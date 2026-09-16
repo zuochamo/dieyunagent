@@ -1,0 +1,39 @@
+{
+  "id": "com.dieyun.example.http-api",
+  "name": "HTTP API 代理",
+  "version": "1.0.0",
+  "description": "向已配置的内网/公网 REST 基址发起 GET/POST（带可选鉴权头）。",
+  "category": "integration",
+  "main": "index.js",
+  "permissions": ["network", "storage"],
+  "provides": ["http"],
+  "tools": [
+    {
+      "name": "get",
+      "description": "对相对路径发起 GET。path 以 / 开头，query 为可选查询参数对象。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "API 路径，如 /api/v1/users" },
+          "query": { "type": "object", "description": "URL 查询参数键值对" }
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "post",
+      "description": "对相对路径发起 POST，body 为 JSON 对象。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "API 路径" },
+          "body": { "type": "object", "description": "JSON 请求体" }
+        },
+        "required": ["path"]
+      }
+    }
+  ],
+  "settings": {
+    "schema": "settings.schema.json"
+  }
+}

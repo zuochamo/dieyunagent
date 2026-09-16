@@ -1,0 +1,7 @@
+{
+  "ssh": "dieyunx@你的服务器IP或域名",
+  "port": 22,
+  "remoteDir": "~/.dieyun/remote-dieyun-core-build",
+  "interactive": false,
+  "identityFile": "C:\\Users\\你的用户名\\.ssh\\id_ed25519"
+}

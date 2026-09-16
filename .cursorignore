@@ -1,0 +1,27 @@
+﻿# Reduce AI agent noise — large/generated paths (mirrors .gitignore intent)
+node_modules/
+dist/
+dist-build/
+target/
+build/remote-gateway-pack/
+build/dieyun-core/
+build/dieyun-core-linux/
+build/.cache/
+release/
+.dieyun/
+skills/bundled/
+skills/bundled/**/mcp_output/
+skills/bundled/**/*.log
+mobile-app/android/app/build/
+mobile-app/android/.gradle/
+mobile-app/android/app/build/
+*.sqlite
+*.db-shm
+*.db-wal
+vectors.db
+updates-published/
+logs_llm/
+.playwright-mcp/
+src/renderer/dist/
+src/renderer/index.bundled.html
+.release-private/

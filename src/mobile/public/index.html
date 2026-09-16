@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#14161f" />
+    <title>叠云AI</title>
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <link rel="stylesheet" href="./styles.css?v=20260713-think-dock" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <button id="sessions-open" class="icon-button" type="button" title="会话" aria-label="会话">
+          <span aria-hidden="true">☰</span>
+        </button>
+        <div class="top-session" id="top-session-label">默认工作空间</div>
+        <div class="top-actions">
+          <button id="settings-open" class="icon-button" type="button" title="设置" aria-label="设置">
+            <span aria-hidden="true">⚙</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+      <aside class="session-drawer" id="session-drawer" aria-label="会话列表" aria-hidden="true">
+        <div class="drawer-head">
+          <div>
+            <span class="drawer-title" data-i18n="sessions">会话</span>
+            <p data-i18n="sessions_hint">右滑打开，左滑收起</p>
+          </div>
+          <button id="sessions-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <button id="refresh" class="ghost-button drawer-refresh" type="button" data-i18n="refresh_sessions">刷新会话</button>
+        <div class="session-list" id="sessions" aria-label="会话列表"></div>
+      </aside>
+
+      <div class="drawer-backdrop settings-backdrop" id="settings-backdrop" hidden></div>
+      <aside class="settings-drawer" id="settings-drawer" aria-label="设置" aria-hidden="true">
+        <div class="drawer-head">
+          <div>
+            <span class="drawer-title" data-i18n="settings">设置</span>
+            <p data-i18n="settings_hint">左滑打开，右滑收起</p>
+          </div>
+          <button id="settings-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <section class="settings-block" aria-label="主题">
+          <span class="settings-label" data-i18n="theme">主题</span>
+          <div class="theme-toggle" role="group" aria-label="主题设置">
+            <button id="theme-dark" class="theme-choice active" type="button" data-theme="dark" data-i18n="dark">黑色</button>
+            <button id="theme-light" class="theme-choice" type="button" data-theme="light" data-i18n="light">白色</button>
+          </div>
+        </section>
+        <section class="settings-block" aria-label="语言">
+          <span class="settings-label" data-i18n="language">语言</span>
+          <div class="theme-toggle" role="group" aria-label="语言设置">
+            <button class="language-choice theme-choice active" type="button" data-language="zh-CN" data-i18n="zh">中文</button>
+            <button class="language-choice theme-choice" type="button" data-language="en" data-i18n="en">English</button>
+          </div>
+        </section>
+        <section class="settings-block" aria-label="思考过程">
+          <span class="settings-label" data-i18n="thoughts">思考过程</span>
+          <label class="settings-check">
+            <input type="checkbox" id="settings-trace-round-titles" checked />
+            <span data-i18n="trace_round_titles">显示「第 N 轮」标题</span>
+          </label>
+        </section>
+        <section class="settings-block" aria-label="连接">
+          <span class="settings-label" data-i18n="connection">连接</span>
+          <button id="settings-reconnect" class="ghost-button settings-action" type="button" data-i18n="reconnect">重连</button>
+          <button id="settings-change-computer" class="ghost-button settings-action" type="button" data-i18n="change_computer">换电脑</button>
+          <button id="settings-check-update" class="ghost-button settings-action" type="button" data-i18n="check_update">检查更新</button>
+        </section>
+        <span class="settings-version" id="settings-version"></span>
+      </aside>
+
+      <section class="chat" id="messages" aria-label="消息">
+        <div class="empty-state" data-i18n="sync_after_connect">连接电脑端后同步会话</div>
+      </section>
+
+      <button id="think-dock" class="think-dock" type="button" hidden aria-label="思考过程">
+        <span class="think-dock-dot" aria-hidden="true"></span>
+        <span class="think-dock-main">
+          <span class="think-dock-status" data-i18n="running">执行中</span>
+          <span class="think-dock-summary"></span>
+        </span>
+        <span class="think-dock-chevron" aria-hidden="true">▸</span>
+      </button>
+
+      <div id="think-sheet-backdrop" class="think-sheet-backdrop" hidden></div>
+      <section id="think-sheet" class="think-sheet" hidden aria-hidden="true" aria-label="思考过程">
+        <div class="think-sheet-head">
+          <span id="think-sheet-title" class="think-sheet-title" data-i18n="thoughts">思考过程</span>
+          <button id="think-sheet-close" class="ghost-button think-sheet-close" type="button" data-i18n="collapse">收起</button>
+        </div>
+        <div id="think-sheet-body" class="think-sheet-body msg-thinking-body"></div>
+      </section>
+
+      <form class="composer" id="composer">
+        <div class="composer-voice-panel" id="composer-voice-panel" hidden>
+          <div class="composer-voice-wave" id="composer-voice-wave" aria-hidden="true"></div>
+          <span class="composer-voice-timer" id="composer-voice-timer">0:00</span>
+          <span class="composer-voice-status" id="composer-voice-status"></span>
+          <div class="composer-voice-actions">
+            <button type="button" class="ghost-button composer-voice-cancel" id="composer-voice-cancel" data-i18n="voice_cancel">取消</button>
+            <button type="button" class="primary composer-voice-confirm" id="composer-voice-confirm" data-i18n="voice_transcribe">转写</button>
+          </div>
+        </div>
+        <div class="composer-meta">
+          <span id="active-session-label">默认工作空间</span>
+        </div>
+        <textarea id="input" rows="2" placeholder="输入任务，电脑端执行" data-i18n-placeholder="input_placeholder"></textarea>
+        <div class="composer-actions">
+          <button type="button" class="secondary icon-button" id="voice-toggle" title="语音输入" aria-label="语音输入">🎤</button>
+          <button id="stop" class="secondary" type="button" data-i18n="stop">停止</button>
+          <button id="send" type="submit" data-i18n="send">发送</button>
+        </div>
+      </form>
+    </main>
+    <script src="./voice.js?v=20260712-mobile-full"></script>
+    <script src="./app.js?v=20260713-think-dock"></script>
+  </body>
+</html>

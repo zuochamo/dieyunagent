@@ -1,0 +1,27 @@
+{
+  "id": "com.dieyun.example.feishu-bot",
+  "name": "飞书机器人",
+  "version": "1.0.0",
+  "description": "通过飞书自定义机器人 Webhook 发送文本消息。",
+  "category": "integration",
+  "main": "index.js",
+  "permissions": ["network", "storage"],
+  "provides": ["feishu", "notify"],
+  "hooks": ["onPlanRan"],
+  "tools": [
+    {
+      "name": "send_text",
+      "description": "向飞书群发送纯文本消息。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "消息正文" }
+        },
+        "required": ["text"]
+      }
+    }
+  ],
+  "settings": {
+    "schema": "settings.schema.json"
+  }
+}

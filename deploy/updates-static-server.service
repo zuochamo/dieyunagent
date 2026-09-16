@@ -1,0 +1,37 @@
+# systemd：长期运行「升级文件」静态服务
+#
+# 安装（需 sudo，路径请按本机修改）：
+#   sudo cp deploy/updates-static-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now updates-static-server.service
+#
+# 查看状态：sudo systemctl status updates-static-server
+# 日志：    journalctl -u updates-static-server -f
+#
+# 共享盘上须有：
+#   .../client-electron/scripts/update-static-server.mjs
+#   .../client-electron/updates-published/latest.yml
+# Windows 发版后执行：scripts\publish-updates-to-y.bat
+
+[Unit]
+Description=client-electron generic update files (static HTTP)
+After=network-online.target
+Wants=network-online.target
+# 数据盘未挂载时不反复 crash-loop
+ConditionPathExists=/run/media/dieyunx/Data/client-electron/updates-published
+
+[Service]
+Type=simple
+User=dieyunx
+Group=dieyunx
+WorkingDirectory=/run/media/dieyunx/Data/client-electron
+Environment=HOME=/home/dieyunx
+Environment=UPDATES_PORT=3099
+Environment=UPDATES_HOST=0.0.0.0
+Environment=UPDATES_ROOT=/run/media/dieyunx/Data/client-electron/updates-published
+ExecStart=/usr/bin/env node /run/media/dieyunx/Data/client-electron/scripts/update-static-server.mjs
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

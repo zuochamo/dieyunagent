@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "module": "CommonJS",
+    "target": "ES2022",
+    "moduleResolution": "node",
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "lib": ["ES2022", "DOM"]
+  },
+  "files": [
+    "src/agent/task-tier.js",
+    "src/agent/agent-limits.js",
+    "src/agent/guardrails-shared.js",
+    "src/agent/write-smell-hints.js",
+    "src/agent/agent-system-prompt.js",
+    "src/agent/run-events.js",
+    "src/llm-stream-utils.js",
+    "src/main/mcp-plans-boot.js"
+  ]
+}

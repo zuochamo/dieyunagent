@@ -1,0 +1,23 @@
+plugins {
+    id "com.android.application"
+}
+
+def mobileVersionCode = (findProperty("MOBILE_VERSION_CODE") ?: "1").toInteger()
+def mobileVersionName = findProperty("MOBILE_VERSION_NAME") ?: "0.0.1"
+
+android {
+    namespace "com.dieyun.agent.mobile"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.dieyun.agent.mobile"
+        minSdk 26
+        targetSdk 34
+        versionCode mobileVersionCode
+        versionName mobileVersionName
+    }
+}
+
+dependencies {
+    implementation files("libs/zxing-core-3.5.3.jar")
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "飞书机器人",
+  "properties": {
+    "webhookUrl": {
+      "type": "string",
+      "title": "Webhook 地址",
+      "description": "飞书群 → 设置 → 群机器人 → 自定义机器人 → Webhook 地址"
+    },
+    "notifyOnPlanRan": {
+      "type": "boolean",
+      "title": "定时任务完成后通知",
+      "description": "计划执行结束时发送摘要到飞书",
+      "default": false
+    }
+  },
+  "required": ["webhookUrl"]
+}

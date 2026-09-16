@@ -1,0 +1,1546 @@
+{
+  "version": 1,
+  "generatedAt": "2026-09-16T13:33:45.269Z",
+  "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
+  "stats": {
+    "total": 179,
+    "gatewayOnly": 107,
+    "rustOnly": 23,
+    "both": 49
+  },
+  "methods": [
+    {
+      "method": "agent.loop.cancel",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.loop.continue",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.loop.set_messages",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.loop.start",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.loop.tool_results",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.ping",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.plan_save",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/agent.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.run_upsert",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/agent.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.state_get",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/agent.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.steps_save",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/agent.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.trace_get",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/agent.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "agent.trace_save",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/agent.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "artifact.list_files",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/artifact.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "artifact.read_file",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/artifact.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.a11y_snapshot",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.back",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.click",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.close",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.configure",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.console",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.cookies",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.dialog",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.downloads",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.drag",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.emulate",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.evaluate",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.expect",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.export_storage",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.fill",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.forward",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.har_export",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.hover",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.import_storage",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.navigate",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.network",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.observe",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.pdf",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.press_key",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.reload",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.reset_logs",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.route",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.screenshot",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.scroll",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.select_option",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.snapshot",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.status",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.tabs",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.type",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.upload_file",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.viewport",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.visual_diff",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.wait_for",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "codebase.index",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/codebase.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "codebase.index.start",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/codebase.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "codebase.index_remote",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "codebase.search",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/codebase.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "codebase.status",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/codebase.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "compaction.apply",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "compaction.estimate",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "compaction.maybe_compact",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "compaction.prepare",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "core.configure",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "core.ping",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "fs.edit_file",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "fs.glob",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "fs.grep",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "fs.list_dir",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "fs.mkdir",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "fs.read_file",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "fs.read_symbol",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "fs.stat",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "fs.write_file",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/fs.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "graph.callees",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.callers",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.embed_symbols",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.impact",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.index",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js",
+        "gateway/rpc.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.index.start",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js",
+        "gateway/rpc.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.index_remote",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.ingest_lsp_callers",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.lsp_enrich",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "graph.lsp_resolve",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "graph.module_deps",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.repo_map",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.status",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js",
+        "gateway/rpc.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.symbol_search",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "graph.symbol_semantic_search",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/graph.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "host.environment",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/host.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "host.exec",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/host.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "host.open_url",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/host.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "host.print_image",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/host.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "index.remote_sync_configure",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/index-remote.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "index.remote_wait_ready",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/index-remote.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "lsp.diagnostics_report",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "lsp.diagnostics_snapshot",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "lsp.document_sync",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "lsp.query",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "lsp.settings_get",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "lsp.settings_set",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "memory.compaction_archive",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.compaction_recent",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.consolidation_job_create",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.consolidation_job_finish",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_add",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_decay",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_keyword_search",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_memories_after",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_recall",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_recent",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_reindex",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_status_set",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_vector_status",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.message_append",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.messages_after",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.messages_clear",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "memory.messages_delete_turn",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.messages_older",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.messages_recent",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.ping",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.project_add",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "memory.project_recall",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "memory.project_scope",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "memory.session_archive",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.session_create",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.session_delete",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.session_get",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.session_workspace_set",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.sessions_list",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.sessions_with_messages",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.touch_session",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "permissions.get",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/permissions.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "planner.ping",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "planner.run.cancel",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "planner.run.continue",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "planner.run.start",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "planner.run.state",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "planner.run.worker_loop",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "plugins.catalog.install",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.catalog.list",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.catalog.sources.get",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.catalog.sources.set",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.hooks.agent_turn_end",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.install_from_path",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.install_from_zip",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.list",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.list_tools",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.remove",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.set_enabled",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.settings.get",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.settings.schema",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.settings.set",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.tool_call",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.uninstall",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "rpc.cancel",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "speech.transcribe",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/speech.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "sql.config_get",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/sql.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "sql.config_set",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/sql.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "sql.list_databases",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/sql.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "sql.list_tables",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/sql.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "sql.query",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/sql.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "sql.test",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/sql.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.can_rollback",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.capture_batch",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.capture_plan_apply",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.mark_worktree_only",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.rollback",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.rollback_batch",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.rollback_commit",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.session_clear",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.stack_get",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.turn_begin",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "undo.turn_finalize",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/undo.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "web.fetch",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/web.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "web.search",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/web.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "workspace.diagnostics",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "workspace.diagnostics_scan",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "workspace.diagnostics_status",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "workspace.diagnostics_store",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "workspace.git_diff",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    }
+  ]
+}

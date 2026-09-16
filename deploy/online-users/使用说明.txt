@@ -1,0 +1,16 @@
+叠云 Agent 工位监控
+================================
+
+解压后：
+
+  方式一（Windows）：双击 start.bat
+  方式二：node workplace-server.mjs
+
+接口：http://localhost:3003/api/users/online
+
+客户端设置（叠云 Agent）：
+  set SERVER_URL=http://本机IP:3003
+
+默认端口 3003，可用环境变量 PORT 修改。
+
+详细部署见 README.md

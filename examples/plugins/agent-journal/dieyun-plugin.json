@@ -1,0 +1,26 @@
+{
+  "id": "com.dieyun.example.agent-journal",
+  "name": "对话摘要日志",
+  "version": "1.0.0",
+  "description": "将 Agent 每轮对话摘要追加写入本地日志（无需外网）。",
+  "category": "utility",
+  "main": "index.js",
+  "permissions": ["storage"],
+  "provides": ["journal"],
+  "hooks": ["onAgentTurnEnd"],
+  "tools": [
+    {
+      "name": "read_recent",
+      "description": "读取最近 N 条对话摘要日志（默认 10 条，最多 50）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "description": "条数，默认 10" }
+        }
+      }
+    }
+  ],
+  "settings": {
+    "schema": "settings.schema.json"
+  }
+}

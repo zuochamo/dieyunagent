@@ -1,0 +1,163 @@
+{
+  "version": 1,
+  "generatedAt": "2026-09-09T01:43:03.652Z",
+  "source": "src/agent/run-events.js",
+  "eventTypes": [
+    {
+      "type": "run_start",
+      "description": "Agent run 开始",
+      "producer": "Main/Rust loop",
+      "consumer": "Renderer, Mobile"
+    },
+    {
+      "type": "prep",
+      "description": "准备阶段（上下文/工具组装）",
+      "producer": "Renderer prep",
+      "consumer": "Renderer thinking UI"
+    },
+    {
+      "type": "trace",
+      "description": "思考 trace 更新",
+      "producer": "Rust loop / Renderer",
+      "consumer": "Renderer, Mobile task.progress"
+    },
+    {
+      "type": "stream",
+      "description": "助手正文流式增量",
+      "producer": "Rust loop",
+      "consumer": "Renderer bubble, Mobile streamContent"
+    },
+    {
+      "type": "tool",
+      "description": "工具调用轮次",
+      "producer": "Rust loop",
+      "consumer": "Renderer tool cards"
+    },
+    {
+      "type": "round_limit",
+      "description": "达到轮次上限",
+      "producer": "Guardrails",
+      "consumer": "Renderer, Mobile"
+    },
+    {
+      "type": "arbitration",
+      "description": "多 Agent 仲裁",
+      "producer": "Planner",
+      "consumer": "Renderer"
+    },
+    {
+      "type": "done",
+      "description": "正常完成",
+      "producer": "Rust loop / Renderer",
+      "consumer": "Renderer, Mobile task.completed"
+    },
+    {
+      "type": "error",
+      "description": "失败",
+      "producer": "Rust loop / Main",
+      "consumer": "Renderer, Mobile task.failed"
+    },
+    {
+      "type": "stopped",
+      "description": "用户停止",
+      "producer": "Main",
+      "consumer": "Renderer, Mobile task.stopped"
+    }
+  ],
+  "fields": [
+    {
+      "name": "type",
+      "type": "AgentRunEventType",
+      "required": true
+    },
+    {
+      "name": "at",
+      "type": "number",
+      "required": true,
+      "description": "Unix ms timestamp"
+    },
+    {
+      "name": "sessionId",
+      "type": "string|null",
+      "required": false
+    },
+    {
+      "name": "runId",
+      "type": "string|null",
+      "required": false
+    },
+    {
+      "name": "requestId",
+      "type": "string|null",
+      "required": false
+    },
+    {
+      "name": "trace",
+      "type": "TraceEntry[]",
+      "required": false
+    },
+    {
+      "name": "streamContent",
+      "type": "string",
+      "required": false,
+      "description": "助手回复流式正文（PC + 手机）"
+    },
+    {
+      "name": "hitRoundLimit",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "name": "stopped",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "name": "error",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "summary",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "mode",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "phase",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "tool",
+      "type": "object|null",
+      "required": false
+    },
+    {
+      "name": "meta",
+      "type": "object|null",
+      "required": false,
+      "description": "prepSteps 等扩展"
+    }
+  ],
+  "mobileServiceEventMap": {
+    "task.started": "run_start",
+    "task.queued": "run_start",
+    "task.progress": "trace",
+    "task.completed": "done",
+    "task.failed": "error",
+    "task.stopped": "stopped",
+    "task.stopping": "stopped"
+  },
+  "mobileProgressFieldMap": {
+    "trace": "event.trace → task.progress.trace",
+    "streamContent": "live.streamContent / runEvent.streamContent → task.progress.streamContent",
+    "runEvent": "runEvent 附在 progress payload（bridge 可选转发）",
+    "sessionId": "sessionId",
+    "requestId": "requestId（手机任务关联）"
+  }
+}

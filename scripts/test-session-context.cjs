@@ -21,12 +21,58 @@ const {
   mergeCompactionBlockIntoTurnRide,
   extractInTurnLoopTail,
   reprojectContinueLoopMessages,
-  isSyntheticLoopUserContent
+  isSyntheticLoopUserContent,
+  contentCharLen
 } = require('../src/agent/session-context');
+const { AGENT_LIMITS_DEFAULTS } = require('../src/agent/agent-limits');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assert failed');
 }
+
+// 图片 part 必须按「等效字符」计入预算，而不是按 base64 长度。
+// 否则一张 2MB 的图会被算成约 270 万字符，单张就顶穿 llmRequestMaxChars，
+// 并让 shouldCompactRound 每轮误触发压缩 —— 而图片既不可折叠也不可压缩。
+const bigImagePart = {
+  type: 'image_url',
+  image_url: { url: `data:image/png;base64,${'A'.repeat(2 * 1024 * 1024)}` }
+};
+assert(
+  contentCharLen([{ type: 'text', text: '看图' }, bigImagePart]) ===
+    '看图'.length + AGENT_LIMITS_DEFAULTS.visionPartEqChars,
+  'image part counts as equivalent chars, not base64 length'
+);
+assert(
+  contentCharLen([{ type: 'text', text: 'x' }]) === 1,
+  'plain text part still counted by length'
+);
+assert(
+  contentCharLen('abc') === 3 && contentCharLen(null) === 0,
+  'string and empty content'
+);
+
+const keptWithBigImage = trimMessagesToCharBudget([
+  { role: 'user', content: '上一个问题' },
+  { role: 'user', content: [{ type: 'text', text: '看这张图' }, bigImagePart] }
+]);
+assert(keptWithBigImage.length === 2, 'big image no longer blows the request char budget');
+assert(
+  Array.isArray(keptWithBigImage[1].content) &&
+    keptWithBigImage[1].content.some((p) => p && p.type === 'image_url'),
+  'image part survives budget trimming'
+);
+
+// 历史消息里的图片同样原样保留：不能因为 base64 长度大就被换成「（图片过大已省略）」
+const keptImageInHistory = trimMessagesToCharBudget([
+  { role: 'user', content: [{ type: 'text', text: '第一轮带图' }, bigImagePart] },
+  { role: 'assistant', content: '收到' },
+  { role: 'user', content: '第二个问题' }
+]);
+assert(
+  Array.isArray(keptImageInHistory[0].content) &&
+    keptImageInHistory[0].content.some((p) => p && p.type === 'image_url'),
+  'history image part is not replaced by an oversize placeholder'
+);
 
 const packed = packSystemPrompt(
   ['规则A', '工作区 /tmp'],

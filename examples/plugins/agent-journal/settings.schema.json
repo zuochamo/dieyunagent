@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "对话摘要日志",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用自动记录",
+      "description": "Agent 每轮对话结束后写入摘要",
+      "default": true
+    },
+    "maxFileKb": {
+      "type": "integer",
+      "title": "日志文件上限（KB）",
+      "description": "超出时截断保留后半部分，默认 512",
+      "default": 512
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "id": "com.dieyun.example.dingtalk-bot",
+  "name": "钉钉机器人",
+  "version": "1.0.0",
+  "description": "通过钉钉自定义机器人 Webhook 发送 Markdown 或文本消息。",
+  "category": "integration",
+  "main": "index.js",
+  "permissions": ["network", "storage"],
+  "provides": ["dingtalk", "notify"],
+  "tools": [
+    {
+      "name": "send_markdown",
+      "description": "发送 Markdown 消息（title + text）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "description": "消息标题" },
+          "text": { "type": "string", "description": "Markdown 正文" }
+        },
+        "required": ["title", "text"]
+      }
+    },
+    {
+      "name": "send_text",
+      "description": "发送纯文本消息。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "消息正文" }
+        },
+        "required": ["text"]
+      }
+    }
+  ],
+  "settings": {
+    "schema": "settings.schema.json"
+  }
+}

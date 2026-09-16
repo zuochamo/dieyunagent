@@ -391,6 +391,178 @@ async function testBrowserVisionInjection() {
   const capped = bv.takePendingBrowserScreenshots('run-bv-cap');
   assert(capped.length === 2, 'cap shots per run');
   assert(capped[capped.length - 1].base64 === 'img3', 'keep newest shot');
+
+  // 附件补看：与浏览器截图各自独立配额
+  bv.recordBrowserScreenshot('run-bv-mix', 'browser_screenshot', { ok: true, base64: 'B1' });
+  assert(
+    bv.recordVisionImage('run-bv-mix', {
+      source: 'attachment',
+      mime: 'image/png',
+      base64: 'A1',
+      path: '.dieyun/attachments/a.png'
+    }),
+    'attachment image queued'
+  );
+  assert(
+    bv.recordVisionImage('run-bv-mix', {
+      source: 'attachment',
+      mime: 'image/jpeg',
+      base64: 'A2',
+      path: '.dieyun/attachments/b.png'
+    }),
+    'second attachment image queued'
+  );
+  assert(
+    bv.recordVisionImage('run-bv-mix', {
+      source: 'attachment',
+      mime: 'image/png',
+      base64: 'A3',
+      path: '.dieyun/attachments/c.png'
+    }) === false,
+    'attachment quota enforced independently'
+  );
+  const mixed = bv.takePendingVisionImages('run-bv-mix');
+  assert(mixed.length === 3, 'browser and attachment quotas do not share a cap');
+  assert(
+    mixed.filter((m) => m.source === 'attachment').map((m) => m.base64).join(',') === 'A1,A2',
+    'keeps newest attachment images'
+  );
+  const mixedMsg = bv.buildVisionMessage(mixed);
+  assert(
+    mixedMsg.content.filter((p) => p.type === 'image_url').length === 3,
+    'mixed message carries every image'
+  );
+  assert(/历史附件图片/.test(mixedMsg.content[0].text), 'mixed message explains attachment source');
+  assert(/浏览器当前画面截图/.test(mixedMsg.content[0].text), 'mixed message explains browser source');
+
+  // 额度可由 agent-limits 显式覆盖（口径是「每轮在途」，故 key 以 PerRound 结尾）
+  assert(bv.MAX_SHOTS_PER_RUN === 2, 'legacy cap constant still exported');
+  assert(
+    bv.recordBrowserScreenshot('run-bv-zero', 'browser_screenshot', { ok: true, base64: 'ZZ' }, { visionShotsPerRound: 0 }) === false,
+    'zero quota disables browser injection'
+  );
+  assert(
+    bv.recordVisionImage(
+      'run-bv-limit',
+      { source: 'attachment', base64: 'y'.repeat(101) },
+      { visionMaxBase64Chars: 100 }
+    ) === false,
+    'oversized attachment image dropped'
+  );
+
+  // 同一路径重复入队是幂等的：不重复注入同一份像素，也不消耗额度
+  assert(
+    bv.recordVisionImage('run-bv-dedupe', { source: 'attachment', base64: 'D1', path: 'a.png' }),
+    'first read queued'
+  );
+  assert(
+    bv.recordVisionImage('run-bv-dedupe', { source: 'attachment', base64: 'D2', path: 'a.png' }),
+    'duplicate read is idempotent'
+  );
+  assert(
+    bv.recordVisionImage('run-bv-dedupe', { source: 'attachment', base64: 'D3', path: 'b.png' }),
+    'second distinct path queued'
+  );
+  assert(
+    bv.recordVisionImage('run-bv-dedupe', { source: 'attachment', base64: 'D4', path: 'c.png' }) === false,
+    'duplicates do not consume quota'
+  );
+  const deduped = bv.takePendingVisionImages('run-bv-dedupe');
+  assert(deduped.length === 2, 'duplicate path injected once');
+  assert(deduped[0].base64 === 'D1', 'keeps first payload for a path');
+}
+
+async function testVisionSurvivesOverflowRetry() {
+  const bv = require('../src/agent/browser-vision');
+  bv.recordVisionImage('run-vr', {
+    source: 'attachment',
+    mime: 'image/png',
+    base64: 'R0lGODdh',
+    path: '.dieyun/attachments/retry.png'
+  });
+
+  const seenBodies = [];
+  const phases = [];
+  let llmCalls = 0;
+  const bridge = createFakeBridge({
+    'agent.loop.start': async () => ({
+      runId: 'run-vr',
+      phase: 'need_llm',
+      llmBody: { model: 'm', messages: [{ role: 'user', content: '看图' }], tools: [] }
+    }),
+    'agent.loop.set_messages': async () => ({ ok: true }),
+    'agent.loop.continue': async () => ({ runId: 'run-vr', phase: 'done', content: 'ok' })
+  });
+
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    browserVision: true,
+    onPhase: (p) => phases.push(p),
+    compactMessages: async (msgs) => ({
+      compacted: true,
+      messages: msgs.slice(0, 1),
+      tokensBefore: 90,
+      tokensAfter: 10
+    }),
+    fetchLlmOnce: async ({ body }) => {
+      llmCalls += 1;
+      seenBodies.push(body.messages);
+      if (llmCalls === 1) {
+        const err = new Error('HTTP 400 prompt is too long');
+        err.statusCode = 400;
+        throw err;
+      }
+      return { content: 'ok', toolCalls: [] };
+    }
+  });
+
+  const carriesImage = (list) =>
+    (list || []).some(
+      (m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === 'image_url')
+    );
+  assert(seenBodies.length === 2, 'overflow triggers exactly one retry');
+  assert(carriesImage(seenBodies[0]), 'first attempt carries the image');
+  // 关键：重试用的是同一个 llmRound，drain 后不能丢图（否则模型看不到图却被告知「已附在下一轮」）
+  assert(carriesImage(seenBodies[1]), 'retry keeps the image instead of losing it');
+  assert(
+    phases.filter((p) => p === 'attachment_vision_injected').length === 1,
+    'vision phase emitted once per round'
+  );
+}
+
+async function testVisionImageReadHelpers() {
+  const { sniffImageMime, isVisionImageReadRequest } = require('../src/agent/tool-bridge-main');
+
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const gif = Buffer.from('GIF89a............', 'latin1');
+  const webp = Buffer.alloc(16);
+  webp.write('RIFF', 0, 'latin1');
+  webp.write('WEBP', 8, 'latin1');
+
+  assert(sniffImageMime(png.toString('base64')) === 'image/png', 'sniff png');
+  assert(sniffImageMime(jpeg.toString('base64')) === 'image/jpeg', 'sniff jpeg');
+  assert(sniffImageMime(gif.toString('base64')) === 'image/gif', 'sniff gif');
+  assert(sniffImageMime(webp.toString('base64')) === 'image/webp', 'sniff webp');
+  assert(sniffImageMime(Buffer.from('hello, plain text payload').toString('base64')) === '', 'sniff rejects text');
+  assert(sniffImageMime('') === '', 'sniff rejects empty');
+
+  assert(
+    isVisionImageReadRequest('fs_read_file', { filePath: 'a.png', encoding: 'base64' }),
+    'base64 whole-file read is a vision read'
+  );
+  assert(
+    !isVisionImageReadRequest('fs_read_file', { filePath: 'a.png' }),
+    'utf8 read is not a vision read'
+  );
+  assert(
+    !isVisionImageReadRequest('fs_read_file', { filePath: 'a.png', encoding: 'base64', offset: 100 }),
+    'chunked read is not a vision read'
+  );
+  assert(!isVisionImageReadRequest('fs_edit', { encoding: 'base64' }), 'other tools are not vision reads');
 }
 
 async function testAbortDuringLlmCancelsSidecar() {
@@ -766,6 +938,8 @@ async function run() {
   await testSkipCompactOnShortFirstRound();
   await testDelegateRound();
   await testBrowserVisionInjection();
+  await testVisionSurvivesOverflowRetry();
+  await testVisionImageReadHelpers();
   await testAbortDuringLlmCancelsSidecar();
   await testAbortDuringContinueCancelsSidecar();
   await testAbortDuringCompactCancelsSidecar();

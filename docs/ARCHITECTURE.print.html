@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>叠云 Agent 架构手册</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --text: #1a1a1a;
+      --muted: #555;
+      --border: #ccc;
+      --accent: #1e4d8c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      font-size: 10.5pt;
+      line-height: 1.55;
+      color: var(--text);
+      background: #e8e8e8;
+    }
+
+    .screen-bar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #1e4d8c;
+      color: #fff;
+      padding: 10px 20px;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .screen-bar button {
+      background: #fff;
+      color: #1e4d8c;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .screen-bar button:hover { background: #f0f4fa; }
+
+    .book {
+      max-width: 210mm;
+      margin: 24px auto 48px;
+      background: #fff;
+      box-shadow: 0 2px 24px rgba(0,0,0,.12);
+    }
+
+    .page {
+      padding: 22mm 18mm 24mm;
+      min-height: 297mm;
+    }
+
+    .page-break { page-break-before: always; break-before: page; }
+
+    /* Cover */
+    .cover {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      min-height: 253mm;
+      padding-top: 30mm;
+    }
+
+    .cover h1 {
+      font-size: 32pt;
+      font-weight: 700;
+      color: var(--accent);
+      margin: 0 0 8mm;
+      letter-spacing: 0.05em;
+    }
+
+    .cover .subtitle {
+      font-size: 16pt;
+      color: var(--muted);
+      margin-bottom: 20mm;
+    }
+
+    .cover .meta {
+      font-size: 11pt;
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
+    .cover .line {
+      width: 60mm;
+      height: 2px;
+      background: var(--accent);
+      margin: 12mm auto;
+    }
+
+    /* TOC */
+    .toc h2 { margin-top: 0; }
+    .toc ol {
+      padding-left: 6mm;
+      columns: 2;
+      column-gap: 10mm;
+    }
+    .toc li { margin: 2mm 0; }
+    .toc a { color: var(--text); text-decoration: none; }
+
+    h2 {
+      font-size: 15pt;
+      color: var(--accent);
+      border-bottom: 1.5px solid var(--accent);
+      padding-bottom: 3mm;
+      margin: 8mm 0 5mm;
+      page-break-after: avoid;
+    }
+
+    h3 {
+      font-size: 12pt;
+      margin: 6mm 0 3mm;
+      page-break-after: avoid;
+    }
+
+    h4 {
+      font-size: 11pt;
+      margin: 4mm 0 2mm;
+    }
+
+    p { margin: 0 0 3mm; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 9.5pt;
+      margin: 4mm 0 6mm;
+      page-break-inside: avoid;
+    }
+
+    th, td {
+      border: 1px solid var(--border);
+      padding: 2.5mm 3mm;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th { background: #f4f7fb; font-weight: 600; }
+
+    .diagram {
+      margin: 5mm 0 8mm;
+      padding: 4mm;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      background: #fafafa;
+      overflow-x: auto;
+      page-break-inside: avoid;
+    }
+
+    .diagram .mermaid { text-align: center; }
+
+    .note {
+      background: #f4f7fb;
+      border-left: 3px solid var(--accent);
+      padding: 3mm 4mm;
+      margin: 4mm 0;
+      font-size: 9.5pt;
+    }
+
+    ul, ol { margin: 2mm 0 4mm; padding-left: 6mm; }
+    li { margin: 1.5mm 0; }
+
+    code {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 9pt;
+      background: #f0f0f0;
+      padding: 0.5px 4px;
+      border-radius: 2px;
+    }
+
+    .footer-note {
+      margin-top: 10mm;
+      padding-top: 4mm;
+      border-top: 1px solid var(--border);
+      font-size: 9pt;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    @media print {
+      body { background: #fff; }
+      .screen-bar { display: none !important; }
+      .book {
+        max-width: none;
+        margin: 0;
+        box-shadow: none;
+      }
+      .page {
+        padding: 0;
+        min-height: auto;
+      }
+      a { color: var(--text); }
+      @page {
+        size: A4;
+        margin: 18mm 15mm 20mm;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="screen-bar">
+    <span>叠云 Agent 架构手册 · 打印前请等待下方图表全部渲染完成（约 5–10 秒）</span>
+    <button type="button" onclick="window.print()">打印 / 导出 PDF（A4）</button>
+  </div>
+
+  <div class="book" id="book">
+
+    <!-- 封面 -->
+    <section class="page cover">
+      <h1>叠云 Agent</h1>
+      <div class="subtitle">架构手册</div>
+      <div class="line"></div>
+      <div class="meta">
+        <div>本地优先桌面 AI Agent</div>
+        <div>Electron · Gateway · dieyun-core (Rust)</div>
+        <div style="margin-top:8mm">PixelOffice · 内部技术文档</div>
+        <div style="margin-top:6mm">文档日期：2026 年 6 月</div>
+      </div>
+    </section>
+
+    <!-- 目录 -->
+    <section class="page page-break toc">
+      <h2>目录</h2>
+      <ol>
+        <li><a href="#ch1">概述</a></li>
+        <li><a href="#ch2">总体架构</a></li>
+        <li><a href="#ch3">进程与启动链</a></li>
+        <li><a href="#ch4">本地 Gateway</a></li>
+        <li><a href="#ch5">Agent 执行</a></li>
+        <li><a href="#ch6">dieyun-core（Rust）</a></li>
+        <li><a href="#ch7">记忆系统</a></li>
+        <li><a href="#ch8">渲染进程 UI</a></li>
+        <li><a href="#ch9">技能、MCP 与插件</a></li>
+        <li><a href="#ch10">SSH 与远程工作空间</a></li>
+        <li><a href="#ch11">浏览器自动化</a></li>
+        <li><a href="#ch12">定时任务（Plans）</a></li>
+        <li><a href="#ch14">自动更新与打包</a></li>
+        <li><a href="#ch15">代码库索引</a></li>
+        <li><a href="#ch16">附录：目录速查</a></li>
+      </ol>
+      <div class="note" style="margin-top:12mm">
+        <strong>打印说明：</strong>浏览器中选择 A4、纵向；建议边距「默认」或「窄」；勾选「背景图形」以保留表格底色。双面打印时建议长边翻转。
+      </div>
+    </section>
+
+    <!-- 第1章 -->
+    <section class="page page-break" id="ch1">
+      <h2>1. 概述</h2>
+      <p>叠云 Agent 是一个 <strong>本地优先的桌面 AI Agent</strong>：用户在 Electron 窗口对话；模型可调用本机工具；复杂任务走规划师 + 多子 Agent + Git Worktree 隔离。</p>
+      <p><strong>一句话架构</strong>：主进程负责系统能力与安全边界 + Rust sidecar 编排；渲染进程负责 Agent UI 与 Gateway 客户端；本地 Gateway 用 WebSocket + RPC 桥接工具与记忆。</p>
+
+      <h3>1.1 核心设计取舍</h3>
+      <table>
+        <tr><th>话题</th><th>选择</th><th>原因</th></tr>
+        <tr><td>Gateway 协议</td><td>自研 WebSocket RPC</td><td>轻量、与 Electron 解耦</td></tr>
+        <tr><td>Agent 循环</td><td>Rust sidecar + Node LLM</td><td>状态机可靠、UI 迭代快</td></tr>
+        <tr><td>路径安全</td><td>白名单</td><td>用户选工作空间即授权</td></tr>
+        <tr><td>复杂任务</td><td>Planner + worktree</td><td>并行与隔离</td></tr>
+        <tr><td>记忆</td><td>Rust SQLite 唯一写入</td><td>一致性与性能</td></tr>
+        <tr><td>定时任务</td><td>单次 LLM</td><td>可预测、低成本</td></tr>
+      </table>
+
+      <h3>1.2 安全模型</h3>
+      <ul>
+        <li><code>contextIsolation: true</code>，<code>nodeIntegration: false</code></li>
+        <li>特权操作经 <strong>preload IPC</strong> 或 <strong>Gateway RPC</strong></li>
+        <li>Gateway 仅 <code>127.0.0.1</code> + token 鉴权</li>
+        <li>文件/命令靠路径白名单 + 权限开关</li>
+      </ul>
+    </section>
+
+    <!-- 第2章 -->
+    <section class="page page-break" id="ch2">
+      <h2>2. 总体架构</h2>
+      <div class="diagram"><pre class="mermaid">
+flowchart TB
+  subgraph Client["叠云 Agent 桌面端"]
+    subgraph Renderer["渲染进程"]
+      UI[对话 / 设置 / 产物 UI]
+      GWClient[gatewayCall]
+      AgentUI[agent-loop / planner]
+      UI --> AgentUI --> GWClient
+    end
+    subgraph Main["主进程"]
+      IPC[IPC]
+      ToolBridge[tool-bridge]
+      CoreBridge[core-bridge]
+      LocalGW[Gateway server]
+    end
+    subgraph Core["dieyun-core Rust"]
+      AgentSM[agent.loop]
+      PlannerSM[planner.run]
+      MemRust[memory]
+    end
+  end
+  subgraph Ext["外部"]
+    LLM[LLM API]
+    MCP[MCP]
+    PG[(Postgres)]
+  end
+  Renderer --> IPC
+  IPC --> CoreBridge --> Core
+  ToolBridge --> LocalGW
+  GWClient --> LocalGW
+  Main --> LLM
+  ToolBridge --> MCP
+      </pre></div>
+
+      <h3>2.1 三层职责</h3>
+      <table>
+        <tr><th>层</th><th>目录</th><th>职责</th></tr>
+        <tr><td>Renderer</td><td><code>src/renderer/</code></td><td>UI、Gateway 客户端、工具 UI 委托</td></tr>
+        <tr><td>Main</td><td><code>main-entry.js</code>、<code>src/agent/</code></td><td>IPC、Worktree、LLM、Rust 桥、计划</td></tr>
+        <tr><td>Gateway</td><td><code>src/gateway/</code></td><td>工具 RPC、权限、路径白名单</td></tr>
+        <tr><td>Rust</td><td><code>crates/dieyun-core/</code></td><td>状态机、记忆、压缩、索引</td></tr>
+      </table>
+    </section>
+
+    <!-- 第3章 -->
+    <section class="page page-break" id="ch3">
+      <h2>3. 进程与启动链</h2>
+      <div class="diagram"><pre class="mermaid">
+flowchart LR
+  mainjs["main.js"] -->|正常启动| entry["main-entry.js"]
+  mainjs -->|--update-bootstrap| bootstrap["update-bootstrap/"]
+  entry --> preload["preload.js"]
+  entry --> gw["gateway/server.js"]
+  entry --> core["core-bridge → dieyun-core"]
+  preload --> html["renderer/index.html"]
+  html --> modules["renderer-*.js 模块链"]
+  modules --> rjs["renderer.js 总线"]
+      </pre></div>
+      <table>
+        <tr><th>文件</th><th>作用</th></tr>
+        <tr><td><code>src/main.js</code></td><td>极薄路由：正常应用或更新引导</td></tr>
+        <tr><td><code>src/main-entry.js</code></td><td>Electron 应用主体：窗口、托盘、IPC、Gateway、更新、计划</td></tr>
+        <tr><td><code>src/preload.js</code></td><td><code>contextBridge</code> 暴露 <code>window.diecloud</code></td></tr>
+        <tr><td><code>src/renderer/index.html</code></td><td>UI 壳，按序加载各 renderer 模块</td></tr>
+        <tr><td><code>src/renderer/renderer.js</code></td><td>UI 总线与 Gateway 客户端入口</td></tr>
+      </table>
+      <h3>3.1 Rust 环境变量</h3>
+      <table>
+        <tr><th>变量</th><th>含义</th></tr>
+        <tr><td><code>DIEYUN_CORE=0</code></td><td>禁用 sidecar</td></tr>
+        <tr><td><code>DIEYUN_CORE_BIN</code></td><td>开发时指定 debug 二进制路径</td></tr>
+      </table>
+    </section>
+    <!-- 第4章 -->
+    <section class="page page-break" id="ch4">
+      <h2>4. 本地 Gateway</h2>
+      <p>实现：<code>src/gateway/server.js</code> + <code>rpc.js</code>。默认 <code>127.0.0.1:17330</code>，WebSocket + token 鉴权。</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TB
+  WS[gatewayCall] --> Server[server.js]
+  Server --> RPC[rpc.js]
+  RPC --> Host[host-control]
+  RPC --> Web[web-fetch]
+  RPC --> Mem[memory.* Rust]
+  Host --> Policy[path-policy]
+      </pre></div>
+      <h3>4.1 RPC 命名空间</h3>
+      <table>
+        <tr><th>前缀</th><th>职责</th></tr>
+        <tr><td><code>permissions.*</code></td><td>能力开关</td></tr>
+        <tr><td><code>memory.*</code></td><td>会话、消息、长期记忆</td></tr>
+        <tr><td><code>compaction.*</code></td><td>上下文压缩</td></tr>
+        <tr><td><code>fs.*</code></td><td>白名单内文件操作</td></tr>
+        <tr><td><code>host.*</code></td><td>Shell、打开 URL</td></tr>
+        <tr><td><code>web.*</code></td><td>HTTP、搜索</td></tr>
+      </table>
+      <h3>4.2 工作空间（两层）</h3>
+      <ol>
+        <li><strong>全局 workspaceRoot</strong>（<code>userData/workspace.json</code>）</li>
+        <li><strong>每会话 workspace_path</strong>（SQLite <code>sessions</code> 表）</li>
+      </ol>
+    </section>
+
+    <!-- 第5章 -->
+    <section class="page page-break" id="ch5">
+      <h2>5. Agent 执行</h2>
+      <p>入口：<code>renderer-agent-loop.js</code> → IPC → Main → Rust 状态机。</p>
+      <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant R as Renderer
+  participant M as Main
+  participant C as dieyun-core
+  participant L as LLM
+  R->>M: rust-loop-run
+  M->>C: agent.loop.start
+  C-->>M: need_llm
+  M->>L: completions
+  M->>C: continue
+  C-->>M: need_delegate
+  M->>M: tool-bridge
+  C-->>M: done
+  M-->>R: trace
+      </pre></div>
+
+      <h3>5.1 Planner 阶段</h3>
+      <div class="diagram"><pre class="mermaid">
+flowchart LR
+  P[plan_llm] --> E[explore_loop]
+  E --> W[workers]
+  W --> R[review_llm]
+  R --> S[synthesize_llm]
+  S --> D[done]
+      </pre></div>
+      <table>
+        <tr><th>类型</th><th>工具集</th><th>目的</th></tr>
+        <tr><td>explore</td><td>只读</td><td>摸清代码库</td></tr>
+        <tr><td>shell</td><td>命令</td><td>构建脚本</td></tr>
+        <tr><td>build</td><td>读写+执行</td><td>改代码</td></tr>
+      </table>
+      <p>Worker 隔离：<code>{repo}/.dieyun/worktrees/{runId}/{workerId}</code>。检查点：<code>~/.dieyun/agent-checkpoints/</code>。</p>
+    </section>
+
+    <!-- 第6章 -->
+    <section class="page page-break" id="ch6">
+      <h2>6. dieyun-core（Rust Sidecar）</h2>
+      <p><code>crates/dieyun-core</code>，经 <code>core-bridge.js</code> stdio JSON-RPC 与 Main 通信。打包：<code>npm run pack:dieyun-core</code>。</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TB
+  B[core-bridge] <-->|stdio| R[rpc/stdio]
+  R --> A[agent/]
+  R --> P[planner/]
+  R --> M[memory/]
+  R --> C[compaction/]
+  R --> I[index/ + embedding/]
+      </pre></div>
+      <table>
+        <tr><th>RPC 前缀</th><th>职责</th></tr>
+        <tr><td><code>agent.loop.*</code></td><td>工具循环状态机</td></tr>
+        <tr><td><code>planner.run.*</code></td><td>Planner 编排</td></tr>
+        <tr><td><code>memory.*</code></td><td>SQLite 记忆</td></tr>
+        <tr><td><code>compaction.*</code></td><td>token 与摘要</td></tr>
+        <tr><td><code>codebase.*</code></td><td>索引与搜索</td></tr>
+      </table>
+    </section>
+
+    <!-- 第7章 -->
+    <section class="page page-break" id="ch7">
+      <h2>7. 记忆系统</h2>
+      <p>存储：<code>%APPDATA%/pixel-office-agent/diecloud-memory.sqlite</code>。唯一写入：Gateway <code>memory.*</code> → Rust。</p>
+      <table>
+        <tr><th>表</th><th>用途</th></tr>
+        <tr><td><code>sessions</code></td><td>标题、归档、workspace_path</td></tr>
+        <tr><td><code>messages</code></td><td>user / assistant / system</td></tr>
+        <tr><td><code>long_memories</code></td><td>长期笔记式记忆</td></tr>
+      </table>
+      <ul>
+        <li>当前会话：<code>localStorage</code> <code>diecloud.active.session.v1</code></li>
+        <li>切换会话：拉消息 + 恢复工作空间与滚动位置</li>
+      </ul>
+    </section>
+
+    <!-- 第8章 -->
+    <section class="page page-break" id="ch8">
+      <h2>8. 渲染进程 UI 模块</h2>
+      <table>
+        <tr><th>模块</th><th>文件</th><th>职责</th></tr>
+        <tr><td>会话</td><td><code>renderer-chat-history.js</code></td><td>切换、加载、历史列表</td></tr>
+        <tr><td>渲染</td><td><code>renderer-chat-render.js</code></td><td>消息 DOM、滚动位置</td></tr>
+        <tr><td>发送</td><td><code>renderer-agent-loop.js</code></td><td>Agent / Plan 入口</td></tr>
+        <tr><td>Gateway</td><td><code>renderer-gateway.js</code></td><td>WebSocket RPC</td></tr>
+        <tr><td>输入</td><td><code>renderer-composer*.js</code></td><td>输入框、模式、附件</td></tr>
+        <tr><td>产物</td><td><code>renderer-artifacts.js</code></td><td>工作空间文件预览</td></tr>
+        <tr><td>变更</td><td><code>renderer-changes-pane.js</code></td><td>Worktree 合并确认</td></tr>
+        <tr><td>终端</td><td><code>renderer-terminal.js</code></td><td>内嵌终端</td></tr>
+        <tr><td>模型</td><td><code>renderer-model-settings.js</code></td><td>模型与 API 配置</td></tr>
+      </table>
+    </section>
+
+    <!-- 第9章 -->
+    <section class="page page-break" id="ch9">
+      <h2>9. 技能、MCP 与插件</h2>
+      <div class="diagram"><pre class="mermaid">
+flowchart TB
+  B[bundled/] -->|seed| H[~/.dieyun/skills/]
+  H --> S[scanner.js]
+  S --> P[system prompt]
+  M[mcp/runtime-manager] --> T[Agent 工具]
+      </pre></div>
+      <ul>
+        <li><strong>Bundled</strong>：<code>skills/bundled/</code>（minimax、curated、dieyun、weather）</li>
+        <li><strong>Seed</strong>：首次复制到用户目录，已存在不覆盖</li>
+        <li><strong>MCP</strong>：<code>src/mcp/</code> catalog + runtime + 凭据存储</li>
+        <li><strong>插件</strong>：<code>src/plugins/</code> loader + host</li>
+      </ul>
+    </section>
+
+    <!-- 第10章 -->
+    <section class="page page-break" id="ch10">
+      <h2>10. SSH 与远程工作空间</h2>
+      <table>
+        <tr><th>组件</th><th>路径</th><th>职责</th></tr>
+        <tr><td>会话管理</td><td><code>ssh/session-manager.js</code></td><td>连接、重连</td></tr>
+        <tr><td>凭据</td><td><code>ssh/credentials-store.js</code></td><td>加密存储</td></tr>
+        <tr><td>远程 Gateway</td><td><code>ssh/remote-gateway-manager.js</code></td><td>部署 remote pack</td></tr>
+        <tr><td>远程 FS</td><td><code>gateway/remote-fs.js</code></td><td>SSH 文件 RPC</td></tr>
+        <tr><td>UI</td><td><code>renderer-workspace-ssh.js</code></td><td>远程工作空间选择</td></tr>
+      </table>
+    </section>
+
+    <!-- 第11章 -->
+    <section class="page page-break" id="ch11">
+      <h2>11. 浏览器自动化</h2>
+      <p><code>src/browser/</code>：内嵌 <code>BrowserView</code>，仅 http/https。<code>controller.js</code> 管理快照与点击；<code>playwright-runner.js</code> 辅助自动化；<code>url-policy.js</code> 限制 URL。</p>
+    </section>
+
+    <!-- 第12章 -->
+    <section class="page page-break" id="ch12">
+      <h2>12. 定时任务（Plans）</h2>
+      <table>
+        <tr><th>对比</th><th>对话 Agent</th><th>Plans</th></tr>
+        <tr><td>执行</td><td>多轮工具循环</td><td>单次 LLM</td></tr>
+        <tr><td>存储</td><td>SQLite messages</td><td><code>plans.json</code></td></tr>
+        <tr><td>调度</td><td>—</td><td>RRULE / <code>scheduler.js</code></td></tr>
+        <tr><td>投递</td><td>当场显示</td><td>写入指定会话</td></tr>
+      </table>
+    </section>
+
+    <!-- 第14章 -->
+    <section class="page page-break" id="ch14">
+      <h2>14. 自动更新与打包</h2>
+      <div class="diagram"><pre class="mermaid">
+flowchart LR
+  B[build-installer.bat] --> P[PC NSIS]
+  B --> M[Android APK]
+  P --> D[dist/]
+  M --> DM[dist/mobile/]
+  D --> Y[Y: 内网]
+  D --> C[COS]
+  DM --> Y
+  DM --> C
+  U[electron-updater] --> Y
+  U --> BS[update-bootstrap]
+      </pre></div>
+      <table>
+        <tr><th>步骤</th><th>命令</th></tr>
+        <tr><td>一键打包发布</td><td><code>build-installer.bat</code></td></tr>
+        <tr><td>仅 PC 打包</td><td><code>npm run build:nsis</code></td></tr>
+        <tr><td>内网发布</td><td><code>scripts\publish-updates-to-y.bat</code></td></tr>
+        <tr><td>COS 上传</td><td><code>node scripts\upload-updates-cos.mjs</code></td></tr>
+      </table>
+    </section>
+    <!-- 第15章 -->
+    <section class="page page-break" id="ch15">
+      <h2>15. 代码库索引</h2>
+      <p><code>codebase.*</code> 仅 Rust 实现：<code>index/walker</code>、<code>search</code>、<code>embedding</code>（内置 BGE 或远程）。Node <code>codebase/index-service.js</code> 仅保留远程采集辅助。</p>
+    </section>
+
+    <!-- 第16章 附录 -->
+    <section class="page page-break" id="ch16">
+      <h2>16. 附录：目录速查与数据路径</h2>
+      <h3>16.1 源码目录</h3>
+      <table>
+        <tr><th>路径</th><th>内容</th></tr>
+        <tr><td><code>src/main-entry.js</code></td><td>主进程中枢</td></tr>
+        <tr><td><code>src/gateway/</code></td><td>本地 RPC</td></tr>
+        <tr><td><code>src/agent/</code></td><td>Agent / Planner / 工具桥</td></tr>
+        <tr><td><code>src/renderer/</code></td><td>UI 模块</td></tr>
+        <tr><td><code>crates/dieyun-core/</code></td><td>Rust sidecar</td></tr>
+        <tr><td><code>src/ssh/</code></td><td>远程 SSH</td></tr>
+        <tr><td><code>src/plans/</code></td><td>定时任务</td></tr>
+        <tr><td><code>src/browser/</code></td><td>浏览器自动化</td></tr>
+        <tr><td><code>src/lsp/</code></td><td>语言服务诊断</td></tr>
+      </table>
+      <h3>16.2 运行时数据</h3>
+      <table>
+        <tr><th>路径</th><th>内容</th></tr>
+        <tr><td><code>%APPDATA%/pixel-office-agent/</code></td><td>userData、Gateway DB、plans</td></tr>
+        <tr><td><code>~/.dieyun/</code></td><td>skills、workspace、checkpoints</td></tr>
+        <tr><td><code>dist/</code></td><td>打包输出</td></tr>
+        <tr><td><code>Y:\client-electron\updates-published</code></td><td>内网更新</td></tr>
+      </table>
+      <div class="footer-note">
+        叠云 Agent 架构手册 · 与仓库 docs/ARCHITECTURE.md 同步 · PixelOffice 内部文档
+      </div>
+    </section>
+
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'neutral',
+      flowchart: { useMaxWidth: true, htmlLabels: true },
+      sequence: { useMaxWidth: true }
+    });
+
+    async function renderDiagrams() {
+      const nodes = document.querySelectorAll('pre.mermaid');
+      for (const el of nodes) {
+        const id = 'mmd-' + Math.random().toString(36).slice(2);
+        const { svg } = await mermaid.render(id, el.textContent.trim());
+        const wrap = document.createElement('div');
+        wrap.innerHTML = svg;
+        el.replaceWith(wrap);
+      }
+    }
+
+    renderDiagrams().catch(console.error);
+  </script>
+</body>
+</html>

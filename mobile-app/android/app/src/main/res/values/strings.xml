@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">叠云AI</string>
+    <string name="mobile_update_manifest_url">http://192.168.31.62:3099/mobile-latest.json</string>
+    <string name="mobile_update_manifest_url_fallback">https://dieyunagent-updates-1440856872.cos.ap-shanghai.myqcloud.com/mobile-latest.json</string>
+</resources>

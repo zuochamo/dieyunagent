@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "钉钉机器人",
+  "properties": {
+    "webhookUrl": {
+      "type": "string",
+      "title": "Webhook 地址",
+      "description": "钉钉群 → 智能群助手 → 自定义 → Webhook"
+    },
+    "secret": {
+      "type": "string",
+      "title": "加签密钥",
+      "description": "若机器人启用了「加签」安全设置则必填",
+      "format": "password"
+    }
+  },
+  "required": ["webhookUrl"]
+}

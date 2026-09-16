@@ -17,7 +17,14 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/gateway/fs-read-limits.js',
   'src/gateway/fs-edit-file.js',
   'src/gateway/str-replace.js',
-  'src/gateway/rg-search.js'
+  'src/gateway/rg-search.js',
+  // navigate-service 的「行内标识符纠正」复用网关侧同一套符号文本工具
+  'src/gateway/symbol-text.js',
+  // 远程 LSP 定位：只依赖 Node 内置模块，server 由远程环境提供
+  // （rust-analyzer / gopls 走 PATH，ts/py 走远程工作区 node_modules）。
+  'src/lsp/language-registry.js',
+  'src/lsp/lsp-client.js',
+  'src/lsp/navigate-service.js'
 ];
 
 function computeRemoteGatewaySourceHash(rootDir) {

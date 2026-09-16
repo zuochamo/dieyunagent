@@ -242,7 +242,12 @@ async function main() {
     'remote/minimal-gateway-host.js',
     'gateway/fs-read-limits.js',
     'gateway/fs-edit-file.js',
-    'gateway/str-replace.js'
+    'gateway/str-replace.js',
+    'gateway/symbol-text.js',
+    // 远程 LSP 定位链路，缺失会让远程 lsp.query 直接报错
+    'lsp/navigate-service.js',
+    'lsp/lsp-client.js',
+    'lsp/language-registry.js'
   ]) {
     if (!fs.existsSync(path.join(OUT, rel))) {
       throw new Error('Remote Agent pack incomplete, missing: ' + rel);

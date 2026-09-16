@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "updatedAt": "2026-06-09",
+  "plugins": [
+    {
+      "id": "com.dieyun.example.webhook",
+      "name": "Webhook 通知",
+      "description": "向任意 URL 发送 JSON POST；可选在定时任务完成后自动通知。",
+      "version": "1.0.0",
+      "category": "integration",
+      "author": "Dieyun",
+      "bundledDir": "examples/plugins/webhook"
+    },
+    {
+      "id": "com.dieyun.example.http-api",
+      "name": "HTTP API 代理",
+      "description": "对已配置的 REST 基址发起 GET/POST，适合内网 OpenAPI、自建后端。",
+      "version": "1.0.0",
+      "category": "integration",
+      "author": "Dieyun",
+      "bundledDir": "examples/plugins/http-api"
+    },
+    {
+      "id": "com.dieyun.example.feishu-bot",
+      "name": "飞书机器人",
+      "description": "飞书群自定义机器人发文本；可选定时任务完成通知。",
+      "version": "1.0.0",
+      "category": "integration",
+      "author": "Dieyun",
+      "bundledDir": "examples/plugins/feishu-bot"
+    },
+    {
+      "id": "com.dieyun.example.dingtalk-bot",
+      "name": "钉钉机器人",
+      "description": "钉钉群机器人发文本/Markdown，支持加签密钥。",
+      "version": "1.0.0",
+      "category": "integration",
+      "author": "Dieyun",
+      "bundledDir": "examples/plugins/dingtalk-bot"
+    },
+    {
+      "id": "com.dieyun.example.agent-journal",
+      "name": "对话摘要日志",
+      "description": "Agent 每轮对话摘要写入本地日志，可让 Agent 读取最近记录（无需外网）。",
+      "version": "1.0.0",
+      "category": "utility",
+      "author": "Dieyun",
+      "bundledDir": "examples/plugins/agent-journal"
+    }
+  ]
+}

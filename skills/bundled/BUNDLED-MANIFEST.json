@@ -1,0 +1,52 @@
+{
+  "generatedAt": "2026-09-15T07:04:33.314Z",
+  "coreOnly": true,
+  "minimaxCount": 8,
+  "minimaxSkills": [
+    "frontend-dev",
+    "fullstack-dev",
+    "minimax-docx",
+    "minimax-multimodal-toolkit",
+    "minimax-pdf",
+    "minimax-xlsx",
+    "pptx-generator",
+    "vision-analysis"
+  ],
+  "officeSkills": [
+    "minimax-docx",
+    "minimax-pdf",
+    "minimax-xlsx",
+    "pptx-generator"
+  ],
+  "curatedIds": [
+    "multi-search-engine",
+    "baidu-search",
+    "weather-china",
+    "skill-vetter",
+    "skill-creator"
+  ],
+  "curatedPresent": [
+    "multi-search-engine",
+    "baidu-search",
+    "weather-china",
+    "skill-vetter",
+    "skill-creator"
+  ],
+  "dieyunCount": 0,
+  "required": [
+    "minimax/frontend-dev/SKILL.md",
+    "minimax/fullstack-dev/SKILL.md",
+    "minimax/minimax-docx/SKILL.md",
+    "minimax/minimax-pdf/SKILL.md",
+    "minimax/minimax-xlsx/SKILL.md",
+    "minimax/pptx-generator/SKILL.md",
+    "minimax/minimax-multimodal-toolkit/SKILL.md",
+    "minimax/vision-analysis/SKILL.md",
+    "curated/multi-search-engine/SKILL.md",
+    "curated/baidu-search/SKILL.md",
+    "curated/weather-china/SKILL.md",
+    "curated/skill-vetter/SKILL.md",
+    "curated/skill-creator/SKILL.md",
+    "weather/SKILL.md"
+  ]
+}

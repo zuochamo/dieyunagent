@@ -1,0 +1,223 @@
+{
+  "name": "dieyunagent",
+  "version": "0.1.30",
+  "description": "叠云 agent",
+  "main": "src/main.js",
+  "scripts": {
+    "bootstrap": "node scripts/bootstrap.cjs",
+    "vendor:minimax-skills": "node scripts/vendor-minimax-skills.mjs",
+    "bundle:curated-skills": "node scripts/bundle-curated-skills.mjs",
+    "verify:bundled-skills": "node scripts/prepare-bundled-skills.mjs",
+    "build:renderer": "node scripts/build-renderer-bundle.cjs --minify",
+    "build:renderer:dev": "node scripts/build-renderer-bundle.cjs",
+    "icons": "python3 scripts/generate-icons.py",
+    "start": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-remote-gateway-pack.cjs && electron .",
+    "dev": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-remote-gateway-pack.cjs && electron . --enable-logging",
+    "dev:fast": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && electron . --enable-logging",
+    "build": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway:lite && npm run pack:optional-assets && npm run pack:deploy-defaults && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack",
+    "build:dir": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway:lite && npm run pack:optional-assets && npm run pack:deploy-defaults && electron-builder --win --dir && npm run verify:asar && npm run verify:remote-pack",
+    "build:nsis": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway:lite && npm run pack:optional-assets && npm run pack:deploy-defaults && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack",
+    "build:installer": "npm run build:nsis",
+    "sync:updates": "node scripts/sync-updates-from-dist.mjs",
+    "verify:asar": "node scripts/verify-packaged-asar.cjs",
+    "verify:remote-pack": "node scripts/verify-remote-gateway-pack.cjs",
+    "serve:updates": "node scripts/update-static-server.mjs",
+    "serve:online-users": "npm --prefix deploy/online-users start",
+    "check:renderer": "python scripts/check-renderer-globals.py && python scripts/check-renderer-critical.py",
+    "check:contracts": "node scripts/check-repo-contracts.cjs",
+    "check:js": "tsc -p tsconfig.check.json --noEmit --pretty false",
+    "test:renderer": "npm run check:renderer",
+    "test": "node scripts/test-agent-smoke.cjs",
+    "test:agent": "node scripts/test-agent-smoke.cjs --all",
+    "test:agent-full": "node scripts/test-agent-smoke.cjs --full",
+    "test:agent-limits": "node scripts/test-agent-limits.cjs",
+    "test:task-tier": "vitest run test/unit/task-tier.test.cjs",
+    "test:unit": "vitest run",
+    "test:composer-queue": "node scripts/test-composer-queue-edit.cjs",
+    "test:local-gateway-smoke": "node scripts/test-local-gateway-smoke.cjs",
+    "test:phase5-handlers": "node scripts/test-phase5-handlers-smoke.cjs",
+    "test:session-remote-transport": "node scripts/test-session-remote-transport.cjs",
+    "test:agent-run-events": "node scripts/test-agent-run-events.cjs",
+    "test:guardrails-sync": "node scripts/test-guardrails-sync.cjs",
+    "test:sandbox-smoke": "node scripts/test-sandbox-smoke.cjs",
+    "test:tool-harness": "node scripts/test-tool-harness.cjs",
+    "test:lsp": "node scripts/test-lsp.cjs",
+    "test:write-smell-hints": "node scripts/test-write-smell-hints.cjs",
+    "test:browser-smoke": "node scripts/test-browser-smoke.cjs",
+    "test:session-context": "node scripts/test-session-context.cjs",
+    "test:agent-system-prompt": "node scripts/test-agent-system-prompt.cjs",
+    "test:system-prompt-prep": "node scripts/test-system-prompt-prep.cjs",
+    "test:llm-tool-call-fallback": "node scripts/test-llm-tool-call-fallback.cjs",
+    "test:monitor-outbox": "node scripts/test-monitor-outbox.cjs",
+    "test:planner-parallel": "node scripts/test-planner-parallel.cjs",
+    "test:mobile": "node scripts/test-mobile-smoke.cjs",
+    "test:mcp-store": "node scripts/test-mcp-store.cjs",
+    "test:app-updater-feeds": "node scripts/test-app-updater-feeds.cjs",
+    "test:ssh-reconnect-targets": "node scripts/test-ssh-reconnect-targets.cjs",
+    "test:workspace-remote-runtime": "node scripts/test-workspace-remote-runtime.cjs",
+    "test:main-shell": "node scripts/test-main-shell.cjs",
+    "lint:agent": "eslint \"src/agent/**/*.js\" \"scripts/test-*.cjs\"",
+    "generate:rpc-catalog": "node scripts/generate-rpc-catalog.cjs",
+    "verify:rpc-catalog": "node scripts/generate-rpc-catalog.cjs --check",
+    "generate:agent-events": "node scripts/generate-agent-run-events-doc.cjs",
+    "verify:agent-events": "node scripts/generate-agent-run-events-doc.cjs --check",
+    "cargo:build": "cargo build -p dieyun-core --release",
+    "cargo:test": "cargo test -p dieyun-core",
+    "cargo:run": "cargo run -p dieyun-core --",
+    "pack:dieyun-core": "node scripts/pack-dieyun-core.cjs",
+    "pack:dieyun-core:linux": "node scripts/pack-dieyun-core-linux.cjs",
+    "pack:dieyun-core:linux:remote": "node scripts/pack-dieyun-core-linux-remote.cjs",
+    "setup:dieyun-linux-ssh": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dieyun-linux-ssh.ps1",
+    "test:reviewer-json": "node scripts/test-reviewer-json.cjs",
+    "test:core-bridge": "node scripts/test-core-bridge.cjs",
+    "test:builtin-embedding-rust": "node scripts/test-builtin-embedding-rust.cjs",
+    "test:rust-agent-loop": "node scripts/test-rust-agent-loop.cjs",
+    "test:rust-agent-loop-smoke": "node scripts/test-rust-agent-loop-smoke.cjs",
+    "test:rust-loop-runner": "node scripts/test-rust-loop-runner.cjs",
+    "test:llm-reconnect-retry": "node scripts/test-llm-reconnect-retry.cjs",
+    "test:rust-planner-pipeline": "node scripts/test-rust-planner-pipeline.cjs",
+    "test:rust-planner-smoke": "node scripts/test-rust-planner-smoke.cjs",
+    "test:tool-bridge-delegate": "node scripts/test-tool-bridge-delegate.cjs",
+    "test:fs-edit": "node scripts/test-fs-edit.cjs",
+    "test:delegate-batch": "node scripts/test-delegate-batch.cjs",
+    "test:dieyun-core-pack": "node scripts/test-dieyun-core-pack.cjs",
+    "test:agent-round-text": "node scripts/test-agent-round-text.cjs",
+    "pack:remote-gateway": "node scripts/pack-remote-gateway.cjs",
+    "pack:remote-gateway:lite": "node scripts/pack-remote-gateway.cjs --lite",
+    "pack:optional-assets": "node scripts/pack-optional-assets.mjs",
+    "pack:deploy-defaults": "node scripts/pack-deploy-defaults.cjs",
+    "upload:optional-cos": "node scripts/upload-optional-cos.mjs",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "author": "PixelOffice",
+  "license": "MIT",
+  "devDependencies": {
+    "better-sqlite3": "^11.10.0",
+    "cos-nodejs-sdk-v5": "^2.15.4",
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1",
+    "eslint": "^8.57.1",
+    "rcedit": "^3.1.0",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "electron-log": "^5.0.1",
+    "electron-updater": "^6.1.7",
+    "mammoth": "^1.12.0",
+    "mermaid": "^11.15.0",
+    "monaco-editor": "^0.52.2",
+    "mssql": "^11.0.1",
+    "playwright-core": "^1.60.0",
+    "qrcode": "^1.5.4",
+    "rrule": "^2.8.1",
+    "socket.io-client": "^4.7.2",
+    "ssh2": "^1.17.0",
+    "systeminformation": "^5.21.0",
+    "uiohook-napi": "^1.5.4",
+    "ws": "^8.20.1",
+    "xlsx": "^0.18.5"
+  },
+  "build": {
+    "afterPack": "scripts/after-pack-win-icon.cjs",
+    "appId": "com.pixeloffice.agent",
+    "productName": "叠云 Agent",
+    "directories": {
+      "output": "dist"
+    },
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "executableName": "dieyunagent",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "guid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "include": "build/installer-progress.nsh",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "叠云 Agent",
+      "artifactName": "dieyunagent-Setup-${version}.${ext}"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "http://192.168.31.62:3099/"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "plugins/bundled/**/*",
+      "examples/plugins/**/*",
+      "scripts/bootstrap.cjs",
+      "!**/*.map",
+      "!**/node_modules/**/*.{pdb,iobj,ipdb,obj,lib,ilk,exp,tlog}",
+      "!**/node_modules/**/{test,tests,__tests__,docs,example,examples}/**",
+      "!**/node_modules/onnxruntime-web/**",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",
+      "!**/node_modules/monaco-editor/**",
+      "!**/node_modules/better-sqlite3/**",
+      "!**/node_modules/better-sqlite3-multiple-ciphers/**",
+      "!**/node_modules/@electron-prebuilds-preview/**",
+      "!**/node_modules/@sudocode-ai/better-sqlite3-win32-x64/**",
+      "!**/node_modules/mermaid/dist/mermaid.js",
+      "!**/node_modules/mermaid/dist/chunks/**",
+      "!**/node_modules/mermaid/dist/*.mjs",
+      "!**/node_modules/@mermaid-js/**",
+      "!**/node_modules/cytoscape/**",
+      "!**/node_modules/cytoscape-fcose/**",
+      "!**/node_modules/katex/**",
+      "!**/node_modules/typescript/**",
+      "!**/node_modules/@types/**"
+    ],
+    "extraResources": [
+      {
+        "from": "build/deploy-packaged.json",
+        "to": "deploy-packaged.json"
+      },
+      {
+        "from": "skills/bundled/weather",
+        "to": "skills/bundled/weather",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/remote-gateway-pack",
+        "to": "remote-gateway-pack",
+        "filter": [
+          "**/*",
+          "!bin/node"
+        ]
+      },
+      {
+        "from": "build/dieyun-core",
+        "to": "dieyun-core",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**/*.node",
+      "node_modules/uiohook-napi/**/*.node",
+      "node_modules/playwright-core/**/*"
+    ]
+  }
+}

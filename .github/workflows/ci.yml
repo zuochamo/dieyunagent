@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main, 'feature/**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install JS deps
+        run: npm ci
+      - name: Repo contracts (npm scripts + CODEMAP)
+        run: npm run check:contracts
+      - name: Agent lint (narrow)
+        run: npm run lint:agent
+      - name: JSDoc check (scoped)
+        run: npm run check:js
+      - name: Renderer static checks
+        run: npm run check:renderer
+      - name: Agent smoke (skip rust sidecar if missing)
+        run: npm run test:agent
+      - name: Rust unit tests
+        run: cargo test -p dieyun-core --no-default-features -- --skip indexes_dieyunagent_main_entry_imports
+      - name: Rust clippy
+        run: cargo clippy -p dieyun-core --no-default-features -- -D warnings

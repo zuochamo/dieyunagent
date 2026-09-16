@@ -1,0 +1,30 @@
+{
+  "id": "com.dieyun.example.webhook",
+  "name": "Webhook 通知",
+  "version": "1.0.0",
+  "description": "向配置的 URL 发送 JSON POST（示例用户插件）。",
+  "category": "integration",
+  "main": "index.js",
+  "permissions": ["network", "storage"],
+  "provides": ["webhook"],
+  "hooks": ["onPlanRan"],
+  "tools": [
+    {
+      "name": "send",
+      "description": "向插件配置的 webhookUrl 发送 JSON 正文。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "description": "要 POST 的 JSON 对象"
+          }
+        },
+        "required": ["payload"]
+      }
+    }
+  ],
+  "settings": {
+    "schema": "settings.schema.json"
+  }
+}

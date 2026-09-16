@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>叠云 Agent 更新</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="update-overlay" id="update-overlay" data-phase="installing">
+      <div class="update-panel" role="dialog" aria-labelledby="update-title">
+        <div class="update-icon" id="update-icon" aria-hidden="true">&#8635;</div>
+        <h2 class="update-title" id="update-title">正在安装更新</h2>
+        <p class="update-version" id="update-version"></p>
+        <p class="update-message" id="update-message">准备中…</p>
+        <div class="update-progress-wrap" id="update-progress-wrap">
+          <div class="update-progress-track">
+            <div class="update-progress-bar" id="update-progress-bar"></div>
+          </div>
+          <span class="update-progress-label" id="update-progress-label"></span>
+        </div>
+        <p class="update-hint" id="update-hint">安装过程中请勿关闭此窗口。</p>
+      </div>
+    </div>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "HTTP API 配置",
+  "properties": {
+    "baseUrl": {
+      "type": "string",
+      "title": "API 基址",
+      "description": "如 https://api.example.com（勿带末尾斜杠）"
+    },
+    "authHeaderName": {
+      "type": "string",
+      "title": "鉴权头名称",
+      "description": "留空则不附加；常用 Authorization 或 X-API-Key"
+    },
+    "authHeaderValue": {
+      "type": "string",
+      "title": "鉴权头值",
+      "description": "如 Bearer token 或 API Key",
+      "format": "password"
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "title": "超时（毫秒）",
+      "description": "默认 30000",
+      "default": 30000
+    }
+  },
+  "required": ["baseUrl"]
+}
