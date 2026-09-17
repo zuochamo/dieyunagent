@@ -1,5 +1,13 @@
 'use strict';
 
+/**
+ * 手动排障工具：探测某个模型在已配置供应商上的真实上下文窗口。
+ * 不接入 npm scripts / CI / smoke 链路，会向配置的 API 发起真实请求。
+ *
+ * Usage: node scripts/dev/probe-context-window.cjs [modelName]
+ * 读取 %APPDATA%/dieyunagent/model-settings.json（可用 DIEYUN_USER_DATA 覆盖）。
+ */
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');

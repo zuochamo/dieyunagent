@@ -74,6 +74,10 @@ npm run test:agent-full        # 含 rust-*-smoke
 npm run test:renderer          # renderer 静态检查
 npm run cargo:test             # Rust 单元测试
 npm run check:renderer         # Renderer 静态检查
+
+# 手动排障脚本（不接入 npm scripts / CI / smoke 链路）
+node scripts/dev/check-memory-health.cjs     # 记忆 SQLite + 向量模型体检
+node scripts/dev/probe-context-window.cjs    # 探测某模型的上下文窗口
 ```
 
 GitHub Actions：`.github/workflows/ci.yml`（contracts + lint + smoke + cargo test/clippy）。

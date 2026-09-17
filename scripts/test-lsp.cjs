@@ -5,12 +5,12 @@
  *
  * 覆盖：
  *  - 纯函数：hover 归一化、位置归一化、行内标识符列纠正（resolveCharacter0）
- *  - server spec / tsserver 解析 / CLI 降级命令（原 test-lsp-navigate 口径）
+ *  - server spec / tsserver 解析 / CLI 降级命令
  *  - queryLspPosition：注入 fake client 校验实际发出的落点列
  *  - 远程网关 lsp.query 只有一份实现（重复键回归）
  *  - LspClient 在 server 不可用时快速失败，而不是等 initialize 超时
  *
- * 可选端到端（需网络 + npx，原 test-lsp-diagnostics 口径）：
+ * 可选端到端（需网络 + npx）：
  *  DIEYUN_LSP_E2E=1 node scripts/test-lsp.cjs
  */
 
@@ -288,7 +288,7 @@ async function assertLspClientFailsFast() {
   assert(elapsed < 15000, `missing language server should fail fast (took ${elapsed}ms)`);
 }
 
-/** 可选端到端：真起 LSP 抓一条类型错误（原 test-lsp-diagnostics 口径，需网络）。 */
+/** 可选端到端：真起 LSP 抓一条类型错误（需网络）。 */
 async function e2eDiagnostics() {
   const { createLspDiagnosticsService } = require('../src/lsp/diagnostics-service');
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'dieyun-lsp-e2e-'));

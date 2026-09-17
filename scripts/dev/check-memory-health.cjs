@@ -3,20 +3,22 @@
 
 /**
  * Health check: memory SQLite (read-only) + embedding models (builtin + configured remote).
- * Usage: node scripts/check-memory-health.cjs [--user-data PATH]
+ *
+ * 手动排障工具，不接入 npm scripts / CI / smoke 链路。
+ * Usage: node scripts/dev/check-memory-health.cjs [--user-data PATH]
  */
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const Database = require('better-sqlite3');
 
-const { createEmbeddingClient } = require('../src/codebase/embedding-client');
+const { createEmbeddingClient } = require('../../src/codebase/embedding-client');
 const {
   hasBuiltinEmbeddingModel,
   BUILTIN_EMBEDDING_ID,
   BUILTIN_EMBEDDING_DIMENSIONS
-} = require('../src/codebase/local-embedding');
-const { loadModelSettings, getEmbeddingConfig } = require('../src/model-settings');
+} = require('../../src/codebase/local-embedding');
+const { loadModelSettings, getEmbeddingConfig } = require('../../src/model-settings');
 
 function guessUserData() {
   const argIdx = process.argv.indexOf('--user-data');
