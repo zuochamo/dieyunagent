@@ -10,6 +10,24 @@ function newId() {
   return crypto.randomBytes(8).toString('hex');
 }
 
+/**
+ * 运行边界标记（唯一权威的「这次运行已经开始、但还没收尾」记录）。
+ *
+ * 进程被杀时 Main 的收尾代码不会执行，只有落盘的标记能告诉下次启动
+ * 「会话里那条用户轮次还没有回复」，从而补写中断回执。
+ */
+function normalizeRunState(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const runId = String(raw.runId || '').trim();
+  const sessionId = String(raw.sessionId || '').trim();
+  if (!runId && !sessionId) return null;
+  return {
+    runId,
+    sessionId,
+    startedAt: String(raw.startedAt || '').trim() || new Date().toISOString()
+  };
+}
+
 function normalizePlan(raw) {
   const p = raw && typeof raw === 'object' ? raw : {};
   const deliver = p.deliver && typeof p.deliver === 'object' ? p.deliver : {};
@@ -29,6 +47,10 @@ function normalizePlan(raw) {
     skillIds: Array.isArray(p.skillIds)
       ? p.skillIds.map((x) => String(x).trim()).filter(Boolean).slice(0, 8)
       : [],
+    // 计划绑定的模型路由（custom:<id> / builtin:<supplierId>:<modelId>）。
+    // 只存路由，绝不存 apiKey：执行时按路由现算配置，避免密钥落盘。
+    model: String(p.model || '').trim(),
+    modelRoute: String(p.modelRoute || '').trim(),
     deliver: {
       type: deliver.type === 'session' ? 'session' : 'session',
       sessionId: String(deliver.sessionId || p.sessionId || '').trim()
@@ -37,7 +59,9 @@ function normalizePlan(raw) {
     updatedAt: new Date().toISOString(),
     lastRunAt: p.lastRunAt || null,
     lastRunOk: p.lastRunOk == null ? null : !!p.lastRunOk,
-    lastRunSummary: String(p.lastRunSummary || '').slice(0, 4000)
+    lastRunSummary: String(p.lastRunSummary || '').slice(0, 4000),
+    // 运行边界标记：只在 beginRun/endRun 中维护，normalize 只负责保留合法值
+    runState: normalizeRunState(p.runState)
   };
 }
 
@@ -92,6 +116,8 @@ class PlansStore {
     if (idx >= 0) {
       plan.createdAt = this.plans[idx].createdAt;
       if (!patch.dtstart) plan.dtstart = this.plans[idx].dtstart;
+      // 运行态不是表单字段：UI 保存不应清掉正在运行的边界标记，只由 beginRun/endRun 维护
+      if (!patch || !('runState' in patch)) plan.runState = this.plans[idx].runState;
       this.plans[idx] = plan;
     } else {
       this.plans.push(plan);
@@ -118,6 +144,38 @@ class PlansStore {
     p.updatedAt = p.lastRunAt;
     if (p.onceAt && p.lastRunOk) p.enabled = false;
     this._save();
+  }
+
+  /**
+   * 运行边界开始：本次触发的用户轮次已写入会话后调用。
+   *
+   * 必须在用户轮次落库之后落盘 —— 这之后无论进程怎么死，
+   * 下次启动都能从这条标记知道「哪条用户轮次还没有回复」。
+   *
+   * @returns {object|null} 写入的 runState
+   */
+  beginRun(id, info) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p) return null;
+    p.runState = normalizeRunState({ ...info, startedAt: new Date().toISOString() });
+    this._save();
+    return p.runState;
+  }
+
+  /** 运行边界结束：assistant 轮次已落库（或已确认无法落库）后调用 */
+  endRun(id) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p || !p.runState) return false;
+    p.runState = null;
+    this._save();
+    return true;
+  }
+
+  /** 上次进程退出时仍在运行的计划，供启动恢复补写中断回执 */
+  listRunning() {
+    return this.plans
+      .filter((p) => p && p.runState)
+      .map((p) => ({ plan: { ...p }, runState: { ...p.runState } }));
   }
 }
 

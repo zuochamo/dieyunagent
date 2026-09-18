@@ -1,46 +1,17 @@
 'use strict';
 
-const { loadModelSettings, clampAgentMaxRounds } = require('../model-settings');
+const { loadModelSettings, clampAgentMaxRounds, resolveTextApiConfig } = require('../model-settings');
 const { ASSISTANT_IDENTITY, formatDieyunSystemBlock, loadDieyunInstructions } = require('../dieyun-instructions');
 const { buildTaskSkillsSystem } = require('../automation/skill-prompt');
 const { runRustAgentLoop } = require('../agent/rust-loop-runner');
 const { resolveLoopToolCallLimit } = require('../agent/agent-limits');
 const { buildCompletionMessagesFromHistory } = require('../agent/session-context');
 const { clearToolHarnessSessionsForSession } = require('../agent/tool-harness');
-const { ensurePlanSession } = require('./plan-session');
+const { buildPlanRunUserText, stripAssistantMeta, stripUserMeta } = require('./plan-run-turn');
 const { buildPlanAgentTools } = require('./plan-tools');
+const { isAbortError } = require('../llm-reconnect-retry');
 const fs = require('fs');
 const path = require('path');
-
-const PLAN_MODE_LABEL = '定时 Agent';
-
-function packAssistantMeta(content, meta) {
-  if (!meta) return content;
-  try {
-    return `【叠云meta】${JSON.stringify(meta)}\n${content}`;
-  } catch {
-    return content;
-  }
-}
-
-function stripAssistantMeta(raw) {
-  const s = String(raw || '');
-  const m = s.match(/^【叠云meta】\{[\s\S]*?\}\n([\s\S]*)$/);
-  return m ? m[1] : s;
-}
-
-function stripUserMeta(raw) {
-  return stripAssistantMeta(raw);
-}
-
-function buildPlanUserPrompt(plan) {
-  const when = new Date().toLocaleString('zh-CN');
-  const todoBlock =
-    Array.isArray(plan.todos) && plan.todos.length
-      ? `\n\n执行 TODO：\n${plan.todos.map((t, i) => `${i + 1}. ${t}`).join('\n')}`
-      : '';
-  return `[计划 · ${plan.name}]\n${when} · 定时触发\n\n${plan.prompt}${todoBlock}`;
-}
 
 async function buildPlanSystemMessage(userData, workspacePath, plan, userPrompt) {
   const chunks = [
@@ -126,15 +97,17 @@ async function runPlanAgentLoop(ctx, plan) {
     userData,
     workspacePath,
     gateway,
-    plansStore,
     coreBridge,
     mcpRuntime,
     createToolBridge,
     compactionAgent,
     getTokenBudget,
     webContents,
+    signal,
+    onPlanPhase,
     log
   } = ctx;
+  const emitPhase = typeof onPlanPhase === 'function' ? onPlanPhase : () => {};
 
   if (!plan || !plan.prompt) throw new Error('计划缺少 prompt');
   if (!gateway || typeof gateway.invokeRpc !== 'function') {
@@ -144,32 +117,49 @@ async function runPlanAgentLoop(ctx, plan) {
     throw new Error('Agent 需要 dieyun-core 就绪（请运行 npm run pack:dieyun-core 并重启）');
   }
 
+  // 定时执行没有 Renderer 会话：只能按计划自己记住的路由解析模型配置。
+  // strict=true —— 路由失效（模型/供应商被删）明确报错，绝不静默换到别的 key 上跑。
   const settings = loadModelSettings(userData);
-  if (!settings.apiKey) throw new Error('未配置 API Key');
+  const llm = resolveTextApiConfig(settings, {
+    route: plan.modelRoute,
+    model: plan.model,
+    strict: true
+  });
+  if (!llm.apiKey || !llm.baseUrl) {
+    throw new Error(
+      plan.modelRoute
+        ? `计划绑定的模型不可用（${plan.modelRoute}），请在「模型设置」检查该模型/供应商是否仍启用`
+        : '未配置 API Key，请在模型设置中填写'
+    );
+  }
+  const llmModel = llm.model || settings.textModel || '';
+  if (!llmModel) {
+    // 别再让下层报 “model 必填”：这里是最清楚上下文的一层
+    throw new Error(
+      '计划未绑定模型，且没有可用的默认模型：请在「定时任务 → 编辑」里选择模型，或在「模型设置」中启用一个供应商模型'
+    );
+  }
 
-  const { plan: boundPlan, sessionId } = await ensurePlanSession(gateway, plansStore, plan);
-  const userPrompt = buildPlanUserPrompt(boundPlan);
+  // 本次运行的会话与用户轮次已由 Main 在运行边界准备好（plan-run-turn#beginPlanRunTurn）：
+  // 这里只消费 ctx.sessionId / ctx.planUserPrompt，不再自己绑会话、写会话（唯一实现）。
+  const sessionId = String(ctx.sessionId || '');
+  if (!sessionId) {
+    throw new Error('计划会话未就绪：Main 未能在运行前准备计划专用会话');
+  }
+  const boundPlan = plan;
+  const userPrompt = String(ctx.planUserPrompt || '') || buildPlanRunUserText(boundPlan);
   const sysContent = await buildPlanSystemMessage(userData, workspacePath, boundPlan, userPrompt);
-
-  await gateway.invokeRpc('memory.message_append', {
-    sessionId,
-    role: 'user',
-    content: userPrompt
-  });
-  await gateway.invokeRpc('memory.touch_session', {
-    sessionId,
-    title: `[计划] ${boundPlan.name}`
-  });
 
   const history = await loadSessionMessages(gateway, sessionId, 120);
   const messages = buildPlanCompletionMessages(history, sysContent);
   const tools = await buildPlanAgentTools(mcpRuntime);
   const toolBridge = createToolBridge(webContents || null);
   const tokenBudget =
-    typeof getTokenBudget === 'function' ? getTokenBudget(settings.textModel) : 96000;
-  const apiCfg = { baseUrl: settings.baseUrl, apiKey: settings.apiKey };
+    typeof getTokenBudget === 'function' ? getTokenBudget(llmModel) : 96000;
+  const apiCfg = { baseUrl: llm.baseUrl, apiKey: llm.apiKey };
 
-  let loopResult;
+  let loopResult = null;
+  let aborted = false;
   try {
     loopResult = await runRustAgentLoop({
       coreBridge,
@@ -177,8 +167,10 @@ async function runPlanAgentLoop(ctx, plan) {
       settings,
       userData,
       useStream: true,
+      signal: signal || null,
+      onPhase: (name, data) => emitPhase(name, data),
       startParams: {
-        model: settings.textModel,
+        model: llmModel,
         messages,
         tools,
         maxToolCalls: resolveLoopToolCallLimit(settings, userData),
@@ -186,12 +178,13 @@ async function runPlanAgentLoop(ctx, plan) {
         workspaceRoot: workspacePath || undefined
       },
       compactMessages: compactionAgent
-        ? async (msgs) => {
+        ? async (msgs, ctx) => {
             const cr = await compactionAgent.maybeCompactMessages(msgs, {
               tokenBudget,
-              apiConfig: { ...apiCfg, model: settings.textModel },
-              model: settings.textModel,
-              sessionId
+              apiConfig: { ...apiCfg, model: llmModel },
+              model: llmModel,
+              sessionId,
+              toolsChars: ctx?.toolsChars
             });
             if (cr && cr.compacted) {
               gateway
@@ -212,48 +205,51 @@ async function runPlanAgentLoop(ctx, plan) {
         toolBridge.executeAgentTool(name, args, {
           workspacePath: workspacePath || undefined,
           sessionId,
-          model: settings.textModel
+          model: llmModel,
+          modelRoute: boundPlan.modelRoute || undefined
         })
     });
+  } catch (err) {
+    if (!isAbortError(err)) throw err;
+    aborted = true;
   } finally {
     clearToolHarnessSessionsForSession(sessionId);
+  }
+
+  if (aborted) {
+    // 用户从 UI 停止：assistant 轮次（「（计划已停止）」）由 Main 统一落库
+    return {
+      ok: false,
+      aborted: true,
+      error: '已停止',
+      summary: '已停止',
+      sessionId,
+      content: '',
+      trace: [],
+      modelLabel: llmModel || 'Auto',
+      modelId: llmModel
+    };
   }
 
   const reply = String(loopResult?.content || '').trim() || '（计划执行完成，无文本摘要）';
   const trace = Array.isArray(loopResult?.trace) ? loopResult.trace : [];
   appendPlanLog(userData, boundPlan, reply);
 
-  const assistantMeta = {
-    modeLabel: PLAN_MODE_LABEL,
-    modelLabel: settings.textModel || 'Auto',
-    modelId: settings.textModel || '',
-    ts: Date.now(),
-    planId: boundPlan.id
-  };
-  const persisted = packAssistantMeta(reply, assistantMeta);
-  await gateway.invokeRpc('memory.message_append', {
-    sessionId,
-    role: 'assistant',
-    content: persisted
-  });
-  await gateway.invokeRpc('memory.touch_session', {
-    sessionId,
-    title: `[计划] ${boundPlan.name}`
-  });
-
   const traceNote = summarizeTrace(trace);
   const summary = traceNote ? `${reply.slice(0, 6000)}\n\n---\n${traceNote}` : reply.slice(0, 8000);
 
   if (log) log(`计划 Agent 完成: ${boundPlan.name} · session ${sessionId}`);
 
+  // 只回结果：assistant 轮次由 Main 在运行边界统一落库（plan-run-turn#endPlanRunTurn）
   return {
     ok: true,
     summary,
     sessionId,
     content: reply,
     trace,
-    persisted: true
+    modelLabel: llmModel,
+    modelId: llmModel
   };
 }
 
-module.exports = { runPlanAgentLoop, ensurePlanSession, buildPlanUserPrompt };
+module.exports = { runPlanAgentLoop };

@@ -1,7 +1,15 @@
 'use strict';
 
+const { buildPlanRunUserText, endPlanRunTurn } = require('./plan-run-turn');
+
 /**
- * 将计划执行结果投递到目标叠云对话会话。
+ * 计划结果投递（降级兜底）。
+ *
+ * 正常路径下这次运行的会话轮次已经由 Main 在运行边界写完了
+ * （`plan-run-turn#beginPlanRunTurn` / `endPlanRunTurn`，result.sessionId 有值），
+ * 不会走到这里。只有「运行开始时没能准备会话」才由本函数补投，
+ * 避免用户在计划会话里完全看不到这次运行。
+ *
  * @returns {Promise<string|null>} sessionId
  */
 async function deliverPlanResult(gateway, plan, result) {
@@ -9,29 +17,13 @@ async function deliverPlanResult(gateway, plan, result) {
   const sessionId = plan.deliver && plan.deliver.sessionId ? String(plan.deliver.sessionId) : '';
   if (!sessionId) return null;
 
-  const when = new Date().toLocaleString('zh-CN');
-  const userLine = `[计划 · ${plan.name}]\n${when} · 定时触发`;
-  let assistantLine;
-  if (result && result.ok) {
-    assistantLine = String(result.summary || '执行完成').trim() || '执行完成';
-  } else {
-    assistantLine = `执行失败：${(result && result.error) || '未知错误'}`;
-  }
-
+  // 与运行边界完全同一份文案与 meta（不再各写一套）
   await gateway.invokeRpc('memory.message_append', {
     sessionId,
     role: 'user',
-    content: userLine
+    content: buildPlanRunUserText(plan)
   });
-  await gateway.invokeRpc('memory.message_append', {
-    sessionId,
-    role: 'assistant',
-    content: assistantLine
-  });
-  await gateway.invokeRpc('memory.touch_session', {
-    sessionId,
-    title: `[计划] ${plan.name}`
-  });
+  await endPlanRunTurn(gateway, sessionId, plan, result);
   return sessionId;
 }
 

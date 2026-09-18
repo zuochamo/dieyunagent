@@ -9,6 +9,8 @@
  *   ensurePlanSession: Function,
  *   parsePlanFromText: Function,
  *   finishPlanRun: (plan: object, result: object) => Promise<void>,
+ *   listRunningPlans: () => Array<{ planId: string, runId: string, sessionId: string, startedAt: number }>,
+ *   cancelPlanRun: (planId: string) => { ok: boolean, error?: string },
  *   log: { warn: (msg: string, ...args: unknown[]) => void }
  * }} ctx
  */
@@ -22,13 +24,33 @@ function registerPlansIpc(ctx) {
     ensurePlanSession,
     parsePlanFromText,
     finishPlanRun,
+    listRunningPlans,
+    cancelPlanRun,
     log
   } = ctx;
 
-  ipcMain.handle('plans:list', () => {
+  /**
+   * 计划列表 + 运行态合并：`running` 是「本进程内正在跑」的内存事实。
+   * 落盘的 `runState` 只服务崩溃恢复（见 `recoverInterruptedRuns`），不代表此刻在运行，
+   * 所以不能拿来当 `running` 用，只在这里合。
+   * @returns {object[]}
+   */
+  function listPlansWithRuntime() {
     const plansStore = getPlansStore();
-    return plansStore ? plansStore.list() : [];
-  });
+    const plans = plansStore ? plansStore.list() : [];
+    const running = new Map(
+      (typeof listRunningPlans === 'function' ? listRunningPlans() : []).map((r) => [r.planId, r])
+    );
+    if (!running.size) return plans;
+    return plans.map((p) => {
+      const live = running.get(p.id);
+      return live
+        ? { ...p, running: true, runId: live.runId, runningSessionId: live.sessionId, runningSince: live.startedAt }
+        : p;
+    });
+  }
+
+  ipcMain.handle('plans:list', () => listPlansWithRuntime());
 
   ipcMain.handle('plans:save', async (_evt, plan) => {
     const plansStore = getPlansStore();
@@ -75,6 +97,11 @@ function registerPlansIpc(ctx) {
     return result;
   });
 
+  ipcMain.handle('plans:cancel', (_evt, planId) => {
+    if (typeof cancelPlanRun !== 'function') return { ok: false, error: '计划调度未就绪' };
+    return cancelPlanRun(String(planId || ''));
+  });
+
   ipcMain.handle('plans:create-from-text', async (_evt, payload) => {
     const plansStore = getPlansStore();
     const localGateway = getLocalGateway();
@@ -83,9 +110,16 @@ function registerPlansIpc(ctx) {
     const text = payload && payload.text != null ? String(payload.text) : '';
     if (!text.trim()) throw new Error('请提供计划描述');
     const plan = await parsePlanFromText(getUserDataPath(), text, {
-      skillIds: payload && payload.skillIds ? payload.skillIds : []
+      skillIds: payload && payload.skillIds ? payload.skillIds : [],
+      structured: payload && payload.structured ? payload.structured : undefined,
+      route: payload && payload.modelRoute ? payload.modelRoute : undefined,
+      model: payload && payload.model ? payload.model : undefined
     });
-    let saved = plansStore.upsert(plan);
+    let saved = plansStore.upsert({
+      ...plan,
+      modelRoute: (payload && payload.modelRoute) || plan.modelRoute || '',
+      model: (payload && payload.model) || plan.model || ''
+    });
     if (localGateway) {
       saved = (await ensurePlanSession(localGateway, plansStore, saved)).plan;
     }

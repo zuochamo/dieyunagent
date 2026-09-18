@@ -29,15 +29,60 @@ function extractJson(text) {
 }
 
 /**
+ * 结构化直通：调用方（模型）已直接给出 rrule / onceAt 时，
+ * 不再花一次 LLM 调用去「解析自然语言」——纯确定性落盘，可复现、可 trace。
+ *
+ * @returns {object | null} null 表示无法结构化确定，交由 LLM 解析兜底
+ */
+function planDraftFromStructured(input, opts = {}) {
+  const src = input && typeof input === 'object' ? input : {};
+  const rrule = String(src.rrule || '').trim();
+  const onceAt = String(src.onceAt || '').trim();
+  const prompt = String(src.prompt || src.description || '').trim();
+  if ((!rrule && !onceAt) || !prompt) return null;
+
+  const skillIds = Array.isArray(src.skillIds) && src.skillIds.length
+    ? src.skillIds
+    : Array.isArray(opts.skillIds)
+      ? opts.skillIds
+      : [];
+
+  return normalizePlan({
+    id: newId(),
+    name: src.name,
+    rrule: onceAt ? '' : rrule,
+    onceAt,
+    tz: 'Asia/Shanghai',
+    dtstart: new Date().toISOString(),
+    prompt,
+    todos: Array.isArray(src.todos) ? src.todos : [],
+    skillIds,
+    deliver: {
+      type: 'session',
+      sessionId: opts.sessionId || ''
+    },
+    enabled: true
+  });
+}
+
+/**
  * @param {string} userData
  * @param {string} text
- * @param {{ sessionId?: string, skillIds?: string[] }} [opts]
+ * @param {{ sessionId?: string, skillIds?: string[], structured?: object, route?: string, model?: string, signal?: object }} [opts]
  */
 async function parsePlanFromText(userData, text, opts = {}) {
+  const structured = planDraftFromStructured(opts.structured, opts);
+  if (structured) return structured;
+
   const raw = await chatCompletion(
     userData,
     String(text || '').trim(),
-    PARSE_SYSTEM
+    PARSE_SYSTEM,
+    {
+      route: opts.route,
+      model: opts.model,
+      signal: opts.signal
+    }
   );
   const parsed = extractJson(raw);
   const plan = normalizePlan({
@@ -59,4 +104,4 @@ async function parsePlanFromText(userData, text, opts = {}) {
   return plan;
 }
 
-module.exports = { parsePlanFromText, PARSE_SYSTEM };
+module.exports = { parsePlanFromText, planDraftFromStructured, PARSE_SYSTEM };
