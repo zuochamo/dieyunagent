@@ -3,14 +3,26 @@
 /**
  * @param {import('../context').MainIpcContext & {
  *   loadDieyunInstructions: () => unknown,
- *   openDieyunMdInEditor: () => unknown
+ *   openDieyunMdInEditor: () => unknown,
+ *   formatDieyunBlock: (opts: object) => string
  * }} ctx
  */
 function registerAgentsMdIpc(ctx) {
-  const { ipcMain, loadDieyunInstructions, openDieyunMdInEditor } = ctx;
+  const { ipcMain, loadDieyunInstructions, openDieyunMdInEditor, formatDieyunBlock } = ctx;
 
   ipcMain.handle('workspace:get-dieyun-md', () => loadDieyunInstructions());
   ipcMain.handle('workspace:open-dieyun-md', () => openDieyunMdInEditor());
+  // Renderer 侧按相关性裁好内容后回传，由这里统一套 header/前言（文案单一来源）
+  ipcMain.handle('workspace:format-dieyun-md', (_evt, payload) => {
+    if (typeof formatDieyunBlock !== 'function') return '';
+    const p = payload && typeof payload === 'object' ? payload : {};
+    return formatDieyunBlock({
+      content: p.content,
+      filePath: p.filePath,
+      modeHint: p.modeHint,
+      maxChars: p.maxChars
+    });
+  });
 
   ipcMain.handle('embedding:test-builtin', async () => {
     try {

@@ -198,6 +198,9 @@ function registerAgentRuntimeIpc(ctx) {
         (payload.startParams && payload.startParams.longHorizon)
       ),
       runId: undefined,
+      // 本次运行实际使用的模型路由（Renderer 传入）：
+      // plan_create 等 Main 侧要自己调模型的地方据此解析配置，勿只看顶层 settings.apiKey
+      modelRoute: payload.modelRoute || undefined,
       browserVision: payload.browserVision === true
     };
     const { resolveContextTierIdForNode } = require('../../agent/agent-limits');
@@ -286,7 +289,8 @@ function registerAgentRuntimeIpc(ctx) {
             sessionId: payload.sessionId || null,
             signal: ctx?.signal || abortController.signal,
             runId: ctx?.runId || entry.runId || undefined,
-            force: !!ctx?.force
+            force: !!ctx?.force,
+            toolsChars: ctx?.toolsChars
           });
           if (cr.compacted && payload.sessionId && live.localGateway) {
             live.localGateway

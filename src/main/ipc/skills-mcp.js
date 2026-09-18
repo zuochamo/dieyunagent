@@ -11,10 +11,9 @@ const { isMcpServerConfigured } = require('../../mcp/server-config');
 const {
   createUserSkill,
   describeAgentHome,
-  dieyunHome,
-  dieyunSkillsDir,
   getScanRoots,
-  filterAccessibleSkillRoots
+  filterAccessibleSkillRoots,
+  evaluateSkillDeletable
 } = require('../../agent-home');
 
 /**
@@ -305,22 +304,25 @@ function registerSkillsMcpIpc(ctx) {
   ipcMain.handle('skills:delete', async (_evt, payload) => {
     const dir = payload && payload.dir;
     if (!dir || typeof dir !== 'string') throw new Error('dir 必填');
+    const localGateway = getLocalGateway();
+    const userData = getUserDataPath();
+    const workspacePath = localGateway ? localGateway.getWorkspace().workspacePath : null;
+    // 删除作用域 == 扫描作用域（~/.dieyun/skills、userData/skills/user、<workspace>/.dieyun/skills）
+    const roots = filterAccessibleSkillRoots(
+      getScanRoots(userData, workspacePath).map((r) => path.resolve(r))
+    );
+    const verdict = evaluateSkillDeletable(dir, roots);
+    if (!verdict.deletable) {
+      if (verdict.reason === 'ROOT_DIR') throw new Error('不能删除技能根目录');
+      if (verdict.reason === 'SEEDED') throw new Error('预装内置技能不可删除');
+      throw new Error('仅可删除当前扫描范围内的技能目录');
+    }
     const resolved = path.resolve(dir);
-    const home = path.resolve(dieyunHome());
-    const skillsRoot = path.resolve(dieyunSkillsDir());
-    if (!resolved.startsWith(home + path.sep) && resolved !== home) {
-      throw new Error('仅可删除 .dieyun 目录内的技能');
-    }
-    if (resolved === skillsRoot || resolved === home) {
-      throw new Error('不能删除技能根目录');
-    }
-    const rel = path.relative(skillsRoot, resolved).replace(/\\/g, '/');
-    if (!rel.startsWith('..')) {
-      const top = rel.split('/').filter(Boolean)[0];
-      const seededCategories = new Set(['minimax', 'curated', 'dieyun', 'weather']);
-      if (seededCategories.has(top)) {
-        throw new Error('预装内置技能不可删除');
-      }
+    // 加固：只删真正的技能目录，避免伪造 dir 误删根内其它目录
+    try {
+      await fsp.access(path.join(resolved, 'SKILL.md'));
+    } catch {
+      throw new Error('目标目录不是技能目录（缺少 SKILL.md）');
     }
     await fsp.rm(resolved, { recursive: true, force: true });
     return { ok: true };

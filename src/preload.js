@@ -101,6 +101,7 @@ contextBridge.exposeInMainWorld('diecloud', {
   },
   getDieyunMd: () => ipcRenderer.invoke('workspace:get-dieyun-md'),
   openDieyunMd: () => ipcRenderer.invoke('workspace:open-dieyun-md'),
+  formatDieyunMdBlock: (payload) => ipcRenderer.invoke('workspace:format-dieyun-md', payload || {}),
 
   getAgentsMdTemplate: () => ipcRenderer.invoke('agents-md:get-template'),
   getAgentsMdPrefs: () => ipcRenderer.invoke('agents-md:get-prefs'),
@@ -346,11 +347,24 @@ contextBridge.exposeInMainWorld('diecloud', {
   plansSave: (plan) => ipcRenderer.invoke('plans:save', plan),
   plansDelete: (id) => ipcRenderer.invoke('plans:delete', id),
   plansRunNow: (id) => ipcRenderer.invoke('plans:run-now', id),
+  plansCancel: (id) => ipcRenderer.invoke('plans:cancel', id),
   plansCreateFromText: (payload) => ipcRenderer.invoke('plans:create-from-text', payload),
   onPlanRan: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('plans:ran', handler);
     return () => ipcRenderer.removeListener('plans:ran', handler);
+  },
+  /** 计划运行中的实时事件（AgentRunEvent：run_start / trace / done / error / stopped） */
+  onPlanPhase: (cb) => {
+    const handler = (_e, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on('plans:phase', handler);
+    return () => ipcRenderer.removeListener('plans:phase', handler);
   },
 
   agentRunStart: (meta) => ipcRenderer.invoke('agent:run-start', meta),

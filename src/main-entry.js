@@ -35,7 +35,12 @@ const logsSources = require('./logs-sources');
 const { createGatewayFileLogger } = require('./gateway-file-log');
 const { ensurePlanSession } = require('./plans/plan-session');
 const { parsePlanFromText } = require('./plans/parser');
-const { ensureDieyunMdInHome, loadDieyunInstructions, openDieyunMdInEditor } = require('./dieyun-instructions');
+const {
+  ensureDieyunMdInHome,
+  loadDieyunInstructions,
+  openDieyunMdInEditor,
+  formatDieyunBlock
+} = require('./dieyun-instructions');
 const { fetchOpenAiModelList } = require('./openai-models');
 const { createMcpStore } = require('./mcp/store');
 const {
@@ -284,7 +289,8 @@ const earlyIpcCtx = {
   dialog,
   getDeployUiDefaults,
   loadDieyunInstructions,
-  openDieyunMdInEditor
+  openDieyunMdInEditor,
+  formatDieyunBlock
 };
 registerEarlyMainIpc(earlyIpcCtx);
 
@@ -620,6 +626,8 @@ app.whenReady().then(async () => {
   plansStore = plansBoot.plansStore;
   plansScheduler = plansBoot.plansScheduler;
   const finishPlanRun = plansBoot.finishPlanRun;
+  const listRunningPlans = plansBoot.listRunningPlans;
+  const cancelPlanRun = plansBoot.cancelPlanRun;
 
   registerMainIpc({
     ipcMain,
@@ -646,6 +654,8 @@ app.whenReady().then(async () => {
     ensurePlanSession,
     parsePlanFromText,
     finishPlanRun,
+    listRunningPlans,
+    cancelPlanRun,
     getAutoLaunchState: () => autoLaunch.getAutoLaunchState(),
     setAutoLaunchEnabled: (enabled, opts) => autoLaunch.setAutoLaunchEnabled(enabled, opts),
     getPendingUpdateInfo: () => appUpdater.getPendingUpdateInfo(),
