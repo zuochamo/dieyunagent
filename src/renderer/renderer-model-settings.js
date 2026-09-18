@@ -1,4 +1,4 @@
-/* global window, document, $, fetch, escapeHtml, openModelSettingsModal, renderComposerModelLists, renderSuppliersList, updateComposerModelTriggerLabel, refreshContextProgress, resetCompactionInstances, refreshComposerBuiltinModels, clearBuiltinModelsCache, migrateLegacyBuiltinEnabledToSuppliers, showAgentToast */
+/* global window, document, $, fetch, escapeHtml, openModelSettingsModal, renderComposerModelLists, renderSuppliersList, updateComposerModelTriggerLabel, refreshContextProgress, resetCompactionInstances, refreshComposerBuiltinModels, clearBuiltinModelsCache, migrateLegacyBuiltinEnabledToSuppliers, showAgentToast, mountSelectMenu, ensureSelectMenu */
 'use strict';
 
 function applyModelRuntimePreset(presetId) {
@@ -97,31 +97,37 @@ var supplierEditorModelModalities = {};
 var supplierEditorContextTier = 'default';
 var supplierEditorContextTierByModel = {};
 
-function populateContextTierSelect(selectEl, value, { includeInherit = false, includeAutoInfer = false } = {}) {
-  if (!selectEl) return;
-  selectEl.innerHTML = '';
-  if (includeAutoInfer) {
-    const autoOpt = document.createElement('option');
-    autoOpt.value = '';
-    autoOpt.textContent = '自动推断（按模型名）';
-    selectEl.appendChild(autoOpt);
-  }
-  if (includeInherit) {
-    const inheritOpt = document.createElement('option');
-    inheritOpt.value = '';
-    inheritOpt.textContent = '继承供应商默认';
-    selectEl.appendChild(inheritOpt);
-  }
+/** Context 档位下拉的选项：档位集合是运行时配置（window.MODEL_RUNTIME_PRESETS），故由 JS 生成。 */
+function populateContextTierMenu(menu, value, { includeInherit = false, includeAutoInfer = false } = {}) {
+  if (!menu) return;
+  const items = [];
+  if (includeAutoInfer) items.push({ key: '', label: '自动推断（按模型名）' });
+  if (includeInherit) items.push({ key: '', label: '继承供应商默认' });
   const presets =
     typeof window !== 'undefined' && window.MODEL_RUNTIME_PRESETS ? window.MODEL_RUNTIME_PRESETS : [];
   for (const preset of presets) {
-    const opt = document.createElement('option');
-    opt.value = preset.id;
-    opt.textContent = preset.label;
-    if (preset.hint) opt.title = preset.hint;
-    selectEl.appendChild(opt);
+    items.push({ key: preset.id, label: preset.label, title: preset.hint || '' });
   }
-  selectEl.value = value || (includeInherit || includeAutoInfer ? '' : 'default');
+  menu.setOptions(items);
+  // 与原生 <select> 一致：值不在选项里（档位已下架等）时归零到「自动/继承」项
+  const wanted = value || (includeInherit || includeAutoInfer ? '' : 'default');
+  const known = items.some((it) => it.key === wanted);
+  menu.setValue(known ? wanted : '');
+}
+
+let supplierEditorContextTierMenu = null;
+let definedModelEditorContextTierMenu = null;
+
+function ensureSupplierEditorContextTierMenu() {
+  if (supplierEditorContextTierMenu) return supplierEditorContextTierMenu;
+  supplierEditorContextTierMenu = ensureSelectMenu('supplier-editor-context-tier');
+  return supplierEditorContextTierMenu;
+}
+
+function ensureDefinedModelEditorContextTierMenu() {
+  if (definedModelEditorContextTierMenu) return definedModelEditorContextTierMenu;
+  definedModelEditorContextTierMenu = ensureSelectMenu('defined-model-editor-context-tier');
+  return definedModelEditorContextTierMenu;
 }
 
 function formatContextTierLabel(tierId) {
@@ -369,15 +375,16 @@ function renderSupplierEditorModelList() {
     name.className = 'supplier-editor-model-name';
     name.textContent = modelId;
     const modality = renderSupplierModelModalityTags(modelId);
-    const tierSelect = document.createElement('select');
-    tierSelect.className = 'context-tier-select supplier-model-tier-select';
-    tierSelect.title = 'Context 档位';
-    populateContextTierSelect(tierSelect, getSupplierEditorModelContextTier(modelId), {
-      includeInherit: true
+    // 每行一个档位下拉：wrap 动态创建，实例随行一起被移除后自动回收
+    const tierWrap = document.createElement('div');
+    tierWrap.className = 'context-tier-select supplier-model-tier-select';
+    const tierMenu = mountSelectMenu({
+      wrap: tierWrap,
+      title: 'Context 档位',
+      ariaLabel: `Context 档位：${modelId}`,
+      onPick: (tierId) => setSupplierEditorModelContextTier(modelId, tierId)
     });
-    tierSelect.addEventListener('change', () => {
-      setSupplierEditorModelContextTier(modelId, tierSelect.value);
-    });
+    populateContextTierMenu(tierMenu, getSupplierEditorModelContextTier(modelId), { includeInherit: true });
     const label = document.createElement('label');
     label.className = 'toggle-switch';
     label.title = on ? '已启用' : '已关闭';
@@ -395,7 +402,7 @@ function renderSupplierEditorModelList() {
     label.appendChild(track);
     row.appendChild(name);
     row.appendChild(modality);
-    row.appendChild(tierSelect);
+    row.appendChild(tierWrap);
     row.appendChild(label);
     list.appendChild(row);
   }
@@ -489,7 +496,7 @@ function openSupplierEditor(id) {
   supplierEditorModelModalities = { ...(supplier.modelModalities || {}) };
   supplierEditorContextTier = normalizeContextTierId(supplier.contextTier);
   supplierEditorContextTierByModel = { ...(supplier.contextTierByModel || {}) };
-  populateContextTierSelect($('supplier-editor-context-tier'), supplierEditorContextTier);
+  populateContextTierMenu(ensureSupplierEditorContextTierMenu(), supplierEditorContextTier);
   const savedIds = Object.keys(supplierEditorEnabledModels);
   supplierEditorModels = savedIds.map((modelId) => ({ id: modelId }));
   setSupplierEditorDetectStatus(
@@ -515,8 +522,9 @@ function closeSupplierEditor() {
 function saveSupplierFromEditor() {
   const { name, baseUrl, apiKey } = collectSupplierEditorConfig();
   if (!baseUrl) return;
-  const tierSelect = $('supplier-editor-context-tier');
-  const contextTier = normalizeContextTierId(tierSelect?.value || supplierEditorContextTier);
+  const contextTier = normalizeContextTierId(
+    ensureSupplierEditorContextTierMenu()?.getValue() || supplierEditorContextTier
+  );
   const enabledModels = {};
   const modelModalities = {};
   const contextTierByModel = {};
@@ -611,7 +619,7 @@ function openDefinedModelEditor(id) {
   $('defined-model-editor-api-key').value = model.apiKey || '';
   const windowInput = $('defined-model-editor-context-window');
   if (windowInput) windowInput.value = model.contextWindow ? String(model.contextWindow) : '';
-  populateContextTierSelect($('defined-model-editor-context-tier'), model.contextTier || '', {
+  populateContextTierMenu(ensureDefinedModelEditorContextTierMenu(), model.contextTier || '', {
     includeAutoInfer: true
   });
   const modalitySetting =
@@ -640,8 +648,7 @@ function resolveChatCompletionsEndpointForTest(baseUrl) {
 }
 
 function collectDefinedModelEditorConfig() {
-  const tierSelect = $('defined-model-editor-context-tier');
-  const contextTier = String(tierSelect?.value || '').trim();
+  const contextTier = String(ensureDefinedModelEditorContextTierMenu()?.getValue() || '').trim();
   return {
     name: $('defined-model-editor-name').value.trim(),
     baseUrl: $('defined-model-editor-base-url').value.trim(),

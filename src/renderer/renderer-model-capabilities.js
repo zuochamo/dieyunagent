@@ -8,6 +8,32 @@
 
   const MODALITY_OPTIONS = ['text', 'vision', 'speech'];
 
+  /**
+   * 「供应商 / 自定义模型 → { baseUrl, apiKey }」的单一来源是
+   * src/agent/model-api-config.js（经 dist/agent-bundle.js 在 index.html 中先于本文件加载）。
+   * 本文件只负责 modality 维度的「挑哪个」，不再自己实现取字段/裁剪规则。
+   */
+  function sharedModelApiConfig() {
+    return (typeof window !== 'undefined' && window.DieyunModelApiConfig) || null;
+  }
+
+  function apiConfigOf(baseUrl, apiKey) {
+    const shared = sharedModelApiConfig();
+    if (shared && typeof shared.asConfig === 'function') {
+      const cfg = shared.asConfig(baseUrl, apiKey);
+      return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
+    }
+    return { baseUrl: String(baseUrl || '').trim(), apiKey: String(apiKey || '').trim() };
+  }
+
+  function supplierApiConfig(supplier) {
+    return apiConfigOf(supplier && supplier.baseUrl, supplier && supplier.apiKey);
+  }
+
+  function customModelApiConfig(model) {
+    return apiConfigOf(model && model.baseUrl, model && model.apiKey);
+  }
+
   function normalizeModalitySetting(value, kind) {
     if (value === 'vision' || value === 'text' || value === 'speech') return value;
     if (kind === 'vision') return 'vision';
@@ -83,10 +109,7 @@
           model: modelId,
           supplierId: supplier.id,
           route: `builtin:${supplier.id}:${modelId}`,
-          apiConfig: {
-            baseUrl: String(supplier.baseUrl || '').trim(),
-            apiKey: String(supplier.apiKey || '').trim()
-          }
+          apiConfig: supplierApiConfig(supplier)
         };
       }
     }
@@ -103,10 +126,7 @@
         model: String(customVision.name).trim(),
         route: `custom:${customVision.id}`,
         source: 'custom',
-        apiConfig: {
-          baseUrl: String(customVision.baseUrl || '').trim(),
-          apiKey: String(customVision.apiKey || '').trim()
-        }
+        apiConfig: customModelApiConfig(customVision)
       };
     }
     const supplierHit = findSupplierModelByModality(s, 'vision');
@@ -124,10 +144,7 @@
         model: String(customSpeech.name).trim(),
         route: `custom:${customSpeech.id}`,
         source: 'custom',
-        apiConfig: {
-          baseUrl: String(customSpeech.baseUrl || '').trim(),
-          apiKey: String(customSpeech.apiKey || '').trim()
-        }
+        apiConfig: customModelApiConfig(customSpeech)
       };
     }
     const supplierHit = findSupplierModelByModality(s, 'speech');

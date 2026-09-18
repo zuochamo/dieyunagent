@@ -51,7 +51,9 @@ var DEFAULTS = {
   visionApiKey: '',
   builtinBaseUrl: DEFAULT_BUILTIN_BASE_URL,
   builtinApiKey: DEFAULT_BUILTIN_API_KEY,
-  system: '你是叠云编程助手，优先给出可运行、可验证的代码与具体修改步骤；不确定时先读文件再动手。',
+  // 身份/人设的唯一来源是 ~/.dieyun/dieyun.md（模板 assets/dieyun.md）与
+  // dieyun-instructions.js 的 ASSISTANT_IDENTITY；这里不再放一份内置人设。
+  system: '',
   temperature: 0.3,
   maxTokens: 16384,
   maxOutputTokens: 16384,
@@ -296,7 +298,12 @@ function getCompactionTriggerRatio(s) {
 var STORAGE_KEY = 'diecloud.model.settings.v1';
 var LEGACY_RUNTIME_PRESETS = {
   temperature: [0.7],
-  compactionTriggerRatio: [0.75, 0.68]
+  compactionTriggerRatio: [0.75, 0.68],
+  // 旧版内置人设：身份已统一为「叠云 Agent（小芸）」（唯一来源 dieyun.md + ASSISTANT_IDENTITY）。
+  // 老装机 localStorage 里可能残留这串，迁移时清掉，避免与 dieyun.md 的人设冲突。
+  system: [
+    '你是叠云编程助手，优先给出可运行、可验证的代码与具体修改步骤；不确定时先读文件再动手。'
+  ]
 };
 
 function migrateLegacyRuntimeDefaults(raw, s) {
@@ -310,6 +317,11 @@ function migrateLegacyRuntimeDefaults(raw, s) {
   const ratio = Number(s.compactionTriggerRatio);
   if (LEGACY_RUNTIME_PRESETS.compactionTriggerRatio.some((v) => Math.abs(ratio - v) < 0.001)) {
     s.compactionTriggerRatio = DEFAULTS.compactionTriggerRatio;
+    changed = true;
+  }
+  const sys = String(s.system || '').trim();
+  if (sys && LEGACY_RUNTIME_PRESETS.system.some((v) => sys === v)) {
+    s.system = DEFAULTS.system;
     changed = true;
   }
   if (
@@ -692,18 +704,30 @@ function getVisionApiConfig(s) {
   return { baseUrl: '', apiKey: '', model: '' };
 }
 
-function getBuiltinApiConfig(supplierId) {
-  const supplier = supplierId ? getSupplierById(supplierId) : (settings.modelSuppliers || [])[0];
-  if (supplier) {
-    return {
-      baseUrl: String(supplier.baseUrl || '').trim(),
-      apiKey: String(supplier.apiKey || '').trim()
-    };
+/** 共享的「路由 → API 配置」单一来源（src/agent/model-api-config.js，经 dist/agent-bundle.js 提供）。 */
+function sharedModelApiConfig() {
+  return (typeof window !== 'undefined' && window.DieyunModelApiConfig) || null;
+}
+
+/** {baseUrl, apiKey} 的规范化（裁剪 + 取字段）只此一处，勿再内联。 */
+function apiConfigOf(baseUrl, apiKey) {
+  const shared = sharedModelApiConfig();
+  if (shared && typeof shared.asConfig === 'function') {
+    const cfg = shared.asConfig(baseUrl, apiKey);
+    return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
   }
-  return {
-    baseUrl: String(settings.builtinBaseUrl || '').trim(),
-    apiKey: String(settings.builtinApiKey || '').trim()
-  };
+  return { baseUrl: String(baseUrl || '').trim(), apiKey: String(apiKey || '').trim() };
+}
+
+function getBuiltinApiConfig(supplierId) {
+  const shared = sharedModelApiConfig();
+  if (shared && typeof shared.resolveSupplierApiConfig === 'function') {
+    const cfg = shared.resolveSupplierApiConfig(settings, supplierId);
+    return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
+  }
+  const supplier = supplierId ? getSupplierById(supplierId) : (settings.modelSuppliers || [])[0];
+  if (supplier) return apiConfigOf(supplier.baseUrl, supplier.apiKey);
+  return apiConfigOf(settings.builtinBaseUrl, settings.builtinApiKey);
 }
 
 function getSelectedCustomModel() {
@@ -718,30 +742,22 @@ function getCustomModelApiConfig(route) {
   const customRoute = routeText.match(/^(?:auto-)?custom:(.+)$/);
   if (customRoute) {
     const model = (settings.customModels || []).find((m) => m.id === customRoute[1]);
-    if (model) {
-      return {
-        baseUrl: model.baseUrl || '',
-        apiKey: model.apiKey || ''
-      };
-    }
+    if (model) return apiConfigOf(model.baseUrl, model.apiKey);
   }
   if (/^(?:auto-)?builtin(?::|$)/.test(routeText)) {
     return getBuiltinApiConfig();
   }
   const selected = getSelectedCustomModel();
   if (selected) {
-    return {
-      baseUrl: selected.baseUrl || settings.baseUrl || '',
-      apiKey: selected.apiKey || settings.apiKey || ''
-    };
+    return apiConfigOf(selected.baseUrl || settings.baseUrl, selected.apiKey || settings.apiKey);
   }
   if (route === 'custom-vision') {
-    return {
-      baseUrl: getVisionApiConfig().baseUrl || settings.baseUrl,
-      apiKey: getVisionApiConfig().apiKey || settings.apiKey
-    };
+    return apiConfigOf(
+      getVisionApiConfig().baseUrl || settings.baseUrl,
+      getVisionApiConfig().apiKey || settings.apiKey
+    );
   }
-  return { baseUrl: settings.baseUrl, apiKey: settings.apiKey };
+  return apiConfigOf(settings.baseUrl, settings.apiKey);
 }
 
 function refreshBuiltinModelsAfterSettingsChange() {

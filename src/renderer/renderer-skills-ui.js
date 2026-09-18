@@ -1,5 +1,22 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, openSettingsShell, switchSettingsPage, refreshAutomationList, showPluginListView, showMcpListView, loadPluginsUI, showAgentToast, getEffectiveInputBudget, CTX_LIMITS, updateSshPanelVisibility */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, openSettingsShell, switchSettingsPage, refreshAutomationList, showPluginListView, showMcpListView, loadPluginsUI, showAgentToast, getEffectiveInputBudget, CTX_LIMITS, updateSshPanelVisibility, ensureSelectMenu */
 'use strict';
+
+/** MCP 远程传输类型（取值与 Gateway 侧 transport 字段一致）。 */
+const MCP_REMOTE_TRANSPORT_OPTIONS = [
+  { key: 'streamable-http', label: 'Streamable HTTP' },
+  { key: 'sse', label: 'SSE' }
+];
+
+let mcpConfigTransportMenu = null;
+
+function ensureMcpConfigTransportMenu() {
+  if (mcpConfigTransportMenu) return mcpConfigTransportMenu;
+  mcpConfigTransportMenu = ensureSelectMenu('mcp-config-transport', {
+    options: MCP_REMOTE_TRANSPORT_OPTIONS,
+    value: 'streamable-http'
+  });
+  return mcpConfigTransportMenu;
+}
 
 function closeSkillDetail() {
   const overlay = $('skill-detail-overlay');
@@ -282,7 +299,7 @@ async function openMcpConfigDialog(server) {
         String(config.openApiService || config.bundledServer || ''));
   } else if (isRemote) {
     $('mcp-config-url') && ($('mcp-config-url').value = config.remoteUrl || '');
-    $('mcp-config-transport') && ($('mcp-config-transport').value = config.remoteTransport || 'streamable-http');
+    ensureMcpConfigTransportMenu()?.setValue(config.remoteTransport || 'streamable-http');
     $('mcp-config-auth-header') &&
       ($('mcp-config-auth-header').value = config.authHeaderName || 'Authorization');
     $('mcp-config-token') && ($('mcp-config-token').value = '');
@@ -343,7 +360,7 @@ async function submitMcpConfig(e) {
       payload.dieyunServiceKey = ($('mcp-config-simple-key')?.value || '').trim();
     } else if (config.transportKind === 'remote') {
       payload.remoteUrl = ($('mcp-config-url')?.value || '').trim();
-      payload.remoteTransport = $('mcp-config-transport')?.value || 'streamable-http';
+      payload.remoteTransport = ensureMcpConfigTransportMenu()?.getValue() || 'streamable-http';
       payload.authHeaderName = ($('mcp-config-auth-header')?.value || 'Authorization').trim();
       const token = $('mcp-config-token')?.value || '';
       if (token) payload.token = token;
@@ -667,112 +684,12 @@ async function renderMcpList() {
   }
 }
 
-function agentToolsIncludeCompactMcp(tools) {
-  if (!Array.isArray(tools) || !tools.length) return false;
-  return tools.some((t) => {
-    const name = t && t.function && t.function.name ? String(t.function.name) : '';
-    return name.startsWith('mcp_') && name !== 'mcp_tool_schema';
-  });
-}
-
-async function buildSkillsPrompt(userQuery = '') {
-  if (!(skillsCatalog.skills || []).length && skillsApi.scanSkills) {
-    try {
-      skillsCatalog = await skillsApi.scanSkills();
-      loadEnabledSkillIds();
-    } catch {
-      // ignore
-    }
-  }
-  const enabledMap = loadEnabledSkillIds();
-  const ids = (skillsCatalog.skills || [])
-    .filter((sk) => isSkillEnabled(enabledMap, sk.id))
-    .map((sk) => sk.id);
-  if (!ids.length) return '';
-  let selected = [];
-  let recallMeta = null;
-  let recallFailed = false;
-  const queryText = String(userQuery || '').trim();
-  if (skillsApi.recallSkills && queryText) {
-    try {
-      const recalled = await skillsApi.recallSkills({
-        query: queryText,
-        enabledIds: ids,
-        limit: SKILL_INJECT_TOTAL
-      });
-      recallMeta = recalled || null;
-      selected = Array.isArray(recalled?.skills) ? recalled.skills : [];
-    } catch {
-      recallFailed = true;
-      selected = [];
-    }
-  }
-  if (!selected.length && recallFailed) {
-    selected = ids.slice(0, SKILL_INJECT_TOTAL).map((id) => (skillsCatalog.skills || []).find((s) => s.id === id)).filter(Boolean);
-  }
-  if (!selected.length) return '';
-  const parts = [];
-  for (const item of selected.slice(0, SKILL_INJECT_TOTAL)) {
-    const id = item.id || item;
-    const fromCatalog = (skillsCatalog.skills || []).find((s) => s.id === id) || {};
-    const meta = { ...fromCatalog, ...item };
-    const skillPath =
-      meta.skillPath ||
-      (String(id).endsWith('SKILL.md') ? id : `${String(id).replace(/[/\\]$/, '')}/SKILL.md`);
-    const skillDir = meta.dir ? String(meta.dir) : '';
-    const scoreHint =
-      Number.isFinite(Number(meta.score)) && recallMeta
-        ? `> 召回分数：${Number(meta.score).toFixed(3)}${
-            Number.isFinite(Number(meta.semanticScore)) ? `，语义 ${Number(meta.semanticScore).toFixed(3)}` : ''
-          }\n`
-        : '';
-    const dirHint = skillDir ? `> 技能目录：${skillDir}\n> host_exec 时 cwd 设为该目录。\n` : '';
-    const desc = String(meta.description || '').trim().slice(0, 320);
-    parts.push(
-      `### 技能：${meta.name || id}\n${scoreHint}> SKILL.md：${skillPath}\n${dirHint}${
-        desc ? `${desc}\n` : ''
-      }（索引；全文用 fs_read_file 读 SKILL.md）`
-    );
-  }
-  if (!parts.length) return '';
-  const modeLabel =
-    recallMeta && recallMeta.mode === 'semantic'
-      ? `语义召回 · ${recallMeta.embeddingModel || '向量模型'}`
-      : recallMeta && recallMeta.mode === 'keyword'
-        ? '关键词召回'
-        : '已启用前置';
-  return (
-    `【相关技能 · 索引 · ${modeLabel}】\n` +
-    `执行前请 fs_read_file 读取 SKILL.md。\n\n${parts.join('\n\n---\n\n')}`
-  );
-}
-
-async function buildMcpPrompt(opts = {}) {
-  if (!skillsApi.listMcpServers) return '';
-  try {
-    const enabled = (await skillsApi.listMcpServers()).filter((server) => server.enabled);
-    if (!enabled.length) return '';
-    if (opts.compactToolsPresent) {
-      const names = enabled.map((s) => s.name || s.id).join('、');
-      return (
-        `【MCP · ${enabled.length} 个服务已启用】${names}\n` +
-        '工具已注册为 mcp_*，参数见各工具 schema。嵌套结构可再调 mcp_tool_schema。'
-      );
-    }
-    const lines = enabled.map((server) => {
-      const command = [server.command, ...(server.args || [])].filter(Boolean).join(' ');
-      const envLine = server.envHint ? `\n  环境变量：${server.envHint}` : '';
-      return `- ${server.name || server.id} (${server.id})：${server.description || ''}\n  启动命令：${command || '未配置'}${envLine}`;
-    });
-    return (
-      '【已启用 MCP 服务】\n' +
-      lines.join('\n') +
-      '\n说明：启用后叠云会 spawn MCP 子进程并将其工具注册到 Agent（以 mcp_ 开头）；首次连接可能需下载 npm 包。'
-    );
-  } catch {
-    return '';
-  }
-}
+/**
+ * 技能索引块 / MCP 块的唯一实现在 Main：`src/agent/system-prompt-prep.js`
+ * （`fetchSkillsBlock` / `formatMcpPromptBlock`，由 agentPrepSystemPrompt 组装）。
+ * Renderer 侧此前有两份逐字重复且**已无调用点**的实现（buildSkillsPrompt / buildMcpPrompt，
+ * 含辅助 agentToolsIncludeCompactMcp）—— 已删除，避免文案漂移。
+ */
 function updateWorkspaceLabel(ws) {
   const el = $('composer-workspace');
   if (typeof window !== 'undefined') {

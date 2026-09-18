@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, syncLiveWriteFromTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, syncLiveWriteFromTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText */
 'use strict';
 
 function patchThinkingTrace(
@@ -22,9 +22,9 @@ function patchThinkingTrace(
   const effectiveCollapseAll = collapseAll || false;
   const uiState = getThinkingUiState(stateHost || hostEl);
   const seen = new Set();
-  const answerPhase = resolveAnswerStreamPhase(trace, streaming, streamContent, uiState);
 
-  applyStreamingDetailsOpen(
+  bindThinkingOuterToggle(outer, uiState);
+  setDetailsOpen(
     outer,
     resolveThinkingOuterOpen({
       streaming,
@@ -32,12 +32,10 @@ function patchThinkingTrace(
       effectiveCollapseAll,
       trace,
       streamContent,
-      uiState,
-      answerPhase
+      uiState
     })
   );
-  bindThinkingOuterToggle(outer, uiState);
-  syncThinkingOuterSummary(outer, trace, { streaming, answerPhase, keepOpen });
+  syncThinkingOuterSummary(outer, trace, { streaming, keepOpen });
 
   if (typeof isPrepOnlyTrace === 'function' && isPrepOnlyTrace(trace)) {
     let panel = body.querySelector('.msg-thinking-prep');
@@ -114,21 +112,21 @@ function patchThinkingTrace(
 function patchStreamingTextOnly(div, trace, content) {
   const uiState = getThinkingUiState(div);
   const contentStr = String(content || '');
-  const answerPhase = resolveAnswerStreamPhase(trace, true, contentStr, uiState);
+  const answerPhase = traceAnswerPhase(trace);
   const outer = div.querySelector(':scope > .msg-thinking-outer');
 
   if (outer) {
-    syncThinkingOuterSummary(outer, trace, { streaming: true, answerPhase, keepOpen: false });
+    bindThinkingOuterToggle(outer, uiState);
+    syncThinkingOuterSummary(outer, trace, { streaming: true, keepOpen: false });
     const shouldOpen = resolveThinkingOuterOpen({
       streaming: true,
       keepOpen: false,
       effectiveCollapseAll: false,
       trace,
       streamContent: contentStr,
-      uiState,
-      answerPhase
+      uiState
     });
-    applyStreamingDetailsOpen(outer, shouldOpen);
+    setDetailsOpen(outer, shouldOpen);
   }
 
   if (!answerPhase && tracePrefs.showReasoning && trace.length) {
@@ -157,6 +155,8 @@ function patchStreamingTextOnly(div, trace, content) {
         if (thoughtEl) thoughtEl.remove();
       }
     }
+    // 结构签名不变时走的就是这条快路径：等待备注必须在这里同步，否则永不出现
+    if (typeof syncThinkingLiveNote === 'function') syncThinkingLiveNote(block, entry);
     const beat = wrap?.querySelector(':scope > .msg-thinking-beat');
     if (beat && typeof fillThinkingRoundBeat === 'function') {
       fillThinkingRoundBeat(beat, entry, lastIdx, trace, true, contentStr);
@@ -168,8 +168,7 @@ function patchStreamingTextOnly(div, trace, content) {
 
 function updateStreamingBubbleTail(div, content, hasTrace, trace) {
   if (!hasTrace) return;
-  const uiState = getThinkingUiState(div);
-  const answerPhase = resolveAnswerStreamPhase(trace, true, content, uiState);
+  const answerPhase = traceAnswerPhase(trace);
   const contentStr = String(content || '');
 
   let answerPending = div.querySelector(':scope > .msg-answer-pending');
@@ -195,6 +194,7 @@ function updateStreamingBubbleTail(div, content, hasTrace, trace) {
   div.querySelector(':scope > .msg-thinking-live')?.remove();
 }
 
+/** 整轮结束时强制归位：收回思考区并清掉用户覆盖，避免下次重绘又弹开 */
 function collapseChatThinkingTraces(opts = {}) {
   const keepLoading = opts.keepLoadingBubble !== false;
   const exceptBubble = opts.exceptBubble || null;
@@ -206,29 +206,16 @@ function collapseChatThinkingTraces(opts = {}) {
     if (exceptBubble && msg === exceptBubble) return;
     const isLoading = !!(msg && msg.classList.contains('loading'));
     if (isLoading && keepLoading) return;
+    // run 仍在执行（验收 / 续跑中）不强制收，交给真正结束时统一折叠
+    if (msg && typeof thinkingRunState === 'function' && thinkingRunState(msg)) return;
 
-    outer.open = false;
+    const uiState = msg ? getThinkingUiState(msg) : null;
+    if (uiState) uiState.userOpen = null;
+    setDetailsOpen(outer, false);
     outer.querySelectorAll('.msg-thinking-round-details').forEach((details) => {
-      details.open = false;
+      setDetailsOpen(details, false);
       details.classList.add('is-collapsed-auto');
     });
-  });
-}
-
-var lastTraceCollapseAtLen = 0;
-
-/** 推理轮次增多时不再中途折叠，等整轮回答结束再折叠 */
-function maybeAutoCollapseChatOnTraceGrowth() {
-  // intentionally no-op
-}
-
-function resetTraceAutoCollapseState() {
-  lastTraceCollapseAtLen = 0;
-  if (typeof resetChatStreamScrollBaseline === 'function') resetChatStreamScrollBaseline();
-  const chat = document.getElementById('chat-list');
-  if (!chat) return;
-  chat.querySelectorAll('.msg.loading').forEach((msg) => {
-    if (msg._thinkingUi) msg._thinkingUi.answerPhaseLatched = false;
   });
 }
 
@@ -249,24 +236,25 @@ function buildThinkingTraceElement(
   const autoCollapseDone = !streaming && !keepOpen;
   const effectiveCollapseAll = collapseAll || autoCollapseDone;
   const uiState = getThinkingUiState(stateHost);
-  const answerPhase = resolveAnswerStreamPhase(trace, streaming, streamContent, uiState);
 
   const root = document.createElement('details');
   root.className = 'msg-thinking-outer';
-  root.open = resolveThinkingOuterOpen({
-    streaming,
-    keepOpen,
-    effectiveCollapseAll,
-    trace,
-    streamContent,
-    uiState,
-    answerPhase
-  });
   bindThinkingOuterToggle(root, uiState);
+  setDetailsOpen(
+    root,
+    resolveThinkingOuterOpen({
+      streaming,
+      keepOpen,
+      effectiveCollapseAll,
+      trace,
+      streamContent,
+      uiState
+    })
+  );
 
   const outerSummary = document.createElement('summary');
   outerSummary.className = 'msg-thinking-outer-summary';
-  outerSummary.textContent = thinkingOuterSummaryLabel(trace, { streaming, answerPhase, keepOpen });
+  outerSummary.textContent = thinkingOuterSummaryLabel(trace, { streaming, keepOpen });
   root.appendChild(outerSummary);
 
   const wrap = document.createElement('div');
@@ -327,7 +315,7 @@ function renderAssistantBubbleContent(
   if (!streaming) {
     resetThinkingUiState(div);
   }
-  if (typeof applyThinkingRunMode === 'function') applyThinkingRunMode(div, streaming);
+  if (typeof applyThinkingLiveState === 'function') applyThinkingLiveState(div);
   const patchOpts = {
     streaming,
     stateHost: div,
@@ -611,7 +599,9 @@ function upsertSynthesisTraceRound(trace, { streaming, failed }) {
       thought: SYNTHESIS_TRACE_START,
       fullThought: SYNTHESIS_TRACE_START,
       tools: [],
-      synthesisRound: true
+      synthesisRound: true,
+      // 合成阶段就是「不再调工具、正文进回答区」：思考区据此折叠
+      answerPhase: true
     };
     next.push(entry);
   }
@@ -632,83 +622,12 @@ function countTraceTools(trace) {
   return (trace || []).reduce((n, e) => n + (e.tools || []).length, 0);
 }
 
-function extractLastUserMessageText(messages) {
-  for (let i = (messages || []).length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (!m || m.role !== 'user') continue;
-    const c = m.content;
-    let text = '';
-    if (typeof c === 'string') text = c.trim();
-    else if (Array.isArray(c)) {
-      text = c
-        .filter((x) => x && x.type === 'text' && x.text)
-        .map((x) => String(x.text))
-        .join('\n')
-        .trim();
-    }
-    if (!text) continue;
-    // 自动续检 / 完成验收注入的系统用户消息，不能当成用户任务
-    if (text.startsWith('[系统]') || text.startsWith('【完成验收】')) continue;
-    return text;
-  }
-  return '';
-}
-
-function buildAgentSynthesisDigest(trace) {
-  const lines = [];
-  const rows = Array.isArray(trace) ? trace : [];
-  for (let index = 0; index < rows.length; index++) {
-    const entry = rows[index];
-    const phase = String(entry.phase || '').trim();
-    const prefix = phase ? `[${phase}] ` : '';
-    const thought = thoughtTextForDisplay(entry, index, rows);
-    if (thought && thought.length > 16 && !/^(请求中|正在准备|生成中)/.test(thought)) {
-      lines.push(`${prefix}${thought.slice(0, 500)}`);
-    }
-    for (const t of entry.tools || []) {
-      const name = String(t.name || 'tool').trim();
-      const sum = String(t.summary || t.argsBrief || '已执行').trim();
-      lines.push(`- 工具 ${name}: ${sum.slice(0, 240)}`);
-    }
-  }
-  return lines.join('\n').slice(0, 8000);
-}
-
-function buildAgentSynthesisBody({ model, messages, trace, maxOutputTokens }) {
-  const userText = extractLastUserMessageText(messages).slice(0, 2500);
-  const digest = buildAgentSynthesisDigest(trace);
-  const changeSummary = buildTraceFileChangeSummary(trace);
-  const userParts = [];
-  if (userText) userParts.push(`【用户任务】\n${userText}`);
-  userParts.push(`【Agent 执行过程摘要】\n${digest || '(无详细 trace)'}`);
-  if (changeSummary) userParts.push(`【文件变更】\n${changeSummary}`);
-  userParts.push('请根据以上信息，用面向用户的 Markdown 写出最终答复。');
-  const maxTokens =
-    typeof maxOutputTokens === 'number' && maxOutputTokens > 0
-      ? Math.min(2048, maxOutputTokens)
-      : 2048;
-  return {
-    model,
-    messages: [
-      {
-        role: 'system',
-        content:
-          '你是叠云 Agent 的最终汇总助手。工具执行细节已在上方折叠区展示；你的任务是写用户直接阅读的最终答复。\n\n' +
-          '要求：\n' +
-          '- 必须直接回答【用户任务】里的问题，禁止只写「已完成。」或空话\n' +
-          '- 说明完成了什么、关键结果；如有代码/文件变更请简要列出\n' +
-          '- 若写不了文件或工具失败，如实说明是否权限/路径/工作区问题，不要假装成功\n' +
-          '- 若适合，用简短 Markdown 列表或表格\n' +
-          '- 不要粘贴原始命令输出、大段日志或 tool_call XML\n' +
-          '- 不要写「已完成工具调用」类系统提示\n' +
-          '- 若任务未完成或失败，如实说明卡点与建议下一步'
-      },
-      { role: 'user', content: userParts.join('\n\n') }
-    ],
-    temperature: 0.3,
-    max_tokens: maxTokens
-  };
-}
+/**
+ * 汇总（synthesis）请求体的唯一实现在 Main：`src/agent/agent-synthesis.js`
+ * （由 rust-loop-runner 在空回复时调用，见 AGENTS.md「空回复才 synthesis，Renderer 只展示」）。
+ * Renderer 侧此前有一份逐字重复的 buildAgentSynthesisBody / digest / 取最后用户消息，
+ * 且无任何调用点 —— 已删除，避免改一处漏一处。
+ */
 
 /** 工具轮结束后仅空回复/残留 tool XML 才补汇总；有正文即交付 */
 function needsAssistantReplySynthesis(reply, trace) {

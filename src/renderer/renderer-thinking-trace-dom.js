@@ -123,41 +123,17 @@ function isThinkingRoundComplete(entry, index, trace, streaming, streamContent) 
   return !isThinkingRoundInProgress(entry, index, trace, streaming, streamContent);
 }
 
-/** 工具已跑完、正文在流式输出时，思考区应收起以免定格在 diff */
-function isTraceInAnswerStreamPhase(trace, streaming, streamContent) {
-  if (!streaming || !trace?.length) return false;
-  if (!String(streamContent || '').trim()) return false;
-  for (const entry of trace) {
-    if (entryHasPendingTools(entry)) return false;
-  }
-  return true;
-}
-
-/** 进入回答阶段后粘滞，避免 trace 追加 pending 工具时思考区突然展开 */
-function resolveAnswerStreamPhase(trace, streaming, streamContent, uiState) {
-  if (!streaming) {
-    if (uiState) uiState.answerPhaseLatched = false;
-    return false;
-  }
-  // Plan 运行会把子任务 / 探索 loop 的正文提前灌进 streamContent（见 rust-planner-runner
-  // pushUiTrace），但那不是用户最终答复：据此折起思考区会显得「还没回答完就收起」。
-  if (uiState?.planRun) {
-    uiState.answerPhaseLatched = false;
-    return false;
-  }
-  for (const entry of trace || []) {
-    if ((entry.tools || []).some((t) => t && t.pending)) {
-      if (uiState) uiState.answerPhaseLatched = false;
-      return false;
-    }
-  }
-  const hasContent = !!String(streamContent || '').trim();
-  const rawReady = hasContent && isTraceInAnswerStreamPhase(trace, streaming, streamContent);
-  if (uiState) {
-    if (rawReady) uiState.answerPhaseLatched = true;
-    if (uiState.answerPhaseLatched && hasContent) return true;
-  }
-  return rawReady;
+/**
+ * 是否已进入「本轮确认不再调工具」的正文阶段。
+ * 信号唯一来源：renderer-agent-rust-loop 在 llm_response(toolCalls=0) 与 synthesis 时
+ * 给当轮打的 answerPhase 标记。
+ * 不能用「streamContent 非空」去猜：模型中间轮常先出文本再发 tool_calls，
+ * 那几秒会被误判成正文阶段，思考区就会「收起又展开」。
+ */
+function traceAnswerPhase(trace) {
+  const rows = trace || [];
+  if (!rows.length) return false;
+  return !!rows[rows.length - 1].answerPhase;
 }
 
 function thinkingRoundTitle(entry) {
@@ -175,79 +151,85 @@ function getThinkingUiState(hostEl) {
     hostEl._thinkingUi = {
       expanded: new Set(),
       collapsed: new Set(),
-      answerPhaseLatched: false,
-      outerExpanded: false,
-      outerCollapsed: false
+      liveRun: false,
+      userOpen: null
     };
   }
   return hostEl._thinkingUi;
 }
 
+/** 重绘只清步骤级记忆，保留用户手动展开/折叠的选择 */
 function resetThinkingUiState(hostEl) {
   if (!hostEl) return;
-  delete hostEl._thinkingUi;
+  const prev = hostEl._thinkingUi;
+  hostEl._thinkingUi = {
+    expanded: new Set(),
+    collapsed: new Set(),
+    liveRun: false,
+    userOpen: prev && typeof prev.userOpen === 'boolean' ? prev.userOpen : null
+  };
   delete hostEl.dataset.thinkingTraceSig;
 }
 
-/** 本轮是否为仍在执行的 Plan 运行（判定依据来自 sessionActiveRuns 登记，而非文案） */
-function isPlanThinkingRun(hostEl) {
+/** 本轮 run 是否仍在执行：依据 sessionActiveRuns 登记，而不是 loading / 文案 */
+function thinkingRunState(hostEl) {
   const sid = hostEl?.dataset?.runSessionId;
-  if (!sid || typeof sessionActiveRuns === 'undefined' || !sessionActiveRuns) return false;
+  if (!sid || typeof sessionActiveRuns === 'undefined' || !sessionActiveRuns) return null;
   const live = sessionActiveRuns.get(String(sid));
-  return !!(live && !live.finished && live.agentRunMode === 'plan');
+  return live && !live.finished ? live : null;
 }
 
-/** 把「本轮是否 Plan 运行」记到思考区 UI 状态，供 resolveAnswerStreamPhase 判定 */
-function applyThinkingRunMode(hostEl, streaming) {
+/** 把「本轮 run 是否仍在跑」记到思考区 UI 状态，供 resolveThinkingOuterOpen 判定 */
+function applyThinkingLiveState(hostEl) {
   const uiState = getThinkingUiState(hostEl);
-  if (uiState) uiState.planRun = !!streaming && isPlanThinkingRun(hostEl);
+  if (!uiState) return;
+  uiState.liveRun = !!thinkingRunState(hostEl);
 }
 
 function bindThinkingOuterToggle(outer, uiState) {
-  if (!outer || !uiState || outer.dataset.thinkingOuterToggle === '1') return;
-  outer.dataset.thinkingOuterToggle = '1';
-  outer.addEventListener('toggle', () => {
-    if (outer.open) {
-      uiState.outerExpanded = true;
-      uiState.outerCollapsed = false;
-    } else {
-      uiState.outerCollapsed = true;
-      uiState.outerExpanded = false;
-    }
+  if (!outer || !uiState) return;
+  bindDetailsUserIntent(outer, (open) => {
+    uiState.userOpen = open;
   });
 }
 
+/**
+ * 思考区展开规则（单一来源，不要再叠记忆类补丁）：
+ *   1. 停止态 → 展开
+ *   2. 流式期间用户手动选择优先
+ *   3. 本轮确认不再调工具（正文阶段）→ 折叠
+ *   4. 仍在思考（流式 / run 未结束）→ 展开
+ *   5. 本轮结束 → 按原逻辑折叠
+ */
 function resolveThinkingOuterOpen({
   streaming,
   keepOpen,
   effectiveCollapseAll,
   trace,
   streamContent,
-  uiState,
-  answerPhase = false
+  uiState
 }) {
   if (keepOpen) return true;
-  if (uiState?.outerExpanded) return true;
-  if (uiState?.outerCollapsed) return false;
-  if (answerPhase) return false;
-  if (streaming) return true;
+  if (streaming && uiState?.userOpen != null) return uiState.userOpen;
+  if (traceAnswerPhase(trace)) return false;
+  if (streaming || uiState?.liveRun) return true;
   if (effectiveCollapseAll) return false;
   return trace.some((e, i) =>
     shouldDefaultOpenThinkingEntry(e, trace, streaming, streamContent, uiState)
   );
 }
 
-function thinkingOuterSummaryLabel(trace, { streaming = false, answerPhase = false, keepOpen = false } = {}) {
+function thinkingOuterSummaryLabel(trace, { streaming = false, keepOpen = false } = {}) {
   if (keepOpen) return '已停止';
   if (!streaming) return '已完成';
-  if (answerPhase) return '生成回答中';
+  if (traceAnswerPhase(trace)) return '生成回答中';
   return '思考中';
 }
 
-function syncThinkingOuterSummary(outer, trace, { streaming, answerPhase, keepOpen }) {
+function syncThinkingOuterSummary(outer, trace, { streaming, keepOpen }) {
   const summary = outer?.querySelector('.msg-thinking-outer-summary');
   if (!summary) return;
-  const label = thinkingOuterSummaryLabel(trace, { streaming, answerPhase, keepOpen });
+  const label = thinkingOuterSummaryLabel(trace, { streaming, keepOpen });
   if (summary.textContent !== label) summary.textContent = label;
 }
 
@@ -589,15 +571,36 @@ function shouldDefaultOpenThinkingEntry(
   return false;
 }
 
-function applyStreamingDetailsOpen(el, nextOpen) {
+/**
+ * 程序化切换 details.open 的唯一入口（保留流式滚动钉底逻辑）。
+ * 切换前登记期望值，toggle 回调据此区分「用户点击」与「程序化切换」；
+ * 旧代码把程序化收起也记成用户意图，导致展开/折叠状态被写死。
+ */
+function setDetailsOpen(el, nextOpen) {
   if (!el) return false;
   const want = !!nextOpen;
   if (el.open === want) return false;
+  el._progOpenWanted = want;
   if (typeof setStreamingDetailsOpen === 'function') {
     return setStreamingDetailsOpen(el, want);
   }
   el.open = want;
   return true;
+}
+
+/** 只在「非程序化造成」的 open 变化时回调 onUserIntent(open)，外层与轮次共用 */
+function bindDetailsUserIntent(el, onUserIntent) {
+  if (!el || el.dataset.detailsUserIntent === '1') return;
+  el.dataset.detailsUserIntent = '1';
+  el.addEventListener('toggle', (ev) => {
+    if (ev.target !== el) return;
+    const wanted = el._progOpenWanted;
+    if (wanted !== undefined) {
+      el._progOpenWanted = undefined;
+      if (wanted === el.open) return;
+    }
+    if (typeof onUserIntent === 'function') onUserIntent(!!el.open);
+  });
 }
 
 function thinkingStepDomKey(entry, index) {
@@ -804,6 +807,30 @@ function patchThinkingRoundFiles(block, entry, index, trace) {
   }
 }
 
+/**
+ * 等待备注（如「上游 42s 无数据」）的唯一 DOM 出入口：叠加在思考正文下方，不覆盖正文。
+ * 流式快路径（renderer-thinking-trace.js#patchStreamingTextOnly）与整块重绘都必须调它，
+ * 否则结构签名不变（只是备注变了）时备注不会出现。
+ */
+function syncThinkingLiveNote(block, entry) {
+  if (!block) return;
+  const note = String((entry && entry.liveNote) || '').trim();
+  let noteEl = block.querySelector('.msg-thinking-live-note');
+  if (note) {
+    if (!noteEl) {
+      noteEl = document.createElement('div');
+      noteEl.className = 'msg-thinking-live-note';
+      const anchor = block.querySelector('.msg-thinking-thought');
+      if (anchor) anchor.insertAdjacentElement('afterend', noteEl);
+      else block.insertBefore(noteEl, block.firstChild);
+    }
+    updateIncrementalTextContent(noteEl, note);
+  } else if (noteEl) {
+    clearIncrementalTextState(noteEl);
+    noteEl.remove();
+  }
+}
+
 function fillThinkingRoundBlock(block, entry, index, trace, streaming, streamContent) {
   const complete = isThinkingRoundComplete(entry, index, trace, streaming, streamContent);
   block.dataset.roundComplete = complete ? '1' : '0';
@@ -841,6 +868,8 @@ function fillThinkingRoundBlock(block, entry, index, trace, streaming, streamCon
   } else if (thoughtEl) {
     thoughtEl.remove();
   }
+
+  syncThinkingLiveNote(block, entry);
 }
 
 function fillThinkingRoundBeat(beat, entry, index, trace, streaming, streamContent) {
@@ -900,7 +929,20 @@ function mountThinkingRoundDetails(
   details.className = 'msg-thinking-round-details';
   details.dataset.stepKey = wrap.dataset.stepKey;
   if (tracePrefs.showTitles === false) details.classList.add('msg-thinking-no-title');
-  applyStreamingDetailsOpen(
+  if (uiState) {
+    bindDetailsUserIntent(details, (open) => {
+      if (open) {
+        uiState.expanded.add(stepKey);
+        uiState.collapsed.delete(stepKey);
+        details.classList.remove('is-collapsed-auto');
+      } else {
+        uiState.collapsed.add(stepKey);
+        uiState.expanded.delete(stepKey);
+        if (complete) details.classList.add('is-collapsed-auto');
+      }
+    });
+  }
+  setDetailsOpen(
     details,
     keepOpen ||
       resolveThinkingStepOpen(
@@ -914,18 +956,6 @@ function mountThinkingRoundDetails(
       )
   );
   if (complete && !details.open) details.classList.add('is-collapsed-auto');
-  details.addEventListener('toggle', () => {
-    if (!uiState) return;
-    if (details.open) {
-      uiState.expanded.add(stepKey);
-      uiState.collapsed.delete(stepKey);
-      details.classList.remove('is-collapsed-auto');
-    } else {
-      uiState.collapsed.add(stepKey);
-      uiState.expanded.delete(stepKey);
-      if (complete) details.classList.add('is-collapsed-auto');
-    }
-  });
 
   const summary = document.createElement('summary');
   summary.className = 'msg-thinking-round-summary';
@@ -974,7 +1004,7 @@ function syncThinkingRoundDetails(
       effectiveCollapseAll,
       streamContent
     );
-  applyStreamingDetailsOpen(details, shouldOpen);
+  setDetailsOpen(details, shouldOpen);
   details.classList.toggle('is-collapsed-auto', complete && !details.open);
 
   const summary = details.querySelector('.msg-thinking-round-summary');

@@ -8,9 +8,6 @@ var SKILLS_HIDDEN_KEY = 'diecloud.skills.hidden.v1';
 var SKILLS_PAGE_SIZE = 15;
 var DEFAULT_ENABLED_SKILL_IDS = ['builtin:weather'];
 var DEFAULT_ENABLED_SKILL_PREFIXES = ['builtin:minimax:', 'builtin:curated:'];
-var MAX_SKILL_CHARS = typeof CTX_LIMITS !== 'undefined' ? CTX_LIMITS.SKILL_BODY_MAX : 3500;
-var SKILL_INJECT_FULL = typeof CTX_LIMITS !== 'undefined' ? CTX_LIMITS.SKILL_FULL_COUNT : 3;
-var SKILL_INJECT_TOTAL = typeof CTX_LIMITS !== 'undefined' ? CTX_LIMITS.SKILL_TOTAL_COUNT : 5;
 var SKILLS_TAB_TITLES = { list: '技能', plugins: '插件', mcp: 'MCP', automation: '定时' };
 
 /** 技能列表功能分类（「全部」单独一项；内置/预装技能按规则打散到下列分类） */
@@ -515,7 +512,7 @@ function updateSkillsEnabledCount() {
   const map = loadEnabledSkillIds();
   const hidden = loadHiddenSkillIds();
   const n = (skillsCatalog.skills || []).filter(
-    (sk) => !hidden[sk.id] && isSkillEnabled(map, sk.id)
+    (sk) => !isSkillHidden(hidden, sk) && isSkillEnabled(map, sk.id)
   ).length;
   el.textContent = `${n} 项已启用`;
 }
@@ -547,11 +544,33 @@ function saveHiddenSkillIds(map) {
   }
 }
 
+/**
+ * 是否隐藏。隐藏只对不可删（内置/预装）技能有意义：可删技能的隐藏记录来自旧版
+ * 「有 skillKey 即内置」的误判，一律视为未隐藏。
+ */
+function isSkillHidden(hidden, sk) {
+  return !!hidden[sk.id] && sk.deletable !== true;
+}
+
+/** 清掉旧判定残留、当前已可删的隐藏记录；返回清理后的隐藏表 */
+function pruneStaleHiddenSkills() {
+  const hidden = loadHiddenSkillIds();
+  let changed = false;
+  for (const sk of skillsCatalog.skills || []) {
+    if (hidden[sk.id] && sk.deletable === true) {
+      delete hidden[sk.id];
+      changed = true;
+    }
+  }
+  if (changed) saveHiddenSkillIds(hidden);
+  return hidden;
+}
+
 function getSortedVisibleSkills() {
   const enabled = loadEnabledSkillIds();
   const hidden = loadHiddenSkillIds();
   const q = skillsSearchQuery.trim().toLowerCase();
-  let skills = (skillsCatalog.skills || []).filter((sk) => !hidden[sk.id]);
+  let skills = (skillsCatalog.skills || []).filter((sk) => !isSkillHidden(hidden, sk));
   if (skillsCategoryFilter !== 'all') {
     skills = skills.filter((sk) => resolveSkillTaxonomy(sk).id === skillsCategoryFilter);
   }
@@ -584,7 +603,7 @@ function getSortedVisibleSkills() {
 function countSkillsInTaxonomy(taxonomyId) {
   const hidden = loadHiddenSkillIds();
   return (skillsCatalog.skills || []).filter((sk) => {
-    if (hidden[sk.id]) return false;
+    if (isSkillHidden(hidden, sk)) return false;
     if (taxonomyId === 'all') return true;
     return resolveSkillTaxonomy(sk).id === taxonomyId;
   }).length;
@@ -636,23 +655,30 @@ function updateSkillsPagination(total, pageCount) {
 
 async function deleteSkillItem(sk) {
   const label = sk.name || sk.id;
-  if (!window.confirm(`确定删除技能「${label}」？${sk.builtin ? '\n（内置技能将从列表隐藏，不会删除安装文件）' : ''}`)) {
+  // 可删性由 Main 侧的扫描结果下发（deletable），Renderer 不再自行用 builtin 推断
+  const canDelete = sk.deletable !== false;
+  const hint = canDelete ? '' : '\n（内置/预装技能将从列表隐藏，不会删除安装文件）';
+  if (!window.confirm(`确定删除技能「${label}」？${hint}`)) {
     return;
   }
   const enabled = loadEnabledSkillIds();
   delete enabled[sk.id];
   saveEnabledSkillIds(enabled);
-  if (sk.builtin) {
-    const hidden = loadHiddenSkillIds();
-    hidden[sk.id] = true;
-    saveHiddenSkillIds(hidden);
-  } else if (skillsApi.deleteSkill) {
+  if (canDelete) {
+    if (!skillsApi.deleteSkill) {
+      window.alert('当前版本未提供技能删除接口');
+      return;
+    }
     try {
       await skillsApi.deleteSkill({ dir: sk.dir });
     } catch (err) {
       window.alert(`删除失败：${err.message || err}`);
       return;
     }
+  } else {
+    const hidden = loadHiddenSkillIds();
+    hidden[sk.id] = true;
+    saveHiddenSkillIds(hidden);
   }
   await refreshSkillsCatalog();
 }
@@ -661,8 +687,9 @@ function renderSkillsList() {
   const grid = $('skills-grid');
   if (!grid) return;
   const enabled = loadEnabledSkillIds();
+  const hidden = pruneStaleHiddenSkills();
   const allVisible = getSortedVisibleSkills();
-  const totalAll = (skillsCatalog.skills || []).filter((sk) => !loadHiddenSkillIds()[sk.id]).length;
+  const totalAll = (skillsCatalog.skills || []).filter((sk) => !isSkillHidden(hidden, sk)).length;
   if (!totalAll) {
     grid.innerHTML =
       '<div class="skills-empty">未找到技能。请将 SKILL.md 放入 ~/.dieyun/skills，也可在对话中让 Agent 创建技能。</div>';
