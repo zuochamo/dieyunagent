@@ -13,13 +13,7 @@ function transcriptFromMessages(messages) {
   );
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    TRANSCRIPT_ROLES,
-    transcriptFromMessages
-  };
-}
-
-if (typeof window !== 'undefined') {
-  window.transcriptFromMessages = transcriptFromMessages;
-}
+module.exports = {
+  TRANSCRIPT_ROLES,
+  transcriptFromMessages
+};

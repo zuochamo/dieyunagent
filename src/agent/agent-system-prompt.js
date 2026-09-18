@@ -1,18 +1,9 @@
 'use strict';
 // @ts-check
 
-function loadPackSystemPrompt() {
-  const g = /** @type {any} */ (typeof globalThis !== 'undefined' ? globalThis : {});
-  if (typeof g.packSystemPrompt === 'function') return g.packSystemPrompt;
-  if (typeof require === 'function') {
-    try {
-      return require('./session-context').packSystemPrompt;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
+// 纯 CJS 依赖：顶层 require 真源，替代原先「全局 → 运行期 require 探测」。
+const { packSystemPrompt: loadPackSystemPrompt } = require('./session-context');
+const { getAgentLimits: readAgentLimits } = require('./agent-limits');
 
 function buildCoreAgentRules(opts = {}) {
   const plan =
@@ -77,14 +68,26 @@ function formatAgentHomeChunk(agentHome) {
 
 function formatWorkspaceChunk(workspaceInfo, agentHome) {
   const ws = workspaceInfo && typeof workspaceInfo === 'object' ? workspaceInfo : null;
+  const def = agentHome && agentHome.dieyunWorkspace ? String(agentHome.dieyunWorkspace) : '';
+  const norm = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const wsPath = ws && ws.workspacePath ? String(ws.workspacePath) : '';
+  // 默认 workspace 恒定可读写（见 gateway/server.js _collectReadRoots），且与所选工作空间
+  // 不同时才有必要提示，避免模型以为「换个工作空间就丢了默认落脚点」。
+  const fallbackHint =
+    def && norm(def) !== norm(wsPath) ? `\n默认工作目录（始终可读写）：${def}` : '';
   if (ws && ws.workspacePath) {
     if (ws.kind === 'ssh') {
       const connHint = ws.sshConnected ? 'SSH 已连接' : 'SSH 未连接（请先重连）';
-      return `【当前工作空间 · SSH】\n${ws.displayPath || ws.workspacePath}\n${connHint}`;
+      // 远程宽松档由网关侧同一处给出（remote-path.remoteAllowedRoots）；
+      // 提示不给绝对路径（HOME 由 ssh 层探测），避免被当成相对路径拼到工作空间下
+      const remoteExtra =
+        '\n远程可读写范围：$HOME（含 .dieyun/workspace 兜底目录）与 /tmp；需要绝对路径时先 host_exec 执行 echo $HOME';
+      return `【当前工作空间 · SSH】\n${ws.displayPath || ws.workspacePath}\n${connHint}${remoteExtra}`;
     }
-    return `【当前工作空间】\n${ws.workspacePath}`;
+    const localExtra =
+      '\n本机可读写范围另含：用户主目录与系统临时目录（绝对路径可用 host_exec 取，Linux/macOS `echo $HOME`、Windows `echo %USERPROFILE%` / `%TEMP%`）';
+    return `【当前工作空间】\n${ws.workspacePath}${fallbackHint}${localExtra}`;
   }
-  const def = agentHome && agentHome.dieyunWorkspace;
   if (def) {
     return `【默认工作目录】\n${def}\n相对路径默认以此目录为根。`;
   }
@@ -103,8 +106,13 @@ function formatPermissionsChunk(permissions) {
     if (p.browserAutomation !== false) caps.push('浏览器自动化');
     if (p.webFetch !== false) caps.push('联网抓取');
     if (p.sqlRead) caps.push('SQL只读');
+    // 「完全放开路径限制」开关（设置页，默认关）：显式告知模型，免得它按白名单惯性自我设限
+    const pathNote =
+      p.unrestrictedPaths === true
+        ? '路径限制：已完全放开（本机所有磁盘、远程 / 下任意路径均可读写，含系统目录）。'
+        : '';
     return (
-      `【本机控制能力】已开启：${caps.join('、')}。` +
+      `【本机控制能力】已开启：${caps.join('、')}。${pathNote}` +
       `工具名与参数见 schema。Windows 的 host_exec 是 cmd，不是 PowerShell；python -c 双引号内不要写分号。` +
       `失败看 errorCode/suggestedFix；大输出看 outputFile。`
     );
@@ -135,15 +143,7 @@ function formatSqlChunk(sqlConfig) {
 
 function resolvePromptLimitChars(key, fallback) {
   try {
-    let limits = null;
-    if (typeof getAgentLimits === 'function') limits = getAgentLimits();
-    else if (typeof require === 'function') {
-      try {
-        limits = require('./agent-limits').getAgentLimits();
-      } catch {
-        limits = null;
-      }
-    }
+    const limits = readAgentLimits();
     const n = Number(limits && limits[key]);
     if (Number.isFinite(n) && n > 0) return Math.floor(n);
   } catch {
@@ -217,13 +217,4 @@ const agentSystemPromptApi = {
   assembleSystemPrompt
 };
 
-if (typeof window !== 'undefined') {
-  const w = /** @type {any} */ (window);
-  w.buildCoreAgentRules = buildCoreAgentRules;
-  w.formatSystemTimeChunk = formatSystemTimeChunk;
-  w.assembleSystemPrompt = assembleSystemPrompt;
-}
-
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = agentSystemPromptApi;
-}
+module.exports = agentSystemPromptApi;

@@ -1,14 +1,8 @@
 'use strict';
 
-const sessionTranscript =
-  typeof require === 'function' && typeof module !== 'undefined' && module.exports
-    ? require('./session-transcript')
-    : null;
-
-const agentLimitsDefaults =
-  typeof require === 'function' && typeof module !== 'undefined' && module.exports
-    ? require('./agent-limits').AGENT_LIMITS_DEFAULTS
-    : null;
+// 纯 CJS 依赖：顶层 require 真源，替代原先「运行期 require 探测 → 全局兜底」。
+const sessionTranscript = require('./session-transcript');
+const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 
 /**
  * 单个图片 part 计入上下文预算时的等效字符数。
@@ -17,13 +11,9 @@ const agentLimitsDefaults =
  * 若按 JSON.stringify(part).length 计（一张 1MB 图 ≈ 140 万字符），单张图就会顶穿
  * llmRequestMaxChars，并让 shouldCompactRound 从第一轮起就误触发压缩；而图片既不可
  * 折叠（当前任务永不折叠）又不可压缩，于是变成「反复花模型调用去压一个压不掉的东西」。
- *
- * 懒读全局，避免 renderer 打包顺序导致取不到 agent-limits 的值。
  */
 function visionPartEquivChars() {
-  const fromGlobal =
-    typeof globalThis !== 'undefined' ? globalThis.AGENT_LIMITS_DEFAULTS : null;
-  const n = Number((fromGlobal || agentLimitsDefaults || {}).visionPartEqChars);
+  const n = Number(AGENT_LIMITS_DEFAULTS.visionPartEqChars);
   return Number.isFinite(n) && n > 0 ? n : 6000;
 }
 
@@ -32,13 +22,7 @@ function isVisionPart(part) {
 }
 
 function messagesForTranscript(messages) {
-  const fn =
-    (sessionTranscript && sessionTranscript.transcriptFromMessages) ||
-    (typeof transcriptFromMessages === 'function' ? transcriptFromMessages : null);
-  if (typeof fn === 'function') return fn(messages);
-  return (Array.isArray(messages) ? messages : []).filter(
-    (m) => m && (m.role === 'user' || m.role === 'assistant')
-  );
+  return sessionTranscript.transcriptFromMessages(messages);
 }
 
 const SESSION_HISTORY_HEADER =
@@ -450,15 +434,23 @@ function truncateContent(content, maxChars, opts) {
   return truncateContent(String(content || ''), cap, opts);
 }
 
+/**
+ * 兜底上限：唯一来源是 `agent-limits.js`，这里只做键映射（含 toolResultMaxChars）。
+ */
+function completionCapDefault(key, fallback) {
+  const n = Number(AGENT_LIMITS_DEFAULTS[key]);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 const DEFAULT_COMPLETION_CAPS = {
-  historyMaxChars: 96000,
-  messageMaxChars: 8000,
-  lastUserMaxChars: 24000,
-  turnRideMaxChars: 32000,
-  requestMaxChars: 800000,
-  recentTurns: 24,
-  foldedMaxChars: 12000,
-  toolResultMaxChars: 14000
+  historyMaxChars: completionCapDefault('completionHistoryMaxChars', 96000),
+  messageMaxChars: completionCapDefault('completionMessageMaxChars', 8000),
+  lastUserMaxChars: completionCapDefault('completionLastUserMaxChars', 24000),
+  turnRideMaxChars: completionCapDefault('completionTurnRideMaxChars', 32000),
+  requestMaxChars: completionCapDefault('llmRequestMaxChars', 800000),
+  recentTurns: completionCapDefault('completionRecentTurns', 24),
+  foldedMaxChars: completionCapDefault('completionFoldedMaxChars', 12000),
+  toolResultMaxChars: completionCapDefault('toolResultMaxJson', 14000)
 };
 
 function resolveCompletionCaps(opts) {
@@ -651,9 +643,20 @@ function trimMessagesToCharBudget(messages, opts) {
     return { ...m, content: truncateContent(m.content, cap, m.role === 'tool' ? { keepTail: true } : undefined) };
   });
   let out = systems.concat(kept, tail);
+  // 请求仍超硬顶时按顺序丢最老的非 system 消息，但绝不能丢掉「当前任务」那条用户消息：
+  // 否则模型会收到「只有工具结果、没有问题」的请求
+  const protectedTaskMsg = (() => {
+    for (let i = out.length - 1; i >= systems.length; i--) {
+      const m = out[i];
+      if (m && m.role === 'user' && !isSyntheticLoopUserContent(m.content)) return m;
+    }
+    return null;
+  })();
   while (out.length > systems.length + 1 && messagesCharLen(out) > caps.requestMaxChars) {
-    const dropAt = systems.length;
-    if (dropAt >= out.length - 1) break;
+    const dropAt = out.findIndex(
+      (m, i) => i >= systems.length && i < out.length - 1 && m !== protectedTaskMsg
+    );
+    if (dropAt < 0) break;
     out.splice(dropAt, 1);
   }
   if (messagesCharLen(out) > caps.requestMaxChars && out.length) {
@@ -714,64 +717,33 @@ function buildCompletionMessagesFromHistory(
   return trimMessagesToCharBudget(foldOlderCompletionMessages(out, helpers, capOpts), capOpts);
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    SESSION_HISTORY_HEADER,
-    TURN_RIDE_HEADER,
-    joinPromptChunks,
-    packSystemPrompt,
-    unwrapSystemPromptPack,
-    attachTurnRideToUserContent,
-    COMPACTION_ARCHIVE_HEADER,
-    FOLDED_HISTORY_HEADER,
-    foldOlderCompletionMessages,
-    formatCompactionArchiveBlock,
-    mergeCompactionBlockIntoTurnRide,
-    isSyntheticLoopUserContent,
-    extractBookPrefixMessages,
-    extractInTurnLoopTail,
-    applyTurnRideToCompletionMessages,
-    reprojectContinueLoopMessages,
-    persistableAssistantText,
-    messagesForTranscript,
-    assistantTextFromMessage,
-    buildSessionChatHistoryFromMessages,
-    buildCompletionMessagesFromHistory,
-    trimMessagesToCharBudget,
-    contentCharLen,
-    selectHistoryMessagesForSession,
-    cloneHistoryMessages,
-    buildCurrentTaskText,
-    isWeakAssistantReply,
-    WEAK_ASSISTANT_REPLIES
-  };
-}
-
-if (typeof window !== 'undefined') {
-  window.persistableAssistantText = persistableAssistantText;
-  window.messagesForTranscript = messagesForTranscript;
-  window.assistantTextFromMessage = assistantTextFromMessage;
-  window.buildSessionChatHistoryFromMessages = buildSessionChatHistoryFromMessages;
-  window.buildCompletionMessagesFromHistory = buildCompletionMessagesFromHistory;
-  window.trimMessagesToCharBudget = trimMessagesToCharBudget;
-  window.selectHistoryMessagesForSession = selectHistoryMessagesForSession;
-  window.cloneHistoryMessages = cloneHistoryMessages;
-  window.buildCurrentTaskText = buildCurrentTaskText;
-  window.SESSION_HISTORY_HEADER = SESSION_HISTORY_HEADER;
-  window.TURN_RIDE_HEADER = TURN_RIDE_HEADER;
-  window.COMPACTION_ARCHIVE_HEADER = COMPACTION_ARCHIVE_HEADER;
-  window.FOLDED_HISTORY_HEADER = FOLDED_HISTORY_HEADER;
-  window.foldOlderCompletionMessages = foldOlderCompletionMessages;
-  window.formatCompactionArchiveBlock = formatCompactionArchiveBlock;
-  window.mergeCompactionBlockIntoTurnRide = mergeCompactionBlockIntoTurnRide;
-  window.isSyntheticLoopUserContent = isSyntheticLoopUserContent;
-  window.extractBookPrefixMessages = extractBookPrefixMessages;
-  window.extractInTurnLoopTail = extractInTurnLoopTail;
-  window.applyTurnRideToCompletionMessages = applyTurnRideToCompletionMessages;
-  window.reprojectContinueLoopMessages = reprojectContinueLoopMessages;
-  window.joinPromptChunks = joinPromptChunks;
-  window.packSystemPrompt = packSystemPrompt;
-  window.unwrapSystemPromptPack = unwrapSystemPromptPack;
-  window.attachTurnRideToUserContent = attachTurnRideToUserContent;
-  window.isWeakAssistantReply = isWeakAssistantReply;
-}
+module.exports = {
+  SESSION_HISTORY_HEADER,
+  TURN_RIDE_HEADER,
+  joinPromptChunks,
+  packSystemPrompt,
+  unwrapSystemPromptPack,
+  attachTurnRideToUserContent,
+  COMPACTION_ARCHIVE_HEADER,
+  FOLDED_HISTORY_HEADER,
+  foldOlderCompletionMessages,
+  formatCompactionArchiveBlock,
+  mergeCompactionBlockIntoTurnRide,
+  isSyntheticLoopUserContent,
+  extractBookPrefixMessages,
+  extractInTurnLoopTail,
+  applyTurnRideToCompletionMessages,
+  reprojectContinueLoopMessages,
+  persistableAssistantText,
+  messagesForTranscript,
+  assistantTextFromMessage,
+  buildSessionChatHistoryFromMessages,
+  buildCompletionMessagesFromHistory,
+  trimMessagesToCharBudget,
+  contentCharLen,
+  selectHistoryMessagesForSession,
+  cloneHistoryMessages,
+  buildCurrentTaskText,
+  isWeakAssistantReply,
+  WEAK_ASSISTANT_REPLIES
+};

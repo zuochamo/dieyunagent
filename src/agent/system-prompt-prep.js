@@ -2,7 +2,7 @@
 
 const { assembleSystemPrompt } = require('./agent-system-prompt');
 const { skipAutoCodebaseForTaskTier } = require('./task-tier');
-const { getAgentLimits } = require('./agent-limits');
+const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const { readAgentsMdPrefs } = require('./agents-md-prefs');
 const {
   parseSections,
@@ -11,14 +11,22 @@ const {
 } = require('../agents-md');
 const { describeAgentHome } = require('../agent-home');
 
+/**
+ * 注入块的兜底上限。带「→ agent-limits」注释的键唯一来源是 `agent-limits.js`，
+ * 这里只映射不重复字面量；其余键 agent-limits 无对应项，保持本文件独有。
+ */
 const DEFAULT_LIMITS = {
-  CODEBASE_AUTO_LIMIT: 12,
+  // —— 与 agent-limits.js 单一来源 ——
+  CODEBASE_AUTO_LIMIT: AGENT_LIMITS_DEFAULTS.codebaseAutoLimit,
+  CODEBASE_SNIPPET_MAX: AGENT_LIMITS_DEFAULTS.codebaseSnippetMax,
+  OPEN_FILES_MAX: AGENT_LIMITS_DEFAULTS.openFilesMax,
+  FILE_PREVIEW_MAX_CHARS: AGENT_LIMITS_DEFAULTS.filePreviewMaxChars,
+
+  // —— 本文件独有：agent-limits 无对应键 ——
   CODEBASE_MENTION_LIMIT: 16,
-  CODEBASE_SNIPPET_MAX: 2400,
-  OPEN_FILES_MAX: 12,
   FILE_PREVIEW_MAX_BYTES: 48000,
-  FILE_PREVIEW_MAX_CHARS: 4000,
   RECENT_CHANGE_MAX: 16,
+  /** 与 renderer-context-engine.js 的 CTX_LIMITS.AGENTS_MD_MAX 保持一致 */
   AGENTS_MD_MAX: 2800,
   GRAPH_REPO_MAP_LIMIT: 32,
   GRAPH_REPO_MAP_MAX_CHARS: 4500,
