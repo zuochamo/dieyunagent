@@ -97,13 +97,17 @@
     }, 4200);
   }
 
-  function setVoicePanelVisible(visible) {
-    const panel = $('composer-voice-panel');
-    const btn = $('voice-toggle');
+  /** 录音/转写是 composer 的两种整体形态：输入框原地换成波形或进度条 */
+  function setComposerVoiceState() {
+    const recorder = $('composer-recording');
+    const transcriber = $('composer-transcribing');
     const composer = $('composer');
-    if (panel) panel.hidden = !visible;
-    if (btn) btn.classList.toggle('is-recording', !!visible);
-    if (composer) composer.classList.toggle('is-voice-recording', !!visible);
+    if (recorder) recorder.hidden = !voiceRecording;
+    if (transcriber) transcriber.hidden = !voiceTranscribing;
+    if (composer) {
+      composer.classList.toggle('is-recording', !!voiceRecording);
+      composer.classList.toggle('is-transcribing', !!voiceTranscribing);
+    }
   }
 
   function setVoiceStatus(text) {
@@ -250,7 +254,7 @@
 
     voiceRecording = true;
     voiceStartedAt = Date.now();
-    setVoicePanelVisible(true);
+    setComposerVoiceState();
     setVoiceStatus(t('voice_recording_hint'));
     setVoiceControlsDisabled(false);
     updateVoiceTimer();
@@ -269,7 +273,7 @@
     voiceRecording = false;
     voiceTranscribing = false;
     cleanupVoiceStream();
-    setVoicePanelVisible(false);
+    setComposerVoiceState();
     setVoiceControlsDisabled(false);
     setVoiceStatus('');
   }
@@ -312,6 +316,7 @@
     if (!voiceRecording || voiceTranscribing) return;
     voiceTranscribing = true;
     voiceRecording = false;
+    setComposerVoiceState();
     setVoiceControlsDisabled(true);
     setVoiceStatus(t('voice_transcribing'));
 
@@ -321,17 +326,18 @@
       const result = await transcribeVoiceBlob(blob);
       const text = String(result?.text || '').trim();
       if (!text) throw new Error('转写结果为空');
+      voiceTranscribing = false;
+      setComposerVoiceState();
       insertTranscript(text);
-      setVoicePanelVisible(false);
       setVoiceStatus('');
     } catch (err) {
       showToast(t('voice_transcribe_failed'), err?.message || String(err));
-      setVoicePanelVisible(false);
       setVoiceStatus('');
     } finally {
       voiceTranscribing = false;
       voiceRecording = false;
       setVoiceControlsDisabled(false);
+      setComposerVoiceState();
     }
   }
 

@@ -39,6 +39,8 @@
   const TRACE_TYPE_TICK_MS = 6;
   /** 落后超过此长度才跳段追赶 */
   const TRACE_TYPE_LAG_SKIP = 2200;
+  /** 距底部小于该值视为「跟随最新」 */
+  const FOLLOW_BOTTOM_SLACK_PX = 96;
 
   const $ = (id) => document.getElementById(id);
   const I18N_KEY = 'dieyun.mobile.language';
@@ -405,17 +407,88 @@
     return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
   }
 
-  function updateComposerRunState() {
-    const stop = $('stop');
-    if (stop) {
-      stop.disabled = state.stopping || !state.taskRunning;
-      stop.textContent = state.stopping ? t('stopping') : t('stop');
+  /**
+   * 滚动跟随的单一来源：思考区与对话区共用同一套「是否停在底部」状态。
+   * 只有用户滚动才会改变它（内容变高不会触发 scroll 事件，因此不会被误判成离开底部）；
+   * 上滑阅读历史 → 停止跟随，回到底部 → 自动恢复跟随。
+   */
+  const scrollTargets = {
+    messages: { id: 'messages', follow: true, raf: 0 },
+    traceSheet: { id: 'think-sheet-body', follow: true, raf: 0 }
+  };
+
+  function scrollTarget(key) {
+    return Object.prototype.hasOwnProperty.call(scrollTargets, key) ? scrollTargets[key] : null;
+  }
+
+  function isFollowScrolling(key) {
+    const target = scrollTarget(key);
+    return target ? target.follow : true;
+  }
+
+  function setFollowScrolling(key, follow) {
+    const target = scrollTarget(key);
+    if (!target) return;
+    target.follow = !!follow;
+  }
+
+  function scrollToFollowTail(key) {
+    const target = scrollTarget(key);
+    const el = target ? $(target.id) : null;
+    if (!el) return;
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  }
+
+  /** 合并到下一帧再贴底，避免打字机每个 tick 都强制回流 */
+  function scheduleFollowScroll(key) {
+    const target = scrollTarget(key);
+    if (!target || target.raf || !target.follow) return;
+    target.raf = requestAnimationFrame(() => {
+      target.raf = 0;
+      if (target.follow) scrollToFollowTail(key);
+    });
+  }
+
+  /** 展开思考区 / 点击浮标：强制回到最新并恢复跟随 */
+  function jumpToFollowTail(key) {
+    setFollowScrolling(key, true);
+    scheduleFollowScroll(key);
+  }
+
+  function bindFollowScrolling() {
+    for (const key of Object.keys(scrollTargets)) {
+      const el = $(scrollTargets[key].id);
+      if (!el) continue;
+      el.addEventListener('scroll', () => {
+        setFollowScrolling(key, wasNearBottom(el, FOLLOW_BOTTOM_SLACK_PX));
+      }, { passive: true });
     }
-    if (state.taskRunning) {
+  }
+
+  function updateComposerRunState() {
+    const running = !!state.taskRunning;
+    const composer = $('composer');
+    if (composer) {
+      composer.classList.toggle('is-running', running);
+      composer.classList.toggle('is-stopping', running && !!state.stopping);
+    }
+    const stop = $('stop');
+    if (stop) stop.disabled = !!state.stopping;
+    const stopLabel = $('stop-label');
+    if (stopLabel) stopLabel.textContent = state.stopping ? t('stopping') : t('stop');
+    if (running) {
       setThinkDockVisible(true);
     } else {
       hideThinkDock();
     }
+  }
+
+  /** 输入框有内容时主键才点亮（发送） */
+  function updateComposerTextState() {
+    const input = $('input');
+    const composer = $('composer');
+    if (!input || !composer) return;
+    composer.classList.toggle('has-text', !!input.value.trim());
   }
 
   function traceDockSummary(trace) {
@@ -476,6 +549,7 @@
   }
 
   function openThinkSheet() {
+    const wasOpen = state.traceSheetOpen;
     state.traceSheetOpen = true;
     state.traceVisible = true;
     state.traceManualClosed = false;
@@ -487,6 +561,7 @@
     }
     if (backdrop) backdrop.hidden = false;
     document.body.classList.add('think-sheet-open');
+    if (!wasOpen) jumpToFollowTail('traceSheet');
     updateThinkDock(state.cachedLiveTrace, state.lastStreamContent || '');
   }
 
@@ -632,9 +707,7 @@
     answer.classList.toggle('msg-answer-pending', !!options.typing);
     if (answer.textContent !== text) answer.textContent = text;
     if (text) state.lastStreamContent = text;
-    if (options.typing) {
-      scrollTraceBodyIfFollowing();
-    }
+    scheduleFollowScroll('messages');
   }
 
   async function attachHistoricalTraces(rows) {
@@ -655,10 +728,8 @@
 
   async function reloadConversationUi() {
     if (!state.authed || !state.activeSessionId) return;
-    const root = $('messages');
-    const keepScroll = wasNearBottom(root);
     const rows = await call('messages.list', { sessionId: state.activeSessionId, limit: 500 });
-    renderMessages(rows, { scrollToBottom: keepScroll });
+    renderMessages(rows);
     if (state.taskRunning) {
       await refreshActiveTrace();
       return;
@@ -687,7 +758,8 @@
 
   function renderMessages(rows, options = {}) {
     const root = $('messages');
-    const stickToBottom = options.scrollToBottom !== false && (options.scrollToBottom === true || wasNearBottom(root));
+    const stickToBottom =
+      options.scrollToBottom === undefined ? isFollowScrolling('messages') : !!options.scrollToBottom;
     root.innerHTML = '';
     if (!rows || !rows.length) {
       root.innerHTML = `<div class="empty">${t('no_messages')}</div>`;
@@ -715,7 +787,8 @@
       item.appendChild(bubble);
       root.appendChild(item);
     }
-    if (stickToBottom) root.scrollTop = root.scrollHeight;
+    if (stickToBottom) scrollToFollowTail('messages');
+    setFollowScrolling('messages', stickToBottom);
   }
 
   function cleanAssistantContent(text) {
@@ -781,19 +854,6 @@
     }
   }
 
-  function scrollTraceBodyIfFollowing() {
-    if (state.traceSheetOpen) {
-      const sheetBody = $('think-sheet-body');
-      if (sheetBody && wasNearBottom(sheetBody, 80)) {
-        sheetBody.scrollTop = sheetBody.scrollHeight;
-      }
-      return;
-    }
-    const body = $('messages');
-    if (!body || !wasNearBottom(body)) return;
-    body.scrollTop = body.scrollHeight;
-  }
-
   function scheduleTraceTypewriterTick(roundIndex) {
     const tw = state.traceTypewriters.get(roundIndex);
     if (!tw || tw.timer) return;
@@ -805,7 +865,7 @@
       if (live.displayed.length >= live.target.length) {
         live.el.textContent = live.target;
         stopTraceTypewriter(roundIndex);
-        scrollTraceBodyIfFollowing();
+        if (state.traceSheetOpen) scheduleFollowScroll('traceSheet');
         return;
       }
 
@@ -823,7 +883,7 @@
 
       live.displayed = live.target.slice(0, live.displayed.length + chunk);
       live.el.textContent = live.displayed;
-      scrollTraceBodyIfFollowing();
+      if (state.traceSheetOpen) scheduleFollowScroll('traceSheet');
       scheduleTraceTypewriterTick(roundIndex);
     }, TRACE_TYPE_TICK_MS);
   }
@@ -1016,9 +1076,7 @@
       });
     }
 
-    if (state.traceSheetOpen) {
-      requestAnimationFrame(() => scrollTraceBodyIfFollowing());
-    }
+    if (state.traceSheetOpen) scheduleFollowScroll('traceSheet');
   }
 
   function renderTrace(trace, options = {}) {
@@ -1060,15 +1118,6 @@
       if (streamContent) state.lastStreamContent = streamContent;
       updateStreamAnswer(streamContent, { typing: !!options.typing });
     }
-
-    const messages = $('messages');
-    const wasBottom = messages && wasNearBottom(messages);
-    if (!state.traceSheetOpen && wasBottom) {
-      requestAnimationFrame(() => {
-        const root = $('messages');
-        if (root) root.scrollTop = root.scrollHeight;
-      });
-    }
   }
 
   async function refreshSessionList(preferSessionId) {
@@ -1099,8 +1148,6 @@
     const preserveTraceState = !!options.preserveTraceState;
     const prevTraceVisible = state.traceVisible;
     const prevTraceManualClosed = state.traceManualClosed;
-    const root = $('messages');
-    const keepScroll = preserveTraceState && wasNearBottom(root);
 
     state.activeSessionId = sessionId;
     if (!preserveTraceState) {
@@ -1110,7 +1157,7 @@
     renderSessions();
     updateActiveSessionLabel();
     const rows = await call('messages.list', { sessionId, limit: 500 });
-    renderMessages(rows, { scrollToBottom: options.scrollToBottom ?? keepScroll });
+    renderMessages(rows, { scrollToBottom: options.scrollToBottom });
     try {
       const trace = await call('trace.get', { sessionId });
       if (trace && trace.live) {
@@ -1253,6 +1300,7 @@
       state.stopping = false;
       state.traceManualClosed = false;
       state.lastStreamContent = '';
+      setFollowScrolling('traceSheet', true);
       updateComposerRunState();
       setThinkDockVisible(true);
       updateThinkDock([], '');
@@ -1456,8 +1504,13 @@
     ev.preventDefault();
     const input = $('input');
     const text = input.value.trim();
-    if (!text || state.taskRunning) return;
+    if (!text) {
+      input.focus();
+      return;
+    }
+    if (state.taskRunning) return;
     input.value = '';
+    updateComposerTextState();
     appendOptimisticUserMessage(text);
     try {
       const r = await call('task.submit', {
@@ -1529,7 +1582,7 @@
       }
     }
     openThinkSheet();
-    requestAnimationFrame(() => scrollTraceBodyIfFollowing());
+    jumpToFollowTail('traceSheet');
   });
   on('think-sheet-close', 'click', () => closeThinkSheet());
   on('think-sheet-backdrop', 'click', () => closeThinkSheet());
@@ -1634,7 +1687,10 @@
 
   applyLanguage(getLang());
   initTheme();
+  bindFollowScrolling();
   updateComposerRunState();
+  updateComposerTextState();
+  on('input', 'input', () => updateComposerTextState());
   if (typeof initMobileVoice === 'function') {
     initMobileVoice({ call, t, showToast, isTaskRunning });
   }

@@ -98,23 +98,50 @@
       </section>
 
       <form class="composer" id="composer">
-        <div class="composer-voice-panel" id="composer-voice-panel" hidden>
-          <div class="composer-voice-wave" id="composer-voice-wave" aria-hidden="true"></div>
-          <span class="composer-voice-timer" id="composer-voice-timer">0:00</span>
-          <span class="composer-voice-status" id="composer-voice-status"></span>
-          <div class="composer-voice-actions">
-            <button type="button" class="ghost-button composer-voice-cancel" id="composer-voice-cancel" data-i18n="voice_cancel">取消</button>
-            <button type="button" class="primary composer-voice-confirm" id="composer-voice-confirm" data-i18n="voice_transcribe">转写</button>
-          </div>
-        </div>
         <div class="composer-meta">
           <span id="active-session-label">默认工作空间</span>
+          <span class="composer-voice-status" id="composer-voice-status"></span>
         </div>
-        <textarea id="input" rows="2" placeholder="输入任务，电脑端执行" data-i18n-placeholder="input_placeholder"></textarea>
-        <div class="composer-actions">
-          <button type="button" class="secondary icon-button" id="voice-toggle" title="语音输入" aria-label="语音输入">🎤</button>
-          <button id="stop" class="secondary" type="button" data-i18n="stop">停止</button>
-          <button id="send" type="submit" data-i18n="send">发送</button>
+        <div class="composer-row">
+          <div class="composer-slot composer-slot-left">
+            <button type="button" class="composer-action composer-action-mic" id="voice-toggle" title="语音输入" aria-label="语音输入">
+              <svg class="composer-action-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <rect x="9" y="2.5" width="6" height="11" rx="3"></rect>
+                <path d="M5 11a7 7 0 0 0 14 0"></path>
+                <path d="M12 18v3.5"></path>
+              </svg>
+            </button>
+            <button type="button" class="composer-action composer-action-cancel" id="composer-voice-cancel" aria-label="取消录音">
+              <span class="composer-action-icon" aria-hidden="true">✕</span>
+              <span class="composer-action-label" data-i18n="voice_cancel">取消</span>
+            </button>
+          </div>
+          <div class="composer-field">
+            <textarea id="input" rows="1" placeholder="输入任务，电脑端执行" data-i18n-placeholder="input_placeholder"></textarea>
+            <div class="composer-recording" id="composer-recording" hidden>
+              <span class="composer-recording-dot" aria-hidden="true"></span>
+              <div class="composer-voice-wave" id="composer-voice-wave" aria-hidden="true"></div>
+              <span class="composer-voice-timer" id="composer-voice-timer">0:00</span>
+            </div>
+            <div class="composer-transcribing" id="composer-transcribing" hidden>
+              <span class="composer-transcribing-shimmer" aria-hidden="true"></span>
+              <span class="composer-transcribing-text" data-i18n="voice_transcribing">正在转写…</span>
+            </div>
+          </div>
+          <div class="composer-slot composer-slot-right">
+            <button type="submit" class="composer-action composer-action-send" id="send" aria-label="发送">
+              <span class="composer-action-icon" aria-hidden="true">↑</span>
+              <span class="composer-action-label" data-i18n="send">发送</span>
+            </button>
+            <button type="button" class="composer-action composer-action-stop" id="stop" aria-label="停止">
+              <span class="composer-action-icon" aria-hidden="true">■</span>
+              <span class="composer-action-label" id="stop-label" data-i18n="stop">停止</span>
+            </button>
+            <button type="button" class="composer-action composer-action-confirm" id="composer-voice-confirm" aria-label="转写">
+              <span class="composer-action-icon" aria-hidden="true">✓</span>
+              <span class="composer-action-label" data-i18n="voice_transcribe">转写</span>
+            </button>
+          </div>
         </div>
       </form>
     </main>
