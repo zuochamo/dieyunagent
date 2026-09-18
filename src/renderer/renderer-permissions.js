@@ -1,4 +1,4 @@
-/* global $, initAgentsMdSettingsUI, initDieyunMdSettingsUI, initPlaybookSettingsUI, initAgentKnowledgeSettingsUI, initKnowledgeConsolidationSettingsUI, gatewayCall, gwState, invalidateLspSettingsCache */
+/* global window, $, initAgentsMdSettingsUI, initDieyunMdSettingsUI, initPlaybookSettingsUI, initAgentKnowledgeSettingsUI, initKnowledgeConsolidationSettingsUI, gatewayCall, gwState, invalidateLspSettingsCache, showAgentToast */
 
 'use strict';
 
@@ -46,13 +46,18 @@ async function syncPermissionsToMain() {
 
     webFetch: $('perm-web-fetch')?.checked !== false,
 
-    browserAutomation: $('perm-browser')?.checked !== false
+    browserAutomation: $('perm-browser')?.checked !== false,
+
+    // 默认关闭：这里必须用 === true，不能沿用上面「!== false」的默认开语义
+    unrestrictedPaths: $('perm-unrestricted-paths')?.checked === true
 
   };
 
   try {
 
     await permissionsApi.setPermissions(perms);
+
+    renderComposerPathPerm(perms.unrestrictedPaths === true);
 
     setPermsHint('权限已保存 ✓');
 
@@ -136,6 +141,8 @@ async function loadPermissionsUI() {
 
     if ($('perm-browser')) $('perm-browser').checked = p.browserAutomation !== false;
 
+    if ($('perm-unrestricted-paths')) $('perm-unrestricted-paths').checked = p.unrestrictedPaths === true;
+
   } catch {
 
     // ignore
@@ -202,7 +209,9 @@ function bindPermissionCheckboxes() {
 
     'perm-web-fetch',
 
-    'perm-browser'
+    'perm-browser',
+
+    'perm-unrestricted-paths'
 
   ].forEach((id) => {
 
@@ -244,5 +253,122 @@ function initPermissionsUI() {
   loadPermissionsUI().catch(() => {});
 
   initAgentKnowledgeSettingsUI();
+
+}
+
+// ---------- 输入区「完全放开路径限制」快捷开关 ----------
+// 状态唯一落盘点是 permissions.unrestrictedPaths（Gateway），设置页与输入区图标都只是它的视图：
+// 这里切换后必须回写设置页 checkbox，SetPermissions 是从 checkbox 读值写盘的。
+const COMPOSER_PATH_PERM_TITLES = {
+
+  restricted: '路径权限：受白名单限制（点击完全放开）',
+
+  unrestricted: '路径权限：已完全放开（点击恢复白名单）'
+
+};
+
+function renderComposerPathPerm(unrestricted) {
+
+  const on = unrestricted === true;
+
+  const btn = $('btn-composer-path-perm');
+
+  if (btn) {
+
+    btn.classList.toggle('is-unrestricted', on);
+
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+
+    btn.title = on ? COMPOSER_PATH_PERM_TITLES.unrestricted : COMPOSER_PATH_PERM_TITLES.restricted;
+
+  }
+
+  const box = $('perm-unrestricted-paths');
+
+  if (box) box.checked = on;
+
+}
+
+async function toggleComposerPathPerm() {
+
+  if (!permissionsApi.getPermissions || !permissionsApi.setPermissions) {
+
+    showAgentToast('路径权限', '当前环境不支持修改权限', { variant: 'error' });
+
+    return;
+
+  }
+
+  const btn = $('btn-composer-path-perm');
+
+  if (btn) btn.disabled = true;
+
+  try {
+
+    const current = (await permissionsApi.getPermissions()) || {};
+
+    const next = current.unrestrictedPaths !== true;
+
+    if (
+
+      next &&
+
+      !window.confirm('完全放开路径限制：Agent 将可读写本机所有磁盘（含系统目录）。\n仅在你完全信任当前任务时开启，确定继续？')
+
+    ) {
+
+      return;
+
+    }
+
+    const saved = await permissionsApi.setPermissions({ ...current, unrestrictedPaths: next });
+
+    const on = saved ? saved.unrestrictedPaths === true : next;
+
+    renderComposerPathPerm(on);
+
+    showAgentToast(
+
+      '路径权限',
+
+      on ? '已完全放开：可访问本机所有路径' : '已恢复白名单限制',
+
+      { variant: on ? 'warn' : 'success' }
+
+    );
+
+  } catch (err) {
+
+    showAgentToast('路径权限', `保存失败：${err?.message || err}`, { variant: 'error' });
+
+  } finally {
+
+    if (btn) btn.disabled = false;
+
+  }
+
+}
+
+function initComposerPathPerm() {
+
+  const btn = $('btn-composer-path-perm');
+
+  if (!btn) return;
+
+  renderComposerPathPerm(false);
+
+  btn.addEventListener('click', () => {
+
+    void toggleComposerPathPerm();
+
+  });
+
+  if (!permissionsApi.getPermissions) return;
+
+  permissionsApi.getPermissions()
+
+    .then((p) => renderComposerPathPerm(p?.unrestrictedPaths === true))
+
+    .catch(() => {});
 
 }

@@ -393,7 +393,11 @@ async function connectRemoteGatewayOnly() {
 }
 
 async function connectGateway() {
-  await connectLocalGatewayOnly();
+  // 必须走连接锁：启动期 connectGateway 与其它路径的 ensureLocalGatewayReady 会并发进入，
+  // 两边都按 isLocalGatewayReady()（只认 OPEN）判定为「未连接」，后到的那个就会
+  // closeGatewayState 掉仍在 CONNECTING 的 socket —— 即
+  // 「WebSocket is closed before the connection is established」。
+  await connectLocalGatewayLocked();
 }
 
 function resetRemoteGatewayClient() {

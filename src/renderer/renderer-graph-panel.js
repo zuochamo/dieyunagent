@@ -337,11 +337,6 @@ function initGraphPanel() {
   });
 }
 
-/** 兼容旧设置入口：结构索引已迁到侧栏 */
-function initGraphIndexSettings() {
-  // no-op：控件在侧栏，由 initGraphPanel 绑定
-}
-
 function onGraphSettingsTabShown() {
   if (typeof closeSettingsModal === 'function') closeSettingsModal();
   else if (typeof window.closeSettingsModal === 'function') window.closeSettingsModal();
@@ -352,7 +347,6 @@ window.initGraphPanel = initGraphPanel;
 window.onGraphPanelShown = onGraphPanelShown;
 window.onGraphPanelHidden = onGraphPanelHidden;
 window.refreshGraphPanelStatus = refreshGraphPanelStatus;
-window.initGraphIndexSettings = initGraphIndexSettings;
 window.onGraphSettingsTabShown = onGraphSettingsTabShown;
 window.refreshGraphIndexStatus = refreshGraphPanelStatus;
 window.openGraphSidePanel = openGraphSidePanel;

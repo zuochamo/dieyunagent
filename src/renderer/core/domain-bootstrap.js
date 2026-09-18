@@ -1,4 +1,4 @@
-/* global window, DieyunBootstrap, DieyunNamespaces, api, currentSessionId, sqlStatusCache, initPermissionsUI, initSettingsShell, initHelpUI, initUpdateUI, initSkillsUI, initSkillCatalogUI, initComposerToolbar, initDefinedModelEditors, initSqlSettingsUI, initPluginCatalogUI, initMcpCatalogUI, initAutomationUI, initGraphIndexSettings, initCodebasePanel, initGraphPanel, initWorktreesSettings, initTerminalPane, initBrowserPanel, initPaneResizers, initSelectionToComposerDrag, applySessionWorkspace, loadSqlConfigUI, setGatewayMeta, renderSqlDbList, maybeEnforceWorktreeCleanupPolicy */
+/* global window, DieyunBootstrap, DieyunNamespaces, api, currentSessionId, sqlStatusCache, initPermissionsUI, initSettingsShell, initHelpUI, initUpdateUI, initSkillsUI, initSkillCatalogUI, initComposerToolbar, initDefinedModelEditors, initSqlSettingsUI, initPluginCatalogUI, initMcpCatalogUI, initAutomationUI, initCodebasePanel, initGraphPanel, initWorktreesSettings, initTerminalPane, initBrowserPanel, initPaneResizers, initSelectionToComposerDrag, applySessionWorkspace, loadSqlConfigUI, setGatewayMeta, renderSqlDbList, maybeEnforceWorktreeCleanupPolicy */
 'use strict';
 
 (function registerDomainInits() {
@@ -53,7 +53,6 @@
       initSkillsUI();
       if (typeof initSkillCatalogUI === 'function') initSkillCatalogUI();
       if (typeof initDefinedModelEditors === 'function') initDefinedModelEditors();
-      if (typeof initGraphIndexSettings === 'function') initGraphIndexSettings();
       if (typeof initCodebasePanel === 'function') initCodebasePanel();
       if (typeof initGraphPanel === 'function') initGraphPanel();
       if (typeof initWorktreesSettings === 'function') initWorktreesSettings();
@@ -97,9 +96,6 @@
     scriptHint: 'renderer-agent-abort.js, renderer-agent-run.js, renderer-agent-complete.js, renderer-agent-resume.js, renderer-agent-send.js, renderer-agent-loop.js, core/namespace-register.js',
     init() {
       window.DieyunAgent.initAgentLoopUI();
-      if (typeof window.DieyunAgent.initAgentResumeBanner === 'function') {
-        window.DieyunAgent.initAgentResumeBanner();
-      }
     }
   });
 

@@ -78,6 +78,29 @@ function parentRemotePath(remotePath) {
 }
 
 /**
+ * 出站图片 URL 的渲染器统一闸门（附件发送 / 出站消息清洗共用）。
+ *
+ * 判定规则（以实际字节为准、只放行上游支持的 png/jpeg/gif/webp）单一来源是
+ * guardrails-shared.sanitizeImageUrlForApi，返回 '' 表示该图必须省略——带着
+ * bmp/svg/坏 base64 出门，整轮请求会被上游 400 "unsupported image" 打回。
+ *
+ * agent-bundle 未重建而缺该 API 时退回原样放行（相当于改动前的行为），
+ * 只告警不静默丢图，避免「所有图片都不发」这种更重的回归。
+ */
+function sanitizeOutboundImageUrl(url) {
+  const raw = String(url || '');
+  const shared = typeof window !== 'undefined' ? window.GuardrailsShared : null;
+  if (shared && typeof shared.sanitizeImageUrlForApi === 'function') {
+    return shared.sanitizeImageUrlForApi(raw);
+  }
+  // 拿不到共用闸门时必须「失败关闭」：带着未校验的图片出门，上游会以 HTTP 400
+  // ".messages[N].image[0]: unsupported image" 打回整轮请求（含历史里重发的旧图）。
+  // 少一张图 vs 整轮对话不可用，前者可接受；Main 侧 llm-proxy 还有同一道闸兜底。
+  console.warn('[renderer] GuardrailsShared 未加载，出站图片一律省略（需重建 agent-bundle）');
+  return '';
+}
+
+/**
  * Electron renderer 不支持 window.prompt；用轻量对话框代替。
  * @returns {Promise<string|null>} null = 取消
  */

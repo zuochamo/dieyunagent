@@ -235,17 +235,8 @@ function initSidePanel() {
   }
 }
 
-// Legacy aliases used across renderer modules
-function closeArtifactsPanelSilently() {
-  closeSidePanelSilently();
-}
-
 function closeBrowserPanelSilently() {
   closeSidePanelSilently();
-}
-
-function toggleArtifactsOverlay() {
-  toggleSidePanelTab('files');
 }
 
 function getSidePanelTab() {

@@ -91,11 +91,15 @@ function trimDieyunMdForInject(content, userQuery) {
   return picked.map((s) => (s.title ? `## ${s.title}\n\n${s.body}` : s.body)).join('\n\n').trim();
 }
 
-function formatDieyunMdInjectBlock(body) {
+/**
+ * 注入块文案的唯一实现在 Main：`dieyun-instructions.js` 的 `formatDieyunBlock`
+ * （IPC `workspace:format-dieyun-md`）。这里只决定「本轮注入哪几条 + 模式提示」，
+ * 不再复制 header / 前言（此前两份已漂移出「优先于长期记忆」的差异）。
+ */
+async function formatDieyunMdInjectBlock(body, filePath) {
   const text = String(body || '').trim();
   if (!text) return '';
-  const max = (CTX_LIMITS && CTX_LIMITS.DIEYUN_MD_MAX) || 6000;
-  const capped = text.length > max ? `${text.slice(0, max)}\n…（已截断）` : text;
+  if (typeof dieyunApi.formatDieyunMdBlock !== 'function') return '';
   const mode = getDieyunMdInjectMode();
   const modeHint =
     mode === 'auto'
@@ -103,11 +107,17 @@ function formatDieyunMdInjectBlock(body) {
       : mode === 'manual'
         ? '（手动 @dieyun.md 注入）'
         : '';
-  return (
-    `【全局用户规则 · dieyun.md】${modeHint}\n` +
-    '跨项目个人偏好；与 AGENTS.md 并存，与用户本轮输入冲突时以用户输入为准。\n\n' +
-    capped
-  );
+  try {
+    const block = await dieyunApi.formatDieyunMdBlock({
+      content: text,
+      filePath,
+      modeHint,
+      maxChars: (CTX_LIMITS && CTX_LIMITS.DIEYUN_MD_MAX) || 6000
+    });
+    return typeof block === 'string' ? block : '';
+  } catch {
+    return '';
+  }
 }
 
 async function buildDieyunMdSystemBlock(userQuery) {
@@ -118,7 +128,7 @@ async function buildDieyunMdSystemBlock(userQuery) {
     if (!d || !d.exists || !d.content) return '';
     const body = trimDieyunMdForInject(d.content, userQuery);
     if (!body) return '';
-    return formatDieyunMdInjectBlock(body);
+    return await formatDieyunMdInjectBlock(body, d.path);
   } catch {
     return '';
   }

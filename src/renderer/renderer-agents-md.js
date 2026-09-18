@@ -217,28 +217,17 @@ async function buildAgentsMdContext(userQuery, workspacePath) {
       content = rebuildSectionsDocument(rec.content, []);
     }
   }
-  const maxOverride = Math.min((CTX_LIMITS && CTX_LIMITS.AGENTS_MD_MAX) || 8000, 2800);
-  return formatAgentsMdBlock(content, workspacePath, maxOverride);
+  return formatAgentsMdBlock(content, workspacePath);
 }
 
-async function formatAgentsMdBlock(content, workspacePath, maxOverride) {
-  if (agentsApi.formatAgentsMdBlock) {
-    return agentsApi.formatAgentsMdBlock({ content, relativePath: AGENTS_MD_REL, workspacePath });
-  }
-  const body = String(content || '').trim();
-  if (!body) return '';
-  const max =
-    maxOverride != null
-      ? Number(maxOverride)
-      : (CTX_LIMITS && CTX_LIMITS.AGENTS_MD_MAX) || 8000;
-  const capped = body.length > max ? `${body.slice(0, max)}\n…（已截断）` : body;
-  return (
-    `【项目地图 · AGENTS.md】\n` +
-    (workspacePath ? `工作空间：${workspacePath}\n` : '') +
-    `文件：${AGENTS_MD_REL}\n` +
-    `与 ~/.dieyun/dieyun.md 全局准则并存；与用户最新输入冲突时以用户为准。更多章节用 fs_read_file 按需读取。\n\n` +
-    capped
-  );
+/**
+ * 注入块唯一实现在主进程 `agents-md.js` 的 `formatAgentsMdSystemBlock`
+ * （IPC `agents-md:format-block`）。这里只做转发，不再保留一份复制的文案与截断上限。
+ * 无 IPC（非 Electron 环境）时返回空串，由调用方省略该块。
+ */
+async function formatAgentsMdBlock(content, workspacePath) {
+  if (!agentsApi.formatAgentsMdBlock) return '';
+  return agentsApi.formatAgentsMdBlock({ content, relativePath: AGENTS_MD_REL, workspacePath });
 }
 
 function parseSectionsLite(content) {

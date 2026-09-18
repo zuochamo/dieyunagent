@@ -162,6 +162,19 @@
                         <path d="M19 11a7 7 0 0 1-14 0M12 18v3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
                       </svg>
                     </button>
+                    <button type="button" class="icon-btn composer-tool-icon-btn" id="btn-composer-path-perm" title="路径权限：受白名单限制" aria-label="路径权限" aria-pressed="false">
+                      <svg class="composer-path-perm-icon-normal" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                        <path d="M12 3.2 5 6v5.4c0 4.2 2.9 8 7 9.2 4.1-1.2 7-5 7-9.2V6l-7-2.8Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+                      </svg>
+                      <svg class="composer-path-perm-icon-unrestricted" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                        <g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="butt" stroke-linejoin="miter">
+                          <path d="M12 20.9 14.4 17.3V8.1H9.6v9.2L12 20.9Z" />
+                          <path d="M6.9 8.1h10.2" />
+                          <path d="M12 8.1v-5" />
+                          <path d="M10 3.1h4" />
+                        </g>
+                      </svg>
+                    </button>
                     <div class="composer-model-wrap" id="composer-model-wrap">
                       <button
                         type="button"
@@ -662,13 +675,10 @@
               <span class="field-label">服务 URL</span>
               <input type="url" id="mcp-config-url" placeholder="https://…" spellcheck="false" autocomplete="off" />
             </label>
-            <label class="field">
+            <div class="field">
               <span class="field-label">传输类型</span>
-              <select id="mcp-config-transport">
-                <option value="streamable-http">Streamable HTTP</option>
-                <option value="sse">SSE</option>
-              </select>
-            </label>
+              <div class="select-menu" id="mcp-config-transport"></div>
+            </div>
             <label class="field">
               <span class="field-label">鉴权 Header</span>
               <input type="text" id="mcp-config-auth-header" placeholder="Authorization" spellcheck="false" autocomplete="off" />
@@ -807,17 +817,20 @@
             <input type="text" id="automation-name" placeholder="例如：每日 AI 新闻推送" required />
           </label>
           <label class="field">
-            <span class="field-label">RRULE（可选，留空则用下方周期设置）</span>
+            <span class="field-label">RRULE（高级，默认由下方设置生成）</span>
             <input type="text" id="plan-rrule" placeholder="FREQ=DAILY;BYHOUR=9;BYMINUTE=0" spellcheck="false" />
-            <span class="field-hint">iCalendar 规则；对话创建的计划会自动填入。</span>
+            <span class="field-hint">iCalendar 规则；改下方设置会同步到这里，手动改写则以这里为准。</span>
           </label>
-          <label class="field" id="automation-skill-wrap">
+          <div class="field" id="automation-skill-wrap">
             <span class="field-label">关联技能（可选，智能体任务）</span>
-            <select id="automation-skill-id" class="field-select">
-              <option value="">不关联技能</option>
-            </select>
+            <div class="select-menu" id="automation-skill"></div>
             <span class="field-hint">执行时将 SKILL.md 注入模型上下文；在「技能列表」中启用后在此选择。</span>
-          </label>
+          </div>
+          <div class="field" id="automation-model-wrap">
+            <span class="field-label">模型（可选）</span>
+            <div class="select-menu" id="automation-model"></div>
+            <span class="field-hint">定时执行没有会话上下文，计划需自己记住模型；留空则用第一个可用供应商模型。</span>
+          </div>
           <label class="field" id="automation-prompt-wrap">
             <span class="field-label">提示词</span>
             <textarea id="automation-prompt" rows="4" placeholder="描述要执行的任务…"></textarea>
@@ -830,22 +843,11 @@
               <button type="button" class="automation-schedule-tab skills-category-tab" data-schedule="once">单次</button>
             </div>
             <div class="automation-schedule-panel active" data-schedule-panel="periodic">
-              <label class="field field-inline">
-                <select id="automation-periodic-unit">
-                  <option value="day">每天</option>
-                  <option value="week">每周</option>
-                </select>
-                <select id="automation-week-day" hidden>
-                  <option value="1">周一</option>
-                  <option value="2">周二</option>
-                  <option value="3">周三</option>
-                  <option value="4">周四</option>
-                  <option value="5">周五</option>
-                  <option value="6">周六</option>
-                  <option value="0">周日</option>
-                </select>
+              <div class="field field-inline">
+                <div class="select-menu" id="automation-periodic-unit"></div>
+                <div class="select-menu" id="automation-week-day" hidden></div>
                 <input type="time" id="automation-daily-time" value="09:00" />
-              </label>
+              </div>
             </div>
             <div class="automation-schedule-panel" data-schedule-panel="interval">
               <label class="field field-inline">
@@ -1248,6 +1250,7 @@
               <label class="check-row"><input type="checkbox" id="perm-sql-read" checked /><span>SQL Server 只读查询</span></label>
               <label class="check-row"><input type="checkbox" id="perm-web-fetch" checked /><span>联网抓取</span></label>
               <label class="check-row"><input type="checkbox" id="perm-browser" checked /><span>浏览器自动化</span></label>
+              <label class="check-row"><input type="checkbox" id="perm-unrestricted-paths" /><span>完全放开路径限制</span></label>
               <label class="check-row"><input type="checkbox" id="perm-lsp-diagnostics" checked /><span>启用 LSP 诊断注入</span></label>
               <label class="check-row"><input type="checkbox" id="perm-workplace-monitor" checked /><span>工位监控上报</span></label>
               <div class="theme-long-horizon-options">
@@ -1719,7 +1722,7 @@
               <div class="help-about-panel">
                 <h3 class="help-about-name">叠云 Agent</h3>
                 <p class="help-about-version" id="help-about-version">版本加载中…</p>
-                <p class="help-about-desc">本地 AI 助手 · 叠云会计服务</p>
+                <p class="help-about-desc">本地 AI 助手 · 叠云 Agent</p>
                 <p class="field-hint">日志保存在本机用户目录，包含应用主进程与 Gateway 等记录。</p>
               </div>
             </div>
@@ -1747,11 +1750,11 @@
             <span class="field-label">API Key</span>
             <input type="password" id="defined-model-editor-api-key" placeholder="sk-..." autocomplete="off" />
           </label>
-          <label class="field">
+          <div class="field">
             <span class="field-label">Context 档位</span>
-            <select id="defined-model-editor-context-tier" class="context-tier-select"></select>
+            <div class="select-menu context-tier-select" id="defined-model-editor-context-tier"></div>
             <p class="field-hint">未指定时按模型名称推断；档位参数在「帮助 → 编码参数」中按档编辑。</p>
-          </label>
+          </div>
           <label class="field">
             <span class="field-label">上下文窗口（可选）</span>
             <input type="number" id="defined-model-editor-context-window" min="8192" max="2000000" step="1024" placeholder="留空则使用档位窗口" />
@@ -1836,11 +1839,11 @@
             <span class="field-label">API Key</span>
             <input type="password" id="supplier-editor-api-key" placeholder="sk-..." autocomplete="off" />
           </label>
-          <label class="field">
+          <div class="field">
             <span class="field-label">默认 Context 档位</span>
-            <select id="supplier-editor-context-tier" class="context-tier-select"></select>
+            <div class="select-menu context-tier-select" id="supplier-editor-context-tier"></div>
             <span class="field-hint">该供应商下未单独指定的模型使用此档位；档位参数在「编码参数」中按档编辑。</span>
-          </label>
+          </div>
           <div class="supplier-editor-models-section">
             <div class="supplier-editor-models-head">
               <span class="field-label">可用模型</span>
@@ -1946,20 +1949,12 @@
     <div class="agent-toast-stack" id="agent-toast-stack" aria-live="polite" aria-relevant="additions"></div>
 
     <!-- core: limits, guardrails, theme, i18n -->
-    <script src="../agent/model-runtime-presets.js"></script>
-    <script src="../agent/model-runtime-schema.js"></script>
-    <script src="../agent/agent-limits.js"></script>
-    <script src="../agent/task-tier.js"></script>
-    <script src="../agent/agent-limits-by-tier.js"></script>
-    <script src="../agent/model-runtime-by-tier.js"></script>
+    <script src="./core/namespaces.js"></script>
+    <!-- agent 层统一由构建产物提供：src/renderer/agent/agent-bundle-entry.js -> scripts/build-agent-bundle.cjs -->
+    <script src="./dist/agent-bundle.js"></script>
     <script src="./renderer-context-engine.js"></script>
-    <script src="../agent/guardrails-shared.js"></script>
-    <script src="../agent/tool-catalog.js"></script>
-    <script src="../agent/tool-classify.js"></script>
-    <script src="../agent/agent-round-text.js"></script>
     <script src="./agent-guardrails.js"></script>
     <script src="./renderer-utils.js"></script>
-    <script src="./core/namespaces.js"></script>
     <script src="./core/bootstrap.js"></script>
     <script src="./renderer-mermaid.js"></script>
     <script src="./renderer-i18n.js"></script>
@@ -1974,6 +1969,10 @@
     <script src="./renderer-worktrees-settings.js"></script>
     <!-- gateway + workspace panels -->
     <script src="./renderer-gateway.js"></script>
+    <!-- 通用 UI 基础设施：直角自定义下拉（原生 select 的弹出列表圆角无法用 CSS 去掉） -->
+    <script src="./renderer-select-menu.js"></script>
+    <!-- 定时任务调度字段的唯一实现（rrule ⇄ 表单），编辑器与列表共用 -->
+    <script src="./renderer-automation-schedule.js"></script>
     <script src="./renderer-automation.js"></script>
     <script src="./renderer-problems.js"></script>
     <script src="./renderer-monaco-core.js"></script>
@@ -2002,11 +2001,6 @@
     <script src="./renderer-chat-bubbles.js"></script>
     <script src="./renderer-chat-render.js"></script>
     <script src="./renderer-session-message-cache.js"></script>
-    <script src="../agent/run-events.js"></script>
-    <script src="../agent/session-transcript.js"></script>
-    <script src="../agent/session-context.js"></script>
-    <script src="../agent/agent-system-prompt.js"></script>
-    <script src="../agent/reviewer-json.js"></script>
     <script src="./renderer-agent-session.js"></script>
     <script src="./agent/trace-store.js"></script>
     <script src="./agent/worktree-ui.js"></script>

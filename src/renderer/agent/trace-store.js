@@ -54,16 +54,31 @@ async function saveAgentRunState({ runId, sessionId, userMessageId, assistantMes
   }
 }
 
+/**
+ * UI 专用字段不落库。
+ * `liveNote`（「上游 Ns 无数据」）是运行中的瞬时状态；存下来会在下次打开会话时
+ * 显示成过期的等待提示，所以所有 trace 落库前统一剥离，只留真正的思考/工具内容。
+ */
+function stripTraceUiOnlyFields(trace) {
+  return (trace || []).map((entry) => {
+    if (!entry || typeof entry !== 'object' || entry.liveNote == null) return entry;
+    const next = { ...entry };
+    delete next.liveNote;
+    return next;
+  });
+}
+
 async function saveAssistantTraceRecord({ runId, sessionId, messageId, userMessageId, trace, status, summary, stateSnapshot }) {
   if (!gwState.authed || !runId || !trace || !trace.length) return null;
+  const persistable = stripTraceUiOnlyFields(trace);
   try {
     return await gatewayCall('agent.trace_save', {
       runId,
       sessionId,
       messageId,
       userMessageId,
-      trace,
-      traceText: formatTracePlain(trace),
+      trace: persistable,
+      traceText: formatTracePlain(persistable),
       phase: 'assistant',
       status: status || 'completed',
       summary,
@@ -151,7 +166,7 @@ function maybeSaveRunningTraceCheckpoint(live, params = {}) {
 }
 
 function normalizeStoppedTrace(trace) {
-  return (trace || []).map((entry) => {
+  return stripTraceUiOnlyFields(trace).map((entry) => {
     const full = String(entry.fullThought || '').trim();
     let thought = full || String(entry.thought || '').trim();
     if (!thought || thought === '请求中…') thought = full || '（已停止）';
@@ -373,10 +388,6 @@ async function tryDetectResumeCheckpoint(sessionId) {
   }
 }
 
-function initAgentResumeBanner() {
-  // 已移除横幅 UI；恢复逻辑改为 withdrawUserTurn 触发
-}
-
 window.DieyunNamespaces.register(
   'DieyunAgent',
   {
@@ -390,8 +401,7 @@ window.DieyunNamespaces.register(
     tryDetectResumeCheckpoint,
     getPendingResumeCheckpoint,
     setPendingResumeCheckpoint,
-    clearPendingResumeCheckpoint,
-    initAgentResumeBanner
+    clearPendingResumeCheckpoint
   },
   {
     compat: [
@@ -405,8 +415,7 @@ window.DieyunNamespaces.register(
       'tryDetectResumeCheckpoint',
       'getPendingResumeCheckpoint',
       'setPendingResumeCheckpoint',
-      'clearPendingResumeCheckpoint',
-      'initAgentResumeBanner'
+      'clearPendingResumeCheckpoint'
     ]
   }
 );

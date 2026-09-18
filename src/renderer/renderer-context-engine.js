@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, settings, getComposerAgentMode, compactPlainText, getContextFilePathsForAgent, getSessionChangeRowsForAgent, getAgentLimits, withSessionRpcScope, currentSessionId, getMergedContextFilePaths, resolveSessionWorkspacePath, resolveSessionWorkspacePathSync */
+/* global gatewayCall, gwState, settings, getComposerAgentMode, compactPlainText, getContextFilePathsForAgent, getSessionChangeRowsForAgent, getAgentLimits, withSessionRpcScope, currentSessionId, getMergedContextFilePaths, resolveSessionWorkspacePath, resolveSessionWorkspacePathSync, CHARS_PER_TOKEN, CJK_CHARS_PER_TOKEN */
 'use strict';
 
 function extractPathHintsFromText(text) {
@@ -14,17 +14,33 @@ function extractPathHintsFromText(text) {
   return paths.slice(0, 6);
 }
 
+/**
+ * 下面带「→ agent-limits」注释的键，唯一来源是 src/agent/agent-limits.js：
+ * 值从 `AGENT_LIMITS_DEFAULTS` 映射，不再在本文件重复字面量 —— 改那边的默认值即生效。
+ * agent-limits.js 在 index.html 中先于本文件加载（1951 < 1955），
+ * 取法与会话上下文（session-context.js 的 visionPartEquivChars）一致，均为懒读。
+ * 兜底实参只在加载顺序异常时才会命中，届时会打一条 warn。
+ */
+const CTX_AGENT_LIMITS_DEFAULTS =
+  (typeof window !== 'undefined' && window.AGENT_LIMITS_DEFAULTS) || {};
+
+let ctxLimitsWarnedMissingAgentDefaults = false;
+function ctxAgentLimitDefault(key, fallback) {
+  const n = Number(CTX_AGENT_LIMITS_DEFAULTS[key]);
+  if (Number.isFinite(n)) return n;
+  if (!ctxLimitsWarnedMissingAgentDefaults) {
+    ctxLimitsWarnedMissingAgentDefaults = true;
+    console.warn(`[ctx-limits] AGENT_LIMITS_DEFAULTS 不可用（${key}），已退回本地兜底值`);
+  }
+  return fallback;
+}
+
 const CTX_LIMITS = {
-  AGENTS_MD_MAX: 8000,
+  // —— 本文件独有：agent-limits 无对应键 ——
+  /** AGENTS.md 注入字符上限；与 system-prompt-prep.js 的 DEFAULT_LIMITS.AGENTS_MD_MAX 保持一致 */
+  AGENTS_MD_MAX: 2800,
   DIEYUN_MD_MAX: 6000,
-  SKILL_BODY_MAX: 3500,
-  SKILL_FULL_COUNT: 3,
-  SKILL_TOTAL_COUNT: 5,
-  /** 技能只注入索引，全文用 fs_read_file */
-  SKILL_CATALOG_MODE: true,
-  CODEBASE_AUTO_LIMIT: 12,
   CODEBASE_MENTION_LIMIT: 16,
-  CODEBASE_SNIPPET_MAX: 2400,
   /** 结构索引 repo map 枢纽符号上限 */
   GRAPH_REPO_MAP_LIMIT: 32,
   GRAPH_REPO_MAP_MAX_CHARS: 4500,
@@ -38,7 +54,6 @@ const CTX_LIMITS = {
   /** Wiki 召回条数与摘要字符上限 */
   WIKI_RECALL_LIMIT: 5,
   WIKI_SUMMARY_MAX: 120,
-  TOOL_RESULT_MAX_JSON: 14000,
   TOOL_FIELD_LIMITS: {
     fs_read_file: { data: 12000 },
     host_exec: { stdout: 8000, stderr: 4000, output: 8000 },
@@ -49,22 +64,26 @@ const CTX_LIMITS = {
     lsp: { locations: 8000, hover: 4000 },
     sql_query: { rows: 6000, data: 6000 }
   },
-  /** 每段 Agent 请求的工具调用上限；继续后重置计数（可在设置中调整） */
-  AGENT_TOOL_CALL_LIMIT: 150,
-  OPEN_FILES_MAX: 12,
   FILE_PREVIEW_MAX_BYTES: 48000,
-  FILE_PREVIEW_MAX_CHARS: 4000,
-  COMPLETION_HISTORY_MAX_CHARS: 96000,
-  COMPLETION_MESSAGE_MAX_CHARS: 8000,
-  COMPLETION_LAST_USER_MAX_CHARS: 24000,
-  COMPLETION_TURN_RIDE_MAX_CHARS: 32000,
-  COMPLETION_RECENT_TURNS: 12,
-  COMPLETION_FOLDED_MAX_CHARS: 8000,
-  LLM_REQUEST_MAX_CHARS: 800000,
   RECENT_CHANGE_MAX: 16,
-  LSP_DIAG_MAX_CHARS: 10000,
-  LSP_DIAG_MAX_FILES: 24,
-  LSP_DIAG_TIMEOUT_MS: 5000
+
+  // —— 以下与 agent-limits.js 单一来源 ——
+  /** 每段 Agent 请求的工具调用上限；继续后重置计数（可在设置中调整） */
+  AGENT_TOOL_CALL_LIMIT: ctxAgentLimitDefault('ctxAgentToolCallLimit', 150),
+  TOOL_RESULT_MAX_JSON: ctxAgentLimitDefault('toolResultMaxJson', 14000),
+  CODEBASE_SNIPPET_MAX: ctxAgentLimitDefault('codebaseSnippetMax', 2400),
+  CODEBASE_AUTO_LIMIT: ctxAgentLimitDefault('codebaseAutoLimit', 12),
+  OPEN_FILES_MAX: ctxAgentLimitDefault('openFilesMax', 12),
+  FILE_PREVIEW_MAX_CHARS: ctxAgentLimitDefault('filePreviewMaxChars', 4000),
+  COMPLETION_HISTORY_MAX_CHARS: ctxAgentLimitDefault('completionHistoryMaxChars', 96000),
+  COMPLETION_MESSAGE_MAX_CHARS: ctxAgentLimitDefault('completionMessageMaxChars', 8000),
+  COMPLETION_LAST_USER_MAX_CHARS: ctxAgentLimitDefault('completionLastUserMaxChars', 24000),
+  COMPLETION_TURN_RIDE_MAX_CHARS: ctxAgentLimitDefault('completionTurnRideMaxChars', 32000),
+  COMPLETION_RECENT_TURNS: ctxAgentLimitDefault('completionRecentTurns', 24),
+  COMPLETION_FOLDED_MAX_CHARS: ctxAgentLimitDefault('completionFoldedMaxChars', 12000),
+  LLM_REQUEST_MAX_CHARS: ctxAgentLimitDefault('llmRequestMaxChars', 800000),
+  // LSP 诊断只限「注入字符数」；文件数 / 单文件条数 / 超时的唯一来源是 lsp-settings
+  LSP_DIAG_MAX_CHARS: ctxAgentLimitDefault('lspDiagMaxChars', 10000)
 };
 
 function ctxLimitsFor(opts = {}) {
@@ -84,8 +103,6 @@ function ctxLimitsFor(opts = {}) {
   if (L.completionFoldedMaxChars != null) out.COMPLETION_FOLDED_MAX_CHARS = L.completionFoldedMaxChars;
   if (L.llmRequestMaxChars != null) out.LLM_REQUEST_MAX_CHARS = L.llmRequestMaxChars;
   if (L.lspDiagMaxChars != null) out.LSP_DIAG_MAX_CHARS = L.lspDiagMaxChars;
-  if (L.lspDiagMaxFiles != null) out.LSP_DIAG_MAX_FILES = L.lspDiagMaxFiles;
-  if (L.lspDiagTimeoutMs != null) out.LSP_DIAG_TIMEOUT_MS = L.lspDiagTimeoutMs;
   return out;
 }
 
@@ -415,7 +432,8 @@ function estimateTextTokens(text) {
   const s = String(text || '');
   const cjk = (s.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
   const other = s.length - cjk;
-  return Math.ceil(cjk / 1.5 + other / 3.2);
+  // 系数唯一来源 agent-limits.js（与 Rust compaction/tokens.rs 同值）
+  return Math.ceil(cjk / CJK_CHARS_PER_TOKEN + other / CHARS_PER_TOKEN);
 }
 
 function estimateMessagesTokens(msgs) {
@@ -579,13 +597,8 @@ async function getLspSettingsCached() {
   } catch {
     // ignore
   }
-  return {
-    enabled: true,
-    timeoutMs: CTX_LIMITS.LSP_DIAG_TIMEOUT_MS,
-    maxFiles: CTX_LIMITS.LSP_DIAG_MAX_FILES,
-    maxPerFile: 20,
-    minSeverity: 'warning'
-  };
+  // settings_get 失败时不编造文件数/超时：留空交给 Gateway 侧 lsp-settings 决定
+  return { enabled: true, minSeverity: 'warning' };
 }
 
 function invalidateLspSettingsCache() {
@@ -599,6 +612,12 @@ function normalizePathKey(p) {
     .replace(/\\/g, '/')
     .toLowerCase();
 }
+
+/**
+ * 诊断 RPC 传输超时兜底：lsp-settings 未给出超时（如 settings_get 失败）时，
+ * 只决定「这次调用等多久」，不改变 LSP 分析超时本身 —— 后者归 lsp-settings。
+ */
+const LSP_DIAG_RPC_FALLBACK_TIMEOUT_MS = 8000;
 
 function mergeDiagnosticsFilePaths(userQuery, opts = {}) {
   const out = [];
@@ -640,8 +659,9 @@ function mergeDiagnosticsFilePaths(userQuery, opts = {}) {
     }
   }
 
-  const maxFiles = opts.maxFiles != null ? opts.maxFiles : CTX_LIMITS.LSP_DIAG_MAX_FILES;
-  return out.slice(0, maxFiles);
+  // 未显式给上限就不在本地截断：文件数由 Gateway 侧 lsp-settings 统一裁决
+  const maxFiles = Number(opts.maxFiles);
+  return Number.isFinite(maxFiles) && maxFiles > 0 ? out.slice(0, maxFiles) : out;
 }
 
 function toDisplayPath(filePath, workspaceRoot) {
@@ -763,19 +783,17 @@ async function fetchWorkspaceDiagnosticsContext(userQuery, opts = {}) {
           : [];
   }
 
+  // 文件数与超时的唯一来源是 lsp-settings（Gateway 侧 lsp-settings.json）；
+  // agent-limits 只提供注入字符上限（lim.LSP_DIAG_MAX_CHARS）。
+  const maxFiles = opts.maxFiles || lspSettings.maxFiles;
+  const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : lspSettings.timeoutMs;
+
   const files = mergeDiagnosticsFilePaths(userQuery, {
     pathHints: mergedPaths,
-    maxFiles: opts.maxFiles || lspSettings.maxFiles || lim.LSP_DIAG_MAX_FILES,
+    maxFiles,
     sessionId: opts.sessionId,
     skipUiPaths
   });
-
-  const timeoutMs =
-    opts.timeoutMs != null
-      ? opts.timeoutMs
-      : lspSettings.timeoutMs || lim.LSP_DIAG_TIMEOUT_MS;
-
-  const maxFiles = opts.maxFiles || lspSettings.maxFiles || lim.LSP_DIAG_MAX_FILES;
 
   try {
     const diagParams =
@@ -803,7 +821,12 @@ async function fetchWorkspaceDiagnosticsContext(userQuery, opts = {}) {
             useDiagnosticStore: opts.useDiagnosticStore !== false,
             includeGitDirty: opts.includeGitDirty !== false
           };
-    const data = await gatewayCallWithTimeout('workspace.diagnostics', diagParams, timeoutMs + 4000);
+    const analysisTimeoutMs = Number(timeoutMs);
+    const rpcTimeoutMs =
+      (Number.isFinite(analysisTimeoutMs) && analysisTimeoutMs > 0
+        ? analysisTimeoutMs
+        : LSP_DIAG_RPC_FALLBACK_TIMEOUT_MS) + 4000;
+    const data = await gatewayCallWithTimeout('workspace.diagnostics', diagParams, rpcTimeoutMs);
     let block = '';
     if (data && data.ok && data.enabled !== false && Array.isArray(data.items) && data.items.length) {
       block = formatDiagnosticsBlock(
