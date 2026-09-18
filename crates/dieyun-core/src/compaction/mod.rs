@@ -65,15 +65,22 @@ pub struct PrepareParams {
     pub prompts: CompactionPrompts,
 }
 
+/// 与 `model-runtime-presets.js` 的「默认」档（128K）对齐：
+/// 128_000 − 16_384(maxOutputTokens) − 16_384(contextReserveTokens)。
 fn default_budget() -> usize {
-    96_000
+    95_232
 }
 fn default_trigger() -> f64 {
-    0.72
+    0.85
 }
 fn default_cooldown() -> i64 {
     6
 }
+
+/// 压缩成功后写入的轮次计数。必须 >0 且 < `default_cooldown()`：
+/// 计数为 0 时 `prepare` 的冷却条件（`>0 && < cool_down`）不成立，
+/// 压力未解除时会在下一轮立刻复压，每次最多拖住发送 210s。
+const POST_COMPACTION_ROUND_COUNT: i64 = 1;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,61 +184,55 @@ pub fn prepare(params: PrepareParams) -> Result<PrepareResult, crate::error::Cor
         .collect();
 
     if let Some(prev) = &params.cumulative_summary {
-        let middle_start = compressible.len() / 2;
-        let middle_atoms: Vec<Atom> = compressible
+        // 摘要提示与折叠集合必须同源：只把「本次真正会被折叠」的原子喂给摘要模型。
+        // 若提示取前一半、折叠取前 3/4，错位的那部分会被折叠却从未进入摘要，
+        // 只有 apply() 里的 file_ops 能靠路径幸存，叙述内容静默丢失。
+        let folded_indices: Vec<usize> = compressible
             .iter()
-            .take(middle_start)
-            .map(|(_, a)| (*a).clone())
+            .filter(|(i, _)| !recent_set.contains(i))
+            .map(|(i, _)| *i)
             .collect();
-        if middle_atoms.len() >= 2 {
-            let folded_indices: Vec<usize> = compressible
-                .iter()
-                .filter(|(i, _)| !recent_set.contains(i))
-                .map(|(i, _)| *i)
-                .collect();
-            if !folded_indices.is_empty() {
-                let folded_atoms: Vec<Atom> =
-                    folded_indices.iter().map(|i| atoms[*i].clone()).collect();
-                let conversation = atoms::format_atoms_for_summary(&middle_atoms)
-                    .chars()
-                    .take(32_000)
-                    .collect::<String>();
-                let prev_text = if prev.is_string() {
-                    prev.as_str().unwrap_or("").to_string()
-                } else {
-                    prev.to_string()
-                };
-                let inc_user = if params.prompts.incremental_user.is_empty() {
-                    format!("Previous summary:\n{prev_text}\n\nNew conversation:\n{conversation}")
-                } else {
-                    params
-                        .prompts
-                        .incremental_user
-                        .replace("{PREVIOUS_SUMMARY}", &prev_text)
-                        .replace("{NEW_CONVERSATION}", &conversation)
-                };
-                let inc_system = if params.prompts.incremental_system.is_empty() {
-                    params.prompts.system.clone()
-                } else {
-                    params.prompts.incremental_system.clone()
-                };
-                return Ok(PrepareResult {
-                    compacted: false,
-                    tokens_before: Some(est),
-                    tokens_after: None,
-                    need_llm: Some(LlmCompactRequest {
-                        mode: "incremental".into(),
-                        system: inc_system,
-                        user: inc_user,
-                        folded_indices,
-                        folded_transcript: atoms::format_atoms_for_summary(&folded_atoms)
-                            .chars()
-                            .take(120_000)
-                            .collect(),
-                        tokens_before: est,
-                    }),
-                });
-            }
+        let folded_atoms: Vec<Atom> = folded_indices.iter().map(|i| atoms[*i].clone()).collect();
+        if folded_atoms.len() >= 2 {
+            let conversation = atoms::format_atoms_for_summary(&folded_atoms)
+                .chars()
+                .take(32_000)
+                .collect::<String>();
+            let prev_text = if prev.is_string() {
+                prev.as_str().unwrap_or("").to_string()
+            } else {
+                prev.to_string()
+            };
+            let inc_user = if params.prompts.incremental_user.is_empty() {
+                format!("Previous summary:\n{prev_text}\n\nNew conversation:\n{conversation}")
+            } else {
+                params
+                    .prompts
+                    .incremental_user
+                    .replace("{PREVIOUS_SUMMARY}", &prev_text)
+                    .replace("{NEW_CONVERSATION}", &conversation)
+            };
+            let inc_system = if params.prompts.incremental_system.is_empty() {
+                params.prompts.system.clone()
+            } else {
+                params.prompts.incremental_system.clone()
+            };
+            return Ok(PrepareResult {
+                compacted: false,
+                tokens_before: Some(est),
+                tokens_after: None,
+                need_llm: Some(LlmCompactRequest {
+                    mode: "incremental".into(),
+                    system: inc_system,
+                    user: inc_user,
+                    folded_indices,
+                    folded_transcript: atoms::format_atoms_for_summary(&folded_atoms)
+                        .chars()
+                        .take(120_000)
+                        .collect(),
+                    tokens_before: est,
+                }),
+            });
         }
     }
 
@@ -460,7 +461,7 @@ pub async fn maybe_compact(
         summary: Some(applied.summary),
         folded_transcript: folded,
         pinned_user_count: applied.pinned_user_count,
-        compaction_round_count: 0,
+        compaction_round_count: POST_COMPACTION_ROUND_COUNT,
         cumulative_summary: Some(summary_json),
         llm_usage: llm_resp.usage,
         llm_model: Some(llm_resp.model),
@@ -478,11 +479,11 @@ pub fn estimate(params: &Value) -> Value {
     let budget = params
         .get("tokenBudget")
         .and_then(|v| v.as_u64())
-        .unwrap_or(96_000) as usize;
+        .unwrap_or_else(|| default_budget() as u64) as usize;
     let ratio = params
         .get("triggerRatio")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.72);
+        .unwrap_or_else(default_trigger);
     let used = estimate_messages_tokens(&messages);
     json!({
         "tokens": used,
@@ -589,5 +590,91 @@ mod tests {
             "digest should keep edited path, got {digest}"
         );
         assert_eq!(applied.summary["filesModified"][0], "src/app.js");
+    }
+
+    /// 增量压缩：摘要提示覆盖的原子必须与 folded_indices 完全一致，
+    /// 否则错位部分的叙述内容会被折叠却从未被摘要。
+    #[test]
+    fn incremental_prompt_covers_every_folded_atom() {
+        let big = "测".repeat(2_000);
+        let mut messages = vec![json!({"role":"user","content":"task"})];
+        for i in 0..8 {
+            messages.push(json!({
+                "role":"assistant",
+                "content": format!("atom-{i} {big}")
+            }));
+        }
+        let r = prepare(PrepareParams {
+            messages,
+            token_budget: 8192,
+            trigger_ratio: 0.85,
+            cool_down_rounds: 6,
+            force: false,
+            compaction_round_count: 0,
+            cumulative_summary: Some(json!("prev summary")),
+            prompts: CompactionPrompts::default(),
+        })
+        .unwrap();
+        let need = r.need_llm.expect("should request incremental summary");
+        assert_eq!(need.mode, "incremental");
+        // 压缩集 = 全部 8 个 assistant 原子去掉最近 1/4（末 2 个）→ atoms[1..=6]
+        assert_eq!(need.folded_indices, vec![1, 2, 3, 4, 5, 6]);
+        // 每一个将被折叠的原子都必须出现在摘要提示里（旧实现只喂前一半，丢掉 atom-4/5）
+        for i in 0..6 {
+            assert!(
+                need.user.contains(&format!("atom-{i}")),
+                "prompt must cover folded atom-{i}"
+            );
+        }
+        // 最近的原子不折叠，也不该被当成本次压缩对象
+        assert!(!need.user.contains("atom-6"));
+    }
+
+    /// 冷却：刚压过一轮（round_count = POST_COMPACTION_ROUND_COUNT）时不得复压。
+    #[test]
+    fn cooldown_blocks_compaction_right_after_a_round() {
+        let huge = "x".repeat(80_000);
+        let r = prepare(PrepareParams {
+            messages: vec![
+                json!({"role":"user","content": huge}),
+                json!({"role":"assistant","content": huge}),
+                json!({"role":"assistant","content": huge}),
+            ],
+            token_budget: 8192,
+            trigger_ratio: 0.85,
+            cool_down_rounds: 6,
+            force: false,
+            compaction_round_count: POST_COMPACTION_ROUND_COUNT,
+            cumulative_summary: None,
+            prompts: CompactionPrompts::default(),
+        })
+        .unwrap();
+        assert!(
+            r.need_llm.is_none(),
+            "cooldown must suppress compaction after a recent round"
+        );
+        // force 必须能穿透冷却（上下文溢出兜底路径依赖它）
+        let forced = prepare(PrepareParams {
+            messages: vec![
+                json!({"role":"user","content": huge}),
+                json!({"role":"assistant","content": huge}),
+                json!({"role":"assistant","content": huge}),
+            ],
+            token_budget: 8192,
+            trigger_ratio: 0.85,
+            cool_down_rounds: 6,
+            force: true,
+            compaction_round_count: POST_COMPACTION_ROUND_COUNT,
+            cumulative_summary: None,
+            prompts: CompactionPrompts::default(),
+        })
+        .unwrap();
+        assert!(forced.need_llm.is_some(), "force must bypass cooldown");
+    }
+
+    #[test]
+    fn post_compaction_round_count_stays_inside_cooldown() {
+        assert!(POST_COMPACTION_ROUND_COUNT > 0);
+        assert!(POST_COMPACTION_ROUND_COUNT < default_cooldown());
     }
 }

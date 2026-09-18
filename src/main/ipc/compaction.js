@@ -37,6 +37,7 @@ function registerCompactionIpc(ctx) {
     return agent.maybeCompactMessages(Array.isArray(payload.messages) ? payload.messages : [], {
       tokenBudget,
       force: !!payload.force,
+      toolsChars: payload.toolsChars,
       sessionId: payload.sessionId || null,
       apiConfig: {
         baseUrl: (payload.apiConfig && payload.apiConfig.baseUrl) || settings.baseUrl,

@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, syncLiveWriteFromTrace, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, syncLiveWriteFromTrace, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, CHARS_PER_TOKEN */
 'use strict';
 
 function estimateContextTokensFallback(msgs) {
@@ -12,11 +12,20 @@ function estimateContextTokensFallback(msgs) {
           })
           .join('\n')
       : m.content;
-    return sum + Math.ceil(String(content || '').length / 3.2) + 6;
+    return sum + Math.ceil(String(content || '').length / CHARS_PER_TOKEN) + 6;
   }, 0);
 }
 
 const ESTIMATE_TOKENS_MESSAGE_CHAR_CAP = 16000;
+
+/** 工具 schema 字符数：不计入 messages，但占真实窗口；交给压缩层从输入预算里扣。 */
+function toolsSchemaChars(tools) {
+  try {
+    return Array.isArray(tools) ? JSON.stringify(tools).length : 0;
+  } catch {
+    return 0;
+  }
+}
 
 function truncateMessagesForContextEstimate(messages) {
   const cap = ESTIMATE_TOKENS_MESSAGE_CHAR_CAP;
@@ -48,7 +57,7 @@ async function estimateMessagesTokensViaMain(messages) {
     ).length;
   }
   if (chars > 48000) {
-    return Math.ceil(chars / 3.2) + list.length * 6;
+    return Math.ceil(chars / CHARS_PER_TOKEN) + list.length * 6;
   }
   const msgs = truncateMessagesForContextEstimate(list);
   if (typeof window.diecloud?.compactionEstimateTokens === 'function') {
@@ -124,6 +133,7 @@ async function maybeCompactMessagesViaMain(messages, opts = {}) {
     messages,
     tokenBudget: opts.tokenBudget || getEffectiveInputBudget(),
     force: !!opts.force,
+    toolsChars: Number(opts.toolsChars) || 0,
     sessionId: opts.sessionId || null,
     model: opts.model || '',
     apiConfig: opts.apiConfig || {
@@ -189,6 +199,7 @@ async function applyContextCompaction(body, opts = {}) {
       tokenBudget: getEffectiveInputBudget(),
       model: body.model,
       sessionId: opts.sessionId || undefined,
+      toolsChars: toolsSchemaChars(body.tools),
       ...opts
     });
   } catch (err) {
