@@ -142,13 +142,20 @@ flowchart LR
    - 切换历史对话时，渲染进程 `applySessionWorkspace()` 把该会话绑定的路径写回 Gateway 全局。
    - 用户点文件夹图标选路径时，`setCurrentWorkspace()` 同时更新 Gateway + 当前会话记录。
 
-**读根**（`_collectReadRoots`）：gateway-readable 目录、userData、`~/.dieyun`、技能目录、工作空间、开发态额外根等。
+**读根**（`_collectReadRoots`）：gateway-readable、userData、`~/.dieyun`、技能目录、默认 workspace（`~/.dieyun/workspace`）、用户主目录、系统临时目录、当前与并行会话工作空间、开发态额外根。
 
-**写根**（`_collectWritableRoots`）：更窄——gateway-readable、`~/.dieyun/skills`、当前工作空间（或 `~/.dieyun/workspace`）。
+**写根**（`_collectWritableRoots`）：gateway-readable、`~/.dieyun/skills`、默认 workspace、用户主目录、系统临时目录、当前与并行会话工作空间。
+
+**远程根**（`src/ssh/remote-path.js` `remoteAllowedRoots`）：远程工作空间根 + `<远程 HOME>` + `/tmp`；HOME 由 ssh 层连接时探测并缓存（`session-manager.getHomeDir`），供同步的路径判定使用。
+
+> **⚠ 完全放开路径限制**（设置页「本机权限 · 完全放开路径限制」，落盘于 `permissions.unrestrictedPaths`，**默认关闭**）：
+> 开启后本地读/写根 = 本机所有卷根（Windows 枚举盘符）、远程根 = `/`，等于不再做路径校验。
+> 白名单组装点仍只有两处：`gateway/server.js` 与 `ssh/remote-path.js`，其它模块只消费，勿再复制判定。
 
 相对路径解析：`src/gateway/host-control.js` 的 `normalizeFilePathInput()`，基于 `defaultCwd`。
 
 > **原理**：用户选的工作空间 = 主动扩大 Agent 可写范围；未选时用 `~/.dieyun/workspace` 作为默认落盘处。
+> 默认 workspace / 主目录 / 临时目录恒定可用，避免「工作空间权限不足时无处落脚」。
 
 ---
 
@@ -341,7 +348,7 @@ flowchart TB
 
   ship -->|首次启动 seed 复制不覆盖| home
   home --> Scan[scanner.js 扫描 SKILL.md]
-  Scan --> Prompt[buildSkillsPrompt 注入 system]
+  Scan --> Prompt[fetchSkillsBlock 注入 system]
 ```
 
 - **Bundled**：随安装包发布（`extraResources` + `asarUnpack`）。
@@ -378,18 +385,81 @@ Agent 也可用 `skill_create` IPC 在用户目录新建技能。
 
 ## 9. 定时任务（Plans）
 
-**注意：定时任务 ≠ 对话 Agent。**
+**注意：定时任务与对话 Agent 共用会话与运行态，但不是同一次运行。**
 
-| 对比  | 对话 Agent        | 定时任务 Plans                            |
-| --- | --------------- | ------------------------------------- |
-| 入口  | 主聊天             | 技能弹窗 → 定时任务 / `plan_create` 工具        |
-| 执行  | 多轮工具循环          | **单次** LLM 调用（`plans/runner.js`）      |
-| 存储  | SQLite messages | `userData/plans.json`（RRULE / onceAt） |
-| 投递  | 当场显示            | `deliver.sessionId` 把结果写入指定会话         |
+| 对比  | 对话 Agent        | 定时任务 Plans                                    |
+| --- | --------------- | --------------------------------------------- |
+| 入口  | 主聊天             | 技能弹窗 → 定时任务 / `plan_create` 工具                |
+| 执行  | 多轮工具循环（Renderer 发起） | 多轮工具循环（**Main 调度器发起**，`plans/plan-agent-runner.js`）；core 不可用时降级为单次 LLM（`plans/runner.js`） |
+| 存储  | SQLite messages | `userData/plans.json`（RRULE / onceAt）+ 计划专用会话  |
+| 投递  | 当场显示            | **运行时**即写入计划专用会话（`plan-run-turn.js`，同 `deliver.sessionId`） |
 
-**设计原因**：计划任务要可预测、低成本、少副作用；复杂自动化应让用户明确指定会话与技能子集。
+**设计原因**：计划任务要可预测、可停止、少副作用；复杂自动化应让用户明确指定会话与技能子集。
 
 调度：`plans/scheduler.js` + 主进程定时器；解析自然语言创建计划：`plans/parser.js`。
+
+### 9.1 运行态如何进入 UI
+
+计划运行由 Main 发起，Renderer 拿不到 `agent:rust-loop-phase`，历史上表现为「后台跑、要刷新才看到」。
+现在的链路（三处，缺一不可）：
+
+```
+Main 运行边界：plan-run-turn.beginPlanRunTurn（建会话 + 写 user 轮次）
+  → Main IPC `plans:phase` run_start（AgentRunEvent）
+  → Renderer `renderer-automation.js` 登记进 sessionActiveRuns
+  → Rust agent loop phase
+  → src/plans/plan-run-events.js（归约成 Rust 风格 trace + 流式正文）
+  → Main IPC `plans:phase`（trace / done / error / stopped）
+  → 复用聊天链路：流式气泡 / 历史「后台运行中」小环 / Composer 停止按钮
+```
+
+- 停止：`plans:cancel` 让 Main abort 当前这次运行（`AbortController` 透传到 Rust loop）；
+  用户停止不写入 `lastRunOk`，也不覆盖上一次的真实结论。
+- `plans:list` 会合并内存运行态（`running` / `runId` / `runningSessionId`），
+  窗口中途刷新也能显示「运行中」。
+- Main 只产出事实（thought / tools / streamContent），summary 与 argsBrief 由 Renderer 统一生成。
+
+### 9.2 运行边界的会话与轮次落库（`plans/plan-run-turn.js`）
+
+计划运行不经过 Renderer 的聊天发送链路，会话轮次只能由 Main 写；这一份落库逻辑收敛在
+`src/plans/plan-run-turn.js` 单一来源（降级路径 `plans/deliver.js` 复用同一份文案与 meta）：
+
+| 时机 | 动作 | 原因 |
+| ---- | ---- | ---- |
+| `run_start` **之前** | `beginPlanRunTurn`：`ensurePlanSession` → `memory.message_append`(user) → `memory.touch_session` | `memory.sessions_list` 只返回**有消息**的会话；先写这一轮，Renderer 首拍（`RUN_START`）就能刷新出该会话与「运行中」，而不是等跑完才第一次出现 |
+| 终态事件 **之前** | `endPlanRunTurn`：`memory.message_append`(assistant，meta 含 `traceRunId` = 本次 runId) | 收尾时 Renderer 会重载该会话消息；消息先在库里，重载才能立刻看到这一轮。停止/失败也写一条，避免只剩悬空用户轮次 |
+| 运行边界**落盘** | `plansStore.beginRun`：写 `runState`（runId / sessionId / startedAt） | 用户轮次落库之后落盘；此后无论进程怎么死，下次启动都能从这条标记知道「哪条用户轮次还没有回复」 |
+| 收尾**之后** | `plansStore.endRun`：清 `runState` | 收尾已经发生，不需要恢复。残留只可能来自「进程被杀」—— 那时这段代码根本不会执行 |
+
+- `traceRunId` 是思考区与气泡的挂钩：Renderer 收尾按 runId 存 trace（`persistPlanRunTrace` →
+  `saveAssistantTraceRecord`，并置 `live.traceCheckpointClosed`），该消息下次打开时靠
+  `meta.traceRunId` 把思考区挂回来；同时避免遗留 `status=running` 的 checkpoint 被当成「可恢复中断任务」。
+- 顺序不可颠倒：先 `endPlanRunTurn` 再 `flushTrace` 再广播终态，否则最后一轮进度会被终态事件吃掉。
+- 终态事件带上**同一份正文**（`assistantReplyText(result)` 只算一次，落库与 `streamContent` 共用）：
+  气泡收尾收成什么，与重载会话后看到的消息完全一致；模型不流式正文时也不会只剩思考区。
+- 对应地，`run-events.applyAgentRunEventToLive` 规定：**终态事件（done/error/stopped）不带正文时不清空
+  已流式渲染的正文**（`createAgentRunEvent` 会把缺省 `streamContent` 规整成 `''`，照抄会把气泡抹空）。
+- Renderer 侧 `bindPlanRunSession` / `showPlanSessionTurnIfOpen` 只做 UI 登记与「用户正停在该会话时先 load 出这一轮」，
+  不参与落库。
+
+### 9.3 运行边界的崩溃恢复（`mcp-plans-boot#recoverInterruptedRuns`）
+
+`try/finally` 只能覆盖「Main 还在跑」的失败。进程被杀 / 应用重启时收尾代码不会执行，
+会话里会留下一条**永远没有回复的用户轮次**（界面永久停在悬空消息上）。
+
+因此运行边界是**持久化**的（`plans.json` 的 `runState`），启动时由 Main 补写中断回执：
+
+| 环节 | 行为 |
+| ---- | ---- |
+| 启动 | `bootPlansRuntime` 调 `recoverInterruptedRuns`：对每条残留 `runState`，在 `sessionId` 上写一条 `interruptedRunResult` 的中断回执（`assistantReplyText` 的 `interrupted` 分支），再 `endRun` |
+| 幂等 | 不重跑计划（重跑会让用户看到两次执行）；回执写失败时**保留** `runState`，下次启动重试，避免把未回复的轮次永久留在会话里 |
+| 会话失联 | `ensurePlanSession` 发现绑定会话已删除时重建，并把 `rebuilt` / `staleSessionId` 上抛；Main 记 warn 日志，不再静默把报告写进一条用户没在看的会话 |
+| 终态送达 | Renderer `finishPlanLiveRun`：只有 live 登记**确实属于本次计划**时才 `dispatchAgentRunEvent`（否则会串台）；无论有没有拿到登记，只要用户正停在该会话就**以库为准重载一次** —— 正文由 Main 落库，重载才是唯一无条件的兜底 |
+| 落库不挡 UI | trace 落库（`persistPlanRunTrace`）只等 1.5s 上限：`saveAssistantTraceRecord` 不 settle 时也必须收尾，否则气泡永远停在 loading、正文永不出现 |
+
+- `runState` 不是表单字段：`PlansStore#upsert` 在 patch 未显式携带 `runState` 时保留原值，
+  避免用户在运行期间保存计划把边界标记清掉。
+- 中断回执不写 `traceRunId`：那次运行的 trace 已随进程丢失，挂上去只会留下空思考区。
 
 ## 11. 自动更新与打包
 
@@ -424,7 +494,7 @@ npm run build:nsis    # 仅 PC 安装包：dist/dieyunagent-Setup-x.y.z.exe + la
 | Planner JSON           | 多轮重试 + fallback                    | 现实里模型常输出脏 JSON                |
 | 工具轮次上限                 | 实质上无硬顶                             | 靠停止按钮 + 压缩；长跑需用户自觉            |
 | 技能默认全开 minimax/curated | 是                                  | 能力强但 prompt 大、费 token         |
-| 定时任务                   | 无工具单次 LLM                          | 稳定；复杂任务应走对话 Agent             |
+| 定时任务                   | 与对话同一套 Agent 循环（Main 发起 + 实时回 UI）     | 结果可复现；core 不可用时降级单次 LLM        |
 | 会话工作空间                 | 每会话 SQLite 字段                      | 历史对话互不污染 cwd                  |
 | 单实例                    | `requestSingleInstanceLock` + 命名管道 | Windows 多开兜底                  |
 | 关窗口                    | 隐藏到托盘                              | 后台 Gateway / 计划继续跑             |

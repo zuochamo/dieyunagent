@@ -25,7 +25,7 @@
 **三条结论**：
 1. 数量最大的两块是**数字上限**和**正则**，两者都集中在少数几个文件（见各节）。
 2. 按 `AGENTS.md` 第一原则要求，**“用固定词表判断用户查询意图 / 是否注入上下文”已实现清零**，改造为结构信号。
-3. 最需要 review 的不是“多”，而是**重复定义**（§C）与**兼容垫片**（§D）。
+3. 最需要 review 的不是“多”，而是**重复定义**（§C）与**兼容垫片**（§D）。§C 的 11 项已于本轮清零；剩 §D 的兼容垫片待观察使用率。
 
 ---
 
@@ -33,31 +33,34 @@
 
 ### A1. 数字上限（单一来源 + 分布）
 
-#### A1.1 `src/agent/agent-limits.js` — 唯一配置源（1008 行）
+#### A1.1 `src/agent/agent-limits.js` — 唯一配置源
 
-| 行号 | 区块 | 条数 |
-|---|---|---|
-| `:8-51` | `AGENT_LIMITS_DEFAULTS` | **44** 条（43 数字 + 1 布尔） |
-| `:56-60` | `LONG_HORIZON_GUARDRAIL_SCALE`（长程放大倍数） | 5 |
-| `:64-68` | `LONG_HORIZON_HARD_CAP`（长程硬顶） | 5 |
-| `:103-562` | `AGENT_LIMITS_SCHEMA`（min/max/step/单位/中文标签） | **44** 项 / ≈**129** 个边界 |
-| `:604-605` | 存储键：`dieyun.agent-limits.v1` / `agent-limits-by-tier.json` | 2 |
-| `:649-659` | 兜底 tier 白名单（default / ctx-16k…ctx-2m） | 9 |
-| `:906,916,922,937-939` | 各类兜底常量（600 / 150 / 10000 / 3 / 800 / 60000） | 6 |
+> **本节只记区块与条数，不记行号** —— 行号每次改动都会漂移，定位请用符号名（`AGENT_LIMITS_DEFAULTS` / `AGENT_LIMITS_SCHEMA` / `LONG_HORIZON_*`）。
 
-`AGENT_LIMITS_DEFAULTS` 51 项分组（行号即键所在行）：
-
-| 组 | 键（行号） |
+| 区块 | 条数 |
 |---|---|
-| 护栏 | `repeatToolStreakLimit`:8 `repeatHistoryMax`:9 `completionRepairAttempts`:10 `verifyDiagMaxChars`:11 `writeSmellHintMaxItems`:20 `writeSmellHintMaxChars`:21 `writeSmellScanTimeoutMs`:22 `taskTierEnabled`:66 |
-| Harness | `transientMaxRetries`:12 `retryBaseMs`:13 |
-| UI 联动 | `liveWriteDebounceMs`:14 `artifactsUiFlushMs`:15 `lspSyncDebounceMs`:16 `monacoMaxChars`:17 |
-| 上下文 | `ctxAgentToolCallLimit`:18 `toolResultMaxJson`:19 `codebaseSnippetMax`:23 `codebaseAutoLimit`:24 `openFilesMax`:25 `filePreviewMaxChars`:26 `fsReadDefaultMaxBytes`:27 `lspDiagMaxChars`:28 `lspDiagMaxFiles`:29 `lspDiagTimeoutMs`:30 `visionShotsPerRound`:45 `visionReattachPerRound`:46 `visionMaxBase64Chars`:47 `visionPartEqChars`:52 `completionHistoryMaxChars`:57 `completionMessageMaxChars`:58 `completionLastUserMaxChars`:59 `completionTurnRideMaxChars`:60 `completionRecentTurns`:61 `completionFoldedMaxChars`:62 `userSystemMaxChars`:63 `systemStableMaxChars`:64 `llmRequestMaxChars`:65 |
-| LLM 重试 | `streamRoundMaxAttempts`:31 `llmRetryBaseMs`:32 `llmFirstTokenTimeoutMs`:34 `synthesisTimeoutMs`:35 `synthesisReconnectMaxWaitMs`:36 |
-| 编辑器/Diff | `maxUndoSteps`:37 `editorSelectionMax`:38 `editorVisibleLines`:39 `maxDiffChars`:40 `diffFullTextCap`:41 `chatImagePreviewMaxMb`:42 `attachmentRetentionMaxMb`:54 `attachmentDownsampleMaxPx`:55 `attachmentDownsampleMinKb`:56 |
+| `AGENT_LIMITS_DEFAULTS` | **52** 键（51 数字 + 1 布尔） |
+| ↳ 其中不上设置页的折算系数 | 3（`visionPartEqChars` / `charsPerToken` / `cjkCharsPerToken`） |
+| `LONG_HORIZON_GUARDRAIL_SCALE`（长程放大倍数） | 5 |
+| `LONG_HORIZON_HARD_CAP`（长程硬顶） | 5 |
+| `AGENT_LIMITS_SCHEMA`（min/max/step/单位/中文标签） | **49** 项（= 52 − 3 个折算系数） |
+| 存储键：`dieyun.agent-limits.v1` / `agent-limits-by-tier.json` | 2 |
+| 兜底 tier 白名单（default / ctx-16k…ctx-2m） | 9 |
+
+`AGENT_LIMITS_DEFAULTS` 52 键分组（键名即定位）：
+
+| 组 | 键 |
+|---|---|
+| 护栏 | `repeatToolStreakLimit` `repeatHistoryMax` `completionRepairAttempts` `verifyDiagMaxChars` `writeSmellHintMaxItems` `writeSmellHintMaxChars` `writeSmellScanTimeoutMs` `taskTierEnabled` |
+| Harness | `transientMaxRetries` `retryBaseMs` |
+| UI 联动 | `liveWriteDebounceMs` `artifactsUiFlushMs` `lspSyncDebounceMs` `monacoMaxChars` |
+| 上下文 | `ctxAgentToolCallLimit` `toolResultMaxJson` `codebaseSnippetMax` `codebaseAutoLimit` `openFilesMax` `filePreviewMaxChars` `fsReadDefaultMaxBytes` `lspDiagMaxChars` `visionShotsPerRound` `visionReattachPerRound` `visionMaxBase64Chars` `visionPartEqChars` `completionHistoryMaxChars` `completionMessageMaxChars` `completionLastUserMaxChars` `completionTurnRideMaxChars` `completionRecentTurns` `completionFoldedMaxChars` `userSystemMaxChars` `systemStableMaxChars` `llmRequestMaxChars` `charsPerToken` `cjkCharsPerToken` |
+| LLM 重试 | `streamRoundMaxAttempts` `llmRetryBaseMs` `llmReconnectMaxWaitMs` `llmFirstTokenTimeoutMs` `llmStreamIdleTimeoutMs` `synthesisTimeoutMs` `synthesisReconnectMaxWaitMs` |
+| 编辑器/Diff | `maxUndoSteps` `editorSelectionMax` `editorVisibleLines` `maxDiffChars` `diffFullTextCap` `chatImagePreviewMaxMb` `attachmentRetentionMaxMb` `attachmentDownsampleMaxPx` `attachmentDownsampleMinKb` |
 
 > **本文件是数字上限的唯一合法改动点**（`AGENTS.md` 原则 5）。除下面 A1.2 的“模块内局部阈值”外，其余文件的数字应尽量改为读这里。
 > 例外：`visionPartEqChars` 是上下文账本的折算系数（非策略上限），故意不上设置页 —— `contentCharLen` 没有 tier 上下文、只读全局默认值，做成可调项会「改了不生效」。
+> 同类例外：`charsPerToken`(3.2) / `cjkCharsPerToken`(1.5) 也是折算系数，唯一来源在本文件，renderer 侧经 `window.CHARS_PER_TOKEN` / `window.CJK_CHARS_PER_TOKEN` 消费；Rust 同值见 `crates/dieyun-core/src/compaction/tokens.rs`。
 
 #### A1.2 其它 JS 文件内嵌数字（应知悉，非单源）
 
@@ -80,6 +83,11 @@
 | `browser/url-policy.js:39,44,185` | 255 / 2 / 443·80 | IPv4 段、TLD 长度、默认端口 |
 | `agent/guardrails-shared.js:146-152,226` | 500 / 2 | 参数截断、止损下限 |
 | `agent/agent-system-prompt.js:156,163` | 8000 / 16000 | user system / stable 兜底帽 |
+| `agent/compaction-main.js:57,59,81` | 0.25 / 6 | 工具 schema 扣减封顶比例、冷却轮数（对齐 Rust `default_cooldown`）；字符→token 折算改为读 `agent-limits.js:57-58` |
+| `agent/rust-loop-runner.js:34,35` | 24 / 0.5 | 中循环压缩的消息数门槛（对齐 `completionRecentTurns`）、字符占比门槛 |
+| `lsp/diagnostics-service.js` | `LSP_SETTINGS_DEFAULTS`：maxFiles 6 / maxPerFile 20 / timeoutMs 8000 | LSP 文件数 · 条数 · 超时的**唯一来源**；`agent-limits.lspDiagMaxChars` 只管注入字符上限 |
+
+> `renderer/renderer-context-engine.js` 的 `CTX_LIMITS`、`agent/session-context.js` 的 `DEFAULT_COMPLETION_CAPS`、`agent/system-prompt-prep.js` 的 `DEFAULT_LIMITS` 已改为**从 `agent-limits.js` 映射**（`ctxAgentLimitDefault` / `completionCapDefault`），不再各存一份默认值；其中的兜底字面量只在 agent-limits 未加载时命中。
 
 #### A1.3 Rust 数字常量与 clamp
 
@@ -91,7 +99,7 @@
 | `memory/mod.rs` | `MEMORY_EMBED_TEXT_MAX=6000`:17、`count<4000`:180、`rn<=2`:193、`clamp(1,500)`:450、`take(120)`:546、`take(80)`:270、`clamp(1,50)`:818,1063、阈值 `<=0.05`:857,1101,1168、`LIMIT 1000`:829,1075、`take(4000)`:907、`take(200_000)`:923、`clamp(1,5)`:1260 |
 | `memory/keyword.rs` | 权重 `0.65`:140 `0.25`:141 `0.035`:142 `0.08`:143、stale `-0.15`:138、时龄 180 天:148 |
 | `compaction/llm.rs` | `3`:10 `800`:11 `3000`:12 `60_000`:13 `180_000`:15 `3`:16 `5_000`:17 `75`:19、`min(4)`:108、温度 `0.15`:141、`max_tokens=4096`:142 |
-| `compaction/mod.rs` + `atoms.rs` | budget `96_000`:69 `0.72`:72 cooldown `6`:75 `max(8192)`:124 `clamp(0.3,0.95)`:125、`recent_budget=budget*0.42`:238、keep `len*0.3`:251、`take(32_000/48_000/120_000)`、正文截断 6000/4000 |
+| `compaction/mod.rs` + `atoms.rs` | budget `95_232`:71 `0.85`:74 cooldown `6`:77 `POST_COMPACTION_ROUND_COUNT=1`:83 `max(8192)`:131 `clamp(0.3,0.95)`:132、`recent_budget=budget*0.42`:239、keep `len*0.3`:252、`take(32_000/48_000/120_000)`、正文截断 6000/4000 |
 | `index/search.rs` | `SEARCH_LIMIT_MAX=48`:12、`limit*6`:87、权重 `0.35`:94 `0.3`:119 `0.55`:290 `0.6`:435、阈值 `0.05`:116,286、`LIMIT 8000`:104、`chunks(400)`:241、`take(12/900)`:357,361 |
 | `graph/query.rs` | depth `clamp(1,8)`:29 / `clamp(1,12)`:402、limit `clamp(1,80)`:79,163 / `clamp(8,64)`:671、权重 `+0.35`:308 `+0.15`:310、阈值 `0.05`:312、渲染 `take(16/28/24/4)` |
 | `index/walker.rs` | `SNIFF_BYTES=8192`:45、`MAX_SNIFF_FILE_BYTES=2MB`:46、阈值 `0.85`:167 / `0.92`:170 |
@@ -124,7 +132,7 @@
 | `agent/write-smell-hints.js:109-113` | `SWALLOWED_EXCEPTION_PATTERNS` | 3 | 吞异常形态 |
 | `agent/agent-round-text.js:33` | `isPassthroughThought` 前缀 | 9 | 过场思考前缀（**中文词表，见 §A6**） |
 | `agent/tool-harness.js:33,52,55` | 错误分类正则词表 | 3 组 | 工具错误分类（**见 §A6**） |
-| `agent/agent-limits.js:649-659` | 兜底 tier 白名单 | 9 | 已知 context tier |
+| `agent/agent-limits.js` | 兜底 tier 白名单 | 9 | 已知 context tier |
 | `agent/task-tier.js:15` | `TASK_TIERS` | 3 | trivial/normal/heavy |
 | `agent/task-schema.js:3,14,28` | 状态/策略/Agent 类型 | 8/3/3 | 任务 schema |
 
@@ -167,7 +175,7 @@
 | 白名单 | `guardrails-shared.js` 改写/文件写工具集 | 9 / 5 |
 | 白名单 | `browser/url-policy.js` 扩展名 / 内网主机 | 65 / 4 |
 | 白名单 | `renderer/renderer-skills-grid.js:9,10` 默认启用技能 | 1 / 2 |
-| 白名单 | `agent/agent-limits.js:649-659` tier | 9 |
+| 白名单 | `agent/agent-limits.js` 兜底 tier | 9 |
 | 白名单 | Rust `index/walker.rs` `KNOWN_TEXT_EXT` / `IGNORE_*` | 69 / 74 |
 | 白名单 | Rust `graph/extract/*` `CALL_SKIP` | 166 |
 | 白名单 | Rust `graph/query.rs:715-717` 枢纽 kind | 10 |
@@ -266,7 +274,7 @@
 | `agent-system-prompt.js:155-167` | `capUserSystemText()` / `capStableSystemText()` | 8000 / 16000 字符截断 | — |
 | `renderer/renderer-i18n.js:216-230` | `agentLanguagePrompt()` | 【回答语言】中/英 | ✅ 稳定块首位 |
 | `renderer/renderer-agent-system-message.js:113,319,361` | 编排 | 取 i18n / dieyun 块 / userSystem | 组装器 |
-| `renderer/renderer-model-runtime.js:54` | `DEFAULTS.system` | 默认自定义 system（“你是叠云编程助手…”） | ✅（经 settings） |
+| `renderer/renderer-model-runtime.js` | `DEFAULTS.system` | 默认自定义 system（**空**；身份/人设唯一来源见 `dieyun.md` 与 `ASSISTANT_IDENTITY`） | ✅（经 settings，用户填了才注入） |
 
 **核心准则包含的硬编码规则文本**（review 时重点）：
 
@@ -312,9 +320,8 @@
 | `agent/session-context.js:242-252` | `buildCurrentTaskText` | 【当前任务】 |
 | `agent/agents-md.js:271-283` | `formatAgentsMdSystemBlock` | 【项目地图 · AGENTS.md】 |
 | `agent/dieyun-instructions.js:59-63` | `formatDieyunSystemBlock` | 【全局用户规则 · dieyun.md】 |
-| `renderer/renderer-dieyun-md.js:94-111` | `formatDieyunMdInjectBlock` | 同上（**重复实现**） |
-| `renderer/renderer-agents-md.js:224-242` | `formatAgentsMdBlock` | 同上（**重复实现**） |
-| `renderer/renderer-skills-ui.js:678-775` | `buildSkillsPrompt` / `buildMcpPrompt` | 技能/MCP（**与 prep 重复**） |
+| `renderer/renderer-dieyun-md.js` | `formatDieyunMdInjectBlock` | 只决定「注入哪几条 + 模式提示」；文案转发 Main `formatDieyunBlock`（IPC `workspace:format-dieyun-md`） |
+| `renderer/renderer-agents-md.js` | `formatAgentsMdBlock` | 纯转发 Main `formatAgentsMdSystemBlock`（IPC `agents-md:format-block`），不再自带文案 |
 | `agent/task-tier.js:79-86` | `formatTaskTierSystemBlock` | 【任务分级】 |
 | `automation/skill-prompt.js:13-38` | `buildTaskSkillsSystem` | 【定时任务关联技能】 |
 
@@ -328,9 +335,9 @@
 | `src/compaction-prompts.js:63-71` | `INCREMENTAL_USER` | user | 增量压缩 |
 | `src/compaction-prompts.js:73-74` | `COMPACT_PREFIX/SUFFIX` | 注入 | 摘要前后缀 |
 | `src/compaction-prompts.js:76-79` | `WORKER_*/PLANNER_*` | system/user | Worktree / Planner 压缩 |
-| `src/agent/compaction-rust-bridge.js:8-13` | fallback 文案 | system/user | **与上重复且 prefix 文案不一致** |
+| ~~`src/agent/compaction-rust-bridge.js`~~ | — | — | **已删除**：唯一消费者改为直接读 `compaction-prompts.js`，映射写在 `compaction-main.js` |
 | `src/agent/agent-synthesis.js:74-106` | 汇总助手 | system | 最终汇总 |
-| `src/renderer/renderer-thinking-trace.js:677-711` | 汇总助手 | system | **与上逐字重复** |
+| ~~`src/renderer/renderer-thinking-trace.js` 汇总助手~~ | — | — | **已删除**：Renderer 侧那份逐字重复且无调用点 |
 | `src/renderer/renderer-agent-reviewer.js:86-88` | 格式修复器 | system | 强制合法 JSON |
 | `src/renderer/renderer-agent-reviewer.js:186-194` | Reviewer | system/user | 独立验收（浏览器证据规则） |
 | `src/renderer/renderer-agent-llm.js:692-706` | 记忆归纳器 | system/user | 长期记忆提取（kind/scope/importance） |
@@ -387,7 +394,7 @@
 
 - 技能 **14** 个，`SKILL.md` **14** 个，`skills/` 下 `.md` 共 **70** 个。
 - `references/` 子目录：**7** 个技能，共 **52** 篇参考文档。
-- `BUNDLED-MANIFEST.json` 登记 **13** 条 → ⚠️ `weather` 在磁盘但**未登记**。
+- `BUNDLED-MANIFEST.json`：`required` **14** 条（minimax 8 + curated 5 + `weather/SKILL.md`），`weather` **已登记**。
 
 ### B6. 模板文件
 
@@ -404,19 +411,21 @@
 
 ## C. 重复定义与一致性风险（review 优先项）
 
-| # | 项 | 位置 A | 位置 B | 风险 |
-|---|---|---|---|---|
-| 1 | 最终汇总助手 system | `agent-synthesis.js:90-100` | `renderer-thinking-trace.js:695-705` | 改一处漏一处 |
-| 2 | 汇总过程摘要构造 | `agent-synthesis.js:56-72` | `renderer-thinking-trace.js:657-675` | 同上 |
-| 3 | 技能索引块 | `system-prompt-prep.js:554-631` | `renderer-skills-ui.js:678-748` | 文案漂移 |
-| 4 | MCP 块 | `system-prompt-prep.js:633-653` | `renderer-skills-ui.js:750-775` | 同上 |
-| 5 | AGENTS.md 注入块 | `agents-md.js:271-283` | `renderer-agents-md.js:224-242` | 两份实现 |
-| 6 | dieyun.md 注入块 | `dieyun-instructions.js:59-63` | `renderer-dieyun-md.js:94-111` | 两份实现 |
-| 7 | 压缩兜底文案 | `compaction-prompts.js:7-74` | `compaction-rust-bridge.js:8-13` | 内容重复，prefix 文案不一致（`历史背景` vs `自动压缩`） |
-| 8 | 过场思考前缀词表 | `agent/agent-round-text.js:33` | `agent/loop_run.rs:17-31` | 中英双份，需同步 |
-| 9 | 默认 system | `model-settings.js:44,144`（空） | `renderer-model-runtime.js:54`（非空） | **定义冲突** |
-| 10 | 助手身份串 | `dieyun-instructions.js:9`「叠云**会计服务** AI 助理」 | 其余处「叠云编程助手 / 叠云 Agent」 | 措辞不一致 |
-| 11 | weather 技能 | `skills/bundled/weather/`（存在） | `BUNDLED-MANIFEST.json`（未登记） | 打包可能漏 |
+> 本节 11 项已于本轮全部处理，处置方式如下 —— 后续新增重复时按同样口径登记。
+
+| # | 项 | 唯一权威实现 | 处置 |
+|---|---|---|---|
+| 1 | 最终汇总助手 system | `agent-synthesis.js`（Main，rust-loop-runner 调用） | **已删** Renderer 侧逐字重复且无调用点的 `buildAgentSynthesisBody` |
+| 2 | 汇总过程摘要构造 | 同上 `buildSynthesisDigest` | 同上（同一次删除） |
+| 3 | 技能索引块 | `system-prompt-prep.js` `fetchSkillsBlock` | **已删** Renderer `buildSkillsPrompt`（无调用点）及 `agentToolsIncludeCompactMcp` |
+| 4 | MCP 块 | `system-prompt-prep.js` `formatMcpPromptBlock` | **已删** Renderer `buildMcpPrompt`（无调用点） |
+| 5 | AGENTS.md 注入块 | `agents-md.js` `formatAgentsMdSystemBlock`（IPC `agents-md:format-block`） | Renderer 改为**纯转发**，删掉复制的文案与 `AGENTS_MD_MAX` 兜底 |
+| 6 | dieyun.md 注入块 | `dieyun-instructions.js` `formatDieyunBlock`（IPC `workspace:format-dieyun-md`） | Renderer 只保留「注入哪几条 + 模式提示」，header/前言单一来源 |
+| 7 | 压缩兜底文案 | `compaction-prompts.js` | **已删** `compaction-rust-bridge.js`，映射内联到 `compaction-main.js`；字段缺失由 Rust `CompactionPrompts::default()` 兜底 |
+| 8 | 过场思考前缀词表 | JS `agent-round-text.js` + Rust `loop_run.rs`（跨语言无法共享常量） | 新增 `check-repo-contracts.cjs` 契约检查，两边不同步即 fail |
+| 9 | 默认 system | 默认两侧均为空串；人设由 `dieyun.md` + `ASSISTANT_IDENTITY` 承载 | **已解决**：`normalize()` 不再强制清空；`LEGACY_RUNTIME_PRESETS.system` 迁移清掉旧内置人设 |
+| 10 | 助手身份串 | `dieyun-instructions.js` `ASSISTANT_IDENTITY` =「叠云 Agent（小芸）」 | **已解决**：`assets/dieyun.md` / 仓库根 `dieyun.md` / `index.html` 关于面板同口径 |
+| 11 | weather 技能 | `BUNDLED-MANIFEST.json` `required` | **本就已登记**（`weather/SKILL.md`），原文「未登记」是误记，已更正 |
 
 ---
 
@@ -426,9 +435,9 @@
 
 | 腐坏类型 | 典型资产 | 处置 |
 |---|---|---|
-| **兼容垫片**（模型换代即失效） | `guardrails-shared.js` `TOOL_NAME_ALIASES`(9) / `GRAPH_LEGACY_OPS`(7)、`llm-tool-call-fallback.js` 别名(14)+参数表(50)、`compaction-rust-bridge.js` fallback | **观察使用率后删除**；不要无限增长 |
+| **兼容垫片**（模型换代即失效） | `guardrails-shared.js` `TOOL_NAME_ALIASES`(15，**全仓单一来源**) / `GRAPH_LEGACY_OPS`(7)、`llm-tool-call-fallback.js` 参数表(50) | **观察使用率后删除**；不要无限增长。工具名别名表已合并到 `guardrails-shared.js`（`llm-tool-call-fallback.js` 改为 require 引用同一对象），由 `test:guardrails-sync` 断言两侧一致 |
 | **模型行为假设** | 核心准则 22 条、`compaction-prompts.js` 强制 JSON/字数、`renderer-wiki-generate.js` 强制二级标题 | 用**行为回归**（同批任务看工具轨迹）而非字符串快照；改前跑 `test:agent-system-prompt` |
-| **调参值** | `agent-limits.js` 全部 44 项 | 已配置化（设置 UI + tier 分层 + 长程缩放），**改配置不改代码** |
+| **调参值** | `agent-limits.js` 全部 49 项（+3 折算系数不上设置页） | 已配置化（设置 UI + tier 分层 + 长程缩放），**改配置不改代码** |
 | **环境事实** | `IGNORE_DIRS`/`KNOWN_TEXT_EXT`、`CALL_SKIP`、`BLOCKED_PATTERNS`、`url-policy` 扩展名 | 腐坏慢；新增语言/工具时补 |
 | **UI 分类词表** | `renderer-skills-grid.js` 127 词 + 14 正则 | 新增技能时补；不影响行为 |
 
@@ -443,6 +452,7 @@
 |---|---|
 | `agent-limits.js` | `npm run test:agent-limits` |
 | `guardrails-shared.js` / Main 护栏 | `npm run test:agent-limits` |
+| `guardrails-shared.js` 别名表 / `llm-tool-call-fallback.js` | `npm run test:guardrails-sync` + `npm run test:llm-tool-call-fallback` |
 | `agent-system-prompt.js` | `npm run test:agent-system-prompt` |
 | `system-prompt-prep.js` | `npm run test:system-prompt-prep` |
 | `task-tier.js` | `npm run test:task-tier` |

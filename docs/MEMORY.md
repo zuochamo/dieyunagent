@@ -110,7 +110,7 @@ flowchart TB
 
 **读取时机：**
 
-- 切换会话 / 启动：`memory.messages_recent`（默认 limit 200）→ 填充渲染进程 `messages` → 重绘聊天。
+- 切换会话 / 启动：`memory.messages_recent`（RPC 默认 limit 50，上限 500；UI/会话服务层可显式传更大值）→ 填充渲染进程 `messages` → 重绘聊天。
 - 下轮对话：`buildCompletionMessages()` 把 `messages` 里**已存储的 user/assistant 正文**拼进 API payload（不含历史轮的 tool 消息链）。
 
 **不写入 SQLite 的内容：**
@@ -139,7 +139,7 @@ UI 用 `unpackAssistantMeta()` 拆开展示模型名、思考过程等；发给�
 **写入：** 仅用户主动 — 设置 → 长期记忆 →「追加到长期记忆」（`memory.long_add`）。  
 **无** Agent 自动 `long_add`、无从对话自动提炼入库。
 
-**读取：** 每轮 `buildSystemMessage()` 调用 `memory.long_recent`（limit **16**），按时间**从旧到新**排进 system：
+**读取：** 每轮 `buildSystemMessage()` 调用 `memory.long_recent`（RPC 默认 limit **20**），按时间**从旧到新**排进 system：
 
 ```
 【长期记忆（本地 SQLite）】
@@ -158,7 +158,7 @@ UI 用 `unpackAssistantMeta()` 拆开展示模型名、思考过程等；发给�
 | `memory.sessions_list` | 历史列表（仅有消息的会话） |
 | `memory.session_create` | 新建会话 |
 | `memory.session_get` | 会话详情含 `workspacePath` |
-| `memory.session_set_workspace` | 绑定工作空间 |
+| `memory.session_workspace_set` | 绑定工作空间 |
 | `memory.session_archive` | 归档 |
 | `memory.session_delete` | 删会话及消息 |
 | `memory.touch_session` | 更新 `updated_at` / 可选 title |
@@ -208,9 +208,10 @@ buildSystemMessage()  →  system 块（技能、dieyun.md、长期记忆、工�
 | 项目 | 说明 |
 |------|------|
 | 实现 | Main `compaction-main.js` → Rust `compaction.maybe_compact`（Renderer 经 IPC，无本地 LLM） |
-| 触发 | 估算 token ≥ 预算 × `triggerRatio`（默认约 78%）；工具轮中 `round > 0` 或 `messages.length > 16` 也会尝试 |
-| 策略 | 消息**原子分组**（`assistant.tool_calls` + 对应 `tool` 不拆散）；保留最近若干 atom；中间段用 LLM 摘要 |
-| 冷却 | `coolDownRounds`（默认 6）避免每轮都压 |
+| 预算 | `窗口 − maxOutputTokens − contextReserveTokens`；**工具 schema 超出预留的部分再从这里扣**（封顶 25%），因为 tools 占窗口却不进 messages |
+| 触发 | 估算 token ≥ 预算 × `triggerRatio`（默认档 0.85）；工具轮中 `messages.length > 24` 或字符数超半也会尝试，再由 Rust 侧 token 阈值与冷却裁决 |
+| 策略 | 消息**原子分组**（`assistant.tool_calls` + 对应 `tool` 不拆散）；保留最近若干 atom；中间段用 LLM 摘要。摘要提示与折叠集合同源，不会出现「被折叠却未摘要」的段落 |
+| 冷却 | `coolDownRounds`（默认 6）；压缩成功后轮次计数置 1（不是 0），否则下一轮冷却不成立会连续复压；`force` 可穿透冷却（上下文溢出兜底） |
 | 落库 | `memory.compaction_archive` → `compaction_archives`；下轮 `memory.compaction_recent` 投影进 turn-ride |
 | 累计摘要 | Main 内存 `cumulativeSummary`；进程重启后从最近一条 archive 补水 |
 | 续跑 / 验收重试 | 从发送时快照的账本前缀 + 本轮工具尾巴重投影；丢掉内存里压过的中间历史（摘要走 turn-ride） |
@@ -265,13 +266,13 @@ flowchart LR
 
 1. 系统时间块  
 2. 工具与编排说明（固定文案）  
-3. **已启用技能**（`buildSkillsPrompt`）  
+3. **已启用技能**（`fetchSkillsBlock`）  
 4. **`dieyun.md`**（若存在）  
 5. 技能目录 / 计划任务说明  
 6. **当前工作空间**路径  
 7. 本机权限能力说明  
 8. SQL 库表上下文（若启用）  
-9. **长期记忆** — `long_recent` 16 条  
+9. **长期记忆** — `long_recent` 20 条（RPC 默认）  
 
 然后与 **会话 `messages` 历史** 合并送入模型。
 
@@ -286,13 +287,14 @@ flowchart LR
 
 ## 10. 定时计划与记忆的关系
 
-定时任务（`plans/runner.js`）是 **单次 LLM 调用**，不走工具循环，也不写 `long_memories`。
+定时任务主流路径是 **工具循环**（`plans/plan-agent-runner.js`），core 不可用时降级为单次 LLM（`plans/runner.js`）；两条路径都不写 `long_memories`。
 
-结果通过 `deliverPlanResult()` 写入 **指定 `deliver.sessionId`** 的 `messages`：
+会话轮次由 `plans/plan-run-turn.js` 在运行边界写入 **计划专用会话**（同 `deliver.sessionId`）的 `messages`：
+**运行开始（`run_start` 之前）** 写 user 轮次，**终态事件之前** 写 assistant 轮次（含 `traceRunId`）：
 
 ```
 [user]  [计划 · 名称] 时间 · 定时触发
-[assistant] 执行摘要或错误
+[assistant] 执行摘要或错误（meta.traceRunId 挂回思考区）
 ```
 
 因此计划产出是 **会话短期记忆** 的一部分，不是独立记忆层。

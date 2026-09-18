@@ -59,7 +59,7 @@ flowchart TB
 
 ### 2.2 诊断哪些文件
 
-按优先级合并，**最多 6 个文件**，去重：
+按优先级合并，**最多 `lsp-settings.maxFiles` 个文件（默认 6）**，去重：
 
 1. 用户消息 `extractPathHintsFromText()` 提取的路径
 2. `getContextFilePathsForAgent()` — 侧栏选中 + 会话最近文件
@@ -159,9 +159,9 @@ flowchart TB
 
 **规则**：
 
-- 单文件最多 `maxPerFile` 条；error 优先于 warning
-- 总字符上限 **~4000**（与 `CTX_LIMITS` 并列，超出截断并注明）
-- 拉取超时 **8s**（`DEFAULT_TIMEOUT_MS`，可用 `lsp-settings.json` 覆盖；prep 不堵死，超时则省略本块）
+- 单文件最多 `maxPerFile` 条（`lsp-settings` 默认 20）；error 优先于 warning
+- 注入**总字符上限 `agent-limits.lspDiagMaxChars`（默认 10000）**，超出截断并注明
+- 拉取超时 **8s**（`lsp-settings.timeoutMs` 默认值，见 `src/lsp/diagnostics-service.js` 的 `LSP_SETTINGS_DEFAULTS`；prep 不堵死，超时则省略本块）
 - 冷启动：首次 `npx -y` 拉取 `typescript-language-server` 可能超过超时预算 → 本轮降级（省略块或回落 CLI），下次调用命中已启动的 server
 - 无诊断时不注入空块
 
@@ -281,7 +281,7 @@ flowchart TB
 
 | 风险 | 对策 |
 |------|------|
-| 首次 `npx` 下载慢 | 超时 5s + 缓存；设置页说明需 Node |
+| 首次 `npx` 下载慢 | 超时 `lsp-settings.timeoutMs`（默认 8s）+ 缓存；设置页说明需 Node |
 | 大仓库 TS 分析慢 | 只 didOpen **指定文件**，不 open 全库 |
 | 多 language server 内存 | 每 workspace 每语言单进程 + 空闲 shutdown |
 | SSH 远程 | 不 spawn 本地 LSP；SSH 已连接时在远程跑 `npx typescript --noEmit`（仅 TS）；需 Shell 权限 |

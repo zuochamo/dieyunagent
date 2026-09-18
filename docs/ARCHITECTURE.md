@@ -485,7 +485,7 @@ flowchart TB
   Bundled -->|seed 首次复制不覆盖| Home["~/.dieyun/skills/"]
   Home --> Scan[skills/scanner.js]
   Scan --> Catalog[skills/catalog.js]
-  Catalog --> Prompt[buildSkillsPrompt → system]
+  Catalog --> Prompt[fetchSkillsBlock → system]
   VectorIdx[skills/vector-index.js] --> Recall[按需召回]
 
   subgraph MCPmod["MCP src/mcp/"]
@@ -553,17 +553,18 @@ flowchart LR
 ```mermaid
 flowchart LR
   UI[技能弹窗 / plan_create] --> Store[plans/store → plans.json]
-  Scheduler[plans/scheduler.js RRULE] --> Runner[plans/runner.js 单次 LLM]
-  Runner --> Deliver[plans/deliver.js → 指定会话]
+  Scheduler[plans/scheduler.js RRULE] --> Runner[plans/plan-agent-runner.js 工具循环<br/>core 不可用降级 runner.js 单次 LLM]
+  Runner --> Turn[plans/plan-run-turn.js<br/>运行边界建会话 + 写 user/assistant 轮次]
+  Turn --> Deliver[plans/deliver.js 降级兜底投递]
   Parser[plans/parser.js] --> Store
 ```
 
 | 对比 | 对话 Agent | 定时任务 Plans |
 |------|------------|----------------|
 | 入口 | 主聊天 | 技能弹窗 / 工具 |
-| 执行 | 多轮工具循环 | **单次** LLM |
-| 存储 | SQLite messages | `userData/plans.json` |
-| 投递 | 当场显示 | 写入 `deliver.sessionId` 会话 |
+| 执行 | 多轮工具循环 | 工具循环（Main 调度）；core 不可用降级单次 LLM |
+| 存储 | SQLite messages | `userData/plans.json` + 计划专用会话 |
+| 投递 | 当场显示 | **运行时**即建会话并写 user 轮次，终态前写 assistant 轮次（`plan-run-turn.js`） |
 
 ---
 
