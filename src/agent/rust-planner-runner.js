@@ -775,7 +775,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
             tokenBudget,
             apiConfig: { baseUrl, apiKey, model: body.model },
             model: body.model,
-            signal: ctx?.signal
+            signal: ctx?.signal,
+            toolsChars: ctx?.toolsChars
           }),
         delegateTool: async (name, args) =>
           toolBridge.executeAgentTool(name, args, {

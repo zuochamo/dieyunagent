@@ -146,19 +146,10 @@ function extractReviewerJson(text) {
   return inferReviewerFromPartial(slice);
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    closeTruncatedJson,
-    extractReviewerJson,
-    inferReviewerFromPartial,
-    collectReviewerFileDiffs,
-    compactReviewerDiffSnippet
-  };
-}
-
-if (typeof window !== 'undefined') {
-  window.closeTruncatedJson = closeTruncatedJson;
-  window.extractReviewerJson = extractReviewerJson;
-  window.inferReviewerFromPartial = inferReviewerFromPartial;
-  window.collectReviewerFileDiffs = collectReviewerFileDiffs;
-}
+module.exports = {
+  closeTruncatedJson,
+  extractReviewerJson,
+  inferReviewerFromPartial,
+  collectReviewerFileDiffs,
+  compactReviewerDiffSnippet
+};

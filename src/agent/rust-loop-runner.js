@@ -21,6 +21,12 @@ const {
   buildVisionMessage,
   SOURCE_BROWSER
 } = require('./browser-vision');
+const {
+  sanitizeChatBodyImagesForApi,
+  isLlmImageRejectedError,
+  parseRejectedImageMessageIndices,
+  dropRejectedChatImagesForApi
+} = require('./guardrails-shared');
 
 const { executeDelegateBatch } = require('./delegate-batch');
 const { applyTurnEndSynthesis } = require('./agent-synthesis');
@@ -29,8 +35,15 @@ const LOOP_START_TIMEOUT_MS = 30000;
 const LOOP_SET_MESSAGES_TIMEOUT_MS = 30000;
 const LOOP_CONTINUE_TIMEOUT_MS = 600000;
 const LOOP_TOOL_RESULTS_TIMEOUT_MS = 300000;
-const COMPACT_AFTER_MESSAGES = 12;
+// 与 session-context 的 completionRecentTurns（24）对齐：低于它就会在
+// 「还保留 24 轮原文」时先按条数触发压缩，多花一次 LLM 调用。
+const COMPACT_AFTER_MESSAGES = 24;
 const COMPACT_CHAR_RATIO = 0.5;
+/**
+ * 单轮请求里「图片被上游拒绝」最多自愈几次：第一次按上游给的 `.messages[N].image[M]`
+ * 定位丢图，第二次（定位对不上时）丢光本轮全部图并不再注入视觉缓冲。
+ */
+const MAX_IMAGE_REPAIRS_PER_ROUND = 2;
 
 function toolsJsonChars(tools) {
   try {
@@ -80,8 +93,11 @@ function applyLlmMessageCharCap(body, userData, tierId) {
 }
 
 async function capAndSyncLoopMessages(body, runId, signal, bridge, userData, tierId) {
-  if (!applyLlmMessageCharCap(body, userData, tierId)) return;
-  if (!runId) return;
+  // 账本自愈：历史里残留的非法图片（旧版本落库，或 Renderer 侧清洗降级放行）
+  // 在此剔除并随 set_messages 回写，避免每轮都重发同一张废图换回上游 400。
+  const imagesSanitized = sanitizeChatBodyImagesForApi(body);
+  if (!applyLlmMessageCharCap(body, userData, tierId) && !imagesSanitized) return false;
+  if (!runId) return imagesSanitized;
   await invokeLoopRpc(
     bridge,
     'agent.loop.set_messages',
@@ -89,6 +105,7 @@ async function capAndSyncLoopMessages(body, runId, signal, bridge, userData, tie
     LOOP_SET_MESSAGES_TIMEOUT_MS,
     signal
   );
+  return imagesSanitized;
 }
 
 function applyResolvedLoopSpec(startParams, spec) {
@@ -194,7 +211,9 @@ async function maybeCompactRound({
         runId,
         round: llmRound,
         signal,
-        force: !!force
+        force: !!force,
+        // 工具 schema 不计入 messages，但占真实窗口；交给压缩层从预算里扣
+        toolsChars: toolsJsonChars(body.tools)
       }),
       signal,
       () => {
@@ -303,6 +322,7 @@ async function fetchLlmRound({
   signal,
   useStream,
   firstTokenTimeoutMs,
+  streamIdleTimeoutMs,
   llmRound,
   onPhase,
   fetchLlmOnce: fetchOverride,
@@ -360,6 +380,7 @@ async function fetchLlmRound({
           apiKey: llm.apiKey,
           signal,
           firstTokenTimeoutMs,
+          idleTimeoutMs: streamIdleTimeoutMs,
           onDelta: (delta) => {
             onPhase('llm_delta', {
               runId,
@@ -467,7 +488,7 @@ async function fetchLlmRound({
  * @param {object} [opts.settings]
  * @param {string} [opts.userData]
  * @param {string} [opts.contextTierId]
- * @param {{ maxToolCalls?: number, firstTokenTimeoutMs?: number }} [opts.loopSpec]
+ * @param {{ maxToolCalls?: number, firstTokenTimeoutMs?: number, streamIdleTimeoutMs?: number }} [opts.loopSpec]
  * @param {Function} [opts.fetchLlmOnce] 可选：覆盖本轮 LLM 请求（测试用）
  * @param {boolean} [opts.turnEndSynthesis] 聊天路径：空回复才补汇总；规划 worker 勿开
  * @param {boolean} [opts.browserVision] 是否为多模态模型：允许把浏览器截图 / 附件补看图片作为 image_url 注入下一轮
@@ -496,6 +517,8 @@ async function runRustAgentLoop(opts) {
   const loopSpec = opts.loopSpec || resolveAgentLoopSpec(opts.settings, opts.userData, opts.contextTierId);
   const startParams = applyResolvedLoopSpec(opts.startParams, loopSpec);
   const firstTokenTimeoutMs = loopSpec.firstTokenTimeoutMs;
+  // 流式「包间隔」容忍时长（上游断流多久算瞬时错误 → 交给重连层）
+  const streamIdleTimeoutMs = loopSpec.streamIdleTimeoutMs;
   const reconnectOptsBase = {
     signal,
     maxRetries: loopSpec.llmMaxRetries,
@@ -514,8 +537,11 @@ async function runRustAgentLoop(opts) {
    * 若每次都 drain，重试那一次就拿不到图了 —— 而工具结果已经告诉模型「已附在下一轮」。
    */
   let visionRound = null;
+  /** 本轮的视觉注入被上游拒过：重发时不再带上，否则只会换回同一个 400 */
+  let visionSkipRound = null;
   const withVision = (baseBody, runId) => {
     if (!browserVision || !runId || !baseBody || !Array.isArray(baseBody.messages)) return baseBody;
+    if (visionSkipRound === llmRound) return baseBody;
     if (!visionRound || visionRound.round !== llmRound || visionRound.runId !== runId) {
       const images = takePendingVisionImages(runId);
       const browserCount = images.filter((s) => s && s.source === SOURCE_BROWSER).length;
@@ -576,7 +602,7 @@ async function runRustAgentLoop(opts) {
         if (compactResult && compactResult.compacted) {
           overflowCompacted = true;
         }
-        await capAndSyncLoopMessages(
+        const imagesSanitized = await capAndSyncLoopMessages(
           body,
           phase.runId,
           signal,
@@ -584,6 +610,9 @@ async function runRustAgentLoop(opts) {
           opts.userData,
           opts.contextTierId
         );
+        if (imagesSanitized) {
+          onPhase('llm_images_sanitized', { runId: phase.runId, round: llmRound });
+        }
 
         lastCheckpoint = {
           runId: phase.runId,
@@ -597,9 +626,8 @@ async function runRustAgentLoop(opts) {
           onWait: (info) => onPhase('llm_reconnect_wait', { runId: phase.runId, round: llmRound, ...info })
         };
 
-        let llmResp;
-        try {
-          llmResp = await fetchLlmRound({
+        const fetchRoundOnce = () =>
+          fetchLlmRound({
             bridge,
             runId: phase.runId,
             body: withVision(body, phase.runId),
@@ -607,18 +635,86 @@ async function runRustAgentLoop(opts) {
             signal,
             useStream,
             firstTokenTimeoutMs,
+            streamIdleTimeoutMs,
             llmRound,
             onPhase,
             fetchLlmOnce: opts.fetchLlmOnce,
             reconnectOpts: roundReconnect
           });
+
+        /**
+         * 上游把「图片不合规」当整轮 400 打回时的自愈：丢图 → 换成文字说明 → 回写账本 →
+         * 重发本轮，绝不让整轮对话因为一张图报废（历史上重发的旧图同样适用）。
+         *
+         * 定位来自上游文案里的 `.messages[N].image[M]`：只有下标可信时才按定位丢，
+         * 否则（定位不到 / 落在视觉注入消息上 / 指到的消息里没有图）直接丢光本轮所有图，
+         * 保证重发一定是一次「无图片」的请求。
+         * @returns {Promise<boolean>} 是否有实际改动（没有就没必要重发）
+         */
+        const dropRejectedRoundImages = async (err, attempt) => {
+          const refs = parseRejectedImageMessageIndices(err && err.message);
+          const ledgerCount = Array.isArray(body.messages) ? body.messages.length : 0;
+          // 视觉注入消息是临时追加、不在账本里，故下标 >= 账本长度即「要丢的是本轮注入图」
+          const targets = refs.filter((i) => i < ledgerCount);
+          const canTarget = attempt === 0 && targets.length > 0 && targets.length === refs.length;
+          let dropped = 0;
+          let dropAll = !canTarget;
+          if (canTarget) {
+            dropped = dropRejectedChatImagesForApi(body, { messageIndices: targets }).dropped;
+            if (!dropped) dropAll = true;
+          }
+          if (dropAll) dropped += dropRejectedChatImagesForApi(body, {}).dropped;
+          const visionDropped = dropAll || refs.some((i) => i >= ledgerCount);
+          if (visionDropped) visionSkipRound = llmRound;
+          if (!dropped && !visionDropped) return false;
+          if (dropped) {
+            await invokeLoopRpc(
+              bridge,
+              'agent.loop.set_messages',
+              { runId: phase.runId, messages: body.messages },
+              LOOP_SET_MESSAGES_TIMEOUT_MS,
+              signal
+            );
+          }
+          console.warn(
+            '[dieyun:agent]',
+            'LLM_IMAGES_DROPPED',
+            `round=${llmRound} dropped=${dropped} visionDropped=${visionDropped} err=${String(
+              (err && err.message) || err
+            ).slice(0, 200)}`
+          );
+          onPhase('llm_images_dropped', {
+            runId: phase.runId,
+            round: llmRound,
+            dropped,
+            visionDropped,
+            attempt: attempt + 1
+          });
+          return true;
+        };
+
+        const fetchRoundWithImageRepair = async () => {
+          for (let attempt = 0; ; attempt += 1) {
+            try {
+              return await fetchRoundOnce();
+            } catch (err) {
+              if (isCancelledRpcError(err) || attempt >= MAX_IMAGE_REPAIRS_PER_ROUND) throw err;
+              if (!isLlmImageRejectedError(err)) throw err;
+              if (!(await dropRejectedRoundImages(err, attempt))) throw err;
+            }
+          }
+        };
+
+        let llmResp;
+        try {
+          llmResp = await fetchRoundWithImageRepair();
         } catch (err) {
           if (isCancelledRpcError(err)) throw err;
           if (isContextOverflowError(err) && overflowCompacted) {
             return await stopForOverflow(phase.runId, { llmError: String(err.message || err) });
           }
           if (isContextOverflowError(err) && !overflowCompacted) {
-            const forced = await maybeCompactRound({
+            await maybeCompactRound({
               compactMessages,
               body,
               llmRound,
@@ -629,7 +725,7 @@ async function runRustAgentLoop(opts) {
               force: true
             });
             overflowCompacted = true;
-            await capAndSyncLoopMessages(
+            const retrySanitized = await capAndSyncLoopMessages(
               body,
               phase.runId,
               signal,
@@ -637,6 +733,9 @@ async function runRustAgentLoop(opts) {
               opts.userData,
               opts.contextTierId
             );
+            if (retrySanitized) {
+              onPhase('llm_images_sanitized', { runId: phase.runId, round: llmRound });
+            }
             lastCheckpoint = {
               runId: phase.runId,
               model: body.model,
@@ -644,19 +743,8 @@ async function runRustAgentLoop(opts) {
               tools: body.tools || []
             };
             try {
-              llmResp = await fetchLlmRound({
-                bridge,
-                runId: phase.runId,
-                body: withVision(body, phase.runId),
-                llm,
-                signal,
-                useStream,
-                firstTokenTimeoutMs,
-                llmRound,
-                onPhase,
-                fetchLlmOnce: opts.fetchLlmOnce,
-                reconnectOpts: roundReconnect
-              });
+              // 压缩后的重发同样带上「图片被拒」自愈：压缩不改变图片合法性
+              llmResp = await fetchRoundWithImageRepair();
             } catch (retryErr) {
               if (isCancelledRpcError(retryErr)) throw retryErr;
               if (isContextOverflowError(retryErr)) {

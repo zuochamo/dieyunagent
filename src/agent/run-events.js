@@ -131,6 +131,12 @@ function agentRunEventFromTrace(sessionId, trace, streamContent, extra = {}) {
   });
 }
 
+const TERMINAL_RUN_EVENT_TYPES = new Set([
+  AGENT_RUN_EVENT_TYPES.DONE,
+  AGENT_RUN_EVENT_TYPES.ERROR,
+  AGENT_RUN_EVENT_TYPES.STOPPED
+]);
+
 /**
  * @param {object} live sessionActiveRuns entry
  * @param {ReturnType<typeof createAgentRunEvent>} event
@@ -145,8 +151,14 @@ function applyAgentRunEventToLive(live, event) {
       live.trace.length > 0;
     if (!keepThinking) live.trace = event.trace;
   }
-  if (typeof event.streamContent === 'string') live.streamContent = event.streamContent;
-  if (typeof event.streamContent === 'string' && String(event.streamContent).trim()) {
+  // 终态事件表达的是状态：createAgentRunEvent 会把缺省 streamContent 规整成 ''，
+  // 若照抄就会把已经流式渲染好的正文抹掉（气泡只剩思考区，重载会话才又出现）。
+  // 只在事件真的带正文、或事件本身就在推进正文时才覆盖。
+  const incomingStream = typeof event.streamContent === 'string' ? event.streamContent : '';
+  if (incomingStream || !TERMINAL_RUN_EVENT_TYPES.has(event.type)) {
+    live.streamContent = incomingStream;
+  }
+  if (incomingStream.trim()) {
     live.inPrepPhase = false;
   }
   if (event.meta && Array.isArray(event.meta.prepSteps)) {
@@ -210,30 +222,17 @@ function agentRunEventFromServicePayload(payload = {}) {
   });
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    AGENT_RUN_EVENT_TYPES,
-    AGENT_RUN_EVENT_TYPE_DOCS,
-    AGENT_RUN_EVENT_FIELDS,
-    MOBILE_SERVICE_EVENT_MAP,
-    MOBILE_PROGRESS_FIELD_MAP,
-    createAgentRunEvent,
-    normalizeAgentRunEvent,
-    agentRunEventFromTrace,
-    applyAgentRunEventToLive,
-    agentRunEventFromServicePayload,
-    mapLegacyServiceEventType,
-    cloneTrace
-  };
-}
-
-if (typeof window !== 'undefined') {
-  /** @type {any} */
-  const w = window;
-  w.AGENT_RUN_EVENT_TYPES = AGENT_RUN_EVENT_TYPES;
-  w.createAgentRunEvent = createAgentRunEvent;
-  w.normalizeAgentRunEvent = normalizeAgentRunEvent;
-  w.agentRunEventFromTrace = agentRunEventFromTrace;
-  w.applyAgentRunEventToLive = applyAgentRunEventToLive;
-  w.agentRunEventFromServicePayload = agentRunEventFromServicePayload;
-}
+module.exports = {
+  AGENT_RUN_EVENT_TYPES,
+  AGENT_RUN_EVENT_TYPE_DOCS,
+  AGENT_RUN_EVENT_FIELDS,
+  MOBILE_SERVICE_EVENT_MAP,
+  MOBILE_PROGRESS_FIELD_MAP,
+  createAgentRunEvent,
+  normalizeAgentRunEvent,
+  agentRunEventFromTrace,
+  applyAgentRunEventToLive,
+  agentRunEventFromServicePayload,
+  mapLegacyServiceEventType,
+  cloneTrace
+};
