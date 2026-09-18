@@ -558,14 +558,6 @@ function createTurnUndoService(opts = {}) {
     return { ok: true, turnId: id };
   }
 
-  /** @deprecated 内部兼容；请用 planRollback + commitRollback */
-  function prepareRollback(input) {
-    const plan = planRollback(input);
-    if (!plan.ok) return plan;
-    commitRollback(input);
-    return plan;
-  }
-
   return {
     MAX_STACK,
     beginTurn,
@@ -580,7 +572,6 @@ function createTurnUndoService(opts = {}) {
     planRollback,
     planRollbackBatch,
     commitRollback,
-    prepareRollback,
     clearSession,
     getRecord
   };

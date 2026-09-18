@@ -6,6 +6,13 @@ const os = require('os');
 
 const AGENT_DIR_NAME = '.dieyun';
 
+/**
+ * 预装技能种子顶层目录（~/.dieyun/skills 下 minimax / curated 等）。
+ * 其下技能视为内置：列表只允许隐藏，不允许物理删除。
+ * 单一来源：scanner 的 builtin 标记与 skills:delete 的可删性判定都读这里。
+ */
+const SEEDED_SKILL_CATEGORIES = new Set(['minimax', 'curated', 'dieyun', 'weather']);
+
 const README_SKILLS = `# 用户技能目录
 
 每个技能使用单独子文件夹，内含 \`SKILL.md\`（YAML frontmatter 需含 name、description）。
@@ -21,12 +28,26 @@ const README_MEMORY = `# 记忆笔记（可选）
 const README_WORKSPACE = `# 默认工作目录
 
 未在应用中单独选择工作空间时，对话通过 fs_write_file 等工具生成的文件（如 .py）会写入此目录。
-选择工作空间后，文件默认写入所选项目目录。
+选择工作空间后，文件默认写入所选项目目录；此目录、用户主目录与系统临时目录仍可读写，
+可作为工作空间之外的落脚点。
 `;
 
 /** 用户主目录下的叠云 Agent 数据根：C:\\Users\\<用户名>\\.dieyun */
 function dieyunHome() {
   return path.join(os.homedir(), AGENT_DIR_NAME);
+}
+
+/**
+ * 用户主目录本身（本地宽松档的可读写根之一）。
+ * 单独成函数是为了让「本机可访问范围」只有一个定义处（见 gateway/server.js 白名单组装）。
+ */
+function dieyunUserHome() {
+  return os.homedir();
+}
+
+/** 系统临时目录（本地宽松档的可读写根之一）。 */
+function systemTempDir() {
+  return os.tmpdir();
 }
 
 function dieyunSkillsDir() {
@@ -156,6 +177,77 @@ function filterAccessibleSkillRoots(roots) {
   return (roots || []).filter((r) => isSkillRootAccessible(r));
 }
 
+/**
+ * 技能目录命中的扫描根（取最长匹配，避免嵌套根误判）。
+ * @param {string} dir
+ * @param {string[]} roots
+ * @returns {string} 命中的根绝对路径；未命中返回 ''
+ */
+function matchSkillRoot(dir, roots) {
+  if (!dir || typeof dir !== 'string') return '';
+  const resolved = path.resolve(dir);
+  let best = '';
+  for (const root of roots || []) {
+    if (!root) continue;
+    const resolvedRoot = path.resolve(String(root));
+    const under = resolved === resolvedRoot || resolved.startsWith(resolvedRoot + path.sep);
+    if (under && resolvedRoot.length > best.length) best = resolvedRoot;
+  }
+  return best;
+}
+
+/** 预装技能种子根；只有这些根下的种子分类目录才算「内置」并受删除保护 */
+function seededSkillRoots() {
+  return [dieyunSkillsDir()];
+}
+
+/**
+ * root 是否就是种子根（~/.dieyun/skills）。
+ * 其它扫描根（userData / 工作空间）下出现同名 minimax 等目录属于用户自己的技能，不参与内置判定。
+ * @param {string} root
+ */
+function isSeededSkillRoot(root) {
+  if (!root) return false;
+  const resolved = path.resolve(String(root));
+  return seededSkillRoots().some((r) => path.resolve(r) === resolved);
+}
+
+/**
+ * 目录是否位于 root 下的种子分类目录内（内置技能判定）。
+ * @param {string} dir
+ * @param {string} root
+ */
+function isSeededSkillDir(dir, root) {
+  if (!dir || !root) return false;
+  const resolved = path.resolve(String(dir));
+  const resolvedRoot = path.resolve(String(root));
+  if (resolved === resolvedRoot || !resolved.startsWith(resolvedRoot + path.sep)) return false;
+  const top = path
+    .relative(resolvedRoot, resolved)
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)[0];
+  return SEEDED_SKILL_CATEGORIES.has(top || '');
+}
+
+/**
+ * 「删除技能」可删性判定的唯一来源：仅扫描根内、非根本身、非种子分类目录的技能可物理删除。
+ * @param {string} dir 技能目录绝对路径
+ * @param {string[]} roots 当前生效的扫描根（getScanRoots 的结果）
+ * @returns {{ deletable: boolean, reason: '' | 'INVALID_DIR' | 'OUTSIDE_ROOTS' | 'ROOT_DIR' | 'SEEDED', root: string }}
+ */
+function evaluateSkillDeletable(dir, roots) {
+  if (!dir || typeof dir !== 'string') return { deletable: false, reason: 'INVALID_DIR', root: '' };
+  const resolved = path.resolve(dir);
+  const root = matchSkillRoot(resolved, roots);
+  if (!root) return { deletable: false, reason: 'OUTSIDE_ROOTS', root: '' };
+  if (resolved === root) return { deletable: false, reason: 'ROOT_DIR', root };
+  if (isSeededSkillRoot(root) && isSeededSkillDir(resolved, root)) {
+    return { deletable: false, reason: 'SEEDED', root };
+  }
+  return { deletable: true, reason: '', root };
+}
+
 function sanitizeSkillFolderName(name) {
   return (
     String(name || 'custom-skill')
@@ -208,7 +300,15 @@ function describeAgentHome(userData, workspacePath) {
 
 module.exports = {
   AGENT_DIR_NAME,
+  SEEDED_SKILL_CATEGORIES,
+  seededSkillRoots,
+  isSeededSkillRoot,
+  matchSkillRoot,
+  isSeededSkillDir,
+  evaluateSkillDeletable,
   dieyunHome,
+  dieyunUserHome,
+  systemTempDir,
   dieyunSkillsDir,
   dieyunMemoryDir,
   dieyunDefaultWorkspaceDir,

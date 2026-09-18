@@ -50,6 +50,9 @@ function createStatusOutbox(opts = {}) {
       if (!next || typeof next !== 'object') return payload;
       payload = next;
       if (opts.connected) {
+        // 已连通时调用方会直接把 payload 发出去；这里仍要落盘，否则磁盘快照
+        // 会长期停留在更旧的版本（重启后补发的是过期状态）
+        persist();
         return payload;
       }
       pending = true;

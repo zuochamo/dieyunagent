@@ -146,7 +146,38 @@ async function writeImageBuffer(target, item, buf) {
     }
     return;
   }
-  await target.ssh.sftpWriteFile(item.full, buf);
+  // 远程：临时文件 + rename，与本地路径语义一致（读取方不会拿到半张图）。
+  // ssh 层缺 rename/unlink 原语（旧版或测试替身）时退回直接覆盖（旧行为）。
+  const ssh = target.ssh;
+  if (
+    typeof (ssh && ssh.sftpRename) !== 'function' ||
+    typeof (ssh && ssh.sftpUnlink) !== 'function'
+  ) {
+    await ssh.sftpWriteFile(item.full, buf);
+    return;
+  }
+  const tmp = `${item.full}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await ssh.sftpWriteFile(tmp, buf);
+    try {
+      await ssh.sftpRename(tmp, item.full);
+    } catch {
+      // 部分 SFTP 服务器不允许 rename 覆盖已存在目标：先删旧目标再重试
+      try {
+        await ssh.sftpUnlink(item.full);
+      } catch {
+        /* 旧目标可能不存在 */
+      }
+      await ssh.sftpRename(tmp, item.full);
+    }
+  } catch (err) {
+    try {
+      await ssh.sftpUnlink(tmp);
+    } catch {
+      /* 临时文件可能没写出来 */
+    }
+    throw err;
+  }
 }
 
 /** 处理单张：成功返回省下的字节数，未处理/失败返回 0。 */

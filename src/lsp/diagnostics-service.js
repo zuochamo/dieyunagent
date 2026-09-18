@@ -56,6 +56,18 @@ const PROJECT_SCAN_COOLDOWN_MS = 10 * 60 * 1000;
 const PROJECT_SCAN_TIMEOUT_MS = 120000;
 const PROJECT_SCAN_MAX_FILES = 0;
 const PROJECT_SCAN_MAX_PER_FILE = 12;
+/**
+ * lsp-settings 缺省值：LSP 诊断「文件数 / 单文件条数 / 超时」的唯一来源。
+ * 其它模块（Gateway `lsp.settings_get` 兜底、Agent 注入路径）一律引用这里，勿再各写一份。
+ */
+const LSP_SETTINGS_DEFAULTS = Object.freeze({
+  enabled: true,
+  timeoutMs: DEFAULT_TIMEOUT_MS,
+  cacheTtlMs: CACHE_TTL_MS,
+  maxFiles: DEFAULT_MAX_FILES,
+  maxPerFile: DEFAULT_MAX_PER_FILE,
+  minSeverity: 'warning'
+});
 const IDLE_SHUTDOWN_MS = 5 * 60 * 1000;
 const WATCH_DEBOUNCE_MS = 450;
 const SSH_DIRTY_POLL_MS = 25000;
@@ -81,14 +93,7 @@ function lspSettingsPath(userDataPath) {
 }
 
 function loadLspSettings(userDataPath) {
-  const defaults = {
-    enabled: true,
-    timeoutMs: DEFAULT_TIMEOUT_MS,
-    cacheTtlMs: CACHE_TTL_MS,
-    maxFiles: DEFAULT_MAX_FILES,
-    maxPerFile: DEFAULT_MAX_PER_FILE,
-    minSeverity: 'warning'
-  };
+  const defaults = LSP_SETTINGS_DEFAULTS;
   try {
     const raw = JSON.parse(require('fs').readFileSync(lspSettingsPath(userDataPath), 'utf8'));
     return {
@@ -1214,7 +1219,7 @@ function createLspDiagnosticsService(opts) {
       return { ok: false, error: 'workspaceRoot 必填', items: [], skipped: [] };
     }
 
-    const maxFiles = opts.maxFiles != null ? Number(opts.maxFiles) : Math.max(settings.maxFiles, 24);
+    const maxFiles = opts.maxFiles != null ? Number(opts.maxFiles) : settings.maxFiles;
     const maxPerFile = opts.maxPerFile != null ? Number(opts.maxPerFile) : settings.maxPerFile;
     const minSeverity = opts.minSeverity || settings.minSeverity;
     const timeoutMs = opts.timeoutMs != null ? Number(opts.timeoutMs) : settings.timeoutMs;
@@ -1809,6 +1814,7 @@ function createLspDiagnosticsService(opts) {
 
 module.exports = {
   createLspDiagnosticsService,
+  LSP_SETTINGS_DEFAULTS,
   loadLspSettings,
   saveLspSettings,
   lspSettingsPath,

@@ -6,7 +6,8 @@ const { dieyunHome } = require('./agent-home');
 
 const FILENAME = 'dieyun.md';
 const MAX_CHARS = 12000;
-const ASSISTANT_IDENTITY = '叠云会计服务 AI 助理';
+/** 助手身份唯一来源：其它 prompt / UI 文案一律引用这里，勿再各写一份自称。 */
+const ASSISTANT_IDENTITY = '叠云 Agent（小芸）';
 const USER_RULES_SECTION = '## 身份与称呼';
 
 function bundledTemplatePath() {
@@ -56,10 +57,34 @@ function loadDieyunInstructions() {
   }
 }
 
+/** dieyun.md 注入块的统一格式：聊天路径（Renderer 经 IPC）与定时计划路径共用这一份文案。 */
+const DIEYUN_BLOCK_HEADER = '【全局用户规则 · dieyun.md】';
+const DIEYUN_BLOCK_PREAMBLE =
+  '跨项目个人偏好，优先于长期记忆；与 AGENTS.md 并存，与用户本轮输入冲突时以用户输入为准。';
+
+/**
+ * 生成 dieyun.md 注入块（唯一实现）。
+ * 此前 Renderer 与 Node 各写一份 header + 前言，已漂移出「优先于长期记忆」的差异。
+ * @param {{ content?: string, filePath?: string, modeHint?: string, maxChars?: number }} [opts]
+ */
+function formatDieyunBlock(opts = {}) {
+  const text = String(opts.content || '').trim();
+  if (!text) return '';
+  const maxChars = Number(opts.maxChars) > 0 ? Number(opts.maxChars) : MAX_CHARS;
+  const capped = text.length > maxChars ? `${text.slice(0, maxChars)}\n…（已截断）` : text;
+  const modeHint = String(opts.modeHint || '').trim();
+  const filePath = String(opts.filePath || '').trim();
+  return (
+    `${DIEYUN_BLOCK_HEADER}${modeHint}\n` +
+    (filePath ? `（文件：${filePath}）\n` : '') +
+    `${DIEYUN_BLOCK_PREAMBLE}\n\n${capped}`
+  );
+}
+
 function formatDieyunSystemBlock() {
   const { content, path: filePath, exists } = loadDieyunInstructions();
   if (!exists || !content) return '';
-  return `【全局用户规则 · dieyun.md】\n（文件：${filePath}）\n跨项目个人偏好，优先于长期记忆；与 AGENTS.md 并存，与用户本轮输入冲突时以用户输入为准。\n\n${content}`;
+  return formatDieyunBlock({ content, filePath });
 }
 
 /**
@@ -87,6 +112,7 @@ module.exports = {
   dieyunMdPath,
   ensureDieyunMdInHome,
   loadDieyunInstructions,
+  formatDieyunBlock,
   formatDieyunSystemBlock,
   openDieyunMdInEditor
 };
