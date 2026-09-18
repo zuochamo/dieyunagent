@@ -1,4 +1,4 @@
-/* global window, document, $, settings, currentSessionId, messages, sessionActiveRuns, chatInput, composerSendBtn, isSending, isCurrentSessionSending, estimateContextTokensFallback, estimateMessagesTokensViaMain, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, lastComposerContextEstimate, reportTokensToMain, estimateTextTokens, getTextModelId, humanizeModelId, escapeHtml, CTX_LIMITS, dieyunI18n, invalidateSystemMessageCache */
+/* global window, document, $, settings, currentSessionId, messages, sessionActiveRuns, chatInput, composerSendBtn, isSending, isCurrentSessionSending, estimateContextTokensFallback, estimateMessagesTokensViaMain, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, lastComposerContextEstimate, reportTokensToMain, estimateTextTokens, getTextModelId, humanizeModelId, escapeHtml, CTX_LIMITS, dieyunI18n, invalidateSystemMessageCache, CHARS_PER_TOKEN */
 'use strict';
 
 const sessionContextEstimates = new Map();
@@ -387,7 +387,7 @@ function estimateSystemPromptTokens(sessionId) {
   const system = getSessionContextEstimate(sessionId).system || '';
   return typeof estimateTextTokens === 'function'
     ? estimateTextTokens(system)
-    : Math.ceil(String(system).length / 3.2);
+    : Math.ceil(String(system).length / CHARS_PER_TOKEN);
 }
 
 function estimateSystemToolsExtra(sessionId) {
@@ -405,7 +405,7 @@ function estimateInflightRunTokens(live) {
   const addText = (text) => {
     const s = String(text || '').trim();
     if (!s) return 0;
-    return (typeof estimateTextTokens === 'function' ? estimateTextTokens(capText(s)) : Math.ceil(capText(s).length / 3.2)) + 6;
+    return (typeof estimateTextTokens === 'function' ? estimateTextTokens(capText(s)) : Math.ceil(capText(s).length / CHARS_PER_TOKEN)) + 6;
   };
 
   let total = 0;
@@ -527,7 +527,7 @@ function resetActiveRunContextUiState(sessionId) {
     contextEstimateIpcTimer = null;
   }
   contextEstimateIpcInflight = false;
-  if (typeof resetTraceAutoCollapseState === 'function') resetTraceAutoCollapseState();
+  if (typeof resetChatStreamScrollBaseline === 'function') resetChatStreamScrollBaseline();
 }
 
 function noteContextCompaction(cr, sessionId) {
@@ -635,7 +635,7 @@ function refreshContextProgress() {
     draft.trim() && typeof estimateTextTokens === 'function'
       ? estimateTextTokens(draft) + 6
       : draft.trim()
-        ? Math.ceil(draft.length / 3.2) + 6
+        ? Math.ceil(draft.length / CHARS_PER_TOKEN) + 6
         : 0;
 
   const syncMessageTokens = estimateContextTokensFallback(contextMessages);

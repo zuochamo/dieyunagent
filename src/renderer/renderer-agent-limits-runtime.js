@@ -18,8 +18,6 @@ function applyAgentLimitsToRuntime(opts = {}) {
     if (L.completionFoldedMaxChars != null) CTX_LIMITS.COMPLETION_FOLDED_MAX_CHARS = L.completionFoldedMaxChars;
     if (L.llmRequestMaxChars != null) CTX_LIMITS.LLM_REQUEST_MAX_CHARS = L.llmRequestMaxChars;
     if (L.lspDiagMaxChars != null) CTX_LIMITS.LSP_DIAG_MAX_CHARS = L.lspDiagMaxChars;
-    if (L.lspDiagMaxFiles != null) CTX_LIMITS.LSP_DIAG_MAX_FILES = L.lspDiagMaxFiles;
-    if (L.lspDiagTimeoutMs != null) CTX_LIMITS.LSP_DIAG_TIMEOUT_MS = L.lspDiagTimeoutMs;
   }
 }
 

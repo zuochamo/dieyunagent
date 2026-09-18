@@ -687,6 +687,8 @@ async function executeSendPrepAndRun(state) {
     fullText: plannerUserText,
     composerModel,
     apiConfig,
+    // 计划创建（plan_create）要按本次实际路由解析模型配置，续跑/定时执行都靠它
+    modelRoute: route,
     userTurn,
     undoTurnId: turnWithdrawMeta.undoTurnId || null,
     agentRunId,

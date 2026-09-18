@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, syncLiveWriteFromTrace, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, syncLiveWriteFromTrace, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS */
 'use strict';
 
 function isDieyunCoreReady() {
@@ -163,27 +163,31 @@ function mapRustAgentTrace(rustTrace, prefixTrace) {
   if (!Array.isArray(rustTrace)) return out;
   for (const r of rustTrace) {
     const tools = (r.tools || []).map((t) => {
-      const args = t.args || {};
+      const args = t.args || t.toolArgs || {};
       const argsBrief =
         typeof formatToolArgsBrief === 'function'
           ? formatToolArgsBrief(t.name, args)
           : JSON.stringify(args).slice(0, 120);
+      // pending 只出现在「实时进度」trace（Main 侧边跑边推）；Rust 收尾 trace 不带该字段
+      const pending = !!t.pending;
       let summary = '完成';
       if (t.error) summary = `错误: ${t.error}`;
+      else if (pending) summary = '';
       else if (typeof summarizeToolResult === 'function') {
         summary = summarizeToolResult(t.name, t.result);
       }
       const failed =
-        !!t.error ||
-        !!(t.result && typeof t.result === 'object' && (t.result.error || t.result.ok === false));
+        !pending &&
+        (!!t.error ||
+          !!(t.result && typeof t.result === 'object' && (t.result.error || t.result.ok === false)));
       return {
         name: t.name,
         argsBrief,
         summary,
-        pending: false,
+        pending,
         failed,
         errorCode: t.result && t.result.errorCode ? t.result.errorCode : undefined,
-        toolArgs: t.args || {}
+        toolArgs: args
       };
     });
     const row = {
@@ -400,6 +404,22 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
   let llmWaitTimer = null;
   let llmWaitStartedAt = 0;
   let llmWaitBaseLabel = '';
+  /** 本轮是否已出字（首包到达）：出字前显示「请求 LLM…」，出字后改为静默监控 */
+  let llmStreaming = false;
+  /** 最近一次收到 delta 的时刻 */
+  let llmLastDeltaAt = 0;
+
+  /** 思考轮次上的等待备注（如「上游 42s 无数据」）：叠加一行，不覆盖模型正文 */
+  const setLiveNote = (note) => {
+    const text = String(note || '').trim();
+    if (!displayedTrace.length) return;
+    const idx = displayedTrace.length - 1;
+    const live = displayedTrace[idx];
+    if (String(live.liveNote || '') === text) return;
+    displayedTrace = displayedTrace.slice();
+    displayedTrace[idx] = { ...live, liveNote: text };
+    notifyRustProgress(displayedTrace, liveContent);
+  };
 
   const clearLlmWaitTimer = () => {
     if (llmWaitTimer) {
@@ -408,17 +428,31 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     }
     llmWaitStartedAt = 0;
     llmWaitBaseLabel = '';
+    llmStreaming = false;
+    llmLastDeltaAt = 0;
+    setLiveNote('');
   };
 
+  /**
+   * 「等待模型」提示的唯一来源（请求期内只此一处改文案）：
+   *   未出字 → 「请求 LLM · 模型（已等 Ns）」
+   *   已出字且静默 ≥ STREAM_IDLE_HINT_MS → 备注「上游 Ns 无数据」
+   *   已出字且正常 → 不加噪音
+   */
   const startLlmWaitTimer = (baseLabel) => {
     clearLlmWaitTimer();
     llmWaitBaseLabel = String(baseLabel || '请求 LLM…');
     llmWaitStartedAt = Date.now();
     llmWaitTimer = setInterval(() => {
       if (!llmWaitStartedAt) return;
-      const sec = Math.max(1, Math.round((Date.now() - llmWaitStartedAt) / 1000));
       const base = llmWaitBaseLabel.replace(/…\s*$/, '');
-      pushLive(`${base}（已等 ${sec}s）…`, []);
+      if (!llmStreaming) {
+        const sec = Math.max(1, Math.round((Date.now() - llmWaitStartedAt) / 1000));
+        pushLive(`${base}（已等 ${sec}s）…`, []);
+        return;
+      }
+      const idleMs = Date.now() - llmLastDeltaAt;
+      setLiveNote(idleMs >= STREAM_IDLE_HINT_MS ? `上游 ${Math.round(idleMs / 1000)}s 无数据` : '');
     }, 5000);
   };
 
@@ -485,6 +519,18 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     notifyRustProgress(displayedTrace, liveContent);
   };
 
+  /** 给当前轮打「确认不再调工具」标记：思考区折叠的唯一信号来源 */
+  const markAnswerPhaseRound = (traceRows) => {
+    const rows = Array.isArray(traceRows) ? traceRows : [];
+    if (!rows.length) return rows;
+    const idx = rows.length - 1;
+    const last = rows[idx];
+    if (!last || last.answerPhase) return rows;
+    const next = rows.slice();
+    next[idx] = { ...last, answerPhase: true };
+    return next;
+  };
+
   const freezeLiveWithTools = (toolsRows) => {
     const live = displayedTrace.length ? displayedTrace[displayedTrace.length - 1] : null;
     if (!live) return;
@@ -539,7 +585,10 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             pushLive(phaseLabel, []);
             startLlmWaitTimer(phaseLabel);
           } else if (ev.phase === 'llm_delta') {
-            clearLlmWaitTimer();
+            // 不结束心跳：出字后从「请求 LLM（已等 Ns）」切到「静默时长」监控，
+            // 上游断流时才会出现「上游 Ns 无数据」，不再回落成无信息的占位符
+            llmStreaming = true;
+            llmLastDeltaAt = Date.now();
             finishRustBootDisplay();
             const reasoning = String((ev.data && ev.data.reasoning) || '');
             const rawContent = String((ev.data && ev.data.content) || '');
@@ -574,6 +623,10 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
               const live = displayedTrace.length ? displayedTrace[displayedTrace.length - 1] : null;
               if (live && leftover) live.visibleContent = leftover;
               liveContent = '';
+              notifyRustProgress(displayedTrace, liveContent, { immediate: true });
+            } else if (Number.isFinite(toolCalls) && toolCalls === 0) {
+              // 本轮不再调工具：正文会落到回答区，思考区据此折叠
+              displayedTrace = markAnswerPhaseRound(displayedTrace);
               notifyRustProgress(displayedTrace, liveContent, { immediate: true });
             } else if (ev.data && ev.data.persistRound) {
               notifyRustProgress(displayedTrace, liveContent, { immediate: true });
@@ -853,6 +906,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
           longHorizon: runIsLongHorizon(options)
         },
         apiConfig,
+        modelRoute: options.modelRoute || undefined,
         sessionId: options.sessionId || undefined,
         model: segmentBody.model,
         taskTier: options.taskTier || undefined,

@@ -126,6 +126,7 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
         signal: runOpts.signal,
         onProgress: progress,
         apiConfig: runOpts.apiConfig,
+        modelRoute: runOpts.modelRoute,
         sessionId: runSessionId,
         runWorkspaceRoot: runWorkspacePath || undefined,
         undoTurnId: runUndoTurnId || undefined,

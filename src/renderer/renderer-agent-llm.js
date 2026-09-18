@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, syncLiveWriteFromTrace, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, syncLiveWriteFromTrace, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, sanitizeOutboundImageUrl */
 'use strict';
 
 function resolveEndpoint(baseUrl) {
@@ -433,6 +433,23 @@ function safeJsonStringify(value) {
   }
 }
 
+/**
+ * 出站图片 part 的统一闸门：格式不受上游支持（bmp/svg/heic/tiff/ico、坏 base64、
+ * 空图）时降级为文字说明，绝不让 image_url 带着不合法内容出门——上游会以
+ * HTTP 400 "unsupported image" 打回整轮请求（历史里的图也一样会被重发）。
+ * 判定逻辑单一来源是 renderer-utils.js 的 sanitizeOutboundImageUrl。
+ */
+function imagePartForApi(url) {
+  const safe = sanitizeOutboundImageUrl(url);
+  if (!safe) {
+    return {
+      type: 'text',
+      text: '（图片格式不受模型接口支持，已省略；仅支持 png/jpeg/gif/webp）'
+    };
+  }
+  return { type: 'image_url', image_url: { url: safe } };
+}
+
 function normalizeContentPartForApi(part) {
   if (typeof part === 'string') return { type: 'text', text: part };
   if (!part || typeof part !== 'object') return null;
@@ -441,14 +458,14 @@ function normalizeContentPartForApi(part) {
   }
   if (part.type === 'image_url') {
     const url = part.image_url?.url || part.url;
-    return url ? { type: 'image_url', image_url: { url: String(url) } } : null;
+    return url ? imagePartForApi(url) : null;
   }
   if (part.type === 'input_text') {
     return { type: 'text', text: String(part.text ?? part.content ?? '') };
   }
   if (part.type === 'input_image') {
     const url = part.image_url || part.url;
-    return url ? { type: 'image_url', image_url: { url: String(url) } } : null;
+    return url ? imagePartForApi(url) : null;
   }
   if (part.text || part.content) {
     return { type: 'text', text: String(part.text || part.content) };
