@@ -4,7 +4,6 @@
  * AgentRunEvent + Mobile progress 契约 smoke（无需 Electron / LLM）
  */
 
-const { EventEmitter } = require('events');
 const {
   AGENT_RUN_EVENT_TYPES,
   createAgentRunEvent,
@@ -124,6 +123,40 @@ function testRoundLimitFlagClearsOnResumeTrace() {
   assert(live.hitRoundLimit === false, 'trace after resume must clear hitRoundLimit');
 }
 
+function testTerminalEventKeepsStreamedContent() {
+  // 终态事件经常不带正文（createAgentRunEvent 把缺省 streamContent 规整成 ''），
+  // 照抄会把已经流式渲染好的正文抹掉 —— 气泡只剩思考区，重载会话才又出现。
+  const live = { trace: [], streamContent: '高阳县今天晴，25℃。' };
+  applyAgentRunEventToLive(live, createAgentRunEvent(AGENT_RUN_EVENT_TYPES.DONE, { sessionId: 's1' }));
+  assert(live.streamContent === '高阳县今天晴，25℃。', 'done without content must keep streamed body');
+  assert(live.finished === true, 'done marks finished');
+  for (const type of [AGENT_RUN_EVENT_TYPES.STOPPED, AGENT_RUN_EVENT_TYPES.ERROR]) {
+    const partial = { trace: [], streamContent: '半截正文' };
+    applyAgentRunEventToLive(partial, createAgentRunEvent(type, { sessionId: 's1' }));
+    assert(partial.streamContent === '半截正文', `${type} without content must keep partial body`);
+  }
+}
+
+function testTerminalEventContentWins() {
+  // 计划运行由 Main 收尾：终态事件带的就是落库的同一份正文，必须以它为准
+  const live = { trace: [], streamContent: '' };
+  applyAgentRunEventToLive(
+    live,
+    createAgentRunEvent(AGENT_RUN_EVENT_TYPES.DONE, { sessionId: 's1', streamContent: '最终正文' })
+  );
+  assert(live.streamContent === '最终正文', 'terminal content overrides');
+}
+
+function testProgressEventStillClearsContent() {
+  // 非终态进度事件仍按事件原样覆盖（新一轮可以清空正文）
+  const live = { trace: [], streamContent: '上一轮正文' };
+  applyAgentRunEventToLive(
+    live,
+    createAgentRunEvent(AGENT_RUN_EVENT_TYPES.TRACE, { trace: [{ round: 1 }], streamContent: '' })
+  );
+  assert(live.streamContent === '', 'progress event may clear content');
+}
+
 function testPrepEventDoesNotClobberThinking() {
   const live = {
     inPrepPhase: false,
@@ -142,6 +175,9 @@ function testPrepEventDoesNotClobberThinking() {
 async function main() {
   testCreateAgentRunEvent();
   testApplyToLiveStreamContent();
+  testTerminalEventKeepsStreamedContent();
+  testTerminalEventContentWins();
+  testProgressEventStillClearsContent();
   testPrepEventDoesNotClobberThinking();
   testRoundLimitFlagClearsOnResumeTrace();
   testServicePayloadStreamContent();

@@ -46,6 +46,16 @@ assert(
     spec.firstTokenTimeoutMs >= 10000,
   'loop spec first-token timeout is resolved or omitted'
 );
+assert(
+  spec.streamIdleTimeoutMs === AGENT_LIMITS_DEFAULTS.llmStreamIdleTimeoutMs ||
+    spec.streamIdleTimeoutMs === undefined ||
+    spec.streamIdleTimeoutMs >= 10000,
+  'loop spec stream idle timeout is resolved or omitted'
+);
+assert(
+  AGENT_LIMITS_DEFAULTS.llmStreamIdleTimeoutMs <= 180000,
+  'stream idle timeout stays 与首包超时同量级（断流不许再回到十分钟级）'
+);
 assert(spec.llmMaxRetries === AGENT_LIMITS_DEFAULTS.streamRoundMaxAttempts, 'loop spec sampling retries');
 assert(spec.llmRetryBaseMs === AGENT_LIMITS_DEFAULTS.llmRetryBaseMs, 'loop spec retry base');
 assert(spec.llmMaxRetryDelayMs === 60000, 'loop spec retry delay cap');

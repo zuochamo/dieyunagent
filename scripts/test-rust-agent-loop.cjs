@@ -6,7 +6,6 @@
  * 环境: LLM 使用 model-settings 或 DIEYUN_TEST_LLM_* 变量
  */
 const path = require('path');
-const fs = require('fs');
 const { createCoreBridge } = require('../src/core-bridge');
 const { resolveDieyunCoreBinary } = require('../src/core-bridge-path');
 const { runRustAgentLoop } = require('../src/agent/rust-loop-runner');

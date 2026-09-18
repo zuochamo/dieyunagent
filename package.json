@@ -1,6 +1,6 @@
 {
   "name": "dieyunagent",
-  "version": "0.1.30",
+  "version": "0.1.35",
   "description": "叠云 agent",
   "main": "src/main.js",
   "scripts": {
@@ -96,6 +96,7 @@
     "cos-nodejs-sdk-v5": "^2.15.4",
     "electron": "^28.1.0",
     "electron-builder": "^24.9.1",
+    "esbuild": "^0.28.2",
     "eslint": "^8.57.1",
     "rcedit": "^3.1.0",
     "typescript": "5.8.3",

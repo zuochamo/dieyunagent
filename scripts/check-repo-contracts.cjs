@@ -34,6 +34,34 @@ function extractScriptFiles(cmd) {
   return files;
 }
 
+/**
+ * 跨语言词表同步：过场思考前缀在 JS（正则）与 Rust（starts_with 链）各写一份，
+ * 跨语言无法共享常量 —— 用本检查钉住，只改一边就会 fail。
+ */
+function checkPassthroughPrefixes(errors) {
+  const jsPath = path.join(ROOT, 'src', 'agent', 'agent-round-text.js');
+  const rsPath = path.join(ROOT, 'crates', 'dieyun-core', 'src', 'agent', 'loop_run.rs');
+  if (!fs.existsSync(jsPath) || !fs.existsSync(rsPath)) return;
+  const jsFn = fs.readFileSync(jsPath, 'utf8').match(/function isPassthroughThought[\s\S]*?\n\}/);
+  const rsFn = fs.readFileSync(rsPath, 'utf8').match(/fn is_passthrough_thought[\s\S]*?\n\}/);
+  const jsList = jsFn
+    ? ((jsFn[0].match(/\^\(([^)]*)\)/) || [])[1] || '')
+        .split('|')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+  const rsList = rsFn ? [...rsFn[0].matchAll(/starts_with\("([^"]+)"\)/g)].map((m) => m[1]) : [];
+  if (!jsList.length || !rsList.length) {
+    errors.push('过场思考前缀：解析失败（agent-round-text.js / loop_run.rs 结构已变？）');
+    return;
+  }
+  if (jsList.join('|') !== rsList.join('|')) {
+    errors.push(
+      `过场思考前缀跨语言不同步：JS=[${jsList.join('|')}] Rust=[${rsList.join('|')}]`
+    );
+  }
+}
+
 function main() {
   const errors = [];
   const pkg = JSON.parse(fs.readFileSync(PKG_PATH, 'utf8'));
@@ -83,6 +111,8 @@ function main() {
   for (const t of npmNeeded) {
     if (!scripts[t]) errors.push(`CODEMAP references unknown npm script: ${t}`);
   }
+
+  checkPassthroughPrefixes(errors);
 
   if (errors.length) {
     console.error(`[check-repo-contracts] ${errors.length} problem(s):`);

@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 html = (ROOT / "src/renderer/index.html").read_text(encoding="utf-8")
 scripts = []
 for src in re.findall(r'src="([^"]+\.js)"', html):
+    if src.startswith("./dist/"):
+        # 构建产物（agent-bundle.js 等），由 scripts/build-agent-bundle.cjs 生成，源代码不在此扫描
+        continue
     if src.startswith("./"):
         scripts.append(ROOT / "src/renderer" / src[2:])
     elif src.startswith("../"):

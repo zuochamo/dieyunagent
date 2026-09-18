@@ -65,9 +65,14 @@ function testShouldCompactRound() {
     'heavy first round compact even at llmRound 0'
   );
   assert(shouldCompactRound({ force: true, messageCount: 2, chars: 10, charBudget: 800000 }), 'force compact');
+  // 门槛与 completionRecentTurns(24) 对齐：12 条不再触发，25 条才触发
   assert(
-    shouldCompactRound({ force: false, messageCount: 13, chars: 10, charBudget: 800000 }),
-    'compact after 12 messages'
+    !shouldCompactRound({ force: false, messageCount: 13, chars: 10, charBudget: 800000 }),
+    '13 messages stays uncompressed'
+  );
+  assert(
+    shouldCompactRound({ force: false, messageCount: 25, chars: 10, charBudget: 800000 }),
+    'compact after 24 messages'
   );
 }
 
@@ -154,7 +159,7 @@ async function testLlmOnlyRound() {
 }
 
 async function testCompactThenContinue() {
-  const messages = Array.from({ length: 13 }, (_, i) => ({ role: 'user', content: String(i) }));
+  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
   const compactCalls = [];
   const bridge = createFakeBridge({
     'agent.loop.start': async () => ({
@@ -190,7 +195,7 @@ async function testCompactThenContinue() {
 }
 
 async function testCompactTimeoutContinuesLoop() {
-  const messages = Array.from({ length: 13 }, (_, i) => ({ role: 'user', content: String(i) }));
+  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
   const bridge = createFakeBridge({
     'agent.loop.start': async () => ({
       runId: 'run-to',
@@ -223,7 +228,7 @@ async function testCompactTimeoutContinuesLoop() {
 }
 
 async function testCompactSkippedResultContinuesLoop() {
-  const messages = Array.from({ length: 13 }, (_, i) => ({ role: 'user', content: String(i) }));
+  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
   const bridge = createFakeBridge({
     'agent.loop.start': async () => ({
       runId: 'run-sk',
@@ -533,6 +538,198 @@ async function testVisionSurvivesOverflowRetry() {
   );
 }
 
+/** 复刻真实上游文案：HTTP 400 + `.messages[N].image[0]: unsupported image` */
+function unsupportedImageError(messageIndex) {
+  const err = new Error(
+    `HTTP 400 {"error":{"code":"invalid_request_error","message":"Error from provider (Console Go): ` +
+      `Upstream request failed: [invalid_request_error] .messages[${messageIndex}].image[0]: You have uploaded ` +
+      `an unsupported image. Please make sure your image is valid and has one of the following formats: ` +
+      `webp, png, jpeg, and gif.","param":null,"type":"invalid_request_error"}}`
+  );
+  err.statusCode = 400;
+  return err;
+}
+
+const PNG_DATA_URL = `data:image/png;base64,${Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0
+]).toString('base64')}`;
+
+function snapshotMessages(messages) {
+  return JSON.parse(JSON.stringify(messages));
+}
+
+function carriesImagePart(list) {
+  return (list || []).some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === 'image_url')
+  );
+}
+
+async function testImageRejectedRoundIsRepaired() {
+  const messages = [
+    { role: 'user', content: '这是什么？' },
+    {
+      role: 'user',
+      content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: PNG_DATA_URL } }]
+    }
+  ];
+  const setMessages = [];
+  const seen = [];
+  const phases = [];
+  let llmCalls = 0;
+  const bridge = createFakeBridge({
+    'agent.loop.start': async () => ({
+      runId: 'run-img',
+      phase: 'need_llm',
+      llmBody: { model: 'm', messages, tools: [] }
+    }),
+    'agent.loop.set_messages': async (params) => {
+      setMessages.push(snapshotMessages(params.messages));
+      return { ok: true };
+    },
+    'agent.loop.continue': async () => ({ runId: 'run-img', phase: 'done', content: 'ok' })
+  });
+
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    onPhase: (p) => phases.push(p),
+    fetchLlmOnce: async ({ body }) => {
+      llmCalls += 1;
+      seen.push(snapshotMessages(body.messages));
+      if (llmCalls === 1) throw unsupportedImageError(1);
+      return { content: 'ok', toolCalls: [] };
+    }
+  });
+
+  assert(result.phase === 'done', 'image rejection still finishes the turn');
+  assert(llmCalls === 2, 'retried exactly once');
+  assert(carriesImagePart(seen[0]), 'first attempt carries the image');
+  assert(!carriesImagePart(seen[1]), 'retry drops the rejected image');
+  assert(
+    seen[1][1].content.some((p) => p.type === 'text' && /图片被模型接口拒绝/.test(p.text)),
+    'dropped image becomes an explaining text part'
+  );
+  assert(setMessages.length === 1, 'ledger written back once');
+  assert(!carriesImagePart(setMessages[0]), 'ledger no longer holds the rejected image');
+  assert(phases.includes('llm_images_dropped'), 'emits llm_images_dropped');
+}
+
+async function testRejectedImageWithoutUsableIndexDropsAll() {
+  const messages = [
+    {
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: PNG_DATA_URL } }]
+    }
+  ];
+  const seen = [];
+  let llmCalls = 0;
+  const bridge = createFakeBridge({
+    'agent.loop.start': async () => ({
+      runId: 'run-img-all',
+      phase: 'need_llm',
+      llmBody: { model: 'm', messages, tools: [] }
+    }),
+    'agent.loop.set_messages': async () => ({ ok: true }),
+    'agent.loop.continue': async () => ({ runId: 'run-img-all', phase: 'done', content: 'ok' })
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    fetchLlmOnce: async ({ body }) => {
+      llmCalls += 1;
+      seen.push(snapshotMessages(body.messages));
+      // 文案里没有可用的 .messages[N] 定位：不许赌，直接丢光
+      if (llmCalls === 1) {
+        const err = new Error('HTTP 400 unsupported image');
+        err.statusCode = 400;
+        throw err;
+      }
+      return { content: 'ok', toolCalls: [] };
+    }
+  });
+  assert(llmCalls === 2, 'retried once without an index');
+  assert(!carriesImagePart(seen[1]), 'all images dropped when the index is unusable');
+}
+
+async function testRejectedVisionMessageIsNotReinjected() {
+  const bv = require('../src/agent/browser-vision');
+  bv.recordBrowserScreenshot('run-vimg', 'browser_screenshot', {
+    ok: true,
+    mime: 'image/png',
+    base64: 'AAAA'
+  });
+
+  const seen = [];
+  const phases = [];
+  let llmCalls = 0;
+  const bridge = createFakeBridge({
+    'agent.loop.start': async () => ({
+      runId: 'run-vimg',
+      phase: 'need_llm',
+      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] }
+    }),
+    'agent.loop.continue': async () => ({ runId: 'run-vimg', phase: 'done', content: 'ok' })
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    browserVision: true,
+    onPhase: (p) => phases.push(p),
+    fetchLlmOnce: async ({ body }) => {
+      llmCalls += 1;
+      seen.push(snapshotMessages(body.messages));
+      // 账本只有 1 条 → 下标 1 就是本轮临时追加的视觉注入消息
+      if (llmCalls === 1) throw unsupportedImageError(1);
+      return { content: 'ok', toolCalls: [] };
+    }
+  });
+
+  assert(llmCalls === 2, 'vision rejection retried');
+  assert(seen[0].length === 2 && carriesImagePart([seen[0][1]]), 'first attempt injected the screenshot');
+  assert(seen[1].length === 1, 'retry no longer injects the rejected screenshot');
+  assert(
+    !bridge.invokes.some((i) => i.method === 'agent.loop.set_messages'),
+    'temp vision message is not written back to the ledger'
+  );
+  assert(phases.includes('llm_images_dropped'), 'emits llm_images_dropped');
+}
+
+async function testNonImage400IsNotRepaired() {
+  let llmCalls = 0;
+  const bridge = createFakeBridge({
+    'agent.loop.start': async () => ({
+      runId: 'run-400',
+      phase: 'need_llm',
+      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] }
+    })
+  });
+  let thrown = '';
+  try {
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm' },
+      loopSpec: loopSpec(),
+      fetchLlmOnce: async () => {
+        llmCalls += 1;
+        const err = new Error('HTTP 400 invalid api key');
+        err.statusCode = 400;
+        throw err;
+      }
+    });
+  } catch (err) {
+    thrown = String(err && err.message);
+  }
+  assert(/invalid api key/.test(thrown), 'non-image 400 still surfaces to the caller');
+  assert(llmCalls === 1, 'no repair retry for a non-image 400');
+}
+
 async function testVisionImageReadHelpers() {
   const { sniffImageMime, isVisionImageReadRequest } = require('../src/agent/tool-bridge-main');
 
@@ -639,7 +836,7 @@ async function testAbortDuringContinueCancelsSidecar() {
 }
 
 async function testAbortDuringCompactCancelsSidecar() {
-  const messages = Array.from({ length: 13 }, (_, i) => ({ role: 'user', content: String(i) }));
+  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
   const bridge = createFakeBridge({
     'agent.loop.start': async () => ({
       runId: 'run-k',
@@ -680,7 +877,7 @@ async function testAbortDuringCompactCancelsSidecar() {
 }
 
 async function testOverflowStopsAfterOneCompact() {
-  const messages = Array.from({ length: 13 }, (_, i) => ({ role: 'user', content: String(i) }));
+  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
   let compactCalls = 0;
   let llmCalls = 0;
   const bridge = createFakeBridge({
@@ -726,7 +923,7 @@ async function testOverflowStopsAfterOneCompact() {
 }
 
 async function testOverflowDoesNotTreatPartialAsSuccess() {
-  const messages = Array.from({ length: 13 }, (_, i) => ({ role: 'user', content: String(i) }));
+  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
   const bridge = createFakeBridge({
     'agent.loop.start': async () => ({
       runId: 'run-ovp',
@@ -939,6 +1136,10 @@ async function run() {
   await testDelegateRound();
   await testBrowserVisionInjection();
   await testVisionSurvivesOverflowRetry();
+  await testImageRejectedRoundIsRepaired();
+  await testRejectedImageWithoutUsableIndexDropsAll();
+  await testRejectedVisionMessageIsNotReinjected();
+  await testNonImage400IsNotRepaired();
   await testVisionImageReadHelpers();
   await testAbortDuringLlmCancelsSidecar();
   await testAbortDuringContinueCancelsSidecar();

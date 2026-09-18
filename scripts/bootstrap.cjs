@@ -27,3 +27,12 @@ if (needInstall()) {
 } else {
   console.log('[dieyunagent/bootstrap] dependencies found, skipping npm install.');
 }
+
+// 构建 renderer 侧 agent 打包产物：index.html 只加载 src/renderer/dist/agent-bundle.js，
+// 该文件由 src/renderer/agent/agent-bundle-entry.js 打包而来（dist/ 不入版本库）。
+require('./build-agent-bundle.cjs')
+  .buildAgentBundle({ minify: false })
+  .catch((err) => {
+    console.error('[dieyunagent/bootstrap] agent bundle build failed:', err.message || err);
+    process.exit(1);
+  });

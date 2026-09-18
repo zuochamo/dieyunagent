@@ -17,6 +17,7 @@ const OUT_DIR = path.join(RENDERER, 'dist');
 const OUT_BUNDLE = path.join(OUT_DIR, 'bundle.js');
 const OUT_MAP = path.join(OUT_DIR, 'bundle.js.map');
 const OUT_INDEX = path.join(RENDERER, 'index.bundled.html');
+const { buildAgentBundle } = require('./build-agent-bundle.cjs');
 
 const HEAD_SCRIPTS = new Set([
   './renderer-theme-bootstrap.js',
@@ -25,13 +26,18 @@ const HEAD_SCRIPTS = new Set([
   '../../node_modules/xlsx/dist/xlsx.full.min.js'
 ]);
 
+// 必须按原位、原顺序独立加载的脚本（不参与 concat，但在 index.bundled.html 中保留 <script> 标签）：
+// - ./dist/agent-bundle.js：独立构建产出的 renderer 侧 agent 层产物
+// - ./core/namespaces.js：agent-bundle 依赖 window.DieyunNamespaces，必须先于它执行
+const PREBUILT_SCRIPTS = new Set(['./dist/agent-bundle.js', './core/namespaces.js']);
+
 function parseBodyScripts(html) {
   const re = /<script\s+src="([^"]+)"><\/script>/gi;
   const scripts = [];
   let m;
   while ((m = re.exec(html))) {
     const src = m[1];
-    if (!HEAD_SCRIPTS.has(src)) scripts.push(src);
+    if (!HEAD_SCRIPTS.has(src) && !PREBUILT_SCRIPTS.has(src)) scripts.push(src);
   }
   return scripts;
 }
@@ -46,7 +52,9 @@ function generateBundledHtml(html) {
   const parts = html.split('</head>');
   if (parts.length !== 2) throw new Error('index.html: missing </head>');
   let body = parts[1];
-  body = body.replace(/\s*<script\s+src="[^"]+"><\/script>\s*/g, '\n');
+  body = body.replace(/\s*<script\s+src="([^"]+)"><\/script>\s*/g, (match, src) =>
+    PREBUILT_SCRIPTS.has(src) ? `\n    <script src="${src}"></script>\n` : '\n'
+  );
   const bundleTag = '    <script src="./dist/bundle.js"></script>\n';
   if (!body.includes('</body>')) throw new Error('index.html: missing </body>');
   body = body.replace('</body>', `${bundleTag}  </body>`);
@@ -55,6 +63,13 @@ function generateBundledHtml(html) {
 
 async function main() {
   const wantMinify = process.argv.includes('--minify');
+
+  // agent-bundle 是 index.html 唯一加载的 agent 层入口：PREBUILT_SCRIPTS 只负责把它留在
+  // HTML 里（不参与 concat），因此必须在这里构建。否则单独跑 build:renderer 会产出引用
+  // 不存在文件的 index.bundled.html，而 dist/ 已被门禁脚本跳过，缺失无从发现。
+  // minify 必须一并传下去：bootstrap 只构建未压缩版，生产包需要压缩版。
+  await buildAgentBundle({ minify: wantMinify });
+
   const html = fs.readFileSync(INDEX, 'utf8');
   const scripts = parseBodyScripts(html);
   if (!scripts.length) throw new Error('no body scripts found in index.html');

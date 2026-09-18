@@ -10,8 +10,6 @@ HTML = DIR / "index.html"
 CRITICAL = [
     "sendMessage",
     "buildAgentTools",
-    "buildSkillsPrompt",
-    "buildMcpPrompt",
     "executeAgentTool",
     "chatCompletionWithToolsViaRust",
     "fetchChatCompletion",

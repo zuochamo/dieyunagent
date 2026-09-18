@@ -23,6 +23,19 @@ setEqual(
   'TOOL_NAME_ALIASES keys'
 );
 
+// llm-tool-call-fallback 必须复用同一张表（曾因各写一份而漂移，见 HARNESS-INVENTORY §D）
+const llmFallback = require('../src/llm-tool-call-fallback');
+for (const [alias, canonical] of Object.entries(shared.TOOL_NAME_ALIASES)) {
+  assert(
+    llmFallback.normalizeToolName(alias) === canonical,
+    `llm-tool-call-fallback alias ${alias} -> ${canonical}`
+  );
+}
+assert(
+  llmFallback.normalizeToolName('EXEC') === 'host_exec',
+  'llm-tool-call-fallback alias lookup is case-insensitive'
+);
+
 assert(
   main.HOST_EXEC_FILE_WRITE_RE.source === shared.HOST_EXEC_FILE_WRITE_RE.source,
   'HOST_EXEC_FILE_WRITE_RE'
