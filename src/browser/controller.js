@@ -17,14 +17,34 @@ const {
   buildHoverCoordsScript,
   buildHoverCoordsScriptBySelector,
   buildElementBoundsScript,
+  buildScrollTargetScript,
   buildDragCoordsScript,
   buildWaitConditionScript,
   buildUploadFileScript,
   buildPressKeyScript,
   normalizeModifiers,
   buildA11yDomScanScript,
-  buildContextMenuScript
+  buildContextMenuScript,
+  normalizeSnapshotMode,
+  SNAPSHOT_MODES
 } = require('./snapshot-script');
+const {
+  normalizeFrameSpec,
+  isMainFrameSpec,
+  describeFrameSpec,
+  frameDescriptorMatches,
+  summarizeFramesForHint,
+  buildFrameTreeScript,
+  buildTargetDiagnosticsScript,
+  buildAnnotateScript,
+  buildClearAnnotationScript
+} = require('./frame-script');
+const {
+  createTimelineJournal,
+  summarizeTimeline,
+  buildTimelineRecorderScript,
+  TIMELINE_BINDING
+} = require('./timeline');
 const { a11ySnapshotBrowserView } = require('./a11y');
 const { createNetworkJournal, summarizeHarEntries } = require('./network-collector');
 const {
@@ -36,7 +56,7 @@ const {
 const { BROWSER_SESSION_PARTITION, browserPartitionForSession } = require('./session-sync');
 const { assertBrowserLoadUrl, matchUrlPattern } = require('./url-policy');
 const { isBrowserPermissionAllowed } = require('./permission-policy');
-const { buildEvaluateScript, normalizeEvaluateResult } = require('./evaluate');
+const { buildEvaluateScript, buildExpressionProbeScript, normalizeEvaluateResult } = require('./evaluate');
 const { normalizeViewport, normalizeEmulation } = require('./viewport');
 const { buildExpectScript } = require('./expect');
 
@@ -66,6 +86,54 @@ function assertHttpUrl(url) {
   return parsed.toString();
 }
 
+/** frame 参数 → 规整后的 spec（'main' 表示顶层）。 */
+function frameSpecOf(args = {}) {
+  return normalizeFrameSpec(args && args.frame);
+}
+
+/** frame 参数 → 注入脚本里的字面量（顶层为 null）。 */
+function frameJsonOf(args = {}) {
+  const spec = frameSpecOf(args);
+  return isMainFrameSpec(spec) ? 'null' : JSON.stringify(spec);
+}
+
+function sameOriginAs(a, b) {
+  try {
+    return new URL(String(a || '')).origin === new URL(String(b || '')).origin;
+  } catch {
+    return String(a || '') === String(b || '');
+  }
+}
+
+/**
+ * 子 frame 内采集到的 framePath 是相对该 frame 的（'main'/'0'），
+ * 回传给模型前要拼回从顶层算起的绝对路径，否则 frame 参数无法复用。
+ */
+function relocateFramePaths(data, prefix) {
+  if (!data || typeof data !== 'object') return data;
+  const base = String(prefix || '');
+  if (!base || base === 'main') return data;
+  const abs = (rel) => {
+    const r = String(rel == null || rel === '' ? 'main' : rel);
+    return r === 'main' ? base : `${base}.${r}`;
+  };
+  if (Array.isArray(data.elements)) {
+    for (const row of data.elements) {
+      if (row && row.framePath != null) row.framePath = abs(row.framePath);
+    }
+  }
+  if (Array.isArray(data.frames)) {
+    data.frames = data.frames.map((f) => (f && f.path != null ? { ...f, path: abs(f.path) } : f));
+  }
+  if (Array.isArray(data.blockedIframes)) {
+    data.blockedIframes = data.blockedIframes.map((f) =>
+      f && f.framePath != null ? { ...f, framePath: abs(f.framePath) } : f
+    );
+  }
+  if (data.framePath != null) data.framePath = abs(data.framePath);
+  return data;
+}
+
 /**
  * @param {{ getMainWindow: () => import('electron').BrowserWindow | null, log?: (msg: string) => void }} deps
  */
@@ -87,9 +155,14 @@ function createBrowserViewController(deps) {
   let lastRenderHealth = null;
   /** 设备仿真覆盖（BrowserView 走 CDP Emulation.setDeviceMetricsOverride） */
   let viewportOverride = null;
-  /** console 异常钩子的 init script 注册状态（按 webContents 记忆） */
-  let consoleInitScriptWc = null;
-  let consoleInitScriptId = null;
+  const timelineJournal = deps.timelineJournal || createTimelineJournal();
+  /** 页面 init script（console 异常钩子 + 时间线记录器）注册状态（按 webContents 记忆） */
+  let initScriptWc = null;
+  /** @type {string[]} */
+  let initScriptIds = [];
+  /** webContents → Map<contextId, { frameId, isDefault, origin }>：frame 级 evaluate 用 */
+  const execContexts = new WeakMap();
+  const runtimeEnabledWcs = new WeakSet();
   let renderProbeTimer = null;
   let recoveringBlankPaint = false;
   let lastBlankRecoveryAt = 0;
@@ -191,27 +264,34 @@ function createBrowserViewController(deps) {
    * 这样 dom-ready 之前抛的早期错误也能采到；注册失败就退回 dom-ready 注入。
    * 注意：CDP 的 Page.addScriptToEvaluateOnNewDocument 需要 debugger 常驻。
    */
-  async function ensureConsoleInitScript(wc) {
+  /** 每个新 document 都要装的两段脚本：console 异常钩子 + 事件时间线记录器。 */
+  function pageInitScriptSources() {
+    return [buildConsoleErrorHookScript(), buildTimelineRecorderScript()];
+  }
+
+  async function ensurePageInitScripts(wc) {
     if (!wc || wc.isDestroyed()) return;
-    if (consoleInitScriptWc === wc && consoleInitScriptId) return;
+    if (initScriptWc === wc && initScriptIds.length) return;
     try {
       if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
       await wc.debugger.sendCommand('Page.enable');
-      const res = await wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-        source: buildConsoleErrorHookScript()
-      });
-      consoleInitScriptWc = wc;
-      consoleInitScriptId = (res && res.identifier) || 'registered';
+      const ids = [];
+      for (const source of pageInitScriptSources()) {
+        const res = await wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source });
+        ids.push((res && res.identifier) || 'registered');
+      }
+      initScriptWc = wc;
+      initScriptIds = ids;
     } catch (e) {
-      consoleInitScriptWc = null;
-      consoleInitScriptId = null;
-      log('browser console init script: ' + (e && e.message ? e.message : e));
+      initScriptWc = null;
+      initScriptIds = [];
+      log('browser page init script: ' + (e && e.message ? e.message : e));
     }
   }
 
   function installConsoleCapture(wc) {
     if (!wc || wc.isDestroyed()) return;
-    ensureConsoleInitScript(wc).catch(() => {});
+    ensurePageInitScripts(wc).catch(() => {});
     wc.on('console-message', (event, level, message, line, sourceId) => {
       // Electron 新版把参数收进 event 对象；旧版为 (event, level, message, line, sourceId)
       const packed = event && typeof event === 'object' && typeof event.message === 'string';
@@ -231,7 +311,9 @@ function createBrowserViewController(deps) {
     });
     wc.on('dom-ready', () => {
       if (wc.isDestroyed()) return;
-      wc.executeJavaScript(buildConsoleErrorHookScript(), false).catch(() => {});
+      for (const source of pageInitScriptSources()) {
+        wc.executeJavaScript(source, false).catch(() => {});
+      }
     });
   }
 
@@ -866,6 +948,7 @@ function createBrowserViewController(deps) {
     loading = false;
     emitState();
     scheduleRenderProbe('navigate', 700);
+    recordTimeline('navigate', { url: currentUrl, reason: 'navigate' });
     return { ok: true, url: currentUrl, title: currentTitle, engine: 'browserview' };
   }
 
@@ -874,7 +957,145 @@ function createBrowserViewController(deps) {
     return v.webContents.executeJavaScript(script, true);
   }
 
-  /** 模型侧任意 JS：结果结构化 + 截断，错误不抛出而是回传。 */
+  /** 时间线：Agent 侧动作（与页面侧真实事件合流）。 */
+  function recordTimeline(type, payload = {}) {
+    try {
+      timelineJournal.add({ type, source: 'agent', engine: 'browserview', url: currentUrl, ...payload });
+    } catch {
+      // 时间线记录失败不影响主流程
+    }
+  }
+
+  /**
+   * frame 树（CDP Page.getFrameTree：含跨域 frame，节点顺序与 in-page 遍历一致）。
+   * @returns {Promise<Array<{frameId: string, parentId: string, url: string, name: string, path: string, depth: number}> | null>}
+   */
+  async function cdpFrameTree(wc) {
+    const dbg = await ensureCdp(wc);
+    if (!dbg) return null;
+    try {
+      const { frameTree } = await dbg.sendCommand('Page.getFrameTree');
+      if (!frameTree) return null;
+      const out = [];
+      const walk = (node, parentId, path, depth) => {
+        const frame = (node && node.frame) || {};
+        out.push({
+          frameId: String(frame.id || ''),
+          parentId: parentId || '',
+          url: String(frame.url || ''),
+          name: String(frame.name || ''),
+          path: depth === 0 ? 'main' : path,
+          depth
+        });
+        const kids = (node && node.childFrames) || [];
+        for (let i = 0; i < kids.length; i++) {
+          walk(kids[i], frame.id, depth === 0 ? String(i) : `${path}.${i}`, depth + 1);
+        }
+      };
+      walk(frameTree, '', 'main', 0);
+      return out;
+    } catch (e) {
+      log('browser Page.getFrameTree: ' + (e && e.message ? e.message : e));
+      return null;
+    }
+  }
+
+  /**
+   * frame 参数 → CDP 目标（frameId + executionContextId）。
+   * 跨域 frame 也会命中（CDP 不受同源限制），但拿不到上下文时明确回报。
+   */
+  async function resolveFrameTarget(wc, spec) {
+    if (isMainFrameSpec(spec)) {
+      return { ok: true, main: true, path: 'main', frameId: '', contextId: 0 };
+    }
+    const tree = await cdpFrameTree(wc);
+    if (!tree) {
+      return {
+        ok: false,
+        errorCode: 'CDP_UNAVAILABLE',
+        error: 'CDP 不可用，无法按 frame 定位；请关闭 DevTools 后重开浏览器面板，或改用 engine=playwright',
+        frames: []
+      };
+    }
+    const descriptors = tree.map((f) => ({ main: f.path === 'main', path: f.path, name: f.name, url: f.url }));
+    let hit = null;
+    for (let i = 0; i < descriptors.length; i++) {
+      if (frameDescriptorMatches(descriptors[i], spec)) {
+        hit = tree[i];
+        break;
+      }
+    }
+    if (!hit) {
+      return {
+        ok: false,
+        errorCode: 'FRAME_NOT_FOUND',
+        error: `未找到匹配的 frame（${describeFrameSpec(spec)}）`,
+        frames: summarizeFramesForHint(descriptors, 16),
+        note: '跨域 frame 也能被 frame 参数命中；用 browser_frames 查看完整 frame 树'
+      };
+    }
+    if (hit.path === 'main') {
+      return { ok: true, main: true, path: 'main', frameId: hit.frameId, contextId: 0, url: hit.url, name: hit.name };
+    }
+    const map = execContexts.get(wc) || new Map();
+    let contextId = null;
+    for (const [id, info] of map) {
+      if (info.frameId === hit.frameId && info.isDefault) {
+        contextId = id;
+        break;
+      }
+    }
+    return {
+      ok: true,
+      main: false,
+      path: hit.path,
+      frameId: hit.frameId,
+      url: hit.url,
+      name: hit.name,
+      contextId,
+      errorCode: contextId == null ? 'FRAME_CONTEXT_UNAVAILABLE' : undefined,
+      error: contextId == null ? 'frame 已找到，但执行上下文尚未就绪（可能仍在加载）；可 browser_wait_for 后再试' : undefined
+    };
+  }
+
+  /** 在指定 frame 内求值：顶层走 executeJavaScript，子 frame 走 CDP Runtime.evaluate(contextId)。 */
+  async function evaluateInTarget(script, opts = {}) {
+    const spec = opts.frameSpec || normalizeFrameSpec(opts.frame);
+    if (isMainFrameSpec(spec)) return evaluate(script);
+    const wc = ensureView().webContents;
+    const target = await resolveFrameTarget(wc, spec);
+    if (!target.ok) return target;
+    if (target.contextId == null) return target;
+    const dbg = await ensureCdp(wc);
+    if (!dbg) {
+      return { ok: false, errorCode: 'CDP_UNAVAILABLE', error: 'CDP 不可用，无法在子 frame 内求值', frames: [] };
+    }
+    try {
+      const res = await dbg.sendCommand('Runtime.evaluate', {
+        expression: script,
+        contextId: target.contextId,
+        awaitPromise: true,
+        returnByValue: true,
+        userGesture: true
+      });
+      if (res && res.exceptionDetails) {
+        const ex = res.exceptionDetails;
+        const desc = ex.exception && (ex.exception.description || ex.exception.value);
+        return {
+          ok: false,
+          error: String(desc || ex.text || '脚本执行失败'),
+          name: String((ex.exception && ex.exception.className) || 'Error'),
+          stack: String((ex.exception && ex.exception.description) || '').split('\n').slice(0, 4).join('\n'),
+          line: ex.lineNumber != null ? Number(ex.lineNumber) + 1 : undefined
+        };
+      }
+      return res && res.result ? res.result.value : undefined;
+    } catch (e) {
+      return { ok: false, errorCode: 'FRAME_EVAL_FAILED', error: e && e.message ? e.message : String(e) };
+    }
+  }
+
+  /** 模型侧任意 JS：结果结构化 + 截断，错误不抛出而是回传。可选 frame 指定执行上下文。 */
   async function evaluateScript(args = {}) {
     const script = String(args.script == null ? '' : args.script);
     if (!script.trim()) {
@@ -882,8 +1103,150 @@ function createBrowserViewController(deps) {
       err.code = 'SCRIPT_REQUIRED';
       throw err;
     }
-    const raw = await evaluate(buildEvaluateScript(script, { maxChars: args.maxChars }));
-    return { engine: 'browserview', url: currentUrl, ...normalizeEvaluateResult(raw) };
+    const frameSpec = frameSpecOf(args);
+    const wrapped = buildEvaluateScript(script, { maxChars: args.maxChars });
+    const raw = await evaluateInTarget(wrapped, { frameSpec });
+    const out = { engine: 'browserview', url: currentUrl };
+    if (raw && raw.ok === false && raw.errorCode && raw.errorCode !== 'SCRIPT_ERROR') {
+      // frame 解析失败 / CDP 不可用：保留具体错误码与可用 frame 列表
+      return {
+        ...out,
+        ok: false,
+        error: raw.error,
+        errorCode: raw.errorCode,
+        frames: raw.frames,
+        note: raw.note,
+        retryable: false
+      };
+    }
+    const normalized = normalizeEvaluateResult(raw);
+    if (!isMainFrameSpec(frameSpec)) out.frame = describeFrameSpec(frameSpec);
+    return { ...out, ...normalized };
+  }
+
+  /** frame 树（模型可见）：CDP 优先（含跨域），无 CDP 时退回同源 DOM 遍历。 */
+  async function listFrames() {
+    if (!hasLiveView() || !currentUrl) {
+      return { ok: false, engine: 'browserview', error: '浏览器尚未打开页面，无法列出 frame', frames: [] };
+    }
+    const wc = view.webContents;
+    const tree = await cdpFrameTree(wc);
+    if (tree) {
+      const map = execContexts.get(wc) || new Map();
+      const ctxFrameIds = new Set();
+      for (const [, info] of map) {
+        if (info.isDefault) ctxFrameIds.add(info.frameId);
+      }
+      const frames = tree.map((f) => {
+        const sameOrigin = f.path === 'main' || sameOriginAs(currentUrl, f.url);
+        return {
+          path: f.path,
+          main: f.path === 'main',
+          name: f.name,
+          url: f.url,
+          depth: f.depth,
+          sameOrigin,
+          accessible: sameOrigin || ctxFrameIds.has(f.frameId),
+          canEvaluate: f.path === 'main' || ctxFrameIds.has(f.frameId),
+          frameId: f.frameId
+        };
+      });
+      return {
+        ok: true,
+        engine: 'browserview',
+        source: 'cdp',
+        url: currentUrl,
+        title: currentTitle,
+        count: frames.length,
+        crossOriginCount: frames.filter((f) => !f.sameOrigin).length,
+        frames,
+        note: 'frame 的 path 可直接作为其它工具的 frame 参数（如 frame:"0.1"）；也可用 name 或 /url正则/'
+      };
+    }
+    const data = await evaluate(buildFrameTreeScript()).catch(() => null);
+    return {
+      ok: true,
+      engine: 'browserview',
+      source: 'dom',
+      url: currentUrl,
+      title: currentTitle,
+      count: (data && data.frames ? data.frames.length : 0),
+      frames: (data && data.frames) || [],
+      note: 'CDP 不可用，仅能列出同源 frame（跨域 frame 不可见）；关闭 DevTools 或重开浏览器面板可恢复'
+    };
+  }
+
+  /**
+   * 失败诊断：当前 URL / 目标 frame 层级 / 遮挡者是谁 / 元素定位与可见性。
+   * 「元素不可点」这类结论必须带证据，否则模型只能靠猜。
+   */
+  async function diagnoseTarget(args = {}, primary = null) {
+    try {
+      const refJson = args.ref ? JSON.stringify(String(args.ref)) : '""';
+      const selectorJson = args.selector
+        ? JSON.stringify(String(args.selector))
+        : args.ref
+          ? '""'
+          : JSON.stringify(String(args.selector || ''));
+      const diag = await evaluateInTarget(
+        buildTargetDiagnosticsScript(refJson, selectorJson, frameJsonOf(args)),
+        { frameSpec: frameSpecOf(args) }
+      );
+      if (!diag || diag.ok !== true) {
+        const frames = await listFrames().catch(() => null);
+        return {
+          ok: false,
+          url: currentUrl,
+          requestedFrame: isMainFrameSpec(frameSpecOf(args)) ? 'main' : describeFrameSpec(frameSpecOf(args)),
+          reason: (diag && diag.error) || (primary && primary.error) || '目标不可用',
+          errorCode: (diag && diag.errorCode) || 'TARGET_NOT_FOUND',
+          availableFrames: (diag && diag.frames) || (frames && frames.frames) || [],
+          occludedBy: primary && primary.occludedBy ? primary.occludedBy : undefined
+        };
+      }
+      return {
+        ok: true,
+        url: diag.url,
+        framePath: diag.framePath,
+        frameUrl: diag.framePath === 'main' ? diag.url : undefined,
+        target: diag.target,
+        rect: diag.rect,
+        style: diag.style,
+        occluded: diag.occluded,
+        occludedBy: diag.occludedBy,
+        hitPoint: diag.hitPoint,
+        frames: diag.frames
+      };
+    } catch (e) {
+      return { ok: false, url: currentUrl, reason: e && e.message ? e.message : String(e) };
+    }
+  }
+
+  /** 目标失败时的统一返回体（带诊断，便于模型直接改选择器/换 frame）。 */
+  async function targetFailure(primary, args = {}, extra = {}) {
+    const diagnostics = await diagnoseTarget(args, primary);
+    const occluded = primary && primary.occludedBy;
+    const base = {
+      ok: false,
+      engine: 'browserview',
+      errorCode: (primary && primary.errorCode) || (occluded ? 'TARGET_OCCLUDED' : 'TARGET_NOT_FOUND'),
+      error:
+        (primary && primary.error) ||
+        (occluded
+          ? `目标被 ${occluded.selector || occluded.tag || '其它元素'} 遮挡，点击/输入不会命中它`
+          : '目标不可用'),
+      retryable: true,
+      diagnostics
+    };
+    if (occluded) {
+      base.occludedBy = occluded;
+      base.suggestedFix =
+        '目标被遮挡：先关闭/收起遮挡层（常见是弹窗、下拉菜单、loading 遮罩），或对真正的可点元素操作；确实要强行点击可传 force=true';
+    } else if (diagnostics && diagnostics.errorCode === 'FRAME_NOT_FOUND') {
+      base.suggestedFix = '用 browser_frames 查看 frame 树，按 path/name/url 重新指定 frame';
+    }
+    if (lastBlockedIframes > 0) base.crossFrameHint = true;
+    return { ...base, ...extra };
   }
 
   async function snapshot(opts = {}) {
@@ -891,13 +1254,48 @@ function createBrowserViewController(deps) {
     await ensurePaintableSurface();
     const delayMs = Math.min(10000, Math.max(0, Number(opts.delayMs) || 0));
     if (delayMs) await waitQuiet(delayMs);
-    const data = await evaluate(buildSnapshotScript(opts));
+    const mode = normalizeSnapshotMode(opts.mode, opts);
+    const frameSpec = frameSpecOf(opts);
+    const scriptOpts = { ...opts, mode };
+    let data = null;
+    if (isMainFrameSpec(frameSpec)) {
+      data = await evaluate(buildSnapshotScript(scriptOpts));
+    } else {
+      const wc = ensureView().webContents;
+      const target = await resolveFrameTarget(wc, frameSpec);
+      if (!target.ok) {
+        return {
+          ok: false,
+          engine: 'browserview',
+          errorCode: target.errorCode,
+          error: target.error,
+          frames: target.frames,
+          note: target.note,
+          retryable: false
+        };
+      }
+      // 脚本在目标 frame 的上下文里跑，所以相对路径从 'main' 起算，回来后统一拼绝对路径
+      data = await evaluateInTarget(buildSnapshotScript({ ...scriptOpts, framePath: 'main' }), { frameSpec });
+      if (!data || data.ok === false) {
+        return {
+          ok: false,
+          engine: 'browserview',
+          errorCode: (data && data.errorCode) || 'FRAME_SNAPSHOT_FAILED',
+          error: (data && data.error) || '目标 frame 内采集失败',
+          frames: (data && data.frames) || undefined,
+          retryable: true
+        };
+      }
+      relocateFramePaths(data, target.path);
+    }
     lastBlockedIframes = Array.isArray(data && data.blockedIframes) ? data.blockedIframes.length : 0;
     const renderHealth = await probeRenderHealth('snapshot');
     return {
       ok: true,
       engine: 'browserview',
       ...data,
+      mode,
+      requestedFrame: isMainFrameSpec(frameSpec) ? undefined : describeFrameSpec(frameSpec),
       renderHealth,
       warning: renderHealth?.likelyBlank
         ? 'BrowserView 截图接近全黑；如果页面不是故意黑屏，请改用 engine=playwright 或调用 browser_status 查看状态。'
@@ -932,21 +1330,44 @@ function createBrowserViewController(deps) {
     await ensurePaintableSurface();
     const timeoutMs = Math.min(30000, Math.max(500, Number(args.timeoutMs) || 8000));
     const started = Date.now();
+    const frameJson = frameJsonOf(args);
+    const force = args.force === true;
     let result = null;
     let evalScript;
     if (args.ref) {
-      evalScript = buildClickCoordsScript(JSON.stringify(String(args.ref)));
+      evalScript = buildClickCoordsScript(JSON.stringify(String(args.ref)), frameJson);
     } else {
       const selector = await resolveTarget(args);
-      evalScript = buildClickCoordsScriptBySelector(JSON.stringify(selector));
+      evalScript = buildClickCoordsScriptBySelector(JSON.stringify(selector), frameJson);
     }
     while (Date.now() - started < timeoutMs) {
       result = await evaluate(evalScript);
-      if (result?.ok) break;
+      if (!result) break;
+      if (result.ok && (!result.occludedBy || force)) break;
+      // 元素已找到但被遮挡：多数是动画/懒加载的瞬时遮罩，重试到超时再报
       await waitQuiet(200);
     }
     if (!result?.ok) {
-      return { ok: false, ...result, engine: 'browserview', crossFrameHint: lastBlockedIframes > 0 };
+      recordTimeline('click', {
+        ok: false,
+        error: (result && result.error) || '元素未找到',
+        target: {
+          selector: args.selector ? String(args.selector) : args.ref ? `[ref=${args.ref}]` : '',
+          tag: ''
+        }
+      });
+      return targetFailure(result, args);
+    }
+    if (result.occludedBy && !force) {
+      recordTimeline('click', {
+        ok: false,
+        error: '目标被遮挡',
+        target: { selector: args.selector ? String(args.selector) : '', tag: result.tag || '' }
+      });
+      return targetFailure(
+        Object.assign({}, result, { error: '目标被遮挡，点击不会命中它' }),
+        args
+      );
     }
     const clickOpts = {
       button: normalizeClickButton(args.button),
@@ -956,15 +1377,25 @@ function createBrowserViewController(deps) {
     if (clickOpts.button === 'right') {
       const refJson = args.ref ? JSON.stringify(String(args.ref)) : '""';
       const selectorJson = args.selector ? JSON.stringify(String(args.selector)) : '""';
-      await evaluate(buildContextMenuScript(refJson, selectorJson));
+      await evaluate(buildContextMenuScript(refJson, selectorJson, frameJson)).catch(() => null);
     }
     await waitQuiet(clickOpts.clickCount >= 2 ? 350 : 300);
+    recordTimeline('click', {
+      ok: true,
+      target: {
+        selector: args.selector ? String(args.selector) : args.ref ? `[ref=${args.ref}]` : '',
+        tag: result.tag || ''
+      },
+      frame: result.framePath || 'main'
+    });
     return {
       ok: true,
       engine: 'browserview',
       tag: result.tag || '',
       button: clickOpts.button,
-      clickCount: clickOpts.clickCount
+      clickCount: clickOpts.clickCount,
+      framePath: result.framePath || 'main',
+      forced: force || undefined
     };
   }
 
@@ -979,16 +1410,22 @@ function createBrowserViewController(deps) {
       err.code = 'TARGET_REQUIRED';
       throw err;
     }
+    const frameJson = frameJsonOf(args);
     const refJson = args.ref ? JSON.stringify(String(args.ref)) : '""';
     const selectorJson = args.selector ? JSON.stringify(String(args.selector)) : '""';
-    const before = await evaluate(buildReadFieldScript(refJson, selectorJson)).catch(() => null);
+    const before = await evaluate(buildReadFieldScript(refJson, selectorJson, frameJson)).catch(() => null);
+    if (before && before.ok === false && before.errorCode && before.errorCode !== 'TARGET_NOT_FOUND') {
+      return targetFailure(before, args);
+    }
     const prev = before && before.ok ? String(before.value || '') : '';
     const expected = clear ? text : prev + text;
     let coords = null;
     try {
-      coords = args.ref
-        ? await evaluate(buildClickCoordsScript(JSON.stringify(String(args.ref))))
-        : await evaluate(buildClickCoordsScriptBySelector(JSON.stringify(String(args.selector))));
+      coords = await evaluate(
+        args.ref
+          ? buildClickCoordsScript(JSON.stringify(String(args.ref)), frameJson)
+          : buildClickCoordsScriptBySelector(JSON.stringify(String(args.selector)), frameJson)
+      );
     } catch {
       coords = null;
     }
@@ -997,23 +1434,39 @@ function createBrowserViewController(deps) {
       await waitQuiet(60);
     }
     if (clear) {
-      await evaluate(buildSelectFieldScript(refJson, selectorJson)).catch(() => null);
+      await evaluate(buildSelectFieldScript(refJson, selectorJson, frameJson)).catch(() => null);
     }
     const trusted = await insertTextTrusted(wc, text);
     await waitQuiet(50);
-    let read = await evaluate(buildReadFieldScript(refJson, selectorJson)).catch(() => null);
+    let read = await evaluate(buildReadFieldScript(refJson, selectorJson, frameJson)).catch(() => null);
     const trustedMatched = !!(read && read.ok && String(read.value) === expected);
     if (!trustedMatched) {
-      read = args.ref
-        ? await evaluate(buildTypePrepareScript(JSON.stringify(String(args.ref)), JSON.stringify(expected), true))
-        : await evaluate(
-            buildTypePrepareScriptBySelector(JSON.stringify(String(args.selector)), JSON.stringify(expected), true)
-          );
+      read = await evaluate(
+        args.ref
+          ? buildTypePrepareScript(JSON.stringify(String(args.ref)), JSON.stringify(expected), true, frameJson)
+          : buildTypePrepareScriptBySelector(
+              JSON.stringify(String(args.selector)),
+              JSON.stringify(expected),
+              true,
+              frameJson
+            )
+      );
     }
     const actual = read && read.ok ? String(read.value || '') : '';
     const matched = actual === expected;
     const isField = read && (read.tag === 'input' || read.tag === 'textarea');
+    const filledVia = trustedMatched ? 'trusted' : 'js';
+    if (!read || read.ok === false) {
+      recordTimeline('type', { ok: false, error: (read && read.error) || '目标不可用', value: text });
+      return targetFailure(read || { error: '目标不可用' }, args, { tag: '' });
+    }
     if (isField && !matched) {
+      recordTimeline('type', {
+        ok: false,
+        error: `输入未写入控件（期望 ${expected.length} 字，实际 ${actual.length} 字）`,
+        value: text,
+        target: { selector: args.selector ? String(args.selector) : '', tag: read.tag }
+      });
       return {
         ok: false,
         retryable: true,
@@ -1022,18 +1475,24 @@ function createBrowserViewController(deps) {
         engine: 'browserview',
         tag: read.tag,
         type: read.type || '',
-        filledVia: trusted ? 'trusted+js' : 'js'
+        filledVia: trusted ? 'trusted+js' : 'js',
+        diagnostics: await diagnoseTarget(args, read)
       };
     }
+    recordTimeline('type', {
+      ok: true,
+      value: text,
+      target: { selector: args.selector ? String(args.selector) : '', tag: (read && read.tag) || '' },
+      frame: (coords && coords.framePath) || 'main'
+    });
     return {
-      ok: !!read?.ok,
+      ok: true,
       engine: 'browserview',
-      error: read && !read.ok ? read.error : undefined,
       tag: read?.tag || '',
       type: read?.type || '',
       matched,
-      filledVia: trustedMatched ? 'trusted' : 'js',
-      crossFrameHint: !!read && !read.ok && lastBlockedIframes > 0
+      filledVia,
+      framePath: (coords && coords.framePath) || 'main'
     };
   }
 
@@ -1046,12 +1505,21 @@ function createBrowserViewController(deps) {
       err.code = 'TARGET_REQUIRED';
       throw err;
     }
+    const frameJson = frameJsonOf(args);
     const refJson = args.ref ? JSON.stringify(String(args.ref)) : '""';
     const selectorJson = args.selector ? JSON.stringify(String(args.selector)) : '""';
     const result = await evaluate(
-      buildSelectOptionScript(refJson, selectorJson, JSON.stringify(value), JSON.stringify(label))
+      buildSelectOptionScript(refJson, selectorJson, JSON.stringify(value), JSON.stringify(label), frameJson)
     );
-    return { ok: !!result?.ok, ...result, engine: 'browserview' };
+    recordTimeline('change', {
+      ok: !!(result && result.ok),
+      value: value || label,
+      error: result && !result.ok ? result.error : undefined,
+      target: { selector: args.selector ? String(args.selector) : '', tag: 'select' },
+      frame: (result && result.framePath) || 'main'
+    });
+    if (!result?.ok) return targetFailure(result, args, { tag: 'select' });
+    return { ok: true, engine: 'browserview', ...result };
   }
 
   async function fill(args = {}) {
@@ -1069,16 +1537,15 @@ function createBrowserViewController(deps) {
     else if (direction === 'left') dx = -amount;
     else if (direction === 'right') dx = amount;
     if (args.ref || args.selector) {
-      const selector = await resolveTarget(args);
-      const sel = JSON.stringify(selector);
-      await evaluate(`(() => {
-        const el = document.querySelector(${sel});
-        if (el) el.scrollBy(${dx}, ${dy});
-      })()`);
-    } else {
-      await evaluate(`(() => { window.scrollBy(${dx}, ${dy}); })()`);
+      const frameJson = frameJsonOf(args);
+      const refJson = args.ref ? JSON.stringify(String(args.ref)) : '""';
+      const selectorJson = args.selector ? JSON.stringify(String(args.selector)) : '""';
+      const result = await evaluate(buildScrollTargetScript(refJson, selectorJson, dx, dy, frameJson));
+      if (result && result.ok === false) return targetFailure(result, args);
+      return { ok: true, engine: 'browserview', ...(result || {}) };
     }
-    return { ok: true, engine: 'browserview' };
+    const result = await evaluate(`(() => { window.scrollBy(${dx}, ${dy}); return { ok: true }; })()`);
+    return { ok: !!(result && result.ok), engine: 'browserview' };
   }
 
   async function pressKey(args = {}) {
@@ -1086,7 +1553,24 @@ function createBrowserViewController(deps) {
     await ensurePaintableSurface();
     const key = String(args.key || 'Enter');
     const modifiers = normalizeModifiers(args.modifiers);
+    const frameSpec = frameSpecOf(args);
     v.webContents.focus();
+    let framed = null;
+    if (!isMainFrameSpec(frameSpec)) {
+      // 先让目标 frame 内的活动元素/首个个控件拿到焦点，键盘事件才会落到那里
+      framed = await evaluateInTarget(
+        `(() => {
+          try {
+            const active = document.activeElement;
+            const el = (active && active !== document.body) ? active : document.querySelector('input, textarea, [contenteditable="true"]');
+            if (el && typeof el.focus === 'function') el.focus();
+          } catch (e) {}
+          return { ok: true, url: location.href };
+        })()`,
+        { frameSpec }
+      );
+      if (framed && framed.ok === false) return targetFailure(framed, args);
+    }
     const result = await evaluate(buildPressKeyScript(JSON.stringify(key), JSON.stringify(modifiers)));
     const code = key.length === 1 ? key.toUpperCase() : key;
     const hasAccel = modifiers.includes('control') || modifiers.includes('meta');
@@ -1099,7 +1583,18 @@ function createBrowserViewController(deps) {
     } catch {
       // ignore
     }
-    return { ok: !!result?.ok, key, modifiers, engine: 'browserview' };
+    recordTimeline('keydown', {
+      ok: !!(result && result.ok),
+      key,
+      frame: isMainFrameSpec(frameSpec) ? 'main' : describeFrameSpec(frameSpec)
+    });
+    return {
+      ok: !!result?.ok,
+      key,
+      modifiers,
+      engine: 'browserview',
+      frame: isMainFrameSpec(frameSpec) ? undefined : describeFrameSpec(frameSpec)
+    };
   }
 
   function sendMouseDragAt(v, startX, startY, endX, endY) {
@@ -1118,34 +1613,40 @@ function createBrowserViewController(deps) {
     if (!args.ref && !args.selector) return null;
     const refJson = args.ref ? JSON.stringify(String(args.ref)) : '""';
     const selectorJson = args.selector ? JSON.stringify(String(args.selector)) : '""';
-    const bounds = await evaluate(buildElementBoundsScript(refJson, selectorJson));
+    const bounds = await evaluate(buildElementBoundsScript(refJson, selectorJson, frameJsonOf(args)));
     if (!bounds?.ok) {
       const err = new Error(bounds?.error || '元素区域未找到');
-      err.code = 'TARGET_REQUIRED';
+      err.code = bounds?.errorCode || 'TARGET_REQUIRED';
+      err.details = bounds;
       throw err;
     }
     return {
       x: bounds.x,
       y: bounds.y,
       width: bounds.width,
-      height: bounds.height
+      height: bounds.height,
+      framePath: bounds.framePath
     };
   }
 
   async function hover(args = {}) {
     const v = ensureView();
+    const frameJson = frameJsonOf(args);
     let evalScript;
     if (args.ref) {
-      evalScript = buildHoverCoordsScript(JSON.stringify(String(args.ref)));
+      evalScript = buildHoverCoordsScript(JSON.stringify(String(args.ref)), frameJson);
     } else if (args.selector) {
-      evalScript = buildHoverCoordsScriptBySelector(JSON.stringify(String(args.selector)));
+      evalScript = buildHoverCoordsScriptBySelector(JSON.stringify(String(args.selector)), frameJson);
     } else {
       const err = new Error('browser_hover 需要 ref 或 selector');
       err.code = 'TARGET_REQUIRED';
       throw err;
     }
     const result = await evaluate(evalScript);
-    if (!result?.ok) return { ok: false, ...result, engine: 'browserview' };
+    if (!result?.ok) {
+      recordTimeline('hover', { ok: false, error: result && result.error });
+      return targetFailure(result, args);
+    }
     v.webContents.focus();
     v.webContents.sendInputEvent({
       type: 'mouseMove',
@@ -1153,7 +1654,12 @@ function createBrowserViewController(deps) {
       y: Math.round(result.y)
     });
     await waitQuiet(120);
-    return { ok: true, engine: 'browserview', x: result.x, y: result.y };
+    recordTimeline('hover', {
+      ok: true,
+      target: { selector: args.selector ? String(args.selector) : '', tag: result.tag || '' },
+      frame: result.framePath || 'main'
+    });
+    return { ok: true, engine: 'browserview', x: result.x, y: result.y, framePath: result.framePath };
   }
 
   async function drag(args = {}) {
@@ -1174,10 +1680,16 @@ function createBrowserViewController(deps) {
       err.code = 'TARGET_REQUIRED';
       throw err;
     }
-    const result = await evaluate(buildDragCoordsScript(refJson, selectorJson, toRefJson, toSelectorJson, dx, dy));
-    if (!result?.ok) return { ok: false, ...result, engine: 'browserview' };
+    const result = await evaluate(
+      buildDragCoordsScript(refJson, selectorJson, toRefJson, toSelectorJson, dx, dy, frameJsonOf(args))
+    );
+    if (!result?.ok) {
+      recordTimeline('drag', { ok: false, error: result && result.error });
+      return targetFailure(result, args);
+    }
     sendMouseDragAt(v, result.startX, result.startY, result.endX, result.endY);
     await waitQuiet(200);
+    recordTimeline('drag', { ok: true, target: { selector: args.selector ? String(args.selector) : '', tag: '' } });
     return { ok: true, engine: 'browserview', ...result };
   }
 
@@ -1186,11 +1698,32 @@ function createBrowserViewController(deps) {
     await ensurePaintableSurface();
     const wc = v.webContents;
     const shotOpts = { ...opts };
-    if (opts.ref || opts.selector) {
+    const isElementShot = !!(opts.ref || opts.selector);
+    if (isElementShot) {
       shotOpts.clip = await resolveElementClip(opts);
       shotOpts.fullPage = false;
     }
-    const image = await capturePageImage(wc, shotOpts);
+    // 标注叠加层必须画在页面里再截图（Electron 的 nativeImage 无法绘文字），
+    // 截完立刻摘掉，避免污染页面与后续断言。
+    let annotation = null;
+    if (opts.annotate) {
+      annotation = await evaluate(
+        buildAnnotateScript({
+          absolute: true,
+          labelInside: isElementShot,
+          maxLabels: opts.annotate === true ? undefined : Number(opts.annotate)
+        })
+      ).catch(() => null);
+      if (annotation && annotation.ok) await waitQuiet(80);
+    }
+    let image;
+    try {
+      image = await capturePageImage(wc, shotOpts);
+    } finally {
+      if (annotation && annotation.ok) {
+        await evaluate(buildClearAnnotationScript()).catch(() => null);
+      }
+    }
     const png = image.toPNG();
     const visual = analyzeImage(image);
     const size = image.getSize();
@@ -1208,8 +1741,10 @@ function createBrowserViewController(deps) {
       base64: png.toString('base64'),
       width: size.width,
       height: size.height,
-      fullPage: !!opts.fullPage && !opts.ref && !opts.selector,
+      fullPage: !!opts.fullPage && !isElementShot,
       element: opts.ref || opts.selector || undefined,
+      framePath: shotOpts.clip ? shotOpts.clip.framePath : undefined,
+      annotate: annotation && annotation.ok ? { drawn: annotation.drawn, total: annotation.total } : undefined,
       renderHealth: lastRenderHealth,
       warning: visual.blankBlack
         ? 'BrowserView 截图接近全黑；如果页面不是故意黑屏，请改用 engine=playwright。'
@@ -1262,6 +1797,7 @@ function createBrowserViewController(deps) {
     currentTitle = wc.getTitle() || currentTitle;
     loading = false;
     emitState();
+    recordTimeline('navigate', { url: currentUrl, reason: 'reload' });
     return { ok: true, url: currentUrl, title: currentTitle, engine: 'browserview', action: 'reload' };
   }
 
@@ -1285,6 +1821,7 @@ function createBrowserViewController(deps) {
     currentTitle = wc.getTitle() || currentTitle;
     loading = false;
     emitState();
+    recordTimeline('navigate', { url: currentUrl, reason: 'back' });
     return { ok: true, url: currentUrl, title: currentTitle, engine: 'browserview', action: 'back' };
   }
 
@@ -1314,6 +1851,7 @@ function createBrowserViewController(deps) {
     currentTitle = wc.getTitle() || currentTitle;
     loading = false;
     emitState();
+    recordTimeline('navigate', { url: currentUrl, reason: 'forward' });
     return { ok: true, url: currentUrl, title: currentTitle, engine: 'browserview', action: 'forward' };
   }
 
@@ -1324,10 +1862,35 @@ function createBrowserViewController(deps) {
     return result;
   }
 
-  /** 结构化断言（一次往返跑完全部断言） */
-  async function expect(assertions) {
+  /** 结构化断言（一次往返跑完全部断言；可选 frame 限定作用域） */
+  async function expect(assertions, opts = {}) {
     ensureView();
-    return evaluate(buildExpectScript(JSON.stringify(assertions || [])));
+    const frameSpec = frameSpecOf(opts);
+    const frameJson = isMainFrameSpec(frameSpec) ? 'null' : JSON.stringify(frameSpec);
+    const raw = await evaluate(buildExpectScript(JSON.stringify(assertions || []), frameJson));
+    if (raw && raw.ok === false && raw.errorCode) {
+      return { ok: false, error: raw.error, errorCode: raw.errorCode, frames: raw.frames, results: [] };
+    }
+    return raw;
+  }
+
+  /** 事件时间线（page 侧真实事件 + Agent 侧动作）。 */
+  function timeline(args = {}) {
+    const action = String(args.action || 'list').toLowerCase();
+    if (action === 'clear') {
+      timelineJournal.clear();
+      return { ok: true, engine: 'browserview', cleared: true };
+    }
+    const entries = timelineJournal.list(args);
+    return {
+      ok: true,
+      engine: 'browserview',
+      ...summarizeTimeline(entries, { includeInput: args.includeInput === true }),
+      stats: timelineJournal.status(),
+      note:
+        '时间线 = 页面侧真实事件（capture 阶段，含 iframe 内）+ Agent 侧动作；' +
+        '排查"点了没反应"时先 action=list 看事件有没有到页面，再看 browser_console/browser_network'
+    };
   }
 
   async function readLocalStorage() {
@@ -1343,29 +1906,76 @@ function createBrowserViewController(deps) {
     const timeoutMs = Math.min(120000, Math.max(500, Number(args.timeoutMs) || 30000));
     const intervalMs = Math.min(3000, Math.max(100, Number(args.intervalMs) || 300));
     const started = Date.now();
+    const kind = String(args.kind || args.type || 'selector').toLowerCase();
+    const frameSpec = frameSpecOf(args);
     let last = null;
     while (Date.now() - started <= timeoutMs) {
-      if (String(args.kind || args.type || '') === 'networkidle' || String(args.kind || args.type || '') === 'idle') {
+      if (kind === 'networkidle' || kind === 'idle') {
         if (!loading) return { ok: true, engine: 'browserview', kind: 'networkidle', elapsedMs: Date.now() - started };
+      } else if (kind === 'expression' || kind === 'expr') {
+        const expr = String(args.value || args.expression || args.script || '').trim();
+        if (!expr) {
+          const err = new Error('browser_wait_for kind=expression 需要 value（表达式）');
+          err.code = 'MISSING_ARG';
+          throw err;
+        }
+        last = await evaluateInTarget(buildExpressionProbeScript(expr), { frameSpec });
+        if (last && last.ok && last.truthy) {
+          return {
+            ok: true,
+            engine: 'browserview',
+            kind: 'expression',
+            elapsedMs: Date.now() - started,
+            value: last.value,
+            frame: isMainFrameSpec(frameSpec) ? undefined : describeFrameSpec(frameSpec)
+          };
+        }
+        if (last && last.ok === false && last.errorCode) break;
       } else {
-        last = await evaluate(buildWaitConditionScript(args));
-        if (last?.ok) return { ok: true, engine: 'browserview', elapsedMs: Date.now() - started, ...last };
+        last = await evaluate(buildWaitConditionScript({ ...args, frameSpec, state: args.state }));
+        if (last?.ok) {
+          return {
+            ok: true,
+            engine: 'browserview',
+            elapsedMs: Date.now() - started,
+            ...last,
+            frame: isMainFrameSpec(frameSpec) ? undefined : describeFrameSpec(frameSpec)
+          };
+        }
+        if (last && last.errorCode === 'FRAME_NOT_FOUND') break;
       }
       await waitQuiet(intervalMs);
     }
     const renderHealth = await probeRenderHealth('wait_for_timeout');
     const blank = !!renderHealth?.likelyBlank;
+    const diagnostics = await diagnoseTarget(args, last);
+    if (last && last.errorCode === 'FRAME_NOT_FOUND') {
+      return {
+        ok: false,
+        engine: 'browserview',
+        elapsedMs: Date.now() - started,
+        last,
+        errorCode: 'FRAME_NOT_FOUND',
+        error: last.error,
+        frames: last.frames,
+        diagnostics,
+        retryable: false,
+        suggestedFix: '用 browser_frames 查看 frame 树，按 path/name/url 重新指定 frame 参数'
+      };
+    }
     return {
       ok: false,
       engine: 'browserview',
       timeout: true,
+      kind: kind === 'expr' ? 'expression' : kind,
       elapsedMs: Date.now() - started,
       last,
       renderHealth,
+      diagnostics,
       errorCode: blank ? 'BROWSER_BLANK_VIEW' : 'WAIT_TIMEOUT',
       error: blank
         ? 'BrowserView 画面疑似全黑，等待条件未命中。请切换 engine=playwright 重新 observe/snapshot，或向用户说明页面渲染异常。'
-        : '等待条件超时',
+        : `等待条件超时（最后一次探测：${JSON.stringify(last)?.slice(0, 300)}）`,
       retryable: false,
       suggestedFix: blank
         ? '调用 browser_observe({engine:"playwright"}) 或 browser_snapshot({engine:"playwright"})；不要继续重复相同 wait_for。'
@@ -1459,6 +2069,9 @@ function createBrowserViewController(deps) {
     wc.debugger.on('message', (_event, method, params) => onCdpMessage(wc, method, params));
     wc.debugger.on('detach', () => {
       cdpBoundWcs.delete(wc);
+      // detach 后 Runtime 域与已记录的执行上下文全部失效，必须允许重新 attach 时重建
+      runtimeEnabledWcs.delete(wc);
+      execContexts.delete(wc);
       if (cdpWc === wc) cdpWc = null;
     });
   }
@@ -1527,6 +2140,7 @@ function createBrowserViewController(deps) {
     cdpWc = wc;
     bindCdpMessage(wc);
     await wc.debugger.sendCommand('Page.enable').catch(() => {});
+    await ensureRuntimeTracking(wc);
     // 重新 attach 后 CDP 覆盖会丢失（切标签 / 外部 debugger detach），把已记录的仿真状态重放回去
     replayEmulationOn(wc).catch(() => {});
     if (routeRules.some((r) => r.enabled !== false)) {
@@ -1542,7 +2156,53 @@ function createBrowserViewController(deps) {
     return wc.debugger;
   }
 
+  /**
+   * Runtime 域：frame 级求值要按 executionContextId 派发；
+   * 同时用 Runtime.addBinding 把页面侧时间线事件回传到 Node
+   * （页面受 sandbox/contextIsolation 限制，没有别的上行通道）。
+   */
+  async function ensureRuntimeTracking(wc) {
+    if (!wc || wc.isDestroyed() || runtimeEnabledWcs.has(wc)) return;
+    try {
+      await wc.debugger.sendCommand('Runtime.enable');
+      await wc.debugger.sendCommand('Runtime.addBinding', { name: TIMELINE_BINDING });
+      runtimeEnabledWcs.add(wc);
+    } catch (e) {
+      log('browser CDP Runtime: ' + (e && e.message ? e.message : e));
+    }
+  }
+
   function onCdpMessage(wc, method, params) {
+    if (method === 'Runtime.executionContextCreated') {
+      const ctx = params && params.context;
+      if (ctx && ctx.id != null) {
+        const map = execContexts.get(wc) || new Map();
+        const aux = ctx.auxData || {};
+        map.set(ctx.id, {
+          frameId: String(aux.frameId || ''),
+          isDefault: aux.isDefault !== false,
+          origin: String(ctx.origin || ''),
+          name: String(ctx.name || '')
+        });
+        execContexts.set(wc, map);
+      }
+      return;
+    }
+    if (method === 'Runtime.executionContextDestroyed') {
+      const map = execContexts.get(wc);
+      if (map && params && params.executionContextId != null) map.delete(params.executionContextId);
+      return;
+    }
+    if (method === 'Runtime.executionContextsCleared') {
+      execContexts.set(wc, new Map());
+      return;
+    }
+    if (method === 'Runtime.bindingCalled') {
+      if (params && params.name === TIMELINE_BINDING) {
+        timelineJournal.addBindingPayload(params.payload);
+      }
+      return;
+    }
     if (method === 'Page.javascriptDialogOpening') {
       handleDialogOpening(wc, params || {});
       return;
@@ -1928,27 +2588,38 @@ function createBrowserViewController(deps) {
       throw err;
     }
     const bytes = fs.readFileSync(filePath);
+    const frameSpec = frameSpecOf(args);
     const result = await evaluate(buildUploadFileScript({
       ref: args.ref,
       selector: args.selector,
       fileName: path.basename(filePath),
       mime: args.mime || guessMime(filePath),
-      base64: bytes.toString('base64')
+      base64: bytes.toString('base64'),
+      frameSpec: isMainFrameSpec(frameSpec) ? null : frameSpec
     }));
-    return { ok: !!result?.ok, engine: 'browserview', path: filePath, ...result };
+    if (!result?.ok) return targetFailure(result, args, { path: filePath });
+    recordTimeline('upload', { ok: true, value: path.basename(filePath), target: { selector: args.selector || '', tag: 'input' } });
+    return { ok: true, engine: 'browserview', path: filePath, ...result };
   }
 
   async function observe(opts = {}) {
     const snap = await snapshot({
       interactive: opts.interactive !== false,
+      mode: opts.mode,
       maxElements: opts.maxElements,
-      delayMs: opts.delayMs
+      delayMs: opts.delayMs,
+      frame: opts.frame
     });
+    if (snap && snap.ok === false) return snap;
     let shot = null;
     let shotError = '';
     if (opts.screenshot !== false) {
       try {
-        shot = await screenshot({ fullPage: !!opts.fullPage });
+        shot = await screenshot({
+          fullPage: !!opts.fullPage,
+          annotate: opts.annotate,
+          frame: opts.frame
+        });
       } catch (e) {
         shotError = e && e.message ? e.message : String(e);
         log('browser observe screenshot: ' + shotError);
@@ -1965,16 +2636,34 @@ function createBrowserViewController(deps) {
       engine: 'browserview',
       url: snap.url || currentUrl,
       title: snap.title || currentTitle,
+      mode: snap.mode,
       textPreview: snap.textPreview || '',
       elements: snap.elements || [],
       refEpoch: snap.refEpoch,
+      coverage: snap.coverage,
+      frames: snap.frames,
+      blockedIframes: snap.blockedIframes,
       screenshot: shot
-        ? { mime: shot.mime, base64: shot.base64, width: shot.width, height: shot.height }
+        ? {
+            mime: shot.mime,
+            base64: shot.base64,
+            width: shot.width,
+            height: shot.height,
+            annotate: shot.annotate
+          }
         : null,
       viewport: bounds ? { width: bounds.width, height: bounds.height } : null,
       renderHealth: shot?.renderHealth || snap.renderHealth || lastRenderHealth,
-      warning: shotWarning || blankWarning || undefined,
-      note: 'observe 同时返回页面文本、可交互 ref 与截图；页面变化后 ref 需重新获取'
+      warning: [snap.warning, shotWarning, blankWarning].filter(Boolean).join('；') || undefined,
+      note: [
+        'observe 同时返回页面文本、ref、覆盖率与截图；页面变化后 ref 需重新获取',
+        snap.coverage && snap.coverage.omitted
+          ? `本次有 ${snap.coverage.omitted} 个元素因 maxElements 未纳入`
+          : null,
+        '看整个 frame 树用 browser_frames；嵌套 iframe 用 frame 参数'
+      ]
+        .filter(Boolean)
+        .join('；')
     };
   }
 
@@ -2218,7 +2907,8 @@ function createBrowserViewController(deps) {
       renderHealth: lastRenderHealth,
       viewport: viewportOverride,
       emulation: { ...emulationState, permissions: [...emulatedPermissions] },
-      cdp: cdpStatus()
+      cdp: cdpStatus(),
+      timeline: timelineJournal.status()
     };
   }
 
@@ -2245,8 +2935,8 @@ function createBrowserViewController(deps) {
     // 视图销毁后 CDP 覆盖物理失效，但覆盖状态要保留（与 Playwright 侧一致）：
     // 下次创建视图时由 ensureView 重放，避免"关浏览器再打开"后退回面板尺寸而与状态不符。
     // 需要显式清掉时走 resetViewport（切会话、browser_viewport reset 都会调用）。
-    consoleInitScriptWc = null;
-    consoleInitScriptId = null;
+    initScriptWc = null;
+    initScriptIds = [];
     cdpDetach();
     cdpFailedWc = null;
     cdpLastError = '';
@@ -2267,14 +2957,22 @@ function createBrowserViewController(deps) {
     const v = ensureView();
     const delayMs = Math.min(10000, Math.max(0, Number(opts.delayMs) || 0));
     if (delayMs) await waitQuiet(delayMs);
-    const result = await a11ySnapshotBrowserView(v.webContents, opts, (maxNodes) =>
-      evaluate(buildA11yDomScanScript({ maxNodes }))
-    );
+    const frameSpec = frameSpecOf(opts);
+    const result = await a11ySnapshotBrowserView(v.webContents, opts, (maxNodes) => {
+      const script = buildA11yDomScanScript({ maxNodes });
+      return isMainFrameSpec(frameSpec) ? evaluate(script) : evaluateInTarget(script, { frameSpec });
+    });
     return {
       ...result,
       url: currentUrl,
       title: currentTitle,
-      note: 'a11y 树列出可访问性角色与名称；复杂页面可配合 browser_snapshot 的 ref 点击'
+      frame: isMainFrameSpec(frameSpec) ? undefined : describeFrameSpec(frameSpec),
+      note: [
+        'a11y 树列出可访问性角色与名称；复杂页面可配合 browser_snapshot 的 ref 点击',
+        result && result.source === 'dom'
+          ? 'DOM 回退扫描已包含同源 iframe（节点带 framePath）；跨域 frame 需 engine=playwright'
+          : 'CDP 无障碍树天然覆盖所有 frame'
+      ].join('；')
     };
   }
 
@@ -2326,6 +3024,8 @@ function createBrowserViewController(deps) {
     screenshot,
     pdf,
     evaluateScript,
+    frames: listFrames,
+    timeline,
     waitFor,
     tabs,
     downloads: downloadStatus,

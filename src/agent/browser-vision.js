@@ -21,6 +21,7 @@
  */
 
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+const { normalizeVisionImageMime } = require('./guardrails-shared');
 
 const SOURCE_BROWSER = 'browser';
 const SOURCE_ATTACHMENT = 'attachment';
@@ -99,6 +100,9 @@ function extractShot(toolName, result) {
  *   避免静默丢图——模型会误以为「我要的 5 张都附上了」。
  * - `evictOldest`（隐式截图）：挤掉同来源最旧的一张，保留最新画面。
  *
+ * 格式：声明的 mime 必须在上游支持集内（png/jpeg/gif/webp），否则直接拒绝
+ * （注入只会换回 HTTP 400 unsupported image）；未声明 mime 按 png 处理。
+ *
  * @param {string} runId
  * @param {{ source?: string, tool?: string, mime?: string, base64?: string, path?: string, width?: number, height?: number }} entry
  * @param {object} [limits] agent-limits 解析结果
@@ -115,6 +119,12 @@ function recordVisionImage(runId, entry, limits, opts = {}) {
   const cap = cfg.maxPerSource[source] || 0;
   if (!(cap > 0)) return false;
 
+  // 声明了却不受上游支持的格式（bmp/svg/heic…）直接拒绝：注入只会换回 400。
+  // 未声明 mime 按 png 处理（浏览器截图即 png），保持既有调用方语义。
+  const declaredMime = String(entry.mime || '').trim();
+  const mime = declaredMime ? normalizeVisionImageMime(declaredMime) : 'image/png';
+  if (!mime) return false;
+
   const list = pendingByRun.get(id) || [];
   const path = typeof entry.path === 'string' ? entry.path : '';
   // 同一张图本轮已在队列里：幂等返回 true。既不重复注入同一份像素，也不消耗额度。
@@ -128,7 +138,7 @@ function recordVisionImage(runId, entry, limits, opts = {}) {
   list.push({
     source,
     tool: entry.tool,
-    mime: entry.mime || 'image/png',
+    mime,
     base64,
     path,
     width: entry.width,
@@ -166,14 +176,9 @@ function clearPendingVisionImages(runId) {
   if (id) pendingByRun.delete(id);
 }
 
-/** 兼容旧入口 */
+/** 测试探针：按 run 取出全部待注入图片（生产路径用 takePendingVisionImages）。 */
 function takePendingBrowserScreenshots(runId) {
   return takePendingVisionImages(runId);
-}
-
-/** 兼容旧入口 */
-function clearPendingBrowserScreenshots(runId) {
-  clearPendingVisionImages(runId);
 }
 
 /** 构造把图片交给模型的 user 消息；无有效图片时返回 null。 */
@@ -209,11 +214,6 @@ function buildVisionMessage(images) {
   };
 }
 
-/** 兼容旧入口：只含浏览器来源时的文案与旧行为一致。 */
-function buildBrowserVisionMessage(shots) {
-  return buildVisionMessage(shots);
-}
-
 module.exports = {
   SOURCE_BROWSER,
   SOURCE_ATTACHMENT,
@@ -225,7 +225,5 @@ module.exports = {
   takePendingVisionImages,
   clearPendingVisionImages,
   takePendingBrowserScreenshots,
-  clearPendingBrowserScreenshots,
-  buildVisionMessage,
-  buildBrowserVisionMessage
+  buildVisionMessage
 };

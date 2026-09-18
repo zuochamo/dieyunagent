@@ -9,8 +9,24 @@ const {
   buildClickPrepareScriptBySelector,
   buildTypePrepareScript,
   buildTypePrepareScriptBySelector,
-  buildWaitConditionScript
+  buildWaitConditionScript,
+  normalizeSnapshotMode
 } = require('./snapshot-script');
+const {
+  normalizeFrameSpec,
+  isMainFrameSpec,
+  describeFrameSpec,
+  frameDescriptorMatches,
+  summarizeFramesForHint,
+  buildAnnotateScript,
+  buildClearAnnotationScript
+} = require('./frame-script');
+const {
+  createTimelineJournal,
+  summarizeTimeline,
+  buildTimelineRecorderScript,
+  TIMELINE_BINDING
+} = require('./timeline');
 const { assertBrowserLoadUrl, matchUrlPattern } = require('./url-policy');
 const { syncElectronCookiesToPlaywrightContext } = require('./session-sync');
 const {
@@ -28,7 +44,7 @@ const {
 } = require('./console-collector');
 const { normalizeViewport, VIEWPORT_DEFAULT, normalizeEmulation } = require('./viewport');
 const { buildExpectScript } = require('./expect');
-const { buildEvaluateScript, normalizeEvaluateResult } = require('./evaluate');
+const { buildEvaluateScript, buildExpressionProbeScript, normalizeEvaluateResult } = require('./evaluate');
 
 /**
  * Playwright 后备引擎：优先使用本机 Chrome / Edge（playwright-core，不随安装包下载 Chromium）。
@@ -37,6 +53,7 @@ function createPlaywrightRunner(deps = {}) {
   const log = deps.log || (() => {});
   const networkJournal = deps.networkJournal || createNetworkJournal();
   const consoleJournal = deps.consoleJournal || createConsoleJournal();
+  const timelineJournal = deps.timelineJournal || createTimelineJournal();
   /** @type {import('playwright-core').Browser | null} */
   let browser = null;
   /** @type {Map<string, {
@@ -250,6 +267,17 @@ function createPlaywrightRunner(deps = {}) {
     if (emulationRuntime.permissions.length) {
       await context.grantPermissions(emulationRuntime.permissions).catch(() => {});
     }
+    // 页面侧事件时间线：init script 负责挂监听，binding 负责把事件送回 Node
+    await context.addInitScript({ content: buildTimelineRecorderScript() }).catch((e) => {
+      log('playwright timeline init script: ' + (e && e.message ? e.message : e));
+    });
+    await context
+      .exposeBinding(TIMELINE_BINDING, (_source, payload) => {
+        timelineJournal.addBindingPayload(payload);
+      })
+      .catch((e) => {
+        log('playwright timeline binding: ' + (e && e.message ? e.message : e));
+      });
     context.on('page', (p) => {
       const e = sessions.get(key);
       if (e) e.page = p;
@@ -264,7 +292,9 @@ function createPlaywrightRunner(deps = {}) {
       context,
       page,
       lastSessionSyncAt: 0,
-      lastSessionSyncUrl: ''
+      lastSessionSyncUrl: '',
+      /** ref id → 所属 frame 路径（snapshot 时登记，跨域 iframe 里的 ref 靠它点得中） */
+      refFrames: new Map()
     };
     sessions.set(key, entry);
     await syncSessionFromElectron(opts.url || '', { ...opts, sessionId: key === '__default__' ? opts.sessionId : key });
@@ -313,6 +343,14 @@ function createPlaywrightRunner(deps = {}) {
         url: (loc && loc.url) || p.url(),
         line: loc && loc.lineNumber
       });
+    });
+    p.on('framenavigated', (frame) => {
+      try {
+        if (frame !== p.mainFrame()) return;
+        recordTimeline('navigate', { url: frame.url() || p.url(), reason: 'page' });
+      } catch {
+        // ignore
+      }
     });
     p.on('pageerror', (err) => {
       consoleJournal.add({
@@ -412,6 +450,7 @@ function createPlaywrightRunner(deps = {}) {
       waitUntil: opts.waitUntil === 'domcontentloaded' ? 'domcontentloaded' : 'load',
       timeout: Number(opts.timeoutMs) || 60000
     });
+    recordTimeline('navigate', { url: p.url(), reason: 'navigate' });
     return {
       ok: true,
       url: p.url(),
@@ -422,12 +461,108 @@ function createPlaywrightRunner(deps = {}) {
     };
   }
 
+  /** 事件时间线（page 侧真实事件 + Agent 侧动作）。 */
+  function timeline(args = {}) {
+    const action = String(args.action || 'list').toLowerCase();
+    if (action === 'clear') {
+      timelineJournal.clear();
+      return { ok: true, engine: 'playwright', cleared: true };
+    }
+    const entries = timelineJournal.list(args);
+    return {
+      ok: true,
+      engine: 'playwright',
+      channel: launchChannel,
+      ...summarizeTimeline(entries, { includeInput: args.includeInput === true }),
+      stats: timelineJournal.status()
+    };
+  }
+
+  /** 子 frame 内采集到的相对路径 → 从顶层算起的绝对路径。 */
+  function absFramePath(prefix, rel) {
+    const base = String(prefix || 'main');
+    const r = String(rel == null || rel === '' ? 'main' : rel);
+    if (base === 'main') return r;
+    return r === 'main' ? base : `${base}.${r}`;
+  }
+
+  /**
+   * snapshot：逐 frame 采集（跨域 iframe 也进得去），ref 全局唯一并登记所属 frame，
+   * 这样 click({ref}) 能自动回到正确的 frame，不需要模型自己算 frame 路径。
+   */
   async function snapshot(opts = {}) {
-    const p = await ensurePage();
+    const p = await ensurePage(opts);
     const delayMs = Math.min(10000, Math.max(0, Number(opts.delayMs) || 0));
     if (delayMs) await p.waitForTimeout(delayMs);
-    const data = await p.evaluate(buildSnapshotScript(opts));
-    return { ok: true, engine: 'playwright', channel: launchChannel, ...data };
+    const mode = normalizeSnapshotMode(opts.mode, opts);
+    const maxElements = Number(opts.maxElements) > 0 ? Number(opts.maxElements) : 120;
+    const spec = normalizeFrameSpec(opts.frame);
+    const list = frameListOf(p);
+    let targets = list;
+    if (!isMainFrameSpec(spec)) {
+      const hit = resolveFrameTarget(p, spec);
+      if (!hit.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...hit };
+      targets = [hit.entry];
+    }
+    const perFrame = Math.max(20, Math.ceil(maxElements / Math.max(1, targets.length)));
+    const elements = [];
+    const refFrames = new Map();
+    const blockedIframes = [];
+    const frames = [];
+    let textPreview = '';
+    let refEpoch = 0;
+    let coverage = null;
+    let offset = 0;
+    for (const entry of targets) {
+      // eslint-disable-next-line no-await-in-loop
+      const data = await entry.frame
+        .evaluate(buildSnapshotScript({ mode, maxElements: perFrame, refOffset: offset, framePath: 'main' }))
+        .catch(() => null);
+      if (!data) {
+        blockedIframes.push({ framePath: entry.path, src: entry.url, crossOrigin: false, error: 'evaluate failed' });
+        continue;
+      }
+      refEpoch = Math.max(refEpoch, Number(data.refEpoch) || 0);
+      const rows = Array.isArray(data.elements) ? data.elements : [];
+      for (const row of rows) {
+        const framePath = absFramePath(entry.path, row.framePath);
+        elements.push({ ...row, framePath, frame: framePath === 'main' ? 'main' : 'iframe' });
+        refFrames.set(row.ref, { path: framePath, url: entry.url });
+      }
+      offset += rows.length;
+      if (Array.isArray(data.blockedIframes)) {
+        for (const b of data.blockedIframes) {
+          blockedIframes.push({ ...b, framePath: absFramePath(entry.path, b.framePath) });
+        }
+      }
+      if (Array.isArray(data.frames)) {
+        for (const f of data.frames) frames.push({ ...f, path: absFramePath(entry.path, f.path) });
+      }
+      if (entry.main) textPreview = data.textPreview || '';
+      if (!coverage || entry.main) coverage = data.coverage || coverage;
+    }
+    const entry = sessions.get(resolveSessionKey(opts));
+    if (entry) entry.refFrames = refFrames;
+    const omitted = coverage ? Number(coverage.omitted) || 0 : 0;
+    return {
+      ok: true,
+      engine: 'playwright',
+      channel: launchChannel,
+      url: p.url(),
+      title: await p.title().catch(() => ''),
+      refEpoch,
+      mode,
+      framePath: isMainFrameSpec(spec) ? 'main' : targets[0].path,
+      textPreview,
+      elements,
+      frames,
+      blockedIframes,
+      coverage,
+      note:
+        'ref 在本次 snapshot 内有效；页面跳转或再次 snapshot 后需重新获取' +
+        (omitted ? `；另有 ${omitted} 个元素因 maxElements 未纳入` : '') +
+        (targets.length > 1 ? `；已跨 ${targets.length} 个 frame 采集（跨域 iframe 也能进）` : '')
+    };
   }
 
   async function resolveTarget(args = {}) {
@@ -438,6 +573,106 @@ function createPlaywrightRunner(deps = {}) {
     throw err;
   }
 
+  /** Agent 侧动作写进时间线（与页面侧真实事件合流）。 */
+  function recordTimeline(type, payload = {}) {
+    try {
+      timelineJournal.add({ type, source: 'agent', engine: 'playwright', ...payload });
+    } catch {
+      // 记录失败不影响主流程
+    }
+  }
+
+  /**
+   * frame 树：与 BrowserView 侧同一套 path 语义（文档顺序的点分下标），
+   * 由 mainFrame + childFrames 递归得到，保证同一 frame 参数在两个引擎指向同一个 frame。
+   */
+  function frameListOf(page) {
+    const out = [];
+    const walk = (frame, path, depth) => {
+      out.push({
+        frame,
+        path: depth === 0 ? 'main' : path,
+        depth,
+        main: depth === 0,
+        name: (() => {
+          try {
+            return String(frame.name() || '');
+          } catch {
+            return '';
+          }
+        })(),
+        url: (() => {
+          try {
+            return String(frame.url() || '');
+          } catch {
+            return '';
+          }
+        })()
+      });
+      const kids = typeof frame.childFrames === 'function' ? frame.childFrames() : [];
+      for (let i = 0; i < kids.length; i++) {
+        walk(kids[i], depth === 0 ? String(i) : `${path}.${i}`, depth + 1);
+      }
+    };
+    walk(page.mainFrame(), 'main', 0);
+    return out;
+  }
+
+  function frameDescriptorOf(entry) {
+    return { main: entry.main, path: entry.path, name: entry.name, url: entry.url };
+  }
+
+  function sameOriginAs(a, b) {
+    try {
+      return new URL(String(a || '')).origin === new URL(String(b || '')).origin;
+    } catch {
+      return String(a || '') === String(b || '');
+    }
+  }
+
+  /** frame 参数 → Playwright Frame（跨域同样可命中）。 */
+  function resolveFrameTarget(page, spec) {
+    const list = frameListOf(page);
+    if (isMainFrameSpec(spec)) return { ok: true, entry: list[0], main: true, path: 'main' };
+    for (const entry of list) {
+      if (frameDescriptorMatches(frameDescriptorOf(entry), spec)) return { ok: true, entry, main: entry.main, path: entry.path };
+    }
+    return {
+      ok: false,
+      errorCode: 'FRAME_NOT_FOUND',
+      error: `未找到匹配的 frame（${describeFrameSpec(spec)}）`,
+      frames: summarizeFramesForHint(list.map(frameDescriptorOf), 16)
+    };
+  }
+
+  async function listFrames() {
+    const page = getActivePage();
+    if (!page) return { ok: false, engine: 'playwright', error: '尚未打开页面，无法列出 frame', frames: [] };
+    const list = frameListOf(page);
+    const topUrl = page.url();
+    const frames = list.map((f) => ({
+      path: f.path,
+      main: f.main,
+      name: f.name,
+      url: f.url,
+      depth: f.depth,
+      sameOrigin: f.main || sameOriginAs(topUrl, f.url),
+      accessible: true,
+      canEvaluate: true
+    }));
+    return {
+      ok: true,
+      engine: 'playwright',
+      channel: launchChannel,
+      source: 'playwright',
+      url: topUrl,
+      count: frames.length,
+      crossOriginCount: frames.filter((f) => !f.sameOrigin).length,
+      frames,
+      note: 'Playwright 可进入任意 frame（含跨域）；path 可直接作为其它工具的 frame 参数'
+    };
+  }
+
   /**
    * 跨 frame 定位：主 frame 找不到元素时遍历子 frame（含跨域 iframe）。
    * 返回可用 locator 与命中 frame，避免"表单在 iframe 里就完全点不到"。
@@ -445,7 +680,7 @@ function createPlaywrightRunner(deps = {}) {
   async function locateAcrossFrames(page, selector) {
     const main = page.locator(selector).first();
     if ((await main.count().catch(() => 0)) > 0) {
-      return { locator: main, frame: page.mainFrame(), crossFrame: false };
+      return { locator: main, frame: page.mainFrame(), crossFrame: false, framePath: 'main' };
     }
     // 只走「主 frame 找不到」的失败路径；仍限制遍历上限，避免重广告页几十个 frame 时逐轮往返过慢
     const frames = page.frames().filter((f) => f !== page.mainFrame());
@@ -453,9 +688,106 @@ function createPlaywrightRunner(deps = {}) {
     for (let i = 0; i < limit; i++) {
       const frame = frames[i];
       const loc = frame.locator(selector).first();
-      if ((await loc.count().catch(() => 0)) > 0) return { locator: loc, frame, crossFrame: true };
+      if ((await loc.count().catch(() => 0)) > 0) return { locator: loc, frame, crossFrame: true, framePath: '' };
     }
-    return { locator: main, frame: page.mainFrame(), crossFrame: false };
+    return { locator: main, frame: page.mainFrame(), crossFrame: false, framePath: 'main' };
+  }
+
+  function selectorForTarget(target) {
+    return target.kind === 'ref'
+      ? `[data-dieyun-ref="${String(target.value).replace(/"/g, '\\"')}"]`
+      : String(target.value);
+  }
+
+  /**
+   * 统一目标定位（frame 感知）：
+   *   1) 显式 frame 参数最优先
+   *   2) ref 优先用 snapshot 登记过的 frame（跨域 iframe 里的 ref 靠它才点得中）
+   *   3) 兜底：主 frame 优先，再遍历子 frame
+   */
+  async function locateTarget(page, args, target) {
+    const selector = selectorForTarget(target);
+    const spec = normalizeFrameSpec(args && args.frame);
+    if (!isMainFrameSpec(spec)) {
+      const hit = resolveFrameTarget(page, spec);
+      if (!hit.ok) return hit;
+      return {
+        ok: true,
+        locator: hit.entry.frame.locator(selector).first(),
+        frame: hit.entry.frame,
+        framePath: hit.entry.path,
+        crossFrame: !hit.entry.main
+      };
+    }
+    if (target.kind === 'ref') {
+      const entry = sessions.get(resolveSessionKey(args));
+      const info = entry && entry.refFrames ? entry.refFrames.get(String(target.value)) : null;
+      if (info && info.path && info.path !== 'main') {
+        const list = frameListOf(page);
+        const hit = list.find((f) => f.path === info.path);
+        if (hit) {
+          return {
+            ok: true,
+            locator: hit.frame.locator(selector).first(),
+            frame: hit.frame,
+            framePath: hit.path,
+            crossFrame: true
+          };
+        }
+      }
+    }
+    return locateAcrossFrames(page, selector);
+  }
+
+  /** 诊断：目标为什么点不到（frame 层级、可见性、遮挡者）。 */
+  async function diagnoseTarget(page, args, primary) {
+    const spec = normalizeFrameSpec(args && args.frame);
+    const list = frameListOf(page);
+    const out = {
+      url: page.url(),
+      requestedFrame: isMainFrameSpec(spec) ? 'main' : describeFrameSpec(spec),
+      frames: summarizeFramesForHint(list.map(frameDescriptorOf), 16),
+      reason: (primary && (primary.error || primary.errorCode)) || '目标不可用'
+    };
+    if (primary && primary.errorCode === 'FRAME_NOT_FOUND') return { ok: false, ...out };
+    try {
+      const target = await resolveTarget(args);
+      const located = await locateTarget(page, args, target);
+      if (!located.ok) return { ok: false, ...out };
+      const loc = located.locator;
+      const count = await loc.count().catch(() => 0);
+      if (!count) return { ok: false, ...out, errorCode: 'TARGET_NOT_FOUND' };
+      const box = await loc.boundingBox().catch(() => null);
+      const visible = await loc.isVisible().catch(() => false);
+      const occluder = await loc
+        .evaluate((el) => {
+          try {
+            const r = el.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            if (!hit || hit === el || el.contains(hit) || hit.contains(el)) return null;
+            return {
+              tag: String(hit.tagName || '').toLowerCase(),
+              id: String(hit.id || ''),
+              class: typeof hit.className === 'string' ? hit.className.slice(0, 120) : ''
+            };
+          } catch (e) {
+            return null;
+          }
+        })
+        .catch(() => null);
+      return {
+        ok: true,
+        ...out,
+        framePath: located.framePath,
+        target: { selector: target.kind === 'selector' ? String(target.value) : '', count },
+        visible,
+        rect: box ? { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) } : null,
+        occluded: !!occluder,
+        occludedBy: occluder || undefined
+      };
+    } catch (e) {
+      return { ok: false, ...out, reason: (e && e.message) || String(e) };
+    }
   }
 
   async function click(args = {}) {
@@ -464,10 +796,17 @@ function createPlaywrightRunner(deps = {}) {
     const button = args.button === 'right' ? 'right' : args.button === 'middle' ? 'middle' : 'left';
     const clickCount = Number(args.clickCount) >= 2 ? 2 : 1;
     const timeout = Number(args.timeoutMs) || 15000;
-    const sel = target.kind === 'ref' ? `[data-dieyun-ref="${target.value}"]` : target.value;
+    const force = args.force === true;
     try {
-      const located = await locateAcrossFrames(p, sel);
-      await located.locator.click({ timeout, button, clickCount });
+      const located = await locateTarget(p, args, target);
+      if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
+      await located.locator.click({ timeout, button, clickCount, force });
+      recordTimeline('click', {
+        ok: true,
+        url: p.url(),
+        target: { selector: target.kind === 'selector' ? String(target.value) : '', tag: '' },
+        frame: located.framePath || 'main'
+      });
       return {
         ok: true,
         engine: 'playwright',
@@ -475,34 +814,30 @@ function createPlaywrightRunner(deps = {}) {
         button,
         clickCount,
         clickedVia: 'locator',
+        framePath: located.framePath || 'main',
         crossFrame: located.crossFrame
       };
     } catch (e) {
-      if (button === 'left' && clickCount === 1) {
-        const result =
-          target.kind === 'ref'
-            ? await p.evaluate(buildClickPrepareScript(JSON.stringify(target.value)))
-            : await p.evaluate(buildClickPrepareScriptBySelector(JSON.stringify(target.value)));
-        if (result?.ok) {
-          return {
-            ok: true,
-            engine: 'playwright',
-            channel: launchChannel,
-            tag: result.tag || '',
-            button,
-            clickCount,
-            clickedVia: 'js'
-          };
-        }
-      }
-      const err = new Error((e && e.message) || '点击失败');
-      err.code = 'CLICK_FAILED';
+      const diagnostics = await diagnoseTarget(p, args, { error: (e && e.message) || String(e) });
+      recordTimeline('click', { ok: false, url: p.url(), error: (e && e.message) || String(e) });
+      const err = new Error(
+        `${(e && e.message) || '点击失败'}${
+          diagnostics.occludedBy
+            ? `（被 ${diagnostics.occludedBy.tag || ''}${diagnostics.occludedBy.id ? '#' + diagnostics.occludedBy.id : ''} 遮挡）`
+            : ''
+        }`
+      );
+      err.code = diagnostics.occludedBy ? 'TARGET_OCCLUDED' : 'CLICK_FAILED';
+      err.diagnostics = diagnostics;
+      err.suggestedFix = diagnostics.occludedBy
+        ? '先关闭/收起遮挡层，或传 force=true 强行点击'
+        : '用 browser_frames 确认 frame，或换 selector/ref';
       throw err;
     }
   }
 
   async function typeText(args = {}) {
-    const p = await ensurePage();
+    const p = await ensurePage(args);
     const text = String(args.text ?? '');
     const clear = args.clear === true;
     const timeout = Number(args.timeoutMs) || 15000;
@@ -511,11 +846,16 @@ function createPlaywrightRunner(deps = {}) {
       err.code = 'TARGET_REQUIRED';
       throw err;
     }
-    const sel = args.ref
-      ? `[data-dieyun-ref="${String(args.ref).replace(/"/g, '\\"')}"]`
-      : String(args.selector);
+    let located = null;
     try {
-      const located = await locateAcrossFrames(p, sel);
+      const target = await resolveTarget(args);
+      located = await locateTarget(p, args, target);
+      if (!located.ok) {
+        const err = new Error(located.error || '目标 frame/元素未找到');
+        err.code = located.errorCode || 'TARGET_NOT_FOUND';
+        err.diagnostics = located;
+        throw err;
+      }
       const loc = located.locator;
       if (clear) await loc.fill(text, { timeout });
       else await loc.pressSequentially(text, { timeout });
@@ -529,25 +869,38 @@ function createPlaywrightRunner(deps = {}) {
       if (actual !== '' && !matched) {
         throw new Error('locator fill value mismatch');
       }
+      recordTimeline('type', {
+        ok: true,
+        url: p.url(),
+        value: text,
+        target: { selector: args.selector ? String(args.selector) : '', tag: '' },
+        frame: located.framePath || 'main'
+      });
       return {
         ok: true,
         engine: 'playwright',
         channel: launchChannel,
         filledVia: 'locator',
+        framePath: located.framePath || 'main',
         crossFrame: located.crossFrame,
         matched: actual === '' || matched
       };
     } catch (e) {
+      if (e && e.code && e.code !== 'CLICK_FAILED') throw e;
+      const frame = located && located.ok ? located.frame : p.mainFrame();
       const result = args.ref
-        ? await p.evaluate(buildTypePrepareScript(JSON.stringify(String(args.ref)), JSON.stringify(text), clear))
-        : await p.evaluate(
+        ? await frame.evaluate(buildTypePrepareScript(JSON.stringify(String(args.ref)), JSON.stringify(text), clear))
+        : await frame.evaluate(
             buildTypePrepareScriptBySelector(JSON.stringify(String(args.selector)), JSON.stringify(text), clear)
           );
       if (!result?.ok) {
-        const err = new Error(result?.error || (e && e.message) || '输入失败');
+        const diagnostics = await diagnoseTarget(p, args, { error: (result && result.error) || (e && e.message) });
+        const err = new Error(`${result?.error || (e && e.message) || '输入失败'}`);
         err.code = 'TYPE_FAILED';
+        err.diagnostics = diagnostics;
         throw err;
       }
+      recordTimeline('type', { ok: true, url: p.url(), value: text, frame: located && located.framePath });
       return { ok: true, engine: 'playwright', channel: launchChannel, filledVia: 'js', ...result };
     }
   }
@@ -566,31 +919,51 @@ function createPlaywrightRunner(deps = {}) {
       err.code = 'TARGET_REQUIRED';
       throw err;
     }
-    if (args.ref) {
-      const result = await p.evaluate(
-        buildSelectOptionScript(
-          JSON.stringify(String(args.ref)),
-          '""',
-          JSON.stringify(value),
-          JSON.stringify(label)
+    const target = await resolveTarget(args);
+    const located = await locateTarget(p, args, target);
+    if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
+    try {
+      if (value) {
+        await located.locator.selectOption(value, { timeout: Number(args.timeoutMs) || 15000 });
+      } else {
+        await located.locator.selectOption({ label }, { timeout: Number(args.timeoutMs) || 15000 });
+      }
+    } catch (e) {
+      const framePath = located.framePath || 'main';
+      const fallback = await (located.frame || p.mainFrame())
+        .evaluate(
+          buildSelectOptionScript(
+            args.ref ? JSON.stringify(String(args.ref)) : '""',
+            args.selector ? JSON.stringify(String(args.selector)) : '""',
+            JSON.stringify(value),
+            JSON.stringify(label)
+          )
         )
-      );
-      if (!result?.ok) {
-        const err = new Error(result?.error || 'select 失败');
+        .catch(() => null);
+      if (!fallback || !fallback.ok) {
+        const err = new Error((fallback && fallback.error) || (e && e.message) || 'select 失败');
         err.code = 'SELECT_FAILED';
+        err.diagnostics = await diagnoseTarget(p, args, { error: err.message });
         throw err;
       }
-      return { ok: true, engine: 'playwright', channel: launchChannel, ...result };
+      recordTimeline('change', { ok: true, url: p.url(), value: value || label, frame: framePath });
+      return { ok: true, engine: 'playwright', channel: launchChannel, ...fallback, filledVia: 'js' };
     }
-    const target = await resolveTarget(args);
-    const sel = target.kind === 'ref' ? `[data-dieyun-ref="${target.value}"]` : target.value;
-    const located = await locateAcrossFrames(p, sel);
-    if (value) {
-      await located.locator.selectOption(value, { timeout: Number(args.timeoutMs) || 15000 });
-    } else {
-      await located.locator.selectOption({ label }, { timeout: Number(args.timeoutMs) || 15000 });
-    }
-    return { ok: true, engine: 'playwright', channel: launchChannel, value: value || undefined, label: label || undefined };
+    recordTimeline('change', {
+      ok: true,
+      url: p.url(),
+      value: value || label,
+      target: { selector: args.selector ? String(args.selector) : '', tag: 'select' },
+      frame: located.framePath || 'main'
+    });
+    return {
+      ok: true,
+      engine: 'playwright',
+      channel: launchChannel,
+      value: value || undefined,
+      label: label || undefined,
+      framePath: located.framePath || 'main'
+    };
   }
 
   async function scroll(args = {}) {
@@ -642,14 +1015,21 @@ function createPlaywrightRunner(deps = {}) {
   async function hover(args = {}) {
     const p = await ensurePage(args);
     const target = await resolveTarget(args);
-    const sel = target.kind === 'ref' ? `[data-dieyun-ref="${target.value}"]` : target.value;
-    const located = await locateAcrossFrames(p, sel);
+    const located = await locateTarget(p, args, target);
+    if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
     await located.locator.hover({ timeout: Number(args.timeoutMs) || 15000 });
+    recordTimeline('hover', {
+      ok: true,
+      url: p.url(),
+      target: { selector: target.kind === 'selector' ? String(target.value) : '', tag: '' },
+      frame: located.framePath || 'main'
+    });
     return {
       ok: true,
       engine: 'playwright',
       channel: launchChannel,
-      selector: sel,
+      selector: selectorForTarget(target),
+      framePath: located.framePath || 'main',
       crossFrame: located.crossFrame
     };
   }
@@ -657,8 +1037,9 @@ function createPlaywrightRunner(deps = {}) {
   async function drag(args = {}) {
     const p = await ensurePage(args);
     const target = await resolveTarget({ ref: args.ref, selector: args.selector });
-    const sel = target.kind === 'ref' ? `[data-dieyun-ref="${target.value}"]` : target.value;
-    const loc = p.locator(sel);
+    const locatedFrom = await locateTarget(p, args, target);
+    if (!locatedFrom.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...locatedFrom };
+    const loc = locatedFrom.locator;
     if (args.toRef || args.toSelector) {
       const to = await resolveTarget({ ref: args.toRef, selector: args.toSelector });
       const toSel = to.kind === 'ref' ? `[data-dieyun-ref="${to.value}"]` : to.value;
@@ -687,22 +1068,52 @@ function createPlaywrightRunner(deps = {}) {
     let buf;
     let width = 0;
     let height = 0;
-    if (opts.ref || opts.selector) {
-      const target = await resolveTarget({ ref: opts.ref, selector: opts.selector });
-      const sel = target.kind === 'ref' ? `[data-dieyun-ref="${target.value}"]` : target.value;
-      const loc = p.locator(sel);
-      buf = await loc.screenshot({ type: 'png', timeout: Number(opts.timeoutMs) || 15000 });
-      const box = await loc.boundingBox();
-      width = box ? Math.round(box.width) : 0;
-      height = box ? Math.round(box.height) : 0;
-    } else {
-      buf = await p.screenshot({
-        fullPage: !!opts.fullPage,
-        type: 'png'
-      });
-      const viewport = p.viewportSize() || { width: 0, height: 0 };
-      width = viewport.width;
-      height = viewport.height;
+    const isElementShot = !!(opts.ref || opts.selector);
+    // 标注：在每个 frame 内各自画（position:fixed 相对于所在 frame 视口，天然对齐）
+    let annotation = null;
+    const annotatedFrames = [];
+    if (opts.annotate) {
+      const targets = isMainFrameSpec(normalizeFrameSpec(opts.frame))
+        ? frameListOf(p)
+        : [resolveFrameTarget(p, normalizeFrameSpec(opts.frame))].filter((x) => x && x.ok).map((x) => x.entry);
+      for (const entry of targets) {
+        // eslint-disable-next-line no-await-in-loop
+        const drawn = await entry.frame
+          .evaluate(
+            buildAnnotateScript({
+              absolute: false,
+              labelInside: isElementShot,
+              maxLabels: opts.annotate === true ? undefined : Number(opts.annotate)
+            })
+          )
+          .catch(() => null);
+        if (drawn && drawn.ok) annotatedFrames.push(entry.frame);
+      }
+      if (annotatedFrames.length) annotation = { drawn: true, frames: annotatedFrames.length };
+    }
+    try {
+      if (isElementShot) {
+        const target = await resolveTarget({ ref: opts.ref, selector: opts.selector });
+        const located = await locateTarget(p, opts, target);
+        if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
+        const loc = located.locator;
+        buf = await loc.screenshot({ type: 'png', timeout: Number(opts.timeoutMs) || 15000 });
+        const box = await loc.boundingBox();
+        width = box ? Math.round(box.width) : 0;
+        height = box ? Math.round(box.height) : 0;
+      } else {
+        buf = await p.screenshot({
+          fullPage: !!opts.fullPage,
+          type: 'png'
+        });
+        const viewport = p.viewportSize() || { width: 0, height: 0 };
+        width = viewport.width;
+        height = viewport.height;
+      }
+    } finally {
+      for (const frame of annotatedFrames) {
+        await frame.evaluate(buildClearAnnotationScript()).catch(() => null);
+      }
     }
     return {
       ok: true,
@@ -713,8 +1124,9 @@ function createPlaywrightRunner(deps = {}) {
       base64: Buffer.from(buf).toString('base64'),
       width,
       height,
-      fullPage: !!opts.fullPage && !opts.ref && !opts.selector,
-      element: opts.ref || opts.selector || undefined
+      fullPage: !!opts.fullPage && !isElementShot,
+      element: opts.ref || opts.selector || undefined,
+      annotate: annotation || undefined
     };
   }
 
@@ -752,22 +1164,46 @@ function createPlaywrightRunner(deps = {}) {
       throw err;
     }
     const p = await ensurePage(args);
-    const raw = await p.evaluate(buildEvaluateScript(script, { maxChars: args.maxChars }));
-    return { engine: 'playwright', channel: launchChannel, url: p.url(), ...normalizeEvaluateResult(raw) };
+    const spec = normalizeFrameSpec(args.frame);
+    let target = p;
+    let framePath = 'main';
+    if (!isMainFrameSpec(spec)) {
+      const hit = resolveFrameTarget(p, spec);
+      if (!hit.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...hit };
+      target = hit.entry.frame;
+      framePath = hit.entry.path;
+    }
+    const raw = await target.evaluate(buildEvaluateScript(script, { maxChars: args.maxChars }));
+    return {
+      engine: 'playwright',
+      channel: launchChannel,
+      url: p.url(),
+      frame: framePath === 'main' ? undefined : framePath,
+      ...normalizeEvaluateResult(raw)
+    };
   }
 
   async function waitFor(args = {}) {
-    const p = await ensurePage();
+    const p = await ensurePage(args);
     const kind = String(args.kind || args.type || 'selector').toLowerCase();
     const value = String(args.value || args.text || args.selector || args.url || '');
     const timeout = Number(args.timeoutMs) || 30000;
+    const spec = normalizeFrameSpec(args.frame);
+    let scope = p;
+    let framePath = 'main';
+    if (!isMainFrameSpec(spec)) {
+      const hit = resolveFrameTarget(p, spec);
+      if (!hit.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...hit };
+      scope = hit.entry.frame;
+      framePath = hit.entry.path;
+    }
     if (kind === 'selector') {
-      await p.waitForSelector(value, { timeout, state: args.state || 'visible' });
-      return { ok: true, engine: 'playwright', kind, selector: value, channel: launchChannel };
+      await scope.waitForSelector(value, { timeout, state: args.state || 'visible' });
+      return { ok: true, engine: 'playwright', kind, selector: value, frame: framePath === 'main' ? undefined : framePath, channel: launchChannel };
     }
     if (kind === 'text') {
-      await p.waitForFunction((v) => document.body && document.body.innerText.includes(v), value, { timeout });
-      return { ok: true, engine: 'playwright', kind, text: value, channel: launchChannel };
+      await scope.waitForFunction((v) => document.body && document.body.innerText.includes(v), value, { timeout });
+      return { ok: true, engine: 'playwright', kind, text: value, frame: framePath === 'main' ? undefined : framePath, channel: launchChannel };
     }
     if (kind === 'url') {
       await p.waitForURL((url) => String(url).includes(value), { timeout });
@@ -781,8 +1217,54 @@ function createPlaywrightRunner(deps = {}) {
       await p.waitForLoadState(args.state || 'load', { timeout });
       return { ok: true, engine: 'playwright', kind: 'load', state: args.state || 'load', channel: launchChannel };
     }
-    const data = await p.evaluate(buildWaitConditionScript(args));
-    return { ok: !!data?.ok, engine: 'playwright', channel: launchChannel, ...data };
+    if (kind === 'expression' || kind === 'expr') {
+      if (!value.trim()) {
+        const err = new Error('browser_wait_for kind=expression 需要 value（表达式）');
+        err.code = 'MISSING_ARG';
+        throw err;
+      }
+      // 表达式内联进脚本（不走页面内 eval，CSP 拦不到），Node 侧轮询到为真
+      const started = Date.now();
+      let last = null;
+      while (Date.now() - started <= timeout) {
+        // eslint-disable-next-line no-await-in-loop
+        last = await scope.evaluate(buildExpressionProbeScript(value)).catch((e) => ({
+          ok: false,
+          error: e && e.message ? e.message : String(e)
+        }));
+        if (last && last.ok && last.truthy) {
+          return {
+            ok: true,
+            engine: 'playwright',
+            kind: 'expression',
+            elapsedMs: Date.now() - started,
+            value: last.value,
+            frame: framePath === 'main' ? undefined : framePath,
+            channel: launchChannel
+          };
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await p.waitForTimeout(Math.min(300, Math.max(50, Number(args.intervalMs) || 200)));
+      }
+      return {
+        ok: false,
+        engine: 'playwright',
+        kind: 'expression',
+        timeout: true,
+        elapsedMs: Date.now() - started,
+        last,
+        errorCode: 'WAIT_TIMEOUT',
+        error: '等待表达式超时'
+      };
+    }
+    const data = await scope.evaluate(buildWaitConditionScript({ ...args, state: args.state }));
+    return {
+      ok: !!data?.ok,
+      engine: 'playwright',
+      channel: launchChannel,
+      frame: framePath === 'main' ? undefined : framePath,
+      ...data
+    };
   }
 
   async function tabs(args = {}) {
@@ -902,14 +1384,17 @@ function createPlaywrightRunner(deps = {}) {
       throw err;
     }
     try {
-      const located = await locateAcrossFrames(p, selector);
+      const located = await locateTarget(p, args, { kind: 'selector', value: selector });
+      if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
       await located.locator.setInputFiles(filePath, { timeout: Number(args.timeoutMs) || 15000 });
+      recordTimeline('upload', { ok: true, url: p.url(), value: path.basename(filePath), frame: located.framePath || 'main' });
       return {
         ok: true,
         engine: 'playwright',
         filePath,
         selector,
         via: 'input',
+        framePath: located.framePath || 'main',
         crossFrame: located.crossFrame,
         channel: launchChannel
       };
@@ -940,25 +1425,49 @@ function createPlaywrightRunner(deps = {}) {
   }
 
   async function observe(opts = {}) {
-    const p = await ensurePage();
+    const p = await ensurePage(opts);
     const snap = await snapshot({
       interactive: opts.interactive !== false,
+      mode: opts.mode,
       maxElements: opts.maxElements,
-      delayMs: opts.delayMs
+      delayMs: opts.delayMs,
+      frame: opts.frame
     });
-    const shot = opts.screenshot === false ? null : await screenshot({ fullPage: !!opts.fullPage });
+    if (snap && snap.ok === false) return snap;
+    let shot = null;
+    let shotError = '';
+    if (opts.screenshot !== false) {
+      try {
+        shot = await screenshot({ fullPage: !!opts.fullPage, annotate: opts.annotate, frame: opts.frame });
+      } catch (e) {
+        shotError = e && e.message ? e.message : String(e);
+      }
+    }
     return {
       ok: true,
       engine: 'playwright',
       channel: launchChannel,
       url: p.url(),
       title: await p.title().catch(() => ''),
+      mode: snap.mode,
       textPreview: snap.textPreview || '',
       elements: snap.elements || [],
       refEpoch: snap.refEpoch,
-      screenshot: shot ? { mime: shot.mime, base64: shot.base64, width: shot.width, height: shot.height } : null,
+      coverage: snap.coverage,
+      frames: snap.frames,
+      blockedIframes: snap.blockedIframes,
+      screenshot: shot
+        ? { mime: shot.mime, base64: shot.base64, width: shot.width, height: shot.height, annotate: shot.annotate }
+        : null,
       viewport: p.viewportSize() || null,
-      note: 'observe 同时返回页面文本、可交互 ref 与截图；页面变化后 ref 需重新获取'
+      warning: shotError ? `截图失败（页面文本与 refs 仍可用）: ${shotError}` : undefined,
+      note: [
+        'observe 同时返回页面文本、ref、覆盖率与截图；页面变化后 ref 需重新获取',
+        snap.coverage && snap.coverage.omitted ? `本次有 ${snap.coverage.omitted} 个元素因 maxElements 未纳入` : null,
+        'Playwright 引擎已跨 frame 采集（含跨域 iframe）'
+      ]
+        .filter(Boolean)
+        .join('；')
     };
   }
 
@@ -1034,9 +1543,17 @@ function createPlaywrightRunner(deps = {}) {
     return p.evaluate(buildImportLocalStorageScript(JSON.stringify(payload)));
   }
 
-  async function expect(assertions) {
-    const p = await ensurePage();
-    return p.evaluate(buildExpectScript(JSON.stringify(assertions || [])));
+  async function expect(assertions, opts = {}) {
+    const p = await ensurePage(opts);
+    const spec = normalizeFrameSpec(opts.frame);
+    let scope = p;
+    if (!isMainFrameSpec(spec)) {
+      const hit = resolveFrameTarget(p, spec);
+      if (!hit.ok) return { ok: false, errorCode: hit.errorCode, error: hit.error, frames: hit.frames, results: [] };
+      scope = hit.entry.frame;
+    }
+    // 已经在目标 frame 的上下文里执行，脚本内部的 frameSpec 必须留空（相对路径会错位）
+    return scope.evaluate(buildExpectScript(JSON.stringify(assertions || []), 'null'));
   }
 
   async function readLocalStorage() {
@@ -1490,6 +2007,8 @@ function createPlaywrightRunner(deps = {}) {
     screenshot,
     pdf,
     evaluateScript,
+    frames: listFrames,
+    timeline,
     waitFor,
     tabs,
     downloads: downloadStatus,

@@ -243,9 +243,19 @@ function createBrowserHandlers(d) {
       return browser.evaluate(params || {});
     },
 
-    'browser.snapshot': async ({ interactive, maxElements, engine, delayMs, sessionId }) => {
+    'browser.snapshot': async ({ interactive, maxElements, engine, delayMs, sessionId, mode, frame }) => {
       assertBrowserEnabled();
-      return browser.snapshot({ interactive, maxElements, engine, delayMs, sessionId });
+      return browser.snapshot({ interactive, maxElements, engine, delayMs, sessionId, mode, frame });
+    },
+
+    'browser.frames': async (params = {}) => {
+      assertBrowserEnabled();
+      return browser.frames(params || {});
+    },
+
+    'browser.timeline': async (params = {}) => {
+      assertBrowserEnabled();
+      return browser.timeline(params || {});
     },
 
     'browser.expect': async (params = {}) => {

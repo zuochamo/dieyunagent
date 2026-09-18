@@ -13,6 +13,8 @@
  * 纯函数，零 Electron 依赖，便于单测。
  */
 
+const { FRAME_HELPERS } = require('./frame-script');
+
 const ASSERTION_KINDS = Object.freeze(['visible', 'hidden', 'text', 'value', 'count', 'url']);
 const TARGET_KINDS = Object.freeze(['visible', 'hidden', 'text', 'value']);
 const MATCH_KINDS = Object.freeze(['text', 'value', 'url']);
@@ -93,15 +95,29 @@ function normalizeAssertions(raw) {
 }
 
 /** 生成在页面内一次性跑完全部断言的表达式。 */
-function buildExpectScript(assertionsJson) {
+function buildExpectScript(assertionsJson, frameJson) {
+  const frameSpecJson = !frameJson || frameJson === 'null' ? 'null' : String(frameJson);
   return `(() => {
+  ${FRAME_HELPERS}
   const assertions = ${assertionsJson};
+  const frameSpec = ${frameSpecJson};
+  const scope = (function () {
+    if (__dyFrameSpecIsMain(frameSpec)) {
+      const top = __dyTopWindow();
+      return { ok: true, doc: document, win: top, path: 'main' };
+    }
+    return __dyPickFrame(frameSpec);
+  })();
+  if (!scope.ok) return { ok: false, error: scope.error, errorCode: scope.errorCode, frames: scope.frames, results: [] };
   const isVisible = (el) =>
     !!el && !!(el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length));
   const resolve = (a) => {
-    if (a.ref) return document.querySelector('[data-dieyun-ref="' + a.ref + '"]');
+    if (a.ref) {
+      const resolved = __dyResolveTargetEx(a.ref, '', frameSpec);
+      return resolved.ok ? resolved.el : null;
+    }
     if (a.selector) {
-      try { return document.querySelector(String(a.selector)); } catch (e) { return null; }
+      try { return scope.doc.querySelector(String(a.selector)); } catch (e) { return null; }
     }
     return null;
   };
@@ -120,12 +136,13 @@ function buildExpectScript(assertionsJson) {
     const row = { id: a.id, kind: a.kind, pass: false, expected: a.expected, actual: '' };
     try {
       if (a.kind === 'url') {
-        const url = String(location.href);
+        let url = '';
+        try { url = String((scope.win && scope.win.location && scope.win.location.href) || location.href); } catch (e) { url = String(location.href); }
         row.actual = clip(url);
         row.pass = hit(url, a.expected, a.match);
       } else if (a.kind === 'count') {
         let n = 0;
-        try { n = document.querySelectorAll(String(a.selector)).length; } catch (e) { n = 0; }
+        try { n = scope.doc.querySelectorAll(String(a.selector)).length; } catch (e) { n = 0; }
         row.actual = String(n);
         const exp = Number(a.expected);
         if (a.op === 'gte') row.pass = n >= exp;

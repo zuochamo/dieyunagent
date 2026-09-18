@@ -11,6 +11,7 @@ const {
 } = require('./session-sync');
 const { createNetworkJournal, summarizeHarEntries, toHar } = require('./network-collector');
 const { createConsoleJournal, summarizeConsoleEntries } = require('./console-collector');
+const { createTimelineJournal, summarizeTimeline } = require('./timeline');
 const { normalizeAssertions, shapeExpectResult } = require('./expect');
 const {
   diffBitmaps,
@@ -81,15 +82,19 @@ function createBrowserService(deps) {
   const pwNetwork = createNetworkJournal();
   const bvConsole = createConsoleJournal();
   const pwConsole = createConsoleJournal();
+  const bvTimeline = createTimelineJournal();
+  const pwTimeline = createTimelineJournal();
   const viewCtrl = createBrowserViewController({
     ...deps,
     networkJournal: bvNetwork,
-    consoleJournal: bvConsole
+    consoleJournal: bvConsole,
+    timelineJournal: bvTimeline
   });
   const pwRunner = createPlaywrightRunner({
     log,
     networkJournal: pwNetwork,
-    consoleJournal: pwConsole
+    consoleJournal: pwConsole,
+    timelineJournal: pwTimeline
   });
   /** @type {'browserview' | 'playwright'} */
   let activeEngine = 'browserview';
@@ -467,8 +472,64 @@ function createBrowserService(deps) {
     const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
     if (engine === 'playwright') await ensurePlaywrightSessionSynced();
     const timeoutMs = Math.min(60000, Math.max(1000, Number(args.timeoutMs) || 15000));
-    const raw = await withTimeout(getRunner(engine).expect(assertions), timeoutMs, '断言执行');
+    const raw = await withTimeout(
+      getRunner(engine).expect(assertions, { frame: args.frame, sessionId: args.sessionId }),
+      timeoutMs,
+      '断言执行'
+    );
+    if (raw && raw.ok === false && raw.errorCode) {
+      return { engine, ok: false, error: raw.error, errorCode: raw.errorCode, frames: raw.frames, results: [] };
+    }
     return shapeExpectResult(raw, { engine });
+  }
+
+  /** frame 树：让 Agent 一眼看出内容在哪一层（含跨域 frame）。 */
+  async function frames(args = {}) {
+    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
+    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
+    const runner = getRunner(engine);
+    if (typeof runner.frames !== 'function') {
+      return { ok: false, engine, error: '当前引擎不支持 frame 列表' };
+    }
+    return runner.frames();
+  }
+
+  /**
+   * 事件时间线：page 侧真实事件 + Agent 侧动作。
+   * auto 模式下合并两个引擎的缓冲（各条带 engine），与 network/console 一致。
+   */
+  function timeline(opts = {}) {
+    const requested = pickEngine(opts.engine);
+    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
+    if (String(opts.action || 'list').toLowerCase() === 'clear') {
+      if (requested === 'auto') {
+        bvTimeline.clear();
+        pwTimeline.clear();
+      } else {
+        (engine === 'playwright' ? pwTimeline : bvTimeline).clear();
+      }
+      return { ok: true, engine, cleared: true };
+    }
+    let entries;
+    if (requested === 'auto') {
+      const merged = [
+        ...bvTimeline.list({ ...opts, limit: 300 }),
+        ...pwTimeline.list({ ...opts, limit: 300 })
+      ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      const limit = Math.min(300, Math.max(1, Number(opts.limit) || 80));
+      entries = merged.slice(-limit);
+    } else {
+      entries = (engine === 'playwright' ? pwTimeline : bvTimeline).list(opts);
+    }
+    return {
+      ok: true,
+      engine,
+      ...summarizeTimeline(entries, { includeInput: opts.includeInput === true }),
+      stats: { browserview: bvTimeline.status(), playwright: pwTimeline.status() },
+      note:
+        '时间线 = 页面侧真实事件（capture 阶段，含 iframe 内）+ Agent 侧动作；' +
+        '"点了没反应"先看这里有没有 click，再看 browser_console / browser_network'
+    };
   }
 
   /** 默认基准文件名：按引擎+目标派生稳定 key，保证多次调用比的是同一个文件。 */
@@ -1151,6 +1212,8 @@ function createBrowserService(deps) {
     evaluate,
     hover,
     drag,
+    frames,
+    timeline,
     configure,
     a11ySnapshot,
     network,
