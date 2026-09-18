@@ -4,7 +4,7 @@ const { delegateAgentToolViaGateway } = require('./delegate-tool-gateway');
 const { isRendererOnlyTool, requestToolFromRenderer } = require('./renderer-tool-delegate');
 const { getToolHarnessSession, clearToolHarnessSession } = require('./tool-harness');
 const { isMutatingAgentTool, MUTATING_TOOLS } = require('./tool-classify');
-const { normalizeAgentToolName } = require('./guardrails-shared');
+const { normalizeAgentToolName, sniffVisionImageMime } = require('./guardrails-shared');
 const { getAgentLimits } = require('./agent-limits');
 const {
   collectWriteSmellHints,
@@ -17,7 +17,7 @@ const {
   executeAgentsMdProposeMain
 } = require('./propose-tools-main');
 
-const { runExclusive, isWorkspaceMutateBusy } = require('./mutate-queue');
+const { runExclusive } = require('./mutate-queue');
 const {
   recordBrowserScreenshot,
   recordVisionImage,
@@ -27,36 +27,11 @@ const {
 
 /**
  * 用文件头魔数判断 base64 是否为图片，并给出准确的 mime。
- * 只认确定无歧义的魔数：无法判定时返回空串，调用方退回原有「读文件」语义。
+ * 单一来源是 guardrails-shared.sniffVisionImageMime：只认上游支持的
+ * png/jpeg/gif/webp（bmp/svg/heic 等注入必被上游 400 打回，故不认），
+ * 无法判定时返回空串，调用方退回原有「读文件」语义。
  */
-function sniffImageMime(base64) {
-  if (typeof base64 !== 'string' || base64.length < 12) return '';
-  let head;
-  try {
-    head = Buffer.from(base64.slice(0, 24), 'base64');
-  } catch {
-    return '';
-  }
-  if (head.length >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
-    return 'image/png';
-  }
-  if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) {
-    return 'image/jpeg';
-  }
-  if (head.length >= 6) {
-    const six = head.subarray(0, 6).toString('latin1');
-    if (six === 'GIF87a' || six === 'GIF89a') return 'image/gif';
-  }
-  if (
-    head.length >= 12 &&
-    head.subarray(0, 4).toString('latin1') === 'RIFF' &&
-    head.subarray(8, 12).toString('latin1') === 'WEBP'
-  ) {
-    return 'image/webp';
-  }
-  if (head.length >= 2 && head[0] === 0x42 && head[1] === 0x4d) return 'image/bmp';
-  return '';
-}
+const sniffImageMime = sniffVisionImageMime;
 
 /**
  * 是否是「想把图片交给模型看」的读取请求。
@@ -274,7 +249,19 @@ function createMainToolBridge(deps) {
             : '';
         const r = await plansCreateFromText({
           text: `${a.description || a.text || ''}${todoText}`,
-          skillIds: a.skillIds || []
+          skillIds: a.skillIds || [],
+          // 结构化优先：模型直接给出 rrule/onceAt 时免 LLM 解析
+          structured: {
+            name: a.name,
+            rrule: a.rrule,
+            onceAt: a.onceAt,
+            prompt: a.prompt,
+            todos: a.todos,
+            skillIds: a.skillIds
+          },
+          // 计划绑定本次运行的路由：定时执行（无 Renderer）据此自洽解析模型配置
+          modelRoute: ctx && ctx.modelRoute ? ctx.modelRoute : undefined,
+          model: ctx && ctx.model ? ctx.model : undefined
         });
         return {
           ok: true,
@@ -293,6 +280,9 @@ function createMainToolBridge(deps) {
             rrule: p.rrule,
             onceAt: p.onceAt,
             todos: Array.isArray(p.todos) ? p.todos : [],
+            // 计划绑定的模型与路由（只存路由不存 key）：便于判断到点会用哪个模型执行
+            model: p.model || '',
+            modelRoute: p.modelRoute || '',
             sessionId: p.deliver?.sessionId,
             lastRunAt: p.lastRunAt
           }))

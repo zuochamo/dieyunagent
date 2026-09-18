@@ -19,6 +19,8 @@ const EXPLORE_TOOL_NAMES = new Set([
   'browser_a11y_snapshot',
   'browser_network',
   'browser_console',
+  'browser_frames',
+  'browser_timeline',
   'browser_expect'
 ]);
 // 注意：browser_screenshot 支持 filePath 落盘（写文件），不再属于纯只读；
@@ -26,6 +28,7 @@ const EXPLORE_TOOL_NAMES = new Set([
 
 const SHELL_TOOL_NAMES = new Set([
   'host_exec',
+  'host_proc',
   'fs_read_file',
   'fs_list_dir',
   'grep',

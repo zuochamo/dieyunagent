@@ -1301,13 +1301,31 @@ const PLAN_TOOLS = [
     function: {
       name: 'plan_create',
       description:
-        '从自然语言创建定时计划（写入 plans.json，RRULE 调度）。用户说「每天 X 点…发到当前对话」时，计划会投递到当前会话。',
+        '创建定时计划（写入 plans.json，RRULE 调度）。能确定时间规则时请直接给出 rrule 或 onceAt（确定、不再额外解析）；只有拿到的是自然语言、无法确定时间规则时才省略它们，交由解析器推断。用户说「每天 X 点…发到当前对话」时，计划会投递到当前会话。',
       parameters: {
         type: 'object',
         properties: {
+          name: {
+            type: 'string',
+            description: '计划名称（简短中文）'
+          },
+          rrule: {
+            type: 'string',
+            description:
+              'iCalendar RRULE（不含 RRULE: 前缀），与 onceAt 二选一。如 每天9:00 → FREQ=DAILY;BYHOUR=9;BYMINUTE=0；每周一9:00 → FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0；每30分钟 → FREQ=MINUTELY;INTERVAL=30'
+          },
+          onceAt: {
+            type: 'string',
+            description:
+              '仅执行一次时的 ISO8601 本地时间，与 rrule 二选一。如 2026-05-26T09:00:00'
+          },
+          prompt: {
+            type: 'string',
+            description: '到点后交给 AI 执行的任务说明（完整、可执行）'
+          },
           description: {
             type: 'string',
-            description: '用户对定时任务的完整描述，含执行时间与要做什么'
+            description: '用户对定时任务的完整描述（自然语言兜底，缺 rrule/onceAt 时据此解析）'
           },
           skillIds: {
             type: 'array',
@@ -1320,7 +1338,7 @@ const PLAN_TOOLS = [
             description: '可选 TODO 清单，每项是一个可执行检查项'
           }
         },
-        required: ['description']
+        required: []
       }
     }
   },

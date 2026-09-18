@@ -65,6 +65,18 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
     return gateway.invokeRpc(method, withRunWorkspace(params || {}));
   }
 
+  /**
+   * frame 家族参数统一透传。
+   * 每个 case 手抄一份必然漏（漏了就静默失效、模型以为是工具不支持），所以集中一处。
+   */
+  function frameArgs(a = {}) {
+    const out = { frame: a.frame };
+    if (a.force === true) out.force = true;
+    if (a.mode) out.mode = a.mode;
+    if (a.annotate != null) out.annotate = a.annotate;
+    return out;
+  }
+
   switch (name) {
     case 'host_open_url':
       return gateway.invokeRpc('host.open_url', { url: a.url });
@@ -82,6 +94,22 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
           sessionId: ctx.sessionId || undefined
         })
       );
+    case 'host_proc': {
+      const action = a.action === 'kill' ? 'kill' : 'list';
+      if (action === 'kill') {
+        return gateway.invokeRpc(
+          'host.proc_kill',
+          withRunWorkspace({ id: a.id, pid: a.pid, sessionId: ctx.sessionId || undefined })
+        );
+      }
+      return gateway.invokeRpc(
+        'host.proc_list',
+        withRunWorkspace({
+          includeFinished: a.includeFinished === true,
+          sessionId: ctx.sessionId || undefined
+        })
+      );
+    }
     case 'fs_read_file':
       return gateway.invokeRpc(
         'fs.read_file',
@@ -319,13 +347,32 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       return browserRpc('browser.snapshot', {
         interactive: a.interactive !== false,
         engine: a.engine,
-        delayMs: a.delayMs
+        delayMs: a.delayMs,
+        mode: a.mode,
+        maxElements: a.maxElements,
+        frame: a.frame
+      });
+    case 'browser_frames':
+      return browserRpc('browser.frames', { engine: a.engine });
+    case 'browser_timeline':
+      return browserRpc('browser.timeline', {
+        action: a.action,
+        limit: a.limit,
+        sinceMs: a.sinceMs,
+        types: a.types,
+        type: a.type,
+        source: a.source,
+        frame: a.frame,
+        urlPattern: a.urlPattern,
+        includeInput: a.includeInput,
+        engine: a.engine
       });
     case 'browser_a11y_snapshot':
       return browserRpc('browser.a11y_snapshot', {
         maxNodes: a.maxNodes,
         delayMs: a.delayMs,
-        engine: a.engine
+        engine: a.engine,
+        frame: a.frame
       });
     case 'browser_network':
       return browserRpc('browser.network', {
@@ -352,21 +399,24 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         selector: a.selector,
         button: a.button,
         clickCount: a.clickCount,
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_double_click':
       return browserRpc('browser.click', {
         ref: a.ref,
         selector: a.selector,
         clickCount: 2,
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_right_click':
       return browserRpc('browser.click', {
         ref: a.ref,
         selector: a.selector,
         button: 'right',
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_type':
       return browserRpc('browser.type', {
@@ -374,14 +424,16 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         selector: a.selector,
         text: a.text,
         clear: a.clear,
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_fill':
       return browserRpc('browser.fill', {
         ref: a.ref,
         selector: a.selector,
         text: a.text,
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_select_option':
       return browserRpc('browser.select_option', {
@@ -389,10 +441,11 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         selector: a.selector,
         value: a.value,
         label: a.label,
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_hover':
-      return browserRpc('browser.hover', { ref: a.ref, selector: a.selector, engine: a.engine });
+      return browserRpc('browser.hover', { ref: a.ref, selector: a.selector, engine: a.engine, ...frameArgs(a) });
     case 'browser_drag':
       return browserRpc('browser.drag', {
         ref: a.ref,
@@ -401,7 +454,8 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         toSelector: a.toSelector,
         dx: a.dx,
         dy: a.dy,
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_scroll':
       return browserRpc('browser.scroll', {
@@ -409,13 +463,15 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         amount: a.amount,
         ref: a.ref,
         selector: a.selector,
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_press_key':
       return browserRpc('browser.press_key', {
         key: a.key,
         modifiers: a.modifiers,
-        engine: a.engine
+        engine: a.engine,
+        ...frameArgs(a)
       });
     case 'browser_screenshot':
       return browserRpc('browser.screenshot', {
@@ -423,7 +479,9 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         selector: a.selector,
         fullPage: a.fullPage,
         filePath: a.filePath ? resolvePath(a.filePath) : undefined,
-        engine: a.engine
+        engine: a.engine,
+        frame: a.frame,
+        annotate: a.annotate
       });
     case 'browser_viewport':
       return browserRpc('browser.viewport', {
@@ -441,10 +499,12 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         selector: a.selector,
         text: a.text,
         url: a.url,
+        expression: a.expression,
         state: a.state,
         engine: a.engine,
         timeoutMs: a.timeoutMs,
-        intervalMs: a.intervalMs
+        intervalMs: a.intervalMs,
+        frame: a.frame
       });
     case 'browser_tabs':
       return browserRpc('browser.tabs', {
@@ -464,14 +524,16 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         filePath: resolvePath(a.filePath),
         mime: a.mime,
         engine: a.engine,
-        timeoutMs: a.timeoutMs
+        timeoutMs: a.timeoutMs,
+        frame: a.frame
       });
     case 'browser_evaluate':
       return browserRpc('browser.evaluate', {
         script: a.script,
         maxChars: a.maxChars,
         timeoutMs: a.timeoutMs,
-        engine: a.engine
+        engine: a.engine,
+        frame: a.frame
       });
     case 'browser_visual_diff':
       return browserRpc('browser.visual_diff', {
@@ -488,7 +550,8 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       return browserRpc('browser.expect', {
         assertions: a.assertions,
         timeoutMs: a.timeoutMs,
-        engine: a.engine
+        engine: a.engine,
+        frame: a.frame
       });
     case 'browser_pdf':
       return browserRpc('browser.pdf', {
@@ -562,6 +625,9 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         delayMs: a.delayMs,
         screenshot: a.screenshot !== false,
         fullPage: a.fullPage,
+        mode: a.mode,
+        annotate: a.annotate,
+        frame: a.frame,
         engine: a.engine
       });
     case 'browser_status':

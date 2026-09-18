@@ -157,6 +157,17 @@ function validateToolArgs(name, args, opts) {
     }
     case 'apply_patch':
       return applyPatchUnsupported();
+    case 'host_proc':
+      if (a.action === 'kill' && !String(a.id || '').trim() && !a.pid) {
+        return {
+          ok: false,
+          error: 'host_proc kill 需要 id 或 pid',
+          errorCode: 'MISSING_ARG',
+          retryable: false,
+          suggestedFix: '传 host_exec detached 返回的 handle（id），或 host_proc list 里的 pid'
+        };
+      }
+      return { ok: true };
     case 'fs_read_file':
     case 'fs_list_dir':
     case 'host_print_image': {
