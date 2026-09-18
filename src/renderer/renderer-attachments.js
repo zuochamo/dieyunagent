@@ -1,4 +1,4 @@
-/* global window, document, $, fetch, gwState, gatewayCall, pendingAttachments, composerBox, chatInput, refreshContextProgress, appendBubble, insertComposerQuotedText, showAgentToast, updateComposerMentionMenu, focusChatInput, getAgentLimits */
+/* global window, document, $, fetch, gwState, gatewayCall, pendingAttachments, composerBox, chatInput, refreshContextProgress, appendBubble, insertComposerQuotedText, showAgentToast, updateComposerMentionMenu, focusChatInput, getAgentLimits, sanitizeOutboundImageUrl */
 'use strict';
 
 const attachmentsApi = window.diecloud || {};
@@ -533,10 +533,17 @@ async function processAttachmentsForSend(userText, attachments) {
         continue;
       }
       const mime = att.mime && String(att.mime).startsWith('image/') ? att.mime : guessImageMime(att);
-      imageParts.push({
-        type: 'image_url',
-        image_url: { url: `data:${mime};base64,${base64}` }
-      });
+      // 出站前按实际字节校正并校验格式：上游只收 png/jpeg/gif/webp，
+      // 带 bmp/svg/heic … 出去会把整轮请求打成 HTTP 400 unsupported image。
+      const url = sanitizeOutboundImageUrl(`data:${mime};base64,${base64}`);
+      if (!url) {
+        lead.push(
+          `[附件图 ${seq}/${imageAtts.length}: ${filePath || att.originalName} 格式不受模型接口支持，未随消息发送]`
+        );
+        excluded.push(`${att.originalName} 格式不受支持（仅 png/jpeg/gif/webp）`);
+        continue;
+      }
+      imageParts.push({ type: 'image_url', image_url: { url } });
     }
     if (imageParts.length) {
       lead.push('（重新查看某张图：fs_read_file 设 encoding=base64）');

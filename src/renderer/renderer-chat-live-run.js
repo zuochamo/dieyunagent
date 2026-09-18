@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, maybeAutoCollapseChatOnTraceGrowth, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, beginLiveWriteSyncSuppress, endLiveWriteSyncSuppress, syncLiveWriteFromTrace, clearLiveWrite, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, getActiveLiveWrite, applyLiveWriteFileListMarks, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, beginLiveWriteSyncSuppress, endLiveWriteSyncSuppress, syncLiveWriteFromTrace, clearLiveWrite, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, getActiveLiveWrite, applyLiveWriteFileListMarks, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns */
 'use strict';
 
 function findAssistantLoadingBubble(sessionId) {
@@ -126,7 +126,12 @@ function settleAssistantBubbleAfterLoop(sessionId, fallbackEl, opts) {
 
 function attachLiveRunBubble(sessionId, opts = {}) {
   const live = sessionActiveRuns.get(sessionId);
-  if (!live || live.finished) return;
+  if (!live) return;
+  // 终态事件会先把 live.finished 置位（run-events.applyAgentRunEventToLive），
+  // 而气泡可能因 DOM 重建已经不在。此时仍要允许补建，否则终态正文再无渲染入口
+  // —— 表现就是「思考区有内容、正文永远空白」。正常滚动仍靠 finished 拦截。
+  if (live.finished && !opts.allowFinished) return;
+  const loading = !live.loopReturned && !live.finished;
 
   let ph = live.placeholderEl;
   if (opts.force || !ph?.isConnected) {
@@ -138,7 +143,7 @@ function attachLiveRunBubble(sessionId, opts = {}) {
   }
   if (!ph) {
     ph = appendBubble('assistant', live.streamContent || '', {
-      loading: !live.loopReturned,
+      loading,
       trace: live.trace || [],
       sessionId
     });
@@ -150,12 +155,12 @@ function attachLiveRunBubble(sessionId, opts = {}) {
     if (typeof resetThinkingUiState === 'function') resetThinkingUiState(ph);
   }
   const cp = checkpointRestoreOptsForLastTurn();
-  if (live.loopReturned) ph.classList.remove('loading');
+  if (!loading) ph.classList.remove('loading');
   renderAssistantBubbleContent(ph, {
     content: live.streamContent || '',
     trace: live.trace || [],
     hitRoundLimit: false,
-    loading: !live.loopReturned,
+    loading,
     undoTurnId: cp?.undoTurnId || null,
     checkpointRestore: !!cp
   });
@@ -221,7 +226,9 @@ function renderLiveRunFromEvent(sessionId, live, event) {
   if (sessionId !== currentSessionId) return;
   const el = resolveRunPlaceholder(sessionId, live.placeholderEl);
   if (!el) {
-    attachLiveRunBubble(sessionId);
+    // 占位气泡丢失时必须还能补建：终态这一拍 live.finished 已经为 true，
+    // 不带 allowFinished 就是一个空转的渲染入口（正文永不出现）。
+    attachLiveRunBubble(sessionId, { allowFinished: true });
     return;
   }
   live.placeholderEl = el;
@@ -358,9 +365,6 @@ function updateSessionRunProgress(sessionId, trace, streamContent, extra) {
           at: Date.now()
         };
   dispatchAgentRunEvent(sessionId, event);
-  if (sessionId === currentSessionId && Array.isArray(trace) && typeof maybeAutoCollapseChatOnTraceGrowth === 'function') {
-    maybeAutoCollapseChatOnTraceGrowth(trace.length);
-  }
 }
 
 function cloneTraceForMobile(trace) {

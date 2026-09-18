@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, getBuiltinApiConfig, getCustomModelApiConfig, getTextModelId, openModelSettingsModal, pendingAttachments, isImageAttachment, gwState, currentSessionId, sessionActiveRuns, gatewayCall, refreshHistoryList, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, initComposerPasteAndDrop, initComposerMentionMenu, initComposerVoice, addAttachmentsFromPaths, initWorkspacePicker, restartTerminalSession, isSupplierModelEnabled, getSupplierById, supplierDisplayName, renderSuppliersList, normalizeSettings, saveSettings, refreshRemoteGatewayMeta, resetRemoteGatewayClient, resetCodebaseWarmCache, ensureDefaultWorkspaceEditor, refreshWikiPanelIfNeeded, isActiveSessionSwitch */
+/* global window, document, $, escapeHtml, settings, getBuiltinApiConfig, getCustomModelApiConfig, getTextModelId, openModelSettingsModal, pendingAttachments, isImageAttachment, gwState, currentSessionId, sessionActiveRuns, gatewayCall, refreshHistoryList, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, initComposerPasteAndDrop, initComposerMentionMenu, initComposerVoice, initComposerPathPerm, addAttachmentsFromPaths, initWorkspacePicker, restartTerminalSession, isSupplierModelEnabled, getSupplierById, supplierDisplayName, renderSuppliersList, normalizeSettings, saveSettings, refreshRemoteGatewayMeta, resetRemoteGatewayClient, resetCodebaseWarmCache, ensureDefaultWorkspaceEditor, refreshWikiPanelIfNeeded, isActiveSessionSwitch */
 const composerApi = window.diecloud || {};
 
 // ---------- 输入区模型选择 ----------
@@ -1177,6 +1177,7 @@ function initComposerToolbar() {
   initComposerMentionMenu();
   initWorkspacePicker();
   if (typeof initComposerVoice === 'function') initComposerVoice();
+  if (typeof initComposerPathPerm === 'function') initComposerPathPerm();
   const btnFile = $('btn-upload-file');
   if (btnFile && composerApi.pickFiles && composerApi.stageFiles) {
     btnFile.addEventListener('click', async () => {
