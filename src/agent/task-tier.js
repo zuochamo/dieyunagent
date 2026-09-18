@@ -93,15 +93,4 @@ const taskTierApi = {
   isTaskTierFeatureEnabled
 };
 
-if (typeof window !== 'undefined') {
-  /** @type {any} */
-  const w = window;
-  w.inferTaskTierFromStructure = inferTaskTierFromStructure;
-  w.skipAutoCodebaseForTaskTier = skipAutoCodebaseForTaskTier;
-  w.formatTaskTierSystemBlock = formatTaskTierSystemBlock;
-  w.isTaskTierFeatureEnabled = isTaskTierFeatureEnabled;
-}
-
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = taskTierApi;
-}
+module.exports = taskTierApi;

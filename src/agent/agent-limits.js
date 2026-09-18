@@ -1,6 +1,25 @@
 'use strict';
 // @ts-check
 
+/**
+ * Node-only 依赖入口：浏览器 / 裸脚本下为抛错桩，避免 esbuild 静态解析 fs / path / electron。
+ * 所有调用点都位于 Node 专用路径（磁盘 I/O、model-settings 读取），renderer 侧不会触达。
+ */
+const nodeRequire =
+  typeof require === 'function'
+    ? require
+    : function () {
+        throw new Error('node-only dependency');
+      };
+
+// 纯 CJS 依赖：顶层 require 真源，替代原先「全局 → 运行期 require → 硬编码副本」三层兜底。
+const {
+  MODEL_RUNTIME_PRESETS,
+  remapLegacyContextTierId,
+  foldLegacyContextTierRecord
+} = require('./model-runtime-presets');
+const { isValidContextTierId, getEditingContextTierId } = require('./model-runtime-by-tier');
+
 /** @typedef {{ key: string, label: string, hint?: string, type: 'number'|'boolean', min?: number, max?: number, step?: number, unit?: string, format?: 'int'|'ms'|'min'|'mb'|'ratio' }} AgentLimitSchemaItem */
 /** @typedef {{ group: string, groupId: string, items: AgentLimitSchemaItem[] }} AgentLimitSchemaGroup */
 
@@ -25,13 +44,18 @@ const AGENT_LIMITS_DEFAULTS = {
   openFilesMax: 12,
   filePreviewMaxChars: 4000,
   fsReadDefaultMaxBytes: 65536,
+  // LSP 诊断只在这里限「注入字符数」；文件数与超时的唯一来源是 lsp-settings
+  // （src/lsp/diagnostics-service.js 的 LSP_SETTINGS_DEFAULTS / lsp-settings.json）。
   lspDiagMaxChars: 10000,
-  lspDiagMaxFiles: 24,
-  lspDiagTimeoutMs: 5000,
   streamRoundMaxAttempts: 3,
   llmRetryBaseMs: 800,
   llmReconnectMaxWaitMs: 30 * 60 * 1000,
   llmFirstTokenTimeoutMs: 180000,
+  // 流式「包间隔」容忍时长：开始出字后，静默超过该时长即 ETIMEDOUT idle 并交给重连层。
+  // 与首包超时同属看门狗（同值 180s），且都只认有效 SSE data 行（keep-alive 空包不续命）。
+  // 取 180s 是「不误杀」优先：一旦开始出字，正常包间隔是亚秒~几秒级，这里有几十倍余量；
+  // 若上游确实是断流，最多也让用户等 3 分钟而不是原来的 10 分钟。
+  llmStreamIdleTimeoutMs: 180000,
   synthesisTimeoutMs: 25000,
   synthesisReconnectMaxWaitMs: 8000,
   maxUndoSteps: 5,
@@ -50,6 +74,13 @@ const AGENT_LIMITS_DEFAULTS = {
   // 注意：这是「账本折算系数」而非策略上限，故意不出现在设置页——
   // contentCharLen 没有 tier 上下文，只读全局默认值，做成可调项会「改了不生效」。
   visionPartEqChars: 6000,
+  // 字符→token 折算系数（上下文账本 / 用量估算用）。与 visionPartEqChars 同为「折算系数」
+  // 而非策略上限，故意不上设置页。Rust 侧同值见
+  // crates/dieyun-core/src/compaction/tokens.rs::estimate_text_tokens。
+  // renderer 侧经 agent-bundle-entry.js 的 compat 挂到 window.CHARS_PER_TOKEN /
+  // window.CJK_CHARS_PER_TOKEN 后直接消费（这两个键不在 module.exports 中）。
+  charsPerToken: 3.2,
+  cjkCharsPerToken: 1.5,
   // 附件图片保留：超过容量后从最旧的图片开始原地降采样（不改名、不删除，历史引用不悬空）
   attachmentRetentionMaxMb: 500,
   attachmentDownsampleMaxPx: 1600,
@@ -433,25 +464,6 @@ const AGENT_LIMITS_SCHEMA = [
         unit: '字'
       },
       {
-        key: 'lspDiagMaxFiles',
-        label: 'LSP 诊断文件数',
-        type: 'number',
-        min: 8,
-        max: 48,
-        step: 1,
-        unit: '个'
-      },
-      {
-        key: 'lspDiagTimeoutMs',
-        label: 'LSP 诊断超时',
-        type: 'number',
-        min: 1000,
-        max: 15000,
-        step: 500,
-        format: 'ms',
-        unit: 'ms'
-      },
-      {
         key: 'visionShotsPerRound',
         label: '浏览器截图注入张数',
         hint: '每个 LLM 轮次最多在途几张浏览器截图；仅多模态模型生效，注入后即清空、下一轮重新计',
@@ -522,6 +534,17 @@ const AGENT_LIMITS_SCHEMA = [
         key: 'llmFirstTokenTimeoutMs',
         label: '流式首包超时',
         hint: 'headers 后无有效 SSE data 则超时重试；可用环境变量 LLM_FIRST_TOKEN_TIMEOUT_MS 覆盖进程默认',
+        type: 'number',
+        min: 30000,
+        max: 600000,
+        step: 10000,
+        format: 'ms',
+        unit: 'ms'
+      },
+      {
+        key: 'llmStreamIdleTimeoutMs',
+        label: '流式包间隔超时',
+        hint: '开始出字后，相邻两包之间超过该时长无有效 SSE data 即判定上游断流并自动重连（keep-alive 空包不算）；调小可更快发现断流',
         type: 'number',
         min: 30000,
         max: 600000,
@@ -697,7 +720,20 @@ let nodeCacheUserData = null;
 /** @type {Record<string, Record<string, unknown>>|null} */
 let nodeByTierCache = null;
 
-function tierGlobalFn(name) {
+/**
+ * agent-limits ↔ agent-limits-by-tier 互为依赖（后者需要本文件的 AGENT_LIMITS_DEFAULTS /
+ * normalizeAgentLimits），顶层互相 require 会成环，故对 by-tier 用惰性 require 打破环。
+ * esbuild 仍能在构建期静态解析这个字面路径。
+ */
+function limitsByTierModule() {
+  return require('./agent-limits-by-tier');
+}
+
+/**
+ * 跨层钩子：renderer 的 renderer-model-settings.js 把 resolveContextTierId 挂到 window。
+ * 它不是 agent 层模块、无法 require，只能运行期取（Node 下不存在 → 落到 default）。
+ */
+function crossLayerGlobalFn(name) {
   const g = typeof globalThis !== 'undefined' ? globalThis : {};
   return typeof g[name] === 'function' ? g[name] : null;
 }
@@ -705,16 +741,13 @@ function tierGlobalFn(name) {
 function resolveAgentLimitsTierId(opts = {}) {
   if (opts && opts.tierId) {
     const id = String(opts.tierId).trim();
-    const isValidLimits = tierGlobalFn('isValidLimitsTierId');
-    const isValidContext = tierGlobalFn('isValidContextTierId');
-    if (isValidLimits && isValidLimits(id)) return id;
-    if (isValidContext && isValidContext(id)) return id;
+    if (limitsByTierModule().isValidLimitsTierId(id)) return id;
+    if (isValidContextTierId(id)) return id;
   }
   if (opts && opts.editing === true) {
-    const getEditing = tierGlobalFn('getEditingContextTierId');
-    if (getEditing) return getEditing();
+    return getEditingContextTierId();
   }
-  const resolveContext = tierGlobalFn('resolveContextTierId');
+  const resolveContext = crossLayerGlobalFn('resolveContextTierId');
   if (resolveContext) {
     return resolveContext(opts || {});
   }
@@ -722,61 +755,27 @@ function resolveAgentLimitsTierId(opts = {}) {
 }
 
 function isUserDataPath(value) {
-  return typeof value === 'string' && value.length > 0 && /[\\/]/.test(value);
+  // 只有绝对路径才当作 Node 的 userData 目录。此前用「含分隔符」判断，
+  // 任何带斜杠的普通字符串（URL 片段、自定义 id 等）都会被误判进磁盘分支
+  if (typeof value !== 'string' || !value) return false;
+  try {
+    return nodeRequire('path').isAbsolute(value);
+  } catch {
+    // renderer 无 require：退化为旧判断，保证打包环境仍可用
+    return /[\\/]/.test(value);
+  }
 }
 
 function listKnownTierIds() {
-  if (typeof globalThis !== 'undefined' && globalThis.MODEL_RUNTIME_PRESETS) {
-    return globalThis.MODEL_RUNTIME_PRESETS.map((p) => p.id);
-  }
-  try {
-    const presets = require('./model-runtime-presets').MODEL_RUNTIME_PRESETS || [];
-    return presets.map((p) => p.id);
-  } catch {
-    return [
-      'default',
-      'ctx-16k',
-      'ctx-32k',
-      'ctx-64k',
-      'ctx-128k',
-      'ctx-200k',
-      'ctx-512k',
-      'ctx-1m',
-      'ctx-2m'
-    ];
-  }
+  return MODEL_RUNTIME_PRESETS.map((p) => p.id);
 }
 
 function remapLimitsTierId(id) {
-  if (typeof globalThis !== 'undefined' && typeof globalThis.remapLegacyContextTierId === 'function') {
-    return globalThis.remapLegacyContextTierId(id);
-  }
-  try {
-    return require('./model-runtime-presets').remapLegacyContextTierId(id);
-  } catch {
-    const key = String(id || '').trim();
-    return key === 'ctx-8k' ? 'ctx-16k' : key;
-  }
+  return remapLegacyContextTierId(id);
 }
 
 function foldLimitsTierRecord(raw) {
-  const known = (tid) => listKnownTierIds().includes(tid);
-  if (typeof globalThis !== 'undefined' && typeof globalThis.foldLegacyContextTierRecord === 'function') {
-    return globalThis.foldLegacyContextTierRecord(raw, known);
-  }
-  try {
-    return require('./model-runtime-presets').foldLegacyContextTierRecord(raw, known);
-  } catch {
-    const out = {};
-    if (!raw || typeof raw !== 'object') return out;
-    for (const [tierId, values] of Object.entries(raw)) {
-      if (!values || typeof values !== 'object') continue;
-      const mapped = remapLimitsTierId(tierId);
-      if (!known(mapped)) continue;
-      if (!out[mapped] || mapped === tierId) out[mapped] = { ...values };
-    }
-    return out;
-  }
+  return foldLegacyContextTierRecord(raw, (tid) => listKnownTierIds().includes(tid));
 }
 
 function isAgentLimitsByTierShape(raw) {
@@ -786,14 +785,7 @@ function isAgentLimitsByTierShape(raw) {
 }
 
 function extractLimitOverridesFromNormalized(values) {
-  const extract = tierGlobalFn('extractLimitOverrides');
-  if (extract) return extract(values);
-  const out = {};
-  for (const [key, value] of Object.entries(normalizeAgentLimits(values || {}))) {
-    if (AGENT_LIMITS_DEFAULTS[key] === value) continue;
-    out[key] = value;
-  }
-  return out;
+  return limitsByTierModule().extractLimitOverrides(values);
 }
 
 function readBrowserStorage() {
@@ -815,7 +807,7 @@ function syncLimitsToMainProcess() {
   /** @type {any} */
   const w = window;
   if (!w.diecloud || !w.diecloud.syncAgentLimits) return;
-  const getAll = tierGlobalFn('getAllLimitsByTier');
+  const getAll = limitsByTierModule().getAllLimitsByTier;
   const payload = getAll ? getAll() : getAgentLimits();
   w.diecloud.syncAgentLimits(payload).catch(() => {});
 }
@@ -828,7 +820,7 @@ function getAgentLimits(arg, tierIdArg) {
 
   const opts = arg && typeof arg === 'object' && !Array.isArray(arg) ? arg : {};
   const tierId = resolveAgentLimitsTierId(opts);
-  const getForTier = tierGlobalFn('getLimitsForTier');
+  const getForTier = limitsByTierModule().getLimitsForTier;
   if (getForTier) {
     return getForTier(tierId);
   }
@@ -846,7 +838,7 @@ function getAgentLimit(key, userDataPathOrOpts, tierIdArg) {
 function setAgentLimits(partial, opts = {}) {
   const tierId = resolveAgentLimitsTierId(opts);
   let merged;
-  const setForTier = tierGlobalFn('setLimitsForTier');
+  const setForTier = limitsByTierModule().setLimitsForTier;
   if (setForTier) {
     merged = setForTier(tierId, partial || {});
   } else {
@@ -868,7 +860,7 @@ function setAgentLimits(partial, opts = {}) {
 function resetAgentLimits(opts = {}) {
   const tierId = resolveAgentLimitsTierId(opts);
   let merged;
-  const resetForTier = tierGlobalFn('resetLimitsForTier');
+  const resetForTier = limitsByTierModule().resetLimitsForTier;
   if (resetForTier) {
     merged = resetForTier(tierId);
   } else {
@@ -888,8 +880,7 @@ function resetAgentLimits(opts = {}) {
 }
 
 function hydrateAgentLimitsFromDisk(limits) {
-  const hydrateByTier = tierGlobalFn('hydrateLimitsByTier');
-  if (hydrateByTier && hydrateByTier(limits)) {
+  if (limitsByTierModule().hydrateLimitsByTier(limits)) {
     if (typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent('dieyun:agent-limits-change', {
@@ -907,18 +898,18 @@ function hydrateAgentLimitsFromDisk(limits) {
 }
 
 function agentLimitsFilePath(userDataPath) {
-  const path = require('path');
+  const path = nodeRequire('path');
   return path.join(userDataPath, AGENT_LIMITS_BY_TIER_FILE);
 }
 
 function legacyAgentLimitsFilePath(userDataPath) {
-  const path = require('path');
+  const path = nodeRequire('path');
   return path.join(userDataPath, 'agent-limits.json');
 }
 
 function loadLimitsByTierFromDisk(userDataPath) {
   if (!userDataPath) return {};
-  const fs = require('fs');
+  const fs = nodeRequire('fs');
   const byTierFile = agentLimitsFilePath(userDataPath);
   try {
     const raw = JSON.parse(fs.readFileSync(byTierFile, 'utf8'));
@@ -961,8 +952,8 @@ function getAgentLimitsForNodeTier(userDataPath, tierId) {
 
 function saveLimitsByTierToDisk(userDataPath, byTier) {
   if (!userDataPath) return {};
-  const fs = require('fs');
-  const path = require('path');
+  const fs = nodeRequire('fs');
+  const path = nodeRequire('path');
   const file = agentLimitsFilePath(userDataPath);
   const cleaned = /** @type {Record<string, Record<string, unknown>>} */ ({});
   const folded = foldLimitsTierRecord(byTier || {});
@@ -1013,6 +1004,17 @@ function resolveFirstTokenTimeoutMs(userDataPath, tierId) {
   return undefined;
 }
 
+/** 流式包间隔容忍时长；未配置时返回 undefined，由 llm-proxy 的模块兜底值生效。 */
+function resolveStreamIdleTimeoutMs(userDataPath, tierId) {
+  try {
+    const n = Number(getAgentLimit('llmStreamIdleTimeoutMs', userDataPath, tierId));
+    if (Number.isFinite(n) && n >= 10000) return n;
+  } catch {
+    // ignore
+  }
+  return undefined;
+}
+
 /** Resolve loop tunables before run — do not hide defaults inside the loop body. */
 function resolveAgentLoopSpec(settings, userDataPath, tierId) {
   const limits = getAgentLimitsForNodeTier(userDataPath, tierId || 'default');
@@ -1022,6 +1024,7 @@ function resolveAgentLoopSpec(settings, userDataPath, tierId) {
   return {
     maxToolCalls: resolveLoopToolCallLimit(settings, userDataPath, tierId),
     firstTokenTimeoutMs: resolveFirstTokenTimeoutMs(userDataPath, tierId),
+    streamIdleTimeoutMs: resolveStreamIdleTimeoutMs(userDataPath, tierId),
     llmMaxRetries: Number.isFinite(maxRetries) && maxRetries > 0 ? maxRetries : 3,
     llmRetryBaseMs: Number.isFinite(retryBaseMs) && retryBaseMs >= 200 ? retryBaseMs : 800,
     llmMaxRetryDelayMs: 60000,
@@ -1035,7 +1038,7 @@ function resolveAgentLoopSpec(settings, userDataPath, tierId) {
 
 function resolveContextTierIdForNode(userDataPath, modelRouteOrId) {
   try {
-    const { loadModelSettings } = require('../model-settings');
+    const { loadModelSettings } = nodeRequire('../model-settings');
     const { resolveContextTierIdFromSettings } = require('./model-runtime-by-tier');
     const settings = loadModelSettings(userDataPath);
     return resolveContextTierIdFromSettings(settings, modelRouteOrId);
@@ -1071,30 +1074,9 @@ const agentLimitsApi = {
   resolveContextTierIdForNode,
   resolveLoopToolCallLimit,
   resolveFirstTokenTimeoutMs,
+  resolveStreamIdleTimeoutMs,
   resolveAgentLoopSpec,
   isAgentLimitsByTierShape
 };
 
-if (typeof window !== 'undefined') {
-  /** @type {any} */
-  const w = window;
-  w.AGENT_LIMITS_DEFAULTS = AGENT_LIMITS_DEFAULTS;
-  w.AGENT_LIMITS_SCHEMA = AGENT_LIMITS_SCHEMA;
-  w.LONG_HORIZON_GUARDRAIL_SCALE = LONG_HORIZON_GUARDRAIL_SCALE;
-  w.scaleLimitForLongHorizon = scaleLimitForLongHorizon;
-  w.applyLongHorizonGuardrails = applyLongHorizonGuardrails;
-  w.getAgentLimits = getAgentLimits;
-  w.getAgentLimit = getAgentLimit;
-  w.setAgentLimits = setAgentLimits;
-  w.resetAgentLimits = resetAgentLimits;
-  w.hydrateAgentLimitsFromDisk = hydrateAgentLimitsFromDisk;
-  w.formatAgentLimitValue = formatAgentLimitValue;
-  w.normalizeAgentLimits = normalizeAgentLimits;
-  w.resolveAgentLimitsTierId = resolveAgentLimitsTierId;
-  w.resolveLoopToolCallLimit = resolveLoopToolCallLimit;
-  w.resolveAgentLoopSpec = resolveAgentLoopSpec;
-}
-
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = agentLimitsApi;
-}
+module.exports = agentLimitsApi;
