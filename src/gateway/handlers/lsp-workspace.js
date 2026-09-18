@@ -11,6 +11,9 @@ const {
   KIND_BY_KEYWORD
 } = require('../symbol-text');
 
+/** lsp-settings 缺省值（文件数 / 条数 / 超时的唯一来源在 src/lsp/diagnostics-service.js） */
+const { LSP_SETTINGS_DEFAULTS } = require('../../lsp/diagnostics-service');
+
 /** 远程 LSP 首次调用要等 server 启动（rust-analyzer 首次会索引整个 crate） */
 const REMOTE_LSP_TIMEOUT_MS = 60000;
 
@@ -384,7 +387,7 @@ function createLspWorkspaceHandlers(d) {
           try {
             const remoteRoot = currentSshWorkspaceRoot();
             gitDirtyFiles = await getWorkspaceGitChangedAbsPaths(remoteRoot || workspaceRoot, {
-              maxFiles: params.maxFiles || 16,
+              maxFiles: params.maxFiles,
               remote: !!remoteRoot,
               sshExec: remoteRoot
                 ? (command, cwd, timeoutMs) => requireSshForCall().exec(command, cwd, timeoutMs)
@@ -473,16 +476,8 @@ function createLspWorkspaceHandlers(d) {
 
     'lsp.settings_get': async () => {
       if (!lspDiagnostics) {
-        return {
-          ok: true,
-          settings: {
-            enabled: true,
-            timeoutMs: 8000,
-            maxFiles: 6,
-            maxPerFile: 20,
-            minSeverity: 'warning'
-          }
-        };
+        // 复用 lsp-settings 的单一默认值来源，勿在此再抄一份
+        return { ok: true, settings: { ...LSP_SETTINGS_DEFAULTS } };
       }
       return { ok: true, settings: lspDiagnostics.loadLspSettings() };
     },

@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-09-16T13:33:45.269Z
+生成时间：2026-09-17T00:56:09.463Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 179 |
-| Gateway only | 107 |
+| 总计 | 183 |
+| Gateway only | 111 |
 | Rust only | 23 |
 | Both | 49 |
 
@@ -37,7 +37,7 @@
 | `artifact.list_files` | gateway | gateway/handlers/artifact.js | — |
 | `artifact.read_file` | gateway | gateway/handlers/artifact.js | — |
 
-### browser (38)
+### browser (40)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -57,6 +57,7 @@
 | `browser.export_storage` | gateway | gateway/handlers/browser.js | — |
 | `browser.fill` | gateway | gateway/handlers/browser.js | — |
 | `browser.forward` | gateway | gateway/handlers/browser.js | — |
+| `browser.frames` | gateway | gateway/handlers/browser.js | — |
 | `browser.har_export` | gateway | gateway/handlers/browser.js | — |
 | `browser.hover` | gateway | gateway/handlers/browser.js | — |
 | `browser.import_storage` | gateway | gateway/handlers/browser.js | — |
@@ -74,6 +75,7 @@
 | `browser.snapshot` | gateway | gateway/handlers/browser.js | — |
 | `browser.status` | gateway | gateway/handlers/browser.js | — |
 | `browser.tabs` | gateway | gateway/handlers/browser.js | — |
+| `browser.timeline` | gateway | gateway/handlers/browser.js | — |
 | `browser.type` | gateway | gateway/handlers/browser.js | — |
 | `browser.upload_file` | gateway | gateway/handlers/browser.js | — |
 | `browser.viewport` | gateway | gateway/handlers/browser.js | — |
@@ -140,7 +142,7 @@
 | `graph.symbol_search` | both | gateway/handlers/graph.js | yes |
 | `graph.symbol_semantic_search` | both | gateway/handlers/graph.js | yes |
 
-### host (4)
+### host (6)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -148,6 +150,8 @@
 | `host.exec` | gateway | gateway/handlers/host.js | — |
 | `host.open_url` | gateway | gateway/handlers/host.js | — |
 | `host.print_image` | gateway | gateway/handlers/host.js | — |
+| `host.proc_kill` | gateway | gateway/handlers/host.js | — |
+| `host.proc_list` | gateway | gateway/handlers/host.js | — |
 
 ### index (2)
 

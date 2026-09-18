@@ -6,6 +6,8 @@ const path = require('path');
 const {
   runShell,
   runShellDetached,
+  listProcessHandles,
+  killProcessHandle,
   openExternalUrl,
   normalizeFilePathInput,
   printImage
@@ -20,9 +22,9 @@ const { buildSshUri, normalizeRemotePath, parseWorkspaceInput, isSameSshTarget, 
 const { remoteAgentInfoKey, remoteIndexCacheKey } = require('../workspace/workspace-cache-keys');
 const { normalizeReadParams, ABSOLUTE_READ_MAX_BYTES } = require('./fs-read-limits');
 const { runEditFile } = require('./fs-edit-file');
-const { grepWorkspace, globWorkspace } = require('./rg-search');
+const { grepWorkspace, globWorkspace, TYPE_EXT } = require('./rg-search');
 const { getRemoteAgentClient, setRemoteAgentInvalidateListener, isDisconnectError } = require('./remote-agent-client');
-const { shellQuoteSingle } = require('../ssh/remote-path');
+const { shellQuoteSingle, resolveRemotePath, remoteAllowedRoots } = require('../ssh/remote-path');
 const { captureRemoteGitWorkingBaseline } = require('../git/remote-baseline-capture');
 const { captureGitWorkingBaseline, mergeBaselineFilesInto } = require('../git/baseline-capture');
 const { isGitRepo } = require('../git/worktree-service');
@@ -954,23 +956,187 @@ function createRpcHandlers(ctx) {
     return matches;
   }
 
+  /**
+   * glob → 系统 grep 的 --include 片段。
+   * GNU grep 的 --include 只按 basename 匹配，`src/**\/*.js` 这类带目录的 glob 会 0 命中，
+   * 所以额外把「无通配符的目录前缀」提出来当搜索目标。
+   */
+  function grepGlobParts(glob) {
+    const g = String(glob || '')
+      .replace(/\\/g, '/')
+      .trim();
+    if (!g) return { include: '', dirHint: '' };
+    const segs = g.split('/').filter((s) => s && s !== '.');
+    if (!segs.length) return { include: '', dirHint: '' };
+    const dirSegs = segs.slice(0, -1);
+    const dirHint =
+      dirSegs.length && !dirSegs.some((s) => /[*?[\]]/.test(s)) ? dirSegs.join('/') : '';
+    return { include: segs[segs.length - 1], dirHint };
+  }
+
+  /**
+   * 远程 grep。与本地 fs.grep 对齐：优先 ripgrep（-F/-i/-g/-t/-U/-A/-B 语义同源），
+   * 远端没有 rg 时才退系统 grep（-F | -E | BRE + --include）。
+   * 关键：不再用 2>/dev/null 吞错，并用 PIPESTATUS 取回管道首位命令的退出码——
+   * 「无命中（1）」与「命令根本没跑起来（127/2）」必须分开，否则一律报成「0 命中」。
+   */
   async function grepViaRemoteExec(cwd, opts) {
-    const n = Math.min(200, Math.max(1, Number(opts.maxResults) || 50));
-    const before = Math.min(10, Math.max(0, Number(opts.beforeContext) || 0));
-    const after = Math.min(10, Math.max(0, Number(opts.afterContext) || 0));
-    const ctxPart = `${before > 0 ? ` -B ${before}` : ''}${after > 0 ? ` -A ${after}` : ''}`;
-    const pat = shellQuoteSingle(String(opts.pattern || ''));
-    const globPart = opts.glob ? `--include=${shellQuoteSingle(String(opts.glob))}` : '';
-    if (opts.count) {
-      // 远程 exec 只支持计数：系统 grep -c 输出 path:count
-      const ccmd = `grep -RIn -c ${globPart} --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=target ${pat} . 2>/dev/null | head -n 400`;
-      let rc = null;
-      if (isSshConnectedForCall()) {
-        rc = await requireSshForCall().exec(ccmd, cwd, 60000);
+    const o = opts || {};
+    const n = Math.min(200, Math.max(1, Number(o.maxResults) || 50));
+    // 与 rg-search.resolveGrepContext 同规则：context 是双向快捷方式，before/after 显式给出时覆盖它
+    const clampCtx = (v) => {
+      const num = Number(v);
+      return Number.isFinite(num) && num > 0 ? Math.min(10, Math.floor(num)) : 0;
+    };
+    const ctxBoth = clampCtx(o.context);
+    const before = o.beforeContext != null ? clampCtx(o.beforeContext) : ctxBoth;
+    const after = o.afterContext != null ? clampCtx(o.afterContext) : ctxBoth;
+    const pattern = String(o.pattern || '');
+    if (!pattern) return null;
+    if (!isSshConnectedForCall()) return null;
+    const countOnly = o.count === true;
+    const multiline = o.multiline === true;
+    const glob = o.glob ? String(o.glob) : '';
+    const typeFilter = o.type ? String(o.type).trim().toLowerCase() : '';
+    // regex 未显式给出 → 保持 BRE：read_symbol / lsp 的远程降级依赖 BRE（\b、\|）写法；
+    // fs.grep 总会传布尔值，正好与本地 -F / rust regex 语义对齐。
+    const dialect = o.regex === true ? 'ere' : o.regex === false ? 'literal' : 'bre';
+    const timeoutMs = Math.max(5000, Math.min(120000, Number(o.timeoutMs) || 60000));
+    const sshCall = requireSshForCall();
+    const pat = shellQuoteSingle(pattern);
+
+    // path 限定：read_symbol 的兜底定位需要只搜某个文件，避免全库扫。
+    // 远程也复用同一套边界校验，并且仍然下发相对路径（返回的 path 保持相对工作区）。
+    let target = '.';
+    if (o.path) {
+      try {
+        // 与 fs / host.exec 共用同一套远程根（含「完全放开路径限制」开关），
+        // 避免同一开关下有的操作放开、有的仍报 PATH_NOT_ALLOWED
+        const roots = remoteAllowedRoots(cwd, sshCall.getHomeDir ? sshCall.getHomeDir() : '', {
+          unrestricted: perms.unrestrictedPaths === true
+        });
+        const abs = resolveRemotePath(String(o.path), roots, cwd);
+        target = shellQuoteSingle(path.posix.relative(cwd, abs) || '.');
+      } catch (err) {
+        return {
+          ok: false,
+          errorCode: (err && err.code) || 'PATH_OUTSIDE',
+          error: (err && err.message) || 'path 必须在工作空间内'
+        };
       }
-      if (!rc) return null;
+    }
+
+    const runRemote = async (cmd) => {
+      try {
+        const r = await sshCall.exec(cmd, cwd, timeoutMs);
+        return r || { code: -1, stdout: '', stderr: '' };
+      } catch (err) {
+        return { code: -1, stdout: '', stderr: (err && err.message) || String(err) };
+      }
+    };
+    // exec 走 bash -lc：管道退出码会被 head 顶掉，用 PIPESTATUS[0] 拿回 grep/rg 自己的状态
+    const withExit = (cmd) => `${cmd}; exit \${PIPESTATUS[0]}`;
+    // head 上限按「每个命中最多带 1+before+after 行」放大：
+    // 否则 -A/-B 的上下文行会吃掉配额，maxResults 实际只能返回零头。
+    const headN = Math.max(1, n * (1 + before + after));
+
+    // ——— rg（首选，与本地语义一致） ———
+    const rgParts = [
+      'rg',
+      '--no-config',
+      '--no-heading',
+      '--no-column',
+      '--line-number',
+      '--color=never',
+      '--max-filesize',
+      '1M'
+    ];
+    for (const g of ['!node_modules/**', '!.git/**', '!dist/**', '!target/**']) {
+      rgParts.push('--glob', shellQuoteSingle(g));
+    }
+    if (dialect !== 'ere') rgParts.push('-F');
+    if (o.caseInsensitive) rgParts.push('-i');
+    if (glob) rgParts.push('-g', shellQuoteSingle(glob));
+    if (typeFilter) rgParts.push('-t', shellQuoteSingle(typeFilter));
+    if (multiline) rgParts.push('-U', '--multiline-dotall');
+    if (countOnly) rgParts.push('--count-matches');
+    else {
+      if (before > 0) rgParts.push('-B', String(before));
+      if (after > 0) rgParts.push('-A', String(after));
+    }
+    rgParts.push('--', pat, target);
+    const rgCmd = `${rgParts.join(' ')} | head -n ${countOnly ? 400 : headN}`;
+
+    // ——— 系统 grep（远端无 rg 时的兜底） ———
+    const grepParts = ['grep', '-RIn'];
+    if (dialect === 'literal') grepParts.push('-F');
+    else if (dialect === 'ere') grepParts.push('-E');
+    if (o.caseInsensitive) grepParts.push('-i');
+    for (const d of ['.git', 'node_modules', 'dist', 'target']) {
+      grepParts.push(`--exclude-dir=${shellQuoteSingle(d)}`);
+    }
+    let grepTarget = target;
+    if (glob) {
+      const { include, dirHint } = grepGlobParts(glob);
+      if (include) grepParts.push(`--include=${shellQuoteSingle(include)}`);
+      if (!o.path && dirHint) grepTarget = shellQuoteSingle(dirHint);
+    }
+    if (typeFilter && TYPE_EXT[typeFilter]) {
+      for (const ext of TYPE_EXT[typeFilter]) {
+        grepParts.push(`--include=${shellQuoteSingle(`*${ext}`)}`);
+      }
+    }
+    if (countOnly) grepParts.push('-c');
+    else {
+      grepParts.push('-m', String(n));
+      if (before > 0) grepParts.push('-B', String(before));
+      if (after > 0) grepParts.push('-A', String(after));
+    }
+    const grepCmd = `${grepParts.join(' ')} -- ${pat} ${grepTarget} | head -n ${
+      countOnly ? 400 : headN
+    }`;
+
+    let usedRg = false;
+    let r = null;
+    if (dialect !== 'bre') {
+      r = await runRemote(withExit(rgCmd));
+      const rgMissing =
+        r.code === 127 ||
+        /command not found|: not found|No such file or directory/i.test(String(r.stderr || ''));
+      usedRg = !rgMissing;
+    }
+    if (!usedRg) {
+      if (multiline) {
+        return {
+          ok: false,
+          errorCode: 'MULTILINE_UNSUPPORTED_REMOTE',
+          error:
+            '远端没有 ripgrep，跨行（multiline）搜索不可用：请去掉 multiline，改用 grep 定位 + fs_read_file 读上下文'
+        };
+      }
+      r = await runRemote(withExit(grepCmd));
+    }
+
+    const backend = usedRg ? 'remote_rg' : 'remote_grep';
+    const raw = String(r.stdout || '');
+    const stderrText = String(r.stderr || '').trim();
+    // 真失败（命令缺失 / 参数错 / cwd 不存在）不能伪装成「0 命中」，否则排查成本极高。
+    // 退出码 >1 = 命令确实报错；另外认几个「命令没跑起来」的 stderr 特征
+    // （exec 的 `cd <cwd> &&` 失败会让退出码停在 1，只能靠 stderr 认出来）。
+    const cmdErrorRe = /command not found|unrecognized option|invalid option|usage:|No such file or directory|not a directory/i;
+    if (!raw.trim() && (r.code > 1 || cmdErrorRe.test(stderrText))) {
+      return {
+        ok: false,
+        errorCode: 'REMOTE_GREP_FAILED',
+        error: `远程 ${usedRg ? 'rg' : 'grep'} 没有返回结果且命令报错（exit ${r.code}）：${
+          stderrText.slice(0, 300) || '无 stderr'
+        }`
+      };
+    }
+
+    if (countOnly) {
       let total = 0;
-      for (const line of String(rc.stdout || '').split(/\r?\n/)) {
+      for (const line of raw.split(/\r?\n/)) {
         const m = line.trim().match(/:(\d+)$/);
         if (m) total += Number(m[1]) || 0;
       }
@@ -979,23 +1145,13 @@ function createRpcHandlers(ctx) {
         matches: [],
         count: total,
         truncated: false,
-        source: 'remote_grep',
+        source: backend,
         countOnly: true
       };
     }
-    // path 限定：read_symbol 的兜底定位需要只搜某个文件，避免全库扫
-    const target = opts.path ? shellQuoteSingle(String(opts.path)) : '.';
-    // head 上限按「每个命中最多带 1+before+after 行」放大：
-    // 否则 -A/-B 的上下文行会吃掉配额，maxResults 实际只能返回零头。
-    const headN = n * (1 + before + after);
-    const cmd = `grep -RIn${ctxPart} ${globPart} --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=target -m ${n} ${pat} ${target} 2>/dev/null | head -n ${headN}`;
-    let r = null;
-    if (isSshConnectedForCall()) {
-      r = await requireSshForCall().exec(cmd, cwd, 60000);
-    }
-    if (!r) return null;
-    const matches = parseClassicGrepLines(r.stdout, n, { before, after });
-    return { ok: true, matches, truncated: matches.length >= n, source: 'remote_grep' };
+
+    const matches = parseClassicGrepLines(raw, n, { before, after });
+    return { ok: true, matches, truncated: matches.length >= n, source: backend };
   }
 
   async function globViaRemoteExec(cwd, opts) {
@@ -1061,31 +1217,13 @@ function createRpcHandlers(ctx) {
     if (!isSshConnectedForCall()) {
       return null;
     }
-    const sshCall = requireSshForCall();
     const cwd = normalizeRemotePath(ctxInfo.remotePath);
-    const pat = shellQuoteSingle(q);
     const n = Math.min(200, Math.max(1, Number(limit) || 50));
-    try {
-      const r = await sshCall.exec(
-        `grep -RIn --exclude-dir=.git --exclude-dir=node_modules -m ${n} ${pat} . 2>/dev/null | head -n ${n}`,
-        cwd,
-        60000
-      );
-      const lines = String(r.stdout || '')
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .slice(0, n)
-        .map((line) => {
-          const m = line.match(/^([^:]+):(\d+):(.*)$/);
-          if (!m) return { raw: line };
-          return { path: m[1], line: Number(m[2]), text: m[3] };
-        });
-      const results = formatGrepMatchesAsSearchResults(lines, limit);
-      if (results.length) return { results, source: 'ssh_grep' };
-    } catch {
-      // ignore
-    }
-    return null;
+    const g = await grepViaRemoteExec(cwd, { pattern: q, regex: false, maxResults: n });
+    const matches = g && g.ok !== false && Array.isArray(g.matches) ? g.matches : [];
+    if (!matches.length) return null;
+    const results = formatGrepMatchesAsSearchResults(matches, limit);
+    return results.length ? { results, source: g.source || 'ssh_grep' } : null;
   }
 
   function getRemoteFs() {
@@ -1094,13 +1232,24 @@ function createRpcHandlers(ctx) {
     if (target.kind !== 'ssh') return null;
     const sshCall = requireSshForCall();
     const st = sshCall.status();
-    return createRemoteFsAdapter(sshCall, {
-      kind: 'ssh',
-      host: st.host,
-      port: st.port,
-      username: st.username,
-      remotePath: target.remotePath
-    });
+    // 兜底根 <HOME>/.dieyun/workspace：与本地默认 workspace 对称，保证远程也有一个
+    // 「工作空间之外但稳定可写」的落脚点（截图/临时产物）。HOME 由 ssh 层连接时缓存。
+    const homeDir = typeof sshCall.getHomeDir === 'function' ? sshCall.getHomeDir() : '';
+    return createRemoteFsAdapter(
+      sshCall,
+      {
+        kind: 'ssh',
+        host: st.host,
+        port: st.port,
+        username: st.username,
+        remotePath: target.remotePath
+      },
+      {
+        roots: remoteAllowedRoots(target.remotePath, homeDir, {
+          unrestricted: perms.unrestrictedPaths === true
+        })
+      }
+    );
   }
 
   function resolveCodebaseContext(workspaceRoot) {
@@ -1887,6 +2036,8 @@ function createRpcHandlers(ctx) {
     normalizeRemotePath,
     runShellDetached,
     runShell,
+    listProcessHandles,
+    killProcessHandle,
     getActiveCallSessionId,
     probeHostEnvironment,
     openExternalUrl,

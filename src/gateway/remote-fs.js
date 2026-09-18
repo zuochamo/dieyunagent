@@ -26,12 +26,18 @@ function summarizeLineDiff(beforeText, afterText) {
 /**
  * @param {ReturnType<import('../ssh/session-manager').createSshSessionManager>} ssh
  * @param {import('../workspace/target').SshWorkspaceTarget} target
+ * @param {{ roots?: string[] }} [opts] 额外的可用根（如远程兜底 workspace，见 ssh/remote-path.remoteAllowedRoots）
  */
-function createRemoteFsAdapter(ssh, target) {
+function createRemoteFsAdapter(ssh, target, opts = {}) {
   const root = normalizeRemotePath(target.remotePath);
+  const extraRoots = (Array.isArray(opts.roots) ? opts.roots : [])
+    .filter((r) => r != null && String(r).trim() !== '')
+    .map((r) => normalizeRemotePath(r));
+  // 工作空间根恒为首根（相对路径基准 / listArtifactFiles 基准都用它），兜底根只放宽落点
+  const roots = Array.from(new Set([root, ...extraRoots]));
 
   function resolve(input, defaultCwd) {
-    return resolveRemotePath(input, root, defaultCwd || root);
+    return resolveRemotePath(input, roots, defaultCwd || root);
   }
 
   async function readFile(filePath, encoding, readOpts = {}) {

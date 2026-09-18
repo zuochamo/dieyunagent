@@ -17,7 +17,10 @@ function assertAllowedPath(p, allowedRoots) {
   const sep = path.sep;
   for (const root of allowedRoots) {
     const r = norm(path.resolve(root));
-    if (target === r || target.startsWith(r + sep)) {
+    // 根目录（C:\ 或 /）本身已以分隔符结尾，再拼一个 sep 会得到 C:\\ 或 //，
+    // 导致根目录下的文件无法 startsWith 而被误判为越界
+    const prefix = r.endsWith(sep) ? r : r + sep;
+    if (target === r || target.startsWith(prefix)) {
       return resolved;
     }
   }

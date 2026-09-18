@@ -4,6 +4,7 @@ const fs = require('fs/promises');
 const fsSync = require('fs');
 const path = require('path');
 const { DEFLIKE_RE, breEscape, firstIdentifier, inferBlockEnd } = require('../symbol-text');
+const { ABSOLUTE_READ_MAX_BYTES } = require('../fs-read-limits');
 
 /** 远程 read_symbol 走 LSP 时的超时（远程 LSP 可能冷启动，超时即回落结构索引） */
 const REMOTE_READ_SYMBOL_LSP_TIMEOUT_MS = 20000;
@@ -327,7 +328,14 @@ function createFsHandlers(d) {
         }
         const rel = pick.relPath || String(filePath || '');
         try {
-          const r = await remote.readFile(rel, 'utf8', {});
+          const r = await remote.readFile(rel, 'utf8', { maxBytes: ABSOLUTE_READ_MAX_BYTES });
+          if (r && r.truncated === true) {
+            return {
+              ok: false,
+              errorCode: 'SYMBOL_FILE_TOO_LARGE',
+              error: `远程文件 ${rel} 超过 ${ABSOLUTE_READ_MAX_BYTES} 字节，read_symbol 无法整读。请改用 fs_read_file 指定 offset/maxBytes 分块读取。`
+            };
+          }
           text =
             typeof r === 'string'
               ? r
@@ -350,6 +358,14 @@ function createFsHandlers(d) {
           return { ok: false, errorCode: 'SYMBOL_NOT_FOUND', error: '无法解析符号所在文件路径' };
         }
         try {
+          const st = await fs.stat(abs);
+          if (st.size > ABSOLUTE_READ_MAX_BYTES) {
+            return {
+              ok: false,
+              errorCode: 'SYMBOL_FILE_TOO_LARGE',
+              error: `文件 ${abs} 过大（${st.size} 字节），read_symbol 无法整读。请改用 fs_read_file 指定 offset/maxBytes 分块读取。`
+            };
+          }
           text = await fs.readFile(abs, 'utf8');
         } catch (err) {
           return {
@@ -637,11 +653,14 @@ function createFsHandlers(d) {
           });
         } catch {
           try {
-            return await getRemoteAgentClient(agentInfo).call('codebase.grep', {
+            const fb = await getRemoteAgentClient(agentInfo).call('codebase.grep', {
               pattern: pat,
               glob,
               maxResults
             });
+            // codebase.grep 是降级路径（basename 级 --include、无 -i/regex/上下文）：
+            // 空结果继续往下走，否则会把「降级查不到」当成最终「0 命中」
+            if (fb && Array.isArray(fb.matches) && fb.matches.length) return fb;
           } catch {
             /* fall through */
           }
@@ -651,6 +670,12 @@ function createFsHandlers(d) {
         const via = await grepViaRemoteExec(cwdForCall(), {
           pattern: pat,
           glob,
+          path: searchPath,
+          regex: regex === true,
+          caseInsensitive: ci,
+          type: type || undefined,
+          multiline: multiline === true,
+          context,
           beforeContext: ctxBefore,
           afterContext: ctxAfter,
           count: count === true,

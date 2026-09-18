@@ -30,6 +30,14 @@ impl From<rusqlite::Error> for CoreError {
     }
 }
 
+/// 序列化失败不再 panic（此前 rpc dispatch 大量 `to_value(..).unwrap()`），
+/// 统一转为 INTERNAL 错误返回给 host。
+impl From<serde_json::Error> for CoreError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Other(value.into())
+    }
+}
+
 impl From<CoreError> for RpcErrorBody {
     fn from(value: CoreError) -> Self {
         match value {

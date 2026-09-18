@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-16T13:33:45.269Z",
+  "generatedAt": "2026-09-17T00:56:09.463Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 179,
-    "gatewayOnly": 107,
+    "total": 183,
+    "gatewayOnly": 111,
     "rustOnly": 23,
     "both": 49
   },
@@ -262,6 +262,14 @@
       "rust": []
     },
     {
+      "method": "browser.frames",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
       "method": "browser.har_export",
       "layer": "gateway",
       "gateway": [
@@ -391,6 +399,14 @@
     },
     {
       "method": "browser.tabs",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/browser.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "browser.timeline",
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/browser.js"
@@ -780,6 +796,22 @@
     },
     {
       "method": "host.print_image",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/host.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "host.proc_kill",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/host.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "host.proc_list",
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/host.js"

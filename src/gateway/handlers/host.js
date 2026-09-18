@@ -16,6 +16,8 @@ function createHostHandlers(d) {
     readRootsForCall,
     runShellDetached,
     runShell,
+    listProcessHandles,
+    killProcessHandle,
     getActiveCallSessionId,
     isSshConnectedForCall,
     probeHostEnvironment,
@@ -92,15 +94,50 @@ function createHostHandlers(d) {
         // 并行本地任务：cwd 常为该会话工作区，必须用 readRootsForCall（含 runWorkspaceRoot），不能只用全局 roots
         return assertAllowedPath(resolved, readRootsForCall());
       })();
+      const callSessionId = sessionId || getActiveCallSessionId() || undefined;
       if (detached) {
-        return runShellDetached(command, { cwd: workDir });
+        return runShellDetached(command, { cwd: workDir, sessionId: callSessionId });
       }
       return runShell(command, {
         cwd: workDir,
         timeoutMs,
-        sessionId: sessionId || getActiveCallSessionId() || undefined,
+        sessionId: callSessionId,
+        trackProcess: true,
         signal: runAbortSignal || undefined
       });
+    },
+
+    'host.proc_list': async ({ includeFinished, sessionId } = {}) => {
+      assertHostEnabled(ctx);
+      if (!perms.shellExec) {
+        const e = new Error('Shell 执行未授权');
+        e.code = 'SHELL_DISABLED';
+        throw e;
+      }
+      return listProcessHandles({
+        sessionId: sessionId || getActiveCallSessionId() || undefined,
+        includeFinished: includeFinished === true
+      });
+    },
+
+    'host.proc_kill': async ({ id, pid, sessionId } = {}) => {
+      assertHostEnabled(ctx);
+      if (!perms.shellExec) {
+        const e = new Error('Shell 执行未授权');
+        e.code = 'SHELL_DISABLED';
+        throw e;
+      }
+      const result = await killProcessHandle({
+        id,
+        pid,
+        sessionId: sessionId || getActiveCallSessionId() || undefined
+      });
+      if (!result.ok) {
+        const e = new Error(result.error || '结束进程失败');
+        e.code = result.errorCode || 'PROC_KILL_FAILED';
+        throw e;
+      }
+      return result;
     },
 
     'host.environment': async () => {

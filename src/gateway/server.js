@@ -8,7 +8,13 @@ const { createRpcHandlers } = require('./rpc');
 const { createTurnUndoService } = require('../undo/turn-undo-service');
 const { createLspDiagnosticsService } = require('../lsp/diagnostics-service');
 const { loadPermissions, savePermissions, DEFAULTS } = require('./permissions-store');
-const { dieyunDefaultWorkspaceDir, dieyunHome, dieyunSkillsDir } = require('../agent-home');
+const {
+  dieyunDefaultWorkspaceDir,
+  dieyunHome,
+  dieyunSkillsDir,
+  dieyunUserHome,
+  systemTempDir
+} = require('../agent-home');
 const { PluginHost } = require('../plugins/host');
 const { createDatabasePlugin } = require('../plugins/database');
 const { getEmbeddingConfig, loadModelSettings } = require('../model-settings');
@@ -25,6 +31,39 @@ const {
 } = require('../workspace/target');
 
 const DEFAULT_PORT = 17330;
+
+/**
+ * 本机所有卷根（「完全放开路径限制」开关用）：Windows 枚举实际存在的盘符，POSIX 只有 `/`。
+ * 不可访问的卷（未插入的读卡器 / 断开的网络盘）跳过，避免后续 canonicalize 失败。
+ */
+function localVolumeRoots() {
+  if (process.platform !== 'win32') return [path.parse(process.cwd()).root || '/'];
+  const out = [];
+  for (let i = 65; i <= 90; i += 1) {
+    const root = `${String.fromCharCode(i)}:\\`;
+    try {
+      if (fs.existsSync(root)) out.push(root);
+    } catch {
+      // 跳过不可访问的卷
+    }
+  }
+  return out.length ? out : [path.parse(process.cwd()).root];
+}
+
+/** resolve + 去重根列表（读 / 写白名单共用，保持其一处置去重规则）。 */
+function uniqueResolvedRoots(roots) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of roots) {
+    if (!raw) continue;
+    const resolved = path.resolve(raw);
+    const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(resolved);
+  }
+  return out;
+}
 
 /**
  * @typedef {object} GatewayOptions
@@ -367,54 +406,73 @@ class LocalGateway {
   }
 
   _collectReadRoots() {
+    // 「完全放开路径限制」（设置页开关，默认关）：本机所有卷根直接放行，不再拼白名单
+    if (this.permissions && this.permissions.unrestrictedPaths === true) {
+      return uniqueResolvedRoots(localVolumeRoots());
+    }
     const roots = [
       this.readableDir,
       this.userDataPath,
       dieyunHome(),
       dieyunSkillsDir(),
+      // 默认 workspace（~/.dieyun/workspace）恒定在读写白名单里：它是「随时能落脚」的
+      // 兜底目录。绑定其它工作空间后仍要保留——否则工作空间不可写 / 远程未连通 /
+      // 用户没选工作空间时，Agent 连一个能落盘的地方都没有。
+      dieyunDefaultWorkspaceDir(),
+      // 宽松档：用户主目录 + 系统临时目录。本机 Agent 默认已授 shell 执行，
+      // 这两个根让「工作空间之外的日常动作」不必先报 PATH_NOT_ALLOWED。
+      dieyunUserHome(),
+      systemTempDir(),
       ...this.extraReadRoots
     ];
     const effRoot = this._effectiveWorkspaceRoot();
     if (effRoot) roots.push(effRoot);
     else if (!this.activeSessionId && this.workspaceRoot) roots.push(this.workspaceRoot);
-    else if (!this.activeSessionId) roots.push(dieyunDefaultWorkspaceDir());
-    else roots.push(dieyunDefaultWorkspaceDir());
     // 并行本地任务：所有已绑定本地会话工作区都进白名单，避免后台任务 cwd/索引被拒或串到当前视图
     for (const t of this.sessionWorkspaceTargets.values()) {
       if (t && t.kind === 'local' && t.path) roots.push(t.path);
     }
-    const seen = new Set();
-    return roots
-      .filter(Boolean)
-      .map((r) => path.resolve(r))
-      .filter((r) => {
-        const key = process.platform === 'win32' ? r.toLowerCase() : r;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+    // 工作区可能已被删除/重命名；不存在的目录必须剔除，否则 Rust configure 因 canonicalize 失败而整体不生效
+    return uniqueResolvedRoots(roots).filter((r) => this._keepExistingReadRoot(r));
+  }
+
+  _keepExistingReadRoot(root) {
+    let exists = false;
+    try {
+      exists = fs.existsSync(root);
+    } catch {
+      exists = false;
+    }
+    if (exists) return true;
+    if (!this._missingReadRoots) this._missingReadRoots = new Set();
+    const key = process.platform === 'win32' ? String(root).toLowerCase() : String(root);
+    if (!this._missingReadRoots.has(key)) {
+      this._missingReadRoots.add(key);
+      this.log(`工作区目录不存在，已跳过: ${root}（可在界面重新选择工作区）`);
+    }
+    return false;
   }
 
   _collectWritableRoots() {
-    const roots = [this.readableDir, dieyunSkillsDir()];
+    // 「完全放开路径限制」：与读白名单同源，整盘可写
+    if (this.permissions && this.permissions.unrestrictedPaths === true) {
+      return uniqueResolvedRoots(localVolumeRoots());
+    }
+    // 默认 workspace / 用户主目录 / 系统临时目录与读白名单同源：恒定可写（见 _collectReadRoots 注释）
+    const roots = [
+      this.readableDir,
+      dieyunSkillsDir(),
+      dieyunDefaultWorkspaceDir(),
+      dieyunUserHome(),
+      systemTempDir()
+    ];
     const effRoot = this._effectiveWorkspaceRoot();
     if (effRoot) roots.push(effRoot);
     else if (!this.activeSessionId && this.workspaceRoot) roots.push(this.workspaceRoot);
-    else if (!this.activeSessionId) roots.push(dieyunDefaultWorkspaceDir());
-    else roots.push(dieyunDefaultWorkspaceDir());
     for (const t of this.sessionWorkspaceTargets.values()) {
       if (t && t.kind === 'local' && t.path) roots.push(t.path);
     }
-    const seen = new Set();
-    return roots
-      .filter(Boolean)
-      .map((r) => path.resolve(r))
-      .filter((r) => {
-        const key = process.platform === 'win32' ? r.toLowerCase() : r;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+    return uniqueResolvedRoots(roots);
   }
 
   _defaultCwd() {
@@ -709,6 +767,7 @@ class LocalGateway {
       this._persistWorkspaceTarget();
       this._refreshHandlers();
       this._syncWorkspaceDiagnosticsWatch();
+      this._syncWorkspaceIndexWatch();
       return this.getWorkspace();
     }
     const target = parseWorkspaceInput(workspacePath);
@@ -743,6 +802,7 @@ class LocalGateway {
       this.codebaseIncremental?.notifyWorkspaceOpened();
     }
     this._syncWorkspaceDiagnosticsWatch();
+    this._syncWorkspaceIndexWatch();
     return this.getWorkspace();
   }
 
@@ -798,6 +858,7 @@ class LocalGateway {
     this._mirrorGlobalWorkspaceToActiveSession();
     this._refreshHandlers();
     this._syncWorkspaceDiagnosticsWatch();
+    this._syncWorkspaceIndexWatch();
     return this.getWorkspace();
   }
 
@@ -836,6 +897,7 @@ class LocalGateway {
     this._loadWorkspaceFromDisk();
     this._refreshHandlers();
     this._syncWorkspaceDiagnosticsWatch();
+    this._syncWorkspaceIndexWatch();
     this.warmupSql().catch(() => {});
 
     this.wss = new WebSocketServer({ host: '127.0.0.1', port: this.port });
@@ -1035,6 +1097,7 @@ class LocalGateway {
       this.wss = null;
     }
     this.wsClients.clear();
+    if (this.indexWatcher) this.indexWatcher.stop();
     if (this.plugins) this.plugins.disposeAll();
     this.sql = null;
     this.handlers = null;

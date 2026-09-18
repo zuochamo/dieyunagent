@@ -86,8 +86,212 @@ function killActiveShellChildren(opts = {}) {
 }
 
 /**
+ * host_exec 进程句柄表：登记 Agent 启动的后台/子进程，供事后 proc_list / proc_kill 使用。
+ * 安全约束：只登记本模块真正 spawn 出来的进程；kill 只接受已登记的 id/pid，
+ * 模型无法传入任意 PID 去结束系统进程。句柄归属 sessionId，避免并行会话串杀。
+ * @type {Map<string, {
+ *   id: string, pid: number | null, command: string, cwd: string, sessionId: string,
+ *   detached: boolean, startedAt: number, child: import('child_process').ChildProcess | null,
+ *   exited: boolean, exitCode: number | null
+ * }>}
+ */
+const processHandles = new Map();
+let processHandleSeq = 0;
+const PROCESS_HANDLE_MAX = 200;
+
+/** PID 是否存活（EPERM 说明进程存在但无权限查询，按存活处理）。 */
+function isPidAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (e) {
+    return !!(e && e.code === 'EPERM');
+  }
+}
+
+/**
+ * 登记一个进程句柄。
+ * @param {{ command?: string, cwd?: string, sessionId?: string, detached?: boolean, pid?: number|null, child?: import('child_process').ChildProcess|null }} info
+ */
+function registerProcessHandle(info = {}) {
+  const id = `hostproc-${++processHandleSeq}`;
+  const child = info.child || null;
+  const pid =
+    Number.isFinite(Number(info.pid)) && Number(info.pid) > 0
+      ? Number(info.pid)
+      : child && Number(child.pid) > 0
+        ? Number(child.pid)
+        : null;
+  const record = {
+    id,
+    pid,
+    command: String(info.command || '').slice(0, 500),
+    cwd: String(info.cwd || ''),
+    sessionId: String(info.sessionId || ''),
+    detached: !!info.detached,
+    startedAt: Date.now(),
+    child,
+    exited: false,
+    exitCode: null
+  };
+  if (child && typeof child.once === 'function') {
+    child.once('exit', (code) => {
+      record.exited = true;
+      record.exitCode = code == null ? null : code;
+    });
+    child.once('error', () => {
+      record.exited = true;
+    });
+  }
+  processHandles.set(id, record);
+  if (processHandles.size > PROCESS_HANDLE_MAX) {
+    const oldest = processHandles.keys().next().value;
+    if (oldest) processHandles.delete(oldest);
+  }
+  return record;
+}
+
+function forgetProcessHandle(id) {
+  return processHandles.delete(String(id || ''));
+}
+
+function publicProcessRecord(rec) {
+  const alive = !rec.exited && (rec.child ? rec.child.exitCode == null : isPidAlive(rec.pid));
+  return {
+    id: rec.id,
+    pid: rec.pid,
+    command: rec.command,
+    cwd: rec.cwd,
+    sessionId: rec.sessionId || undefined,
+    detached: rec.detached,
+    startedAt: rec.startedAt,
+    alive,
+    exitCode: rec.exited ? rec.exitCode : rec.child ? rec.child.exitCode : null
+  };
+}
+
+/**
+ * 列出已登记进程。默认只返回仍存活的；includeFinished=true 时附带最近结束的。
+ * @param {{ sessionId?: string, includeFinished?: boolean }} opts
+ */
+function listProcessHandles(opts = {}) {
+  const sid =
+    opts.sessionId != null && String(opts.sessionId).trim() ? String(opts.sessionId).trim() : null;
+  const includeFinished = opts.includeFinished === true;
+  const rows = [];
+  for (const rec of processHandles.values()) {
+    if (sid && rec.sessionId && rec.sessionId !== sid) continue;
+    const pub = publicProcessRecord(rec);
+    if (!includeFinished && !pub.alive) continue;
+    rows.push(pub);
+  }
+  rows.sort((a, b) => b.startedAt - a.startedAt);
+  return { ok: true, count: rows.length, processes: rows };
+}
+
+/** 结束进程树（Win32 用 taskkill /T /F；POSIX 先杀进程组再兜底 SIGKILL）。 */
+function killProcessTree(rec) {
+  return new Promise((resolve) => {
+    const pid = rec.pid;
+    if (!Number.isFinite(pid) || pid <= 0) {
+      rec.exited = true;
+      resolve({ killed: false, alive: false, reason: '无有效 PID' });
+      return;
+    }
+    if (!isPidAlive(pid)) {
+      rec.exited = true;
+      resolve({ killed: false, alive: false, reason: '进程已结束' });
+      return;
+    }
+    if (rec.child && !rec.exited) {
+      try {
+        rec.child.kill();
+      } catch {
+        /* ignore */
+      }
+    }
+    const settle = () => {
+      const alive = isPidAlive(pid);
+      if (!alive) rec.exited = true;
+      resolve({ killed: true, alive, reason: alive ? '发送结束信号后仍在运行' : undefined });
+    };
+    if (process.platform === 'win32') {
+      let stderr = '';
+      const tk = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+      tk.stderr.on('data', (c) => {
+        stderr += c.toString();
+      });
+      tk.on('error', () => setTimeout(settle, 200));
+      tk.on('close', () => setTimeout(settle, 200));
+      return;
+    }
+    try {
+      process.kill(rec.detached ? -pid : pid, 'SIGTERM');
+    } catch {
+      /* ignore */
+    }
+    setTimeout(() => {
+      if (isPidAlive(pid)) {
+        try {
+          process.kill(rec.detached ? -pid : pid, 'SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }
+      setTimeout(settle, 150);
+    }, 400);
+  });
+}
+
+/**
+ * 结束已登记的进程。只接受已登记 id/pid，拒绝任意 PID。
+ * @param {{ id?: string, pid?: number, sessionId?: string }} opts
+ */
+async function killProcessHandle(opts = {}) {
+  const id = opts.id != null ? String(opts.id).trim() : '';
+  const pid = Number(opts.pid);
+  const sid =
+    opts.sessionId != null && String(opts.sessionId).trim() ? String(opts.sessionId).trim() : null;
+  const targets = [];
+  if (id) {
+    const rec = processHandles.get(id);
+    if (!rec) {
+      return { ok: false, errorCode: 'PROC_NOT_FOUND', error: `未找到进程句柄 ${id}` };
+    }
+    if (sid && rec.sessionId && rec.sessionId !== sid) {
+      return { ok: false, errorCode: 'PROC_SESSION_MISMATCH', error: '该进程属于其它会话，拒绝结束' };
+    }
+    targets.push(rec);
+  } else if (Number.isFinite(pid) && pid > 0) {
+    for (const rec of processHandles.values()) {
+      if (rec.pid !== pid) continue;
+      if (sid && rec.sessionId && rec.sessionId !== sid) continue;
+      targets.push(rec);
+    }
+    if (!targets.length) {
+      return {
+        ok: false,
+        errorCode: 'PROC_NOT_FOUND',
+        error: '该 PID 不是由 host_exec 启动，拒绝结束（只能结束本会话登记的进程）'
+      };
+    }
+  } else {
+    return { ok: false, errorCode: 'PROC_ID_REQUIRED', error: '需提供 id 或 pid' };
+  }
+  const results = [];
+  for (const rec of targets) {
+    const r = await killProcessTree(rec);
+    results.push({ id: rec.id, pid: rec.pid, ...r });
+    processHandles.delete(rec.id);
+  }
+  return { ok: true, killed: results };
+}
+
+/**
  * @param {string} command
- * @param {{ cwd?: string, timeoutMs?: number, maxBuffer?: number, signal?: AbortSignal }} opts
+ * @param {{ cwd?: string, timeoutMs?: number, maxBuffer?: number, signal?: AbortSignal, sessionId?: string, trackProcess?: boolean }} opts
  */
 function runShell(command, opts = {}) {
   const timeoutMs = Math.min(180000, Math.max(1000, Number(opts.timeoutMs) || 90000));
@@ -114,6 +318,16 @@ function runShell(command, opts = {}) {
       child.__dieyunSessionId = String(opts.sessionId).trim();
     }
     activeShellChildren.add(child);
+    if (opts.trackProcess === true) {
+      registerProcessHandle({
+        command,
+        cwd,
+        sessionId: child.__dieyunSessionId || opts.sessionId,
+        detached: false,
+        pid: child.pid,
+        child
+      });
+    }
 
     let stdout = '';
     let stderr = '';
@@ -245,10 +459,38 @@ function psSingleQuote(s) {
 
 /**
  * 后台启动进程（GUI / 长期运行），不阻塞 host_exec。
+ * 结果里带 handle（已登记进程句柄），可用 host_proc 结束时回收。
  * @param {string} command
- * @param {{ cwd?: string }} opts
+ * @param {{ cwd?: string, sessionId?: string }} opts
  */
-function runShellDetached(command, opts = {}) {
+async function runShellDetached(command, opts = {}) {
+  const result = await spawnDetachedProcess(command, opts);
+  try {
+    const rec = registerProcessHandle({
+      command,
+      cwd: (result && result.cwd) || (opts && opts.cwd),
+      sessionId: opts && opts.sessionId,
+      detached: true,
+      pid: result && result.pid
+    });
+    if (result && typeof result === 'object') {
+      if (rec.pid) result.pid = rec.pid;
+      result.handle = rec.id;
+      if (rec.pid) {
+        result.stdout = `已后台启动 PID ${rec.pid}（句柄 ${rec.id}，可用 host_proc 结束）`;
+      }
+    }
+  } catch {
+    // 登记失败不影响启动结果
+  }
+  return result;
+}
+
+/**
+ * @param {string} command
+ * @param {{ cwd?: string, sessionId?: string }} opts
+ */
+function spawnDetachedProcess(command, opts = {}) {
   const cwd = opts.cwd && String(opts.cwd).trim() ? opts.cwd : os.homedir();
   const cmd = String(command || '').trim();
   if (!cmd) {
@@ -438,6 +680,10 @@ module.exports = {
   runShell,
   runShellDetached,
   killActiveShellChildren,
+  registerProcessHandle,
+  forgetProcessHandle,
+  listProcessHandles,
+  killProcessHandle,
   openExternalUrl,
   normalizeFilePathInput,
   printImage

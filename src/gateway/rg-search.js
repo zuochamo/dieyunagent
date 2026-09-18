@@ -721,6 +721,7 @@ module.exports = {
   walkFiles,
   parseGitignoreLines,
   isGitIgnored,
+  TYPE_EXT,
   DEFAULT_GREP_LIMIT,
   DEFAULT_GLOB_LIMIT,
   MAX_GREP_LIMIT,

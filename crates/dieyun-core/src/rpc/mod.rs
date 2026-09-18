@@ -212,7 +212,7 @@ impl AppState {
                     .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
                 let guard = self.inner.read().await;
                 let r = guard.agent.start(p)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "agent.loop.continue" => {
                 let run_id = params
@@ -231,7 +231,7 @@ impl AppState {
                     .agent
                     .continue_llm(&guard.config, &guard.index, run_id, llm)
                     .await?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "agent.loop.tool_results" => {
                 let run_id = params
@@ -250,7 +250,7 @@ impl AppState {
                     .agent
                     .submit_tool_results(&guard.config, &guard.index, run_id, results)
                     .await?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "agent.loop.cancel" => {
                 let run_id = params
@@ -335,7 +335,7 @@ impl AppState {
                     .unwrap_or(false);
                 let guard = self.inner.read().await;
                 let rows = guard.memory.list_sessions(limit, archived)?;
-                Ok(serde_json::to_value(rows).unwrap())
+                Ok(serde_json::to_value(rows)?)
             }
             "memory.session_get" => {
                 let session_id = params
@@ -345,7 +345,7 @@ impl AppState {
                 let guard = self.inner.read().await;
                 let row = guard.memory.get_session(session_id)?;
                 Ok(row
-                    .map(|r| serde_json::to_value(r).unwrap())
+                    .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
                     .unwrap_or(Value::Null))
             }
             "memory.session_create" => {
@@ -353,7 +353,7 @@ impl AppState {
                 let workspace_path = params.get("workspacePath").and_then(|v| v.as_str());
                 let guard = self.inner.read().await;
                 let row = guard.memory.create_session(title, workspace_path)?;
-                Ok(serde_json::to_value(row).unwrap())
+                Ok(serde_json::to_value(row)?)
             }
             "memory.message_append" => {
                 let session_id = params
@@ -384,7 +384,7 @@ impl AppState {
                     .clamp(1, 500);
                 let guard = self.inner.read().await;
                 let rows = guard.memory.recent_messages(session_id, limit)?;
-                Ok(serde_json::to_value(rows).unwrap())
+                Ok(serde_json::to_value(rows)?)
             }
             "memory.messages_older" => {
                 let session_id = params
@@ -404,7 +404,7 @@ impl AppState {
                 let rows = guard
                     .memory
                     .messages_older_than(session_id, before_id, limit)?;
-                Ok(serde_json::to_value(rows).unwrap())
+                Ok(serde_json::to_value(rows)?)
             }
             "memory.compaction_archive" => {
                 let input: memory::CompactionArchiveInput = serde_json::from_value(params)
@@ -424,7 +424,7 @@ impl AppState {
                     .clamp(1, 50);
                 let guard = self.inner.read().await;
                 let rows = guard.memory.recent_compaction_archives(session_id, limit)?;
-                Ok(serde_json::to_value(rows).unwrap())
+                Ok(serde_json::to_value(rows)?)
             }
             "memory.long_recall" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -520,7 +520,7 @@ impl AppState {
                 let scope = params.get("scope").and_then(|v| v.as_str());
                 let guard = self.inner.read().await;
                 let rows = guard.memory.recent_long_memories(limit, scope)?;
-                Ok(serde_json::to_value(rows).unwrap())
+                Ok(serde_json::to_value(rows)?)
             }
             "memory.long_keyword_search" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
@@ -617,34 +617,34 @@ impl AppState {
             "memory.sessions_with_messages" => {
                 let guard = self.inner.read().await;
                 let rows = guard.memory.list_sessions_with_messages()?;
-                Ok(serde_json::to_value(rows).unwrap())
+                Ok(serde_json::to_value(rows)?)
             }
             "memory.messages_after" => {
                 let after_id = params.get("afterId").and_then(|v| v.as_i64()).unwrap_or(0);
                 let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(500);
                 let guard = self.inner.read().await;
                 let rows = guard.memory.list_messages_after_id(after_id, limit)?;
-                Ok(serde_json::to_value(rows).unwrap())
+                Ok(serde_json::to_value(rows)?)
             }
             "memory.long_memories_after" => {
                 let after_id = params.get("afterId").and_then(|v| v.as_i64()).unwrap_or(0);
                 let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(200);
                 let guard = self.inner.read().await;
                 let rows = guard.memory.list_long_memories_after_id(after_id, limit)?;
-                Ok(serde_json::to_value(rows).unwrap())
+                Ok(serde_json::to_value(rows)?)
             }
             "compaction.estimate" => Ok(compaction::estimate(&params)),
             "compaction.prepare" => {
                 let p: compaction::PrepareParams = serde_json::from_value(params)
                     .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
                 let r = compaction::prepare(p)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "compaction.apply" => {
                 let p: compaction::ApplyParams = serde_json::from_value(params)
                     .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
                 let r = compaction::apply(p);
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "compaction.maybe_compact" => {
                 let p: compaction::MaybeCompactParams = serde_json::from_value(params)
@@ -655,7 +655,7 @@ impl AppState {
                     guard.config.llm.clone()
                 };
                 let r = compaction::maybe_compact(&llm, p).await?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "agent.run_upsert" => {
                 let guard = self.inner.read().await;
@@ -708,7 +708,7 @@ impl AppState {
                 let offset = params.get("offset").and_then(|v| v.as_u64());
                 let max_bytes = params.get("maxBytes").and_then(|v| v.as_u64());
                 let r = fs_ops::read_file(&guard.config, file_path, encoding, offset, max_bytes)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "fs.list_dir" => {
                 let guard = self.inner.read().await;
@@ -717,7 +717,7 @@ impl AppState {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "dirPath 必填"))?;
                 let r = fs_ops::list_dir(&guard.config, dir_path)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "codebase.status" => {
                 let workspace_root = params
@@ -733,7 +733,7 @@ impl AppState {
                 let r = tokio::task::spawn_blocking(move || index.status(&workspace_root))
                     .await
                     .map_err(|e| CoreError::rpc("STATUS_JOIN_FAILED", e.to_string()))??;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "codebase.index.start" => {
                 let workspace_root = params
@@ -752,7 +752,7 @@ impl AppState {
                 let r = guard
                     .index
                     .start_index_workspace(workspace_root, force, skip_if_ready)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "codebase.index" => {
                 let workspace_root = params
@@ -769,7 +769,7 @@ impl AppState {
                     guard.index.clone()
                 };
                 let r = index.index_workspace(&workspace_root, force).await?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "codebase.search" => {
                 let workspace_root = params
@@ -817,7 +817,7 @@ impl AppState {
                     ));
                 }
                 let r = guard.index.search(workspace_root, query, limit).await?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "codebase.index_remote" => {
                 let workspace_root = params
@@ -844,7 +844,7 @@ impl AppState {
                     "begin" => {
                         guard.index.index_remote_begin(&ws, force).await?;
                         let st = guard.index.status(workspace_root)?;
-                        Ok(serde_json::to_value(st).unwrap())
+                        Ok(serde_json::to_value(st)?)
                     }
                     "push" => {
                         let files: Vec<crate::index::RemoteFileInput> = params
@@ -858,7 +858,7 @@ impl AppState {
                     }
                     "finish" => {
                         let r = guard.index.index_remote_finish(&ws).await?;
-                        Ok(serde_json::to_value(r).unwrap())
+                        Ok(serde_json::to_value(r)?)
                     }
                     _ => {
                         let files: Vec<crate::index::RemoteFileInput> = params
@@ -871,7 +871,7 @@ impl AppState {
                             .index
                             .index_remote(workspace_root, files, force)
                             .await?;
-                        Ok(serde_json::to_value(r).unwrap())
+                        Ok(serde_json::to_value(r)?)
                     }
                 }
             }
@@ -888,7 +888,7 @@ impl AppState {
                 let r = tokio::task::spawn_blocking(move || graph.status(&workspace_root))
                     .await
                     .map_err(|e| CoreError::rpc("STATUS_JOIN_FAILED", e.to_string()))??;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.index.start" => {
                 let workspace_root = params
@@ -907,7 +907,7 @@ impl AppState {
                 let r = guard
                     .graph
                     .start_index_workspace(workspace_root, force, skip_if_ready)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.index" => {
                 let workspace_root = params
@@ -957,7 +957,7 @@ impl AppState {
                 match phase {
                     "begin" => {
                         let r = graph.index_remote_begin(workspace_root)?;
-                        return Ok(serde_json::to_value(r).unwrap());
+                        return Ok(serde_json::to_value(r)?);
                     }
                     "push" => {
                         let pushed = graph.index_remote_push(workspace_root, &files)?;
@@ -984,7 +984,7 @@ impl AppState {
                     .map(|n| n as u32);
                 let guard = self.inner.read().await;
                 let r = guard.graph.module_deps(workspace_root, path, depth)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.repo_map" => {
                 let workspace_root = params
@@ -997,7 +997,7 @@ impl AppState {
                     .map(|n| n as u32);
                 let guard = self.inner.read().await;
                 let r = guard.graph.repo_map(workspace_root, limit)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.symbol_search" => {
                 let workspace_root = params
@@ -1017,7 +1017,7 @@ impl AppState {
                 let r = guard
                     .graph
                     .symbol_search(workspace_root, query, kind, limit)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.embed_symbols" => {
                 let workspace_root = params
@@ -1032,7 +1032,7 @@ impl AppState {
                 let graph = guard.graph.clone();
                 drop(guard);
                 let r = graph.embed_symbols(workspace_root, force).await?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.symbol_semantic_search" => {
                 let workspace_root = params
@@ -1092,7 +1092,7 @@ impl AppState {
                 let name = params.get("name").and_then(|v| v.as_str());
                 let guard = self.inner.read().await;
                 let r = guard.graph.callers(workspace_root, symbol_id, path, name)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.callees" => {
                 let workspace_root = params
@@ -1104,7 +1104,7 @@ impl AppState {
                 let name = params.get("name").and_then(|v| v.as_str());
                 let guard = self.inner.read().await;
                 let r = guard.graph.callees(workspace_root, symbol_id, path, name)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.impact" => {
                 let workspace_root = params
@@ -1121,7 +1121,7 @@ impl AppState {
                     .map(|n| n as u32);
                 let guard = self.inner.read().await;
                 let r = guard.graph.impact(workspace_root, path, depth)?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             "graph.ingest_lsp_callers" => {
                 let workspace_root = params
@@ -1146,7 +1146,7 @@ impl AppState {
                     callee_name,
                     sites,
                 )?;
-                Ok(serde_json::to_value(r).unwrap())
+                Ok(serde_json::to_value(r)?)
             }
             _ => Err(CoreError::rpc(
                 "UNKNOWN_METHOD",
