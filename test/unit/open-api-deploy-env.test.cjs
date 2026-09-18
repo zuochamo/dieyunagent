@@ -37,24 +37,4 @@ describe('open-api-deploy-env', () => {
     expect(merged.env.DAIZHANG_API_URL).toBe('http://x/api');
   });
 
-  it('buildOpenApiConfigForUi prefills url and key from deploy', () => {
-    const { buildOpenApiConfigForUi } = require('../../src/mcp/open-api-deploy-env');
-    const ui = buildOpenApiConfigForUi(
-      { env: {} },
-      {
-        deployEnv: {
-          DAIZHANG_API_URL: 'http://192.168.31.62:3011/api/open-api/v1',
-          DAIZHANG_API_KEY: 'sk_demo',
-          TOOLS_API_KEY: 'sk-tools'
-        },
-        processEnv: {}
-      }
-    );
-    expect(ui.configKind).toBe('dieyun-open-api');
-    expect(ui.filledCount).toBe(2);
-    const dz = ui.services.find((s) => s.id === 'daizhang');
-    expect(dz.url).toContain('3011');
-    expect(dz.key).toBe('sk_demo');
-    expect(dz.keySource).toBe('deploy');
-  });
 });

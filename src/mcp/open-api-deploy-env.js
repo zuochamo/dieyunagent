@@ -132,30 +132,6 @@ function buildDieyunServiceConfigForUi(serviceId, secrets, opts = {}) {
   };
 }
 
-/** @deprecated 兼容旧测试；改为 per-service */
-function buildOpenApiConfigForUi(secrets, opts = {}) {
-  const services = SERVICE_KEYS.map((id) => {
-    const one = buildDieyunServiceConfigForUi(id, secrets, opts);
-    return {
-      id,
-      label: one.label,
-      urlEnv: one.urlEnv,
-      keyEnv: one.keyEnv,
-      url: one.url,
-      key: one.key,
-      hasKey: one.hasKey,
-      keySource: one.keySource,
-      enableHint: one.enableHint
-    };
-  });
-  return {
-    configKind: 'dieyun-open-api',
-    services,
-    filledCount: services.filter((s) => s.hasKey).length,
-    totalCount: services.length
-  };
-}
-
 function writeDieyunServiceToDeployLocal(serviceId, { url, key }) {
   const fs = require('fs');
   const path = require('path');
@@ -217,7 +193,6 @@ module.exports = {
   getDieyunOpenApiEnvFromDeploy,
   mergeMcpServerSecrets,
   buildDieyunServiceConfigForUi,
-  buildOpenApiConfigForUi,
   openApiServicesToEnv,
   writeDieyunServiceToDeployLocal,
   writeOpenApiToDeployLocal

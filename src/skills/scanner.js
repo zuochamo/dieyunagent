@@ -3,16 +3,19 @@
 const fs = require('fs/promises');
 const path = require('path');
 const os = require('os');
-const { dieyunSkillsDir, getScanRoots, filterAccessibleSkillRoots } = require('../agent-home');
+const {
+  seededSkillRoots,
+  getScanRoots,
+  filterAccessibleSkillRoots,
+  isSeededSkillDir,
+  evaluateSkillDeletable
+} = require('../agent-home');
 const {
   parseFrontmatter,
   pickDescriptionZh,
   formatBilingualBlurb
 } = require('./skill-frontmatter');
 const { zhDescriptionForSkillKey } = require('./bundled-i18n-zh');
-
-/** 预装技能种子顶层目录；其下技能解析为 builtin: 前缀 */
-const SEEDED_SKILL_CATEGORIES = new Set(['minimax', 'curated', 'dieyun', 'weather']);
 
 function defaultSkillRoots() {
   const home = os.homedir();
@@ -33,30 +36,24 @@ function enrichMetaDescriptions(meta, skillId) {
 }
 
 /**
+ * 技能 id 生成（仅供启用/隐藏持久化与召回定位，不代表「是否内置」）。
+ * 注意：`builtin:` 前缀被 Renderer 的「用户添加」分类与默认启用规则复用，勿改语义。
  * @param {string} dir
- * @param {Set<string>} seen
- * @param {import('fs').Dirent[]} out
+ * @param {object} meta
+ * @param {string[]} bundledRoots
  */
 function resolveBundledSkillId(dir, meta, bundledRoots) {
   if (meta.skillKey) {
     const key = String(meta.skillKey).trim();
     return key.startsWith('builtin:') ? key : `builtin:${key}`;
   }
-  const resolvedDir = path.resolve(dir);
   for (const root of bundledRoots) {
-    const resolvedRoot = path.resolve(root);
-    if (resolvedDir === resolvedRoot || resolvedDir.startsWith(resolvedRoot + path.sep)) {
-      const rel = path.relative(resolvedRoot, resolvedDir).replace(/\\/g, '/');
-      if (rel && !rel.startsWith('..')) {
-        const parts = rel.split('/').filter(Boolean);
-        const top = parts[0];
-        if (SEEDED_SKILL_CATEGORIES.has(top)) {
-          return `builtin:${parts.join(':')}`;
-        }
-      }
+    if (isSeededSkillDir(dir, root)) {
+      const rel = path.relative(path.resolve(root), path.resolve(dir)).replace(/\\/g, '/');
+      return `builtin:${rel.split('/').filter(Boolean).join(':')}`;
     }
   }
-  return resolvedDir;
+  return path.resolve(dir);
 }
 
 async function tryAddSkill(dir, seen, out, bundledRoots) {
@@ -90,7 +87,8 @@ async function tryAddSkill(dir, seen, out, bundledRoots) {
     descriptionZh: pickDescriptionZh(meta),
     preview: blurb,
     category,
-    builtin: String(skillId).startsWith('builtin:') || !!meta.skillKey
+    // 「内置」= 落在预装种子分类目录内（与可删性同源）。skillKey 只用于 id 与召回，不再是内置判据。
+    builtin: bundledRoots.some((root) => isSeededSkillDir(dir, root))
   });
   return true;
 }
@@ -125,7 +123,7 @@ async function walkRoot(root, depth, seen, out, bundledRoots) {
 
 /** 预装技能种子目录（~/.dieyun/skills 下 minimax/curated 等），用于 builtin: 前缀解析 */
 function bundledSkillRoots() {
-  return [dieyunSkillsDir()];
+  return seededSkillRoots();
 }
 
 /**
@@ -154,6 +152,12 @@ async function scanSkills(opts = {}) {
   const out = [];
   for (const root of roots) {
     await walkRoot(root, 0, seen, out, bundled);
+  }
+  // 可删性由扫描根集合统一裁决（Renderer 不再自行推断「是否内置 -> 能否删除」）
+  for (const item of out) {
+    const verdict = evaluateSkillDeletable(item.dir, roots);
+    item.deletable = verdict.deletable;
+    item.undeletableReason = verdict.reason;
   }
   out.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN'));
   return { roots, skills: out };

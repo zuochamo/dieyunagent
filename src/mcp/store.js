@@ -50,7 +50,12 @@ function createMcpStore(opts) {
       return {
         version: 1,
         enabled: raw && typeof raw.enabled === 'object' ? raw.enabled : {},
-        custom: raw && Array.isArray(raw.custom) ? raw.custom : [],
+        // 手工编辑或半截写入可能留下 null/字符串元素；listMcpServersForUi 会直接读
+        // server.id，脏数据会让整个 MCP 列表接口抛异常
+        custom:
+          raw && Array.isArray(raw.custom)
+            ? raw.custom.filter((s) => s && typeof s === 'object' && !Array.isArray(s))
+            : [],
         removed: raw && Array.isArray(raw.removed) ? raw.removed.map(String) : [],
         overrides: raw && raw.overrides && typeof raw.overrides === 'object' ? raw.overrides : {}
       };
