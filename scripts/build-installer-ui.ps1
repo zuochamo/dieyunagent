@@ -1,4 +1,4 @@
-param([string]$Version = '')
+param([string]$Version = '', [string]$SuggestedVersion = '')
 
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -46,7 +46,30 @@ Write-Host ' [4/5] Publish to Y drive'
 Write-Host ' [5/5] Upload to Tencent COS'
 Write-Host ''
 
-if (-not $Version) { $Version = Read-Host 'Version (e.g. 0.0.47)' }
+if ($SuggestedVersion) {
+  $currentDev = ''
+  try {
+    $pkg = Get-Content (Join-Path $Root 'package.json') -Raw | ConvertFrom-Json
+    if ($pkg.version) { $currentDev = "$($pkg.version)".Trim() }
+  } catch { $currentDev = '' }
+  if ($currentDev) { Write-Host " Current dev version (package.json): $currentDev" }
+  Write-Host " Suggested release version (PC + mobile): $SuggestedVersion"
+  Write-Host ''
+}
+
+# The suggestion is only a pre-fill: the operator still confirms before anything is written.
+if (-not $Version) {
+  $hint = 'Version (e.g. 0.0.47)'
+  if ($SuggestedVersion) { $hint = "Version [$SuggestedVersion] (Enter = accept, or type another)" }
+  $entered = Read-Host $hint
+  $typed = ''
+  if ($null -ne $entered) { $typed = $entered.Trim() }
+  if ($typed) {
+    $Version = $typed
+  } elseif ($SuggestedVersion) {
+    $Version = $SuggestedVersion
+  }
+}
 $Version = $Version.Trim()
 if (-not $Version) { Fail 'Version is empty.' }
 

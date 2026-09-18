@@ -3,18 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..');
-
-/** electron-builder 按 semver 写产物名：0.1.00 → dieyunagent-Setup-0.1.0.exe */
-function canonicalizeVersion(raw) {
-  const input = String(raw || '').trim();
-  const m = input.match(/^(\d+)\.(\d+)\.(\d+)((?:[-+][0-9A-Za-z.-]+)?)$/);
-  if (!m) return null;
-  return {
-    input,
-    version: `${Number.parseInt(m[1], 10)}.${Number.parseInt(m[2], 10)}.${Number.parseInt(m[3], 10)}${m[4]}`
-  };
-}
+const { ROOT, canonicalizeVersion, mobileVersionCodeFromVersion } = require('./app-version.cjs');
 
 const parsed = canonicalizeVersion(process.argv[2]);
 if (!parsed) {
@@ -43,14 +32,6 @@ function replaceVersionFields(file, count) {
     process.exit(1);
   }
   fs.writeFileSync(file, text, 'utf8');
-}
-
-function mobileVersionCodeFromVersion(v) {
-  const main = v.split(/[+-]/, 1)[0];
-  const parts = main.split('.').map((p) => Number.parseInt(p, 10));
-  const [major = 0, minor = 0, patch = 0] = parts.map((n) => (Number.isFinite(n) && n >= 0 ? n : 0));
-  const code = major * 1000000 + minor * 1000 + patch;
-  return Math.max(1, Math.min(2100000000, code));
 }
 
 function setMobileProp(text, key, value) {

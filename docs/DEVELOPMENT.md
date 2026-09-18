@@ -81,7 +81,9 @@ npm run test:rust-planner-smoke  # mock LLM + Gateway 端到端
 
 #### 版本号
 
-完整发布时用根目录 `build-installer.bat` 输入版本号。脚本会同步更新桌面端 `package.json` / `package-lock.json` 和手机端 `mobile-app/android/gradle.properties`。
+完整发布时用根目录 `build-installer.bat` 输入版本号。脚本会同步更新桌面端 `package.json` / `package-lock.json` 和手机端 `mobile-app/android/gradle.properties`（协议版号 = PC / 手机统一版号）。
+
+`scripts\build-installer-version.bat` 是带版号辅助的同一条发布链：不带参数时会自动识别开发版版号（`package.json`）+1 patch 作为建议协议版号并预填，**回车确认或改写后才开始构建**；带参数（`build-installer-version.bat 0.1.36`）则原样透传、不再交互。版号解析与推导的单一来源是 `scripts/app-version.cjs`（CLI：`scripts/resolve-next-version.cjs`）。
 
 #### 完整发布
 
