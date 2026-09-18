@@ -1,4 +1,4 @@
-/* global window, $, fetch, escapeHtml, gwState, gatewayCall, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal, openPluginDetail, openPluginSchemaSettings, renderGridCategoryTabs, updateGridPagination, bindGridSearchInput, bindGridPagination, PLUGIN_TAXONOMY, SKILLS_GRID_PAGE_SIZE */
+/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal, openPluginDetail, openPluginSchemaSettings, renderGridCategoryTabs, updateGridPagination, bindGridSearchInput, bindGridPagination, PLUGIN_TAXONOMY, SKILLS_GRID_PAGE_SIZE */
 const toolDefsApi = window.diecloud || {};
 
 const EXPLORE_TOOL_NAMES = new Set([
@@ -17,6 +17,8 @@ const EXPLORE_TOOL_NAMES = new Set([
   'browser_a11y_snapshot',
   'browser_network',
   'browser_console',
+  'browser_frames',
+  'browser_timeline',
   'browser_expect',
   'browser_observe',
   'browser_wait_for',
@@ -33,6 +35,7 @@ function buildExploreTools(allTools) {
 
 const SHELL_TOOL_NAMES = new Set([
   'host_exec',
+  'host_proc',
   'fs_read_file',
   'fs_list_dir',
   'grep',
@@ -346,6 +349,9 @@ const _tc = typeof DieyunToolCatalog !== 'undefined' ? DieyunToolCatalog : {};
 const HOST_TOOLS = _tc.HOST_TOOLS || [];
 const WEB_TOOLS = _tc.WEB_TOOLS || [];
 const BROWSER_TOOLS = _tc.BROWSER_TOOLS || [];
+// 浏览器工具两层：CORE 常驻；ADVANCED（验收/调试/凭据/导出）仅在浏览器任务上下文中注册。
+const BROWSER_CORE_TOOLS = Array.isArray(_tc.BROWSER_CORE_TOOLS) ? _tc.BROWSER_CORE_TOOLS : BROWSER_TOOLS;
+const BROWSER_ADVANCED_TOOLS = Array.isArray(_tc.BROWSER_ADVANCED_TOOLS) ? _tc.BROWSER_ADVANCED_TOOLS : [];
 const CODEBASE_TOOL = _tc.CODEBASE_TOOL;
 const GREP_TOOL = _tc.GREP_TOOL;
 const GLOB_TOOL = _tc.GLOB_TOOL;
@@ -508,6 +514,46 @@ function pushGraphTools(tools) {
   if (GRAPH_TOOL) tools.push(GRAPH_TOOL);
 }
 
+/**
+ * 会话是否已进入浏览器任务：以「本会话确实调用过 browser_* 工具」为准。
+ * 用的是已发生的工具调用（结构信号），不做意图关键词/寒暄词判断。
+ */
+const sessionBrowserToolUsed = new Set();
+
+function noteBrowserToolUse(sessionId) {
+  const sid = String(sessionId || '').trim();
+  if (sid) sessionBrowserToolUsed.add(sid);
+}
+
+if (typeof window !== 'undefined') {
+  window.noteBrowserToolUse = noteBrowserToolUse;
+}
+
+/** 浏览器是否已有活跃页面（BrowserView 有视图，或 Playwright 可用且 URL 非空）。 */
+async function hasActiveBrowserPage() {
+  if (!gwState.authed) return false;
+  try {
+    const st = await Promise.race([
+      gatewayCall('browser.status', {}),
+      new Promise((resolve) => setTimeout(() => resolve(null), 800))
+    ]);
+    if (!st || st.ok === false) return false;
+    const bv = st.browserview || {};
+    const pw = st.playwright || {};
+    const url = String((bv.hasView ? bv.url : '') || (pw.available ? pw.url : '') || '').trim();
+    return !!url && url !== 'about:blank';
+  } catch {
+    return false;
+  }
+}
+
+async function shouldExposeAdvancedBrowserTools(sessionId) {
+  const fallback = typeof currentSessionId !== 'undefined' ? currentSessionId : '';
+  const sid = String(sessionId || fallback || '').trim();
+  if (sid && sessionBrowserToolUsed.has(sid)) return true;
+  return hasActiveBrowserPage();
+}
+
 async function buildAgentTools(userQuery = '', opts = {}) {
   if (opts.signal?.aborted) {
     const err = new Error('已停止');
@@ -524,6 +570,7 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   if (host.exec) {
     tools.push(hostToolByName('host_print_image'));
     tools.push(hostToolByName('host_exec'));
+    tools.push(hostToolByName('host_proc'));
   }
   if (host.fsRead) {
     tools.push(hostToolByName('fs_read_file'));
@@ -541,10 +588,13 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   if (host.fsWrite) tools.push(PLAYBOOK_PROPOSE_TOOL);
   if (host.hostControl) tools.push(SKILL_CREATE_TOOL);
   if (host.webFetch) tools.push(...WEB_TOOLS);
-  if (host.browser && !weakModel) tools.push(...BROWSER_TOOLS);
+  if (host.browser && !weakModel) tools.push(...BROWSER_CORE_TOOLS);
   else if (host.browser && weakModel) {
-    const weakBrowser = new Set(['browser_navigate', 'browser_snapshot', 'browser_a11y_snapshot', 'browser_network', 'browser_console', 'browser_observe', 'browser_status', 'browser_close']);
+    const weakBrowser = new Set(['browser_navigate', 'browser_snapshot', 'browser_a11y_snapshot', 'browser_network', 'browser_console', 'browser_frames', 'browser_timeline', 'browser_observe', 'browser_status', 'browser_close']);
     tools.push(...BROWSER_TOOLS.filter((t) => weakBrowser.has(t.function.name)));
+  }
+  if (host.browser && !weakModel && (await shouldExposeAdvancedBrowserTools(prepSid))) {
+    tools.push(...BROWSER_ADVANCED_TOOLS);
   }
   if (gwState.authed) {
     tools.push(CODEBASE_TOOL);

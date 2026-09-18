@@ -1,4 +1,4 @@
-/* global window, currentSessionId, sessionActiveRuns, trackArtifact, scheduleArtifactsUiFlush, showClarifyInBubble, getUndoTurnIdForSession, resolveSessionWorkspacePathSync, DieyunToolCatalog, DieyunToolClassify, normalizeAgentToolName */
+/* global window, currentSessionId, sessionActiveRuns, trackArtifact, scheduleArtifactsUiFlush, showClarifyInBubble, getUndoTurnIdForSession, resolveSessionWorkspacePathSync, DieyunToolCatalog, DieyunToolClassify, normalizeAgentToolName, noteBrowserToolUse */
 'use strict';
 
 const agentToolsApi = window.diecloud || {};
@@ -70,6 +70,11 @@ async function executeAgentTool(name, args, sessionId) {
   const ctx = getAgentExecutionContext(sessionId) || {};
   const sid = String(ctx.sessionId || sessionId || '').trim();
   const workspaceKey = ctx.workspacePath || ctx.worktreePath || sid;
+  // 记录本会话已进入浏览器任务：用于按需注册 browser_* 专用工具（见 renderer-tool-defs.js）。
+  // 依据是「确实发生过的工具调用」这一结构信号，不涉及意图关键词判断。
+  if (String(norm.name || '').startsWith('browser_') && typeof noteBrowserToolUse === 'function') {
+    noteBrowserToolUse(sid || sessionId);
+  }
   const invoke = async () => executeAgentToolInner(norm.name, norm.args, sid || sessionId);
   if (isMutatingAgentTool(norm.name)) {
     if (typeof maybeNotifySharedWorkspaceWrite === 'function') {
