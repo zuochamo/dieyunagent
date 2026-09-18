@@ -21,6 +21,11 @@ function isGraphSourcePath(filePath) {
   return GRAPH_SOURCE_EXT.has(path.extname(String(filePath || '')).toLowerCase());
 }
 
+/** POSIX 单引号转义：远程 shell 拼接命令时统一走这里（本文件不打包 ssh/remote-path） */
+function shq(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 const DEFAULT_REMOTE_PORT = 17331;
 
 function summarizeLineDiff(beforeText, afterText) {
@@ -329,8 +334,18 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
         throw e;
       }
       const limit = Math.min(200, Math.max(1, Number(maxResults) || 50));
-      const globPart = glob ? `--include=${JSON.stringify(String(glob))}` : '';
-      const cmd = `grep -RIn ${globPart} --exclude-dir=.git --exclude-dir=node_modules -m ${limit} ${JSON.stringify(pat)} . 2>/dev/null | head -n ${limit}`;
+      // glob 只按 basename 下发：GNU grep 的 --include 不匹配目录前缀（src/**/*.js 会 0 命中）
+      const globBase = glob
+        ? String(glob)
+            .replace(/\\/g, '/')
+            .split('/')
+            .filter(Boolean)
+            .pop()
+        : '';
+      const globPart = globBase ? `--include=${shq(globBase)}` : '';
+      // -F 字面匹配 + 单引号引用（此前 JSON.stringify 走双引号，pattern 里的 $ ` \ 会被 shell 展开）；
+      // 不再 2>/dev/null，否则 grep 报错也会被当成「0 命中」
+      const cmd = `grep -RIn -F ${globPart} --exclude-dir=.git --exclude-dir=node_modules -m ${limit} ${shq(pat)} . | head -n ${limit}`;
       const r = await runShell(cmd, { cwd: root, timeoutMs: 60000 });
       const lines = String(r.stdout || '')
         .split(/\r?\n/)
@@ -341,6 +356,20 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
           if (!m) return { raw: line };
           return { path: path.resolve(root, m[1]), line: Number(m[2]), text: m[3] };
         });
+      const stderrText = String(r.stderr || '').trim();
+      // runShell 走 `sh -c "… | head"`，退出码是 head 的（恒为 0），只能靠 stderr 认「命令没跑起来」
+      const cmdErrorRe = /command not found|unrecognized option|invalid option|usage:|No such file or directory|not a directory/i;
+      if (!lines.length && (Number(r.code) > 1 || cmdErrorRe.test(stderrText))) {
+        return {
+          ok: false,
+          errorCode: 'REMOTE_GREP_FAILED',
+          error: `远程 grep 没有返回结果且命令报错（exit ${r.code}）：${
+            stderrText.slice(0, 300) || '无 stderr'
+          }`,
+          matches: [],
+          remote: true
+        };
+      }
       return { ok: true, matches: lines, remote: true };
     },
 

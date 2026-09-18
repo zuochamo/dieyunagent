@@ -372,9 +372,17 @@ function createSshConnectionPool(opts = {}) {
       },
       browse: (...args) => requireActive().browse(...args),
       resolveHomeDir: (...args) => requireActive().resolveHomeDir(...args),
+      primeHomeDir: (...args) => requireActive().primeHomeDir(...args),
+      // 同步读缓存：路径白名单要在非 async 处拼兜底根（见 remote-path.remoteAllowedRoots）
+      getHomeDir: () => {
+        const m = activeManager();
+        return m && typeof m.getHomeDir === 'function' ? m.getHomeDir() : '';
+      },
       sftpReaddir: (...args) => requireActive().sftpReaddir(...args),
       sftpReadFile: (...args) => requireActive().sftpReadFile(...args),
       sftpWriteFile: (...args) => requireActive().sftpWriteFile(...args),
+      sftpRename: (...args) => requireActive().sftpRename(...args),
+      sftpUnlink: (...args) => requireActive().sftpUnlink(...args),
       sftpMkdirp: (...args) => requireActive().sftpMkdirp(...args),
       sftpStat: (...args) => requireActive().sftpStat(...args),
       exec: (...args) => requireActive().exec(...args),

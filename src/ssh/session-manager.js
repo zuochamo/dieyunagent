@@ -67,6 +67,13 @@ function createSshSessionManager(opts = {}) {
   let connecting = null;
   /** @type {{ host: string, port: number, username: string } | null} */
   let identity = null;
+  /**
+   * 远程 HOME 缓存：路径白名单（`<HOME>/.dieyun/workspace` 兜底根）是**同步**判定的
+   * （resolveRemotePath 不 async），所以连接建立后探测一次并缓存，见 primeHomeDir()。
+   */
+  let cachedHomeDir = '';
+  /** @type {Promise<string> | null} */
+  let homePrimePromise = null;
 
   function loadKnownHosts() {
     if (!knownHostsPath) return {};
@@ -211,6 +218,8 @@ function createSshSessionManager(opts = {}) {
       sftp = null;
       pendingConn = null;
       client = null;
+      // 换主机/重连后旧 HOME 不再适用，避免兜底根指向上一个会话
+      cachedHomeDir = '';
 
       if (abort) {
         try {
@@ -356,6 +365,9 @@ function createSshSessionManager(opts = {}) {
               sftp = sftpWrapper;
               pendingConn = null;
               identity = { host: h, port: p, username: u, authType };
+              // 预探测远程 HOME（不阻塞连接返回）：兜底根 <HOME>/.dieyun/workspace
+              // 需要它才能进白名单，探测失败的第一次调用会退化为仅工作空间根。
+              void primeHomeDir();
               finish(resolve, { ok: true, ...status() });
             });
           })
@@ -448,6 +460,39 @@ function createSshSessionManager(opts = {}) {
     return '/';
   }
 
+  /** 身份快照：探测期间可能断线/换主机，回来时用它确认结果仍属于当前连接。 */
+  function identityKey() {
+    return identity ? `${identity.host}:${identity.port}:${identity.username}` : '';
+  }
+
+  /**
+   * 连接建立后一次性探测远程 HOME 并缓存，供**同步**的路径白名单使用
+   * （见 remote-path.remoteAllowedRoots / gateway/remote-fs）。失败静默：拿不到就
+   * 退化为「仅工作空间根」，不影响其它功能。
+   */
+  function primeHomeDir() {
+    if (cachedHomeDir) return Promise.resolve(cachedHomeDir);
+    if (homePrimePromise) return homePrimePromise;
+    const snapshot = identityKey();
+    homePrimePromise = resolveHomeDir()
+      .then((home) => {
+        if (snapshot && snapshot === identityKey() && home && home !== '/') {
+          cachedHomeDir = home;
+        }
+        return cachedHomeDir;
+      })
+      .catch(() => cachedHomeDir)
+      .finally(() => {
+        homePrimePromise = null;
+      });
+    return homePrimePromise;
+  }
+
+  /** 同步读缓存（未探测到返回 ''，调用方退化为仅工作空间根）。 */
+  function getHomeDir() {
+    return cachedHomeDir;
+  }
+
   function sftpReadFile(remotePath, maxBytes, offset = 0) {
     const start = Math.max(0, Number(offset) || 0);
     const limit = Math.max(1, Number(maxBytes) || 512 * 1024);
@@ -479,6 +524,30 @@ function createSshSessionManager(opts = {}) {
           stream.on('error', reject);
           stream.on('close', () => resolve());
           stream.end(buf);
+        })
+    );
+  }
+
+  function sftpRename(remotePath, newRemotePath) {
+    return withSftp(
+      (s) =>
+        new Promise((resolve, reject) => {
+          s.rename(remotePath, newRemotePath, (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        })
+    );
+  }
+
+  function sftpUnlink(remotePath) {
+    return withSftp(
+      (s) =>
+        new Promise((resolve, reject) => {
+          s.unlink(remotePath, (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
         })
     );
   }
@@ -687,9 +756,13 @@ function createSshSessionManager(opts = {}) {
     status,
     browse,
     resolveHomeDir,
+    primeHomeDir,
+    getHomeDir,
     sftpReaddir,
     sftpReadFile,
     sftpWriteFile,
+    sftpRename,
+    sftpUnlink,
     sftpMkdirp,
     sftpStat,
     exec,
