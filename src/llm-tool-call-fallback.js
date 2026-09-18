@@ -1,5 +1,7 @@
 'use strict';
 
+const { TOOL_NAME_ALIASES } = require('./agent/guardrails-shared');
+
 /**
  * 部分 OpenAI 兼容模型（如 mimo）把 tool call 写在 content 的 XML 里，
  * 而不填充 message.tool_calls，导致 agent loop 提前 finish。
@@ -16,23 +18,6 @@ const TOOL_CALL_OPEN_RE = /<tool[\s_]+call>/gi;
 const TOOL_CALL_CLOSE_RE = /<\/tool[\s_]+call>/gi;
 const DSML_TAG_PREFIX = /<\uff5cDSML\uff5c/gi;
 const DSML_TAG_CLOSE_PREFIX = /<\/\uff5cDSML\uff5c/gi;
-
-const TOOL_NAME_ALIASES = {
-  exec: 'host_exec',
-  Exec: 'host_exec',
-  shell: 'host_exec',
-  bash: 'host_exec',
-  terminal: 'host_exec',
-  run_terminal_cmd: 'host_exec',
-  run_command: 'host_exec',
-  write_file: 'fs_write_file',
-  str_replace: 'fs_edit',
-  str_replace_editor: 'fs_edit',
-  search_replace: 'fs_edit',
-  edit: 'fs_edit',
-  rg: 'grep',
-  ripgrep: 'grep'
-};
 
 /** parameter name 等于工具名时视为「工具参数块」 */
 const TOOL_PARAM_NAMES = new Set([
@@ -116,7 +101,7 @@ function trimParameterBody(raw) {
 function normalizeToolName(name) {
   const raw = String(name || '').trim();
   if (!raw) return '';
-  return TOOL_NAME_ALIASES[raw] || raw;
+  return TOOL_NAME_ALIASES[raw.toLowerCase()] || raw;
 }
 
 function isToolParameterName(name) {

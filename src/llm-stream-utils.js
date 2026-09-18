@@ -151,7 +151,9 @@ function buildToolCallAccumulator() {
 /**
  * Main 进程流式 chat completion（单次请求；重试由 rust-loop-runner 的 reconnect 层负责）
  * @param {object} body OpenAI chat body（含 model/messages/tools）
- * @param {{ url?: string, apiKey?: string, signal?: object, onDelta?: Function, firstTokenTimeoutMs?: number }} [opts]
+ * @param {{ url?: string, apiKey?: string, signal?: object, onDelta?: Function, firstTokenTimeoutMs?: number,
+ *   idleTimeoutMs?: number }} [opts]
+ *   `idleTimeoutMs` = 两包之间的容忍时长（只认真实 SSE data 行），由 agent-limits 注入
  */
 async function streamChatCompletionMain(body, opts = {}) {
   const sendBody = { ...body };
@@ -187,6 +189,7 @@ async function streamChatCompletionMain(body, opts = {}) {
       body: JSON.stringify(sendBody),
       signal: opts.signal,
       firstTokenTimeoutMs: opts.firstTokenTimeoutMs,
+      idleTimeoutMs: opts.idleTimeoutMs,
       onChunk: (text) => {
         const r = processSseTextChunk(sseBuffer, text, applyDelta);
         sseBuffer = r.buffer;

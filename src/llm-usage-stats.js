@@ -168,10 +168,36 @@ function messageContentText(content) {
   return '';
 }
 
+let cachedCharsPerToken = 0;
+
+/**
+ * 字符→token 折算系数唯一来源：agent-limits.js。
+ * renderer 打包无 require，读 agent-limits 发布的 window 全局；Node 走 require。
+ */
+function charsPerToken() {
+  if (cachedCharsPerToken > 0) return cachedCharsPerToken;
+  const fromGlobal = typeof CHARS_PER_TOKEN === 'number' ? CHARS_PER_TOKEN : 0;
+  if (fromGlobal > 0) {
+    cachedCharsPerToken = fromGlobal;
+    return cachedCharsPerToken;
+  }
+  try {
+    const d = require('./agent-limits').AGENT_LIMITS_DEFAULTS;
+    if (d && Number.isFinite(d.charsPerToken) && d.charsPerToken > 0) {
+      cachedCharsPerToken = d.charsPerToken;
+      return cachedCharsPerToken;
+    }
+  } catch {
+    // renderer：无 require
+  }
+  cachedCharsPerToken = 3.2;
+  return cachedCharsPerToken;
+}
+
 function estimateTokensFromText(text) {
   const n = String(text || '').length;
   if (n <= 0) return 0;
-  return Math.max(1, Math.ceil(n / 3.2));
+  return Math.max(1, Math.ceil(n / charsPerToken()));
 }
 
 function estimatePromptTokensFromMessages(messages) {

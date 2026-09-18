@@ -13,6 +13,10 @@ const {
 } = require('./embedding-model-presets');
 const { CONTEXT_WINDOW_MAX } = require('./agent/model-runtime-schema');
 const { MODEL_RUNTIME_DEFAULTS: PRESET_DEFAULTS } = require('./agent/model-runtime-presets');
+const {
+  resolveApiConfigForRoute,
+  resolveDefaultApiConfig
+} = require('./agent/model-api-config');
 
 const MAX_OUTPUT_TOKENS_DEFAULT = PRESET_DEFAULTS.maxOutputTokens;
 const CONTEXT_WINDOW_DEFAULT = PRESET_DEFAULTS.contextWindow;
@@ -83,6 +87,30 @@ function resolveSpeechApiConfig(settings) {
   return { baseUrl, apiKey, model, language };
 }
 
+/**
+ * Main 侧取文本模型配置的唯一入口（定时计划、无 Renderer 会话的一切调用方）。
+ *
+ * - 有 route（`custom:<id>` / `builtin:<sid>:<model>` / `auto-*`）：按路由解析；
+ *   strict=true 时路由失效（模型/供应商已被删）直接返回不可用配置，调用方据此明确报错，
+ *   避免静默换 key 跑到别的模型上。
+ * - 无 route：走「可用供应商 → 文本自定义模型 → 顶层 legacy → builtin」兜底。
+ *
+ * @param {object} settings loadModelSettings() 结果
+ * @param {{ route?: string, model?: string, strict?: boolean }} [opts]
+ */
+function resolveTextApiConfig(settings, opts = {}) {
+  const s = settings && typeof settings === 'object' ? settings : {};
+  const route = String(opts.route || '').trim();
+  const cfg = route
+    ? resolveApiConfigForRoute(s, route, { strict: opts.strict === true })
+    : resolveDefaultApiConfig(s);
+  return {
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    model: String(opts.model || cfg.model || s.textModel || '').trim()
+  };
+}
+
 function clampMaxTokens(n) {
   const v = Number(n);
   if (!Number.isFinite(v) || v < 1) return MAX_OUTPUT_TOKENS_DEFAULT;
@@ -141,7 +169,9 @@ function normalizeEmbeddingEntry(m, index) {
 
 function normalize(raw) {
   const s = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
-  s.system = '';
+  // 不再强制清空 system：清空会让保存进 model-settings.json 的自定义 system「落盘即丢」，
+  // 且与 Renderer 的默认值形成同名字段两份定义。身份/人设的唯一来源是
+  // ~/.dieyun/dieyun.md（模板 assets/dieyun.md）与 dieyun-instructions.js 的 ASSISTANT_IDENTITY。
   if (raw && raw.model && !raw.textModel) s.textModel = raw.model;
   if (raw && raw.maxTokens && !raw.maxOutputTokens) s.maxOutputTokens = raw.maxTokens;
   if (!s.builtinBaseUrl || isRemovedBuiltinBaseUrl(s.builtinBaseUrl)) {
@@ -284,6 +314,7 @@ module.exports = {
   getEmbeddingConfig,
   embeddingSignature,
   resolveSpeechApiConfig,
+  resolveTextApiConfig,
   DEFAULTS,
   MAX_TOKENS_DEFAULT,
   MAX_TOKENS_LIMIT,
