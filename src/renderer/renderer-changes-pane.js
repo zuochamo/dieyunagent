@@ -39,7 +39,7 @@ if (typeof window !== 'undefined') {
 function kindLabel(kind) {
   if (typeof window.kindLabelWorktree === 'function') return window.kindLabelWorktree(kind);
   if (kind === 'deleted') return '删除';
-  if (kind === 'untracked') return '新增';
+  if (kind === 'added' || kind === 'untracked') return '新增';
   return '修改';
 }
 
@@ -618,13 +618,31 @@ function bindWorktreeReviewActions(review) {
       const selectedChanges = review.preview.changes.filter((ch) =>
         review.accepted.get(ch.changeId || ch.repoPath)
       );
+      const keyOf = (ch) => ch.changeId || `${ch.roleId}::${ch.repoPath}`;
       const paths = [...new Set(selectedChanges.map((ch) => ch.repoPath))];
-      const changeIds = selectedChanges.map((ch) => ch.changeId || `${ch.roleId}::${ch.repoPath}`);
-      const forceConflict = selectedChanges.some((ch) => ch.conflict);
+      const changeIds = selectedChanges.map(keyOf);
+      // 冲突强制按变更粒度。原来用「存在冲突 → forceConflict=true」，
+      // 勾中一个冲突文件会连带解除其余全部文件的覆盖保护。
+      const forceChangeIds = selectedChanges.filter((ch) => ch.conflict).map(keyOf);
+      // 主工作区已有未提交改动的文件默认不覆盖，必须逐次显式确认。
+      const dirtyChanges = selectedChanges.filter((ch) => ch.mainDirty);
+      let allowOverwriteMainDirty = false;
+      if (dirtyChanges.length) {
+        allowOverwriteMainDirty = window.confirm(
+          `以下 ${dirtyChanges.length} 个文件在主工作区已有未提交修改，应用会覆盖它们：\n\n` +
+            dirtyChanges.map((ch) => `· ${ch.repoPath}`).join('\n') +
+            '\n\n覆盖前会自动备份到 .dieyun/backup/，可回滚。确定继续？'
+        );
+        if (!allowOverwriteMainDirty) return;
+      }
       if (typeof window.applyWorktreeReview === 'function') {
         applyBtn.disabled = true;
         try {
-          await window.applyWorktreeReview(paths, { forceConflict, changeIds });
+          await window.applyWorktreeReview(paths, {
+            forceChangeIds,
+            allowOverwriteMainDirty,
+            changeIds
+          });
         } finally {
           applyBtn.disabled = false;
         }

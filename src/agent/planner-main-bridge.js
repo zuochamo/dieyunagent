@@ -135,14 +135,16 @@ function createPlannerMainBridge(deps) {
         return { ok: false, error: e.message || String(e) };
       }
     },
-    async worktreeApplyRun(runId, paths, forceConflict, changeIds) {
+    async worktreeApplyRun(runId, paths, forceConflict, changeIds, applyOpts) {
       const root = workspaceRootPath();
       if (!root) return { ok: false, error: '未设置工作空间' };
       try {
         return await worktreeService.applyRunWorktreeChanges(root, runId, {
           paths: paths || null,
           changeIds: changeIds || null,
-          forceConflict: !!forceConflict
+          forceConflict: !!forceConflict,
+          forceChangeIds: (applyOpts && applyOpts.forceChangeIds) || [],
+          allowOverwriteMainDirty: !!(applyOpts && applyOpts.allowOverwriteMainDirty)
         });
       } catch (e) {
         return { ok: false, error: e.message || String(e) };

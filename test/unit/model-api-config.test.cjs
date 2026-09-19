@@ -6,6 +6,8 @@ const {
   resolveDefaultApiConfig,
   resolveSupplierApiConfig,
   pickSupplierModelId,
+  isSupplierModelEnabled,
+  supplierModelIds,
   isUsableApiConfig,
   asConfig
 } = require('../../src/agent/model-api-config');
@@ -257,7 +259,36 @@ describe('pickSupplierModelId / 供应商默认模型名', () => {
   });
 
   it('enabledModels 全禁用：不猜，返回空', () => {
-    expect(pickSupplierModelId({ ...SUPPLIER, enabledModels: { 'm-a': false } })).toBe('');
+    // 三条来源上声明过的模型全部被显式禁用 ⇒ 没有可用候选，不猜。
+    expect(
+      pickSupplierModelId({
+        id: 's1',
+        enabledModels: { 'm-a': false, 'm-c': false },
+        modelModalities: { 'm-c': 'text' }
+      })
+    ).toBe('');
+    // 该供应商根本没有已启用模型（三个来源都空）
+    expect(pickSupplierModelId({ ...SUPPLIER, enabledModels: {}, modelModalities: {} })).toBe('');
+  });
+
+  it('候选集三源合并：enabledModels 只声明了一个 false 时，其余来源键不得被误判为禁用', () => {
+    // enabledModels 非空只说明「用户动过开关」，不等于「这是模型全集」：
+    // m-c 只出现在 modelModalities 上，仍必须入选（与 Renderer 勾选态一致）。
+    expect(
+      pickSupplierModelId({
+        id: 's1',
+        enabledModels: { 'm-a': false },
+        modelModalities: { 'm-c': 'text' }
+      })
+    ).toBe('m-c');
+    // 反过来：m-c 被显式禁用时就不该再选中它
+    expect(
+      pickSupplierModelId({
+        id: 's1',
+        enabledModels: { 'm-a': false, 'm-c': false },
+        modelModalities: { 'm-c': 'text' }
+      })
+    ).toBe('');
   });
 
   it('无 enabledModels 时退回 modelModalities / contextTierByModel 的键；全无信息返回空', () => {
@@ -265,6 +296,28 @@ describe('pickSupplierModelId / 供应商默认模型名', () => {
     expect(pickSupplierModelId({ id: 's1', contextTierByModel: { 'm-y': 'long' } })).toBe('m-y');
     expect(pickSupplierModelId({ id: 's1' })).toBe('');
     expect(pickSupplierModelId(null)).toBe('');
+    expect(pickSupplierModelId({ id: 's1', enabledModels: {} })).toBe('');
+  });
+
+  it('isSupplierModelEnabled 判据：空表全可用 / 显式 false 才禁用', () => {
+    expect(isSupplierModelEnabled(SUPPLIER, 'm-a')).toBe(true);
+    expect(isSupplierModelEnabled(SUPPLIER, 'm-b')).toBe(false);
+    // 表为空 ⇒ 用户没筛过，任何 id 都可用
+    expect(isSupplierModelEnabled({ id: 's1', enabledModels: {} }, 'm-z')).toBe(true);
+    expect(isSupplierModelEnabled({ id: 's1' }, 'm-z')).toBe(true);
+    expect(isSupplierModelEnabled(null, 'm-z')).toBe(false);
+    expect(isSupplierModelEnabled(SUPPLIER, '')).toBe(false);
+  });
+
+  it('supplierModelIds 合并三源并保序去重', () => {
+    expect(
+      supplierModelIds({
+        enabledModels: { 'm-a': true, 'm-b': false },
+        modelModalities: { 'm-b': 'text', 'm-c': 'vision' },
+        contextTierByModel: { 'm-d': 'long' }
+      })
+    ).toEqual(['m-a', 'm-b', 'm-c', 'm-d']);
+    expect(supplierModelIds(null)).toEqual([]);
   });
 
   it('无 route 的兜底解析必须带出模型名（否则定时计划会以空模型名请求模型服务）', () => {

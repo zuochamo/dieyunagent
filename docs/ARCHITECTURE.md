@@ -606,12 +606,11 @@ flowchart TB
   RustIdx --> SQLiteIdx[(索引 SQLite)]
   RustGraph --> SQLiteGraph[(图 SQLite)]
   LSP[Gateway LSP enrich] -->|standing job| SQLiteGraph
-  NodeHelper[codebase/index-service.js] -->|远程采集常量| Remote
 ```
 
 ### 15.1 Codebase 文本索引
 
-- `codebase.*` 仅 Rust 实现；Node 侧 `index-service.js` 保留远程采集辅助。
+- `codebase.*` 仅 Rust 实现（含远程仓库的采集与索引）。
 - 切块优先 **Tree-sitter**（JS/TS/Python/Go/Rust 按函数/类边界）；失败回退行窗（`CHUNK_LINES` / overlap）。
 - 单仓库文件上限 **16000**；`codebase.search` 结果上限 **48**。
 - 向量检索：≤2500 条精确余弦；更大库走 **FTS 候选重打分 + 分层模量采样**（`embedding/ann.rs`），不依赖 sqlite-vec / 原生 HNSW 扩展。

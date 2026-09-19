@@ -93,8 +93,23 @@
     {
       "id": "memory",
       "paths": ["crates/dieyun-core/src/memory/"],
-      "owns": ["SQLite messages", "agent traces", "sessions"],
+      "owns": [
+        "SQLite messages",
+        "agent traces",
+        "sessions",
+        "周期修剪（agent_runs 为根 + CASCADE + 空闲页回收）"
+      ],
       "tests": ["test:local-gateway-smoke", "cargo:test"],
+      "docs": ["docs/MEMORY.md"]
+    },
+    {
+      "id": "core-sqlite",
+      "paths": ["crates/dieyun-core/src/sqlite.rs"],
+      "owns": [
+        "SQLite 调优单一来源（WAL / synchronous=NORMAL / wal_autocheckpoint / cache_size / auto_vacuum=INCREMENTAL）",
+        "连接生命周期单一来源（SqliteHandle：每库一条常驻连接 + 惰性建表 + open_dedicated）"
+      ],
+      "tests": ["cargo:test"],
       "docs": ["docs/MEMORY.md"]
     },
     {
@@ -129,10 +144,16 @@
       "id": "codebase-index",
       "paths": [
         "crates/dieyun-core/src/index/",
+        "crates/dieyun-core/src/codebase_db.rs",
         "crates/dieyun-core/src/treesitter/",
         "crates/dieyun-core/src/embedding/"
       ],
-      "owns": ["Codebase index", "Tree-sitter chunking", "FTS+ANN vector search"],
+      "owns": [
+        "Codebase index",
+        "Tree-sitter chunking",
+        "FTS+ANN vector search",
+        "codebase.db 唯一入口（索引 + 图谱共享同一条常驻连接与一份建表）"
+      ],
       "tests": ["cargo:test"],
       "docs": ["docs/ARCHITECTURE.md#15-代码库索引"]
     },
@@ -222,6 +243,12 @@
     { "prefix": "src/main/auto-launch.js", "tests": ["test:main-shell"] },
     { "prefix": "src/main/app-updater.js", "tests": ["test:app-updater-feeds"] },
     { "prefix": "src/main/tray-notify.js", "tests": ["test:phase5-handlers"] },
+    { "prefix": "src/git/worktree-service.js", "tests": ["test:worktree"] },
+    { "prefix": "src/main/ipc/worktree.js", "tests": ["test:worktree", "verify:rpc-catalog"] },
+    { "prefix": "src/renderer/agent/worktree-ui.js", "tests": ["test:worktree", "check:renderer"] },
+    { "prefix": "src/renderer/renderer-changes-pane.js", "tests": ["test:worktree", "check:renderer"] },
+    { "prefix": "src/renderer/renderer-worktrees-settings.js", "tests": ["test:worktree", "check:renderer"] },
+    { "prefix": "scripts/test-worktree-baseline.cjs", "tests": ["test:worktree"] },
     { "prefix": "scripts/", "tests": ["test:agent-limits"] }
   ],
   "suites": {
@@ -257,6 +284,7 @@
       "test:delegate-batch",
       "test:mobile",
       "test:write-smell-hints",
+      "test:worktree",
       "lint:agent",
       "check:js",
       "check:renderer"
@@ -292,6 +320,7 @@
       "test:delegate-batch",
       "test:mobile",
       "test:write-smell-hints",
+      "test:worktree",
       "lint:agent",
       "test:rust-planner-smoke",
       "test:rust-agent-loop-smoke",

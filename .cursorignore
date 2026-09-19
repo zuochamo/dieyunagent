@@ -14,7 +14,6 @@ skills/bundled/**/mcp_output/
 skills/bundled/**/*.log
 mobile-app/android/app/build/
 mobile-app/android/.gradle/
-mobile-app/android/app/build/
 *.sqlite
 *.db-shm
 *.db-wal

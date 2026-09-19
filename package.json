@@ -1,6 +1,6 @@
 {
   "name": "dieyunagent",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "description": "叠云 agent",
   "main": "src/main.js",
   "scripts": {
@@ -43,6 +43,7 @@
     "test:tool-harness": "node scripts/test-tool-harness.cjs",
     "test:lsp": "node scripts/test-lsp.cjs",
     "test:write-smell-hints": "node scripts/test-write-smell-hints.cjs",
+    "test:worktree": "node scripts/test-worktree-baseline.cjs",
     "test:browser-smoke": "node scripts/test-browser-smoke.cjs",
     "test:session-context": "node scripts/test-session-context.cjs",
     "test:agent-system-prompt": "node scripts/test-agent-system-prompt.cjs",

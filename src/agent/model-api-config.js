@@ -58,6 +58,50 @@ function findCustomModelById(settings, id) {
 }
 
 /**
+ * 供应商某个模型是否「已启用」——全局单一来源。
+ *
+ * 语义刻意与 Renderer 的 `isSupplierModelEnabled`（renderer-model-runtime.js /
+ * renderer-model-capabilities.js）逐条对齐，三处必须同判据：
+ *   1. 无 modelId → 未启用；
+ *   2. enabledModels 为空对象 / 缺失 → 视为「未做过启用筛选」，全部可用；
+ *   3. 显式 `=== false` → 未启用；
+ *   4. 其余（含 `=== true`）→ 已启用。
+ * 注意第 4 条：**不能**写成 `=== true`，否则 enabledModels 里只写了 `false` 的
+ * 供应商会把 modelModalities 上声明过的模型全部判死，与 Renderer 的勾选状态相反。
+ */
+function isSupplierModelEnabled(supplier, modelId) {
+  const id = String(modelId == null ? '' : modelId);
+  if (!supplier || typeof supplier !== 'object' || !id) return false;
+  const map =
+    supplier.enabledModels && typeof supplier.enabledModels === 'object' ? supplier.enabledModels : {};
+  if (!Object.keys(map).length) return true;
+  if (map[id] === false) return false;
+  return true;
+}
+
+function isPlainMap(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * 供应商上「声明过」的全部模型 id（保序去重）。
+ *
+ * 为什么要合并三个来源：`enabledModels` 只记录用户动过开关的模型，用户没筛过时它是空的，
+ * 此时唯一能反映「这个供应商有哪些模型」的就是 `modelModalities` /
+ * `contextTierByModel`（设置页探测到的模型会写进这两张表）。
+ */
+function supplierModelIds(supplier) {
+  const row = supplier && typeof supplier === 'object' ? supplier : null;
+  if (!row) return [];
+  const ids = [];
+  for (const map of [row.enabledModels, row.modelModalities, row.contextTierByModel]) {
+    if (!isPlainMap(map)) continue;
+    for (const id of Object.keys(map)) if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
  * 供应商 → 默认模型名（供应商行自身记录的已启用模型）。
  *
  * 为什么必须有：`builtin:<supplierId>:<modelId>` 路由把模型名放在路由里，而「无 route」
@@ -65,23 +109,16 @@ function findCustomModelById(settings, id) {
  * 此时若顶层 textModel 也为空（只用供应商配模型的用户就是这种情况），调用方最终会把
  * 空模型名交给模型服务，报「model 必填」。
  *
- * 取舍：以 enabledModels 中第一个 `!== false` 的模型为准（与 Renderer
- * isSupplierModelEnabled 同一判据），优先非 speech；无法判定时返回 ''（由调用方报错）。
+ * 候选集 = enabledModels ∪ modelModalities ∪ contextTierByModel 的键，
+ * 逐个过 `isSupplierModelEnabled` 这条唯一判据；优先非 speech，全不可用时返回 ''
+ * （由调用方报错，不猜）。
  */
 function pickSupplierModelId(supplier) {
   const row = supplier && typeof supplier === 'object' ? supplier : null;
   if (!row) return '';
-  const enabled = row.enabledModels && typeof row.enabledModels === 'object' ? row.enabledModels : null;
-  const declared = [];
-  for (const map of [enabled, row.modelModalities, row.contextTierByModel]) {
-    if (!map || typeof map !== 'object') continue;
-    for (const id of Object.keys(map)) if (id && !declared.includes(id)) declared.push(id);
-  }
-  const ids = enabled
-    ? declared.filter((id) => enabled[id] !== false)
-    : declared;
+  const ids = supplierModelIds(row).filter((id) => isSupplierModelEnabled(row, id));
   if (!ids.length) return '';
-  const modalities = row.modelModalities && typeof row.modelModalities === 'object' ? row.modelModalities : {};
+  const modalities = isPlainMap(row.modelModalities) ? row.modelModalities : {};
   const speakable = (id) => String(modalities[id] || 'text') === 'speech';
   return ids.find((id) => !speakable(id)) || ids[0];
 }
@@ -210,6 +247,8 @@ module.exports = {
   resolveDefaultApiConfig,
   resolveSupplierApiConfig,
   pickSupplierModelId,
+  isSupplierModelEnabled,
+  supplierModelIds,
   isUsableApiConfig,
   asConfig,
   listSuppliers,

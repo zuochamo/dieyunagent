@@ -6,13 +6,14 @@ mod query;
 mod schema;
 pub(crate) mod types;
 
+pub use schema::ensure_schema;
 pub use types::{IngestLspResult, LspCallSiteIn};
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 
 use crate::config::AppConfig;
 use crate::embedding::{self, EmbeddingConfig};
@@ -28,7 +29,8 @@ use crate::graph::types::{
     RepoMapResult, SymbolSearchResult,
 };
 use crate::index::vector_pool::{PoolCache, VectorPool};
-use crate::index::{resolve_workspace, RemoteFileInput, SCHEMA_VERSION};
+use crate::index::{resolve_workspace, RemoteFileInput, WorkspaceRef};
+use crate::sqlite::SqliteHandle;
 
 #[derive(Debug, Clone, Default)]
 struct GraphProgressSnapshot {
@@ -43,7 +45,8 @@ struct GraphProgressSnapshot {
 
 #[derive(Clone)]
 pub struct GraphService {
-    db_path: PathBuf,
+    /// codebase.db 句柄：与 `IndexService` 共享同一条常驻连接（同库，故同连接）。
+    db: Arc<SqliteHandle>,
     embedding: EmbeddingConfig,
     models_dirs: Vec<PathBuf>,
     building: Arc<Mutex<HashSet<String>>>,
@@ -55,9 +58,9 @@ pub struct GraphService {
 }
 
 impl GraphService {
-    pub fn new(db_path: PathBuf, embedding: EmbeddingConfig, models_dirs: Vec<PathBuf>) -> Self {
+    pub fn new(db: Arc<SqliteHandle>, embedding: EmbeddingConfig, models_dirs: Vec<PathBuf>) -> Self {
         Self {
-            db_path,
+            db,
             embedding,
             models_dirs,
             building: Arc::new(Mutex::new(HashSet::new())),
@@ -90,12 +93,24 @@ impl GraphService {
         }
     }
 
-    pub fn from_config(config: &AppConfig) -> Self {
-        Self::new(
-            config.codebase_db_path(),
-            config.embedding.clone(),
-            config.models_dirs.clone(),
-        )
+    pub fn from_config(config: &AppConfig, db: Arc<SqliteHandle>) -> Self {
+        Self::new(db, config.embedding.clone(), config.models_dirs.clone())
+    }
+
+    /// 复用常驻连接执行一次读/写（见 `SqliteHandle::with_conn`）。
+    ///
+    /// 非重入锁：调用方**不得**在闭包内再调 `with_conn` / `status`，否则死锁。
+    /// 需要串联多步时用 `*_with_conn` 形态的私有方法。
+    fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        self.db.with_conn(f)
+    }
+
+    /// 独立连接：用于跨 `.await` 或分钟级长任务，避免长时间占用常驻锁。
+    fn open_dedicated(&self) -> Result<Connection, CoreError> {
+        self.db.open_dedicated()
     }
 
     pub fn embedding_enabled(&self) -> bool {
@@ -106,51 +121,6 @@ impl GraphService {
         self.embedding.signature(&self.models_dirs)
     }
 
-    fn open(&self) -> Result<Connection, CoreError> {
-        if let Some(parent) = self.db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        }
-        let conn = Connection::open(&self.db_path)
-            .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        let _ = conn.busy_timeout(std::time::Duration::from_secs(15));
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        let ver: i32 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap_or(0);
-        if ver < SCHEMA_VERSION {
-            let has_chunks = conn
-                .query_row(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks' LIMIT 1",
-                    [],
-                    |r| r.get::<_, i32>(0),
-                )
-                .optional()
-                .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?
-                .is_some();
-            if has_chunks {
-                let _ = conn.pragma_update(None, "user_version", SCHEMA_VERSION);
-            } else {
-                crate::index::init_schema(&conn)
-                    .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
-            }
-        }
-        let has_graph = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_workspaces' LIMIT 1",
-                [],
-                |r| r.get::<_, i32>(0),
-            )
-            .optional()
-            .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?
-            .is_some();
-        if !has_graph {
-            schema::init_graph_schema(&conn)
-                .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
-        }
-        Ok(conn)
-    }
 
     fn set_progress(
         &self,
@@ -216,7 +186,19 @@ impl GraphService {
 
     pub fn status(&self, workspace_root: &str) -> Result<GraphStatusResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
+        self.with_conn(|conn| self.status_with_conn(conn, &ws))
+    }
+
+    /// `status` 的实现本体：连接由调用方提供。
+    ///
+    /// 常驻连接的锁非重入，凡是「已经拿着连接」的地方都必须走这个入口 ——
+    /// `module_deps` / `repo_map` / `symbol_search` / `callers` / `callees` / `impact`
+    /// 都是「先查状态、再用同一连接查数据」。在这里再调一次 `self.status` 会直接自锁。
+    fn status_with_conn(
+        &self,
+        conn: &Connection,
+        ws: &WorkspaceRef,
+    ) -> Result<GraphStatusResult, CoreError> {
         let live_indexing = self
             .building
             .lock()
@@ -378,7 +360,7 @@ impl GraphService {
                         Ok(()) => svc.clear_progress(hash),
                         Err(e) => {
                             svc.set_progress_error(hash, &e.to_string());
-                            if let Ok(conn) = svc.open() {
+                            if let Ok(conn) = svc.open_dedicated() {
                                 let _ = conn.execute(
                                     "UPDATE graph_workspaces SET indexing = 0 WHERE root_hash = ?1",
                                     params![hash],
@@ -387,7 +369,7 @@ impl GraphService {
                         }
                     }
                 };
-                let conn = match svc.open() {
+                let conn = match svc.open_dedicated() {
                     Ok(c) => c,
                     Err(e) => {
                         finish(&svc, &hash, Err(e));
@@ -471,7 +453,8 @@ impl GraphService {
         }
 
         self.set_progress(&root_hash, "walking", 0, 0, 0, 0, 0);
-        let conn = self.open()?;
+        // 长任务：占着常驻锁几分钟会把所有读请求堵死，必须开独立连接。
+        let conn = self.open_dedicated()?;
         let progress_svc = self.clone();
         let progress_hash = root_hash.clone();
         let result = run_build_with_progress(
@@ -526,7 +509,7 @@ impl GraphService {
             guard.insert(root_hash.clone());
         }
 
-        let conn = self.open()?;
+        let conn = self.open_dedicated()?;
         let result = run_remote_build(&conn, &ws.key, &root_hash, &files, force);
         if let Ok(mut guard) = self.building.lock() {
             guard.remove(&root_hash);
@@ -592,9 +575,10 @@ impl GraphService {
         depth: Option<u32>,
     ) -> Result<ModuleDepsResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        let st = self.status(workspace_root)?;
-        module_deps(&conn, &ws.root_hash, path, depth.unwrap_or(1), st.indexed)
+        self.with_conn(|conn| {
+            let st = self.status_with_conn(conn, &ws)?;
+            module_deps(conn, &ws.root_hash, path, depth.unwrap_or(1), st.indexed)
+        })
     }
 
     pub fn repo_map(
@@ -603,9 +587,10 @@ impl GraphService {
         limit: Option<u32>,
     ) -> Result<RepoMapResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        let st = self.status(workspace_root)?;
-        repo_map(&conn, &ws.root_hash, limit.unwrap_or(32), st.indexed)
+        self.with_conn(|conn| {
+            let st = self.status_with_conn(conn, &ws)?;
+            repo_map(conn, &ws.root_hash, limit.unwrap_or(32), st.indexed)
+        })
     }
 
     pub fn symbol_search(
@@ -616,16 +601,17 @@ impl GraphService {
         limit: Option<u32>,
     ) -> Result<SymbolSearchResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        let st = self.status(workspace_root)?;
-        symbol_search(
-            &conn,
-            &ws.root_hash,
-            query,
-            kind,
-            limit.unwrap_or(20),
-            st.indexed,
-        )
+        self.with_conn(|conn| {
+            let st = self.status_with_conn(conn, &ws)?;
+            symbol_search(
+                conn,
+                &ws.root_hash,
+                query,
+                kind,
+                limit.unwrap_or(20),
+                st.indexed,
+            )
+        })
     }
 
     pub async fn embed_symbols(
@@ -647,7 +633,8 @@ impl GraphService {
             guard.insert(root_hash.clone());
         }
 
-        let conn = self.open()?;
+        // 跨 await + 分钟级任务：既拿不住 MutexGuard，也不该占着常驻锁。
+        let conn = self.open_dedicated()?;
         let result =
             run_embed_symbols(&conn, &self.embedding, &self.models_dirs, &root_hash, force).await;
 
@@ -668,8 +655,9 @@ impl GraphService {
         limit: Option<u32>,
     ) -> Result<SymbolSearchResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        let st = self.status(workspace_root)?;
+        // 分两段用连接：中间要 await embedding，而常驻锁的 MutexGuard 拿不过 await。
+        // `st` 在两段之间沿用同一份快照，与改造前「先取状态、再检索」的取值时机一致。
+        let st = self.with_conn(|conn| self.status_with_conn(conn, &ws))?;
 
         let mut query_vector = None;
         let can_vector = self.embedding.enabled(&self.models_dirs)
@@ -688,24 +676,26 @@ impl GraphService {
             }
         }
 
-        // 有池则走内存扫描（只加速，不改语义：仍是全量精确余弦）
-        let pool = if query_vector.is_some() {
-            self.symbol_pool_for(&conn, &ws.root_hash)
-        } else {
-            None
-        };
+        self.with_conn(|conn| {
+            // 有池则走内存扫描（只加速，不改语义：仍是全量精确余弦）
+            let pool = if query_vector.is_some() {
+                self.symbol_pool_for(conn, &ws.root_hash)
+            } else {
+                None
+            };
 
-        symbol_semantic_search(
-            &conn,
-            &ws.root_hash,
-            query,
-            kind,
-            limit.unwrap_or(20),
-            st.indexed,
-            st.symbol_vector_count,
-            query_vector.as_deref(),
-            pool.as_deref(),
-        )
+            symbol_semantic_search(
+                conn,
+                &ws.root_hash,
+                query,
+                kind,
+                limit.unwrap_or(20),
+                st.indexed,
+                st.symbol_vector_count,
+                query_vector.as_deref(),
+                pool.as_deref(),
+            )
+        })
     }
 
     pub fn callers(
@@ -716,9 +706,10 @@ impl GraphService {
         name: Option<&str>,
     ) -> Result<CallGraphResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        let st = self.status(workspace_root)?;
-        callers(&conn, &ws.root_hash, symbol_id, path, name, st.indexed)
+        self.with_conn(|conn| {
+            let st = self.status_with_conn(conn, &ws)?;
+            callers(conn, &ws.root_hash, symbol_id, path, name, st.indexed)
+        })
     }
 
     pub fn callees(
@@ -729,9 +720,10 @@ impl GraphService {
         name: Option<&str>,
     ) -> Result<CallGraphResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        let st = self.status(workspace_root)?;
-        callees(&conn, &ws.root_hash, symbol_id, path, name, st.indexed)
+        self.with_conn(|conn| {
+            let st = self.status_with_conn(conn, &ws)?;
+            callees(conn, &ws.root_hash, symbol_id, path, name, st.indexed)
+        })
     }
 
     pub fn impact(
@@ -741,9 +733,10 @@ impl GraphService {
         depth: Option<u32>,
     ) -> Result<ImpactResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        let st = self.status(workspace_root)?;
-        impact(&conn, &ws.root_hash, path, depth.unwrap_or(4), st.indexed)
+        self.with_conn(|conn| {
+            let st = self.status_with_conn(conn, &ws)?;
+            impact(conn, &ws.root_hash, path, depth.unwrap_or(4), st.indexed)
+        })
     }
 
     pub fn ingest_lsp_callers(
@@ -754,8 +747,9 @@ impl GraphService {
         sites: Vec<LspCallSiteIn>,
     ) -> Result<IngestLspResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        ingest_lsp_callers(&conn, &ws.root_hash, callee_symbol_id, callee_name, &sites)
+        self.with_conn(|conn| {
+            ingest_lsp_callers(conn, &ws.root_hash, callee_symbol_id, callee_name, &sites)
+        })
     }
 }
 
@@ -771,7 +765,11 @@ mod tests {
     use std::fs;
 
     fn test_graph(db: std::path::PathBuf) -> GraphService {
-        GraphService::new(db, EmbeddingConfig::default(), Vec::new())
+        GraphService::new(
+            crate::codebase_db::handle(db),
+            EmbeddingConfig::default(),
+            Vec::new(),
+        )
     }
 
     #[test]

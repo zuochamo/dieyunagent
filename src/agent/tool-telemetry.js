@@ -2,45 +2,29 @@
 
 const fs = require('fs');
 const path = require('path');
-
-const MAX_LOG_BYTES = 2 * 1024 * 1024;
+const { getRotatingLog, flushLog, DEFAULT_MAX_BYTES } = require('../logs/rotating-file-log');
 
 function telemetryPath(userDataPath) {
   return path.join(userDataPath || '', 'tool-telemetry.jsonl');
 }
 
-function rotateIfNeeded(filePath) {
-  try {
-    const st = fs.statSync(filePath);
-    if (st.size <= MAX_LOG_BYTES) return;
-    const bak = `${filePath}.1`;
-    if (fs.existsSync(bak)) fs.unlinkSync(bak);
-    fs.renameSync(filePath, bak);
-  } catch {
-    // ignore
-  }
-}
-
 /**
+ * 每次工具调用记一行。
+ * 原来这里是 `appendFileSync`（一次 open+write+close 系统调用）且跑在主进程上，
+ * 现在走统一闸门批写，高频工具轮次下能省掉大量 syscall。
  * @param {object} row
  */
 function recordToolTelemetry(userDataPath, row) {
   if (!userDataPath) return;
   const filePath = telemetryPath(userDataPath);
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    rotateIfNeeded(filePath);
-    fs.appendFileSync(
-      filePath,
-      `${JSON.stringify({
-        ts: Date.now(),
-        ...row
-      })}\n`,
-      'utf8'
-    );
-  } catch {
-    // ignore telemetry failures
-  }
+  const log = getRotatingLog(filePath, { maxBytes: DEFAULT_MAX_BYTES });
+  if (!log) return;
+  log.write(
+    `${JSON.stringify({
+      ts: Date.now(),
+      ...row
+    })}\n`
+  );
 }
 
 function summarizeTelemetry(userDataPath, limit = 200) {
@@ -58,6 +42,8 @@ function summarizeTelemetry(userDataPath, limit = 200) {
     rows: []
   };
   try {
+    // 日志是批写的，读取前必须先刷缓冲，否则会统计到陈旧数据
+    flushLog(filePath);
     const raw = fs.readFileSync(filePath, 'utf8');
     const lines = raw.trim().split('\n').slice(-limit);
     const byKey = new Map();

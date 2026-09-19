@@ -1,4 +1,28 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+
+use crate::error::CoreError;
+
+/// 确保结构图谱表就绪。
+///
+/// **只在库文件首次被用到时跑一次**（由 `SqliteHandle` 保证）。
+/// 索引表的建表不在这里：同库同连接，那份由 [`crate::index::ensure_schema`] 负责，
+/// 两者在 [`crate::codebase_db`] 里汇合。此前 graph 的 `open()` 里抄了一份 index 的
+/// 建表逻辑（谁先打开谁负责建），是同一份东西的第二份实现。
+pub fn ensure_schema(conn: &Connection) -> Result<(), CoreError> {
+    let has_graph = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_workspaces' LIMIT 1",
+            [],
+            |r| r.get::<_, i32>(0),
+        )
+        .optional()
+        .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?
+        .is_some();
+    if has_graph {
+        return Ok(());
+    }
+    init_graph_schema(conn).map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))
+}
 
 pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(

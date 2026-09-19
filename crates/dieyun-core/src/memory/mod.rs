@@ -3,8 +3,10 @@ mod keyword;
 mod misc;
 mod schema;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,42 @@ use crate::error::CoreError;
 
 const MEMORY_EMBED_TEXT_MAX: usize = 6000;
 const GLOBAL_MEMORY_SCOPE: &str = "global";
+
+/// 后台修剪周期。原实现只在 `MemoryStore::open()` 跑一次 —— 长驻进程的
+/// `agent_runs` / `agent_traces` 等于没有上限，可以涨到任意大小。
+const PRUNE_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// 启动后先等一会儿再修剪，避开 serve-stdio 启动与首批 RPC 的锁竞争。
+const PRUNE_STARTUP_DELAY: Duration = Duration::from_secs(60);
+
+/// agent 历史（`agent_runs` / `agent_traces`）的修剪策略。
+///
+/// 集中成一处，既避免阈值散进 SQL，也让测试能用不同窗口驱动真实逻辑。
+struct PrunePolicy {
+    /// `agent_traces` 总行数超过它才开始裁剪（小库不值得全表扫）。
+    traces_trigger: i64,
+    /// 单条 run 保留的 trace 行数。
+    traces_per_run: i64,
+    /// 已完成 run 保留的条数（按 updated_at 倒序）。
+    runs_keep_recent: i64,
+    /// 已完成 run 的最长保留时长（毫秒）。
+    run_max_age_ms: i64,
+    /// 空闲页占全库页数达到这个百分比才回收磁盘。
+    freelist_percent: i64,
+}
+
+impl Default for PrunePolicy {
+    fn default() -> Self {
+        Self {
+            traces_trigger: 4_000,
+            // 唯一读者 `agent.trace_get` 只取 `ORDER BY id DESC LIMIT 1`，
+            // 更早的 checkpoint 行没有任何用途，纯写放大残留。
+            traces_per_run: 4,
+            runs_keep_recent: 500,
+            run_max_age_ms: 30 * 24 * 60 * 60 * 1000,
+            freelist_percent: 25,
+        }
+    }
+}
 
 fn is_global_memory_scope(scope: &str) -> bool {
     scope.trim().eq_ignore_ascii_case(GLOBAL_MEMORY_SCOPE)
@@ -137,14 +175,8 @@ impl MemoryStore {
         embedding: EmbeddingConfig,
         models_dirs: Vec<PathBuf>,
     ) -> Result<Self, CoreError> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        }
-        let conn = Connection::open(&db_path)
-            .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
+        let conn = crate::sqlite::open_tuned(&db_path)?;
+        // 外键只在这里显式打开：index / graph 原本没开，统一打开会改变它们的行为
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
         schema::init_schema(&conn)?;
@@ -154,48 +186,145 @@ impl MemoryStore {
             models_dirs: std::sync::Arc::new(Mutex::new(models_dirs)),
             conn: std::sync::Arc::new(Mutex::new(conn)),
         };
-        // 后台修剪，勿阻塞 serve-stdio 启动（4GB 库同步 DELETE 可卡数十秒）
-        Self::spawn_prune_surplus_agent_traces(db_path);
+        // 后台周期修剪，勿阻塞 serve-stdio 启动（4GB 库同步 DELETE / VACUUM 可卡数十秒）
+        Self::spawn_prune_loop(db_path);
         Ok(store)
     }
 
-    fn spawn_prune_surplus_agent_traces(db_path: PathBuf) {
-        std::thread::Builder::new()
+    /// 周期修剪线程：同一 `db_path` 只起一条，随进程退出而结束。
+    fn spawn_prune_loop(db_path: PathBuf) {
+        static STARTED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        let started = STARTED.get_or_init(|| Mutex::new(HashSet::new()));
+        match started.lock() {
+            Ok(mut guard) => {
+                if !guard.insert(db_path.clone()) {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+        let _ = std::thread::Builder::new()
             .name("dieyun-memory-prune".into())
             .spawn(move || {
-                let Ok(conn) = Connection::open(&db_path) else {
-                    return;
-                };
-                let _ = conn.busy_timeout(std::time::Duration::from_secs(30));
-                let _ = Self::prune_surplus_agent_traces(&conn);
-            })
-            .ok();
+                std::thread::sleep(PRUNE_STARTUP_DELAY);
+                loop {
+                    // 每轮独立开关连接：不长期持有库文件（Windows 下会挡住备份 / 删除），
+                    // 且主连接常驻，关闭这条连接不会触发 WAL checkpoint 抖动。
+                    if let Ok(conn) = crate::sqlite::open_tuned(&db_path) {
+                        // open_tuned 有意不开 foreign_keys，而这里依赖 CASCADE 清子表，
+                        // 必须显式打开，否则删 run 会留下孤儿 traces / plans / steps。
+                        if conn.pragma_update(None, "foreign_keys", "ON").is_ok() {
+                            let _ = Self::prune_agent_history(&conn, &PrunePolicy::default());
+                        }
+                    }
+                    std::thread::sleep(PRUNE_INTERVAL);
+                }
+            });
     }
 
-    /// Keep at most 2 newest traces per run; drop oldest extras when table is huge.
-    fn prune_surplus_agent_traces(conn: &Connection) -> Result<(), CoreError> {
+    /// 以 `agent_runs` 为根修剪历史：`agent_traces` / `agent_plans` / `agent_steps`
+    /// 都挂着 `ON DELETE CASCADE`，只删 trace 是修不掉的 ——
+    /// 最肥的 `agent_runs.state_snapshot`（每 2.5s 一份同源全量快照）从不被触碰。
+    ///
+    /// 三件事：裁 trace → 裁 run（级联）→ 回收空闲页。有删除才回收。
+    fn prune_agent_history(conn: &Connection, policy: &PrunePolicy) -> Result<(), CoreError> {
+        let traces_deleted = Self::prune_surplus_agent_traces(conn, policy)?;
+        let runs_deleted = Self::prune_finished_agent_runs(conn, policy)?;
+        if traces_deleted + runs_deleted > 0 {
+            Self::reclaim_free_pages(conn, policy)?;
+        }
+        Ok(())
+    }
+
+    /// 单条 run 的 trace 只保留最新若干行（超阈值才动手）。
+    fn prune_surplus_agent_traces(
+        conn: &Connection,
+        policy: &PrunePolicy,
+    ) -> Result<usize, CoreError> {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM agent_traces", [], |r| r.get(0))
             .unwrap_or(0);
-        if count < 4_000 {
-            return Ok(());
+        if count < policy.traces_trigger {
+            return Ok(0);
         }
         // SQLite 3.25+ window functions
-        conn.execute_batch(
-            r#"
-            DELETE FROM agent_traces
-            WHERE id NOT IN (
-              SELECT id FROM (
-                SELECT id,
-                       ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY id DESC) AS rn
-                FROM agent_traces
-              )
-              WHERE rn <= 2
-            );
-            "#,
-        )
-        .map_err(|e| CoreError::rpc("DB_PRUNE_FAILED", e.to_string()))?;
-        Ok(())
+        let deleted = conn
+            .execute(
+                r#"
+                DELETE FROM agent_traces
+                WHERE id NOT IN (
+                  SELECT id FROM (
+                    SELECT id,
+                           ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY id DESC) AS rn
+                    FROM agent_traces
+                  )
+                  WHERE rn <= ?1
+                )
+                "#,
+                params![policy.traces_per_run],
+            )
+            .map_err(|e| CoreError::rpc("DB_PRUNE_FAILED", e.to_string()))?;
+        Ok(deleted)
+    }
+
+    /// 已完成 run 的保留窗口：最近 `runs_keep_recent` 条 + 最长 `run_max_age_ms`。
+    ///
+    /// 只删终态：`running`（进行中）与 `planned`（planner 写入的中间态）都不动。
+    fn prune_finished_agent_runs(
+        conn: &Connection,
+        policy: &PrunePolicy,
+    ) -> Result<usize, CoreError> {
+        let cutoff = now_ms() - policy.run_max_age_ms;
+        let deleted = conn
+            .execute(
+                r#"
+                DELETE FROM agent_runs
+                WHERE status IN ('completed', 'stopped', 'failed')
+                  AND (
+                    updated_at < ?1
+                    OR id IN (
+                      SELECT id FROM agent_runs
+                      WHERE status IN ('completed', 'stopped', 'failed')
+                      ORDER BY updated_at DESC
+                      LIMIT -1 OFFSET ?2
+                    )
+                  )
+                "#,
+                params![cutoff, policy.runs_keep_recent],
+            )
+            .map_err(|e| CoreError::rpc("DB_PRUNE_FAILED", e.to_string()))?;
+        Ok(deleted)
+    }
+
+    /// DELETE 只把页标记为空闲，文件不会缩回；空闲页占比够高时真正回收。
+    ///
+    /// `auto_vacuum=INCREMENTAL` 的库走增量回收（便宜）；否则用 `VACUUM` 一次性重建，
+    /// 顺带把库转换成增量模式。VACUUM 需要独占锁，失败就等下一轮，不影响调用方。
+    fn reclaim_free_pages(conn: &Connection, policy: &PrunePolicy) -> Result<(), CoreError> {
+        let free_pages: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        let total_pages: i64 = conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        if free_pages <= 0 || total_pages <= 0 {
+            return Ok(());
+        }
+        if free_pages.saturating_mul(100) < total_pages.saturating_mul(policy.freelist_percent) {
+            return Ok(());
+        }
+        let auto_vacuum: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .unwrap_or(0);
+        if auto_vacuum == 2 {
+            conn.execute_batch("PRAGMA incremental_vacuum;")
+        } else {
+            // 非空库的 auto_vacuum 改动要等 VACUUM 才落定，所以两条一起做；
+            // 设置语句单独执行，失败也不能挡住后面的 VACUUM。
+            let _ = conn.pragma_update(None, "auto_vacuum", "INCREMENTAL");
+            conn.execute_batch("VACUUM;")
+        }
+        .map_err(|e| CoreError::rpc("DB_VACUUM_FAILED", e.to_string()))
     }
 
     pub fn from_config(config: &AppConfig) -> Result<Self, CoreError> {
@@ -1395,6 +1524,133 @@ mod tests {
         let msgs = store.recent_messages(&session.id, 10).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "user");
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn prunes_finished_runs_and_cascades_children() {
+        let db = std::env::temp_dir().join(format!("dieyun-prune-runs-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let session = store.create_session(Some("修剪"), None).unwrap();
+
+        for i in 0..3 {
+            let run_id = format!("run-done-{i}");
+            store
+                .upsert_agent_run(&json!({
+                    "id": run_id,
+                    "sessionId": session.id,
+                    "status": "completed",
+                }))
+                .unwrap();
+            store
+                .save_agent_trace(&json!({
+                    "runId": run_id,
+                    "sessionId": session.id,
+                    "status": "completed",
+                    "trace": [{ "type": "text", "content": "x" }],
+                }))
+                .unwrap();
+        }
+        // 非终态的 run 必须原样保留：running 进行中，planned 是 planner 中间态。
+        for run_id in ["run-live", "run-planned"] {
+            let status = if run_id == "run-live" {
+                "running"
+            } else {
+                "planned"
+            };
+            store
+                .upsert_agent_run(&json!({
+                    "id": run_id,
+                    "sessionId": session.id,
+                    "status": status,
+                }))
+                .unwrap();
+        }
+
+        let policy = PrunePolicy {
+            runs_keep_recent: 1,
+            // 关掉时间窗口，只验证「保留最近 N 条」这条路径
+            run_max_age_ms: i64::MAX / 2,
+            ..PrunePolicy::default()
+        };
+        let guard = store.conn.lock().unwrap();
+        let deleted = MemoryStore::prune_finished_agent_runs(&guard, &policy).unwrap();
+        assert_eq!(deleted, 2, "应删掉 2 个超出保留窗口的终态 run");
+        let runs: i64 = guard
+            .query_row("SELECT COUNT(*) FROM agent_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(runs, 3, "保留 1 个终态 + running + planned");
+        let traces: i64 = guard
+            .query_row("SELECT COUNT(*) FROM agent_traces", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(traces, 1, "agent_traces 应随 run 级联删除");
+        drop(guard);
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn prunes_surplus_traces_per_run() {
+        let db = std::env::temp_dir().join(format!("dieyun-prune-traces-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let session = store.create_session(Some("修剪"), None).unwrap();
+        store
+            .upsert_agent_run(&json!({
+                "id": "run-1",
+                "sessionId": session.id,
+                "status": "running",
+            }))
+            .unwrap();
+        // 新写入已是原地覆盖，这里直接造出「老库」形态（同一 run 堆多份 checkpoint）
+        // 来验证裁剪逻辑本身。
+        {
+            let guard = store.conn.lock().unwrap();
+            for i in 0..5 {
+                guard
+                    .execute(
+                        "INSERT INTO agent_traces
+                           (run_id, session_id, message_id, phase, trace_json, trace_text, created_at)
+                         VALUES ('run-1', ?1, NULL, 'assistant', ?2, NULL, ?3)",
+                        params![
+                            session.id,
+                            json!([{ "type": "text", "content": i.to_string() }]).to_string(),
+                            now_ms()
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let policy = PrunePolicy {
+            traces_trigger: 1,
+            traces_per_run: 2,
+            ..PrunePolicy::default()
+        };
+        let guard = store.conn.lock().unwrap();
+        let deleted = MemoryStore::prune_surplus_agent_traces(&guard, &policy).unwrap();
+        assert_eq!(deleted, 3, "5 条只留 2 条");
+        drop(guard);
+
+        let remaining: i64 = {
+            let guard = store.conn.lock().unwrap();
+            guard
+                .query_row("SELECT COUNT(*) FROM agent_traces", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(remaining, 2);
+        // 唯一读取路径（runId + LIMIT 1）拿到的必须仍是最新那次 checkpoint。
+        let row = store
+            .get_agent_trace(&json!({ "runId": "run-1" }))
+            .unwrap()
+            .unwrap();
+        let content = row
+            .get("trace")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.as_str());
+        assert_eq!(content, Some("4"));
         let _ = std::fs::remove_file(db);
     }
 }

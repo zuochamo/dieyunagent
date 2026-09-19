@@ -62,13 +62,16 @@
     return { label: meta.label, short: meta.short, kind };
   }
 
+  /** 判据单一来源同 renderer-model-runtime.js：委托 model-api-config，勿复写。 */
   function isSupplierModelEnabled(supplier, modelId) {
+    const shared = sharedModelApiConfig();
+    if (shared && typeof shared.isSupplierModelEnabled === 'function') {
+      return shared.isSupplierModelEnabled(supplier, modelId);
+    }
     if (!supplier || !modelId) return false;
     const map = supplier.enabledModels || {};
-    const keys = Object.keys(map);
-    if (!keys.length) return true;
-    if (map[modelId] === false) return false;
-    return map[modelId] === true;
+    if (!Object.keys(map).length) return true;
+    return map[modelId] !== false;
   }
 
   function getSupplierModelModality(supplier, modelId) {

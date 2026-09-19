@@ -55,6 +55,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, updated_at);
+      -- 周期修剪按 updated_at 排序 + 按时间截断，没有它就要全表扫并排序
+      CREATE INDEX IF NOT EXISTS idx_agent_runs_updated ON agent_runs(updated_at);
       CREATE TABLE IF NOT EXISTS agent_traces (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,

@@ -531,11 +531,27 @@ contextBridge.exposeInMainWorld('diecloud', {
   worktreeCreate: (runId, roleId, baseRef) =>
     ipcRenderer.invoke('worktree:create', { runId, roleId, baseRef }),
   worktreeRemove: (path) => ipcRenderer.invoke('worktree:remove', { path }),
-  worktreeCleanupRun: (runId) => ipcRenderer.invoke('worktree:cleanup-run', { runId }),
+  worktreeCleanupRun: (runId, opts) =>
+    ipcRenderer.invoke('worktree:cleanup-run', {
+      runId,
+      archive: !(opts && opts.archive === false),
+      allowDiscardUncommitted: !!(opts && opts.allowDiscardUncommitted),
+      deleteBranches: !!(opts && opts.deleteBranches)
+    }),
+  worktreePruneBranches: (opts) => ipcRenderer.invoke('worktree:prune-branches', opts || {}),
+  worktreeRestoreApplyBackup: (backupDir) =>
+    ipcRenderer.invoke('worktree:restore-apply-backup', { backupDir }),
   worktreeListManaged: () => ipcRenderer.invoke('worktree:list-managed'),
   worktreeEnforceCleanup: (payload) => ipcRenderer.invoke('worktree:enforce-cleanup', payload || {}),
   worktreePreviewRun: (runId) => ipcRenderer.invoke('worktree:preview-run', { runId }),
-  worktreeApplyRun: (runId, paths, forceConflict, changeIds) =>
-    ipcRenderer.invoke('worktree:apply-run', { runId, paths, forceConflict, changeIds }),
+  worktreeApplyRun: (runId, paths, forceConflict, changeIds, opts) =>
+    ipcRenderer.invoke('worktree:apply-run', {
+      runId,
+      paths,
+      forceConflict,
+      changeIds,
+      forceChangeIds: (opts && opts.forceChangeIds) || [],
+      allowOverwriteMainDirty: !!(opts && opts.allowOverwriteMainDirty)
+    }),
   worktreeChangeDiff: (change) => ipcRenderer.invoke('worktree:change-diff', { change })
 });

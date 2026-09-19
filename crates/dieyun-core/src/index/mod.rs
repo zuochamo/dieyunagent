@@ -13,12 +13,14 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use crate::config::{AppConfig, INDEX_FILE_MAX_BYTES};
-use crate::embedding::{self, EmbeddingConfig};
 use crate::error::CoreError;
+use crate::sqlite::SqliteHandle;
 use vector_pool::{PoolCache, VectorPool};
 
+use crate::embedding::{self, EmbeddingConfig};
+
 pub use remote::RemoteFileInput;
-pub use schema::{init_schema, SCHEMA_VERSION};
+pub use schema::{ensure_schema, init_schema, SCHEMA_VERSION};
 pub use search::SearchResult;
 pub use walker::collect_text_files;
 pub use workspace::{resolve_workspace, WorkspaceRef};
@@ -69,7 +71,8 @@ pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> &str {
 
 #[derive(Clone)]
 pub struct IndexService {
-    db_path: PathBuf,
+    /// codebase.db 句柄：与 `GraphService` 共享同一条常驻连接（同库，故同连接）。
+    db: Arc<SqliteHandle>,
     embedding: EmbeddingConfig,
     models_dirs: Vec<PathBuf>,
     indexing: Arc<Mutex<HashSet<String>>>,
@@ -80,9 +83,9 @@ pub struct IndexService {
 }
 
 impl IndexService {
-    pub fn new(db_path: PathBuf, embedding: EmbeddingConfig, models_dirs: Vec<PathBuf>) -> Self {
+    pub fn new(db: Arc<SqliteHandle>, embedding: EmbeddingConfig, models_dirs: Vec<PathBuf>) -> Self {
         Self {
-            db_path,
+            db,
             embedding,
             models_dirs,
             indexing: Arc::new(Mutex::new(HashSet::new())),
@@ -157,52 +160,40 @@ impl IndexService {
             .and_then(|g| g.get(root_hash).cloned())
     }
 
-    pub fn from_config(config: &AppConfig) -> Self {
-        Self::new(
-            config.codebase_db_path(),
-            config.embedding.clone(),
-            config.models_dirs.clone(),
-        )
+    pub fn from_config(config: &AppConfig, db: Arc<SqliteHandle>) -> Self {
+        Self::new(db, config.embedding.clone(), config.models_dirs.clone())
     }
 
-    fn open(&self) -> Result<Connection, CoreError> {
-        if let Some(parent) = self.db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        }
-        let conn = Connection::open(&self.db_path)
-            .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        conn.busy_timeout(std::time::Duration::from_secs(15))
-            .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        // 勿每次 status 都跑 CREATE/FTS；外置盘上可拖到数十秒
-        let ver: i32 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap_or(0);
-        if ver < schema::SCHEMA_VERSION {
-            let has_chunks = conn
-                .query_row(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks' LIMIT 1",
-                    [],
-                    |r| r.get::<_, i32>(0),
-                )
-                .ok()
-                .is_some();
-            if has_chunks {
-                // 已有表：只钉版本，勿再跑 CREATE/FTS（外置盘上很慢）
-                let _ = conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION);
-            } else {
-                schema::init_schema(&conn)
-                    .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
-            }
-        }
-        Ok(conn)
+    /// 复用常驻连接执行一次读/写（见 `SqliteHandle::with_conn`）。
+    ///
+    /// 非重入锁：调用方**不得**在闭包内再调 `with_conn` / `status`，否则死锁。
+    /// 需要串联多步时用 `*_with_conn` 形态的私有方法。
+    fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        self.db.with_conn(f)
+    }
+
+    /// 独立连接：用于跨 `.await` 或分钟级长任务，避免长时间占用常驻锁。
+    fn open_dedicated(&self) -> Result<Connection, CoreError> {
+        self.db.open_dedicated()
     }
 
     pub fn status(&self, workspace_root: &str) -> Result<StatusResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
+        self.with_conn(|conn| self.status_with_conn(conn, &ws))
+    }
+
+    /// `status` 的实现本体：连接由调用方提供。
+    ///
+    /// 常驻连接的锁非重入，凡是「已经拿着连接」的地方都必须走这个入口
+    /// （`search` / `run_index` 都是「先查状态、再用同一连接干活」）。
+    fn status_with_conn(
+        &self,
+        conn: &Connection,
+        ws: &WorkspaceRef,
+    ) -> Result<StatusResult, CoreError> {
         let live_indexing = self
             .indexing
             .lock()
@@ -434,7 +425,7 @@ impl IndexService {
                         Ok(_) => svc.clear_progress(hash),
                         Err(e) => {
                             svc.set_progress_error(hash, &e.to_string());
-                            if let Ok(conn) = svc.open() {
+                            if let Ok(conn) = svc.open_dedicated() {
                                 let _ = conn.execute(
                                     "UPDATE workspaces SET indexing = 0 WHERE root_hash = ?1",
                                     params![hash],
@@ -508,6 +499,9 @@ impl IndexService {
                 .lock()
                 .map_err(|_| CoreError::rpc("INDEX_BUSY", "索引锁不可用"))?;
             if guard.contains(&root_hash) {
+                // 先放锁再查状态：status() 会再加同一把非重入锁，持锁调用即死锁。
+                // 与 start_index_workspace 的写法对齐（那里早就踩过这个坑）。
+                drop(guard);
                 return self.status(workspace_root);
             }
             // sync index：始终跑一遍（force=false 时按 mtime 增量），供保存后后台刷新
@@ -564,7 +558,8 @@ impl IndexService {
         root_hash: &str,
         force: bool,
     ) -> Result<IndexStats, CoreError> {
-        let conn = self.open()?;
+        // 跨 await + 分钟级任务：既拿不住 MutexGuard，也不该占着常驻锁。
+        let conn = self.open_dedicated()?;
         conn.execute(
             "INSERT INTO workspaces (root_hash, root_path, indexing) VALUES (?1, ?2, 1)
              ON CONFLICT(root_hash) DO UPDATE SET indexing = 1, root_path = excluded.root_path",
@@ -848,8 +843,9 @@ impl IndexService {
         limit: Option<u32>,
     ) -> Result<SearchResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        let conn = self.open()?;
-        let st = self.status(workspace_root)?;
+        // 分两段用连接：中间要 await embedding，而常驻锁的 MutexGuard 拿不过 await。
+        // `st` 在两段之间沿用同一份快照，与改造前「先取状态、再检索」的取值时机一致。
+        let st = self.with_conn(|conn| self.status_with_conn(conn, &ws))?;
 
         let mut query_vector = None;
         let can_vector = self.embedding.enabled(&self.models_dirs)
@@ -868,20 +864,22 @@ impl IndexService {
             }
         }
 
-        // 有池则走内存扫描（只加速，不改语义：仍是全量精确余弦）
-        let pool = if query_vector.is_some() {
-            self.vector_pool_for(&conn, &ws.root_hash)
-        } else {
-            None
-        };
-        search::search(
-            &conn,
-            &ws.root_hash,
-            query,
-            limit,
-            query_vector.as_deref(),
-            pool.as_deref(),
-        )
+        self.with_conn(|conn| {
+            // 有池则走内存扫描（只加速，不改语义：仍是全量精确余弦）
+            let pool = if query_vector.is_some() {
+                self.vector_pool_for(conn, &ws.root_hash)
+            } else {
+                None
+            };
+            search::search(
+                conn,
+                &ws.root_hash,
+                query,
+                limit,
+                query_vector.as_deref(),
+                pool.as_deref(),
+            )
+        })
     }
 }
 
@@ -1095,7 +1093,11 @@ mod tests {
         )
         .unwrap();
         let db = dir.path().join("idx.sqlite");
-        let svc = IndexService::new(db, EmbeddingConfig::default(), Vec::new());
+        let svc = IndexService::new(
+            crate::codebase_db::handle(db),
+            EmbeddingConfig::default(),
+            Vec::new(),
+        );
         let root = dir.path().to_string_lossy();
         let st = svc.index_workspace(&root, true).await.unwrap();
         assert!(st.indexed);
@@ -1110,7 +1112,11 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let db = dir.path().join("idx.sqlite");
-        let svc = IndexService::new(db, EmbeddingConfig::default(), Vec::new());
+        let svc = IndexService::new(
+            crate::codebase_db::handle(db),
+            EmbeddingConfig::default(),
+            Vec::new(),
+        );
         let key = "ssh://dev@192.168.1.10/home/dev/project";
         let files = vec![RemoteFileInput {
             rel_path: "hello.rs".into(),
@@ -1132,7 +1138,11 @@ mod tests {
         std::fs::write(&a, "fn a() { /* keep */ }\n").unwrap();
         std::fs::write(&b, "fn b() { /* old */ }\n").unwrap();
         let db = dir.path().join("idx.sqlite");
-        let svc = IndexService::new(db, EmbeddingConfig::default(), Vec::new());
+        let svc = IndexService::new(
+            crate::codebase_db::handle(db),
+            EmbeddingConfig::default(),
+            Vec::new(),
+        );
         let root = dir.path().to_string_lossy();
         let st1 = svc.index_workspace(&root, true).await.unwrap();
         assert!(st1.indexed);
@@ -1158,7 +1168,11 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.js"), "console.log('a');\n").unwrap();
         let db = dir.path().join("idx.sqlite");
-        let svc = IndexService::new(db, EmbeddingConfig::default(), Vec::new());
+        let svc = IndexService::new(
+            crate::codebase_db::handle(db),
+            EmbeddingConfig::default(),
+            Vec::new(),
+        );
         let root = dir.path().to_string_lossy().to_string();
         let started = svc.start_index_workspace(&root, true, true).unwrap();
         assert!(started.started);

@@ -12,6 +12,7 @@ use crate::graph::GraphService;
 use crate::index::IndexService;
 use crate::memory;
 use crate::planner::PlannerRunManager;
+use crate::sqlite::SqliteHandle;
 use serde_json::json;
 
 pub mod stdio;
@@ -23,6 +24,12 @@ pub struct AppState {
 
 struct StateInner {
     config: AppConfig,
+    /// codebase.db 的唯一句柄：index / graph 共享同一条常驻连接。
+    ///
+    /// 存在这里是为了让配置热更新能在库文件没变时**复用**它——
+    /// 否则每次 configure 都会另开一条连接，旧的随服务一起被 drop，
+    /// 在异步写锁上同步做一次 WAL checkpoint。
+    codebase_db: Arc<SqliteHandle>,
     index: IndexService,
     graph: GraphService,
     memory: memory::MemoryStore,
@@ -66,13 +73,16 @@ async fn graph_status_with_optional_embed(
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
-        let index = IndexService::from_config(&config);
-        let graph = GraphService::from_config(&config);
+        // 索引与图谱落在同一个库文件上，共用同一条常驻连接。
+        let codebase_db = crate::codebase_db::handle(config.codebase_db_path());
+        let index = IndexService::from_config(&config, Arc::clone(&codebase_db));
+        let graph = GraphService::from_config(&config, Arc::clone(&codebase_db));
         let memory = memory::MemoryStore::from_config(&config)
             .unwrap_or_else(|e| panic!("memory store init failed: {e}"));
         Self {
             inner: Arc::new(RwLock::new(StateInner {
                 config,
+                codebase_db,
                 index,
                 graph,
                 memory,
@@ -287,8 +297,17 @@ impl AppState {
                     let old_mem_path = guard.memory.db_path().to_path_buf();
                     guard.config.apply_configure(&p).map_err(CoreError::Other)?;
                     let new_mem_path = guard.config.memory_db_path();
-                    guard.index = IndexService::from_config(&guard.config);
-                    guard.graph = GraphService::from_config(&guard.config);
+                    // 库文件没换就沿用原句柄：连接、页缓存、建表结果都不必重来。
+                    let new_db_path = guard.config.codebase_db_path();
+                    let codebase_db = if same_path(guard.codebase_db.path(), &new_db_path) {
+                        Arc::clone(&guard.codebase_db)
+                    } else {
+                        crate::codebase_db::handle(new_db_path)
+                    };
+                    guard.codebase_db = Arc::clone(&codebase_db);
+                    guard.index =
+                        IndexService::from_config(&guard.config, Arc::clone(&codebase_db));
+                    guard.graph = GraphService::from_config(&guard.config, codebase_db);
                     if same_path(&old_mem_path, &new_mem_path) {
                         let embedding = guard.config.embedding.clone();
                         let models_dirs = guard.config.models_dirs.clone();

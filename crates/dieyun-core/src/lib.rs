@@ -17,6 +17,7 @@
 #![allow(clippy::trim_split_whitespace)]
 
 pub mod agent;
+pub mod codebase_db;
 pub mod compaction;
 pub mod config;
 pub mod embedding;
@@ -27,6 +28,7 @@ pub mod index;
 pub mod memory;
 pub mod planner;
 pub mod rpc;
+pub mod sqlite;
 pub mod treesitter;
 
 use config::AppConfig;

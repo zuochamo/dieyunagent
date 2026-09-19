@@ -1,11 +1,10 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
 const { loadModelSettings, MAX_TOKENS_DEFAULT, resolveTextApiConfig } = require('../model-settings');
 const { buildTaskSkillsSystem } = require('../automation/skill-prompt');
 const { ASSISTANT_IDENTITY, formatDieyunSystemBlock } = require('../dieyun-instructions');
 const { runPlanAgentLoop } = require('./plan-agent-runner');
+const { appendPlanLog } = require('./plan-log');
 const { chatCompletionJson } = require('../llm-proxy');
 
 function resolveEndpoint(baseUrl) {
@@ -63,15 +62,6 @@ async function chatCompletion(userData, prompt, extraSystem, opts = {}) {
       json.choices[0].message.content) ||
     ''
   );
-}
-
-function appendPlanLog(userData, plan, text) {
-  const dir = path.join(userData, 'plans-logs');
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${plan.id}.md`);
-  const header = `\n\n---\n## ${new Date().toLocaleString('zh-CN')} · ${plan.name}\n\n`;
-  fs.appendFileSync(file, header + text, 'utf8');
-  return file;
 }
 
 /**

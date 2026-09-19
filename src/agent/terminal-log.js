@@ -1,11 +1,20 @@
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
 const { isVirtualWorkspacePath, hostSidecarRoots, TERMINALS_REL } = require('./host-sidecar');
+const { getRotatingLog, closeLog } = require('../logs/rotating-file-log');
 
-/** @type {{ filePath: string|null, stream: import('fs').WriteStream|null }} */
-let state = { filePath: null, stream: null };
+/**
+ * 集成终端日志。
+ *
+ * `appendTerminalLog` 挂在 PTY 的 onData 上——终端每吐一个数据块就写一次，
+ * 是仓库里频率最高、也最容易被 build 输出（HMR / 进度条 / verbose）打爆的落盘路径。
+ * 上限、轮转、批写节流全部交给 logs/rotating-file-log.js，这里只管路径与目标切换。
+ */
+const TERMINAL_LOG_MAX_BYTES = 4 * 1024 * 1024;
+
+/** 当前日志目标；切工作区时需要先把它刷盘，避免缓冲串台 @type {string|null} */
+let currentTarget = null;
 
 function resolveTerminalLogPath(workspacePath, userDataPath) {
   const ws = workspacePath ? String(workspacePath).trim() : '';
@@ -15,45 +24,23 @@ function resolveTerminalLogPath(workspacePath, userDataPath) {
   return path.join(hostSidecarRoots(userDataPath).terminals, 'integrated.log');
 }
 
-function ensureTerminalLogStream(workspacePath, userDataPath) {
-  const filePath = resolveTerminalLogPath(workspacePath, userDataPath);
-  if (state.filePath === filePath && state.stream) return state;
-  if (state.stream) {
-    try {
-      state.stream.end();
-    } catch {
-      // ignore
-    }
-  }
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  state = {
-    filePath,
-    stream: fs.createWriteStream(filePath, { flags: 'a', encoding: 'utf8' })
-  };
-  return state;
-}
-
 function appendTerminalLog(text, opts = {}) {
   const chunk = String(text || '');
   if (!chunk) return null;
-  const { stream, filePath } = ensureTerminalLogStream(opts.workspacePath, opts.userDataPath);
-  try {
-    stream.write(chunk);
-  } catch {
-    // ignore
-  }
+  const filePath = resolveTerminalLogPath(opts.workspacePath, opts.userDataPath);
+  // 目标变了：先把旧目标的缓冲落盘，否则残留内容会串到新工作区的日志里
+  if (currentTarget && currentTarget !== filePath) closeLog(currentTarget);
+  currentTarget = filePath;
+  const log = getRotatingLog(filePath, { maxBytes: TERMINAL_LOG_MAX_BYTES });
+  if (log) log.write(chunk);
   return filePath;
 }
 
 function resetTerminalLogTarget(workspacePath, userDataPath) {
-  if (state.stream) {
-    try {
-      state.stream.end();
-    } catch {
-      // ignore
-    }
+  if (currentTarget) {
+    closeLog(currentTarget);
+    currentTarget = null;
   }
-  state = { filePath: null, stream: null };
   return resolveTerminalLogPath(workspacePath, userDataPath);
 }
 

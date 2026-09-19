@@ -62,7 +62,9 @@ impl IndexService {
             guard.insert(ws.root_hash.clone());
         }
 
-        let conn = self.open()?;
+        // begin / push / finish 是一次远程摄取会话，都是批量写：用独立连接，
+        // 免得把常驻锁按在一批 DELETE/INSERT 上，拖住期间 UI 的 status 轮询。
+        let conn = self.open_dedicated()?;
         conn.execute(
             "INSERT INTO workspaces (root_hash, root_path, indexing) VALUES (?1, ?2, 1)
              ON CONFLICT(root_hash) DO UPDATE SET indexing = 1, root_path = excluded.root_path",
@@ -122,7 +124,7 @@ impl IndexService {
             .get_mut(&ws.root_hash)
             .ok_or_else(|| CoreError::rpc("REMOTE_INDEX_STATE", "远程索引未 begin"))?;
 
-        let conn = self.open()?;
+        let conn = self.open_dedicated()?;
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
@@ -192,7 +194,7 @@ impl IndexService {
             .remove(&ws.root_hash)
             .ok_or_else(|| CoreError::rpc("REMOTE_INDEX_STATE", "远程索引未 begin"))?;
 
-        let conn = self.open()?;
+        let conn = self.open_dedicated()?;
         let mut vector_count = 0i64;
         if state.use_vectors && !state.pending_embed.is_empty() {
             self.set_progress(
