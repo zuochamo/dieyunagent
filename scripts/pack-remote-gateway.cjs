@@ -244,6 +244,8 @@ async function main() {
     'remote/run-cli.js',
     'remote/minimal-gateway-host.js',
     'gateway/fs-read-limits.js',
+    // line-diff-stats 是 minimal-gateway-host 的 require 依赖，缺失会让远程模块加载失败
+    'gateway/line-diff-stats.js',
     'gateway/fs-edit-file.js',
     'gateway/str-replace.js',
     'gateway/symbol-text.js',

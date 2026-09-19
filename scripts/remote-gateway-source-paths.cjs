@@ -15,6 +15,8 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/gateway/path-policy.js',
   'src/gateway/host-control.js',
   'src/gateway/fs-read-limits.js',
+  // fs_edit 结果的 added/removed 统计（LCS 口径），host 与 local 网关共用同一份
+  'src/gateway/line-diff-stats.js',
   'src/gateway/fs-edit-file.js',
   'src/gateway/str-replace.js',
   'src/gateway/rg-search.js',

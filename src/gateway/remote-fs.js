@@ -5,22 +5,10 @@ const { resolveRemotePath } = require('../ssh/remote-path');
 const { normalizeRemotePath } = require('../workspace/target');
 const { normalizeReadParams } = require('./fs-read-limits');
 const { sftpEntryIsDirectory } = require('../ssh/session-manager');
+const { computeLineDiffStats } = require('./line-diff-stats');
 
 function summarizeLineDiff(beforeText, afterText) {
-  const before = beforeText == null ? [] : String(beforeText).split(/\r?\n/);
-  const after = String(afterText || '').split(/\r?\n/);
-  let start = 0;
-  while (start < before.length && start < after.length && before[start] === after[start]) start++;
-  let beforeEnd = before.length - 1;
-  let afterEnd = after.length - 1;
-  while (beforeEnd >= start && afterEnd >= start && before[beforeEnd] === after[afterEnd]) {
-    beforeEnd--;
-    afterEnd--;
-  }
-  return {
-    added: Math.max(0, afterEnd - start + 1),
-    removed: Math.max(0, beforeEnd - start + 1)
-  };
+  return computeLineDiffStats(beforeText, afterText);
 }
 
 /**

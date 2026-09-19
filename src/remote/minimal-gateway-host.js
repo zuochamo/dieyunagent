@@ -14,6 +14,7 @@ const { RemoteIndexCoreHost, createRemoteIndexCoreHandlers } = require('./remote
 const { queryLspPosition } = require('../lsp/navigate-service');
 const { LspClient } = require('../lsp/lsp-client');
 const { getServerSpec } = require('../lsp/language-registry');
+const { computeLineDiffStats } = require('../gateway/line-diff-stats');
 
 const GRAPH_SOURCE_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.go', '.rs']);
 
@@ -29,20 +30,7 @@ function shq(value) {
 const DEFAULT_REMOTE_PORT = 17331;
 
 function summarizeLineDiff(beforeText, afterText) {
-  const before = beforeText == null ? [] : String(beforeText).split(/\r?\n/);
-  const after = String(afterText || '').split(/\r?\n/);
-  let start = 0;
-  while (start < before.length && start < after.length && before[start] === after[start]) start++;
-  let beforeEnd = before.length - 1;
-  let afterEnd = after.length - 1;
-  while (beforeEnd >= start && afterEnd >= start && before[beforeEnd] === after[afterEnd]) {
-    beforeEnd--;
-    afterEnd--;
-  }
-  return {
-    added: Math.max(0, afterEnd - start + 1),
-    removed: Math.max(0, beforeEnd - start + 1)
-  };
+  return computeLineDiffStats(beforeText, afterText);
 }
 
 function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {

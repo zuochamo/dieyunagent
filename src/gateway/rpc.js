@@ -38,6 +38,7 @@ const { createWikiRpcHandlers } = require('../wiki/wiki-rpc');
 const { createExtractedHandlers } = require('./handlers');
 const { projectMemoryScope } = require('./project-memory');
 const { resolveCoreRpcTimeoutMs } = require('../core-rpc-timeouts');
+const { computeLineDiffStats } = require('./line-diff-stats');
 
 function assertHostEnabled(ctx) {
   if (!ctx.permissions.hostControl) {
@@ -68,9 +69,12 @@ function summarizeLineDiff(beforeText, afterText) {
   const afterFull = String(afterText || '');
   const includeFullText =
     beforeFull.length <= DIFF_FULL_TEXT_CAP && afterFull.length <= DIFF_FULL_TEXT_CAP;
+  // added/removed 走真实逐行 LCS（与 diff 图形同一口径）；
+  // 掐头去尾只用于截取变更片段，未变更的中间行不再计入删除
+  const { added, removed } = computeLineDiffStats(beforeText, afterText);
   return {
-    added: Math.max(0, afterEnd - start + 1),
-    removed: Math.max(0, beforeEnd - start + 1),
+    added,
+    removed,
     beforeLines: before.length,
     afterLines: after.length,
     created: beforeText == null,
