@@ -807,7 +807,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
-            dir.path().join("idx.sqlite"),
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
             Vec::new(),
         );
@@ -850,7 +850,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
-            dir.path().join("idx.sqlite"),
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
             Vec::new(),
         );
@@ -905,7 +905,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
-            dir.path().join("idx.sqlite"),
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
             Vec::new(),
         );
@@ -964,7 +964,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
-            dir.path().join("idx.sqlite"),
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
             Vec::new(),
         );
@@ -1021,7 +1021,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
-            dir.path().join("idx.sqlite"),
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
             Vec::new(),
         );
@@ -1098,7 +1098,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
-            dir.path().join("idx.sqlite"),
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
             Vec::new(),
         );
@@ -1224,7 +1224,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
-            dir.path().join("idx.sqlite"),
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
             Vec::new(),
         );

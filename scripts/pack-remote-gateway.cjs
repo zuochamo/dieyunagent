@@ -119,9 +119,12 @@ async function ensureBundledNode(outDir) {
   const extractDir = path.join(tmpDir, 'extract');
   await fsp.rm(tmpDir, { recursive: true, force: true });
   await fsp.mkdir(extractDir, { recursive: true });
+  // 用相对路径解压：GNU tar 会把 `E:\...` 里的盘符冒号解析成远程主机
   execSync(
-    `tar -xzf ${JSON.stringify(tarPath)} -C ${JSON.stringify(extractDir)} ${`node-${NODE_VERSION}-${NODE_PLATFORM}/bin/node`}`,
-    { stdio: 'inherit' }
+    `tar -xzf ${JSON.stringify(path.basename(tarPath))} -C ${JSON.stringify(
+      path.relative(CACHE_DIR, extractDir).replace(/\\/g, '/')
+    )} ${`node-${NODE_VERSION}-${NODE_PLATFORM}/bin/node`}`,
+    { stdio: 'inherit', cwd: CACHE_DIR }
   );
   const extractedNode = path.join(extractDir, `node-${NODE_VERSION}-${NODE_PLATFORM}`, 'bin', 'node');
   if (!fs.existsSync(extractedNode)) {
@@ -244,6 +247,9 @@ async function main() {
     'gateway/fs-edit-file.js',
     'gateway/str-replace.js',
     'gateway/symbol-text.js',
+    'gateway/rg-search.js',
+    // rg-search 的依赖，缺失会让远程 Agent 模块加载失败
+    'git/git-target.js',
     // 远程 LSP 定位链路，缺失会让远程 lsp.query 直接报错
     'lsp/navigate-service.js',
     'lsp/lsp-client.js',

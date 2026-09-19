@@ -74,9 +74,20 @@ flowchart TB
 %APPDATA%/pixel-office-agent/diecloud-memory.sqlite
 ```
 
-- 引擎：`better-sqlite3`，WAL 模式，外键开启。
+- 引擎：`dieyun-core`（Rust / rusqlite），WAL + `synchronous=NORMAL` + `auto_vacuum=INCREMENTAL`；
+  连接调优单一来源 `crates/dieyun-core/src/sqlite.rs`，外键由各 store 显式开启。
 - 实现：`crates/dieyun-core/src/memory/`（Gateway `requireRustCore`）
 - 访问：渲染进程经 Gateway RPC（`memory.*`），不直接读文件。
+
+### 3.1.1 Agent 运行历史（`agent_runs` / `agent_traces`）
+
+- 运行中的 checkpoint 每 ~2.5s 一次，**原地覆盖**该 run 的最新一行 trace：
+  唯一读取路径 `agent.trace_get` 只取 `ORDER BY id DESC LIMIT 1`，历史行没有读者。
+- 子表 `agent_traces` / `agent_plans` / `agent_steps` 都以 `ON DELETE CASCADE` 挂在 `agent_runs` 上，
+  所以修剪必须以 `agent_runs` 为根。
+- 后台每 30 分钟修剪一次：终态 run 保留最近 **500 条 / 30 天**，`running` 与 `planned` 不动；
+  空闲页占比 ≥ 25% 才回收磁盘（`auto_vacuum=INCREMENTAL` 走 `incremental_vacuum`，
+  否则用一次 `VACUUM` 重建并顺带完成模式转换）。
 
 ### 3.2 表结构
 

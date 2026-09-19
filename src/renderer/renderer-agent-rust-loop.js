@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, syncLiveWriteFromTrace, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS */
 'use strict';
 
 function isDieyunCoreReady() {
@@ -727,9 +727,6 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
                 })
                 .catch(() => {});
             }
-            if (typeof syncLiveWriteFromTrace === 'function') {
-              void syncLiveWriteFromTrace(displayedTrace, { sessionId: runSessionId });
-            }
           } else if (ev.phase === 'delegate_result') {
             const fr = frozenRounds[frozenRounds.length - 1];
             const normEv = normalizeDelegateEvent(ev.data);
@@ -772,9 +769,6 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             }
             const live = displayedTrace[displayedTrace.length - 1];
             pushLive(live?.thought || '…', fr?.tools || live?.tools || []);
-            if (typeof syncLiveWriteFromTrace === 'function') {
-              void syncLiveWriteFromTrace(displayedTrace, { sessionId: runSessionId });
-            }
           } else if (ev.phase === 'llm_reconnect_wait') {
             clearLlmWaitTimer();
             const waitData = ev.data || {};

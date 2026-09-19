@@ -1016,20 +1016,30 @@ async function applySessionWorkspace(sessionId, opts = {}) {
       sessionWorkspacePathCache.set(sid, '');
     }
     const nextPath = workspacePath ? String(workspacePath) : '';
-    const sameWorkspace = prevPath === nextPath;
+    const unchanged = prevPath === nextPath;
+    let bindResult = null;
     if (composerApi.setActiveSessionWorkspace) {
-      await composerApi.setActiveSessionWorkspace({
+      bindResult = await composerApi.setActiveSessionWorkspace({
         sessionId,
         workspacePath,
         bindOnly: !!(opts.bindOnly || opts.viewOnly),
-        skipRemoteTransport: sameWorkspace && !(opts.bindOnly || opts.viewOnly)
+        skipRemoteTransport: unchanged && !(opts.bindOnly || opts.viewOnly)
       });
     }
+    // 主进程校验出本地工作空间目录已不存在并清了绑定：缓存与 UI 都按无工作空间处理，
+    // 勿把 DB 里恢复出来的死路径继续显示
+    const missingCleared = !!(bindResult && bindResult.clearedMissingWorkspace);
+    if (missingCleared) {
+      sessionWorkspacePathCache.set(sid, '');
+      refreshHistoryList().catch(() => {});
+    }
+    const effectivePath = missingCleared ? null : workspacePath;
+    const sameWorkspace = unchanged && !missingCleared;
     if (!stillActive()) return { sameWorkspace };
     if (!sameWorkspace) {
-      await refreshSessionWorkspaceUi(workspacePath);
+      await refreshSessionWorkspaceUi(effectivePath);
     } else if (typeof window !== 'undefined') {
-      window.activeViewSessionWorkspacePath = workspacePath || null;
+      window.activeViewSessionWorkspacePath = effectivePath || null;
     }
     if (!stillActive()) return { sameWorkspace };
     if (!sameWorkspace && typeof refreshRemoteGatewayMeta === 'function') {
@@ -1041,27 +1051,27 @@ async function applySessionWorkspace(sessionId, opts = {}) {
       }
     }
     if (!stillActive()) return { sameWorkspace };
-    if (!workspacePath && typeof resetRemoteGatewayClient === 'function') {
+    if (!effectivePath && typeof resetRemoteGatewayClient === 'function') {
       resetRemoteGatewayClient();
     }
     if (opts.viewOnly) {
       if (!sameWorkspace) invalidateWorkspaceArtifacts();
       if (typeof refreshWikiPanelIfNeeded === 'function') refreshWikiPanelIfNeeded();
-      return { sameWorkspace, workspacePath };
+      return { sameWorkspace, workspacePath: effectivePath };
     }
     if (!sameWorkspace) {
       const ws = composerApi.getWorkspace ? await composerApi.getWorkspace() : null;
-      if (!stillActive()) return { sameWorkspace, workspacePath };
+      if (!stillActive()) return { sameWorkspace, workspacePath: effectivePath };
       if (ws) updateWorkspaceLabel(ws);
       invalidateWorkspaceArtifacts();
       if (typeof refreshWikiPanelIfNeeded === 'function') refreshWikiPanelIfNeeded();
       if (typeof resetCodebaseWarmCache === 'function') resetCodebaseWarmCache();
       if (typeof restartTerminalSession === 'function') restartTerminalSession();
-      if (workspacePath && !opts.skipDefaultEditor && typeof ensureDefaultWorkspaceEditor === 'function') {
+      if (effectivePath && !opts.skipDefaultEditor && typeof ensureDefaultWorkspaceEditor === 'function') {
         void ensureDefaultWorkspaceEditor({ force: true });
       }
     }
-    return { sameWorkspace, workspacePath };
+    return { sameWorkspace, workspacePath: effectivePath };
   } catch (e) {
     console.warn(e);
     return { sameWorkspace: false };

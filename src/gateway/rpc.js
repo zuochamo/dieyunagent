@@ -25,6 +25,7 @@ const { runEditFile } = require('./fs-edit-file');
 const { grepWorkspace, globWorkspace, TYPE_EXT } = require('./rg-search');
 const { getRemoteAgentClient, setRemoteAgentInvalidateListener, isDisconnectError } = require('./remote-agent-client');
 const { shellQuoteSingle, resolveRemotePath, remoteAllowedRoots } = require('../ssh/remote-path');
+const { encodeWorktreeContent, WORKTREE_SNAPSHOT_MAX_BYTES } = require('../git/git-target');
 const { captureRemoteGitWorkingBaseline } = require('../git/remote-baseline-capture');
 const { captureGitWorkingBaseline, mergeBaselineFilesInto } = require('../git/baseline-capture');
 const { isGitRepo } = require('../git/worktree-service');
@@ -721,18 +722,15 @@ function createRpcHandlers(ctx) {
         return { before: null, encoding: enc, remote: false };
       }
       const buf = fsSync.readFileSync(safe);
-      if (buf.length > 4 * 1024 * 1024) {
+      if (buf.length > WORKTREE_SNAPSHOT_MAX_BYTES) {
         return {
           before: meta && meta.before != null ? String(meta.before) : null,
           encoding: meta && meta.encoding === 'base64' ? 'base64' : 'utf8',
           remote: false
         };
       }
-      const isBinary = buf.includes(0);
-      if (isBinary) {
-        return { before: buf.toString('base64'), encoding: 'base64', remote: false };
-      }
-      return { before: buf.toString('utf8'), encoding: 'utf8', remote: false };
+      // 二进制判定 / 编码落档统一走 git-target（与回合基线、Plan 回写快照同口径）
+      return { ...encodeWorktreeContent(buf), remote: false };
     } catch {
       return {
         before: meta && meta.before != null ? String(meta.before) : null,

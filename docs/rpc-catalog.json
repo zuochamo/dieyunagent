@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-17T00:56:09.463Z",
+  "generatedAt": "2026-09-19T07:28:13.317Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 183,
-    "gatewayOnly": 111,
+    "total": 192,
+    "gatewayOnly": 120,
     "rustOnly": 23,
     "both": 49
   },
@@ -1373,6 +1373,78 @@
       "rust": [
         "dieyun-core/rpc/mod.rs"
       ]
+    },
+    {
+      "method": "scm.commit",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "scm.commit_diff",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "scm.commit_files",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "scm.discard",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "scm.file_diff",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "scm.log",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "scm.stage",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "scm.status",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "scm.unstage",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/scm.js"
+      ],
+      "rust": []
     },
     {
       "method": "speech.transcribe",

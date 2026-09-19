@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, syncLiveWriteFromTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText */
 'use strict';
 
 function patchThinkingTrace(
@@ -90,11 +90,6 @@ function patchThinkingTrace(
   body.querySelectorAll('.msg-thinking-step[data-step-key], :scope > details[data-step-key]').forEach((node) => {
     if (!seen.has(node.dataset.stepKey || '')) node.remove();
   });
-  if (typeof syncLiveWriteFromTrace === 'function') {
-    void syncLiveWriteFromTrace(trace, {
-      sessionId: typeof currentSessionId !== 'undefined' ? currentSessionId : undefined
-    });
-  }
   if (streaming && typeof scheduleStreamingChatFollow === 'function') {
     scheduleStreamingChatFollow();
   } else if (streaming && typeof followChatStreamGrowth === 'function') {
@@ -284,11 +279,6 @@ function buildThinkingTraceElement(
 
   wrap.appendChild(inner);
   root.appendChild(wrap);
-  if (typeof syncLiveWriteFromTrace === 'function') {
-    void syncLiveWriteFromTrace(trace, {
-      sessionId: typeof currentSessionId !== 'undefined' ? currentSessionId : undefined
-    });
-  }
   return root;
 }
 

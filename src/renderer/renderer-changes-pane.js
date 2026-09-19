@@ -1,4 +1,4 @@
-/* global mergeArtifactRows, sessionFileChangeTotals, getSidePanelTab, escapeHtml, document, window, flatFileIconSvg, getActiveLiveWrite, syncLiveWritePreview, applyLiveWriteFileListMarks, pathsMatch, resolveArtifactDiffFromTrace, readArtifactFileText, renderChangesPaneDiffPreview, toolDiffHasBody, gwState, upsertArtifactFileDiffBadge, enrichLiveWriteDiffStats, formatArtifactDiffHtml, getLastRoundFileChanges, currentSessionId, isPlausibleArtifactPath, pickDiffDisplayText, applyWorkspaceArtifactPath, liveMatchesArtifactPath */
+/* global mergeArtifactRows, getSidePanelTab, escapeHtml, document, window, flatFileIconSvg, pathsMatch, resolveArtifactDiffFromTrace, readArtifactFileText, renderChangesPaneDiffPreview, toolDiffHasBody, gwState, upsertArtifactFileDiffBadge, formatArtifactDiffHtml, getLastRoundFileChanges, currentSessionId, isPlausibleArtifactPath, pickDiffDisplayText, applyWorkspaceArtifactPath */
 'use strict';
 
 const dcApi = window.diecloud || {};
@@ -16,15 +16,6 @@ function pathsMatchArtifact(a, b) {
   return typeof pathsMatch === 'function' ? pathsMatch(ca, cb) : ca === cb;
 }
 
-function liveMatchesPath(live, path) {
-  if (typeof liveMatchesArtifactPath === 'function') return liveMatchesArtifactPath(live, path);
-  if (!live || !path || typeof pathsMatch !== 'function') return false;
-  const target = workspaceArtifactPath(path);
-  if (live.canonicalPath && pathsMatch(live.canonicalPath, target)) return true;
-  if (live.path && pathsMatch(workspaceArtifactPath(live.path), target)) return true;
-  return false;
-}
-
 /** @type {{ runId: string, preview: object, accepted: Map<string, boolean>, emptyPending?: boolean } | null} */
 let worktreeReviewCache = null;
 
@@ -39,7 +30,7 @@ if (typeof window !== 'undefined') {
 function kindLabel(kind) {
   if (typeof window.kindLabelWorktree === 'function') return window.kindLabelWorktree(kind);
   if (kind === 'deleted') return '删除';
-  if (kind === 'untracked') return '新增';
+  if (kind === 'added' || kind === 'untracked') return '新增';
   return '修改';
 }
 
@@ -466,11 +457,6 @@ async function readFallbackArtifactText(filePath) {
   const fp = workspaceArtifactPath(filePath);
   if (!fp) return null;
 
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-  if (live && liveMatchesPath(live, fp) && live.afterText != null && String(live.afterText)) {
-    return { text: String(live.afterText), source: 'live' };
-  }
-
   const ch = await findWorktreeChangeForRepoPath(fp, { ignoreReviewGate: true });
   if (ch && dcApi.worktreeChangeDiff) {
     try {
@@ -584,11 +570,6 @@ function hideWorktreeReviewToolbar(summary) {
   const toolbar = document.getElementById('changes-review-toolbar');
   if (toolbar) toolbar.hidden = true;
   syncChangesReviewToolbarMode();
-  if (summary && typeof sessionFileChangeTotals !== 'undefined') {
-    const t = sessionFileChangeTotals;
-    summary.textContent =
-      t.files > 0 ? `${t.files} 个文件 · +${t.added || 0} -${t.removed || 0}` : '本会话暂无文件变更';
-  }
 }
 
 function bindWorktreeReviewActions(review) {
@@ -618,13 +599,31 @@ function bindWorktreeReviewActions(review) {
       const selectedChanges = review.preview.changes.filter((ch) =>
         review.accepted.get(ch.changeId || ch.repoPath)
       );
+      const keyOf = (ch) => ch.changeId || `${ch.roleId}::${ch.repoPath}`;
       const paths = [...new Set(selectedChanges.map((ch) => ch.repoPath))];
-      const changeIds = selectedChanges.map((ch) => ch.changeId || `${ch.roleId}::${ch.repoPath}`);
-      const forceConflict = selectedChanges.some((ch) => ch.conflict);
+      const changeIds = selectedChanges.map(keyOf);
+      // 冲突强制按变更粒度。原来用「存在冲突 → forceConflict=true」，
+      // 勾中一个冲突文件会连带解除其余全部文件的覆盖保护。
+      const forceChangeIds = selectedChanges.filter((ch) => ch.conflict).map(keyOf);
+      // 主工作区已有未提交改动的文件默认不覆盖，必须逐次显式确认。
+      const dirtyChanges = selectedChanges.filter((ch) => ch.mainDirty);
+      let allowOverwriteMainDirty = false;
+      if (dirtyChanges.length) {
+        allowOverwriteMainDirty = window.confirm(
+          `以下 ${dirtyChanges.length} 个文件在主工作区已有未提交修改，应用会覆盖它们：\n\n` +
+            dirtyChanges.map((ch) => `· ${ch.repoPath}`).join('\n') +
+            '\n\n覆盖前会自动备份到 .dieyun/backup/，可回滚。确定继续？'
+        );
+        if (!allowOverwriteMainDirty) return;
+      }
       if (typeof window.applyWorktreeReview === 'function') {
         applyBtn.disabled = true;
         try {
-          await window.applyWorktreeReview(paths, { forceConflict, changeIds });
+          await window.applyWorktreeReview(paths, {
+            forceChangeIds,
+            allowOverwriteMainDirty,
+            changeIds
+          });
         } finally {
           applyBtn.disabled = false;
         }
@@ -894,32 +893,6 @@ function mergeSessionArtifactDiff(art) {
     const resolved = resolveArtifactDiffFromTrace(art.path);
     if (resolved) diff = resolved;
   }
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-  if (
-    live &&
-    art?.path &&
-    liveMatchesPath(live, art.path) &&
-    (!diff || !toolDiffHasBody(diff))
-  ) {
-    const liveDiff =
-      typeof enrichLiveWriteDiffStats === 'function' ? enrichLiveWriteDiffStats(live) : live.diff;
-    if (liveDiff && toolDiffHasBody(liveDiff)) {
-      diff = {
-        ...liveDiff,
-        beforeText: live.beforeText ?? liveDiff.beforeText,
-        afterText: live.afterText ?? liveDiff.afterText
-      };
-    } else if (live.afterText != null) {
-      diff = {
-        ...(diff || {}),
-        beforeText: live.beforeText ?? '',
-        afterText: live.afterText,
-        created: !live.beforeText,
-        added: Number(liveDiff?.added) || Number(diff?.added) || 0,
-        removed: Number(liveDiff?.removed) || Number(diff?.removed) || 0
-      };
-    }
-  }
   return diff;
 }
 
@@ -946,15 +919,6 @@ async function showSessionChangePreview(view, art, opts) {
   if (isWorktreeReviewActive()) {
     const shown = await tryShowWorktreeChangePreview(view, previewPath, opts);
     if (shown) return;
-  }
-
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-  if (live && live.status === 'writing' && liveMatchesPath(live, previewPath)) {
-    setChangesPreviewPath(previewPath);
-    if (typeof syncLiveWritePreview === 'function') {
-      syncLiveWritePreview({ live, incremental: true });
-    }
-    return;
   }
 
   if (incremental && isChangesDiffPreviewMounted(previewPath) && !(opts && opts.remountInline)) {
@@ -1042,10 +1006,6 @@ function bindChangesListRowClick(row, filePath) {
         ? mergeArtifactRows().find((r) => pathsMatchArtifact(r.path, filePath))
         : null;
     if (!art) art = { path: workspaceArtifactPath(filePath), diff: null };
-    const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-    if (live && liveMatchesPath(live, filePath) && typeof enrichLiveWriteDiffStats === 'function') {
-      art = { ...art, diff: enrichLiveWriteDiffStats(live) };
-    }
     void showSessionChangePreview(view, art);
   });
 }
@@ -1096,44 +1056,24 @@ function updateChangesListRowBadge(row, diffStats, opts) {
   }
 }
 
-/** 写入过程中：确保变更列表有对应行，并实时刷新 +/- 数字（Plan worktree 待审时不注入 trace 行） */
-function syncChangesListLiveRows() {
+/** 确保变更列表有本轮变更行，并刷新 +/- 数字（Plan worktree 待审时不注入 trace 行） */
+function syncChangesListRoundRows() {
   const list = document.getElementById('changes-file-list');
   if (!list) return;
   if (isWorktreeReviewActive()) return;
 
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
   const roundChanges =
     typeof getLastRoundFileChanges === 'function' ? getLastRoundFileChanges() : [];
   const targets = new Map();
-
-  if (live && (live.path || live.canonicalPath)) {
-    const path = live.canonicalPath || workspaceArtifactPath(live.path);
-    const stats =
-      typeof enrichLiveWriteDiffStats === 'function' ? enrichLiveWriteDiffStats(live) : live.diff;
-    targets.set(path, {
-      path,
-      stats: stats ? { added: Number(stats.added) || 0, removed: Number(stats.removed) || 0 } : null,
-      writing: live.status === 'writing',
-      done: live.status === 'done',
-      live: true
-    });
-  }
-
   for (const ch of roundChanges) {
     if (!ch || !ch.path) continue;
-    const key = workspaceArtifactPath(ch.path);
-    if (targets.has(key) && targets.get(key).live) continue;
     if (ch.added == null && ch.removed == null && !ch.pending) continue;
-    targets.set(key, {
+    targets.set(workspaceArtifactPath(ch.path), {
       path: ch.path,
       stats: { added: Number(ch.added) || 0, removed: Number(ch.removed) || 0 },
-      writing: !!ch.pending,
-      done: !ch.pending,
-      live: false
+      pending: !!ch.pending
     });
   }
-
   if (!targets.size) return;
 
   const empty = list.querySelector('.artifacts-empty');
@@ -1145,11 +1085,10 @@ function syncChangesListLiveRows() {
       row = createChangesListRow(info.path, info.stats);
       list.insertBefore(row, list.firstChild);
     } else if (info.stats) {
-      updateChangesListRowBadge(row, info.stats, { live: info.live && info.writing });
+      updateChangesListRowBadge(row, info.stats);
     }
-    row.classList.toggle('is-writing', !!info.writing);
-    row.classList.toggle('is-write-done', !!info.done && !info.writing);
-    if (info.writing && info.live) row.classList.add('active');
+    row.classList.toggle('is-writing', info.pending);
+    row.classList.toggle('is-write-done', !info.pending);
   }
 }
 
@@ -1167,29 +1106,7 @@ function getSessionChangeRows() {
 
 function syncSessionChangesSummary(summary, rows) {
   if (!summary) return;
-  let added = 0;
-  let removed = 0;
-  for (const r of rows || []) {
-    const d = r.diff || {};
-    added += Number(d.added) || 0;
-    removed += Number(d.removed) || 0;
-  }
-  summary.textContent = rows.length
-    ? `${rows.length} 个文件 · +${added} -${removed}`
-    : '本会话暂无文件变更';
-}
-
-function resolveSessionRowDiffStats(art) {
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-  if (
-    live &&
-    live.status === 'writing' &&
-    liveMatchesPath(live, art.path) &&
-    typeof enrichLiveWriteDiffStats === 'function'
-  ) {
-    return enrichLiveWriteDiffStats(live);
-  }
-  return art.diff;
+  summary.textContent = rows.length ? '' : '本会话暂无文件变更';
 }
 
 function listShowsPlanPreviewRows(list) {
@@ -1207,20 +1124,11 @@ function syncSessionChangesListInPlace(list, rows) {
     if (!findChangesListRow(list, art.path)) return false;
   }
 
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
   for (const art of rows) {
     const row = findChangesListRow(list, art.path);
     if (!row) continue;
-    const diffStats = resolveSessionRowDiffStats(art);
-    if (diffStats) {
-      const isLiveFile = live && liveMatchesPath(live, art.path);
-      updateChangesListRowBadge(row, diffStats, {
-        live: !!(isLiveFile && live.status === 'writing')
-      });
-    }
-    const isLiveFile = live && liveMatchesPath(live, art.path);
-    row.classList.toggle('is-writing', !!(isLiveFile && live.status === 'writing'));
-    row.classList.toggle('is-write-done', !!(isLiveFile && live.status === 'done'));
+    if (art.diff) updateChangesListRowBadge(row, art.diff);
+    row.classList.remove('is-writing', 'is-write-done');
   }
   return true;
 }
@@ -1228,13 +1136,6 @@ function syncSessionChangesListInPlace(list, rows) {
 function patchSessionChangesPreview(view, rows) {
   if (!view || !rows.length) return;
   const list = document.getElementById('changes-file-list');
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-
-  if (live && (live.path || live.canonicalPath) && typeof syncLiveWritePreview === 'function') {
-    syncLiveWritePreview({ live, incremental: true, forceRemount: false });
-    return;
-  }
-
   const previewPath = changesPreviewPath || '';
   if (previewPath && isChangesDiffPreviewMounted(previewPath)) {
     const art = rows.find((r) => pathsMatchArtifact(r.path, previewPath));
@@ -1292,7 +1193,7 @@ async function patchChangesPaneAsync() {
     worktreeReview = await loadWorktreeReviewIfNeeded();
     if (worktreeReview && isWorktreeReviewActive()) {
       await renderWorktreeReviewPane(worktreeReview, list, view, summary);
-      syncLiveWriteAfterChangesRender();
+      syncChangesPaneAfterRender();
       return;
     }
   } catch (err) {
@@ -1304,13 +1205,13 @@ async function patchChangesPaneAsync() {
       typeof window.getPendingWorktreeApply === 'function' ? window.getPendingWorktreeApply() : null;
     if (pending && typeof window.renderPlanPreviewPane === 'function') {
       window.renderPlanPreviewPane(pending, list, view, summary);
-      syncLiveWriteAfterChangesRender();
+      syncChangesPaneAfterRender();
       return;
     }
   }
 
   patchSessionChangesPane(list, view, summary);
-  syncLiveWriteAfterChangesRender();
+  syncChangesPaneAfterRender();
 }
 
 function patchChangesPane() {
@@ -1319,11 +1220,7 @@ function patchChangesPane() {
 
 function autoPreviewSessionChange(list, view, rows) {
   if (!view || !rows.length) return;
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-  let target = rows[0];
-  if (live) {
-    target = rows.find((r) => liveMatchesPath(live, r.path)) || target;
-  }
+  const target = rows[0];
   list.querySelectorAll('.artifacts-file-item').forEach((el) => el.classList.remove('active'));
   const rowEl = [...list.querySelectorAll('.artifacts-file-item')].find((el) => {
     const p = el.getAttribute('data-change-path') || el.title || '';
@@ -1353,7 +1250,7 @@ function renderSessionArtifactChanges(list, view, summary) {
   for (const art of rows) {
     const path = workspaceArtifactPath(art.path);
     const name = art.relativePath || path.replace(/\\/g, '/').split('/').pop() || path;
-    const diffStats = resolveSessionRowDiffStats(art);
+    const diffStats = art.diff;
     const diff = diffStats
       ? ' <span class="artifacts-file-diff">+' +
         escapeHtml(String(diffStats.added || 0)) +
@@ -1407,7 +1304,7 @@ async function renderChangesPaneAsync() {
     worktreeReview = await loadWorktreeReviewIfNeeded();
     if (worktreeReview && isWorktreeReviewActive()) {
       await renderWorktreeReviewPane(worktreeReview, list, view, summary);
-      syncLiveWriteAfterChangesRender();
+      syncChangesPaneAfterRender();
       return;
     }
   } catch (err) {
@@ -1419,23 +1316,23 @@ async function renderChangesPaneAsync() {
       typeof window.getPendingWorktreeApply === 'function' ? window.getPendingWorktreeApply() : null;
     if (pending && typeof window.renderPlanPreviewPane === 'function') {
       window.renderPlanPreviewPane(pending, list, view, summary);
-      syncLiveWriteAfterChangesRender();
+      syncChangesPaneAfterRender();
       return;
     }
   }
 
   renderSessionArtifactChanges(list, view, summary);
-  syncLiveWriteAfterChangesRender();
+  syncChangesPaneAfterRender();
 }
 
-function syncLiveWriteAfterChangesRender() {
+/** 重绘后补齐本轮变更行与角标（非「变更」页不白跑） */
+function syncChangesPaneAfterRender() {
   if (typeof getSidePanelTab === 'function' && getSidePanelTab() !== 'changes') return;
-  if (typeof syncChangesListLiveRows === 'function') syncChangesListLiveRows();
-  if (typeof applyLiveWriteFileListMarks === 'function') applyLiveWriteFileListMarks();
+  if (typeof syncChangesListRoundRows === 'function') syncChangesListRoundRows();
 }
 
 window.setChangesPreviewPath = setChangesPreviewPath;
-window.syncChangesListLiveRows = syncChangesListLiveRows;
+window.syncChangesListRoundRows = syncChangesListRoundRows;
 window.isChangesDiffPreviewMounted = isChangesDiffPreviewMounted;
 window.patchChangesPane = patchChangesPane;
 window.showSessionChangePreview = showSessionChangePreview;

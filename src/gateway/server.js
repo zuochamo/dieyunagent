@@ -359,7 +359,18 @@ class LocalGateway {
     try {
       if (fs.existsSync(this.workspacePathFile)) {
         const raw = JSON.parse(fs.readFileSync(this.workspacePathFile, 'utf8'));
-        this.workspaceTarget = targetFromDisk(raw);
+        const target = targetFromDisk(raw);
+        // 全局工作空间目录可能已被系统外删除；不校验的话每次启动都会复活死路径
+        // （index-watch watching/stopped，composer 徽标跟着显示死路径）。
+        // 只校验本地目录；SSH target 交给既有重连逻辑（远端可能只是暂时离线）。
+        if (target && target.kind === 'local' && !fs.existsSync(target.path)) {
+          this.log(`全局工作空间目录已不存在，重置为默认: ${target.path}`);
+          this.workspaceTarget = null;
+          this.workspaceRoot = null;
+          this._persistWorkspaceTarget();
+          return;
+        }
+        this.workspaceTarget = target;
         this.workspaceRoot =
           this.workspaceTarget && this.workspaceTarget.kind === 'local' ? this.workspaceTarget.path : null;
       }

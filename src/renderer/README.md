@@ -35,7 +35,7 @@
 | `renderer-thinking-trace.js` | 流式 patch / 合成回退 | 思考区更新 |
 | `renderer-artifacts-session.js` | 会话产物桶 / UI batch | 产物会话态 |
 | `renderer-artifacts-browse.js` | 工作区浏览路径 | 产物目录 |
-| `renderer-artifacts-live-write.js` | live-write 预览 | 写入预览 |
+| `renderer-artifact-diff-view.js` | 产物 diff 静态渲染 / 读盘 | 变更 diff 预览 |
 | `renderer-artifacts.js` | 产物列表绘制 / 打开 | 产物面板 |
 | `renderer-chat-history.js` | 会话列表、切换、加载消息 | 侧栏会话 |
 | `renderer-chat-state.js` | 当前会话 run 状态 | 进行中任务标记 |
@@ -71,8 +71,9 @@
 | `renderer-terminal.js` | 内置终端 |
 | `renderer-browser.js` | 内置浏览器面板 |
 | `renderer-changes-pane.js` | 变更列表 |
-| `renderer-live-write.js` | Agent 写文件实时预览 |
-| `renderer-artifacts.js` | 产物列表面板（session/browse/live-write 见上表） |
+| `renderer-scm-pane.js` | 源码管理（更改/历史双模式：git 状态 + 暂存/提交、提交时间线泳道图 + 提交内 diff） |
+| `renderer-path-utils.js` | 路径归一 / 匹配、trace 工具参数还原 |
+| `renderer-artifacts.js` | 产物列表面板（session/browse/diff 见上表） |
 | `renderer-codebase-panel.js` | 代码索引侧栏 |
 | `renderer-graph-panel.js` | 结构索引侧栏 |
 | `renderer-wiki-panel.js` | 项目 Wiki（`.dieyun/wiki`） |

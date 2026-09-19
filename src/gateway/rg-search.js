@@ -3,6 +3,7 @@
 const fsp = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
+const { bufferLooksBinary } = require('../git/git-target');
 
 const IGNORE_DIRS = new Set([
   'node_modules',
@@ -487,7 +488,8 @@ async function scanOneFileForGrep(root, rel, needle, opts) {
   let text;
   try {
     const buf = await fsp.readFile(abs);
-    if (buf.includes(0)) return null;
+    // 「含 NUL 即二进制」是全局单一规则（见 git/git-target.bufferLooksBinary）
+    if (bufferLooksBinary(buf)) return null;
     text = buf.toString('utf8');
   } catch {
     return null;

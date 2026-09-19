@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, syncLiveWriteFromTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml */
 'use strict';
 
 /** 结构签名：不含 thought 正文，用于区分「仅流式文本」与「trace 结构变化」 */
@@ -631,36 +631,54 @@ function appendInlineToolDiff(parent, tool, { roundComplete = false } = {}) {
   }
   details.appendChild(summary);
 
-  const grid = document.createElement('div');
-  grid.className = 'agents-md-diff-grid msg-tool-inline-diff-grid';
-
-  const beforePane = document.createElement('div');
-  beforePane.className = 'agents-md-diff-pane';
-  const beforeLabel = document.createElement('div');
-  beforeLabel.className = 'agents-md-diff-label';
-  beforeLabel.textContent = '修改前';
-  const beforePre = document.createElement('pre');
-  beforePre.className = 'agents-md-diff-pre';
-  beforePre.textContent =
-    typeof pickDiffDisplayText === 'function'
-      ? pickDiffDisplayText(diff, 'before') || '（空 / 新建）'
-      : '（空 / 新建）';
-  beforePane.append(beforeLabel, beforePre);
-
-  const afterPane = document.createElement('div');
-  afterPane.className = 'agents-md-diff-pane';
-  const afterLabel = document.createElement('div');
-  afterLabel.className = 'agents-md-diff-label';
-  afterLabel.textContent = '修改后';
-  const afterPre = document.createElement('pre');
-  afterPre.className = 'agents-md-diff-pre';
-  afterPre.textContent =
-    typeof pickDiffDisplayText === 'function' ? pickDiffDisplayText(diff, 'after') || '（空）' : '（空）';
-  afterPane.append(afterLabel, afterPre);
-
-  grid.append(beforePane, afterPane);
-  details.appendChild(grid);
+  const body = document.createElement('div');
+  body.className = 'msg-tool-inline-diff-body agent-scroll';
+  body.innerHTML = buildThinkingInlineDiffHtml(diff);
+  details.appendChild(body);
   parent.appendChild(details);
+}
+
+/**
+ * 思考区内联 diff：上下单栏、绿增红删（unified）。
+ * 复用面板同一套 LCS 渲染（formatInlineUnifiedDiffHtml），不在这里再造一份 diff 实现；
+ * 仅当行数超过 LCS 上限（该函数返回「无 diff 内容」）时，退化为整段删 + 整段增。
+ */
+function buildThinkingInlineDiffHtml(diff) {
+  const escape =
+    typeof escapeHtml === 'function'
+      ? escapeHtml
+      : (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const before =
+    typeof pickDiffDisplayText === 'function' ? String(pickDiffDisplayText(diff, 'before') || '') : '';
+  const after =
+    typeof pickDiffDisplayText === 'function' ? String(pickDiffDisplayText(diff, 'after') || '') : '';
+  if (typeof formatInlineUnifiedDiffHtml === 'function') {
+    const html = formatInlineUnifiedDiffHtml(before, after, { escapeHtml: escape });
+    if (html && !html.includes('artifacts-empty')) return html;
+  }
+  return buildWholeFileDiffHtml(before, after, escape);
+}
+
+/** 超大文件兜底：整段删 + 整段增，仍然红绿；行数封顶避免 DOM 爆炸 */
+function buildWholeFileDiffHtml(before, after, escape) {
+  const MAX_LINES = 500;
+  const take = (text) => {
+    const all = String(text ?? '').split('\n');
+    return all.length <= MAX_LINES ? { all, truncated: false } : { all: all.slice(0, MAX_LINES), truncated: true };
+  };
+  if (!before && !after) return '<div class="diff-line diff-eq">（无内容）</div>';
+  const rows = [];
+  if (before) {
+    const { all, truncated } = take(before);
+    for (const line of all) rows.push(`<div class="diff-line diff-del">${escape('-' + line)}</div>`);
+    if (truncated) rows.push('<div class="diff-line diff-gap">…</div>');
+  }
+  if (after) {
+    const { all, truncated } = take(after);
+    for (const line of all) rows.push(`<div class="diff-line diff-add">${escape('+' + line)}</div>`);
+    if (truncated) rows.push('<div class="diff-line diff-gap">…</div>');
+  }
+  return rows.join('');
 }
 
 function thinkingToolsSignature(tools, roundComplete) {

@@ -18,6 +18,8 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/gateway/fs-edit-file.js',
   'src/gateway/str-replace.js',
   'src/gateway/rg-search.js',
+  // rg-search 依赖 git-target 做二进制探测，缺失会导致远程模块加载失败
+  'src/git/git-target.js',
   // navigate-service 的「行内标识符纠正」复用网关侧同一套符号文本工具
   'src/gateway/symbol-text.js',
   // 远程 LSP 定位：只依赖 Node 内置模块，server 由远程环境提供
@@ -41,6 +43,19 @@ function computeRemoteGatewaySourceHash(rootDir) {
     }
     hash.update('\0');
   }
+  // 远程包内容不止源码清单：Linux dieyun-core 有无/换版都要反映到 hash，
+  // 否则补打包核心后注入端会因 hash 不变而跳过重传
+  const linuxCore = path.join(root, 'build', 'dieyun-core-linux', 'dieyun-core');
+  hash.update('linux-core\0');
+  try {
+    const bin = fs.readFileSync(linuxCore);
+    hash.update(String(bin.length));
+    hash.update('\0');
+    hash.update(bin);
+  } catch {
+    hash.update('missing');
+  }
+  hash.update('\0');
   return hash.digest('hex').slice(0, 16);
 }
 

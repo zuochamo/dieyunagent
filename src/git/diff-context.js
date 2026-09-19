@@ -1,19 +1,34 @@
 'use strict';
 
 const path = require('path');
-const { isGitRepo, gitExec } = require('./worktree-service');
+const { createGitTarget } = require('./git-target');
+const { readGitStatus } = require('./status');
+const { synthesizeNewFilePatch } = require('./diff-text');
 
 const MAX_DIFF_CHARS = 12000;
 const MAX_FILES = 8;
 const TEXT_EXT =
   /\.(tsx?|jsx?|mjs|cjs|vue|py|go|rs|java|cs|cpp|c|h|hpp|sql|md|json|yaml|yml|toml|sh|bash|ps1|css|scss|html?)$/i;
 
-function shellQuoteSingle(s) {
-  return `'${String(s).replace(/'/g, `'\\''`)}'`;
-}
+const UNTRACKED_TEXT_MAX_BYTES = 12000;
 
 function isTextLikePath(relPath) {
   return TEXT_EXT.test(String(relPath || ''));
+}
+
+/**
+ * 取本次调用的 git 目标。调用方已按工作区类型给出 remote/sshExec，
+ * 这里统一收敛成 git-target，避免再出现「本地一份、远端一份」的实现分叉。
+ * @param {string} root
+ * @param {{ remote?: boolean, sshExec?: Function, gitTarget?: object }} opts
+ */
+function resolveDiffGitTarget(root, opts) {
+  const o = opts || {};
+  if (o.gitTarget) return o.gitTarget;
+  if (o.remote && typeof o.sshExec === 'function') {
+    return createGitTarget({ kind: 'ssh', root, sshExec: o.sshExec });
+  }
+  return createGitTarget({ kind: 'local', root });
 }
 
 function normalizeRelPath(repoPath, filePath) {
@@ -37,97 +52,30 @@ function normalizeRemoteRelPath(root, filePath) {
   return f.replace(/^\/+/, '') || null;
 }
 
-function parseStatusChangedEntries(statusOut) {
-  const changed = [];
-  const seen = new Set();
-  for (const line of String(statusOut || '').split('\n')) {
-    if (line.length < 2) continue;
-    const hasPorcelainGap = line.length >= 3 && line[2] === ' ';
-    const xy = hasPorcelainGap ? line.slice(0, 2) : `${line[0] || ' '} `;
-    let rel = (hasPorcelainGap ? line.slice(3) : line.slice(2)).trim();
-    if (rel.includes(' -> ')) rel = rel.split(' -> ').pop().trim();
-    rel = rel.replace(/\\/g, '/');
-    if (!rel || seen.has(rel)) continue;
-    seen.add(rel);
-    changed.push({ path: rel, untracked: xy[0] === '?' && xy[1] === '?' });
-  }
-  return changed;
-}
-
-function parseStatusChangedPaths(statusOut) {
-  return parseStatusChangedEntries(statusOut).map((entry) => entry.path);
-}
-
-async function remoteGitExec(root, sshExec, args, timeoutMs = 20000) {
-  if (typeof sshExec !== 'function') {
-    throw new Error('remote git exec unavailable');
-  }
-  const cmd = ['git', ...args.map(shellQuoteSingle)].join(' ');
-  const r = await sshExec(cmd, root, timeoutMs);
-  const code = Number(r && r.code);
-  if (Number.isFinite(code) && code !== 0) {
-    throw new Error(String((r && r.stderr) || (r && r.stdout) || 'remote git command failed').trim());
-  }
-  return String((r && r.stdout) || (r && r.stderr) || '').trim();
-}
-
-async function localGitMaybe(root, args) {
+/** 未跟踪文件读正文：git 不产出 patch，要自己拼「新增」diff */
+async function readUntrackedText(git, rel) {
   try {
-    return await gitExec(root, args);
+    const r = await git.readText(rel, { maxBytes: UNTRACKED_TEXT_MAX_BYTES });
+    return r && r.text ? String(r.text) : '';
   } catch {
     return '';
   }
 }
 
-async function remoteGitMaybe(root, sshExec, args, timeoutMs = 30000) {
-  try {
-    return await remoteGitExec(root, sshExec, args, timeoutMs);
-  } catch {
-    return '';
-  }
-}
-
-async function readUntrackedText(root, rel, opts) {
-  const maxBytes = 12000;
-  if (opts.remote) {
-    const script = `head -c ${maxBytes + 1} -- ${shellQuoteSingle(rel)} 2>/dev/null || true`;
-    const r = await opts.sshExec(script, root, 20000);
-    return String((r && r.stdout) || '');
-  }
-  const fs = require('fs');
-  const filePath = path.join(root, rel);
-  if (!fs.existsSync(filePath)) return '';
-  return fs.readFileSync(filePath, 'utf8').slice(0, maxBytes + 1);
-}
-
-async function buildDiffText(root, entries, opts) {
+async function buildDiffText(git, entries) {
   const tracked = entries.filter((entry) => !entry.untracked).map((entry) => entry.path);
   const chunks = [];
   if (tracked.length) {
-    const diff = opts.remote
-      ? await remoteGitMaybe(root, opts.sshExec, ['diff', 'HEAD', '--unified=3', '--', ...tracked], 30000)
-      : await localGitMaybe(root, ['diff', 'HEAD', '--unified=3', '--', ...tracked]);
+    const diff = await git.textOrEmpty(['diff', 'HEAD', '--unified=3', '--', ...tracked], {
+      timeoutMs: 30000
+    });
     if (diff.trim()) chunks.push(diff.trim());
   }
   for (const entry of entries.filter((item) => item.untracked)) {
     if (!isTextLikePath(entry.path)) continue;
-    const text = await readUntrackedText(root, entry.path, opts);
+    const text = await readUntrackedText(git, entry.path);
     if (!text) continue;
-    const clipped = text.length > 12000 ? `${text.slice(0, 12000)}\n...(truncated)` : text;
-    const body = clipped
-      .split(/\r?\n/)
-      .map((line) => (line ? `+${line}` : '+'))
-      .join('\n');
-    chunks.push(
-      [
-        `diff --git a/${entry.path} b/${entry.path}`,
-        'new file mode 100644',
-        '--- /dev/null',
-        `+++ b/${entry.path}`,
-        '@@ -0,0 +1 @@',
-        body
-      ].join('\n')
-    );
+    chunks.push(synthesizeNewFilePatch(entry.path, text, { maxChars: UNTRACKED_TEXT_MAX_BYTES }));
   }
   return chunks.join('\n\n');
 }
@@ -135,28 +83,27 @@ async function buildDiffText(root, entries, opts) {
 /**
  * @param {string} repoPath
  * @param {string[]} focusPaths absolute or relative paths to prioritize
- * @param {{ maxChars?: number, maxFiles?: number, sshExec?: Function, remote?: boolean }} opts
+ * @param {{ maxChars?: number, maxFiles?: number, sshExec?: Function, remote?: boolean, gitTarget?: object }} opts
  */
 async function getWorkspaceGitDiffContext(repoPath, focusPaths = [], opts = {}) {
   const root = String(repoPath || '').trim();
   const remote = !!opts.remote && typeof opts.sshExec === 'function';
-  if (!root || (!remote && !(await isGitRepo(root)))) {
-    return { ok: false, reason: 'not_git', text: '' };
+  if (!root) return { ok: false, reason: 'not_git', text: '' };
+
+  const git = resolveDiffGitTarget(root, opts);
+
+  let status;
+  try {
+    status = await readGitStatus(git, { untrackedMode: 'normal' });
+  } catch {
+    return { ok: false, reason: 'status_failed', text: '' };
   }
+  if (!status.isRepo) return { ok: false, reason: 'not_git', text: '' };
 
   const maxChars = opts.maxChars != null ? opts.maxChars : MAX_DIFF_CHARS;
   const maxFiles = opts.maxFiles != null ? opts.maxFiles : MAX_FILES;
 
-  let statusOut = '';
-  try {
-    statusOut = remote
-      ? await remoteGitExec(root, opts.sshExec, ['status', '--porcelain', '-u'])
-      : await gitExec(root, ['status', '--porcelain', '-u']);
-  } catch {
-    return { ok: false, reason: 'status_failed', text: '' };
-  }
-
-  const changedEntries = parseStatusChangedEntries(statusOut);
+  const changedEntries = status.entries;
   const changed = changedEntries.map((entry) => entry.path);
 
   if (!changed.length) {
@@ -188,7 +135,7 @@ async function getWorkspaceGitDiffContext(repoPath, focusPaths = [], opts = {}) 
 
   let diffText = '';
   try {
-    diffText = await buildDiffText(root, pickedEntries, { remote, sshExec: opts.sshExec });
+    diffText = await buildDiffText(git, pickedEntries);
   } catch {
     return { ok: false, reason: 'diff_failed', text: '', files: pick };
   }
@@ -221,22 +168,27 @@ async function getWorkspaceGitDiffContext(repoPath, focusPaths = [], opts = {}) 
 async function getWorkspaceGitChangedAbsPaths(repoPath, opts = {}) {
   const root = String(repoPath || '').trim();
   const remote = !!opts.remote && typeof opts.sshExec === 'function';
-  if (!root || (!remote && !(await isGitRepo(root)))) {
-    return [];
-  }
-  const maxFiles = opts.maxFiles != null ? opts.maxFiles : 16;
-  let statusOut = '';
+  if (!root) return [];
+
+  const git = resolveDiffGitTarget(root, opts);
+
+  let status;
   try {
-    statusOut = remote
-      ? await remoteGitExec(root, opts.sshExec, ['status', '--porcelain', '-u'])
-      : await gitExec(root, ['status', '--porcelain', '-u']);
+    status = await readGitStatus(git, { untrackedMode: 'normal' });
   } catch {
     return [];
   }
+  if (!status.isRepo) return [];
+
+  const maxFiles = opts.maxFiles != null ? opts.maxFiles : 16;
   const out = [];
-  for (const rel of parseStatusChangedPaths(statusOut)) {
-    if (!isTextLikePath(rel)) continue;
-    out.push(remote ? `${root.replace(/\/+$/, '')}/${rel}` : path.join(root, rel));
+  for (const entry of status.entries) {
+    if (!isTextLikePath(entry.path)) continue;
+    out.push(
+      remote
+        ? `${root.replace(/\/+$/, '')}/${entry.path}`
+        : path.join(root, entry.path)
+    );
     if (out.length >= maxFiles) break;
   }
   return out;

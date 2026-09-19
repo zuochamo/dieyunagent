@@ -38,12 +38,36 @@ function registerWorkspaceRemoteIpc(ctx) {
       return { kind: 'local', workspacePath: null, displayPath: '', sshConnected: false };
     }
     const sid = sessionId ? String(sessionId).trim() : '';
+    // 会话行持久化的 workspace_path 可能指向早已删除的本地目录；不校验的话
+    // 每次启动/切会话都会把它重新绑回来（索引 watcher 随即 stop）
+    let clearedMissingWorkspace = false;
+    const isMissingLocalPath = (p) =>
+      !!p && !/^ssh:/i.test(String(p)) && !fs.existsSync(String(p));
+    const clearMissingWorkspace = async () => {
+      clearedMissingWorkspace = true;
+      localGateway.setSessionWorkspaceContext(sid, null);
+      // 只清运行时上下文还不够：DB 行里的旧路径下次启动又会被 session_get 带回来
+      try {
+        await localGateway.invokeRpc('memory.session_workspace_set', {
+          sessionId: sid,
+          workspacePath: null
+        });
+      } catch (e) {
+        log.info('session_workspace_set null:', e && e.message);
+      }
+    };
     if (sid && workspacePath !== undefined) {
-      localGateway.setSessionWorkspaceContext(sid, workspacePath || null);
+      if (isMissingLocalPath(workspacePath)) {
+        await clearMissingWorkspace();
+      } else {
+        localGateway.setSessionWorkspaceContext(sid, workspacePath || null);
+      }
     } else if (sid && !localGateway.sessionWorkspaceTargets.has(sid)) {
       try {
         const row = await localGateway.invokeRpc('memory.session_get', { sessionId: sid });
-        if (row && row.workspacePath) {
+        if (row && row.workspacePath && isMissingLocalPath(row.workspacePath)) {
+          await clearMissingWorkspace();
+        } else if (row && row.workspacePath) {
           localGateway.setSessionWorkspaceContext(sid, row.workspacePath);
         }
       } catch (e) {
@@ -51,7 +75,7 @@ function registerWorkspaceRemoteIpc(ctx) {
       }
     }
     if (bindOnly) {
-      return { ok: true, bindOnly: true, sessionId: sid || null };
+      return { ok: true, bindOnly: true, sessionId: sid || null, clearedMissingWorkspace };
     }
     localGateway.setActiveSession(sid || null);
     if (browserService && typeof browserService.setActiveViewSessionId === 'function' && sid) {
@@ -64,7 +88,7 @@ function registerWorkspaceRemoteIpc(ctx) {
         log.info('applySessionRemoteTransport:', e && e.message);
       }
     }
-    return localGateway.getWorkspace();
+    return { ...localGateway.getWorkspace(), clearedMissingWorkspace };
   });
 
   ipcMain.handle('remote:session-lease', async (_evt, { sessionId, active, workspacePath } = {}) => {

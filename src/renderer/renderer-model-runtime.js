@@ -405,12 +405,21 @@ function countSupplierEnabledModels(s) {
   return keys.filter((k) => map[k] === true).length;
 }
 
+/**
+ * 供应商模型是否已启用。判据的单一来源是 src/agent/model-api-config.js
+ * （经 dist/agent-bundle.js 提前加载）；此处只做委托，勿再复写规则——
+ * 之前三处各写一份，其中两份写成 `=== true`，与「enabledModels 为空即全可用」
+ * 冲突，导致同一份设置在主进程和界面里得出相反的模型名。
+ */
 function isSupplierModelEnabled(supplier, modelId) {
+  const shared = typeof window !== 'undefined' && window.DieyunModelApiConfig;
+  if (shared && typeof shared.isSupplierModelEnabled === 'function') {
+    return shared.isSupplierModelEnabled(supplier, modelId);
+  }
   if (!supplier || !modelId) return false;
   const map = supplier.enabledModels || {};
   if (!Object.keys(map).length) return true;
-  if (map[modelId] === false) return false;
-  return map[modelId] === true;
+  return map[modelId] !== false;
 }
 
 function getSupplierById(supplierId) {

@@ -174,6 +174,25 @@ function main() {
     true
   );
 
+  // 连续软失败止损：跨 flush 调用累计，达上限暂停并清零，成功一次即清零
+  const SOFT_FAIL_LIMIT = 3;
+  function bumpSoftFail(streaks, sid) {
+    const streak = (streaks.get(sid) || 0) + 1;
+    streaks.set(sid, streak);
+    if (streak < SOFT_FAIL_LIMIT) return false;
+    streaks.delete(sid);
+    return true;
+  }
+  const streaks = new Map();
+  assert.strictEqual(bumpSoftFail(streaks, 's1'), false);
+  assert.strictEqual(bumpSoftFail(streaks, 's1'), false);
+  assert.strictEqual(streaks.get('s1'), 2);
+  assert.strictEqual(bumpSoftFail(streaks, 's1'), true); // 第 3 次 → 暂停
+  assert.strictEqual(streaks.has('s1'), false);
+  streaks.set('s2', 2);
+  streaks.delete('s2'); // 中间成功发送一次，重新计数
+  assert.strictEqual(bumpSoftFail(streaks, 's2'), false);
+
   console.log('[dieyun:test] test-composer-queue-edit passed');
 }
 

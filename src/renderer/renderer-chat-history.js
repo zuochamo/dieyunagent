@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, disconnectSshIfConnected, ensureLocalGatewayReady, clearAgentContinueState, restoreKnowledgeMaintenanceContext, cancelBackgroundKnowledgeFallback, saveComposerAgentMode, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, activateLiveWriteForView, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, disconnectSshIfConnected, ensureLocalGatewayReady, clearAgentContinueState, restoreKnowledgeMaintenanceContext, cancelBackgroundKnowledgeFallback, saveComposerAgentMode, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache */
 'use strict';
 
 const historyApi = window.diecloud || {};
@@ -1030,9 +1030,6 @@ async function performSwitchSession(sessionId, switchGen) {
       }
       currentSessionId = target;
       setCurrentSessionId(target);
-      if (typeof activateLiveWriteForView === 'function') {
-        activateLiveWriteForView(target);
-      }
       if (typeof onComposerSessionActivated === 'function') onComposerSessionActivated(target);
       // 只清离开会话的压缩状态，勿清目标会话（可能仍在后台跑）
       if (prevSessionId) resetCompactionStateSafe(prevSessionId);
@@ -1326,9 +1323,6 @@ async function createNewSession(workspacePath) {
     });
     currentSessionId = s.id;
     setCurrentSessionId(s.id);
-    if (typeof activateLiveWriteForView === 'function') {
-      activateLiveWriteForView(s.id);
-    }
     messages.length = 0;
     if (typeof setMessagesOwnerSessionId === 'function') {
       setMessagesOwnerSessionId(s.id);

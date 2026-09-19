@@ -3200,12 +3200,6 @@ body.composer-resizing {
   opacity: 0.75;
   font-style: normal;
 }
-.msg-thinking-tools li.is-live-write-focus {
-  background: var(--live-write-bg);
-  border-radius: 0;
-  box-shadow: inset 0 0 0 1px var(--accent-dark, rgba(190, 194, 202, 0.45));
-  opacity: 1;
-}
 .msg-thinking-tool-failed {
   color: var(--danger, #f85149);
 }
@@ -3248,13 +3242,44 @@ body.composer-resizing {
   color: var(--text-dim);
   font-size: 10px;
 }
-.msg-tool-inline-diff-grid {
+/* 思考区内联 diff：上下单栏 unified，绿增红删 */
+.msg-tool-inline-diff-body {
   margin-top: 8px;
-  padding: 0;
-  gap: 8px;
-}
-.msg-tool-inline-diff-grid .agents-md-diff-pre {
   max-height: min(36vh, 280px);
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle, #30363d);
+  background: var(--surface-2, #21262d);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg-tool-inline-diff-body .diff-line.diff-add {
+  background: rgba(63, 185, 80, 0.14);
+  color: #3fb950;
+}
+.msg-tool-inline-diff-body .diff-line.diff-del {
+  background: rgba(248, 81, 73, 0.12);
+  color: #f85149;
+}
+.msg-tool-inline-diff-body .diff-line.diff-eq {
+  color: var(--text-dim);
+}
+.msg-tool-inline-diff-body .diff-line.diff-gap {
+  color: var(--text-mute);
+  background: rgba(128, 128, 128, 0.06);
+  text-align: center;
+  user-select: none;
+}
+:root[data-theme='light'] .msg-tool-inline-diff-body .diff-line.diff-add {
+  background: rgba(22, 163, 74, 0.12);
+  color: #15803d;
+}
+:root[data-theme='light'] .msg-tool-inline-diff-body .diff-line.diff-del {
+  background: rgba(220, 38, 38, 0.08);
+  color: #cf222e;
 }
 
 .msg-thinking-tool-retry:hover {
@@ -4885,10 +4910,12 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
-  background: var(--bg-elev-2);
+  background: transparent;
   border: 1px solid var(--border);
   border-radius: 0;
   max-height: min(52vh, 420px);
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .agents-md-diff-line {
@@ -4911,7 +4938,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 .agents-md-diff-pre .agents-md-diff-line.diff-pad {
-  background: rgba(128, 128, 128, 0.05);
+  background: transparent;
   min-height: 1.45em;
 }
 
@@ -6219,7 +6246,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 
 .supplier-model-list-head,
 .supplier-model-row {
-  grid-template-columns: minmax(100px, 1fr) minmax(140px, 1.6fr) minmax(90px, 0.9fr) 88px 72px;
+  grid-template-columns: minmax(100px, 1fr) minmax(140px, 1.3fr) minmax(90px, 0.8fr) minmax(150px, 1.1fr) 72px;
 }
 
 .supplier-model-row {
@@ -7289,19 +7316,6 @@ body.pane-resizing {
   opacity: 0.78;
 }
 
-.codebase-panel-check {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 0 0 10px;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.codebase-panel-check input {
-  margin-top: 2px;
-}
-
 .codebase-panel-note {
   margin: 0 0 12px;
   font-size: 11px;
@@ -7561,12 +7575,408 @@ body.pane-resizing {
   white-space: nowrap;
 }
 
+/* --- 源码管理页（data-side-pane="scm"） --- */
+
+.side-panel-pane[data-side-pane='scm'] .side-panel-pane-meta {
+  margin-left: auto;
+}
+
+.scm-commit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.scm-commit-box[hidden] {
+  display: none;
+}
+
+.scm-commit-message {
+  width: 100%;
+  min-height: 46px;
+  resize: vertical;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  outline: none;
+}
+
+.scm-commit-message::placeholder {
+  color: var(--text-mute);
+}
+
+.scm-commit-message:focus {
+  border-color: var(--text-mute);
+}
+
+.scm-commit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scm-commit-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scm-filebar {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-mute);
+  flex-shrink: 0;
+}
+
+.scm-filebar[hidden] {
+  display: none;
+}
+
+.scm-filebar-path {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scm-filebar-meta {
+  flex-shrink: 0;
+}
+
+.scm-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 4px;
+  font-size: 11px;
+  color: var(--text-mute);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-elev);
+  min-width: 0;
+}
+
+.scm-group-title {
+  font-weight: 600;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scm-group-count {
+  flex-shrink: 0;
+}
+
+.scm-group-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scm-group-action {
+  margin-left: auto;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.scm-file-item .scm-file-status {
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+  font-family: var(--mono, Consolas, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.scm-file-item .scm-file-status[data-status='A'],
+.scm-file-item .scm-file-status[data-status='?'] {
+  color: var(--ok);
+}
+
+.scm-file-item .scm-file-status[data-status='D'],
+.scm-file-item .scm-file-status[data-status='U'] {
+  color: var(--danger);
+}
+
+.scm-file-item .scm-file-status[data-status='R'],
+.scm-file-item .scm-file-status[data-status='C'] {
+  color: var(--accent-2, #93c5fd);
+}
+
+.scm-file-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.scm-file-item:hover .scm-file-actions,
+.scm-file-item:focus-within .scm-file-actions {
+  opacity: 1;
+}
+
+.scm-file-action {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.scm-file-action:hover {
+  color: var(--text);
+  border-color: var(--text-mute);
+}
+
+/* --- 源码管理：更改 / 历史 双模式 --- */
+
+.scm-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: 6px;
+}
+
+.scm-mode-btn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-mute);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.scm-mode-btn:hover {
+  color: var(--text);
+}
+
+.scm-mode-btn.active {
+  color: var(--text);
+  background: rgba(128, 128, 128, 0.14);
+}
+
+#scm-changes-wrap,
+#scm-history-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+#scm-changes-wrap[hidden],
+#scm-history-wrap[hidden] {
+  display: none;
+}
+
+/* --- 历史时间线（泳道图） --- */
+
+.scm-history-row {
+  display: flex;
+  align-items: stretch;
+  cursor: pointer;
+  user-select: none;
+  min-width: 0;
+}
+
+.scm-history-row:hover {
+  background: rgba(128, 128, 128, 0.07);
+}
+
+.scm-history-row.expanded {
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.scm-history-lane {
+  flex-shrink: 0;
+  align-self: center;
+  line-height: 0;
+}
+
+.scm-lane-svg {
+  color: rgba(128, 128, 128, 0.4);
+  display: block;
+}
+
+.scm-lane-svg line,
+.scm-lane-svg path {
+  stroke: currentColor;
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.scm-lane-node {
+  fill: var(--accent, #3b82f6);
+  stroke: none;
+}
+
+.scm-lane-node-ring {
+  fill: none;
+  stroke: var(--accent, #3b82f6);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.scm-history-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 12px 4px 4px;
+}
+
+.scm-history-subject {
+  font-size: 12px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scm-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-mute);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.scm-history-sha {
+  font-family: var(--mono, Consolas, monospace);
+  color: var(--text-mute);
+  flex-shrink: 0;
+}
+
+.scm-history-time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scm-ref-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.scm-ref-badge[data-kind='head'] {
+  border-color: var(--accent, #3b82f6);
+  color: var(--accent, #3b82f6);
+}
+
+.scm-ref-badge[data-kind='tag'] {
+  color: var(--text-mute);
+  border-style: dashed;
+}
+
+/* 展开提交后的文件子列表 */
+.scm-commit-files {
+  background: rgba(128, 128, 128, 0.05);
+  padding: 2px 0 4px;
+}
+
+.scm-commit-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px 3px 26px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg);
+  user-select: none;
+  min-width: 0;
+}
+
+.scm-commit-file:hover {
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.scm-commit-file.active {
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.scm-commit-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scm-history-more {
+  padding: 6px 0 8px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+/* 历史 mode 下右栏：文件条 + 提交 diff */
+.scm-commit-diff-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.scm-commit-diff-host .artifacts-empty {
+  padding: 12px;
+}
+
 .changes-panel-body {
   flex: 1;
   display: flex;
   min-height: 0;
   min-width: 0;
   transition: gap var(--motion-collapse-duration) var(--motion-collapse-ease);
+}
+
+/* display 会覆盖 UA 的 [hidden]，需显式隐藏（否则非 Plan 待审时留一条空工具条） */
+.changes-review-toolbar[hidden] {
+  display: none;
 }
 
 .changes-review-toolbar {
@@ -7614,6 +8024,11 @@ body.pane-resizing {
 .changes-review-select-all:has(input:disabled) {
   opacity: 0.45;
   cursor: default;
+}
+
+/* display 会覆盖 UA 的 [hidden]，需显式隐藏（否则非 Plan 待审时也常驻在标题旁） */
+.changes-review-select-all[hidden] {
+  display: none;
 }
 
 .changes-review-select-all {
@@ -7705,9 +8120,11 @@ body.pane-resizing {
   margin-bottom: 8px;
   padding: 8px 10px;
   border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.1));
-  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  background: transparent;
   font-size: 12px;
   line-height: 1.4;
+  user-select: text;
+  -webkit-user-select: text;
 }
 .changes-worktree-preview-meta.is-plan-live {
   border-color: rgba(107, 159, 255, 0.35);
@@ -7753,6 +8170,8 @@ body.pane-resizing {
   border: none;
   padding: 0;
   background: transparent;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .changes-session-diff-grid {
@@ -7787,7 +8206,7 @@ body.pane-resizing {
 
 .diff-line.diff-gap {
   color: var(--text-mute);
-  background: rgba(128, 128, 128, 0.06);
+  background: transparent;
   text-align: center;
   padding: 2px 0;
   user-select: none;
@@ -7846,23 +8265,7 @@ body.pane-resizing {
   max-height: none;
 }
 
-/* Monaco inline review — Cursor layout: delete view-zone (upper) + insert line (lower) */
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor {
-  --vscode-diffEditor-insertedLineBackground: var(--cursor-diff-ins-line);
-  --vscode-diffEditor-removedLineBackground: var(--cursor-diff-del-line);
-  --vscode-diffEditorGutter-insertedLineBackground: var(--cursor-diff-ins-char);
-  --vscode-diffEditorGutter-removedLineBackground: var(--cursor-diff-del-char);
-}
-
-/* Upper deleted row (view-zone): original line number in margin-view-zones */
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .inline-deleted-margin-view-zone {
-  color: var(--cursor-diff-del-lnum) !important;
-  font-variant-numeric: tabular-nums;
-}
-
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .inline-deleted-text {
-  text-decoration: none;
-}
+/* [排查中] Monaco 选区红底问题：review 模式的 --vscode-diffEditor-* 变量覆盖补丁已拆除 */
 
 .changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .view-zones .view-lines .view-line {
   line-height: 1.5;
@@ -8104,6 +8507,15 @@ body.pane-resizing {
 :root:not([data-theme='light']) .terminal-pane,
 :root:not([data-theme='light']) .terminal-output {
   background: #000000;
+}
+
+:root[data-theme='light'] .terminal-pane {
+  background: #ffffff;
+}
+
+:root[data-theme='light'] .terminal-output {
+  background: #ffffff;
+  color: #1f2328;
 }
 
 .terminal-pane.focused {
@@ -8630,68 +9042,8 @@ body.pane-resizing {
   border-top: 1px solid var(--border);
 }
 
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .editor.original {
-  display: none !important;
-}
-
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .editor.modified {
-  width: 100% !important;
-  left: 0 !important;
-}
-
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .line-insert,
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .line-delete,
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .char-insert,
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .char-delete,
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .inline-deleted-text,
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .delete-sign,
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .gutter-delete,
-.artifacts-monaco-diff-host.is-diff-writing .monaco-diff-editor .gutter-insert {
-  background-color: transparent !important;
-  border: none !important;
-}
-
-.monaco-goto-line-highlight,
-.monaco-diff-editor .view-line.monaco-goto-line-highlight,
-.monaco-editor .view-line.monaco-goto-line-highlight,
-.monaco-editor .view-lines .monaco-goto-line-highlight {
-  background-color: var(--monaco-goto-line-bg) !important;
-}
-
-.monaco-diff-writing-line,
-.monaco-editor .view-line.monaco-diff-writing-line,
-.monaco-diff-editor .view-line.monaco-diff-writing-line,
-.artifacts-file-view.is-live-writing .artifacts-monaco-host .view-line.monaco-diff-writing-line,
-.artifacts-file-view.is-live-writing .artifacts-monaco-after-host .view-line.monaco-diff-writing-line {
-  background-color: var(--monaco-writing-line-bg) !important;
-  box-shadow: inset 3px 0 0 var(--monaco-writing-line-accent) !important;
-}
-
-:root[data-theme='light'] .monaco-diff-writing-line,
-:root[data-theme='light'] .monaco-editor .view-line.monaco-diff-writing-line,
-:root[data-theme='light'] .monaco-diff-editor .view-line.monaco-diff-writing-line {
-  background-color: var(--monaco-writing-line-bg) !important;
-  box-shadow: inset 3px 0 0 var(--monaco-writing-line-accent) !important;
-}
-
-/* 文件面板 / 变更面板：压低 Monaco 内联 diff 与定位行高亮 */
-.artifacts-monaco-diff-host:not(.is-diff-writing) .monaco-diff-editor .line-delete,
-.artifacts-monaco-diff-host:not(.is-diff-writing) .monaco-diff-editor .char-delete {
-  background-color: var(--cursor-diff-del-line) !important;
-}
-
-.artifacts-monaco-diff-host:not(.is-diff-writing) .monaco-diff-editor .line-insert,
-.artifacts-monaco-diff-host:not(.is-diff-writing) .monaco-diff-editor .char-insert {
-  background-color: var(--cursor-diff-ins-line) !important;
-}
-
-.artifacts-monaco-diff-host:not(.is-diff-writing) .monaco-diff-editor .char-delete {
-  background-color: var(--cursor-diff-del-char) !important;
-}
-
-.artifacts-monaco-diff-host:not(.is-diff-writing) .monaco-diff-editor .char-insert {
-  background-color: var(--cursor-diff-ins-char) !important;
-}
+/* [排查中] Monaco 选区红底问题：is-diff-writing 压制 / goto-line 高亮 / writing-line 高亮 /
+   内联 diff 压低等补丁已整体拆除，排查结束后从 git 历史恢复 */
 
 .artifacts-large-diff-grid {
   flex: 1;
@@ -8808,7 +9160,6 @@ body.pane-resizing {
   min-width: 28px;
   padding: 0 6px;
   font-size: 11px;
-  font-weight: 600;
 }
 .browser-back-chat-btn {
   flex-shrink: 0;

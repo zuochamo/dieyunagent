@@ -5,6 +5,7 @@ const fsSync = require('fs');
 const path = require('path');
 const { captureGitWorkingBaseline } = require('../git/baseline-capture');
 const { isGitRepo } = require('../git/worktree-service');
+const { encodeWorktreeContent, WORKTREE_SNAPSHOT_MAX_BYTES } = require('../git/git-target');
 const { createTurnUndoStore } = require('./turn-undo-store');
 const { normalizeRemotePath, parseWorkspaceInput } = require('../workspace/target');
 
@@ -401,11 +402,9 @@ function createTurnUndoService(opts = {}) {
         if (fsSync.existsSync(full) && fsSync.statSync(full).isFile()) {
           try {
             const buf = fsSync.readFileSync(full);
-            if (buf.length > 4 * 1024 * 1024) continue;
-            const isBinary = buf.includes(0);
-            record.files[key] = isBinary
-              ? { before: buf.toString('base64'), encoding: 'base64' }
-              : { before: buf.toString('utf8'), encoding: 'utf8' };
+            if (buf.length > WORKTREE_SNAPSHOT_MAX_BYTES) continue;
+            const enc = encodeWorktreeContent(buf);
+            record.files[key] = { before: enc.before, encoding: enc.encoding };
           } catch {
             record.files[key] = { before: null, encoding: 'utf8' };
           }

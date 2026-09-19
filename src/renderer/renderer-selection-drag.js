@@ -7,7 +7,7 @@ const SELECTION_DRAG_SOURCE_SELECTORS = [
   '.side-panel-body',
   '.changes-panel-body',
   '.msg-thinking-body',
-  '.msg-tool-inline-diff-grid',
+  '.msg-tool-inline-diff-body',
   '.agents-md-diff-pre'
 ];
 

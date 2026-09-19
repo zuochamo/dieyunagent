@@ -253,14 +253,17 @@ async function uploadSources(opts) {
   const tarItems = ['Cargo.toml', 'crates'];
   if (fs.existsSync(path.join(ROOT, 'Cargo.lock'))) tarItems.push('Cargo.lock');
 
-  const tmpTar = path.join(os.tmpdir(), `dieyun-core-src-${Date.now()}.tgz`);
+  // 固定名 + 相对路径：GNU tar 会把 `C:\...` 的盘符冒号解析成远程主机，
+  // tar 产物必须以 cwd（ROOT）内的相对路径给出
+  const tmpTar = 'dieyun-core-src.tmp.tgz';
   console.log('[dieyun-core-linux:remote] 打包源码…');
   run('tar', ['-czf', tmpTar, ...tarItems], { cwd: ROOT });
+  const tmpTarAbs = path.join(ROOT, tmpTar);
 
   const remoteTar = `${opts.remoteDir}/src.tgz`;
   console.log('[dieyun-core-linux:remote] 上传源码到', remoteTar);
   sshRun(opts, `mkdir -p ${shellQuote(opts.remoteDir)}`, 60000);
-  scpToRemote(opts, tmpTar, remoteTar);
+  scpToRemote(opts, tmpTarAbs, remoteTar);
   sshRun(
     opts,
     `cd ${shellQuote(opts.remoteDir)} && tar -xzf src.tgz && rm -f src.tgz`,
@@ -268,7 +271,7 @@ async function uploadSources(opts) {
   );
 
   try {
-    fs.unlinkSync(tmpTar);
+    fs.unlinkSync(tmpTarAbs);
   } catch {
     // ignore
   }

@@ -2,13 +2,22 @@
 
 const path = require('path');
 const { normalizeRemotePath } = require('../workspace/target');
-const { parsePorcelainStatus } = require('./worktree-service');
+const {
+  createGitTarget,
+  encodeWorktreeContent,
+  WORKTREE_SNAPSHOT_MAX_BYTES
+} = require('./git-target');
+const { readGitStatus, toLegacyStatusItem } = require('./status');
 
-const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_BASELINE_FILES = 120;
 
 /**
  * SSH 工作区：捕获回合开始前远端 git 脏文件（与 captureGitWorkingBaseline 对齐）。
+ *
+ * git 调用走 createGitTarget（与源码管理同一套远端执行），
+ * 文件内容仍走 SFTP：`head -c` 拿到的是已解码字符串，二进制文件会失真，
+ * 而回撤基线必须拿到精确字节（按 utf8 / base64 分别落档）。
+ *
  * @param {ReturnType<import('../ssh/session-manager').createSshSessionManager>} ssh
  * @param {string} remoteRoot
  * @returns {Promise<{ isGitRepo: boolean, head: string, files: Record<string, { before: string|null, encoding: 'utf8'|'base64', remote: true }> }>}
@@ -18,38 +27,28 @@ async function captureRemoteGitWorkingBaseline(ssh, remoteRoot) {
   if (!ssh || !remoteRoot) return empty;
 
   const root = normalizeRemotePath(remoteRoot);
+  const target = createGitTarget({
+    kind: 'ssh',
+    root,
+    sshExec: (command, cwd, timeoutMs) => ssh.exec(command, cwd, timeoutMs)
+  });
 
-  let check;
-  try {
-    check = await ssh.exec('git rev-parse --git-dir', root, 20000);
-  } catch {
-    return empty;
-  }
-  if (!check || check.code !== 0) return empty;
+  if (!(await target.isRepo())) return empty;
 
-  let head = '';
-  try {
-    const headR = await ssh.exec('git rev-parse HEAD', root, 20000);
-    if (headR && headR.code === 0) head = String(headR.stdout || '').trim();
-  } catch {
-    // ignore
-  }
+  const head = (await target.textOrEmpty(['rev-parse', 'HEAD'])) || '';
 
-  let statusOut = '';
+  let status;
   try {
-    const st = await ssh.exec('git status --porcelain -u', root, 60000);
-    if (!st || st.code !== 0) return { isGitRepo: true, head, files: {} };
-    statusOut = String(st.stdout || '');
+    status = await readGitStatus(target, { untrackedMode: 'normal' });
   } catch {
     return { isGitRepo: true, head, files: {} };
   }
 
   /** @type {Record<string, { before: string|null, encoding: 'utf8'|'base64', remote: true }>} */
   const files = {};
-  const items = parsePorcelainStatus(statusOut);
-
-  for (const item of items) {
+  for (const entry of status.entries) {
     if (Object.keys(files).length >= MAX_BASELINE_FILES) break;
+    const item = toLegacyStatusItem(entry);
     const rel = item.path.replace(/\\/g, '/');
     if (!rel) continue;
 
@@ -60,12 +59,10 @@ async function captureRemoteGitWorkingBaseline(ssh, remoteRoot) {
 
     const full = path.posix.join(root, rel);
     try {
-      const { buf, truncated } = await ssh.sftpReadFile(full, MAX_FILE_BYTES + 1, 0);
-      if (truncated || buf.length > MAX_FILE_BYTES) continue;
-      const isBinary = buf.includes(0);
-      files[rel] = isBinary
-        ? { before: buf.toString('base64'), encoding: 'base64', remote: true }
-        : { before: buf.toString('utf8'), encoding: 'utf8', remote: true };
+      const { buf, truncated } = await ssh.sftpReadFile(full, WORKTREE_SNAPSHOT_MAX_BYTES + 1, 0);
+      if (truncated || buf.length > WORKTREE_SNAPSHOT_MAX_BYTES) continue;
+      const enc = encodeWorktreeContent(buf);
+      files[rel] = { before: enc.before, encoding: enc.encoding, remote: true };
     } catch {
       // ignore unreadable
     }

@@ -30,7 +30,6 @@ const AGENT_LIMITS_DEFAULTS = {
   verifyDiagMaxChars: 18000,
   transientMaxRetries: 3,
   retryBaseMs: 400,
-  liveWriteDebounceMs: 120,
   artifactsUiFlushMs: 80,
   lspSyncDebounceMs: 500,
   monacoMaxChars: 200000,
@@ -256,16 +255,6 @@ const AGENT_LIMITS_SCHEMA = [
     group: 'UI 联动',
     groupId: 'ui-link',
     items: [
-      {
-        key: 'liveWriteDebounceMs',
-        label: '写入联动防抖',
-        type: 'number',
-        min: 50,
-        max: 500,
-        step: 10,
-        format: 'ms',
-        unit: 'ms'
-      },
       {
         key: 'artifactsUiFlushMs',
         label: '产物区刷新防抖',

@@ -36,17 +36,19 @@ async function syncPermissionsToMain() {
 
     hostControl: $('perm-host-control')?.checked !== false,
 
-    fsRead: $('perm-fs-read')?.checked !== false,
+    // 读/写文件、Shell、SQL 只读、联网抓取、浏览器自动化为系统内置能力，恒开、UI 不提供开关；
+    // 显式回写 true，纠正历史持久化里的关闭值
+    fsRead: true,
 
-    fsWrite: $('perm-fs-write')?.checked !== false,
+    fsWrite: true,
 
-    shellExec: $('perm-shell-exec')?.checked !== false,
+    shellExec: true,
 
-    sqlRead: $('perm-sql-read')?.checked !== false,
+    sqlRead: true,
 
-    webFetch: $('perm-web-fetch')?.checked !== false,
+    webFetch: true,
 
-    browserAutomation: $('perm-browser')?.checked !== false,
+    browserAutomation: true,
 
     // 默认关闭：这里必须用 === true，不能沿用上面「!== false」的默认开语义
     unrestrictedPaths: $('perm-unrestricted-paths')?.checked === true
@@ -129,18 +131,6 @@ async function loadPermissionsUI() {
 
     if ($('perm-host-control')) $('perm-host-control').checked = !!p.hostControl;
 
-    if ($('perm-fs-read')) $('perm-fs-read').checked = !!p.fsRead;
-
-    if ($('perm-fs-write')) $('perm-fs-write').checked = !!p.fsWrite;
-
-    if ($('perm-shell-exec')) $('perm-shell-exec').checked = !!p.shellExec;
-
-    if ($('perm-sql-read')) $('perm-sql-read').checked = p.sqlRead !== false;
-
-    if ($('perm-web-fetch')) $('perm-web-fetch').checked = p.webFetch !== false;
-
-    if ($('perm-browser')) $('perm-browser').checked = p.browserAutomation !== false;
-
     if ($('perm-unrestricted-paths')) $('perm-unrestricted-paths').checked = p.unrestrictedPaths === true;
 
   } catch {
@@ -198,18 +188,6 @@ function bindPermissionCheckboxes() {
   [
 
     'perm-host-control',
-
-    'perm-fs-read',
-
-    'perm-fs-write',
-
-    'perm-shell-exec',
-
-    'perm-sql-read',
-
-    'perm-web-fetch',
-
-    'perm-browser',
 
     'perm-unrestricted-paths'
 

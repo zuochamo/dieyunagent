@@ -261,10 +261,23 @@ async function removeWorktreeRun(runId) {
   if (typeof worktreesApi.worktreeCleanupRun !== 'function') return;
   setWorktreesSettingsHint('删除中…');
   try {
-    await worktreesApi.worktreeCleanupRun(id);
+    const r = await worktreesApi.worktreeCleanupRun(id);
+    if (r && r.ok === false) {
+      // 归档失败时服务端会拒绝删除。如实说明，不要谎报「已删除」。
+      setWorktreesSettingsHint('');
+      const why = (r.blocked && r.blocked[0] && r.blocked[0].error) || r.error || '未知原因';
+      showAgentToast('未删除', why, { variant: 'warn', duration: 4200 });
+      await refreshWorktreesSettingsPanel();
+      return;
+    }
+    const archivedN = r && Array.isArray(r.archived) ? r.archived.length : 0;
     await maybeEnforceWorktreeCleanupPolicy();
     await refreshWorktreesSettingsPanel();
-    showAgentToast('已删除', `worktree run ${id}`, { variant: 'info', duration: 2400 });
+    showAgentToast(
+      '已删除',
+      `worktree run ${id}${archivedN ? ` · 产出已归档到分支（${archivedN} 个）` : ''}`,
+      { variant: 'info', duration: 2600 }
+    );
   } catch (err) {
     setWorktreesSettingsHint('');
     showAgentToast('删除失败', err.message || String(err), { variant: 'error' });
@@ -278,9 +291,18 @@ async function saveWorktreeCleanupAndEnforce() {
     const result = await maybeEnforceWorktreeCleanupPolicy();
     await refreshWorktreesSettingsPanel();
     const removedN = result && result.removed ? result.removed.length : 0;
-    setWorktreesSettingsHint(removedN ? `已保存 · 自动清理 ${removedN} 个旧 run` : '已保存');
-    showAgentToast('Worktree 设置已保存', removedN ? `已清理 ${removedN} 个旧 run` : '', {
-      variant: 'success',
+    const blockedN = result && result.blocked ? result.blocked.length : 0;
+    const prunedN =
+      result && result.pruned && Array.isArray(result.pruned.deleted)
+        ? result.pruned.deleted.length
+        : 0;
+    const bits = [];
+    if (removedN) bits.push(`自动清理 ${removedN} 个旧 run`);
+    if (prunedN) bits.push(`回收 ${prunedN} 个已合并分支`);
+    if (blockedN) bits.push(`${blockedN} 个因归档失败保留`);
+    setWorktreesSettingsHint(`已保存${bits.length ? ` · ${bits.join(' · ')}` : ''}`);
+    showAgentToast('Worktree 设置已保存', bits.join(' · '), {
+      variant: blockedN ? 'warn' : 'success',
       duration: 2600
     });
   } catch (err) {

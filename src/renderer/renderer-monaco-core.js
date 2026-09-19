@@ -80,6 +80,8 @@ function canUseMonacoEditor(filePath, text) {
 }
 
 function ensureMonacoDieyunOverrideStyles() {
+  // [排查中] Monaco 选区红底问题：补丁层全部拆除，恢复由本函数注入的覆盖样式时再还原
+  return;
   if (document.getElementById('monaco-dieyun-overrides-css')) return;
   const style = document.createElement('style');
   style.id = 'monaco-dieyun-overrides-css';
@@ -776,23 +778,9 @@ function startDiffHunkAnimation(before, after, opts) {
   const finish = (reveal) => {
     if (!diffAnimState || diffAnimState.token !== token) return;
     if (model.getValue() !== after) model.setValue(after);
-    const animFilePath = String(diffAnimState.filePath || opts?.filePath || activeDiffModels.filePath || '');
     diffAnimState = null;
-    const live =
-      typeof window.getActiveLiveWrite === 'function' ? window.getActiveLiveWrite() : null;
-    const stillWriting =
-      !!(
-        live &&
-        live.status === 'writing' &&
-        (typeof window.pathsMatch === 'function'
-          ? window.pathsMatch(live.path, animFilePath)
-          : String(live.path) === animFilePath)
-      );
-    applyMonacoDiffVisualMode(stillWriting ? 'writing' : 'done');
-    if (stillWriting && modifiedEditor) {
-      const ln = Math.max(1, Math.min(snapshots[snapshots.length - 1]?.focusLine || 1, model.getLineCount()));
-      setDiffWritingDecoration(modifiedEditor, monaco, ln);
-    }
+    // 不再有「写入中」状态：动画结束即回到终态
+    applyMonacoDiffVisualMode('done');
     if (reveal && activeDiffEditor) {
       const listener = activeDiffEditor.onDidUpdateDiff(() => {
         listener.dispose();
@@ -1066,6 +1054,9 @@ function readCssVar(name, fallback) {
 }
 
 function buildDieyunMonacoColors(quietDiff = false, reviewMode = false) {
+  // [排查中] Monaco 选区红底问题：自定义主题配色全部拆除（含选区/diff 覆盖色），
+  // 编辑器退回官方 vs / vs-dark 原始配色；排查结束后再决定恢复方式
+  return {};
   const dark = isAppDarkTheme();
   const editorBg = readCssVar('--monaco-editor-bg', 'transparent');
   const overviewMarker = readCssVar(

@@ -22,9 +22,17 @@ const COMPOSER_QUEUE_STORAGE_KEY = 'dieyun.composer-queue.v1';
 const COMPOSER_QUEUE_PAUSE_STORAGE_KEY = 'dieyun.composer-queue-pause.v1';
 const EMPTY_QUEUE_TEXT = '请根据附件内容协助我。';
 const COMPOSER_QUEUE_IDLE_WAIT_MS = 30000;
+const COMPOSER_QUEUE_SOFT_FAIL_LIMIT = 3;
 
 /** @type {Map<string, { reason: string, at: number }>} */
 const composerQueuePauses = new Map();
+
+/**
+ * 连续软失败计数（按会话）。flush 的 finally 会用 queueMicrotask 重开新调用，
+ * 局部计数器每次归零防不住无限重试，必须跨调用累计；成功发送一次即清零。
+ * @type {Map<string, number>}
+ */
+const composerQueueSoftFailStreaks = new Map();
 
 /**
  * @type {null | {
@@ -525,6 +533,7 @@ function updateComposerQueueUi() {
 function dropQueueIfEmpty(sid) {
   if (getComposerQueue(sid).length) return;
   composerQueues.delete(sid);
+  composerQueueSoftFailStreaks.delete(sid);
   if (composerQueuePauses.has(sid)) {
     composerQueuePauses.delete(sid);
     persistComposerQueuePauses();
@@ -663,6 +672,7 @@ function clearComposerQueue(sessionId) {
   }
   composerQueues.delete(sid);
   composerQueuePauses.delete(sid);
+  composerQueueSoftFailStreaks.delete(sid);
   persistComposerQueuePauses();
   persistComposerQueues();
   updateComposerQueueUi();
@@ -674,6 +684,7 @@ function invalidateComposerQueueSession(sessionId) {
   if (composerQueueEditing?.sessionId === sid) composerQueueEditing = null;
   composerQueues.delete(sid);
   composerQueuePauses.delete(sid);
+  composerQueueSoftFailStreaks.delete(sid);
   persistComposerQueuePauses();
   persistComposerQueues();
   if (sid === activeSid()) updateComposerQueueUi();
@@ -744,7 +755,22 @@ async function flushComposerQueue(sessionId) {
   if (!canFlushComposerQueueSession(sid) || !getComposerQueue(sid).length) return;
 
   flushingComposerQueue = true;
-  let softFailStreak = 0;
+  // 软失败 = sendMessage 正常返回但未启动任务也未新增消息；连续达上限即暂停队列，
+  // 由用户通过「发送下一条 / 立即发送」清除暂停后重试
+  const bumpSoftFail = () => {
+    const streak = (composerQueueSoftFailStreaks.get(sid) || 0) + 1;
+    composerQueueSoftFailStreaks.set(sid, streak);
+    if (streak < COMPOSER_QUEUE_SOFT_FAIL_LIMIT) return false;
+    composerQueueSoftFailStreaks.delete(sid);
+    composerQueuePauses.set(sid, { reason: 'soft_fail', at: Date.now() });
+    persistComposerQueuePauses();
+    updateComposerQueueUi();
+    toast('队列暂停', '连续未能发送，请检查模型配置后重试', {
+      variant: 'warn',
+      duration: 4000
+    });
+    return true;
+  };
   try {
     while (getComposerQueue(sid).length) {
       if (!canFlushComposerQueueSession(sid)) break;
@@ -806,22 +832,17 @@ async function flushComposerQueue(sessionId) {
           Array.isArray(messages) &&
           messages.length > msgLenBefore;
         if (!startedRun && !msgAdded) {
-          softFailStreak += 1;
           requeueItem();
-          if (softFailStreak >= 3) {
-            toast('队列暂停', '连续未能发送，请检查模型配置后重试', {
-              variant: 'warn',
-              duration: 4000
-            });
-            break;
-          }
+          bumpSoftFail();
           break;
         }
-        softFailStreak = 0;
+        composerQueueSoftFailStreaks.delete(sid);
       } catch (err) {
         console.warn('composer queue flush', err);
         requeueItem();
-        toast('队列发送失败', err.message || String(err), { variant: 'error' });
+        if (!bumpSoftFail()) {
+          toast('队列发送失败', err.message || String(err), { variant: 'error' });
+        }
         break;
       }
     }
@@ -832,7 +853,7 @@ async function flushComposerQueue(sessionId) {
     flushingComposerQueue = false;
     if (
       getComposerQueue(sid).length &&
-      softFailStreak < 3 &&
+      !isComposerQueuePaused(sid) &&
       canFlushComposerQueueSession(sid) &&
       !(typeof isSessionSending === 'function' && isSessionSending(sid)) &&
       !(typeof isSessionSwitchInFlight === 'function' && isSessionSwitchInFlight())

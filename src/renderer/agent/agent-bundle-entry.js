@@ -124,12 +124,17 @@ register('DieyunModelRuntimeByTier', runtimeByTier, {
 });
 
 // 模型路由 → API 配置的单一来源（Main 直接 require；Renderer 侧统一走这里，勿再写第二份）
+// isSupplierModelEnabled 也走这里：renderer-model-runtime / renderer-model-capabilities
+// 的勾选判定统一委托本模块，避免同一条设置在两侧得出不同模型名。
 register('DieyunModelApiConfig', modelApiConfig, {
   compat: [
     'parseModelRoute',
     'resolveApiConfigForRoute',
     'resolveDefaultApiConfig',
     'resolveSupplierApiConfig',
+    'pickSupplierModelId',
+    'isSupplierModelEnabled',
+    'supplierModelIds',
     'isUsableApiConfig'
   ]
 });

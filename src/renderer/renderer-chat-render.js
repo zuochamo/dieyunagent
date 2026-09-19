@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, beginLiveWriteSyncSuppress, endLiveWriteSyncSuppress, syncLiveWriteFromTrace, clearLiveWrite, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, getActiveLiveWrite, applyLiveWriteFileListMarks, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns */
 'use strict';
 
 
@@ -348,13 +348,7 @@ function finalizeChatRenderAfterMessages(opts = {}) {
   if (typeof isArtifactsUiBatching === 'function' && isArtifactsUiBatching()) {
     // 批量渲染结束后统一刷新产物区
   } else if (!$('artifacts-panel')?.hidden) {
-    const live =
-      typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-    if (live && live.status === 'writing') {
-      if (typeof applyLiveWriteFileListMarks === 'function') applyLiveWriteFileListMarks();
-    } else {
-      renderArtifactsList({ skipRefresh: true });
-    }
+    renderArtifactsList({ skipRefresh: true });
   }
   if (forceScroll) {
     scrollChatToBottom({ force: true });
@@ -364,41 +358,23 @@ function finalizeChatRenderAfterMessages(opts = {}) {
   updateLastTurnFloat();
 }
 
-function syncLiveWriteFromLastRenderedMessage() {
-  if (typeof syncLiveWriteFromTrace !== 'function') return;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (!m || m.role !== 'assistant') continue;
-    const { content: raw } = unpackAssistantMeta(m.content);
-    const split = splitPersistedAssistantTrace(raw);
-    const trace = split.trace || (Array.isArray(m.transientTrace) ? m.transientTrace : []);
-    if (trace.length) {
-      void syncLiveWriteFromTrace(trace, {
-        sessionId: typeof currentSessionId !== 'undefined' ? currentSessionId : undefined
-      });
-      return;
-    }
-  }
+/** 历史渲染批次收尾：面板「变更」页按需重绘（不再驱动 live-write，也不自动打开侧栏） */
+function refreshChangesPaneAfterRender() {
   const hasSessionChanges =
     typeof getSessionChangeRowsForAgent === 'function' && getSessionChangeRowsForAgent().length > 0;
-  if (hasSessionChanges) {
-    if (typeof window.patchChangesPane === 'function') window.patchChangesPane();
-    else if (typeof renderChangesPane === 'function') renderChangesPane();
-    return;
-  }
-  if (typeof clearLiveWrite === 'function') clearLiveWrite();
+  if (!hasSessionChanges) return;
+  if (typeof window.patchChangesPane === 'function') window.patchChangesPane();
+  else if (typeof renderChangesPane === 'function') renderChangesPane();
 }
 
 function beginChatHistoryArtifactsBatch() {
   if (typeof beginArtifactsUiBatch === 'function') beginArtifactsUiBatch();
-  if (typeof beginLiveWriteSyncSuppress === 'function') beginLiveWriteSyncSuppress();
 }
 
 function endChatHistoryArtifactsBatch() {
   if (typeof forceArtifactsUiRefreshAfterBatch === 'function') forceArtifactsUiRefreshAfterBatch();
-  if (typeof endLiveWriteSyncSuppress === 'function') endLiveWriteSyncSuppress();
   if (typeof endArtifactsUiBatch === 'function') endArtifactsUiBatch();
-  syncLiveWriteFromLastRenderedMessage();
+  refreshChangesPaneAfterRender();
 }
 
 async function renderChatFromMessagesYielding(opts = {}) {

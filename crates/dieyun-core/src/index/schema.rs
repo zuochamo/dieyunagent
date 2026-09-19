@@ -1,7 +1,36 @@
 use rusqlite::Connection;
 
-/// 递增时在 open() 中重新跑 init_schema
+use crate::error::CoreError;
+
+/// 递增时触发一次 [`ensure_schema`] 重跑
 pub const SCHEMA_VERSION: i32 = 1;
+
+/// 确保索引表就绪。
+///
+/// **只在库文件首次被用到时跑一次**（由 `SqliteHandle` 保证）：CREATE + FTS 建表
+/// 在外置盘上可拖到数十秒，每次查询都跑一遍就是灾难。
+pub fn ensure_schema(conn: &Connection) -> Result<(), CoreError> {
+    let ver: i32 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap_or(0);
+    if ver >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    let has_chunks = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks' LIMIT 1",
+            [],
+            |r| r.get::<_, i32>(0),
+        )
+        .ok()
+        .is_some();
+    if has_chunks {
+        // 已有表：只钉版本，勿再跑 CREATE/FTS（外置盘上很慢）
+        let _ = conn.pragma_update(None, "user_version", SCHEMA_VERSION);
+        return Ok(());
+    }
+    init_schema(conn).map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))
+}
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(

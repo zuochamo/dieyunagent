@@ -2,7 +2,12 @@
 
 const fs = require('fs');
 const path = require('path');
-const { parsePorcelainStatus, isGitRepo, gitExec } = require('./worktree-service');
+const {
+  createGitTarget,
+  encodeWorktreeContent,
+  WORKTREE_SNAPSHOT_MAX_BYTES
+} = require('./git-target');
+const { readGitStatus, toLegacyStatusItem } = require('./status');
 
 /** Avoid multi-minute undo.turn_begin on repos with thousands of dirty paths. */
 const MAX_BASELINE_FILES = 120;
@@ -14,28 +19,37 @@ const MAX_BASELINE_FILES = 120;
  */
 async function captureGitWorkingBaseline(repoPath) {
   const files = {};
-  if (!(await isGitRepo(repoPath))) {
+  const target = createGitTarget({ kind: 'local', root: repoPath });
+  if (!(await target.isRepo())) {
     return { head: '', files };
   }
-  const head = await gitExec(repoPath, ['rev-parse', 'HEAD']).catch(() => '');
-  const out = await gitExec(repoPath, ['status', '--porcelain', '-u']).catch(() => '');
-  const items = parsePorcelainStatus(out);
-  for (const item of items) {
+  const head = (await target.textOrEmpty(['rev-parse', 'HEAD'])) || '';
+
+  let status;
+  try {
+    // untrackedMode:normal —— 与改造前 `git status --porcelain -u` 一致：
+    // 未跟踪目录折叠成 `dir/`，不会在 turn_begin 里逐个展开
+    status = await readGitStatus(target, { untrackedMode: 'normal' });
+  } catch {
+    return { head, files };
+  }
+
+  for (const entry of status.entries) {
     if (Object.keys(files).length >= MAX_BASELINE_FILES) break;
+    const item = toLegacyStatusItem(entry);
     const rel = item.path.replace(/\\/g, '/');
-    const full = path.join(repoPath, rel);
+    if (!rel) continue;
     if (item.kind === 'deleted') {
       files[rel] = { before: null, encoding: 'utf8' };
       continue;
     }
+    const full = path.join(repoPath, rel);
     if (!fs.existsSync(full) || !fs.statSync(full).isFile()) continue;
     try {
       const buf = fs.readFileSync(full);
-      if (buf.length > 4 * 1024 * 1024) continue;
-      const isBinary = buf.includes(0);
-      files[rel] = isBinary
-        ? { before: buf.toString('base64'), encoding: 'base64' }
-        : { before: buf.toString('utf8'), encoding: 'utf8' };
+      if (buf.length > WORKTREE_SNAPSHOT_MAX_BYTES) continue;
+      const enc = encodeWorktreeContent(buf);
+      files[rel] = { before: enc.before, encoding: enc.encoding };
     } catch {
       // ignore unreadable
     }

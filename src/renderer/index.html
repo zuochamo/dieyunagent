@@ -164,14 +164,17 @@
                     </button>
                     <button type="button" class="icon-btn composer-tool-icon-btn" id="btn-composer-path-perm" title="路径权限：受白名单限制" aria-label="路径权限" aria-pressed="false">
                       <svg class="composer-path-perm-icon-normal" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                        <path d="M12 3.2 5 6v5.4c0 4.2 2.9 8 7 9.2 4.1-1.2 7-5 7-9.2V6l-7-2.8Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+                        <g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                          <rect x="5.5" y="11" width="13" height="9" rx="2" />
+                          <path d="M9 11V7.5a3 3 0 0 1 6 0V11" />
+                          <path d="M12 14.6v2.6" />
+                        </g>
                       </svg>
                       <svg class="composer-path-perm-icon-unrestricted" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                        <g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="butt" stroke-linejoin="miter">
-                          <path d="M12 20.9 14.4 17.3V8.1H9.6v9.2L12 20.9Z" />
-                          <path d="M6.9 8.1h10.2" />
-                          <path d="M12 8.1v-5" />
-                          <path d="M10 3.1h4" />
+                        <g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                          <rect x="5.5" y="11" width="13" height="9" rx="2" />
+                          <path d="M9 11V7.5a3.4 3.4 0 0 1 6.7-.9" />
+                          <path d="M12 14.6v2.6" />
                         </g>
                       </svg>
                     </button>
@@ -261,6 +264,15 @@
                     <path d="M8 6h5a4 4 0 0 1 4 4v5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
                   </svg>
                 </button>
+                <button type="button" class="side-panel-rail-btn" data-side-tab="scm" title="源码管理" aria-label="源码管理">
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                    <circle cx="6.5" cy="5.5" r="2.4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                    <circle cx="6.5" cy="18.5" r="2.4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                    <circle cx="17.5" cy="8.5" r="2.4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                    <path d="M6.5 7.9v8.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                    <path d="M17.5 10.9v.4a4.8 4.8 0 0 1-4.8 4.8H6.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                  </svg>
+                </button>
                 <button type="button" class="side-panel-rail-btn" data-side-tab="terminal" title="终端" aria-label="终端">
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                     <rect x="3" y="4" width="18" height="16" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
@@ -344,6 +356,54 @@
                     </div>
                     <div class="changes-file-view agent-scroll" id="changes-file-view">
                       <div class="artifacts-empty">选择文件查看 diff 摘要</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="side-panel-pane" data-side-pane="scm" hidden>
+                  <div class="side-panel-pane-head">
+                    <span class="side-panel-pane-title">源码管理</span>
+                    <div class="scm-mode-switch" id="scm-mode-switch" role="tablist" aria-label="源码管理视图">
+                      <button type="button" class="scm-mode-btn active" data-scm-mode-btn="changes" role="tab" aria-selected="true" title="工作区改动">更改</button>
+                      <button type="button" class="scm-mode-btn" data-scm-mode-btn="history" role="tab" aria-selected="false" title="提交历史时间线">历史</button>
+                    </div>
+                    <span class="side-panel-pane-meta" id="scm-summary">未连接</span>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="scm-refresh" title="刷新工作区状态">刷新</button>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="scm-commit-btn" title="提交已暂存内容（Ctrl+Enter）" hidden disabled>提交</button>
+                  </div>
+                  <div id="scm-changes-wrap">
+                    <div class="scm-commit-box" id="scm-commit-box" hidden>
+                      <textarea class="scm-commit-message" id="scm-commit-message" rows="2" placeholder="提交信息（Ctrl+Enter 提交已暂存内容）" spellcheck="false"></textarea>
+                      <div class="scm-commit-actions">
+                        <span class="scm-commit-hint" id="scm-commit-hint"></span>
+                      </div>
+                    </div>
+                    <div class="scm-filebar" id="scm-filebar" hidden>
+                      <span class="scm-filebar-path" id="scm-filebar-path"></span>
+                      <span class="scm-filebar-meta" id="scm-filebar-meta"></span>
+                    </div>
+                    <div class="changes-panel-body">
+                      <div class="changes-file-list agent-scroll" id="scm-file-list">
+                        <div class="artifacts-empty">加载中…</div>
+                      </div>
+                      <div class="changes-file-view agent-scroll" id="scm-file-view">
+                        <div class="artifacts-empty">选择文件查看 diff</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div id="scm-history-wrap" hidden>
+                    <div class="changes-panel-body">
+                      <div class="changes-file-list agent-scroll" id="scm-history-list">
+                        <div class="artifacts-empty">加载中…</div>
+                      </div>
+                      <div class="changes-file-view agent-scroll" id="scm-commit-view">
+                        <div class="scm-filebar" id="scm-commit-filebar" hidden>
+                          <span class="scm-filebar-path" id="scm-commit-filebar-path"></span>
+                          <span class="scm-filebar-meta" id="scm-commit-filebar-meta"></span>
+                        </div>
+                        <div id="scm-commit-diff" class="scm-commit-diff-host">
+                          <div class="artifacts-empty">展开提交并选择文件查看 diff</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -466,10 +526,6 @@
                     </div>
                   </div>
                   <div class="context-stats-panel agent-scroll" id="codebase-stats-panel">
-                    <label class="check-row codebase-panel-check">
-                      <input type="checkbox" id="codebase-auto-incremental" checked />
-                      <span>保存源文件或打开工作区后，自动后台增量更新（含向量）</span>
-                    </label>
                     <section class="context-stats-section">
                       <h4 class="context-stats-section-title">索引状态</h4>
                       <div class="context-stats-row"><span>状态</span><span id="cb-stat-state">—</span></div>
@@ -504,10 +560,6 @@
                     </div>
                   </div>
                   <div class="context-stats-panel agent-scroll" id="graph-stats-panel">
-                    <label class="check-row codebase-panel-check">
-                      <input type="checkbox" id="graph-auto-incremental" checked />
-                      <span>保存源文件或打开工作区后，自动后台增量更新</span>
-                    </label>
                     <p class="codebase-panel-note" id="graph-panel-workspace-note"></p>
                     <section class="context-stats-section">
                       <h4 class="context-stats-section-title">索引状态</h4>
@@ -1244,15 +1296,11 @@
                 <p class="settings-page-desc theme-auto-launch-hint" id="theme-auto-launch-hint" data-i18n="theme_auto_launch_hint" hidden>开发模式下不可用；请使用安装包。</p>
               </div>
               <label class="check-row"><input type="checkbox" id="perm-host-control" checked /><span>启用本机控制</span></label>
-              <label class="check-row"><input type="checkbox" id="perm-fs-read" checked /><span>读取文件</span></label>
-              <label class="check-row"><input type="checkbox" id="perm-fs-write" checked /><span>写入文件</span></label>
-              <label class="check-row"><input type="checkbox" id="perm-shell-exec" checked /><span>执行 Shell 命令</span></label>
-              <label class="check-row"><input type="checkbox" id="perm-sql-read" checked /><span>SQL Server 只读查询</span></label>
-              <label class="check-row"><input type="checkbox" id="perm-web-fetch" checked /><span>联网抓取</span></label>
-              <label class="check-row"><input type="checkbox" id="perm-browser" checked /><span>浏览器自动化</span></label>
               <label class="check-row"><input type="checkbox" id="perm-unrestricted-paths" /><span>完全放开路径限制</span></label>
               <label class="check-row"><input type="checkbox" id="perm-lsp-diagnostics" checked /><span>启用 LSP 诊断注入</span></label>
               <label class="check-row"><input type="checkbox" id="perm-workplace-monitor" checked /><span>工位监控上报</span></label>
+              <label class="check-row"><input type="checkbox" id="codebase-auto-incremental" checked /><span>代码索引：保存源文件或打开工作区后，自动后台增量更新（含向量）</span></label>
+              <label class="check-row"><input type="checkbox" id="graph-auto-incremental" checked /><span>结构索引：保存源文件或打开工作区后，自动后台增量更新</span></label>
               <div class="theme-long-horizon-options">
                 <label class="check-row" id="theme-long-horizon-row">
                   <input type="checkbox" id="theme-long-horizon" />
@@ -1571,13 +1619,13 @@
                 </section>
                 <section class="help-usage-section">
                   <h3>代码索引</h3>
-                  <p>在右侧工作面板的「代码索引」页维护：查看状态、试搜片段、重建索引，以及开启保存后自动增量。代码索引把工作区源码切成可检索的片段（chunk）。Agent 问「某段逻辑在哪」时用 <code>codebase_search</code> 按语义/关键词找相关文件；它不画依赖图（那是「结构索引」）。</p>
+                  <p>在右侧工作面板的「代码索引」页维护：查看状态、试搜片段、重建索引；「保存后自动增量」开关在「设置 → 权限」。代码索引把工作区源码切成可检索的片段（chunk）。Agent 问「某段逻辑在哪」时用 <code>codebase_search</code> 按语义/关键词找相关文件；它不画依赖图（那是「结构索引」）。</p>
                   <p>语义检索依赖「向量索引」中已启用的 Embedding 模型（也可用关键词检索）。与结构索引互补：前者偏文本/语义搜片段，后者偏模块依赖与调用关系。</p>
                   <p><strong>自动增量更新</strong>（默认开）：保存源文件或打开工作区后，在后台增量更新索引（含向量）；需先对工作区完成一次「重建」。关闭后仅手动重建时更新。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>结构索引</h3>
-                  <p>在右侧工作面板的「结构索引」页维护：查看状态、试查符号、重建索引，以及开启保存后自动增量。结构索引解析模块 import、函数/类符号与静态调用关系。Agent 用它查「谁依赖谁 / 谁调用谁 / 改一处会影响哪」；与「代码索引」互补（后者偏文本/语义搜片段）。</p>
+                  <p>在右侧工作面板的「结构索引」页维护：查看状态、试查符号、重建索引；「保存后自动增量」开关在「设置 → 权限」。结构索引解析模块 import、函数/类符号与静态调用关系。Agent 用它查「谁依赖谁 / 谁调用谁 / 改一处会影响哪」；与「代码索引」互补（后者偏文本/语义搜片段）。</p>
                   <p>本地分析 JS/TS/Python/Go/Rust，供 Agent 工具 <code>graph</code>（<code>operation</code>：<code>module_deps</code> / <code>find_symbol</code> / <code>semantic_find</code> / <code>callers</code> / <code>callees</code> / <code>impact</code> / <code>lsp_callers</code>）使用。</p>
                   <p><strong>语义找符号</strong>（<code>graph</code> 的 <code>semantic_find</code>）需先在「向量索引」中配置并启用 Embedding 模型；点击「重建」时会自动构建符号向量。</p>
                   <p>与向量索引（<code>@Codebase</code> / <code>codebase_search</code>）相互独立，不依赖 MCP。SSH 工作区支持远程结构索引；<code>graph</code> 的 <code>lsp_callers</code> 在 SSH 下会使用远程 rg/grep 补强调用点。</p>
@@ -1597,7 +1645,7 @@
                 </section>
                 <section class="help-usage-section">
                   <h3>权限</h3>
-                  <p><strong>本机权限</strong>：逐项开关 Agent 可用能力——本机控制、读/写文件、Shell、SQL Server 只读、联网抓取、浏览器自动化。关闭后对应工具不再注册。权限仅在本地回环 Gateway 中生效。</p>
+                  <p><strong>本机权限</strong>：读/写文件、Shell、SQL Server 只读查询、联网抓取、浏览器自动化为系统内置能力，恒开、不提供开关；可逐项开关的是本机控制、路径限制（含「完全放开」）等，关闭后对应工具不再注册。权限仅在本地回环 Gateway 中生效。</p>
                   <p><strong>启用 LSP 诊断注入</strong>（默认开）：发消息前拉取 TS/Python 等语言服务报错，注入 Agent 上下文（类似 Cursor Problems）；需本地工作区与读取文件权限。</p>
                   <p><strong>工位监控上报</strong>（默认开启）：内网 Socket.IO 实时上报 CPU / 键鼠统计，可在「设置 → 权限」关闭。</p>
                   <p><strong>长程 Agent 任务</strong>（默认关）：打开即生效，无需改编码参数。适合跨很多工具轮次的长任务：<strong>不启用文件回撤</strong>；撞上轮次上限时自动续段（最多 20 段）；<strong>不再硬拦</strong>同文件反复读取、只读探索步数、重复工具调用。每段工具次数与轮次上限自动提高。页脚显示「· 长程」。Plan 下 worktree 隔离仍有效；Agent 下建议在重要节点自行 <code>git commit</code>。</p>
@@ -1977,14 +2025,15 @@
     <script src="./renderer-problems.js"></script>
     <script src="./renderer-monaco-core.js"></script>
     <script src="./renderer-monaco.js"></script>
-    <script src="./renderer-live-write.js"></script>
+    <script src="./renderer-path-utils.js"></script>
     <script src="./renderer-plan-changes.js"></script>
     <script src="./renderer-artifacts-session.js"></script>
     <script src="./renderer-artifacts-browse.js"></script>
-    <script src="./renderer-artifacts-live-write.js"></script>
+    <script src="./renderer-artifact-diff-view.js"></script>
     <script src="./renderer-artifacts.js"></script>
     <script src="./renderer-editor-context.js"></script>
     <script src="./renderer-changes-pane.js"></script>
+    <script src="./renderer-scm-pane.js"></script>
     <script src="./renderer-terminal.js"></script>
     <script src="./renderer-browser.js"></script>
     <script src="./renderer-side-panel.js"></script>

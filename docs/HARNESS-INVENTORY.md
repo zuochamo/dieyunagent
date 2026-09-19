@@ -53,7 +53,7 @@
 |---|---|
 | 护栏 | `repeatToolStreakLimit` `repeatHistoryMax` `completionRepairAttempts` `verifyDiagMaxChars` `writeSmellHintMaxItems` `writeSmellHintMaxChars` `writeSmellScanTimeoutMs` `taskTierEnabled` |
 | Harness | `transientMaxRetries` `retryBaseMs` |
-| UI 联动 | `liveWriteDebounceMs` `artifactsUiFlushMs` `lspSyncDebounceMs` `monacoMaxChars` |
+| UI 联动 | `artifactsUiFlushMs` `lspSyncDebounceMs` `monacoMaxChars` |
 | 上下文 | `ctxAgentToolCallLimit` `toolResultMaxJson` `codebaseSnippetMax` `codebaseAutoLimit` `openFilesMax` `filePreviewMaxChars` `fsReadDefaultMaxBytes` `lspDiagMaxChars` `visionShotsPerRound` `visionReattachPerRound` `visionMaxBase64Chars` `visionPartEqChars` `completionHistoryMaxChars` `completionMessageMaxChars` `completionLastUserMaxChars` `completionTurnRideMaxChars` `completionRecentTurns` `completionFoldedMaxChars` `userSystemMaxChars` `systemStableMaxChars` `llmRequestMaxChars` `charsPerToken` `cjkCharsPerToken` |
 | LLM 重试 | `streamRoundMaxAttempts` `llmRetryBaseMs` `llmReconnectMaxWaitMs` `llmFirstTokenTimeoutMs` `llmStreamIdleTimeoutMs` `synthesisTimeoutMs` `synthesisReconnectMaxWaitMs` |
 | 编辑器/Diff | `maxUndoSteps` `editorSelectionMax` `editorVisibleLines` `maxDiffChars` `diffFullTextCap` `chatImagePreviewMaxMb` `attachmentRetentionMaxMb` `attachmentDownsampleMaxPx` `attachmentDownsampleMinKb` |

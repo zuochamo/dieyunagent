@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-09-17T00:56:09.463Z
+生成时间：2026-09-19T07:28:13.317Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 183 |
-| Gateway only | 111 |
+| 总计 | 192 |
+| Gateway only | 120 |
 | Rust only | 23 |
 | Both | 49 |
 
@@ -250,6 +250,20 @@
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `rpc.cancel` | rust | — | yes |
+
+### scm (9)
+
+| Method | Layer | Gateway source | Rust |
+|--------|-------|----------------|------|
+| `scm.commit` | gateway | gateway/handlers/scm.js | — |
+| `scm.commit_diff` | gateway | gateway/handlers/scm.js | — |
+| `scm.commit_files` | gateway | gateway/handlers/scm.js | — |
+| `scm.discard` | gateway | gateway/handlers/scm.js | — |
+| `scm.file_diff` | gateway | gateway/handlers/scm.js | — |
+| `scm.log` | gateway | gateway/handlers/scm.js | — |
+| `scm.stage` | gateway | gateway/handlers/scm.js | — |
+| `scm.status` | gateway | gateway/handlers/scm.js | — |
+| `scm.unstage` | gateway | gateway/handlers/scm.js | — |
 
 ### speech (1)
 

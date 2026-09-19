@@ -10,8 +10,7 @@ const { clearToolHarnessSessionsForSession } = require('../agent/tool-harness');
 const { buildPlanRunUserText, stripAssistantMeta, stripUserMeta } = require('./plan-run-turn');
 const { buildPlanAgentTools } = require('./plan-tools');
 const { isAbortError } = require('../llm-reconnect-retry');
-const fs = require('fs');
-const path = require('path');
+const { appendPlanLog } = require('./plan-log');
 
 async function buildPlanSystemMessage(userData, workspacePath, plan, userPrompt) {
   const chunks = [
@@ -77,15 +76,6 @@ function summarizeTrace(trace) {
     })
     .filter(Boolean)
     .join('\n');
-}
-
-function appendPlanLog(userData, plan, text) {
-  const dir = path.join(userData, 'plans-logs');
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${plan.id}.md`);
-  const header = `\n\n---\n## ${new Date().toLocaleString('zh-CN')} · ${plan.name}\n\n`;
-  fs.appendFileSync(file, header + text, 'utf8');
-  return file;
 }
 
 /**

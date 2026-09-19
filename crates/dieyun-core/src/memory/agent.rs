@@ -152,14 +152,41 @@ impl MemoryStore {
             .to_string();
         let now = super::now_ms();
         self.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO agent_traces
-                  (run_id, session_id, message_id, phase, trace_json, trace_text, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![run_id, session_id, message_id, phase, trace_json, trace_text, now],
-            )?;
+            // 同一条 run 的 checkpoint 原地覆盖最新一行。
+            //
+            // 读取路径只有 `get_agent_trace`（`run_id` + `ORDER BY id DESC LIMIT 1`），
+            // 历史行没有任何读者；而运行中的任务每 ~2.5s 就写一份**全量**快照，
+            // 追加式写入等于让单次运行落盘几十 MB、且总量与时长成平方关系。
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM agent_traces WHERE run_id = ?1 ORDER BY id DESC LIMIT 1",
+                    params![run_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let trace_id = match existing {
+                Some(id) => {
+                    conn.execute(
+                        "UPDATE agent_traces
+                            SET session_id = ?1, message_id = ?2, phase = ?3,
+                                trace_json = ?4, trace_text = ?5, created_at = ?6
+                          WHERE id = ?7",
+                        params![session_id, message_id, phase, trace_json, trace_text, now, id],
+                    )?;
+                    id
+                }
+                None => {
+                    conn.execute(
+                        "INSERT INTO agent_traces
+                          (run_id, session_id, message_id, phase, trace_json, trace_text, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![run_id, session_id, message_id, phase, trace_json, trace_text, now],
+                    )?;
+                    conn.last_insert_rowid()
+                }
+            };
             Ok(json!({
-                "traceId": conn.last_insert_rowid(),
+                "traceId": trace_id,
                 "runId": run_id,
             }))
         })
@@ -575,6 +602,59 @@ mod tests {
         assert_eq!(trace.get("runId").and_then(|v| v.as_str()), Some("run-1"));
         let state = store.get_latest_agent_state(&session.id).unwrap().unwrap();
         assert_eq!(state.get("runId").and_then(|v| v.as_str()), Some("run-1"));
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// 运行中每 ~2.5s 一次 checkpoint 必须原地覆盖，
+    /// 否则单条 run 会累积上百份同源全量快照。
+    #[test]
+    fn trace_checkpoints_overwrite_same_run() {
+        let db = std::env::temp_dir().join(format!(
+            "dieyun-agent-overwrite-{}.sqlite",
+            super::super::now_ms()
+        ));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let session = store.create_session(Some("trace"), None).unwrap();
+        store
+            .upsert_agent_run(&json!({
+                "id": "run-ow",
+                "sessionId": session.id,
+                "status": "running",
+            }))
+            .unwrap();
+        for i in 0..3 {
+            store
+                .save_agent_trace(&json!({
+                    "runId": "run-ow",
+                    "sessionId": session.id,
+                    "status": "running",
+                    "trace": [{ "type": "text", "content": i.to_string() }],
+                }))
+                .unwrap();
+        }
+        let rows: i64 = {
+            let guard = store.conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_traces WHERE run_id = 'run-ow'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(rows, 1, "同一 run 的 checkpoint 不应堆成多行");
+        let row = store
+            .get_agent_trace(&json!({ "runId": "run-ow" }))
+            .unwrap()
+            .unwrap();
+        let content = row
+            .get("trace")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.as_str());
+        assert_eq!(content, Some("2"), "覆盖后应读到最新一次 checkpoint");
         let _ = std::fs::remove_file(db);
     }
 }

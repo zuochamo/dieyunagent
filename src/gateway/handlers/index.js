@@ -16,6 +16,7 @@ const { createFsHandlers } = require('./fs');
 const { createHostHandlers } = require('./host');
 const { createBrowserHandlers } = require('./browser');
 const { createUndoHandlers } = require('./undo');
+const { createScmHandlers } = require('./scm');
 
 /**
  * Compose extracted RPC handler namespaces.
@@ -38,7 +39,8 @@ function createExtractedHandlers(deps) {
     ...createFsHandlers(deps),
     ...createHostHandlers(deps),
     ...createBrowserHandlers(deps),
-    ...createUndoHandlers(deps)
+    ...createUndoHandlers(deps),
+    ...createScmHandlers(deps)
   };
 }
 

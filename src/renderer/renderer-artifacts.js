@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, getActiveLiveWrite, isLiveWritePath, normWritePath, pathsMatch, syncLiveWriteFromTrace, clearLiveWrite, applyLiveWriteFileListMarks, refreshLiveWriteArtifactPreview, createMonacoArtifactDiffEditor, updateMonacoArtifactDiffEditor, disposeMonacoArtifactEditor, createMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, enrichLiveWriteDiffStats, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoAfterOnlyEditorMounted, isMonacoMountInFlight, isMonacoArtifactEditorMounted, updateMonacoArtifactEditorText, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText */
+/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, updateMonacoArtifactDiffEditor, disposeMonacoArtifactEditor, createMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText */
 'use strict';
 
 function pruneInvalidSessionArtifacts() {
@@ -163,16 +163,11 @@ function trackArtifactsFromTrace(trace, opts) {
   }
   if (!visible) return;
   if (!isArtifactsUiBatching() && isSidePanelOpen()) {
-    if (isActiveLiveWriteSession()) {
-      patchArtifactsFilesPanelForLiveWrite();
-      if (typeof window.patchChangesPane === 'function') window.patchChangesPane();
-    } else {
-      scheduleArtifactsUiFlush();
-    }
+    scheduleArtifactsUiFlush();
   }
 }
 
-function renderLastRoundFileRows(list, view, dirEntries, live) {
+function renderLastRoundFileRows(list, view, dirEntries) {
   if (!lastRoundFileChanges.length) return;
   const missing = lastRoundFileChanges.filter(function (f) {
     if (
@@ -182,7 +177,6 @@ function renderLastRoundFileRows(list, view, dirEntries, live) {
     ) {
       return false;
     }
-    if (live && artifactPathsMatch(live.path, f.path)) return false;
     return shouldShowVirtualArtifactRow(f.path, { pending: f.pending });
   });
   if (!missing.length) return;
@@ -207,8 +201,7 @@ function renderLastRoundFileRows(list, view, dirEntries, live) {
 }
 
 function renderArtifactRow(list, view, row) {
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-  const diffStats = resolveRowDiffStats(row, live);
+  const diffStats = resolveRowDiffStats(row);
   const diff = formatArtifactDiffHtml(diffStats);
   const remoteTag = row.remote ? ' <span class="artifacts-file-remote">远程</span>' : '';
   const icon = row.kind === 'dir' ? flatFolderIconSvg(16) : flatFileIconSvg(16);
@@ -216,11 +209,6 @@ function renderArtifactRow(list, view, row) {
   el.className = 'artifacts-file-item' + (row.kind === 'dir' ? ' is-dir' : '');
   if (row.kind === 'file') {
     el.setAttribute('data-file-path', row.path);
-    if (typeof isLiveWritePath === 'function' && isLiveWritePath(row.path)) {
-      const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-      if (live?.status === 'writing') el.classList.add('is-writing');
-      if (live?.status === 'done') el.classList.add('is-write-done');
-    }
   }
   if (row.kind === 'file' && row.path === selectedArtifactPath) el.classList.add('active');
   if (row.source === 'trace') el.classList.add('recent');
@@ -253,7 +241,6 @@ function renderArtifactRow(list, view, row) {
 }
 
 function artifactsFileListSig() {
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
   return [
     artifactsBrowseRel,
     selectedArtifactPath,
@@ -264,8 +251,7 @@ function artifactsFileListSig() {
       .map(function (f) {
         return String(f.path || '') + ':' + (f.pending ? 'p' : '') + ':' + (f.added || 0) + ':' + (f.removed || 0);
       })
-      .join('|'),
-    live ? String(live.path || '') + ':' + String(live.status || '') : ''
+      .join('|')
   ].join('::');
 }
 
@@ -273,17 +259,6 @@ function paintArtifactsFileList(list, view) {
   const sig = artifactsFileListSig();
   if (sig === lastArtifactsFileListSig && list.childElementCount > 0) {
     if (view && selectedArtifactPath) {
-      const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-      const liveForSelected =
-        live &&
-        live.path &&
-        (typeof liveMatchesArtifactPath === 'function'
-          ? liveMatchesArtifactPath(live, selectedArtifactPath)
-          : typeof isLiveWritePath === 'function' && isLiveWritePath(selectedArtifactPath));
-      const needsLiveRemount =
-        liveForSelected &&
-        live.status === 'writing' &&
-        viewHasPlainMonacoEditor(view);
       const alreadyMounted =
         typeof window.isMonacoArtifactEditorMounted === 'function' &&
         window.isMonacoArtifactEditorMounted(selectedArtifactPath);
@@ -293,12 +268,8 @@ function paintArtifactsFileList(list, view) {
         !!diskMtime &&
         !!selectedArtifactContentMtime &&
         diskMtime !== selectedArtifactContentMtime;
-      if (needsLiveRemount || !alreadyMounted || contentStale) {
-        loadArtifactContent(
-          selectedArtifactPath,
-          view,
-          needsLiveRemount || contentStale ? { force: true } : undefined
-        );
+      if (!alreadyMounted || contentStale) {
+        loadArtifactContent(selectedArtifactPath, view, contentStale ? { force: true } : undefined);
       }
     }
     return;
@@ -358,48 +329,18 @@ function paintArtifactsFileList(list, view) {
     }
   }
 
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-  if (live && live.path) {
-    selectedArtifactPath = applyWorkspaceArtifactPath(live.path);
-  }
-
-  renderLastRoundFileRows(list, view, artifactsDirEntries, live);
+  renderLastRoundFileRows(list, view, artifactsDirEntries);
 
   var selectedExists =
     selectedArtifactPath &&
-    (artifactsDirEntries.some(function (row) {
+    artifactsDirEntries.some(function (row) {
       return row.kind === 'file' && artifactPathsMatch(row.path, selectedArtifactPath);
-    }) ||
-      (live && artifactPathsMatch(live.path, selectedArtifactPath)));
-  if (!selectedExists) selectedArtifactPath = null;
-  if (!selectedArtifactPath && live && live.path) {
-    selectedArtifactPath = applyWorkspaceArtifactPath(live.path);
-  }
-  if (!selectedArtifactPath) {
+    });
+  if (!selectedExists) {
     const firstFile = artifactsDirEntries.find(function (r) {
       return r.kind === 'file';
     });
-    if (firstFile) selectedArtifactPath = firstFile.path;
-  }
-
-  if (live && live.path) {
-    const liveExists = artifactsDirEntries.some(function (row) {
-      return row.kind === 'file' && artifactPathsMatch(row.path, live.path);
-    });
-    if (!liveExists && shouldShowVirtualArtifactRow(live.path, { pending: live.status === 'writing' })) {
-      const livePath = applyWorkspaceArtifactPath(live.path);
-      const name = String(livePath).replace(/\\/g, '/').split('/').pop() || livePath;
-      renderArtifactRow(list, view, {
-        kind: 'file',
-        name,
-        path: livePath,
-        relativePath: name,
-        ts: live.ts || Date.now(),
-        diff: live.diff,
-        source: 'trace',
-        virtual: true
-      });
-    }
+    selectedArtifactPath = firstFile ? firstFile.path : null;
   }
 
   for (var i = 0; i < artifactsDirEntries.length; i++) {
@@ -408,16 +349,6 @@ function paintArtifactsFileList(list, view) {
 
   if (view) {
     if (selectedArtifactPath) {
-      const liveForSelected =
-        live &&
-        live.path &&
-        (typeof liveMatchesArtifactPath === 'function'
-          ? liveMatchesArtifactPath(live, selectedArtifactPath)
-          : typeof isLiveWritePath === 'function' && isLiveWritePath(selectedArtifactPath));
-      const needsLiveRemount =
-        liveForSelected &&
-        live.status === 'writing' &&
-        viewHasPlainMonacoEditor(view);
       const alreadyMounted =
         typeof window.isMonacoArtifactEditorMounted === 'function' &&
         window.isMonacoArtifactEditorMounted(selectedArtifactPath);
@@ -427,12 +358,8 @@ function paintArtifactsFileList(list, view) {
         !!diskMtime &&
         !!selectedArtifactContentMtime &&
         diskMtime !== selectedArtifactContentMtime;
-      if (needsLiveRemount || !alreadyMounted || contentStale) {
-        loadArtifactContent(
-          selectedArtifactPath,
-          view,
-          needsLiveRemount || contentStale ? { force: true } : undefined
-        );
+      if (!alreadyMounted || contentStale) {
+        loadArtifactContent(selectedArtifactPath, view, contentStale ? { force: true } : undefined);
       }
     } else if (!artifactsDirEntries.length) {
       void clearArtifactsFileView(
@@ -450,10 +377,6 @@ function renderArtifactsList(opts) {
     if (!list) return;
     if (isArtifactsUiBatching()) {
       markArtifactsUiDirty();
-      return;
-    }
-    if (!(opts && opts.force) && isActiveLiveWriteSession() && isWorkspaceArtifactsCacheReady()) {
-      patchArtifactsFilesPanelForLiveWrite();
       return;
     }
     var skipRefresh = !!(opts && opts.skipRefresh);
@@ -494,30 +417,6 @@ function loadArtifactContent(filePath, viewEl, opts) {
   if (!viewEl) return;
   const fp = String(filePath || '').trim();
   const force = !!(opts && opts.force);
-
-  const live = typeof getActiveLiveWrite === 'function' ? getActiveLiveWrite() : null;
-  const liveForFile =
-    live &&
-    live.path &&
-    (typeof liveMatchesArtifactPath === 'function'
-      ? liveMatchesArtifactPath(live, fp)
-      : typeof isLiveWritePath === 'function' && isLiveWritePath(fp));
-  if (liveForFile && typeof createMonacoArtifactDiffEditor === 'function') {
-    const previewTab =
-      typeof resolveLiveWritePreviewTab === 'function' ? resolveLiveWritePreviewTab() : 'changes';
-    const showLiveDiff = live.status === 'writing' || previewTab === 'changes';
-    if (showLiveDiff) {
-      renderLiveWriteDiffInView(viewEl, fp, live, {
-        incremental: !force,
-        forceRemount: force,
-        revealLastChange: live.status === 'done',
-        focusLine: live.status === 'writing' ? live.focusLine : undefined,
-        reviewMode: previewTab === 'changes'
-      });
-      liveWritePreviewMountedTab = resolveLiveWritePreviewTab();
-      return;
-    }
-  }
 
   if (
     !force &&
@@ -982,120 +881,14 @@ function initArtifactsBtn() {
   // Panel toggle handled by initSidePanel()
 }
 
-function focusLiveWriteFile(filePath) {
-  if (!filePath) return;
-  selectedArtifactPath = filePath;
-  if (isArtifactsUiBatching()) {
-    markArtifactsUiDirty();
-    return;
-  }
-  applyLiveWriteFileListMarks();
-  const live =
-    typeof getActiveLiveWrite === 'function' &&
-    typeof isLiveWritePath === 'function' &&
-    isLiveWritePath(filePath)
-      ? getActiveLiveWrite()
-      : null;
-  if (live && isSidePanelOpen()) {
-    syncLiveWritePreview({ live, incremental: false });
-    return;
-  }
-  if (isSidePanelOpen()) {
-    renderArtifactsList({ skipRefresh: true });
-    const view = document.getElementById('artifacts-file-view');
-    if (view) loadArtifactContent(filePath, view);
-    return;
-  }
-  void refreshArtifactsDirectory(false).then(function () {
-    if (isSidePanelOpen()) {
-      renderArtifactsList({ skipRefresh: true });
-      const view = document.getElementById('artifacts-file-view');
-      if (view) loadArtifactContent(filePath, view);
-    }
-  });
-}
-
-/** 写入联动：列表补行 + 预览跟随当前侧栏页 */
-function openLiveWritePreview(live) {
-  if (!live || !live.path) return;
-  if (isArtifactsUiBatching()) {
-    markArtifactsUiDirty();
-    return;
-  }
-  syncLiveWritePreview({ live, incremental: false });
-}
-
 window.pruneInvalidSessionArtifacts = pruneInvalidSessionArtifacts;
 window.resetPlanTraceArtifactLog = resetPlanTraceArtifactLog;
-window.syncLiveWritePreview = syncLiveWritePreview;
-window.setLiveWritePanelChrome = setLiveWritePanelChrome;
-window.migrateLiveWritePreviewOnTabSwitch = migrateLiveWritePreviewOnTabSwitch;
 
-window.focusLiveWriteFile = focusLiveWriteFile;
 window.findLastRoundChange = findLastRoundChange;
 window.getLastRoundFileChanges = getLastRoundFileChanges;
 window.formatArtifactDiffHtml = formatArtifactDiffHtml;
 window.upsertArtifactFileDiffBadge = upsertArtifactFileDiffBadge;
 window.refreshLastRoundFileChanges = refreshLastRoundFileChanges;
-window.ensureSessionArtifactForLiveWrite = ensureSessionArtifactForLiveWrite;
-window.readArtifactFileText = readArtifactFileText;
-window.renderChangesPaneDiffPreview = renderChangesPaneDiffPreview;
-window.patchUnifiedDiffInPlace = patchUnifiedDiffInPlace;
-window.highlightLiveWriteInThinking = highlightLiveWriteInThinking;
-window.onLiveWriteChanged = function (liveArg, opts) {
-  if (isArtifactsUiBatching()) {
-    markArtifactsUiDirty();
-    return;
-  }
-  const live =
-    liveArg && liveArg.path
-      ? liveArg
-      : typeof getActiveLiveWrite === 'function'
-        ? getActiveLiveWrite()
-        : null;
-  if (!live) {
-    if (typeof renderChangesPane === 'function') {
-      renderChangesPane();
-    } else if (opts && opts.showStaticPreview) {
-      const view = document.getElementById('changes-file-view');
-      const rows =
-        typeof getSessionChangeRowsForAgent === 'function' ? getSessionChangeRowsForAgent() : [];
-      const path = opts.completedPath || (rows[0] && rows[0].path);
-      const art = path ? rows.find((r) => (typeof pathsMatch === 'function' ? pathsMatch(r.path, path) : r.path === path)) || rows[0] : rows[0];
-      if (view && art && typeof renderChangesPaneDiffPreview === 'function') {
-        renderChangesPaneDiffPreview(view, art);
-      }
-    }
-    // 写入结束后文件预览可能仍停在旧 Monaco 内容：强制刷目录并重载当前打开文件
-    const completedPath = opts && opts.completedPath ? String(opts.completedPath).trim() : '';
-    if (completedPath || (opts && opts.showStaticPreview)) {
-      void refreshArtifactsDirectory(true).then(function () {
-        if (typeof isSidePanelOpen === 'function' && isSidePanelOpen()) {
-          renderArtifactsList({ skipRefresh: true });
-        }
-        maybeReloadSelectedArtifactContent({
-          force: true,
-          path: completedPath || undefined
-        });
-      });
-    }
-    return;
-  }
-  syncLiveWritePreview({
-    live,
-    incremental: opts?.incremental !== false,
-    revealLastChange: !!(opts && opts.revealLastChange) || live.status === 'done',
-    forceRemount: !!(opts && opts.forceRemount)
-  });
-  if (live.status === 'done') {
-    if (typeof window.patchChangesPane === 'function') {
-      window.patchChangesPane();
-    } else if (typeof scheduleArtifactsUiFlush === 'function') {
-      scheduleArtifactsUiFlush();
-    }
-    // 最终落盘预览在 clearLiveWrite → onLiveWriteChanged(!live) 里强制重载
-  }
-};
 
 window.beginArtifactsUiBatch = beginArtifactsUiBatch;
 window.endArtifactsUiBatch = endArtifactsUiBatch;

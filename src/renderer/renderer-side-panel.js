@@ -1,4 +1,4 @@
-/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, migrateLiveWritePreviewOnTabSwitch, maybeReloadSelectedArtifactContent */
+/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent */
 'use strict';
 
 const SIDE_PANEL_TAB_KEY = 'diecloud.ui.sidePanelTab.v1';
@@ -27,6 +27,7 @@ function loadSavedSideTab() {
     const t = window.localStorage.getItem(SIDE_PANEL_TAB_KEY);
     if (
     t === 'changes' ||
+    t === 'scm' ||
     t === 'terminal' ||
     t === 'browser' ||
     t === 'files' ||
@@ -100,6 +101,7 @@ function setSidePanelTab(tab, opts) {
     if (typeof patchChangesPane === 'function') patchChangesPane();
     else if (typeof renderChangesPane === 'function') renderChangesPane();
   }
+  if (next === 'scm' && typeof renderScmPane === 'function') renderScmPane();
   if (next === 'browser') {
     if (typeof clampBrowserPanelWidthToChatMin === 'function') clampBrowserPanelWidthToChatMin();
   }
@@ -113,13 +115,6 @@ function setSidePanelTab(tab, opts) {
   if (next === 'graph' && typeof onGraphPanelShown === 'function') onGraphPanelShown();
   else if (typeof onGraphPanelHidden === 'function') onGraphPanelHidden();
   if (next === 'wiki' && typeof onWikiPanelShown === 'function') onWikiPanelShown();
-
-  if (
-    (next === 'files' || next === 'changes') &&
-    typeof migrateLiveWritePreviewOnTabSwitch === 'function'
-  ) {
-    migrateLiveWritePreviewOnTabSwitch(next);
-  }
 
   // 离开浏览器页时必须收起 BrowserView，否则会盖住侧栏按钮导致无法切换
   if (typeof syncBrowserBounds === 'function') {
@@ -233,6 +228,8 @@ function initSidePanel() {
       else openSidePanel({ tab: sidePanelState.tab || loadSavedSideTab() });
     });
   }
+
+  if (typeof initScmPane === 'function') initScmPane();
 }
 
 function closeBrowserPanelSilently() {

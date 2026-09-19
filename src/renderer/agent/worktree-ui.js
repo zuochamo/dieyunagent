@@ -234,14 +234,20 @@ if (typeof window !== 'undefined' && window.diecloud && window.diecloud.onAgentP
 
 function kindLabelWorktree(kind) {
   if (kind === 'deleted') return '删除';
-  if (kind === 'untracked') return '新增';
+  if (kind === 'added' || kind === 'untracked') return '新增';
   return '修改';
 }
 
-async function applyWorktreeChangesCore(runId, undoTurnId, paths, forceConflict, changeIds) {
+async function applyWorktreeChangesCore(runId, undoTurnId, paths, forceConflict, changeIds, applyOpts) {
   if (!paths?.length || !worktreeLoopApi.worktreeApplyRun) return { appliedOk: false };
   try {
-    const apply = await worktreeLoopApi.worktreeApplyRun(runId, paths, !!forceConflict, changeIds || []);
+    const apply = await worktreeLoopApi.worktreeApplyRun(
+      runId,
+      paths,
+      !!forceConflict,
+      changeIds || [],
+      applyOpts || {}
+    );
     if (apply.ok) {
       if (undoTurnId && paths.length) {
         let workspaceRoot = null;
@@ -300,9 +306,17 @@ async function applyWorktreeReview(paths, opts = {}) {
     pending.undoTurnId,
     paths,
     !!opts.forceConflict,
-    opts.changeIds || []
+    opts.changeIds || [],
+    {
+      forceChangeIds: opts.forceChangeIds || [],
+      allowOverwriteMainDirty: !!opts.allowOverwriteMainDirty
+    }
   );
-  if (worktreeLoopApi.worktreeCleanupRun) await worktreeLoopApi.worktreeCleanupRun(pending.runId).catch(() => {});
+  // 应用后清理走默认「归档到分支再删」：用户没勾选的文件产出仍留在分支上，
+  // 不会像原来的 rmSync --force 那样静默消失。
+  if (worktreeLoopApi.worktreeCleanupRun) {
+    await worktreeLoopApi.worktreeCleanupRun(pending.runId).catch(() => {});
+  }
   scheduleWorktreePolicyCleanup();
   finalizeWorktreeKnowledge(result.appliedOk, result.appliedOk ? paths : [], pending.sessionId);
   if (result.appliedOk) setPendingWorktreeRow(null, pending.sessionId);
@@ -326,7 +340,15 @@ async function dismissWorktreeReview() {
     return;
   }
   if (!pending.runId) return;
-  if (worktreeLoopApi.worktreeCleanupRun) await worktreeLoopApi.worktreeCleanupRun(pending.runId).catch(() => {});
+  // 用户显式放弃：这是唯一允许「丢弃未提交产出 + 回收分支」的路径。
+  // 其它清理入口都走默认归档，不会走到这里。
+  if (worktreeLoopApi.worktreeCleanupRun) {
+    await worktreeLoopApi.worktreeCleanupRun(pending.runId, {
+      archive: false,
+      allowDiscardUncommitted: true,
+      deleteBranches: true
+    }).catch(() => {});
+  }
   scheduleWorktreePolicyCleanup();
   setPendingWorktreeRow(null, pending.sessionId);
   finalizeWorktreeKnowledge(false, [], pending.sessionId);
@@ -476,8 +498,22 @@ function openWorktreeApplyDialog(preview) {
         showAgentToast('未选择文件', '请至少勾选一个文件，或点击「放弃变更」', { variant: 'warn' });
         return;
       }
-      const forceConflict = paths.some((p) => changes.find((c) => c.repoPath === p && c.conflict));
-      close({ applied: true, paths, forceConflict });
+      // 冲突强制按变更粒度：勾中某个冲突文件只强制它自己，
+      // 不再用一个全局 boolean 顺带解除其余文件的覆盖保护。
+      const selectedChanges = changes.filter((c) => paths.includes(c.repoPath));
+      const keyOf = (ch) => ch.changeId || `${ch.roleId}::${ch.repoPath}`;
+      const forceChangeIds = selectedChanges.filter((c) => c.conflict).map(keyOf);
+      const dirtyFiles = selectedChanges.filter((c) => c.mainDirty);
+      let allowOverwriteMainDirty = false;
+      if (dirtyFiles.length) {
+        allowOverwriteMainDirty = window.confirm(
+          `主工作区中以下 ${dirtyFiles.length} 个文件已有未提交修改，应用会覆盖它们：\n\n` +
+            dirtyFiles.map((c) => `· ${c.repoPath}`).join('\n') +
+            '\n\n覆盖前会自动备份到 .dieyun/backup/，可回滚。确定继续？'
+        );
+        if (!allowOverwriteMainDirty) return;
+      }
+      close({ applied: true, paths, forceChangeIds, allowOverwriteMainDirty });
     };
 
     const onSkip = () => close({ applied: false });

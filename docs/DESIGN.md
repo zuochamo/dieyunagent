@@ -286,7 +286,7 @@ flowchart TD
 
 **Rust memory RPC**（完整）：`memory.ping`、`touch_session`、`sessions_list`、`session_*`、`message_append`、`messages_recent/clear/delete_turn`、`long_add/recent/recall/keyword_search/reindex/vector_status/status_set/decay`、`consolidation_job_*`、`compaction_archive/recent`、`sessions_with_messages`、`messages_after`、`long_memories_after`；`agent.run_upsert`、`plan_save`、`steps_save`、`state_get`、`trace_save/get`。
 
-**代码库索引**：`codebase.*` 仅 Rust；`src/codebase/index-service.js` 仅保留远程采集用常量/工具函数。
+**代码库索引**：`codebase.*` 全部由 Rust 实现（含远程采集）。
 
 ### 5.1 表结构（逻辑）
 
@@ -550,7 +550,6 @@ src/agent-home.js
 crates/dieyun-core/          # Rust sidecar：agent.loop、planner.run、codebase.index、memory.*、compaction.*、embedding
 src/gateway/server.js
 src/gateway/rpc.js
-src/codebase/index-service.js   # 远程 index 采集常量（索引本体在 dieyun-core）
 crates/dieyun-core/src/memory/  # SQLite MemoryStore
 src/gateway/host-control.js
 src/gateway/web-fetch.js

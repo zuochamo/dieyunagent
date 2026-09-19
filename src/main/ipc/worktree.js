@@ -99,11 +99,34 @@ function registerWorktreeIpc(ctx) {
       return { ok: false, error: e.message || String(e) };
     }
   });
-  ipcMain.handle('worktree:cleanup-run', async (_evt, { runId }) => {
+  ipcMain.handle('worktree:cleanup-run', async (_evt, payload) => {
+    const repo = resolveWorktreeRepoContext(getLocalGateway);
+    if (!repo.ok) return worktreeContextFailure(repo);
+    const { runId, archive, allowDiscardUncommitted, deleteBranches } = payload || {};
+    try {
+      return await getWorktreeService().cleanupRunWorktrees(repo.repoPath, runId, {
+        archive: archive !== false,
+        allowDiscardUncommitted: !!allowDiscardUncommitted,
+        deleteBranches: !!deleteBranches
+      });
+    } catch (e) {
+      return { ok: false, error: e.message || String(e) };
+    }
+  });
+  ipcMain.handle('worktree:prune-branches', async (_evt, payload) => {
     const repo = resolveWorktreeRepoContext(getLocalGateway);
     if (!repo.ok) return worktreeContextFailure(repo);
     try {
-      return await getWorktreeService().cleanupRunWorktrees(repo.repoPath, runId);
+      return await getWorktreeService().pruneRunBranches(repo.repoPath, payload || {});
+    } catch (e) {
+      return { ok: false, error: e.message || String(e) };
+    }
+  });
+  ipcMain.handle('worktree:restore-apply-backup', async (_evt, { backupDir }) => {
+    const repo = resolveWorktreeRepoContext(getLocalGateway);
+    if (!repo.ok) return worktreeContextFailure(repo);
+    try {
+      return await getWorktreeService().restoreApplyBackup(repo.repoPath, backupDir);
     } catch (e) {
       return { ok: false, error: e.message || String(e) };
     }
@@ -135,14 +158,18 @@ function registerWorktreeIpc(ctx) {
       return worktreeContextFailure(repo, { error: e.message || String(e), changes: [] });
     }
   });
-  ipcMain.handle('worktree:apply-run', async (_evt, { runId, paths, forceConflict, changeIds }) => {
+  ipcMain.handle('worktree:apply-run', async (_evt, payload) => {
     const repo = resolveWorktreeRepoContext(getLocalGateway);
     if (!repo.ok) return worktreeContextFailure(repo);
+    const { runId, paths, forceConflict, changeIds, forceChangeIds, allowOverwriteMainDirty } =
+      payload || {};
     try {
       return await getWorktreeService().applyRunWorktreeChanges(repo.repoPath, runId, {
         paths: paths || [],
         changeIds: changeIds || [],
-        forceConflict: !!forceConflict
+        forceConflict: !!forceConflict,
+        forceChangeIds: forceChangeIds || [],
+        allowOverwriteMainDirty: !!allowOverwriteMainDirty
       });
     } catch (e) {
       return { ok: false, error: e.message || String(e) };

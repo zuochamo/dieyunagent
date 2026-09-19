@@ -85,9 +85,6 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
     if (typeof trackArtifactsFromTrace === 'function') {
       trackArtifactsFromTrace(mergedTrace, { sessionId: runSessionId });
     }
-    if (typeof syncLiveWriteFromTrace === 'function') {
-      void syncLiveWriteFromTrace(mergedTrace, { sessionId: runSessionId });
-    }
     const rowCountAfter =
       typeof getSessionChangeRowsForAgent === 'function'
         ? getSessionChangeRowsForAgent(runSessionId).length

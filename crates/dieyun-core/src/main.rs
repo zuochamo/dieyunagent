@@ -78,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .ok();
             std::fs::create_dir_all(&config.data_dir)?;
-            let svc = IndexService::from_config(&config);
+            let db = dieyun_core::codebase_db::handle(config.codebase_db_path());
+            let svc = IndexService::from_config(&config, db);
             let st = svc
                 .index_workspace(&workspace.to_string_lossy(), force)
                 .await?;
@@ -101,7 +102,8 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .ok();
             std::fs::create_dir_all(&config.data_dir)?;
-            let svc = IndexService::from_config(&config);
+            let db = dieyun_core::codebase_db::handle(config.codebase_db_path());
+            let svc = IndexService::from_config(&config, db);
             let sr = svc
                 .search(&workspace.to_string_lossy(), &query, Some(limit))
                 .await?;
