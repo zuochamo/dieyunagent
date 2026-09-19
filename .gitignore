@@ -13,6 +13,7 @@ build/remote-gateway-pack/
 .dieyun/attachments/
 .dieyun/cleanup-backup/
 .dieyun/worktrees/
+.dieyun/backup/
 .dieyun/agents-meta.json
 .dieyun/agents-draft.md
 .dieyun/agents-pending.json
@@ -49,3 +50,7 @@ deploy/*.zip
 .dieyun/tool-output/
 /tmp-*
 /generated-images/
+
+# 根目录 dieyun.md 为运行时用户文件（实际位置 ~/.dieyun/dieyun.md），
+# 仓库内唯一模板是 assets/dieyun.md，勿在根目录再放一份副本
+/dieyun.md
