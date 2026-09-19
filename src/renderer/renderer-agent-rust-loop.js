@@ -180,7 +180,7 @@ function mapRustAgentTrace(rustTrace, prefixTrace) {
         !pending &&
         (!!t.error ||
           !!(t.result && typeof t.result === 'object' && (t.result.error || t.result.ok === false)));
-      return {
+      const tool = {
         name: t.name,
         argsBrief,
         summary,
@@ -189,6 +189,19 @@ function mapRustAgentTrace(rustTrace, prefixTrace) {
         errorCode: t.result && t.result.errorCode ? t.result.errorCode : undefined,
         toolArgs: args
       };
+      // 账本 result 未超上限时保留完整 diff；超限被 tailAwarePreview 顶替时由
+      // mergeTraceEditDiffsFromLive 从实时 trace 回填，保证思考结束后 diff 卡不消失
+      if (
+        t.result &&
+        typeof t.result === 'object' &&
+        t.result.diff &&
+        typeof t.result.diff === 'object'
+      ) {
+        const diff =
+          typeof compactDiffForTrace === 'function' ? compactDiffForTrace(t.result.diff) : t.result.diff;
+        if (diff) tool.diff = diff;
+      }
+      return tool;
     });
     const row = {
       round: r.round,
@@ -221,6 +234,51 @@ function mergeTraceVisibleContent(mapped, liveTrace) {
     if (!v || String((e && e.visibleContent) || '').trim()) return e;
     return { ...e, visibleContent: v };
   });
+}
+
+/**
+ * Rust 收尾 trace 的工具 result 超过 toolResultMaxJson 时被 tailAwarePreview 顶替，
+ * diff 随之丢失；实时 trace（delegate_result 事件）里还留着 compactDiffForTrace 后的正文。
+ * 按归一化工具名 + 出现顺序回填，容错两侧轮次数量不一致（实时侧有临时 live 行）。
+ */
+function mergeTraceEditDiffsFromLive(rows, liveRows) {
+  if (!Array.isArray(rows) || !rows.length || !Array.isArray(liveRows) || !liveRows.length) return rows;
+  const queueByName = new Map();
+  for (const row of liveRows) {
+    for (const t of row?.tools || []) {
+      if (!t || !t.diff) continue;
+      const name =
+        typeof normalizeAgentToolName === 'function'
+          ? normalizeAgentToolName(t.name, t.toolArgs || t.args || {}).name
+          : String(t.name || '');
+      if (!queueByName.has(name)) queueByName.set(name, []);
+      queueByName.get(name).push(t.diff);
+    }
+  }
+  if (!queueByName.size) return rows;
+  let changed = false;
+  const out = rows.map((row) => {
+    if (!row || !Array.isArray(row.tools) || !row.tools.length) return row;
+    let rowChanged = false;
+    const tools = row.tools.map((t) => {
+      if (!t || t.diff) return t;
+      const name =
+        typeof normalizeAgentToolName === 'function'
+          ? normalizeAgentToolName(t.name, t.toolArgs || {}).name
+          : String(t.name || '');
+      const queue = queueByName.get(name);
+      if (!queue || !queue.length) return t;
+      const raw = queue.shift();
+      const diff = typeof compactDiffForTrace === 'function' ? compactDiffForTrace(raw) : raw;
+      if (!diff) return t;
+      rowChanged = true;
+      return { ...t, diff };
+    });
+    if (!rowChanged) return row;
+    changed = true;
+    return { ...row, tools };
+  });
+  return changed ? out : rows;
 }
 
 function applyCheckpointIdsToTrace(traceRows, checkpointByRound) {
@@ -946,6 +1004,8 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       finalContent = stripVisibleAgentStatus(stripVisibleToolCallMarkup(done.content || ''));
       mapped = mapRustAgentTrace(done.trace, tracePrefix);
       mapped = mergeTraceVisibleContent(mapped, displayedTrace);
+      // 账本 result 被截断顶替的工具，diff 从实时 trace 回填（slice 掉前段前缀，避免串段）
+      mapped = mergeTraceEditDiffsFromLive(mapped, displayedTrace.slice(trace.length));
       seedCheckpointByRound(mapped, checkpointByRound);
       mapped = applyCheckpointIdsToTrace(mapped, checkpointByRound);
       resultTrace = mapped;

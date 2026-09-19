@@ -24,6 +24,11 @@
   --menu-item-hover-bg: rgba(190, 194, 202, 0.18);
   --menu-item-hover-text: var(--text);
   --sidebar-bg: rgba(0, 0, 0, 0.92);
+  --surface: rgba(0, 0, 0, 0.92);
+  --surface-1: rgba(255, 255, 255, 0.04);
+  --surface-2: #21262d;
+  --border-subtle: rgba(255, 255, 255, 0.16);
+  --text-primary: #e8e8e8;
 }
 
 :root[data-theme='light'] {
@@ -52,6 +57,11 @@
   --menu-item-hover-text: var(--text);
   --sidebar-bg: rgba(255, 255, 255, 0.96);
   --monaco-overview-ruler-color: rgba(100, 116, 139, 0.38);
+  --surface: #ffffff;
+  --surface-1: rgba(0, 0, 0, 0.04);
+  --surface-2: #ffffff;
+  --border-subtle: rgba(0, 0, 0, 0.12);
+  --text-primary: #111827;
 }
 
 /* 全局滚动条：与聊天主窗口一致（细条、透明轨道、浅灰滑块） */
