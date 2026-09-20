@@ -13,7 +13,14 @@
  * DOM 结构由本组件生成（调用方只给容器），避免结构在多处重复描述：
  *   div.select-menu[id=baseId]     ← 调用方在 HTML 里放这个空容器
  *     button.select-menu-trigger[id=baseId-trigger] > span.select-menu-trigger-label[id=baseId-label]
- *     div.select-menu-list[id=baseId-menu][role=listbox]（初始 hidden）
+ *     div.select-menu-list[id=baseId-menu][role=listbox]（收起时留在这里，hidden）
+ *
+ * 展开时列表会被搬进 body 级浮层 `#select-menu-layer`（收起时搬回容器）：
+ * 原生 <select> 的弹层由 OS 绘制，不受祖先裁剪；本组件是普通 DOM，只要祖先里有
+ * `overflow: auto`（表单滚动区、模型列表滚动区…）就会被裁掉——表现为只露出前两三项、
+ * 后面的档位根本点不到。故展开时挂到浮层，用 trigger 的父窗口坐标做视口定位：
+ * 下方放不下就上翻、按可用空间限高、左右贴边收敛宽度。浮层自身 `pointer-events: none`，
+ * 只有菜单本体接收事件，不影响其他点击。
  *
  * 两种用法：
  *  - 静态字段：`<div class="select-menu" id="my-field"></div>` 然后
@@ -23,7 +30,8 @@
  *
  * options: [{ key, label, raw?, disabled?, title? }]；raw 原样透传，getItem() 可取回。
  * aria：自动关联同 `.field` 内的 `.field-label`；纯行内字段（无字段名元素）请传 ariaLabel。
- * 实例随容器一起被移除（如列表重渲染）后自动回收，无需显式销毁。
+ * 实例随容器一起被移除（如列表重渲染）后自动回收，无需显式销毁；
+ * 若此时菜单正展开在浮层上，浮层里的菜单节点也会一并清掉。
  */
 
 /** 存活实例：document 级监听只注册一次，靠该集合实现「互斥打开 + 外点关闭 + 惰性回收」。 */
@@ -32,9 +40,37 @@ const selectMenuLive = new Set();
 const selectMenuCache = new Map();
 let selectMenuDocumentBound = false;
 
+/** 浮层宿主 id：菜单展开期间的父节点（body 唯一一个，见文件头说明）。 */
+const SELECT_MENU_LAYER_ID = 'select-menu-layer';
+/** 菜单限高上限与贴合间距（档位/模型这类长列表约 6~9 项，超过即内部滚动）。 */
+const SELECT_MENU_MAX_HEIGHT = 320;
+const SELECT_MENU_GAP = 4;
+const SELECT_MENU_VIEWPORT_EDGE = 8;
+
+/** 取/建浮层宿主；文档还没有 body（极早期调用）时返回 null，调用方退回容器内展开。 */
+function selectMenuLayer() {
+  if (!document.body) return null;
+  let layer = document.getElementById(SELECT_MENU_LAYER_ID);
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.id = SELECT_MENU_LAYER_ID;
+    layer.className = 'select-menu-layer';
+    document.body.appendChild(layer);
+  }
+  return layer;
+}
+
+/** 实例回收：容器已被移除（如列表重渲染）时调用，同时清掉浮层上可能残留的菜单节点。 */
+function dropSelectMenuInstance(inst) {
+  if (!inst) return;
+  selectMenuLive.delete(inst);
+  const list = inst.list;
+  if (list && list.parentNode && list.parentNode.id === SELECT_MENU_LAYER_ID) list.remove();
+}
+
 function pruneSelectMenuLive() {
   for (const inst of Array.from(selectMenuLive)) {
-    if (!inst.root.isConnected) selectMenuLive.delete(inst);
+    if (!inst.root.isConnected) dropSelectMenuInstance(inst);
   }
 }
 
@@ -44,8 +80,12 @@ function bindSelectMenuDocument() {
   selectMenuDocumentBound = true;
   document.addEventListener('mousedown', (e) => {
     for (const inst of Array.from(selectMenuLive)) {
-      if (!inst.root.isConnected) selectMenuLive.delete(inst);
-      else if (inst.isOpen() && !inst.root.contains(e.target)) inst.close();
+      if (!inst.root.isConnected) {
+        dropSelectMenuInstance(inst);
+        continue;
+      }
+      // 展开时菜单在浮层里，已不在 root 内，故两处都要判
+      if (inst.isOpen() && !inst.root.contains(e.target) && !inst.list.contains(e.target)) inst.close();
     }
   });
 }
@@ -132,9 +172,11 @@ function mountSelectMenu(options) {
 
   function paintActive() {
     Array.from(menu.children).forEach((el, idx) => {
-      if (el.classList && el.classList.contains('select-menu-item')) {
-        el.classList.toggle('active', idx === state.activeIndex);
-      }
+      if (!el.classList || !el.classList.contains('select-menu-item')) return;
+      const on = idx === state.activeIndex;
+      el.classList.toggle('active', on);
+      // 展开时菜单已在浮层里，故只会滚菜单自身；长档位列表要靠它把当前项/键盘选中项露出来
+      if (on && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
     });
   }
 
@@ -177,10 +219,56 @@ function mountSelectMenu(options) {
     paintActive();
   }
 
+  /**
+   * 把列表摆到 trigger 旁边（浮层坐标系即视口，故直接用 getBoundingClientRect 的数值）。
+   * 下方空间不足且上方更宽裕时上翻；限高取可用空间，超出即菜单内部滚动。
+   * trigger 已不可见（如所属面板被隐藏）时返回 false，由调用方收起菜单。
+   */
+  function placeList() {
+    const rect = trigger.getBoundingClientRect();
+    if (!trigger.isConnected || (!rect.width && !rect.height)) return false;
+    const vw = window.innerWidth || 0;
+    const vh = window.innerHeight || 0;
+    const width = Math.max(Math.round(rect.width), 120);
+    const maxLeft = Math.max(SELECT_MENU_VIEWPORT_EDGE, vw - width - SELECT_MENU_VIEWPORT_EDGE);
+    const left = Math.min(Math.max(Math.round(rect.left), SELECT_MENU_VIEWPORT_EDGE), maxLeft);
+    menu.style.left = `${left}px`;
+    menu.style.width = `${width}px`;
+    // 先放开限高量出内容高度，再决定朝上/朝下与最终限高（同一帧内改回，不会闪）
+    menu.style.maxHeight = 'none';
+    const natural = menu.offsetHeight;
+    const below = vh - rect.bottom - SELECT_MENU_GAP - SELECT_MENU_VIEWPORT_EDGE;
+    const above = rect.top - SELECT_MENU_GAP - SELECT_MENU_VIEWPORT_EDGE;
+    const wanted = Math.min(natural || SELECT_MENU_MAX_HEIGHT, SELECT_MENU_MAX_HEIGHT);
+    const flipUp = below < wanted && above > below;
+    const maxHeight = Math.max(96, Math.min(SELECT_MENU_MAX_HEIGHT, flipUp ? above : below));
+    menu.style.maxHeight = `${Math.round(maxHeight)}px`;
+    const height = menu.offsetHeight;
+    const top = flipUp ? rect.top - SELECT_MENU_GAP - height : rect.bottom + SELECT_MENU_GAP;
+    menu.style.top = `${Math.round(Math.max(SELECT_MENU_VIEWPORT_EDGE, top))}px`;
+    return true;
+  }
+
+  /** 展开期间跟着滚动/缩放重新贴合 trigger；菜单自身滚动时不动（否则一滚动就跳）。 */
+  function onViewportChange(e) {
+    if (!state.open) return;
+    const target = e && e.target;
+    if (target && target !== document && menu.contains(target)) return;
+    if (!placeList()) closeMenu();
+  }
+
   function closeMenu(refocus) {
     if (!state.open) return;
     state.open = false;
+    window.removeEventListener('scroll', onViewportChange, true);
+    window.removeEventListener('resize', onViewportChange);
     menu.hidden = true;
+    menu.style.left = '';
+    menu.style.top = '';
+    menu.style.width = '';
+    menu.style.maxHeight = '';
+    // 收回容器：菜单随容器一起被回收，浮层里不留常驻节点
+    if (menu.parentNode !== wrap) wrap.appendChild(menu);
     syncTrigger();
     if (refocus) trigger.focus();
   }
@@ -196,10 +284,21 @@ function mountSelectMenu(options) {
     }
     state.open = true;
     menu.hidden = false;
+    // 先搬进浮层再渲染：渲染时滚到当前档位只滚菜单自身，不会带动祖先滚动区
+    const layer = selectMenuLayer();
+    if (layer && menu.parentNode !== layer) layer.appendChild(menu);
     const idx = state.items.findIndex((it) => it.key === state.value && !it.disabled);
     state.activeIndex = idx >= 0 ? idx : -1;
     render();
     syncTrigger();
+    // 无 body（极早期调用）时留在容器内，用 CSS 兜底定位
+    if (!layer) return;
+    if (!placeList()) {
+      closeMenu();
+      return;
+    }
+    window.addEventListener('scroll', onViewportChange, true);
+    window.addEventListener('resize', onViewportChange);
   }
 
   function pick(key) {
@@ -259,12 +358,17 @@ function mountSelectMenu(options) {
 
   api = {
     root: wrap,
+    /** 菜单节点：展开时在浮层里（不在 root 内），外点判定与实例回收都要用它。 */
+    list: menu,
     isOpen: () => state.open,
     close: () => closeMenu(false),
     setOptions(list) {
       state.items = normalize(list);
       state.activeIndex = -1;
-      if (state.open) render();
+      if (state.open) {
+        render();
+        placeList();
+      }
       syncTrigger();
     },
     setValue(v) {
@@ -273,6 +377,7 @@ function mountSelectMenu(options) {
         const idx = state.items.findIndex((it) => it.key === state.value && !it.disabled);
         state.activeIndex = idx >= 0 ? idx : -1;
         render();
+        placeList();
       }
       syncTrigger();
     },
