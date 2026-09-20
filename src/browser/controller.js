@@ -1804,12 +1804,12 @@ function createBrowserViewController(deps) {
   async function goBack(opts = {}) {
     const v = ensureView();
     const wc = v.webContents;
-    if (!wc.canGoBack()) {
+    if (!wc.navigationHistory.canGoBack()) {
       return { ok: false, engine: 'browserview', action: 'back', error: '无法后退（历史记录为空）', errorCode: 'HISTORY_EMPTY' };
     }
     loading = true;
     emitState();
-    wc.goBack();
+    wc.navigationHistory.goBack();
     try {
       await waitForNavigation(wc, opts.timeoutMs);
     } catch (e) {
@@ -1828,7 +1828,7 @@ function createBrowserViewController(deps) {
   async function goForward(opts = {}) {
     const v = ensureView();
     const wc = v.webContents;
-    if (!wc.canGoForward()) {
+    if (!wc.navigationHistory.canGoForward()) {
       return {
         ok: false,
         engine: 'browserview',
@@ -1839,7 +1839,7 @@ function createBrowserViewController(deps) {
     }
     loading = true;
     emitState();
-    wc.goForward();
+    wc.navigationHistory.goForward();
     try {
       await waitForNavigation(wc, opts.timeoutMs);
     } catch (e) {

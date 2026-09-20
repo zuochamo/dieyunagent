@@ -54,15 +54,22 @@
 !macroend
 
 ; 覆盖 electron-builder 默认「应用正在运行」对话框：直接结束进程后继续。
+; 此钩子在解压前执行；electron-builder 在安装节开头 SetDetailsPrint none，
+; 会静音整个解压阶段的 Extract 逐文件输出与 DetailPrint（ShowInstDetails show
+; 只控制详情框是否展开，不产生内容），这里恢复输出详情区才有内容。
 !macro customCheckAppRunning
+  ${IfNot} ${Silent}
+    SetDetailsPrint both
+  ${endif}
   !insertmacro KillDieyunAppProcesses
 !macroend
 
 !macro customInit
-  !insertmacro WriteDieyunProgress 2 "正在启动安装向导"
+  ; 引导更新窗口此前已写到 18%，这里若低于该值会让进度条倒退，故从 22 起。
+  !insertmacro WriteDieyunProgress 22 "正在启动安装向导"
   DetailPrint "正在启动安装向导..."
   !insertmacro KillDieyunAppProcesses
-  !insertmacro WriteDieyunProgress 8 "正在准备安装环境"
+  !insertmacro WriteDieyunProgress 26 "正在准备安装环境"
   DetailPrint "正在准备安装环境..."
 !macroend
 

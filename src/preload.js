@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('diecloud', {
   getGatewayInfo: () => ipcRenderer.invoke('gateway:get-info'),
@@ -115,6 +115,15 @@ contextBridge.exposeInMainWorld('diecloud', {
   stageFiles: (paths) => ipcRenderer.invoke('files:stage', paths),
   stageBase64: (payload) => ipcRenderer.invoke('files:stage-base64', payload),
   readClipboardImage: () => ipcRenderer.invoke('clipboard:read-image'),
+
+  // Electron 32 起渲染层 File.path 被移除，拖拽文件取真实路径只能走 webUtils。
+  getPathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return '';
+    }
+  },
 
   scanSkills: () => ipcRenderer.invoke('skills:scan'),
   recallSkills: (payload) => ipcRenderer.invoke('skills:recall', payload),

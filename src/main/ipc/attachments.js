@@ -58,32 +58,37 @@ function registerAttachmentsIpc(ctx) {
   });
 
   ipcMain.handle('clipboard:read-image', async () => {
+    // Electron 44 起 clipboard 收敛为 W3C 风格：read() 返回 ClipboardItem[]，
+    // readImage/readBuffer/availableFormats 已移除，图片字节走 item.getType(mime)。
     try {
-      const img = clipboard.readImage();
-      if (img && !img.isEmpty()) {
-        const png = img.toPNG();
-        if (png && png.length) {
-          return {
-            base64: png.toString('base64'),
-            mime: 'image/png',
-            name: `paste-${Date.now()}.png`
-          };
-        }
-      }
-      const formats = clipboard.availableFormats();
-      for (const fmt of formats) {
-        if (!/^image\//i.test(fmt) && fmt !== 'PNG' && fmt !== 'Device Independent Bitmap') continue;
-        const buf = fmt === 'PNG' || /^image\//i.test(fmt) ? clipboard.readBuffer(fmt) : null;
-        if (buf && buf.length) {
+      const items = await clipboard.read();
+      for (const item of items || []) {
+        const imgType = ((item && item.types) || []).find(
+          (t) => typeof t === 'string' && /^image\//i.test(t)
+        );
+        if (!imgType) continue;
+        const blob = await item.getType(imgType);
+        if (!blob) continue;
+        let buf = Buffer.from(await blob.arrayBuffer());
+        if (!buf.length) continue;
+        let mime = imgType;
+        if (imgType !== 'image/png') {
           const asImg = nativeImage.createFromBuffer(buf);
-          const png = asImg && !asImg.isEmpty() ? asImg.toPNG() : buf;
-          if (png && png.length) {
-            return {
-              base64: png.toString('base64'),
-              mime: /^image\//i.test(fmt) ? fmt : 'image/png',
-              name: `paste-${Date.now()}.png`
-            };
+          if (asImg && !asImg.isEmpty()) {
+            buf = asImg.toPNG();
+            mime = 'image/png';
           }
+        }
+        if (buf.length) {
+          const ext =
+            mime === 'image/png'
+              ? 'png'
+              : String(mime.slice('image/'.length) || '').replace(/[^a-z0-9]/gi, '') || 'png';
+          return {
+            base64: buf.toString('base64'),
+            mime,
+            name: `paste-${Date.now()}.${ext}`
+          };
         }
       }
       return null;

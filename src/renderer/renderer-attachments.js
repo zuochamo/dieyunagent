@@ -349,8 +349,13 @@ async function handleComposerDrop(e) {
   }
   const paths = [];
   for (const file of files) {
-    if (file.path) {
-      paths.push(file.path);
+    // Electron 32+ 移除了 File.path，真实路径经 preload 的 webUtils.getPathForFile 获取
+    const filePath =
+      typeof window.diecloud?.getPathForFile === 'function'
+        ? window.diecloud.getPathForFile(file)
+        : file.path;
+    if (filePath) {
+      paths.push(filePath);
       continue;
     }
     const isImg = file.type.startsWith('image/') || IMAGE_ATTACH_RE.test(file.name || '');
