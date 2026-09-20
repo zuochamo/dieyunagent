@@ -39,7 +39,9 @@ function registerCompactionIpc(ctx) {
       force: !!payload.force,
       toolsChars: payload.toolsChars,
       sessionId: payload.sessionId || null,
+      // 整体继承 payload.apiConfig：逐字段重建会丢掉 headers / authMode / userAgent
       apiConfig: {
+        ...(payload.apiConfig || {}),
         baseUrl: (payload.apiConfig && payload.apiConfig.baseUrl) || settings.baseUrl,
         apiKey: (payload.apiConfig && payload.apiConfig.apiKey) || settings.apiKey,
         model:

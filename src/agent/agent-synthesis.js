@@ -4,6 +4,7 @@ const { chatCompletionJson } = require('../llm-proxy');
 const { streamChatCompletionMain } = require('../llm-stream-utils');
 const { isAbortError, createAbortError } = require('../llm-reconnect-retry');
 const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
 const roundText = require('./agent-round-text');
 
 const SYNTHESIS_PHASE = '汇总';
@@ -12,11 +13,10 @@ const SYNTHESIS_DONE = '已完成';
 const SYNTHESIS_FAILED = '汇总未完成，见下方答复';
 
 function resolveChatUrl(baseUrl) {
-  const raw = String(baseUrl || '').trim().replace(/\/+$/, '');
-  if (!raw) throw new Error('LLM baseUrl 未配置');
-  if (/\/chat\/completions(?:\?|$)/i.test(raw)) return raw;
-  if (/\/v\d+$/i.test(raw)) return `${raw}/chat/completions`;
-  return `${raw}/v1/chat/completions`;
+  // 端点拼接单一来源 llm-request.js；此处只保留「必填」语义
+  const url = resolveLlmEndpoint(baseUrl, 'chat');
+  if (!url) throw new Error('LLM baseUrl 未配置');
+  return url;
 }
 
 function extractLastUserMessageText(messages) {
@@ -208,9 +208,11 @@ async function applyTurnEndSynthesis(opts) {
       result = await opts.fetchSynthesisOnce({ body: synthBody, signal: child.signal });
     } else {
       const url = resolveChatUrl(llm.baseUrl);
+      const headers = buildLlmHeadersFromConfig(llm, { runId: done.runId });
       try {
         result = await streamChatCompletionMain(synthBody, {
           url,
+          headers,
           apiKey: llm.apiKey,
           signal: child.signal,
           onDelta: (delta) => {
@@ -223,10 +225,7 @@ async function applyTurnEndSynthesis(opts) {
           throw streamErr;
         }
         const json = await chatCompletionJson(url, {
-          headers: {
-            'Content-Type': 'application/json',
-            ...(llm.apiKey ? { Authorization: `Bearer ${llm.apiKey}` } : {})
-          },
+          headers,
           body: JSON.stringify({ ...synthBody, stream: false }),
           signal: child.signal
         });

@@ -30,6 +30,7 @@ const {
 
 const { executeDelegateBatch } = require('./delegate-batch');
 const { applyTurnEndSynthesis } = require('./agent-synthesis');
+const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
 
 const LOOP_START_TIMEOUT_MS = 30000;
 const LOOP_SET_MESSAGES_TIMEOUT_MS = 30000;
@@ -189,6 +190,7 @@ async function maybeCompactRound({
   signal,
   bridge,
   onPhase,
+  apiConfig,
   force,
   charBudget
 }) {
@@ -212,6 +214,10 @@ async function maybeCompactRound({
         round: llmRound,
         signal,
         force: !!force,
+        // 压缩必须与主链路同配置（自定义头 / 会话标识随 apiConfig 透传），
+        // 否则会出现「对话正常、压缩先撞上游 4xx」的割裂现象。
+        apiConfig,
+        sessionId: apiConfig && apiConfig.sessionId,
         // 工具 schema 不计入 messages，但占真实窗口；交给压缩层从预算里扣
         toolsChars: toolsJsonChars(body.tools)
       }),
@@ -259,10 +265,16 @@ async function maybeCompactRound({
   return { compacted: true, tokensBefore: cr.tokensBefore, tokensAfter: cr.tokensAfter };
 }
 
-function buildChatHeaders(llm) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (llm.apiKey) headers.Authorization = `Bearer ${llm.apiKey}`;
-  return headers;
+/**
+ * 一轮 LLM 请求的请求头（单一来源 llm-request.js）。
+ *
+ * 变量分工（关系上游缓存命中，勿混）：
+ *   - `sessionId`：**同一对话稳定**，用于会话级标识（如 x-opencode-session）→ 上游可据此命中 prompt 缓存；
+ *   - `runId`    ：每轮不同，用于「每轮唯一」的追踪头。
+ * 供应商自定义头里的 `{{sessionId}}` / `{{runId}}` / `{{model}}` 即取自此。
+ */
+function buildChatHeaders(llm, runId) {
+  return buildLlmHeadersFromConfig(llm, { runId });
 }
 
 async function completeNonStreamChat(url, headers, body, signal) {
@@ -329,7 +341,7 @@ async function fetchLlmRound({
   reconnectOpts
 }) {
   const url = resolveChatUrl(llm.baseUrl);
-  const headers = buildChatHeaders(llm);
+  const headers = buildChatHeaders(llm, runId);
   const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
   const requestBody = {
     ...body,
@@ -377,6 +389,7 @@ async function fetchLlmRound({
       try {
         const streamResp = await streamChatCompletionMain(requestBody, {
           url,
+          headers,
           apiKey: llm.apiKey,
           signal,
           firstTokenTimeoutMs,
@@ -590,6 +603,7 @@ async function runRustAgentLoop(opts) {
           signal,
           bridge,
           onPhase,
+          apiConfig: llm,
           charBudget: (() => {
             try {
               const lim = getAgentLimits(opts.userData, opts.contextTierId) || {};
@@ -722,6 +736,7 @@ async function runRustAgentLoop(opts) {
               signal,
               bridge,
               onPhase,
+              apiConfig: llm,
               force: true
             });
             overflowCompacted = true;
@@ -835,13 +850,11 @@ async function runRustAgentLoop(opts) {
 }
 
 function resolveChatUrl(baseUrl) {
-  const raw = String(baseUrl || '').trim().replace(/\/+$/, '');
-  if (!raw) throw new Error('LLM baseUrl 未配置');
-  // 已含 chat/completions（含 Azure ?api-version= 查询串）则不再拼接
-  if (/\/chat\/completions(?:\?|$)/i.test(raw)) return raw;
-  // LM Studio / OpenAI 兼容：裸 host 须带 /v1，否则会打到 /chat/completions 得到空 SSE
-  if (/\/v\d+$/i.test(raw)) return `${raw}/chat/completions`;
-  return `${raw}/v1/chat/completions`;
+  // 端点拼接的单一来源是 llm-request.js（裸 host 补 /v1、已含版本段只补资源路径、
+  // Azure 的 ?api-version= 查询串不二次拼接）；此处仅负责本模块的「必填」语义。
+  const url = resolveLlmEndpoint(baseUrl, 'chat');
+  if (!url) throw new Error('LLM baseUrl 未配置');
+  return url;
 }
 
 function normalizeLlmResponse(json) {

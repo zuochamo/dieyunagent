@@ -380,7 +380,9 @@ async function generateWikiKnowledgeBase(workspacePath, opts = {}) {
           temperature: 0.25,
           max_tokens: 7000,
           _apiBaseUrl: apiConfig.baseUrl,
-          _apiKey: apiConfig.apiKey
+          _apiKey: apiConfig.apiKey,
+          // 完整配置：让自定义请求头 / User-Agent / 会话标识一并生效
+          _apiConfig: apiConfig
         },
         opts.signal,
         (delta) => {

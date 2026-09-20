@@ -3,6 +3,7 @@
 
 const { streamChatSse } = require('./llm-proxy');
 const { parseCompleteJsonArgs } = require('./llm-tool-call-fallback');
+const { buildLlmHeaders } = require('./agent/llm-request');
 
 function extractDeltaReasoning(delta) {
   if (!delta || typeof delta !== 'object') return '';
@@ -151,8 +152,10 @@ function buildToolCallAccumulator() {
 /**
  * Main 进程流式 chat completion（单次请求；重试由 rust-loop-runner 的 reconnect 层负责）
  * @param {object} body OpenAI chat body（含 model/messages/tools）
- * @param {{ url?: string, apiKey?: string, signal?: object, onDelta?: Function, firstTokenTimeoutMs?: number,
- *   idleTimeoutMs?: number }} [opts]
+ * @param {{ url?: string, apiKey?: string, headers?: object, signal?: object, onDelta?: Function,
+ *   firstTokenTimeoutMs?: number, idleTimeoutMs?: number }} [opts]
+ *   `headers`   = 调用方经 llm-request.js 装配好的**完整**请求头（含自定义头 / User-Agent /
+ *                 会话标识）；给了就用它，未给（旧调用点）才按 apiKey 兜底生成。
  *   `idleTimeoutMs` = 两包之间的容忍时长（只认真实 SSE data 行），由 agent-limits 注入
  */
 async function streamChatCompletionMain(body, opts = {}) {
@@ -160,8 +163,11 @@ async function streamChatCompletionMain(body, opts = {}) {
   sendBody.stream = true;
   sendBody.stream_options = { ...(sendBody.stream_options || {}), include_usage: true };
 
-  const headers = { 'Content-Type': 'application/json' };
-  if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
+  const providedHeaders =
+    opts.headers && typeof opts.headers === 'object' && Object.keys(opts.headers).length
+      ? opts.headers
+      : null;
+  const headers = providedHeaders ? { ...providedHeaders } : buildLlmHeaders({ apiKey: opts.apiKey });
 
   let content = '';
   let reasoning = '';

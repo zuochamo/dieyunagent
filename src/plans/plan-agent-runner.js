@@ -146,7 +146,8 @@ async function runPlanAgentLoop(ctx, plan) {
   const toolBridge = createToolBridge(webContents || null);
   const tokenBudget =
     typeof getTokenBudget === 'function' ? getTokenBudget(llmModel) : 96000;
-  const apiCfg = { baseUrl: llm.baseUrl, apiKey: llm.apiKey };
+  // 整体继承 llm：逐字段重建会丢掉 headers / authMode / userAgent（压缩也复用这份 apiCfg）
+  const apiCfg = { ...llm, baseUrl: llm.baseUrl, apiKey: llm.apiKey };
 
   let loopResult = null;
   let aborted = false;

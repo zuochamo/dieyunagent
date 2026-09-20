@@ -28,6 +28,7 @@ const sessionTranscript = require('../../agent/session-transcript');
 const sessionContext = require('../../agent/session-context');
 const agentSystemPrompt = require('../../agent/agent-system-prompt');
 const reviewerJson = require('../../agent/reviewer-json');
+const llmRequest = require('../../agent/llm-request');
 
 register('DieyunModelRuntimePresets', presets, {
   compat: [
@@ -137,6 +138,12 @@ register('DieyunModelApiConfig', modelApiConfig, {
     'supplierModelIds',
     'isUsableApiConfig'
   ]
+});
+
+// LLM 出站请求装配的单一来源（端点解析 + 请求头）。
+// Renderer 侧发 LLM 请求前必须走这里构造 headers，勿再内联 Content-Type + Authorization。
+register('DieyunLlmRequest', { ...llmRequest, LlmRequest: llmRequest }, {
+  compat: ['LlmRequest']
 });
 
 // 改造前 window.GuardrailsShared = 整个导出对象（键名与导出名不同名），此处显式补上。

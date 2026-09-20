@@ -18,6 +18,7 @@ const {
 const { PluginHost } = require('../plugins/host');
 const { createDatabasePlugin } = require('../plugins/database');
 const { getEmbeddingConfig, loadModelSettings } = require('../model-settings');
+const { buildLlmHeadersFromConfig } = require('../agent/llm-request');
 const { createGraphIncrementalScheduler } = require('../graph/graph-incremental-scheduler');
 const { createCodebaseIncrementalScheduler } = require('../index/codebase-incremental-scheduler');
 const { createWorkspaceIndexWatcher } = require('../index/workspace-index-watcher');
@@ -282,12 +283,17 @@ class LocalGateway {
           baseUrl: embedding.baseUrl || '',
           apiKey: embedding.apiKey || '',
           model: embedding.model || '',
-          dimensions: Number(embedding.dimensions) || 1024
+          dimensions: Number(embedding.dimensions) || 1024,
+          // 请求头由 llm-request 装配后交给 Rust 直接应用，Rust 不自行推导鉴权
+          headers: buildLlmHeadersFromConfig(embedding),
+          authMode: String(embedding.authMode || '').trim()
         },
         llm: {
           baseUrl: modelSettings.baseUrl || '',
           apiKey: modelSettings.apiKey || '',
-          textModel: modelSettings.textModel || ''
+          textModel: modelSettings.textModel || '',
+          headers: buildLlmHeadersFromConfig(modelSettings),
+          authMode: String(modelSettings.authMode || '').trim()
         }
       })
       .catch((e) => {

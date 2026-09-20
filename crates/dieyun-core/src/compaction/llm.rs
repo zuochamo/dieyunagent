@@ -143,13 +143,10 @@ async fn chat_completion_once(
         "stream": false,
     });
 
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .json(&body);
-    if !cfg.api_key.trim().is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", cfg.api_key.trim()));
-    }
+    let mut req = client.post(url).json(&body);
+    // 请求头单一来源：Node 侧 llm-request.js 装配后经 LlmConfig.headers 传入。
+    // 改造前这里自己拼 Content-Type + Authorization，导致「对话带自定义头、压缩不带」。
+    req = crate::config::apply_llm_headers(req, &cfg.headers, &cfg.api_key, &cfg.auth_mode);
 
     let resp = req
         .send()

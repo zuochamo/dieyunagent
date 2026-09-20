@@ -1,5 +1,7 @@
 'use strict';
 
+const { buildLlmHeaders, resolveLlmEndpoint } = require('./agent/llm-request');
+
 const DEFAULT_PROBE_CONCURRENCY = 5;
 const DEFAULT_PROBE_TIMEOUT_MS = 8000;
 const MAX_MODELS_TO_PROBE = 48;
@@ -8,26 +10,19 @@ const MAX_MODELS_TO_PROBE = 48;
  * @param {string} baseUrl
  */
 function resolveModelsUrl(baseUrl) {
-  const trimmed = String(baseUrl || '')
-    .trim()
-    .replace(/\/+$/, '');
-  if (!trimmed) throw new Error('未配置接口地址');
-  if (/\/models$/i.test(trimmed)) return trimmed;
-  if (/\/v\d+$/i.test(trimmed)) return `${trimmed}/models`;
-  return `${trimmed}/v1/models`;
+  // 端点拼接单一来源 llm-request.js；此处只保留「必填」语义
+  const url = resolveLlmEndpoint(baseUrl, 'models');
+  if (!url) throw new Error('未配置接口地址');
+  return url;
 }
 
 /**
  * @param {string} baseUrl
  */
 function resolveChatCompletionsUrl(baseUrl) {
-  const trimmed = String(baseUrl || '')
-    .trim()
-    .replace(/\/+$/, '');
-  if (!trimmed) throw new Error('未配置接口地址');
-  if (/\/chat\/completions$/i.test(trimmed)) return trimmed;
-  if (/\/v\d+$/i.test(trimmed)) return `${trimmed}/chat/completions`;
-  return `${trimmed}/v1/chat/completions`;
+  const url = resolveLlmEndpoint(baseUrl, 'chat');
+  if (!url) throw new Error('未配置接口地址');
+  return url;
 }
 
 /**
@@ -71,10 +66,23 @@ function isModelUnavailableResponse(status, body) {
  * @param {string} apiKey
  * @param {string} modelId
  * @param {number} timeoutMs
+ * @param {{ authMode?: string, headers?: object, userAgent?: string }} [requestOptions]
  */
-async function probeModelAvailable(chatUrl, apiKey, modelId, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS) {
-  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+async function probeModelAvailable(
+  chatUrl,
+  apiKey,
+  modelId,
+  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+  requestOptions = {}
+) {
+  // 探测也要带上供应商的自定义头 / User-Agent，否则「列表能拉、模型不可用」的假阴性
+  const headers = buildLlmHeaders({
+    apiKey,
+    authMode: requestOptions.authMode,
+    headers: requestOptions.headers,
+    userAgent: requestOptions.userAgent,
+    accept: 'application/json'
+  });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -107,11 +115,12 @@ async function probeModelAvailable(chatUrl, apiKey, modelId, timeoutMs = DEFAULT
  * @param {Array<{ id: string }>} models
  * @param {string} chatUrl
  * @param {string} apiKey
- * @param {{ concurrency?: number, maxProbe?: number }} [opts]
+ * @param {{ concurrency?: number, maxProbe?: number, requestOptions?: object }} [opts]
  */
 async function filterModelsByProbe(models, chatUrl, apiKey, opts = {}) {
   const concurrency = Math.max(1, opts.concurrency || DEFAULT_PROBE_CONCURRENCY);
   const maxProbe = Math.max(1, opts.maxProbe || MAX_MODELS_TO_PROBE);
+  const requestOptions = opts.requestOptions || {};
   const list = models.slice(0, maxProbe);
   const skipped = models.length - list.length;
   const valid = [];
@@ -122,7 +131,8 @@ async function filterModelsByProbe(models, chatUrl, apiKey, opts = {}) {
     while (index < list.length) {
       const i = index++;
       const m = list[i];
-      const ok = await probeModelAvailable(chatUrl, apiKey, m.id);
+      // 探测请求与列表请求必须用同一套头，否则会出现「列表可见但探测全删」的假阴性
+      const ok = await probeModelAvailable(chatUrl, apiKey, m.id, undefined, requestOptions);
       if (ok) valid.push(m);
       else removed += 1;
     }
@@ -143,15 +153,25 @@ async function filterModelsByProbe(models, chatUrl, apiKey, opts = {}) {
 /**
  * @param {string} baseUrl
  * @param {string} apiKey
- * @param {{ validate?: boolean, concurrency?: number }} [opts]
+ * @param {{ validate?: boolean, concurrency?: number, authMode?: string, headers?: object, userAgent?: string }} [opts]
  */
 async function fetchOpenAiModelList(baseUrl, apiKey, opts = {}) {
   const validate = opts.validate !== false;
   const modelsUrl = resolveModelsUrl(baseUrl);
   const chatUrl = resolveChatCompletionsUrl(baseUrl);
+  const requestOptions = {
+    authMode: opts.authMode,
+    headers: opts.headers,
+    userAgent: opts.userAgent
+  };
 
-  const headers = { Accept: 'application/json' };
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  // GET 请求不设 Content-Type
+  const headers = buildLlmHeaders({
+    apiKey,
+    ...requestOptions,
+    accept: 'application/json',
+    json: false
+  });
 
   const res = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(15000) });
   if (!res.ok) {
@@ -191,7 +211,8 @@ async function fetchOpenAiModelList(baseUrl, apiKey, opts = {}) {
 
   if (validate && unique.length && apiKey) {
     const r = await filterModelsByProbe(unique, chatUrl, apiKey, {
-      concurrency: opts.concurrency
+      concurrency: opts.concurrency,
+      requestOptions
     });
     out = r.models;
     probed = r.probed;

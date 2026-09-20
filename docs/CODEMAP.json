@@ -52,6 +52,16 @@
       "docs": ["docs/ARCHITECTURE.md"]
     },
     {
+      "id": "llm-request",
+      "paths": ["src/agent/llm-request.js"],
+      "owns": [
+        "LLM 端点解析（chat / models / embeddings / transcriptions）",
+        "请求头装配（自定义头、User-Agent、{{sessionId}} 占位符、authMode）"
+      ],
+      "tests": ["test:unit"],
+      "docs": ["docs/AGENT-DEV.md"]
+    },
+    {
       "id": "agent-node",
       "paths": ["src/agent/"],
       "owns": ["run-events", "service", "guardrails", "compaction-main", "rust runners"],
@@ -205,6 +215,7 @@
     { "prefix": "src/agent/task-tier.js", "tests": ["test:task-tier"] },
     { "prefix": "src/agent/guardrails-shared.js", "tests": ["test:guardrails-sync", "test:tool-harness"] },
     { "prefix": "src/agent/model-api-config.js", "tests": ["test:unit"] },
+    { "prefix": "src/agent/llm-request.js", "tests": ["test:unit"] },
     { "prefix": "src/agent/tool-guardrails.js", "tests": ["test:guardrails-sync", "test:tool-harness"] },
     { "prefix": "src/agent/write-smell-hints.js", "tests": ["test:write-smell-hints"] },
     { "prefix": "src/agent/reviewer-json.js", "tests": ["test:reviewer-json"] },
@@ -235,6 +246,8 @@
     { "prefix": "src/ssh/", "tests": ["test:ssh-reconnect-targets"] },
     { "prefix": "src/main/remote-gateway.js", "tests": ["test:ssh-reconnect-targets"] },
     { "prefix": "src/main/workspace-remote-runtime.js", "tests": ["test:workspace-remote-runtime"] },
+    { "prefix": "src/remote/remote-pack-layout.js", "tests": ["test:workspace-remote-runtime", "test:fs-edit"] },
+    { "prefix": "src/optional-assets/", "tests": ["test:workspace-remote-runtime"] },
     { "prefix": "src/main/mcp-plans-boot.js", "tests": ["test:unit"] },
     { "prefix": "src/main/app-config.js", "tests": ["test:main-shell"] },
     { "prefix": "src/main/activity-stats.js", "tests": ["test:main-shell"] },
@@ -255,6 +268,8 @@
     { "prefix": "test/unit/scm-service.test.cjs", "tests": ["test:unit"] },
     { "prefix": "test/unit/git-status.test.cjs", "tests": ["test:unit"] },
     { "prefix": "src/gateway/handlers/scm.js", "tests": ["test:scm", "verify:rpc-catalog"] },
+    { "prefix": "src/gateway/handlers/workspace.js", "tests": ["test:unit", "verify:rpc-catalog"] },
+    { "prefix": "src/workspace/resolve-path-candidates.js", "tests": ["test:unit"] },
     { "prefix": "src/renderer/renderer-scm-pane.js", "tests": ["check:renderer"] },
     { "prefix": "src/main/ipc/worktree.js", "tests": ["test:worktree", "verify:rpc-catalog"] },
     { "prefix": "src/renderer/agent/worktree-ui.js", "tests": ["test:worktree", "check:renderer"] },

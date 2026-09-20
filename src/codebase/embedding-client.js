@@ -7,16 +7,14 @@ const {
   hasBuiltinEmbeddingModel
 } = require('./local-embedding');
 const { runInEmbeddingQueue } = require('./embedding-queue');
+const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('../agent/llm-request');
 
 const EMBEDDING_DIMENSIONS_MIN = 64;
 const EMBEDDING_DIMENSIONS_MAX = 8192;
 
 function resolveEmbeddingsUrl(baseUrl) {
-  const raw = String(baseUrl || '').trim().replace(/\/+$/, '');
-  if (!raw) return '';
-  if (/\/(embeddings|embed)$/i.test(raw)) return raw;
-  if (/\/v1$/i.test(raw)) return `${raw}/embeddings`;
-  return `${raw}/v1/embeddings`;
+  // 端点拼接单一来源 llm-request.js（含 /embed 直连写法；空 baseUrl 返回 ''）
+  return resolveLlmEndpoint(baseUrl, 'embeddings');
 }
 
 function isDirectEmbedUrl(baseUrl) {
@@ -70,8 +68,8 @@ function createEmbeddingClient(config) {
             dimensions
           };
 
-      const headers = { 'Content-Type': 'application/json' };
-      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      // 请求头单一来源 llm-request.js（嵌入端点同样可能要求自定义头 / User-Agent）
+      const headers = buildLlmHeadersFromConfig({ ...config, apiKey });
       const res = await fetch(url, {
         method: 'POST',
         headers,

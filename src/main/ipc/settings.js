@@ -68,8 +68,15 @@ function registerSettingsIpc(ctx) {
     const baseUrl = payload && payload.baseUrl ? String(payload.baseUrl).trim() : '';
     const apiKey = payload && payload.apiKey ? String(payload.apiKey).trim() : '';
     const validate = !(payload && payload.validate === false);
+    // 请求修饰随 payload 透传：检测请求必须与真实请求同一套头，
+    // 否则会出现「检测失败但聊天正常」或反之。
+    const requestOptions = {
+      authMode: payload && payload.authMode ? String(payload.authMode).trim() : '',
+      headers: payload && payload.headers ? payload.headers : undefined,
+      userAgent: payload && payload.userAgent ? String(payload.userAgent).trim() : ''
+    };
     try {
-      const result = await fetchOpenAiModelList(baseUrl, apiKey, { validate });
+      const result = await fetchOpenAiModelList(baseUrl, apiKey, { validate, ...requestOptions });
       if (result.removed > 0) {
         log.info(
           `模型可用性检测：列表 ${result.listed} 个，探测 ${result.probed} 个，剔除不可用 ${result.removed} 个，保留 ${result.validated} 个`

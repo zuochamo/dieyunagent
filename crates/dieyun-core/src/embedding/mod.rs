@@ -42,6 +42,12 @@ pub struct EmbeddingConfig {
     pub model: String,
     #[serde(default = "default_dimensions")]
     pub dimensions: u32,
+    /// 出站请求头，由 Node 侧 `src/agent/llm-request.js` 统一装配（语义同 LlmConfig::headers）
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// `api_key` 注入方式：bearer（默认）/ x-api-key / none（语义同 LlmConfig::auth_mode）
+    #[serde(default)]
+    pub auth_mode: String,
 }
 
 fn default_dimensions() -> u32 {

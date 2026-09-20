@@ -1,18 +1,19 @@
 'use strict';
 
+const { buildLlmHeaders, resolveLlmEndpoint } = require('../agent/llm-request');
+
 const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 const TRANSCRIBE_TIMEOUT_MS = 120000;
 
 function resolveTranscriptionUrl(baseUrl) {
-  const b = String(baseUrl || '').trim().replace(/\/+$/, '');
-  if (!b) {
+  // 端点拼接单一来源 llm-request.js；此处只保留「必填」语义
+  const url = resolveLlmEndpoint(baseUrl, 'transcriptions');
+  if (!url) {
     const e = new Error('未配置 API Base URL（请在模型设置中填写供应商地址）');
     e.code = 'MISSING_BASE_URL';
     throw e;
   }
-  if (/\/audio\/transcriptions$/i.test(b)) return b;
-  if (/\/v\d+$/i.test(b)) return `${b}/audio/transcriptions`;
-  return `${b}/v1/audio/transcriptions`;
+  return url;
 }
 
 function parseTranscriptionResponse(data) {
@@ -50,9 +51,15 @@ async function transcribeWhisper(opts) {
   const lang = String(opts.language || '').trim();
   if (lang) form.append('language', lang);
 
-  const headers = {};
+  // FormData 由 fetch 自带 multipart boundary：json:false 确保不设 Content-Type
   const apiKey = String(opts.apiKey || '').trim();
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const headers = buildLlmHeaders({
+    apiKey,
+    authMode: opts.authMode,
+    headers: opts.headers,
+    userAgent: opts.userAgent,
+    json: false
+  });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TRANSCRIBE_TIMEOUT_MS);

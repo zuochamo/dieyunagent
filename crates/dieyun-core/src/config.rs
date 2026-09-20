@@ -16,6 +16,17 @@ pub struct LlmConfig {
     pub api_key: String,
     #[serde(default)]
     pub text_model: String,
+    /// 出站请求头，由 Node 侧 `src/agent/llm-request.js` 统一装配后传入
+    /// （已含 Authorization 与供应商自定义头，占位符也已在那边渲染完毕）。
+    ///
+    /// 为什么不在这里自己拼：请求头构造必须是单一来源。否则会出现
+    /// 「主链路带了自定义头、压缩却没带」，表现为「对话正常、压缩一跑就 400」，
+    /// 而这类不一致极难定位。`api_key` 仅在 headers 里没有鉴权头时兜底。
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// `api_key` 的注入方式：bearer（默认）/ x-api-key / none。仅兜底路径使用。
+    #[serde(default)]
+    pub auth_mode: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -135,6 +146,43 @@ impl AppConfig {
             format!("路径不在允许的工作区内: {}", input.display()),
         ))
     }
+}
+
+/// 把 Node 侧装配好的请求头应用到 reqwest 请求上（Compaction 与 Embedding 共用）。
+///
+/// 单一来源原则：请求头在 Node 的 `src/agent/llm-request.js` 里装配完成，
+/// Rust 只是执行者，不重新推导鉴权逻辑。
+///
+/// 语义（逐条都有原因，勿简化）：
+///   - `Content-Type` 一律跳过：reqwest 的 `.json()` 会自己设置，
+///     重复设置会产生两个同名头，部分网关会因此直接 400。
+///   - 逐个应用其余头（含供应商自定义头与 User-Agent）。
+///   - 鉴权：**headers 里已有 `Authorization` / `x-api-key` 就不再兜底**，
+///     否则按 `auth_mode` 用 `api_key` 拼 Bearer（兼容尚未传 headers 的旧调用方）；
+///     `auth_mode == "none"`（端点无需鉴权）时不拼，避免用户显式声明被覆盖。
+pub fn apply_llm_headers(
+    req: reqwest::RequestBuilder,
+    headers: &std::collections::HashMap<String, String>,
+    api_key: &str,
+    auth_mode: &str,
+) -> reqwest::RequestBuilder {
+    let mut out = req;
+    let mut has_auth_header = false;
+    for (name, value) in headers {
+        if name.is_empty() || value.is_empty() || name.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        if lower == "authorization" || lower == "x-api-key" {
+            has_auth_header = true;
+        }
+        out = out.header(name.as_str(), value.as_str());
+    }
+    let key = api_key.trim();
+    if !has_auth_header && !key.is_empty() && auth_mode != "none" {
+        out = out.header("Authorization", format!("Bearer {key}"));
+    }
+    out
 }
 
 pub fn normalize_path(path: &Path) -> anyhow::Result<PathBuf> {

@@ -340,3 +340,73 @@ describe('pickSupplierModelId / 供应商默认模型名', () => {
     expect(resolveApiConfigForRoute(settings, 'auto-builtin:m-c').model).toBe('m-a');
   });
 });
+
+describe('请求修饰字段（headers / authMode / userAgent）解析与装配', () => {
+  const OPENCODE_LIKE = {
+    id: 's1',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    apiKey: 'sk-1',
+    userAgent: 'dieyunagent/1.0',
+    headers: { 'x-opencode-session': '{{sessionId}}' }
+  };
+
+  it('供应商上的自定义头 / User-Agent 随解析结果一并带出', () => {
+    const settings = settingsWith({ modelSuppliers: [OPENCODE_LIKE] });
+    const cfg = resolveApiConfigForRoute(settings, 'builtin:s1:m1');
+    expect(cfg.headers).toEqual({ 'x-opencode-session': '{{sessionId}}' });
+    expect(cfg.userAgent).toBe('dieyunagent/1.0');
+  });
+
+  it('未配置请求修饰时返回值仍是三键（不污染既有结构契约）', () => {
+    const settings = settingsWith({
+      modelSuppliers: [{ id: 's1', baseUrl: 'https://s1/v1', apiKey: 'sk-1' }]
+    });
+    expect(resolveSupplierApiConfig(settings, 's1')).toEqual({
+      baseUrl: 'https://s1/v1',
+      apiKey: 'sk-1',
+      model: ''
+    });
+  });
+
+  it('authMode 非默认值才透出；bearer 不写进配置', () => {
+    const settings = settingsWith({
+      modelSuppliers: [{ id: 's1', baseUrl: 'https://s1/v1', apiKey: 'k', authMode: 'x-api-key' }]
+    });
+    expect(resolveSupplierApiConfig(settings, 's1').authMode).toBe('x-api-key');
+
+    const legacy = settingsWith({
+      modelSuppliers: [{ id: 's1', baseUrl: 'https://s1/v1', apiKey: 'k', authMode: 'bearer' }]
+    });
+    expect(resolveSupplierApiConfig(legacy, 's1').authMode).toBeUndefined();
+  });
+
+  it('端到端：路由解析 → 请求头装配，产出上游要的会话头（原 400 场景）', () => {
+    const { buildLlmHeadersFromConfig } = require('../../src/agent/llm-request');
+    const settings = settingsWith({ modelSuppliers: [OPENCODE_LIKE] });
+    const cfg = resolveApiConfigForRoute(settings, 'builtin:s1:m1');
+    // 调用点只需补运行时标识：会话级 sessionId + 每轮 runId
+    const headers = buildLlmHeadersFromConfig({ ...cfg, sessionId: 'conv-1' }, { runId: 'r1' });
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers.Authorization).toBe('Bearer sk-1');
+    expect(headers['x-opencode-session']).toBe('conv-1');
+    expect(headers['User-Agent']).toBe('dieyunagent/1.0');
+  });
+
+  it('端到端：无会话标识时该头不发送（不产生空值头）', () => {
+    const { buildLlmHeadersFromConfig } = require('../../src/agent/llm-request');
+    const settings = settingsWith({ modelSuppliers: [OPENCODE_LIKE] });
+    const cfg = resolveApiConfigForRoute(settings, 'builtin:s1:m1');
+    const headers = buildLlmHeadersFromConfig(cfg, {});
+    expect(Object.prototype.hasOwnProperty.call(headers, 'x-opencode-session')).toBe(false);
+    expect(headers.Authorization).toBe('Bearer sk-1');
+  });
+
+  it('自定义模型同样支持请求修饰字段', () => {
+    const settings = settingsWith({
+      customModels: [{ ...CUSTOM_TEXT, userAgent: 'ua/2', headers: { 'X-Title': 'dieyun' } }]
+    });
+    const cfg = resolveApiConfigForRoute(settings, 'custom:c1');
+    expect(cfg.userAgent).toBe('ua/2');
+    expect(cfg.headers).toEqual({ 'X-Title': 'dieyun' });
+  });
+});

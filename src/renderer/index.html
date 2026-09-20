@@ -1243,6 +1243,7 @@
                   <label class="check-row"><input type="checkbox" id="trace-show-titles" checked /><span data-i18n="trace_titles">显示思考标题</span></label>
                   <label class="check-row"><input type="checkbox" id="trace-expand-shell" /><span data-i18n="trace_shell">展开 Shell 工具部分</span></label>
                   <label class="check-row"><input type="checkbox" id="trace-expand-edit" checked /><span data-i18n="trace_edit">展开编辑工具部分</span></label>
+                  <label class="check-row"><input type="checkbox" id="trace-follow-writes" checked /><span data-i18n="trace_follow_writes">编辑区跟随 Agent 写入</span></label>
                 </div>
               </div>
             </div>
@@ -1798,15 +1799,21 @@
             <span class="field-label">API Key</span>
             <input type="password" id="defined-model-editor-api-key" placeholder="sk-..." autocomplete="off" />
           </label>
+          <label class="field">
+            <span class="field-label">User-Agent（可选）</span>
+            <input type="text" id="defined-model-editor-user-agent" placeholder="例如：my-agent/1.0" autocomplete="off" />
+          </label>
+          <div class="field">
+            <span class="field-label">自定义请求头（可选）</span>
+            <textarea id="defined-model-editor-headers" rows="3" placeholder="每行一个，例如：&#10;x-opencode-session: {{sessionId}}&#10;HTTP-Referer: https://example.com" autocomplete="off"></textarea>
+          </div>
           <div class="field">
             <span class="field-label">Context 档位</span>
             <div class="select-menu context-tier-select" id="defined-model-editor-context-tier"></div>
-            <p class="field-hint">未指定时按模型名称推断；档位参数在「帮助 → 编码参数」中按档编辑。</p>
           </div>
           <label class="field">
             <span class="field-label">上下文窗口（可选）</span>
             <input type="number" id="defined-model-editor-context-window" min="8192" max="2000000" step="1024" placeholder="留空则使用档位窗口" />
-            <p class="field-hint">该模型真实支持的上下文长度。填写后覆盖档位窗口（8K 档已删除，小窗口模型请在此填写）。</p>
           </label>
           <label class="field">
             <span class="field-label">模型类型</span>
@@ -1815,7 +1822,6 @@
               <button type="button" class="model-modality-tag" data-modality="vision" aria-pressed="false">全模态</button>
               <button type="button" class="model-modality-tag" data-modality="speech" aria-pressed="false">语音</button>
             </div>
-            <p class="field-hint" id="defined-model-editor-modality-hint"></p>
           </label>
         </div>
         <footer class="defined-model-editor-actions">
@@ -1887,6 +1893,14 @@
             <span class="field-label">API Key</span>
             <input type="password" id="supplier-editor-api-key" placeholder="sk-..." autocomplete="off" />
           </label>
+          <label class="field">
+            <span class="field-label">User-Agent（可选）</span>
+            <input type="text" id="supplier-editor-user-agent" placeholder="例如：my-agent/1.0" autocomplete="off" />
+          </label>
+          <div class="field">
+            <span class="field-label">自定义请求头（可选）</span>
+            <textarea id="supplier-editor-headers" rows="3" placeholder="每行一个，例如：&#10;x-opencode-session: {{sessionId}}&#10;HTTP-Referer: https://example.com" autocomplete="off"></textarea>
+          </div>
           <div class="field">
             <span class="field-label">默认 Context 档位</span>
             <div class="select-menu context-tier-select" id="supplier-editor-context-tier"></div>
@@ -2031,6 +2045,8 @@
     <script src="./renderer-artifacts-browse.js"></script>
     <script src="./renderer-artifact-diff-view.js"></script>
     <script src="./renderer-artifacts.js"></script>
+    <!-- Agent 写入跟随：编辑区实时预览的唯一入口（零 RPC 增量写入） -->
+    <script src="./renderer-artifacts-follow.js"></script>
     <script src="./renderer-editor-context.js"></script>
     <script src="./renderer-changes-pane.js"></script>
     <script src="./renderer-scm-pane.js"></script>

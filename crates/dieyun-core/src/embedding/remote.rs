@@ -63,10 +63,9 @@ pub async fn embed_remote(
         .build()
         .map_err(|e| CoreError::rpc("EMBEDDING_HTTP", e.to_string()))?;
 
-    let mut req = client.post(&url).header("Content-Type", "application/json");
-    if !cfg.api_key.trim().is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", cfg.api_key.trim()));
-    }
+    // 请求头单一来源：Node 侧 llm-request.js 装配后经 EmbeddingConfig.headers 传入
+    let mut req = client.post(&url);
+    req = crate::config::apply_llm_headers(req, &cfg.headers, &cfg.api_key, &cfg.auth_mode);
 
     let resp = req
         .json(&body)

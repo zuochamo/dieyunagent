@@ -206,12 +206,6 @@ function updateSettingsFromModelLists() {
   updateComposerModelTriggerLabel();
 }
 
-var MODALITY_HINTS = {
-  text: '用于对话与代码生成。发图时不会直接发送 image_url，需由标记为全模态的模型处理。',
-  vision: '支持识图与 image_url 多模态输入，会出现在对话模型列表中。',
-  speech: '用于语音转写（调用 /v1/audio/transcriptions），不会出现在对话模型列表。'
-};
-
 function getDefinedModelEditorModality() {
   const active = document.querySelector('#defined-model-editor-modality-tags .model-modality-tag[aria-pressed="true"]');
   const value = active?.dataset?.modality;
@@ -225,8 +219,6 @@ function setDefinedModelEditorModality(value) {
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     btn.classList.toggle('is-active', on);
   });
-  const hint = $('defined-model-editor-modality-hint');
-  if (hint) hint.textContent = MODALITY_HINTS[setting] || MODALITY_HINTS.text;
 }
 
 function renderDefinedModelModalityBadge(model) {
@@ -408,11 +400,116 @@ function renderSupplierEditorModelList() {
   }
 }
 
+/**
+ * llm-request 模块（经 dist/agent-bundle.js 注册为 window.LlmRequest）。
+ *
+ * 取不到时**绝不抛错**：设置页必须始终能打开与保存。
+ * 否则一旦 bundle 未随源码更新（例如应用没重启），一个 undefined 就会让
+ * 「保存」整条链路中断——表现为点了没反应，且看不出任何原因。
+ */
+function llmRequestApi() {
+  return (typeof window !== 'undefined' && window.LlmRequest) || null;
+}
+
+/** 降级解析（仅 llm-request 不可用时使用；规则与其一致：每行 `名称: 值`） */
+function parseHeaderLinesFallback(text) {
+  const out = {};
+  for (const line of String(text == null ? '' : text).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf(':');
+    if (idx <= 0) continue;
+    out[trimmed.slice(0, idx).trim()] = trimmed.slice(idx + 1).trim();
+  }
+  return out;
+}
+
+function normalizeHeadersLoose(input) {
+  const api = llmRequestApi();
+  if (api && typeof api.normalizeConfiguredHeaders === 'function') {
+    return api.normalizeConfiguredHeaders(input);
+  }
+  if (typeof input === 'string') return parseHeaderLinesFallback(input);
+  if (input && typeof input === 'object') return { ...input };
+  return {};
+}
+
+/**
+ * 自定义请求头在「存储（对象）」与「编辑（多行文本）」之间转换。
+ * 解析 / 归一化统一委托 llm-request，避免设置页与运行时各有一套规则
+ * （那正是「测试通过但真实请求 400」的来源）。
+ */
+function headersToEditorText(headers) {
+  const obj = normalizeHeadersLoose(headers);
+  return Object.entries(obj)
+    .map(([name, value]) => `${name}: ${value}`)
+    .join('\n');
+}
+
+function readHeadersFromEditor(id) {
+  const el = $(id);
+  if (!el) return {};
+  return normalizeHeadersLoose(el.value);
+}
+
+/**
+ * 保存前的校验版读取：文本框有内容却解析不出任何头，说明写法有误
+ * （最常见是漏了冒号与值，例如只写 `x-opencode-session`）。
+ *
+ * 这时返回 error 让保存停下并提示，而不是静默丢弃用户输入 ——
+ * 静默丢弃的体验就是「我填了、点了保存、再打开就没了」。
+ */
+function readHeadersFromEditorChecked(id) {
+  const el = $(id);
+  if (!el) return { headers: {} };
+  if (!String(el.value || '').trim()) return { headers: {} };
+  const headers = readHeadersFromEditor(id);
+  if (!Object.keys(headers).length) {
+    return {
+      headers: {},
+      error: '自定义请求头格式无法识别：每行需形如「名称: 值」，例如 x-opencode-session: {{sessionId}}'
+    };
+  }
+  return { headers };
+}
+
+/**
+ * 探针请求（拉模型列表 / 探测可用性）没有会话语义，但部分网关必须先看到会话头
+ * 才会响应。这里用固定标识把占位符渲染掉，保证「检测」与「真实使用」同一套头。
+ */
+function renderProbeHeaders(headers, modelName) {
+  const api = llmRequestApi();
+  const out = {};
+  for (const [name, value] of Object.entries(headers || {})) {
+    const rendered =
+      api && typeof api.renderHeaderTemplate === 'function'
+        ? api.renderHeaderTemplate(value, { sessionId: 'probe', model: modelName || '' })
+        : String(value == null ? '' : value).trim();
+    if (rendered) out[name] = rendered;
+  }
+  return out;
+}
+
+/** 装配请求头；llm-request 不可用时降级为「Content-Type + Bearer」，保证「测试」按钮仍可用 */
+function buildHeadersFromConfigLoose(config, vars) {
+  const api = llmRequestApi();
+  const cfg = config && typeof config === 'object' ? config : {};
+  if (api && typeof api.buildLlmHeadersFromConfig === 'function') {
+    return api.buildLlmHeadersFromConfig(cfg, vars);
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  const key = String(cfg.apiKey || '').trim();
+  if (key) headers.Authorization = `Bearer ${key}`;
+  return headers;
+}
+
 function collectSupplierEditorConfig() {
   return {
     name: $('supplier-editor-name').value.trim(),
     baseUrl: $('supplier-editor-base-url').value.trim(),
-    apiKey: $('supplier-editor-api-key').value.trim()
+    apiKey: $('supplier-editor-api-key').value.trim(),
+    userAgent: ($('supplier-editor-user-agent')?.value || '').trim(),
+    headers: readHeadersFromEditor('supplier-editor-headers')
   };
 }
 
@@ -432,6 +529,8 @@ async function detectSupplierModelsForEditor() {
     const res = await modelSettingsApi.fetchBuiltinModels({
       baseUrl: cfg.baseUrl,
       apiKey: cfg.apiKey,
+      userAgent: cfg.userAgent,
+      headers: renderProbeHeaders(cfg.headers, cfg.name),
       validate: true
     });
     if (!res || !res.ok) {
@@ -491,6 +590,8 @@ function openSupplierEditor(id) {
   $('supplier-editor-name').value = supplier.name || '';
   $('supplier-editor-base-url').value = supplier.baseUrl || '';
   $('supplier-editor-api-key').value = supplier.apiKey || '';
+  $('supplier-editor-user-agent').value = supplier.userAgent || '';
+  $('supplier-editor-headers').value = headersToEditorText(supplier.headers);
   $('supplier-editor-delete').hidden = !id;
   supplierEditorEnabledModels = { ...(supplier.enabledModels || {}) };
   supplierEditorModelModalities = { ...(supplier.modelModalities || {}) };
@@ -520,8 +621,15 @@ function closeSupplierEditor() {
 }
 
 function saveSupplierFromEditor() {
-  const { name, baseUrl, apiKey } = collectSupplierEditorConfig();
+  const { name, baseUrl, apiKey, userAgent } = collectSupplierEditorConfig();
   if (!baseUrl) return;
+  // 格式写错时停下并提示，而不是静默丢弃用户刚填的内容
+  const checkedHeaders = readHeadersFromEditorChecked('supplier-editor-headers');
+  if (checkedHeaders.error) {
+    setSupplierEditorDetectStatus(checkedHeaders.error, false);
+    return;
+  }
+  const headers = checkedHeaders.headers;
   const contextTier = normalizeContextTierId(
     ensureSupplierEditorContextTierMenu()?.getValue() || supplierEditorContextTier
   );
@@ -556,6 +664,9 @@ function saveSupplierFromEditor() {
     modelModalities,
     contextTierByModel
   };
+  // 请求修饰字段按需落盘：未配置时保持配置干净，不写空对象
+  if (userAgent) next.userAgent = userAgent;
+  if (Object.keys(headers || {}).length) next.headers = headers;
   if (idx >= 0) suppliers[idx] = next;
   else suppliers.push(next);
   settings = normalizeSettings({ ...settings, modelSuppliers: suppliers });
@@ -617,6 +728,8 @@ function openDefinedModelEditor(id) {
   $('defined-model-editor-name').value = model.name || '';
   $('defined-model-editor-base-url').value = model.baseUrl || '';
   $('defined-model-editor-api-key').value = model.apiKey || '';
+  $('defined-model-editor-user-agent').value = model.userAgent || '';
+  $('defined-model-editor-headers').value = headersToEditorText(model.headers);
   const windowInput = $('defined-model-editor-context-window');
   if (windowInput) windowInput.value = model.contextWindow ? String(model.contextWindow) : '';
   populateContextTierMenu(ensureDefinedModelEditorContextTierMenu(), model.contextTier || '', {
@@ -636,15 +749,8 @@ function closeDefinedModelEditor() {
 }
 
 function resolveChatCompletionsEndpointForTest(baseUrl) {
-  return (
-    window.ModelCapabilities?.resolveChatCompletionsEndpoint(baseUrl) ||
-    (() => {
-      const raw = String(baseUrl || '').trim().replace(/\/+$/, '');
-      if (/\/chat\/completions$/i.test(raw)) return raw;
-      if (/\/v1$/i.test(raw)) return `${raw}/chat/completions`;
-      return `${raw}/v1/chat/completions`;
-    })()
-  );
+  // 端点拼接单一来源 llm-request（与 Main 侧同一份实现）
+  return window.LlmRequest.resolveLlmEndpoint(baseUrl, 'chat');
 }
 
 function collectDefinedModelEditorConfig() {
@@ -655,7 +761,9 @@ function collectDefinedModelEditorConfig() {
     apiKey: $('defined-model-editor-api-key').value.trim(),
     modalitySetting: getDefinedModelEditorModality(),
     contextTier: contextTier ? normalizeContextTierId(contextTier) : '',
-    contextWindow: String($('defined-model-editor-context-window')?.value || '').trim()
+    contextWindow: String($('defined-model-editor-context-window')?.value || '').trim(),
+    userAgent: ($('defined-model-editor-user-agent')?.value || '').trim(),
+    headers: readHeadersFromEditor('defined-model-editor-headers')
   };
 }
 
@@ -675,8 +783,8 @@ async function testDefinedModelFromEditor() {
     return;
   }
   const url = resolveChatCompletionsEndpointForTest(cfg.baseUrl);
-  const headers = { 'Content-Type': 'application/json' };
-  if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+  // 测试连接必须与真实请求用同一套头，否则会出现「测试通过但聊天 400」
+  const headers = buildHeadersFromConfigLoose(cfg, { sessionId: currentSessionId });
   const body = {
     model: cfg.name,
     messages: [{ role: 'user', content: '叠云模型连接测试。请只回复 OK。' }],
@@ -715,9 +823,16 @@ async function testDefinedModelFromEditor() {
 }
 
 function saveDefinedModelFromEditor() {
-  const { name, baseUrl, apiKey, modalitySetting, contextTier, contextWindow } =
+  const { name, baseUrl, apiKey, modalitySetting, contextTier, contextWindow, userAgent } =
     collectDefinedModelEditorConfig();
   if (!name || !baseUrl) return;
+  // 格式写错时停下并提示，而不是静默丢弃用户刚填的内容
+  const checkedHeaders = readHeadersFromEditorChecked('defined-model-editor-headers');
+  if (checkedHeaders.error) {
+    setDefinedModelTestStatus(checkedHeaders.error, false);
+    return;
+  }
+  const headers = checkedHeaders.headers;
   const models = [...(settings.customModels || [])];
   const idx = models.findIndex((m) => m.id === editingDefinedModelId);
   const next = {
@@ -731,6 +846,9 @@ function saveDefinedModelFromEditor() {
   const ownWindow = Math.floor(Number(contextWindow));
   if (Number.isFinite(ownWindow) && ownWindow >= 8192) next.contextWindow = ownWindow;
   next.kind = window.ModelCapabilities?.effectiveCustomModelKind(next) || 'text';
+  // 请求修饰字段按需落盘：未配置时保持配置干净，不写空对象
+  if (userAgent) next.userAgent = userAgent;
+  if (Object.keys(headers || {}).length) next.headers = headers;
   if (idx >= 0) models[idx] = next;
   else models.push(next);
   settings = normalizeSettings({ ...settings, customModels: models });
@@ -785,10 +903,8 @@ function closeEmbeddingModelEditor() {
 }
 
 function resolveEmbeddingEndpointForTest(baseUrl) {
-  const raw = String(baseUrl || '').trim().replace(/\/+$/, '');
-  if (/\/(embeddings|embed)$/i.test(raw)) return raw;
-  if (/\/v1$/i.test(raw)) return `${raw}/embeddings`;
-  return `${raw}/v1/embeddings`;
+  // 端点拼接单一来源 llm-request（含 /embed 直连写法）
+  return window.LlmRequest.resolveLlmEndpoint(baseUrl, 'embeddings');
 }
 
 function isDirectEmbedEndpoint(baseUrl) {
@@ -846,8 +962,7 @@ async function testEmbeddingModelFromEditor() {
     return;
   }
   const url = resolveEmbeddingEndpointForTest(cfg.baseUrl);
-  const headers = { 'Content-Type': 'application/json' };
-  if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+  const headers = buildHeadersFromConfigLoose(cfg);
   const body = isDirectEmbedEndpoint(cfg.baseUrl)
     ? {
         texts: ['叠云向量模型测试'],

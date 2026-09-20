@@ -373,7 +373,7 @@ function normalizeSupplierEntry(m, index) {
     const normalized = normalizeContextTierId(tierId, '');
     if (normalized) contextTierByModel[modelId] = normalized;
   }
-  return {
+  const entry = {
     id: String(m?.id || `supplier-${Date.now()}-${index}`),
     name: String(m?.name || '').trim(),
     baseUrl: String(m?.baseUrl || '').trim(),
@@ -383,6 +383,13 @@ function normalizeSupplierEntry(m, index) {
     modelModalities,
     contextTierByModel
   };
+  // 请求修饰字段（交给 llm-request 装配进出站请求）必须原样保留。
+  // 本函数是「重建对象、只列已知字段」，漏写一个键就会表现为
+  // 「设置页填得好好的，一保存就没了」——排查成本极高。
+  if (m && m.headers) entry.headers = m.headers;
+  if (m && m.authMode) entry.authMode = String(m.authMode).trim();
+  if (m && m.userAgent) entry.userAgent = String(m.userAgent).trim();
+  return entry;
 }
 
 function supplierDisplayName(s) {
@@ -488,6 +495,10 @@ function normalizeSettings(raw) {
       entry.contextWindow = clampContextWindowInput(ownWindow);
     }
     entry.kind = window.ModelCapabilities?.effectiveCustomModelKind(entry) || (m?.kind === 'vision' ? 'vision' : 'text');
+    // 请求修饰字段必须原样保留（同 normalizeSupplierEntry，勿漏）
+    if (m && m.headers) entry.headers = m.headers;
+    if (m && m.authMode) entry.authMode = String(m.authMode).trim();
+    if (m && m.userAgent) entry.userAgent = String(m.userAgent).trim();
     return entry;
   };
   s.customModels = Array.isArray(s.customModels)
@@ -718,12 +729,21 @@ function sharedModelApiConfig() {
   return (typeof window !== 'undefined' && window.DieyunModelApiConfig) || null;
 }
 
-/** {baseUrl, apiKey} 的规范化（裁剪 + 取字段）只此一处，勿再内联。 */
-function apiConfigOf(baseUrl, apiKey) {
+/**
+ * 「baseUrl / apiKey → API 配置」的规范化只此一处，勿再内联。
+ *
+ * `source` 是配置的来源行（供应商 / 自定义模型 / settings）：带上它会一并透传
+ * 请求修饰字段（headers / authMode / userAgent）。
+ * **只取 baseUrl + apiKey 两个标量会把用户配的自定义头与 User-Agent 静默丢掉**，
+ * 表现为「设置页明明配了 x-opencode-session，请求却依然 400」。
+ */
+function apiConfigOf(baseUrl, apiKey, source) {
   const shared = sharedModelApiConfig();
   if (shared && typeof shared.asConfig === 'function') {
-    const cfg = shared.asConfig(baseUrl, apiKey);
-    return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
+    const extra = typeof shared.requestOptionsFrom === 'function'
+      ? shared.requestOptionsFrom(source)
+      : undefined;
+    return shared.asConfig(baseUrl, apiKey, undefined, extra);
   }
   return { baseUrl: String(baseUrl || '').trim(), apiKey: String(apiKey || '').trim() };
 }
@@ -731,12 +751,12 @@ function apiConfigOf(baseUrl, apiKey) {
 function getBuiltinApiConfig(supplierId) {
   const shared = sharedModelApiConfig();
   if (shared && typeof shared.resolveSupplierApiConfig === 'function') {
-    const cfg = shared.resolveSupplierApiConfig(settings, supplierId);
-    return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
+    // 完整透传解析结果（含请求修饰字段），不要再手工裁剪字段
+    return shared.resolveSupplierApiConfig(settings, supplierId);
   }
   const supplier = supplierId ? getSupplierById(supplierId) : (settings.modelSuppliers || [])[0];
-  if (supplier) return apiConfigOf(supplier.baseUrl, supplier.apiKey);
-  return apiConfigOf(settings.builtinBaseUrl, settings.builtinApiKey);
+  if (supplier) return apiConfigOf(supplier.baseUrl, supplier.apiKey, supplier);
+  return apiConfigOf(settings.builtinBaseUrl, settings.builtinApiKey, settings);
 }
 
 function getSelectedCustomModel() {
@@ -751,22 +771,27 @@ function getCustomModelApiConfig(route) {
   const customRoute = routeText.match(/^(?:auto-)?custom:(.+)$/);
   if (customRoute) {
     const model = (settings.customModels || []).find((m) => m.id === customRoute[1]);
-    if (model) return apiConfigOf(model.baseUrl, model.apiKey);
+    if (model) return apiConfigOf(model.baseUrl, model.apiKey, model);
   }
   if (/^(?:auto-)?builtin(?::|$)/.test(routeText)) {
     return getBuiltinApiConfig();
   }
   const selected = getSelectedCustomModel();
   if (selected) {
-    return apiConfigOf(selected.baseUrl || settings.baseUrl, selected.apiKey || settings.apiKey);
+    return apiConfigOf(
+      selected.baseUrl || settings.baseUrl,
+      selected.apiKey || settings.apiKey,
+      selected
+    );
   }
   if (route === 'custom-vision') {
     return apiConfigOf(
       getVisionApiConfig().baseUrl || settings.baseUrl,
-      getVisionApiConfig().apiKey || settings.apiKey
+      getVisionApiConfig().apiKey || settings.apiKey,
+      settings
     );
   }
-  return apiConfigOf(settings.baseUrl, settings.apiKey);
+  return apiConfigOf(settings.baseUrl, settings.apiKey, settings);
 }
 
 function refreshBuiltinModelsAfterSettingsChange() {

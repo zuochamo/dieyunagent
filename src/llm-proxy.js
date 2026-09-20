@@ -42,6 +42,35 @@ function sseChunkHasDataLine(text, lineCarry) {
   return { found, rest };
 }
 
+/**
+ * 上游 HTTP 错误的信息增强：附上目标 host、实际发出的头名，以及可执行的排查提示。
+ *
+ * 为什么需要：改造前用户看到的只有 `HTTP 400 {截断的 JSON}` ——
+ * 既不知道打的是哪个端点、带了哪些头，也不知道缺什么，每次都得人工排查一遍。
+ * 鉴权头的**值**永不打印（只列名字），避免密钥进日志。
+ */
+function describeLlmHttpError(url, headers, bodyText) {
+  const parts = [];
+  try {
+    const host = new URL(url).host;
+    if (host) parts.push(`host=${host}`);
+  } catch {
+    // URL 非法时跳过 host 提示，不影响原错误
+  }
+  const sent = Object.keys(headers || {}).map((n) => String(n).toLowerCase());
+  if (sent.length) parts.push(`已发头=${sent.join(',')}`);
+
+  // 通用启发式（不针对任何厂商）：上游抱怨某类信息而我们确实没发对应头
+  const body = String(bodyText || '');
+  if (/session/i.test(body) && !sent.some((n) => n.includes('session'))) {
+    parts.push('上游要求会话标识，可在该供应商的「自定义请求头」里加 x-opencode-session: {{sessionId}}');
+  }
+  if (/user-?agent/i.test(body) && !sent.includes('user-agent')) {
+    parts.push('上游要求自报 User-Agent，可在该供应商的「User-Agent」里填写');
+  }
+  return parts.join('；');
+}
+
 function isAbortError(err) {
   return err && (err.code === 'ABORT_ERR' || err.name === 'AbortError' || err.message === 'aborted');
 }
@@ -207,7 +236,10 @@ async function chatCompletionJson(url, opts = {}) {
 
   const raw = Buffer.concat(chunks).toString('utf8');
   if (res.statusCode && res.statusCode >= 400) {
-    const err = new Error(`HTTP ${res.statusCode} ${raw.slice(0, 400)}`);
+    const hint = describeLlmHttpError(url, opts.headers, raw);
+    const err = new Error(
+      `HTTP ${res.statusCode} ${raw.slice(0, 400)}${hint ? `（诊断：${hint}）` : ''}`
+    );
     err.statusCode = res.statusCode;
     throw err;
   }
@@ -247,7 +279,10 @@ async function streamChatSse(url, opts = {}) {
       idleMs: Math.min(BODY_IDLE_TIMEOUT_MS, 30000),
       totalMs: Math.min(STREAM_TOTAL_TIMEOUT_MS, 60000)
     });
-    const err = new Error(`HTTP ${res.statusCode} ${errBody.slice(0, 400)}`);
+    const hint = describeLlmHttpError(url, opts.headers, errBody);
+    const err = new Error(
+      `HTTP ${res.statusCode} ${errBody.slice(0, 400)}${hint ? `（诊断：${hint}）` : ''}`
+    );
     err.statusCode = res.statusCode;
     throw err;
   }

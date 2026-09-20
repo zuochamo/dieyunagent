@@ -6,12 +6,11 @@ const { ASSISTANT_IDENTITY, formatDieyunSystemBlock } = require('../dieyun-instr
 const { runPlanAgentLoop } = require('./plan-agent-runner');
 const { appendPlanLog } = require('./plan-log');
 const { chatCompletionJson } = require('../llm-proxy');
+const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('../agent/llm-request');
 
 function resolveEndpoint(baseUrl) {
-  const base = String(baseUrl || '').replace(/\/+$/, '');
-  if (/\/chat\/completions(?:\?|$)/i.test(base)) return base;
-  if (/\/v\d+$/i.test(base)) return `${base}/chat/completions`;
-  return `${base}/v1/chat/completions`;
+  // 端点拼接单一来源 llm-request.js（调用方已保证 baseUrl 非空）
+  return resolveLlmEndpoint(baseUrl, 'chat');
 }
 
 /**
@@ -41,10 +40,7 @@ async function chatCompletion(userData, prompt, extraSystem, opts = {}) {
   ];
 
   const json = await chatCompletionJson(resolveEndpoint(cfg.baseUrl), {
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${cfg.apiKey}`
-    },
+    headers: buildLlmHeadersFromConfig(cfg, { sessionId: opts.sessionId }),
     body: JSON.stringify({
       model: cfg.model,
       messages,

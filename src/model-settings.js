@@ -15,7 +15,8 @@ const { CONTEXT_WINDOW_MAX } = require('./agent/model-runtime-schema');
 const { MODEL_RUNTIME_DEFAULTS: PRESET_DEFAULTS } = require('./agent/model-runtime-presets');
 const {
   resolveApiConfigForRoute,
-  resolveDefaultApiConfig
+  resolveDefaultApiConfig,
+  requestOptionsFrom
 } = require('./agent/model-api-config');
 
 const MAX_OUTPUT_TOKENS_DEFAULT = PRESET_DEFAULTS.maxOutputTokens;
@@ -84,7 +85,8 @@ function resolveSpeechApiConfig(settings) {
   const apiKey = String(s.speechApiKey || supplier?.apiKey || s.builtinApiKey || s.apiKey || '').trim();
   const model = String(s.speechWhisperModel || 'whisper-1').trim() || 'whisper-1';
   const language = String(s.speechLanguage || 'zh').trim();
-  return { baseUrl, apiKey, model, language };
+  // 一并带出请求修饰字段（转写端点也可能要求自定义头 / User-Agent）
+  return { ...requestOptionsFrom(supplier || s), baseUrl, apiKey, model, language };
 }
 
 /**
@@ -104,7 +106,10 @@ function resolveTextApiConfig(settings, opts = {}) {
   const cfg = route
     ? resolveApiConfigForRoute(s, route, { strict: opts.strict === true })
     : resolveDefaultApiConfig(s);
+  // 整体继承解析结果：逐字段重建会丢掉 headers / authMode / userAgent，
+  // 于是「供应商配了自定义头，定时计划/后台调用却依然 400」。
   return {
+    ...cfg,
     baseUrl: cfg.baseUrl,
     apiKey: cfg.apiKey,
     model: String(opts.model || cfg.model || s.textModel || '').trim()
@@ -153,7 +158,7 @@ function modelSettingsPath(userData) {
 
 function normalizeEmbeddingEntry(m, index) {
   const builtin = isBuiltinEmbeddingListEntry(m);
-  return {
+  const entry = {
     id: String(m?.id || `embedding-${index + 1}`),
     name: String(m?.name || '').trim(),
     baseUrl: builtin ? '内置' : String(m?.baseUrl || '').trim(),
@@ -165,6 +170,12 @@ function normalizeEmbeddingEntry(m, index) {
     active: m?.active === true,
     builtin
   };
+  // 请求修饰字段：与供应商 / 自定义模型同源，由 llm-request.js 统一装配。
+  // 内置模型不出网，不参与；无值时不挂键，保持既有结构契约。
+  if (!builtin && m && m.headers) entry.headers = m.headers;
+  if (!builtin && m && m.authMode) entry.authMode = String(m.authMode).trim();
+  if (!builtin && m && m.userAgent) entry.userAgent = String(m.userAgent).trim();
+  return entry;
 }
 
 function normalize(raw) {
@@ -294,12 +305,17 @@ function getEmbeddingConfig(settings) {
       builtin: true
     };
   }
-  return {
+  const out = {
     baseUrl: active.baseUrl,
     apiKey: active.apiKey,
     model: active.name,
     dimensions: active.dimensions || DEFAULTS.embeddingDimensions
   };
+  // 请求修饰字段透传给 Rust（EmbeddingConfig.headers）与 llm-request 装配
+  if (active.headers) out.headers = active.headers;
+  if (active.authMode) out.authMode = active.authMode;
+  if (active.userAgent) out.userAgent = active.userAgent;
+  return out;
 }
 
 function embeddingSignature(settings) {

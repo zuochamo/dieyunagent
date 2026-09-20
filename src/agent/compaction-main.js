@@ -1,6 +1,8 @@
 'use strict';
 
 const { loadModelSettings } = require('../model-settings');
+const { buildLlmHeadersFromConfig } = require('./llm-request');
+const { mergedRequestOptions } = require('./model-api-config');
 const { resolveModelContextWindowFromSettings } = require('./model-runtime-by-tier');
 const { MODEL_RUNTIME_DEFAULTS } = require('./model-runtime-presets');
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
@@ -108,7 +110,25 @@ function resolveCompactionLlm(settings, opts = {}) {
   const baseUrl = String(apiConfig.baseUrl || settings.baseUrl || '').trim();
   const apiKey = String(apiConfig.apiKey || settings.apiKey || '').trim();
   const sessionModel = String(opts.model || apiConfig.model || resolveTextModel(settings) || '').trim();
-  return { baseUrl, apiKey, textModel: sessionModel };
+  return {
+    baseUrl,
+    apiKey,
+    textModel: sessionModel,
+    // 压缩与主链路必须带同一套请求头（单一来源 llm-request.js）。
+    // 少了这里就会出现「对话正常、压缩一跑就 400」——历史上最难定位的一类不一致。
+    // 请求修饰字段缺失时回落到 settings（顶层 legacy 配置同样可能自带自定义头）。
+    headers: buildLlmHeadersFromConfig(
+      {
+        ...apiConfig,
+        ...mergedRequestOptions(apiConfig, settings),
+        baseUrl,
+        apiKey,
+        model: sessionModel
+      },
+      { sessionId: opts.sessionId }
+    ),
+    authMode: String(apiConfig.authMode || '').trim()
+  };
 }
 
 /** 中转/供应商内容审核拒绝压缩摘要时，跳过 LLM 压缩而非阻断 Agent。 */

@@ -17,21 +17,28 @@
     return (typeof window !== 'undefined' && window.DieyunModelApiConfig) || null;
   }
 
-  function apiConfigOf(baseUrl, apiKey) {
+  /**
+   * `source` 用于一并透传请求修饰字段（headers / authMode / userAgent）。
+   * 只取 baseUrl + apiKey 会静默丢掉用户配的自定义头与 User-Agent。
+   */
+  function apiConfigOf(baseUrl, apiKey, source) {
     const shared = sharedModelApiConfig();
     if (shared && typeof shared.asConfig === 'function') {
-      const cfg = shared.asConfig(baseUrl, apiKey);
-      return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
+      const extra =
+        typeof shared.requestOptionsFrom === 'function'
+          ? shared.requestOptionsFrom(source)
+          : undefined;
+      return shared.asConfig(baseUrl, apiKey, undefined, extra);
     }
     return { baseUrl: String(baseUrl || '').trim(), apiKey: String(apiKey || '').trim() };
   }
 
   function supplierApiConfig(supplier) {
-    return apiConfigOf(supplier && supplier.baseUrl, supplier && supplier.apiKey);
+    return apiConfigOf(supplier && supplier.baseUrl, supplier && supplier.apiKey, supplier);
   }
 
   function customModelApiConfig(model) {
-    return apiConfigOf(model && model.baseUrl, model && model.apiKey);
+    return apiConfigOf(model && model.baseUrl, model && model.apiKey, model);
   }
 
   function normalizeModalitySetting(value, kind) {
@@ -158,11 +165,17 @@
   function getVisionApiConfigFromSettings(settings) {
     const pick = pickVisionModel(settings);
     if (!pick) return { baseUrl: '', apiKey: '', model: '' };
-    return {
-      baseUrl: String(pick.apiConfig?.baseUrl || '').trim(),
-      apiKey: String(pick.apiConfig?.apiKey || '').trim(),
+    const cfg = pick.apiConfig || {};
+    // 保留请求修饰字段：视觉模型同样可能要求自定义头 / User-Agent
+    const out = {
+      baseUrl: String(cfg.baseUrl || '').trim(),
+      apiKey: String(cfg.apiKey || '').trim(),
       model: String(pick.model || '').trim()
     };
+    if (cfg.authMode) out.authMode = String(cfg.authMode).trim();
+    if (cfg.userAgent) out.userAgent = String(cfg.userAgent).trim();
+    if (cfg.headers) out.headers = cfg.headers;
+    return out;
   }
 
   function getSpeechApiConfigFromSettings(settings) {
@@ -225,10 +238,8 @@
   }
 
   function resolveChatCompletionsEndpoint(baseUrl) {
-    const raw = String(baseUrl || '').trim().replace(/\/+$/, '');
-    if (/\/chat\/completions$/i.test(raw)) return raw;
-    if (/\/v1$/i.test(raw)) return `${raw}/chat/completions`;
-    return `${raw}/v1/chat/completions`;
+    // 端点拼接单一来源 llm-request（与 Main 侧同一份实现）
+    return window.LlmRequest.resolveLlmEndpoint(baseUrl, 'chat');
   }
 
   window.ModelCapabilities = {

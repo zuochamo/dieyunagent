@@ -2,6 +2,12 @@
 'use strict';
 
 function resolveEndpoint(baseUrl) {
+  // 端点拼接单一来源：llm-request（经 agent-bundle 注册为 window.LlmRequest，与 Main 同一份实现）。
+  // 模块缺失时降级为等价内联实现：发请求的路径不能因为一次加载顺序问题直接崩。
+  const llmApi = typeof window !== 'undefined' ? window.LlmRequest : null;
+  if (llmApi && typeof llmApi.resolveLlmEndpoint === 'function') {
+    return llmApi.resolveLlmEndpoint(baseUrl, 'chat');
+  }
   const trimmed = String(baseUrl || '').replace(/\/+$/, '');
   if (/\/chat\/completions(?:\?|$)/i.test(trimmed)) return trimmed;
   if (/\/v\d+$/i.test(trimmed)) return `${trimmed}/chat/completions`;
@@ -629,10 +635,19 @@ async function fetchChatCompletion({ model, messages, temperature, max_tokens, r
     bodyPayload.response_format = response_format;
   }
   const body = JSON.stringify(bodyPayload);
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${apiKey}`
-  };
+  // 请求头单一来源（llm-request）：自定义头 / User-Agent / 会话标识随 apiConfig 一并带出。
+  // 模块缺失时降级为「Content-Type + Bearer」，保证对话仍可用（只是不带自定义头）。
+  const llmApi = typeof window !== 'undefined' ? window.LlmRequest : null;
+  const headers =
+    llmApi && typeof llmApi.buildLlmHeadersFromConfig === 'function'
+      ? llmApi.buildLlmHeadersFromConfig(
+          { ...(apiConfig || {}), baseUrl: apiBaseUrl, apiKey },
+          { sessionId: currentSessionId }
+        )
+      : {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+        };
 
   return runRendererLlmReconnectRetry(
     async () => {
@@ -1015,21 +1030,33 @@ function buildToolCallAccumulator() {
  * 流式 chat completion — 单轮（主进程 HTTP + 渲染进程 SSE 解析）
  */
 async function streamChatCompletionOnce(body, signal, onDelta) {
-  const apiBaseUrl = body._apiBaseUrl || settings.baseUrl;
-  const apiKey = body._apiKey || settings.apiKey;
+  // `_apiConfig` 承载完整模型配置（含自定义头 / authMode / userAgent）；
+  // `_apiBaseUrl` / `_apiKey` 是历史遗留的简化写法，仍兼容。
+  const apiConfig = body._apiConfig && typeof body._apiConfig === 'object' ? body._apiConfig : null;
+  const apiBaseUrl = (apiConfig && apiConfig.baseUrl) || body._apiBaseUrl || settings.baseUrl;
+  const apiKey = (apiConfig && apiConfig.apiKey) || body._apiKey || settings.apiKey;
 
   let sendBody = { ...body };
   delete sendBody._apiBaseUrl;
   delete sendBody._apiKey;
+  delete sendBody._apiConfig;
   sendBody.messages = sanitizeMessagesForChatApi(sendBody.messages);
   sendBody.stream = true;
   sendBody.stream_options = { ...(sendBody.stream_options || {}), include_usage: true };
 
   const url = resolveEndpoint(apiBaseUrl);
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${apiKey}`
-  };
+  // 同上：模块缺失时降级，不让流式对话整体失败
+  const llmApi = typeof window !== 'undefined' ? window.LlmRequest : null;
+  const headers =
+    llmApi && typeof llmApi.buildLlmHeadersFromConfig === 'function'
+      ? llmApi.buildLlmHeadersFromConfig(
+          { ...(apiConfig || {}), baseUrl: apiBaseUrl, apiKey },
+          { sessionId: currentSessionId }
+        )
+      : {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+        };
   const payload = JSON.stringify(sendBody);
 
   let content = '';

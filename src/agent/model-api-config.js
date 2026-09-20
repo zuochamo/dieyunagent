@@ -15,6 +15,8 @@
  * 安全约定：本模块只解析，不落盘。严禁把 apiKey 写进 plans.json 等持久化文件。
  */
 
+const { normalizeConfiguredHeaders } = require('./llm-request');
+
 const CUSTOM_ROUTE_RE = /^(?:auto-)?custom:(.+)$/;
 const BUILTIN_ROUTE_RE = /^(?:auto-)?builtin(?::|$)/;
 
@@ -22,12 +24,59 @@ function asSettings(settings) {
   return settings && typeof settings === 'object' ? settings : {};
 }
 
-function asConfig(baseUrl, apiKey, model) {
-  return {
+/**
+ * 行对象（供应商 / 自定义模型 / 顶层 settings）→ 「请求修饰」字段。
+ *
+ * 这三样是 llm-request.js#buildLlmHeaders 的输入，与 baseUrl/apiKey/model 一样
+ * 属于「一次请求所需的全部配置」，所以必须由本模块一并解析出来 —— 否则每个调用点
+ * 都要自己去 settings 里再捞一遍 headers，等于把单一来源又拆散。
+ *
+ * 刻意「有值才挂键」：无自定义配置时返回值仍是 {baseUrl, apiKey, model} 三键，
+ * 这是既有单测（toEqual）与调用方依赖的契约。
+ */
+function requestOptionsFrom(row) {
+  const r = row && typeof row === 'object' ? row : {};
+  const out = {};
+  const headers = normalizeConfiguredHeaders(r.headers);
+  if (Object.keys(headers).length) out.headers = headers;
+  const authMode = String(r.authMode == null ? '' : r.authMode).trim();
+  if (authMode && authMode !== 'bearer') out.authMode = authMode;
+  const userAgent = String(r.userAgent == null ? '' : r.userAgent).trim();
+  if (userAgent) out.userAgent = userAgent;
+  return out;
+}
+
+/**
+ * 主行缺失时回落到顶层 settings 的请求修饰（对齐 `row.baseUrl || s.baseUrl` 的既有语义）。
+ * headers 按键合并（主行优先），authMode / userAgent 主行优先。
+ */
+function mergedRequestOptions(primary, fallback) {
+  const a = requestOptionsFrom(primary);
+  const b = requestOptionsFrom(fallback);
+  const out = {};
+  const headers = { ...(b.headers || {}), ...(a.headers || {}) };
+  if (Object.keys(headers).length) out.headers = headers;
+  const authMode = a.authMode || b.authMode;
+  if (authMode) out.authMode = authMode;
+  const userAgent = a.userAgent || b.userAgent;
+  if (userAgent) out.userAgent = userAgent;
+  return out;
+}
+
+function asConfig(baseUrl, apiKey, model, extra) {
+  const out = {
     baseUrl: String(baseUrl == null ? '' : baseUrl).trim(),
     apiKey: String(apiKey == null ? '' : apiKey).trim(),
     model: String(model == null ? '' : model).trim()
   };
+  const e = extra && typeof extra === 'object' ? extra : null;
+  if (!e) return out;
+  if (e.headers && Object.keys(e.headers).length) out.headers = e.headers;
+  const authMode = String(e.authMode == null ? '' : e.authMode).trim();
+  if (authMode) out.authMode = authMode;
+  const userAgent = String(e.userAgent == null ? '' : e.userAgent).trim();
+  if (userAgent) out.userAgent = userAgent;
+  return out;
 }
 
 function isUsableApiConfig(cfg) {
@@ -135,11 +184,15 @@ function resolveSupplierApiConfig(settings, supplierId) {
   const id = String(supplierId || '');
   if (id) {
     const hit = listSuppliers(s).find((row) => String(row.id || '') === id) || null;
-    return hit ? asConfig(hit.baseUrl, hit.apiKey, pickSupplierModelId(hit)) : asConfig('', '');
+    return hit
+      ? asConfig(hit.baseUrl, hit.apiKey, pickSupplierModelId(hit), requestOptionsFrom(hit))
+      : asConfig('', '');
   }
   const first = listSuppliers(s).find((row) => isUsableApiConfig(asConfig(row.baseUrl, row.apiKey)));
-  if (first) return asConfig(first.baseUrl, first.apiKey, pickSupplierModelId(first));
-  return asConfig(s.builtinBaseUrl, s.builtinApiKey, s.textModel);
+  if (first) {
+    return asConfig(first.baseUrl, first.apiKey, pickSupplierModelId(first), requestOptionsFrom(first));
+  }
+  return asConfig(s.builtinBaseUrl, s.builtinApiKey, s.textModel, requestOptionsFrom(s));
 }
 
 /**
@@ -152,17 +205,19 @@ function resolveDefaultApiConfig(settings) {
   const supplier = listSuppliers(s).find((row) =>
     isUsableApiConfig(asConfig(row.baseUrl, row.apiKey))
   );
-  if (supplier) return asConfig(supplier.baseUrl, supplier.apiKey, pickSupplierModelId(supplier));
+  if (supplier) {
+    return asConfig(supplier.baseUrl, supplier.apiKey, pickSupplierModelId(supplier), requestOptionsFrom(supplier));
+  }
 
   const custom = listCustomModels(s).find(
     (m) => isTextCustomModel(m) && isUsableApiConfig(asConfig(m.baseUrl, m.apiKey, m.name))
   );
-  if (custom) return asConfig(custom.baseUrl, custom.apiKey, custom.name);
+  if (custom) return asConfig(custom.baseUrl, custom.apiKey, custom.name, requestOptionsFrom(custom));
 
-  const legacy = asConfig(s.baseUrl, s.apiKey, s.textModel);
+  const legacy = asConfig(s.baseUrl, s.apiKey, s.textModel, requestOptionsFrom(s));
   if (isUsableApiConfig(legacy)) return legacy;
 
-  return asConfig(s.builtinBaseUrl, s.builtinApiKey, s.textModel);
+  return asConfig(s.builtinBaseUrl, s.builtinApiKey, s.textModel, requestOptionsFrom(s));
 }
 
 function parseModelRoute(route) {
@@ -209,7 +264,10 @@ function resolveApiConfigForRoute(settings, route, opts = {}) {
 
   if (parsed.kind === 'custom') {
     const model = findCustomModelById(s, parsed.customId);
-    if (model) return asConfig(model.baseUrl || s.baseUrl, model.apiKey || s.apiKey, model.name);
+    if (model) {
+      const options = mergedRequestOptions(model, s);
+      return asConfig(model.baseUrl || s.baseUrl, model.apiKey || s.apiKey, model.name, options);
+    }
     return strict ? asConfig('', '') : resolveDefaultApiConfig(s);
   }
 
@@ -222,7 +280,8 @@ function resolveApiConfigForRoute(settings, route, opts = {}) {
       return asConfig(
         hit.baseUrl,
         hit.apiKey,
-        String(parsed.modelId || '').trim() || pickSupplierModelId(hit)
+        String(parsed.modelId || '').trim() || pickSupplierModelId(hit),
+        requestOptionsFrom(hit)
       );
     }
     const cfg = resolveSupplierApiConfig(s, '');
@@ -232,10 +291,13 @@ function resolveApiConfigForRoute(settings, route, opts = {}) {
 
   // plain：裸模型名 / custom-text / custom-vision 之类的路由记号
   const byName = listCustomModels(s).find((m) => String(m.name || '') === parsed.name);
-  if (byName) return asConfig(byName.baseUrl || s.baseUrl, byName.apiKey || s.apiKey, byName.name);
+  if (byName) {
+    const options = mergedRequestOptions(byName, s);
+    return asConfig(byName.baseUrl || s.baseUrl, byName.apiKey || s.apiKey, byName.name, options);
+  }
   if (strict) {
     // 记号不是模型名（如 custom-text），顶层 legacy 才是它的真实配置
-    const legacy = asConfig(s.baseUrl, s.apiKey, s.textModel);
+    const legacy = asConfig(s.baseUrl, s.apiKey, s.textModel, requestOptionsFrom(s));
     return isUsableApiConfig(legacy) ? legacy : asConfig('', '');
   }
   return resolveDefaultApiConfig(s);
@@ -251,6 +313,8 @@ module.exports = {
   supplierModelIds,
   isUsableApiConfig,
   asConfig,
+  requestOptionsFrom,
+  mergedRequestOptions,
   listSuppliers,
   listCustomModels
 };
