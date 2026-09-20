@@ -25,6 +25,12 @@ const EXPLORE_TOOL_NAMES = new Set([
 ]);
 // 注意：browser_screenshot 支持 filePath 落盘（写文件），不再属于纯只读；
 // Explore 需要看图时用 browser_observe（返回页内截图，不落盘）。
+//
+// 【不变式 · 勿破】EXPLORE_TOOL_NAMES 必须保持「纯只读」，尤其**不得加入 subagent**。
+// 这张白名单同时是「研究子 Agent 的工具集」（src/agent/subagent-runner.js 直接用它建子回合），
+// 一旦加入 subagent，子 Agent 就能再派子 Agent，深度不再为 1，会指数级放大调用。
+// 需要 subagent 的是「协调者」——Agent 主循环、Explore 模式、Plan 的 explore 阶段，
+// 它们各自在自己的工具集上显式追加 SUBAGENT_TOOL，而不是改这张表。
 
 const SHELL_TOOL_NAMES = new Set([
   'host_exec',

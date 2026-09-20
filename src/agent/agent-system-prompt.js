@@ -14,6 +14,18 @@ function buildCoreAgentRules(opts = {}) {
     opts.composerMode === 'explore'
       ? '【探索】Explore 只读勘察模式：目标是理解代码库、定位问题、梳理架构/依赖/数据流，最终输出分析报告（结论、证据路径、可行建议）。本模式未提供任何写文件/执行/保存类工具；上文中提及的写类工具条目在此不可用，勿尝试调用。不要声称已修改文件——只报告发现。报告收尾即交付，无需等待执行环节。'
       : '';
+  // 子 Agent 准则只在「协调者」入口注入：Agent 主循环与 Explore 模式。
+  // Plan 模式不走主循环（由 planner 编排），其 explore 阶段的指引在 Rust planner prompt。
+  const subagent =
+    opts.composerMode === 'plan'
+      ? ''
+      : [
+          '【只读并发调研】需要同时摸清多个互不依赖的模块或事实来源时，用 subagent 一轮并发派多个只读研究子 Agent，比你自己串行读快得多。',
+          '- 派之前先想清切分：一路一个明确问题，写清边界与期望产出；有已知起点就放进 hints。',
+          '- 子 Agent 只读、不改工作区、不能再派子 Agent；返回的是结论与证据路径的摘要，不是全量过程。',
+          '- 子 Agent 查过的结论直接采信使用，不要自己再查一遍；要看过程就展开对话里那张折叠卡片。',
+          '- 单文件小问题、需要写操作的改动、有串行依赖的任务不要派——自己顺手做完更快。'
+        ].join('\n');
   return [
     '【Agent 准则】',
     '- 相关代码已在下文「相关代码/项目上下文」中预注入时，优先使用，少做重复 list/read。',
@@ -35,7 +47,8 @@ function buildCoreAgentRules(opts = {}) {
     '- 改结构化文件（JSON/YAML/TOML/配置）走 parse→改字段→dump，勿用正则做字符串替换；异常要么处理、要么向上抛，勿静默吞掉。',
     '- 完成校验：声称已改文件/已完成实现时，须确有写操作工具或会话变更；否则应补做或更正表述。',
     plan,
-    explore
+    explore,
+    subagent
   ]
     .filter(Boolean)
     .join('\n');

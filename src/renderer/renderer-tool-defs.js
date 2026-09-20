@@ -33,6 +33,17 @@ function buildExploreTools(allTools) {
   });
 }
 
+/**
+ * 协调者工具集 = Explore 只读白名单 + subagent（可再派只读研究子 Agent）。
+ * 只有「协调者」拿这个集合：Agent 主循环、Explore 模式、Plan 的 explore 阶段。
+ * 研究子 Agent 只拿 buildExploreTools —— 白名单里没有 subagent，
+ * 因此「子 Agent 不能再派」是工具层面的物理约束，不需要运行期判断。
+ */
+function buildExploreCoordinatorTools(allTools) {
+  const base = buildExploreTools(allTools);
+  return SUBAGENT_TOOL ? base.concat([SUBAGENT_TOOL]) : base;
+}
+
 const SHELL_TOOL_NAMES = new Set([
   'host_exec',
   'host_proc',
@@ -364,6 +375,8 @@ const SKILL_CREATE_TOOL = _tc.SKILL_CREATE_TOOL;
 const PLAN_TOOLS = _tc.PLAN_TOOLS || [];
 const MCP_TOOL_SCHEMA_TOOL = _tc.MCP_TOOL_SCHEMA_TOOL;
 const CLARIFY_TOOL = _tc.CLARIFY_TOOL;
+// 只读并发调研子 Agent：schema 单一来源在 src/agent/tool-catalog.js（Main 执行）。
+const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
 const isWeakToolCallerModel = _tc.isWeakToolCallerModel || function () { return false; };
 const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return entry && entry.tool; };
 
@@ -603,6 +616,8 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   tools.push(...(await loadPluginToolsForAgent()));
   tools.push(...PLAN_TOOLS);
   tools.push(CLARIFY_TOOL);
+  // Agent 主循环是协调者：可派只读研究子 Agent（深度恒为 1）。
+  if (SUBAGENT_TOOL) tools.push(SUBAGENT_TOOL);
 
   const optionalEntries = [];
 

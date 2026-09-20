@@ -1501,6 +1501,42 @@ const CLARIFY_TOOL = {
   }
 };
 
+/**
+ * 只读并发调研子 Agent。
+ * 只注入给「协调者」——Agent 主循环、Explore 模式、Plan 的 explore 阶段；
+ * 研究子 Agent 的工具集 = Explore 白名单，白名单不含本工具，递归被物理切断（深度恒为 1）。
+ * Main 执行（见 src/agent/subagent-runner.js），不属于 RENDERER_ONLY_TOOLS。
+ */
+const SUBAGENT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'subagent',
+    description:
+      '派出一个只读研究子 Agent 并行调研一个明确问题（读文件 / 搜索 / 查符号 / 联网）。' +
+      '需要分别摸清多个互不依赖的模块或多个事实来源时，一次并发发多个调用，比自己串行读快得多。' +
+      '子 Agent 只读、不改工作区、不能再派子 Agent。' +
+      '返回的是结论与证据路径的摘要（不是全量过程）；过程可在对话里展开那张折叠卡片查看。' +
+      '已经让子 Agent 查过的东西不要自己再查一遍。',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: {
+          type: 'string',
+          description:
+            '这次调研要回答的单一问题，写清边界与期望产出（例如「X 模块的鉴权入口在哪、被谁调用」）。'
+        },
+        label: { type: 'string', description: '简短标签，用于在界面上区分多路子 Agent' },
+        hints: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '已知线索或起点路径，减少子 Agent 的重复探索'
+        }
+      },
+      required: ['task']
+    }
+  }
+};
+
 const GRAPH_TOOLS = [GRAPH_TOOL];
 
 const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
@@ -1510,7 +1546,7 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   GRAPH_TOOLS,
   [PLAYBOOK_PROPOSE_TOOL, AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL],
   PLAN_TOOLS,
-  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL]
+  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SUBAGENT_TOOL]
 );
 
 const BY_NAME = Object.create(null);
@@ -1559,6 +1595,7 @@ module.exports = {
   PLAN_TOOLS,
   MCP_TOOL_SCHEMA_TOOL,
   CLARIFY_TOOL,
+  SUBAGENT_TOOL,
   ALL_STATIC_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
   RENDERER_ONLY_TOOLS,

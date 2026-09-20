@@ -14,7 +14,10 @@ const { resolveAgentLoopSpec, scaleLimitForLongHorizon, LONG_HORIZON_HARD_CAP } 
 const { settleAllAbortable } = require('./parallel-batch');
 const { createPlannerMainBridge } = require('./planner-main-bridge');
 const { buildExploreTools, buildShellTools, buildBuildTools } = require('./planner-tool-filters');
+const { SUBAGENT_TOOL } = require('./tool-catalog');
+const { createSubagentRunner } = require('./subagent-runner');
 const { runRustAgentLoop, resolveChatUrl } = require('./rust-loop-runner');
+const { buildLlmHeadersFromConfig } = require('./llm-request');
 const { createMainCompactionAgent, getEffectiveInputBudget } = require('./compaction-main');
 const { stripToolCallMarkup } = require('../llm-tool-call-fallback');
 const {
@@ -469,16 +472,19 @@ function mapLoopTraceToUi(trace, meta = {}) {
 }
 
 async function fetchChatCompletion(body, apiConfig, settings, signal, onUsage, reconnect) {
-  const baseUrl = (apiConfig && apiConfig.baseUrl) || settings.baseUrl;
-  const apiKey = (apiConfig && apiConfig.apiKey) || settings.apiKey;
+  const cfg = apiConfig && typeof apiConfig === 'object' ? apiConfig : {};
+  const baseUrl = cfg.baseUrl || settings.baseUrl;
+  const apiKey = cfg.apiKey || settings.apiKey;
   const url = resolveChatUrl(baseUrl);
+  // 请求头单一来源 llm-request.js：自定义头 / User-Agent / 会话标识随配置一起带出
+  const headers = buildLlmHeadersFromConfig(
+    { ...cfg, baseUrl, apiKey },
+    { model: body && body.model }
+  );
   const json = await runWithLlmReconnectRetry(
     () =>
       chatCompletionJson(url, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`
-        },
+        headers,
         body: JSON.stringify({ ...body, stream: false }),
         signal
       }),
@@ -509,7 +515,10 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     throw new Error('dieyun-core 未就绪');
   }
   const settings = loadModelSettings(deps.userData);
-  const apiConfig = payload.apiConfig || {};
+  // sessionId 注入配置：planner 的若干 LLM 调用（计划解析 / 评审 / 汇总）与主对话同属一个会话，
+  // 带上它才能让 {{sessionId}} 这类自定义头生效，并命中上游 prompt 缓存。
+  const apiConfig = { ...(payload.apiConfig || {}) };
+  if (payload.sessionId && !apiConfig.sessionId) apiConfig.sessionId = payload.sessionId;
   const baseUrl = apiConfig.baseUrl || settings.baseUrl;
   const apiKey = apiConfig.apiKey || settings.apiKey;
   const signal = opts.signal || null;
@@ -517,6 +526,31 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
   const allTools = payload.tools || [];
   const exploreTools = buildExploreTools(allTools);
+  // Plan 的 explore 阶段是「协调者」：runToolLoopOnce 会按 allowSubagent 追加 subagent。
+  // 研究子 Agent 拿的是 exploreTools（纯白名单，不含 subagent），因此深度恒为 1。
+  // 子 Agent 执行器：编排 / 护栏 / 摘要复用 subagent-runner；真正跑循环复用 runToolLoopFromSpec，
+  // 于是每个子 Agent 白拿两件事 —— 隔离 trace（对话里的可折叠卡片）与父级取消联动
+  // （runToolLoopOnce 会把子 loop 的 runId 记进 activeWorkerLoopIds）。
+  const subagentRunner = createSubagentRunner({
+    allTools,
+    model: payload.model,
+    userDataPath: deps.userData,
+    contextTierId: payload.contextTierId,
+    signal,
+    newSubagentId,
+    runChildLoop: (req, meta) =>
+      runToolLoopFromSpec(
+        {
+          model: req.model,
+          messages: req.messages,
+          maxRounds: req.maxRounds,
+          maxToolCalls: req.maxToolCalls
+        },
+        exploreTools,
+        null,
+        { phase: 'Sub · 只读调研', worker: 'explore', subagentId: meta.subagentId }
+      )
+  });
   let workspacePath = payload.workspacePath || undefined;
   if (!workspacePath && typeof deps.resolveAgentRunWorkspacePath === 'function' && payload.sessionId) {
     workspacePath = (await deps.resolveAgentRunWorkspacePath(payload.sessionId)) || undefined;
@@ -716,6 +750,10 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
 
   async function runToolLoopOnce(spec, tools, worktreePath, traceMeta, opts = {}) {
     const deferFinalize = !!opts.deferFinalize;
+    // allowSubagent 只对「协调者」开放（当前仅 Plan 的 explore 阶段）。
+    // 子 Agent 循环不会再传它，因此不会出现嵌套派发。
+    const coordinatorTools =
+      opts.allowSubagent && SUBAGENT_TOOL ? tools.concat([SUBAGENT_TOOL]) : tools;
     const body = {
       model: spec.model || startParams.model,
       messages: spec.messages || [],
@@ -743,7 +781,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         startParams: {
           model: body.model,
           messages: body.messages,
-          tools,
+          tools: coordinatorTools,
           workspaceRoot: workspacePath,
           maxToolCalls:
             Number(spec.maxToolCalls) > 0 ? Number(spec.maxToolCalls) : loopMaxToolCalls,
@@ -773,13 +811,15 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         compactMessages: async (messages, ctx) =>
           compactionAgent.maybeCompactMessages(messages, {
             tokenBudget,
-            apiConfig: { baseUrl, apiKey, model: body.model },
+            // 整体透传（含 headers / authMode / userAgent），勿逐字段重建
+            apiConfig: { ...apiConfig, baseUrl, apiKey, model: body.model },
             model: body.model,
+            sessionId: payload.sessionId || undefined,
             signal: ctx?.signal,
             toolsChars: ctx?.toolsChars
           }),
-        delegateTool: async (name, args) =>
-          toolBridge.executeAgentTool(name, args, {
+        delegateTool: async (name, args) => {
+          const toolCtx = {
             workspacePath,
             worktreePath: worktreePath || undefined,
             sessionId: payload.sessionId || undefined,
@@ -787,7 +827,14 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
             model: body.model || payload.model,
             taskTier: payload.taskTier || null,
             longHorizon: !!payload.longHorizon
-          })
+          };
+          // 协调者（Plan explore 阶段）派发的只读研究子 Agent 走 subagent-runner，
+          // 不落回普通工具委托 —— 否则「子 Agent」会被当成一个不存在的网关工具。
+          if (opts.allowSubagent && name === subagentRunner.toolName) {
+            return subagentRunner.run(args, { ...toolCtx, subagentDepth: 1 });
+          }
+          return toolBridge.executeAgentTool(name, args, toolCtx);
+        }
       });
     } finally {
       if (trackedLoopRunId) activeWorkerLoopIds.delete(trackedLoopRunId);
@@ -819,7 +866,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     }
   }
 
-  async function runToolLoopFromSpec(spec, tools, worktreePath, traceMeta) {
+  async function runToolLoopFromSpec(spec, tools, worktreePath, traceMeta, opts = {}) {
     const longHorizon = !!payload.longHorizon;
     let segmentIndex = 0;
     let currentSpec = { ...(spec || {}) };
@@ -830,7 +877,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     while (true) {
       const multiSegment = longHorizon;
       const loopResult = await runToolLoopOnce(currentSpec, tools, worktreePath, traceMeta, {
-        deferFinalize: multiSegment
+        deferFinalize: multiSegment,
+        allowSubagent: !!opts.allowSubagent
       });
       if (Array.isArray(loopResult.trace) && loopResult.trace.length) {
         mergedTrace = mergedTrace.concat(loopResult.trace);
@@ -1085,11 +1133,19 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           );
         } else {
           const spec = phase.loopStart || {};
-          const loopResult = await runToolLoopFromSpec(spec, exploreTools, null, {
-            phase: 'Explore · 只读勘察',
-            worker: 'explore',
-            subagentId: newSubagentId('explore')
-          });
+          // Plan 的 explore 阶段是协调者：额外拿到 subagent，可并行派只读研究子 Agent
+          // 摸清多个方向，再由它汇总成勘察笔记交回 planner。
+          const loopResult = await runToolLoopFromSpec(
+            spec,
+            exploreTools,
+            null,
+            {
+              phase: 'Explore · 只读勘察',
+              worker: 'explore',
+              subagentId: newSubagentId('explore')
+            },
+            { allowSubagent: true }
+          );
           if (loopResult.hitRoundLimit) {
             phase = await bridge.invoke(
               'planner.run.continue',

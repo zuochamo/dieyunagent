@@ -1,6 +1,7 @@
 'use strict';
 
 const { runRustAgentLoop } = require('../../agent/rust-loop-runner');
+const { createSubagentRunner } = require('../../agent/subagent-runner');
 const { createMainPlannerRunner } = require('../../agent/planner-runner-main');
 const { createMainCompactionAgent, getEffectiveInputBudget } = require('../../agent/compaction-main');
 const { summarizeTelemetry } = require('../../agent/tool-telemetry');
@@ -229,12 +230,53 @@ function registerAgentRuntimeIpc(ctx) {
         settings.textModel ||
         '';
       const tokenBudget = getEffectiveInputBudget(settings, sessionModel);
-      const apiCfg = { baseUrl, apiKey, model: sessionModel };
+      // 整体继承 payload.apiConfig：逐字段重建会丢掉 headers / authMode / userAgent，
+      // 结果就是「设置页配了自定义头，主循环却不带」。压缩走同一份 apiCfg。
+      const apiCfg = {
+        ...apiConfig,
+        baseUrl,
+        apiKey,
+        model: sessionModel,
+        sessionId: payload.sessionId || undefined
+      };
       // 本轮开始先清空浏览器日志缓冲，避免上一轮/别的会话的残留错误触发本轮完成验收提示
       if (live.localGateway && typeof live.localGateway.invokeRpc === 'function') {
         live.localGateway.invokeRpc('browser.reset_logs', {}).catch(() => {});
       }
       const toolBridge = live.createRustLoopToolBridge(evt.sender);
+      // 只读并发调研子 Agent。Agent 主循环是「协调者」，Renderer 已在工具集里注入 subagent；
+      // 这里只负责执行：子 Agent 跑一次完整的内层循环，工具集是 Explore 只读白名单（无 subagent，
+      // 因此深度恒为 1），只有摘要回注主上下文。
+      const subagentRunner = createSubagentRunner({
+        allTools: startParams.tools,
+        model: sessionModel,
+        userDataPath: live.userData,
+        contextTierId: ctx.contextTierId,
+        signal: abortController.signal,
+        runChildLoop: async (req) => {
+          return runRustAgentLoop({
+            coreBridge: live.coreBridge,
+            llm: apiCfg,
+            startParams: {
+              ...startParams,
+              messages: req.messages,
+              tools: req.tools,
+              maxRounds: req.maxRounds,
+              maxToolCalls: req.maxToolCalls
+            },
+            settings,
+            userData: live.userData,
+            contextTierId: ctx.contextTierId,
+            // 子 Agent 无 UI 通道：既省流式开销，也避免它的 runId 覆盖父运行的 entry.runId
+            // （外层 onPhase 会用 data.runId 回写 entry，串了就会导致取消打错目标）。
+            useStream: false,
+            onPhase: () => {},
+            signal: abortController.signal,
+            delegateTool: (n, a) =>
+              toolBridge.executeAgentTool(n, a, { ...ctx, subagentDepth: 1 })
+          });
+        }
+      });
       const protocolAbort = () => {
         try {
           live.killActiveShellChildren({ sessionId: entry.sessionId || null });
@@ -258,7 +300,9 @@ function registerAgentRuntimeIpc(ctx) {
       abortController.signal.addEventListener('abort', protocolAbort, { once: true });
       const result = await runRustAgentLoop({
         coreBridge: live.coreBridge,
-        llm: { baseUrl, apiKey },
+        // 请求头 / 会话标识随配置一并交给 loop runner（装配单一来源：llm-request.js）。
+        // sessionId 让供应商自定义头里的 {{sessionId}} 生效，并提升上游 prompt 缓存命中。
+        llm: apiCfg,
         turnEndSynthesis: payload.turnEndSynthesis === true,
         browserVision: payload.browserVision === true,
         startParams,
@@ -318,6 +362,9 @@ function registerAgentRuntimeIpc(ctx) {
             ensureRunAbortController(entry.runId, entry.sessionId || payload.sessionId);
           }
           ctx.signal = abortController.signal;
+          if (name === subagentRunner.toolName) {
+            return subagentRunner.run(args, ctx);
+          }
           return toolBridge.executeAgentTool(name, args, ctx);
         }
       });

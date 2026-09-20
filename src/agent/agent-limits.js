@@ -93,7 +93,19 @@ const AGENT_LIMITS_DEFAULTS = {
   userSystemMaxChars: 8000,
   systemStableMaxChars: 16000,
   llmRequestMaxChars: 800000,
-  taskTierEnabled: true
+  taskTierEnabled: true,
+  // 只读并发调研子 Agent（subagent 工具）。
+  // 深度恒为 1：只有「协调者」被显式注入 subagent 工具——Agent 主循环 / Explore 模式 /
+  // Plan 的 explore 阶段。研究子 Agent 的工具集就是 Explore 白名单本身，而白名单里没有
+  // subagent，因此递归在工具层面被物理切断，不依赖运行期判断。
+  subagentMaxDepth: 1,
+  subagentMaxConcurrent: 3,
+  subagentMaxPerRun: 8,
+  subagentMaxRounds: 16,
+  subagentMaxToolCalls: 32,
+  // 子 Agent 回注主上下文的摘要上限。过程 trace 不回注，只在折叠卡片里展开，
+  // 否则 N 路调研会把主上下文顶爆（这是该功能最常见的失败模式）。
+  subagentSummaryMaxChars: 2400
 };
 
 /** Long-horizon run: multiply these guardrails (still hard-capped; not disabled). */
@@ -223,6 +235,72 @@ const AGENT_LIMITS_SCHEMA = [
         label: '发送前任务分级',
         hint: '用结构信号（路径/选区/@Codebase）推断规模并跳过多余自动检索；不另打分级 LLM，不据此强迫写入',
         type: 'boolean'
+      }
+    ]
+  },
+  {
+    group: '子 Agent（只读并发调研）',
+    groupId: 'subagent',
+    items: [
+      {
+        key: 'subagentMaxDepth',
+        label: '子 Agent 最大深度',
+        hint: '1 = 只允许协调者派一层；研究子 Agent 的 Explore 白名单不含 subagent，再多也派不出去',
+        type: 'number',
+        min: 0,
+        max: 3,
+        step: 1,
+        unit: '层'
+      },
+      {
+        key: 'subagentMaxConcurrent',
+        label: '子 Agent 并发上限',
+        hint: '只读工具走 delegate-batch 的无限并发分支，必须在子 Agent 执行器内自我限流',
+        type: 'number',
+        min: 1,
+        max: 8,
+        step: 1,
+        unit: '个'
+      },
+      {
+        key: 'subagentMaxPerRun',
+        label: '整轮派出总上限',
+        hint: '一次对话最多派出多少个子 Agent，防失控',
+        type: 'number',
+        min: 1,
+        max: 24,
+        step: 1,
+        unit: '个'
+      },
+      {
+        key: 'subagentMaxRounds',
+        label: '子 Agent 最大轮次',
+        hint: '单个子 Agent 的工具轮预算',
+        type: 'number',
+        min: 4,
+        max: 48,
+        step: 1,
+        unit: '轮'
+      },
+      {
+        key: 'subagentMaxToolCalls',
+        label: '子 Agent 工具上限',
+        hint: '单个子 Agent 的工具调用总次数上限',
+        type: 'number',
+        min: 4,
+        max: 96,
+        step: 1,
+        unit: '次'
+      },
+      {
+        key: 'subagentSummaryMaxChars',
+        label: '子 Agent 摘要回注上限',
+        hint: '只有摘要进主上下文；过程 trace 仅折叠卡片可见',
+        type: 'number',
+        min: 400,
+        max: 8000,
+        step: 100,
+        unit: '字'
       }
     ]
   },
