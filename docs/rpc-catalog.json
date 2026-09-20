@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-19T07:28:13.317Z",
+  "generatedAt": "2026-09-20T03:49:19.420Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 192,
-    "gatewayOnly": 120,
+    "total": 193,
+    "gatewayOnly": 121,
     "rustOnly": 23,
     "both": 49
   },
@@ -1643,6 +1643,14 @@
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/lsp-workspace.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "workspace.resolve_path",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/workspace.js"
       ],
       "rust": []
     }

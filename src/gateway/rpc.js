@@ -1157,13 +1157,17 @@ function createRpcHandlers(ctx) {
   }
 
   async function globViaRemoteExec(cwd, opts) {
-    const n = Math.min(400, Math.max(1, Number(opts.maxResults) || 80));
-    const pat = shellQuoteSingle(String(opts.pattern || ''));
+    const o = opts || {};
+    const n = Math.min(400, Math.max(1, Number(o.maxResults) || 80));
+    // 默认仍是 60s（旧调用点语义不变）；workspace.resolve_path 会传入更紧的预算，
+    // 否则一次 glob 就能吃掉「路径解析」整个 10s 上限。
+    const timeoutMs = Math.max(3000, Math.min(60000, Number(o.timeoutMs) || 60000));
+    const pat = shellQuoteSingle(String(o.pattern || ''));
     const cmd = `rg --files --no-config --glob '!node_modules/**' --glob '!.git/**' -g ${pat} 2>/dev/null | head -n ${n}`;
     let r = null;
     try {
       if (isSshConnectedForCall()) {
-        r = await requireSshForCall().exec(cmd, cwd, 60000);
+        r = await requireSshForCall().exec(cmd, cwd, timeoutMs);
       }
     } catch {
       return { ok: false, errorCode: 'GLOB_UNAVAILABLE', error: '远程没有 rg，改用 fs_list_dir' };

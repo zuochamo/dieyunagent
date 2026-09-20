@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-09-19T07:28:13.317Z
+生成时间：2026-09-20T03:49:19.420Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 192 |
-| Gateway only | 120 |
+| 总计 | 193 |
+| Gateway only | 121 |
 | Rust only | 23 |
 | Both | 49 |
 
@@ -305,7 +305,7 @@
 | `web.fetch` | gateway | gateway/handlers/web.js | — |
 | `web.search` | gateway | gateway/handlers/web.js | — |
 
-### workspace (5)
+### workspace (6)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -314,4 +314,5 @@
 | `workspace.diagnostics_status` | gateway | gateway/handlers/lsp-workspace.js | — |
 | `workspace.diagnostics_store` | gateway | gateway/handlers/lsp-workspace.js | — |
 | `workspace.git_diff` | gateway | gateway/handlers/lsp-workspace.js | — |
+| `workspace.resolve_path` | gateway | gateway/handlers/workspace.js | — |
 
