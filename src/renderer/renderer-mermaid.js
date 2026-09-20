@@ -1,4 +1,4 @@
-/* global window, document */
+/* global window, document, nudgeChatFollowSettle */
 'use strict';
 
 let mermaidReady = false;
@@ -373,6 +373,8 @@ async function renderAssistantAnswerContent(answerEl, content) {
   }
 
   await Promise.all(pending);
+  // 显式「正文已落位」信号：收尾跟底窗口据此补最后一次钉底
+  if (typeof nudgeChatFollowSettle === 'function') nudgeChatFollowSettle();
   return true;
 }
 

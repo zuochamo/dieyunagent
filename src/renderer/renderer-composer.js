@@ -431,10 +431,8 @@ function getModelCandidatesForAuto(context = {}) {
     model: m.name,
     kind:
       m.kind === 'vision' ? 'vision' : m.kind === 'speech' ? 'speech' : 'text',
-    apiConfig: {
-      baseUrl: m.baseUrl || '',
-      apiKey: m.apiKey || ''
-    },
+    // 走单一来源解析：手工只取两个标量会丢掉 headers / authMode / userAgent
+    apiConfig: getCustomModelApiConfig(`custom:${m.id}`),
     route: `custom:${m.id}`
   }));
   const candidates = builtins
@@ -638,10 +636,8 @@ function resolveComposerModelForSend(text, opts = {}) {
         resolved = {
           model: model.name,
           route: `custom:${model.id}`,
-          apiConfig: {
-            baseUrl: model.baseUrl || '',
-            apiKey: model.apiKey || ''
-          }
+          // 勿在此手工重建配置：只取两个标量会丢掉自定义头 / User-Agent
+          apiConfig: getCustomModelApiConfig(`custom:${model.id}`)
         };
       }
     }

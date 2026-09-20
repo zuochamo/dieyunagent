@@ -12,6 +12,11 @@ var chatRenderHiddenDepth = 0;
 var chatRenderPrevVisibility = '';
 var chatRenderFadeTimer = null;
 var chatUserScrollIntent = false;
+/** 收尾跟底窗口：观察最新气泡，捕获 mermaid / 图片解码等异步落位带来的高度变化 */
+var chatFollowSettleObserver = null;
+var chatFollowSettleAnchorEl = null;
+var chatFollowSettleDeadlineTimer = null;
+var CHAT_FOLLOW_SETTLE_MAX_MS = 5000;
 /** Yield to the event loop every N messages during session switch render. */
 var CHAT_HISTORY_RENDER_YIELD_EVERY = 24;
 var DEFER_TRACE_YIELD_EVERY = 6;
@@ -205,9 +210,12 @@ function restoreSessionScrollPosition(sessionId, opts = {}) {
       if (!saved) {
         chatList.scrollTop = maxTop;
         setChatAutoFollow(true);
+        // 落点即底部：后续异步落位（mermaid / 图片）继续跟
+        if (typeof startChatFollowSettle === 'function') startChatFollowSettle();
       } else if (saved.atBottom) {
         chatList.scrollTop = maxTop;
         setChatAutoFollow(true);
+        if (typeof startChatFollowSettle === 'function') startChatFollowSettle();
       } else {
         const top = Number.isFinite(Number(saved.scrollTop))
           ? Number(saved.scrollTop)
@@ -257,6 +265,76 @@ function isChatNearBottom(el, threshold = CHAT_AUTO_SCROLL_THRESHOLD) {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
 }
 
+/** 唯一「钉底」原语：写 scrollTop、同步流式跟随基线、刷新「回到底部」浮标 */
+function pinChatToBottom() {
+  const el = chatList || document.getElementById('chat-list');
+  if (!el) return false;
+  el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  el.dataset.streamScrollHeight = String(el.scrollHeight);
+  updateLastTurnFloat();
+  return true;
+}
+
+/** 最新助手气泡（assistant 直接挂在 #chat-list 下） */
+function lastAssistantBubble() {
+  const el = chatList || document.getElementById('chat-list');
+  if (!el) return null;
+  const bubbles = el.querySelectorAll(':scope > .msg.assistant');
+  return bubbles.length ? bubbles[bubbles.length - 1] : null;
+}
+
+function isChatFollowSettling() {
+  return !!chatFollowSettleObserver;
+}
+
+/**
+ * 收尾跟底窗口：回答的最终高度（mermaid、图片解码、字体）常常在
+ * `ensureChatScrollAfterLayout` 之后才落位，一次性滚动会停在半路。
+ * 这里观察最新气泡，内容每次变高就重钉，直到窗口到期 / 回合被重绘 / 用户接管。
+ */
+function startChatFollowSettle(opts = {}) {
+  stopChatFollowSettle({ capture: false });
+  if (typeof ResizeObserver !== 'function') return;
+  const anchor = opts.anchor || lastAssistantBubble();
+  if (!anchor) return;
+  const maxMs = Number(opts.maxMs) > 0 ? Number(opts.maxMs) : CHAT_FOLLOW_SETTLE_MAX_MS;
+  chatFollowSettleAnchorEl = anchor;
+  chatFollowSettleObserver = new ResizeObserver(() => nudgeChatFollowSettle());
+  chatFollowSettleObserver.observe(anchor);
+  chatFollowSettleDeadlineTimer = setTimeout(() => {
+    chatFollowSettleDeadlineTimer = null;
+    stopChatFollowSettle();
+  }, maxMs);
+}
+
+function stopChatFollowSettle(opts = {}) {
+  if (chatFollowSettleDeadlineTimer) {
+    clearTimeout(chatFollowSettleDeadlineTimer);
+    chatFollowSettleDeadlineTimer = null;
+  }
+  if (chatFollowSettleObserver) {
+    chatFollowSettleObserver.disconnect();
+    chatFollowSettleObserver = null;
+  }
+  chatFollowSettleAnchorEl = null;
+  if (opts.capture !== false) captureSessionScrollPosition(currentSessionId, { force: true });
+}
+
+/** 跟底窗口内唯一判定：锚点失效或用户接管就收摊，否则重钉 */
+function nudgeChatFollowSettle() {
+  if (!chatFollowSettleObserver) return;
+  const anchor = chatFollowSettleAnchorEl;
+  if (!anchor || !anchor.isConnected || anchor !== lastAssistantBubble()) {
+    stopChatFollowSettle();
+    return;
+  }
+  if (typeof getChatAutoFollow === 'function' && !getChatAutoFollow()) {
+    stopChatFollowSettle({ capture: false });
+    return;
+  }
+  pinChatToBottom();
+}
+
 function markChatUserScrollIntent() {
   chatUserScrollIntent = true;
 }
@@ -272,7 +350,16 @@ function updateChatAutoFollowFromScroll() {
     updateLastTurnFloat();
     return;
   }
-  if (chatUserScrollIntent) chatUserScrollIntent = false;
+  if (chatUserScrollIntent) {
+    chatUserScrollIntent = false;
+    // 用户主动接管滚动：立刻结束收尾跟底，别把视口抢回来
+    if (isChatFollowSettling()) stopChatFollowSettle({ capture: false });
+  } else if (isChatFollowSettling()) {
+    // 跟底窗口里的滚动是我们自己钉出来的（正文还在长高），不代表用户接管，
+    // 也不该据此把 autoFollow 判成 false —— 否则后续长高就再也钉不回去。
+    updateLastTurnFloat();
+    return;
+  }
   setChatAutoFollow(isChatNearBottom(chatList));
   updateLastTurnFloat();
   scheduleSessionScrollSave(currentSessionId);

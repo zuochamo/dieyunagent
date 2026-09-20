@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling */
 'use strict';
 
 
@@ -64,12 +64,8 @@ function isThinkingLayoutTransitionTarget(target) {
 }
 
 function pinStreamingChatToBottom() {
-  const el = document.getElementById('chat-list');
-  if (!el) return;
   if (typeof getChatAutoFollow === 'function' && !getChatAutoFollow()) return;
-  el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-  el.dataset.streamScrollHeight = String(el.scrollHeight);
-  updateLastTurnFloat();
+  pinChatToBottom();
 }
 
 function startThinkingTransitionPin() {
@@ -140,10 +136,9 @@ function scrollChatToBottomNow(opts = {}) {
     return;
   }
   requestAnimationFrame(() => {
-    el.scrollTop = el.scrollHeight;
-        setChatAutoFollow(true);
+    pinChatToBottom();
+    setChatAutoFollow(true);
     captureSessionScrollPosition(currentSessionId, { force: true });
-    updateLastTurnFloat();
   });
 }
 
@@ -185,17 +180,14 @@ async function ensureChatScrollAfterLayout(opts = {}) {
   const el = document.getElementById('chat-list');
   if (!el) return;
   if (revealAnswer) {
-    const answers = el.querySelectorAll('.msg.assistant .msg-answer:not(.msg-answer-pending)');
-    const target = answers.length ? answers[answers.length - 1] : null;
-    if (target) {
-      try {
-        target.scrollIntoView({ block: 'end', behavior: 'auto' });
-      } catch {
-        scrollChatToBottomNow({ force: true });
-      }
-      setChatAutoFollow(isChatNearBottom(el));
+    const anchor = lastAssistantBubble();
+    if (anchor) {
+      // 回答此刻的高度可能还没到位（mermaid / 图片异步落位），
+      // 所以不做一次性 scrollIntoView 测量，改为钉底 + 布局驱动的跟底窗口。
+      pinChatToBottom();
+      setChatAutoFollow(true);
       captureSessionScrollPosition(currentSessionId, { force: true });
-      updateLastTurnFloat();
+      startChatFollowSettle({ anchor });
       return;
     }
   }
@@ -254,6 +246,10 @@ async function hydrateAssistantTraceFromStore(bubble, meta, storedContent, check
       checkpointRestore: !!cp
     });
     const saved = sessionScrollPositions.get(String(sessionId));
+    // 补齐思考区后正文会重排；最新回合还可能异步长高（mermaid / 图片），教给跟底窗口收尾
+    if (bubble === lastAssistantBubble() && (!saved || saved.atBottom)) {
+      if (typeof startChatFollowSettle === 'function') startChatFollowSettle({ anchor: bubble });
+    }
     if (saved && !saved.atBottom) {
       restoreSessionScrollPosition(sessionId, { immediate: true });
     }
