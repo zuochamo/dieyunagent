@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const { computeRemoteGatewaySourceHash } = require('./remote-gateway-source-paths.cjs');
+const { computeRemoteGatewaySourceHash, inspectRemotePack } = require('../src/remote/remote-pack-layout.js');
 
 const ROOT = path.join(__dirname, '..');
 const PACK = path.join(ROOT, 'build', 'remote-gateway-pack');
@@ -25,9 +25,10 @@ function packLooksComplete() {
     const manifest = readManifest();
     if (!manifest || !manifest.entry) return false;
     if (manifest.sourceHash !== EXPECTED_SOURCE_HASH) return false;
-    if (manifest.lite) {
-      return fs.existsSync(path.join(PACK, 'remote', 'run-cli.js'));
-    }
+    // 必需清单与远程注入校验同源（src/remote/remote-pack-layout.js）：
+    // 半成品 pack（例如缺 node_modules/ws）必须触发重新打包。
+    if (!inspectRemotePack(PACK, { deploy: !manifest.lite }).ok) return false;
+    if (manifest.lite) return true;
     if (!fs.existsSync(NODE_BIN)) return false;
     const st = fs.statSync(NODE_BIN);
     return st.isFile() && st.size > 50 * 1024 * 1024 && !!manifest.injected;

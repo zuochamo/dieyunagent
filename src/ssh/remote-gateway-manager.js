@@ -7,6 +7,13 @@ const crypto = require('crypto');
 const { createSshTunnel, closeSshTunnel } = require('./tunnel');
 const { shellQuoteSingle } = require('./remote-path');
 const { DEFAULT_REMOTE_PORT } = require('../remote/minimal-gateway-host');
+const {
+  REMOTE_DEPLOY_REQUIRED_FILES,
+  REMOTE_PACK_OK_MARKER,
+  inspectRemotePack,
+  parseRemotePackState,
+  evaluateRemotePackPreflight
+} = require('../remote/remote-pack-layout');
 
 const REMOTE_HOME_DIR = '.dieyun/remote-agent';
 
@@ -151,22 +158,33 @@ function createRemoteGatewayManager(opts = {}) {
     }
   }
 
+  /**
+   * 远程存在性检查脚本片段：必需清单来自 remote-pack-layout（单一来源）。
+   * @param {string} dirExpr 远程 shell 表达式，如 '"$DIR"' 或已引用的绝对路径
+   * @param {string[]} rels
+   */
+  function remoteMissingCheckLines(dirExpr, rels) {
+    const list = rels.map((rel) => shellQuoteSingle(rel)).join(' ');
+    return [
+      "MISSING=''",
+      `for f in ${list}; do test -f ${dirExpr}/"$f" || MISSING="$MISSING $f"; done`,
+      'echo "MISSING=$MISSING"'
+    ];
+  }
+
   async function remotePackState(sshManager, remoteBase, version, localNodeSize, localSourceHash) {
-    const verFile = `${remoteBase}/.pack-version`;
-    const nodeFile = `${remoteBase}/bin/node`;
-    const runCli = `${remoteBase}/remote/run-cli.js`;
-    const manifestFile = `${remoteBase}/manifest.json`;
-    const bundledNode = nodeFile;
+    const dirQ = shellQuoteSingle(remoteBase);
+    const manifestQ = shellQuoteSingle(`${remoteBase}/manifest.json`);
+    const nodeQ = shellQuoteSingle(`${remoteBase}/bin/node`);
     const hashScript =
       "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log('HASH='+(m.sourceHash||''));";
     const cmd = [
-      `test -f ${shellQuoteSingle(verFile)}`,
-      `test -f ${shellQuoteSingle(nodeFile)}`,
-      `test -f ${shellQuoteSingle(runCli)}`,
-      `echo VERSION=$(tr -d '\\r\\n' < ${shellQuoteSingle(verFile)})`,
-      `echo SIZE=$(stat -c%s ${shellQuoteSingle(nodeFile)} 2>/dev/null || wc -c < ${shellQuoteSingle(nodeFile)})`,
-      `if test -f ${shellQuoteSingle(manifestFile)}; then ${shellQuoteSingle(bundledNode)} -e ${shellQuoteSingle(hashScript)} ${shellQuoteSingle(manifestFile)}; else echo HASH=; fi`
-    ].join(' && ');
+      `DIR=${dirQ}`,
+      ...remoteMissingCheckLines('"$DIR"', REMOTE_DEPLOY_REQUIRED_FILES),
+      `echo "VERSION=$(tr -d '\\r\\n' < "$DIR/.pack-version" 2>/dev/null)"`,
+      `echo "SIZE=$(stat -c%s "$DIR/bin/node" 2>/dev/null || wc -c < "$DIR/bin/node" 2>/dev/null || echo 0)"`,
+      `if test -f ${manifestQ} && test -f ${nodeQ}; then ${nodeQ} -e ${shellQuoteSingle(hashScript)} ${manifestQ}; else echo HASH=; fi`
+    ].join('\n');
     try {
       const r = await sshManager.execScript(cmd, 12000);
       const out = String(r.stdout || '');
@@ -177,35 +195,39 @@ function createRemoteGatewayManager(opts = {}) {
           remoteVer: '',
           remoteSize: 0,
           remoteHash: '',
+          missing: [],
           error: `verify exit ${r.code}${errOut ? `: ${errOut}` : ''}`
         };
       }
-      const verMatch = out.match(/VERSION=(.+)/);
-      const sizeMatch = out.match(/SIZE=(\d+)/);
-      const hashMatch = out.match(/HASH=([^\r\n]*)/);
-      const remoteVer = verMatch ? String(verMatch[1]).trim() : '';
-      const remoteSize = sizeMatch ? Number(sizeMatch[1]) : 0;
-      const remoteHash = hashMatch ? String(hashMatch[1]).trim() : '';
+      const parsed = parseRemotePackState(out);
+      const remoteVer = parsed.version;
+      const remoteSize = parsed.size;
+      const remoteHash = parsed.hash;
+      const missing = parsed.missing;
+      const filesOk = missing.length === 0;
       const sizeOk = localNodeSize > 0 && Math.abs(remoteSize - localNodeSize) < 4096;
       const hashOk = !localSourceHash || (remoteHash && remoteHash === localSourceHash);
       const versionOk = remoteVer === version;
       return {
-        ok: versionOk && sizeOk && hashOk,
+        ok: versionOk && filesOk && sizeOk && hashOk,
         remoteVer,
         remoteSize,
         remoteHash,
+        missing,
+        filesOk,
         versionOk,
         sizeOk,
         hashOk
       };
     } catch (e) {
-      return { ok: false, remoteVer: '', remoteSize: 0, remoteHash: '', error: e && e.message ? String(e.message) : 'verify exec failed' };
+      return { ok: false, remoteVer: '', remoteSize: 0, remoteHash: '', missing: [], error: e && e.message ? String(e.message) : 'verify exec failed' };
     }
   }
 
   function formatDeployVerifyFailure(verify, version, localNodeSize, localSourceHash) {
     const parts = [];
     if (verify.versionOk === false) parts.push(`版本 ${verify.remoteVer || '?'}≠${version}`);
+    if (verify.filesOk === false) parts.push(`缺少文件 ${(verify.missing || []).join(', ')}`);
     if (verify.sizeOk === false) {
       parts.push(`Node 大小 ${verify.remoteSize || 0}/${localNodeSize}`);
     }
@@ -230,6 +252,14 @@ function createRemoteGatewayManager(opts = {}) {
         code: 'REMOTE_GATEWAY_PACK_INCOMPLETE'
       });
     }
+    // 清单来自 remote-pack-layout：本地缺项就在这里失败，不要上传几百 MB 后再报错
+    const localCheck = inspectRemotePack(packRoot);
+    if (!localCheck.ok) {
+      throw Object.assign(new Error(`远程 Agent 包内容不完整（${localCheck.detail}），请重新打包`), {
+        code: 'REMOTE_GATEWAY_PACK_INCOMPLETE',
+        detail: localCheck.missing.join(', ')
+      });
+    }
     const localNodeSize = fs.statSync(localNodePath).size;
     const localSourceHash = manifest && manifest.sourceHash ? String(manifest.sourceHash) : '';
 
@@ -243,12 +273,15 @@ function createRemoteGatewayManager(opts = {}) {
       needUpload = !st.ok;
       if (!needUpload) {
         log(`远程 Agent ${version} 已存在（Node ${Math.round(localNodeSize / 1024 / 1024)}MB）`);
-      } else if (st.remoteVer) {
+      } else if (st.remoteVer || (st.missing && st.missing.length)) {
         const hashHint =
           localSourceHash && st.remoteHash && st.remoteHash !== localSourceHash
             ? `，源码包已更新 ${st.remoteHash}→${localSourceHash}`
             : '';
-        log(`远程 Agent 需重新注入（版本 ${st.remoteVer || '?'} / 大小 ${st.remoteSize || 0}${hashHint}）`);
+        const missingHint = st.missing && st.missing.length ? `，缺少 ${st.missing.join(', ')}` : '';
+        log(
+          `远程 Agent 需重新注入（版本 ${st.remoteVer || '?'} / 大小 ${st.remoteSize || 0}${hashHint}${missingHint}）`
+        );
       }
     }
 
@@ -324,14 +357,27 @@ function createRemoteGatewayManager(opts = {}) {
     }
 
     emit({ phase: 'link', percent: 86, message: '创建链接…' });
+    // set -e：任意一步失败即退出，退出码才能被下面检测到
+    // （原来整条 && 链结尾的 `|| true` 会把 mkdir/ln/chmod 的失败一起吞掉）。
     const linkCmd = [
+      'set -e',
       `mkdir -p ${shellQuoteSingle(`${home}/${REMOTE_HOME_DIR}`)}`,
       `rm -rf ${shellQuoteSingle(remoteCurrent)}`,
       `ln -sfn ${shellQuoteSingle(remoteBase)} ${shellQuoteSingle(remoteCurrent)}`,
       `chmod +x ${shellQuoteSingle(`${remoteCurrent}/bin/node`)}`,
-      `test -f ${shellQuoteSingle(`${remoteCurrent}/bin/dieyun-core`)} && chmod +x ${shellQuoteSingle(`${remoteCurrent}/bin/dieyun-core`)} || true`
-    ].join(' && ');
-    await sshManager.execScript(linkCmd, 15000);
+      `if test -f ${shellQuoteSingle(`${remoteCurrent}/bin/dieyun-core`)}; then chmod +x ${shellQuoteSingle(`${remoteCurrent}/bin/dieyun-core`)}; fi`
+    ].join('\n');
+    // current 链接是后续 preflight / 启动的前置条件，失败必须显式报错
+    const linked = await sshManager.execScript(linkCmd, 15000);
+    if (linked.code !== 0) {
+      throw Object.assign(new Error('远程 Agent 安装目录链接失败（~/.dieyun/remote-agent/current）'), {
+        code: 'REMOTE_GATEWAY_LINK_FAILED',
+        detail: [String(linked.stdout || '').trim(), String(linked.stderr || '').trim()]
+          .filter(Boolean)
+          .join('\n')
+          .slice(0, 500)
+      });
+    }
   }
 
   async function checkSystemNode(sshManager) {
@@ -485,27 +531,35 @@ function createRemoteGatewayManager(opts = {}) {
     const nodeQ = shellQuoteSingle(nodeBin);
     const dirQ = shellQuoteSingle(currentDir);
 
+    // 检查项与缺项诊断都来自 remote-pack-layout（与打包 / 部署包装配同一份清单），
+    // 失败时必须报出到底缺什么，否则只剩一句「安装包不完整」无法定位。
+    // 成功标记单独一行，判定走 evaluateRemotePackPreflight（脚本必然还会打印 MISSING= 行）。
     const preflight = await sshManager.execScript(
       [
-        `test -d ${dirQ} || test -L ${dirQ}`,
-        `test -f ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)}`,
-        `test -d ${shellQuoteSingle(`${currentDir}/node_modules/ws`)}`,
-        'echo OK'
-      ].join(' && '),
+        `DIR=${dirQ}`,
+        `if test ! -d "$DIR" && test ! -L "$DIR"; then echo "DIR_MISSING"; exit 1; fi`,
+        ...remoteMissingCheckLines('"$DIR"', REMOTE_DEPLOY_REQUIRED_FILES),
+        'if test -n "$MISSING"; then ls -la "$DIR" 2>&1 | head -n 40; exit 1; fi',
+        `echo ${REMOTE_PACK_OK_MARKER}`
+      ].join('\n'),
       8000
     );
-    if (String(preflight.stdout || '').trim() !== 'OK') {
-      throw Object.assign(new Error('远程 Agent 安装包不完整'), {
+    const preflightResult = evaluateRemotePackPreflight(preflight.stdout, preflight.code);
+    if (!preflightResult.ok) {
+      const hint = preflightResult.missing.length ? `，缺少 ${preflightResult.missing.join(', ')}` : '';
+      const detail = [preflightResult.detail, String(preflight.stderr || '').trim()]
+        .filter(Boolean)
+        .join('\n')
+        .slice(0, 1200);
+      throw Object.assign(new Error(`远程 Agent 安装包不完整${hint}`), {
         code: 'REMOTE_GATEWAY_PACK_INCOMPLETE',
-        detail: String(preflight.stderr || preflight.stdout || '').trim()
+        detail
       });
     }
 
     const smoke = await sshManager.execScript(
       [
         `cd ${dirQ}`,
-        `test -f ${shellQuoteSingle(`${currentDir}/gateway/fs-read-limits.js`)}`,
-        `test -f ${shellQuoteSingle(`${currentDir}/gateway/fs-edit-file.js`)}`,
         `${nodeQ} -e ${shellQuoteSingle("require('./remote/minimal-gateway-host'); console.log('SMOKE_OK')")}`
       ].join('\n'),
       20000

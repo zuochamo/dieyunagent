@@ -7,6 +7,7 @@ const https = require('https');
 const http = require('http');
 const { spawn } = require('child_process');
 const { OPTIONAL_ASSETS, MONACO_VERSION, BGE_MODEL_NAME, BGE_ASSET_ID, REMOTE_NODE_VERSION } = require('./manifest');
+const { inspectRemotePack, REMOTE_PACK_NODE_REL } = require('../remote/remote-pack-layout');
 
 /** @type {Map<string, Promise<string>>} */
 const inflight = new Map();
@@ -331,9 +332,31 @@ function getMonacoVsUrl(installRoot) {
   return fileUrl.endsWith('/') ? fileUrl.slice(0, -1) : fileUrl;
 }
 
+/**
+ * 注入前的最后一道本地闸门：部署包（lite 包 + 内置 Node）必须满足
+ * src/remote/remote-pack-layout.js 的清单，否则宁可在这里失败，
+ * 也不要上传几百 MB 后在远程报「安装包不完整」。
+ */
+function assertRemoteDeployPackReady(packRoot) {
+  const check = inspectRemotePack(packRoot, { deploy: true });
+  if (check.ok) return packRoot;
+  const onlyNodeMissing = check.missing.length === 1 && check.missing[0] === REMOTE_PACK_NODE_REL;
+  if (onlyNodeMissing) {
+    throw Object.assign(new Error('Remote Agent Node 未就绪，请检查网络后重试连接'), {
+      code: 'REMOTE_GATEWAY_PACK_MISSING'
+    });
+  }
+  throw Object.assign(
+    new Error(
+      `远程 Agent 部署包不完整：${check.detail}。请重新执行 npm run pack:remote-gateway（安装包用 npm run build 重新打包）`
+    ),
+    { code: 'REMOTE_GATEWAY_PACK_INCOMPLETE', missing: check.missing }
+  );
+}
+
 async function ensureRemoteGatewayDeployPack({ userDataPath, resourcesPath, litePackRoot, appVersion, onProgress }) {
   const nodeBundled = resolveRemoteGatewayNodeBundled(litePackRoot);
-  if (nodeBundled) return litePackRoot;
+  if (nodeBundled) return assertRemoteDeployPackReady(litePackRoot);
 
   await ensureOptionalAsset('remote-gateway-linux-node', {
     userDataPath,
@@ -346,7 +369,7 @@ async function ensureRemoteGatewayDeployPack({ userDataPath, resourcesPath, lite
   const nodeDest = path.join(cacheRoot, 'bin', 'node');
   if (fs.existsSync(nodeDest) && fs.statSync(nodeDest).size > 50 * 1024 * 1024) {
     await syncLitePackFiles(litePackRoot, cacheRoot);
-    return cacheRoot;
+    return assertRemoteDeployPackReady(cacheRoot);
   }
 
   await fsp.mkdir(cacheRoot, { recursive: true });
@@ -355,7 +378,7 @@ async function ensureRemoteGatewayDeployPack({ userDataPath, resourcesPath, lite
   await fsp.mkdir(path.dirname(nodeDest), { recursive: true });
   await fsp.copyFile(nodeSrc, nodeDest);
   await syncLitePackFiles(litePackRoot, cacheRoot);
-  return cacheRoot;
+  return assertRemoteDeployPackReady(cacheRoot);
 }
 
 async function syncLitePackFiles(litePackRoot, cacheRoot) {

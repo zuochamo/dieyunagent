@@ -14,8 +14,10 @@ const NODE_VERSION = process.env.DIEYUN_REMOTE_NODE_VERSION || 'v20.18.2';
 const NODE_PLATFORM = 'linux-x64';
 const {
   REMOTE_GATEWAY_SOURCE_PATHS,
-  computeRemoteGatewaySourceHash
-} = require('./remote-gateway-source-paths.cjs');
+  REMOTE_PACK_CORE_REL,
+  computeRemoteGatewaySourceHash,
+  inspectRemotePack
+} = require('../src/remote/remote-pack-layout.js');
 const NODE_MIRRORS = [
   process.env.DIEYUN_NODE_MIRROR,
   'https://npmmirror.com/mirrors/node',
@@ -161,7 +163,7 @@ async function main() {
   }
 
   const linuxCoreSrc = path.join(ROOT, 'build', 'dieyun-core-linux', 'dieyun-core');
-  const linuxCoreDest = path.join(OUT, 'bin', 'dieyun-core');
+  const linuxCoreDest = path.join(OUT, REMOTE_PACK_CORE_REL);
   let hasLinuxCore = false;
   if (fs.existsSync(linuxCoreSrc)) {
     await fsp.mkdir(path.dirname(linuxCoreDest), { recursive: true });
@@ -240,26 +242,11 @@ async function main() {
   };
   await fsp.writeFile(path.join(OUT, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
-  for (const rel of [
-    'remote/run-cli.js',
-    'remote/minimal-gateway-host.js',
-    'gateway/fs-read-limits.js',
-    // line-diff-stats 是 minimal-gateway-host 的 require 依赖，缺失会让远程模块加载失败
-    'gateway/line-diff-stats.js',
-    'gateway/fs-edit-file.js',
-    'gateway/str-replace.js',
-    'gateway/symbol-text.js',
-    'gateway/rg-search.js',
-    // rg-search 的依赖，缺失会让远程 Agent 模块加载失败
-    'git/git-target.js',
-    // 远程 LSP 定位链路，缺失会让远程 lsp.query 直接报错
-    'lsp/navigate-service.js',
-    'lsp/lsp-client.js',
-    'lsp/language-registry.js'
-  ]) {
-    if (!fs.existsSync(path.join(OUT, rel))) {
-      throw new Error('Remote Agent pack incomplete, missing: ' + rel);
-    }
+  // 必需文件清单来自 src/remote/remote-pack-layout.js（本地打包 / 部署包装配 /
+  // 远程注入校验共用同一份），缺项必须在打包阶段就失败。
+  const packCheck = inspectRemotePack(OUT);
+  if (!packCheck.ok) {
+    throw new Error('Remote Agent pack incomplete, missing: ' + packCheck.missing.join(', '));
   }
 
   console.log('Remote Agent pack:', OUT);

@@ -1,6 +1,5 @@
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
 
 function getRemoteGatewayPackRoot(app) {
@@ -32,6 +31,8 @@ function createRemoteGatewayRuntime(deps) {
   async function buildRemoteGatewayPackContext() {
     const liteRoot = packRoot();
     const { ensureRemoteGatewayDeployPack } = require('../optional-assets/service');
+    // 部署包完整性（必需文件 + 内置 Node）由 optional-assets 统一校验并抛出
+    // REMOTE_GATEWAY_PACK_INCOMPLETE / REMOTE_GATEWAY_PACK_MISSING，此处不再重复判断。
     const resolved = await ensureRemoteGatewayDeployPack({
       userDataPath: app.getPath('userData'),
       resourcesPath: process.resourcesPath,
@@ -39,12 +40,6 @@ function createRemoteGatewayRuntime(deps) {
       appVersion: app.getVersion(),
       onProgress: (payload) => broadcastToRenderers('ssh:remote-agent-deploy-progress', payload || {})
     });
-    const nodeBin = path.join(resolved, 'bin', 'node');
-    if (!fs.existsSync(nodeBin)) {
-      throw Object.assign(new Error('Remote Agent Node 未就绪，请检查网络后重试连接'), {
-        code: 'REMOTE_GATEWAY_PACK_MISSING'
-      });
-    }
     return {
       packRoot: resolved,
       appVersion: app.getVersion(),

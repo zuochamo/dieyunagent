@@ -76,7 +76,7 @@ const norm = normalizeEditArgs({
 });
 assert(norm.filePath === 'src/a.js' && norm.oldString === 'foo' && norm.newString === 'bar' && norm.replaceAll === true, 'normalize snake_case');
 
-const { REMOTE_GATEWAY_SOURCE_PATHS } = require('./remote-gateway-source-paths.cjs');
+const { REMOTE_GATEWAY_SOURCE_PATHS } = require('../src/remote/remote-pack-layout.js');
 assert(
   REMOTE_GATEWAY_SOURCE_PATHS.includes('src/gateway/fs-edit-file.js'),
   'remote pack must include fs-edit-file.js (minimal-gateway-host requires it)'

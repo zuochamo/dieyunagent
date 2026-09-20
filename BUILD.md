@@ -36,6 +36,14 @@ The installer artifacts are written to `dist/`:
 - `dieyunagent-Setup-<version>.exe.blockmap`
 - `latest.yml`
 
+### Remote Agent pack (`resources/remote-gateway-pack`)
+
+`npm run build:*` runs `npm run pack:remote-gateway:lite` first and copies `build/remote-gateway-pack` into the installer via `extraResources`.
+
+electron-builder always drops the **root** `node_modules` of a copied directory, so the pack's runtime dependency (`ws`) needs its own `extraResources` entry pointing at `build/remote-gateway-pack/node_modules`. Without it the installer ships an incomplete Remote Agent pack, and SSH remote workspaces fail at injection time with `REMOTE_GATEWAY_PACK_INCOMPLETE` (surfaced as「远程 Agent 安装包不完整」).
+
+`npm run verify:remote-pack` checks this at the end of every build using the shared manifest in `src/remote/remote-pack-layout.js`. If it reports missing files, fix `package.json` → `build.extraResources` rather than shipping the artifact.
+
 ### Optional: Bundle Default Credentials
 
 Copy `deploy.defaults.example.json` to `deploy.packaged.json` (gitignored) and fill in the `openApi` keys. `npm run pack:deploy-defaults` runs before `electron-builder` and injects it as `resources/deploy-packaged.json` via `extraResources`.

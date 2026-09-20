@@ -9,6 +9,7 @@ const { createSshConnectionPool } = require('../ssh/connection-pool');
 const { createRemoteGatewayPool } = require('../ssh/remote-gateway-pool');
 const { createSessionRemoteTransport } = require('../session/session-remote-transport');
 const { invalidateRemoteAgentClient } = require('../gateway/remote-agent-client');
+const { inspectRemotePack, REMOTE_PACK_NODE_REL } = require('../remote/remote-pack-layout');
 
 function endpointKeyFromScope(scopeKey) {
   return String(scopeKey || '').split('|')[0] || scopeKey;
@@ -41,24 +42,19 @@ function describeRemoteGatewayPack(packRoot, fsApi = fs) {
   } catch {
     return { ok: false, detail: '(manifest 无效)' };
   }
-  if (lite) {
-    const entry = path.join(root, 'remote', 'run-cli.js');
-    if (!fsApi.existsSync(entry)) {
-      return { ok: false, detail: '(lite 包不完整)' };
+  // 完整性清单与远程注入校验同源（src/remote/remote-pack-layout.js）：
+  // 这里显示 ok 就必须真的能注入，否则只会把问题推迟到远程报错。
+  const check = inspectRemotePack(root, { deploy: !lite, fsApi });
+  if (!check.ok) {
+    if (!lite && check.missing.length === 1 && check.missing[0] === REMOTE_PACK_NODE_REL) {
+      return { ok: false, detail: '(缺失 Node，dev 启动时会自动打包)' };
     }
+    return { ok: false, detail: `(${lite ? 'lite 包' : '包'}不完整：${check.detail})` };
+  }
+  if (lite) {
     return { ok: true, detail: '(lite，Node 随远程注入)' };
   }
-  const nodeUnix = path.join(root, 'bin', 'node');
-  const nodeWin = path.join(root, 'bin', 'node.exe');
-  const nodeBin = fsApi.existsSync(nodeUnix)
-    ? nodeUnix
-    : fsApi.existsSync(nodeWin)
-      ? nodeWin
-      : '';
-  if (!nodeBin) {
-    return { ok: false, detail: '(缺失 Node，dev 启动时会自动打包)' };
-  }
-  const mb = Math.round(fsApi.statSync(nodeBin).size / 1024 / 1024);
+  const mb = Math.round(fsApi.statSync(path.join(root, REMOTE_PACK_NODE_REL)).size / 1024 / 1024);
   return { ok: true, detail: `(Node ${mb}MB)` };
 }
 

@@ -4,9 +4,10 @@ const fs = require('fs');
 const path = require('path');
 
 const { getBuildDistRoot } = require('./build-dist-root.cjs');
+const { inspectRemotePack, REMOTE_PACK_CORE_REL } = require('../src/remote/remote-pack-layout.js');
 const root = path.join(__dirname, '..');
 const packRoot = path.join(getBuildDistRoot(), 'win-unpacked', 'resources', 'remote-gateway-pack');
-const corePath = path.join(packRoot, 'bin', 'dieyun-core');
+const corePath = path.join(packRoot, REMOTE_PACK_CORE_REL);
 const manifestPath = path.join(packRoot, 'manifest.json');
 const MIN_BYTES = 500 * 1024;
 
@@ -24,6 +25,18 @@ function main() {
     } catch (e) {
       console.warn('[verify-remote-pack] manifest.json 解析失败:', e.message || e);
     }
+  }
+
+  // 安装包里的 pack 必须自带运行时清单（含 node_modules/ws）。
+  // 注意：electron-builder 会无条件剔除 extraResources 源目录根的 node_modules
+  // （app-builder-lib/out/util/filter.js），因此 package.json 里对
+  // node_modules 单独声明了一条 extraResources；漏掉就会在远程注入时报
+  // REMOTE_GATEWAY_PACK_INCOMPLETE。
+  const packCheck = inspectRemotePack(packRoot);
+  if (!packCheck.ok) {
+    console.error('[verify-remote-pack] 安装包内 remote-gateway-pack 不完整:', packCheck.detail);
+    console.error('  检查 package.json build.extraResources 是否同时拷贝了 build/remote-gateway-pack 与 build/remote-gateway-pack/node_modules');
+    process.exit(1);
   }
 
   if (!fs.existsSync(corePath)) {
