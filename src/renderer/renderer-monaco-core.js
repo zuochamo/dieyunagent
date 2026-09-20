@@ -1,4 +1,4 @@
-/* global window, document, gatewayCall, gwState, updateProblemsPanel, initProblemsPanel, refreshWorkspaceProblemsPanel, getAgentLimits */
+/* global window, document, gatewayCall, gwState, updateProblemsPanel, initProblemsPanel, refreshWorkspaceProblemsPanel, getAgentLimits, resetArtifactFollowState */
 'use strict';
 
 var MONACO_BASE = '../../node_modules/monaco-editor/min/vs';
@@ -28,12 +28,6 @@ var EXT_MONACO_LANG = {
 var monacoReady = null;
 /** @type {import('monaco-editor').editor.IStandaloneCodeEditor | null} */
 var activeEditor = null;
-/** @type {import('monaco-editor').editor.IStandaloneDiffEditor | null} */
-var activeDiffEditor = null;
-/** @type {{ original: object, modified: object, filePath: string } | null} */
-var activeDiffModels = null;
-/** @type {HTMLElement | null} */
-var activeDiffHostEl = null;
 var activeFilePath = null;
 var syncTimer = null;
 /** @type {{ getValue: Function, dispose: Function, revealLine: Function } | null} */
@@ -42,13 +36,25 @@ var activeHandle = null;
 var pendingGotoLine = null;
 /** @type {Map<string, { path: string, ts: number }>} */
 var openTabMap = new Map();
+/** 打开标签记录上限（仅用于编辑器上下文）：超出按最近使用淘汰，避免长会话无限累积 */
+var MONACO_OPEN_TABS_MAX = 40;
 /** @type {object|null} */
 var editorSelection = null;
 /** @type {Map<string, object[]>} */
 var diagnosticsCache = new Map();
+/** 诊断缓存上限（超出淘汰最旧），避免长会话累积 */
+var MONACO_DIAG_CACHE_MAX = 200;
+/**
+ * Monaco model LRU：编辑器销毁不会释放 model，若不设上限，本次会话看过的每个文件
+ * 都会留下一份模型常驻（单文件上限 monacoMaxChars）。这里只保留最近若干份，
+ * 兼顾「切回来还能恢复撤销/滚动」与内存占用。
+ */
+var MONACO_MODEL_LRU_MAX = 12;
+/** @type {Map<string, { model: object }>} */
+var artifactModelLRU = new Map();
+/** 用户是否手动改过当前编辑器内容（未保存）；写入跟随据此暂停，绝不覆盖用户输入 */
+var activeEditorUserDirty = false;
 
-/** @type {{ token: number, timer: ReturnType<typeof setTimeout>|null, filePath: string, targetAfter: string } | null} */
-var diffAnimState = null;
 /** @type {object|null} */
 var liveWriteLineDecorations = null;
 /** @type {number} */
@@ -56,12 +62,7 @@ var lastWritingDecorationLine = 0;
 /** @type {{ decorations: object|null, timer: ReturnType<typeof setTimeout>|null }} */
 var gotoLineFlashState = { decorations: null, timer: null };
 
-var DIFF_ANIM_MS = 52;
 var GOTO_LINE_FLASH_MS = 2600;
-var DIFF_ANIM_MAX_LINES = 2000;
-var DIFF_ANIM_MAX_LINE_PRODUCT = 400_000;
-var DIFF_ANIM_MAX_STEPS = 220;
-var DIFF_ANIM_INSERT_CHUNK = 3;
 
 function guessMonacoLanguage(filePath) {
   const ext = String(filePath || '')
@@ -79,75 +80,8 @@ function canUseMonacoEditor(filePath, text) {
   return true;
 }
 
-function ensureMonacoDieyunOverrideStyles() {
-  // [排查中] Monaco 选区红底问题：补丁层全部拆除，恢复由本函数注入的覆盖样式时再还原
-  return;
-  if (document.getElementById('monaco-dieyun-overrides-css')) return;
-  const style = document.createElement('style');
-  style.id = 'monaco-dieyun-overrides-css';
-  style.textContent = `
-/* 必须排在 editor.main.css 之后，覆盖 Monaco 默认 20% 红底 inline diff */
-.artifacts-file-view .monaco-editor .line-delete,
-.artifacts-file-view .monaco-editor .char-delete,
-.artifacts-file-view .monaco-diff-editor .line-delete,
-.artifacts-file-view .monaco-diff-editor .char-delete,
-.artifacts-file-view .monaco-editor .inline-deleted-text,
-.artifacts-file-view .monaco-editor .inline-deleted-margin-view-zone,
-.changes-file-view .monaco-editor .line-delete,
-.changes-file-view .monaco-editor .char-delete,
-.changes-file-view .monaco-diff-editor .line-delete,
-.changes-file-view .monaco-diff-editor .char-delete,
-.changes-file-view .monaco-editor .inline-deleted-text,
-.changes-file-view .monaco-editor .inline-deleted-margin-view-zone {
-  background-color: var(--cursor-diff-del-line, rgba(248, 81, 73, 0.06)) !important;
-}
-.artifacts-file-view .monaco-editor .line-insert,
-.artifacts-file-view .monaco-editor .char-insert,
-.artifacts-file-view .monaco-diff-editor .line-insert,
-.artifacts-file-view .monaco-diff-editor .char-insert,
-.changes-file-view .monaco-editor .line-insert,
-.changes-file-view .monaco-editor .char-insert,
-.changes-file-view .monaco-diff-editor .line-insert,
-.changes-file-view .monaco-diff-editor .char-insert {
-  background-color: var(--cursor-diff-ins-line, rgba(63, 185, 80, 0.06)) !important;
-}
-.artifacts-file-view.is-live-writing .monaco-editor .line-delete,
-.artifacts-file-view.is-live-writing .monaco-editor .char-delete,
-.artifacts-file-view.is-live-writing .monaco-diff-editor .line-delete,
-.artifacts-file-view.is-live-writing .monaco-diff-editor .char-delete,
-.artifacts-file-view.is-live-writing .monaco-editor .inline-deleted-text,
-.artifacts-file-view.is-live-writing .monaco-editor .inline-deleted-margin-view-zone,
-.changes-file-view.is-live-writing .monaco-editor .line-delete,
-.changes-file-view.is-live-writing .monaco-editor .char-delete,
-.changes-file-view.is-live-writing .monaco-diff-editor .line-delete,
-.changes-file-view.is-live-writing .monaco-diff-editor .char-delete,
-.changes-file-view.is-live-writing .monaco-editor .inline-deleted-text,
-.changes-file-view.is-live-writing .monaco-editor .inline-deleted-margin-view-zone {
-  background-color: transparent !important;
-}
-.monaco-diff-writing-line,
-.monaco-editor .view-line.monaco-diff-writing-line,
-.monaco-diff-editor .view-line.monaco-diff-writing-line,
-.artifacts-file-view.is-live-writing .artifacts-monaco-host .view-line.monaco-diff-writing-line,
-.artifacts-file-view.is-live-writing .artifacts-monaco-after-host .view-line.monaco-diff-writing-line {
-  background-color: var(--monaco-writing-line-bg, rgba(255, 255, 255, 0.05)) !important;
-  box-shadow: inset 3px 0 0 var(--monaco-writing-line-accent, rgba(255, 255, 255, 0.14)) !important;
-}
-/* 去掉 Monaco 隐藏 textarea 的系统黄/橙 focus 环 */
-.monaco-editor .inputarea,
-.monaco-editor textarea.inputarea,
-.monaco-diff-editor .inputarea {
-  outline: none !important;
-  border: none !important;
-  box-shadow: none !important;
-}
-`;
-  document.head.appendChild(style);
-}
-
 function loadMonaco() {
   if (window.monaco) {
-    ensureMonacoDieyunOverrideStyles();
     configureMonacoArtifactLanguages(window.monaco);
     return Promise.resolve(window.monaco);
   }
@@ -172,7 +106,6 @@ function loadMonaco() {
           : `${MONACO_BASE}/editor/editor.main.css`;
       document.head.appendChild(link);
     }
-    ensureMonacoDieyunOverrideStyles();
     await new Promise((resolve, reject) => {
       const s = document.createElement('script');
       s.src =
@@ -232,7 +165,15 @@ async function syncLspDocument(filePath, text, opts) {
 function rememberOpenTab(filePath) {
   const p = String(filePath || '').trim();
   if (!p) return;
-  openTabMap.set(p.replace(/\\/g, '/').toLowerCase(), { path: p, ts: Date.now() });
+  const key = p.replace(/\\/g, '/').toLowerCase();
+  // 先删后插：Map 的迭代顺序即最近使用顺序（用于淘汰）
+  openTabMap.delete(key);
+  openTabMap.set(key, { path: p, ts: Date.now() });
+  while (openTabMap.size > MONACO_OPEN_TABS_MAX) {
+    const oldest = openTabMap.keys().next().value;
+    if (oldest === key) break;
+    openTabMap.delete(oldest);
+  }
 }
 
 function getOpenTabPaths() {
@@ -244,7 +185,14 @@ function getOpenTabPaths() {
 function cacheDiagnostics(filePath, diagnostics) {
   const p = String(filePath || '').trim();
   if (!p) return;
-  diagnosticsCache.set(p.replace(/\\/g, '/').toLowerCase(), Array.isArray(diagnostics) ? diagnostics : []);
+  const key = p.replace(/\\/g, '/').toLowerCase();
+  diagnosticsCache.delete(key);
+  diagnosticsCache.set(key, Array.isArray(diagnostics) ? diagnostics : []);
+  while (diagnosticsCache.size > MONACO_DIAG_CACHE_MAX) {
+    const oldest = diagnosticsCache.keys().next().value;
+    if (oldest === key) break;
+    diagnosticsCache.delete(oldest);
+  }
   if (gwState && gwState.authed && diagnostics && diagnostics.length) {
     void gatewayCall('lsp.diagnostics_report', {
       filePath: p,
@@ -370,16 +318,6 @@ function clearLiveWriteLineDecoration() {
   lastWritingDecorationLine = 0;
 }
 
-function cancelDiffHunkAnimation() {
-  if (!diffAnimState) return;
-  if (diffAnimState.timer) {
-    clearTimeout(diffAnimState.timer);
-    diffAnimState.timer = null;
-  }
-  clearLiveWriteLineDecoration();
-  diffAnimState = null;
-}
-
 function clearGotoLineFlash() {
   if (gotoLineFlashState.timer) {
     clearTimeout(gotoLineFlashState.timer);
@@ -425,114 +363,6 @@ function applyMonacoGotoLine(editor, line, col) {
   flashMonacoGotoLine(editor, ln, cn);
 }
 
-function splitTextLines(text) {
-  return String(text ?? '').split('\n');
-}
-
-function buildMonacoLineDiffOps(beforeText, afterText) {
-  const oldLines = splitTextLines(beforeText);
-  const newLines = splitTextLines(afterText);
-  const n = oldLines.length;
-  const m = newLines.length;
-  if (n > DIFF_ANIM_MAX_LINES || m > DIFF_ANIM_MAX_LINES || n * m > DIFF_ANIM_MAX_LINE_PRODUCT) {
-    return null;
-  }
-  if (n === m && oldLines.every((line, i) => line === newLines[i])) {
-    return [];
-  }
-
-  const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      if (oldLines[i - 1] === newLines[j - 1]) dp[i][j] = dp[i - 1][j - 1] + 1;
-      else dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-    }
-  }
-
-  const raw = [];
-  let i = n;
-  let j = m;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
-      raw.push({ t: 'keep' });
-      i -= 1;
-      j -= 1;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      raw.push({ t: 'ins', line: newLines[j - 1] });
-      j -= 1;
-    } else {
-      raw.push({ t: 'del' });
-      i -= 1;
-    }
-  }
-  raw.reverse();
-  return raw;
-}
-
-/** @returns {{ text: string, focusLine: number }[] | null} */
-function buildDiffHunkSnapshots(beforeText, afterText) {
-  const ops = buildMonacoLineDiffOps(beforeText, afterText);
-  if (!ops || !ops.length) return null;
-
-  const naturalFrames = [];
-  let cur = [];
-  for (const op of ops) {
-    if (op.t === 'keep') {
-      if (cur.length) naturalFrames.push(cur);
-      cur = [];
-    } else {
-      cur.push(op);
-    }
-  }
-  if (cur.length) naturalFrames.push(cur);
-
-  const expandedFrames = [];
-  for (const frame of naturalFrames) {
-    const insertOnly = frame.every((o) => o.t === 'ins');
-    if (insertOnly && frame.length > DIFF_ANIM_INSERT_CHUNK) {
-      for (let i = 0; i < frame.length; i += DIFF_ANIM_INSERT_CHUNK) {
-        expandedFrames.push(frame.slice(i, i + DIFF_ANIM_INSERT_CHUNK));
-      }
-    } else {
-      expandedFrames.push(frame);
-    }
-  }
-
-  const lines = [...splitTextLines(beforeText)];
-  let modLine = 1;
-  let opIdx = 0;
-  const snapshots = [];
-
-  for (const frame of expandedFrames) {
-    while (opIdx < ops.length && ops[opIdx].t === 'keep') {
-      modLine += 1;
-      opIdx += 1;
-    }
-    for (const op of frame) {
-      if (op.t === 'del') {
-        if (lines.length === 1 && lines[0] === '') lines.length = 0;
-        else if (lines.length) lines.splice(modLine - 1, 1);
-        if (!lines.length) modLine = 1;
-      } else if (op.t === 'ins') {
-        if (!lines.length) {
-          lines.push(op.line);
-          modLine = 2;
-        } else {
-          lines.splice(modLine - 1, 0, op.line);
-          modLine += 1;
-        }
-      }
-      opIdx += 1;
-    }
-    snapshots.push({
-      text: lines.join('\n'),
-      focusLine: Math.max(1, Math.min(modLine - 1, lines.length || 1))
-    });
-  }
-
-  return snapshots.length ? snapshots : null;
-}
-
 function setDiffWritingDecoration(editor, monaco, line) {
   if (!editor || !monaco || typeof editor.createDecorationsCollection !== 'function') return;
   const model = editor.getModel?.();
@@ -554,269 +384,6 @@ function setDiffWritingDecoration(editor, monaco, line) {
   ]);
 }
 
-/** @type {object|null} decorations for Cursor-style insert line numbers in review diff */
-var reviewDiffLineNumDecorations = null;
-/** @type {import('monaco-editor').IDisposable | null} */
-var reviewDiffPaintListener = null;
-
-function clearReviewDiffLineNumberPaint() {
-  if (reviewDiffLineNumDecorations && typeof reviewDiffLineNumDecorations.clear === 'function') {
-    reviewDiffLineNumDecorations.clear();
-  }
-  reviewDiffLineNumDecorations = null;
-}
-
-function disposeReviewDiffPaintListener() {
-  if (!reviewDiffPaintListener) return;
-  try {
-    reviewDiffPaintListener.dispose();
-  } catch {
-    // ignore
-  }
-  reviewDiffPaintListener = null;
-}
-
-function safeGetLineChanges(diffEditor) {
-  if (!diffEditor) return [];
-  try {
-    const changes = diffEditor.getLineChanges?.();
-    return changes && Array.isArray(changes) ? changes : [];
-  } catch {
-    return [];
-  }
-}
-
-async function whenDiffReady(diffEditor, fn) {
-  if (!diffEditor || typeof fn !== 'function') return;
-  try {
-    if (typeof diffEditor.waitForDiff === 'function') {
-      await diffEditor.waitForDiff();
-    } else {
-      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    }
-  } catch {
-    return;
-  }
-  try {
-    fn();
-  } catch {
-    // ignore — Monaco may throw if diff was invalidated mid-flight
-  }
-}
-
-function runWhenDiffReady(diffEditor, fn) {
-  void whenDiffReady(diffEditor, fn);
-}
-
-function paintCursorReviewDiffLineNumbers(diffEditor) {
-  clearReviewDiffLineNumberPaint();
-  if (!isDiffReviewHost() || !diffEditor || activeDiffHostEl?.classList.contains('is-diff-writing')) return;
-  const modified = diffEditor.getModifiedEditor?.();
-  const monaco = window.monaco;
-  if (!modified || !monaco) return;
-  const changes = safeGetLineChanges(diffEditor);
-  if (!changes.length) return;
-  const decorations = [];
-  for (const ch of changes) {
-    const modStart = Number(ch.modifiedStartLineNumber) || 0;
-    const modEnd = Number(ch.modifiedEndLineNumber) || modStart;
-    if (modStart < 1) continue;
-    for (let ln = modStart; ln <= Math.max(modStart, modEnd); ln++) {
-      decorations.push({
-        range: new monaco.Range(ln, 1, ln, 1),
-        options: {
-          lineNumberClassName: 'cursor-diff-ins-lnum',
-          linesDecorationsClassName: 'cursor-diff-ins-gutter'
-        }
-      });
-    }
-  }
-  if (!decorations.length) return;
-  reviewDiffLineNumDecorations = modified.createDecorationsCollection(decorations);
-}
-
-function scheduleCursorReviewDiffLineNumberPaint(diffEditor) {
-  if (!diffEditor || !isDiffReviewHost()) return;
-  disposeReviewDiffPaintListener();
-  try {
-    reviewDiffPaintListener = diffEditor.onDidUpdateDiff(() => {
-      disposeReviewDiffPaintListener();
-      runWhenDiffReady(diffEditor, () => paintCursorReviewDiffLineNumbers(diffEditor));
-    });
-    trackEditorDisposable(reviewDiffPaintListener);
-  } catch {
-    runWhenDiffReady(diffEditor, () => paintCursorReviewDiffLineNumbers(diffEditor));
-  }
-}
-
-function setDiffHostWritingState(writing) {
-  if (activeDiffHostEl) {
-    activeDiffHostEl.classList.toggle('is-diff-writing', !!writing);
-  }
-}
-
-function isDiffReviewHost() {
-  return !!activeDiffHostEl?.classList.contains('is-diff-review');
-}
-
-function applyMonacoDiffVisualMode(mode) {
-  const monaco = window.monaco;
-  if (!monaco) return;
-  const writing = mode === 'writing';
-  const review = isDiffReviewHost();
-  if (!writing) {
-    clearLiveWriteLineDecoration();
-    lastWritingDecorationLine = 0;
-  }
-  // 写入中每个 chunk 都 setTheme/updateOptions 会让字形重绘闪烁；同模式只应用一次
-  if (lastDiffVisualMode === mode && activeDiffEditor) {
-    setDiffHostWritingState(writing);
-    return;
-  }
-  lastDiffVisualMode = mode;
-  applyDieyunMonacoTheme(monaco, writing, review && !writing);
-  setDiffHostWritingState(writing);
-  if (!activeDiffEditor) return;
-  const wide = activeDiffHostEl ? activeDiffHostEl.clientWidth >= 820 : true;
-  try {
-    activeDiffEditor.updateOptions({
-      renderSideBySide: writing || review ? false : wide,
-      renderIndicators: review || !writing,
-      useInlineViewWhenSpaceIsLimited: writing || review || !wide,
-      renderSideBySideInlineBreakpoint: review ? 99999 : 820,
-      renderOverviewRuler: false,
-      overviewRulerLanes: 0
-    });
-    applyMonacoDiffEditorChromeOptions(activeDiffEditor);
-    if (review && !writing) {
-      scheduleCursorReviewDiffLineNumberPaint(activeDiffEditor);
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function shouldAnimateMonacoDiff(before, after, opts) {
-  if (!opts || !opts.animate) return false;
-  if (before === after) return false;
-  const snapshots = buildDiffHunkSnapshots(before, after);
-  return !!(snapshots && snapshots.length && snapshots.length <= DIFF_ANIM_MAX_STEPS);
-}
-
-function snapMonacoDiffModels(before, after, opts) {
-  if (!activeDiffModels?.original || !activeDiffModels?.modified) return;
-  const liveWriting = !!(opts && opts.liveWriting);
-  const incremental = liveWriting || !!(opts && opts.incremental);
-  cancelDiffHunkAnimation();
-  if (!liveWriting && activeDiffModels.original.getValue() !== before) {
-    setMonacoModelText(activeDiffModels.original, before, { incremental });
-  }
-  if (activeDiffModels.modified.getValue() !== after) {
-    setMonacoModelText(activeDiffModels.modified, after, { incremental });
-  }
-  const modifiedEditor = activeDiffEditor?.getModifiedEditor?.();
-  if (liveWriting) {
-    applyMonacoDiffVisualMode('writing');
-    if (opts?.focusLine && modifiedEditor) {
-      const ln = Math.max(1, Number(opts.focusLine) || 1);
-      modifiedEditor.revealLineInCenterIfOutsideViewport(ln);
-      const monaco = window.monaco;
-      if (monaco) setDiffWritingDecoration(modifiedEditor, monaco, ln);
-    }
-    return;
-  }
-  applyMonacoDiffVisualMode('done');
-  if (opts?.revealLastChange && activeDiffEditor) {
-    const listener = activeDiffEditor.onDidUpdateDiff(() => {
-      listener.dispose();
-      runWhenDiffReady(activeDiffEditor, () => {
-        revealLastDiffChange(activeDiffEditor);
-        paintCursorReviewDiffLineNumbers(activeDiffEditor);
-      });
-    });
-  } else if (opts?.focusLine && modifiedEditor) {
-    const ln = Math.max(1, Number(opts.focusLine) || 1);
-    modifiedEditor.revealLineInCenter(ln);
-  } else if (
-    isDiffReviewHost() &&
-    activeDiffEditor &&
-    !incremental &&
-    !opts?.revealLastChange
-  ) {
-    scheduleCursorReviewDiffLineNumberPaint(activeDiffEditor);
-  }
-}
-
-function startDiffHunkAnimation(before, after, opts) {
-  if (!activeDiffEditor || !activeDiffModels?.modified || !activeDiffModels?.original) return false;
-  const monaco = window.monaco;
-  if (!monaco) return false;
-
-  const snapshots = buildDiffHunkSnapshots(before, after);
-  if (!snapshots || !snapshots.length || snapshots.length > DIFF_ANIM_MAX_STEPS) {
-    snapMonacoDiffModels(before, after, opts);
-    return false;
-  }
-
-  cancelDiffHunkAnimation();
-  activeDiffModels.original.setValue(before);
-  activeDiffModels.modified.setValue(before);
-  applyMonacoDiffVisualMode('writing');
-
-  const modifiedEditor = activeDiffEditor.getModifiedEditor();
-  const model = activeDiffModels.modified;
-  const token = Date.now();
-  let stepIdx = 0;
-
-  diffAnimState = {
-    token,
-    timer: null,
-    filePath: String(opts?.filePath || activeDiffModels.filePath || ''),
-    targetAfter: after
-  };
-
-  const finish = (reveal) => {
-    if (!diffAnimState || diffAnimState.token !== token) return;
-    if (model.getValue() !== after) model.setValue(after);
-    diffAnimState = null;
-    // 不再有「写入中」状态：动画结束即回到终态
-    applyMonacoDiffVisualMode('done');
-    if (reveal && activeDiffEditor) {
-      const listener = activeDiffEditor.onDidUpdateDiff(() => {
-        listener.dispose();
-        runWhenDiffReady(activeDiffEditor, () => revealLastDiffChange(activeDiffEditor));
-      });
-    } else if (reveal && modifiedEditor) {
-      modifiedEditor.revealLineInCenter(Math.max(1, model.getLineCount()));
-    }
-  };
-
-  const tick = () => {
-    if (!diffAnimState || diffAnimState.token !== token) return;
-    if (stepIdx >= snapshots.length) {
-      finish(!!opts?.revealLastChange);
-      return;
-    }
-
-    const snap = snapshots[stepIdx];
-    stepIdx += 1;
-    model.setValue(snap.text);
-
-    const revealLine = Math.max(1, Math.min(snap.focusLine, model.getLineCount()));
-    if (modifiedEditor) {
-      modifiedEditor.revealLineInCenterIfOutsideViewport(revealLine);
-      setDiffWritingDecoration(modifiedEditor, monaco, revealLine);
-    }
-
-    const delay =
-      snapshots.length > 120 ? Math.max(16, Math.floor(DIFF_ANIM_MS * 0.45)) : DIFF_ANIM_MS;
-    diffAnimState.timer = setTimeout(tick, delay);
-  };
-
-  tick();
-  return true;
-}
-
 /** @type {Promise<void> | null} */
 var monacoDisposeInFlight = null;
 /** @type {Promise<unknown> | null} */
@@ -826,8 +393,6 @@ var activeEditorDisposables = [];
 var dieyunMonacoThemesReady = false;
 /** @type {string | null} */
 var lastDieyunMonacoThemeId = null;
-/** @type {'writing' | 'done' | null} */
-var lastDiffVisualMode = null;
 
 function clearActiveEditorDisposables() {
   for (const d of activeEditorDisposables) {
@@ -847,13 +412,18 @@ function trackEditorDisposable(disposable) {
   return disposable;
 }
 
+/** 由 onDidChangeModelContent 调用；程序化写入（跟随/读盘对齐）不能算用户改动 */
+function markActiveMonacoEditorUserDirty() {
+  activeEditorUserDirty = true;
+}
+
+function isActiveMonacoEditorUserDirty() {
+  return activeEditorUserDirty;
+}
+
 function isModelBoundToActiveEditors(model) {
   if (!model) return false;
   try {
-    if (activeDiffEditor) {
-      const pair = activeDiffEditor.getModel?.();
-      if (pair && (pair.original === model || pair.modified === model)) return true;
-    }
     if (activeEditor && activeEditor.getModel?.() === model) return true;
   } catch {
     // ignore
@@ -864,12 +434,6 @@ function isModelBoundToActiveEditors(model) {
 function detachModelFromActiveEditors(model) {
   if (!model || !isModelBoundToActiveEditors(model)) return;
   try {
-    if (activeDiffEditor) {
-      const pair = activeDiffEditor.getModel?.();
-      if (pair && (pair.original === model || pair.modified === model)) {
-        activeDiffEditor.setModel(null);
-      }
-    }
     if (activeEditor && activeEditor.getModel?.() === model) {
       activeEditor.setModel(null);
     }
@@ -889,6 +453,37 @@ function safeDisposeMonacoModel(model) {
   }
 }
 
+function touchArtifactModelLRU(uriKey, model) {
+  if (!uriKey || !model) return;
+  artifactModelLRU.delete(uriKey);
+  artifactModelLRU.set(uriKey, { model });
+}
+
+/** 超出上限时淘汰最久未使用的模型；仍被编辑器使用的模型不释放 */
+function evictArtifactModelsIfNeeded() {
+  let overflow = artifactModelLRU.size - MONACO_MODEL_LRU_MAX;
+  if (overflow <= 0) return;
+  for (const key of Array.from(artifactModelLRU.keys())) {
+    if (overflow <= 0) break;
+    const entry = artifactModelLRU.get(key);
+    if (!entry) continue;
+    if (isModelBoundToActiveEditors(entry.model)) continue;
+    artifactModelLRU.delete(key);
+    safeDisposeMonacoModel(entry.model);
+    overflow -= 1;
+  }
+}
+
+/** 切换工作区 / 清空产物时释放全部缓存模型（仍被编辑器使用的不动） */
+function resetArtifactModelCache() {
+  for (const entry of artifactModelLRU.values()) {
+    if (!entry || !entry.model) continue;
+    if (isModelBoundToActiveEditors(entry.model)) continue;
+    safeDisposeMonacoModel(entry.model);
+  }
+  artifactModelLRU.clear();
+}
+
 async function runMonacoMountTask(task) {
   if (monacoMountInFlight) await monacoMountInFlight;
   const job = task();
@@ -900,33 +495,22 @@ async function runMonacoMountTask(task) {
   }
 }
 
+/**
+ * 让出一帧给 Monaco 完成布局。
+ * 必须带超时兜底：窗口隐藏/最小化时 rAF 会被暂停，裸 requestAnimationFrame 会让
+ * 挂载任务永久挂起（monacoMountInFlight 不释放），后续打开任何文件都永远排队。
+ */
 function yieldToMonacoLayout() {
-  return new Promise((resolve) => requestAnimationFrame(resolve));
-}
-
-/** Monaco stamps a context attribute on the container; innerHTML clear is not enough to remount. */
-function clearMonacoHostContext(hostEl) {
-  if (!hostEl) return;
-  try {
-    hostEl.innerHTML = '';
-    for (const name of hostEl.getAttributeNames()) {
-      if (/context|monaco/i.test(name)) hostEl.removeAttribute(name);
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function freshMonacoDiffHost(hostEl) {
-  if (!hostEl) return hostEl;
-  if (!hostEl.parentNode) {
-    clearMonacoHostContext(hostEl);
-    return hostEl;
-  }
-  const next = document.createElement('div');
-  next.className = hostEl.className;
-  hostEl.parentNode.replaceChild(next, hostEl);
-  return next;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(finish);
+    setTimeout(finish, 120);
+  });
 }
 
 function disposeStandaloneEditor(editor) {
@@ -936,57 +520,6 @@ function disposeStandaloneEditor(editor) {
     editor.dispose();
   } catch {
     // ignore
-  }
-}
-
-async function waitForDiffEditorIdle(diffEditor, timeoutMs = 120) {
-  if (!diffEditor) return;
-  try {
-    if (typeof diffEditor.waitForDiff === 'function') {
-      await Promise.race([
-        diffEditor.waitForDiff(),
-        new Promise((resolve) => setTimeout(resolve, timeoutMs))
-      ]);
-    }
-  } catch {
-    // ignore — diff may already be torn down
-  }
-  await yieldToMonacoLayout();
-  await yieldToMonacoLayout();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-async function disposeActiveDiffEditor() {
-  const diffEditor = activeDiffEditor;
-  const hostEl = activeDiffHostEl;
-  disposeReviewDiffPaintListener();
-  clearReviewDiffLineNumberPaint();
-  activeDiffEditor = null;
-  activeDiffModels = null;
-
-  if (!diffEditor) return;
-
-  await waitForDiffEditorIdle(diffEditor);
-
-  try {
-    diffEditor.setModel(null);
-  } catch {
-    // ignore
-  }
-
-  await yieldToMonacoLayout();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  try {
-    diffEditor.dispose();
-  } catch {
-    // ignore
-  }
-
-  if (hostEl?.parentNode) {
-    freshMonacoDiffHost(hostEl);
-  } else if (hostEl) {
-    clearMonacoHostContext(hostEl);
   }
 }
 
@@ -1005,30 +538,16 @@ async function disposeMonacoArtifactEditor() {
 
 async function disposeMonacoArtifactEditorCore() {
   clearGotoLineFlash();
-  clearReviewDiffLineNumberPaint();
-  cancelDiffHunkAnimation();
+  clearLiveWriteLineDecoration();
   clearActiveEditorDisposables();
-  lastDiffVisualMode = null;
   lastWritingDecorationLine = 0;
   if (syncTimer) {
     clearTimeout(syncTimer);
     syncTimer = null;
   }
-  const staleDiffHost = activeDiffHostEl;
-  if (activeFilePath && !activeDiffEditor) {
+  if (activeFilePath) {
     void syncLspDocument(activeFilePath, '', { close: true });
   }
-  if (activeDiffEditor) {
-    await disposeActiveDiffEditor();
-  } else {
-    activeDiffModels = null;
-    if (staleDiffHost) {
-      clearMonacoHostContext(staleDiffHost);
-      if (staleDiffHost.parentNode) freshMonacoDiffHost(staleDiffHost);
-    }
-  }
-  activeDiffHostEl = null;
-  setDiffHostWritingState(false);
   if (activeEditor) {
     disposeStandaloneEditor(activeEditor);
     activeEditor = null;
@@ -1036,6 +555,8 @@ async function disposeMonacoArtifactEditorCore() {
   activeHandle = null;
   activeFilePath = null;
   editorSelection = null;
+  activeEditorUserDirty = false;
+  if (typeof resetArtifactFollowState === 'function') resetArtifactFollowState();
   if (window.diecloud && typeof window.diecloud.setComponentInUse === 'function') {
     window.diecloud.setComponentInUse('monaco-editor', false);
   }
@@ -1048,147 +569,43 @@ function isAppDarkTheme() {
   return document.documentElement.getAttribute('data-theme') !== 'light';
 }
 
-function readCssVar(name, fallback) {
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return v || fallback;
-}
-
-function buildDieyunMonacoColors(quietDiff = false, reviewMode = false) {
-  // [排查中] Monaco 选区红底问题：自定义主题配色全部拆除（含选区/diff 覆盖色），
-  // 编辑器退回官方 vs / vs-dark 原始配色；排查结束后再决定恢复方式
+/**
+ * Monaco 主题：自定义配色表已拆除（Monaco 选区红底排查时清空，见 git 历史），
+ * 统一走官方 vs / vs-dark 基底；保留函数是为了让主题调用点稳定。
+ */
+function buildDieyunMonacoColors() {
   return {};
-  const dark = isAppDarkTheme();
-  const editorBg = readCssVar('--monaco-editor-bg', 'transparent');
-  const overviewMarker = readCssVar(
-    '--monaco-overview-ruler-color',
-    dark ? 'rgba(154, 160, 192, 0.42)' : 'rgba(100, 116, 139, 0.38)'
-  );
-  const overviewTrack = readCssVar('--monaco-overview-ruler-track', 'transparent');
-  const borderColor = readCssVar('--border', dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.08)');
-  const lineHighlight = dark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.025)';
-  const gotoLineBg = readCssVar(
-    '--monaco-goto-line-bg',
-    dark ? 'rgba(96, 165, 250, 0.08)' : 'rgba(59, 130, 246, 0.07)'
-  );
-  const base = {
-    'editor.background': editorBg === 'transparent' ? '#00000000' : editorBg,
-    'editor.foreground': readCssVar('--text', dark ? '#e6e8f5' : '#111827'),
-    'editorLineNumber.foreground': readCssVar('--text-mute', dark ? '#6b7196' : '#6b7280'),
-    'editorLineNumber.activeForeground': readCssVar('--text-dim', dark ? '#9aa0c0' : '#374151'),
-    'editor.selectionBackground': dark ? 'rgba(190, 194, 202, 0.22)' : 'rgba(0, 0, 0, 0.1)',
-    'editor.inactiveSelectionBackground': dark ? 'rgba(190, 194, 202, 0.1)' : 'rgba(0, 0, 0, 0.05)',
-    'editorCursor.foreground': readCssVar('--accent-2', dark ? '#e2e4e8' : '#111827'),
-    'editor.lineHighlightBackground': lineHighlight,
-    'editor.lineHighlightBorder': '#00000000',
-    'editor.rangeHighlightBackground': gotoLineBg,
-    'editor.selectionHighlightBackground': gotoLineBg,
-    'editor.wordHighlightBackground': gotoLineBg,
-    'editor.wordHighlightStrongBackground': gotoLineBg,
-    // Monaco 默认 find / snippet 为亮黄框，改为黑白灰描边
-    'editor.findMatchBackground': dark ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.1)',
-    'editor.findMatchBorder': dark ? 'rgba(255, 255, 255, 0.45)' : 'rgba(0, 0, 0, 0.35)',
-    'editor.findMatchHighlightBackground': dark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)',
-    'editor.findMatchHighlightBorder': dark ? 'rgba(255, 255, 255, 0.22)' : 'rgba(0, 0, 0, 0.18)',
-    'editor.findRangeHighlightBackground': gotoLineBg,
-    'editor.snippetTabstopHighlightBackground': dark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.06)',
-    'editor.snippetTabstopHighlightBorder': dark ? 'rgba(255, 255, 255, 0.35)' : 'rgba(0, 0, 0, 0.28)',
-    'editor.snippetFinalTabstopHighlightBackground': dark ? 'rgba(255, 255, 255, 0.14)' : 'rgba(0, 0, 0, 0.08)',
-    'editor.snippetFinalTabstopHighlightBorder': dark ? 'rgba(255, 255, 255, 0.45)' : 'rgba(0, 0, 0, 0.35)',
-    'editorBracketMatch.background': dark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.04)',
-    'editorBracketMatch.border': dark ? 'rgba(255, 255, 255, 0.35)' : 'rgba(0, 0, 0, 0.28)',
-    'editorWidget.background': readCssVar('--bg-elev', dark ? '#121212' : '#ffffff'),
-    'editorWidget.border': borderColor,
-    'focusBorder': '#00000000',
-    'contrastBorder': '#00000000',
-    'contrastActiveBorder': '#00000000',
-    'scrollbarSlider.background': readCssVar('--scrollbar-thumb', 'rgba(128,128,128,0.25)'),
-    'scrollbarSlider.hoverBackground': readCssVar('--scrollbar-thumb-hover', 'rgba(128,128,128,0.4)'),
-    'scrollbarSlider.activeBackground': readCssVar('--scrollbar-thumb-hover', 'rgba(128,128,128,0.4)'),
-    'editorOverviewRuler.background': overviewTrack === 'transparent' ? '#00000000' : overviewTrack,
-    'editorOverviewRuler.border': '#00000000',
-    'editorOverviewRuler.errorForeground': overviewMarker,
-    'editorOverviewRuler.warningForeground': overviewMarker,
-    'editorOverviewRuler.infoForeground': overviewMarker,
-    'editorOverviewRuler.findMatchForeground': overviewMarker,
-    'editorOverviewRuler.rangeHighlightForeground': overviewMarker,
-    'editorOverviewRuler.selectionHighlightForeground': overviewMarker,
-    'editorOverviewRuler.wordHighlightForeground': overviewMarker,
-    'editorOverviewRuler.wordHighlightStrongForeground': overviewMarker,
-    'editorOverviewRuler.modifiedForeground': overviewMarker,
-    'editorOverviewRuler.addedForeground': overviewMarker,
-    'editorOverviewRuler.deletedForeground': overviewMarker,
-    'diffEditor.border': dark ? '#ffffff14' : '#00000014',
-    'diffEditor.insertedTextBorder': '#00000000',
-    'diffEditor.removedTextBorder': '#00000000',
-    'panel.background': readCssVar('--bg-elev', dark ? '#121212' : '#ffffff'),
-    'sideBar.background': readCssVar('--bg-elev', dark ? '#121212' : '#ffffff')
-  };
-  if (quietDiff) {
-    return {
-      ...base,
-      'diffEditor.insertedLineBackground': '#00000000',
-      'diffEditor.removedLineBackground': '#00000000',
-      'diffEditor.insertedTextBackground': '#00000000',
-      'diffEditor.removedTextBackground': '#00000000',
-      'diffEditorGutter.insertedLineBackground': '#00000000',
-      'diffEditorGutter.removedLineBackground': '#00000000',
-      'diffEditor.diagonalFill': '#00000000'
-    };
-  }
-  if (reviewMode) {
-    // Cursor-like: faint whole-line tint + slightly stronger char-level highlight; delete/insert symmetric
-    return {
-      ...base,
-      'diffEditor.insertedLineBackground': dark ? '#3fb9500a' : '#16a34a08',
-      'diffEditor.removedLineBackground': dark ? '#f851490a' : '#dc262608',
-      'diffEditor.insertedTextBackground': dark ? '#3fb95018' : '#16a34a14',
-      'diffEditor.removedTextBackground': dark ? '#f8514918' : '#dc262614',
-      'diffEditor.diagonalFill': dark ? '#ffffff06' : '#00000004',
-      'diffEditorGutter.insertedLineBackground': dark ? '#3fb95033' : '#16a34a28',
-      'diffEditorGutter.removedLineBackground': dark ? '#f8514933' : '#dc262628'
-    };
-  }
-  return {
-    ...base,
-    'diffEditor.insertedLineBackground': dark ? '#22c55e05' : '#16a34a04',
-    'diffEditor.removedLineBackground': dark ? '#ef444405' : '#dc262604',
-    'diffEditor.insertedTextBackground': dark ? '#3fb95012' : '#16a34a10',
-    'diffEditor.removedTextBackground': dark ? '#f8514912' : '#dc262610'
-  };
 }
 
-function ensureDieyunMonacoThemes(monaco, quietDiff = false, reviewMode = false) {
-  const colors = buildDieyunMonacoColors(quietDiff, reviewMode);
-  let themeId = isAppDarkTheme() ? 'dieyun-dark' : 'dieyun-light';
-  if (quietDiff) themeId = 'dieyun-diff-quiet';
-  else if (reviewMode) themeId = 'dieyun-diff-review';
+function ensureDieyunMonacoThemes(monaco) {
+  const themeId = isAppDarkTheme() ? 'dieyun-dark' : 'dieyun-light';
   const base = isAppDarkTheme() ? 'vs-dark' : 'vs';
   monaco.editor.defineTheme(themeId, {
     base,
     inherit: true,
     rules: [],
-    colors
+    colors: buildDieyunMonacoColors()
   });
-  if (!quietDiff && !reviewMode && !dieyunMonacoThemesReady) {
+  if (!dieyunMonacoThemesReady) {
     monaco.editor.defineTheme('dieyun-dark', {
       base: 'vs-dark',
       inherit: true,
       rules: [],
-      colors: buildDieyunMonacoColors(false, false)
+      colors: buildDieyunMonacoColors()
     });
     monaco.editor.defineTheme('dieyun-light', {
       base: 'vs',
       inherit: true,
       rules: [],
-      colors: buildDieyunMonacoColors(false, false)
+      colors: buildDieyunMonacoColors()
     });
     dieyunMonacoThemesReady = true;
   }
   return themeId;
 }
 
-function applyDieyunMonacoTheme(monaco, quietDiff = false, reviewMode = false) {
-  const themeId = ensureDieyunMonacoThemes(monaco, quietDiff, reviewMode);
+function applyDieyunMonacoTheme(monaco) {
+  const themeId = ensureDieyunMonacoThemes(monaco);
   if (lastDieyunMonacoThemeId === themeId) return themeId;
   lastDieyunMonacoThemeId = themeId;
   monaco.editor.setTheme(themeId);
@@ -1199,9 +616,7 @@ function refreshDieyunMonacoTheme() {
   if (!window.monaco) return;
   dieyunMonacoThemesReady = false;
   lastDieyunMonacoThemeId = null;
-  const quiet = activeDiffHostEl?.classList.contains('is-diff-writing');
-  const review = activeDiffHostEl?.classList.contains('is-diff-review');
-  applyDieyunMonacoTheme(window.monaco, quiet, review && !quiet);
+  applyDieyunMonacoTheme(window.monaco);
 }
 
 function applyMonacoEditorChromeOptions(editor) {
@@ -1230,33 +645,14 @@ function applyMonacoEditorChromeOptions(editor) {
   });
 }
 
-/** 移除/隐藏 Monaco overview ruler（变更区左右对比里会误显示为粗红条） */
-function stripMonacoOverviewRuler(hostEl) {
-  if (!hostEl) return;
-  hostEl.querySelectorAll('.decorationsOverviewRuler, .overview-ruler').forEach((el) => {
-    el.style.display = 'none';
-    el.style.width = '0';
-    el.style.height = '0';
-    el.style.opacity = '0';
-    el.style.pointerEvents = 'none';
-  });
-}
-
-function applyMonacoDiffEditorChromeOptions(diffEditor) {
-  if (!diffEditor) return;
-  applyMonacoEditorChromeOptions(diffEditor.getOriginalEditor?.());
-  applyMonacoEditorChromeOptions(diffEditor.getModifiedEditor?.());
-}
-
 function normalizeArtifactModelPath(filePath) {
   const raw = String(filePath || '').trim().replace(/\\/g, '/');
   if (!raw) return '/untitled';
   return '/' + raw.replace(/^\/+/, '').replace(/\/+/g, '/');
 }
 
-function artifactModelUri(monaco, filePath, suffix) {
-  let path = normalizeArtifactModelPath(filePath);
-  if (suffix) path += `~${suffix}`;
+function artifactModelUri(monaco, filePath) {
+  const path = normalizeArtifactModelPath(filePath);
   return monaco.Uri.from({ scheme: 'inmemory', authority: 'dieyun', path });
 }
 
@@ -1283,58 +679,30 @@ function configureMonacoArtifactLanguages(monaco) {
 
 function createOrReplaceMonacoModel(monaco, uri, text, lang) {
   const nextText = String(text ?? '');
+  const uriKey = uri && typeof uri.toString === 'function' ? uri.toString() : String(uri);
+  let model = null;
   const existing = monaco.editor.getModel(uri);
-  if (!existing) {
-    return monaco.editor.createModel(nextText, lang, uri);
-  }
-  try {
-    if (typeof existing.isDisposed === 'function' && existing.isDisposed()) {
-      return monaco.editor.createModel(nextText, lang, uri);
+  if (existing) {
+    let usable = true;
+    try {
+      usable = !(typeof existing.isDisposed === 'function' && existing.isDisposed());
+    } catch {
+      usable = false;
     }
-  } catch {
-    return monaco.editor.createModel(nextText, lang, uri);
+    if (usable) {
+      detachModelFromActiveEditors(existing);
+      if (existing.getValue() !== nextText) existing.setValue(nextText);
+      model = existing;
+    }
   }
-  detachModelFromActiveEditors(existing);
-  if (existing.getValue() !== nextText) {
-    existing.setValue(nextText);
-  }
-  return existing;
-}
-
-function createMonacoArtifactModel(monaco, filePath, text, lang, suffix) {
-  const uri = artifactModelUri(monaco, filePath, suffix);
-  return createOrReplaceMonacoModel(monaco, uri, text, lang);
-}
-
-function createDiffMonacoModels(monaco, before, after, lang, animate, filePath) {
-  const origUri = artifactModelUri(monaco, filePath, 'original');
-  const modUri = artifactModelUri(monaco, filePath, 'modified');
-  return {
-    original: createOrReplaceMonacoModel(monaco, origUri, before, lang),
-    modified: createOrReplaceMonacoModel(monaco, modUri, animate ? before : after, lang)
-  };
+  if (!model) model = monaco.editor.createModel(nextText, lang, uri);
+  touchArtifactModelLRU(uriKey, model);
+  evictArtifactModelsIfNeeded();
+  return model;
 }
 
 function isMonacoArtifactEditorMounted(filePath) {
-  if (!activeFilePath || !filePath) return false;
-  const same =
-    typeof window.pathsMatch === 'function'
-      ? window.pathsMatch(activeFilePath, filePath)
-      : normMonacoFilePath(activeFilePath) === normMonacoFilePath(filePath);
-  if (!same) return false;
-  if (activeEditor) {
-    const dom = activeEditor.getDomNode?.();
-    return !!(dom && dom.isConnected);
-  }
-  if (activeDiffEditor && activeDiffHostEl) {
-    return activeDiffHostEl.isConnected;
-  }
-  return false;
-}
-
-/** 单栏 after-only 是否已挂好（不含 DiffEditor） */
-function isMonacoAfterOnlyEditorMounted(filePath) {
-  if (activeDiffEditor || !activeEditor || !activeFilePath || !filePath) return false;
+  if (!activeEditor || !activeFilePath || !filePath) return false;
   const same =
     typeof window.pathsMatch === 'function'
       ? window.pathsMatch(activeFilePath, filePath)

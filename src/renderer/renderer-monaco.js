@@ -1,4 +1,4 @@
-/* global window, document, gatewayCall, gwState, updateProblemsPanel, initProblemsPanel, refreshWorkspaceProblemsPanel, getAgentLimits */
+/* global window, document, gatewayCall, gwState, updateProblemsPanel, initProblemsPanel, refreshWorkspaceProblemsPanel, getAgentLimits, activeEditorUserDirty, markActiveMonacoEditorUserDirty, isActiveMonacoEditorUserDirty, resetArtifactFollowState, resetArtifactModelCache */
 'use strict';
 
 
@@ -40,8 +40,11 @@ async function createMonacoArtifactEditor(hostEl, opts) {
   rememberOpenTab(opts.filePath);
   updateEditorSelection(editor, opts.filePath);
 
+  activeEditorUserDirty = false;
   trackEditorDisposable(
     editor.onDidChangeModelContent(() => {
+      // 程序化写入（写入跟随 / 读盘对齐）不算用户改动，否则跟随会误判为「用户已编辑」而停止
+      if (!editor._dieyunProgEdit) markActiveMonacoEditorUserDirty();
       scheduleLspSync(opts.filePath, () => editor.getValue());
     })
   );
@@ -50,10 +53,6 @@ async function createMonacoArtifactEditor(hostEl, opts) {
       updateEditorSelection(editor, opts.filePath);
     })
   );
-
-  const r = await syncLspDocument(opts.filePath, opts.text || '');
-  applyDiagnosticsToEditor(editor, opts.filePath, r ? r.diagnostics || [] : []);
-  applyMonacoEditorChromeOptions(editor);
 
   activeHandle = {
     getValue: () => editor.getValue(),
@@ -71,111 +70,26 @@ async function createMonacoArtifactEditor(hostEl, opts) {
   if (typeof wireMonacoEditorSelectionDrag === 'function') {
     wireMonacoEditorSelectionDrag(editor);
   }
-  return activeHandle;
-  });
-}
 
-async function createMonacoArtifactDiffEditor(hostEl, opts) {
-  return runMonacoMountTask(async () => {
-  await disposeMonacoArtifactEditor();
-  await yieldToMonacoLayout();
-  if (window.diecloud && typeof window.diecloud.setComponentInUse === 'function') {
-    window.diecloud.setComponentInUse('monaco-editor', true);
-  }
-  const monaco = await loadMonaco();
-  if (!hostEl?.isConnected && !hostEl?.parentNode) return null;
-  hostEl = freshMonacoDiffHost(hostEl);
-  activeDiffHostEl = hostEl;
-  const reviewMode = !!opts.reviewMode;
-  hostEl.classList.toggle('is-diff-review', reviewMode);
-  applyDieyunMonacoTheme(monaco, false, reviewMode);
-  const lang = guessMonacoLanguage(opts.filePath);
-  const before = String(opts.beforeText != null ? opts.beforeText : '');
-  const after = String(opts.afterText != null ? opts.afterText : '');
-  const wide = hostEl.clientWidth >= 820;
-
-  const diffEditor = monaco.editor.createDiffEditor(hostEl, {
-    automaticLayout: true,
-    readOnly: true,
-    renderSideBySide: reviewMode ? false : wide,
-    useInlineViewWhenSpaceIsLimited: true,
-    renderSideBySideInlineBreakpoint: reviewMode ? 99999 : 820,
-    renderIndicators: true,
-    minimap: { enabled: false },
-    scrollBeyondLastLine: false,
-    fontSize: 13,
-    lineNumbers: 'on',
-    wordWrap: 'on',
-    tabSize: 2,
-    padding: { top: 8, bottom: 8 },
-    renderOverviewRuler: false,
-    overviewRulerLanes: 0,
-    hideCursorInOverviewRuler: true,
-    diffAlgorithm: 'advanced'
-  });
-
-  const animate = shouldAnimateMonacoDiff(before, after, opts);
-  const { original, modified } = createDiffMonacoModels(monaco, before, after, lang, animate, opts.filePath);
-  diffEditor.setModel({ original, modified });
-  applyMonacoDiffEditorChromeOptions(diffEditor);
-
-  activeDiffEditor = diffEditor;
-  activeDiffModels = { original, modified, filePath: opts.filePath };
-  activeEditor = null;
-  activeFilePath = opts.filePath;
-  rememberOpenTab(opts.filePath);
-
-  activeHandle = {
-    getValue: () => modified.getValue(),
-    dispose: () => disposeMonacoArtifactEditor(),
-    revealLine: (line, col) => {
-      const modifiedEditor = diffEditor.getModifiedEditor?.();
-      applyMonacoGotoLine(modifiedEditor, line, col);
-    }
-  };
-
-  if (animate) {
-    startDiffHunkAnimation(before, after, { ...opts, filePath: opts.filePath, revealLastChange: false });
-  } else if (opts.liveWriting) {
-    applyMonacoDiffVisualMode('writing');
-    const modifiedEditor = diffEditor.getModifiedEditor?.();
-    if (opts.focusLine && modifiedEditor) {
-      const ln = Math.max(1, Number(opts.focusLine) || 1);
-      modifiedEditor.revealLineInCenterIfOutsideViewport(ln);
-      setDiffWritingDecoration(modifiedEditor, monaco, ln);
-    }
-  } else {
-    applyMonacoDiffVisualMode('done');
-    if (opts.revealLastChange) {
-      const listener = diffEditor.onDidUpdateDiff(() => {
-        listener.dispose();
-        runWhenDiffReady(diffEditor, () => {
-          revealLastDiffChange(diffEditor);
-          paintCursorReviewDiffLineNumbers(diffEditor);
-        });
-      });
-    } else if (reviewMode) {
-      scheduleCursorReviewDiffLineNumberPaint(diffEditor);
-    } else if (opts.focusLine) {
-      const ln = Math.max(1, Number(opts.focusLine) || 1);
-      const modifiedEditor = diffEditor.getModifiedEditor?.();
-      if (modifiedEditor) modifiedEditor.revealLineInCenter(ln);
-    }
-  }
-
-  flushPendingGotoLine();
-
-  if (typeof wireMonacoEditorSelectionDrag === 'function') {
-    wireMonacoEditorSelectionDrag(diffEditor.getOriginalEditor());
-    wireMonacoEditorSelectionDrag(diffEditor.getModifiedEditor());
-  }
+  // LSP 同步是慢路径（首次可能要等语言服务器就绪，超时 8s），绝不能留在挂载任务里：
+  // runMonacoMountTask 串行执行，一旦被它占住，用户之后每次打开文件都要排在后面等超时
+  // —— 表现就是「点了文件只见标题栏、内容空白很久」。编辑器挂载本身是同步的，
+  // 这里返回后内容立即可见，诊断稍后补上。
+  void syncLspDocument(opts.filePath, opts.text || '')
+    .then((r) => {
+      if (activeEditor !== editor) return; // 已切走，丢弃过期诊断
+      applyDiagnosticsToEditor(editor, opts.filePath, r ? r.diagnostics || [] : []);
+      applyMonacoEditorChromeOptions(editor);
+    })
+    .catch(() => {
+      // LSP 不可用不影响编辑器内容展示
+    });
 
   return activeHandle;
   });
 }
 
 function updateMonacoArtifactEditorText(filePath, text, opts) {
-  if (activeDiffEditor) return false;
   if (!activeEditor) return false;
   const sameFile =
     typeof window.pathsMatch === 'function'
@@ -213,26 +127,6 @@ function flushPendingGotoLine() {
     pendingGotoLine = null;
     activeHandle.revealLine(line, col);
   }
-}
-
-function revealLastDiffChange(diffEditor) {
-  if (!diffEditor) return;
-  const modifiedEditor = diffEditor.getModifiedEditor?.();
-  if (!modifiedEditor) return;
-  try {
-    const changes = safeGetLineChanges(diffEditor);
-    if (changes.length) {
-      const last = changes[changes.length - 1];
-      const line = Math.max(1, last.modifiedEndLineNumber || last.modifiedStartLineNumber || 1);
-      modifiedEditor.revealLineInCenter(line);
-      return;
-    }
-  } catch {
-    // ignore
-  }
-  const model = modifiedEditor.getModel?.();
-  const fallback = Math.max(1, model?.getLineCount?.() ?? 1);
-  modifiedEditor.revealLineInCenter(fallback);
 }
 
 function normMonacoFilePath(p) {
@@ -309,70 +203,21 @@ function setMonacoModelText(model, nextText, opts) {
   const incremental = !!(opts && opts.incremental);
   const appendOnly = !!(opts && opts.appendOnly);
   const monaco = window.monaco;
-  if (incremental && monaco) {
-    const result = applyMonacoModelTextIncremental(model, next, monaco, { appendOnly });
-    if (result === 'ok' || result === 'same') return result === 'ok';
-    if (result === 'skipped') return false;
+  const editor = activeEditor;
+  // 标记为程序化编辑：Monaco 的 model 变更事件同步派发，finally 里立即复位
+  if (editor) editor._dieyunProgEdit = true;
+  try {
+    if (incremental && monaco) {
+      const result = applyMonacoModelTextIncremental(model, next, monaco, { appendOnly });
+      if (result === 'ok' || result === 'same') return result === 'ok';
+      if (result === 'skipped') return false;
+    }
+    if (appendOnly) return false;
+    model.setValue(next);
+    return true;
+  } finally {
+    if (editor) editor._dieyunProgEdit = false;
   }
-  if (appendOnly) return false;
-  model.setValue(next);
-  return true;
-}
-
-async function updateMonacoArtifactDiffEditor(opts) {
-  if (monacoMountInFlight) {
-    try {
-      await monacoMountInFlight;
-    } catch {
-      // ignore failed mount; fall through to retry
-    }
-  }
-
-  const filePath = String(opts.filePath || '');
-  const before = String(opts.beforeText != null ? opts.beforeText : '');
-  const after = String(opts.afterText != null ? opts.afterText : '');
-
-  const sameFile =
-    typeof window.pathsMatch === 'function'
-      ? window.pathsMatch(activeDiffModels?.filePath, filePath)
-      : normMonacoFilePath(activeDiffModels?.filePath) === normMonacoFilePath(filePath);
-
-  const hostConnected = !!(opts.hostEl && opts.hostEl.isConnected);
-  const hostMatchesActive =
-    hostConnected && activeDiffHostEl && opts.hostEl === activeDiffHostEl;
-
-  if (activeDiffEditor && activeDiffModels && sameFile && activeDiffModels.original && activeDiffModels.modified) {
-    if (!hostMatchesActive && hostConnected) {
-      return createMonacoArtifactDiffEditor(freshMonacoDiffHost(opts.hostEl), opts);
-    }
-    const updateOpts = { ...opts, animate: false };
-    const animatingSameTarget =
-      diffAnimState &&
-      diffAnimState.filePath &&
-      normMonacoFilePath(diffAnimState.filePath) === normMonacoFilePath(filePath) &&
-      diffAnimState.targetAfter === after;
-
-    if (updateOpts.revealLastChange || updateOpts.animate === false) {
-      snapMonacoDiffModels(before, after, { ...updateOpts, incremental: true });
-      return activeHandle;
-    }
-
-    if (animatingSameTarget) {
-      activeDiffModels.original.setValue(before);
-      return activeHandle;
-    }
-
-    if (shouldAnimateMonacoDiff(before, after, updateOpts)) {
-      startDiffHunkAnimation(before, after, { ...updateOpts, filePath });
-      return activeHandle;
-    }
-
-    snapMonacoDiffModels(before, after, { ...updateOpts, incremental: true });
-    return activeHandle;
-  }
-
-  if (!opts.hostEl) return null;
-  return createMonacoArtifactDiffEditor(opts.hostEl, opts);
 }
 
 function revealMonacoLine(line, col) {
@@ -388,31 +233,23 @@ function revealMonacoLine(line, col) {
     applyMonacoGotoLine(activeEditor, ln, cn);
     return;
   }
-  if (activeDiffEditor) {
-    pendingGotoLine = null;
-    applyMonacoGotoLine(activeDiffEditor.getModifiedEditor?.(), ln, cn);
-    return;
-  }
   pendingGotoLine = { line: ln, col: cn };
 }
 
-window.createMonacoArtifactModel = createMonacoArtifactModel;
 window.loadMonaco = loadMonaco;
 window.canUseMonacoEditor = canUseMonacoEditor;
 window.refreshDieyunMonacoTheme = refreshDieyunMonacoTheme;
 window.createMonacoArtifactEditor = createMonacoArtifactEditor;
-window.createMonacoArtifactDiffEditor = createMonacoArtifactDiffEditor;
-window.updateMonacoArtifactDiffEditor = updateMonacoArtifactDiffEditor;
 window.updateMonacoArtifactEditorText = updateMonacoArtifactEditorText;
 window.applyMonacoModelTextIncremental = applyMonacoModelTextIncremental;
 window.setMonacoModelText = setMonacoModelText;
 window.disposeMonacoArtifactEditor = disposeMonacoArtifactEditor;
-window.stripMonacoOverviewRuler = stripMonacoOverviewRuler;
 window.revealMonacoLine = revealMonacoLine;
 window.getMonacoEditorHandle = () => activeHandle;
+window.isActiveMonacoEditorUserDirty = isActiveMonacoEditorUserDirty;
 window.isMonacoArtifactEditorMounted = isMonacoArtifactEditorMounted;
-window.isMonacoAfterOnlyEditorMounted = isMonacoAfterOnlyEditorMounted;
 window.isMonacoMountInFlight = isMonacoMountInFlight;
+window.resetArtifactModelCache = resetArtifactModelCache;
 window.getMonacoEditorContext = getMonacoEditorContext;
 window.getMonacoEditorContextPaths = getMonacoEditorContextPaths;
 window.getCachedMonacoDiagnostics = getCachedDiagnosticsForPaths;

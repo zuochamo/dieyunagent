@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, loopApi, settings, gwState, chatCompletionWithToolsViaRust, isDieyunCoreReady, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, getSessionAbortSignal, throwIfAgentAborted, waitForAgentAbortable, createAgentAbortError, renderAssistantBubbleContent, getPlannerBestOfN, applyContextCompaction, noteContextCompaction, getEffectiveInputBudget, getAgentToolCallLimit, getAgentMaxRounds, getComposerLongHorizon, LONG_HORIZON_MAX_SEGMENTS, buildAgentSegmentContinuePartial, pauseAgentForToolLimit, pauseAgentForNetworkDisconnect, shouldPauseForNetworkDisconnect, clearAgentContinueState, setAgentContinueState, showAgentToast, formatToolArgsBrief, summarizeToolResult, reprojectContinueLoopMessages, refreshTurnRideFromArchive */
+/* global sessionActiveRuns, currentSessionId, loopApi, settings, gwState, chatCompletionWithToolsViaRust, isDieyunCoreReady, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, getSessionAbortSignal, throwIfAgentAborted, waitForAgentAbortable, createAgentAbortError, renderAssistantBubbleContent, getPlannerBestOfN, applyContextCompaction, noteContextCompaction, getEffectiveInputBudget, getAgentToolCallLimit, getAgentMaxRounds, getComposerLongHorizon, LONG_HORIZON_MAX_SEGMENTS, buildAgentSegmentContinuePartial, pauseAgentForToolLimit, pauseAgentForNetworkDisconnect, shouldPauseForNetworkDisconnect, clearAgentContinueState, setAgentContinueState, showAgentToast, formatToolArgsBrief, summarizeToolResult, reprojectContinueLoopMessages, refreshTurnRideFromArchive, scheduleArtifactsUiRefresh, schedulePlanWorktreeChangesRefresh, renderChangesPane, trackArtifactsFromTrace, maybeSaveRunningTraceCheckpoint, setSessionLastTrace, setAgentExecutionContext, createTraceRunId, updateSessionRunProgress, mergeRetryTrace, getSessionChangeRowsForAgent */
 'use strict';
 
 async function reprojectContinueFromBody(continueFrom, payload, runOpts, runSessionId) {
@@ -78,22 +78,13 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
       if (planVisible) window.syncPlanPreviewFromPlan(plan);
     }
     const artifactVisible = String(runSessionId) === String(currentSessionId || '');
-    const rowCountBefore =
-      typeof getSessionChangeRowsForAgent === 'function'
-        ? getSessionChangeRowsForAgent(runSessionId).length
-        : 0;
     if (typeof trackArtifactsFromTrace === 'function') {
       trackArtifactsFromTrace(mergedTrace, { sessionId: runSessionId });
     }
-    const rowCountAfter =
-      typeof getSessionChangeRowsForAgent === 'function'
-        ? getSessionChangeRowsForAgent(runSessionId).length
-        : 0;
-    if (artifactVisible && typeof renderChangesPane === 'function') {
-      renderChangesPane(rowCountAfter !== rowCountBefore ? undefined : { soft: true });
-    }
-    if (artifactVisible && typeof window.schedulePlanWorktreeChangesRefresh === 'function') {
-      window.schedulePlanWorktreeChangesRefresh();
+    // 产物/变更面板刷新统一走节流调度器：思考流只排 light，避免每次 progress
+    // 都 renderChangesPane + 强制 list_dir，把主线程和 Gateway 占满。
+    if (artifactVisible && typeof scheduleArtifactsUiRefresh === 'function') {
+      scheduleArtifactsUiRefresh('light');
     }
     if (typeof schedulePlanWorktreeChangesRefresh === 'function') {
       schedulePlanWorktreeChangesRefresh();

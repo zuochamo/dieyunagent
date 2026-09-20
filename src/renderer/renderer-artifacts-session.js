@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, createMonacoArtifactDiffEditor, updateMonacoArtifactDiffEditor, disposeMonacoArtifactEditor, createMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText, applyWorkspaceArtifactPath */
+/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, disposeMonacoArtifactEditor, createMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText, applyWorkspaceArtifactPath, renderArtifactsList, artifactViewHasPreview, resetArtifactFollowState, resetArtifactModelCache, revokeArtifactMediaBlobUrls, resolveArtifactPathInWorkspace, loadArtifactContent, markArtifactPathTranslated, getArtifactPathTranslation, clearArtifactPathTranslation */
 'use strict';
 
 var artifactsApi = window.diecloud || {};
@@ -44,12 +44,58 @@ var sessionFileChangeTotals = { files: 0, added: 0, removed: 0 };
 var selectedArtifactPath = null;
 /** 当前预览内容对应的磁盘 mtime（ms）；用于判断是否需重载 */
 var selectedArtifactContentMtime = 0;
+
+/**
+ * 「路径翻译」记录：被权威解析（Gateway 在远程匹配出来的候选）打开的路径 → 原始输入。
+ *
+ * 只有两个用途：编辑器顶部提示条、保存前的二次确认。
+ * 为什么需要确认：这条路径是**系统替用户做的决定**（不是他点的那个文件），
+ * 而保存会写向真实远端 —— 写错了不可逆。用户自己从候选里点选的也记一笔，
+ * 但只有「唯一候选自动打开」这种系统决策会反复提示。
+ */
+var artifactPathTranslations = new Map();
+
+function artifactTranslationKey(filePath) {
+  return typeof normWritePath === 'function'
+    ? normWritePath(filePath)
+    : String(filePath || '').replace(/\\/g, '/').toLowerCase();
+}
+
+function markArtifactPathTranslated(resolvedPath, info) {
+  const key = artifactTranslationKey(resolvedPath);
+  if (!key) return;
+  artifactPathTranslations.set(key, {
+    inputPath: String((info && info.inputPath) || ''),
+    kind: String((info && info.kind) || 'picked')
+  });
+}
+
+function getArtifactPathTranslation(filePath) {
+  const key = artifactTranslationKey(filePath);
+  return key ? artifactPathTranslations.get(key) || null : null;
+}
+
+function clearArtifactPathTranslation(filePath) {
+  const key = artifactTranslationKey(filePath);
+  if (key) artifactPathTranslations.delete(key);
+}
 var artifactsWorkspaceRoot = null;
 var artifactsWorkspaceKind = 'local';
 var artifactsBrowseRel = '';
 var artifactsDirEntries = [];
+/**
+ * 目录条目版本号：entries 整体替换时递增，用于 O(1) 生成列表签名。
+ * 大目录下逐项拼接签名是每拍（80ms）的固定开销，这里改成只比版本号。
+ */
+var artifactsDirEntriesVersion = 0;
 var artifactsDirLoading = false;
 var artifactsDirRefreshPromise = null;
+
+/** entries 的唯一写入口：版本号与内容同步递增，避免漏递增导致列表不刷新 */
+function setArtifactsDirEntries(next) {
+  artifactsDirEntries = Array.isArray(next) ? next : [];
+  artifactsDirEntriesVersion += 1;
+}
 /** 目录刷新代际：切换会话 / invalidate 时递增，丢弃过期 list_dir 结果 */
 var artifactsDirRefreshGen = 0;
 
@@ -82,6 +128,34 @@ function rememberSelectedArtifactContentMtime(filePath) {
   if (m) selectedArtifactContentMtime = m;
 }
 
+/**
+ * 用户手动保存后：磁盘 mtime 已变，但列表里的 ts 还是旧值。
+ * 不对齐的话陈旧判定永远为真（拿 Date.now() 与磁盘 mtime 比），下一次列表刷新会把编辑器
+ * 当成「内容过期」强制重载 —— 滚动位置和光标全部丢失。
+ * 这里从磁盘取一次真实 mtime，并同步列表项，保证同一拍内 stale 判定一致。
+ */
+async function syncSelectedArtifactContentMtimeFromDisk(filePath) {
+  const fp = String(filePath || '').trim();
+  if (!fp) return false;
+  try {
+    const st = await gatewayCall('fs.stat', await artifactRpcParams({ filePath: fp }));
+    const m = Number(st && st.mtimeMs) || 0;
+    if (!m) return false;
+    if (selectedArtifactPath && artifactPathsEqual(selectedArtifactPath, fp)) {
+      selectedArtifactContentMtime = m;
+    }
+    for (const row of artifactsDirEntries || []) {
+      if (row && row.kind === 'file' && artifactPathsEqual(row.path, fp)) {
+        row.ts = m;
+        break;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function syncSelectedArtifactContentMtimeFromList() {
   if (!selectedArtifactPath || selectedArtifactContentMtime) return;
   const m = findArtifactEntryMtime(selectedArtifactPath);
@@ -108,11 +182,8 @@ function maybeReloadSelectedArtifactContent(opts) {
     typeof window.isMonacoArtifactEditorMounted === 'function' &&
     window.isMonacoArtifactEditorMounted(fp);
   const view = document.getElementById('artifacts-file-view');
-  const hasPreview =
-    !!view &&
-    !!view.querySelector(
-      '.artifacts-editor-shell, .monaco-artifact-editor, .monaco-diff-artifact-editor, img.artifacts-image-preview'
-    );
+  // 预览容器判定统一走 artifactViewHasPreview，避免各处选择器写岔（图片/Office shell 不同）
+  const hasPreview = artifactViewHasPreview(view);
   if (!force) {
     if (mounted || hasPreview) {
       if (!diskMtime || diskMtime === selectedArtifactContentMtime) return false;
@@ -152,10 +223,15 @@ function refreshLastRoundFileChanges(trace) {
 function refreshLastRoundFileChangesForSession(trace, sessionId) {
   const raw =
     typeof getLastTraceEntryFileChanges === 'function' ? getLastTraceEntryFileChanges(trace) : [];
-  const changes = raw.map(function (ch) {
-    if (!ch || !ch.path) return ch;
-    return { ...ch, path: applyWorkspaceArtifactPath(ch.path) };
-  });
+  // 不属于当前工作区的路径（例如 SSH 会话里混入的本地盘符路径）不进变更行：
+  // 它在列表里注定打不开，留着只会误导
+  const changes = raw
+    .map(function (ch) {
+      if (!ch || !ch.path) return ch;
+      const resolved = resolveArtifactPathInWorkspace(ch.path);
+      return resolved.ok ? { ...ch, path: resolved.path } : null;
+    })
+    .filter(Boolean);
   const sid = resolveArtifactSessionId(sessionId);
   if (!sid) return;
   const visibleSid = resolveArtifactSessionId();
@@ -384,7 +460,7 @@ function dropArtifactFromWorkspaceFileList(filePath, opts) {
   if (!(opts && opts.keepSession)) {
     removeSessionArtifact(fp);
   }
-  artifactsDirEntries = artifactsDirEntries.filter((row) => !artifactPathsMatch(row.path, fp));
+  setArtifactsDirEntries(artifactsDirEntries.filter((row) => !artifactPathsMatch(row.path, fp)));
   workspaceArtifacts = workspaceArtifacts.filter((row) => !artifactPathsMatch(row.path, fp));
   if (selectedArtifactPath && artifactPathsMatch(selectedArtifactPath, fp)) {
     selectedArtifactPath = null;
@@ -412,7 +488,12 @@ function trackArtifact(fp, meta) {
     const sid = resolveArtifactSessionId(meta && meta.sessionId);
     fp = String(fp || '').trim();
     if (!sid || isVisibleArtifactSession(sid)) {
-      fp = applyWorkspaceArtifactPath(fp);
+      // 解析失败说明它不属于当前工作区（如 SSH 会话里混入了本地盘符路径）：
+      // 不写入产物记录 —— 否则列表里会出现「点开就报错」的条目，
+      // 其路径还会参与 artifactPathsMatch，污染去重与变更匹配。
+      const resolved = resolveArtifactPathInWorkspace(fp);
+      if (!resolved.ok) return;
+      fp = resolved.path;
     }
     if (!fp) return;
     const bucket = getArtifactBucket(sid, true);
@@ -464,8 +545,8 @@ function trackArtifact(fp, meta) {
     }
     if (sid) persistArtifactBucket(sid);
     const skipFlush = !!(meta && meta.skipUiFlush);
-    if (!skipFlush && isVisibleArtifactSession(sid) && isSidePanelOpen()) {
-      scheduleArtifactsUiFlush();
+    if (!skipFlush && isVisibleArtifactSession(sid)) {
+      scheduleArtifactsUiRefresh('light');
     }
   } catch (e) {
     // ignore
@@ -474,11 +555,18 @@ function trackArtifact(fp, meta) {
 
 function cancelArtifactContentLoads() {
   artifactContentLoadGen += 1;
+  artifactContentLoadingPath = '';
+  artifactContentLoadingAt = 0;
 }
 
 /** 切换会话 / 清空产物预览前：先卸 Monaco，再动 DOM，避免 Diff 销毁竞态 */
 async function teardownArtifactsMonacoEditor() {
   cancelArtifactContentLoads();
+  // 图片/PDF 预览的 blob 也必须在这里释放：切会话 / 切工作区 / 清空产物都会走这条路径，
+  // 只在「切换到另一个文件」时 revoke 会让之前看过的媒体字节一直常驻内存。
+  if (typeof revokeArtifactMediaBlobUrls === 'function') {
+    revokeArtifactMediaBlobUrls(document.getElementById('artifacts-file-view'));
+  }
   if (typeof disposeMonacoArtifactEditor === 'function') {
     await disposeMonacoArtifactEditor();
   }
@@ -498,8 +586,9 @@ function clearArtifacts() {
   selectedArtifactPath = null;
   selectedArtifactContentMtime = 0;
   cancelArtifactContentLoads();
-  if (typeof disposeMonacoArtifactEditor === 'function') {
-    void disposeMonacoArtifactEditor();
+  if (typeof resetArtifactFollowState === 'function') resetArtifactFollowState();
+  if (typeof teardownArtifactsMonacoEditor === 'function') {
+    void teardownArtifactsMonacoEditor();
   }
   const sid = resolveArtifactSessionId();
   if (sid) persistGlobalsToArtifactBucket(sid);
@@ -516,12 +605,16 @@ function invalidateWorkspaceArtifacts() {
   artifactsWorkspaceRoot = null;
   artifactsWorkspaceKind = 'local';
   artifactsBrowseRel = '';
-  artifactsDirEntries = [];
+  setArtifactsDirEntries([]);
   artifactsDirLoading = false;
   lastDefaultEditorWorkspaceKey = null;
   lastArtifactsFileListSig = '';
   selectedArtifactContentMtime = 0;
   cancelArtifactContentLoads();
+  if (typeof revokeArtifactMediaBlobUrls === 'function') {
+    revokeArtifactMediaBlobUrls(document.getElementById('artifacts-file-view'));
+  }
+  if (typeof resetArtifactModelCache === 'function') resetArtifactModelCache();
 }
 
 function expectedArtifactsSourceKey(workspacePath, browseRel) {
@@ -554,7 +647,32 @@ var artifactContentLoadGen = 0;
 
 var artifactsUiBatchDepth = 0;
 var artifactsUiBatchDirty = false;
-var artifactsUiFlushTimer = null;
+/** batch 期间累积的最强刷新类型：一旦出现 full 就保持 full */
+var artifactsUiBatchKind = null;
+
+/**
+ * 产物面板刷新调度器状态。
+ * 语义是 throttle（保证最小间隔），不是 debounce：
+ * debounce 在 Agent 思考流这种高频事件下会被无限顺延（饿死），随后一次性爆发，
+ * 表现为「文件列表长时间不动、然后猛跳一下」。
+ */
+var artifactsUiRefreshTimer = null;
+var artifactsUiRefreshPendingKind = null;
+var artifactsUiRefreshLastAt = 0;
+
+/** 当前正在异步加载预览的文件路径，用于避免同路径重复加载互相打断渲染 */
+var artifactContentLoadingPath = '';
+var artifactContentLoadingGen = 0;
+/** 加载开始时间：异常路径留下的标记不能永久挡住后续点击 */
+var artifactContentLoadingAt = 0;
+/** 超过该时长仍认为「在加载中」，视为失效标记并放行（远大于正常读盘+挂载耗时） */
+var ARTIFACT_CONTENT_LOADING_STALE_MS = 30000;
+
+function artifactsUiRefreshIntervalMs() {
+  const v =
+    typeof getAgentLimits === 'function' ? Number(getAgentLimits().artifactsUiFlushMs) : NaN;
+  return Number.isFinite(v) && v > 0 ? v : 80;
+}
 
 function isArtifactsUiBatching() {
   return artifactsUiBatchDepth > 0;
@@ -569,40 +687,116 @@ function endArtifactsUiBatch() {
   artifactsUiBatchDepth -= 1;
   if (artifactsUiBatchDepth === 0 && artifactsUiBatchDirty) {
     artifactsUiBatchDirty = false;
-    flushArtifactsUiNow();
+    const kind = artifactsUiBatchKind === 'light' ? 'light' : 'full';
+    artifactsUiBatchKind = null;
+    flushArtifactsUiNow(kind);
   }
 }
 
-function markArtifactsUiDirty() {
+/** @param {'light'|'full'} [kind] 默认 light（仅重绘列表数据） */
+function markArtifactsUiDirty(kind) {
   if (!isArtifactsUiBatching()) return false;
   artifactsUiBatchDirty = true;
+  if (artifactsUiBatchKind === 'full') return true;
+  artifactsUiBatchKind = kind === 'full' ? 'full' : artifactsUiBatchKind || 'light';
   return true;
 }
 
+/** batch 结束必须拿到最新磁盘视图（否则新文件不会出现在列表里） */
 function forceArtifactsUiRefreshAfterBatch() {
-  if (isArtifactsUiBatching()) artifactsUiBatchDirty = true;
+  if (!isArtifactsUiBatching()) return;
+  artifactsUiBatchDirty = true;
+  artifactsUiBatchKind = 'full';
 }
 
-function flushArtifactsUiNow() {
-  if (!isSidePanelOpen()) return;
+function isArtifactContentLoading(filePath) {
+  if (!artifactContentLoadingPath) return false;
+  if (
+    artifactContentLoadingAt > 0 &&
+    Date.now() - artifactContentLoadingAt > ARTIFACT_CONTENT_LOADING_STALE_MS
+  ) {
+    // 标记疑似残留（加载异常未走清理）：放行，否则该文件会永久「点了没反应」
+    artifactContentLoadingPath = '';
+    artifactContentLoadingAt = 0;
+    return false;
+  }
+  return artifactPathsEqual(artifactContentLoadingPath, filePath);
+}
+
+function beginArtifactContentLoad(filePath, gen) {
+  artifactContentLoadingPath = String(filePath || '');
+  artifactContentLoadingGen = Number(gen) || 0;
+  artifactContentLoadingAt = Date.now();
+}
+
+/** 只有「最新一次加载」结束时才清标记，避免旧加载清掉新加载的状态 */
+function endArtifactContentLoad(gen) {
+  if (gen != null && Number(gen) !== artifactContentLoadingGen) return;
+  artifactContentLoadingPath = '';
+  artifactContentLoadingAt = 0;
+}
+
+/** 重绘产物列表 + 变更面板（两个 pane 共用同一拍刷新，避免各自扫描） */
+function refreshArtifactsPaneViews() {
+  renderArtifactsList({ skipRefresh: true });
+  if (typeof window.patchChangesPane === 'function') {
+    window.patchChangesPane();
+  } else if (typeof renderChangesPane === 'function') {
+    renderChangesPane();
+  }
+}
+
+/**
+ * @param {'light'|'full'} [kind] 默认 full（兼容旧调用点）
+ * light：只重绘内存数据，不发 RPC、不主动重载编辑器；
+ * full ：强制 list_dir 后再重绘（文件系统确实变化时用）。
+ */
+function flushArtifactsUiNow(kind) {
+  if (typeof isSidePanelOpen === 'function' && !isSidePanelOpen()) return;
+  // 未显式指定 light（或列表尚未加载过）时按 full 处理，保持旧调用点语义不变
+  const needFull = kind !== 'light' || !workspaceArtifactsLoaded;
+  if (!needFull) {
+    refreshArtifactsPaneViews();
+    return;
+  }
   // 缓存就绪时仍强制 list_dir：否则 mtime 不更新，打开中的文件预览会一直停在旧内容
   void refreshArtifactsDirectory(true).then(function () {
-    renderArtifactsList({ skipRefresh: true });
-    if (typeof window.patchChangesPane === 'function') {
-      window.patchChangesPane();
-    } else if (typeof renderChangesPane === 'function') {
-      renderChangesPane();
-    }
+    refreshArtifactsPaneViews();
   });
 }
 
+/**
+ * 产物面板刷新的唯一入口（单一来源）。
+ * kind = 'light'：数据更新（trace / track）用，思考流只走这条，开销与文件系统无关；
+ * kind = 'full' ：文件系统可能变化（工具执行完成 / 切页 / 用户操作）用。
+ * throttle：持续事件下按最小间隔周期性刷新，而不是被无限顺延。
+ */
+function scheduleArtifactsUiRefresh(kind) {
+  const want = kind === 'full' ? 'full' : 'light';
+  if (isArtifactsUiBatching()) {
+    markArtifactsUiDirty(want);
+    return;
+  }
+  if (typeof isSidePanelOpen === 'function' && !isSidePanelOpen()) return;
+  if (want === 'full' || !artifactsUiRefreshPendingKind) {
+    artifactsUiRefreshPendingKind = want;
+  }
+  if (artifactsUiRefreshTimer) return;
+  const interval = artifactsUiRefreshIntervalMs();
+  const elapsed = Date.now() - artifactsUiRefreshLastAt;
+  const wait = elapsed >= interval ? 0 : interval - elapsed;
+  artifactsUiRefreshTimer = setTimeout(function () {
+    artifactsUiRefreshTimer = null;
+    const pendingKind = artifactsUiRefreshPendingKind || 'light';
+    artifactsUiRefreshPendingKind = null;
+    artifactsUiRefreshLastAt = Date.now();
+    flushArtifactsUiNow(pendingKind);
+  }, wait);
+}
+
+/** 兼容旧调用点：数据更新语义 = light */
 function scheduleArtifactsUiFlush() {
-  if (markArtifactsUiDirty()) return;
-  if (artifactsUiFlushTimer) clearTimeout(artifactsUiFlushTimer);
-  artifactsUiFlushTimer = setTimeout(function () {
-    artifactsUiFlushTimer = null;
-    flushArtifactsUiNow();
-  }, typeof getAgentLimits === 'function' ? getAgentLimits().artifactsUiFlushMs : 80);
+  scheduleArtifactsUiRefresh('light');
 }
 
 async function pickDefaultEditorFile(wsCtx) {
@@ -661,7 +855,8 @@ async function ensureDefaultWorkspaceEditor(opts = {}) {
 
   const view = document.getElementById('artifacts-file-view');
   if (pick && view && typeof loadArtifactContent === 'function') {
-    loadArtifactContent(pick, view);
+    // 用户主动打开：允许在本地映射失败时向 Gateway 要一次权威解析
+    loadArtifactContent(pick, view, { authoritative: true });
   } else if (typeof renderArtifactsList === 'function') {
     renderArtifactsList({ skipRefresh: true });
   }
@@ -716,7 +911,8 @@ async function openArtifactFileAtLine(filePath, line, col) {
   selectedArtifactContentMtime = 0;
   const view = document.getElementById('artifacts-file-view');
   if (view && typeof loadArtifactContent === 'function') {
-    loadArtifactContent(fp, view, { force: true });
+    // 来自问题面板 / 搜索结果的路径：可能是「别的视角」的路径，允许权威解析兜底
+    loadArtifactContent(fp, view, { force: true, authoritative: true });
   } else if (typeof renderArtifactsList === 'function') {
     renderArtifactsList({ skipRefresh: true });
   }

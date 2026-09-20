@@ -6751,20 +6751,36 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   color: var(--text-mute);
   cursor: default;
 }
+/* 展开期间的宿主：菜单必须挂在 body 级浮层上，否则会被表单/列表滚动区（overflow: auto）裁掉。
+   z-index 要高于所有弹层（.defined-model-editor-overlay 700、.skill-detail-overlay 850、
+   .worktree-apply-overlay 960、.text-prompt-overlay 10050、lightbox 12000）；
+   宿主自身不吃鼠标事件，只有菜单本体接收。 */
+.select-menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 13000;
+  pointer-events: none;
+}
+/* 位置/宽度/限高由 renderer-select-menu.js 按 trigger 的视口坐标写内联样式 */
+.select-menu-layer > .select-menu-list {
+  pointer-events: auto;
+}
 .select-menu-list {
   position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  z-index: 340;
-  /* 菜单是 DOM 浮层（不像原生 select 的 OS 弹层），会被表单滚动区裁剪，故限制高度 */
-  max-height: min(260px, 40vh);
+  max-height: 320px;
   overflow-y: auto;
   padding: 2px 0;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 0;
   box-shadow: var(--shadow);
+}
+/* 退路：拿不到浮层时（文档尚无 body）留在容器内，按容器宽度在下方展开 */
+.select-menu > .select-menu-list {
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 340;
 }
 .select-menu-list[hidden] {
   display: none;
@@ -7429,6 +7445,8 @@ body.pane-resizing {
   min-height: 0;
   overflow: auto;
   padding: 4px 2px 12px;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .wiki-md-streaming {
@@ -8275,44 +8293,6 @@ body.pane-resizing {
   max-height: none;
 }
 
-/* [排查中] Monaco 选区红底问题：review 模式的 --vscode-diffEditor-* 变量覆盖补丁已拆除 */
-
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .view-zones .view-lines .view-line {
-  line-height: 1.5;
-}
-
-/* Lower inserted row line numbers (decorated via lineNumberClassName) */
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .cursor-diff-ins-lnum {
-  color: var(--cursor-diff-ins-lnum) !important;
-}
-
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .cursor-diff-ins-gutter {
-  background-color: var(--cursor-diff-ins-text);
-  width: 3px !important;
-  margin-left: 3px;
-}
-
-/* Gutter bars — delete zone (upper) / insert line (lower) */
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .gutter-delete,
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .delete-sign {
-  background-color: var(--cursor-diff-del-text);
-  opacity: 0.9;
-}
-
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .gutter-insert,
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .insert-sign {
-  background-color: var(--cursor-diff-ins-text);
-  opacity: 0.9;
-}
-
-/* Remove Monaco default diff borders in review (Cursor has none) */
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .line-insert,
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .line-delete,
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .char-insert,
-.changes-file-view .artifacts-monaco-diff-host.is-diff-review:not(.is-diff-writing) .monaco-diff-editor .char-delete {
-  border: none !important;
-}
-
 .help-tool-harness {
   padding: 12px 14px;
   border: 1px solid var(--border);
@@ -8962,6 +8942,64 @@ body.pane-resizing {
   border-bottom: 1px solid var(--border);
 }
 
+/* 「路径翻译」提示条：不是旁注，而是「打开的不是你给的那个路径」的风险提示 */
+.artifacts-editor-translation-note {
+  color: var(--fg);
+  border-left: 3px solid var(--danger);
+  background: var(--bg-elev);
+}
+
+/* 权威解析候选：本地映射失败后，由远程按文件名匹配出的可能文件 */
+.artifacts-path-resolve {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.artifacts-path-candidates {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.artifacts-path-candidate {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.artifacts-path-candidate:hover {
+  border-color: var(--accent-dark);
+}
+
+.artifacts-path-candidate-main {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifacts-path-candidate-full {
+  font-size: 11px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .artifacts-file-item {
   display: flex;
   align-items: center;
@@ -9052,8 +9090,13 @@ body.pane-resizing {
   border-top: 1px solid var(--border);
 }
 
-/* [排查中] Monaco 选区红底问题：is-diff-writing 压制 / goto-line 高亮 / writing-line 高亮 /
-   内联 diff 压低等补丁已整体拆除，排查结束后从 git 历史恢复 */
+/* Agent 写入跟随：编辑区当前写入行高亮
+   （配合 renderer-artifacts-follow.js → updateMonacoArtifactEditorText → setDiffWritingDecoration） */
+.monaco-editor .view-line.monaco-diff-writing-line,
+.monaco-diff-editor .view-line.monaco-diff-writing-line {
+  background-color: var(--monaco-writing-line-bg, rgba(255, 255, 255, 0.05)) !important;
+  box-shadow: inset 3px 0 0 var(--monaco-writing-line-accent, rgba(255, 255, 255, 0.14)) !important;
+}
 
 .artifacts-large-diff-grid {
   flex: 1;

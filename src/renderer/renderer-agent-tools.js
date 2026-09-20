@@ -1,4 +1,4 @@
-/* global window, currentSessionId, sessionActiveRuns, trackArtifact, scheduleArtifactsUiFlush, showClarifyInBubble, getUndoTurnIdForSession, resolveSessionWorkspacePathSync, DieyunToolCatalog, DieyunToolClassify, normalizeAgentToolName, noteBrowserToolUse */
+/* global window, currentSessionId, sessionActiveRuns, trackArtifact, scheduleArtifactsUiRefresh, scheduleArtifactsUiFlush, showClarifyInBubble, getUndoTurnIdForSession, resolveSessionWorkspacePathSync, DieyunToolCatalog, DieyunToolClassify, normalizeAgentToolName, noteBrowserToolUse */
 'use strict';
 
 const agentToolsApi = window.diecloud || {};
@@ -82,7 +82,9 @@ async function executeAgentTool(name, args, sessionId) {
     }
     const result = await runExclusiveAgentTool(async () => {
       const inner = await invoke();
-      if (typeof scheduleArtifactsUiFlush === 'function') scheduleArtifactsUiFlush();
+      // 写入类工具已落盘：full 刷新才会重新 list_dir，让新文件出现在工作面板
+      if (typeof scheduleArtifactsUiRefresh === 'function') scheduleArtifactsUiRefresh('full');
+      else if (typeof scheduleArtifactsUiFlush === 'function') scheduleArtifactsUiFlush();
       return inner;
     }, workspaceKey, sid);
     if (typeof refreshWorkspaceMutateHint === 'function') {

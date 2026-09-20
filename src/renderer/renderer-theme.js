@@ -17,7 +17,8 @@ const TRACE_PREF_DEFAULTS = {
   showReasoning: true,
   showTitles: true,
   expandShell: false,
-  expandEdit: true
+  expandEdit: true,
+  followWrites: true
 };
 var tracePrefs = loadTracePrefs();
 
@@ -28,7 +29,8 @@ function loadTracePrefs() {
       showReasoning: raw.showReasoning !== false,
       showTitles: raw.showTitles !== false,
       expandShell: raw.expandShell === true,
-      expandEdit: raw.expandEdit !== false
+      expandEdit: raw.expandEdit !== false,
+      followWrites: raw.followWrites !== false
     };
   } catch {
     return { ...TRACE_PREF_DEFAULTS };
@@ -48,10 +50,12 @@ function syncTracePrefInputs() {
   const titles = $('trace-show-titles');
   const shell = $('trace-expand-shell');
   const edit = $('trace-expand-edit');
+  const follow = $('trace-follow-writes');
   if (show) show.checked = tracePrefs.showReasoning !== false;
   if (titles) titles.checked = tracePrefs.showTitles !== false;
   if (shell) shell.checked = tracePrefs.expandShell === true;
   if (edit) edit.checked = tracePrefs.expandEdit !== false;
+  if (follow) follow.checked = tracePrefs.followWrites !== false;
 }
 
 function syncThemeCards() {
@@ -321,16 +325,19 @@ window.isTurnLongHorizon = isTurnLongHorizon;
 
 syncTracePrefInputs();
 [
-  ['trace-show-reasoning', 'showReasoning'],
-  ['trace-show-titles', 'showTitles'],
-  ['trace-expand-shell', 'expandShell'],
-  ['trace-expand-edit', 'expandEdit']
-].forEach(([id, key]) => {
+  ['trace-show-reasoning', 'showReasoning', true],
+  ['trace-show-titles', 'showTitles', true],
+  ['trace-expand-shell', 'expandShell', true],
+  ['trace-expand-edit', 'expandEdit', true],
+  // 跟随开关只影响后续写入，重绘整轮聊天开销大且无必要
+  ['trace-follow-writes', 'followWrites', false]
+].forEach(([id, key, rerender]) => {
   const el = $(id);
   if (!el) return;
   el.addEventListener('change', () => {
     tracePrefs = { ...tracePrefs, [key]: el.checked === true };
     saveTracePrefs();
+    if (!rerender) return;
     if (typeof renderChatFromMessagesYielding === 'function') {
       void renderChatFromMessagesYielding();
     } else {

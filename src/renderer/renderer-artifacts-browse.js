@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, createMonacoArtifactDiffEditor, updateMonacoArtifactDiffEditor, disposeMonacoArtifactEditor, createMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText */
+/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, disposeMonacoArtifactEditor, createMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText, artifactRpcParams */
 'use strict';
 
 function normalizeRelPath(p) {
@@ -76,63 +76,102 @@ function isUnderPosixRoot(root, candidate) {
   return c === r || c.startsWith(`${r}/`);
 }
 
-/** SSH：把 Agent/本地格式路径规范到远程工作区根下，避免「路径不在远程工作空间内」 */
-function canonicalizeArtifactPathForWorkspace(filePath, wsCtx) {
-  const fp = String(filePath || '').trim();
-  if (!fp || !wsCtx) return fp;
-  if (wsCtx.kind !== 'ssh') return fp;
-  const root = normalizePosixRoot(wsCtx.root);
-
-  if (isRemoteWorkspacePath(fp)) {
-    const extracted = extractRemotePathFromSshUri(fp);
-    const norm = normalizePosixRoot(extracted || '/');
-    if (isUnderPosixRoot(root, norm)) return norm;
-  }
-
-  const posix = fp.replace(/\\/g, '/');
-  if (posix.startsWith('/') && isUnderPosixRoot(root, posix)) {
-    return normalizePosixRoot(posix);
-  }
-
-  if (!posix.startsWith('/') && !/^[a-zA-Z]:\//.test(posix)) {
-    return joinPosixPath(root, posix);
-  }
-
-  for (const row of artifactsDirEntries || []) {
-    if (row.kind !== 'file' || !row.path) continue;
-    if (typeof pathsMatch === 'function' && pathsMatch(row.path, fp)) return row.path;
-    if (row.name && (posix.endsWith('/' + row.name) || posix.endsWith('\\' + row.name))) {
-      return row.path;
-    }
-  }
-
-  const rootParts = root.split('/').filter(Boolean);
-  for (let n = Math.min(3, rootParts.length); n >= 1; n--) {
-    const tail = rootParts.slice(-n).join('/');
-    const escaped = tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`(?:^|[/:])${escaped}/(.+)$`, 'i');
-    const m = posix.match(re);
-    if (m && m[1]) return joinPosixPath(root, m[1]);
-  }
-
-  const base = posix.split('/').pop();
-  if (base && /\.[a-zA-Z0-9]{1,16}$/.test(base)) {
-    return joinPosixPath(root, base);
-  }
-
-  return posix.startsWith('/') ? normalizePosixRoot(posix) : joinPosixPath(root, posix);
-}
-
 function remoteWorkspaceCtxFromArtifacts() {
   if (!artifactsWorkspaceRoot) return null;
   if (artifactsWorkspaceKind !== 'ssh') return null;
   return { kind: artifactsWorkspaceKind, root: artifactsWorkspaceRoot };
 }
 
-function applyWorkspaceArtifactPath(filePath, wsCtx) {
+/**
+ * 把外部输入的路径解析成「当前工作区内的确定路径」—— 路径进入系统的**唯一映射点**。
+ *
+ * 只做确定性解析，四种情况：
+ *   1. ssh: URI         → 提取远程路径，必须落在工作区根下；
+ *   2. 远程绝对路径      → 必须落在工作区根下；
+ *   3. 相对路径          → 拼到工作区根下（确定映射）；
+ *   4. 其它（本地盘符）  → **明确失败**。
+ *
+ * 刻意删掉了旧实现里的三段猜测（按当前目录同名文件认领 / 按工作区根尾段正则匹配 /
+ * 按有扩展名就丢到根下）。它们看似「能多打开一些文件」，实际代价是：
+ *   - 打开**另一个文件**（同名目录 / 同名文件随处可见），且面板标题显示的是猜出来的路径，
+ *     用户无法察觉；
+ *   - 那个路径会被交给编辑器的保存按钮 → **保存即覆盖错误的远程文件**，不可逆；
+ *   - 猜测结果还会进入 artifactPathsMatch，污染产物去重与变更匹配。
+ * 所以这里坚持「宁可打不开并说明原因，也不猜」。
+ *
+ * @returns {{ ok: true, path: string } | { ok: false, path: string, reason: string, input: string }}
+ */
+function resolveArtifactPathInWorkspace(filePath, wsCtx) {
+  const fp = String(filePath || '').trim();
   const ctx = wsCtx || remoteWorkspaceCtxFromArtifacts();
-  if (!ctx) return String(filePath || '').trim();
-  return canonicalizeArtifactPathForWorkspace(filePath, ctx);
+  const fail = (reason) => ({
+    ok: false,
+    path: fp,
+    reason,
+    input: fp
+  });
+  if (!fp) return fail('路径为空');
+  // 非远程工作区：路径就是真实路径，原样通过
+  if (!ctx || ctx.kind !== 'ssh') return { ok: true, path: fp };
+
+  const root = normalizePosixRoot(ctx.root);
+
+  if (isRemoteWorkspacePath(fp)) {
+    const norm = normalizePosixRoot(extractRemotePathFromSshUri(fp) || '/');
+    if (isUnderPosixRoot(root, norm)) return { ok: true, path: norm };
+    return fail(`该远程路径不在当前工作区内（${root}）`);
+  }
+
+  const posix = fp.replace(/\\/g, '/');
+  if (posix.startsWith('/')) {
+    if (isUnderPosixRoot(root, posix)) return { ok: true, path: normalizePosixRoot(posix) };
+    return fail(`该路径不在当前远程工作区内（${root}）`);
+  }
+  if (/^[a-zA-Z]:\//.test(posix)) {
+    return fail('这是本地路径，而当前工作区在远程主机上：请从左侧文件列表中选择对应文件');
+  }
+  // 相对路径：确定映射到工作区根下
+  return { ok: true, path: joinPosixPath(root, posix) };
+}
+
+/**
+ * 兼容包装：解析成功返回映射结果，失败原样返回（由读取侧明确拒绝）。
+ * 需要区分「成功 / 失败」并给用户可读提示的调用点，请直接用 resolveArtifactPathInWorkspace。
+ */
+function applyWorkspaceArtifactPath(filePath, wsCtx) {
+  const resolved = resolveArtifactPathInWorkspace(filePath, wsCtx);
+  if (resolved.ok) return resolved.path;
+  return String(filePath || '').trim();
+}
+
+/**
+ * 权威解析：本地确定性映射失败后，问 Gateway「这个路径在远程可能对应谁」。
+ *
+ * Gateway 持有真实文件系统，它能 stat 原路径、也能用远程 rg 按尾部特征找候选；
+ * Renderer 只有一份文件列表**副本**，用它推断映射就是猜。判断权归持有文件系统的那一层。
+ *
+ * 只在**用户主动打开**时调用：后台流式刷新也走这条路会变成远程 rg 风暴。
+ *
+ * @param {string} inputPath 来路不明的路径（本地盘符 / 别的机器 / 相对路径）
+ * @returns {Promise<{ok: boolean, exact?: boolean, path?: string, candidates?: object[], reason?: string, code?: string}>}
+ */
+async function resolveArtifactPathViaGateway(inputPath) {
+  const fp = String(inputPath || '').trim();
+  if (!fp) return { ok: false, code: 'INVALID_PATH', reason: '路径为空' };
+  if (typeof gatewayCall !== 'function' || !gwState || !gwState.authed) {
+    return { ok: false, code: 'GATEWAY_UNAVAILABLE', reason: 'Gateway 未连接' };
+  }
+  try {
+    const params =
+      typeof artifactRpcParams === 'function'
+        ? await artifactRpcParams({ inputPath: fp })
+        : { inputPath: fp };
+    const r = await gatewayCall('workspace.resolve_path', params);
+    if (r && typeof r === 'object') return r;
+    return { ok: false, code: 'BAD_RESPONSE', reason: '解析服务返回异常' };
+  } catch (err) {
+    return { ok: false, code: 'RPC_FAILED', reason: String((err && err.message) || err) };
+  }
 }
 
 async function probeRemoteConnectedFlags() {
@@ -279,13 +318,13 @@ async function refreshArtifactsDirectory(force, opts = {}) {
       artifactsWorkspaceKind = wsCtx ? wsCtx.kind : 'local';
 
       if (!wsCtx) {
-        artifactsDirEntries = [];
+        setArtifactsDirEntries([]);
         workspaceArtifacts = [];
         workspaceArtifactsLoaded = true;
         return true;
       }
       if (wsCtx.kind === 'ssh' && !wsCtx.sshConnected) {
-        artifactsDirEntries = [];
+        setArtifactsDirEntries([]);
         workspaceArtifacts = [];
         workspaceArtifactsLoaded = true;
         workspaceArtifactsError = 'SSH 未连接，请在工作空间菜单中重新连接远程主机';
@@ -368,7 +407,7 @@ async function refreshArtifactsDirectory(force, opts = {}) {
       });
 
       if (myGen !== artifactsDirRefreshGen) return false;
-      artifactsDirEntries = rows;
+      setArtifactsDirEntries(rows);
       workspaceArtifacts = rows
         .filter(function (r) {
           return r.kind === 'file';
@@ -388,7 +427,7 @@ async function refreshArtifactsDirectory(force, opts = {}) {
       return true;
     } catch (e) {
       if (myGen !== artifactsDirRefreshGen) return false;
-      artifactsDirEntries = [];
+      setArtifactsDirEntries([]);
       workspaceArtifacts = [];
       workspaceArtifactsLoaded = true;
       workspaceArtifactsError = e && e.message ? e.message : String(e || '加载失败');
@@ -495,4 +534,5 @@ async function refreshWorkspaceArtifacts(force) {
 }
 
 window.applyWorkspaceArtifactPath = applyWorkspaceArtifactPath;
-window.canonicalizeArtifactPathForWorkspace = canonicalizeArtifactPathForWorkspace;
+window.resolveArtifactPathInWorkspace = resolveArtifactPathInWorkspace;
+window.resolveArtifactPathViaGateway = resolveArtifactPathViaGateway;

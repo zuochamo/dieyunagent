@@ -16,15 +16,25 @@ function normWritePath(p) {
     .toLowerCase();
 }
 
+/**
+ * 两个路径是否指向同一个文件。
+ *
+ * 只承认两种确定性等价：
+ *   1. 规范化后完全相等；
+ *   2. 一方是另一方的「/ 边界后缀」—— 覆盖「相对路径 vs 工作区绝对路径」这一合法场景。
+ *
+ * 刻意不做「只看文件名」的兜底：同名文件在不同目录极其常见（config.json / index.ts），
+ * 那种宽松匹配会让 src/a/config.json 与 lib/b/config.json 被判为同一个文件，进而污染
+ * 产物去重、变更行匹配、编辑器挂载判断 —— 表现为「认错文件」。
+ * 语义与 renderer-problems.js 的 pathsMatchProblems 保持一致（它一直如此且工作正常）。
+ */
 function pathsMatch(a, b) {
   if (!a || !b) return false;
   const na = normWritePath(a);
   const nb = normWritePath(b);
+  if (!na || !nb) return false;
   if (na === nb) return true;
-  if (na.endsWith('/' + nb) || nb.endsWith('/' + na)) return true;
-  const ba = na.includes('/') ? na.slice(na.lastIndexOf('/') + 1) : na;
-  const bb = nb.includes('/') ? nb.slice(nb.lastIndexOf('/') + 1) : nb;
-  return !!(ba && ba === bb);
+  return na.endsWith('/' + nb) || nb.endsWith('/' + na);
 }
 
 function extractPathFieldsFromArgsBrief(brief) {
