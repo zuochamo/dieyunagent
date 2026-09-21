@@ -1,16 +1,22 @@
 'use strict';
 
+/**
+ * 本模块同时被 Main（Node）与 Renderer（esbuild browser bundle）加载，
+ * 后者没有可靠的 process 全局，故 env 访问须双端安全。
+ */
+const ENV = typeof process !== 'undefined' && process.env ? process.env : {};
+
 const LLM_RECONNECT_SHORT_ATTEMPTS = 3;
 const LLM_RECONNECT_SHORT_BASE_MS = 800;
 /** 单次采样重试次数（不含首次）。可用 LLM_RECONNECT_MAX_RETRIES 覆盖。 */
-const LLM_RECONNECT_MAX_RETRIES = Number(process.env.LLM_RECONNECT_MAX_RETRIES) || 3;
+const LLM_RECONNECT_MAX_RETRIES = Number(ENV.LLM_RECONNECT_MAX_RETRIES) || 3;
 /** 单次退避上限（对齐 Pi Retry-After cap）。 */
 const LLM_RECONNECT_MAX_DELAY_MS = 60 * 1000;
 /**
  * 未显式传 maxWaitMs 时的墙钟上限兜底（0 = 走次数模式）。
  * 生产路径由 agent-limits.llmReconnectMaxWaitMs 显式传入，见 resolveAgentLoopSpec。
  */
-const LLM_RECONNECT_MAX_WAIT_MS = Number(process.env.LLM_RECONNECT_MAX_WAIT_MS) || 0;
+const LLM_RECONNECT_MAX_WAIT_MS = Number(ENV.LLM_RECONNECT_MAX_WAIT_MS) || 0;
 const LLM_RECONNECT_LONG_BASE_MS = 3000;
 const LLM_RECONNECT_LONG_MAX_INTERVAL_MS = 60000;
 
@@ -277,6 +283,7 @@ module.exports = {
   isContextOverflowError,
   isAbortError,
   createAbortError,
+  parseHttpStatus,
   throwIfAborted,
   sleepMs,
   raceAbortable,

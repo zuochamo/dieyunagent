@@ -21,7 +21,6 @@ var STREAM_ROUND_MAX_ATTEMPTS = () =>
   (typeof getAgentLimits === 'function' ? getAgentLimits().streamRoundMaxAttempts : 3) || 3;
 var LLM_RETRY_BASE_MS = () =>
   (typeof getAgentLimits === 'function' ? getAgentLimits().llmRetryBaseMs : 800) || 800;
-var LLM_RECONNECT_MAX_DELAY_MS = 60 * 1000;
 var LONG_HORIZON_MAX_SEGMENTS = 20;
 var SEGMENT_CONTINUE_USER_MSG =
   '[系统] 本段工具轮次已达上限，请在同一会话中继续未完成任务，勿重复已完成的步骤。';

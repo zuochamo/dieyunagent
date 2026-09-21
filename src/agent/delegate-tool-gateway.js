@@ -3,12 +3,13 @@
 const { normalizeAgentToolName } = require('./tool-guardrails');
 const { fsEditArgsPresent } = require('./guardrails-shared');
 const { applyPatchUnsupported } = require('./tool-validate');
+// 护栏数字单一来源（AGENTS.md §5）：fs 读取字节上限只改 agent-limits。
+const { AGENT_LIMITS_DEFAULTS, getAgentLimits } = require('./agent-limits');
 
 function resolveFsReadMaxBytes(args, ctx) {
   const explicit = Number(args && args.maxBytes);
   if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
   try {
-    const { getAgentLimits } = require('./agent-limits');
     const n = Number(
       (getAgentLimits(ctx && ctx.userDataPath, ctx && ctx.contextTierId) || {}).fsReadDefaultMaxBytes
     );
@@ -16,7 +17,7 @@ function resolveFsReadMaxBytes(args, ctx) {
   } catch {
     /* defaults */
   }
-  return 65536;
+  return AGENT_LIMITS_DEFAULTS.fsReadDefaultMaxBytes;
 }
 
 /**

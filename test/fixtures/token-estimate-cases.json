@@ -1,0 +1,36 @@
+{
+  "note": "跨语言 token 估算一致性基线（H4）。textCases 与 sharedMessageCases 必须被 JS(src/agent/token-estimate.js) 与 Rust(crates/dieyun-core/src/compaction/tokens.rs) 两侧算出完全相同的结果。本文件是唯一真值来源：改公式必须同时改两侧实现与本文件。",
+  "textCases": [
+    { "input": "", "expected": 0 },
+    { "input": "a", "expected": 1 },
+    { "input": "hello", "expected": 2 },
+    { "input": "   ", "expected": 1 },
+    { "input": "line1\nline2", "expected": 4 },
+    { "input": "1234567890", "expected": 4 },
+    { "input": "你好世界", "expected": 3 },
+    { "input": "你好world", "expected": 3 },
+    { "input": "Hello, 世界!", "expected": 4 },
+    { "input": "这是 一段 中文 与 English 混合", "expected": 10 },
+    { "input": "こんにちは", "expected": 4 },
+    { "input": "한국어", "expected": 2 },
+    { "input": "日本語テキスト", "expected": 5 },
+    { "input": "ＡＢ", "expected": 1 },
+    { "input": "\ud83d\ude00\ud83d\ude00", "expected": 1 },
+    { "input": "中\ud83d\ude00", "expected": 1 },
+    { "input": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00", "expected": 2 },
+    { "input": "\ud835\udd4f", "expected": 1 }
+  ],
+  "sharedMessageCases": [
+    { "message": { "role": "user", "content": "hello" }, "expected": 8 },
+    { "message": { "role": "assistant", "content": "你好世界" }, "expected": 9 },
+    { "message": { "role": "assistant", "content": "" }, "expected": 6 },
+    { "message": { "role": "user", "content": null }, "expected": 6 },
+    { "message": { "role": "user", "content": ["alpha", "beta"] }, "expected": 10 },
+    { "message": { "role": "user", "content": [{ "text": "你好" }, { "text": "ok" }] }, "expected": 9 },
+    { "message": { "role": "user", "content": { "text": "你好" } }, "expected": 8 },
+    { "message": { "role": "user", "content": [{ "type": "text", "text": "a" }] }, "expected": 7 }
+  ],
+  "jsOnly": {
+    "note": "JS estimateMessageTokens 额外计入 assistant.tool_calls（Rust estimate_messages_tokens 不计）。这是刻意的跨语言差异，故不含 tool_calls 的消息不进 sharedMessageCases。断言见 test/unit/token-estimate.test.cjs。"
+  }
+}

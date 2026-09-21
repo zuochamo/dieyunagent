@@ -31,6 +31,8 @@ const { captureGitWorkingBaseline, mergeBaselineFilesInto } = require('../git/ba
 const { isGitRepo } = require('../git/worktree-service');
 const { getWorkspaceGitDiffContext, getWorkspaceGitChangedAbsPaths } = require('../git/diff-context');
 const { resolveHostSidecarLocalPath } = require('../agent/host-sidecar');
+// 护栏数字单一来源（AGENTS.md §5）：diff 全文阈值只改 agent-limits。
+const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 
 const { createExtractedHandlers } = require('./handlers');
 const { projectMemoryScope } = require('./project-memory');
@@ -45,7 +47,7 @@ function assertHostEnabled(ctx) {
   }
 }
 
-const DIFF_FULL_TEXT_CAP = 120000;
+const DIFF_FULL_TEXT_CAP = AGENT_LIMITS_DEFAULTS.diffFullTextCap;
 
 function summarizeLineDiff(beforeText, afterText) {
   const before = beforeText == null ? [] : String(beforeText).split(/\r?\n/);

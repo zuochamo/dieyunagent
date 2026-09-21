@@ -31,6 +31,7 @@ const agentSystemPrompt = require('../../agent/agent-system-prompt');
 const reviewerJson = require('../../agent/reviewer-json');
 const llmRequest = require('../../agent/llm-request');
 const llmChannel = require('../../agent/llm-channel');
+const llmReconnectRetry = require('../../llm-reconnect-retry');
 const tokenEstimate = require('../../agent/token-estimate');
 const sseDeltaParse = require('../../agent/sse-delta-parse');
 const reasoningBackfill = require('../../agent/reasoning-backfill');
@@ -156,6 +157,13 @@ register('DieyunLlmRequest', { ...llmRequest, LlmRequest: llmRequest }, {
 // 只镜像一个命名空间全局 LlmChannel，避免 getChannelPolicy / classifyDelta 这类通用名污染 window。
 register('DieyunLlmChannel', { ...llmChannel, LlmChannel: llmChannel }, {
   compat: ['LlmChannel']
+});
+
+// LLM 重连重试的**循环与退避**唯一来源（src/llm-reconnect-retry.js）。
+// Main 的 rust-loop-runner / rust-planner-runner / compaction-main 等直接 require；
+// Renderer 的 renderer-agent-llm.js 消费这里的兼容全局，勿再自抄一份退避循环。
+register('DieyunLlmReconnectRetry', { ...llmReconnectRetry, LlmReconnectRetry: llmReconnectRetry }, {
+  compat: ['LlmReconnectRetry']
 });
 
 // 文本→token 估算的唯一来源（src/agent/token-estimate.js，公式对齐 Rust compaction/tokens.rs）。

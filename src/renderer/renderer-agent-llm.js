@@ -14,6 +14,27 @@ function resolveEndpoint(baseUrl) {
   return `${trimmed}/v1/chat/completions`;
 }
 
+/**
+ * 请求头装配单一来源：llm-request（经 agent-bundle 注册为 window.LlmRequest）。
+ * 非流式与流式两处调用点共用本函数，不再各自内联「Content-Type + Bearer」降级。
+ * 降级仅在 bundle 加载异常时触达，并显式告警——避免静默发错鉴权头
+ * （与 renderer-model-settings.js「不再自行拼 Authorization」同一立场）。
+ */
+function buildRendererLlmHeaders(apiConfig, apiBaseUrl, apiKey) {
+  const llmApi = typeof window !== 'undefined' ? window.LlmRequest : null;
+  if (llmApi && typeof llmApi.buildLlmHeadersFromConfig === 'function') {
+    return llmApi.buildLlmHeadersFromConfig(
+      { ...(apiConfig || {}), baseUrl: apiBaseUrl, apiKey },
+      { sessionId: currentSessionId }
+    );
+  }
+  console.warn('[llm] window.LlmRequest 未加载，请求头降级为默认（自定义头 / authMode 将失效）');
+  return {
+    'Content-Type': 'application/json',
+    ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+  };
+}
+
 function describeApiHost(baseUrl) {
   const raw = String(baseUrl || '').trim();
   if (!raw) return '模型接口';
@@ -24,48 +45,35 @@ function describeApiHost(baseUrl) {
   }
 }
 
-function parseHttpStatusFromError(err) {
-  if (!err) return 0;
-  const code = Number(err.statusCode);
-  if (Number.isFinite(code) && code > 0) return code;
-  const msg = String(err.message || err);
-  const m = msg.match(/\bHTTP\s+(\d{3})\b/i);
-  return m ? Number(m[1]) : 0;
+/** HTTP 状态码解析单一来源（llm-reconnect-retry.parseHttpStatus）；bundle 缺失时保守返回 0。 */
+function llmHttpStatus(err) {
+  const shared = resolveLlmReconnectRetry();
+  return shared && typeof shared.parseHttpStatus === 'function' ? shared.parseHttpStatus(err) : 0;
 }
 
+/**
+ * 瞬时错误判定单一来源（llm-reconnect-retry.isTransientLlmError）。
+ * 渲染层只加「用户取消优先」这一层：IPC 包装过的 AbortError 必须先在本地拦掉。
+ * bundle 缺失时保守判「非瞬时」——宁可快速失败并展示错误，也不在此复制一份关键词表。
+ */
 function isTransientFetchError(err) {
   if (!err) return false;
   if (isUserAbortError(err)) return false;
-  const msg = String(err.message || err).toLowerCase();
-  const status = parseHttpStatusFromError(err);
-  if (status === 400 || status === 401 || status === 403) return false;
-  if (/quota|billing|insufficient_quota|额度|余额不足/.test(msg) && status === 429) return false;
-  if (/content.?policy|content_policy|内容审核/.test(msg)) return false;
-  if (status === 429 || status === 502 || status === 503 || status === 504) return true;
-  return (
-    err instanceof TypeError ||
-    msg.includes('network error') ||
-    msg.includes('failed to fetch') ||
-    msg.includes('network request failed') ||
-    msg.includes('socket hang up') ||
-    msg.includes('econnreset') ||
-    msg.includes('connection reset') ||
-    msg.includes('connection aborted') ||
-    msg.includes('connection_error') ||
-    msg.includes('etimedout') ||
-    msg.includes('timedout') ||
-    msg.includes('enotfound') ||
-    /\bhttp\s+(429|502|503|504)\b/.test(msg)
-  );
+  const shared = resolveLlmReconnectRetry();
+  return shared ? shared.isTransientLlmError(err) : false;
 }
 
+/**
+ * 用户主动停止判定 —— 渲染层唯一扩展点。
+ * 刻意**不复用** llm-reconnect-retry.isAbortError：后者用 includes('已停止') 宽松匹配，
+ * 会把「dieyun-core 已停止」这类内核错误误判成用户取消；此处只认精确串与 Electron IPC 包装。
+ */
 function isUserAbortError(err) {
   for (let cur = err; cur; cur = cur.cause) {
     if (!cur) break;
     if (cur.name === 'AbortError' || cur.code === 'ABORT_ERR') return true;
     const raw = String(cur.message || '').trim();
     const msg = raw.toLowerCase();
-    // 仅精确匹配用户取消；勿用 includes('已停止')，否则会误伤「dieyun-core 已停止」
     if (msg === 'aborted' || raw === '已停止') return true;
     // Electron IPC：Error invoking remote method 'agent:rust-loop-run': AbortError: aborted
     if (/aborterror\s*:\s*aborted/.test(msg)) return true;
@@ -74,9 +82,17 @@ function isUserAbortError(err) {
   return false;
 }
 
+/** AbortError 构造单一来源（llm-reconnect-retry.createAbortError）；bundle 缺失时降级为等价内联。 */
+function userAbortError() {
+  const shared = resolveLlmReconnectRetry();
+  if (shared && typeof shared.createAbortError === 'function') return shared.createAbortError();
+  const err = new Error('已停止');
+  err.name = 'AbortError';
+  return err;
+}
+
 function toUserAbortError(err, extra = {}) {
-  const ae = new Error('已停止');
-  ae.name = 'AbortError';
+  const ae = userAbortError();
   if (err?.trace) ae.trace = err.trace;
   if (extra.trace) ae.trace = extra.trace;
   ae.cause = err;
@@ -88,7 +104,7 @@ function enrichFetchError(err, apiBaseUrl, phase) {
   const host = describeApiHost(apiBaseUrl);
   const base = err instanceof Error ? err : new Error(String(err || '未知错误'));
   const msg = String(base.message || '').toLowerCase();
-  const status = parseHttpStatusFromError(base);
+  const status = llmHttpStatus(base);
   let hint = base.message || String(err);
   if (status === 502 || msg.includes('http 502')) {
     hint =
@@ -127,26 +143,14 @@ function enrichFetchError(err, apiBaseUrl, phase) {
   return out;
 }
 
-async function apiFetchWithRetry(url, init, apiBaseUrl, opts = {}) {
-  const retries = Number.isFinite(opts.retries) ? opts.retries : 2;
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    if (init?.signal?.aborted) {
-      const err = new Error('已停止');
-      err.name = 'AbortError';
-      throw err;
-    }
-    try {
-      return await fetch(url, init);
-    } catch (err) {
-      lastErr = err;
-      if (!isTransientFetchError(err) || attempt >= retries) {
-        throw enrichFetchError(err, apiBaseUrl, opts.phase || '请求');
-      }
-      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
-    }
-  }
-  throw enrichFetchError(lastErr, apiBaseUrl, opts.phase || '请求');
+/**
+ * 单次 fetch —— **不再自带退避重试**。
+ * 瞬时重试/退避由外层 runRendererLlmReconnectRetry（单一来源 src/llm-reconnect-retry.js）
+ * 统一负责；内层再退避会与其形成双层重试（且富化后的错误无法再被 isTransient 分类）。
+ * 此处原样抛出，交由外层完成重试与 enrichFetchError 文案富化。
+ */
+async function apiFetchOnce(url, init) {
+  return fetch(url, init);
 }
 
 function formatAgentApiError(err, fallbackBaseUrl) {
@@ -216,44 +220,6 @@ function noteLlmFailure(err, apiBaseUrl) {
   showAgentToast('模型连接不稳定', body, { variant: 'warn' });
 }
 
-function sleepMs(ms, signal) {
-  const wait = Math.max(0, Number(ms) || 0);
-  if (!signal) {
-    return new Promise((r) => setTimeout(r, wait));
-  }
-  if (signal.aborted) {
-    const err = new Error('已停止');
-    err.name = 'AbortError';
-    return Promise.reject(err);
-  }
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve();
-    }, wait);
-    const onAbort = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      const err = new Error('已停止');
-      err.name = 'AbortError';
-      reject(err);
-    };
-    const cleanup = () => {
-      clearTimeout(timer);
-      if (typeof signal.removeEventListener === 'function') {
-        signal.removeEventListener('abort', onAbort);
-      }
-    };
-    if (typeof signal.addEventListener === 'function') {
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-  });
-}
-
 /**
  * 主对话重连墙钟预算：显式正数优先，否则读 agent-limits（默认 30 分钟）。
  * 返回 0 表示退回「流式轮次重试」次数模式。
@@ -272,57 +238,47 @@ function resolveRendererReconnectBudgetMs(explicit) {
   return 0;
 }
 
+/**
+ * 重连重试的**循环、退避与错误分类**由 src/llm-reconnect-retry.js 单一来源提供
+ * （经 agent-bundle 注册为 window.LlmReconnectRetry，与 Main 侧同一份实现）。
+ * 本函数只补渲染层专有部分：错误文案富化、连续失败通知、用户取消语义（见 isUserAbortError）。
+ */
+function resolveLlmReconnectRetry() {
+  const mod = typeof window !== 'undefined' ? window.LlmReconnectRetry : null;
+  return mod && typeof mod.runWithLlmReconnectRetry === 'function' ? mod : null;
+}
+
 async function runRendererLlmReconnectRetry(runOnce, opts = {}) {
-  const { signal, onWait, maxWaitMs = 0 } = opts;
-  const maxRetries = STREAM_ROUND_MAX_ATTEMPTS();
-  const retryBase = LLM_RETRY_BASE_MS();
-  // 必须调用方显式传预算才进入时间模式；缺省保持次数模式（旧行为）
-  const timeBudgetMs = Number(maxWaitMs) > 0 ? Number(maxWaitMs) : 0;
-  const startedAt = Date.now();
-  let retryAttempt = 0;
-  let lastErr;
-  for (;;) {
-    if (signal?.aborted) {
-      const err = new Error('已停止');
-      err.name = 'AbortError';
-      throw err;
-    }
-    // 时间驱动：首次必试，之后墙钟耗尽即停（不受次数上限约束）
-    if (retryAttempt > 0 && timeBudgetMs > 0 && Date.now() - startedAt >= timeBudgetMs) break;
+  const { signal, onWait, maxWaitMs = 0, apiBaseUrl, phase = 'LLM' } = opts;
+  const shared = resolveLlmReconnectRetry();
+  if (!shared) {
+    // 缺失只可能因 renderer agent bundle 未重建；降级为单次尝试，绝不在此复制退避循环。
+    console.warn('[agent-llm] window.LlmReconnectRetry 缺失，重连重试降级为单次尝试；请重建 renderer agent bundle');
     try {
       return await runOnce();
     } catch (err) {
-      lastErr = enrichFetchError(err, opts.apiBaseUrl, opts.phase || 'LLM');
-      if (isUserAbortError(err) || isUserAbortError(lastErr)) throw lastErr;
-      if (!isTransientFetchError(lastErr)) throw lastErr;
-      retryAttempt += 1;
-      if (timeBudgetMs > 0) {
-        if (Date.now() - startedAt >= timeBudgetMs) break;
-      } else if (retryAttempt > maxRetries) {
-        break;
-      }
-      const elapsed = Date.now() - startedAt;
-      const waitMs = Math.min(LLM_RECONNECT_MAX_DELAY_MS, retryBase * Math.pow(2, retryAttempt - 1));
-      // 时间驱动：剩余时间放不下下一次退避 → 不再空等
-      if (timeBudgetMs > 0 && timeBudgetMs - elapsed <= waitMs) break;
-      if (typeof onWait === 'function') {
-        await onWait({
-          attempt: retryAttempt,
-          waitMs,
-          error: lastErr,
-          elapsedMs: elapsed,
-          maxRetries: timeBudgetMs > 0 ? 0 : maxRetries,
-          maxWaitMs: timeBudgetMs,
-          remainingMs: timeBudgetMs > 0 ? Math.max(0, timeBudgetMs - elapsed) : 0
-        });
-      }
-      await sleepMs(waitMs, signal);
+      throw enrichFetchError(err, apiBaseUrl, phase);
     }
   }
-  noteLlmFailure(lastErr, opts.apiBaseUrl);
-  const exhausted = lastErr || new Error('模型连接恢复超时');
-  exhausted.code = 'LLM_RECONNECT_EXHAUSTED';
-  throw exhausted;
+  try {
+    return await shared.runWithLlmReconnectRetry(runOnce, {
+      signal,
+      onWait,
+      isTransient: isTransientFetchError,
+      // baseDelayMs / maxRetries 取 agent-limits 配置；maxDelayMs 用共享模块默认，勿再复制常量。
+      baseDelayMs: LLM_RETRY_BASE_MS(),
+      maxRetries: STREAM_ROUND_MAX_ATTEMPTS(),
+      maxWaitMs: Number(maxWaitMs) > 0 ? Number(maxWaitMs) : 0
+    });
+  } catch (err) {
+    // 共享循环抛出的错误未富化；此处补文案，并保留 LLM_RECONNECT_EXHAUSTED
+    // （renderer-agent-rust-loop 依赖该 code 判定可续跑断点）。
+    const exhausted = !!(err && err.code === 'LLM_RECONNECT_EXHAUSTED');
+    if (exhausted) noteLlmFailure(err, apiBaseUrl);
+    const out = enrichFetchError(err, apiBaseUrl, phase);
+    if (err && err.code && !out.code) out.code = err.code;
+    throw out;
+  }
 }
 
 /** AbortSignal 不能经 contextBridge 传递，须在渲染进程绑定后通过 IPC 中止主进程请求 */
@@ -661,19 +617,8 @@ async function fetchChatCompletion({ model, messages, temperature, max_tokens, r
     bodyPayload.response_format = response_format;
   }
   const body = JSON.stringify(bodyPayload);
-  // 请求头单一来源（llm-request）：自定义头 / User-Agent / 会话标识随 apiConfig 一并带出。
-  // 模块缺失时降级为「Content-Type + Bearer」，保证对话仍可用（只是不带自定义头）。
-  const llmApi = typeof window !== 'undefined' ? window.LlmRequest : null;
-  const headers =
-    llmApi && typeof llmApi.buildLlmHeadersFromConfig === 'function'
-      ? llmApi.buildLlmHeadersFromConfig(
-          { ...(apiConfig || {}), baseUrl: apiBaseUrl, apiKey },
-          { sessionId: currentSessionId }
-        )
-      : {
-          'Content-Type': 'application/json',
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
-        };
+  // 请求头装配单点（唯一来源 llm-request，见 buildRendererLlmHeaders）。
+  const headers = buildRendererLlmHeaders(apiConfig, apiBaseUrl, apiKey);
 
   return runRendererLlmReconnectRetry(
     async () => {
@@ -695,12 +640,8 @@ async function fetchChatCompletion({ model, messages, temperature, max_tokens, r
           unbind();
         }
       } else {
-        const resp = await apiFetchWithRetry(
-          url,
-          { method: 'POST', headers, body, signal },
-          apiBaseUrl,
-          { phase: '对话请求', retries: 0 }
-        );
+        // 单次请求；瞬时重试由外层 runRendererLlmReconnectRetry 统一负责。
+        const resp = await apiFetchOnce(url, { method: 'POST', headers, body, signal });
         if (!resp.ok) {
           const errText = await resp.text();
           const err = new Error(`HTTP ${resp.status} ${resp.statusText}\n${errText.slice(0, 400)}`);
@@ -958,18 +899,7 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
   sendBody.stream_options = { ...(sendBody.stream_options || {}), include_usage: true };
 
   const url = resolveEndpoint(apiBaseUrl);
-  // 同上：模块缺失时降级，不让流式对话整体失败
-  const llmApi = typeof window !== 'undefined' ? window.LlmRequest : null;
-  const headers =
-    llmApi && typeof llmApi.buildLlmHeadersFromConfig === 'function'
-      ? llmApi.buildLlmHeadersFromConfig(
-          { ...(apiConfig || {}), baseUrl: apiBaseUrl, apiKey },
-          { sessionId: currentSessionId }
-        )
-      : {
-          'Content-Type': 'application/json',
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
-        };
+  const headers = buildRendererLlmHeaders(apiConfig, apiBaseUrl, apiKey);
   const payload = JSON.stringify(sendBody);
 
   const sse = resolveSseDeltaParse();
@@ -1016,12 +946,7 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
       unbind();
     }
   } else {
-    const resp = await apiFetchWithRetry(
-      url,
-      { method: 'POST', headers, body: payload, signal },
-      apiBaseUrl,
-      { phase: '流式对话' }
-    );
+    const resp = await apiFetchOnce(url, { method: 'POST', headers, body: payload, signal });
     if (!resp.ok) {
       const errText = await resp.text();
       const err = new Error(`HTTP ${resp.status} ${resp.statusText}\n${errText.slice(0, 400)}`);
@@ -1033,9 +958,7 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
     try {
       while (true) {
         if (signal?.aborted) {
-          const err = new Error('已停止');
-          err.name = 'AbortError';
-          throw err;
+          throw userAbortError();
         }
         let done;
         let value;
@@ -1043,9 +966,7 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
           ({ done, value } = await reader.read());
         } catch (err) {
           if (signal?.aborted || err?.name === 'AbortError') {
-            const abortErr = new Error('已停止');
-            abortErr.name = 'AbortError';
-            throw abortErr;
+            throw userAbortError();
           }
           throw enrichFetchError(err, apiBaseUrl, '流式响应');
         }
@@ -1062,9 +983,7 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
   }
 
   if (signal?.aborted) {
-    const err = new Error('已停止');
-    err.name = 'AbortError';
-    throw err;
+    throw userAbortError();
   }
 
   sse.flushSseBuffer(sseBuffer, applyDelta, sseOpts);

@@ -5,6 +5,17 @@ let mermaidReady = false;
 let mermaidCounter = 0;
 let mermaidSubgraphSeq = 0;
 
+// 基础配置单一来源：两处 initialize 共用，避免加字段时漏改。
+// loose：LLM 图里中文/括号标签更稳；渲染前会去掉 HTML/<br/>
+// suppressErrorRendering 属「增强项」——旧版 mermaid 不认该字段会抛错，故 catch 兜底显式去掉。
+const MERMAID_BASE_OPTIONS = {
+  startOnLoad: false,
+  theme: 'neutral',
+  securityLevel: 'loose',
+  fontFamily: 'Segoe UI, system-ui, sans-serif',
+  flowchart: { htmlLabels: false, curve: 'basis' }
+};
+
 function initMermaidRender() {
   if (mermaidReady) return !!window.mermaid;
   if (!window.mermaid) {
@@ -12,26 +23,12 @@ function initMermaidRender() {
     return false;
   }
   try {
-    window.mermaid.initialize({
-      startOnLoad: false,
-      theme: 'neutral',
-      // loose：LLM 图里中文/括号标签更稳；渲染前会去掉 HTML/<br/>
-      securityLevel: 'loose',
-      suppressErrorRendering: true,
-      fontFamily: 'Segoe UI, system-ui, sans-serif',
-      flowchart: { htmlLabels: false, curve: 'basis' }
-    });
+    window.mermaid.initialize({ ...MERMAID_BASE_OPTIONS, suppressErrorRendering: true });
     mermaidReady = true;
     return true;
   } catch (e) {
     try {
-      window.mermaid.initialize({
-        startOnLoad: false,
-        theme: 'neutral',
-        securityLevel: 'loose',
-        fontFamily: 'Segoe UI, system-ui, sans-serif',
-        flowchart: { htmlLabels: false, curve: 'basis' }
-      });
+      window.mermaid.initialize({ ...MERMAID_BASE_OPTIONS });
       mermaidReady = true;
       return true;
     } catch (e2) {

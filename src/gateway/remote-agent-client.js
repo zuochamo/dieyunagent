@@ -3,14 +3,12 @@
 const crypto = require('crypto');
 const WebSocket = require('ws');
 
+const { sleepMs } = require('../llm-reconnect-retry');
+
 const PING_INTERVAL_MS = 25000;
 const CALL_RECONNECT_ATTEMPTS = 3;
 const CALL_RECONNECT_BASE_MS = 600;
 const MAX_CACHED_CLIENTS = 6;
-
-function sleepMs(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 function isDisconnectError(err) {
   const msg = String((err && err.message) || err || '').toLowerCase();

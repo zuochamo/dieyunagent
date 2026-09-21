@@ -11,10 +11,7 @@ const { spillToolOutputIfLarge } = require('./tool-output-spill');
 const { recordToolTelemetry } = require('./tool-telemetry');
 
 const { getAgentLimits } = require('./agent-limits');
-
-function sleepMs(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+const { sleepMs } = require('../llm-reconnect-retry');
 
 function formatArgsBrief(name, args) {
   if (!args || typeof args !== 'object') return '';

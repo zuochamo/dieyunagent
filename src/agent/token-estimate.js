@@ -3,8 +3,13 @@
 /**
  * 文本 → token 估算的**唯一来源**。
  *
- * 公式与 Rust `crates/dieyun-core/src/compaction/tokens.rs::estimate_text_tokens`
- * 逐字对齐：`ceil(cjk / CJK_CHARS_PER_TOKEN + other / CHARS_PER_TOKEN)`。
+ * 公式与 Rust `crates/dieyun-core/src/compaction/tokens.rs` **逐字对齐**：
+ * `ceil(cjk / CJK_CHARS_PER_TOKEN + other / CHARS_PER_TOKEN)`，且总长按 **Unicode 码点**
+ * 计（与 Rust `str::chars()` 一致：星平面字符算 1，而非 UTF-16 码元的 2）。
+ * 两语言共用同一基线 `test/fixtures/token-estimate-cases.json`，由
+ * `test/unit/token-estimate.test.cjs` 与 `tokens.rs` 的 `#[cfg(test)]` 两侧分别校验
+ * —— 改公式必须同时改两侧实现与该基线。
+ *
  * Main 侧 compaction 直接走 Rust；JS 侧（账本扣减 / 用量估算 / UI 圆环 / 上下文预算）
  * 一律消费本模块，避免出现「中文按 3.2、英文按 3.2 / 或只算 CJK」这类互相打架的启发式。
  *
@@ -17,7 +22,12 @@ const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const CHARS_PER_TOKEN = AGENT_LIMITS_DEFAULTS.charsPerToken;
 const CJK_CHARS_PER_TOKEN = AGENT_LIMITS_DEFAULTS.cjkCharsPerToken;
 
-const CJK_RE = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g;
+/** CJK 字符类单一来源（与 Rust `is_cjk` 的区段一一对应）。 */
+const CJK_CLASS = '\\u4e00-\\u9fff\\u3400-\\u4dbf\\uf900-\\ufaff\\u3040-\\u309f\\u30a0-\\u30ff\\uac00-\\ud7af';
+/** 全局版：用于 `match` 统计个数。 */
+const CJK_RE = new RegExp(`[${CJK_CLASS}]`, 'g');
+/** 单字符版：用于逐码点 `test`（不可带 g，否则 lastIndex 有状态）。 */
+const CJK_CHAR_RE = new RegExp(`[${CJK_CLASS}]`);
 
 /** 统计字符串中的 CJK 字符数（乱码修复 / token 估算共用同一字符类）。 */
 function countCjkChars(text) {
@@ -26,45 +36,72 @@ function countCjkChars(text) {
   return (s.match(CJK_RE) || []).length;
 }
 
-/** 与 Rust `estimate_text_tokens` 同式：`ceil(cjk/1.5 + other/3.2)`。 */
+/**
+ * 与 Rust `estimate_text_tokens` 同式：`ceil(cjk/1.5 + other/3.2)`。
+ * 迭代 **Unicode 码点**（`for...of`），CJK 与总长同口径，避免 emoji / 扩展区字符
+ * 被 UTF-16 码元计成 2 而与 Rust 分叉。
+ */
 function estimateTextTokens(text) {
   const s = String(text == null ? '' : text);
   if (!s) return 0;
-  const cjk = countCjkChars(s);
-  return Math.ceil(cjk / CJK_CHARS_PER_TOKEN + (s.length - cjk) / CHARS_PER_TOKEN);
+  let cjk = 0;
+  let total = 0;
+  for (const ch of s) {
+    total += 1;
+    if (CJK_CHAR_RE.test(ch)) cjk += 1;
+  }
+  return Math.ceil(cjk / CJK_CHARS_PER_TOKEN + (total - cjk) / CHARS_PER_TOKEN);
 }
 
-/** 提取消息正文文本：字符串 / 多段 parts（text|content）。 */
-function messageContentText(content) {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
-        if (part && typeof part === 'object') return part.text || part.content || '';
-        return '';
-      })
-      .join('\n');
+/** 对象按 JSON 全量计费（与 Rust `Value::to_string()` 一致）；异常退化为 0。 */
+function estimateJsonTokens(value) {
+  try {
+    return estimateTextTokens(JSON.stringify(value));
+  } catch {
+    return 0;
   }
-  return '';
 }
 
 /**
- * 单条消息计费：正文 + 工具调用参数 + 6 结构开销。
- * 与 Rust `estimate_messages_tokens` 同构，并额外计入 assistant.tool_calls
- * （该部分同样占用真实窗口）。
+ * 与 Rust `estimate_tokens` 逐字对齐的内容计费：
+ * - `null` / `undefined` → 0
+ * - string → 文本
+ * - array → 各元素**分别**计费后求和（**无分隔符**；与 Rust 一致）
+ * - object → 取 `text`（否则 `content`）字符串；非字符串或缺失时按整个 JSON 计费
+ * - 其它标量 → `String(value)`
+ */
+function estimateContentTokens(content) {
+  if (content == null) return 0;
+  if (typeof content === 'string') return estimateTextTokens(content);
+  if (Array.isArray(content)) {
+    let sum = 0;
+    for (const part of content) sum += estimateContentTokens(part);
+    return sum;
+  }
+  if (typeof content === 'object') {
+    for (const key of ['text', 'content']) {
+      if (content[key] !== undefined) {
+        return typeof content[key] === 'string'
+          ? estimateTextTokens(content[key])
+          : estimateJsonTokens(content);
+      }
+    }
+    return estimateJsonTokens(content);
+  }
+  return estimateTextTokens(String(content));
+}
+
+/**
+ * 单条消息计费：正文（`estimateContentTokens`，与 Rust `estimate_messages_tokens` 同构）
+ * + 6 结构开销 + **`assistant.tool_calls`**。
+ * tool_calls 是**刻意的 JS 侧增量**：该部分同样占真实窗口，Rust 侧不计，故两侧
+ * message 级总量在此项存在受预期的差异（见 fixture 的 `jsOnly`）。
  */
 function estimateMessageTokens(message) {
   if (!message) return 6;
-  let text = messageContentText(message.content);
-  if (message.tool_calls) {
-    try {
-      text = `${text || ''}\n${JSON.stringify(message.tool_calls)}`;
-    } catch {
-      // 循环引用等异常：忽略 tool_calls 部分
-    }
-  }
-  return estimateTextTokens(text) + 6;
+  let tokens = estimateContentTokens(message.content) + 6;
+  if (message.tool_calls) tokens += estimateContentTokens(message.tool_calls);
+  return tokens;
 }
 
 /** 整段消息计费。 */
@@ -99,7 +136,7 @@ module.exports = {
   CJK_RE,
   countCjkChars,
   estimateTextTokens,
-  messageContentText,
+  estimateContentTokens,
   estimateMessageTokens,
   estimateMessagesTokens,
   estimateToolsTokens,
