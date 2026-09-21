@@ -30,9 +30,10 @@
 
 ## LLM 原始响应体抓包（临时排障）
 
-`TraceRound` 一轮只留 `thought` / `fullThought` / `tools`，而 Rust 侧
-`thought_raw = reasoning || content` —— 两者落库前已经合成一段文字，
-所以「这段文字来自上游 `content` 还是 `reasoning_content`」在库里无法区分，
+`TraceRound` 一轮留 `thought` / `fullThought` / `contentSource` / `visibleContent` / `tools`。
+`contentSource` 已能区分「本轮正文来自哪个通道」（`answer` / `reasoning` / `absent` / `synthetic`），
+但它记的是**账本结论**（入口盖章 + Rust 分流之后），不是上游原始键 ——
+要看「这段文字在响应体里落在哪个键下」，仍然要抓包，
 `main.log` 也不含响应体。此时打开抓包，拿上游原始报文当唯一真相：
 
 ```bash

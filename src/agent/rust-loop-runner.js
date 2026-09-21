@@ -492,6 +492,11 @@ async function fetchLlmRound({
     }
   }
 
+  // 通道身份随账本一起交给 Rust：`content` 键属于正文还是思考由能力表（入口）决定，
+  // Rust 不再用「长度 ≥24 且不含 <tool_call」这类启发式猜（§3.3）。
+  // 这里只**标注**、不搬迁字段：`llmResp.content` 的既有消费方（UI 的 llm_response、
+  // 压缩回退）不受影响；账本层的分流由 Rust 依据 `contentChannel` 完成。
+  llmResp = { ...llmResp, contentChannel };
   return llmResp;
 }
 

@@ -51,34 +51,26 @@ fn parse_status_value(raw: &str) -> Option<&'static str> {
     }
 }
 
-fn content_or_reasoning(content: Option<&str>, reasoning: Option<&str>) -> String {
-    let content = content.unwrap_or("").to_string();
-    if !content.trim().is_empty() {
-        return content;
-    }
-    let reasoning = reasoning.unwrap_or("").trim();
-    if reasoning.chars().count() >= 24 && !reasoning.contains("<tool_call") {
-        return reasoning.to_string();
-    }
-    content
-}
-
 /// 本段结束、交给下游的正文 —— **四条终态路径（正常收尾 / 轮次上限 / 工具次数上限）
 /// 只有这一处口径**：
-/// - 有正文用正文；
-/// - 正文为空才回退到「像正文的」reasoning（守卫见 `content_or_reasoning`）；
-/// - 两者都没有则 `None`：下游（`applyTurnEndSynthesis`、子 Agent 摘要）据此判定「空回复」，
-///   而不是收到一个空字符串的假正文。
+/// - 思考通道（`ContentChannel::Reasoning`，单通道模型的 `content` 键）**永不**作为正文；
+/// - 其余情况正文为空即 `None`：下游（`applyTurnEndSynthesis`、子 Agent 摘要）据此
+///   判定「空回复」，而不是拿到一段空字符串的假正文。
 ///
-/// 命中预算的分支尤其依赖这条兜底：模型被打断的那一轮正文通常是空的，只有 reasoning 有内容。
-/// 早先这两条分支直接取 `llm.content`，于是「预算耗尽」总是回 `None`，被摘要层记成
-/// 「模型没给结论」—— 而它与「被预算截断」是两种处置（前者换问法，后者缩小问题重派）。
-fn delivered_content(content: Option<&str>, reasoning: Option<&str>) -> Option<String> {
-    let text = content_or_reasoning(content, reasoning);
+/// 旧实现会在正文为空时把「像正文的」reasoning 顶上来（`chars().count() >= 24` 且不含
+/// `<tool_call`）。那条兜底让「模型到底有没有给结论」在 UI 上失真 —— 思考被复述成回答，
+/// 且阈值纯属拍脑袋的启发式。通道身份改由入口盖章（`ContentChannel`）后即可删掉。
+/// 「被轮次/预算截断」这一事实由 `hit_round_limit` 与 `TraceRound.content_source` 表达，
+/// 交付形态交给 Node 侧的四态收口（见 docs/REASONING-ISOLATION-PLAN.md §3.4）。
+fn delivered_content(content: Option<&str>, channel: ContentChannel) -> Option<String> {
+    if channel == ContentChannel::Reasoning {
+        return None;
+    }
+    let text = content.unwrap_or("");
     if text.trim().is_empty() {
         None
     } else {
-        Some(text)
+        Some(text.to_string())
     }
 }
 
@@ -259,6 +251,34 @@ pub struct ToolCallInput {
     pub arguments: Value,
 }
 
+/// 入口盖章（Node `llm-channel.getChannelPolicy`）：本轮 `content` 键属于哪个通道。
+///
+/// 单通道模型（能力表按精确模型 id 声明 `singleChannel`）把思考塞在 `content` 键里，
+/// 盖章后 Rust 账本不必再用「文本长度 / 是否含 markup」这类启发式猜。
+/// 未声明的模型一律 `Answer`；未知取值降级为 `Absent`，不阻断请求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentChannel {
+    Answer,
+    Reasoning,
+    #[default]
+    #[serde(other)]
+    Absent,
+}
+
+/// 账本事实：本轮**可交付正文**的来源（`TraceRound.content_source`）。
+///
+/// 与 `ContentChannel` 刻意分开：入口只可能盖出前三种，`Synthetic` 是**平台补的**
+/// 文本（段上限提示），只有账本会记录它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentSource {
+    Answer,
+    Reasoning,
+    Absent,
+    Synthetic,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmResponseInput {
@@ -270,6 +290,8 @@ pub struct LlmResponseInput {
     pub tool_calls: Vec<ToolCallInput>,
     #[serde(default)]
     pub finish_reason: Option<String>,
+    #[serde(default)]
+    pub content_channel: ContentChannel,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -288,6 +310,12 @@ pub struct TraceRound {
     pub thought: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full_thought: Option<String>,
+    /// 本轮正文来自哪个通道 —— 账本事实。展示层据此决定「要不要进回答区」，
+    /// 不再用 `reasoning || content` 之类启发式回推。
+    pub content_source: ContentSource,
+    /// 本轮面向用户的正文（`Answer` 才非空；`Synthetic` 记平台提示文本）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible_content: Option<String>,
     pub tools: Vec<TraceTool>,
 }
 
@@ -376,15 +404,39 @@ const TRUNCATED_TOOL_ERROR: &str =
 
 /// When a segment hits the tool-call cap, persist text-only assistant output.
 /// Never append `tool_calls` without matching `tool` results — that breaks long-horizon continuation.
-fn push_assistant_text_only(messages: &mut Vec<Value>, content: Option<&String>, fallback: &str) {
+///
+/// `synthetic: true` 标明这段正文是**平台补的**（上限提示），不是模型原话。账本据此把
+/// 该轮记成 `ContentSource::Synthetic`。字段只活在账本里：发给上游前会经出站白名单
+/// `sanitizeMessagesForChatApi` 过滤，未知字段不会漏到 OpenAI 兼容接口。
+/// 返回写入的文本，供调用方记账。
+fn push_assistant_text_only(
+    messages: &mut Vec<Value>,
+    content: Option<&String>,
+    fallback: &str,
+) -> String {
     let text = content
         .filter(|c| !c.trim().is_empty())
         .map(|c| c.as_str())
-        .unwrap_or(fallback);
+        .unwrap_or(fallback)
+        .to_string();
     messages.push(json!({
         "role": "assistant",
-        "content": text
+        "content": text,
+        "synthetic": true
     }));
+    text
+}
+
+/// 思考原文的来源**唯一**：`reasoning` 键；单通道模型（入口盖章 `content` 即思考）
+/// 则取 `content` 键。绝不拿「正文」兜底思考 —— 旧实现正是靠那条兜底让思考区复述回答。
+fn llm_thought_raw(llm: &LlmResponseInput) -> Option<String> {
+    let pick = |slot: &Option<String>| -> Option<String> {
+        slot.as_ref().filter(|v| !v.trim().is_empty()).cloned()
+    };
+    match llm.content_channel {
+        ContentChannel::Reasoning => pick(&llm.content).or_else(|| pick(&llm.reasoning)),
+        _ => pick(&llm.reasoning),
+    }
 }
 
 impl AgentLoopManager {
@@ -467,26 +519,29 @@ impl AgentLoopManager {
         if state.cancelled {
             return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
         }
+        // 通道身份随本轮一起进来：`Reasoning` 表示 `content` 键里装的是思考
+        // （单通道模型），账本据此把它记进思考，绝不进交付正文。
+        let channel = llm.content_channel;
         if state.round >= state.max_rounds {
             if llm.tool_calls.is_empty() {
                 let trace = state.trace.clone();
-                let content = delivered_content(llm.content.as_deref(), llm.reasoning.as_deref());
+                let content = delivered_content(llm.content.as_deref(), channel);
                 drop(runs);
                 return Ok(self.finish_run(run_id, trace, content, false));
             }
-            push_assistant_text_only(
-                &mut state.messages,
-                llm.content.as_ref(),
-                &format!("已达本段 {} 轮上限", state.max_rounds),
-            );
+            let hint = format!("已达本段 {} 轮上限", state.max_rounds);
+            let synthetic_text =
+                push_assistant_text_only(&mut state.messages, llm.content.as_ref(), &hint);
             state.trace.push(TraceRound {
                 round: state.round,
-                thought: format!("已达本段 {} 轮上限", state.max_rounds),
-                full_thought: llm.reasoning.clone(),
+                thought: hint,
+                full_thought: llm_thought_raw(&llm),
+                content_source: ContentSource::Synthetic,
+                visible_content: Some(synthetic_text),
                 tools: Vec::new(),
             });
             let trace = state.trace.clone();
-            let content = delivered_content(llm.content.as_deref(), llm.reasoning.as_deref());
+            let content = delivered_content(llm.content.as_deref(), channel);
             drop(runs);
             return Ok(self.finish_run(run_id, trace, content, true));
         }
@@ -513,12 +568,9 @@ impl AgentLoopManager {
         if !had_plan && content_stripped.chars().count() >= MIN_RECORDED_PLAN_CHARS {
             state.recorded_plan = Some(content_stripped.clone());
         }
-        let thought_raw = llm
-            .reasoning
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| stored_content.clone());
+        // 思考原文只来自思考通道：`reasoning` 键，或（单通道模型）`content` 键。
+        // 不再用「正文」兜底思考 —— 那正是旧实现让思考区复述回答的路径。
+        let thought_raw = llm_thought_raw(&llm).unwrap_or_default();
         let display_thought = sanitize_thought(&thought_raw, &previous_thoughts);
         let full_thought = if display_thought.is_empty() {
             None
@@ -526,12 +578,28 @@ impl AgentLoopManager {
             Some(display_thought.clone())
         };
         let thought = display_thought.chars().take(500).collect::<String>();
+        // 可交付正文 = 非思考通道 且 内容非空。思考通道的 `content` 只是思考的存放处，
+        // 交给下游会把推理复述成结论（UI 上就是「回答区出现了思考」）。
+        let visible_content = if channel != ContentChannel::Reasoning
+            && !stored_content.trim().is_empty()
+        {
+            Some(stored_content.clone())
+        } else {
+            None
+        };
+        let content_source = if visible_content.is_some() {
+            ContentSource::Answer
+        } else if full_thought.is_some() {
+            ContentSource::Reasoning
+        } else {
+            ContentSource::Absent
+        };
         let trace_tools = Vec::new();
 
         if !llm.tool_calls.is_empty() {
             let mut assistant_msg = json!({
                 "role": "assistant",
-                "content": stored_content,
+                "content": stored_content.clone(),
                 "tool_calls": llm.tool_calls.iter().map(|tc| json!({
                     "id": tc.id,
                     "type": "function",
@@ -552,19 +620,19 @@ impl AgentLoopManager {
             }
 
             if state.tool_calls_used + llm.tool_calls.len() as u32 > state.max_tool_calls {
-                push_assistant_text_only(
-                    &mut state.messages,
-                    llm.content.as_ref(),
-                    &format!("已达本段 {} 次工具调用上限", state.max_tool_calls),
-                );
+                let hint = format!("已达本段 {} 次工具调用上限", state.max_tool_calls);
+                let synthetic_text =
+                    push_assistant_text_only(&mut state.messages, llm.content.as_ref(), &hint);
                 state.trace.push(TraceRound {
                     round: round_no,
-                    thought: format!("已达本段 {} 次工具调用上限", state.max_tool_calls),
-                    full_thought: llm.reasoning.clone(),
+                    thought: hint,
+                    full_thought: llm_thought_raw(&llm),
+                    content_source: ContentSource::Synthetic,
+                    visible_content: Some(synthetic_text),
                     tools: trace_tools,
                 });
                 let trace = state.trace.clone();
-                let content = delivered_content(llm.content.as_deref(), llm.reasoning.as_deref());
+                let content = delivered_content(llm.content.as_deref(), channel);
                 drop(runs);
                 return Ok(self.finish_run(run_id, trace, content, true));
             }
@@ -582,6 +650,8 @@ impl AgentLoopManager {
                 round: round_no,
                 thought: thought.clone(),
                 full_thought,
+                content_source,
+                visible_content: visible_content.clone(),
                 tools: trace_tools,
             });
 
@@ -626,10 +696,12 @@ impl AgentLoopManager {
             round: round_no,
             thought,
             full_thought,
+            content_source,
+            visible_content,
             tools: trace_tools,
         });
         let trace = state.trace.clone();
-        let content = delivered_content(llm.content.as_deref(), llm.reasoning.as_deref());
+        let content = delivered_content(llm.content.as_deref(), channel);
         drop(runs);
         Ok(self.finish_run(run_id, trace, content, false))
     }
@@ -846,9 +918,7 @@ mod tests {
                 &start.run_id,
                 LlmResponseInput {
                     content: Some("Let me check one more file.".into()),
-                    reasoning: None,
-                    tool_calls: vec![],
-                    finish_reason: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -860,8 +930,11 @@ mod tests {
         assert_eq!(msgs[0].get("role").and_then(|r| r.as_str()), Some("user"));
     }
 
+    /// 只有思考、没有正文的轮次：**不**把思考顶上来当正文（旧行为），
+    /// 而是 `content = None` + 账本记 `Reasoning`。空回复的收口在 Node 侧
+    /// （`applyTurnEndSynthesis` 用 trace 汇总），见 REASONING-ISOLATION-PLAN §3.4。
     #[tokio::test]
-    async fn empty_content_promotes_reasoning_as_user_reply() {
+    async fn reasoning_only_turn_yields_no_content_but_keeps_thought() {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
@@ -897,28 +970,110 @@ mod tests {
             .unwrap();
 
         assert_eq!(done.phase, "done");
-        assert_eq!(done.content.as_deref(), Some(writeup));
+        assert_eq!(done.content, None, "思考不得作为正文交付");
+        let rounds = done.trace.expect("trace");
+        let last = rounds.last().expect("round");
+        assert_eq!(last.content_source, ContentSource::Reasoning);
+        assert!(last.visible_content.is_none());
+        assert_eq!(last.full_thought.as_deref(), Some(writeup));
     }
 
+    /// 单通道模型（如 mimo）：入口把 `content` 键盖章为思考通道。
+    /// 此时 `content` 里的推理文本只进思考，**不得**成为交付正文 ——
+    /// 这是删掉 `content_or_reasoning` 兜底后「正文不等于思考」的核心回归点。
+    #[tokio::test]
+    async fn single_channel_content_becomes_thought_not_visible_reply() {
+        let dir = tempdir().unwrap();
+        let config = AppConfig::default();
+        let index = IndexService::new(
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
+            EmbeddingConfig::default(),
+            Vec::new(),
+        );
+        let mgr = AgentLoopManager::default();
+        let start = mgr
+            .start(StartParams {
+                model: "mimo-v2-flash".into(),
+                messages: vec![json!({"role":"user","content":"改一处 bug"})],
+                tools: vec![],
+                workspace_root: None,
+                max_tool_calls: Some(10),
+                max_rounds: Some(10),
+            })
+            .unwrap();
+
+        let reasoning_text = "先读 a.txt 再改 b.js，确认三处调用点都在同一条路径上，然后跑一次冒烟。";
+        let done = mgr
+            .continue_llm(
+                &config,
+                &index,
+                &start.run_id,
+                LlmResponseInput {
+                    content: Some(reasoning_text.into()),
+                    tool_calls: vec![],
+                    content_channel: ContentChannel::Reasoning,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(done.phase, "done");
+        assert_eq!(done.content, None, "单通道模型的 content 是思考，不能当正文");
+        let rounds = done.trace.expect("trace");
+        let last = rounds.last().expect("round");
+        assert_eq!(last.content_source, ContentSource::Reasoning);
+        assert!(last.visible_content.is_none());
+        assert_eq!(last.full_thought.as_deref(), Some(reasoning_text));
+    }
+
+    /// 入口传的是 camelCase 字段 + snake_case 取值，务必与 Node 端逐字对齐，
+    /// 否则通道盖章到不了账本（症状是「改了没效果」）。
     #[test]
-    fn delivered_content_is_none_only_when_both_empty() {
-        let fallback = "足够长的思考内容可以兜底正文，这段文字超过二十四个字符。";
+    fn llm_response_input_deserializes_content_channel() {
+        let as_reasoning: LlmResponseInput =
+            serde_json::from_value(json!({ "content": "推理文本", "contentChannel": "reasoning" }))
+                .unwrap();
+        assert_eq!(as_reasoning.content_channel, ContentChannel::Reasoning);
+
+        // 缺字段（旧版 Node / 未声明模型）回落 `Absent`，不报错
+        let legacy: LlmResponseInput = serde_json::from_value(json!({ "content": "ok" })).unwrap();
+        assert_eq!(legacy.content_channel, ContentChannel::Absent);
+
+        // 未知取值不阻断请求
+        let unknown: LlmResponseInput =
+            serde_json::from_value(json!({ "contentChannel": "whatever" })).unwrap();
+        assert_eq!(unknown.content_channel, ContentChannel::Absent);
+    }
+
+    /// 正文口径唯一：只看 `content` 与通道身份，**永不看** reasoning 文本长短。
+    #[test]
+    fn delivered_content_only_accepts_answer_channel() {
         assert_eq!(
-            delivered_content(Some("正文"), Some("reasoning")).as_deref(),
+            delivered_content(Some("正文"), ContentChannel::Answer).as_deref(),
             Some("正文")
         );
+        // 思考通道：即便有文本也不交付
         assert_eq!(
-            delivered_content(Some(""), Some(fallback)).as_deref(),
-            Some(fallback)
+            delivered_content(
+                Some("很长的推理文本，但它属于思考通道，不该被当成回答。"),
+                ContentChannel::Reasoning
+            ),
+            None
         );
-        assert_eq!(delivered_content(Some("  "), Some("too short")), None);
-        assert_eq!(delivered_content(None, None), None);
+        assert_eq!(delivered_content(Some("  "), ContentChannel::Answer), None);
+        assert_eq!(delivered_content(None, ContentChannel::Absent), None);
+        // 入口未盖章（旧版 Node / 未声明的模型）：按内容判定，保持向后兼容
+        assert_eq!(
+            delivered_content(Some("正文"), ContentChannel::Absent).as_deref(),
+            Some("正文")
+        );
     }
 
-    /// 命中预算的正文口径必须与正常收尾一致：被打断的那一轮正文通常为空、只有 reasoning，
-    /// 若两条 limit 分支直接取 `llm.content`，下游会把「预算截断」记成「模型没给结论」。
+    /// 命中上限的两条分支与正常收尾共用同一正文口径：**思考不顶正文**。
+    /// 上限轮的账本记 `ContentSource::Synthetic`（平台补的提示），
+    /// 「被截断」这一事实由 `hit_round_limit` 表达，交付形态交给 Node 收口。
     #[tokio::test]
-    async fn budget_limit_branches_deliver_reasoning_like_normal_done() {
+    async fn limit_branches_never_promote_reasoning_to_content() {
         let dir = tempdir().unwrap();
         let config = AppConfig::default();
         let index = IndexService::new(
@@ -963,7 +1118,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(done.hit_round_limit, Some(true));
-        assert_eq!(done.content.as_deref(), Some(reasoning));
+        assert_eq!(done.content, None, "上限轮不得把思考当正文交付");
+        let last = done.trace.as_ref().and_then(|t| t.last()).expect("round");
+        assert_eq!(last.content_source, ContentSource::Synthetic);
+        assert_eq!(last.full_thought.as_deref(), Some(reasoning));
 
         // 工具次数上限
         let start2 = mgr
@@ -990,21 +1148,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(done2.hit_round_limit, Some(true));
-        assert_eq!(done2.content.as_deref(), Some(reasoning));
-    }
-
-    #[test]
-    fn content_or_reasoning_skips_short_or_tool_markup() {
-        assert_eq!(
-            content_or_reasoning(Some("hello world this is visible"), Some("hidden")),
-            "hello world this is visible"
-        );
-        assert!(content_or_reasoning(Some(""), Some("too short")).is_empty());
-        assert!(content_or_reasoning(
-            Some(""),
-            Some("<tool_call>fs_read_file</tool_call> still long enough text here")
-        )
-        .is_empty());
+        assert_eq!(done2.content, None, "上限轮不得把思考当正文交付");
+        let last2 = done2.trace.as_ref().and_then(|t| t.last()).expect("round");
+        assert_eq!(last2.content_source, ContentSource::Synthetic);
     }
 
     #[tokio::test]
@@ -1348,13 +1494,13 @@ mod tests {
                 &start.run_id,
                 LlmResponseInput {
                     content: Some("editing".into()),
-                    reasoning: None,
                     tool_calls: vec![ToolCallInput {
                         id: "tc1".into(),
                         name: "fs_edit".into(),
                         arguments: json!({"filePath":"a.js","oldString":"x","newString":"y"}),
                     }],
                     finish_reason: Some("length".into()),
+                    ..Default::default()
                 },
             )
             .unwrap();

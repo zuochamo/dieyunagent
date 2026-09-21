@@ -138,6 +138,7 @@ async function testLlmOnlyRound() {
     'agent.loop.continue': async (params) => {
       assert(params.runId === 'run-1', 'continue runId');
       assert(params.llm && params.llm.content === 'ok', 'continue llm payload');
+      assert(params.llm.contentChannel === 'answer', 'continue llm carries contentChannel');
       return { runId: 'run-1', phase: 'done', content: 'ok' };
     }
   });
@@ -156,6 +157,43 @@ async function testLlmOnlyRound() {
     bridge.invokes.map((i) => i.method).join(',') === 'agent.loop.start,agent.loop.continue',
     'start then continue'
   );
+}
+
+/**
+ * 单通道模型（mimo）：`content` 键即思考 —— 入口把它盖章为 `reasoning`，
+ * Rust 账本据此不再把它当正文（见 docs/REASONING-ISOLATION-PLAN.md §3.3）。
+ */
+async function testContentChannelReachesLedger() {
+  const cases = [
+    ['m', 'answer'],
+    ['mimo-v2.5-pro', 'reasoning']
+  ];
+  for (const [model, expected] of cases) {
+    let seen = null;
+    const bridge = createFakeBridge({
+      'agent.loop.start': async () => ({
+        runId: 'run-1',
+        phase: 'need_llm',
+        llmBody: { model, messages: [{ role: 'user', content: 'hi' }], tools: [] }
+      }),
+      'agent.loop.continue': async (params) => {
+        seen = params.llm;
+        return { runId: 'run-1', phase: 'done', content: '' };
+      }
+    });
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1', apiKey: 'k' },
+      startParams: { model, messages: [] },
+      loopSpec: loopSpec(),
+      fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
+    });
+    assert(seen, `continue called for ${model}`);
+    assert(
+      seen.contentChannel === expected,
+      `contentChannel for ${model}: got ${seen.contentChannel}, want ${expected}`
+    );
+  }
 }
 
 async function testCompactThenContinue() {
@@ -1129,6 +1167,7 @@ async function run() {
   testNormalizeLlmResponse();
   testBackfillReasoningContent();
   await testLlmOnlyRound();
+  await testContentChannelReachesLedger();
   await testCompactThenContinue();
   await testCompactTimeoutContinuesLoop();
   await testCompactSkippedResultContinuesLoop();

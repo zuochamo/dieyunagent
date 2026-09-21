@@ -204,15 +204,10 @@ fn extract_completion_text(json: &Value) -> String {
     let Some(msg) = json.pointer("/choices/0/message") else {
         return String::new();
     };
-    let content = flatten_content(msg.get("content"));
-    if !content.trim().is_empty() {
-        return content;
-    }
-    let reasoning = flatten_content(msg.get("reasoning_content"));
-    if !reasoning.trim().is_empty() {
-        return reasoning;
-    }
-    flatten_content(msg.get("reasoning"))
+    // 只认正文通道。思考文本（`reasoning_content` / `reasoning`）不是压缩摘要 ——
+    // 旧实现在正文为空时把它们顶上来，于是「模型只思考、没输出」会被记成一份「摘要」写进
+    // 上下文，而摘要的内容其实是模型的思考过程。宁可返回空让上层跳过压缩。
+    flatten_content(msg.get("content"))
 }
 
 /// 压缩摘要 LLM：瞬时错误短重试；失败由上层跳过压缩，避免拖死停止。
@@ -338,10 +333,14 @@ mod tests {
         });
         assert_eq!(extract_completion_text(&as_parts), "abcd");
 
-        let reasoning = json!({
+        // 思考通道不是摘要：正文为空即视为「压缩模型没给结论」，由调用方判空跳过压缩。
+        let reasoning_only = json!({
             "choices": [{ "message": { "content": "", "reasoning_content": "only think" } }]
         });
-        assert_eq!(extract_completion_text(&reasoning), "only think");
+        assert!(
+            extract_completion_text(&reasoning_only).trim().is_empty(),
+            "reasoning_content 不得被当作压缩摘要"
+        );
 
         let empty = json!({ "choices": [{ "message": { "content": "" } }] });
         assert!(extract_completion_text(&empty).trim().is_empty());
