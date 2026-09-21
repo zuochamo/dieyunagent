@@ -84,6 +84,7 @@
     "test:delegate-batch": "node scripts/test-delegate-batch.cjs",
     "test:dieyun-core-pack": "node scripts/test-dieyun-core-pack.cjs",
     "test:agent-round-text": "node scripts/test-agent-round-text.cjs",
+    "test:llm-channel": "node scripts/test-llm-channel.cjs",
     "pack:remote-gateway": "node scripts/pack-remote-gateway.cjs",
     "pack:remote-gateway:lite": "node scripts/pack-remote-gateway.cjs --lite",
     "pack:optional-assets": "node scripts/pack-optional-assets.mjs",
