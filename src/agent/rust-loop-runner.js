@@ -32,6 +32,8 @@ const { executeDelegateBatch } = require('./delegate-batch');
 const { applyTurnEndSynthesis } = require('./agent-synthesis');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
 const { getChannelPolicy } = require('./llm-channel');
+// 思考占位补全的单一来源（Renderer 经 agent-bundle 消费同一份）。
+const { backfillReasoningContent } = require('./reasoning-backfill');
 
 const LOOP_START_TIMEOUT_MS = 30000;
 const LOOP_SET_MESSAGES_TIMEOUT_MS = 30000;
@@ -293,25 +295,6 @@ async function completeNonStreamChat(url, headers, body, signal, tag) {
 }
 
 /**
- * DeepSeek 思考模式 + tools 的硬校验：请求里只要带 tools，历史中的 assistant
- * 消息就必须回传 reasoning_content（含未发起 tool call 的普通回复轮）。
- * 修复前落库/续跑的历史消息没有该字段，发送前补占位，避免上游 HTTP 400。
- */
-function backfillReasoningContent(messages, hasTools) {
-  if (!Array.isArray(messages)) return messages;
-  let changed = false;
-  const next = messages.map((m) => {
-    if (!m || m.role !== 'assistant') return m;
-    const needsField = !!hasTools || (Array.isArray(m.tool_calls) && m.tool_calls.length > 0);
-    if (!needsField) return m;
-    if (typeof m.reasoning_content === 'string' && m.reasoning_content.trim()) return m;
-    changed = true;
-    return { ...m, reasoning_content: '（思考内容未随消息保存）' };
-  });
-  return changed ? next : messages;
-}
-
-/**
  * 诊断：上游因 reasoning_content 报 400 时，把本次请求的消息形态附到错误信息里，
  * 便于判断是「客户端漏传」还是「中间代理吞字段」。仅诊断，不改变行为。
  */
@@ -351,10 +334,12 @@ async function fetchLlmRound({
   // content 的通道身份：由能力表按模型声明一次，随每个 llm_delta 下发。
   // 展示层（live-loop-trace / plan-run-events / renderer-agent-rust-loop）只搬运，
   // 不再各自用 `reasoning || contentOnly` 猜 content 是正文还是思考。
-  const contentChannel = getChannelPolicy(body && body.model).singleChannel ? 'reasoning' : 'answer';
+  const policy = getChannelPolicy(body && body.model);
+  const contentChannel = policy.singleChannel ? 'reasoning' : 'answer';
   const requestBody = {
     ...body,
-    messages: backfillReasoningContent(body.messages, hasTools)
+    // 思考回传：真值优先取账本 `reasoning`，真值不可得才补占位；回传面由能力表统一声明。
+    messages: backfillReasoningContent(body.messages, hasTools, !!policy.echoReasoning)
   };
   let frozenPartial = { content: '', reasoning: '' };
   /**

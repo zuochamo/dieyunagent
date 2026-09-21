@@ -33,6 +33,7 @@ const llmRequest = require('../../agent/llm-request');
 const llmChannel = require('../../agent/llm-channel');
 const tokenEstimate = require('../../agent/token-estimate');
 const sseDeltaParse = require('../../agent/sse-delta-parse');
+const reasoningBackfill = require('../../agent/reasoning-backfill');
 const contextSignals = require('../../agent/context-signals');
 
 register('DieyunModelRuntimePresets', presets, {
@@ -175,6 +176,13 @@ register('DieyunTokenEstimate', {
 register('DieyunSseDeltaParse', { ...sseDeltaParse, SseDeltaParse: sseDeltaParse }, {
   compat: ['SseDeltaParse']
 });
+
+// 思考占位补全单一来源（Main 直接 require 同名模块）；Renderer 消费 window.ReasoningBackfill。
+register(
+  'DieyunReasoningBackfill',
+  { ...reasoningBackfill, ReasoningBackfill: reasoningBackfill },
+  { compat: ['ReasoningBackfill'] }
+);
 
 // 改造前 window.GuardrailsShared = 整个导出对象（键名与导出名不同名），此处显式补上。
 register('DieyunGuardrailsShared', { ...guardrailsShared, GuardrailsShared: guardrailsShared }, {

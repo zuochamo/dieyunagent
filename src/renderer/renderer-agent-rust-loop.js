@@ -1007,7 +1007,11 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
         browserVision: resolveBrowserVision(segmentBody.model),
         startParams: {
           model: segmentBody.model,
-          messages: sanitizeMessagesForChatApi(segmentBody.messages),
+          messages: sanitizeMessagesForChatApi(
+            segmentBody.messages,
+            (segmentBody.tools || tools || []).length > 0,
+            segmentBody.model
+          ),
           tools: segmentBody.tools || tools || [],
           maxToolCalls: scaleRunLimit('ctxAgentToolCallLimit', getAgentToolCallLimit(), options),
           maxRounds: scaleRunLimit('agentMaxRounds', getAgentMaxRounds(), options),

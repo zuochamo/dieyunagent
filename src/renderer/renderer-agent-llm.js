@@ -493,7 +493,35 @@ function normalizeMessageContentForApi(content) {
   return content == null ? '' : String(content);
 }
 
-function sanitizeMessagesForChatApi(messages) {
+/**
+ * 取思考回传共享实现（window.ReasoningBackfill，经 agent-bundle 注册的
+ * src/agent/reasoning-backfill.js）。缺失（bundle 未重建）时安全退化：不补占位并告警，
+ * 不在此内联第二份判定，避免与 Main 的语义再次分叉。
+ */
+function applyReasoningBackfill(messages, hasTools, echoReasoning) {
+  const mod = typeof window !== 'undefined' ? window.ReasoningBackfill : null;
+  if (!mod || typeof mod.backfillReasoningContent !== 'function') {
+    console.warn('[llm] window.ReasoningBackfill 未加载，跳过 reasoning_content 回传');
+    return messages;
+  }
+  return mod.backfillReasoningContent(messages, hasTools, !!echoReasoning);
+}
+
+/**
+ * 能力表是否声明「脱工具也回传思考」（getChannelPolicy(model).echoReasoning）。
+ * 缺失（bundle 未重建 / 模型未声明）时退化为 false，行为与改造前一致。
+ */
+function echoReasoningForModel(model) {
+  const ch = typeof window !== 'undefined' ? window.LlmChannel : null;
+  if (!ch || typeof ch.getChannelPolicy !== 'function' || !model) return false;
+  try {
+    return !!ch.getChannelPolicy(model).echoReasoning;
+  } catch (e) {
+    return false;
+  }
+}
+
+function sanitizeMessagesForChatApi(messages, hasTools, model) {
   const droppedIds = new Set();
   const mapped = (messages || []).map((m) => {
     const role = m && m.role ? String(m.role) : 'user';
@@ -518,25 +546,18 @@ function sanitizeMessagesForChatApi(messages) {
         if (!out.content) out.content = '';
       }
     }
-    // 修复前落库/续跑的历史轮没有 reasoning_content；DeepSeek 思考模式要求带
-    // tool_calls 的 assistant 消息必须回传该字段，缺失时补占位避免 HTTP 400。
-    if (
-      role === 'assistant' &&
-      Array.isArray(out.tool_calls) &&
-      out.tool_calls.length &&
-      !(typeof out.reasoning_content === 'string' && out.reasoning_content.trim())
-    ) {
-      out.reasoning_content = '（思考内容未随消息保存）';
-    }
     if (m?.tool_call_id) out.tool_call_id = String(m.tool_call_id);
     if (m?.name) out.name = String(m.name);
     return out;
   });
-  return mapped.filter((m) => {
+  const filtered = mapped.filter((m) => {
     if (!m || m.role !== 'tool') return true;
     const id = m.tool_call_id != null ? String(m.tool_call_id) : '';
     return !(id && droppedIds.has(id));
   });
+  // 历史轮思考回传：单一来源（reasoning-backfill）。真值优先取账本 `reasoning`，
+  // 真值不可得才补占位；判定与 Main 的 rust-loop-runner 完全一致（含「本轮带 tools 的普通回复轮」）。
+  return applyReasoningBackfill(filtered, !!hasTools, echoReasoningForModel(model));
 }
 
 function toTokenCount(value) {
@@ -627,7 +648,7 @@ async function fetchChatCompletion({ model, messages, temperature, max_tokens, r
   const url = resolveEndpoint(apiBaseUrl);
   const bodyPayload = {
     model,
-    messages: sanitizeMessagesForChatApi(messages),
+    messages: sanitizeMessagesForChatApi(messages, false, model),
     temperature,
     max_tokens
   };
@@ -923,7 +944,11 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
   delete sendBody._apiBaseUrl;
   delete sendBody._apiKey;
   delete sendBody._apiConfig;
-  sendBody.messages = sanitizeMessagesForChatApi(sendBody.messages);
+  sendBody.messages = sanitizeMessagesForChatApi(
+    sendBody.messages,
+    Array.isArray(sendBody.tools) && sendBody.tools.length > 0,
+    sendBody.model
+  );
   sendBody.stream = true;
   sendBody.stream_options = { ...(sendBody.stream_options || {}), include_usage: true };
 
