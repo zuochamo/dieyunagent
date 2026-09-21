@@ -83,13 +83,16 @@ function main() {
   const mdText = renderMarkdown(catalog);
 
   if (check) {
-    const existingJson = fs.existsSync(JSON_OUT) ? fs.readFileSync(JSON_OUT, 'utf8') : '';
-    const existingMd = fs.existsSync(MD_OUT) ? fs.readFileSync(MD_OUT, 'utf8') : '';
+    // git autocrlf 会把检出文件落成 CRLF，而生成物恒为 LF；只按行尾不同就判 stale 会假红。
+    // "--check" 的语义是「目录内容是否过期」，比较前统一归一化行尾。
+    const normalizeEol = (text) => String(text).replace(/\r\n?/g, '\n');
+    const existingJson = normalizeEol(fs.existsSync(JSON_OUT) ? fs.readFileSync(JSON_OUT, 'utf8') : '');
+    const existingMd = normalizeEol(fs.existsSync(MD_OUT) ? fs.readFileSync(MD_OUT, 'utf8') : '');
     const jsonOk = existingJson.replace(/"generatedAt": "[^"]+"/, '"generatedAt": "…"') ===
-      jsonText.replace(/"generatedAt": "[^"]+"/, '"generatedAt": "…"');
+      normalizeEol(jsonText).replace(/"generatedAt": "[^"]+"/, '"generatedAt": "…"');
     const mdOk =
       existingMd.replace(/生成时间：[^\n]+/, '生成时间：…') ===
-      mdText.replace(/生成时间：[^\n]+/, '生成时间：…');
+      normalizeEol(mdText).replace(/生成时间：[^\n]+/, '生成时间：…');
     if (!jsonOk || !mdOk) {
       console.error('[dieyun:rpc] catalog is stale — run: npm run generate:rpc-catalog');
       process.exit(1);

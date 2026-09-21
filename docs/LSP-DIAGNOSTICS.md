@@ -82,7 +82,7 @@ flowchart TB
 
 **探测策略**：
 
-1. `%APPDATA%/pixel-office-agent/lsp.json` 可覆盖 command（高级用户）
+1. `%APPDATA%/dieyunagent/lsp.json` 可覆盖 command（高级用户）
 2. 默认 `npx -y` 免全局安装；首次慢，可提示
 3. 找不到 server → 该语言 **静默跳过**，不阻塞发消息
 
@@ -199,7 +199,7 @@ flowchart TB
 
 - [x] `fetchWorkspaceDiagnosticsContext` + 注入 Agent system；改后验收用 `fetchWorkspaceVerifyDiagnostics`
 - [x] `extractPathHintsFromText` + `getContextFilePathsForAgent` 合并逻辑
-- [x] 设置 → 权限：**启用 LSP 诊断**（默认 **开**）→ `%APPDATA%/pixel-office-agent/lsp-settings.json`
+- [x] 设置 → 权限：**启用 LSP 诊断**（默认 **开**）→ `%APPDATA%/dieyunagent/lsp-settings.json`
 
 ### Phase 2 — TS + Python 打磨（1 天）
 
@@ -236,7 +236,7 @@ flowchart TB
 
 ## 9. 配置示例
 
-`%APPDATA%/pixel-office-agent/lsp-settings.json`
+`%APPDATA%/dieyunagent/lsp-settings.json`
 
 ```json
 {
@@ -249,7 +249,7 @@ flowchart TB
 }
 ```
 
-`%APPDATA%/pixel-office-agent/lsp.json`（可选覆盖 server）
+`%APPDATA%/dieyunagent/lsp.json`（可选覆盖 server）
 
 ```json
 {
@@ -293,8 +293,8 @@ flowchart TB
 
 ```
 用户发送
-  → buildSystemMessage / buildCursorLikeContextBlocks
-       ├─ fetchCodebaseContext
+  → buildSystemMessage（Renderer 上报视图快照）
+       ├─ codebase 召回（Main：system-prompt-prep.js）
        ├─ buildOpenFilesContext
        └─ fetchWorkspaceDiagnosticsContext（绑定工作区时）
   → Rust agent loop 消费 richer system prompt

@@ -4,7 +4,7 @@
 
 ## 原则
 
-1. **最小 diff**：只改与任务直接相关的文件；不顺手重构、不扩 scope。
+1. **架构优先**：以「单一来源、消除重复实现、职责分层清晰」为设计目标；**不为最小 diff 而保留重复实现或错误职责**。改动仍聚焦任务本身，避免任务无关的顺手重构与无限扩 scope。
 2. **禁用意图关键词硬编码**：勿用固定中英文词表 / 寒暄正则决定「是否注入上下文、切 AGENTS 章节、是否触发索引」等路由；优先结构信号（`@Codebase`、消息内路径、编辑器选区）、召回是否命中、或 `agent-limits` 配置。对用户查询做动态分词打分（FTS/向量）不属于本禁令。
 3. **分层边界**：Renderer 做 UI；**对话 LLM 与工具执行在 Main/Node**；Rust `dieyun-core` 做循环账本、planner、memory、index、compaction。工具走 Gateway RPC。勿在 Rust 循环里堆「工头」协议，勿在 Renderer 写长期 Agent 状态机。
 4. **循环哲学（对齐 PI harness，不整仓替换）**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status` 状态机、假用户续跑、按只读步数/同文件读取/只计划逼写入。有模型正文就交付；空回复才 synthesis，且在 Node `rust-loop-runner`，Renderer 只展示。完成验收只提示、不自动续跑、不挡交付。
@@ -38,7 +38,7 @@
 
 ```
 Renderer (src/renderer/)     UI、事件展示、gatewayCall 客户端（不执行 host 工具）
-Main (src/main-entry.js)     IPC、LLM HTTP、工具委托、Worktree、MobileBridge
+Main (src/main-entry.js)     IPC、LLM HTTP、工具委托、Worktree、MobileBridge（Electron 入口 src/main.js）
 Gateway (src/gateway/)       WebSocket RPC、工具、权限白名单
 dieyun-core (Rust)           循环账本 agent.loop、planner、memory、index、compaction
 ```
@@ -94,11 +94,11 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | `crates/dieyun-core/src/planner/` | `npm run test:rust-planner-smoke` |
 | `src/agent/` | `npm run test:agent-limits` + agent smoke |
 | 纯函数 / MCP-计划装配 | `npm run test:unit`；`npm run check:js`（scoped checkJs） |
-| `src/gateway/`、`src/gateway/` | `npm run test:local-gateway-smoke` |
+| `src/gateway/`、`crates/dieyun-core/src/rpc/` | `npm run test:local-gateway-smoke` + `verify:rpc-catalog` |
 | `src/lsp/`（LSP 定位 / 诊断） | `npm run test:lsp`（可选 `DIEYUN_LSP_E2E=1` 跑真 LSP 端到端） |
 | `src/renderer/` | `npm run check:renderer` 或 `npm run test:renderer` |
 | `src/mobile/` | `npm run test:mobile` |
-| `src/agent/service.js` + mobile bridge | `npm run test:mobile` + `test:local-gateway-smoke` |
+| `src/agent/service.js` + mobile bridge | `npm run test:mobile` + `npm run test:agent-run-events` |
 
 完整映射见 `scripts/test-agent-smoke.cjs` 与 `docs/CODEMAP.json`。
 
@@ -117,7 +117,7 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 
 | 路径 | 内容 |
 |------|------|
-| `%APPDATA%/pixel-office-agent/` | Electron userData、Gateway DB |
+| `%APPDATA%/dieyunagent/` | Electron userData、Gateway DB（目录名唯一来源 `src/app-paths.js`；旧 `pixel-office-agent` 首次启动自动迁移） |
 | `~/.dieyun/` | 默认 workspace、skills、dieyun.md |
 | `.dieyun/`（仓库内） | 本地索引 / worktree 缓存 |
 | `dist/`、`target/`、`node_modules/` | 构建产物，不进版本库 |
@@ -137,6 +137,12 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/rpc-catalog.md`](docs/rpc-catalog.md) | RPC 方法清单（自动生成） |
 | [`docs/agent-run-events.md`](docs/agent-run-events.md) | AgentRunEvent 契约 |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 设计原理 |
+| [`docs/MEMORY.md`](docs/MEMORY.md) | 记忆系统分层与注入规则 |
+| [`docs/AGENT-STRATEGY.md`](docs/AGENT-STRATEGY.md) | Agent 策略分层 / taskTier 护栏 |
+| [`docs/LSP-DIAGNOSTICS.md`](docs/LSP-DIAGNOSTICS.md) | LSP 定位 / 诊断链路 |
+| [`docs/HARNESS-INVENTORY.md`](docs/HARNESS-INVENTORY.md) | harness 能力清单 |
+| [`docs/REASONING-ISOLATION-PLAN.md`](docs/REASONING-ISOLATION-PLAN.md) | 思考通道隔离（方案，未实施） |
+| [`docs/UMD-CLEANUP-PLAN.md`](docs/UMD-CLEANUP-PLAN.md) | UMD 清理计划 |
 
 ---
 

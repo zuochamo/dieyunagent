@@ -32,9 +32,6 @@ const { isGitRepo } = require('../git/worktree-service');
 const { getWorkspaceGitDiffContext, getWorkspaceGitChangedAbsPaths } = require('../git/diff-context');
 const { resolveHostSidecarLocalPath } = require('../agent/host-sidecar');
 
-const { probeHostEnvironment } = require('./host-environment');
-const { createPlaybookRpcHandlers } = require('../playbook/playbook-rpc');
-const { createWikiRpcHandlers } = require('../wiki/wiki-rpc');
 const { createExtractedHandlers } = require('./handlers');
 const { projectMemoryScope } = require('./project-memory');
 const { resolveCoreRpcTimeoutMs } = require('../core-rpc-timeouts');
@@ -635,58 +632,6 @@ function createRpcHandlers(ctx) {
       return { ok: false, error: err.message || String(err) };
     }
   }
-
-  const playbookHandlers = createPlaybookRpcHandlers({
-    getRemoteFs,
-    defaultCwd,
-    writable,
-    roots,
-    normalizeFilePathInput,
-    assertAllowedPath,
-    userDataPath: ctx.userDataPath || '',
-    getEmbeddingConfig: getActiveEmbeddingConfig,
-    assertFsWrite: () => {
-      assertHostEnabled(ctx);
-      if (!perms.fsWrite) {
-        const e = new Error('文件写入未授权');
-        e.code = 'FS_WRITE_DISABLED';
-        throw e;
-      }
-    },
-    assertFsRead: () => {
-      if (!perms.hostControl || !perms.fsRead) {
-        const e = new Error('文件读取未授权');
-        e.code = 'FS_READ_DISABLED';
-        throw e;
-      }
-    }
-  });
-
-  const wikiHandlers = createWikiRpcHandlers({
-    getRemoteFs,
-    defaultCwd,
-    writable,
-    roots,
-    normalizeFilePathInput,
-    assertAllowedPath,
-    userDataPath: ctx.userDataPath || '',
-    getEmbeddingConfig: getActiveEmbeddingConfig,
-    assertFsWrite: () => {
-      assertHostEnabled(ctx);
-      if (!perms.fsWrite) {
-        const e = new Error('文件写入未授权');
-        e.code = 'FS_WRITE_DISABLED';
-        throw e;
-      }
-    },
-    assertFsRead: () => {
-      if (!perms.hostControl || !perms.fsRead) {
-        const e = new Error('文件读取未授权');
-        e.code = 'FS_READ_DISABLED';
-        throw e;
-      }
-    }
-  });
 
   function workspaceRootForUndo() {
     const target = resolveCallWorkspaceTarget();
@@ -2045,7 +1990,6 @@ function createRpcHandlers(ctx) {
     listProcessHandles,
     killProcessHandle,
     getActiveCallSessionId,
-    probeHostEnvironment,
     openExternalUrl,
     printImage,
     assertBrowserEnabled,
@@ -2071,9 +2015,7 @@ function createRpcHandlers(ctx) {
   });
 
   const handlers = {
-    ...extractedHandlers,
-    ...playbookHandlers,
-    ...wikiHandlers
+    ...extractedHandlers
   };
 
   setRemoteAgentInvalidateListener(resetRemoteIndexCoreCache);

@@ -71,7 +71,7 @@ flowchart TB
 ### 3.1 文件位置
 
 ```
-%APPDATA%/pixel-office-agent/diecloud-memory.sqlite
+%APPDATA%/dieyunagent/diecloud-memory.sqlite
 ```
 
 - 引擎：`dieyun-core`（Rust / rusqlite），WAL + `synchronous=NORMAL` + `auto_vacuum=INCREMENTAL`；

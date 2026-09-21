@@ -169,7 +169,7 @@
     },
     {
       "id": "code-graph",
-      "paths": ["crates/dieyun-core/src/graph/", "src/renderer/renderer-context-engine.js"],
+      "paths": ["crates/dieyun-core/src/graph/"],
       "owns": ["Dependency graph", "repo_map", "LSP enrich standing job"],
       "tests": ["cargo:test"],
       "docs": ["docs/ARCHITECTURE.md#15-代码库索引", "docs/AGENT-DEV.md"]

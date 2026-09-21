@@ -378,21 +378,6 @@ function validateToolArgs(name, args, opts) {
       }
       return { ok: true };
     }
-    case 'playbook_propose': {
-      if (
-        !String(a.title || '').trim() ||
-        !String(a.goal || '').trim() ||
-        !String(a.steps || '').trim()
-      ) {
-        return {
-          ok: false,
-          error: 'playbook_propose 需要 title、goal、steps',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    }
     case 'agents_md_propose': {
       if (!String(a.section || '').trim() || !String(a.content || '').trim()) {
         return {

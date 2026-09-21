@@ -239,9 +239,8 @@
 | `src/agent/task-tier.js:41` | 注释「结构信号…**不用意图词表**，不另打分级 LLM」 |
 | `src/renderer/agent-guardrails.js:96-99` | `replyClaimsFileWork` 直接 `return false`，注释「禁用『宣称完成』关键词」 |
 | `src/renderer/agent-guardrails.js:101-102` | `hasFileModificationStructureSignal` 注释「**禁用任务意图词表**」，只用 @Codebase / 路径 / Monaco 选区 / 产物 |
-| `src/renderer/renderer-context-engine.js:104-138` | 「禁用关键词/寒暄词表硬编码」，改用显式信号；`agentsMdInjectDepth` 恒 `light` |
-| `src/renderer/renderer-playbook.js:200` | 「结构信号；**禁用寒暄关键词门闩**」 |
-| `src/renderer/renderer-knowledge-maintainer.js:290` | 同上 |
+| `src/agent/context-signals.js:2-12` | 「结构信号（@Codebase / 路径 / 编辑器选区）→ 是否注入代码 / 自动检索」的**唯一来源**，注释声明「不含任何平台分支或关键词表」 |
+| `src/renderer/renderer-knowledge-maintainer.js:272` | 「结构信号；**禁用寒暄关键词门闩**」 |
 | `src/agent/write-smell-hints.js:16` | 「判定对象是写入产物…**不构成意图关键词路由**」 |
 | `src/agent/system-prompt-prep.js:34-49` | 注入判定 = `@Codebase` 正则 + 路径正则（结构信号） |
 
@@ -267,7 +266,7 @@
 
 | 文件:行号 | 构造器 | 内容 | 模型可见 |
 |---|---|---|---|
-| `agent-system-prompt.js:17-51` | `buildCoreAgentRules()` | **【Agent 准则】22 条 + plan/explore 2 条**（≈2500 字符） | ✅ 稳定块 |
+| `agent-system-prompt.js:17-50` | `buildCoreAgentRules()` | **【Agent 准则】21 条 + plan/explore 2 条**（≈2500 字符） | ✅ 稳定块 |
 | `agent-system-prompt.js:53-67` | `formatSystemTimeChunk()` | 【系统时间】 | ✅ 轮次块 |
 | `agent-system-prompt.js:69-76` | `formatAgentHomeChunk()` | 【技能/计划】 | ✅ 稳定块 |
 | `agent-system-prompt.js:78-92` | `formatWorkspaceChunk()` | 【当前工作空间】/【默认工作目录】 | ✅ 稳定块 |
@@ -282,24 +281,22 @@
 
 | 行号 | 内容 |
 |---|---|
-| `:28` | 预注入代码优先，少做重复 list/read |
-| `:29` | 工具可并行；读大文件用 offset/maxBytes |
-| `:30` | 用 web_search→web_fetch 核验；禁止伪造搜索结果 |
-| `:31` | SQL 仅 SELECT，勿重复 list |
-| `:32` | 技能：先读 SKILL.md；host_exec cwd=技能目录 |
-| `:33` | 仅无法抉择时才 agent_clarify；适合表格用 Markdown |
-| `:34` | **无 tool_calls 的文字回复即本轮结束** |
-| `:35-36` | Mermaid：每回复最多 1 块、节点 ≤15、嵌套 subgraph ≤2、标签双引号 |
-| `:37` | `.dieyun/AGENTS.md` 项目地图 |
-| `:38` | `.dieyun/playbooks/` SOP |
-| `:39` | `.dieyun/wiki/` 人工文档 |
-| `:40` | 会话记忆判定规则 |
-| `:41` | 任务优先级规则 |
-| `:42` | 折叠历史使用规则 |
-| `:43` | 写代码“能改”原则；同常量单源 |
-| `:44` | 结构化文件 parse→dump，勿正则替换；勿静默吞异常 |
-| `:45` | 完成校验：声称已改须有写操作 |
-| `:20,:24` | plan / explore 模式规则 |
+| `:31` | 预注入代码优先，少做重复 list/read |
+| `:32` | 工具可并行；读大文件用 offset/maxBytes |
+| `:33` | 用 web_search→web_fetch 核验；禁止伪造搜索结果 |
+| `:34` | SQL 仅 SELECT，勿重复 list |
+| `:35` | 技能：先读 SKILL.md；host_exec cwd=技能目录 |
+| `:36` | 仅无法抉择时才 agent_clarify；适合表格用 Markdown |
+| `:37` | **无 tool_calls 的文字回复即本轮结束** |
+| `:38-39` | Mermaid：每回复最多 1 块、节点 ≤15、嵌套 subgraph ≤2、标签双引号 |
+| `:40` | `.dieyun/AGENTS.md` 项目地图 |
+| `:41` | 会话记忆判定规则 |
+| `:42` | 任务优先级规则 |
+| `:43` | 折叠历史使用规则 |
+| `:44` | 写代码“能改”原则；同常量单源 |
+| `:45` | 结构化文件 parse→dump，勿正则替换；勿静默吞异常 |
+| `:46` | 完成校验：声称已改须有写操作 |
+| `:47-49` | plan / explore / subagent 模式规则 |
 
 ### B2. 上下文注入块构造器（≈16 个）
 
@@ -312,7 +309,6 @@
 | `agent/system-prompt-prep.js:347-357` | `formatMemoryLines` | 记忆行 |
 | `agent/system-prompt-prep.js:359-391` | `fetchProjectMemoryBlock` | 【项目记忆】 |
 | `agent/system-prompt-prep.js:393-435` | `fetchGlobalMemoryBlock` | 【长期记忆】 |
-| `agent/system-prompt-prep.js:437-474` | `fetchPlaybookBlock` | 【相关 Playbook】 |
 | `agent/system-prompt-prep.js:488-517` | `formatAgentStateBlock` | ## 工作记忆快照 / ## 最近步骤 |
 | `agent/system-prompt-prep.js:527-542` | `fetchWorkMemoryBlock` | 【工作记忆模板】 |
 | `agent/system-prompt-prep.js:554-631` | `fetchSkillsBlock` | 【相关技能 · 索引】 |
@@ -344,7 +340,6 @@
 | `src/renderer/renderer-agent-reviewer.js:186-194` | Reviewer | system/user | 独立验收（浏览器证据规则） |
 | `src/renderer/renderer-agent-llm.js:692-706` | 记忆归纳器 | system/user | 长期记忆提取（kind/scope/importance） |
 | `src/renderer/renderer-knowledge-maintainer.js:45-159` | 知识维护器 | system | 三分支（fullPeriodic / periodicOnly / 默认） |
-| `src/renderer/renderer-wiki-generate.js:356-369,447-456` | Wiki 生成 / 补图 | system/user | 强制含 `## 架构流程图` mermaid |
 | `src/renderer/renderer-agents-md.js:635-637` | AGENTS 冷启动 | system | 初始化 section |
 | `src/plans/parser.js:6-19` | `PARSE_SYSTEM` | system | 自然语言 → RRULE JSON |
 | `src/plans/plan-agent-runner.js:36-69` | 计划 Agent | system/user | 定时任务执行 |
@@ -402,7 +397,7 @@
 
 | 文件 | 规模 | 说明 |
 |---|---|---|
-| `assets/AGENTS.md.template` | 52 行 / **9 个 section 占位** | overview / environment(auto) / structure / commands / conventions / testing / architecture / gotchas / changelog(auto) |
+| `assets/AGENTS.md.template` | 47 行 / **8 个 section 占位** | overview / structure / commands / conventions / testing / architecture / gotchas / changelog(auto) |
 | `assets/dieyun.md` | 25 行 / **4 个字段** | 身份与称呼 / 语言与风格 / 沟通偏好 / 跨项目编码习惯 |
 | 仓库根 `AGENTS.md` | 147 行 | **不参与运行时注入**（仅本仓库开发指南） |
 | 仓库根 `dieyun.md` | 28 行 | **不参与运行时注入**（示例） |
@@ -438,7 +433,7 @@
 | 腐坏类型 | 典型资产 | 处置 |
 |---|---|---|
 | **兼容垫片**（模型换代即失效） | `guardrails-shared.js` `TOOL_NAME_ALIASES`(15，**全仓单一来源**) / `GRAPH_LEGACY_OPS`(7)、`llm-tool-call-fallback.js` 参数表(50) | **观察使用率后删除**；不要无限增长。工具名别名表已合并到 `guardrails-shared.js`（`llm-tool-call-fallback.js` 改为 require 引用同一对象），由 `test:guardrails-sync` 断言两侧一致 |
-| **模型行为假设** | 核心准则 22 条、`compaction-prompts.js` 强制 JSON/字数、`renderer-wiki-generate.js` 强制二级标题 | 用**行为回归**（同批任务看工具轨迹）而非字符串快照；改前跑 `test:agent-system-prompt` |
+| **模型行为假设** | 核心准则 21 条、`compaction-prompts.js` 强制 JSON/字数 | 用**行为回归**（同批任务看工具轨迹）而非字符串快照；改前跑 `test:agent-system-prompt` |
 | **调参值** | `agent-limits.js` 全部 49 项（+3 折算系数不上设置页） | 已配置化（设置 UI + tier 分层 + 长程缩放），**改配置不改代码** |
 | **环境事实** | `IGNORE_DIRS`/`KNOWN_TEXT_EXT`、`CALL_SKIP`、`BLOCKED_PATTERNS`、`url-policy` 扩展名 | 腐坏慢；新增语言/工具时补 |
 | **UI 分类词表** | `renderer-skills-grid.js` 127 词 + 14 正则 | 新增技能时补；不影响行为 |

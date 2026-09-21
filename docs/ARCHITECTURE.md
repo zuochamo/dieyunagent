@@ -1,6 +1,6 @@
 # 叠云 Agent 架构手册
 
-> **产品名**：叠云 Agent（npm 包名 `dieyunagent` / `pixel-office-agent`）
+> **产品名**：叠云 Agent（npm 包名 `dieyunagent`）
 > **文档类型**：架构说明 · 可打印版源稿
 > **建议打印**：在浏览器中打开 [`ARCHITECTURE.print.html`](./ARCHITECTURE.print.html)，等待图表渲染完成后，选择 A4、双面、页边距「默认」或「窄」进行打印或导出 PDF。
 > **关联文档**：[`DESIGN.md`](./DESIGN.md)（设计原理）· [`AGENT-STRATEGY.md`](./AGENT-STRATEGY.md)（Agent 策略分层 · 开放设计）· [`MEMORY.md`](./MEMORY.md)（记忆）· [`DEVELOPMENT.md`](./DEVELOPMENT.md)（开发发版）
@@ -176,7 +176,7 @@ flowchart LR
 ### 4.1 连接协议（v1）
 
 1. WebSocket 连接 `127.0.0.1:17330`（可用 `DIECLOUD_GATEWAY_PORT` 改端口）。
-2. 首包 `{ type: 'auth', token }`，token 存于 `%APPDATA%/pixel-office-agent/gateway-token.txt`。
+2. 首包 `{ type: 'auth', token }`，token 存于 `%APPDATA%/dieyunagent/gateway-token.txt`。
 3. 之后 `{ type: 'call', id, method, params }` → `{ type: 'result', id, ok, data|error }`。
 
 渲染进程封装：`gatewayCall(method, params)`（`renderer-gateway.js`）。
@@ -372,7 +372,7 @@ flowchart TB
 
 ## 7. 记忆系统
 
-存储：`crates/dieyun-core/src/memory/` → `%APPDATA%/pixel-office-agent/diecloud-memory.sqlite`（WAL）。
+存储：`crates/dieyun-core/src/memory/` → `%APPDATA%/dieyunagent/diecloud-memory.sqlite`（WAL）。
 
 **唯一写入路径**：Gateway `requireRustCore('memory.*')`；sidecar 未就绪则 RPC 抛 `RUST_CORE_UNAVAILABLE`。
 
@@ -649,7 +649,7 @@ flowchart TB
 
 | 路径 | 内容 |
 |------|------|
-| `%APPDATA%/pixel-office-agent/` | userData：Gateway DB、权限、workspace、plans、更新 token |
+| `%APPDATA%/dieyunagent/` | userData：Gateway DB、权限、workspace、plans、更新 token |
 | `~/.dieyun/` | skills、memory 笔记、默认 workspace、dieyun.md、checkpoints |
 | `~/.dieyun/workspace/` | 未选工作空间时的默认可写目录 |
 | `dist/` | 打包输出 |

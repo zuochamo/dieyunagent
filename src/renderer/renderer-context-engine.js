@@ -1,24 +1,71 @@
-/* global gatewayCall, gwState, settings, getComposerAgentMode, compactPlainText, getContextFilePathsForAgent, getSessionChangeRowsForAgent, getAgentLimits, withSessionRpcScope, currentSessionId, getMergedContextFilePaths, resolveSessionWorkspacePath, resolveSessionWorkspacePathSync, CHARS_PER_TOKEN, CJK_CHARS_PER_TOKEN */
+/* global gatewayCall, gwState, settings, getComposerAgentMode, compactPlainText, getContextFilePathsForAgent, getSessionChangeRowsForAgent, getAgentLimits, withSessionRpcScope, currentSessionId, getMergedContextFilePaths, resolveSessionWorkspacePath, resolveSessionWorkspacePathSync, CHARS_PER_TOKEN, CJK_CHARS_PER_TOKEN, extractPathHintsFromText */
 'use strict';
 
-function extractPathHintsFromText(text) {
-  const t = String(text || '');
-  const paths = [];
-  const re =
-    /(?:^|[\s"'`(])((?:[\w.-]+\/)+[\w.-]+\.\w{1,8}|[A-Za-z]:\\(?:[^\\:\n"]+\\)*[^\\:\n"]+\.\w{1,8})(?=[\s"'`,]|$)/gi;
-  let m;
-  while ((m = re.exec(t))) {
-    const p = String(m[1] || '').trim();
-    if (p && !paths.includes(p)) paths.push(p);
+/**
+ * 结构信号纯函数（@Codebase 识别、路径提取、是否注入代码 / 自动检索、codebase 块格式化）
+ * 的**唯一来源**是 src/agent/context-signals.js：Main 直接 require，Renderer 经
+ * agent-bundle.js 注册为 window.ContextSignals（index.html 中先于本文件加载）。
+ *
+ * 本文件只保留「Renderer 编辑器状态 → snapshot.editor」的薄适配，勿再自抄判定逻辑；
+ * textHasCodebaseMention / extractPathHintsFromText / formatCodebaseBlock /
+ * extractCodebasePathsFromBlock 已由 bundle 的 compat 直接挂到 window，本文件不再复制。
+ *
+ * 各类 **召回** 同理不在此层：codebase（fetchCodebaseContext）、图谱 repo map
+ * （fetchGraphRepoMap / scheduleGraphLspEnrichKick）、项目/全局记忆
+ * （fetchProjectMemoryContext / fetchGlobalOnlyMemoryContext）的 Renderer 实现均已删除，
+ * 召回统一由 Main 的 system-prompt-prep.js 承担（AGENTS.md：Renderer 只上报快照 + 编辑器块）。
+ *
+ * 注入门闩同理：shouldInjectProjectKnowledge / agentsMdInjectDepth /
+ * shouldAutoCodebaseSearch 的 Renderer 实现已删除，判定归 Main + ContextSignals。
+ */
+let ctxSignalsMissingWarned = false;
+function ctxContextSignals() {
+  const CS = (typeof window !== 'undefined' && window.ContextSignals) || null;
+  if (!CS && !ctxSignalsMissingWarned) {
+    ctxSignalsMissingWarned = true;
+    console.warn(
+      '[ctx-signals] window.ContextSignals 不可用（agent-bundle 未加载？），代码上下文注入判定已降级'
+    );
   }
-  return paths.slice(0, 6);
+  return CS;
 }
 
 /**
- * 下面带「→ agent-limits」注释的键，唯一来源是 src/agent/agent-limits.js：
- * 值从 `AGENT_LIMITS_DEFAULTS` 映射，不再在本文件重复字面量 —— 改那边的默认值即生效。
- * agent-limits.js 在 index.html 中先于本文件加载（1951 < 1955），
- * 取法与会话上下文（session-context.js 的 visionPartEquivChars）一致，均为懒读。
+ * 是否注入代码相关上下文（薄适配）。
+ * 信号判定在 ContextSignals.shouldInjectCodeContext：这里只把 Monaco / 已选 artifact
+ * 适配成 snapshot.editor。保留改造前的调用方策略：仅在本地工作区
+ * （workspaceInfo.workspacePath 存在）时才读编辑器信号。
+ */
+function shouldInjectCodeContext(userQuery, opts = {}) {
+  const CS = ctxContextSignals();
+  if (!CS) return false;
+  const includeEditor = opts.includeEditor !== false;
+  const ws = opts.workspaceInfo || null;
+  const editor = {};
+  if (includeEditor && ws && ws.workspacePath) {
+    if (typeof window.getMonacoEditorContext === 'function') {
+      const ctx = window.getMonacoEditorContext();
+      if (ctx && ctx.activeFilePath) {
+        editor.hasActiveFile = true;
+        if (ctx.selection && ctx.selection.text) editor.hasSelection = true;
+      }
+    }
+    if (typeof window.getSelectedArtifactPath === 'function' && window.getSelectedArtifactPath()) {
+      editor.hasArtifact = true;
+    }
+  }
+  return CS.shouldInjectCodeContext(userQuery, {
+    forceCodeContext: opts.forceCodeContext === true,
+    includeEditor,
+    editor
+  });
+}
+
+/**
+ * CTX_LIMITS 中所有数字上限的唯一来源是 src/agent/agent-limits.js：
+ * 值经 ctxAgentLimitDefault() 从 `AGENT_LIMITS_DEFAULTS` 映射，本文件不再重复字面量 ——
+ * 改 agent-limits.js 的默认值即 Main 的 system-prompt-prep.js 与本文件同步生效。
+ * agent-limits.js 在 index.html 中先于本文件加载（1951 < 1955），取法为懒读。
  * 兜底实参只在加载顺序异常时才会命中，届时会打一条 warn。
  */
 const CTX_AGENT_LIMITS_DEFAULTS =
@@ -36,24 +83,17 @@ function ctxAgentLimitDefault(key, fallback) {
 }
 
 const CTX_LIMITS = {
-  // —— 本文件独有：agent-limits 无对应键 ——
-  /** AGENTS.md 注入字符上限；与 system-prompt-prep.js 的 DEFAULT_LIMITS.AGENTS_MD_MAX 保持一致 */
-  AGENTS_MD_MAX: 2800,
-  DIEYUN_MD_MAX: 6000,
-  CODEBASE_MENTION_LIMIT: 16,
-  /** 结构索引 repo map 枢纽符号上限 */
-  GRAPH_REPO_MAP_LIMIT: 32,
-  GRAPH_REPO_MAP_MAX_CHARS: 4500,
-  PROJECT_MEMORY_LIMIT: 8,
-  GLOBAL_MEMORY_LIMIT: 5,
+  // —— 与 agent-limits.js 单一来源（注入块尺寸上限）——
+  // 这些键曾在本文件与 system-prompt-prep.js 各存一份字面量、靠「保持一致」注释互指来源，
+  // 现已全部收敛到 agent-limits.js，本文件只做 camelCase → SCREAMING_SNAKE 映射。
+  /** AGENTS.md 注入字符上限 */
+  AGENTS_MD_MAX: ctxAgentLimitDefault('agentsMdMaxChars', 2800),
+  DIEYUN_MD_MAX: ctxAgentLimitDefault('dieyunMdMaxChars', 6000),
   /** 可选工具（MCP 等）语义 Top-K 注入上限 */
-  TOOL_RECALL_LIMIT: 10,
-  /** Playbook 语义召回条数与摘要字符上限 */
-  PLAYBOOK_RECALL_LIMIT: 3,
-  PLAYBOOK_SUMMARY_MAX: 250,
-  /** Wiki 召回条数与摘要字符上限 */
-  WIKI_RECALL_LIMIT: 5,
-  WIKI_SUMMARY_MAX: 120,
+  TOOL_RECALL_LIMIT: ctxAgentLimitDefault('toolRecallLimit', 10),
+  FILE_PREVIEW_MAX_BYTES: ctxAgentLimitDefault('filePreviewMaxBytes', 48000),
+  RECENT_CHANGE_MAX: ctxAgentLimitDefault('recentChangeMax', 16),
+  // 工具结果按字段截断表：Renderer 侧独有（跨层无此表的第二份），暂留本文件维护。
   TOOL_FIELD_LIMITS: {
     fs_read_file: { data: 12000 },
     host_exec: { stdout: 8000, stderr: 4000, output: 8000 },
@@ -64,15 +104,11 @@ const CTX_LIMITS = {
     lsp: { locations: 8000, hover: 4000 },
     sql_query: { rows: 6000, data: 6000 }
   },
-  FILE_PREVIEW_MAX_BYTES: 48000,
-  RECENT_CHANGE_MAX: 16,
 
-  // —— 以下与 agent-limits.js 单一来源 ——
+  // —— 与 agent-limits.js 单一来源（可在设置中调整的护栏）——
   /** 每段 Agent 请求的工具调用上限；继续后重置计数（可在设置中调整） */
   AGENT_TOOL_CALL_LIMIT: ctxAgentLimitDefault('ctxAgentToolCallLimit', 150),
   TOOL_RESULT_MAX_JSON: ctxAgentLimitDefault('toolResultMaxJson', 14000),
-  CODEBASE_SNIPPET_MAX: ctxAgentLimitDefault('codebaseSnippetMax', 2400),
-  CODEBASE_AUTO_LIMIT: ctxAgentLimitDefault('codebaseAutoLimit', 12),
   OPEN_FILES_MAX: ctxAgentLimitDefault('openFilesMax', 12),
   FILE_PREVIEW_MAX_CHARS: ctxAgentLimitDefault('filePreviewMaxChars', 4000),
   COMPLETION_HISTORY_MAX_CHARS: ctxAgentLimitDefault('completionHistoryMaxChars', 96000),
@@ -100,8 +136,6 @@ const CTX_LIMITS = {
 const CTX_LIMITS_FROM_AGENT_LIMITS = [
   ['ctxAgentToolCallLimit', 'AGENT_TOOL_CALL_LIMIT'],
   ['toolResultMaxJson', 'TOOL_RESULT_MAX_JSON'],
-  ['codebaseSnippetMax', 'CODEBASE_SNIPPET_MAX'],
-  ['codebaseAutoLimit', 'CODEBASE_AUTO_LIMIT'],
   ['openFilesMax', 'OPEN_FILES_MAX'],
   ['filePreviewMaxChars', 'FILE_PREVIEW_MAX_CHARS'],
   ['completionHistoryMaxChars', 'COMPLETION_HISTORY_MAX_CHARS'],
@@ -143,83 +177,8 @@ function ctxLimitsFor(opts = {}) {
   return applyAgentLimitsTo({ ...CTX_LIMITS }, opts);
 }
 
-function textHasCodebaseMention(text) {
-  return /(^|\s)@Codebase\b/i.test(String(text || ''));
-}
-
-function stripCodebaseMention(text) {
-  return String(text || '')
-    .replace(/(^|\s)@Codebase\b/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
- * 是否注入代码相关上下文。禁用关键词/寒暄词表硬编码：
- * 仅看显式 @Codebase、消息内路径、编辑器选区/打开文件等结构信号。
- */
-function shouldInjectCodeContext(userQuery, opts = {}) {
-  const t = String(userQuery || '').trim();
-  if (!t) return false;
-  if (textHasCodebaseMention(t)) return true;
-  if (extractPathHintsFromText(t).length) return true;
-  if (opts.forceCodeContext === true) return true;
-
-  const ws = opts.workspaceInfo || null;
-  if (ws && ws.workspacePath && opts.includeEditor !== false) {
-    if (typeof window.getMonacoEditorContext === 'function') {
-      const ctx = window.getMonacoEditorContext();
-      if (ctx && ctx.activeFilePath && ctx.selection?.text) return true;
-    }
-    if (typeof window.getSelectedArtifactPath === 'function' && window.getSelectedArtifactPath()) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * 项目知识（记忆/Playbook/Wiki）是否自动注入。
- * 不做寒暄/关键词门闩：有非空用户输入即尝试召回；无命中则不注入。
- */
-function shouldInjectProjectKnowledge(userQuery) {
-  return !!String(userQuery || '').trim();
-}
-
-/** AGENTS.md 固定轻量注入（仅 overview）；全文按需 fs_read，禁用关键词分级 */
-function agentsMdInjectDepth(_userQuery) {
-  return 'light';
-}
-
-function shouldAutoCodebaseSearch(userQuery, ws) {
-  if (!gwState.authed) return false;
-  if (!ws || !ws.workspacePath) return false;
-  if (ws.kind === 'ssh' && !ws.sshConnected) return false;
-  const q = String(userQuery || '').trim();
-  if (!q || q.length < 4) return false;
-  if (textHasCodebaseMention(q)) return false;
-  return shouldInjectCodeContext(q, { workspaceInfo: ws, includeEditor: false });
-}
-
-function formatCodebaseBlock(query, data, snippetMax) {
-  const results = Array.isArray(data?.results) ? data.results : [];
-  const mode = data?.vectorSearch ? '向量+全文' : data?.grepFallback ? 'grep' : '全文/词元';
-  if (!results.length) return '';
-  const maxSnip = snippetMax || CTX_LIMITS.CODEBASE_SNIPPET_MAX;
-  const lines = results.map((r, i) => {
-    const loc = `${r.path || ''}:${r.startLine || 1}-${r.endLine || r.startLine || 1}`;
-    const snippet = String(r.snippet || '').trim().slice(0, maxSnip);
-    return `### ${i + 1}. ${loc}\n${snippet}`;
-  });
-  return [
-    '【相关代码 · 自动检索】',
-    `查询：${query}`,
-    `模式：${mode}`,
-    `候选：${data?.totalCandidates ?? results.length}`,
-    '',
-    ...lines
-  ].join('\n');
-}
+// textHasCodebaseMention 由 agent-bundle.js 的 ContextSignals compat 提供（唯一来源）。
+// shouldInjectCodeContext 见文件顶部薄适配层（Monaco 状态 → snapshot.editor）。
 
 function gatewayCallWithTimeout(method, params, ms = 15000) {
   const scoped =
@@ -230,189 +189,6 @@ function gatewayCallWithTimeout(method, params, ms = 15000) {
       setTimeout(() => reject(new Error(`${method} 超时`)), ms);
     })
   ]);
-}
-
-async function fetchCodebaseContext(userQuery, opts = {}) {
-  if (!gwState.authed) return '';
-  const lim = ctxLimitsFor(opts);
-  const explicit = textHasCodebaseMention(userQuery);
-  const query = explicit
-    ? stripCodebaseMention(userQuery) || String(userQuery || '').replace(/@Codebase/gi, '').trim()
-    : String(userQuery || '').trim();
-  if (!query) return '';
-  const limit = opts.limit || (explicit ? lim.CODEBASE_MENTION_LIMIT : lim.CODEBASE_AUTO_LIMIT);
-  const timeoutMs = opts.timeoutMs || 15000;
-  try {
-    const searchParams =
-      typeof withSessionRpcScope === 'function'
-        ? withSessionRpcScope(
-            {
-              query,
-              limit,
-              autoIndex: false,
-              ...(opts.runWorkspaceRoot ? { runWorkspaceRoot: opts.runWorkspaceRoot } : {})
-            },
-            opts.sessionId
-          )
-        : {
-            query,
-            limit,
-            autoIndex: false,
-            ...(opts.runWorkspaceRoot ? { runWorkspaceRoot: opts.runWorkspaceRoot } : {})
-          };
-    const data = await gatewayCallWithTimeout('codebase.search', searchParams, timeoutMs);
-    const label = explicit ? '【Codebase 检索】' : '【相关代码 · 自动检索】';
-    const block = formatCodebaseBlock(query, data, lim.CODEBASE_SNIPPET_MAX);
-    return block.replace(/^【[^】]+】/, label);
-  } catch (e) {
-    return `【相关代码】\n查询：${query}\n状态：失败，${e.message || e}`;
-  }
-}
-
-/**
- * 结构索引压缩地图（枢纽文件/符号/依赖），供 Agent prep 注入。
- * @param {string} workspacePath
- * @param {{ limit?: number, sessionId?: string, runWorkspaceRoot?: string }} [opts]
- */
-async function fetchGraphRepoMap(workspacePath, opts = {}) {
-  if (!gwState || !gwState.authed || !workspacePath) return '';
-  const lim = ctxLimitsFor(opts);
-  const limit = opts.limit != null ? Number(opts.limit) : lim.GRAPH_REPO_MAP_LIMIT;
-  try {
-    const params =
-      typeof withSessionRpcScope === 'function'
-        ? withSessionRpcScope(
-            {
-              workspaceRoot: workspacePath,
-              limit,
-              ...(opts.runWorkspaceRoot ? { runWorkspaceRoot: opts.runWorkspaceRoot } : {})
-            },
-            opts.sessionId
-          )
-        : {
-            workspaceRoot: workspacePath,
-            limit,
-            ...(opts.runWorkspaceRoot ? { runWorkspaceRoot: opts.runWorkspaceRoot } : {})
-          };
-    const data = await gatewayCallWithTimeout('graph.repo_map', params, 25000);
-    if (!data || data.indexed === false) return '';
-    let md = data.markdown != null ? String(data.markdown).trim() : '';
-    if (!md) return '';
-    const maxChars = lim.GRAPH_REPO_MAP_MAX_CHARS || 4500;
-    if (md.length > maxChars) md = `${md.slice(0, maxChars)}\n…`;
-    return md;
-  } catch {
-    return '';
-  }
-}
-
-/**
- * 后台触发 LSP 调用边增强（不阻塞发消息）。
- */
-function scheduleGraphLspEnrichKick(workspacePath) {
-  if (!gwState || !gwState.authed || !workspacePath || typeof gatewayCall !== 'function') return;
-  void gatewayCall(
-    'graph.lsp_enrich',
-    { workspaceRoot: workspacePath, limit: 16 },
-    5000
-  ).catch(() => {});
-}
-
-function formatMemoryLines(rows, maxLen) {
-  return (rows || [])
-    .slice(0, 20)
-    .map((r) => {
-      const kind = r.kind && r.kind !== 'normal' ? ` · ${r.kind}` : '';
-      const score = Number.isFinite(Number(r.score)) && Number(r.score) > 0 ? ` · ${Number(r.score).toFixed(2)}` : '';
-      return `- #${r.id}${kind}${score} ${compactPlainText(r.content || '', maxLen || 360)}`;
-    })
-    .filter(Boolean);
-}
-
-async function fetchProjectMemoryContext(userQuery, workspacePath, opts = {}) {
-  if (!gwState.authed || !workspacePath) return '';
-  const lim = ctxLimitsFor(opts);
-  try {
-    const q = String(userQuery || '').trim();
-    const params =
-      typeof withSessionRpcScope === 'function'
-        ? withSessionRpcScope(
-            {
-              workspacePath,
-              query: q,
-              limit: lim.PROJECT_MEMORY_LIMIT,
-              runWorkspaceRoot: workspacePath
-            },
-            opts.sessionId
-          )
-        : {
-            workspacePath,
-            query: q,
-            limit: lim.PROJECT_MEMORY_LIMIT,
-            runWorkspaceRoot: workspacePath
-          };
-    const recall = await gatewayCallWithTimeout('memory.project_recall', params, 10000);
-    const rows = recall && Array.isArray(recall.results) ? recall.results : [];
-    const minScore = recall?.mode === 'semantic' ? 0.32 : recall?.mode === 'keyword' ? 0.12 : 0;
-    const filtered =
-      minScore > 0
-        ? rows.filter((r) => (Number(r.score) || 0) >= minScore)
-        : rows;
-    if (!filtered.length) return '';
-    const lines = formatMemoryLines(filtered, 420);
-    const modeLabel =
-      recall.mode === 'semantic' ? '语义' : recall.mode === 'keyword' ? '关键词' : '最近';
-    return (
-      `【项目记忆 · ${modeLabel} · 跨会话/历史沉淀，非本轮对话记录】\n` +
-      `绑定工作空间：${workspacePath}\n` +
-      `与当前任务相关时优先遵守；与用户最新输入或【本会话近期对话】冲突时以会话对话为准。\n` +
-      `${lines.join('\n')}`
-    );
-  } catch {
-    return '';
-  }
-}
-
-/** 仅召回 scope=global 的用户级长期记忆，不跨项目泄漏。 */
-async function fetchGlobalOnlyMemoryContext(userQuery) {
-  if (!gwState.authed) return '';
-  try {
-    const q = String(userQuery || '').trim();
-    const recall = q
-      ? await gatewayCallWithTimeout('memory.long_recall', {
-          query: q,
-          limit: CTX_LIMITS.GLOBAL_MEMORY_LIMIT,
-          scope: 'global'
-        })
-      : {
-          mode: 'recent',
-          results: await gatewayCallWithTimeout('memory.long_recent', {
-            limit: CTX_LIMITS.GLOBAL_MEMORY_LIMIT,
-            scope: 'global'
-          })
-        };
-    const rows = recall && Array.isArray(recall.results) ? recall.results : [];
-    const minScore = recall?.mode === 'semantic' ? 0.32 : recall?.mode === 'keyword' ? 0.12 : 0;
-    const filtered =
-      minScore > 0
-        ? rows.filter((r) => (Number(r.score) || 0) >= minScore)
-        : rows;
-    if (!filtered.length || recall?.mode === 'none') return '';
-    const lines = formatMemoryLines(filtered, 360);
-    const modeLabel =
-      recall && recall.mode === 'semantic'
-        ? '语义召回'
-        : recall && recall.mode === 'keyword'
-          ? '关键词召回'
-          : '最近记忆';
-    return (
-      `【长期记忆（用户级 · ${modeLabel} · 非项目专属）】\n` +
-      `以下为跨工作区的用户偏好/事实沉淀，不是本会话刚才的往来，也不含其他项目的任务记录。\n` +
-      `${lines.join('\n')}`
-    );
-  } catch {
-    return '';
-  }
 }
 
 function capText(text, max) {
@@ -592,10 +368,6 @@ async function buildOpenFilesContext(getPathsFn, codebasePaths, opts = {}) {
   return lines.join('\n\n');
 }
 
-function resetCodebaseWarmCache() {
-  // Codebase indexing is lazy now: it starts from user intent via fetchCodebaseContext().
-}
-
 function buildRecentChangesContext(getChangesFn, sessionId) {
   if (typeof getChangesFn !== 'function') return '';
   const rows = getChangesFn(sessionId).slice(0, CTX_LIMITS.RECENT_CHANGE_MAX);
@@ -607,15 +379,7 @@ function buildRecentChangesContext(getChangesFn, sessionId) {
   return `【本会话变更文件】\n${lines.join('\n')}`;
 }
 
-function extractCodebasePathsFromBlock(block) {
-  const paths = [];
-  const re = /^###\s+\d+\.\s+([^:\n]+):/gm;
-  let m;
-  while ((m = re.exec(String(block || '')))) {
-    paths.push(m[1].trim());
-  }
-  return paths;
-}
+// extractCodebasePathsFromBlock 由 agent-bundle.js 的 ContextSignals compat 提供（唯一来源）。
 
 let lspSettingsCache = null;
 let lspSettingsCacheTs = 0;
@@ -916,25 +680,17 @@ window.estimateFullContextUsage = estimateFullContextUsage;
 window.estimateToolsTokens = estimateToolsTokens;
 window.estimateMessagesTokens = estimateMessagesTokens;
 window.truncateToolResultForApi = truncateToolResultForApi;
-window.fetchProjectMemoryContext = fetchProjectMemoryContext;
-window.fetchGlobalOnlyMemoryContext = fetchGlobalOnlyMemoryContext;
-window.fetchCodebaseContext = fetchCodebaseContext;
-window.fetchGraphRepoMap = fetchGraphRepoMap;
-window.scheduleGraphLspEnrichKick = scheduleGraphLspEnrichKick;
 window.buildOpenFilesContext = buildOpenFilesContext;
 window.buildRecentChangesContext = buildRecentChangesContext;
-window.extractCodebasePathsFromBlock = extractCodebasePathsFromBlock;
-window.resetCodebaseWarmCache = resetCodebaseWarmCache;
+// extractCodebasePathsFromBlock / extractPathHintsFromText 已由 agent-bundle 的
+// ContextSignals compat 挂到 window（唯一来源），本文件不再重复导出。
 window.getLspSettingsCached = getLspSettingsCached;
 window.invalidateLspSettingsCache = invalidateLspSettingsCache;
 window.mergeDiagnosticsFilePaths = mergeDiagnosticsFilePaths;
 window.shouldFetchWorkspaceDiagnostics = shouldFetchWorkspaceDiagnostics;
 window.shouldInjectCodeContext = shouldInjectCodeContext;
-window.shouldInjectProjectKnowledge = shouldInjectProjectKnowledge;
-window.agentsMdInjectDepth = agentsMdInjectDepth;
 window.fetchWorkspaceDiagnosticsContext = fetchWorkspaceDiagnosticsContext;
 window.formatDiagnosticsBlock = formatDiagnosticsBlock;
-window.extractPathHintsFromText = extractPathHintsFromText;
 
 /**
  * 改后 LSP/tsc 校验 — 供完成验收在 fs_write_file 后注入。

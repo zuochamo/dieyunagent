@@ -31,7 +31,7 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 
 - `crates/dieyun-core/src/agent/loop_run.rs` — Rust 状态机
 - `src/agent/agent-system-prompt.js` — 给模型看的准则/工作区/权限/SQL 文案（`assembleSystemPrompt`）
-- `src/agent/system-prompt-prep.js` — Main 召回开文件 / codebase / AGENTS.md overview / 图谱（结构信号）/ 记忆 / Playbook / 技能索引 / MCP；Wiki 不自动注入
+- `src/agent/system-prompt-prep.js` — Main 召回开文件 / codebase / AGENTS.md overview / 图谱（结构信号）/ 记忆 / 技能索引 / MCP
 - `src/agent/rust-loop-runner.js` — Node ↔ Rust bridge（LLM / compact / sidecar cancel 分缝）
 - `src/agent/tool-catalog.js` — 工具 schema 唯一目录（Renderer / plan-tools 共用）；MCP `mcp_*` 带精简 inputSchema，勿再广告空 `{}`
 - `src/agent/session-context.js` — 会话账本投影；近 N 条原文 + 更早折叠条，再加字符硬顶；循环里 last-user 之后的 tool/assistant 也截断
@@ -55,6 +55,7 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 ### 护栏
 
 - `src/agent/agent-limits.js` — **数字上限唯一配置源**
+- 测试同守此规：`scripts/test-*.cjs` 里的上限与探针必须**从 `agent-limits` 或本轮传入的 cap 推导**，勿抄裸字面量（抄了就会在改护栏数字时假红／假绿）。同理，断言优先写「精确契约」（集合相等、cap+1 探针），少用「条目数变多变少」这类代理指标。
 - `src/agent/guardrails-shared.js` — 工具拦截常量/逻辑（Main + Renderer 共用）。无只读探索/同文件重读硬拦。
 - `src/agent/tool-guardrails.js` — Main 薄封装
 - `src/renderer/agent-guardrails.js` — Renderer 薄封装 + 完成验收提示（不自动续跑）

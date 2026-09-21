@@ -1208,41 +1208,6 @@ const GRAPH_TOOL = {
   }
 };
 
-const PLAYBOOK_PROPOSE_TOOL = {
-  type: 'function',
-  function: {
-    name: 'playbook_propose',
-    description:
-      '将当前任务的可复用工作流保存为 Playbook 草稿（SOP：目标、步骤、命令、验收等），写入 `.dieyun/playbooks/_drafts/`。' +
-      '用户可在预览中确认入库。也可以直接 fs_edit / fs_write_file 维护该目录。',
-    parameters: {
-      type: 'object',
-      properties: {
-        title: { type: 'string', description: 'Playbook 标题，如「发布 Windows 安装包」' },
-        domain: {
-          type: 'string',
-          description: '领域分类，如 deploy、testing、general（默认 general）'
-        },
-        goal: { type: 'string', description: '任务目标（1–3 句）' },
-        steps: {
-          type: 'string',
-          description: '确认步骤（Markdown 有序/无序列表，按执行顺序）'
-        },
-        commands: { type: 'string', description: '可选：关键 shell 命令（不含 ``` 包裹）' },
-        acceptance: { type: 'string', description: '可选：验收标准' },
-        pitfalls: { type: 'string', description: '可选：踩坑与注意事项' },
-        relatedFiles: { type: 'string', description: '可选：关联文件路径（每行一个）' },
-        tags: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '可选：标签，便于召回'
-        }
-      },
-      required: ['title', 'goal', 'steps']
-    }
-  }
-};
-
 const AGENTS_MD_PROPOSE_TOOL = {
   type: 'function',
   function: {
@@ -1546,7 +1511,7 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   BROWSER_TOOLS,
   [CODEBASE_TOOL, GREP_TOOL, GLOB_TOOL, READ_SYMBOL_TOOL, LSP_TOOL],
   GRAPH_TOOLS,
-  [PLAYBOOK_PROPOSE_TOOL, AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL],
+  [AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL],
   PLAN_TOOLS,
   [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SUBAGENT_TOOL]
 );
@@ -1591,7 +1556,6 @@ module.exports = {
   LSP_TOOL,
   GRAPH_TOOL,
   GRAPH_TOOLS,
-  PLAYBOOK_PROPOSE_TOOL,
   AGENTS_MD_PROPOSE_TOOL,
   SKILL_CREATE_TOOL,
   PLAN_TOOLS,

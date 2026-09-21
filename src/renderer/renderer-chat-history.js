@@ -1221,10 +1221,6 @@ async function settleSessionSidePanelAfterSwitch(sessionId, switchGen, opts = {}
     if (typeof renderChangesPane === 'function') renderChangesPane();
     return;
   }
-  if (tab === 'wiki' && typeof onWikiPanelShown === 'function') {
-    onWikiPanelShown();
-    return;
-  }
   if (tab === 'codebase' && typeof onCodebasePanelShown === 'function') {
     onCodebasePanelShown();
     return;

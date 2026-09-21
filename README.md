@@ -2,7 +2,7 @@
 
 本地 AI Agent 桌面应用：对话、技能、工具调用、定时计划、手机 PWA 连接等。同时保留工位监控上报（CPU / 键鼠统计，Socket.IO）。
 
-npm 包名仍为 `pixel-office-agent`（历史命名）；仓库目录为 **`dieyunagent`**。
+npm 包名 **`dieyunagent`**（见 `package.json`）；仓库目录同名。历史名 `pixel-office-agent` 仅保留为旧 userData 目录（首次启动自动迁移到 `dieyunagent`，见 `src/app-paths.js`）。
 
 ## 功能特性
 

@@ -58,7 +58,6 @@ async function testHandlerFactories() {
     'codebase.status',
     'graph.status',
     'fs.stat',
-    'host.environment',
     'browser.status',
     'undo.can_rollback',
     'artifact.list_files'

@@ -15,6 +15,17 @@ const CHANGELOG_MAX_ROWS = 50;
 const CHANGELOG_TRIM_FALLBACK_ROWS = 20;
 const CHANGELOG_INJECT_ROWS = 5;
 
+/** 可被工具 / 维护流程写入的 section（changelog 由系统自动维护，不对外暴露）。 */
+const EDITABLE_SECTION_IDS = [
+  'overview',
+  'structure',
+  'commands',
+  'conventions',
+  'testing',
+  'architecture',
+  'gotchas'
+];
+
 const SECTION_RE = /<!--\s*dieyun:section:(\w+)\s+status=(\w+)\s*-->/g;
 const CHANGELOG_ROW_RE = /^\|\s*\d{4}-\d{2}-\d{2}/;
 
@@ -45,11 +56,6 @@ function loadBundledTemplate() {
       '## 项目概览',
       '',
       '（待补充）',
-      '',
-      '<!-- dieyun:section:environment status=auto -->',
-      '## 运行环境',
-      '',
-      '（由叠云自动检测）',
       ''
     ].join('\n');
   }
@@ -264,7 +270,8 @@ function applySectionUpdates(content, updates, opts = {}) {
     nearLimit,
     truncated,
     changelogTrimmed,
-    contentLength: out.length
+    contentLength: out.length,
+    maxChars: MAX_FILE_CHARS
   };
 }
 
@@ -338,6 +345,7 @@ module.exports = {
   NEAR_LIMIT_CHARS,
   CHANGELOG_MAX_ROWS,
   CHANGELOG_INJECT_ROWS,
+  EDITABLE_SECTION_IDS,
   agentsRelativePath,
   agentsMetaRelativePath,
   agentsDraftRelativePath,

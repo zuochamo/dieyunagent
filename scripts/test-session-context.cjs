@@ -193,6 +193,13 @@ const withToolRow = buildCompletionMessagesFromHistory(
 assert(!JSON.stringify(withToolRow).includes('不该进模型'), 'completion messages drop tool rows');
 assert(!JSON.stringify(withToolRow).includes('LEAKED_LIVE_TRACE'), 'completion messages stay on the book');
 
+// 每轮的 cap 先具名，断言一律挂在具名 cap 上；裸字面量边界改预算就会漂移。
+const hugeCaps = {
+  historyMaxChars: 12000,
+  messageMaxChars: 3000,
+  lastUserMaxChars: 8000,
+  requestMaxChars: 20000
+};
 const hugeHist = buildCompletionMessagesFromHistory(
   [
     { role: 'user', content: 'x'.repeat(40000) },
@@ -204,13 +211,20 @@ const hugeHist = buildCompletionMessagesFromHistory(
   false,
   null,
   '',
-  { historyMaxChars: 12000, messageMaxChars: 3000, lastUserMaxChars: 8000, requestMaxChars: 20000 }
+  hugeCaps
 );
 const hugeJson = JSON.stringify(hugeHist);
 assert(!hugeJson.includes('x'.repeat(4000)), 'old user history is truncated');
 assert(hugeJson.includes('这一问'), 'keeps current user turn');
-assert(hugeJson.length < 30000, 'completion payload stays bounded');
+assert(hugeJson.length <= hugeCaps.requestMaxChars + 10000, 'completion payload stays bounded');
 
+const rideCaps = {
+  lastUserMaxChars: 8000,
+  turnRideMaxChars: 5000,
+  historyMaxChars: 1000,
+  messageMaxChars: 1000,
+  requestMaxChars: 80000
+};
 const rideKeepTask = buildCompletionMessagesFromHistory(
   [{ role: 'user', content: '务必保留的任务句' }],
   'sys',
@@ -218,11 +232,14 @@ const rideKeepTask = buildCompletionMessagesFromHistory(
   false,
   null,
   `${TURN_RIDE_HEADER}\n${'R'.repeat(40000)}`,
-  { lastUserMaxChars: 8000, turnRideMaxChars: 5000, historyMaxChars: 1000, messageMaxChars: 1000, requestMaxChars: 80000 }
+  rideCaps
 );
 const lastKeep = rideKeepTask[rideKeepTask.length - 1];
 assert(String(lastKeep.content).includes('务必保留的任务句'), 'truncating turn-ride keeps current task');
-assert(!String(lastKeep.content).includes('R'.repeat(8000)), 'turn-ride is capped');
+assert(
+  !String(lastKeep.content).includes('R'.repeat(rideCaps.lastUserMaxChars)),
+  'turn-ride is capped'
+);
 
 const longBook = [];
 for (let i = 0; i < 10; i++) longBook.push({ role: 'user', content: `旧问-${i}-UNIQUE` }, { role: 'assistant', content: `旧答-${i}` });
@@ -332,9 +349,12 @@ assert(archiveBlock.includes('已改 renderer-agent-send.js'), 'latest archive s
 assert(!archiveBlock.includes('更旧的摘要不应出现'), 'only latest archive');
 const camelBlock = formatCompactionArchiveBlock([{ summaryText: 'camel-summary' }]);
 assert(camelBlock.includes('camel-summary'), 'accepts camelCase summaryText');
+const archiveCap = 100;
 const long = 'x'.repeat(3000);
-const clipped = formatCompactionArchiveBlock([{ summary_text: long }], 100);
-assert(clipped.includes('…') && clipped.length < 400, 'clips archive summary');
+const clipped = formatCompactionArchiveBlock([{ summary_text: long }], archiveCap);
+assert(clipped.includes('…'), 'clips archive summary');
+assert(!clipped.includes('x'.repeat(archiveCap + 1)), 'archive summary is cut to maxChars');
+assert(clipped.length < archiveCap + 200, 'archive block stays near maxChars');
 
 const riddenWithArchive = attachTurnRideToUserContent(
   buildCurrentTaskText('继续'),
@@ -413,11 +433,22 @@ assert(continued[continued.length - 1].role === 'user' && isSyntheticLoopUserCon
 assert(continued.some((m) => m.role === 'tool'), 'this-turn tool result kept');
 
 const { capToolResultValue, capDelegateResults } = require('../src/agent/tool-result-cap');
-const fat = capToolResultValue({ data: 'Z'.repeat(20000) }, 4000);
-assert(fat && fat.truncated === true && String(fat.preview).length <= 4000, 'tool json is capped before loop ingest');
+const toolCap = 4000;
+const fat = capToolResultValue({ data: 'Z'.repeat(20000) }, toolCap);
+assert(
+  fat && fat.truncated === true && String(fat.preview).length <= toolCap,
+  'tool json is capped before loop ingest'
+);
 const cappedRows = capDelegateResults([{ id: '1', result: { data: 'Y'.repeat(50000) } }], 3000);
 assert(cappedRows[0].result.truncated, 'delegate rows are capped');
 
+const tailCaps = {
+  messageMaxChars: 2000,
+  toolResultMaxChars: 3000,
+  lastUserMaxChars: 8000,
+  historyMaxChars: 1000,
+  requestMaxChars: 80000
+};
 const loopTail = trimMessagesToCharBudget(
   [
     { role: 'system', content: 's' },
@@ -425,19 +456,19 @@ const loopTail = trimMessagesToCharBudget(
     { role: 'assistant', content: 'A'.repeat(20000) },
     { role: 'tool', content: `HEADUNIQUE${'T'.repeat(40000)}TAILUNIQUE` }
   ],
-  {
-    messageMaxChars: 2000,
-    toolResultMaxChars: 3000,
-    lastUserMaxChars: 8000,
-    historyMaxChars: 1000,
-    requestMaxChars: 80000
-  }
+  tailCaps
 );
 const loopTool = loopTail.find((m) => m.role === 'tool');
 const loopAsst = loopTail.find((m) => m.role === 'assistant');
-assert(String(loopTool.content).length <= 3200, 'post-user tool tail is clipped');
+assert(
+  String(loopTool.content).length <= tailCaps.toolResultMaxChars + 200,
+  'post-user tool tail is clipped'
+);
 assert(String(loopTool.content).includes('HEADUNIQUE') && String(loopTool.content).includes('TAILUNIQUE'), 'tool clip keeps head and tail');
-assert(String(loopAsst.content).length <= 2100, 'post-user assistant tail is clipped');
+assert(
+  String(loopAsst.content).length <= tailCaps.messageMaxChars + 100,
+  'post-user assistant tail is clipped'
+);
 assert(JSON.stringify(loopTail).includes('这一问'), 'keeps current user when clipping tail');
 
 assert(

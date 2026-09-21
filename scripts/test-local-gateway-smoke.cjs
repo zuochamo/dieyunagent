@@ -305,6 +305,9 @@ async function testUnrestrictedPathsToggle() {
     const before = gateway.getPermissions();
     if (before.unrestrictedPaths === true) throw new Error('缺省应为关闭（false）');
 
+    const baselineRead = gateway._collectReadRoots().map(norm).sort();
+    const baselineWrite = gateway._collectWritableRoots().map(norm).sort();
+
     const on = gateway.setPermissions({ ...before, unrestrictedPaths: true });
     if (on.unrestrictedPaths !== true) throw new Error('开关未能写入');
     const read = gateway._collectReadRoots().map(norm);
@@ -324,11 +327,14 @@ async function testUnrestrictedPathsToggle() {
     }
 
     gateway.setPermissions({ ...before, unrestrictedPaths: false });
-    const restored = gateway._collectReadRoots().map(norm);
-    if (process.platform === 'win32' && restored.length && restored.every((r) => /^[a-z]:\\$/.test(r))) {
-      throw new Error('关闭开关后仍停留在整盘白名单');
+    const restoredRead = gateway._collectReadRoots().map(norm).sort();
+    const restoredWrite = gateway._collectWritableRoots().map(norm).sort();
+    if (restoredRead.join(',') !== baselineRead.join(',')) {
+      throw new Error(`关闭开关后可读白名单未回到宽松档：${restoredRead.join(',')}`);
     }
-    if (restored.length >= read.length) throw new Error('关闭开关后白名单未收窄');
+    if (restoredWrite.join(',') !== baselineWrite.join(',')) {
+      throw new Error(`关闭开关后可写白名单未回到宽松档：${restoredWrite.join(',')}`);
+    }
     console.log('ok unrestricted paths toggle');
   } finally {
     await stop();

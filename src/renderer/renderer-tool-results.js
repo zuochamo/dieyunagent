@@ -110,7 +110,7 @@ function summarizeToolResult(name, result) {
     }
     return parts.join(' · ') || '已确认';
   }
-  if ((name === 'playbook_propose' || name === 'agents_md_propose') && result.message) {
+  if (name === 'agents_md_propose' && result.message) {
     return String(result.message).slice(0, 120);
   }
   if (name === 'web_fetch' || name === 'web_search') {

@@ -5,6 +5,7 @@ const {
   formatSystemTimeChunk,
   assembleSystemPrompt
 } = require('../src/agent/agent-system-prompt');
+const { AGENT_LIMITS_DEFAULTS } = require('../src/agent/agent-limits');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assert failed');
@@ -20,7 +21,6 @@ assert(agentRules.includes('若给出新需求则只做该需求'), 'new task st
 assert(agentRules.includes('未改目标时根据压缩摘要'), 'same-session work continues from fold');
 assert(agentRules.includes('不要因历史已折叠而提问'), 'folded history is not a clarify trigger');
 assert(agentRules.includes('勿仅因折叠就重读同一文件'), 'fold must not trigger recovery thrash');
-assert(agentRules.includes('不要假设已注入'), 'wiki is on-demand');
 assert(!agentRules.includes('概览已注入'), 'AGENTS overview is not claimed injected');
 assert(agentRules.includes('概览若已出现'), 'AGENTS overview is conditional');
 assert(!agentRules.includes('运行环境'), 'environment not in core rules');
@@ -72,18 +72,27 @@ const fallbackHome = assembleSystemPrompt({
 assert(fallbackHome.stable.includes('【默认工作目录】'), 'default workspace when none bound');
 assert(fallbackHome.stable.includes('/tmp/default-ws'), 'default workspace path');
 
+// 上限唯一来源是 src/agent/agent-limits.js：探针与边界都按它推导。
+// 抄死字面量的话，改护栏数字就会让本用例假红（或假绿）。
+const userSystemCap = AGENT_LIMITS_DEFAULTS.userSystemMaxChars;
+const stableSystemCap = AGENT_LIMITS_DEFAULTS.systemStableMaxChars;
+
 const longSys = assembleSystemPrompt({
-  userSystem: 'S'.repeat(20000),
+  userSystem: 'S'.repeat(userSystemCap * 3),
   now
 });
 assert(longSys.stable.includes('用户系统提示已截断'), 'user system is capped');
-assert(!longSys.stable.includes('S'.repeat(9000)), 'oversized user system is not kept whole');
+assert(!longSys.stable.includes('S'.repeat(userSystemCap + 1)), 'oversized user system is not kept whole');
 
 const longStable = assembleSystemPrompt({
-  stableDataChunks: ['M'.repeat(40000)],
+  stableDataChunks: ['M'.repeat(stableSystemCap * 3)],
   now
 });
 assert(longStable.stable.includes('稳定系统提示已截断'), 'stable system total is capped');
-assert(longStable.stable.length < 20000, 'stable system stays bounded');
+// 截断标记（…（稳定系统提示已截断））追加在 cap 之后，故留固定余量。
+assert(
+  longStable.stable.length <= stableSystemCap + 64,
+  'stable system stays bounded by systemStableMaxChars'
+);
 
 console.log('test-agent-system-prompt.cjs ok');

@@ -18,7 +18,7 @@ const remoteGwState = {
 };
 
 /** 对话记忆、权限等必须走本地 Gateway，不能经 SSH 远程隧道 */
-const LOCAL_RPC_PREFIXES = ['memory.', 'agent.state_', 'sql.', 'permissions.', 'plugins.', 'undo.', 'playbook.', 'wiki.', 'speech.'];
+const LOCAL_RPC_PREFIXES = ['memory.', 'agent.state_', 'sql.', 'permissions.', 'plugins.', 'undo.', 'speech.'];
 
 function isLocalOnlyMethod(method) {
   const m = String(method || '');
@@ -445,7 +445,7 @@ function resolveSessionWorkspacePathForRpc(sessionId) {
 }
 
 /**
- * Workspace for index/graph/wiki panels.
+ * Workspace for index/graph panels.
  * Session bind → activeView → Main getWorkspace (opened folder even if session 未绑定).
  */
 async function resolveWorkspaceRootForIndexPanels(sessionId) {

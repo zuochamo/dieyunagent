@@ -10,21 +10,7 @@ const AGENTS_PENDING_REL = '.dieyun/agents-pending.json';
 const AGENTS_MD_MODE_KEY = 'dieyun.agentsMd.mode';
 const AGENTS_MD_PREVIEW_KEY = 'dieyun.agentsMd.preview';
 
-const AGENTS_MD_SECTIONS = [
-  'overview',
-  'environment',
-  'structure',
-  'commands',
-  'conventions',
-  'testing',
-  'architecture',
-  'gotchas'
-];
-
 let lastAgentsMdEnsurePath = '';
-const AGENTS_MD_MAX_CHARS = 24000;
-const CHANGELOG_INJECT_ROWS = 5;
-const CHANGELOG_ROW_RE = /^\|\s*\d{4}-\d{2}-\d{2}/;
 /** @type {object | null} */
 let pendingAgentsMdProposal = null;
 
@@ -195,113 +181,21 @@ async function loadAgentsMdRecord(workspacePath) {
   return { content: content || '', exists, relativePath: AGENTS_MD_REL };
 }
 
-async function buildAgentsMdContext(userQuery, workspacePath) {
-  if (!workspacePath || getAgentsMdMode() === 'off') return '';
-  await ensureAgentsMd(workspacePath);
-  await loadPendingAgentsMdProposalFromDisk(workspacePath);
-  const rec = await loadAgentsMdRecord(workspacePath);
-  if (!rec.exists) {
-    return '';
-  }
-  const sections = parseSectionsLite(rec.content);
-  let content = rec.content;
-  if (sections.length) {
-    // 固定轻量结构段，禁用「查询词 → 章节」关键词映射
-    const picked = pickSectionsForInject(sections);
-    if (picked.length && picked.length < sections.length) {
-      const trimmed = picked.map((sec) =>
-        sec.id === 'changelog' ? { ...sec, body: trimChangelogSectionForContext(sec.body) } : sec
-      );
-      content = rebuildSectionsDocument(rec.content, trimmed);
-    } else if (!picked.length) {
-      content = rebuildSectionsDocument(rec.content, []);
-    }
-  }
-  return formatAgentsMdBlock(content, workspacePath);
-}
-
-/**
- * 注入块唯一实现在主进程 `agents-md.js` 的 `formatAgentsMdSystemBlock`
- * （IPC `agents-md:format-block`）。这里只做转发，不再保留一份复制的文案与截断上限。
- * 无 IPC（非 Electron 环境）时返回空串，由调用方省略该块。
- */
-async function formatAgentsMdBlock(content, workspacePath) {
-  if (!agentsApi.formatAgentsMdBlock) return '';
-  return agentsApi.formatAgentsMdBlock({ content, relativePath: AGENTS_MD_REL, workspacePath });
-}
-
-function parseSectionsLite(content) {
-  const re = /<!--\s*dieyun:section:(\w+)\s+status=(\w+)\s*-->/g;
-  const markers = [];
-  let m;
-  while ((m = re.exec(String(content || ''))) !== null) {
-    markers.push({ id: m[1], status: m[2], index: m.index, end: m.index + m[0].length });
-  }
-  const out = [];
-  for (let i = 0; i < markers.length; i++) {
-    const cur = markers[i];
-    const next = markers[i + 1];
-    out.push({
-      id: cur.id,
-      status: cur.status,
-      marker: String(content).slice(cur.index, cur.end),
-      body: String(content)
-        .slice(cur.end, next ? next.index : content.length)
-        .trim()
-    });
-  }
-  return out;
-}
-
-function pickSectionsForInject(sections) {
-  const lightIds = new Set(['overview']);
-  return (sections || []).filter((s) => lightIds.has(s.id));
-}
-
-function rebuildSectionsDocument(full, pickedSections) {
-  const first = full.indexOf('<!-- dieyun:section:');
-  const header = first > 0 ? full.slice(0, first) : '';
-  let out = header;
-  for (const sec of pickedSections) {
-    out += `${sec.marker}\n${sec.body}\n\n`;
-  }
-  return out.trim();
-}
-
-function trimChangelogSectionForContext(body) {
-  const lines = String(body || '').split('\n');
-  const preamble = [];
-  const rows = [];
-  let seenData = false;
-  for (const line of lines) {
-    if (CHANGELOG_ROW_RE.test(line.trim())) {
-      seenData = true;
-      rows.push(line);
-    } else if (!seenData) {
-      preamble.push(line);
-    }
-  }
-  if (rows.length <= CHANGELOG_INJECT_ROWS) return String(body || '').trim();
-  const dropped = rows.length - CHANGELOG_INJECT_ROWS;
-  const kept = rows.slice(-CHANGELOG_INJECT_ROWS);
-  const omitRow = `| … | … | （更早 ${dropped} 条已省略，完整记录见 .dieyun/AGENTS.md） |`;
-  const table = [omitRow, ...kept].join('\n');
-  return preamble.length ? `${preamble.join('\n')}\n${table}`.trim() : table;
-}
-
 function maybeWarnAgentsMdSize(meta) {
   if (!meta) return;
   const len = Number(meta.contentLength) || 0;
+  const max = Number(meta.maxChars) || 0;
+  const maxLabel = max ? (max % 1000 ? (max / 1000).toFixed(1) : String(max / 1000)) + 'k' : '';
   if (meta.truncated) {
     showAgentToast(
       '项目地图已截断',
-      '内容超过 24k 字符上限，部分正文可能已丢失。建议将稳定说明移到 docs/ 并精简 maintenance 记录。',
+      `内容超过${maxLabel ? ` ${maxLabel}` : ''} 字符上限，部分正文可能已丢失。建议将稳定说明移到 docs/ 并精简 maintenance 记录。`,
       { variant: 'warn' }
     );
   } else if (meta.nearLimit) {
     showAgentToast(
       '项目地图接近上限',
-      `当前约 ${len.toLocaleString()} 字符（上限 ${AGENTS_MD_MAX_CHARS.toLocaleString()}）。维护记录会自动轮转，可考虑手动归档旧条目。`,
+      `当前约 ${len.toLocaleString()} 字符${max ? `（上限 ${max.toLocaleString()}）` : ''}。维护记录会自动轮转，可考虑手动归档旧条目。`,
       { variant: 'warn' }
     );
   }
@@ -311,7 +205,8 @@ function agentsMdSizeMetaFromMerged(merged) {
   return {
     nearLimit: !!merged?.nearLimit,
     truncated: !!merged?.truncated,
-    contentLength: merged?.contentLength || String(merged?.content || '').length
+    contentLength: merged?.contentLength || String(merged?.content || '').length,
+    maxChars: Number(merged?.maxChars) || 0
   };
 }
 
@@ -337,7 +232,9 @@ function normalizeAgentsMdUpdates(updates) {
       content: String(u.content || '').trim(),
       confidence: Number(u.confidence)
     }))
-    .filter((u) => u.section && u.content && AGENTS_MD_SECTIONS.includes(u.section));
+    // section 合法性由 Main 的 applySectionUpdates（按文件实际 marker）校验，
+    // 这里不再维护第二份白名单，避免与 agents-md.js 漂移。
+    .filter((u) => u.section && u.content);
 }
 
 async function getCurrentWorkspacePath() {
@@ -409,8 +306,10 @@ function showAgentsMdPreviewOverlay(proposal) {
     const cnt = Array.isArray(p.updates) ? ` · ${p.updates.length} 条变更` : '';
     let extra = '';
     const warn = p.sizeMeta;
-    if (warn?.truncated) extra = ' · ⚠ 将超过 24k 上限并截断';
-    else if (warn?.nearLimit) extra = ` · ⚠ 接近 24k 上限（${Number(warn.contentLength || 0).toLocaleString()} 字符）`;
+    const maxChars = Number(warn?.maxChars) || 0;
+    const maxLabel = maxChars ? (maxChars % 1000 ? (maxChars / 1000).toFixed(1) : String(maxChars / 1000)) + 'k' : '';
+    if (warn?.truncated) extra = ` · ⚠ 将超过${maxLabel ? ` ${maxLabel}` : ''} 上限并截断`;
+    else if (warn?.nearLimit) extra = ` · ⚠ 接近${maxLabel ? ` ${maxLabel}` : ''} 上限（${Number(warn.contentLength || 0).toLocaleString()} 字符）`;
     metaEl.textContent = `${src}${cnt}${extra}`;
   }
   overlay.hidden = false;
@@ -534,49 +433,6 @@ async function proposeAgentsMdUpdates(updates, source, workspacePath) {
   maybeWarnAgentsMdSize(sizeMeta);
   showAgentToast('项目地图已更新', `AGENTS.md +${applied.length} 条`, { variant: 'info' });
   return { ok: true, applied: applied.length, message: `已更新 AGENTS.md（${applied.length} 条）` };
-}
-
-async function executeAgentsMdPropose(args) {
-  const section = String(args?.section || '').trim();
-  const content = String(args?.content || '').trim();
-  const action = String(args?.action || 'append').trim();
-  const reason = String(args?.reason || '').trim();
-  if (!section || !content) {
-    return { error: 'section 与 content 必填' };
-  }
-  if (!AGENTS_MD_SECTIONS.includes(section)) {
-    return { error: `section 无效，可用：${AGENTS_MD_SECTIONS.join(', ')}` };
-  }
-  let workspacePath = null;
-  if (agentsApi.getWorkspace) {
-    try {
-      const ws = await agentsApi.getWorkspace();
-      workspacePath = ws && ws.workspacePath ? ws.workspacePath : null;
-    } catch {
-      workspacePath = null;
-    }
-  }
-  if (!workspacePath) {
-    return { error: '请先选择工作空间' };
-  }
-  const line = reason ? `- ${content}（${reason}）` : content.startsWith('- ') ? content : `- ${content}`;
-  const updates = [
-    {
-      section,
-      action,
-      content: line,
-      confidence: 0.92
-    }
-  ];
-  const result = await proposeAgentsMdUpdates(updates, 'agents_md_propose', workspacePath);
-  if (result.error) return { error: result.error };
-  return {
-    ok: true,
-    pending: !!result.pending,
-    draft: !!result.draft,
-    applied: result.applied || 0,
-    message: result.message || '已处理'
-  };
 }
 
 async function coldStartAgentsMd(workspacePath) {
@@ -714,3 +570,33 @@ function initAgentsMdSettingsUI() {
 
   loadPendingAgentsMdProposalFromDisk().catch(() => {});
 }
+
+/**
+ * tool 结果为 pending 时弹对应预览：项目地图（agents_md_propose）走 Diff 预览 / 草稿提示。
+ */
+function maybeShowProposeToolPreview(name, result) {
+  if (!result || result.error || result.ok === false) return;
+  if (name === 'agents_md_propose' && result.pending && result.workspacePath) {
+    if (typeof loadPendingAgentsMdProposalFromDisk === 'function') {
+      void loadPendingAgentsMdProposalFromDisk(result.workspacePath).then((p) => {
+        if (p && typeof showAgentsMdPreviewOverlay === 'function') showAgentsMdPreviewOverlay(p);
+      });
+    }
+    return;
+  }
+  if (name === 'agents_md_propose' && result.draft && typeof showAgentToast === 'function') {
+    showAgentToast('项目地图草稿', result.message || '已写入草稿', { variant: 'info' });
+    return;
+  }
+  if (
+    name === 'agents_md_propose' &&
+    result.applied &&
+    !result.pending &&
+    !result.draft &&
+    typeof showAgentToast === 'function'
+  ) {
+    showAgentToast('项目地图已更新', result.message || '', { variant: 'info' });
+  }
+}
+
+window.maybeShowProposeToolPreview = maybeShowProposeToolPreview;

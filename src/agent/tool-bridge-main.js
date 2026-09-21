@@ -12,10 +12,7 @@ const {
   relDirGlobPattern,
   filterDirNames
 } = require('./write-smell-hints');
-const {
-  executePlaybookProposeMain,
-  executeAgentsMdProposeMain
-} = require('./propose-tools-main');
+const { executeAgentsMdProposeMain } = require('./propose-tools-main');
 
 const { runExclusive } = require('./mutate-queue');
 const {
@@ -293,8 +290,6 @@ function createMainToolBridge(deps) {
         plansStore.delete(a.id);
         return { ok: true, deleted: a.id };
       }
-      case 'playbook_propose':
-        return executePlaybookProposeMain(gateway, a, ctx);
       case 'agents_md_propose':
         return executeAgentsMdProposeMain(gateway, a, ctx, userDataPath);
       default:

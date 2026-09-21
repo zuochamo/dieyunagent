@@ -33,6 +33,9 @@ deploy.packaged.json
 build/deploy-packaged.json
 dieyun-linux-build.local.json
 models/**/*.onnx
+.env
+.env.*
+!.env.example
 build-warnings.txt
 
 # 本地索引 / MCP / 日志 / 发布产物（不进版本库）
@@ -49,6 +52,7 @@ deploy/*.zip
 # 本地工具输出 / 临时调试文件 / 生成产物（不进版本库）
 .dieyun/tool-output/
 /tmp-*
+/.tmp-*
 /generated-images/
 
 # 根目录 dieyun.md 为运行时用户文件（实际位置 ~/.dieyun/dieyun.md），

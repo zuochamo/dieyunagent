@@ -321,7 +321,6 @@ const GLOB_TOOL = _tc.GLOB_TOOL;
 const READ_SYMBOL_TOOL = _tc.READ_SYMBOL_TOOL;
 const LSP_TOOL = _tc.LSP_TOOL;
 const GRAPH_TOOL = _tc.GRAPH_TOOL;
-const PLAYBOOK_PROPOSE_TOOL = _tc.PLAYBOOK_PROPOSE_TOOL;
 const AGENTS_MD_PROPOSE_TOOL = _tc.AGENTS_MD_PROPOSE_TOOL;
 const SKILL_CREATE_TOOL = _tc.SKILL_CREATE_TOOL;
 const PLAN_TOOLS = _tc.PLAN_TOOLS || [];
@@ -550,7 +549,6 @@ async function buildAgentTools(userQuery = '', opts = {}) {
     tools.push(hostToolByName('fs_write_file'));
   }
   if (host.fsWrite && getAgentsMdMode() !== 'off') tools.push(AGENTS_MD_PROPOSE_TOOL);
-  if (host.fsWrite) tools.push(PLAYBOOK_PROPOSE_TOOL);
   if (host.hostControl) tools.push(SKILL_CREATE_TOOL);
   if (host.webFetch) tools.push(...WEB_TOOLS);
   if (host.browser && !weakModel) tools.push(...BROWSER_CORE_TOOLS);

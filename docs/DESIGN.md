@@ -1,6 +1,6 @@
 # 叠云 Agent 设计逻辑与原理
 
-> 产品名：**叠云 Agent**（npm 包名 `pixel-office-agent`）
+> 产品名：**叠云 Agent**（npm 包名 `dieyunagent`）
 > 本文档记录「为什么这样设计」与核心原理，便于长期维护时快速回忆。
 > 操作类说明见 [DEVELOPMENT.md](./DEVELOPMENT.md)。
 > Agent 策略分层（开放设计，待实现）见 [AGENT-STRATEGY.md](./AGENT-STRATEGY.md)。
@@ -111,7 +111,7 @@ flowchart LR
 ### 3.1 连接协议（v1）
 
 1. 客户端 WebSocket 连 `127.0.0.1:17330`（可用环境变量 `DIECLOUD_GATEWAY_PORT` 改端口）。
-2. 首包发送 `{ type: 'auth', token }`，token 存在 `%APPDATA%/pixel-office-agent/gateway-token.txt`。
+2. 首包发送 `{ type: 'auth', token }`，token 存在 `%APPDATA%/dieyunagent/gateway-token.txt`。
 3. 之后 `{ type: 'call', id, method, params }` → `{ type: 'result', id, ok, data|error }`。
 
 渲染进程封装：`gatewayCall(method, params)`（`renderer.js`）。
@@ -282,7 +282,7 @@ flowchart TD
 
 > 详细分层、读写时机与注入规则见 **[MEMORY.md](./MEMORY.md)**。
 
-存储：`crates/dieyun-core/src/memory/`（Rust `MemoryStore`）→ `%APPDATA%/pixel-office-agent/diecloud-memory.sqlite`（WAL）。**唯一写入路径**：Gateway `requireRustCore('memory.*')`；sidecar 未就绪时 RPC 直接抛 `RUST_CORE_UNAVAILABLE`（JS `memory-store.js` 已删除）。
+存储：`crates/dieyun-core/src/memory/`（Rust `MemoryStore`）→ `%APPDATA%/dieyunagent/diecloud-memory.sqlite`（WAL）。**唯一写入路径**：Gateway `requireRustCore('memory.*')`；sidecar 未就绪时 RPC 直接抛 `RUST_CORE_UNAVAILABLE`（JS `memory-store.js` 已删除）。
 
 **Rust memory RPC**（完整）：`memory.ping`、`touch_session`、`sessions_list`、`session_*`、`message_append`、`messages_recent/clear/delete_turn`、`long_add/recent/recall/keyword_search/reindex/vector_status/status_set/decay`、`consolidation_job_*`、`compaction_archive/recent`、`sessions_with_messages`、`messages_after`、`long_memories_after`；`agent.run_upsert`、`plan_save`、`steps_save`、`state_get`、`trace_save/get`。
 
@@ -505,7 +505,7 @@ npm run build:nsis    # 仅 PC 安装包：dist/dieyunagent-Setup-x.y.z.exe + la
 
 | 路径                                     | 内容                                                                 |
 | -------------------------------------- | ------------------------------------------------------------------ |
-| `%APPDATA%/pixel-office-agent/`        | Electron userData：Gateway DB、权限、workspace.json、plans、更新 token |
+| `%APPDATA%/dieyunagent/`                | Electron userData：Gateway DB、权限、workspace.json、plans、更新 token |
 | `~/.dieyun/`                           | Agent 用户数据根：skills、memory 笔记、默认 workspace、dieyun.md、checkpoints    |
 | `~/.dieyun/workspace/`                 | 未选工作空间时的默认可写目录                                                     |
 | `skills/bundled/`（仓库内）                 | 安装包自带技能源                                                           |

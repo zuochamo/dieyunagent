@@ -19,7 +19,7 @@ const INDEX_FILE = 'skill-vector-index.json';
 const SKILL_EMBED_TEXT_MAX = 6000;
 const QUERY_EMBED_TEXT_MAX = 1200;
 const DEFAULT_LIMIT = 8;
-/** 本召回特有的命中阈值，比 tool/playbook 更严格以避免技能误召回。 */
+/** 本召回特有的命中阈值，比 tool 更严格以避免技能误召回。 */
 const SEMANTIC_MIN = 0.28;
 const KEYWORD_MIN = 0.35;
 

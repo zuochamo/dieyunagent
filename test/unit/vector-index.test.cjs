@@ -49,8 +49,8 @@ describe('vector-index tokenize/keywordScore', () => {
   });
 
   it('完全相同词表得 1，无交集得 0，空集得 0', () => {
-    const a = tokenize('playbook 召回');
-    expect(keywordScore(a, tokenize('playbook 召回'))).toBeCloseTo(1, 6);
+    const a = tokenize('技能 召回');
+    expect(keywordScore(a, tokenize('技能 召回'))).toBeCloseTo(1, 6);
     expect(keywordScore(a, tokenize('unrelated'))).toBe(0);
     expect(keywordScore(new Set(), a)).toBe(0);
     expect(keywordScore(a, new Set())).toBe(0);

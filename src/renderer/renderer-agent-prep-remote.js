@@ -1,28 +1,8 @@
-/* global loopApi, gatewayCall, fetchCodebaseContext, isRemoteSessionWorkspacePath, agentPrepStepStart, agentPrepStepDone, agentPrepStepSkip, agentPrepStepFail, agentPrepStepNote, recordAgentPrepTrace, textHasCodebaseMention, shouldAutoCodebaseSearch */
+/* global gatewayCall, isRemoteSessionWorkspacePath, agentPrepStepStart, agentPrepStepDone, agentPrepStepSkip, agentPrepStepFail, agentPrepStepNote, showAgentToast */
 'use strict';
 
-async function buildCodebaseMentionContext(text, rpcScope = {}) {
-  if (!textHasCodebaseMention(text)) {
-    return '';
-  }
-  return fetchCodebaseContext(text, rpcScope);
-}
-
-async function buildAutoCodebaseContext(userQuery, ws, rpcScope = {}) {
-  if (typeof window.getMonacoEditorContext === 'function') {
-    const ctx = window.getMonacoEditorContext();
-    if (ctx && ctx.activeFilePath) return '';
-  }
-  if (typeof window.getSelectedArtifactPath === 'function') {
-    const selected = window.getSelectedArtifactPath();
-    if (selected) return '';
-  }
-  if (!shouldAutoCodebaseSearch(userQuery, ws)) return '';
-  return fetchCodebaseContext(userQuery, {
-    ...rpcScope,
-    ...(ws?.workspacePath ? { runWorkspaceRoot: ws.workspacePath } : {})
-  });
-}
+// codebase 召回（buildCodebaseMentionContext / buildAutoCodebaseContext）已删除：
+// Renderer 不再自行检索 codebase，召回统一由 Main 的 system-prompt-prep.js 承担。
 
 const REMOTE_CORE_PREP_TIMEOUT_MS = 45000;
 const REMOTE_CORE_PREP_CONFIGURE_RETRIES = 3;
@@ -50,10 +30,6 @@ function invalidateRemoteCoreReadyCache(workspacePath) {
   const p = String(workspacePath || '').trim();
   if (p) remoteCoreReadyAt.delete(p);
   else remoteCoreReadyAt.clear();
-}
-
-function isCodebaseContextFailure(block) {
-  return typeof block === 'string' && /状态：失败/.test(block);
 }
 
 async function waitRemoteCoreForPrep(prepSid, workspaceInfo, opts = {}) {
@@ -125,6 +101,4 @@ async function waitRemoteCoreForPrep(prepSid, workspaceInfo, opts = {}) {
 if (typeof window !== 'undefined') {
   window.waitRemoteCoreForPrep = waitRemoteCoreForPrep;
   window.invalidateRemoteCoreReadyCache = invalidateRemoteCoreReadyCache;
-  window.buildCodebaseMentionContext = buildCodebaseMentionContext;
-  window.buildAutoCodebaseContext = buildAutoCodebaseContext;
 }

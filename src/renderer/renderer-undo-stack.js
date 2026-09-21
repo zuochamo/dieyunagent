@@ -239,8 +239,7 @@ function extractUndoTouchPathsFromTools(tools) {
       name !== 'skill_create' &&
       name !== 'plan_create' &&
       name !== 'plan_delete' &&
-      name !== 'agents_md_propose' &&
-      name !== 'playbook_propose'
+      name !== 'agents_md_propose'
     ) {
       continue;
     }

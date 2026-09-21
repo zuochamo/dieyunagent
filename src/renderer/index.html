@@ -322,14 +322,6 @@
                     <path class="graph-rail-edge" d="M8 8.2 10.4 15M16 8.2 13.6 15M8.2 7h7.6" fill="none" stroke="currentColor" stroke-width="1.4"/>
                   </svg>
                 </button>
-                <button type="button" class="side-panel-rail-btn" data-side-tab="wiki" title="Wiki" aria-label="Wiki">
-                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-                    <path d="M5 5h14v14H5z" fill="none" stroke="currentColor" stroke-width="1.6"/>
-                    <line class="wiki-rail-line" x1="8" y1="8" x2="11.2" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                    <line class="wiki-rail-line" x1="8" y1="12" x2="16" y2="12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                    <line class="wiki-rail-line" x1="8" y1="16" x2="13.5" y2="16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                  </svg>
-                </button>
               </nav>
               <div class="side-panel-body">
                 <div class="side-panel-pane" data-side-pane="changes" hidden>
@@ -582,21 +574,6 @@
                         <p class="artifacts-empty">建好后可试查函数/类名，验证符号是否入库</p>
                       </div>
                     </section>
-                  </div>
-                </div>
-                <div class="side-panel-pane" data-side-pane="wiki" hidden>
-                  <div class="side-panel-pane-head">
-                    <div class="side-panel-pane-head-main">
-                      <span class="side-panel-pane-title">Wiki</span>
-                      <span class="side-panel-pane-meta" id="wiki-panel-status"></span>
-                    </div>
-                    <div class="side-panel-pane-actions">
-                      <button type="button" class="ghost-btn" id="wiki-panel-download" title="下载当前知识库为 Markdown（.md）" disabled>下载</button>
-                      <button type="button" class="ghost-btn" id="wiki-panel-generate" title="AI 扫描项目并生成知识库">生成</button>
-                    </div>
-                  </div>
-                  <div class="wiki-panel-body">
-                    <div id="wiki-panel-preview" class="wiki-panel-preview agent-scroll"></div>
                   </div>
                 </div>
               </div>
@@ -1330,35 +1307,24 @@
               </div>
               <hr class="settings-section-divider" />
               <h3 class="settings-subsection-title">项目地图 · AGENTS.md</h3>
-              <p class="settings-page-desc">维护当前工作空间 <code>.dieyun/AGENTS.md</code>：记录目录结构、常用命令与项目约定。任务完成或 Agent 工具提议的变更，在<strong>自动合并</strong>模式下可经 Diff 预览后采纳；<strong>运行环境</strong>区（OS、本地/SSH、Shell 等）每轮自动探测并直接写入，无需确认。维护记录超过 50 条会自动轮转；全文接近 24k 字符时会提示归档。</p>
+              <p class="settings-page-desc">维护当前工作空间 <code>.dieyun/AGENTS.md</code>：记录目录结构、常用命令与项目约定。任务完成或 Agent 工具提议的变更，在<strong>自动合并</strong>模式下可经 Diff 预览后采纳。维护记录超过 50 条会自动轮转；全文接近 24k 字符时会提示归档。</p>
               <div class="field agents-md-mode-field">
                 <span class="field-label">维护模式</span>
                 <nav class="settings-segmented-tabs" id="agents-md-mode-tabs" role="radiogroup" aria-label="维护模式">
-                  <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="auto" title="任务后 / 工具提议（运行环境区除外）">自动合并</button>
+                  <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="auto" title="任务后 / 工具提议">自动合并</button>
                   <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="draft-only" title="写入 agents-draft，不直接改文件">仅草稿</button>
                   <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="off">关闭</button>
                 </nav>
               </div>
-              <label class="check-row"><input type="checkbox" id="agents-md-preview" checked /><span>采纳前 Diff 预览（auto 模式下生效；不含「运行环境」自动更新）</span></label>
+              <label class="check-row"><input type="checkbox" id="agents-md-preview" checked /><span>采纳前 Diff 预览（auto 模式下生效）</span></label>
               <div class="field-row agents-md-settings-actions">
                 <button type="button" class="ghost-btn" id="agents-md-review-pending" hidden>查看待采纳变更</button>
                 <span class="save-hint" id="agents-md-settings-hint"></span>
               </div>
               <hr class="settings-section-divider" />
-              <h3 class="settings-subsection-title">Playbook 工作流库</h3>
-              <p class="settings-page-desc">任务成功后自动提炼可复用 SOP 至 <code>.dieyun/playbooks/</code>，确认后入库并参与语义召回。</p>
-              <div class="field agents-md-mode-field">
-                <span class="field-label">自动沉淀</span>
-                <nav class="settings-segmented-tabs" id="playbook-auto-tabs" role="radiogroup" aria-label="Playbook 自动沉淀">
-                  <button type="button" class="settings-segmented-tab playbook-auto-tab" data-mode="auto" title="Plan 验收 / 多步任务完成后提议草稿">开启</button>
-                  <button type="button" class="settings-segmented-tab playbook-auto-tab" data-mode="off">关闭</button>
-                </nav>
-              </div>
-              <span class="save-hint" id="playbook-settings-hint"></span>
-              <hr class="settings-section-divider" />
               <h3 class="settings-subsection-title">定时知识归纳</h3>
               <p class="settings-page-desc">
-                后台按间隔调用<strong>当前对话模型</strong>，对照近期对话整理长期记忆、项目记忆，并可归纳 Wiki / Playbook / AGENTS.md（受下方各模块开关约束）。衰减与向量重建仍由程序执行。
+                后台按间隔调用<strong>当前对话模型</strong>，对照近期对话整理长期记忆、项目记忆，并可归纳 AGENTS.md（受下方各模块开关约束）。衰减与向量重建仍由程序执行。
               </p>
               <div class="field agents-md-mode-field">
                 <span class="field-label">运行模式</span>
@@ -1382,8 +1348,6 @@
                   <label class="check-row"><input type="checkbox" data-scope="recentChat" checked /><span>近期对话</span></label>
                   <label class="check-row"><input type="checkbox" data-scope="longMemory" checked /><span>长期记忆</span></label>
                   <label class="check-row"><input type="checkbox" data-scope="projectMemory" checked /><span>项目记忆</span></label>
-                  <label class="check-row"><input type="checkbox" data-scope="wiki" checked /><span>Wiki</span></label>
-                  <label class="check-row"><input type="checkbox" data-scope="playbook" checked /><span>Playbook</span></label>
                   <label class="check-row"><input type="checkbox" data-scope="agents" checked /><span>AGENTS.md</span></label>
                 </div>
               </div>
@@ -1656,8 +1620,7 @@
                   <h3>知识</h3>
                   <p>三层持久化知识，在「设置 → 知识」维护：</p>
                   <p><strong>dieyun.md</strong>（<code>~/.dieyun/dieyun.md</code>）：跨项目个人规则与编码偏好。注入模式：始终 / 自动（编程类任务）/ 手动（<code>@dieyun.md</code>）。</p>
-                  <p><strong>AGENTS.md</strong>（<code>.dieyun/AGENTS.md</code>）：当前工作空间项目地图（目录、命令、约定）；运行环境每轮自动检测。维护模式：自动合并 / 仅草稿 / 关闭；auto 模式下可开启采纳前 Diff 预览。</p>
-                  <p><strong>Playbook</strong>（<code>.dieyun/playbooks/</code>）：可复用任务 SOP；Plan 验收或多步任务成功后可自动沉淀草稿，确认入库并在相似任务时语义召回。</p>
+                  <p><strong>AGENTS.md</strong>（<code>.dieyun/AGENTS.md</code>）：当前工作空间项目地图（目录、命令、约定）。维护模式：自动合并 / 仅草稿 / 关闭；auto 模式下可开启采纳前 Diff 预览。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>组件</h3>
@@ -1960,30 +1923,12 @@
       </div>
     </div>
 
-    <div class="worktree-apply-overlay agents-md-preview-overlay" id="playbook-preview-overlay" hidden>
-      <div class="worktree-apply-dialog agents-md-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="playbook-preview-title">
-        <header class="worktree-apply-header">
-          <h2 id="playbook-preview-title">确认 Playbook 入库</h2>
-          <p class="worktree-apply-desc">
-            以下工作流将写入 <code>.dieyun/playbooks/by-domain/</code>。请核对后确认入库或放弃。
-          </p>
-          <p class="agents-md-preview-meta" id="playbook-preview-meta"></p>
-        </header>
-        <pre class="agents-md-diff-pre playbook-preview-body" id="playbook-preview-body"></pre>
-        <footer class="worktree-apply-actions">
-          <button type="button" class="ghost-btn" id="playbook-preview-close">稍后</button>
-          <button type="button" class="ghost-btn" id="playbook-preview-reject">放弃</button>
-          <button type="button" class="primary-btn" id="playbook-preview-accept">确认入库</button>
-        </footer>
-      </div>
-    </div>
-
     <div class="worktree-apply-overlay agents-md-preview-overlay" id="agents-md-preview-overlay" hidden>
       <div class="worktree-apply-dialog agents-md-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="agents-md-preview-title">
         <header class="worktree-apply-header">
           <h2 id="agents-md-preview-title">采纳 AGENTS.md 变更</h2>
           <p class="worktree-apply-desc" id="agents-md-preview-desc">
-            以下变更将写入 <code>.dieyun/AGENTS.md</code>（不含运行环境区的自动更新）。请核对后采纳或放弃。
+            以下变更将写入 <code>.dieyun/AGENTS.md</code>。请核对后采纳或放弃。
           </p>
           <p class="agents-md-preview-meta" id="agents-md-preview-meta"></p>
         </header>
@@ -2103,10 +2048,7 @@
     <script src="./renderer-agent-compaction.js"></script>
     <script src="./renderer-agent-rust-loop.js"></script>
     <script src="./renderer-agent-api.js"></script>
-    <script src="./renderer-wiki-generate.js"></script>
-    <script src="./renderer-wiki-panel.js"></script>
     <script src="./renderer-agents-md.js"></script>
-    <script src="./renderer-playbook.js"></script>
     <script src="./renderer-knowledge-maintainer.js"></script>
     <script src="./renderer-selection-drag.js"></script>
     <script src="./renderer-attachments.js"></script>

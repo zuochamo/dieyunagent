@@ -38,7 +38,6 @@ async function main() {
   assert(catalog.RENDERER_ONLY_TOOLS.includes('agent_clarify'), 'renderer-only clarify');
   assert(
     catalog.RENDERER_ONLY_TOOLS.length === 1 &&
-      !catalog.RENDERER_ONLY_TOOLS.includes('playbook_propose') &&
       !catalog.RENDERER_ONLY_TOOLS.includes('agents_md_propose'),
     'propose tools are not renderer-only'
   );
@@ -102,10 +101,6 @@ async function main() {
   const vGraphBad = validateToolArgs('graph', { operation: 'nope' });
   assert(!vGraphBad.ok && vGraphBad.errorCode === 'MISSING_ARG', 'graph bad operation');
 
-  const vPb = validateToolArgs('playbook_propose', { title: 't', goal: 'g', steps: '- a' });
-  assert(vPb.ok, 'playbook_propose valid');
-  const vPbBad = validateToolArgs('playbook_propose', { title: 't' });
-  assert(!vPbBad.ok, 'playbook_propose missing args');
   const vAmd = validateToolArgs('agents_md_propose', { section: 'gotchas', content: '- x' });
 
   const mcpSchema = {
@@ -283,7 +278,7 @@ async function main() {
   );
   assert(blocked2.errorCode === 'REPEAT_BLOCK', 'bridge repeat block');
 
-  const { executePlaybookProposeMain, executeAgentsMdProposeMain } = require('../src/agent/propose-tools-main');
+  const { executeAgentsMdProposeMain } = require('../src/agent/propose-tools-main');
   const { writeAgentsMdPrefs } = require('../src/agent/agents-md-prefs');
   const { loadBundledTemplate } = require('../src/agents-md');
   const proposeUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'dieyun-propose-ud-'));
@@ -311,26 +306,9 @@ async function main() {
         files.set(rel, String(params.data || ''));
         return { ok: true };
       }
-      if (method === 'playbook.draft_create') {
-        return {
-          ok: true,
-          draftPath: '.dieyun/playbooks/_drafts/x.draft.md',
-          id: 'pb-1',
-          title: params.title,
-          domain: 'general',
-          preview: 'goal'
-        };
-      }
       throw new Error(`unexpected ${method}`);
     }
   };
-
-  const pbOut = await executePlaybookProposeMain(
-    proposeGw,
-    { title: '发版', goal: '打安装包', steps: '- 构建' },
-    { workspacePath: proposeWs }
-  );
-  assert(pbOut.ok && pbOut.pending && pbOut.ui === 'playbook_preview' && pbOut.draftPath, 'playbook propose main');
 
   const amdOut = await executeAgentsMdProposeMain(
     proposeGw,

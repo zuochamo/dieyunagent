@@ -125,8 +125,8 @@ Rust 收到的是已被 `normalizeLlmResponse` 压平的 `{content, reasoning}` 
 1. `src/renderer/renderer-agent-llm.js:871-980` + `:1032-1180`：Renderer 第二份 SSE 解析与推理通道。
    文件本身**是活的**（`fetchChatCompletion:624` / `streamChatCompletion:1178` 被
    `renderer-knowledge-maintainer.js:447,784`、`renderer-agents-md.js:615`、`renderer-agent-reviewer.js:92-100`、
-   `renderer-wiki-generate.js:427-430`、`renderer-agent-loop.js:79` 调用），
-   但**这些调用方只要 `content`**（wiki / 知识维护 / reviewer / AGENTS 冷启动）→ 推理通道那段是
+   `renderer-agent-loop.js:79` 调用），
+   但**这些调用方只要 `content`**（知识维护 / reviewer / AGENTS 冷启动）→ 推理通道那段是
    重复实现 + 无真实消费者；
 2. `src/agent/live-loop-trace.js:187-198` 与 `src/plans/plan-run-events.js:169-183`：两份 `llm_delta` 消费逻辑逐字重复；
 3. `docs/LOGGING.md:29-43` 本身：因 Rust 把两通道合成一段，只能靠抓包区分 —— 缺陷自证。
@@ -294,7 +294,7 @@ npm run check:renderer
 2. 删 `src/agent/live-loop-trace.js:186-202`（B2）与 `src/plans/plan-run-events.js:169-189`（B3）里的 `reasoning || contentOnly || rawContent` 判定，改为消费 `channel`。
 3. `src/renderer/renderer-agent-rust-loop.js:702-717`（B4）同样改为消费 `channel`。
 4. `src/renderer/renderer-agent-llm.js` 删除 SSE 解析重复段（`:871-980`，含 `:956-971` `repairDeltaMojibake` 的第二遍三键扫描），改为复用 `src/llm-stream-utils.js`（同源复用已有先例：`agent-bundle-entry.js:146` 的 `llm-request` 注册）。
-   注意：该文件**是活的**（被 wiki / 知识维护 / reviewer / AGENTS 冷启动调用），但调用方只要 `content` → 只删推理通道那一段，保留 `content` 通路。
+   注意：该文件**是活的**（被知识维护 / reviewer / AGENTS 冷启动调用），但调用方只要 `content` → 只删推理通道那一段，保留 `content` 通路。
 
 **验收**
 ```powershell

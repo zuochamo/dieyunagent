@@ -8,20 +8,15 @@ const {
   agentsDraftRelativePath,
   contentHash,
   defaultMeta,
-  normalizeMeta
+  normalizeMeta,
+  EDITABLE_SECTION_IDS,
+  MAX_FILE_CHARS
 } = require('../agents-md');
 const { readAgentsMdPrefs } = require('./agents-md-prefs');
 
 const AGENTS_PENDING_REL = '.dieyun/agents-pending.json';
-const AGENTS_MD_TOOL_SECTIONS = new Set([
-  'overview',
-  'structure',
-  'commands',
-  'conventions',
-  'testing',
-  'architecture',
-  'gotchas'
-]);
+// section 白名单唯一来源在 agents-md.js，避免模板 / Main / Renderer 各写一份。
+const AGENTS_MD_TOOL_SECTIONS = new Set(EDITABLE_SECTION_IDS);
 
 function withWs(params, ctx) {
   const ws = ctx.workspacePath || ctx.worktreePath || '';
@@ -55,54 +50,6 @@ async function gwWriteText(gateway, filePath, data, ctx) {
     'fs.write_file',
     withWs({ filePath, data: String(data || ''), encoding: 'utf8' }, ctx)
   );
-}
-
-async function executePlaybookProposeMain(gateway, args, ctx = {}) {
-  const a = args || {};
-  const title = String(a.title || '').trim();
-  const goal = String(a.goal || '').trim();
-  const steps = String(a.steps || '').trim();
-  if (!title || !goal || !steps) {
-    return { error: 'title、goal、steps 必填', errorCode: 'MISSING_ARG', retryable: false };
-  }
-  if (!gateway || typeof gateway.invokeRpc !== 'function') {
-    return { error: 'Gateway 未就绪', errorCode: 'GATEWAY', retryable: true };
-  }
-  const workspacePath = resolveWorkspacePath(a, ctx);
-  if (!workspacePath) {
-    return { error: '请先选择工作空间', errorCode: 'MISSING_WORKSPACE', retryable: false };
-  }
-  const draft = await gateway.invokeRpc(
-    'playbook.draft_create',
-    withWs(
-      {
-        workspacePath,
-        title,
-        domain: a.domain,
-        goal,
-        steps,
-        commands: a.commands,
-        acceptance: a.acceptance,
-        pitfalls: a.pitfalls,
-        relatedFiles: a.relatedFiles,
-        tags: a.tags,
-        trigger: 'manual'
-      },
-      ctx
-    )
-  );
-  return {
-    ok: true,
-    pending: true,
-    ui: 'playbook_preview',
-    draftPath: draft && draft.draftPath,
-    id: draft && draft.id,
-    title: (draft && draft.title) || title,
-    domain: draft && draft.domain,
-    preview: draft && draft.preview,
-    workspacePath,
-    message: '已生成 Playbook 草稿，请在预览对话框中确认入库或放弃'
-  };
 }
 
 async function ensureAgentsMdFile(gateway, ctx) {
@@ -156,7 +103,8 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
   const sizeMeta = {
     nearLimit: !!merged.nearLimit,
     truncated: !!merged.truncated,
-    contentLength: merged.contentLength || String(merged.content || '').length
+    contentLength: merged.contentLength || String(merged.content || '').length,
+    maxChars: merged.maxChars || MAX_FILE_CHARS
   };
 
   if (prefs.mode === 'draft-only') {
@@ -231,6 +179,5 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
 
 module.exports = {
   AGENTS_MD_TOOL_SECTIONS,
-  executePlaybookProposeMain,
   executeAgentsMdProposeMain
 };

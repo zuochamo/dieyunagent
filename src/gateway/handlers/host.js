@@ -20,7 +20,6 @@ function createHostHandlers(d) {
     killProcessHandle,
     getActiveCallSessionId,
     isSshConnectedForCall,
-    probeHostEnvironment,
     defaultCwd,
     openExternalUrl,
     normalizeFilePathInput,
@@ -138,35 +137,6 @@ function createHostHandlers(d) {
         throw e;
       }
       return result;
-    },
-
-    'host.environment': async () => {
-      assertHostEnabled(ctx);
-      const target = resolveCallWorkspaceTarget();
-      const sshConnected = isSshConnectedForCall();
-
-      let runRemoteShell = null;
-      if (target && target.kind === 'ssh' && sshConnected) {
-        try {
-          const remote = getRemoteFs();
-          const root = remote.root;
-          runRemoteShell = (command, timeoutMs) =>
-            requireSshForCall().exec(command, root, timeoutMs || 8000, { loginShell: false });
-        } catch {
-          runRemoteShell = null;
-        }
-      }
-
-      return probeHostEnvironment({
-        platform: process.platform,
-        arch: process.arch,
-        workspaceTarget: target,
-        sshConnected,
-        defaultCwd,
-        runLocalShell: (command, timeoutMs) =>
-          runShell(command, { cwd: defaultCwd || undefined, timeoutMs: timeoutMs || 8000 }),
-        runRemoteShell
-      });
     },
 
     'host.open_url': async ({ url }) => {

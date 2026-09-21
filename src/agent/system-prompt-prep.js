@@ -3,6 +3,15 @@
 const { assembleSystemPrompt } = require('./agent-system-prompt');
 const { skipAutoCodebaseForTaskTier } = require('./task-tier');
 const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+// 结构信号判定（@Codebase / 路径 / 编辑器选区）的唯一来源，Renderer 亦经 agent-bundle 共用。
+const {
+  textHasCodebaseMention,
+  extractPathHintsFromText,
+  shouldInjectCodeContext,
+  shouldAutoCodebaseSearch,
+  formatCodebaseBlock,
+  extractCodebasePathsFromBlock
+} = require('./context-signals');
 const { readAgentsMdPrefs } = require('./agents-md-prefs');
 const {
   parseSections,
@@ -12,73 +21,27 @@ const {
 const { describeAgentHome } = require('../agent-home');
 
 /**
- * 注入块的兜底上限。带「→ agent-limits」注释的键唯一来源是 `agent-limits.js`，
- * 这里只映射不重复字面量；其余键 agent-limits 无对应项，保持本文件独有。
+ * 注入块的兜底上限。唯一来源是 `agent-limits.js`，这里只映射不重复字面量 ——
+ * 改 agent-limits.js 的默认值即 Main / Renderer 两侧同步生效。
  */
 const DEFAULT_LIMITS = {
-  // —— 与 agent-limits.js 单一来源 ——
   CODEBASE_AUTO_LIMIT: AGENT_LIMITS_DEFAULTS.codebaseAutoLimit,
   CODEBASE_SNIPPET_MAX: AGENT_LIMITS_DEFAULTS.codebaseSnippetMax,
   OPEN_FILES_MAX: AGENT_LIMITS_DEFAULTS.openFilesMax,
   FILE_PREVIEW_MAX_CHARS: AGENT_LIMITS_DEFAULTS.filePreviewMaxChars,
 
-  // —— 本文件独有：agent-limits 无对应键 ——
-  CODEBASE_MENTION_LIMIT: 16,
-  FILE_PREVIEW_MAX_BYTES: 48000,
-  RECENT_CHANGE_MAX: 16,
-  /** 与 renderer-context-engine.js 的 CTX_LIMITS.AGENTS_MD_MAX 保持一致 */
-  AGENTS_MD_MAX: 2800,
-  GRAPH_REPO_MAP_LIMIT: 32,
-  GRAPH_REPO_MAP_MAX_CHARS: 4500,
-  PROJECT_MEMORY_LIMIT: 8,
-  GLOBAL_MEMORY_LIMIT: 5,
-  PLAYBOOK_RECALL_LIMIT: 3,
-  PLAYBOOK_SUMMARY_MAX: 250,
-  SKILL_BODY_MAX: 3500,
-  SKILL_FULL_COUNT: 3,
-  SKILL_TOTAL_COUNT: 5
+  CODEBASE_MENTION_LIMIT: AGENT_LIMITS_DEFAULTS.codebaseMentionLimit,
+  FILE_PREVIEW_MAX_BYTES: AGENT_LIMITS_DEFAULTS.filePreviewMaxBytes,
+  RECENT_CHANGE_MAX: AGENT_LIMITS_DEFAULTS.recentChangeMax,
+  AGENTS_MD_MAX: AGENT_LIMITS_DEFAULTS.agentsMdMaxChars,
+  GRAPH_REPO_MAP_LIMIT: AGENT_LIMITS_DEFAULTS.graphRepoMapLimit,
+  GRAPH_REPO_MAP_MAX_CHARS: AGENT_LIMITS_DEFAULTS.graphRepoMapMaxChars,
+  PROJECT_MEMORY_LIMIT: AGENT_LIMITS_DEFAULTS.projectMemoryLimit,
+  GLOBAL_MEMORY_LIMIT: AGENT_LIMITS_DEFAULTS.globalMemoryLimit,
+  SKILL_BODY_MAX: AGENT_LIMITS_DEFAULTS.skillBodyMax,
+  SKILL_FULL_COUNT: AGENT_LIMITS_DEFAULTS.skillFullCount,
+  SKILL_TOTAL_COUNT: AGENT_LIMITS_DEFAULTS.skillTotalCount
 };
-
-function textHasCodebaseMention(text) {
-  return /(^|\s)@Codebase\b/i.test(String(text || ''));
-}
-
-function extractPathHintsFromText(text) {
-  const t = String(text || '');
-  const paths = [];
-  const re =
-    /(?:^|[\s"'`(])((?:[\w.-]+\/)+[\w.-]+\.\w{1,8}|[A-Za-z]:\\(?:[^\\:\n"]+\\)*[^\\:\n"]+\.\w{1,8})(?=[\s"'`,]|$)/gi;
-  let m;
-  while ((m = re.exec(t))) {
-    const p = String(m[1] || '').trim();
-    if (p && !paths.includes(p)) paths.push(p);
-  }
-  return paths.slice(0, 6);
-}
-
-function shouldInjectCodeContext(userQuery, snapshot = {}) {
-  const t = String(userQuery || '').trim();
-  if (!t) return false;
-  if (textHasCodebaseMention(t)) return true;
-  if (extractPathHintsFromText(t).length) return true;
-  if (snapshot.forceCodeContext === true) return true;
-  const ed = snapshot.editor || {};
-  if (snapshot.includeEditor !== false) {
-    if (ed.hasActiveFile && ed.hasSelection) return true;
-    if (ed.hasArtifact) return true;
-  }
-  return false;
-}
-
-function shouldAutoCodebaseSearch(userQuery, workspaceInfo, editor) {
-  if (!workspaceInfo || !workspaceInfo.workspacePath) return false;
-  if (workspaceInfo.kind === 'ssh' && !workspaceInfo.sshConnected) return false;
-  const q = String(userQuery || '').trim();
-  if (!q || q.length < 4) return false;
-  if (textHasCodebaseMention(q)) return false;
-  if (editor && (editor.hasActiveFile || editor.hasArtifact)) return false;
-  return shouldInjectCodeContext(q, { workspaceInfo, includeEditor: false, editor });
-}
 
 function ctxLimitsFromUserData(userDataPath) {
   const L =
@@ -107,32 +70,6 @@ function capText(text, max) {
   const s = String(text || '');
   if (s.length <= max) return s;
   return `${s.slice(0, max)}\n\n…（已截断，原文 ${s.length} 字符）`;
-}
-
-function formatCodebaseBlock(query, data, snippetMax, label) {
-  const results = Array.isArray(data && data.results) ? data.results : [];
-  const mode = data && data.vectorSearch ? '向量+全文' : data && data.grepFallback ? 'grep' : '全文/词元';
-  const head = label || '【相关代码 · 自动检索】';
-  if (!results.length) return '';
-  const maxSnip = snippetMax || DEFAULT_LIMITS.CODEBASE_SNIPPET_MAX;
-  const lines = results.map((r, i) => {
-    const loc = `${r.path || ''}:${r.startLine || 1}-${r.endLine || r.startLine || 1}`;
-    const snippet = String(r.snippet || '').trim().slice(0, maxSnip);
-    return `### ${i + 1}. ${loc}\n${snippet}`;
-  });
-  return [head, `查询：${query}`, `模式：${mode}`, `候选：${data.totalCandidates ?? results.length}`, '', ...lines].join(
-    '\n'
-  );
-}
-
-function extractCodebasePathsFromBlock(block) {
-  const paths = [];
-  const re = /^###\s+\d+\.\s+([^:\n]+):/gm;
-  let m;
-  while ((m = re.exec(String(block || '')))) {
-    paths.push(m[1].trim());
-  }
-  return paths;
 }
 
 function isCodebaseContextFailure(block) {
@@ -442,45 +379,6 @@ async function fetchGlobalMemoryBlock(snapshot, invokeRpc, lim) {
   }
 }
 
-async function fetchPlaybookBlock(snapshot, invokeRpc, lim) {
-  const root =
-    (snapshot.workspaceInfo && snapshot.workspaceInfo.workspacePath) || snapshot.runWorkspaceRoot;
-  if (!root) return '';
-  try {
-    const recall = await withTimeout(
-      invokeRpc(
-        'playbook.recall',
-        rpcScope(snapshot, {
-          workspacePath: root,
-          query: String(snapshot.userQuery || '').trim(),
-          limit: lim.PLAYBOOK_RECALL_LIMIT
-        })
-      ),
-      10000,
-      'playbook.recall'
-    );
-    const rows = recall && Array.isArray(recall.results) ? recall.results : [];
-    if (!rows.length) return '';
-    if (!recall.mode || recall.mode === 'none' || recall.mode === 'recent') return '';
-    const minScore = recall.mode === 'semantic' ? 0.32 : 0.12;
-    const filtered = rows.filter((r) => (Number(r.score) || 0) >= minScore);
-    if (!filtered.length) return '';
-    const modeLabel = recall.mode === 'semantic' ? '语义' : '关键词';
-    const lines = filtered.map((row) => {
-      const summary = compactPlainText(row.summary || '', lim.PLAYBOOK_SUMMARY_MAX);
-      return `- ${row.id} · ${row.title || row.id}（${row.domain || 'general'}）\n  步骤摘要：${summary}\n  路径：${row.path || ''}`;
-    });
-    return (
-      `【相关 Playbook · ${modeLabel}】\n` +
-      `工作空间：${root}\n` +
-      `命中时可优先按 SOP 执行；细节用 fs_read_file 读取路径全文。与用户最新输入冲突时以用户为准。\n` +
-      `${lines.join('\n')}`
-    );
-  } catch {
-    return '';
-  }
-}
-
 async function fetchCompactionBlock(snapshot, invokeRpc) {
   const sid = String(snapshot.sessionId || '').trim();
   if (!sid) return '';
@@ -748,7 +646,6 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     fetchGraphRepoMapBlock(snap, invokeRpc, lim),
     injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim) : Promise.resolve(''),
     fetchGlobalMemoryBlock(snap, invokeRpc, lim),
-    injectKnowledge ? fetchPlaybookBlock(snap, invokeRpc, lim) : Promise.resolve(''),
     fetchCompactionBlock(snap, invokeRpc),
     fetchWorkMemoryBlock(snap, invokeRpc),
     fetchSkillsBlock(snap, deps, lim)

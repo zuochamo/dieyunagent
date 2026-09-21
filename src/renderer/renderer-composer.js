@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, getBuiltinApiConfig, getCustomModelApiConfig, getTextModelId, openModelSettingsModal, pendingAttachments, isImageAttachment, gwState, currentSessionId, sessionActiveRuns, gatewayCall, refreshHistoryList, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, initComposerPasteAndDrop, initComposerMentionMenu, initComposerVoice, initComposerPathPerm, addAttachmentsFromPaths, initWorkspacePicker, restartTerminalSession, isSupplierModelEnabled, getSupplierById, supplierDisplayName, renderSuppliersList, normalizeSettings, saveSettings, refreshRemoteGatewayMeta, resetRemoteGatewayClient, resetCodebaseWarmCache, ensureDefaultWorkspaceEditor, refreshWikiPanelIfNeeded, isActiveSessionSwitch */
+/* global window, document, $, escapeHtml, settings, getBuiltinApiConfig, getCustomModelApiConfig, getTextModelId, openModelSettingsModal, pendingAttachments, isImageAttachment, gwState, currentSessionId, sessionActiveRuns, gatewayCall, refreshHistoryList, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, initComposerPasteAndDrop, initComposerMentionMenu, initComposerVoice, initComposerPathPerm, addAttachmentsFromPaths, initWorkspacePicker, restartTerminalSession, isSupplierModelEnabled, getSupplierById, supplierDisplayName, renderSuppliersList, normalizeSettings, saveSettings, refreshRemoteGatewayMeta, resetRemoteGatewayClient, ensureDefaultWorkspaceEditor, isActiveSessionSwitch */
 const composerApi = window.diecloud || {};
 
 // ---------- 输入区模型选择 ----------
@@ -1052,7 +1052,6 @@ async function applySessionWorkspace(sessionId, opts = {}) {
     }
     if (opts.viewOnly) {
       if (!sameWorkspace) invalidateWorkspaceArtifacts();
-      if (typeof refreshWikiPanelIfNeeded === 'function') refreshWikiPanelIfNeeded();
       return { sameWorkspace, workspacePath: effectivePath };
     }
     if (!sameWorkspace) {
@@ -1060,8 +1059,6 @@ async function applySessionWorkspace(sessionId, opts = {}) {
       if (!stillActive()) return { sameWorkspace, workspacePath: effectivePath };
       if (ws) updateWorkspaceLabel(ws);
       invalidateWorkspaceArtifacts();
-      if (typeof refreshWikiPanelIfNeeded === 'function') refreshWikiPanelIfNeeded();
-      if (typeof resetCodebaseWarmCache === 'function') resetCodebaseWarmCache();
       if (typeof restartTerminalSession === 'function') restartTerminalSession();
       if (effectivePath && !opts.skipDefaultEditor && typeof ensureDefaultWorkspaceEditor === 'function') {
         void ensureDefaultWorkspaceEditor({ force: true });

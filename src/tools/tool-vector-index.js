@@ -17,7 +17,7 @@ const INDEX_FILE = 'tool-vector-index.json';
 const TOOL_EMBED_TEXT_MAX = 2000;
 const QUERY_EMBED_TEXT_MAX = 1200;
 const DEFAULT_LIMIT = 10;
-/** 本召回特有的命中阈值，与 skills/playbook 不同，故留在调用方。 */
+/** 本召回特有的命中阈值，与 skills 不同，故留在调用方。 */
 const SEMANTIC_MIN = 0.18;
 const KEYWORD_MIN = 0;
 

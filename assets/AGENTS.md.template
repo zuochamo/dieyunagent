@@ -7,11 +7,6 @@
 
 （待补充：一句话说明、技术栈、运行形态）
 
-<!-- dieyun:section:environment status=auto -->
-## 运行环境
-
-（由叠云自动检测：操作系统、本地/SSH、PowerShell、Python/Node；同工作空间 60 秒内不重复探测）
-
 <!-- dieyun:section:structure status=empty -->
 ## 目录结构
 

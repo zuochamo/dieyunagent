@@ -6,12 +6,10 @@
  * 谁在用：
  *   - src/tools/tool-vector-index.js   （Agent 工具召回）
  *   - src/skills/vector-index.js       （技能召回）
- *   - src/playbook/playbook-index.js   （Playbook 召回）
  *
- * 这三处此前各自复制了 CJK_RE / ID_RE / tokenize / keywordScore / hashText /
+ * 这两处此前各自复制了 CJK_RE / ID_RE / tokenize / keywordScore / hashText /
  * embeddingSignature / vectorToBase64 / base64ToVector / 索引 JSON 读写 /
- * 关键词排序 / 语义+关键词混合排序，并且已经产生行为漂移
- * （playbook 版 tokenize 漏了驼峰与下划线切分）。
+ * 关键词排序 / 语义+关键词混合排序，并且已经产生行为漂移。
  *
  * 本文件是上述能力的唯一实现：要改分词、打分、向量编解码或排序，只改这里。
  * 各召回模块只保留「实体特有的」部分：文档拼装、条目字段、新鲜度判定、结果映射。

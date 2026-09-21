@@ -1,4 +1,4 @@
-/* global window, $, initAgentsMdSettingsUI, initDieyunMdSettingsUI, initPlaybookSettingsUI, initAgentKnowledgeSettingsUI, initKnowledgeConsolidationSettingsUI, gatewayCall, gwState, invalidateLspSettingsCache, showAgentToast */
+/* global window, $, initAgentsMdSettingsUI, initDieyunMdSettingsUI, initAgentKnowledgeSettingsUI, initKnowledgeConsolidationSettingsUI, gatewayCall, gwState, invalidateLspSettingsCache, showAgentToast */
 
 'use strict';
 
@@ -216,7 +216,6 @@ function bindPermissionCheckboxes() {
 function initAgentKnowledgeSettingsUI() {
   initDieyunMdSettingsUI();
   initAgentsMdSettingsUI();
-  initPlaybookSettingsUI();
   if (typeof initKnowledgeConsolidationSettingsUI === 'function') {
     initKnowledgeConsolidationSettingsUI();
   }

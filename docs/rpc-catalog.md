@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-09-20T03:49:19.420Z
+生成时间：2026-09-21T02:38:14.016Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 193 |
-| Gateway only | 121 |
+| 总计 | 192 |
+| Gateway only | 120 |
 | Rust only | 23 |
 | Both | 49 |
 
@@ -142,11 +142,10 @@
 | `graph.symbol_search` | both | gateway/handlers/graph.js | yes |
 | `graph.symbol_semantic_search` | both | gateway/handlers/graph.js | yes |
 
-### host (6)
+### host (5)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
-| `host.environment` | gateway | gateway/handlers/host.js | — |
 | `host.exec` | gateway | gateway/handlers/host.js | — |
 | `host.open_url` | gateway | gateway/handlers/host.js | — |
 | `host.print_image` | gateway | gateway/handlers/host.js | — |

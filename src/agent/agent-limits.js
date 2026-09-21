@@ -110,7 +110,25 @@ const AGENT_LIMITS_DEFAULTS = {
   subagentMaxToolCalls: 64,
   // 子 Agent 回注主上下文的摘要上限。过程 trace 不回注，只在折叠卡片里展开，
   // 否则 N 路调研会把主上下文顶爆（这是该功能最常见的失败模式）。
-  subagentSummaryMaxChars: 2400
+  subagentSummaryMaxChars: 2400,
+
+  // —— 注入块尺寸上限（system prompt 各数据块）——
+  // 唯一来源。Main 的 src/agent/system-prompt-prep.js 与 Renderer 的
+  // renderer-context-engine.js 都从这里读，不再各自维护字面量。
+  // 这些是「注入内容尺寸」而非用户可调护栏，故意不进 AGENT_LIMITS_SCHEMA（设置页不展示）。
+  agentsMdMaxChars: 2800,
+  dieyunMdMaxChars: 6000,
+  codebaseMentionLimit: 16,
+  filePreviewMaxBytes: 48000,
+  recentChangeMax: 16,
+  graphRepoMapLimit: 32,
+  graphRepoMapMaxChars: 4500,
+  projectMemoryLimit: 8,
+  globalMemoryLimit: 5,
+  toolRecallLimit: 10,
+  skillBodyMax: 3500,
+  skillFullCount: 3,
+  skillTotalCount: 5
 };
 
 /** Long-horizon run: multiply these guardrails (still hard-capped; not disabled). */

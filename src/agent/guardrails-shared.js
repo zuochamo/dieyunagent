@@ -56,14 +56,13 @@ const MUTATING_TOOL_NAMES = Object.freeze(
     'skill_create',
     'plan_create',
     'plan_delete',
-    'agents_md_propose',
-    'playbook_propose'
+    'agents_md_propose'
   ])
 );
 
 /** 会写入本地文件的工具名（不含 host_exec，后者按命令内容判断）。 */
 const FILE_WRITE_TOOL_NAMES = Object.freeze(
-  new Set(['fs_write_file', 'fs_edit', 'skill_create', 'agents_md_propose', 'playbook_propose'])
+  new Set(['fs_write_file', 'fs_edit', 'skill_create', 'agents_md_propose'])
 );
 
 /**

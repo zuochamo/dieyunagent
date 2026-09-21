@@ -34,7 +34,6 @@ function loadSavedSideTab() {
     t === 'context' ||
     t === 'codebase' ||
     t === 'graph' ||
-    t === 'wiki' ||
     t === 'ssh'
   )
     return t;
@@ -114,7 +113,6 @@ function setSidePanelTab(tab, opts) {
   else if (typeof onCodebasePanelHidden === 'function') onCodebasePanelHidden();
   if (next === 'graph' && typeof onGraphPanelShown === 'function') onGraphPanelShown();
   else if (typeof onGraphPanelHidden === 'function') onGraphPanelHidden();
-  if (next === 'wiki' && typeof onWikiPanelShown === 'function') onWikiPanelShown();
 
   // 离开浏览器页时必须收起 BrowserView，否则会盖住侧栏按钮导致无法切换
   if (typeof syncBrowserBounds === 'function') {
@@ -211,7 +209,7 @@ function toggleSidePanelTab(tab) {
 
 function initSidePanel() {
   sidePanelState.tab = loadSavedSideTab();
-  // 同步 rail + pane 初始态，避免 rail 高亮 Wiki 但主 pane 仍是 files
+  // 同步 rail + pane 初始态，避免 rail 高亮某页但主 pane 仍是 files
   setSidePanelTab(sidePanelState.tab, { silent: true });
 
   document.querySelectorAll('.side-panel-rail-btn').forEach((btn) => {

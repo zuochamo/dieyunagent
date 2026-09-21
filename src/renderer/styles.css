@@ -4989,14 +4989,6 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   color: var(--text-dim);
 }
 
-.playbook-preview-body {
-  margin: 12px 18px;
-  max-height: min(52vh, 480px);
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .agents-md-diff-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -7111,25 +7103,7 @@ body.pane-resizing {
   z-index: 0;
 }
 
-/* Wiki 生成中：文档横线错峰轻闪（书写感），无侧栏扫光 */
-.side-panel-rail-btn[data-side-tab='wiki'].is-busy .wiki-rail-line {
-  animation: wiki-rail-line-pulse 1.2s ease-in-out infinite;
-  transform-origin: left center;
-}
-
-.side-panel-rail-btn[data-side-tab='wiki'].is-busy .wiki-rail-line:nth-of-type(1) {
-  animation-delay: 0s;
-}
-
-.side-panel-rail-btn[data-side-tab='wiki'].is-busy .wiki-rail-line:nth-of-type(2) {
-  animation-delay: 0.2s;
-}
-
-.side-panel-rail-btn[data-side-tab='wiki'].is-busy .wiki-rail-line:nth-of-type(3) {
-  animation-delay: 0.4s;
-}
-
-@keyframes wiki-rail-line-pulse {
+@keyframes rail-line-pulse {
   0%,
   100% {
     opacity: 0.32;
@@ -7142,7 +7116,7 @@ body.pane-resizing {
 
 /* 代码索引构建中：横线上下错峰扫描，竖线静止 */
 .side-panel-rail-btn[data-side-tab='codebase'].is-busy .codebase-rail-row {
-  animation: wiki-rail-line-pulse 1.2s ease-in-out infinite;
+  animation: rail-line-pulse 1.2s ease-in-out infinite;
 }
 
 .side-panel-rail-btn[data-side-tab='codebase'].is-busy svg .codebase-rail-row:nth-child(3) {
@@ -7190,7 +7164,6 @@ body.pane-resizing {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .side-panel-rail-btn[data-side-tab='wiki'].is-busy .wiki-rail-line,
   .side-panel-rail-btn[data-side-tab='codebase'].is-busy .codebase-rail-row,
   .side-panel-rail-btn[data-side-tab='graph'].is-busy .graph-rail-node {
     animation: none;
@@ -7541,133 +7514,6 @@ body.pane-resizing {
   font-weight: 400;
   opacity: 0.65;
   font-size: 11px;
-}
-
-.wiki-panel-body {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  padding: 8px 10px 10px;
-}
-
-.wiki-panel-preview {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 4px 2px 12px;
-  user-select: text;
-  -webkit-user-select: text;
-}
-
-.wiki-md-streaming {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.wiki-stream-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.wiki-stream-caret {
-  display: inline-block;
-  width: 2px;
-  height: 1.05em;
-  margin-left: 1px;
-  vertical-align: -0.12em;
-  background: currentColor;
-  opacity: 0.85;
-  animation: wiki-stream-caret-blink 1s step-end infinite;
-}
-
-@keyframes wiki-stream-caret-blink {
-  0%,
-  100% {
-    opacity: 0;
-  }
-  50% {
-    opacity: 0.9;
-  }
-}
-
-.wiki-md-view {
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.wiki-md-view h1,
-.wiki-md-view h2,
-.wiki-md-view h3 {
-  margin: 0.8em 0 0.35em;
-  font-weight: 650;
-  line-height: 1.3;
-}
-
-.wiki-md-view h1 { font-size: 1.2em; }
-.wiki-md-view h2 { font-size: 1.1em; }
-.wiki-md-view h3 { font-size: 1.02em; }
-
-.wiki-md-view p {
-  margin: 0.4em 0;
-}
-
-.wiki-md-view ul,
-.wiki-md-view ol {
-  margin: 0.35em 0;
-  padding-left: 1.3em;
-}
-
-.wiki-md-view li {
-  margin: 0.15em 0;
-}
-
-.wiki-md-view code {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.92em;
-  padding: 0.05em 0.3em;
-  border-radius: 4px;
-  background: rgba(127, 127, 127, 0.12);
-}
-
-.wiki-md-code {
-  margin: 0.5em 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
-  background: rgba(127, 127, 127, 0.06);
-  overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-}
-
-.wiki-md-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0.55em 0;
-  font-size: 12px;
-}
-
-.wiki-md-table th,
-.wiki-md-table td {
-  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
-  padding: 6px 8px;
-  text-align: left;
-  vertical-align: top;
-}
-
-.wiki-md-table th {
-  font-weight: 600;
-  background: rgba(127, 127, 127, 0.08);
-}
-
-.wiki-md-view .msg-mermaid {
-  margin: 0.6em 0;
-  overflow: auto;
 }
 
 .codebase-hit-snip {

@@ -32,6 +32,7 @@ const reviewerJson = require('../../agent/reviewer-json');
 const llmRequest = require('../../agent/llm-request');
 const llmChannel = require('../../agent/llm-channel');
 const sseDeltaParse = require('../../agent/sse-delta-parse');
+const contextSignals = require('../../agent/context-signals');
 
 register('DieyunModelRuntimePresets', presets, {
   compat: [
@@ -234,6 +235,17 @@ register('DieyunSessionContext', sessionContext, {
 
 register('DieyunAgentSystemPrompt', agentSystemPrompt, {
   compat: ['buildCoreAgentRules', 'formatSystemTimeChunk', 'assembleSystemPrompt']
+});
+
+// 「消息结构信号 → 是否注入代码 / 是否自动检索」判定的唯一来源（src/agent/context-signals.js）。
+// Main 的 system-prompt-prep.js 直接 require；Renderer 的
+// renderer-editor-context.js / renderer-agent-system-message.js 消费这里的兼容全局，
+// 勿再自抄 textHasCodebaseMention / extractPathHintsFromText / formatCodebaseBlock。
+// 注：shouldInjectCodeContext 不进 compat —— Renderer 需先把 Monaco 状态适配成
+// snapshot.editor，故 renderer-context-engine.js 只保留 shouldInjectCodeContext 一层薄适配器。
+// shouldAutoCodebaseSearch 仅 Main（system-prompt-prep.js）使用，Renderer 侧适配器已删除。
+register('DieyunContextSignals', { ...contextSignals, ContextSignals: contextSignals }, {
+  compat: ['ContextSignals', 'textHasCodebaseMention', 'extractPathHintsFromText', 'extractCodebasePathsFromBlock', 'formatCodebaseBlock']
 });
 
 register('DieyunReviewerJson', reviewerJson, {

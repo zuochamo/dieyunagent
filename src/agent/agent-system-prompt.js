@@ -38,8 +38,6 @@ function buildCoreAgentRules(opts = {}) {
     '- 解释架构/流程/状态机时，可用 ```mermaid 代码块（客户端 Mermaid 11 自动渲染成 SVG）。',
     '- Mermaid 写法：首行 flowchart TB/LR 或 sequenceDiagram；节点 ID 用英文；中文/括号/斜杠标签务必双引号如 Main["主进程"]、subgraph S1["Gateway (RPC)"]；边文案 -->|"步骤"|；每回复最多 1 个 mermaid 块；勿用 HTML/<br/>/style/classDef；节点 ≤15、嵌套 subgraph ≤2；语法不确定时用 Markdown 列表兜底。',
     '- 项目地图：`.dieyun/AGENTS.md` 概览若已出现在本轮上下文则优先用；否则用 fs_read_file。长期记录用 agents_md_propose 或 fs_edit。',
-    '- Playbook：`.dieyun/playbooks/` 存可复用 SOP；相关摘要已注入时优先按步骤执行，全文用 fs_read_file；保存流程用 playbook_propose 或直接写该目录。',
-    '- Wiki：`.dieyun/wiki/` 给人查阅的项目说明；需要时用 fs_read_file 读对应页面，不要假设已注入。',
     '- 会话记忆：用户追问「刚才说了什么/继续上文/你已经给过方案」时，以 messages 中本会话 assistant 回复与【本会话近期对话】为准；勿把【项目记忆】【长期记忆】【工作记忆模板】当成同一会话内刚才的回答。',
     '- 任务优先级：【当前任务】若给出新需求则只做该需求；未改目标时根据压缩摘要、折叠历史与近轮原文继续未完成工作。摘要不得覆盖与当前任务冲突的新指令。',
     '- 看到「较早对话已折叠」时：先用折叠条 + 本轮近文继续；勿仅因折叠就重读同一文件或空转恢复上下文。',

@@ -14,10 +14,10 @@
 | `renderer-agent-complete.js` | 成功收尾 / 完成验收提示 / 断网暂停 | 完成门槛（不自动续跑） |
 | `renderer-agent-resume.js` | resumeAgentToolLoop | 「继续」协议续跑 |
 | `renderer-agent-abort.js` | 停止 / abort 等待 / 停止页脚 | 停止按钮 |
-| `renderer-agent-prep-remote.js` | 远程 core 等待、自动 codebase 上下文 | 准备阶段远程 |
+| `renderer-agent-prep-remote.js` | 远程 core 等待（`index.remote_wait_ready`） | 准备阶段远程 |
 | `renderer-agent-context-ui.js` | Composer 上下文进度环 / token 统计 | 上下文用量 UI |
 | `../agent/agent-system-prompt.js` | 模型可见准则与权限/工作区文案 | 改 Agent 规则 |
-| `../agent/system-prompt-prep.js` | Main：codebase / 开文件 / AGENTS.md overview / 图谱(结构信号) / 记忆 / Playbook / 技能索引 / MCP；Wiki 不自动注入 | 改召回装配 |
+| `../agent/system-prompt-prep.js` | Main：codebase / 开文件 / AGENTS.md overview / 图谱(结构信号) / 记忆 / 技能索引 / MCP | 改召回装配 |
 | `renderer-agent-system-message.js` | 视图快照 + 编辑器/诊断 + 缓存 | 系统消息注入 |
 | `renderer-agent-reviewer.js` | 可选 LLM Reviewer：默认关；须独立模型 + 文件 diff | 终态 opt-in |
 | `renderer-composer-mention.js` | Composer @ 提及菜单 | @ 菜单 |
@@ -46,7 +46,7 @@
 | `renderer-tool-defs.js` | 从 `tool-catalog` 组装工具列表 + 插件 UI | 工具列表注入 |
 | `../agent/tool-catalog.js` | 静态工具 schema 唯一目录 | 改工具描述/参数 |
 | `renderer-tool-results.js` | 工具结果卡片 | 工具输出 UI |
-| `renderer-context-engine.js` | 代码库/图谱/记忆召回辅助（Main 装配；此处保留 UI/其它入口） | 上下文注入（非 loop） |
+| `renderer-context-engine.js` | token 估算 / 工具结果截断 / LSP 诊断块 / 编辑器与 @Codebase 信号薄适配（召回全在 Main） | 上下文注入（非 loop） |
 | `renderer-agent-session.js` | 会话上下文薄封装 | 历史消息组装 |
 | `../agent/session-transcript.js` | 会话账本过滤（user/assistant） | 下轮模型历史投影 |
 | `renderer-agent-tools.js` | 工具调用 UI 辅助 | tool 卡片交互 |
@@ -76,7 +76,6 @@
 | `renderer-artifacts.js` | 产物列表面板（session/browse/diff 见上表） |
 | `renderer-codebase-panel.js` | 代码索引侧栏 |
 | `renderer-graph-panel.js` | 结构索引侧栏 |
-| `renderer-wiki-panel.js` | 项目 Wiki（`.dieyun/wiki`） |
 | `renderer-problems.js` | LSP 诊断 |
 
 ## 设置 / 模型 / 技能

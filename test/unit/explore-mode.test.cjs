@@ -27,7 +27,6 @@ describe('explore mode', () => {
       'host_exec',
       'agent_clarify',
       'agents_md_propose',
-      'playbook_propose',
       'mcp_server_tool',
       'graph'
     ].map(tool);

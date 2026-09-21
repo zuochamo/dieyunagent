@@ -35,25 +35,25 @@ const md = [
   '<!-- dieyun:section:overview status=stable -->',
   '## 概览',
   'hello',
-  '<!-- dieyun:section:environment status=auto -->',
-  '## 环境',
-  'win',
+  '<!-- dieyun:section:commands status=auto -->',
+  '## 常用命令',
+  'heavy-cmd-secret',
   '<!-- dieyun:section:conventions status=draft -->',
   '## 约定',
   'secret-conventions'
 ].join('\n');
 const light = lightAgentsMdContent(md);
 assert(light.includes('hello'), 'keeps overview');
-assert(!light.includes('win'), 'drops environment');
+assert(!light.includes('heavy-cmd-secret'), 'drops commands section');
 assert(!light.includes('secret-conventions'), 'drops heavy sections');
 
-const envOnly = [
+const commandsOnly = [
   '# AGENTS.md',
-  '<!-- dieyun:section:environment status=auto -->',
-  '## 环境',
-  'win'
+  '<!-- dieyun:section:commands status=auto -->',
+  '## 常用命令',
+  'heavy-cmd-secret'
 ].join('\n');
-assert(!lightAgentsMdContent(envOnly).includes('win'), 'no overview does not dump environment');
+assert(!lightAgentsMdContent(commandsOnly).includes('heavy-cmd-secret'), 'no overview does not dump heavy sections');
 
 assert(
   extractCodebasePathsFromBlock('### 1. src/a.ts:1-2\nfoo').includes('src/a.ts'),
@@ -105,9 +105,7 @@ async function runPrep() {
         if (
           method === 'memory.project_recall' ||
           method === 'memory.long_recall' ||
-          method === 'memory.long_recent' ||
-          method === 'playbook.recall' ||
-          method === 'wiki.recall'
+          method === 'memory.long_recent'
         ) {
           return { mode: 'none', results: [] };
         }
@@ -127,8 +125,7 @@ async function runPrep() {
   assert(packed.turnRide.includes('【当前关注文件'), 'open files on Main');
   assert(packed.turnRide.includes('【项目地图 · AGENTS.md】'), 'AGENTS.md on Main');
   assert(packed.turnRide.includes('hello'), 'AGENTS overview injected');
-  assert(!packed.turnRide.includes('win'), 'AGENTS environment not injected');
-  assert(!calls.includes('wiki.recall'), 'wiki not recalled');
+  assert(!packed.turnRide.includes('heavy-cmd-secret'), 'AGENTS heavy sections not injected');
   assert(packed.turnRide.includes('【本会话变更文件】'), 'changes on Main');
   assert(packed.turnRide.includes('【编辑器上下文'), 'renderer editor chunk preserved');
   assert(calls.includes('codebase.search'), 'searched codebase');
@@ -161,7 +158,7 @@ async function runPrepKnowledge() {
           return { data: '', encoding: 'utf8' };
         }
         if (method === 'sql.config_get') return { enabled: false };
-        if (method === 'graph.repo_map' || method === 'graph.lsp_enrich' || method === 'wiki.recall') {
+        if (method === 'graph.repo_map' || method === 'graph.lsp_enrich') {
           throw new Error(`${method} should not run in this case`);
         }
         if (method === 'memory.project_recall') {
@@ -169,12 +166,6 @@ async function runPrepKnowledge() {
         }
         if (method === 'memory.long_recall') {
           return { mode: 'keyword', results: [{ id: 3, kind: 'normal', score: 0.4, content: '用户偏好中文' }] };
-        }
-        if (method === 'playbook.recall') {
-          return {
-            mode: 'keyword',
-            results: [{ id: 'pb1', title: '登录修复', domain: 'auth', summary: '先读登录模块', path: '.dieyun/playbook/login.md', score: 0.5 }]
-          };
         }
         if (method === 'memory.compaction_recent') {
           return [{ summary_text: '此前已改过路由' }];
@@ -220,8 +211,6 @@ async function runPrepKnowledge() {
   assert(!packed.turnRide.includes('【项目地图 · AGENTS.md】'), 'no AGENTS stub');
   assert(packed.turnRide.includes('【项目记忆'), 'project memory on Main');
   assert(packed.turnRide.includes('【长期记忆'), 'global memory on Main');
-  assert(packed.turnRide.includes('【相关 Playbook'), 'playbook on Main');
-  assert(!packed.turnRide.includes('【项目 Wiki】'), 'wiki not auto-injected');
   assert(packed.turnRide.includes('此前已改过路由') || packed.turnRide.includes('压缩摘要'), 'compaction on Main');
   assert(packed.turnRide.includes('【工作记忆模板】'), 'work memory on Main');
   assert(packed.turnRide.includes('【相关技能 · 索引'), 'skills catalog on Main');
@@ -229,7 +218,6 @@ async function runPrepKnowledge() {
   assert(!packed.turnRide.includes('用 HTTP 查天气'), 'skill body not injected');
   assert(packed.stable.includes('【MCP · 1 个服务已启用】Filesystem'), 'compact MCP on Main stable');
   assert(!calls.includes('graph.repo_map'), 'did not fetch graph');
-  assert(!calls.includes('wiki.recall'), 'did not fetch wiki');
   assert(calls.includes('memory.project_recall'), 'fetched project memory');
 }
 
@@ -255,11 +243,7 @@ async function runPrepGraph() {
         }
         if (method === 'graph.lsp_enrich') return { ok: true };
         if (method === 'workspace.git_diff') return { ok: false };
-        if (
-          method === 'memory.project_recall' ||
-          method === 'memory.long_recall' ||
-          method === 'playbook.recall'
-        ) {
+        if (method === 'memory.project_recall' || method === 'memory.long_recall') {
           return { mode: 'none', results: [] };
         }
         if (method === 'memory.compaction_recent' || method === 'agent.state_get') {
@@ -299,11 +283,7 @@ async function runPrepSkipAutoGraph() {
           throw new Error('graph should skip when skipAuto');
         }
         if (method === 'workspace.git_diff') return { ok: false };
-        if (
-          method === 'memory.project_recall' ||
-          method === 'memory.long_recall' ||
-          method === 'playbook.recall'
-        ) {
+        if (method === 'memory.project_recall' || method === 'memory.long_recall') {
           return { mode: 'none', results: [] };
         }
         throw new Error('unexpected ' + method);
@@ -329,11 +309,7 @@ async function runPrepMcpFull() {
       invokeRpc: async (method) => {
         if (method === 'fs.read_file') return { data: '', encoding: 'utf8' };
         if (method === 'sql.config_get') return { enabled: false };
-        if (
-          method === 'memory.project_recall' ||
-          method === 'memory.long_recall' ||
-          method === 'playbook.recall'
-        ) {
+        if (method === 'memory.project_recall' || method === 'memory.long_recall') {
           return { mode: 'none', results: [] };
         }
         throw new Error('unexpected ' + method);

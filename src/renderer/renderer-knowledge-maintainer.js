@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, fetchChatCompletion, resolveComposerModelForSend, getCustomModelApiConfig, compactPlainText, showAgentToast, getAgentsMdMode, ensureAgentsMd, loadAgentsMdRecord, parseMaintainerResponse, proposeAgentsMdUpdates, getPlaybookAutoMode, shouldRunPlaybookSedimentation, queuePlaybookDraftPreview, traceHasPlaybookPropose, messages, isSending, sessionActiveRuns, $, diecloud */
+/* global gatewayCall, gwState, fetchChatCompletion, resolveComposerModelForSend, getCustomModelApiConfig, compactPlainText, showAgentToast, getAgentsMdMode, ensureAgentsMd, loadAgentsMdRecord, parseMaintainerResponse, proposeAgentsMdUpdates, messages, isSending, sessionActiveRuns, $, diecloud */
 'use strict';
 
 let knowledgeMaintenancePending = false;
@@ -20,8 +20,6 @@ const KNOWLEDGE_CONSOL_DEFAULTS = Object.freeze({
     recentChat: true,
     longMemory: true,
     projectMemory: true,
-    wiki: true,
-    playbook: true,
     agents: true
   }),
   lastRunAt: 0,
@@ -46,9 +44,7 @@ const UNIFIED_KNOWLEDGE_SCHEMA = `只输出 JSON，不要 Markdown 包裹或额�
 {
   "memories": [{"content":"…","kind":"normal|private|secret","importance":1-5,"scope":"global|project"}],
   "archive_memory_ids": ["记忆id"],
-  "agents_updates": [{"section":"commands","action":"append","content":"- …","confidence":0.9}],
-  "wiki_updates": [{"slug":"page-slug","title":"标题","body":"markdown正文","action":"upsert"}],
-  "playbook": {"worthy":false,"confidence":0,"title":"","domain":"general","goal":"","steps":"","commands":"","acceptance":"","pitfalls":"","relatedFiles":"","tags":[]}
+  "agents_updates": [{"section":"commands","action":"append","content":"- …","confidence":0.9}]
 }`;
 
 function getKnowledgeConsolidationSettings() {
@@ -98,7 +94,7 @@ function saveKnowledgeConsolidationSettings(patch) {
 }
 
 function buildUnifiedKnowledgeSystemPrompt(opts = {}) {
-  const { periodicOnly, fullPeriodic, agentsEnabled, playbookEnabled, wikiEnabled } = opts;
+  const { periodicOnly, fullPeriodic, agentsEnabled } = opts;
   if (fullPeriodic) {
     let boundary =
       '你是叠云 Agent 的定时知识归纳器。根据输入中的对话与已有知识，合并去重、提炼稳定事实，并建议归档过时记忆。' +
@@ -112,17 +108,6 @@ function buildUnifiedKnowledgeSystemPrompt(opts = {}) {
     } else {
       boundary += '3. agents_updates 必须为 []。\n';
     }
-    if (playbookEnabled) {
-      boundary += '4. playbook：仅当可复用多步 SOP（≥3 步）时 worthy=true。\n';
-    } else {
-      boundary += '4. playbook.worthy 必须为 false。\n';
-    }
-    if (wikiEnabled) {
-      boundary +=
-        '5. wiki_updates：仅当有稳定项目说明值得入库时 upsert；slug 仅 a-z0-9-；body 简洁。无则 []。\n';
-    } else {
-      boundary += '5. wiki_updates 必须为 []。\n';
-    }
     boundary += '禁止编造未出现的路径/命令；无内容则对应数组为空。';
     return boundary;
   }
@@ -131,7 +116,7 @@ function buildUnifiedKnowledgeSystemPrompt(opts = {}) {
       '你是叠云 Agent 的知识维护器（定时归纳）。只从近期对话提取 SQLite 碎片记忆。' +
       UNIFIED_KNOWLEDGE_SCHEMA +
       '【写入边界】memories：临时事实、偏好、密钥（标 kind）、未写入 AGENTS 的坑点；不要命令清单/目录树/多步流程。' +
-      'archive_memory_ids / agents_updates / wiki_updates 必须为 []；playbook.worthy 必须为 false。'
+      'archive_memory_ids / agents_updates 必须为 []。'
     );
   }
   let boundary =
@@ -141,21 +126,14 @@ function buildUnifiedKnowledgeSystemPrompt(opts = {}) {
     '2. agents_updates（AGENTS.md 项目地图）：稳定命令、目录、规范、长期坑点（短列表项）。' +
     'section 取值：overview, structure, commands, conventions, testing, architecture, gotchas。' +
     '不写：完整 SOP、逐步操作过程。\n';
-  if (playbookEnabled) {
-    boundary +=
-      '3. playbook：仅当存在可复用多步 SOP（≥3 步）或 Plan 验收通过时 worthy=true。' +
-      '写目标、步骤、验收；命令只写关键几条。与已有 Playbook 高度重复则 worthy=false。\n';
-  } else {
-    boundary += '3. playbook.worthy 必须为 false。\n';
-  }
   boundary +=
     '【互斥】同一命令优先 agents_updates.commands，不要同时写 memories；' +
-    '完整流程优先 playbook，不要拆成多条 memories。无内容则对应数组为空或 worthy=false。' +
-    '禁止编造未出现的命令或路径。wiki_updates 与 archive_memory_ids 在本触发下必须为 []。';
+    '无内容则对应数组为空。' +
+    '禁止编造未出现的命令或路径。archive_memory_ids 在本触发下必须为 []。';
   if (!agentsEnabled) {
     boundary += '\nagents_updates 必须为 []（项目地图维护已关闭）。';
   }
-  return `你是叠云 Agent 的统一知识维护器。一次决策，分路写入 memories / AGENTS.md / Playbook。\n${boundary}\n${UNIFIED_KNOWLEDGE_SCHEMA}`;
+  return `你是叠云 Agent 的统一知识维护器。一次决策，分路写入 memories / AGENTS.md。\n${boundary}\n${UNIFIED_KNOWLEDGE_SCHEMA}`;
 }
 
 function extractJsonBlock(text) {
@@ -259,33 +237,17 @@ function parseUnifiedKnowledgeJson(text) {
     : Array.isArray(json.updates)
       ? json.updates
       : [];
-  const playbook = json.playbook && typeof json.playbook === 'object' ? json.playbook : { worthy: false };
   const archive_memory_ids = (Array.isArray(json.archive_memory_ids) ? json.archive_memory_ids : [])
     .map((id) => String(id || '').trim())
     .filter(Boolean)
     .slice(0, 24);
-  const wiki_updates = (Array.isArray(json.wiki_updates) ? json.wiki_updates : [])
-    .map((w) => ({
-      slug: compactPlainText(w.slug || w.id || '', 64)
-        .toLowerCase()
-        .replace(/[^a-z0-9-]+/g, '-')
-        .replace(/^-+|-+$/g, ''),
-      title: compactPlainText(w.title || '', 120),
-      body: String(w.body || w.content || '').trim().slice(0, 8000),
-      action: String(w.action || 'upsert').toLowerCase()
-    }))
-    .filter((w) => w.slug && w.body.length >= 24)
-    .slice(0, 3);
-  return { memories, agents_updates, playbook, archive_memory_ids, wiki_updates };
+  return { memories, agents_updates, archive_memory_ids };
 }
 
 function shouldRunUnifiedMaintenance(input) {
   const signals = collectKnowledgeSignals(input);
   if (input?.periodicOnly) {
     return !!signals.recentText;
-  }
-  if (traceHasPlaybookPropose(input?.trace)) {
-    // 用户/Agent 已手动提议 Playbook，仍可做 memory/agents
   }
   // 结构信号（文本长度/工具/变更）；禁用寒暄关键词门闩
   return (
@@ -336,50 +298,6 @@ async function applyAgentsUpdates(updates, workspacePath, source, input) {
   return proposeAgentsMdUpdates(updates, source || 'task-completed', workspacePath);
 }
 
-async function applyPlaybookDraft(playbook, input) {
-  if (!playbook || !playbook.worthy || getPlaybookAutoMode() === 'off') {
-    return { skipped: true };
-  }
-  const fromPeriodic =
-    input?.source === 'periodic_consolidation' || input?.memorySource === 'periodic_consolidation';
-  if (!fromPeriodic && !shouldRunPlaybookSedimentation(input)) {
-    return { skipped: true, reason: 'gate' };
-  }
-  const confidence = Number(playbook.confidence);
-  if (Number.isFinite(confidence) && confidence < 0.62) {
-    return { skipped: true, reason: 'low_confidence' };
-  }
-  const workspacePath = input?.workspacePath;
-  if (!workspacePath) return { skipped: true, reason: 'no_workspace' };
-
-  const title = String(playbook.title || '').trim();
-  const goal = String(playbook.goal || '').trim();
-  const steps = String(playbook.steps || '').trim();
-  if (!title || !goal || !steps) return { skipped: true, reason: 'invalid' };
-
-  const draft = await gatewayCall('playbook.draft_create', {
-    workspacePath,
-    title,
-    domain: playbook.domain,
-    goal,
-    steps,
-    commands: playbook.commands,
-    acceptance: playbook.acceptance,
-    pitfalls: playbook.pitfalls,
-    relatedFiles: playbook.relatedFiles,
-    tags: playbook.tags,
-    trigger:
-      input?.source === 'plan-worktree-applied'
-        ? 'plan-worktree'
-        : input?.source === 'plan-completed'
-          ? 'plan-review'
-          : 'auto'
-  });
-  await queuePlaybookDraftPreview({ ...draft, auto: true }, workspacePath, { auto: true });
-  showAgentToast('Playbook 自动沉淀', '已生成草稿，请确认入库或放弃', { variant: 'info' });
-  return { ok: true, draftPath: draft.draftPath };
-}
-
 async function runUnifiedKnowledgeMaintenance(input) {
   if (!gwState.authed) return { ok: false, reason: 'gateway_disconnected' };
   if (!shouldRunUnifiedMaintenance(input)) return { ok: false, reason: 'skip' };
@@ -387,7 +305,6 @@ async function runUnifiedKnowledgeMaintenance(input) {
   const signals = collectKnowledgeSignals(input);
   const workspacePath = input?.workspacePath ? String(input.workspacePath).trim() : '';
   const agentsEnabled = !!workspacePath && getAgentsMdMode() !== 'off';
-  const playbookEnabled = !!workspacePath && getPlaybookAutoMode() !== 'off';
   const periodicOnly = !!input?.periodicOnly;
 
   const model =
@@ -410,20 +327,6 @@ async function runUnifiedKnowledgeMaintenance(input) {
       } catch {
         agentsContext = '';
       }
-    }
-  }
-
-  let playbookTitles = '';
-  if (playbookEnabled && !periodicOnly) {
-    try {
-      const listed = await gatewayCall('playbook.list', { workspacePath });
-      playbookTitles = (listed?.entries || [])
-        .filter((e) => e && e.status === 'active')
-        .slice(0, 16)
-        .map((e) => `- ${e.title || e.id} (${e.domain || 'general'})`)
-        .join('\n');
-    } catch {
-      // ignore
     }
   }
 
@@ -453,7 +356,7 @@ async function runUnifiedKnowledgeMaintenance(input) {
       messages: [
         {
           role: 'system',
-          content: buildUnifiedKnowledgeSystemPrompt({ periodicOnly, agentsEnabled, playbookEnabled })
+          content: buildUnifiedKnowledgeSystemPrompt({ periodicOnly, agentsEnabled })
         },
         {
           role: 'user',
@@ -462,7 +365,6 @@ async function runUnifiedKnowledgeMaintenance(input) {
             : [
                 `【触发】${sourceLabel}`,
                 `【当前 AGENTS.md】\n${agentsContext || '（未启用或无工作空间）'}`,
-                `【已有 Playbook】\n${playbookTitles || '无'}`,
                 `【用户任务】\n${signals.userText || '无'}`,
                 `【Agent 结果】\n${signals.assistantText || '无'}`,
                 `【Plan 步骤】\n${signals.planSummary || '无'}`,
@@ -492,7 +394,6 @@ async function runUnifiedKnowledgeMaintenance(input) {
   const parsed = parseUnifiedKnowledgeJson(llmText);
   let memorySaved = 0;
   let agentsApplied = 0;
-  let playbookResult = { skipped: true };
 
   try {
     memorySaved = await applyMemoryItems(parsed.memories, input);
@@ -502,10 +403,6 @@ async function runUnifiedKnowledgeMaintenance(input) {
       const updates = agentsParsed?.updates || parsed.agents_updates;
       const agentsRes = await applyAgentsUpdates(updates, workspacePath, 'task-completed', input);
       agentsApplied = agentsRes?.applied || 0;
-    }
-
-    if (playbookEnabled && !periodicOnly && parsed.playbook?.worthy) {
-      playbookResult = await applyPlaybookDraft(parsed.playbook, input);
     }
 
     if (job?.jobId) {
@@ -518,8 +415,7 @@ async function runUnifiedKnowledgeMaintenance(input) {
     return {
       ok: true,
       memorySaved,
-      agentsApplied,
-      playbook: playbookResult
+      agentsApplied
     };
   } catch (err) {
     if (job?.jobId) {
@@ -621,48 +517,6 @@ async function gatherFullConsolidationCorpus(settings, workspacePath) {
     }
   }
 
-  if (scopes.wiki !== false && workspacePath) {
-    try {
-      const listed = await gatewayCall('wiki.list', { workspacePath });
-      const pages = (listed?.pages || []).slice(0, 12);
-      if (!pages.length) {
-        parts.push('【Wiki】\n无页面');
-      } else {
-        const chunks = [];
-        for (const p of pages.slice(0, 6)) {
-          const slug = p.slug || p.path || '';
-          let body = compactPlainText(p.summary || '', 160);
-          if (slug) {
-            try {
-              const page = await gatewayCall('wiki.read', { workspacePath, slug });
-              body = compactPlainText(page?.body || page?.content || body, 500);
-            } catch {
-              // keep summary
-            }
-          }
-          chunks.push(`### ${p.title || slug}\nslug=${slug}\n${body}`);
-        }
-        parts.push(`【Wiki】\n${chunks.join('\n\n')}`);
-      }
-    } catch {
-      parts.push('【Wiki】\n读取失败');
-    }
-  }
-
-  if (scopes.playbook !== false && workspacePath) {
-    try {
-      const listed = await gatewayCall('playbook.list', { workspacePath });
-      const titles = (listed?.entries || [])
-        .filter((e) => e && e.status === 'active')
-        .slice(0, 16)
-        .map((e) => `- ${e.title || e.id} (${e.domain || 'general'})`)
-        .join('\n');
-      parts.push(`【已有 Playbook】\n${titles || '无'}`);
-    } catch {
-      parts.push('【已有 Playbook】\n读取失败');
-    }
-  }
-
   if (scopes.agents !== false && workspacePath && getAgentsMdMode() !== 'off') {
     try {
       await ensureAgentsMd(workspacePath);
@@ -692,27 +546,8 @@ async function applyArchiveMemoryIds(ids, knownMemoryIds) {
   return n;
 }
 
-async function applyWikiUpdates(updates, workspacePath) {
-  if (!workspacePath || !updates?.length) return 0;
-  let n = 0;
-  for (const w of updates) {
-    try {
-      await gatewayCall('wiki.write', {
-        workspacePath,
-        slug: w.slug,
-        title: w.title || w.slug,
-        body: w.body
-      });
-      n += 1;
-    } catch (err) {
-      console.warn('wiki consolidate write', err);
-    }
-  }
-  return n;
-}
-
 /**
- * 完整版定时知识归纳：对话模型整理记忆 + 可选 Wiki/Playbook/AGENTS。
+ * 完整版定时知识归纳：对话模型整理记忆 + 可选 AGENTS.md。
  * @param {{ force?: boolean, reason?: string }} opts
  */
 async function runFullPeriodicKnowledgeConsolidation(opts = {}) {
@@ -729,9 +564,6 @@ async function runFullPeriodicKnowledgeConsolidation(opts = {}) {
   const workspacePath = await resolveConsolidationWorkspacePath();
   const agentsEnabled =
     !!workspacePath && settings.scopes.agents !== false && getAgentsMdMode() !== 'off';
-  const playbookEnabled =
-    !!workspacePath && settings.scopes.playbook !== false && getPlaybookAutoMode() !== 'off';
-  const wikiEnabled = !!workspacePath && settings.scopes.wiki !== false;
 
   const model = resolveComposerModelForSend('knowledge consolidation').model;
   const apiConfig =
@@ -792,9 +624,7 @@ async function runFullPeriodicKnowledgeConsolidation(opts = {}) {
           role: 'system',
           content: buildUnifiedKnowledgeSystemPrompt({
             fullPeriodic: true,
-            agentsEnabled,
-            playbookEnabled,
-            wikiEnabled
+            agentsEnabled
           })
         },
         {
@@ -847,16 +677,6 @@ async function runFullPeriodicKnowledgeConsolidation(opts = {}) {
       agentsApplied = agentsRes?.applied || 0;
     }
 
-    let playbookResult = { skipped: true };
-    if (playbookEnabled && parsed.playbook?.worthy) {
-      playbookResult = await applyPlaybookDraft(parsed.playbook, input);
-    }
-
-    let wikiWritten = 0;
-    if (wikiEnabled && parsed.wiki_updates?.length) {
-      wikiWritten = await applyWikiUpdates(parsed.wiki_updates, workspacePath);
-    }
-
     if (job?.jobId) {
       await gatewayCall('memory.consolidation_job_finish', {
         jobId: job.jobId,
@@ -865,9 +685,7 @@ async function runFullPeriodicKnowledgeConsolidation(opts = {}) {
     }
 
     lastKnowledgeMaintenanceAt = Date.now();
-    const summary = `记忆+${memorySaved} 归档${archived} AGENTS${agentsApplied} Wiki${wikiWritten}${
-      playbookResult?.ok ? ' Playbook草稿' : ''
-    }`;
+    const summary = `记忆+${memorySaved} 归档${archived} AGENTS${agentsApplied}`;
     saveKnowledgeConsolidationSettings({
       lastRunAt: Date.now(),
       lastRunOk: true,
@@ -878,9 +696,7 @@ async function runFullPeriodicKnowledgeConsolidation(opts = {}) {
       ok: true,
       memorySaved,
       archived,
-      agentsApplied,
-      wikiWritten,
-      playbook: playbookResult
+      agentsApplied
     };
   } catch (err) {
     if (job?.jobId) {
