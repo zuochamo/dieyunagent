@@ -1,19 +1,9 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, CHARS_PER_TOKEN */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, estimateMessagesTokens */
 'use strict';
 
 function estimateContextTokensFallback(msgs) {
-  return (msgs || []).reduce((sum, m) => {
-    const content = Array.isArray(m.content)
-      ? m.content
-          .map((part) => {
-            if (typeof part === 'string') return part;
-            if (part && typeof part === 'object') return part.text || part.content || '';
-            return '';
-          })
-          .join('\n')
-      : m.content;
-    return sum + Math.ceil(String(content || '').length / CHARS_PER_TOKEN) + 6;
-  }, 0);
+  // token 估算单一来源（window.estimateMessagesTokens，见 src/agent/token-estimate.js）
+  return estimateMessagesTokens(msgs || []);
 }
 
 const ESTIMATE_TOKENS_MESSAGE_CHAR_CAP = 16000;
@@ -57,7 +47,7 @@ async function estimateMessagesTokensViaMain(messages) {
     ).length;
   }
   if (chars > 48000) {
-    return Math.ceil(chars / CHARS_PER_TOKEN) + list.length * 6;
+    return estimateMessagesTokens(list);
   }
   const msgs = truncateMessagesForContextEstimate(list);
   if (typeof window.diecloud?.compactionEstimateTokens === 'function') {

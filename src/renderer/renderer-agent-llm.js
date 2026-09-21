@@ -884,7 +884,9 @@ function resolveSseDeltaParse() {
 }
 
 function countCjkChars(text) {
-  return (String(text || '').match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
+  // CJK 字符类单一来源（window.DieyunTokenEstimate，见 src/agent/token-estimate.js）。
+  const mod = typeof window !== 'undefined' ? window.DieyunTokenEstimate : null;
+  return mod && typeof mod.countCjkChars === 'function' ? mod.countCjkChars(text) : 0;
 }
 
 function maybeRepairMojibakeText(value) {

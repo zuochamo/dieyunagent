@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, settings, getComposerAgentMode, compactPlainText, getContextFilePathsForAgent, getSessionChangeRowsForAgent, getAgentLimits, withSessionRpcScope, currentSessionId, getMergedContextFilePaths, resolveSessionWorkspacePath, resolveSessionWorkspacePathSync, CHARS_PER_TOKEN, CJK_CHARS_PER_TOKEN, extractPathHintsFromText */
+/* global gatewayCall, gwState, settings, getComposerAgentMode, compactPlainText, getContextFilePathsForAgent, getSessionChangeRowsForAgent, getAgentLimits, withSessionRpcScope, currentSessionId, getMergedContextFilePaths, resolveSessionWorkspacePath, resolveSessionWorkspacePathSync, extractPathHintsFromText */
 'use strict';
 
 /**
@@ -239,46 +239,6 @@ function truncateToolResultForApi(name, result) {
     return truncateStringField(String(result), CTX_LIMITS.TOOL_RESULT_MAX_JSON);
   }
   return truncateToolResultDeep(name, result, 0);
-}
-
-function estimateTextTokens(text) {
-  const s = String(text || '');
-  const cjk = (s.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
-  const other = s.length - cjk;
-  // 系数唯一来源 agent-limits.js（与 Rust compaction/tokens.rs 同值）
-  return Math.ceil(cjk / CJK_CHARS_PER_TOKEN + other / CHARS_PER_TOKEN);
-}
-
-function estimateMessagesTokens(msgs) {
-  return (msgs || []).reduce((n, m) => {
-    let content = m.content;
-    if (Array.isArray(content)) {
-      content = content
-        .map((p) => (typeof p === 'string' ? p : p?.text || p?.content || ''))
-        .join('\n');
-    }
-    if (m.tool_calls) content = `${content || ''}\n${JSON.stringify(m.tool_calls)}`;
-    return n + estimateTextTokens(content) + 6;
-  }, 0);
-}
-
-function estimateToolsTokens(tools) {
-  if (!tools || !tools.length) return 0;
-  try {
-    return estimateTextTokens(JSON.stringify(tools));
-  } catch {
-    return Math.ceil(tools.length * 120);
-  }
-}
-
-function estimateFullContextUsage({ systemContent, messages, tools, draft }) {
-  let total = estimateTextTokens(systemContent || '');
-  total += estimateMessagesTokens(messages || []);
-  total += estimateToolsTokens(tools || []);
-  if (draft && String(draft).trim()) {
-    total += estimateTextTokens(draft) + 6;
-  }
-  return total;
 }
 
 async function buildOpenFilesContext(getPathsFn, codebasePaths, opts = {}) {
@@ -676,9 +636,8 @@ window.ctxLimitsFor = ctxLimitsFor;
 // applyAgentLimitsTo 是内部助手（仅 ctxLimitsFor / applyAgentLimitsToRuntime 消费），不导出；
 // applyAgentLimitsToRuntime 是渲染器全局契约：renderer-encoding-params.js 多处调用。
 window.applyAgentLimitsToRuntime = applyAgentLimitsToRuntime;
-window.estimateFullContextUsage = estimateFullContextUsage;
-window.estimateToolsTokens = estimateToolsTokens;
-window.estimateMessagesTokens = estimateMessagesTokens;
+// estimateFullContextUsage / estimateToolsTokens / estimateMessagesTokens 已由 agent-bundle
+// 的 TokenEstimate compat 挂到 window（唯一来源），本文件不再重复导出。
 window.truncateToolResultForApi = truncateToolResultForApi;
 window.buildOpenFilesContext = buildOpenFilesContext;
 window.buildRecentChangesContext = buildRecentChangesContext;

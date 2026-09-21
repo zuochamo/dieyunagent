@@ -31,6 +31,7 @@ const agentSystemPrompt = require('../../agent/agent-system-prompt');
 const reviewerJson = require('../../agent/reviewer-json');
 const llmRequest = require('../../agent/llm-request');
 const llmChannel = require('../../agent/llm-channel');
+const tokenEstimate = require('../../agent/token-estimate');
 const sseDeltaParse = require('../../agent/sse-delta-parse');
 const contextSignals = require('../../agent/context-signals');
 
@@ -154,6 +155,19 @@ register('DieyunLlmRequest', { ...llmRequest, LlmRequest: llmRequest }, {
 // 只镜像一个命名空间全局 LlmChannel，避免 getChannelPolicy / classifyDelta 这类通用名污染 window。
 register('DieyunLlmChannel', { ...llmChannel, LlmChannel: llmChannel }, {
   compat: ['LlmChannel']
+});
+
+// 文本→token 估算的唯一来源（src/agent/token-estimate.js，公式对齐 Rust compaction/tokens.rs）。
+// Main 直接 require；Renderer 的 estimate* 兼容全局由此提供，勿再各写一份 char/CPT 启发式。
+register('DieyunTokenEstimate', {
+  estimateTextTokens: tokenEstimate.estimateTextTokens,
+  estimateMessageTokens: tokenEstimate.estimateMessageTokens,
+  estimateMessagesTokens: tokenEstimate.estimateMessagesTokens,
+  estimateToolsTokens: tokenEstimate.estimateToolsTokens,
+  estimateFullContextUsage: tokenEstimate.estimateFullContextUsage,
+  countCjkChars: tokenEstimate.countCjkChars
+}, {
+  compat: ['estimateTextTokens', 'estimateMessagesTokens', 'estimateToolsTokens', 'estimateFullContextUsage']
 });
 
 // SSE delta 解析的唯一来源：Main（src/llm-stream-utils.js）与 Renderer（renderer-agent-llm.js）

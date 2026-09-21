@@ -6,6 +6,7 @@ const { mergedRequestOptions } = require('./model-api-config');
 const { resolveModelContextWindowFromSettings } = require('./model-runtime-by-tier');
 const { MODEL_RUNTIME_DEFAULTS } = require('./model-runtime-presets');
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+const { estimateTextTokens } = require('./token-estimate');
 const { COMPACTION } = require('../compaction-prompts');
 const { recordLlmUsage } = require('./llm-usage-recorder');
 const { buildEstimatedUsageObject, estimatePromptTokensFromMessages } = require('../llm-usage-stats');
@@ -312,7 +313,7 @@ function createMainCompactionAgent(userData, coreBridge = null) {
       );
       const est = buildEstimatedUsageObject({
         promptTokens: estimatePromptTokensFromMessages(messages) + 512,
-        completionTokens: Math.max(128, Math.ceil(summaryText.length / CHARS_PER_TOKEN))
+        completionTokens: Math.max(128, estimateTextTokens(summaryText))
       });
       if (est) recordLlmUsage(est, modelForUsage);
     }

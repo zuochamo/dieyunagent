@@ -1,4 +1,4 @@
-/* global window, document, $, settings, currentSessionId, messages, sessionActiveRuns, chatInput, composerSendBtn, isSending, isCurrentSessionSending, estimateContextTokensFallback, estimateMessagesTokensViaMain, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, lastComposerContextEstimate, reportTokensToMain, estimateTextTokens, getTextModelId, humanizeModelId, escapeHtml, CTX_LIMITS, dieyunI18n, invalidateSystemMessageCache, CHARS_PER_TOKEN */
+/* global window, document, $, settings, currentSessionId, messages, sessionActiveRuns, chatInput, composerSendBtn, isSending, isCurrentSessionSending, estimateContextTokensFallback, estimateMessagesTokensViaMain, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, lastComposerContextEstimate, reportTokensToMain, estimateTextTokens, getTextModelId, humanizeModelId, escapeHtml, CTX_LIMITS, dieyunI18n, invalidateSystemMessageCache */
 'use strict';
 
 const sessionContextEstimates = new Map();
@@ -385,9 +385,7 @@ function updateComposerContextStatsUi(used, capacity, ratio, sending) {
 
 function estimateSystemPromptTokens(sessionId) {
   const system = getSessionContextEstimate(sessionId).system || '';
-  return typeof estimateTextTokens === 'function'
-    ? estimateTextTokens(system)
-    : Math.ceil(String(system).length / CHARS_PER_TOKEN);
+  return estimateTextTokens(system);
 }
 
 function estimateSystemToolsExtra(sessionId) {
@@ -405,7 +403,7 @@ function estimateInflightRunTokens(live) {
   const addText = (text) => {
     const s = String(text || '').trim();
     if (!s) return 0;
-    return (typeof estimateTextTokens === 'function' ? estimateTextTokens(capText(s)) : Math.ceil(capText(s).length / CHARS_PER_TOKEN)) + 6;
+    return estimateTextTokens(capText(s)) + 6;
   };
 
   let total = 0;
@@ -631,12 +629,7 @@ function refreshContextProgress() {
   const { contextMessages, draft, sending, inflightTokens } = collectComposerContextMessages();
   const systemTokens = estimateSystemPromptTokens(currentSessionId);
   const toolsTokens = getSessionContextEstimate(currentSessionId).toolsTokenEst || 0;
-  const draftEst =
-    draft.trim() && typeof estimateTextTokens === 'function'
-      ? estimateTextTokens(draft) + 6
-      : draft.trim()
-        ? Math.ceil(draft.length / CHARS_PER_TOKEN) + 6
-        : 0;
+  const draftEst = draft.trim() ? estimateTextTokens(draft) + 6 : 0;
 
   const syncMessageTokens = estimateContextTokensFallback(contextMessages);
   const workingMessageTokens =

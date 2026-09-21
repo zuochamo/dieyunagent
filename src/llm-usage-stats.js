@@ -154,63 +154,48 @@ function usageToActivityPatch(input, model) {
   return patch;
 }
 
-function messageContentText(content) {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
-        if (part && typeof part === 'object') return part.text || part.content || '';
-        return '';
-      })
-      .join('\n');
-  }
-  return '';
-}
-
-let cachedCharsPerToken = 0;
+let cachedTokenEstimate = null;
 
 /**
- * 字符→token 折算系数唯一来源：agent-limits.js。
- * renderer 打包无 require，读 agent-limits 发布的 window 全局；Node 走 require。
+ * 文本→token 估算单一来源：`src/agent/token-estimate.js`
+ * （公式对齐 Rust compaction/tokens.rs，CJK 感知）。
+ * renderer 侧由 agent-bundle 发布 window.estimate* 兼容全局；Node 侧直接 require。
+ * 本函数只负责「取实现」，绝不在此复制算法，避免与账本数值打架。
  */
-function charsPerToken() {
-  if (cachedCharsPerToken > 0) return cachedCharsPerToken;
-  const fromGlobal = typeof CHARS_PER_TOKEN === 'number' ? CHARS_PER_TOKEN : 0;
-  if (fromGlobal > 0) {
-    cachedCharsPerToken = fromGlobal;
-    return cachedCharsPerToken;
+function tokenEstimateModule() {
+  if (cachedTokenEstimate) return cachedTokenEstimate;
+  if (typeof estimateTextTokens === 'function' && typeof estimateMessagesTokens === 'function') {
+    cachedTokenEstimate = {
+      estimateTextTokens,
+      estimateMessagesTokens,
+      estimateToolsTokens:
+        typeof estimateToolsTokens === 'function'
+          ? estimateToolsTokens
+          : (tools) => estimateTextTokens(JSON.stringify(tools || []))
+    };
+    return cachedTokenEstimate;
   }
   try {
-    const d = require('./agent-limits').AGENT_LIMITS_DEFAULTS;
-    if (d && Number.isFinite(d.charsPerToken) && d.charsPerToken > 0) {
-      cachedCharsPerToken = d.charsPerToken;
-      return cachedCharsPerToken;
-    }
+    cachedTokenEstimate = require('./agent/token-estimate');
+    return cachedTokenEstimate;
   } catch {
-    // renderer：无 require
+    // 落到下方抛出：bundle 未重建 / require 不可用都属配置错误，静默降级会让数值悄悄漂移
   }
-  cachedCharsPerToken = 3.2;
-  return cachedCharsPerToken;
+  throw new Error(
+    'token 估算模块缺失（window.estimate* / src/agent/token-estimate.js）：请重新构建 renderer agent bundle'
+  );
 }
 
 function estimateTokensFromText(text) {
-  const n = String(text || '').length;
-  if (n <= 0) return 0;
-  return Math.max(1, Math.ceil(n / charsPerToken()));
+  return tokenEstimateModule().estimateTextTokens(text);
 }
 
 function estimatePromptTokensFromMessages(messages) {
-  let sum = 0;
-  for (const m of messages || []) {
-    sum += estimateTokensFromText(messageContentText(m?.content)) + 6;
-  }
-  return sum;
+  return tokenEstimateModule().estimateMessagesTokens(messages);
 }
 
 function estimateToolDefinitionTokens(tools) {
-  if (!Array.isArray(tools) || !tools.length) return 0;
-  return estimateTokensFromText(JSON.stringify(tools));
+  return tokenEstimateModule().estimateToolsTokens(tools);
 }
 
 function buildEstimatedUsageObject({ promptTokens = 0, completionTokens = 0 } = {}) {
