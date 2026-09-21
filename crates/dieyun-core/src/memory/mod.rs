@@ -148,6 +148,8 @@ pub struct MessageRow {
     pub session_id: String,
     pub role: String,
     pub content: String,
+    /// 该轮真思考（与 `content` 分列）。历史重建默认不读它。
+    pub reasoning: Option<String>,
     pub created_at: i64,
 }
 
@@ -551,15 +553,21 @@ impl MemoryStore {
         session_id: &str,
         role: &str,
         content: &str,
+        reasoning: Option<&str>,
     ) -> Result<AppendMessageResult, CoreError> {
         // 唯一写库口：meta 里的字节（base64 / data URL）在这里被挡掉，
         // 不依赖各调用点自觉。
         let content = sanitize_persisted_message(content).unwrap_or_else(|| content.to_string());
+        // 真思考与 content 分列：空值统一落 NULL，避免「空串」与「无」两种表示。
+        let reasoning = reasoning
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let now = now_ms();
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![session_id, role, &content, now],
+                "INSERT INTO messages (session_id, role, content, reasoning, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![session_id, role, &content, &reasoning, now],
             )?;
             let id = conn.last_insert_rowid();
             conn.execute(
@@ -580,7 +588,7 @@ impl MemoryStore {
     ) -> Result<Vec<MessageRow>, CoreError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, created_at
+                "SELECT id, session_id, role, content, reasoning, created_at
                  FROM messages WHERE session_id = ?1
                  ORDER BY created_at DESC LIMIT ?2",
             )?;
@@ -591,7 +599,8 @@ impl MemoryStore {
                         session_id: row.get(1)?,
                         role: row.get(2)?,
                         content: row.get(3)?,
-                        created_at: row.get(4)?,
+                        reasoning: row.get(4)?,
+                        created_at: row.get(5)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -609,7 +618,7 @@ impl MemoryStore {
         let lim = limit.clamp(1, 500);
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, created_at
+                "SELECT id, session_id, role, content, reasoning, created_at
                  FROM messages WHERE session_id = ?1 AND id < ?2
                  ORDER BY id DESC LIMIT ?3",
             )?;
@@ -620,7 +629,8 @@ impl MemoryStore {
                         session_id: row.get(1)?,
                         role: row.get(2)?,
                         content: row.get(3)?,
-                        created_at: row.get(4)?,
+                        reasoning: row.get(4)?,
+                        created_at: row.get(5)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1672,11 +1682,26 @@ mod tests {
         let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
         let session = store.create_session(Some("测试"), None).unwrap();
         store
-            .append_message(&session.id, "user", "你好，Rust memory")
+            .append_message(&session.id, "user", "你好，Rust memory", None)
+            .unwrap();
+        store
+            .append_message(
+                &session.id,
+                "assistant",
+                "答复正文",
+                Some("  这是该轮真思考  "),
+            )
+            .unwrap();
+        // 空串与空白按「无」处理，统一落 NULL。
+        store
+            .append_message(&session.id, "assistant", "无思考轮", Some("   "))
             .unwrap();
         let msgs = store.recent_messages(&session.id, 10).unwrap();
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].reasoning, None);
+        assert_eq!(msgs[1].reasoning.as_deref(), Some("这是该轮真思考"));
+        assert_eq!(msgs[2].reasoning, None);
         let _ = std::fs::remove_file(db);
     }
 

@@ -53,6 +53,8 @@ function gatewayRowsToMessages(rows) {
       content: r.content,
       displayContent: packedMeta?.inputText || undefined,
       meta: packedMeta || undefined,
+      // 账本真思考（与 content 分列）：重建历史时只作上行回传真值来源，不并进 content。
+      reasoning: typeof r.reasoning === 'string' && r.reasoning.trim() ? r.reasoning : undefined,
       created_at: r.created_at
     });
   }

@@ -13,6 +13,8 @@ const {
   shouldCompactRound,
   backfillReasoningContent
 } = require('../src/agent/rust-loop-runner');
+const { REASONING_PLACEHOLDER } = require('../src/agent/reasoning-backfill');
+const { isReasoningFallbackText, persistableTurnText, TURN_EMPTY_REPLY_TEXT } = require('../src/agent/agent-round-text');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assert failed');
@@ -1068,7 +1070,8 @@ async function testTurnEndSynthesisFillsEmptyReply() {
   );
 }
 
-async function testTurnEndThoughtCoversSkipsLlm() {
+// 截断 + 只有思考：带标签交付思考原文，不再花一轮 LLM；该标签只用于展示，不写进 book。
+async function testTurnEndTruncatedUsesReasoningFallback() {
   let synthCalls = 0;
   const longThought =
     '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
@@ -1077,7 +1080,7 @@ async function testTurnEndThoughtCoversSkipsLlm() {
       phase: 'done',
       runId: 'run-thought',
       content: '',
-      hitRoundLimit: false,
+      hitRoundLimit: true,
       messages: [{ role: 'user', content: '修截图' }],
       trace: [{ round: 1, thought: longThought, tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
     })
@@ -1093,8 +1096,13 @@ async function testTurnEndThoughtCoversSkipsLlm() {
       return { content: '不应调用' };
     }
   });
-  assert(synthCalls === 0, 'substantial thought skips synthesis LLM');
-  assert(result.content === longThought, 'thought becomes delivery');
+  assert(synthCalls === 0, 'truncated turn with only reasoning skips synthesis LLM');
+  assert(isReasoningFallbackText(result.content), 'truncated turn labels reasoning as delivery');
+  assert(result.content.includes(longThought), 'reasoning 原文进入交付文本');
+  assert(
+    persistableTurnText(result.content) === TURN_EMPTY_REPLY_TEXT,
+    'reasoning-fallback 不写进 book（落库换成占位）'
+  );
 }
 
 async function testTurnEndKeepsModelProse() {
@@ -1158,6 +1166,42 @@ function testBackfillReasoningContent() {
   ];
   assert(backfillReasoningContent(fresh, true) === fresh, 'no rewrite when reasoning present');
   assert(backfillReasoningContent(undefined, true) === undefined, 'undefined passes through');
+
+  // 真值优先：账本 `reasoning`（与 content 分列）直接作为 reasoning_content 回传，不落占位。
+  const book = [
+    { role: 'user', content: 'hi' },
+    {
+      role: 'assistant',
+      content: '',
+      reasoning: '  账本真思考  ',
+      tool_calls: [{ id: 'tc3', function: { name: 'read', arguments: '{}' } }]
+    }
+  ];
+  const echoed = backfillReasoningContent(book, false);
+  assert(echoed !== book, 'book reasoning triggers rewrite');
+  assert(echoed[1].reasoning_content === '账本真思考', 'book reasoning becomes reasoning_content truth');
+  assert(echoed[1].reasoning === undefined, 'internal reasoning field stripped before upstream');
+  assert(book[1].reasoning === '  账本真思考  ' && book[1].reasoning_content === undefined, 'original not mutated');
+  assert(echoed[0] === book[0], 'user message keeps identity');
+
+  // 无 tool_calls 的普通回复轮：脱工具默认不回传，但要剥掉账本内部字段。
+  const plainBook = [{ role: 'assistant', content: 'answer', reasoning: '思考' }];
+  const plainOut = backfillReasoningContent(plainBook, false);
+  assert(plainOut[0].reasoning === undefined, 'book field stripped even when not echoing');
+  assert(plainOut[0].reasoning_content === undefined, 'no reasoning_content without tools');
+
+  // echoReasoning（能力表声明）时才脱工具也回传。
+  const echoOn = backfillReasoningContent(plainBook, false, true);
+  assert(echoOn[0].reasoning_content === '思考', 'echoReasoning forces echo without tools');
+
+  // 真值不可得 + 需要回传 → 占位兜底。
+  const noTruth = [
+    { role: 'assistant', content: '', tool_calls: [{ id: 'tc4', function: { name: 'x', arguments: '{}' } }] }
+  ];
+  assert(
+    backfillReasoningContent(noTruth, false)[0].reasoning_content === REASONING_PLACEHOLDER,
+    'placeholder only when truth unavailable'
+  );
 }
 
 async function run() {
@@ -1188,7 +1232,7 @@ async function run() {
   await testUnknownPhase();
   await testTurnEndSynthesisSkippedByDefault();
   await testTurnEndSynthesisFillsEmptyReply();
-  await testTurnEndThoughtCoversSkipsLlm();
+  await testTurnEndTruncatedUsesReasoningFallback();
   await testTurnEndKeepsModelProse();
 }
 

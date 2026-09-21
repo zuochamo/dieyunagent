@@ -13,7 +13,9 @@
 | Gateway | `src/gateway/` | RPC 注册、鉴权、工具执行入口 |
 | Rust | `crates/dieyun-core/` | 循环账本 `agent.loop`、planner、memory、index、compaction（不是对话 LLM） |
 
-**循环哲学**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status`、假用户续跑（`SEGMENT_CONTINUE` 段满预算闸除外）、按只读/同文件读取/只计划逼写入。有模型正文就交付。空回复才 synthesis，且在 Node `rust-loop-runner`（Renderer 只展示）。完成验收只提示、不自动续跑、不挡交付。落库不以「已完成。」当弱回复替换。
+**循环哲学**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status`、假用户续跑（`SEGMENT_CONTINUE` 段满预算闸除外）、按只读/同文件读取/只计划逼写入。
+
+**交付四态**（`agent-round-text.resolveTurnDelivery`，单一来源）：有正文 → 交付正文；预算截断且只有思考 → 交付**带标签的思考引用**（仅展示，落库换占位）；正常收尾无正文 → 一次无工具 synthesis（Node `rust-loop-runner`，Renderer 只展示）；都没有 → 占位。思考**永不**当正文，只进 `messages.reasoning`（与 content 分列）。完成验收只提示、不自动续跑、不挡交付。落库不以「已完成。」当弱回复替换。
 
 **事件流**：Rust/Main 产生 progress → Renderer `dispatchAgentRunEvent` → UI；手机经 `AgentService` → `mobile/bridge.js` WebSocket。
 
@@ -160,7 +162,7 @@ Rust 侧注册：`crates/dieyun-core/src/rpc/mod.rs`。Node 侧：`src/gateway/h
 - [LOGGING.md](./LOGGING.md) — 日志前缀约定
 - [rpc-catalog.md](./rpc-catalog.md) — RPC 清单
 - [agent-run-events.md](./agent-run-events.md) — 事件契约
-- [REASONING-ISOLATION-PLAN.md](./REASONING-ISOLATION-PLAN.md) — 思考通道隔离目标设计（方案，未实施）
+- [REASONING-ISOLATION-PLAN.md](./REASONING-ISOLATION-PLAN.md) — 思考通道隔离目标设计（**已实施**，提交 1-5；仅余取证重放）
 - [examples/agent-sandbox/README.md](../examples/agent-sandbox/README.md) — Agent 沙盒
 
 ## 仓库噪音 / 清理

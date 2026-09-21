@@ -15,6 +15,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
         session_id TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
+        -- 该轮真思考：与 content 分列，绝不混进正文。
+        -- 默认不进历史重建（见 session-context.buildCompletionMessagesFromHistory），
+        -- 只在该轮需要上行回传（reasoning_content）时按需取真值。
+        reasoning TEXT,
         created_at INTEGER NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id)
       );
@@ -172,6 +176,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
         "ALTER TABLE compaction_archives ADD COLUMN folded_text TEXT",
         [],
     );
+    // 旧库补列：真思考与 content 分列存储（老数据为 NULL，回传时降级为占位）。
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT", []);
 
     conn.execute_batch(
         r#"

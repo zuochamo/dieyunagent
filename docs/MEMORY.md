@@ -20,7 +20,7 @@
 
 **重要区分：**
 
-- **SQLite 里存的是会话账本**（user/assistant 正文）。下轮送给模型的聊天历史只从这份账本投影：近 N 条原文 + 更早折叠条，再套字符硬顶；`transientTrace` 只服务 UI，不进模型请求。弱回复（空/「已完成。」/「已停止生成。」）在落库时折成工具摘要写入正文，这样下一轮能从 content 读到，不必再刮 live trace。
+- **SQLite 里存的是会话账本**（user/assistant 正文）。下轮送给模型的聊天历史只从这份账本投影：近 N 条原文 + 更早折叠条，再套字符硬顶；`transientTrace` 只服务 UI，不进模型请求。弱回复（空/「已完成。」/「已停止生成。」）在落库时折成工具摘要写入正文，这样下一轮能从 content 读到，不必再刮 live trace。**真思考另走 `reasoning` 列**：不回灌正文、重建历史时不读它（只在该轮需上行回传 `reasoning_content` 时按需取真值）。
 - **SQLite 不是 OpenAI 多轮里的完整 `tool` 消息链**；工具过程仍嵌在 assistant 气泡元数据里供思考区展示。
 - **Agent 不会自动写入 `long_memories`**；要长期记住偏好，需用户在设置里点「追加到长期记忆」，或写入 `dieyun.md` / 文件 / 技能记忆。
 - **上下文压缩是有损的**：当次运行只保留摘要 + 最近 atoms；摘要写入 `compaction_archives`，下轮从该表投影进 turn-ride，不改聊天气泡。完整 tool 链仍不进 `messages` 表。
@@ -111,12 +111,13 @@ flowchart TB
 | `session_id` | 所属会话 |
 | `role` | `user` \| `assistant` \| `system`（实际对话主要用前两者） |
 | `content` | 文本；可含 `【叠云meta】{...}\n` 前缀存 UI 元数据 |
+| `reasoning` | 该轮**真思考**（`assistant` 独有，可空）。与 `content` **分列不混**：只为该轮上行回传 `reasoning_content` 提供真值，**默认不进历史重建**；空/空白落 `NULL`（单一写库口 `MemoryStore::append_message` 统一归一）。老库由 `schema.rs` 迁移补列，老数据为 `NULL` |
 | `created_at` | 时间戳 |
 
 **写入时机：**
 
 1. 用户发送 → 立即 `memory.message_append`（user）。
-2. Agent 正常结束 / 停止 → `memory.message_append`（assistant，含 trace 打包）。
+2. Agent 正常结束 / 停止 → `memory.message_append`（assistant，含 trace 打包 + 本轮 `reasoning`）。
 3. 定时计划投递 → 主进程 `plans/deliver.js` 直接 `store.appendMessage`。
 
 **读取时机：**
@@ -137,6 +138,11 @@ flowchart TB
 ```
 
 UI 用 `unpackAssistantMeta()` 拆开展示模型名、思考过程等；发给模型的通常只用正文部分。
+
+**正文只装正文：** 交付层（气泡）在「预算截断且只有思考」时会显示一段带标签的思考引用
+（`（以下为模型思考，本轮未成文）…`，见 `agent-round-text.js` 四态交付），但该标签**只用于展示** ——
+落库口 `persistableAssistantText → persistableTurnText` 会把它与空串统一换成 `（模型未生成文字答复。）`，
+思考本体只进 `reasoning` 列。即：**展示可以与账本不同，账本永远是「模型真的说了什么」**。
 
 #### `long_memories` — 长期笔记式记忆
 

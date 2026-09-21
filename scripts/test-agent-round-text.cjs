@@ -61,8 +61,13 @@ assert(
 const {
   needsAssistantReplySynthesis,
   synthesizedReplyIsUsable,
-  thoughtFallbackCoversSynthesis,
-  pickNormalizedAssistantReply
+  pickNormalizedAssistantReply,
+  resolveTurnDelivery,
+  reasoningTextFromTrace,
+  reasoningFallbackText,
+  persistableTurnText,
+  isReasoningFallbackText,
+  TURN_EMPTY_REPLY_TEXT
 } = require('../src/agent/agent-round-text');
 
 const toolTrace = [
@@ -86,28 +91,67 @@ assert(
   needsAssistantReplySynthesis('已改 login 表单：补了 CDP 输入，截图失败不再整轮失败。', toolTrace) === false,
   'non-empty reply does not trip synthesis'
 );
+const deepThought = '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
+
+// 四态交付决策：单一来源（§3.4）
 assert(
-  thoughtFallbackCoversSynthesis(
-    '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。'
-  ) === true,
-  'substantial thought covers synthesis'
+  resolveTurnDelivery({ answer: '已完成。', reasoning: deepThought, truncated: true }).state === 'answer',
+  'answer wins over reasoning'
+);
+const fallback = resolveTurnDelivery({ answer: '', reasoning: deepThought, truncated: true });
+assert(
+  fallback.state === 'reasoning-fallback' && fallback.text === reasoningFallbackText(deepThought),
+  'truncated + reasoning → labeled reasoning-fallback'
+);
+assert(isReasoningFallbackText(fallback.text) === true, 'reasoning fallback is explicitly labeled');
+assert(
+  resolveTurnDelivery({ answer: '', reasoning: deepThought, truncated: false }).state === 'synthesis',
+  'normal end + reasoning → synthesis'
+);
+const emptyDelivery = resolveTurnDelivery({ answer: '   ', reasoning: '', truncated: false });
+assert(
+  emptyDelivery.state === 'empty' && emptyDelivery.text === TURN_EMPTY_REPLY_TEXT,
+  'nothing to deliver → placeholder'
+);
+
+// 思考回退只用于展示，绝不写进账本（§3.4）
+assert(persistableTurnText(fallback.text) === TURN_EMPTY_REPLY_TEXT, 'reasoning fallback never persisted');
+assert(persistableTurnText('真实答复') === '真实答复', 'plain answer persists as-is');
+assert(persistableTurnText('') === TURN_EMPTY_REPLY_TEXT, 'empty reply persists as placeholder');
+
+// trace → 真思考（单一来源，跳过汇总轮与占位思考）
+assert(
+  reasoningTextFromTrace([
+    { phase: '思考', fullThought: deepThought },
+    { phase: '汇总', fullThought: '已完成' },
+    { phase: '思考', fullThought: '请求 LLM…' }
+  ]) === deepThought,
+  'trace reasoning skips synthesis round + placeholder'
 );
 
 const genericTool = '本轮 Agent 已执行 3 次工具，但未能生成最终文字总结。';
-const thought = '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
+const thought = deepThought;
 assert(
   pickNormalizedAssistantReply('已完成。', toolTrace, {
-    thoughtFallback: thought,
+    reasoningFallback: thought,
     toolFallback: genericTool
   }) === '已完成。',
   'normalize keeps short model reply'
 );
 assert(
   pickNormalizedAssistantReply('', toolTrace, {
-    thoughtFallback: thought,
+    reasoningFallback: thought,
     toolFallback: genericTool
-  }) === thought,
-  'empty content uses thought'
+  }) === reasoningFallbackText(thought),
+  'empty content uses labeled reasoning fallback'
+);
+assert(
+  pickNormalizedAssistantReply('', toolTrace, { reasoningFallback: '', toolFallback: genericTool }) === genericTool,
+  'no reasoning → tool fallback'
+);
+assert(
+  pickNormalizedAssistantReply('', toolTrace, { reasoningFallback: '', toolFallback: '' }) === TURN_EMPTY_REPLY_TEXT,
+  'nothing available → placeholder'
 );
 
 console.log('test-agent-round-text.cjs ok');

@@ -1,12 +1,12 @@
-/* global unpackUserMessageContent, unpackAssistantMeta, splitPersistedAssistantTrace, buildToolTraceFallbackReply, buildTraceThoughtFallbackReply, compactPlainText, messages, buildSessionChatHistoryFromMessages, buildCompletionMessagesFromHistory, assistantTextFromMessage, persistableAssistantText, formatCompactionArchiveBlock, mergeCompactionBlockIntoTurnRide, reprojectContinueLoopMessages, gwState, gatewayCall, CTX_LIMITS */
+/* global unpackUserMessageContent, unpackAssistantMeta, splitPersistedAssistantTrace, buildToolTraceFallbackReply, compactPlainText, messages, buildSessionChatHistoryFromMessages, buildCompletionMessagesFromHistory, assistantTextFromMessage, persistableAssistantText, formatCompactionArchiveBlock, mergeCompactionBlockIntoTurnRide, reprojectContinueLoopMessages, gwState, gatewayCall, CTX_LIMITS */
 'use strict';
 
 function getSessionContextHelpers() {
   return {
     unpackAssistantMeta,
     splitPersistedAssistantTrace,
+    // 账本正文只认 content + 工具事实兜底；思考不参与正文投影（D1），故不再注入思考兜底回调。
     toolFallback: buildToolTraceFallbackReply,
-    thoughtFallback: buildTraceThoughtFallbackReply,
     compactPlainText,
     unpackUserContent(raw) {
       return String(unpackUserMessageContent(raw).content || '').trim();

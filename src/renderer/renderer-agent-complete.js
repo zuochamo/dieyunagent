@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, messages, loopApi, settings, gwState, showAgentToast, finalizeAssistantBubble, settleAssistantBubbleAfterLoop, finalizeUserTurnFooter, renderAssistantBubbleContent, resolveRunPlaceholder, runAgentCompletion, getSessionAbortSignal, createAgentAbortError, throwIfAgentAborted, waitForAgentAbortable, isUserAbortError, formatAgentApiError, compactPlainText, compactTraceForReviewer, runReviewerValidation, applyReadinessNote, getTraceWriteFilePaths, fetchWorkspaceVerifyDiagnostics, COMPLETION_REPAIR_ATTEMPT_LIMIT, LONG_HORIZON_MAX_SEGMENTS, capturePlanApplyForUndo, handleWorktreeApplyAfterRun, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, markTurnWorktreeOnly, getCurrentUndoTurnId, finalizeUndoForUserTurn, saveAgentPlanState, saveAgentRunState, saveAssistantTraceRecord, persistStoppedAssistant, buildAgentStateSnapshot, stepsFromAgentPlan, trackArtifactsFromTrace, scheduleUnifiedKnowledgeMaintenance, stashKnowledgeMaintenanceContext, flushKnowledgeMaintenanceAfterPlan, hasKnowledgeMaintenanceContext, clearKnowledgeMaintenanceContext, scheduleBackgroundKnowledgeFallback, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, finishSessionActiveRun, syncComposerForActiveSession, noteComposerSessionUsage, reportTokensToMain, clearAgentContinueState, setAgentContinueState, setPlannerParallelWorkersActive, setAgentExecutionContext, invalidateSessionMessageCache, refreshHistoryList, scrollChat, collapseChatThinkingTraces, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, extractBookPrefixMessages, reprojectContinueLoopMessages, refreshTurnRideFromArchive, normalizeAssistantReplyForStorage, unpackAssistantMeta, splitPersistedAssistantTrace, humanizeModelId, formatModelFooterLabel, getTextModelId, composerModeLabel, buildStoppedFooterMeta, buildFallbackTurnMeta, resolveUserMsgCreatedAt, withdrawUserTurn, appendBubble, agentApi, captureTurnBatchCheckpoint, getPendingWorktreeApply, clearPendingResumeCheckpoint, tryDetectResumeCheckpoint, maybeSaveRunningTraceCheckpoint, createTraceRunId, getComposerLongHorizon, buildAgentSegmentContinuePartial, getAgentToolCallLimit, getAgentMaxRounds, clearComposerQueuePause, getAgentLimits, scaleLimitForLongHorizon */
+/* global sessionActiveRuns, currentSessionId, messages, loopApi, settings, gwState, showAgentToast, finalizeAssistantBubble, settleAssistantBubbleAfterLoop, finalizeUserTurnFooter, renderAssistantBubbleContent, resolveRunPlaceholder, runAgentCompletion, getSessionAbortSignal, createAgentAbortError, throwIfAgentAborted, waitForAgentAbortable, isUserAbortError, formatAgentApiError, compactPlainText, compactTraceForReviewer, runReviewerValidation, applyReadinessNote, getTraceWriteFilePaths, fetchWorkspaceVerifyDiagnostics, COMPLETION_REPAIR_ATTEMPT_LIMIT, LONG_HORIZON_MAX_SEGMENTS, capturePlanApplyForUndo, handleWorktreeApplyAfterRun, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, markTurnWorktreeOnly, getCurrentUndoTurnId, finalizeUndoForUserTurn, saveAgentPlanState, saveAgentRunState, saveAssistantTraceRecord, persistStoppedAssistant, buildAgentStateSnapshot, stepsFromAgentPlan, trackArtifactsFromTrace, scheduleUnifiedKnowledgeMaintenance, stashKnowledgeMaintenanceContext, flushKnowledgeMaintenanceAfterPlan, hasKnowledgeMaintenanceContext, clearKnowledgeMaintenanceContext, scheduleBackgroundKnowledgeFallback, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, finishSessionActiveRun, syncComposerForActiveSession, noteComposerSessionUsage, reportTokensToMain, clearAgentContinueState, setAgentContinueState, setPlannerParallelWorkersActive, setAgentExecutionContext, invalidateSessionMessageCache, refreshHistoryList, scrollChat, collapseChatThinkingTraces, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, extractBookPrefixMessages, reprojectContinueLoopMessages, refreshTurnRideFromArchive, normalizeAssistantReplyForStorage, unpackAssistantMeta, splitPersistedAssistantTrace, humanizeModelId, formatModelFooterLabel, getTextModelId, composerModeLabel, buildStoppedFooterMeta, buildFallbackTurnMeta, resolveUserMsgCreatedAt, withdrawUserTurn, appendBubble, agentApi, captureTurnBatchCheckpoint, getPendingWorktreeApply, clearPendingResumeCheckpoint, tryDetectResumeCheckpoint, maybeSaveRunningTraceCheckpoint, createTraceRunId, getComposerLongHorizon, buildAgentSegmentContinuePartial, getAgentToolCallLimit, getAgentMaxRounds, clearComposerQueuePause, getAgentLimits, scaleLimitForLongHorizon, AgentRoundText */
 'use strict';
 
 function buildAgentRunOptsForContinue(fc) {
@@ -556,6 +556,13 @@ async function completeAgentRunAfterSuccess(run, fc) {
     persistAssistantTranscriptText(reply, trace)
   );
   const persisted = packAssistantMeta(persistedBody, assistantMeta);
+  // 本轮真思考：与 content 分列落库（messages.reasoning），只作上行回传真值来源，
+  // 不并进 content、不进历史重建的正文（REASONING-ISOLATION §3.5 / D1）。
+  // 提取单一来源 agent-round-text.reasoningTextFromTrace；bundle 未重建时不落 reasoning。
+  const persistedReasoning =
+    typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.reasoningTextFromTrace === 'function'
+      ? AgentRoundText.reasoningTextFromTrace(trace)
+      : '';
 
   const userLocalMsgId = await fc.ensureUserLocalMsgId();
 
@@ -569,7 +576,8 @@ async function completeAgentRunAfterSuccess(run, fc) {
         const ins = await gatewayCall('memory.message_append', {
           sessionId: runSessionId,
           role: 'assistant',
-          content: persisted
+          content: persisted,
+          ...(persistedReasoning ? { reasoning: persistedReasoning } : {})
         });
         await saveAgentRunState({
           runId: agentRunId,
@@ -623,7 +631,8 @@ async function completeAgentRunAfterSuccess(run, fc) {
           const ins = await gatewayCall('memory.message_append', {
             sessionId: runSessionId,
             role: 'assistant',
-            content: persisted
+            content: persisted,
+            ...(persistedReasoning ? { reasoning: persistedReasoning } : {})
           });
           await saveAgentRunState({
             runId: agentRunId,
@@ -661,7 +670,8 @@ async function completeAgentRunAfterSuccess(run, fc) {
     const assistantMsg = {
       role: 'assistant',
       content: persisted,
-      transientTrace: trace || []
+      transientTrace: trace || [],
+      ...(persistedReasoning ? { reasoning: persistedReasoning } : {})
     };
     messages.push(assistantMsg);
     const liveBeforeRender = sessionActiveRuns.get(runSessionId);
@@ -691,7 +701,8 @@ async function completeAgentRunAfterSuccess(run, fc) {
           const ins = await gatewayCall('memory.message_append', {
             sessionId: runSessionId,
             role: 'assistant',
-            content: persisted
+            content: persisted,
+            ...(persistedReasoning ? { reasoning: persistedReasoning } : {})
           });
           if (ins?.localMsgId) {
             assistantMsg.localMsgId = ins.localMsgId;
@@ -748,7 +759,8 @@ async function completeAgentRunAfterSuccess(run, fc) {
         const ins = await gatewayCall('memory.message_append', {
           sessionId: runSessionId,
           role: 'assistant',
-          content: persisted
+          content: persisted,
+          ...(persistedReasoning ? { reasoning: persistedReasoning } : {})
         });
         if (ins?.localMsgId) {
           assistantMsg.localMsgId = ins.localMsgId;

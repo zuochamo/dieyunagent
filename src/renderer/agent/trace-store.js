@@ -1,4 +1,4 @@
-/* global window, gwState, gatewayCall, currentSessionId, messages, sessionActiveRuns, formatTracePlain, buildAgentStateSnapshot, createTraceRunId, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, refreshHistoryList, showAgentToast, formatAgentApiError, isCurrentSessionSending, isSessionSending, unpackAssistantMeta, DieyunNamespaces, withSessionRpcScope */
+/* global window, gwState, gatewayCall, currentSessionId, messages, sessionActiveRuns, formatTracePlain, buildAgentStateSnapshot, createTraceRunId, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, refreshHistoryList, showAgentToast, formatAgentApiError, isCurrentSessionSending, isSessionSending, unpackAssistantMeta, DieyunNamespaces, withSessionRpcScope, AgentRoundText */
 'use strict';
 
 const traceStoreLoopApi = window.diecloud || {};
@@ -272,10 +272,18 @@ async function persistInterruptedAssistant(trace, replyText, turnMeta = null, op
   });
   const body = buildPersistedAssistantContent(persistAssistantTranscriptText(replyText, trace));
   const persisted = meta ? packAssistantMeta(body, meta) : body;
+  // 本轮真思考：与 content 分列落库（messages.reasoning），只作上行回传真值来源，
+  // 不并进 content、不进历史重建的正文（REASONING-ISOLATION §3.5 / D1）。
+  // 提取单一来源 agent-round-text.reasoningTextFromTrace；bundle 未重建时不落 reasoning。
+  const persistedReasoning =
+    typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.reasoningTextFromTrace === 'function'
+      ? AgentRoundText.reasoningTextFromTrace(trace)
+      : '';
   const assistantMsg = {
     role: 'assistant',
     content: persisted,
-    transientTrace: trace && trace.length ? trace.slice() : []
+    transientTrace: trace && trace.length ? trace.slice() : [],
+    ...(persistedReasoning ? { reasoning: persistedReasoning } : {})
   };
   if (viewing) {
     messages.push(assistantMsg);
@@ -287,7 +295,8 @@ async function persistInterruptedAssistant(trace, replyText, turnMeta = null, op
       const ins = await gatewayCall('memory.message_append', {
         sessionId: sid,
         role: 'assistant',
-        content: persisted
+        content: persisted,
+        ...(persistedReasoning ? { reasoning: persistedReasoning } : {})
       });
       if (ins?.localMsgId) {
         assistantMsg.localMsgId = ins.localMsgId;

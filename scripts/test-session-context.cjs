@@ -132,8 +132,9 @@ const leakHelpers = {
   toolFallback(trace) {
     return trace && trace[0] && trace[0].marker === 'LIVE_TRACE' ? 'LEAKED_LIVE_TRACE' : '';
   },
+  // D1 哨兵：正文投影/落库**不得**再咨询思考兜底；一旦被调用，下面断言必失败。
   thoughtFallback() {
-    return '';
+    return 'LEAKED_THOUGHT';
   }
 };
 const emptyWithLive = assistantTextFromMessage(
@@ -165,6 +166,37 @@ assert(
   'strong reply is stored as-is'
 );
 
+// §3.4「不写进 book」：思考回退标签（仅展示）与空串在落库口统一换成占位。
+assert(
+  persistableAssistantText('', [], leakHelpers) === '（模型未生成文字答复。）',
+  'empty turn persists the honest placeholder'
+);
+assert(
+  persistableAssistantText('（以下为模型思考，本轮未成文）\n\n某段思考', [], leakHelpers) ===
+    '（模型未生成文字答复。）',
+  'reasoning-fallback label never lands in the book'
+);
+
+// D1 回归哨兵：即使 helpers 明确塞了思考兜底，落库与重建也**不得**再咨询它。
+const thoughtOnlyHelpers = {
+  toolFallback() {
+    return '';
+  },
+  thoughtFallback: leakHelpers.thoughtFallback,
+  splitPersistedAssistantTrace: (raw) => ({
+    content: raw,
+    trace: [{ round: 1, thought: '落库时被内嵌的思考' }]
+  })
+};
+assert(
+  persistableAssistantText('', liveTrace, thoughtOnlyHelpers) !== 'LEAKED_THOUGHT',
+  'persist fold never falls back to reasoning'
+);
+assert(
+  assistantTextFromMessage({ role: 'assistant', content: '' }, thoughtOnlyHelpers) !== 'LEAKED_THOUGHT',
+  'history projection never falls back to reasoning'
+);
+
 const filtered = messagesForTranscript([
   { role: 'user', content: 'u' },
   { role: 'system', content: 'sys-row' },
@@ -175,6 +207,82 @@ assert(filtered.length === 2, 'transcript keeps user/assistant only');
 assert(
   !filtered.some((m) => String(m.content).includes('不该进模型')),
   'tool rows are not transcript'
+);
+
+// 账本投影是字段白名单（REASONING-ISOLATION D2）：只保留协议字段，
+// 不把 UI 字段（meta / transientTrace）或思考通道（reasoning_content）交出去。
+const liveAssistantRow = {
+  role: 'assistant',
+  content: '上一答',
+  reasoning_content: '某一轮的真实思考',
+  tool_calls: [{ id: 'c1', type: 'function', function: { name: 'grep', arguments: '{}' } }],
+  tool_call_id: 'c1',
+  name: 'assistant-name',
+  meta: { modelId: 'deepseek-flash' },
+  transientTrace: liveTrace
+};
+const projected = messagesForTranscript([
+  { role: 'user', content: '上一问', meta: { k: 1 }, transientTrace: liveTrace },
+  liveAssistantRow
+]);
+assert(projected.length === 2, 'projection keeps user/assistant rows');
+assert(projected[0] !== undefined && !('meta' in projected[0]), 'projection drops UI meta');
+assert(
+  !('transientTrace' in projected[0]),
+  'projection drops live transientTrace'
+);
+const projectedAssistant = projected[1];
+assert(
+  !('reasoning_content' in projectedAssistant),
+  'projection never carries the reasoning channel into history'
+);
+assert(
+  projectedAssistant.content === '上一答' &&
+    Array.isArray(projectedAssistant.tool_calls) &&
+    projectedAssistant.tool_call_id === 'c1' &&
+    projectedAssistant.name === 'assistant-name',
+  'projection keeps protocol fields (content / tool_calls / tool_call_id / name)'
+);
+assert(
+  projectedAssistant !== liveAssistantRow,
+  'projection returns copies, not the live view objects'
+);
+
+// 账本自有 `reasoning`（与 content 分列）走投影（上行回传真值来源），但**绝不**并进正文。
+const bookRowWithReasoning = {
+  role: 'assistant',
+  content: '写在正文里的答复',
+  reasoning: '这一轮的真实思考'
+};
+const projectedReasoning = messagesForTranscript([bookRowWithReasoning])[0];
+assert(projectedReasoning.reasoning === '这一轮的真实思考', 'projection keeps the book reasoning field');
+assert(projectedReasoning.content === '写在正文里的答复', 'reasoning never merges into content');
+assert(
+  messagesForTranscript([{ role: 'assistant', content: '答', reasoning: '   ' }])[0].reasoning === undefined,
+  'blank reasoning is dropped by projection'
+);
+
+// D1 反转：重建历史时不把思考当正文 —— 无论它来自 `reasoning` 字段还是落库正文里内嵌的 trace。
+const blankBookRow = { role: 'assistant', content: '', reasoning: '只有思考没有正文' };
+assert(
+  assistantTextFromMessage(blankBookRow, leakHelpers) === '',
+  'book reasoning is not read back as assistant content'
+);
+const persistedThoughtTrace = [{ round: 1, thought: '落库时被内嵌的思考' }];
+const traceOnlyHelpers = {
+  toolFallback: () => '',
+  splitPersistedAssistantTrace: (raw) => ({ content: raw, trace: persistedThoughtTrace })
+};
+assert(
+  assistantTextFromMessage({ role: 'assistant', content: '' }, traceOnlyHelpers) === '',
+  'persisted trace thought is no longer resurrected as content'
+);
+assert(
+  assistantTextFromMessage({ role: 'assistant', content: '' }, {
+    toolFallback: () => '已执行：fs_edit',
+    splitPersistedAssistantTrace: (raw) => ({ content: raw, trace: persistedThoughtTrace })
+  }) === '已执行：fs_edit',
+  'tool fact fallback is still allowed'
 );
 
 const withToolRow = buildCompletionMessagesFromHistory(
@@ -192,6 +300,28 @@ const withToolRow = buildCompletionMessagesFromHistory(
 );
 assert(!JSON.stringify(withToolRow).includes('不该进模型'), 'completion messages drop tool rows');
 assert(!JSON.stringify(withToolRow).includes('LEAKED_LIVE_TRACE'), 'completion messages stay on the book');
+
+// 重建出的 completion 消息带账本真思考作同级传输字段（供上行回传 reasoning_content），
+// 但正文仍只是 content —— 该字段不进上下文语义（REASONING-ISOLATION §3.5）。
+const withReasoningRow = buildCompletionMessagesFromHistory(
+  [
+    { role: 'user', content: '上一问' },
+    { role: 'assistant', content: '上一答', reasoning: '上一轮的真思考' },
+    { role: 'assistant', content: '', reasoning: '弱正文轮的真思考' },
+    { role: 'user', content: '这一问' }
+  ],
+  packed.stable,
+  null,
+  false,
+  leakHelpers,
+  packed.turnRide
+);
+const carried = withReasoningRow.filter((m) => m.role === 'assistant');
+assert(carried[0].content === '上一答' && carried[0].reasoning === '上一轮的真思考', 'reasoning rides beside content');
+assert(
+  carried[1].content === '' && carried[1].reasoning === '弱正文轮的真思考',
+  'weak content is not replaced by its own reasoning'
+);
 
 // 每轮的 cap 先具名，断言一律挂在具名 cap 上；裸字面量边界改预算就会漂移。
 const hugeCaps = {

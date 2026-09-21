@@ -533,6 +533,11 @@ function sanitizeMessagesForChatApi(messages, hasTools, model) {
     if (role === 'assistant' && typeof m?.reasoning_content === 'string' && m.reasoning_content.trim()) {
       out.reasoning_content = m.reasoning_content;
     }
+    // 账本真思考（与 content 分列）：只作传输字段交给 reasoning-backfill 提升为
+    // reasoning_content（真值优先），本函数不直接落 reasoning_content、不并进 content。
+    if (role === 'assistant' && typeof m?.reasoning === 'string' && m.reasoning.trim()) {
+      out.reasoning = m.reasoning;
+    }
     if (Array.isArray(m?.tool_calls) && m.tool_calls.length) {
       const orig = m.tool_calls;
       const toolCalls = normalizeToolCallsForApi(orig);

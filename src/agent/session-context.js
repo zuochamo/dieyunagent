@@ -2,6 +2,7 @@
 
 // 纯 CJS 依赖：顶层 require 真源，替代原先「运行期 require 探测 → 全局兜底」。
 const sessionTranscript = require('./session-transcript');
+const roundText = require('./agent-round-text');
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 
 /**
@@ -393,19 +394,30 @@ function wrapPreparedCurrentTaskContent(prepared, text) {
 /**
  * Fold a weak live reply into persisted transcript text using the same-turn tool trace.
  * Call this at write time so the next turn can project from content alone.
+ *
+ * **思考不写进 book**（REASONING-ISOLATION §3.4 / D1）：这里只用工具事实兜底，
+ * 思考只走独立 `reasoning` 字段（`messages.reasoning`）；最后再过 `persistableTurnText`
+ * 把「思考回退标签」（仅展示）与空串统一落成占位，保证标签永远进不了账本。
  */
 function persistableAssistantText(reply, trace, helpers) {
   const raw = String(reply == null ? '' : reply);
-  if (!isWeakAssistantReply(raw)) return raw;
   const h = helpers || {};
-  const toolFallback = typeof h.toolFallback === 'function' ? h.toolFallback : () => '';
-  const thoughtFallback = typeof h.thoughtFallback === 'function' ? h.thoughtFallback : () => '';
   const t = Array.isArray(trace) ? trace : [];
-  if (!t.length) return raw;
-  return toolFallback(t) || thoughtFallback(t) || raw;
+  let text = raw;
+  if (isWeakAssistantReply(raw) && t.length) {
+    const toolFallback = typeof h.toolFallback === 'function' ? h.toolFallback : () => '';
+    text = toolFallback(t) || raw;
+  }
+  return roundText.persistableTurnText(text);
 }
 
-/** Project assistant text from persisted content only. Live transientTrace is UI-only. */
+/**
+ * Project assistant text from persisted content only. Live transientTrace is UI-only.
+ *
+ * **重建不读思考**（REASONING-ISOLATION D1 反转）：`message.reasoning`（账本真思考）与
+ * 落库正文里内嵌的 trace 思考都不参与正文投影 —— 历史正文只认 `content`，
+ * 弱正文时最多用工具事实兜底，绝不让某一轮思考在下一轮变成 assistant 正文。
+ */
 function assistantTextFromMessage(message, helpers) {
   const h = helpers || {};
   const unpackAssistantMeta =
@@ -415,7 +427,6 @@ function assistantTextFromMessage(message, helpers) {
       ? h.splitPersistedAssistantTrace
       : (raw) => ({ content: raw, trace: null });
   const toolFallback = typeof h.toolFallback === 'function' ? h.toolFallback : () => '';
-  const thoughtFallback = typeof h.thoughtFallback === 'function' ? h.thoughtFallback : () => '';
 
   const { content: raw } = unpackAssistantMeta(message && message.content);
   const split = splitTrace(raw);
@@ -423,7 +434,7 @@ function assistantTextFromMessage(message, helpers) {
   if (WEAK_ASSISTANT_REPLIES.has(text)) {
     const persistedTrace = split.trace;
     if (persistedTrace && persistedTrace.length) {
-      text = toolFallback(persistedTrace) || thoughtFallback(persistedTrace) || text;
+      text = toolFallback(persistedTrace) || text;
     }
   }
   return text;
@@ -826,7 +837,11 @@ function buildCompletionMessagesFromHistory(
       content = attachTurnRideToUserContent(content, turnRide);
       out.push({ role: 'user', content });
     } else {
-      out.push({ role: m.role, content: storedContent });
+      const projected = { role: m.role, content: storedContent };
+      // 账本真思考（`reasoning`，与 content 分列）只作上行回传 reasoning_content 的真值来源：
+      // 作为**同级传输字段**带上，绝不并进 content，也不参与正文投影（REASONING-ISOLATION D1）。
+      if (m.reasoning) projected.reasoning = m.reasoning;
+      out.push(projected);
     }
   }
   return trimMessagesToCharBudget(foldOlderCompletionMessages(out, helpers, capOpts), capOpts);

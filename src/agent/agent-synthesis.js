@@ -40,19 +40,6 @@ function extractLastUserMessageText(messages) {
   return '';
 }
 
-function thoughtFallbackFromTrace(trace) {
-  const parts = [];
-  for (const entry of trace || []) {
-    if (String(entry.phase || '').trim() === SYNTHESIS_PHASE) continue;
-    const text = String(entry.fullThought || entry.thought || '').trim();
-    if (text.length <= 24) continue;
-    if (/^(请求中|思考中|生成中|处理中|请求 LLM|正在生成最终答复)/.test(text)) continue;
-    parts.push(text);
-  }
-  if (!parts.length) return '';
-  return parts.slice(-4).join('\n\n');
-}
-
 function buildSynthesisDigest(trace) {
   const lines = [];
   for (const entry of trace || []) {
@@ -145,23 +132,31 @@ function usableSynth(text) {
 }
 
 /**
- * 工具轮结束后若无用户向正文，用思考兜底或补一轮无工具汇总。默认不调用；聊天 IPC 打开。
+ * 工具轮结束后若无用户向正文：交付由 `resolveTurnDelivery()`（§3.4）决定 ——
+ * 截断且只有思考 → 带标签的思考引用（仅展示）；正常收尾且有工具轮 → 补一轮无工具汇总 LLM。
+ * 默认不调用；聊天 IPC 打开。
  */
 async function applyTurnEndSynthesis(opts) {
   const done = opts.done || {};
-  if (!done || done.overflowStopped || done.hitRoundLimit || done.aborted) {
-    return done;
-  }
   const content = String(done.content || '').trim();
   const trace = Array.isArray(done.trace) ? done.trace : [];
   const messages = Array.isArray(done.messages) ? done.messages : [];
-  if (!roundText.needsAssistantReplySynthesis(content, trace)) {
+  const truncated = !!(done.overflowStopped || done.hitRoundLimit || done.aborted);
+  // 四态交付决策单一来源（§3.4）：answer 直接交付；截断轮显式思考回退；
+  // 正常收尾且确有工具轮时，才走无工具汇总 LLM。
+  const delivery = roundText.resolveTurnDelivery({
+    answer: roundText.deliverableAnswer(content, trace),
+    reasoning: roundText.reasoningTextFromTrace(trace),
+    truncated
+  });
+  if (delivery.state === 'reasoning-fallback') {
+    return { ...done, content: delivery.text };
+  }
+  if (delivery.state !== 'synthesis') {
     return done;
   }
-
-  const thought = thoughtFallbackFromTrace(trace);
-  if (roundText.thoughtFallbackCoversSynthesis(thought)) {
-    return { ...done, content: thought };
+  if (!roundText.needsAssistantReplySynthesis(content, trace)) {
+    return done;
   }
 
   const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
@@ -265,6 +260,5 @@ module.exports = {
   applyTurnEndSynthesis,
   buildAgentSynthesisBody,
   buildSynthesisDigest,
-  thoughtFallbackFromTrace,
   upsertSynthesisTraceRound
 };

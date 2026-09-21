@@ -564,32 +564,6 @@ var SYNTHESIS_TRACE_START = '正在生成最终答复…';
 var SYNTHESIS_TRACE_DONE = '已完成';
 var SYNTHESIS_TRACE_FAILED = '汇总未完成，见下方答复';
 
-/** 空回复时用 trace 思考正文当交付兜底；过滤 phase 级固定文案（非意图词表） */
-function buildTraceThoughtFallbackReply(trace) {
-  const parts = [];
-  const rows = Array.isArray(trace) ? trace : [];
-  for (let index = 0; index < rows.length; index++) {
-    const entry = rows[index];
-    const phase = String(entry.phase || '').trim();
-    const thought = thoughtTextForDisplay(entry, index, rows);
-    let text =
-      thought.length > phase.length + 8 ? thought : [phase, thought].filter(Boolean).join('\n');
-    text = text.trim();
-    if (text.length <= 24) continue;
-    if (phase && (text === phase || text === `${phase}。` || text === `${phase}…`)) continue;
-    if (
-      text === SYNTHESIS_TRACE_START ||
-      text === SYNTHESIS_TRACE_DONE ||
-      text === SYNTHESIS_TRACE_FAILED
-    ) {
-      continue;
-    }
-    parts.push(text);
-  }
-  if (!parts.length) return '';
-  return parts.slice(-4).join('\n\n');
-}
-
 function cloneTraceEntryForUi(entry) {
   return {
     ...entry,
@@ -669,14 +643,6 @@ function synthesizedReplyIsUsable(text) {
   return !!(t && t !== '(空响应)' && t.length >= 8 && !/<(?:tool_call|tool_calls|invoke|function=)/i.test(t));
 }
 
-function thoughtFallbackCoversSynthesis(trace) {
-  const thought = buildTraceThoughtFallbackReply(trace);
-  if (typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.thoughtFallbackCoversSynthesis === 'function') {
-    return AgentRoundText.thoughtFallbackCoversSynthesis(thought);
-  }
-  return synthesizedReplyIsUsable(thought) && thought.length >= 48;
-}
-
 function stripAssistantVisibleToolCallMarkup(text) {
   const normalized = String(text || '')
     .replace(/<\uff5cDSML\uff5c/gi, '<')
@@ -704,18 +670,24 @@ function stripAssistantVisibleToolCallMarkup(text) {
     .trim();
 }
 
+/**
+ * 交付/展示归一（**不负责落库**）：给气泡与后续落库输入一个「正文优先」的文本。
+ * - 正文优先，无正文时才显式回退；思考兜底取单一来源 `agent-round-text.reasoningTextFromTrace`
+ *   （带「思考回退」标签，仅展示）；
+ * - 落库另有收口：`persistAssistantTranscriptText → persistableAssistantText → persistableTurnText`
+ *   会把该标签与空串统一换成占位，保证思考回退永远进不了账本（REASONING-ISOLATION §3.4）。
+ */
 function normalizeAssistantReplyForStorage(reply, trace) {
   const text = stripAssistantVisibleToolCallMarkup(String(reply || '').trim());
-  const thoughtFallback = buildTraceThoughtFallbackReply(trace);
   const toolFallback = buildToolTraceFallbackReply(trace);
   if (typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.pickNormalizedAssistantReply === 'function') {
     return AgentRoundText.pickNormalizedAssistantReply(text, trace, {
-      thoughtFallback,
+      reasoningFallback: AgentRoundText.reasoningTextFromTrace(trace),
       toolFallback
     });
   }
+  // bundle 未重建（AgentRoundText 缺失）时的退化路径：只做工具事实兜底，不把思考当正文。
   if (text && text !== '(空响应)' && !needsAssistantReplySynthesis(text, trace)) return text;
-  if (thoughtFallback) return thoughtFallback;
   if (toolFallback) return toolFallback;
   return '（模型未生成文字答复。）';
 }

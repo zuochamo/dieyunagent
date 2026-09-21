@@ -43,7 +43,7 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
     'memory.session_delete': async ({ sessionId }) =>
       requireRustCore('memory.session_delete', { sessionId: String(sessionId) }),
 
-    'memory.message_append': async ({ sessionId, role, content }) => {
+    'memory.message_append': async ({ sessionId, role, content, reasoning }) => {
       const sid = String(sessionId);
       const r = String(role);
       if (!['user', 'assistant', 'system'].includes(r)) {
@@ -56,10 +56,13 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
         e.code = 'INVALID_CONTENT';
         throw e;
       }
+      // 真思考与 content 分列；仅非空字符串才写入，其余交由 Rust 落 NULL。
+      const reasoningText = typeof reasoning === 'string' && reasoning.trim() ? reasoning : null;
       const rustIns = await requireRustCore('memory.message_append', {
         sessionId: sid,
         role: r,
-        content
+        content,
+        ...(reasoningText ? { reasoning: reasoningText } : {})
       });
       return { ok: true, localMsgId: rustIns.localMsgId };
     },

@@ -198,7 +198,7 @@ impl MemoryStore {
         let lim = limit.clamp(1, 2000);
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, created_at FROM messages
+                "SELECT id, session_id, role, content, reasoning, created_at FROM messages
                  WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
             )?;
             let rows = stmt.query_map(params![after_id, lim], |row| {
@@ -207,7 +207,8 @@ impl MemoryStore {
                     "session_id": row.get::<_, String>(1)?,
                     "role": row.get::<_, String>(2)?,
                     "content": row.get::<_, String>(3)?,
-                    "created_at": row.get::<_, i64>(4)?,
+                    "reasoning": row.get::<_, Option<String>>(4)?,
+                    "created_at": row.get::<_, i64>(5)?,
                 }))
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(CoreError::from)

@@ -147,7 +147,9 @@ impl ServiceSnapshot {
                     .get("content")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "content 必填"))?;
-                let ins = self.memory.append_message(session_id, role, content)?;
+                // 该轮真思考：可选、与 content 分列；缺省/空白落 NULL。
+                let reasoning = params.get("reasoning").and_then(|v| v.as_str());
+                let ins = self.memory.append_message(session_id, role, content, reasoning)?;
                 Ok(json!({ "ok": true, "localMsgId": ins.local_msg_id }))
             }
             "memory.messages_recent" => {
