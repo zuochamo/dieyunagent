@@ -66,6 +66,14 @@ const FILE_WRITE_TOOL_NAMES = Object.freeze(
   new Set(['fs_write_file', 'fs_edit', 'skill_create', 'agents_md_propose', 'playbook_propose'])
 );
 
+/**
+ * 入参携带 `filePath`、可据此「按文件串行」的写入工具名。
+ * 与 FILE_WRITE_TOOL_NAMES 是**包含关系而非同一概念**：后者含 skill_create /
+ * agents_md_propose 等无 filePath 的写入工具，无法按文件分组，故单列此更窄的集合
+ * （delegate-batch 分组用）。新增「写文件且带 filePath」的工具时改这里。
+ */
+const FILE_PATH_KEYED_WRITE_TOOL_NAMES = Object.freeze(new Set(['fs_write_file', 'fs_edit']));
+
 /** 会改变页面状态的浏览器工具名前缀。 */
 const BROWSER_MUTATING_PREFIXES = Object.freeze([
   'browser_click',
@@ -590,6 +598,7 @@ const SHARED_EXPORTS = {
   isWriteTool,
   MUTATING_TOOL_NAMES,
   FILE_WRITE_TOOL_NAMES,
+  FILE_PATH_KEYED_WRITE_TOOL_NAMES,
   BROWSER_MUTATING_PREFIXES,
   VISION_IMAGE_MIME,
   REJECTED_IMAGE_PLACEHOLDER,

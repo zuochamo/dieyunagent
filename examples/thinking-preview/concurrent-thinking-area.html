@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>并发 Agent · 思考区预览</title>
+    <!-- 直接复用仓库真实样式表，保证与 App 内渲染完全一致 -->
+    <link rel="stylesheet" href="../../src/renderer/styles.css" />
+    <style>
+      /* 仅本预览页的壳层：真 App 里 body 是 overflow:hidden，这里放开以便滚动 */
+      body {
+        overflow: auto;
+        user-select: text;
+      }
+      .preview-toolbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        padding: 10px 18px;
+        background: var(--bg-elev);
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--text-dim);
+      }
+      .preview-toolbar button {
+        font: inherit;
+        padding: 3px 10px;
+        color: var(--text);
+        background: transparent;
+        border: 1px solid var(--border);
+        cursor: pointer;
+      }
+      .preview-toolbar button:hover {
+        border-color: var(--accent);
+      }
+      .preview-note {
+        padding: 10px 18px 0;
+        font-size: 11px;
+        line-height: 1.6;
+        color: var(--text-mute);
+      }
+      .preview-note code {
+        color: var(--text-dim);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="preview-toolbar">
+      <strong>并发 Agent · 思考区预览</strong>
+      <button type="button" onclick="toggleTheme()">黑 / 白主题</button>
+      <button type="button" onclick="setAllOpen(true)">全部展开</button>
+      <button type="button" onclick="setAllOpen(false)">全部折叠</button>
+      <span>数据来源：<code>renderer-thinking-trace-dom.js</code> + <code>styles.css</code></span>
+    </div>
+
+    <div class="preview-note">
+      下面三个气泡展示思考区的卡片规则。<br />
+      <b>① 运行中</b>：协调者把任务拆开并发派发，<b>N 个子 Agent = N 张卡片</b>（第 4 张见下），
+      每个子 Agent 是<b>一张大直角卡片</b>（<code>data-step-key="sa:&lt;subagentId&gt;"</code>），
+      该子 Agent 的<b>全部轮次</b>（思考 + 工具）都在卡片内的
+      <code>.msg-thinking-subagent-body</code> 里，随运行实时刷新（工具 pending → 完成）。
+      卡片正文按<b>行</b>定尺：<b>初始 3 行、最多长到 20 行</b>（
+      <code>--thinking-subagent-card-lines-min/max</code>），超出走<b>卡片内滚动</b>——
+      轮次再多也只加卡内可滚动内容，不把卡片越撑越高、更不会把并发卡片互相顶下去。
+      运行中自动跟随最新一轮（用户上翻看历史时不抢滚动位置）。<br />
+      <b>② 已完成</b>：run 结束，<b>卡片仍是展开的直角卡片</b>（不自动折叠），过程留在卡片内；
+      只有协调者自己的轮次收成一行摘要。<br />
+      <b>③ Plan 模式</b>：<b>写入子 Agent 也是同一套卡片</b>，卡片标题统一为
+      <b>「子 Agent 类型 + 子 Agent 序号」</b>（<code>.msg-thinking-subagent-name</code>）：
+      调研 / 命令 / 写入 各有中文标签，序号在同一轮里全局唯一（勘察 #1、写入 #2、命令 #3）。<br />
+      <code>live-loop-trace.createSubagentNamer</code> 一次分配
+      <b><code>subagentId</code> / 序号 / 类型</b>三件套——身份与标题同源，
+      并发派发也不会撞 id（否则 4 个子 Agent 会被合并进同一张卡片）。
+    </div>
+
+    <div class="chat" id="chat-list">
+      <!-- ============ ① 运行中（streaming，思考区默认展开） ============ -->
+      <div class="msg assistant loading">
+        <details class="msg-thinking-outer" open>
+          <summary class="msg-thinking-outer-summary">思考中</summary>
+          <div class="msg-thinking">
+            <div class="msg-thinking-body">
+              <!-- 调度（协调者，非 isolated） -->
+              <div class="msg-thinking-step" data-step-key="调度 · 规划::1::0">
+                <details class="msg-thinking-round-details" data-step-key="调度 · 规划::1::0" open>
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-round-summary-preview">先把任务拆成三条互不依赖的调研线，再并发派发</span>
+                  </summary>
+                  <div class="msg-thinking-round">
+                    <div class="msg-thinking-thought">这个重构同时牵扯索引、向量检索、缓存三块，彼此没有依赖。先派三个只读子 Agent 并行摸清现状，我自己只做汇总与决策。</div>
+                  </div>
+                </details>
+                <div class="msg-thinking-beat is-empty"></div>
+              </div>
+
+              <!-- 子 Agent A：一张大卡片，第 1、2 轮都在卡片内，仍在运行 -->
+              <div class="msg-thinking-step" data-step-key="sa:exec-A-lx9f">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent msg-thinking-parallel is-running"
+                  data-step-key="sa:exec-A-lx9f"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">调研子 Agent #1</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">先摸清 index 模块的写入路径与落盘时机</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">运行中…</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body is-multi-round">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">索引入口在 src/index/，写入由 flush() 触发，先读入口文件……</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">grep(pattern=flush, path=src/index) → 命中 7 处</span>
+                          </div>
+                        </li>
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(src/index/index.js) → 214 行</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                    <div class="msg-thinking-subround" data-subround="2">
+                      <div class="msg-thinking-thought">flush() 之外还有全量 rebuild，需要确认它是否也走同一套落盘……</div>
+                      <ul class="msg-thinking-tools">
+                        <li class="msg-thinking-tool-pending">fs_read_file(src/index/rebuild.js) …</li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!-- 子 Agent B：一张大卡片，单轮 -->
+              <div class="msg-thinking-step" data-step-key="sa:exec-B-m2kq">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent msg-thinking-parallel"
+                  data-step-key="sa:exec-B-m2kq"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">调研子 Agent #2</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">确认 ann 索引与 embedding 的耦合点</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">已完成 · 2 步</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">embedding 只在 upsert 时算一次，检索侧读的是已落盘的 ann 文件，两者解耦。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(src/vector/vector-store.js) → 187 行</span>
+                          </div>
+                        </li>
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">grep(pattern=ann, path=src/vector) → 命中 4 处</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!-- 子 Agent C：一张大卡片，含失败工具（重试按钮在卡片内） -->
+              <div class="msg-thinking-step" data-step-key="sa:exec-C-p7wd">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent msg-thinking-parallel"
+                  data-step-key="sa:exec-C-p7wd"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">调研子 Agent #3</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">查清 LRU 与索引失效的联动方式</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">已完成 · 2 步</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">缓存 key 只含 path，不含内容 hash —— 这可能就是失效不彻底的原因。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(src/cache/cache.js) → 96 行</span>
+                          </div>
+                        </li>
+                        <li class="msg-thinking-tool-failed">
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">host_exec(npm run test:index) → 错误: 进程超时（30s）</span>
+                            <button type="button" class="msg-thinking-tool-retry">重试</button>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!--
+                子 Agent D：第 4 路并发。卡片正文初始 3 行、最多 20 行，超出走卡内滚动
+                （min/max-height 由 --thinking-subagent-card-lines-min/max 算出），
+                所以轮次再多也不会把这张卡撑高，更不会把下面 3 张卡顶下去。
+              -->
+              <div class="msg-thinking-step" data-step-key="sa:exec-D-q4tz">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent msg-thinking-parallel is-running"
+                  data-step-key="sa:exec-D-q4tz"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">调研子 Agent #4</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">核对 README 契约与 docs/CODEMAP.json 的口径</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">运行中…</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body is-multi-round">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">先从 README 的契约章节入手，确认它与 CODEMAP 是否一致。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">grep(pattern=契约, path=README.md) → 命中 5 处</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                    <div class="msg-thinking-subround" data-subround="2">
+                      <div class="msg-thinking-thought">CODEMAP 里读到的是另一种叫法，需要逐个比对入口文件。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(docs/CODEMAP.json) → 312 行</span>
+                          </div>
+                        </li>
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">glob(pattern=src/index/*.js) → 9 个文件</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                    <div class="msg-thinking-subround" data-subround="3">
+                      <div class="msg-thinking-thought">差异集中在 rebuild 入口，再确认一次导出面。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">grep(pattern=module.exports, path=src/index) → 命中 9 处</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                    <div class="msg-thinking-subround" data-subround="4">
+                      <div class="msg-thinking-thought">整理成「README 与 CODEMAP 需同步的 3 个入口」……</div>
+                      <ul class="msg-thinking-tools">
+                        <li class="msg-thinking-tool-pending">fs_read_file(src/index/rebuild.js) …</li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </details>
+        <div class="msg-answer msg-answer-pending">正在把四条调研线汇成结论…</div>
+      </div>
+
+      <!-- ============ ② 已完成（run 结束，卡片仍展开） ============ -->
+      <div class="msg assistant">
+        <details class="msg-thinking-outer" open>
+          <summary class="msg-thinking-outer-summary">已完成</summary>
+          <div class="msg-thinking">
+            <div class="msg-thinking-body">
+              <div class="msg-thinking-step" data-step-key="调度 · 规划::1::0">
+                <details class="msg-thinking-round-details" data-step-key="调度 · 规划::1::0">
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-round-summary-preview">先把任务拆成三条互不依赖的调研线，再并发派发</span>
+                  </summary>
+                  <div class="msg-thinking-round">
+                    <div class="msg-thinking-thought">这个重构同时牵扯索引、向量检索、缓存三块，彼此没有依赖。先派三个只读子 Agent 并行摸清现状。</div>
+                  </div>
+                </details>
+                <div class="msg-thinking-beat is-empty"></div>
+              </div>
+
+              <div class="msg-thinking-step" data-step-key="sa:exec-A-lx9f">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent msg-thinking-parallel"
+                  data-step-key="sa:exec-A-lx9f"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">调研子 Agent #1</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">索引写入路径：入口与落盘时机</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">已完成 · 3 步</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body is-multi-round">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">索引入口在 src/index/，写入由 flush() 触发。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">grep(pattern=flush, path=src/index) → 命中 7 处</span>
+                          </div>
+                        </li>
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(src/index/index.js) → 214 行</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                    <div class="msg-thinking-subround" data-subround="2">
+                      <div class="msg-thinking-thought">索引写入发生在两处：增量 flush 与全量 rebuild。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(src/index/rebuild.js) → 158 行</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <div class="msg-thinking-step" data-step-key="sa:exec-B-m2kq">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent msg-thinking-parallel"
+                  data-step-key="sa:exec-B-m2kq"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">调研子 Agent #2</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">向量检索：ann 索引与 embedding 解耦</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">已完成 · 2 步</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">embedding 只在 upsert 时算一次，检索侧读已落盘的 ann 文件。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(src/vector/vector-store.js) → 187 行</span>
+                          </div>
+                        </li>
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">grep(pattern=ann, path=src/vector) → 命中 4 处</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <div class="msg-thinking-step" data-step-key="sa:exec-C-p7wd">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent msg-thinking-parallel"
+                  data-step-key="sa:exec-C-p7wd"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">调研子 Agent #3</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">缓存层：LRU 与索引失效的联动方式</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">已完成 · 2 步</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">缓存 key 只含 path，不含内容 hash —— 失效不彻底的根因。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(src/cache/cache.js) → 96 行</span>
+                          </div>
+                        </li>
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">grep(pattern=cacheKey, path=src/cache) → 命中 3 处</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <div class="msg-thinking-step" data-step-key="汇总::6::4">
+                <details class="msg-thinking-round-details" data-step-key="汇总::6::4">
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-round-summary-preview">汇总 · 已完成</span>
+                  </summary>
+                  <div class="msg-thinking-round">
+                    <div class="msg-thinking-thought">已完成</div>
+                  </div>
+                </details>
+                <div class="msg-thinking-beat is-empty"></div>
+              </div>
+            </div>
+          </div>
+        </details>
+        <div class="msg-answer">三条调研线已汇总：索引写入集中在 flush/rebuild 两处；向量侧 embedding 与检索解耦；缓存失效不彻底的根因是 key 未纳入内容 hash。</div>
+      </div>
+
+      <!-- ============ ③ Plan 模式：写入子 Agent 也是同一套卡片 ============ -->
+      <div class="msg assistant">
+        <details class="msg-thinking-outer" open>
+          <summary class="msg-thinking-outer-summary">Plan · 执行中</summary>
+          <div class="msg-thinking">
+            <div class="msg-thinking-body">
+              <!-- planner 自己的勘察阶段也占一个序号（kind=plan → 勘察），避免出现无编号卡片 -->
+              <div class="msg-thinking-step" data-step-key="sa:explore-c1">
+                <details class="msg-thinking-round-details msg-thinking-subagent" data-step-key="sa:explore-c1" open>
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">勘察子 Agent #1</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">已确认 auth 与 config 模块的现状</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">已完成 · 3 步</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">auth 把 token 密钥硬编码在 auth/token.js；config 已有统一入口，可以直接复用。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">grep(pattern=SECRET, path=src/auth) → 命中 3 处</span>
+                          </div>
+                        </li>
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_read_file(src/config/index.js) → 88 行</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!-- 写入子 Agent：标题「类型 + 序号」，全部轮次都在卡片内，运行中实时刷新 -->
+              <div class="msg-thinking-step" data-step-key="sa:exec-build-a">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent msg-thinking-parallel is-running"
+                  data-step-key="sa:exec-build-a"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">写入子 Agent #2</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">把 token 密钥迁到 config 入口</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">运行中…</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body is-multi-round">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">先新增 config/auth.js 暴露 SECRET，再改 token.js 的取值来源。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">fs_edit_file(src/config/auth.js) → 新增 12 行</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                    <div class="msg-thinking-subround" data-subround="2">
+                      <div class="msg-thinking-thought">接着替换 token.js 里的硬编码，并跑 auth 单测兜底……</div>
+                      <ul class="msg-thinking-tools">
+                        <li class="msg-thinking-tool-pending">fs_edit_file(src/auth/token.js) …</li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!-- 命令子 Agent：同款卡片，只是类型不同 -->
+              <div class="msg-thinking-step" data-step-key="sa:exec-shell-b">
+                <details
+                  class="msg-thinking-round-details msg-thinking-subagent"
+                  data-step-key="sa:exec-shell-b"
+                  open
+                >
+                  <summary class="msg-thinking-round-summary">
+                    <span class="msg-thinking-subagent-name">命令子 Agent #3</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-preview">跑 auth 相关单测确认无回归</span>
+                    <span class="msg-checkpoint-restore-sep msg-thinking-round-summary-sep"> · </span>
+                    <span class="msg-thinking-round-summary-tools">已完成 · 1 步</span>
+                  </summary>
+                  <div class="msg-thinking-round msg-thinking-subagent-body">
+                    <div class="msg-thinking-subround" data-subround="1">
+                      <div class="msg-thinking-thought">只跑受影响的两个用例即可。</div>
+                      <ul class="msg-thinking-tools">
+                        <li>
+                          <div class="msg-thinking-tool-row">
+                            <span class="msg-thinking-tool-text">host_exec(npx vitest run test/unit/auth.test.cjs) → 12 passed</span>
+                          </div>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </details>
+        <div class="msg-answer msg-answer-pending">正在把密钥迁移到统一配置入口…</div>
+      </div>
+    </div>
+
+    <script>
+      function toggleTheme() {
+        const root = document.documentElement;
+        root.dataset.theme = root.dataset.theme === 'light' ? '' : 'light';
+      }
+      function setAllOpen(open) {
+        document.querySelectorAll('#chat-list details').forEach((d) => {
+          d.open = open;
+        });
+      }
+    </script>
+  </body>
+</html>

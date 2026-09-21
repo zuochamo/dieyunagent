@@ -4,6 +4,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::agent::AgentLoopManager;
+use crate::blocking::run_blocking;
 use crate::compaction;
 use crate::config::{AppConfig, ConfigureParams, VERSION};
 use crate::error::{CoreError, RpcErrorBody};
@@ -16,6 +17,14 @@ use crate::sqlite::SqliteHandle;
 use serde_json::json;
 
 pub mod stdio;
+
+/// 架构约束守卫：`AppState` 必须可跨线程共享，RPC 才能在多线程运行时上 `tokio::spawn`。
+/// 断言失败说明某个服务重新引入了裸 `Connection` 等 `!Sync` 字段——那会把整个状态机拖回单线程。
+#[allow(dead_code)]
+fn _assert_app_state_is_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<AppState>();
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -37,6 +46,514 @@ struct StateInner {
     planner: PlannerRunManager,
 }
 
+/// 阻塞 RPC 分支的执行上下文。
+///
+/// 它存在的唯一理由：`spawn_blocking` 要求闭包 `Send + 'static`，不能借用 `AppState`。
+/// 于是把「同步世界需要的东西」先克隆成快照：在 `inner` 读锁下只做 `Arc` 克隆
+/// （微秒级），锁一放，剩下全部时间都在阻塞池里跑。这样做同时拿到两个好处——
+/// 一次全表扫描不再压在 async worker 上，也不会攥着读锁挡住 `core.configure` 这类写路径。
+///
+/// 只装**阻塞分支真正会用到**的服务：`agent` / `planner` 的循环账本方法都是纯内存操作，
+/// 留在 `AppState::dispatch` 的 async 分支里，不进这个快照。
+#[derive(Clone)]
+struct ServiceSnapshot {
+    config: AppConfig,
+    index: IndexService,
+    graph: GraphService,
+    memory: memory::MemoryStore,
+}
+
+/// 架构约束守卫：快照必须能整体移动到阻塞池，否则 [`run_blocking`] 的调用点无法成立。
+#[allow(dead_code)]
+fn _assert_snapshot_is_send_static() {
+    fn assert_send_static<T: Send + 'static>() {}
+    assert_send_static::<ServiceSnapshot>();
+}
+
+impl StateInner {
+    /// 取一份服务句柄快照。各字段内部都是 `Arc`，克隆廉价且立即释放读锁。
+    fn snapshot(&self) -> ServiceSnapshot {
+        ServiceSnapshot {
+            config: self.config.clone(),
+            index: self.index.clone(),
+            graph: self.graph.clone(),
+            memory: self.memory.clone(),
+        }
+    }
+}
+
+impl ServiceSnapshot {
+    /// 同步 RPC 分支的**唯一实现**。
+    ///
+    /// 这里刻意没有 `.await`：整段是同步世界，由 [`run_blocking`] 在阻塞线程池上调用，
+    /// 因此不可能借到 `AppState` 的读锁，也不可能压在 async worker 上。
+    ///
+    /// 与 [`AppState::dispatch`] 的分工只有一条标准——**会不会把线程钉住**：
+    /// 需要等（LLM / embedding / 索引任务）或只碰内存的留在那边，
+    /// 碰 SQLite / 文件系统 / 纯 CPU 的落到这里。判断依据是「阻塞」而非「哪个模块」，
+    /// 所以 `memory.*` 一部分在这里（查询），一部分在那边（向量召回）。
+    fn dispatch(&self, method: &str, params: &Value) -> Result<Value, CoreError> {
+        match method {
+            // ---- memory：会话 / 消息 ----
+            "memory.ping" => Ok(self.memory.ping()),
+            "memory.touch_session" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let title = params.get("title").and_then(|v| v.as_str());
+                self.memory.touch_session(session_id, title)?;
+                Ok(json!({ "ok": true }))
+            }
+            "memory.sessions_list" => {
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(40)
+                    .clamp(1, 100);
+                let archived = params
+                    .get("archived")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let rows = self.memory.list_sessions(limit, archived)?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            "memory.session_get" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let row = self.memory.get_session(session_id)?;
+                Ok(row
+                    .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null))
+            }
+            "memory.session_create" => {
+                let title = params.get("title").and_then(|v| v.as_str());
+                let workspace_path = params.get("workspacePath").and_then(|v| v.as_str());
+                let row = self.memory.create_session(title, workspace_path)?;
+                Ok(serde_json::to_value(row)?)
+            }
+            "memory.message_append" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let role = params
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "role 必填"))?;
+                let content = params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "content 必填"))?;
+                let ins = self.memory.append_message(session_id, role, content)?;
+                Ok(json!({ "ok": true, "localMsgId": ins.local_msg_id }))
+            }
+            "memory.messages_recent" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(200)
+                    .clamp(1, 500);
+                let rows = self.memory.recent_messages(session_id, limit)?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            "memory.messages_older" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let before_id = params
+                    .get("beforeId")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "beforeId 必填"))?;
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(100)
+                    .clamp(1, 500);
+                let rows = self
+                    .memory
+                    .messages_older_than(session_id, before_id, limit)?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            "memory.compaction_archive" => {
+                let input: memory::CompactionArchiveInput = serde_json::from_value(params.clone())
+                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
+                self.memory.save_compaction_archive(input)
+            }
+            "memory.compaction_recent" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(8)
+                    .clamp(1, 50);
+                let rows = self.memory.recent_compaction_archives(session_id, limit)?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            "memory.session_archive" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let archived = params
+                    .get("archived")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                self.memory.set_session_archived(session_id, archived)
+            }
+            "memory.session_workspace_set" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let workspace_path = params.get("workspacePath").and_then(|v| v.as_str());
+                self.memory
+                    .set_session_workspace(session_id, workspace_path)
+            }
+            "memory.session_delete" | "memory.messages_clear" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                self.memory.clear_session(session_id)
+            }
+            // ---- memory：长期记忆（向量 / embedding 部分不在这里） ----
+            "memory.long_recent" => {
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+                let scope = params.get("scope").and_then(|v| v.as_str());
+                let rows = self.memory.recent_long_memories(limit, scope)?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            "memory.long_keyword_search" => {
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(12)
+                    .clamp(1, 50);
+                self.memory.keyword_search_long_memories(query, limit)
+            }
+            "memory.long_vector_status" => self.memory.long_memory_vector_status(),
+            "memory.long_status_set" => {
+                let memory_id = params
+                    .get("memoryId")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "memoryId 必填"))?;
+                let status = params
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("active");
+                self.memory.update_long_memory_status(memory_id, status)
+            }
+            "memory.messages_delete_turn" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ids: Vec<i64> = params
+                    .get("messageId")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_i64())
+                            .filter(|id| *id > 0)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let remove_count = params.get("removeCount").and_then(|v| v.as_i64());
+                self.memory
+                    .delete_turn_messages(session_id, &ids, remove_count)
+            }
+            "memory.consolidation_job_create" => {
+                let scope = params.get("scope").and_then(|v| v.as_str());
+                let reason = params.get("reason").and_then(|v| v.as_str());
+                self.memory
+                    .create_consolidation_job(scope, reason, Some("pending"))
+            }
+            "memory.consolidation_job_finish" => {
+                let job_id = params
+                    .get("jobId")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "jobId 必填"))?;
+                let status = params
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("completed");
+                let error = params.get("error").and_then(|v| v.as_str());
+                self.memory.finish_consolidation_job(job_id, status, error)
+            }
+            "memory.long_decay" => {
+                let stale_days = params
+                    .get("staleDays")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(120);
+                let archive_days = params
+                    .get("archiveDays")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(240);
+                self.memory.decay_long_memories(stale_days, archive_days)
+            }
+            "memory.sessions_with_messages" => {
+                let rows = self.memory.list_sessions_with_messages()?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            "memory.messages_after" => {
+                let after_id = params.get("afterId").and_then(|v| v.as_i64()).unwrap_or(0);
+                let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(500);
+                let rows = self.memory.list_messages_after_id(after_id, limit)?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            "memory.long_memories_after" => {
+                let after_id = params.get("afterId").and_then(|v| v.as_i64()).unwrap_or(0);
+                let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(200);
+                let rows = self.memory.list_long_memories_after_id(after_id, limit)?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            // ---- compaction：纯 CPU，无 IO ----
+            "compaction.estimate" => Ok(compaction::estimate(params)),
+            "compaction.prepare" => {
+                let p: compaction::PrepareParams = serde_json::from_value(params.clone())
+                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
+                let r = compaction::prepare(p)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "compaction.apply" => {
+                let p: compaction::ApplyParams = serde_json::from_value(params.clone())
+                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
+                let r = compaction::apply(p);
+                Ok(serde_json::to_value(r)?)
+            }
+            // ---- agent：运行账本 / trace ----
+            "agent.run_upsert" => self.memory.upsert_agent_run(params),
+            "agent.plan_save" => {
+                let saved = self.memory.upsert_agent_plan(params)?;
+                if params.get("steps").and_then(|v| v.as_array()).is_some() {
+                    let mut step_input = params.clone();
+                    if let Some(obj) = step_input.as_object_mut() {
+                        obj.insert(
+                            "planId".into(),
+                            saved.get("planId").cloned().unwrap_or(Value::Null),
+                        );
+                    }
+                    self.memory.save_agent_steps(&step_input)?;
+                }
+                Ok(saved)
+            }
+            "agent.steps_save" => self.memory.save_agent_steps(params),
+            "agent.state_get" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let row = self.memory.get_latest_agent_state(session_id)?;
+                Ok(row.unwrap_or(Value::Null))
+            }
+            "agent.trace_save" => self.memory.save_agent_trace(params),
+            "agent.trace_get" => {
+                let row = self.memory.get_agent_trace(params)?;
+                Ok(row.unwrap_or(Value::Null))
+            }
+            // ---- fs：磁盘 IO ----
+            "fs.read_file" => {
+                let file_path = params
+                    .get("filePath")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "filePath 必填"))?;
+                let encoding = params.get("encoding").and_then(|v| v.as_str());
+                let offset = params.get("offset").and_then(|v| v.as_u64());
+                let max_bytes = params.get("maxBytes").and_then(|v| v.as_u64());
+                let r = fs_ops::read_file(&self.config, file_path, encoding, offset, max_bytes)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "fs.list_dir" => {
+                let dir_path = params
+                    .get("dirPath")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "dirPath 必填"))?;
+                let r = fs_ops::list_dir(&self.config, dir_path)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            // ---- codebase / graph：同步查询与索引启动 ----
+            "codebase.status" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let r = self.index.status(workspace_root)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "codebase.index.start" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let force = params
+                    .get("force")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let skip_if_ready = params
+                    .get("skipIfReady")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let r = self
+                    .index
+                    .start_index_workspace(workspace_root, force, skip_if_ready)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.status" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let r = self.graph.status(workspace_root)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.index.start" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let force = params
+                    .get("force")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let skip_if_ready = params
+                    .get("skipIfReady")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let r = self
+                    .graph
+                    .start_index_workspace(workspace_root, force, skip_if_ready)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.module_deps" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let path = params.get("path").and_then(|v| v.as_str());
+                let depth = params
+                    .get("depth")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                let r = self.graph.module_deps(workspace_root, path, depth)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.repo_map" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                let r = self.graph.repo_map(workspace_root, limit)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.symbol_search" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let query = params
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_QUERY", "query 必填"))?;
+                let kind = params.get("kind").and_then(|v| v.as_str());
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                let r = self
+                    .graph
+                    .symbol_search(workspace_root, query, kind, limit)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.callers" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let symbol_id = params.get("symbolId").and_then(|v| v.as_i64());
+                let path = params.get("path").and_then(|v| v.as_str());
+                let name = params.get("name").and_then(|v| v.as_str());
+                let r = self.graph.callers(workspace_root, symbol_id, path, name)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.callees" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let symbol_id = params.get("symbolId").and_then(|v| v.as_i64());
+                let path = params.get("path").and_then(|v| v.as_str());
+                let name = params.get("name").and_then(|v| v.as_str());
+                let r = self.graph.callees(workspace_root, symbol_id, path, name)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.impact" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let path = params
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "path 必填"))?;
+                let depth = params
+                    .get("depth")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                let r = self.graph.impact(workspace_root, path, depth)?;
+                Ok(serde_json::to_value(r)?)
+            }
+            "graph.ingest_lsp_callers" => {
+                let workspace_root = params
+                    .get("workspaceRoot")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                let callee_symbol_id = params
+                    .get("calleeSymbolId")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "calleeSymbolId 必填"))?;
+                let callee_name = params
+                    .get("calleeName")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "calleeName 必填"))?;
+                let sites: Vec<crate::graph::LspCallSiteIn> =
+                    serde_json::from_value(params.get("sites").cloned().unwrap_or_default())
+                        .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
+                let r = self.graph.ingest_lsp_callers(
+                    workspace_root,
+                    callee_symbol_id,
+                    callee_name,
+                    sites,
+                )?;
+                Ok(serde_json::to_value(r)?)
+            }
+            _ => Err(CoreError::rpc(
+                "UNKNOWN_METHOD",
+                format!("未知 RPC: {method}"),
+            )),
+        }
+    }
+}
+
 fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     if a == b {
         return true;
@@ -46,22 +563,34 @@ fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     na == nb
 }
 
+/// 图谱索引收尾：同步的两段 `status` 查询走阻塞池，中间的 `embed_symbols` 才 `.await`。
+///
+/// `graph` 按值传入（`GraphService` 内部全是 `Arc`，克隆廉价），这样每段同步查询
+/// 都能把自己的那份句柄移进闭包，不必在 `.await` 前后借用调用方。
 async fn graph_status_with_optional_embed(
-    graph: &GraphService,
+    graph: GraphService,
     workspace_root: &str,
     force: bool,
     should_embed: bool,
 ) -> Result<Value, CoreError> {
     let mut embed_error: Option<String> = None;
     if should_embed {
-        let st = graph.status(workspace_root)?;
+        let st = {
+            let graph = graph.clone();
+            let workspace_root = workspace_root.to_string();
+            run_blocking(move || graph.status(&workspace_root)).await?
+        };
         if st.indexed && st.symbol_count > 0 {
             if let Err(e) = graph.embed_symbols(workspace_root, force).await {
                 embed_error = Some(e.to_string());
             }
         }
     }
-    let st = graph.status(workspace_root)?;
+    let st = {
+        let graph = graph.clone();
+        let workspace_root = workspace_root.to_string();
+        run_blocking(move || graph.status(&workspace_root)).await?
+    };
     let mut val = serde_json::to_value(st).map_err(|e| CoreError::rpc("SERIALIZE", e.to_string()))?;
     if let Some(err) = embed_error {
         if let Value::Object(ref mut map) = val {
@@ -92,6 +621,19 @@ impl AppState {
         }
     }
 
+    /// 在兼容 async 语义的前提下取出服务快照（读锁只覆盖克隆那几行）。
+    async fn snapshot(&self) -> ServiceSnapshot {
+        self.inner.read().await.snapshot()
+    }
+
+    /// RPC 总入口。这里只保留两类分支：
+    ///
+    /// 1. 只碰内存的（`core.ping` / `rpc.cancel` / planner 与 agent 循环账本）；
+    /// 2. 真正需要 `.await` 的（LLM、embedding、索引任务）。
+    ///
+    /// 其余一切同步工作——`rusqlite` 查询、文件读写、压缩计算——都由兜底分支
+    /// 交给 [`ServiceSnapshot::dispatch`]，在阻塞线程池上执行。判断标准是
+    /// 「这段代码会不会把线程钉住」，而不是「属于哪个模块」。
     pub async fn dispatch(
         &self,
         method: &str,
@@ -237,10 +779,7 @@ impl AppState {
                     .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
                     .unwrap_or_default();
                 let guard = self.inner.read().await;
-                let r = guard
-                    .agent
-                    .continue_llm(&guard.config, &guard.index, run_id, llm)
-                    .await?;
+                let r = guard.agent.continue_llm(&guard.config, &guard.index, run_id, llm)?;
                 Ok(serde_json::to_value(r)?)
             }
             "agent.loop.tool_results" => {
@@ -256,10 +795,10 @@ impl AppState {
                     .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
                     .unwrap_or_default();
                 let guard = self.inner.read().await;
-                let r = guard
-                    .agent
-                    .submit_tool_results(&guard.config, &guard.index, run_id, results)
-                    .await?;
+                let r =
+                    guard
+                        .agent
+                        .submit_tool_results(&guard.config, &guard.index, run_id, results)?;
                 Ok(serde_json::to_value(r)?)
             }
             "agent.loop.cancel" => {
@@ -328,123 +867,6 @@ impl AppState {
                 }
                 Ok(serde_json::json!({ "ok": true }))
             }
-            "memory.ping" => {
-                let guard = self.inner.read().await;
-                Ok(guard.memory.ping())
-            }
-            "memory.touch_session" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let title = params.get("title").and_then(|v| v.as_str());
-                let guard = self.inner.read().await;
-                guard.memory.touch_session(session_id, title)?;
-                Ok(serde_json::json!({ "ok": true }))
-            }
-            "memory.sessions_list" => {
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(40)
-                    .clamp(1, 100);
-                let archived = params
-                    .get("archived")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let guard = self.inner.read().await;
-                let rows = guard.memory.list_sessions(limit, archived)?;
-                Ok(serde_json::to_value(rows)?)
-            }
-            "memory.session_get" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let guard = self.inner.read().await;
-                let row = guard.memory.get_session(session_id)?;
-                Ok(row
-                    .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-                    .unwrap_or(Value::Null))
-            }
-            "memory.session_create" => {
-                let title = params.get("title").and_then(|v| v.as_str());
-                let workspace_path = params.get("workspacePath").and_then(|v| v.as_str());
-                let guard = self.inner.read().await;
-                let row = guard.memory.create_session(title, workspace_path)?;
-                Ok(serde_json::to_value(row)?)
-            }
-            "memory.message_append" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let role = params
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "role 必填"))?;
-                let content = params
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "content 必填"))?;
-                let guard = self.inner.read().await;
-                let ins = guard.memory.append_message(session_id, role, content)?;
-                Ok(json!({ "ok": true, "localMsgId": ins.local_msg_id }))
-            }
-            "memory.messages_recent" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(200)
-                    .clamp(1, 500);
-                let guard = self.inner.read().await;
-                let rows = guard.memory.recent_messages(session_id, limit)?;
-                Ok(serde_json::to_value(rows)?)
-            }
-            "memory.messages_older" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let before_id = params
-                    .get("beforeId")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "beforeId 必填"))?;
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(100)
-                    .clamp(1, 500);
-                let guard = self.inner.read().await;
-                let rows = guard
-                    .memory
-                    .messages_older_than(session_id, before_id, limit)?;
-                Ok(serde_json::to_value(rows)?)
-            }
-            "memory.compaction_archive" => {
-                let input: memory::CompactionArchiveInput = serde_json::from_value(params)
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let guard = self.inner.read().await;
-                guard.memory.save_compaction_archive(input)
-            }
-            "memory.compaction_recent" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(8)
-                    .clamp(1, 50);
-                let guard = self.inner.read().await;
-                let rows = guard.memory.recent_compaction_archives(session_id, limit)?;
-                Ok(serde_json::to_value(rows)?)
-            }
             "memory.long_recall" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let scope = params.get("scope").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -453,44 +875,10 @@ impl AppState {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(12)
                     .clamp(1, 50);
-                let memory = {
-                    let guard = self.inner.read().await;
-                    guard.memory.clone()
-                };
+                let memory = self.snapshot().await.memory;
                 memory
                     .recall_long_memories(&query, scope.as_deref(), limit)
                     .await
-            }
-            "memory.session_archive" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let archived = params
-                    .get("archived")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let guard = self.inner.read().await;
-                guard.memory.set_session_archived(session_id, archived)
-            }
-            "memory.session_workspace_set" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let workspace_path = params.get("workspacePath").and_then(|v| v.as_str());
-                let guard = self.inner.read().await;
-                guard
-                    .memory
-                    .set_session_workspace(session_id, workspace_path)
-            }
-            "memory.session_delete" | "memory.messages_clear" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-                let guard = self.inner.read().await;
-                guard.memory.clear_session(session_id)
             }
             "memory.long_add" => {
                 let content = params
@@ -506,10 +894,7 @@ impl AppState {
                 let importance = params.get("importance").and_then(|v| v.as_i64());
                 let expires_at = params.get("expiresAt").and_then(|v| v.as_i64());
                 let metadata = params.get("metadata").cloned();
-                let memory = {
-                    let guard = self.inner.read().await;
-                    guard.memory.clone()
-                };
+                let memory = self.snapshot().await.memory;
                 let ins = memory.add_long_memory(
                     content,
                     source,
@@ -530,247 +915,21 @@ impl AppState {
                     "vector": vector,
                 }))
             }
-            "memory.long_recent" => {
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(20)
-                    .clamp(1, 100);
-                let scope = params.get("scope").and_then(|v| v.as_str());
-                let guard = self.inner.read().await;
-                let rows = guard.memory.recent_long_memories(limit, scope)?;
-                Ok(serde_json::to_value(rows)?)
-            }
-            "memory.long_keyword_search" => {
-                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(12)
-                    .clamp(1, 50);
-                let guard = self.inner.read().await;
-                guard.memory.keyword_search_long_memories(query, limit)
-            }
-            "memory.long_vector_status" => {
-                let guard = self.inner.read().await;
-                guard.memory.long_memory_vector_status()
-            }
             "memory.long_reindex" => {
                 let limit = params
                     .get("limit")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(500)
                     .clamp(1, 2000);
-                let memory = {
-                    let guard = self.inner.read().await;
-                    guard.memory.clone()
-                };
+                let memory = self.snapshot().await.memory;
                 memory.reindex_long_memories(limit).await
-            }
-            "memory.long_status_set" => {
-                let memory_id = params
-                    .get("memoryId")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "memoryId 必填"))?;
-                let status = params
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("active");
-                let guard = self.inner.read().await;
-                guard.memory.update_long_memory_status(memory_id, status)
-            }
-            "memory.messages_delete_turn" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let ids: Vec<i64> = params
-                    .get("messageId")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_i64())
-                            .filter(|id| *id > 0)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let remove_count = params.get("removeCount").and_then(|v| v.as_i64());
-                let guard = self.inner.read().await;
-                guard
-                    .memory
-                    .delete_turn_messages(session_id, &ids, remove_count)
-            }
-            "memory.consolidation_job_create" => {
-                let scope = params.get("scope").and_then(|v| v.as_str());
-                let reason = params.get("reason").and_then(|v| v.as_str());
-                let guard = self.inner.read().await;
-                guard
-                    .memory
-                    .create_consolidation_job(scope, reason, Some("pending"))
-            }
-            "memory.consolidation_job_finish" => {
-                let job_id = params
-                    .get("jobId")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "jobId 必填"))?;
-                let status = params
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("completed");
-                let error = params.get("error").and_then(|v| v.as_str());
-                let guard = self.inner.read().await;
-                guard.memory.finish_consolidation_job(job_id, status, error)
-            }
-            "memory.long_decay" => {
-                let stale_days = params
-                    .get("staleDays")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(120);
-                let archive_days = params
-                    .get("archiveDays")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(240);
-                let guard = self.inner.read().await;
-                guard.memory.decay_long_memories(stale_days, archive_days)
-            }
-            "memory.sessions_with_messages" => {
-                let guard = self.inner.read().await;
-                let rows = guard.memory.list_sessions_with_messages()?;
-                Ok(serde_json::to_value(rows)?)
-            }
-            "memory.messages_after" => {
-                let after_id = params.get("afterId").and_then(|v| v.as_i64()).unwrap_or(0);
-                let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(500);
-                let guard = self.inner.read().await;
-                let rows = guard.memory.list_messages_after_id(after_id, limit)?;
-                Ok(serde_json::to_value(rows)?)
-            }
-            "memory.long_memories_after" => {
-                let after_id = params.get("afterId").and_then(|v| v.as_i64()).unwrap_or(0);
-                let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(200);
-                let guard = self.inner.read().await;
-                let rows = guard.memory.list_long_memories_after_id(after_id, limit)?;
-                Ok(serde_json::to_value(rows)?)
-            }
-            "compaction.estimate" => Ok(compaction::estimate(&params)),
-            "compaction.prepare" => {
-                let p: compaction::PrepareParams = serde_json::from_value(params)
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let r = compaction::prepare(p)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "compaction.apply" => {
-                let p: compaction::ApplyParams = serde_json::from_value(params)
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let r = compaction::apply(p);
-                Ok(serde_json::to_value(r)?)
             }
             "compaction.maybe_compact" => {
                 let p: compaction::MaybeCompactParams = serde_json::from_value(params)
                     .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
                 // 勿在 LLM 重试期间持有 inner 读锁，否则停止后的 memory/agent 写会卡住
-                let llm = {
-                    let guard = self.inner.read().await;
-                    guard.config.llm.clone()
-                };
+                let llm = self.snapshot().await.config.llm;
                 let r = compaction::maybe_compact(&llm, p).await?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "agent.run_upsert" => {
-                let guard = self.inner.read().await;
-                guard.memory.upsert_agent_run(&params)
-            }
-            "agent.plan_save" => {
-                let guard = self.inner.read().await;
-                let saved = guard.memory.upsert_agent_plan(&params)?;
-                if params.get("steps").and_then(|v| v.as_array()).is_some() {
-                    let mut step_input = params.clone();
-                    if let Some(obj) = step_input.as_object_mut() {
-                        obj.insert(
-                            "planId".into(),
-                            saved.get("planId").cloned().unwrap_or(Value::Null),
-                        );
-                    }
-                    guard.memory.save_agent_steps(&step_input)?;
-                }
-                Ok(saved)
-            }
-            "agent.steps_save" => {
-                let guard = self.inner.read().await;
-                guard.memory.save_agent_steps(&params)
-            }
-            "agent.state_get" => {
-                let session_id = params
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let guard = self.inner.read().await;
-                let row = guard.memory.get_latest_agent_state(session_id)?;
-                Ok(row.map(|r| r).unwrap_or(Value::Null))
-            }
-            "agent.trace_save" => {
-                let guard = self.inner.read().await;
-                guard.memory.save_agent_trace(&params)
-            }
-            "agent.trace_get" => {
-                let guard = self.inner.read().await;
-                let row = guard.memory.get_agent_trace(&params)?;
-                Ok(row.map(|r| r).unwrap_or(Value::Null))
-            }
-            "fs.read_file" => {
-                let guard = self.inner.read().await;
-                let file_path = params
-                    .get("filePath")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "filePath 必填"))?;
-                let encoding = params.get("encoding").and_then(|v| v.as_str());
-                let offset = params.get("offset").and_then(|v| v.as_u64());
-                let max_bytes = params.get("maxBytes").and_then(|v| v.as_u64());
-                let r = fs_ops::read_file(&guard.config, file_path, encoding, offset, max_bytes)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "fs.list_dir" => {
-                let guard = self.inner.read().await;
-                let dir_path = params
-                    .get("dirPath")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "dirPath 必填"))?;
-                let r = fs_ops::list_dir(&guard.config, dir_path)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "codebase.status" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let index = {
-                    let guard = self.inner.read().await;
-                    guard.index.clone()
-                };
-                // spawn_blocking：避免在 current-thread LocalSet 上同步 open SQLite 饿死其它 RPC
-                let r = tokio::task::spawn_blocking(move || index.status(&workspace_root))
-                    .await
-                    .map_err(|e| CoreError::rpc("STATUS_JOIN_FAILED", e.to_string()))??;
-                Ok(serde_json::to_value(r)?)
-            }
-            "codebase.index.start" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let force = params
-                    .get("force")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let skip_if_ready = params
-                    .get("skipIfReady")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let guard = self.inner.read().await;
-                let r = guard
-                    .index
-                    .start_index_workspace(workspace_root, force, skip_if_ready)?;
                 Ok(serde_json::to_value(r)?)
             }
             "codebase.index" => {
@@ -783,10 +942,7 @@ impl AppState {
                     .get("force")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let index = {
-                    let guard = self.inner.read().await;
-                    guard.index.clone()
-                };
+                let index = self.snapshot().await.index;
                 let r = index.index_workspace(&workspace_root, force).await?;
                 Ok(serde_json::to_value(r)?)
             }
@@ -794,7 +950,8 @@ impl AppState {
                 let workspace_root = params
                     .get("workspaceRoot")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?
+                    .to_string();
                 let query = params
                     .get("query")
                     .and_then(|v| v.as_str())
@@ -807,8 +964,13 @@ impl AppState {
                     .get("autoIndex")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let guard = self.inner.read().await;
-                let st = guard.index.status(workspace_root)?;
+                let index = self.snapshot().await.index;
+                // status 是同步 SQLite 聚合：走阻塞池，别压在 async worker 上
+                let st = {
+                    let index = index.clone();
+                    let workspace_root = workspace_root.clone();
+                    run_blocking(move || index.status(&workspace_root)).await?
+                };
                 if !st.indexed || st.chunk_count == 0 {
                     if st.indexing {
                         return Err(CoreError::rpc(
@@ -817,7 +979,7 @@ impl AppState {
                         ));
                     }
                     if auto_index {
-                        let ws = crate::index::resolve_workspace(workspace_root)?;
+                        let ws = crate::index::resolve_workspace(&workspace_root)?;
                         if ws.is_remote {
                             return Err(CoreError::rpc(
                                 "INDEX_REQUIRED",
@@ -830,19 +992,17 @@ impl AppState {
                             "代码库尚未索引，请先等待准备工作中的索引完成",
                         ));
                     }
-                    return Err(CoreError::rpc(
-                        "INDEX_REQUIRED",
-                        "代码库尚未索引",
-                    ));
+                    return Err(CoreError::rpc("INDEX_REQUIRED", "代码库尚未索引"));
                 }
-                let r = guard.index.search(workspace_root, query, limit).await?;
+                let r = index.search(&workspace_root, query, limit).await?;
                 Ok(serde_json::to_value(r)?)
             }
             "codebase.index_remote" => {
                 let workspace_root = params
                     .get("workspaceRoot")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?
+                    .to_string();
                 let force = params
                     .get("force")
                     .and_then(|v| v.as_bool())
@@ -850,19 +1010,24 @@ impl AppState {
                 let phase = params
                     .get("phase")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("full");
-                let guard = self.inner.read().await;
-                let ws = crate::index::resolve_workspace(workspace_root)?;
+                    .unwrap_or("full")
+                    .to_string();
+                let index = self.snapshot().await.index;
+                let ws = crate::index::resolve_workspace(&workspace_root)?;
                 if !ws.is_remote {
                     return Err(CoreError::rpc(
                         "LOCAL_INDEX_REQUIRED",
                         "本地工作空间请使用 codebase.index",
                     ));
                 }
-                match phase {
+                match phase.as_str() {
                     "begin" => {
-                        guard.index.index_remote_begin(&ws, force).await?;
-                        let st = guard.index.status(workspace_root)?;
+                        index.index_remote_begin(&ws, force).await?;
+                        let st = {
+                            let index = index.clone();
+                            let workspace_root = workspace_root.clone();
+                            run_blocking(move || index.status(&workspace_root)).await?
+                        };
                         Ok(serde_json::to_value(st)?)
                     }
                     "push" => {
@@ -872,11 +1037,16 @@ impl AppState {
                             .transpose()
                             .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
                             .unwrap_or_default();
-                        guard.index.index_remote_push(&ws, &files)?;
-                        Ok(serde_json::json!({ "ok": true, "pushed": files.len() }))
+                        let count = files.len();
+                        {
+                            let index = index.clone();
+                            let ws = ws.clone();
+                            run_blocking(move || index.index_remote_push(&ws, &files)).await?
+                        };
+                        Ok(serde_json::json!({ "ok": true, "pushed": count }))
                     }
                     "finish" => {
-                        let r = guard.index.index_remote_finish(&ws).await?;
+                        let r = index.index_remote_finish(&ws).await?;
                         Ok(serde_json::to_value(r)?)
                     }
                     _ => {
@@ -886,53 +1056,17 @@ impl AppState {
                             .transpose()
                             .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
                             .unwrap_or_default();
-                        let r = guard
-                            .index
-                            .index_remote(workspace_root, files, force)
-                            .await?;
+                        let r = index.index_remote(&workspace_root, files, force).await?;
                         Ok(serde_json::to_value(r)?)
                     }
                 }
-            }
-            "graph.status" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let graph = {
-                    let guard = self.inner.read().await;
-                    guard.graph.clone()
-                };
-                let r = tokio::task::spawn_blocking(move || graph.status(&workspace_root))
-                    .await
-                    .map_err(|e| CoreError::rpc("STATUS_JOIN_FAILED", e.to_string()))??;
-                Ok(serde_json::to_value(r)?)
-            }
-            "graph.index.start" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let force = params
-                    .get("force")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let skip_if_ready = params
-                    .get("skipIfReady")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let guard = self.inner.read().await;
-                let r = guard
-                    .graph
-                    .start_index_workspace(workspace_root, force, skip_if_ready)?;
-                Ok(serde_json::to_value(r)?)
             }
             "graph.index" => {
                 let workspace_root = params
                     .get("workspaceRoot")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?
+                    .to_string();
                 let force = params
                     .get("force")
                     .and_then(|v| v.as_bool())
@@ -941,23 +1075,30 @@ impl AppState {
                     .get("embedSymbols")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let guard = self.inner.read().await;
-                let graph = guard.graph.clone();
+                let graph = self.snapshot().await.graph;
                 let should_embed = embed_symbols && graph.embedding_enabled();
-                drop(guard);
-                graph.index_workspace(workspace_root, force)?;
-                graph_status_with_optional_embed(&graph, workspace_root, force, should_embed).await
+                {
+                    let graph = graph.clone();
+                    let workspace_root = workspace_root.clone();
+                    run_blocking(move || graph.index_workspace(&workspace_root, force)).await?
+                };
+                graph_status_with_optional_embed(graph, &workspace_root, force, should_embed).await
             }
             "graph.index_remote" => {
                 let workspace_root = params
                     .get("workspaceRoot")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?
+                    .to_string();
                 let force = params
                     .get("force")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let phase = params.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+                let phase = params
+                    .get("phase")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let embed_symbols = params
                     .get("embedSymbols")
                     .and_then(|v| v.as_bool())
@@ -969,74 +1110,44 @@ impl AppState {
                         .unwrap_or_else(|| serde_json::json!([])),
                 )
                 .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let guard = self.inner.read().await;
-                let graph = guard.graph.clone();
+                let graph = self.snapshot().await.graph;
                 let should_embed = embed_symbols && graph.embedding_enabled();
-                drop(guard);
-                match phase {
+                match phase.as_str() {
                     "begin" => {
-                        let r = graph.index_remote_begin(workspace_root)?;
+                        let r = {
+                            let graph = graph.clone();
+                            let workspace_root = workspace_root.clone();
+                            run_blocking(move || graph.index_remote_begin(&workspace_root)).await?
+                        };
                         return Ok(serde_json::to_value(r)?);
                     }
                     "push" => {
-                        let pushed = graph.index_remote_push(workspace_root, &files)?;
+                        let pushed = {
+                            let graph = graph.clone();
+                            let workspace_root = workspace_root.clone();
+                            run_blocking(move || {
+                                graph.index_remote_push(&workspace_root, &files)
+                            })
+                            .await?
+                        };
                         return Ok(serde_json::json!({ "ok": true, "pushed": pushed }));
                     }
                     "finish" => {
-                        graph.index_remote_finish(workspace_root, force)?;
+                        let graph = graph.clone();
+                        let workspace_root = workspace_root.clone();
+                        run_blocking(move || graph.index_remote_finish(&workspace_root, force))
+                            .await?;
                     }
                     _ => {
-                        graph.index_remote(workspace_root, files, force)?;
+                        let graph = graph.clone();
+                        let workspace_root = workspace_root.clone();
+                        run_blocking(move || {
+                            graph.index_remote(&workspace_root, files, force)
+                        })
+                        .await?;
                     }
                 }
-                graph_status_with_optional_embed(&graph, workspace_root, force, should_embed).await
-            }
-            "graph.module_deps" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let path = params.get("path").and_then(|v| v.as_str());
-                let depth = params
-                    .get("depth")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as u32);
-                let guard = self.inner.read().await;
-                let r = guard.graph.module_deps(workspace_root, path, depth)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "graph.repo_map" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as u32);
-                let guard = self.inner.read().await;
-                let r = guard.graph.repo_map(workspace_root, limit)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "graph.symbol_search" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let query = params
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_QUERY", "query 必填"))?;
-                let kind = params.get("kind").and_then(|v| v.as_str());
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as u32);
-                let guard = self.inner.read().await;
-                let r = guard
-                    .graph
-                    .symbol_search(workspace_root, query, kind, limit)?;
-                Ok(serde_json::to_value(r)?)
+                graph_status_with_optional_embed(graph, &workspace_root, force, should_embed).await
             }
             "graph.embed_symbols" => {
                 let workspace_root = params
@@ -1047,9 +1158,7 @@ impl AppState {
                     .get("force")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let guard = self.inner.read().await;
-                let graph = guard.graph.clone();
-                drop(guard);
+                let graph = self.snapshot().await.graph;
                 let r = graph.embed_symbols(workspace_root, force).await?;
                 Ok(serde_json::to_value(r)?)
             }
@@ -1057,7 +1166,8 @@ impl AppState {
                 let workspace_root = params
                     .get("workspaceRoot")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?
+                    .to_string();
                 let query = params
                     .get("query")
                     .and_then(|v| v.as_str())
@@ -1071,12 +1181,14 @@ impl AppState {
                     .get("autoEmbed")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let guard = self.inner.read().await;
-                let graph = guard.graph.clone();
-                drop(guard);
+                let graph = self.snapshot().await.graph;
                 let mut embed_error: Option<String> = None;
                 if auto_embed {
-                    let st = graph.status(workspace_root)?;
+                    let st = {
+                        let graph = graph.clone();
+                        let workspace_root = workspace_root.clone();
+                        run_blocking(move || graph.status(&workspace_root)).await?
+                    };
                     if st.indexed
                         && st.symbol_count > 0
                         && (st.symbol_vector_count < st.symbol_count
@@ -1084,13 +1196,13 @@ impl AppState {
                                 != st.symbol_embedding_model.as_deref().unwrap_or(""))
                         && graph.embedding_enabled()
                     {
-                        if let Err(e) = graph.embed_symbols(workspace_root, false).await {
+                        if let Err(e) = graph.embed_symbols(&workspace_root, false).await {
                             embed_error = Some(e.to_string());
                         }
                     }
                 }
                 let r = graph
-                    .symbol_semantic_search(workspace_root, query, kind, limit)
+                    .symbol_semantic_search(&workspace_root, query, kind, limit)
                     .await?;
                 let mut val =
                     serde_json::to_value(r).map_err(|e| CoreError::rpc("SERIALIZE", e.to_string()))?;
@@ -1101,76 +1213,16 @@ impl AppState {
                 }
                 Ok(val)
             }
-            "graph.callers" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let symbol_id = params.get("symbolId").and_then(|v| v.as_i64());
-                let path = params.get("path").and_then(|v| v.as_str());
-                let name = params.get("name").and_then(|v| v.as_str());
-                let guard = self.inner.read().await;
-                let r = guard.graph.callers(workspace_root, symbol_id, path, name)?;
-                Ok(serde_json::to_value(r)?)
+            // 兜底：其余全部是同步分支（SQLite / 文件系统 / 纯 CPU）。
+            //
+            // 快照在读锁下只做 Arc 克隆，随后整段搬到阻塞池执行——于是 async worker
+            // 不再被一次全表扫描占住，`core.configure` 这类写路径也不会被读锁挡住。
+            // 注意：真正的「哪些方法阻塞」清单只有一处，就是 `ServiceSnapshot::dispatch`。
+            _ => {
+                let snap = self.snapshot().await;
+                let method = method.to_string();
+                run_blocking(move || snap.dispatch(&method, &params)).await
             }
-            "graph.callees" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let symbol_id = params.get("symbolId").and_then(|v| v.as_i64());
-                let path = params.get("path").and_then(|v| v.as_str());
-                let name = params.get("name").and_then(|v| v.as_str());
-                let guard = self.inner.read().await;
-                let r = guard.graph.callees(workspace_root, symbol_id, path, name)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "graph.impact" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let path = params
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "path 必填"))?;
-                let depth = params
-                    .get("depth")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as u32);
-                let guard = self.inner.read().await;
-                let r = guard.graph.impact(workspace_root, path, depth)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "graph.ingest_lsp_callers" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let callee_symbol_id = params
-                    .get("calleeSymbolId")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "calleeSymbolId 必填"))?;
-                let callee_name = params
-                    .get("calleeName")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "calleeName 必填"))?;
-                let sites: Vec<crate::graph::LspCallSiteIn> =
-                    serde_json::from_value(params.get("sites").cloned().unwrap_or_default())
-                        .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let guard = self.inner.read().await;
-                let r = guard.graph.ingest_lsp_callers(
-                    workspace_root,
-                    callee_symbol_id,
-                    callee_name,
-                    sites,
-                )?;
-                Ok(serde_json::to_value(r)?)
-            }
-            _ => Err(CoreError::rpc(
-                "UNKNOWN_METHOD",
-                format!("未知 RPC: {method}"),
-            )),
         }
     }
 }

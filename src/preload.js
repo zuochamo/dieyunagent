@@ -456,6 +456,21 @@ contextBridge.exposeInMainWorld('diecloud', {
     ipcRenderer.on('agent:rust-loop-phase', handler);
     return () => ipcRenderer.removeListener('agent:rust-loop-phase', handler);
   },
+  /**
+   * 主循环并发 subagent 的隔离 trace（过程卡片）。与 agent:rust-loop-phase 分通道，
+   * 因为子运行的 runId 不能回写父 entry，且它需要按 subagentId 分桶。
+   */
+  onAgentSubagentTrace: (cb) => {
+    const handler = (_evt, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on('agent:subagent-trace', handler);
+    return () => ipcRenderer.removeListener('agent:subagent-trace', handler);
+  },
   onAgentPlannerPhase: (cb) => {
     const handler = (_evt, payload) => {
       try {

@@ -70,11 +70,6 @@ function createPlanRunTrace(opts = {}) {
   let llmRound = 0;
   let streamContent = '';
 
-  function roundPhase(index, roundNo) {
-    if (index <= 0) return baseLabel;
-    return `${baseLabel} · 第 ${roundNo || index + 1} 轮`;
-  }
-
   function getRound(roundNo) {
     const n = Math.max(1, Number(roundNo) || 1);
     let row = rounds.find((x) => x.round === n);
@@ -87,9 +82,10 @@ function createPlanRunTrace(opts = {}) {
   }
 
   function snapshot() {
-    return rounds.map((r, i) => ({
+    // 轮次标签只用计划名：不再拼「· 第 N 轮」，轮号是实现细节，UI 侧不需要展示。
+    return rounds.map((r) => ({
       round: r.round,
-      phase: roundPhase(i, r.round),
+      phase: baseLabel,
       thought: r.thought,
       fullThought: r.fullThought || r.thought,
       visibleContent: r.visibleContent || '',
@@ -125,7 +121,9 @@ function createPlanRunTrace(opts = {}) {
       if (d && d.id && row.tools.some((t) => t.id === d.id)) continue;
       row.tools.push(mapPendingTool(d));
     }
-    if (!row.thought || String(row.thought).startsWith('请求 LLM')) row.thought = '执行工具…';
+    // 不再写「执行工具…」占位文本：正文只显示真实模型输出，工具进度由工具行自己表达。
+    // 顺手清掉上一轮的「请求 LLM…」，避免工具跑起来了还挂着过期的请求提示。
+    if (!row.thought || String(row.thought).startsWith('请求 LLM')) row.thought = '';
     return true;
   }
 
@@ -172,17 +170,22 @@ function createPlanRunTrace(opts = {}) {
       llmRound = d.round != null ? Number(d.round) : llmRound;
       const reasoning = String(d.reasoning || '');
       const contentOnly = stripToolCallMarkup(String(d.content || ''));
+      // content 的通道身份由入口盖章（llm-channel.classifyDelta），此处不再用 `a || b` 猜。
+      const contentIsReasoning = d.contentChannel === 'reasoning';
       const row = getRound(eventRoundNo(d));
       if (reasoning) {
         row.thought = reasoning.slice(0, LIVE_THOUGHT_CHARS);
         row.fullThought = reasoning.slice(0, LIVE_THOUGHT_CHARS);
         if (d.hasToolCalls) row.visibleContent = contentOnly;
-        else if (contentOnly) streamContent = contentOnly;
-      } else if (contentOnly) {
-        // 单通道模型：流式 content 是推理，不应泄漏进回答区
+        else if (contentOnly && !contentIsReasoning) streamContent = contentOnly;
+      } else if (contentIsReasoning) {
+        // 单通道模型（能力表声明，如 mimo）：流式 content 是推理，不应泄漏进回答区
         row.thought = contentOnly.slice(0, LIVE_THOUGHT_CHARS);
         row.fullThought = contentOnly.slice(0, LIVE_THOUGHT_CHARS);
         streamContent = '';
+      } else if (contentOnly) {
+        // 普通模型：content 是正文，进回答区
+        streamContent = contentOnly;
       } else {
         row.thought = row.thought || '生成中…';
       }

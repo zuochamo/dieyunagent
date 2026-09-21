@@ -216,10 +216,37 @@ impl MemoryStore {
                         if conn.pragma_update(None, "foreign_keys", "ON").is_ok() {
                             let _ = Self::prune_agent_history(&conn, &PrunePolicy::default());
                         }
+                        // 顺手洗掉历史脏数据（meta 里的 base64）。洗完这个扫描恒为 0 行。
+                        let _ = Self::purge_oversized_message_meta(&conn);
                     }
                     std::thread::sleep(PRUNE_INTERVAL);
                 }
             });
+    }
+
+    /// 一次性洗掉历史消息 meta 里的字节（早期版本把暂存附件的 base64 落库了）。
+    ///
+    /// 只碰「长度明显超过任何正常消息」的行：正常库里这个查询恒为 0 行，可以跟着
+    /// 修剪线程每轮便宜地跑；没有 meta 前缀的超长正文（如长回答）原样保留。
+    fn purge_oversized_message_meta(conn: &Connection) -> Result<usize, CoreError> {
+        let mut stmt = conn.prepare("SELECT id, content FROM messages WHERE length(content) > ?1")?;
+        let rows = stmt
+            .query_map(params![MESSAGE_META_STRING_MAX as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut fixed = 0usize;
+        for (id, content) in rows {
+            let Some(cleaned) = sanitize_persisted_message(&content) else {
+                continue;
+            };
+            conn.execute(
+                "UPDATE messages SET content = ?1 WHERE id = ?2",
+                params![cleaned, id],
+            )?;
+            fixed += 1;
+        }
+        Ok(fixed)
     }
 
     /// 以 `agent_runs` 为根修剪历史：`agent_traces` / `agent_plans` / `agent_steps`
@@ -525,11 +552,14 @@ impl MemoryStore {
         role: &str,
         content: &str,
     ) -> Result<AppendMessageResult, CoreError> {
+        // 唯一写库口：meta 里的字节（base64 / data URL）在这里被挡掉，
+        // 不依赖各调用点自觉。
+        let content = sanitize_persisted_message(content).unwrap_or_else(|| content.to_string());
         let now = now_ms();
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![session_id, role, content, now],
+                params![session_id, role, &content, now],
             )?;
             let id = conn.last_insert_rowid();
             conn.execute(
@@ -537,7 +567,7 @@ impl MemoryStore {
                 params![now, session_id],
             )?;
             if role == "user" {
-                maybe_set_title_from_user_message(conn, session_id, content)?;
+                maybe_set_title_from_user_message(conn, session_id, &content)?;
             }
             Ok(AppendMessageResult { local_msg_id: id })
         })
@@ -1434,9 +1464,68 @@ fn title_needs_repair(title: Option<&str>) -> bool {
     }
 }
 
+/// 落库消息的 meta 前缀：`【叠云meta】{json}\n<正文>`。
+/// 与 JS `session-context.MESSAGE_META_PREFIX` 同口径（那里是唯一打包口）。
+pub(crate) const MESSAGE_META_PREFIX: &str = "【叠云meta】";
+
+/// 落库 meta 里单个字符串字段的长度上限，与 JS `session-context.META_STRING_MAX` 同口径。
+///
+/// 远高于任何合法元数据（路径 / 模型名 / 输入文本），远低于任何以字节形式混进来的
+/// 内容 —— 一张 1MB 图片的 base64 就有约 145 万字符。
+pub(crate) const MESSAGE_META_STRING_MAX: usize = 100_000;
+
+/// 会话结束即失效的临时 URL：object URL 与 data URL 落库后都没有读者。
+fn is_ephemeral_meta_string(s: &str) -> bool {
+    let t = s.trim_start();
+    t.starts_with("data:") || t.starts_with("blob:")
+}
+
+/// 递归清洗 meta 值：丢弃「字节形态」的字符串（超长 / data: / blob:）。
+///
+/// `messages.content` 的 meta 只该存引用与元数据。base64 之类的东西没有读者
+/// （回传与渲染都只认路径），却让单行涨到 MB 级、每次开会话都要经 Gateway RPC
+/// 搬进 Renderer 再 JSON.parse。
+fn sanitize_meta_value(value: Value) -> Option<Value> {
+    match value {
+        Value::String(s) => {
+            if s.len() > MESSAGE_META_STRING_MAX || is_ephemeral_meta_string(&s) {
+                None
+            } else {
+                Some(Value::String(s))
+            }
+        }
+        Value::Array(items) => Some(Value::Array(
+            items.into_iter().filter_map(sanitize_meta_value).collect(),
+        )),
+        Value::Object(map) => Some(Value::Object(
+            map.into_iter()
+                .filter_map(|(k, v)| sanitize_meta_value(v).map(|v| (k, v)))
+                .collect(),
+        )),
+        other => Some(other),
+    }
+}
+
+/// 清洗一条待落库的消息内容；无需改动时返回 `None`。
+///
+/// 这是「meta 里不得出现字节」不变量的唯一咽喉：`append_message` 落库前必经这里，
+/// 将来任何新调用点写错也进不了库。
+pub(crate) fn sanitize_persisted_message(content: &str) -> Option<String> {
+    let rest = content.strip_prefix(MESSAGE_META_PREFIX)?;
+    let idx = rest.find('\n')?;
+    let (meta_raw, body) = rest.split_at(idx);
+    let meta: Value = serde_json::from_str(meta_raw).ok()?;
+    let cleaned = sanitize_meta_value(meta)?;
+    let cleaned_raw = serde_json::to_string(&cleaned).ok()?;
+    if cleaned_raw == meta_raw {
+        return None;
+    }
+    Some(format!("{MESSAGE_META_PREFIX}{cleaned_raw}{body}"))
+}
+
 pub(crate) fn strip_message_meta(content: &str) -> &str {
     let s = content.trim();
-    if let Some(rest) = s.strip_prefix("【叠云meta】") {
+    if let Some(rest) = s.strip_prefix(MESSAGE_META_PREFIX) {
         if let Some(idx) = rest.find('\n') {
             return rest[idx + 1..].trim();
         }
@@ -1510,6 +1599,70 @@ mod tests {
             Some("写一个俄罗斯方块")
         );
         assert!(title_needs_repair(Some("【叠云meta】{\"inputText\":\"x\"")));
+    }
+
+    /// 落库 meta 只该存引用：base64 / data URL 进不了库（append_message 是唯一写库口）。
+    #[test]
+    fn sanitize_persisted_message_strips_meta_bytes() {
+        let huge = "A".repeat(MESSAGE_META_STRING_MAX + 1);
+        let packed = format!(
+            "【叠云meta】{{\"inputText\":\"看图\",\"attachments\":[{{\"path\":\"/tmp/a.png\",\"_pasteBase64\":\"{huge}\",\"previewUrl\":\"blob:http://x/1\"}}]}}\n看图"
+        );
+        let cleaned = sanitize_persisted_message(&packed).expect("脏 meta 应当被清洗");
+        assert!(!cleaned.contains(&huge), "base64 必须被丢弃");
+        assert!(!cleaned.contains("blob:"), "临时 URL 必须被丢弃");
+        assert!(cleaned.contains("\"path\":\"/tmp/a.png\""), "附件引用保留");
+        assert!(cleaned.ends_with("\n看图"), "正文不受影响");
+
+        // 干净的 meta 与没有 meta 的正文都不该被改写。
+        assert!(sanitize_persisted_message("【叠云meta】{\"inputText\":\"x\"}\nx").is_none());
+        assert!(sanitize_persisted_message("裸正文").is_none());
+    }
+
+    /// 历史脏数据由修剪线程顺手洗掉，且不碰没有 meta 的超长正文。
+    #[test]
+    fn purge_oversized_message_meta_repairs_legacy_rows() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::init_schema(&conn).expect("schema");
+        conn.execute(
+            "INSERT INTO sessions (id, updated_at, title) VALUES ('s1', 1, 't')",
+            [],
+        )
+        .expect("session");
+        let huge = "A".repeat(MESSAGE_META_STRING_MAX + 1);
+        let dirty = format!(
+            "【叠云meta】{{\"inputText\":\"看图\",\"attachments\":[{{\"path\":\"/tmp/a.png\",\"_pasteBase64\":\"{huge}\"}}]}}\n看图"
+        );
+        let long_body = format!(
+            "【叠云meta】{{\"inputText\":\"x\"}}\n{}",
+            "长".repeat(MESSAGE_META_STRING_MAX + 10)
+        );
+        for content in [dirty.as_str(), long_body.as_str()] {
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, created_at) VALUES ('s1', 'assistant', ?1, 1)",
+                params![content],
+            )
+            .expect("legacy row");
+        }
+        assert_eq!(
+            MemoryStore::purge_oversized_message_meta(&conn).expect("purge"),
+            1,
+            "只洗 meta 里有字节的那条"
+        );
+        let washed: String = conn
+            .query_row("SELECT content FROM messages ORDER BY id LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .expect("row");
+        assert!(!washed.contains(&huge) && washed.ends_with("\n看图"));
+        let untouched: String = conn
+            .query_row(
+                "SELECT content FROM messages ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row");
+        assert_eq!(untouched, long_body, "无 meta 大正文原样保留");
     }
 
     #[test]
@@ -1651,6 +1804,121 @@ mod tests {
             .and_then(|v| v.get("content"))
             .and_then(|v| v.as_str());
         assert_eq!(content, Some("4"));
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn merges_incremental_trace_checkpoints() {
+        let db = std::env::temp_dir().join(format!("dieyun-trace-delta-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let session = store.create_session(Some("增量"), None).unwrap();
+
+        // 首帧是全量：客户端游标为空，traceFrom 缺省为 0。
+        store
+            .save_agent_trace(&json!({
+                "runId": "run-delta",
+                "sessionId": session.id,
+                "status": "running",
+                "trace": [
+                    { "type": "round", "thought": "A" },
+                    { "type": "round", "thought": "B" }
+                ],
+            }))
+            .unwrap();
+
+        // 增量帧：客户端只重发「会变的尾部」+ 新增条目，从第 1 条起拼。
+        let res = store
+            .save_agent_trace(&json!({
+                "runId": "run-delta",
+                "sessionId": session.id,
+                "status": "running",
+                "traceFrom": 1,
+                "trace": [
+                    { "type": "round", "thought": "B2" },
+                    { "type": "round", "thought": "C" }
+                ],
+            }))
+            .unwrap();
+        assert!(res.get("stale").is_none(), "游标合法时不该回 stale");
+        let row = store
+            .get_agent_trace(&json!({ "runId": "run-delta" }))
+            .unwrap()
+            .unwrap();
+        let thoughts = |row: &Value| -> Vec<String> {
+            row.get("trace")
+                .and_then(|v| v.as_array())
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| r.get("thought").and_then(|v| v.as_str()))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            thoughts(&row),
+            vec!["A", "B2", "C"],
+            "前缀按 traceFrom 保留 + 尾部覆盖 + 新增追加"
+        );
+        // 运行中的 checkpoint 不重算全量纯文本（该列只有 get_agent_trace 一个读者）。
+        assert_eq!(
+            row.get("traceText").and_then(|v| v.as_str()),
+            Some(""),
+            "增量帧不传 traceText"
+        );
+
+        // 终态式全量帧带纯文本后，后续增量帧缺省 traceText 时必须保留旧值（COALESCE），
+        // 否则每个 tick 都会把上一帧的纯文本抹成空。
+        store
+            .save_agent_trace(&json!({
+                "runId": "run-delta",
+                "sessionId": session.id,
+                "status": "running",
+                "traceText": "A / B2 / C2",
+                "trace": [
+                    { "type": "round", "thought": "A" },
+                    { "type": "round", "thought": "B2" },
+                    { "type": "round", "thought": "C2" }
+                ],
+            }))
+            .unwrap();
+        store
+            .save_agent_trace(&json!({
+                "runId": "run-delta",
+                "sessionId": session.id,
+                "status": "running",
+                "traceFrom": 2,
+                "trace": [{ "type": "round", "thought": "C3" }],
+            }))
+            .unwrap();
+        let row = store
+            .get_agent_trace(&json!({ "runId": "run-delta" }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(thoughts(&row), vec!["A", "B2", "C3"]);
+        assert_eq!(
+            row.get("traceText").and_then(|v| v.as_str()),
+            Some("A / B2 / C2"),
+            "缺省 traceText 时保留上一次的值"
+        );
+
+        // 游标过期（traceFrom 超出已存条数）必须拒写并回 stale，绝不能落成半截快照。
+        let res = store
+            .save_agent_trace(&json!({
+                "runId": "run-delta",
+                "sessionId": session.id,
+                "status": "running",
+                "traceFrom": 99,
+                "trace": [{ "type": "round", "thought": "X" }],
+            }))
+            .unwrap();
+        assert_eq!(res.get("stale").and_then(|v| v.as_bool()), Some(true));
+        let row = store
+            .get_agent_trace(&json!({ "runId": "run-delta" }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(thoughts(&row), vec!["A", "B2", "C3"], "stale 时不改已存快照");
         let _ = std::fs::remove_file(db);
     }
 }

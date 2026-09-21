@@ -70,6 +70,15 @@
   --motion-collapse-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --motion-panel-duration: 0.56s;
   --motion-panel-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  /*
+   * 子 Agent 卡片正文：按「行」定尺，初始 3 行、最多长到 20 行，超出走卡片内滚动。
+   * 基准行高对齐正文的主体文本 .msg-thinking-thought（12px * 1.45），
+   * 想整体放大/缩小只改 lines 两个数字即可，不必反推像素。
+   */
+  --thinking-subagent-card-line-h: 17.4px;
+  --thinking-subagent-card-pad-y: 12px;
+  --thinking-subagent-card-lines-min: 3;
+  --thinking-subagent-card-lines-max: 20;
   --scrollbar-size: 8px;
   --scrollbar-thumb: rgba(128, 128, 128, 0.25);
   --scrollbar-thumb-hover: rgba(128, 128, 128, 0.4);
@@ -2027,6 +2036,15 @@ body.composer-resizing {
   gap: 0;
   min-width: 0;
 }
+/*
+ * 子 Agent 卡片标题 = 「类型 + 序号」（如「写入子 Agent #3」，由 live-loop-trace 统一拼装）。
+ * 固定不收缩：哪怕思考预览被 ellipsis 掉，也要能一眼认出是哪张卡片。
+ */
+.msg-thinking-subagent-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--text);
+}
 .msg-thinking-round-summary-preview {
   flex: 1 1 auto;
   min-width: 0;
@@ -2045,6 +2063,7 @@ body.composer-resizing {
   font-size: 11px;
 }
 .msg-thinking-round-summary-label,
+.msg-thinking-subagent-name,
 .msg-thinking-round-summary-preview,
 .msg-thinking-round-summary-tools,
 .msg-checkpoint-restore-sep {
@@ -2080,6 +2099,98 @@ body.composer-resizing {
 }
 .msg-thinking-round-details.msg-thinking-subagent[open] .msg-thinking-round-summary {
   color: var(--text);
+}
+/**
+ * 子 Agent 过程卡片（并发 subagent / planner 执行器）。
+ * 直角 + 边框是刻意的：并发时要能一眼数清是几张卡片、各自对应哪段过程；
+ * 卡片默认展开，且不随回合结束/正文阶段折叠（见 renderer-thinking-trace-dom.js）。
+ * 不填底色：卡片只用边框与对话背景区分层级，避免多张卡片叠成一片色块。
+ */
+.msg-thinking-round-details.msg-thinking-subagent {
+  /*
+   * 1px 是能稳定渲染的最细线宽：0.5px 在非整数缩放比下会被画成断续的线，
+   * 看上去就是虚线。所以「更细」由「更浅」实现 —— 比全局 --border 再淡一档，
+   * 卡片只留「这里有边界」的暗示，不抢内容。
+   */
+  border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  border-radius: 0;
+  margin: 0 0 8px;
+  padding: 0 10px;
+}
+.msg-thinking-round-details.msg-thinking-subagent:last-child {
+  margin-bottom: 8px;
+}
+/* 同批并发（多张卡片同时在跑）时边框略深一档，与单张卡片区分（仍远淡于正文色） */
+.msg-thinking-round-details.msg-thinking-subagent.msg-thinking-parallel {
+  border-color: var(--border);
+}
+/*
+ * 卡片正文：一个子 Agent 的全部轮次（思考 + 工具）都在这里，按轮分区。
+ * 内容随运行实时刷新（工具 pending → 完成、思考正文增长），不再甩到卡片外的 beat。
+ *
+ * 尺寸按「行」定：初始 3 行，最多长到 20 行，再多的轮次走卡片内滚动
+ * （并发 4 张卡片时尤其明显：谁都不会把别人顶下去）。运行中自动跟随最新一轮，
+ * 见 fillIsolatedCardBody。padding 已在行数预算里算进去了（border-box）。
+ * 只挂在 [open] 上：一是要压过 .msg-thinking-round-details[open] > .msg-thinking-round
+ * 的 max-height:none，二是不干扰折叠态由 max-height:0 驱动的收起动画。
+ * 排除 .is-empty：还没收到第一轮时不要凭 min-height 先占出 3 行空白。
+ */
+.msg-thinking-round-details[open] > .msg-thinking-round.msg-thinking-subagent-body:not(.is-empty) {
+  padding: 4px 0 8px;
+  min-height: calc(
+    var(--thinking-subagent-card-lines-min) * var(--thinking-subagent-card-line-h) +
+      var(--thinking-subagent-card-pad-y)
+  );
+  max-height: calc(
+    var(--thinking-subagent-card-lines-max) * var(--thinking-subagent-card-line-h) +
+      var(--thinking-subagent-card-pad-y)
+  );
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.msg-thinking-subround {
+  padding: 4px 0 2px;
+}
+.msg-thinking-subround.is-empty {
+  display: none;
+}
+/* 轮次之间不再画分隔线：卡片边框已划出边界，再加一条线只是噪音 */
+.msg-thinking-subround + .msg-thinking-subround {
+  margin-top: 4px;
+}
+/* 轮次之间只用分隔线区分，不再显示「第 N 轮」标签：轮次编号是实现细节，不是用户关心的信息 */
+.msg-thinking-subround > .msg-thinking-thought:last-child {
+  margin-bottom: 2px;
+}
+/* 运行中的卡片：标题行尾加脉冲点，示意「内容还在动」 */
+.msg-thinking-round-details.msg-thinking-subagent.is-running > .msg-thinking-round-summary::after {
+  content: '';
+  flex: 0 0 auto;
+  align-self: center;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+  animation: msg-thinking-running-pulse 1.2s ease-in-out infinite;
+}
+@keyframes msg-thinking-running-pulse {
+  0%,
+  100% {
+    opacity: 0.22;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-thinking-round-details.msg-thinking-subagent.is-running > .msg-thinking-round-summary::after {
+    animation: none;
+    opacity: 0.6;
+  }
 }
 .msg-thinking-round {
   padding: 0 0 6px 12px;

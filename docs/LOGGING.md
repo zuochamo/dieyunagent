@@ -26,6 +26,25 @@
 | 索引 / 记忆异常 | `[dieyun:core]` | `memory.*` / `codebase.*` RPC |
 | 压缩失败 / 跳过 | `[dieyun:agent]` compaction | Rust `compaction.*` |
 | 远程 SSH/WSL | `[remote-agent]`（已有） | `session-remote-transport` 测试 |
+| 某段文字出自 `content` 还是 `reasoning_content` | `DIEYUN_LLM_RAW_LOG` 抓包文件 | `TraceRound`（只有合成结果，区分不了） |
+
+## LLM 原始响应体抓包（临时排障）
+
+`TraceRound` 一轮只留 `thought` / `fullThought` / `tools`，而 Rust 侧
+`thought_raw = reasoning || content` —— 两者落库前已经合成一段文字，
+所以「这段文字来自上游 `content` 还是 `reasoning_content`」在库里无法区分，
+`main.log` 也不含响应体。此时打开抓包，拿上游原始报文当唯一真相：
+
+```bash
+DIEYUN_LLM_RAW_LOG=/tmp/llm-raw.log npm run dev:fast
+```
+
+跑一轮要查的对话，然后在抓包文件里搜那段文字：它落在 `"content"` 还是
+`"reasoning_content"` 键下，归属就钉死了。
+
+- 每条记录带 `tag`（`runId` / `round` / `model`），响应体能对回某一轮；
+- **不记请求头、不记请求体**：API Key 与图片 base64 都不会进这个文件，URL 去掉 query；
+- 单条与文件都有上限，走统一落盘闸门；不设变量即零开销、零落盘。
 
 ## 约定
 

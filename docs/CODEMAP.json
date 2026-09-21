@@ -217,6 +217,7 @@
     { "prefix": "src/agent/model-api-config.js", "tests": ["test:unit"] },
     { "prefix": "src/agent/llm-request.js", "tests": ["test:unit"] },
     { "prefix": "src/agent/llm-channel.js", "tests": ["test:llm-channel", "test:unit"] },
+    { "prefix": "src/agent/sse-delta-parse.js", "tests": ["test:unit", "test:llm-tool-call-fallback", "check:renderer"] },
     { "prefix": "src/agent/tool-guardrails.js", "tests": ["test:guardrails-sync", "test:tool-harness"] },
     { "prefix": "src/agent/write-smell-hints.js", "tests": ["test:write-smell-hints"] },
     { "prefix": "src/agent/reviewer-json.js", "tests": ["test:reviewer-json"] },

@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, stopChatFollowSettle */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, packMessageMeta, unpackMessageMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, stopChatFollowSettle */
 'use strict';
 
 function focusChatInput() {
@@ -102,64 +102,29 @@ function formatModelFooterLabel(modelId, route) {
   return humanizeModelId(getTextModelId(settings)) || 'Auto';
 }
 
+/**
+ * 落库 meta 的打包/剥离统一委托 session-context（agent-bundle 镜像为兼容全局）。
+ *
+ * 此处原有一份 packAssistantMeta（**不瘦身**）+ 一份 packUserMessageMeta（瘦身），
+ * 而 assistant meta 是从内存里的 user meta 展开来的 —— 那个对象带着全量暂存附件
+ * （_pasteBase64 / _base64 / previewUrl），于是同一条附件在库里存两份：一份瘦的
+ * user 行、一份带 base64 的 assistant 行（实测 123 行 38.4MB，最大单行 7.1MB）。
+ * 现在「附件只存引用、meta 不收字节」由 packMessageMeta 单点保证。
+ */
 function packAssistantMeta(content, meta) {
-  if (!meta) return content;
-  try {
-    return `【叠云meta】${JSON.stringify(meta)}\n${content}`;
-  } catch {
-    return content;
-  }
-}
-
-function slimAttachmentsForPersist(list) {
-  return (list || [])
-    .filter(Boolean)
-    .map((att) => ({
-      path: att.path || '',
-      workspaceRelative: att.workspaceRelative || '',
-      absolutePath: att.absolutePath || '',
-      originalName: att.originalName || '',
-      size: Number(att.size) || 0,
-      mime: att.mime || ''
-    }))
-    .filter((att) => att.path || att.absolutePath || att.workspaceRelative);
+  return packMessageMeta(content, meta, { role: 'assistant' });
 }
 
 function packUserMessageMeta(content, meta) {
-  if (!meta) return content;
-  const attachments = slimAttachmentsForPersist(meta.attachments);
-  const payload = {};
-  const inputText = meta.inputText != null ? String(meta.inputText).trim() : '';
-  if (inputText) payload.inputText = inputText;
-  if (attachments.length) payload.attachments = attachments;
-  if (!Object.keys(payload).length) return content;
-  try {
-    return `【叠云meta】${JSON.stringify(payload)}\n${content}`;
-  } catch {
-    return content;
-  }
+  return packMessageMeta(content, meta, { role: 'user' });
 }
 
 function unpackAssistantMeta(raw) {
-  const s = String(raw || '');
-  const m = s.match(/^【叠云meta】(\{[\s\S]*?\})\n([\s\S]*)$/);
-  if (!m) return { content: s, meta: null };
-  try {
-    return { content: m[2], meta: JSON.parse(m[1]) };
-  } catch {
-    return { content: s, meta: null };
-  }
+  return unpackMessageMeta(raw);
 }
 
 function unpackUserMessageContent(raw) {
-  const s = String(raw || '');
-  const m = s.match(/^【叠云meta】(\{[\s\S]*?\})\n([\s\S]*)$/);
-  if (!m) return { content: s, meta: null };
-  try {
-    return { content: m[2], meta: JSON.parse(m[1]) };
-  } catch {
-    return { content: s, meta: null };
-  }
+  return unpackMessageMeta(raw);
 }
 
 function getLastUserMessageIndex() {

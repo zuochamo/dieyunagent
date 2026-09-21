@@ -8,6 +8,7 @@ const {
 } = require('../../src/agent/subagent-runner');
 const { SUBAGENT_TOOL } = require('../../src/agent/tool-catalog');
 const { isMutatingAgentTool } = require('../../src/agent/tool-classify');
+const { AGENT_LIMITS_DEFAULTS } = require('../../src/agent/agent-limits');
 
 function tool(name) {
   return { type: 'function', function: { name, description: name, parameters: { type: 'object' } } };
@@ -135,7 +136,65 @@ describe('subagent runner', () => {
     const runner = makeRunner({}, async () => ({ content: '   ' }));
     const out = await runner.run({ task: 't' }, {});
     expect(out.truncated).toBe(false);
+    expect(out.reason).toBe('empty');
     expect(out.summary).toContain('未产出结论');
+  });
+
+  // 回归：内层循环被预算截断时，最后一轮常常只有 tool_calls、没有正文。
+  // 若只看 content，就会把子 Agent 已经跑出来的 trace 全部丢掉，只回一句「未产出结论」，
+  // 协调者只能把同一块工作重做一遍。摘要必须把「被截断」和「已有发现」一起带上。
+  it('folds the child trace into the summary when the loop was cut off at budget', async () => {
+    const runner = makeRunner({}, async () => ({
+      content: '',
+      hitRoundLimit: true,
+      trace: [
+        {
+          round: 1,
+          thought: '先列 llm 目录，确认有哪些 Python 文件与入口',
+          tools: [{ name: 'glob', summary: 'llm/*.py 共 12 个文件' }]
+        },
+        {
+          round: 2,
+          thought: '路由装饰器集中在 llm/app.py 第 40 行附近，下一步看常量表',
+          tools: [{ name: 'grep', summary: 'llm/app.py:40 route' }]
+        }
+      ]
+    }));
+    const out = await runner.run({ task: 't' }, {});
+    expect(out.ok).toBe(true);
+    expect(out.reason).toBe('limit');
+    expect(out.summary).toContain('截断');
+    expect(out.summary).toContain('llm/app.py');
+    expect(out.summary).toContain('grep');
+    expect(out.summary).not.toContain('未产出结论');
+  });
+
+  it('folds the child trace into the summary when the model gave no conclusion', async () => {
+    const runner = makeRunner({}, async () => ({
+      content: '   ',
+      trace: [
+        {
+          round: 1,
+          thought: '读完 llm 目录，鉴权入口在 llm/auth.py 的 login 函数',
+          tools: [{ name: 'fs_read_file', summary: 'llm/auth.py' }]
+        }
+      ]
+    }));
+    const out = await runner.run({ task: 't' }, {});
+    expect(out.reason).toBe('empty');
+    expect(out.summary).toContain('llm/auth.py');
+    expect(out.summary).not.toContain('未产出结论');
+  });
+
+  it('flags a budget-truncated conclusion that did carry content', async () => {
+    const runner = makeRunner({}, async () => ({
+      content: '结论：入口在 llm/app.py:40',
+      hitRoundLimit: true
+    }));
+    const out = await runner.run({ task: 't' }, {});
+    expect(out.reason).toBe('limit');
+    expect(out.summary).toContain('llm/app.py:40');
+    expect(out.summary).toContain('不完整');
   });
 
   it('converges a child loop failure into a structured error', async () => {
@@ -186,5 +245,16 @@ describe('subagent runner', () => {
   it('falls back to defaults without a userDataPath', () => {
     expect(resolveSubagentLimits()).toEqual(FALLBACK_LIMITS);
     expect(resolveSubagentLimits('')).toEqual(FALLBACK_LIMITS);
+  });
+
+  // 护栏数字的唯一来源是 agent-limits.js。兜底值若另写一份字面量，改预算就只会改到一半：
+  // 有 userDataPath 的走新值、Renderer/测试走的还是旧值，两边行为悄悄分叉。
+  it('derives fallback limits from the agent-limits single source', () => {
+    for (const key of Object.keys(FALLBACK_LIMITS)) {
+      expect(FALLBACK_LIMITS[key]).toBe(AGENT_LIMITS_DEFAULTS[key]);
+    }
+    // 放宽后的轮次预算必须真的落在 schema 的 min/max 之间，否则设置页会把它夹回去。
+    expect(FALLBACK_LIMITS.subagentMaxRounds).toBe(32);
+    expect(FALLBACK_LIMITS.subagentMaxToolCalls).toBe(64);
   });
 });

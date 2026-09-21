@@ -2,21 +2,26 @@
 
 const fs = require('fs/promises');
 const path = require('path');
-const crypto = require('crypto');
 const { scanSkills, readSkillContent } = require('./scanner');
+const { createEmbeddingClient } = require('../codebase/embedding-client');
 const {
-  createEmbeddingClient,
-  vectorToBlob,
-  blobToVector,
-  cosineSimilarity
-} = require('../codebase/embedding-client');
+  hashText,
+  embeddingSignature,
+  vectorToBase64,
+  tokenize,
+  readIndexFile,
+  writeIndexFile,
+  rankByKeyword,
+  rankBySemantic
+} = require('../codebase/vector-index');
 
 const INDEX_FILE = 'skill-vector-index.json';
 const SKILL_EMBED_TEXT_MAX = 6000;
 const QUERY_EMBED_TEXT_MAX = 1200;
 const DEFAULT_LIMIT = 8;
-const CJK_RE = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g;
-const ID_RE = /[A-Za-z_][A-Za-z0-9_-]*/g;
+/** 本召回特有的命中阈值，比 tool/playbook 更严格以避免技能误召回。 */
+const SEMANTIC_MIN = 0.28;
+const KEYWORD_MIN = 0.35;
 
 function compactText(text, max = 600) {
   const s = String(text || '').replace(/\s+/g, ' ').trim();
@@ -27,69 +32,12 @@ function skillIndexPath(userData) {
   return path.join(userData, INDEX_FILE);
 }
 
-function embeddingSignature(client) {
-  return client && client.enabled() ? `${client.model}@${client.dimensions}` : '';
+function readIndex(userData) {
+  return readIndexFile(skillIndexPath(userData), { version: 1, entries: [] });
 }
 
-function hashText(text) {
-  return crypto.createHash('sha1').update(String(text || '')).digest('hex');
-}
-
-function vectorToBase64(values) {
-  return vectorToBlob(values).toString('base64');
-}
-
-function base64ToVector(value, dims) {
-  if (!value || !dims) return null;
-  return blobToVector(Buffer.from(String(value), 'base64'), dims);
-}
-
-function tokenize(text) {
-  const s = String(text || '').toLowerCase();
-  const set = new Set();
-  const cjk = s.match(CJK_RE);
-  if (cjk) {
-    for (const ch of cjk) set.add(ch);
-    for (let i = 0; i < cjk.length - 1; i++) set.add(cjk[i] + cjk[i + 1]);
-  }
-  const ids = s.match(ID_RE);
-  if (ids) {
-    for (const id of ids) {
-      if (id.length >= 2) set.add(id);
-      for (const part of id.split(/[-_]+|(?=[A-Z])/).filter(Boolean)) {
-        if (part.length >= 2) set.add(part.toLowerCase());
-      }
-    }
-  }
-  for (const w of s.split(/[\s/\\._\-+:,;!?，。；：、()[\]{}"'`<>]+/)) {
-    if (w.length >= 2 && w.length <= 64) set.add(w);
-  }
-  return set;
-}
-
-function keywordScore(queryTokens, docTokens) {
-  if (!queryTokens.size || !docTokens.size) return 0;
-  let hit = 0;
-  for (const token of queryTokens) {
-    if (docTokens.has(token)) hit += 1;
-  }
-  return hit / Math.sqrt(queryTokens.size * docTokens.size);
-}
-
-async function readIndex(userData) {
-  try {
-    const raw = JSON.parse(await fs.readFile(skillIndexPath(userData), 'utf8'));
-    if (raw && typeof raw === 'object' && Array.isArray(raw.entries)) return raw;
-  } catch {
-    // ignore
-  }
-  return { version: 1, entries: [] };
-}
-
-async function writeIndex(userData, index) {
-  const file = skillIndexPath(userData);
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, JSON.stringify(index, null, 2), 'utf8');
+function writeIndex(userData, index) {
+  return writeIndexFile(skillIndexPath(userData), index);
 }
 
 async function statSkill(skill) {
@@ -210,19 +158,6 @@ async function ensureSkillIndex({ userData, workspacePath, embeddingConfig }) {
   return { catalog, index: next, vector: canVector && !!signature };
 }
 
-function rankByKeyword(entries, query, enabledSet, limit) {
-  const qTokens = tokenize(query);
-  return entries
-    .filter((entry) => !enabledSet || enabledSet.has(entry.id))
-    .map((entry) => {
-      const score = keywordScore(qTokens, new Set(entry.tokens || []));
-      return { entry, score, semanticScore: 0, keywordScore: score };
-    })
-    .filter((row) => row.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-}
-
 async function recallSkills({
   userData,
   workspacePath,
@@ -244,24 +179,15 @@ async function recallSkills({
     try {
       const client = createEmbeddingClient(embeddingConfig || {});
       const [queryVec] = await client.embed(q.slice(0, QUERY_EMBED_TEXT_MAX));
-      const qArr = Array.isArray(queryVec) ? queryVec : Array.from(queryVec || []);
-      const keywordById = new Map(keywordRows.map((row) => [row.entry.id, row.keywordScore]));
-      rows = entries
-        .filter((entry) => (!enabledSet || enabledSet.has(entry.id)) && entry.vector && entry.dims)
-        .map((entry) => {
-          const vec = base64ToVector(entry.vector, entry.dims);
-          const semantic = vec ? cosineSimilarity(qArr, vec) : 0;
-          const keyword = keywordById.get(entry.id) || 0;
-          return {
-            entry,
-            semanticScore: semantic,
-            keywordScore: keyword,
-            score: semantic + keyword * 0.25
-          };
-        })
-        .filter((row) => row.semanticScore > 0.28 || row.keywordScore > 0.35)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, max);
+      rows = rankBySemantic({
+        entries,
+        keywordRows,
+        queryVec,
+        max,
+        minSemantic: SEMANTIC_MIN,
+        minKeyword: KEYWORD_MIN,
+        allowedSet: enabledSet
+      });
     } catch {
       rows = keywordRows.slice(0, max);
     }

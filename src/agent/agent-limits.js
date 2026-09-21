@@ -101,8 +101,13 @@ const AGENT_LIMITS_DEFAULTS = {
   subagentMaxDepth: 1,
   subagentMaxConcurrent: 3,
   subagentMaxPerRun: 8,
-  subagentMaxRounds: 16,
-  subagentMaxToolCalls: 32,
+  // 子 Agent 的轮次 / 工具预算。协调者自己的段预算是 agentMaxRounds 64~96，子 Agent 的
+  // 一轮调研要「列目录 → 搜定义 → 读关键片段 → 交叉验证」几十步，16 轮在大仓库上必然
+  // 中途截断 —— 截断就没有结论，等于白派（协调者只能自己重做一遍）。
+  // 取父预算的约 1/3：既够一次结构性调研跑完，又不至于 N 路并发把整轮预算吃光。
+  // 不按任务类型分档（避免第二套预算规则），护栏数字只在这里改。
+  subagentMaxRounds: 32,
+  subagentMaxToolCalls: 64,
   // 子 Agent 回注主上下文的摘要上限。过程 trace 不回注，只在折叠卡片里展开，
   // 否则 N 路调研会把主上下文顶爆（这是该功能最常见的失败模式）。
   subagentSummaryMaxChars: 2400

@@ -141,6 +141,7 @@ Rust 侧注册：`crates/dieyun-core/src/rpc/mod.rs`。Node 侧：`src/gateway/h
 | `DIEYUN_CORE_BIN` | 开发用 debug 二进制 |
 | `DIEYUN_CORE=0` | 关 Rust |
 | `DIEYUN_MOBILE_PORT` | 手机桥端口（默认 17331） |
+| `DIEYUN_LLM_RAW_LOG` | 抓 LLM 原始响应体到指定文件（排障用，默认关；见 [LOGGING.md](./LOGGING.md)） |
 
 ## 8. 不要动
 
@@ -158,6 +159,7 @@ Rust 侧注册：`crates/dieyun-core/src/rpc/mod.rs`。Node 侧：`src/gateway/h
 - [LOGGING.md](./LOGGING.md) — 日志前缀约定
 - [rpc-catalog.md](./rpc-catalog.md) — RPC 清单
 - [agent-run-events.md](./agent-run-events.md) — 事件契约
+- [REASONING-ISOLATION-PLAN.md](./REASONING-ISOLATION-PLAN.md) — 思考通道隔离目标设计（方案，未实施）
 - [examples/agent-sandbox/README.md](../examples/agent-sandbox/README.md) — Agent 沙盒
 
 ## 仓库噪音 / 清理

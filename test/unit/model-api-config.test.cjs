@@ -401,6 +401,30 @@ describe('请求修饰字段（headers / authMode / userAgent）解析与装配'
     expect(headers.Authorization).toBe('Bearer sk-1');
   });
 
+  it('回归：vars 传空 sessionId 不得抹掉 config 上的会话标识（压缩 400 场景）', () => {
+    const { buildLlmHeadersFromConfig } = require('../../src/agent/llm-request');
+    const settings = settingsWith({ modelSuppliers: [OPENCODE_LIKE] });
+    const cfg = resolveApiConfigForRoute(settings, 'builtin:s1:m1');
+    // 压缩调用点历史上传 `{ sessionId: opts.sessionId }`，opts 为空时会整条头消失
+    for (const empty of [undefined, null, '']) {
+      const headers = buildLlmHeadersFromConfig({ ...cfg, sessionId: 'conv-1' }, { sessionId: empty });
+      expect(headers['x-opencode-session']).toBe('conv-1');
+    }
+  });
+
+  it('vars 非空值仍可覆盖 config 同名变量，并可新增 config 没有的键', () => {
+    const { buildLlmHeadersFromConfig } = require('../../src/agent/llm-request');
+    const cfg = {
+      apiKey: 'sk-1',
+      model: 'm-default',
+      headers: { 'x-model': '{{model}}', 'x-run': '{{runId}}' }
+    };
+    // runId 每轮变化：config 上没有，由 vars 补
+    const headers = buildLlmHeadersFromConfig(cfg, { model: 'm-per-turn', runId: 'r-9' });
+    expect(headers['x-model']).toBe('m-per-turn');
+    expect(headers['x-run']).toBe('r-9');
+  });
+
   it('自定义模型同样支持请求修饰字段', () => {
     const settings = settingsWith({
       customModels: [{ ...CUSTOM_TEXT, userAgent: 'ua/2', headers: { 'X-Title': 'dieyun' } }]

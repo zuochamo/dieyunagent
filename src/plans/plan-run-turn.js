@@ -1,28 +1,23 @@
 'use strict';
 
 const { ensurePlanSession } = require('./plan-session');
+const { packMessageMeta, unpackMessageMeta } = require('../agent/session-context');
 
 const PLAN_MODE_LABEL = '定时 Agent';
 
 /**
- * 叠云 meta 前缀打包/剥离。
+ * 叠云 meta 前缀打包/剥离：统一走 session-context 的唯一实现。
  *
- * 计划运行没有 Renderer 参与，会话轮次只能由 Main 写；这里与 Renderer
- * (`renderer-chat-bubbles.js`) 共用同一份 `【叠云meta】{...}\n<正文>` 约定。
+ * 计划运行没有 Renderer 参与，会话轮次只能由 Main 写。这里原有第二份 packAssistantMeta，
+ * 与 Renderer 那份是同一约定的两份独立实现（且都不过滤字节）——「附件 base64 落库」
+ * 就是这么漏出来的，现在全部委托 packMessageMeta。
  */
 function packAssistantMeta(content, meta) {
-  if (!meta) return content;
-  try {
-    return `【叠云meta】${JSON.stringify(meta)}\n${content}`;
-  } catch {
-    return content;
-  }
+  return packMessageMeta(content, meta, { role: 'assistant' });
 }
 
 function stripAssistantMeta(raw) {
-  const s = String(raw || '');
-  const m = s.match(/^【叠云meta】\{[\s\S]*?\}\n([\s\S]*)$/);
-  return m ? m[1] : s;
+  return unpackMessageMeta(raw).content;
 }
 
 const stripUserMeta = stripAssistantMeta;

@@ -262,18 +262,38 @@ function buildLlmHeaders(spec) {
  * 为什么要有这一层：改造前 `{ 'Content-Type', Authorization: Bearer ${apiKey} }`
  * 被抄在 11 个地方，每加一个横切能力都要改 11 遍。现在所有调用点统一走这里。
  *
+ * 变量合并单行规则（勿改成 `{...config, ...vars}` 式无条件覆盖）：
+ *   config 上的 `sessionId` / `model` 是**基准**，`vars` 只做两件事 ——
+ *     1. 补充 config 没有的键（如每轮变化的 runId）；
+ *     2. 用**非空值**覆盖同名键。
+ *   空值（null / undefined / ''）永不覆盖 config。
+ *
+ * 为什么必须这么定：`renderHeaderTemplate` 的语义是「任一占位符缺值 → 整条头不发送」。
+ * 若允许空值覆盖，调用点一句 `buildLlmHeadersFromConfig(cfg, { sessionId: opts.sessionId })`
+ * 在 opts 为空时就会把 config 上有效的会话 id 抹掉，导致自定义头（如 x-opencode-session）
+ * 整条消失 —— 表现正是「主链路正常、压缩一跑就 400」。
+ *
  * @param {object} config
  * @param {Record<string, unknown>} [vars] 额外占位符变量（如每轮变化的 runId）
  * @returns {Record<string, string>}
  */
 function buildLlmHeadersFromConfig(config, vars) {
   const c = config && typeof config === 'object' ? config : {};
+  const extra = vars && typeof vars === 'object' ? vars : null;
+  /** @type {Record<string, unknown>} */
+  const merged = { sessionId: c.sessionId, model: c.model };
+  if (extra) {
+    for (const [key, value] of Object.entries(extra)) {
+      if (value == null || value === '') continue;
+      merged[key] = value;
+    }
+  }
   return buildLlmHeaders({
     apiKey: c.apiKey,
     authMode: c.authMode,
     headers: c.headers,
     userAgent: c.userAgent,
-    vars: { sessionId: c.sessionId, model: c.model, ...(vars || {}) }
+    vars: merged
   });
 }
 

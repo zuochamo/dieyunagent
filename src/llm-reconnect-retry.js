@@ -20,6 +20,11 @@ function createAbortError(message = '已停止') {
   return err;
 }
 
+/** signal 已中止则抛 AbortError（全仓单一来源，勿在各处再复制一份）。 */
+function throwIfAborted(signal) {
+  if (signal && signal.aborted) throw createAbortError();
+}
+
 /** 可被 AbortSignal 立即打断的 sleep（停止优先） */
 function sleepMs(ms, signal) {
   const wait = Math.max(0, Number(ms) || 0);
@@ -272,6 +277,7 @@ module.exports = {
   isContextOverflowError,
   isAbortError,
   createAbortError,
+  throwIfAborted,
   sleepMs,
   raceAbortable,
   resolveRetryWaitMs,

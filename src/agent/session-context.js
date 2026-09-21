@@ -34,6 +34,121 @@ const FOLDED_HISTORY_HEADER = '【较早对话 · 已折叠】';
 
 const TURN_RIDE_HEADER = '【本轮上下文 / Turn Context】';
 
+/**
+ * 落库消息的 meta 前缀：`【叠云meta】{json}\n<正文>`。
+ *
+ * 这是 Main 与 Renderer 共用的唯一一份打包/剥离实现：Main 直接 require，
+ * Renderer 经 agent-bundle 镜像成兼容全局（见 agent-bundle-entry.js）。
+ * `renderer-chat-bubbles.js` 与 `plan-run-turn.js` 的 pack/strip 全部委托到这里，
+ * 勿再各处自抄一份——三份实现漂移正是「附件 base64 落库」的直接原因。
+ */
+const MESSAGE_META_PREFIX = '【叠云meta】';
+const MESSAGE_META_RE = /^【叠云meta】(\{[\s\S]*?\})\n([\s\S]*)$/;
+
+/**
+ * 附件落库只允许「引用」形态：路径 + 展示名 + 尺寸 + mime。
+ *
+ * base64 / data URL / blob URL 一律不得落库。它们是「出站那一刻」的临时产物
+ * （readAttachmentBase64 现场读盘、previewUrl 是会话内 object URL），落库后没有任何读者：
+ * 历史渲染与回传都只认路径。留着只会让 messages 表按「单张图 ~1.45M 字符 × 2 份
+ * （_pasteBase64 + _base64）」膨胀，并让每次开会话都要经 Gateway RPC 把整行搬进
+ * Renderer 再 JSON.parse。
+ */
+const ATTACHMENT_META_KEYS = ['path', 'workspaceRelative', 'absolutePath', 'originalName', 'size', 'mime'];
+
+/**
+ * meta 内单个字符串字段的长度上限。
+ *
+ * meta 是「元数据」：任何以字节形式混进来的东西（base64 / 长文本快照）都远超此值，
+ * 而合法的元数据字段（路径、模型名、输入文本）都远小于此值。超限即丢弃，作为
+ * 「字节不得进 meta」这条不变量的兜底，不依赖各调用点自觉。
+ */
+const META_STRING_MAX = 20000;
+
+function slimAttachmentForPersist(att) {
+  if (!att || typeof att !== 'object') return null;
+  const out = {};
+  for (const key of ATTACHMENT_META_KEYS) {
+    if (key === 'size') continue;
+    const v = att[key];
+    if (v == null || v === '') continue;
+    const s = String(v);
+    if (s.length > META_STRING_MAX) continue;
+    out[key] = s;
+  }
+  const size = Number(att.size) || 0;
+  if (size) out.size = size;
+  return out.path || out.absolutePath || out.workspaceRelative ? out : null;
+}
+
+function slimAttachmentsForPersist(list) {
+  return (Array.isArray(list) ? list : []).map(slimAttachmentForPersist).filter(Boolean);
+}
+
+/** 递归剔除 meta 里的「字节形态」值：超长字符串与 data:/blob: 临时 URL。 */
+function sanitizeMetaValue(value, depth) {
+  if (typeof value === 'string') {
+    if (value.length > META_STRING_MAX) return undefined;
+    if (/^(data|blob):/i.test(value.trim())) return undefined;
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (depth >= 6) return undefined;
+    return value.map((v) => sanitizeMetaValue(v, depth + 1)).filter((v) => v !== undefined);
+  }
+  if (value && typeof value === 'object') {
+    if (depth >= 6) return undefined;
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      const kept = sanitizeMetaValue(v, depth + 1);
+      if (kept !== undefined) out[k] = kept;
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * 打包落库消息：`【叠云meta】{json}\n<正文>`；没有任何可落库元数据时原样返回正文。
+ *
+ * - role=user：只留本轮输入文本 + 附件引用（内存里的暂存附件带 base64，必须投影掉）。
+ * - role=assistant：轮次元数据经 sanitizeMetaValue 过一遍；不复制附件引用——
+ *   附件的唯一来源是那条 user 消息，assistant 再存一份就是同一事实的第二来源。
+ */
+function packMessageMeta(content, meta, opts) {
+  const text = content == null ? '' : String(content);
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return text;
+  let payload;
+  if ((opts && opts.role) === 'user') {
+    payload = {};
+    const inputText = meta.inputText != null ? String(meta.inputText).trim() : '';
+    if (inputText) payload.inputText = inputText;
+    const attachments = slimAttachmentsForPersist(meta.attachments);
+    if (attachments.length) payload.attachments = attachments;
+  } else {
+    payload = sanitizeMetaValue(meta, 0) || {};
+    delete payload.attachments;
+  }
+  if (!Object.keys(payload).length) return text;
+  try {
+    return `${MESSAGE_META_PREFIX}${JSON.stringify(payload)}\n${text}`;
+  } catch {
+    return text;
+  }
+}
+
+/** 剥离落库消息的 meta，得到 `{ content, meta }`；meta 非法时按「无 meta」处理。 */
+function unpackMessageMeta(raw) {
+  const s = raw == null ? '' : String(raw);
+  const m = s.match(MESSAGE_META_RE);
+  if (!m) return { content: s, meta: null };
+  try {
+    return { content: m[2], meta: JSON.parse(m[1]) };
+  } catch {
+    return { content: s, meta: null };
+  }
+}
+
 function joinPromptChunks(chunks) {
   return (Array.isArray(chunks) ? chunks : [])
     .map((c) => String(c || '').trim())
@@ -720,6 +835,13 @@ function buildCompletionMessagesFromHistory(
 module.exports = {
   SESSION_HISTORY_HEADER,
   TURN_RIDE_HEADER,
+  MESSAGE_META_PREFIX,
+  ATTACHMENT_META_KEYS,
+  META_STRING_MAX,
+  packMessageMeta,
+  unpackMessageMeta,
+  slimAttachmentForPersist,
+  slimAttachmentsForPersist,
   joinPromptChunks,
   packSystemPrompt,
   unwrapSystemPromptPack,

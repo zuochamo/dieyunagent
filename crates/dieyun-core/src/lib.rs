@@ -17,6 +17,7 @@
 #![allow(clippy::trim_split_whitespace)]
 
 pub mod agent;
+pub mod blocking;
 pub mod codebase_db;
 pub mod compaction;
 pub mod config;

@@ -7,11 +7,12 @@ const path = require('path');
 const { promisify } = require('util');
 const { createGitTarget } = require('./git-target');
 const { readGitStatus, toLegacyStatusItem } = require('./status');
+const { atomicCopyFileSync } = require('../fs-atomic');
 
 const execFileAsync = promisify(execFile);
 
-/** 并行 worker 同时 git worktree add 会争用 index.lock，串行化创建 */
-const worktreeCreateQueue = { tail: Promise.resolve() };
+/** 并行 worker 同时 git worktree add 会争用**同一仓库**的 index.lock，按仓库串行化创建 */
+const worktreeCreateQueues = new Map();
 
 /**
  * 固定提交身份。绝不依赖用户全局 git config：新机器 / CI 上 user.email 常为空，
@@ -73,9 +74,16 @@ async function readHeadSha(repoPath) {
   }
 }
 
-function runWorktreeCreateExclusive(fn) {
-  const run = worktreeCreateQueue.tail.then(() => fn());
-  worktreeCreateQueue.tail = run.catch(() => {});
+function runWorktreeCreateExclusive(repoPath, fn) {
+  const key = String(repoPath || '');
+  const prev = worktreeCreateQueues.get(key) || Promise.resolve();
+  const run = prev.then(() => fn());
+  const tail = run.catch(() => {});
+  worktreeCreateQueues.set(key, tail);
+  // 队列排空即回收，避免 Map 随仓库数无界增长
+  tail.then(() => {
+    if (worktreeCreateQueues.get(key) === tail) worktreeCreateQueues.delete(key);
+  });
   return run;
 }
 
@@ -257,7 +265,7 @@ async function resolveWorktreeBase(repoPath, runId, roleId, wtPath) {
  * @param {{ runId: string, roleId: string, baseRef?: string }} opts
  */
 async function createAgentWorktree(repoPath, opts) {
-  return runWorktreeCreateExclusive(() => createAgentWorktreeInner(repoPath, opts));
+  return runWorktreeCreateExclusive(repoPath, () => createAgentWorktreeInner(repoPath, opts));
 }
 
 async function createAgentWorktreeInner(repoPath, opts) {
@@ -856,31 +864,6 @@ function backupSessionDir(repoPath, runId) {
 }
 
 /**
- * 原子替换：先写同目录临时文件，再 rename 覆盖目标。
- * 直接 copyFileSync 到目标路径时，中途崩溃/断电会留下半截文件——
- * 而这里覆盖的正是用户的正式代码，半截文件比不覆盖更糟。
- */
-function atomicWriteFromSource(dest, src) {
-  const dir = path.dirname(dest);
-  fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(
-    dir,
-    `.dieyun-apply-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.tmp`
-  );
-  try {
-    fs.copyFileSync(src, tmp);
-    fs.renameSync(tmp, dest);
-  } catch (e) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // 清理临时文件失败不应掩盖真正的错误
-    }
-    throw e;
-  }
-}
-
-/**
  * 覆盖前把主工作区**当前**内容备份进备份会话目录，使 apply 可回滚。
  * 用 existed 区分「原本没有这个文件」——回滚时要删除它，而不是恢复。
  */
@@ -945,7 +928,7 @@ async function restoreApplyBackup(repoPath, backupDir) {
         errors.push({ repoPath: ent.repoPath, error: '备份副本缺失' });
         continue;
       }
-      atomicWriteFromSource(dest, saved);
+      atomicCopyFileSync(dest, saved);
       restored.push({ repoPath: ent.repoPath, action: 'restored' });
     } catch (e) {
       errors.push({ repoPath: ent.repoPath, error: e.message || String(e) });
@@ -974,7 +957,7 @@ async function applyOneChange(repoPath, change, ctx = {}) {
     throw new Error(`worktree 中找不到文件: ${rel}`);
   }
   const backup = backupDir ? backupBeforeWrite(repoPath, backupDir, rel) : null;
-  atomicWriteFromSource(dest, src);
+  atomicCopyFileSync(dest, src);
   return { repoPath: rel, action: 'copied', backup, sha256: sha256FileSync(dest) };
 }
 

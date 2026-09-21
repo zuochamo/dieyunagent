@@ -1,7 +1,12 @@
 'use strict';
 
 const { chatCompletionJson } = require('../llm-proxy');
-const { runWithLlmReconnectRetry, raceAbortable } = require('../llm-reconnect-retry');
+const {
+  runWithLlmReconnectRetry,
+  raceAbortable,
+  createAbortError,
+  throwIfAborted
+} = require('../llm-reconnect-retry');
 const { recordLlmUsage } = require('./llm-usage-recorder');
 const {
   addUsageStats,
@@ -24,19 +29,16 @@ const {
   LONG_HORIZON_MAX_SEGMENTS,
   buildSegmentContinueMessages
 } = require('./segment-continue');
+const {
+  createLiveLoopTraceTracker,
+  createSubagentNamer,
+  buildIsolatedCard,
+  mapLoopTraceToUi,
+  mapLoopToolToUi,
+  mergeIsolatedCards
+} = require('./live-loop-trace');
 
 const TASK_TIMEOUT_MS = 60 * 60 * 1000;
-const LIVE_THOUGHT_CHARS = 2000;
-
-function createAbortError() {
-  const err = new Error('已停止');
-  err.name = 'AbortError';
-  return err;
-}
-
-function throwIfAborted(signal) {
-  if (signal?.aborted) throw createAbortError();
-}
 
 function createAbortWaiter(signal) {
   if (!signal) return null;
@@ -81,155 +83,6 @@ function createAbortWaiter(signal) {
   };
 }
 
-function buildLoopPhaseLabel(meta, roundIndex, roundNo) {
-  const base =
-    meta.phase ||
-    (meta.worker && meta.taskId
-      ? `执行器 ${meta.worker} · ${meta.taskId}`
-      : meta.worker
-        ? `执行器 ${meta.worker}`
-        : '执行器');
-  if (roundIndex <= 0) return base;
-  return `${base} · 第 ${roundNo || roundIndex + 1} 轮`;
-}
-
-function mapPendingDelegateTool(d) {
-  const args = d.arguments && typeof d.arguments === 'object' ? d.arguments : {};
-  return {
-    id: d.id || '',
-    name: d.name || 'tool',
-    argsBrief: JSON.stringify(args).slice(0, 120),
-    toolArgs: args,
-    summary: '',
-    pending: true
-  };
-}
-
-/**
- * Plan / Explore worker loop 的流式 trace（按 subagentId 独立更新，支持并行执行器）。
- */
-function createLiveLoopTraceTracker(meta, { onUpdate }) {
-  const subagentId = meta.subagentId || '';
-  const rounds = [];
-  let llmRound = 0;
-  let liveContent = '';
-
-  function getRound(roundNo) {
-    const n = Math.max(1, Number(roundNo) || 1);
-    let row = rounds.find((x) => x.round === n);
-    if (!row) {
-      row = { round: n, thought: '', fullThought: '', tools: [] };
-      rounds.push(row);
-      rounds.sort((a, b) => a.round - b.round);
-    }
-    return row;
-  }
-
-  function toUiEntries() {
-    return rounds.map((r, i) => ({
-      round: r.round,
-      phase: buildLoopPhaseLabel(meta, i, r.round),
-      thought: r.thought,
-      fullThought: r.fullThought || r.thought,
-      subagentId,
-      isolated: true,
-      worker: meta.worker || '',
-      parallel: !!meta.parallel,
-      tools: r.tools.map((t) => ({ ...t }))
-    }));
-  }
-
-  function sync() {
-    onUpdate(toUiEntries(), liveContent);
-  }
-
-  function eventRoundNo(data) {
-    if (data && data.round != null) return Number(data.round) + 1;
-    return llmRound + 1;
-  }
-
-  function handlePhase(name, data) {
-    if (name === 'start') {
-      getRound(1).thought = '启动…';
-      sync();
-      return;
-    }
-    if (name === 'llm_request') {
-      llmRound = data && data.round != null ? Number(data.round) : llmRound;
-      const row = getRound(eventRoundNo(data));
-      row.thought =
-        data && data.model ? `请求 LLM · ${String(data.model).trim()}…` : '请求 LLM…';
-      sync();
-      return;
-    }
-    if (name === 'llm_delta') {
-      llmRound = data && data.round != null ? Number(data.round) : llmRound;
-      const reasoning = String((data && data.reasoning) || '');
-      const rawContent = String((data && data.content) || '');
-      const contentOnly = stripToolCallMarkup(rawContent);
-      const thoughtSource = reasoning || contentOnly || rawContent;
-      const row = getRound(eventRoundNo(data));
-      row.thought = thoughtSource.slice(0, LIVE_THOUGHT_CHARS) || '生成中…';
-      row.fullThought = thoughtSource;
-      if (reasoning) {
-        liveContent = contentOnly.slice(0, 800);
-      } else {
-        liveContent = '';
-      }
-      sync();
-      return;
-    }
-    if (name === 'llm_response') {
-      if (data && data.round != null) llmRound = Number(data.round) + 1;
-      return;
-    }
-    if (name === 'need_delegate' || name === 'delegate_start') {
-      const delegates = Array.isArray(data && data.delegates) ? data.delegates : [];
-      if (!delegates.length) return;
-      const row = getRound(llmRound || 1);
-      for (const d of delegates) {
-        if (d.id && row.tools.some((t) => t.id === d.id)) continue;
-        row.tools.push(mapPendingDelegateTool(d));
-      }
-      if (!row.thought || String(row.thought).startsWith('请求 LLM')) row.thought = '执行工具…';
-      sync();
-      return;
-    }
-    if (name === 'delegate_result') {
-      const row = getRound(llmRound || 1);
-      const tool = row.tools.find((t) => t.id === data.id) || row.tools.find((t) => t.pending && t.name === data.name);
-      if (tool) {
-        tool.pending = false;
-        if (data.arguments && typeof data.arguments === 'object') {
-          tool.toolArgs = { ...(tool.toolArgs || {}), ...data.arguments };
-          tool.args = { ...(tool.args || {}), ...data.arguments };
-        }
-        if (data.result && typeof data.result === 'object') {
-          tool.result = data.result;
-          if (data.result.path && !tool.toolArgs?.filePath) {
-            tool.toolArgs = { ...(tool.toolArgs || {}), filePath: data.result.path };
-            tool.args = { ...(tool.args || {}), filePath: data.result.path };
-          }
-        }
-        const briefArgs = tool.toolArgs || tool.args || {};
-        tool.argsBrief =
-          briefArgs.filePath ||
-          briefArgs.path ||
-          JSON.stringify(briefArgs).slice(0, 120);
-        tool.summary = data.error
-          ? `错误: ${data.error}`
-          : summarizeLoopTool({ name: data.name, result: data.result, error: data.error });
-        if ((data.name === 'fs_write_file' || data.name === 'fs_edit') && data.result && data.result.diff) {
-          tool.diff = compactLoopToolDiff(data.result.diff);
-        }
-      }
-      sync();
-    }
-  }
-
-  return { handlePhase, getSubagentId: () => subagentId };
-}
-
 function filterTools(allTools, agentType) {
   if (agentType === 'explore') return buildExploreTools(allTools);
   if (agentType === 'shell') return buildShellTools(allTools);
@@ -265,172 +118,14 @@ function sanitizePlanBestOfN(plan, enabledN) {
   return { ...plan, bestOfN: 0, best_of_n: 0 };
 }
 
-function shouldUseCoordinatorTaskQueue(plan, payload, enabledBestOfN) {
+/** 是否走协调器任务队列：只看结构信号（bestOfN、子任务数、是否跨 worker），不看用户措辞。 */
+function shouldUseCoordinatorTaskQueue(plan, enabledBestOfN) {
   if (enabledBestOfN >= 2) return true;
   if (!plan || typeof plan !== 'object') return false;
   const subtasks = Array.isArray(plan.subtasks) ? plan.subtasks : [];
   if (subtasks.length > 3) return true;
   const workers = new Set(subtasks.map((st) => String(st?.worker || 'A')));
-  if (workers.size > 1) return true;
-  const t = String(payload?.userText || '');
-  if (/重构|架构|迁移|集成|全量|多模块|调研|arbitrat/i.test(t)) return true;
-  return false;
-}
-
-function compactLoopToolDiff(diff) {
-  if (!diff || typeof diff !== 'object') return null;
-  const out = {
-    added: Number(diff.added) || 0,
-    removed: Number(diff.removed) || 0,
-    created: !!diff.created,
-    textTruncated: !!diff.textTruncated
-  };
-  const cap = 12000;
-  if (diff.beforeSnippet != null) {
-    const s = String(diff.beforeSnippet);
-    out.beforeSnippet = s.length > cap ? s.slice(0, cap) : s;
-  }
-  if (diff.afterSnippet != null) {
-    const s = String(diff.afterSnippet);
-    out.afterSnippet = s.length > cap ? s.slice(0, cap) : s;
-  }
-  if (!diff.textTruncated) {
-    if (diff.beforeText != null) {
-      const t = String(diff.beforeText);
-      if (t.length <= 120000) out.beforeText = t;
-    }
-    if (diff.afterText != null) {
-      const t = String(diff.afterText);
-      if (t.length <= 120000) out.afterText = t;
-    }
-  }
-  return out;
-}
-
-function newSubagentId(worker) {
-  return `exec-${worker}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-}
-
-function summarizeLoopTool(t) {
-  if (t.error) return `错误: ${t.error}`;
-  if (t.name === 'host_exec') {
-    return summarizeHostExecInline(t.result, t.error);
-  }
-  if (t.name === 'fs_write_file' || t.name === 'fs_edit') {
-    const r = t.result;
-    if (r && typeof r === 'object' && r.path) {
-      const file = String(r.path).replace(/\\/g, '/').split('/').pop() || r.path;
-      const diff = r.diff
-        ? ` · +${Number(r.diff.added) || 0} -${Number(r.diff.removed) || 0}`
-        : '';
-      const n = Number(r.replacements);
-      const repl = t.name === 'fs_edit' && Number.isFinite(n) && n > 0 ? ` · ${n} 处` : '';
-      return `${file}${r.diff?.created ? ' · 新建' : t.name === 'fs_edit' ? ' · 已替换' : ' · 已写入'}${diff}${repl}`;
-    }
-  }
-  const r = t.result;
-  if (r && typeof r === 'object') {
-    if (typeof r.stdout === 'string' && r.stdout.trim()) return r.stdout.trim().slice(0, 240);
-    if (typeof r.stderr === 'string' && r.stderr.trim()) return r.stderr.trim().slice(0, 240);
-    if (typeof r.message === 'string' && r.message.trim()) return r.message.trim().slice(0, 240);
-    if (typeof r.content === 'string' && r.content.trim()) return r.content.trim().slice(0, 240);
-  }
-  return '完成';
-}
-
-function summarizeHostExecInline(result, error) {
-  if (error) return `错误: ${error}`;
-  if (!result || typeof result !== 'object') return '完成';
-  const exit = result.code != null ? result.code : result.exitCode;
-  const stderr = String(result.stderr ?? '').trim();
-  if (stderr && exit != null && exit !== 0) {
-    return `exit ${exit} · ${stderr.slice(0, 80)}`;
-  }
-  const out = String(result.stdout ?? result.output ?? '').trim();
-  if (out) {
-    if ((/^\/\*|^#|^<!DOCTYPE|^<html[\s>]/i.test(out) || out.includes('{')) && out.length > 80) {
-      return `exit ${exit ?? 0} · 输出 ${out.length} 字`;
-    }
-    if (/^(True|False|OK|null|None)$/i.test(out)) return `exit ${exit ?? 0} · ${out}`;
-    return out.length > 100 ? `${out.slice(0, 100)}…` : out;
-  }
-  if (stderr) return stderr.slice(0, 100);
-  return exit != null ? (exit === 0 ? 'exit 0' : `exit ${exit}`) : '完成';
-}
-
-function mapLoopToolToUi(t) {
-  const args =
-    (t.toolArgs && typeof t.toolArgs === 'object' && Object.keys(t.toolArgs).length
-      ? t.toolArgs
-      : null) ||
-    (t.args && typeof t.args === 'object' ? t.args : {});
-  const normalized = { ...(args || {}) };
-  if (!normalized.filePath && normalized.path) normalized.filePath = normalized.path;
-  if (!normalized.filePath && normalized.file) normalized.filePath = normalized.file;
-  if (!normalized.filePath && t.result && typeof t.result === 'object' && t.result.path) {
-    normalized.filePath = String(t.result.path);
-  }
-  const out = {
-    name: t.name || 'tool',
-    argsBrief:
-      normalized.filePath ||
-      normalized.path ||
-      JSON.stringify(normalized).slice(0, 120),
-    summary: summarizeLoopTool(t),
-    pending: !!t.pending,
-    failed: !!t.failed,
-    toolArgs: normalized,
-    args: t.args && typeof t.args === 'object' ? t.args : normalized
-  };
-  if (t.diff) out.diff = t.diff;
-  if (t.result) out.result = t.result;
-  if (t.error) out.error = t.error;
-  return out;
-}
-
-function mergeTraceTools(liveTools, rustTools) {
-  const out = [];
-  const n = Math.max(liveTools.length, rustTools.length);
-  for (let i = 0; i < n; i += 1) {
-    const live = liveTools[i];
-    const rust = rustTools[i];
-    if (!live) {
-      out.push(rust);
-      continue;
-    }
-    if (!rust) {
-      out.push(live);
-      continue;
-    }
-    const mergedArgs = {
-      ...(rust.args && typeof rust.args === 'object' ? rust.args : {}),
-      ...(rust.toolArgs && typeof rust.toolArgs === 'object' ? rust.toolArgs : {}),
-      ...(live.args && typeof live.args === 'object' ? live.args : {}),
-      ...(live.toolArgs && typeof live.toolArgs === 'object' ? live.toolArgs : {})
-    };
-    if (!mergedArgs.filePath && mergedArgs.path) mergedArgs.filePath = mergedArgs.path;
-    const mergedResult = live.result || rust.result || null;
-    if (!mergedArgs.filePath && mergedResult && mergedResult.path) {
-      mergedArgs.filePath = String(mergedResult.path);
-    }
-    out.push({
-      ...rust,
-      ...live,
-      toolArgs: mergedArgs,
-      args: live.args || rust.args || mergedArgs,
-      result: mergedResult,
-      diff: live.diff || rust.diff,
-      summary: live.summary || rust.summary,
-      argsBrief:
-        (live.argsBrief && live.argsBrief !== '{}' && live.argsBrief) ||
-        (rust.argsBrief && rust.argsBrief !== '{}' && rust.argsBrief) ||
-        mergedArgs.filePath ||
-        JSON.stringify(mergedArgs).slice(0, 120),
-      pending: !!(live.pending || rust.pending),
-      failed: !!(live.failed || rust.failed)
-    });
-  }
-  return out;
+  return workers.size > 1;
 }
 
 function mapPlannerTraceEntryToUi(entry) {
@@ -446,29 +141,6 @@ function mapPlannerTraceEntryToUi(entry) {
           .map(mapLoopToolToUi)
       : []
   };
-}
-
-function mapLoopTraceToUi(trace, meta = {}) {
-  const worker = meta.worker || '';
-  const taskId = meta.taskId || '';
-  const subagentId = meta.subagentId || '';
-  const basePhase =
-    meta.phase ||
-    (worker && taskId ? `执行器 ${worker} · ${taskId}` : worker ? `执行器 ${worker}` : '执行器');
-  return (trace || []).map((r, i) => {
-    const thought = String(r.fullThought || r.thought || '').trim();
-    return {
-      round: r.round,
-      phase: i === 0 ? basePhase : `${basePhase} · 第 ${r.round} 轮`,
-      thought,
-      fullThought: thought,
-      subagentId,
-      isolated: true,
-      worker,
-      parallel: !!meta.parallel,
-      tools: Array.isArray(r.tools) ? r.tools.map(mapLoopToolToUi) : []
-    };
-  });
 }
 
 async function fetchChatCompletion(body, apiConfig, settings, signal, onUsage, reconnect) {
@@ -531,13 +203,16 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   // 子 Agent 执行器：编排 / 护栏 / 摘要复用 subagent-runner；真正跑循环复用 runToolLoopFromSpec，
   // 于是每个子 Agent 白拿两件事 —— 隔离 trace（对话里的可折叠卡片）与父级取消联动
   // （runToolLoopOnce 会把子 loop 的 runId 记进 activeWorkerLoopIds）。
+  // 序号分配器在本轮内共享：研究子 Agent 与写入/命令执行器共用同一序列，
+  // 保证每张子 Agent 卡片标题的「#N」唯一（见 live-loop-trace.createSubagentNamer）。
+  const subagentNamer = createSubagentNamer();
   const subagentRunner = createSubagentRunner({
     allTools,
     model: payload.model,
     userDataPath: deps.userData,
     contextTierId: payload.contextTierId,
     signal,
-    newSubagentId,
+    namer: subagentNamer,
     runChildLoop: (req, meta) =>
       runToolLoopFromSpec(
         {
@@ -548,7 +223,13 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         },
         exploreTools,
         null,
-        { phase: 'Sub · 只读调研', worker: 'explore', subagentId: meta.subagentId }
+        {
+          phase: 'Sub · 只读调研',
+          worker: 'explore',
+          subagentId: meta.subagentId,
+          subagentKind: meta.subagentKind,
+          subagentIndex: meta.subagentIndex
+        }
       )
   });
   let workspacePath = payload.workspacePath || undefined;
@@ -707,26 +388,14 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
 
   const finalizeLoopTrace = (loopResult, meta, streamContent) => {
     if (!meta || !meta.subagentId) return;
-    const rustEntries = mapLoopTraceToUi(loopResult && loopResult.trace, meta);
-    const liveEntries = isolatedTraceBySubagent.get(meta.subagentId) || [];
-    const finalEntries = rustEntries.map((rustEntry, idx) => {
-      const liveEntry = liveEntries[idx];
-      if (!liveEntry) return rustEntry;
-      return {
-        ...rustEntry,
-        thought: liveEntry.thought || rustEntry.thought,
-        fullThought: liveEntry.fullThought || rustEntry.fullThought,
-        tools: mergeTraceTools(liveEntry.tools || [], rustEntry.tools || [])
-      };
-    });
-    if (!finalEntries.length && liveEntries.length) {
-      upsertIsolatedTrace(meta.subagentId, liveEntries, streamContent);
-      return;
-    }
-    if (!finalEntries.length) return;
+    // 收尾：Rust 最终 trace 合进实时卡片，保持「一个执行器一张卡片」。
+    const rustCard = mapLoopTraceToUi((loopResult && loopResult.trace) || [], meta)[0] || null;
+    const liveCard = (isolatedTraceBySubagent.get(meta.subagentId) || [])[0] || null;
+    const card = rustCard && liveCard ? mergeIsolatedCards(liveCard, rustCard) : rustCard || liveCard;
+    if (!card) return;
     upsertIsolatedTrace(
       meta.subagentId,
-      finalEntries,
+      [card],
       streamContent || (loopResult && loopResult.content) || ''
     );
   };
@@ -838,6 +507,14 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       });
     } finally {
       if (trackedLoopRunId) activeWorkerLoopIds.delete(trackedLoopRunId);
+      // 补发节流中未到达的一帧，保证下面的 finalizeLoopTrace 合并到最新思考文本
+      if (tracker) {
+        try {
+          tracker.dispose();
+        } catch {
+          // ignore
+        }
+      }
     }
     if (!deferFinalize) {
       if (liveMeta) {
@@ -922,7 +599,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     let priorSummary = '';
     let hitRoundLimit = false;
     let partial = null;
-    const useCoordinatorTasks = shouldUseCoordinatorTaskQueue(latestPlan, payload, enabledBestOfN);
+    const useCoordinatorTasks = shouldUseCoordinatorTaskQueue(latestPlan, enabledBestOfN);
 
     for (const task of job.tasks || []) {
       throwIfAborted(signal);
@@ -950,21 +627,22 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         await agentBridge.taskRunning(coordinatorRunId, taskId);
       }
 
-      const subagentId = newSubagentId(worker);
+      // 每个子任务 = 一张子 Agent 卡片（写入/命令/调研），标题「类型 + 序号」。
+      // id / 序号 / 类型一次分配（共享 namer），并发执行器也不会撞 id；
+      // 占位卡也走 buildIsolatedCard，保证与实时/收尾卡片同形、标题一致。
+      const named = subagentNamer.next(task.agentType || 'build');
+      const subagentId = named.subagentId;
+      const cardMeta = {
+        worker,
+        taskId: task.id,
+        subagentId,
+        parallel: parallelRun,
+        ...named
+      };
       upsertIsolatedTrace(
         subagentId,
         [
-          {
-            round: 1,
-            phase: `执行器 ${worker} · ${task.id}`,
-            thought: '准备中…',
-            fullThought: '准备中…',
-            subagentId,
-            isolated: true,
-            worker,
-            parallel: parallelRun,
-            tools: []
-          }
+          buildIsolatedCard(cardMeta, [{ round: 1, thought: '准备中…', fullThought: '准备中…', tools: [] }], subagentId)
         ],
         ''
       );
@@ -987,12 +665,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       }
       let loopResult;
       try {
-        loopResult = await runToolLoopFromSpec(spec, taskTools, wtPath, {
-          worker,
-          taskId: task.id,
-          subagentId,
-          parallel: parallelRun
-        });
+        loopResult = await runToolLoopFromSpec(spec, taskTools, wtPath, cardMeta);
       } catch (err) {
         if (useCoordinatorTasks && agentBridge.taskFail && coordinatorRunId) {
           await agentBridge.taskFail(coordinatorRunId, taskId, err.message || String(err), signal?.aborted);
@@ -1135,6 +808,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           const spec = phase.loopStart || {};
           // Plan 的 explore 阶段是协调者：额外拿到 subagent，可并行派只读研究子 Agent
           // 摸清多个方向，再由它汇总成勘察笔记交回 planner。
+          // 它也占一个序号（kind=plan →「勘察子 Agent #1」），保证思考区每张卡片标题
+          // 都是统一的「类型 + 序号」，不会出现一张没有编号的卡片。
           const loopResult = await runToolLoopFromSpec(
             spec,
             exploreTools,
@@ -1142,7 +817,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
             {
               phase: 'Explore · 只读勘察',
               worker: 'explore',
-              subagentId: newSubagentId('explore')
+              ...subagentNamer.next('plan')
             },
             { allowSubagent: true }
           );

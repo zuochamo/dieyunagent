@@ -1,27 +1,18 @@
-/* global CTX_LIMITS, getAgentLimits */
+/* global applyAgentLimitsToRuntime */
 'use strict';
 
-function applyAgentLimitsToRuntime(opts = {}) {
-  const L = typeof getAgentLimits === 'function' ? getAgentLimits(opts) : {};
-  if (typeof CTX_LIMITS !== 'undefined' && CTX_LIMITS) {
-    if (L.ctxAgentToolCallLimit != null) CTX_LIMITS.AGENT_TOOL_CALL_LIMIT = L.ctxAgentToolCallLimit;
-    if (L.toolResultMaxJson != null) CTX_LIMITS.TOOL_RESULT_MAX_JSON = L.toolResultMaxJson;
-    if (L.codebaseSnippetMax != null) CTX_LIMITS.CODEBASE_SNIPPET_MAX = L.codebaseSnippetMax;
-    if (L.codebaseAutoLimit != null) CTX_LIMITS.CODEBASE_AUTO_LIMIT = L.codebaseAutoLimit;
-    if (L.openFilesMax != null) CTX_LIMITS.OPEN_FILES_MAX = L.openFilesMax;
-    if (L.filePreviewMaxChars != null) CTX_LIMITS.FILE_PREVIEW_MAX_CHARS = L.filePreviewMaxChars;
-    if (L.completionHistoryMaxChars != null) CTX_LIMITS.COMPLETION_HISTORY_MAX_CHARS = L.completionHistoryMaxChars;
-    if (L.completionMessageMaxChars != null) CTX_LIMITS.COMPLETION_MESSAGE_MAX_CHARS = L.completionMessageMaxChars;
-    if (L.completionLastUserMaxChars != null) CTX_LIMITS.COMPLETION_LAST_USER_MAX_CHARS = L.completionLastUserMaxChars;
-    if (L.completionTurnRideMaxChars != null) CTX_LIMITS.COMPLETION_TURN_RIDE_MAX_CHARS = L.completionTurnRideMaxChars;
-    if (L.completionRecentTurns != null) CTX_LIMITS.COMPLETION_RECENT_TURNS = L.completionRecentTurns;
-    if (L.completionFoldedMaxChars != null) CTX_LIMITS.COMPLETION_FOLDED_MAX_CHARS = L.completionFoldedMaxChars;
-    if (L.llmRequestMaxChars != null) CTX_LIMITS.LLM_REQUEST_MAX_CHARS = L.llmRequestMaxChars;
-    if (L.lspDiagMaxChars != null) CTX_LIMITS.LSP_DIAG_MAX_CHARS = L.lspDiagMaxChars;
-  }
-}
-
-window.applyAgentLimitsToRuntime = applyAgentLimitsToRuntime;
+/**
+ * CTX_LIMITS 的启动期 / 事件驱动刷新。
+ *
+ * 本文件只回答「**何时**刷」，不持有任何「键 → 键」映射：
+ * 映射表与刷新实现（applyAgentLimitsTo / applyAgentLimitsToRuntime）的属主是
+ * renderer-context-engine.js —— 那里也是 CTX_LIMITS 的声明处与加载期派生处。
+ *
+ * 曾经这里另抄了一份 agent-limits → CTX_LIMITS 的 14 键表，与 ctxLimitsFor() 双份维护；
+ * 漏一个键的表现是「设置里改了不生效」，且只在某个档位下复现，极难定位。
+ *
+ * 位置要求（index.html 顺序敏感）：必须在 composer 之后，理由见下方 boot 说明。
+ */
 
 /** 推迟到当前脚本/bundle 同步执行完毕再 boot。
  * 打包后 function 会被提升，但 composer 的 const Map 仍在 TDZ；
@@ -30,10 +21,11 @@ window.applyAgentLimitsToRuntime = applyAgentLimitsToRuntime;
  * 开发模式分文件时 composer 尚未加载，该分支不会踩到。
  */
 function bootAgentLimitsRuntime() {
-  if (typeof getAgentLimits !== 'function') return;
+  if (typeof applyAgentLimitsToRuntime !== 'function') return;
   applyAgentLimitsToRuntime();
-  window.addEventListener('dieyun:agent-limits-change', () => applyAgentLimitsToRuntime());
-  window.addEventListener('dieyun:context-tier-change', () => applyAgentLimitsToRuntime());
+  const refresh = () => applyAgentLimitsToRuntime();
+  window.addEventListener('dieyun:agent-limits-change', refresh);
+  window.addEventListener('dieyun:context-tier-change', refresh);
 }
 
 queueMicrotask(bootAgentLimitsRuntime);

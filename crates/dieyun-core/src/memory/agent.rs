@@ -131,11 +131,20 @@ impl MemoryStore {
             "summary": input.get("summary"),
             "stateSnapshot": input.get("stateSnapshot"),
         }))?;
+        // 增量 checkpoint：客户端只发「新增条目 + 会变的尾部条目」，`traceFrom`
+        // 指出这批条目在完整 trace 里的起始下标（0 表示全量覆盖）。
+        let trace_from = input
+            .get("traceFrom")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
         let trace_json = match input.get("trace") {
             Some(v) if v.is_string() => v.as_str().unwrap_or("[]").to_string(),
             Some(v) => v.to_string(),
             None => "[]".into(),
         };
+        // 运行中的 checkpoint 不再重算 `traceText`：`trace_text` 的唯一读者是
+        // `get_agent_trace`，而恢复路径只读 `trace`。缺省时保持上一次的值（见下方
+        // COALESCE），于是每 2.5s 的「全量纯文本拼装 + 传输」整条省掉。
         let trace_text = input
             .get("traceText")
             .and_then(|v| v.as_str())
@@ -155,7 +164,7 @@ impl MemoryStore {
             // 同一条 run 的 checkpoint 原地覆盖最新一行。
             //
             // 读取路径只有 `get_agent_trace`（`run_id` + `ORDER BY id DESC LIMIT 1`），
-            // 历史行没有任何读者；而运行中的任务每 ~2.5s 就写一份**全量**快照，
+            // 历史行没有任何读者；而运行中的任务每 ~2.5s 就写一份快照，
             // 追加式写入等于让单次运行落盘几十 MB、且总量与时长成平方关系。
             let existing: Option<i64> = conn
                 .query_row(
@@ -164,12 +173,50 @@ impl MemoryStore {
                     |row| row.get(0),
                 )
                 .optional()?;
+            // 增量分支：把本批条目拼到「截断到 trace_from」的已存快照后面。
+            //
+            // 截断点必须落在已存条目内，否则说明客户端游标过期（换过 run、trace 被重置、
+            // 或上一次写没落地）。此时**不写**并回 `stale`，让客户端退化成全量重发——
+            // 宁可多传一次，也不能把半截 trace 落成权威快照。
+            let trace_json = if trace_from == 0 {
+                trace_json
+            } else {
+                let stored_json: Option<String> = match existing {
+                    Some(id) => Some(conn.query_row(
+                        "SELECT trace_json FROM agent_traces WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )?),
+                    None => None,
+                };
+                let mut merged: Vec<Value> = stored_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default();
+                if merged.len() < trace_from {
+                    return Ok(json!({
+                        "stale": true,
+                        "storedCount": merged.len(),
+                        "runId": run_id,
+                    }));
+                }
+                let delta: Vec<Value> = serde_json::from_str::<Value>(&trace_json)
+                    .ok()
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default();
+                merged.truncate(trace_from);
+                merged.extend(delta);
+                Value::Array(merged).to_string()
+            };
             let trace_id = match existing {
                 Some(id) => {
                     conn.execute(
                         "UPDATE agent_traces
                             SET session_id = ?1, message_id = ?2, phase = ?3,
-                                trace_json = ?4, trace_text = ?5, created_at = ?6
+                                trace_json = ?4,
+                                trace_text = COALESCE(?5, trace_text),
+                                created_at = ?6
                           WHERE id = ?7",
                         params![session_id, message_id, phase, trace_json, trace_text, now, id],
                     )?;

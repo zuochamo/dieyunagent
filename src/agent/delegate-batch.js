@@ -2,75 +2,12 @@
 
 const path = require('path');
 const { isMutatingAgentTool } = require('./tool-classify');
-
-const FILE_MUTATING_TOOLS = new Set(['fs_write_file', 'fs_edit']);
-
-function createAbortError() {
-  const err = new Error('已停止');
-  err.name = 'AbortError';
-  return err;
-}
-
-function isAbortError(err) {
-  if (!err) return false;
-  if (err.name === 'AbortError' || err.code === 'ABORT_ERR') return true;
-  const msg = String(err.message || err);
-  // 勿匹配 connection aborted 等网络文案
-  return msg === '已停止' || msg.includes('已停止') || /^aborted$/i.test(msg.trim());
-}
-
-function throwIfAborted(signal) {
-  if (signal?.aborted) throw createAbortError();
-}
-
-function waitForAbortable(promise, signal) {
-  const taskPromise = Promise.resolve(promise);
-  if (!signal) return taskPromise;
-  throwIfAborted(signal);
-  if (typeof signal.addEventListener === 'function') {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const onAbort = () => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener('abort', onAbort);
-        reject(createAbortError());
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-      taskPromise.then(
-        (value) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', onAbort);
-          resolve(value);
-        },
-        (err) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', onAbort);
-          reject(err);
-        }
-      );
-    });
-  }
-  let timer = null;
-  const abortPromise = new Promise((_, reject) => {
-    timer = setInterval(() => {
-      if (signal?.aborted) {
-        clearInterval(timer);
-        reject(createAbortError());
-      }
-    }, 50);
-  });
-  taskPromise.catch(() => {});
-  return Promise.race([taskPromise, abortPromise]).finally(() => {
-    if (timer) clearInterval(timer);
-  });
-}
+const { isAbortError, throwIfAborted, raceAbortable } = require('../llm-reconnect-retry');
+const { FILE_PATH_KEYED_WRITE_TOOL_NAMES } = require('./guardrails-shared');
 
 function mutationFileKey(d) {
   const name = String((d && d.name) || '');
-  if (!FILE_MUTATING_TOOLS.has(name)) return null;
+  if (!FILE_PATH_KEYED_WRITE_TOOL_NAMES.has(name)) return null;
   const a = (d && d.arguments) || {};
   const p = a.filePath || a.path || a.file || a.filename;
   if (!p || !String(p).trim()) return `__missing_${d && d.id != null ? d.id : 'file'}`;
@@ -121,7 +58,7 @@ async function executeDelegateBatch(delegates, delegateTool, onPhase = () => {},
   async function runOne(d) {
     try {
       throwIfAborted(signal);
-      const result = await waitForAbortable(delegateTool(d.name, d.arguments || {}), signal);
+      const result = await raceAbortable(delegateTool(d.name, d.arguments || {}), signal);
       throwIfAborted(signal);
       const row = { id: d.id, result };
       onPhase('delegate_result', {

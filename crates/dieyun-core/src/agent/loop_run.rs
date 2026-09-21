@@ -63,6 +63,25 @@ fn content_or_reasoning(content: Option<&str>, reasoning: Option<&str>) -> Strin
     content
 }
 
+/// 本段结束、交给下游的正文 —— **四条终态路径（正常收尾 / 轮次上限 / 工具次数上限）
+/// 只有这一处口径**：
+/// - 有正文用正文；
+/// - 正文为空才回退到「像正文的」reasoning（守卫见 `content_or_reasoning`）；
+/// - 两者都没有则 `None`：下游（`applyTurnEndSynthesis`、子 Agent 摘要）据此判定「空回复」，
+///   而不是收到一个空字符串的假正文。
+///
+/// 命中预算的分支尤其依赖这条兜底：模型被打断的那一轮正文通常是空的，只有 reasoning 有内容。
+/// 早先这两条分支直接取 `llm.content`，于是「预算耗尽」总是回 `None`，被摘要层记成
+/// 「模型没给结论」—— 而它与「被预算截断」是两种处置（前者换问法，后者缩小问题重派）。
+fn delivered_content(content: Option<&str>, reasoning: Option<&str>) -> Option<String> {
+    let text = content_or_reasoning(content, reasoning);
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 fn strip_agent_status(raw: &str) -> String {
     let s = raw.trim_start();
     let lower = s.to_ascii_lowercase();
@@ -427,11 +446,10 @@ impl AgentLoopManager {
         Ok(())
     }
 
-    // clippy 误报（await_holding_lock）：本函数唯一 await 前的所有路径都显式 drop(runs)
-    // （见下方各处 `drop(runs);`），锁在 await 前必然释放；且 submit_tool_results 内部会再次
-    // 加同一把非重入锁，若未释放将直接死锁，对应单测已证明其可正常返回。
-    #[allow(clippy::await_holding_lock)]
-    pub async fn continue_llm(
+    /// 纯内存账本推进：本函数不做任何 IO，**同步**即可（此前写成 `async` 是历史遗留，
+    /// 会在多线程运行时下让 `std::sync::MutexGuard` 跨 await，违反 `Send`）。
+    /// 与 `submit_tool_results` 共用 `self.runs`（非重入锁），故每条路径都用 `drop(runs)` 收窄临界区。
+    pub fn continue_llm(
         &self,
         _config: &AppConfig,
         _index: &IndexService,
@@ -452,9 +470,9 @@ impl AgentLoopManager {
         if state.round >= state.max_rounds {
             if llm.tool_calls.is_empty() {
                 let trace = state.trace.clone();
-                let content = content_or_reasoning(llm.content.as_deref(), llm.reasoning.as_deref());
+                let content = delivered_content(llm.content.as_deref(), llm.reasoning.as_deref());
                 drop(runs);
-                return Ok(self.finish_run(run_id, trace, Some(content), false));
+                return Ok(self.finish_run(run_id, trace, content, false));
             }
             push_assistant_text_only(
                 &mut state.messages,
@@ -468,7 +486,7 @@ impl AgentLoopManager {
                 tools: Vec::new(),
             });
             let trace = state.trace.clone();
-            let content = llm.content.clone();
+            let content = delivered_content(llm.content.as_deref(), llm.reasoning.as_deref());
             drop(runs);
             return Ok(self.finish_run(run_id, trace, content, true));
         }
@@ -546,7 +564,7 @@ impl AgentLoopManager {
                     tools: trace_tools,
                 });
                 let trace = state.trace.clone();
-                let content = llm.content.clone();
+                let content = delivered_content(llm.content.as_deref(), llm.reasoning.as_deref());
                 drop(runs);
                 return Ok(self.finish_run(run_id, trace, content, true));
             }
@@ -578,10 +596,7 @@ impl AgentLoopManager {
                     })
                     .collect();
                 drop(runs);
-                let response = self
-                    .submit_tool_results(_config, _index, run_id, results)
-                    .await;
-                return response;
+                return self.submit_tool_results(_config, _index, run_id, results);
             }
 
             let delegates = state
@@ -614,12 +629,13 @@ impl AgentLoopManager {
             tools: trace_tools,
         });
         let trace = state.trace.clone();
-        let content = content_or_reasoning(llm.content.as_deref(), llm.reasoning.as_deref());
+        let content = delivered_content(llm.content.as_deref(), llm.reasoning.as_deref());
         drop(runs);
-        Ok(self.finish_run(run_id, trace, Some(content), false))
+        Ok(self.finish_run(run_id, trace, content, false))
     }
 
-    pub async fn submit_tool_results(
+    /// 与 `continue_llm` 同属纯内存账本推进，见其注释：**同步**，无 IO。
+    pub fn submit_tool_results(
         &self,
         _config: &AppConfig,
         _index: &IndexService,
@@ -835,7 +851,6 @@ mod tests {
                     finish_reason: None,
                 },
             )
-            .await
             .unwrap();
 
         assert_eq!(done.phase, "done");
@@ -879,11 +894,103 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
 
         assert_eq!(done.phase, "done");
         assert_eq!(done.content.as_deref(), Some(writeup));
+    }
+
+    #[test]
+    fn delivered_content_is_none_only_when_both_empty() {
+        let fallback = "足够长的思考内容可以兜底正文，这段文字超过二十四个字符。";
+        assert_eq!(
+            delivered_content(Some("正文"), Some("reasoning")).as_deref(),
+            Some("正文")
+        );
+        assert_eq!(
+            delivered_content(Some(""), Some(fallback)).as_deref(),
+            Some(fallback)
+        );
+        assert_eq!(delivered_content(Some("  "), Some("too short")), None);
+        assert_eq!(delivered_content(None, None), None);
+    }
+
+    /// 命中预算的正文口径必须与正常收尾一致：被打断的那一轮正文通常为空、只有 reasoning，
+    /// 若两条 limit 分支直接取 `llm.content`，下游会把「预算截断」记成「模型没给结论」。
+    #[tokio::test]
+    async fn budget_limit_branches_deliver_reasoning_like_normal_done() {
+        let dir = tempdir().unwrap();
+        let config = AppConfig::default();
+        let index = IndexService::new(
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
+            EmbeddingConfig::default(),
+            Vec::new(),
+        );
+        let reasoning = "已定位 loop_run.rs 的四条终态路径，接下来统一正文口径。";
+        let tool_call = |id: &str| ToolCallInput {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: json!({"path":"a.txt"}),
+        };
+
+        // 轮次上限（带 tool_calls）
+        let mgr = AgentLoopManager::default();
+        let start = mgr
+            .start(StartParams {
+                model: "test-model".into(),
+                messages: vec![json!({"role":"user","content":"run tools"})],
+                tools: vec![],
+                workspace_root: None,
+                max_tool_calls: Some(10),
+                max_rounds: Some(1),
+            })
+            .unwrap();
+        {
+            let mut runs = mgr.runs.lock().unwrap();
+            runs.get_mut(&start.run_id).unwrap().round = 1;
+        }
+        let done = mgr
+            .continue_llm(
+                &config,
+                &index,
+                &start.run_id,
+                LlmResponseInput {
+                    content: Some("".into()),
+                    reasoning: Some(reasoning.into()),
+                    tool_calls: vec![tool_call("tc1")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(done.hit_round_limit, Some(true));
+        assert_eq!(done.content.as_deref(), Some(reasoning));
+
+        // 工具次数上限
+        let start2 = mgr
+            .start(StartParams {
+                model: "test-model".into(),
+                messages: vec![json!({"role":"user","content":"run tools"})],
+                tools: vec![],
+                workspace_root: None,
+                max_tool_calls: Some(0),
+                max_rounds: Some(10),
+            })
+            .unwrap();
+        let done2 = mgr
+            .continue_llm(
+                &config,
+                &index,
+                &start2.run_id,
+                LlmResponseInput {
+                    content: Some("".into()),
+                    reasoning: Some(reasoning.into()),
+                    tool_calls: vec![tool_call("tc2")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(done2.hit_round_limit, Some(true));
+        assert_eq!(done2.content.as_deref(), Some(reasoning));
     }
 
     #[test]
@@ -937,7 +1044,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
 
         assert_eq!(done.phase, "done");
@@ -996,7 +1102,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
         assert_eq!(phase.phase, "need_delegate");
 
@@ -1060,7 +1165,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
 
         assert_eq!(done.phase, "done");
@@ -1134,7 +1238,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
         assert_eq!(first.phase, "need_delegate");
 
@@ -1149,7 +1252,6 @@ mod tests {
                     error: None,
                 }],
             )
-            .await
             .unwrap();
         assert_eq!(need.phase, "need_llm");
         let msgs = need
@@ -1193,7 +1295,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
         assert_eq!(second.phase, "need_delegate");
 
@@ -1256,7 +1357,6 @@ mod tests {
                     finish_reason: Some("length".into()),
                 },
             )
-            .await
             .unwrap();
 
         assert_eq!(next.phase, "need_llm");

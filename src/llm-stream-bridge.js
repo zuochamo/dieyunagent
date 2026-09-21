@@ -1,6 +1,7 @@
 'use strict';
 
-const { streamChatSse, chatCompletionJson, isAbortError } = require('./llm-proxy');
+const { streamChatSse, chatCompletionJson } = require('./llm-proxy');
+const { isAbortError } = require('./llm-reconnect-retry');
 
 /** @type {Map<string, { abort: () => void }>} */
 const active = new Map();
@@ -68,6 +69,8 @@ async function runStreamChat(webContents, payload) {
       headers: payload.headers || {},
       body: payload.body || '',
       signal,
+      // 抓包归属：renderer 自跑的 LLM 请求（与 rust-loop 那条链路区分开）
+      tag: { via: 'renderer-ipc', streamId },
       onChunk: (text) => send({ type: 'raw', text })
     });
     send({ type: 'done' });
@@ -92,7 +95,8 @@ async function runChatCompletion(payload) {
     const json = await chatCompletionJson(payload.url, {
       headers: payload.headers || {},
       body: payload.body || '',
-      signal
+      signal,
+      tag: { via: 'renderer-ipc', requestId: id }
     });
     return { ok: true, json };
   } catch (err) {

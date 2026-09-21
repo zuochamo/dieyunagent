@@ -14,7 +14,7 @@ struct SymbolEmbedRow {
 }
 
 pub async fn run_embed_symbols(
-    conn: &Connection,
+    conn: &mut Connection,
     cfg: &EmbeddingConfig,
     models_dirs: &[std::path::PathBuf],
     root_hash: &str,

@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, disconnectSshIfConnected, ensureLocalGatewayReady, clearAgentContinueState, restoreKnowledgeMaintenanceContext, cancelBackgroundKnowledgeFallback, saveComposerAgentMode, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, disconnectSshIfConnected, ensureLocalGatewayReady, clearAgentContinueState, restoreKnowledgeMaintenanceContext, cancelBackgroundKnowledgeFallback, saveComposerAgentMode, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta */
 'use strict';
 
 const historyApi = window.diecloud || {};
@@ -702,34 +702,17 @@ async function drainSwitchSessionQueue() {
   }
 }
 
-function extractInputTextFromMetaPrefix(raw) {
-  const s = String(raw || '').trim();
-  if (!s.startsWith('【叠云meta】')) return '';
-  const jsonPart = s.slice('【叠云meta】'.length).split('\n')[0].trim();
-  if (!jsonPart.startsWith('{')) return '';
-  try {
-    const meta = JSON.parse(jsonPart);
-    const inputText = meta && meta.inputText != null ? String(meta.inputText).trim() : '';
-    return inputText;
-  } catch {
-    return '';
-  }
-}
-
+/** 会话标题用：剥离落库 meta 前缀，正文为空时回退到 meta.inputText。 */
 function stripMessageMetaForTitle(raw) {
   const s = String(raw || '').trim();
-  const m = s.match(/^【叠云meta】(\{[\s\S]*?\})\n([\s\S]*)$/);
-  if (m) {
-    const body = String(m[2] || '').trim();
+  const { content, meta } = unpackMessageMeta(s);
+  if (meta) {
+    const body = String(content || '').trim();
     if (body) return body;
-    return extractInputTextFromMetaPrefix(s);
+    return meta.inputText != null ? String(meta.inputText).trim() : '';
   }
-  if (s.startsWith('【叠云meta】')) {
-    const fromMeta = extractInputTextFromMetaPrefix(s);
-    if (fromMeta) return fromMeta;
-    return '';
-  }
-  return s;
+  // 无 meta：整段即正文；但「前缀存在却解析失败」不能把原始 meta 当标题暴露。
+  return s.startsWith(MESSAGE_META_PREFIX) ? '' : s;
 }
 
 function formatSessionTitleSlice(text) {
@@ -761,7 +744,7 @@ function titleFromPreview(preview) {
 function sessionListTitle(s) {
   const storedRaw = stripMessageMetaForTitle(s && s.title);
   const stored =
-    storedRaw && !storedRaw.startsWith('【叠云meta】') && storedRaw !== '新对话' && storedRaw !== '对话'
+    storedRaw && !storedRaw.startsWith(MESSAGE_META_PREFIX) && storedRaw !== '新对话' && storedRaw !== '对话'
       ? storedRaw
       : '';
   if (stored) return formatSessionTitleSlice(stored);

@@ -65,6 +65,8 @@ function buildBuildTools(allTools) {
 }
 
 module.exports = {
+  EXPLORE_TOOL_NAMES,
+  SHELL_TOOL_NAMES,
   buildExploreTools,
   buildShellTools,
   buildBuildTools

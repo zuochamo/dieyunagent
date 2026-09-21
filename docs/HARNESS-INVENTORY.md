@@ -88,6 +88,8 @@
 | `lsp/diagnostics-service.js` | `LSP_SETTINGS_DEFAULTS`：maxFiles 6 / maxPerFile 20 / timeoutMs 8000 | LSP 文件数 · 条数 · 超时的**唯一来源**；`agent-limits.lspDiagMaxChars` 只管注入字符上限 |
 
 > `renderer/renderer-context-engine.js` 的 `CTX_LIMITS`、`agent/session-context.js` 的 `DEFAULT_COMPLETION_CAPS`、`agent/system-prompt-prep.js` 的 `DEFAULT_LIMITS` 已改为**从 `agent-limits.js` 映射**（`ctxAgentLimitDefault` / `completionCapDefault`），不再各存一份默认值；其中的兜底字面量只在 agent-limits 未加载时命中。
+>
+> 运行期刷新同理：`agent-limits` 键（camelCase）→ `CTX_LIMITS` 键（SCREAMING_SNAKE）的映射表 `CTX_LIMITS_FROM_AGENT_LIMITS` **只存在于** `renderer-context-engine.js`。`renderer-agent-limits-runtime.js` 只回答「何时刷」（启动 + 档位/limits 变更事件），`ctxLimitsFor()` 复用同一张表取单次快照；它原先另存一份 14 键表，已删。
 
 #### A1.3 Rust 数字常量与 clamp
 
@@ -119,8 +121,8 @@
 | `guardrails-shared.js:37-49` | `MUTATING_TOOL_NAMES` | 9 | 会改动状态的工具 |
 | `guardrails-shared.js:52-54` | `FILE_WRITE_TOOL_NAMES` | 5 | 会写本地文件的工具 |
 | `guardrails-shared.js:57-77` | `BROWSER_MUTATING_PREFIXES` | 19 | 改页面状态的浏览器工具前缀 |
-| `planner-tool-filters.js:3-22` | `EXPLORE_TOOL_NAMES` | 18 | Explore 只读白名单 |
-| `planner-tool-filters.js:26-36` | `SHELL_TOOL_NAMES` | 9 | Shell 模式白名单 |
+| `planner-tool-filters.js:3-25` | `EXPLORE_TOOL_NAMES` | 21 | Explore 只读白名单（**唯一来源**，经 agent-bundle 镜像给 Renderer） |
+| `planner-tool-filters.js:35-47` | `SHELL_TOOL_NAMES` | 11 | Shell 模式白名单（同上） |
 | `llm-tool-call-fallback.js:20-35` | `TOOL_NAME_ALIASES` | 14 | 解析模型输出里的工具名 |
 | `llm-tool-call-fallback.js:38-89` | `TOOL_PARAM_NAMES` | 50 | 各工具参数名候选表 |
 | `browser/url-policy.js:10-17` | `LOCAL_FILE_EXTENSIONS` | 65 | 本地文件扩展名白名单 |
@@ -170,7 +172,7 @@
 |---|---|---|
 | **黑名单** | `gateway/exec-policy.js:5-14` `BLOCKED_PATTERNS`（rm -rf /、del /s、format、mkfs、写裸设备、fork bomb、shutdown、reboot、-enc） | 10 |
 | 黑名单 | `renderer/renderer-skills-grid.js:184` 分类移除 | 3 |
-| 白名单 | `planner-tool-filters.js` Explore / Shell | 18 / 9 |
+| 白名单 | `planner-tool-filters.js` Explore / Shell | 21 / 11 |
 | 白名单 | `agent/tool-validate.js:271` lsp operation | 4 |
 | 白名单 | `guardrails-shared.js` 改写/文件写工具集 | 9 / 5 |
 | 白名单 | `browser/url-policy.js` 扩展名 / 内网主机 | 65 / 4 |

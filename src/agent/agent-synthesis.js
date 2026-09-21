@@ -264,6 +264,7 @@ async function applyTurnEndSynthesis(opts) {
 module.exports = {
   applyTurnEndSynthesis,
   buildAgentSynthesisBody,
+  buildSynthesisDigest,
   thoughtFallbackFromTrace,
   upsertSynthesisTraceRound
 };

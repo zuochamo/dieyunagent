@@ -1,25 +1,40 @@
 /* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml */
 'use strict';
 
+/** 工具行的稳定签名（不含思考正文） */
+function thinkingToolsStructureSig(tools) {
+  return (tools || [])
+    .map((t) => {
+      const parts = [
+        t.id || '',
+        t.name || '',
+        t.pending ? '1' : '0',
+        t.failed ? '1' : '0'
+      ];
+      parts.push(t.summary || '');
+      parts.push(t.diff ? `${Number(t.diff.added) || 0}:${Number(t.diff.removed) || 0}` : '');
+      return parts.join(':');
+    })
+    .join(';');
+}
+
+/** 子 Agent 卡片内各轮（轮号 + 该轮工具）的稳定签名，卡片内容变化据此触发重绘 */
+function isolatedCardRoundsSig(entry) {
+  const rounds = Array.isArray(entry && entry.rounds) ? entry.rounds : null;
+  if (!rounds) return '';
+  return rounds
+    .map((r) => `${r && r.round != null ? r.round : ''}~${thinkingToolsStructureSig(r && r.tools)}`)
+    .join(';');
+}
+
 /** 结构签名：不含 thought 正文，用于区分「仅流式文本」与「trace 结构变化」 */
 function thinkingTraceStructureSig(trace) {
   if (!trace || !trace.length) return '';
   return trace
     .map((entry, index) => {
       const tools = entry.tools || [];
-      const toolSig = tools
-        .map((t) => {
-          const parts = [
-            t.id || '',
-            t.name || '',
-            t.pending ? '1' : '0',
-            t.failed ? '1' : '0'
-          ];
-          parts.push(t.summary || '');
-          parts.push(t.diff ? `${Number(t.diff.added) || 0}:${Number(t.diff.removed) || 0}` : '');
-          return parts.join(':');
-        })
-        .join(';');
+      const toolSig = thinkingToolsStructureSig(tools);
+      const roundsSig = isolatedCardRoundsSig(entry);
       const prepSig =
         entry.phase === 'prep' && Array.isArray(entry.prepSteps)
           ? typeof agentPrepStepsSig === 'function'
@@ -40,6 +55,8 @@ function thinkingTraceStructureSig(trace) {
         bootSig,
         entry.subagentId || '',
         entry.isolated ? '1' : '0',
+        entry.runDone ? '1' : '0',
+        roundsSig,
         String(entry.visibleContent || '').trim() ? 'v' : '',
         tools.length,
         toolSig
@@ -69,7 +86,12 @@ function clearIncrementalTextState(el) {
 }
 
 function entryHasPendingTools(entry) {
-  return (entry?.tools || []).some((t) => t && t.pending);
+  if ((entry?.tools || []).some((t) => t && t.pending)) return true;
+  // 子 Agent 卡片的工具在 rounds 内（全部内容都在卡片里）
+  if (Array.isArray(entry?.rounds)) {
+    return entry.rounds.some((r) => (r?.tools || []).some((t) => t && t.pending));
+  }
+  return false;
 }
 
 function isPlaceholderThoughtText(text) {
@@ -132,8 +154,42 @@ function isThinkingRoundComplete(entry, index, trace, streaming, streamContent) 
  */
 function traceAnswerPhase(trace) {
   const rows = trace || [];
-  if (!rows.length) return false;
-  return !!rows[rows.length - 1].answerPhase;
+  // 子 Agent 过程卡片是并列插入的，不代表父运行进度：跳过它们找父运行的最后一行。
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (rows[i] && rows[i].isolated) continue;
+    return !!rows[i].answerPhase;
+  }
+  return false;
+}
+
+/** trace 里是否含子 Agent 过程卡片（并发 subagent / planner 执行器）。 */
+function hasIsolatedThinkingEntry(trace) {
+  return Array.isArray(trace) && trace.some((e) => e && e.isolated);
+}
+
+/** 子 Agent 卡片条目：一个子 Agent = 一条 trace，全部轮次在 entry.rounds 内。 */
+function isIsolatedCardEntry(entry) {
+  return !!(entry && entry.isolated && Array.isArray(entry.rounds));
+}
+
+/**
+ * 是否展示 trace 标题（卡片身份标题 + 轮次摘要）。
+ * 子 Agent 卡片的身份标题（类型 + 序号）不跟随「显示标题」开关：并发多张卡片时，
+ * 标题是「一眼认出是哪张卡片」的唯一依据，隐藏后卡片将无法区分。
+ */
+function shouldShowTraceTitle(entry) {
+  return tracePrefs.showTitles !== false || !!(entry && entry.isolated);
+}
+
+/** 卡片是否仍在运行：优先用 Main 推来的 done 标记，其次用「是否还有未完成工具 / 占位文案」兜底。 */
+function isolatedCardRunning(entry) {
+  const rounds = Array.isArray(entry && entry.rounds) ? entry.rounds : [];
+  if (rounds.some((r) => (r && r.tools || []).some((t) => t && t.pending))) return true;
+  if (entry && entry.runDone === true) return false;
+  if (entry && entry.runDone === false) return true;
+  const last = rounds.length ? rounds[rounds.length - 1] : null;
+  const text = String((last && (last.fullThought || last.thought)) || '').trim();
+  return !!text && isPlaceholderThoughtText(text);
 }
 
 function thinkingRoundTitle(entry) {
@@ -142,7 +198,11 @@ function thinkingRoundTitle(entry) {
 }
 
 function thinkingStepKey(entry, index) {
-  return `${index}:${entry.phase || `r${entry.round}`}:${entry.subagentId || ''}`;
+  // 子 Agent 卡片 = 一个 subagentId 一张卡；父循环新增轮次会改变 index，
+  // 必须用 subagentId 做稳定键，否则父循环每推进一步，用户手动的展开/折叠状态就会丢。
+  // 与 thinkingStepDomKey 对齐。
+  if (entry.subagentId) return `sa:${entry.subagentId}`;
+  return `${index}:${entry.phase || `r${entry.round}`}:`;
 }
 
 function getThinkingUiState(hostEl) {
@@ -200,6 +260,7 @@ function bindThinkingOuterToggle(outer, uiState) {
  *   3. 本轮确认不再调工具（正文阶段）→ 折叠
  *   4. 仍在思考（流式 / run 未结束）→ 展开
  *   5. 本轮结束 → 按原逻辑折叠
+ * 例外：含子 Agent 过程卡片的思考区不自动折叠（卡片就是「要看的过程」），仍可手动折叠。
  */
 function resolveThinkingOuterOpen({
   streaming,
@@ -210,10 +271,11 @@ function resolveThinkingOuterOpen({
   uiState
 }) {
   if (keepOpen) return true;
+  const hasCards = hasIsolatedThinkingEntry(trace);
   if (streaming && uiState?.userOpen != null) return uiState.userOpen;
-  if (traceAnswerPhase(trace)) return false;
+  if (traceAnswerPhase(trace)) return hasCards;
   if (streaming || uiState?.liveRun) return true;
-  if (effectiveCollapseAll) return false;
+  if (effectiveCollapseAll) return hasCards;
   return trace.some((e, i) =>
     shouldDefaultOpenThinkingEntry(e, trace, streaming, streamContent, uiState)
   );
@@ -392,7 +454,7 @@ function joinSummaryParts(primary, suffix) {
 }
 
 /**
- * @returns {{ primary: string, suffix: string, combined: string }}
+ * @returns {{ name?: string, primary: string, suffix: string, combined: string }}
  */
 function thinkingRoundSummaryParts(entry, index, trace) {
   const toolN = (entry.tools || []).length;
@@ -401,11 +463,22 @@ function thinkingRoundSummaryParts(entry, index, trace) {
   const preview = reasoningPreviewFromEntry(entry, index, trace);
   const toolSuffix = toolSuffixFromEntry(entry);
 
-  if (entry.isolated && phase.startsWith('执行器 ')) {
-    const primary =
-      preview ||
-      (pendingTools ? `${phase} · 运行中…` : toolN ? `${phase} · ${toolN} 个工具` : `${phase} · 运行中…`);
-    return { primary, suffix: toolSuffix, combined: joinSummaryParts(primary, toolSuffix) };
+  if (entry.isolated) {
+    // 子 Agent 卡片：标题固定显示「子 Agent 类型 + 序号」（entry.phase，由 live-loop-trace
+    // 统一拼装），后面接最新实时思考预览与运行状态/步数。
+    const rounds = Array.isArray(entry.rounds) ? entry.rounds : [];
+    const stepN = rounds.length
+      ? rounds.reduce((n, r) => n + ((r && r.tools) || []).length, 0)
+      : toolN;
+    const running = isolatedCardRunning(entry);
+    const name = phase || '子 Agent';
+    const status = running ? '运行中…' : stepN ? `已完成 · ${stepN} 步` : '已完成';
+    return {
+      name,
+      primary: preview,
+      suffix: status,
+      combined: joinSummaryParts(joinSummaryParts(name, preview), status)
+    };
   }
 
   if (!entry.isolated && phase.startsWith('调度 ·')) {
@@ -433,8 +506,11 @@ function thinkingRoundSummaryParts(entry, index, trace) {
     return { primary: toolSuffix, suffix: '', combined: toolSuffix };
   }
 
+  // 不用「执行工具…」占位：没有可用预览时退回真实轮次标题（phase），
+  // 工具进度由工具行自己表达，避免摘要里出现无信息量的假文案。
   if (pendingTools) {
-    return { primary: '执行工具…', suffix: '', combined: '执行工具…' };
+    const pendingTitle = thinkingRoundTitle(entry);
+    return { primary: pendingTitle, suffix: '', combined: pendingTitle };
   }
 
   const title = thinkingRoundTitle(entry);
@@ -450,41 +526,42 @@ function syncThinkingRoundSummaryLabel(summary, entry, index, trace) {
   if (!summary) return false;
   summary
     .querySelectorAll(
-      '.msg-thinking-round-summary-preview, .msg-thinking-round-summary-tools, .msg-thinking-round-summary-sep, .msg-thinking-round-summary-label'
+      '.msg-thinking-subagent-name, .msg-thinking-round-summary-preview, .msg-thinking-round-summary-tools, .msg-thinking-round-summary-sep, .msg-thinking-round-summary-label'
     )
     .forEach((el) => el.remove());
 
-  if (tracePrefs.showTitles === false) return false;
+  if (!shouldShowTraceTitle(entry)) return false;
 
   const cpBtn = summary.querySelector('.msg-checkpoint-restore-btn');
-  const { primary, suffix } = thinkingRoundSummaryParts(entry, index, trace);
+  const { name, primary, suffix } = thinkingRoundSummaryParts(entry, index, trace);
   const insertNode = (node) => {
     if (cpBtn) summary.insertBefore(node, cpBtn);
     else summary.appendChild(node);
   };
 
-  if (primary) {
-    const previewSpan = document.createElement('span');
-    previewSpan.className = 'msg-thinking-round-summary-preview';
-    previewSpan.textContent = primary;
-    previewSpan.title = primary;
-    insertNode(previewSpan);
-  }
-  if (suffix) {
-    if (primary) {
+  let wrote = false;
+  const writePart = (cls, text) => {
+    if (!text) return;
+    if (wrote) {
       const sep = document.createElement('span');
       sep.className = 'msg-checkpoint-restore-sep msg-thinking-round-summary-sep';
       sep.textContent = ' · ';
       insertNode(sep);
     }
-    const toolsSpan = document.createElement('span');
-    toolsSpan.className = 'msg-thinking-round-summary-tools';
-    toolsSpan.textContent = suffix;
-    toolsSpan.title = suffix;
-    insertNode(toolsSpan);
-  }
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = text;
+    span.title = text;
+    insertNode(span);
+    wrote = true;
+  };
 
-  return !!(primary || suffix);
+  // 子 Agent 卡片的 name = 「类型 + 序号」标题；普通轮次没有 name。
+  writePart('msg-thinking-subagent-name', name);
+  writePart('msg-thinking-round-summary-preview', primary);
+  writePart('msg-thinking-round-summary-tools', suffix);
+
+  return wrote;
 }
 
 function shouldShowCheckpointRestore(entry, { checkpointRestore, undoTurnId, complete }) {
@@ -550,6 +627,8 @@ function resolveThinkingStepOpen(
   const key = thinkingStepKey(entry, index);
   if (uiState?.expanded.has(key)) return true;
   if (uiState?.collapsed.has(key)) return false;
+  // 子 Agent 过程卡片默认展开，且不随「回合结束 / 正文阶段」自动折叠（用户手动折叠仍生效）。
+  if (entry.isolated) return true;
   if (streaming) return true;
   if (collapseAll) return false;
   if (tracePrefs.expandShell && entryHasShellTool(entry)) return true;
@@ -565,7 +644,7 @@ function shouldDefaultOpenThinkingEntry(
   uiState = null
 ) {
   if (streaming) return true;
-  if (entry.isolated && entry.worker) return true;
+  if (entry.isolated) return true;
   if (tracePrefs.expandShell && entryHasShellTool(entry)) return true;
   if (tracePrefs.expandEdit && entryHasEditTool(entry)) return true;
   return false;
@@ -605,9 +684,10 @@ function bindDetailsUserIntent(el, onUserIntent) {
 
 function thinkingStepDomKey(entry, index) {
   const sid = entry.subagentId ? String(entry.subagentId) : '';
+  if (sid) return `sa:${sid}`;
   const round = entry.round != null ? entry.round : index + 1;
   const phase = String(entry.phase || `r${round}`);
-  return sid ? `sa:${sid}:r${round}` : `${phase}::${round}::${index}`;
+  return `${phase}::${round}::${index}`;
 }
 
 function appendInlineToolDiff(parent, tool, { roundComplete = false } = {}) {
@@ -923,6 +1003,80 @@ function fillThinkingRoundBeat(beat, entry, index, trace, streaming, streamConte
   beat.classList.toggle('is-empty', !beat.childElementCount);
 }
 
+/**
+ * 卡片内单轮：思考正文 + 工具行。全部落在卡片内部（不再有卡片外的 beat），
+ * 随 rounds 更新实时刷新（工具 pending → 完成、思考正文流式增长）。
+ */
+function fillIsolatedSubround(block, roundData, isLast, running) {
+  const round = roundData || {};
+  let thoughtEl = block.querySelector(':scope > .msg-thinking-thought');
+  if (tracePrefs.showReasoning) {
+    const text = String(round.fullThought || round.thought || '').trim();
+    const display = text || (isLast && running ? '思考中…' : '');
+    if (display) {
+      if (!thoughtEl) {
+        thoughtEl = document.createElement('div');
+        thoughtEl.className = 'msg-thinking-thought';
+        block.insertBefore(thoughtEl, block.firstChild);
+      }
+      updateIncrementalTextContent(thoughtEl, display);
+    } else if (thoughtEl) {
+      clearIncrementalTextState(thoughtEl);
+      thoughtEl.remove();
+    }
+  } else if (thoughtEl) {
+    clearIncrementalTextState(thoughtEl);
+    thoughtEl.remove();
+  }
+
+  const tools = round.tools || [];
+  let ul = block.querySelector(':scope > .msg-thinking-tools');
+  if (tools.length) {
+    if (!ul) {
+      ul = document.createElement('ul');
+      ul.className = 'msg-thinking-tools';
+      block.appendChild(ul);
+    }
+    appendThinkingToolRows(ul, tools, { roundComplete: !isLast || !running });
+  } else if (ul) {
+    ul.remove();
+  }
+  block.classList.toggle('is-empty', !block.childElementCount);
+}
+
+/**
+ * 子 Agent 卡片正文：一个子 Agent 的全部轮次都在卡片里，按轮顺序渲染。
+ * 正文是固定高度的滚动容器（见 styles.css .msg-thinking-subagent-body），
+ * 所以运行中要跟着最新一轮走：仅当用户本来就贴在底部时才自动贴底，
+ * 用户主动上翻看历史时不抢滚动位置。
+ */
+function fillIsolatedCardBody(body, entry) {
+  const rounds = Array.isArray(entry.rounds) ? entry.rounds : [];
+  const running = isolatedCardRunning(entry);
+  const followTail = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+  const seen = new Set();
+  rounds.forEach((r, i) => {
+    const key = String(r && r.round != null ? r.round : i + 1);
+    seen.add(key);
+    let block = body.querySelector(`:scope > .msg-thinking-subround[data-subround="${key}"]`);
+    if (!block) {
+      block = document.createElement('div');
+      block.className = 'msg-thinking-subround';
+      block.dataset.subround = key;
+      body.appendChild(block);
+    }
+    fillIsolatedSubround(block, r, i === rounds.length - 1, running);
+  });
+  body.querySelectorAll(':scope > .msg-thinking-subround').forEach((el) => {
+    if (!seen.has(el.dataset.subround || '')) el.remove();
+  });
+  body.classList.toggle('is-empty', !rounds.length);
+  body.classList.toggle('is-multi-round', rounds.length > 1);
+  if (running && followTail && body.scrollHeight > body.clientHeight) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
 function mountThinkingRoundDetails(
   entry,
   index,
@@ -946,7 +1100,7 @@ function mountThinkingRoundDetails(
   const details = document.createElement('details');
   details.className = 'msg-thinking-round-details';
   details.dataset.stepKey = wrap.dataset.stepKey;
-  if (tracePrefs.showTitles === false) details.classList.add('msg-thinking-no-title');
+  if (!shouldShowTraceTitle(entry)) details.classList.add('msg-thinking-no-title');
   if (uiState) {
     bindDetailsUserIntent(details, (open) => {
       if (open) {
@@ -977,8 +1131,9 @@ function mountThinkingRoundDetails(
 
   const summary = document.createElement('summary');
   summary.className = 'msg-thinking-round-summary';
-  const combinedLabel = tracePrefs.showTitles ? thinkingRoundSummaryLabel(entry, index, trace) : '';
-  summary.title = tracePrefs.showTitles ? combinedLabel || thinkingRoundTitle(entry) : '';
+  const showTitle = shouldShowTraceTitle(entry);
+  const combinedLabel = showTitle ? thinkingRoundSummaryLabel(entry, index, trace) : '';
+  summary.title = showTitle ? combinedLabel || thinkingRoundTitle(entry) : '';
   const hasLabel = syncThinkingRoundSummaryLabel(summary, entry, index, trace);
   if (shouldShowCheckpointRestore(entry, { checkpointRestore, undoTurnId, complete })) {
     appendCheckpointRestoreLink(summary, {
@@ -988,12 +1143,23 @@ function mountThinkingRoundDetails(
     });
   }
   if (entry.isolated) details.classList.add('msg-thinking-subagent');
-  if (entry.parallel && entry.worker) details.classList.add('msg-thinking-parallel');
+  if (entry.parallel) details.classList.add('msg-thinking-parallel');
+  details.classList.toggle('is-running', entry.isolated ? isolatedCardRunning(entry) : false);
   details.appendChild(summary);
+
+  if (isIsolatedCardEntry(entry)) {
+    // 子 Agent 卡片：全部内容（思考 + 工具）都在卡片内部，没有卡片外的 beat。
+    const body = document.createElement('div');
+    body.className = 'msg-thinking-round msg-thinking-subagent-body';
+    fillIsolatedCardBody(body, entry);
+    details.appendChild(body);
+    wrap.append(details);
+    return wrap;
+  }
 
   const block = document.createElement('div');
   block.className = 'msg-thinking-round';
-  const last = streaming && index === trace.length - 1;
+  const last = !entry.isolated && streaming && index === trace.length - 1;
   fillThinkingRoundBlock(block, entry, index, trace, last, streamContent);
   details.appendChild(block);
   const beat = document.createElement('div');
@@ -1027,15 +1193,23 @@ function syncThinkingRoundDetails(
 
   const summary = details.querySelector('.msg-thinking-round-summary');
   if (summary) {
-    const combinedLabel = tracePrefs.showTitles ? thinkingRoundSummaryLabel(entry, index, trace) : '';
-    summary.title = tracePrefs.showTitles ? combinedLabel || thinkingRoundTitle(entry) : '';
+    const showTitle = shouldShowTraceTitle(entry);
+    const combinedLabel = showTitle ? thinkingRoundSummaryLabel(entry, index, trace) : '';
+    summary.title = showTitle ? combinedLabel || thinkingRoundTitle(entry) : '';
     syncThinkingRoundSummaryLabel(summary, entry, index, trace);
   }
 
   details.classList.toggle('msg-thinking-subagent', !!entry.isolated);
-  details.classList.toggle('msg-thinking-parallel', !!(entry.parallel && entry.worker));
+  details.classList.toggle('msg-thinking-parallel', !!entry.parallel);
+  details.classList.toggle('is-running', entry.isolated ? isolatedCardRunning(entry) : false);
 
-  const last = streaming && index === trace.length - 1;
+  if (isIsolatedCardEntry(entry)) {
+    const cardBody = details.querySelector('.msg-thinking-round.msg-thinking-subagent-body');
+    if (cardBody) fillIsolatedCardBody(cardBody, entry);
+    return;
+  }
+
+  const last = !entry.isolated && streaming && index === trace.length - 1;
   const block = details.querySelector('.msg-thinking-round');
   if (block) {
     fillThinkingRoundBlock(block, entry, index, trace, last, streamContent);

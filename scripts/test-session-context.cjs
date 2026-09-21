@@ -22,7 +22,10 @@ const {
   extractInTurnLoopTail,
   reprojectContinueLoopMessages,
   isSyntheticLoopUserContent,
-  contentCharLen
+  contentCharLen,
+  packMessageMeta,
+  unpackMessageMeta,
+  slimAttachmentsForPersist
 } = require('../src/agent/session-context');
 const { AGENT_LIMITS_DEFAULTS } = require('../src/agent/agent-limits');
 
@@ -471,5 +474,78 @@ assert(
 
 const nested = buildCurrentTaskText(buildCurrentTaskText('游戏还是很卡'));
 assert((nested.match(/游戏还是很卡/g) || []).length === 1, 'current-task wrap is not nested');
+
+// 落库 meta：附件只存引用，meta 不收字节。
+//
+// 实库里曾出现 assistant meta 带 attachments[]._pasteBase64 + _base64（单行 2.9MB，
+// 123 行共 38.4MB）：根因是 renderer 把内存里的暂存附件整份展开进 assistant meta，
+// 而 packAssistantMeta 不过滤。现在打包只有 packMessageMeta 一处，且「字节不得进
+// meta」是硬约束，不依赖调用点自觉。
+const hugeBase64 = 'A'.repeat(1_453_696);
+const persistedUser = packMessageMeta(
+  '修一下这个报错',
+  {
+    inputText: '修一下这个报错',
+    modeLabel: 'Agent',
+    attachments: [
+      {
+        path: '/tmp/a.png',
+        absolutePath: 'C:/tmp/a.png',
+        originalName: 'a.png',
+        size: 1090272,
+        mime: 'image/png',
+        previewUrl: 'blob:http://localhost/9f2c',
+        _pasteBase64: hugeBase64,
+        _base64: hugeBase64
+      }
+    ]
+  },
+  { role: 'user' }
+);
+assert(persistedUser.length < 1000, 'user meta never carries bytes');
+assert(!persistedUser.includes('AAAA'), 'user meta drops base64');
+assert(!persistedUser.includes('blob:'), 'user meta drops object URLs');
+const userUnpacked = unpackMessageMeta(persistedUser);
+assert(userUnpacked.content === '修一下这个报错', 'user body round-trips');
+assert(userUnpacked.meta.attachments.length === 1, 'user attachment reference is kept');
+assert(userUnpacked.meta.attachments[0].path === '/tmp/a.png', 'attachment path is kept');
+assert(userUnpacked.meta.attachments[0].size === 1090272, 'attachment size stays a number');
+assert(!('modeLabel' in userUnpacked.meta), 'user meta does not pick up composer turn fields');
+
+const persistedAssistant = packMessageMeta('改完了。', {
+  modeLabel: 'Agent',
+  modelId: 'deepseek-flash',
+  ts: 1789943793526,
+  inputText: '修一下这个报错',
+  attachments: [{ path: '/tmp/a.png', _pasteBase64: hugeBase64 }],
+  previewUrl: `data:image/png;base64,${hugeBase64}`
+});
+assert(persistedAssistant.length < 500, 'assistant meta never carries bytes');
+assert(!persistedAssistant.includes('AAAA'), 'assistant meta drops base64');
+assert(!persistedAssistant.includes('data:'), 'assistant meta drops data URLs');
+const assistantUnpacked = unpackMessageMeta(persistedAssistant);
+assert(assistantUnpacked.content === '改完了。', 'assistant body round-trips');
+assert(assistantUnpacked.meta.modelId === 'deepseek-flash', 'turn metadata survives');
+assert(!('attachments' in assistantUnpacked.meta), 'assistant does not duplicate the user attachment');
+assert(!('previewUrl' in assistantUnpacked.meta), 'ephemeral preview URL is dropped');
+
+const bare = unpackMessageMeta('裸正文');
+assert(bare.content === '裸正文' && bare.meta === null, 'plain content has no meta');
+assert(
+  unpackMessageMeta('【叠云meta】{坏 json\n正文').content.includes('坏 json'),
+  'broken meta falls back to raw text'
+);
+assert(packMessageMeta('正文', null) === '正文', 'no meta means untouched content');
+assert(packMessageMeta('正文', {}) === '正文', 'empty meta does not add a prefix');
+
+const slimmedAtts = slimAttachmentsForPersist([
+  { absolutePath: 'C:/x.png', _pasteBase64: hugeBase64, previewUrl: 'blob:x' },
+  { _pasteBase64: hugeBase64 },
+  null
+]);
+assert(
+  slimmedAtts.length === 1 && slimmedAtts[0].absolutePath === 'C:/x.png',
+  'slim keeps only reference-shaped attachments'
+);
 
 console.log('test-session-context.cjs ok');

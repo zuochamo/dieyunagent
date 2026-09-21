@@ -86,24 +86,61 @@ const CTX_LIMITS = {
   LSP_DIAG_MAX_CHARS: ctxAgentLimitDefault('lspDiagMaxChars', 10000)
 };
 
-function ctxLimitsFor(opts = {}) {
+/**
+ * agent-limits 键（camelCase）→ CTX_LIMITS 键（SCREAMING_SNAKE）的**唯一**映射表。
+ *
+ * 两条路径共用这一份，勿在别处再抄：
+ *   - 加载期：CTX_LIMITS 初值经 ctxAgentLimitDefault() 从 AGENT_LIMITS_DEFAULTS 派生；
+ *   - 运行期：applyAgentLimitsTo() 按当前上下文档位把 getAgentLimits() 刷进目标对象
+ *     （renderer-agent-limits-runtime.js 的启动/事件刷新、ctxLimitsFor() 的单次快照）。
+ *
+ * 此处曾与 renderer-agent-limits-runtime.js 各存一份 14 键表；漏一个键的表现是
+ * 「设置里改了不生效」，且只在某个档位下复现 —— 极难定位。
+ */
+const CTX_LIMITS_FROM_AGENT_LIMITS = [
+  ['ctxAgentToolCallLimit', 'AGENT_TOOL_CALL_LIMIT'],
+  ['toolResultMaxJson', 'TOOL_RESULT_MAX_JSON'],
+  ['codebaseSnippetMax', 'CODEBASE_SNIPPET_MAX'],
+  ['codebaseAutoLimit', 'CODEBASE_AUTO_LIMIT'],
+  ['openFilesMax', 'OPEN_FILES_MAX'],
+  ['filePreviewMaxChars', 'FILE_PREVIEW_MAX_CHARS'],
+  ['completionHistoryMaxChars', 'COMPLETION_HISTORY_MAX_CHARS'],
+  ['completionMessageMaxChars', 'COMPLETION_MESSAGE_MAX_CHARS'],
+  ['completionLastUserMaxChars', 'COMPLETION_LAST_USER_MAX_CHARS'],
+  ['completionTurnRideMaxChars', 'COMPLETION_TURN_RIDE_MAX_CHARS'],
+  ['completionRecentTurns', 'COMPLETION_RECENT_TURNS'],
+  ['completionFoldedMaxChars', 'COMPLETION_FOLDED_MAX_CHARS'],
+  ['llmRequestMaxChars', 'LLM_REQUEST_MAX_CHARS'],
+  ['lspDiagMaxChars', 'LSP_DIAG_MAX_CHARS']
+];
+
+/**
+ * 把 agent-limits 当前档位的值就地刷进 target 并返回它。
+ *
+ * @param {Record<string, unknown>} target
+ * @param {object} [opts] 透传 getAgentLimits（tierId / editing 等）
+ * @returns {Record<string, unknown>}
+ */
+function applyAgentLimitsTo(target, opts = {}) {
+  const out = target && typeof target === 'object' ? target : {};
   const L = typeof getAgentLimits === 'function' ? getAgentLimits(opts) : {};
-  const out = { ...CTX_LIMITS };
-  if (L.ctxAgentToolCallLimit != null) out.AGENT_TOOL_CALL_LIMIT = L.ctxAgentToolCallLimit;
-  if (L.toolResultMaxJson != null) out.TOOL_RESULT_MAX_JSON = L.toolResultMaxJson;
-  if (L.codebaseSnippetMax != null) out.CODEBASE_SNIPPET_MAX = L.codebaseSnippetMax;
-  if (L.codebaseAutoLimit != null) out.CODEBASE_AUTO_LIMIT = L.codebaseAutoLimit;
-  if (L.openFilesMax != null) out.OPEN_FILES_MAX = L.openFilesMax;
-  if (L.filePreviewMaxChars != null) out.FILE_PREVIEW_MAX_CHARS = L.filePreviewMaxChars;
-  if (L.completionHistoryMaxChars != null) out.COMPLETION_HISTORY_MAX_CHARS = L.completionHistoryMaxChars;
-  if (L.completionMessageMaxChars != null) out.COMPLETION_MESSAGE_MAX_CHARS = L.completionMessageMaxChars;
-  if (L.completionLastUserMaxChars != null) out.COMPLETION_LAST_USER_MAX_CHARS = L.completionLastUserMaxChars;
-  if (L.completionTurnRideMaxChars != null) out.COMPLETION_TURN_RIDE_MAX_CHARS = L.completionTurnRideMaxChars;
-  if (L.completionRecentTurns != null) out.COMPLETION_RECENT_TURNS = L.completionRecentTurns;
-  if (L.completionFoldedMaxChars != null) out.COMPLETION_FOLDED_MAX_CHARS = L.completionFoldedMaxChars;
-  if (L.llmRequestMaxChars != null) out.LLM_REQUEST_MAX_CHARS = L.llmRequestMaxChars;
-  if (L.lspDiagMaxChars != null) out.LSP_DIAG_MAX_CHARS = L.lspDiagMaxChars;
+  for (const [srcKey, dstKey] of CTX_LIMITS_FROM_AGENT_LIMITS) {
+    if (L[srcKey] != null) out[dstKey] = L[srcKey];
+  }
   return out;
+}
+
+/**
+ * 刷新全局 CTX_LIMITS 到当前档位。
+ * 名字是渲染器全局契约（renderer-encoding-params.js 多处调用），勿改。
+ */
+function applyAgentLimitsToRuntime(opts = {}) {
+  return applyAgentLimitsTo(CTX_LIMITS, opts);
+}
+
+/** 单次快照：不改全局，供按档位/按轮次取值的调用点使用。 */
+function ctxLimitsFor(opts = {}) {
+  return applyAgentLimitsTo({ ...CTX_LIMITS }, opts);
 }
 
 function textHasCodebaseMention(text) {
@@ -872,6 +909,9 @@ async function fetchWorkspaceDiagnosticsContext(userQuery, opts = {}) {
 
 window.CTX_LIMITS = CTX_LIMITS;
 window.ctxLimitsFor = ctxLimitsFor;
+// applyAgentLimitsTo 是内部助手（仅 ctxLimitsFor / applyAgentLimitsToRuntime 消费），不导出；
+// applyAgentLimitsToRuntime 是渲染器全局契约：renderer-encoding-params.js 多处调用。
+window.applyAgentLimitsToRuntime = applyAgentLimitsToRuntime;
 window.estimateFullContextUsage = estimateFullContextUsage;
 window.estimateToolsTokens = estimateToolsTokens;
 window.estimateMessagesTokens = estimateMessagesTokens;

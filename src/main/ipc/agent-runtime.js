@@ -2,6 +2,11 @@
 
 const { runRustAgentLoop } = require('../../agent/rust-loop-runner');
 const { createSubagentRunner } = require('../../agent/subagent-runner');
+const {
+  createLiveLoopTraceTracker,
+  mapLoopTraceToUi,
+  mergeIsolatedCards
+} = require('../../agent/live-loop-trace');
 const { createMainPlannerRunner } = require('../../agent/planner-runner-main');
 const { createMainCompactionAgent, getEffectiveInputBudget } = require('../../agent/compaction-main');
 const { summarizeTelemetry } = require('../../agent/tool-telemetry');
@@ -247,34 +252,121 @@ function registerAgentRuntimeIpc(ctx) {
       // 只读并发调研子 Agent。Agent 主循环是「协调者」，Renderer 已在工具集里注入 subagent；
       // 这里只负责执行：子 Agent 跑一次完整的内层循环，工具集是 Explore 只读白名单（无 subagent，
       // 因此深度恒为 1），只有摘要回注主上下文。
+      //
+      // 过程可见性：子 Agent 的内层 phase 经 live-loop-trace 装配成「隔离 trace 卡片」，
+      // 走独立通道 agent:subagent-trace 推给 Renderer —— 不混进父 agent:rust-loop-phase，
+      // 因为子运行的 runId 会覆盖父 entry.runId（外层 onPhase 用 data.runId 回写），
+      // 串了会导致取消打错目标。子 Agent 的正文仍不回父上下文，只走卡片。
+      const subagentTraceState = new Map();
+      const emitSubagentTrace = (meta, entries, streamContent, done) => {
+        live.safeWebContentsSend(evt.sender, 'agent:subagent-trace', {
+          cancelToken,
+          subagentId: meta.subagentId || '',
+          label: meta.label || '',
+          index: Number(meta.index) || 0,
+          parallel: !!meta.parallel,
+          done: !!done,
+          entries: Array.isArray(entries) ? entries : [],
+          streamContent: streamContent || ''
+        });
+      };
+      // 把并发标记写进卡片条目：条目构建时读到的 meta.parallel 可能落后一次事件，
+      // 这里统一重盖，保证卡片上的并发样式与实际并发数一致。
+      const stampParallel = (entries, parallel) =>
+        (Array.isArray(entries) ? entries : []).map((e) => ({ ...e, parallel: !!parallel }));
+      // 并发判定：同一父运行里同时在跑的子 Agent 多于一个 → 卡片标记为并发
+      // （首个启动时还不知道后面会不会并行，故新卡加入/退出时统一回推一次）。
+      const resyncSubagentParallel = () => {
+        const parallel = subagentTraceState.size > 1;
+        for (const st of subagentTraceState.values()) {
+          const changed = !!st.meta.parallel !== parallel;
+          st.meta.parallel = parallel;
+          st.entries = stampParallel(st.entries, parallel);
+          if (!changed) continue;
+          emitSubagentTrace(st.meta, st.entries, st.streamContent, false);
+        }
+      };
+      const finalizeSubagentTrace = (state, loopResult) => {
+        const meta = state.meta;
+        // 收尾：把 Rust 的最终 trace 合进「实时卡片」，保持同一个条目（一个子 Agent 一张卡片）。
+        const rustCard = mapLoopTraceToUi((loopResult && loopResult.trace) || [], meta)[0] || null;
+        const liveCard = (state.entries || [])[0] || null;
+        const card = rustCard && liveCard ? mergeIsolatedCards(liveCard, rustCard) : rustCard || liveCard;
+        const entries = card ? [card] : state.entries || [];
+        state.entries = entries;
+        if (loopResult && loopResult.content) {
+          state.streamContent = String(loopResult.content).slice(0, 800);
+        }
+        meta.parallel = subagentTraceState.size > 1;
+        emitSubagentTrace(meta, entries, state.streamContent, true);
+        subagentTraceState.delete(meta.subagentId);
+        resyncSubagentParallel();
+      };
       const subagentRunner = createSubagentRunner({
         allTools: startParams.tools,
         model: sessionModel,
         userDataPath: live.userData,
         contextTierId: ctx.contextTierId,
         signal: abortController.signal,
-        runChildLoop: async (req) => {
-          return runRustAgentLoop({
-            coreBridge: live.coreBridge,
-            llm: apiCfg,
-            startParams: {
-              ...startParams,
-              messages: req.messages,
-              tools: req.tools,
-              maxRounds: req.maxRounds,
-              maxToolCalls: req.maxToolCalls
-            },
-            settings,
-            userData: live.userData,
-            contextTierId: ctx.contextTierId,
-            // 子 Agent 无 UI 通道：既省流式开销，也避免它的 runId 覆盖父运行的 entry.runId
-            // （外层 onPhase 会用 data.runId 回写 entry，串了就会导致取消打错目标）。
-            useStream: false,
-            onPhase: () => {},
-            signal: abortController.signal,
-            delegateTool: (n, a) =>
-              toolBridge.executeAgentTool(n, a, { ...ctx, subagentDepth: 1 })
+        runChildLoop: async (req, meta) => {
+          const state = {
+            meta: { ...(meta || {}), parallel: false },
+            entries: [],
+            streamContent: ''
+          };
+          const subagentId = state.meta.subagentId || '';
+          const tracker = createLiveLoopTraceTracker(state.meta, {
+            onUpdate: (entries, content) => {
+              state.entries = entries;
+              if (content) state.streamContent = content;
+              subagentTraceState.set(subagentId, state);
+              resyncSubagentParallel();
+              emitSubagentTrace(state.meta, state.entries, state.streamContent, false);
+            }
           });
+          tracker.handlePhase('start', {});
+          let loopResult = null;
+          try {
+            loopResult = await runRustAgentLoop({
+              coreBridge: live.coreBridge,
+              llm: apiCfg,
+              startParams: {
+                ...startParams,
+                messages: req.messages,
+                tools: req.tools,
+                maxRounds: req.maxRounds,
+                maxToolCalls: req.maxToolCalls
+              },
+              settings,
+              userData: live.userData,
+              contextTierId: ctx.contextTierId,
+              // 子 Agent 的正文不回父上下文，只走卡片；phase 单独转发给 tracker。
+              useStream: false,
+              onPhase: (phaseName, data) => {
+                try {
+                  tracker.handlePhase(phaseName, data || {});
+                } catch {
+                  // 卡片装配失败不应影响子 Agent 执行
+                }
+              },
+              signal: abortController.signal,
+              delegateTool: (n, a) =>
+                toolBridge.executeAgentTool(n, a, { ...ctx, subagentDepth: 1 })
+            });
+          } finally {
+            // 先补发节流中未到达的一帧，再落收尾卡片：否则最后 ~120ms 的流式文本会被节流丢掉
+            try {
+              tracker.dispose();
+            } catch {
+              // ignore
+            }
+            try {
+              finalizeSubagentTrace(state, loopResult);
+            } catch {
+              // ignore
+            }
+          }
+          return loopResult;
         }
       });
       const protocolAbort = () => {

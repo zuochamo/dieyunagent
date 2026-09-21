@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS, SUBAGENT_TOOL */
 'use strict';
 
 function isDieyunCoreReady() {
@@ -205,7 +205,7 @@ function mapRustAgentTrace(rustTrace, prefixTrace) {
     });
     const row = {
       round: r.round,
-      phase: r.phase || (r.round ? `第 ${r.round} 轮` : '思考'),
+      phase: r.phase || '',
       thought: sanitizeTraceThought(r.thought || '', out.map((e) => e.fullThought || e.thought)),
       fullThought: sanitizeTraceThought(r.fullThought || r.thought || '', out.map((e) => e.fullThought || e.thought)),
       subagentId: r.subagentId,
@@ -347,6 +347,35 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
   let displayedTrace = trace.slice();
   let liveContent = '';
   let frozenRounds = [];
+  // 主循环并发 subagent 的「过程卡片」：Main 经 agent:subagent-trace 按 subagentId 分桶推送
+  // （见 main/ipc/agent-runtime.js）。它们不进 displayedTrace —— 父运行收尾会用 Rust trace
+  // 整体覆盖 displayedTrace，所以只在推给 UI 前合并一次。
+  const isolatedSubagentTrace = new Map();
+  const SUBAGENT_TOOL_NAME =
+    typeof SUBAGENT_TOOL !== 'undefined' && SUBAGENT_TOOL && SUBAGENT_TOOL.function
+      ? SUBAGENT_TOOL.function.name
+      : 'subagent';
+  const mergeIsolatedSubagentTrace = (traceRows) => {
+    if (!isolatedSubagentTrace.size) return traceRows;
+    const base = Array.isArray(traceRows) ? traceRows : [];
+    const cards = [];
+    for (const entries of isolatedSubagentTrace.values()) {
+      if (Array.isArray(entries) && entries.length) cards.push(...entries);
+    }
+    if (!cards.length) return base;
+    // 卡片紧跟「派发 subagent 的那一轮」之后：父循环后续再追加轮次也不会打乱时序。
+    let anchor = -1;
+    for (let i = base.length - 1; i >= 0; i -= 1) {
+      const toolRows = base[i] && base[i].tools;
+      if (Array.isArray(toolRows) && toolRows.some((t) => t && t.name === SUBAGENT_TOOL_NAME)) {
+        anchor = i;
+        break;
+      }
+    }
+    const out = base.slice();
+    out.splice(anchor >= 0 ? anchor + 1 : out.length, 0, ...cards);
+    return out;
+  };
   const checkpointByRound = new Map();
   let rustLoopFailedCheckpoint = null;
   let tokenUsage = options.tokenUsage
@@ -410,16 +439,19 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
 
   const notifyRustProgress = (traceRows, streamContent, { immediate = false } = {}) => {
     if (typeof onProgress !== 'function') return traceRows;
+    // 推给 UI 前合并子 Agent 过程卡片；返回值仍是未合并的 traceRows，
+    // 否则卡片会被写回 displayedTrace 并在后续每帧重复追加。
+    const emitRows = mergeIsolatedSubagentTrace(traceRows);
     if (immediate) {
-      pendingRustProgress = { traceRows, streamContent: streamContent || '' };
+      pendingRustProgress = { traceRows: emitRows, streamContent: streamContent || '' };
       lastRustProgressStructureSig =
         typeof thinkingTraceStructureSig === 'function'
-          ? thinkingTraceStructureSig(traceRows)
-          : String((traceRows || []).length);
+          ? thinkingTraceStructureSig(emitRows)
+          : String((emitRows || []).length);
       flushRustProgress();
       return traceRows;
     }
-    scheduleRustProgress(traceRows, streamContent);
+    scheduleRustProgress(emitRows, streamContent);
     return traceRows;
   };
 
@@ -595,7 +627,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     frozenRounds.push({
       ...live,
       tools: toolsRows || live.tools || [],
-      thought: live.thought || live.fullThought || '执行工具…',
+      thought: live.thought || live.fullThought || '',
       fullThought: live.fullThought || live.thought || ''
     });
     pushLive('…', []);
@@ -610,6 +642,25 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     }
     return false;
   };
+
+  const offSubagentTrace = (() => {
+    if (typeof agentApi.onAgentSubagentTrace !== 'function') return null;
+    try {
+      return agentApi.onAgentSubagentTrace((ev) => {
+        if (!ev || ev.cancelToken !== cancelToken) return;
+        const subagentId = String(ev.subagentId || '');
+        if (!subagentId || !Array.isArray(ev.entries) || !ev.entries.length) return;
+        // 一个子 Agent = 一张卡片条目（entries 通常只有 1 个）；带上 done 标记驱动「运行中/已完成」。
+        isolatedSubagentTrace.set(
+          subagentId,
+          ev.entries.map((e) => ({ ...e, runDone: !!ev.done }))
+        );
+        notifyRustProgress(displayedTrace, liveContent);
+      });
+    } catch {
+      return null;
+    }
+  })();
 
   const offPhase =
     typeof agentApi.onAgentRustLoopPhase === 'function'
@@ -652,15 +703,21 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             const rawContent = String((ev.data && ev.data.content) || '');
             const content = stripVisibleToolCallMarkup(rawContent);
             const hasToolCalls = !!(ev.data && ev.data.hasToolCalls);
+            // content 的通道身份由入口盖章（llm-channel.classifyDelta），此处不再用 `a || b` 猜。
+            const contentIsReasoning = (ev.data && ev.data.contentChannel) === 'reasoning';
             if (reasoning) {
               // 双通道：reasoning → 思考；有 tool 时 content 挂轮次旁白，无 tool 时才进回答尾
               const extra = hasToolCalls && content ? { visibleContent: content } : {};
               pushLive(reasoning, [], reasoning, extra);
-              liveContent = hasToolCalls ? '' : content;
-            } else if (content) {
-              // 单通道（如 mimo）：流式 content 是推理，不应泄漏到正文区
+              liveContent = hasToolCalls || contentIsReasoning ? '' : content;
+            } else if (contentIsReasoning && content) {
+              // 单通道（能力表声明，如 mimo）：流式 content 是推理，不应泄漏到正文区
               pushLive(content, [], content);
               liveContent = '';
+            } else if (content) {
+              // 普通模型：content 是正文，进回答区；思考区不镜像正文
+              liveContent = content;
+              pushLive('生成中…', []);
             } else {
               pushLive('生成中…', []);
             }
@@ -1087,6 +1144,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     rustLoopFailedCheckpoint = null;
     unregisterBackendCancel();
     if (offPhase) offPhase();
+    if (offSubagentTrace) offSubagentTrace();
     if (signal) signal.removeEventListener('abort', onAbort);
     if (typeof window !== 'undefined' && onCompactionProgressUi) {
       window.removeEventListener('dieyun:compaction-progress', onCompactionProgressUi);

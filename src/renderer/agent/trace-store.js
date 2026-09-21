@@ -68,7 +68,25 @@ function stripTraceUiOnlyFields(trace) {
   });
 }
 
-async function saveAssistantTraceRecord({ runId, sessionId, messageId, userMessageId, trace, status, summary, stateSnapshot }) {
+/**
+ * @param {object} p
+ * @param {number} [p.traceFrom] 本批条目在完整 trace 里的起始下标；0 = 全量覆盖。
+ * @param {boolean} [p.withTraceText] 是否重算 `traceText`。运行中的 checkpoint 传 false：
+ *   `trace_text` 的唯一读者是 `get_agent_trace`，而它只被用来取 `trace`（思考区补渲染、
+ *   中断恢复），所以每 2.5s 重拼一遍全量纯文本纯属浪费；终态写入仍带全量文本。
+ */
+async function saveAssistantTraceRecord({
+  runId,
+  sessionId,
+  messageId,
+  userMessageId,
+  trace,
+  traceFrom = 0,
+  withTraceText = true,
+  status,
+  summary,
+  stateSnapshot
+}) {
   if (!gwState.authed || !runId || !trace || !trace.length) return null;
   const persistable = stripTraceUiOnlyFields(trace);
   try {
@@ -78,7 +96,8 @@ async function saveAssistantTraceRecord({ runId, sessionId, messageId, userMessa
       messageId,
       userMessageId,
       trace: persistable,
-      traceText: formatTracePlain(persistable),
+      traceFrom,
+      ...(withTraceText ? { traceText: formatTracePlain(persistable) } : {}),
       phase: 'assistant',
       status: status || 'completed',
       summary,
@@ -102,22 +121,77 @@ function buildTraceCheckpointSignature(trace, streamContent) {
   return [rows.length, toolCount, pendingCount, thoughtLen, String(streamContent || '').length].join(':');
 }
 
-async function saveRunningTraceCheckpoint({ runId, sessionId, userMessageId, trace, streamContent }) {
+/**
+ * 已落库前缀的廉价位指纹：条目数 + 每条思考长度 + 工具项数 + 未完成工具数。
+ * 只做整数累加，不拷贝任何对象。前缀被改写（重试重排、trace 被重置成更短）时
+ * 指纹几乎必然变化，于是退回全量重发——宁可多传一次，也不让库里留着旧前缀。
+ */
+function tracePrefixFingerprint(trace, count) {
+  const rows = Array.isArray(trace) ? trace : [];
+  let acc = count * 31;
+  for (let i = 0; i < count && i < rows.length; i += 1) {
+    const entry = rows[i];
+    const tools = Array.isArray(entry?.tools) ? entry.tools : [];
+    let pending = 0;
+    for (const tool of tools) if (tool?.pending) pending += 1;
+    acc +=
+      String(entry?.fullThought || entry?.thought || '').length * 7 + tools.length * 17 + pending * 101;
+  }
+  return acc;
+}
+
+/**
+ * 运行中的 checkpoint 只发增量：`{ from, entries }`。
+ *
+ * `live.trace` 每次事件都是整体替换（`live.trace = event.trace`），但**值上前缀稳定**、
+ * 只有尾部那条还在长（思考追加、工具状态翻转），所以：
+ * - 重发起点取「已落库条数 - 1」，把会变的尾部一起覆盖；
+ * - 前缀指纹对不上、trace 变短、或换了 run 时退回全量（`from = 0`）。
+ */
+function buildTraceCheckpointDelta(live, runId, trace) {
+  const rows = Array.isArray(trace) ? trace : [];
+  const cursor = live && live.traceCheckpointCursor;
+  const canAppend =
+    !!cursor &&
+    cursor.runId === runId &&
+    cursor.count > 1 &&
+    rows.length >= cursor.count &&
+    cursor.fingerprint === tracePrefixFingerprint(rows, cursor.count - 1);
+  const from = canAppend ? cursor.count - 1 : 0;
+  return { from, entries: rows.slice(from) };
+}
+
+async function saveRunningTraceCheckpoint({ live, runId, sessionId, userMessageId, trace, streamContent }) {
   if (!gwState.authed || !runId || !sessionId || !trace || !trace.length) return null;
   const state = buildAgentStateSnapshot({
     reply: streamContent || '运行中',
     trace,
     status: 'running'
   });
-  return saveAssistantTraceRecord({
+  const delta = buildTraceCheckpointDelta(live, runId, trace);
+  const result = await saveAssistantTraceRecord({
     runId,
     sessionId,
     userMessageId,
-    trace,
+    trace: delta.entries,
+    traceFrom: delta.from,
+    withTraceText: false,
     status: 'running',
     summary: state.summary || '运行中',
     stateSnapshot: state.snapshot
   });
+  if (live) {
+    // 只有真写进库里才推进游标；`stale` 说明游标对不上，清空让下一次全量重发。
+    live.traceCheckpointCursor =
+      result && !result.stale
+        ? {
+            runId,
+            count: trace.length,
+            fingerprint: tracePrefixFingerprint(trace, trace.length - 1)
+          }
+        : null;
+  }
+  return result;
 }
 
 function maybeSaveRunningTraceCheckpoint(live, params = {}) {
@@ -131,13 +205,12 @@ function maybeSaveRunningTraceCheckpoint(live, params = {}) {
 
   live.lastTraceCheckpointAt = now;
   live.lastTraceCheckpointSignature = signature;
+  // 入队时不拷贝：trace 在排队期间还在长，切片统一放到真正发包那一刻做
+  // （见 `buildTraceCheckpointDelta`）。既省掉每 2.5s 的全量深拷贝，也顺带拿到更新的一版。
   const payload = {
     runId: params.runId,
     sessionId: params.sessionId,
-    trace: trace.map((entry) => ({
-      ...entry,
-      tools: Array.isArray(entry.tools) ? entry.tools.map((tool) => ({ ...tool })) : []
-    })),
+    trace,
     streamContent: params.streamContent || '',
     ensureUserLocalMsgId: params.ensureUserLocalMsgId
   };
@@ -146,7 +219,7 @@ function maybeSaveRunningTraceCheckpoint(live, params = {}) {
     const userMessageId =
       typeof p.ensureUserLocalMsgId === 'function' ? await p.ensureUserLocalMsgId() : null;
     if (live.traceCheckpointClosed) return;
-    await saveRunningTraceCheckpoint({ ...p, userMessageId });
+    await saveRunningTraceCheckpoint({ ...p, live, userMessageId });
   };
 
   if (live.traceCheckpointSaving) {

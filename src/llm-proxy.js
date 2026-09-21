@@ -4,6 +4,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const { sanitizeChatRequestJsonForApi } = require('./agent/guardrails-shared');
+const { captureLlmRaw, llmRawTapEnabled, createRawAccumulator } = require('./llm-raw-tap');
 
 /** 建立 TCP / 等到响应 headers（慢模型生成 JSON 可能长时间无输出） */
 const CONNECT_TIMEOUT_MS = Number(process.env.LLM_CONNECT_TIMEOUT_MS) || 180000;
@@ -69,10 +70,6 @@ function describeLlmHttpError(url, headers, bodyText) {
     parts.push('上游要求自报 User-Agent，可在该供应商的「User-Agent」里填写');
   }
   return parts.join('；');
-}
-
-function isAbortError(err) {
-  return err && (err.code === 'ABORT_ERR' || err.name === 'AbortError' || err.message === 'aborted');
 }
 
 function listenAbort(signal, onAbort) {
@@ -235,6 +232,8 @@ async function chatCompletionJson(url, opts = {}) {
   });
 
   const raw = Buffer.concat(chunks).toString('utf8');
+  // 抓包点（默认关闭）：非流式的原始 JSON 响应体是字段归属的唯一真相
+  captureLlmRaw({ tag: opts.tag, mode: 'json', url, raw });
   if (res.statusCode && res.statusCode >= 400) {
     const hint = describeLlmHttpError(url, opts.headers, raw);
     const err = new Error(
@@ -253,8 +252,9 @@ async function chatCompletionJson(url, opts = {}) {
 /**
  * @param {string} url
  * @param {{ headers?: object, body?: string, signal?: object, onChunk?: (text: string) => void,
- *   firstTokenTimeoutMs?: number, idleTimeoutMs?: number }} opts
+ *   firstTokenTimeoutMs?: number, idleTimeoutMs?: number, tag?: object }} opts
  *   `idleTimeoutMs` = 两包之间的容忍时长（只认真实 SSE data 行），由 agent-limits 注入。
+ *   `tag` = 抓包归属标签（runId / round / model），仅在 `DIEYUN_LLM_RAW_LOG` 打开时落盘。
  */
 async function streamChatSse(url, opts = {}) {
   const signal = opts.signal || null;
@@ -280,6 +280,7 @@ async function streamChatSse(url, opts = {}) {
       totalMs: Math.min(STREAM_TOTAL_TIMEOUT_MS, 60000)
     });
     const hint = describeLlmHttpError(url, opts.headers, errBody);
+    captureLlmRaw({ tag: opts.tag, mode: 'stream_http_error', url, raw: errBody });
     const err = new Error(
       `HTTP ${res.statusCode} ${errBody.slice(0, 400)}${hint ? `（诊断：${hint}）` : ''}`
     );
@@ -288,6 +289,18 @@ async function streamChatSse(url, opts = {}) {
   }
 
   const started = Date.now();
+  const rawTap = llmRawTapEnabled() ? createRawAccumulator() : null;
+  /** 抓包只写一次；未开启时是 `null`，调用点无需分支。 */
+  const tapCapture = (note) => {
+    if (!rawTap) return;
+    captureLlmRaw({
+      tag: opts.tag,
+      mode: 'stream',
+      url,
+      raw: rawTap.text(),
+      note: note || (rawTap.droppedChars() ? `dropped ${rawTap.droppedChars()} chars` : '')
+    });
+  };
   await new Promise((resolve, reject) => {
     let settled = false;
     let idleTimer = null;
@@ -305,6 +318,8 @@ async function streamChatSse(url, opts = {}) {
       if (idleTimer) clearTimeout(idleTimer);
       if (firstTokenTimer) clearTimeout(firstTokenTimer);
       clearTimeout(totalTimer);
+      // 断流/超时同样落盘：拿到多少算多少，往往正是「读到一半」的那条最能说明问题
+      tapCapture(`fail: ${(err && err.message) || err}`);
       try {
         req.destroy();
         res.destroy();
@@ -378,6 +393,7 @@ async function streamChatSse(url, opts = {}) {
         return;
       }
       const text = String(chunk);
+      if (rawTap) rawTap.push(text);
       // 只有真正的 data: 行才算「上游还在说话」：keep-alive 注释 / 空行一律不续命
       const hit = sseChunkHasDataLine(text, sseLineCarry);
       sseLineCarry = hit.rest.length > 1024 * 1024 ? hit.rest.slice(-1024) : hit.rest;
@@ -425,6 +441,7 @@ async function streamChatSse(url, opts = {}) {
       clearTimeout(totalTimer);
       if (idleTimer) clearTimeout(idleTimer);
       if (firstTokenTimer) clearTimeout(firstTokenTimer);
+      tapCapture('');
       resolve();
     });
     res.on('error', fail);
@@ -499,6 +516,5 @@ module.exports = {
   BODY_IDLE_TIMEOUT_MS,
   chatCompletionJson,
   streamChatSse,
-  sseChunkHasDataLine,
-  isAbortError
+  sseChunkHasDataLine
 };

@@ -634,9 +634,12 @@ impl GraphService {
         }
 
         // 跨 await + 分钟级任务：既拿不住 MutexGuard，也不该占着常驻锁。
-        let conn = self.open_dedicated()?;
+        // `&mut Connection` 才是 Send（`&Connection` 因 `Connection: !Sync` 而非 Send），
+        // 否则该 future 无法在多线程运行时上 spawn。
+        let mut conn = self.open_dedicated()?;
         let result =
-            run_embed_symbols(&conn, &self.embedding, &self.models_dirs, &root_hash, force).await;
+            run_embed_symbols(&mut conn, &self.embedding, &self.models_dirs, &root_hash, force)
+                .await;
 
         if let Ok(mut guard) = self.embedding_symbols.lock() {
             guard.remove(&root_hash);

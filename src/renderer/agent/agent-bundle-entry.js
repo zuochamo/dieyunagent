@@ -22,6 +22,7 @@ const modelApiConfig = require('../../agent/model-api-config');
 const guardrailsShared = require('../../agent/guardrails-shared');
 const toolCatalog = require('../../agent/tool-catalog');
 const toolClassify = require('../../agent/tool-classify');
+const plannerToolFilters = require('../../agent/planner-tool-filters');
 const agentRoundText = require('../../agent/agent-round-text');
 const runEvents = require('../../agent/run-events');
 const sessionTranscript = require('../../agent/session-transcript');
@@ -29,6 +30,8 @@ const sessionContext = require('../../agent/session-context');
 const agentSystemPrompt = require('../../agent/agent-system-prompt');
 const reviewerJson = require('../../agent/reviewer-json');
 const llmRequest = require('../../agent/llm-request');
+const llmChannel = require('../../agent/llm-channel');
+const sseDeltaParse = require('../../agent/sse-delta-parse');
 
 register('DieyunModelRuntimePresets', presets, {
   compat: [
@@ -146,6 +149,18 @@ register('DieyunLlmRequest', { ...llmRequest, LlmRequest: llmRequest }, {
   compat: ['LlmRequest']
 });
 
+// 思考 / 正文通道身份的唯一来源：入口 classifyDelta 盖章，下游只搬运 channel，不再各自猜。
+// 只镜像一个命名空间全局 LlmChannel，避免 getChannelPolicy / classifyDelta 这类通用名污染 window。
+register('DieyunLlmChannel', { ...llmChannel, LlmChannel: llmChannel }, {
+  compat: ['LlmChannel']
+});
+
+// SSE delta 解析的唯一来源：Main（src/llm-stream-utils.js）与 Renderer（renderer-agent-llm.js）
+// 共用同一份实现；渲染器侧勿再自抄 emitParsedSseJson / processSseTextChunk / buildToolCallAccumulator。
+register('DieyunSseDeltaParse', { ...sseDeltaParse, SseDeltaParse: sseDeltaParse }, {
+  compat: ['SseDeltaParse']
+});
+
 // 改造前 window.GuardrailsShared = 整个导出对象（键名与导出名不同名），此处显式补上。
 register('DieyunGuardrailsShared', { ...guardrailsShared, GuardrailsShared: guardrailsShared }, {
   compat: ['GuardrailsShared']
@@ -153,6 +168,17 @@ register('DieyunGuardrailsShared', { ...guardrailsShared, GuardrailsShared: guar
 
 register('DieyunToolCatalog', toolCatalog, { compat: ['DieyunToolCatalog'] });
 register('DieyunToolClassify', toolClassify, { compat: ['DieyunToolClassify'] });
+// Explore / Shell / Build 工具白名单的唯一来源（Main 侧由 planner / loop runner 直接 require）。
+// 渲染器勿再自抄一份：renderer-tool-defs.js 直接消费这里镜像出的兼容全局。
+register('DieyunPlannerToolFilters', plannerToolFilters, {
+  compat: [
+    'EXPLORE_TOOL_NAMES',
+    'SHELL_TOOL_NAMES',
+    'buildExploreTools',
+    'buildShellTools',
+    'buildBuildTools'
+  ]
+});
 // 改造前 window.AgentRoundText = 整个导出对象（键名与导出名不同名），此处显式补上。
 register('DieyunAgentRoundText', { ...agentRoundText, AgentRoundText: agentRoundText }, {
   compat: ['AgentRoundText']
@@ -173,6 +199,10 @@ register('DieyunSessionTranscript', sessionTranscript, { compat: ['transcriptFro
 
 register('DieyunSessionContext', sessionContext, {
   compat: [
+    'MESSAGE_META_PREFIX',
+    'packMessageMeta',
+    'unpackMessageMeta',
+    'slimAttachmentsForPersist',
     'persistableAssistantText',
     'messagesForTranscript',
     'assistantTextFromMessage',

@@ -31,6 +31,7 @@ const {
 const { executeDelegateBatch } = require('./delegate-batch');
 const { applyTurnEndSynthesis } = require('./agent-synthesis');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
+const { getChannelPolicy } = require('./llm-channel');
 
 const LOOP_START_TIMEOUT_MS = 30000;
 const LOOP_SET_MESSAGES_TIMEOUT_MS = 30000;
@@ -277,12 +278,16 @@ function buildChatHeaders(llm, runId) {
   return buildLlmHeadersFromConfig(llm, { runId });
 }
 
-async function completeNonStreamChat(url, headers, body, signal) {
+/**
+ * @param {object} [tag] 抓包归属标签（透传 llm-raw-tap；仅 `DIEYUN_LLM_RAW_LOG` 打开时落盘）
+ */
+async function completeNonStreamChat(url, headers, body, signal, tag) {
   const sendBody = { ...body, stream: false };
   const json = await chatCompletionJson(url, {
     headers,
     body: JSON.stringify(sendBody),
-    signal
+    signal,
+    tag
   });
   return normalizeLlmResponse(json);
 }
@@ -343,11 +348,21 @@ async function fetchLlmRound({
   const url = resolveChatUrl(llm.baseUrl);
   const headers = buildChatHeaders(llm, runId);
   const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+  // content 的通道身份：由能力表按模型声明一次，随每个 llm_delta 下发。
+  // 展示层（live-loop-trace / plan-run-events / renderer-agent-rust-loop）只搬运，
+  // 不再各自用 `reasoning || contentOnly` 猜 content 是正文还是思考。
+  const contentChannel = getChannelPolicy(body && body.model).singleChannel ? 'reasoning' : 'answer';
   const requestBody = {
     ...body,
     messages: backfillReasoningContent(body.messages, hasTools)
   };
   let frozenPartial = { content: '', reasoning: '' };
+  /**
+   * 抓包归属标签（仅 `DIEYUN_LLM_RAW_LOG` 打开时落盘）。
+   * 没有 runId/round 的话，抓下来的一堆原始响应体无从对回到某一轮，
+   * 也就没法回答「这段文字出自哪一轮的哪个字段」。
+   */
+  const rawTapTag = { runId, round: llmRound, model: body && body.model };
 
   const capturePartial = (err) => {
     if (err && err.partial) {
@@ -369,12 +384,14 @@ async function fetchLlmRound({
           signal,
           useStream,
           firstTokenTimeoutMs,
+          tag: rawTapTag,
           onDelta: (delta) => {
             onPhase('llm_delta', {
               runId,
               round: llmRound,
               content: delta.content || '',
               reasoning: delta.reasoning || '',
+              contentChannel,
               hasToolCalls: !!delta.hasToolCalls
             });
           }
@@ -394,12 +411,14 @@ async function fetchLlmRound({
           signal,
           firstTokenTimeoutMs,
           idleTimeoutMs: streamIdleTimeoutMs,
+          tag: rawTapTag,
           onDelta: (delta) => {
             onPhase('llm_delta', {
               runId,
               round: llmRound,
               content: delta.content || '',
               reasoning: delta.reasoning || '',
+              contentChannel,
               hasToolCalls: !!delta.hasToolCalls
             });
           }
@@ -415,11 +434,14 @@ async function fetchLlmRound({
           throw streamErr;
         }
         onPhase('llm_stream_fallback', { runId, error: streamErr.message || String(streamErr) });
-        const jsonResp = await completeNonStreamChat(url, headers, requestBody, signal);
+        const jsonResp = await completeNonStreamChat(url, headers, requestBody, signal, rawTapTag);
         return mergeMissingReasoning(jsonResp, frozenPartial);
       }
     }
-    return mergeMissingReasoning(await completeNonStreamChat(url, headers, requestBody, signal), frozenPartial);
+    return mergeMissingReasoning(
+      await completeNonStreamChat(url, headers, requestBody, signal, rawTapTag),
+      frozenPartial
+    );
   };
 
   const reconnect = reconnectOpts || {
@@ -467,7 +489,8 @@ async function fetchLlmRound({
           chatCompletionJson(url, {
             headers,
             body: JSON.stringify({ ...requestBody, stream: false }),
-            signal
+            signal,
+            tag: rawTapTag
           }),
         reconnect
       ),

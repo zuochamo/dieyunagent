@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { atomicWriteFileSync } = require('../fs-atomic');
 
 function checkpointsDir(dieyunHome) {
   const dir = path.join(dieyunHome, 'agent-checkpoints');
@@ -18,7 +19,7 @@ function saveCheckpoint(dieyunHome, runId, data) {
     updatedAt: Date.now(),
     ...data
   };
-  fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8');
+  atomicWriteFileSync(file, JSON.stringify(payload, null, 2), 'utf8');
   return { ok: true, path: file };
 }
 

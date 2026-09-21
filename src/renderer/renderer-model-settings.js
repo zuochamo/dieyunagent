@@ -411,6 +411,14 @@ function llmRequestApi() {
   return (typeof window !== 'undefined' && window.LlmRequest) || null;
 }
 
+let warnedLlmRequestMissing = false;
+/** 只在首次降级时提示一次：bundle 未随源码更新是「看不出任何原因」的典型故障 */
+function warnLlmRequestMissingOnce() {
+  if (warnedLlmRequestMissing) return;
+  warnedLlmRequestMissing = true;
+  console.warn('[model-settings] llm-request 不可用（agent-bundle 未加载或过期），请求头/端点已退化为惰性默认值');
+}
+
 /** 降级解析（仅 llm-request 不可用时使用；规则与其一致：每行 `名称: 值`） */
 function parseHeaderLinesFallback(text) {
   const out = {};
@@ -490,17 +498,21 @@ function renderProbeHeaders(headers, modelName) {
   return out;
 }
 
-/** 装配请求头；llm-request 不可用时降级为「Content-Type + Bearer」，保证「测试」按钮仍可用 */
+/**
+ * 装配请求头。唯一来源是 llm-request（含 authMode / 自定义头 / User-Agent）。
+ *
+ * llm-request 不可用时只给惰性默认头，**不再自行拼 Authorization**：
+ * 自拼的 Bearer 与真实请求的鉴权方式可能不一致（如 authMode=x-api-key 时探针发 Bearer），
+ * 那正是「测试通过但真实请求 400」的来源。宁可让探针明确失败并提示，也不给假结果。
+ */
 function buildHeadersFromConfigLoose(config, vars) {
   const api = llmRequestApi();
   const cfg = config && typeof config === 'object' ? config : {};
   if (api && typeof api.buildLlmHeadersFromConfig === 'function') {
     return api.buildLlmHeadersFromConfig(cfg, vars);
   }
-  const headers = { 'Content-Type': 'application/json' };
-  const key = String(cfg.apiKey || '').trim();
-  if (key) headers.Authorization = `Bearer ${key}`;
-  return headers;
+  warnLlmRequestMissingOnce();
+  return { 'Content-Type': 'application/json' };
 }
 
 function collectSupplierEditorConfig() {

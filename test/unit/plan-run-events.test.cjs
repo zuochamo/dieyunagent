@@ -75,10 +75,31 @@ describe('createPlanRunTrace', () => {
   it('单通道模型：content 只进思考区，不写进正文', () => {
     const { trace, last } = collect();
     trace.handlePhase('llm_request', { round: 0, model: 'm1' });
-    trace.handlePhase('llm_delta', { round: 0, reasoning: '', content: '思考内容', hasToolCalls: false });
+    trace.handlePhase('llm_delta', {
+      round: 0,
+      reasoning: '',
+      content: '思考内容',
+      contentChannel: 'reasoning',
+      hasToolCalls: false
+    });
     const { trace: rows, streamContent } = last();
     expect(rows[0].thought).toBe('思考内容');
     expect(streamContent).toBe('');
+  });
+
+  it('普通模型：content 是正文，进 streamContent，且不镜像成思考', () => {
+    const { trace, last } = collect();
+    trace.handlePhase('llm_request', { round: 0, model: 'm1' });
+    trace.handlePhase('llm_delta', {
+      round: 0,
+      reasoning: '',
+      content: '正文答案',
+      contentChannel: 'answer',
+      hasToolCalls: false
+    });
+    const { trace: rows, streamContent } = last();
+    expect(streamContent).toBe('正文答案');
+    expect(String(rows[0].thought || '')).not.toContain('正文答案');
   });
 
   it('多轮 trace 按 round 递增且不共享可变对象', () => {
@@ -87,6 +108,7 @@ describe('createPlanRunTrace', () => {
     trace.handlePhase('llm_request', { round: 1, model: 'm1' });
     const rows = last().trace;
     expect(rows.map((r) => r.round)).toEqual([1, 2]);
-    expect(rows[1].phase).toBe('执行计划 · 第 2 轮');
+    // 轮次标签只用计划名，不再拼「· 第 N 轮」
+    expect(rows[1].phase).toBe('执行计划');
   });
 });

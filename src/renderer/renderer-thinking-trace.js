@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText, shouldShowTraceTitle */
 'use strict';
 
 function patchThinkingTrace(
@@ -132,29 +132,55 @@ function patchStreamingTextOnly(div, trace, content) {
     const details =
       wrap?.querySelector('details.msg-thinking-round-details') ||
       div.querySelector(`details[data-step-key="${domKey}"]`);
-    const block = details?.querySelector('.msg-thinking-round');
-    if (block) {
-      const display = visibleThoughtDisplay(entry, lastIdx, trace, true);
-      if (display) {
-        let thoughtEl = block.querySelector('.msg-thinking-thought');
-        if (!thoughtEl) {
-          thoughtEl = document.createElement('div');
-          thoughtEl.className = 'msg-thinking-thought';
-          block.insertBefore(thoughtEl, block.firstChild);
-        }
-        if (updateIncrementalTextContent(thoughtEl, display) && typeof followChatStreamGrowth === 'function') {
-          followChatStreamGrowth();
-        }
-      } else {
-        const thoughtEl = block.querySelector('.msg-thinking-thought');
-        if (thoughtEl) thoughtEl.remove();
+    if (typeof isIsolatedCardEntry === 'function' && isIsolatedCardEntry(entry)) {
+      // 子 Agent 卡片：内容全在卡片内部，直接按 rounds 重刷卡片正文
+      const cardBody = details?.querySelector('.msg-thinking-round.msg-thinking-subagent-body');
+      if (cardBody && typeof fillIsolatedCardBody === 'function') {
+        fillIsolatedCardBody(cardBody, entry);
       }
-    }
-    // 结构签名不变时走的就是这条快路径：等待备注必须在这里同步，否则永不出现
-    if (typeof syncThinkingLiveNote === 'function') syncThinkingLiveNote(block, entry);
-    const beat = wrap?.querySelector(':scope > .msg-thinking-beat');
-    if (beat && typeof fillThinkingRoundBeat === 'function') {
-      fillThinkingRoundBeat(beat, entry, lastIdx, trace, true, contentStr);
+      if (details) {
+        details.classList.toggle('is-running', isolatedCardRunning(entry));
+        // 摘要行的序号标题是稳定的，但「思考预览 / 运行中…→已完成」会随流式变化，
+        // 这里按内容变化才重刷，避免每个 tick 重建 span。
+        const cardSummary = details.querySelector('.msg-thinking-round-summary');
+        if (cardSummary && shouldShowTraceTitle(entry) && typeof thinkingRoundSummaryLabel === 'function') {
+          const label = thinkingRoundSummaryLabel(entry, lastIdx, trace);
+          if (cardSummary.title !== label) {
+            cardSummary.title = label;
+            if (typeof syncThinkingRoundSummaryLabel === 'function') {
+              syncThinkingRoundSummaryLabel(cardSummary, entry, lastIdx, trace);
+            }
+          }
+        }
+      }
+    } else {
+      const block = details?.querySelector('.msg-thinking-round');
+      if (block) {
+        const display = visibleThoughtDisplay(entry, lastIdx, trace, true);
+        if (display) {
+          let thoughtEl = block.querySelector('.msg-thinking-thought');
+          if (!thoughtEl) {
+            thoughtEl = document.createElement('div');
+            thoughtEl.className = 'msg-thinking-thought';
+            block.insertBefore(thoughtEl, block.firstChild);
+          }
+          if (
+            updateIncrementalTextContent(thoughtEl, display) &&
+            typeof followChatStreamGrowth === 'function'
+          ) {
+            followChatStreamGrowth();
+          }
+        } else {
+          const thoughtEl = block.querySelector('.msg-thinking-thought');
+          if (thoughtEl) thoughtEl.remove();
+        }
+      }
+      // 结构签名不变时走的就是这条快路径：等待备注必须在这里同步，否则永不出现
+      if (typeof syncThinkingLiveNote === 'function') syncThinkingLiveNote(block, entry);
+      const beat = wrap?.querySelector(':scope > .msg-thinking-beat');
+      if (beat && typeof fillThinkingRoundBeat === 'function') {
+        fillThinkingRoundBeat(beat, entry, lastIdx, trace, true, contentStr);
+      }
     }
   }
 
@@ -203,11 +229,14 @@ function collapseChatThinkingTraces(opts = {}) {
     if (isLoading && keepLoading) return;
     // run 仍在执行（验收 / 续跑中）不强制收，交给真正结束时统一折叠
     if (msg && typeof thinkingRunState === 'function' && thinkingRunState(msg)) return;
+    // 含子 Agent 过程卡片的思考区不自动收回：卡片就是「要看的过程」，仍可手动折叠
+    if (outer.querySelector('.msg-thinking-subagent')) return;
 
     const uiState = msg ? getThinkingUiState(msg) : null;
     if (uiState) uiState.userOpen = null;
     setDetailsOpen(outer, false);
     outer.querySelectorAll('.msg-thinking-round-details').forEach((details) => {
+      if (details.classList.contains('msg-thinking-subagent')) return;
       setDetailsOpen(details, false);
       details.classList.add('is-collapsed-auto');
     });

@@ -1,72 +1,24 @@
-/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal, openPluginDetail, openPluginSchemaSettings, renderGridCategoryTabs, updateGridPagination, bindGridSearchInput, bindGridPagination, PLUGIN_TAXONOMY, SKILLS_GRID_PAGE_SIZE */
+/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal, openPluginDetail, openPluginSchemaSettings, renderGridCategoryTabs, updateGridPagination, bindGridSearchInput, bindGridPagination, PLUGIN_TAXONOMY, SKILLS_GRID_PAGE_SIZE, buildExploreTools */
 const toolDefsApi = window.diecloud || {};
 
-const EXPLORE_TOOL_NAMES = new Set([
-  'fs_read_file',
-  'fs_list_dir',
-  'grep',
-  'glob',
-  'read_symbol',
-  'lsp',
-  'sql_list_databases',
-  'sql_list_tables',
-  'sql_query',
-  'web_fetch',
-  'web_search',
-  'browser_snapshot',
-  'browser_a11y_snapshot',
-  'browser_network',
-  'browser_console',
-  'browser_frames',
-  'browser_timeline',
-  'browser_expect',
-  'browser_observe',
-  'browser_wait_for',
-  'browser_status'
-]);
-// browser_screenshot 支持 filePath 落盘（写文件），不属于纯只读；Explore 看图用 browser_observe。
-
-function buildExploreTools(allTools) {
-  return (allTools || []).filter((t) => {
-    const name = t?.function?.name;
-    return name && EXPLORE_TOOL_NAMES.has(name);
-  });
-}
+// Explore / Shell / Build 工具白名单与采集函数的唯一来源是
+// src/agent/planner-tool-filters.js：Main 侧直接 require，Renderer 侧经
+// agent-bundle-entry.js 的 compat 镜像为全局（buildExploreTools 等）。
+// 此处不再自抄白名单——白名单里「不得加入 subagent」的不变式只维护一处。
 
 /**
  * 协调者工具集 = Explore 只读白名单 + subagent（可再派只读研究子 Agent）。
  * 只有「协调者」拿这个集合：Agent 主循环、Explore 模式、Plan 的 explore 阶段。
  * 研究子 Agent 只拿 buildExploreTools —— 白名单里没有 subagent，
  * 因此「子 Agent 不能再派」是工具层面的物理约束，不需要运行期判断。
+ *
+ * 白名单来源缺失（agent-bundle 未产出或未加载）时降级为空集，与调用点
+ * renderer-agent-send.js 的降级策略一致：宁可不给工具，也不给写工具。
  */
 function buildExploreCoordinatorTools(allTools) {
+  if (typeof buildExploreTools !== 'function') return [];
   const base = buildExploreTools(allTools);
   return SUBAGENT_TOOL ? base.concat([SUBAGENT_TOOL]) : base;
-}
-
-const SHELL_TOOL_NAMES = new Set([
-  'host_exec',
-  'host_proc',
-  'fs_read_file',
-  'fs_list_dir',
-  'grep',
-  'glob',
-  'read_symbol',
-  'lsp',
-  'sql_list_databases',
-  'sql_list_tables',
-  'sql_query'
-]);
-
-function buildShellTools(allTools) {
-  return (allTools || []).filter((t) => {
-    const name = t?.function?.name;
-    return name && SHELL_TOOL_NAMES.has(name);
-  });
-}
-
-function buildBuildTools(allTools) {
-  return allTools || [];
 }
 
 let sqlStatusCache = null;

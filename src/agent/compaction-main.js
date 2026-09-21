@@ -9,12 +9,13 @@ const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const { COMPACTION } = require('../compaction-prompts');
 const { recordLlmUsage } = require('./llm-usage-recorder');
 const { buildEstimatedUsageObject, estimatePromptTokensFromMessages } = require('../llm-usage-stats');
-const { raceAbortable, createAbortError, isAbortError } = require('../llm-reconnect-retry');
+const {
+  raceAbortable,
+  createAbortError,
+  isAbortError,
+  throwIfAborted
+} = require('../llm-reconnect-retry');
 const { COMPACTION_MAYBE_COMPACT_TIMEOUT_MS } = require('../core-rpc-timeouts');
-
-function throwIfAborted(signal) {
-  if (signal?.aborted) throw createAbortError();
-}
 
 /** 模型自带窗口（settings.customModels[].contextWindow / 名字线索）优先，其次磁盘 settings。 */
 function resolveEffectiveContextWindow(settings, modelRouteOrId) {
@@ -110,6 +111,18 @@ function resolveCompactionLlm(settings, opts = {}) {
   const baseUrl = String(apiConfig.baseUrl || settings.baseUrl || '').trim();
   const apiKey = String(apiConfig.apiKey || settings.apiKey || '').trim();
   const sessionModel = String(opts.model || apiConfig.model || resolveTextModel(settings) || '').trim();
+  // 会话标识单一来源：优先 apiConfig 上随「本次运行 LLM 配置」一起带下来的那个
+  // （主链路 agent-runtime 就是这样装的 apiCfg.sessionId），opts.sessionId 只作旧调用点兜底。
+  // 归一化后写回 config，交给 llm-request.js 统一渲染 —— 压缩侧不再自己拼请求头。
+  const sessionId = String(apiConfig.sessionId || opts.sessionId || '').trim();
+  const config = {
+    ...apiConfig,
+    ...mergedRequestOptions(apiConfig, settings),
+    baseUrl,
+    apiKey,
+    model: sessionModel
+  };
+  if (sessionId) config.sessionId = sessionId;
   return {
     baseUrl,
     apiKey,
@@ -117,17 +130,8 @@ function resolveCompactionLlm(settings, opts = {}) {
     // 压缩与主链路必须带同一套请求头（单一来源 llm-request.js）。
     // 少了这里就会出现「对话正常、压缩一跑就 400」——历史上最难定位的一类不一致。
     // 请求修饰字段缺失时回落到 settings（顶层 legacy 配置同样可能自带自定义头）。
-    headers: buildLlmHeadersFromConfig(
-      {
-        ...apiConfig,
-        ...mergedRequestOptions(apiConfig, settings),
-        baseUrl,
-        apiKey,
-        model: sessionModel
-      },
-      { sessionId: opts.sessionId }
-    ),
-    authMode: String(apiConfig.authMode || '').trim()
+    headers: buildLlmHeadersFromConfig(config),
+    authMode: String(config.authMode || apiConfig.authMode || '').trim()
   };
 }
 
