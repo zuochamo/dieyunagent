@@ -142,13 +142,9 @@ impl MemoryStore {
             Some(v) => v.to_string(),
             None => "[]".into(),
         };
-        // 运行中的 checkpoint 不再重算 `traceText`：`trace_text` 的唯一读者是
-        // `get_agent_trace`，而恢复路径只读 `trace`。缺省时保持上一次的值（见下方
-        // COALESCE），于是每 2.5s 的「全量纯文本拼装 + 传输」整条省掉。
-        let trace_text = input
-            .get("traceText")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        // 不再接收 `traceText`：它是「思考拼成的纯文本」，两个生产者、零个读者
+        // （思考通道隔离 §3.7 D4）。跨边界可回读的只有结构化 `trace`（下方 trace_json），
+        // 旧客户端仍带该字段时直接忽略，避免又出现一条思考通路。
         let message_id = optional_i64(
             input
                 .get("messageId")
@@ -213,21 +209,19 @@ impl MemoryStore {
                 Some(id) => {
                     conn.execute(
                         "UPDATE agent_traces
-                            SET session_id = ?1, message_id = ?2, phase = ?3,
-                                trace_json = ?4,
-                                trace_text = COALESCE(?5, trace_text),
-                                created_at = ?6
-                          WHERE id = ?7",
-                        params![session_id, message_id, phase, trace_json, trace_text, now, id],
+                           SET session_id = ?1, message_id = ?2, phase = ?3,
+                               trace_json = ?4, created_at = ?5
+                         WHERE id = ?6",
+                        params![session_id, message_id, phase, trace_json, now, id],
                     )?;
                     id
                 }
                 None => {
                     conn.execute(
                         "INSERT INTO agent_traces
-                          (run_id, session_id, message_id, phase, trace_json, trace_text, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![run_id, session_id, message_id, phase, trace_json, trace_text, now],
+                          (run_id, session_id, message_id, phase, trace_json, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![run_id, session_id, message_id, phase, trace_json, now],
                     )?;
                     conn.last_insert_rowid()
                 }
@@ -536,7 +530,7 @@ impl MemoryStore {
         self.with_conn(|conn| {
             let row = if !run_id.is_empty() {
                 conn.query_row(
-                    "SELECT id, run_id, session_id, message_id, phase, trace_json, trace_text, created_at
+                    "SELECT id, run_id, session_id, message_id, phase, trace_json, created_at
                      FROM agent_traces WHERE run_id = ?1 ORDER BY id DESC LIMIT 1",
                     params![run_id],
                     map_trace_row,
@@ -544,7 +538,7 @@ impl MemoryStore {
                 .optional()?
             } else if let Some(mid) = message_id {
                 conn.query_row(
-                    "SELECT id, run_id, session_id, message_id, phase, trace_json, trace_text, created_at
+                    "SELECT id, run_id, session_id, message_id, phase, trace_json, created_at
                      FROM agent_traces WHERE message_id = ?1 ORDER BY id DESC LIMIT 1",
                     params![mid],
                     map_trace_row,
@@ -553,7 +547,8 @@ impl MemoryStore {
             } else {
                 None
             };
-            Ok(row.map(|(id, run_id, session_id, message_id, phase, trace_json, trace_text, created_at)| {
+            // 只回结构化 `trace`：展示用纯文本由展示层现场格式化（§3.7 D4）。
+            Ok(row.map(|(id, run_id, session_id, message_id, phase, trace_json, created_at)| {
                 let trace = serde_json::from_str::<Value>(&trace_json)
                     .unwrap_or_else(|_| json!([]));
                 json!({
@@ -563,7 +558,6 @@ impl MemoryStore {
                     "messageId": message_id,
                     "phase": phase,
                     "trace": trace,
-                    "traceText": trace_text.unwrap_or_default(),
                     "createdAt": created_at,
                 })
             }))
@@ -573,16 +567,7 @@ impl MemoryStore {
 
 fn map_trace_row(
     row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(
-    i64,
-    String,
-    String,
-    Option<i64>,
-    Option<String>,
-    String,
-    Option<String>,
-    i64,
-)> {
+) -> rusqlite::Result<(i64, String, String, Option<i64>, Option<String>, String, i64)> {
     Ok((
         row.get(0)?,
         row.get(1)?,
@@ -591,7 +576,6 @@ fn map_trace_row(
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
-        row.get(7)?,
     ))
 }
 
@@ -639,6 +623,7 @@ mod tests {
                 "runId": "run-1",
                 "sessionId": session.id,
                 "trace": [{"type": "text", "content": "hello"}],
+                // 旧客户端可能仍带该字段：§3.7 D4 已废除，必须被忽略且不出现在出参里。
                 "traceText": "hello",
             }))
             .unwrap();
@@ -647,6 +632,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(trace.get("runId").and_then(|v| v.as_str()), Some("run-1"));
+        assert!(
+            trace.get("traceText").is_none(),
+            "traceText 已废除：出参只有结构化 trace"
+        );
         let state = store.get_latest_agent_state(&session.id).unwrap().unwrap();
         assert_eq!(state.get("runId").and_then(|v| v.as_str()), Some("run-1"));
         let _ = std::fs::remove_file(db);

@@ -1,6 +1,9 @@
 # 思考通道隔离 · 目标设计（根治方案）
 
-> 状态：**方案（未实施）**
+> 状态：**已实施（提交 1-5 + H4 + 提交 6）**，逐条进度见 §5 与 §1 各表的 ✅ / ⚠️ 标注；
+> 通道身份由入口盖章（`llm-channel.js`），账本记事实（`ContentChannel` / `TraceRound.contentSource`），
+> 交付四态收口于 `agent-round-text.resolveTurnDelivery()`；跨边界文本契约见 §3.7（D3 / D4 已落地）；
+> 仅剩 `提交 0` 取证重放。
 > 目标：让「思考绝不进正文 / 思考绝不进本地上下文」成为**结构事实**，而不是靠多处启发式碰运气。
 > 取证工具：[`LOGGING.md` § LLM 原始响应体抓包](./LOGGING.md)（`DIEYUN_LLM_RAW_LOG`）
 
@@ -28,6 +31,10 @@
 
 A1 与 A2 是**同一策略的两份实现，阈值 24 / 48 不一致** → 同一轮内容在 Rust 与 Node 可能得到不同归属。
 
+**✅ 已全部删除**（提交 4 / 5）：A1 → `delivered_content(content, channel)` 只认非思考通道，正文空即 `None`；
+A2 → `resolveTurnDelivery()` 四态决策（**无任何长度阈值**）；A3 → `thoughtFallbackFromTrace()` 已删，
+交付只能来自 `answer` / 带标签的 `reasoning-fallback` / 汇总 LLM。
+
 ### B. 思考 ← 正文（「正文进了思考区」）
 
 | # | 位置 | 行为 |
@@ -39,31 +46,47 @@ A1 与 A2 是**同一策略的两份实现，阈值 24 / 48 不一致** → 同�
 
 B2/B3/B4 **逐字重复**；B1 是 Rust 侧第四份。
 
+**✅ 已全部删除**：B1 → `llm_thought_raw()` 只取思考通道（`reasoning` 键，或单通道模型的 `content` 键），
+不再拿正文兜底；B2/B3/B4 → 三处判定改为消费入口盖章的 `channel`（提交 2），
+账本侧另有 `TraceRound.contentSource` / `visibleContent` 作为**事实**（提交 4）。
+
 ### C. 占位文本进上下文（污染 prompt）
 
 | # | 位置 | 行为 |
 |---|---|---|
-| C1 | `src/agent/rust-loop-runner.js:299-311` `backfillReasoningContent()`（`:352` 注入 `requestBody.messages`） | 历史 assistant 缺 `reasoning_content` 时补假文本 `'（思考内容未随消息保存）'` |
-| C2 | `src/renderer/renderer-agent-llm.js:521-531` | C1 的**第二份实现**（文案相同），Renderer 自跑路径 |
+| C1 | `src/agent/reasoning-backfill.js` `backfillReasoningContent()`（由 `rust-loop-runner.js` 注入 `requestBody.messages`） | 历史 assistant 缺 `reasoning_content` 时补假文本 `'（思考内容未随消息保存）'` **（已合并为单一来源）** |
+| C2 | ~~`src/renderer/renderer-agent-llm.js:521-531`~~ **已合并** → 同上，Renderer 经 `window.ReasoningBackfill` 消费 | 判定与 C1 统一为「本轮 hasTools 或该消息 tool_calls」 |
 | C3 | `loop_run.rs:379-388` `push_assistant_text_only()` | 触顶轮把合成文本 `"已达本段 N 轮上限"` 写进 messages |
 
 C1/C2 本身是症状：`session-context.js:829` 重建历史**只带 `content`**（见 D1），真思考在落库那步就丢了，于是只能在发送前**现编**。
+
+**✅ 已处理**（提交 3 / 4 / 5）：真思考从落库那步就不再丢（`messages.reasoning`，§3.5），
+`backfillReasoningContent` 改为**真值优先**（账本 `reasoning` → `reasoning_content`），占位只在真值不可得时触发；
+C3 → `push_assistant_text_only()` 写进 messages 的合成文本已标 `synthetic: true`，账本记 `ContentSource::Synthetic`。
 
 ### D. 历史 / 上下文（思考回流）
 
 | # | 位置 | 行为 |
 |---|---|---|
 | D1 | `src/agent/session-context.js:801-829` `buildCompletionMessagesFromHistory()` | assistant 只取 `assistantTextFromMessage()`，**不带 `reasoning_content`** → 真思考丢失 |
-| D2 | `src/agent/session-transcript.js:4-14` `TRANSCRIPT_ROLES` | 只过滤 role、**不过滤字段**：带 `reasoning_content` 的消息可被原样投影进下一次请求 |
+| D2 | `src/agent/session-transcript.js` `TRANSCRIPT_FIELDS` / `projectTranscriptMessage`（**✅ 已落地**） | 账本投影改为**字段白名单 + 浅拷贝**：只保留 `role` / `content` / `tool_calls` / `tool_call_id` / `name`，**排除 `reasoning_content`** 与 UI 字段（`meta` / `transientTrace`）。出站侧另有 wire 白名单（`sanitizeMessagesForChatApi`），两层职责分离。 |
 | D3 | `src/agent/subagent-runner.js:116-124` | 子 Agent 摘要**以 trace 的 `thought`/`fullThought` 为唯一来源**回注主上下文 → 思考跨 Agent 进上下文 |
 | D4 | `src/agent/service.js:254-261, 275-282` | `traceText = trace.map(fullThought \|\| thought).join('\n')` 作为 run 的可回读文本 |
 
+**D3 ✅ / D4 ✅ 已实施**（提交 6，契约见 §3.7）：`buildTraceFactsDigest()` 只回注 / 只喂**工具事实**；
+`traceText` 整条链路（Main live 拼接、Renderer `formatTracePlain`、Rust `agent_traces.trace_text` 列）全部删除。
+
+**D1 ✅ 已反转**（提交 5）：`assistantTextFromMessage()` 只投影 `content`（+ 工具事实兜底），
+**不再**把 `message.reasoning` 或落库 trace 里的思考当正文读回；同时新增 `messages.reasoning` 与 content **分列**落库，
+重建出的 completion 消息带 `reasoning` 作为**同级传输字段**（供上行回传真值），不进正文语义。
 ### E. 压缩（思考被当摘要长期驻留上下文）
 
 | # | 位置 | 行为 |
 |---|---|---|
 | E1 | `crates/dieyun-core/src/compaction/llm.rs:203-216` `extract_completion_text()` | `content` 空 → 回退 `reasoning_content` → 回退 `reasoning`。压缩模型是思考模型时，**整份摘要可能是思考** |
 
+**✅ 已处理**（提交 4）：`extract_completion_text()` 拆为「正文抽取」与「思考抽取」两条通道，
+摘要只取正文；正文空即判失败，不再用 `reasoning_content` / `reasoning` 冒充摘要。
 ### F. 入口解析重复（最该盖章的地方有两份）
 
 | # | 位置 | 行为 |
@@ -217,6 +240,61 @@ classifyDelta(delta, policy) -> [{ channel: 'reasoning' | 'answer', text, source
 `"压缩模型返回空内容（未写入摘要，已跳过压缩）"`(`:172-175`)。
 理由：一段思考冒充摘要长期驻留上下文，比「本轮不压缩」危害大得多。
 
+### 3.7 跨边界文本契约（D3 / D4）：没有结论就只给事实
+
+§3.4 / §3.5 管的是**一次运行内部**的两条边界（交付、账本）。还剩两条**跨边界**文本 ——
+它们不是「展示 vs 账本」，而是「一个 Agent 的产物 → 另一个消费者的输入」，口径必须另行定义：
+
+| 边界 | 现状实现 | 缺陷 |
+|---|---|---|
+| 子 Agent → 主 Agent 上下文（**D3**） | `subagent-runner.js` 无正文时用 `buildSynthesisDigest(trace)`（`thought`/`fullThought` 拼接）当「已完成的发现」回注 | 思考是子 Agent 的**私有推理**，含中间猜测与元评论；主 Agent 无法区分「它查到的」与「它猜的」，且这是**跨 Agent** 污染 |
+| 一次运行 → 「可回读纯文本」（**D4**） | 两处各拼一份：Main `service.js` 的 `trace.map(fullThought \|\| thought).join('\n')`、Renderer `formatTracePlain()` → `agent_traces.trace_text` | 同名字段**两个来源**（违反单一来源）；且两个字段**读者为零**（下方逐处核对） |
+
+#### 契约 1（D3）：跨 Agent 只允许「正文 ∪ 工具事实」
+
+回注给协调者的文本，只允许由三类材料构成：
+
+- **正文**：`child.content` —— 有正文时它就是结论本身（截断时显式标注「可能不完整」）；
+- **工具事实**：`entry.tools[]` 的 `name` / `argsBrief` / `summary` / `error`（工具层已归纳的事实）；
+- **结构信号**：`hitRoundLimit` / `reason` / `truncated`（协调者据此决定重派还是换问法）。
+
+**禁止**：`thought` / `fullThought`（完整与否都一样），以及 UI 过场文案（`请求中` / `正在准备` / `生成中`）。
+
+理由：①思考里是**过程猜测**，越界即被当事实；②这条边界不该比账本更宽松 ——
+账本正文也只认 `content`（§3.5），跨 Agent 回注没有理由放宽；③一旦为子 Agent 开口，
+「思考只在展示层」就重新变成「多处启发式碰运气」。
+
+代价（有意接受）：子 Agent 若把结论只留在思考里（没写进正文），协调者只能拿到工具事实 ——
+这是**如实**的代价，由子 Agent 提示词「结论先行 / 查不到就说查不到」（`buildSubagentPrompt`）负责，
+而不是靠回注思考兜底。
+
+实现：`buildSynthesisDigest()` → **`buildTraceFactsDigest()`**（只输出工具行），一次改动同时覆盖两个消费者：
+①子 Agent 回注摘要（D3）②汇总 LLM 的【Agent 执行过程摘要】（§3.4 `synthesis` 态）。
+文案同步：`SUMMARY_HEAD_*_WITH_TRACE` 的「已完成的发现」→「已完成的工具调用记录」。
+
+#### 契约 2（D4）：没有读者的派生文本不是契约，整条删掉
+
+先摆事实（逐处核对过）：
+
+- `agent.trace_get` 的两个读者都**只读 `trace`**：Renderer `hydrateAssistantTraceFromStore()`（`row.trace`）、
+  移动端 `trace.get`（`trace.trace` / `streamContent`）；
+- `service.js` live 分支的 `active.traceText` 与 Rust 终态列 `agent_traces.trace_text` **没有任何读者**；
+- 同一语义两个生产者：`formatTracePlain()`（Renderer，终态写库）与 `service.js` 的 thought-join（Main，live 读回）。
+
+契约：**「可回读纯文本」不是一等概念**。跨边界可回读的只有**结构化 `trace`**（事实源）；
+展示用纯文本一律由展示层从 `trace` **现场格式化**，不落库、不出 RPC。
+
+据此删除整条链路：
+
+- Main `service.js`：删 `active.traceText`（两处拼接）与 `getTrace()` 出参里的 `traceText`；
+- Renderer `trace-store.js`：终态 `trace_save` 不再传 `traceText`（`withTraceText` 参数一并删除），
+  `formatTracePlain()` 因无调用点而删除；
+- Rust：`agent.trace_save` 忽略 `traceText` 入参、`get_agent_trace` 不再出 `traceText`，
+  `agent_traces.trace_text` 从 schema 移除（老库 best-effort `DROP COLUMN`；失败也不影响读写）。
+
+理由：这两个字段的存在让「思考被当可回读文本」看起来像一个**契约**（有人写、有列存、有 RPC 出参），
+实际读者为零；保留只会让下一个人以为它是权威事实，继续往里塞思考。
+
 ---
 
 ## 4. 关键取舍（先说清楚再决定）
@@ -243,6 +321,27 @@ classifyDelta(delta, policy) -> [{ channel: 'reasoning' | 'answer', text, source
 
 > 约定：每步一个独立提交，可单独 review / 单独回滚。除注明外，**先落地身份（1）、再切消费方（2）、再收敛补丁（3）、再删兜底（4）、最后收口交付（5）** —— 顺序不可颠倒，否则会在真值落库前产生上游 400（见 §4.1）。
 > 命令均在仓库根目录、PowerShell 环境下执行。
+>
+> **进度（滚动更新）**：提交 1 ✅ 已落地（`llm-channel.js` / `sse-delta-parse.js` 及 bundle 注册）；
+> B2 / B4 已改消费 `contentChannel`；C1/C2 已合并为 `src/agent/reasoning-backfill.js`
+> （独立模块，未并入 `llm-request.js` —— 占位补全是请求**体**的职责，与端点/请求头单一来源解耦）；
+> D2 ✅ 已落地（`session-transcript.js` 账本投影字段白名单，排除 `reasoning_content`）。
+> **H4 ✅ 已落地**（跨语言 token 估算对齐，见「附带整改 · H4」，不在提交序列内）。
+> **提交 4 ✅ 已落地**（Rust 账本去兜底 + 入口通道盖章，`delivered_content` / `thought_raw` 不再互相顶替）。
+> **提交 5 ✅ 已落地**（交付四态收口 + 真思考分列落库 + 历史重建不读思考 + 上行回传真值优先）：
+> `resolveTurnDelivery()` / `persistableTurnText()` / `reasoningTextFromTrace()` 成为交付与落库的单一来源；
+> A1/A2/A3 三处「思考顶正文」已全部删除；`messages.reasoning` 走 RPC `memory.message_append` 落库并按需回读。
+>
+> **提交 6 ✅ 已落地**（跨边界文本契约 D3 / D4，见 §3.7）：
+> `buildSynthesisDigest()` → `buildTraceFactsDigest()`（子 Agent 回注与汇总摘要只吃**工具事实**）；
+> 「可回读纯文本」整条链路删除（Main `active.traceText`、Renderer `formatTracePlain()`、
+> Rust `agent_traces.trace_text` 列）。
+>
+> **未做的只剩取证**：`提交 0`（抓包端到端重放，需活体 LLM，见 §7）。
+>
+> **另一条 assistant 落库口**：`src/plans/plan-run-turn.js`（计划运行）。它不开启 `turnEndSynthesis`，
+> 交付物里**不可能**出现展示用标签（故未接 `persistableTurnText`）；但它也没有按轮 trace 取数链路，
+> 因此不落 `reasoning` —— 计划会话的上行回传仍走占位兜底，属本方案的已知遗留。
 
 ### 提交 0（可选，强烈建议）· 取证基线
 
@@ -313,9 +412,10 @@ npm run test:agent
 **目标**：假思考文案从「每轮常规路径」降级为「罕见兜底」，且只留一处。
 
 **改动**
-1. 把 `src/agent/rust-loop-runner.js:299-311`（C1）与 `src/renderer/renderer-agent-llm.js:521-531`（C2）两份 `backfillReasoningContent` 合并进 `src/agent/llm-request.js`（AGENTS.md 指定的「端点与请求头唯一来源」），由 `getChannelPolicy(model).echoReasoning` 决定是否回传、回传时取真值。
-   **顺序警告**：此刻真思考尚未落库（`提交 5` 才做），本步**必须保留占位兜底**，只做「两份并一份」；不可提前删，否则每轮带 tools 的续跑都会上游 400。
-2. `src/agent/session-transcript.js:4-14` 的 `TRANSCRIPT_ROLES` 增加**字段白名单**：投影历史消息只保留 `role` / `content` / `tool_calls` / `tool_call_id` / `name`，**排除 `reasoning_content`**（D2），堵住「带 reasoning 的历史原样进下一次请求」。
+1. **✅ 已落地（变体）**：C1/C2 两份 `backfillReasoningContent`（`rust-loop-runner.js` / `renderer-agent-llm.js`）未并入 `llm-request.js`，而是抽出为**独立模块** `src/agent/reasoning-backfill.js`（占位补全是请求**体**的职责，与端点/请求头单一来源解耦）。`rust-loop-runner.js` 直接 `require`，Renderer 经 `agent-bundle` 注册的 `window.ReasoningBackfill` 消费；判定统一为「本轮 `hasTools` 或该消息 `tool_calls`」。
+   **顺序警告（仍然有效）**：真思考尚未落库（`提交 5` 才做），故**保留占位兜底**，只做「两份并一份」；不可提前删，否则每轮带 tools 的续跑都会上游 400。
+2. **✅ 已落地（D2）**：`src/agent/session-transcript.js` 新增 `TRANSCRIPT_FIELDS` + `projectTranscriptMessage`，`transcriptFromMessages` 改为「role 过滤 + 字段白名单 + 返回浅拷贝」：历史投影只保留 `role` / `content` / `tool_calls` / `tool_call_id` / `name`，**排除 `reasoning_content`** 与 UI 字段。
+   - **取证结论（重要）**：出站侧早已有 wire 白名单 —— Renderer 的 `sanitizeMessagesForChatApi`（保留 `reasoning_content`）在种子进 Rust 前净化，Main 的 `backfillReasoningContent` 再按需补占位。因此**刻意不在出站处再剥 `reasoning_content`**：剥了只会把本 turn 的真思考降级成占位串（§4.1），字段仍会被补回。账本层（`TRANSCRIPT_FIELDS`）与 wire 层（`sanitizeMessagesForChatApi`）各自单源、职责分离。
 
 **验收**
 ```powershell
@@ -324,6 +424,36 @@ npm run test:session-context
 npm run test:llm-tool-call-fallback
 npm run test:agent-limits
 npm run check:js
+```
+
+---
+
+### 附带整改 · H4：跨语言 token 估算一致性（不在提交序列内）
+
+**起因**：`src/agent/token-estimate.js` 注释声称与 Rust `compaction/tokens.rs` 「逐字对齐」，实测有分叉：
+
+| # | 差异点 | 原 JS | Rust |
+|---|---|---|---|
+| 1 | 长度口径 | `s.length`（UTF-16 码元，星平面字符算 2） | `chars()`（Unicode 码点，算 1） |
+| 2 | 数组 content | 各元素分别计费求和、无分隔符 | 同（本就一致） |
+| 3 | 裸对象 | 无 JSON 全量兜底 | `Value::to_string()` |
+| 4 | `tool_calls` | 计入 message | 不计（**刻意保留**，见下） |
+
+差异 1 会让含 emoji / 扩展区的消息在 JS 侧虚高，使上下文预算、UI 圆环与 Rust compaction 的判定互相打架。
+
+**落点**
+1. `src/agent/token-estimate.js`：`estimateTextTokens` 改 `for...of` 迭代**码点**；新增 `estimateContentTokens`（null / string / array / object / scalar 五分支，与 Rust `estimate_tokens` 同构）与 `estimateJsonTokens`；CJK 字符类抽 `CJK_CLASS` 常量供两个正则共用（单源）；删除无消费者的 `messageContentText`。
+2. `test/fixtures/token-estimate-cases.json`（**新建 · 唯一真值**）：`textCases` 18 例（emoji / 星平面 / 全角 / 假名 / 谚文）、`sharedMessageCases` 8 例；`jsOnly` 段显式记录 tool_calls 的刻意差异。
+3. `test/unit/token-estimate.test.cjs`（新建）：读 fixture 逐例断言，另加码点计数、数组无分隔符、tool_calls 增量。
+4. `crates/dieyun-core/src/compaction/tokens.rs` `#[cfg(test)]`：`include_str!` 同一 fixture，`text_cases_match_shared_fixture` / `message_cases_match_shared_fixture` / `counts_unicode_scalar_values_not_utf16_units`。
+
+**保留的差异（有意为之）**：JS `estimateMessageTokens` 额外计入 `assistant.tool_calls`，Rust `estimate_messages_tokens` 不计 —— 二者**用途不同**（JS 面向真实窗口占用，Rust 面向消息正文），故 fixture 的 `sharedMessageCases` 只收不含 tool_calls 的消息，差异由 `jsOnly` 显式声明而非隐藏。
+**不变式**：改公式必须**同时**改两侧实现与本 fixture；两侧测试各自守住半边，fixture 即跨语言契约的单源。
+
+**验收**
+```powershell
+npm run test:unit            # 含 token-estimate（6 例）
+cargo test -p dieyun-core tokens
 ```
 
 ---

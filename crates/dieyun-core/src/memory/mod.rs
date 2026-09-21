@@ -1788,8 +1788,8 @@ mod tests {
                 guard
                     .execute(
                         "INSERT INTO agent_traces
-                           (run_id, session_id, message_id, phase, trace_json, trace_text, created_at)
-                         VALUES ('run-1', ?1, NULL, 'assistant', ?2, NULL, ?3)",
+                           (run_id, session_id, message_id, phase, trace_json, created_at)
+                         VALUES ('run-1', ?1, NULL, 'assistant', ?2, ?3)",
                         params![
                             session.id,
                             json!([{ "type": "text", "content": i.to_string() }]).to_string(),
@@ -1886,15 +1886,14 @@ mod tests {
             vec!["A", "B2", "C"],
             "前缀按 traceFrom 保留 + 尾部覆盖 + 新增追加"
         );
-        // 运行中的 checkpoint 不重算全量纯文本（该列只有 get_agent_trace 一个读者）。
-        assert_eq!(
-            row.get("traceText").and_then(|v| v.as_str()),
-            Some(""),
-            "增量帧不传 traceText"
+        // §3.7 D4：`traceText`（思考拼成的纯文本）已整体废除 —— 跨边界可回读的只有结构化 trace，
+        // 出参里不得再出现该字段。
+        assert!(
+            row.get("traceText").is_none(),
+            "get_agent_trace 不再出 traceText"
         );
 
-        // 终态式全量帧带纯文本后，后续增量帧缺省 traceText 时必须保留旧值（COALESCE），
-        // 否则每个 tick 都会把上一帧的纯文本抹成空。
+        // 旧客户端仍可能带 traceText：必须被忽略，且不影响 trace 增量语义。
         store
             .save_agent_trace(&json!({
                 "runId": "run-delta",
@@ -1922,10 +1921,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(thoughts(&row), vec!["A", "B2", "C3"]);
-        assert_eq!(
-            row.get("traceText").and_then(|v| v.as_str()),
-            Some("A / B2 / C2"),
-            "缺省 traceText 时保留上一次的值"
+        assert!(
+            row.get("traceText").is_none(),
+            "legacy traceText 入参被忽略，出参不带该字段"
         );
 
         // 游标过期（traceFrom 超出已存条数）必须拒写并回 stale，绝不能落成半截快照。

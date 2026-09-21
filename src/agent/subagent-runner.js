@@ -18,7 +18,7 @@
  */
 
 const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
-const { buildSynthesisDigest } = require('./agent-synthesis');
+const { buildTraceFactsDigest } = require('./agent-synthesis');
 const { buildExploreTools } = require('./planner-tool-filters');
 const { SUBAGENT_TOOL } = require('./tool-catalog');
 const { createSubagentNamer } = require('./live-loop-trace');
@@ -49,15 +49,18 @@ const FALLBACK_LIMITS = Object.freeze(
 /**
  * 回注摘要的文案口径（单一来源，勿在调用方再拼）。
  * reason 字段把这几种情况结构化回给协调者：ok / limit / empty。
+ *
+ * 文案只承诺**工具事实**（不再说「发现」——那会把子 Agent 的推理过程暗示成结论）。
  */
 const SUMMARY_HEAD_TRUNCATED_WITH_CONTENT =
   '（子 Agent 达到轮次/工具预算被截断，以下内容可能不完整）';
 const SUMMARY_HEAD_TRUNCATED_WITH_TRACE =
-  '（子 Agent 达到轮次/工具预算被截断，未给出正式结论；以下是它已完成的发现）';
-const SUMMARY_HEAD_NO_CONCLUSION_WITH_TRACE = '（子 Agent 未给出结论；以下是它已完成的发现）';
+  '（子 Agent 达到轮次/工具预算被截断，未给出正式结论；以下是它已完成的工具调用记录）';
+const SUMMARY_HEAD_NO_CONCLUSION_WITH_TRACE =
+  '（子 Agent 未给出结论；以下是它已完成的工具调用记录）';
 const SUMMARY_TRUNCATED_NO_EVIDENCE =
-  '（子 Agent 达到轮次/工具预算被截断，且未留下任何可见发现；建议缩小问题范围，或提高 subagentMaxRounds/subagentMaxToolCalls 后重派）';
-const SUMMARY_NO_CONCLUSION = '（子 Agent 未产出结论，也没有留下可见的探索记录）';
+  '（子 Agent 达到轮次/工具预算被截断，且未留下任何工具调用记录；建议缩小问题范围，或提高 subagentMaxRounds/subagentMaxToolCalls 后重派）';
+const SUMMARY_NO_CONCLUSION = '（子 Agent 未产出结论，也没有留下任何工具调用记录）';
 const SUMMARY_CUT_SUFFIX = '\n…（摘要已截断，完整内容见对话中该子 Agent 的折叠卡片）';
 
 /**
@@ -115,14 +118,22 @@ function buildSubagentPrompt(task, hints) {
 /**
  * 把内层循环结果压成回注主上下文的摘要。
  *
+ * **跨边界文本契约**（`docs/REASONING-ISOLATION-PLAN.md` §3.7）：回注只允许「正文 ∪ 工具事实」。
+ * - 允许：`child.content`（子 Agent 正文 —— 它就是结论本身）；`trace[].tools[]` 的
+ *   name / argsBrief / summary / error（工具层已归纳的事实）；结构信号（hitRoundLimit / reason）。
+ * - 禁止：`trace[].thought` / `fullThought` —— 那是子 Agent 的**私有推理**（含过程猜测与
+ *   对任务的元评论），回注进主上下文会被当成事实使用，且跨 Agent 污染比同轮污染更难排查。
+ *
  * 为什么不能只看 `content`：子 Agent 的内层循环会因预算耗尽（maxRounds / maxToolCalls）
  * 而非正常收尾，此时最后一轮常常只发了 tool_calls、没有正文 —— 若只读 content，就会把
- * 子 Agent 已经完成的整段调研（都在 `trace`：每轮 thought/fullThought + 每把工具的 summary）
- * 全部丢掉，只回一句「未产出结论」。协调者拿到这种摘要无法决策，只能把同一块工作重做一遍，
- * 子 Agent 白跑。因此这里把「结束原因」与「已有发现」一起回注，作为摘要的唯一来源：
+ * 已经完成的**工具调用事实**全部丢掉，只回一句「未产出结论」。协调者拿到这种摘要无法决策，
+ * 只能把同一块工作重做一遍，子 Agent 白跑。因此这里把「结束原因」与「工具事实」一起回注：
  * - 有正文：交付正文；命中预算时显式标注「可能不完整」，避免协调者把半份结论当完整结论。
- * - 无正文但有 trace：从 trace 提炼已完成发现，并区分「被预算截断」与「模型没给结论」。
- * - 无正文也无 trace：如实说明，并给出可执行建议。
+ * - 无正文但有工具事实：列出工具调用记录，并区分「被预算截断」与「模型没给结论」。
+ * - 都没有：如实说明，并给出可执行建议。
+ *
+ * 有意接受的代价：子 Agent 若把结论只留在思考里（没写进正文），协调者只能拿到工具事实 ——
+ * 这由 `buildSubagentPrompt()` 的「结论先行 / 查不到就说查不到」负责，而不是靠回注思考兜底。
  *
  * @param {any} child 内层循环结果（content / hitRoundLimit / trace）
  * @param {number} maxChars
@@ -141,9 +152,9 @@ function buildSummary(child, maxChars) {
   if (raw) {
     text = hitLimit ? `${SUMMARY_HEAD_TRUNCATED_WITH_CONTENT}\n${raw}` : raw;
   } else {
-    const evidence = buildSynthesisDigest(child && child.trace);
-    if (evidence) {
-      text = `${hitLimit ? SUMMARY_HEAD_TRUNCATED_WITH_TRACE : SUMMARY_HEAD_NO_CONCLUSION_WITH_TRACE}\n${evidence}`;
+    const facts = buildTraceFactsDigest(child && child.trace);
+    if (facts) {
+      text = `${hitLimit ? SUMMARY_HEAD_TRUNCATED_WITH_TRACE : SUMMARY_HEAD_NO_CONCLUSION_WITH_TRACE}\n${facts}`;
     } else {
       text = hitLimit ? SUMMARY_TRUNCATED_NO_EVIDENCE : SUMMARY_NO_CONCLUSION;
     }

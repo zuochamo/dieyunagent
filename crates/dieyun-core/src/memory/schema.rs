@@ -68,7 +68,6 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
         message_id INTEGER,
         phase TEXT,
         trace_json TEXT NOT NULL,
-        trace_text TEXT,
         created_at INTEGER NOT NULL,
         FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
       );
@@ -178,6 +177,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
     );
     // 旧库补列：真思考与 content 分列存储（老数据为 NULL，回传时降级为占位）。
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT", []);
+    // 旧库删列：`trace_text` 是「思考拼成的纯文本」——两个生产者（Renderer / Main）、读者为零，
+    // 已按思考通道隔离 §3.7 D4 整体废除。best-effort：SQLite < 3.35 时语法失败也无妨，
+    // 那只是老库留一个空列，而读写两侧都已不再碰它。
+    let _ = conn.execute("ALTER TABLE agent_traces DROP COLUMN trace_text", []);
 
     conn.execute_batch(
         r#"

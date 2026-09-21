@@ -119,7 +119,6 @@ class AgentService extends EventEmitter {
           requestId,
           sessionId: active.sessionId,
           trace: active.trace || [],
-          traceText: active.traceText || '',
           streamContent: active.streamContent || '',
           live: active.status !== 'completed' && active.status !== 'failed' && active.status !== 'stopped',
           createdAt: active.createdAt || Date.now()
@@ -139,7 +138,6 @@ class AgentService extends EventEmitter {
           requestId: active.requestId,
           sessionId: active.sessionId,
           trace: active.trace || [],
-          traceText: active.traceText || '',
           streamContent: active.streamContent || '',
           live: active.status !== 'completed' && active.status !== 'failed' && active.status !== 'stopped',
           createdAt: active.createdAt || Date.now()
@@ -254,10 +252,8 @@ class AgentService extends EventEmitter {
     if (entry) {
       entry.trace = trace;
       if (streamContent) entry.streamContent = streamContent;
-      entry.traceText = trace
-        .map((row) => String(row.fullThought || row.thought || '').trim())
-        .filter(Boolean)
-        .join('\n');
+      // 有意不派生 traceText：跨边界可回读的只有结构化 trace（思考通道隔离 §3.7 D4）。
+      // 展示用纯文本由展示层从 trace 现场格式化，不在这一层再拼一份「思考纯文本」。
     }
     this._emitEvent({
       type: 'task.progress',
@@ -275,10 +271,6 @@ class AgentService extends EventEmitter {
       entry.status = payload.status || 'completed';
       if (Array.isArray(payload.trace)) {
         entry.trace = payload.trace;
-        entry.traceText = payload.trace
-          .map((row) => String(row.fullThought || row.thought || '').trim())
-          .filter(Boolean)
-          .join('\n');
       }
       if (payload.runId) entry.runId = payload.runId;
     }

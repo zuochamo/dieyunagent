@@ -495,22 +495,6 @@ function buildTraceFileChangeSummary(trace) {
   if (!files) return '';
   return `变更：${files} 个文件 · +${added} -${removed}`;
 }
-function formatTracePlain(trace) {
-  if (!trace || !trace.length) return '';
-  const lines = [];
-  for (let i = 0; i < trace.length; i++) {
-    const entry = trace[i];
-    lines.push(entry.phase || '思考');
-    const thought = thoughtTextForDisplay(entry, i, trace);
-    if (thought) lines.push(thought);
-    for (const t of entry.tools || []) {
-      const arg = t.argsBrief ? `(${t.argsBrief})` : '';
-      lines.push(`  · ${t.name}${arg} → ${t.summary}`);
-    }
-  }
-  return lines.join('\n');
-}
-
 function buildPersistedAssistantContent(reply) {
   return String(reply || '');
 }

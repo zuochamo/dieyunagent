@@ -1,4 +1,4 @@
-/* global window, gwState, gatewayCall, currentSessionId, messages, sessionActiveRuns, formatTracePlain, buildAgentStateSnapshot, createTraceRunId, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, refreshHistoryList, showAgentToast, formatAgentApiError, isCurrentSessionSending, isSessionSending, unpackAssistantMeta, DieyunNamespaces, withSessionRpcScope, AgentRoundText */
+/* global window, gwState, gatewayCall, currentSessionId, messages, sessionActiveRuns, buildAgentStateSnapshot, createTraceRunId, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, refreshHistoryList, showAgentToast, formatAgentApiError, isCurrentSessionSending, isSessionSending, unpackAssistantMeta, DieyunNamespaces, withSessionRpcScope, AgentRoundText */
 'use strict';
 
 const traceStoreLoopApi = window.diecloud || {};
@@ -71,9 +71,9 @@ function stripTraceUiOnlyFields(trace) {
 /**
  * @param {object} p
  * @param {number} [p.traceFrom] 本批条目在完整 trace 里的起始下标；0 = 全量覆盖。
- * @param {boolean} [p.withTraceText] 是否重算 `traceText`。运行中的 checkpoint 传 false：
- *   `trace_text` 的唯一读者是 `get_agent_trace`，而它只被用来取 `trace`（思考区补渲染、
- *   中断恢复），所以每 2.5s 重拼一遍全量纯文本纯属浪费；终态写入仍带全量文本。
+ *
+ * 刻意不传 `traceText`：跨边界可回读的只有**结构化 `trace`**（事实源），
+ * 展示用纯文本一律由展示层现场格式化（`docs/REASONING-ISOLATION-PLAN.md` §3.7 D4）。
  */
 async function saveAssistantTraceRecord({
   runId,
@@ -82,7 +82,6 @@ async function saveAssistantTraceRecord({
   userMessageId,
   trace,
   traceFrom = 0,
-  withTraceText = true,
   status,
   summary,
   stateSnapshot
@@ -97,7 +96,6 @@ async function saveAssistantTraceRecord({
       userMessageId,
       trace: persistable,
       traceFrom,
-      ...(withTraceText ? { traceText: formatTracePlain(persistable) } : {}),
       phase: 'assistant',
       status: status || 'completed',
       summary,
@@ -175,7 +173,6 @@ async function saveRunningTraceCheckpoint({ live, runId, sessionId, userMessageI
     userMessageId,
     trace: delta.entries,
     traceFrom: delta.from,
-    withTraceText: false,
     status: 'running',
     summary: state.summary || '运行中',
     stateSnapshot: state.snapshot

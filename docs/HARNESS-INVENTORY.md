@@ -413,7 +413,7 @@
 | # | 项 | 唯一权威实现 | 处置 |
 |---|---|---|---|
 | 1 | 最终汇总助手 system | `agent-synthesis.js`（Main，rust-loop-runner 调用） | **已删** Renderer 侧逐字重复且无调用点的 `buildAgentSynthesisBody` |
-| 2 | 汇总过程摘要构造 | 同上 `buildSynthesisDigest` | 同上（同一次删除） |
+| 2 | 汇总 / 回注过程摘要构造 | `agent-synthesis.js` `buildTraceFactsDigest` | 同上（同一次删除）；**并收窄为「只由工具事实构成」**：汇总 LLM 的输入与子 Agent 回注都不再含思考（`docs/REASONING-ISOLATION-PLAN.md` §3.7 D3） |
 | 3 | 技能索引块 | `system-prompt-prep.js` `fetchSkillsBlock` | **已删** Renderer `buildSkillsPrompt`（无调用点）及 `agentToolsIncludeCompactMcp` |
 | 4 | MCP 块 | `system-prompt-prep.js` `formatMcpPromptBlock` | **已删** Renderer `buildMcpPrompt`（无调用点） |
 | 5 | AGENTS.md 注入块 | `agents-md.js` `formatAgentsMdSystemBlock`（IPC `agents-md:format-block`） | Renderer 改为**纯转发**，删掉复制的文案与 `AGENTS_MD_MAX` 兜底 |

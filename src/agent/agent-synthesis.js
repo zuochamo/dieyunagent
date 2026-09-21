@@ -40,15 +40,20 @@ function extractLastUserMessageText(messages) {
   return '';
 }
 
-function buildSynthesisDigest(trace) {
+/**
+ * 工具事实摘要：**只由工具调用记录构成，不含思考**。
+ *
+ * 这是跨边界文本（回注协调者 / 作为汇总 LLM 的输入）的唯一构造口，契约见
+ * `docs/REASONING-ISOLATION-PLAN.md` §3.7：跨边界只允许「正文 ∪ 工具事实」——
+ * 思考是私有推理（含过程猜测与元评论），越界就会被下游当成事实使用，
+ * 且会经由「汇总 LLM 写正文」间接把思考写进用户可见答复。
+ *
+ * 材料只有 `entry.tools[]` 的 `name` / `summary` / `error` / `argsBrief`（工具层已归纳的事实），
+ * 不读 `entry.thought` / `entry.fullThought`，也不依赖任何过场文案正则。
+ */
+function buildTraceFactsDigest(trace) {
   const lines = [];
   for (const entry of trace || []) {
-    const phase = String(entry.phase || '').trim();
-    const prefix = phase ? `[${phase}] ` : '';
-    const thought = String(entry.fullThought || entry.thought || '').trim();
-    if (thought && thought.length > 16 && !/^(请求中|正在准备|生成中)/.test(thought)) {
-      lines.push(`${prefix}${thought.slice(0, 500)}`);
-    }
     for (const t of entry.tools || []) {
       const name = String(t.name || 'tool').trim();
       const sum = String(t.summary || t.error || t.argsBrief || '已执行').trim();
@@ -60,7 +65,7 @@ function buildSynthesisDigest(trace) {
 
 function buildAgentSynthesisBody({ model, messages, trace, maxOutputTokens }) {
   const userText = extractLastUserMessageText(messages).slice(0, 2500);
-  const digest = buildSynthesisDigest(trace);
+  const digest = buildTraceFactsDigest(trace);
   const userParts = [];
   if (userText) userParts.push(`【用户任务】\n${userText}`);
   userParts.push(`【Agent 执行过程摘要】\n${digest || '(无详细 trace)'}`);
@@ -259,6 +264,6 @@ async function applyTurnEndSynthesis(opts) {
 module.exports = {
   applyTurnEndSynthesis,
   buildAgentSynthesisBody,
-  buildSynthesisDigest,
+  buildTraceFactsDigest,
   upsertSynthesisTraceRound
 };

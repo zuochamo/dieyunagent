@@ -1105,6 +1105,46 @@ async function testTurnEndTruncatedUsesReasoningFallback() {
   );
 }
 
+// 正常收尾 + 无正文 + 有思考：走汇总链路，不再用思考顶替正文（A3 反转）。
+// 同时校验 D3 契约（docs/REASONING-ISOLATION-PLAN.md §3.7）：**汇总 LLM 的输入只允许工具事实**，
+// 不得把思考喂进去 —— 否则「写用户可见正文」这一步会把私有推理间接写进答复。
+async function testTurnEndThoughtDefersToSynthesis() {
+  let synthCalls = 0;
+  let synthBody = null;
+  const longThought =
+    '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
+  const bridge = createFakeBridge({
+    'agent.loop.start': async () => ({
+      phase: 'done',
+      runId: 'run-thought-norm',
+      content: '',
+      hitRoundLimit: false,
+      messages: [{ role: 'user', content: '修截图' }],
+      trace: [{ round: 1, thought: longThought, tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
+    })
+  });
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    turnEndSynthesis: true,
+    fetchSynthesisOnce: async ({ body }) => {
+      synthCalls += 1;
+      synthBody = body;
+      return { content: '已改截图重试并保留快照。' };
+    }
+  });
+  assert(synthCalls === 1, 'normal finish with only reasoning defers to synthesis');
+  assert(result.content === '已改截图重试并保留快照。', 'synthesis output becomes delivery');
+  assert(!isReasoningFallbackText(result.content), '汇总结果不是思考回退标签');
+
+  const synthPrompt = JSON.stringify(synthBody || {});
+  assert(synthPrompt.includes('fs_edit'), '汇总输入带工具事实');
+  assert(!synthPrompt.includes(longThought), '汇总输入不含思考（D3：写正文的输入只允许事实）');
+  assert(!synthPrompt.includes('BrowserView'), '思考正文片段不进入汇总输入');
+}
+
 async function testTurnEndKeepsModelProse() {
   let synthCalls = 0;
   const bridge = createFakeBridge({
@@ -1233,6 +1273,7 @@ async function run() {
   await testTurnEndSynthesisSkippedByDefault();
   await testTurnEndSynthesisFillsEmptyReply();
   await testTurnEndTruncatedUsesReasoningFallback();
+  await testTurnEndThoughtDefersToSynthesis();
   await testTurnEndKeepsModelProse();
 }
 

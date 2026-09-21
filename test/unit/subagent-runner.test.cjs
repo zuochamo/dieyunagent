@@ -140,9 +140,11 @@ describe('subagent runner', () => {
     expect(out.summary).toContain('未产出结论');
   });
 
-  // 回归：内层循环被预算截断时，最后一轮常常只有 tool_calls、没有正文。
-  // 若只看 content，就会把子 Agent 已经跑出来的 trace 全部丢掉，只回一句「未产出结论」，
-  // 协调者只能把同一块工作重做一遍。摘要必须把「被截断」和「已有发现」一起带上。
+  // 回归（D3 契约，docs/REASONING-ISOLATION-PLAN.md §3.7）：内层循环被预算截断时，
+  // 最后一轮常常只有 tool_calls、没有正文。若只看 content，就会把子 Agent 已经跑出来的
+  // **工具事实**全部丢掉，只回一句「未产出结论」，协调者只能把同一块工作重做一遍。
+  // 摘要必须把「被截断」和「工具调用记录」一起带上 —— 但**不得回注思考**：
+  // 思考是子 Agent 的私有推理（含过程猜测与元评论），跨 Agent 越界会被主 Agent 当事实用。
   it('folds the child trace into the summary when the loop was cut off at budget', async () => {
     const runner = makeRunner({}, async () => ({
       content: '',
@@ -164,9 +166,13 @@ describe('subagent runner', () => {
     expect(out.ok).toBe(true);
     expect(out.reason).toBe('limit');
     expect(out.summary).toContain('截断');
+    expect(out.summary).toContain('工具调用记录');
     expect(out.summary).toContain('llm/app.py');
     expect(out.summary).toContain('grep');
     expect(out.summary).not.toContain('未产出结论');
+    // D3：思考一律不回注（工具事实才回注）。
+    expect(out.summary).not.toContain('先列 llm 目录');
+    expect(out.summary).not.toContain('路由装饰器');
   });
 
   it('folds the child trace into the summary when the model gave no conclusion', async () => {
@@ -184,6 +190,8 @@ describe('subagent runner', () => {
     expect(out.reason).toBe('empty');
     expect(out.summary).toContain('llm/auth.py');
     expect(out.summary).not.toContain('未产出结论');
+    // D3：思考里的结论（没写进正文）不得被当「发现」回注。
+    expect(out.summary).not.toContain('鉴权入口在');
   });
 
   it('flags a budget-truncated conclusion that did carry content', async () => {
