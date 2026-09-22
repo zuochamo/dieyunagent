@@ -68,12 +68,12 @@ node .agents/skills/full-test/scripts/run-batch.cjs [--timeout MS] suite1 suite2
 
 逐套件运行 `npm run -s <suite>`，单个失败不中断后续；失败自动单独重跑一次（端口/时序抖动常见）再定论；超时默认 10 分钟并 taskkill 整棵进程树。输出 `PASS/FAIL(code) <suite>`，FAIL 附最后几行日志，结尾给通过数汇总。
 
-## 已知问题基线（截至 2026-09-19，本机）
+## 已知问题基线（截至 2026-09-21，本机）
 
 判定规则：FAIL 的**签名**（失败信息 + 通过项数量）与基线一致 → 已知问题，报告标「非回归」；签名不同、通过项变少、或出现新 FAIL → 按新回归排查。基线会过时——每次全量测试后核对，状态变了就更新本节，并同步 auto-memory 对应条目。
 
-1. **test:local-gateway-smoke 白名单 FAIL**：签名 = 10 项 ok + `FAIL: 关闭开关后白名单未收窄`。环境相关预存问题。副作用：`npm test` 链在此中断，需按步骤 1 补跑。
-2. **test:builtin-embedding-rust 全仓超时**：签名 = `RPC_TIMEOUT codebase.index`，600s 预算 < 实测 ~789s。容量问题非回归，功能用小目录变体验证。
+1. **test:local-gateway-smoke 白名单 FAIL**（2026-09-21 复测 PASS，未复现）：历史签名 = 10 项 ok + `FAIL: 关闭开关后白名单未收窄`。2026-09-21 全量测试中该项单独跑与批量跑均 PASS；疑似已修复或环境不再触发。保留为观察项：若后续再次出现该签名，按已知问题判定；连续多轮不 FAIL 后可移除。
+2. **test:builtin-embedding-rust 全仓超时**：签名 = `RPC_TIMEOUT codebase.index`，600s 预算 < 实测 ~789s。容量问题非回归，功能用小目录变体验证（2026-09-21 以 `src/agent` 变体跑通：713 vectors / vectorSearch true / OK）。
 
 ## 报告格式
 
