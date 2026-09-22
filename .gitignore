@@ -28,6 +28,10 @@ mobile-app/android/manual-build/
 mobile-app/android/.gradle/
 mobile-app/android/app/build/
 mobile-app/android/local.properties
+
+# 手机版发布签名：密钥与口令只存在本地，不进版本库（模板见 signing.properties.example）
+mobile-app/android/keys/
+mobile-app/android/signing.properties
 deploy.local.json
 deploy.packaged.json
 build/deploy-packaged.json

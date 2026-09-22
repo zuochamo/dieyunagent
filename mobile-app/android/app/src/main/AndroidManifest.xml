@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.dieyun.agent.mobile">
+<!-- AGP 8 forbids a `package` attribute here; the namespace lives in
+     app/build.gradle, and build-manual.ps1 injects the package name with
+     aapt2 rename-manifest-package. Note: XML comments may not contain a
+     double hyphen, so that aapt2 flag cannot be spelled out verbatim here. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

@@ -4,20 +4,115 @@ plugins {
 
 def mobileVersionCode = (findProperty("MOBILE_VERSION_CODE") ?: "1").toInteger()
 def mobileVersionName = findProperty("MOBILE_VERSION_NAME") ?: "0.0.1"
+def mobilePackageName = findProperty("MOBILE_PACKAGE_NAME") ?: "com.dieyun.agent.mobile"
+
+// ---------------------------------------------------------------------------
+// Release signing: shares signing.properties with build-manual.ps1 (single source).
+// Android Studio "Build APK" and the command line must use the same key, otherwise
+// the two output paths produce packages that cannot replace each other (Android
+// rejects them with "software conflict"). Missing config fails packaging instead of
+// silently falling back to the default debug key.
+// Keep this file ASCII-only: Gradle reads build scripts with the platform charset.
+// ---------------------------------------------------------------------------
+def signingPropsFile = rootProject.file("signing.properties")
+def signingProps = new Properties()
+if (signingPropsFile.exists()) {
+    signingPropsFile.withInputStream { signingProps.load(it) }
+}
+
+def signingValue = { String envName, String propName ->
+    def envValue = System.getenv(envName)
+    if (envValue != null && !envValue.trim().isEmpty()) return envValue.trim()
+    def propValue = signingProps.getProperty(propName)
+    return propValue == null ? "" : propValue.trim()
+}
+
+def storeFilePath = signingValue("DIEYUN_MOBILE_KEYSTORE", "storeFile")
+def storePass = signingValue("DIEYUN_MOBILE_KEYSTORE_PASSWORD", "storePassword")
+def keyAliasName = signingValue("DIEYUN_MOBILE_KEY_ALIAS", "keyAlias")
+def keyPass = signingValue("DIEYUN_MOBILE_KEY_PASSWORD", "keyPassword")
+
+def signingReady = !storeFilePath.isEmpty() && !storePass.isEmpty() &&
+        !keyAliasName.isEmpty() && !keyPass.isEmpty()
+def missingSigning = []
+if (storeFilePath.isEmpty()) missingSigning << "storeFile/DIEYUN_MOBILE_KEYSTORE"
+if (storePass.isEmpty()) missingSigning << "storePassword/DIEYUN_MOBILE_KEYSTORE_PASSWORD"
+if (keyAliasName.isEmpty()) missingSigning << "keyAlias/DIEYUN_MOBILE_KEY_ALIAS"
+if (keyPass.isEmpty()) missingSigning << "keyPassword/DIEYUN_MOBILE_KEY_PASSWORD"
+
+def signingError = "Release signing is not configured; packaging aborted. " +
+        "Create ${signingPropsFile} (see signing.properties.example) or set the " +
+        "DIEYUN_MOBILE_* environment variables. Missing: ${missingSigning.join(', ')}"
+
+def keystoreFile = storeFilePath.isEmpty() ? null : rootProject.file(storeFilePath)
+if (signingReady && !keystoreFile.exists()) {
+    throw new GradleException(
+            "Release keystore not found: ${keystoreFile}\n" +
+            "Restore it from backup (Y drive / password manager). Do not create a new key: " +
+            "every installed device would then fail to upgrade with 'software conflict'.")
+}
 
 android {
-    namespace "com.dieyun.agent.mobile"
+    namespace mobilePackageName
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.dieyun.agent.mobile"
+        applicationId mobilePackageName
         minSdk 26
         targetSdk 34
         versionCode mobileVersionCode
         versionName mobileVersionName
     }
+
+    compileOptions {
+        // Keep both build paths equivalent: build-manual.ps1 compiles with --release 17.
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    signingConfigs {
+        release {
+            if (signingReady) {
+                storeFile keystoreFile
+                storePassword storePass
+                keyAlias keyAliasName
+                keyPassword keyPass
+            }
+        }
+    }
+
+    buildTypes {
+        // debug and release both use the release key: keeps Android Studio builds and
+        // command line builds installable over each other.
+        debug {
+            signingConfig signingConfigs.release
+        }
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
 }
 
 dependencies {
     implementation files("libs/zxing-core-3.5.3.jar")
+}
+
+// ---------------------------------------------------------------------------
+// Fail when a task actually needs the key, not while configuring the project:
+// a missing signing.properties must not break IDE sync, `gradle clean` or
+// `gradle tasks` on a machine that only reads the code.
+// ---------------------------------------------------------------------------
+def signingDependentTasks = [
+        "packageDebug", "packageRelease",
+        "packageDebugBundle", "packageReleaseBundle",
+        "bundleDebug", "bundleRelease",
+        "assembleDebug", "assembleRelease", "assembleAndroidTest",
+        "installDebug", "installRelease"
+]
+tasks.configureEach { task ->
+    if (!signingReady && signingDependentTasks.contains(task.name)) {
+        task.doFirst {
+            throw new GradleException(signingError)
+        }
+    }
 }

@@ -32,6 +32,9 @@ if ($Deep) {
     'build-warnings.txt',
     'mobile-app/android/app/build',
     'mobile-app/android/.gradle',
+    # Do NOT add mobile-app/android/keys: it holds the mobile release keystore.
+    # Deleting it changes the APK signature and every installed device would then
+    # reject upgrades with "software conflict".
     'mobile-app/android/apk-build',
     'mobile-app/android/manual-build'
   )
@@ -71,6 +74,38 @@ function Remove-TreeIfExists([string]$rel) {
   return 0
 }
 
+# 根目录临时调试产物（会话遗留的 diff / patch / 构建日志 / 一次性工具）。
+# 与 .gitignore 的 `/tmp-*`、`/.tmp-*` 保持同一套定义；改了这里也要同步 .gitignore。
+$rootTempGlobs = @('tmp-*', '.tmp-*')
+
+function Clean-RootTempFiles {
+  $items = @()
+  foreach ($glob in $rootTempGlobs) {
+    $items += Get-ChildItem -LiteralPath $Root -Filter $glob -Force -ErrorAction SilentlyContinue
+  }
+  if ($items.Count -eq 0) {
+    Write-Host '  skip (none)'
+    return 0
+  }
+  $freed = 0
+  foreach ($item in $items) {
+    if ($WhatIf) {
+      if ($item.PSIsContainer) {
+        $bytes = (Get-ChildItem -LiteralPath $item.FullName -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+      } else {
+        $bytes = $item.Length
+      }
+      $mb = [math]::Round(($bytes / 1MB), 1)
+      Write-Host "  would remove: $($item.Name) ($mb MB)"
+      $freed += $bytes
+    } else {
+      Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+      Write-Host "  removed: $($item.Name)"
+    }
+  }
+  return $freed
+}
+
 function Clean-ReleaseArtifacts {
   $release = Join-Path $Root 'release'
   if (-not (Test-Path -LiteralPath $release)) {
@@ -93,7 +128,7 @@ function Clean-ReleaseArtifacts {
       }
       $mb = [math]::Round(($bytes / 1MB), 1)
       Write-Host "  would remove: $rel ($mb MB)"
-      $script:freed += $bytes
+      $freed += $bytes
     } else {
       Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
       Write-Host "  removed: $rel"
@@ -111,6 +146,9 @@ $total = 0
 foreach ($rel in $removePaths) {
   $total += Remove-TreeIfExists $rel
 }
+
+Write-Host 'Root temp files (tmp-* / .tmp-*):'
+$total += Clean-RootTempFiles
 
 if ($Deep) {
   Write-Host 'Release folder (keeping source-backups):'

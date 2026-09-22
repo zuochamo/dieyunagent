@@ -1,0 +1,19 @@
+# Copy this file to signing.properties (same directory) and fill in real values.
+#
+# The release keystore lives at mobile-app/android/keys/dieyun-mobile-release.keystore
+# (gitignored, never cleaned). On a new machine restore that file from the internal
+# backup (Y drive / password manager) BEFORE building.
+#
+# Never generate a new keystore: a different signing certificate makes every already
+# installed device reject the upgrade with "software conflict / app not installed",
+# forcing all users to uninstall and reinstall.
+#
+# Environment variables take precedence over this file:
+#   DIEYUN_MOBILE_KEYSTORE, DIEYUN_MOBILE_KEYSTORE_PASSWORD,
+#   DIEYUN_MOBILE_KEY_ALIAS, DIEYUN_MOBILE_KEY_PASSWORD
+#
+# storeFile is resolved relative to mobile-app/android unless absolute.
+storeFile=keys/dieyun-mobile-release.keystore
+storePassword=
+keyAlias=dieyun-mobile
+keyPassword=

@@ -14,8 +14,8 @@ $classes = Join-Path $build 'classes'
 $dex = Join-Path $build 'dex'
 $unsigned = Join-Path $build 'dieyun-mobile-unsigned.apk'
 $aligned = Join-Path $build 'dieyun-mobile-aligned.apk'
-$keystore = Join-Path $buildRoot 'debug.keystore'
 $propsPath = Join-Path $project 'gradle.properties'
+$signingPropsPath = Join-Path $project 'signing.properties'
 
 function Read-Prop {
   param(
@@ -28,8 +28,60 @@ function Read-Prop {
   return (($line -split '=', 2)[1]).Trim()
 }
 
+# ---------------------------------------------------------------------------
+# Release signing: env vars > signing.properties (shared with app/build.gradle).
+# Never auto-generate a keystore here: a changed signature makes every installed
+# device reject the upgrade with "software conflict / app not installed".
+# Missing config aborts the build instead of silently creating a new key.
+# Keep this file ASCII-only: Windows PowerShell 5.1 reads scripts as ANSI/GBK.
+# ---------------------------------------------------------------------------
+function Read-KeyValueFile([string]$Path) {
+  $map = @{}
+  if (-not (Test-Path -LiteralPath $Path)) { return $map }
+  foreach ($raw in Get-Content -LiteralPath $Path -Encoding UTF8) {
+    $line = $raw.Trim()
+    if (-not $line -or $line.StartsWith('#') -or $line.StartsWith(';')) { continue }
+    $idx = $line.IndexOf('=')
+    if ($idx -lt 1) { continue }
+    $key = $line.Substring(0, $idx).Trim()
+    $val = $line.Substring($idx + 1).Trim()
+    if ($key) { $map[$key] = $val }
+  }
+  return $map
+}
+
+function Resolve-SigningValue([string]$EnvVarName, [hashtable]$Props, [string]$PropName) {
+  $envValue = [Environment]::GetEnvironmentVariable($EnvVarName)
+  if ($envValue -and $envValue.Trim()) { return $envValue.Trim() }
+  if ($Props.ContainsKey($PropName) -and $Props[$PropName]) { return $Props[$PropName] }
+  return ''
+}
+
+$signingProps = Read-KeyValueFile $signingPropsPath
+$keystoreValue = Resolve-SigningValue 'DIEYUN_MOBILE_KEYSTORE' $signingProps 'storeFile'
+$signingStorePass = Resolve-SigningValue 'DIEYUN_MOBILE_KEYSTORE_PASSWORD' $signingProps 'storePassword'
+$signingKeyAlias = Resolve-SigningValue 'DIEYUN_MOBILE_KEY_ALIAS' $signingProps 'keyAlias'
+$signingKeyPass = Resolve-SigningValue 'DIEYUN_MOBILE_KEY_PASSWORD' $signingProps 'keyPassword'
+
+if (-not $keystoreValue) {
+  throw "Release signing is not configured; build aborted. Create $signingPropsPath (see signing.properties.example) or set DIEYUN_MOBILE_KEYSTORE / DIEYUN_MOBILE_KEYSTORE_PASSWORD / DIEYUN_MOBILE_KEY_ALIAS / DIEYUN_MOBILE_KEY_PASSWORD. Reuse the existing release key in mobile-app/android/keys/ - do not create a new one."
+}
+if (-not $signingKeyAlias) { throw "Release signing is missing keyAlias (signing.properties keyAlias or DIEYUN_MOBILE_KEY_ALIAS)." }
+if (-not $signingStorePass) { throw "Release signing is missing storePassword (signing.properties storePassword or DIEYUN_MOBILE_KEYSTORE_PASSWORD)." }
+if (-not $signingKeyPass) { throw "Release signing is missing keyPassword (signing.properties keyPassword or DIEYUN_MOBILE_KEY_PASSWORD)." }
+
+if ([System.IO.Path]::IsPathRooted($keystoreValue)) {
+  $keystore = $keystoreValue
+} else {
+  $keystore = Join-Path $project $keystoreValue
+}
+if (-not (Test-Path -LiteralPath $keystore)) {
+  throw "Release keystore not found: $keystore`nRestore it from backup (Y drive / password manager). Do not create a new key: every installed device would then fail to upgrade with 'software conflict'."
+}
+
 $versionCode = Read-Prop 'MOBILE_VERSION_CODE' '1'
 $versionName = Read-Prop 'MOBILE_VERSION_NAME' '0.0.1'
+$packageName = Read-Prop 'MOBILE_PACKAGE_NAME' 'com.dieyun.agent.mobile'
 $updateBaseUrl = Read-Prop 'MOBILE_UPDATE_BASE_URL' 'http://192.168.31.62:3099/'
 $apkName = "dieyun-mobile-$versionName.apk"
 $signed = Join-Path $build $apkName
@@ -128,12 +180,22 @@ if (-not $resolvedBuild.StartsWith($resolvedProject, [StringComparison]::Ordinal
 }
 New-Item -ItemType Directory -Force -Path $gen, $classes, $dex | Out-Null
 
+# aapt2 requires a package attribute in the manifest, while AGP 8 forbids one in the
+# source manifest. Inject it into a build-local copy so both build paths stay valid.
+$manifestForBuild = Join-Path $build 'AndroidManifest.xml'
+$manifestSource = Get-Content -LiteralPath (Join-Path $srcMain 'AndroidManifest.xml') -Raw
+$manifestInjected = [regex]::Replace($manifestSource, '<manifest\s', ('<manifest package="' + $packageName + '" '), 1)
+if ($manifestInjected -eq $manifestSource) {
+  throw 'Failed to inject the package attribute into AndroidManifest.xml'
+}
+[System.IO.File]::WriteAllText($manifestForBuild, $manifestInjected, (New-Object System.Text.UTF8Encoding($false)))
+
 Invoke-Checked (Join-Path $buildTools 'aapt2.exe') @('compile', '--dir', (Join-Path $srcMain 'res'), '-o', $compiled)
 Invoke-Checked (Join-Path $buildTools 'aapt2.exe') @(
   'link',
   '-o', $unsigned,
   '-I', $androidJar,
-  '--manifest', (Join-Path $srcMain 'AndroidManifest.xml'),
+  '--manifest', $manifestForBuild,
   '--java', $gen,
   '--min-sdk-version', '26',
   '--target-sdk-version', '34',
@@ -152,30 +214,40 @@ Invoke-Checked (Join-Path $buildTools 'd8.bat') (@('--min-api', '26', '--output'
 Invoke-Checked 'jar' @('uf', $unsigned, '-C', $dex, '.')
 Invoke-Checked (Join-Path $buildTools 'zipalign.exe') @('-f', '4', $unsigned, $aligned)
 
-if (-not (Test-Path $keystore)) {
-  Invoke-Checked 'keytool' @(
-    '-genkeypair',
-    '-v',
-    '-keystore', $keystore,
-    '-storepass', 'android',
-    '-alias', 'androiddebugkey',
-    '-keypass', 'android',
-    '-keyalg', 'RSA',
-    '-keysize', '2048',
-    '-validity', '10000',
-    '-dname', 'CN=Android Debug,O=Android,C=US'
-  )
-}
+$apksigner = Join-Path $buildTools 'apksigner.bat'
+Write-Host "[apk-build] keystore=$keystore (alias=$signingKeyAlias)"
 
-Invoke-Checked (Join-Path $buildTools 'apksigner.bat') @(
+# Pass the passwords via the environment instead of the apksigner command line:
+# command lines stay readable by other processes on the same machine.
+$env:DIEYUN_MOBILE_KEYSTORE_PASSWORD = $signingStorePass
+$env:DIEYUN_MOBILE_KEY_PASSWORD = $signingKeyPass
+
+Invoke-Checked $apksigner @(
   'sign',
   '--ks', $keystore,
-  '--ks-pass', 'pass:android',
-  '--key-pass', 'pass:android',
+  '--ks-key-alias', $signingKeyAlias,
+  '--ks-pass', 'env:DIEYUN_MOBILE_KEYSTORE_PASSWORD',
+  '--key-pass', 'env:DIEYUN_MOBILE_KEY_PASSWORD',
   '--out', $signed,
   $aligned
 )
-Invoke-Checked (Join-Path $buildTools 'apksigner.bat') @('verify', $signed)
+Invoke-Checked $apksigner @('verify', $signed)
+
+# apksigner may write to stderr; with $ErrorActionPreference = 'Stop' a 2>&1 redirect
+# would turn that into a terminating error and abort a build whose APK is already
+# signed. Read the digest with the preference temporarily relaxed.
+$certDump = ''
+$previousPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  $certDump = (& $apksigner verify --print-certs $signed 2>&1 | Out-String)
+} finally {
+  $ErrorActionPreference = $previousPreference
+}
+$certMatch = [regex]::Match($certDump, 'SHA-256 digest:\s*([0-9A-Fa-f:]{60,})')
+if (-not $certMatch.Success) { throw "Cannot read the signing certificate digest:`n$certDump" }
+$certSha256 = ($certMatch.Groups[1].Value -replace ':', '').ToLowerInvariant()
+Write-Host "[apk-build] signing cert SHA-256=$certSha256"
 
 New-Item -ItemType Directory -Force -Path $distMobile | Out-Null
 Get-ChildItem -LiteralPath $distMobile -Filter 'dieyun-mobile-*.apk' -File -ErrorAction SilentlyContinue |
