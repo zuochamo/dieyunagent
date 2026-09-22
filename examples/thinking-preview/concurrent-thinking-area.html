@@ -62,9 +62,9 @@
       每个子 Agent 是<b>一张大直角卡片</b>（<code>data-step-key="sa:&lt;subagentId&gt;"</code>），
       该子 Agent 的<b>全部轮次</b>（思考 + 工具）都在卡片内的
       <code>.msg-thinking-subagent-body</code> 里，随运行实时刷新（工具 pending → 完成）。
-      卡片正文按<b>行</b>定尺：<b>初始 3 行、最多长到 20 行</b>（
-      <code>--thinking-subagent-card-lines-min/max</code>），超出走<b>卡片内滚动</b>——
-      轮次再多也只加卡内可滚动内容，不把卡片越撑越高、更不会把并发卡片互相顶下去。
+      卡片正文按<b>行</b>定尺：<b>固定 20 行</b>（
+      <code>--thinking-subagent-card-lines</code>），超出走<b>卡片内滚动</b>——
+      卡片出现即占满 20 行、高度恒定，不把卡片越撑越高、更不会把并发卡片互相顶下去。
       运行中自动跟随最新一轮（用户上翻看历史时不抢滚动位置）。<br />
       <b>② 已完成</b>：run 结束，<b>卡片仍是展开的直角卡片</b>（不自动折叠），过程留在卡片内；
       只有协调者自己的轮次收成一行摘要。<br />
@@ -206,9 +206,9 @@
               </div>
 
               <!--
-                子 Agent D：第 4 路并发。卡片正文初始 3 行、最多 20 行，超出走卡内滚动
-                （min/max-height 由 --thinking-subagent-card-lines-min/max 算出），
-                所以轮次再多也不会把这张卡撑高，更不会把下面 3 张卡顶下去。
+                子 Agent D：第 4 路并发。卡片正文固定 20 行，超出走卡内滚动
+                （min/max-height 由 --thinking-subagent-card-lines 算出），
+                所以高度恒定，不会把下面 3 张卡顶下去。
               -->
               <div class="msg-thinking-step" data-step-key="sa:exec-D-q4tz">
                 <details

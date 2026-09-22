@@ -341,7 +341,9 @@ function registerAgentRuntimeIpc(ctx) {
               userData: live.userData,
               contextTierId: ctx.contextTierId,
               // 子 Agent 的正文不回父上下文，只走卡片；phase 单独转发给 tracker。
-              useStream: false,
+              // 用流式：live-loop-trace 的节流/补帧（sync/dispose）本就是为主循环 subagent 写的，
+              // 关掉流式会让 llm_delta 到不了 tracker，卡片只能停在「请求 LLM」这类占位文案。
+              useStream: true,
               onPhase: (phaseName, data) => {
                 try {
                   tracker.handlePhase(phaseName, data || {});

@@ -71,14 +71,15 @@
   --motion-panel-duration: 0.56s;
   --motion-panel-ease: cubic-bezier(0.16, 1, 0.3, 1);
   /*
-   * 子 Agent 卡片正文：按「行」定尺，初始 3 行、最多长到 20 行，超出走卡片内滚动。
+   * 子 Agent 卡片正文：按「行」定尺，固定 20 行，超出走卡片内滚动。
+   * 不再有「初始 3 行 → 随内容增长」的过程：卡片出现即占满 20 行、高度恒定，
+   * 并发多张卡片时彼此不会被顶动（内容只在卡内滚动）。
    * 基准行高对齐正文的主体文本 .msg-thinking-thought（12px * 1.45），
-   * 想整体放大/缩小只改 lines 两个数字即可，不必反推像素。
+   * 想整体放大/缩小只改 lines 这一个数字即可，不必反推像素。
    */
   --thinking-subagent-card-line-h: 17.4px;
   --thinking-subagent-card-pad-y: 12px;
-  --thinking-subagent-card-lines-min: 3;
-  --thinking-subagent-card-lines-max: 20;
+  --thinking-subagent-card-lines: 20;
   --scrollbar-size: 8px;
   --scrollbar-thumb: rgba(128, 128, 128, 0.25);
   --scrollbar-thumb-hover: rgba(128, 128, 128, 0.4);
@@ -2128,21 +2129,23 @@ body.composer-resizing {
  * 卡片正文：一个子 Agent 的全部轮次（思考 + 工具）都在这里，按轮分区。
  * 内容随运行实时刷新（工具 pending → 完成、思考正文增长），不再甩到卡片外的 beat。
  *
- * 尺寸按「行」定：初始 3 行，最多长到 20 行，再多的轮次走卡片内滚动
- * （并发 4 张卡片时尤其明显：谁都不会把别人顶下去）。运行中自动跟随最新一轮，
- * 见 fillIsolatedCardBody。padding 已在行数预算里算进去了（border-box）。
+ * 尺寸按「行」定：固定 20 行，高度不随内容增长（取消原先「初始 3 行 → 最多 20 行」
+ * 的增长过程），再多的轮次一律走卡片内滚动（并发 4 张卡片时尤其明显：
+ * 谁都不会把别人顶下去）。运行中自动跟随最新一轮，见 fillIsolatedCardBody。
+ * padding 已在行数预算里算进去了（border-box）。
  * 只挂在 [open] 上：一是要压过 .msg-thinking-round-details[open] > .msg-thinking-round
  * 的 max-height:none，二是不干扰折叠态由 max-height:0 驱动的收起动画。
- * 排除 .is-empty：还没收到第一轮时不要凭 min-height 先占出 3 行空白。
+ * 排除 .is-empty：还没收到第一轮时不要先占出 20 行空白。
  */
 .msg-thinking-round-details[open] > .msg-thinking-round.msg-thinking-subagent-body:not(.is-empty) {
   padding: 4px 0 8px;
+  /* min/max 同值 = 固定 20 行：卡片出现即占满，不再逐轮增高 */
   min-height: calc(
-    var(--thinking-subagent-card-lines-min) * var(--thinking-subagent-card-line-h) +
+    var(--thinking-subagent-card-lines) * var(--thinking-subagent-card-line-h) +
       var(--thinking-subagent-card-pad-y)
   );
   max-height: calc(
-    var(--thinking-subagent-card-lines-max) * var(--thinking-subagent-card-line-h) +
+    var(--thinking-subagent-card-lines) * var(--thinking-subagent-card-line-h) +
       var(--thinking-subagent-card-pad-y)
   );
   overflow-y: auto;
