@@ -8,7 +8,7 @@ const {
 } = require('../../src/agent/subagent-runner');
 const { SUBAGENT_TOOL } = require('../../src/agent/tool-catalog');
 const { isMutatingAgentTool } = require('../../src/agent/tool-classify');
-const { AGENT_LIMITS_DEFAULTS } = require('../../src/agent/agent-limits');
+const { AGENT_LIMITS_DEFAULTS, SCHEMA_BY_KEY } = require('../../src/agent/agent-limits');
 
 function tool(name) {
   return { type: 'function', function: { name, description: name, parameters: { type: 'object' } } };
@@ -31,8 +31,8 @@ const LIMITS = {
   subagentMaxDepth: 1,
   subagentMaxConcurrent: 3,
   subagentMaxPerRun: 8,
-  subagentMaxRounds: 16,
-  subagentMaxToolCalls: 32,
+  subagentMaxRounds: 48,
+  subagentMaxToolCalls: 96,
   subagentSummaryMaxChars: 2400
 };
 
@@ -262,7 +262,14 @@ describe('subagent runner', () => {
       expect(FALLBACK_LIMITS[key]).toBe(AGENT_LIMITS_DEFAULTS[key]);
     }
     // 放宽后的轮次预算必须真的落在 schema 的 min/max 之间，否则设置页会把它夹回去。
-    expect(FALLBACK_LIMITS.subagentMaxRounds).toBe(32);
-    expect(FALLBACK_LIMITS.subagentMaxToolCalls).toBe(64);
+    expect(FALLBACK_LIMITS.subagentMaxRounds).toBe(48);
+    expect(FALLBACK_LIMITS.subagentMaxToolCalls).toBe(96);
+    // 不变式：默认值落在设置页 min/max 内，且**低于**上限，保证用户仍能手动上调。
+    for (const key of ['subagentMaxRounds', 'subagentMaxToolCalls']) {
+      const item = SCHEMA_BY_KEY.get(key);
+      expect(item).toBeTruthy();
+      expect(FALLBACK_LIMITS[key]).toBeGreaterThanOrEqual(item.min);
+      expect(FALLBACK_LIMITS[key]).toBeLessThan(item.max);
+    }
   });
 });
