@@ -2,6 +2,9 @@
 
 const { msUntilNextRun } = require('./rrule-next');
 
+/** setTimeout 的最大延时（约 24.8 天），超过它只能分段等待 */
+const TIMER_MAX_MS = 2147483647;
+
 class PlansScheduler {
   /**
    * @param {{ getPlans: () => object[], runPlan: (plan: object) => Promise<object>, log?: (m: string) => void }} opts
@@ -30,8 +33,18 @@ class PlansScheduler {
   _arm(plan) {
     const ms = msUntilNextRun(plan);
     if (ms == null) return;
-    const cap = Math.min(ms, 2147483647);
-    const timer = setTimeout(() => this._tick(plan.id), cap);
+    if (ms > TIMER_MAX_MS) {
+      // setTimeout 上限约 24.8 天：远期计划只能先睡满一段再重算。
+      // 若把这一段当成「到点」触发，远期计划就会提前执行（时间对不上设定）。
+      const timer = setTimeout(() => {
+        this.timers.delete(plan.id);
+        const fresh = this.getPlans().find((p) => p.id === plan.id);
+        if (fresh && fresh.enabled) this._arm(fresh);
+      }, TIMER_MAX_MS);
+      this.timers.set(plan.id, timer);
+      return;
+    }
+    const timer = setTimeout(() => this._tick(plan.id), ms);
     this.timers.set(plan.id, timer);
   }
 

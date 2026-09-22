@@ -208,6 +208,8 @@
     { "prefix": "src/plans/plan-run-turn.js", "tests": ["test:unit"] },
     { "prefix": "src/plans/plan-session.js", "tests": ["test:unit"] },
     { "prefix": "src/plans/plan-agent-runner.js", "tests": ["test:unit"] },
+    { "prefix": "src/plans/rrule-next.js", "tests": ["test:unit"] },
+    { "prefix": "src/plans/scheduler.js", "tests": ["test:unit"] },
     { "prefix": "src/renderer/renderer-automation.js", "tests": ["check:renderer"] },
     { "prefix": "src/llm-tool-call-fallback.js", "tests": ["test:llm-tool-call-fallback"] },
     { "prefix": "src/llm-stream-utils.js", "tests": ["test:llm-tool-call-fallback", "test:task-tier", "test:unit"] },
