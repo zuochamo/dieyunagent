@@ -9,6 +9,9 @@
  * 用途：回归验收 —— 「改前 vs 改后」页面是否发生变化。
  * 注意：只有**同引擎 + 同视口**的比较才有意义，跨引擎像素必然不同，
  * 该约束由调用方（service）用基准元信息硬校验。
+ *
+ * 像素级「全黑」事实与「空 / 暗」判定在 `render-health.js`（唯一来源），
+ * 本模块只做「两张图之间的差异」。
  */
 
 const DEFAULT_PIXEL_TOLERANCE = 12;
@@ -105,41 +108,10 @@ function diffBitmaps(prev, next, opts = {}) {
   };
 }
 
-/**
- * 引擎无关的"疑似全黑"判定（与 controller.analyzeImage 同阈值）。
- * 用于拒绝把空白截图当成基准或"无变化"，BrowserView / Playwright 一视同仁。
- * @param {Buffer|Uint8Array} bitmap BGRA 位图
- */
-function isLikelyBlankBitmap(bitmap, width, height) {
-  const total = Math.max(0, Math.round(Number(width) || 0)) * Math.max(0, Math.round(Number(height) || 0));
-  if (!total) return true;
-  const buf = Buffer.isBuffer(bitmap) ? bitmap : Buffer.from(bitmap || []);
-  if (buf.length < total * 4) return true;
-
-  const step = Math.max(1, Math.floor(total / 4096));
-  let samples = 0;
-  let dark = 0;
-  let sum = 0;
-  for (let p = 0; p < total; p += step) {
-    const i = p * 4;
-    const b = buf[i] || 0;
-    const g = buf[i + 1] || 0;
-    const r = buf[i + 2] || 0;
-    const brightness = (r + g + b) / 3;
-    samples += 1;
-    sum += brightness;
-    if (brightness < 8) dark += 1;
-  }
-  const avgBrightness = samples ? sum / samples : 0;
-  const darkRatio = samples ? dark / samples : 1;
-  return darkRatio > 0.985 && avgBrightness < 8;
-}
-
 module.exports = {
   DEFAULT_PIXEL_TOLERANCE,
   DEFAULT_RATIO_THRESHOLD,
   clampRatio,
   stableKey,
-  diffBitmaps,
-  isLikelyBlankBitmap
+  diffBitmaps
 };

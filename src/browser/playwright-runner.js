@@ -21,14 +21,17 @@ const {
   buildAnnotateScript,
   buildClearAnnotationScript
 } = require('./frame-script');
-const {
-  createTimelineJournal,
-  summarizeTimeline,
-  buildTimelineRecorderScript,
-  TIMELINE_BINDING
-} = require('./timeline');
+const { buildTimelineRecorderScript, TIMELINE_BINDING } = require('./timeline');
+const { createJournalScope } = require('./journal-scope');
 const { assertBrowserLoadUrl, matchUrlPattern } = require('./url-policy');
 const { syncElectronCookiesToPlaywrightContext } = require('./session-sync');
+const {
+  mintSnapshotId,
+  normalizeSnapshotId,
+  checkRefOrigin,
+  refSelector,
+  refLifecycleNote
+} = require('./ref-namespace');
 const {
   buildSelectOptionScript,
   buildImportLocalStorageScript,
@@ -36,34 +39,54 @@ const {
   normalizeModifiers
 } = require('./snapshot-script');
 const { a11ySnapshotPlaywright } = require('./a11y');
-const { createNetworkJournal, summarizeHarEntries } = require('./network-collector');
-const {
-  createConsoleJournal,
-  summarizeConsoleEntries,
-  classifyConsoleEntry
-} = require('./console-collector');
+const { classifyConsoleEntry } = require('./console-collector');
 const { normalizeViewport, VIEWPORT_DEFAULT, normalizeEmulation } = require('./viewport');
 const { buildExpectScript } = require('./expect');
 const { buildEvaluateScript, buildExpressionProbeScript, normalizeEvaluateResult } = require('./evaluate');
+
+/**
+ * 空闲会话回收（缺陷 P2-7）：无头 Chromium 走软件渲染（swiftshader），
+ * 长期挂着多个后台会话会持续吃 CPU。超过 idleMs 没被任何调用触碰的「非活动会话」
+ * 会被关闭；下次调用再按需重建（ensurePage 本来就是惰性创建）。
+ * 0 = 禁用回收；可用 DIEYUN_PW_IDLE_MS 覆盖。
+ */
+const DEFAULT_IDLE_SESSION_MS = 10 * 60 * 1000;
+const IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
+
+function resolveIdleSessionMs(raw) {
+  const n = Number(raw);
+  if (raw === '' || raw == null || !Number.isFinite(n) || n < 0) return DEFAULT_IDLE_SESSION_MS;
+  return n;
+}
 
 /**
  * Playwright 后备引擎：优先使用本机 Chrome / Edge（playwright-core，不随安装包下载 Chromium）。
  */
 function createPlaywrightRunner(deps = {}) {
   const log = deps.log || (() => {});
-  const networkJournal = deps.networkJournal || createNetworkJournal();
-  const consoleJournal = deps.consoleJournal || createConsoleJournal();
-  const timelineJournal = deps.timelineJournal || createTimelineJournal();
+  /**
+   * 观察账本按会话归位：归属键取自「产生这些事件的 page 属于哪个会话」
+   * （page 在 ensurePage 里打上 __dieyunSessionKey），而不是「当前用哪个引擎」。
+   */
+  const journals = deps.journals || createJournalScope();
   /** @type {import('playwright-core').Browser | null} */
   let browser = null;
   /** @type {Map<string, {
    *   context: import('playwright-core').BrowserContext,
    *   page: import('playwright-core').Page,
    *   lastSessionSyncAt: number,
-   *   lastSessionSyncUrl: string
+   *   lastSessionSyncUrl: string,
+   *   createdAt: number,
+   *   lastUsedAt: number
    * }>} */
   const sessions = new Map();
   let activeSessionId = '__default__';
+  /** 空闲会话回收阈值与定时器（唯一来源；0 = 不回收）。 */
+  const idleSessionMs = resolveIdleSessionMs(
+    deps.idleSessionMs != null ? deps.idleSessionMs : process.env.DIEYUN_PW_IDLE_MS
+  );
+  /** @type {NodeJS.Timeout | null} */
+  let idleSweepTimer = null;
   // ── 对话框 / 请求改写状态（与 BrowserView 侧同构） ──
   const dialogLog = [];
   const routeRulesPw = [];
@@ -90,6 +113,109 @@ function createPlaywrightRunner(deps = {}) {
 
   function partitionSessionIdForKey(key) {
     return key && key !== '__default__' ? key : null;
+  }
+
+  /** 标记「该会话刚被用过」——空闲回收只看这个时间戳。 */
+  function touchSession(key) {
+    const entry = sessions.get(key);
+    if (entry) entry.lastUsedAt = Date.now();
+    return entry;
+  }
+
+  /**
+   * 在途操作计数（按会话）。
+   * 回收只看 lastUsedAt（= 操作开始时间）：一次跑得比 idleSessionMs 还久的操作
+   * （例如 browser_wait_for 传了很大的 timeoutMs）会被误判成「空闲」，
+   * 页就在操作执行中被关掉，操作当场以 Target closed 失败。
+   * 这个计数补上「操作还没结束」这个信号，回收据此避让。
+   */
+  const inFlightOps = new Map();
+
+  function enterOp(key) {
+    inFlightOps.set(key, (inFlightOps.get(key) || 0) + 1);
+  }
+
+  function exitOp(key) {
+    const next = (inFlightOps.get(key) || 0) - 1;
+    if (next > 0) inFlightOps.set(key, next);
+    else inFlightOps.delete(key);
+  }
+
+  /** 该会话是否正被某个操作持有（持有期间不得回收）。 */
+  function isOpInFlight(key) {
+    return (inFlightOps.get(key) || 0) > 0;
+  }
+
+  /**
+   * 对外 API 的唯一出口：在这里统一登记在途操作，避免每个方法各写一遍 try/finally。
+   * 约定（本文件全局一致）：opts 是最后一个参数，缺省时落到活动会话——活动会话本来就不回收，
+   * 取不到 key 最多只是少回收一轮，不会误关。
+   * 同步方法（status / activateSession 等）没有 promise 可挂，原样返回、不计数。
+   */
+  function trackSessionOps(api) {
+    for (const name of Object.keys(api)) {
+      const fn = api[name];
+      if (typeof fn !== 'function') continue;
+      api[name] = function withSessionInFlight(...args) {
+        const last = args[args.length - 1];
+        const key = resolveSessionKey(last && typeof last === 'object' && !Array.isArray(last) ? last : {});
+        const out = fn.apply(this, args);
+        if (!out || typeof out.then !== 'function') return out;
+        enterOp(key);
+        const leave = () => exitOp(key);
+        return out.then(
+          (value) => {
+            leave();
+            return value;
+          },
+          (err) => {
+            leave();
+            throw err;
+          }
+        );
+      };
+    }
+    return api;
+  }
+
+  /**
+   * 回收空闲会话：只关「非活动会话」且距上次调用超过 idleSessionMs 的那些。
+   * 活动会话（activeSessionId）永不回收——它是 auto 语义的落点。
+   * 有操作在途的会话也不回收——此刻的 lastUsedAt 是「操作开始时间」，不是「空闲时长」。
+   * @param {number} [now]
+   */
+  async function reapIdleSessions(now = Date.now()) {
+    if (!(idleSessionMs > 0)) return { ok: true, closed: [], idleMs: idleSessionMs };
+    const active = activeSessionId || '__default__';
+    const closed = [];
+    for (const [key, entry] of [...sessions]) {
+      if (key === active) continue;
+      if (isOpInFlight(key)) continue;
+      const last = Number(entry.lastUsedAt) || Number(entry.createdAt) || 0;
+      if (!last || now - last < idleSessionMs) continue;
+      await closeSession(key);
+      closed.push(key);
+    }
+    if (closed.length) {
+      log(`playwright 回收空闲会话 ${closed.length} 个（idle>${idleSessionMs}ms）：${closed.join(', ')}`);
+    }
+    return { ok: true, closed, idleMs: idleSessionMs };
+  }
+
+  /** 第一次创建会话时启动回收定时器（unref，不阻塞进程退出）。 */
+  function ensureIdleSweep() {
+    if (idleSweepTimer || !(idleSessionMs > 0)) return;
+    const period = Math.max(1000, Math.min(idleSessionMs, IDLE_SWEEP_INTERVAL_MS));
+    idleSweepTimer = setInterval(() => {
+      reapIdleSessions().catch((e) => log('playwright idle reap: ' + (e && e.message ? e.message : e)));
+    }, period);
+    if (typeof idleSweepTimer.unref === 'function') idleSweepTimer.unref();
+  }
+
+  function stopIdleSweep() {
+    if (!idleSweepTimer) return;
+    clearInterval(idleSweepTimer);
+    idleSweepTimer = null;
   }
 
   function getActivePage() {
@@ -212,6 +338,8 @@ function createPlaywrightRunner(deps = {}) {
     const key = resolveSessionKey(opts);
     let entry = sessions.get(key);
     if (entry && entry.page && !entry.page.isClosed() && browser && browser.isConnected()) {
+      // 任何操作都要经过 ensurePage：这里就是「会话刚被用过」的唯一刷新点
+      touchSession(key);
       return entry.page;
     }
 
@@ -273,7 +401,8 @@ function createPlaywrightRunner(deps = {}) {
     });
     await context
       .exposeBinding(TIMELINE_BINDING, (_source, payload) => {
-        timelineJournal.addBindingPayload(payload);
+        // binding 挂在会话的 context 上：页面侧事件直接归该会话，无需再猜当前引擎
+        journals.timeline(key).addBindingPayload(payload, 'playwright');
       })
       .catch((e) => {
         log('playwright timeline binding: ' + (e && e.message ? e.message : e));
@@ -281,11 +410,13 @@ function createPlaywrightRunner(deps = {}) {
     context.on('page', (p) => {
       const e = sessions.get(key);
       if (e) e.page = p;
+      p.__dieyunSessionKey = key;
       applyViewportToPage(p).catch(() => {});
       attachPageEvents(p);
     });
     await applyRoutesToContext(context);
     const page = await context.newPage();
+    page.__dieyunSessionKey = key;
     await applyViewportToPage(page);
     attachPageEvents(page);
     entry = {
@@ -294,9 +425,14 @@ function createPlaywrightRunner(deps = {}) {
       lastSessionSyncAt: 0,
       lastSessionSyncUrl: '',
       /** ref id → 所属 frame 路径（snapshot 时登记，跨域 iframe 里的 ref 靠它点得中） */
-      refFrames: new Map()
+      refFrames: new Map(),
+      /** 本会话「当前 snapshot」的 origin id；ref 与它不一致即判为已失效 */
+      snapshotId: '',
+      createdAt: Date.now(),
+      lastUsedAt: Date.now()
     };
     sessions.set(key, entry);
+    ensureIdleSweep();
     await syncSessionFromElectron(opts.url || '', { ...opts, sessionId: key === '__default__' ? opts.sessionId : key });
     return page;
   }
@@ -309,6 +445,12 @@ function createPlaywrightRunner(deps = {}) {
     const key = sessionId ? String(sessionId).trim() : activeSessionId || '__default__';
     const entry = sessions.get(key);
     if (!entry) return { ok: true };
+    // 先摘账，再关页面：关闭是异步的，若等 await 之后再 delete，期间并发到达的 ensurePage
+    // 会为同一个 key 建好新会话并写回 map —— 那条迟到的 delete 会把新会话从账上抹掉，
+    // 新 context/page 就此失联（既不回收也不复用，还会被下次调用再建一份）。
+    sessions.delete(key);
+    // 会话回收：观察账本一起丢弃，避免下一个会话读到上一个会话的残留
+    journals.drop(key);
     try {
       if (entry.page && !entry.page.isClosed()) await entry.page.close();
     } catch {
@@ -319,7 +461,6 @@ function createPlaywrightRunner(deps = {}) {
     } catch {
       // ignore
     }
-    sessions.delete(key);
     return { ok: true };
   }
 
@@ -335,7 +476,7 @@ function createPlaywrightRunner(deps = {}) {
         return;
       }
       const loc = typeof msg.location === 'function' ? msg.location() : null;
-      consoleJournal.add({
+      consoleJournal(p).add({
         engine: 'playwright',
         source: classified.source,
         level: classified.level,
@@ -347,13 +488,13 @@ function createPlaywrightRunner(deps = {}) {
     p.on('framenavigated', (frame) => {
       try {
         if (frame !== p.mainFrame()) return;
-        recordTimeline('navigate', { url: frame.url() || p.url(), reason: 'page' });
+        recordTimeline(p, 'navigate', { url: frame.url() || p.url(), reason: 'page' });
       } catch {
         // ignore
       }
     });
     p.on('pageerror', (err) => {
-      consoleJournal.add({
+      consoleJournal(p).add({
         engine: 'playwright',
         source: 'pageerror',
         level: 'error',
@@ -391,7 +532,7 @@ function createPlaywrightRunner(deps = {}) {
     p.on('requestfailed', (req) => {
       const meta = pending.get(req) || {};
       pending.delete(req);
-      networkJournal.add({
+      networkJournal(p).add({
         engine: 'playwright',
         method: req.method(),
         url: req.url(),
@@ -406,7 +547,7 @@ function createPlaywrightRunner(deps = {}) {
       const meta = pending.get(req) || {};
       pending.delete(req);
       const status = res.status();
-      networkJournal.add({
+      networkJournal(p).add({
         engine: 'playwright',
         method: req.method(),
         url: res.url(),
@@ -450,7 +591,7 @@ function createPlaywrightRunner(deps = {}) {
       waitUntil: opts.waitUntil === 'domcontentloaded' ? 'domcontentloaded' : 'load',
       timeout: Number(opts.timeoutMs) || 60000
     });
-    recordTimeline('navigate', { url: p.url(), reason: 'navigate' });
+    recordTimeline(p, 'navigate', { url: p.url(), reason: 'navigate' });
     return {
       ok: true,
       url: p.url(),
@@ -458,23 +599,6 @@ function createPlaywrightRunner(deps = {}) {
       engine: 'playwright',
       headless,
       channel: launchChannel
-    };
-  }
-
-  /** 事件时间线（page 侧真实事件 + Agent 侧动作）。 */
-  function timeline(args = {}) {
-    const action = String(args.action || 'list').toLowerCase();
-    if (action === 'clear') {
-      timelineJournal.clear();
-      return { ok: true, engine: 'playwright', cleared: true };
-    }
-    const entries = timelineJournal.list(args);
-    return {
-      ok: true,
-      engine: 'playwright',
-      channel: launchChannel,
-      ...summarizeTimeline(entries, { includeInput: args.includeInput === true }),
-      stats: timelineJournal.status()
     };
   }
 
@@ -510,19 +634,19 @@ function createPlaywrightRunner(deps = {}) {
     const blockedIframes = [];
     const frames = [];
     let textPreview = '';
-    let refEpoch = 0;
     let coverage = null;
     let offset = 0;
+    // 同一次 snapshot 的所有 frame 共用一个 origin id（逐 frame evaluate 也不会串号）
+    const snapshotId = normalizeSnapshotId(opts.snapshotId) || mintSnapshotId();
     for (const entry of targets) {
       // eslint-disable-next-line no-await-in-loop
       const data = await entry.frame
-        .evaluate(buildSnapshotScript({ mode, maxElements: perFrame, refOffset: offset, framePath: 'main' }))
+        .evaluate(buildSnapshotScript({ mode, maxElements: perFrame, refOffset: offset, framePath: 'main', snapshotId }))
         .catch(() => null);
       if (!data) {
         blockedIframes.push({ framePath: entry.path, src: entry.url, crossOrigin: false, error: 'evaluate failed' });
         continue;
       }
-      refEpoch = Math.max(refEpoch, Number(data.refEpoch) || 0);
       const rows = Array.isArray(data.elements) ? data.elements : [];
       for (const row of rows) {
         const framePath = absFramePath(entry.path, row.framePath);
@@ -542,7 +666,10 @@ function createPlaywrightRunner(deps = {}) {
       if (!coverage || entry.main) coverage = data.coverage || coverage;
     }
     const entry = sessions.get(resolveSessionKey(opts));
-    if (entry) entry.refFrames = refFrames;
+    if (entry) {
+      entry.refFrames = refFrames;
+      entry.snapshotId = snapshotId;
+    }
     const omitted = coverage ? Number(coverage.omitted) || 0 : 0;
     return {
       ok: true,
@@ -550,7 +677,7 @@ function createPlaywrightRunner(deps = {}) {
       channel: launchChannel,
       url: p.url(),
       title: await p.title().catch(() => ''),
-      refEpoch,
+      snapshotId,
       mode,
       framePath: isMainFrameSpec(spec) ? 'main' : targets[0].path,
       textPreview,
@@ -559,7 +686,7 @@ function createPlaywrightRunner(deps = {}) {
       blockedIframes,
       coverage,
       note:
-        'ref 在本次 snapshot 内有效；页面跳转或再次 snapshot 后需重新获取' +
+        refLifecycleNote({ example: `ref-0@${snapshotId}` }) +
         (omitted ? `；另有 ${omitted} 个元素因 maxElements 未纳入` : '') +
         (targets.length > 1 ? `；已跨 ${targets.length} 个 frame 采集（跨域 iframe 也能进）` : '')
     };
@@ -573,10 +700,21 @@ function createPlaywrightRunner(deps = {}) {
     throw err;
   }
 
-  /** Agent 侧动作写进时间线（与页面侧真实事件合流）。 */
-  function recordTimeline(type, payload = {}) {
+  /**
+   * 观察账本访问器：事件归「产生它的 page 所属的会话」，而不是「当前引擎」。
+   * page 在 ensurePage 里打上 __dieyunSessionKey，所以同会话跨引擎的记录会落到同一个桶。
+   */
+  function sessionKeyForPage(page) {
+    return (page && page.__dieyunSessionKey) || activeSessionId || '';
+  }
+  const networkJournal = (page) => journals.network(sessionKeyForPage(page));
+  const consoleJournal = (page) => journals.console(sessionKeyForPage(page));
+  const timelineJournal = (page) => journals.timeline(sessionKeyForPage(page));
+
+  /** Agent 侧动作写进时间线（与页面侧真实事件合流）。page 决定归属会话。 */
+  function recordTimeline(page, type, payload = {}) {
     try {
-      timelineJournal.add({ type, source: 'agent', engine: 'playwright', ...payload });
+      timelineJournal(page).add({ type, source: 'agent', engine: 'playwright', ...payload });
     } catch {
       // 记录失败不影响主流程
     }
@@ -693,19 +831,36 @@ function createPlaywrightRunner(deps = {}) {
     return { locator: main, frame: page.mainFrame(), crossFrame: false, framePath: 'main' };
   }
 
+  /** 目标 → CSS 选择器；ref 走 ref-namespace 的同一份拼装（含格式校验）。 */
   function selectorForTarget(target) {
-    return target.kind === 'ref'
-      ? `[data-dieyun-ref="${String(target.value).replace(/"/g, '\\"')}"]`
-      : String(target.value);
+    if (target.kind !== 'ref') return String(target.value);
+    return refSelector(target.value) || `[data-dieyun-ref="${String(target.value).replace(/"/g, '\\"')}"]`;
+  }
+
+  /**
+   * ref 的 origin 校验：只有「产生这个 ref 的那次 snapshot」仍是本引擎 DOM 上最后盖章的 snapshot 才放行。
+   * 旧 ref 因此得到明确的 REF_EXPIRED，而不是一路走到 locator 超时后的笼统「元素未找到」。
+   */
+  function checkTargetRefOrigin(args, target) {
+    if (target.kind !== 'ref') return null;
+    const entry = sessions.get(resolveSessionKey(args));
+    return checkRefOrigin(target.value, entry ? entry.snapshotId : null);
   }
 
   /**
    * 统一目标定位（frame 感知）：
-   *   1) 显式 frame 参数最优先
-   *   2) ref 优先用 snapshot 登记过的 frame（跨域 iframe 里的 ref 靠它才点得中）
-   *   3) 兜底：主 frame 优先，再遍历子 frame
+   *   1) ref 先过 origin 校验（失效即返回，不做任何兜底）
+   *   2) 显式 frame 参数最优先
+   *   3) ref 优先用 snapshot 登记过的 frame（跨域 iframe 里的 ref 靠它才点得中）
+   *   4) 兜底：主 frame 优先，再遍历子 frame
    */
   async function locateTarget(page, args, target) {
+    const origin = checkTargetRefOrigin(args, target);
+    if (origin && !origin.ok) {
+      // 失败发生在页面里，当前 url 是判断「是否已跳转」的第一手证据（见 session-scope.navigatedSinceSnapshot）
+      const currentUrl = page && typeof page.url === 'function' ? page.url() : '';
+      return currentUrl ? { ...origin, url: currentUrl } : origin;
+    }
     const selector = selectorForTarget(target);
     const spec = normalizeFrameSpec(args && args.frame);
     if (!isMainFrameSpec(spec)) {
@@ -801,7 +956,7 @@ function createPlaywrightRunner(deps = {}) {
       const located = await locateTarget(p, args, target);
       if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
       await located.locator.click({ timeout, button, clickCount, force });
-      recordTimeline('click', {
+      recordTimeline(p, 'click', {
         ok: true,
         url: p.url(),
         target: { selector: target.kind === 'selector' ? String(target.value) : '', tag: '' },
@@ -819,7 +974,7 @@ function createPlaywrightRunner(deps = {}) {
       };
     } catch (e) {
       const diagnostics = await diagnoseTarget(p, args, { error: (e && e.message) || String(e) });
-      recordTimeline('click', { ok: false, url: p.url(), error: (e && e.message) || String(e) });
+      recordTimeline(p, 'click', { ok: false, url: p.url(), error: (e && e.message) || String(e) });
       const err = new Error(
         `${(e && e.message) || '点击失败'}${
           diagnostics.occludedBy
@@ -851,10 +1006,10 @@ function createPlaywrightRunner(deps = {}) {
       const target = await resolveTarget(args);
       located = await locateTarget(p, args, target);
       if (!located.ok) {
-        const err = new Error(located.error || '目标 frame/元素未找到');
-        err.code = located.errorCode || 'TARGET_NOT_FOUND';
-        err.diagnostics = located;
-        throw err;
+        // 与 click / hover / selectOption / drag / upload 保持一致：定位失败返回失败体，不抛错。
+        // 抛错会绕过 service 的 ref 失效诊断组装点（engine/instanceId/refEpoch/suggestedFix），
+        // 模型只能看到一句 EXCEPTION，还得自己猜是不是 ref 过期。
+        return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
       }
       const loc = located.locator;
       if (clear) await loc.fill(text, { timeout });
@@ -869,7 +1024,7 @@ function createPlaywrightRunner(deps = {}) {
       if (actual !== '' && !matched) {
         throw new Error('locator fill value mismatch');
       }
-      recordTimeline('type', {
+      recordTimeline(p, 'type', {
         ok: true,
         url: p.url(),
         value: text,
@@ -900,7 +1055,7 @@ function createPlaywrightRunner(deps = {}) {
         err.diagnostics = diagnostics;
         throw err;
       }
-      recordTimeline('type', { ok: true, url: p.url(), value: text, frame: located && located.framePath });
+      recordTimeline(p, 'type', { ok: true, url: p.url(), value: text, frame: located && located.framePath });
       return { ok: true, engine: 'playwright', channel: launchChannel, filledVia: 'js', ...result };
     }
   }
@@ -946,10 +1101,10 @@ function createPlaywrightRunner(deps = {}) {
         err.diagnostics = await diagnoseTarget(p, args, { error: err.message });
         throw err;
       }
-      recordTimeline('change', { ok: true, url: p.url(), value: value || label, frame: framePath });
+      recordTimeline(p, 'change', { ok: true, url: p.url(), value: value || label, frame: framePath });
       return { ok: true, engine: 'playwright', channel: launchChannel, ...fallback, filledVia: 'js' };
     }
-    recordTimeline('change', {
+    recordTimeline(p, 'change', {
       ok: true,
       url: p.url(),
       value: value || label,
@@ -972,8 +1127,9 @@ function createPlaywrightRunner(deps = {}) {
     const direction = String(args.direction || 'down');
     if (args.ref || args.selector) {
       const target = await resolveTarget(args);
-      const sel = target.kind === 'ref' ? `[data-dieyun-ref="${target.value}"]` : target.value;
-      await p.locator(sel).evaluate(
+      const located = await locateTarget(p, args, target);
+      if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
+      await located.locator.evaluate(
         (el, payload) => {
           el.scrollBy(payload.dx, payload.dy);
         },
@@ -1018,7 +1174,7 @@ function createPlaywrightRunner(deps = {}) {
     const located = await locateTarget(p, args, target);
     if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
     await located.locator.hover({ timeout: Number(args.timeoutMs) || 15000 });
-    recordTimeline('hover', {
+    recordTimeline(p, 'hover', {
       ok: true,
       url: p.url(),
       target: { selector: target.kind === 'selector' ? String(target.value) : '', tag: '' },
@@ -1042,8 +1198,9 @@ function createPlaywrightRunner(deps = {}) {
     const loc = locatedFrom.locator;
     if (args.toRef || args.toSelector) {
       const to = await resolveTarget({ ref: args.toRef, selector: args.toSelector });
-      const toSel = to.kind === 'ref' ? `[data-dieyun-ref="${to.value}"]` : to.value;
-      await loc.dragTo(toSel, { timeout: Number(args.timeoutMs) || 15000 });
+      const toLocated = await locateTarget(p, args, to);
+      if (!toLocated.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...toLocated };
+      await loc.dragTo(toLocated.locator, { timeout: Number(args.timeoutMs) || 15000 });
     } else {
       const dx = Number(args.dx) || 0;
       const dy = Number(args.dy) || 0;
@@ -1376,18 +1533,20 @@ function createPlaywrightRunner(deps = {}) {
       err.code = 'FILE_REQUIRED';
       throw err;
     }
-    let selector = args.selector;
-    if (!selector && args.ref) selector = `[data-dieyun-ref="${String(args.ref).replace(/"/g, '\\"')}"]`;
-    if (!selector) {
+    if (!args.selector && !args.ref) {
       const err = new Error('需要提供 ref 或 selector');
       err.code = 'TARGET_REQUIRED';
       throw err;
     }
+    let selector = args.selector;
     try {
-      const located = await locateTarget(p, args, { kind: 'selector', value: selector });
+      const target = await resolveTarget(args);
+      // ref 不再降级成裸选择器：origin 校验必须发生在 locateTarget 里
+      if (target.kind === 'ref') selector = selectorForTarget(target);
+      const located = await locateTarget(p, args, target);
       if (!located.ok) return { ok: false, engine: 'playwright', channel: launchChannel, ...located };
       await located.locator.setInputFiles(filePath, { timeout: Number(args.timeoutMs) || 15000 });
-      recordTimeline('upload', { ok: true, url: p.url(), value: path.basename(filePath), frame: located.framePath || 'main' });
+      recordTimeline(p, 'upload', { ok: true, url: p.url(), value: path.basename(filePath), frame: located.framePath || 'main' });
       return {
         ok: true,
         engine: 'playwright',
@@ -1452,7 +1611,7 @@ function createPlaywrightRunner(deps = {}) {
       mode: snap.mode,
       textPreview: snap.textPreview || '',
       elements: snap.elements || [],
-      refEpoch: snap.refEpoch,
+      snapshotId: snap.snapshotId,
       coverage: snap.coverage,
       frames: snap.frames,
       blockedIframes: snap.blockedIframes,
@@ -1462,7 +1621,7 @@ function createPlaywrightRunner(deps = {}) {
       viewport: p.viewportSize() || null,
       warning: shotError ? `截图失败（页面文本与 refs 仍可用）: ${shotError}` : undefined,
       note: [
-        'observe 同时返回页面文本、ref、覆盖率与截图；页面变化后 ref 需重新获取',
+        'observe 同时返回页面文本、ref、覆盖率与截图；' + refLifecycleNote(),
         snap.coverage && snap.coverage.omitted ? `本次有 ${snap.coverage.omitted} 个元素因 maxElements 未纳入` : null,
         'Playwright 引擎已跨 frame 采集（含跨域 iframe）'
       ]
@@ -1673,11 +1832,22 @@ function createPlaywrightRunner(deps = {}) {
       viewport: viewportOverride,
       hasBrowser: !!(browser && browser.isConnected()),
       activeSessionId: activeSessionId || '__default__',
-      sessionCount: sessions.size
+      sessionCount: sessions.size,
+      /** 空闲回收阈值（0 = 关闭回收）；sessions 列出每个会话的最后使用时间，便于确认没有长期挂着的实例。 */
+      idleSessionMs,
+      sessions: [...sessions].map(([key, e]) => ({
+        id: key,
+        active: key === (activeSessionId || '__default__'),
+        url: e.page && !e.page.isClosed() ? e.page.url() : '',
+        lastUsedAt: Number(e.lastUsedAt) || 0,
+        /** 有操作在途的会话不会被回收，便于解释「为什么这个空闲会话还在」 */
+        inFlight: isOpInFlight(key)
+      }))
     };
   }
 
   async function close() {
+    stopIdleSweep();
     for (const key of [...sessions.keys()]) {
       await closeSession(key);
     }
@@ -1698,34 +1868,6 @@ function createPlaywrightRunner(deps = {}) {
       ...result,
       url: p.url(),
       note: 'a11y 树列出可访问性角色与名称；复杂页面可配合 browser_snapshot 的 ref 点击'
-    };
-  }
-
-  function network(args = {}) {
-    if (String(args.action || 'list').toLowerCase() === 'clear') {
-      networkJournal.clear();
-      return { ok: true, engine: 'playwright', cleared: true };
-    }
-    const entries = networkJournal.list(args);
-    return {
-      ok: true,
-      engine: 'playwright',
-      ...summarizeHarEntries(entries),
-      stats: networkJournal.status()
-    };
-  }
-
-  function consoleMessages(args = {}) {
-    if (String(args.action || 'list').toLowerCase() === 'clear') {
-      consoleJournal.clear();
-      return { ok: true, engine: 'playwright', cleared: true };
-    }
-    const entries = consoleJournal.list(args);
-    return {
-      ok: true,
-      engine: 'playwright',
-      ...summarizeConsoleEntries(entries),
-      stats: consoleJournal.status()
     };
   }
 
@@ -1995,7 +2137,8 @@ function createPlaywrightRunner(deps = {}) {
     }
   }
 
-  return {
+  // 出口统一装饰：此后所有对外方法都会登记在途操作（回收器据此避让），见 trackSessionOps
+  return trackSessionOps({
     navigate,
     snapshot,
     click,
@@ -2008,7 +2151,6 @@ function createPlaywrightRunner(deps = {}) {
     pdf,
     evaluateScript,
     frames: listFrames,
-    timeline,
     waitFor,
     tabs,
     downloads: downloadStatus,
@@ -2023,8 +2165,6 @@ function createPlaywrightRunner(deps = {}) {
     hover,
     drag,
     a11ySnapshot,
-    network,
-    consoleMessages,
     setViewport,
     stageViewport,
     resetViewport,
@@ -2034,12 +2174,13 @@ function createPlaywrightRunner(deps = {}) {
     setHeaded,
     activateSession,
     closeSession,
+    reapIdleSessions,
     clearCookies,
     dialog,
     route,
     emulate,
     resetEmulation
-  };
+  });
 }
 
 module.exports = { createPlaywrightRunner };

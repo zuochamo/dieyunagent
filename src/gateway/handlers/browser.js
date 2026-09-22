@@ -334,9 +334,10 @@ function createBrowserHandlers(d) {
       return browser.consoleMessages(params || {});
     },
 
-    'browser.reset_logs': async () => {
+    // 必须带 sessionId：只清本会话的缓冲，否则会把别的会话（前台可见页面）的请求与日志一起清掉
+    'browser.reset_logs': async (params) => {
       assertBrowserEnabled();
-      return browser.resetLogs();
+      return browser.resetLogs(params || {});
     },
 
     'browser.scroll': async (params) => {

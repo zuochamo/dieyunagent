@@ -159,8 +159,8 @@ function updateBrowserChrome(state) {
     badge.title = '';
     if (state.loading) badge.textContent = '加载中…';
     else if (state.renderHealth && state.renderHealth.likelyBlank) {
-      badge.textContent = '画面黑屏';
-      badge.title = 'BrowserView 截图接近全黑，已尝试重绘恢复';
+      badge.textContent = '未渲染';
+      badge.title = '画面全黑且页面无可见内容（确认未渲染），已尝试重绘恢复';
     }
     else if (state.loadError && state.loadError.errorDescription) {
       badge.textContent = '加载失败';

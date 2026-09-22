@@ -35,13 +35,14 @@ function createNetworkJournal(opts = {}) {
     entries = [];
   }
 
-  function list(args = {}) {
-    const limit = Math.min(200, Math.max(1, Number(args.limit) || 50));
+  /** list 与 status 共用的过滤（唯一来源）：engine 只是条目属性之一。 */
+  function filterEntries(args = {}) {
     const urlPattern = args.urlPattern != null ? String(args.urlPattern) : '';
     const types = args.types
       ? (Array.isArray(args.types) ? args.types : [args.types]).map((t) => String(t).toLowerCase())
       : null;
     let out = entries.slice();
+    if (args.engine) out = out.filter((e) => e.engine === args.engine);
     if (urlPattern) {
       try {
         const re = new RegExp(urlPattern, 'i');
@@ -62,13 +63,19 @@ function createNetworkJournal(opts = {}) {
       const since = Date.now() - Math.max(0, Number(args.sinceMs) || 0);
       out = out.filter((e) => e.ts >= since);
     }
-    return out.slice(-limit);
+    return out;
   }
 
-  function status() {
-    const tail = entries.slice(-30);
+  function list(args = {}) {
+    const limit = Math.min(200, Math.max(1, Number(args.limit) || 50));
+    return filterEntries(args).slice(-limit);
+  }
+
+  function status(args = {}) {
+    const rows = filterEntries(args);
+    const tail = rows.slice(-30);
     const failed = tail.filter((e) => e.failed || (e.status != null && e.status >= 400)).length;
-    return { total: entries.length, recentFailed: failed };
+    return { total: rows.length, recentFailed: failed };
   }
 
   return { add, clear, list, status };

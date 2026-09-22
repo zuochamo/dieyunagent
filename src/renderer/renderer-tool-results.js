@@ -195,7 +195,7 @@ function summarizeToolResult(name, result) {
     if (result.saveError) return `截图 ${size} · 保存失败：${String(result.saveError).slice(0, 40)}`;
     if (result.path) return `截图 ${size} · 已存 ${String(result.path).split(/[\\/]/).pop()}`;
     if (result.renderHealth && result.renderHealth.likelyBlank) {
-      return `截图 ${size} · 画面疑似全黑`;
+      return `截图 ${size} · 页面未渲染（全黑且无可见内容）`;
     }
     return `截图 ${size} · PNG`;
   }
@@ -280,13 +280,13 @@ function summarizeToolResult(name, result) {
   }
   if (name === 'browser_observe') {
     const shot = result.screenshot ? ` · 截图 ${result.screenshot.width || '?'}×${result.screenshot.height || '?'}` : '';
-    const blank = result.renderHealth && result.renderHealth.likelyBlank ? ' · 画面疑似全黑' : '';
+    const blank = result.renderHealth && result.renderHealth.likelyBlank ? ' · 页面未渲染' : '';
     const fb = result.fallbackFrom ? ` · fallback ${result.fallbackFrom}->${result.engine || '?'}` : '';
     return `${Array.isArray(result.elements) ? result.elements.length : 0} 个元素 · ${(result.title || result.url || '').slice(0, 60)}${shot}${blank}${fb}`;
   }
   if (name === 'browser_status' && result.browserview) {
     const v = result.browserview;
-    const blank = v.renderHealth && v.renderHealth.likelyBlank ? ' · 画面疑似全黑' : '';
+    const blank = v.renderHealth && v.renderHealth.likelyBlank ? ' · 页面未渲染' : '';
     return `${v.title || v.url || '空闲'} · ${result.activeEngine || ''}${blank}`;
   }
   if (name === 'browser_close') return '已关闭';

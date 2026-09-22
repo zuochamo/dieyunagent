@@ -1,6 +1,7 @@
 'use strict';
 
 const { FRAME_HELPERS } = require('./frame-script');
+const { mintSnapshotId, normalizeSnapshotId, refLifecycleNote } = require('./ref-namespace');
 
 const INTERACTIVE_SEL =
   'a, button, input, textarea, select, label, [role="button"], [role="link"], [role="textbox"], [role="combobox"], [onclick], input[type="submit"], input[type="button"], [tabindex]:not([tabindex="-1"])';
@@ -204,17 +205,6 @@ function __dieyunSelectOption(el, value, label) {
   el.dispatchEvent(new Event('change', { bubbles: true }));
   return { ok: true, value: target.value, label: (target.textContent || target.label || '').trim() };
 }
-function __dieyunResolveRef(ref) {
-  let el = (window.__dieyunRefs || {})[ref];
-  if (el && el.isConnected) return el;
-  el = document.querySelector('[data-dieyun-ref="' + ref + '"]');
-  if (el) {
-    window.__dieyunRefs = window.__dieyunRefs || {};
-    window.__dieyunRefs[ref] = el;
-    return el;
-  }
-  return null;
-}
 /**
  * 递归采集（含同源 iframe，深度/节点数双上限）。
  * 覆盖率统计是硬要求：宁可多回一条"另有 N 个元素未纳入"，也不能让模型
@@ -240,7 +230,7 @@ function __dieyunCollectRoot(root, out, state, framePath, mode, depth) {
             });
           }
         } else {
-          const id = 'ref-' + (state.ref++);
+          const id = __dyFormatRef(state.ref++, state.snapshotId);
           const row = __dieyunAssignRef(node, id, nodePath === 'main' ? 'main' : 'iframe');
           row.framePath = nodePath;
           const extra = __dieyunExtraRow(node, mode);
@@ -395,6 +385,8 @@ function buildSnapshotScript(options = {}) {
   const rootPath = JSON.stringify(String(options.framePath == null ? 'main' : options.framePath));
   const scanLimit = Math.min(SNAPSHOT_SCAN_LIMIT, Math.max(500, Number(options.scanLimit) || SNAPSHOT_SCAN_LIMIT));
   const sampleLimit = Math.min(10, Math.max(1, Number(options.sampleLimit) || SNAPSHOT_SAMPLE_LIMIT));
+  // origin 身份由 Node 铸造并逐 frame 复用；缺省时兜底铸造一个（脚本可独立跑，如单测）
+  const snapshotId = normalizeSnapshotId(options.snapshotId) || mintSnapshotId();
   return `(() => {
     ${SNAPSHOT_HELPERS}
     const mode = ${JSON.stringify(mode)};
@@ -403,13 +395,20 @@ function buildSnapshotScript(options = {}) {
     const scanLimit = ${scanLimit};
     const sampleLimit = ${sampleLimit};
     const initialRef = ${refOffset};
+    const snapshotId = ${JSON.stringify(snapshotId)};
     document.querySelectorAll('[data-dieyun-ref]').forEach(el => el.removeAttribute('data-dieyun-ref'));
     window.__dieyunRefs = {};
-    window.__dieyunRefEpoch = (window.__dieyunRefEpoch || 0) + 1;
-    const refEpoch = window.__dieyunRefEpoch;
+    // 本窗口这次 snapshot 的身份；ref 解析时用它判定「这个 ref 是否已经过期」
+    window.__dieyunRefSnapshotId = snapshotId;
+    // 同源 frame 在 top 上共享这份身份：snapshot 可能跑在子 frame 里，别的 frame 也要看得到
+    try {
+      const topWin = __dyTopWindow();
+      if (topWin && topWin !== window) topWin.__dieyunRefSnapshotId = snapshotId;
+    } catch (e) {}
     const elements = [];
     const state = {
       ref: initialRef,
+      snapshotId,
       maxElements,
       depth: 0,
       scanned: 0,
@@ -444,7 +443,7 @@ function buildSnapshotScript(options = {}) {
     if (state.filteredVisible > 0 && mode === 'interactive') {
       coverage.filteredSamples = state.filteredSamples;
     }
-    let note = 'ref 在本次 snapshot 内有效；页面跳转或再次 snapshot 后需重新获取';
+    let note = ${JSON.stringify(refLifecycleNote())};
     if (omitted > 0) {
       note += '；因 maxElements=' + maxElements + ' 还有 ' + omitted + ' 个匹配元素未纳入（可提高 maxElements，或用 ref 定位到更小的容器后重新 snapshot）';
     }
@@ -463,7 +462,7 @@ function buildSnapshotScript(options = {}) {
     return {
       url: location.href,
       title: document.title || '',
-      refEpoch,
+      snapshotId,
       mode,
       framePath: rootPath,
       textPreview: (document.body && document.body.innerText ? document.body.innerText : '').slice(0, 6000),

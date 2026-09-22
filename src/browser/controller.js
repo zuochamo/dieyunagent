@@ -39,24 +39,23 @@ const {
   buildAnnotateScript,
   buildClearAnnotationScript
 } = require('./frame-script');
+const { refSelector } = require('./ref-namespace');
 const {
-  createTimelineJournal,
-  summarizeTimeline,
   buildTimelineRecorderScript,
   TIMELINE_BINDING
 } = require('./timeline');
+const { createJournalScope } = require('./journal-scope');
 const { a11ySnapshotBrowserView } = require('./a11y');
-const { createNetworkJournal, summarizeHarEntries } = require('./network-collector');
-const {
-  createConsoleJournal,
-  summarizeConsoleEntries,
-  classifyConsoleEntry,
-  buildConsoleErrorHookScript
-} = require('./console-collector');
+const { classifyConsoleEntry, buildConsoleErrorHookScript } = require('./console-collector');
 const { BROWSER_SESSION_PARTITION, browserPartitionForSession } = require('./session-sync');
 const { assertBrowserLoadUrl, matchUrlPattern } = require('./url-policy');
 const { isBrowserPermissionAllowed } = require('./permission-policy');
 const { buildEvaluateScript, buildExpressionProbeScript, normalizeEvaluateResult } = require('./evaluate');
+const {
+  buildContentSignalsScript,
+  classifyRenderHealth,
+  renderHealthWarning
+} = require('./render-health');
 const { normalizeViewport, normalizeEmulation } = require('./viewport');
 const { buildExpectScript } = require('./expect');
 
@@ -139,8 +138,11 @@ function relocateFramePaths(data, prefix) {
  */
 function createBrowserViewController(deps) {
   const log = deps.log || (() => {});
-  const networkJournal = deps.networkJournal || createNetworkJournal();
-  const consoleJournal = deps.consoleJournal || createConsoleJournal();
+  /**
+   * 观察账本（network / console / timeline）按会话归位，由 service 注入同一份；
+   * BrowserView 只服务前台会话，所以写入时用「当前承载会话」做归属键。
+   */
+  const journals = deps.journals || createJournalScope();
   const installedNetworkSessions = new WeakSet();
   /** @type {import('electron').BrowserView | null} */
   let view = null;
@@ -155,7 +157,7 @@ function createBrowserViewController(deps) {
   let lastRenderHealth = null;
   /** 设备仿真覆盖（BrowserView 走 CDP Emulation.setDeviceMetricsOverride） */
   let viewportOverride = null;
-  const timelineJournal = deps.timelineJournal || createTimelineJournal();
+
   /** 页面 init script（console 异常钩子 + 时间线记录器）注册状态（按 webContents 记忆） */
   let initScriptWc = null;
   /** @type {string[]} */
@@ -210,6 +212,14 @@ function createBrowserViewController(deps) {
     return activePartitionSessionId;
   }
 
+  /**
+   * 观察账本访问器：BrowserView 只承载前台会话（后台会话会被改道到 Playwright），
+   * 因此 view 的网络 / console / 时间线都归「当前承载的会话」，而不是「当前引擎」。
+   * 归属键由 journal-scope 归一，service 读取时用同一个 keyOf，读写不会再错位。
+   */
+  const networkJournal = () => journals.network(activePartitionSessionId);
+  const consoleJournal = () => journals.console(activePartitionSessionId);
+  const timelineJournal = () => journals.timeline(activePartitionSessionId);
 
   function installNetworkCapture(wc) {
     const ses = wc.session;
@@ -229,7 +239,7 @@ function createBrowserViewController(deps) {
     ses.webRequest.onCompleted(filter, (details) => {
       const p = pending.get(details.id) || {};
       pending.delete(details.id);
-      networkJournal.add({
+      networkJournal().add({
         engine: 'browserview',
         method: p.method || details.method,
         url: details.url,
@@ -242,7 +252,7 @@ function createBrowserViewController(deps) {
     ses.webRequest.onErrorOccurred(filter, (details) => {
       const p = pending.get(details.id) || {};
       pending.delete(details.id);
-      networkJournal.add({
+      networkJournal().add({
         engine: 'browserview',
         method: p.method || details.method,
         url: details.url,
@@ -300,7 +310,7 @@ function createBrowserViewController(deps) {
         packed ? event.message : message
       );
       const source = packed ? event.sourceId : sourceId;
-      consoleJournal.add({
+      consoleJournal().add({
         engine: 'browserview',
         source: classified.source,
         level: classified.level,
@@ -604,12 +614,16 @@ function createBrowserViewController(deps) {
     });
   }
 
+  /**
+   * 截图像素统计（纯数据，不做「空 / 暗」判定）。
+   * 「是否全黑」把 sampleCount=0 的无效采样排除在外；「是否空白」由 render-health 结合页面内容判定。
+   */
   function analyzeImage(image) {
     const size = image && image.getSize ? image.getSize() : { width: 0, height: 0 };
     const width = Number(size.width) || 0;
     const height = Number(size.height) || 0;
     if (width <= 0 || height <= 0) {
-      return { width, height, sampleCount: 0, avgBrightness: 0, darkRatio: 1, blankBlack: true };
+      return { width, height, sampleCount: 0, avgBrightness: 0, darkRatio: 0, contrast: 0 };
     }
     const bitmap = image.toBitmap();
     const pixels = width * height;
@@ -639,9 +653,22 @@ function createBrowserViewController(deps) {
       sampleCount: samples,
       avgBrightness: Math.round(avgBrightness * 10) / 10,
       darkRatio: Math.round(darkRatio * 1000) / 1000,
-      contrast: Math.round((max - min) * 10) / 10,
-      blankBlack: darkRatio > 0.985 && avgBrightness < 8
+      contrast: Math.round((max - min) * 10) / 10
     };
+  }
+
+  /**
+   * 页面侧内容信号（渲染健康的内容事实来源，脚本见 render-health.js）。
+   * 取不到时返回 null —— 调用方必须把它当成「未知」，不能当成「空」。
+   */
+  async function readPageContentSignals(wc = null) {
+    const target = wc || (hasLiveView() ? view.webContents : null);
+    if (!target || target.isDestroyed()) return null;
+    try {
+      return await target.executeJavaScript(buildContentSignalsScript(), true);
+    } catch {
+      return null;
+    }
   }
 
   async function probeRenderHealth(reason = '') {
@@ -652,35 +679,14 @@ function createBrowserViewController(deps) {
     try {
       const image = await view.webContents.capturePage();
       const visual = analyzeImage(image);
-      let page = null;
-      try {
-        page = await view.webContents.executeJavaScript(
-          `(() => {
-            const body = document.body;
-            const root = document.documentElement;
-            const bodyStyle = body ? getComputedStyle(body) : null;
-            return {
-              readyState: document.readyState,
-              title: document.title || '',
-              textLength: ((body && body.innerText) || '').trim().length,
-              canvasCount: document.querySelectorAll('canvas').length,
-              imageCount: document.images ? document.images.length : 0,
-              bodyBackground: bodyStyle ? bodyStyle.backgroundColor : '',
-              url: location.href
-            };
-          })()`,
-          true
-        );
-      } catch {
-        page = null;
-      }
+      const page = await readPageContentSignals();
       lastRenderHealth = {
         ok: true,
         reason,
         at: Date.now(),
         visual,
         page,
-        likelyBlank: !!visual.blankBlack
+        ...classifyRenderHealth({ visual, page })
       };
       return lastRenderHealth;
     } catch (e) {
@@ -704,11 +710,15 @@ function createBrowserViewController(deps) {
     }, Math.max(0, Number(delayMs) || 0));
   }
 
+  /**
+   * 重绘恢复：**只在确认空白时**做（全黑像素 + 页面无可见内容）。
+   * 单纯「画面暗」的深色主题页面不动它 —— 重挂 BrowserView 会打断页面状态（登录态、ref 归属）。
+   */
   async function probeAndRecoverBlankPaint(reason) {
     if (!panelOpen || !bounds || !hasLiveView()) return;
     const health = await probeRenderHealth(reason);
     emitState();
-    if (!health?.visual?.blankBlack || recoveringBlankPaint) return;
+    if (!health?.likelyBlank || recoveringBlankPaint) return;
     const recoveryUrl = String(currentUrl || (health.page && health.page.url) || '');
     const now = Date.now();
     if (recoveryUrl && recoveryUrl === lastBlankRecoveryUrl && now - lastBlankRecoveryAt < 10000) {
@@ -730,7 +740,7 @@ function createBrowserViewController(deps) {
       }
       await waitQuiet(350);
       const after = await probeRenderHealth(reason + ':recovered');
-      if (after?.visual?.blankBlack && !loading && currentUrl) {
+      if (after?.likelyBlank && !loading && currentUrl) {
         log('browser blank paint persists after reattach: ' + currentUrl);
       }
       emitState();
@@ -960,7 +970,7 @@ function createBrowserViewController(deps) {
   /** 时间线：Agent 侧动作（与页面侧真实事件合流）。 */
   function recordTimeline(type, payload = {}) {
     try {
-      timelineJournal.add({ type, source: 'agent', engine: 'browserview', url: currentUrl, ...payload });
+      timelineJournal().add({ type, source: 'agent', engine: 'browserview', url: currentUrl, ...payload });
     } catch {
       // 时间线记录失败不影响主流程
     }
@@ -1238,6 +1248,10 @@ function createBrowserViewController(deps) {
       retryable: true,
       diagnostics
     };
+    // ref origin 的事实（来自哪次 snapshot / 当前是哪次）必须一路带到返回体：
+    // 上层据此补全 ref 失效诊断，模型才知道是「过期」而不是「页面上没这个元素」
+    if (primary && primary.snapshotId) base.snapshotId = primary.snapshotId;
+    if (primary && primary.currentSnapshotId) base.currentSnapshotId = primary.currentSnapshotId;
     if (occluded) {
       base.occludedBy = occluded;
       base.suggestedFix =
@@ -1297,16 +1311,14 @@ function createBrowserViewController(deps) {
       mode,
       requestedFrame: isMainFrameSpec(frameSpec) ? undefined : describeFrameSpec(frameSpec),
       renderHealth,
-      warning: renderHealth?.likelyBlank
-        ? 'BrowserView 截图接近全黑；如果页面不是故意黑屏，请改用 engine=playwright 或调用 browser_status 查看状态。'
-        : undefined
+      warning: renderHealthWarning(renderHealth) || undefined
     };
   }
 
   async function resolveTarget(args = {}) {
     if (args.ref) {
-      const ref = String(args.ref).replace(/"/g, '\\"');
-      return `[data-dieyun-ref="${ref}"]`;
+      // 与引擎侧同一份 ref → 选择器拼装；非法格式退回字面量，由页面脚本报 REF_MALFORMED
+      return refSelector(args.ref) || `[data-dieyun-ref="${String(args.ref).replace(/"/g, '\\"')}"]`;
     }
     if (args.selector) return String(args.selector);
     const err = new Error('需要提供 ref 或 selector');
@@ -1727,12 +1739,15 @@ function createBrowserViewController(deps) {
     const png = image.toPNG();
     const visual = analyzeImage(image);
     const size = image.getSize();
+    // 元素截图时视觉统计只覆盖元素，但仍要问页面有没有内容：纯黑按钮 ≠ 页面空白
+    const page = await readPageContentSignals(wc);
     lastRenderHealth = {
       ok: true,
       reason: 'screenshot',
       at: Date.now(),
       visual,
-      likelyBlank: visual.blankBlack
+      page,
+      ...classifyRenderHealth({ visual, page })
     };
     return {
       ok: true,
@@ -1746,9 +1761,7 @@ function createBrowserViewController(deps) {
       framePath: shotOpts.clip ? shotOpts.clip.framePath : undefined,
       annotate: annotation && annotation.ok ? { drawn: annotation.drawn, total: annotation.total } : undefined,
       renderHealth: lastRenderHealth,
-      warning: visual.blankBlack
-        ? 'BrowserView 截图接近全黑；如果页面不是故意黑屏，请改用 engine=playwright。'
-        : undefined
+      warning: renderHealthWarning(lastRenderHealth) || undefined
     };
   }
 
@@ -1869,28 +1882,19 @@ function createBrowserViewController(deps) {
     const frameJson = isMainFrameSpec(frameSpec) ? 'null' : JSON.stringify(frameSpec);
     const raw = await evaluate(buildExpectScript(JSON.stringify(assertions || []), frameJson));
     if (raw && raw.ok === false && raw.errorCode) {
-      return { ok: false, error: raw.error, errorCode: raw.errorCode, frames: raw.frames, results: [] };
+      // snapshotId / currentSnapshotId 是 ref 失效诊断的原话（这个 ref 来自哪次 snapshot）：
+      // 重建失败体时不能丢，否则上层只能报「过期了」却说不出过期的两端。
+      return {
+        ok: false,
+        error: raw.error,
+        errorCode: raw.errorCode,
+        snapshotId: raw.snapshotId,
+        currentSnapshotId: raw.currentSnapshotId,
+        frames: raw.frames,
+        results: []
+      };
     }
     return raw;
-  }
-
-  /** 事件时间线（page 侧真实事件 + Agent 侧动作）。 */
-  function timeline(args = {}) {
-    const action = String(args.action || 'list').toLowerCase();
-    if (action === 'clear') {
-      timelineJournal.clear();
-      return { ok: true, engine: 'browserview', cleared: true };
-    }
-    const entries = timelineJournal.list(args);
-    return {
-      ok: true,
-      engine: 'browserview',
-      ...summarizeTimeline(entries, { includeInput: args.includeInput === true }),
-      stats: timelineJournal.status(),
-      note:
-        '时间线 = 页面侧真实事件（capture 阶段，含 iframe 内）+ Agent 侧动作；' +
-        '排查"点了没反应"时先 action=list 看事件有没有到页面，再看 browser_console/browser_network'
-    };
   }
 
   async function readLocalStorage() {
@@ -1974,11 +1978,11 @@ function createBrowserViewController(deps) {
       diagnostics,
       errorCode: blank ? 'BROWSER_BLANK_VIEW' : 'WAIT_TIMEOUT',
       error: blank
-        ? 'BrowserView 画面疑似全黑，等待条件未命中。请切换 engine=playwright 重新 observe/snapshot，或向用户说明页面渲染异常。'
+        ? '页面全黑且无可见内容（已确认未渲染），等待条件未命中。请用 browser_status 查看渲染状态，或向用户说明页面渲染异常。'
         : `等待条件超时（最后一次探测：${JSON.stringify(last)?.slice(0, 300)}）`,
       retryable: false,
       suggestedFix: blank
-        ? '调用 browser_observe({engine:"playwright"}) 或 browser_snapshot({engine:"playwright"})；不要继续重复相同 wait_for。'
+        ? '确认页面确实没渲染再考虑 browser_observe({engine:"playwright"})；深色主题页面属于正常渲染，不要切引擎。不要重复相同 wait_for。'
         : '先 browser_observe 查看当前页面状态，再决定下一步。'
     };
   }
@@ -2199,7 +2203,7 @@ function createBrowserViewController(deps) {
     }
     if (method === 'Runtime.bindingCalled') {
       if (params && params.name === TIMELINE_BINDING) {
-        timelineJournal.addBindingPayload(params.payload);
+        timelineJournal().addBindingPayload(params.payload, 'browserview');
       }
       return;
     }
@@ -2625,9 +2629,7 @@ function createBrowserViewController(deps) {
         log('browser observe screenshot: ' + shotError);
       }
     }
-    const blankWarning = (shot?.renderHealth || snap.renderHealth || lastRenderHealth)?.likelyBlank
-      ? 'BrowserView 画面疑似全黑；如果不是页面自身黑色背景，请改用 engine=playwright。'
-      : '';
+    // 空白警告已在 snapshot / screenshot 内由 render-health 统一生成，这里不再自写一份
     const shotWarning = shotError
       ? `截图失败（页面文本与 refs 仍可用）: ${shotError}`
       : '';
@@ -2639,7 +2641,7 @@ function createBrowserViewController(deps) {
       mode: snap.mode,
       textPreview: snap.textPreview || '',
       elements: snap.elements || [],
-      refEpoch: snap.refEpoch,
+      snapshotId: snap.snapshotId,
       coverage: snap.coverage,
       frames: snap.frames,
       blockedIframes: snap.blockedIframes,
@@ -2654,7 +2656,7 @@ function createBrowserViewController(deps) {
         : null,
       viewport: bounds ? { width: bounds.width, height: bounds.height } : null,
       renderHealth: shot?.renderHealth || snap.renderHealth || lastRenderHealth,
-      warning: [snap.warning, shotWarning, blankWarning].filter(Boolean).join('；') || undefined,
+      warning: [snap.warning, shotWarning].filter(Boolean).join('；') || undefined,
       note: [
         'observe 同时返回页面文本、ref、覆盖率与截图；页面变化后 ref 需重新获取',
         snap.coverage && snap.coverage.omitted
@@ -2908,7 +2910,7 @@ function createBrowserViewController(deps) {
       viewport: viewportOverride,
       emulation: { ...emulationState, permissions: [...emulatedPermissions] },
       cdp: cdpStatus(),
-      timeline: timelineJournal.status()
+      timeline: timelineJournal().status()
     };
   }
 
@@ -2976,34 +2978,6 @@ function createBrowserViewController(deps) {
     };
   }
 
-  function network(args = {}) {
-    if (String(args.action || 'list').toLowerCase() === 'clear') {
-      networkJournal.clear();
-      return { ok: true, engine: 'browserview', cleared: true };
-    }
-    const entries = networkJournal.list(args);
-    return {
-      ok: true,
-      engine: 'browserview',
-      ...summarizeHarEntries(entries),
-      stats: networkJournal.status()
-    };
-  }
-
-  function consoleMessages(args = {}) {
-    if (String(args.action || 'list').toLowerCase() === 'clear') {
-      consoleJournal.clear();
-      return { ok: true, engine: 'browserview', cleared: true };
-    }
-    const entries = consoleJournal.list(args);
-    return {
-      ok: true,
-      engine: 'browserview',
-      ...summarizeConsoleEntries(entries),
-      stats: consoleJournal.status()
-    };
-  }
-
   function onWindowResize() {
     try {
       applyBounds();
@@ -3025,7 +2999,6 @@ function createBrowserViewController(deps) {
     pdf,
     evaluateScript,
     frames: listFrames,
-    timeline,
     waitFor,
     tabs,
     downloads: downloadStatus,
@@ -3044,8 +3017,6 @@ function createBrowserViewController(deps) {
     hover,
     drag,
     a11ySnapshot,
-    network,
-    consoleMessages,
     setViewport,
     stageViewport,
     resetViewport,

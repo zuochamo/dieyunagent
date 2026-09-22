@@ -1,5 +1,7 @@
 'use strict';
 
+const { REF_PATTERN, REF_PREFIX, REF_ORIGIN_SEPARATOR, REF_FORMAT_HINT } = require('./ref-namespace');
+
 /**
  * iframe / 多 frame 上下文：frame 描述、匹配、页面内遍历与坐标换算。
  *
@@ -397,7 +399,70 @@ function __dyOcclusion(el) {
     errorCode: 'TARGET_OCCLUDED'
   };
 }
+/* ---- ref origin 身份：与 ref-namespace.js 共用同一份格式定义 ---- */
+var __dyRefRe = new RegExp(${JSON.stringify(`^${REF_PATTERN}$`)});
+function __dyParseRef(ref) {
+  if (ref == null) return null;
+  var m = __dyRefRe.exec(String(ref).trim());
+  return m ? { seq: Number(m[1]), snapshotId: m[2] } : null;
+}
+function __dyFormatRef(seq, snapshotId) {
+  return ${JSON.stringify(REF_PREFIX)} + Number(seq) + ${JSON.stringify(REF_ORIGIN_SEPARATOR)} + snapshotId;
+}
+/** 某个 window 最后一次 snapshot 的身份；跨域/无权限时返回 ''。 */
+function __dyWindowSnapshotId(win) {
+  try {
+    var v = win ? win.__dieyunRefSnapshotId : null;
+    return v ? String(v) : '';
+  } catch (e) {
+    return '';
+  }
+}
+/** 解析时应当比对的「当前 snapshot」：优先将要解析它的那个 window，再退到本 window / top。 */
+function __dyCurrentSnapshotId(win) {
+  return __dyWindowSnapshotId(win)
+    || __dyWindowSnapshotId(typeof window !== 'undefined' ? window : null)
+    || __dyWindowSnapshotId(__dyTopWindow());
+}
+function __dyRefFailure(reason, ref, extra) {
+  var out = Object.assign({ ok: false, reason: reason, ref: ref == null ? '' : String(ref) }, extra || {});
+  // 页面当场在哪：页面自己跳转（表单提交 / JS 重定向）不经过 navigate 工具，
+  // 上层只能靠这个 url 判断「旧 ref 失效是因为跳转过」还是「被新 snapshot 取代」。
+  try { if (typeof location !== 'undefined' && location.href) out.url = String(location.href); } catch (e) {}
+  if (reason === 'malformed') {
+    out.errorCode = 'REF_MALFORMED';
+    out.error = 'ref 格式非法："' + out.ref + '"；应直接使用 browser_snapshot 返回的 ref（形如 '
+      + ${JSON.stringify(REF_FORMAT_HINT)} + '）';
+  } else if (reason === 'no_snapshot') {
+    out.errorCode = 'REF_NO_SNAPSHOT';
+    out.error = '本会话尚无有效的 snapshot（或它已被关闭）；请先调用 browser_snapshot 再操作 ref';
+  } else {
+    out.errorCode = 'REF_EXPIRED';
+    out.error = 'ref 已失效：它来自 snapshot ' + out.snapshotId + '，当前已是 '
+      + (out.currentSnapshotId || '（无）') + '；请重新 browser_snapshot 取新 ref，或改用 CSS selector';
+  }
+  return out;
+}
+/**
+ * ref 失效的唯一判定点：ref 自带 origin，只有「产生它的那次 snapshot」仍是
+ * 将要解析它的那个 window 上最后盖章的 snapshot 才放行。
+ * 这样旧 ref 会得到明确的 REF_EXPIRED，而不是静默命中页面里残留的同名属性。
+ * @param {string} ref
+ * @param {Window} [win] 解析发生的目标 window（缺省退到本 window / top）
+ */
+function __dyCheckRefOrigin(ref, win) {
+  var parsed = __dyParseRef(ref);
+  if (!parsed) return __dyRefFailure('malformed', ref);
+  var current = __dyCurrentSnapshotId(win);
+  if (!current) return __dyRefFailure('no_snapshot', ref, { snapshotId: parsed.snapshotId });
+  if (current !== parsed.snapshotId) {
+    return __dyRefFailure('expired', ref, { snapshotId: parsed.snapshotId, currentSnapshotId: current });
+  }
+  return { ok: true, seq: parsed.seq, snapshotId: parsed.snapshotId };
+}
 function __dyFindElByRef(ref) {
+  var origin = __dyCheckRefOrigin(ref, __dyTopWindow());
+  if (!origin.ok) return { el: null, frame: '', failure: origin };
   var direct = null;
   try { direct = (window.__dieyunRefs || {})[ref]; } catch (e) { direct = null; }
   if (direct && direct.isConnected) return { el: direct, frame: 'main' };
@@ -423,6 +488,11 @@ function __dyResolveTargetEx(ref, selector, frameSpec) {
   if (!__dyFrameSpecIsMain(frameSpec)) {
     var picked = __dyPickFrame(frameSpec);
     if (!picked.ok) return picked;
+    if (ref) {
+      // origin 要按「真正解析它的那个 frame」判定
+      var pickedOrigin = __dyCheckRefOrigin(ref, picked.win);
+      if (!pickedOrigin.ok) return pickedOrigin;
+    }
     var found = null;
     if (ref) {
       try { found = (picked.win.__dieyunRefs || {})[ref] || picked.doc.querySelector('[data-dieyun-ref="' + ref + '"]'); } catch (e) { found = null; }
@@ -445,6 +515,7 @@ function __dyResolveTargetEx(ref, selector, frameSpec) {
   }
   if (ref) {
     var byRef = __dyFindElByRef(ref);
+    if (byRef.failure) return byRef.failure;
     if (byRef.el) {
       var ownerWin = null;
       try { ownerWin = byRef.el.ownerDocument ? byRef.el.ownerDocument.defaultView : null; } catch (e) { ownerWin = null; }
@@ -453,7 +524,7 @@ function __dyResolveTargetEx(ref, selector, frameSpec) {
     }
     return {
       ok: false,
-      error: '元素未找到（ref 已过期，请重新 browser_snapshot）',
+      error: '元素未找到（ref ' + ref + ' 在当前页面不存在；若页面已跳转或结构变化，请重新 browser_snapshot）',
       errorCode: 'TARGET_NOT_FOUND',
       ref: ref,
       frames: __dyFrameSummary(__dyFrameEntries())

@@ -244,9 +244,10 @@ function registerAgentRuntimeIpc(ctx) {
         model: sessionModel,
         sessionId: payload.sessionId || undefined
       };
-      // 本轮开始先清空浏览器日志缓冲，避免上一轮/别的会话的残留错误触发本轮完成验收提示
+      // 本轮开始先清空「本会话」的浏览器日志缓冲，避免上一轮残留错误触发本轮完成验收提示。
+      // 带上 sessionId 是必须的：不带就等于清掉所有会话，别的会话正在看的页面日志会凭空消失。
       if (live.localGateway && typeof live.localGateway.invokeRpc === 'function') {
-        live.localGateway.invokeRpc('browser.reset_logs', {}).catch(() => {});
+        live.localGateway.invokeRpc('browser.reset_logs', { sessionId: payload.sessionId || undefined }).catch(() => {});
       }
       const toolBridge = live.createRustLoopToolBridge(evt.sender);
       // 只读并发调研子 Agent。Agent 主循环是「协调者」，Renderer 已在工具集里注入 subagent；

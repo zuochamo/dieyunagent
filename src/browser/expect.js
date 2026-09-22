@@ -14,13 +14,13 @@
  */
 
 const { FRAME_HELPERS } = require('./frame-script');
+const { REF_RE } = require('./ref-namespace');
 
 const ASSERTION_KINDS = Object.freeze(['visible', 'hidden', 'text', 'value', 'count', 'url']);
 const TARGET_KINDS = Object.freeze(['visible', 'hidden', 'text', 'value']);
 const MATCH_KINDS = Object.freeze(['text', 'value', 'url']);
 const MAX_ASSERTIONS = 20;
 const MAX_ACTUAL_CHARS = 300;
-const REF_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 function invalidAssertion(message) {
   const err = new Error(message);
@@ -66,7 +66,9 @@ function normalizeAssertions(raw) {
         throw invalidAssertion(`第 ${i + 1} 条断言（${kind}）需要 ref 或 selector`);
       }
       if (ref) {
-        if (!REF_RE.test(ref)) throw invalidAssertion(`第 ${i + 1} 条断言 ref 非法：${ref}`);
+        if (!REF_RE.test(ref)) {
+          throw invalidAssertion(`第 ${i + 1} 条断言 ref 非法：${ref}（应为 browser_snapshot 返回的形如 ref-0@s1 的引用）`);
+        }
         item.ref = ref;
       } else {
         item.selector = selector;

@@ -99,9 +99,10 @@ function createConsoleJournal(opts = {}) {
     entries = [];
   }
 
-  function list(args = {}) {
-    const limit = Math.min(200, Math.max(1, Number(args.limit) || 50));
+  /** list 与 status 共用的过滤（唯一来源）：engine 只是条目属性之一。 */
+  function filterEntries(args = {}) {
     let out = entries.slice();
+    if (args.engine) out = out.filter((e) => e.engine === args.engine);
     if (args.errorsOnly) out = out.filter((e) => e.level === 'error');
     if (args.level) {
       const level = normalizeLevel(args.level);
@@ -123,12 +124,18 @@ function createConsoleJournal(opts = {}) {
       const since = Date.now() - Math.max(0, Number(args.sinceMs) || 0);
       out = out.filter((e) => e.ts >= since);
     }
-    return out.slice(-limit);
+    return out;
   }
 
-  function status() {
-    const tail = entries.slice(-50);
-    return { total: entries.length, recentErrors: tail.filter((e) => e.level === 'error').length };
+  function list(args = {}) {
+    const limit = Math.min(200, Math.max(1, Number(args.limit) || 50));
+    return filterEntries(args).slice(-limit);
+  }
+
+  function status(args = {}) {
+    const rows = filterEntries(args);
+    const tail = rows.slice(-50);
+    return { total: rows.length, recentErrors: tail.filter((e) => e.level === 'error').length };
   }
 
   return { add, clear, list, status };

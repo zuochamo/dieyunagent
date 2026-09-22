@@ -1,5 +1,10 @@
 'use strict';
 
+// engine 参数文案的唯一来源（引擎契约与决策见 src/browser/engine-target.js）
+const { ENGINE_PARAM_SCHEMA } = require('../browser/engine-target');
+// ref 参数文案的唯一来源（ref origin 身份见 src/browser/ref-namespace.js）
+const { REF_PARAM_SCHEMA } = require('../browser/ref-namespace');
+
 const HOST_TOOLS = [
   {
     type: 'function',
@@ -261,10 +266,7 @@ const BROWSER_TOOLS = [
             type: 'string',
             description: 'http/https URL，或本地路径（如 index.html、D:\\\\site\\\\index.html、file:///D:/site/index.html）'
           },
-          engine: {
-            type: 'string',
-            description: 'auto | browserview | playwright（后备，使用本机 Edge/Chrome）'
-          },
+          engine: ENGINE_PARAM_SCHEMA,
           waitUntil: { type: 'string', description: 'load 或 domcontentloaded' },
           timeoutMs: { type: 'number', description: '导航超时毫秒，默认 60000' }
         },
@@ -280,7 +282,7 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          engine: { type: 'string', description: 'auto | browserview | playwright' },
+          engine: ENGINE_PARAM_SCHEMA,
           waitUntil: { type: 'string', description: 'load 或 domcontentloaded' },
           timeoutMs: { type: 'number', description: '超时毫秒，默认 60000' }
         }
@@ -295,7 +297,7 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          engine: { type: 'string' },
+          engine: ENGINE_PARAM_SCHEMA,
           waitUntil: { type: 'string' },
           timeoutMs: { type: 'number' }
         }
@@ -310,7 +312,7 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          engine: { type: 'string' },
+          engine: ENGINE_PARAM_SCHEMA,
           waitUntil: { type: 'string' },
           timeoutMs: { type: 'number' }
         }
@@ -331,7 +333,7 @@ const BROWSER_TOOLS = [
           maxElements: { type: 'number', description: '最多返回元素数，默认 120' },
           mode: SNAPSHOT_MODE_PARAM,
           frame: FRAME_PARAM,
-          engine: { type: 'string', description: 'auto | browserview | playwright（本机 Edge/Chrome）' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -348,7 +350,7 @@ const BROWSER_TOOLS = [
           maxNodes: { type: 'number', description: '最多返回节点数，默认 200' },
           delayMs: { type: 'number', description: '扫描前等待毫秒' },
           frame: FRAME_PARAM,
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -367,7 +369,7 @@ const BROWSER_TOOLS = [
           urlPattern: { type: 'string', description: 'URL 子串或正则过滤' },
           errorsOnly: { type: 'boolean', description: '仅 4xx/5xx 或失败请求' },
           sinceMs: { type: 'number', description: '仅最近 N 毫秒内的请求' },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -387,7 +389,7 @@ const BROWSER_TOOLS = [
           errorsOnly: { type: 'boolean', description: '仅 error 级（含未捕获异常/未处理拒绝）' },
           urlPattern: { type: 'string', description: '按来源 URL 子串或正则过滤' },
           sinceMs: { type: 'number', description: '仅最近 N 毫秒内的记录' },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -397,17 +399,17 @@ const BROWSER_TOOLS = [
     function: {
       name: 'browser_click',
       description:
-        '在浏览器页面点击元素。必须先 browser_snapshot 拿到 ref（如 ref-0），再传入 ref 点击；每次页面变化后需重新 snapshot。不要用 host_open_url 代替 browser_navigate。可选 button=right 做右键、clickCount=2 做双击——本工具已覆盖，勿另找专用工具。目标被遮挡时会回报遮挡者；确需强点设 force=true。',
+        '在浏览器页面点击元素。必须先 browser_snapshot 拿到 ref（如 ref-0@s1），再传入 ref 点击；每次页面变化后需重新 snapshot（旧 ref 会明确报 ref 已失效，不会错点别的元素）。不要用 host_open_url 代替 browser_navigate。可选 button=right 做右键、clickCount=2 做双击——本工具已覆盖，勿另找专用工具。目标被遮挡时会回报遮挡者；确需强点设 force=true。',
       parameters: {
         type: 'object',
         properties: {
-          ref: { type: 'string', description: 'browser_snapshot 返回的 ref，如 ref-0' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string', description: 'CSS 选择器（与 ref 二选一）' },
           button: { type: 'string', description: 'left | right | middle，默认 left' },
           clickCount: { type: 'number', description: '1 或 2（双击），默认 1' },
           frame: FRAME_PARAM,
           force: FORCE_PARAM,
-          engine: { type: 'string', description: 'auto | browserview | playwright（本机 Edge/Chrome）' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -420,13 +422,13 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          ref: { type: 'string' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string' },
           text: { type: 'string', description: '要输入的文本' },
           clear: { type: 'boolean', description: '输入前是否清空，默认 false（追加到现有内容）' },
           frame: FRAME_PARAM,
           force: FORCE_PARAM,
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         },
         required: ['text']
       }
@@ -441,13 +443,13 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          ref: { type: 'string', description: 'browser_snapshot 返回的 select ref' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string', description: 'CSS 选择器，如 select#country' },
           value: { type: 'string', description: 'option 的 value 属性' },
           label: { type: 'string', description: 'option 的可见文本（与 value 二选一）' },
           frame: FRAME_PARAM,
           force: FORCE_PARAM,
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -460,10 +462,10 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          ref: { type: 'string', description: 'browser_snapshot 返回的元素 ref' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string', description: 'CSS 选择器' },
           frame: FRAME_PARAM,
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -476,14 +478,14 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          ref: { type: 'string', description: '起始元素 ref' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string', description: '起始 CSS 选择器' },
-          toRef: { type: 'string', description: '目标元素 ref' },
+          toRef: REF_PARAM_SCHEMA,
           toSelector: { type: 'string', description: '目标 CSS 选择器' },
           dx: { type: 'number', description: '相对起始元素中心的水平位移（像素）' },
           dy: { type: 'number', description: '相对起始元素中心的垂直位移（像素）' },
           frame: FRAME_PARAM,
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -498,10 +500,10 @@ const BROWSER_TOOLS = [
         properties: {
           direction: { type: 'string', description: 'up|down|left|right，默认 down' },
           amount: { type: 'number', description: '像素，默认 400' },
-          ref: { type: 'string' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string' },
           frame: FRAME_PARAM,
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -527,7 +529,7 @@ const BROWSER_TOOLS = [
               "修饰键数组：control/shift/alt/meta（同义 ctrl、cmd、command、option、win）。例 ['control'] 表示 Control+key"
           },
           frame: FRAME_PARAM,
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -541,7 +543,7 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          ref: { type: 'string', description: 'browser_snapshot 返回的元素 ref（元素截图）' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string', description: 'CSS 选择器（元素截图）' },
           fullPage: { type: 'boolean', description: '是否整页截图' },
           filePath: {
@@ -550,7 +552,7 @@ const BROWSER_TOOLS = [
           },
           frame: FRAME_PARAM,
           annotate: ANNOTATE_PARAM,
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -571,7 +573,7 @@ const BROWSER_TOOLS = [
           format: { type: 'string', description: '纸张尺寸，如 A4、Letter，默认 A4' },
           landscape: { type: 'boolean', description: '是否横向，默认 false' },
           printBackground: { type: 'boolean', description: '是否打印背景色，默认 true' },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -592,7 +594,7 @@ const BROWSER_TOOLS = [
           maxChars: { type: 'number', description: '返回 JSON 最大字符数，默认 32000' },
           timeoutMs: { type: 'number', description: '超时毫秒，默认 15000，上限 60000' },
           frame: FRAME_PARAM,
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         },
         required: ['script']
       }
@@ -616,7 +618,7 @@ const BROWSER_TOOLS = [
           frame: FRAME_PARAM,
           timeoutMs: { type: 'number', description: '超时毫秒，默认 30000' },
           intervalMs: { type: 'number', description: 'BrowserView 轮询间隔毫秒，默认 300' },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -635,7 +637,7 @@ const BROWSER_TOOLS = [
           url: { type: 'string', description: 'new/open 时打开的 URL' },
           waitUntil: { type: 'string' },
           timeoutMs: { type: 'number' },
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -651,7 +653,7 @@ const BROWSER_TOOLS = [
         properties: {
           action: { type: 'string', description: 'list | wait | clear，默认 list' },
           timeoutMs: { type: 'number', description: '等待下载超时毫秒，默认 30000' },
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -665,13 +667,13 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          ref: { type: 'string', description: 'browser_snapshot 返回的 file input ref' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string', description: 'CSS 选择器，如 input[type=file]' },
           filePath: { type: 'string', description: '要上传的本地文件路径，可为相对工作空间路径' },
           mime: { type: 'string', description: '可选 MIME 类型' },
           frame: FRAME_PARAM,
           timeoutMs: { type: 'number' },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         },
         required: ['filePath']
       }
@@ -694,7 +696,7 @@ const BROWSER_TOOLS = [
           mode: SNAPSHOT_MODE_PARAM,
           frame: FRAME_PARAM,
           annotate: ANNOTATE_PARAM,
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -719,7 +721,7 @@ const BROWSER_TOOLS = [
                   type: 'string',
                   description: 'visible | hidden | text | value | count | url'
                 },
-                ref: { type: 'string', description: 'browser_snapshot 的 ref（visible/hidden/text/value 用）' },
+                ref: REF_PARAM_SCHEMA,
                 selector: {
                   type: 'string',
                   description: 'CSS 选择器（visible/hidden/text/value 与 count 用；与 ref 二选一）'
@@ -736,7 +738,7 @@ const BROWSER_TOOLS = [
           },
           timeoutMs: { type: 'number', description: '超时毫秒，默认 15000，上限 60000' },
           frame: FRAME_PARAM,
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         },
         required: ['assertions']
       }
@@ -756,7 +758,7 @@ const BROWSER_TOOLS = [
             description: '基准图路径；省略时按 引擎+目标 自动取稳定文件名（同目标多次调用比的是同一张）'
           },
           filePath: { type: 'string', description: 'diff 图保存路径；省略时存到系统下载目录' },
-          ref: { type: 'string', description: '只比较该元素（browser_snapshot 的 ref）' },
+          ref: REF_PARAM_SCHEMA,
           selector: { type: 'string', description: '只比较该元素（CSS 选择器）' },
           threshold: {
             type: 'number',
@@ -764,7 +766,7 @@ const BROWSER_TOOLS = [
           },
           fullPage: { type: 'boolean', description: '整页截图；需与基准创建时一致' },
           reset: { type: 'boolean', description: 'true 时用当前截图重建基准' },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -783,7 +785,7 @@ const BROWSER_TOOLS = [
           deviceScaleFactor: { type: 'number', description: '像素比，默认 1（仅 BrowserView 生效）' },
           mobile: { type: 'boolean', description: '移动端布局，默认 false（仅 BrowserView 生效）' },
           reset: { type: 'boolean', description: 'true 时清除覆盖、恢复默认视口' },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -822,7 +824,7 @@ const BROWSER_TOOLS = [
             type: 'object',
             description: '键值对象，写入当前页 origin 的 localStorage'
           },
-          engine: { type: 'string', description: 'localStorage 写入时使用的引擎，默认 auto' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -839,7 +841,7 @@ const BROWSER_TOOLS = [
           cookies: { type: 'boolean', description: '是否导出 Cookie，默认 true' },
           localStorage: { type: 'boolean', description: '是否导出当前页同源 localStorage，默认 true' },
           url: { type: 'string', description: '可选：只导出该 URL 同源 Cookie' },
-          engine: { type: 'string', description: 'localStorage 读取使用的引擎，默认 auto' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -871,7 +873,7 @@ const BROWSER_TOOLS = [
               '批量操作：Cookie 数组，每项含 name、value、domain 或 url，可选 path/secure/httpOnly/sameSite',
             items: { type: 'object' }
           },
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -889,7 +891,7 @@ const BROWSER_TOOLS = [
           accept: { type: 'boolean', description: 'handle 时是否接受，默认 true' },
           promptText: { type: 'string', description: 'prompt 对话框要填入的文本' },
           policy: { type: 'string', description: 'auto（默认，自动接受）| accept | dismiss | manual' },
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -918,7 +920,7 @@ const BROWSER_TOOLS = [
           },
           errorReason: { type: 'string', description: 'abort 时的失败原因，默认 failed' },
           id: { type: 'string', description: 'remove 时的规则 id（如 route-0）' },
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -950,7 +952,7 @@ const BROWSER_TOOLS = [
             description:
               '要模拟授予的权限：geolocation | notifications | clipboard-read | clipboard-sanitized-write | midi'
           },
-          engine: { type: 'string' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -968,7 +970,7 @@ const BROWSER_TOOLS = [
             type: 'string',
             description: '保存路径（相对工作空间或绝对路径，须在白名单内）；省略时存到系统下载目录'
           },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -982,7 +984,7 @@ const BROWSER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          engine: { type: 'string', description: 'auto | browserview | playwright（本机 Edge/Chrome）' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }
@@ -1018,7 +1020,7 @@ const BROWSER_TOOLS = [
             type: 'boolean',
             description: '是否保留 input 事件及其内容原文；默认 false（input 事件整条省略）'
           },
-          engine: { type: 'string', description: 'auto | browserview | playwright' }
+          engine: ENGINE_PARAM_SCHEMA
         }
       }
     }

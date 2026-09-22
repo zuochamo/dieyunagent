@@ -141,8 +141,11 @@ function createTimelineJournal(opts = {}) {
     return entry;
   }
 
-  /** 页面侧回传的 JSON 行 → 结构化条目；非本通道一律返回 null。 */
-  function addBindingPayload(rawJson) {
+  /**
+   * 页面侧回传的 JSON 行 → 结构化条目；非本通道一律返回 null。
+   * engine 由调用方传入（页面侧不知道自己在哪个引擎里），否则同会话跨引擎时无法区分来源。
+   */
+  function addBindingPayload(rawJson, engine) {
     let row = null;
     try {
       row = JSON.parse(String(rawJson == null ? '' : rawJson));
@@ -154,6 +157,7 @@ function createTimelineJournal(opts = {}) {
       type: row.type,
       ts: row.ts,
       source: 'page',
+      engine,
       frame: row.frame,
       target: row.target,
       value: row.value,
@@ -167,9 +171,10 @@ function createTimelineJournal(opts = {}) {
     entries = [];
   }
 
-  function list(args = {}) {
-    const limit = Math.min(300, Math.max(1, Number(args.limit) || 80));
+  /** list 与 status 共用的过滤（唯一来源）：engine 只是条目属性之一。 */
+  function filterEntries(args = {}) {
     let out = entries.slice();
+    if (args.engine) out = out.filter((e) => e.engine === args.engine);
     if (args.source) {
       const source = String(args.source).toLowerCase();
       out = out.filter((e) => e.source === source);
@@ -202,16 +207,22 @@ function createTimelineJournal(opts = {}) {
       const since = Date.now() - Math.max(0, Number(args.sinceMs) || 0);
       out = out.filter((e) => e.ts >= since);
     }
-    return out.slice(-limit);
+    return out;
   }
 
-  function status() {
+  function list(args = {}) {
+    const limit = Math.min(300, Math.max(1, Number(args.limit) || 80));
+    return filterEntries(args).slice(-limit);
+  }
+
+  function status(args = {}) {
+    const rows = filterEntries(args);
     const counts = {};
-    for (const e of entries) counts[e.type] = (counts[e.type] || 0) + 1;
+    for (const e of rows) counts[e.type] = (counts[e.type] || 0) + 1;
     return {
-      total: entries.length,
-      pageEvents: entries.filter((e) => e.source === 'page').length,
-      agentEvents: entries.filter((e) => e.source === 'agent').length,
+      total: rows.length,
+      pageEvents: rows.filter((e) => e.source === 'page').length,
+      agentEvents: rows.filter((e) => e.source === 'agent').length,
       counts
     };
   }

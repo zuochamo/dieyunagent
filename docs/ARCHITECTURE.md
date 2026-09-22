@@ -537,14 +537,105 @@ flowchart TB
 ```mermaid
 flowchart LR
   Tool[browser_* 工具] --> Svc[browser/service.js]
+  Svc --> ET[engine-target.js 引擎决策]
+  Svc --> Scope[session-scope.js 会话账本]
+  Svc --> JS[journal-scope.js 观察账本归属]
   Svc --> Ctrl[controller.js BrowserView]
   Svc --> PW[playwright-runner.js]
   Ctrl --> URLPol[url-policy.js]
   Ctrl --> Snap[snapshot-script]
+  Ctrl --> RN[ref-namespace.js ref 命名空间]
+  Ctrl --> JS
+  PW --> RN
+  PW --> JS
+  Svc --> RH[render-health.js 渲染健康判定]
+  Ctrl --> RH
   RendererUI[renderer-browser.js] -->|browser:state IPC| Ctrl
 ```
 
 内嵌 `BrowserView`，仅允许 http/https；快照与点击坐标脚本在 `browser/snapshot-script.js`。
+
+### 引擎选择、ref 身份与观察归属（三个单一来源）
+
+| 关注点 | 单一来源 | 语义 |
+|--------|----------|------|
+| 引擎选择 | `browser/engine-target.js` | 显式 `engine` 参数优先；`auto` 跟随会话导航归属（存在 session-scope 的 `meta.engine`）；后台会话强制 Playwright 并在结果里标 `downgraded`/`downgradeReason` |
+| 实例身份 | `browser/engine-target.js`（`instanceIdFor`） | 每个 `browser_*` 结果带 `target.instanceId` = `<engine>#<生效会话 id>`（会话身份先经 `session-scope.resolveEffectiveSessionId` 归一），换引擎（含运行期改道）或换会话即换实例；仅未绑定会话时为 `#default` |
+| ref 命名空间 | `browser/ref-namespace.js` | ref 形如 `ref-<seq>@<snapshotId>`，自带 origin 身份；`enrichRefFailure` 是 ref 失效错误体的唯一组装点 |
+| 观察账本归属 | `browser/journal-scope.js` | network / console / timeline 按**会话**分桶，`engine` 只是条目属性 |
+
+ref 的 origin 身份由 Node 侧在每次 snapshot 前铸造（全进程单调、base36），同一次 snapshot 的所有 frame 共用一个 id；
+`browser/service.js` 把它写进 session-scope（`meta.snapshot`，含 `epoch`）并回灌结果。
+
+**失效判定发生在将要解析它的那个 DOM 上**，两侧各查自己 DOM 最后盖章的 snapshot：
+
+- BrowserView：页面内 `window.__dieyunRefSnapshotId`（子 frame 里跑 snapshot 时同步镜像到同源 top）
+- Playwright：`sessions.get(key).snapshotId`
+
+旧 ref 一律得到 `REF_EXPIRED` / `REF_NO_SNAPSHOT` / `REF_MALFORMED`（各自触发条件见「ref 失效诊断」一节的 `refLifecycleNote`），**不会**静默命中页面里残留的同名属性；
+这类失败也不参与跨引擎兜底重试（换引擎只会命中另一份 DOM 的旧状态）。
+
+### ref 失效诊断与空闲会话回收
+
+`ref-namespace.enrichRefFailure` 是 ref 失效错误体的唯一组装点：引擎侧只判定「这个 ref 不属于当前 snapshot」，
+`browser/service.js` 把会话账本里的事实喂进去，两套引擎共用同一份诊断。字段约定：
+
+| 字段 | 含义 |
+|------|------|
+| 顶层 `engine` / `instanceId` / `url` / `refEpoch` / `navigatedSinceSnapshot` | 渲染层与调用方直接可读的落点事实 |
+| `diagnostics` | 结构化事实（另含 `snapshotId` / `currentSnapshotId`）；`tool-harness.classifyFailure` 归一化失败信封时**必须原样保留**，否则模型只知道「失败了」 |
+| `suggestedFix` | 唯一的「下一步怎么做」文案（重新 `browser_snapshot` 或用 CSS selector） |
+| `retryable: false` | ref 失效不是暂时故障，原样重试只会再打一次同一个旧 ref |
+
+`instanceId` / `engine` / 会话账本键同源：`session-scope.resolveEffectiveSessionId`（显式 `sessionId` → 前台 BrowserView 会话）
+是唯一口径，因此 auto 调用（不带 `sessionId`）与显式调用对同一实例给同一个名字；只有「确实还没绑定任何会话」才落到 `#default` 缺省键。
+
+`navigatedSinceSnapshot` 由 session-scope 判定，两个证据任一成立即为 true：
+
+1. **事件序号**：snapshot 与导航共用一条单调 `seq`，导航比 snapshot 晚即已跳转（不看时间戳 —— 同一毫秒内的 snapshot + 导航不能判成「没跳转过」）；
+2. **url 变化**：`snapshot.url` ≠ 当前 url。页面自己跳转（表单提交 / JS 重定向 / 点链接）不经过 navigate 工具、账本里没有事件，
+   只有 url 能认出来；引擎在失败体里自报当场 url（in-page `location.href` / Playwright `page.url()`），`service.js` 因此能一眼区分
+   「跳转导致失效」与「被新 snapshot 取代导致失效」。url 未知（空）时不用它臆断。
+
+旧 ref 会报哪个 code、为什么，文案唯一来源是 `ref-namespace.refLifecycleNote`（两套引擎的 snapshot note 都引用它）：
+页面跳转后报 `REF_NO_SNAPSHOT`（新文档里没有 snapshot 印章），同一文档内再次 snapshot 后报 `REF_EXPIRED`（origin 已不是当前 snapshot）。
+
+Playwright 空闲会话回收（`playwright-runner.js`）：会话新增 `lastUsedAt`，每次 `ensurePage` 刷新；
+定时 sweep 只关「非活动会话 + 超过 `idleSessionMs` 没被调用」的那些（默认 10 分钟，`DIEYUN_PW_IDLE_MS` 覆盖，`0` 关闭），
+下次调用按需重建。`status()` 返回 `idleSessionMs` 与逐会话 `lastUsedAt`，可确认没有长期挂着的无头实例。
+
+### 观察账本按会话归位
+
+`browser_network` / `browser_console` / `browser_timeline` 读的是 `journal-scope.js` 里**该会话**的桶，
+不是「当前引擎」的桶。归属键只有一条规则：显式 `sessionId` → 前台 BrowserView 会话 → `__view__`。
+
+- 写入：BrowserView 用 view 承载的会话（`activePartitionSessionId`）；Playwright 用 page 上的 `__dieyunSessionKey`；
+  页面侧 timeline binding 挂在会话的 context 上。
+- `engine` 从「账本归属」降级为「条目属性」：`engine=auto` 读本会话全部条目，显式 `engine=X` 只是过滤，不再换桶读。
+- `browser.reset_logs` 必须带 `sessionId`（Agent 每轮开始调用）：只清本会话的 console/network，
+  并记下清空时间，查询时在 `note` 里明说，避免把「已清空」误读成「请求没发出去」。
+- 会话关闭 / 浏览器整体关闭时丢弃对应桶。
+
+### 渲染健康：暗 ≠ 空（`browser/render-health.js`）
+
+像素全黑只说明画面**暗**，不说明页面**空**：纯黑主题站点（`#000` + 白字）截图就是整幅全黑。
+把「暗」当「空」会触发引擎改道，而 ref / Cookie / 登录态都贴在原实例上 —— 代价是「换了一台机器」。
+
+判定只有两类事实 + 一条结论，全部收在 `browser/render-health.js`：
+
+| 事实 | 来源 | 说明 |
+|------|------|------|
+| `darkPixels` | 截图像素统计（`controller.analyzeImage`）或 BGRA 位图 | 只表示「整幅全黑」；`sampleCount:0`（没采到样）不算全黑 |
+| `content` / `contentKnown` | 页面侧脚本 `buildContentSignalsScript()` | 文本长度 / 可见交互元素数 / canvas·img·svg 数；取不到即「未知」 |
+| `likelyBlank` | 两者合成（`classifyRenderHealth`） | **全黑 且 页面确认无可见内容**；`blankReason` 记录是哪种情况 |
+
+约束：
+
+- `likelyBlank` 才允许触发引擎改道（`service.fallbackToPlaywrightAfterBlank`）与重绘恢复（`controller.probeAndRecoverBlankPaint`）；
+  深色主题页面**不判定、不改道、不重挂 view**。
+- 内容信号取不到（脚本失败）时不得断言「空」（`blank_reason: dark_pixels_content_unknown`）——误改道代价远大于漏报。
+- 同一个脚本既是可直接求值的表达式（`executeJavaScript` / `page.evaluate`），也是 `buildEvaluateScript` 的脚本体，两引擎同源。
+- `visual_diff` 自己也探内容事实：深色主题截图是合法基准；位图尺寸/长度异常单独报 `CAPTURE_INVALID`，不再混进 `BLANK_CAPTURE`。
 
 ---
 

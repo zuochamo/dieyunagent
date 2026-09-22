@@ -217,6 +217,83 @@ async function main() {
   );
   assert(surf.retryable === true && surf.errorCode === 'TRANSIENT', 'surface capture is transient');
 
+  // 抛错同样要带契约信息：网关 invokeRpc 原样抛出 handler 的 Error（保留 code），
+  // 浏览器 runner 在点击失败/被遮挡/缺 ref 时会挂 diagnostics 与 suggestedFix。
+  // 一律折叠成 EXCEPTION 会让模型丢掉「失败在哪、下一步怎么改」，错误码也不再是契约。
+  const thrownCoded = classifyFailure(
+    'browser_click',
+    null,
+    Object.assign(new Error('点击失败（被 #mask 遮挡）'), {
+      code: 'TARGET_OCCLUDED',
+      diagnostics: { engine: 'playwright', occludedBy: { id: 'mask' } },
+      suggestedFix: '先关闭/收起遮挡层，或传 force=true 强行点击'
+    })
+  );
+  assert(thrownCoded.errorCode === 'TARGET_OCCLUDED', 'thrown failure keeps its code');
+  assert(thrownCoded.retryable === false, 'thrown deterministic failure stays non-retryable');
+  assert(
+    thrownCoded.diagnostics &&
+      thrownCoded.diagnostics.occludedBy &&
+      thrownCoded.diagnostics.occludedBy.id === 'mask',
+    'thrown failure keeps diagnostics for the model'
+  );
+  assert(thrownCoded.suggestedFix.includes('force=true'), 'thrown failure keeps suggestedFix');
+
+  // 没有声明的抛错维持原判定口径（EXCEPTION / 消息正则判 TRANSIENT）
+  const thrownPlain = classifyFailure('host_exec', null, new Error('boom'));
+  assert(
+    thrownPlain.errorCode === 'EXCEPTION' && thrownPlain.retryable === false,
+    'plain thrown error keeps legacy classification'
+  );
+  const thrownTimeout = classifyFailure(
+    'browser_click',
+    null,
+    Object.assign(new Error('Timeout 15000ms exceeded'), { code: 'CLICK_FAILED' })
+  );
+  assert(thrownTimeout.retryable === true, 'timeout message still retried');
+  assert(thrownTimeout.errorCode === 'CLICK_FAILED', 'code describes what happened, retryable says what to do');
+  // 显式声明优先于消息启发式：作者说不可重试就不再重试
+  const thrownDeclared = classifyFailure(
+    'browser_click',
+    null,
+    Object.assign(new Error('Timeout 15000ms exceeded'), { retryable: false })
+  );
+  assert(thrownDeclared.retryable === false, 'explicit retryable:false wins over message heuristic');
+
+  const refFail = classifyFailure('browser_click', {
+    ok: false,
+    errorCode: 'REF_EXPIRED',
+    error: 'ref 已失效',
+    suggestedFix: '重新 browser_snapshot 取新 ref',
+    diagnostics: { instanceId: 'browserview#default', refEpoch: 3, navigatedSinceSnapshot: true }
+  });
+  assert(refFail.errorCode === 'REF_EXPIRED', 'ref failure classified');
+  assert(
+    refFail.diagnostics &&
+      refFail.diagnostics.instanceId === 'browserview#default' &&
+      refFail.diagnostics.navigatedSinceSnapshot === true,
+    'structured diagnostics survive failure classification'
+  );
+
+  const refSession = new ToolHarnessSession({ runId: 'ref-fail', userDataPath: os.tmpdir() });
+  const refStep = await refSession.execute('browser_click', { ref: 'e1' }, async () => ({
+    ok: false,
+    errorCode: 'REF_EXPIRED',
+    error: 'ref 已失效',
+    retryable: false,
+    suggestedFix: '重新 browser_snapshot 取新 ref',
+    diagnostics: { instanceId: 'browserview#default', refEpoch: 3, navigatedSinceSnapshot: true }
+  }));
+  assert(!refStep.ok && refStep.errorCode === 'REF_EXPIRED', 'ref failure reaches model envelope');
+  assert(
+    typeof refStep.suggestedFix === 'string' && refStep.suggestedFix.includes('browser_snapshot'),
+    'ref failure keeps suggestedFix for UI + model'
+  );
+  assert(
+    refStep.diagnostics && refStep.diagnostics.refEpoch === 3 && refStep.diagnostics.navigatedSinceSnapshot === true,
+    'ref failure keeps diagnostics through the failure envelope'
+  );
+
   const trivialSession = new ToolHarnessSession({
     runId: 'tier-trivial',
     userDataPath: os.tmpdir(),

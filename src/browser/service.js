@@ -9,18 +9,25 @@ const {
   exportCookiesForPlaywright,
   removeCookiesFromElectron
 } = require('./session-sync');
-const { createNetworkJournal, summarizeHarEntries, toHar } = require('./network-collector');
-const { createConsoleJournal, summarizeConsoleEntries } = require('./console-collector');
-const { createTimelineJournal, summarizeTimeline } = require('./timeline');
+const { summarizeHarEntries, toHar } = require('./network-collector');
+const { summarizeConsoleEntries } = require('./console-collector');
+const { summarizeTimeline } = require('./timeline');
+const { createJournalScope } = require('./journal-scope');
 const { normalizeAssertions, shapeExpectResult } = require('./expect');
-const {
-  diffBitmaps,
-  clampRatio,
-  stableKey,
-  isLikelyBlankBitmap,
-  DEFAULT_RATIO_THRESHOLD
-} = require('./visual-diff');
+const { diffBitmaps, clampRatio, stableKey, DEFAULT_RATIO_THRESHOLD } = require('./visual-diff');
+const { buildContentSignalsScript, classifyBitmapRenderHealth } = require('./render-health');
 const { createBrowserSessionScope } = require('./session-scope');
+const { mintSnapshotId, normalizeSnapshotId, isRefFailureError, enrichRefFailure } = require('./ref-namespace');
+const {
+  ENGINE_AUTO,
+  ENGINE_BROWSERVIEW,
+  ENGINE_PLAYWRIGHT,
+  REASON,
+  isEngine,
+  resolveTarget,
+  applyTarget,
+  retarget
+} = require('./engine-target');
 
 const MAX_EXPORT_COOKIES = 300;
 
@@ -78,28 +85,54 @@ function withTimeout(promise, timeoutMs, label) {
 function createBrowserService(deps) {
   const log = deps.log || (() => {});
   const sessionScope = createBrowserSessionScope();
-  const bvNetwork = createNetworkJournal();
-  const pwNetwork = createNetworkJournal();
-  const bvConsole = createConsoleJournal();
-  const pwConsole = createConsoleJournal();
-  const bvTimeline = createTimelineJournal();
-  const pwTimeline = createTimelineJournal();
-  const viewCtrl = createBrowserViewController({
-    ...deps,
-    networkJournal: bvNetwork,
-    consoleJournal: bvConsole,
-    timelineJournal: bvTimeline
+  /**
+   * 观察账本（network / console / timeline）按会话归位，两个引擎共用同一份。
+   * 引擎不再决定「这条观察属于谁」：写入时给会话 id，读取时用同一个 key。
+   */
+  const journals = createJournalScope({
+    resolveDefaultSessionId: () => sessionScope.getActiveViewSessionId()
   });
-  const pwRunner = createPlaywrightRunner({
-    log,
-    networkJournal: pwNetwork,
-    consoleJournal: pwConsole,
-    timelineJournal: pwTimeline
-  });
-  /** @type {'browserview' | 'playwright'} */
-  let activeEngine = 'browserview';
-  let forcePlaywrightUrl = '';
+  const viewCtrl = createBrowserViewController({ ...deps, journals });
+  const pwRunner = createPlaywrightRunner({ log, journals });
   let playwrightHeaded = false;
+
+  /**
+   * 会话 → 「当前页面归属引擎」（navigation owner）。
+   * 唯一来源：session-scope meta.engine。auto 的语义就是跟随归属，不再比较 URL 字符串。
+   * 归属键本身由 journal-scope 归一（同一 key 供账本读写两侧使用）。
+   */
+  function ownerKey(sessionId) {
+    return journals.keyOf(sessionId);
+  }
+
+  function ownerEngine(sessionId) {
+    const meta = sessionScope.getMeta(ownerKey(sessionId));
+    return isEngine(meta && meta.engine) ? meta.engine : ENGINE_BROWSERVIEW;
+  }
+
+  /** 记录归属：engine 用已决策的引擎，不读结果自报。 */
+  function setOwner(sessionId, engine, result) {
+    const patch = { engine };
+    if (result && result.url != null) patch.url = result.url;
+    if (result && result.title != null) patch.title = result.title;
+    sessionScope.updateMeta(ownerKey(sessionId), patch);
+  }
+
+  /**
+   * 解析唯一执行目标：只有这里能决定引擎。
+   * 会话身份走 session-scope 的单一规则（显式 sessionId → 前台 BrowserView 会话）：
+   * 实例名、归属引擎与观察账本必须同名，否则 auto 调用（不带 sessionId）会得到
+   * `browserview#default`，显式调用得到 `browserview#s-…`，看起来像两个实例。
+   */
+  function targetFor(args = {}) {
+    const sessionId = sessionScope.resolveEffectiveSessionId(args.sessionId);
+    return resolveTarget({
+      requested: args.engine,
+      sessionId,
+      ownerEngine: ownerEngine(sessionId),
+      isBackgroundSession: !!(sessionId && sessionScope.isBackgroundSession(sessionId))
+    });
+  }
 
   function withPwOpts(opts = {}) {
     const out = { ...(opts || {}) };
@@ -108,56 +141,91 @@ function createBrowserService(deps) {
   }
 
   function runnerArgs(engine, args = {}) {
-    return engine === 'playwright' ? withPwOpts(args) : args;
-  }
-
-  function pickEngine(requested) {
-    const e = String(requested || 'auto').toLowerCase();
-    if (e === 'playwright') return 'playwright';
-    if (e === 'browserview' || e === 'embedded') return 'browserview';
-    if (e === 'auto') return 'auto';
-    return activeEngine;
+    return engine === ENGINE_PLAYWRIGHT ? withPwOpts(args) : args;
   }
 
   function getRunner(engine) {
-    return engine === 'playwright' ? pwRunner : viewCtrl;
+    return engine === ENGINE_PLAYWRIGHT ? pwRunner : viewCtrl;
   }
 
-  function stripHash(url) {
-    return String(url || '').replace(/#.*$/, '');
+  /** playwright → BrowserView 的显示镜像。仅前台会话，且绝不改变归属。 */
+  function mirrorToView(target, result, opts = {}) {
+    if (!result || !result.url || target.backgroundSession) return;
+    viewCtrl.navigate(result.url, { waitUntil: 'domcontentloaded', timeoutMs: opts.timeoutMs }).catch(() => {});
   }
 
+  /**
+   * 只有「确认空白」才允许改道：像素全黑 **且** 页面无可见内容（render-health 唯一判定）。
+   * 深色主题页面（全黑像素但有内容）不是空白，绝不改道 —— 改道会丢掉 ref / Cookie / 登录态。
+   */
   function isBlankBrowserViewResult(result) {
-    return result?.engine === 'browserview' && !!result?.renderHealth?.likelyBlank;
+    return result?.engine === ENGINE_BROWSERVIEW && !!result?.renderHealth?.likelyBlank;
   }
 
-  async function fallbackToPlaywrightAfterBlank(opts, invoke) {
+  /**
+   * 把会话账本里的事实（实例身份 / 页面 / snapshot 世代 / 是否导航过）喂给 ref-namespace 的
+   * enrichRefFailure —— 错误体本身由那边唯一组装，这里只负责取数。
+   */
+  function withRefFailureDiagnostics(result, target, sessionId) {
+    if (!result || result.ok !== false || !isRefFailureError(result)) return result;
+    const key = ownerKey(sessionId);
+    const snapshot = sessionScope.getSnapshot(key);
+    const meta = sessionScope.getMeta(key);
+    // 引擎在失败体里自报的 url 是「页面当场在哪」的第一手证据：页面自己跳转
+    // （表单提交 / JS 重定向）不经过 navigate 工具，账本里没有导航事件，
+    // 只有这个 url 能证明 snapshot 之后的这次跳转。
+    const currentUrl = result.url || (meta && meta.url);
+    return enrichRefFailure(result, {
+      engine: target.engine,
+      instanceId: target.instanceId,
+      url: currentUrl,
+      refEpoch: snapshot ? snapshot.epoch : undefined,
+      navigatedSinceSnapshot: sessionScope.navigatedSinceSnapshot(key, { currentUrl })
+    });
+  }
+
+  /**
+   * 引擎无关的「页面有没有内容」探测：统一走 browser_evaluate 的脚本包装，
+   * 两个引擎同一份脚本（render-health.buildContentSignalsScript）。取不到返回 null（= 未知）。
+   * 返回页面原始信号，规整交给 render-health（避免两处各写一遍字段解读）。
+   */
+  async function probePageContent(engine, opts = {}) {
+    try {
+      const res = await getRunner(engine).evaluateScript(
+        runnerArgs(engine, { script: buildContentSignalsScript(), timeoutMs: opts.timeoutMs, sessionId: opts.sessionId })
+      );
+      if (!res || res.ok === false || typeof res.json !== 'string') return null;
+      const raw = JSON.parse(res.json);
+      return raw && typeof raw === 'object' ? raw : null;
+    } catch (e) {
+      log('Browser content probe: ' + (e && e.message ? e.message : e));
+      return null;
+    }
+  }
+
+  /**
+   * BrowserView 确认未渲染（全黑且无可见内容）时改用 Playwright 重跑。
+   * 这是运行期改道，必须回填 target，让模型看见实际执行者换了。
+   */
+  async function fallbackToPlaywrightAfterBlank(opts, invoke, target) {
     const viewStatus = viewCtrl.status();
     const url = viewStatus.url || viewStatus.renderHealth?.page?.url || '';
     if (!url) return null;
-    let sessionSync = { synced: 0 };
-    if (typeof pwRunner.syncSessionFromElectron === 'function') {
-      try {
-        sessionSync = await pwRunner.syncSessionFromElectron(url);
-      } catch (e) {
-        log('Browser session-sync before fallback: ' + (e.message || e));
-      }
-    }
+    const sessionSync = await ensurePlaywrightSessionSynced(opts?.sessionId);
     await pwRunner.navigate(url, {
       waitUntil: 'domcontentloaded',
       timeoutMs: opts?.timeoutMs || 30000
     });
-    activeEngine = 'playwright';
-    forcePlaywrightUrl = stripHash(url);
+    setOwner(opts?.sessionId, ENGINE_PLAYWRIGHT, { url });
     const result = await invoke();
     return {
-      ...result,
-      fallbackFrom: 'browserview',
+      ...retarget(result, target, { engine: ENGINE_PLAYWRIGHT, reason: REASON.BLANK_CAPTURE }),
+      fallbackFrom: ENGINE_BROWSERVIEW,
       fallbackReason: 'browserview_blank',
       sessionSync,
       note: [
         result?.note,
-        'BrowserView 画面疑似全黑，auto 模式已切到 Playwright。',
+        'BrowserView 画面全黑且页面无可见内容（确认未渲染），已改用 Playwright 重试。',
         sessionSync.synced ? `已从 BrowserView 同步 ${sessionSync.synced} 条 Cookie 到 Playwright。` : null,
         playwrightHeaded ? 'Playwright 可见窗口已启用。' : null
       ]
@@ -168,7 +236,7 @@ function createBrowserService(deps) {
 
   async function ensurePlaywrightSessionSynced(sessionId) {
     if (typeof pwRunner.syncSessionFromElectron !== 'function') return { synced: 0 };
-    const sid = sessionId || sessionScope.getActiveViewSessionId();
+    const sid = sessionScope.resolveEffectiveSessionId(sessionId);
     const viewUrl = viewCtrl.status().url || '';
     const pwUrl = pwRunner.status().url || '';
     const url = viewUrl || pwUrl;
@@ -180,143 +248,162 @@ function createBrowserService(deps) {
     }
   }
 
-  /** auto 模式下交互操作使用的引擎（不 silent 跨引擎 fallback） */
-  function resolveAutoInteractionEngine() {
-    if (activeEngine === 'playwright') {
-      const vs = viewCtrl.status();
-      const ps = pwRunner.status();
-      const vu = stripHash(vs.url || '');
-      const pu = stripHash(ps.url || '');
-      if (forcePlaywrightUrl && pu && pu === forcePlaywrightUrl) return 'playwright';
-      if (vu && pu && vu === pu) return 'browserview';
-      return 'playwright';
-    }
-    return 'browserview';
-  }
-
-  function resolveEngine(requested, { interaction = false, sessionId } = {}) {
-    if (sessionId && sessionScope.isBackgroundSession(sessionId)) {
-      return 'playwright';
-    }
-    const e = pickEngine(requested);
-    if (e === 'auto') {
-      return interaction ? resolveAutoInteractionEngine() : activeEngine;
-    }
-    return e;
-  }
-
-  function recordSessionMeta(sessionId, result) {
-    const sid = sessionId ? String(sessionId) : sessionScope.getActiveViewSessionId();
-    if (!sid || !result) return;
-    sessionScope.updateMeta(sid, {
-      url: result.url,
-      title: result.title,
-      engine: result.engine || activeEngine
-    });
-  }
-
-  async function navigate(url, opts = {}) {
-    const sessionId = opts.sessionId ? String(opts.sessionId) : null;
-    if (sessionId && sessionScope.isBackgroundSession(sessionId)) {
-      sessionScope.updateMeta(sessionId, { url });
-      await ensurePlaywrightSessionSynced(sessionId);
-      const pwResult = await pwRunner.navigate(url, withPwOpts({ ...opts, engine: 'playwright', sessionId }));
-      activeEngine = 'playwright';
-      const merged = {
-        ...pwResult,
-        engine: 'playwright',
-        backgroundSession: true,
-        note: '后台会话浏览器操作使用 Playwright，不会切换当前可见 BrowserView。'
-      };
-      recordSessionMeta(sessionId, merged);
-      return merged;
-    }
-    const engine = pickEngine(opts.engine);
-    if (engine === 'auto') {
-      try {
-        const result = await viewCtrl.navigate(url, opts);
-        activeEngine = 'browserview';
-        forcePlaywrightUrl = '';
-        return result;
-      } catch (err) {
-        if (String(err?.code || '') === 'PLAYWRIGHT_MISSING' || String(err?.code || '') === 'PLAYWRIGHT_LAUNCH_FAILED') {
-          throw err;
-        }
-        log('BrowserView 失败，尝试 Playwright: ' + (err.message || err));
-        let sessionSync = { synced: 0 };
-        if (typeof pwRunner.syncSessionFromElectron === 'function') {
-          try {
-            sessionSync = await pwRunner.syncSessionFromElectron(url);
-          } catch (syncErr) {
-            log('Browser session-sync before PW navigate: ' + (syncErr.message || syncErr));
-          }
-        }
-        const pwResult = await pwRunner.navigate(url, opts);
-        try {
-          await viewCtrl.navigate(pwResult.url || url, {
-            waitUntil: 'domcontentloaded',
-            timeoutMs: opts.timeoutMs
-          });
-          activeEngine = 'browserview';
-          forcePlaywrightUrl = '';
-        } catch (syncErr) {
-          activeEngine = 'playwright';
-          forcePlaywrightUrl = stripHash(pwResult.url || url);
-          log('BrowserView 同步失败，后续操作走 Playwright: ' + (syncErr.message || syncErr));
-        }
-        return {
-          ...pwResult,
-          activeEngine,
-          sessionSync,
-          fallbackFrom: 'browserview',
-          fallbackReason: err.message || String(err),
-          note: sessionSync.synced
-            ? `已从 BrowserView 同步 ${sessionSync.synced} 条 Cookie 到 Playwright。`
-            : undefined
-        };
-      }
-    }
-    if (engine === 'playwright') {
-      await ensurePlaywrightSessionSynced();
-    }
-    const result = await getRunner(engine).navigate(url, opts);
-    if (engine === 'playwright' && result?.url) {
-      viewCtrl.navigate(result.url, { waitUntil: 'domcontentloaded', timeoutMs: opts.timeoutMs }).catch(() => {});
-    }
-    activeEngine = engine;
-    forcePlaywrightUrl = engine === 'playwright' ? stripHash(result?.url || url) : '';
-    recordSessionMeta(sessionId, result);
-    return result;
-  }
-
-  async function snapshot(opts = {}) {
-    const sessionId = opts.sessionId ? String(opts.sessionId) : null;
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    const result = await getRunner(engine).snapshot(opts);
-    if (engine === 'browserview' && pickEngine(opts.engine) === 'auto' && isBlankBrowserViewResult(result)) {
-      return fallbackToPlaywrightAfterBlank(opts, () => pwRunner.snapshot(opts)).catch((e) => ({
-        ...result,
-        fallbackError: e && e.message ? e.message : String(e)
-      }));
-    }
-    return result;
+  /** 派发结果统一收尾：回填 target + 记录本会话归属。 */
+  function settle(result, target, args = {}) {
+    setOwner(args.sessionId, target.engine, result);
+    return applyTarget(result, target);
   }
 
   /**
-   * 元素在主 frame 找不到、且页面存在跨域 iframe 时，自动改用 Playwright 重试
-   * （Playwright 侧支持跨 frame 定位）。命中返回重试结果，否则返回 null。
+   * 单次引擎派发：解析唯一 target → 调用对应 runner → 回填 target。
+   * 所有 browser_* 都必须走这里；方法体内禁止再自己决策引擎。
    */
-  async function retryOnPlaywrightForIframe(method, args, result) {
-    if (!result || result.ok !== false || !result.crossFrameHint) return null;
+  async function dispatch(method, args = {}) {
+    const target = targetFor(args);
+    if (target.engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(args.sessionId);
+    const result = await getRunner(target.engine)[method](runnerArgs(target.engine, args));
+    return settle(withRefFailureDiagnostics(result, target, args.sessionId), target, args);
+  }
+
+  /**
+   * 交互类派发：browserview 目标未找到且页面存在跨域 frame 时，改道 Playwright 重试。
+   * 重试成功的结果已回填 target（downgraded + cross_frame_iframe）。
+   */
+  async function dispatchInteraction(method, args = {}) {
+    const target = targetFor(args);
+    if (target.engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(args.sessionId);
+    const result = await getRunner(target.engine)[method](runnerArgs(target.engine, args));
+    setOwner(args.sessionId, target.engine, result);
+    if (target.engine === ENGINE_BROWSERVIEW) {
+      const retried = await retryOnPlaywrightForIframe(method, args, result, target);
+      if (retried) return retried;
+    }
+    return applyTarget(withRefFailureDiagnostics(result, target, args.sessionId), target);
+  }
+
+  /**
+   * 带 BrowserView 兜底的派发（snapshot / screenshot / waitFor / observe）。
+   * 兜底只在 auto 请求下触发：显式指定 browserview 时失败即失败，不改道。
+   *   1. 结果确认空白（全黑像素 + 页面无可见内容，见 render-health；单纯深色主题不改道）；
+   *   2. 抛抓取面不可用错误（硬失败）。
+   */
+  async function dispatchWithBlankFallback(method, args = {}) {
+    const target = targetFor(args);
+    const engine = target.engine;
+    if (engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(args.sessionId);
+    const canFallback = engine === ENGINE_BROWSERVIEW && !target.explicit;
+    let fallbackError = '';
+    const tryFallback = async () => {
+      try {
+        return await fallbackToPlaywrightAfterBlank(
+          args,
+          () => pwRunner[method](runnerArgs(ENGINE_PLAYWRIGHT, args)),
+          target
+        );
+      } catch (e) {
+        fallbackError = (e && e.message) || String(e);
+        return null;
+      }
+    };
+    const keepResult = () => {
+      const out = applyTarget(result, target);
+      return fallbackError ? { ...out, fallbackError } : out;
+    };
+    let result;
     try {
-      await ensurePlaywrightSessionSynced();
-      const retry = await pwRunner[method](withPwOpts({ ...args, engine: 'playwright' }));
+      result = await getRunner(engine)[method](runnerArgs(engine, args));
+    } catch (e) {
+      if (canFallback && isBrowserCaptureSurfaceError(e)) {
+        const fb = await tryFallback();
+        if (fb) return fb;
+      }
+      throw e;
+    }
+    setOwner(args.sessionId, engine, result);
+    if (canFallback && isBlankBrowserViewResult(result)) {
+      const fb = await tryFallback();
+      if (fb) return fb;
+    }
+    return keepResult();
+  }
+
+  async function navigate(url, opts = {}) {
+    const target = targetFor(opts);
+    const engine = target.engine;
+    if (engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(opts.sessionId);
+    try {
+      const result = await getRunner(engine).navigate(url, runnerArgs(engine, opts));
+      setOwner(opts.sessionId, engine, result);
+      // 导航是 ref 失效的主因：记下「这次 snapshot 之后确实跳转过」。
+      // 失败的导航不算 —— 页面没动，旧 ref 仍可能有效，不能给模型一个假前提。
+      if (!result || result.ok !== false) {
+        sessionScope.recordNavigation(ownerKey(opts.sessionId), { url: (result && result.url) || url });
+      }
+      mirrorToView(target, result, opts);
+      return applyTarget(result, target);
+    } catch (err) {
+      // 硬失败兜底：playwright 侧失败无处可退（模块缺失 / 启动失败）
+      if (engine !== ENGINE_BROWSERVIEW) throw err;
+      if (String(err?.code || '') === 'PLAYWRIGHT_MISSING' || String(err?.code || '') === 'PLAYWRIGHT_LAUNCH_FAILED') {
+        throw err;
+      }
+      log('BrowserView 导航失败，回退 Playwright: ' + (err.message || err));
+      const sessionSync = await ensurePlaywrightSessionSynced(opts.sessionId);
+      const pwResult = await pwRunner.navigate(url, runnerArgs(ENGINE_PLAYWRIGHT, opts));
+      setOwner(opts.sessionId, ENGINE_PLAYWRIGHT, pwResult);
+      if (!pwResult || pwResult.ok !== false) {
+        sessionScope.recordNavigation(ownerKey(opts.sessionId), { url: (pwResult && pwResult.url) || url });
+      }
+      return {
+        ...retarget(pwResult, target, { engine: ENGINE_PLAYWRIGHT, reason: REASON.NAVIGATE_FAILED }),
+        fallbackFrom: ENGINE_BROWSERVIEW,
+        fallbackReason: err.message || String(err),
+        sessionSync
+      };
+    }
+  }
+
+  /**
+   * 回填 snapshot 的 origin 身份：写进 session-scope（该会话的「当前 snapshot」）并回灌到结果。
+   * snapshotId / refEpoch 只在这里产生——同一次 snapshot 的多个 frame 共享同一个 id，
+   * refEpoch 是「本会话第几次 snapshot」，因此 ref 的失效判定与展示口径完全一致。
+   */
+  function stampSnapshotIdentity(result, args = {}, fallbackSnapshotId) {
+    if (!result || result.ok === false) return result;
+    const id = normalizeSnapshotId(result.snapshotId) || normalizeSnapshotId(fallbackSnapshotId);
+    if (!id) return result;
+    const recorded = sessionScope.recordSnapshot(ownerKey(args.sessionId), {
+      id,
+      engine: result.engine || '',
+      url: result.url || ''
+    });
+    return recorded ? { ...result, snapshotId: recorded.id, refEpoch: recorded.epoch } : result;
+  }
+
+  async function snapshot(opts = {}) {
+    // origin 身份在这里铸造：两个引擎（含兜底改道）拿到的是同一个 id
+    const snapshotId = mintSnapshotId();
+    const result = await dispatchWithBlankFallback('snapshot', { ...opts, snapshotId });
+    return stampSnapshotIdentity(result, opts, snapshotId);
+  }
+
+  /**
+   * 元素在主 frame 找不到、且页面存在跨域 iframe 时，改用 Playwright 重试
+   * （Playwright 侧支持跨 frame 定位）。命中返回重试结果（已回填 target），否则返回 null。
+   */
+  async function retryOnPlaywrightForIframe(method, args, result, target) {
+    if (!result || result.ok !== false || !result.crossFrameHint) return null;
+    // ref 失效不是「换个引擎就能找到」的问题：ref 属于某一次 snapshot，
+    // 换引擎只会命中另一个 DOM 的旧状态，正是本方案要消灭的「静默打到另一个元素」
+    if (isRefFailureError(result)) return null;
+    try {
+      await ensurePlaywrightSessionSynced(args.sessionId);
+      const retry = await pwRunner[method](runnerArgs(ENGINE_PLAYWRIGHT, args));
       if (retry && retry.ok) {
-        activeEngine = 'playwright';
+        setOwner(args.sessionId, ENGINE_PLAYWRIGHT, retry);
         return {
-          ...retry,
-          fallbackFrom: 'browserview',
+          ...retarget(retry, target, { engine: ENGINE_PLAYWRIGHT, reason: REASON.CROSS_FRAME }),
+          fallbackFrom: ENGINE_BROWSERVIEW,
           fallbackReason: 'cross_frame_iframe',
           note: '元素在主 frame 未找到且页面存在跨域 iframe，已自动改用 Playwright（支持跨 frame 定位）。'
         };
@@ -328,25 +415,11 @@ function createBrowserService(deps) {
   }
 
   async function click(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    const result = await getRunner(engine).click(runnerArgs(engine, args));
-    if (engine === 'browserview') {
-      const retried = await retryOnPlaywrightForIframe('click', args, result);
-      if (retried) return retried;
-    }
-    return result;
+    return dispatchInteraction('click', args);
   }
 
   async function typeText(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    const result = await getRunner(engine).typeText(runnerArgs(engine, args));
-    if (engine === 'browserview') {
-      const retried = await retryOnPlaywrightForIframe('typeText', args, result);
-      if (retried) return retried;
-    }
-    return result;
+    return dispatchInteraction('typeText', args);
   }
 
   async function fill(args = {}) {
@@ -354,41 +427,23 @@ function createBrowserService(deps) {
   }
 
   async function selectOption(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    const result = await getRunner(engine).selectOption(runnerArgs(engine, args));
-    if (engine === 'browserview') {
-      const retried = await retryOnPlaywrightForIframe('selectOption', args, result);
-      if (retried) return retried;
-    }
-    return result;
+    return dispatchInteraction('selectOption', args);
   }
 
   async function hover(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    const result = await getRunner(engine).hover(runnerArgs(engine, args));
-    if (engine === 'browserview') {
-      const retried = await retryOnPlaywrightForIframe('hover', args, result);
-      if (retried) return retried;
-    }
-    return result;
+    return dispatchInteraction('hover', args);
   }
 
   async function drag(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    return getRunner(engine).drag(runnerArgs(engine, args));
+    return dispatch('drag', args);
   }
 
   async function scroll(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    return getRunner(engine).scroll(runnerArgs(engine, args));
+    return dispatch('scroll', args);
   }
 
   async function pressKey(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    return getRunner(engine).pressKey(runnerArgs(engine, args));
+    return dispatch('pressKey', args);
   }
 
   /** 验收留证：给了 filePath 就把 PNG 落盘（base64 仍保留，供多模态注入使用）。 */
@@ -408,31 +463,7 @@ function createBrowserService(deps) {
   }
 
   async function screenshot(opts = {}) {
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    const pwOpts = runnerArgs(engine, opts);
-    let result;
-    try {
-      result = await getRunner(engine).screenshot(pwOpts);
-      if (engine === 'browserview' && pickEngine(opts.engine) === 'auto' && isBlankBrowserViewResult(result)) {
-        result = await fallbackToPlaywrightAfterBlank(opts, () => pwRunner.screenshot(withPwOpts(opts))).catch(
-          (e) => ({
-            ...result,
-            fallbackError: e && e.message ? e.message : String(e)
-          })
-        );
-      }
-    } catch (e) {
-      if (engine === 'browserview' && pickEngine(opts.engine) === 'auto' && isBrowserCaptureSurfaceError(e)) {
-        const fb = await fallbackToPlaywrightAfterBlank(opts, () => pwRunner.screenshot(withPwOpts(opts))).catch(
-          () => null
-        );
-        if (!fb) throw e;
-        result = fb;
-      } else {
-        throw e;
-      }
-    }
-    return saveScreenshotIfRequested(result, opts);
+    return saveScreenshotIfRequested(await dispatchWithBlankFallback('screenshot', opts), opts);
   }
 
   /**
@@ -442,13 +473,14 @@ function createBrowserService(deps) {
    * 例外：后台会话不该镜像 —— BrowserView 是前台会话共享的单例，镜像过去等于改别人的页面。
    */
   async function setViewport(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
+    const target = targetFor(args);
+    const engine = target.engine;
+    if (engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(args.sessionId);
     const result = await getRunner(engine).setViewport(args);
-    const mirrorEngine = engine === 'playwright' ? 'browserview' : 'playwright';
-    const background = !!(args.sessionId && sessionScope.isBackgroundSession(args.sessionId));
+    setOwner(args.sessionId, engine, result);
+    const mirrorEngine = engine === ENGINE_PLAYWRIGHT ? ENGINE_BROWSERVIEW : ENGINE_PLAYWRIGHT;
     let mirrored = false;
-    const mirror = background ? null : getRunner(mirrorEngine);
+    const mirror = target.backgroundSession ? null : getRunner(mirrorEngine);
     if (mirror && typeof mirror.stageViewport === 'function') {
       try {
         await mirror.stageViewport(args);
@@ -463,14 +495,15 @@ function createBrowserService(deps) {
     ]
       .filter(Boolean)
       .join('；');
-    return { ...result, mirroredTo: mirrored ? mirrorEngine : null, note: note || undefined };
+    return applyTarget({ ...result, mirroredTo: mirrored ? mirrorEngine : null, note: note || undefined }, target);
   }
 
   /** 结构化断言：把「验过了」变成可被完成验收护栏识别的 pass/fail 证据。 */
   async function expect(args = {}) {
     const assertions = normalizeAssertions(args.assertions);
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
+    const target = targetFor(args);
+    const engine = target.engine;
+    if (engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(args.sessionId);
     const timeoutMs = Math.min(60000, Math.max(1000, Number(args.timeoutMs) || 15000));
     const raw = await withTimeout(
       getRunner(engine).expect(assertions, { frame: args.frame, sessionId: args.sessionId }),
@@ -478,58 +511,52 @@ function createBrowserService(deps) {
       '断言执行'
     );
     if (raw && raw.ok === false && raw.errorCode) {
-      return { engine, ok: false, error: raw.error, errorCode: raw.errorCode, frames: raw.frames, results: [] };
+      return applyTarget(
+        withRefFailureDiagnostics(
+          {
+            engine,
+            ok: false,
+            error: raw.error,
+            errorCode: raw.errorCode,
+            snapshotId: raw.snapshotId,
+            currentSnapshotId: raw.currentSnapshotId,
+            frames: raw.frames,
+            results: []
+          },
+          target,
+          args.sessionId
+        ),
+        target
+      );
     }
-    return shapeExpectResult(raw, { engine });
+    return applyTarget(shapeExpectResult(raw, { engine }), target);
   }
 
   /** frame 树：让 Agent 一眼看出内容在哪一层（含跨域 frame）。 */
   async function frames(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
+    const target = targetFor(args);
+    const engine = target.engine;
+    if (engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(args.sessionId);
     const runner = getRunner(engine);
     if (typeof runner.frames !== 'function') {
-      return { ok: false, engine, error: '当前引擎不支持 frame 列表' };
+      return applyTarget({ ok: false, engine, error: '当前引擎不支持 frame 列表' }, target);
     }
-    return runner.frames();
+    return applyTarget(await runner.frames(args), target);
   }
 
   /**
-   * 事件时间线：page 侧真实事件 + Agent 侧动作。
-   * auto 模式下合并两个引擎的缓冲（各条带 engine），与 network/console 一致。
+   * 事件时间线：page 侧真实事件 + Agent 侧动作，按会话归位（与 network/console 同一账本来源）。
    */
   function timeline(opts = {}) {
-    const requested = pickEngine(opts.engine);
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    if (String(opts.action || 'list').toLowerCase() === 'clear') {
-      if (requested === 'auto') {
-        bvTimeline.clear();
-        pwTimeline.clear();
-      } else {
-        (engine === 'playwright' ? pwTimeline : bvTimeline).clear();
-      }
-      return { ok: true, engine, cleared: true };
-    }
-    let entries;
-    if (requested === 'auto') {
-      const merged = [
-        ...bvTimeline.list({ ...opts, limit: 300 }),
-        ...pwTimeline.list({ ...opts, limit: 300 })
-      ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-      const limit = Math.min(300, Math.max(1, Number(opts.limit) || 80));
-      entries = merged.slice(-limit);
-    } else {
-      entries = (engine === 'playwright' ? pwTimeline : bvTimeline).list(opts);
-    }
-    return {
-      ok: true,
-      engine,
-      ...summarizeTimeline(entries, { includeInput: opts.includeInput === true }),
-      stats: { browserview: bvTimeline.status(), playwright: pwTimeline.status() },
+    return journalQuery(opts, {
+      kind: 'timeline',
+      summarize: (entries) => summarizeTimeline(entries, { includeInput: opts.includeInput === true }),
+      limitMax: 300,
+      defaultLimit: 80,
       note:
         '时间线 = 页面侧真实事件（capture 阶段，含 iframe 内）+ Agent 侧动作；' +
         '"点了没反应"先看这里有没有 click，再看 browser_console / browser_network'
-    };
+    });
   }
 
   /** 默认基准文件名：按引擎+目标派生稳定 key，保证多次调用比的是同一个文件。 */
@@ -545,8 +572,13 @@ function createBrowserService(deps) {
    * 硬约束：基准元信息里的引擎必须与当前引擎一致 —— 跨引擎像素必然不同，比较无意义。
    */
   async function visualDiff(params = {}) {
-    const engine = resolveEngine(params.engine, { sessionId: params.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
+    const target = targetFor(params);
+    return applyTarget(await runVisualDiff(params, target), target);
+  }
+
+  async function runVisualDiff(params, target) {
+    const engine = target.engine;
+    if (engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(params.sessionId);
 
     const shot = await screenshot({
       engine,
@@ -567,20 +599,39 @@ function createBrowserService(deps) {
       : defaultBaselinePath(engine, params);
     const metaPath = `${baselinePath}.meta.json`;
 
-    // 空白截图不能作为基准，也不能参与比较：否则会把"全黑"当成"没变化"
-    // 用位图判定而不是 renderHealth：对两个引擎一致（Playwright 截图不带 renderHealth）
+    // 空白截图不能作为基准，也不能参与比较：否则会把"全黑"当成"没变化"。
+    // 判据与运行时同源（render-health）：Playwright 截图不带 renderHealth，所以这里
+    // 自己取位图 + 页面内容，但合成结论仍走 classifyBitmapRenderHealth —— 深色主题页面
+    // （全黑像素但有可见内容）是合法基准，不允许被判成空白。
     const { nativeImage } = require('electron');
     const nextImg = nativeImage.createFromBuffer(currentBuf);
     const nextSize = nextImg.getSize();
     const nextBitmap = nextImg.toBitmap();
-    if (isLikelyBlankBitmap(nextBitmap, nextSize.width, nextSize.height)) {
+    const pageSignals = await probePageContent(engine, params);
+    const captureHealth = classifyBitmapRenderHealth(
+      nextBitmap,
+      nextSize.width,
+      nextSize.height,
+      pageSignals
+    );
+    if (!captureHealth.bitmapUsable) {
+      return {
+        ok: false,
+        engine,
+        errorCode: 'CAPTURE_INVALID',
+        error: '当前截图的像素数据不可用（尺寸或长度异常），无法作为基准比较，请重试或换 engine。',
+        baselinePath
+      };
+    }
+    if (captureHealth.likelyBlank) {
       return {
         ok: false,
         engine,
         errorCode: 'BLANK_CAPTURE',
         error:
-          '当前截图疑似全黑，视觉比较无意义。请改用 engine=playwright，或先 browser_status 确认渲染状态。',
-        baselinePath
+          '当前截图全黑且页面无可见内容（确认未渲染），视觉比较无意义。请先 browser_status 确认渲染状态；确实要换实现再用 engine=playwright。',
+        baselinePath,
+        renderHealth: captureHealth
       };
     }
 
@@ -688,103 +739,60 @@ function createBrowserService(deps) {
 
   /**
    * 清空日志缓冲（console + network），供 Agent 轮次开始时调用。
-   * 缓冲是引擎级全局，不清会让上一轮/别的会话的残留错误触发本轮完成验收提示。
+   * 只清「发起该轮次的会话」：不清会让上一轮的残留错误触发本轮完成验收提示，
+   * 但清别人的会话又会让另一个会话的请求/日志凭空消失（这正是「登录请求查不到」的来源）。
+   * 清空时间会被记录，查询时会明说，避免把「已清空」误读成「没发出去」。
    */
-  function resetLogs() {
-    bvConsole.clear();
-    pwConsole.clear();
-    bvNetwork.clear();
-    pwNetwork.clear();
-    return { ok: true, cleared: ['console', 'network'] };
+  function resetLogs(opts = {}) {
+    return journals.clear(opts.sessionId, ['console', 'network']);
   }
 
   async function waitFor(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    const result = await getRunner(engine).waitFor(runnerArgs(engine, args));
-    if (engine === 'browserview' && pickEngine(args.engine) === 'auto' && isBlankBrowserViewResult(result)) {
-      return fallbackToPlaywrightAfterBlank(args, () => pwRunner.waitFor(withPwOpts(args))).catch((e) => ({
-        ...result,
-        fallbackError: e && e.message ? e.message : String(e)
-      }));
-    }
-    return result;
+    return dispatchWithBlankFallback('waitFor', args);
   }
 
   async function tabs(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    const result = await getRunner(engine).tabs(args);
-    activeEngine = engine;
-    return result;
+    return dispatch('tabs', args);
   }
 
   async function downloads(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    return getRunner(engine).downloads(args);
+    return dispatch('downloads', args);
   }
 
   async function uploadFile(args = {}) {
-    const requested = pickEngine(args.engine);
-    const engine = requested === 'auto'
-      ? (args.ref ? resolveAutoInteractionEngine() : 'playwright')
-      : requested;
-    const result = await getRunner(engine).uploadFile(args);
-    activeEngine = engine;
-    return result;
+    return dispatch('uploadFile', args);
   }
 
   async function observe(opts = {}) {
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    try {
-      const result = await getRunner(engine).observe(opts);
-      if (engine === 'browserview' && pickEngine(opts.engine) === 'auto' && isBlankBrowserViewResult(result)) {
-        return fallbackToPlaywrightAfterBlank(opts, () => pwRunner.observe(opts)).catch((e) => ({
-          ...result,
-          fallbackError: e && e.message ? e.message : String(e)
-        }));
-      }
-      return result;
-    } catch (e) {
-      if (engine === 'browserview' && pickEngine(opts.engine) === 'auto' && isBrowserCaptureSurfaceError(e)) {
-        const fb = await fallbackToPlaywrightAfterBlank(opts, () => pwRunner.observe(withPwOpts(opts))).catch(
-          () => null
-        );
-        if (fb) return fb;
-      }
-      throw e;
+    const result = await dispatchWithBlankFallback('observe', opts);
+    // observe 内部也做了一次 snapshot，其 origin 同样要落进会话账本（ref 失效判定靠它）
+    return stampSnapshotIdentity(result, opts);
+  }
+
+  /** 刷新 / 后退 / 前进：派发 + 归属 + 前台镜像，三处同一流程。 */
+  async function historyDispatch(method, opts = {}) {
+    const target = targetFor(opts);
+    if (target.engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(opts.sessionId);
+    const result = await getRunner(target.engine)[method](runnerArgs(target.engine, opts));
+    setOwner(opts.sessionId, target.engine, result);
+    // 刷新 / 后退 / 前进同属导航：同样会让旧 ref 失效
+    if (!result || result.ok !== false) {
+      sessionScope.recordNavigation(ownerKey(opts.sessionId), { url: (result && result.url) || '' });
     }
+    mirrorToView(target, result, opts);
+    return applyTarget(result, target);
   }
 
   async function reload(opts = {}) {
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    const result = await getRunner(engine).reload(opts);
-    if (result?.url && engine === 'playwright') {
-      viewCtrl.navigate(result.url, { waitUntil: 'domcontentloaded', timeoutMs: opts.timeoutMs }).catch(() => {});
-    }
-    activeEngine = engine;
-    return result;
+    return historyDispatch('reload', opts);
   }
 
   async function goBack(opts = {}) {
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    const result = await getRunner(engine).goBack(opts);
-    if (result?.ok && result.url && engine === 'playwright') {
-      viewCtrl.navigate(result.url, { waitUntil: 'domcontentloaded', timeoutMs: opts.timeoutMs }).catch(() => {});
-    }
-    activeEngine = engine;
-    return result;
+    return historyDispatch('goBack', opts);
   }
 
   async function goForward(opts = {}) {
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    const result = await getRunner(engine).goForward(opts);
-    if (result?.ok && result.url && engine === 'playwright') {
-      viewCtrl.navigate(result.url, { waitUntil: 'domcontentloaded', timeoutMs: opts.timeoutMs }).catch(() => {});
-    }
-    activeEngine = engine;
-    return result;
+    return historyDispatch('goForward', opts);
   }
 
   async function importStorage(params = {}) {
@@ -816,16 +824,16 @@ function createBrowserService(deps) {
     }
     const cookieResult = cookies.length
       ? await importCookiesToElectron(cookies, {
-          sessionId: params.sessionId || sessionScope.getActiveViewSessionId()
+          sessionId: sessionScope.resolveEffectiveSessionId(params.sessionId)
         })
       : { applied: 0, failed: 0, total: 0 };
     let localStorageResult = { ok: true, applied: 0 };
     if (lsKeys.length) {
-      const engine = resolveEngine(params.engine, { interaction: true, sessionId: params.sessionId });
-      if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-      localStorageResult = await getRunner(engine).importLocalStorage(ls);
+      const target = targetFor(params);
+      if (target.engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(params.sessionId);
+      localStorageResult = await getRunner(target.engine).importLocalStorage(ls);
     }
-    await ensurePlaywrightSessionSynced();
+    await ensurePlaywrightSessionSynced(params.sessionId);
     return {
       ok: true,
       cookies: cookieResult,
@@ -839,34 +847,36 @@ function createBrowserService(deps) {
    * auto 模式下若 Playwright 处于可见窗口，自动回退到 BrowserView。
    */
   async function pdf(params = {}) {
-    const engine = resolveEngine(params.engine, { sessionId: params.sessionId });
-    let activeForCall = engine;
+    const target = targetFor(params);
+    let activeForCall = target.engine;
     let result;
     try {
-      result = await getRunner(engine).pdf(runnerArgs(engine, params));
+      result = await getRunner(activeForCall).pdf(runnerArgs(activeForCall, params));
     } catch (e) {
       // 后台会话的 Playwright 属于另一个页面，回退到 BrowserView 会打印错页面
-      const isBackground = !!(params.sessionId && sessionScope.isBackgroundSession(params.sessionId));
       const canFallback =
-        pickEngine(params.engine) === 'auto' &&
-        engine === 'playwright' &&
-        !isBackground &&
+        !target.explicit &&
+        activeForCall === ENGINE_PLAYWRIGHT &&
+        !target.backgroundSession &&
         String(e && e.code) === 'PDF_HEADLESS_ONLY';
       if (!canFallback) throw e;
-      activeForCall = 'browserview';
-      result = await getRunner('browserview').pdf(params);
+      activeForCall = ENGINE_BROWSERVIEW;
+      result = await getRunner(ENGINE_BROWSERVIEW).pdf(params);
     }
-    const target = resolveOutputPath(params.filePath, 'pdf', 'dieyun-page');
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, Buffer.from(result.base64, 'base64'));
-    return {
+    const outPath = resolveOutputPath(params.filePath, 'pdf', 'dieyun-page');
+    await fs.mkdir(path.dirname(outPath), { recursive: true });
+    await fs.writeFile(outPath, Buffer.from(result.base64, 'base64'));
+    const payload = {
       ok: true,
       engine: activeForCall,
-      path: target,
+      path: outPath,
       bytes: result.bytes || 0,
       mime: 'application/pdf',
       note: 'PDF 已保存到本地路径；需要内容时用 fs_read_file（base64）或 PDF 技能解析该文件。'
     };
+    return activeForCall === target.engine
+      ? applyTarget(payload, target)
+      : retarget(payload, target, { engine: activeForCall, reason: REASON.PDF_HEADLESS });
   }
 
   /**
@@ -897,9 +907,9 @@ function createBrowserService(deps) {
       return { ok: false, cancelled: true, error: '用户取消了登录态导出', errorCode: 'EXPORT_CANCELLED' };
     }
 
-    const sessionId = params.sessionId ? String(params.sessionId) : sessionScope.getActiveViewSessionId();
-    const engine = resolveEngine(params.engine, { sessionId: params.sessionId });
-    const out = { ok: true, engine };
+    const sessionId = sessionScope.resolveEffectiveSessionId(params.sessionId);
+    const target = targetFor(params);
+    const out = { ok: true, engine: target.engine };
 
     if (wantCookies) {
       const cookies = await exportCookiesForPlaywright({
@@ -925,28 +935,22 @@ function createBrowserService(deps) {
 
     out.note =
       '导出的 Cookie / localStorage 含登录态，请勿写入日志或提交版本库；可与 browser_import_storage 配对使用。';
-    return out;
+    return applyTarget(out, target);
   }
 
   /** 对话框：list（默认）| handle | policy。避免 alert/confirm 卡死页面。 */
   async function dialog(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    return getRunner(engine).dialog(args);
+    return dispatch('dialog', args);
   }
 
   /** 请求改写：list（默认）| add | remove | clear；用于 mock 接口 / 改请求头 / 阻断资源。 */
   async function route(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    return getRunner(engine).route(runnerArgs(engine, args));
+    return dispatch('route', args);
   }
 
   /** 设备/权限模拟：set（默认）| reset | status（定位/时区/语言/权限授权）。 */
   async function emulate(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    return getRunner(engine).emulate(runnerArgs(engine, args));
+    return dispatch('emulate', args);
   }
 
   /**
@@ -955,9 +959,7 @@ function createBrowserService(deps) {
    */
   async function cookies(params = {}) {
     const action = String(params.action || 'list').toLowerCase();
-    const sessionId = params.sessionId
-      ? String(params.sessionId)
-      : sessionScope.getActiveViewSessionId() || undefined;
+    const sessionId = sessionScope.resolveEffectiveSessionId(params.sessionId) || undefined;
     const url = params.url ? String(params.url) : '';
 
     const collectRows = () => {
@@ -1024,38 +1026,42 @@ function createBrowserService(deps) {
    * 仅含方法与状态等摘要字段，不含请求/响应头与 body。
    */
   async function exportHar(params = {}) {
-    const requested = pickEngine(params.engine);
-    const engine = resolveEngine(params.engine, { sessionId: params.sessionId });
-    const entries =
-      requested === 'auto'
-        ? [...bvNetwork.list({ limit: 200 }), ...pwNetwork.list({ limit: 200 })].sort(
-            (a, b) => (a.ts || 0) - (b.ts || 0)
-          )
-        : (engine === 'playwright' ? pwNetwork : bvNetwork).list({ limit: 200 });
+    const target = targetFor(params);
+    // 导出的是「本会话」的请求缓冲（engine 只作过滤），与 browser_network 读到的是同一份。
+    const entries = journals.network(params.sessionId).list({
+      limit: 200,
+      engine: target.requested === ENGINE_AUTO ? undefined : target.engine
+    });
     const har = toHar(entries);
-    const target = resolveOutputPath(params.filePath, 'har', 'dieyun-network');
-    await fs.mkdir(path.dirname(target), { recursive: true });
+    const outPath = resolveOutputPath(params.filePath, 'har', 'dieyun-network');
+    await fs.mkdir(path.dirname(outPath), { recursive: true });
     const text = JSON.stringify(har, null, 2);
-    await fs.writeFile(target, text, 'utf8');
-    return {
-      ok: true,
-      engine,
-      path: target,
-      count: entries.length,
-      bytes: Buffer.byteLength(text, 'utf8'),
-      note: 'HAR 仅含方法与状态摘要（无请求/响应头与 body）；可用浏览器 DevTools 打开。'
-    };
+    await fs.writeFile(outPath, text, 'utf8');
+    return applyTarget(
+      {
+        ok: true,
+        engine: target.engine,
+        path: outPath,
+        count: entries.length,
+        bytes: Buffer.byteLength(text, 'utf8'),
+        note: 'HAR 仅含方法与状态摘要（无请求/响应头与 body）；可用浏览器 DevTools 打开。'
+      },
+      target
+    );
   }
 
   /** 模型侧任意 JS 执行（授权复用 browserAutomation；工具层已归入 mutating）。 */
   async function evaluate(args = {}) {
-    const engine = resolveEngine(args.engine, { interaction: true, sessionId: args.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
+    const target = targetFor(args);
+    if (target.engine === ENGINE_PLAYWRIGHT) await ensurePlaywrightSessionSynced(args.sessionId);
     const timeoutMs = Math.min(60000, Math.max(1000, Number(args.timeoutMs) || 15000));
-    return withTimeout(
-      getRunner(engine).evaluateScript(runnerArgs(engine, args)),
-      timeoutMs,
-      '脚本执行'
+    return applyTarget(
+      await withTimeout(
+        getRunner(target.engine).evaluateScript(runnerArgs(target.engine, args)),
+        timeoutMs,
+        '脚本执行'
+      ),
+      target
     );
   }
 
@@ -1071,103 +1077,113 @@ function createBrowserService(deps) {
     return {
       ok: true,
       playwrightHeaded,
-      activeEngine,
-      interactionEngine: resolveAutoInteractionEngine(),
+      activeEngine: ownerEngine(params.sessionId),
       browserview: viewCtrl.status(),
       playwright: pwRunner.status()
     };
   }
 
   async function a11ySnapshot(opts = {}) {
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    if (engine === 'playwright') await ensurePlaywrightSessionSynced();
-    return getRunner(engine).a11ySnapshot(runnerArgs(engine, opts));
+    return dispatch('a11ySnapshot', opts);
+  }
+
+  /**
+   * 日志类查询（timeline / network / console）的唯一实现：按会话取账本、引擎只作过滤、清理与 target 回填。
+   * 归属键是会话（journal-scope），所以 auto 不再需要「合并两个引擎的缓冲」：
+   * 读的就是本会话的全部条目（每条自带 engine），跨引擎改道也不会把记录丢在另一个桶里。
+   */
+  function journalQuery(opts, { kind, summarize, note, limitMax = 200, defaultLimit = 50 }) {
+    const target = targetFor(opts);
+    const { requested, engine } = target;
+    const sessionKey = ownerKey(opts.sessionId);
+    const journal = journals[kind](opts.sessionId);
+    // auto = 只看会话归属，不按引擎过滤；显式引擎才把 engine 当过滤条件交给 journal。
+    const scoped = { ...opts, engine: requested === ENGINE_AUTO ? undefined : engine };
+    if (String(opts.action || 'list').toLowerCase() === 'clear') {
+      journals.clear(opts.sessionId, [kind]);
+      return applyTarget({ ok: true, engine, cleared: true, sessionKey, clearedAt: journals.clearedAt(opts.sessionId) }, target);
+    }
+    const limit = Math.min(limitMax, Math.max(1, Number(opts.limit) || defaultLimit));
+    const entries = journal.list({ ...scoped, limit });
+    return applyTarget(
+      {
+        ok: true,
+        engine,
+        ...summarize(entries),
+        stats: {
+          [ENGINE_BROWSERVIEW]: journal.status({ engine: ENGINE_BROWSERVIEW }),
+          [ENGINE_PLAYWRIGHT]: journal.status({ engine: ENGINE_PLAYWRIGHT })
+        },
+        sessionKey,
+        note: withClearedNote(note, opts.sessionId)
+      },
+      target
+    );
+  }
+
+  /**
+   * 缓冲被清空过就明说，避免「上一轮的登录请求查不到」被误判成「请求没发出去」。
+   * 清空只作用于本会话（Agent 每轮开始 reset），别的会话的记录不受影响。
+   */
+  function withClearedNote(note, sessionId) {
+    const at = journals.clearedAt(sessionId);
+    if (!at) return note;
+    return `${note}；注意：本会话缓冲已于 ${new Date(at).toISOString()} 清空（Agent 轮次开始 reset_logs），更早的记录不再保留`;
   }
 
   function network(opts = {}) {
-    const requested = pickEngine(opts.engine);
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    const action = String(opts.action || 'list').toLowerCase();
-    if (action === 'clear') {
-      if (requested === 'auto') {
-        bvNetwork.clear();
-        pwNetwork.clear();
-      } else {
-        (engine === 'playwright' ? pwNetwork : bvNetwork).clear();
-      }
-      return { ok: true, engine, cleared: true };
-    }
-    let entries;
-    if (requested === 'auto') {
-      const merged = [
-        ...bvNetwork.list({ ...opts, limit: 200 }),
-        ...pwNetwork.list({ ...opts, limit: 200 })
-      ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-      const limit = Math.min(200, Math.max(1, Number(opts.limit) || 50));
-      entries = merged.slice(-limit);
-    } else {
-      entries = (engine === 'playwright' ? pwNetwork : bvNetwork).list(opts);
-    }
-    return {
-      ok: true,
-      engine,
-      ...summarizeHarEntries(entries),
-      stats: { browserview: bvNetwork.status(), playwright: pwNetwork.status() },
-      note: 'HAR-lite：记录最近 HTTP(S) 请求；action=clear 可清空缓冲'
-    };
+    return journalQuery(opts, {
+      kind: 'network',
+      summarize: summarizeHarEntries,
+      note: 'HAR-lite：记录最近 HTTP(S) 请求（按会话保存，engine 为条目属性）；action=clear 可清空本会话缓冲'
+    });
   }
 
   function consoleMessages(opts = {}) {
-    const requested = pickEngine(opts.engine);
-    const engine = resolveEngine(opts.engine, { interaction: true, sessionId: opts.sessionId });
-    if (String(opts.action || 'list').toLowerCase() === 'clear') {
-      if (requested === 'auto') {
-        bvConsole.clear();
-        pwConsole.clear();
-      } else {
-        (engine === 'playwright' ? pwConsole : bvConsole).clear();
-      }
-      return { ok: true, engine, cleared: true };
-    }
-    let entries;
-    if (requested === 'auto') {
-      const merged = [
-        ...bvConsole.list({ ...opts, limit: 200 }),
-        ...pwConsole.list({ ...opts, limit: 200 })
-      ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-      const limit = Math.min(200, Math.max(1, Number(opts.limit) || 50));
-      entries = merged.slice(-limit);
-    } else {
-      entries = (engine === 'playwright' ? pwConsole : bvConsole).list(opts);
-    }
-    return {
-      ok: true,
-      engine,
-      ...summarizeConsoleEntries(entries),
-      stats: { browserview: bvConsole.status(), playwright: pwConsole.status() },
-      note: 'console-lite：记录页面 console 调用与未捕获异常/未处理拒绝；action=clear 可清空缓冲'
-    };
+    return journalQuery(opts, {
+      kind: 'console',
+      summarize: summarizeConsoleEntries,
+      note: 'console-lite：记录页面 console 调用与未捕获异常/未处理拒绝（按会话保存）；action=clear 可清空本会话缓冲'
+    });
   }
 
-  function status() {
-    const viewStatus = viewCtrl.status();
-    const pwStatus = pwRunner.status();
+  /**
+   * 全局状态：前台会话归属引擎、会话映射、各引擎可用性。
+   * activeEngine 是前台会话的归属引擎（兼容字段，renderer 摘要仍在使用）。
+   * target 说明「不带 engine 的调用会打到哪个引擎、为什么」。
+   */
+  function status(opts = {}) {
+    // 与 targetFor 同一份会话身份：摘要里的 target.instanceId 必须和真实调用一致
+    const sessionId = sessionScope.resolveEffectiveSessionId(opts.sessionId);
+    const viewSessionId = sessionScope.getActiveViewSessionId();
+    const backgroundSession = !!sessionId && sessionScope.isBackgroundSession(sessionId);
+    const target = resolveTarget({
+      requested: undefined,
+      sessionId,
+      ownerEngine: ownerEngine(sessionId),
+      isBackgroundSession: backgroundSession
+    });
     return {
       ok: true,
-      activeEngine,
-      interactionEngine: resolveAutoInteractionEngine(),
-      forcePlaywrightUrl,
+      activeEngine: ownerEngine(null),
+      target,
+      viewSessionId,
+      backgroundSession,
+      snapshot: sessionScope.getSnapshot(ownerKey(sessionId)),
       playwrightHeaded,
-      browserview: viewStatus,
-      playwright: pwStatus
+      browserview: viewCtrl.status(),
+      playwright: pwRunner.status()
     };
   }
 
   async function close() {
     await pwRunner.close();
     viewCtrl.close();
-    activeEngine = 'browserview';
-    forcePlaywrightUrl = '';
+    sessionScope.clearEngineOwners();
+    // 页面没了，旧 snapshot 的 ref 必须判为失效，不能继续命中残留 DOM
+    sessionScope.clearSnapshots();
+    // 观察账本随浏览器一起丢弃：页面都没了，旧记录只会在下一轮被误读成本轮证据
+    journals.reset();
     return { ok: true };
   }
 
@@ -1228,13 +1244,18 @@ function createBrowserService(deps) {
     hideForOverlay,
     restoreAfterOverlay,
     onWindowResize,
+    /**
+     * 切换「可见 BrowserView 承载哪个会话」。只影响视图与 playwright 的默认会话，
+     * 不再影响任何调用的引擎选择（引擎由 engine-target.resolveTarget 按请求与归属决定）。
+     */
     setActiveViewSessionId: (sessionId) => {
       const prev = sessionScope.getActiveViewSessionId();
       const sid = sessionId ? String(sessionId).trim() : null;
+      const prevOwner = ownerEngine(prev);
       sessionScope.setActiveViewSessionId(sid);
       if (prev && prev !== sid) {
         const st = viewCtrl.status();
-        sessionScope.updateMeta(prev, { url: st.url, title: st.title, engine: activeEngine });
+        sessionScope.updateMeta(prev, { url: st.url, title: st.title, engine: prevOwner });
       }
       const swap = viewCtrl.activateSession(sid);
       if (swap.swapped && sid) {
@@ -1243,6 +1264,7 @@ function createBrowserService(deps) {
           viewCtrl.navigate(meta.url, { waitUntil: 'domcontentloaded' }).catch(() => {});
         }
       }
+      // playwright 的默认会话跟随视图会话；显式传 sessionId 的调用不受影响
       if (typeof pwRunner.activateSession === 'function') {
         pwRunner.activateSession(sid);
       }

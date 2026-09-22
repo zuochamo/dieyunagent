@@ -195,6 +195,36 @@ async function main() {
   conJournal.clear();
   assert(conJournal.status().total === 0, 'console journal clear');
 
+  // --- P3 观察账本按会话归位：engine 只是条目属性，不再是账本归属 ---
+  const { createJournalScope, VIEW_OWNER_KEY } = require('../src/browser/journal-scope');
+  let activeSession = 'sess-a';
+  const journals = createJournalScope({ resolveDefaultSessionId: () => activeSession });
+  journals.network('sess-a').add({ engine: 'browserview', method: 'POST', url: 'https://a.com/api/login' });
+  journals.network('sess-a').add({ engine: 'playwright', method: 'GET', url: 'https://a.com/home' });
+  journals.network('sess-b').add({ engine: 'playwright', method: 'GET', url: 'https://b.com/' });
+  assert(journals.network('sess-a').list({}).length === 2, 'same session keeps both engines in one bucket');
+  assert(journals.network('sess-a').list({ engine: 'browserview' }).length === 1, 'engine filters entries');
+  assert(journals.network('sess-a').status({ engine: 'playwright' }).total === 1, 'status honours engine filter');
+  assert(journals.network(null) === journals.network('sess-a'), 'no sessionId falls back to active session');
+  activeSession = 'sess-b';
+  assert(journals.network('') === journals.network('sess-b'), 'empty sessionId follows active session');
+  assert(journals.keyOf(null) === 'sess-b', 'keyOf follows active session');
+
+  journals.console('sess-b').add({ engine: 'playwright', level: 'error', text: 'b' });
+  const clearedA = journals.clear('sess-a');
+  assert(clearedA.clearedAt > 0 && journals.clearedAt('sess-a') === clearedA.clearedAt, 'clear records time');
+  assert(journals.network('sess-a').list({}).length === 0, 'clear only empties its own session');
+  assert(journals.console('sess-b').status().total === 1, 'other session survives the clear');
+  assert(journals.clearedAt('sess-b') === 0, 'other session has no clear marker');
+  assert(journals.clear('sess-b', ['console']).cleared.join(',') === 'console', 'clear accepts kind list');
+
+  const bareScope = createJournalScope();
+  assert(bareScope.keyOf(null) === VIEW_OWNER_KEY, 'ownerless journals keyed by __view__');
+  journals.drop('sess-b');
+  assert(!journals.keys().includes('sess-b'), 'drop reclaims a closed session');
+  journals.reset();
+  assert(journals.keys().length === 0, 'reset drops every session');
+
   const hookListeners = {};
   const hookLogged = [];
   const fakeWindow = {
@@ -516,13 +546,38 @@ async function main() {
   );
   assert(DEFAULT_RATIO_THRESHOLD === 0.005 && DEFAULT_PIXEL_TOLERANCE === 12, 'visual diff defaults');
 
-  const { isLikelyBlankBitmap } = require('../src/browser/visual-diff');
+  // 像素事实只在 render-health（visual-diff 不再导出空白判定，避免两套判据）
+  const { isAllBlackBitmap, isUsableBitmap, classifyBitmapRenderHealth } = require('../src/browser/render-health');
+  assert(
+    require('../src/browser/visual-diff').isLikelyBlankBitmap === undefined,
+    'visual-diff no longer owns blank detection'
+  );
   const blackBitmap = Buffer.alloc(16, 0);
   for (let i = 3; i < 16; i += 4) blackBitmap[i] = 255; // BGRA：alpha=255、RGB=0
-  assert(isLikelyBlankBitmap(blackBitmap, 2, 2) === true, 'blank detector flags all-black bitmap');
-  assert(isLikelyBlankBitmap(Buffer.alloc(16, 255), 2, 2) === false, 'blank detector ignores white page');
-  assert(isLikelyBlankBitmap(Buffer.alloc(4), 2, 2) === true, 'blank detector flags truncated bitmap');
-  assert(isLikelyBlankBitmap(Buffer.alloc(0), 0, 0) === true, 'blank detector flags empty bitmap');
+  assert(isAllBlackBitmap(blackBitmap, 2, 2) === true, 'pixel fact flags all-black bitmap');
+  assert(isAllBlackBitmap(Buffer.alloc(16, 255), 2, 2) === false, 'pixel fact ignores white page');
+  assert(isUsableBitmap(Buffer.alloc(4), 2, 2) === false, 'truncated bitmap is unusable (not "blank")');
+  assert(isUsableBitmap(Buffer.alloc(0), 0, 0) === false, 'empty bitmap is unusable (not "blank")');
+  // 全黑 + 页面有可见内容 = 深色主题 → 合法基准（P1-4 验收标准）
+  const darkTheme = classifyBitmapRenderHealth(blackBitmap, 2, 2, {
+    textLength: 120,
+    interactiveCount: 3,
+    canvasCount: 0,
+    imageCount: 0,
+    svgCount: 0
+  });
+  assert(
+    darkTheme.bitmapUsable === true && darkTheme.darkPixels === true && darkTheme.likelyBlank === false,
+    'dark theme with visible content is not blank'
+  );
+  const confirmedBlank = classifyBitmapRenderHealth(blackBitmap, 2, 2, {
+    textLength: 0,
+    interactiveCount: 0,
+    canvasCount: 0,
+    imageCount: 0,
+    svgCount: 0
+  });
+  assert(confirmedBlank.likelyBlank === true, 'all-black page without content is blank');
 
   const { parseRemotePreviewTarget } = require('../src/browser/url-policy');
   assert(parseRemotePreviewTarget('http://localhost:5000/').remotePort === 5000, 'localhost is preview target');
@@ -650,6 +705,50 @@ async function main() {
   await forwards.removeAll();
   await new Promise((resolve) => httpServer.close(resolve));
   await new Promise((resolve) => silentServer.close(resolve));
+
+  // --- ref origin 身份：旧 ref 必须明确失效，绝不静默命中另一个元素 ---
+  const { FRAME_HELPERS } = require('../src/browser/frame-script');
+  const { REF_RE, formatRef, __resetSnapshotCounter } = require('../src/browser/ref-namespace');
+
+  __resetSnapshotCounter(0);
+  assert(
+    buildSnapshotScript({ mode: 'interactive', maxElements: 3 }).includes('const snapshotId = "s1"'),
+    'snapshot mints its own origin id when the engine gives none'
+  );
+  assert(
+    buildSnapshotScript({ mode: 'interactive', maxElements: 3, snapshotId: 's5' }).includes('const snapshotId = "s5"'),
+    'snapshot reuses the engine-supplied origin id (all frames share one)'
+  );
+  assert(formatRef(3, 's1') === 'ref-3@s1' && REF_RE.test('ref-3@s1'), 'ref carries origin identity');
+  assert(!REF_RE.test('ref-3'), 'bare counter ref is no longer a valid ref');
+
+  const originGate = (ref, snapshotId) => {
+    const pageCtx = { __dieyunRefSnapshotId: snapshotId };
+    pageCtx.top = pageCtx;
+    return vm.runInNewContext(
+      `(() => { ${FRAME_HELPERS} return __dyCheckRefOrigin(${JSON.stringify(ref)}); })()`,
+      { window: pageCtx }
+    );
+  };
+
+  const liveOrigin = originGate('ref-0@s2', 's2');
+  assert(liveOrigin.ok === true && liveOrigin.seq === 0, 'ref from the current snapshot passes the origin gate');
+
+  const staleOrigin = originGate('ref-0@s1', 's2');
+  assert(
+    staleOrigin.ok === false && staleOrigin.errorCode === 'REF_EXPIRED',
+    'ref from an older snapshot reports REF_EXPIRED instead of "element not found"'
+  );
+  assert(
+    staleOrigin.snapshotId === 's1' && staleOrigin.currentSnapshotId === 's2',
+    'expiry error names both the ref origin and the current snapshot'
+  );
+  assert(
+    String(staleOrigin.error).includes('browser_snapshot'),
+    'expiry error tells the agent to re-snapshot (or use a selector)'
+  );
+  assert(originGate('ref-0', 's2').errorCode === 'REF_MALFORMED', 'bare counter ref is rejected as malformed');
+  assert(originGate('ref-0@s2', '').errorCode === 'REF_NO_SNAPSHOT', 'ref with no snapshot reports REF_NO_SNAPSHOT');
 
   console.log('test-browser-smoke.cjs ok');
 }

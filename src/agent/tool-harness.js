@@ -27,32 +27,49 @@ function formatArgsBrief(name, args) {
 function classifyFailure(name, result, thrownErr) {
   if (thrownErr) {
     const msg = String(thrownErr.message || thrownErr);
-    if (/timeout|ECONNRESET|ETIMEDOUT|ENOTFOUND|429|502|503|socket hang up|display surface not available|not available for capture/i.test(msg)) {
-      return { retryable: true, errorCode: 'TRANSIENT', error: msg };
-    }
-    return { retryable: false, errorCode: 'EXCEPTION', error: msg };
+    // 抛错同样可以带契约信息：网关 invokeRpc 原样抛出 handler 的 Error（保留 code），
+    // 浏览器 runner 在点击失败 / 目标被遮挡 / 缺 ref 等场景还会挂 diagnostics 与 suggestedFix。
+    // 一律折叠成 EXCEPTION 会让模型丢掉「失败在哪、下一步怎么改」，错误码也不再是契约。
+    // 规则：有声明用声明，没有才回退到原有的消息启发式（retryable 判定口径不变）。
+    const retryable =
+      typeof thrownErr.retryable === 'boolean'
+        ? thrownErr.retryable
+        : /timeout|ECONNRESET|ETIMEDOUT|ENOTFOUND|429|502|503|socket hang up|display surface not available|not available for capture/i.test(msg);
+    const failure = {
+      retryable,
+      errorCode: thrownErr.errorCode || thrownErr.code || (retryable ? 'TRANSIENT' : 'EXCEPTION'),
+      error: msg
+    };
+    if (thrownErr.suggestedFix) failure.suggestedFix = thrownErr.suggestedFix;
+    if (thrownErr.diagnostics) failure.diagnostics = thrownErr.diagnostics;
+    return failure;
   }
   if (!result || typeof result !== 'object') return null;
   if (result.ok === false && result.errorCode) {
-    return {
+    const failure = {
       retryable: !!result.retryable,
       errorCode: result.errorCode,
       error: result.error || '工具失败',
       suggestedFix: result.suggestedFix
     };
+    // 结构化诊断（浏览器实例 / ref 世代 / 遮挡元素 …）是错误体的一部分：
+    // 归一化失败信封时必须原样带过，否则模型只看到「失败了」，看不到「失败在哪、下一步怎么改」。
+    if (result.diagnostics) failure.diagnostics = result.diagnostics;
+    return failure;
   }
   if (result.error) {
     const err = String(result.error);
+    const diagnostics = result.diagnostics;
     if (result.retryable === true) {
-      return { retryable: true, errorCode: result.errorCode || 'TRANSIENT', error: err };
+      return { retryable: true, errorCode: result.errorCode || 'TRANSIENT', error: err, diagnostics };
     }
     if (/超时|timeout|ECONN|503|502|429|暂时|not ready|display surface|not available for capture/i.test(err)) {
-      return { retryable: true, errorCode: 'TRANSIENT', error: err };
+      return { retryable: true, errorCode: 'TRANSIENT', error: err, diagnostics };
     }
     if (/安全策略|BLOCKED|重复|缺少|无效|未知工具|validation|拒绝/i.test(err)) {
-      return { retryable: false, errorCode: 'POLICY', error: err };
+      return { retryable: false, errorCode: 'POLICY', error: err, diagnostics };
     }
-    return { retryable: false, errorCode: 'TOOL_ERROR', error: err };
+    return { retryable: false, errorCode: 'TOOL_ERROR', error: err, diagnostics };
   }
   return null;
 }
@@ -64,6 +81,7 @@ function wrapStructuredError(failure, extra = {}) {
     errorCode: failure.errorCode,
     retryable: !!failure.retryable,
     suggestedFix: failure.suggestedFix || extra.suggestedFix || undefined,
+    ...(failure.diagnostics ? { diagnostics: failure.diagnostics } : null),
     ...extra
   };
 }
