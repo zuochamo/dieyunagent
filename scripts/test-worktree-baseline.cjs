@@ -7,7 +7,8 @@
  * 覆盖的全是「一旦回归就会静默毁数据」的路径：
  *  1. 子 Agent 自行 commit 后，预览仍必须显示产出（基线相对，而非 HEAD 相对）；
  *  2. 主工作区已有未提交改动时 apply 默认拒绝，显式允许时留下可回滚备份；
- *  3. 清理必须先归档到分支再删目录 —— 目录没了，产出还在。
+ *  3. 清理必须先归档到分支再删目录 —— 目录没了，产出还在；
+ *  4. 分支回收必须只删「已并入 HEAD」的 —— ref 模式漏写通配符会让它静默空转。
  *
  * 用法：npm run test:worktree
  */
@@ -143,6 +144,41 @@ async function scenarioUncommittedArchive(repo, runId) {
   ok('未提交产出先归档、再删目录');
 }
 
+async function scenarioPruneRunBranches(repo) {
+  console.log('· 场景 3：回收已合并分支、保留未合并分支');
+  // 已合并：分支等于创建基线，仍留在 HEAD 历史中
+  const mergedRun = 'run-prune-merged';
+  const merged = await svc.createAgentWorktree(repo, { runId: mergedRun, roleId: 'A' });
+  assert.strictEqual(merged.ok, true, JSON.stringify(merged));
+  await svc.cleanupRunWorktrees(repo, mergedRun);
+
+  // 未合并：分支上带着 main 没有的提交，属于产出存档，必须保留
+  const unmergedRun = 'run-prune-unmerged';
+  const unmerged = await svc.createAgentWorktree(repo, { runId: unmergedRun, roleId: 'A' });
+  assert.strictEqual(unmerged.ok, true, JSON.stringify(unmerged));
+  write(path.join(unmerged.path, 'd.txt'), 'diverged\n');
+  gitId(unmerged.path, ['add', '-A']);
+  gitId(unmerged.path, ['commit', '-m', 'diverge']);
+  await svc.cleanupRunWorktrees(repo, unmergedRun);
+
+  const mergedBranch = `dieyun/agent-${mergedRun}-A`;
+  const unmergedBranch = `dieyun/agent-${unmergedRun}-A`;
+
+  const pruned = await svc.pruneRunBranches(repo, { keep: 0, deleteUnmerged: false });
+  assert.strictEqual(pruned.ok, true, JSON.stringify(pruned));
+  // 回归点：ref 模式漏写 `*` 时 deleted 会是空数组，回收静默失效
+  assert.ok(
+    pruned.deleted.includes(mergedBranch),
+    `已合并分支应被回收，实际 deleted: ${JSON.stringify(pruned.deleted)}`
+  );
+  assert.ok(
+    pruned.kept.includes(unmergedBranch),
+    `未合并分支应出现在 kept，实际: ${JSON.stringify(pruned.kept)}`
+  );
+  assert.ok(!pruned.deleted.includes(unmergedBranch), '未合并分支绝不能被删');
+  ok('pruneRunBranches 回收已合并、保留未合并（ref 模式正确匹配）');
+}
+
 async function main() {
   try {
     execFileSync('git', ['--version'], { stdio: 'ignore' });
@@ -162,6 +198,7 @@ async function main() {
 
     await scenarioAgentSelfCommit(repo, 'run-test-1');
     await scenarioUncommittedArchive(repo, 'run-test-2');
+    await scenarioPruneRunBranches(repo);
 
     console.log(`\n[worktree-baseline] ${passed} 项通过`);
   } finally {

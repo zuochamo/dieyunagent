@@ -28,6 +28,13 @@ const COMMIT_IDENTITY = [
 const WORKTREES_DIR = 'worktrees';
 const BACKUP_DIR = 'backup';
 
+/**
+ * Agent worktree 分支命名空间。唯一来源：创建分支、判断归属、回收分支都引用它。
+ * 曾因「创建用 `dieyun/agent-`、回收用 `refs/heads/dieyun/agent-`（字面模式）」两处独立书写，
+ * 而 git for-each-ref 的字面模式必须停在 `/` 边界 → 回收永远匹配到 0 个分支、静默空转。
+ */
+const AGENT_BRANCH_PREFIX = 'dieyun/agent-';
+
 /** worktree 元数据（各 role 的基线 sha）。放在 run 根，随 run 一起被清理。 */
 const RUN_META_FILE = '.dieyun-run-meta.json';
 
@@ -249,7 +256,7 @@ async function resolveWorktreeBase(repoPath, runId, roleId, wtPath) {
   }
   // 老 run（本次改动前创建）没有元数据：worktree 分支与主分支的 merge-base 就是真实基线。
   // 子 Agent 在 worktree 内自行 commit 也不会影响分叉点，所以这个回退是可靠的。
-  const branch = `dieyun/agent-${runId}-${roleId}`;
+  const branch = `${AGENT_BRANCH_PREFIX}${runId}-${roleId}`;
   try {
     const mb = await gitExec(repoPath, ['merge-base', 'HEAD', branch]);
     if (mb) return mb.trim();
@@ -279,7 +286,7 @@ async function createAgentWorktreeInner(repoPath, opts) {
   const wtDir = path.join(runRootOf(repoPath, runId), roleId);
   fs.mkdirSync(path.dirname(wtDir), { recursive: true });
 
-  const branch = `dieyun/agent-${runId}-${roleId}`;
+  const branch = `${AGENT_BRANCH_PREFIX}${runId}-${roleId}`;
   const baseRef = opts.baseRef || 'HEAD';
   // 先把 baseRef 解析成具体 sha 再落盘。存 ref 名会让基线随后续 HEAD 漂移，
   // 那样"相对基线的变更"就失去了确定含义。
@@ -399,7 +406,7 @@ async function removeAgentWorktree(repoPath, wtPath, opts = {}) {
 
   // 分支默认保留：worktree 目录已删，分支是产出唯一的存档。
   // 需显式 deleteBranch 才回收（且只回收本工具自己建的命名空间）。
-  if (opts.deleteBranch && branch && branch.startsWith('dieyun/agent-')) {
+  if (opts.deleteBranch && branch && branch.startsWith(AGENT_BRANCH_PREFIX)) {
     await gitExec(repoPath, ['branch', '-D', branch]).catch(() => {});
   }
 
@@ -478,11 +485,13 @@ async function pruneRunBranches(repoPath, opts = {}) {
   const keep = Math.max(0, Number(opts.keep) || 0);
   const deleteUnmerged = !!opts.deleteUnmerged;
 
+  // 必须带通配符 `*`：for-each-ref 的字面模式只匹配到 `/` 边界，
+  // `refs/heads/dieyun/agent-` 会匹配 0 个分支，回收静默失效。
   const out = await gitExec(repoPath, [
     'for-each-ref',
     '--sort=-committerdate',
     '--format=%(refname:short)',
-    'refs/heads/dieyun/agent-'
+    `refs/heads/${AGENT_BRANCH_PREFIX}*`
   ]);
   const branches = out.split('\n').map((s) => s.trim()).filter(Boolean);
   const deleted = [];
