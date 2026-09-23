@@ -77,9 +77,12 @@ fn default_cooldown() -> i64 {
     6
 }
 
-/// 压缩成功后写入的轮次计数。必须 >0 且 < `default_cooldown()`：
+/// 一次压缩尝试后写入的轮次计数（成功与失败共用）。必须 >0 且 < `default_cooldown()`：
 /// 计数为 0 时 `prepare` 的冷却条件（`>0 && < cool_down`）不成立，
-/// 压力未解除时会在下一轮立刻复压，每次最多拖住发送 210s。
+/// 压力未解除时会在下一轮立刻复压，每次最多拖住发送 90s。
+///
+/// 失败路径也必须写这个值，而不是对计数递增：递增会让它越过 `cool_down` 后再也回不到
+/// 冷却区，于是每一轮都重打一次注定失败的大请求（每轮白等一个 LLM 超时）。
 const POST_COMPACTION_ROUND_COUNT: i64 = 1;
 
 #[derive(Debug, Serialize)]
@@ -421,7 +424,9 @@ pub async fn maybe_compact(
         Ok(r) => r,
         Err(err) => {
             eprintln!("[compaction-llm] skip compaction after LLM failure: {err}");
-            round_count += 1;
+            // 失败即「本次尝试已发生」：把计数落回冷却起点，让后续几轮不再重打同一个
+            // 注定失败的大请求。失败与成功共用同一常量，冷却语义只有一处定义。
+            round_count = POST_COMPACTION_ROUND_COUNT;
             return Ok(MaybeCompactResult {
                 compacted: false,
                 messages: source_messages,
@@ -676,5 +681,43 @@ mod tests {
     fn post_compaction_round_count_stays_inside_cooldown() {
         assert!(POST_COMPACTION_ROUND_COUNT > 0);
         assert!(POST_COMPACTION_ROUND_COUNT < default_cooldown());
+    }
+
+    /// LLM 失败后计数必须落回冷却起点（而不是递增）。
+    /// 递增会让计数越过 cool_down 后再也回不到冷却区，于是每轮都重打一次注定失败的大请求。
+    #[tokio::test]
+    async fn llm_failure_reenters_cooldown() {
+        let huge = "x".repeat(80_000);
+        // baseUrl 为空 → 直接返回 LLM_CONFIG 错误，不会发起真实网络请求
+        let offline = crate::config::LlmConfig::default();
+        let r = maybe_compact(
+            &offline,
+            MaybeCompactParams {
+                prepare: PrepareParams {
+                    messages: vec![
+                        json!({"role":"user","content": huge.clone()}),
+                        json!({"role":"assistant","content": huge.clone()}),
+                        json!({"role":"assistant","content": huge}),
+                    ],
+                    token_budget: 8192,
+                    trigger_ratio: 0.85,
+                    cool_down_rounds: 6,
+                    force: false,
+                    compaction_round_count: 0,
+                    cumulative_summary: None,
+                    prompts: CompactionPrompts::default(),
+                },
+                model: None,
+                llm: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.compaction_skipped.as_deref(), Some("llm_error"));
+        assert_eq!(
+            r.compaction_round_count, POST_COMPACTION_ROUND_COUNT,
+            "failure must re-enter cooldown instead of counting up"
+        );
+        assert!(r.compaction_round_count < default_cooldown());
     }
 }

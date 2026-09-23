@@ -3,8 +3,8 @@
 /** 本地 / 远程 dieyun-core RPC 共用超时（避免 core-bridge 与 gateway 漂移） */
 const DEFAULT_TIMEOUT_MS = 120000;
 const INDEX_TIMEOUT_MS = 600000;
-/** 与 dieyun-core compaction/llm.rs `COMPACTION_LLM_MAX_WAIT_MS`(180s) + 余量对齐 */
-const COMPACTION_MAYBE_COMPACT_TIMEOUT_MS = 210 * 1000;
+/** 与 dieyun-core compaction/llm.rs `LLM_HTTP_TIMEOUT_SECS`(75s，单次不重试) + 余量对齐 */
+const COMPACTION_MAYBE_COMPACT_TIMEOUT_MS = 90 * 1000;
 
 /**
  * @param {string} method

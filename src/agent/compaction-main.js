@@ -80,9 +80,15 @@ function getCompactionTriggerRatio(settings) {
 
 /**
  * 冷却轮数：与 Rust `default_cooldown()` 对齐。
- * 压缩成功那一轮会写入 POST_COMPACTION_ROUND_COUNT(1)，使这里真正生效。
+ * 一次压缩尝试（无论成功或失败）都会写入 POST_COMPACTION_ROUND_COUNT，使冷却真正生效。
  */
 const COMPACTION_COOL_DOWN_ROUNDS = 6;
+
+/**
+ * 一次压缩尝试后写入的轮次计数，与 Rust `POST_COMPACTION_ROUND_COUNT` 对齐。
+ * 必须 >0 且 < COMPACTION_COOL_DOWN_ROUNDS：否则后续几轮不会跳过压缩。
+ */
+const POST_COMPACTION_ROUND_COUNT = 1;
 
 /**
  * Rust `compaction.maybe_compact` 的 prompts 参数（字段名 camelCase）。
@@ -283,9 +289,11 @@ function createMainCompactionAgent(userData, coreBridge = null) {
     throwIfAborted(signal);
     if (result && result.compactionSkipped) {
       const skippedRounds = Number(result.compactionRoundCount);
+      // 失败/异常同样要「进入冷却」而非递增：递增会让计数越过 COMPACTION_COOL_DOWN_ROUNDS
+      // 后再也回不去，于是每轮都重打一次注定失败的大请求。
       st.compactionRoundCount = Number.isFinite(skippedRounds) && skippedRounds > 0
         ? skippedRounds
-        : (Number(st.compactionRoundCount) || 0) + 1;
+        : POST_COMPACTION_ROUND_COUNT;
       return {
         messages,
         compacted: false,
@@ -299,7 +307,7 @@ function createMainCompactionAgent(userData, coreBridge = null) {
       };
     }
     if (!result) {
-      st.compactionRoundCount = (Number(st.compactionRoundCount) || 0) + 1;
+      st.compactionRoundCount = POST_COMPACTION_ROUND_COUNT;
       return compactionSkippedResult(messages, 'llm_error', 'compaction.maybe_compact 无响应');
     }
     st.compactionRoundCount = Number(result.compactionRoundCount) || 0;

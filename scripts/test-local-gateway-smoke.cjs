@@ -90,21 +90,35 @@ async function testCompactionPerSession() {
 }
 
 async function testCompactionTimeoutSoftSkip() {
+  const seenRounds = [];
   const agent = createMainCompactionAgent(os.tmpdir(), {
     isReady: () => true,
-    async invoke(method) {
+    async invoke(method, params) {
       if (method === 'memory.compaction_recent') return [];
+      if (method === 'compaction.maybe_compact') {
+        seenRounds.push(Number(params && params.compactionRoundCount) || 0);
+      }
       const err = new Error('dieyun-core 超时: compaction.maybe_compact');
       err.code = 'CORE_RPC_TIMEOUT';
       throw err;
     }
   });
-  const cr = await agent.maybeCompactMessages([{ role: 'user', content: 'hi' }], {
-    sessionId: 's-timeout',
-    apiConfig: { baseUrl: 'https://example/v1', apiKey: 'k' }
-  });
+  const runOnce = () =>
+    agent.maybeCompactMessages([{ role: 'user', content: 'hi' }], {
+      sessionId: 's-timeout',
+      apiConfig: { baseUrl: 'https://example/v1', apiKey: 'k' }
+    });
+  const cr = await runOnce();
   if (cr.compacted) throw new Error('timeout should not compact');
   if (cr.compactionSkipped !== 'llm_error') throw new Error(`expected llm_error skip, got ${cr.compactionSkipped}`);
+  // 压缩失败必须「进入冷却」而非把计数往上加：加过头之后再也不会跳过压缩，
+  // 每轮都白等一次超时。连压三轮后计数应稳定停在 POST_COMPACTION_ROUND_COUNT(1)。
+  await runOnce();
+  await runOnce();
+  if (seenRounds.length !== 3) throw new Error(`expected 3 compaction invokes, got ${seenRounds.length}`);
+  if (seenRounds[1] !== 1 || seenRounds[2] !== 1) {
+    throw new Error(`failure must re-enter cooldown (expect 1), got [${seenRounds.join(', ')}]`);
+  }
   console.log('ok compaction timeout soft-skip');
 }
 
