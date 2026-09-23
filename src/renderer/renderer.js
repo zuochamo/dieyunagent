@@ -1,4 +1,4 @@
-/* global window, DieyunBootstrap, DieyunApp, setGatewayMeta */
+/* global window, DieyunBootstrap, DieyunApp, setGatewayMeta, startRendererFreezeWatch */
 'use strict';
 
 function initRendererApp() {
@@ -14,6 +14,9 @@ function initRendererApp() {
     'DieyunComposer',
     'DieyunAgent'
   ]);
+
+  // 冻结取证（问题 B / B1）：先于 runStartup 启动，覆盖首屏渲染期的长任务
+  if (typeof startRendererFreezeWatch === 'function') startRendererFreezeWatch();
 
   boot.runStartup().catch((err) => {
     console.warn(err);

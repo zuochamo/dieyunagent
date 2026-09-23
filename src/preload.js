@@ -244,6 +244,11 @@ contextBridge.exposeInMainWorld('diecloud', {
   fetchAllLogs: (opts) => ipcRenderer.invoke('logs:fetch-all', opts),
   cleanLogs: (opts) => ipcRenderer.invoke('logs:clean', opts || {}),
 
+  // 渲染进程冻结取证（问题 B）：单向 send，不回包——观测不该在卡死时挂住渲染进程。
+  // 心跳只更新主进程内存时间戳，snapshot 才落盘（src/main/ipc/renderer-freeze.js）。
+  rendererFreezeBeat: () => ipcRenderer.send('renderer:freeze-beat'),
+  reportRendererFreeze: (snapshot) => ipcRenderer.send('renderer:freeze-report', snapshot),
+
   syncModelSettings: (settings) => ipcRenderer.invoke('model:sync-settings', settings),
   getModelSettingsFromMain: () => ipcRenderer.invoke('model:get-settings'),
   syncAgentLimits: (limits) => ipcRenderer.invoke('agent:sync-limits', limits),

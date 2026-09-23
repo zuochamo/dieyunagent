@@ -26,6 +26,7 @@
 | 索引 / 记忆异常 | `[dieyun:core]` | `memory.*` / `codebase.*` RPC |
 | 压缩失败 / 跳过 | `[dieyun:agent]` compaction | Rust `compaction.*` |
 | 远程 SSH/WSL | `[remote-agent]`（已有） | `session-remote-transport` 测试 |
+| 窗口冻结 / 卡顿 / 渲染进程崩溃重载 | Main `[dieyun:renderer] freeze`（`snapshot` → `unresponsive` → `render-process-gone`，看 `silentMs` 与 `metrics`） | Renderer DevTools Performance 面板 |
 | 某段文字出自 `content` 还是 `reasoning_content` | `DIEYUN_LLM_RAW_LOG` 抓包文件 | `TraceRound`（只有合成结果，区分不了） |
 
 ## LLM 原始响应体抓包（临时排障）

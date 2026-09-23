@@ -280,6 +280,8 @@
     { "prefix": "src/renderer/renderer-changes-pane.js", "tests": ["test:worktree", "check:renderer"] },
     { "prefix": "src/renderer/renderer-worktrees-settings.js", "tests": ["test:worktree", "check:renderer"] },
     { "prefix": "scripts/test-worktree-baseline.cjs", "tests": ["test:worktree"] },
+    { "prefix": "src/main/ipc/renderer-freeze.js", "tests": ["test:main-shell"] },
+    { "prefix": "src/renderer/renderer-freeze-watch.js", "tests": ["check:renderer"] },
     { "prefix": "scripts/", "tests": ["test:agent-limits"] }
   ],
   "suites": {

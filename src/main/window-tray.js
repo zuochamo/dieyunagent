@@ -70,7 +70,8 @@ function createWindowTray(deps) {
     canSendToWebContents,
     safeWebContentsSend,
     isMonitorRegistered,
-    getStats
+    getStats,
+    rendererFreeze
   } = deps;
 
   let mainWindow = null;
@@ -257,9 +258,10 @@ function createWindowTray(deps) {
     });
     mainWindow.loadFile(resolveRendererIndexHtml({ isPackaged: app.isPackaged }));
 
-    // 渲染进程崩溃：记录 + 自动重载恢复显示（崩溃后 DOM 已丢失，任务状态在 Main 进程不受影响）
+    // 渲染进程崩溃：先落现场，再自动重载恢复显示（崩溃后 DOM 已丢失，任务状态在 Main 进程不受影响）
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
-      log.error('render-process-gone:', JSON.stringify(details));
+      // 现场必须先于 reload 落盘：reload 会重建 DOM，之后再无现场可取证
+      reportRendererFreezeEvent('render-process-gone', details);
       if (details.reason === 'clean-exit') return;
       setTimeout(() => {
         if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -271,7 +273,15 @@ function createWindowTray(deps) {
       }, 300);
     });
     mainWindow.on('unresponsive', () => {
-      log.warn('主窗口渲染进程无响应（unresponsive）');
+      // 此刻渲染主线程已堵、抓不到 DOM；能拿的是「距最后一次心跳多久」+ 进程 CPU/内存
+      reportRendererFreezeEvent('unresponsive', { note: 'renderer main thread blocked' });
+    });
+
+    // 心跳基准随页面重载归零，否则新页面第一秒会被算成「很久没心跳」
+    mainWindow.webContents.on('did-finish-load', () => {
+      if (rendererFreeze && typeof rendererFreeze.resetRendererBeat === 'function') {
+        rendererFreeze.resetRendererBeat();
+      }
     });
 
     mainWindow.once('ready-to-show', () => {
@@ -327,6 +337,19 @@ function createWindowTray(deps) {
 
   function getMainWindow() {
     return mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  }
+
+  /**
+   * 渲染进程冻结/崩溃取证落盘（问题 B）。现场采集在 src/main/ipc/renderer-freeze.js，
+   * 这里只负责「何时取」；只读渲染侧快照由该模块经 IPC 直接落盘。
+   */
+  function reportRendererFreezeEvent(tag, payload) {
+    if (rendererFreeze && typeof rendererFreeze.reportRendererFreeze === 'function') {
+      rendererFreeze.reportRendererFreeze(tag, payload);
+      return;
+    }
+    // 取证模块未注入（如单测直接调 createWindowTray）：保留原有的最小落盘，避免崩溃日志整体丢失
+    log.error(`${tag}:`, JSON.stringify(payload));
   }
 
   /**

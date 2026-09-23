@@ -71,6 +71,7 @@ const { killActiveShellChildren } = require('./gateway/host-control');
 const { registerEarlyMainIpc, registerMainIpc, registerLateMainIpc } = require('./main/register-ipc');
 const { registerAgentRuntimeIpc } = require('./main/ipc/agent-runtime');
 const { registerCompactionIpc } = require('./main/ipc/compaction');
+const { createRendererFreezeReporter } = require('./main/ipc/renderer-freeze');
 const { invalidateRemoteAgentClient } = require('./gateway/remote-agent-client');
 const { createTerminalPool } = require('./terminal/terminal-pool');
 
@@ -357,6 +358,14 @@ const appUpdater = createAppUpdater({
   notifyUpdateTray: (title, content, onClick) => trayNotify.notifyUpdateTray(title, content, onClick)
 });
 
+// 渲染进程冻结取证（问题 B）：心跳时间戳与取证落盘的唯一来源。
+// 取证期临时机制 —— 根因定位并修复后删除本行、下方注入项与 registerIpc 调用。
+const rendererFreezeReporter = createRendererFreezeReporter({
+  app,
+  log,
+  getMainWindow: () => (windowTray ? windowTray.getMainWindow() : null)
+});
+
 windowTray = createWindowTray({
   app,
   BrowserWindow,
@@ -373,7 +382,8 @@ windowTray = createWindowTray({
   canSendToWebContents,
   safeWebContentsSend,
   isMonitorRegistered: () => workplaceMonitor.isMonitorRegistered(),
-  getStats: () => activityStats.getStats()
+  getStats: () => activityStats.getStats(),
+  rendererFreeze: rendererFreezeReporter
 });
 
 setLlmUsageRecorder((usage, model) => activityStats.recordLlmUsageFromApi(usage, model));
@@ -692,6 +702,9 @@ app.whenReady().then(async () => {
       terminalSession = v;
     }
   });
+
+  // 渲染进程冻结取证通道（问题 B，取证期临时）：心跳/快照经 preload 单向上报 → main.log
+  rendererFreezeReporter.registerIpc(ipcMain);
 
   function workspaceRootPath() {
     if (!localGateway) return null;

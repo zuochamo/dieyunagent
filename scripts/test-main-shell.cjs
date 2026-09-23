@@ -13,6 +13,12 @@ const {
 const { createActivityStats, normalizeModelUsageKey } = require('../src/main/activity-stats');
 const { isValidPublicIpv4 } = require('../src/main/workplace-monitor');
 const { resolveRendererIndexHtml } = require('../src/main/window-tray');
+const {
+  createRendererFreezeReporter,
+  collectRendererProcessMetrics,
+  formatRendererFreezeReport,
+  RENDERER_FREEZE_PREFIX
+} = require('../src/main/ipc/renderer-freeze');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assert failed');
@@ -79,4 +85,105 @@ const legacy = resolveRendererIndexHtml({
 assert(legacy.replace(/\\/g, '/').endsWith('renderer/index.html'), 'legacy force');
 
 fs.rmSync(dir, { recursive: true, force: true });
+
+// 渲染进程冻结取证（问题 B）：进程指标匹配 + 单行取证格式 + 心跳不落盘
+const fakeMetricsApp = {
+  getAppMetrics: () => [
+    {
+      pid: 111,
+      type: 'Tab',
+      cpu: { percentCPUUsage: 12.34 },
+      memory: { workingSetSize: 2048 * 1024, privateBytes: 4096 * 1024 }
+    }
+  ]
+};
+const fakeWebContents = { isDestroyed: () => false, getOSProcessId: () => 111 };
+const freezeMetrics = collectRendererProcessMetrics(fakeMetricsApp, fakeWebContents);
+assert(freezeMetrics.pid === 111, 'freeze metrics pid');
+assert(freezeMetrics.cpuPercent === 12.3, 'freeze metrics cpu rounded');
+assert(freezeMetrics.workingSetMB === 2048, 'freeze metrics working set (KB -> MB)');
+assert(freezeMetrics.privateMB === 4096, 'freeze metrics private bytes');
+assert(
+  collectRendererProcessMetrics(
+    {
+      getAppMetrics: () => {
+        throw new Error('no metrics');
+      }
+    },
+    null
+  ).pid === 0,
+  'freeze metrics tolerates missing app metrics'
+);
+assert(
+  collectRendererProcessMetrics(fakeMetricsApp, { isDestroyed: () => true }).pid === 0,
+  'freeze metrics skips destroyed webContents'
+);
+
+const freezeLine = formatRendererFreezeReport('unresponsive', { note: 'blocked' }, freezeMetrics, 12345);
+assert(freezeLine.startsWith(RENDERER_FREEZE_PREFIX), 'freeze prefix');
+assert(freezeLine.includes('silentMs=12345'), 'freeze silentMs');
+assert(freezeLine.includes('"note":"blocked"'), 'freeze payload kept');
+assert(
+  formatRendererFreezeReport('unresponsive', {}, freezeMetrics, null).includes('silentMs=n/a'),
+  'freeze silentMs null'
+);
+assert(
+  formatRendererFreezeReport('snapshot', { pad: 'x'.repeat(9000) }, freezeMetrics, 1).length < 9000,
+  'freeze payload capped'
+);
+const circular = {};
+circular.self = circular;
+assert(
+  formatRendererFreezeReport('snapshot', circular, freezeMetrics, 1).includes('unserializable'),
+  'freeze circular payload safe'
+);
+
+const freezeLogs = [];
+const reporter = createRendererFreezeReporter({
+  app: fakeMetricsApp,
+  log: { error: (m) => freezeLogs.push(m) },
+  getMainWindow: () => ({ isDestroyed: () => false, webContents: fakeWebContents })
+});
+assert(reporter.getLastBeatAt() === 0, 'freeze beat initial');
+reporter.markRendererBeat();
+assert(reporter.getLastBeatAt() > 0, 'freeze beat marked');
+assert(freezeLogs.length === 0, 'freeze beat must not log');
+const firstReport = reporter.reportRendererFreeze('snapshot', { kind: 'longtask' });
+assert(freezeLogs.length === 1 && freezeLogs[0] === firstReport, 'freeze report logs exactly one line');
+assert(/silentMs=\d+/.test(firstReport), 'freeze report derives silentMs from beat');
+reporter.resetRendererBeat();
+assert(reporter.getLastBeatAt() === 0, 'freeze beat reset after reload');
+assert(
+  reporter.reportRendererFreeze('snapshot', {}).includes('silentMs=n/a'),
+  'freeze report without beat baseline'
+);
+const freezeChannels = [];
+assert(reporter.registerIpc({ on: (ch) => freezeChannels.push(ch) }) === true, 'freeze registerIpc ok');
+assert(
+  freezeChannels.join(',') === 'renderer:freeze-beat,renderer:freeze-report',
+  'freeze IPC channels'
+);
+assert(reporter.registerIpc(null) === false, 'freeze registerIpc tolerates missing ipcMain');
+
+// 来源过滤：非主窗口渲染进程的上报必须丢弃（取证日志是证据，不能被污染）
+const guardLogs = [];
+const guardReporter = createRendererFreezeReporter({
+  app: fakeMetricsApp,
+  log: { error: (m) => guardLogs.push(m) },
+  getMainWindow: () => ({ isDestroyed: () => false, webContents: fakeWebContents })
+});
+const guardHandlers = {};
+guardReporter.registerIpc({ on: (ch, fn) => { guardHandlers[ch] = fn; } });
+guardHandlers['renderer:freeze-report']({ sender: { id: 999 } }, { kind: 'forged' });
+assert(guardLogs.length === 0, 'freeze report from foreign sender rejected');
+guardHandlers['renderer:freeze-beat']({ sender: { id: 999 } });
+assert(guardReporter.getLastBeatAt() === 0, 'freeze beat from foreign sender rejected');
+guardHandlers['renderer:freeze-report']({ sender: fakeWebContents }, { kind: 'genuine' });
+assert(
+  guardLogs.length === 1 && guardLogs[0].includes('"kind":"genuine"'),
+  'freeze report from main window accepted'
+);
+guardHandlers['renderer:freeze-beat']({ sender: fakeWebContents });
+assert(guardReporter.getLastBeatAt() > 0, 'freeze beat from main window accepted');
+
 console.log('test-main-shell.cjs ok');
