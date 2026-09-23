@@ -3,7 +3,11 @@
 const { loadModelSettings } = require('../model-settings');
 const { buildLlmHeadersFromConfig } = require('./llm-request');
 const { mergedRequestOptions } = require('./model-api-config');
-const { resolveModelContextWindowFromSettings } = require('./model-runtime-by-tier');
+const {
+  resolveModelContextWindowFromSettings,
+  computeEffectiveInputBudget,
+  MIN_INPUT_BUDGET_TOKENS
+} = require('./model-runtime-by-tier');
 const { MODEL_RUNTIME_DEFAULTS } = require('./model-runtime-presets');
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const { estimateTextTokens } = require('./token-estimate');
@@ -12,7 +16,6 @@ const { recordLlmUsage } = require('./llm-usage-recorder');
 const { buildEstimatedUsageObject, estimatePromptTokensFromMessages } = require('../llm-usage-stats');
 const {
   raceAbortable,
-  createAbortError,
   isAbortError,
   throwIfAborted
 } = require('../llm-reconnect-retry');
@@ -45,9 +48,16 @@ function resolveMaxOutputTokens(settings) {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : MODEL_RUNTIME_DEFAULTS.maxOutputTokens;
 }
 
+/**
+ * 有效输入预算：公式是 model-runtime-by-tier.computeEffectiveInputBudget（Renderer 同调），
+ * 这里只把磁盘 settings 解析成三个 token 数。勿在本文件再写一份减法。
+ */
 function getEffectiveInputBudget(settings, modelRouteOrId) {
-  const cw = resolveEffectiveContextWindow(settings, modelRouteOrId);
-  return Math.max(8192, cw - resolveReserveTokens(settings) - resolveMaxOutputTokens(settings));
+  return computeEffectiveInputBudget({
+    contextWindow: resolveEffectiveContextWindow(settings, modelRouteOrId),
+    maxOutputTokens: resolveMaxOutputTokens(settings),
+    contextReserveTokens: resolveReserveTokens(settings)
+  });
 }
 
 /**
@@ -57,19 +67,21 @@ function getEffectiveInputBudget(settings, modelRouteOrId) {
  *
  * 扣减上限为 base 的 25%：小窗口档本来就放不下完整工具目录，
  * 不能让预算直接塌到地板后变成「每轮误压却压不掉」。
+ * 地板取 MIN_INPUT_BUDGET_TOKENS（= getEffectiveInputBudget 的地板），
+ * 两处必须同值，否则扣减后的预算会反超 base。
  */
 const TOOLS_SCHEMA_DEDUCT_MAX_RATIO = 0.25;
 /** 字符→token 折算系数唯一来源：agent-limits.js（与 Rust compaction/tokens.rs 同值） */
 const CHARS_PER_TOKEN = AGENT_LIMITS_DEFAULTS.charsPerToken;
 
 function applyToolSchemaDeduction(baseBudget, reserveTokens, toolsChars) {
-  const base = Math.max(8192, Number(baseBudget) || 0);
+  const base = Math.max(MIN_INPUT_BUDGET_TOKENS, Number(baseBudget) || 0);
   const chars = Math.max(0, Number(toolsChars) || 0);
   if (!chars) return base;
   const toolsTokens = Math.ceil(chars / CHARS_PER_TOKEN);
   const excess = Math.max(0, toolsTokens - Math.max(0, Number(reserveTokens) || 0));
   const capped = Math.min(excess, Math.floor(base * TOOLS_SCHEMA_DEDUCT_MAX_RATIO));
-  return Math.max(8192, base - capped);
+  return Math.max(MIN_INPUT_BUDGET_TOKENS, base - capped);
 }
 
 function getCompactionTriggerRatio(settings) {

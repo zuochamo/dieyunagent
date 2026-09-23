@@ -34,8 +34,8 @@ function assert(cond, msg) {
 }
 
 // 图片 part 必须按「等效字符」计入预算，而不是按 base64 长度。
-// 否则一张 2MB 的图会被算成约 270 万字符，单张就顶穿 llmRequestMaxChars，
-// 并让 shouldCompactRound 每轮误触发压缩 —— 而图片既不可折叠也不可压缩。
+// 否则一张 2MB 的图会被算成约 270 万字符，单张就顶穿 llmRequestMaxChars
+// 这条长度硬上限、每轮误裁历史 —— 而图片既不可折叠也不可压缩。
 const bigImagePart = {
   type: 'image_url',
   image_url: { url: `data:image/png;base64,${'A'.repeat(2 * 1024 * 1024)}` }

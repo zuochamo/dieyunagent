@@ -39,10 +39,6 @@ const LOOP_START_TIMEOUT_MS = 30000;
 const LOOP_SET_MESSAGES_TIMEOUT_MS = 30000;
 const LOOP_CONTINUE_TIMEOUT_MS = 600000;
 const LOOP_TOOL_RESULTS_TIMEOUT_MS = 300000;
-// 与 session-context 的 completionRecentTurns（24）对齐：低于它就会在
-// 「还保留 24 轮原文」时先按条数触发压缩，多花一次 LLM 调用。
-const COMPACT_AFTER_MESSAGES = 24;
-const COMPACT_CHAR_RATIO = 0.5;
 /**
  * 单轮请求里「图片被上游拒绝」最多自愈几次：第一次按上游给的 `.messages[N].image[M]`
  * 定位丢图，第二次（定位对不上时）丢光本轮全部图并不再注入视觉缓冲。
@@ -57,15 +53,12 @@ function toolsJsonChars(tools) {
   }
 }
 
-function shouldCompactRound({ force, messageCount, chars, charBudget }) {
-  if (force) return true;
-  const charCap =
-    Number(charBudget) > 0 ? Number(charBudget) : AGENT_LIMITS_DEFAULTS.llmRequestMaxChars;
-  const count = Number(messageCount) || 0;
-  const n = Number(chars) || 0;
-  return count > COMPACT_AFTER_MESSAGES || n > Math.floor(charCap * COMPACT_CHAR_RATIO);
-}
-
+/**
+ * 请求长度硬上限（`llmRequestMaxChars`，按字符计）：proxy / 上游的输入长度护栏，
+ * 与「模型 token 窗口 / 压缩触发线」是两件事 —— 是否压缩由 Rust 账本
+ * （触发比 + 冷却轮数）单点决定，这里不做也**不能**做压缩判据。
+ * 历史上曾把本函数的前身当触发线，另写了一份 Node 侧判据与 Rust 分叉，勿再回头。
+ */
 function applyLlmMessageCharCap(body, userData, tierId) {
   if (!body || !Array.isArray(body.messages)) return false;
   let lim = {};
@@ -185,6 +178,16 @@ async function invokeLoopRpc(bridge, method, params, timeoutMs, signal) {
   }
 }
 
+/**
+ * 每轮 need_llm 都无条件问一次压缩（不再做 Node 侧预判）。
+ *
+ * 「是否压缩、是否在冷却」的唯一决策点是 Rust `compaction::maybe_compact`：
+ * 它在 prepare 里按触发比与 compactionRoundCount 判定，未达阈值就直接早退
+ * —— 不调 LLM、不改账本、messages 原样返回，Node 只负责搬运与 set_messages。
+ * 这里删掉的是旧的条数 / 字符比预判：那套口径拿不到真 token 账本，必然会和
+ * Rust 分叉（模型自带窗口、图片等效字符、工具 schema 扣减都会让两边不一致）。
+ * @param {boolean} [force] 溢出兜底：要求 Rust 忽略触发比与冷却强制压一次
+ */
 async function maybeCompactRound({
   compactMessages,
   body,
@@ -194,21 +197,9 @@ async function maybeCompactRound({
   bridge,
   onPhase,
   apiConfig,
-  force,
-  charBudget
+  force
 }) {
   if (!compactMessages || !Array.isArray(body.messages)) return { compacted: false };
-  const chars = (body.messages || []).reduce((n, m) => n + contentCharLen(m && m.content), 0);
-  if (
-    !shouldCompactRound({
-      force,
-      messageCount: body.messages.length,
-      chars,
-      charBudget
-    })
-  ) {
-    return { compacted: false };
-  }
   let cr;
   try {
     cr = await raceAbortable(
@@ -448,12 +439,8 @@ async function fetchLlmRound({
       !isAbortError(err) &&
       (String(frozenPartial.reasoning || '').trim() || String(frozenPartial.content || '').trim())
     ) {
-      onPhase('llm_partial_recovered', {
-        runId,
-        round: llmRound,
-        recoveredReasoning: !!String(frozenPartial.reasoning || '').trim(),
-        recoveredContent: !!String(frozenPartial.content || '').trim()
-      });
+      // 重连耗尽但已收到部分内容：把它当作本轮响应继续走正常通道（llm_response），
+      // 因此不需要额外的「已恢复」事件通知。
       llmResp = mergeMissingReasoning(
         { content: frozenPartial.content || '', reasoning: frozenPartial.reasoning || '', toolCalls: [] },
         frozenPartial
@@ -536,7 +523,10 @@ async function runRustAgentLoop(opts) {
 
   let llmRound = 0;
   let lastCheckpoint = null;
-  let overflowCompacted = false;
+  // 本轮 run 是否已尝试过压缩（成功与否都算）：再次溢出只停不重试，
+  // 否则会每轮空转一次注定失败的压缩。成败与跳过原因单独记下，供停止文案如实说明。
+  let overflowCompactionAttempted = false;
+  let overflowCompaction = null;
   let activeRunId = '';
   let lastAssistantContent = '';
 
@@ -616,18 +606,11 @@ async function runRustAgentLoop(opts) {
           signal,
           bridge,
           onPhase,
-          apiConfig: llm,
-          charBudget: (() => {
-            try {
-              const lim = getAgentLimits(opts.userData, opts.contextTierId) || {};
-              return Math.max(50000, Number(lim.llmRequestMaxChars || 800000) - toolsJsonChars(body.tools));
-            } catch {
-              return Math.max(50000, 800000 - toolsJsonChars(body.tools));
-            }
-          })()
+          apiConfig: llm
         });
         if (compactResult && compactResult.compacted) {
-          overflowCompacted = true;
+          overflowCompactionAttempted = true;
+          overflowCompaction = { compacted: true };
         }
         const imagesSanitized = await capAndSyncLoopMessages(
           body,
@@ -737,11 +720,14 @@ async function runRustAgentLoop(opts) {
           llmResp = await fetchRoundWithImageRepair();
         } catch (err) {
           if (isCancelledRpcError(err)) throw err;
-          if (isContextOverflowError(err) && overflowCompacted) {
-            return await stopForOverflow(phase.runId, { llmError: String(err.message || err) });
+          if (isContextOverflowError(err) && overflowCompactionAttempted) {
+            return await stopForOverflow(phase.runId, {
+              llmError: String(err.message || err),
+              compaction: overflowCompaction
+            });
           }
-          if (isContextOverflowError(err) && !overflowCompacted) {
-            await maybeCompactRound({
+          if (isContextOverflowError(err) && !overflowCompactionAttempted) {
+            const forcedCompaction = await maybeCompactRound({
               compactMessages,
               body,
               llmRound,
@@ -752,7 +738,13 @@ async function runRustAgentLoop(opts) {
               apiConfig: llm,
               force: true
             });
-            overflowCompacted = true;
+            overflowCompactionAttempted = true;
+            // 强制压缩也可能失败（摘要模型报错 / 内容审核拦截）：如实记录，
+            // 停止文案不能声称「已压缩一次」。
+            overflowCompaction = {
+              compacted: !!(forcedCompaction && forcedCompaction.compacted),
+              reason: (forcedCompaction && forcedCompaction.reason) || undefined
+            };
             const retrySanitized = await capAndSyncLoopMessages(
               body,
               phase.runId,
@@ -776,7 +768,10 @@ async function runRustAgentLoop(opts) {
             } catch (retryErr) {
               if (isCancelledRpcError(retryErr)) throw retryErr;
               if (isContextOverflowError(retryErr)) {
-                return await stopForOverflow(phase.runId, { llmError: String(retryErr.message || retryErr) });
+                return await stopForOverflow(phase.runId, {
+                  llmError: String(retryErr.message || retryErr),
+                  compaction: overflowCompaction
+                });
               }
               throw retryErr;
             }
@@ -905,6 +900,5 @@ module.exports = {
   resolveChatUrl,
   normalizeLlmResponse,
   applyResolvedLoopSpec,
-  shouldCompactRound,
   backfillReasoningContent
 };

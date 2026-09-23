@@ -47,7 +47,7 @@ const DEFAULTS = {
   builtinBaseUrl: DEFAULT_BUILTIN_BASE_URL,
   builtinApiKey: DEFAULT_BUILTIN_API_KEY,
   system: '',
-  temperature: 0.3,
+  temperature: PRESET_DEFAULTS.temperature,
   maxTokens: MAX_OUTPUT_TOKENS_DEFAULT,
   maxOutputTokens: MAX_OUTPUT_TOKENS_DEFAULT,
   contextWindow: CONTEXT_WINDOW_DEFAULT,

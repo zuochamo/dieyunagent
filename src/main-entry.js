@@ -760,9 +760,7 @@ app.whenReady().then(async () => {
     getUserDataPath: () => userData,
     getCoreBridge: () => coreBridge,
     getMainCompactionAgent: () => mainCompactionAgent,
-    setMainCompactionAgent: (v) => {
-      mainCompactionAgent = v;
-    },
+    ensureMainCompactionAgent,
     loadModelSettings
   });
 
@@ -778,10 +776,7 @@ app.whenReady().then(async () => {
     getSubagentStore: () => subagentStore,
     getAgentService: () => agentService,
     getWorktreeService: () => worktreeService,
-    getMainCompactionAgent: () => mainCompactionAgent,
-    setMainCompactionAgent: (v) => {
-      mainCompactionAgent = v;
-    },
+    ensureMainCompactionAgent,
     createRustLoopToolBridge,
     resolveAgentRunWorkspacePath,
     workspaceRootPath,

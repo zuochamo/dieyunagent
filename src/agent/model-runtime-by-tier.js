@@ -194,6 +194,32 @@ function inferContextTierFromModelName(modelId) {
 const CONTEXT_WINDOW_FLOOR = 8192;
 
 /**
+ * 输入预算地板。取窗口下限同值：畸形配置（模型自带 8k 窗口 + 档位 16k 输出/预留）
+ * 下「窗口 − 输出 − 预留」会算成负数或 0，此时仍给 8192 而不是塌到 0。
+ * 必须与 compaction-main.applyToolSchemaDeduction 的地板同值，否则「超出预留的工具 schema」
+ * 扣减后预算会反超 base。数字只此一处，两侧共用下面的 computeEffectiveInputBudget。
+ */
+const MIN_INPUT_BUDGET_TOKENS = CONTEXT_WINDOW_FLOOR;
+
+/**
+ * 有效输入预算 = 上下文窗口 − 最大输出 − 系统预留 的**唯一公式来源**。
+ * Renderer（renderer-model-runtime.getEffectiveInputBudget）与 Main
+ * （compaction-main.getEffectiveInputBudget）都委托到这里，各自只负责把 settings 里的三个
+ * token 数解析出来（档位取值 / 模型自带窗口 / 缺省值），不再各写一份减法 ——
+ * 此前两侧地板不同（1024 vs 8192），模型自带 8k 窗口时会算成「UI 显示的预算 ≠ 主进程压缩阈值」。
+ *
+ * 入参由调用方解析为 token 数，本函数不兜默认值；缺省 / 非数值一律按 0 计，靠地板兜住。
+ * @param {{ contextWindow?: number, maxOutputTokens?: number, contextReserveTokens?: number }} [usage]
+ */
+function computeEffectiveInputBudget(usage = {}) {
+  const toTokens = (v) => (Number.isFinite(Number(v)) ? Math.floor(Number(v)) : 0);
+  const windowTokens = toTokens(usage.contextWindow);
+  const outputTokens = Math.max(0, toTokens(usage.maxOutputTokens));
+  const reserveTokens = Math.max(0, toTokens(usage.contextReserveTokens));
+  return Math.max(MIN_INPUT_BUDGET_TOKENS, windowTokens - outputTokens - reserveTokens);
+}
+
+/**
  * 模型名里的「小窗口」线索。8K 档已删除，若名字写明 8k 则按 8192 估算，
  * 避免只落进 16K 档后仍按 16384 申请上下文。
  */
@@ -278,6 +304,9 @@ function resolveContextTierIdFromSettings(settings, modelRouteOrId) {
 
 const api = {
   STORAGE_KEY,
+  CONTEXT_WINDOW_FLOOR,
+  MIN_INPUT_BUDGET_TOKENS,
+  computeEffectiveInputBudget,
   reloadRuntimeByTier,
   getRuntimeValuesForTier,
   getRuntimeOverridesForTier,

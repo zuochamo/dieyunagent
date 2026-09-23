@@ -8,7 +8,7 @@ const {
   mergeIsolatedCards
 } = require('../../agent/live-loop-trace');
 const { createMainPlannerRunner } = require('../../agent/planner-runner-main');
-const { createMainCompactionAgent, getEffectiveInputBudget } = require('../../agent/compaction-main');
+const { getEffectiveInputBudget } = require('../../agent/compaction-main');
 const { summarizeTelemetry } = require('../../agent/tool-telemetry');
 const {
   ensureRunAbortController,
@@ -34,8 +34,7 @@ function registerAgentRuntimeIpc(ctx) {
     getSubagentStore,
     getAgentService,
     getWorktreeService,
-    getMainCompactionAgent,
-    setMainCompactionAgent,
+    ensureMainCompactionAgent,
     createRustLoopToolBridge,
     resolveAgentRunWorkspacePath,
     workspaceRootPath,
@@ -69,12 +68,6 @@ function registerAgentRuntimeIpc(ctx) {
     },
     get worktreeService() {
       return getWorktreeService();
-    },
-    get mainCompactionAgent() {
-      return getMainCompactionAgent();
-    },
-    set mainCompactionAgent(v) {
-      setMainCompactionAgent(v);
     },
     createRustLoopToolBridge,
     resolveAgentRunWorkspacePath,
@@ -226,9 +219,8 @@ function registerAgentRuntimeIpc(ctx) {
       if (!startParams.workspaceRoot && workspacePath) {
         startParams.workspaceRoot = workspacePath;
       }
-      if (!live.mainCompactionAgent) {
-        live.mainCompactionAgent = createMainCompactionAgent(live.userData, live.coreBridge);
-      }
+      // 压缩实例唯一创建入口在 main-entry（单例，与 IPC 预检 / planner 共用）；这里只取用
+      const mainCompactionAgent = ensureMainCompactionAgent();
       const sessionModel =
         payload.model ||
         startParams.model ||
@@ -421,7 +413,7 @@ function registerAgentRuntimeIpc(ctx) {
           sendPhase(phase, data);
         },
         compactMessages: async (messages, ctx) => {
-          const cr = await live.mainCompactionAgent.maybeCompactMessages(messages, {
+          const cr = await mainCompactionAgent.maybeCompactMessages(messages, {
             tokenBudget,
             apiConfig: apiCfg,
             model: sessionModel,
@@ -576,6 +568,8 @@ function registerAgentRuntimeIpc(ctx) {
   });
 
   const mainPlannerRunner = createMainPlannerRunner({
+    // 压缩实例与对话链路共用 Main 单例（延迟取：注册时可能尚未创建）
+    getCompactionAgent: () => ensureMainCompactionAgent(),
     coreBridge: live.coreBridge,
     coordinator: live.agentCoordinator,
     worktreeService: live.worktreeService,

@@ -10,8 +10,8 @@ const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
  *
  * 图片在真实请求里由服务端换算成「图片 token」，与 base64 长度无关。
  * 若按 JSON.stringify(part).length 计（一张 1MB 图 ≈ 140 万字符），单张图就会顶穿
- * llmRequestMaxChars，并让 shouldCompactRound 从第一轮起就误触发压缩；而图片既不可
- * 折叠（当前任务永不折叠）又不可压缩，于是变成「反复花模型调用去压一个压不掉的东西」。
+ * llmRequestMaxChars 这条长度硬上限，使历史从第一轮起就被反复裁；而图片既不可
+ * 折叠（当前任务永不折叠）又不可压缩，于是变成「每轮都在裁一个裁不掉的东西」。
  */
 function visionPartEquivChars() {
   const n = Number(AGENT_LIMITS_DEFAULTS.visionPartEqChars);

@@ -3,6 +3,14 @@
 
 var modelSettingsApi = window.diecloud || {};
 
+/**
+ * 档位默认值的唯一来源：agent-bundle.js 暴露的 window.DieyunModelRuntimePresets
+ * （index.html 里 agent-bundle 先于本文件加载）。与 Main 侧 src/model-settings.js 的
+ * PRESET_DEFAULTS 同源，本文件不再各写一份数字 —— 否则「默认档位」改一次要改两处，
+ * UI 侧预算与触发比会重新和主进程分叉。
+ */
+var PRESET_DEFAULTS = window.DieyunModelRuntimePresets.MODEL_RUNTIME_DEFAULTS;
+
 var REMOVED_BUILTIN_BASE_URLS = new Set(['http://192.168.31.127:30001/v1']);
 var DEFAULT_BUILTIN_BASE_URL = '';
 var DEFAULT_BUILTIN_API_KEY = '';
@@ -54,14 +62,14 @@ var DEFAULTS = {
   // 身份/人设的唯一来源是 ~/.dieyun/dieyun.md（模板 assets/dieyun.md）与
   // dieyun-instructions.js 的 ASSISTANT_IDENTITY；这里不再放一份内置人设。
   system: '',
-  temperature: 0.3,
-  maxTokens: 16384,
-  maxOutputTokens: 16384,
-  contextWindow: 128000,
-  contextReserveTokens: 16384,
-  compactionTriggerRatio: 0.85,
-  agentToolCallLimit: 200,
-  agentMaxRounds: 96,
+  temperature: PRESET_DEFAULTS.temperature,
+  maxTokens: PRESET_DEFAULTS.maxOutputTokens,
+  maxOutputTokens: PRESET_DEFAULTS.maxOutputTokens,
+  contextWindow: PRESET_DEFAULTS.contextWindow,
+  contextReserveTokens: PRESET_DEFAULTS.contextReserveTokens,
+  compactionTriggerRatio: PRESET_DEFAULTS.compactionTriggerRatio,
+  agentToolCallLimit: PRESET_DEFAULTS.agentToolCallLimit,
+  agentMaxRounds: PRESET_DEFAULTS.agentMaxRounds,
   embeddingEnabled: true,
   embeddingBaseUrl: '',
   embeddingApiKey: '',
@@ -283,10 +291,20 @@ function getContextReserveTokens(s) {
   );
 }
 
+/**
+ * 有效输入预算：公式的唯一来源是 src/agent/model-runtime-by-tier.js 的
+ * computeEffectiveInputBudget（Main 的 compaction-main.getEffectiveInputBudget 同调同一函数，
+ * 由 agent-bundle.js 暴露为 window.DieyunModelRuntimeByTier，先于本文件加载）。
+ * 本文件只负责把当前档位设置解析成三个 token 数，勿在这里再写一份减法 ——
+ * 此前本地地板 1024 与主进程 8192 不一致，模型自带 8k 窗口时两侧预算会分叉。
+ */
 function getEffectiveInputBudget(s) {
   const src = s != null ? s : getActiveRuntimeSettings();
-  const budget = getContextWindowTokens(src) - getMaxOutputTokens(src) - getContextReserveTokens(src);
-  return Math.max(1024, Math.floor(budget));
+  return window.DieyunModelRuntimeByTier.computeEffectiveInputBudget({
+    contextWindow: getContextWindowTokens(src),
+    maxOutputTokens: getMaxOutputTokens(src),
+    contextReserveTokens: getContextReserveTokens(src)
+  });
 }
 
 function getCompactionTriggerRatio(s) {

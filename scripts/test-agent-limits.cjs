@@ -128,7 +128,9 @@ const {
   inferContextTierFromModelName,
   inferContextWindowFromModelName,
   resolveModelContextWindowFromSettings,
-  normalizeContextTierId
+  normalizeContextTierId,
+  computeEffectiveInputBudget,
+  MIN_INPUT_BUDGET_TOKENS
 } = require('../src/agent/model-runtime-by-tier');
 
 const presetIds = MODEL_RUNTIME_PRESETS.map((p) => p.id);
@@ -198,5 +200,52 @@ assert(
   'builtin per-model tier wins'
 );
 assert(inferContextTierFromModelName('gpt-4o') === 'ctx-128k', 'gpt-4o 128k');
+
+// —— 输入预算：公式单一来源（Renderer / Main 共用 computeEffectiveInputBudget）——
+assert(MIN_INPUT_BUDGET_TOKENS === 8192, 'input budget floor single-sourced at 8192');
+assert(
+  computeEffectiveInputBudget({ contextWindow: 128000, maxOutputTokens: 16384, contextReserveTokens: 16384 }) ===
+    95232,
+  'budget = window - output - reserve'
+);
+assert(
+  computeEffectiveInputBudget({ contextWindow: 16384, maxOutputTokens: 4096, contextReserveTokens: 4096 }) === 8192,
+  '16k tier budget floor'
+);
+assert(
+  computeEffectiveInputBudget({ contextWindow: 8192, maxOutputTokens: 16384, contextReserveTokens: 16384 }) ===
+    MIN_INPUT_BUDGET_TOKENS,
+  'degenerate config (model window < tier output/reserve) floors instead of going negative'
+);
+assert(
+  computeEffectiveInputBudget({ contextWindow: 20000, maxOutputTokens: 10000, contextReserveTokens: 15000 }) ===
+    MIN_INPUT_BUDGET_TOKENS,
+  'oversized reserve floors at the same place as the renderer clamp'
+);
+assert(
+  computeEffectiveInputBudget({ contextWindow: 128000, contextReserveTokens: 0 }) === 128000,
+  'explicit zero reserve is honored'
+);
+
+// Main 侧解析器必须与共享公式同值（此前 Main 地板 8192 / Renderer 1024 会分叉）
+const { getEffectiveInputBudget: mainEffectiveInputBudget } = require('../src/agent/compaction-main');
+const tierSettings = { contextWindow: 128000, maxOutputTokens: 16384, contextReserveTokens: 16384 };
+assert(
+  mainEffectiveInputBudget(tierSettings, 'foo') ===
+    computeEffectiveInputBudget({
+      contextWindow: 128000,
+      maxOutputTokens: 16384,
+      contextReserveTokens: 16384
+    }),
+  'main resolves tier settings through the shared budget formula'
+);
+const selfWindowSettings = {
+  ...tierSettings,
+  customModels: [{ id: 'm1', name: 'relay-8k', contextWindow: 8192 }]
+};
+assert(
+  mainEffectiveInputBudget(selfWindowSettings, 'custom:m1') === MIN_INPUT_BUDGET_TOKENS,
+  'main floors a self-declared 8k window to the shared budget floor'
+);
 
 console.log('test-agent-limits.cjs ok');

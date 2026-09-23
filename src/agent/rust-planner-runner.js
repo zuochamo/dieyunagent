@@ -23,7 +23,7 @@ const { SUBAGENT_TOOL } = require('./tool-catalog');
 const { createSubagentRunner } = require('./subagent-runner');
 const { runRustAgentLoop, resolveChatUrl } = require('./rust-loop-runner');
 const { buildLlmHeadersFromConfig } = require('./llm-request');
-const { createMainCompactionAgent, getEffectiveInputBudget } = require('./compaction-main');
+const { getEffectiveInputBudget } = require('./compaction-main');
 const { stripToolCallMarkup } = require('../llm-tool-call-fallback');
 const {
   LONG_HORIZON_MAX_SEGMENTS,
@@ -255,7 +255,12 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   const started = agentBridge.runStart({ userText: String(payload.userText || '').slice(0, 500) });
   if (started?.runId) coordinatorRunId = started.runId;
 
-  const compactionAgent = createMainCompactionAgent(deps.userData, deps.coreBridge);
+  // 压缩实例的唯一来源是 Main（main-entry.ensureMainCompactionAgent）。planner 若自建实例，
+  // 会话冷却计数与累积摘要缓存只活在本轮 run 内 —— 等于每次都绕过冷却、每次重新拉归档。
+  const compactionAgent = deps.getCompactionAgent ? deps.getCompactionAgent() : null;
+  if (!compactionAgent) {
+    throw new Error('planner 缺少 getCompactionAgent 注入，压缩实例必须由 Main 提供');
+  }
   const tokenBudget = getEffectiveInputBudget(settings, payload.model || settings.textModel);
   const toolBridge = deps.createToolBridge(opts.webContents);
 

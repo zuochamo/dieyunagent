@@ -10,7 +10,6 @@ const {
   resolveChatUrl,
   normalizeLlmResponse,
   applyResolvedLoopSpec,
-  shouldCompactRound,
   backfillReasoningContent
 } = require('../src/agent/rust-loop-runner');
 const { REASONING_PLACEHOLDER } = require('../src/agent/reasoning-backfill');
@@ -55,27 +54,6 @@ async function expectAbort(promise) {
   } catch (err) {
     assert(err && err.name === 'AbortError', `expected AbortError, got ${err && err.name}: ${err && err.message}`);
   }
-}
-
-function testShouldCompactRound() {
-  assert(
-    !shouldCompactRound({ force: false, messageCount: 3, chars: 1000, charBudget: 800000 }),
-    'short first round stays uncompressed'
-  );
-  assert(
-    shouldCompactRound({ force: false, messageCount: 3, chars: 500000, charBudget: 800000 }),
-    'heavy first round compact even at llmRound 0'
-  );
-  assert(shouldCompactRound({ force: true, messageCount: 2, chars: 10, charBudget: 800000 }), 'force compact');
-  // 门槛与 completionRecentTurns(24) 对齐：12 条不再触发，25 条才触发
-  assert(
-    !shouldCompactRound({ force: false, messageCount: 13, chars: 10, charBudget: 800000 }),
-    '13 messages stays uncompressed'
-  );
-  assert(
-    shouldCompactRound({ force: false, messageCount: 25, chars: 10, charBudget: 800000 }),
-    'compact after 24 messages'
-  );
 }
 
 function testApplyResolvedLoopSpec() {
@@ -295,34 +273,44 @@ async function testCompactSkippedResultContinuesLoop() {
   assert(phases.includes('compact_skipped'), 'skipped result emits phase');
 }
 
-async function testSkipCompactOnShortFirstRound() {
-  let compactCalled = false;
+/**
+ * 短首轮同样必须问 Rust：Node 侧不再有「条数 / 字符比」预判。
+ * Rust 未达触发线时的早退形态 = compacted:false + 原样 messages，
+ * 此时不得回写账本（否则每轮都会多一次无意义的 set_messages）。
+ */
+async function testShortRoundStillAsksRust() {
+  const short = [
+    { role: 'system', content: 's' },
+    { role: 'user', content: 'u' }
+  ];
+  let compactCalls = 0;
   const bridge = createFakeBridge({
     'agent.loop.start': async () => ({
       runId: 'run-s',
       phase: 'need_llm',
-      llmBody: {
-        model: 'm',
-        messages: [
-          { role: 'system', content: 's' },
-          { role: 'user', content: 'u' }
-        ]
-      }
+      llmBody: { model: 'm', messages: short }
     }),
     'agent.loop.continue': async () => ({ runId: 'run-s', phase: 'done', content: 'ok' })
   });
+  const phases = [];
   await runRustAgentLoop({
     coreBridge: bridge,
     llm: { baseUrl: 'https://example/v1' },
     startParams: { model: 'm' },
     loopSpec: loopSpec(),
+    onPhase: (p) => phases.push(p),
     compactMessages: async () => {
-      compactCalled = true;
-      return { compacted: true, messages: [] };
+      compactCalls += 1;
+      return { compacted: false, messages: short };
     },
     fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
   });
-  assert(!compactCalled, 'first short round does not compact');
+  assert(compactCalls === 1, 'need_llm 每轮都必须委托 Rust 判断，Node 不再预判');
+  assert(!phases.includes('compacted'), 'Rust 未压缩就不该有 compacted phase');
+  assert(
+    !bridge.invokes.some((i) => i.method === 'agent.loop.set_messages'),
+    'Rust 早退（compacted:false）时不得回写账本'
+  );
 }
 
 async function testDelegateRound() {
@@ -546,12 +534,11 @@ async function testVisionSurvivesOverflowRetry() {
     loopSpec: loopSpec(),
     browserVision: true,
     onPhase: (p) => phases.push(p),
-    compactMessages: async (msgs) => ({
-      compacted: true,
-      messages: msgs.slice(0, 1),
-      tokensBefore: 90,
-      tokensAfter: 10
-    }),
+    // 复刻 Rust 语义：未达触发线时早退（compacted:false，原样返回），只有溢出兜底 force 才真压。
+    compactMessages: async (msgs, ctx) => {
+      if (!ctx || !ctx.force) return { compacted: false, messages: msgs };
+      return { compacted: true, messages: msgs.slice(0, 1), tokensBefore: 90, tokensAfter: 10 };
+    },
     fetchLlmOnce: async ({ body }) => {
       llmCalls += 1;
       seenBodies.push(body.messages);
@@ -1246,7 +1233,6 @@ function testBackfillReasoningContent() {
 
 async function run() {
   testApplyResolvedLoopSpec();
-  testShouldCompactRound();
   testResolveChatUrl();
   testNormalizeLlmResponse();
   testBackfillReasoningContent();
@@ -1255,7 +1241,7 @@ async function run() {
   await testCompactThenContinue();
   await testCompactTimeoutContinuesLoop();
   await testCompactSkippedResultContinuesLoop();
-  await testSkipCompactOnShortFirstRound();
+  await testShortRoundStillAsksRust();
   await testDelegateRound();
   await testBrowserVisionInjection();
   await testVisionSurvivesOverflowRetry();

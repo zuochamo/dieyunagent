@@ -761,11 +761,15 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             notifyRustProgress(displayedTrace, liveContent, { immediate: true });
           } else if (ev.phase === 'turn_overflow_stopped') {
             notifyRustProgress(displayedTrace, liveContent, { immediate: true });
-            showAgentToast(
-              '本轮已停止',
-              '上下文仍超限（已压缩一次）。思考已保留，可新开对话或缩短历史后再试。',
-              { variant: 'warn' }
-            );
+            // 压缩可能失败（摘要模型报错 / 内容审核拦截）：文案如实说明，不谎称「已压缩一次」
+            const overflowCompaction = (ev.data && ev.data.compaction) || null;
+            let overflowDetail = '上下文仍超限（已压缩一次）。思考已保留，可新开对话或缩短历史后再试。';
+            if (overflowCompaction && overflowCompaction.compacted === false) {
+              const why =
+                overflowCompaction.reason === 'content_policy' ? '压缩被内容审核拦截' : '压缩未能完成';
+              overflowDetail = `上下文仍超限（${why}）。思考已保留，可新开对话或缩短历史后再试。`;
+            }
+            showAgentToast('本轮已停止', overflowDetail, { variant: 'warn' });
           } else if (ev.phase === 'compacted') {
             const compactCr = {
               tokensBefore: ev.data && ev.data.tokensBefore,
@@ -885,7 +889,6 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             const live = displayedTrace[displayedTrace.length - 1];
             pushLive(live?.thought || '…', fr?.tools || live?.tools || []);
           } else if (ev.phase === 'llm_reconnect_wait') {
-            clearLlmWaitTimer();
             const waitData = ev.data || {};
             const sec = Math.max(1, Math.round((waitData.waitMs || 0) / 1000));
             const remainMin = waitData.remainingMs > 0 ? Math.ceil(waitData.remainingMs / 60000) : 0;
@@ -894,11 +897,12 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
               const live = displayedTrace[displayedTrace.length - 1];
               freezeLiveWithTools((live && live.tools) || []);
             }
-            pushLive(
-              `连接中断，${sec}s 后自动重试（第 ${waitData.attempt || 1} 次${budgetNote}）…`,
-              [],
-              '等待模型连接恢复，恢复后将从当前进度继续…'
-            );
+            // 等待期间不熄心跳：此前 clearLlmWaitTimer 会把 trace 冻在「Ns 后自动重试」这句
+            // 固定文案上，单次退避可达 60s，长等待看起来就是 UI 卡死。交给 startLlmWaitTimer
+            // 与 llm_request 同一处续写「（已等 Ns）」，精确的 Ns 预计只留在 toast（一次性快照）。
+            const waitLabel = `连接中断，等待第 ${waitData.attempt || 1} 次自动重试${budgetNote}`;
+            pushLive(waitLabel, [], '等待模型连接恢复，恢复后将从当前进度继续…');
+            startLlmWaitTimer(waitLabel);
             maybeShowLlmReconnectToast(
               '模型连接中断',
               `${sec}s 后自动重试${budgetNote}，无需手动点「继续」`,

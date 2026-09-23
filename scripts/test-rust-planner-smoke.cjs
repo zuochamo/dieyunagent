@@ -7,6 +7,7 @@ const { resolveDieyunCoreBinary } = require('../src/core-bridge-path');
 const { createMockGateway } = require('./lib/test-gateway-mock.cjs');
 const { createMainToolBridge } = require('../src/agent/tool-bridge-main');
 const { runRustPlannerPipeline } = require('../src/agent/rust-planner-runner');
+const { createMainCompactionAgent } = require('../src/agent/compaction-main');
 const { loadModelSettings } = require('../src/model-settings');
 const { AgentRunCoordinator } = require('../src/agent/coordinator');
 const worktreeService = require('../src/git/worktree-service');
@@ -130,6 +131,8 @@ async function main() {
       dieyunHome,
       workspaceRootPath: () => workspace,
       localGateway: { getWorkspace: () => ({ kind: 'local', workspacePath: workspace }) },
+      // 生产环境由 main-entry 的单例提供；planner 不再自建，故此处显式注入同一契约
+      getCompactionAgent: () => createMainCompactionAgent(userData, bridge),
       userData,
       createToolBridge: () => createMainToolBridge({ gateway: testGw, webContents: null })
     },

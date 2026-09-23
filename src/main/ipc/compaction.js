@@ -1,6 +1,6 @@
 'use strict';
 
-const { createMainCompactionAgent, getEffectiveInputBudget } = require('../../agent/compaction-main');
+const { getEffectiveInputBudget } = require('../../agent/compaction-main');
 
 /**
  * @param {object} ctx
@@ -11,18 +11,10 @@ function registerCompactionIpc(ctx) {
     getUserDataPath,
     getCoreBridge,
     getMainCompactionAgent,
-    setMainCompactionAgent,
+    // 压缩实例的唯一创建入口（main-entry 单例）；本模块不再自建，避免出现第二个实例
+    ensureMainCompactionAgent,
     loadModelSettings
   } = ctx;
-
-  function ensureMainCompactionAgent() {
-    let agent = getMainCompactionAgent();
-    if (!agent) {
-      agent = createMainCompactionAgent(getUserDataPath(), getCoreBridge());
-      setMainCompactionAgent(agent);
-    }
-    return agent;
-  }
 
   ipcMain.handle('compaction:maybe-compact', async (_evt, payload = {}) => {
     const agent = ensureMainCompactionAgent();

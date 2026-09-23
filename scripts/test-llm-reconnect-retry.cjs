@@ -116,6 +116,35 @@ async function testQuotaNotRetried() {
   assert(!isTransientLlmError({ message: 'HTTP 429 insufficient_quota', statusCode: 429 }), 'quota not transient');
 }
 
+/** 瞬时判定必须认「网络信号」，不能认「只要是 TypeError」（本地代码缺陷同为 TypeError） */
+function testTransientErrorShape() {
+  const netErr = new TypeError('fetch failed');
+  netErr.cause = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+  assert(isTransientLlmError(netErr), 'fetch failed + ECONNREFUSED is transient');
+
+  const undiciErr = new TypeError('fetch failed');
+  undiciErr.cause = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' });
+  assert(isTransientLlmError(undiciErr), 'undici socket code is transient');
+
+  assert(isTransientLlmError(new TypeError('Failed to fetch')), 'browser failed to fetch is transient');
+
+  const timeoutErr = new TypeError('fetch failed');
+  timeoutErr.cause = Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' });
+  assert(isTransientLlmError(timeoutErr), 'ETIMEDOUT is transient');
+
+  assert(isTransientLlmError({ message: 'socket hang up' }), 'socket hang up is transient');
+
+  assert(
+    !isTransientLlmError(new TypeError('cannot read properties of undefined')),
+    'local TypeError must fail fast, not retry for 30min'
+  );
+  assert(!isTransientLlmError(Object.assign(new Error('bad handler'), { code: 'ERR_INVALID_ARG_TYPE' })), 'arg error not transient');
+
+  const aborted = new Error('已停止');
+  aborted.name = 'AbortError';
+  assert(!isTransientLlmError(aborted), 'abort is never transient');
+}
+
 function testOverflowAndWait() {
   assert(isContextOverflowError({ message: 'prompt is too long' }), 'overflow detect');
   assert(isContextOverflowError({ message: 'HTTP 400 context_length_exceeded' }), 'context_length');
@@ -135,6 +164,7 @@ function testOverflowAndWait() {
 
 async function main() {
   testOverflowAndWait();
+  testTransientErrorShape();
   await testRetryBudget();
   await testTimeBudgetIgnoresRetryCap();
   await testTinyBudgetDoesNotIdle();

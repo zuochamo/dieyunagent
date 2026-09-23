@@ -6,11 +6,14 @@
  */
 const ENV = typeof process !== 'undefined' && process.env ? process.env : {};
 
-const LLM_RECONNECT_SHORT_ATTEMPTS = 3;
 const LLM_RECONNECT_SHORT_BASE_MS = 800;
 /** 单次采样重试次数（不含首次）。可用 LLM_RECONNECT_MAX_RETRIES 覆盖。 */
 const LLM_RECONNECT_MAX_RETRIES = Number(ENV.LLM_RECONNECT_MAX_RETRIES) || 3;
-/** 单次退避上限（对齐 Pi Retry-After cap）。 */
+/**
+ * 单次退避上限（指数退避封顶）。
+ * 注意：上游 `Retry-After` 目前**未**参与退避计算，此处不再是它的实现处，
+ * 若将来要尊重该头，改动点就在 resolveRetryWaitMs 的调用方。
+ */
 const LLM_RECONNECT_MAX_DELAY_MS = 60 * 1000;
 /**
  * 未显式传 maxWaitMs 时的墙钟上限兜底（0 = 走次数模式）。
@@ -175,6 +178,19 @@ function isContextOverflowError(err) {
   );
 }
 
+/**
+ * 网络类 errno / undici 错误码（含 cause 链）：「这是网络故障」最可靠的结构信号。
+ * 比 `err instanceof TypeError` 精确 —— 本地代码缺陷（如 undefined.foo）同样是 TypeError，
+ * 但它重试 30 分钟也不会成功，理应立刻暴露。
+ */
+const NETWORK_ERRNO_RE = /^(E(?:CONN|NOTFOUND|TIMEDOUT|AI|PIPE|HOST|NET)|UND_ERR_)/;
+function hasNetworkErrno(err) {
+  for (let cur = err; cur; cur = cur.cause) {
+    if (typeof cur.code === 'string' && NETWORK_ERRNO_RE.test(cur.code.toUpperCase())) return true;
+  }
+  return false;
+}
+
 function isTransientLlmError(err) {
   if (!err || isAbortError(err)) return false;
   if (err.code === 'LLM_RECONNECT_EXHAUSTED') return false;
@@ -182,8 +198,9 @@ function isTransientLlmError(err) {
   const msg = String(err.message || err).toLowerCase();
   const status = parseHttpStatus(err);
   if (status === 429 || status === 502 || status === 503 || status === 504) return true;
+  if (hasNetworkErrno(err)) return true;
   return (
-    err instanceof TypeError ||
+    msg.includes('fetch failed') ||
     msg.includes('network error') ||
     msg.includes('failed to fetch') ||
     msg.includes('network request failed') ||
@@ -290,6 +307,5 @@ module.exports = {
   resolveRetryWaitMs,
   LLM_RECONNECT_MAX_WAIT_MS,
   LLM_RECONNECT_MAX_RETRIES,
-  LLM_RECONNECT_SHORT_ATTEMPTS,
   LLM_RECONNECT_MAX_DELAY_MS
 };
