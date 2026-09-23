@@ -3,7 +3,7 @@
 > 用途：定期 review「随模型换代 / 需求变化而腐坏」的资产，决定保留、改配置、还是删除。
 > 口径：**精确** = 可逐个枚举；**近似** = grep 调用点计数（含多义命中）。
 > 生成方式：逐文件通读 + 行号核对。改动相关代码后请同步更新本文件。
-> 相关：`AGENTS.md`（第一原则：禁用意图关键词硬编码）、`docs/AGENT-DEV.md`、`docs/AGENT-STRATEGY.md`。
+> 相关：`AGENTS.md`（禁用意图关键词硬编码）、`docs/AGENT-DEV.md`、`docs/AGENT-STRATEGY.md`。
 
 ---
 
@@ -24,7 +24,7 @@
 
 **三条结论**：
 1. 数量最大的两块是**数字上限**和**正则**，两者都集中在少数几个文件（见各节）。
-2. 按 `AGENTS.md` 第一原则要求，**“用固定词表判断用户查询意图 / 是否注入上下文”已实现清零**，改造为结构信号。
+2. 按 `AGENTS.md` 的意图关键词硬编码禁令要求，**“用固定词表判断用户查询意图 / 是否注入上下文”已实现清零**，改造为结构信号。
 3. 最需要 review 的不是“多”，而是**重复定义**（§C）与**兼容垫片**（§D）。§C 的 11 项已于本轮清零；剩 §D 的兼容垫片待观察使用率。
 
 ---
@@ -58,7 +58,7 @@
 | LLM 重试 | `streamRoundMaxAttempts` `llmRetryBaseMs` `llmReconnectMaxWaitMs` `llmFirstTokenTimeoutMs` `llmStreamIdleTimeoutMs` `synthesisTimeoutMs` `synthesisReconnectMaxWaitMs` |
 | 编辑器/Diff | `maxUndoSteps` `editorSelectionMax` `editorVisibleLines` `maxDiffChars` `diffFullTextCap` `chatImagePreviewMaxMb` `attachmentRetentionMaxMb` `attachmentDownsampleMaxPx` `attachmentDownsampleMinKb` |
 
-> **本文件是数字上限的唯一合法改动点**（`AGENTS.md` 原则 5）。除下面 A1.2 的“模块内局部阈值”外，其余文件的数字应尽量改为读这里。
+> **本文件是数字上限的唯一合法改动点**（`AGENTS.md` 原则 6）。除下面 A1.2 的“模块内局部阈值”外，其余文件的数字应尽量改为读这里。
 > 例外：`visionPartEqChars` 是上下文账本的折算系数（非策略上限），故意不上设置页 —— `contentCharLen` 没有 tier 上下文、只读全局默认值，做成可调项会「改了不生效」。
 > 同类例外：`charsPerToken`(3.2) / `cjkCharsPerToken`(1.5) 也是折算系数，唯一来源在本文件，renderer 侧经 `window.CHARS_PER_TOKEN` / `window.CJK_CHARS_PER_TOKEN` 消费；Rust 同值见 `crates/dieyun-core/src/compaction/tokens.rs`。
 
@@ -466,4 +466,4 @@
 1. 本文件行号会随代码漂移，**改动 `agent-limits.js` / `agent-system-prompt.js` / `guardrails-shared.js` / `planner/prompts.rs` 时应同步更新**。
 2. 新增硬编码规则前先问：能否改为 `agent-limits.js` 配置？能否用结构信号替代词表？
 3. 新增 prompt 前先搜 §B 是否已有同类实现，避免加重 §C 的重复。
-4. 数字上限**只改** `agent-limits.js`（`AGENTS.md` 原则 5）。
+4. 数字上限**只改** `agent-limits.js`（`AGENTS.md` 原则 6）。

@@ -5,12 +5,13 @@
 ## 原则
 
 1. **架构优先**：以「单一来源、消除重复实现、职责分层清晰」为设计目标；**不为最小 diff 而保留重复实现或错误职责**。改动仍聚焦任务本身，避免任务无关的顺手重构与无限扩 scope。
-2. **禁用意图关键词硬编码**：勿用固定中英文词表 / 寒暄正则决定「是否注入上下文、切 AGENTS 章节、是否触发索引」等路由；优先结构信号（`@Codebase`、消息内路径、编辑器选区）、召回是否命中、或 `agent-limits` 配置。对用户查询做动态分词打分（FTS/向量）不属于本禁令。
-3. **分层边界**：Renderer 做 UI；**对话 LLM 与工具执行在 Main/Node**；Rust `dieyun-core` 做循环账本、planner、memory、index、compaction。工具走 Gateway RPC。勿在 Rust 循环里堆「工头」协议，勿在 Renderer 写长期 Agent 状态机。
-4. **循环哲学（对齐 PI harness，不整仓替换）**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status` 状态机、假用户续跑、按只读步数/同文件读取/只计划逼写入。**交付四态**（`agent-round-text.resolveTurnDelivery` 单一来源）：有正文就交付；预算截断且只有思考 → 带标签思考引用（仅展示，落库换占位）；正常收尾无正文才 synthesis，且在 Node `rust-loop-runner`，Renderer 只展示。**思考永不顶正文**：只进 `messages.reasoning`（与 content 分列）。完成验收只提示、不自动续跑、不挡交付。
-5. **护栏单一来源**：数字上限只改 `src/agent/agent-limits.js`；工具拦截常量/逻辑在 `src/agent/guardrails-shared.js`（Main `tool-guardrails.js` + Renderer `agent-guardrails.js` 共用）。
-6. **不提交**：密钥、`deploy.local.json`、`.env`、`dist/`、`release/`（除文档说明的备份策略）。
-7. **验证**：改完跑 `npm test`（按 diff 选测）或 `npm run test:agent`（全量 smoke）。
+2. **减法优先（默认解法方向）**：排查与出方案时先问「能不能不做 / 能不能删 / 能不能收敛到既有单一来源」，再问「要加什么」。禁止用新增机制掩盖根因 —— **降级层、兜底层、重试层、开关、配置项、状态机**若只是「绕过」失败而非「消除」失败，即属加法反模式。任何新增的分支 / 机制 / 配置字段，方案里必须写明「为何删不掉、为何不能并入既有单一来源」；写不出来就回到减法。仅当根因位于本仓不可控的外部系统、且加法位置本身就是唯一来源时，才允许加。
+3. **禁用意图关键词硬编码**：勿用固定中英文词表 / 寒暄正则决定「是否注入上下文、切 AGENTS 章节、是否触发索引」等路由；优先结构信号（`@Codebase`、消息内路径、编辑器选区）、召回是否命中、或 `agent-limits` 配置。对用户查询做动态分词打分（FTS/向量）不属于本禁令。
+4. **分层边界**：Renderer 做 UI；**对话 LLM 与工具执行在 Main/Node**；Rust `dieyun-core` 做循环账本、planner、memory、index、compaction。工具走 Gateway RPC。勿在 Rust 循环里堆「工头」协议，勿在 Renderer 写长期 Agent 状态机。
+5. **循环哲学（对齐 PI harness，不整仓替换）**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status` 状态机、假用户续跑、按只读步数/同文件读取/只计划逼写入。**交付四态**（`agent-round-text.resolveTurnDelivery` 单一来源）：有正文就交付；预算截断且只有思考 → 带标签思考引用（仅展示，落库换占位）；正常收尾无正文才 synthesis，且在 Node `rust-loop-runner`，Renderer 只展示。**思考永不顶正文**：只进 `messages.reasoning`（与 content 分列）。完成验收只提示、不自动续跑、不挡交付。
+6. **护栏单一来源**：数字上限只改 `src/agent/agent-limits.js`；工具拦截常量/逻辑在 `src/agent/guardrails-shared.js`（Main `tool-guardrails.js` + Renderer `agent-guardrails.js` 共用）。
+7. **不提交**：密钥、`deploy.local.json`、`.env`、`dist/`、`release/`（除文档说明的备份策略）。
+8. **验证**：改完跑 `npm test`（按 diff 选测）或 `npm run test:agent`（全量 smoke）。
 
 详细速查见 [`docs/AGENT-DEV.md`](docs/AGENT-DEV.md)。模块机器可读索引见 [`docs/CODEMAP.json`](docs/CODEMAP.json)。
 
