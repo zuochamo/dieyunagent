@@ -749,15 +749,16 @@ const BROWSER_TOOLS = [
     function: {
       name: 'browser_visual_diff',
       description:
-        '视觉回归验收：把当前页面（或元素）截图与基准图逐像素比较，返回变化比例并输出 diff 图（不进模型上下文）。首次调用创建基准，再次调用即比较。硬约束：只有同引擎 + 同视口才有可比性，跨引擎会被直接拒绝。',
+        '视觉回归验收：把当前页面（或元素）截图与基准图逐像素比较，返回变化比例并输出 diff 图（不进模型上下文）。首次调用创建基准，再次调用即比较。基准文件名会带上引擎标记，所以不同引擎各有一份基准、不会互相覆盖（跨引擎比较无从发生）；比较只在「同引擎 + 同视口」下才有意义，换了视口会判为尺寸变化而不做逐像素比较。',
       parameters: {
         type: 'object',
         properties: {
           baselinePath: {
             type: 'string',
-            description: '基准图路径；省略时按 引擎+目标 自动取稳定文件名（同目标多次调用比的是同一张）'
+            description:
+              '基准图路径；会按引擎自动加标记（base.png → base.browserview.png），已带标记的路径原样使用 —— 把上次返回的路径传回即可。省略时按目标生成稳定文件名落在工作区，保证同目标多次调用比的是同一张'
           },
-          filePath: { type: 'string', description: 'diff 图保存路径；省略时存到系统下载目录' },
+          filePath: { type: 'string', description: 'diff 图保存路径；省略时落到默认产物目录' },
           ref: REF_PARAM_SCHEMA,
           selector: { type: 'string', description: '只比较该元素（CSS 选择器）' },
           threshold: {

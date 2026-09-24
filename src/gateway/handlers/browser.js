@@ -1,5 +1,11 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const { ensureExtension, resolveOutputPath } = require('../../browser/service');
+const { defaultBaselineName, withEngineTag } = require('../../browser/visual-diff');
+const { ABSOLUTE_READ_MAX_BYTES } = require('../fs-read-limits');
+
 function createBrowserHandlers(d) {
   const {
     assertBrowserEnabled,
@@ -16,8 +22,88 @@ function createBrowserHandlers(d) {
     assertAllowedPath,
     normalizeFilePathInput,
     roots,
-    writable
+    writable,
+    getRemoteFs
   } = d;
+
+  /**
+   * 浏览器产物落盘的单一来源（截图 / PDF / HAR / 视觉基准与 diff 图共用）。
+   *
+   * 内置浏览器跑在本机，产物只存在于本机内存 —— SSH 工作区必须经 SFTP 送过去；本地工作区
+   * 则要过工作区白名单。这两条以前散在三个 handler 里各写一份，且 SSH 分支整个缺失：
+   * 拿本地白名单去校验远程路径必然越界，抛错还会连带把 base64 一起丢掉（模型既拿不到
+   * 文件，视觉注入也一起废掉）。与 fs.* 写类工具同此 remote first。
+   *
+   * @param {string} target 调用方指定的落盘路径；为空 → 落到程序自选的产物目录
+   * @param {string} content 产物内容
+   * @param {'base64'|'utf8'} encoding
+   * @param {string} ext 产物扩展名（png / pdf / har）
+   * @param {string} prefix 自选目录下的默认文件名前缀
+   * @returns {Promise<{path: string, bytes: number}>}
+   */
+  async function writeArtifact(target, content, encoding, ext, prefix) {
+    const buf = Buffer.from(content, encoding);
+    const remote = typeof getRemoteFs === 'function' ? getRemoteFs() : null;
+    if (remote) {
+      // 相对路径由 remoteFs 按远程工作区根解析；没给就用默认文件名落在远程 workspace
+      const name = target ? ensureExtension(target, ext) : `${prefix}-${Date.now()}.${ext}`;
+      const written = await remote.writeFile(name, content, encoding);
+      return { path: written.path, bytes: buf.length };
+    }
+    // 模型给了路径 → 必须过工作区白名单（否则可写任意绝对路径）；
+    // 没给 → 落程序自选的产物目录，模型未指定路径，不存在越权面。
+    const safe = target
+      ? assertAllowedPath(
+          ensureExtension(normalizeFilePathInput(target, defaultCwd), ext),
+          Array.from(new Set([...roots, ...writable]))
+        )
+      : resolveOutputPath('', ext, prefix);
+    await fs.mkdir(path.dirname(safe), { recursive: true });
+    await fs.writeFile(safe, buf);
+    return { path: safe, bytes: buf.length };
+  }
+
+  /**
+   * 产物路径解析（读写共用，与 writeArtifact 同一套规则）：SSH 走远程根解析，本地过工作区白名单。
+   * 越界直接抛，不静默降级 —— 否则会把「读错地方」误判成「首次调用」，
+   * 用当前截图把用户已有的基准覆盖掉。
+   * @returns {{remote: object|null, path: string}}
+   */
+  function resolveArtifactPath(ref) {
+    const remote = typeof getRemoteFs === 'function' ? getRemoteFs() : null;
+    if (remote) return { remote, path: remote.resolve(ref, remote.root) };
+    return {
+      remote: null,
+      path: assertAllowedPath(
+        normalizeFilePathInput(ref, defaultCwd),
+        Array.from(new Set([...roots, ...writable]))
+      )
+    };
+  }
+
+  /**
+   * 浏览器产物的**读取**（与 writeArtifact 对称）：SSH 工作区经 SFTP 读，本地工作区经 fs 读。
+   * 视觉基准是唯一需要「先读回来」的产物 —— 内置浏览器跑在本机，基准却是工作区里的文件。
+   *
+   * 只有「文件确实不存在 / 读不出来」才返回空 buffer，此时语义就是「还没有基准」。
+   *
+   * @param {string} ref 基准路径（相对或绝对）
+   * @returns {Promise<{path: string, buffer: Buffer|null}>} path 为解析后的真实路径，供回显
+   */
+  async function readArtifactIfExists(ref) {
+    const { remote, path: safe } = resolveArtifactPath(ref);
+    try {
+      if (remote) {
+        const file = await remote.readFile(safe, 'base64', { maxBytes: ABSOLUTE_READ_MAX_BYTES });
+        const buf = file && file.data != null ? Buffer.from(file.data, 'base64') : null;
+        return { path: safe, buffer: buf && buf.length ? buf : null };
+      }
+      const buf = await fs.readFile(safe);
+      return { path: safe, buffer: buf && buf.length ? buf : null };
+    } catch {
+      return { path: safe, buffer: null };
+    }
+  }
 
   /**
    * SSH 工作空间下的「远端预览」：内置浏览器跑在本机，`localhost:5000` 指的是本机而不是
@@ -218,24 +304,26 @@ function createBrowserHandlers(d) {
 
     'browser.har_export': async (params = {}) => {
       assertBrowserEnabled();
-      const filePath = params.filePath
-        ? assertAllowedPath(
-            normalizeFilePathInput(params.filePath, defaultCwd),
-            Array.from(new Set([...roots, ...writable]))
-          )
-        : '';
-      return browser.exportHar({ ...params, filePath });
+      // text 只用来落盘，不进模型上下文
+      const { text, ...rest } = await browser.exportHar({ ...params, filePath: '' });
+      const saved = await writeArtifact(params.filePath, text, 'utf8', 'har', 'dieyun-network');
+      return {
+        ...rest,
+        ...saved,
+        note: 'HAR 仅含方法与状态摘要（无请求/响应头与 body）；可用浏览器 DevTools 打开。'
+      };
     },
 
     'browser.pdf': async (params = {}) => {
       assertBrowserEnabled();
-      const filePath = params.filePath
-        ? assertAllowedPath(
-            normalizeFilePathInput(params.filePath, defaultCwd),
-            Array.from(new Set([...roots, ...writable]))
-          )
-        : '';
-      return browser.pdf({ ...params, filePath });
+      // base64 只用来落盘，不进模型上下文（动辄上百 KB）
+      const { base64, ...rest } = await browser.pdf({ ...params, filePath: '' });
+      const saved = await writeArtifact(params.filePath, base64, 'base64', 'pdf', 'dieyun-page');
+      return {
+        ...rest,
+        ...saved,
+        note: 'PDF 已保存到 path；需要内容时用 fs_read_file（base64）或 PDF 技能解析该文件。'
+      };
     },
 
     'browser.evaluate': async (params = {}) => {
@@ -265,18 +353,41 @@ function createBrowserHandlers(d) {
 
     'browser.visual_diff': async (params = {}) => {
       assertBrowserEnabled();
-      const withPath = (input) =>
-        input
-          ? assertAllowedPath(
-              normalizeFilePathInput(input, defaultCwd),
-              Array.from(new Set([...roots, ...writable]))
-            )
-          : '';
-      return browser.visualDiff({
-        ...(params || {}),
-        baselinePath: withPath(params && params.baselinePath),
-        filePath: withPath(params && params.filePath)
+      const p = params || {};
+      // 基准是「需要先读回来」的产物，路径只能在这里定：service 不知道工作区是本地还是 SSH，
+      // 自己解析路径就会拿本地白名单去校验远程路径。
+      const engine = browser.resolveEngine(p);
+      // 引擎标记编进文件名：换引擎就换文件，「拿 A 引擎的基准跟 B 引擎比」无从发生，
+      // 因此不再需要 .meta.json 记录引擎。
+      const baselineRef = withEngineTag(
+        ensureExtension(String(p.baselinePath || '').trim() || defaultBaselineName(p), 'png'),
+        engine
+      );
+      // reset 明确要重建基准，不必先把旧的读回来
+      const baseline =
+        p.reset === true
+          ? { path: resolveArtifactPath(baselineRef).path, buffer: null }
+          : await readArtifactIfExists(baselineRef);
+
+      const raw = await browser.visualDiff({
+        ...p,
+        baselinePath: baseline.path,
+        baselineBuffer: baseline.buffer
       });
+      // 图像只用来落盘，不进模型上下文（动辄上百 KB）
+      const { baselinePng, diffPng, ...rest } = raw || {};
+      const out = { ...rest };
+      if (baselinePng) {
+        out.baselinePath = (
+          await writeArtifact(baselineRef, baselinePng, 'base64', 'png', 'dieyun-visual-baseline')
+        ).path;
+      }
+      if (diffPng) {
+        out.diffPath = (
+          await writeArtifact(p.filePath, diffPng, 'base64', 'png', 'dieyun-visual-diff')
+        ).path;
+      }
+      return out;
     },
 
     'browser.click': async (params) => {
@@ -352,14 +463,10 @@ function createBrowserHandlers(d) {
 
     'browser.screenshot': async (params = {}) => {
       assertBrowserEnabled();
-      // 与 pdf / har_export 一致：落盘路径必须走工作空间白名单，否则模型可写任意绝对路径
-      const filePath = params.filePath
-        ? assertAllowedPath(
-            normalizeFilePathInput(params.filePath, defaultCwd),
-            Array.from(new Set([...roots, ...writable]))
-          )
-        : '';
-      return browser.screenshot({ ...params, filePath });
+      // 先让浏览器把 PNG 留在内存：base64 照常回传（截图视觉注入走它），落盘只是可选留证
+      const shot = await browser.screenshot({ ...params, filePath: '' });
+      if (!shot || !shot.base64 || !params.filePath) return shot;
+      return { ...shot, ...(await writeArtifact(params.filePath, shot.base64, 'base64', 'png', 'dieyun-screenshot')) };
     },
 
     'browser.wait_for': async (params) => {

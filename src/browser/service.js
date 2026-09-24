@@ -1,6 +1,5 @@
 'use strict';
 
-const fs = require('fs/promises');
 const path = require('path');
 const { createBrowserViewController, isBrowserCaptureSurfaceError } = require('./controller');
 const { createPlaywrightRunner } = require('./playwright-runner');
@@ -14,7 +13,7 @@ const { summarizeConsoleEntries } = require('./console-collector');
 const { summarizeTimeline } = require('./timeline');
 const { createJournalScope } = require('./journal-scope');
 const { normalizeAssertions, shapeExpectResult } = require('./expect');
-const { diffBitmaps, clampRatio, stableKey, DEFAULT_RATIO_THRESHOLD } = require('./visual-diff');
+const { diffBitmaps, clampRatio, DEFAULT_RATIO_THRESHOLD } = require('./visual-diff');
 const { buildContentSignalsScript, classifyBitmapRenderHealth } = require('./render-health');
 const { createBrowserSessionScope } = require('./session-scope');
 const { mintSnapshotId, normalizeSnapshotId, isRefFailureError, enrichRefFailure } = require('./ref-namespace');
@@ -446,24 +445,12 @@ function createBrowserService(deps) {
     return dispatch('pressKey', args);
   }
 
-  /** 验收留证：给了 filePath 就把 PNG 落盘（base64 仍保留，供多模态注入使用）。 */
-  async function saveScreenshotIfRequested(result, opts = {}) {
-    if (!result || !result.base64) return result;
-    const raw = String(opts.filePath || '').trim();
-    if (!raw) return result;
-    const target = ensureExtension(path.resolve(raw), 'png');
-    try {
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      const buf = Buffer.from(result.base64, 'base64');
-      await fs.writeFile(target, buf);
-      return { ...result, path: target, bytes: buf.length };
-    } catch (e) {
-      return { ...result, savePath: target, saveError: (e && e.message) || String(e) };
-    }
-  }
-
+  /**
+   * 截图只产出像素：base64 交回工具层 —— 视觉注入与落盘都在那边。
+   * service 不碰文件系统：产物落本地还是 SSH 工作区，是工具层才知道的事。
+   */
   async function screenshot(opts = {}) {
-    return saveScreenshotIfRequested(await dispatchWithBlankFallback('screenshot', opts), opts);
+    return dispatchWithBlankFallback('screenshot', opts);
   }
 
   /**
@@ -559,17 +546,23 @@ function createBrowserService(deps) {
     });
   }
 
-  /** 默认基准文件名：按引擎+目标派生稳定 key，保证多次调用比的是同一个文件。 */
-  function defaultBaselinePath(engine, params = {}) {
-    const key = stableKey(
-      [engine, params.ref || '', params.selector || '', params.fullPage ? 'full' : 'viewport'].join('|')
-    );
-    return path.join(defaultDownloadDir(), `dieyun-visual-baseline-${key}.png`);
+  /**
+   * 引擎查询（只读投影）：基准文件命名需要它，工具层才能保证「换个引擎就换一份基准」。
+   * 决策仍在 targetFor / engine-target.resolveTarget，这里不做任何判断。
+   */
+  function resolveEngine(params = {}) {
+    return targetFor(params).engine;
   }
 
   /**
-   * 视觉差异（回归验收）：无基准则创建基准；有基准则逐像素比较并输出 diff 图。
-   * 硬约束：基准元信息里的引擎必须与当前引擎一致 —— 跨引擎像素必然不同，比较无意义。
+   * 视觉差异（回归验收）：无基准则创建基准；有基准则逐像素比较。
+   *
+   * 只做像素计算，**不碰文件系统** —— 与截图同一条约定：基准由工具层读成 buffer 喂进来
+   * （`baselineBuffer`），待落盘的基准图 / diff 图以 base64 返回（`baselinePng` / `diffPng`）。
+   * 产物落本地还是 SSH 工作区，是工具层才知道的事（那里有 remote-first 的落盘单一来源）。
+   *
+   * 跨引擎比较的硬约束不再靠 `.meta.json`：工具层用 `withEngineTag` 把引擎编进基准文件名，
+   * 不同引擎天然指向不同文件，比较无从发生。
    */
   async function visualDiff(params = {}) {
     const target = targetFor(params);
@@ -593,11 +586,8 @@ function createBrowserService(deps) {
       throw err;
     }
     const currentBuf = Buffer.from(shot.base64, 'base64');
-    const explicitBaseline = String(params.baselinePath || '').trim();
-    const baselinePath = explicitBaseline
-      ? ensureExtension(path.resolve(explicitBaseline), 'png')
-      : defaultBaselinePath(engine, params);
-    const metaPath = `${baselinePath}.meta.json`;
+    // 基准路径只用于回显（路径解析与落盘都在工具层：remote-first 的落盘与白名单只有那边知道）
+    const baselinePath = String(params.baselinePath || '').trim();
 
     // 空白截图不能作为基准，也不能参与比较：否则会把"全黑"当成"没变化"。
     // 判据与运行时同源（render-health）：Playwright 截图不带 renderHealth，所以这里
@@ -635,31 +625,11 @@ function createBrowserService(deps) {
       };
     }
 
-    let baselineBuf = null;
-    try {
-      baselineBuf = await fs.readFile(baselinePath);
-    } catch {
-      baselineBuf = null;
-    }
+    const baselineBuf =
+      Buffer.isBuffer(params.baselineBuffer) && params.baselineBuffer.length ? params.baselineBuffer : null;
 
+    // 无基准（首次调用 / 基准文件读不到）或显式重建：把当前截图交回工具层落盘作为基准
     if (!baselineBuf || params.reset === true) {
-      await fs.mkdir(path.dirname(baselinePath), { recursive: true });
-      await fs.writeFile(baselinePath, currentBuf);
-      await fs.writeFile(
-        metaPath,
-        JSON.stringify(
-          {
-            engine,
-            width: shot.width,
-            height: shot.height,
-            fullPage: !!params.fullPage,
-            element: params.ref || params.selector || '',
-            createdAt: new Date().toISOString()
-          },
-          null,
-          2
-        )
-      );
       return {
         ok: true,
         engine,
@@ -667,42 +637,25 @@ function createBrowserService(deps) {
         baselinePath,
         width: shot.width,
         height: shot.height,
+        baselinePng: currentBuf.toString('base64'),
         note: params.reset ? '已用当前截图重建基准。' : '已保存为新基准；再次调用即可比较差异。'
-      };
-    }
-
-    let meta = null;
-    try {
-      meta = JSON.parse(await fs.readFile(metaPath, 'utf8'));
-    } catch {
-      meta = null;
-    }
-    if (meta && meta.engine && meta.engine !== engine) {
-      return {
-        ok: false,
-        engine,
-        errorCode: 'BASELINE_ENGINE_MISMATCH',
-        error: `基准由 ${meta.engine} 引擎创建，当前是 ${engine}；跨引擎像素必然不同，请用同一引擎重跑，或 reset=true 重建基准。`,
-        baselinePath
       };
     }
 
     const prevImg = nativeImage.createFromBuffer(baselineBuf);
     const prevSize = prevImg.getSize();
 
+    // 尺寸不同就不做逐像素比较（只有在同尺寸下才有意义），把当前截图交出去当参考图
     if (prevSize.width !== nextSize.width || prevSize.height !== nextSize.height) {
-      const diffPath = resolveOutputPath(params.filePath, 'png', 'dieyun-visual-diff');
-      await fs.mkdir(path.dirname(diffPath), { recursive: true });
-      await fs.writeFile(diffPath, currentBuf);
       return {
         ok: true,
         engine,
         changed: true,
         dimensionChanged: true,
         baselinePath,
-        diffPath,
         baselineSize: { width: prevSize.width, height: prevSize.height },
         currentSize: { width: nextSize.width, height: nextSize.height },
+        diffPng: currentBuf.toString('base64'),
         note: '尺寸变化（视口或内容高度不同），已把当前截图写出作为参考；建议先用 browser_viewport 统一视口。'
       };
     }
@@ -712,12 +665,9 @@ function createBrowserService(deps) {
       height: nextSize.height,
       ratioThreshold: clampRatio(params.threshold, DEFAULT_RATIO_THRESHOLD)
     });
-    const diffPath = resolveOutputPath(params.filePath, 'png', 'dieyun-visual-diff');
-    await fs.mkdir(path.dirname(diffPath), { recursive: true });
     const diffPng = nativeImage
       .createFromBitmap(diff.diffBitmap, { width: nextSize.width, height: nextSize.height })
       .toPNG();
-    await fs.writeFile(diffPath, diffPng);
 
     return {
       ok: true,
@@ -730,9 +680,9 @@ function createBrowserService(deps) {
       changedPercent: Number((diff.ratio * 100).toFixed(3)),
       threshold: diff.ratioThreshold,
       baselinePath,
-      diffPath,
       width: nextSize.width,
       height: nextSize.height,
+      diffPng: diffPng.toString('base64'),
       note: '红色为变化像素、浅灰为未变化；只有同引擎 + 同视口的比较才有意义。'
     };
   }
@@ -843,7 +793,7 @@ function createBrowserService(deps) {
   }
 
   /**
-   * 导出当前页面为 PDF 并落盘（base64 不进模型上下文，只返回路径）。
+   * 导出当前页面为 PDF，只产出 base64（落盘交给工具层，base64 不回模型上下文）。
    * auto 模式下若 Playwright 处于可见窗口，自动回退到 BrowserView。
    */
   async function pdf(params = {}) {
@@ -863,16 +813,12 @@ function createBrowserService(deps) {
       activeForCall = ENGINE_BROWSERVIEW;
       result = await getRunner(ENGINE_BROWSERVIEW).pdf(params);
     }
-    const outPath = resolveOutputPath(params.filePath, 'pdf', 'dieyun-page');
-    await fs.mkdir(path.dirname(outPath), { recursive: true });
-    await fs.writeFile(outPath, Buffer.from(result.base64, 'base64'));
     const payload = {
       ok: true,
       engine: activeForCall,
-      path: outPath,
+      base64: result.base64,
       bytes: result.bytes || 0,
-      mime: 'application/pdf',
-      note: 'PDF 已保存到本地路径；需要内容时用 fs_read_file（base64）或 PDF 技能解析该文件。'
+      mime: 'application/pdf'
     };
     return activeForCall === target.engine
       ? applyTarget(payload, target)
@@ -1022,7 +968,7 @@ function createBrowserService(deps) {
   }
 
   /**
-   * 把当前网络记录（HAR-lite 缓冲）导出为 HAR 1.2 文件，返回路径。
+   * 把当前网络记录导出为 HAR 1.2 文本，只产出文本（落盘交给工具层）。
    * 仅含方法与状态等摘要字段，不含请求/响应头与 body。
    */
   async function exportHar(params = {}) {
@@ -1032,19 +978,12 @@ function createBrowserService(deps) {
       limit: 200,
       engine: target.requested === ENGINE_AUTO ? undefined : target.engine
     });
-    const har = toHar(entries);
-    const outPath = resolveOutputPath(params.filePath, 'har', 'dieyun-network');
-    await fs.mkdir(path.dirname(outPath), { recursive: true });
-    const text = JSON.stringify(har, null, 2);
-    await fs.writeFile(outPath, text, 'utf8');
     return applyTarget(
       {
         ok: true,
         engine: target.engine,
-        path: outPath,
-        count: entries.length,
-        bytes: Buffer.byteLength(text, 'utf8'),
-        note: 'HAR 仅含方法与状态摘要（无请求/响应头与 body）；可用浏览器 DevTools 打开。'
+        text: JSON.stringify(toHar(entries), null, 2),
+        count: entries.length
       },
       target
     );
@@ -1236,6 +1175,7 @@ function createBrowserService(deps) {
     consoleMessages,
     setViewport,
     expect,
+    resolveEngine,
     visualDiff,
     resetLogs,
     setPanelState,
@@ -1280,4 +1220,6 @@ function createBrowserService(deps) {
   };
 }
 
-module.exports = { createBrowserService };
+// resolveOutputPath / ensureExtension 是「产物路径」的单一来源，
+// 落盘已被工具层接管，故一并导出供那边复用（默认产物目录与扩展名补全不另写一份）。
+module.exports = { createBrowserService, ensureExtension, resolveOutputPath };

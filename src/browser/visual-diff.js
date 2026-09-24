@@ -7,11 +7,12 @@
  * 与 `nativeImage.createFromBitmap()` 期望的输入一致，可直接回编码成 PNG）。
  *
  * 用途：回归验收 —— 「改前 vs 改后」页面是否发生变化。
- * 注意：只有**同引擎 + 同视口**的比较才有意义，跨引擎像素必然不同，
- * 该约束由调用方（service）用基准元信息硬校验。
+ * 注意：只有**同引擎 + 同视口**的比较才有意义，跨引擎像素必然不同；
+ * 该约束靠 `withEngineTag` 把引擎编进基准文件名来实现 —— 不同引擎落在不同文件，
+ * 「拿 A 引擎的基准跟 B 引擎比」结构上不可能发生，不需要额外的元信息文件。
  *
  * 像素级「全黑」事实与「空 / 暗」判定在 `render-health.js`（唯一来源），
- * 本模块只做「两张图之间的差异」。
+ * 本模块只做「两张图之间的差异」与「基准文件命名」。
  */
 
 const DEFAULT_PIXEL_TOLERANCE = 12;
@@ -36,6 +37,39 @@ function stableKey(input) {
     h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
   }
   return h.toString(36);
+}
+
+/**
+ * 引擎隔离的**唯一实现**：把 engine 插到扩展名前。
+ * `shots/login.png` + browserview → `shots/login.browserview.png`。
+ *
+ * 这样「跨引擎拿同一张基准比较」不会发生 —— 不是靠运行时报错拦住，而是两侧根本
+ * 指向不同文件。因此基准不需要再落一份 `.meta.json` 记录引擎。
+ *
+ * 幂等：已带本引擎标记的路径原样返回。模型会把上一次返回的 `baselinePath` 传回来，
+ * 二次追加会凭空造出新文件、让基准永远对不上。
+ */
+function withEngineTag(filePath, engine) {
+  const p = String(filePath || '');
+  const tag = `.${engine || 'unknown'}`;
+  const dot = p.lastIndexOf('.');
+  const hasExt = dot > 0 && dot > p.lastIndexOf('/') && dot > p.lastIndexOf('\\');
+  const base = hasExt ? p.slice(0, dot) : p;
+  const ext = hasExt ? p.slice(dot) : '.png';
+  if (base.endsWith(tag)) return p;
+  return `${base}${tag}${ext}`;
+}
+
+/**
+ * 默认基准文件名（不含目录、不含引擎标记 —— 引擎标记统一由 withEngineTag 附加）：
+ * 按目标派生稳定 key，保证同一目标多次调用比的是同一个文件。
+ * @param {{ ref?: string, selector?: string, fullPage?: boolean }} params
+ */
+function defaultBaselineName(params = {}) {
+  const key = stableKey(
+    [params.ref || '', params.selector || '', params.fullPage ? 'full' : 'viewport'].join('|')
+  );
+  return `dieyun-visual-baseline-${key}.png`;
 }
 
 /**
@@ -113,5 +147,7 @@ module.exports = {
   DEFAULT_RATIO_THRESHOLD,
   clampRatio,
   stableKey,
+  withEngineTag,
+  defaultBaselineName,
   diffBitmaps
 };
