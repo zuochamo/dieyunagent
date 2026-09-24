@@ -285,6 +285,16 @@ function createFsHandlers(d) {
         e.code = 'MISSING_PARAM';
         throw e;
       }
+      // 只给 filePath 是无效输入：符号定位只有「按 name 找」与「按包含某行的最小符号」
+      // 两条路（见 locateSymbolForRead 末尾 wantLine > 0 的分支），裸路径必返回 null。
+      // 在此快速失败，避免白跑一趟 LSP + 结构索引后回一句不指向病因的 SYMBOL_NOT_FOUND。
+      if (hasPath && !symName && !wantLine) {
+        const e = new Error(
+          '需要 name 或 line：只给 filePath 无法定位符号。读整个文件请用 fs_read_file（可配 offset/maxBytes）。'
+        );
+        e.code = 'MISSING_PARAM';
+        throw e;
+      }
 
       const target =
         typeof ctx.getWorkspaceTarget === 'function' ? ctx.getWorkspaceTarget() : null;
@@ -311,7 +321,7 @@ function createFsHandlers(d) {
           errorCode: 'SYMBOL_NOT_FOUND',
           error: symName
             ? `没找到符号「${symName}」的精确范围。可先用 grep 确认名字，或 graph find_symbol 看结构索引里是否有该符号${isSsh ? '（远程需已建结构索引）' : ''}。`
-            : '该位置未识别出符号，请改用 fs_read_file 配合行号读取。'
+            : `第 ${wantLine} 行没有可定位的符号（该文件类型可能没有 Language Server，或结构索引未覆盖）。请改用 fs_read_file 配合 offset/maxBytes 读取。`
         };
       }
 

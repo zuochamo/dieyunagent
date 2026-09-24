@@ -1112,12 +1112,13 @@ const READ_SYMBOL_TOOL = {
     description:
       '按符号读取代码体，返回带行号的原文与 path，可直接用于 fs_edit。' +
       'filePath+name：读该文件里的符号；filePath+line：读包含该行的最内层符号；只给 name：全库找同名符号。' +
+      '只给 filePath 无法定位符号，读整个文件请用 fs_read_file。' +
       '比 fs_read_file 读整个文件更省上下文。' +
       '本地走 LSP/结构索引；SSH 工作区自动降级为远程结构索引 → 远程 grep，仍返回带行号代码体（降级精度略低）。',
     parameters: {
       type: 'object',
       properties: {
-        filePath: { type: 'string', description: '文件路径；只按 name 全库找时可省略' },
+        filePath: { type: 'string', description: '文件路径；只按 name 全库找时可省略（不能只给路径）' },
         name: { type: 'string', description: '符号名（函数/类/方法），如 prepSystemPrompt' },
         line: { type: 'number', description: '1-based 行号：读包含该行的最小符号' },
         maxLines: { type: 'number', description: '最多返回行数，默认 400，上限 2000' }

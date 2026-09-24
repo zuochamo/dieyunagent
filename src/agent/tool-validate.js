@@ -247,11 +247,11 @@ function validateToolArgs(name, args, opts) {
         };
       }
       return { ok: true };
-    case 'read_symbol':
-      if (
-        (!a.filePath || !String(a.filePath).trim()) &&
-        !String(a.name || a.symbol || a.symbolName || '').trim()
-      ) {
+    case 'read_symbol': {
+      const hasPath = !!(a.filePath && String(a.filePath).trim());
+      const hasName = !!String(a.name || a.symbol || a.symbolName || '').trim();
+      const hasLine = Number(a.line) > 0;
+      if (!hasPath && !hasName) {
         return {
           ok: false,
           error: 'read_symbol 需要 filePath 或 name',
@@ -260,7 +260,20 @@ function validateToolArgs(name, args, opts) {
           suggestedFix: 'filePath+name、filePath+line，或只给 name 全库查找'
         };
       }
+      // 只给 filePath 定位不到任何符号（符号定位只有「按 name」与「按包含某行的最小符号」
+      // 两条路）；在此拦下，避免白跑 LSP/结构索引并回一句不指向病因的 SYMBOL_NOT_FOUND。
+      // handler 侧同判，保证 fs.read_symbol 的空 name 分支只可能是「有 line 但该行无符号」。
+      if (hasPath && !hasName && !hasLine) {
+        return {
+          ok: false,
+          error: 'read_symbol 只给 filePath 无法定位符号：需要 name 或 line',
+          errorCode: 'MISSING_ARG',
+          retryable: false,
+          suggestedFix: '补 name（读该符号）或补 line（读包含该行的符号）；读整个文件请用 fs_read_file'
+        };
+      }
       return { ok: true };
+    }
     case 'codebase_search':
       if (!String(a.query || '').trim()) {
         return {
