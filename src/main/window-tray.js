@@ -208,10 +208,10 @@ function createWindowTray(deps) {
   function createWindow() {
     const iconPath = path.join(__dirname, '..', '..', 'assets', 'icon.png');
     mainWindow = new BrowserWindow({
-      width: 1229,
-      height: 794,
-      minWidth: 1032,
-      minHeight: 648,
+      width: 1475,
+      height: 953,
+      minWidth: 1238,
+      minHeight: 778,
       show: false,
       frame: false,
       roundedCorners: false,

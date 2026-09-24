@@ -6532,7 +6532,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 .supplier-model-editor .defined-model-editor-body {
-  max-height: min(72vh, 640px);
+  max-height: min(79.2vh, 704px);
   overflow-y: auto;
 }
 
