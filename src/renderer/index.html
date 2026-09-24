@@ -1351,7 +1351,6 @@
                   <label class="check-row"><input type="checkbox" data-scope="agents" checked /><span>AGENTS.md</span></label>
                 </div>
               </div>
-              <p class="settings-page-desc" style="margin-top:0.35rem">模型：跟随对话模型（Composer 当前选用）。</p>
               <span class="save-hint" id="knowledge-consol-hint"></span>
               <p class="settings-path-hint" id="knowledge-consol-status" style="margin-top:0.4rem"></p>
             </div>
@@ -1650,7 +1649,7 @@
                 </section>
                 <section class="help-usage-section">
                   <h3>帮助中心</h3>
-                  <p><strong>统计信息</strong>：Gateway 连接状态、今日按键与 Token、模型用量图表、工具 Harness 成功率等。</p>
+                  <p><strong>统计信息</strong>：Gateway 连接状态、今日按键与 Token、工具 Harness 成功率、上下文压缩次数与成功率、模型用量图表等。</p>
                   <p><strong>运行日志</strong>：查看应用主进程与 Gateway 最近日志，支持刷新、清理与复制（默认保留 3 天）。</p>
                   <p><strong>编码参数</strong>：模型与段预算、Agent 护栏与上下文注入阈值等，详见上文「编码参数」小节。</p>
                   <p><strong>关于应用</strong>：当前版本与简要说明。关闭窗口后应用可驻留系统托盘，Gateway 与定时任务继续在后台运行。</p>
@@ -1684,6 +1683,23 @@
                     <div class="status-meta"><span class="meta-label">瞬态重试</span><span id="help-harness-retries">—</span></div>
                   </div>
                   <div class="help-harness-by-tool" id="help-harness-by-tool">
+                    <p class="model-usage-empty">打开本页后加载</p>
+                  </div>
+                </section>
+                <section class="help-tool-harness" aria-labelledby="help-compaction-title">
+                  <div class="model-usage-head">
+                    <h3 id="help-compaction-title">上下文压缩（近 200 次）</h3>
+                  </div>
+                  <div id="help-compaction-summary">
+                    <div class="status-meta"><span class="meta-label">压缩次数</span><span id="help-compaction-attempted">—</span></div>
+                    <div class="status-meta"><span class="meta-label">动态压缩（自动触发）</span><span id="help-compaction-auto">—</span></div>
+                    <div class="status-meta"><span class="meta-label">强制压缩</span><span id="help-compaction-forced">—</span></div>
+                    <div class="status-meta"><span class="meta-label">压缩成功率</span><span id="help-compaction-success">—</span></div>
+                    <div class="status-meta"><span class="meta-label">压缩失败</span><span id="help-compaction-failed">—</span></div>
+                    <div class="status-meta"><span class="meta-label">平均节省 Token</span><span id="help-compaction-saved">—</span></div>
+                    <div class="status-meta"><span class="meta-label">平均耗时</span><span id="help-compaction-elapsed">—</span></div>
+                  </div>
+                  <div class="help-harness-by-tool" id="help-compaction-reasons">
                     <p class="model-usage-empty">打开本页后加载</p>
                   </div>
                 </section>

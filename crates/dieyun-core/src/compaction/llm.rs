@@ -72,12 +72,12 @@ pub async fn chat_completion(
     let resp = req
         .send()
         .await
-        .map_err(|e| CoreError::rpc("LLM_HTTP", e.to_string()))?;
+        .map_err(|e| CoreError::rpc(transport_error_code(&e), e.to_string()))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         return Err(CoreError::rpc(
-            "LLM_HTTP",
+            http_status_code(status.as_u16(), &text),
             format!(
                 "HTTP {status}: {}",
                 text.chars().take(400).collect::<String>()
@@ -87,13 +87,16 @@ pub async fn chat_completion(
     let json: Value = resp
         .json()
         .await
-        .map_err(|e| CoreError::rpc("LLM_HTTP", e.to_string()))?;
+        .map_err(|e| CoreError::rpc(transport_error_code(&e), e.to_string()))?;
     let content = extract_completion_text(&json);
     if content.trim().is_empty() {
-        return Err(CoreError::rpc(
-            "LLM_HTTP",
-            "压缩模型返回空内容（未写入摘要，已跳过压缩）",
-        ));
+        let code = empty_content_code(&json);
+        let hint = if code == "LLM_REASONING_ONLY" {
+            "压缩模型只输出了思考、正文为空（未写入摘要，已跳过压缩）"
+        } else {
+            "压缩模型返回空内容（未写入摘要，已跳过压缩）"
+        };
+        return Err(CoreError::rpc(code, hint));
     }
     let usage = json.get("usage").cloned();
     Ok(LlmCompletionResult {
@@ -101,6 +104,59 @@ pub async fn chat_completion(
         usage,
         model: model_name,
     })
+}
+
+/// 传输层失败分类（还没拿到 HTTP 状态码的阶段：连不上 / 超时 / 响应不是 JSON）。
+///
+/// 分类要回答的是「谁的锅」—— 网络与代理、模型、还是配置。日志与遥测的失败原因分布
+/// 直接消费这些码，所以它们必须稳定，且唯一来源在此；Node 侧只做提取与翻译，不再二次判定。
+fn transport_error_code(err: &reqwest::Error) -> &'static str {
+    if err.is_timeout() {
+        "LLM_TIMEOUT"
+    } else if err.is_connect() {
+        "LLM_CONNECT"
+    } else if err.is_decode() {
+        "LLM_BAD_JSON"
+    } else {
+        "LLM_HTTP"
+    }
+}
+
+/// HTTP 非 2xx 的分类。
+///
+/// 5xx 要再看一眼响应体：中转代理会把「往上游写请求体超时」原样转述成 502 +
+/// `TimeoutError('The write operation timed out')`。这类是**代理侧超时**（调代理的
+/// 上游写超时即可解），与「上游服务真的挂了」不是一回事 —— 混在一个码里，
+/// 排查时只能靠人肉读响应体，这正是本次分类要消除的。
+fn http_status_code(status: u16, body: &str) -> &'static str {
+    if status >= 500 {
+        let lower = body.to_ascii_lowercase();
+        if lower.contains("timed out") || lower.contains("timeout") {
+            return "LLM_UPSTREAM_TIMEOUT";
+        }
+        return "LLM_UPSTREAM_5XX";
+    }
+    match status {
+        401 | 403 => "LLM_AUTH",
+        429 => "LLM_RATE_LIMIT",
+        _ => "LLM_BAD_REQUEST",
+    }
+}
+
+/// 正文为空时的细分：模型只输出了思考（走 reasoning 通道）还是压根没写。
+/// 旧实现这两种在日志里长得完全一样（都报「返回空内容」），排查时无从区分。
+fn empty_content_code(json: &Value) -> &'static str {
+    let Some(msg) = json.pointer("/choices/0/message") else {
+        return "LLM_EMPTY_CONTENT";
+    };
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(text) = msg.get(key).and_then(|v| v.as_str()) {
+            if !text.trim().is_empty() {
+                return "LLM_REASONING_ONLY";
+            }
+        }
+    }
+    "LLM_EMPTY_CONTENT"
 }
 
 fn flatten_content(value: Option<&Value>) -> String {
@@ -178,5 +234,49 @@ mod tests {
 
         let empty = json!({ "choices": [{ "message": { "content": "" } }] });
         assert!(extract_completion_text(&empty).trim().is_empty());
+    }
+
+    #[test]
+    fn classify_http_failures_by_owner() {
+        // 代理把「往上游写超时」转述成 502，必须与普通 5xx 分开 —— 前者调代理可解
+        assert_eq!(
+            http_status_code(
+                502,
+                "('Connection aborted.', TimeoutError('The write operation timed out'))"
+            ),
+            "LLM_UPSTREAM_TIMEOUT"
+        );
+        assert_eq!(
+            http_status_code(504, "Gateway Timeout"),
+            "LLM_UPSTREAM_TIMEOUT"
+        );
+        assert_eq!(
+            http_status_code(503, "upstream unavailable"),
+            "LLM_UPSTREAM_5XX"
+        );
+        assert_eq!(http_status_code(401, "unauthorized"), "LLM_AUTH");
+        assert_eq!(http_status_code(403, "forbidden"), "LLM_AUTH");
+        assert_eq!(http_status_code(429, "rate limited"), "LLM_RATE_LIMIT");
+        assert_eq!(http_status_code(400, "bad body"), "LLM_BAD_REQUEST");
+    }
+
+    #[test]
+    fn classify_empty_content_vs_reasoning_only() {
+        let reasoning_only = json!({
+            "choices": [{ "message": { "content": "", "reasoning_content": "think" } }]
+        });
+        assert_eq!(empty_content_code(&reasoning_only), "LLM_REASONING_ONLY");
+
+        let alt_key = json!({
+            "choices": [{ "message": { "content": "  ", "reasoning": "think" } }]
+        });
+        assert_eq!(empty_content_code(&alt_key), "LLM_REASONING_ONLY");
+
+        let truly_empty = json!({ "choices": [{ "message": { "content": "" } }] });
+        assert_eq!(empty_content_code(&truly_empty), "LLM_EMPTY_CONTENT");
+
+        // 连 choices 都没有（代理给了个 200 的空壳）也归到「真空内容」
+        let no_choices = json!({ "object": "error" });
+        assert_eq!(empty_content_code(&no_choices), "LLM_EMPTY_CONTENT");
     }
 }

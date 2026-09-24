@@ -408,7 +408,14 @@ pub async fn maybe_compact(
     let llm_resp = match llm::chat_completion(llm_cfg, model, &need.system, &need.user).await {
         Ok(r) => r,
         Err(err) => {
-            eprintln!("[compaction-llm] skip compaction after LLM failure: {err}");
+            // CoreError 的 Display 只输出 message，分类码（code）会被丢掉 —— 而分类码正是
+            // 「谁的锅」的唯一来源。这里显式拼上，日志与遥测才区分得开「代理写超时」与
+            // 「模型空正文」。拼接口径只此一处，下游只做提取，不再各自解析。
+            let detail = match &err {
+                crate::error::CoreError::Rpc { code, message } => format!("{code}: {message}"),
+                other => other.to_string(),
+            };
+            eprintln!("[compaction-llm] skip compaction after LLM failure: {detail}");
             // 失败即「本次尝试已发生」：把计数落回冷却起点，让后续几轮不再重打同一个
             // 注定失败的大请求。失败与成功共用同一常量，冷却语义只有一处定义。
             round_count = POST_COMPACTION_ROUND_COUNT;
@@ -425,7 +432,7 @@ pub async fn maybe_compact(
                 llm_usage: None,
                 llm_model: None,
                 compaction_skipped: Some("llm_error".into()),
-                llm_error: Some(err.to_string()),
+                llm_error: Some(detail),
             });
         }
     };

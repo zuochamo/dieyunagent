@@ -10,6 +10,7 @@ const {
 const { createMainPlannerRunner } = require('../../agent/planner-runner-main');
 const { getEffectiveInputBudget } = require('../../agent/compaction-main');
 const { summarizeTelemetry } = require('../../agent/tool-telemetry');
+const { summarizeCompactionTelemetry } = require('../../agent/compaction-telemetry');
 const {
   ensureRunAbortController,
   abortRun,
@@ -532,6 +533,10 @@ function registerAgentRuntimeIpc(ctx) {
 
   ipcMain.handle('agent:tool-telemetry-summary', async () => {
     return summarizeTelemetry(live.userData);
+  });
+
+  ipcMain.handle('agent:compaction-telemetry-summary', async () => {
+    return summarizeCompactionTelemetry(live.userData);
   });
 
   ipcMain.handle('agent:rust-loop-cancel', async (_evt, { cancelToken, runId } = {}) => {

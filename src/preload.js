@@ -428,6 +428,7 @@ contextBridge.exposeInMainWorld('diecloud', {
   agentRustLoopCancel: (payload) => ipcRenderer.invoke('agent:rust-loop-cancel', payload || {}),
   agentRetryTool: (payload) => ipcRenderer.invoke('agent:retry-tool', payload || {}),
   agentToolTelemetrySummary: () => ipcRenderer.invoke('agent:tool-telemetry-summary'),
+  agentCompactionTelemetrySummary: () => ipcRenderer.invoke('agent:compaction-telemetry-summary'),
   agentPlannerPing: () => ipcRenderer.invoke('agent:planner-ping'),
   agentPlannerRun: (payload) =>
     ipcRenderer

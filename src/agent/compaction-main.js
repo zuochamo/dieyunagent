@@ -13,6 +13,7 @@ const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const { estimateTextTokens } = require('./token-estimate');
 const { COMPACTION } = require('../compaction-prompts');
 const { recordLlmUsage } = require('./llm-usage-recorder');
+const { recordCompactionTelemetry, compactionTelemetryRow } = require('./compaction-telemetry');
 const { buildEstimatedUsageObject, estimatePromptTokensFromMessages } = require('../llm-usage-stats');
 const {
   raceAbortable,
@@ -237,14 +238,31 @@ function createMainCompactionAgent(userData, coreBridge = null) {
   }
 
   async function maybeCompactMessages(messages, opts = {}) {
+    // 遥测口径：一次「压缩次数」= 一次真正发起过摘要 LLM 的尝试。未触发（未达触发线 /
+    // 仍在冷却 / 可折叠原子不足）与「未配置 LLM」的早退会被 compactionTelemetryRow 判为
+    // null 而不记录 —— 否则每轮 LLM 前的空转都会进窗口，把成功率稀释成没意义的数。
+    // 本函数是 loop / planner / plan / IPC / Renderer 五条路径的唯一汇聚点，遥测只此一处。
+    const startedAt = Date.now();
     const bridge = requireCoreBridge(coreBridge);
     const settings = loadModelSettings(userData);
     const llm = resolveCompactionLlm(settings, opts);
     const st = getSessionState(opts.sessionId);
     const signal = opts.signal || null;
+    const finish = (payload) => {
+      recordCompactionTelemetry(
+        userData,
+        compactionTelemetryRow({
+          payload,
+          force: !!opts.force,
+          model: llm.textModel,
+          startedAt
+        })
+      );
+      return payload;
+    };
     throwIfAborted(signal);
     if (!llm.baseUrl) {
-      return {
+      return finish({
         messages,
         compacted: false,
         tokensBefore: undefined,
@@ -252,7 +270,7 @@ function createMainCompactionAgent(userData, coreBridge = null) {
         summary: null,
         foldedTranscript: '',
         pinnedUserCount: 0
-      };
+      });
     }
     await hydrateSessionState(bridge, st, opts.sessionId);
     // opts.tokenBudget 是「基础输入预算」；工具 schema 超出预留的部分在这里统一扣，
@@ -307,7 +325,7 @@ function createMainCompactionAgent(userData, coreBridge = null) {
       st.compactionRoundCount = Number.isFinite(skippedRounds) && skippedRounds > 0
         ? skippedRounds
         : POST_COMPACTION_ROUND_COUNT;
-      return {
+      return finish({
         messages,
         compacted: false,
         tokensBefore: result.tokensBefore,
@@ -317,11 +335,11 @@ function createMainCompactionAgent(userData, coreBridge = null) {
         pinnedUserCount: 0,
         compactionSkipped: result.compactionSkipped,
         llmError: result.llmError || undefined
-      };
+      });
     }
     if (!result) {
       st.compactionRoundCount = POST_COMPACTION_ROUND_COUNT;
-      return compactionSkippedResult(messages, 'llm_error', 'compaction.maybe_compact 无响应');
+      return finish(compactionSkippedResult(messages, 'llm_error', 'compaction.maybe_compact 无响应'));
     }
     st.compactionRoundCount = Number(result.compactionRoundCount) || 0;
     st.cumulativeSummary = result.cumulativeSummary != null ? result.cumulativeSummary : st.cumulativeSummary;
@@ -346,7 +364,7 @@ function createMainCompactionAgent(userData, coreBridge = null) {
         foldedTranscript: result.foldedTranscript || ''
       });
     }
-    return {
+    return finish({
       messages: result.messages || messages,
       compacted: !!result.compacted,
       tokensBefore: result.tokensBefore,
@@ -356,7 +374,7 @@ function createMainCompactionAgent(userData, coreBridge = null) {
       pinnedUserCount: result.pinnedUserCount,
       compactionSkipped: result.compactionSkipped || undefined,
       llmError: result.llmError || undefined
-    };
+    });
   }
 
   return {

@@ -1,4 +1,4 @@
-/* global window, document, $, uiText, setDialogMaximized, resetDialogMaximize, closeAllMenus, closeSettingsModal, closeSettingsSkillsPage, closeExecuteModal */
+/* global window, document, $, uiText, setDialogMaximized, resetDialogMaximize, closeAllMenus, closeSettingsModal, closeSettingsSkillsPage, closeExecuteModal, formatTokenCountFull */
 'use strict';
 
 const helpApi = window.diecloud || {};
@@ -28,7 +28,10 @@ function switchHelpTab(tab) {
   if (titleEl) titleEl.textContent = titleFromHelpMap(helpTab, helpTab);
   if (helpTab === 'logs') loadHelpLogs().catch(() => {});
   if (helpTab === 'about') loadHelpAbout().catch(() => {});
-  if (helpTab === 'stats') loadHelpToolStats().catch(() => {});
+  if (helpTab === 'stats') {
+    loadHelpToolStats().catch(() => {});
+    loadHelpCompactionStats().catch(() => {});
+  }
   if (helpTab === 'encoding-params' && typeof renderEncodingParamsPanel === 'function') {
     renderEncodingParamsPanel();
   }
@@ -86,6 +89,87 @@ async function loadHelpToolStats() {
     }
   } catch (e) {
     if (byToolEl) byToolEl.innerHTML = `<p class="model-usage-empty">加载失败: ${escapeHelpHtml(e.message || String(e))}</p>`;
+  }
+}
+
+/**
+ * 压缩失败的原始原因是 Rust 侧分类码，展示前翻成人话。
+ * 码的唯一来源是 `crates/dieyun-core/src/compaction/llm.rs`；这里只是展示层映射，
+ * 未收录的新码会原样显示（便于发现新增分类），不会被吞掉。
+ */
+const COMPACTION_REASON_LABELS = {
+  LLM_UPSTREAM_TIMEOUT: '代理上游写超时',
+  LLM_UPSTREAM_5XX: '上游服务错误',
+  LLM_TIMEOUT: '请求超时',
+  LLM_CONNECT: '连不上服务',
+  LLM_BAD_JSON: '响应非 JSON',
+  LLM_BAD_REQUEST: '请求被拒',
+  LLM_AUTH: '鉴权失败',
+  LLM_RATE_LIMIT: '被限流',
+  LLM_EMPTY_CONTENT: '模型未输出正文',
+  LLM_REASONING_ONLY: '模型只输出思考',
+  LLM_HTTP: '网络错误',
+  LLM_CONFIG: '模型未配置',
+  content_policy: '内容审核拒绝',
+  llm_error: 'LLM 调用失败'
+};
+
+/**
+ * 上下文压缩统计（次数 / 动态 / 强制 / 成功率 / 失败原因）。
+ * 口径见 Main 侧 `agent/compaction-telemetry.js`：一次「压缩次数」= 一次真正发起摘要 LLM 的
+ * 尝试，未达触发线或仍在冷却的空转不计入 —— 所以这里的成功率不会被空转轮次稀释。
+ */
+async function loadHelpCompactionStats() {
+  const attemptedEl = $('help-compaction-attempted');
+  const autoEl = $('help-compaction-auto');
+  const forcedEl = $('help-compaction-forced');
+  const successEl = $('help-compaction-success');
+  const failedEl = $('help-compaction-failed');
+  const savedEl = $('help-compaction-saved');
+  const elapsedEl = $('help-compaction-elapsed');
+  const reasonsEl = $('help-compaction-reasons');
+  if (!helpApi.agentCompactionTelemetrySummary) {
+    if (reasonsEl) reasonsEl.innerHTML = '<p class="model-usage-empty">Telemetry 不可用</p>';
+    return;
+  }
+  if (reasonsEl) reasonsEl.innerHTML = '<p class="model-usage-empty">加载中…</p>';
+  try {
+    const s = await helpApi.agentCompactionTelemetrySummary();
+    const attempted = s.attempted || 0;
+    if (attemptedEl) attemptedEl.textContent = String(attempted);
+    if (autoEl) autoEl.textContent = String(s.auto || 0);
+    if (forcedEl) forcedEl.textContent = String(s.forced || 0);
+    if (successEl) {
+      successEl.textContent = attempted ? `${s.successRate ?? 0}% (${s.ok || 0}/${attempted})` : '—';
+    }
+    if (failedEl) failedEl.textContent = String(s.failed || 0);
+    if (savedEl) {
+      savedEl.textContent = s.savedTokensAvg ? formatTokenCountFull(s.savedTokensAvg) : '—';
+    }
+    if (elapsedEl) elapsedEl.textContent = attempted ? `${s.elapsedMsAvg || 0} ms` : '—';
+
+    if (reasonsEl) {
+      const reasons = s.byReason || [];
+      if (!attempted) {
+        reasonsEl.innerHTML = '<p class="model-usage-empty">暂无压缩记录</p>';
+      } else if (!reasons.length) {
+        reasonsEl.innerHTML = '<p class="model-usage-empty">无压缩失败</p>';
+      } else {
+        const tags = reasons
+          .map(
+            (r) =>
+              `<span class="help-harness-err-tag">${escapeHelpHtml(
+                COMPACTION_REASON_LABELS[r.reason] || r.reason
+              )} ×${r.count}</span>`
+          )
+          .join('');
+        reasonsEl.innerHTML = `<div class="help-harness-errors"><span class="meta-label">失败原因</span>${tags}</div>`;
+      }
+    }
+  } catch (e) {
+    if (reasonsEl) {
+      reasonsEl.innerHTML = `<p class="model-usage-empty">加载失败: ${escapeHelpHtml(e.message || String(e))}</p>`;
+    }
   }
 }
 
