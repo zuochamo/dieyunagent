@@ -23,7 +23,7 @@ const {
 } = require('./frame-script');
 const { buildTimelineRecorderScript, TIMELINE_BINDING } = require('./timeline');
 const { createJournalScope } = require('./journal-scope');
-const { assertBrowserLoadUrl, matchUrlPattern } = require('./url-policy');
+const { assertBrowserLoadUrl, isPlaceholderPageUrl, matchUrlPattern } = require('./url-policy');
 const { syncElectronCookiesToPlaywrightContext } = require('./session-sync');
 const {
   mintSnapshotId,
@@ -1718,7 +1718,7 @@ function createPlaywrightRunner(deps = {}) {
   async function readLocalStorage() {
     const p = await ensurePage();
     const url = p.url();
-    if (!url || url === 'about:blank') {
+    if (!url || isPlaceholderPageUrl(url)) {
       return { ok: false, error: '当前没有已打开的页面，无法读取 localStorage' };
     }
     return p.evaluate(buildReadLocalStorageScript());

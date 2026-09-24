@@ -48,7 +48,7 @@ const { createJournalScope } = require('./journal-scope');
 const { a11ySnapshotBrowserView } = require('./a11y');
 const { classifyConsoleEntry, buildConsoleErrorHookScript } = require('./console-collector');
 const { BROWSER_SESSION_PARTITION, browserPartitionForSession } = require('./session-sync');
-const { assertBrowserLoadUrl, matchUrlPattern } = require('./url-policy');
+const { assertBrowserLoadUrl, isPlaceholderPageUrl, matchUrlPattern } = require('./url-policy');
 const { isBrowserPermissionAllowed } = require('./permission-policy');
 const { buildEvaluateScript, buildExpressionProbeScript, normalizeEvaluateResult } = require('./evaluate');
 const {
@@ -64,7 +64,10 @@ const CHROME_USER_AGENT =
 
 function isBrowserCaptureSurfaceError(err) {
   const msg = String(err && err.message ? err.message : err || '');
-  return /display surface not available|not available for capture|no current surface/i.test(msg);
+  // UnknownVizError：BrowserView 刚创建 / 刚重建（切会话、关面板后重开）时合成表面尚未就绪，
+  // capturePage 首次调用即抛，稍后同一操作即可成功 —— 与「表面不可用」同属瞬态。
+  // 本分类器是这一类的唯一来源：capturePageImage 的重试、service 的 Playwright 降级都挂在它上面。
+  return /display surface not available|not available for capture|no current surface|unknownvizerror/i.test(msg);
 }
 
 function assertHttpUrl(url) {
@@ -83,6 +86,22 @@ function assertHttpUrl(url) {
     throw err;
   }
   return parsed.toString();
+}
+
+/**
+ * 把 webContents 上的 URL 规整成「当前页面 URL」：
+ * - 真实页面 → 原样返回；
+ * - 占位空白文档（about:blank）→ 返回 ''，语义是「有视图但没有页面」。
+ *   这里必须返回空串而不是 fallback：否则关浏览器重开、或页面自身跳回 about:blank 时，
+ *   会把上一个页面的 URL 当成当前页面继续上报（地址栏、hasActiveBrowserPage、空白兜底都按它决策）。
+ * - 什么都没拿到 → 返回 fallback，沿用各调用点原有的「保持旧值」语义。
+ * @param {string} raw
+ * @param {string} [fallback]
+ */
+function normalizePageUrl(raw, fallback = '') {
+  const u = String(raw || '').trim();
+  if (!u) return fallback;
+  return isPlaceholderPageUrl(u) ? '' : u;
 }
 
 /** frame 参数 → 规整后的 spec（'main' 表示顶层）。 */
@@ -851,6 +870,12 @@ function createBrowserViewController(deps) {
       });
       const wc = view.webContents;
       win.setBrowserView(view);
+      // 全新 webContents 若从未提交过文档，页面侧求值（executeJavaScript：内容信号 / snapshot /
+      // evaluate）永不 settle —— 首个 browser_screenshot / snapshot / evaluate 会永久挂住整轮
+      // Agent（Electron 实测：未导航视图 executeJavaScript 不 settle，loadURL 后立刻恢复）。
+      // 创建即落一个空白文档，保证「有 live view ⇒ 必有已提交文档」。about:blank 不是真实页面：
+      // 它的 URL / 标题都不进入页面状态（见 normalizePageUrl），空白判定与 Playwright 兜底同样按「无页面」处理。
+      wc.loadURL('about:blank').catch(() => {});
       // 新窗口不再劫持当前页：登记为待打开标签，由 browser_tabs(action=open) 显式打开，原页面保留
       wc.setWindowOpenHandler(({ url }) => {
         if (/^https?:/i.test(url)) {
@@ -868,23 +893,26 @@ function createBrowserViewController(deps) {
       wc.on('did-stop-loading', () => {
         if (wc.isDestroyed()) return;
         loading = false;
-        currentUrl = wc.getURL() || currentUrl;
-        currentTitle = wc.getTitle() || currentTitle;
+        const liveUrl = normalizePageUrl(wc.getURL(), currentUrl);
+        currentUrl = liveUrl;
+        // 没有真实页面（占位空白文档 / 尚未导航）时标题也必须为空：
+        // 否则 Chromium 会把 about:blank 当标题给出，界面拿它当页面标题显示。
+        currentTitle = liveUrl ? wc.getTitle() || currentTitle : '';
         emitState();
       });
       wc.on('page-title-updated', (_e, title) => {
         if (wc.isDestroyed()) return;
-        currentTitle = title || '';
+        currentTitle = currentUrl ? title || '' : '';
         emitState();
       });
       wc.on('did-navigate', (_e, url) => {
         if (wc.isDestroyed()) return;
-        currentUrl = url || '';
+        currentUrl = normalizePageUrl(url);
         emitState();
       });
       wc.on('did-navigate-in-page', (_e, url) => {
         if (wc.isDestroyed()) return;
-        currentUrl = url || '';
+        currentUrl = normalizePageUrl(url);
         emitState();
       });
       wc.setUserAgent(CHROME_USER_AGENT);
@@ -953,7 +981,7 @@ function createBrowserViewController(deps) {
       throw err;
     }
     lastLoadError = null;
-    currentUrl = v.webContents.getURL() || safeUrl;
+    currentUrl = normalizePageUrl(v.webContents.getURL(), safeUrl);
     currentTitle = v.webContents.getTitle() || '';
     loading = false;
     emitState();
@@ -1806,7 +1834,7 @@ function createBrowserViewController(deps) {
       throw e;
     }
     lastLoadError = null;
-    currentUrl = wc.getURL() || currentUrl;
+    currentUrl = normalizePageUrl(wc.getURL(), currentUrl);
     currentTitle = wc.getTitle() || currentTitle;
     loading = false;
     emitState();
@@ -1830,7 +1858,7 @@ function createBrowserViewController(deps) {
       emitState();
       throw e;
     }
-    currentUrl = wc.getURL() || currentUrl;
+    currentUrl = normalizePageUrl(wc.getURL(), currentUrl);
     currentTitle = wc.getTitle() || currentTitle;
     loading = false;
     emitState();
@@ -1860,7 +1888,7 @@ function createBrowserViewController(deps) {
       emitState();
       throw e;
     }
-    currentUrl = wc.getURL() || currentUrl;
+    currentUrl = normalizePageUrl(wc.getURL(), currentUrl);
     currentTitle = wc.getTitle() || currentTitle;
     loading = false;
     emitState();
@@ -2934,6 +2962,10 @@ function createBrowserViewController(deps) {
     loading = false;
     currentUrl = '';
     currentTitle = '';
+    // 页面已销毁：渲染健康与加载错误都是「那个页面」的结论，必须随 URL/标题一起失效。
+    // 否则 status() 会继续报一个不存在的页面（renderHealth 还带着它的 url）与它的旧加载错误。
+    lastRenderHealth = null;
+    lastLoadError = null;
     // 视图销毁后 CDP 覆盖物理失效，但覆盖状态要保留（与 Playwright 侧一致）：
     // 下次创建视图时由 ensureView 重放，避免"关浏览器再打开"后退回面板尺寸而与状态不符。
     // 需要显式清掉时走 resetViewport（切会话、browser_viewport reset 都会调用）。

@@ -3,6 +3,7 @@
 const path = require('path');
 const { createBrowserViewController, isBrowserCaptureSurfaceError } = require('./controller');
 const { createPlaywrightRunner } = require('./playwright-runner');
+const { isPlaceholderPageUrl } = require('./url-policy');
 const {
   importCookiesToElectron,
   exportCookiesForPlaywright,
@@ -209,7 +210,8 @@ function createBrowserService(deps) {
   async function fallbackToPlaywrightAfterBlank(opts, invoke, target) {
     const viewStatus = viewCtrl.status();
     const url = viewStatus.url || viewStatus.renderHealth?.page?.url || '';
-    if (!url) return null;
+    // 占位空白文档不算页面（与 controller 的状态采纳同源）：根本没有页面时不该改道去「重跑」它。
+    if (!url || isPlaceholderPageUrl(url)) return null;
     const sessionSync = await ensurePlaywrightSessionSynced(opts?.sessionId);
     await pwRunner.navigate(url, {
       waitUntil: 'domcontentloaded',

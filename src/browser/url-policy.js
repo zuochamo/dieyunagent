@@ -206,6 +206,18 @@ function assertBrowserLoadUrl(url) {
   return u;
 }
 
+/**
+ * about:blank 是「有视图但没有页面」的占位文档，不是真实页面：
+ * BrowserView 创建时会加载它来满足「有 live view ⇒ 必有已提交文档」，Playwright 侧同样把它当作没有已打开页面。
+ * 「什么算真实页面 URL」以本谓词为唯一来源：状态采纳（controller）、空白兜底（service）、前置校验（playwright-runner）共用，
+ * 避免各处各写一份 `url === 'about:blank'` 而漏掉其中一处。
+ * @param {string} url
+ * @returns {boolean}
+ */
+function isPlaceholderPageUrl(url) {
+  return String(url || '').trim() === 'about:blank';
+}
+
 /** 本机地址（含 IPv6 环回）：SSH 工作空间下需要端口转发才能预览。 */
 const REMOTE_PREVIEW_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1']);
 
@@ -234,5 +246,6 @@ module.exports = {
   resolveBrowserNavigateUrl,
   parseRemotePreviewTarget,
   assertBrowserLoadUrl,
+  isPlaceholderPageUrl,
   matchUrlPattern
 };
