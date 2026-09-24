@@ -893,13 +893,11 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             const sec = Math.max(1, Math.round((waitData.waitMs || 0) / 1000));
             const remainMin = waitData.remainingMs > 0 ? Math.ceil(waitData.remainingMs / 60000) : 0;
             const budgetNote = remainMin > 0 ? `，最长再等 ${remainMin} 分钟` : '';
-            if (!liveThoughtLooksEphemeral()) {
-              const live = displayedTrace[displayedTrace.length - 1];
-              freezeLiveWithTools((live && live.tools) || []);
-            }
-            // 等待期间不熄心跳：此前 clearLlmWaitTimer 会把 trace 冻在「Ns 后自动重试」这句
-            // 固定文案上，单次退避可达 60s，长等待看起来就是 UI 卡死。交给 startLlmWaitTimer
-            // 与 llm_request 同一处续写「（已等 Ns）」，精确的 Ns 预计只留在 toast（一次性快照）。
+            // 不冻结当前轮：中断的那次尝试是「正在被重新生成」的东西，不属于历史。
+            // 若把它推进 frozenRounds，重试后的累积串会与残段前缀相同，被 sanitizeTraceThought
+            // 判成重复而抑制；模型换措辞则拼接。这里只把 live 槽位换成等待提示，重试的 delta
+            // 自然接管同一槽位（previous 不含残段 → 无抑制/无拼接）。彻底失败时 Main 用
+            // frozenPartial 以 llm_response 交回残片，信息不丢。
             const waitLabel = `连接中断，等待第 ${waitData.attempt || 1} 次自动重试${budgetNote}`;
             pushLive(waitLabel, [], '等待模型连接恢复，恢复后将从当前进度继续…');
             startLlmWaitTimer(waitLabel);
@@ -1087,17 +1085,11 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       toolCallsUsed += Array.isArray(r.tools) ? r.tools.length : 0;
     }
 
-    if (hitRoundLimit) {
-      body = { ...body, messages: loopMessages };
-      await maybeCompactBodyIfHeavy(body, {
-        signal,
-        apiConfig,
-        sessionId: options.sessionId || undefined
-      });
-    }
-
+    // 续段起点的压缩不在此处做：续段入口（本函数开头的 preflight）会用同一 Rust 判据对
+    // 重投影后的 messages 再判一次。此处压缩的产物会被 reprojectContinueFromBody 重建掉，
+    // 只会把 compaction 冷却推高、让续段那次预检空转（与 2.4 的重复预检同根因）。
     const outBody = hitRoundLimit
-      ? { ...body, messages: buildSegmentContinueMessages(body.messages, finalContent) }
+      ? { ...body, messages: buildSegmentContinueMessages(loopMessages, finalContent) }
       : body;
 
     return {

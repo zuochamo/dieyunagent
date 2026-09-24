@@ -95,10 +95,6 @@ function humanizeModelId(id) {
 
 function formatModelFooterLabel(modelId, route) {
   if (modelId && String(modelId).trim()) return humanizeModelId(modelId);
-  if (route === 'auto-vision' || route === 'custom-vision') {
-    const v = (settings.visionModel || '').trim();
-    return v ? humanizeModelId(v) : '识图模型';
-  }
   return humanizeModelId(getTextModelId(settings)) || 'Auto';
 }
 

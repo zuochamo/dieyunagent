@@ -9,8 +9,6 @@ function buildAgentRunOptsForContinue(fc) {
     userText: fc.fullText,
     userContent: fc.userContent,
     hasImages: fc.hasImages,
-    visionModel: fc.visionModel,
-    visionApiConfig: fc.visionApiConfig,
     sysContent: fc.sysContent,
     turnRide: fc.turnRide,
     bookPrefixMessages: fc.bookPrefixMessages,
@@ -101,8 +99,11 @@ async function pauseAgentForNetworkDisconnect(fc, err) {
   }
   if (!partial?.body) return false;
   const fromGateway = isGatewayTransportDisconnectError(err);
+  // 层级标注：能走到这里说明请求级自动重连（llm_reconnect_wait，文案含剩余时长）
+  // 已经耗尽，与第一层「仍在自动重试」区分开，用户才不会对着同一次故障误判当前层级。
+  const reconnectExhausted = err?.code === 'LLM_RECONNECT_EXHAUSTED';
   showAgentToast(
-    fromGateway ? 'Gateway 连接中断' : '模型连接中断',
+    fromGateway ? 'Gateway 连接中断' : reconnectExhausted ? '模型自动重连已耗尽' : '模型连接中断',
     '可点击「继续」或发送「继续」从断点恢复',
     { variant: 'warn' }
   );

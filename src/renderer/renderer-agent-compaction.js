@@ -164,21 +164,6 @@ function formatCompactionProgressNote(payload) {
   return msg;
 }
 
-function applyCompactionProgressToThinking(payload) {
-  const note = formatCompactionProgressNote(payload);
-  if (!note || typeof agentPrepStepNote !== 'function') return note;
-  if (typeof sessionActiveRuns !== 'undefined' && sessionActiveRuns && typeof sessionActiveRuns.entries === 'function') {
-    for (const [sid, live] of sessionActiveRuns.entries()) {
-      if (!live || live.finished) continue;
-      const step = (live.prepSteps || []).find((s) => s && s.id === 'compact' && s.status === 'active');
-      if (step) agentPrepStepNote(sid, 'compact', note);
-    }
-  } else if (currentSessionId) {
-    agentPrepStepNote(currentSessionId, 'compact', note);
-  }
-  return note;
-}
-
 async function applyContextCompaction(body, opts = {}) {
   if (!body || !Array.isArray(body.messages)) {
     return { compacted: false };
@@ -229,17 +214,4 @@ async function applyContextCompaction(body, opts = {}) {
     return { compacted: true, tokensBefore: cr.tokensBefore, tokensAfter: cr.tokensAfter };
   }
   return { compacted: false };
-}
-
-async function maybeCompactBodyIfHeavy(body, opts = {}) {
-  if (!body || !Array.isArray(body.messages) || body.messages.length < 8) {
-    return { compacted: false };
-  }
-  try {
-    return await applyContextCompaction(body, opts);
-  } catch (err) {
-    if (isUserAbortError(err) || (err && err.name === 'AbortError')) throw err;
-    console.warn('mid-loop compaction skipped', err);
-    return { compacted: false, skipped: 'error', llmError: String(err && err.message ? err.message : err) };
-  }
 }

@@ -289,14 +289,14 @@ function resolveApiConfigForRoute(settings, route, opts = {}) {
     return strict ? cfg : resolveDefaultApiConfig(s);
   }
 
-  // plain：裸模型名 / custom-text / custom-vision 之类的路由记号
+  // plain：裸模型名（没有 custom: / builtin: 前缀的路由记号）
   const byName = listCustomModels(s).find((m) => String(m.name || '') === parsed.name);
   if (byName) {
     const options = mergedRequestOptions(byName, s);
     return asConfig(byName.baseUrl || s.baseUrl, byName.apiKey || s.apiKey, byName.name, options);
   }
   if (strict) {
-    // 记号不是模型名（如 custom-text），顶层 legacy 才是它的真实配置
+    // 记号不是任何模型名，顶层 legacy 才是它的真实配置
     const legacy = asConfig(s.baseUrl, s.apiKey, s.textModel, requestOptionsFrom(s));
     return isUsableApiConfig(legacy) ? legacy : asConfig('', '');
   }

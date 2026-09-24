@@ -49,11 +49,12 @@ impl Default for CompactionPrompts {
 #[serde(rename_all = "camelCase")]
 pub struct PrepareParams {
     pub messages: Vec<Value>,
-    #[serde(default = "default_budget")]
+    /// 三个预算参数**必填**：数值唯一来源是 JS 侧
+    /// （预算 `compaction-main.js:getEffectiveInputBudget`、触发比 `model-runtime-presets.js`、
+    /// 冷却 `COMPACTION_COOL_DOWN_ROUNDS`）。缺字段即 deserialize 报错，
+    /// 避免在 Rust 再存一份「看起来生效」的默认值。
     pub token_budget: usize,
-    #[serde(default = "default_trigger")]
     pub trigger_ratio: f64,
-    #[serde(default = "default_cooldown")]
     pub cool_down_rounds: i64,
     #[serde(default)]
     pub force: bool,
@@ -65,19 +66,8 @@ pub struct PrepareParams {
     pub prompts: CompactionPrompts,
 }
 
-/// 与 `model-runtime-presets.js` 的「默认」档（128K）对齐：
-/// 128_000 − 16_384(maxOutputTokens) − 16_384(contextReserveTokens)。
-fn default_budget() -> usize {
-    95_232
-}
-fn default_trigger() -> f64 {
-    0.85
-}
-fn default_cooldown() -> i64 {
-    6
-}
-
-/// 一次压缩尝试后写入的轮次计数（成功与失败共用）。必须 >0 且 < `default_cooldown()`：
+/// 一次压缩尝试后写入的轮次计数（成功与失败共用）。必须 >0 且 < 调用方传入的
+/// `cool_down_rounds`（Main 侧 `compaction-main.js:COMPACTION_COOL_DOWN_ROUNDS = 6`）：
 /// 计数为 0 时 `prepare` 的冷却条件（`>0 && < cool_down`）不成立，
 /// 压力未解除时会在下一轮立刻复压，每次最多拖住发送 90s。
 ///
@@ -85,10 +75,12 @@ fn default_cooldown() -> i64 {
 /// 冷却区，于是每一轮都重打一次注定失败的大请求（每轮白等一个 LLM 超时）。
 const POST_COMPACTION_ROUND_COUNT: i64 = 1;
 
+/// `prepare` 只判断「要不要压、压哪些」，**永不产出压缩结果**：
+/// 真正改写 messages 并置 `compacted = true` 的是 `apply`（经 `maybe_compact` 串联）。
+/// 因此这里没有 `compacted` 字段 —— 有它只会恒为 false，与 `ApplyResult.compacted` 同名不同义。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareResult {
-    pub compacted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_before: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +110,8 @@ pub struct ApplyParams {
     pub prompts: CompactionPrompts,
 }
 
+/// 只做重组：把折叠原子换成摘要 digest，并回填工具调用里出现过的文件路径。
+/// 折叠正文（`folded_transcript`）由 `prepare` 产出，不在这里复制一份（旧字段恒为空串）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyResult {
@@ -126,7 +120,6 @@ pub struct ApplyResult {
     pub tokens_before: usize,
     pub tokens_after: usize,
     pub summary: Value,
-    pub folded_transcript: String,
     pub pinned_user_count: usize,
 }
 
@@ -136,7 +129,6 @@ pub fn prepare(params: PrepareParams) -> Result<PrepareResult, crate::error::Cor
     let est = estimate_messages_tokens(&params.messages);
     if est < trigger {
         return Ok(PrepareResult {
-            compacted: false,
             tokens_before: Some(est),
             tokens_after: Some(est),
             need_llm: None,
@@ -155,7 +147,6 @@ pub fn prepare(params: PrepareParams) -> Result<PrepareResult, crate::error::Cor
         && params.compaction_round_count < params.cool_down_rounds
     {
         return Ok(PrepareResult {
-            compacted: false,
             tokens_before: Some(est),
             tokens_after: Some(est),
             need_llm: None,
@@ -171,7 +162,6 @@ pub fn prepare(params: PrepareParams) -> Result<PrepareResult, crate::error::Cor
 
     if compressible.len() < 2 {
         return Ok(PrepareResult {
-            compacted: false,
             tokens_before: Some(est),
             tokens_after: Some(est),
             need_llm: None,
@@ -221,7 +211,6 @@ pub fn prepare(params: PrepareParams) -> Result<PrepareResult, crate::error::Cor
                 params.prompts.incremental_system.clone()
             };
             return Ok(PrepareResult {
-                compacted: false,
                 tokens_before: Some(est),
                 tokens_after: None,
                 need_llm: Some(LlmCompactRequest {
@@ -262,14 +251,12 @@ pub fn prepare(params: PrepareParams) -> Result<PrepareResult, crate::error::Cor
 
     if to_fold.is_empty() {
         return Ok(PrepareResult {
-            compacted: false,
             tokens_before: Some(est),
             tokens_after: Some(est),
             need_llm: None,
         });
     }
 
-    let _ = _recent;
     let folded_atoms: Vec<Atom> = to_fold.iter().map(|i| atoms[*i].clone()).collect();
     let conversation = atoms::format_atoms_for_summary(&folded_atoms)
         .chars()
@@ -278,7 +265,6 @@ pub fn prepare(params: PrepareParams) -> Result<PrepareResult, crate::error::Cor
     let user = params.prompts.user.replace("{CONVERSATION}", &conversation);
 
     Ok(PrepareResult {
-        compacted: false,
         tokens_before: Some(est),
         tokens_after: None,
         need_llm: Some(LlmCompactRequest {
@@ -341,7 +327,6 @@ pub fn apply(params: ApplyParams) -> ApplyResult {
         tokens_before: est,
         tokens_after,
         summary: summary_json,
-        folded_transcript: String::new(),
         pinned_user_count: pinned,
     }
 }
@@ -398,9 +383,9 @@ pub async fn maybe_compact(
     let tokens_before = prep.tokens_before.unwrap_or(0);
 
     let Some(need) = prep.need_llm else {
-        if !prep.compacted {
-            round_count += 1;
-        }
+        // prepare 只判断（未到触发线 / 仍在冷却 / 可折叠原子不足），从不产出压缩结果；
+        // 走到这里就记「本轮未压」：轮次计数 +1，让冷却窗口随时间自然解除。
+        round_count += 1;
         return Ok(MaybeCompactResult {
             compacted: false,
             messages: source_messages,
@@ -452,11 +437,8 @@ pub async fn maybe_compact(
         folded_indices: need.folded_indices,
         prompts,
     });
-    let folded = if need.folded_transcript.is_empty() {
-        applied.folded_transcript.clone()
-    } else {
-        need.folded_transcript
-    };
+    // 折叠正文的唯一来源是 prepare 计算出的 `need.folded_transcript`（apply 只重组 messages）。
+    let folded = need.folded_transcript;
 
     Ok(MaybeCompactResult {
         compacted: true,
@@ -475,27 +457,19 @@ pub async fn maybe_compact(
     })
 }
 
+/// 只回答「这段 messages 值多少 token」。
+///
+/// 曾经的 `budget` / `trigger` / `overTrigger` 没有任何消费方（IPC 只传 `{ messages }`，
+/// 调用方只读 `tokens`），且需要在这里再存一份预算与触发比的默认值 —— 与 JS 侧
+/// `getEffectiveInputBudget` / `model-runtime-presets.js` 重复。触发线由
+/// `compaction.maybe_compact` 单点判定，UI 圆环自己算「已用 / 预算」，此处不再兜一份。
 pub fn estimate(params: &Value) -> Value {
     let messages = params
         .get("messages")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let budget = params
-        .get("tokenBudget")
-        .and_then(|v| v.as_u64())
-        .unwrap_or_else(|| default_budget() as u64) as usize;
-    let ratio = params
-        .get("triggerRatio")
-        .and_then(|v| v.as_f64())
-        .unwrap_or_else(default_trigger);
-    let used = estimate_messages_tokens(&messages);
-    json!({
-        "tokens": used,
-        "budget": budget,
-        "trigger": ((budget as f64 * ratio) as usize),
-        "overTrigger": used >= ((budget as f64 * ratio) as usize),
-    })
+    json!({ "tokens": estimate_messages_tokens(&messages) })
 }
 
 #[cfg(test)]
@@ -516,7 +490,6 @@ mod tests {
             prompts: CompactionPrompts::default(),
         })
         .unwrap();
-        assert!(!r.compacted);
         assert!(r.need_llm.is_none());
     }
 
@@ -677,10 +650,11 @@ mod tests {
         assert!(forced.need_llm.is_some(), "force must bypass cooldown");
     }
 
+    /// 冷却上界是调用方参数（`cool_down_rounds`，Main 侧 `COMPACTION_COOL_DOWN_ROUNDS = 6`），
+    /// Rust 不再存一份默认值；这里只守住「必须为正」这个本地不变量。
     #[test]
-    fn post_compaction_round_count_stays_inside_cooldown() {
+    fn post_compaction_round_count_is_positive() {
         assert!(POST_COMPACTION_ROUND_COUNT > 0);
-        assert!(POST_COMPACTION_ROUND_COUNT < default_cooldown());
     }
 
     /// LLM 失败后计数必须落回冷却起点（而不是递增）。
@@ -688,6 +662,8 @@ mod tests {
     #[tokio::test]
     async fn llm_failure_reenters_cooldown() {
         let huge = "x".repeat(80_000);
+        // 与 Main 侧 COMPACTION_COOL_DOWN_ROUNDS 同值，由调用方传入
+        const COOL_DOWN_ROUNDS: i64 = 6;
         // baseUrl 为空 → 直接返回 LLM_CONFIG 错误，不会发起真实网络请求
         let offline = crate::config::LlmConfig::default();
         let r = maybe_compact(
@@ -701,7 +677,7 @@ mod tests {
                     ],
                     token_budget: 8192,
                     trigger_ratio: 0.85,
-                    cool_down_rounds: 6,
+                    cool_down_rounds: COOL_DOWN_ROUNDS,
                     force: false,
                     compaction_round_count: 0,
                     cumulative_summary: None,
@@ -718,6 +694,6 @@ mod tests {
             r.compaction_round_count, POST_COMPACTION_ROUND_COUNT,
             "failure must re-enter cooldown instead of counting up"
         );
-        assert!(r.compaction_round_count < default_cooldown());
+        assert!(r.compaction_round_count < COOL_DOWN_ROUNDS);
     }
 }

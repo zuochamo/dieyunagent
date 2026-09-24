@@ -460,8 +460,8 @@ function pickAnyModelForContext(context) {
     const model = getTextModelId(settings);
     return {
       model,
-      route: model ? 'custom-text' : 'default',
-      apiConfig: getCustomModelApiConfig('custom-text')
+      route: 'default',
+      apiConfig: getCustomModelApiConfig('default')
     };
   }
   const pickedName = pickAutoBuiltinModelId(
@@ -522,8 +522,6 @@ function modelSupportsMultimodal(model, route) {
   }
   const id = String(model || '').trim();
   if (!id) return false;
-  const routeStr = String(route || '');
-  if (/^custom-vision|^auto-vision|custom:vision/.test(routeStr)) return true;
   const custom = (settings.customModels || []).find((m) => m && (m.name === id || m.id === id));
   if (custom) {
     return (
@@ -641,20 +639,6 @@ function resolveComposerModelForSend(text, opts = {}) {
         };
       }
     }
-    if (!resolved && sel.startsWith('custom:vision')) {
-      resolved = {
-        model: (settings.visionModel || getTextModelId(settings)).trim(),
-        route: 'custom-vision',
-        apiConfig: getCustomModelApiConfig('custom-vision')
-      };
-    }
-    if (!resolved && sel.startsWith('custom:text')) {
-      resolved = {
-        model: getTextModelId(settings),
-        route: 'custom-text',
-        apiConfig: getCustomModelApiConfig('custom-text')
-      };
-    }
     if (!resolved && sel.startsWith('builtin:')) {
       const parsed = parseBuiltinRoute(sel);
       const modelId = parsed?.modelId || '';
@@ -688,19 +672,6 @@ function resolveComposerModelForSend(text, opts = {}) {
     }
   }
 
-  if (ctx.needsVision && !modelSupportsMultimodal(resolved.model, resolved.route)) {
-    const vision =
-      typeof pickCustomVisionModel === 'function'
-        ? pickCustomVisionModel()
-        : window.ModelCapabilities?.pickVisionModel?.(settings) || null;
-    if (vision && vision.model) {
-      return {
-        model: vision.model,
-        route: `auto-vision:${vision.route}`,
-        apiConfig: vision.apiConfig
-      };
-    }
-  }
   return resolved;
 }
 
@@ -712,14 +683,6 @@ function getComposerModelDisplayLabel() {
     const id = sel.slice('custom:'.length);
     const model = (settings.customModels || []).find((m) => m.id === id);
     if (model) return model.name;
-  }
-  if (sel.startsWith('custom:vision')) {
-    const m = (settings.visionModel || '').trim();
-    return m || '识图模型';
-  }
-  if (sel.startsWith('custom:text')) {
-    const m = getTextModelId(settings);
-    return m || '文本模型';
   }
   if (sel.startsWith('builtin:')) {
     const parsed = parseBuiltinRoute(sel);

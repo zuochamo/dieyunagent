@@ -23,9 +23,6 @@ function applyFormValues(s) {
   if (cfg.baseUrl) cfg.baseUrl.value = s.baseUrl;
   if (cfg.apiKey) cfg.apiKey.value = s.apiKey;
   if (cfg.textModel) cfg.textModel.value = getTextModelId(s);
-  if (cfg.visionModel) cfg.visionModel.value = s.visionModel || DEFAULTS.visionModel;
-  if (cfg.visionBaseUrl) cfg.visionBaseUrl.value = s.visionBaseUrl || '';
-  if (cfg.visionApiKey) cfg.visionApiKey.value = s.visionApiKey || '';
   if (cfg.system) cfg.system.value = s.system;
 }
 
@@ -1110,9 +1107,6 @@ function applyDeployUiDefaults(_deployUiDefaults) {}
 
 window.applyDeployUiDefaults = applyDeployUiDefaults;
 window.getSpeechApiConfig = getSpeechApiConfig;
-window.getVisionApiConfig = getVisionApiConfig;
-window.pickCustomVisionModel = pickCustomVisionModel;
-window.pickVisionModel = pickCustomVisionModel;
 window.getModelRuntimeValues = getModelRuntimeValues;
 window.setModelRuntimeValues = setModelRuntimeValues;
 window.resetModelRuntimeValues = resetModelRuntimeValues;

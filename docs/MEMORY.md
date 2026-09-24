@@ -226,9 +226,9 @@ buildSystemMessage()  →  system 块（技能、dieyun.md、长期记忆、工�
 |------|------|
 | 实现 | Main `compaction-main.js` → Rust `compaction.maybe_compact`（Renderer 经 IPC，无本地 LLM） |
 | 预算 | `窗口 − maxOutputTokens − contextReserveTokens`；**工具 schema 超出预留的部分再从这里扣**（封顶 25%），因为 tools 占窗口却不进 messages |
-| 触发 | 估算 token ≥ 预算 × `triggerRatio`（默认档 0.85）；工具轮中 `messages.length > 24` 或字符数超半也会尝试，再由 Rust 侧 token 阈值与冷却裁决 |
+| 触发 | **唯一决策点**：Rust `maybe_compact` 的 `prepare` —— 估算 token ≥ 预算 × `triggerRatio`（默认档 0.85）且不在冷却期才压。Node 侧只搬运，不再有「条数 / 字符比」预判（那套拿不到真 token 账本，必然与 Rust 分叉） |
 | 策略 | 消息**原子分组**（`assistant.tool_calls` + 对应 `tool` 不拆散）；保留最近若干 atom；中间段用 LLM 摘要。摘要提示与折叠集合同源，不会出现「被折叠却未摘要」的段落 |
-| 冷却 | `coolDownRounds`（默认 6）；压缩成功后轮次计数置 1（不是 0），否则下一轮冷却不成立会连续复压；`force` 可穿透冷却（上下文溢出兜底） |
+| 冷却 | `coolDownRounds`（Main `COMPACTION_COOL_DOWN_ROUNDS = 6`，作为必传参数给 Rust，Rust 不再存默认值）；压缩成功后轮次计数置 1（不是 0），否则下一轮冷却不成立会连续复压；`force` 可穿透冷却（上下文溢出兜底） |
 | 落库 | `memory.compaction_archive` → `compaction_archives`；下轮 `memory.compaction_recent` 投影进 turn-ride |
 | 累计摘要 | Main 内存 `cumulativeSummary`；进程重启后从最近一条 archive 补水 |
 | 续跑 / 验收重试 | 从发送时快照的账本前缀 + 本轮工具尾巴重投影；丢掉内存里压过的中间历史（摘要走 turn-ride） |

@@ -40,18 +40,20 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
   const checkpointRunId = runOpts.runId || live?.runId || createTraceRunId();
   const runWorkspacePath = live?.workspacePath || null;
   const runUndoTurnId = runOpts.undoTurnId || live?.undoTurnId || null;
+  // 本轮 contextTierId 单一来源：既给执行上下文，也随 planner payload 下传
+  // （rust-planner-runner 用它解析 loopSpec，避免 planner 子循环落 'default' 档）。
+  const runContextTierId =
+    typeof resolveContextTierId === 'function'
+      ? resolveContextTierId({ sessionId: runSessionId })
+      : 'default';
   if (typeof setAgentExecutionContext === 'function') {
-    const contextTierId =
-      typeof resolveContextTierId === 'function'
-        ? resolveContextTierId({ sessionId: runSessionId })
-        : 'default';
     setAgentExecutionContext({
       runId: checkpointRunId,
       worktreePath: runOpts.worktreePath || null,
       workspacePath: runWorkspacePath,
       sessionId: runSessionId,
       undoTurnId: runUndoTurnId,
-      contextTierId
+      contextTierId: runContextTierId
     });
     // 禁止按会话改写全局 CTX_LIMITS：并行 run 会互相覆盖 snippet/工具上限
   }
@@ -164,13 +166,12 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
               userText: runOpts.userText,
               userContent: runOpts.userContent,
               hasImages: !!runOpts.hasImages,
-              visionModel: runOpts.visionModel,
-              visionApiConfig: runOpts.visionApiConfig,
               sysContent: runOpts.sysContent,
               chatHistoryBlock: runOpts.chatHistoryBlock || '',
               tools,
               apiConfig: runOpts.apiConfig,
               model: payload?.model,
+              contextTierId: runContextTierId,
               resumeFromRunId: resumeCheckpoint?.runId || null,
               plannerBestOfN: typeof getPlannerBestOfN === 'function' ? getPlannerBestOfN() : 0,
               longHorizon: !!longHorizon

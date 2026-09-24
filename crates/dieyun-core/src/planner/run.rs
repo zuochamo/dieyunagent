@@ -449,10 +449,7 @@ impl PlannerRunManager {
                         obj.insert(
                             "llmBody".into(),
                             build_synthesize_llm_body(
-                                run.params
-                                    .vision_model
-                                    .as_deref()
-                                    .unwrap_or(&run.params.model),
+                                &run.params.model,
                                 &run.params.sys_content,
                                 plan,
                                 &results_json,
@@ -1141,7 +1138,6 @@ mod tests {
             max_output_tokens: 8192,
             temperature: 0.7,
             resume_checkpoint: None,
-            vision_model: None,
             max_tool_calls: None,
         }
     }

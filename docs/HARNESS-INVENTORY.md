@@ -83,8 +83,8 @@
 | `browser/url-policy.js:39,44,185` | 255 / 2 / 443·80 | IPv4 段、TLD 长度、默认端口 |
 | `agent/guardrails-shared.js:146-152,226` | 500 / 2 | 参数截断、止损下限 |
 | `agent/agent-system-prompt.js:156,163` | 8000 / 16000 | user system / stable 兜底帽 |
-| `agent/compaction-main.js:57,59,81` | 0.25 / 6 | 工具 schema 扣减封顶比例、冷却轮数（对齐 Rust `default_cooldown`）；字符→token 折算改为读 `agent-limits.js:57-58` |
-| `agent/rust-loop-runner.js:34,35` | 24 / 0.5 | 中循环压缩的消息数门槛（对齐 `completionRecentTurns`）、字符占比门槛 |
+| `agent/compaction-main.js:73,97,103` | 0.25 / 6 / 1 | 工具 schema 扣减封顶比例、冷却轮数（**唯一来源**，Rust 已无默认值，缺参即报错）、压缩后轮次计数；字符→token 折算读 `agent-limits.js` |
+| `agent/rust-loop-runner.js:38-41,46` | 30000 / 30000 / 600000 / 300000 / 2 | loop RPC 超时、单轮图片自愈次数；**不再有**条数 / 字符比压缩门槛（压缩判据单点在 Rust） |
 | `lsp/diagnostics-service.js` | `LSP_SETTINGS_DEFAULTS`：maxFiles 6 / maxPerFile 20 / timeoutMs 8000 | LSP 文件数 · 条数 · 超时的**唯一来源**；`agent-limits.lspDiagMaxChars` 只管注入字符上限 |
 
 > `renderer/renderer-context-engine.js` 的 `CTX_LIMITS`、`agent/session-context.js` 的 `DEFAULT_COMPLETION_CAPS`、`agent/system-prompt-prep.js` 的 `DEFAULT_LIMITS` 已改为**从 `agent-limits.js` 映射**（`ctxAgentLimitDefault` / `completionCapDefault`），不再各存一份默认值；其中的兜底字面量只在 agent-limits 未加载时命中。
@@ -101,7 +101,7 @@
 | `memory/mod.rs` | `MEMORY_EMBED_TEXT_MAX=6000`:17、`count<4000`:180、`rn<=2`:193、`clamp(1,500)`:450、`take(120)`:546、`take(80)`:270、`clamp(1,50)`:818,1063、阈值 `<=0.05`:857,1101,1168、`LIMIT 1000`:829,1075、`take(4000)`:907、`take(200_000)`:923、`clamp(1,5)`:1260 |
 | `memory/keyword.rs` | 权重 `0.65`:140 `0.25`:141 `0.035`:142 `0.08`:143、stale `-0.15`:138、时龄 180 天:148 |
 | `compaction/llm.rs` | `3`:10 `800`:11 `3000`:12 `60_000`:13 `180_000`:15 `3`:16 `5_000`:17 `75`:19、`min(4)`:108、温度 `0.15`:141、`max_tokens=4096`:142 |
-| `compaction/mod.rs` + `atoms.rs` | budget `95_232`:71 `0.85`:74 cooldown `6`:77 `POST_COMPACTION_ROUND_COUNT=1`:83 `max(8192)`:131 `clamp(0.3,0.95)`:132、`recent_budget=budget*0.42`:239、keep `len*0.3`:252、`take(32_000/48_000/120_000)`、正文截断 6000/4000 |
+| `compaction/mod.rs` + `atoms.rs` | `POST_COMPACTION_ROUND_COUNT=1`:76 `max(8192)`:125 `clamp(0.3,0.95)`:126、`recent_budget=budget*0.42`:233、keep `len*0.3`:246、`take(32_000/48_000/120_000)`、正文截断 6000/4000（预算 / 触发比 / 冷却轮数已改为**调用方必传**，Rust 不再存默认值） |
 | `index/search.rs` | `SEARCH_LIMIT_MAX=48`:12、`limit*6`:87、权重 `0.35`:94 `0.3`:119 `0.55`:290 `0.6`:435、阈值 `0.05`:116,286、`LIMIT 8000`:104、`chunks(400)`:241、`take(12/900)`:357,361 |
 | `graph/query.rs` | depth `clamp(1,8)`:29 / `clamp(1,12)`:402、limit `clamp(1,80)`:79,163 / `clamp(8,64)`:671、权重 `+0.35`:308 `+0.15`:310、阈值 `0.05`:312、渲染 `take(16/28/24/4)` |
 | `index/walker.rs` | `SNIFF_BYTES=8192`:45、`MAX_SNIFF_FILE_BYTES=2MB`:46、阈值 `0.85`:167 / `0.92`:170 |

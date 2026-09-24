@@ -523,8 +523,10 @@ async function runRustAgentLoop(opts) {
 
   let llmRound = 0;
   let lastCheckpoint = null;
-  // 本轮 run 是否已尝试过压缩（成功与否都算）：再次溢出只停不重试，
-  // 否则会每轮空转一次注定失败的压缩。成败与跳过原因单独记下，供停止文案如实说明。
+  // 本轮 run 是否已用掉「溢出强制压缩」这一次重试：预检真压过、或强压已经试过
+  // （无论成败）都置位 —— 再次溢出只停不重试，否则会每轮空转一次注定失败的压缩。
+  // 注意预检未压成时**不**置位（那次 chance 留给真溢出时的强制压缩）。
+  // 成败与跳过原因单独记在 overflowCompaction，供停止文案如实说明。
   let overflowCompactionAttempted = false;
   let overflowCompaction = null;
   let activeRunId = '';

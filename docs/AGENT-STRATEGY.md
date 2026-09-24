@@ -90,7 +90,7 @@ flowchart TD
 
 完成验收默认只走规则门 + 诊断（`verifyAgentCompletionReadiness`）：诊断 error / 测试失败会提示用户，不自动续跑。LLM Reviewer **非默认**。
 
-流式：SSE 中断时把已收到的 `content`/`reasoning` 挂到 error.partial；重试/非流式回退时合并；重连耗尽则 `llm_partial_recovered` 用残片继续，而不是整轮空白失败。
+流式：SSE 中断时把已收到的 `content`/`reasoning` 挂到 error.partial；重试/非流式回退时合并；重连耗尽且已有残片时，直接用残片走正常 `llm_response` 通道继续，而不是整轮空白失败（不再单独发「已恢复」事件）。
 
 ---
 
@@ -122,7 +122,7 @@ flowchart TD
 | `src/agent/agent-limits.js` | `taskTierEnabled` |
 | `src/agent/tool-harness.js` | run 级指纹止损 |
 | `src/llm-stream-utils.js` | `mergeMissingReasoning` / `attachPartialStreamError` |
-| `src/agent/rust-loop-runner.js` | 流式残片合并与 `llm_partial_recovered` |
+| `src/agent/rust-loop-runner.js` | 流式残片合并（重连耗尽直接用残片续走 `llm_response`） |
 | `src/renderer/renderer-agent-send.js` | 发送前分类 |
 | `src/renderer/agent-guardrails.js` | 完成验收规则门 |
 | `src/renderer/renderer-agent-reviewer.js` | 可选 files+diff Reviewer |

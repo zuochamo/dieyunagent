@@ -126,24 +126,6 @@
     return null;
   }
 
-  function pickVisionModel(settings) {
-    const s = settings && typeof settings === 'object' ? settings : {};
-    const customVision = (s.customModels || []).find(
-      (m) => m && m.kind === 'vision' && m.name && m.baseUrl
-    );
-    if (customVision) {
-      return {
-        model: String(customVision.name).trim(),
-        route: `custom:${customVision.id}`,
-        source: 'custom',
-        apiConfig: customModelApiConfig(customVision)
-      };
-    }
-    const supplierHit = findSupplierModelByModality(s, 'vision');
-    if (supplierHit) return { ...supplierHit, source: 'supplier' };
-    return null;
-  }
-
   function pickSpeechModel(settings) {
     const s = settings && typeof settings === 'object' ? settings : {};
     const customSpeech = (s.customModels || []).find(
@@ -160,22 +142,6 @@
     const supplierHit = findSupplierModelByModality(s, 'speech');
     if (supplierHit) return { ...supplierHit, source: 'supplier' };
     return null;
-  }
-
-  function getVisionApiConfigFromSettings(settings) {
-    const pick = pickVisionModel(settings);
-    if (!pick) return { baseUrl: '', apiKey: '', model: '' };
-    const cfg = pick.apiConfig || {};
-    // 保留请求修饰字段：视觉模型同样可能要求自定义头 / User-Agent
-    const out = {
-      baseUrl: String(cfg.baseUrl || '').trim(),
-      apiKey: String(cfg.apiKey || '').trim(),
-      model: String(pick.model || '').trim()
-    };
-    if (cfg.authMode) out.authMode = String(cfg.authMode).trim();
-    if (cfg.userAgent) out.userAgent = String(cfg.userAgent).trim();
-    if (cfg.headers) out.headers = cfg.headers;
-    return out;
   }
 
   function getSpeechApiConfigFromSettings(settings) {
@@ -199,7 +165,6 @@
     const id = String(modelId || '').trim();
     if (!id) return false;
     const routeStr = String(route || '');
-    if (/^custom-vision|^auto-vision|custom:vision/.test(routeStr)) return true;
 
     const s = settings && typeof settings === 'object' ? settings : {};
     const custom = (s.customModels || []).find((m) => m && (m.name === id || m.id === id));
@@ -255,9 +220,7 @@
     supplierModelSupportsMultimodal,
     parseBuiltinRoute,
     findSupplierModelByModality,
-    pickVisionModel,
     pickSpeechModel,
-    getVisionApiConfigFromSettings,
     getSpeechApiConfigFromSettings,
     modelSupportsMultimodalInSettings,
     supplierModalitySummary,

@@ -91,8 +91,9 @@ function getCompactionTriggerRatio(settings) {
 }
 
 /**
- * 冷却轮数：与 Rust `default_cooldown()` 对齐。
- * 一次压缩尝试（无论成功或失败）都会写入 POST_COMPACTION_ROUND_COUNT，使冷却真正生效。
+ * 冷却轮数：作为**必传参数**交给 Rust（Rust `prepare` 无默认值，缺参即报错）。
+ * 这里是该值的唯一来源；一次压缩尝试（无论成功或失败）都会写入
+ * POST_COMPACTION_ROUND_COUNT，使冷却真正生效。
  */
 const COMPACTION_COOL_DOWN_ROUNDS = 6;
 

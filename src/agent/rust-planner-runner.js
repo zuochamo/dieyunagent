@@ -270,7 +270,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   }
 
   const enabledBestOfN = plannerBestOfNFromPayload(payload, settings);
-  const loopSpec = resolveAgentLoopSpec(settings, deps.userData);
+  // 与主链同层：Renderer 传入本轮 contextTierId，planner 子循环的首包 / 静默 / 重连
+  // 参数才能落在与主对话相同的档位（原先缺省落 'default'）。
+  const loopSpec = resolveAgentLoopSpec(settings, deps.userData, payload.contextTierId);
   const plannerReconnect = {
     baseDelayMs: loopSpec.llmRetryBaseMs,
     maxDelayMs: loopSpec.llmMaxRetryDelayMs,
@@ -293,7 +295,6 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     bestOfN: enabledBestOfN,
     maxOutputTokens: Math.min(240000, Math.max(1, Number(settings.maxOutputTokens || settings.maxTokens || 8192))),
     temperature: Number(settings.temperature) || 0.7,
-    visionModel: payload.visionModel || payload.model || settings.textModel,
     maxToolCalls: loopMaxToolCalls,
     resumeCheckpoint: resumeCheckpoint?.ok ? resumeCheckpoint.data || resumeCheckpoint : null
   };

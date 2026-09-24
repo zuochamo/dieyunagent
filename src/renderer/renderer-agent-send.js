@@ -1,4 +1,4 @@
-/* global isSessionSwitchInFlight, loopApi, currentSessionId, cleanupStaleSessionRun, resolveComposerModelForSend, attachmentNeedsVision, getCustomModelApiConfig, appendBubble, isCurrentSessionSending, getAgentContinueState, resumeAgentToolLoop, clearAgentContinueState, closeStaleAgentRunForSession, getPendingResumeCheckpoint, tryDetectResumeCheckpoint, clearPendingResumeCheckpoint, cloneAttachmentSnapshot, getPendingAttachments, appendUserTurn, setComposerSendingState, isImageAttachment, revokeAttachmentPreview, renderAttachmentChips, processAttachmentsForSend, syncComposerForActiveSession, focusChatInput, invalidateSessionMessageCache, packUserMessageMeta, messages, setMessagesOwnerSessionId, getMessagesOwnerSessionId, messagesBelongToSession, getSessionMessageCache, selectHistoryMessagesForSession, cloneHistoryMessages, renderChatFromMessages, gwState, resolveSessionWorkspacePath, bindCurrentSessionWorkspace, gatewayCall, sessionListTitle, refreshHistoryList, createTraceRunId, getComposerLongHorizon, getComposerAgentMode, resetActiveRunContextUiState, beginComposerUsageAttribution, sessionActiveRuns, refreshContextProgress, throwIfAgentAborted, waitForAgentAbortable, isRemoteSessionWorkspacePath, syncSessionRemoteLease, finishSessionActiveRun, finalizeAssistantBubble, initAgentPrepSteps, renderAssistantBubbleContent, scrollChatToBottom, agentPrepStepStart, beginTurnUndo, agentPrepStepDone, agentPrepStepSkip, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, buildSystemMessage, buildAgentTools, buildExploreTools, buildExploreCoordinatorTools, setSessionContextEstimate, estimateToolsTokens, modelSupportsMultimodal, stripMultimodalFromPrepared, extractPreparedImageParts, composerModeLabel, formatModelFooterLabel, resolveUserMsgCreatedAt, canMutateViewMessages, getVisionApiConfig, settings, pickCustomVisionModel, buildPlannerVisionSupplement, buildCompletionMessages, unwrapSystemPromptPack, joinPromptChunks, getMaxOutputTokens, applyContextCompaction, shortenCompactionLlmMessage, buildSessionChatHistoryBlock, runAgentCompletion, pauseAgentForToolLimit, completeAgentRunAfterSuccess, finishAgentPrepPhase, isUserAbortError, resolveStoppedDisplayTrace, resolveFailedDisplayTrace, normalizeStoppedTrace, getLastAgentDisplayedTrace, buildFallbackTurnMeta, finalizeUndoForUserTurn, buildStoppedFooterMeta, persistStoppedAssistant, finalizeUserTurnFooter, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, formatAgentApiError, persistFailedAssistantTurn, scheduleWorktreePolicyCleanup, autoCloseBrowserAfterAgentRun, isTaskTierFeatureEnabled, inferTaskTierFromStructure, extractPathHintsFromText, textHasCodebaseMention, getAgentLimits, fetchChatCompletion, pauseComposerQueueAfterUserStop */
+/* global isSessionSwitchInFlight, loopApi, currentSessionId, cleanupStaleSessionRun, resolveComposerModelForSend, attachmentNeedsVision, getCustomModelApiConfig, appendBubble, isCurrentSessionSending, getAgentContinueState, resumeAgentToolLoop, clearAgentContinueState, closeStaleAgentRunForSession, getPendingResumeCheckpoint, tryDetectResumeCheckpoint, clearPendingResumeCheckpoint, cloneAttachmentSnapshot, getPendingAttachments, appendUserTurn, setComposerSendingState, isImageAttachment, revokeAttachmentPreview, renderAttachmentChips, processAttachmentsForSend, syncComposerForActiveSession, focusChatInput, invalidateSessionMessageCache, packUserMessageMeta, messages, setMessagesOwnerSessionId, getMessagesOwnerSessionId, messagesBelongToSession, getSessionMessageCache, selectHistoryMessagesForSession, cloneHistoryMessages, renderChatFromMessages, gwState, resolveSessionWorkspacePath, bindCurrentSessionWorkspace, gatewayCall, sessionListTitle, refreshHistoryList, createTraceRunId, getComposerLongHorizon, getComposerAgentMode, resetActiveRunContextUiState, beginComposerUsageAttribution, sessionActiveRuns, refreshContextProgress, throwIfAgentAborted, waitForAgentAbortable, isRemoteSessionWorkspacePath, syncSessionRemoteLease, finishSessionActiveRun, finalizeAssistantBubble, initAgentPrepSteps, renderAssistantBubbleContent, scrollChatToBottom, agentPrepStepStart, beginTurnUndo, agentPrepStepDone, agentPrepStepSkip, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, buildSystemMessage, buildAgentTools, buildExploreTools, buildExploreCoordinatorTools, setSessionContextEstimate, estimateToolsTokens, modelSupportsMultimodal, extractPreparedImageParts, composerModeLabel, formatModelFooterLabel, resolveUserMsgCreatedAt, canMutateViewMessages, settings, buildCompletionMessages, unwrapSystemPromptPack, joinPromptChunks, getMaxOutputTokens, buildSessionChatHistoryBlock, runAgentCompletion, pauseAgentForToolLimit, completeAgentRunAfterSuccess, finishAgentPrepPhase, isUserAbortError, resolveStoppedDisplayTrace, resolveFailedDisplayTrace, normalizeStoppedTrace, getLastAgentDisplayedTrace, buildFallbackTurnMeta, finalizeUndoForUserTurn, buildStoppedFooterMeta, persistStoppedAssistant, finalizeUserTurnFooter, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, formatAgentApiError, persistFailedAssistantTurn, scheduleWorktreePolicyCleanup, autoCloseBrowserAfterAgentRun, isTaskTierFeatureEnabled, inferTaskTierFromStructure, extractPathHintsFromText, textHasCodebaseMention, getAgentLimits, fetchChatCompletion, pauseComposerQueueAfterUserStop */
 'use strict';
 
 function rejectAgentServiceTask(requestId, sessionId, error) {
@@ -563,8 +563,12 @@ async function executeSendPrepAndRun(state) {
   let effectivePrepared = prepared;
   const canSendImages = prepared.hasImages && modelSupportsMultimodal(composerModel, route);
   if (prepared.hasImages && !canSendImages) {
-    effectivePrepared = stripMultimodalFromPrepared(prepared);
-  } else if (canSendImages) {
+    // 图片只能交给多模态模型自己看：不换模型、不中继、也不静默丢弃附件
+    throw new Error(
+      `当前模型「${composerModel || '未设置'}」不支持识图，无法处理图片附件。请在「模型设置」中把它设为全模态，或切换到支持识图的模型后重发。`
+    );
+  }
+  if (canSendImages) {
     const plain = String(turnWithdrawMeta.inputText || '').trim() || '请根据附件图片协助我。';
     const imageParts = extractPreparedImageParts(prepared);
     effectivePrepared = {
@@ -595,51 +599,7 @@ async function executeSendPrepAndRun(state) {
       ...state.turnMeta
     };
   }
-  const useVisionApi = canSendImages || /^auto-vision|custom-vision/.test(route || '');
-  // 兜底配置同样要带请求修饰字段（顶层 settings 也可以配自定义头 / User-Agent）
-  const visionFallback = {
-    ...(window.DieyunModelApiConfig?.requestOptionsFrom?.(settings) || {}),
-    baseUrl: getVisionApiConfig().baseUrl || settings.baseUrl,
-    apiKey: getVisionApiConfig().apiKey || settings.apiKey
-  };
-  const apiConfig = useVisionApi
-    ? resolvedComposerApiConfig || visionFallback
-    : resolvedComposerApiConfig || getCustomModelApiConfig(route);
-  if (/^custom-/.test(route || '')) {
-    // 逐字段覆盖时必须一并带上请求修饰字段，否则 custom-* 路由会丢掉自定义头 / User-Agent
-    const customApiConfig = getCustomModelApiConfig(route);
-    apiConfig.baseUrl = customApiConfig.baseUrl;
-    apiConfig.apiKey = customApiConfig.apiKey;
-    if (customApiConfig.authMode) apiConfig.authMode = customApiConfig.authMode;
-    if (customApiConfig.userAgent) apiConfig.userAgent = customApiConfig.userAgent;
-    if (customApiConfig.headers) apiConfig.headers = customApiConfig.headers;
-  }
-  const plannerVisionPick =
-    prepared.hasImages && typeof pickCustomVisionModel === 'function'
-      ? pickCustomVisionModel()
-      : null;
-  const visionApiConfig = prepared.hasImages ? getVisionApiConfig() : null;
-  let plannerUserText = fullText;
-  if (
-    execUsesPlanner &&
-    prepared.hasImages &&
-    !canSendImages &&
-    visionApiConfig?.model &&
-    visionApiConfig?.baseUrl
-  ) {
-    const supplement = await waitForAgentAbortable(
-      buildPlannerVisionSupplement(prepared, {
-        visionModel: plannerVisionPick?.model || visionApiConfig.model,
-        visionApiConfig,
-        signal: runAbortController.signal
-      }),
-      runAbortController.signal
-    );
-    throwIfAgentAborted(runAbortController.signal);
-    if (supplement) {
-      plannerUserText = fullText + '\n\n【Plan 视觉补充】\n' + supplement;
-    }
-  }
+  const apiConfig = resolvedComposerApiConfig || getCustomModelApiConfig(route);
   const payload = {
     model: composerModel,
     messages: buildCompletionMessages(
@@ -653,35 +613,9 @@ async function executeSendPrepAndRun(state) {
     max_tokens: getMaxOutputTokens()
   };
   const bookPrefixMessages = Array.isArray(payload.messages) ? payload.messages.slice() : [];
-  if (typeof agentPrepStepStart === 'function') agentPrepStepStart(runSessionId, 'compact');
-  const compactResult = await waitForAgentAbortable(
-    applyContextCompaction(payload, {
-      signal: runAbortController.signal,
-      apiConfig,
-      sessionId: runSessionId
-    }),
-    runAbortController.signal
-  );
-  if (compactResult && compactResult.compacted) {
-    if (typeof agentPrepStepDone === 'function') agentPrepStepDone(runSessionId, 'compact');
-  } else if (compactResult && compactResult.skipped === 'llm_error') {
-    const detail =
-      typeof shortenCompactionLlmMessage === 'function'
-        ? `已跳过：${shortenCompactionLlmMessage(compactResult.llmError)}`
-        : '已跳过：模型请求失败';
-    if (typeof agentPrepStepSkip === 'function') agentPrepStepSkip(runSessionId, 'compact', detail);
-    else if (typeof agentPrepStepDone === 'function') agentPrepStepDone(runSessionId, 'compact');
-  } else if (compactResult && compactResult.skipped === 'content_policy') {
-    if (typeof agentPrepStepSkip === 'function') {
-      agentPrepStepSkip(runSessionId, 'compact', '内容审核拦截');
-    } else if (typeof agentPrepStepDone === 'function') {
-      agentPrepStepDone(runSessionId, 'compact');
-    }
-  } else if (typeof agentPrepStepSkip === 'function') {
-    agentPrepStepSkip(runSessionId, 'compact', '未触发');
-  } else if (typeof agentPrepStepDone === 'function') {
-    agentPrepStepDone(runSessionId, 'compact');
-  }
+  // 压缩预检的唯一入口在 Rust 循环起步处（renderer-agent-rust-loop.js 的 compact_preflight，
+  // 判据单一来源 Rust compaction::maybe_compact）。此处不再预检：同一次发送里第二次预检
+  // 必因冷却空转，白付一次 RPC + 一次设置读盘，且两处判定会分叉。
   throwIfAgentAborted(runAbortController.signal);
   if (typeof agentPrepStepStart === 'function') agentPrepStepStart(runSessionId, 'llm');
   state.agentRunFrame = {
@@ -695,7 +629,7 @@ async function executeSendPrepAndRun(state) {
     userMsgIndex,
     userGatewayPersist,
     turnWithdrawMeta,
-    fullText: plannerUserText,
+    fullText,
     composerModel,
     apiConfig,
     // 计划创建（plan_create）要按本次实际路由解析模型配置，续跑/定时执行都靠它
@@ -705,8 +639,6 @@ async function executeSendPrepAndRun(state) {
     agentRunId,
     userContent: effectivePrepared.content,
     hasImages: effectivePrepared.hasImages,
-    visionModel: plannerVisionPick?.model || null,
-    visionApiConfig,
     sysContent: sysStable,
     turnRide,
     bookPrefixMessages,
@@ -725,11 +657,9 @@ async function executeSendPrepAndRun(state) {
     apiConfig,
     sessionId: runSessionId,
     undoTurnId: turnWithdrawMeta.undoTurnId || null,
-    userText: plannerUserText,
+    userText: fullText,
     userContent: effectivePrepared.content,
     hasImages: effectivePrepared.hasImages,
-    visionModel: state.agentRunFrame.visionModel,
-    visionApiConfig,
     sysContent: sysStable,
     chatHistoryBlock,
     forcePlanner: execUsesPlanner,

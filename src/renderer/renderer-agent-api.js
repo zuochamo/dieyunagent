@@ -9,7 +9,7 @@ if (typeof window !== 'undefined') {
   window.buildAgentSegmentContinuePartial = buildAgentSegmentContinuePartial;
   if (agentApi.onCompactionProgress) {
     agentApi.onCompactionProgress((payload) => {
-      const note = applyCompactionProgressToThinking(payload);
+      const note = formatCompactionProgressNote(payload);
       if (!note || typeof window === 'undefined') return;
       try {
         window.dispatchEvent(

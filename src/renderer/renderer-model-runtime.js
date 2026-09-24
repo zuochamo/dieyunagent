@@ -54,9 +54,6 @@ var DEFAULTS = {
   baseUrl: DEFAULT_BUILTIN_BASE_URL,
   apiKey: DEFAULT_BUILTIN_API_KEY,
   textModel: 'mimo-v2.5-pro',
-  visionModel: 'qwen3.6-plus',
-  visionBaseUrl: '',
-  visionApiKey: '',
   builtinBaseUrl: DEFAULT_BUILTIN_BASE_URL,
   builtinApiKey: DEFAULT_BUILTIN_API_KEY,
   // 身份/人设的唯一来源是 ~/.dieyun/dieyun.md（模板 assets/dieyun.md）与
@@ -534,7 +531,6 @@ function normalizeSettings(raw) {
     ];
   }
   const firstText = s.customModels.find((m) => m.kind === 'text');
-  const firstVision = s.customModels.find((m) => m.kind === 'vision');
   const firstSpeech = s.customModels.find((m) => m.kind === 'speech');
   if (firstText) {
     s.textModel = firstText.name;
@@ -544,15 +540,6 @@ function normalizeSettings(raw) {
     s.textModel = '';
     s.baseUrl = '';
     s.apiKey = '';
-  }
-  if (firstVision) {
-    s.visionModel = firstVision.name;
-    s.visionBaseUrl = firstVision.baseUrl || s.baseUrl || '';
-    s.visionApiKey = firstVision.apiKey || s.apiKey || '';
-  } else {
-    s.visionModel = '';
-    s.visionBaseUrl = '';
-    s.visionApiKey = '';
   }
   if (firstSpeech) {
     s.speechWhisperModel = firstSpeech.name;
@@ -706,11 +693,6 @@ function getComposerSelectedApiConfig() {
   return null;
 }
 
-function getVisionModelId(s) {
-  const x = s || settings;
-  return String(x.visionModel || getTextModelId(x) || '').trim();
-}
-
 function getSpeechApiConfig(s) {
   if (window.ModelCapabilities?.getSpeechApiConfigFromSettings) {
     return window.ModelCapabilities.getSpeechApiConfigFromSettings(s || settings);
@@ -729,17 +711,6 @@ function getSpeechApiConfig(s) {
     apiKey: String(x.speechApiKey || x.apiKey || '').trim(),
     model: String(x.speechWhisperModel || 'whisper-1').trim() || 'whisper-1'
   };
-}
-
-function pickCustomVisionModel(s) {
-  return window.ModelCapabilities?.pickVisionModel?.(s || settings) || null;
-}
-
-function getVisionApiConfig(s) {
-  if (window.ModelCapabilities?.getVisionApiConfigFromSettings) {
-    return window.ModelCapabilities.getVisionApiConfigFromSettings(s || settings);
-  }
-  return { baseUrl: '', apiKey: '', model: '' };
 }
 
 /** 共享的「路由 → API 配置」单一来源（src/agent/model-api-config.js，经 dist/agent-bundle.js 提供）。 */
@@ -800,13 +771,6 @@ function getCustomModelApiConfig(route) {
       selected.baseUrl || settings.baseUrl,
       selected.apiKey || settings.apiKey,
       selected
-    );
-  }
-  if (route === 'custom-vision') {
-    return apiConfigOf(
-      getVisionApiConfig().baseUrl || settings.baseUrl,
-      getVisionApiConfig().apiKey || settings.apiKey,
-      settings
     );
   }
   return apiConfigOf(settings.baseUrl, settings.apiKey, settings);
@@ -918,9 +882,6 @@ var cfg = {
   baseUrl: $('cfg-base-url'),
   apiKey: $('cfg-api-key'),
   textModel: $('cfg-text-model'),
-  visionModel: $('cfg-vision-model'),
-  visionBaseUrl: $('cfg-vision-base-url'),
-  visionApiKey: $('cfg-vision-api-key'),
   system: $('cfg-system')
 };
 

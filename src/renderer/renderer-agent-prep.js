@@ -9,7 +9,6 @@ const AGENT_PREP_STEP_DEFS = Object.freeze([
   { id: 'memory', label: '加载项目记忆' },
   { id: 'skills_mcp', label: '加载技能 / MCP' },
   { id: 'tools', label: '组装工具列表' },
-  { id: 'compact', label: '压缩上下文' },
   { id: 'llm', label: '请求模型' }
 ]);
 

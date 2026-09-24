@@ -1,4 +1,4 @@
-/* global window, document, $, settings, gwState, gatewayCall, currentSessionId, messages, sessionActiveRuns, chatInput, chatForm, composerSendBtn, pendingAttachments, getSessionAbortSignal, isSending, lastAgentDisplayedTrace, chatAutoFollow, chatList, getPendingResumeCheckpoint, clearPendingResumeCheckpoint, getPendingWorktreeApply, currentAgentRunId, currentAgentPlaceholderEl, resetCompactionStateSafe, applySessionWorkspace, bindCurrentSessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, refreshSkillsCatalog, buildAgentTools, getComposerAgentMode, resolveComposerModelForSend, modelSupportsMultimodal, attachmentNeedsVision, getTextModelId, getCustomModelApiConfig, getVisionApiConfig, formatModelFooterLabel, pickAnyModelForContext, buildExploreTools, buildExploreCoordinatorTools, buildShellTools, buildBuildTools, getPlannerBestOfN, sessionListTitle, appendUserTurn, appendBubble, renderAssistantBubbleContent, renderChatFromMessages, finalizeAssistantBubble, switchSession, createNewSession, loadChatFromGateway, finalizeUserTurnFooter, scrollChat, packUserMessageMeta, packAssistantMeta, unpackAssistantMeta, unpackUserMessageContentToBottom, chatCompletionWithToolsViaRust, isRustAgentLoopEnabled, isRustPlannerEnabled, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, loopApi, applyContextCompaction, estimateContextTokensFallback, estimateMessagesTokensViaMain, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, lastComposerContextEstimate, reportTokensToMain, clearAgentContinueState, setPlannerParallelWorkersActive, setAgentExecutionContext, buildAgentBridge, compactPlainText, captureTurnBatchCheckpoint, withdrawUserTurn, markTurnWorktreeOnly, getCurrentUndoTurnId, showAgentToast, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, CTX_LIMITS, showTrayBalloon, toastPreviewText, focusChatInput, refreshHistoryList, cloneAttachmentSnapshot, cloneTraceForMobile, finishSessionActiveRun, syncComposerForActiveSession, isCurrentSessionSending, isChatNearBottom, updateLastTurnFloat, renderAttachmentChips, revokeAttachmentPreview, processAttachmentsForSend, isImageAttachment, packAssistantMeta, buildPersistedAssistantContent, normalizeAssistantReplyForStorage, buildAgentStateSnapshot, createTraceRunId, saveAgentRunState, saveAssistantTraceRecord, saveAgentPlanState, persistStoppedAssistant, unpackUserMessageContent, unpackAssistantMeta, splitPersistedAssistantTrace, handleWorktreeApplyAfterRun, startMemoryMaintenanceTimers, tryDetectResumeCheckpoint, humanizeModelId, agentApi, cleanupStaleSessionRun, formatAgentApiError, isUserAbortError, buildDieyunMdSystemBlock, getAgentsMdMode, ensureAgentsMd, loadAgentsMdRecord, getSessionChangeRowsForAgent, trackArtifactsFromTrace, scheduleUnifiedKnowledgeMaintenance, stashKnowledgeMaintenanceContext, flushKnowledgeMaintenanceAfterPlan, hasKnowledgeMaintenanceContext, clearKnowledgeMaintenanceContext, scheduleBackgroundKnowledgeFallback, capText, buildCoreAgentRules, formatSystemTimeChunk, buildOpenFilesContext, getContextFilePathsForAgent, extractCodebasePathsFromBlock, buildAgentStatePrompt, buildSystemMessage, beginTurnUndo, finalizeTurnUndo, capturePlanApplyForUndo, collectCompletionEvidence, applyReadinessNote, getTraceWriteFilePaths, fetchWorkspaceVerifyDiagnostics, COMPLETION_REPAIR_ATTEMPT_LIMIT, buildSessionChatHistoryBlock, buildCompletionMessages, createAgentRunEvent, dispatchAgentRunEvent, emitAgentProgress, collapseChatThinkingTraces, estimateTextTokens, tracePrefs, getComposerLongHorizon, buildAgentSegmentContinuePartial, LONG_HORIZON_MAX_SEGMENTS, cancelActiveAgentBackends, dieyunI18n, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeSaveRunningTraceCheckpoint, invalidateSessionMessageCache, resolveSessionWorkspacePathSync, reconcileSessionLiveRunUi */
+/* global window, document, $, settings, gwState, gatewayCall, currentSessionId, messages, sessionActiveRuns, chatInput, chatForm, composerSendBtn, pendingAttachments, getSessionAbortSignal, isSending, lastAgentDisplayedTrace, chatAutoFollow, chatList, getPendingResumeCheckpoint, clearPendingResumeCheckpoint, getPendingWorktreeApply, currentAgentRunId, currentAgentPlaceholderEl, resetCompactionStateSafe, applySessionWorkspace, bindCurrentSessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, refreshSkillsCatalog, buildAgentTools, getComposerAgentMode, resolveComposerModelForSend, modelSupportsMultimodal, attachmentNeedsVision, getTextModelId, getCustomModelApiConfig, formatModelFooterLabel, pickAnyModelForContext, buildExploreTools, buildExploreCoordinatorTools, buildShellTools, buildBuildTools, getPlannerBestOfN, sessionListTitle, appendUserTurn, appendBubble, renderAssistantBubbleContent, renderChatFromMessages, finalizeAssistantBubble, switchSession, createNewSession, loadChatFromGateway, finalizeUserTurnFooter, scrollChat, packUserMessageMeta, packAssistantMeta, unpackAssistantMeta, unpackUserMessageContentToBottom, chatCompletionWithToolsViaRust, isRustAgentLoopEnabled, isRustPlannerEnabled, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, loopApi, applyContextCompaction, estimateContextTokensFallback, estimateMessagesTokensViaMain, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, lastComposerContextEstimate, reportTokensToMain, clearAgentContinueState, setPlannerParallelWorkersActive, setAgentExecutionContext, buildAgentBridge, compactPlainText, captureTurnBatchCheckpoint, withdrawUserTurn, markTurnWorktreeOnly, getCurrentUndoTurnId, showAgentToast, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, shouldBlockRepeatToolCall, recordToolCallFingerprint, repeatToolBlockMessage, CTX_LIMITS, showTrayBalloon, toastPreviewText, focusChatInput, refreshHistoryList, cloneAttachmentSnapshot, cloneTraceForMobile, finishSessionActiveRun, syncComposerForActiveSession, isCurrentSessionSending, isChatNearBottom, updateLastTurnFloat, renderAttachmentChips, revokeAttachmentPreview, processAttachmentsForSend, isImageAttachment, packAssistantMeta, buildPersistedAssistantContent, normalizeAssistantReplyForStorage, buildAgentStateSnapshot, createTraceRunId, saveAgentRunState, saveAssistantTraceRecord, saveAgentPlanState, persistStoppedAssistant, unpackUserMessageContent, unpackAssistantMeta, splitPersistedAssistantTrace, handleWorktreeApplyAfterRun, startMemoryMaintenanceTimers, tryDetectResumeCheckpoint, humanizeModelId, agentApi, cleanupStaleSessionRun, formatAgentApiError, isUserAbortError, buildDieyunMdSystemBlock, getAgentsMdMode, ensureAgentsMd, loadAgentsMdRecord, getSessionChangeRowsForAgent, trackArtifactsFromTrace, scheduleUnifiedKnowledgeMaintenance, stashKnowledgeMaintenanceContext, flushKnowledgeMaintenanceAfterPlan, hasKnowledgeMaintenanceContext, clearKnowledgeMaintenanceContext, scheduleBackgroundKnowledgeFallback, capText, buildCoreAgentRules, formatSystemTimeChunk, buildOpenFilesContext, getContextFilePathsForAgent, extractCodebasePathsFromBlock, buildAgentStatePrompt, buildSystemMessage, beginTurnUndo, finalizeTurnUndo, capturePlanApplyForUndo, collectCompletionEvidence, applyReadinessNote, getTraceWriteFilePaths, fetchWorkspaceVerifyDiagnostics, COMPLETION_REPAIR_ATTEMPT_LIMIT, buildSessionChatHistoryBlock, buildCompletionMessages, createAgentRunEvent, dispatchAgentRunEvent, emitAgentProgress, collapseChatThinkingTraces, estimateTextTokens, tracePrefs, getComposerLongHorizon, buildAgentSegmentContinuePartial, LONG_HORIZON_MAX_SEGMENTS, cancelActiveAgentBackends, dieyunI18n, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeSaveRunningTraceCheckpoint, invalidateSessionMessageCache, resolveSessionWorkspacePathSync, reconcileSessionLiveRunUi */
 'use strict';
 
 const loopApi = window.diecloud || {};
@@ -39,23 +39,6 @@ function recordAgentPrepTrace(sessionId, thought, fields = {}) {
   return prepTrace;
 }
 
-function stripMultimodalFromPrepared(prepared) {
-  if (!prepared || !prepared.hasImages) return prepared;
-  const text =
-    prepared.textForStorage ||
-    (Array.isArray(prepared.content)
-      ? prepared.content
-          .filter((p) => p && p.type === 'text')
-          .map((p) => String(p.text || ''))
-          .join('\n')
-      : String(prepared.content || ''));
-  return {
-    content: text,
-    hasImages: false,
-    textForStorage: text
-  };
-}
-
 function extractPreparedImageParts(prepared) {
   const parts = Array.isArray(prepared?.content) ? prepared.content : [];
   return parts
@@ -64,43 +47,6 @@ function extractPreparedImageParts(prepared) {
       type: 'image_url',
       image_url: { url: String(part.image_url?.url || part.url) }
     }));
-}
-
-async function buildPlannerVisionSupplement(prepared, opts = {}) {
-  const imageParts = extractPreparedImageParts(prepared).slice(0, 4);
-  if (!imageParts.length || typeof fetchChatCompletion !== 'function') return '';
-  const apiConfig = opts.visionApiConfig || getVisionApiConfig();
-  const visionPick = typeof pickCustomVisionModel === 'function' ? pickCustomVisionModel() : null;
-  const model = String(
-    opts.visionModel || visionPick?.model || apiConfig?.model || ''
-  ).trim();
-  if (!model || !apiConfig?.baseUrl) return '';
-  try {
-    const text = await fetchChatCompletion({
-      model,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text:
-                '请用中文详细识别这些图片，重点提取用户任务所需的信息、界面文字、错误提示、表格/代码/路径、可见状态。只输出图片内容摘要。'
-            },
-            ...imageParts
-          ]
-        }
-      ],
-      temperature: 0.1,
-      max_tokens: Math.min(1600, getMaxOutputTokens ? getMaxOutputTokens() : 1600),
-      apiConfig,
-      signal: opts.signal
-    });
-    return String(text || '').trim();
-  } catch (err) {
-    console.warn('planner vision supplement failed', err);
-    return '';
-  }
 }
 
 function createTraceRunId() {
