@@ -677,6 +677,10 @@ app.whenReady().then(async () => {
     getStats: () => activityStats.getStats(),
     bumpActivityStats: (patch) => activityStats.bumpActivityStats(patch),
     resetDailyStats: () => activityStats.resetDailyStats(),
+    clearActivityStats: () => activityStats.clearAllStats(),
+    pushStatus: () => {
+      if (windowTray) windowTray.pushStatus();
+    },
     normalizeModelUsageKey: activityStats.normalizeModelUsageKey,
     getSessionRemoteTransport: () => sessionRemoteTransport,
     ensureAgentHomeDirs,

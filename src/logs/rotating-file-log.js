@@ -193,6 +193,28 @@ function closeLog(filePath) {
   return true;
 }
 
+/**
+ * 清空一个日志文件（保留文件本身，让后续写入继续追加）。
+ *
+ * 必须是「先 flushSync 再截断」，不能直接 `fs.truncateSync`：缓冲里如果还压着
+ * 未落盘的行，截断之后它们会在下一次 flush 被 append 回来 —— 用户看到的就是
+ * 「点了清空，数字又自己回来了」的假清空。
+ * @param {string} filePath
+ */
+function truncateLog(filePath) {
+  const key = path.resolve(String(filePath || ''));
+  if (!key) return false;
+  const inst = registry.get(key);
+  if (inst) inst.flushSync();
+  try {
+    fs.mkdirSync(path.dirname(key), { recursive: true });
+    fs.writeFileSync(key, '', 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function bindExitFlush() {
   if (exitHookBound) return;
   exitHookBound = true;
@@ -211,5 +233,6 @@ module.exports = {
   getRotatingLog,
   flushLog,
   closeLog,
+  truncateLog,
   DEFAULT_MAX_BYTES
 };

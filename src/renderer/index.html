@@ -483,11 +483,24 @@
                       <div class="context-stats-row"><span>安全预留</span><span id="ctx-stat-safety-reserve">—</span></div>
                     </section>
                     <section class="context-stats-section">
-                      <h4 class="context-stats-section-title">上下文明细（估算）</h4>
+                      <h4 class="context-stats-section-title">上下文明细</h4>
                       <div class="context-stats-row"><span>System</span><span id="ctx-stat-system">—</span></div>
                       <div class="context-stats-row"><span>工具定义</span><span id="ctx-stat-tools">—</span></div>
-                      <div class="context-stats-row"><span>对话历史（堆积）</span><span id="ctx-stat-messages">—</span></div>
+                      <div class="context-stats-row"><span>对话历史</span><span id="ctx-stat-messages">—</span></div>
                       <div class="context-stats-row"><span>进行中</span><span id="ctx-stat-inflight">—</span></div>
+                    </section>
+                    <section class="context-stats-section">
+                      <h4 class="context-stats-section-title">上下文压缩</h4>
+                      <div class="context-stats-row"><span>压缩次数</span><span id="ctx-compaction-attempted">—</span></div>
+                      <div class="context-stats-row"><span>动态压缩</span><span id="ctx-compaction-auto">—</span></div>
+                      <div class="context-stats-row"><span>强制压缩</span><span id="ctx-compaction-forced">—</span></div>
+                      <div class="context-stats-row"><span>压缩成功率</span><span id="ctx-compaction-success">—</span></div>
+                      <div class="context-stats-row"><span>压缩失败</span><span id="ctx-compaction-failed">—</span></div>
+                      <div class="context-stats-row"><span>平均节省 Token</span><span id="ctx-compaction-saved">—</span></div>
+                      <div class="context-stats-row"><span>平均耗时</span><span id="ctx-compaction-elapsed">—</span></div>
+                      <div class="help-harness-by-tool" id="ctx-compaction-reasons">
+                        <p class="context-model-usage-empty">切到本页后加载</p>
+                      </div>
                     </section>
                     <section class="context-stats-section">
                       <h4 class="context-stats-section-title">本会话</h4>
@@ -552,7 +565,6 @@
                     </div>
                   </div>
                   <div class="context-stats-panel agent-scroll" id="graph-stats-panel">
-                    <p class="codebase-panel-note" id="graph-panel-workspace-note"></p>
                     <section class="context-stats-section">
                       <h4 class="context-stats-section-title">索引状态</h4>
                       <div class="context-stats-row"><span>状态</span><span id="gr-stat-state">—</span></div>
@@ -1658,7 +1670,7 @@
             </div>
             <div class="help-page" data-help-tab="stats">
               <div class="help-stats-panel">
-                <div class="help-stats-connection"><span class="status-dot" id="conn-dot"></span><div><strong id="conn-text" data-i18n="gateway_disconnected">Gateway 未连接</strong><span id="meta-id-compact">-</span></div></div>
+                <div class="help-stats-connection"><span class="status-dot" id="conn-dot"></span><div><strong id="conn-text" data-i18n="gateway_disconnected">Gateway 未连接</strong><span id="meta-id-compact">-</span></div><button type="button" class="ghost-btn help-stats-clear" id="help-stats-clear" title="清空统计信息（按键 / Token / 工具 / 压缩）">清空统计</button></div>
                 <div class="status-panel help-stats-list">
                   <div class="status-meta"><span class="meta-label" data-i18n="stat_keys">今日按键</span><span id="meta-keys-today">0</span></div>
                   <div class="status-meta"><span class="meta-label" data-i18n="stat_clicks">鼠标点击</span><span id="meta-clicks">0</span></div>
@@ -1683,23 +1695,6 @@
                     <div class="status-meta"><span class="meta-label">瞬态重试</span><span id="help-harness-retries">—</span></div>
                   </div>
                   <div class="help-harness-by-tool" id="help-harness-by-tool">
-                    <p class="model-usage-empty">打开本页后加载</p>
-                  </div>
-                </section>
-                <section class="help-tool-harness" aria-labelledby="help-compaction-title">
-                  <div class="model-usage-head">
-                    <h3 id="help-compaction-title">上下文压缩（近 200 次）</h3>
-                  </div>
-                  <div id="help-compaction-summary">
-                    <div class="status-meta"><span class="meta-label">压缩次数</span><span id="help-compaction-attempted">—</span></div>
-                    <div class="status-meta"><span class="meta-label">动态压缩（自动触发）</span><span id="help-compaction-auto">—</span></div>
-                    <div class="status-meta"><span class="meta-label">强制压缩</span><span id="help-compaction-forced">—</span></div>
-                    <div class="status-meta"><span class="meta-label">压缩成功率</span><span id="help-compaction-success">—</span></div>
-                    <div class="status-meta"><span class="meta-label">压缩失败</span><span id="help-compaction-failed">—</span></div>
-                    <div class="status-meta"><span class="meta-label">平均节省 Token</span><span id="help-compaction-saved">—</span></div>
-                    <div class="status-meta"><span class="meta-label">平均耗时</span><span id="help-compaction-elapsed">—</span></div>
-                  </div>
-                  <div class="help-harness-by-tool" id="help-compaction-reasons">
                     <p class="model-usage-empty">打开本页后加载</p>
                   </div>
                 </section>
@@ -1735,14 +1730,11 @@
             <div class="help-page" data-help-tab="encoding-params">
               <div class="encoding-params-panel">
                 <div class="encoding-params-presets-wrap">
-                  <span class="encoding-params-presets-label">编辑档位</span>
                   <div class="encoding-params-presets" id="encoding-params-presets"></div>
+                  <span class="encoding-params-preset-sep" aria-hidden="true">/</span>
+                  <button type="button" class="ghost-btn encoding-params-preset-btn" id="encoding-params-reset" title="恢复当前档位的全部编码参数（含护栏）">恢复</button>
                 </div>
-                <p class="encoding-params-intro">各 Context 档位独立保存下方全部参数；切换档位分别编辑，互不影响。「恢复当前」只重置正在编辑的那一档。</p>
-                <div class="defined-model-toolbar encoding-params-toolbar">
-                  <button type="button" class="ghost-btn" id="encoding-params-reset" title="恢复当前档位的全部编码参数（含护栏）">恢复当前</button>
-                  <span class="save-hint" id="encoding-params-hint"></span>
-                </div>
+                <span class="save-hint" id="encoding-params-hint"></span>
                 <div id="encoding-params-root" class="encoding-params-root"></div>
               </div>
             </div>

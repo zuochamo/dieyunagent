@@ -525,7 +525,116 @@ function resetActiveRunContextUiState(sessionId) {
     contextEstimateIpcTimer = null;
   }
   contextEstimateIpcInflight = false;
-  if (typeof resetChatStreamScrollBaseline === 'function') resetChatStreamScrollBaseline();
+}
+
+/**
+ * 压缩失败的原始原因是 Rust 侧分类码，展示前翻成人话。
+ * 码的唯一来源是 `crates/dieyun-core/src/compaction/llm.rs`；这里只是展示层映射，
+ * 未收录的新码会原样显示（便于发现新增分类），不会被吞掉。
+ */
+const COMPACTION_REASON_LABELS = {
+  LLM_UPSTREAM_TIMEOUT: '代理上游写超时',
+  LLM_UPSTREAM_5XX: '上游服务错误',
+  LLM_TIMEOUT: '请求超时',
+  LLM_CONNECT: '连不上服务',
+  LLM_BAD_JSON: '响应非 JSON',
+  LLM_BAD_REQUEST: '请求被拒',
+  LLM_AUTH: '鉴权失败',
+  LLM_RATE_LIMIT: '被限流',
+  LLM_EMPTY_CONTENT: '模型未输出正文',
+  LLM_REASONING_ONLY: '模型只输出思考',
+  LLM_HTTP: '网络错误',
+  LLM_CONFIG: '模型未配置',
+  content_policy: '内容审核拒绝',
+  llm_error: 'LLM 调用失败'
+};
+
+let compactionStatsLoading = false;
+let compactionStatsLastAt = 0;
+let compactionStatsRefreshTimer = null;
+const COMPACTION_STATS_MIN_INTERVAL_MS = 3000;
+const COMPACTION_STATS_DEBOUNCE_MS = 1200;
+
+function scheduleCompactionStatsRefresh() {
+  if (compactionStatsRefreshTimer) return;
+  compactionStatsRefreshTimer = setTimeout(() => {
+    compactionStatsRefreshTimer = null;
+    loadCompactionStats().catch(() => {});
+  }, COMPACTION_STATS_DEBOUNCE_MS);
+}
+
+/**
+ * 上下文压缩统计（次数 / 动态 / 强制 / 成功率 / 失败原因），渲染在「上下文」面板。
+ *
+ * **口径 = 当前对话**（与本面板上半部分的「上下文明细」一致）。同一面板里一半看当前
+ * 会话、一半看全机累计，是最容易被误读的错配，所以这里请求必带 `currentSessionId`。
+ * 口径见 Main 侧 `agent/compaction-telemetry.js`：一次「压缩次数」= 一次真正发起摘要 LLM 的
+ * 尝试，未达触发线或仍在冷却的空转不计入 —— 所以这里的成功率不会被空转轮次稀释。
+ * 数据源是磁盘 jsonl，非热路径字段：切页 / 切会话 / 压缩发生 / 清空统计时按最小间隔节流拉取。
+ */
+async function loadCompactionStats(opts) {
+  const force = !!(opts && opts.force);
+  if (!force) {
+    if (compactionStatsLoading) return;
+    if (Date.now() - compactionStatsLastAt < COMPACTION_STATS_MIN_INTERVAL_MS) return;
+  }
+  const scopeSessionId = String(currentSessionId || '');
+  const api = typeof window !== 'undefined' ? window.diecloud : null;
+  const reasonsEl = $('ctx-compaction-reasons');
+  if (!api || typeof api.agentCompactionTelemetrySummary !== 'function') {
+    if (reasonsEl) reasonsEl.innerHTML = '<p class="context-model-usage-empty">Telemetry 不可用</p>';
+    return;
+  }
+  compactionStatsLoading = true;
+  if (reasonsEl) reasonsEl.innerHTML = '<p class="context-model-usage-empty">加载中…</p>';
+  try {
+    const s = await api.agentCompactionTelemetrySummary(scopeSessionId);
+    // 等 IPC 期间用户可能已切走会话：这份结果属于旧会话，写上去就是串台
+    if (String(currentSessionId || '') !== scopeSessionId) return;
+    const attempted = s.attempted || 0;
+    const setStat = (id, value) => {
+      const el = $(id);
+      if (el) el.textContent = value;
+    };
+    setStat('ctx-compaction-attempted', String(attempted));
+    setStat('ctx-compaction-auto', String(s.auto || 0));
+    setStat('ctx-compaction-forced', String(s.forced || 0));
+    setStat(
+      'ctx-compaction-success',
+      attempted ? `${s.successRate ?? 0}% (${s.ok || 0}/${attempted})` : '—'
+    );
+    setStat('ctx-compaction-failed', String(s.failed || 0));
+    setStat('ctx-compaction-saved', s.savedTokensAvg ? formatTokenCountFull(s.savedTokensAvg) : '—');
+    setStat('ctx-compaction-elapsed', attempted ? `${s.elapsedMsAvg || 0} ms` : '—');
+
+    if (reasonsEl) {
+      const reasons = s.byReason || [];
+      if (!attempted) {
+        reasonsEl.innerHTML = '<p class="context-model-usage-empty">暂无压缩记录</p>';
+      } else if (!reasons.length) {
+        reasonsEl.innerHTML = '<p class="context-model-usage-empty">无压缩失败</p>';
+      } else {
+        const tags = reasons
+          .map(
+            (r) =>
+              `<span class="help-harness-err-tag">${escapeContextHtml(
+                COMPACTION_REASON_LABELS[r.reason] || r.reason
+              )} ×${r.count}</span>`
+          )
+          .join('');
+        reasonsEl.innerHTML = `<div class="help-harness-errors"><span class="meta-label">失败原因</span>${tags}</div>`;
+      }
+    }
+  } catch (e) {
+    if (reasonsEl) {
+      reasonsEl.innerHTML = `<p class="context-model-usage-empty">加载失败: ${escapeContextHtml(
+        e && e.message ? e.message : String(e)
+      )}</p>`;
+    }
+  } finally {
+    compactionStatsLoading = false;
+    compactionStatsLastAt = Date.now();
+  }
 }
 
 function noteContextCompaction(cr, sessionId) {
@@ -551,6 +660,7 @@ function noteContextCompaction(cr, sessionId) {
   }
   lastContextAutoCollapseBand = Math.max(lastContextAutoCollapseBand, 2);
   refreshContextProgress();
+  scheduleCompactionStatsRefresh();
 }
 
 function paintContextProgressRing(used, sending, breakdown) {

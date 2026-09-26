@@ -75,12 +75,15 @@ async function streamChatCompletionMain(body, opts = {}) {
   let content = '';
   let reasoning = '';
   let usage = null;
+  /** 流里出现的上游错误载荷（见 sse-delta-parse#upstreamStreamErrorMessage） */
+  let upstreamError = '';
   const tcAcc = buildToolCallAccumulator();
   let sseBuffer = '';
   let finishReason = '';
 
   const applyDelta = (delta) => {
     if (!delta) return;
+    if (delta._upstreamError) upstreamError = String(delta._upstreamError);
     if (delta.content) content += delta.content;
     const rc = extractDeltaReasoning(delta);
     if (rc) reasoning += rc;
@@ -111,6 +114,15 @@ async function streamChatCompletionMain(body, opts = {}) {
     throw err;
   }
   flushSseBuffer(sseBuffer, applyDelta);
+
+  // 上游把错误当正常流回吐（HTTP 200 + `data: {"error":...}`）：必须变成失败。
+  // 否则这一轮会以「空回复」收尾，上层只会看到「计划执行完成，无文本摘要」这类空话，
+  // 完全没执行的任务被记成成功。已收到的部分内容经 partial 保留，由重连层按既有语义处理。
+  if (upstreamError) {
+    const err = new Error(`LLM 上游错误：${upstreamError}`);
+    attachPartialStreamError(/** @type {any} */ (err), { content, reasoning });
+    throw err;
+  }
 
   const toolCallsRaw = tcAcc.flush() || [];
   const toolCalls = [];

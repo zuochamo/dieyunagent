@@ -101,7 +101,6 @@ function syncGraphRailBusy(busy, tip) {
 async function refreshGraphPanelStatus() {
   const summary = $('graph-panel-summary');
   const rebuildBtn = $('graph-panel-rebuild');
-  const noteEl = $('graph-panel-workspace-note');
   const root = await resolveGraphPanelWorkspaceRootAsync();
   if (!root) {
     if (summary) summary.textContent = '未选工作区';
@@ -109,7 +108,6 @@ async function refreshGraphPanelStatus() {
     ['gr-stat-files', 'gr-stat-edges', 'gr-stat-symbols', 'gr-stat-calls', 'gr-stat-vectors', 'gr-stat-updated', 'gr-stat-progress'].forEach(
       (id) => setGraphPanelText(id, '—')
     );
-    if (noteEl) noteEl.textContent = '';
     if (rebuildBtn) rebuildBtn.disabled = true;
     syncGraphRailBusy(false);
     stopGraphPanelPoll();
@@ -117,11 +115,6 @@ async function refreshGraphPanelStatus() {
     return;
   }
   if (rebuildBtn) rebuildBtn.disabled = false;
-  if (noteEl) {
-    noteEl.textContent = /^ssh:\/\//i.test(root)
-      ? `工作区：${root}（远程项目内 .dieyun，需 Remote Agent 含 Linux dieyun-core）`
-      : `工作区：${root}`;
-  }
   try {
     const st = await gatewayCall('graph.status', { workspaceRoot: root });
     const indexing = !!(st && st.indexing);

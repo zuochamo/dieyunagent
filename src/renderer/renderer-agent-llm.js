@@ -909,11 +909,14 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
   let content = '';
   let reasoning = '';
   let usage = null;
+  /** 流里的上游错误载荷（主进程侧 llm-stream-utils 同判据，见 sse-delta-parse） */
+  let upstreamError = '';
   const tcAcc = sse.buildToolCallAccumulator();
   let sseBuffer = '';
 
   const applyDelta = (delta) => {
     if (!delta) return;
+    if (delta._upstreamError) upstreamError = String(delta._upstreamError);
     if (delta.content) content += delta.content;
     const reasoningChunk = sse.extractDeltaReasoning(delta);
     if (reasoningChunk) reasoning += reasoningChunk;
@@ -987,6 +990,12 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
   }
 
   sse.flushSseBuffer(sseBuffer, applyDelta, sseOpts);
+
+  // 与主进程 llm-stream-utils 同判据：上游把错误当正常流回吐时抛错，
+  // 绝不把「额度用尽 / 鉴权失败」当成一次空回复放过去。
+  if (upstreamError) {
+    throw new Error(`LLM 上游错误：${upstreamError}`);
+  }
 
   const toolCalls = normalizeToolCallsForApi(tcAcc.flush());
   const hasToolCalls = !!(toolCalls && toolCalls.length);

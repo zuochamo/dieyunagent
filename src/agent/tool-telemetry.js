@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { getRotatingLog, flushLog, DEFAULT_MAX_BYTES } = require('../logs/rotating-file-log');
+const { getRotatingLog, flushLog, truncateLog, DEFAULT_MAX_BYTES } = require('../logs/rotating-file-log');
 
 function telemetryPath(userDataPath) {
   return path.join(userDataPath || '', 'tool-telemetry.jsonl');
@@ -121,8 +121,20 @@ function summarizeTelemetry(userDataPath, limit = 200) {
   }
 }
 
+/**
+ * 清空工具调用遥测（统计信息页「清空」按钮的一路）。
+ * 走闸门截断而不是直接删文件：删文件会让正在跑的工具轮次在下次写入时重建它，
+ * 而闸门截断能一并排掉尚未落盘的缓冲，避免清空后旧数据回灌。
+ * @param {string} userDataPath
+ */
+function clearToolTelemetry(userDataPath) {
+  if (!userDataPath) return false;
+  return truncateLog(telemetryPath(userDataPath));
+}
+
 module.exports = {
   recordToolTelemetry,
   summarizeTelemetry,
+  clearToolTelemetry,
   telemetryPath
 };

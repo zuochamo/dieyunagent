@@ -1,5 +1,5 @@
 {
-  "note": "跨语言 token 估算一致性基线（H4）。textCases 与 sharedMessageCases 必须被 JS(src/agent/token-estimate.js) 与 Rust(crates/dieyun-core/src/compaction/tokens.rs) 两侧算出完全相同的结果。本文件是唯一真值来源：改公式必须同时改两侧实现与本文件。",
+  "note": "跨语言 token 估算一致性基线（H4）。textCases 与 sharedMessageCases 必须被 JS(src/agent/token-estimate.js) 与 Rust(crates/dieyun-core/src/compaction/tokens.rs) 两侧算出完全相同的结果。本文件是唯一真值来源：改公式必须同时改两侧实现与本文件。图片 part 按等效折算计费（IMAGE_PART_EQUIV_TOKENS，与 base64 长度无关），同样由本文件的图片用例锁定 —— 若两侧任何一处退回「按 base64 长度计」，这里会直接失败。",
   "textCases": [
     { "input": "", "expected": 0 },
     { "input": "a", "expected": 1 },
@@ -28,7 +28,11 @@
     { "message": { "role": "user", "content": ["alpha", "beta"] }, "expected": 10 },
     { "message": { "role": "user", "content": [{ "text": "你好" }, { "text": "ok" }] }, "expected": 9 },
     { "message": { "role": "user", "content": { "text": "你好" } }, "expected": 8 },
-    { "message": { "role": "user", "content": [{ "type": "text", "text": "a" }] }, "expected": 7 }
+    { "message": { "role": "user", "content": [{ "type": "text", "text": "a" }] }, "expected": 7 },
+    { "message": { "role": "user", "content": [{ "type": "text", "text": "看图" }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }] }, "expected": 1883 },
+    { "message": { "role": "user", "content": [{ "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }] }, "expected": 1881 },
+    { "message": { "role": "user", "content": [{ "type": "input_image", "image_url": "data:image/png;base64,AAAA" }] }, "expected": 1881 },
+    { "message": { "role": "user", "content": [{ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" } }] }, "expected": 1881 }
   ],
   "jsOnly": {
     "note": "JS estimateMessageTokens 额外计入 assistant.tool_calls（Rust estimate_messages_tokens 不计）。这是刻意的跨语言差异，故不含 tool_calls 的消息不进 sharedMessageCases。断言见 test/unit/token-estimate.test.cjs。"

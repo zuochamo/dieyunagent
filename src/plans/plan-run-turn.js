@@ -2,6 +2,8 @@
 
 const { ensurePlanSession } = require('./plan-session');
 const { packMessageMeta, unpackMessageMeta } = require('../agent/session-context');
+// 空交付文案 / 「思考回退不落库」闸门的单一来源，勿在此另造一句
+const roundText = require('../agent/agent-round-text');
 
 const PLAN_MODE_LABEL = '定时 Agent';
 
@@ -85,7 +87,9 @@ function assistantReplyText(result) {
   }
   if (result && (result.aborted || result.stopped)) return '（计划已停止）';
   if (result && result.ok) {
-    return String(result.content || result.summary || '').trim() || '（计划执行完成，无文本摘要）';
+    return (
+      String(result.content || result.summary || '').trim() || roundText.TURN_EMPTY_REPLY_TEXT
+    );
   }
   return `执行失败：${(result && result.error) || '未知错误'}`;
 }
@@ -113,7 +117,12 @@ async function endPlanRunTurn(gateway, sessionId, plan, result, opts = {}) {
     planId: String((plan && plan.id) || '')
   };
   if (opts.traceRunId) meta.traceRunId = String(opts.traceRunId);
-  const body = opts.replyText != null ? String(opts.replyText) : assistantReplyText(result);
+  // 账本正文再过一次「带标签思考引用不落库」闸门（REASONING-ISOLATION §3.4）：
+  // 终态事件（展示）仍用原样 replyText，落库这一路与聊天路径同判据 ——
+  // 带标签的思考引用只用于展示，写进账本一律换成占位。
+  const body = roundText.persistableTurnText(
+    opts.replyText != null ? String(opts.replyText) : assistantReplyText(result)
+  );
   await gateway.invokeRpc('memory.message_append', {
     sessionId,
     role: 'assistant',

@@ -270,7 +270,6 @@ function pinChatToBottom() {
   const el = chatList || document.getElementById('chat-list');
   if (!el) return false;
   el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-  el.dataset.streamScrollHeight = String(el.scrollHeight);
   updateLastTurnFloat();
   return true;
 }

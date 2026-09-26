@@ -90,16 +90,9 @@ function patchThinkingTrace(
   body.querySelectorAll('.msg-thinking-step[data-step-key], :scope > details[data-step-key]').forEach((node) => {
     if (!seen.has(node.dataset.stepKey || '')) node.remove();
   });
-  if (streaming && typeof scheduleStreamingChatFollow === 'function') {
-    scheduleStreamingChatFollow();
-  } else if (streaming && typeof followChatStreamGrowth === 'function') {
-    followChatStreamGrowth();
-    const chat = document.getElementById('chat-list');
-    if (chat) {
-      requestAnimationFrame(() => {
-        chat.dataset.streamScrollHeight = String(chat.scrollHeight);
-      });
-    }
+  if (streaming) {
+    if (typeof scheduleStreamingChatFollow === 'function') scheduleStreamingChatFollow();
+    else if (typeof followChatStreamGrowth === 'function') followChatStreamGrowth();
   }
   return true;
 }

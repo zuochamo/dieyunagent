@@ -535,8 +535,9 @@ function registerAgentRuntimeIpc(ctx) {
     return summarizeTelemetry(live.userData);
   });
 
-  ipcMain.handle('agent:compaction-telemetry-summary', async () => {
-    return summarizeCompactionTelemetry(live.userData);
+  ipcMain.handle('agent:compaction-telemetry-summary', async (_evt, { sessionId } = {}) => {
+    // limit 传 undefined 走默认窗口；sessionId 为空时维持全局口径（兼容既有调用方）
+    return summarizeCompactionTelemetry(live.userData, undefined, sessionId || '');
   });
 
   ipcMain.handle('agent:rust-loop-cancel', async (_evt, { cancelToken, runId } = {}) => {

@@ -226,13 +226,6 @@ function estimateStreamCompletionUsage(body, content, reasoning) {
   return buildEstimatedUsageObject({ promptTokens, completionTokens });
 }
 
-function estimateVisionUsage({ imageBase64Length = 0, outputText = '' } = {}) {
-  const imgLen = Math.max(0, Number(imageBase64Length) || 0);
-  const promptTokens = Math.max(256, Math.ceil(imgLen / 1024) * 85 + 32);
-  const completionTokens = estimateTokensFromText(outputText);
-  return buildEstimatedUsageObject({ promptTokens, completionTokens });
-}
-
 const llmUsageStatsExports = {
   toTokenCount,
   firstTokenCount,
@@ -251,8 +244,7 @@ const llmUsageStatsExports = {
   estimateToolDefinitionTokens,
   buildEstimatedUsageObject,
   estimateLlmRoundUsage,
-  estimateStreamCompletionUsage,
-  estimateVisionUsage
+  estimateStreamCompletionUsage
 };
 
 if (typeof module !== 'undefined' && module.exports) {

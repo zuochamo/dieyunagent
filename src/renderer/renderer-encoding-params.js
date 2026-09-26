@@ -34,6 +34,13 @@ function renderEncodingParamsTierTabs() {
   const presets = getModelRuntimePresets();
   const activeTierId = getActiveEditingTierId();
   for (const preset of presets) {
+    if (wrap.childElementCount) {
+      const sep = document.createElement('span');
+      sep.className = 'encoding-params-preset-sep';
+      sep.setAttribute('aria-hidden', 'true');
+      sep.textContent = '/';
+      wrap.appendChild(sep);
+    }
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'ghost-btn encoding-params-preset-btn';

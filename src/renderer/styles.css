@@ -97,16 +97,19 @@
   --monaco-writing-line-accent: rgba(59, 130, 246, 0.35);
 }
 
-*,
-*::before,
-*::after {
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
-}
-
+/*
+ * 只用 ::-webkit-scrollbar 一套。
+ * 此前同时写了 scrollbar-width / scrollbar-color，Chromium 121+ 下只要 scrollbar-width ≠ auto
+ * 就会整组忽略 ::-webkit-scrollbar，实际跑的是原生滚动条（带上下箭头按钮），
+ * --scrollbar-size 形同虚设。
+ */
 *::-webkit-scrollbar {
   width: var(--scrollbar-size);
   height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
 }
 
 *::-webkit-scrollbar-track {
@@ -768,6 +771,11 @@ body {
   font-size: 12px;
 }
 
+/* 清空按钮靠右，与左侧连接状态拉开距离 */
+.help-stats-connection .help-stats-clear {
+  margin-left: auto;
+}
+
 .help-stats-list {
   margin: 0;
   padding: 12px 16px;
@@ -775,7 +783,7 @@ body {
 }
 
 .encoding-params-panel {
-  width: min(640px, 100%);
+  width: 100%;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -786,62 +794,70 @@ body {
   box-sizing: border-box;
 }
 
-.encoding-params-intro {
-  margin: 0;
-  color: var(--text-mute);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.encoding-params-toolbar {
-  margin-bottom: 4px;
+/* 保存/恢复提示：空时不占位，避免档位行与字段区之间留一条空行 */
+.encoding-params-panel > .save-hint:empty {
+  display: none;
 }
 
 .encoding-params-presets-wrap {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 10px;
+  gap: 8px 4px;
   margin: 0 0 12px;
-}
-
-.encoding-params-presets-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-mute);
-  flex: 0 0 auto;
 }
 
 .encoding-params-presets {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  align-items: baseline;
+  gap: 8px 4px;
 }
 
-.encoding-params-preset-btn {
+/* 档位行：纯文字 + “/” 分隔，无边框。
+   特异性必须压过 `#help-overlay .ghost-btn { border: 1px solid var(--border) }`
+   —— 那条同样是 1 id + 1 class 且定义在样式表更靠后处，同优先级下会赢。
+   这里多挂一层 .encoding-params-presets-wrap（档位按钮与“恢复”都在它里面）。 */
+#help-overlay .encoding-params-presets-wrap .encoding-params-preset-btn {
+  /* appearance:auto 的 button 会走原生主题绘制，即使 border:none 也可能画出边框 → 显式关掉 */
+  appearance: none;
+  -webkit-appearance: none;
   font-size: 12px;
-  padding: 4px 10px;
-  min-width: 2.8em;
+  padding: 2px 4px;
+  min-width: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text-mute);
+  box-shadow: none;
+  font-weight: normal;
+  line-height: 1.6;
 }
 
-#help-overlay .encoding-params-preset-btn.is-active,
-#help-overlay .encoding-params-preset-btn[aria-pressed='true'],
-.encoding-params-preset-btn.is-active,
-.encoding-params-preset-btn[aria-pressed='true'] {
-  background: rgba(80, 80, 80, 0.18);
+#help-overlay .encoding-params-presets-wrap .encoding-params-preset-btn:hover,
+#help-overlay .encoding-params-presets-wrap .encoding-params-preset-btn:focus-visible {
+  background: none;
+  border: none;
   color: var(--text);
-  border-color: rgba(80, 80, 80, 0.45);
-  font-weight: 600;
-  box-shadow: inset 0 0 0 1px rgba(80, 80, 80, 0.28);
 }
 
-#help-overlay .encoding-params-preset-btn.is-active:hover,
-#help-overlay .encoding-params-preset-btn[aria-pressed='true']:hover,
-.encoding-params-preset-btn.is-active:hover,
-.encoding-params-preset-btn[aria-pressed='true']:hover {
-  background: rgba(80, 80, 80, 0.24);
+/* 选中态：边框去掉后靠亮色 + 加粗区分 */
+#help-overlay .encoding-params-presets-wrap .encoding-params-preset-btn.is-active,
+#help-overlay .encoding-params-presets-wrap .encoding-params-preset-btn[aria-pressed='true'] {
+  background: none;
+  border: none;
+  box-shadow: none;
   color: var(--text);
-  border-color: rgba(80, 80, 80, 0.55);
+  font-weight: 700;
+}
+
+.encoding-params-preset-sep {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-mute);
+  opacity: 0.4;
+  user-select: none;
+  pointer-events: none;
 }
 
 .encoding-params-group-title {
@@ -1616,6 +1632,11 @@ body.composer-resizing {
   flex: 1 1 auto;
   overflow-x: hidden;
   overflow-y: auto;
+  /*
+   * 常驻滚动条槽：流式时内容高度在临界区来回跨越「是否溢出」，
+   * 不留槽会让滚动条反复出现/消失 → 可用宽度变化 → 长推理换行点变 → 高度再变（震荡）。
+   */
+  scrollbar-gutter: stable;
   overflow-anchor: none;
   overscroll-behavior: contain;
   background: var(--chat-pane-bg);
@@ -6633,6 +6654,9 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 
 #help-overlay .settings-dialog {
   grid-template-columns: 140px 1fr;
+  /* 比通用设置弹窗（760px）宽：编码参数页的档位行含 9 个档位 + 「恢复」，
+     需要更宽的内容区才能排成一行 */
+  width: min(960px, calc(100vw - 48px));
 }
 
 #help-overlay .settings-nav {
@@ -7427,14 +7451,6 @@ body.pane-resizing {
   font-size: 12px;
   line-height: 1.45;
   opacity: 0.78;
-}
-
-.codebase-panel-note {
-  margin: 0 0 12px;
-  font-size: 11px;
-  line-height: 1.4;
-  opacity: 0.65;
-  word-break: break-all;
 }
 
 .codebase-panel-help code {

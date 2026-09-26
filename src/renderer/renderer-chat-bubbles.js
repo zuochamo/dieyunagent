@@ -67,9 +67,6 @@ function appendBubble(role, content, opts = {}) {
     if (role === 'assistant' && opts.loading) {
       // 新一轮开始：上一轮的收尾跟底窗口到此为止，滚动交回流式跟随
       if (typeof stopChatFollowSettle === 'function') stopChatFollowSettle({ capture: false });
-      if (typeof resetChatStreamScrollBaseline === 'function') {
-        resetChatStreamScrollBaseline();
-      }
     }
     scrollChatToBottom({ force: opts.forceScroll !== false });
   }
@@ -680,7 +677,3 @@ var SCROLL_CHAT_THROTTLE_MS = 100;
 var THINKING_COLLAPSE_FOLLOW_MS = 1100;
 var scrollChatTimer = null;
 var scrollChatForcePending = false;
-var streamScrollRaf = null;
-var thinkingTransitionFollowTimer = null;
-var thinkingTransitionPinRaf = null;
-var thinkingTransitionPinUntil = 0;

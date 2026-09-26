@@ -225,6 +225,7 @@ contextBridge.exposeInMainWorld('diecloud', {
   },
 
   addTokens: (n) => ipcRenderer.invoke('stats:add-tokens', n),
+  clearStats: () => ipcRenderer.invoke('stats:clear'),
 
   checkForUpdates: () => ipcRenderer.invoke('app:check-updates'),
   installUpdate: () => ipcRenderer.invoke('app:install-update'),
@@ -428,7 +429,8 @@ contextBridge.exposeInMainWorld('diecloud', {
   agentRustLoopCancel: (payload) => ipcRenderer.invoke('agent:rust-loop-cancel', payload || {}),
   agentRetryTool: (payload) => ipcRenderer.invoke('agent:retry-tool', payload || {}),
   agentToolTelemetrySummary: () => ipcRenderer.invoke('agent:tool-telemetry-summary'),
-  agentCompactionTelemetrySummary: () => ipcRenderer.invoke('agent:compaction-telemetry-summary'),
+  agentCompactionTelemetrySummary: (sessionId) =>
+    ipcRenderer.invoke('agent:compaction-telemetry-summary', { sessionId: sessionId || '' }),
   agentPlannerPing: () => ipcRenderer.invoke('agent:planner-ping'),
   agentPlannerRun: (payload) =>
     ipcRenderer

@@ -92,6 +92,10 @@ async function runPlan(ctx, plan) {
     route: plan.modelRoute,
     model: plan.model
   });
+  // 与 runPlanAgentLoop 同判据：空正文不许冒充成功（否则「没跑」会被记成 lastRunOk: true）
+  if (!String(reply || '').trim()) {
+    throw new Error('模型未返回任何正文（上游可能拒绝请求或额度已用尽），请查看日志后重跑');
+  }
   appendPlanLog(userData, plan, reply);
   return { ok: true, summary: reply.slice(0, 8000), content: reply };
 }

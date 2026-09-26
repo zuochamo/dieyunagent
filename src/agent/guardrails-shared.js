@@ -607,6 +607,9 @@ const SHARED_EXPORTS = {
   sanitizeChatBodyImagesForApi,
   sanitizeChatRequestJsonForApi,
   mapChatImages,
+  // 图片 part 形状判定的单一来源：计费（token-estimate.js）与出站闸门共用同一套形状，
+  // 否则会出现「闸门拦下了、账本还把 base64 当正文算」这种两边不认同一件事的漂移。
+  isChatImagePart,
   isLlmImageRejectedError,
   parseRejectedImageMessageIndices,
   dropRejectedChatImagesForApi,

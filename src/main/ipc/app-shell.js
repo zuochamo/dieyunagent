@@ -1,5 +1,8 @@
 'use strict';
 
+const { clearToolTelemetry } = require('../../agent/tool-telemetry');
+const { clearCompactionTelemetry } = require('../../agent/compaction-telemetry');
+
 /**
  * Window chrome, app lifecycle, tray, logs, and activity stats IPC.
  *
@@ -16,6 +19,9 @@
  *   getStats: () => object,
  *   bumpActivityStats: (patch: object) => void,
  *   resetDailyStats: () => void,
+ *   clearActivityStats: () => { ok: boolean, clearedAt: number },
+ *   getUserDataPath: () => string,
+ *   pushStatus: () => void,
  *   normalizeModelUsageKey: (model: unknown) => string,
  *   usageToActivityPatch: (input: object, modelName: string) => object | null,
  *   logsSources: { fetchAllLogs: Function, cleanLogs: Function },
@@ -38,6 +44,9 @@ function registerAppShellIpc(ctx) {
     getStats,
     bumpActivityStats,
     resetDailyStats,
+    clearActivityStats,
+    getUserDataPath,
+    pushStatus,
     normalizeModelUsageKey,
     usageToActivityPatch,
     logsSources,
@@ -166,6 +175,25 @@ function registerAppShellIpc(ctx) {
       modelUsageToday: stats.modelUsageToday,
       modelUsageMonth: stats.modelUsageMonth
     };
+  });
+
+  /**
+   * 清空统计信息页的全部数据：本机活动统计（按键 / 点击 / Token / 模型用量）
+   * 加两条 Agent 遥测流（工具 Harness、上下文压缩）。
+   *
+   * 这三者正好是该页展示的全部累计数据；版本与 Gateway 连接状态属实时信息，不在此列。
+   * 清完显式 pushStatus 一次，让渲染端不必等下一个状态推送周期就能刷新。
+   */
+  ipcMain.handle('stats:clear', () => {
+    const userData = getUserDataPath();
+    const cleared = {
+      activity: !!(clearActivityStats && clearActivityStats().ok),
+      toolTelemetry: clearToolTelemetry(userData),
+      compactionTelemetry: clearCompactionTelemetry(userData)
+    };
+    if (typeof pushStatus === 'function') pushStatus();
+    log.warn('统计信息已清空:', JSON.stringify(cleared));
+    return { ok: true, cleared, clearedAt: Date.now() };
   });
 }
 

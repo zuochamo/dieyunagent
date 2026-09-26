@@ -72,6 +72,8 @@ const AGENT_LIMITS_DEFAULTS = {
   // 不能按 base64 长度计；否则单张图就顶穿 chat 预算并触发无意义的压缩。
   // 注意：这是「账本折算系数」而非策略上限，故意不出现在设置页——
   // contentCharLen 没有 tier 上下文，只读全局默认值，做成可调项会「改了不生效」。
+  // 两个计费口径都从本值换算：字符口径 session-context.contentCharLen、
+  // token 口径 token-estimate.IMAGE_PART_EQUIV_TOKENS（Rust 同值见 compaction/tokens.rs）。
   visionPartEqChars: 6000,
   // 字符→token 折算系数（上下文账本 / 用量估算用）。与 visionPartEqChars 同为「折算系数」
   // 而非策略上限，故意不上设置页。Rust 侧同值见

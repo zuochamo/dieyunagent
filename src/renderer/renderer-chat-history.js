@@ -1229,8 +1229,11 @@ async function settleSessionSidePanelAfterSwitch(sessionId, switchGen, opts = {}
     onGraphPanelShown();
     return;
   }
-  if (tab === 'context' && typeof refreshContextProgress === 'function') {
-    refreshContextProgress();
+  if (tab === 'context') {
+    if (typeof refreshContextProgress === 'function') refreshContextProgress();
+    // 压缩统计是「按会话」口径，切会话后必须重拉（force 绕开面板刷新用的 3s 最小间隔），
+    // 否则新会话的面板上还挂着上一个会话的压缩次数。
+    if (typeof loadCompactionStats === 'function') loadCompactionStats({ force: true }).catch(() => {});
     return;
   }
   if (tab === 'terminal' && typeof ensureTerminalSession === 'function') {

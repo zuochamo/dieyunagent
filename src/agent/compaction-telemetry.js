@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { getRotatingLog, flushLog, DEFAULT_MAX_BYTES } = require('../logs/rotating-file-log');
+const { getRotatingLog, flushLog, truncateLog, DEFAULT_MAX_BYTES } = require('../logs/rotating-file-log');
 
 /**
  * 上下文压缩遥测（统计信息页「上下文压缩」板块的唯一数据来源）。
@@ -61,6 +61,27 @@ function compactionTelemetryPath(userDataPath) {
 }
 
 /**
+ * 会话键归一化：**写入与过滤必须共用这一个口径**。
+ * 空值（少数没有会话上下文的调用路径）归一成空串，代表「无会话」这一组；
+ * 它不会被算进任何具体对话，也不会因为某处传 `undefined`、某处传 `null`
+ * 而被拆成两个互不相认的分组。
+ * @param {unknown} sessionId
+ */
+function normalizeTelemetrySessionId(sessionId) {
+  return String(sessionId == null ? '' : sessionId).trim();
+}
+
+/**
+ * 会话过滤用的廉价子串：行是 `JSON.stringify` 的产物（无空格、值后必跟 `"`），
+ * 所以这个串不会误配到 `abc` → `abcd` 这类前缀。先用它筛行、再 `JSON.parse`，
+ * 避免为了看一个字段把整个窗口都解析一遍。
+ * @param {string} sessionId 已归一化且非空
+ */
+function sessionNeedle(sessionId) {
+  return `"sessionId":${JSON.stringify(sessionId)}`;
+}
+
+/**
  * 每次压缩尝试记一行；`row` 为假值时静默跳过（调用点无需自判是否该记）。
  * 走统一落盘闸门批写，压缩虽低频，但这里图的是「轮转上限 + 退出前 flush」这两条
  * 与 tool-telemetry 同源的保证，而不是为了省 syscall。
@@ -88,11 +109,15 @@ function recordCompactionTelemetry(userDataPath, row) {
  * 未达触发线 / 冷却中 / 可折叠原子不足只走 `prepare` 早退，没调 LLM。
  * 未配置 baseUrl 的早退同样不是压缩，一并排除。
  *
- * @param {{ payload: object|null, force?: boolean, model?: string, startedAt?: number }} input
+ * 行里带 `sessionId` —— 面板要回答的是「**这段对话**压缩了几下、成不成」，
+ * 没有会话标识就只能统计全机累计，那是另一个问题。字段由写入点唯一提供，
+ * 读取侧按它过滤（见 `summarizeCompactionTelemetry`）。
+ *
+ * @param {{ payload: object|null, force?: boolean, model?: string, sessionId?: string, startedAt?: number }} input
  * @returns {object|null}
  */
 function compactionTelemetryRow(input = {}) {
-  const { payload, force, model, startedAt } = input;
+  const { payload, force, model, sessionId, startedAt } = input;
   if (!payload || typeof payload !== 'object') return null;
   const compacted = !!payload.compacted;
   const skipped = String(payload.compactionSkipped || '');
@@ -106,7 +131,10 @@ function compactionTelemetryRow(input = {}) {
   const savedTokens = compacted && tokensBefore > tokensAfter ? tokensBefore - tokensAfter : 0;
   const ms = Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
 
+  const scopeId = normalizeTelemetrySessionId(sessionId);
+
   return {
+    sessionId: scopeId || undefined,
     trigger: force ? TRIGGER_FORCE : TRIGGER_AUTO,
     result: compacted ? RESULT_COMPACTED : RESULT_FAILED,
     reason: compacted ? undefined : failureReason(skipped, llmError),
@@ -128,11 +156,17 @@ function roundRate(numerator, denominator) {
  *
  * 「压缩次数」= 触发的尝试数（本文件的窗口行数）；成功率 = 成功 / 次数。
  * 未触发不入窗口，所以不存在「成功率被空转轮次稀释」的问题。
+ *
+ * 传 `sessionId` 时只统计该会话的记录（面板要的是「这段对话压了几次」）；
+ * 不传则维持全局口径，供其它调用方使用。
+ *
  * @param {string} userDataPath
  * @param {number} [limit]
+ * @param {string} [sessionId]
  */
-function summarizeCompactionTelemetry(userDataPath, limit = 200) {
+function summarizeCompactionTelemetry(userDataPath, limit = 200, sessionId = '') {
   const filePath = compactionTelemetryPath(userDataPath);
+  const scopeId = normalizeTelemetrySessionId(sessionId);
   const empty = {
     windowRows: limit,
     attempted: 0,
@@ -150,7 +184,12 @@ function summarizeCompactionTelemetry(userDataPath, limit = 200) {
     // 日志是批写的，读取前必须先刷缓冲，否则会统计到陈旧数据
     flushLog(filePath);
     const raw = fs.readFileSync(filePath, 'utf8');
-    const lines = raw.trim().split('\n').slice(-limit);
+    const all = raw.trim().split('\n');
+    // 过滤必须发生在取窗口**之前**：先 slice 再筛的话，窗口会被其它会话的记录占满，
+    // 统计出来的是「本会话排在别人后面、剩下多少算多少」—— 会话越新数字越假。
+    const needle = scopeId ? sessionNeedle(scopeId) : '';
+    const scoped = needle ? all.filter((line) => line.includes(needle)) : all;
+    const lines = scoped.slice(-limit);
     const reasonMap = new Map();
     let auto = 0;
     let forced = 0;
@@ -209,10 +248,21 @@ function summarizeCompactionTelemetry(userDataPath, limit = 200) {
   }
 }
 
+/**
+ * 清空压缩遥测（统计信息页「清空」按钮的一路）。
+ * 与工具遥测同源：走闸门截断而非删文件，保证缓冲里的行不会在清空后回灌。
+ * @param {string} userDataPath
+ */
+function clearCompactionTelemetry(userDataPath) {
+  if (!userDataPath) return false;
+  return truncateLog(compactionTelemetryPath(userDataPath));
+}
+
 module.exports = {
   recordCompactionTelemetry,
   compactionTelemetryRow,
   summarizeCompactionTelemetry,
+  clearCompactionTelemetry,
   compactionTelemetryPath,
   TRIGGER_AUTO,
   TRIGGER_FORCE,

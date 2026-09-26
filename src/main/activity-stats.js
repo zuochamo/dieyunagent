@@ -206,6 +206,25 @@ function createActivityStats(deps) {
     bumpActivityStats(patch);
   }
 
+  /**
+   * 统计整体归零（统计信息页「清空」按钮）。
+   *
+   * lastResetDate / lastResetMonth 直接落成当前日期：否则下次 resetDailyStats
+   * 会再判定一次「跨天 / 跨月」并重复走一遍清零分支（结果相同，纯属多余）。
+   * 这里同步落盘而不是走 1.5s 防抖 —— 用户点完按钮就会刷新页面看结果，
+   * 延迟写入会让它短暂看到旧数据。
+   */
+  function clearAllStats() {
+    if (statsSaveTimer) {
+      clearTimeout(statsSaveTimer);
+      statsSaveTimer = null;
+    }
+    stats = emptyStats(new Date().toDateString(), currentStatsMonthKey());
+    saveActivityStats();
+    if (typeof onChanged === 'function') onChanged();
+    return { ok: true, clearedAt: Date.now() };
+  }
+
   function dispose() {
     if (statsSaveTimer) {
       clearTimeout(statsSaveTimer);
@@ -219,6 +238,7 @@ function createActivityStats(deps) {
     saveActivityStats,
     bumpActivityStats,
     resetDailyStats,
+    clearAllStats,
     recordLlmUsageFromApi,
     normalizeModelUsageKey,
     getStats: () => stats,

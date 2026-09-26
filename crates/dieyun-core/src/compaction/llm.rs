@@ -8,6 +8,9 @@ use crate::error::CoreError;
 /// 压缩请求超时。压缩是可选优化、且不重试，一次成败即定论。
 /// 取满 75s 而非更小值：摘要请求 prefill 重（48K~120K 字符）且输出预算 4096 token，
 /// 调小超时只会把「慢但会成功」的请求误判为失败（新引入失败），并不消除失败。
+///
+/// 这个预算成立的前提是**思考链已关闭**（见 `chat_completion` 里的 `enable_thinking`）——
+/// 思考 token 不受 `max_tokens` 约束，开着时同一请求会从 7.6s 涨到 30s+，历史一大就撞满这里。
 const LLM_HTTP_TIMEOUT_SECS: u64 = 75;
 
 #[derive(Debug, Clone)]
@@ -62,6 +65,15 @@ pub async fn chat_completion(
         "temperature": 0.15,
         "max_tokens": 4096,
         "stream": false,
+        // 显式关思考链：压缩只要「按格式提取的 JSON」，思考通道的内容会被
+        // `extract_completion_text` 原样丢弃 —— 对摘要零贡献。
+        // 而思考 token **不受 `max_tokens` 约束**，会静默吃掉全部时间预算：
+        // 2026-09-26 实测同一压缩请求，开思考 29.7s（思考 1202/输出 1867），
+        // 关思考 7.6s（思考 0/输出 490），正文完整度不变。
+        // 不关就是「7.6s 的活干成 30s+」，历史一大就撞满下面的 75s 超时被判失败。
+        // 兼容性已对两个在用的供应商实测（opencode zen / 叠云中转均 200 且思考归零）；
+        // 注意改用 `reasoning_effort` 会让叠云中转挂死到超时，勿替换。
+        "enable_thinking": false,
     });
 
     let mut req = client.post(url).json(&body);

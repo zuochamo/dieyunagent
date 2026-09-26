@@ -192,6 +192,10 @@ async function runPlanAgentLoop(ctx, plan) {
             return cr;
           }
         : null,
+      // 交付决策的单一来源是 `agent-round-text` 的四态（§3.4）：计划这一路同样要把
+      // 「有工具轮但没写正文」交给汇总轮，而不是自己拼一句占位文案。
+      // 汇总只在此开关打开时发生，且是**追加**一轮无工具 LLM，不改变有正文的行为。
+      turnEndSynthesis: true,
       delegateTool: async (name, args) =>
         toolBridge.executeAgentTool(name, args, {
           workspacePath: workspacePath || undefined,
@@ -222,8 +226,20 @@ async function runPlanAgentLoop(ctx, plan) {
     };
   }
 
-  const reply = String(loopResult?.content || '').trim() || '（计划执行完成，无文本摘要）';
+  const reply = String(loopResult?.content || '').trim();
   const trace = Array.isArray(loopResult?.trace) ? loopResult.trace : [];
+  if (!reply) {
+    // 走到这里仍无正文 == 这一轮什么都没交付。历史上这里会落一句「（计划执行完成，
+    // 无文本摘要）」并返回 ok:true —— 于是一次**完全没执行**的巡检被记成
+    // `lastRunOk: true`，上游「额度用尽」这类错误被静默丢掉，用户以为任务跑过了。
+    // 空交付必须如实失败：让 lastRunOk=false、会话里留 `执行失败：…`。
+    const toolCount = trace.reduce((n, r) => n + ((r && r.tools) || []).length, 0);
+    throw new Error(
+      toolCount
+        ? `模型执行了 ${toolCount} 次工具调用但未生成任何正文，请查看日志后重跑`
+        : '模型未返回任何正文与工具调用（上游可能拒绝请求或额度已用尽），请查看日志后重跑'
+    );
+  }
   appendPlanLog(userData, boundPlan, reply);
 
   const traceNote = summarizeTrace(trace);

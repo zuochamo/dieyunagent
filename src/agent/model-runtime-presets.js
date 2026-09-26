@@ -10,21 +10,30 @@ const LEGACY_CONTEXT_TIER_ALIASES = Object.freeze({
   'ctx-8k': 'ctx-16k'
 });
 
+/**
+ * 「默认」档与「512K」档共用同一组出厂值 —— 单一来源，避免两处各写一份后漂移。
+ * 两个档位各自展开一份（`{ ...TIER_SHARED_512K_VALUES }`），不共享可变对象引用。
+ *
+ * 关于 `agentToolCallLimit`：**所有档位统一 600**（= model-runtime-schema 的 max 上限）。
+ * 小窗口档位不再配更小的工具段预算，额度差异只由窗口 / 轮次体现。
+ */
+const TIER_SHARED_512K_VALUES = Object.freeze({
+  temperature: 0.3,
+  contextWindow: 524288,
+  maxOutputTokens: 32768,
+  contextReserveTokens: 32768,
+  compactionTriggerRatio: 0.88,
+  agentToolCallLimit: 600,
+  agentMaxRounds: 96
+});
+
 /** @type {ModelRuntimePreset[]} */
 const MODEL_RUNTIME_PRESETS = [
   {
     id: 'default',
     label: '默认',
-    hint: '128k 平衡档：大项目编程通用，历史与输出均衡',
-    values: {
-      temperature: 0.3,
-      contextWindow: 128000,
-      maxOutputTokens: 16384,
-      contextReserveTokens: 16384,
-      compactionTriggerRatio: 0.85,
-      agentToolCallLimit: 200,
-      agentMaxRounds: 96
-    }
+    hint: '等同 512K 档：512k 长窗口，大项目编程通用',
+    values: { ...TIER_SHARED_512K_VALUES }
   },
   {
     id: 'ctx-16k',
@@ -36,7 +45,7 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 4096,
       contextReserveTokens: 4096,
       compactionTriggerRatio: 0.75,
-      agentToolCallLimit: 80,
+      agentToolCallLimit: 600,
       agentMaxRounds: 32
     }
   },
@@ -50,7 +59,7 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 8192,
       contextReserveTokens: 8192,
       compactionTriggerRatio: 0.8,
-      agentToolCallLimit: 150,
+      agentToolCallLimit: 600,
       agentMaxRounds: 64
     }
   },
@@ -64,7 +73,7 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 12288,
       contextReserveTokens: 12288,
       compactionTriggerRatio: 0.82,
-      agentToolCallLimit: 180,
+      agentToolCallLimit: 600,
       agentMaxRounds: 80
     }
   },
@@ -78,7 +87,7 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 24576,
       contextReserveTokens: 24576,
       compactionTriggerRatio: 0.85,
-      agentToolCallLimit: 300,
+      agentToolCallLimit: 600,
       agentMaxRounds: 96
     }
   },
@@ -92,7 +101,7 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 32768,
       contextReserveTokens: 32768,
       compactionTriggerRatio: 0.88,
-      agentToolCallLimit: 300,
+      agentToolCallLimit: 600,
       agentMaxRounds: 96
     }
   },
@@ -100,15 +109,7 @@ const MODEL_RUNTIME_PRESETS = [
     id: 'ctx-512k',
     label: '512K',
     hint: '512k 长窗口：介于 200k 与 1M',
-    values: {
-      temperature: 0.3,
-      contextWindow: 524288,
-      maxOutputTokens: 32768,
-      contextReserveTokens: 32768,
-      compactionTriggerRatio: 0.88,
-      agentToolCallLimit: 300,
-      agentMaxRounds: 96
-    }
+    values: { ...TIER_SHARED_512K_VALUES }
   },
   {
     id: 'ctx-1m',
@@ -120,7 +121,7 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 32768,
       contextReserveTokens: 65536,
       compactionTriggerRatio: 0.9,
-      agentToolCallLimit: 300,
+      agentToolCallLimit: 600,
       agentMaxRounds: 96
     }
   },
@@ -134,7 +135,7 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 32768,
       contextReserveTokens: 65536,
       compactionTriggerRatio: 0.9,
-      agentToolCallLimit: 300,
+      agentToolCallLimit: 600,
       agentMaxRounds: 96
     }
   }
@@ -176,6 +177,7 @@ function foldLegacyContextTierRecord(raw, isKnown) {
 const api = {
   MODEL_RUNTIME_PRESETS,
   MODEL_RUNTIME_DEFAULTS,
+  TIER_SHARED_512K_VALUES,
   LEGACY_CONTEXT_TIER_ALIASES,
   getModelRuntimePresetById,
   remapLegacyContextTierId,

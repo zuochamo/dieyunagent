@@ -61,6 +61,33 @@ function repairDeltaTextFields(delta, repairText) {
 }
 
 /**
+ * 上游把错误装进「正常响应」时的载荷识别（**唯一来源**）。
+ *
+ * 为什么必须有：OpenAI 兼容中转普遍在 HTTP 200 里回吐上游错误 ——
+ * 流式是 `data: {"error": {...}}`（如叠云中转把 opencode 的 Go 额度用尽原样下发），
+ * 非流式是 `{"error": {...}}`。这类响应**既无 content 也无 tool_calls**，
+ * 若当成「正常空回复」，上层就会把「额度用尽」交付成一句空话 ——
+ * 定时任务曾因此把一次完全没执行的巡检记成 `lastRunOk: true`。
+ *
+ * 判据只认结构性字段（`error` 键 / `type: "error"`），不做文案正则。
+ *
+ * @param {any} json
+ * @returns {string} 错误文案；非错误载荷返回 ''
+ */
+function upstreamStreamErrorMessage(json) {
+  if (!json || typeof json !== 'object') return '';
+  const err = json.error;
+  if (!err && json.type !== 'error') return '';
+  if (typeof err === 'string') return err.trim();
+  if (err && typeof err === 'object') {
+    const text = err.message || err.code || err.type;
+    if (typeof text === 'string' && text.trim()) return text.trim();
+  }
+  if (typeof json.message === 'string' && json.message.trim()) return json.message.trim();
+  return '上游返回错误但未给出信息';
+}
+
+/**
  * 把一条已解析的 SSE JSON 翻译成 delta 交给 emit（流式走 `delta`，非流式走 `message`）。
  *
  * @param {any} json
@@ -69,6 +96,13 @@ function repairDeltaTextFields(delta, repairText) {
  */
 function emitParsedSseJson(json, emit, opts) {
   if (!json || typeof emit !== 'function') return;
+  // 流级元信息（与 `_usage` / `_finishReason` 同一条通道）：上游错误随 delta 交给消费方，
+  // 由消费方决定「抛错」还是「忽略」——本层保持纯解析、不抛异常（否则会被坏行 try 吞掉）。
+  const upstreamError = upstreamStreamErrorMessage(json);
+  if (upstreamError) {
+    emit({ _upstreamError: upstreamError });
+    return;
+  }
   const repairText = opts && opts.repairText;
   const choice = json?.choices?.[0];
   const delta = choice?.delta;
@@ -199,6 +233,7 @@ function buildToolCallAccumulator() {
 module.exports = {
   extractDeltaReasoning,
   repairDeltaTextFields,
+  upstreamStreamErrorMessage,
   emitParsedSseJson,
   processSseLineTrimmed,
   processSseTextChunk,

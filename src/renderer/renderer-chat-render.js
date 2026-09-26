@@ -2,52 +2,44 @@
 'use strict';
 
 
-function resetChatStreamScrollBaseline() {
-  const el = document.getElementById('chat-list');
-  if (el) delete el.dataset.streamScrollHeight;
+/**
+ * 「贴底」的唯一调度器：同一帧最多写一次 scrollTop，策略唯一（绝对贴底）。
+ *
+ * 这里曾有三套策略抢同一个 scrollTop —— 流式正文按增量 delta 跟随、思考区展开/折叠
+ * 过渡期自建一条 rAF 链每帧 pin、以及 renderer-thinking-trace 里一个裸 rAF 无条件刷
+ * 「上次 scrollHeight」基线。基线被互相覆盖后增量跟随的前提就不成立：视口在底部附近
+ * 反复回缩再前进，滚动条 thumb 因此表现为频繁跳动。
+ * 现在所有触发源只提交一次请求，由这里合并、并按需在过渡窗口内续期。
+ */
+var chatBottomFollowRaf = null;
+var chatBottomFollowHoldUntil = 0;
+
+/**
+ * @param {number} holdMs 需要逐帧跟随的时长（思考区展开/折叠期间高度逐帧变化）
+ */
+function requestChatBottomFollow(holdMs = 0) {
+  if (holdMs > 0) {
+    chatBottomFollowHoldUntil = Math.max(chatBottomFollowHoldUntil, Date.now() + holdMs);
+  }
+  if (chatBottomFollowRaf) return;
+  const tick = () => {
+    chatBottomFollowRaf = null;
+    pinStreamingChatToBottom();
+    if (Date.now() < chatBottomFollowHoldUntil) {
+      chatBottomFollowRaf = requestAnimationFrame(tick);
+    }
+  };
+  chatBottomFollowRaf = requestAnimationFrame(tick);
 }
 
-/** 流式正文增高时按增量跟随，避免 scrollHeight 硬跳 */
 function followChatStreamGrowth() {
-  if (streamScrollRaf) return;
-  streamScrollRaf = requestAnimationFrame(() => {
-    streamScrollRaf = null;
-    const el = document.getElementById('chat-list');
-    if (!el) return;
-    const nearBottom =
-      (typeof getChatAutoFollow === 'function' ? getChatAutoFollow() : true) || isChatNearBottom(el);
-    const nextH = el.scrollHeight;
-    const prevRecorded = Number(el.dataset.streamScrollHeight);
-    const hasBaseline = Number.isFinite(prevRecorded) && prevRecorded > 0;
-
-    if (!hasBaseline) {
-      if (nearBottom) el.scrollTop = Math.max(0, nextH - el.clientHeight);
-      el.dataset.streamScrollHeight = String(nextH);
-      if (nearBottom) setChatAutoFollow(true);
-      updateLastTurnFloat();
-      return;
-    }
-
-    const delta = nextH - prevRecorded;
-    if (delta > 0) {
-      if (nearBottom) el.scrollTop += delta;
-    } else if (delta < 0) {
-      const maxTop = Math.max(0, nextH - el.clientHeight);
-      el.scrollTop = nearBottom ? maxTop : Math.min(el.scrollTop, maxTop);
-    } else if (nearBottom) {
-      el.scrollTop = Math.max(0, nextH - el.clientHeight);
-    }
-    el.dataset.streamScrollHeight = String(nextH);
-    if (nearBottom) setChatAutoFollow(true);
-    updateLastTurnFloat();
-  });
+  requestChatBottomFollow();
 }
 
 function scheduleStreamingChatFollow() {
-  followChatStreamGrowth();
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => followChatStreamGrowth());
-  });
+  requestChatBottomFollow();
+  // 字体 / 图片 / mermaid 可能让高度再晚一帧才落位，补一次请求
+  requestAnimationFrame(() => requestChatBottomFollow());
 }
 
 function isThinkingLayoutSizeProperty(name) {
@@ -68,25 +60,12 @@ function pinStreamingChatToBottom() {
   pinChatToBottom();
 }
 
+/**
+ * 思考区展开/折叠过渡期间保持贴底：过渡期内高度逐帧变化，
+ * 由唯一调度器续期，不再自建第二条 rAF 链（两条链会在同一帧各写一次 scrollTop）。
+ */
 function startThinkingTransitionPin() {
-  thinkingTransitionPinUntil = Date.now() + THINKING_COLLAPSE_FOLLOW_MS;
-  if (thinkingTransitionPinRaf) return;
-  const tick = () => {
-    thinkingTransitionPinRaf = null;
-    if (typeof getChatAutoFollow === 'function' && !getChatAutoFollow()) {
-      thinkingTransitionPinUntil = 0;
-      return;
-    }
-    if (typeof isCurrentSessionSending === 'function' && !isCurrentSessionSending()) {
-      thinkingTransitionPinUntil = 0;
-      return;
-    }
-    pinStreamingChatToBottom();
-    if (Date.now() < thinkingTransitionPinUntil) {
-      thinkingTransitionPinRaf = requestAnimationFrame(tick);
-    }
-  };
-  thinkingTransitionPinRaf = requestAnimationFrame(tick);
+  requestChatBottomFollow(THINKING_COLLAPSE_FOLLOW_MS);
 }
 
 /** 流式中改 <details open> 会把 summary 滚进视口；跟底时改完立刻钉回底部 */
@@ -120,11 +99,7 @@ function onThinkingLayoutTransitionEnd(ev) {
   if (!chat || !isThinkingLayoutTransitionTarget(ev.target) || !chat.contains(ev.target)) return;
   if (ev.propertyName && !isThinkingLayoutSizeProperty(ev.propertyName)) return;
   if (typeof getChatAutoFollow === 'function' && !getChatAutoFollow()) return;
-  if (thinkingTransitionFollowTimer) clearTimeout(thinkingTransitionFollowTimer);
-  thinkingTransitionFollowTimer = setTimeout(() => {
-    thinkingTransitionFollowTimer = null;
-    pinStreamingChatToBottom();
-  }, 32);
+  requestChatBottomFollow();
 }
 
 function scrollChatToBottomNow(opts = {}) {
@@ -472,7 +447,6 @@ window.captureSessionScrollPosition = captureSessionScrollPosition;
 window.restoreSessionScrollPosition = restoreSessionScrollPosition;
 window.withSessionScrollCaptureSuppressed = withSessionScrollCaptureSuppressed;
 window.ensureChatScrollAfterLayout = ensureChatScrollAfterLayout;
-window.resetChatStreamScrollBaseline = resetChatStreamScrollBaseline;
 window.scheduleStreamingChatFollow = scheduleStreamingChatFollow;
 window.setStreamingDetailsOpen = setStreamingDetailsOpen;
 window.startThinkingTransitionPin = startThinkingTransitionPin;

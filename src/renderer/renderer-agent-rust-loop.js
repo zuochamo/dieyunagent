@@ -761,15 +761,15 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             notifyRustProgress(displayedTrace, liveContent, { immediate: true });
           } else if (ev.phase === 'turn_overflow_stopped') {
             notifyRustProgress(displayedTrace, liveContent, { immediate: true });
-            // 压缩可能失败（摘要模型报错 / 内容审核拦截）：文案如实说明，不谎称「已压缩一次」
-            const overflowCompaction = (ev.data && ev.data.compaction) || null;
-            let overflowDetail = '上下文仍超限（已压缩一次）。思考已保留，可新开对话或缩短历史后再试。';
-            if (overflowCompaction && overflowCompaction.compacted === false) {
-              const why =
-                overflowCompaction.reason === 'content_policy' ? '压缩被内容审核拦截' : '压缩未能完成';
-              overflowDetail = `上下文仍超限（${why}）。思考已保留，可新开对话或缩短历史后再试。`;
-            }
-            showAgentToast('本轮已停止', overflowDetail, { variant: 'warn' });
+            // 归因只转述上游原文（`llmError` 由 rust-loop-runner.stopForOverflow 带出）：
+            // 本地不分类、不给建议 —— 「请求体过长（图太大）」与「token 溢出」的处置方向相反
+            // （前者压缩压不掉：图 pin 在当前任务消息里；后者压缩有效），本地写死一句建议
+            // 必然对其中一类是错的，而用户拿不到可判断的原始事实。
+            // 展示长度由 showAgentToast 统一截断（240 字符），此处不再做二次加工。
+            const overflowLlmError = String((ev.data && ev.data.llmError) || '').trim();
+            showAgentToast('本轮已停止', overflowLlmError || '上游未返回错误详情', {
+              variant: 'warn'
+            });
           } else if (ev.phase === 'compacted') {
             const compactCr = {
               tokensBefore: ev.data && ev.data.tokensBefore,

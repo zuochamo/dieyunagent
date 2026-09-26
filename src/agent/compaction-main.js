@@ -255,6 +255,8 @@ function createMainCompactionAgent(userData, coreBridge = null) {
           payload,
           force: !!opts.force,
           model: llm.textModel,
+          // 会话标识：面板按会话统计压缩次数/成功率，缺了它就只能算全机累计
+          sessionId: opts.sessionId,
           startedAt
         })
       );

@@ -6,7 +6,6 @@ const attachmentsApi = window.diecloud || {};
 const MAX_ATTACH_TEXT = 12000;
 const IMAGE_ATTACH_RE = /\.(png|jpe?g|gif|webp|bmp|svg|heic|tiff?|ico)$/i;
 const FALLBACK_IMAGE_ATTACH_MAX_MB = 15;
-const FALLBACK_REQUEST_MAX_CHARS = 800000;
 
 /** 图片附件体积上限的唯一来源是 agent-limits.chatImagePreviewMaxMb（勿在此硬编码第二份）。 */
 function attachmentImageMaxBytes() {
@@ -20,19 +19,6 @@ function attachmentImageMaxBytes() {
     /* 读配置失败退回默认，不影响发送 */
   }
   return Math.max(1, Math.round(mb * 1024 * 1024));
-}
-
-/** 本次请求的字符硬顶：上游按字符计 Input length，base64 全量算在内。 */
-function attachmentRequestMaxChars() {
-  try {
-    if (typeof getAgentLimits === 'function') {
-      const n = Number((getAgentLimits() || {}).llmRequestMaxChars);
-      if (Number.isFinite(n) && n > 0) return n;
-    }
-  } catch {
-    /* ignore */
-  }
-  return FALLBACK_REQUEST_MAX_CHARS;
 }
 
 function attachmentToast(title, detail, opts) {
@@ -582,23 +568,10 @@ async function processAttachmentsForSend(userText, attachments) {
     }
   }
 
-  // 上游按字符计 Input length，base64 全量算在内。这里不自动剔除图片（会误伤当前可用
-  // 的场景），但超出本地请求硬顶时必须让用户知道，而不是发出去换一个 400。
-  if (imageParts.length) {
-    const payloadChars = imageParts.reduce(
-      (n, p) => n + String((p.image_url && p.image_url.url) || '').length,
-      0
-    );
-    const budgetChars = attachmentRequestMaxChars();
-    if (payloadChars > budgetChars) {
-      attachmentToast(
-        '图片较大，可能超出中转上限',
-        `本次图片约 ${Math.round(payloadChars / 1024 / 1024)}M 字符，超过请求上限 ${Math.round(budgetChars / 1024)}K 字符。若本轮报错，请压缩后重发。`,
-        { variant: 'warn', duration: 8000 }
-      );
-    }
-  }
-
+  // 发送前不做「图片字符预估」提示：它唯一的判据是本地硬顶（llmRequestMaxChars），
+  // 与中转实际放宽到多少无关 —— 中转一放宽就必然误报，且文案把它赖给「中转上限」。
+  // 超限这一事实只在真失败后如实转述上游原文（renderer-agent-rust-loop.js 的
+  // turn_overflow_stopped）。勿在此重新加回预估提示。
   const textForStorage = [...lead, ...lines].join('\n').trim() || userText || '';
   if (imageParts.length) {
     return {

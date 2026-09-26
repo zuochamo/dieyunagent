@@ -105,7 +105,11 @@ function setSidePanelTab(tab, opts) {
     if (typeof clampBrowserPanelWidthToChatMin === 'function') clampBrowserPanelWidthToChatMin();
   }
   if (next === 'terminal' && typeof ensureTerminalSession === 'function') ensureTerminalSession();
-  if (next === 'context' && typeof refreshContextProgress === 'function') refreshContextProgress();
+  if (next === 'context') {
+    if (typeof refreshContextProgress === 'function') refreshContextProgress();
+    // 压缩统计来自磁盘 jsonl（异步 IPC），随面板可见性拉取，不跟高频的圆环刷新混在一起
+    if (typeof loadCompactionStats === 'function') loadCompactionStats().catch(() => {});
+  }
   if (next === 'ssh' && typeof refreshWorkspaceMenuItems === 'function') {
     refreshWorkspaceMenuItems().catch(() => {});
   }

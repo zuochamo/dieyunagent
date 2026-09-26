@@ -18,9 +18,32 @@
  */
 
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+// 图片 part 形状的单一来源（OpenAI chat `image_url` / Responses `input_image` / Anthropic `image`）：
+// 出站图片闸门（sanitizeChatBodyImagesForApi）与计费必须认同一套形状，否则会漂移成
+// 「闸门拦下了、账本还把 base64 当正文算」。
+const { isChatImagePart } = require('./guardrails-shared');
 
 const CHARS_PER_TOKEN = AGENT_LIMITS_DEFAULTS.charsPerToken;
 const CJK_CHARS_PER_TOKEN = AGENT_LIMITS_DEFAULTS.cjkCharsPerToken;
+
+/** 单个图片 part 的等效字符数（唯一来源 `agent-limits.visionPartEqChars`）。 */
+const IMAGE_PART_EQUIV_CHARS = Number(AGENT_LIMITS_DEFAULTS.visionPartEqChars);
+
+/**
+ * 单个图片 part 的等效 token。
+ *
+ * 图片在真实请求里由服务端**按像素**换算成「图片 token」，与 base64 长度无关：
+ * 同一张图存成 1.5MB PNG 与压成 200KB JPEG，输入 token 几乎相同。若按 base64 长度计
+ * （旧行为：image part 既无 `text` 也无 `content`，退化成整个 JSON 计费），一张图就会被
+ * 放大数百倍 —— 实测一次 PNG 让压缩侧估到 685406 token，直接越过触发线，而图片既不可
+ * 折叠也不可压缩，于是变成「每轮都压、却压不掉」的假压缩（其中一次白等 75s 超时），
+ * 上下文圆环与用量统计也一并虚高。
+ *
+ * 这里只做「等效字符 → token」的同系数换算，折算系数本身仍唯一来源 `agent-limits.js`。
+ * Rust 侧同值见 `crates/dieyun-core/src/compaction/tokens.rs::IMAGE_PART_EQUIV_TOKENS`，
+ * 两侧一致性由 `test/fixtures/token-estimate-cases.json` 的图片用例锁定（改一侧必改另一侧）。
+ */
+const IMAGE_PART_EQUIV_TOKENS = Math.ceil(IMAGE_PART_EQUIV_CHARS / CHARS_PER_TOKEN);
 
 /** CJK 字符类单一来源（与 Rust `is_cjk` 的区段一一对应）。 */
 const CJK_CLASS = '\\u4e00-\\u9fff\\u3400-\\u4dbf\\uf900-\\ufaff\\u3040-\\u309f\\u30a0-\\u30ff\\uac00-\\ud7af';
@@ -64,6 +87,7 @@ function estimateJsonTokens(value) {
 
 /**
  * 与 Rust `estimate_tokens` 逐字对齐的内容计费：
+ * - 图片 part（三种形状）→ `IMAGE_PART_EQUIV_TOKENS`（不按 base64 长度计）
  * - `null` / `undefined` → 0
  * - string → 文本
  * - array → 各元素**分别**计费后求和（**无分隔符**；与 Rust 一致）
@@ -71,6 +95,8 @@ function estimateJsonTokens(value) {
  * - 其它标量 → `String(value)`
  */
 function estimateContentTokens(content) {
+  // 图片先判：它是「由服务端换算的图片 token」，与文本长度无关，绝不能落到下方 JSON 全量计费
+  if (isChatImagePart(content)) return IMAGE_PART_EQUIV_TOKENS;
   if (content == null) return 0;
   if (typeof content === 'string') return estimateTextTokens(content);
   if (Array.isArray(content)) {
@@ -133,6 +159,8 @@ function estimateFullContextUsage({ systemContent, messages, tools, draft } = {}
 module.exports = {
   CHARS_PER_TOKEN,
   CJK_CHARS_PER_TOKEN,
+  IMAGE_PART_EQUIV_CHARS,
+  IMAGE_PART_EQUIV_TOKENS,
   CJK_RE,
   countCjkChars,
   estimateTextTokens,

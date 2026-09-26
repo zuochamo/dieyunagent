@@ -4,6 +4,8 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const { sanitizeChatRequestJsonForApi } = require('./agent/guardrails-shared');
+// 上游错误载荷识别（HTTP 200 里装 `{"error":...}`）的单一来源，与流式路径共用同一判据
+const { upstreamStreamErrorMessage } = require('./agent/sse-delta-parse');
 const { captureLlmRaw, llmRawTapEnabled, createRawAccumulator } = require('./llm-raw-tap');
 
 /** 建立 TCP / 等到响应 headers（慢模型生成 JSON 可能长时间无输出） */
@@ -242,11 +244,17 @@ async function chatCompletionJson(url, opts = {}) {
     err.statusCode = res.statusCode;
     throw err;
   }
+  let json;
   try {
-    return JSON.parse(raw);
+    json = JSON.parse(raw);
   } catch {
     throw new Error(`响应非 JSON：${raw.slice(0, 200)}`);
   }
+  // HTTP 200 里装错误对象（中转把上游额度/鉴权错误当正常响应回吐）：必须变成失败，
+  // 否则上层拿到的会是「空 choices」→ 空回复 → 静默成功。判据与流式路径同源。
+  const upstreamError = upstreamStreamErrorMessage(json);
+  if (upstreamError) throw new Error(`LLM 上游错误：${upstreamError}`);
+  return json;
 }
 
 /**

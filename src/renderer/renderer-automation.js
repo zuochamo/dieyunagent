@@ -604,12 +604,18 @@ async function populateAutomationSkillSelect(selectedId) {
 function listAutomationModelOptions() {
   const out = [];
   const seen = new Set();
+  // 语音（TTS）模型不接受 chat 请求，选进计划必然失败；模态判据与 Composer 同源（ModelCapabilities）
+  const modalityOf = (supplier, modelId) =>
+    typeof window !== 'undefined' && window.ModelCapabilities
+      ? window.ModelCapabilities.getSupplierModelModality(supplier, modelId)
+      : 'text';
   try {
     const builtins =
       typeof builtinModelsFromSavedSuppliers === 'function' ? builtinModelsFromSavedSuppliers() : [];
     for (const m of builtins) {
       const supplier = typeof getSupplierById === 'function' ? getSupplierById(m.supplierId) : null;
       if (!supplier || !isSupplierModelEnabled(supplier, m.id)) continue;
+      if (modalityOf(supplier, m.id) === 'speech') continue;
       const route = m.routeKey || `builtin:${m.supplierId}:${m.id}`;
       if (seen.has(route)) continue;
       seen.add(route);
@@ -666,10 +672,14 @@ function populateAutomationModelSelect(route, model) {
 
 /** 读取模型选择：路由与模型名一并给出（定时执行无会话，两者都要随计划落盘）。 */
 function readAutomationModelPick() {
-  const pick = automationModelMenu ? automationModelMenu.getItem() : null;
+  const item = automationModelMenu ? automationModelMenu.getItem() : null;
+  // select-menu 的 normalize 只保留 { key, label, title, disabled, raw }，调用方透传的
+  // route / model 只存在于 raw 里（见 renderer-select-menu.js#normalize）。
+  // 直接读 item.route / item.model 恒为 undefined —— 症状就是「选了模型、保存后仍是跟随默认」。
+  const raw = (item && item.raw) || null;
   return {
-    model: String((pick && pick.model) || '').trim(),
-    modelRoute: String((pick && pick.route) || '').trim()
+    model: String((raw && raw.model) || '').trim(),
+    modelRoute: String((raw && raw.route) || '').trim()
   };
 }
 

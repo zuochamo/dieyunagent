@@ -4,6 +4,10 @@
 const sessionTranscript = require('./session-transcript');
 const roundText = require('./agent-round-text');
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+// 图片 part 形状判定的单一来源（OpenAI chat `image_url` / Responses `input_image` /
+// Anthropic `image`）。原先本文件只认 `image_url`，与出站闸门（guardrails-shared）的
+// 三形状判定不一致 —— 同一张图「闸门认得出、账本认不出」，账本就会退回按 base64 长度计。
+const { isChatImagePart } = require('./guardrails-shared');
 
 /**
  * 单个图片 part 计入上下文预算时的等效字符数。
@@ -12,15 +16,15 @@ const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
  * 若按 JSON.stringify(part).length 计（一张 1MB 图 ≈ 140 万字符），单张图就会顶穿
  * llmRequestMaxChars 这条长度硬上限，使历史从第一轮起就被反复裁；而图片既不可
  * 折叠（当前任务永不折叠）又不可压缩，于是变成「每轮都在裁一个裁不掉的东西」。
+ * token 口径的同值换算见 token-estimate.js 的 IMAGE_PART_EQUIV_TOKENS。
  */
 function visionPartEquivChars() {
   const n = Number(AGENT_LIMITS_DEFAULTS.visionPartEqChars);
   return Number.isFinite(n) && n > 0 ? n : 6000;
 }
 
-function isVisionPart(part) {
-  return !!(part && typeof part === 'object' && part.type === 'image_url');
-}
+/** 是否图片 part：形状判定委托 guardrails-shared，本文件不再自维护第二份形状表。 */
+const isVisionPart = isChatImagePart;
 
 function messagesForTranscript(messages) {
   return sessionTranscript.transcriptFromMessages(messages);
