@@ -54,8 +54,9 @@ logs_llm/
 release/
 deploy/*.zip
 
-# 本地工具输出 / 临时调试文件 / 生成产物（不进版本库）
+# 本地工具输出 / 集成终端日志 / 临时调试文件 / 生成产物（不进版本库）
 .dieyun/tool-output/
+.dieyun/terminals/
 /tmp-*
 /.tmp-*
 /generated-images/

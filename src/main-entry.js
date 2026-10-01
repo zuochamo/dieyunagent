@@ -204,8 +204,6 @@ let sshCredentialsStore = null;
 let sessionRemoteTransport = null;
 /** @type {object | null} */
 let portForwardManager = null;
-/** @type {object | null} */
-let terminalSession = null;
 /** @type {ReturnType<createTerminalPool> | null} */
 let terminalPool = null;
 let agentCoordinator = null;
@@ -698,11 +696,7 @@ app.whenReady().then(async () => {
       remoteGatewayRuntime.ensureRemoteGatewayForCurrentWorkspace(),
     suppressSshReconnect: () => sshReconnect.suppressSshReconnect(),
     broadcastToRenderers,
-    getTerminalPool: () => terminalPool,
-    getTerminalSession: () => terminalSession,
-    setTerminalSession: (v) => {
-      terminalSession = v;
-    }
+    getTerminalPool: () => terminalPool
   });
 
   // 渲染进程冻结取证通道（问题 B，取证期临时）：心跳/快照经 preload 单向上报 → main.log

@@ -711,8 +711,18 @@ function createSshSessionManager(opts = {}) {
             return;
           }
           let exited = false;
-          stream.on('data', (d) => onData(d.toString()));
-          stream.stderr?.on('data', (d) => onData(d.toString()));
+          // 远端 shell 输出是 UTF-8；按块 toString() 会把被数据块切开的汉字解成 U+FFFD，
+          // 所以用带 stream 的解码器跨块续接（ssh2 给的是 Buffer）
+          const decodeUtf8Stream = () => {
+            const decoder = new TextDecoder('utf-8');
+            return (chunk) => (typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true }));
+          };
+          const decodeOut = decodeUtf8Stream();
+          stream.on('data', (d) => onData(decodeOut(d)));
+          if (stream.stderr) {
+            const decodeErr = decodeUtf8Stream();
+            stream.stderr.on('data', (d) => onData(decodeErr(d)));
+          }
           stream.on('close', (code) => {
             if (exited) return;
             exited = true;

@@ -54,15 +54,10 @@ function createTerminalPool(opts = {}) {
     const candidates = [...entries.entries()]
       .filter(([key]) => key !== attachedSessionId)
       .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
-    for (const [key, entry] of candidates) {
+    for (const [key] of candidates) {
       if (entries.size <= maxEntries) break;
-      try {
-        entry.handle.kill();
-      } catch {
-        // ignore
-      }
-      entries.delete(key);
       log(`Terminal pool evicted ${key}`);
+      kill(key);
     }
   }
 
@@ -176,8 +171,10 @@ function createTerminalPool(opts = {}) {
     } catch {
       // ignore
     }
-    entries.delete(key);
-    if (attachedSessionId === key) attachedSessionId = null;
+    // 会话确实没了：删除 + 通知渲染端（单一来源 routeExit）。
+    // 少了这一步，UI 会继续显示「SSH · 用户@主机」，之后每次输入都落进"没有这个会话"的
+    // 静默分支 —— 表现就是「看着连着，打字毫无反应」。
+    routeExit(key, null);
   }
 
   function killExceptSessionIds(keepIds) {

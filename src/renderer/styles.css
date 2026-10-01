@@ -8431,12 +8431,33 @@ body.pane-resizing {
 }
 
 .terminal-pane {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   background: #0d1117;
   outline: none;
+}
+
+/* 输入法 / 粘贴宿主：必须是可编辑元素且「可见」，否则输入法不组字、paste 事件不派发。
+   1×1 + opacity:0 是终端模拟器的通行做法（display:none / visibility:hidden 都会失效）。 */
+.terminal-ime-sink {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  z-index: 1;
 }
 
 :root:not([data-theme='light']) .terminal-pane,
@@ -8469,6 +8490,38 @@ body.pane-resizing {
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+  /* 明确 tab 展开宽度：显示层按字符下标记账（tab 算 1 个），展开只发生在这里 */
+  tab-size: 8;
+}
+
+/* 光标：反白压在所在字符上（不占额外宽度）。未聚焦时是空心框，聚焦后实心并闪烁 */
+.terminal-cursor {
+  color: inherit;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.terminal-pane.focused .terminal-cursor {
+  background: #e6edf3;
+  color: #000000;
+  box-shadow: none;
+  animation: terminal-cursor-blink 1.06s steps(1, end) infinite;
+}
+
+:root[data-theme='light'] .terminal-pane.focused .terminal-cursor {
+  background: #1f2328;
+  color: #ffffff;
+}
+
+@keyframes terminal-cursor-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
 }
 
 .side-panel-pane[data-side-pane="browser"] .browser-panel-head {

@@ -68,7 +68,8 @@
 | `renderer-pane-layout.js` | 分栏布局 |
 | `renderer-monaco-core.js` | Monaco 加载 / 诊断 / diff 动画 |
 | `renderer-monaco.js` | 产物 Monaco 挂载 |
-| `renderer-terminal.js` | 内置终端 |
+| `terminal-screen.js` | 终端显示层：剥离 OSC/CSI、CR/BS/EL 归约（纯函数，可单测） |
+| `renderer-terminal.js` | 内置终端（会话/输入转发/输入法宿主） |
 | `renderer-browser.js` | 内置浏览器面板 |
 | `renderer-changes-pane.js` | 变更列表 |
 | `renderer-scm-pane.js` | 源码管理（更改/历史双模式：git 状态 + 暂存/提交、提交时间线泳道图 + 提交内 diff） |

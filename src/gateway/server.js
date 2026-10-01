@@ -680,7 +680,14 @@ class LocalGateway {
     this.sessionWorkspaceTargets.set(this.activeSessionId, { ...this.workspaceTarget });
   }
 
-  getWorkspaceTarget() {
+  /**
+   * 会话作用域的视图目标：该会话已绑定的目标优先，未绑定时跟随当前视图。
+   * 终端这类「随会话走的视图」必须走这个入口，否则会话尚未绑工作区时会拿到视图之外的
+   * 类型 —— 表现就是 SSH 工作区里开出本机 shell。
+   */
+  getWorkspaceTarget(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (sid) return this.sessionWorkspaceTargets.get(sid) || this.getEffectiveWorkspaceTarget();
     return this.getEffectiveWorkspaceTarget();
   }
 
@@ -731,8 +738,13 @@ class LocalGateway {
     return this.getPermissions();
   }
 
-  getWorkspace() {
-    const target = this.getEffectiveWorkspaceTarget();
+  /** @param {string} [sessionId] 传入会话 id 时返回该会话的工作区视图（终端等随会话走的视图用） */
+  getWorkspace(sessionId) {
+    return this._workspaceView(this.getWorkspaceTarget(sessionId));
+  }
+
+  /** 工作区视图的唯一成形处：getWorkspace 的两个入口都走这里 */
+  _workspaceView(target) {
     const sshConnected = this._sshConnectedForTarget(target);
     const connected = target?.kind === 'ssh' ? sshConnected : false;
     const displayPath = formatWorkspaceDisplay(target, { connected });

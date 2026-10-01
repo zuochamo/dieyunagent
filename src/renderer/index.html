@@ -406,6 +406,9 @@
                     <button type="button" class="ghost-btn side-panel-pane-action" id="terminal-restart">重启</button>
                   </div>
                   <div class="terminal-pane" id="terminal-pane" tabindex="0">
+                    <textarea class="terminal-ime-sink" id="terminal-ime-sink" tabindex="-1" rows="1"
+                              autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+                              aria-hidden="true"></textarea>
                     <pre class="terminal-output agent-scroll" id="terminal-output"></pre>
                   </div>
                 </div>
@@ -1953,6 +1956,7 @@
     <script src="./renderer-editor-context.js"></script>
     <script src="./renderer-changes-pane.js"></script>
     <script src="./renderer-scm-pane.js"></script>
+    <script src="./terminal-screen.js"></script>
     <script src="./renderer-terminal.js"></script>
     <script src="./renderer-browser.js"></script>
     <script src="./renderer-side-panel.js"></script>
