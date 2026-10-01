@@ -197,7 +197,10 @@ function createTerminalPool(opts = {}) {
   }
 
   function workspaceMetaFromTarget(target) {
-    if (!target) {
+    // 本地 target 缺 path（工作区未绑定）时不编路径：写死字面量 'local' 会让终端日志落到
+    // 进程 CWD 下的相对目录 local/.dieyun/terminals/，而且它与「没有 target」的
+    // workspaceKey 不一致（同一会话会因此多换一次壳），所以两者收敛成同一种形态。
+    if (!target || (target.kind !== 'ssh' && !target.path)) {
       return { kind: 'local', endpointKey: 'local', workspaceKey: 'local' };
     }
     if (target.kind === 'ssh') {
@@ -210,7 +213,7 @@ function createTerminalPool(opts = {}) {
         remotePath: target.remotePath
       };
     }
-    const p = target.path ? String(target.path) : 'local';
+    const p = String(target.path);
     return { kind: 'local', endpointKey: 'local', workspaceKey: `local:${p}`, path: p };
   }
 
