@@ -18,7 +18,7 @@ const remoteGwState = {
 };
 
 /** 对话记忆、权限等必须走本地 Gateway，不能经 SSH 远程隧道 */
-const LOCAL_RPC_PREFIXES = ['memory.', 'agent.state_', 'sql.', 'permissions.', 'plugins.', 'undo.', 'speech.'];
+const LOCAL_RPC_PREFIXES = ['memory.', 'agent.state_', 'permissions.', 'plugins.', 'undo.', 'speech.'];
 
 function isLocalOnlyMethod(method) {
   const m = String(method || '');
@@ -379,9 +379,6 @@ async function connectLocalGatewayOnly() {
   await connectOneGateway(gwState, localInfo, '本地 Gateway');
   gwState.port = localInfo.port;
   gwState.rustCore = info.rustCore || null;
-  if (typeof window.applyDeployUiDefaults === 'function' && info.deployUiDefaults) {
-    window.applyDeployUiDefaults(info.deployUiDefaults);
-  }
   setGatewayMeta(`已连接 :${localInfo.port}`);
   await refreshRemoteGatewayMeta();
 }

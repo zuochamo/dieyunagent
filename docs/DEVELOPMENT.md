@@ -69,9 +69,9 @@ npm run test:rust-planner-smoke  # mock LLM + Gateway 端到端
 
 ### 桌面客户端
 
-- 无边框主界面、设置弹窗（模型 / 主题 / 数据库）
+- 无边框主界面、设置弹窗（模型 / 主题）
 - 模型设置：**文本模型**、**多模态模型** 子标签；配置存 `localStorage`（`diecloud.model.settings.v1`）
-- 本地 Gateway（loopback）、技能、SQL 只读、本机控制工具
+- 本地 Gateway（loopback）、技能、本机控制工具
 - Agent 工具轮次无硬上限，依赖用户停止 + 上下文压缩；展示**思考过程**
 - 开机自启、单实例（含 Windows 命名管道兜底）、generic 自动更新
 
@@ -127,6 +127,26 @@ npm run sync:updates   # 可选：同步到 updates-published/ 供本机静态�
 | `mobile/dieyun-mobile-<version>.apk` | 手机端安装包 |
 
 客户端内置更新源与 `package.json` → `build.publish.url` 一致，默认 **`http://192.168.31.62:3099/`**（`UPDATE_URL` 可覆盖）。
+
+#### 离线预装的 MCP（内网可用性）
+
+`mcp-postgres`（PostgreSQL 只读）是**离线预装**：npm 包与平台二进制在构建期取好、随安装包分发到
+`<resources>/mcp/bundled/mcp-postgres`，运行时既不 `npm install` 也不从 GitHub Releases 下载。
+原因是该包默认在**首次使用时**才下载平台二进制，且用的是 Node `fetch` —— 内网不可达，企业 TLS
+代理下即使「有网」也会 `fetch failed`（本机实测：curl 200 / Node fetch 失败）。
+
+```bash
+npm run pack:mcp-bundled     # 取产物 + 校 sha256 → build/mcp-bundled/
+npm run verify:mcp-bundled   # 打包后校验安装包内产物与 registry 锁定版本/校验和一致
+```
+
+- 包名与版本的唯一来源是 `src/mcp/registry.js` 的 `mcp-postgres` 条目（`-y postgres-mcp-hardened@<ver>`），
+  sha256 的唯一来源是该 npm 包自带的 `checksums.json`；**勿在别处再写一份版本或校验和**。
+- 断网/内网构建：把 `postgres-mcp-hardened-<ver>.tgz` 与
+  `postgres-mcp-hardened-x86_64-pc-windows-msvc.zip` 放进 `build/.cache/` 后重跑即可跳过下载（仍校 sha256）。
+- `npm run dev` / `start` 会先执行 `scripts/ensure-mcp-bundled.cjs`；取不到产物只告警不阻断
+  （该 MCP `defaultEnabled: false`，属可选能力）。
+- 目前只做 Windows x64；新增平台改 `scripts/pack-mcp-bundled.cjs` 的 `TARGETS` 并确认随对应安装包分发。
 
 #### 只发布已有产物
 

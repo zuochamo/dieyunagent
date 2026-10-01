@@ -640,7 +640,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         const blocked = applyPatchUnsupported();
         return { error: blocked.error, errorCode: blocked.errorCode, suggestedFix: blocked.suggestedFix };
       }
-      if (name.startsWith('plugin_') || name.startsWith('sql_')) {
+      if (name.startsWith('plugin_')) {
         return gateway.invokeRpc(
           'plugins.tool_call',
           withRunWorkspace({ name, arguments: a || {} })

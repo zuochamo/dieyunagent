@@ -21,8 +21,6 @@ function buildExploreCoordinatorTools(allTools) {
   return SUBAGENT_TOOL ? base.concat([SUBAGENT_TOOL]) : base;
 }
 
-let sqlStatusCache = null;
-
 function formatPluginInstallHint(result) {
   if (!result || typeof result !== 'object') return '已安装';
   const action = result.action || 'install';
@@ -139,8 +137,6 @@ function wirePluginTileEvents(grid) {
             description: tile.dataset.pluginDescription || '',
             installPath: tile.dataset.pluginInstallPath || ''
           });
-        } else if (pluginId === 'builtin.database') {
-          openDatabaseSettingsModal('settings');
         } else if (typeof openPluginSchemaSettings === 'function') {
           openPluginSchemaSettings(pluginId, pluginName);
         }
@@ -163,10 +159,6 @@ function wirePluginTileEvents(grid) {
       cb.disabled = true;
       try {
         await gatewayCall('plugins.set_enabled', { id, enabled: cb.checked });
-        if (id === 'builtin.database') {
-          sqlStatusCache = null;
-          if (typeof loadSqlConfigUI === 'function') loadSqlConfigUI().catch(() => {});
-        }
         await loadPluginsUI();
       } catch (err) {
         cb.disabled = false;
@@ -181,7 +173,7 @@ function renderPluginTileHtml(p) {
   const on = !!p.enabled;
   const sourceLabel = p.source === 'user' ? '用户' : '内置';
   const deleteLabel = p.source === 'user' ? '卸载' : '删除';
-  const hasSettings = p.id === 'builtin.database' || !!p.hasSettings;
+  const hasSettings = !!p.hasSettings;
   const hintText = hasSettings ? '点击打开设置' : `${p.category || 'general'} · ${sourceLabel}`;
   return `<article class="skill-tile plugin-tile${on ? ' enabled' : ''}${hasSettings ? ' plugin-tile-clickable' : ''}" data-plugin-id="${escapeHtml(p.id)}" data-plugin-name="${escapeHtml(p.name || p.id)}" data-plugin-description="${escapeHtml(p.description || '')}" data-plugin-install-path="${escapeHtml(p.installPath || '')}" data-plugin-has-settings="${hasSettings ? '1' : '0'}">
     <div class="skill-tile-head">
@@ -298,9 +290,6 @@ document.addEventListener('click', async (e) => {
     } else {
       await gatewayCall('plugins.remove', { id: removeId });
     }
-    if (removeId === 'builtin.database') {
-      sqlStatusCache = null;
-    }
     await loadPluginsUI();
   } catch (err) {
     removeBtn.disabled = false;
@@ -331,101 +320,11 @@ const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
 const isWeakToolCallerModel = _tc.isWeakToolCallerModel || function () { return false; };
 const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return entry && entry.tool; };
 
-function setSqlHint(text) {
-  const el = $('plugin-detail-hint') || $('sql-hint');
-  if (!el) return;
-  el.textContent = text || '';
-  if (text) {
-    el.classList.add('show');
-    setTimeout(() => el.classList.remove('show'), 2500);
-  }
-}
-
-function renderSqlDbList(databases, extra) {
-  const el = $('sql-db-list');
-  if (!el) return;
-  if (!databases || !databases.length) {
-    el.textContent = extra || '（无数据库或无权限）';
-    return;
-  }
-  el.textContent = `共 ${databases.length} 个数据库：\n${databases.join('\n')}`;
-}
-
-function readSqlForm() {
-  return {
-    enabled: $('sql-enabled')?.checked !== false,
-    host: ($('sql-host')?.value || '').trim(),
-    port: Number($('sql-port')?.value) || 1433,
-    user: ($('sql-user')?.value || '').trim(),
-    password: $('sql-password')?.value || '',
-    maxRows: Number($('sql-max-rows')?.value) || 500
-  };
-}
-
-function applySqlForm(cfg) {
-  if (!cfg) return;
-  if ($('sql-enabled')) $('sql-enabled').checked = !!cfg.enabled;
-  if ($('sql-host')) $('sql-host').value = cfg.host || '';
-  if ($('sql-port')) $('sql-port').value = cfg.port || 1433;
-  if ($('sql-user')) $('sql-user').value = cfg.user || '';
-  if ($('sql-max-rows')) $('sql-max-rows').value = cfg.maxRows || 500;
-  if (cfg.databases && cfg.databases.length) renderSqlDbList(cfg.databases);
-}
-
-async function loadSqlConfigUI() {
-  if (!gwState.authed) return;
-  try {
-    const cfg = await gatewayCall('sql.config_get', {});
-    sqlStatusCache = cfg;
-    applySqlForm(cfg);
-  } catch {
-    // ignore
-  }
-}
-
-async function saveSqlConfig() {
-  if (!gwState.authed) {
-    setSqlHint('Gateway 未连接');
-    return;
-  }
-  try {
-    const patch = readSqlForm();
-    const saved = await gatewayCall('sql.config_set', patch);
-    sqlStatusCache = saved;
-    setSqlHint('配置已保存 ✓');
-  } catch (err) {
-    setSqlHint(`保存失败：${err.message || err}`);
-  }
-}
-
-async function testSqlConnection() {
-  if (!gwState.authed) {
-    setSqlHint('Gateway 未连接');
-    return;
-  }
-  const listEl = $('sql-db-list');
-  if (listEl) listEl.textContent = '正在连接…';
-  try {
-    await saveSqlConfig();
-    const r = await gatewayCall('sql.test', {});
-    sqlStatusCache = { ...sqlStatusCache, databases: r.databases, lastTestOk: true };
-    renderSqlDbList(r.databases, `连接成功\n${(r.version || '').split('\n')[0]}`);
-    setSqlHint('连接成功 ✓');
-  } catch (err) {
-    if (listEl) listEl.textContent = `连接失败：${err.message || err}`;
-    setSqlHint(`失败：${err.message || err}`);
-  }
-}
-
 async function loadPluginToolsForAgent() {
   if (!gwState.authed) return [];
   try {
     const tools = await gatewayCall('plugins.list_tools', {});
     if (!Array.isArray(tools) || !tools.length) return [];
-    const p = await toolDefsApi.getPermissions();
-    if (p && p.sqlRead === false) {
-      return tools.filter((t) => !String(t?.function?.name || '').startsWith('sql_'));
-    }
     return tools;
   } catch {
     return [];
@@ -664,18 +563,7 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   }
 }
 
-function initSqlSettingsUI() {
-  const btnRefreshList = $('sql-refresh-list');
-  if (btnRefreshList) {
-    btnRefreshList.addEventListener('click', async () => {
-      if (sqlStatusCache && sqlStatusCache.databases && sqlStatusCache.databases.length) {
-        renderSqlDbList(sqlStatusCache.databases);
-        return;
-      }
-      await testSqlConnection();
-    });
-  }
-
+function initPluginSettingsUI() {
   if (typeof initPluginDetailOverlay === 'function') initPluginDetailOverlay();
 
   const pluginAddBtn = $('plugin-add-btn');

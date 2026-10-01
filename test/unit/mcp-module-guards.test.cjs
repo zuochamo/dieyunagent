@@ -2,6 +2,7 @@
 
 const { serverSignature } = require('../../src/mcp/runtime-manager');
 const { runtimeArgsWithoutNpxPackage, getMcpNpmPackageMeta } = require('../../src/mcp/package-store');
+const { isMcpServerConfigured } = require('../../src/mcp/server-config');
 
 describe('mcp session signature', () => {
   const remote = {
@@ -34,6 +35,50 @@ describe('mcp session signature', () => {
     expect(serverSignature(stdio, { env: { K: '1' } })).not.toBe(
       serverSignature(stdio, { env: { K: '2' } })
     );
+  });
+});
+
+// 预装（bundled）服务不要求用户填 command，但**不豁免凭据**：
+// 声明了 envHint 就必须配好，否则会出现「已启用但永远连不上」。
+describe('预装 MCP 的凭据闸门', () => {
+  let savedDbUrl;
+
+  beforeEach(() => {
+    savedDbUrl = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+  });
+
+  afterEach(() => {
+    if (savedDbUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = savedDbUrl;
+  });
+
+  const bundledPostgres = {
+    id: 'mcp-postgres',
+    bundledServer: 'mcp-postgres',
+    command: 'npx',
+    envHint: 'DATABASE_URL'
+  };
+
+  it('bundled + envHint：没配 DATABASE_URL 仍算未配置', () => {
+    expect(
+      isMcpServerConfigured(bundledPostgres, { getSecretMeta: () => ({ envKeys: [] }) })
+    ).toBe(false);
+  });
+
+  it('bundled + envHint：凭据就位才算已配置', () => {
+    expect(
+      isMcpServerConfigured(bundledPostgres, { getSecretMeta: () => ({ envKeys: ['DATABASE_URL'] }) })
+    ).toBe(true);
+  });
+
+  it('无 envHint 的预装服务视为已配置（不要求填 command）', () => {
+    expect(
+      isMcpServerConfigured(
+        { id: 'mcp-daizhang', bundledServer: 'dieyun-open-api', command: 'bundled' },
+        { getSecretMeta: () => ({ envKeys: [] }) }
+      )
+    ).toBe(true);
   });
 });
 

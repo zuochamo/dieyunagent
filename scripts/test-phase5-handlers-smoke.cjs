@@ -15,23 +15,10 @@ function assert(cond, msg) {
 
 async function testHandlerFactories() {
   const fakeDeps = {
-    perms: { webFetch: true, sqlRead: false, browserAutomation: true },
+    perms: { webFetch: true, browserAutomation: true },
     requireRustCore: async (method, params) => ({ ok: true, method, params }),
     projectMemoryScope: () => 'proj:test',
-    sqlSvc: {
-      getStatus: () => ({ enabled: false }),
-      setConfig: () => ({}),
-      testConnection: async () => ({ ok: true }),
-      listDatabases: async () => [],
-      listTables: async () => [],
-      query: async () => ({ rows: [] })
-    },
     assertHostEnabled: () => {},
-    assertSqlEnabled: () => {
-      const e = new Error('SQL disabled');
-      e.code = 'SQL_READ_DISABLED';
-      throw e;
-    },
     assertWebFetchEnabled: () => {},
     webFetch: {
       fetchWithRedirects: async () => ({ text: 'ok' }),
@@ -49,7 +36,6 @@ async function testHandlerFactories() {
     'permissions.get',
     'memory.touch_session',
     'agent.state_get',
-    'sql.config_get',
     'web.fetch',
     'speech.transcribe',
     'index.remote_sync_configure',
@@ -67,7 +53,6 @@ async function testHandlerFactories() {
   assert((await h['permissions.get']()).webFetch === true, 'perms');
   assert((await h['memory.project_scope']({})).scope === 'proj:test', 'project scope');
   assert((await h['agent.state_get']({ sessionId: 's1' })).method === 'agent.state_get', 'agent');
-  assert((await h['sql.config_get']()).enabled === false, 'sql');
   assert((await h['index.remote_sync_configure']()).ok === true, 'index');
   assert((await h['index.remote_wait_ready']({})).skipped === true, 'remote wait local skip');
 
@@ -118,7 +103,7 @@ async function testHandlerFactories() {
   const h2 = createExtractedHandlers(healDeps);
   const healed = await h2['index.remote_wait_ready']({ workspaceRoot: 'ssh://u@h/tmp/proj' });
   assert(healed.ok === true && healed.healed === true && healCalls === 1, 'prep heal retries wait');
-  console.log('ok handler factories (permissions/memory/agent/sql/web/speech/index)');
+  console.log('ok handler factories (permissions/memory/agent/web/speech/index)');
 }
 
 async function testLiveGatewayRpc() {
@@ -141,8 +126,6 @@ async function testMainIpcModules() {
   assert(typeof registerEarlyMainIpc === 'function', 'registerEarlyMainIpc');
   assert(typeof registerMainIpc === 'function', 'registerMainIpc');
   assert(typeof registerLateMainIpc === 'function', 'registerLateMainIpc');
-  const ipc = require('../src/main/ipc/deploy');
-  assert(typeof ipc.registerDeployIpc === 'function', 'registerDeployIpc');
   const { registerWorkspaceRemoteIpc } = require('../src/main/ipc/workspace-remote');
   assert(typeof registerWorkspaceRemoteIpc === 'function', 'registerWorkspaceRemoteIpc');
   console.log('ok main IPC modules load');

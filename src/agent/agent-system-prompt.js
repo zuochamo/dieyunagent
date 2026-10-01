@@ -31,7 +31,6 @@ function buildCoreAgentRules(opts = {}) {
     '- 相关代码已在下文「相关代码/项目上下文」中预注入时，优先使用，少做重复 list/read。',
     '- 工具可并行；避免重复 list_dir；读大文件用 offset/maxBytes 分块。',
     '- 需要最新事实用 web_search → web_fetch 核验；禁止伪造搜索结果。',
-    '- SQL：已知库/表勿重复 list；仅 SELECT。',
     '- 技能：下文只给目录与路径；执行前用 fs_read_file 读 SKILL.md；host_exec 时 cwd=技能目录。',
     '- 仅当摘要、折叠条、近轮原文和工作区仍无法在互斥选项间抉择时才用 agent_clarify；不要因历史已折叠而提问「本轮做什么」。交付适合表格时用 Markdown 表格。',
     '- 无 tool_calls 的文字回复即本轮结束；还要检查就继续调用工具，不要空转描述下一步。',
@@ -116,7 +115,6 @@ function formatPermissionsChunk(permissions) {
     caps.push('打开浏览器');
     if (p.browserAutomation !== false) caps.push('浏览器自动化');
     if (p.webFetch !== false) caps.push('联网抓取');
-    if (p.sqlRead) caps.push('SQL只读');
     // 「完全放开路径限制」开关（设置页，默认关）：显式告知模型，免得它按白名单惯性自我设限
     const pathNote =
       p.unrestrictedPaths === true
@@ -131,25 +129,7 @@ function formatPermissionsChunk(permissions) {
   if (p.webFetch !== false) {
     return '【联网抓取】web_search / web_fetch 已开启（无需本机文件权限）。';
   }
-  if (p.sqlRead) {
-    return '【本机控制能力】SQL Server 只读查询已开启。';
-  }
   return '';
-}
-
-function formatSqlChunk(sqlConfig) {
-  const sqlCfg = sqlConfig && typeof sqlConfig === 'object' ? sqlConfig : null;
-  if (!sqlCfg || !sqlCfg.enabled) return '';
-  let dbLine = '';
-  if (sqlCfg.databases && sqlCfg.databases.length) {
-    dbLine = `\n可访问数据库（${sqlCfg.databases.length} 个）：${sqlCfg.databases.join(', ')}`;
-  }
-  return (
-    `【SQL Server 只读】已连接 ${sqlCfg.host}:${sqlCfg.port}，用户 ${sqlCfg.user}。仅允许 SELECT。` +
-    `${dbLine}\n` +
-    `优先 sql_query；跨库用 [库].[dbo].[表] 三段式；元数据可用 INFORMATION_SCHEMA。` +
-    `勿重复 sql_list_databases；勿对同一库多次 list_tables。`
-  );
 }
 
 function resolvePromptLimitChars(key, fallback) {
@@ -203,8 +183,7 @@ function assembleSystemPrompt(opts = {}) {
     ...(Array.isArray(opts.stableDataChunks) ? opts.stableDataChunks : []),
     formatAgentHomeChunk(opts.agentHome),
     formatWorkspaceChunk(opts.workspaceInfo, opts.agentHome),
-    formatPermissionsChunk(opts.permissions),
-    formatSqlChunk(opts.sqlConfig)
+    formatPermissionsChunk(opts.permissions)
   ];
   const turnChunks = [
     formatSystemTimeChunk(opts.now),
@@ -223,7 +202,6 @@ const agentSystemPromptApi = {
   formatAgentHomeChunk,
   formatWorkspaceChunk,
   formatPermissionsChunk,
-  formatSqlChunk,
   capUserSystemText,
   assembleSystemPrompt
 };

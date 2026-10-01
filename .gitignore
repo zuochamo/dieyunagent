@@ -10,6 +10,7 @@ build/dieyun-core/
 build/dieyun-core-linux/
 build/.cache/
 build/remote-gateway-pack/
+build/mcp-bundled/
 .dieyun/attachments/
 .dieyun/cleanup-backup/
 .dieyun/worktrees/

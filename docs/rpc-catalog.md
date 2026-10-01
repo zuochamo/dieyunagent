@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-09-21T02:38:14.016Z
+生成时间：2026-09-29T10:53:09.548Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 192 |
-| Gateway only | 120 |
+| 总计 | 186 |
+| Gateway only | 114 |
 | Rust only | 23 |
 | Both | 49 |
 
@@ -269,17 +269,6 @@
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `speech.transcribe` | gateway | gateway/handlers/speech.js | — |
-
-### sql (6)
-
-| Method | Layer | Gateway source | Rust |
-|--------|-------|----------------|------|
-| `sql.config_get` | gateway | gateway/handlers/sql.js | — |
-| `sql.config_set` | gateway | gateway/handlers/sql.js | — |
-| `sql.list_databases` | gateway | gateway/handlers/sql.js | — |
-| `sql.list_tables` | gateway | gateway/handlers/sql.js | — |
-| `sql.query` | gateway | gateway/handlers/sql.js | — |
-| `sql.test` | gateway | gateway/handlers/sql.js | — |
 
 ### undo (11)
 

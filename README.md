@@ -8,7 +8,7 @@ npm 包名 **`dieyunagent`**（见 `package.json`）；仓库目录同名。历�
 
 ### Agent 核心
 
-- **本地 Gateway** — WebSocket RPC，会话 / 记忆 / 工具 / SQL 只读等
+- **本地 Gateway** — WebSocket RPC，会话 / 记忆 / 工具等
 - **技能系统** — 内置与自定义 Skill，向量召回
 - **模型配置** — 文本 / 多模态 / Embedding，存 `localStorage`（`diecloud.model.settings.v1`）
 - **定时计划** — `plans` 调度（设置 → 自动化）

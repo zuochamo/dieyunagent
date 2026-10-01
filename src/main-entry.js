@@ -13,7 +13,7 @@ const {
   clipboard
 } = require('electron');
 const path = require('path');
-const { getDeployConfig, getDeployUiDefaults } = require('./deploy-config');
+const { getDeployConfig } = require('./deploy-config');
 const {
   getMonitorServerCandidates,
   loadAppConfig
@@ -288,7 +288,6 @@ const earlyIpcCtx = {
   ipcMain,
   app,
   dialog,
-  getDeployUiDefaults,
   loadDieyunInstructions,
   openDieyunMdInEditor,
   formatDieyunBlock
@@ -656,7 +655,6 @@ app.whenReady().then(async () => {
     getPlansScheduler: () => plansScheduler,
     getUserDataPath: () => userData,
     getActiveRemoteGatewayInfo: () => remoteGatewayRuntime.getActiveRemoteGatewayInfo(),
-    getDeployUiDefaults,
     resolveDieyunCoreBinary,
     saveModelSettings,
     loadModelSettings,

@@ -91,7 +91,6 @@ function summarizeLineDiff(beforeText, afterText) {
  *   writableRoots: string[],
  *   permissions: import('./permissions-store').DEFAULTS & object,
  *   defaultCwd?: string | null
- *   sql?: import('../plugins/database/sqlserver').SqlServerService | null
  *   plugins?: import('../plugins/host').PluginHost | null
  *   getEmbeddingConfig?: () => object
  *   onPluginsChanged?: Function
@@ -112,7 +111,6 @@ function createRpcHandlers(ctx) {
   const writable = ctx.writableRoots.map((r) => path.resolve(r));
   const perms = ctx.permissions;
   const defaultCwd = ctx.defaultCwd || null;
-  const sqlSvc = ctx.sql || null;
   const plugins = ctx.plugins || null;
   const browser = ctx.browser || null;
   const ssh = ctx.ssh || null;
@@ -1257,19 +1255,6 @@ function createRpcHandlers(ctx) {
     }
   }
 
-  function assertSqlEnabled() {
-    if (!perms.sqlRead) {
-      const e = new Error('SQL 只读查询未授权');
-      e.code = 'SQL_READ_DISABLED';
-      throw e;
-    }
-    if (!sqlSvc) {
-      const e = new Error('SQL Server 服务未初始化');
-      e.code = 'SQL_UNAVAILABLE';
-      throw e;
-    }
-  }
-
   function getActiveEmbeddingConfig() {
     if (typeof ctx.getEmbeddingConfig !== 'function') return {};
     try {
@@ -1930,9 +1915,7 @@ function createRpcHandlers(ctx) {
     perms,
     requireRustCore,
     projectMemoryScope,
-    sqlSvc,
     assertHostEnabled,
-    assertSqlEnabled,
     assertWebFetchEnabled,
     webFetch,
     ctx,

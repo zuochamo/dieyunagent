@@ -111,7 +111,7 @@
 
 ### A2. 词表 / 数组常量
 
-#### A2.1 JS（≈22 张）
+#### A2.1 JS（≈23 张）
 
 | 文件:行号 | 名称 | 数量 | 用途 |
 |---|---|---|---|
@@ -121,8 +121,9 @@
 | `guardrails-shared.js:37-49` | `MUTATING_TOOL_NAMES` | 9 | 会改动状态的工具 |
 | `guardrails-shared.js:52-54` | `FILE_WRITE_TOOL_NAMES` | 5 | 会写本地文件的工具 |
 | `guardrails-shared.js:57-77` | `BROWSER_MUTATING_PREFIXES` | 19 | 改页面状态的浏览器工具前缀 |
-| `planner-tool-filters.js:3-25` | `EXPLORE_TOOL_NAMES` | 21 | Explore 只读白名单（**唯一来源**，经 agent-bundle 镜像给 Renderer） |
-| `planner-tool-filters.js:35-47` | `SHELL_TOOL_NAMES` | 11 | Shell 模式白名单（同上） |
+| `planner-tool-filters.js:5-24` | `EXPLORE_TOOL_NAMES` | 21 | Explore 只读白名单（**唯一来源**，经 agent-bundle 镜像给 Renderer） |
+| `planner-tool-filters.js:36-45` | `SHELL_TOOL_NAMES` | 11 | Shell 模式白名单（同上） |
+| `planner-tool-filters.js:63` | `READONLY_MCP_SERVER_IDS` | 1 | 只读阶段放行的 MCP 服务（服务端契约拒写；`mcp-postgres`）。前缀经 `mcp/tool-name.js` 生成，不在此复写编码格式 |
 | `llm-tool-call-fallback.js:20-35` | `TOOL_NAME_ALIASES` | 14 | 解析模型输出里的工具名 |
 | `llm-tool-call-fallback.js:38-89` | `TOOL_PARAM_NAMES` | 50 | 各工具参数名候选表 |
 | `browser/url-policy.js:10-17` | `LOCAL_FILE_EXTENSIONS` | 65 | 本地文件扩展名白名单 |
@@ -166,13 +167,13 @@
 
 ---
 
-### A3. 白名单 / 黑名单（≈23 张）
+### A3. 白名单 / 黑名单（≈24 张）
 
 | 类型 | 位置 | 数量 |
 |---|---|---|
 | **黑名单** | `gateway/exec-policy.js:5-14` `BLOCKED_PATTERNS`（rm -rf /、del /s、format、mkfs、写裸设备、fork bomb、shutdown、reboot、-enc） | 10 |
 | 黑名单 | `renderer/renderer-skills-grid.js:184` 分类移除 | 3 |
-| 白名单 | `planner-tool-filters.js` Explore / Shell | 21 / 11 |
+| 白名单 | `planner-tool-filters.js` Explore / Shell + 只读 MCP 放行名单 | 21 / 11 / 1 |
 | 白名单 | `agent/tool-validate.js:271` lsp operation | 4 |
 | 白名单 | `guardrails-shared.js` 改写/文件写工具集 | 9 / 5 |
 | 白名单 | `browser/url-policy.js` 扩展名 / 内网主机 | 65 / 4 |
@@ -261,18 +262,17 @@
 
 ### B1. 主 Agent system prompt 链路
 
-组装入口：`src/agent/agent-system-prompt.js:186-207` `assembleSystemPrompt()`。
-拼接顺序（stable → turn）：`language → userSystem → 核心准则 → stableDataChunks → 家目录 → 工作空间 → 权限 → SQL ｜ 系统时间 → turnDataChunks`。
+组装入口：`src/agent/agent-system-prompt.js:177-198` `assembleSystemPrompt()`。
+拼接顺序（stable → turn）：`language → userSystem → 核心准则 → stableDataChunks → 家目录 → 工作空间 → 权限 ｜ 系统时间 → turnDataChunks`。
 
 | 文件:行号 | 构造器 | 内容 | 模型可见 |
 |---|---|---|---|
-| `agent-system-prompt.js:17-50` | `buildCoreAgentRules()` | **【Agent 准则】21 条 + plan/explore 2 条**（≈2500 字符） | ✅ 稳定块 |
-| `agent-system-prompt.js:53-67` | `formatSystemTimeChunk()` | 【系统时间】 | ✅ 轮次块 |
-| `agent-system-prompt.js:69-76` | `formatAgentHomeChunk()` | 【技能/计划】 | ✅ 稳定块 |
-| `agent-system-prompt.js:78-92` | `formatWorkspaceChunk()` | 【当前工作空间】/【默认工作目录】 | ✅ 稳定块 |
-| `agent-system-prompt.js:94-119` | `formatPermissionsChunk()` | 【本机控制能力】/【联网抓取】/【SQL 只读】 | ✅ 稳定块 |
-| `agent-system-prompt.js:121-134` | `formatSqlChunk()` | 【SQL Server 只读】 | ✅ 稳定块 |
-| `agent-system-prompt.js:155-167` | `capUserSystemText()` / `capStableSystemText()` | 8000 / 16000 字符截断 | — |
+| `agent-system-prompt.js:8-52` | `buildCoreAgentRules()` | **【Agent 准则】15 条 + plan/explore 2 条 + subagent 块**（≈2500 字符） | ✅ 稳定块 |
+| `agent-system-prompt.js:54-69` | `formatSystemTimeChunk()` | 【系统时间】 | ✅ 轮次块 |
+| `agent-system-prompt.js:70-78` | `formatAgentHomeChunk()` | 【技能/计划】 | ✅ 稳定块 |
+| `agent-system-prompt.js:79-106` | `formatWorkspaceChunk()` | 【当前工作空间】/【默认工作目录】 | ✅ 稳定块 |
+| `agent-system-prompt.js:107-133` | `formatPermissionsChunk()` | 【本机控制能力】/【联网抓取】 | ✅ 稳定块 |
+| `agent-system-prompt.js:146-159` | `capUserSystemText()` / `capStableSystemText()` | 8000 / 16000 字符截断 | — |
 | `renderer/renderer-i18n.js:216-230` | `agentLanguagePrompt()` | 【回答语言】中/英 | ✅ 稳定块首位 |
 | `renderer/renderer-agent-system-message.js:113,319,361` | 编排 | 取 i18n / dieyun 块 / userSystem | 组装器 |
 | `renderer/renderer-model-runtime.js` | `DEFAULTS.system` | 默认自定义 system（**空**；身份/人设唯一来源见 `dieyun.md` 与 `ASSISTANT_IDENTITY`） | ✅（经 settings，用户填了才注入） |
@@ -284,19 +284,18 @@
 | `:31` | 预注入代码优先，少做重复 list/read |
 | `:32` | 工具可并行；读大文件用 offset/maxBytes |
 | `:33` | 用 web_search→web_fetch 核验；禁止伪造搜索结果 |
-| `:34` | SQL 仅 SELECT，勿重复 list |
-| `:35` | 技能：先读 SKILL.md；host_exec cwd=技能目录 |
-| `:36` | 仅无法抉择时才 agent_clarify；适合表格用 Markdown |
-| `:37` | **无 tool_calls 的文字回复即本轮结束** |
-| `:38-39` | Mermaid：每回复最多 1 块、节点 ≤15、嵌套 subgraph ≤2、标签双引号 |
-| `:40` | `.dieyun/AGENTS.md` 项目地图 |
-| `:41` | 会话记忆判定规则 |
-| `:42` | 任务优先级规则 |
-| `:43` | 折叠历史使用规则 |
-| `:44` | 写代码“能改”原则；同常量单源 |
-| `:45` | 结构化文件 parse→dump，勿正则替换；勿静默吞异常 |
-| `:46` | 完成校验：声称已改须有写操作 |
-| `:47-49` | plan / explore / subagent 模式规则 |
+| `:34` | 技能：先读 SKILL.md；host_exec cwd=技能目录 |
+| `:35` | 仅无法抉择时才 agent_clarify；适合表格用 Markdown |
+| `:36` | **无 tool_calls 的文字回复即本轮结束** |
+| `:37-38` | Mermaid：每回复最多 1 块、节点 ≤15、嵌套 subgraph ≤2、标签双引号 |
+| `:39` | `.dieyun/AGENTS.md` 项目地图 |
+| `:40` | 会话记忆判定规则 |
+| `:41` | 任务优先级规则 |
+| `:42` | 折叠历史使用规则 |
+| `:43` | 写代码“能改”原则；同常量单源 |
+| `:44` | 结构化文件 parse→dump，勿正则替换；勿静默吞异常 |
+| `:45` | 完成校验：声称已改须有写操作 |
+| `:46-48` | plan / explore / subagent 模式规则 |
 
 ### B2. 上下文注入块构造器（≈16 个）
 

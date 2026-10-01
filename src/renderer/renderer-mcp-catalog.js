@@ -14,16 +14,25 @@ let mcpCatalogHasMore = false;
 let mcpCatalogLoading = false;
 let mcpCatalogLoadedCount = 0;
 let mcpCatalogSearchRemote = false;
+/** 最近一次目录请求里各源的失败原因，用于说明「空目录」到底为什么空 */
+let mcpCatalogSourceErrors = [];
 
 function parseMcpCatalogListResult(result) {
   if (Array.isArray(result)) {
-    return { entries: result, hasMore: false, loadedCount: result.length, searchRemote: false };
+    return {
+      entries: result,
+      hasMore: false,
+      loadedCount: result.length,
+      searchRemote: false,
+      errors: []
+    };
   }
   return {
     entries: Array.isArray(result?.entries) ? result.entries : [],
     hasMore: !!result?.hasMore,
     loadedCount: Number(result?.loadedCount) || (Array.isArray(result?.entries) ? result.entries.length : 0),
-    searchRemote: !!result?.searchRemote
+    searchRemote: !!result?.searchRemote,
+    errors: Array.isArray(result?.errors) ? result.errors : []
   };
 }
 
@@ -33,7 +42,21 @@ function applyMcpCatalogListResult(result) {
   mcpCatalogHasMore = parsed.hasMore;
   mcpCatalogLoadedCount = parsed.loadedCount;
   mcpCatalogSearchRemote = parsed.searchRemote;
+  mcpCatalogSourceErrors = parsed.errors;
   return parsed;
+}
+
+/** 去重后的目录源失败说明，无失败返回空串 */
+function mcpCatalogSourceErrorText() {
+  const seen = new Set();
+  const parts = [];
+  for (const err of Array.isArray(mcpCatalogSourceErrors) ? mcpCatalogSourceErrors : []) {
+    const message = String((err && err.message) || '').trim();
+    if (!message || seen.has(message)) continue;
+    seen.add(message);
+    parts.push(message);
+  }
+  return parts.join('；');
 }
 
 function entryCanAdd(ent) {
@@ -213,7 +236,10 @@ async function loadMcpCatalogUI({ refresh = false, loadMore = false, silent = fa
   mcpCatalogLoading = true;
   renderMcpCatalogGrid();
   if (!silent && !loadMore) {
-    listEl.innerHTML = `<p class="skills-empty">${searchQuery ? '正在搜索官方市场…' : '加载目录…'}</p>`;
+    const loadingMsg = searchQuery
+      ? '正在搜索官方市场…（官方 Registry 较慢，可能需数十秒）'
+      : '正在加载目录…（首次拉取可能需要数十秒）';
+    listEl.innerHTML = `<p class="skills-empty">${loadingMsg}</p>`;
   } else if (loadMore && hint) {
     hint.textContent = searchQuery ? '搜索加载更多…' : '加载更多…';
   }
@@ -221,23 +247,19 @@ async function loadMcpCatalogUI({ refresh = false, loadMore = false, silent = fa
     await fetchMcpCatalogFromApi({ refresh, loadMore, search: searchQuery });
     if (!loadMore) mcpCatalogPageIndex = 0;
 
-    const isBrowse = !searchQuery;
     if (!mcpCatalogEntries.length && mcpCatalogHasMore && !loadMore) {
       await fetchMcpCatalogFromApi({ loadMore: true, search: searchQuery });
     }
 
-    if (isBrowse && !loadMore && !refresh) {
-      let attempts = 0;
-      while (attempts < 6) {
-        const visible = getFilteredMcpCatalogEntries();
-        if (visible.length >= MCP_CATALOG_PAGE_SIZE || !mcpCatalogHasMore) break;
-        await fetchMcpCatalogFromApi({ loadMore: true, search: '' });
-        attempts += 1;
-      }
-    }
-
     if (!mcpCatalogEntries.length) {
-      listEl.innerHTML = `<p class="skills-empty">${searchQuery ? '没有匹配的 MCP' : '目录为空'}</p>`;
+      const reason = mcpCatalogSourceErrorText();
+      const base = searchQuery ? '没有匹配的 MCP' : '目录为空';
+      listEl.innerHTML = `<p class="skills-empty">${escapeHtml(
+        reason
+          ? `${base}。目录源请求失败：${reason}。可点「刷新目录」重试，或回 MCP 列表用「添加」手动接入。`
+          : base
+      )}</p>`;
+      if (hint) hint.textContent = reason ? '目录源请求失败，可点「刷新目录」重试' : '';
       renderMcpCatalogFilterTabs();
       return;
     }

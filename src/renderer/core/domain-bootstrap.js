@@ -1,4 +1,4 @@
-/* global window, DieyunBootstrap, DieyunNamespaces, api, currentSessionId, sqlStatusCache, initPermissionsUI, initSettingsShell, initHelpUI, initUpdateUI, initSkillsUI, initSkillCatalogUI, initComposerToolbar, initDefinedModelEditors, initSqlSettingsUI, initPluginCatalogUI, initMcpCatalogUI, initAutomationUI, initCodebasePanel, initGraphPanel, initWorktreesSettings, initTerminalPane, initBrowserPanel, initPaneResizers, initSelectionToComposerDrag, applySessionWorkspace, loadSqlConfigUI, setGatewayMeta, renderSqlDbList, maybeEnforceWorktreeCleanupPolicy */
+/* global window, DieyunBootstrap, DieyunNamespaces, api, currentSessionId, initPermissionsUI, initSettingsShell, initHelpUI, initUpdateUI, initSkillsUI, initSkillCatalogUI, initComposerToolbar, initDefinedModelEditors, initPluginSettingsUI, initPluginCatalogUI, initMcpCatalogUI, initAutomationUI, initCodebasePanel, initGraphPanel, initWorktreesSettings, initTerminalPane, initBrowserPanel, initPaneResizers, initSelectionToComposerDrag, applySessionWorkspace, setGatewayMeta, maybeEnforceWorktreeCleanupPolicy */
 'use strict';
 
 (function registerDomainInits() {
@@ -56,7 +56,7 @@
       if (typeof initCodebasePanel === 'function') initCodebasePanel();
       if (typeof initGraphPanel === 'function') initGraphPanel();
       if (typeof initWorktreesSettings === 'function') initWorktreesSettings();
-      if (typeof initSqlSettingsUI === 'function') initSqlSettingsUI();
+      if (typeof initPluginSettingsUI === 'function') initPluginSettingsUI();
       if (typeof initPluginCatalogUI === 'function') initPluginCatalogUI();
       if (typeof initMcpCatalogUI === 'function') initMcpCatalogUI();
       if (typeof initAutomationUI === 'function') initAutomationUI();
@@ -193,15 +193,5 @@
       throw err;
     }
 
-    if (typeof loadSqlConfigUI === 'function') {
-      await loadSqlConfigUI();
-    }
-    if (window.DieyunGateway?.gwState?.authed && sqlStatusCache?.enabled && typeof gatewayCall === 'function') {
-      const r = await gatewayCall('sql.list_databases', {});
-      if (r?.databases) {
-        sqlStatusCache = { ...sqlStatusCache, databases: r.databases };
-        if (typeof renderSqlDbList === 'function') renderSqlDbList(r.databases);
-      }
-    }
   });
 })();

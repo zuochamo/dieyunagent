@@ -7,7 +7,6 @@
  *   getMobileBridge: () => object | null,
  *   getCoreBridge: () => object | null,
  *   getActiveRemoteGatewayInfo: () => object | null,
- *   getDeployUiDefaults: () => object,
  *   resolveDieyunCoreBinary: () => string,
  *   QRCode: { toDataURL: (url: string, opts: object) => Promise<string> },
  *   log: { warn: (msg: string, ...args: unknown[]) => void }
@@ -21,7 +20,6 @@ function registerGatewayShellIpc(ctx) {
     getMobileBridge,
     getCoreBridge,
     getActiveRemoteGatewayInfo,
-    getDeployUiDefaults,
     resolveDieyunCoreBinary,
     QRCode,
     log
@@ -40,11 +38,9 @@ function registerGatewayShellIpc(ctx) {
       binary: resolveDieyunCoreBinary()
     };
     if (!local) {
-      return remote
-        ? { ...remote, rustCore, deployUiDefaults: getDeployUiDefaults() }
-        : { rustCore, deployUiDefaults: getDeployUiDefaults() };
+      return remote ? { ...remote, rustCore } : { rustCore };
     }
-    return { ...local, local, remote, rustCore, deployUiDefaults: getDeployUiDefaults() };
+    return { ...local, local, remote, rustCore };
   });
 
   ipcMain.handle('mobile:get-info', async () => {

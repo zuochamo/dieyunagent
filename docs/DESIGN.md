@@ -120,13 +120,12 @@ flowchart LR
 
 | 前缀              | 职责                             |
 | --------------- | ------------------------------ |
-| `permissions.*` | 读/写本机能力开关（读文件、写文件、执行命令、SQL、联网） |
+| `permissions.*` | 读/写本机能力开关（读文件、写文件、执行命令、联网） |
 | `memory.*`      | 会话、消息、长期记忆、**每会话工作空间**（**仅 Rust**；sidecar 不可用则 RPC 报错） |
 | `compaction.*`  | 上下文 token 估算 / prepare / apply / **maybe_compact**（含 LLM 摘要，Rust HTTP） |
 | `fs.*`          | 白名单内读写列目录                      |
 | `host.*`        | Shell、打开 URL、打印图片              |
 | `web.*`         | HTTP fetch、搜索引擎（带 SSRF 防护）     |
-| `sql.*`         | 可选 SQL Server 只读查询             |
 
 ### 3.3 工作空间与路径白名单
 

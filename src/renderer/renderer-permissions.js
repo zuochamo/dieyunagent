@@ -36,15 +36,13 @@ async function syncPermissionsToMain() {
 
     hostControl: $('perm-host-control')?.checked !== false,
 
-    // 读/写文件、Shell、SQL 只读、联网抓取、浏览器自动化为系统内置能力，恒开、UI 不提供开关；
+    // 读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、UI 不提供开关；
     // 显式回写 true，纠正历史持久化里的关闭值
     fsRead: true,
 
     fsWrite: true,
 
     shellExec: true,
-
-    sqlRead: true,
 
     webFetch: true,
 

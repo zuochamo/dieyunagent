@@ -68,10 +68,7 @@ const TOOL_PARAM_NAMES = new Set([
   'browser_expect',
   'browser_visual_diff',
   'browser_status',
-  'browser_close',
-  'sql_query',
-  'sql_list_tables',
-  'sql_list_databases'
+  'browser_close'
 ]);
 
 function genToolCallId(index) {

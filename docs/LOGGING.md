@@ -9,6 +9,7 @@
 | `[dieyun:agent]` | Agent 循环、护栏、compaction | `src/agent/`、`crates/dieyun-core/src/agent/` | 工具轮次、trace、压缩 |
 | `[dieyun:mobile]` | 手机桥、AgentService | `src/mobile/bridge.js`、`src/agent/service.js` | task.progress、WebSocket |
 | `[dieyun:gateway]` | 本地 Gateway RPC | `src/gateway/` | 工具执行、fs/host、RPC 错误 |
+| `[dieyun:mcp]` | MCP 运行时与凭据库 | `src/mcp/` | 子进程启动、凭据解不开（safeStorage 密钥不一致） |
 | `[dieyun:core]` | Rust sidecar bridge | `src/core-bridge.js`、core stdout | index/memory/Rust RPC |
 | `[dieyun:renderer]` | 渲染进程（可选） | `src/renderer/` | UI 事件、气泡、思考区 |
 | `[dieyun:test]` | 测试 runner | `scripts/test-*.cjs` | smoke 进度 |

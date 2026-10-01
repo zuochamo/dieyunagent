@@ -32,7 +32,7 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 ### Agent 执行
 
 - `crates/dieyun-core/src/agent/loop_run.rs` — Rust 状态机
-- `src/agent/agent-system-prompt.js` — 给模型看的准则/工作区/权限/SQL 文案（`assembleSystemPrompt`）
+- `src/agent/agent-system-prompt.js` — 给模型看的准则/工作区/权限文案（`assembleSystemPrompt`）
 - `src/agent/system-prompt-prep.js` — Main 召回开文件 / codebase / AGENTS.md overview / 图谱（结构信号）/ 记忆 / 技能索引 / MCP
 - `src/agent/rust-loop-runner.js` — Node ↔ Rust bridge（LLM / compact / sidecar cancel 分缝）
 - `src/agent/tool-catalog.js` — 工具 schema 唯一目录（Renderer / plan-tools 共用）；MCP `mcp_*` 带精简 inputSchema，勿再广告空 `{}`

@@ -90,6 +90,24 @@ function renderMcpVersionStatus(config, info = null) {
   const packageName = config?.packageName || '';
   const packageVersion = config?.packageVersion || '';
   const supported = !!packageName && config?.transportKind !== 'remote';
+
+  // 离线预装（config.bundled）：包与平台二进制随客户端分发，不存在「本地 npm 安装 / 升级 /
+  // 检查更新」这回事。全部隐藏并说明来源 —— 否则内网用户点「安装到本地」必然失败（要联网）。
+  if (config?.bundled) {
+    section.hidden = false;
+    upgradeBtn.hidden = true;
+    upgradeBtn.disabled = true;
+    installBtn.hidden = true;
+    installBtn.disabled = true;
+    repairBtn.hidden = true;
+    repairBtn.disabled = true;
+    mcpConfigRepairKind = '';
+    statusEl.textContent = `随客户端预装（离线可用）：${packageName || config.id || 'MCP'}${
+      packageVersion ? `@${packageVersion}` : ''
+    }`;
+    return;
+  }
+
   const canRepairBuildEnv = supported && /code-graph|schema|better-sqlite3|sqlite|native/i.test(packageName);
   section.hidden = !supported;
   upgradeBtn.hidden = true;
@@ -267,6 +285,8 @@ async function openMcpConfigDialog(server) {
   const isDieyunService = config.configKind === 'dieyun-service' || !!config.dieyunService;
   const isSimpleCred = isDieyunService;
   const isRemote = !isSimpleCred && config.transportKind === 'remote';
+  /** 存在但解不开的凭据键（Main 侧凭据库给出），只用于把提示写成"请重新填写" */
+  const undecryptable = Array.isArray(config.undecryptable) ? config.undecryptable : [];
   if (descEl) {
     descEl.textContent = config.description || (isRemote ? '远程 MCP 服务' : '本地 stdio MCP');
   }
@@ -308,6 +328,7 @@ async function openMcpConfigDialog(server) {
       const parts = [];
       if (config.authRequired) parts.push('该服务需要 Token / API Key');
       if (config.hasToken) parts.push('已保存鉴权信息（留空则不修改）');
+      if (undecryptable.includes('token')) parts.push('此前保存的 Token 无法解密，请重新填写');
       tokenHint.textContent = parts.join(' · ') || '可选：填写 Bearer Token 或 API Key';
     }
   } else {
@@ -318,9 +339,13 @@ async function openMcpConfigDialog(server) {
     const envHint = $('mcp-config-env-hint');
     if (envHint) {
       if (config.envHint) {
-        envHint.textContent = config.hasEnvValue
-          ? `${config.envHint} 已保存（留空则不修改）`
-          : `请填写 ${config.envHint}`;
+        if (undecryptable.includes(config.envHint)) {
+          envHint.textContent = `此前保存的 ${config.envHint} 无法解密，请重新填写`;
+        } else {
+          envHint.textContent = config.hasEnvValue
+            ? `${config.envHint} 已保存（留空则不修改）`
+            : `请填写 ${config.envHint}`;
+        }
       } else {
         envHint.textContent = '无需额外环境变量';
       }

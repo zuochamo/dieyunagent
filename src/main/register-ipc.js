@@ -1,6 +1,5 @@
 'use strict';
 
-const { registerDeployIpc } = require('./ipc/deploy');
 const { registerAgentsMdIpc, registerAgentsMdReadyIpc } = require('./ipc/agents-md');
 const { registerDialogIpc } = require('./ipc/dialog');
 const { registerGatewayShellIpc } = require('./ipc/gateway-shell');
@@ -19,7 +18,6 @@ const { registerSkillsMcpIpc } = require('./ipc/skills-mcp');
  * @param {object} ctx
  */
 function registerEarlyMainIpc(ctx) {
-  registerDeployIpc(ctx);
   registerAgentsMdIpc(ctx);
 }
 

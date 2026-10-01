@@ -63,6 +63,26 @@ const BUILTIN_MCP_SERVERS = [
     args: ['-y', '@modelcontextprotocol/server-brave-search'],
     defaultEnabled: false,
     envHint: 'BRAVE_API_KEY'
+  },
+  {
+    // 版本与 --stdio 是该包的行为契约（写死在 AST 层拒写、不带参数会改成开 HTTP 服务），
+    // 浮动版本会让预装行为静默变化，故锁定版本；升级需同时确认 --stdio 与只读语义未变。
+    // 「服务端契约保证拒写」→ 只读阶段（Explore / Shell / 研究子 Agent）放行，
+    // 放行名单唯一来源是 agent/planner-tool-filters.js 的 READONLY_MCP_SERVER_IDS。
+    //
+    // bundledServer：该服务**离线预装**随客户端分发（scripts/pack-mcp-bundled.cjs 在构建期
+    // 取 npm 包 + 平台二进制、校 sha256，打进 <resources>/mcp/bundled/<key>），
+    // 因此运行时既不 npm install、也不从 GitHub Releases 下载 —— 内网可用。
+    // 包名与版本仍以本条目为唯一来源（pack 脚本读这里，勿在别处再写一份版本）。
+    id: 'mcp-postgres',
+    name: 'PostgreSQL',
+    description:
+      'PostgreSQL 只读查询：AST 层拒绝写语句，可查库表结构、执行计划与索引分析（需 DATABASE_URL）。',
+    command: 'npx',
+    args: ['-y', 'postgres-mcp-hardened@0.1.10', '--stdio'],
+    bundledServer: 'mcp-postgres',
+    defaultEnabled: false,
+    envHint: 'DATABASE_URL'
   }
 ];
 

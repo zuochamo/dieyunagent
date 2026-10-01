@@ -2,7 +2,6 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('diecloud', {
   getGatewayInfo: () => ipcRenderer.invoke('gateway:get-info'),
-  getDeployUiDefaults: () => ipcRenderer.invoke('deploy:get-ui-defaults'),
   getMobileInfo: () => ipcRenderer.invoke('mobile:get-info'),
 
   getPermissions: () => ipcRenderer.invoke('permissions:get'),

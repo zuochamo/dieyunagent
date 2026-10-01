@@ -48,15 +48,16 @@ function jsonSchemaTypeOk(val, typeSpec) {
   });
 }
 
+/**
+ * 必填项只认工具自己声明的 `required`。
+ * 这里曾经在 required 缺失时把「唯一属性」当成必填 —— 猜错会把可选参数判成必填，
+ * 调用还没到服务器就被打回（例如 postgres 的 list_schemas 只有可选的 database，
+ * 合法调用 list_schemas({}) 会报「缺少参数：database」）。缺 required 就不猜，交给服务器判。
+ */
 function mcpRequiredKeys(schema) {
   if (!schema || typeof schema !== 'object') return [];
-  if (Array.isArray(schema.required) && schema.required.length) {
-    return schema.required.map((k) => String(k));
-  }
-  const props = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
-  const keys = Object.keys(props);
-  if (keys.length === 1) return keys;
-  return [];
+  if (!Array.isArray(schema.required)) return [];
+  return schema.required.map((k) => String(k)).filter(Boolean);
 }
 
 /**
@@ -402,16 +403,6 @@ function validateToolArgs(name, args, opts) {
       }
       return { ok: true };
     }
-    case 'sql_query':
-      if (!String(a.sql || '').trim()) {
-        return {
-          ok: false,
-          error: 'sql_query 缺少 sql',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
     case 'mcp_tool_schema':
       if (!String(a.agentName || '').trim()) {
         return {

@@ -18,6 +18,11 @@ const INITIAL_LOAD_LIMIT = UI_PAGE_SIZE * INITIAL_UI_PAGES;
 const REGISTRY_PAGE_LIMIT = INITIAL_LOAD_LIMIT;
 const LOAD_MORE_REGISTRY_PAGES = 1;
 const MAX_INSTALL_SEARCH_PAGES = 30;
+/**
+ * 单个目录请求超时。实测官方 Registry：45 条分页约 12s，带 search 的查询可达约 35s；
+ * 原先 30s 会把搜索请求固定打断，而失败按源静默吞掉，UI 只剩「没有匹配的 MCP」。
+ */
+const CATALOG_FETCH_TIMEOUT_MS = 60000;
 
 function readJsonFile(filePath, fallback) {
   try {
@@ -184,13 +189,22 @@ function npmBasePackage(spec) {
   return versionAt > 0 ? s.slice(0, versionAt) : s;
 }
 
+/** 取启动参数里的 npm 包名：跳过 -y / --stdio 之类开关，scoped 与 unscoped 包名都要认 */
+function npmSpecFromArgs(args) {
+  const spec = (Array.isArray(args) ? args : []).find((a) => {
+    const s = String(a || '');
+    return s && !s.startsWith('-');
+  });
+  return spec ? String(spec) : '';
+}
+
 function matchBuiltinByNpmSpec(installSpec) {
-  if (!installSpec || !installSpec.args || !installSpec.args[1]) return null;
-  const pkg = npmBasePackage(installSpec.args[1]);
+  if (!installSpec || !Array.isArray(installSpec.args)) return null;
+  const pkg = npmBasePackage(npmSpecFromArgs(installSpec.args));
+  if (!pkg) return null;
   for (const builtin of listBuiltinMcpServers()) {
-    const bpkg = (builtin.args || []).find((a) => String(a).startsWith('@'));
-    if (!bpkg) continue;
-    if (npmBasePackage(bpkg) === pkg) return builtin;
+    const bpkg = npmBasePackage(npmSpecFromArgs(builtin.args));
+    if (bpkg && bpkg === pkg) return builtin;
   }
   return null;
 }
@@ -368,7 +382,7 @@ class McpCatalog {
     if (q) u.searchParams.set('search', q);
     const res = await fetch(u.toString(), {
       headers: { Accept: 'application/json', 'User-Agent': 'DieyunAgent/McpCatalog' },
-      signal: AbortSignal.timeout(30000)
+      signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS)
     });
     if (!res.ok) throw new Error(`目录请求失败 HTTP ${res.status}`);
     const text = await res.text();
@@ -415,7 +429,7 @@ class McpCatalog {
     assertSafeUrl(url);
     const res = await fetch(url, {
       headers: { Accept: 'application/json', 'User-Agent': 'DieyunAgent/McpCatalog' },
-      signal: AbortSignal.timeout(30000)
+      signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS)
     });
     if (!res.ok) throw new Error(`目录请求失败 HTTP ${res.status}`);
     const text = await res.text();
@@ -443,14 +457,15 @@ class McpCatalog {
 
   async _loadRemoteEntries({ force = false, loadMore = false } = {}) {
     const { urls } = this.getSources();
-    if (!urls.length) return { entries: [], hasMore: false };
+    if (!urls.length) return { entries: [], hasMore: false, errors: [] };
 
     let cache = this._readCache();
 
     if (!force && !loadMore && cache.entries.length) {
       return {
         entries: cache.entries,
-        hasMore: this._hasMoreSources(cache.sourceState)
+        hasMore: this._hasMoreSources(cache.sourceState),
+        errors: []
       };
     }
 
@@ -460,6 +475,8 @@ class McpCatalog {
 
     let entries = cache.entries.slice();
     let sourceState = { ...(cache.sourceState || {}) };
+    /** @type {Array<{ url: string, message: string }>} 按源记录失败，供 UI 说明空目录的原因 */
+    const errors = [];
 
     for (const url of urls) {
       try {
@@ -499,13 +516,15 @@ class McpCatalog {
           sourceState[url] = { isOfficial: false, nextCursor: '', complete: true };
         }
       } catch (e) {
-        this.log(`MCP 目录拉取失败 ${url}: ${e.message || e}`);
+        const message = (e && e.message) || String(e);
+        this.log(`MCP 目录拉取失败 ${url}: ${message}`);
+        errors.push({ url, message });
       }
     }
 
     entries = mergeCatalogEntries(entries);
     this._writeCache(entries, sourceState);
-    return { entries, hasMore: this._hasMoreSources(sourceState) };
+    return { entries, hasMore: this._hasMoreSources(sourceState), errors };
   }
 
   _filterEntriesLocal(entries, query) {
@@ -538,7 +557,8 @@ class McpCatalog {
         entries: filtered,
         hasMore: false,
         searchMode: true,
-        searchRemote: false
+        searchRemote: false,
+        errors: browse.errors || []
       };
     }
 
@@ -551,12 +571,15 @@ class McpCatalog {
         entries: this.searchSession.entries,
         hasMore: this._hasMoreSources(this.searchSession.sourceState),
         searchMode: true,
-        searchRemote: true
+        searchRemote: true,
+        errors: []
       };
     }
 
     let entries = loadMore ? this.searchSession.entries.slice() : [];
     let sourceState = loadMore ? { ...(this.searchSession.sourceState || {}) } : {};
+    /** @type {Array<{ url: string, message: string }>} */
+    const errors = [];
 
     if (force) {
       entries = [];
@@ -584,7 +607,9 @@ class McpCatalog {
         entries.push(...batch);
         sourceState = nextState;
       } catch (e) {
-        this.log(`MCP 搜索失败 ${url}: ${e.message || e}`);
+        const message = (e && e.message) || String(e);
+        this.log(`MCP 搜索失败 ${url}: ${message}`);
+        errors.push({ url, message });
       }
     }
 
@@ -594,7 +619,8 @@ class McpCatalog {
       entries,
       hasMore: this._hasMoreSources(sourceState),
       searchMode: true,
-      searchRemote: true
+      searchRemote: true,
+      errors
     };
   }
 
@@ -668,7 +694,8 @@ class McpCatalog {
       hasMore: result.hasMore,
       loadedCount: result.entries.length,
       searchMode: !!result.searchMode,
-      searchRemote: !!result.searchRemote
+      searchRemote: !!result.searchRemote,
+      errors: Array.isArray(result.errors) ? result.errors : []
     };
   }
 

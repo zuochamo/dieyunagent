@@ -16,7 +16,6 @@ const {
   systemTempDir
 } = require('../agent-home');
 const { PluginHost } = require('../plugins/host');
-const { createDatabasePlugin } = require('../plugins/database');
 const { getEmbeddingConfig, loadModelSettings } = require('../model-settings');
 const { buildLlmHeadersFromConfig } = require('../agent/llm-request');
 const { createGraphIncrementalScheduler } = require('../graph/graph-incremental-scheduler');
@@ -118,10 +117,7 @@ class LocalGateway {
       appVersion: opts.appVersion || '0.0.0',
       appRoot: opts.appRoot || process.cwd()
     });
-    this.plugins.register(createDatabasePlugin());
     this.plugins.loadUserPlugins();
-    /** @type {import('../plugins/database/sqlserver').SqlServerService | null} */
-    this.sql = null;
     /** @type {ReturnType<import('../browser/service').createBrowserService> | null} */
     this.browser = opts.browser || null;
     /** @type {ReturnType<import('../ssh/session-manager').createSshSessionManager> | null} */
@@ -694,11 +690,9 @@ class LocalGateway {
       writableRoots: this._collectWritableRoots(),
       permissions: this.permissions,
       defaultCwd: this._defaultCwd(),
-      sql: this.sql,
       plugins: this.plugins,
       getEmbeddingConfig: () => getEmbeddingConfig(loadModelSettings(this.userDataPath)),
       onPluginsChanged: () => {
-        this.sql = this.plugins.getService('sql');
         this._refreshHandlers();
       },
       browser: this.browser,
@@ -889,18 +883,8 @@ class LocalGateway {
       listening: !!this.wss,
       permissions: this.getPermissions(),
       workspace: this.getWorkspace(),
-      sql: this.sql ? this.sql.getStatus() : null,
       plugins: this.plugins.listPublic()
     };
-  }
-
-  async warmupSql() {
-    if (!this.sql || !this.sql.config.enabled) return;
-    try {
-      await this.sql.testConnection();
-    } catch {
-      // 预热失败静默处理，不写入运行日志
-    }
   }
 
   start() {
@@ -910,12 +894,10 @@ class LocalGateway {
     this._ensureToken();
 
     this.plugins.initAll();
-    this.sql = this.plugins.getService('sql');
     this._loadWorkspaceFromDisk();
     this._refreshHandlers();
     this._syncWorkspaceDiagnosticsWatch();
     this._syncWorkspaceIndexWatch();
-    this.warmupSql().catch(() => {});
 
     this.wss = new WebSocketServer({ host: '127.0.0.1', port: this.port });
 
@@ -1116,7 +1098,6 @@ class LocalGateway {
     this.wsClients.clear();
     if (this.indexWatcher) this.indexWatcher.stop();
     if (this.plugins) this.plugins.disposeAll();
-    this.sql = null;
     this.handlers = null;
     if (this.lspDiagnostics) {
       void this.lspDiagnostics.shutdown();

@@ -1,9 +1,8 @@
 'use strict';
 
-/* global window, document, $, escapeHtml, gwState, gatewayCall, loadSqlConfigUI, saveSqlConfig, testSqlConnection, renderSqlDbList, sqlStatusCache */
+/* global window, document, $, escapeHtml, gwState, gatewayCall */
 
 let activePluginSchemaId = '';
-let pluginDetailMode = '';
 
 function schemaFieldLabel(key, prop) {
   if (prop && prop.title) return String(prop.title);
@@ -81,19 +80,6 @@ function setPluginDetailHint(text) {
   }
 }
 
-function switchPluginDetailDbTab(tab) {
-  const dbTab = tab || 'settings';
-  document.querySelectorAll('[data-pd-db-tab]').forEach((el) => {
-    el.classList.toggle('active', el.dataset.pdDbTab === dbTab);
-  });
-  document.querySelectorAll('[data-pd-db-panel]').forEach((el) => {
-    el.classList.toggle('active', el.dataset.pdDbPanel === dbTab);
-  });
-  if (dbTab === 'list' && gwState.authed && typeof loadSqlConfigUI === 'function') {
-    loadSqlConfigUI().catch(() => {});
-  }
-}
-
 function closePluginDetail() {
   const overlay = $('plugin-detail-overlay');
   if (overlay) overlay.hidden = true;
@@ -105,9 +91,7 @@ async function openPluginDetail(plugin) {
   const overlay = $('plugin-detail-overlay');
   const titleEl = $('plugin-detail-title');
   const introEl = $('plugin-detail-intro');
-  const dbPanel = $('plugin-detail-database');
   const schemaPanel = $('plugin-detail-schema');
-  const testBtn = $('plugin-detail-test');
   if (!overlay || !plugin || !plugin.id) return;
 
   overlay.hidden = false;
@@ -123,24 +107,8 @@ async function openPluginDetail(plugin) {
   }
   if (introEl) introEl.innerHTML = introHtml;
 
-  if (plugin.id === 'builtin.database') {
-    pluginDetailMode = 'database';
-    activePluginSchemaId = '';
-    if (dbPanel) dbPanel.hidden = false;
-    if (schemaPanel) schemaPanel.hidden = true;
-    if (testBtn) testBtn.hidden = false;
-    switchPluginDetailDbTab(plugin.databaseTab || 'settings');
-    if (gwState.authed && typeof loadSqlConfigUI === 'function') {
-      await loadSqlConfigUI().catch(() => {});
-    }
-    return;
-  }
-
-  pluginDetailMode = 'schema';
   activePluginSchemaId = plugin.id;
-  if (dbPanel) dbPanel.hidden = true;
   if (schemaPanel) schemaPanel.hidden = false;
-  if (testBtn) testBtn.hidden = true;
 
   const formEl = $('plugin-detail-schema-form');
   if (!formEl) return;
@@ -159,12 +127,6 @@ async function openPluginDetail(plugin) {
 }
 
 async function saveActivePluginDetail() {
-  if (pluginDetailMode === 'database') {
-    if (typeof saveSqlConfig === 'function') {
-      await saveSqlConfig();
-    }
-    return;
-  }
   const formEl = $('plugin-detail-schema-form');
   if (!activePluginSchemaId || !formEl || !gwState.authed) return;
   setPluginDetailHint('保存中…');
@@ -178,37 +140,19 @@ async function saveActivePluginDetail() {
   }
 }
 
-async function testPluginDetailDatabase() {
-  if (pluginDetailMode !== 'database' || !gwState.authed) return;
-  setPluginDetailHint('正在连接…');
-  try {
-    if (typeof saveSqlConfig === 'function') await saveSqlConfig();
-    if (typeof testSqlConnection === 'function') await testSqlConnection();
-    setPluginDetailHint('连接成功 ✓');
-  } catch (err) {
-    setPluginDetailHint(`失败：${err.message || err}`);
-  }
-}
-
 function initPluginDetailOverlay() {
   const overlay = $('plugin-detail-overlay');
   const closeX = $('plugin-detail-close');
   const saveBtn = $('plugin-detail-save');
-  const testBtn = $('plugin-detail-test');
 
   if (closeX) closeX.addEventListener('click', closePluginDetail);
   if (saveBtn) saveBtn.addEventListener('click', () => saveActivePluginDetail());
-  if (testBtn) testBtn.addEventListener('click', () => testPluginDetailDatabase());
 
   if (overlay) {
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) closePluginDetail();
     });
   }
-
-  document.querySelectorAll('[data-pd-db-tab]').forEach((el) => {
-    el.addEventListener('click', () => switchPluginDetailDbTab(el.dataset.pdDbTab));
-  });
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
@@ -224,17 +168,7 @@ function openPluginSchemaSettings(pluginId, pluginName) {
   });
 }
 
-function openDatabasePluginDetail(databaseTab = 'settings') {
-  openPluginDetail({
-    id: 'builtin.database',
-    name: '数据库连接',
-    description: 'SQL Server 只读连接，可查询当前账号有权限的所有数据库。',
-    databaseTab
-  });
-}
-
 window.openPluginDetail = openPluginDetail;
 window.closePluginDetail = closePluginDetail;
 window.openPluginSchemaSettings = openPluginSchemaSettings;
-window.openDatabasePluginDetail = openDatabasePluginDetail;
 window.initPluginDetailOverlay = initPluginDetailOverlay;

@@ -2,14 +2,6 @@
 
 function formatToolArgsBrief(name, args) {
   if (!args || typeof args !== 'object') return '';
-  if (name === 'sql_query') {
-    const sql = String(args.sql || '').replace(/\s+/g, ' ').trim();
-    const db = args.database ? `[${args.database}] ` : '';
-    const cut = sql.length > 120 ? `${sql.slice(0, 120)}…` : sql;
-    return `${db}${cut}`;
-  }
-  if (name === 'sql_list_tables') return args.database || '';
-  if (name === 'sql_list_databases') return '';
   if (name === 'host_exec') return String(args.command || '').slice(0, 100);
   if (name === 'fs_read_file' || name === 'fs_write_file' || name === 'fs_edit' || name === 'fs_list_dir') {
     return args.filePath || args.dirPath || '';
@@ -81,17 +73,6 @@ function summarizeToolResult(name, result) {
     const n = Number(result.replacements);
     const repl = name === 'fs_edit' && Number.isFinite(n) && n > 0 ? ` · ${n} 处` : '';
     return `${file}${result.diff?.created ? ' · 新建' : name === 'fs_edit' ? ' · 已替换' : ' · 已写入'}${diff}${repl}`;
-  }
-  if (name === 'sql_query') {
-    const n = result.rowCount != null ? result.rowCount : (result.rows && result.rows.length) || 0;
-    const trunc = result.truncated ? '（已截断）' : '';
-    return `返回 ${n} 行${trunc}`;
-  }
-  if (name === 'sql_list_databases' && result.databases) {
-    return `${result.databases.length} 个库`;
-  }
-  if (name === 'sql_list_tables' && result.tables) {
-    return `${result.tables.length} 张表`;
   }
   if (name === 'fs_list_dir' && result.entries) return `${result.entries.length} 项`;
   if (result.stdout != null) {

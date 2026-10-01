@@ -144,7 +144,7 @@ async function loadHelpLogs(opts = {}) {
     if (meta && data.fetchedAt && !opts.keepMeta) {
       const t = new Date(data.fetchedAt);
       const days = data.retentionDays || 3;
-      meta.textContent = `已刷新 ${t.toLocaleTimeString()} · 仅保留 ${days} 天 · 已隐藏 SQL Server 日志`;
+      meta.textContent = `已刷新 ${t.toLocaleTimeString()} · 仅保留 ${days} 天`;
     }
     view.scrollTop = view.scrollHeight;
   } catch (e) {

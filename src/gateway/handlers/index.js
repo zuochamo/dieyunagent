@@ -3,7 +3,6 @@
 const { createPermissionsHandlers } = require('./permissions');
 const { createAgentHandlers } = require('./agent');
 const { createMemoryHandlers } = require('./memory');
-const { createSqlHandlers } = require('./sql');
 const { createWebHandlers } = require('./web');
 const { createSpeechHandlers } = require('./speech');
 const { createIndexRemoteHandlers } = require('./index-remote');
@@ -28,7 +27,6 @@ function createExtractedHandlers(deps) {
     ...createPermissionsHandlers(deps),
     ...createMemoryHandlers(deps),
     ...createAgentHandlers(deps),
-    ...createSqlHandlers(deps),
     ...createWebHandlers(deps),
     ...createSpeechHandlers(deps),
     ...createIndexRemoteHandlers(deps),

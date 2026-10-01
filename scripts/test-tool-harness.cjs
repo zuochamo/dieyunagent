@@ -130,6 +130,19 @@ async function main() {
   assert(mcpOk.ok, 'mcp query ok');
   const mcpType = validateMcpInputArgs('mcp_x__search_nodes', { query: {} }, mcpSchema);
   assert(!mcpType.ok, 'mcp query must be string');
+  // 未声明 required 时不得把唯一属性猜成必填（真实案例：postgres list_schemas 的 database 是可选）
+  const mcpOptionalOnly = {
+    type: 'object',
+    properties: { database: { type: 'string', description: 'omit when only one is configured' } }
+  };
+  assert(
+    validateMcpInputArgs('mcp_pg__list_schemas', {}, mcpOptionalOnly).ok,
+    'mcp schema without required: empty args allowed'
+  );
+  assert(
+    validateMcpInputArgs('mcp_pg__list_schemas', { database: 'dieyun_biz' }, mcpOptionalOnly).ok,
+    'mcp schema without required: optional arg allowed'
+  );
   const slim = catalog.slimMcpInputSchema(mcpSchema);
   assert(slim.required && slim.required[0] === 'query' && slim.properties.query.type === 'string', 'slim keeps query');
   const compacted = catalog.compactMcpToolDef({

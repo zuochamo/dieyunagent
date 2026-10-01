@@ -101,8 +101,7 @@ const CTX_LIMITS = {
     codebase_search: { results: 8000 },
     grep: { matches: 8000 },
     glob: { files: 8000 },
-    lsp: { locations: 8000, hover: 4000 },
-    sql_query: { rows: 6000, data: 6000 }
+    lsp: { locations: 8000, hover: 4000 }
   },
 
   // —— 与 agent-limits.js 单一来源（可在设置中调整的护栏）——

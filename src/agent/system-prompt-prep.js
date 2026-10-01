@@ -671,15 +671,6 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
       agentHome = null;
     }
   }
-  let sqlConfig = deps.sqlConfig;
-  if (sqlConfig == null && typeof invokeRpc === 'function') {
-    try {
-      sqlConfig = await invokeRpc('sql.config_get', {});
-    } catch {
-      sqlConfig = null;
-    }
-  }
-
   return assembleSystemPrompt({
     languagePrompt: snapshot.languagePrompt,
     userSystem: snapshot.userSystem,
@@ -688,7 +679,6 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     agentHome,
     workspaceInfo: snapshot.workspaceInfo,
     permissions,
-    sqlConfig,
     stableDataChunks: [
       ...(Array.isArray(snapshot.stableDataChunks) ? snapshot.stableDataChunks : []),
       ...(mcpBlock ? [mcpBlock] : [])

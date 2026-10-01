@@ -292,6 +292,7 @@ module.exports = {
   compareSemver,
   ensureMcpNpmPackage,
   execFileText,
+  npmCommandName,
   fetchNpmLatestVersion,
   getMcpNpmPackageMeta,
   getMcpPackageStatus,

@@ -207,13 +207,12 @@ flowchart TB
 
 | 前缀 | 职责 |
 |------|------|
-| `permissions.*` | 读/写/执行/SQL/联网开关 |
+| `permissions.*` | 读/写/执行/联网开关 |
 | `memory.*` | 会话、消息、长期记忆、每会话工作空间 |
 | `compaction.*` | 上下文 token 估算与压缩 |
 | `fs.*` | 白名单内读写列目录 |
 | `host.*` | Shell、打开 URL |
 | `web.*` | HTTP fetch、搜索（SSRF 防护） |
-| `sql.*` | 可选 SQL Server 只读查询 |
 
 ### 4.3 工作空间（两层，勿混）
 

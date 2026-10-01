@@ -6,7 +6,6 @@ const SETTINGS_TITLE_KEYS = {
   settings: ['settings_model', '模型'],
   theme: ['settings_theme', '主题'],
   worktrees: ['settings_worktrees', 'Worktree'],
-  database: ['settings_database', '数据库'],
   plugins: ['settings_plugins', '插件'],
   perms: ['settings_perms', '权限'],
   'agent-knowledge': ['settings_agent_knowledge', '知识']
@@ -15,10 +14,6 @@ const MODEL_TAB_TITLE_KEYS = {
   defined: ['model_defined', '定义模型'],
   embedding: ['model_embedding', '向量索引'],
   builtin: ['model_builtin', '供应商']
-};
-const DATABASE_TAB_TITLES = {
-  settings: '数据库设置',
-  list: '数据库列表'
 };
 const EXECUTE_TAB_TITLES = { anchor: '锚点设置', tasks: '定时任务', api: 'API设置' };
 
@@ -52,7 +47,6 @@ function ensureSettingsSidebar() {
   const overlay = $('settings-overlay');
   if (!overlay) return;
   overlay.classList.add('settings-mode-model');
-  overlay.classList.remove('settings-mode-database');
 }
 
 function showPluginListView() {
@@ -157,19 +151,6 @@ function switchSettingsTab(tab) {
   }
 }
 
-function openDatabaseSettingsModal(databaseTab = 'settings') {
-  closeAllMenus();
-  closeMobileConnectModal();
-  closeExecuteModal();
-  closeHelpModal();
-  if (typeof openDatabasePluginDetail === 'function') {
-    openDatabasePluginDetail(databaseTab);
-    return;
-  }
-  openSettingsSkillsPage('plugins');
-  if (gwState.authed) loadSqlConfigUI().catch(() => {});
-}
-
 function openPermissionsSettingsModal() {
   const overlay = $('settings-overlay');
   if (!overlay) return;
@@ -236,10 +217,6 @@ function openSettingsModal(tab) {
   closeHelpModal();
   if (tab === 'settings' || !tab) {
     openModelSettingsModal('defined');
-    return;
-  }
-  if (tab === 'database') {
-    openDatabaseSettingsModal('settings');
     return;
   }
   if (tab === 'perms') {

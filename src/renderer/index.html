@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src *;" />
+          content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; connect-src *;" />
     <title>叠云 Agent</title>
     <script src="./renderer-theme-bootstrap.js"></script>
     <link rel="stylesheet" href="./styles.css" />
@@ -777,55 +777,6 @@
         </header>
         <div class="skill-detail-body" id="plugin-detail-body">
           <div id="plugin-detail-intro"></div>
-          <div id="plugin-detail-database" hidden>
-            <nav class="settings-subtabs" aria-label="数据库插件">
-              <button type="button" class="settings-subtab active" data-pd-db-tab="settings">连接设置</button>
-              <button type="button" class="settings-subtab" data-pd-db-tab="list">数据库列表</button>
-            </nav>
-            <div class="database-settings-panel active" data-pd-db-panel="settings">
-              <section class="skill-detail-section">
-                <h3>连接配置</h3>
-                <div class="settings-form database-form">
-                  <label class="check-row">
-                    <input type="checkbox" id="sql-enabled" checked />
-                    <span>启用 SQL Server 连接</span>
-                  </label>
-                  <div class="field-row">
-                    <label class="field">
-                      <span class="field-label">主机</span>
-                      <input type="text" id="sql-host" placeholder="SQL Server 主机" autocomplete="off" />
-                    </label>
-                    <label class="field">
-                      <span class="field-label">端口</span>
-                      <input type="number" id="sql-port" value="1433" min="1" max="65535" />
-                    </label>
-                  </div>
-                  <label class="field">
-                    <span class="field-label">用户名</span>
-                    <input type="text" id="sql-user" placeholder="dieyunagent" autocomplete="off" />
-                  </label>
-                  <label class="field">
-                    <span class="field-label">密码</span>
-                    <input type="password" id="sql-password" placeholder="留空则保持已保存密码" autocomplete="off" />
-                  </label>
-                  <label class="field">
-                    <span class="field-label">单次查询最大行数</span>
-                    <input type="number" id="sql-max-rows" min="1" max="2000" value="500" />
-                  </label>
-                  <p class="field-hint">保存后可用「测试连接」验证；成功后在「数据库列表」查看库名。</p>
-                </div>
-              </section>
-            </div>
-            <div class="database-settings-panel" data-pd-db-panel="list">
-              <section class="skill-detail-section">
-                <h3>数据库列表</h3>
-                <div class="field-row sql-actions">
-                  <button type="button" class="ghost-btn" id="sql-refresh-list">刷新列表</button>
-                </div>
-                <pre class="skill-detail-pre sql-db-list" id="sql-db-list">请先测试连接后显示数据库列表</pre>
-              </section>
-            </div>
-          </div>
           <div id="plugin-detail-schema" hidden>
             <section class="skill-detail-section">
               <h3>设置</h3>
@@ -835,7 +786,6 @@
         </div>
         <footer class="skill-detail-foot skills-form-foot">
           <span class="save-hint" id="plugin-detail-hint"></span>
-          <button type="button" class="ghost-btn" id="plugin-detail-test" hidden>测试连接</button>
           <button type="button" class="primary-btn" id="plugin-detail-save">保存</button>
         </footer>
       </div>
@@ -1621,7 +1571,7 @@
                 </section>
                 <section class="help-usage-section">
                   <h3>权限</h3>
-                  <p><strong>本机权限</strong>：读/写文件、Shell、SQL Server 只读查询、联网抓取、浏览器自动化为系统内置能力，恒开、不提供开关；可逐项开关的是本机控制、路径限制（含「完全放开」）等，关闭后对应工具不再注册。权限仅在本地回环 Gateway 中生效。</p>
+                  <p><strong>本机权限</strong>：读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、不提供开关；可逐项开关的是本机控制、路径限制（含「完全放开」）等，关闭后对应工具不再注册。权限仅在本地回环 Gateway 中生效。</p>
                   <p><strong>启用 LSP 诊断注入</strong>（默认开）：发消息前拉取 TS/Python 等语言服务报错，注入 Agent 上下文（类似 Cursor Problems）；需本地工作区与读取文件权限。</p>
                   <p><strong>工位监控上报</strong>（默认开启）：内网 Socket.IO 实时上报 CPU / 键鼠统计，可在「设置 → 权限」关闭。</p>
                   <p><strong>长程 Agent 任务</strong>（默认关）：打开即生效，无需改编码参数。适合跨很多工具轮次的长任务：<strong>不启用文件回撤</strong>；撞上轮次上限时自动续段（最多 20 段）；<strong>不再硬拦</strong>同文件反复读取、只读探索步数、重复工具调用。每段工具次数与轮次上限自动提高。页脚显示「· 长程」。Plan 下 worktree 隔离仍有效；Agent 下建议在重要节点自行 <code>git commit</code>。</p>

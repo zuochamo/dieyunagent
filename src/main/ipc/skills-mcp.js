@@ -70,7 +70,7 @@ function registerSkillsMcpIpc(ctx) {
 
   ipcMain.handle('mcp:catalog-list', async (_evt, payload) => {
     const mcpCatalog = getMcpCatalog();
-    if (!mcpCatalog) return { entries: [], hasMore: false, loadedCount: 0 };
+    if (!mcpCatalog) return { entries: [], hasMore: false, loadedCount: 0, errors: [] };
     return mcpCatalog.listEntries({
       forceRemote: !!(payload && payload.refresh),
       loadMore: !!(payload && payload.loadMore),

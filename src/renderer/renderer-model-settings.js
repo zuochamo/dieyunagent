@@ -1103,9 +1103,6 @@ function initDefinedModelEditors() {
   initSupplierEditor();
 }
 
-function applyDeployUiDefaults(_deployUiDefaults) {}
-
-window.applyDeployUiDefaults = applyDeployUiDefaults;
 window.getSpeechApiConfig = getSpeechApiConfig;
 window.getModelRuntimeValues = getModelRuntimeValues;
 window.setModelRuntimeValues = setModelRuntimeValues;

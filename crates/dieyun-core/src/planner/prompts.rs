@@ -61,7 +61,7 @@ pub const REVIEW_SYSTEM: &str = r#"你是叠云 Agent 的规划师（验收）�
 - 若 worktreeChanges.conflict 为 true，在 notes 中说明冲突路径
 - 仅有文字汇报、无文件改动时，按 expectedOutput 语义判断，勿因无 diff 一律判失败"#;
 
-pub const EXPLORE_SYSTEM: &str = r#"你是 Explore 子 Agent（只读勘察），同时是本阶段的协调者。可使用 fs_read_file、fs_list_dir、grep、glob、lsp、sql_query、web_search、web_fetch 了解代码库与公开网页信息。
+pub const EXPLORE_SYSTEM: &str = r#"你是 Explore 子 Agent（只读勘察），同时是本阶段的协调者。可使用 fs_read_file、fs_list_dir、grep、glob、lsp、web_search、web_fetch 了解代码库与公开网页信息。
 禁止 fs_write_file、fs_edit、host_exec、host_print_image 及任何写入操作。
 精确字符串用 grep，文件名模式用 glob，语义检索用 codebase_search（若在工具列表中），跳转定义/引用用 lsp。
 联网勘察时：web_search 返回结构化 URL 后，必须用 web_fetch 抓取 1-3 个最相关 URL 再总结；若没有新 URL 或重复搜索被止损，换一次关键词/引擎后停止搜索循环。

@@ -9,30 +9,12 @@ const { SSEClientTransport } = require('@modelcontextprotocol/sdk/client/sse.js'
 const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
 const { transportKind } = require('./server-config');
 const { validateMcpInputArgs } = require('../agent/tool-validate');
+// 工具名编码的单一来源（Renderer 的只读白名单要按同一前缀判定，故不能再放在本文件里）
+const { encodeMcpToolName, simpleHash } = require('./tool-name');
 
 const CONNECT_TIMEOUT_MS = 60000;
 const CALL_TIMEOUT_MS = 120000;
 const TOOLS_CACHE_MS = 60000;
-
-function encodeMcpToolName(serverId, toolName) {
-  const combined = `${serverId}__${toolName}`;
-  let name = `mcp_${combined.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-  if (name.length <= 64) return name;
-  const hash = simpleHash(combined);
-  const sid = String(serverId)
-    .replace(/[^a-zA-Z0-9_-]/g, '_')
-    .slice(0, 24);
-  return `mcp_${sid}_${hash}`.slice(0, 64);
-}
-
-function simpleHash(text) {
-  let h = 2166136261;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0).toString(36);
-}
 
 function extractMcpText(result) {
   if (!result || !Array.isArray(result.content)) return '';
@@ -199,7 +181,9 @@ class McpSession {
           command: stdioServer.command,
           args,
           env,
-          stderr: 'pipe'
+          // 子进程的报错是唯一能看见「服务器起来但用不了」的地方（例如缺少连接串）。
+          // 之前用 'pipe' 但没人读：报错被丢掉，管道写满还会阻塞子进程。
+          stderr: 'inherit'
         });
       }
       await client.connect(transport);

@@ -3,6 +3,24 @@
 const fs = require('fs');
 const path = require('path');
 
+/** 解密失败去重：读取凭据是高频路径（列表 / 弹窗 / 建会话都读），同一个坏值只喊一次 */
+const warnedUndecryptable = new Set();
+
+/** 密文解不开时唯一的一次告警（含用户要做的动作），不在这里决定怎么继续跑 */
+function warnUndecryptable(serverId, keys, encryptionAvailable) {
+  const dedupeKey = `${serverId}:${keys.join(',')}`;
+  if (warnedUndecryptable.has(dedupeKey)) return;
+  warnedUndecryptable.add(dedupeKey);
+  if (!encryptionAvailable) {
+    console.warn(`[dieyun:mcp] ${serverId} 的 ${keys.join('、')} 无法解密：当前系统不可用 safeStorage`);
+    return;
+  }
+  console.warn(
+    `[dieyun:mcp] ${serverId} 的 ${keys.join('、')} 无法解密：` +
+      'safeStorage 密钥与写入时不一致（换过 userData / 启动方式），请在 MCP 设置页重新填写保存'
+  );
+}
+
 /**
  * @param {{ safeStorage?: import('electron').SafeStorage, userDataPath: string }} deps
  */
@@ -55,31 +73,48 @@ function createMcpCredentialsStore(deps) {
     return row && typeof row === 'object' ? row : null;
   }
 
+  /**
+   * 凭据的唯一真相：以「能解出来的值」为准。
+   * 只数密文键名会把"解不开"当成"已配置"（UI 显示已保存、子进程却拿到空 env），
+   * 于是失败以"没配过"的形态静默传播。解不开就如实报出来，并让调用方决定拦不拦。
+   */
+  function readUsableSecrets(serverId, row) {
+    const env = {};
+    const undecryptable = [];
+    if (row.envEnc && typeof row.envEnc === 'object') {
+      for (const [key, enc] of Object.entries(row.envEnc)) {
+        const val = decryptSecret(enc);
+        if (val) env[key] = val;
+        else undecryptable.push(key);
+      }
+    }
+    let token = '';
+    if (row.tokenEnc) {
+      token = decryptSecret(row.tokenEnc);
+      if (!token) undecryptable.push('token');
+    }
+    if (undecryptable.length) warnUndecryptable(serverId, undecryptable, canEncrypt());
+    return { token, env, undecryptable };
+  }
+
   function getSecretMeta(serverId) {
     const row = getRow(serverId);
-    if (!row) return { hasToken: false, envKeys: [], hasEnv: false };
-    const envKeys = row.envEnc && typeof row.envEnc === 'object' ? Object.keys(row.envEnc) : [];
+    if (!row) return { hasToken: false, envKeys: [], hasEnv: false, undecryptable: [] };
+    const { token, env, undecryptable } = readUsableSecrets(serverId, row);
+    const envKeys = Object.keys(env);
     return {
-      hasToken: !!(row.tokenEnc && canEncrypt()),
+      hasToken: !!token,
       envKeys,
-      hasEnv: envKeys.length > 0
+      hasEnv: envKeys.length > 0,
+      undecryptable
     };
   }
 
   function loadSecrets(serverId) {
     const row = getRow(serverId);
     if (!row) return { token: '', env: {} };
-    const env = {};
-    if (row.envEnc && typeof row.envEnc === 'object') {
-      for (const [key, enc] of Object.entries(row.envEnc)) {
-        const val = decryptSecret(enc);
-        if (val) env[key] = val;
-      }
-    }
-    return {
-      token: decryptSecret(row.tokenEnc),
-      env
-    };
+    const { token, env } = readUsableSecrets(serverId, row);
+    return { token, env };
   }
 
   /**

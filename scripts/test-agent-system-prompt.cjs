@@ -36,14 +36,7 @@ const packed = assembleSystemPrompt({
   taskTier: { taskTier: 'trivial', reason: '单文件', suggestedFiles: ['a.ts'] },
   agentHome: { dieyunSkills: '/home/u/.dieyun/skills', dieyunWorkspace: '/home/u/.dieyun' },
   workspaceInfo: { workspacePath: 'D:/proj', kind: 'local' },
-  permissions: { hostControl: true, fsRead: true, fsWrite: true, shellExec: true, sqlRead: true },
-  sqlConfig: {
-    enabled: true,
-    host: '127.0.0.1',
-    port: 1433,
-    user: 'sa',
-    databases: ['AppDb']
-  },
+  permissions: { hostControl: true, fsRead: true, fsWrite: true, shellExec: true },
   stableDataChunks: ['【MCP】demo'],
   turnDataChunks: ['【相关代码】foo.ts'],
   now
@@ -58,7 +51,6 @@ assert(!packed.stable.includes('已预注入'), 'workspace does not claim preloa
 assert(packed.stable.includes('读文件'), 'permissions in stable');
 assert(packed.stable.includes('cmd'), 'windows host_exec hint stays short');
 assert(!packed.stable.includes('browser_navigate'), 'permissions omit tool tutorial');
-assert(packed.stable.includes('AppDb'), 'sql in stable');
 assert(packed.stable.includes('【MCP】demo'), 'stable recall after rules');
 assert(!packed.stable.includes('foo.ts'), 'turn recall stays out of stable');
 assert(packed.turnRide.includes('ISO 2026-09-09'), 'time in turn ride');

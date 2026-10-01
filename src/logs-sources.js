@@ -6,28 +6,6 @@ const path = require('path');
 const LOG_RETENTION_DAYS = 3;
 const LOG_RETENTION_MS = LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
-/** 运行日志 UI 中不展示的 SQL Server 相关行 */
-const SQL_SERVER_LOG_LINE_RE =
-  /\bSQL Server\b|sqlserver|SqlServer|\bmssql\b|SQL Server 服务|SQL Server 未启用|未配置 SQL Server 密码/i;
-
-/**
- * @param {string} line
- */
-function isSqlServerLogLine(line) {
-  return SQL_SERVER_LOG_LINE_RE.test(String(line || ''));
-}
-
-/**
- * @param {string} content
- */
-function filterLogContentForDisplay(content) {
-  if (!content) return '';
-  return content
-    .split(/\r?\n/)
-    .filter((line) => !isSqlServerLogLine(line))
-    .join('\n');
-}
-
 /**
  * @param {string} line
  * @returns {number | null}
@@ -82,13 +60,11 @@ function readLogTail(filePath, maxLines = 600) {
     const raw = fs.readFileSync(filePath, 'utf8');
     const lines = raw.split(/\r?\n/);
     const tail = lines.slice(-Math.max(1, maxLines));
-    const filtered = filterLogContentForDisplay(tail.join('\n'));
-    const filteredLines = filtered ? filtered.split(/\r?\n/) : [];
     return {
       path: filePath,
       missing: false,
-      content: filtered,
-      lineCount: filteredLines.length,
+      content: tail.join('\n'),
+      lineCount: tail.length,
       totalLines: lines.length
     };
   } catch (e) {
@@ -297,7 +273,5 @@ module.exports = {
   readLogTail,
   fetchAllLogs,
   cleanLogs,
-  clearAllLogs,
-  filterLogContentForDisplay,
-  isSqlServerLogLine
+  clearAllLogs
 };

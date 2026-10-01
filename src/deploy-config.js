@@ -10,12 +10,6 @@ const BUILTIN_DEFAULTS = Object.freeze({
   updates: {
     primaryUrl: 'http://192.168.31.62:3099/',
     fallbackUrl: 'https://dieyunagent-updates-1440856872.cos.ap-shanghai.myqcloud.com/'
-  },
-  sqlServer: {
-    host: '192.168.31.211',
-    port: 1433,
-    user: 'dieyunagent',
-    password: ''
   }
 });
 
@@ -147,11 +141,6 @@ function applyEnvOverrides(cfg) {
   setIfEnv(out, 'monitor', 'serverUrl', 'SERVER_URL');
   setIfEnv(out, 'updates', 'primaryUrl', 'UPDATE_URL');
   setIfEnv(out, 'updates', 'fallbackUrl', 'UPDATE_URL_FALLBACK');
-  setIfEnv(out, 'sqlServer', 'host', 'SQLSERVER_HOST');
-  setIfEnv(out, 'sqlServer', 'user', 'SQLSERVER_USER');
-  setIfEnv(out, 'sqlServer', 'password', 'SQLSERVER_PASSWORD');
-  setIfEnv(out, 'sqlServer', 'port', 'SQLSERVER_PORT', (v) => Number(v) || BUILTIN_DEFAULTS.sqlServer.port);
-  out.sqlServer.port = Number(out.sqlServer.port) || BUILTIN_DEFAULTS.sqlServer.port;
   return out;
 }
 
@@ -173,16 +162,6 @@ function getDeployConfig(opts = {}) {
   return cachedConfig;
 }
 
-function getDeployUiDefaults() {
-  const cfg = getDeployConfig();
-  return {
-    sqlServer: {
-      host: cfg.sqlServer.host || '',
-      port: cfg.sqlServer.port || BUILTIN_DEFAULTS.sqlServer.port
-    }
-  };
-}
-
 function resetDeployConfigCache() {
   cachedConfig = null;
   cachedRepoRoot = null;
@@ -192,7 +171,6 @@ function resetDeployConfigCache() {
 module.exports = {
   BUILTIN_DEFAULTS,
   getDeployConfig,
-  getDeployUiDefaults,
   deployConfigPaths,
   readDeployLocalJson,
   resolvePackagedConfigPath,

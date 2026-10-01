@@ -5184,27 +5184,6 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 /* Master 模式：浅蓝色主题 */
-.sql-settings-block {
-  margin-top: 4px;
-}
-.sql-actions {
-  align-items: center;
-  flex-wrap: wrap;
-}
-.sql-db-list {
-  margin: 10px 0 0;
-  padding: 10px 12px;
-  font-size: 11px;
-  line-height: 1.5;
-  max-height: 280px;
-  overflow: auto;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--text-mute);
-}
-
 .plugin-grid.skills-grid {
   width: 100%;
 }
@@ -5678,16 +5657,6 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 
 .plugin-catalog-toolbar {
   flex-wrap: wrap;
-}
-
-.database-settings-panel {
-  display: none;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.database-settings-panel.active {
-  display: flex;
 }
 
 .settings-nav {

@@ -32,6 +32,7 @@
 | 模型 / 语音设置 | `src/model-settings.js`、`src/renderer/renderer-model-settings.js` | 散落硬编码 API URL |
 | LLM 端点拼接 / 请求头 | `src/agent/llm-request.js`（端点与请求头唯一来源） | 在调用点内联 `Content-Type + Authorization` |
 | 打包 / 安装包 | `scripts/`、`build-installer.bat` | 任务无关不改 `electron-builder` 配置 |
+| 离线预装的 MCP 产物 | `scripts/pack-mcp-bundled.cjs`（版本唯一来源 `src/mcp/registry.js`） | 再写一份版本/校验和或另造预装机制 |
 | 护栏 / 探索限制 | `src/agent/agent-limits.js`（数字）、`guardrails-shared.js`（逻辑） | 多处重复常量 |
 
 ---
@@ -56,6 +57,7 @@ dieyun-core (Rust)           循环账本 agent.loop、planner、memory、index�
 npm ci
 npm run bootstrap
 npm run pack:dieyun-core          # 或 cargo build -p dieyun-core + DIEYUN_CORE_BIN=...
+npm run pack:mcp-bundled          # 离线预装 MCP 产物（断网构建：产物放 build/.cache/ 后重跑）
 
 # 日常开发（完整 bootstrap + remote-gateway pack）
 npm run dev

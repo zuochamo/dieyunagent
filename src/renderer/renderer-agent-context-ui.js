@@ -559,7 +559,9 @@ function scheduleCompactionStatsRefresh() {
   if (compactionStatsRefreshTimer) return;
   compactionStatsRefreshTimer = setTimeout(() => {
     compactionStatsRefreshTimer = null;
-    loadCompactionStats().catch(() => {});
+    // force：压缩是低频事件，防抖已经把抖动合并掉了，再撞 3s 最小间隔只会让
+    // 「刚压缩完」的统计要等下一次触发才出现（且撞上节流时是直接丢弃、不是排队）。
+    loadCompactionStats({ force: true }).catch(() => {});
   }, COMPACTION_STATS_DEBOUNCE_MS);
 }
 
@@ -661,6 +663,70 @@ function noteContextCompaction(cr, sessionId) {
   lastContextAutoCollapseBand = Math.max(lastContextAutoCollapseBand, 2);
   refreshContextProgress();
   scheduleCompactionStatsRefresh();
+}
+
+/**
+ * 「上下文」面板可见性守卫 —— 与 `renderer-codebase-panel.js: isCodebasePaneActive` 同构。
+ * 收起动画期间也视为不可见，避免动画里白刷一轮。
+ */
+function isContextPaneActive() {
+  const panel = document.getElementById('artifacts-panel');
+  if (!panel || panel.hidden || panel.classList.contains('is-panel-closing')) return false;
+  const pane = document.querySelector('.side-panel-pane[data-side-pane="context"]');
+  return !!(pane && !pane.hidden);
+}
+
+/**
+ * 「上下文」面板低频心跳（可见才跑）。
+ *
+ * 本面板此前是**零定时器**的纯事件驱动（切页 / 输入 / 流式 / 压缩发生才刷），后果是面板
+ * 开着不动时数据冻结，且压缩统计还要吃 1.2s 防抖 + 3s 最小间隔的双延迟。这里照
+ * codebase / graph 面板的既有模式补一个兜底心跳 —— 事件驱动仍是主路径，心跳只兜住
+ * 「事件没来但数据该变」的窗口：运行中无 delta 的思考期、压缩后统计的延迟、
+ * 以及切页刚好撞上 3s 节流被丢弃的那一次。
+ *
+ * 面板不可见即自停，不是常驻轮询。
+ */
+const CONTEXT_PANEL_POLL_MS = 4000;
+let contextPanelPollTimer = null;
+
+function stopContextPanelPoll() {
+  if (!contextPanelPollTimer) return;
+  clearInterval(contextPanelPollTimer);
+  contextPanelPollTimer = null;
+}
+
+function startContextPanelPoll() {
+  if (contextPanelPollTimer) return;
+  contextPanelPollTimer = setInterval(() => {
+    if (!isContextPaneActive()) {
+      stopContextPanelPoll();
+      return;
+    }
+    // 窗口隐藏时 Chromium 会节流定时器：这一拍直接跳过，省掉无意义的估算与 IPC
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    refreshContextProgress();
+    loadCompactionStats().catch(() => {});
+  }, CONTEXT_PANEL_POLL_MS);
+}
+
+/**
+ * 面板可见 → 首刷 + 启心跳。**唯一入口**，`setSidePanelTab` 与
+ * `settleSessionSidePanelAfterSwitch`（切会话）共用，避免两处各写一份刷新逻辑。
+ */
+function onContextPanelShown() {
+  // 启动时 initSidePanel 会以 silent 方式恢复上次的 tab，此时面板容器仍是 hidden：
+  // 不挡掉就会在应用启动瞬间白跑一轮 IPC。
+  if (!isContextPaneActive()) return;
+  refreshContextProgress();
+  // force：用户主动打开 / 切会话的语义就是「要看最新」，3s 最小间隔对它纯属误伤。
+  loadCompactionStats({ force: true }).catch(() => {});
+  startContextPanelPoll();
+}
+
+/** 面板隐藏 → 停心跳 */
+function onContextPanelHidden() {
+  stopContextPanelPoll();
 }
 
 function paintContextProgressRing(used, sending, breakdown) {

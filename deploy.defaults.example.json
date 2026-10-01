@@ -7,12 +7,6 @@
     "primaryUrl": "http://192.168.31.62:3099/",
     "fallbackUrl": "https://dieyunagent-updates-1440856872.cos.ap-shanghai.myqcloud.com/"
   },
-  "sqlServer": {
-    "host": "192.168.31.211",
-    "port": 1433,
-    "user": "dieyunagent",
-    "password": "123456"
-  },
   "openApi": {
     "daizhang": {
       "url": "http://192.168.31.62:3011/api/open-api/v1",

@@ -8,7 +8,6 @@ const DEFAULTS = {
   fsRead: true,
   fsWrite: true,
   shellExec: true,
-  sqlRead: true,
   webFetch: true,
   browserAutomation: true,
   /**

@@ -106,9 +106,10 @@ function setSidePanelTab(tab, opts) {
   }
   if (next === 'terminal' && typeof ensureTerminalSession === 'function') ensureTerminalSession();
   if (next === 'context') {
-    if (typeof refreshContextProgress === 'function') refreshContextProgress();
-    // 压缩统计来自磁盘 jsonl（异步 IPC），随面板可见性拉取，不跟高频的圆环刷新混在一起
-    if (typeof loadCompactionStats === 'function') loadCompactionStats().catch(() => {});
+    // 首刷 + 心跳启停的唯一入口（与 codebase / graph 面板同构）
+    if (typeof onContextPanelShown === 'function') onContextPanelShown();
+  } else if (typeof onContextPanelHidden === 'function') {
+    onContextPanelHidden();
   }
   if (next === 'ssh' && typeof refreshWorkspaceMenuItems === 'function') {
     refreshWorkspaceMenuItems().catch(() => {});
@@ -146,6 +147,7 @@ function finishPanelClose(panel, resizer) {
   if (typeof syncBrowserBounds === 'function') syncBrowserBounds();
   if (typeof onCodebasePanelHidden === 'function') onCodebasePanelHidden();
   if (typeof onGraphPanelHidden === 'function') onGraphPanelHidden();
+  if (typeof onContextPanelHidden === 'function') onContextPanelHidden();
 }
 
 function applySidePanelOpenState(open) {

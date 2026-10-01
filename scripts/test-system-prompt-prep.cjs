@@ -96,9 +96,6 @@ async function runPrep() {
         if (method === 'workspace.git_diff') {
           return { ok: true, text: '【未提交 diff】\ndiff --git a/src/foo.js' };
         }
-        if (method === 'sql.config_get') {
-          return { enabled: false };
-        }
         if (method === 'graph.repo_map' || method === 'graph.lsp_enrich') {
           return { indexed: false };
         }
@@ -157,7 +154,6 @@ async function runPrepKnowledge() {
         if (method === 'fs.read_file') {
           return { data: '', encoding: 'utf8' };
         }
-        if (method === 'sql.config_get') return { enabled: false };
         if (method === 'graph.repo_map' || method === 'graph.lsp_enrich') {
           throw new Error(`${method} should not run in this case`);
         }
@@ -237,7 +233,6 @@ async function runPrepGraph() {
       invokeRpc: async (method) => {
         calls.push(method);
         if (method === 'fs.read_file') return { data: md, encoding: 'utf8' };
-        if (method === 'sql.config_get') return { enabled: false };
         if (method === 'graph.repo_map') {
           return { indexed: true, markdown: '【仓库结构】\n- src/login.js' };
         }
@@ -278,7 +273,6 @@ async function runPrepSkipAutoGraph() {
       invokeRpc: async (method) => {
         calls.push(method);
         if (method === 'fs.read_file') return { data: md, encoding: 'utf8' };
-        if (method === 'sql.config_get') return { enabled: false };
         if (method === 'graph.repo_map' || method === 'graph.lsp_enrich') {
           throw new Error('graph should skip when skipAuto');
         }
@@ -308,7 +302,6 @@ async function runPrepMcpFull() {
     {
       invokeRpc: async (method) => {
         if (method === 'fs.read_file') return { data: '', encoding: 'utf8' };
-        if (method === 'sql.config_get') return { enabled: false };
         if (method === 'memory.project_recall' || method === 'memory.long_recall') {
           return { mode: 'none', results: [] };
         }

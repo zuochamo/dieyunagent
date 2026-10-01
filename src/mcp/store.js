@@ -107,7 +107,10 @@ function createMcpStore(opts) {
             ? enabled[server.id] !== false
             : !!server.defaultEnabled
         };
-        if (merged.bundledServer) {
+        // 只覆写「占位命令」型预装服务（registry 里 command 写的是 bundled）用于展示。
+        // 带真实启动规格的预装服务（如 mcp-postgres：npx 规格 + bundledServer）必须保留
+        // command/args —— 启动侧要靠 args 里的 `--stdio`（丢掉会变成开 HTTP 监听而静默挂住）。
+        if (merged.bundledServer && merged.command === 'bundled') {
           merged.command = '内置';
           merged.args = [String(merged.openApiService || merged.bundledServer)];
         }
@@ -319,6 +322,8 @@ function createMcpStore(opts) {
       packageInstallRoot: packageStatus.installRoot || '',
       packageInstalledVersion: packageStatus.installedVersion || '',
       envHint,
+      /** 离线预装（随客户端分发，运行时不需要 npm install / 下载二进制） */
+      bundled: !!server.bundledServer,
       homepage: server.homepage || '',
       catalogId: server.catalogId || '',
       configured: !!server.configured,
@@ -328,7 +333,8 @@ function createMcpStore(opts) {
         ? meta.envKeys.includes(envHint)
         : dieyunService
           ? dieyunService.hasKey
-          : meta.hasEnv
+          : meta.hasEnv,
+      undecryptable: Array.isArray(meta.undecryptable) ? meta.undecryptable : []
     };
   }
 

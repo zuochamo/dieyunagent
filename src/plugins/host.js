@@ -167,14 +167,9 @@ class PluginHost {
         source: plugin.source || (plugin.builtin === false ? 'user' : 'builtin'),
         installPath: plugin.installPath || null,
         permissions: Array.isArray(plugin.permissions) ? plugin.permissions.slice() : [],
-        hasSettings: this._pluginHasSettings(plugin),
+        hasSettings: !!(plugin.settings && plugin.settings.schema),
         settingsSchema: plugin.settings?.schema || null
       }));
-  }
-
-  _pluginHasSettings(plugin) {
-    if (plugin.id === 'builtin.database') return true;
-    return !!(plugin.settings && plugin.settings.schema);
   }
 
   _readSettingsSchema(plugin) {

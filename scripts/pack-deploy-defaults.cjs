@@ -64,7 +64,7 @@ function readJson(file) {
   }
 }
 
-/** 只保留需要的段落，避免把 sqlServer 等无关密钥一并打进安装包 */
+/** 只保留需要注入的段落，避免把 monitor/updates 等无关字段与本机额外配置一并打进安装包 */
 function pickSections(config, { all }) {
   const cfg = config && typeof config === 'object' ? config : {};
   if (all) return cfg;
