@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab */
 'use strict';
 
 /** 工具行的稳定签名（不含思考正文） */
@@ -775,6 +775,55 @@ function thinkingToolsSignature(tools, roundComplete) {
     .join(';')}`;
 }
 
+/** HTML 产物预览的读取上限（module 内局部阈值；srcdoc 过大浏览器渲染也吃不住） */
+const HTML_PREVIEW_MAX_BYTES = 400 * 1024;
+
+/**
+ * HTML 产物的聊天内预览卡（Gen UI 简版）：
+ * - sandbox iframe（只有 allow-scripts，无 allow-same-origin → 页面拿不到宿主 DOM/storage）；
+ * - 内容经 fs.read_file 异步读出后填 srcdoc；读不到/被截断就撤卡，不占位；
+ * - 「在面板打开」复用 artifacts 面板的 openArtifactTab，不另造预览器。
+ */
+function appendInlineHtmlPreview(li, t) {
+  const p = String((t.toolArgs && t.toolArgs.filePath) || '').trim();
+  if (!p || !/\.html?$/i.test(p)) return;
+  if (li.querySelector('.msg-tool-html-preview')) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-tool-html-preview';
+  const bar = document.createElement('div');
+  bar.className = 'msg-tool-html-preview-bar';
+  const name = document.createElement('span');
+  name.textContent = 'HTML 预览';
+  bar.appendChild(name);
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.textContent = '在面板打开';
+  openBtn.addEventListener('click', () => {
+    if (typeof openArtifactTab === 'function') openArtifactTab(p);
+  });
+  bar.appendChild(openBtn);
+  const frame = document.createElement('iframe');
+  frame.setAttribute('sandbox', 'allow-scripts');
+  frame.setAttribute('title', 'HTML 预览');
+  frame.setAttribute('referrerpolicy', 'no-referrer');
+  wrap.appendChild(bar);
+  wrap.appendChild(frame);
+  li.appendChild(wrap);
+  Promise.resolve()
+    .then(() =>
+      gatewayCall('fs.read_file', { filePath: p, maxBytes: HTML_PREVIEW_MAX_BYTES })
+    )
+    .then((r) => {
+      const content = r && typeof r.content === 'string' ? r.content : null;
+      if (content == null || r.truncated) {
+        wrap.remove();
+        return;
+      }
+      frame.srcdoc = content;
+    })
+    .catch(() => wrap.remove());
+}
+
 function appendThinkingToolRows(ul, tools, { roundComplete = false } = {}) {
   const list = tools || [];
   const sig = thinkingToolsSignature(list, roundComplete);
@@ -811,6 +860,7 @@ function appendThinkingToolRows(ul, tools, { roundComplete = false } = {}) {
       row.appendChild(text);
       li.appendChild(row);
       appendInlineToolDiff(li, t, { roundComplete });
+      if (!failed) appendInlineHtmlPreview(li, t);
     }
     ul.appendChild(li);
   }

@@ -40,6 +40,7 @@ const AUTOMATION_TAXONOMY_LIST = Array.isArray(window.AUTOMATION_TAXONOMY)
       { id: 'periodic', label: '周期' },
       { id: 'interval', label: '按间隔' },
       { id: 'once', label: '单次' },
+      { id: 'idle', label: '空闲时' },
       { id: 'disabled', label: '已停用' }
     ];
 
@@ -49,6 +50,7 @@ function setAutomationHint(msg) {
 }
 
 function scheduleLabelPlan(plan) {
+  if (plan.trigger === 'idle') return '空闲时执行';
   if (plan.onceAt) {
     try {
       return `单次 · ${new Date(plan.onceAt).toLocaleString('zh-CN')}`;
@@ -88,6 +90,7 @@ function promptInPlan(plan) {
 
 function resolveAutomationCategory(plan) {
   if (!plan || plan.enabled === false) return 'disabled';
+  if (plan.trigger === 'idle') return 'idle';
   if (plan.onceAt) return 'once';
   const r = String(plan.rrule || '').toUpperCase();
   if (r.includes('MINUTELY') || r.includes('FREQ=HOURLY')) return 'interval';
@@ -749,6 +752,7 @@ function collectAutomationForm() {
     todos: parseTodoText($('automation-todos')?.value || ''),
     rrule: sched.rrule,
     onceAt: sched.onceAt,
+    trigger: sched.trigger || 'schedule',
     tz: 'Asia/Shanghai',
     // 生效开始只在用户显式填过时上送：undefined 会让 store 保留原 dtstart（新建则兜底为当前时间），
     // 否则「打开编辑器保存一次」就会把已有计划的起始相位冲成保存时刻。

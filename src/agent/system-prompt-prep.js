@@ -552,6 +552,30 @@ async function fetchGlobalMemoryBlock(snapshot, invokeRpc, lim) {
   }
 }
 
+/** 交接块字符上限（module 内局部阈值，与 fetchCompactionBlock 同级；登记 HARNESS-INVENTORY A1.2） */
+const HANDOFF_BLOCK_MAX_CHARS = 4000;
+
+/**
+ * 【上个会话交接】注入块。
+ *
+ * 触发是**结构信号**：snapshot.continueFromSessionId 由 Renderer「继续上次」显式带上
+ * （发送一次即清），不做任何关键词判定（AGENTS.md 原则 3）。
+ * 取回走 memory.handoff_get（按 session_id 精确取，不参与语义召回）。
+ */
+async function fetchSessionHandoffBlock(snapshot, invokeRpc) {
+  const fromId = String((snapshot && snapshot.continueFromSessionId) || '').trim();
+  if (!fromId) return '';
+  try {
+    const handoff = await invokeRpc('memory.handoff_get', { sessionId: fromId });
+    if (!handoff || !handoff.payload) return '';
+    const title = handoff.title ? ` · ${String(handoff.title).slice(0, 48)}` : '';
+    const body = String(handoff.payload).slice(0, HANDOFF_BLOCK_MAX_CHARS);
+    return `【上个会话交接${title}】\n${body}\n（交接来自旧会话，仅供接续参考；与当前任务冲突时以当前任务为准）`;
+  } catch {
+    return ''; // 交接取不到不阻塞本轮
+  }
+}
+
 async function fetchCompactionBlock(snapshot, invokeRpc) {
   const sid = String(snapshot.sessionId || '').trim();
   if (!sid) return '';
@@ -819,6 +843,7 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   kickGraphLspEnrich(snap, invokeRpc);
   const injectKnowledge = !!String(userQuery || '').trim();
   const knowledgeBlocks = await Promise.all([
+    fetchSessionHandoffBlock(snapshot, invokeRpc),
     fetchGraphRepoMapBlock(snap, invokeRpc, lim),
     injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim) : Promise.resolve(''),
     fetchGlobalMemoryBlock(snap, invokeRpc, lim),
@@ -885,6 +910,7 @@ module.exports = {
   fetchCodebaseBlock,
   fetchOpenFilesBlock,
   fetchAgentsMdBlock,
+  fetchSessionHandoffBlock,
   prepSystemPrompt,
   resolveAgentHome
 };

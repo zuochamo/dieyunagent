@@ -2,14 +2,14 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-10-21T06:33:00.856Z
+生成时间：2026-10-24T01:43:21.453Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 191 |
-| Gateway only | 116 |
+| 总计 | 195 |
+| Gateway only | 117 |
 | Rust only | 24 |
-| Both | 51 |
+| Both | 54 |
 
 ## 按命名空间
 
@@ -171,7 +171,7 @@
 | `lsp.settings_get` | gateway | gateway/handlers/lsp-workspace.js | — |
 | `lsp.settings_set` | gateway | gateway/handlers/lsp-workspace.js | — |
 
-### memory (34)
+### memory (37)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -179,6 +179,9 @@
 | `memory.compaction_recent` | both | gateway/handlers/memory.js | yes |
 | `memory.consolidation_job_create` | both | gateway/handlers/memory.js | yes |
 | `memory.consolidation_job_finish` | both | gateway/handlers/memory.js | yes |
+| `memory.handoff_get` | both | gateway/handlers/memory.js | yes |
+| `memory.handoff_latest` | both | gateway/handlers/memory.js | yes |
+| `memory.handoff_save` | both | gateway/handlers/memory.js | yes |
 | `memory.long_add` | both | gateway/handlers/memory.js | yes |
 | `memory.long_decay` | both | gateway/handlers/memory.js | yes |
 | `memory.long_keyword_search` | both | gateway/handlers/memory.js | yes |
@@ -228,11 +231,12 @@
 | `planner.run.state` | rust | — | yes |
 | `planner.run.worker_loop` | rust | — | yes |
 
-### plugins (16)
+### plugins (17)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `plugins.catalog.install` | gateway | gateway/handlers/plugins.js | — |
+| `plugins.catalog.install_from_url` | gateway | gateway/handlers/plugins.js | — |
 | `plugins.catalog.list` | gateway | gateway/handlers/plugins.js | — |
 | `plugins.catalog.sources.get` | gateway | gateway/handlers/plugins.js | — |
 | `plugins.catalog.sources.set` | gateway | gateway/handlers/plugins.js | — |

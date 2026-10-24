@@ -342,6 +342,7 @@
 | `src/renderer/renderer-agents-md.js:635-637` | AGENTS 冷启动 | system | 初始化 section |
 | `src/plans/parser.js:6-19` | `PARSE_SYSTEM` | system | 自然语言 → RRULE JSON |
 | `src/plans/plan-agent-runner.js:36-69` | 计划 Agent | system/user | 定时任务执行 |
+| `src/agent/handoff-prompts.js:11-32` | 会话交接归纳器 | system/user | 跨会话交接生成（结构固定五段，600 字内） |
 | `src/plans/runner.js:10-92` | 轻量执行 | system | `ASSISTANT_IDENTITY` + dieyun + 技能 |
 | `src/agent/agent-synthesis.js:9-12` | trace 阶段文案 | UI | 汇总阶段名 |
 

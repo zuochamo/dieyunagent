@@ -405,6 +405,7 @@ contextBridge.exposeInMainWorld('diecloud', {
   agentArbitrate: (runId, decision) => ipcRenderer.invoke('agent:arbitrate', { runId, decision }),
   agentRustLoopPing: () => ipcRenderer.invoke('agent:rust-loop-ping'),
   agentPrepSystemPrompt: (payload) => ipcRenderer.invoke('agent:prep-system-prompt', payload || {}),
+  sessionHandoffGenerate: (payload) => ipcRenderer.invoke('session:handoff-generate', payload || {}),
   agentRustLoopRun: (payload) =>
     ipcRenderer
       .invoke('agent:rust-loop-run', payload || {})

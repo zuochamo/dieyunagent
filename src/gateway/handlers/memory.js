@@ -43,6 +43,28 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
     'memory.session_delete': async ({ sessionId }) =>
       requireRustCore('memory.session_delete', { sessionId: String(sessionId) }),
 
+    // —— 会话交接：按 session_id 精确读写（不参与语义召回，与 long_memories 分层）——
+    'memory.handoff_save': async ({ sessionId, title, payload }) => {
+      if (!payload || typeof payload !== 'string' || !payload.trim()) {
+        const e = new Error('payload 必填');
+        e.code = 'INVALID_CONTENT';
+        throw e;
+      }
+      return requireRustCore('memory.handoff_save', {
+        sessionId: String(sessionId || ''),
+        title: title ? String(title) : '',
+        payload
+      });
+    },
+
+    'memory.handoff_get': async ({ sessionId }) =>
+      requireRustCore('memory.handoff_get', { sessionId: String(sessionId || '') }),
+
+    'memory.handoff_latest': async ({ excludeSessionId }) =>
+      requireRustCore('memory.handoff_latest', {
+        excludeSessionId: excludeSessionId ? String(excludeSessionId) : null
+      }),
+
     'memory.message_append': async ({ sessionId, role, content, reasoning }) => {
       const sid = String(sessionId);
       const r = String(role);

@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generatedAt": "2026-10-21T06:33:00.856Z",
+  "generatedAt": "2026-10-24T01:43:21.453Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 191,
-    "gatewayOnly": 116,
+    "total": 195,
+    "gatewayOnly": 117,
     "rustOnly": 24,
-    "both": 51
+    "both": 54
   },
   "methods": [
     {
@@ -923,6 +923,36 @@
       ]
     },
     {
+      "method": "memory.handoff_get",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.handoff_latest",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.handoff_save",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
       "method": "memory.long_add",
       "layer": "both",
       "gateway": [
@@ -1276,6 +1306,14 @@
     },
     {
       "method": "plugins.catalog.install",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/plugins.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "plugins.catalog.install_from_url",
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/plugins.js"

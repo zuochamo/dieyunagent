@@ -27,6 +27,27 @@ function buildClarifySelectionSummary(selectedIds, freeText, options) {
   if (freeText) parts.push(freeText);
   return parts.length ? `已选择：${parts.join(' · ')}` : '已确认';
 }
+function hasClarifyPreviews(options) {
+  return (options || []).some((o) => o && typeof o.preview === 'string' && o.preview.trim());
+}
+
+function buildClarifyPreviewPane(options) {
+  const wrap = document.createElement('div');
+  wrap.className = 'agent-clarify-preview';
+  const title = document.createElement('p');
+  title.className = 'agent-clarify-preview-title';
+  const pre = document.createElement('pre');
+  wrap.appendChild(title);
+  wrap.appendChild(pre);
+  const show = (optionId) => {
+    const opt = (options || []).find((o) => String(o.id) === String(optionId));
+    if (!opt) return;
+    title.textContent = String(opt.label || opt.id || '');
+    pre.textContent = String(opt.preview || '');
+  };
+  return { wrap, show };
+}
+
 function buildClarifyCard(args, onSubmit) {
   const card = document.createElement('div');
   card.className = 'agent-clarify-card';
@@ -65,7 +86,28 @@ function buildClarifyCard(args, onSubmit) {
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
-  card.appendChild(table);
+
+  if (hasClarifyPreviews(options)) {
+    // 带预览的选项走并排布局：左侧选项表，右侧当前聚焦选项的等宽预览。
+    const split = document.createElement('div');
+    split.className = 'agent-clarify-split';
+    const preview = buildClarifyPreviewPane(options);
+    split.appendChild(table);
+    split.appendChild(preview.wrap);
+    card.appendChild(split);
+    const firstWithPreview = options.find((o) => hasClarifyPreviews([o]));
+    if (firstWithPreview) preview.show(firstWithPreview.id);
+    for (let i = 0; i < inputs.length; i++) {
+      const input = inputs[i];
+      const row = tbody.children[i];
+      const focus = () => preview.show(input.value);
+      input.addEventListener('change', focus);
+      row.addEventListener('mouseenter', focus);
+      row.addEventListener('focusin', focus);
+    }
+  } else {
+    card.appendChild(table);
+  }
 
   const actions = document.createElement('div');
   actions.className = 'agent-clarify-actions';
@@ -109,7 +151,9 @@ function showClarifyInBubble(container, args) {
       const summary = buildClarifySelectionSummary(selectedIds, freeText, args.options);
       const q = card.querySelector('.agent-clarify-question');
       if (q) q.textContent = summary;
-      card.querySelector('.agent-clarify-table')?.remove();
+      const split = card.querySelector('.agent-clarify-split');
+      if (split) split.remove();
+      else card.querySelector('.agent-clarify-table')?.remove();
       card.querySelector('.agent-clarify-actions')?.remove();
       card.classList.add('agent-clarify-done');
       scheduleClarifyCardDismiss(card);

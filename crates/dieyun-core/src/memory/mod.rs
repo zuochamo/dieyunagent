@@ -528,6 +528,78 @@ impl MemoryStore {
         })
     }
 
+    // —— 会话交接（session_handoffs）：按 session_id 精确读写，不参与语义召回 ——
+
+    pub fn handoff_save(
+        &self,
+        session_id: &str,
+        title: &str,
+        payload: &str,
+    ) -> Result<(), CoreError> {
+        let title = title.trim();
+        let payload = payload.trim();
+        if payload.is_empty() {
+            return Err(CoreError::rpc("INVALID_PARAMS", "payload 不能为空"));
+        }
+        let now = now_ms();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO session_handoffs (session_id, title, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                   title = excluded.title, payload = excluded.payload, created_at = excluded.created_at",
+                params![session_id, title, payload, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn handoff_get(&self, session_id: &str) -> Result<Option<Value>, CoreError> {
+        self.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT session_id, title, payload, created_at
+                     FROM session_handoffs WHERE session_id = ?1",
+                    params![session_id],
+                    |row| {
+                        Ok(json!({
+                            "sessionId": row.get::<_, String>(0)?,
+                            "title": row.get::<_, String>(1)?,
+                            "payload": row.get::<_, String>(2)?,
+                            "createdAt": row.get::<_, i64>(3)?,
+                        }))
+                    },
+                )
+                .optional()?)
+        })
+    }
+
+    /// 最近一份交接（排除指定会话，通常是当前会话）。
+    /// 「继续上次」的取回入口：按 created_at 全序取最新，不做语义匹配。
+    pub fn handoff_latest(
+        &self,
+        exclude_session_id: Option<&str>,
+    ) -> Result<Option<Value>, CoreError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT session_id, title, payload, created_at
+                 FROM session_handoffs
+                 WHERE (?1 IS NULL OR session_id != ?1)
+                 ORDER BY created_at DESC LIMIT 1",
+            )?;
+            let mut rows = stmt.query(params![exclude_session_id])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(json!({
+                    "sessionId": row.get::<_, String>(0)?,
+                    "title": row.get::<_, String>(1)?,
+                    "payload": row.get::<_, String>(2)?,
+                    "createdAt": row.get::<_, i64>(3)?,
+                })));
+            }
+            Ok(None)
+        })
+    }
+
     pub fn create_session(
         &self,
         title: Option<&str>,
@@ -1676,6 +1748,40 @@ mod tests {
             )
             .expect("row");
         assert_eq!(untouched, long_body, "无 meta 大正文原样保留");
+    }
+
+    #[test]
+    fn handoff_roundtrip_and_latest() {
+        let db = std::env::temp_dir().join(format!("dieyun-handoff-test-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let a = store.create_session(Some("会话A"), None).unwrap();
+        let b = store.create_session(Some("会话B"), None).unwrap();
+
+        // 空载荷拒绝
+        assert!(store.handoff_save(&a.id, "t", "   ").is_err());
+
+        store.handoff_save(&a.id, "会话A", "目标：做X\n未完成：Y").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.handoff_save(&b.id, "会话B", "目标：做P").unwrap();
+
+        // 精确取回
+        let got = store.handoff_get(&a.id).unwrap().expect("a 的交接");
+        assert_eq!(got["payload"].as_str().unwrap(), "目标：做X\n未完成：Y");
+        assert_eq!(got["title"].as_str().unwrap(), "会话A");
+
+        // latest：排除当前会话后取最新
+        let latest = store.handoff_latest(Some(&b.id)).unwrap().expect("应取到 A");
+        assert_eq!(latest["sessionId"].as_str().unwrap(), a.id);
+        let latest_all = store.handoff_latest(None).unwrap().expect("应取到 B");
+        assert_eq!(latest_all["sessionId"].as_str().unwrap(), b.id);
+
+        // 同会话重生成 → 覆盖（每会话最多一份）
+        store.handoff_save(&a.id, "会话A", "更新后的交接").unwrap();
+        let got2 = store.handoff_get(&a.id).unwrap().unwrap();
+        assert_eq!(got2["payload"].as_str().unwrap(), "更新后的交接");
+
+        let _ = std::fs::remove_file(&db);
     }
 
     #[test]

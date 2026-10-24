@@ -350,6 +350,13 @@ function syncHistoryRowActions(actions, thinking, isBackgroundRun) {
   }
   if (indicator) indicator.remove();
   if (actions.querySelector('.history-act')) return;
+  const handoff = document.createElement('button');
+  handoff.type = 'button';
+  handoff.className = 'history-act history-act-handoff';
+  handoff.title = '生成交接（供新会话继续）';
+  handoff.textContent = '⇄';
+  actions.appendChild(handoff);
+
   const arch = document.createElement('button');
   arch.type = 'button';
   arch.className = 'history-act';
@@ -824,6 +831,76 @@ async function refreshHistoryList(opts = {}) {
   })();
 
   return historyListRefreshInflight;
+}
+
+/** 会话 → 待注入交接来源（「继续上次」一次性信号，首轮发送即消费） */
+const pendingHandoffBySession = new Map();
+
+function setPendingSessionHandoff(sessionId, fromSessionId) {
+  const sid = String(sessionId || '').trim();
+  if (sid && fromSessionId) pendingHandoffBySession.set(sid, String(fromSessionId));
+}
+
+function consumePendingSessionHandoff(sessionId) {
+  const sid = String(sessionId || '').trim();
+  if (!sid) return null;
+  const from = pendingHandoffBySession.get(sid) || null;
+  pendingHandoffBySession.delete(sid);
+  return from;
+}
+
+/** 历史行「⇄」：为该会话生成交接（Main 单轮 LLM → memory.handoff_save） */
+async function generateHandoffForSession(sessionId, btn) {
+  if (!gwState.authed) return;
+  const diecloud = typeof window !== 'undefined' ? window.diecloud : null;
+  if (!diecloud || typeof diecloud.sessionHandoffGenerate !== 'function') {
+    window.alert('当前版本不支持会话交接');
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '…';
+  }
+  try {
+    const r = await diecloud.sessionHandoffGenerate({ sessionId });
+    if (btn) {
+      btn.textContent = '✓';
+      window.setTimeout(() => {
+        btn.textContent = '⇄';
+        btn.disabled = false;
+      }, 2000);
+    }
+    return r;
+  } catch (e) {
+    if (btn) {
+      btn.textContent = '⇄';
+      btn.disabled = false;
+    }
+    window.alert(`交接生成失败：${(e && e.message) || e}`);
+    return null;
+  }
+}
+
+/** 顶部「⇄ 继续上次」：取最近交接 → 新建会话 → 首轮自动注入【上个会话交接】 */
+async function continueFromLastSession() {
+  if (!gwState.authed) return;
+  let latest = null;
+  try {
+    latest = await gatewayCall('memory.handoff_latest', {
+      excludeSessionId: String(currentSessionId || '') || null
+    });
+  } catch (e) {
+    window.alert(`读取交接失败：${(e && e.message) || e}`);
+    return;
+  }
+  if (!latest || !latest.payload) {
+    window.alert('没有可用的会话交接（先在历史记录里对某个会话点 ⇄ 生成交接）');
+    return;
+  }
+  const fromId = String(latest.sessionId || '').trim();
+  if (!fromId) return;
+  await createNewSession();
+  if (currentSessionId) setPendingSessionHandoff(currentSessionId, fromId);
 }
 
 async function archiveSession(sessionId, archived) {
@@ -1437,6 +1514,8 @@ function initChatHistoryUI() {
         if (!sid) return;
         if (act.classList.contains('history-act-danger')) {
           void deleteSession(sid);
+        } else if (act.classList.contains('history-act-handoff')) {
+          void generateHandoffForSession(sid, act);
         } else {
           void archiveSession(sid, true);
         }
@@ -1457,9 +1536,17 @@ function initChatHistoryUI() {
     // 主动断 SSH 并清空工作空间。需要换工作空间用文件夹入口的 +（显式传 path）。
     chatNewBtn.addEventListener('click', () => createNewSession());
   }
+
+  const chatContinueBtn = $('chat-continue');
+  if (chatContinueBtn) {
+    chatContinueBtn.addEventListener('click', () => void continueFromLastSession());
+  }
 }
 
 window.switchSession = switchSession;
+window.setPendingSessionHandoff = setPendingSessionHandoff;
+window.consumePendingSessionHandoff = consumePendingSessionHandoff;
+window.continueFromLastSession = continueFromLastSession;
 window.loadChatFromGateway = loadChatFromGateway;
 window.healActiveSessionFromHistory = healActiveSessionFromHistory;
 window.showChatLoadError = showChatLoadError;

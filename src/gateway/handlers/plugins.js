@@ -66,6 +66,15 @@ function createPluginsHandlers({ plugins, ctx }) {
       return result;
     },
 
+    'plugins.catalog.install_from_url': async ({ url, allowDowngrade }) => {
+      if (!plugins || !plugins.catalog) return { list: [], action: 'install' };
+      const result = await plugins.catalog.installFromUrl(String(url || ''), {
+        allowDowngrade: allowDowngrade === true
+      });
+      if (typeof ctx.onPluginsChanged === 'function') ctx.onPluginsChanged();
+      return result;
+    },
+
     'plugins.catalog.sources.get': () => {
       if (!plugins || !plugins.catalog) return { urls: [] };
       return plugins.catalog.getSources();

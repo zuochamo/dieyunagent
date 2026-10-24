@@ -242,6 +242,30 @@ class PluginCatalog {
     err.code = 'PLUGIN_CATALOG_NO_PACKAGE';
     throw err;
   }
+
+  /**
+   * 直接从 zip URL 安装（不经目录条目）。与目录安装共用 _downloadZip：
+   * 同一份 assertSafeUrl（SSRF 单源）+ 大小上限 + host.installFromZip 校验/权限链。
+   * 直接 URL 无 sha256 期望值，完整性靠 manifest 校验与安装权限确认兜底。
+   */
+  async installFromUrl(url, opts = {}) {
+    const target = String(url || '').trim();
+    if (!target) {
+      const err = new Error('缺少插件包 URL');
+      err.code = 'PLUGIN_CATALOG_BAD_URL';
+      throw err;
+    }
+    const zipPath = await this._downloadZip(target, null);
+    try {
+      return this.host.installFromZip(zipPath, opts);
+    } finally {
+      try {
+        fs.unlinkSync(zipPath);
+      } catch {
+        // ignore
+      }
+    }
+  }
 }
 
 module.exports = { PluginCatalog };

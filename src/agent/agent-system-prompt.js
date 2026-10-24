@@ -24,6 +24,7 @@ function buildCoreAgentRules(opts = {}) {
           '- 派之前先想清切分：一路一个明确问题，写清边界与期望产出；有已知起点就放进 hints。',
           '- 子 Agent 只读、不改工作区、不能再派子 Agent；返回的是结论与证据路径的摘要，不是全量过程。',
           '- 子 Agent 查过的结论直接采信使用，不要自己再查一遍；要看过程就展开对话里那张折叠卡片。',
+    '- 对同一调研要追问时，用 subagent 的 continueFrom 带上它返回的 subagentId 续问（沿用已查明的事实），不要重派一次全新调研。',
           '- 单文件小问题、需要写操作的改动、有串行依赖的任务不要派——自己顺手做完更快。'
         ].join('\n');
   return [
@@ -33,7 +34,7 @@ function buildCoreAgentRules(opts = {}) {
     '- 需要最新事实用 web_search（默认 bing 可直连；要正文就加 fetchTop=2~3，某引擎失败就换 engine，勿重复同一 query）→ 需要单页细节再 web_fetch；禁止伪造搜索结果。',
     '- 网页需要登录、依赖 JS 渲染、或联网抓取被反爬挡住（401/403/验证码）时，改用内置浏览器打开同一 URL 再读快照——它带浏览器 cookie 与 JS 能力（具体工具名见工具列表）。',
     '- 技能：下文只给目录与路径；执行前用 fs_read_file 读 SKILL.md；host_exec 时 cwd=技能目录。',
-    '- 仅当摘要、折叠条、近轮原文和工作区仍无法在互斥选项间抉择时才用 agent_clarify；不要因历史已折叠而提问「本轮做什么」。交付适合表格时用 Markdown 表格。',
+    '- 仅当摘要、折叠条、近轮原文和工作区仍无法在互斥选项间抉择时才用 agent_clarify；不要因历史已折叠而提问「本轮做什么」。交付适合表格时用 Markdown 表格。选项差异体现在形态（界面布局/代码写法/配置示例）时，给每个选项附 preview 片段供用户并排对比后再选。',
     '- 无 tool_calls 的文字回复即本轮结束；还要检查就继续调用工具，不要空转描述下一步。',
     '- 解释架构/流程/状态机时，可用 ```mermaid 代码块（客户端 Mermaid 11 自动渲染成 SVG）。',
     '- Mermaid 写法：首行 flowchart TB/LR 或 sequenceDiagram；节点 ID 用英文；中文/括号/斜杠标签务必双引号如 Main["主进程"]、subgraph S1["Gateway (RPC)"]；边文案 -->|"步骤"|；每回复最多 1 个 mermaid 块；勿用 HTML/<br/>/style/classDef；节点 ≤15、嵌套 subgraph ≤2；语法不确定时用 Markdown 列表兜底。',

@@ -46,6 +46,15 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
         finished_at INTEGER,
         error TEXT
       );
+      -- 会话交接：每个会话最多一份（重生成覆盖），供新会话「继续上次」精确取回。
+      -- 与 long_memories 不同：不参与语义召回，只按 session_id 精确读写。
+      CREATE TABLE IF NOT EXISTS session_handoffs (
+        session_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_handoffs_created ON session_handoffs(created_at);
       CREATE TABLE IF NOT EXISTS agent_runs (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,

@@ -21,6 +21,8 @@ const {
 const { PlansStore } = require('../plans/store');
 const { PlansScheduler } = require('../plans/scheduler');
 const { runPlan } = require('../plans/runner');
+const { getAgentLimits } = require('../agent/agent-limits');
+const { getActiveAgentLoopCount } = require('../agent/rust-loop-runner');
 const { createPlanRunTrace } = require('../plans/plan-run-events');
 const { ensurePlanSession } = require('../plans/plan-session');
 const { beginPlanRunTurn, endPlanRunTurn, assistantReplyText, interruptedRunResult } = require(
@@ -281,6 +283,11 @@ function bootPlansRuntime(deps) {
 
   const plansScheduler = new Scheduler({
     getPlans: () => plansStore.list(),
+    // 闲时队列（plans trigger=idle）：忙信号唯一来源 = 活跃 agent loop 计数
+    //（聊天 / Planner worker / 计划运行全走 runRustAgentLoop）。数值上限只认 agent-limits。
+    isBusy: deps.isBusy || (() => getActiveAgentLoopCount() > 0),
+    idlePollMs: (getAgentLimits(userData, '') || {}).plansIdlePollMs,
+    idleQuietMs: (getAgentLimits(userData, '') || {}).plansIdleQuietMs,
     runPlan: async (plan) => {
       log.info(`计划开始: ${plan.name}`);
       const runId = `plan-${plan.id}-${Date.now().toString(36)}`;

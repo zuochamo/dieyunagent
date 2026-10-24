@@ -7,7 +7,14 @@ const TIMER_MAX_MS = 2147483647;
 
 class PlansScheduler {
   /**
-   * @param {{ getPlans: () => object[], runPlan: (plan: object) => Promise<object>, log?: (m: string) => void }} opts
+   * @param {{ getPlans: () => object[], runPlan: (plan: object) => Promise<object>, log?: (m: string) => void,
+   *           isBusy?: () => boolean, idlePollMs?: number, idleQuietMs?: number }} opts
+   *
+   * 定时计划（trigger=schedule，默认）按 rrule/onceAt 上闹钟；
+   * 闲时计划（trigger=idle）不定时，由 _idleTick 空闲轮询触发：
+   * isBusy 是「系统是否忙」的唯一外部信号（Main 注入 rust-loop-runner 的活跃 loop 计数），
+   * lastBusyAt 让「刚结束一次运行」也算忙 —— 空闲任务之间、以及空闲任务与用户运行之间
+   * 至少间隔 idleQuietMs，避免背靠背触发。
    */
   constructor(opts) {
     this.getPlans = opts.getPlans;
@@ -16,11 +23,21 @@ class PlansScheduler {
     /** @type {Map<string, NodeJS.Timeout>} */
     this.timers = new Map();
     this.running = new Set();
+    this.isBusy = typeof opts.isBusy === 'function' ? opts.isBusy : null;
+    this.idlePollMs = opts.idlePollMs > 0 ? opts.idlePollMs : 60 * 1000;
+    this.idleQuietMs = opts.idleQuietMs > 0 ? opts.idleQuietMs : 5 * 60 * 1000;
+    this.lastBusyAt = Date.now();
+    /** @type {NodeJS.Timeout|null} */
+    this.idleTimer = null;
   }
 
   clearAll() {
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
+    if (this.idleTimer) {
+      clearInterval(this.idleTimer);
+      this.idleTimer = null;
+    }
   }
 
   reload() {
@@ -28,9 +45,11 @@ class PlansScheduler {
     for (const plan of this.getPlans()) {
       if (plan.enabled) this._arm(plan);
     }
+    this._armIdlePoll();
   }
 
   _arm(plan) {
+    if (plan.trigger === 'idle') return; // 闲时计划不走定时器（见 _idleTick）
     const ms = msUntilNextRun(plan);
     if (ms == null) return;
     if (ms > TIMER_MAX_MS) {
@@ -65,8 +84,38 @@ class PlansScheduler {
       this.running.delete(planId);
     }
     const fresh = this.getPlans().find((p) => p.id === planId);
-    if (fresh && fresh.enabled && !fresh.onceAt) {
+    if (fresh && fresh.enabled && !fresh.onceAt && fresh.trigger !== 'idle') {
       this._arm(fresh);
+    }
+  }
+
+  _armIdlePoll() {
+    if (this.idleTimer || !this.isBusy) return;
+    this.idleTimer = setInterval(() => {
+      this._idleTick().catch(() => {});
+    }, this.idlePollMs);
+    if (typeof this.idleTimer.unref === 'function') this.idleTimer.unref();
+  }
+
+  async _idleTick() {
+    if (this.running.size > 0 || (this.isBusy && this.isBusy())) {
+      this.lastBusyAt = Date.now();
+      return;
+    }
+    if (Date.now() - this.lastBusyAt < this.idleQuietMs) return;
+    const plan = this.getPlans().find(
+      (p) => p && p.enabled && p.trigger === 'idle' && !this.running.has(p.id)
+    );
+    if (!plan) return;
+    this.running.add(plan.id);
+    this.lastBusyAt = Date.now();
+    try {
+      await this.runPlan(plan);
+    } catch (e) {
+      this.log(`闲时计划执行失败 ${plan.name}: ${e.message}`);
+    } finally {
+      this.running.delete(plan.id);
+      this.lastBusyAt = Date.now();
     }
   }
 
@@ -75,10 +124,12 @@ class PlansScheduler {
     if (!plan) throw new Error('计划不存在');
     if (this.running.has(planId)) throw new Error('计划正在执行');
     this.running.add(planId);
+    this.lastBusyAt = Date.now();
     try {
       return await this.runPlan(plan);
     } finally {
       this.running.delete(planId);
+      this.lastBusyAt = Date.now();
     }
   }
 }

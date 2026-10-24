@@ -568,6 +568,15 @@ function setLoopRunnerLog(fn) {
 }
 
 /**
+ * 活跃 agent loop 计数（闲时队列「系统是否忙」的唯一来源）。
+ * 聊天 Agent / Planner worker / 定时计划全走 runRustAgentLoop，一个计数器覆盖全部。
+ */
+const activeLoops = new Set();
+function getActiveAgentLoopCount() {
+  return activeLoops.size;
+}
+
+/**
  * run 级「无进展」看门狗：只回答一个问题 —— **它最后一次有进展是什么时候、卡在哪一段**。
  *
  * 为什么需要它（2026-10-23→24，两次静默 11 小时 / 40 分钟）：`while (phase !== 'done')`
@@ -640,6 +649,10 @@ async function runRustAgentLoop(opts) {
       : async (name, args) => ({ error: `delegate not implemented: ${name}`, args });
 
   const browserVision = opts.browserVision === true;
+
+  // 闲时队列的忙碌信号：进入即计数，finally 必减（含 throw / abort 路径）。
+  const loopTicket = {};
+  activeLoops.add(loopTicket);
 
   let llmRound = 0;
 
@@ -1080,6 +1093,7 @@ async function runRustAgentLoop(opts) {
     }
     throw err;
   } finally {
+    activeLoops.delete(loopTicket);
     if (stallTimer) clearInterval(stallTimer);
     if (browserVision) clearPendingVisionImages(activeRunId);
   }
@@ -1127,6 +1141,7 @@ module.exports = {
   runRustAgentLoop,
   createRunStallWatchdog,
   setLoopRunnerLog,
+  getActiveAgentLoopCount,
   resolveChatUrl,
   normalizeLlmResponse,
   applyResolvedLoopSpec,

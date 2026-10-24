@@ -175,6 +175,13 @@
       exact: false
     };
 
+    // 空闲触发（trigger=idle）：无 rrule/onceAt，表单只负责选中「空闲时」页签
+    if (p.trigger === 'idle' && !onceAt && !normalizeRruleText(p.rrule)) {
+      out.tab = 'idle';
+      out.exact = true;
+      return out;
+    }
+
     if (onceAt) {
       out.tab = 'once';
       out.onceAtInput = toLocalDatetimeInputValue(onceAt);
@@ -220,16 +227,19 @@
     return out;
   }
 
-  /** 表单值 → rrule / onceAt（与 automationScheduleFromPlan 对称）。 */
+  /** 表单值 → rrule / onceAt / trigger（与 automationScheduleFromPlan 对称）。 */
   function buildAutomationRrule(input) {
     const s = input && typeof input === 'object' ? input : {};
+    if (s.tab === 'idle') {
+      return { rrule: '', onceAt: '', trigger: 'idle' };
+    }
     if (s.tab === 'once') {
       const raw = String(s.onceAtInput || '').trim();
-      return { rrule: '', onceAt: raw ? new Date(raw).toISOString() : '' };
+      return { rrule: '', onceAt: raw ? new Date(raw).toISOString() : '', trigger: 'schedule' };
     }
     const until = untilSuffix(s.untilDate);
     if (s.tab === 'interval') {
-      return { rrule: `FREQ=MINUTELY;INTERVAL=${clampInterval(s.intervalMin)}${until}`, onceAt: '' };
+      return { rrule: `FREQ=MINUTELY;INTERVAL=${clampInterval(s.intervalMin)}${until}`, onceAt: '', trigger: 'schedule' };
     }
     const hour = Math.min(23, Math.max(0, Math.round(numOrNull(s.hour) == null ? DEFAULT_HOUR : numOrNull(s.hour))));
     const minute = Math.min(
@@ -239,10 +249,11 @@
     if (s.unit === 'week') {
       return {
         rrule: `FREQ=WEEKLY;BYDAY=${bydayForKey(s.weekdayKey)};BYHOUR=${hour};BYMINUTE=${minute}${until}`,
-        onceAt: ''
+        onceAt: '',
+        trigger: 'schedule'
       };
     }
-    return { rrule: `FREQ=DAILY;BYHOUR=${hour};BYMINUTE=${minute}${until}`, onceAt: '' };
+    return { rrule: `FREQ=DAILY;BYHOUR=${hour};BYMINUTE=${minute}${until}`, onceAt: '', trigger: 'schedule' };
   }
 
   /** 表单里的读数（把 DOM 值收敛成一个对象，供 buildAutomationRrule 使用） */

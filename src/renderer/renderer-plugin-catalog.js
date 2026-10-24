@@ -132,6 +132,29 @@ function initPluginCatalogUI() {
     saveSourcesBtn.addEventListener('click', () => saveCatalogSourcesFromUI());
   }
 
+  const directInstallBtn = $('plugin-catalog-direct-install');
+  if (directInstallBtn) {
+    directInstallBtn.addEventListener('click', async () => {
+      const input = $('plugin-catalog-direct-url');
+      const hint = $('plugin-catalog-hint');
+      const url = input ? String(input.value || '').trim() : '';
+      if (!url || !gwState.authed) return;
+      directInstallBtn.disabled = true;
+      if (hint) hint.textContent = '下载安装中…';
+      try {
+        const result = await installPluginRpc('plugins.catalog.install_from_url', { url });
+        if (hint) hint.textContent = formatPluginInstallHint(result);
+        if (input) input.value = '';
+        await loadPluginCatalogUI();
+        await loadPluginsUI();
+      } catch (err) {
+        if (hint) hint.textContent = `失败：${err.message || err}`;
+      } finally {
+        directInstallBtn.disabled = false;
+      }
+    });
+  }
+
   document.addEventListener('click', async (e) => {
     const btn = e.target && e.target.closest ? e.target.closest('[data-catalog-install]') : null;
     if (!btn || btn.disabled) return;

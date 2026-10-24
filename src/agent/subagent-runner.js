@@ -34,7 +34,8 @@ const SUBAGENT_LIMIT_KEYS = [
   'subagentMaxPerRun',
   'subagentMaxRounds',
   'subagentMaxToolCalls',
-  'subagentSummaryMaxChars'
+  'subagentSummaryMaxChars',
+  'subagentFollowupRetention'
 ];
 
 /**
@@ -112,6 +113,21 @@ function buildSubagentPrompt(task, hints) {
     '- 结论先行，紧跟着列证据路径（形如 path:line），再按需补充细节。',
     '- 查不到就明确说「未找到」，并说明查过哪些范围；不要猜测、不要编造路径。',
     '- 不要输出与任务无关的探索过程，不要复述这个任务本身。'
+  ].join('\n');
+}
+
+/** 追问轮的 user 提示词：明确「同一调研的延续」，避免子 Agent 把上文当无关历史折叠掉。 */
+function buildFollowupPrompt(priorTask, task, hints) {
+  const hintLines = (Array.isArray(hints) ? hints : [])
+    .map((h) => String(h || '').trim())
+    .filter(Boolean)
+    .slice(0, 12)
+    .map((h) => `- ${h}`);
+  return [
+    `这是对同一调研的追问（原任务：${priorTask}）。上文里你已查明的事实直接复用，不要重查。`,
+    '',
+    `追问：${task}`,
+    ...(hintLines.length ? ['', '补充线索：', ...hintLines] : [])
   ].join('\n');
 }
 
@@ -204,6 +220,22 @@ function createSubagentRunner(deps) {
   /** @type {Array<() => void>} */
   const waiters = [];
 
+  /**
+   * 追问留存：subagentId → { messages, task }。
+   * 只在本 runner（= 同一次父运行）生命周期内保留，不落盘；LRU 按 retention 上限淘汰。
+   * 追问 = 在原 messages 后追加新 user 轮，复用同一份只读工具集与预算，深度不变。
+   */
+  const followups = new Map();
+  function rememberFollowup(subagentId, task, messages) {
+    if (!(limits.subagentFollowupRetention > 0)) return;
+    if (!Array.isArray(messages) || !messages.length) return;
+    if (followups.has(subagentId)) followups.delete(subagentId);
+    followups.set(subagentId, { task, messages });
+    while (followups.size > limits.subagentFollowupRetention) {
+      followups.delete(followups.keys().next().value);
+    }
+  }
+
   function acquire() {
     if (active < limits.subagentMaxConcurrent) {
       active += 1;
@@ -253,6 +285,14 @@ function createSubagentRunner(deps) {
 
     // id / 序号 / 类型一次性从共享 namer 取（planner 与本 runner 可能共用一份）：
     // 并发派发也不会撞 id，且「调研 1」这类回注标签与卡片标题「调研子 Agent #1」始终同号。
+    const continueFrom = String((rawArgs && rawArgs.continueFrom) || '').trim();
+    const prior = continueFrom ? followups.get(continueFrom) : null;
+    if (continueFrom && !prior) {
+      return {
+        error: `continueFrom=${continueFrom} 没有可续用的子 Agent（不在本次运行内或已被留存上限淘汰）；请不带 continueFrom 重新派发`,
+        errorCode: 'SUBAGENT_FOLLOWUP_NOT_FOUND'
+      };
+    }
     const named = namer.next('explore');
     const index = named.subagentIndex;
     issued += 1;
@@ -264,7 +304,8 @@ function createSubagentRunner(deps) {
       index,
       subagentId,
       subagentKind: named.subagentKind,
-      subagentIndex: named.subagentIndex
+      subagentIndex: named.subagentIndex,
+      ...(prior ? { continueFrom } : {})
     };
 
     await acquire();
@@ -275,10 +316,16 @@ function createSubagentRunner(deps) {
       }
       if (typeof deps.onSubagentStart === 'function') deps.onSubagentStart(meta);
 
+      const baseMessages = prior
+        ? [
+            ...prior.messages,
+            { role: 'user', content: buildFollowupPrompt(prior.task, task, rawArgs && rawArgs.hints) }
+          ]
+        : [{ role: 'user', content: buildSubagentPrompt(task, rawArgs && rawArgs.hints) }];
       const child = await runChildLoop(
         {
           model: deps.model,
-          messages: [{ role: 'user', content: buildSubagentPrompt(task, rawArgs && rawArgs.hints) }],
+          messages: baseMessages,
           tools: childTools,
           maxRounds: limits.subagentMaxRounds,
           maxToolCalls: limits.subagentMaxToolCalls,
@@ -288,6 +335,8 @@ function createSubagentRunner(deps) {
         meta
       );
 
+      // 留存追问上下文（含追问轮合并后的账本 messages；截断 run 也留 —— 半份上下文仍可续问）
+      rememberFollowup(subagentId, prior ? `${prior.task}（含追问）` : task, child && child.messages);
       const summary = buildSummary(child, limits.subagentSummaryMaxChars);
       if (typeof deps.onSubagentEnd === 'function') deps.onSubagentEnd(meta, child);
       return {
@@ -296,7 +345,8 @@ function createSubagentRunner(deps) {
         subagentId,
         summary: summary.text,
         truncated: summary.truncated,
-        reason: summary.reason
+        reason: summary.reason,
+        ...(prior ? { continuedFrom: continueFrom } : {})
       };
     } catch (err) {
       if (isAbortError(err)) throw err;
@@ -314,7 +364,9 @@ function createSubagentRunner(deps) {
     /** 子 Agent 实际可用的只读工具名（测试/诊断用） */
     childToolNames: () => childTools.map((t) => t && t.function && t.function.name).filter(Boolean),
     limits,
-    stats: () => ({ issued, active, queued: waiters.length })
+    /** 当前可续问的子 Agent id（测试/诊断用） */
+    followupIds: () => [...followups.keys()],
+    stats: () => ({ issued, active, queued: waiters.length, retained: followups.size })
   };
 }
 
@@ -322,6 +374,7 @@ module.exports = {
   createSubagentRunner,
   resolveSubagentLimits,
   buildSubagentPrompt,
+  buildFollowupPrompt,
   SUBAGENT_TOOL_NAME,
   FALLBACK_LIMITS
 };

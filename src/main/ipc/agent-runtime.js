@@ -144,6 +144,16 @@ function registerAgentRuntimeIpc(ctx) {
     });
   });
 
+  // 会话交接：生成（Main 单轮 LLM + Rust 唯一写入口）；读取走 Gateway memory.handoff_*
+  ipcMain.handle('session:handoff-generate', async (_evt, { sessionId } = {}) => {
+    const gateway = live.localGateway;
+    if (!gateway || typeof gateway.invokeRpc !== 'function') {
+      throw new Error('Gateway 未就绪');
+    }
+    const { generateSessionHandoff } = require('../../agent/session-handoff');
+    return generateSessionHandoff({ userData: live.userData, gateway }, { sessionId });
+  });
+
   ipcMain.handle('agent:rust-loop-run', async (evt, payload = {}) => {
     if (!live.coreBridge || !live.coreBridge.isReady()) {
       throw new Error('dieyun-core 未就绪');

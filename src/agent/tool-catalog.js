@@ -1498,7 +1498,8 @@ const CLARIFY_TOOL = {
             properties: {
               id: { type: 'string' },
               label: { type: 'string', description: '选项标题' },
-              description: { type: 'string', description: '可选说明' }
+              description: { type: 'string', description: '可选说明' },
+              preview: { type: 'string', description: '可选预览：代码片段 / ASCII 布局 / 配置示例，等宽展示，供用户并排对比各选项的实际样子' }
             },
             required: ['id', 'label']
           }
@@ -1542,6 +1543,11 @@ const SUBAGENT_TOOL = {
           type: 'array',
           items: { type: 'string' },
           description: '已知线索或起点路径，减少子 Agent 的重复探索'
+        },
+        continueFrom: {
+          type: 'string',
+          description:
+            '追问模式：填上次结果返回的 subagentId，子 Agent 会带着上次的完整对话继续调研本次 task（仍只读、深度不变）'
         }
       },
       required: ['task']

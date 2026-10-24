@@ -390,7 +390,12 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
       typeof sessionActiveRuns.has === 'function' &&
       sessionActiveRuns.has(String(sessionId || '')),
     stableDataChunks: extraStable,
-    turnDataChunks: extraTurn
+    turnDataChunks: extraTurn,
+    // 「继续上次」一次性结构信号：带来源会话即注入【上个会话交接】（消费即清）
+    continueFromSessionId:
+      typeof window !== 'undefined' && typeof window.consumePendingSessionHandoff === 'function'
+        ? window.consumePendingSessionHandoff(sessionId) || undefined
+        : undefined
   };
   prepStart('memory');
   prepStart('skills_mcp');

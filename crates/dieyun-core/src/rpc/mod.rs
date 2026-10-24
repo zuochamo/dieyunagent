@@ -134,6 +134,32 @@ impl ServiceSnapshot {
                 let row = self.memory.create_session(title, workspace_path)?;
                 Ok(serde_json::to_value(row)?)
             }
+            "memory.handoff_save" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let payload = params
+                    .get("payload")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "payload 必填"))?;
+                self.memory.handoff_save(session_id, title, payload)?;
+                Ok(json!({ "ok": true }))
+            }
+            "memory.handoff_get" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let row = self.memory.handoff_get(session_id)?;
+                Ok(row.unwrap_or(Value::Null))
+            }
+            "memory.handoff_latest" => {
+                let exclude = params.get("excludeSessionId").and_then(|v| v.as_str());
+                let row = self.memory.handoff_latest(exclude)?;
+                Ok(row.unwrap_or(Value::Null))
+            }
             "memory.message_append" => {
                 let session_id = params
                     .get("sessionId")

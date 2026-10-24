@@ -30,6 +30,10 @@ const AGENT_LIMITS_DEFAULTS = {
   verifyDiagMaxChars: 18000,
   transientMaxRetries: 3,
   retryBaseMs: 400,
+  // 闲时队列（plans trigger=idle）：轮询间隔与「静默多久才算闲」。
+  // 「忙」的唯一来源是 rust-loop-runner 的活跃 agent loop 计数（聊天/规划/定时任务全走它）。
+  plansIdlePollMs: 60 * 1000,
+  plansIdleQuietMs: 5 * 60 * 1000,
   artifactsUiFlushMs: 80,
   lspSyncDebounceMs: 500,
   monacoMaxChars: 200000,
@@ -134,6 +138,9 @@ const AGENT_LIMITS_DEFAULTS = {
   // 子 Agent 回注主上下文的摘要上限。过程 trace 不回注，只在折叠卡片里展开，
   // 否则 N 路调研会把主上下文顶爆（这是该功能最常见的失败模式）。
   subagentSummaryMaxChars: 2400,
+  // 追问留存：同一 run 内可被 continueFrom 续用的已完成子 Agent 上下文份数（LRU）。
+  // 只在 runner 生命周期内保留，不落盘；0 = 关闭追问。
+  subagentFollowupRetention: 8,
 
   // —— 注入块尺寸上限（system prompt 各数据块）——
   // 唯一来源。Main 的 src/agent/system-prompt-prep.js 与 Renderer 的
@@ -367,6 +374,16 @@ const AGENT_LIMITS_SCHEMA = [
         max: 8000,
         step: 100,
         unit: '字'
+      },
+      {
+        key: 'subagentFollowupRetention',
+        label: '子 Agent 追问留存份数',
+        hint: '同一轮运行内可被 continueFrom 续问的已完成子 Agent 上下文数（LRU）；0 = 关闭追问',
+        type: 'number',
+        min: 0,
+        max: 32,
+        step: 1,
+        unit: '份'
       }
     ]
   },
@@ -390,6 +407,34 @@ const AGENT_LIMITS_SCHEMA = [
         min: 100,
         max: 2000,
         step: 50,
+        format: 'ms',
+        unit: 'ms'
+      }
+    ]
+  },
+  {
+    group: '定时与闲时',
+    groupId: 'plans-idle',
+    items: [
+      {
+        key: 'plansIdlePollMs',
+        label: '闲时队列轮询间隔',
+        hint: '「空闲时执行」计划的检查频率；只在无活跃 Agent 运行时生效',
+        type: 'number',
+        min: 10000,
+        max: 600000,
+        step: 10000,
+        format: 'ms',
+        unit: 'ms'
+      },
+      {
+        key: 'plansIdleQuietMs',
+        label: '闲时静默阈值',
+        hint: '最后一次 Agent 活动之后静默多久，才允许触发空闲任务',
+        type: 'number',
+        min: 60000,
+        max: 3600000,
+        step: 60000,
         format: 'ms',
         unit: 'ms'
       }

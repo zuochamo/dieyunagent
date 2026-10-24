@@ -71,6 +71,7 @@
         <div class="sidebar-history chat-history" id="chat-history">
           <div class="history-head">
             <span class="history-title" data-i18n="history_title">历史对话</span>
+            <button type="button" class="icon-btn" id="chat-continue" title="继续上次（带交接新建会话）" aria-label="继续上次">⇄</button>
             <button type="button" class="icon-btn" id="chat-new" title="新对话" aria-label="新对话" data-i18n-title="new_chat" data-i18n-aria="new_chat">+</button>
           </div>
           <div class="history-list" id="history-list"></div>
@@ -891,6 +892,7 @@
               <button type="button" class="automation-schedule-tab skills-category-tab active" data-schedule="periodic">周期</button>
               <button type="button" class="automation-schedule-tab skills-category-tab" data-schedule="interval">按间隔</button>
               <button type="button" class="automation-schedule-tab skills-category-tab" data-schedule="once">单次</button>
+              <button type="button" class="automation-schedule-tab skills-category-tab" data-schedule="idle">空闲时</button>
             </div>
             <div class="automation-schedule-panel active" data-schedule-panel="periodic">
               <div class="field field-inline">
@@ -910,6 +912,9 @@
               <label class="field">
                 <input type="datetime-local" id="automation-run-at" />
               </label>
+            </div>
+            <div class="automation-schedule-panel" data-schedule-panel="idle">
+              <p class="settings-page-desc">无活跃 Agent 运行且静默一段时间后自动执行一次；跑完自动停用，重新启用即重新排队。</p>
             </div>
           </div>
           <div class="field-row">
@@ -1501,6 +1506,13 @@
                     <label class="field">
                       <span class="field-label">扩展目录 URL（每行一个）</span>
                       <textarea id="plugin-catalog-source-url" rows="2" placeholder="https://intranet.example.com/dieyun-plugins/catalog.json"></textarea>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">从 URL 直接安装（zip 包地址）</span>
+                      <div class="plugin-catalog-url-row">
+                        <input type="text" id="plugin-catalog-direct-url" placeholder="https://example.com/dieyun-plugin.zip" autocomplete="off" />
+                        <button type="button" class="ghost-btn" id="plugin-catalog-direct-install">安装</button>
+                      </div>
                     </label>
                     <div class="skills-grid-wrap">
                       <div class="skills-grid plugin-grid" id="plugin-catalog-list"><p class="skills-empty">加载中…</p></div>

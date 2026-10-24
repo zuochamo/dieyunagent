@@ -3349,6 +3349,39 @@ body.composer-resizing {
 .agent-clarify-table td label {
   color: var(--text);
 }
+.agent-clarify-split {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  margin-bottom: 8px;
+}
+.agent-clarify-split .agent-clarify-table {
+  flex: 1 1 40%;
+  margin-bottom: 0;
+  align-self: flex-start;
+}
+.agent-clarify-preview {
+  flex: 1 1 60%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  overflow: auto;
+  max-height: 240px;
+}
+.agent-clarify-preview-title {
+  margin: 0 0 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.agent-clarify-preview pre {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text);
+  user-select: text;
+}
 .agent-clarify-actions {
   display: flex;
   align-items: center;
@@ -3444,6 +3477,35 @@ body.composer-resizing {
 .msg-tool-inline-diff-body .diff-line.diff-add {
   background: rgba(63, 185, 80, 0.14);
   color: #3fb950;
+}
+.msg-tool-html-preview {
+  margin: 6px 0 2px;
+  border: 1px solid var(--border);
+}
+.msg-tool-html-preview-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.msg-tool-html-preview-bar button {
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 8px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+}
+.msg-tool-html-preview iframe {
+  display: block;
+  width: 100%;
+  height: min(40vh, 320px);
+  border: 0;
+  background: #fff;
 }
 .msg-tool-inline-diff-body .diff-line.diff-del {
   background: rgba(248, 81, 73, 0.12);
@@ -5694,6 +5756,17 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 
 .plugin-catalog-toolbar {
   flex-wrap: wrap;
+}
+
+.plugin-catalog-url-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.plugin-catalog-url-row input {
+  flex: 1;
+  min-width: 0;
 }
 
 .settings-nav {

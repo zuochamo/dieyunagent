@@ -38,6 +38,8 @@ function normalizePlan(raw) {
     id: p.id || newId(),
     name: String(p.name || '未命名计划').trim() || '未命名计划',
     enabled: p.enabled !== false,
+    // 触发方式：schedule（按 rrule/onceAt 定时）| idle（无活跃 Agent 运行且静默达标后触发，跑一次即停用）
+    trigger: p.trigger === 'idle' ? 'idle' : 'schedule',
     rrule: String(p.rrule || '').trim(),
     onceAt: p.onceAt ? String(p.onceAt).trim() : '',
     tz: String(p.tz || 'Asia/Shanghai').trim() || 'Asia/Shanghai',
@@ -102,8 +104,8 @@ class PlansStore {
 
   upsert(patch) {
     const plan = normalizePlan(patch);
-    if (!plan.rrule && !plan.onceAt) {
-      const err = new Error('rrule 或 onceAt 至少填一项');
+    if (plan.trigger !== 'idle' && !plan.rrule && !plan.onceAt) {
+      const err = new Error('rrule 或 onceAt 至少填一项（空闲触发计划除外）');
       err.code = 'INVALID_SCHEDULE';
       throw err;
     }
@@ -142,7 +144,8 @@ class PlansStore {
       ? result.summary || result.error || ''
       : '';
     p.updatedAt = p.lastRunAt;
-    if (p.onceAt && p.lastRunOk) p.enabled = false;
+    // onceAt 与 idle 都是「一次性」语义：成功跑完即停用，重新启用 = 重新排队
+    if ((p.onceAt || p.trigger === 'idle') && p.lastRunOk) p.enabled = false;
     this._save();
   }
 
