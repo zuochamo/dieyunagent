@@ -248,11 +248,18 @@ function createMainCompactionAgent(userData, coreBridge = null) {
     const llm = resolveCompactionLlm(settings, opts);
     const st = getSessionState(opts.sessionId);
     const signal = opts.signal || null;
+    /**
+     * 判定事实（预算 / 触发比 / 冷却计数）：请求快照要把它们落进行里，
+     * 否则「这轮为什么没压缩」在事后无法复盘（字段建了却永远 NULL）。
+     * 放在 finish 里统一附加，避免每个 return 分支各写一遍。
+     */
+    let budgetFacts = null;
     const finish = (payload) => {
+      const row = budgetFacts ? { ...payload, ...budgetFacts, compactionRoundCount: st.compactionRoundCount } : payload;
       recordCompactionTelemetry(
         userData,
         compactionTelemetryRow({
-          payload,
+          payload: row,
           force: !!opts.force,
           model: llm.textModel,
           // 会话标识：面板按会话统计压缩次数/成功率，缺了它就只能算全机累计
@@ -260,7 +267,7 @@ function createMainCompactionAgent(userData, coreBridge = null) {
           startedAt
         })
       );
-      return payload;
+      return row;
     };
     throwIfAborted(signal);
     if (!llm.baseUrl) {
@@ -286,6 +293,8 @@ function createMainCompactionAgent(userData, coreBridge = null) {
       resolveReserveTokens(settings),
       opts.toolsChars
     );
+    const triggerRatio = getCompactionTriggerRatio(settings);
+    budgetFacts = { tokenBudget, triggerRatio };
     const result = await raceAbortable(
       bridge
         .invoke(
@@ -293,7 +302,7 @@ function createMainCompactionAgent(userData, coreBridge = null) {
           {
             messages,
             tokenBudget,
-            triggerRatio: getCompactionTriggerRatio(settings),
+            triggerRatio,
             coolDownRounds: COMPACTION_COOL_DOWN_ROUNDS,
             force: !!opts.force,
             compactionRoundCount: st.compactionRoundCount,

@@ -453,6 +453,9 @@ function createBrowserViewController(deps) {
     const win = getWin();
     if (!win || win.isDestroyed()) return;
     try {
+      // 标签表随状态流下发：UI 的标签条与 browser_tabs 工具读的是同一份 tabEntries，
+      // 不再需要额外 IPC（前端只消费 browser:state 就能画出标签并保持同步）。
+      const tabState = tabListResult();
       win.webContents.send('browser:state', {
         url: currentUrl,
         title: currentTitle,
@@ -462,7 +465,9 @@ function createBrowserViewController(deps) {
         loadError: lastLoadError,
         bounds,
         hasView: hasLiveView(),
-        renderHealth: lastRenderHealth
+        renderHealth: lastRenderHealth,
+        activeTabId: tabState.activeTabId,
+        tabs: tabState.tabs
       });
     } catch {
       // ignore

@@ -18,6 +18,9 @@ const {
   clearRunAbortController
 } = require('../../agent/run-cancel-registry');
 
+/** 压缩归档（旁路记录）的写入上限：它在发请求之前 await，不能让它拖住整轮。 */
+const COMPACTION_ARCHIVE_TIMEOUT_MS = 2000;
+
 /**
  * Agent rust-loop / planner / coordinator / AgentService IPC.
  * @param {object} ctx
@@ -324,6 +327,9 @@ function registerAgentRuntimeIpc(ctx) {
             loopResult = await runRustAgentLoop({
               coreBridge: live.coreBridge,
               llm: apiCfg,
+              // 子 Agent 的请求同样留底：来源标 subagent、会话归属父会话（排查时按会话聚类）。
+              sessionId: payload.sessionId || undefined,
+              runSource: 'subagent',
               startParams: {
                 ...startParams,
                 messages: req.messages,
@@ -391,6 +397,10 @@ function registerAgentRuntimeIpc(ctx) {
         // 请求头 / 会话标识随配置一并交给 loop runner（装配单一来源：llm-request.js）。
         // sessionId 让供应商自定义头里的 {{sessionId}} 生效，并提升上游 prompt 缓存命中。
         llm: apiCfg,
+        // 请求快照的会话归属与来源：与上面的请求头标识同源，避免两套会话概念。
+        sessionId: payload.sessionId || undefined,
+        runSource: 'chat',
+        contextAudit: payload.contextAudit || null,
         turnEndSynthesis: payload.turnEndSynthesis === true,
         browserVision: payload.browserVision === true,
         startParams,
@@ -425,16 +435,26 @@ function registerAgentRuntimeIpc(ctx) {
             toolsChars: ctx?.toolsChars
           });
           if (cr.compacted && payload.sessionId && live.localGateway) {
-            live.localGateway
-              .invokeRpc('memory.compaction_archive', {
-                sessionId: payload.sessionId,
-                workspacePath: workspacePath || null,
-                tokensBefore: cr.tokensBefore,
-                tokensAfter: cr.tokensAfter,
-                summary: cr.summary || null,
-                foldedTranscript: cr.foldedTranscript || null
-              })
-              .catch(() => {});
+            // 归档 id 回填给快照：让「这一轮压缩过」与 compaction_archives 行对得上。
+            // 归档失败不影响主链路（快照里就留 null）。
+            // 短超时：这次归档在**发请求之前**，DB 慢不能拖着整轮对话等它的默认 120s。
+            try {
+              const archived = await live.localGateway.invokeRpc(
+                'memory.compaction_archive',
+                {
+                  sessionId: payload.sessionId,
+                  workspacePath: workspacePath || null,
+                  tokensBefore: cr.tokensBefore,
+                  tokensAfter: cr.tokensAfter,
+                  summary: cr.summary || null,
+                  foldedTranscript: cr.foldedTranscript || null
+                },
+                { timeoutMs: COMPACTION_ARCHIVE_TIMEOUT_MS }
+              );
+              if (archived && archived.id != null) cr.compactionArchiveId = archived.id;
+            } catch {
+              // archive 是旁路记录，写失败只让快照少一个 id
+            }
           }
           return cr;
         },

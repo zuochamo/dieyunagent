@@ -392,6 +392,73 @@ assert(String(nonSys[0].content).includes('用本段恢复目标'), 'fold stub i
 assert(!String(nonSys[0].content).includes('禁止根据本段去「继续完成」'), 'fold stub must not forbid resuming');
 assert(!nonSys.some((m) => m.content === '旧问-0-UNIQUE'), 'oldest turn is not a verbatim API message');
 
+// 审计出参（request_snapshots.context_audit_json 的唯一来源）：
+// 折叠/裁剪的事实必须由这里产出，Main 不重算。未传 audit 时行为必须完全不变。
+{
+  const longTurnRide = '骑手位上下文'.repeat(4000);
+  const many = [{ role: 'system', content: 'sys' }];
+  for (let i = 0; i < 40; i++) {
+    many.push({ role: 'user', content: `旧问${i}` });
+    many.push({ role: 'assistant', content: `旧答${i}` });
+  }
+  many.push({ role: 'user', content: attachTurnRideToUserContent('当前任务', longTurnRide) });
+
+  const noAudit = buildCompletionMessagesFromHistory(many, 'sys', null, false, null, '', {
+    recentTurns: 4,
+    historyMaxChars: 2000,
+    requestMaxChars: 3000,
+    foldedMaxChars: 500
+  });
+  const audit = {};
+  const withAudit = buildCompletionMessagesFromHistory(many, 'sys', null, false, null, '', {
+    recentTurns: 4,
+    historyMaxChars: 2000,
+    requestMaxChars: 3000,
+    foldedMaxChars: 500,
+    audit
+  });
+  assert(JSON.stringify(noAudit) === JSON.stringify(withAudit), 'audit 出参不得改变拼装结果');
+  assert(audit.fold && audit.fold.foldedCount > 0, 'audit 记录折叠条数');
+  assert(audit.fold.keptRecentTurns === 4, 'audit 记录保留窗口');
+  assert(audit.fold.foldMaxChars === 500, 'audit 记录折叠上限');
+  assert(typeof audit.fold.cutRole === 'string', 'audit 记录断点角色');
+
+  // 只裁剪不折叠的场景（折叠窗口很大 → 不折，但历史/硬顶预算不够 → 必须丢）
+  const long = [{ role: 'system', content: 'sys' }];
+  for (let i = 0; i < 40; i++) {
+    long.push({ role: 'user', content: `旧问${i}` + 'x'.repeat(200) });
+    long.push({ role: 'assistant', content: `旧答${i}` + 'y'.repeat(200) });
+  }
+  long.push({ role: 'user', content: attachTurnRideToUserContent('当前任务', longTurnRide) });
+  const trimAudit = {};
+  buildCompletionMessagesFromHistory(long, 'sys', null, false, null, '', {
+    recentTurns: 999,
+    historyMaxChars: 2000,
+    requestMaxChars: 3000,
+    lastUserMaxChars: 400,
+    turnRideMaxChars: 400,
+    messageMaxChars: 100,
+    audit: trimAudit
+  });
+  assert(!trimAudit.fold, '窗口够大时不折叠');
+  assert(trimAudit.trim, 'audit 记录裁剪事实');
+  assert(trimAudit.trim.messagesIn > trimAudit.trim.messagesOut, 'audit 记录进/出条数差');
+  assert(trimAudit.trim.requestMaxChars === 3000, 'audit 记录硬顶');
+  assert(
+    trimAudit.trim.droppedByHistoryBudget + trimAudit.trim.droppedByRequestCap > 0,
+    'audit 记录到底哪一层丢的'
+  );
+  assert(trimAudit.trim.perMessageTruncated > 0, 'audit 记录被截断的条数（含当前任务那条）');
+
+  // 不需要折叠/裁剪时，不写空账（避免每轮都多一段无意义的 json）
+  const smallAudit = {};
+  buildCompletionMessagesFromHistory([{ role: 'user', content: 'hi' }], 'sys', null, false, null, '', {
+    recentTurns: 24,
+    audit: smallAudit
+  });
+  assert(!smallAudit.fold && !smallAudit.trim, '未发生折叠/裁剪时不写审计块');
+}
+
 const toolCut = foldOlderCompletionMessages(
   [
     { role: 'system', content: 'sys' },

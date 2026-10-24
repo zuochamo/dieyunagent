@@ -47,7 +47,9 @@ const HOST_TOOLS = [
         'Windows 下实际为 cmd.exe：分号 ; 会切断命令，禁止 python -c "a; b" 这类写法，请写临时 .py 再 python 运行。' +
         '启动 GUI/长期运行程序（如 pythonw main.py）请设 detached=true，并用 cwd 指向项目目录，不要 start /B（会超时）。' +
         'Windows GUI 推荐：command=pythonw main.py，cwd=项目目录，detached=true。' +
-        'detached=true 的返回体会带 handle（进程句柄），之后可用 host_proc 查看/结束。',
+        '长任务（编译/打包/渲染/训练，几分钟级）设 waitMs=180000：到点仍未结束会自动转后台继续跑（不会杀进程），' +
+        '返回 handle + 已产生的输出，再用 host_proc action=output 续读、action=kill 结束。' +
+        'detached=true 的返回体会带 handle（进程句柄），之后可用 host_proc 查看/读输出/结束。',
       parameters: {
         type: 'object',
         properties: {
@@ -57,7 +59,12 @@ const HOST_TOOLS = [
             type: 'boolean',
             description: 'true 时后台启动，不等待进程结束（GUI/守护进程必用）'
           },
-          timeoutMs: { type: 'number', description: '可选超时（毫秒），仅 detached=false 时有效' }
+          timeoutMs: { type: 'number', description: '可选超时（毫秒，上限 600000），仅 detached=false 时有效' },
+          waitMs: {
+            type: 'number',
+            description:
+              '长任务的等待窗口（毫秒，上限 600000）。到时未结束则转后台继续运行并返回 handle（不会杀进程），再用 host_proc action=output 读增量输出'
+          }
         },
         required: ['command']
       }
@@ -68,16 +75,31 @@ const HOST_TOOLS = [
     function: {
       name: 'host_proc',
       description:
-        '管理由 host_exec 启动的进程：action=list 列出仍在运行的进程（含 host_exec detached 返回的 handle、PID、命令、存活状态）；action=kill 用 handle 或 pid 结束进程树。只能结束本会话经 host_exec 启动的进程，不能结束任意系统进程。用于清理未退出的 GUI/后台进程。',
+        '管理由 host_exec 启动的进程：action=list 列出仍在运行的进程（含 handle、PID、命令、存活状态）；' +
+        'action=output 读取该进程的输出（detached 与「waitMs 转后台」的进程都能读，可读增量、可等待新输出）；' +
+        'action=kill 用 handle 或 pid 结束进程树。' +
+        '只能操作本会话经 host_exec 启动的进程，不能结束任意系统进程。用于跟进长任务进度、清理未退出的 GUI/后台进程。',
       parameters: {
         type: 'object',
         properties: {
-          action: { type: 'string', description: 'list（默认）| kill' },
-          id: { type: 'string', description: 'kill：host_exec 返回的 handle，如 hostproc-3' },
-          pid: { type: 'number', description: 'kill：进程 PID（须是 host_exec 启动过的）' },
+          action: { type: 'string', description: 'list（默认）| output | kill' },
+          id: { type: 'string', description: 'host_exec 返回的 handle，如 hostproc-3（output/kill 必填其一）' },
+          pid: { type: 'number', description: '进程 PID（须是 host_exec 启动过的）' },
           includeFinished: {
             type: 'boolean',
             description: 'list：是否附带已结束的进程，默认 false（只看存活）'
+          },
+          tailBytes: {
+            type: 'number',
+            description: 'output：只返回尾部多少字节（默认 32768，用于长日志）'
+          },
+          offset: {
+            type: 'number',
+            description: 'output：从上次返回的 offset 之后继续读（增量跟进）'
+          },
+          waitMs: {
+            type: 'number',
+            description: 'output：等待新输出或进程退出最多多少毫秒（默认 0，不等待；上限 120000）'
           }
         }
       }
@@ -193,7 +215,7 @@ const WEB_TOOLS = [
     function: {
       name: 'web_fetch',
       description:
-        'GET 抓取 http/https 网页或 API 正文（HTML 转纯文本）。禁止内网/localhost。需要读具体 URL、核验搜索结果、整理餐馆/商品/政策/攻略推荐时用此工具，不要伪造内容。',
+        'GET 抓取 http/https 网页或 API 正文。HTML 会自动抽取正文（去掉导航/页脚/广告）。禁止内网/localhost。需要读具体 URL、核验搜索结果、整理政策/文档/攻略时用，不要伪造内容。',
       parameters: {
         type: 'object',
         properties: {
@@ -212,14 +234,26 @@ const WEB_TOOLS = [
     function: {
       name: 'web_search',
       description:
-        '联网搜索关键词，返回结构化结果（标题、URL、摘要）和搜索页摘录。中文默认百度，英文默认必应；可指定 engine：baidu|bing|google|duckduckgo。用户问最新资讯/事实/政策/本地推荐/餐馆/商品时必须优先调用；拿到结构化 URL 后应继续 web_fetch 1-3 个最相关页面再下结论。没有新 URL 时不要重复相同搜索。',
+        '联网搜索，返回结构化结果（标题、URL、摘要）。默认引擎 bing（国内可直连、最稳），中文/英文都直接用。需要正文时加 fetchTop=2~3，一次拿到结果页正文，省掉后续多轮 web_fetch。某引擎失败（限流/验证码/解析不到）就换 engine 或改关键词，不要重复同一 query。',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: '搜索关键词' },
           engine: {
             type: 'string',
-            description: '可选：baidu、bing、google、duckduckgo'
+            description: '可选：bing（默认）|baidu|google|duckduckgo。google 需代理且易被限流'
+          },
+          site: {
+            type: 'string',
+            description: '可选：限定站点域名，如 gov.cn、github.com'
+          },
+          page: {
+            type: 'number',
+            description: '可选：页码，从 1 开始（duckduckgo 不支持翻页）'
+          },
+          fetchTop: {
+            type: 'number',
+            description: '可选：0-3，搜完顺手抓前 N 条正文（带此参数就不用再单独 web_fetch）'
           },
           maxChars: { type: 'number', description: '返回最大字符数，默认 12000' }
         },
@@ -1149,7 +1183,8 @@ const LSP_TOOL = {
   function: {
     name: 'lsp',
     description:
-      'Language Server 定位（TS/JS/TSX/Python/Rust/Go；Rust/Go 需本机已装 rust-analyzer/gopls）。' +
+      'Language Server 定位（TS/JS/TSX/Python/Rust/Go/C/C++/CUDA；Rust/Go 需本机已装 rust-analyzer/gopls，C/C++ 需 clangd）。' +
+      'C/C++（含 UE5 工程）要拿到准确跳转，项目里需要有 compile_commands.json（UE 在 Intermediate/ 下），否则 clangd 只能做文本级推断。' +
       'SSH 工作区优先用远程 Language Server；不可用时依次降级：workspaceSymbol → 远程结构索引，其他 operation → 远程 grep（结果带 degraded: true，属非语义匹配）。' +
       'workspaceSymbol：全库按名搜符号，只需 query（可选 filePath 指定语言），返回 path:line 与 kind——还不知道符号在哪个文件时首选。' +
       'documentSymbol：列出某文件内的符号大纲，只需 filePath。' +
@@ -1218,7 +1253,8 @@ const AGENTS_MD_PROPOSE_TOOL = {
     name: 'agents_md_propose',
     description:
       '向当前工作空间 .dieyun/AGENTS.md 做分段增量更新（项目地图：命令、目录、规范、坑点等）。' +
-      '按 section 追加或替换，避免整文件覆盖。设置里可开 Diff 预览后再采纳。也可以 fs_edit 该文件。',
+      '**同主题已有条目时用 merge 并入，不要追加第二条**；新增用 append；整段重写用 replace。' +
+      '设置里可开 Diff 预览后再采纳。也可以 fs_edit 该文件。',
     parameters: {
       type: 'object',
       properties: {
@@ -1233,8 +1269,13 @@ const AGENTS_MD_PROPOSE_TOOL = {
         },
         action: {
           type: 'string',
-          enum: ['append', 'replace'],
-          description: 'append 追加（默认）；replace 替换该 section 正文'
+          enum: ['append', 'merge', 'replace'],
+          description:
+            'append 追加（默认）；merge 用 content 替换 anchor 命中的那一条（同主题合并的唯一方式）；replace 替换该 section 全文'
+        },
+        anchor: {
+          type: 'string',
+          description: 'merge 时必填：目标条目的开头片段（如 "**CameraCut"），在该 section 内按前缀匹配'
         },
         reason: {
           type: 'string',

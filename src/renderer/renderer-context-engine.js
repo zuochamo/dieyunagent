@@ -86,8 +86,8 @@ const CTX_LIMITS = {
   // —— 与 agent-limits.js 单一来源（注入块尺寸上限）——
   // 这些键曾在本文件与 system-prompt-prep.js 各存一份字面量、靠「保持一致」注释互指来源，
   // 现已全部收敛到 agent-limits.js，本文件只做 camelCase → SCREAMING_SNAKE 映射。
-  /** AGENTS.md 注入字符上限 */
-  AGENTS_MD_MAX: ctxAgentLimitDefault('agentsMdMaxChars', 2800),
+  /** AGENTS.md 注入字符上限（兜底值与 agent-limits.js 保持一致） */
+  AGENTS_MD_MAX: ctxAgentLimitDefault('agentsMdMaxChars', 13500),
   DIEYUN_MD_MAX: ctxAgentLimitDefault('dieyunMdMaxChars', 6000),
   /** 可选工具（MCP 等）语义 Top-K 注入上限 */
   TOOL_RECALL_LIMIT: ctxAgentLimitDefault('toolRecallLimit', 10),

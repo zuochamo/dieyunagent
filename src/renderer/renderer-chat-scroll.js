@@ -200,6 +200,9 @@ function scheduleSessionScrollSave(sessionId) {
 
 function restoreSessionScrollPosition(sessionId, opts = {}) {
   if (!chatList) return;
+  // 切会话前先掐掉进行中的平滑回底：它的 900ms 兜底定时器到点会无条件 pinChatToBottom，
+  // 把刚还原好位置的新会话再钉到底部（浮条也会被 pending 压制着不出现）。
+  cancelChatScrollToBottom();
   const key = String(sessionId || currentSessionId);
   const saved = sessionScrollPositions.get(key);
   beginSessionScrollCaptureSuppression();
@@ -236,6 +239,7 @@ function restoreSessionScrollPosition(sessionId, opts = {}) {
 }
 
 function updateLastTurnFloat() {
+  updateChatScrollBottomBtn();
   const floatEl = $('last-turn-float');
   const textEl = $('last-turn-float-user');
   if (!floatEl || !textEl || !chatList) return;
@@ -263,6 +267,93 @@ function updateLastTurnFloat() {
 function isChatNearBottom(el, threshold = CHAT_AUTO_SCROLL_THRESHOLD) {
   if (!el) return true;
   return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+/** 平滑回底进行中：期间浮条恒隐藏，否则滚动途中「仍在半路」会把浮条立刻闪回来 */
+var chatScrollToBottomPending = false;
+var chatScrollBottomSettleTimer = null;
+
+/**
+ * 「滑到底部」浮条显隐的唯一判定：不在底部就出现，点击后平滑回底并消失。
+ * 所有触发源（滚动 / 钉底 / 会话切换还原）都走 updateLastTurnFloat 或
+ * updateChatAutoFollowFromScroll 这两条既有刷新路径，不另开定时器。
+ */
+function updateChatScrollBottomBtn() {
+  const btn = $('chat-scroll-bottom');
+  if (!btn) return;
+  const el = chatList || document.getElementById('chat-list');
+  const hide = !el || chatScrollToBottomPending || isChatNearBottom(el);
+  // 幂等写入：本函数在流式跟底时每帧都会走到，避免重复写同一个属性
+  if (btn.hidden !== hide) btn.hidden = hide;
+}
+
+/**
+ * 放弃进行中的平滑回底（切会话 / 列表重建时用）。
+ * 只清状态，不钉底 —— 与 `finishChatScrollToBottom` 的区别就在这。
+ */
+function cancelChatScrollToBottom() {
+  if (!chatScrollToBottomPending) return false;
+  chatScrollToBottomPending = false;
+  if (chatScrollBottomSettleTimer) {
+    clearTimeout(chatScrollBottomSettleTimer);
+    chatScrollBottomSettleTimer = null;
+  }
+  detachChatScrollEndListener();
+  updateChatScrollBottomBtn();
+  return true;
+}
+
+function finishChatScrollToBottom() {
+  if (!chatScrollToBottomPending) return;
+  chatScrollToBottomPending = false;
+  if (chatScrollBottomSettleTimer) {
+    clearTimeout(chatScrollBottomSettleTimer);
+    chatScrollBottomSettleTimer = null;
+  }
+  detachChatScrollEndListener();
+  // 平滑期间内容可能继续长高：收尾用唯一钉底原语补一次绝对贴底
+  pinChatToBottom();
+  updateChatScrollBottomBtn();
+}
+
+/** 上一次平滑回底挂的 scrollend 监听（具名才能摘：匿名 once 在取消路径上永远摘不掉）。 */
+let chatScrollEndTarget = null;
+
+function detachChatScrollEndListener() {
+  if (!chatScrollEndTarget) return;
+  try {
+    chatScrollEndTarget.removeEventListener('scrollend', finishChatScrollToBottom);
+  } catch {
+    /* ignore */
+  }
+  chatScrollEndTarget = null;
+}
+
+function scrollChatToBottomSmooth() {
+  const el = chatList || document.getElementById('chat-list');
+  if (!el) return;
+  chatScrollToBottomPending = true;
+  updateChatScrollBottomBtn();
+  setChatAutoFollow(true);
+  const target = Math.max(0, el.scrollHeight - el.clientHeight);
+  if (target - el.scrollTop <= 1) {
+    finishChatScrollToBottom();
+    return;
+  }
+  el.scrollTo({ top: target, behavior: 'smooth' });
+  if (chatScrollBottomSettleTimer) clearTimeout(chatScrollBottomSettleTimer);
+  detachChatScrollEndListener();
+  chatScrollEndTarget = el;
+  el.addEventListener('scrollend', finishChatScrollToBottom, { once: true });
+  // 兜底：极长距离或不支持 scrollend 时，到点直接收尾
+  chatScrollBottomSettleTimer = setTimeout(finishChatScrollToBottom, 900);
+}
+
+function initChatScrollBottomBtn() {
+  const btn = $('chat-scroll-bottom');
+  if (!btn || btn.dataset.scrollBottomBound === '1') return;
+  btn.dataset.scrollBottomBound = '1';
+  btn.addEventListener('click', scrollChatToBottomSmooth);
 }
 
 /** 唯一「钉底」原语：写 scrollTop、同步流式跟随基线、刷新「回到底部」浮标 */
@@ -340,6 +431,7 @@ function markChatUserScrollIntent() {
 
 function updateChatAutoFollowFromScroll() {
   if (!chatList) return;
+  updateChatScrollBottomBtn();
   if (isSessionScrollCaptureSuppressed()) {
     updateLastTurnFloat();
     return;
@@ -396,6 +488,7 @@ function initChatScrollFollow() {
       chatList.addEventListener('transitionend', onThinkingLayoutTransitionEnd);
     }
   }
+  initChatScrollBottomBtn();
   initMsgTurnFooterActions();
 }
 

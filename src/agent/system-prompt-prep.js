@@ -3,6 +3,7 @@
 const { assembleSystemPrompt } = require('./agent-system-prompt');
 const { skipAutoCodebaseForTaskTier } = require('./task-tier');
 const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+const { getEnvHintNames } = require('../mcp/env-hints');
 // 结构信号判定（@Codebase / 路径 / 编辑器选区）的唯一来源，Renderer 亦经 agent-bundle 共用。
 const {
   textHasCodebaseMention,
@@ -16,7 +17,11 @@ const { readAgentsMdPrefs } = require('./agents-md-prefs');
 const {
   parseSections,
   formatAgentsMdSystemBlock,
-  agentsRelativePath
+  clipTextByLines,
+  selectSectionsByPath,
+  agentsRelativePath,
+  MAX_FILE_CHARS,
+  NEAR_LIMIT_CHARS
 } = require('../agents-md');
 const { describeAgentHome } = require('../agent-home');
 
@@ -86,24 +91,172 @@ function formatRecentChanges(rows, max) {
   return `【本会话变更文件】\n${lines.join('\n')}`;
 }
 
-function lightAgentsMdContent(full) {
-  const text = String(full || '');
-  const sections = parseSections(text);
-  if (!sections.length) return text;
-  const lightIds = new Set(['overview']);
-  const picked = sections.filter((s) => lightIds.has(s.id));
-  if (!picked.length) {
-    const first = text.indexOf('<!-- dieyun:section:');
-    return (first > 0 ? text.slice(0, first) : '').trim();
+/**
+ * 每轮注入的 section 白名单与配额比例。
+ *
+ * overview 之外只带「不查就会踩坑」的两类：commands（命令写错直接失败）与
+ * gotchas（已知坑）。structure 刻意不进来 —— graph.repo_map 已注入目录结构，
+ * 重复只会挤占预算；其余 section 模型需要时自行 fs_read_file 读全文
+ * （注入块头部给了文件路径）。
+ *
+ * share 的意义：预算必须**按段分配**。整体 slice 会把排在最后的 gotchas
+ * 整段切掉 —— 实测某项目地图 14870 字符被切到 6000，25 条已知坑一条都没进
+ * 上下文。gotchas 份额最大，因为它是三者里唯一「不知道就一定重踩」的。
+ *
+ * **数组顺序就是注入顺序**：gotchas 排在 commands 前面。依据是长上下文里的
+ * "lost in the middle" —— 越靠后越容易被忽略，而踩坑比命令更该被看见。
+ */
+const AGENTS_LIGHT_SECTIONS = [
+  { id: 'overview', share: 0.2 },
+  { id: 'gotchas', share: 0.46 },
+  { id: 'commands', share: 0.34 }
+];
+const AGENTS_LIGHT_IDS = new Set(AGENTS_LIGHT_SECTIONS.map((s) => s.id));
+const AGENTS_LIGHT_MIN_SECTION = 200;
+
+/** 段内按行裁剪（实现唯一来源 `agents-md.js: clipTextByLines`），尾巴留省略标记。 */
+function clipSectionByLines(body, limit) {
+  return clipTextByLines(body, limit, (dropped) => `…（本段另有 ${dropped} 行未注入，全文见文件）`).text;
+}
+
+/**
+ * 水位式配额分配：能整段放下的先给足，腾出的额度按比例再分给放不下的段。
+ * @param {number[]} demands 各段正文长度
+ * @param {number[]} shares 各段份额
+ * @param {number} budget 可用正文预算
+ * @returns {number[]} 各段配额
+ */
+function allocateAgentSectionQuotas(demands, shares, budget) {
+  const quota = demands.map(() => 0);
+  let pool = budget;
+  let open = demands.map((d, i) => i).filter((i) => demands[i] > 0);
+  while (open.length && pool > 0) {
+    const shareSum = open.reduce((s, i) => s + (shares[i] || 1), 0) || open.length;
+    const rest = [];
+    let spent = 0;
+    for (const i of open) {
+      const q = Math.floor((pool * (shares[i] || 1)) / shareSum);
+      if (demands[i] <= q) {
+        quota[i] = demands[i];
+        spent += demands[i];
+      } else {
+        rest.push(i);
+      }
+    }
+    pool -= spent;
+    if (rest.length === open.length) {
+      const restSum = rest.reduce((s, i) => s + (shares[i] || 1), 0) || rest.length;
+      for (const i of rest) quota[i] = Math.max(0, Math.floor((pool * (shares[i] || 1)) / restSum));
+      return quota;
+    }
+    open = rest;
   }
-  if (picked.length >= sections.length) return text;
+  return quota;
+}
+
+/**
+ * 本轮「触达路径」信号 —— 按需注入段（section 带 paths 属性）的筛选依据。
+ *
+ * 只用结构信号（消息里的显式路径 / 会话关注文件 / 本会话变更文件），
+ * 不做任何关键词表或意图猜测（见仓库 AGENTS.md 原则 3）。
+ * Renderer 侧同源实现在 renderer-context-engine.js（用同一份 pathHints 语义）。
+ *
+ * @param {object} snapshot
+ * @returns {string[]}
+ */
+function collectInjectPathHints(snapshot) {
+  const out = [];
+  const add = (p) => {
+    const v = String(p || '').trim().replace(/\\/g, '/');
+    if (v && !out.includes(v)) out.push(v);
+  };
+  if (snapshot && snapshot.userQuery) {
+    for (const p of extractPathHintsFromText(snapshot.userQuery)) add(p);
+  }
+  const paths = snapshot && Array.isArray(snapshot.openFilePaths) ? snapshot.openFilePaths : [];
+  for (const p of paths) add(p);
+  const rows = snapshot && Array.isArray(snapshot.changeRows) ? snapshot.changeRows : [];
+  for (const r of rows) add(r && r.path);
+  return out.slice(0, 24);
+}
+
+/**
+ * @param {string} full 文件全文
+ * @param {number} [budget] 注入预算（字符）。缺省＝不裁剪（旧行为）。
+ * @param {{ pathHints?: string[] }} [opts] 传入 pathHints 时，带 paths 属性且未命中的段不进注入。
+ */
+function lightAgentsMdContent(full, budget, opts = {}) {
+  const text = String(full || '');
+  const allSections = parseSections(text);
+  if (!allSections.length) return text;
+  const allowed = allSections.filter((s) => AGENTS_LIGHT_IDS.has(s.id));
   const first = text.indexOf('<!-- dieyun:section:');
   const header = first > 0 ? text.slice(0, first) : '';
-  let out = header;
-  for (const sec of picked) {
-    out += `${sec.marker}\n${sec.body}\n\n`;
+  if (!allowed.length) return header.trim();
+
+  // 按路径筛段：条件段（带 paths 属性）本轮没碰相关路径就不注入，省下的预算留给命中段。
+  const pathHints = Array.isArray(opts.pathHints) ? opts.pathHints : [];
+  const { picked, skipped } = selectSectionsByPath(allowed, pathHints);
+  // 命中为空（白名单段全带 paths 且本轮都没碰上）时退回全注入 —— 既然都注入了，
+  // 就不能再声称「有段未注入」，否则提示与实际内容自相矛盾。
+  const useAll = !picked.length;
+  const active = useAll ? allowed : picked;
+  // 注入顺序按 AGENTS_LIGHT_SECTIONS 的声明顺序（overview → gotchas → commands），
+  // 而不是文件里的物理顺序 —— 靠后的段在长上下文里更容易被忽略。
+  const orderOf = (id) => {
+    const i = AGENTS_LIGHT_SECTIONS.findIndex((x) => x.id === id);
+    return i < 0 ? AGENTS_LIGHT_SECTIONS.length : i;
+  };
+  active.sort((a, b) => orderOf(a.id) - orderOf(b.id));
+  const dropped = useAll ? [] : skipped;
+  const skippedNote = dropped.length
+    ? `\n\n（另有 ${dropped.length} 个分段因本轮未涉及相关路径而未注入：${dropped.join('、')}；需要时读本文件全文）`
+    : '';
+
+  const limit = Number(budget) > 0 ? Number(budget) : 0;
+  if (!limit) {
+    if (active.length >= allSections.length) return text;
+    return `${header}${active.map((s) => `${s.marker}\n${s.body}\n\n`).join('')}${skippedNote}`.trim();
   }
-  return out.trim();
+
+  // marker 行开销先扣掉，剩余预算才按比例分给正文（每段再预留省略标记的余量；
+  // 跳过提示也要占预算 —— 否则内容刚好用满时，加上提示会超出额度）。
+  const CLIP_NOTE_RESERVE = 48;
+  const overhead =
+    active.reduce((sum, s) => sum + s.marker.length + 2, 0) +
+    header.length +
+    active.length * CLIP_NOTE_RESERVE +
+    skippedNote.length;
+  const bodyBudget = Math.max(AGENTS_LIGHT_MIN_SECTION * active.length, limit - overhead);
+  const demands = active.map((s) => s.body.length);
+  const shares = active.map((s) => {
+    const cfg = AGENTS_LIGHT_SECTIONS.find((x) => x.id === s.id);
+    return cfg ? cfg.share : 1;
+  });
+  const quotas = demands.map(() => 0);
+  let pool = bodyBudget;
+  let pending = active.map((_, i) => i);
+  // overview 是项目身份 + 硬约束，短且必须完整 —— 被裁掉一行就答不上「这是什么项目、
+  // 什么绝对不能做」。占预算 4 成以内一律全给，超出才参与按份额分配。
+  const ovIdx = active.findIndex((s) => s.id === 'overview');
+  if (ovIdx >= 0 && demands[ovIdx] <= Math.floor(bodyBudget * 0.4)) {
+    quotas[ovIdx] = demands[ovIdx];
+    pool -= demands[ovIdx];
+    pending = pending.filter((i) => i !== ovIdx);
+  }
+  const sub = allocateAgentSectionQuotas(
+    pending.map((i) => demands[i]),
+    pending.map((i) => shares[i]),
+    pool
+  );
+  pending.forEach((i, k) => {
+    quotas[i] = sub[k];
+  });
+  let out = header;
+  active.forEach((sec, i) => {
+    out += `${sec.marker}\n${clipSectionByLines(sec.body, quotas[i])}\n\n`;
+  });
+  return `${out.trim()}${skippedNote}`;
 }
 
 function rpcScope(snapshot, extra) {
@@ -234,13 +387,33 @@ async function fetchAgentsMdBlock(snapshot, invokeRpc, userDataPath) {
     raw = '';
   }
   if (!String(raw).trim()) return '';
-  const content = lightAgentsMdContent(raw);
+  const max = DEFAULT_LIMITS.AGENTS_MD_MAX;
+  const pathHints = collectInjectPathHints(snapshot);
+  // 体积反馈：让模型知道这份地图多大、本轮看到几段 —— 没有它，agent 会一直往
+  // 已经写满的文件里 append（实测一天内三次触顶，每次都要人工压）。
+  const allSections = parseSections(raw);
+  const lightSections = allSections.filter((s) => AGENTS_LIGHT_IDS.has(s.id));
+  const { picked } = selectSectionsByPath(lightSections, pathHints);
+  const stats = {
+    fileChars: raw.length,
+    fileLimit: MAX_FILE_CHARS,
+    sectionCount: allSections.length,
+    injectedCount: picked.length || lightSections.length,
+    nearLimit: raw.length >= NEAR_LIMIT_CHARS
+  };
+  // 头部固定文案长度用函数本身探测，避免这里再写一份字面量。
+  const headerLen =
+    formatAgentsMdSystemBlock({ content: '\u0000', relativePath: rel, workspacePath: root, stats }).length - 1;
+  // 交给 lightAgentsMdContent 按段分配预算：只做整体 slice 会把 gotchas 整段切掉。
+  // pathHints 让带 paths 属性的条件段「命中才注入」（对齐 Claude Code path-scoped rules）。
+  const content = lightAgentsMdContent(raw, Math.max(800, max - headerLen), { pathHints });
   const block = formatAgentsMdSystemBlock({
     content,
     relativePath: rel,
-    workspacePath: root
+    workspacePath: root,
+    maxChars: max,
+    stats
   });
-  const max = DEFAULT_LIMITS.AGENTS_MD_MAX;
   if (block.length > max) return `${block.slice(0, max)}\n…（已截断）`;
   return block;
 }
@@ -548,7 +721,10 @@ function formatMcpPromptBlock(servers, compactToolsPresent) {
   }
   const lines = enabled.map((server) => {
     const command = [server.command, ...(server.args || [])].filter(Boolean).join(' ');
-    const envLine = server.envHint ? `\n  环境变量：${server.envHint}` : '';
+    // 一个服务可能声明多个环境变量（如 mcp-postgres 的 DATABASE_URL / MCP_DATABASE_URLS），
+    // 名字清单以 env-hints.js 为唯一来源。
+    const envNames = getEnvHintNames(server);
+    const envLine = envNames.length ? `\n  环境变量：${envNames.join(' / ')}` : '';
     return `- ${server.name || server.id} (${server.id})：${server.description || ''}\n  启动命令：${command || '未配置'}${envLine}`;
   });
   return (
@@ -703,6 +879,8 @@ module.exports = {
   formatCodebaseBlock,
   formatRecentChanges,
   lightAgentsMdContent,
+  collectInjectPathHints,
+  allocateAgentSectionQuotas,
   extractCodebasePathsFromBlock,
   fetchCodebaseBlock,
   fetchOpenFilesBlock,

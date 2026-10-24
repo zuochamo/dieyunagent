@@ -93,12 +93,19 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
   const before = await ensureAgentsMdFile(gateway, ctx);
   const merged = applySectionUpdates(
     before,
-    [{ section, action, content: line, confidence: 0.92 }],
+    [{ section, action, anchor: a.anchor, content: line, confidence: 0.92 }],
     { source: 'agents_md_propose' }
   );
   const applied = merged.applied || [];
   if (!applied.length) {
-    return { ok: true, applied: 0, message: '变更已存在或置信度过低，已跳过' };
+    // merge 找不到 anchor 之类的失败要把原因回给模型，否则它只会以为「重复了」再试一次。
+    const why = (merged.skipped || [])[0];
+    return {
+      ok: true,
+      applied: 0,
+      skipped: merged.skipped || [],
+      message: (why && why.reason) || '变更已存在或置信度过低，已跳过'
+    };
   }
   const sizeMeta = {
     nearLimit: !!merged.nearLimit,
@@ -173,7 +180,9 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
     ok: true,
     applied: applied.length,
     sizeMeta,
-    message: `已更新 AGENTS.md（${applied.length} 条）`
+    message: `已更新 AGENTS.md（${applied.length} 条；当前 ${sizeMeta.contentLength}/${sizeMeta.maxChars} 字${
+      sizeMeta.nearLimit ? '，已接近上限，下次请先合并同主题条目' : ''
+    }）`
   };
 }
 

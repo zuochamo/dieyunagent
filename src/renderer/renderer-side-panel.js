@@ -1,4 +1,4 @@
-/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent */
+/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden */
 'use strict';
 
 const SIDE_PANEL_TAB_KEY = 'diecloud.ui.sidePanelTab.v1';
@@ -31,7 +31,9 @@ function loadSavedSideTab() {
     t === 'terminal' ||
     t === 'browser' ||
     t === 'files' ||
+    t === 'artifacts' ||
     t === 'context' ||
+    t === 'subagents' ||
     t === 'codebase' ||
     t === 'graph' ||
     t === 'ssh'
@@ -96,6 +98,12 @@ function setSidePanelTab(tab, opts) {
       maybeReloadSelectedArtifactContent();
     }
   }
+  if (next === 'artifacts') {
+    // 首刷的唯一入口（与 context / codebase / graph 面板同构）
+    if (typeof onProductsPanelShown === 'function') onProductsPanelShown();
+  } else if (typeof onProductsPanelHidden === 'function') {
+    onProductsPanelHidden();
+  }
   if (next === 'changes') {
     if (typeof patchChangesPane === 'function') patchChangesPane();
     else if (typeof renderChangesPane === 'function') renderChangesPane();
@@ -114,6 +122,8 @@ function setSidePanelTab(tab, opts) {
   if (next === 'ssh' && typeof refreshWorkspaceMenuItems === 'function') {
     refreshWorkspaceMenuItems().catch(() => {});
   }
+  if (next === 'subagents' && typeof onSubagentsPanelShown === 'function') onSubagentsPanelShown();
+  else if (typeof onSubagentsPanelHidden === 'function') onSubagentsPanelHidden();
   if (next === 'codebase' && typeof onCodebasePanelShown === 'function') onCodebasePanelShown();
   else if (typeof onCodebasePanelHidden === 'function') onCodebasePanelHidden();
   if (next === 'graph' && typeof onGraphPanelShown === 'function') onGraphPanelShown();
@@ -148,6 +158,8 @@ function finishPanelClose(panel, resizer) {
   if (typeof onCodebasePanelHidden === 'function') onCodebasePanelHidden();
   if (typeof onGraphPanelHidden === 'function') onGraphPanelHidden();
   if (typeof onContextPanelHidden === 'function') onContextPanelHidden();
+  if (typeof onSubagentsPanelHidden === 'function') onSubagentsPanelHidden();
+  if (typeof onProductsPanelHidden === 'function') onProductsPanelHidden();
 }
 
 function applySidePanelOpenState(open) {

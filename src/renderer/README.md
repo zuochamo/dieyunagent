@@ -33,10 +33,12 @@
 | `renderer-chat-render.js` | 历史渲染、流式钉底 | 会话重绘 |
 | `renderer-thinking-trace-dom.js` | 思考区 DOM / 轮次块（折叠思考，旁白+工具在折叠外） | 思考过程 |
 | `renderer-thinking-trace.js` | 流式 patch / 合成回退 | 思考区更新 |
+| `renderer-subagent-panel.js` | 右侧面板「子代理」页：本次运行的子 Agent 全文思考（复用思考区卡片渲染原语） | 子代理详情 |
 | `renderer-artifacts-session.js` | 会话产物桶 / UI batch | 产物会话态 |
 | `renderer-artifacts-browse.js` | 工作区浏览路径 | 产物目录 |
 | `renderer-artifact-diff-view.js` | 产物 diff 静态渲染 / 读盘 | 变更 diff 预览 |
 | `renderer-artifacts.js` | 产物列表绘制 / 打开 | 产物面板 |
+| `renderer-artifacts-tabs.js` | 文件面板多标签 + 长驻编辑区（标签状态 / 未保存标记 / 文本域与 Monaco 二选一） | 文件面板多标签 |
 | `renderer-chat-history.js` | 会话列表、切换、加载消息 | 侧栏会话 |
 | `renderer-chat-state.js` | 当前会话 run 状态 | 进行中任务标记 |
 | `renderer-composer.js` | 输入框、发送、Agent/Plan 模式切换 | Composer 行为 |

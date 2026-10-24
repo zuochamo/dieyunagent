@@ -6,6 +6,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { listBuiltinMcpServers } = require('./registry');
 const { enrichMcpServerForUi } = require('./server-config');
+const { getEnvHintNames } = require('./env-hints');
 const { createMcpCredentialsStore } = require('./credentials-store');
 const mcpPackageStore = require('./package-store');
 const {
@@ -292,7 +293,14 @@ function createMcpStore(opts) {
     const creds = ensureMcpCredentialsStore(userDataPath);
     const meta = creds.getSecretMeta(serverId);
     const secrets = creds.loadSecrets(serverId);
-    const envHint = String(server.envHint || '').trim();
+    // listMcpServersForUi 已经把声明规范化成带状态的逐项表（env-hints.js 是唯一来源）
+    const envDefs = Array.isArray(server.envHints) ? server.envHints : [];
+    const envRequirement = server.envRequirement === 'any' ? 'any' : 'all';
+    const envSatisfied = envDefs.length
+      ? envRequirement === 'any'
+        ? envDefs.some((def) => def.saved)
+        : envDefs.filter((def) => def.required).every((def) => def.saved)
+      : false;
     const packageMeta = mcpPackageStore.getMcpNpmPackageMeta(server);
     const packageStatus = mcpPackageStore.getMcpPackageStatus(userDataPath, server);
     const openApiDef = getOpenApiMcpDef(serverId) || (server.openApiService ? getOpenApiMcpDef(`mcp-${server.openApiService}`) : null);
@@ -321,7 +329,11 @@ function createMcpStore(opts) {
       packageInstalled: !!packageStatus.installed,
       packageInstallRoot: packageStatus.installRoot || '',
       packageInstalledVersion: packageStatus.installedVersion || '',
-      envHint,
+      envHint: envDefs.length ? envDefs[0].name : String(server.envHint || '').trim(),
+      /** 逐项环境变量（name/label/hint/required/saved/undecryptable）：配置页按它渲染输入框 */
+      envHints: envDefs,
+      envHintNames: envDefs.map((def) => def.name),
+      envRequirement,
       /** 离线预装（随客户端分发，运行时不需要 npm install / 下载二进制） */
       bundled: !!server.bundledServer,
       homepage: server.homepage || '',
@@ -329,8 +341,8 @@ function createMcpStore(opts) {
       configured: !!server.configured,
       needsConfig: !!server.needsConfig,
       hasToken: !!meta.hasToken,
-      hasEnvValue: envHint
-        ? meta.envKeys.includes(envHint)
+      hasEnvValue: envDefs.length
+        ? envSatisfied
         : dieyunService
           ? dieyunService.hasKey
           : meta.hasEnv,
@@ -384,14 +396,41 @@ function createMcpStore(opts) {
     }
 
     const creds = ensureMcpCredentialsStore(userDataPath);
-    const envHint =
-      (isBuiltin ? builtin.envHint : store.custom[customIdx]?.envHint) ||
-      String(payload.envHint || '').trim();
+    // 环境变量白名单：只允许写服务**自己声明过**的变量名。
+    // 旧实现把 payload.envHint 当键名用，等于让渲染层决定往子进程 env 里塞什么变量；
+    // 多变量入口放开之后这个口子必须收紧，否则 IPC 就成了一条任意 env 注入路径。
+    //
+    // 白名单**只**来自服务定义（registry 的 envHints / store.custom 的 envHint），
+    // 不并入 payload.envHint —— 否则 { envHint: 'LD_PRELOAD', envValues: { LD_PRELOAD: … } }
+    // 就能直接绕过校验，写进 mcp-secrets.json 并随 spawn 的 env 生效（2026-10-16 实测确证）。
+    // 旧渲染层本来就不发 envHint（它发的 envValue 靠服务声明定键名），去掉这行零回归。
+    const declaredServer = isBuiltin ? builtin : store.custom[customIdx] || null;
+    const declaredNames = getEnvHintNames(declaredServer || {});
+    const allowedNames = new Set(declaredNames);
+
+    const envPatch = {};
+    if (payload.envValues && typeof payload.envValues === 'object' && !Array.isArray(payload.envValues)) {
+      for (const [rawName, rawValue] of Object.entries(payload.envValues)) {
+        const name = String(rawName || '').trim();
+        if (!name) continue;
+        if (!allowedNames.has(name)) throw new Error(`该服务未声明环境变量 ${name}`);
+        // 空串＝清除这个变量（credentials-store 对空值就是删键）
+        envPatch[name] = String(rawValue == null ? '' : rawValue);
+      }
+    }
+    // 旧的单值字段（打包版里的旧渲染层仍会发它）：只落到第一个**已声明**的变量名上。
+    // 变量名同样由服务定义决定，不接受渲染层指定；服务没声明就忽略（旧实现这里会回落到
+    // payload.envHint，等于又开一条注入路径，而该回落实际不可达 —— UI 无声明时不渲染输入框）。
+    if (payload.envValue != null) {
+      const target = declaredNames[0];
+      if (target) envPatch[target] = String(payload.envValue || '');
+    }
+
     if (payload.token != null) {
       creds.saveSecrets(serverId, { token: String(payload.token || '') });
     }
-    if (envHint && payload.envValue != null) {
-      creds.saveSecrets(serverId, { env: { [envHint]: String(payload.envValue || '') } });
+    if (Object.keys(envPatch).length) {
+      creds.saveSecrets(serverId, { env: envPatch });
     }
     if (
       (isOpenApiMcpId(serverId) || (builtin && builtin.openApiService)) &&

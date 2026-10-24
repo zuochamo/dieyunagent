@@ -515,6 +515,34 @@ contextBridge.exposeInMainWorld('diecloud', {
   },
   agentMainToolDelegateResult: (payload) =>
     ipcRenderer.invoke('agent:main-tool-delegate-result', payload || {}),
+  /**
+   * 沙箱越界审批（Main → Renderer）：用户点完按钮回传 `{ requestId, decision }`。
+   * 不回传 = Main 侧超时按「拒绝」处理，所以 Renderer 必须保证每条请求都有回包。
+   */
+  onSandboxApproval: (cb) => {
+    const handler = (_evt, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on('agent:sandbox-approval', handler);
+    return () => ipcRenderer.removeListener('agent:sandbox-approval', handler);
+  },
+  sandboxApprovalResult: (payload) => ipcRenderer.invoke('agent:sandbox-approval-result', payload || {}),
+  /** Main 侧已超时作废这条请求：界面要把卡片摘掉（此时再回包也不会生效）。 */
+  onSandboxApprovalExpired: (cb) => {
+    const handler = (_evt, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on('agent:sandbox-approval-expired', handler);
+    return () => ipcRenderer.removeListener('agent:sandbox-approval-expired', handler);
+  },
 
   compactionMaybeCompact: (payload) => ipcRenderer.invoke('compaction:maybe-compact', payload || {}),
   compactionEstimateTokens: (payload) => ipcRenderer.invoke('compaction:estimate-tokens', payload || {}),

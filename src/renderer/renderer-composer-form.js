@@ -1,4 +1,4 @@
-/* global chatForm, chatInput, composerSendBtn, isCurrentSessionSending, sendMessage, stopAgentRun, refreshContextProgress, updateComposerMentionMenu, appendBubble, finishSessionActiveRun, syncComposerForActiveSession, currentSessionId, renderAttachmentChips, trySubmitComposerWhileBusy, initComposerQueueUI, isUserAbortError, isEditingComposerQueueItem, commitEditComposerQueueItem, isSessionSwitchInFlight, showAgentToast */
+/* global chatForm, chatInput, composerSendBtn, isCurrentSessionSending, sendMessage, stopAgentRun, refreshContextProgress, updateComposerMentionMenu, appendBubble, finishSessionActiveRun, syncComposerForActiveSession, currentSessionId, renderAttachmentChips, trySubmitComposerWhileBusy, initComposerQueueUI, isUserAbortError, isEditingComposerQueueItem, commitEditComposerQueueItem, isSessionSwitchInFlight, showAgentToast, clearSessionComposerDraft */
 'use strict';
 
 function isComposerUserAbortError(err) {
@@ -29,6 +29,10 @@ function clearComposerPendingAndRefresh(attachments) {
   const pending = getPendingAttachments();
   const snapshot = attachments || pending.slice();
   chatInput.value = '';
+  // 文字已发出 / 已入队：本会话草稿同步清掉，否则切回来会「复活」已发出去的内容
+  if (typeof clearSessionComposerDraft === 'function') {
+    clearSessionComposerDraft(currentSessionId);
+  }
   pending.length = 0;
   if (typeof renderAttachmentChips === 'function') renderAttachmentChips();
   refreshContextProgress();

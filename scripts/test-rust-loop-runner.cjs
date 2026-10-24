@@ -1231,6 +1231,88 @@ function testBackfillReasoningContent() {
   );
 }
 
+/**
+ * 请求快照接线：`fetchRoundOnce` 必须先留底再发请求（docs/REQUEST-SNAPSHOT.md §5）。
+ * 这里只验"接上了、顺序对、字段透传"，装配细节由 test/unit/request-snapshot.test.cjs 覆盖。
+ */
+async function testRequestSnapshotWrittenBeforeSend() {
+  const order = [];
+  const bridge = createFakeBridge({
+    'agent.loop.start': async () => ({
+      runId: 'run-snap',
+      phase: 'need_llm',
+      llmBody: {
+        model: 'm',
+        messages: [
+          { role: 'system', content: 'SYS' },
+          { role: 'user', content: 'hi' }
+        ],
+        tools: [{ type: 'function', function: { name: 'fs_read_file' } }]
+      }
+    }),
+    'agent.loop.continue': async () => ({ runId: 'run-snap', phase: 'done', content: 'ok' }),
+    'memory.request_snapshot_append': async (params) => {
+      order.push('snapshot');
+      assert(params.sessionId === 'sess-snap', 'sessionId 透传');
+      assert(params.source === 'subagent', 'runSource 透传');
+      assert(params.runId === 'run-snap', 'runId 透传');
+      assert(params.round === 0, 'round 从 0 起');
+      assert(params.reason === 'initial', '首发 reason=initial');
+      assert(params.model === 'm', 'model 透传');
+      assert(params.systemText === 'SYS', 'system 全文落库');
+      assert(params.messageCount === 2, 'messageCount');
+      assert(params.messagesHash && params.messagesHash.length === 64, 'messages hash');
+      assert(JSON.parse(params.toolsNames)[0] === 'fs_read_file', 'tools 名字');
+      assert(params.compacted === false, '未压缩');
+      return { ok: true, id: 1, pruned: 0 };
+    }
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1', apiKey: 'k' },
+    sessionId: 'sess-snap',
+    runSource: 'subagent',
+    contextAudit: { fold: { foldedCount: 2 } },
+    startParams: { model: 'm', messages: [] },
+    loopSpec: loopSpec(),
+    onPhase: () => {},
+    fetchLlmOnce: async () => {
+      order.push('llm');
+      return { content: 'ok', toolCalls: [] };
+    }
+  });
+  assert(order.join(',') === 'snapshot,llm', `先留底后发请求，实际 ${order.join(',')}`);
+  const sent = bridge.invokes.find((i) => i.method === 'memory.request_snapshot_append');
+  assert(JSON.parse(sent.params.contextAuditJson).fold.foldedCount === 2, 'contextAudit 落库');
+}
+
+/**
+ * 快照写失败绝不能影响请求（旁路事实）。
+ */
+async function testRequestSnapshotFailureDoesNotBreakLoop() {
+  const bridge = createFakeBridge({
+    'agent.loop.start': async () => ({
+      runId: 'run-snap-fail',
+      phase: 'need_llm',
+      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] }
+    }),
+    'agent.loop.continue': async () => ({ runId: 'run-snap-fail', phase: 'done', content: 'ok' }),
+    'memory.request_snapshot_append': async () => {
+      throw new Error('snapshot db locked');
+    }
+  });
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1', apiKey: 'k' },
+    sessionId: 'sess-snap-fail',
+    startParams: { model: 'm', messages: [] },
+    loopSpec: loopSpec(),
+    onPhase: () => {},
+    fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
+  });
+  assert(result.phase === 'done', '写快照失败后本轮照常完成');
+}
+
 async function run() {
   testApplyResolvedLoopSpec();
   testResolveChatUrl();
@@ -1261,6 +1343,8 @@ async function run() {
   await testTurnEndTruncatedUsesReasoningFallback();
   await testTurnEndThoughtDefersToSynthesis();
   await testTurnEndKeepsModelProse();
+  await testRequestSnapshotWrittenBeforeSend();
+  await testRequestSnapshotFailureDoesNotBreakLoop();
 }
 
 run()

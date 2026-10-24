@@ -63,6 +63,9 @@ const RG_TIMEOUT_MS = 20000;
 const MAX_GREP_CONTEXT = 10;
 /** 解析前收集的原始条目上限，防御病态输入 */
 const MAX_RAW_GREP_ITEMS = 20000;
+/** 0 命中时探测「被体积上限跳过」的文件：只 stat 不解压，硬上限防超大仓库拖住 */
+const OVERSIZE_PROBE_MAX_WALK = 4000;
+const OVERSIZE_PROBE_MAX_DEPTH = 10;
 
 function clampLimit(n, fallback, max) {
   const v = Number(n);
@@ -588,6 +591,98 @@ async function grepJsFallback(root, opts) {
   return { ok: true, matches, truncated, source: 'js', context: { before, after } };
 }
 
+/**
+ * 有界扫描：数一数搜索范围内有多少文件超过 MAX_FILE_BYTES。
+ *
+ * 为什么需要它：rg 侧用 `--max-filesize 1M` 跳过超大文件，JS 兜底也在 scanOneFileForGrep
+ * 里 `return null`——两条路都是**静默**的。模型搜 UE/渲染日志（单文件几百 MB）时会拿到
+ * 「0 命中」，进而得出「日志里没有这个报错」的错误结论。这里只在 0 命中时补一次 stat
+ * 扫描（不读内容），把「被跳过」这件事说出口。
+ *
+ * @param {string} root 工作区根（用于生成相对路径）
+ * @param {string} searchPath 本次搜索的起点
+ * @returns {Promise<{ count: number, examples: string[], limitBytes: number, scanned: number, truncated: boolean }>}
+ */
+async function probeOversizeFiles(root, searchPath) {
+  const out = { count: 0, examples: [], limitBytes: MAX_FILE_BYTES, scanned: 0, truncated: false };
+  const startRel = path.relative(root, searchPath);
+  const stack = [{ dir: searchPath, rel: startRel }];
+  let walked = 0;
+  while (stack.length) {
+    const { dir, rel } = stack.pop();
+    if (rel.split(/[\\/]/).filter(Boolean).length > OVERSIZE_PROBE_MAX_DEPTH) {
+      out.truncated = true;
+      continue;
+    }
+    let ents;
+    try {
+      ents = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of ents) {
+      if (ent.isDirectory()) {
+        if (shouldSkipDir(ent.name)) continue;
+        stack.push({ dir: path.join(dir, ent.name), rel: path.join(rel, ent.name) });
+        continue;
+      }
+      if (!ent.isFile()) continue;
+      walked += 1;
+      if (walked > OVERSIZE_PROBE_MAX_WALK) {
+        out.truncated = true;
+        stack.length = 0;
+        break;
+      }
+      const full = path.join(dir, ent.name);
+      if (shouldSkipFile(full)) continue;
+      let st;
+      try {
+        st = await fsp.stat(full);
+      } catch {
+        continue;
+      }
+      if (st.size <= MAX_FILE_BYTES) continue;
+      out.count += 1;
+      if (out.examples.length < 3) {
+        out.examples.push(path.relative(root, full).replace(/\\/g, '/'));
+      }
+    }
+  }
+  out.scanned = walked;
+  return out;
+}
+
+/**
+ * 给「0 命中」的结果补一条可执行的说明：有多少文件因为体积被跳过、该怎么查。
+ * 有命中时原样返回（不增加任何开销）。
+ * @param {object} result grepWorkspace / grepJsFallback 的返回
+ * @param {string} absRoot
+ * @param {string} searchPath
+ */
+async function withOversizeHint(result, absRoot, searchPath) {
+  if (!result || !result.ok) return result;
+  const noHit =
+    Array.isArray(result.matches) && result.matches.length === 0 && !(Number(result.count) > 0);
+  if (!noHit) return result;
+  let oversize;
+  try {
+    oversize = await probeOversizeFiles(absRoot, searchPath);
+  } catch {
+    return result;
+  }
+  if (!oversize.count) return result;
+  const sample = oversize.examples.join('、');
+  const countText = `${oversize.truncated ? '至少 ' : ''}${oversize.count} 个`;
+  return {
+    ...result,
+    oversizeSkipped: oversize,
+    note:
+      `0 命中，但搜索范围内有 ${countText} >1MB 的文件**没有参与搜索**` +
+      `（如 ${sample}）；这些文件里的内容本次查不到，不等于不存在。` +
+      '大日志请改用 host_exec：`findstr /C:"关键词" "文件路径"`，或写临时 py 脚本读尾部。'
+  };
+}
+
 async function grepWorkspace(root, opts = {}) {
   const absRoot = path.resolve(root);
   const pattern = String(opts.pattern || '');
@@ -641,16 +736,24 @@ async function grepWorkspace(root, opts = {}) {
         const m = line.trim().match(/:(\d+)$/);
         if (m) total += Number(m[1]) || 0;
       }
-      return {
-        ok: true,
-        matches: [],
-        count: total,
-        truncated: false,
-        source: 'rg',
-        countOnly: true
-      };
+      return withOversizeHint(
+        {
+          ok: true,
+          matches: [],
+          count: total,
+          truncated: false,
+          source: 'rg',
+          countOnly: true
+        },
+        absRoot,
+        searchPath
+      );
     }
-    return grepJsFallback(absRoot, { ...opts, maxResults: limit });
+    return withOversizeHint(
+      await grepJsFallback(absRoot, { ...opts, maxResults: limit }),
+      absRoot,
+      searchPath
+    );
   }
 
   const args = [
@@ -674,15 +777,23 @@ async function grepWorkspace(root, opts = {}) {
   const rg = await spawnRg(args, absRoot, opts.timeoutMs);
   if (rg.ok && !rg.missing && (rg.code <= 1 || String(rg.stdout || '').trim())) {
     const matches = parseRgJsonMatches(rg.stdout, absRoot, limit, ctx);
-    return {
-      ok: true,
-      matches,
-      truncated: matches.length >= limit,
-      source: 'rg',
-      context: ctx
-    };
+    return withOversizeHint(
+      {
+        ok: true,
+        matches,
+        truncated: matches.length >= limit,
+        source: 'rg',
+        context: ctx
+      },
+      absRoot,
+      searchPath
+    );
   }
-  return grepJsFallback(absRoot, { ...opts, maxResults: limit });
+  return withOversizeHint(
+    await grepJsFallback(absRoot, { ...opts, maxResults: limit }),
+    absRoot,
+    searchPath
+  );
 }
 
 async function globWorkspace(root, opts = {}) {
@@ -721,6 +832,7 @@ module.exports = {
   grepWorkspace,
   globWorkspace,
   walkFiles,
+  probeOversizeFiles,
   parseGitignoreLines,
   isGitIgnored,
   TYPE_EXT,
@@ -728,5 +840,6 @@ module.exports = {
   DEFAULT_GLOB_LIMIT,
   MAX_GREP_LIMIT,
   MAX_GLOB_LIMIT,
-  MAX_GREP_CONTEXT
+  MAX_GREP_CONTEXT,
+  MAX_FILE_BYTES
 };

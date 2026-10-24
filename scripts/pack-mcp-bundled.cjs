@@ -198,6 +198,46 @@ async function ensureNpmTarball(name, version) {
   }
 }
 
+/**
+ * 上游 launcher（pkg/bin/cli.js）把控制台交给原生二进制时**没传 windowsHide**：
+ *
+ *   const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit' });   ← 上游原文
+ *
+ * 后果不是「多了个进程」，而是**每次连接都弹一个黑窗口**：app 与 launcher 自己都是
+ * GUI 子系统 / 无控制台进程（Electron），Windows 对「父进程没有控制台」的控制台子进程
+ * 必须**新分配**一个控制台，Win11 默认终端是 Windows Terminal，于是弹出一个标题为
+ * `…\pkg\vendor\postgres-mcp-hardened.exe` 的窗口（2026-10-16 实测：electron 父进程复现 11→12 个窗口）。
+ * 用 node.exe 当父进程复现不出来 —— 控制台子系统 + CREATE_NO_WINDOW 拿到的是「隐藏控制台」，
+ * 孙进程能继承，所以这个坑只在 app 里出现。
+ *
+ * 补一个 windowsHide: true（控制台子进程于是拿到隐藏控制台）即无窗口。
+ * 锚点找不到就**失败关闭**：上游改了这段结构必须人工确认，不能静默产出带窗口的包。
+ */
+const LAUNCHER_SPAWN_ANCHOR = "spawn(bin, process.argv.slice(2), { stdio: 'inherit' })";
+const LAUNCHER_SPAWN_PATCHED =
+  "spawn(bin, process.argv.slice(2), { stdio: 'inherit', windowsHide: true })";
+
+/** @returns {{ ok: boolean, changed: boolean, text: string }} ok=false 表示上游结构变了，拒绝产出 */
+function patchLauncherHideConsole(source) {
+  const text = String(source || '');
+  if (text.includes(LAUNCHER_SPAWN_PATCHED)) return { ok: true, changed: false, text };
+  // 上游自己补上了（写法可能不同）：只要这行 spawn 里已有 windowsHide 就放行
+  if (!text.includes(LAUNCHER_SPAWN_ANCHOR)) {
+    if (/spawn\(bin,[^\n]*windowsHide/.test(text)) return { ok: true, changed: false, text };
+    return { ok: false, changed: false, text };
+  }
+  return { ok: true, changed: true, text: text.replace(LAUNCHER_SPAWN_ANCHOR, LAUNCHER_SPAWN_PATCHED) };
+}
+
+/** 产物里的 launcher 是否已经不会给孙进程弹控制台窗口 */
+function launcherHidesConsole(entryPath) {
+  try {
+    return fs.readFileSync(entryPath, 'utf8').includes('windowsHide');
+  } catch {
+    return false;
+  }
+}
+
 /** 读已存在的 manifest（没有/坏掉都返回 null） */
 function readManifest(dir) {
   try {
@@ -208,7 +248,7 @@ function readManifest(dir) {
   }
 }
 
-/** 完成判定：manifest 与 registry 一致，且入口、二进制都在（二进制按 manifest 的 sha256 复校） */
+/** 完成判定：manifest 与 registry 一致，入口、二进制都在（二进制按 manifest 的 sha256 复校），且入口已打过防弹窗补丁 */
 function packLooksComplete(dir, meta) {
   try {
     const manifestPath = path.join(dir, 'manifest.json');
@@ -219,6 +259,8 @@ function packLooksComplete(dir, meta) {
     const binary = path.join(dir, manifest.binary || '');
     if (!manifest.entry || !manifest.binary) return false;
     if (!fs.existsSync(entry) || !fs.existsSync(binary)) return false;
+    // 补丁是同版本下也必须重打包的一项：否则旧产物会被判定「已是最新」而继续弹窗
+    if (!launcherHidesConsole(entry)) return false;
     return sha256File(binary) === manifest.binarySha256;
   } catch {
     return false;
@@ -282,6 +324,23 @@ async function packOne(serverId, target, force) {
     throw new Error(`${meta.name}@${meta.version} 里没有 ${entry}，与上游包结构不符`);
   }
 
+  // 给上游 launcher 补 windowsHide（理由见 patchLauncherHideConsole 的注释）：
+  // 不改这一行，app 每次连接 mcp-postgres 都会弹一个黑窗口。
+  const entryAbs = path.join(dir, entry);
+  const patched = patchLauncherHideConsole(fs.readFileSync(entryAbs, 'utf8'));
+  if (!patched.ok) {
+    throw new Error(
+      `${meta.name}@${meta.version} 的 ${entry} 结构与补丁锚点不符，拒绝产出：\n` +
+        `  期望找到：${LAUNCHER_SPAWN_ANCHOR}\n` +
+        `  上游可能已重构起原生二进制的调用。请人工确认它是否已传 windowsHide；\n` +
+        `  若上游自己修好了，更新 scripts/pack-mcp-bundled.cjs 的 patchLauncherHideConsole 即可。`
+    );
+  }
+  if (patched.changed) {
+    fs.writeFileSync(entryAbs, patched.text, 'utf8');
+    console.log(`[mcp-bundled] patched ${entry}: 起原生二进制时补 windowsHide（防弹控制台窗口）`);
+  }
+
   const manifest = {
     id: serverId,
     packageName: meta.name,
@@ -293,6 +352,9 @@ async function packOne(serverId, target, force) {
     entry,
     binary: toManifestPath('pkg', 'vendor', exeName),
     binarySha256: sha256File(exePath),
+    // 本仓对上游字节做过的改动（目前一项）：launcher 起原生二进制时补 windowsHide。
+    // 打包侧的唯一声明；`packLooksComplete` 按它复检，缺了视为产物过期。
+    patches: ['launcher-windowsHide'],
     archive,
     archiveSha256: expectedSha,
     packedAt: new Date().toISOString()
@@ -326,5 +388,7 @@ module.exports = {
   CACHE_DIR,
   BUNDLED_MCP_IDS,
   packLooksComplete,
+  patchLauncherHideConsole,
+  launcherHidesConsole,
   readJson
 };

@@ -9,7 +9,7 @@
 3. **禁用意图关键词硬编码**：勿用固定中英文词表 / 寒暄正则决定「是否注入上下文、切 AGENTS 章节、是否触发索引」等路由；优先结构信号（`@Codebase`、消息内路径、编辑器选区）、召回是否命中、或 `agent-limits` 配置。对用户查询做动态分词打分（FTS/向量）不属于本禁令。
 4. **分层边界**：Renderer 做 UI；**对话 LLM 与工具执行在 Main/Node**；Rust `dieyun-core` 做循环账本、planner、memory、index、compaction。工具走 Gateway RPC。勿在 Rust 循环里堆「工头」协议，勿在 Renderer 写长期 Agent 状态机。
 5. **循环哲学（对齐 PI harness，不整仓替换）**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status` 状态机、假用户续跑、按只读步数/同文件读取/只计划逼写入。**交付四态**（`agent-round-text.resolveTurnDelivery` 单一来源）：有正文就交付；预算截断且只有思考 → 带标签思考引用（仅展示，落库换占位）；正常收尾无正文才 synthesis，且在 Node `rust-loop-runner`，Renderer 只展示。**思考永不顶正文**：只进 `messages.reasoning`（与 content 分列）。完成验收只提示、不自动续跑、不挡交付。
-6. **护栏单一来源**：数字上限只改 `src/agent/agent-limits.js`；工具拦截常量/逻辑在 `src/agent/guardrails-shared.js`（Main `tool-guardrails.js` + Renderer `agent-guardrails.js` 共用）。
+6. **护栏单一来源**：数字上限只改 `src/agent/agent-limits.js`；工具拦截常量/逻辑在 `src/agent/guardrails-shared.js`；**工具调用的关卡顺序只在 `src/agent/tool-gate.js` 声明**（加检查只改清单，不改流程）。
 7. **不提交**：密钥、`deploy.local.json`、`.env`、`dist/`、`release/`（除文档说明的备份策略）。
 8. **验证**：改完跑 `npm test`（按 diff 选测）或 `npm run test:agent`（全量 smoke）。
 
@@ -28,12 +28,16 @@
 | 工具 schema / 执行 | `src/agent/tool-catalog.js`（schema）、`src/agent/tool-bridge-main.js`（执行）、`src/gateway/fs-edit-file.js`（edit 实现） | 在 Renderer 再写一份 schema 或 `gatewayCall` 执行 host 工具 |
 | Planner / 多 Agent | `crates/dieyun-core/src/planner/`、`src/agent/rust-planner-runner.js` | `planner-orchestrator.js`（已删除） |
 | Gateway / 记忆 / fs RPC | `src/gateway/`、`crates/dieyun-core/src/rpc/`、`crates/dieyun-core/src/memory/` | preload 绕过 Gateway |
+| 联网搜索 / 网页抓取 | `src/gateway/web/`（`engines/` 一个引擎一个 parser；出网走 `transport.js`） | 另写一份 SERP 解析、fetch 或 SSRF 校验 |
 | 手机端 UI / 桥接 | `src/mobile/public/`、`src/mobile/bridge.js`、`src/agent/service.js` | 复制整套 PC Renderer |
 | 模型 / 语音设置 | `src/model-settings.js`、`src/renderer/renderer-model-settings.js` | 散落硬编码 API URL |
 | LLM 端点拼接 / 请求头 | `src/agent/llm-request.js`（端点与请求头唯一来源） | 在调用点内联 `Content-Type + Authorization` |
 | 打包 / 安装包 | `scripts/`、`build-installer.bat` | 任务无关不改 `electron-builder` 配置 |
 | 离线预装的 MCP 产物 | `scripts/pack-mcp-bundled.cjs`（版本唯一来源 `src/mcp/registry.js`） | 再写一份版本/校验和或另造预装机制 |
 | 护栏 / 探索限制 | `src/agent/agent-limits.js`（数字）、`guardrails-shared.js`（逻辑） | 多处重复常量 |
+| 沙箱档位 / 越界审批 | `src/gateway/sandbox-policy.js`（三档判定，唯一来源）、`sandbox-approvals.js`（ask-once）、`permissions-store.js`（档位持久化） | 在 handler 里自己拼白名单；另写一份高危命令词表（`exec-policy.js` 已复用同一份） |
+| 工具调用关卡（校验 / 止损 / 遥测 / 落盘顺序） | `src/agent/tool-gate.js`（流程 + 冻结关卡清单，加检查只改清单） | 在 `ToolHarnessSession` / `executeAgentTool` 里手写顺序，或另起一个"前置钩子层" |
+| 请求快照 / 「模型看到了什么」 | `src/agent/request-snapshot.js`（唯一装配与写入点）、`crates/dieyun-core/src/memory/snapshot.rs`（表与保留裁剪） | 在 Renderer/Main 各拼一份；另写事件溯源或格式迁移链 |
 
 ---
 
@@ -146,6 +150,9 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/LSP-DIAGNOSTICS.md`](docs/LSP-DIAGNOSTICS.md) | LSP 定位 / 诊断链路 |
 | [`docs/HARNESS-INVENTORY.md`](docs/HARNESS-INVENTORY.md) | harness 能力清单 |
 | [`docs/REASONING-ISOLATION-PLAN.md`](docs/REASONING-ISOLATION-PLAN.md) | 思考通道隔离（**已实施**，提交 1-5；仅余取证重放） |
+| [`docs/REQUEST-SNAPSHOT.md`](docs/REQUEST-SNAPSHOT.md) | 请求快照：模型看到了什么 / 为什么折叠 / 预留策略（**已实施**） |
+| [`docs/TOOL-GATE.md`](docs/TOOL-GATE.md) | 工具关卡：一次工具调用的唯一流程与关卡清单（**已实施**） |
+| [`docs/SANDBOX.md`](docs/SANDBOX.md) | 沙箱：三档能力边界 / ask-once 审批 / 未做的内核强制（**策略层已实施**） |
 | [`docs/UMD-CLEANUP-PLAN.md`](docs/UMD-CLEANUP-PLAN.md) | UMD 清理计划 |
 
 ---

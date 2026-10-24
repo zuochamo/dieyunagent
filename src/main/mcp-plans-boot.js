@@ -108,6 +108,8 @@ function bootMcpSkillCatalogs(deps) {
       },
       {
         catalogPath: path.join(userData, 'mcp-tools-catalog.json'),
+        // 会话断开 / 连接失败落到主日志：MCP 出问题时的第一现场在 logs/main.log
+        log: (msg) => log.warn(msg),
         getServerSecrets: (id) => {
           const raw = mcpStore.ensureMcpCredentialsStore(userData).loadSecrets(id);
           return mergeMcpServerSecrets(id, raw);

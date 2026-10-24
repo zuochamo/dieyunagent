@@ -12,7 +12,22 @@ const EXT_LANGUAGE = [
   ['.cjs', 'javascript'],
   ['.py', 'python'],
   ['.rs', 'rust'],
-  ['.go', 'go']
+  ['.go', 'go'],
+  // C / C++ / CUDA（UE5、Blender 插件、原生扩展）：交给 clangd
+  ['.c', 'c'],
+  ['.h', 'cpp'],
+  ['.cpp', 'cpp'],
+  ['.cc', 'cpp'],
+  ['.cxx', 'cpp'],
+  ['.c++', 'cpp'],
+  ['.hpp', 'cpp'],
+  ['.hh', 'cpp'],
+  ['.hxx', 'cpp'],
+  ['.h++', 'cpp'],
+  ['.ipp', 'cpp'],
+  ['.inl', 'cpp'],
+  ['.cu', 'cuda'],
+  ['.cuh', 'cuda']
 ];
 
 const SERVER_BY_LANGUAGE = {
@@ -22,7 +37,10 @@ const SERVER_BY_LANGUAGE = {
   javascriptreact: 'typescript',
   python: 'python',
   rust: 'rust',
-  go: 'go'
+  go: 'go',
+  c: 'clangd',
+  cpp: 'clangd',
+  cuda: 'clangd'
 };
 
 function resolvePyrightLangserverPath(workspaceRoot) {
@@ -72,11 +90,30 @@ const DEFAULT_SERVER_SPECS = {
     command: 'gopls',
     args: [],
     shell: false
+  },
+  /**
+   * C/C++/CUDA：clangd 是原生可执行文件（LLVM 发行版自带），从 PATH 启动。
+   * 未安装时 spawn 失败 → 上层返回 LSP_UNAVAILABLE，不影响其它语言。
+   * UE 项目通常还需要编译数据库：项目根 .clangd 里写
+   *   CompileFlags: { CompilationDatabase: Intermediate }
+   * 或在 userData/lsp.json 覆盖 args（如 ["--compile-commands-dir=D:/Proj/Intermediate"]）。
+   */
+  clangd: {
+    id: 'clangd',
+    command: 'clangd',
+    args: ['--background-index', '--header-insertion=never'],
+    shell: false
   }
 };
 
 function lspConfigPath(userDataPath) {
   return path.join(userDataPath, 'lsp.json');
+}
+
+/** Python 类型存根目录（bpy / 引擎 SDK 等 pyi 包放这里，由 pyright stubPath 加载）。 */
+function pythonStubDir(userDataPath) {
+  if (!userDataPath) return '';
+  return path.join(userDataPath, 'lsp-stubs');
 }
 
 function loadLspServerOverrides(userDataPath) {
@@ -122,6 +159,18 @@ function getServerKeyForLanguage(languageId) {
   return SERVER_BY_LANGUAGE[languageId] || null;
 }
 
+/**
+ * 该文件能否交给语言服务（唯一判据：语言有对应 server、且不是工程配置文件）。
+ * 早先这里是「ts 系 + python」硬编码白名单，导致 rust/go/clangd 有 spec 却永远
+ * 在 syncDocument 里被判死（诊断永远为空）。新增语言只改 EXT_LANGUAGE/SERVER_BY_LANGUAGE 即可。
+ */
+function isLanguageServable(filePath, languageId) {
+  const lang = languageId || getLanguageIdForPath(filePath);
+  if (!lang) return false;
+  if (!getServerKeyForLanguage(lang)) return false;
+  return !isTypescriptProjectConfigPath(filePath);
+}
+
 function resolveTsServerFromDir(startDir) {
   let dir = path.resolve(String(startDir || ''));
   for (let i = 0; i < 12; i++) {
@@ -149,11 +198,38 @@ function resolveTsServerPath(workspaceRoot) {
   }
 }
 
-function buildInitializeOptions(serverKey, workspaceRoot) {
-  if (serverKey !== 'typescript') return {};
-  const tsserverPath = resolveTsServerPath(workspaceRoot);
-  if (!tsserverPath) return {};
-  return { tsserver: { path: tsserverPath } };
+function buildInitializeOptions(serverKey, workspaceRoot, opts = {}) {
+  if (serverKey === 'typescript') {
+    const tsserverPath = resolveTsServerPath(workspaceRoot);
+    if (!tsserverPath) return {};
+    return { tsserver: { path: tsserverPath } };
+  }
+  /**
+   * Python 类型存根（bpy 等）：pyright 的 stubPath 指向 userData/lsp-stubs，
+   * 该目录不存在时保持默认（不影响普通项目）。
+   * 存根通过 initializationOptions.settings 下发（vscode-pyright 同款通道），
+   * 不在用户项目里写 pyrightconfig.json。
+   */
+  if (serverKey === 'python') {
+    const stubDir = opts.userDataPath ? pythonStubDir(opts.userDataPath) : '';
+    if (!stubDir) return {};
+    try {
+      if (!fs.statSync(stubDir).isDirectory()) return {};
+    } catch {
+      return {};
+    }
+    return {
+      settings: {
+        python: {
+          analysis: {
+            stubPath: stubDir,
+            extraPaths: [stubDir]
+          }
+        }
+      }
+    };
+  }
+  return {};
 }
 
 function getServerSpec(serverKey, userDataPath, workspaceRoot) {
@@ -187,11 +263,13 @@ function getServerSpec(serverKey, userDataPath, workspaceRoot) {
 module.exports = {
   getLanguageIdForPath,
   getServerKeyForLanguage,
+  isLanguageServable,
   getServerSpec,
   buildInitializeOptions,
   resolveTsServerPath,
   resolvePyrightLangserverPath,
   isTypescriptProjectConfigPath,
   shouldOpenOnTypescriptLanguageServer,
-  lspConfigPath
+  lspConfigPath,
+  pythonStubDir
 };

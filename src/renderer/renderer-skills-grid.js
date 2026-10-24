@@ -392,6 +392,7 @@ function mcpSearchHaystack(server) {
     server.description,
     command,
     server.envHint,
+    ...(Array.isArray(server.envHints) ? server.envHints.map((def) => def && def.name) : []),
     server.remoteUrl,
     server.transportKind
   ]

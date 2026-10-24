@@ -78,6 +78,17 @@ function createRendererFreezeReporter(deps) {
   const { app, log, getMainWindow } = deps || {};
   /** 最后一次渲染进程心跳时刻；0 表示尚无基准（空闲窗口无法据此判定） */
   let lastBeatAt = 0;
+  /**
+   * 上一份已落盘的渲染侧快照指纹。
+   *
+   * PerformanceObserver 一次回调里可能带多条 longtask，`renderer-freeze-watch.js` 对每条都会
+   * `collectFreezeSnapshot` + 上报一次，而快照里的 `kind/sessionId/at` 几乎相同（实测同一
+   * `at` 连落两行，第二行只是 longTasks 多一条）。落盘口是唯一的地方，去重放在这里：
+   * 同一秒、同会话、同 kind 的快照只留第一条。窗口生命周期事件（unresponsive /
+   * render-process-gone）不受影响 —— 它们 tag 不同，必须条条落盘。
+   */
+  let lastSnapshotKey = '';
+  let lastSnapshotAt = 0;
 
   function currentWebContents() {
     try {
@@ -91,9 +102,17 @@ function createRendererFreezeReporter(deps) {
 
   /**
    * 落盘一条取证：窗口生命周期事件与渲染侧上报共用同一份现场采集。
-   * @returns {string} 写入的日志行（测试/调试可直接读取）
+   * @returns {string} 写入的日志行；同秒重复快照被去重时返回空串
    */
   function reportRendererFreeze(tag, payload) {
+    if (tag === 'snapshot' && payload && typeof payload === 'object') {
+      const bucket = Math.floor((Number(payload.at) || 0) / 1000);
+      const key = `${payload.kind}|${payload.sessionId}|${bucket}`;
+      const now = Date.now();
+      if (key === lastSnapshotKey && now - lastSnapshotAt < 1000) return '';
+      lastSnapshotKey = key;
+      lastSnapshotAt = now;
+    }
     const silentMs = lastBeatAt ? Date.now() - lastBeatAt : null;
     const line = formatRendererFreezeReport(
       tag,

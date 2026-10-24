@@ -234,7 +234,18 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
       requireRustCore('memory.compaction_recent', {
         sessionId: String(sessionId || ''),
         limit
-      })
+      }),
+
+    // —— 请求快照（只读面；写入唯一入口在 Node 循环内部，不经 Gateway）——
+    // 用途：事后回答「这一轮模型到底看到了什么」。列表不带大字段，原文要 get。
+    'memory.request_snapshot_recent': async ({ sessionId, limit }) =>
+      requireRustCore('memory.request_snapshot_recent', {
+        sessionId: String(sessionId || ''),
+        limit
+      }),
+
+    'memory.request_snapshot_get': async ({ id }) =>
+      requireRustCore('memory.request_snapshot_get', { id: Number(id) })
   };
 }
 

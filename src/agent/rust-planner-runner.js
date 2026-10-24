@@ -453,6 +453,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         coreBridge: bridge,
         llm: { baseUrl, apiKey },
         loopSpec,
+        // 请求快照：Planner worker 的请求也要能事后回看（来源标 planner）。
+        sessionId: payload.sessionId || undefined,
+        runSource: 'planner',
         startParams: {
           model: body.model,
           messages: body.messages,

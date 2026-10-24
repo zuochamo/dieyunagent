@@ -7,14 +7,23 @@ const { WebSocketServer } = require('ws');
 const { createRpcHandlers } = require('./rpc');
 const { createTurnUndoService } = require('../undo/turn-undo-service');
 const { createLspDiagnosticsService } = require('../lsp/diagnostics-service');
-const { loadPermissions, savePermissions, DEFAULTS } = require('./permissions-store');
+const { loadPermissions, savePermissions, normalizePermissions } = require('./permissions-store');
+const {
+  normalizeSandboxMode,
+  sandboxErrorFor,
+  SANDBOX_MODE_META,
+  SANDBOX_MODES
+} = require('./sandbox-policy');
+const { createSandboxApprovals } = require('./sandbox-approvals');
 const {
   dieyunDefaultWorkspaceDir,
   dieyunHome,
+  dieyunMemoryDir,
   dieyunSkillsDir,
   dieyunUserHome,
   systemTempDir
 } = require('../agent-home');
+const { dieyunMdPath } = require('../dieyun-instructions');
 const { PluginHost } = require('../plugins/host');
 const { getEmbeddingConfig, loadModelSettings } = require('../model-settings');
 const { buildLlmHeadersFromConfig } = require('../agent/llm-request');
@@ -99,7 +108,15 @@ class LocalGateway {
     this.portForwardManager = null;
     this.permissionsPath = path.join(this.userDataPath, 'host-permissions.json');
     this.workspacePathFile = path.join(this.userDataPath, 'workspace.json');
-    this.permissions = opts.permissions || loadPermissions(this.permissionsPath);
+    this.permissions = normalizePermissions(opts.permissions || loadPermissions(this.permissionsPath));
+    /**
+     * ask-once 审批：越界操作问用户一次，本会话内同类直接放行。
+     * `opts.requestSandboxApproval` 由 Main 注入（走 Renderer 弹窗）；没有注入时 fail-closed。
+     */
+    this.sandboxApprovals = createSandboxApprovals({
+      request: opts.requestSandboxApproval,
+      log: (msg) => this.log(msg)
+    });
 
     this.port = Number(process.env.DIECLOUD_GATEWAY_PORT) || DEFAULT_PORT;
     this.tokenPath = path.join(this.userDataPath, 'gateway-token.txt');
@@ -467,25 +484,101 @@ class LocalGateway {
   }
 
   _collectWritableRoots() {
-    // 「完全放开路径限制」：与读白名单同源，整盘可写
-    if (this.permissions && this.permissions.unrestrictedPaths === true) {
+    // 沙箱档位唯一决定「能写哪儿」：
+    // - danger-full-access：整盘可写（历史 unrestrictedPaths 语义）
+    // - workspace-write：本机内部目录 + 工作区 + 临时目录（用户主目录不再默认开写）
+    // - read-only：只有本机内部目录 + 临时目录（账本/日志/缓存还得能写，否则 Agent 无法记账）
+    const sandboxMode = this.getSandboxMode();
+    if (sandboxMode === 'danger-full-access') {
+      // 卷根本身已覆盖内部目录与工作区，不必再拼（拼了反而让「整盘」这个事实不直观）
       return uniqueResolvedRoots(localVolumeRoots());
     }
-    // 默认 workspace / 用户主目录 / 系统临时目录与读白名单同源：恒定可写（见 _collectReadRoots 注释）
-    const roots = [
+    if (sandboxMode === 'workspace-write') {
+      return uniqueResolvedRoots([
+        ...this._internalWriteRoots(),
+        ...this._workspaceWriteRoots(),
+        systemTempDir()
+      ]);
+    }
+    return uniqueResolvedRoots([...this._internalWriteRoots(), systemTempDir()]);
+  }
+
+  /**
+   * 本机内部目录：DB / 日志 / 撤销栈 / 技能 / 记忆 / 全局说明。任何档位都可写。
+   *
+   * 这里**不能**放 `~/.dieyun` 这个父目录：它包着 `~/.dieyun/workspace`（默认工作区），
+   * 放行父目录等于给 read-only 开后门 —— 默认工作区里的写会整片绕过档位判定
+   * （实测：read-only 下 `fs.write_file` 写 `~/.dieyun/workspace/x` 0 次询问成功）。
+   * 需要写的子目录逐个列出即可，这也让「可写范围」在代码里是可读的清单。
+   */
+  _internalWriteRoots() {
+    return [
+      this.userDataPath,
       this.readableDir,
       dieyunSkillsDir(),
-      dieyunDefaultWorkspaceDir(),
-      dieyunUserHome(),
-      systemTempDir()
+      dieyunMemoryDir(),
+      dieyunMdPath()
     ];
+  }
+
+  /** 当前生效的工作区写根（含并行会话各自的工作区 + 默认工作区）。 */
+  _workspaceWriteRoots() {
+    const roots = [];
     const effRoot = this._effectiveWorkspaceRoot();
     if (effRoot) roots.push(effRoot);
     else if (!this.activeSessionId && this.workspaceRoot) roots.push(this.workspaceRoot);
+    // 默认工作区（~/.dieyun/workspace）按"工作区"算，不再按"内部目录"算 ——
+    // 它受档位管，read-only 才有意义（否则「只看不改」在最常见的首次使用场景里是空的）。
+    roots.push(dieyunDefaultWorkspaceDir());
     for (const t of this.sessionWorkspaceTargets.values()) {
       if (t && t.kind === 'local' && t.path) roots.push(t.path);
     }
-    return uniqueResolvedRoots(roots);
+    return roots;
+  }
+
+  getSandboxMode() {
+    return normalizeSandboxMode(this.permissions && this.permissions.sandboxMode);
+  }
+
+  /** 沙箱判定上下文（窗口/工具层共用一份，避免各处自己拼 roots）。 */
+  sandboxContext(opts = {}) {
+    return {
+      mode: this.getSandboxMode(),
+      workspaceRoots: this._workspaceWriteRoots(),
+      internalRoots: this._internalWriteRoots(),
+      cwd: opts.cwd
+    };
+  }
+
+  /** 越界判定 + 一次批准的唯一入口（host.exec / fs 写操作都走这里）。 */
+  async sandboxGuard(decision, opts = {}) {
+    if (!decision || decision.action === 'allow') return null;
+    const tool = opts.tool || '';
+    if (decision.action === 'deny') {
+      this.log(
+        `SANDBOX_DENY tool=${tool} mode=${decision.mode} detail=${String(decision.detail || '').slice(0, 160)}`
+      );
+      return sandboxErrorFor(decision);
+    }
+    const result = await this.sandboxApprovals.ask(decision, {
+      sessionId: opts.sessionId || this.activeSessionId || '',
+      tool,
+      /** 批准后把这个目录并入写白名单（否则旧 whitelist 会挡下刚被批准的写） */
+      path: opts.path || ''
+    });
+    if (!result.granted) {
+      this.log(
+        `SANDBOX_DECLINED tool=${tool} mode=${decision.mode} category=${decision.category} reason=${result.reason}` +
+          `${result.noChannel ? ' noChannel=1' : ''}${result.expired ? ' expired=1' : ''}`
+      );
+      return sandboxErrorFor(decision, {
+        declined: !result.noChannel && !result.expired,
+        noChannel: result.noChannel === true,
+        expired: result.expired === true
+      });
+    }
+    this.log(`SANDBOX_APPROVED tool=${tool} mode=${decision.mode} category=${decision.category}`);
+    return null;
   }
 
   _defaultCwd() {
@@ -659,7 +752,10 @@ class LocalGateway {
 
   setActiveSession(sessionId) {
     const sid = sessionId ? String(sessionId).trim() : null;
+    const prev = this.activeSessionId;
     this.activeSessionId = sid || null;
+    // 换会话 = 换任务：上一个会话的「越界已批准」不该延续到新任务
+    if (prev && prev !== this.activeSessionId) this.sandboxApprovals.clearSession(prev);
     this._refreshHandlers();
     this._syncWorkspaceDiagnosticsWatch();
     this._syncWorkspaceIndexWatch();
@@ -696,6 +792,16 @@ class LocalGateway {
       allowedReadRoots: this._collectReadRoots(),
       writableRoots: this._collectWritableRoots(),
       permissions: this.permissions,
+      /** 沙箱判定的唯一注入面：mode + roots + 审批。handler 不再自己拼白名单。 */
+      sandbox: {
+        context: (opts) => this.sandboxContext(opts),
+        guard: (decision, opts) => this.sandboxGuard(decision, opts),
+        approvals: this.sandboxApprovals,
+        /** 本会话已被批准写的目录：并入 `writeRootsForCall()`，保证「批准了就能写」 */
+        grantedWriteRoots: (sessionId) => this.sandboxApprovals.grantedPathsFor(sessionId),
+        /** 实时可写白名单（档位决定），供 `permissions.sandbox_state` 如实回报 */
+        writableRoots: () => this._collectWritableRoots()
+      },
       defaultCwd: this._defaultCwd(),
       plugins: this.plugins,
       getEmbeddingConfig: () => getEmbeddingConfig(loadModelSettings(this.userDataPath)),
@@ -732,10 +838,40 @@ class LocalGateway {
   }
 
   setPermissions(next) {
-    this.permissions = { ...DEFAULTS, ...next };
-    savePermissions(this.permissionsPath, this.permissions);
+    // 归一在 store 里做（`unrestrictedPaths` ⇄ `sandboxMode`）。这里必须先剔掉**已存储的派生值**：
+    // 否则「完全放开」时落盘的 `unrestrictedPaths: true` 会在下次只改档位时被当成用户新指令，
+    // 把档位又顶回完全放开（表现为「切了档位没生效」）。
+    const { unrestrictedPaths: _derived, ...base } = this.permissions;
+    const before = this.getSandboxMode();
+    this.permissions = savePermissions(this.permissionsPath, { ...base, ...next });
+    // 档位收紧（含切到 read-only）时作废已有批准：否则"我刚切到只读"之后旧批准照样放行，
+    // 用户看到的是一个不生效的安全开关。
+    const after = this.getSandboxMode();
+    if (SANDBOX_MODES.indexOf(after) < SANDBOX_MODES.indexOf(before)) {
+      this.sandboxApprovals.clearAll();
+      this.log(`SANDBOX_GRANTS_CLEARED ${before} -> ${after}`);
+    }
     this._refreshHandlers();
     return this.getPermissions();
+  }
+
+  /** 沙箱状态（设置页 / 状态图标 / 排查用）。 */
+  getSandboxState() {
+    const mode = this.getSandboxMode();
+    return {
+      mode,
+      meta: SANDBOX_MODE_META[mode],
+      writableRoots: this._collectWritableRoots(),
+      grants: this.sandboxApprovals.snapshot()
+    };
+  }
+
+  /**
+   * Main 注入审批通道（能弹窗的那个窗口稍后才就绪）。
+   * 没注入时 `sandboxApprovals` 走 fail-closed：越界一律拒，不会静默放行。
+   */
+  setSandboxApprovalChannel(fn) {
+    this.sandboxApprovals.setRequest(fn);
   }
 
   /** @param {string} [sessionId] 传入会话 id 时返回该会话的工作区视图（终端等随会话走的视图用） */
@@ -1072,8 +1208,10 @@ class LocalGateway {
    * 主进程内直接调用 RPC（无需 WebSocket）
    * @param {string} method
    * @param {object} [params]
+   * @param {{ timeoutMs?: number }} [opts] 旁路写（快照 / 压缩归档）必须能设短超时，
+   *   否则 DB 一慢就把等着发请求的主链路一起拖住
    */
-  async invokeRpc(method, params = {}) {
+  async invokeRpc(method, params = {}, opts = {}) {
     if (!this.handlers) this._refreshHandlers();
     const fn = this.handlers && this.handlers[method];
     if (!fn) {
@@ -1086,16 +1224,33 @@ class LocalGateway {
     const callSessionId = params && params.sessionId ? String(params.sessionId) : null;
     if (callSessionId) await this.hydrateSessionWorkspaceContext(callSessionId);
     const call = () => fn(params && typeof params === 'object' ? params : {});
-    if (this._runWithCallContext) {
-      return this._runWithCallContext(
-        { runWorkspaceRoot, sessionId: callSessionId },
-        call
-      );
+    const run = () => {
+      if (this._runWithCallContext) {
+        return this._runWithCallContext({ runWorkspaceRoot, sessionId: callSessionId }, call);
+      }
+      if (this._runWithWorkspaceRoot) {
+        return this._runWithWorkspaceRoot(runWorkspaceRoot, call);
+      }
+      return call();
+    };
+    const timeoutMs = Number(opts && opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 0;
+    if (!timeoutMs) return run();
+    let timer = null;
+    try {
+      return await Promise.race([
+        run(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const e = new Error(`RPC 超时: ${method} (>${timeoutMs}ms)`);
+            e.code = 'RPC_TIMEOUT';
+            reject(e);
+          }, timeoutMs);
+          if (timer && typeof timer.unref === 'function') timer.unref();
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
-    if (this._runWithWorkspaceRoot) {
-      return this._runWithWorkspaceRoot(runWorkspaceRoot, call);
-    }
-    return call();
   }
 
   stop() {

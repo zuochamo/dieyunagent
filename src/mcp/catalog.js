@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { assertSafeUrl } = require('../gateway/web-fetch');
+const { assertSafeUrl } = require('../gateway/web/url-safety');
 const { compareSemver } = require('../plugins/version');
 const { listBuiltinMcpServers } = require('./registry');
 

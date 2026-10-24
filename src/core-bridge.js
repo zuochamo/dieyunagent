@@ -63,7 +63,19 @@ function createCoreBridge(opts) {
   const extraEnv = opts.env && typeof opts.env === 'object' ? opts.env : {};
   const pingTimeoutMs =
     Number(opts.pingTimeoutMs) > 0 ? Number(opts.pingTimeoutMs) : 15000;
-  const log = typeof opts.log === 'function' ? opts.log : () => {};
+  // 未注入时退回 console.warn：**不能是 noop**。
+  // 曾经默认 noop + RPC_TIMEOUT 硬写 console.warn ⇒ GUI 打包后（无 stdout）
+  // 「dieyun-core 的请求超时了」这件事在 main.log 里一行都看不到，排查时只能猜。
+  const log =
+    typeof opts.log === 'function'
+      ? opts.log
+      : (msg) => {
+          try {
+            console.warn(msg);
+          } catch {
+            /* ignore */
+          }
+        };
   const onNotify = typeof opts.onNotify === 'function' ? opts.onNotify : null;
 
   /** @type {import('child_process').ChildProcess | null} */
@@ -381,7 +393,9 @@ function createCoreBridge(opts) {
         const entry = pending.get(id);
         pending.delete(id);
         if (entry && entry.timer) clearTimeout(entry.timer);
-        console.warn('[dieyun:core]', 'RPC_TIMEOUT', method, `id=${id}`);
+        // 走注入的 log 通道（main.log），不再只 console.warn：
+        // 「core 请求超时」是判断「run 为什么不动」的第一线索，必须落盘。
+        log(`[dieyun:core] RPC_TIMEOUT ${method} id=${id} timeoutMs=${timeout}`);
         bestEffortCancelForMethod(method, runId, id);
         const err = new Error(`dieyun-core 超时: ${method}`);
         err.code = 'CORE_RPC_TIMEOUT';

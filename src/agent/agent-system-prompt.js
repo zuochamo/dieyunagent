@@ -30,7 +30,8 @@ function buildCoreAgentRules(opts = {}) {
     '【Agent 准则】',
     '- 相关代码已在下文「相关代码/项目上下文」中预注入时，优先使用，少做重复 list/read。',
     '- 工具可并行；避免重复 list_dir；读大文件用 offset/maxBytes 分块。',
-    '- 需要最新事实用 web_search → web_fetch 核验；禁止伪造搜索结果。',
+    '- 需要最新事实用 web_search（默认 bing 可直连；要正文就加 fetchTop=2~3，某引擎失败就换 engine，勿重复同一 query）→ 需要单页细节再 web_fetch；禁止伪造搜索结果。',
+    '- 网页需要登录、依赖 JS 渲染、或联网抓取被反爬挡住（401/403/验证码）时，改用内置浏览器打开同一 URL 再读快照——它带浏览器 cookie 与 JS 能力（具体工具名见工具列表）。',
     '- 技能：下文只给目录与路径；执行前用 fs_read_file 读 SKILL.md；host_exec 时 cwd=技能目录。',
     '- 仅当摘要、折叠条、近轮原文和工作区仍无法在互斥选项间抉择时才用 agent_clarify；不要因历史已折叠而提问「本轮做什么」。交付适合表格时用 Markdown 表格。',
     '- 无 tool_calls 的文字回复即本轮结束；还要检查就继续调用工具，不要空转描述下一步。',
@@ -127,7 +128,7 @@ function formatPermissionsChunk(permissions) {
     );
   }
   if (p.webFetch !== false) {
-    return '【联网抓取】web_search / web_fetch 已开启（无需本机文件权限）。';
+    return '【联网抓取】web_search（默认 bing）/ web_fetch 已开启（无需本机文件权限，走系统代理）。';
   }
   return '';
 }

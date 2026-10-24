@@ -92,6 +92,30 @@ function createRemoteGatewayPool(opts = {}) {
     entries.delete(gKey);
   }
 
+  /**
+   * 停掉同一 SSH 端点上的所有 Remote Gateway（跨 remotePath）。
+   * `ssh:disconnect` 断连接是按端点前缀断的（connection-pool.disconnectEndpoint），
+   * 这里若只停 exact key，同服务器其它项目的 agent 进程会变成远端孤儿。
+   * @returns {Promise<string[]>} 被停掉的 gateway key
+   */
+  async function stopForEndpoint(target, sshManager) {
+    const tKey = sshTargetKey(target);
+    if (!tKey) return [];
+    const stopped = [];
+    for (const [gKey, entry] of [...entries.entries()]) {
+      if (entry.targetKey !== tKey) continue;
+      try {
+        await entry.manager.stop(sshManager, { killRemote: true });
+      } catch {
+        // ignore — 单个槽失败不能挡住其它槽与 SSH 断开
+      }
+      entries.delete(gKey);
+      stopped.push(gKey);
+      log(`Remote Gateway pool stopped endpoint ${gKey}`);
+    }
+    return stopped;
+  }
+
   async function stopAll(sshPoolDisconnect) {
     for (const [gKey, entry] of [...entries.entries()]) {
       try {
@@ -146,6 +170,7 @@ function createRemoteGatewayPool(opts = {}) {
     getInfoForTarget,
     getStatusForTarget,
     stopForTarget,
+    stopForEndpoint,
     stopAll,
     stopExceptGatewayKeys,
     isActiveForTarget,

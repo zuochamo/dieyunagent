@@ -1,4 +1,4 @@
-/* global window, document, $, setComposerSendingState, updateLastTurnFloat, flushComposerQueue, updateComposerQueueUi, getAgentContinueState, currentSessionId, isSessionSwitchInFlight, isComposerQueuePaused */
+/* global window, document, $, setComposerSendingState, updateLastTurnFloat, flushComposerQueue, updateComposerQueueUi, getAgentContinueState, currentSessionId, isSessionSwitchInFlight, isComposerQueuePaused, getComposerQueueEditing, renderAttachmentChips, refreshContextProgress, revokeAttachmentPreview */
 'use strict';
 
 const SESSION_STORAGE_KEY = 'diecloud.active.session.v1';
@@ -15,6 +15,8 @@ function getCurrentSessionId() {
 }
 
 function setCurrentSessionId(id) {
+  // 未发送文字按会话绑定：此刻输入框里还是旧会话的内容，先存回它，再载入新会话的草稿
+  bindComposerDraftToSession(id);
   try {
     window.localStorage.setItem(SESSION_STORAGE_KEY, id);
   } catch {
@@ -76,11 +78,98 @@ function clearSessionPendingAttachments(sessionId) {
   list.length = 0;
 }
 
+/**
+ * 输入框「未发送文字」的每会话草稿。
+ *
+ * 待发附件早就按会话隔离（sessionPendingAttachments），输入框文字却只有一个 DOM 值：
+ * 在 A 对话打了没发的字，切到 B 会原样跟过去，看起来就是「没绑定对话」。
+ * 这里把文字按会话存起来 —— 切走时存回旧会话，切回时载入该会话自己的草稿。
+ * @type {Map<string, string>}
+ */
+const sessionComposerDrafts = new Map();
+/** 输入框当前内容归属的会话；随 setCurrentSessionId 同步推进 */
+let composerDraftOwnerSessionId = currentSessionId ? String(currentSessionId) : '';
+/**
+ * 「还没有活跃会话」时输入框里已经打下的文字。
+ * 首装 / 清过 localStorage 的启动态就是这种：currentSessionId 为空，文字没有归属。
+ * 不寄存的话，切到第一个会话时会拿「目标会话的草稿（不存在）」去覆盖输入框 —— 用户打的字直接丢。
+ * 只在目标会话自己没有草稿时被认领一次，之后归它名下。
+ */
+let orphanComposerDraft = '';
+
+function getSessionComposerDraft(sessionId) {
+  const sid = sessionId != null ? String(sessionId) : String(currentSessionId || '');
+  if (!sid) return '';
+  return sessionComposerDrafts.get(sid) || '';
+}
+
+function clearSessionComposerDraft(sessionId) {
+  const sid = sessionId != null ? String(sessionId) : String(currentSessionId || '');
+  if (!sid) return;
+  sessionComposerDrafts.delete(sid);
+}
+
+/**
+ * 把输入框里的文字存回它当前归属的会话（空串删键，不堆空草稿）。
+ * 排队项编辑槽占着输入区时，框里是「编辑缓冲」而不是会话草稿：
+ * 此时存回「进入编辑前」的快照，否则队列项文本会被复制成草稿。
+ */
+function stashComposerDraft() {
+  const sid = composerDraftOwnerSessionId;
+  if (!chatInput) return;
+  const editing =
+    typeof getComposerQueueEditing === 'function' ? getComposerQueueEditing() : null;
+  const inEditSlot = !!(editing && String(editing.sessionId || '') === sid);
+  const text = inEditSlot
+    ? String((editing.composerDraftBefore && editing.composerDraftBefore.text) || '')
+    : String(chatInput.value || '');
+  if (!sid || sid === LEGACY_SESSION) {
+    // 尚无活跃会话（LEGACY_SESSION 是「没有活跃会话」时的占位 id，不是真实会话）：
+    // 先寄存，等真正的会话出现时认领 —— 直接丢弃等于吃用户已经打下的字
+    orphanComposerDraft = text;
+    return;
+  }
+  if (text) sessionComposerDrafts.set(sid, text);
+  else sessionComposerDrafts.delete(sid);
+}
+
+/**
+ * 会话切换：先存回旧会话的草稿，再载入目标会话的草稿（没有就清空输入框）。
+ * 唯一入口是 setCurrentSessionId —— 改 currentSessionId 的 4 处都紧跟它，
+ * 绑定点放在那里，将来新增切换路径也不会漏。
+ */
+function bindComposerDraftToSession(sessionId) {
+  const next = sessionId != null ? String(sessionId) : '';
+  if (next === composerDraftOwnerSessionId) return;
+  stashComposerDraft();
+  composerDraftOwnerSessionId = next;
+  let text = '';
+  if (next) {
+    if (sessionComposerDrafts.has(next)) {
+      text = sessionComposerDrafts.get(next);
+    } else if (orphanComposerDraft) {
+      // 目标会话还没有自己的草稿：认领「无会话期间」打下的字，之后它就是该会话的草稿
+      text = orphanComposerDraft;
+      sessionComposerDrafts.set(next, text);
+    }
+    orphanComposerDraft = '';
+  }
+  if (chatInput) chatInput.value = next ? text : '';
+  if (typeof renderAttachmentChips === 'function') renderAttachmentChips();
+  if (typeof refreshContextProgress === 'function') refreshContextProgress();
+}
+
 function cleanupSessionScopedComposerState(sessionId) {
   const sid = String(sessionId || '').trim();
   if (!sid) return;
   clearSessionPendingAttachments(sid);
   sessionPendingAttachments.delete(sid);
+  clearSessionComposerDraft(sid);
+  if (composerDraftOwnerSessionId === sid && chatInput) {
+    // 会话已删：输入区内容随会话一起丢弃，否则切走时又被存回这条已删会话
+    composerDraftOwnerSessionId = '';
+    chatInput.value = '';
+  }
   if (typeof cleanupSessionContinueState === 'function') cleanupSessionContinueState(sid);
   if (typeof cleanupSessionComposerAgentMode === 'function') cleanupSessionComposerAgentMode(sid);
   if (typeof cleanupSessionComposerModelPick === 'function') cleanupSessionComposerModelPick(sid);

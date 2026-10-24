@@ -44,8 +44,31 @@ const UNIFIED_KNOWLEDGE_SCHEMA = `只输出 JSON，不要 Markdown 包裹或额�
 {
   "memories": [{"content":"…","kind":"normal|private|secret","importance":1-5,"scope":"global|project"}],
   "archive_memory_ids": ["记忆id"],
-  "agents_updates": [{"section":"commands","action":"append","content":"- …","confidence":0.9}]
+  "agents_updates": [{"section":"commands","action":"append|merge|replace","anchor":"merge 时填已有条目的开头片段","content":"- …","confidence":0.9}]
 }`;
+
+/**
+ * 同主题合并的唯一可执行路径（merge + anchor）。
+ *
+ * 不给这条引导，后台归纳器只会 append —— 实测某项目文件在一天内被加了 20 条，
+ * 其中 CameraCut 同主题重复两次，直接把文件顶到 24000 上限、要靠人工压。
+ * 注意这里的措辞与 `tool-catalog.js` 的 agents_md_propose 描述保持一致。
+ */
+const AGENTS_MERGE_RULE =
+  '   **同主题已有条目要合并，不要追加第二条**：用 action:"merge" + anchor' +
+  '（已有条目的开头片段，如 "**CameraCut"），content 写合并后的完整条目；' +
+  '确实没有同主题条目时才用 action:"append"；整段重写用 action:"replace"。\n';
+
+/**
+ * 给归纳器一个体积感。没有这句，它不知道自己在往一个快写满的文件里塞东西，
+ * 于是照旧 append（实测正是这条路径把文件顶到 24000）。
+ * 阈值取 18000（文件自带口径「涨到约 20000 就压一轮」的提前量）。
+ */
+function agentsPressureNote(content) {
+  const len = String(content || '').length;
+  if (len < 18000) return '';
+  return `\n⚠ 当前已约 ${len} 字（上限 24000，接近写满）：本次 agents_updates 只做合并（merge），不要 append 新增条目。`;
+}
 
 function getKnowledgeConsolidationSettings() {
   const base = {
@@ -104,7 +127,8 @@ function buildUnifiedKnowledgeSystemPrompt(opts = {}) {
       '2. archive_memory_ids：仅填输入里给出的过时/重复记忆 id。\n';
     if (agentsEnabled) {
       boundary +=
-        '3. agents_updates：稳定命令/目录/规范/坑点短列表；section=overview|structure|commands|conventions|testing|architecture|gotchas。\n';
+        '3. agents_updates：稳定命令/目录/规范/坑点短列表；section=overview|structure|commands|conventions|testing|architecture|gotchas。\n' +
+        AGENTS_MERGE_RULE;
     } else {
       boundary += '3. agents_updates 必须为 []。\n';
     }
@@ -125,7 +149,8 @@ function buildUnifiedKnowledgeSystemPrompt(opts = {}) {
     '不写：稳定命令清单、目录树、完整多步流程。与 AGENTS 将写入的内容重复则不要放 memories。\n' +
     '2. agents_updates（AGENTS.md 项目地图）：稳定命令、目录、规范、长期坑点（短列表项）。' +
     'section 取值：overview, structure, commands, conventions, testing, architecture, gotchas。' +
-    '不写：完整 SOP、逐步操作过程。\n';
+    '不写：完整 SOP、逐步操作过程。\n' +
+    AGENTS_MERGE_RULE;
   boundary +=
     '【互斥】同一命令优先 agents_updates.commands，不要同时写 memories；' +
     '无内容则对应数组为空。' +
@@ -316,14 +341,19 @@ async function runUnifiedKnowledgeMaintenance(input) {
   if (!model || !apiConfig?.baseUrl) return { ok: false, reason: 'no_model' };
 
   let agentsContext = '';
+  let agentsPressure = '';
   if (agentsEnabled && !periodicOnly) {
     if (input?.agentsMdSnapshot) {
-      agentsContext = String(input.agentsMdSnapshot).slice(0, 12000);
+      const full = String(input.agentsMdSnapshot);
+      agentsContext = full.slice(0, 12000);
+      agentsPressure = agentsPressureNote(full);
     } else {
       try {
         await ensureAgentsMd(workspacePath);
         const rec = await loadAgentsMdRecord(workspacePath);
-        agentsContext = String(rec?.content || '').slice(0, 12000);
+        const full = String(rec?.content || '');
+        agentsContext = full.slice(0, 12000);
+        agentsPressure = agentsPressureNote(full);
       } catch {
         agentsContext = '';
       }
@@ -364,7 +394,7 @@ async function runUnifiedKnowledgeMaintenance(input) {
             ? `【触发】${sourceLabel}\n\n【近期上下文】\n${signals.recentText || '无'}`
             : [
                 `【触发】${sourceLabel}`,
-                `【当前 AGENTS.md】\n${agentsContext || '（未启用或无工作空间）'}`,
+                `【当前 AGENTS.md】\n${agentsContext || '（未启用或无工作空间）'}${agentsPressure}`,
                 `【用户任务】\n${signals.userText || '无'}`,
                 `【Agent 结果】\n${signals.assistantText || '无'}`,
                 `【Plan 步骤】\n${signals.planSummary || '无'}`,
@@ -521,7 +551,8 @@ async function gatherFullConsolidationCorpus(settings, workspacePath) {
     try {
       await ensureAgentsMd(workspacePath);
       const rec = await loadAgentsMdRecord(workspacePath);
-      parts.push(`【当前 AGENTS.md】\n${String(rec?.content || '').slice(0, 10000) || '空'}`);
+      const full = String(rec?.content || '');
+      parts.push(`【当前 AGENTS.md】\n${full.slice(0, 10000) || '空'}${agentsPressureNote(full)}`);
     } catch {
       parts.push('【当前 AGENTS.md】\n读取失败');
     }

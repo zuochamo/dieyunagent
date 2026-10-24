@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, disposeMonacoArtifactEditor, createMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText, applyWorkspaceArtifactPath, renderArtifactsList, artifactViewHasPreview, resetArtifactFollowState, resetArtifactModelCache, revokeArtifactMediaBlobUrls, resolveArtifactPathInWorkspace, loadArtifactContent, markArtifactPathTranslated, getArtifactPathTranslation, clearArtifactPathTranslation */
+/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, disposeMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText, applyWorkspaceArtifactPath, renderArtifactsList, artifactViewHasPreview, resetArtifactFollowState, resetArtifactModelCache, revokeArtifactMediaBlobUrls, resolveArtifactPathInWorkspace, loadArtifactContent, markArtifactPathTranslated, getArtifactPathTranslation, clearArtifactPathTranslation, openArtifactTab, resetArtifactsTabs, resetArtifactsEditorShell, paintEmptyArtifactsTabStrip, isMonacoPathDirty, ensureArtifactsEditorMounted */
 'use strict';
 
 var artifactsApi = window.diecloud || {};
@@ -176,6 +176,12 @@ function maybeReloadSelectedArtifactContent(opts) {
   }
   if (typeof isSidePanelOpen === 'function' && !isSidePanelOpen()) return false;
   if (typeof getSidePanelTab === 'function' && getSidePanelTab() !== 'files') return false;
+  // 别的面板的 diff 预览会卸载 Monaco：回到文件页先补挂（内容在缓存里，零 RPC）
+  if (!force && typeof ensureArtifactsEditorMounted === 'function' && ensureArtifactsEditorMounted()) {
+    return true;
+  }
+  // 当前标签有未保存修改：任何「磁盘变了」的判定都不能覆盖用户输入
+  if (typeof isMonacoPathDirty === 'function' && isMonacoPathDirty(fp)) return false;
 
   const diskMtime = findArtifactEntryMtime(fp);
   const mounted =
@@ -570,12 +576,28 @@ async function teardownArtifactsMonacoEditor() {
   if (typeof disposeMonacoArtifactEditor === 'function') {
     await disposeMonacoArtifactEditor();
   }
+  // 编辑器实例没了，长驻编辑区外壳必须失效（下次用新宿主重建）。
+  // 标签也跟着清：调用方都是「切工作区 / 清空产物」，跨工作区留着标签会把
+  // SSH 本地/远程的同名路径串成同一条。
+  if (typeof resetArtifactsEditorShell === 'function') resetArtifactsEditorShell();
+  if (typeof resetArtifactsTabs === 'function') resetArtifactsTabs();
+  // 选中项一起清：否则下一次列表重绘会按旧工作区的路径把标签又建回来
+  selectedArtifactPath = null;
+  selectedArtifactContentMtime = 0;
 }
 
-async function clearArtifactsFileView(view, html) {
+/**
+ * @param {HTMLElement} view
+ * @param {string} html
+ * @param {{ keepTabs?: boolean }} [opts] 关闭最后一个标签时用 keepTabs（标签已空，别再重复清）
+ */
+async function clearArtifactsFileView(view, html, opts) {
   if (!view) return;
   cancelArtifactContentLoads();
   await teardownArtifactsMonacoEditor();
+  if (opts && opts.keepTabs && typeof paintEmptyArtifactsTabStrip === 'function') {
+    paintEmptyArtifactsTabStrip();
+  }
   if (view.isConnected) view.innerHTML = html;
 }
 
@@ -615,6 +637,9 @@ function invalidateWorkspaceArtifacts() {
     revokeArtifactMediaBlobUrls(document.getElementById('artifacts-file-view'));
   }
   if (typeof resetArtifactModelCache === 'function') resetArtifactModelCache();
+  // 工作区换了：标签里的路径与未保存内容都不再成立
+  if (typeof resetArtifactsEditorShell === 'function') resetArtifactsEditorShell();
+  if (typeof resetArtifactsTabs === 'function') resetArtifactsTabs();
 }
 
 function expectedArtifactsSourceKey(workspacePath, browseRel) {
@@ -736,13 +761,17 @@ function endArtifactContentLoad(gen) {
   artifactContentLoadingAt = 0;
 }
 
-/** 重绘产物列表 + 变更面板（两个 pane 共用同一拍刷新，避免各自扫描） */
+/** 重绘产物列表 + 变更面板 + 产物区（三个 pane 共用同一拍刷新，避免各自扫描） */
 function refreshArtifactsPaneViews() {
   renderArtifactsList({ skipRefresh: true });
   if (typeof window.patchChangesPane === 'function') {
     window.patchChangesPane();
   } else if (typeof renderChangesPane === 'function') {
     renderChangesPane();
+  }
+  // 产物区是 sessionArtifacts 的只读索引：同一份数据，同一拍刷新（pane 不可见时自带短路）
+  if (typeof window.refreshProductsPanelIfActive === 'function') {
+    window.refreshProductsPanelIfActive();
   }
 }
 
@@ -848,14 +877,13 @@ async function ensureDefaultWorkspaceEditor(opts = {}) {
   await refreshArtifactsDirectory(true);
 
   const pick = await pickDefaultEditorFile(wsCtx);
-  if (pick) {
+  const view = document.getElementById('artifacts-file-view');
+  if (pick && typeof openArtifactTab === 'function') {
+    // 用户主动打开：允许在本地映射失败时向 Gateway 要一次权威解析
+    openArtifactTab(pick, { force: true, authoritative: true });
+  } else if (pick && view && typeof loadArtifactContent === 'function') {
     selectedArtifactPath = pick;
     selectedArtifactContentMtime = 0;
-  }
-
-  const view = document.getElementById('artifacts-file-view');
-  if (pick && view && typeof loadArtifactContent === 'function') {
-    // 用户主动打开：允许在本地映射失败时向 Gateway 要一次权威解析
     loadArtifactContent(pick, view, { authoritative: true });
   } else if (typeof renderArtifactsList === 'function') {
     renderArtifactsList({ skipRefresh: true });
@@ -907,14 +935,18 @@ async function openArtifactFileAtLine(filePath, line, col) {
   const fp = applyWorkspaceArtifactPath(String(filePath || '').trim());
   if (!fp) return;
   if (typeof openSidePanel === 'function') openSidePanel({ tab: 'files' });
-  selectedArtifactPath = fp;
-  selectedArtifactContentMtime = 0;
-  const view = document.getElementById('artifacts-file-view');
-  if (view && typeof loadArtifactContent === 'function') {
+  if (typeof openArtifactTab === 'function') {
     // 来自问题面板 / 搜索结果的路径：可能是「别的视角」的路径，允许权威解析兜底
-    loadArtifactContent(fp, view, { force: true, authoritative: true });
-  } else if (typeof renderArtifactsList === 'function') {
-    renderArtifactsList({ skipRefresh: true });
+    openArtifactTab(fp, { force: true, authoritative: true });
+  } else {
+    selectedArtifactPath = fp;
+    selectedArtifactContentMtime = 0;
+    const view = document.getElementById('artifacts-file-view');
+    if (view && typeof loadArtifactContent === 'function') {
+      loadArtifactContent(fp, view, { force: true, authoritative: true });
+    } else if (typeof renderArtifactsList === 'function') {
+      renderArtifactsList({ skipRefresh: true });
+    }
   }
   if (typeof revealMonacoLine === 'function') {
     revealMonacoLine(line, col);

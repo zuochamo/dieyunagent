@@ -1,5 +1,7 @@
 'use strict';
 
+const { getEnvHintDefs, getEnvHintNames, getEnvRequirement, isEnvSatisfied } = require('./env-hints');
+
 function transportKind(server) {
   if (!server) return 'stdio';
   if (server.transportKind === 'remote' || server.remoteUrl) return 'remote';
@@ -14,15 +16,17 @@ function hasProcessEnv(name) {
 
 /**
  * 声明的环境变量是否已就位（保存的凭据能解密出值，或进程环境里已有）。
+ * 判定口径由 env-hints.js 决定：默认「required 的条目全都要有」；声明了
+ * `envRequirement: 'any'` 的服务则是「至少一条有」（条目互为替代，例如
+ * mcp-postgres 的单库串与多库串）。
  * @param {object} server
  * @param {{ getSecretMeta: (id: string) => { envKeys?: string[] } }} deps
  */
 function hasRequiredEnv(server, deps) {
-  const envHint = String(server.envHint || '').trim();
-  if (!envHint) return true;
+  if (!getEnvHintDefs(server).length) return true;
   const meta = deps.getSecretMeta(server.id);
-  if (meta && meta.envKeys && meta.envKeys.includes(envHint)) return true;
-  return hasProcessEnv(envHint);
+  const saved = new Set(meta && Array.isArray(meta.envKeys) ? meta.envKeys : []);
+  return isEnvSatisfied(server, (name) => saved.has(name) || hasProcessEnv(name));
 }
 
 /**
@@ -45,7 +49,8 @@ function isMcpServerConfigured(server, deps) {
   }
 
   // 预装服务：启动命令来自 app 资源，不要求用户填 command，但凭据要求与普通 stdio 一致 ——
-  // 声明了 envHint（如 mcp-postgres 的 DATABASE_URL）就仍须就位，否则会「已启用但连不上」。
+  // 声明了环境变量（如 mcp-postgres 的 DATABASE_URL / MCP_DATABASE_URLS）就仍须就位，
+  // 否则会「已启用但连不上」。
   if (server.bundledServer) return hasRequiredEnv(server, deps);
 
   const command = String(server.command || '').trim();
@@ -62,6 +67,8 @@ function enrichMcpServerForUi(server, deps) {
   const kind = transportKind(server);
   const configured = isMcpServerConfigured(server, deps);
   const meta = deps.getSecretMeta(server.id);
+  const undecryptable = meta && Array.isArray(meta.undecryptable) ? meta.undecryptable : [];
+  const saved = new Set(meta && Array.isArray(meta.envKeys) ? meta.envKeys : []);
   return {
     ...server,
     transportKind: kind,
@@ -69,7 +76,22 @@ function enrichMcpServerForUi(server, deps) {
     needsConfig: !configured,
     hasToken: !!(meta && meta.hasToken),
     /** 存在但解不开的凭据键（含 'token'）：UI 据此提示"请重新填写"而不是"请填写" */
-    undecryptable: meta && Array.isArray(meta.undecryptable) ? meta.undecryptable : []
+    undecryptable,
+    /**
+     * 逐项环境变量的**规范化 + 当前状态**，配置页据此渲染多个输入框。
+     * 这里会覆盖服务定义里的原始 envHints —— 原始数组可能只是字符串名，
+     * UI 需要的是带 label、且标明「已就位 / 待填写 / 解不开」的形态。
+     */
+    envHintNames: getEnvHintNames(server),
+    envRequirement: getEnvRequirement(server),
+    envHints: getEnvHintDefs(server).map((def) => ({
+      name: def.name,
+      label: def.label,
+      hint: def.hint,
+      required: def.required,
+      saved: saved.has(def.name) || hasProcessEnv(def.name),
+      undecryptable: undecryptable.includes(def.name)
+    }))
   };
 }
 

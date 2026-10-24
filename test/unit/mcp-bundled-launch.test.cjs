@@ -9,7 +9,10 @@ const {
   resolveBundledMcpEntry,
   resolveBundledMcpLaunch
 } = require('../../src/mcp/bundled-launch');
-const { packLooksComplete } = require('../../scripts/pack-mcp-bundled.cjs');
+const {
+  packLooksComplete,
+  patchLauncherHideConsole
+} = require('../../scripts/pack-mcp-bundled.cjs');
 const { getBuiltinMcpById } = require('../../src/mcp/registry');
 
 function sha256(buf) {
@@ -17,6 +20,12 @@ function sha256(buf) {
 }
 
 const FAKE_EXE = Buffer.from('MZ-fake-binary');
+
+/** 上游 launcher 起原生二进制那一行（未打补丁，会弹控制台窗口） */
+const LAUNCHER_UPSTREAM = "const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit' });\n";
+/** 打过补丁后的同一行 */
+const LAUNCHER_PATCHED =
+  "const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit', windowsHide: true });\n";
 
 describe('预装 MCP 启动解析（离线预装产物）', () => {
   let root;
@@ -32,12 +41,14 @@ describe('预装 MCP 启动解析（离线预装产物）', () => {
   /**
    * 造一份最小预装产物：manifest.json + pkg/bin/cli.js + pkg/vendor/<exe>。
    * 布局由 manifest 声明，测试不依赖脚本的实现细节。
+   * launcher 默认写成「已打补丁」的样子 —— 与 pack 脚本的产出一致。
    */
   function writePack(dirName, patch = {}) {
     const dir = path.join(root, dirName);
     fs.mkdirSync(path.join(dir, 'pkg', 'bin'), { recursive: true });
     fs.mkdirSync(path.join(dir, 'pkg', 'vendor'), { recursive: true });
-    fs.writeFileSync(path.join(dir, 'pkg', 'bin', 'cli.js'), '// cli\n', 'utf8');
+    const launcher = patch.__launcher === 'upstream' ? LAUNCHER_UPSTREAM : LAUNCHER_PATCHED;
+    fs.writeFileSync(path.join(dir, 'pkg', 'bin', 'cli.js'), launcher, 'utf8');
     if (!patch.__skipBinary) {
       fs.writeFileSync(path.join(dir, 'pkg', 'vendor', 'x.exe'), FAKE_EXE);
     }
@@ -52,6 +63,7 @@ describe('预装 MCP 启动解析（离线预装产物）', () => {
       ...patch
     };
     delete manifest.__skipBinary;
+    delete manifest.__launcher;
     fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
     return dir;
   }
@@ -131,7 +143,7 @@ describe('预装产物完成判定（决定是否重新 pack）', () => {
     const dir = path.join(root, 'mcp-postgres');
     fs.mkdirSync(path.join(dir, 'pkg', 'bin'), { recursive: true });
     fs.mkdirSync(path.join(dir, 'pkg', 'vendor'), { recursive: true });
-    fs.writeFileSync(path.join(dir, 'pkg', 'bin', 'cli.js'), '// cli\n', 'utf8');
+    fs.writeFileSync(path.join(dir, 'pkg', 'bin', 'cli.js'), LAUNCHER_PATCHED, 'utf8');
     fs.writeFileSync(path.join(dir, 'pkg', 'vendor', 'x.exe'), FAKE_EXE);
     fs.writeFileSync(
       path.join(dir, 'manifest.json'),
@@ -151,5 +163,67 @@ describe('预装产物完成判定（决定是否重新 pack）', () => {
     // 产物被替换/损坏
     fs.writeFileSync(path.join(dir, 'pkg', 'vendor', 'x.exe'), Buffer.from('tampered'));
     expect(packLooksComplete(dir, { name: 'x', version: '0.1.10' })).toBe(false);
+  });
+
+  // 版本没变但缺补丁 → 必须判定为「未完成」，否则旧产物会一直弹窗口
+  it('launcher 没打防弹窗补丁的旧产物视为未完成（强制重打包）', () => {
+    const dir = path.join(root, 'mcp-postgres');
+    fs.mkdirSync(path.join(dir, 'pkg', 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'pkg', 'vendor'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'pkg', 'bin', 'cli.js'), LAUNCHER_UPSTREAM, 'utf8');
+    fs.writeFileSync(path.join(dir, 'pkg', 'vendor', 'x.exe'), FAKE_EXE);
+    fs.writeFileSync(
+      path.join(dir, 'manifest.json'),
+      JSON.stringify({
+        packageName: 'x',
+        version: '0.1.10',
+        entry: path.join('pkg', 'bin', 'cli.js'),
+        binary: path.join('pkg', 'vendor', 'x.exe'),
+        binarySha256: sha256(FAKE_EXE)
+      }),
+      'utf8'
+    );
+
+    expect(packLooksComplete(dir, { name: 'x', version: '0.1.10' })).toBe(false);
+  });
+});
+
+/**
+ * 为什么需要这个补丁：上游 launcher 起原生二进制时没传 windowsHide。
+ * app 与 launcher 自己都是 GUI 子系统 / 无控制台进程，Windows 对控制台子进程必须新分配一个控制台，
+ * 于是每次连接 mcp-postgres 都弹一个黑窗口（2026-10-16 实测：electron 父进程下窗口 11→12）。
+ */
+describe('预装 launcher 的防弹窗补丁（打包期打到上游字节上）', () => {
+  it('上游原文 → 补上 windowsHide', () => {
+    const r = patchLauncherHideConsole(LAUNCHER_UPSTREAM);
+    expect(r.ok).toBe(true);
+    expect(r.changed).toBe(true);
+    expect(r.text).toContain('windowsHide: true');
+    expect(r.text).toContain("stdio: 'inherit'");
+  });
+
+  it('重复执行幂等（改了字节不重复改）', () => {
+    const once = patchLauncherHideConsole(LAUNCHER_UPSTREAM).text;
+    const twice = patchLauncherHideConsole(once);
+    expect(twice.ok).toBe(true);
+    expect(twice.changed).toBe(false);
+    expect(twice.text).toBe(once);
+  });
+
+  it('上游自己修好了（写法不同）也放行，不强改字节', () => {
+    const upstreamFixed =
+      'const child = spawn(bin, process.argv.slice(2), { windowsHide: true, stdio: \'inherit\' });\n';
+    const r = patchLauncherHideConsole(upstreamFixed);
+    expect(r.ok).toBe(true);
+    expect(r.changed).toBe(false);
+    expect(r.text).toBe(upstreamFixed);
+  });
+
+  it('上游结构变了（锚点找不到且没有 windowsHide）→ 失败关闭，拒绝产出带窗口的包', () => {
+    const unknown = 'const child = spawn(bin, argv, { stdio: "inherit", detached: false });\n';
+    const r = patchLauncherHideConsole(unknown);
+    expect(r.ok).toBe(false);
+    expect(r.changed).toBe(false);
+    expect(r.text).toBe(unknown);
   });
 });

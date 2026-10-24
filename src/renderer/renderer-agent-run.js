@@ -121,7 +121,10 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
         runWorkspaceRoot: runWorkspacePath || undefined,
         undoTurnId: runUndoTurnId || undefined,
         taskTier: runOpts.taskTier || null,
-        longHorizon: !!longHorizon
+        longHorizon: !!longHorizon,
+        // 请求快照的审计事实：只有「首段」的 messages 是这次刚拼出来的，
+        // 续段的 messages 来自循环账本，折叠事实不再适用，因此显式置空。
+        contextAudit: runOpts.contextAudit || null
       };
       if (continueFrom && continueFrom.body) {
         continueFrom = await reprojectContinueFromBody(
@@ -131,6 +134,7 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
           runSessionId
         );
         toolOpts.body = continueFrom.body;
+        toolOpts.contextAudit = null;
         toolOpts.trace = continueFrom.trace;
         toolOpts.tokensUsed = continueFrom.tokensUsed;
         toolOpts.tokenUsage = continueFrom.tokenUsage;

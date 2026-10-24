@@ -6,10 +6,10 @@ const agentToolsApi = window.diecloud || {};
 /** @type {Map<string, { runId: string, roleId?: string, worktreePath?: string, workspacePath?: string, sessionId: string, undoTurnId?: string }>} */
 const agentExecutionContexts = new Map();
 
-function runExclusiveAgentTool(fn, workspaceKey, holderId) {
+function runExclusiveAgentTool(fn, workspaceKey, holderId, tool) {
   const mq = window.MutateQueue;
   if (mq && typeof mq.runExclusive === 'function') {
-    return mq.runExclusive(fn, workspaceKey, holderId);
+    return mq.runExclusive(fn, workspaceKey, holderId, { tool });
   }
   return fn();
 }
@@ -86,7 +86,7 @@ async function executeAgentTool(name, args, sessionId) {
       if (typeof scheduleArtifactsUiRefresh === 'function') scheduleArtifactsUiRefresh('full');
       else if (typeof scheduleArtifactsUiFlush === 'function') scheduleArtifactsUiFlush();
       return inner;
-    }, workspaceKey, sid);
+    }, workspaceKey, sid, norm.name);
     if (typeof refreshWorkspaceMutateHint === 'function') {
       refreshWorkspaceMutateHint(workspaceKey, sid);
     }
@@ -95,12 +95,9 @@ async function executeAgentTool(name, args, sessionId) {
   return invoke();
 }
 
+// 入参必须已归一：两个入口（本地调用 / Main 反向委托）都先过 `executeAgentTool`，
+// 归一发生在那里一次即可。内层再归一既无用、又会让人误以为"这里也可以传原始名"。
 async function executeAgentToolInner(name, args, sessionId) {
-  if (typeof normalizeAgentToolName === 'function') {
-    const norm = normalizeAgentToolName(name, args);
-    name = norm.name;
-    args = norm.args;
-  }
   const rendererOnly =
     (typeof DieyunToolCatalog !== 'undefined' &&
       Array.isArray(DieyunToolCatalog.RENDERER_ONLY_TOOLS) &&

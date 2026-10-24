@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail */
 'use strict';
 
 /** 工具行的稳定签名（不含思考正文） */
@@ -533,9 +533,12 @@ function syncThinkingRoundSummaryLabel(summary, entry, index, trace) {
   if (!shouldShowTraceTitle(entry)) return false;
 
   const cpBtn = summary.querySelector('.msg-checkpoint-restore-btn');
+  // 子 Agent 卡片的「详情」入口固定留在行尾：标题片段插在它前面
+  const detailBtn = summary.querySelector('.msg-thinking-subagent-detail');
   const { name, primary, suffix } = thinkingRoundSummaryParts(entry, index, trace);
   const insertNode = (node) => {
     if (cpBtn) summary.insertBefore(node, cpBtn);
+    else if (detailBtn) summary.insertBefore(node, detailBtn);
     else summary.appendChild(node);
   };
 
@@ -806,51 +809,6 @@ function appendThinkingToolRows(ul, tools, { roundComplete = false } = {}) {
       text.className = 'msg-thinking-tool-text';
       text.textContent = `${label} → ${t.summary}`;
       row.appendChild(text);
-      if (failed && t.name && t.toolArgs && window.diecloud && window.diecloud.agentRetryTool) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'msg-thinking-tool-retry';
-        btn.textContent = '重试';
-        btn.title = '重新执行此工具调用';
-        btn.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          btn.disabled = true;
-          void window.diecloud
-            .agentRetryTool({
-              name: t.name,
-              args: t.toolArgs,
-              sessionId:
-                (btn.closest('.msg') && btn.closest('.msg').dataset.runSessionId) ||
-                (typeof currentSessionId !== 'undefined' ? currentSessionId : undefined),
-              undoTurnId:
-                typeof getCurrentUndoTurnId === 'function' ? getCurrentUndoTurnId() : undefined
-            })
-            .then((r) => {
-              if (r && r.error) {
-                text.textContent = `${label} → 错误: ${r.error}`;
-                if (typeof showAgentToast === 'function') {
-                  showAgentToast('工具重试失败', String(r.error).slice(0, 200), { variant: 'error' });
-                }
-              } else if (typeof summarizeToolResult === 'function') {
-                text.textContent = `${label} → ${summarizeToolResult(t.name, r)}`;
-                li.classList.remove('msg-thinking-tool-failed');
-                if (typeof showAgentToast === 'function') {
-                  showAgentToast('工具已重试', t.name, { variant: 'success' });
-                }
-              }
-            })
-            .catch((err) => {
-              if (typeof showAgentToast === 'function') {
-                showAgentToast('工具重试失败', err.message || String(err), { variant: 'error' });
-              }
-            })
-            .finally(() => {
-              btn.disabled = false;
-            });
-        });
-        row.appendChild(btn);
-      }
       li.appendChild(row);
       appendInlineToolDiff(li, t, { roundComplete });
     }
@@ -1006,11 +964,14 @@ function fillThinkingRoundBeat(beat, entry, index, trace, streaming, streamConte
 /**
  * 卡片内单轮：思考正文 + 工具行。全部落在卡片内部（不再有卡片外的 beat），
  * 随 rounds 更新实时刷新（工具 pending → 完成、思考正文流式增长）。
+ *
+ * `opts.forceReasoning`：忽略 `tracePrefs.showReasoning`。右侧「子代理」面板是
+ * 用户显式打开的「看思考」视图，不该被聊天区的显示开关关成空壳。
  */
-function fillIsolatedSubround(block, roundData, isLast, running) {
+function fillIsolatedSubround(block, roundData, isLast, running, opts = {}) {
   const round = roundData || {};
   let thoughtEl = block.querySelector(':scope > .msg-thinking-thought');
-  if (tracePrefs.showReasoning) {
+  if (tracePrefs.showReasoning || opts.forceReasoning) {
     const text = String(round.fullThought || round.thought || '').trim();
     const display = text || (isLast && running ? '思考中…' : '');
     if (display) {
@@ -1050,10 +1011,11 @@ function fillIsolatedSubround(block, roundData, isLast, running) {
  * 所以运行中要跟着最新一轮走：仅当用户本来就贴在底部时才自动贴底，
  * 用户主动上翻看历史时不抢滚动位置。
  */
-function fillIsolatedCardBody(body, entry) {
+function fillIsolatedCardBody(body, entry, opts = {}) {
   const rounds = Array.isArray(entry.rounds) ? entry.rounds : [];
   const running = isolatedCardRunning(entry);
-  const followTail = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+  const followTail =
+    !opts.noFollowTail && body.scrollHeight - body.scrollTop - body.clientHeight < 24;
   const seen = new Set();
   rounds.forEach((r, i) => {
     const key = String(r && r.round != null ? r.round : i + 1);
@@ -1065,7 +1027,7 @@ function fillIsolatedCardBody(body, entry) {
       block.dataset.subround = key;
       body.appendChild(block);
     }
-    fillIsolatedSubround(block, r, i === rounds.length - 1, running);
+    fillIsolatedSubround(block, r, i === rounds.length - 1, running, opts);
   });
   body.querySelectorAll(':scope > .msg-thinking-subround').forEach((el) => {
     if (!seen.has(el.dataset.subround || '')) el.remove();
@@ -1075,6 +1037,33 @@ function fillIsolatedCardBody(body, entry) {
   if (running && followTail && body.scrollHeight > body.clientHeight) {
     body.scrollTop = body.scrollHeight;
   }
+}
+
+/**
+ * 卡片标题行尾的「详情」入口：把这张卡片同一份 `rounds` 在右侧「子代理」面板里
+ * 全文展开（面板不另存数据，读的就是这个条目，见 renderer-subagent-panel.js）。
+ * 独立按钮：必须拦掉冒泡，否则点它会顺带切换卡片折叠。
+ */
+function appendSubagentDetailLink(summary, entry) {
+  const subagentId = String((entry && entry.subagentId) || '');
+  if (!summary || !subagentId) return;
+  let btn = summary.querySelector(':scope > .msg-thinking-subagent-detail');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'msg-thinking-subagent-detail';
+    btn.textContent = '详情';
+    btn.title = '在右侧面板查看该子代理的完整思考过程';
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (typeof openSubagentPanelDetail === 'function') {
+        openSubagentPanelDetail(btn.dataset.subagentId || '');
+      }
+    });
+    summary.appendChild(btn);
+  }
+  btn.dataset.subagentId = subagentId;
 }
 
 function mountThinkingRoundDetails(
@@ -1145,6 +1134,7 @@ function mountThinkingRoundDetails(
   if (entry.isolated) details.classList.add('msg-thinking-subagent');
   if (entry.parallel) details.classList.add('msg-thinking-parallel');
   details.classList.toggle('is-running', entry.isolated ? isolatedCardRunning(entry) : false);
+  if (entry.isolated) appendSubagentDetailLink(summary, entry);
   details.appendChild(summary);
 
   if (isIsolatedCardEntry(entry)) {
@@ -1202,6 +1192,7 @@ function syncThinkingRoundDetails(
   details.classList.toggle('msg-thinking-subagent', !!entry.isolated);
   details.classList.toggle('msg-thinking-parallel', !!entry.parallel);
   details.classList.toggle('is-running', entry.isolated ? isolatedCardRunning(entry) : false);
+  if (entry.isolated && summary) appendSubagentDetailLink(summary, entry);
 
   if (isIsolatedCardEntry(entry)) {
     const cardBody = details.querySelector('.msg-thinking-round.msg-thinking-subagent-body');

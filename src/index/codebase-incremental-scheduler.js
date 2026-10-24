@@ -38,10 +38,21 @@ const CODEBASE_IGNORE_EXT = new Set([
   '.jar'
 ]);
 
-const DEFAULT_DEBOUNCE_MS = 800;
+/**
+ * 与 `graph-incremental-scheduler.js` 同构：一次保存有「工具主动上报 + watcher」两个来源，
+ * 窗口必须大于 watcher 延迟（实测约 3s），否则同一笔改动会把增量索引跑两遍。
+ */
+const DEFAULT_DEBOUNCE_MS = 3500;
 const WORKSPACE_OPEN_DEBOUNCE_MS = 1500;
 const INDEX_BUSY_RETRY_MS = 5000;
 const MAX_BUSY_RETRIES = 60;
+/**
+ * `!indexed` 是「此工作区从未建立过初始索引」，属正常状态而非故障：
+ * 增量只维护已有索引，首次建库由「代码索引」面板或 prep 触发（建库要跑 embedding，不能默默代做）。
+ * 但原来的实现是静默 return —— 日志里只剩 graph 一侧在跑，容易被误判成「codebase 增量坏了」。
+ * 每个工作区 10 分钟最多记一条，既能诊断又不会刷屏。
+ */
+const NOT_INDEXED_LOG_THROTTLE_MS = 10 * 60 * 1000;
 
 function isCodebaseSourcePath(filePath) {
   const p = String(filePath || '');
@@ -91,6 +102,16 @@ function createCodebaseIncrementalScheduler(opts) {
   const busyRetries = new Map();
   /** @type {Map<string, number>} 最近一次「保存触发了刷新意图」的时间 */
   const lastSavedAt = new Map();
+  /** @type {Map<string, number>} 最近一次「未建初始索引」跳过日志的时间（节流用） */
+  const notIndexedLoggedAt = new Map();
+
+  function logSkipThrottled(key, msg) {
+    const now = Date.now();
+    const prev = notIndexedLoggedAt.get(key) || 0;
+    if (prev && now - prev < NOT_INDEXED_LOG_THROTTLE_MS) return;
+    notIndexedLoggedAt.set(key, now);
+    log(msg);
+  }
 
   function isAutoEnabled() {
     const settings = loadModelSettings(opts.userDataPath);
@@ -107,7 +128,14 @@ function createCodebaseIncrementalScheduler(opts) {
         log(`[codebase] incremental index skipped: status unavailable`);
         return;
       }
-      if (!st.indexed) return;
+      if (!st.indexed) {
+        logSkipThrottled(
+          workspaceRoot,
+          `[codebase] incremental index idle: 尚未建立初始索引，增量不代建（${workspaceRoot}）` +
+            '——恢复方式是先在「代码索引」面板建立一次，或提一个带代码上下文的请求由 prep 触发'
+        );
+        return;
+      }
       if (st.indexing) {
         const n = (busyRetries.get(workspaceRoot) || 0) + 1;
         busyRetries.set(workspaceRoot, n);
@@ -131,7 +159,7 @@ function createCodebaseIncrementalScheduler(opts) {
         log(`[codebase] incremental index skipped: start returned empty`);
         return;
       }
-      log(`[codebase] incremental index started (${reason || 'save'})`);
+      log(`[codebase] incremental index started (${reason || 'save'}) root=${workspaceRoot}`);
     } catch (err) {
       log(`[codebase] incremental index skipped: ${err && (err.message || err)}`);
     }

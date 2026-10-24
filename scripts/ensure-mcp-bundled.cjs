@@ -3,7 +3,8 @@
 /**
  * dev / start 前置：确保 build/mcp-bundled 里有预装 MCP 产物（对标 scripts/ensure-dieyun-core.cjs）。
  *
- * 与 dieyun-core 的关键区别：预装 MCP 是**可选能力**（registry 里 defaultEnabled: false），
+ * 与 dieyun-core 的关键区别：预装 MCP 二进制是**可选能力**（registry 里带 bundledServer 的
+ * 条目默认 defaultEnabled: false；叠云 open-api 那四个纯 JS 服务虽然默认开启，但不需要本脚本的产物），
  * 取不到产物时不能阻断开发 —— 否则内网/断网机器连 npm run dev 都起不来。
  * 这里只打印一条可执行的提示并放行；真正启用该 MCP 时，同一条原因会出现在 MCP 错误列表里。
  */

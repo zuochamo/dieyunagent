@@ -2,7 +2,14 @@
 'use strict';
 
 const traceStoreLoopApi = window.diecloud || {};
+/** 同一结构性边界内的最小写入间隔（只降抖，不再决定「要不要写」）。 */
 const TRACE_CHECKPOINT_INTERVAL_MS = 2500;
+/**
+ * 纯思考（没有新工具、没进下一轮）时的最长落库间隔。
+ * 崩溃保护只需这个粒度：每 2.5s 灌一次 100KB~1.3MB 的行是持续伤害，
+ * 而丢掉最后 30s 的思考对回顾无实际影响。
+ */
+const TRACE_CHECKPOINT_FORCE_MS = 30000;
 
 /** @type {Map<string, { runId: string, planSummary: string, sessionId?: string }>} */
 const pendingResumeCheckpoints = new Map();
@@ -107,16 +114,27 @@ async function saveAssistantTraceRecord({
   }
 }
 
-function buildTraceCheckpointSignature(trace, streamContent) {
+/**
+ * checkpoint 触发签名：只认**结构性边界**（新一轮 / 新工具 / 工具状态翻转）。
+ *
+ * 曾经的实现把「思考长度 + 正文长度」也算进签名，而流式期间这两个值每帧都在变，
+ * 于是 2.5s 节流被穿透成「每 2.5s 必写一次」—— `agent_traces` 单行 avg 100KB / max 1.3MB，
+ * core 侧 `MemoryStore` 又只有一把 DB Mutex，直接后果是 `agent.trace_save` 排到 45s 超时；
+ * 超时会把 checkpoint 游标清空，下一次退化成全量重发，越滚越慢。
+ *
+ * 思考/正文的增长不构成 checkpoint 理由：真正值得落库的是「多了一轮」「多了一个工具」
+ * 「工具从 pending 翻成完成」。纯思考期间的兜底交给 `TRACE_CHECKPOINT_FORCE_MS`。
+ */
+function buildTraceCheckpointSignature(trace) {
   const rows = Array.isArray(trace) ? trace : [];
-  const last = rows.length ? rows[rows.length - 1] : null;
-  const toolCount = rows.reduce((n, row) => n + (Array.isArray(row?.tools) ? row.tools.length : 0), 0);
-  const pendingCount = rows.reduce(
-    (n, row) => n + (Array.isArray(row?.tools) ? row.tools.filter((tool) => tool?.pending).length : 0),
-    0
-  );
-  const thoughtLen = String(last?.fullThought || last?.thought || '').length;
-  return [rows.length, toolCount, pendingCount, thoughtLen, String(streamContent || '').length].join(':');
+  let toolCount = 0;
+  let pendingCount = 0;
+  for (const row of rows) {
+    const tools = Array.isArray(row?.tools) ? row.tools : [];
+    toolCount += tools.length;
+    for (const tool of tools) if (tool?.pending) pendingCount += 1;
+  }
+  return [rows.length, toolCount, pendingCount].join(':');
 }
 
 /**
@@ -195,10 +213,14 @@ function maybeSaveRunningTraceCheckpoint(live, params = {}) {
   const trace = Array.isArray(params.trace) ? params.trace : [];
   if (!live || live.traceCheckpointClosed || !params.runId || !params.sessionId || !trace.length) return;
   const now = Date.now();
-  const signature = buildTraceCheckpointSignature(trace, params.streamContent);
+  const signature = buildTraceCheckpointSignature(trace);
   const elapsed = now - (live.lastTraceCheckpointAt || 0);
-  if (!params.immediate && signature === live.lastTraceCheckpointSignature) return;
-  if (!params.immediate && live.lastTraceCheckpointAt && elapsed < TRACE_CHECKPOINT_INTERVAL_MS) return;
+  if (!params.immediate) {
+    const structural = signature !== live.lastTraceCheckpointSignature;
+    // 结构没变 ⇒ 只是思考/正文在长，不写；超过 FORCE 才落一次兜底快照。
+    if (!structural && elapsed < TRACE_CHECKPOINT_FORCE_MS) return;
+    if (elapsed < TRACE_CHECKPOINT_INTERVAL_MS) return;
+  }
 
   live.lastTraceCheckpointAt = now;
   live.lastTraceCheckpointSignature = signature;

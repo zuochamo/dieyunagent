@@ -202,6 +202,30 @@ impl ServiceSnapshot {
                 let rows = self.memory.recent_compaction_archives(session_id, limit)?;
                 Ok(serde_json::to_value(rows)?)
             }
+            "memory.request_snapshot_append" => {
+                let input: memory::RequestSnapshotInput = serde_json::from_value(params.clone())
+                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
+                self.memory.save_request_snapshot(input)
+            }
+            "memory.request_snapshot_recent" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(20);
+                let rows = self.memory.recent_request_snapshots(session_id, limit)?;
+                Ok(serde_json::to_value(rows)?)
+            }
+            "memory.request_snapshot_get" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "id 必填"))?;
+                self.memory.request_snapshot_get(id)
+            }
             "memory.session_archive" => {
                 let session_id = params
                     .get("sessionId")

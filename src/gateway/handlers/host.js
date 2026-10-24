@@ -2,6 +2,8 @@
 
 const path = require('path');
 
+const { decideShellCommand } = require('../sandbox-policy');
+
 function createHostHandlers(d) {
   const {
     assertHostEnabled,
@@ -18,6 +20,7 @@ function createHostHandlers(d) {
     runShell,
     listProcessHandles,
     killProcessHandle,
+    readProcessOutput,
     getActiveCallSessionId,
     isSshConnectedForCall,
     defaultCwd,
@@ -25,9 +28,40 @@ function createHostHandlers(d) {
     normalizeFilePathInput,
     printImage,
     assertAllowedPath,
+    sandbox,
   } = d;
+
+  /**
+   * 沙箱档位对 `host.exec` 的判定（写/联网越界 → 问一次；高危 → 恒拒）。
+   * `host.exec` 唯一的策略入口：档位语义在 sandbox-policy.js，审批记忆在 sandbox-approvals.js。
+   */
+  async function guardShell(command, workDir, sessionId, opts = {}) {
+    if (!sandbox) {
+      // fail-closed：没注入沙箱说明装配错了。静默放行等于把 `host.exec` 变成无限制提权面。
+      const e = new Error('沙箱未就绪，已拒绝执行（请重启应用；装配问题不该由用户承担风险）');
+      e.code = 'SANDBOX_UNAVAILABLE';
+      e.retryable = false;
+      throw e;
+    }
+    const decision = decideShellCommand(command, {
+      ...sandbox.context({ cwd: workDir }),
+      // 远程（SSH）命令的路径是远端路径：按本地根解析只会造出假越界和假 detail
+      remote: opts.remote === true
+    });
+    const blocked = await sandbox.guard(decision, {
+      tool: 'host_exec',
+      sessionId: sessionId || getActiveCallSessionId()
+    });
+    if (blocked) {
+      const e = new Error(blocked.error);
+      e.code = blocked.errorCode;
+      e.sandboxMode = blocked.sandboxMode;
+      e.retryable = false;
+      throw e;
+    }
+  }
   return {
-    'host.exec': async ({ command, cwd, timeoutMs, detached, runId, sessionId }) => {
+    'host.exec': async ({ command, cwd, timeoutMs, waitMs, keepOnTimeout, detached, runId, sessionId }) => {
       assertHostEnabled(ctx);
       if (!perms.shellExec) {
         const e = new Error('Shell 执行未授权');
@@ -55,6 +89,7 @@ function createHostHandlers(d) {
       const remote = getRemoteFs();
       if (remote) {
         const workDir = cwd ? remote.resolve(cwd, remote.root) : remote.root;
+        await guardShell(command, workDir, sessionId, { remote: true });
         if (detached) {
           const bg = `nohup ${command} >/dev/null 2>&1 & echo $!`;
           const r = await requireSshForCall().exec(bg, workDir, Math.min(30000, Number(timeoutMs) || 15000), {
@@ -94,12 +129,17 @@ function createHostHandlers(d) {
         return assertAllowedPath(resolved, readRootsForCall());
       })();
       const callSessionId = sessionId || getActiveCallSessionId() || undefined;
+      await guardShell(command, workDir, callSessionId);
       if (detached) {
         return runShellDetached(command, { cwd: workDir, sessionId: callSessionId });
       }
+      // 长任务语义：给了 waitMs 就视为「等待窗口」，到点转后台而不是杀掉重来
+      const waitWindow = Number(waitMs);
+      const hasWaitWindow = Number.isFinite(waitWindow) && waitWindow > 0;
       return runShell(command, {
         cwd: workDir,
-        timeoutMs,
+        timeoutMs: hasWaitWindow ? waitWindow : timeoutMs,
+        keepOnTimeout: hasWaitWindow || keepOnTimeout === true,
         sessionId: callSessionId,
         trackProcess: true,
         signal: runAbortSignal || undefined
@@ -117,6 +157,30 @@ function createHostHandlers(d) {
         sessionId: sessionId || getActiveCallSessionId() || undefined,
         includeFinished: includeFinished === true
       });
+    },
+
+    'host.proc_output': async ({ id, pid, offset, tailBytes, waitMs, sessionId } = {}) => {
+      assertHostEnabled(ctx);
+      if (!perms.shellExec) {
+        const e = new Error('Shell 执行未授权');
+        e.code = 'SHELL_DISABLED';
+        throw e;
+      }
+      const result = await readProcessOutput({
+        id,
+        pid,
+        offset,
+        tailBytes,
+        waitMs,
+        sessionId: sessionId || getActiveCallSessionId() || undefined
+      });
+      if (!result.ok) {
+        const e = new Error(result.error || '读取进程输出失败');
+        e.code = result.errorCode || 'PROC_OUTPUT_FAILED';
+        e.hint = result.hint;
+        throw e;
+      }
+      return result;
     },
 
     'host.proc_kill': async ({ id, pid, sessionId } = {}) => {

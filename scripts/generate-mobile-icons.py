@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 assets/icon.png 生成 Android mipmap 与手机 PWA 图标。"""
+"""从高清美术源生成 Android mipmap 与手机 PWA 图标。"""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,9 @@ import os
 from PIL import Image
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SRC = os.path.join(ROOT, "assets", "icon.png")
+# 与 scripts/generate-icons.py 同一个美术源；1254x1254 才能真下采样出 432/512，
+# 回退到 256 的 icon.png 会把大尺寸图标放大糊掉。
+SOURCE_CANDIDATES = ("logo-source.png", "icon.png")
 RES = os.path.join(ROOT, "mobile-app", "android", "app", "src", "main", "res")
 PWA = os.path.join(ROOT, "src", "mobile", "public")
 
@@ -33,9 +35,14 @@ PWA_SIZES = {
 
 
 def load_square_source() -> Image.Image:
-    if not os.path.isfile(SRC):
-        raise SystemExit(f"缺少源图标: {SRC}")
-    img = Image.open(SRC).convert("RGBA")
+    assets = os.path.join(ROOT, "assets")
+    src_path = next(
+        (os.path.join(assets, name) for name in SOURCE_CANDIDATES if os.path.isfile(os.path.join(assets, name))),
+        None,
+    )
+    if src_path is None:
+        raise SystemExit(f"缺少源图标: {assets}/{SOURCE_CANDIDATES[0]}")
+    img = Image.open(src_path).convert("RGBA")
     w, h = img.size
     side = min(w, h)
     left = (w - side) // 2

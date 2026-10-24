@@ -247,6 +247,30 @@ function validateToolArgs(name, args, opts) {
           retryable: false
         };
       }
+      if (a.fetchTop != null) {
+        const n = Number(a.fetchTop);
+        if (!Number.isFinite(n) || n < 0 || n > 3) {
+          return {
+            ok: false,
+            error: `fetchTop 超出范围：${a.fetchTop}`,
+            errorCode: 'INVALID_ARG',
+            retryable: true,
+            suggestedFix: 'fetchTop 取 0-3，默认 0（只搜索不抓正文）'
+          };
+        }
+      }
+      if (a.page != null) {
+        const p = Number(a.page);
+        if (!Number.isFinite(p) || p < 1 || p > 10) {
+          return {
+            ok: false,
+            error: `page 超出范围：${a.page}`,
+            errorCode: 'INVALID_ARG',
+            retryable: true,
+            suggestedFix: 'page 从 1 开始，最多 10'
+          };
+        }
+      }
       return { ok: true };
     case 'read_symbol': {
       const hasPath = !!(a.filePath && String(a.filePath).trim());

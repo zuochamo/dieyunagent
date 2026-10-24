@@ -13,13 +13,22 @@ const {
 const { recordLlmUsage } = require('./llm-usage-recorder');
 const { estimateLlmRoundUsage } = require('../llm-usage-stats');
 const { resolveAgentLoopSpec, getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+// 请求快照：本循环是「发请求」的唯一位置，因此也是快照的**唯一写入点**（见 docs/REQUEST-SNAPSHOT.md）。
+const {
+  createRequestSnapshotWriter,
+  resolveSnapshotLimits,
+  SNAPSHOT_SOURCES,
+  SNAPSHOT_REASONS
+} = require('./request-snapshot');
 const { trimMessagesToCharBudget, foldOlderCompletionMessages, contentCharLen } = require('./session-context');
 const { capDelegateResults } = require('./tool-result-cap');
 const {
   takePendingVisionImages,
   clearPendingVisionImages,
   buildVisionMessage,
-  SOURCE_BROWSER
+  SOURCE_BROWSER,
+  SOURCE_ATTACHMENT,
+  SOURCE_MCP
 } = require('./browser-vision');
 const {
   sanitizeChatBodyImagesForApi,
@@ -242,7 +251,9 @@ async function maybeCompactRound({
     });
     return { compacted: false, skipped: true, reason: cr.compactionSkipped };
   }
-  if (!(cr && cr.compacted && Array.isArray(cr.messages))) return { compacted: false };
+  if (!(cr && cr.compacted && Array.isArray(cr.messages))) {
+    return { compacted: false, ...compactionFacts(cr) };
+  }
   body.messages = cr.messages;
   await invokeLoopRpc(
     bridge,
@@ -256,7 +267,44 @@ async function maybeCompactRound({
     tokensBefore: cr.tokensBefore,
     tokensAfter: cr.tokensAfter
   });
-  return { compacted: true, tokensBefore: cr.tokensBefore, tokensAfter: cr.tokensAfter };
+  return {
+    compacted: true,
+    tokensBefore: cr.tokensBefore,
+    tokensAfter: cr.tokensAfter,
+    // 归档行 id 由调用方的 compactMessages 闭包回填（它才知道 archive 写没写成）；
+    // 拿不到就为 null —— 快照里宁可空着，也不编一个 id。
+    archiveId: cr.compactionArchiveId != null ? cr.compactionArchiveId : null,
+    ...compactionFacts(cr)
+  };
+}
+
+/**
+ * 压缩判定的事实（预算 / 触发比 / 冷却计数）：快照要用它们回答「这轮为什么没压」。
+ * 只搬不判：数字全部由 compaction-main 给（它才是唯一算预算的地方）。
+ */
+function compactionFacts(cr) {
+  if (!cr || typeof cr !== 'object') return {};
+  /** @type {{ tokenBudget?: number, triggerRatio?: number, compactionRoundCount?: number }} */
+  const out = {};
+  const budget = Number(cr.tokenBudget);
+  if (Number.isFinite(budget) && budget > 0) out.tokenBudget = budget;
+  const ratio = Number(cr.triggerRatio);
+  if (Number.isFinite(ratio) && ratio > 0) out.triggerRatio = ratio;
+  const rounds = Number(cr.compactionRoundCount);
+  if (Number.isFinite(rounds) && rounds >= 0) out.compactionRoundCount = rounds;
+  return out;
+}
+
+/** 一次压缩判定的快照行（压没压都记，事实取自 compaction-main）。 */
+function snapshotOfCompaction(result) {
+  const r = result && typeof result === 'object' ? result : {};
+  return {
+    compacted: !!r.compacted,
+    tokensBefore: r.tokensBefore,
+    tokensAfter: r.tokensAfter,
+    archiveId: r.archiveId != null ? r.archiveId : null,
+    ...compactionFacts(r)
+  };
 }
 
 /**
@@ -504,9 +552,81 @@ async function fetchLlmRound({
  * @param {{ maxToolCalls?: number, firstTokenTimeoutMs?: number, streamIdleTimeoutMs?: number }} [opts.loopSpec]
  * @param {Function} [opts.fetchLlmOnce] 可选：覆盖本轮 LLM 请求（测试用）
  * @param {boolean} [opts.turnEndSynthesis] 聊天路径：空回复才补汇总；规划 worker 勿开
+ * @param {string} [opts.sessionId] 请求快照的会话归属（缺省回落到 `llm.sessionId`）
+ * @param {'chat'|'subagent'|'planner'|'plan'} [opts.runSource] 快照来源，仅用于事后归因
+ * @param {object} [opts.contextAudit] Renderer 带下来的折叠/裁剪事实，原样落到快照
  * @param {boolean} [opts.browserVision] 是否为多模态模型：允许把浏览器截图 / 附件补看图片作为 image_url 注入下一轮
  * @param {Function} [opts.fetchSynthesisOnce] 可选：覆盖汇总 LLM（测试用）
  */
+/**
+ * 日志出口由 Main 注入（electron-log）；未注入时退回 console.warn。
+ * 与 `mutate-queue.setMutateQueueLog` 同构：一个模块一个钩子，避免 4 个调用点各传一遍。
+ */
+let loopLogHook = null;
+function setLoopRunnerLog(fn) {
+  loopLogHook = typeof fn === 'function' ? fn : null;
+}
+
+/**
+ * run 级「无进展」看门狗：只回答一个问题 —— **它最后一次有进展是什么时候、卡在哪一段**。
+ *
+ * 为什么需要它（2026-10-23→24，两次静默 11 小时 / 40 分钟）：`while (phase !== 'done')`
+ * 里的每个 await（压缩判定、快照写库、`agent.loop.continue`、委托结果回填）都**没有时间维度**。
+ * 任何一段挂住，现象都完全一样：没有下一轮请求、没有 trace、main.log 一行不写。
+ * 工具段现在有 `toolStallMs` 兜（12min），但其余段此前是彻底的黑洞。
+ *
+ * 语义刻意保守：
+ * - `warn` 只记一次日志（不刷屏、不改变行为）；
+ * - `abort` 复用既有的 `agent.loop.cancel`，不新造终止路径；
+ * - 每次 `note()` 都会重置 warned —— 有进展就重新计时。
+ */
+function createRunStallWatchdog(opts = {}) {
+  const warnMs = Number(opts.warnMs) > 0 ? Number(opts.warnMs) : 5 * 60 * 1000;
+  const abortMs =
+    Number(opts.abortMs) > 0 ? Number(opts.abortMs) : Math.max(warnMs, 45 * 60 * 1000);
+  let stage = 'start';
+  let at = Date.now();
+  let warned = false;
+  let aborted = false;
+
+  return {
+    /** 标记一次真实进展（进入新段 / 收到新相位都算）。 */
+    note(nextStage) {
+      if (typeof nextStage === 'string' && nextStage) stage = nextStage;
+      at = Date.now();
+      warned = false;
+    },
+    /** @returns {{ level: 'warn'|'abort', stage: string, idleMs: number, message: string } | null} */
+    check(now = Date.now(), runId = '') {
+      const idleMs = Math.max(0, now - at);
+      if (idleMs < warnMs) return null;
+      const head =
+        `run=${runId || '?'} stage=${stage} idleMs=${idleMs}` +
+        ` (${Math.round(idleMs / 1000)}s 无任何进展)`;
+      if (!warned) {
+        warned = true;
+        return { level: 'warn', stage, idleMs, message: `RUN_STALL ${head}` };
+      }
+      if (!aborted && idleMs >= abortMs) {
+        aborted = true;
+        return {
+          level: 'abort',
+          stage,
+          idleMs,
+          message: `RUN_STALL_ABORT ${head} — 已调用 agent.loop.cancel 收尾（不再是永远 running）`
+        };
+      }
+      return null;
+    },
+    get stage() {
+      return stage;
+    },
+    get idleMs() {
+      return Date.now() - at;
+    }
+  };
+}
+
 async function runRustAgentLoop(opts) {
   const bridge = opts.coreBridge;
   const llm = opts.llm || {};
@@ -522,6 +642,72 @@ async function runRustAgentLoop(opts) {
   const browserVision = opts.browserVision === true;
 
   let llmRound = 0;
+
+  // run 级无进展看门狗（阈值只认 agent-limits，见 createRunStallWatchdog 注释）。
+  const stallLimits = getAgentLimits(opts.userData, opts.contextTierId) || {};
+  const runLog =
+    typeof opts.log === 'function'
+      ? opts.log
+      : loopLogHook ||
+        ((msg) => {
+          try {
+            console.warn(msg);
+          } catch {
+            /* ignore */
+          }
+        });
+  const runStall = createRunStallWatchdog({
+    warnMs: stallLimits.runStallWarnMs,
+    abortMs: stallLimits.runStallAbortMs
+  });
+  let stallTimer = null;
+  /**
+   * 请求快照写入器（每 run 一个，内部维护 system/tools 的 hash 游标做去重）。
+   * session 归属：显式 `opts.sessionId` 优先，其次沿用 `llm.sessionId`（同样的会话标识
+   * 已经用于 `x-opencode-session` 这类请求头，语义一致）。都没有就不写——匿名 run 无账可查。
+   */
+  const snapshotWriter = createRequestSnapshotWriter({
+    invoke: (method, params, timeoutMs) => bridge.invoke(method, params, timeoutMs),
+    sessionId: opts.sessionId || (llm && llm.sessionId) || '',
+    source: opts.runSource || SNAPSHOT_SOURCES.CHAT,
+    limits: resolveSnapshotLimits(opts.userData, opts.contextTierId)
+  });
+  /** 本次发送之前刚发生过的压缩结论（写进这条快照后即清空，避免记到后续轮次）。 */
+  let snapshotCompaction = null;
+  let snapshotReason = SNAPSHOT_REASONS.INITIAL;
+  /**
+   * 留底「这一份请求」。失败只记日志、不影响主链路；await 是为了保证
+   * 同一轮内的多次发送（溢出重发 / 图片重发）在库里顺序正确。
+   *
+   * 两件事让它不至于变成主链路的刹车：
+   * 1. 已取消就根本不写（DB 慢时不该让"停止"再等一个超时）；
+   * 2. 写的同时盯着取消信号，用户点停止立刻走。
+   */
+  const writeRequestSnapshot = async (sendBody, runId) => {
+    if (!snapshotWriter.enabled) return;
+    if (signal && signal.aborted) return;
+    try {
+      await raceAbortable(
+        snapshotWriter.write({
+          body: sendBody,
+          runId: runId || '',
+          round: llmRound,
+          reason: snapshotReason,
+          compaction: snapshotCompaction,
+          // 折叠/裁剪的审计只描述「首次装配」的那一份；后续轮的 body 来自账本，
+          // 把它复制到每一行会让 messageCount 与 audit.messagesOut 对不上。
+          contextAudit: Number(llmRound) === 0 ? opts.contextAudit || null : null
+        }),
+        signal
+      );
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      // write 内部已经只记一次日志，这里不再放大
+    }
+    snapshotCompaction = null;
+    snapshotReason = SNAPSHOT_REASONS.INITIAL;
+  };
+
   let lastCheckpoint = null;
   // 本轮 run 是否已用掉「溢出强制压缩」这一次重试：预检真压过、或强压已经试过
   // （无论成败）都置位 —— 再次溢出只停不重试，否则会每轮空转一次注定失败的压缩。
@@ -563,12 +749,16 @@ async function runRustAgentLoop(opts) {
     if (!visionRound || visionRound.round !== llmRound || visionRound.runId !== runId) {
       const images = takePendingVisionImages(runId);
       const browserCount = images.filter((s) => s && s.source === SOURCE_BROWSER).length;
-      const attachmentCount = images.length - browserCount;
+      const attachmentCount = images.filter((s) => s && s.source === SOURCE_ATTACHMENT).length;
+      const mcpCount = images.filter((s) => s && s.source === SOURCE_MCP).length;
       if (browserCount) {
         onPhase('browser_vision_injected', { runId, round: llmRound, count: browserCount });
       }
       if (attachmentCount) {
         onPhase('attachment_vision_injected', { runId, round: llmRound, count: attachmentCount });
+      }
+      if (mcpCount) {
+        onPhase('mcp_vision_injected', { runId, round: llmRound, count: mcpCount });
       }
       visionRound = { round: llmRound, runId, message: buildVisionMessage(images) };
     }
@@ -595,11 +785,28 @@ async function runRustAgentLoop(opts) {
   onPhase('start', phase);
 
   try {
+    // 30s 采样：warn 只记一次；到 abort 阈值用既有的 agent.loop.cancel 收尾。
+    // 只在**主循环**里跑：`while` 的每个 await 都是它盯着的对象。
+    stallTimer = setInterval(() => {
+      const hit = runStall.check(Date.now(), (phase && phase.runId) || '');
+      if (!hit) return;
+      runLog(hit.message);
+      if (hit.level === 'abort') {
+        void bridge
+          .invoke('agent.loop.cancel', { runId: (phase && phase.runId) || '' })
+          .catch(() => {});
+      }
+    }, 30000);
+    if (stallTimer && typeof stallTimer.unref === 'function') stallTimer.unref();
+
     while (phase && phase.phase !== 'done') {
+      runStall.note(String(phase.phase || 'unknown'));
       await throwIfCancelled(bridge, phase.runId, signal);
 
       if (phase.phase === 'need_llm') {
+        snapshotReason = SNAPSHOT_REASONS.INITIAL;
         const body = { ...(phase.llmBody || {}) };
+        runStall.note('compact');
         const compactResult = await maybeCompactRound({
           compactMessages,
           body,
@@ -610,6 +817,9 @@ async function runRustAgentLoop(opts) {
           onPhase,
           apiConfig: llm
         });
+        // 无论压没压，都把这次的判定事实挂到「这一次发送」的快照上：
+        // 只记 compacted=true 的话，「这轮为什么没压」在事后就无从复盘了。
+        snapshotCompaction = snapshotOfCompaction(compactResult);
         if (compactResult && compactResult.compacted) {
           overflowCompactionAttempted = true;
           overflowCompaction = { compacted: true };
@@ -638,11 +848,16 @@ async function runRustAgentLoop(opts) {
           onWait: (info) => onPhase('llm_reconnect_wait', { runId: phase.runId, round: llmRound, ...info })
         };
 
-        const fetchRoundOnce = () =>
-          fetchLlmRound({
+        const fetchRoundOnce = async () => {
+          const sendBody = withVision(body, phase.runId);
+          // 先留底再发：`sendBody` 就是这一轮真正出去的请求（含视觉注入后的形态）。
+          runStall.note('llm_snapshot');
+          await writeRequestSnapshot(sendBody, phase.runId);
+          runStall.note('llm_fetch');
+          return fetchLlmRound({
             bridge,
             runId: phase.runId,
-            body: withVision(body, phase.runId),
+            body: sendBody,
             llm,
             signal,
             useStream,
@@ -653,6 +868,7 @@ async function runRustAgentLoop(opts) {
             fetchLlmOnce: opts.fetchLlmOnce,
             reconnectOpts: roundReconnect
           });
+        };
 
         /**
          * 上游把「图片不合规」当整轮 400 打回时的自愈：丢图 → 换成文字说明 → 回写账本 →
@@ -713,6 +929,8 @@ async function runRustAgentLoop(opts) {
               if (isCancelledRpcError(err) || attempt >= MAX_IMAGE_REPAIRS_PER_ROUND) throw err;
               if (!isLlmImageRejectedError(err)) throw err;
               if (!(await dropRejectedRoundImages(err, attempt))) throw err;
+              // 丢掉被拒图片后的重发：留底时如实标成 image-repair（与首发区分开）。
+              snapshotReason = SNAPSHOT_REASONS.IMAGE_REPAIR;
             }
           }
         };
@@ -747,6 +965,11 @@ async function runRustAgentLoop(opts) {
               compacted: !!(forcedCompaction && forcedCompaction.compacted),
               reason: (forcedCompaction && forcedCompaction.reason) || undefined
             };
+            if (forcedCompaction && forcedCompaction.compacted) {
+              // 这次强压发生在下面这次重发之前 —— 结论落在重发那条快照上。
+              snapshotCompaction = snapshotOfCompaction(forcedCompaction);
+            }
+            snapshotReason = SNAPSHOT_REASONS.OVERFLOW_RETRY;
             const retrySanitized = await capAndSyncLoopMessages(
               body,
               phase.runId,
@@ -809,12 +1032,14 @@ async function runRustAgentLoop(opts) {
       if (phase.phase === 'need_delegate') {
         const delegates = Array.isArray(phase.delegates) ? phase.delegates : [];
         onPhase('delegate_start', { runId: phase.runId, delegates });
+        runStall.note('delegate');
         const results = capDelegateResults(
           await executeDelegateBatch(delegates, delegateTool, onPhase, phase.runId, signal),
           (getAgentLimits(opts.userData, opts.contextTierId) || {}).toolResultMaxJson
         );
         await throwIfCancelled(bridge, phase.runId, signal);
         const toolRunId = phase.runId;
+        runStall.note('tool_results');
         phase = await invokeLoopRpc(
           bridge,
           'agent.loop.tool_results',
@@ -855,6 +1080,7 @@ async function runRustAgentLoop(opts) {
     }
     throw err;
   } finally {
+    if (stallTimer) clearInterval(stallTimer);
     if (browserVision) clearPendingVisionImages(activeRunId);
   }
 }
@@ -899,6 +1125,8 @@ function normalizeLlmResponse(json) {
 
 module.exports = {
   runRustAgentLoop,
+  createRunStallWatchdog,
+  setLoopRunnerLog,
   resolveChatUrl,
   normalizeLlmResponse,
   applyResolvedLoopSpec,

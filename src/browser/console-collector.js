@@ -43,9 +43,13 @@ function buildConsoleErrorHookScript() {
   };
   window.addEventListener('error', (e) => {
     if (!e) return;
-    const msg = (e.error && e.error.message) || e.message || 'unknown error';
+    const msg = (e.error && e.error.message) || e.message || '';
+    // capture 阶段连资源加载失败（img/script/link 404）也会进这里：这类事件没有
+    // message，target 是元素本身，不属于页面运行时异常。转发出去只会变成
+    // 「[pageerror] unknown error」这种零信息噪音，还会误触发完成验收提示。
+    if (!msg && e.target && e.target !== window) return;
     const where = e.filename ? ' @ ' + e.filename + ':' + (e.lineno || 0) : '';
-    report('${PAGE_ERROR_MARKER}', String(msg) + where);
+    report('${PAGE_ERROR_MARKER}', String(msg || 'unknown error') + where);
   }, true);
   window.addEventListener('unhandledrejection', (e) => {
     const r = e && e.reason;

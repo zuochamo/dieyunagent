@@ -3,7 +3,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { LspClient } = require('./lsp-client');
-const { getLanguageIdForPath, getServerKeyForLanguage, getServerSpec, resolveTsServerPath } = require('./language-registry');
+const { getLanguageIdForPath, getServerKeyForLanguage, getServerSpec, resolveTsServerPath, pythonStubDir } = require('./language-registry');
 const fsSync = require('fs');
 const {
   findProjectRoot,
@@ -70,6 +70,23 @@ const LSP_SETTINGS_DEFAULTS = Object.freeze({
 });
 const IDLE_SHUTDOWN_MS = 5 * 60 * 1000;
 const WATCH_DEBOUNCE_MS = 450;
+/**
+ * watch 批量诊断的三个上限。
+ *
+ * 批量写文件（脚本生成、大批量保存、拉分支）会让 `fs.watch(recursive)` 喷出成百上千事件。
+ * 旧实现是**每个文件一个独立 450ms 定时器**：这些定时器同一刻到期，然后串行跑完
+ * 读文件 → didOpen → 等诊断 → didClose 的完整往返。实测一个 1100 个 .py 的工程被批量
+ * 写入后，单轮 855 个文件连续 didOpen/didClose 跑了约 90 秒（pyright 776MB），期间主线程
+ * 一直排队，界面卡死。
+ *
+ * 现在合并成「脏集合 + 单定时器 + 分批」：
+ * - `WATCH_BATCH_MAX_FILES` 单批最多处理几个文件，处理完让出事件循环；
+ * - `WATCH_BATCH_GAP_MS`    批与批之间的间隔，给 UI / 其它 RPC 留出窗口；
+ * - `WATCH_DIRTY_MAX_QUEUE` 队列硬上限，超出丢弃最旧的（保留最近改动的）。
+ */
+const WATCH_BATCH_MAX_FILES = 24;
+const WATCH_BATCH_GAP_MS = 800;
+const WATCH_DIRTY_MAX_QUEUE = 400;
 const SSH_DIRTY_POLL_MS = 25000;
 const WATCH_IGNORE_DIRS = new Set([
   '.git',
@@ -158,10 +175,32 @@ function isUnderRoot(absPath, workspaceRoot) {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function workspaceStoreKey(workspaceRoot) {
+/**
+ * 工作区根归一：**远端 POSIX 路径不能过 `path.resolve`**。
+ *
+ * Windows 上 `path.resolve('/home/u/proj')` → `E:\home\u\proj`，一旦进了 watch 队列：
+ * ① `stopWorkspaceDiagnosticsWatch` / `getWatchStatus` 用原串算 key，两边永不相等 →
+ *    stop 永远 return（SSH poll interval 泄漏）、面板 watch 状态恒 off；
+ * ② `pollSshDirtyFiles` 把这个根当远程 cwd 传给 sshExec，`git diff` 在远程不存在的
+ *    目录里跑，永远拉不到脏文件 → SSH 侧 watch 形同虚设。
+ * 所以「以 / 开头」就是远端绝对路径的唯一判据，本地路径才 resolve。
+ */
+function watchRootPath(workspaceRoot) {
   const raw = String(workspaceRoot || '').trim().replace(/\\/g, '/').replace(/\/$/, '');
-  if (raw.startsWith('/')) return raw.toLowerCase();
-  return path.resolve(raw).toLowerCase();
+  if (!raw) return '';
+  return raw.startsWith('/') ? raw : path.resolve(raw);
+}
+
+function workspaceStoreKey(workspaceRoot) {
+  return watchRootPath(workspaceRoot).toLowerCase();
+}
+
+/** 文件绝对路径归一：远端 POSIX 路径保持原串，本地路径才 resolve（与 watchRootPath 同规）。 */
+function watchAbsPath(absPath, root) {
+  const raw = String(absPath || '').trim().replace(/\\/g, '/');
+  if (!raw) return '';
+  if (raw.startsWith('/') || String(root || '').startsWith('/')) return raw;
+  return path.resolve(raw);
 }
 
 function filterDiagnosticsBySeverity(diagnostics, minSeverity) {
@@ -197,7 +236,7 @@ function createLspDiagnosticsService(opts) {
   const workspaceStores = new Map();
   /** @type {Map<string, { running: Promise<any>|null, lastTs: number, lastResult: object|null }>} */
   const projectScanState = new Map();
-  /** @type {Map<string, { watcher: import('fs').FSWatcher|null, pollTimer: NodeJS.Timeout|null, sshExec?: Function|null, pending: Map<string, NodeJS.Timeout>, refreshing: Set<string>, workspaceRoot: string, mode: string }>} */
+  /** @type {Map<string, { watcher: import('fs').FSWatcher|null, pollTimer: NodeJS.Timeout|null, queueTimer: NodeJS.Timeout|null, draining: boolean, dirty: Map<string, { abs: string, ts: number }>, refreshing: Set<string>, retry: Map<string, number>, workspaceRoot: string, mode: string, sshExec?: Function|null }>} */
   const watchState = new Map();
 
   function getWorkspaceBucket(workspaceRoot) {
@@ -297,6 +336,7 @@ function createLspDiagnosticsService(opts) {
       spec,
       workspaceRoot,
       serverKey,
+      userDataPath,
       log
     });
     bucket.set(serverKey, client);
@@ -425,6 +465,55 @@ function createLspDiagnosticsService(opts) {
    *   timeoutMs?: number
    * }} opts
    */
+  /**
+   * 远程引擎「没跑起来」的唯一日志出口。
+   *
+   * 批量路径的上层以前一律 `.catch(() => new Map())`，失败被吞成「0 条诊断」⇒ 面板显示
+   * 「没有问题」。现在失败只做两件事：落一行可检索的日志 + 由调用方**跳过写空诊断**，
+   * 保留上一次可信结果（引擎残废时最危险的不是报错，是假装干净）。
+   */
+  function logRemoteEngineUnavailable(workspaceRoot, r) {
+    if (!r || r.ok !== false) return;
+    log(
+      `[diagnostics] 远程引擎未运行 engine=${r.engine || '?'} exitCode=${r.exitCode == null ? '-' : r.exitCode} ` +
+        `root=${workspaceRoot} error=${r.error || '未知错误'}${r.detail ? ` detail=${r.detail}` : ''}`
+    );
+  }
+
+  /** 批量引擎调用：抛错也归一成 `ok:false`，与 cli-fallback 的失败形状一致。 */
+  function settleRemoteBatch(promise) {
+    return promise.catch((err) => ({
+      ok: false,
+      engine: '?',
+      byFile: new Map(),
+      error: String((err && err.message) || err),
+      exitCode: null
+    }));
+  }
+
+  /**
+   * 单文件远程 CLI 诊断的统一落库出口：**只写 ok 的引擎**。
+   * 失败时不 upsert（保留上一次可信结果），并落一行 `远程引擎未运行` 日志。
+   */
+  function upsertRemoteCliEntry(root, abs, scan, meta) {
+    if (!scan || !scan.ok) {
+      logRemoteEngineUnavailable(root, scan || { ok: false, engine: meta.engine, error: '引擎未运行' });
+      return false;
+    }
+    upsertWorkspaceStoreEntry(
+      root,
+      {
+        file: abs,
+        diagnostics: scan.byFile.get(abs) || [],
+        language: meta.language || '',
+        server: meta.server,
+        source: 'watch'
+      },
+      meta.engine
+    );
+    return true;
+  }
+
   async function diagnoseFilesRemote(opts) {
     const settings = loadLspSettings(userDataPath);
     if (!settings.enabled) {
@@ -479,20 +568,23 @@ function createLspDiagnosticsService(opts) {
       maxPerFile
     };
 
-    const [tscDiags, eslintDiags, ruffDiags, prettierDiags] = await Promise.all([
-      tsTargets.length
-        ? runRemoteTscBatch({ ...scanOpts, absPaths: tsTargets }).catch(() => new Map())
-        : Promise.resolve(new Map()),
+    const [tscScan, eslintScan, ruffScan, prettierScan] = await Promise.all([
+      tsTargets.length ? settleRemoteBatch(runRemoteTscBatch({ ...scanOpts, absPaths: tsTargets })) : null,
       eslintTargets.length
-        ? runRemoteEslintBatch({ ...scanOpts, absPaths: eslintTargets }).catch(() => new Map())
-        : Promise.resolve(new Map()),
-      pyTargets.length
-        ? runRemoteRuffBatch({ ...scanOpts, absPaths: pyTargets }).catch(() => new Map())
-        : Promise.resolve(new Map()),
+        ? settleRemoteBatch(runRemoteEslintBatch({ ...scanOpts, absPaths: eslintTargets }))
+        : null,
+      pyTargets.length ? settleRemoteBatch(runRemoteRuffBatch({ ...scanOpts, absPaths: pyTargets })) : null,
       prettierTargets.length
-        ? runRemotePrettierBatch({ ...scanOpts, absPaths: prettierTargets }).catch(() => new Map())
-        : Promise.resolve(new Map())
+        ? settleRemoteBatch(runRemotePrettierBatch({ ...scanOpts, absPaths: prettierTargets }))
+        : null
     ]);
+    const engineFailures = [tscScan, eslintScan, ruffScan, prettierScan].filter((r) => r && r.ok === false);
+    for (const r of engineFailures) logRemoteEngineUnavailable(workspaceRoot, r);
+    // 只有 ok 的引擎才写 store：失败引擎不写空数组，避免把上次的问题「洗白」。
+    const tscDiags = tscScan && tscScan.ok ? tscScan.byFile : new Map();
+    const eslintDiags = eslintScan && eslintScan.ok ? eslintScan.byFile : new Map();
+    const ruffDiags = ruffScan && ruffScan.ok ? ruffScan.byFile : new Map();
+    const prettierDiags = prettierScan && prettierScan.ok ? prettierScan.byFile : new Map();
 
     const allFiles = new Set([...tsTargets, ...pyTargets, ...eslintTargets, ...prettierTargets]);
     for (const absRemote of allFiles) {
@@ -569,7 +661,18 @@ function createLspDiagnosticsService(opts) {
       cached: false,
       workspaceRoot,
       items,
-      skipped
+      skipped,
+      // 有引擎没跑起来时诊断是不完整的：只回 items=[] 会让调用方以为「全都干净」。
+      ...(engineFailures.length
+        ? {
+            failures: engineFailures.map((r) => ({
+              engine: r.engine || '?',
+              error: r.error || '引擎未运行',
+              detail: r.detail || '',
+              exitCode: r.exitCode == null ? null : r.exitCode
+            }))
+          }
+        : null)
     };
   }
 
@@ -657,21 +760,26 @@ function createLspDiagnosticsService(opts) {
     return WATCH_EXT_RE.test(base);
   }
 
-  function normalizeWatchRoot(workspaceRoot) {
-    const raw = String(workspaceRoot || '').trim().replace(/\\/g, '/').replace(/\/$/, '');
-    if (raw.startsWith('/')) return raw;
-    return path.resolve(raw);
-  }
-
   function getWatchBucket(workspaceRoot) {
     const wk = workspaceStoreKey(workspaceRoot);
     if (!watchState.has(wk)) {
       watchState.set(wk, {
         watcher: null,
         pollTimer: null,
-        pending: new Map(),
+        /**
+         * 待诊断文件：key = absPath.toLowerCase()，value = { abs, ts }。
+         * 用 Map 而不是 per-file 定时器：同一文件的多次事件只保留最新一次，
+         * 批量写入时不会攒出成百上千个独立 timer。ts 用于超限时保留最近改动。
+         */
+        dirty: new Map(),
+        /** 合并后的单一定时器（到点触发 drainWatchQueue） */
+        queueTimer: null,
+        /** 正在排空队列：期间新事件只入队，不再起第二个 drain */
+        draining: false,
         refreshing: new Set(),
-        workspaceRoot: normalizeWatchRoot(workspaceRoot),
+        /** key → 已失败次数：单文件异常最多回队重试一次，避免坏文件把队列拖成死循环 */
+        retry: new Map(),
+        workspaceRoot: watchRootPath(workspaceRoot),
         mode: 'local',
         sshExec: null
       });
@@ -693,9 +801,10 @@ function createLspDiagnosticsService(opts) {
     if (bucket.pollTimer) {
       clearInterval(bucket.pollTimer);
     }
-    for (const timer of bucket.pending.values()) {
-      clearTimeout(timer);
+    if (bucket.queueTimer) {
+      clearTimeout(bucket.queueTimer);
     }
+    bucket.dirty.clear();
     watchState.delete(wk);
   }
 
@@ -720,7 +829,9 @@ function createLspDiagnosticsService(opts) {
     const settings = loadLspSettings(userDataPath);
     if (!settings.enabled) return { ok: false, skipped: 'disabled' };
 
-    const root = path.resolve(String(workspaceRoot || ''));
+    // 远端根必须保持 POSIX 原串：resolve 成 E:\home\... 会让 sshExec 的 cwd 失效，
+    // 且与 stop/getWatchStatus 的 key 对不上（见 watchRootPath 注释）。
+    const root = watchRootPath(workspaceRoot);
     if (!root) return { ok: false, error: 'workspaceRoot 必填' };
 
     const wantSsh = opts.mode === 'ssh' && typeof opts.sshExec === 'function';
@@ -786,17 +897,23 @@ function createLspDiagnosticsService(opts) {
     return {
       active: !!(bucket && (bucket.watcher || bucket.pollTimer)),
       mode: bucket ? bucket.mode : 'off',
-      pending: bucket ? bucket.pending.size : 0,
+      pending: bucket ? bucket.dirty.size : 0,
       refreshing: bucket ? bucket.refreshing.size : 0
     };
   }
 
+  /**
+   * 入队一个「需要重新诊断」的文件。
+   *
+   * 与旧实现的区别只有两点：① 不再为每个文件建定时器，全部事件合并到一个 450ms 单定时器；
+   * ② 到点后走 `drainWatchQueue` 分批处理，而不是一次性把整批串行排完。
+   */
   function scheduleFileDiagnosticsRefresh(workspaceRoot, absPath, opts = {}) {
     const settings = loadLspSettings(userDataPath);
     if (!settings.enabled) return Promise.resolve(null);
 
-    const root = path.resolve(String(workspaceRoot || ''));
-    const abs = path.resolve(String(absPath || ''));
+    const root = watchRootPath(workspaceRoot);
+    const abs = watchAbsPath(absPath, root);
     if (!root || !abs || !isUnderRoot(abs, root)) return Promise.resolve(null);
 
     invalidateCacheForPath(abs);
@@ -804,30 +921,114 @@ function createLspDiagnosticsService(opts) {
     const key = abs.toLowerCase();
 
     if (opts.immediate) {
-      if (bucket.pending.has(key)) {
-        clearTimeout(bucket.pending.get(key));
-        bucket.pending.delete(key);
-      }
+      // 立即刷新＝调用方明确要等结果（保存后马上要看诊断），跳过排队。
+      // mode/sshExec 用调用方显式给的优先：SSH 写文件时 watch 可能还没建立
+      // （bucket 默认 local/null），只信 bucket 会把远端路径当本地路径诊断，静默失败。
+      bucket.dirty.delete(key);
       return refreshFileDiagnostics(root, abs, {
-        mode: bucket.mode,
-        sshExec: bucket.sshExec
+        mode: opts.mode || bucket.mode,
+        sshExec: typeof opts.sshExec === 'function' ? opts.sshExec : bucket.sshExec
       });
     }
 
-    if (bucket.pending.has(key)) {
-      clearTimeout(bucket.pending.get(key));
+    bucket.dirty.set(key, { abs, ts: Date.now() });
+    if (bucket.dirty.size > WATCH_DIRTY_MAX_QUEUE) {
+      // 硬上限：丢掉最旧的那批（它们多半已被后续写入覆盖，再诊断也是旧内容）
+      const oldest = [...bucket.dirty.entries()]
+        .sort((a, b) => a[1].ts - b[1].ts)
+        .slice(0, bucket.dirty.size - WATCH_DIRTY_MAX_QUEUE);
+      for (const [oldKey] of oldest) bucket.dirty.delete(oldKey);
     }
 
-    const delay = opts.debounceMs != null ? Number(opts.debounceMs) : WATCH_DEBOUNCE_MS;
-    const timer = setTimeout(() => {
-      bucket.pending.delete(key);
-      void refreshFileDiagnostics(root, abs, {
-        mode: bucket.mode,
-        sshExec: bucket.sshExec
-      });
-    }, delay);
-    bucket.pending.set(key, timer);
-    return Promise.resolve({ scheduled: true, file: abs });
+    if (!bucket.queueTimer && !bucket.draining) {
+      const delay = opts.debounceMs != null ? Number(opts.debounceMs) : WATCH_DEBOUNCE_MS;
+      bucket.queueTimer = setTimeout(() => {
+        bucket.queueTimer = null;
+        void drainWatchQueue(root);
+      }, delay);
+    }
+    return Promise.resolve({ scheduled: true, file: abs, queued: bucket.dirty.size });
+  }
+
+  /**
+   * 分批排空脏队列：每批最多 `WATCH_BATCH_MAX_FILES` 个，批间 sleep 让出事件循环。
+   *
+   * 单文件之间仍然是串行（`refreshFileDiagnostics` 内部只处理一个文件），这是刻意的：
+   * LSP 客户端本身是单连接 + 单 program，堆并发只会让 pyright 同时开更多文档，
+   * 反而更容易把内存推高。真正要掐掉的是「一口气把整批排完」。
+   */
+  async function drainWatchQueue(workspaceRoot) {
+    const root = watchRootPath(workspaceRoot);
+    if (!root) return;
+    const wk = workspaceStoreKey(root);
+    const bucket = watchState.get(wk);
+    if (!bucket || bucket.draining) return;
+    bucket.draining = true;
+    let total = 0;
+    let batches = 0;
+    let withDiagnostics = 0;
+    let failed = 0;
+    try {
+      while (bucket.dirty.size) {
+        // stop（含 local↔ssh 切换）/ 重建后旧 bucket 已废弃：立刻收手，
+        // 否则会继续用旧的 mode/sshExec 把整批跑完，结果写进新模式下的 store。
+        if (watchState.get(wk) !== bucket) return;
+        const batch = [...bucket.dirty.entries()]
+          .sort((a, b) => b[1].ts - a[1].ts)
+          .slice(0, WATCH_BATCH_MAX_FILES);
+        for (const [key] of batch) bucket.dirty.delete(key);
+        batches += 1;
+        for (const [key, row] of batch) {
+          if (watchState.get(wk) !== bucket) return;
+          try {
+            const result = await refreshFileDiagnostics(root, row.abs, {
+              mode: bucket.mode,
+              sshExec: bucket.sshExec
+            });
+            total += 1;
+            bucket.retry.delete(key);
+            if (result && result.count > 0) withDiagnostics += 1;
+          } catch (err) {
+            // 单文件失败不能吃掉整批：其它文件照常诊断，这一条最多回队重试一次
+            // （无限重试会把「一个坏文件」变成 800ms 一轮的死循环）。
+            failed += 1;
+            const tries = (bucket.retry.get(key) || 0) + 1;
+            if (tries < 2) {
+              bucket.retry.set(key, tries);
+              if (!bucket.dirty.has(key)) bucket.dirty.set(key, { ...row, ts: Date.now() });
+            } else {
+              bucket.retry.delete(key);
+              log(
+                `[diagnostics] watch 放弃 ${row.abs}（连续失败 ${tries} 次）: ${err && err.message ? err.message : err}`
+              );
+            }
+          }
+        }
+        if (bucket.dirty.size) {
+          await new Promise((resolve) => setTimeout(resolve, WATCH_BATCH_GAP_MS));
+        }
+      }
+    } catch (err) {
+      log(`[diagnostics] watch drain error ${root}: ${err.message || err}`);
+    } finally {
+      const live = watchState.get(wk);
+      // 只清自己那个 bucket 的标志：stop 后重建的新 bucket 可能已有别的 drain 在跑，
+      // 误清会让 schedule 再起一个 drain，两个 drain 同时对同一连接分批 didOpen。
+      if (live && live === bucket) live.draining = false;
+      if (total > 0 || failed) {
+        log(
+          `[diagnostics] watch batch ${root} files=${total} batches=${batches} withDiagnostics=${withDiagnostics}` +
+            (failed ? ` failed=${failed}` : '')
+        );
+      }
+      // 排空过程中又来了新事件（dirty 又有货）→ 补一次，避免丢事件
+      if (live && live === bucket && live.dirty.size && !live.queueTimer) {
+        live.queueTimer = setTimeout(() => {
+          live.queueTimer = null;
+          void drainWatchQueue(root);
+        }, WATCH_BATCH_GAP_MS);
+      }
+    }
   }
 
   async function runWatchCliScansForFile(root, abs, settings) {
@@ -898,68 +1099,33 @@ function createLspDiagnosticsService(opts) {
     };
 
     if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
-      const tscMap = await runRemoteTscBatch(scanOpts).catch(() => new Map());
-      upsertWorkspaceStoreEntry(
-        root,
-        {
-          file: abs,
-          diagnostics: tscMap.get(abs) || [],
-          language: 'typescript',
-          server: 'tsc-cli-remote',
-          source: 'watch'
-        },
-        'tsc'
-      );
-      const eslintMap = await runRemoteEslintBatch(scanOpts).catch(() => new Map());
-      upsertWorkspaceStoreEntry(
-        root,
-        {
-          file: abs,
-          diagnostics: eslintMap.get(abs) || [],
-          language: 'javascript',
-          server: 'eslint-cli-remote',
-          source: 'watch'
-        },
-        'eslint'
-      );
-      const prettierMap = await runRemotePrettierBatch(scanOpts).catch(() => new Map());
-      upsertWorkspaceStoreEntry(
-        root,
-        {
-          file: abs,
-          diagnostics: prettierMap.get(abs) || [],
-          language: 'javascript',
-          server: 'prettier-cli-remote',
-          source: 'watch'
-        },
-        'prettier'
-      );
+      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemoteTscBatch(scanOpts)), {
+        language: 'typescript',
+        server: 'tsc-cli-remote',
+        engine: 'tsc'
+      });
+      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemoteEslintBatch(scanOpts)), {
+        language: 'javascript',
+        server: 'eslint-cli-remote',
+        engine: 'eslint'
+      });
+      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemotePrettierBatch(scanOpts)), {
+        language: 'javascript',
+        server: 'prettier-cli-remote',
+        engine: 'prettier'
+      });
     } else if (ext === '.py') {
-      const ruffMap = await runRemoteRuffBatch(scanOpts).catch(() => new Map());
-      upsertWorkspaceStoreEntry(
-        root,
-        {
-          file: abs,
-          diagnostics: ruffMap.get(abs) || [],
-          language: 'python',
-          server: 'ruff-cli-remote',
-          source: 'watch'
-        },
-        'ruff'
-      );
+      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemoteRuffBatch(scanOpts)), {
+        language: 'python',
+        server: 'ruff-cli-remote',
+        engine: 'ruff'
+      });
     } else if (PRETTIER_FILE_RE.test(abs)) {
-      const prettierMap = await runRemotePrettierBatch(scanOpts).catch(() => new Map());
-      upsertWorkspaceStoreEntry(
-        root,
-        {
-          file: abs,
-          diagnostics: prettierMap.get(abs) || [],
-          language: '',
-          server: 'prettier-cli-remote',
-          source: 'watch'
-        },
-        'prettier'
-      );
+      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemotePrettierBatch(scanOpts)), {
+        language: '',
+        server: 'prettier-cli-remote',
+        engine: 'prettier'
+      });
     }
 
     notifyStoreUpdated(root, abs);
@@ -1366,6 +1532,50 @@ function createLspDiagnosticsService(opts) {
     return 'typescript';
   }
 
+  /**
+   * 远程项目类型探测（一次 ls 判定该跑哪些引擎），对齐本地 `findWorkspaceXProjectRoot` 的语义。
+   *
+   * 为什么要有：远程分支以前无条件跑 tsc+eslint+ruff+prettier。非 JS/Python 的仓库
+   * 会白付四次 `npx -y` 冷启动（慢且耗网络），并把「这个项目没有 eslint 配置」
+   * 汇报成「扫描完成，0 个问题」——用户与模型都无法区分「干净」与「没扫」。
+   *
+   * @returns {Promise<{ ok: boolean, engines?: {ts:boolean,eslint:boolean,ruff:boolean,prettier:boolean}, error?: string, detail?: string, exitCode?: number|null }>}
+   */
+  async function probeRemoteProjectEngines(sshExec, workspaceRoot, timeoutMs) {
+    const cmd =
+      'ls -1d tsconfig.json jsconfig.json package.json eslint.config.js eslint.config.mjs ' +
+      "eslint.config.cjs eslint.config.ts .eslintrc .eslintrc.js .eslintrc.cjs .eslintrc.json " +
+      'pyproject.toml ruff.toml .ruff.toml setup.cfg .prettierrc .prettierrc.json .prettierrc.js ' +
+      'prettier.config.js 2>/dev/null';
+    let r;
+    try {
+      r = await sshExec(cmd, workspaceRoot, Math.min(15000, timeoutMs || 15000));
+    } catch (err) {
+      return { ok: false, error: err && err.message ? String(err.message) : String(err) };
+    }
+    const names = String((r && r.stdout) || '')
+      .split('\n')
+      .map((s) => s.trim().replace(/^\.\//, ''))
+      .filter(Boolean);
+    // 一条都没列出来未必是「探测失败」：空目录 / 没有上述配置文件都正常。
+    // 但 stderr 非空且 exit != 0 时（cd 不进去、目录不存在）必须报错而不是当成空项目。
+    const stderr = String((r && r.stderr) || '').trim();
+    const code = r && r.code != null ? Number(r.code) : null;
+    if (!names.length && stderr && code !== 0) {
+      return { ok: false, error: `探测命令失败（退出码 ${code}）`, detail: stderr.slice(-400), exitCode: code };
+    }
+    const has = (re) => names.some((n) => re.test(n));
+    return {
+      ok: true,
+      engines: {
+        ts: has(/^(tsconfig|jsconfig)\.json$/),
+        eslint: has(/^(package\.json|eslint\.config\.|\.eslintrc)/),
+        ruff: has(/^(pyproject\.toml|ruff\.toml|\.ruff\.toml|setup\.cfg)$/),
+        prettier: has(/^(package\.json|\.prettierrc|prettier\.config\.)/)
+      }
+    };
+  }
+
   async function runWorkspaceProjectScan(opts) {
     const settings = loadLspSettings(userDataPath);
     if (!settings.enabled) {
@@ -1394,50 +1604,76 @@ function createLspDiagnosticsService(opts) {
       const remote = typeof opts.sshExec === 'function';
 
       if (remote) {
-        scanJobs.push(
-          runRemoteTscProjectScan({
-            exec: opts.sshExec,
-            projectRoot: workspaceRoot,
-            workspaceRoot,
-            timeoutMs,
-            minSeverity,
-            maxFiles,
-            maxPerFile
-          })
-        );
-        scanJobs.push(
-          runRemoteEslintProjectScan({
-            exec: opts.sshExec,
-            projectRoot: workspaceRoot,
-            workspaceRoot,
-            timeoutMs,
-            minSeverity,
-            maxFiles,
-            maxPerFile
-          })
-        );
-        scanJobs.push(
-          runRemoteRuffProjectScan({
-            exec: opts.sshExec,
-            projectRoot: workspaceRoot,
-            workspaceRoot,
-            timeoutMs,
-            minSeverity,
-            maxFiles,
-            maxPerFile
-          })
-        );
-        scanJobs.push(
-          runRemotePrettierProjectScan({
-            exec: opts.sshExec,
-            projectRoot: workspaceRoot,
-            workspaceRoot,
-            timeoutMs,
-            minSeverity,
-            maxFiles,
-            maxPerFile
-          })
-        );
+        // 远程必须**先探测项目类型**再决定跑哪些引擎：此前无条件跑 tsc+eslint+ruff+prettier，
+        // 对 Go / PHP / 纯文档仓库等于白付四次 npx 冷启动，而且「工具没装/没配置」
+        // 和「扫完没问题」被压成同一种结果。一次 ls 的成本远低于四次 npx。
+        const probe = await probeRemoteProjectEngines(opts.sshExec, workspaceRoot, timeoutMs);
+        if (!probe.ok) {
+          const result = {
+            ok: false,
+            error: `远程项目探测失败：${probe.error}`,
+            engines: [],
+            failures: [{ engine: 'probe', error: probe.error, detail: probe.detail || '', exitCode: probe.exitCode }],
+            fileCount: 0,
+            errorCount: 0,
+            remote
+          };
+          projectScanState.set(wk, { running: null, lastTs: Date.now(), lastResult: result });
+          log(`[diagnostics] project scan FAILED ${workspaceRoot} probe ${probe.error}`);
+          return result;
+        }
+        if (probe.engines.ts) {
+          scanJobs.push(
+            runRemoteTscProjectScan({
+              exec: opts.sshExec,
+              projectRoot: workspaceRoot,
+              workspaceRoot,
+              timeoutMs,
+              minSeverity,
+              maxFiles,
+              maxPerFile
+            })
+          );
+        }
+        if (probe.engines.eslint) {
+          scanJobs.push(
+            runRemoteEslintProjectScan({
+              exec: opts.sshExec,
+              projectRoot: workspaceRoot,
+              workspaceRoot,
+              timeoutMs,
+              minSeverity,
+              maxFiles,
+              maxPerFile
+            })
+          );
+        }
+        if (probe.engines.ruff) {
+          scanJobs.push(
+            runRemoteRuffProjectScan({
+              exec: opts.sshExec,
+              projectRoot: workspaceRoot,
+              workspaceRoot,
+              timeoutMs,
+              minSeverity,
+              maxFiles,
+              maxPerFile
+            })
+          );
+        }
+        if (probe.engines.prettier) {
+          scanJobs.push(
+            runRemotePrettierProjectScan({
+              exec: opts.sshExec,
+              projectRoot: workspaceRoot,
+              workspaceRoot,
+              timeoutMs,
+              minSeverity,
+              maxFiles,
+              maxPerFile
+            })
+          );
+        }
       } else {
         const tsRoot = findWorkspaceTsProjectRoot(workspaceRoot);
         if (tsRoot) {
@@ -1461,7 +1697,8 @@ function createLspDiagnosticsService(opts) {
               timeoutMs,
               minSeverity,
               maxFiles,
-              maxPerFile
+              maxPerFile,
+              stubDir: pythonStubDir(userDataPath)
             })
           );
         }
@@ -1508,9 +1745,34 @@ function createLspDiagnosticsService(opts) {
 
       const scans = (await Promise.all(scanJobs)).filter(Boolean);
       const successful = scans.filter((scan) => scan && scan.ok !== false && scan.engine);
+      // 失败的扫描必须显式带到结果里：以前只有「成功」才进 successful，
+      // 失败项被静默丢弃，最终表现为「扫描完成 0 个问题」。
+      const failures = scans
+        .filter((scan) => scan && scan.ok === false)
+        .map((scan) => ({
+          engine: scan.engine,
+          error: scan.error || '未知原因',
+          detail: scan.detail || '',
+          exitCode: scan.exitCode != null ? scan.exitCode : null
+        }));
       if (!successful.length) {
-        const result = { ok: true, skipped: 'no_project', engines: [], fileCount: 0, errorCount: 0 };
+        const result = failures.length
+          ? {
+              ok: false,
+              error: `诊断未跑起来（${failures.map((f) => f.engine).join('+') || 'unknown'}）：${failures[0].error}`,
+              engines: [],
+              failures,
+              fileCount: 0,
+              errorCount: 0,
+              remote
+            }
+          : { ok: true, skipped: 'no_project', engines: [], fileCount: 0, errorCount: 0, remote };
         projectScanState.set(wk, { running: null, lastTs: Date.now(), lastResult: result });
+        if (failures.length) {
+          log(
+            `[diagnostics] project scan FAILED ${workspaceRoot} ${failures.map((f) => f.engine).join('+')} ${failures[0].error}`
+          );
+        }
         return result;
       }
 
@@ -1557,6 +1819,8 @@ function createLspDiagnosticsService(opts) {
           errorCount: engErrors,
           warningCount: engWarnings,
           rawCount: scan.rawCount || 0,
+          // 真正被引擎检查过的文件数（eslint/ruff 由 JSON 条目数得到；其它引擎不提供则为 0）
+          scannedFiles: scan.scannedFiles || 0,
           projectRoot: scan.projectRoot || workspaceRoot
         };
       }
@@ -1566,15 +1830,21 @@ function createLspDiagnosticsService(opts) {
         engines,
         engine: engines.join('+') || null,
         byEngine,
+        // 口径：fileCount = **有诊断**的文件数（items 只含有问题的文件），
+        // 不是「扫描过的文件数」。旧日志把它写成 `files=` 被读成「一个文件都没扫到」，
+        // 直接导致「远程索引不可用」的误判，所以这里连字段名一起说清楚。
         fileCount,
         errorCount,
         warningCount,
+        ...(failures.length ? { failures } : null),
         remote
       };
       projectScanState.set(wk, { running: null, lastTs: Date.now(), lastResult: result });
       notifyStoreUpdated(workspaceRoot);
       log(
-        `[diagnostics] project scan ${workspaceRoot} ${engines.join('+')} files=${fileCount} errors=${errorCount}`
+        `[diagnostics] project scan ${workspaceRoot} ${engines.join('+')} ` +
+          `filesWithDiagnostics=${fileCount} errors=${errorCount} warnings=${warningCount}` +
+          (failures.length ? ` failed=${failures.map((f) => f.engine).join('+')}` : '')
       );
       return result;
     })().catch((err) => {
@@ -1626,7 +1896,8 @@ function createLspDiagnosticsService(opts) {
           absPath,
           timeoutMs: opts.timeoutMs,
           minSeverity: opts.minSeverity,
-          maxPerFile: opts.maxPerFile
+          maxPerFile: opts.maxPerFile,
+          stubDir: pythonStubDir(userDataPath)
         });
         return { diagnostics, server: 'pyright-cli', error: null };
       }

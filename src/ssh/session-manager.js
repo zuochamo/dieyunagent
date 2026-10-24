@@ -619,7 +619,17 @@ function createSshSessionManager(opts = {}) {
         } catch {
           // ignore
         }
-        reject(new Error(`远程命令超时（${timeout}ms）`));
+        reject(
+          Object.assign(new Error(`远程命令超时（${timeout}ms）`), {
+            // 不声明 code 会塌成 EXCEPTION：远程占全部调用的 84%，超时是最常见的失败，
+            // 模型必须能区分「超时」和「命令本身报错」，否则只能盲目重试。
+            code: 'SSH_EXEC_TIMEOUT',
+            retryable: false,
+            suggestedFix:
+              `远程命令超过 ${timeout}ms 未返回。改用脱管/后台执行（nohup … &）或缩小命令范围，` +
+              '不要在同一个 timeout 下重复同一条命令。'
+          })
+        );
       }, timeout);
       let activeStream = null;
       c.exec(wrapped, (err, stream) => {

@@ -52,8 +52,65 @@ var MONACO_DIAG_CACHE_MAX = 200;
 var MONACO_MODEL_LRU_MAX = 12;
 /** @type {Map<string, { model: object }>} */
 var artifactModelLRU = new Map();
-/** 用户是否手动改过当前编辑器内容（未保存）；写入跟随据此暂停，绝不覆盖用户输入 */
-var activeEditorUserDirty = false;
+/**
+ * 用户手动改过、还没保存的路径集合（按标签记录）。
+ * 多标签下不能只留一个布尔：切走标签再切回来，未保存状态必须还在，
+ * 否则「写入跟随 / 读盘对齐」会把用户输入当成可覆盖内容写掉。
+ */
+var editorDirtyPathKeys = new Set();
+/** @type {Map<string, object>} 每个标签的视口状态（滚动位置 / 光标），切回来时恢复 */
+var editorViewStateByPath = new Map();
+
+/** 路径归一（与 rememberOpenTab 同一口径，用于脏标记与视口状态索引） */
+function monacoPathKey(filePath) {
+  return String(filePath || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .toLowerCase();
+}
+
+function markMonacoPathDirty(filePath) {
+  const key = monacoPathKey(filePath);
+  if (!key) return;
+  editorDirtyPathKeys.add(key);
+  if (typeof window.markArtifactTabDirty === 'function') {
+    window.markArtifactTabDirty(filePath, true);
+  }
+}
+
+function clearMonacoPathDirty(filePath) {
+  const key = monacoPathKey(filePath);
+  if (key) editorDirtyPathKeys.delete(key);
+  if (typeof window.markArtifactTabDirty === 'function') {
+    window.markArtifactTabDirty(filePath, false);
+  }
+}
+
+function isMonacoPathDirty(filePath) {
+  const key = monacoPathKey(filePath);
+  return !!key && editorDirtyPathKeys.has(key);
+}
+
+function rememberMonacoViewState(filePath, editor) {
+  if (!filePath || !editor || typeof editor.saveViewState !== 'function') return;
+  try {
+    const state = editor.saveViewState();
+    if (state) editorViewStateByPath.set(monacoPathKey(filePath), state);
+  } catch {
+    // ignore
+  }
+}
+
+function restoreMonacoViewState(filePath, editor) {
+  if (!filePath || !editor || typeof editor.restoreViewState !== 'function') return;
+  const state = editorViewStateByPath.get(monacoPathKey(filePath));
+  if (!state) return;
+  try {
+    editor.restoreViewState(state);
+  } catch {
+    // ignore
+  }
+}
 
 /** @type {object|null} */
 var liveWriteLineDecorations = null;
@@ -414,11 +471,11 @@ function trackEditorDisposable(disposable) {
 
 /** 由 onDidChangeModelContent 调用；程序化写入（跟随/读盘对齐）不能算用户改动 */
 function markActiveMonacoEditorUserDirty() {
-  activeEditorUserDirty = true;
+  if (activeFilePath) markMonacoPathDirty(activeFilePath);
 }
 
 function isActiveMonacoEditorUserDirty() {
-  return activeEditorUserDirty;
+  return !!activeFilePath && isMonacoPathDirty(activeFilePath);
 }
 
 function isModelBoundToActiveEditors(model) {
@@ -459,7 +516,53 @@ function touchArtifactModelLRU(uriKey, model) {
   artifactModelLRU.set(uriKey, { model });
 }
 
-/** 超出上限时淘汰最久未使用的模型；仍被编辑器使用的模型不释放 */
+/** 模型是否对应一个「用户改过未保存」的标签（这种模型绝不淘汰，否则未保存内容直接丢失） */
+function isArtifactModelDirty(model) {
+  try {
+    const p = model && model.uri ? String(model.uri.path || '') : '';
+    return !!p && editorDirtyPathKeys.has(monacoPathKey(p));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 按路径取缓存的 model（标签切回时用它避免重读盘、保住撤销栈与未保存内容）。
+ * 先查 LRU，再查当前编辑器绑定模型（理论上已包含在 LRU 里，作为兜底）。
+ */
+function getArtifactModelByPath(filePath) {
+  const want = normalizeArtifactModelPath(filePath).toLowerCase();
+  if (!want) return null;
+  for (const entry of artifactModelLRU.values()) {
+    const model = entry && entry.model;
+    if (!model) continue;
+    let p = '';
+    try {
+      p = String(model.uri && model.uri.path ? model.uri.path : '').toLowerCase();
+    } catch {
+      p = '';
+    }
+    if (p !== want) continue;
+    let disposed = false;
+    try {
+      disposed = typeof model.isDisposed === 'function' && model.isDisposed();
+    } catch {
+      disposed = true;
+    }
+    if (!disposed) return model;
+  }
+  try {
+    const bound = activeEditor && activeEditor.getModel ? activeEditor.getModel() : null;
+    if (bound && String(bound.uri && bound.uri.path ? bound.uri.path : '').toLowerCase() === want) {
+      return bound;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+/** 超出上限时淘汰最久未使用的模型；仍被编辑器使用或含未保存内容的模型不释放 */
 function evictArtifactModelsIfNeeded() {
   let overflow = artifactModelLRU.size - MONACO_MODEL_LRU_MAX;
   if (overflow <= 0) return;
@@ -468,6 +571,7 @@ function evictArtifactModelsIfNeeded() {
     const entry = artifactModelLRU.get(key);
     if (!entry) continue;
     if (isModelBoundToActiveEditors(entry.model)) continue;
+    if (isArtifactModelDirty(entry.model)) continue;
     artifactModelLRU.delete(key);
     safeDisposeMonacoModel(entry.model);
     overflow -= 1;
@@ -482,6 +586,9 @@ function resetArtifactModelCache() {
     safeDisposeMonacoModel(entry.model);
   }
   artifactModelLRU.clear();
+  // 工作区换了，路径与未保存/视口状态都不再成立
+  editorDirtyPathKeys.clear();
+  editorViewStateByPath.clear();
 }
 
 async function runMonacoMountTask(task) {
@@ -546,6 +653,8 @@ async function disposeMonacoArtifactEditorCore() {
     syncTimer = null;
   }
   if (activeFilePath) {
+    // 切标签/切会话前先把视口状态留下，切回来能恢复滚动与光标
+    rememberMonacoViewState(activeFilePath, activeEditor);
     void syncLspDocument(activeFilePath, '', { close: true });
   }
   if (activeEditor) {
@@ -555,7 +664,8 @@ async function disposeMonacoArtifactEditorCore() {
   activeHandle = null;
   activeFilePath = null;
   editorSelection = null;
-  activeEditorUserDirty = false;
+  // 注意：不清 editorDirtyPathKeys —— 未保存标记属于「标签」而不是「编辑器实例」，
+  // 编辑器因展示 diff / 切会话被销毁后，模型的未保存内容仍在，标记也必须留着。
   if (typeof resetArtifactFollowState === 'function') resetArtifactFollowState();
   if (window.diecloud && typeof window.diecloud.setComponentInUse === 'function') {
     window.diecloud.setComponentInUse('monaco-editor', false);
@@ -677,8 +787,14 @@ function configureMonacoArtifactLanguages(monaco) {
   monaco.languages.typescript.javascriptDefaults.setCompilerOptions(compiler);
 }
 
-function createOrReplaceMonacoModel(monaco, uri, text, lang) {
+/**
+ * 取（或建）该路径的 model。
+ * `opts.keepText`：多标签切回时不要用磁盘正文覆盖 —— 模型里可能有未保存编辑，
+ * 也可能只是比磁盘新；覆盖就等于丢弃用户输入。
+ */
+function createOrReplaceMonacoModel(monaco, uri, text, lang, opts) {
   const nextText = String(text ?? '');
+  const keepText = !!(opts && opts.keepText);
   const uriKey = uri && typeof uri.toString === 'function' ? uri.toString() : String(uri);
   let model = null;
   const existing = monaco.editor.getModel(uri);
@@ -691,7 +807,15 @@ function createOrReplaceMonacoModel(monaco, uri, text, lang) {
     }
     if (usable) {
       detachModelFromActiveEditors(existing);
-      if (existing.getValue() !== nextText) existing.setValue(nextText);
+      if (!keepText && existing.getValue() !== nextText) {
+        const editor = activeEditor;
+        if (editor) editor._dieyunProgEdit = true;
+        try {
+          existing.setValue(nextText);
+        } finally {
+          if (editor) editor._dieyunProgEdit = false;
+        }
+      }
       model = existing;
     }
   }

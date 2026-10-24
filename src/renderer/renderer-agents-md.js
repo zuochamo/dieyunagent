@@ -229,6 +229,8 @@ function normalizeAgentsMdUpdates(updates) {
     .map((u) => ({
       section: String(u.section || '').trim(),
       action: String(u.action || 'append').trim() || 'append',
+      // anchor 必须透传：merge 靠它定位同主题条目，丢了就会被 Main 判成「缺 anchor」静默跳过。
+      anchor: u.anchor ? String(u.anchor).trim() : undefined,
       content: String(u.content || '').trim(),
       confidence: Number(u.confidence)
     }))

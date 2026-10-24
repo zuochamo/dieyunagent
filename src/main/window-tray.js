@@ -50,6 +50,17 @@ function buildEditContextMenuTemplate(params) {
 }
 
 /**
+ * 托盘槽位是 16 DIP，按屏幕缩放比换成实际像素（100%→16、150%→24、200%→32）。
+ * 固定 16px 会让高缩放下的系统把图标放大一倍，托盘必糊。
+ * @param {number} scaleFactor
+ * @returns {number}
+ */
+function trayPixelSizeFor(scaleFactor) {
+  const factor = Number(scaleFactor) > 0 ? Number(scaleFactor) : 1;
+  return Math.max(16, Math.round(16 * factor));
+}
+
+/**
  * Main BrowserWindow + system tray.
  * @param {object} deps
  */
@@ -60,6 +71,7 @@ function createWindowTray(deps) {
     Tray,
     Menu,
     nativeImage,
+    screen,
     log,
     getComputerId,
     isLoginItemLaunch,
@@ -163,25 +175,35 @@ function createWindowTray(deps) {
     tray = null;
   }
 
-  function resolveTrayIconPath() {
-    const trayPath = path.join(__dirname, '..', '..', 'assets', 'icon-tray.png');
-    if (fs.existsSync(trayPath)) return trayPath;
+  // Windows 用多尺寸 ICO：任务栏/托盘/Alt-Tab 各自按当前 DPI 直接取到 16/20/24/32/40/48/64 帧，
+  // 而不是拿一张 256 PNG 让系统自己缩（实测那样窗口 HICON 是 256x256，任务栏必然发虚）。
+  function resolveAppIconPath() {
+    const icoPath = path.join(__dirname, '..', '..', 'assets', 'icon.ico');
+    if (process.platform === 'win32' && fs.existsSync(icoPath)) return icoPath;
     return path.join(__dirname, '..', '..', 'assets', 'icon.png');
   }
 
+  // 托盘单独走实心版 PNG：小尺寸（≤32px）用实心剪影才看得清，而 Electron 的
+  // nativeImage 读 ICO 只拿得到最大帧（256），取不到 32px 帧。这张图由
+  // scripts/generate-icons.py 从同一份美术出（TRAY_PX=64，供这里按 DPI 缩下去）。
+  function resolveTrayIconPath() {
+    const trayPath = path.join(__dirname, '..', '..', 'assets', 'icon-tray.png');
+    return fs.existsSync(trayPath) ? trayPath : resolveAppIconPath();
+  }
+
   function loadTrayNativeImage() {
-    const iconPath = resolveTrayIconPath();
     let trayIcon;
     try {
-      trayIcon = nativeImage.createFromPath(iconPath);
+      trayIcon = nativeImage.createFromPath(resolveTrayIconPath());
       if (trayIcon.isEmpty()) {
         trayIcon = nativeImage.createEmpty();
       }
     } catch {
       trayIcon = nativeImage.createEmpty();
     }
-    if (!trayIcon.isEmpty() && process.platform === 'win32') {
-      trayIcon = trayIcon.resize({ width: 16, height: 16, quality: 'best' });
+    if (!trayIcon.isEmpty()) {
+      const px = trayPixelSizeFor(screen.getPrimaryDisplay().scaleFactor);
+      trayIcon = trayIcon.resize({ width: px, height: px, quality: 'best' });
     }
     return trayIcon;
   }
@@ -206,7 +228,7 @@ function createWindowTray(deps) {
   }
 
   function createWindow() {
-    const iconPath = path.join(__dirname, '..', '..', 'assets', 'icon.png');
+    const iconPath = resolveAppIconPath();
     mainWindow = new BrowserWindow({
       width: 1475,
       height: 953,
@@ -382,4 +404,4 @@ function createWindowTray(deps) {
   };
 }
 
-module.exports = { createWindowTray, resolveRendererIndexHtml, buildEditContextMenuTemplate };
+module.exports = { createWindowTray, resolveRendererIndexHtml, buildEditContextMenuTemplate, trayPixelSizeFor };

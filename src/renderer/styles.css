@@ -71,15 +71,16 @@
   --motion-panel-duration: 0.56s;
   --motion-panel-ease: cubic-bezier(0.16, 1, 0.3, 1);
   /*
-   * 子 Agent 卡片正文：按「行」定尺，固定 20 行，超出走卡片内滚动。
-   * 不再有「初始 3 行 → 随内容增长」的过程：卡片出现即占满 20 行、高度恒定，
+   * 子 Agent 卡片正文：按「行」定尺，固定 10 行，超出走卡片内滚动。
+   * 不再有「初始 3 行 → 随内容增长」的过程：卡片出现即占满 10 行、高度恒定，
    * 并发多张卡片时彼此不会被顶动（内容只在卡内滚动）。
+   * 卡片只是「就地概览」，完整过程见右侧面板「子代理」页（可看全部轮次全文）。
    * 基准行高对齐正文的主体文本 .msg-thinking-thought（12px * 1.45），
    * 想整体放大/缩小只改 lines 这一个数字即可，不必反推像素。
    */
   --thinking-subagent-card-line-h: 17.4px;
   --thinking-subagent-card-pad-y: 12px;
-  --thinking-subagent-card-lines: 20;
+  --thinking-subagent-card-lines: 10;
   --scrollbar-size: 8px;
   --scrollbar-thumb: rgba(128, 128, 128, 0.25);
   --scrollbar-thumb-hover: rgba(128, 128, 128, 0.4);
@@ -1319,6 +1320,55 @@ body {
   min-height: 0;
 }
 
+/*
+ * 聊天视口层：滚动容器内的 absolute 子元素会随内容一起滚走，
+ * 所以「滑到底部」浮条需要挂在滚动容器外、但仍是聊天区大小的定位上下文。
+ */
+.chat-viewport {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/*
+ * 「滑到底部」浮条：不在底部时贴在滚动条轨道底部，材质与滚动条 thumb 完全一致
+ * （同宽、同色、纯矩形无圆角，无边框无阴影），点击平滑回底后消失。
+ * 右边缘与 .chat 的滚动条槽重合：.chat 在上层容器内横向撑满，轨道就在 0..var(--scrollbar-size)。
+ */
+.chat-scroll-bottom {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  width: var(--scrollbar-size);
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--scrollbar-thumb);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.chat-scroll-bottom:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+/* 视觉只有 8px 宽，左右各外扩 5px 命中区，避免点不中 */
+.chat-scroll-bottom::after {
+  content: '';
+  position: absolute;
+  inset: 0 -5px;
+}
+.chat-scroll-bottom:focus-visible {
+  outline: 1px solid var(--text-dim);
+  outline-offset: -1px;
+}
+.chat-scroll-bottom[hidden] {
+  display: none !important;
+}
+
 /* 启动进度 = 输入框顶边（深/浅主题共用）；可拖动改输入框高度 */
 .boot-chat-progress {
   position: relative;
@@ -2150,17 +2200,17 @@ body.composer-resizing {
  * 卡片正文：一个子 Agent 的全部轮次（思考 + 工具）都在这里，按轮分区。
  * 内容随运行实时刷新（工具 pending → 完成、思考正文增长），不再甩到卡片外的 beat。
  *
- * 尺寸按「行」定：固定 20 行，高度不随内容增长（取消原先「初始 3 行 → 最多 20 行」
+ * 尺寸按「行」定：固定 10 行，高度不随内容增长（取消原先「初始 3 行 → 最多 20 行」
  * 的增长过程），再多的轮次一律走卡片内滚动（并发 4 张卡片时尤其明显：
  * 谁都不会把别人顶下去）。运行中自动跟随最新一轮，见 fillIsolatedCardBody。
  * padding 已在行数预算里算进去了（border-box）。
  * 只挂在 [open] 上：一是要压过 .msg-thinking-round-details[open] > .msg-thinking-round
  * 的 max-height:none，二是不干扰折叠态由 max-height:0 驱动的收起动画。
- * 排除 .is-empty：还没收到第一轮时不要先占出 20 行空白。
+ * 排除 .is-empty：还没收到第一轮时不要先占出 10 行空白。
  */
 .msg-thinking-round-details[open] > .msg-thinking-round.msg-thinking-subagent-body:not(.is-empty) {
   padding: 4px 0 8px;
-  /* min/max 同值 = 固定 20 行：卡片出现即占满，不再逐轮增高 */
+  /* min/max 同值 = 固定 10 行：卡片出现即占满，不再逐轮增高 */
   min-height: calc(
     var(--thinking-subagent-card-lines) * var(--thinking-subagent-card-line-h) +
       var(--thinking-subagent-card-pad-y)
@@ -3358,16 +3408,6 @@ body.composer-resizing {
   flex: 1 1 auto;
   min-width: 0;
 }
-.msg-thinking-tool-retry {
-  flex: 0 0 auto;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 0;
-  border: 1px solid var(--border-subtle, #30363d);
-  background: var(--surface-2, #21262d);
-  color: var(--text-primary, #e6edf3);
-  cursor: pointer;
-}
 .msg-tool-inline-diff {
   margin-top: 6px;
   width: 100%;
@@ -3427,9 +3467,6 @@ body.composer-resizing {
   color: #cf222e;
 }
 
-.msg-thinking-tool-retry:hover {
-  border-color: var(--accent, #58a6ff);
-}
 .composer-foot {
   display: flex;
   align-items: center;
@@ -8559,6 +8596,16 @@ body.pane-resizing {
     max-width var(--motion-collapse-duration) var(--motion-collapse-ease);
 }
 
+/* 文件面板右栏：标签条 + 内容区（内容区仍是 #artifacts-file-view，保持既有预览语义） */
+.artifacts-file-pane {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-width: var(--artifacts-view-min);
+  min-height: 0;
+  overflow: hidden;
+}
+
 .artifacts-file-view {
   flex: 1 1 0;
   overflow: hidden;
@@ -8940,6 +8987,16 @@ body.pane-resizing {
   border-bottom: 1px solid var(--border);
 }
 
+/* 提示条容器：同一次切换里可能同时有「截断 / 来源 / 路径翻译」多条 */
+.artifacts-editor-notes:empty {
+  display: none;
+}
+
+/* 编辑器外壳里被隐藏的部件（Monaco 宿主 / 文本域二选一）不占位 */
+.artifacts-editor-shell > [hidden] {
+  display: none !important;
+}
+
 /* 「路径翻译」提示条：不是旁注，而是「打开的不是你给的那个路径」的风险提示 */
 .artifacts-editor-translation-note {
   color: var(--fg);
@@ -9219,6 +9276,130 @@ body.pane-resizing {
   font-size: 12px;
   white-space: nowrap;
 }
+/* 侧栏标签条：浏览器页与文件面板共用同一份视觉与交互（类名唯一来源，勿各自再写一套）
+   形态：只用文字，「/」分隔；选中项加粗。无灰底、无边框、无卡片。 */
+.side-tabstrip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px 4px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.side-tabstrip[hidden] {
+  display: none !important;
+}
+.side-tabstrip-list {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-gutter: auto;
+}
+.side-tabstrip-list::-webkit-scrollbar {
+  height: 4px;
+}
+.side-tab {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  max-width: 180px;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+  user-select: none;
+  box-sizing: border-box;
+}
+/* 分隔符只画在相邻标签之间（首项前面没有） */
+.side-tab + .side-tab::before {
+  content: '/';
+  flex: 0 0 auto;
+  margin: 0 3px 0 0;
+  color: var(--text-mute);
+  font-weight: 400;
+}
+.side-tab:hover {
+  color: var(--text);
+}
+.side-tab.active {
+  color: var(--text);
+  font-weight: 700;
+}
+/* 待打开（尚未加载）的标签：斜体弱化，不再用虚线框表达 */
+.side-tab.pending {
+  color: var(--text-mute);
+  font-style: italic;
+}
+.side-tab-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 未保存标记：多标签下必须一眼看出哪个标签有改动 */
+.side-tab-dirty {
+  flex-shrink: 0;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--accent);
+}
+.side-tab-close {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  box-sizing: border-box;
+}
+.side-tab:hover .side-tab-close,
+.side-tab.active .side-tab-close {
+  opacity: 0.55;
+}
+.side-tab-close:hover {
+  opacity: 1;
+  color: var(--text);
+}
+/* 新建标签：同样只留文字，不加边框/底色 */
+.side-tabstrip-new {
+  flex: 0 0 auto;
+  align-self: center;
+  width: auto;
+  height: auto;
+  padding: 0 4px;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: var(--text-mute);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.3;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.side-tabstrip-new:hover {
+  color: var(--text);
+}
+.side-tabstrip-new[aria-pressed='true'] {
+  color: var(--accent);
+}
 .browser-url-input {
   flex: 1;
   min-width: 0;
@@ -9267,3 +9448,302 @@ body.pane-resizing {
   background: rgba(190, 194, 202, 0.18);
   color: var(--titlebar-text);
 }
+
+/* ── 产物区（工作区面板「产物」页）：只读 sessionArtifacts 的索引视图 ── */
+.products-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0 8px;
+}
+.products-group-head {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  user-select: none;
+}
+/* 头部两段（标题 / 摘要）都要能收缩，否则窄面板下标题会被挤成竖排 */
+.side-panel-pane[data-side-pane='artifacts'] .side-panel-pane-head {
+  gap: 6px;
+}
+.side-panel-pane[data-side-pane='artifacts'] .side-panel-pane-title {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+#products-panel-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 两行式：第一行 名称/徽章/变更/时间，第二行 路径（本地可点，SSH 纯文本） */
+.products-item {
+  align-items: flex-start;
+}
+.products-item .artifacts-file-icon {
+  margin-top: 2px;
+}
+.products-item-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.products-item-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+/* 类型徽章紧跟文件名，靠 gap 把变更行数与时间推右 */
+.products-item-gap {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+.products-item-line .artifacts-file-name {
+  flex: 0 1 auto;
+  max-width: 62%;
+}
+.products-item-path {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.products-item-path.is-clickable {
+  cursor: pointer;
+}
+.products-item-path.is-clickable:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+.products-item-type {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: var(--text-mute);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.products-item-age {
+  flex-shrink: 0;
+  min-width: 52px;
+  font-size: 11px;
+  color: var(--text-mute);
+  text-align: right;
+}
+.products-item .artifacts-file-diff {
+  flex-shrink: 0;
+}
+.products-empty {
+  padding: 28px 16px;
+  text-align: center;
+  user-select: none;
+}
+.products-empty-title {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.products-empty-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* ---------------------------------------------------------------
+ * 子 Agent 卡片标题行的「详情」入口（→ 右侧面板「子代理」页）
+ * 与 .msg-checkpoint-restore-btn 同款「正文里的次要链接」观感：
+ * 不占独立行、不加边框，避免在 10 行的卡片头上再挂一个按钮色块。
+ * ------------------------------------------------------------- */
+.msg-thinking-subagent-detail {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 0;
+  font: inherit;
+  line-height: inherit;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--text-dim) 45%, transparent);
+}
+.msg-thinking-subagent-detail:hover {
+  color: var(--text);
+  text-decoration-color: currentColor;
+}
+
+/* ---------------------------------------------------------------
+ * 右侧面板「子代理」页
+ * 卡片 = 与思考区同一套 rounds 渲染（fillIsolatedCardBody），差别只在容器：
+ * 这里不限高、不裁剪，全部轮次直接铺开，所以不再有「卡片内滚动」。
+ * ------------------------------------------------------------- */
+.subagent-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.subagent-panel-card {
+  border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  border-radius: 0;
+  padding: 0 8px;
+}
+.subagent-panel-card.is-running {
+  border-color: var(--border);
+}
+.subagent-panel-card.is-highlight {
+  border-color: color-mix(in srgb, var(--text) 32%, var(--border));
+  animation: subagent-panel-flash 1.2s ease-out;
+}
+@keyframes subagent-panel-flash {
+  from {
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+.subagent-panel-card-head {
+  cursor: pointer;
+  list-style: none;
+  padding: 6px 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  user-select: none;
+}
+.subagent-panel-card-head::-webkit-details-marker {
+  display: none;
+}
+.subagent-panel-card-head::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 0.1em;
+  opacity: 0.55;
+  transform-origin: center;
+  transition: transform var(--motion-collapse-duration) var(--motion-collapse-ease);
+}
+.subagent-panel-card[open] > .subagent-panel-card-head::before {
+  transform: rotate(90deg);
+}
+.subagent-panel-card-title {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--text);
+}
+.subagent-panel-card-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-mute);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.subagent-panel-card-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-mute);
+}
+.subagent-panel-card-body {
+  padding: 2px 0 8px;
+}
+.subagent-panel-empty {
+  padding: 28px 16px;
+  text-align: center;
+  user-select: none;
+}
+.subagent-panel-empty-title {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.subagent-panel-empty-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* ── 沙箱越界审批卡片（Main → Renderer 弹一次）────────────────────────── */
+.sandbox-approval-host {
+  position: fixed;
+  right: 20px;
+  bottom: 88px;
+  z-index: 9000;
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(520px, calc(100vw - 40px));
+}
+
+.sandbox-approval-host.show { display: flex; }
+
+.sandbox-approval-card {
+  background: var(--panel-bg, #1f2430);
+  border: 1px solid var(--border-color, #3a4050);
+  border-left: 3px solid var(--accent, #4c8dff);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+  color: var(--text-primary, #e6e8ee);
+}
+
+.sandbox-approval-title { font-weight: 600; margin-bottom: 6px; }
+.sandbox-approval-meta { opacity: 0.75; font-size: 12px; margin-bottom: 6px; }
+.sandbox-approval-reason { margin-bottom: 6px; line-height: 1.5; }
+
+.sandbox-approval-detail {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 6px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.sandbox-approval-note { opacity: 0.7; font-size: 11.5px; margin-bottom: 10px; line-height: 1.5; }
+.sandbox-approval-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+.sandbox-approval-btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #3a4050);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.sandbox-approval-btn.primary {
+  background: var(--accent, #4c8dff);
+  border-color: var(--accent, #4c8dff);
+  color: #fff;
+}
+
+.sandbox-approval-btn:hover { filter: brightness(1.15); }
+.sandbox-mode-field { margin: 6px 0 10px; }
+.sandbox-mode-field select { min-width: 280px; }

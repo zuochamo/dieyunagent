@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, bindCurrentSessionWorkspace, restartTerminalSession, showAgentToast, connectRemoteGatewayLocked, resetRemoteGatewayClient, refreshRemoteGatewayMeta, refreshHistoryList, showOverlay, parentRemotePath, showTextPrompt, setSidePanelTab, getSidePanelTab, consumePendingSshTabRequest */
+/* global window, document, $, escapeHtml, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, refreshProductsPanelIfActive, bindCurrentSessionWorkspace, restartTerminalSession, showAgentToast, connectRemoteGatewayLocked, resetRemoteGatewayClient, refreshRemoteGatewayMeta, refreshHistoryList, showOverlay, parentRemotePath, showTextPrompt, setSidePanelTab, getSidePanelTab, consumePendingSshTabRequest */
 'use strict';
 
 const wsApi = window.diecloud || {};
@@ -540,7 +540,19 @@ async function pickLocalWorkspace() {
     await ensureDefaultWorkspaceEditor({ force: true });
   }
   if (typeof restartTerminalSession === 'function') restartTerminalSession();
-  if (!$('artifacts-panel')?.hidden) renderArtifactsList();
+  refreshWorkspaceScopedPanes();
+}
+
+/**
+ * 工作区切换后刷新「依赖工作区根」的 pane。
+ *
+ * 只调 `renderArtifactsList()` 会让「产物」页继续显示旧根下的相对路径与可点判定
+ * （同一批产物的 path@ts 没变，光看签名分不出来）—— 产物页必须一起重绘。
+ */
+function refreshWorkspaceScopedPanes() {
+  if ($('artifacts-panel')?.hidden) return;
+  renderArtifactsList();
+  if (typeof refreshProductsPanelIfActive === 'function') refreshProductsPanelIfActive();
 }
 
 async function clearWorkspaceToDefault() {
@@ -550,7 +562,7 @@ async function clearWorkspaceToDefault() {
   invalidateWorkspaceArtifacts();
   await bindCurrentSessionWorkspace(null);
   if (typeof restartTerminalSession === 'function') restartTerminalSession();
-  if (!$('artifacts-panel')?.hidden) renderArtifactsList();
+  refreshWorkspaceScopedPanes();
 }
 
 function openSshConnectModal(opts) {
@@ -598,7 +610,7 @@ async function bindSshRemotePath(remotePath) {
   if (ws.workspacePath) await bindCurrentSessionWorkspace(ws.workspacePath);
   await tryStartRemoteGateway();
   if (typeof restartTerminalSession === 'function') restartTerminalSession();
-  if (!$('artifacts-panel')?.hidden) renderArtifactsList();
+  refreshWorkspaceScopedPanes();
   return ws;
 }
 

@@ -21,7 +21,10 @@ function formatToolArgsBrief(name, args) {
   if (name === 'web_fetch') return (args.url || '').slice(0, 120);
   if (name === 'web_search') {
     const eng = args.engine ? ` [${args.engine}]` : '';
-    return `${args.query || ''}${eng}`.slice(0, 120);
+    const site = args.site ? ` site:${args.site}` : '';
+    const page = Number(args.page) > 1 ? ` p${args.page}` : '';
+    const top = Number(args.fetchTop) > 0 ? ` +${args.fetchTop}篇` : '';
+    return `${args.query || ''}${site}${page}${eng}${top}`.slice(0, 120);
   }
   if (name === 'codebase_search') return String(args.query || '').slice(0, 120);
   if (name === 'host_print_image') return args.filePath || '';
@@ -99,7 +102,11 @@ function summarizeToolResult(name, result) {
     if (name === 'web_search' && result.resultCount != null) {
       const n = Number(result.resultCount) || 0;
       const suffix = result.truncated ? '（已截断）' : '';
-      return `${n} 个结果 · ${result.length || 0} 字${suffix}`;
+      const pages =
+        Array.isArray(result.pages) && result.pages.length
+          ? ` · 正文 ${result.pages.filter((p) => p && p.ok).length}/${result.pages.length} 篇`
+          : '';
+      return `${n} 个结果${pages} · ${result.length || 0} 字${suffix}`;
     }
     if (result.text != null) {
       const n = result.length != null ? result.length : result.text.length;

@@ -9,7 +9,7 @@ const OPEN_API_MCP_DEFS = Object.freeze([
     id: 'mcp-daizhang',
     service: 'daizhang',
     name: '叠云代账',
-    description: '内网只读：客户列表、发票查询。配置 Base URL + API Key。'
+    description: '内网只读：客户列表、发票查询与汇总、增值税税负与申报口径。配置 Base URL + API Key。'
   },
   {
     id: 'mcp-tools',

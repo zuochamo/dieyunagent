@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-29T10:53:09.548Z",
+  "generatedAt": "2026-10-21T06:33:00.856Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 186,
-    "gatewayOnly": 114,
-    "rustOnly": 23,
-    "both": 49
+    "total": 191,
+    "gatewayOnly": 116,
+    "rustOnly": 24,
+    "both": 51
   },
   "methods": [
     {
@@ -811,6 +811,14 @@
       "rust": []
     },
     {
+      "method": "host.proc_output",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/host.js"
+      ],
+      "rust": []
+    },
+    {
       "method": "index.remote_sync_configure",
       "layer": "gateway",
       "gateway": [
@@ -1095,6 +1103,34 @@
       "rust": []
     },
     {
+      "method": "memory.request_snapshot_append",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.request_snapshot_get",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.request_snapshot_recent",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
       "method": "memory.session_archive",
       "layer": "both",
       "gateway": [
@@ -1176,6 +1212,14 @@
     },
     {
       "method": "permissions.get",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/permissions.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "permissions.sandbox_state",
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/permissions.js"

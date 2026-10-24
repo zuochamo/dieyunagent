@@ -35,6 +35,24 @@ const AGENT_LIMITS_DEFAULTS = {
   monacoMaxChars: 200000,
   ctxAgentToolCallLimit: 150,
   toolResultMaxJson: 14000,
+  // 单次工具执行的「无进展看门狗」：超过该时长仍未 settle，判定工具卡住，按 TOOL_STALLED
+  // 失败返回并让循环继续（原调用不终止）。**必须大于 host_exec 的硬上限 600s**
+  // （src/gateway/host-control.js: SHELL_TIMEOUT_MAX_MS），否则合法的编译/渲染会被误杀。
+  // 故意不上设置页：这是兜底护栏，不是用户可调的探索策略。
+  // 2026-10-23→24 事故：host_exec 起前台长驻脚本 + 链路无回包 ⇒ run 静默 running 11 小时，
+  // 期间零请求、零 trace、零日志 —— 除遥测外没有任何一层能看出「它停了」。
+  toolStallMs: 12 * 60 * 1000,
+  // 长任务工具（`subagent` = 一整轮子 loop run，调研常常十几分钟）的窗口。
+  // 工具清单的唯一来源是 `guardrails-shared.js: LONG_RUNNING_TOOL_NAMES`。
+  toolStallMsLong: 45 * 60 * 1000,
+  // run 级「无进展」看门狗（`rust-loop-runner` 的 while 循环）。
+  // 工具段已有 toolStallMs 兜底；这两个数覆盖其余**没有时间维度**的段：
+  // 压缩判定 / 快照写入 / 循环 RPC（agent.loop.*）/ 委托结果回填。
+  // warn：只记一行 `RUN_STALL`（含 stage），先让「它停了」可见；
+  // abort：调既有的 `agent.loop.cancel` 收尾，不再依赖用户发现。
+  // abort 必须 > llmReconnectMaxWaitMs(30min)，否则把「合法重连等待」误判成卡死。
+  runStallWarnMs: 5 * 60 * 1000,
+  runStallAbortMs: 45 * 60 * 1000,
   writeSmellHintMaxItems: 3,
   writeSmellHintMaxChars: 480,
   writeSmellScanTimeoutMs: 1500,
@@ -121,7 +139,14 @@ const AGENT_LIMITS_DEFAULTS = {
   // 唯一来源。Main 的 src/agent/system-prompt-prep.js 与 Renderer 的
   // renderer-context-engine.js 都从这里读，不再各自维护字面量。
   // 这些是「注入内容尺寸」而非用户可调护栏，故意不进 AGENT_LIMITS_SCHEMA（设置页不展示）。
-  agentsMdMaxChars: 2800,
+  // 项目地图每轮注入预算。**按注入白名单的实际体量定，不是拍脑袋对齐**：
+  // 白名单是 overview + commands + gotchas（structure 刻意留在外面 —— graph.repo_map
+  // 已注入目录结构）。三条都是「不知道就直接做错」的内容，6000 是当年只注入
+  // overview 时的额度，白名单扩容后没跟着涨，实测某项目三段合计 12658 字符只进
+  // 47%，命令与已知坑各被砍掉一半以上。
+  // 13500 = 实测覆盖「三段全量」所需的 13258 + 余量（13000 仍差 258 字符，约一条命令）。
+  // 注意：这是「最多给多少」的上限，小项目文件小就只占实际体量，不会白烧。
+  agentsMdMaxChars: 13500,
   dieyunMdMaxChars: 6000,
   codebaseMentionLimit: 16,
   filePreviewMaxBytes: 48000,
@@ -133,7 +158,20 @@ const AGENT_LIMITS_DEFAULTS = {
   toolRecallLimit: 10,
   skillBodyMax: 3500,
   skillFullCount: 3,
-  skillTotalCount: 5
+  skillTotalCount: 5,
+
+  // —— 请求快照（审计）参数 ——
+  // 定位：让人事后能回答「这一轮模型到底看到了什么、为什么历史变短了」。
+  // 这六个数字是**账本/保留**参数（与 `charsPerToken` 同类），不是策略上限，
+  // 故意不进 AGENT_LIMITS_SCHEMA（设置页不展示），唯一来源仍是这里。
+  // 三层预算（DEFAULTS → schema → tier 覆盖）都不参与 tier 缩放：审计留底不该随任务档位变。
+  // 体量账：单行 messages 20–120KB，40 轮 ≈ 3.2MB/会话；超预算先降 keepPerSession。
+  requestSnapshotEnabled: true,
+  requestSnapshotKeepPerSession: 40,
+  requestSnapshotKeepCompacted: 200,
+  requestSnapshotMaxMessagesChars: 400000,
+  requestSnapshotSystemMaxChars: 64000,
+  requestSnapshotToolsMaxChars: 96000
 };
 
 /** Long-horizon run: multiply these guardrails (still hard-capped; not disabled). */

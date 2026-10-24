@@ -107,13 +107,17 @@ function registerSkillsMcpIpc(ctx) {
     const userData = getUserDataPath();
     const settings = loadModelSettings(userData);
     const embeddingConfig = getEmbeddingConfig(settings);
-    return recallAgentTools({
+    const recalled = await recallAgentTools({
       userData,
       embeddingConfig,
       candidates: Array.isArray(payload?.candidates) ? payload.candidates : [],
       query: payload?.query || '',
       limit: payload?.limit || 10
     });
+    if (recalled && recalled.serverFloor > 0) {
+      console.log(`[tools] recall 每服务保底补入 ${recalled.serverFloor} 个服务（候选 ${recalled.total}）`);
+    }
+    return recalled;
   });
 
   ipcMain.handle('mcp:list', () => listMcpServersForUi(getUserDataPath()));

@@ -3,8 +3,10 @@
 const { delegateAgentToolViaGateway } = require('./delegate-tool-gateway');
 const { isRendererOnlyTool, requestToolFromRenderer } = require('./renderer-tool-delegate');
 const { getToolHarnessSession, clearToolHarnessSession } = require('./tool-harness');
+// 关卡装配（归一 + before/after 顺序）的唯一来源；本文件只追加自己的 after 关卡。
+const { createToolCall } = require('./tool-gate');
 const { isMutatingAgentTool, MUTATING_TOOLS } = require('./tool-classify');
-const { normalizeAgentToolName, sniffVisionImageMime } = require('./guardrails-shared');
+const { sniffVisionImageMime } = require('./guardrails-shared');
 const { getAgentLimits } = require('./agent-limits');
 const {
   collectWriteSmellHints,
@@ -19,7 +21,8 @@ const {
   recordBrowserScreenshot,
   recordVisionImage,
   resolveVisionLimits,
-  SOURCE_ATTACHMENT
+  SOURCE_ATTACHMENT,
+  SOURCE_MCP
 } = require('./browser-vision');
 
 /**
@@ -92,8 +95,14 @@ function sanitizeToolResultForApi(name, result) {
   return result;
 }
 
-function runExclusiveMain(fn, workspaceKey) {
-  return runExclusive(fn, workspaceKey);
+/**
+ * 写类工具串行入口。`meta` 只用于 stall 诊断（哪个工具把队列占住了），不参与判定。
+ * @param {() => Promise<any>} fn
+ * @param {string} workspaceKey
+ * @param {{ tool?: string, sessionId?: string }} [meta]
+ */
+function runExclusiveMain(fn, workspaceKey, meta) {
+  return runExclusive(fn, workspaceKey, null, meta);
 }
 
 /**
@@ -314,7 +323,10 @@ function createMainToolBridge(deps) {
       return executeGatewayTool(toolName, args, ctx);
     };
     return isMutatingAgentTool(toolName)
-      ? runExclusiveMain(invoke, ctx.workspacePath || ctx.worktreePath || ctx.sessionId)
+      ? runExclusiveMain(invoke, ctx.workspacePath || ctx.worktreePath || ctx.sessionId, {
+          tool: toolName,
+          sessionId: ctx.sessionId
+        })
       : invoke();
   }
 
@@ -379,6 +391,60 @@ function createMainToolBridge(deps) {
     };
   }
 
+  /**
+   * MCP 工具返回的图片：送进视觉缓冲，并把 base64 从工具结果里摘掉。
+   *
+   * 为什么必须在这里做：runtime-manager 把 image part 提炼成 visionImages，
+   * 但只有渲染进程侧才持有 runId 与 vision 额度；不接这一段，图片就还是
+   * 「模型知道有张图、却看不见像素」，3D 建模的看图闭环断在最后一步。
+   *
+   * 视觉未开启（模型不支持图）时不注入，但必须**明说**——否则模型会以为自己看过图。
+   */
+  function absorbMcpVision(result, toolName, ctx, visionEnabled, visionLimits) {
+    if (!result || typeof result !== 'object' || !Array.isArray(result.visionImages)) return result;
+    const images = result.visionImages;
+    const { visionImages, ...rest } = result;
+    const runId = ctx && ctx.runId;
+    let queued = 0;
+    if (visionEnabled && runId) {
+      for (const img of images) {
+        try {
+          const ok = recordVisionImage(
+            runId,
+            {
+              source: SOURCE_MCP,
+              tool: toolName,
+              mime: img && img.mime,
+              base64: img && img.base64
+            },
+            visionLimits,
+            { evictOldest: true }
+          );
+          if (ok) queued += 1;
+        } catch {
+          /* 单张失败不影响其它图片与工具结果 */
+        }
+      }
+    }
+    let suffix;
+    if (queued > 0) {
+      suffix = `图片已作为视觉输入附在下一轮（${queued} 张），请直接据此判断，无需重复调用。`;
+    } else if (visionEnabled) {
+      suffix =
+        '图片未能注入（超出单张体积或每轮张数上限）；需要看图请降低分辨率后重取，或分批调用。';
+    } else {
+      suffix =
+        '当前模型未开启视觉输入，图片不会被看到；请改用工具返回的文字/数值字段判断，或让用户看图确认。';
+    }
+    return {
+      ...rest,
+      visionInjected: queued > 0,
+      visionImagesProvided: images.length,
+      visionImagesDropped: images.length - queued,
+      note: [rest.note, suffix].filter(Boolean).join(' ')
+    };
+  }
+
   async function executeAgentTool(name, args, ctx = {}) {
     if (ctx.signal?.aborted) {
       const err = new Error('已停止');
@@ -414,22 +480,54 @@ function createMainToolBridge(deps) {
     const visionEnabled = ctx && ctx.browserVision === true;
     const visionLimits = visionEnabled ? getAgentLimits(userDataPath, ctx.contextTierId) : null;
     const invokeTool = (n, a) => executeAgentToolInner(n, a, ctx);
-    const raw = await harness.execute(name, args, (n, a) =>
+    // 归一**一次**：之后关卡、视觉判定、出站净化、写味提示都只看 `call.name`（别名已展开）。
+    const call = createToolCall({
+      name,
+      args,
+      harness,
+      // 外层追加的 after 关卡：与 harness 自带的遥测/落盘共用一个顺序机制，
+      // 位置即语义（落盘 → 视觉吸收 → 截图暂存 → 出站净化 → 写味提示）。
+      extraAfterHooks: [
+        {
+          id: 'absorb-mcp-vision',
+          stage: 'after',
+          run(c) {
+            c.result = absorbMcpVision(c.result, c.name, ctx, visionEnabled, visionLimits);
+          }
+        },
+        {
+          id: 'record-browser-screenshot',
+          stage: 'after',
+          run(c) {
+            if (!visionEnabled || !ctx.runId) return;
+            try {
+              recordBrowserScreenshot(ctx.runId, c.name, c.result, visionLimits);
+            } catch {
+              /* 截图暂存失败不影响工具结果 */
+            }
+          }
+        },
+        {
+          id: 'sanitize-result',
+          stage: 'after',
+          run(c) {
+            c.result = sanitizeToolResultForApi(c.name, c.result);
+          }
+        },
+        {
+          id: 'write-smell-hints',
+          stage: 'after',
+          async run(c) {
+            c.result = await withWriteSmellHints(c.name, c.args, c.result, ctx);
+          }
+        }
+      ]
+    });
+    return harness.execute(call, (n, a) =>
       visionEnabled && ctx.runId && isVisionImageReadRequest(n, a)
         ? invokeVisionImageRead(n, a, ctx, visionLimits, invokeTool)
         : invokeTool(n, a)
     );
-    if (visionEnabled && ctx.runId) {
-      try {
-        recordBrowserScreenshot(ctx.runId, name, raw, visionLimits);
-      } catch {
-        /* 截图暂存失败不影响工具结果 */
-      }
-    }
-    // harness 内部已归一化并据此执行，但这里拿到的是原始 name/args：再归一一次，
-    // 否则模型用 write_file / edit / str_replace_editor 等别名时判定会被整体跳过。
-    const norm = normalizeAgentToolName(name, args);
-    return withWriteSmellHints(norm.name, norm.args, sanitizeToolResultForApi(name, raw), ctx);
   }
 
   return {

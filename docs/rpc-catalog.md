@@ -2,14 +2,14 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-09-29T10:53:09.548Z
+生成时间：2026-10-21T06:33:00.856Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 186 |
-| Gateway only | 114 |
-| Rust only | 23 |
-| Both | 49 |
+| 总计 | 191 |
+| Gateway only | 116 |
+| Rust only | 24 |
+| Both | 51 |
 
 ## 按命名空间
 
@@ -142,7 +142,7 @@
 | `graph.symbol_search` | both | gateway/handlers/graph.js | yes |
 | `graph.symbol_semantic_search` | both | gateway/handlers/graph.js | yes |
 
-### host (5)
+### host (6)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -151,6 +151,7 @@
 | `host.print_image` | gateway | gateway/handlers/host.js | — |
 | `host.proc_kill` | gateway | gateway/handlers/host.js | — |
 | `host.proc_list` | gateway | gateway/handlers/host.js | — |
+| `host.proc_output` | gateway | gateway/handlers/host.js | — |
 
 ### index (2)
 
@@ -170,7 +171,7 @@
 | `lsp.settings_get` | gateway | gateway/handlers/lsp-workspace.js | — |
 | `lsp.settings_set` | gateway | gateway/handlers/lsp-workspace.js | — |
 
-### memory (31)
+### memory (34)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -197,6 +198,9 @@
 | `memory.project_add` | gateway | gateway/handlers/memory.js | — |
 | `memory.project_recall` | gateway | gateway/handlers/memory.js | — |
 | `memory.project_scope` | gateway | gateway/handlers/memory.js | — |
+| `memory.request_snapshot_append` | rust | — | yes |
+| `memory.request_snapshot_get` | both | gateway/handlers/memory.js | yes |
+| `memory.request_snapshot_recent` | both | gateway/handlers/memory.js | yes |
 | `memory.session_archive` | both | gateway/handlers/memory.js | yes |
 | `memory.session_create` | both | gateway/handlers/memory.js | yes |
 | `memory.session_delete` | both | gateway/handlers/memory.js | yes |
@@ -206,11 +210,12 @@
 | `memory.sessions_with_messages` | both | gateway/handlers/memory.js | yes |
 | `memory.touch_session` | both | gateway/handlers/memory.js | yes |
 
-### permissions (1)
+### permissions (2)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `permissions.get` | gateway | gateway/handlers/permissions.js | — |
+| `permissions.sandbox_state` | gateway | gateway/handlers/permissions.js | — |
 
 ### planner (6)
 

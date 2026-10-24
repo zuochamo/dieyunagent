@@ -6,6 +6,7 @@ const {
   Menu,
   ipcMain,
   nativeImage,
+  screen,
   dialog,
   Notification,
   safeStorage,
@@ -65,7 +66,7 @@ const { createSshReconnect } = require('./ssh/reconnect');
 const { loadModelSettings, saveModelSettings } = require('./model-settings');
 const { createMainToolBridge } = require('./agent/tool-bridge-main');
 const { clearToolHarnessSessionsForSession } = require('./agent/tool-harness');
-const { registerRendererToolDelegateIpc } = require('./agent/renderer-tool-delegate');
+const { registerRendererToolDelegateIpc, requestSandboxApproval } = require('./agent/renderer-tool-delegate');
 const { createMainCompactionAgent, getEffectiveInputBudget } = require('./agent/compaction-main');
 const { killActiveShellChildren } = require('./gateway/host-control');
 const { registerEarlyMainIpc, registerMainIpc, registerLateMainIpc } = require('./main/register-ipc');
@@ -78,6 +79,12 @@ const { createTerminalPool } = require('./terminal/terminal-pool');
 log.transports.file.level = 'info';
 log.transports.file.maxSize = 5 * 1024 * 1024;
 log.info('应用启动中...');
+// 写类工具串行队列的 stall 告警必须进 main.log：队列被一个不返回的调用钉住时，
+// 其它地方一行痕迹都没有（读类工具与 Gateway 照常工作），只能靠这条日志定位。
+require('./agent/mutate-queue').setMutateQueueLog((m) => log.warn(m));
+// 循环停滞（RUN_STALL / RUN_STALL_ABORT）同样必须进 main.log：
+// run 卡在某个 await 上时，除了这一行没有任何痕迹（无下一轮请求、无 trace、无报错）。
+require('./agent/rust-loop-runner').setLoopRunnerLog((m) => log.warn(m));
 
 // 兜底开关：遇到 GPU 花屏（其他窗口像素混入）时可用 DIEYUN_DISABLE_GPU=1 规避
 if (process.env.DIEYUN_DISABLE_GPU === '1') {
@@ -369,6 +376,7 @@ windowTray = createWindowTray({
   Tray,
   Menu,
   nativeImage,
+  screen,
   log,
   getComputerId: () => CONFIG.COMPUTER_ID,
   isLoginItemLaunch: () => autoLaunch.isLoginItemLaunch(),
@@ -472,6 +480,13 @@ app.whenReady().then(async () => {
     sshReconnect,
     LocalGateway
   }));
+  // 沙箱审批通道：越界操作（写工作区外 / read-only 档下写文件）弹一次窗问用户。
+  // 未注入时 Gateway 的 broker 走 fail-closed（一律拒），不会静默放行。
+  if (localGateway && typeof localGateway.setSandboxApprovalChannel === 'function') {
+    localGateway.setSandboxApprovalChannel((payload) =>
+      requestSandboxApproval(windowTray ? windowTray.getMainWindow() : null, payload)
+    );
+  }
   if (isRustCoreEnabled()) {
     const bin = resolveDieyunCoreBinary();
     if (bin) {

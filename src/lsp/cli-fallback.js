@@ -5,12 +5,15 @@ const fsSync = require('fs');
 const { spawn } = require('child_process');
 const { resolveTsServerPath } = require('./language-registry');
 const { filterByMinSeverity, severityRank } = require('./lsp-client');
+const { buildCmdLine } = require('./spawn-args');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 
 function resolveSpawn(command, args, cwd) {
   if (process.platform === 'win32' && command === 'npx') {
-    const cmdLine = ['npx', ...args].join(' ');
+    // 逐参数加引号：`--project <userData>/lsp-stubs/...` 里 userData 常带空格，
+    // 裸 join(' ') 会被 cmd.exe 劈成两个参数，pyright 参数错误退出 → 诊断静默为空。
+    const cmdLine = buildCmdLine('npx', args);
     return {
       command: 'cmd.exe',
       args: ['/d', '/s', '/c', cmdLine],
@@ -153,7 +156,7 @@ function parseEslintJsonOutput(text) {
     if (!Array.isArray(rows)) return [];
     const diags = [];
     for (const row of rows) {
-      const filePath = row.filePath ? path.normalize(String(row.filePath)) : '';
+      const filePath = row.filePath ? toAbsoluteReportedPath(row.filePath, '') : '';
       for (const msg of row.messages || []) {
         const severity =
           msg.severity === 2 ? 'error' : msg.severity === 1 ? 'warning' : 'info';
@@ -183,13 +186,34 @@ function resolveEslintCommand(projectRoot) {
   }
 }
 
+/**
+ * 把 CLI 上报的文件路径统一成「绝对路径」。
+ *
+ * 关键：**远程项目是 POSIX 路径，而宿主可能是 Windows**。
+ * `path.normalize('/srv/app/a.js')` 在 win32 上返回 `\srv\app\a.js`，
+ * 丢掉「以 / 开头」这个唯一判据，随后 `path.isAbsolute` 判 false、
+ * `isUnderWorkspace` 直接丢条目 —— 表现为「远程 eslint/ruff 永远 0 条诊断」。
+ * 所以先看分隔符风格，再决定用 posix 还是平台实现。
+ */
+function toAbsoluteReportedPath(file, projectRoot) {
+  const s = String(file || '');
+  const proot = String(projectRoot || '');
+  const posixWorld = s.startsWith('/') || proot.startsWith('/');
+  if (posixWorld) {
+    const base = proot.replace(/\\/g, '/').replace(/\/$/, '');
+    const rel = s.replace(/\\/g, '/');
+    if (rel.startsWith('/')) return path.posix.normalize(rel);
+    return path.posix.normalize(base ? `${base}/${rel}` : rel);
+  }
+  if (path.isAbsolute(s)) return path.normalize(s);
+  return path.normalize(path.join(proot, s));
+}
+
 function groupEslintByFile(rows, projectRoot, workspaceRoot, minSeverity, maxPerFile, maxFiles) {
   const byFile = new Map();
   for (const d of rows) {
     if (!d.file) continue;
-    let abs = path.isAbsolute(d.file)
-      ? path.normalize(d.file)
-      : path.normalize(path.join(projectRoot, d.file));
+    const abs = toAbsoluteReportedPath(d.file, projectRoot);
     if (!isUnderWorkspace(abs, workspaceRoot)) continue;
     const key = abs.toLowerCase();
     if (!byFile.has(key)) byFile.set(key, { file: abs, diagnostics: [] });
@@ -286,15 +310,76 @@ async function runTscFallback(opts) {
   );
 }
 
+/**
+ * pyright CLI 的 `--project` 参数（B3）。
+ * 只有在「项目自己没配置 pyright」且「userData 下装了类型存根」时才注入，
+ * 避免覆盖用户项目的 venv/include 设置（那会静默改变诊断口径）。
+ * 存根（bpy 等）是 PEP 561 stub-only 包，必须经 stubPath 才能被 import 解析器看到，
+ * 所以要让 CLI 路线上也生效。
+ *
+ * @param {string} projectRoot
+ * @param {string} [stubDir] userData/lsp-stubs
+ * @returns {string[]}
+ */
+function pyrightProjectArgs(projectRoot, stubDir) {
+  const dir = String(stubDir || '').trim();
+  if (!dir) return [];
+  try {
+    if (!fsSync.statSync(dir).isDirectory()) return [];
+  } catch {
+    return [];
+  }
+  if (hasOwnPyrightConfig(projectRoot)) return [];
+  const cfgPath = path.join(dir, 'pyright-stubconfig.json');
+  const config = {
+    extraPaths: [dir],
+    stubPath: dir,
+    // stub-only 包没有 .py 实现，pyright 会误报 "could not be resolved from source"
+    reportMissingModuleSource: 'none'
+  };
+  try {
+    fsSync.writeFileSync(cfgPath, JSON.stringify(config, null, 2), 'utf8');
+  } catch {
+    return [];
+  }
+  return ['--project', cfgPath];
+}
+
+/** 项目自己是否有 pyright 配置（有则不动，交回项目口径） */
+function hasOwnPyrightConfig(projectRoot) {
+  const root = path.resolve(projectRoot);
+  let dir = root;
+  for (let i = 0; i < 8; i++) {
+    try {
+      if (fsSync.existsSync(path.join(dir, 'pyrightconfig.json'))) return true;
+    } catch {
+      /* ignore */
+    }
+    const pyproject = path.join(dir, 'pyproject.toml');
+    try {
+      if (fsSync.existsSync(pyproject) && /\[tool\.pyright\]/i.test(fsSync.readFileSync(pyproject, 'utf8'))) {
+        return true;
+      }
+    } catch {
+      /* ignore */
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return false;
+}
+
 async function runPyrightFallback(opts) {
   const projectRoot = path.resolve(opts.projectRoot);
   const absPath = path.resolve(opts.absPath);
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   const rel = path.relative(projectRoot, absPath) || path.basename(absPath);
+  const projectArgs = pyrightProjectArgs(projectRoot, opts.stubDir);
 
   let result;
   try {
-    result = await runProcess('npx', ['-y', 'pyright', '--outputjson', rel], {
+    result = await runProcess('npx', ['-y', 'pyright', ...projectArgs, '--outputjson', rel], {
       cwd: projectRoot,
       timeoutMs
     });
@@ -311,7 +396,10 @@ async function runPyrightFallback(opts) {
     // try text output
   }
 
-  result = await runProcess('npx', ['-y', 'pyright', rel], { cwd: projectRoot, timeoutMs });
+  result = await runProcess('npx', ['-y', 'pyright', ...projectArgs, rel], {
+    cwd: projectRoot,
+    timeoutMs
+  });
   const all = parsePyrightTextOutput(`${result.stdout}\n${result.stderr}`);
   const matched = all.filter((d) => d.file && pathsMatch(d.file, absPath, projectRoot));
   return limitDiags(
@@ -601,7 +689,11 @@ async function runPyrightProjectScan(opts) {
   const maxPerFile = opts.maxPerFile != null ? Number(opts.maxPerFile) : 8;
   const minSeverity = opts.minSeverity || 'warning';
 
-  const result = await runProcess('npx', ['-y', 'pyright', '--outputjson', projectRoot], {
+  // 与单文件兜底共用同一份 stub 配置：不接进来时，项目扫描层会对 `import bpy`
+  // 报 could not be resolved，而单文件层（有 stub）不报；mergeDiagnosticsLayers
+  // 是并集，这条幽灵错误永不被清掉且排在前面。
+  const projectArgs = pyrightProjectArgs(projectRoot, opts.stubDir);
+  const result = await runProcess('npx', ['-y', 'pyright', '--outputjson', ...projectArgs, projectRoot], {
     cwd: projectRoot,
     timeoutMs
   });
@@ -713,7 +805,7 @@ function parseRuffJsonOutput(text) {
       message: String(row.message || '').trim(),
       code: row.code ? String(row.code) : '',
       source: 'ruff',
-      file: row.filename ? path.normalize(String(row.filename)) : ''
+      file: row.filename ? toAbsoluteReportedPath(row.filename, '') : ''
     }));
   } catch {
     return [];
@@ -733,9 +825,7 @@ function groupRuffByFile(rows, projectRoot, workspaceRoot, minSeverity, maxPerFi
   const byFile = new Map();
   for (const d of rows) {
     if (!d.file) continue;
-    let abs = path.isAbsolute(d.file)
-      ? path.normalize(d.file)
-      : path.normalize(path.join(projectRoot, d.file));
+    const abs = toAbsoluteReportedPath(d.file, projectRoot);
     if (!isUnderWorkspace(abs, workspaceRoot)) continue;
     const key = abs.toLowerCase();
     if (!byFile.has(key)) byFile.set(key, { file: abs, diagnostics: [] });
@@ -919,11 +1009,14 @@ async function runPrettierFileScan(opts) {
 
 /**
  * Remote (SSH) TS diagnostics via tsc on the remote host.
+ *
+ * 返回形状与 `runRemoteTscBatch` 对齐（`ok` + `diagnostics`），不再只回数组：
+ * 只有数组时「tsc 没跑起来」与「没有类型错误」无法区分。
  */
 async function runRemoteTscFallback(opts) {
   const projectRoot = String(opts.projectRoot || '').replace(/\\/g, '/');
   const absPath = String(opts.absPath || '').replace(/\\/g, '/');
-  const byFile = await runRemoteTscBatch({
+  const r = await runRemoteTscBatch({
     exec: opts.exec,
     projectRoot,
     absPaths: [absPath],
@@ -931,7 +1024,10 @@ async function runRemoteTscFallback(opts) {
     minSeverity: opts.minSeverity,
     maxPerFile: opts.maxPerFile
   });
-  return byFile.get(absPath) || [];
+  if (!r.ok) {
+    return { ok: false, engine: 'tsc', diagnostics: [], error: r.error, detail: r.detail, exitCode: r.exitCode };
+  }
+  return { ok: true, engine: 'tsc', diagnostics: r.byFile.get(absPath) || [] };
 }
 
 async function runRemoteTscBatch(opts) {
@@ -941,12 +1037,19 @@ async function runRemoteTscBatch(opts) {
   );
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   const byFile = new Map(absPaths.map((p) => [p, []]));
-  if (!absPaths.length) return byFile;
+  if (!absPaths.length) return remoteEngineSuccess('tsc', byFile);
 
-  const cmd = 'npx -y typescript --noEmit --pretty false 2>&1; exit 0';
-  const r = await opts.exec(cmd, projectRoot, timeoutMs);
-  const combined = `${r.stdout || ''}\n${r.stderr || ''}`;
-  const all = parseTscOutput(combined);
+  const cmd = 'npx -y typescript --noEmit --pretty false 2>&1';
+  const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
+  const all = parseTscOutput(scan.text);
+  // 与项目扫描同判据：解析不出诊断但退出码非 0 ⇒ 工具没跑起来（npx/tsconfig 缺失）。
+  if (!all.length && scan.code !== 0 && scan.code !== null) {
+    return remoteEngineFailure(
+      'tsc',
+      scan,
+      `tsc 未产生任何可解析诊断但退出码 ${scan.code}（远程可能没装 node/npx，或 tsconfig 有问题）`
+    );
+  }
 
   for (const absPath of absPaths) {
     const matched = all.filter((d) => {
@@ -962,15 +1065,107 @@ async function runRemoteTscBatch(opts) {
       )
     );
   }
-  return byFile;
+  return remoteEngineSuccess('tsc', byFile);
 }
 
+/**
+ * 远程 CLI 扫描的**唯一**执行出口。
+ *
+ * 保留退出码：此前每个命令都拼 `; exit 0`，把「工具根本没跑起来」和「跑完没问题」
+ * 压成同一种结果（都是 0 诊断），远程诊断因此长期静默返回「0 个问题」。
+ *
+ * @returns {Promise<{ text: string, code: number|null }>} code 为远程命令退出码，拿不到时为 null
+ */
 async function runRemoteCliJsonScan(opts) {
   const projectRoot = String(opts.projectRoot || '').replace(/\\/g, '/');
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   const cmd = String(opts.command || '');
   const r = await opts.exec(cmd, projectRoot, timeoutMs);
-  return `${r.stdout || ''}\n${r.stderr || ''}`;
+  return {
+    text: `${(r && r.stdout) || ''}\n${(r && r.stderr) || ''}`,
+    code: r && r.code != null ? Number(r.code) : null
+  };
+}
+
+/**
+ * `--format json` 的 CLI 无论有没有问题都会输出 JSON 数组（干净时是 `[]`）。
+ * 整段输出里翻不出 JSON 数组 ⇒ 命令没跑起来（npx/工具缺失、网络、权限），
+ * 不能当成「0 个问题」。这是远程扫描「静默成功」的可靠判据，不必靠关键词猜。
+ */
+function findJsonArray(text) {
+  const s = String(text || '').trim();
+  if (!s) return null;
+  const direct = (() => {
+    try {
+      const v = JSON.parse(s);
+      return Array.isArray(v) ? v : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (direct) return direct;
+  const start = s.indexOf('[');
+  const end = s.lastIndexOf(']');
+  if (start < 0 || end <= start) return null;
+  try {
+    const v = JSON.parse(s.slice(start, end + 1));
+    return Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 失败时带一小段输出尾巴，让人直接看出是「npx 不可用」还是「工具报错」。 */
+function outputTail(text, limit = 400) {
+  const s = String(text || '').trim();
+  if (!s) return '';
+  return s.length > limit ? `…${s.slice(-limit)}` : s;
+}
+
+/**
+ * 远程引擎「没跑起来」的统一失败形状（与项目扫描的 `ok:false + failures` 同口径）。
+ *
+ * **为什么批量路径也必须判**：批量调用点的上层全是 `.catch(() => new Map())`，
+ * 返回空 Map（或抛错被吞）都会被解读成「这个文件没有诊断」⇒ 面板显示「无问题」。
+ * 半个引擎残废比整个引擎不可用更危险：用户会以为代码是干净的。
+ *
+ * @param {'tsc'|'eslint'|'ruff'|'prettier'} engine
+ * @param {{ text?: string, code?: number|null }} scan
+ * @param {string} error
+ */
+function remoteEngineFailure(engine, scan, error) {
+  return {
+    ok: false,
+    engine,
+    byFile: new Map(),
+    error,
+    detail: outputTail((scan && scan.text) || ''),
+    exitCode: scan && scan.code != null ? scan.code : null
+  };
+}
+
+/** 成功形状：`byFile` 是唯一的诊断出口，`ok:false` 时它是空 Map（上层不得据此写「无问题」）。 */
+function remoteEngineSuccess(engine, byFile) {
+  return { ok: true, engine, byFile };
+}
+
+/**
+ * 「被检查过的文件数」的**唯一口径**：诊断条目里的 file 去重后的个数。
+ *
+ * 不能用 `rows.length`：eslint 的 `--format json` 是「一个文件一条」，ruff 是
+ * 「一条诊断一条」。同一个 `scannedFiles` 字段直接取行数时，ruff 会把
+ * 「一个文件 5 个警告」报成「扫描了 5 个文件」—— 正是 `fileCount` 被误读成
+ * 「扫到 0 个文件」那类口径事故的同款。
+ */
+function countScannedFiles(rows) {
+  const files = new Set();
+  for (const d of rows || []) {
+    const f = String((d && d.file) || '')
+      .replace(/\\/g, '/')
+      .toLowerCase();
+    if (f) files.add(f);
+  }
+  return files.size;
 }
 
 async function runRemoteEslintBatch(opts) {
@@ -980,15 +1175,22 @@ async function runRemoteEslintBatch(opts) {
   );
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   const byFile = new Map(absPaths.map((p) => [p, []]));
-  if (!absPaths.length) return byFile;
+  if (!absPaths.length) return remoteEngineSuccess('eslint', byFile);
 
   const rels = absPaths.map((p) => {
     const rel = p.startsWith(projectRoot) ? p.slice(projectRoot.length + 1) : path.posix.basename(p);
     return rel.replace(/^\.\//, '');
   });
-  const cmd = `npx -y eslint ${rels.map((r) => JSON.stringify(r)).join(' ')} --format json --no-error-on-unmatched-pattern 2>&1; exit 0`;
-  const combined = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
-  const rows = parseEslintJsonOutput(combined);
+  const cmd = `npx -y eslint ${rels.map((r) => JSON.stringify(r)).join(' ')} --format json --no-error-on-unmatched-pattern 2>&1`;
+  const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
+  if (!findJsonArray(scan.text)) {
+    return remoteEngineFailure(
+      'eslint',
+      scan,
+      'eslint 未产生 JSON 输出（远程可能没装 node/npx，或命令失败）'
+    );
+  }
+  const rows = parseEslintJsonOutput(scan.text);
 
   for (const absPath of absPaths) {
     const matched = rows.filter((d) => {
@@ -1004,7 +1206,7 @@ async function runRemoteEslintBatch(opts) {
       )
     );
   }
-  return byFile;
+  return remoteEngineSuccess('eslint', byFile);
 }
 
 async function runRemoteRuffBatch(opts) {
@@ -1014,15 +1216,18 @@ async function runRemoteRuffBatch(opts) {
   );
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   const byFile = new Map(absPaths.map((p) => [p, []]));
-  if (!absPaths.length) return byFile;
+  if (!absPaths.length) return remoteEngineSuccess('ruff', byFile);
 
   const rels = absPaths.map((p) => {
     const rel = p.startsWith(projectRoot) ? p.slice(projectRoot.length + 1) : path.posix.basename(p);
     return rel.replace(/^\.\//, '');
   });
-  const cmd = `npx -y ruff check ${rels.map((r) => JSON.stringify(r)).join(' ')} --output-format json 2>&1; exit 0`;
-  const combined = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
-  const rows = parseRuffJsonOutput(combined);
+  const cmd = `npx -y ruff check ${rels.map((r) => JSON.stringify(r)).join(' ')} --output-format json 2>&1`;
+  const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
+  if (!findJsonArray(scan.text)) {
+    return remoteEngineFailure('ruff', scan, 'ruff 未产生 JSON 输出（远程可能没装 node/npx，或命令失败）');
+  }
+  const rows = parseRuffJsonOutput(scan.text);
 
   for (const absPath of absPaths) {
     const matched = rows.filter((d) => {
@@ -1038,7 +1243,7 @@ async function runRemoteRuffBatch(opts) {
       )
     );
   }
-  return byFile;
+  return remoteEngineSuccess('ruff', byFile);
 }
 
 async function runRemotePrettierBatch(opts) {
@@ -1048,15 +1253,24 @@ async function runRemotePrettierBatch(opts) {
   );
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   const byFile = new Map(absPaths.map((p) => [p, []]));
-  if (!absPaths.length) return byFile;
+  if (!absPaths.length) return remoteEngineSuccess('prettier', byFile);
 
+  let failedScan = null;
+  let failedCount = 0;
   for (const absPath of absPaths) {
     const rel = absPath.startsWith(projectRoot)
       ? absPath.slice(projectRoot.length + 1)
       : path.posix.basename(absPath);
-    const cmd = `npx -y prettier --check ${JSON.stringify(rel)} 2>&1; exit 0`;
-    const combined = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
-    if (remotePrettierOutputHasFormatIssue(combined, rel)) {
+    const cmd = `npx -y prettier --check ${JSON.stringify(rel)} 2>&1`;
+    const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
+    // `prettier --check` 的退出码有语义：0=已格式化，1=待格式化（正常结果），>1=执行错误。
+    // 只把 >1 当失败，绝不因为「有文件待格式化」就判引擎不可用。
+    if (scan.code != null && scan.code > 1) {
+      failedCount += 1;
+      if (!failedScan) failedScan = scan;
+      continue;
+    }
+    if (remotePrettierOutputHasFormatIssue(scan.text, rel)) {
       byFile.set(absPath, [
         {
           severity: 'warning',
@@ -1069,7 +1283,14 @@ async function runRemotePrettierBatch(opts) {
       ]);
     }
   }
-  return byFile;
+  if (failedScan) {
+    return remoteEngineFailure(
+      'prettier',
+      failedScan,
+      `prettier 在 ${failedCount} 个文件上执行失败（退出码 ${failedScan.code}）`
+    );
+  }
+  return remoteEngineSuccess('prettier', byFile);
 }
 
 async function runRemoteEslintProjectScan(opts) {
@@ -1079,18 +1300,39 @@ async function runRemoteEslintProjectScan(opts) {
   const maxFiles = opts.maxFiles != null ? Number(opts.maxFiles) : 0;
   const maxPerFile = opts.maxPerFile != null ? Number(opts.maxPerFile) : 12;
   const minSeverity = opts.minSeverity || 'warning';
-  const cmd = 'npx -y eslint . --format json --no-error-on-unmatched-pattern 2>&1; exit 0';
-  const combined = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
-  const rows = parseEslintJsonOutput(combined);
+  const cmd = 'npx -y eslint . --format json --no-error-on-unmatched-pattern 2>&1';
+  const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
+  const rows = findJsonArray(scan.text);
+  if (!rows) {
+    // 拿不到 JSON 数组 = eslint 没跑起来。以前这里会被解析成 0 条，然后上游
+    // 汇报「扫描完成，0 个问题」—— 用户看到的是「没毛病」，实际是「没扫描」。
+    return {
+      ok: false,
+      engine: 'eslint',
+      error: 'eslint 未产生 JSON 输出（远程可能没装 node/npx，或命令失败）',
+      detail: outputTail(scan.text),
+      exitCode: scan.code,
+      projectRoot
+    };
+  }
+  const parsed = parseEslintJsonOutput(scan.text);
   const grouped = groupEslintByFile(
-    rows,
+    parsed,
     projectRoot,
     workspaceRoot,
     minSeverity,
     maxPerFile,
     maxFiles
   );
-  return { ok: true, engine: 'eslint', projectRoot, items: grouped.items, rawCount: grouped.rawCount };
+  return {
+    ok: true,
+    engine: 'eslint',
+    projectRoot,
+    items: grouped.items,
+    rawCount: grouped.rawCount,
+    // 真正被检查过的文件数（与「有诊断的文件数」不是一回事，别混用）
+    scannedFiles: countScannedFiles(parsed)
+  };
 }
 
 async function runRemoteRuffProjectScan(opts) {
@@ -1100,11 +1342,30 @@ async function runRemoteRuffProjectScan(opts) {
   const maxFiles = opts.maxFiles != null ? Number(opts.maxFiles) : 0;
   const maxPerFile = opts.maxPerFile != null ? Number(opts.maxPerFile) : 12;
   const minSeverity = opts.minSeverity || 'warning';
-  const cmd = 'npx -y ruff check . --output-format json 2>&1; exit 0';
-  const combined = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
-  const rows = parseRuffJsonOutput(combined);
-  const grouped = groupRuffByFile(rows, projectRoot, workspaceRoot, minSeverity, maxPerFile, maxFiles);
-  return { ok: true, engine: 'ruff', projectRoot, items: grouped.items, rawCount: grouped.rawCount };
+  const cmd = 'npx -y ruff check . --output-format json 2>&1';
+  const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
+  const rows = findJsonArray(scan.text);
+  if (!rows) {
+    return {
+      ok: false,
+      engine: 'ruff',
+      error: 'ruff 未产生 JSON 输出（远程可能没装 node/npx，或命令失败）',
+      detail: outputTail(scan.text),
+      exitCode: scan.code,
+      projectRoot
+    };
+  }
+  const parsed = parseRuffJsonOutput(scan.text);
+  const grouped = groupRuffByFile(parsed, projectRoot, workspaceRoot, minSeverity, maxPerFile, maxFiles);
+  return {
+    ok: true,
+    engine: 'ruff',
+    projectRoot,
+    items: grouped.items,
+    rawCount: grouped.rawCount,
+    // ruff 的 JSON 是「一条诊断一条」，文件数必须去重（见 countScannedFiles）
+    scannedFiles: countScannedFiles(parsed)
+  };
 }
 
 async function runRemoteTscProjectScan(opts) {
@@ -1114,9 +1375,20 @@ async function runRemoteTscProjectScan(opts) {
   const maxFiles = opts.maxFiles != null ? Number(opts.maxFiles) : 0;
   const maxPerFile = opts.maxPerFile != null ? Number(opts.maxPerFile) : 12;
   const minSeverity = opts.minSeverity || 'warning';
-  const cmd = 'npx -y typescript --noEmit --pretty false 2>&1; exit 0';
-  const combined = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
-  const all = parseTscOutput(combined);
+  const cmd = 'npx -y typescript --noEmit --pretty false 2>&1';
+  const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
+  const all = parseTscOutput(scan.text);
+  // tsc 干净时零输出且 exit 0；解析不出诊断但**退出码非 0** ⇒ 没跑起来（npx/tsconfig 缺失）。
+  if (!all.length && scan.code !== 0 && scan.code !== null) {
+    return {
+      ok: false,
+      engine: 'tsc',
+      error: `tsc 未产生任何可解析诊断但退出码 ${scan.code}（远程可能没装 node/npx，或 tsconfig 有问题）`,
+      detail: outputTail(scan.text),
+      exitCode: scan.code,
+      projectRoot
+    };
+  }
   const byFile = new Map();
   for (const d of all) {
     if (!d.file) continue;
@@ -1143,14 +1415,27 @@ async function runRemotePrettierProjectScan(opts) {
   const maxFiles = opts.maxFiles != null ? Number(opts.maxFiles) : 0;
   const maxPerFile = opts.maxPerFile != null ? Number(opts.maxPerFile) : 4;
   const minSeverity = opts.minSeverity || 'warning';
-  const cmd = 'npx -y prettier --list-different . 2>&1; exit 0';
-  const combined = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
-  const rows = parsePrettierListOutput(combined, projectRoot, workspaceRoot);
+  const cmd = 'npx -y prettier --list-different . 2>&1';
+  const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
+  // prettier --list-different 的退出码语义：0 = 全部已格式化，1 = 有文件待格式化，>=2 = 出错。
+  if (scan.code != null && scan.code > 1) {
+    return {
+      ok: false,
+      engine: 'prettier',
+      error: `prettier 执行失败（退出码 ${scan.code}）`,
+      detail: outputTail(scan.text),
+      exitCode: scan.code,
+      projectRoot
+    };
+  }
+  const rows = parsePrettierListOutput(scan.text, projectRoot, workspaceRoot);
   const grouped = groupPrettierByFile(rows, minSeverity, maxPerFile, maxFiles);
   return { ok: true, engine: 'prettier', projectRoot, items: grouped.items, rawCount: grouped.rawCount };
 }
 
 module.exports = {
+  pyrightProjectArgs,
+  hasOwnPyrightConfig,
   parseTscOutput,
   parsePyrightTextOutput,
   parsePyrightJsonOutput,

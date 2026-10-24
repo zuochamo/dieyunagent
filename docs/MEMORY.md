@@ -165,6 +165,17 @@ UI 用 `unpackAssistantMeta()` 拆开展示模型名、思考过程等；发给�
 ...
 ```
 
+#### `request_snapshots` — 请求信封留底（旁路事实）
+
+每轮**真发出去的请求**一行：messages 原文（超限存信封）、system/tools 的 hash（未变则 NULL 去重）、
+`est_tokens`、压缩结论、以及 Renderer 带下来的折叠/裁剪事实（`context_audit_json`）。
+
+- **不是对话账本**：真相仍是 `messages`；该表可裁剪、丢失不影响任何流程。
+- 写入唯一入口：`src/agent/rust-loop-runner.js` 的 `fetchRoundOnce` → `memory.request_snapshot_append`；
+  读取走 `memory.request_snapshot_recent` / `_get`（列表不带大字段）。
+- 保留：每会话最近 **40** 行 + 压缩过的行 **200** 行，写入同一次调用里就地裁剪。
+- 完整语义与排查用法见 [`REQUEST-SNAPSHOT.md`](REQUEST-SNAPSHOT.md)。
+
 
 ---
 
@@ -184,6 +195,8 @@ UI 用 `unpackAssistantMeta()` 拆开展示模型名、思考过程等；发给�
 | `memory.messages_clear` | 清空会话（同 delete 消息部分） |
 | `memory.long_add` | 追加长期记忆 |
 | `memory.long_recent` | 最近 N 条长期记忆 |
+| `memory.request_snapshot_recent` | 请求快照列表（不含 messages/system/tools 大字段） |
+| `memory.request_snapshot_get` | 单条请求快照全文（排查「模型看到了什么」） |
 
 权限：记忆 RPC **不**走 `hostControl` 开关；只要 Gateway 已鉴权即可（本机信任模型）。
 

@@ -422,6 +422,8 @@
 | 9 | 默认 system | 默认两侧均为空串；人设由 `dieyun.md` + `ASSISTANT_IDENTITY` 承载 | **已解决**：`normalize()` 不再强制清空；`LEGACY_RUNTIME_PRESETS.system` 迁移清掉旧内置人设 |
 | 10 | 助手身份串 | `dieyun-instructions.js` `ASSISTANT_IDENTITY` =「叠云 Agent（小芸）」 | **已解决**：`assets/dieyun.md` / 仓库根 `dieyun.md` / `index.html` 关于面板同口径 |
 | 11 | weather 技能 | `BUNDLED-MANIFEST.json` `required` | **本就已登记**（`weather/SKILL.md`），原文「未登记」是误记，已更正 |
+| 12 | 工具调用关卡（校验 / 重复止损 / 遥测 / 落盘顺序） | `src/agent/tool-gate.js`（流程 + 冻结关卡清单） | **已收敛**：`ToolHarnessSession` 只留会话状态与重试；**已删** Renderer `agent-guardrails.js` 三个无人调用的止损薄包装 + 恒 false 的 `replyClaimsFileWork` 死分支。见 [`TOOL-GATE.md`](TOOL-GATE.md) |
+| 13 | 执行能力边界（能不能写、能不能越界跑） | `src/gateway/sandbox-policy.js`（三档判定，唯一来源）、`sandbox-approvals.js`（ask-once） | **策略层已实施**：`read-only` / `workspace-write` / `danger-full-access` + 越界问一次（拒绝/超时即拒）；`exec-policy.js` 的高危词表已并到同一份。**内核级强制（受限令牌 / AppContainer）未做**。见 [`SANDBOX.md`](SANDBOX.md) |
 
 ---
 

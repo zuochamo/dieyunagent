@@ -1,25 +1,41 @@
 #!/usr/bin/env python3
-"""生成托盘/任务栏用的 PNG 与 Windows 打包用的 ICO。
+"""生成应用图标：icon.ico / icon.png / icon-tray.png，全部来自 assets/logo-source.png。
 
-优先使用 assets/logo-source.png（替换为你的品牌图后执行本脚本即可）。
-若不存在该文件，则回退为内置的像素风占位图。
+唯一美术来源是 assets/logo-source.png（替换为你的品牌图后执行本脚本即可）；
+文件不存在时回退为内置的像素风占位图。配方假定源图是「深底 + 亮色线稿」，
+换风格美术时需重新审视这个配方。
 
-小尺寸（≤32px）使用「实心云」：在 256px 高清描边上提取内部填充后再缩小，
-线条粗细不变，仅避免托盘 16px 时描边断成碎点。
+尺寸自适应（同一份美术、一套配方）：
+  ≥48px  描边加粗（512 网格上膨胀 +10px，缩到 48px 仍有约 3.6px 粗）
+  ≤32px  描边会退化到 1px 以下，改用同一轮廓的实心剪影（16px 才有实体感）
+  统一   6% 安全边距、#303037 底色（与深色任务栏拉开层次）、22% 圆角
+
+小尺寸（≤32px）正是 Windows 任务栏 / 托盘 / Alt-Tab 的实际显示尺寸，所以另外出
+assets/icon-tray.png（实心版 64px）：Electron 的 nativeImage 读 ICO 只能拿到最大帧，
+取不到 32px 帧，托盘只能自己按 DPI 缩放这张图。
 """
 from __future__ import annotations
 
 import os
 import sys
-from collections import deque
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 W = H = 256
 SOURCE_NAME = "logo-source.png"
-TRAY_PX = 32
-ICO_SIZES = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (24, 24), (16, 16)]
-SOLID_MAX_PX = 32
+ICO_SIZES = (256, 128, 64, 48, 32, 24, 16)
+TRAY_PX = 64
+
+MASTER_PX = 512
+STROKE_LUM = 140          # 「亮色线稿」的亮度阈值
+TILE_INSET = 0.06         # 安全边距（占整图比例）
+TILE_RADIUS = 0.22        # 圆角（占卡片边长比例）
+TILE_COLOR = (48, 48, 55, 255)
+MARK_COLOR = (255, 255, 255, 255)
+SOLID_MAX_PX = 32         # ≤ 此值改实心剪影
+STROKE_BOLD_PASSES = 5    # 5 趟 3x3 最大值滤波 = 描边 +10px（512 网格）
+MARK_W_SOLID = 0.76       # 小尺寸光学放大
+MARK_W_OUTLINE = 0.72
 
 
 def draw_logo() -> Image.Image:
@@ -58,96 +74,96 @@ def draw_logo() -> Image.Image:
 
 
 def load_source(assets: str) -> Image.Image | None:
+    """读高清源并裁成正方形。保持原始像素，让各档尺寸都从它直接缩放。"""
     path = os.path.join(assets, SOURCE_NAME)
     if not os.path.isfile(path):
         return None
     img = Image.open(path).convert("RGBA")
-
     iw, ih = img.size
     side = min(iw, ih)
     left = (iw - side) // 2
     top = (ih - side) // 2
-    img = img.crop((left, top, left + side, top + side))
-    img = img.resize((W, H), Image.Resampling.LANCZOS)
-    return img
+    return img.crop((left, top, left + side, top + side))
 
 
-def _is_stroke(rgba: tuple[int, ...]) -> bool:
-    r, g, b, a = rgba
-    return a > 80 and r > 160
+def _stroke_mask(master: Image.Image) -> Image.Image:
+    """亮色线稿的掩膜（'L'，255 = 线）。"""
+    small = master.resize((MASTER_PX, MASTER_PX), Image.Resampling.LANCZOS)
+    lum = small.convert("L").point(lambda v: 255 if v > STROKE_LUM else 0)
+    return ImageChops.multiply(lum, small.getchannel("A").point(lambda v: 255 if v > 128 else 0))
 
 
-def solid_cloud_from_outline(img: Image.Image) -> Image.Image:
-    """在高清描边图里填充云朵内部，得到完整实心云（不增加描边粗细）。"""
-    w, h = img.size
-    px = img.load()
-    stroke = [[_is_stroke(px[x, y]) for x in range(w)] for y in range(h)]
-
-    xs: list[int] = []
-    ys: list[int] = []
-    for y in range(h):
-        for x in range(w):
-            if stroke[y][x]:
-                xs.append(x)
-                ys.append(y)
-    if not xs:
-        return img
-
-    x0, x1 = min(xs), max(xs)
-    y0, y1 = min(ys), max(ys)
-    seed: tuple[int, int] | None = None
-    mid_x = (x0 + x1) // 2
-    target_y = y0 + (y1 - y0) * 2 // 5
-    for dy in range(y1 - y0 + 1):
-        y = target_y + dy
-        if y0 <= y <= y1 and not stroke[y][mid_x]:
-            seed = (mid_x, y)
-            break
-        y = target_y - dy
-        if y0 <= y <= y1 and not stroke[y][mid_x]:
-            seed = (mid_x, y)
-            break
-    if seed is None:
-        for y in range(y0, y1 + 1):
-            for x in range(x0, x1 + 1):
-                if not stroke[y][x]:
-                    seed = (x, y)
-                    break
-            if seed:
-                break
-    if seed is None:
-        return img
-
-    filled = [[False] * w for _ in range(h)]
-    q: deque[tuple[int, int]] = deque([seed])
-    filled[seed[1]][seed[0]] = True
-    while q:
-        cx, cy = q.popleft()
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            nx, ny = cx + dx, cy + dy
-            if 0 <= nx < w and 0 <= ny < h and not filled[ny][nx] and not stroke[ny][nx]:
-                filled[ny][nx] = True
-                q.append((nx, ny))
-
-    out = img.copy()
-    op = out.load()
-    for y in range(h):
-        for x in range(w):
-            if filled[y][x] or stroke[y][x]:
-                op[x, y] = (255, 255, 255, 255)
-    return out
+def _free_seed(stroke: Image.Image, seed: tuple[int, int]) -> tuple[int, int] | None:
+    w, h = stroke.size
+    x0, y0 = seed
+    if stroke.getpixel((x0, y0)) == 0:
+        return seed
+    for r in range(1, 60):
+        for y in range(max(0, y0 - r), min(h, y0 + r + 1)):
+            for x in range(max(0, x0 - r), min(w, x0 + r + 1)):
+                if stroke.getpixel((x, y)) == 0:
+                    return (x, y)
+    return None
 
 
-def save_multi_size_ico(path: str, outline: Image.Image, solid: Image.Image) -> None:
-    frames: list[Image.Image] = []
-    for size in ICO_SIZES:
-        sz = size[0]
-        source = solid if sz <= SOLID_MAX_PX else outline
-        frames.append(source.resize(size, Image.Resampling.LANCZOS))
+def build_marks(master: Image.Image) -> tuple[Image.Image, Image.Image, tuple[int, int, int, int]]:
+    """返回 (实心剪影, 加粗描边, 标志包围盒)，都在 MASTER_PX 网格上。"""
+    stroke = _stroke_mask(master)
+    bbox = stroke.getbbox()
+    if bbox is None:
+        raise SystemExit("源图里没找到亮色线稿（STROKE_LUM=%d）" % STROKE_LUM)
+
+    # 实心剪影：从轮廓内部洪水填充，保住肩部凹口（行/列填充会把凹口抹平）
+    work = stroke.copy()
+    seed = _free_seed(stroke, ((bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2))
+    if seed is not None:
+        ImageDraw.floodfill(work, seed, 128, thresh=0)
+    solid = ImageChops.lighter(stroke, work.point(lambda v: 255 if v == 128 else 0))
+
+    # 加粗描边：多趟 3x3 最大值滤波 ≈ 圆形膨胀
+    outline = stroke
+    for _ in range(STROKE_BOLD_PASSES):
+        outline = outline.filter(ImageFilter.MaxFilter(3))
+
+    return solid, outline, bbox
+
+
+def render_icon(size: int, *, solid_mark: bool, marks) -> Image.Image:
+    solid, outline, bbox = marks
+    ss = 8 if size <= 64 else 4
+    canvas_px = size * ss
+    canvas = Image.new("RGBA", (canvas_px, canvas_px), (0, 0, 0, 0))
+
+    inset = round(canvas_px * TILE_INSET)
+    tile = canvas_px - inset * 2
+    ImageDraw.Draw(canvas).rounded_rectangle(
+        [inset, inset, inset + tile, inset + tile],
+        radius=round(tile * TILE_RADIUS),
+        fill=TILE_COLOR,
+    )
+
+    mark_src = solid if solid_mark else outline
+    mark_w = MARK_W_SOLID if solid_mark else MARK_W_OUTLINE
+    mark_box = mark_src.crop(bbox)
+    target_w = max(1, round(tile * mark_w))
+    target_h = max(1, round(target_w * mark_box.height / mark_box.width))
+    mark = mark_box.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    layer = Image.new("L", (canvas_px, canvas_px), 0)
+    px = inset + (tile - target_w) // 2
+    py = inset + (tile - target_h) // 2 - round(tile * 0.01)  # 视觉中心略上移
+    layer.paste(mark, (px, py))
+
+    canvas.paste(MARK_COLOR, (0, 0, canvas_px, canvas_px), layer)
+    return canvas.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def save_multi_size_ico(path: str, marks) -> None:
+    frames = [render_icon(s, solid_mark=s <= SOLID_MAX_PX, marks=marks) for s in ICO_SIZES]
     frames[0].save(
         path,
         format="ICO",
-        sizes=[(frame.width, frame.height) for frame in frames],
+        sizes=[(f.width, f.height) for f in frames],
         append_images=frames[1:],
     )
 
@@ -157,19 +173,22 @@ def main() -> int:
     assets = os.path.join(root, "assets")
     os.makedirs(assets, exist_ok=True)
     png_path = os.path.join(assets, "icon.png")
-    tray_path = os.path.join(assets, "icon-tray.png")
     ico_path = os.path.join(assets, "icon.ico")
+    tray_path = os.path.join(assets, "icon-tray.png")
 
     from_source = load_source(assets)
-    outline = from_source or draw_logo()
-    solid = solid_cloud_from_outline(outline)
+    master = from_source or draw_logo()
+    marks = build_marks(master)
 
-    outline.save(png_path, "PNG")
-    solid.resize((TRAY_PX, TRAY_PX), Image.Resampling.LANCZOS).save(tray_path, "PNG")
-    save_multi_size_ico(ico_path, outline, solid)
+    render_icon(W, solid_mark=False, marks=marks).save(png_path, "PNG")
+    save_multi_size_ico(ico_path, marks)
+    render_icon(TRAY_PX, solid_mark=True, marks=marks).save(tray_path, "PNG")
 
     src = SOURCE_NAME if from_source is not None else "内置占位"
-    print("Wrote", png_path, tray_path, "and", ico_path, f"(来源: {src})")
+    print(
+        "Wrote", png_path, tray_path, "and", ico_path,
+        f"(来源: {src} {master.width}x{master.height}, 实心档: ≤{SOLID_MAX_PX}px)",
+    )
     return 0
 
 

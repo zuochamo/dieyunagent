@@ -600,6 +600,10 @@ async function executeSendPrepAndRun(state) {
     };
   }
   const apiConfig = resolvedComposerApiConfig || getCustomModelApiConfig(route);
+  // 审计事实：折叠/裁剪只发生在这里（Renderer 拼 prompt），Main 拿到的是结果。
+  // 这里算出来的 `contextAudit` 随请求送下去，最终落到 request_snapshots，
+  // 让「历史为什么只剩 24 条」可查（见 docs/REQUEST-SNAPSHOT.md）。
+  const contextAudit = { taskTier: taskTier || null, longHorizon: !!longHorizon };
   const payload = {
     model: composerModel,
     messages: buildCompletionMessages(
@@ -607,7 +611,8 @@ async function executeSendPrepAndRun(state) {
       effectivePrepared,
       canSendImages,
       turnRide,
-      historyMessages
+      historyMessages,
+      contextAudit
     ),
     temperature: settings.temperature,
     max_tokens: getMaxOutputTokens()
@@ -645,7 +650,8 @@ async function executeSendPrepAndRun(state) {
     notifyAgentServiceDone: state.notifyAgentServiceDone,
     ensureUserLocalMsgId: state.ensureUserLocalMsgId,
     historyMessages,
-    taskTier
+    taskTier,
+    contextAudit
   };
   const chatHistoryBlock = joinPromptChunks
     ? joinPromptChunks([buildSessionChatHistoryBlock({ messages: historyMessages })])
@@ -669,7 +675,8 @@ async function executeSendPrepAndRun(state) {
     turnRide,
     bookPrefixMessages,
     ensureUserLocalMsgId: state.ensureUserLocalMsgId,
-    taskTier
+    taskTier,
+    contextAudit
   });
   if (!run.done) {
     pauseAgentForToolLimit(run, state.agentRunFrame);

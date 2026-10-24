@@ -2,6 +2,9 @@ mod agent;
 mod keyword;
 mod misc;
 mod schema;
+mod snapshot;
+
+pub use snapshot::RequestSnapshotInput;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

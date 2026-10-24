@@ -1,6 +1,8 @@
 # AGENTS.md
 
 > 本文件供 AI Agent 阅读，由叠云 Agent 根据项目与对话渐进维护。请人工 review 后提交版本库。
+> 注入规则：overview / commands / gotchas 三段每轮注入；段标记可加 `paths="tools/**, shows/**"`
+> 使其只在碰到相关路径时注入（不写 paths ＝每轮都注入）。
 
 <!-- dieyun:section:overview status=empty -->
 ## 项目概览
@@ -40,7 +42,7 @@
 <!-- dieyun:section:changelog status=auto -->
 ## 维护记录
 
-（超过 50 条时自动保留最近条目；注入上下文时仅展示最近几条）
+（只保留最近几条；注入上下文时仅展示最近几条。）
 
 | 日期 | 来源 | 摘要 |
 |------|------|------|

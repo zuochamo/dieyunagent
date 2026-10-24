@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { assertSafeUrl } = require('../gateway/web-fetch');
+const { assertSafeUrl } = require('../gateway/web/url-safety');
 const { MANIFEST_FILE } = require('./manifest');
 const { compareSemver } = require('./version');
 

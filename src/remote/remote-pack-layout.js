@@ -40,6 +40,9 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   // 远程 LSP 定位：只依赖 Node 内置模块，server 由远程环境提供
   // （rust-analyzer / gopls 走 PATH，ts/py 走远程工作区 node_modules）。
   'src/lsp/language-registry.js',
+  // lsp-client 起 server 时的 cmd 命令行拼装（唯一来源）；漏打包会让远程
+  // 注入 smoke 直接 `Cannot find module './spawn-args'`，整条远程 LSP 不可用。
+  'src/lsp/spawn-args.js',
   'src/lsp/lsp-client.js',
   'src/lsp/navigate-service.js'
 ];

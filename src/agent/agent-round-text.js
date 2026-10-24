@@ -165,6 +165,13 @@ function synthesizedReplyIsUsable(text) {
 const TURN_REASONING_FALLBACK_LABEL = '（以下为模型思考，本轮未成文）';
 const TURN_EMPTY_REPLY_TEXT = '（模型未生成文字答复。）';
 const SYNTHESIS_PHASE = '汇总';
+/**
+ * 非模型思考的 trace phase：程序动作，不进 `messages.reasoning`。
+ * - 汇总：交给汇总 LLM 的合成轮，不是本轮思考；
+ * - 完成验收：`collectCompletionDiagnosticsForRun` 注入的静态检查证据，曾经被当成真思考
+ *   落库并上行回传，模型据此把「完成验收」提示当模板复述（2026-10-17 重复提示事故）。
+ */
+const NON_MODEL_PHASES = new Set([SYNTHESIS_PHASE, '完成验收']);
 
 /** 交付用正文：去空白，'(空响应)' 视为空 */
 function normalizeDeliverableText(reply) {
@@ -191,7 +198,7 @@ function reasoningTextFromTrace(trace) {
   const parts = [];
   for (const entry of trace || []) {
     const phase = String((entry && entry.phase) || '').trim();
-    if (phase === SYNTHESIS_PHASE) continue;
+    if (NON_MODEL_PHASES.has(phase)) continue;
     const text = String((entry && (entry.fullThought || entry.thought)) || '').trim();
     if (!text) continue;
     if (isPassthroughThought(text)) continue;

@@ -18,7 +18,8 @@ const TRACE_PREF_DEFAULTS = {
   showTitles: true,
   expandShell: false,
   expandEdit: true,
-  followWrites: true
+  followWrites: true,
+  showReadiness: true
 };
 var tracePrefs = loadTracePrefs();
 
@@ -30,7 +31,8 @@ function loadTracePrefs() {
       showTitles: raw.showTitles !== false,
       expandShell: raw.expandShell === true,
       expandEdit: raw.expandEdit !== false,
-      followWrites: raw.followWrites !== false
+      followWrites: raw.followWrites !== false,
+      showReadiness: raw.showReadiness !== false
     };
   } catch {
     return { ...TRACE_PREF_DEFAULTS };
@@ -56,6 +58,8 @@ function syncTracePrefInputs() {
   if (shell) shell.checked = tracePrefs.expandShell === true;
   if (edit) edit.checked = tracePrefs.expandEdit !== false;
   if (follow) follow.checked = tracePrefs.followWrites !== false;
+  const readiness = $('trace-show-readiness');
+  if (readiness) readiness.checked = tracePrefs.showReadiness !== false;
 }
 
 function syncThemeCards() {
@@ -330,7 +334,9 @@ syncTracePrefInputs();
   ['trace-expand-shell', 'expandShell', true],
   ['trace-expand-edit', 'expandEdit', true],
   // 跟随开关只影响后续写入，重绘整轮聊天开销大且无必要
-  ['trace-follow-writes', 'followWrites', false]
+  ['trace-follow-writes', 'followWrites', false],
+  // 完成验收提示只作用于之后的新回复，历史消息已落库，重绘也不会变
+  ['trace-show-readiness', 'showReadiness', false]
 ].forEach(([id, key, rerender]) => {
   const el = $(id);
   if (!el) return;

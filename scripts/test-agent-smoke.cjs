@@ -21,6 +21,7 @@ const CODEMAP = path.join(ROOT, 'docs', 'CODEMAP.json');
 /** npm scripts that need a built dieyun-core binary */
 const REQUIRES_CORE = new Set([
   'test:core-bridge',
+  'test:request-snapshot',
   'test:rust-agent-loop',
   'test:rust-agent-loop-smoke',
   'test:rust-planner-pipeline',

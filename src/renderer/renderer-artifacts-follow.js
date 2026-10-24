@@ -1,4 +1,4 @@
-/* global window, document, setTimeout, clearTimeout, requestAnimationFrame, tracePrefs, currentSessionId, isEditToolName, artifactPathFromTool, resolveToolDiffBody, pickDiffDisplayText, isSidePanelOpen, getSidePanelTab, getSelectedArtifactPath, isMonacoArtifactEditorMounted, updateMonacoArtifactEditorText, getMonacoEditorHandle, isActiveMonacoEditorUserDirty */
+/* global window, document, setTimeout, clearTimeout, requestAnimationFrame, tracePrefs, currentSessionId, isEditToolName, artifactPathFromTool, resolveToolDiffBody, pickDiffDisplayText, isSidePanelOpen, getSidePanelTab, getSelectedArtifactPath, isMonacoArtifactEditorMounted, updateMonacoArtifactEditorText, getMonacoEditorHandle, isActiveMonacoEditorUserDirty, findArtifactTab, updateCachedArtifactModelText */
 'use strict';
 
 /**
@@ -157,9 +157,33 @@ function resetArtifactFollowState() {
   }
 }
 
+/**
+ * 后台标签的跟随：文件开着但用户在看别的文件时，也把正文写进它的缓存 model，
+ * 这样切回去看到的不是旧内容。不抢焦点、不挂编辑器，用户在该标签有未保存改动时直接跳过。
+ */
+function followArtifactBackgroundTab(write) {
+  if (!write || !write.path) return false;
+  const tab = typeof findArtifactTab === 'function' ? findArtifactTab(write.path) : null;
+  if (!tab || tab.dirty) return false;
+  if (tab.kind !== 'editor') return false;
+  if (typeof updateCachedArtifactModelText !== 'function') return false;
+  const ok = updateCachedArtifactModelText(tab.readPath || tab.path, write.text, {
+    appendOnly: !!write.pending
+  });
+  if (!ok) return false;
+  const key = artifactFollowPathKey(write.path);
+  if (artifactFollowLastApplied.size > 50) artifactFollowLastApplied.clear();
+  artifactFollowLastApplied.set(key, { text: write.text, at: Date.now() });
+  return true;
+}
+
 function applyArtifactFollowPayload(write) {
   const path = write.path;
-  if (!artifactFollowTargetIsViewable(path)) return false;
+  if (!artifactFollowTargetIsViewable(path)) {
+    // 不在看的文件：更新它的后台标签，但不改动当前编辑器
+    followArtifactBackgroundTab(write);
+    return false;
+  }
   if (
     typeof isMonacoArtifactEditorMounted === 'function' &&
     !isMonacoArtifactEditorMounted(path)

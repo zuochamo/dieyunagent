@@ -23,6 +23,8 @@ function createBrowserHandlers(d) {
     normalizeFilePathInput,
     roots,
     writable,
+    writeRootsForCall,
+    assertSandboxWritable,
     getRemoteFs
   } = d;
 
@@ -50,14 +52,19 @@ function createBrowserHandlers(d) {
       const written = await remote.writeFile(name, content, encoding);
       return { path: written.path, bytes: buf.length };
     }
-    // 模型给了路径 → 必须过工作区白名单（否则可写任意绝对路径）；
-    // 没给 → 落程序自选的产物目录，模型未指定路径，不存在越权面。
-    const safe = target
-      ? assertAllowedPath(
-          ensureExtension(normalizeFilePathInput(target, defaultCwd), ext),
-          Array.from(new Set([...roots, ...writable]))
-        )
-      : resolveOutputPath('', ext, prefix);
+    // 没给路径 → 落程序自选的产物目录（模型未指定路径，不存在越权面）。
+    if (!target) {
+      const fallback = resolveOutputPath('', ext, prefix);
+      await fs.mkdir(path.dirname(fallback), { recursive: true });
+      await fs.writeFile(fallback, buf);
+      return { path: fallback, bytes: buf.length };
+    }
+    // 模型给了路径 → 与 fs.write_file 同一条链：先过沙箱档位（read-only 不落盘、工作区外问一次），
+    // 再过写白名单（含刚被批准的目录）。以前这里用的是「读根 ∪ 写根」，
+    // 而读根里含用户主目录 —— 于是 read-only 档仍能往主目录写产物，档位被整条绕过。
+    const rawPath = ensureExtension(normalizeFilePathInput(target, defaultCwd), ext);
+    await assertSandboxWritable(rawPath, 'browser_artifact');
+    const safe = assertAllowedPath(rawPath, writeRootsForCall());
     await fs.mkdir(path.dirname(safe), { recursive: true });
     await fs.writeFile(safe, buf);
     return { path: safe, bytes: buf.length };

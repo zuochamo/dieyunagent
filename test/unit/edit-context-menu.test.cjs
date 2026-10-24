@@ -1,6 +1,6 @@
 'use strict';
 
-const { buildEditContextMenuTemplate } = require('../../src/main/window-tray');
+const { buildEditContextMenuTemplate, trayPixelSizeFor } = require('../../src/main/window-tray');
 
 describe('edit context menu', () => {
   it('builds cut/copy/paste/selectAll for editable fields', () => {
@@ -34,5 +34,23 @@ describe('edit context menu', () => {
   it('keeps items enabled when editFlags are missing', () => {
     const t = buildEditContextMenuTemplate({ isEditable: true, selectionText: '' });
     expect(t.every((i) => i.enabled !== false)).toBe(true);
+  });
+});
+
+describe('tray icon pixel size', () => {
+  // 托盘槽位是 16 DIP：高缩放下必须给足像素，否则系统放大 → 图标糊
+  it('scales with the display scale factor', () => {
+    expect(trayPixelSizeFor(1)).toBe(16);
+    expect(trayPixelSizeFor(1.25)).toBe(20);
+    expect(trayPixelSizeFor(1.5)).toBe(24);
+    expect(trayPixelSizeFor(2)).toBe(32);
+    expect(trayPixelSizeFor(3)).toBe(48);
+  });
+
+  it('never goes below the 16px tray slot', () => {
+    expect(trayPixelSizeFor(0.5)).toBe(16);
+    expect(trayPixelSizeFor(0)).toBe(16);
+    expect(trayPixelSizeFor(Number.NaN)).toBe(16);
+    expect(trayPixelSizeFor(undefined)).toBe(16);
   });
 });

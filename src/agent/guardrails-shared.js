@@ -66,6 +66,21 @@ const FILE_WRITE_TOOL_NAMES = Object.freeze(
 );
 
 /**
+ * 单次调用可能**合法运行很久**的工具（工具级 stall 看门狗要给更长窗口）。
+ *
+ * `subagent` 是一次完整的子 loop run（一轮调研常常十几分钟），用通用 stall 窗口会误杀。
+ * 这是按**工具身份**分类（结构信号），不是按用户意图猜。
+ */
+const LONG_RUNNING_TOOL_NAMES = Object.freeze(new Set(['subagent']));
+
+function isLongRunningAgentTool(name) {
+  const n = String(name || '')
+    .trim()
+    .toLowerCase();
+  return LONG_RUNNING_TOOL_NAMES.has(n);
+}
+
+/**
  * 入参携带 `filePath`、可据此「按文件串行」的写入工具名。
  * 与 FILE_WRITE_TOOL_NAMES 是**包含关系而非同一概念**：后者含 skill_create /
  * agents_md_propose 等无 filePath 的写入工具，无法按文件分组，故单列此更窄的集合
@@ -580,6 +595,22 @@ function createGuardrailApi(getLimits) {
   };
 }
 
+/**
+ * 「完成验收」提示（`> ⚠️ **完成验收**：…`）是**当轮 UI 提醒**，不属于模型正文。
+ *
+ * 落库的 `content` 里带着它 → 下一轮作为历史上行 → 模型原样复述一遍 →
+ * 与新一轮追加的提示叠成两段（2026-10-17 实测 `messages.id=4834` 同一提示出现两次）。
+ * 历史投影与追加点都先过这里，保证全仓只有一种「什么算验收提示」的判定。
+ */
+const READINESS_NOTE_RE = /(?:^|\n+)-{3,}\n+>\s*\u26A0\uFE0F?\s*\*\*完成验收\*\*[：:][^\n]*/g;
+
+/** 剥掉正文里的验收提示段（幂等；不含该文案时原样返回）。 */
+function stripReadinessNotes(text) {
+  const s = String(text == null ? '' : text);
+  if (!s.includes('完成验收')) return s;
+  return s.replace(READINESS_NOTE_RE, '').trim();
+}
+
 const SHARED_EXPORTS = {
   TOOL_NAME_ALIASES,
   GRAPH_LEGACY_OPS,
@@ -597,6 +628,8 @@ const SHARED_EXPORTS = {
   isWriteTool,
   MUTATING_TOOL_NAMES,
   FILE_WRITE_TOOL_NAMES,
+  LONG_RUNNING_TOOL_NAMES,
+  isLongRunningAgentTool,
   FILE_PATH_KEYED_WRITE_TOOL_NAMES,
   BROWSER_MUTATING_PREFIXES,
   VISION_IMAGE_MIME,
@@ -615,7 +648,9 @@ const SHARED_EXPORTS = {
   dropRejectedChatImagesForApi,
   isMutatingAgentTool: isMutatingAgentToolName,
   fsEditArgsPresent,
-  createGuardrailApi
+  createGuardrailApi,
+  READINESS_NOTE_RE,
+  stripReadinessNotes
 };
 
 module.exports = SHARED_EXPORTS;

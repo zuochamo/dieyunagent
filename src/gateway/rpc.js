@@ -8,12 +8,14 @@ const {
   runShellDetached,
   listProcessHandles,
   killProcessHandle,
+  readProcessOutput,
   openExternalUrl,
   normalizeFilePathInput,
   printImage
 } = require('./host-control');
-const webFetch = require('./web-fetch');
+const webTools = require('./web');
 const { assertAllowedPath } = require('./path-policy');
+const { decideFsWrite } = require('./sandbox-policy');
 const { validateShellCommand } = require('./exec-policy');
 const { resolveBrowserNavigateUrl, parseRemotePreviewTarget } = require('../browser/url-policy');
 const { createRemoteFsAdapter } = require('./remote-fs');
@@ -280,7 +282,16 @@ function createRpcHandlers(ctx) {
     try {
       names = await fs.readdir(absPath, { withFileTypes: true });
     } catch (err) {
-      if (err && err.code === 'ENOENT') return [];
+      // 不要用 `[]` 顶替「目录不存在」：空数组在 list_dir 语义里等于「目录是空的」，
+      // 模型会据此判「产物没生成」并重新生成一遍。明确报错才可诊断。
+      if (err && err.code === 'ENOENT') {
+        const e = new Error(
+          `目录不存在: ${absPath}（tool-output / terminals 在首次产生大输出或终端会话后才会创建）`
+        );
+        e.code = 'FS_LIST_FAILED';
+        e.path = absPath;
+        throw e;
+      }
       throw err;
     }
     const out = [];
@@ -302,8 +313,48 @@ function createRpcHandlers(ctx) {
     return out;
   }
 
+  /** 本会话里用户批准过写的目录（档位判定的结果要能被白名单看见，否则批准了还是写不进去）。 */
+  function sandboxGrantedWriteRoots() {
+    const sandbox = ctx.sandbox;
+    if (!sandbox || typeof sandbox.grantedWriteRoots !== 'function') return [];
+    return sandbox.grantedWriteRoots(getActiveCallSessionId());
+  }
+
   function writeRootsForCall() {
-    return Array.from(new Set([...writable, ...extraLocalRunRoots()]));
+    return Array.from(new Set([...writable, ...extraLocalRunRoots(), ...sandboxGrantedWriteRoots()]));
+  }
+
+  /**
+   * 沙箱档位对**文件写操作**的判定（工作区外 → 问一次；read-only → 一律问一次）。
+   *
+   * 放在这里的原因：`writeRootsForCall()` 是「能写哪儿」的唯一出口，档位判定必须紧挨着它，
+   * 否则新加的写 handler 会只受白名单约束、绕过档位。撤销栈回滚（undo apply）刻意不经过这里：
+   * 它是用户显式要求的回退，不该再被问一次。
+   *
+   * @param {string} absPath
+   * @param {string} tool
+   */
+  async function assertSandboxWritable(absPath, tool) {
+    const sandbox = ctx.sandbox;
+    if (!sandbox) {
+      // fail-closed：沙箱没装配好时不能把"检查不到"当成"允许写"
+      const e = new Error('沙箱未就绪，已拒绝写入（请重启应用；装配问题不该变成静默放行）');
+      e.code = 'SANDBOX_UNAVAILABLE';
+      e.retryable = false;
+      throw e;
+    }
+    const decision = decideFsWrite(absPath, sandbox.context());
+    const blocked = await sandbox.guard(decision, {
+      tool,
+      sessionId: getActiveCallSessionId(),
+      path: absPath
+    });
+    if (!blocked) return;
+    const e = new Error(blocked.error);
+    e.code = blocked.errorCode;
+    e.sandboxMode = blocked.sandboxMode;
+    e.retryable = false;
+    throw e;
   }
 
   function currentSshWorkspaceRoot() {
@@ -437,7 +488,7 @@ function createRpcHandlers(ctx) {
       .filter((s, i, arr) => arr.indexOf(s) === i);
     const head = `远程 dieyun-core 启动失败（已尝试拉起 ${configureAttempts} 次）`;
     if (detail.length) return `${head}：${detail[0].replace(/`/g, "'").slice(0, 800)}`;
-    return `${head}，请检查 ~/.dieyun/remote-agent/current/agent.log`;
+    return `${head}，请检查 ~/.dieyun/remote-agent/logs/ 下对应该项目的 agent-*.log`;
   }
 
   /**
@@ -1917,7 +1968,7 @@ function createRpcHandlers(ctx) {
     projectMemoryScope,
     assertHostEnabled,
     assertWebFetchEnabled,
-    webFetch,
+    webTools,
     ctx,
     plugins,
     syncRemoteIndexCoreConfig,
@@ -1954,6 +2005,8 @@ function createRpcHandlers(ctx) {
     getWorkspaceGitChangedAbsPaths,
     currentSshWorkspaceRoot,
     writeRootsForCall,
+    assertSandboxWritable,
+    sandbox: ctx.sandbox || null,
     invokeRustCore,
     captureUndoWrite,
     graphIncremental,
@@ -1974,6 +2027,7 @@ function createRpcHandlers(ctx) {
     runShell,
     listProcessHandles,
     killProcessHandle,
+    readProcessOutput,
     getActiveCallSessionId,
     openExternalUrl,
     printImage,

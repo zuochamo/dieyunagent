@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, disposeMonacoArtifactEditor, createMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText, scheduleArtifactsUiRefresh, isArtifactContentLoading, beginArtifactContentLoad, endArtifactContentLoad, followArtifactEditorOnWrite, isArtifactEditorFollowCurrent, syncSelectedArtifactContentMtimeFromDisk, resolveArtifactPathInWorkspace, resolveArtifactPathViaGateway, getArtifactPathTranslation, clearArtifactPathTranslation, markArtifactPathTranslated */
+/* global gatewayCall, gwState, isSidePanelOpen, openSidePanel, setSidePanelTab, getSidePanelTab, flatFolderIconSvg, flatFileIconSvg, flatDirUpIconSvg, revealMonacoLine, refreshWorkspaceProblemsPanel, startWorkspaceDiagnosticsScan, normWritePath, pathsMatch, disposeMonacoArtifactEditor, canUseMonacoEditor, getAgentLimits, pickDiffDisplayText, getLastTraceEntryFileChanges, updateProblemsPanel, renderChangesPane, lastAgentDisplayedTrace, computeLineDiffStats, toolDiffHasBody, formatInlineUnifiedDiffHtml, escapeHtml, isEditToolName, editToolFilePath, canonicalArtifactPathFromTool, resolveToolDiffBody, resolveArtifactDiffFromTrace, mammoth, XLSX, withSessionRpcScope, isMonacoArtifactEditorMounted, currentSessionId, resolveSessionWorkspacePathSync, resolveSessionWorkspacePathForRpc, readFallbackArtifactText, scheduleArtifactsUiRefresh, isArtifactContentLoading, beginArtifactContentLoad, endArtifactContentLoad, followArtifactEditorOnWrite, isArtifactEditorFollowCurrent, syncSelectedArtifactContentMtimeFromDisk, resolveArtifactPathInWorkspace, resolveArtifactPathViaGateway, getArtifactPathTranslation, clearArtifactPathTranslation, markArtifactPathTranslated, openArtifactTab, syncArtifactTabAfterLoad, syncArtifactTabsWithSelection, isMonacoPathDirty, renderArtifactEditor */
 'use strict';
 
 function pruneInvalidSessionArtifacts() {
@@ -84,6 +84,34 @@ function notePlanTraceArtifactProgress(trace, latestByPath) {
   window.logPlanTraceDiffState('artifacts-pending', { writeTools, missingPath });
 }
 
+/**
+ * 「聊天里展示过的图片」也算本会话产物。
+ *
+ * 为什么需要这条来源：图片常常不是用 fs_write 写的（UE 渲染、ffmpeg/PIL 缩放、
+ * 截图工具都走 host_exec 或自己的工具），trace 里没有写工具，产物区就会漏掉
+ * 「用户明明在聊天里看到过这张图」的条目。而 fs_read_file + encoding=base64
+ * 且落成图片的调用，正是「这张图被展示给用户了」的精确信号，且 toolArgs 会
+ * 随 trace 持久化（历史会话 replay 也能重建）。
+ *
+ * 只看 args、不看工具结果：失败调用（如 IMAGE_TOO_LARGE）不算展示过。
+ */
+var READ_IMAGE_TOOL_NAMES = ['fs_read_file', 'fs.read_file'];
+
+function isImagePreviewToolCall(tool, resolvedPath) {
+  if (!tool || tool.failed || tool.pending) return false;
+  const name = String(tool.name || '').toLowerCase();
+  if (READ_IMAGE_TOOL_NAMES.indexOf(name) < 0) return false;
+  const args =
+    tool.toolArgs && typeof tool.toolArgs === 'object'
+      ? tool.toolArgs
+      : typeof window !== 'undefined' && typeof window.resolveToolArgsFromTrace === 'function'
+        ? window.resolveToolArgsFromTrace(tool) || {}
+        : {};
+  if (String(args.encoding || '').toLowerCase() !== 'base64') return false;
+  const p = resolvedPath || toolArtifactPath(tool);
+  return !!p && IMAGE_ARTIFACT_RE.test(p);
+}
+
 function trackArtifactsFromTrace(trace, opts) {
   const o = opts && typeof opts === 'object' ? opts : {};
   const sessionId = resolveArtifactSessionId(o.sessionId);
@@ -124,7 +152,13 @@ function trackArtifactsFromTrace(trace, opts) {
         latestByPath.delete(p);
         continue;
       }
-      if (!isEditToolName(tool.name) || !p || tool.failed) continue;
+      if (!isEditToolName(tool.name) || !p || tool.failed) {
+        // 展示过的图片没有写工具，但确实进了本会话产物（见 isImagePreviewToolCall 注释）
+        if (p && isImagePreviewToolCall(tool, p)) {
+          latestByPath.set(p, { diff: null, order: order++ });
+        }
+        continue;
+      }
       let diff = typeof resolveToolDiffBody === 'function' ? resolveToolDiffBody(tool) : null;
       if (!diff || !toolDiffHasBody(diff)) {
         diff = tool.diff || parseDiffFromSummary(tool.summary);
@@ -233,7 +267,7 @@ function renderArtifactRow(list, view, row, opts) {
   el.addEventListener('click', function () {
     if (row.kind === 'dir') {
       artifactsBrowseRel = row.relativePath;
-      selectedArtifactPath = null;
+      // 与「..」同一口径：换目录不动标签
       refreshArtifactsDirectory(true).then(function () {
         if (isSidePanelOpen()) renderArtifactsList({ skipRefresh: true });
       });
@@ -242,9 +276,13 @@ function renderArtifactRow(list, view, row, opts) {
     const items = list.querySelectorAll('.artifacts-file-item');
     for (let j = 0; j < items.length; j++) items[j].classList.remove('active');
     el.classList.add('active');
+    // 打开成标签：已开着的直接激活（再点一次同一个文件仍会强制从磁盘重载）
+    if (typeof openArtifactTab === 'function') {
+      openArtifactTab(row.path);
+      return;
+    }
     selectedArtifactPath = row.path;
     selectedArtifactContentMtime = 0;
-    // 再点一次同一个文件 = 强制从磁盘重新加载（原地刷新，保留滚动位置）
     loadArtifactContent(row.path, view, { force: true });
   });
   if (!(opts && opts.skipAppend)) list.appendChild(el);
@@ -452,7 +490,7 @@ function paintArtifactsFileList(list, view) {
     up.title = parentRelPath(dirRel) || '工作区根目录';
     up.addEventListener('click', function () {
       artifactsBrowseRel = parentRelPath(dirRel);
-      selectedArtifactPath = null;
+      // 标签保持不动：换目录只换列表内容，已打开的文件仍在标签条里
       refreshArtifactsDirectory(true).then(function () {
         if (isSidePanelOpen()) renderArtifactsList({ skipRefresh: true });
       });
@@ -476,17 +514,8 @@ function paintArtifactsFileList(list, view) {
 
   renderLastRoundFileRows(list, view, artifactsDirEntries);
 
-  var selectedExists =
-    selectedArtifactPath &&
-    artifactsDirEntries.some(function (row) {
-      return row.kind === 'file' && artifactPathsMatch(row.path, selectedArtifactPath);
-    });
-  if (!selectedExists) {
-    const firstFile = artifactsDirEntries.find(function (r) {
-      return r.kind === 'file';
-    });
-    selectedArtifactPath = firstFile ? firstFile.path : null;
-  }
+  // 选中项由标签决定：切目录不再自动选中第一个文件（那会让每翻一次目录都多开一个标签）
+  if (typeof syncArtifactTabsWithSelection === 'function') syncArtifactTabsWithSelection();
 
   if (artifactsDirEntries.length >= ARTIFACTS_VIRTUALIZE_MIN_ROWS) {
     // 大目录：先按总行数把滚动高度撑开，再只渲染可视窗口内的行
@@ -512,9 +541,11 @@ function paintArtifactsFileList(list, view) {
     if (selectedArtifactPath) {
       syncSelectedArtifactEditorFromList(view);
     } else if (!artifactsDirEntries.length) {
+      // 目录为空只清预览，不动标签（标签里的文件不属于当前目录）
       void clearArtifactsFileView(
         view,
-        '<div class="artifacts-empty">选择文件查看内容</div>'
+        '<div class="artifacts-empty">选择文件查看内容</div>',
+        { keepTabs: true }
       );
     }
   }
@@ -861,6 +892,8 @@ async function refreshMountedArtifactTextInPlace(filePath, viewEl) {
   ) {
     return false;
   }
+  // 用户在这个标签里改过还没保存：读盘刷新等于丢弃输入，直接当「已是最新」
+  if (typeof isMonacoPathDirty === 'function' && isMonacoPathDirty(filePath)) return true;
   const gen = ++artifactContentLoadGen;
   if (typeof beginArtifactContentLoad === 'function') beginArtifactContentLoad(filePath, gen);
   try {
@@ -938,6 +971,10 @@ function renderArtifactPathCandidates(viewEl, inputPath, payload) {
       // 用户点选 = 明确的决定（不是系统替他猜），照常打开，不再重复追问
       if (typeof markArtifactPathTranslated === 'function') {
         markArtifactPathTranslated(c.path, { inputPath: inputPath, kind: 'picked' });
+      }
+      if (typeof openArtifactTab === 'function') {
+        openArtifactTab(c.path, { force: true, authoritative: true });
+        return;
       }
       selectedArtifactPath = c.path;
       selectedArtifactContentMtime = 0;
@@ -1017,17 +1054,18 @@ async function loadArtifactContentAsync(filePath, viewEl, loadGen, opts) {
   const gen = loadGen || ++artifactContentLoadGen;
   if (typeof beginArtifactContentLoad === 'function') beginArtifactContentLoad(filePath, gen);
   try {
-    const hadEditor = !!viewEl.querySelector('.artifacts-editor-shell, .artifacts-office-preview');
-
-    if (typeof disposeMonacoArtifactEditor === 'function') {
-      await disposeMonacoArtifactEditor();
-    }
+    // 编辑器不再在切换文件时销毁：文本标签之间只换 model（见 renderer-artifacts-tabs.js）。
+    // 只有渲染媒体预览（图片/Office/PDF）前才卸掉，避免留一个看不见的编辑器实例。
+    const hadPreview =
+      typeof artifactViewHasPreview === 'function'
+        ? artifactViewHasPreview(viewEl)
+        : !!viewEl.querySelector(ARTIFACT_PREVIEW_SELECTOR);
 
     revokeArtifactMediaBlobUrls(viewEl);
 
     if (gen !== artifactContentLoadGen) return;
 
-    if (!hadEditor) {
+    if (!hadPreview) {
       viewEl.innerHTML = '<div class="artifacts-empty">加载中…</div>';
     }
     if (!gwState || !gwState.authed) {
@@ -1049,19 +1087,35 @@ async function loadArtifactContentAsync(filePath, viewEl, loadGen, opts) {
       }
       const readPath = resolvedRead.path;
       if (imageArtifactKind(readPath)) {
+        if (typeof disposeMonacoArtifactEditor === 'function') {
+          await disposeMonacoArtifactEditor();
+        }
         await renderImageArtifactPreview(viewEl, readPath, readPath, gen);
-        if (gen === artifactContentLoadGen) rememberSelectedArtifactContentMtime(readPath);
+        if (gen === artifactContentLoadGen) {
+          if (typeof syncArtifactTabAfterLoad === 'function') {
+            syncArtifactTabAfterLoad(filePath, { kind: 'media', readPath: readPath });
+          }
+          rememberSelectedArtifactContentMtime(readPath);
+        }
         return;
       }
       const officeKind = officeArtifactKind(readPath);
       if (officeKind) {
+        if (typeof disposeMonacoArtifactEditor === 'function') {
+          await disposeMonacoArtifactEditor();
+        }
         await renderOfficeArtifactPreview(viewEl, readPath, readPath, officeKind, gen);
-        if (gen === artifactContentLoadGen) rememberSelectedArtifactContentMtime(readPath);
+        if (gen === artifactContentLoadGen) {
+          if (typeof syncArtifactTabAfterLoad === 'function') {
+            syncArtifactTabAfterLoad(filePath, { kind: 'media', readPath: readPath });
+          }
+          rememberSelectedArtifactContentMtime(readPath);
+        }
         return;
       }
       const { text, truncated } = await readArtifactTextFile(filePath, wsCtx, readPath);
       if (gen !== artifactContentLoadGen) return;
-      await renderArtifactEditor(viewEl, readPath, text, truncated);
+      await renderArtifactEditor(viewEl, readPath, text, truncated, '', { tabPath: filePath });
       if (gen === artifactContentLoadGen) rememberSelectedArtifactContentMtime(readPath);
     } catch (err) {
       if (gen !== artifactContentLoadGen) return;
@@ -1079,7 +1133,8 @@ async function loadArtifactContentAsync(filePath, viewEl, loadGen, opts) {
               displayPath,
               fb.text,
               !!fb.truncated,
-              artifactFallbackSourceNote(fb.source)
+              artifactFallbackSourceNote(fb.source),
+              { tabPath: filePath }
             );
             return;
           }
@@ -1124,158 +1179,10 @@ function confirmTranslatedPathSave(filePath) {
   return ok;
 }
 
-async function renderArtifactEditor(viewEl, filePath, text, truncated, sourceNote) {
-  if (typeof disposeMonacoArtifactEditor === 'function') {
-    await disposeMonacoArtifactEditor();
-  }
-  viewEl.innerHTML = '';
-  const shell = document.createElement('div');
-  shell.className = 'artifacts-editor-shell';
-
-  const head = document.createElement('div');
-  head.className = 'artifacts-editor-head';
-  const pathEl = document.createElement('span');
-  pathEl.className = 'artifacts-editor-path';
-  pathEl.textContent = filePath;
-  pathEl.title = filePath;
-  const saveBtn = document.createElement('button');
-  saveBtn.type = 'button';
-  saveBtn.className = 'ghost-btn artifacts-editor-save';
-  saveBtn.textContent = '保存';
-  head.appendChild(pathEl);
-  head.appendChild(saveBtn);
-
-  shell.appendChild(head);
-  if (truncated) {
-    const note = document.createElement('div');
-    note.className = 'artifacts-editor-note';
-    note.textContent = '内容过长，仅显示部分内容（可用 offset/maxBytes 分块读取）';
-    shell.appendChild(note);
-  }
-  if (sourceNote) {
-    const note = document.createElement('div');
-    note.className = 'artifacts-editor-note';
-    note.textContent = sourceNote;
-    shell.appendChild(note);
-  }
-  // 路径是系统按文件名匹配出来的：必须让用户知道打开的不是他给的那个路径
-  const translation =
-    typeof getArtifactPathTranslation === 'function' ? getArtifactPathTranslation(filePath) : null;
-  if (translation) {
-    const note = document.createElement('div');
-    note.className = 'artifacts-editor-note artifacts-editor-translation-note';
-    note.textContent = `原路径在远程不存在，已打开文件名匹配到的文件：${translation.inputPath}`;
-    note.title = `原路径：${translation.inputPath}\n当前文件：${filePath}`;
-    shell.appendChild(note);
-  }
-
-  const useMonaco =
-    typeof canUseMonacoEditor === 'function' &&
-    canUseMonacoEditor(filePath, text) &&
-    typeof createMonacoArtifactEditor === 'function';
-
-  if (useMonaco) {
-    const editorHost = document.createElement('div');
-    editorHost.className = 'artifacts-monaco-host';
-    // Monaco 异步挂载期间给个可见反馈：createMonacoArtifactEditor 会用 innerHTML = '' 清掉
-    editorHost.innerHTML = '<div class="artifacts-empty">正在加载编辑器…</div>';
-    shell.appendChild(editorHost);
-    if (typeof initProblemsPanel === 'function') {
-      initProblemsPanel(shell);
-    }
-    viewEl.appendChild(shell);
-
-    let editorHandle = null;
-    let textareaFallback = null;
-
-    function saveCurrentContent() {
-      if (!confirmTranslatedPathSave(filePath)) return;
-      saveBtn.disabled = true;
-      saveBtn.textContent = '保存中…';
-      const data =
-        editorHandle && typeof editorHandle.getValue === 'function'
-          ? editorHandle.getValue()
-          : textareaFallback
-            ? textareaFallback.value
-            : '';
-      artifactRpcParams({ filePath: filePath, data: data, encoding: 'utf8' })
-        .then((params) => gatewayCall('fs.write_file', params))
-        .then(function () {
-          // 用真实磁盘 mtime 对齐（不是 Date.now()），否则下次刷新会把编辑器当过期内容重建
-          return typeof syncSelectedArtifactContentMtimeFromDisk === 'function'
-            ? syncSelectedArtifactContentMtimeFromDisk(filePath)
-            : null;
-        })
-        .then(function () {
-          saveBtn.textContent = '已保存';
-          setTimeout(function () {
-            saveBtn.textContent = '保存';
-            saveBtn.disabled = false;
-          }, 1200);
-        })
-        .catch(function (err) {
-          saveBtn.textContent = '保存失败';
-          saveBtn.disabled = false;
-          window.alert((err && err.message) || String(err));
-        });
-    }
-
-    saveBtn.addEventListener('click', saveCurrentContent);
-
-    createMonacoArtifactEditor(editorHost, { filePath: filePath, text: text.slice(0, 500000) })
-      .then(function (handle) {
-        editorHandle = handle;
-      })
-      .catch(function () {
-        editorHost.remove();
-        if (typeof initProblemsPanel === 'function') {
-          const prob = shell.querySelector('.artifacts-problems');
-          if (prob) prob.remove();
-        }
-        textareaFallback = renderArtifactTextarea(shell, text);
-      });
-    return;
-  }
-
-  const ta = renderArtifactTextarea(shell, text);
-  viewEl.appendChild(shell);
-  saveBtn.addEventListener('click', function () {
-    if (!confirmTranslatedPathSave(filePath)) return;
-    saveBtn.disabled = true;
-    saveBtn.textContent = '保存中…';
-    artifactRpcParams({ filePath: filePath, data: ta.value, encoding: 'utf8' })
-      .then(function (params) {
-        return gatewayCall('fs.write_file', params);
-      })
-      .then(function () {
-        // 同 Monaco 版：保存后用真实磁盘 mtime 对齐，避免编辑器被无谓重建
-        return typeof syncSelectedArtifactContentMtimeFromDisk === 'function'
-          ? syncSelectedArtifactContentMtimeFromDisk(filePath)
-          : null;
-      })
-      .then(function () {
-        saveBtn.textContent = '已保存';
-        setTimeout(function () {
-          saveBtn.textContent = '保存';
-          saveBtn.disabled = false;
-        }, 1200);
-      })
-      .catch(function (err) {
-        saveBtn.textContent = '保存失败';
-        saveBtn.disabled = false;
-        window.alert((err && err.message) || String(err));
-      });
-  });
-}
-
-function renderArtifactTextarea(shell, text) {
-  const ta = document.createElement('textarea');
-  ta.className = 'artifacts-editor-textarea';
-  ta.spellcheck = false;
-  ta.value = text.slice(0, 500000);
-  shell.appendChild(ta);
-  return ta;
-}
+/**
+ * 编辑区渲染（renderArtifactEditor / 文本域回退）已迁到 renderer-artifacts-tabs.js：
+ * 那里是「多标签 + 长驻编辑区」的唯一实现，本文件只负责文件列表与内容加载。
+ */
 
 function initArtifactsBtn() {
   // Panel toggle handled by initSidePanel()

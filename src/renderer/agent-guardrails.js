@@ -1,4 +1,4 @@
-/* global window, getAgentLimits, GuardrailsShared, extractPathHintsFromText, textHasCodebaseMention, editToolFilePath */
+/* global window, GuardrailsShared, extractPathHintsFromText, textHasCodebaseMention, editToolFilePath, tracePrefs */
 'use strict';
 
 const shared = typeof GuardrailsShared !== 'undefined' ? GuardrailsShared : null;
@@ -6,23 +6,9 @@ if (!shared) {
   throw new Error('guardrails-shared.js must load before agent-guardrails.js');
 }
 
-function limits() {
-  return typeof getAgentLimits === 'function' ? getAgentLimits() : {};
-}
-
-const api = shared.createGuardrailApi(() => limits());
-
-function recordToolCallFingerprint(history, name, args) {
-  return api.recordToolCallFingerprint(history, name, args);
-}
-
-function shouldBlockRepeatToolCall(name, args, history, limit) {
-  return api.shouldBlockRepeatToolCall(name, args, history, limit);
-}
-
-function repeatToolBlockMessage(name, argsBrief) {
-  return api.repeatToolBlockMessage(name, argsBrief);
-}
+// 「重复调用止损 / 指纹记录」只有一份实现，且只有 Main 的 `tool-gate.js` 关卡在跑它
+// （工具执行全在 Main；Renderer 这里此前那三个薄包装没有任何调用点）。
+// 本文件只保留 Renderer 真正需要的东西：**验收证据**与**提示渲染**。
 
 // 工具名归类来自单一来源 guardrails-shared.js（含 host_exec；下方 isTraceMutatingTool 对 host_exec 按命令内容细分）
 
@@ -93,12 +79,13 @@ function parseToolExitCode(tool) {
   return Number.isFinite(n) ? n : null;
 }
 
-function replyClaimsFileWork(_text) {
-  // 禁用「宣称完成」关键词；是否缺写入只看 trace / changes 结构信号
-  return false;
-}
-
-/** 结构信号：路径 / @Codebase / 编辑器选区 / 选中产物 — 禁用任务意图词表 */
+/**
+ * 结构信号：路径 / @Codebase / 编辑器选区 / 选中产物 — 禁用任务意图词表。
+ *
+ * 「回复是否宣称已完成」这一路已删：判定依据只能是结构信号（trace / changes），
+ * 关键词判定按仓规禁用；此前 `replyClaimsFileWork` 恒返回 false，
+ * 下游 `claimsWork` 分支永远不会命中，属于死分支。
+ */
 function hasFileModificationStructureSignal(userText) {
   const user = String(userText || '');
   if (!user.trim()) return false;
@@ -116,10 +103,6 @@ function hasFileModificationStructureSignal(userText) {
     }
   }
   return false;
-}
-
-function isLikelyFileModificationTask(userText, _reply) {
-  return hasFileModificationStructureSignal(userText);
 }
 
 function getTraceWriteFilePaths(trace) {
@@ -256,7 +239,6 @@ function verifyTargetCompletion() {
 
 function verifyAgentCompletionReadiness(reply, trace, sessionChanges, context = {}) {
   const evidence = collectCompletionEvidence(trace, sessionChanges, context.diagnostics, context.browser);
-  const claimsWork = replyClaimsFileWork(reply);
   const target = verifyTargetCompletion();
 
   // Explore 只读模式：无写工具，写入验收（含历史残留变更行）不适用
@@ -290,7 +272,7 @@ function verifyAgentCompletionReadiness(reply, trace, sessionChanges, context = 
     );
   }
 
-  if (!evidence.hasWriteSignal && !claimsWork) {
+  if (!evidence.hasWriteSignal) {
     return { ok: true, note: '', shouldRetry: false, skipped: true, evidence, target };
   }
 
@@ -310,30 +292,38 @@ function verifyAgentCompletionReadiness(reply, trace, sessionChanges, context = 
     );
   }
 
-  if (claimsWork && !evidence.hasWriteSignal) {
-    return buildReadinessResult(
-      '回复声称已完成修改/创建，但未检测到实际写入。请继续执行实际修改；如果无需修改，请明确说明卡点。',
-      context,
-      { evidence, target, reason: 'missing_write_evidence' }
-    );
-  }
-
   return { ok: true, note: '', shouldRetry: false, evidence, target };
 }
+/**
+ * 「显示完成验收提示」开关（设置 → 主题 → 显示完成验收提示，偏好存 tracePrefs.showReadiness）。
+ * 关掉后只是不往回复正文里追加提示，验收结论仍留在 readiness.evidence 里供排查。
+ * 这里是唯一渲染出口，规则来源（ruleGate / reviewer）都经过它，所以开关只在这里判一次。
+ */
+function isReadinessNoteMuted() {
+  try {
+    return !!(typeof tracePrefs !== 'undefined' && tracePrefs && tracePrefs.showReadiness === false);
+  } catch {
+    return false;
+  }
+}
+
 function applyReadinessNote(reply, readiness) {
   if (!readiness || readiness.ok || !readiness.note || !readiness.surfaceToUser) return String(reply || '');
-  const body = String(reply || '').trim() || '（模型未生成文字答复。）';
+  if (isReadinessNoteMuted()) return String(reply || '');
+  // 自带幂等：模型可能复述历史里的验收提示（历史投影已在 session-context 剥离，
+  // 这里是同一条链的第二道），先剥掉已有验收段再加，避免同一提示叠成两段。
+  const cleaned =
+    shared && typeof shared.stripReadinessNotes === 'function'
+      ? shared.stripReadinessNotes(reply)
+      : String(reply || '');
+  const body = String(cleaned || '').trim() || '（模型未生成文字答复。）';
   return `${body}\n\n---\n\n> ⚠️ **完成验收**：${readiness.note}`;
 }
 
 if (typeof window !== 'undefined') {
-  window.shouldBlockRepeatToolCall = shouldBlockRepeatToolCall;
   window.normalizeAgentToolName = shared.normalizeAgentToolName;
-  window.recordToolCallFingerprint = recordToolCallFingerprint;
-  window.repeatToolBlockMessage = repeatToolBlockMessage;
   window.verifyAgentCompletionReadiness = verifyAgentCompletionReadiness;
   window.applyReadinessNote = applyReadinessNote;
-  window.isLikelyFileModificationTask = isLikelyFileModificationTask;
   window.getTraceWriteFilePaths = getTraceWriteFilePaths;
   window.collectCompletionEvidence = collectCompletionEvidence;
   window.collectBrowserEvidence = collectBrowserEvidence;

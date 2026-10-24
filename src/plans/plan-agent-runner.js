@@ -159,6 +159,9 @@ async function runPlanAgentLoop(ctx, plan) {
       userData,
       useStream: true,
       signal: signal || null,
+      // 请求快照：定时/计划任务的请求同样留底（来源标 plan）。
+      sessionId,
+      runSource: 'plan',
       onPhase: (name, data) => emitPhase(name, data),
       startParams: {
         model: llmModel,
@@ -178,16 +181,25 @@ async function runPlanAgentLoop(ctx, plan) {
               toolsChars: ctx?.toolsChars
             });
             if (cr && cr.compacted) {
-              gateway
-                .invokeRpc('memory.compaction_archive', {
-                  sessionId,
-                  workspacePath: workspacePath || null,
-                  tokensBefore: cr.tokensBefore,
-                  tokensAfter: cr.tokensAfter,
-                  summary: cr.summary || null,
-                  foldedTranscript: cr.foldedTranscript || null
-                })
-                .catch(() => {});
+              // 归档 id 回填给请求快照（旁路记录，失败就让快照留 null）。
+              // 短超时：它在发请求之前 await，不能按默认上限一直等着。
+              try {
+                const archived = await gateway.invokeRpc(
+                  'memory.compaction_archive',
+                  {
+                    sessionId,
+                    workspacePath: workspacePath || null,
+                    tokensBefore: cr.tokensBefore,
+                    tokensAfter: cr.tokensAfter,
+                    summary: cr.summary || null,
+                    foldedTranscript: cr.foldedTranscript || null
+                  },
+                  { timeoutMs: 2000 }
+                );
+                if (archived && archived.id != null) cr.compactionArchiveId = archived.id;
+              } catch {
+                // 归档失败不改变压缩结论
+              }
             }
             return cr;
           }

@@ -54,9 +54,10 @@ function buildSessionChatHistoryBlock(opts = {}) {
   return buildSessionChatHistoryFromMessages(list, opts, getSessionContextHelpers());
 }
 
-function completionCapOpts() {
+function completionCapOpts(audit) {
   const L = typeof CTX_LIMITS !== 'undefined' && CTX_LIMITS ? CTX_LIMITS : {};
-  return {
+  /** @type {Record<string, any>} */
+  const caps = {
     historyMaxChars: L.COMPLETION_HISTORY_MAX_CHARS,
     messageMaxChars: L.COMPLETION_MESSAGE_MAX_CHARS,
     lastUserMaxChars: L.COMPLETION_LAST_USER_MAX_CHARS,
@@ -66,10 +67,22 @@ function completionCapOpts() {
     foldedMaxChars: L.COMPLETION_FOLDED_MAX_CHARS,
     toolResultMaxChars: L.TOOL_RESULT_MAX_JSON
   };
+  // 审计出参（可选）：折叠/裁剪发生在这一层，Main 无法重算，只能由这里把事实带出去。
+  if (audit && typeof audit === 'object') caps.audit = audit;
+  return caps;
 }
 
-function buildCompletionMessages(sysContent, prepared, includeImages, turnRide, historyMessages) {
+/**
+ * @param {object} [audit] 可选：把「折叠了几条 / 丢了几个」写进这个对象（见 request-snapshot）
+ */
+function buildCompletionMessages(sysContent, prepared, includeImages, turnRide, historyMessages, audit) {
   const list = Array.isArray(historyMessages) ? historyMessages : messages;
+  const caps = completionCapOpts(audit);
+  if (audit) {
+    audit.sysStableChars = typeof sysContent === 'string' ? sysContent.length : 0;
+    audit.turnRideChars = typeof turnRide === 'string' ? turnRide.length : 0;
+    audit.historyMessages = list.length;
+  }
   return buildCompletionMessagesFromHistory(
     list,
     sysContent,
@@ -77,7 +90,7 @@ function buildCompletionMessages(sysContent, prepared, includeImages, turnRide, 
     includeImages,
     getSessionContextHelpers(),
     turnRide,
-    completionCapOpts()
+    caps
   );
 }
 

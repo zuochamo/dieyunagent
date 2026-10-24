@@ -91,16 +91,31 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
           cwd: resolveExecCwd(a.cwd),
           detached: !!a.detached,
           timeoutMs: a.timeoutMs,
+          waitMs: a.waitMs,
+          keepOnTimeout: a.keepOnTimeout === true,
           runId: ctx.runId || undefined,
           sessionId: ctx.sessionId || undefined
         })
       );
     case 'host_proc': {
-      const action = a.action === 'kill' ? 'kill' : 'list';
+      const action = a.action === 'kill' ? 'kill' : a.action === 'output' ? 'output' : 'list';
       if (action === 'kill') {
         return gateway.invokeRpc(
           'host.proc_kill',
           withRunWorkspace({ id: a.id, pid: a.pid, sessionId: ctx.sessionId || undefined })
+        );
+      }
+      if (action === 'output') {
+        return gateway.invokeRpc(
+          'host.proc_output',
+          withRunWorkspace({
+            id: a.id,
+            pid: a.pid,
+            offset: a.offset,
+            tailBytes: a.tailBytes,
+            waitMs: a.waitMs,
+            sessionId: ctx.sessionId || undefined
+          })
         );
       }
       return gateway.invokeRpc(
@@ -214,6 +229,9 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       return gateway.invokeRpc('web.search', {
         query: a.query,
         engine: a.engine,
+        site: a.site,
+        page: a.page,
+        fetchTop: a.fetchTop,
         maxChars: a.maxChars
       });
     case 'codebase_search':

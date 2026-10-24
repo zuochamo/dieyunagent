@@ -113,6 +113,42 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
       );
       CREATE INDEX IF NOT EXISTS idx_agent_steps_plan ON agent_steps(plan_id, step_number);
       CREATE INDEX IF NOT EXISTS idx_agent_steps_run ON agent_steps(run_id, step_number);
+      -- 请求快照：每轮真正发往 LLM 的请求信封（"模型看到了什么"的唯一留底）。
+      -- 定位是**旁路事实**而非真相来源：可裁剪、可丢失、不参与 replay；
+      -- 真相仍是 messages / compaction_archives。字段语义见 docs/REQUEST-SNAPSHOT.md。
+      CREATE TABLE IF NOT EXISTS request_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        run_id TEXT,
+        round INTEGER,
+        source TEXT,
+        created_at INTEGER NOT NULL,
+        model TEXT,
+        stream INTEGER,
+        messages_json TEXT NOT NULL,
+        messages_chars INTEGER,
+        message_count INTEGER,
+        messages_hash TEXT,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        system_hash TEXT,
+        system_chars INTEGER,
+        system_text TEXT,
+        tools_hash TEXT,
+        tools_names TEXT,
+        tools_json TEXT,
+        est_tokens INTEGER,
+        token_budget INTEGER,
+        trigger_ratio REAL,
+        compaction_round_count INTEGER,
+        compacted INTEGER NOT NULL DEFAULT 0,
+        tokens_before INTEGER,
+        tokens_after INTEGER,
+        compaction_archive_id INTEGER,
+        reason TEXT,
+        context_audit_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_reqsnap_session ON request_snapshots(session_id, id);
+      CREATE INDEX IF NOT EXISTS idx_reqsnap_created ON request_snapshots(created_at);
       CREATE TABLE IF NOT EXISTS compaction_archives (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT,

@@ -16,14 +16,15 @@ function loadTraceStoreProbe() {
   const source = fs.readFileSync(SRC, 'utf8');
   const factory = new Function(
     'window',
-    `${source}\nreturn { buildTraceCheckpointDelta, tracePrefixFingerprint };`
+    `${source}\nreturn { buildTraceCheckpointDelta, tracePrefixFingerprint, buildTraceCheckpointSignature };`
   );
   // 文件尾部会以 `window.DieyunNamespaces.register('DieyunAgent', {...})` 自我注册，
   // 这里给个空实现即可——断言只针对两个纯函数，不触碰注册表。
   return factory({ diecloud: {}, DieyunNamespaces: { register() {} } });
 }
 
-const { buildTraceCheckpointDelta, tracePrefixFingerprint } = loadTraceStoreProbe();
+const { buildTraceCheckpointDelta, tracePrefixFingerprint, buildTraceCheckpointSignature } =
+  loadTraceStoreProbe();
 
 /** 造一个「已落库 count 条」的游标，指纹与被落库的前缀一致。 */
 function cursorFor(runId, trace, count) {
@@ -97,5 +98,52 @@ describe('trace checkpoint 增量切片', () => {
     const delta = buildTraceCheckpointDelta(live, 'run-1', settled);
     assert.equal(delta.from, 0);
     assert.deepEqual(delta.entries, settled);
+  });
+});
+
+/**
+ * 触发签名决定「要不要写 checkpoint」。曾经的实现把思考长度、正文长度也算进去，
+ * 而流式期间这两个值每帧都在变 → 2.5s 节流形同虚设 → 每 2.5s 写一次 100KB~1.3MB 的行，
+ * 把 core 侧唯一那把 DB Mutex 顶到 45s 超时（`Gateway RPC 超时: agent.trace_save`）。
+ * 这组断言钉住「只有结构性边界才算变化」。
+ */
+describe('trace checkpoint 触发签名', () => {
+  const round1 = {
+    round: 1,
+    thought: '看入口',
+    tools: [{ id: 't1', pending: false }]
+  };
+
+  it('思考/正文继续增长不改变签名（流式期间不该反复落库）', () => {
+    const grown = {
+      round: 1,
+      thought: `${round1.thought}${' 再读一段文件'.repeat(50)}`,
+      fullThought: 'x'.repeat(4000),
+      finalText: 'y'.repeat(8000),
+      tools: [{ id: 't1', pending: false }]
+    };
+    assert.equal(
+      buildTraceCheckpointSignature([grown]),
+      buildTraceCheckpointSignature([round1]),
+      '同一条目的文字变长不构成 checkpoint 理由'
+    );
+  });
+
+  it('新增一轮 / 新增工具 / 工具翻成完成 都会改变签名', () => {
+    const base = buildTraceCheckpointSignature([round1]);
+    assert.notEqual(buildTraceCheckpointSignature([round1, { round: 2, thought: '继续', tools: [] }]), base);
+    assert.notEqual(
+      buildTraceCheckpointSignature([{ ...round1, tools: [...round1.tools, { id: 't2', pending: false }] }]),
+      base
+    );
+    assert.notEqual(
+      buildTraceCheckpointSignature([{ ...round1, tools: [{ id: 't1', pending: true }] }]),
+      base
+    );
+  });
+
+  it('空 trace 也有稳定签名（不抛错）', () => {
+    assert.equal(buildTraceCheckpointSignature([]), '0:0:0');
+    assert.equal(buildTraceCheckpointSignature(null), '0:0:0');
   });
 });

@@ -324,6 +324,9 @@ function summarizeLoopTool(t) {
 function summarizeHostExecInline(result, error) {
   if (error) return `错误: ${error}`;
   if (!result || typeof result !== 'object') return '完成';
+  if (result.timedOut && result.stillRunning) {
+    return `转后台继续运行（${result.handle || (result.pid ? `pid ${result.pid}` : '无句柄')}）`;
+  }
   const exit = result.code != null ? result.code : result.exitCode;
   const stderr = String(result.stderr ?? '').trim();
   if (stderr && exit != null && exit !== 0) {

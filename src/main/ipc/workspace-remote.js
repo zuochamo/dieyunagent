@@ -230,7 +230,13 @@ function registerWorkspaceRemoteIpc(ctx) {
       sshSessionManager.assertConnected();
       const homeR = await sshSessionManager.exec('echo $HOME', null, 5000, { loginShell: false });
       const home = String(homeR.stdout || '').trim();
-      const logPath = `${home}/.dieyun/remote-agent/current/agent.log`;
+      // 日志按项目分开（remote-gateway-manager: remoteLogDir/remoteLogPathFor）：
+      // 以当前槽位回报的 remoteLogPath 为准，别再用共享的 current/agent.log
+      const rgStatus = getActiveRemoteGatewayStatus();
+      const rel = rgStatus && rgStatus.remoteLogPath ? String(rgStatus.remoteLogPath) : '';
+      const logPath = rel.startsWith('~/')
+        ? `${home}/${rel.slice(2)}`
+        : rel || `${home}/.dieyun/remote-agent/current/agent.log`;
       const n = Math.min(200, Math.max(10, Number(lines) || 80));
       const r = await sshSessionManager.execScript(
         `test -f ${shellQuoteSingle(logPath)} && tail -n ${n} ${shellQuoteSingle(logPath)} || echo "(无 agent.log)"`,
@@ -354,7 +360,11 @@ function registerWorkspaceRemoteIpc(ctx) {
         (typeof sshConnectionPool.getConnectedManagerForEndpoint === 'function'
           ? sshConnectionPool.getConnectedManagerForEndpoint(target)
           : null) || sshConnectionPool.getManagerForTarget(target);
-      if (manager) {
+      // 连接按端点前缀断（disconnectEndpoint），Remote Gateway 也要按端点停 ——
+      // 只停 exact key 会把同服务器其它项目的 agent 进程留在远端成为孤儿。
+      if (typeof remoteGatewayPool.stopForEndpoint === 'function') {
+        await remoteGatewayPool.stopForEndpoint(target, manager);
+      } else if (manager) {
         await remoteGatewayPool.stopForTarget(target, manager);
       }
       if (portForwardManager) await portForwardManager.removeAll();

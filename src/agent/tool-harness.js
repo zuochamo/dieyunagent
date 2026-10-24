@@ -1,28 +1,19 @@
 'use strict';
 
+// 工具执行的会话宿主：**流程与关卡都不在这里**。
+// 关卡清单与顺序的唯一来源是 `tool-gate.js`（before：校验/重复止损；after：遥测/落盘）；
+// 这里只负责三件不属于关卡的事：会话级状态（指纹表 / 落盘序号）、瞬时失败重试、失败分类。
+
 const {
-  shouldBlockRepeatToolCall,
-  recordToolCallFingerprint,
-  repeatToolBlockMessage,
-  normalizeAgentToolName
-} = require('./tool-guardrails');
-const { validateToolArgs } = require('./tool-validate');
-const { spillToolOutputIfLarge } = require('./tool-output-spill');
-const { recordToolTelemetry } = require('./tool-telemetry');
-
+  createToolCall,
+  isToolCall,
+  runToolGateStage,
+  formatArgsBrief,
+  wrapStructuredError
+} = require('./tool-gate');
 const { getAgentLimits } = require('./agent-limits');
+const { isLongRunningAgentTool } = require('./guardrails-shared');
 const { sleepMs } = require('../llm-reconnect-retry');
-
-function formatArgsBrief(name, args) {
-  if (!args || typeof args !== 'object') return '';
-  if (name === 'host_exec') return String(args.command || '').slice(0, 80);
-  try {
-    const s = JSON.stringify(args);
-    return s.length > 80 ? `${s.slice(0, 80)}…` : s;
-  } catch {
-    return '';
-  }
-}
 
 function classifyFailure(name, result, thrownErr) {
   if (thrownErr) {
@@ -74,177 +65,135 @@ function classifyFailure(name, result, thrownErr) {
   return null;
 }
 
-function wrapStructuredError(failure, extra = {}) {
-  return {
-    ok: false,
-    error: failure.error,
-    errorCode: failure.errorCode,
-    retryable: !!failure.retryable,
-    suggestedFix: failure.suggestedFix || extra.suggestedFix || undefined,
-    ...(failure.diagnostics ? { diagnostics: failure.diagnostics } : null),
-    ...extra
-  };
+/**
+ * 单次工具执行的「无进展看门狗」。
+ *
+ * **为什么必须有**（2026-10-23→24 事故）：`host_exec` 起了一个前台长驻脚本，工具 promise
+ * 永不 settle，harness 就永远 await 在这一句上 —— 结果是**没有下一轮 LLM 请求、没有新 trace、
+ * 没有一行日志**，`agent_runs.status` 一直是 running。那天这条 run 静默卡了 11 小时，
+ * 直到 UE 进程被杀、脚本自己退出才"复活"。
+ *
+ * `mutate-queue` 的 stall 看门狗只管**排队**（写类工具在等前一个），管不到「执行中」。
+ * 两者语义保持一致：**只放弃等待，不终止原调用** —— 取消属 `delegate-batch` 的 abort 契约，
+ * 在这里 kill 会把「超时」变成「误杀长任务」。原 promise 继续在后台跑，结果丢弃。
+ *
+ * 超时后按 `TOOL_STALLED`（retryable:false）回给模型，并提示改用 detached / 缩小命令范围；
+ * 遥测的 `errorCode` 会记下它，统计页可查 —— 这是"它停了"唯一留下的痕迹。
+ *
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {{ name?: string }} call
+ * @param {number} stallMs 0/未配置 = 不启用
+ * @returns {Promise<T>}
+ */
+function raceToolStall(promise, call, stallMs) {
+  const ms = Number(stallMs) || 0;
+  if (!(ms > 0)) return promise;
+  // 原调用的后续 reject 必须被吃掉：race 已经不再持有它，否则会升级成
+  // 进程级 unhandledRejection（Electron 主进程会弹错误框）。
+  promise.catch(() => {});
+  let timer = null;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const minutes = Math.max(1, Math.round(ms / 60000));
+      const name = (call && call.name) || '工具';
+      const e = new Error(`${name} 超过 ${minutes} 分钟没有返回，已判定卡住（原调用仍在后台运行，未被终止）。`);
+      e.code = 'TOOL_STALLED';
+      e.retryable = false;
+      e.stalled = true;
+      e.suggestedFix =
+        '不要原样重跑同一条调用。① 长驻/守护型脚本（打印 READY 后不退出）必须用 detached=true；' +
+        '② 长任务给 waitMs 让它到点转后台，再用 host_proc action=output 续读；' +
+        '③ 交互式命令（如 timeout /t、等待 stdin 的工具）在无控制台环境下会一直挂住，改用轮询式检查。';
+      reject(e);
+    }, ms);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([promise, guard]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
+ * 选本次调用的看门狗窗口：长任务工具（`subagent`）用 `toolStallMsLong`，其余用 `toolStallMs`。
+ * 工具清单来源 `guardrails-shared.js: LONG_RUNNING_TOOL_NAMES`（别在这里写第二份清单）。
+ */
+function resolveToolStallMs(name, limits) {
+  const base = Number(limits && limits.toolStallMs) || 0;
+  const long = Number(limits && limits.toolStallMsLong) || 0;
+  return isLongRunningAgentTool(name) ? long || base : base;
 }
 
 class ToolHarnessSession {
   /**
-   * @param {{ runId?: string, sessionId?: string, model?: string, workspacePath?: string, userDataPath?: string }} ctx
+   * @param {{ runId?: string, sessionId?: string, model?: string, workspacePath?: string, userDataPath?: string, contextTierId?: string }} ctx
    */
   constructor(ctx = {}) {
     this.ctx = ctx;
+    /** 连续调用指纹表（repeat-guard 关卡的数据源） */
     this.fingerprints = [];
+    /** 大输出落盘序号（spill-output 关卡的数据源） */
     this.spillSeq = 0;
     this.runKey = String(ctx.runId || ctx.sessionId || 'run');
   }
 
-  validationError(name, args, v) {
-    recordToolTelemetry(this.ctx.userDataPath, {
-      tool: name,
-      ok: false,
-      errorCode: v.errorCode,
-      model: this.ctx.model,
-      sessionId: this.ctx.sessionId,
-      durationMs: 0
-    });
-    return wrapStructuredError(
-      { retryable: false, errorCode: v.errorCode, error: v.error },
-      { suggestedFix: v.suggestedFix }
-    );
-  }
-
-  repeatBlockError(name, args, limit) {
-    const brief = formatArgsBrief(name, args);
-    const msg = repeatToolBlockMessage(
-      name,
-      brief,
-      this.ctx.userDataPath,
-      this.ctx.contextTierId,
-      this.ctx.model,
-      limit
-    );
-    recordToolTelemetry(this.ctx.userDataPath, {
-      tool: name,
-      ok: false,
-      errorCode: 'REPEAT_BLOCK',
-      model: this.ctx.model,
-      sessionId: this.ctx.sessionId,
-      durationMs: 0
-    });
-    return wrapStructuredError(
-      { retryable: false, errorCode: 'REPEAT_BLOCK', error: msg },
-      { repeated: true }
-    );
-  }
-
-  postProcessSuccess(name, raw) {
-    this.spillSeq += 1;
-    let out = spillToolOutputIfLarge(name, raw, {
-      runId: this.runKey,
-      sessionId: this.ctx.sessionId,
-      workspacePath: this.ctx.workspacePath,
-      userDataPath: this.ctx.userDataPath,
-      spillSeq: this.spillSeq
-    });
-    if (out && typeof out === 'object' && out.error) {
-      return out;
-    }
-    return out;
-  }
-
   /**
-   * @param {string} name
-   * @param {object} args
-   * @param {() => Promise<object>} invokeFn
+   * 执行一次工具调用。两种入参都支持：
+   * - `execute(call, invokeFn)`：`call` 由 `tool-gate.createToolCall` 造好（推荐，全局只归一一次）
+   * - `execute(name, args, invokeFn)`：兼容旧调用点（内部自己造 call）
+   *
+   * @param {object|string} callOrName
+   * @param {Function|object} argsOrInvoke
+   * @param {() => Promise<object>} [maybeInvokeFn]
    */
-  async execute(name, args, invokeFn) {
-    const norm = normalizeAgentToolName(name, args);
-    const toolName = norm.name;
-    args = norm.args;
-    const started = Date.now();
+  async execute(callOrName, argsOrInvoke, maybeInvokeFn) {
+    const call = isToolCall(callOrName)
+      ? callOrName
+      : createToolCall({ name: callOrName, args: argsOrInvoke });
+    const invoke = typeof argsOrInvoke === 'function' ? argsOrInvoke : maybeInvokeFn;
+    if (typeof invoke !== 'function') throw new Error('ToolHarnessSession.execute 需要 invoke 函数');
+    call.harness = this;
+    call.startedAt = call.startedAt || Date.now();
 
-    const validation = validateToolArgs(toolName, args);
-    if (!validation.ok) {
-      return this.validationError(toolName, args, validation);
-    }
+    const blocked = await runToolGateStage('before', call);
+    if (blocked) return blocked;
 
-    const tierId = this.ctx.contextTierId || 'default';
-    const lim = getAgentLimits(this.ctx.userDataPath, tierId);
-    if (
-      shouldBlockRepeatToolCall(
-        toolName,
-        args,
-        this.fingerprints,
-        undefined,
-        this.ctx.userDataPath,
-        tierId,
-        this.ctx.model
-      )
-    ) {
-      return this.repeatBlockError(toolName, args);
-    }
-    recordToolCallFingerprint(
-      this.fingerprints,
-      toolName,
-      args,
-      this.ctx.userDataPath,
-      tierId,
-      this.ctx.model
-    );
-
-    let lastFailure = null;
+    const lim = getAgentLimits(this.ctx.userDataPath, this.ctx.contextTierId || 'default');
+    const stallMs = resolveToolStallMs(call.name, lim);
     const transientMaxRetries = lim.transientMaxRetries;
     const retryBaseMs = lim.retryBaseMs;
+    let lastFailure = null;
+
     for (let attempt = 0; attempt <= transientMaxRetries; attempt++) {
+      call.attempt = attempt;
       try {
-        const raw = await invokeFn(toolName, args);
-        const failure = classifyFailure(toolName, raw, null);
-        if (failure && failure.retryable && attempt < transientMaxRetries) {
-          lastFailure = failure;
+        // 同步抛错也变成 reject：看门狗只认 promise，不能让它漏掉一层。
+        const invocation = Promise.resolve().then(() => invoke(call.name, call.args));
+        call.result = await raceToolStall(invocation, call, stallMs);
+        call.failure = classifyFailure(call.name, call.result, null);
+        if (call.failure && call.failure.retryable && attempt < transientMaxRetries) {
+          lastFailure = call.failure;
           await sleepMs(retryBaseMs * (attempt + 1));
           continue;
         }
-        if (failure) {
-          recordToolTelemetry(this.ctx.userDataPath, {
-            tool: toolName,
-            ok: false,
-            errorCode: failure.errorCode,
-            model: this.ctx.model,
-            sessionId: this.ctx.sessionId,
-            durationMs: Date.now() - started,
-            attempt
-          });
-          return wrapStructuredError(failure, { attempts: attempt + 1 });
-        }
-        recordToolTelemetry(this.ctx.userDataPath, {
-          tool: toolName,
-          ok: true,
-          errorCode: 'ok',
-          model: this.ctx.model,
-          sessionId: this.ctx.sessionId,
-          durationMs: Date.now() - started,
-          attempt
-        });
-        return this.postProcessSuccess(toolName, raw);
+        // 成功 / 终态失败都走 after 关卡：观察类关卡只该看到一种"调用已结束"的形状。
+        await runToolGateStage('after', call);
+        return call.failure ? wrapStructuredError(call.failure, { attempts: attempt + 1 }) : call.result;
       } catch (e) {
-        const failure = classifyFailure(toolName, null, e);
-        if (failure.retryable && attempt < transientMaxRetries) {
-          lastFailure = failure;
+        call.failure = classifyFailure(call.name, null, e);
+        if (call.failure.retryable && attempt < transientMaxRetries) {
+          lastFailure = call.failure;
           await sleepMs(retryBaseMs * (attempt + 1));
           continue;
         }
-        recordToolTelemetry(this.ctx.userDataPath, {
-          tool: toolName,
-          ok: false,
-          errorCode: failure.errorCode,
-          model: this.ctx.model,
-          sessionId: this.ctx.sessionId,
-          durationMs: Date.now() - started,
-          attempt
-        });
-        return wrapStructuredError(failure, { attempts: attempt + 1 });
+        await runToolGateStage('after', call);
+        return wrapStructuredError(call.failure, { attempts: attempt + 1 });
       }
     }
-    return wrapStructuredError(lastFailure || { retryable: false, errorCode: 'TOOL_ERROR', error: '工具失败' });
+    await runToolGateStage('after', call);
+    return wrapStructuredError(
+      lastFailure || call.failure || { retryable: false, errorCode: 'TOOL_ERROR', error: '工具失败' }
+    );
   }
 }
 
@@ -284,5 +233,8 @@ module.exports = {
   clearToolHarnessSession,
   clearToolHarnessSessionsForSession,
   classifyFailure,
-  formatArgsBrief
+  formatArgsBrief,
+  // 单测直接钉住看门狗语义（不必为 12 分钟的默认值等真实时间）
+  raceToolStall,
+  resolveToolStallMs
 };

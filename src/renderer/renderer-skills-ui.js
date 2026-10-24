@@ -45,9 +45,14 @@ function buildMcpFullDescription(server, tools = []) {
       lines.push('  参数：');
       for (const arg of server.args) lines.push(`    ${arg}`);
     }
-    if (server.envHint) {
+    const envNames = Array.isArray(server.envHints)
+      ? server.envHints.map((def) => (def && def.name) || '').filter(Boolean)
+      : server.envHint
+        ? [server.envHint]
+        : [];
+    if (envNames.length) {
       lines.push('');
-      lines.push(`环境变量：${server.envHint}`);
+      lines.push(`环境变量：${envNames.join(' / ')}`);
     }
   }
   if (tools.length) {
@@ -335,21 +340,7 @@ async function openMcpConfigDialog(server) {
     $('mcp-config-command') && ($('mcp-config-command').value = config.command || '');
     $('mcp-config-args') &&
       ($('mcp-config-args').value = (config.args || []).join('\n'));
-    $('mcp-config-env') && ($('mcp-config-env').value = '');
-    const envHint = $('mcp-config-env-hint');
-    if (envHint) {
-      if (config.envHint) {
-        if (undecryptable.includes(config.envHint)) {
-          envHint.textContent = `此前保存的 ${config.envHint} 无法解密，请重新填写`;
-        } else {
-          envHint.textContent = config.hasEnvValue
-            ? `${config.envHint} 已保存（留空则不修改）`
-            : `请填写 ${config.envHint}`;
-        }
-      } else {
-        envHint.textContent = '无需额外环境变量';
-      }
-    }
+    renderMcpEnvFields(config);
   }
 
   const toolsSection = $('mcp-config-tools-section');
@@ -372,6 +363,87 @@ async function openMcpConfigDialog(server) {
   }
 }
 
+/**
+ * 环境变量区：按服务声明的变量**逐个**渲染输入框。
+ * 声明表由 Main 侧规范化后随 config.envHints 下发（唯一来源 src/mcp/env-hints.js）——
+ * 早期版本这里是写死的一个 #mcp-config-env，键名由服务端的单个 envHint 决定，
+ * 于是「一个服务要传两个变量」（如 mcp-postgres 的单库串 + 多库串）没有出口，只能手改 mcp.json。
+ */
+function renderMcpEnvFields(config) {
+  const list = $('mcp-config-env-list');
+  const hintEl = $('mcp-config-env-hint');
+  const revealWrap = $('mcp-config-env-reveal-wrap');
+  const reveal = $('mcp-config-env-reveal');
+  if (!list) return;
+  const defs = Array.isArray(config.envHints) ? config.envHints.filter((def) => def && def.name) : [];
+  list.innerHTML = '';
+  if (reveal) reveal.checked = false;
+  if (revealWrap) revealWrap.hidden = !defs.length;
+  if (reveal) {
+    // 赋值而非 addEventListener：本函数每次打开弹窗都会重跑，用 onchange 天然幂等
+    reveal.onchange = () => {
+      for (const input of list.querySelectorAll('input[data-env-name]')) {
+        input.type = reveal.checked ? 'text' : 'password';
+      }
+    };
+  }
+  if (!defs.length) {
+    if (hintEl) hintEl.textContent = '无需额外环境变量';
+    return;
+  }
+  defs.forEach((def, index) => {
+    const row = document.createElement('label');
+    row.className = 'field';
+    const labelEl = document.createElement('span');
+    labelEl.className = 'field-label';
+    labelEl.textContent = def.label ? `${def.name} · ${def.label}` : def.name;
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.id = `mcp-config-env-${index}`;
+    input.dataset.envName = def.name;
+    input.placeholder = '留空则不修改已保存的值';
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    const stateEl = document.createElement('span');
+    stateEl.className = 'field-hint';
+    if (def.undecryptable) {
+      stateEl.textContent = `此前保存的 ${def.name} 无法解密，请重新填写`;
+    } else if (def.saved) {
+      stateEl.textContent = `${def.name} 已就位（留空则不修改）`;
+    } else {
+      stateEl.textContent = def.hint ? `请填写 ${def.name}：${def.hint}` : `请填写 ${def.name}`;
+    }
+    row.append(labelEl, input, stateEl);
+    list.appendChild(row);
+  });
+  if (hintEl) {
+    const missing = defs.filter((def) => !def.saved).map((def) => def.name);
+    if (config.envRequirement === 'any' && defs.length > 1) {
+      hintEl.textContent =
+        missing.length === defs.length
+          ? '以上互为替代，填写任意一个即可'
+          : `已就位 ${defs.length - missing.length}/${defs.length} 个；配了多个库时 Agent 调用需带 database 参数`;
+    } else if (missing.length) {
+      hintEl.textContent = `还需填写：${missing.join('、')}`;
+    } else {
+      hintEl.textContent = '已全部就位';
+    }
+  }
+}
+
+/** 收集环境变量输入框的值（留空＝不修改已保存的值，故不提交空串） */
+function collectMcpEnvValues() {
+  const out = {};
+  const list = $('mcp-config-env-list');
+  if (!list) return out;
+  for (const input of list.querySelectorAll('input[data-env-name]')) {
+    const name = String(input.dataset.envName || '').trim();
+    const value = String(input.value || '');
+    if (name && value) out[name] = value;
+  }
+  return out;
+}
+
 async function submitMcpConfig(e) {
   e.preventDefault();
   if (!mcpConfigServerId || !skillsApi.updateMcpConfig) return;
@@ -390,8 +462,8 @@ async function submitMcpConfig(e) {
       const token = $('mcp-config-token')?.value || '';
       if (token) payload.token = token;
     } else {
-      const envValue = $('mcp-config-env')?.value || '';
-      if (envValue) payload.envValue = envValue;
+      const envValues = collectMcpEnvValues();
+      if (Object.keys(envValues).length) payload.envValues = envValues;
     }
     await skillsApi.updateMcpConfig(payload);
     closeMcpConfigDialog();

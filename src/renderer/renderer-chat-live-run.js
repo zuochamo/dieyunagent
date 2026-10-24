@@ -309,6 +309,9 @@ function dispatchAgentRunEvent(sessionId, rawEvent) {
     pushAgentServiceCompletion(live, sessionId, event);
   }
   renderLiveRunFromEvent(sessionId, live, event);
+  // 右侧「子代理」面板与思考区卡片同源（同一份 live.trace），跟着同一拍事件刷新；
+  // 面板不可见时该函数自行返回，不做任何工作。
+  if (typeof scheduleSubagentPanelRefresh === 'function') scheduleSubagentPanelRefresh();
   if (
     event.type === AGENT_RUN_EVENT_TYPES.TRACE ||
     event.type === AGENT_RUN_EVENT_TYPES.STREAM ||

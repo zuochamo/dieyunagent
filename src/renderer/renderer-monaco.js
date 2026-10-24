@@ -1,59 +1,38 @@
-/* global window, document, gatewayCall, gwState, updateProblemsPanel, initProblemsPanel, refreshWorkspaceProblemsPanel, getAgentLimits, activeEditorUserDirty, markActiveMonacoEditorUserDirty, isActiveMonacoEditorUserDirty, resetArtifactFollowState, resetArtifactModelCache */
+/* global window, document, gatewayCall, gwState, updateProblemsPanel, initProblemsPanel, refreshWorkspaceProblemsPanel, getAgentLimits, markActiveMonacoEditorUserDirty, isActiveMonacoEditorUserDirty, clearMonacoPathDirty, isMonacoPathDirty, rememberMonacoViewState, restoreMonacoViewState, resetArtifactFollowState, resetArtifactModelCache */
 'use strict';
 
-
-async function createMonacoArtifactEditor(hostEl, opts) {
-  return runMonacoMountTask(async () => {
-  await disposeMonacoArtifactEditor();
-  await yieldToMonacoLayout();
-  if (window.diecloud && typeof window.diecloud.setComponentInUse === 'function') {
-    window.diecloud.setComponentInUse('monaco-editor', true);
+/**
+ * 复用现有编辑器实例的条件：实例还在、DOM 还活着、且就挂在这个宿主里。
+ * 多标签只在同一个宿主（持久编辑区）之间换 model，因此正常情况永远复用；
+ * 宿主被重建（切到文本域 / 视图被清空）才销毁重建。
+ */
+function canReuseActiveMonacoEditor(hostEl) {
+  if (!activeEditor || !hostEl) return false;
+  let dom = null;
+  try {
+    dom = activeEditor.getDomNode ? activeEditor.getDomNode() : null;
+  } catch {
+    dom = null;
   }
-  const monaco = await loadMonaco();
-  hostEl.innerHTML = '';
-  applyDieyunMonacoTheme(monaco);
+  if (!dom || !dom.isConnected) return false;
+  return hostEl.contains(dom);
+}
 
-  const lang = guessMonacoLanguage(opts.filePath);
-  const uri = artifactModelUri(monaco, opts.filePath);
-  const model = createOrReplaceMonacoModel(monaco, uri, opts.text || '', lang);
-
-  const editor = monaco.editor.create(hostEl, {
-    model,
-    automaticLayout: true,
-    minimap: { enabled: false },
-    scrollBeyondLastLine: false,
-    fontSize: 13,
-    lineNumbers: 'on',
-    wordWrap: 'on',
-    tabSize: 2,
-    padding: { top: 8, bottom: 8 },
-    renderOverviewRuler: false,
-    overviewRulerLanes: 0,
-    hideCursorInOverviewRuler: true,
-    renderLineHighlight: 'line',
-    selectionHighlight: false
-  });
-  applyMonacoEditorChromeOptions(editor);
-
-  activeEditor = editor;
-  activeFilePath = opts.filePath;
-  rememberOpenTab(opts.filePath);
-  updateEditorSelection(editor, opts.filePath);
-
-  activeEditorUserDirty = false;
+/** 事件接线只在真正创建实例时做一次；多标签复用时不再重复注册 */
+function adoptMonacoArtifactEditor(editor) {
   trackEditorDisposable(
     editor.onDidChangeModelContent(() => {
       // 程序化写入（写入跟随 / 读盘对齐）不算用户改动，否则跟随会误判为「用户已编辑」而停止
       if (!editor._dieyunProgEdit) markActiveMonacoEditorUserDirty();
-      scheduleLspSync(opts.filePath, () => editor.getValue());
+      const path = activeFilePath;
+      if (path) scheduleLspSync(path, () => editor.getValue());
     })
   );
   trackEditorDisposable(
     editor.onDidChangeCursorSelection(() => {
-      updateEditorSelection(editor, opts.filePath);
+      if (activeFilePath) updateEditorSelection(editor, activeFilePath);
     })
   );
-
   activeHandle = {
     getValue: () => editor.getValue(),
     dispose: () => disposeMonacoArtifactEditor(),
@@ -61,31 +40,105 @@ async function createMonacoArtifactEditor(hostEl, opts) {
       applyMonacoGotoLine(editor, line, col);
     }
   };
-  flushPendingGotoLine();
-  if (opts?.focusLine) {
-    const ln = Math.max(1, Number(opts.focusLine) || 1);
-    editor.revealLineInCenterIfOutsideViewport(ln);
-    setDiffWritingDecoration(editor, monaco, ln);
-  }
   if (typeof wireMonacoEditorSelectionDrag === 'function') {
     wireMonacoEditorSelectionDrag(editor);
   }
+}
 
-  // LSP 同步是慢路径（首次可能要等语言服务器就绪，超时 8s），绝不能留在挂载任务里：
-  // runMonacoMountTask 串行执行，一旦被它占住，用户之后每次打开文件都要排在后面等超时
-  // —— 表现就是「点了文件只见标题栏、内容空白很久」。编辑器挂载本身是同步的，
-  // 这里返回后内容立即可见，诊断稍后补上。
-  void syncLspDocument(opts.filePath, opts.text || '')
-    .then((r) => {
-      if (activeEditor !== editor) return; // 已切走，丢弃过期诊断
-      applyDiagnosticsToEditor(editor, opts.filePath, r ? r.diagnostics || [] : []);
-      applyMonacoEditorChromeOptions(editor);
-    })
-    .catch(() => {
-      // LSP 不可用不影响编辑器内容展示
+async function createMonacoArtifactEditor(hostEl, opts) {
+  return runMonacoMountTask(async () => {
+    const options = opts || {};
+    const monaco = await loadMonaco();
+    applyDieyunMonacoTheme(monaco);
+    if (window.diecloud && typeof window.diecloud.setComponentInUse === 'function') {
+      window.diecloud.setComponentInUse('monaco-editor', true);
+    }
+
+    if (!canReuseActiveMonacoEditor(hostEl)) {
+      await disposeMonacoArtifactEditor();
+      await yieldToMonacoLayout();
+      if (hostEl) hostEl.innerHTML = '';
+    }
+
+    const lang = guessMonacoLanguage(options.filePath);
+    const uri = artifactModelUri(monaco, options.filePath);
+    // keepModelText：切回已有标签时不要用磁盘正文覆盖模型（可能含未保存编辑）
+    const model = createOrReplaceMonacoModel(monaco, uri, options.text || '', lang, {
+      keepText: !!options.keepModelText
     });
 
-  return activeHandle;
+    let editor = activeEditor;
+    if (!editor) {
+      editor = monaco.editor.create(hostEl, {
+        model,
+        automaticLayout: true,
+        minimap: { enabled: false },
+        scrollBeyondLastLine: false,
+        fontSize: 13,
+        lineNumbers: 'on',
+        wordWrap: 'on',
+        tabSize: 2,
+        padding: { top: 8, bottom: 8 },
+        renderOverviewRuler: false,
+        overviewRulerLanes: 0,
+        hideCursorInOverviewRuler: true,
+        renderLineHighlight: 'line',
+        selectionHighlight: false
+      });
+      activeEditor = editor;
+      applyMonacoEditorChromeOptions(editor);
+      adoptMonacoArtifactEditor(editor);
+    } else {
+      // 切标签：先记住原标签的视口，再换 model（不销毁实例）
+      rememberMonacoViewState(activeFilePath, editor);
+      if (editor.getModel() !== model) {
+        editor._dieyunProgEdit = true;
+        try {
+          editor.setModel(model);
+        } finally {
+          editor._dieyunProgEdit = false;
+        }
+      }
+    }
+
+    activeFilePath = options.filePath;
+    rememberOpenTab(options.filePath);
+    restoreMonacoViewState(options.filePath, editor);
+    updateEditorSelection(editor, options.filePath);
+    // 从磁盘载入（非保留模型）是一次干净加载：该路径的未保存标记归零
+    if (!options.keepModelText) clearMonacoPathDirty(options.filePath);
+
+    flushPendingGotoLine();
+    if (options.focusLine) {
+      const ln = Math.max(1, Number(options.focusLine) || 1);
+      editor.revealLineInCenterIfOutsideViewport(ln);
+      setDiffWritingDecoration(editor, monaco, ln);
+    }
+
+    // 宿主可能刚从 hidden 恢复（切标签 / 重开面板）：显式 layout 一次
+    requestAnimationFrame(() => {
+      try {
+        if (activeEditor === editor) editor.layout();
+      } catch {
+        // ignore
+      }
+    });
+
+    // LSP 同步是慢路径（首次可能要等语言服务器就绪，超时 8s），绝不能留在挂载任务里：
+    // runMonacoMountTask 串行执行，一旦被它占住，用户之后每次打开文件都要排在后面等超时
+    // —— 表现就是「点了文件只见标题栏、内容空白很久」。编辑器挂载本身是同步的，
+    // 这里返回后内容立即可见，诊断稍后补上。
+    void syncLspDocument(options.filePath, options.text || '')
+      .then((r) => {
+        if (activeEditor !== editor) return; // 已切走，丢弃过期诊断
+        applyDiagnosticsToEditor(editor, options.filePath, r ? r.diagnostics || [] : []);
+        applyMonacoEditorChromeOptions(editor);
+      })
+      .catch(() => {
+        // LSP 不可用不影响编辑器内容展示
+      });
+
+    return activeHandle;
   });
 }
 
@@ -220,6 +273,25 @@ function setMonacoModelText(model, nextText, opts) {
   }
 }
 
+/**
+ * 后台标签的写入跟随：只更新该路径缓存里的 model，不抢焦点、不动当前编辑器。
+ * 用户在该标签有未保存修改时拒绝写入（绝不覆盖输入）。
+ * @returns {boolean} 是否真的写进去了
+ */
+function updateCachedArtifactModelText(filePath, text, opts) {
+  if (!filePath) return false;
+  if (isMonacoPathDirty(filePath)) return false;
+  const model = typeof getArtifactModelByPath === 'function' ? getArtifactModelByPath(filePath) : null;
+  if (!model) return false;
+  if (activeEditor && typeof activeEditor.getModel === 'function' && activeEditor.getModel() === model) {
+    return false; // 当前编辑器由 updateMonacoArtifactEditorText 负责
+  }
+  return !!setMonacoModelText(model, text, {
+    incremental: true,
+    appendOnly: !!(opts && opts.appendOnly)
+  });
+}
+
 function revealMonacoLine(line, col) {
   const ln = Math.max(1, Number(line) || 1);
   const cn = Math.max(1, Number(col) || 1);
@@ -253,6 +325,12 @@ window.resetArtifactModelCache = resetArtifactModelCache;
 window.getMonacoEditorContext = getMonacoEditorContext;
 window.getMonacoEditorContextPaths = getMonacoEditorContextPaths;
 window.getCachedMonacoDiagnostics = getCachedDiagnosticsForPaths;
+// 多标签：每标签未保存状态 / 缓存模型查询 / 后台标签写入
+window.updateCachedArtifactModelText = updateCachedArtifactModelText;
+window.getArtifactModelByPath = getArtifactModelByPath;
+window.isMonacoPathDirty = isMonacoPathDirty;
+window.markMonacoPathDirty = markMonacoPathDirty;
+window.clearMonacoPathDirty = clearMonacoPathDirty;
 
 var monacoPreloadPromise = null;
 

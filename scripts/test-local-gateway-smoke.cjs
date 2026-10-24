@@ -264,9 +264,11 @@ async function testRpcSessionIdContext() {
 }
 
 /**
- * 回归：绑定工作空间后，宽松档的本地根（默认 workspace / 用户主目录 / 系统临时目录）
- * 仍须留在读/写白名单里，否则工作空间不可写 / 用户想在工作空间外落盘时无落脚点
- * （曾是 if/else 链把兜底目录吞掉）。
+ * 回归：绑定工作空间后，宽松档的本地根仍须留在**读**白名单里，否则工作空间不可写 /
+ * 用户想在工作空间外读文件时会 PATH_NOT_ALLOWED（曾是 if/else 链把兜底目录吞掉）。
+ *
+ * 写白名单自沙箱档位上线后**不再包含用户主目录**：默认档「工作区内可写」把写入限制在
+ * 工作区 + 内部目录 + 临时目录，越界要用户批一次（见 docs/SANDBOX.md）。
  */
 async function testDefaultWorkspaceAlwaysInRoots() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dieyun-smoke-def-'));
@@ -279,23 +281,35 @@ async function testDefaultWorkspaceAlwaysInRoots() {
       dieyunUserHome,
       systemTempDir
     } = require('../src/agent-home');
-    const required = [dieyunDefaultWorkspaceDir(), dieyunUserHome(), systemTempDir()];
     const norm = (p) => {
       const abs = path.resolve(p);
       return process.platform === 'win32' ? abs.toLowerCase() : abs;
     };
-    for (const [label, roots] of [
-      ['可读', gateway._collectReadRoots()],
-      ['可写', gateway._collectWritableRoots()]
-    ]) {
-      const have = roots.map(norm);
-      for (const want of required) {
-        if (!have.includes(norm(want))) {
-          throw new Error(`${label}白名单缺少本地宽松根：${want}`);
-        }
+    const readRoots = gateway._collectReadRoots().map(norm);
+    for (const want of [dieyunDefaultWorkspaceDir(), dieyunUserHome(), systemTempDir()]) {
+      if (!readRoots.includes(norm(want))) {
+        throw new Error(`可读白名单缺少本地宽松根：${want}`);
       }
     }
-    console.log('ok local wide roots (default workspace / home / tmp) in read+write');
+
+    const writeRoots = gateway._collectWritableRoots().map(norm);
+    for (const want of [dieyunDefaultWorkspaceDir(), systemTempDir()]) {
+      if (!writeRoots.includes(norm(want))) {
+        throw new Error(`可写白名单缺少本地兜底根：${want}`);
+      }
+    }
+    if (writeRoots.includes(norm(dieyunUserHome()))) {
+      throw new Error('默认档（workspace-write）不应把用户主目录列入可写白名单');
+    }
+
+    // 完全放开档：主目录可写
+    gateway.setPermissions({ sandboxMode: 'danger-full-access' });
+    const dangerWrite = gateway._collectWritableRoots().map(norm);
+    if (!dangerWrite.some((r) => norm(dieyunUserHome()).startsWith(r))) {
+      throw new Error('完全放开档下用户主目录应可写');
+    }
+
+    console.log('ok local wide roots (default workspace / home / tmp) in read; write follows sandbox mode');
   } finally {
     await stop();
     fs.rmSync(tmp, { recursive: true, force: true });

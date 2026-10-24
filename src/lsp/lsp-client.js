@@ -1,15 +1,19 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
 const { spawn } = require('child_process');
 const { pathToFileURL, fileURLToPath } = require('url');
 const {
   buildInitializeOptions,
   getLanguageIdForPath,
   getServerKeyForLanguage,
+  isLanguageServable,
   isTypescriptProjectConfigPath,
+  pythonStubDir,
   shouldOpenOnTypescriptLanguageServer
 } = require('./language-registry');
+const { buildCmdLine } = require('./spawn-args');
 
 function childEnvForCommand(command) {
   if (command !== process.execPath) return process.env;
@@ -33,12 +37,19 @@ function uriKeyFromUri(uri) {
 }
 
 function fileUriFromAbs(absPath) {
-  return pathToFileURL(path.resolve(absPath)).href;
+  const href = pathToFileURL(path.resolve(absPath)).href;
+  // Node 给的是 file:///C:/Users/...；VS Code / pyright / clangd 的规范形式是
+  // file:///c%3A/Users/...（盘符小写 + 冒号编码）。用非规范形式发 didOpen 时，
+  // pyright 会把它当成另一个文档，只做「导入解析」不做类型检查，
+  // 表现为诊断永远为空（等满超时后返回 []）。key 用 fileURLToPath 归一化，故两边仍能对上。
+  if (process.platform !== 'win32') return href;
+  return href.replace(/^file:\/\/\/([A-Za-z]):/, (_m, drive) => `file:///${drive.toLowerCase()}%3A`);
 }
 
 function resolveSpawnSpec(spec, workspaceRoot) {
   if (process.platform === 'win32' && spec.command === 'npx') {
-    const cmdLine = ['npx', ...(spec.args || [])].join(' ');
+    // 与 cli-fallback 共用同一份引号规则（tsserver 路径同样可能含空格）
+    const cmdLine = buildCmdLine('npx', spec.args);
     return {
       command: 'cmd.exe',
       args: ['/d', '/s', '/c', cmdLine],
@@ -110,6 +121,8 @@ class LspClient {
     this.spec = opts.spec;
     this.workspaceRoot = opts.workspaceRoot;
     this.serverKey = opts.serverKey || '';
+    /** userData 用于解析 Python 类型存根目录（lsp-stubs）；缺省时不下发 stub 配置 */
+    this.userDataPath = opts.userDataPath || '';
     this.log = opts.log || (() => {});
     /** @type {import('child_process').ChildProcess | null} */
     this.proc = null;
@@ -125,6 +138,21 @@ class LspClient {
     this.waiters = new Map();
     /** @type {Map<string, { uri: string, languageId: string, version: number, absPath: string }>} */
     this.openDocuments = new Map();
+    /**
+     * pyright 的 python.analysis 覆盖项（目前只有类型存根目录）。
+     * 通过 workspace/configuration 下发；目录不存在时为 null（保持 pyright 默认）。
+     */
+    this.pythonAnalysisSettings = null;
+    if (this.serverKey === 'python' && this.userDataPath) {
+      const stubDir = pythonStubDir(this.userDataPath);
+      try {
+        if (stubDir && fs.statSync(stubDir).isDirectory()) {
+          this.pythonAnalysisSettings = { stubPath: stubDir, extraPaths: [stubDir] };
+        }
+      } catch {
+        this.pythonAnalysisSettings = null;
+      }
+    }
     this.closed = false;
   }
 
@@ -231,6 +259,10 @@ class LspClient {
       const key = uriKeyFromUri(uri);
       const diags = (params.diagnostics || []).map(normalizeDiagnostic);
       this.diagnosticsByUri.set(key, diags);
+      // 只在真有诊断时打一行：批量诊断时「diag 0 条」占了绝大多数（实测一轮 855 个
+      // .py 有 700+ 条空诊断），逐条落盘会把 main.log 冲爆并拖慢主进程。
+      // 汇总口径看 diagnostics-service 的 `[diagnostics] watch batch`。
+      if (diags.length) this.log(`[lsp] diag ${diags.length} 条 ← ${key}`);
       const waiter = this.waiters.get(key);
       if (waiter && typeof waiter.onDiagnostics === 'function') {
         waiter.onDiagnostics(diags);
@@ -239,14 +271,34 @@ class LspClient {
     }
     if (msg.method === 'workspace/configuration' && msg.id != null) {
       const items = (msg.params && msg.params.items) || [];
+      this._configSeenAt = Date.now();
       this.sendResponse(
         msg.id,
-        items.map(() => ({}))
+        items.map((item) => this._configurationFor(item && item.section))
       );
       return;
     }
     if (msg.method === 'window/logMessage' && msg.params && msg.params.message) {
       this.log(`[lsp log] ${String(msg.params.message).slice(0, 200)}`);
+      return;
+    }
+    /**
+     * 服务端发起的请求必须回应，否则 server 会一直等它。
+     * 典型：pyright 初始化后发 client/registerCapability（注册 didOpen/didChange），
+     * 没回应时文档「打开」从未生效——只能拿到 workspace 扫描产生的 import 级诊断，
+     * 类型检查（赋值、参数、属性）永远为空，且表现为「20s 后返回空数组」。
+     */
+    if (msg.id != null && typeof msg.method === 'string') {
+      if (msg.method === 'workspace/workspaceFolders') {
+        this.sendResponse(msg.id, [
+          {
+            uri: fileUriFromAbs(this.workspaceRoot),
+            name: path.basename(this.workspaceRoot) || 'workspace'
+          }
+        ]);
+        return;
+      }
+      this.sendResponse(msg.id, null);
     }
   }
 
@@ -276,9 +328,33 @@ class LspClient {
     this._send(encodeMessage(payload));
   }
 
+  /**
+   * 回应服务端请求。**不能抛错**：
+   * 它只可能被 `_onStdout` 的 `data` 回调调用，而 `_abortPending`（进程 exit / spawn
+   * error）会把 `proc` 置 null 并 `closed=true`；此时 stdout 里已缓冲的消息仍会被派发，
+   * `_send` 抛出的 `language server not running` 在事件回调里无人接管 → uncaughtException
+   * → 主进程崩（`main-entry.js` 只挂了 unhandledRejection）。
+   */
   sendResponse(id, result) {
-    const payload = { jsonrpc: '2.0', id, result };
-    this._send(encodeMessage(payload));
+    try {
+      this._send(encodeMessage({ jsonrpc: '2.0', id, result }));
+    } catch (err) {
+      this.log(`[lsp] 回包丢弃（server 已退出）id=${id}: ${err && err.message ? err.message : err}`);
+    }
+  }
+
+  /**
+   * 响应 language server 的 workspace/configuration。
+   * pyright 通过这个通道读取 python.analysis.*（vscode-pyright 同款），
+   * 早先一律返回 {} 导致「下发 python 设置」的所有尝试都是静默无效。
+   */
+  _configurationFor(section) {
+    const key = String(section || '').toLowerCase();
+    const py = this.pythonAnalysisSettings;
+    if (!py) return {};
+    if (key === 'python') return { analysis: py };
+    if (key === 'python.analysis') return py;
+    return {};
   }
 
   async ensureInitialized() {
@@ -294,8 +370,12 @@ class LspClient {
 
   async _initialize() {
     this.start();
-    const rootUri = pathToFileURL(this.workspaceRoot).href;
-    const initOptions = buildInitializeOptions(this.serverKey, this.workspaceRoot);
+    // 统一用规范 URI（与 didOpen 同一套），否则 pyright 会把 workspace 根和文档
+    // 当成两棵不同的树，打开的文件落在 workspace 之外，类型检查直接被跳过。
+    const rootUri = fileUriFromAbs(this.workspaceRoot);
+    const initOptions = buildInitializeOptions(this.serverKey, this.workspaceRoot, {
+      userDataPath: this.userDataPath
+    });
     const initResult = await Promise.race([
       this.sendRequest('initialize', {
         processId: process.pid,
@@ -323,8 +403,27 @@ class LspClient {
     ]);
     this.sendNotification('initialized', {});
     this.initialized = true;
+    // pyright 类 server 在收到 initialized 后才请求 workspace/configuration 并建 program；
+    // program 就绪前发 didOpen 会被丢弃（表现为「怎么都不推诊断」）。这里等它建完再放行。
+    await this._waitProgramReady();
     if (initResult && initResult.capabilities) {
       this.log(`[lsp] initialized ${this.spec.id || 'server'}`);
+    }
+  }
+
+  /**
+   * 等服务端 program 就绪。
+   * 探测信号：initialized 之后 150ms 内是否收到 workspace/configuration 请求。
+   * - 收到（pyright 等）：继续等最后一次请求后 150ms 静默，最多 2000ms；
+   * - 没收到（tsserver 等）：立即返回，不引入延迟。
+   */
+  async _waitProgramReady() {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const start = Date.now();
+    await sleep(150);
+    if (!this._configSeenAt) return;
+    while (Date.now() - start < 2000 && Date.now() - this._configSeenAt < 150) {
+      await sleep(50);
     }
   }
 
@@ -372,7 +471,7 @@ class LspClient {
    * @param {{ absPath: string, languageId: string, text: string, timeoutMs?: number, minSeverity?: string, maxPerFile?: number }} opts
    */
   async syncDocument(opts) {
-    if (!shouldOpenOnTypescriptLanguageServer(opts.absPath, opts.languageId) && opts.languageId !== 'python') {
+    if (!isLanguageServable(opts.absPath, opts.languageId)) {
       return [];
     }
     await this.ensureInitialized();
@@ -640,7 +739,7 @@ class LspClient {
    */
   async getDiagnosticsForFile(opts) {
     await this.ensureInitialized();
-    if (!shouldOpenOnTypescriptLanguageServer(opts.absPath, opts.languageId) && opts.languageId !== 'python') {
+    if (!isLanguageServable(opts.absPath, opts.languageId)) {
       return [];
     }
     const key = uriKeyFromAbs(opts.absPath);
@@ -668,6 +767,8 @@ class LspClient {
         text: opts.text
       }
     });
+    // 不再逐文件打 didOpen 日志：批量 watch 场景一轮几百个文件，每文件一行是纯噪音，
+    // 汇总口径见 diagnostics-service 的 `[diagnostics] watch batch files=N`。
 
     try {
       const diags = await diagPromise;

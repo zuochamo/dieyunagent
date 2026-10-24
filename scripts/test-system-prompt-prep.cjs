@@ -35,25 +35,39 @@ const md = [
   '<!-- dieyun:section:overview status=stable -->',
   '## 概览',
   'hello',
+  '<!-- dieyun:section:structure status=auto -->',
+  '## 目录结构',
+  'secret-structure',
   '<!-- dieyun:section:commands status=auto -->',
   '## 常用命令',
-  'heavy-cmd-secret',
+  'light-cmd-secret',
+  '<!-- dieyun:section:gotchas status=auto -->',
+  '## 已知坑点',
+  'light-gotcha-secret',
   '<!-- dieyun:section:conventions status=draft -->',
   '## 约定',
   'secret-conventions'
 ].join('\n');
+// 契约：每轮注入 overview + commands + gotchas（不查就会踩坑的两类），
+// structure 由 graph.repo_map 覆盖，其余 section 靠模型按需 fs_read_file。
 const light = lightAgentsMdContent(md);
 assert(light.includes('hello'), 'keeps overview');
-assert(!light.includes('heavy-cmd-secret'), 'drops commands section');
-assert(!light.includes('secret-conventions'), 'drops heavy sections');
+assert(light.includes('light-cmd-secret'), 'keeps commands section');
+assert(light.includes('light-gotcha-secret'), 'keeps gotchas section');
+assert(!light.includes('secret-structure'), 'drops structure section (graph repo_map covers it)');
+assert(!light.includes('secret-conventions'), 'drops non-whitelisted sections');
 
-const commandsOnly = [
+// 白名单之外的 section 单独存在时仍不会灌入（防止纯 conventions 文件撑爆预算）。
+const conventionsOnly = [
   '# AGENTS.md',
-  '<!-- dieyun:section:commands status=auto -->',
-  '## 常用命令',
-  'heavy-cmd-secret'
+  '<!-- dieyun:section:conventions status=auto -->',
+  '## 约定',
+  'secret-conventions'
 ].join('\n');
-assert(!lightAgentsMdContent(commandsOnly).includes('heavy-cmd-secret'), 'no overview does not dump heavy sections');
+assert(
+  !lightAgentsMdContent(conventionsOnly).includes('secret-conventions'),
+  'no overview does not dump non-whitelisted sections'
+);
 
 assert(
   extractCodebasePathsFromBlock('### 1. src/a.ts:1-2\nfoo').includes('src/a.ts'),

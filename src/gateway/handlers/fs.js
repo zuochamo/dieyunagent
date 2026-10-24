@@ -28,6 +28,7 @@ function createFsHandlers(d) {
     ctx,
     captureUndoWrite,
     writeRootsForCall,
+    assertSandboxWritable,
     lspDiagnostics,
     isSshConnectedForCall,
     requireSshForCall,
@@ -319,9 +320,16 @@ function createFsHandlers(d) {
         return {
           ok: false,
           errorCode: 'SYMBOL_NOT_FOUND',
+          retryable: false,
+          // 远程本来就没有 LSP、结构索引也常未建：这不是「符号不存在」，
+          // 而是「这个能力在远程降级」。标出来，模型才不会一个名字反复重试。
+          degraded: isSsh,
           error: symName
-            ? `没找到符号「${symName}」的精确范围。可先用 grep 确认名字，或 graph find_symbol 看结构索引里是否有该符号${isSsh ? '（远程需已建结构索引）' : ''}。`
-            : `第 ${wantLine} 行没有可定位的符号（该文件类型可能没有 Language Server，或结构索引未覆盖）。请改用 fs_read_file 配合 offset/maxBytes 读取。`
+            ? `没找到符号「${symName}」的精确范围${isSsh ? '（远程工作区无 LSP，结构索引可能未建）' : ''}。`
+            : `第 ${wantLine} 行没有可定位的符号（该文件类型可能没有 Language Server，或结构索引未覆盖）。`,
+          suggestedFix: isSsh
+            ? '远程请改走两步：① grep 搜符号名（给 path / glob 限定范围拿到 file:line）② fs_read_file 配 offset/maxBytes 读定义附近。不要用同一个名字重复 read_symbol。'
+            : '先用 grep 确认名字拼写，或 graph find_symbol 看结构索引是否覆盖该类型；读整段代码用 fs_read_file + offset/maxBytes。'
         };
       }
 
@@ -423,6 +431,14 @@ function createFsHandlers(d) {
         startLine,
         endLine,
         source: pick.source,
+        // grep-remote 只拿到定义行、符号体范围是启发式推的，必须自报降级，
+        // 否则模型会把它当成 LSP 级精度去依赖（漏掉花括号之外的代码）。
+        ...(pick.source === 'grep-remote'
+          ? {
+              degraded: true,
+              note: '远程无 LSP/结构索引，符号体范围由 grep 命中行 + 缩进推理得到，末尾可能不精确；需要完整定义请 fs_read_file 多读几行。'
+            }
+          : null),
         truncated,
         code: body.join('\n')
       };
@@ -448,6 +464,9 @@ function createFsHandlers(d) {
       }
       const remote = getRemoteFs();
       if (remote) {
+        // 远程（SSH）写入：**刻意不过本机沙箱档位**。路径是远端 POSIX 路径，本机既没有这些根
+        // 也无法解析，硬判只会造出假越界（`C:\home\...`）。写权限由 SSH 凭据本身授予，
+        // 这是文档化的边界（docs/SANDBOX.md「远程工作区」一节），不是漏检。
         let beforeText = null;
         try {
           if (enc === 'utf8') {
@@ -485,6 +504,7 @@ function createFsHandlers(d) {
         return r;
       }
       const resolved = normalizeFilePathInput(filePath, cwdForCall());
+      await assertSandboxWritable(resolved, 'fs.write_file');
       const safe = assertAllowedPath(resolved, writeRootsForCall());
       const buf = enc === 'base64' ? Buffer.from(String(data), 'base64') : Buffer.from(String(data), 'utf8');
       let beforeText = null;
@@ -503,8 +523,11 @@ function createFsHandlers(d) {
           workspaceRoot &&
           typeof lspDiagnostics.scheduleFileDiagnosticsRefresh === 'function'
         ) {
+          // 走 watch 队列（不再 immediate）：Agent 批量写文件时每次写都同步诊断一次，
+          // 会把成百上千个 LSP 往返同时压到主进程（实测一轮 855 个 .py 卡死界面）。
+          // 队列内部是「单定时器合并 + 分批」，单文件保存最多延后一个 debounce 周期。
           void lspDiagnostics
-            .scheduleFileDiagnosticsRefresh(workspaceRoot, safe, { immediate: enc === 'utf8' })
+            .scheduleFileDiagnosticsRefresh(workspaceRoot, safe)
             .catch(() => {});
         } else if (typeof lspDiagnostics.invalidateCacheForPath === 'function') {
           lspDiagnostics.invalidateCacheForPath(safe);
@@ -570,6 +593,7 @@ function createFsHandlers(d) {
       const remote = getRemoteFs();
       if (remote) return remote.mkdir(dirPath);
       const resolved = normalizeFilePathInput(dirPath, cwdForCall());
+      await assertSandboxWritable(resolved, 'fs.mkdir');
       const safe = assertAllowedPath(resolved, writeRootsForCall());
       await fs.mkdir(safe, { recursive: true });
       return { ok: true, path: safe };
@@ -588,7 +612,25 @@ function createFsHandlers(d) {
       const resolved = normalizeFilePathInput(dirPath, cwdForCall());
       const safe = assertAllowedPath(resolved, readRootsForCall());
       const rustList = await invokeRustCore('fs.list_dir', { dirPath: safe });
-      if (rustList) return rustList;
+      if (Array.isArray(rustList) && rustList.length > 0) return rustList;
+      // 空列表必须先证明「目录真的存在且真的是目录」，否则 `[]` 会把
+      // 「路径写错 / 盘符不在 / 无权限」伪装成「空目录」：
+      // 模型据此判「产物没生成」→ 重复生成、重复写入，代价远大于一次明确报错。
+      const st = await fs.stat(safe).catch(() => null);
+      if (!st) {
+        const e = new Error(`目录不存在或无法访问: ${safe}`);
+        e.code = 'FS_LIST_FAILED';
+        e.path = safe;
+        throw e;
+      }
+      if (!st.isDirectory()) {
+        const e = new Error(`不是目录（是文件）: ${safe}`);
+        e.code = 'FS_LIST_FAILED';
+        e.path = safe;
+        throw e;
+      }
+      // 目录确实为空：Rust 已给出权威答案，直接用，不必再走 Node 兜底。
+      if (Array.isArray(rustList)) return rustList;
       const names = await fs.readdir(safe, { withFileTypes: true });
       const out = [];
       for (const ent of names) {

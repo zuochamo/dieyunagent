@@ -58,6 +58,40 @@ function resolveServiceEndpoint(service, env = process.env) {
 }
 
 /**
+ * `total` 是否真的是「行数」语义。
+ *
+ * 后端并不统一：`/invoices` 的 `total` 是行数，而 `/tax/burden` 的 `total`
+ * 是一整个期间汇总对象（销售额/应纳/税负率…）。早前这里无条件
+ * `total = items.length`，一旦税负区间超过 50 个月触发裁剪，汇总对象就会被
+ * 覆盖成一个数字 —— Agent 拿到的「总应纳增值税」直接消失。所以只在 `total`
+ * 本来就是数字（或数字字符串）时才前置/改写，否则原样留给 `...rest` 带出去。
+ *
+ * @param {unknown} raw
+ * @returns {boolean}
+ */
+function isNumericTotal(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw);
+  if (typeof raw === 'string') return raw.trim() !== '' && Number.isFinite(Number(raw));
+  return false;
+}
+
+/**
+ * 算出「本次可前置到 JSON 头部的 total 数值」。
+ *
+ * - 缺失（undefined / null）→ 用数组长度兜底（保持「没给的话模型自己数不清」的旧行为）
+ * - 数字 / 数字字符串 → 原值
+ * - 其它（对象等）→ 返回 null，表示**不许改写**，原样留给 `...data` 带出去
+ *
+ * @param {unknown} rawTotal
+ * @param {number} fallback
+ * @returns {number|null}
+ */
+function resolvePayloadTotal(rawTotal, fallback) {
+  if (rawTotal === undefined || rawTotal === null) return fallback;
+  return isNumericTotal(rawTotal) ? Number(rawTotal) : null;
+}
+
+/**
  * @param {Record<string, unknown>} [params]
  * @param {number} [limit]
  */
@@ -77,16 +111,20 @@ function truncateListPayload(data, limit = DEFAULT_LIST_LIMIT) {
   }
 
   if (Array.isArray(data.items)) {
-    const total = Number.isFinite(Number(data.total)) ? Number(data.total) : data.items.length;
+    const numericTotal = resolvePayloadTotal(data.total, data.items.length);
     if (data.items.length <= max) {
       // 摘要字段必须排在明细之前：明细很长时下游只保留 JSON 头部，排末尾的字段会被整段截掉
-      return { data: { total, ...data }, truncated: false };
+      return {
+        data: { ...(numericTotal == null ? {} : { total: numericTotal }), ...data },
+        truncated: false
+      };
     }
     const rest = { ...data };
     delete rest.items;
+    const total = numericTotal == null ? data.items.length : numericTotal;
     return {
       data: {
-        total,
+        ...(numericTotal == null ? {} : { total: numericTotal }),
         ...rest,
         truncated: true,
         returned: max,
@@ -98,16 +136,23 @@ function truncateListPayload(data, limit = DEFAULT_LIST_LIMIT) {
   }
 
   if (Array.isArray(data.bookmarks)) {
-    const total = Number.isFinite(Number(data.total)) ? Number(data.total) : data.bookmarks.length;
+    const numericTotal = resolvePayloadTotal(data.total, data.bookmarks.length);
     if (data.bookmarks.length <= max) {
       // 与 items 分支保持一致：未截断时也补 total，否则「一共有多少条」只能靠模型自己数
-      return { data: { total, ...data }, truncated: false };
+      return {
+        data: {
+          ...(numericTotal == null ? {} : { total: numericTotal }),
+          ...data
+        },
+        truncated: false
+      };
     }
     const rest = { ...data };
     delete rest.bookmarks;
+    const total = numericTotal == null ? data.bookmarks.length : numericTotal;
     return {
       data: {
-        total,
+        ...(numericTotal == null ? {} : { total: numericTotal }),
         ...rest,
         truncated: true,
         returned: max,
@@ -118,7 +163,7 @@ function truncateListPayload(data, limit = DEFAULT_LIST_LIMIT) {
     };
   }
 
-  // 兜底：其它字段名的列表（sections / computers / customers / invoices …）同样要截断。
+  // 兜底：其它字段名的列表（sections / computers / customers / months …）同样要截断。
   // 早前只认 items / bookmarks，其余字段的超大数组会整包进入上下文。
   let biggestKey = '';
   let biggestLen = 0;
@@ -130,13 +175,13 @@ function truncateListPayload(data, limit = DEFAULT_LIST_LIMIT) {
     }
   }
   if (biggestKey) {
-    const rawTotal = Number(data.total);
-    const total = Number.isFinite(rawTotal) ? rawTotal : biggestLen;
+    const numericTotal = resolvePayloadTotal(data.total, biggestLen);
+    const total = numericTotal == null ? biggestLen : numericTotal;
     const rest = { ...data };
     delete rest[biggestKey];
     return {
       data: {
-        total,
+        ...(numericTotal == null ? {} : { total: numericTotal }),
         ...rest,
         truncated: true,
         returned: max,
@@ -148,6 +193,29 @@ function truncateListPayload(data, limit = DEFAULT_LIST_LIMIT) {
   }
 
   return { data, truncated: false };
+}
+
+/**
+ * 出参截断上限的唯一解析口径。
+ *
+ * 优先级：显式 `opts.listLimit` > 本次请求的 `params.pageSize` > `DEFAULT_LIST_LIMIT`。
+ *
+ * 为什么必须让 `pageSize` 参与：调用方已经明确要了 N 条，后端也按 N 条返回，
+ * 再在本地按 50 二次裁剪就是「schema 说能拿 51、实际只给 50」，且 `truncated`
+ * 会被伪造为 true —— 调用方以为还有下一页，逐页翻却永远差一截。这条曾经真实存在：
+ * `list_invoices({ pageSize: 51 })` 返回 50。
+ *
+ * @param {Record<string, unknown>} [params]
+ * @param {number} [explicitLimit]
+ * @returns {number|undefined} undefined 表示交给 `truncateListPayload` 用默认值
+ */
+function resolveListLimit(params, explicitLimit) {
+  if (Number.isFinite(Number(explicitLimit)) && Number(explicitLimit) > 0) {
+    return Math.floor(Number(explicitLimit));
+  }
+  const fromPageSize = Number(params && params.pageSize);
+  if (Number.isFinite(fromPageSize) && fromPageSize > 0) return Math.floor(fromPageSize);
+  return undefined;
 }
 
 /**
@@ -206,8 +274,15 @@ async function callApi(service, apiPath, params = {}, opts = {}) {
     throw new Error(`${cfg.label} 鉴权失败（UNAUTHORIZED）。请检查 ${cfg.keyEnv} 是否正确或已轮换。`);
   }
   if (response.status === 403) {
+    // 403 有两种完全不同的成因，混成一句「Open API 已关闭」会把人带偏
+    // （总开关明明开着，真正缺的是这个 Key 的 tax / invoices 作用域）。
+    const code = body && body.code ? String(body.code) : '';
+    const detail = (body && (body.message || body.error)) || text.slice(0, 200) || '';
+    const scopeish = /scope|作用域|permission|权限/i.test(`${code} ${detail}`);
     throw new Error(
-      `${cfg.label} Open API 已关闭（OPEN_API_DISABLED）。请到对应设置页打开开关：${cfg.enableHint}`
+      scopeish
+        ? `${cfg.label} 该 API Key 缺少此接口的作用域（403${code ? ` ${code}` : ''}）：${detail || '未提供原因'}。请到 ${cfg.enableHint} 勾选对应权限。`
+        : `${cfg.label} 拒绝访问（403${code ? ` ${code}` : ''}）：${detail || '未提供原因'}。可能是 Open API 总开关未打开，或该 Key 缺少此接口的作用域 —— 两者都在 ${cfg.enableHint} 处理。`
     );
   }
   if (!response.ok) {
@@ -223,7 +298,7 @@ async function callApi(service, apiPath, params = {}, opts = {}) {
   }
 
   const payload = body && typeof body === 'object' && 'data' in body ? body.data : body;
-  const { data } = truncateListPayload(payload, opts.listLimit);
+  const { data } = truncateListPayload(payload, resolveListLimit(params, opts.listLimit));
   return {
     ok: true,
     service,
@@ -238,6 +313,8 @@ module.exports = {
   SERVICES,
   getServiceConfig,
   resolveServiceEndpoint,
+  resolveListLimit,
+  resolvePayloadTotal,
   truncateListPayload,
   callApi
 };

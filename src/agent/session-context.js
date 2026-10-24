@@ -7,7 +7,7 @@ const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 // 图片 part 形状判定的单一来源（OpenAI chat `image_url` / Responses `input_image` /
 // Anthropic `image`）。原先本文件只认 `image_url`，与出站闸门（guardrails-shared）的
 // 三形状判定不一致 —— 同一张图「闸门认得出、账本认不出」，账本就会退回按 base64 长度计。
-const { isChatImagePart } = require('./guardrails-shared');
+const { isChatImagePart, stripReadinessNotes } = require('./guardrails-shared');
 
 /**
  * 单个图片 part 计入上下文预算时的等效字符数。
@@ -441,7 +441,12 @@ function assistantTextFromMessage(message, helpers) {
       text = toolFallback(persistedTrace) || text;
     }
   }
-  return text;
+  // 验收提示只服务当轮 UI，不参与历史投影：否则模型会把它当正文模板复述，
+  // 与新一轮追加的提示叠成两段（见 guardrails-shared.stripReadinessNotes 注释）。
+  const cleaned = stripReadinessNotes(text);
+  if (cleaned) return cleaned;
+  // 整条只有提示：不能把提示本身当历史上行，回退到与渲染层一致的占位。
+  return text.includes('完成验收') ? '（模型未生成文字答复。）' : text;
 }
 
 /**
@@ -652,6 +657,18 @@ function foldOlderCompletionMessages(messages, helpers, opts) {
       : clipFoldText;
   const per = Math.min(800, Math.max(160, Math.floor(caps.foldedMaxChars / Math.max(older.length, 1))));
   const body = compact(older.map((m) => messageFoldSnippet(m, per)).join('\n'), caps.foldedMaxChars);
+  const audit = auditOf(opts);
+  if (audit) {
+    // 记「折了几条 / 原本多少字 / 折完多少字 / 断点落在什么角色」——
+    // 这四个数就是事后解释「历史为什么只剩 24 条」的全部依据。
+    audit.fold = {
+      foldedCount: older.length,
+      keptRecentTurns: caps.recentTurns,
+      foldedChars: messagesCharLen(older),
+      foldMaxChars: caps.foldedMaxChars,
+      cutRole: book[cut] && book[cut].role ? String(book[cut].role) : null
+    };
+  }
   const folded = {
     role: 'user',
     content: [
@@ -670,6 +687,17 @@ function messagesCharLen(list) {
       sum + contentCharLen(m && m.content) + JSON.stringify(m && m.tool_calls ? m.tool_calls : '').length,
     0
   );
+}
+
+/**
+ * 审计出参：折叠/裁剪这些「派生事实」发生在 Renderer 的拼装里，Main 无法重算
+ * （重算就是第二份实现）。所以这里只做一件事——把已经算出来的事实写进调用方传进来的
+ * 可变对象 `capOpts.audit`（未传则完全不产生任何行为差异）。
+ * 该对象最终落到 `request_snapshots.context_audit_json`，见 docs/REQUEST-SNAPSHOT.md。
+ */
+function auditOf(opts) {
+  const audit = opts && opts.audit;
+  return audit && typeof audit === 'object' ? audit : null;
 }
 
 function splitRideAndTaskText(s) {
@@ -739,14 +767,21 @@ function trimMessagesToCharBudget(messages, opts) {
     }
   }
   if (lastUser < 0) lastUser = rest.length - 1;
+  // 「当前任务那条」被截断是最常见的裁剪（骑手位/turnRide 很长时每轮都发生），
+  // 必须和「历史条被丢」分开记，否则审计里看不出是哪一层把内容切了。
+  let taskUserTruncated = 0;
   if (lastUser >= 0 && rest[lastUser]) {
+    const beforeTaskChars = contentCharLen(rest[lastUser].content);
+    const taskContent = truncateLastUserKeepingTask(rest[lastUser].content, caps);
     rest[lastUser] = {
       ...rest[lastUser],
-      content: truncateLastUserKeepingTask(rest[lastUser].content, caps)
+      content: taskContent
     };
+    if (contentCharLen(taskContent) < beforeTaskChars) taskUserTruncated = 1;
   }
   let historyUsed = 0;
   const kept = [];
+  let clippedCount = 0;
   for (let i = lastUser - 1; i >= 0; i--) {
     const m = rest[i];
     if (!m) continue;
@@ -754,6 +789,7 @@ function trimMessagesToCharBudget(messages, opts) {
       ...m,
       content: truncateContent(m.content, caps.messageMaxChars, m.role === 'tool' ? { keepTail: true } : undefined)
     };
+    if (contentCharLen(clipped.content) < contentCharLen(m.content)) clippedCount += 1;
     const n = contentCharLen(clipped.content);
     if (historyUsed + n > caps.historyMaxChars) {
       if (!kept.length) {
@@ -770,9 +806,16 @@ function trimMessagesToCharBudget(messages, opts) {
     if (!m) return m;
     if (i === 0) return m;
     const cap = m.role === 'tool' ? caps.toolResultMaxChars : caps.messageMaxChars;
-    return { ...m, content: truncateContent(m.content, cap, m.role === 'tool' ? { keepTail: true } : undefined) };
+    const clippedContent = truncateContent(m.content, cap, m.role === 'tool' ? { keepTail: true } : undefined);
+    if (contentCharLen(clippedContent) < contentCharLen(m.content)) clippedCount += 1;
+    return { ...m, content: clippedContent };
   });
   let out = systems.concat(kept, tail);
+  // 审计：进函数的条数 → 出去的条数，差出来的就是「按历史预算丢掉的老消息」。
+  // （逐条截断发生在上面 `truncateContent`，`clippedCount` 记的是「有多少条被截过」。）
+  const audit = auditOf(opts);
+  const droppedByHistoryBudget = Math.max(0, rest.length - (kept.length + tail.length));
+  let perMessageTruncated = clippedCount + taskUserTruncated;
   // 请求仍超硬顶时按顺序丢最老的非 system 消息，但绝不能丢掉「当前任务」那条用户消息：
   // 否则模型会收到「只有工具结果、没有问题」的请求
   const protectedTaskMsg = (() => {
@@ -782,12 +825,14 @@ function trimMessagesToCharBudget(messages, opts) {
     }
     return null;
   })();
+  let droppedByRequestCap = 0;
   while (out.length > systems.length + 1 && messagesCharLen(out) > caps.requestMaxChars) {
     const dropAt = out.findIndex(
       (m, i) => i >= systems.length && i < out.length - 1 && m !== protectedTaskMsg
     );
     if (dropAt < 0) break;
     out.splice(dropAt, 1);
+    droppedByRequestCap += 1;
   }
   if (messagesCharLen(out) > caps.requestMaxChars && out.length) {
     const last = out[out.length - 1];
@@ -799,6 +844,20 @@ function trimMessagesToCharBudget(messages, opts) {
         turnRideMaxChars: Math.min(caps.turnRideMaxChars, Math.max(2000, Math.floor(room * 0.45))),
         lastUserMaxChars: Math.min(caps.lastUserMaxChars, Math.max(2000, Math.floor(room * 0.55)))
       })
+    };
+    perMessageTruncated += 1;
+  }
+  if (audit && (droppedByHistoryBudget || droppedByRequestCap || perMessageTruncated)) {
+    audit.trim = {
+      droppedByHistoryBudget,
+      droppedByRequestCap,
+      perMessageTruncated,
+      // 口径一致：两条都**不含 system**（system 单独计），否则 messagesOut 恒比 messagesIn 多一条，
+      // 与快照行的 messageCount 也对不上，排查时会被这一条差带偏。
+      messagesIn: rest.length,
+      messagesOut: out.length - systems.length,
+      systemMessages: systems.length,
+      requestMaxChars: caps.requestMaxChars
     };
   }
   return out;

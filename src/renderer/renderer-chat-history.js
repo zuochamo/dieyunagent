@@ -1221,6 +1221,11 @@ async function settleSessionSidePanelAfterSwitch(sessionId, switchGen, opts = {}
     if (typeof renderChangesPane === 'function') renderChangesPane();
     return;
   }
+  // 产物区按会话隔离：切会话后 sessionArtifacts 已换成新会话的桶，必须整表重绘
+  if (tab === 'artifacts') {
+    if (typeof renderProductsPanel === 'function') renderProductsPanel({ force: true });
+    return;
+  }
   if (tab === 'codebase' && typeof onCodebasePanelShown === 'function') {
     onCodebasePanelShown();
     return;
@@ -1447,8 +1452,10 @@ function initChatHistoryUI() {
 
   const chatNewBtn = $('chat-new');
   if (chatNewBtn) {
-    // 顶部「新对话」默认不绑定工作空间；文件夹入口的 + 才显式传入 path
-    chatNewBtn.addEventListener('click', () => createNewSession(null));
+    // 顶部「新对话」继承当前会话的工作空间（含 SSH）。必须传 undefined：
+    // 显式传 null 会走 createNewSession 的「不继承」分支，连带 disconnectSshIfConnected()
+    // 主动断 SSH 并清空工作空间。需要换工作空间用文件夹入口的 +（显式传 path）。
+    chatNewBtn.addEventListener('click', () => createNewSession());
   }
 }
 

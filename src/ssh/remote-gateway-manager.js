@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { createSshTunnel, closeSshTunnel } = require('./tunnel');
 const { shellQuoteSingle } = require('./remote-path');
 const { DEFAULT_REMOTE_PORT } = require('../remote/minimal-gateway-host');
+const { endpointScopeOf, withEndpointDeployLock } = require('./deploy-lock');
 const {
   REMOTE_DEPLOY_REQUIRED_FILES,
   REMOTE_PACK_OK_MARKER,
@@ -16,6 +17,38 @@ const {
 } = require('../remote/remote-pack-layout');
 
 const REMOTE_HOME_DIR = '.dieyun/remote-agent';
+const REMOTE_LOG_DIR = 'logs';
+
+/**
+ * 远程 Agent 日志**按项目分开**（2026-10-23）。
+ *
+ * 原来所有 remotePath 共用 `~/.dieyun/remote-agent/current/agent.log`：同一台机器跑两个项目时
+ * 两个进程 `>>` 追加同一个文件，日志交错混写，排查时根本分不清哪行属于哪个 workspace；
+ * 而 `current` 是随版本切换的软链，日志还会跟着安装目录一起被替换掉。
+ *
+ * 现在落在 `~/.dieyun/remote-agent/logs/agent-<路径slug>-<hash8>.log`：
+ * - slug 给人看（`srv_projA`），hash8 保证唯一且与端口分配无关（换端口不换文件）；
+ * - 目录在版本目录之外，升级安装包不会丢日志。
+ */
+function remoteLogDir(home) {
+  return `${home}/${REMOTE_HOME_DIR}/${REMOTE_LOG_DIR}`;
+}
+
+function remoteLogFileName(remotePath) {
+  const raw = String(remotePath || '/');
+  const slug = raw.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
+  const hash = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 8);
+  return slug ? `agent-${slug}-${hash}.log` : `agent-path-${hash}.log`;
+}
+
+function remoteLogPathFor(home, remotePath) {
+  return `${remoteLogDir(home)}/${remoteLogFileName(remotePath)}`;
+}
+
+/** 展示用的 `~/...` 形式（getStatus / UI 只读这个，不再假设 current 目录）。 */
+function remoteLogDisplayPath(remotePath) {
+  return `~/${REMOTE_HOME_DIR}/${REMOTE_LOG_DIR}/${remoteLogFileName(remotePath)}`;
+}
 
 function remotePidBasename(remotePort, kind) {
   const p = Number(remotePort) || DEFAULT_REMOTE_PORT;
@@ -33,6 +66,8 @@ function createRemoteGatewayManager(opts = {}) {
   let token = '';
   let remoteWorkspace = '';
   let activeRemotePort = DEFAULT_REMOTE_PORT;
+  /** 当前槽位的远程日志（`~/...` 展示形式）；每个 workspace 一份，不随版本目录变化 */
+  let activeLogRel = '';
   let active = false;
   let deploying = null;
   /** @type {ReturnType<import('./session-manager').createSshSessionManager> | null} */
@@ -69,6 +104,7 @@ function createRemoteGatewayManager(opts = {}) {
     }
     remoteWorkspace = '';
     runtimeSource = '';
+    activeLogRel = '';
     await stopTunnel();
   }
 
@@ -238,7 +274,16 @@ function createRemoteGatewayManager(opts = {}) {
     return parts.length ? parts.join('，') : '未知校验失败';
   }
 
+  /**
+   * 注入远程安装包。同端点串行（见模块级 deployLocks）：`rm -rf remoteBase` 与
+   * `current` 软链是跨 manager 共享资源，必须整段排队。
+   */
   async function deployPack(sshManager, packRoot, version, opts = {}) {
+    const scope = `deploy:${endpointScopeOf(sshManager)}`;
+    return withEndpointDeployLock(scope, () => deployPackUnlocked(sshManager, packRoot, version, opts));
+  }
+
+  async function deployPackUnlocked(sshManager, packRoot, version, opts = {}) {
     const emit = typeof opts.onProgress === 'function' ? opts.onProgress : () => {};
     if (!fs.existsSync(packRoot)) {
       throw Object.assign(new Error('远程 Agent 安装包未找到，请运行 npm run pack:remote-gateway'), {
@@ -447,8 +492,8 @@ function createRemoteGatewayManager(opts = {}) {
     });
   }
 
-  async function readRemoteGatewayLog(sshManager, currentDir, lines = 40) {
-    const logPath = `${currentDir}/agent.log`;
+  async function readRemoteGatewayLog(sshManager, logPath, lines = 40) {
+    if (!logPath) return '(无 agent.log)';
     try {
       const r = await sshManager.execScript(
         `test -f ${shellQuoteSingle(logPath)} && tail -n ${lines} ${shellQuoteSingle(logPath)} || echo "(无 agent.log)"`,
@@ -530,6 +575,10 @@ function createRemoteGatewayManager(opts = {}) {
     const nodeBin = nodeRuntime.nodeBin || `${currentDir}/bin/node`;
     const nodeQ = shellQuoteSingle(nodeBin);
     const dirQ = shellQuoteSingle(currentDir);
+    // 每个项目一份日志：避免同机器两个 workspace 混写同一个文件（见 remoteLogDir 注释）
+    const logDir = remoteLogDir(home);
+    const logPath = remoteLogPathFor(home, workspaceRoot);
+    const logQ = shellQuoteSingle(logPath);
 
     // 检查项与缺项诊断都来自 remote-pack-layout（与打包 / 部署包装配同一份清单），
     // 失败时必须报出到底缺什么，否则只剩一句「安装包不完整」无法定位。
@@ -566,7 +615,7 @@ function createRemoteGatewayManager(opts = {}) {
     );
     const smokeOut = String(smoke.stdout || '').trim();
     if (!smokeOut.includes('SMOKE_OK')) {
-      const logTail = await readRemoteGatewayLog(sshManager, currentDir);
+      const logTail = await readRemoteGatewayLog(sshManager, logPath);
       throw Object.assign(new Error('远程 Agent 模块加载失败'), {
         code: 'REMOTE_GATEWAY_SMOKE_FAILED',
         detail: [smokeOut, String(smoke.stderr || '').trim(), logTail].filter(Boolean).join('\n').slice(0, 2000)
@@ -581,12 +630,13 @@ function createRemoteGatewayManager(opts = {}) {
       'if command -v lsof >/dev/null 2>&1; then for pid in $(lsof -ti :${PORT} 2>/dev/null); do kill "$pid" 2>/dev/null || true; done; fi',
       `kill $(cat ${agentPidFile} 2>/dev/null) 2>/dev/null || true`,
       `rm -f ${agentPidFile}`,
+      `mkdir -p ${shellQuoteSingle(logDir)}`,
       'sleep 0.5',
-      `nohup ${nodeQ} ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)} --workspace ${wsQ} --port ${remotePort} --token ${tokQ} >> agent.log 2>&1 &`,
+      `nohup ${nodeQ} ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)} --workspace ${wsQ} --port ${remotePort} --token ${tokQ} >> ${logQ} 2>&1 &`,
       `echo $! > ${agentPidFile}`,
       'sleep 2',
       `PID=$(cat ${agentPidFile} 2>/dev/null || true)`,
-      'if kill -0 "$PID" 2>/dev/null; then echo "$PID"; else echo START_FAILED; tail -n 30 agent.log 2>/dev/null || true; fi'
+      `if kill -0 "$PID" 2>/dev/null; then echo "$PID"; else echo START_FAILED; tail -n 30 ${logQ} 2>/dev/null || true; fi`
     ].join('\n');
 
     const r = await sshManager.execScript(startCmd, 30000);
@@ -596,7 +646,7 @@ function createRemoteGatewayManager(opts = {}) {
     const pid = pidLine || outLines[0];
 
     if (!pid || pid === 'START_FAILED' || !/^\d+$/.test(pid)) {
-      const logTail = await readRemoteGatewayLog(sshManager, currentDir);
+      const logTail = await readRemoteGatewayLog(sshManager, logPath);
       const detail = [out, String(r.stderr || '').trim(), logTail].filter(Boolean).join('\n---\n');
       const portBusy = /EADDRINUSE|address already in use/i.test(detail);
       throw Object.assign(
@@ -608,6 +658,7 @@ function createRemoteGatewayManager(opts = {}) {
       );
     }
     log(`远程 Agent 已启动 pid=${pid} port=${remotePort} runtime=${nodeRuntime.source || 'unknown'}`);
+    activeLogRel = remoteLogDisplayPath(workspaceRoot);
   }
 
   async function waitRemotePort(sshManager, remotePort, attempts = 12) {
@@ -744,7 +795,7 @@ function createRemoteGatewayManager(opts = {}) {
       lastErrorCode,
       lastErrorAt,
       lastOkAt,
-      remoteLogPath: `~/${REMOTE_HOME_DIR}/current/agent.log`
+      remoteLogPath: activeLogRel || remoteLogDisplayPath(remoteWorkspace || '/')
     };
   }
 
@@ -757,4 +808,11 @@ function createRemoteGatewayManager(opts = {}) {
   };
 }
 
-module.exports = { createRemoteGatewayManager };
+module.exports = {
+  createRemoteGatewayManager,
+  // 日志路径的单一来源（IPC / 单测都走这里，别再各自拼 `current/agent.log`）
+  remoteLogDir,
+  remoteLogFileName,
+  remoteLogPathFor,
+  remoteLogDisplayPath
+};
