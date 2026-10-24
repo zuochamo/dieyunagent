@@ -17,8 +17,9 @@
  * 避免 SSH 本地/远程同名路径串到同一条标签上。
  */
 
-/** 打开标签上限：与 Monaco model LRU（12）对齐；超出的旧标签切回时重新读盘，不会丢文件 */
-var ARTIFACTS_TAB_MAX = 12;
+/** 打开标签上限（循环 6 个）：与浏览器标签上限（src/browser/controller.js）同值，改上限两处同步；
+ *  Monaco model LRU（12）仍大于它，被淘汰的标签切回时重新读盘，不会丢文件 */
+var ARTIFACTS_TAB_MAX = 6;
 
 /** @type {{ path: string, readPath: string, kind: 'auto'|'editor'|'text'|'media', dirty: boolean, docText: (string|null), truncated: boolean, sourceNote: string, at: number }[]} */
 var artifactsOpenTabs = [];

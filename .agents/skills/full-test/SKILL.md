@@ -38,11 +38,12 @@ node .agents/skills/full-test/scripts/run-batch.cjs check:js lint:agent check:co
 
 典型清单（以步骤 0 的实际清单为准；步骤 1/2 已跑过的不要重复计入报告）：
 
-- 批 A：`test:phase5-handlers test:session-remote-transport test:agent-run-events test:guardrails-sync test:sandbox-smoke test:write-smell-hints test:session-context test:agent-system-prompt test:system-prompt-prep test:monitor-outbox test:planner-parallel test:mcp-store`
-- 批 B：`test:app-updater-feeds test:ssh-reconnect-targets test:main-shell test:reviewer-json test:fs-edit test:delegate-batch test:dieyun-core-pack test:tool-bridge-delegate test:llm-reconnect-retry test:mobile test:browser-smoke test:composer-queue`
-- 批 C（sidecar/Rust 链路）：`test:workspace-remote-runtime test:core-bridge test:rust-loop-runner test:rust-planner-pipeline test:rust-agent-loop-smoke test:rust-planner-smoke test:lsp`
+- 批 A：`test:phase5-handlers test:session-remote-transport test:agent-run-events test:guardrails-sync test:sandbox-smoke test:sandbox-policy test:sandbox-gateway test:tool-gate test:write-smell-hints test:session-context test:agent-system-prompt test:system-prompt-prep`
+- 批 B：`test:monitor-outbox test:planner-parallel test:mcp-store test:app-updater-feeds test:ssh-reconnect-targets test:main-shell test:reviewer-json test:fs-edit test:delegate-batch test:dieyun-core-pack test:tool-bridge-delegate test:llm-reconnect-retry`
+- 批 C：`test:mobile test:composer-queue test:task-tier test:agent-limits test:worktree test:scm test:llm-tool-call-fallback test:agent-round-text test:llm-channel test:request-snapshot test:remote-pack test:sandbox-real`
+- 批 D（sidecar/Rust 链路）：`test:local-gateway-smoke test:workspace-remote-runtime test:core-bridge test:rust-loop-runner test:rust-planner-pipeline test:rust-agent-loop-smoke test:rust-planner-smoke test:lsp`
 
-默认跳过并单独注明：`test:rust-agent-loop`（需真实 LLM 配置）、build 验证类（`verify:asar` `verify:remote-pack` `verify:bundled-skills`，依赖打包产物）。
+默认跳过并单独注明：`test:rust-agent-loop`（需真实 LLM 配置）、聚合命令（`test:agent` / `test:agent-full`，与子套件重复）、build 验证类（`verify:asar` `verify:remote-pack` `verify:bundled-skills`，依赖打包产物）、`test:renderer`（即 check:renderer，已在静态批次覆盖）。
 
 ### 4. Rust 单测
 
@@ -68,12 +69,13 @@ node .agents/skills/full-test/scripts/run-batch.cjs [--timeout MS] suite1 suite2
 
 逐套件运行 `npm run -s <suite>`，单个失败不中断后续；失败自动单独重跑一次（端口/时序抖动常见）再定论；超时默认 10 分钟并 taskkill 整棵进程树。输出 `PASS/FAIL(code) <suite>`，FAIL 附最后几行日志，结尾给通过数汇总。
 
-## 已知问题基线（截至 2026-09-21，本机）
+## 已知问题基线（截至 2026-10-24，本机）
 
 判定规则：FAIL 的**签名**（失败信息 + 通过项数量）与基线一致 → 已知问题，报告标「非回归」；签名不同、通过项变少、或出现新 FAIL → 按新回归排查。基线会过时——每次全量测试后核对，状态变了就更新本节，并同步 auto-memory 对应条目。
 
-1. **test:local-gateway-smoke 白名单 FAIL**（2026-09-21 复测 PASS，未复现）：历史签名 = 10 项 ok + `FAIL: 关闭开关后白名单未收窄`。2026-09-21 全量测试中该项单独跑与批量跑均 PASS；疑似已修复或环境不再触发。保留为观察项：若后续再次出现该签名，按已知问题判定；连续多轮不 FAIL 后可移除。
-2. **test:builtin-embedding-rust 全仓超时**：签名 = `RPC_TIMEOUT codebase.index`，600s 预算 < 实测 ~789s。容量问题非回归，功能用小目录变体验证（2026-09-21 以 `src/agent` 变体跑通：713 vectors / vectorSearch true / OK）。
+1. **test:builtin-embedding-rust 全仓超时**：签名 = `RPC_TIMEOUT codebase.index`，600s 预算 < 实测 ~789s。容量问题非回归，功能用小目录变体验证（2026-10-24 以 `src/agent` 变体跑通：778 vectors / vectorSearch true / OK）。
+2. 历史项 test:local-gateway-smoke 白名单 FAIL（`关闭开关后白名单未收窄`）已于 2026-09-21、2026-10-24 连续两轮 PASS，按规则移出基线；若该签名再现，重新立案排查。
+3. 环境前提备忘：宿主全局 gitconfig 已于 2026-10-24 配好 user.name/email（此前缺失曾致 test:scm 场景 5 失败）。test:scm 已改为临时仓库自配身份（scripts/test-scm-service.cjs），不依赖宿主配置，换了机器也稳；其他新建临时 git 仓库做提交的测试若报 GIT_IDENTITY_MISSING，同法自配。
 
 ## 报告格式
 

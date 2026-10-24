@@ -11,7 +11,7 @@ const {
   REMOTE_DEPLOY_REQUIRED_FILES,
   inspectRemotePack,
   parseRemotePackMissing,
-  parseRemotePackState,
+  parseRemotePackMarker,
   evaluateRemotePackPreflight
 } = require('../src/remote/remote-pack-layout');
 
@@ -102,10 +102,16 @@ assert(!missEval.ok && missEval.missing[0] === 'node_modules/ws/package.json', '
 assert(!evaluateRemotePackPreflight('DIR_MISSING\n', 1).ok, 'missing dir fails preflight');
 assert(!evaluateRemotePackPreflight('', 0).ok, 'empty output is not a pass');
 
-const state = parseRemotePackState('MISSING=\nVERSION=0.1.41\nSIZE=12345\nHASH=abc123\n');
-assert(state.version === '0.1.41' && state.size === 12345 && state.hash === 'abc123', 'parse remote pack state');
-assert(state.missing.length === 0, 'state without missing entries');
+// 跳过重传的判定只认 .pack-ok 标记：VERSION / CONTENT_HASH 两行，按行锚定
+const markerHash = 'a'.repeat(64);
+const marker = parseRemotePackMarker(`VERSION=0.1.41\nCONTENT_HASH=${markerHash}\n`);
+assert(marker.version === '0.1.41', 'parse marker version');
+assert(marker.contentHash === markerHash, 'parse marker content hash (64 hex)');
+assert(parseRemotePackMarker('no markers').version === '', 'no marker lines → empty');
+assert(
+  parseRemotePackMarker('CONTENT_HASH=short\n').contentHash === '',
+  '非 64 位 hex 的 hash 行不算数'
+);
 assert(parseRemotePackMissing('no markers here').length === 0, 'no MISSING line → no missing entries');
-assert(parseRemotePackState('SIZE=abc\n').size === 0, 'invalid SIZE falls back to 0');
 
 console.log('test-workspace-remote-runtime.cjs ok');

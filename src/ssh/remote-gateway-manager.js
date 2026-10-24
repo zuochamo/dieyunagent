@@ -1,7 +1,6 @@
 'use strict';
 
 const fs = require('fs');
-const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
 const { createSshTunnel, closeSshTunnel } = require('./tunnel');
@@ -11,10 +10,13 @@ const { endpointScopeOf, withEndpointDeployLock } = require('./deploy-lock');
 const {
   REMOTE_DEPLOY_REQUIRED_FILES,
   REMOTE_PACK_OK_MARKER,
+  REMOTE_PACK_MARKER_REL,
   inspectRemotePack,
-  parseRemotePackState,
-  evaluateRemotePackPreflight
+  parseRemotePackMarker,
+  evaluateRemotePackPreflight,
+  computePackContentHash
 } = require('../remote/remote-pack-layout');
+const { buildPackTarGz } = require('../remote/pack-archive');
 
 const REMOTE_HOME_DIR = '.dieyun/remote-agent';
 const REMOTE_LOG_DIR = 'logs';
@@ -126,57 +128,8 @@ function createRemoteGatewayManager(opts = {}) {
     return active;
   }
 
-  async function sftpMkdirp(sftp, remoteDir) {
-    const parts = String(remoteDir || '').split('/').filter(Boolean);
-    let cur = remoteDir.startsWith('/') ? '' : '';
-    for (const part of parts) {
-      cur += `/${part}`;
-      await new Promise((resolve, reject) => {
-        sftp.mkdir(cur, (err) => {
-          if (err && err.code !== 4) reject(err);
-          else resolve();
-        });
-      });
-    }
-  }
-
-  async function sftpUploadFile(sftp, localPath, remotePath, opts = {}) {
-    await new Promise((resolve, reject) => {
-      const putOpts = {};
-      if (opts.mode != null) putOpts.mode = opts.mode;
-      sftp.fastPut(localPath, remotePath, putOpts, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-    if (opts.mode != null) {
-      await new Promise((resolve, reject) => {
-        sftp.chmod(remotePath, opts.mode, (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-    }
-  }
-
-  function uploadModeForRel(rel) {
-    if (rel === 'bin/node' || rel === 'bin/dieyun-core' || rel === 'remote/run-cli.js') return 0o755;
-    return null;
-  }
-
-  async function walkFiles(dir, base = dir) {
-    const out = [];
-    const entries = await fsp.readdir(dir, { withFileTypes: true });
-    for (const ent of entries) {
-      const full = path.join(dir, ent.name);
-      if (ent.name === '.tmp-node') continue;
-      if (ent.isDirectory()) {
-        out.push(...(await walkFiles(full, base)));
-      } else {
-        out.push({ local: full, rel: path.relative(base, full).replace(/\\/g, '/') });
-      }
-    }
-    return out;
+  function mb(bytes) {
+    return (bytes / 1024 / 1024).toFixed(1);
   }
 
   async function getRemoteHome(sshManager) {
@@ -208,75 +161,48 @@ function createRemoteGatewayManager(opts = {}) {
     ];
   }
 
-  async function remotePackState(sshManager, remoteBase, version, localNodeSize, localSourceHash) {
-    const dirQ = shellQuoteSingle(remoteBase);
-    const manifestQ = shellQuoteSingle(`${remoteBase}/manifest.json`);
-    const nodeQ = shellQuoteSingle(`${remoteBase}/bin/node`);
-    const hashScript =
-      "const fs=require('fs');const m=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log('HASH='+(m.sourceHash||''));";
-    const cmd = [
-      `DIR=${dirQ}`,
-      ...remoteMissingCheckLines('"$DIR"', REMOTE_DEPLOY_REQUIRED_FILES),
-      `echo "VERSION=$(tr -d '\\r\\n' < "$DIR/.pack-version" 2>/dev/null)"`,
-      `echo "SIZE=$(stat -c%s "$DIR/bin/node" 2>/dev/null || wc -c < "$DIR/bin/node" 2>/dev/null || echo 0)"`,
-      `if test -f ${manifestQ} && test -f ${nodeQ}; then ${nodeQ} -e ${shellQuoteSingle(hashScript)} ${manifestQ}; else echo HASH=; fi`
-    ].join('\n');
+  /**
+   * 远端已就绪判定：只认 `.pack-ok` 标记（版本 + 内容 hash 两个口径）。
+   * @returns {Promise<{ remoteVersion: string, remoteHash: string }>}
+   */
+  async function remoteMarkerState(sshManager, remoteMarker) {
     try {
-      const r = await sshManager.execScript(cmd, 12000);
-      const out = String(r.stdout || '');
-      const errOut = String(r.stderr || '').trim();
-      if (r.code !== 0) {
-        return {
-          ok: false,
-          remoteVer: '',
-          remoteSize: 0,
-          remoteHash: '',
-          missing: [],
-          error: `verify exit ${r.code}${errOut ? `: ${errOut}` : ''}`
-        };
-      }
-      const parsed = parseRemotePackState(out);
-      const remoteVer = parsed.version;
-      const remoteSize = parsed.size;
-      const remoteHash = parsed.hash;
-      const missing = parsed.missing;
-      const filesOk = missing.length === 0;
-      const sizeOk = localNodeSize > 0 && Math.abs(remoteSize - localNodeSize) < 4096;
-      const hashOk = !localSourceHash || (remoteHash && remoteHash === localSourceHash);
-      const versionOk = remoteVer === version;
-      return {
-        ok: versionOk && filesOk && sizeOk && hashOk,
-        remoteVer,
-        remoteSize,
-        remoteHash,
-        missing,
-        filesOk,
-        versionOk,
-        sizeOk,
-        hashOk
-      };
-    } catch (e) {
-      return { ok: false, remoteVer: '', remoteSize: 0, remoteHash: '', missing: [], error: e && e.message ? String(e.message) : 'verify exec failed' };
+      const r = await sshManager.execScript(`cat ${shellQuoteSingle(remoteMarker)} 2>/dev/null || true`, 8000);
+      const st = parseRemotePackMarker(String(r.stdout || ''));
+      return { remoteVersion: st.version, remoteHash: st.contentHash };
+    } catch {
+      return { remoteVersion: '', remoteHash: '' };
     }
   }
 
-  function formatDeployVerifyFailure(verify, version, localNodeSize, localSourceHash) {
-    const parts = [];
-    if (verify.versionOk === false) parts.push(`版本 ${verify.remoteVer || '?'}≠${version}`);
-    if (verify.filesOk === false) parts.push(`缺少文件 ${(verify.missing || []).join(', ')}`);
-    if (verify.sizeOk === false) {
-      parts.push(`Node 大小 ${verify.remoteSize || 0}/${localNodeSize}`);
+  /** 远端工具 preflight：解压与校验各依赖一个工具，缺了必须在上传前报出来。 */
+  async function assertRemoteDeployTools(sshManager) {
+    const r = await sshManager.execScript(
+      [
+        'command -v tar >/dev/null 2>&1 && echo TAR=tar || echo TAR=missing',
+        'command -v sha256sum >/dev/null 2>&1 && echo SHA=sha256sum || echo SHA=missing'
+      ].join('\n'),
+      8000
+    );
+    const out = String(r.stdout || '');
+    const missing = [];
+    if (!/^TAR=tar$/m.test(out)) missing.push('tar');
+    if (!/^SHA=sha256sum$/m.test(out)) missing.push('sha256sum');
+    if (missing.length) {
+      throw Object.assign(new Error(`远程服务器缺少 ${missing.join('、')}，无法注入远程 Agent`), {
+        code: 'REMOTE_GATEWAY_TOOLS_MISSING',
+        detail: missing.join(', ')
+      });
     }
-    if (localSourceHash && verify.hashOk === false) {
-      parts.push(`源码包 hash ${verify.remoteHash || '(空)'}≠${localSourceHash}`);
-    }
-    if (verify.error) parts.push(verify.error);
-    return parts.length ? parts.join('，') : '未知校验失败';
   }
 
   /**
    * 注入远程安装包。同端点串行（见模块级 deployLocks）：`rm -rf remoteBase` 与
    * `current` 软链是跨 manager 共享资源，必须整段排队。
+   *
+   * 传输与完整性模型：整包打成单个 tar.gz 一次上传（取代散文件逐个 SFTP 的
+   * 上百次往返），sha256 远端比对校验传输，解压 + 缺项检查后写 `.pack-ok`
+   * 标记；下次注入只对标记（版本 + 内容 hash）决定是否跳过上传。
    */
   async function deployPack(sshManager, packRoot, version, opts = {}) {
     const scope = `deploy:${endpointScopeOf(sshManager)}`;
@@ -290,14 +216,13 @@ function createRemoteGatewayManager(opts = {}) {
         code: 'REMOTE_GATEWAY_PACK_MISSING'
       });
     }
-    const localNodePath = path.join(packRoot, 'bin', 'node');
     const manifest = readLocalManifest(packRoot);
-    if (!manifest || !fs.existsSync(localNodePath)) {
+    if (!manifest || !fs.existsSync(path.join(packRoot, 'bin', 'node'))) {
       throw Object.assign(new Error('远程 Agent 包缺少内置 Node 运行时，请重新打包'), {
         code: 'REMOTE_GATEWAY_PACK_INCOMPLETE'
       });
     }
-    // 清单来自 remote-pack-layout：本地缺项就在这里失败，不要上传几百 MB 后再报错
+    // 清单来自 remote-pack-layout：本地缺项就在这里失败，不要上传几十 MB 后再报错
     const localCheck = inspectRemotePack(packRoot);
     if (!localCheck.ok) {
       throw Object.assign(new Error(`远程 Agent 包内容不完整（${localCheck.detail}），请重新打包`), {
@@ -305,112 +230,159 @@ function createRemoteGatewayManager(opts = {}) {
         detail: localCheck.missing.join(', ')
       });
     }
-    const localNodeSize = fs.statSync(localNodePath).size;
-    const localSourceHash = manifest && manifest.sourceHash ? String(manifest.sourceHash) : '';
+    // 内容 hash 对「最终注入目录」现场计算（lite 直用 / 缓存装配统一覆盖），
+    // 跳过判定与写标记共用这一份，保证两处口径一致
+    const contentHash = await computePackContentHash(packRoot);
 
     const home = await getRemoteHome(sshManager);
     const remoteBase = `${home}/${REMOTE_HOME_DIR}/${version}`;
     const remoteCurrent = `${home}/${REMOTE_HOME_DIR}/current`;
+    const remoteMarker = `${remoteBase}/${REMOTE_PACK_MARKER_REL}`;
+    const remoteArchive = `${remoteBase}/pack.tar.gz`;
 
     let needUpload = opts.force === true;
     if (!needUpload) {
-      const st = await remotePackState(sshManager, remoteBase, version, localNodeSize, localSourceHash);
-      needUpload = !st.ok;
+      const st = await remoteMarkerState(sshManager, remoteMarker);
+      needUpload = !(st.remoteVersion === version && st.remoteHash === contentHash);
       if (!needUpload) {
-        log(`远程 Agent ${version} 已存在（Node ${Math.round(localNodeSize / 1024 / 1024)}MB）`);
-      } else if (st.remoteVer || (st.missing && st.missing.length)) {
-        const hashHint =
-          localSourceHash && st.remoteHash && st.remoteHash !== localSourceHash
-            ? `，源码包已更新 ${st.remoteHash}→${localSourceHash}`
-            : '';
-        const missingHint = st.missing && st.missing.length ? `，缺少 ${st.missing.join(', ')}` : '';
-        log(
-          `远程 Agent 需重新注入（版本 ${st.remoteVer || '?'} / 大小 ${st.remoteSize || 0}${hashHint}${missingHint}）`
-        );
+        log(`远程 Agent ${version} 已就绪（内容 ${contentHash.slice(0, 8)}）`);
+      } else {
+        const hint = st.remoteVersion
+          ? st.remoteHash !== contentHash
+            ? `内容已变化 ${st.remoteHash.slice(0, 8) || '(空)'}→${contentHash.slice(0, 8)}`
+            : `版本 ${st.remoteVersion}≠${version}`
+          : '首次注入';
+        log(`远程 Agent 需重新注入（${hint}，整包约含 Node ${manifest.nodeVersion || '?'}）`);
       }
     }
 
     if (needUpload) {
-      const sftp = sshManager.getSftp();
-      emit({ phase: 'upload', percent: 3, message: '准备上传…' });
-      log(`正在注入远程 Agent ${version}（含 Node ${manifest.nodeVersion || ''}，约 ${Math.round(localNodeSize / 1024 / 1024)}MB）…`);
+      await assertRemoteDeployTools(sshManager);
       await sshManager.execScript(
         `rm -rf ${shellQuoteSingle(remoteBase)} && mkdir -p ${shellQuoteSingle(remoteBase)}`,
         20000
       );
-      const files = await walkFiles(packRoot);
-      let uploaded = 0;
-      emit({ phase: 'upload', percent: 5, message: `0/${files.length}`, current: 0, total: files.length });
-      for (const f of files) {
-        const remotePath = `${remoteBase}/${f.rel}`;
-        const mode = uploadModeForRel(f.rel);
-        try {
-          await sftpMkdirp(sftp, path.posix.dirname(remotePath));
-          await sftpUploadFile(sftp, f.local, remotePath, { mode });
-          uploaded += 1;
-          const pct = 5 + Math.round((uploaded / files.length) * 76);
-          emit({
-            phase: 'upload',
-            percent: pct,
-            message: `${uploaded}/${files.length}`,
-            file: f.rel,
-            current: uploaded,
-            total: files.length
-          });
-          if (f.rel === 'bin/node' || uploaded % 10 === 0 || uploaded === files.length) {
-            log(`  上传进度 ${uploaded}/${files.length} (${f.rel})`);
-          }
-        } catch (e) {
-          const msg = e && e.message ? e.message : String(e);
-          throw Object.assign(new Error(`远程 Agent 上传失败 (${f.rel}): ${msg}`), {
-            code: 'REMOTE_GATEWAY_UPLOAD_FAILED',
-            detail: `${uploaded}/${files.length} ${f.rel}`
-          });
-        }
-      }
-      const versionFile = `${remoteBase}/.pack-version`;
-      const tmp = path.join(require('os').tmpdir(), `dieyun-agent-ver-${Date.now()}.txt`);
-      await fsp.writeFile(tmp, version, 'utf8');
+
+      // 本地打包：单归档，进度口径为已送入压缩的未压缩字节
+      emit({ phase: 'prepare', percent: 2, message: '正在打包…' });
+      const tmpArchive = path.join(require('os').tmpdir(), `dieyun-agent-pack-${Date.now()}.tar.gz`);
+      let built;
       try {
-        await sftpUploadFile(sftp, tmp, versionFile);
+        built = await buildPackTarGz(packRoot, tmpArchive, {
+          onBytes: (fed, total) =>
+            emit({
+              phase: 'prepare',
+              percent: 2 + Math.min(2, Math.round((fed / Math.max(1, total)) * 2)),
+              message: `正在打包 ${mb(fed)}/${mb(total)} MB`
+            })
+        });
+
+        // 上传：一次 fastPut，字节级进度（ssh2 step 回调）
+        emit({
+          phase: 'upload',
+          percent: 5,
+          message: `0/${mb(built.sizeBytes)} MB`,
+          file: 'pack.tar.gz',
+          current: 0,
+          total: built.sizeBytes
+        });
+        const sftp = sshManager.getSftp();
+        log(`正在注入远程 Agent ${version}（含 Node ${manifest.nodeVersion || ''}，压缩后 ${mb(built.sizeBytes)}MB）…`);
+        await new Promise((resolve, reject) => {
+          sftp.fastPut(
+            tmpArchive,
+            remoteArchive,
+            {
+              step: (transferred, _chunk, total) => {
+                emit({
+                  phase: 'upload',
+                  percent: 5 + Math.round((transferred / Math.max(1, total)) * 75),
+                  message: `${mb(transferred)}/${mb(total)} MB`,
+                  file: 'pack.tar.gz',
+                  current: transferred,
+                  total
+                });
+              }
+            },
+            (err) => (err ? reject(err) : resolve())
+          );
+        }).catch((e) => {
+          throw Object.assign(new Error(`远程 Agent 上传失败 (pack.tar.gz): ${e && e.message ? e.message : e}`), {
+            code: 'REMOTE_GATEWAY_UPLOAD_FAILED'
+          });
+        });
+
+        // 传输校验：远端 sha256sum 与本地构建摘要比对
+        emit({ phase: 'verify', percent: 82, message: '校验 sha256…' });
+        const hashR = await sshManager.execScript(
+          `A=$(sha256sum ${shellQuoteSingle(remoteArchive)} 2>/dev/null | cut -d' ' -f1); echo "HASH=$A"`,
+          20000
+        );
+        const remoteSha = (String(hashR.stdout || '').match(/^HASH=([0-9a-f]{64})$/m) || [])[1] || '';
+        if (remoteSha !== built.sha256) {
+          throw Object.assign(
+            new Error(`远程 Agent 上传后校验失败（sha256 ${remoteSha || '(空)'}≠${built.sha256}）`),
+            { code: 'REMOTE_GATEWAY_DEPLOY_VERIFY_FAILED' }
+          );
+        }
+
+        // 解压（-p 保留执行位）+ 清理归档 + 必需文件缺项检查（清单单一来源）
+        emit({ phase: 'extract', percent: 84, message: '解压…' });
+        const dirQ = shellQuoteSingle(remoteBase);
+        const extractCmd = [
+          'set -e',
+          `DIR=${dirQ}`,
+          `tar -xzpf ${shellQuoteSingle(remoteArchive)} -C "$DIR"`,
+          `rm -f ${shellQuoteSingle(remoteArchive)}`,
+          ...remoteMissingCheckLines('"$DIR"', REMOTE_DEPLOY_REQUIRED_FILES),
+          'if test -n "$MISSING"; then exit 1; fi',
+          `echo ${REMOTE_PACK_OK_MARKER}`
+        ].join('\n');
+        const extractR = await sshManager.execScript(extractCmd, 120000);
+        const extractCheck = evaluateRemotePackPreflight(extractR.stdout, extractR.code);
+        if (!extractCheck.ok) {
+          throw Object.assign(
+            new Error(
+              `远程 Agent 解压后缺项${extractCheck.missing.length ? `：${extractCheck.missing.join(', ')}` : ''}`
+            ),
+            {
+              code: 'REMOTE_GATEWAY_PACK_INCOMPLETE',
+              detail: [String(extractR.stdout || ''), String(extractR.stderr || '')]
+                .filter(Boolean)
+                .join('\n')
+                .slice(0, 800)
+            }
+          );
+        }
+
+        // 写就绪标记：跳过判定的唯一依据
+        await sshManager.execScript(
+          `printf 'VERSION=%s\nCONTENT_HASH=%s\n' ${shellQuoteSingle(version)} ${shellQuoteSingle(
+            contentHash
+          )} > ${shellQuoteSingle(remoteMarker)}`,
+          8000
+        );
+        log('远程 Agent 整包上传并解压完成');
       } finally {
         try {
-          fs.unlinkSync(tmp);
+          fs.unlinkSync(tmpArchive);
         } catch {
           // ignore
         }
       }
-      await sshManager.execScript(
-        [
-          `chmod +x ${shellQuoteSingle(`${remoteBase}/bin/node`)}`,
-          `chmod +x ${shellQuoteSingle(`${remoteBase}/remote/run-cli.js`)}`,
-          `test -f ${shellQuoteSingle(`${remoteBase}/bin/dieyun-core`)} && chmod +x ${shellQuoteSingle(`${remoteBase}/bin/dieyun-core`)} || true`
-        ].join(' && '),
-        8000
-      );
-      emit({ phase: 'verify', percent: 84, message: '校验…' });
-      const verify = await remotePackState(sshManager, remoteBase, version, localNodeSize, localSourceHash);
-      if (!verify.ok) {
-        throw Object.assign(
-          new Error(`远程 Agent 上传后校验失败（${formatDeployVerifyFailure(verify, version, localNodeSize, localSourceHash)}）`),
-          { code: 'REMOTE_GATEWAY_DEPLOY_VERIFY_FAILED' }
-        );
-      }
-      log('远程 Agent 文件上传完成');
     } else {
       emit({ phase: 'upload', percent: 82, message: '已存在，跳过上传' });
     }
 
     emit({ phase: 'link', percent: 86, message: '创建链接…' });
     // set -e：任意一步失败即退出，退出码才能被下面检测到
-    // （原来整条 && 链结尾的 `|| true` 会把 mkdir/ln/chmod 的失败一起吞掉）。
+    // （原来整条 && 链结尾的 `|| true` 会把 mkdir/ln 的失败一起吞掉）。
+    // chmod 不再需要：tar 头里的 mode 白名单（remotePackTarMode）+ tar -p 已保留执行位。
     const linkCmd = [
       'set -e',
       `mkdir -p ${shellQuoteSingle(`${home}/${REMOTE_HOME_DIR}`)}`,
       `rm -rf ${shellQuoteSingle(remoteCurrent)}`,
-      `ln -sfn ${shellQuoteSingle(remoteBase)} ${shellQuoteSingle(remoteCurrent)}`,
-      `chmod +x ${shellQuoteSingle(`${remoteCurrent}/bin/node`)}`,
-      `if test -f ${shellQuoteSingle(`${remoteCurrent}/bin/dieyun-core`)}; then chmod +x ${shellQuoteSingle(`${remoteCurrent}/bin/dieyun-core`)}; fi`
+      `ln -sfn ${shellQuoteSingle(remoteBase)} ${shellQuoteSingle(remoteCurrent)}`
     ].join('\n');
     // current 链接是后续 preflight / 启动的前置条件，失败必须显式报错
     const linked = await sshManager.execScript(linkCmd, 15000);
@@ -632,7 +604,8 @@ function createRemoteGatewayManager(opts = {}) {
       `rm -f ${agentPidFile}`,
       `mkdir -p ${shellQuoteSingle(logDir)}`,
       'sleep 0.5',
-      `nohup ${nodeQ} ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)} --workspace ${wsQ} --port ${remotePort} --token ${tokQ} >> ${logQ} 2>&1 &`,
+      // token 走 env：argv 里的 --token 会被同机其他用户从 ps 里读到
+      `DIEYUN_REMOTE_TOKEN=${tokQ} nohup ${nodeQ} ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)} --workspace ${wsQ} --port ${remotePort} >> ${logQ} 2>&1 &`,
       `echo $! > ${agentPidFile}`,
       'sleep 2',
       `PID=$(cat ${agentPidFile} 2>/dev/null || true)`,

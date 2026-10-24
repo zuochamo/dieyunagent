@@ -76,6 +76,10 @@ async function main() {
   // 关掉行尾转换：测试断言的是内容语义，不该随宿主机 autocrlf 变红
   raw(['config', 'core.autocrlf', 'false']);
   raw(['config', 'commit.gpgsign', 'false']);
+  // repo 级身份自给：scmCommit 按设计不伪造身份，宿主全局 gitconfig 可能没配 user.name，
+  // 缺了它场景 5 会以 GIT_IDENTITY_MISSING 失败（不是产品回归）
+  raw(['config', 'user.name', 'Dieyun Test']);
+  raw(['config', 'user.email', 'test@dieyun.local']);
   mainBranch = raw(['symbolic-ref', '--short', 'HEAD']).trim();
   write('a.txt', 'one\n');
   write('keep.txt', 'k\n');

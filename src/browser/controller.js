@@ -202,8 +202,13 @@ function createBrowserViewController(deps) {
   let downloadListenerInstalled = false;
   /** @type {string | null} */
   let activePartitionSessionId = null;
-  /** 多标签：id -> { id, view, url, title }；view 为 null 表示待打开的 popup */
+  /**
+   * 多标签：id -> { id, view, url, title, at }；view 为 null 表示待打开的 popup；
+   * at 是最近激活时间，标签数超过上限时按它淘汰最久未激活的非活动标签。
+   */
   const tabEntries = new Map();
+  /** 标签上限（循环 6 个）：与文件面板标签条上限（renderer-artifacts-tabs.js）同值，改上限两处同步 */
+  const BROWSER_TAB_MAX = 6;
   let activeTabId = null;
   let tabSeq = 0;
   /** 模拟授权的权限集合（由 browser_emulate 写入，permission handler 会放行） */
@@ -834,6 +839,19 @@ function createBrowserViewController(deps) {
     return true;
   }
 
+  /** 标签数超过上限时关掉最久未激活的非活动标签（活动标签刚激活，天然不会被选中）。 */
+  function trimTabsToLimit() {
+    while (tabEntries.size > BROWSER_TAB_MAX) {
+      let victim = null;
+      for (const e of tabEntries.values()) {
+        if (e.id === activeTabId) continue;
+        if (!victim || (e.at || 0) < (victim.at || 0)) victim = e;
+      }
+      if (!victim) break;
+      closeTab(victim.id);
+    }
+  }
+
   function ensureView() {
     const win = getWin();
     if (!win) {
@@ -885,7 +903,8 @@ function createBrowserViewController(deps) {
       wc.setWindowOpenHandler(({ url }) => {
         if (/^https?:/i.test(url)) {
           const popupId = 'tab-' + tabSeq++;
-          tabEntries.set(popupId, { id: popupId, view: null, url: String(url), title: '', popup: true });
+          tabEntries.set(popupId, { id: popupId, view: null, url: String(url), title: '', popup: true, at: Date.now() });
+          trimTabsToLimit();
           emitState();
         }
         return { action: 'deny' };
@@ -950,8 +969,9 @@ function createBrowserViewController(deps) {
         slot.view = view;
       } else {
         const tabId = 'tab-' + tabSeq++;
-        tabEntries.set(tabId, { id: tabId, view, url: '', title: '' });
+        tabEntries.set(tabId, { id: tabId, view, url: '', title: '', at: Date.now() });
         activeTabId = tabId;
+        trimTabsToLimit();
       }
     } else if (win.getBrowserView() !== view) {
       win.setBrowserView(view);
@@ -2055,6 +2075,7 @@ function createBrowserViewController(deps) {
         persistActiveTab();
         const win = getWin();
         activeTabId = id;
+        entry.at = Date.now();
         view = entry.view;
         currentUrl = entry.url || '';
         currentTitle = entry.title || '';

@@ -73,6 +73,13 @@ const REMOTE_DEPLOY_REQUIRED_FILES = [...REMOTE_PACK_REQUIRED_FILES, REMOTE_PACK
 const REMOTE_PACK_OK_MARKER = 'PACK_OK';
 
 /**
+ * 注入成功标记（远端 `~/.dieyun/remote-agent/<version>/.pack-ok`）。
+ * 内容为 `VERSION=…` / `CONTENT_HASH=…` 两行：跳过重传的判定只认这份标记，
+ * 取代旧的 `.pack-version` + 文件大小 + manifest hash 三口径拼合。
+ */
+const REMOTE_PACK_MARKER_REL = '.pack-ok';
+
+/**
  * 解析远程 `MISSING= a b c` 行。
  * 只认整行 MISSING=，缺项之间以空白分隔。
  */
@@ -82,22 +89,78 @@ function parseRemotePackMissing(stdout) {
 }
 
 /**
- * 解析远程 pack 状态脚本输出（版本 / Node 大小 / 源码 hash / 缺项）。
- * 这里刻意按行锚定：裸 `VERSION=` 之类的诊断文本不能被当成有效值。
+ * 解析远端 `.pack-ok` 标记内容（版本 / 内容 hash）。
+ * 与其它解析器一样按行锚定，裸文本不能被当成有效值。
  */
-function parseRemotePackState(stdout) {
+function parseRemotePackMarker(stdout) {
   const out = String(stdout || '');
-  const pick = (re) => {
-    const m = out.match(re);
-    return m ? String(m[1]).trim() : '';
-  };
-  const size = Number(pick(/^SIZE=(\d+)$/m));
+  const ver = out.match(/^VERSION=(.*)$/m);
+  const hash = out.match(/^CONTENT_HASH=([0-9a-f]{64})$/m);
   return {
-    version: pick(/^VERSION=(.*)$/m),
-    size: Number.isFinite(size) ? size : 0,
-    hash: pick(/^HASH=(.*)$/m),
-    missing: parseRemotePackMissing(out)
+    version: ver ? ver[1].trim() : '',
+    contentHash: hash ? hash[1] : ''
   };
+}
+
+/** tar 归档内的执行位白名单。 */
+const REMOTE_PACK_EXEC_RELS = new Set(['bin/node', 'bin/dieyun-core', 'remote/run-cli.js']);
+
+/**
+ * tar 头里的文件 mode：白名单 0755，其余 0644。
+ * Windows 侧文件系统不带执行位，注入到 Linux 的执行权限只能在这里声明。
+ */
+function remotePackTarMode(rel) {
+  return REMOTE_PACK_EXEC_RELS.has(rel) ? 0o755 : 0o644;
+}
+
+/**
+ * 遍历 pack 目录的全部文件（相对路径按字典序稳定排序）。
+ * 打 tar（pack-archive）与内容 hash（computePackContentHash）共用这一份遍历，
+ * 保证「hash 算过什么」与「tar 里装了什么」永远一致。
+ */
+async function walkPackFiles(packRoot) {
+  const fsp = require('fs/promises');
+  const root = String(packRoot || '');
+  const out = [];
+  async function walk(dir) {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    for (const ent of entries) {
+      if (ent.name === '.tmp-node') continue;
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        await walk(full);
+      } else {
+        out.push({ abs: full, rel: path.relative(root, full).replace(/\\/g, '/') });
+      }
+    }
+  }
+  await walk(root);
+  out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+  return out;
+}
+
+/**
+ * 部署包内容 hash：对最终注入目录的全部文件逐个 sha256 后再汇总。
+ * 在注入期对最终 pack 目录现场计算（lite 包直用 / 缓存装配目录都统一覆盖），
+ * 不落 manifest —— manifest 只在打包期生成，装配进缓存目录的 Node 不经过它。
+ */
+async function computePackContentHash(packRoot) {
+  const files = await walkPackFiles(packRoot);
+  const hash = crypto.createHash('sha256');
+  for (const f of files) {
+    const fileHash = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(f.abs);
+      stream.on('data', (c) => fileHash.update(c));
+      stream.on('error', reject);
+      stream.on('end', resolve);
+    });
+    hash.update(f.rel);
+    hash.update('\0');
+    hash.update(fileHash.digest('hex'));
+    hash.update('\n');
+  }
+  return hash.digest('hex');
 }
 
 /**
@@ -191,11 +254,15 @@ module.exports = {
   REMOTE_PACK_NODE_REL,
   REMOTE_PACK_CORE_REL,
   REMOTE_PACK_OK_MARKER,
+  REMOTE_PACK_MARKER_REL,
   REMOTE_PACK_REQUIRED_FILES,
   REMOTE_DEPLOY_REQUIRED_FILES,
   inspectRemotePack,
   parseRemotePackMissing,
-  parseRemotePackState,
+  parseRemotePackMarker,
   evaluateRemotePackPreflight,
+  remotePackTarMode,
+  walkPackFiles,
+  computePackContentHash,
   computeRemoteGatewaySourceHash
 };

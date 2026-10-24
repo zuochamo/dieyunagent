@@ -55,9 +55,18 @@ function parseArgs(argv) {
   return out;
 }
 
+/**
+ * token 优先取环境变量 DIEYUN_REMOTE_TOKEN：argv 对同机所有用户可见（ps aux），
+ * 配合 127.0.0.1 监听等于把凭据贴在进程表上。`--token` 仅留给手工调试用，
+ * 注入端（remote-gateway-manager）只走 env。
+ */
+function resolveToken(args) {
+  return String(process.env.DIEYUN_REMOTE_TOKEN || args.token || '');
+}
+
 const args = parseArgs(process.argv);
 if (!args.workspace) {
-  console.error('usage: node run-cli.js --workspace /path --port 17331 --token <secret>');
+  console.error('usage: DIEYUN_REMOTE_TOKEN=<secret> node run-cli.js --workspace /path --port 17331');
   process.exit(1);
 }
 
@@ -65,7 +74,7 @@ const host = new MinimalRemoteGatewayHost({
   workspaceRoot: args.workspace,
   packRoot: path.resolve(__dirname, '..'),
   port: args.port || undefined,
-  token: args.token || undefined,
+  token: resolveToken(args) || undefined,
   log: (m) => {
     try {
       console.log(`[dieyun-remote-agent] ${m}`);
