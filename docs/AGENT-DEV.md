@@ -39,7 +39,10 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - `src/agent/session-context.js` — 会话账本投影；近 N 条原文 + 更早折叠条，再加字符硬顶；循环里 last-user 之后的 tool/assistant 也截断
 - `src/agent/tool-result-cap.js` — 工具结果写入 loop 前截断（`toolResultMaxJson`）
 - `src/agent/delegate-tool-gateway.js` — Agent `fs_read_file` 省略 maxBytes 时用 `fsReadDefaultMaxBytes`
-- `src/agent/tool-bridge-main.js` — Main 执行；Renderer 仅 UI 工具（clarify / propose）
+- `src/agent/tool-bridge-main.js` — Main 执行；`RENDERER_ONLY_TOOLS`（`agent_clarify` / `session_new`）只反委托给 Renderer，Main 不执行
+- `src/agent/browser-vision.js` — 运行期视觉缓冲（按 runId / 来源限流，注入后清空，不进账本）
+- `src/agent/vision-image.js` — 工具图片的**可寻址凭证**：内容寻址落盘副本（`tool-output/vision/`，按 `visionImageKeepFiles` 裁剪）+ 视觉 token 口径（`visionTokensForSize`，DeepSeek 公开格网算法，≤1024）+ 成功/失败两句模型可见文案（唯一来源）。图入不进视觉通道都要在工具结果里留 `visionImage` / `visionTokens` / 只读副本路径
+- `src/renderer/renderer-agent-tools.js` — Renderer 侧的 UI 工具执行体；`session_new` 复用 `createNewSession`（与「新对话」按钮同一条流程），勿另写一遍建会话 + 绑工作空间
 - `src/gateway/fs-edit-file.js` — 本地 Gateway 与 remote host 共用 `fs.edit_file`
 
 ### 手机端
