@@ -1,17 +1,38 @@
-/* global window, document, sessionArtifacts, artifactsWorkspaceRoot, isSshWorkspacePath, escapeHtml, flatFileIconSvg, formatArtifactDiffHtml */
+/* global window, document, sessionArtifacts, artifactsWorkspaceRoot, isSshWorkspacePath, escapeHtml, flatFileIconSvg, formatArtifactDiffHtml, gatewayCall, gwState, currentSessionId, getArtifactBucket, artifactRpcParams, joinArtifactPath, extractRemotePathFromSshUri */
 'use strict';
 
 /**
  * 产物区（工作区面板第 10 页）：本会话 Agent 产出/修改过什么的索引视图。
  *
+ * 两个数据来源，缺一不可：
+ * 1. `sessionArtifacts`（trace 驱动）：带 +/- diff，但只认 `fs_write_file` / `fs_edit`
+ *    两个写工具 —— 脚本、截图、插件落盘的文件它看不见；
+ * 2. 文件系统扫描（`artifact.list_files` + 会话时间窗）：问「这段窗口里盘上到底改过哪些文件」，
+ *    `host_exec` 跑 python-docx / openpyxl、浏览器截图、下载的 docx/xlsx/png/html 全在这一侧。
+ *
+ * 只留第 1 个来源时，产物区会把「本会话产物」退化成「Agent 手写的代码和 md」——
+ * 视图本身早就能分组展示文档/表格/图片（PRODUCT_EXT_GROUP），缺的一直是数据源。
+ *
  * 单一来源约束：
- * - 数据只读 `sessionArtifacts`（trace 驱动的本会话产物桶），不新建采集、不新建持久化；
  * - 点击只调 `window.openArtifactFileAtLine`，预览器仍只有「文件」页那一套（Monaco 单实例）；
- * - 重绘时机挂在 `refreshArtifactsPaneViews`（与文件列表同一拍），不另起轮询。
+ * - 重绘时机挂在 `refreshArtifactsPaneViews`（与文件列表同一拍），不另起轮询；
+ * - 目录遍历与排除表在 `src/gateway/artifact-scan.js`，Renderer 不自己扫盘。
  */
 
 var productsLastSig = '';
 var productsPanelActive = false;
+
+/** 会话时间窗内的文件系统扫描结果（trace 之外的产物来源） */
+var productsScanFiles = [];
+/** 上次扫描的「工作区根 + 会话」标识：变了就必须重扫，旧结果不能顶到新会话上 */
+var productsScanKey = '';
+var productsScanAt = 0;
+var productsScanLoading = false;
+
+/** 扫描节流：产物页可见时最多每 6 秒重扫一次（一次扫描 = 一趟目录遍历） */
+var PRODUCTS_SCAN_MIN_INTERVAL_MS = 6000;
+var PRODUCTS_SCAN_LIMIT = 200;
+var PRODUCTS_SCAN_MAX_DEPTH = 4;
 
 /** 类型分组顺序（按类型视图的展示顺序） */
 var PRODUCT_GROUP_ORDER = ['doc', 'data', 'image', 'code', 'other'];
@@ -79,18 +100,81 @@ function formatProductAge(ts, now) {
   return Math.floor(age / 86400000) + ' 天前';
 }
 
-/** 本会话产物条目（时间倒序）。不做磁盘存在性探测：那需要额外 RPC，且与「文件」页打开时的报错重复。 */
+/**
+ * 绝对化：trace 里的路径可能是模型写的相对路径（`report.md`），扫描结果是绝对路径；
+ * 两者不归一就会被当成两个文件各占一行。
+ */
+function productAbsPath(filePath) {
+  const p = String(filePath || '').trim();
+  if (!p) return p;
+  if (/^ssh:/i.test(p)) return p;
+  if (/^[a-zA-Z]:[\\/]/.test(p) || /^[\\/]/.test(p)) return p;
+  const root = productWorkspaceRoot();
+  if (!root) return p;
+  if (/^ssh:/i.test(root)) {
+    // 远程工作区：相对路径按远程根拼成 posix 路径（与 gateway 的解析口径一致）
+    const remoteRoot =
+      typeof extractRemotePathFromSshUri === 'function' ? extractRemotePathFromSshUri(root) : '';
+    if (!remoteRoot) return p;
+    return remoteRoot.replace(/\/+$/, '') + '/' + p.replace(/^[\\/]+/, '').replace(/\\/g, '/');
+  }
+  if (typeof joinArtifactPath === 'function') return joinArtifactPath(root, p);
+  return String(root).replace(/[\\/]+$/, '') + (root.includes('\\') ? '\\' : '/') + p.replace(/^[\\/]+/, '');
+}
+
+/** 去重键：绝对化 + 统一分隔符 + 小写（Windows 大小写不敏感） */
+function productPathKey(filePath) {
+  const abs = productAbsPath(filePath);
+  return abs ? abs.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : '';
+}
+
+/**
+ * 本会话产物条目（时间倒序）：trace 产物（带 diff）+ 会话窗口内盘上变过的文件。
+ *
+ * 不做磁盘存在性探测：那需要额外 RPC，且与「文件」页打开时的报错重复。
+ */
 function productsPanelItems() {
-  const src = typeof sessionArtifacts !== 'undefined' && Array.isArray(sessionArtifacts) ? sessionArtifacts : [];
-  const out = [];
-  for (const a of src) {
+  const merged = new Map();
+  function upsert(filePath, row) {
+    const abs = productAbsPath(filePath);
+    const key = productPathKey(abs);
+    if (!key) return;
+    const prev = merged.get(key);
+    if (!prev) {
+      merged.set(key, {
+        path: abs,
+        ts: Number(row.ts) || 0,
+        diff: row.diff || null,
+        source: row.source
+      });
+      return;
+    }
+    if ((Number(row.ts) || 0) > prev.ts) prev.ts = Number(row.ts) || 0;
+    // trace 侧的 diff 是唯一来源：扫描只知道「变了」，不知道变了几行
+    if (row.diff && !prev.diff) prev.diff = row.diff;
+    if (row.source === 'trace') prev.source = 'trace';
+  }
+
+  const traced =
+    typeof sessionArtifacts !== 'undefined' && Array.isArray(sessionArtifacts) ? sessionArtifacts : [];
+  for (const a of traced) {
     if (!a || !a.path) continue;
-    const ext = productExtOf(a.path);
+    upsert(a.path, { ts: a.ts, diff: a.diff || null, source: 'trace' });
+  }
+  for (const f of productsScanFiles) {
+    if (!f || !f.path) continue;
+    upsert(f.path, { ts: f.ts, diff: null, source: 'fs' });
+  }
+
+  const out = [];
+  for (const row of merged.values()) {
+    const ext = productExtOf(row.path);
     out.push({
-      path: a.path,
-      name: productNameOf(a.path),
-      ts: Number(a.ts) || 0,
-      diff: a.diff || null,
+      path: row.path,
+      name: productNameOf(row.path),
+      ts: row.ts,
+      diff: row.diff,
+      source: row.source,
       ext,
       group: productGroupOf(ext),
       label: ext ? ext.slice(0, 4).toUpperCase() : 'FILE'
@@ -121,6 +205,84 @@ function paintProductsSummary(items) {
   // 头部空间有限：只显示总数，类型分布挂 title（窄面板下不被截半句）
   el.textContent = items.length + ' 项';
   el.title = items.length + ' 项 · ' + parts.join(' ');
+}
+
+/** 会话窗口起点（产物区「本会话」的时间下界）；拿不到就退化成不设窗口 */
+function productsScanSinceMs() {
+  if (typeof getArtifactBucket !== 'function') return 0;
+  const bucket = getArtifactBucket(undefined, false);
+  const since = bucket && Number(bucket.sinceTs);
+  return Number.isFinite(since) && since > 0 ? since : 0;
+}
+
+/** 扫描标识：换工作区或换会话都必须重扫，否则旧结果会顶到新上下文上 */
+function productsScanIdentity() {
+  return (
+    productWorkspaceRoot() +
+    '#' +
+    String(typeof currentSessionId !== 'undefined' && currentSessionId ? currentSessionId : '')
+  );
+}
+
+/**
+ * 向文件系统追问「本会话窗口里改过哪些文件」。
+ *
+ * 这是产物区唯一会走磁盘的来源，因此：
+ * - 只在产物页可见时跑（由 onProductsPanelShown / refreshProductsPanelIfActive 触发）；
+ * - 按 PRODUCTS_SCAN_MIN_INTERVAL_MS 节流，思考流那 80ms 一拍的刷新不会变成扫盘风暴；
+ * - 失败静默保留上一次结果：扫描是补充来源，trace 来源仍在，产物页不会因此变空。
+ */
+async function refreshProductsScan(force) {
+  if (productsScanLoading) return;
+  if (typeof gatewayCall !== 'function') return;
+  if (typeof gwState === 'undefined' || !gwState || !gwState.authed) return;
+  const root = productWorkspaceRoot();
+  if (!root) {
+    productsScanFiles = [];
+    return;
+  }
+  const key = productsScanIdentity();
+  const now = Date.now();
+  if (!force && key === productsScanKey && now - productsScanAt < PRODUCTS_SCAN_MIN_INTERVAL_MS) return;
+
+  // 换会话 / 换工作区：先丢掉旧结果，别让上一个上下文的产物在新列表里停一会儿
+  if (key !== productsScanKey) {
+    productsScanFiles = [];
+    productsScanKey = key;
+  }
+  productsScanLoading = true;
+  try {
+    const base = {
+      dirPath: root,
+      limit: PRODUCTS_SCAN_LIMIT,
+      maxDepth: PRODUCTS_SCAN_MAX_DEPTH,
+      sinceMs: productsScanSinceMs()
+    };
+    const params = typeof artifactRpcParams === 'function' ? await artifactRpcParams(base) : base;
+    const res = await gatewayCall('artifact.list_files', params);
+    const files = res && Array.isArray(res.files) ? res.files : [];
+    productsScanFiles = files
+      .map(function (f) {
+        return { path: String((f && f.path) || ''), ts: Number(f && f.mtimeMs) || 0 };
+      })
+      .filter(function (f) {
+        return !!f.path;
+      });
+  } catch {
+    // 扫描只是补充来源：SSH 掉线 / 目录不可读时保持上一次结果，trace 来源照常显示
+  } finally {
+    productsScanLoading = false;
+    productsScanAt = Date.now();
+  }
+  renderProductsPanel({ force: true });
+}
+
+/** 工作区被换掉 / 会话产物整体作废时调用：扫描结果与窗口一起失效 */
+function resetProductsScan() {
+  productsScanFiles = [];
+  productsScanKey = '';
+  productsScanAt = 0;
+  productsLastSig = '';
 }
 
 /** 当前产物区所属工作区根（与文件面板同源，不另记一份工作区状态） */
@@ -267,14 +429,15 @@ function renderProductsPanel(opts) {
 }
 
 /**
- * 面板可见 → 首刷。**唯一入口**，由 `setSidePanelTab` 调用。
+ * 面板可见 → 首刷 + 重扫。**唯一入口**，由 `setSidePanelTab` 调用。
  * 启动时 `initSidePanel({silent:true})` 会恢复上次 tab，此时容器仍是 hidden：
- * 不挡掉就会在应用启动瞬间白跑一轮渲染。
+ * 不挡掉就会在应用启动瞬间白跑一轮渲染（与一趟目录遍历）。
  */
 function onProductsPanelShown() {
   productsPanelActive = true;
   if (!isProductsPaneActive()) return;
   renderProductsPanel({ force: true });
+  void refreshProductsScan(true);
 }
 
 function onProductsPanelHidden() {
@@ -287,6 +450,8 @@ function refreshProductsPanelIfActive() {
   if (typeof isSidePanelOpen === 'function' && !isSidePanelOpen()) return;
   if (!isProductsPaneActive()) return;
   renderProductsPanel();
+  // 脚本 / 截图落盘的产物没有 trace 事件可得，只能按节流重扫（见 refreshProductsScan）
+  void refreshProductsScan(false);
 }
 
 if (typeof window !== 'undefined') {
@@ -294,4 +459,6 @@ if (typeof window !== 'undefined') {
   window.onProductsPanelHidden = onProductsPanelHidden;
   window.renderProductsPanel = renderProductsPanel;
   window.refreshProductsPanelIfActive = refreshProductsPanelIfActive;
+  window.refreshProductsScan = refreshProductsScan;
+  window.resetProductsScan = resetProductsScan;
 }

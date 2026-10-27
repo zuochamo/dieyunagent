@@ -28,6 +28,8 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/gateway/path-policy.js',
   'src/gateway/host-control.js',
   'src/gateway/fs-read-limits.js',
+  // artifact.list_files 的目录遍历与排除表（远程 Agent 与本地/SFTP 网关共用同一份）
+  'src/gateway/artifact-scan.js',
   // fs_edit 结果的 added/removed 统计（LCS 口径），host 与 local 网关共用同一份
   'src/gateway/line-diff-stats.js',
   'src/gateway/fs-edit-file.js',

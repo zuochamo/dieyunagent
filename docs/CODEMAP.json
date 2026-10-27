@@ -272,6 +272,7 @@
     { "prefix": "src/agent/service.js", "tests": ["test:agent-run-events"] },
     { "prefix": "crates/dieyun-core/src/rpc/", "tests": ["verify:rpc-catalog", "cargo:test"] },
     { "prefix": "src/gateway/web/", "tests": ["test:unit", "test:local-gateway-smoke", "verify:rpc-catalog"] },
+    { "prefix": "src/gateway/artifact-scan.js", "tests": ["test:unit", "test:local-gateway-smoke"] },
     { "prefix": "src/gateway/", "tests": ["test:local-gateway-smoke", "verify:rpc-catalog"] },
     { "prefix": "src/lsp/", "tests": ["test:lsp"] },
     { "prefix": "src/browser/", "tests": ["test:browser-smoke", "test:tool-harness"] },

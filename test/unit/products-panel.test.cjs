@@ -78,6 +78,13 @@ function loadPanel(options = {}) {
     'sessionArtifacts',
     'isSshWorkspacePath',
     'artifactsWorkspaceRoot',
+    'gatewayCall',
+    'gwState',
+    'currentSessionId',
+    'getArtifactBucket',
+    'artifactRpcParams',
+    'joinArtifactPath',
+    'extractRemotePathFromSshUri',
     `var escapeHtml = function (s) { return String(s == null ? '' : s); };
      var flatFileIconSvg = function () { return '<svg></svg>'; };
      var formatArtifactDiffHtml = function (d) {
@@ -95,7 +102,13 @@ function loadPanel(options = {}) {
        summary: paintProductsSummary,
        render: renderProductsPanel,
        open: openProductItem,
-       groupLabel: productGroupLabel
+       groupLabel: productGroupLabel,
+       scan: refreshProductsScan,
+       setScanFiles: (f) => {
+         productsScanFiles = f || [];
+       },
+       scanFiles: () => productsScanFiles,
+       resetScan: resetProductsScan
      };`
   );
   const api = factory(
@@ -103,7 +116,14 @@ function loadPanel(options = {}) {
     doc,
     options.sessionArtifacts || [],
     (p) => /^ssh:/i.test(String(p || '')),
-    options.workspaceRoot || ''
+    options.workspaceRoot || '',
+    options.gatewayCall || (async () => ({ files: [] })),
+    options.gwState || { authed: true },
+    options.sessionId || '',
+    options.getBucket || (() => ({ sinceTs: options.sinceTs || 0 })),
+    async (p) => p,
+    options.joinArtifactPath || null,
+    options.extractRemotePath || null
   );
   return { api, doc, els, windowSpy };
 }
@@ -229,6 +249,119 @@ describe('产物区：列表与渲染', () => {
     });
     api.open('/ws/a.md');
     assert.deepEqual(calls, ['/ws/a.md']);
+  });
+});
+
+describe('产物区：文件系统来源（脚本 / 截图 / 插件落盘）', () => {
+  test('扫描结果进入列表并参与类型分组', () => {
+    const now = Date.now();
+    const { api } = loadPanel({ scanOnly: true });
+    api.setScanFiles([
+      { path: 'E:\\ws\\月度对账.docx', ts: now - 1000 },
+      { path: 'E:\\ws\\chart.png', ts: now - 2000 },
+      { path: 'E:\\ws\\report.html', ts: now - 3000 }
+    ]);
+    const items = api.items();
+    assert.deepEqual(
+      items.map((r) => r.group),
+      ['doc', 'image', 'doc']
+    );
+    assert.deepEqual(
+      items.map((r) => r.name),
+      ['月度对账.docx', 'chart.png', 'report.html']
+    );
+  });
+
+  test('trace 与扫描同一文件只占一行，diff 由 trace 提供', () => {
+    const now = Date.now();
+    const { api } = loadPanel({
+      sessionArtifacts: [{ path: 'E:\\ws\\out\\report.md', ts: now - 5000, diff: { added: 3, removed: 1 } }]
+    });
+    api.setScanFiles([{ path: 'E:\\ws\\out\\report.md', ts: now - 100 }]);
+    const items = api.items();
+    assert.equal(items.length, 1, '同一文件不能因为来源不同出现两行');
+    assert.deepEqual(items[0].diff, { added: 3, removed: 1 });
+    assert.equal(items[0].ts, now - 100, 'ts 取较新的那一侧');
+  });
+
+  test('trace 的相对路径与扫描的绝对路径归一成同一行', () => {
+    const now = Date.now();
+    const { api } = loadPanel({
+      workspacePath: 'E:\\ws',
+      sessionArtifacts: [{ path: 'report.md', ts: now }]
+    });
+    api.setScanFiles([{ path: 'E:/ws/report.md', ts: now - 10 }]);
+    const items = api.items();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].name, 'report.md');
+  });
+
+  test('刷新按会话窗口传 sinceMs，并把结果写进列表', async () => {
+    const now = Date.now();
+    const calls = [];
+    const { api } = loadPanel({
+      workspacePath: 'E:\\ws',
+      sessionId: 'sess-1',
+      sinceTs: now - 3600_000,
+      gatewayCall: async (method, params) => {
+        calls.push({ method, params });
+        return { files: [{ path: 'E:\\ws\\生成.xlsx', mtimeMs: now - 1000 }] };
+      }
+    });
+    await api.scan(true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, 'artifact.list_files');
+    assert.equal(calls[0].params.dirPath, 'E:\\ws');
+    assert.equal(calls[0].params.sinceMs, now - 3600_000, '窗口起点 = 会话开始时间');
+    assert.ok(calls[0].params.limit > 0);
+    assert.deepEqual(
+      api.items().map((r) => r.name),
+      ['生成.xlsx']
+    );
+  });
+
+  test('扫描失败不清掉 trace 来源（产物页不能因此变空）', async () => {
+    const now = Date.now();
+    const { api } = loadPanel({
+      workspacePath: 'E:\\ws',
+      sessionArtifacts: [{ path: 'E:\\ws\\a.md', ts: now }],
+      gatewayCall: async () => {
+        throw new Error('SSH 未连接');
+      }
+    });
+    await api.scan(true);
+    assert.deepEqual(
+      api.items().map((r) => r.name),
+      ['a.md']
+    );
+  });
+
+  test('没有工作区时不发扫描请求', async () => {
+    const calls = [];
+    const { api } = loadPanel({
+      gatewayCall: async (method) => {
+        calls.push(method);
+        return { files: [] };
+      }
+    });
+    await api.scan(true);
+    assert.deepEqual(calls, []);
+  });
+
+  test('节流：可见期间的重复刷新不会每次都扫盘', async () => {
+    const calls = [];
+    const { api } = loadPanel({
+      workspacePath: 'E:\\ws',
+      sessionId: 'sess-1',
+      gatewayCall: async () => {
+        calls.push(1);
+        return { files: [] };
+      }
+    });
+    await api.scan(true);
+    await api.scan(false);
+    await api.scan(false);
+    assert.equal(calls.length, 1, '同一窗口内的非强制刷新被节流');
   });
 });
 

@@ -269,7 +269,8 @@ function persistArtifactBucket(sessionId) {
     sessionArtifacts: bucket.sessionArtifacts.slice(),
     sessionFileChangeTotals: { ...bucket.sessionFileChangeTotals },
     lastRoundFileChanges: bucket.lastRoundFileChanges.slice(),
-    selectedArtifactPath: bucket.selectedArtifactPath || null
+    selectedArtifactPath: bucket.selectedArtifactPath || null,
+    sinceTs: Number(bucket.sinceTs) || Date.now()
   });
 }
 
@@ -376,7 +377,10 @@ function emptyArtifactBucket() {
     sessionArtifacts: [],
     sessionFileChangeTotals: { files: 0, added: 0, removed: 0 },
     lastRoundFileChanges: [],
-    selectedArtifactPath: null
+    selectedArtifactPath: null,
+    // 会话窗口起点：产物区据此向文件系统追问「这段窗口里到底改过哪些文件」
+    // （脚本 / 截图 / 插件落盘的 docx、xlsx、png 没有写工具，只能从盘上问）。
+    sinceTs: Date.now()
   };
 }
 
@@ -413,11 +417,15 @@ function applyArtifactBucketToGlobals(bucket) {
 function persistGlobalsToArtifactBucket(sessionId) {
   const sid = resolveArtifactSessionId(sessionId);
   if (!sid) return;
+  const prev = artifactsSessionStore.get(sid);
   artifactsSessionStore.set(sid, {
     sessionArtifacts: sessionArtifacts.slice(),
     sessionFileChangeTotals: { ...sessionFileChangeTotals },
     lastRoundFileChanges: lastRoundFileChanges.slice(),
-    selectedArtifactPath
+    selectedArtifactPath,
+    // 窗口起点只在会话首次出现时钉住；后续持久化不能把它刷成「现在」，
+    // 否则每次重绘都把窗口缩短，早先产出的脚本产物会被判成「不属于本会话」。
+    sinceTs: (prev && Number(prev.sinceTs)) || Date.now()
   });
 }
 
@@ -433,6 +441,8 @@ function switchSessionArtifacts(prevSessionId, nextSessionId, opts) {
   if (!sameWorkspace) {
     invalidateWorkspaceArtifacts();
   }
+  // 产物区的扫描窗口是「会话」口径的：旧会话的窗口结果不能留在新会话的列表里
+  if (typeof window.resetProductsScan === 'function') window.resetProductsScan();
   if (opts && opts.skipRender) return;
   if (
     typeof isSidePanelOpen === 'function' &&
@@ -442,6 +452,9 @@ function switchSessionArtifacts(prevSessionId, nextSessionId, opts) {
     typeof renderChangesPane === 'function'
   ) {
     renderChangesPane();
+  }
+  if (typeof window.refreshProductsPanelIfActive === 'function') {
+    window.refreshProductsPanelIfActive();
   }
 }
 
@@ -633,6 +646,8 @@ function invalidateWorkspaceArtifacts() {
   lastArtifactsFileListSig = '';
   selectedArtifactContentMtime = 0;
   cancelArtifactContentLoads();
+  // 产物区的会话扫描结果属于「旧工作区 / 旧窗口」，一并作废（下一次可见时重扫）
+  if (typeof window.resetProductsScan === 'function') window.resetProductsScan();
   if (typeof revokeArtifactMediaBlobUrls === 'function') {
     revokeArtifactMediaBlobUrls(document.getElementById('artifacts-file-view'));
   }

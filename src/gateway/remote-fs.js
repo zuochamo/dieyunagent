@@ -6,6 +6,7 @@ const { normalizeRemotePath } = require('../workspace/target');
 const { normalizeReadParams } = require('./fs-read-limits');
 const { sftpEntryIsDirectory } = require('../ssh/session-manager');
 const { computeLineDiffStats } = require('./line-diff-stats');
+const { scanRecentArtifactFiles } = require('./artifact-scan');
 
 function summarizeLineDiff(beforeText, afterText) {
   return computeLineDiffStats(beforeText, afterText);
@@ -112,52 +113,38 @@ function createRemoteFsAdapter(ssh, target, opts = {}) {
     return { ok: true, path: safe, remote: true };
   }
 
-  async function listArtifactFiles(limit) {
-    const max = Math.min(500, Math.max(1, Number(limit) || 200));
-    const skipDirs = new Set([
-      '.git',
-      '.agents',
-      '.codex',
-      'node_modules',
-      '__pycache__',
-      '.venv',
-      'venv',
-      'dist',
-      'build'
-    ]);
-    const out = [];
-    const stack = [{ dir: root, depth: 0 }];
-    while (stack.length && out.length < max) {
-      const cur = stack.pop();
-      let entries = [];
-      try {
-        entries = await ssh.sftpReaddir(cur.dir);
-      } catch {
-        continue;
-      }
-      for (const ent of entries) {
-        if (out.length >= max) break;
-        if (!ent || !ent.filename || ent.filename.startsWith('~$')) continue;
-        if (ent.filename === '.' || ent.filename === '..') continue;
-        const full = path.posix.join(cur.dir, ent.filename);
-        const isDir = sftpEntryIsDirectory(ent);
-        if (isDir) {
-          if (cur.depth < 2 && !skipDirs.has(ent.filename)) {
-            stack.push({ dir: full, depth: cur.depth + 1 });
+  /**
+   * 远程工作区的文件清单（按 mtime 倒序）。遍历与排除表复用 artifact-scan.js
+   * ——本地 / SFTP / 远程 Agent 三处过去各写一份，排除表已开始漂移。
+   */
+  async function listArtifactFiles(limit, opts = {}) {
+    const res = await scanRecentArtifactFiles(
+      {
+        async readdir(dir) {
+          const list = await ssh.sftpReaddir(dir);
+          const out = [];
+          for (const ent of list || []) {
+            if (!ent || !ent.filename) continue;
+            if (ent.filename === '.' || ent.filename === '..') continue;
+            out.push({
+              name: ent.filename,
+              isDirectory: sftpEntryIsDirectory(ent),
+              isFile: !sftpEntryIsDirectory(ent),
+              size: (ent.attrs && ent.attrs.size) || 0,
+              mtimeMs: ((ent.attrs && ent.attrs.mtime) || 0) * 1000
+            });
           }
-          continue;
-        }
-        out.push({
-          path: full,
-          relativePath: path.posix.relative(root, full) || ent.filename,
-          size: (ent.attrs && ent.attrs.size) || 0,
-          mtimeMs: ((ent.attrs && ent.attrs.mtime) || 0) * 1000,
-          remote: true
-        });
-      }
-    }
-    out.sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0));
-    return { base: root, files: out.slice(0, max) };
+          return out;
+        },
+        join: (dir, name) => path.posix.join(dir, name),
+        relative: (base, full) => path.posix.relative(base, full)
+      },
+      { base: root, sinceMs: opts.sinceMs, limit, maxDepth: opts.maxDepth }
+    );
+    return {
+      ...res,
+      files: res.files.map((f) => ({ ...f, remote: true }))
+    };
   }
 
   return {

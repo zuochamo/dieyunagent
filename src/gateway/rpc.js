@@ -24,6 +24,11 @@ const { buildSshUri, normalizeRemotePath, parseWorkspaceInput, isSameSshTarget, 
 const { remoteAgentInfoKey, remoteIndexCacheKey } = require('../workspace/workspace-cache-keys');
 const { normalizeReadParams, ABSOLUTE_READ_MAX_BYTES } = require('./fs-read-limits');
 const { runEditFile } = require('./fs-edit-file');
+const {
+  scanRecentArtifactFiles,
+  createLocalScanIo,
+  DEFAULT_ARTIFACT_SCAN_LIMIT
+} = require('./artifact-scan');
 const { grepWorkspace, globWorkspace, TYPE_EXT } = require('./rg-search');
 const { getRemoteAgentClient, setRemoteAgentInvalidateListener, isDisconnectError } = require('./remote-agent-client');
 const { shellQuoteSingle, resolveRemotePath, remoteAllowedRoots } = require('../ssh/remote-path');
@@ -1925,59 +1930,22 @@ function createRpcHandlers(ctx) {
     }
   }
 
-  async function listAllowedArtifactFiles(dirPath, limit) {
+  /**
+   * 工作区里「按 mtime 窗口」的文件清单（产物区用）。
+   *
+   * 遍历、深度与排除表都在 artifact-scan.js（本地 / SFTP / 远程 Agent 共用同一份），
+   * 这里只负责「把外部路径钉进白名单」这一层。
+   */
+  async function listAllowedArtifactFiles(dirPath, limit, opts) {
     const baseInput = dirPath || defaultCwd;
     const resolved = normalizeFilePathInput(baseInput, defaultCwd);
     const base = assertAllowedPath(resolved, Array.from(new Set([...roots, ...writable])));
-    const max = Math.min(500, Math.max(1, Number(limit) || 200));
-    const skipDirs = new Set([
-      '.git',
-      '.agents',
-      '.codex',
-      'node_modules',
-      '__pycache__',
-      '.venv',
-      'venv',
-      'dist',
-      'build'
-    ]);
-    const out = [];
-    const stack = [{ dir: base, depth: 0 }];
-    while (stack.length && out.length < max) {
-      const cur = stack.pop();
-      let entries = [];
-      try {
-        entries = await fs.readdir(cur.dir, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const ent of entries) {
-        if (out.length >= max) break;
-        if (!ent || !ent.name || ent.name.startsWith('~$')) continue;
-        const full = path.join(cur.dir, ent.name);
-        if (ent.isDirectory()) {
-          if (cur.depth < 2 && !skipDirs.has(ent.name)) {
-            stack.push({ dir: full, depth: cur.depth + 1 });
-          }
-          continue;
-        }
-        if (!ent.isFile()) continue;
-        let st;
-        try {
-          st = await fs.stat(full);
-        } catch {
-          continue;
-        }
-        out.push({
-          path: full,
-          relativePath: path.relative(base, full) || ent.name,
-          size: st.size,
-          mtimeMs: st.mtimeMs
-        });
-      }
-    }
-    out.sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0));
-    return { base, files: out.slice(0, max) };
+    return scanRecentArtifactFiles(createLocalScanIo(), {
+      base,
+      sinceMs: opts && opts.sinceMs,
+      limit: limit || DEFAULT_ARTIFACT_SCAN_LIMIT,
+      maxDepth: opts && opts.maxDepth
+    });
   }
 
 

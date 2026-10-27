@@ -15,6 +15,7 @@ const { queryLspPosition } = require('../lsp/navigate-service');
 const { LspClient } = require('../lsp/lsp-client');
 const { getServerSpec } = require('../lsp/language-registry');
 const { computeLineDiffStats } = require('../gateway/line-diff-stats');
+const { scanRecentArtifactFiles, createLocalScanIo } = require('../gateway/artifact-scan');
 
 const GRAPH_SOURCE_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.go', '.rs']);
 
@@ -389,44 +390,14 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
     'artifact.read_file': async ({ filePath, encoding, offset, maxBytes }) =>
       readFile(filePath, encoding, { offset, maxBytes }),
 
-    'artifact.list_files': async ({ limit }) => {
-      const max = Math.min(500, Math.max(1, Number(limit) || 200));
-      const skipDirs = new Set(['.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build']);
-      const out = [];
-      const stack = [{ dir: root, depth: 0 }];
-      while (stack.length && out.length < max) {
-        const cur = stack.pop();
-        let entries = [];
-        try {
-          entries = await fsp.readdir(cur.dir, { withFileTypes: true });
-        } catch {
-          continue;
-        }
-        for (const ent of entries) {
-          if (out.length >= max) break;
-          if (!ent.name || ent.name.startsWith('~$')) continue;
-          const full = path.join(cur.dir, ent.name);
-          if (ent.isDirectory()) {
-            if (cur.depth < 4 && !skipDirs.has(ent.name)) stack.push({ dir: full, depth: cur.depth + 1 });
-            continue;
-          }
-          let st;
-          try {
-            st = await fsp.stat(full);
-          } catch {
-            continue;
-          }
-          out.push({
-            path: full,
-            relativePath: path.relative(root, full) || ent.name,
-            size: st.size,
-            mtimeMs: st.mtimeMs,
-            remote: true
-          });
-        }
-      }
-      out.sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0));
-      return { base: root, files: out.slice(0, max) };
+    'artifact.list_files': async ({ limit, sinceMs, maxDepth }) => {
+      const res = await scanRecentArtifactFiles(createLocalScanIo(), {
+        base: root,
+        sinceMs,
+        limit,
+        maxDepth
+      });
+      return { ...res, files: res.files.map((f) => ({ ...f, remote: true })) };
     }
   };
 

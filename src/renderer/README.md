@@ -39,6 +39,7 @@
 | `renderer-artifact-diff-view.js` | 产物 diff 静态渲染 / 读盘 | 变更 diff 预览 |
 | `renderer-artifacts.js` | 产物列表绘制 / 打开 | 产物面板 |
 | `renderer-artifacts-tabs.js` | 文件面板多标签 + 长驻编辑区（标签状态 / 未保存标记 / 文本域与 Monaco 二选一） | 文件面板多标签 |
+| `renderer-artifacts-panel.js` | 侧栏「产物」页：会话产物桶（带 diff）+ 会话时间窗内 `artifact.list_files` 扫描结果（脚本 / 截图 / 插件落盘的 docx、xlsx、png、html） | 产物页 |
 | `renderer-chat-history.js` | 会话列表、切换、加载消息 | 侧栏会话 |
 | `renderer-chat-state.js` | 当前会话 run 状态 | 进行中任务标记 |
 | `renderer-composer.js` | 输入框、发送、Agent/Plan 模式切换 | Composer 行为 |
