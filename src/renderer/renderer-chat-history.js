@@ -1322,7 +1322,12 @@ async function settleSessionSidePanelAfterSwitch(sessionId, switchGen, opts = {}
   }
 }
 
-async function createNewSession(workspacePath) {
+/**
+ * 新建对话（「新对话」按钮与 session_new 工具共用的唯一流程）。
+ * @param {string|undefined|null} workspacePath undefined = 继承当前工作空间；null/'' = 不挂工作空间
+ * @param {{ title?: string }} [opts]
+ */
+async function createNewSession(workspacePath, opts = {}) {
   if (!gwState.authed) return;
   sessionCreateInFlight = true;
   try {
@@ -1382,7 +1387,8 @@ async function createNewSession(workspacePath) {
       }
     }
     const s = await gatewayCall('memory.session_create', {
-      workspacePath: keepWorkspace ? inheritWs : null
+      workspacePath: keepWorkspace ? inheritWs : null,
+      title: opts && opts.title ? String(opts.title) : undefined
     });
     currentSessionId = s.id;
     setCurrentSessionId(s.id);

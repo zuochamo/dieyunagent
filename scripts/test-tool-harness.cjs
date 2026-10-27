@@ -36,8 +36,12 @@ async function main() {
   );
   assert(planTools.PLAN_HOST_TOOLS.length === 5, 'PLAN_HOST_TOOLS');
   assert(catalog.RENDERER_ONLY_TOOLS.includes('agent_clarify'), 'renderer-only clarify');
+  assert(catalog.RENDERER_ONLY_TOOLS.includes('session_new'), 'renderer-only session_new');
+  // 渲染器专属只放「只有渲染器才做得到」的动作：确认卡片、建会话/换工作空间（会话与视图状态归渲染器）。
+  // propose 类、fs_*、host_* 在 Main 都有真实现，一旦被列进来就会变成两处执行。
+  const RENDERER_ONLY_EXPECTED = ['agent_clarify', 'session_new'];
   assert(
-    catalog.RENDERER_ONLY_TOOLS.length === 1 &&
+    catalog.RENDERER_ONLY_TOOLS.every((n) => RENDERER_ONLY_EXPECTED.includes(n)) &&
       !catalog.RENDERER_ONLY_TOOLS.includes('agents_md_propose'),
     'propose tools are not renderer-only'
   );

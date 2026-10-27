@@ -1513,6 +1513,46 @@ const CLARIFY_TOOL = {
 };
 
 /**
+ * 会话级操作：新建对话 + 把工作空间挂上去（可带第一条任务）。
+ *
+ * 为什么是 RENDERER_ONLY_TOOLS：会话列表、当前会话、工作空间视图三者都是 Renderer 的状态，
+ * Main 单方面建行/切工作空间只会让 UI 与账本脱钩。渲染器侧的执行体直接复用「新对话」按钮那条
+ * 单源流程（renderer-chat-history.js 的 createNewSession），这里不重复一遍建会话 + 绑工作空间的顺序。
+ */
+const SESSION_TOOL = {
+  type: 'function',
+  function: {
+    name: 'session_new',
+    description:
+      '新建一个对话，并把它的工作空间设到指定目录（可顺带把第一条任务发进去）。' +
+      '适用：用户说「开个新对话做这件事」「换到 <某目录> 继续」「这个项目单独开一个会话」，' +
+      '或当前对话已被别的任务占住、需要干净起点（新对话会按该目录重新加载 AGENTS.md / 记忆 / 索引）。' +
+      '效果：立即切到新对话并挂上工作空间；原对话的消息与工作空间不受影响，可从历史列表切回。' +
+      '只想改当前对话的工作空间、不新建对话时不要用它。' +
+      '传 prompt 时本轮应就此收尾：任务在新的对话里独立执行，你在这里继续调工具不会再影响它。',
+    parameters: {
+      type: 'object',
+      properties: {
+        workspacePath: {
+          type: 'string',
+          description:
+            '工作空间的绝对路径（例如 D:\\UE5-Tutorial-Course），或 ssh:<host>:<远端路径>。省略则沿用当前对话的工作空间。'
+        },
+        title: {
+          type: 'string',
+          description: '新对话的标题，写清项目或任务，便于在历史列表里辨认。省略则先留空，历史列表用首条消息充当标题。'
+        },
+        prompt: {
+          type: 'string',
+          description: '可选：新对话的第一条消息，会立即发送并开始执行。用户已把任务说清时，把任务原样写进来。'
+        }
+      },
+      required: []
+    }
+  }
+};
+
+/**
  * 只读并发调研子 Agent。
  * 只注入给「协调者」——Agent 主循环、Explore 模式、Plan 的 explore 阶段；
  * 研究子 Agent 的工具集 = Explore 白名单，白名单不含本工具，递归被物理切断（深度恒为 1）。
@@ -1609,7 +1649,7 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   GRAPH_TOOLS,
   [AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL],
   PLAN_TOOLS,
-  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SUBAGENT_TOOL],
+  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SESSION_TOOL, SUBAGENT_TOOL],
   [COMPUTER_TOOL]
 );
 
@@ -1629,7 +1669,8 @@ const PLAN_RUNTIME_TOOL_NAMES = [
   'web_search'
 ];
 
-const RENDERER_ONLY_TOOLS = ['agent_clarify'];
+// 只认渲染器能做的事：确认卡片、会话/工作空间切换。Main 收到这些名字只做反委托，不自己执行。
+const RENDERER_ONLY_TOOLS = ['agent_clarify', 'session_new'];
 
 function getToolByName(name) {
   return BY_NAME[String(name || '')] || null;
@@ -1658,6 +1699,7 @@ module.exports = {
   PLAN_TOOLS,
   MCP_TOOL_SCHEMA_TOOL,
   CLARIFY_TOOL,
+  SESSION_TOOL,
   SUBAGENT_TOOL,
   COMPUTER_TOOL,
   ALL_STATIC_TOOLS,

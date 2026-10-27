@@ -1,4 +1,4 @@
-/* global window, currentSessionId, sessionActiveRuns, trackArtifact, scheduleArtifactsUiRefresh, scheduleArtifactsUiFlush, showClarifyInBubble, getUndoTurnIdForSession, resolveSessionWorkspacePathSync, DieyunToolCatalog, DieyunToolClassify, normalizeAgentToolName, noteBrowserToolUse */
+/* global window, currentSessionId, sessionActiveRuns, trackArtifact, scheduleArtifactsUiRefresh, scheduleArtifactsUiFlush, showClarifyInBubble, getUndoTurnIdForSession, resolveSessionWorkspacePathSync, DieyunToolCatalog, DieyunToolClassify, normalizeAgentToolName, noteBrowserToolUse, createNewSession, sendMessage, gatewayCall */
 'use strict';
 
 const agentToolsApi = window.diecloud || {};
@@ -95,6 +95,59 @@ async function executeAgentTool(name, args, sessionId) {
   return invoke();
 }
 
+/**
+ * `session_new` 的执行体：建会话 + 挂工作空间。
+ *
+ * 唯一实现是 createNewSession（「新对话」按钮走同一条流程）；这里只做参数校验与结果整形，
+ * 不重写一遍「先建行、再绑工作空间、再刷历史列表」的顺序 —— 那会立刻变成两份。
+ *
+ * @param {{ workspacePath?: string, title?: string, prompt?: string }} args
+ */
+async function createSessionFromTool(args = {}) {
+  if (typeof createNewSession !== 'function') return { error: '会话创建入口不可用' };
+  const rawPath = args.workspacePath;
+  const workspacePath = rawPath == null ? undefined : String(rawPath).trim();
+  if (workspacePath === '') return { error: 'workspacePath 不能是空字符串；想沿用当前工作空间就省略该参数' };
+  const title = String(args.title || '').trim();
+  const prompt = String(args.prompt || '').trim();
+  const beforeId = String((typeof currentSessionId !== 'undefined' && currentSessionId) || '');
+  await createNewSession(workspacePath, title ? { title } : {});
+  const sessionId = String((typeof currentSessionId !== 'undefined' && currentSessionId) || '');
+  if (!sessionId || sessionId === beforeId) return { error: '新建对话失败：会话 id 没有变化' };
+  // 路径不存在时 Main 会把该会话的 workspace_path 清回 null（见 workspace:set-active-session），
+  // 所以这里回读一次账本，把「建了但没挂上」如实告诉模型，别让它以为工作空间已经就位。
+  let effectiveWorkspacePath = null;
+  if (workspacePath) {
+    try {
+      const row = await gatewayCall('memory.session_get', { sessionId });
+      effectiveWorkspacePath = (row && row.workspacePath) || null;
+    } catch {
+      // 回读只是校验：查不到不影响「已建会话」这个事实
+      effectiveWorkspacePath = null;
+    }
+  }
+  if (workspacePath && !effectiveWorkspacePath) {
+    return {
+      ok: true,
+      sessionId,
+      workspacePath: null,
+      warning: `已新建对话，但工作空间 ${workspacePath} 不存在或不可用，未挂上；确认路径后可用工作空间选择器重设`
+    };
+  }
+  if (prompt && typeof sendMessage === 'function') {
+    // 不能 await：sendMessage 会一直阻塞到那一轮 Agent 跑完，工具调用不能挂在那里。
+    // 也不能让它把异常冒成未处理拒绝：这已经是新会话那边的事，失败只影响 prompt 是否发出。
+    void Promise.resolve(sendMessage(prompt)).catch(() => {});
+  }
+  return {
+    ok: true,
+    sessionId,
+    workspacePath: effectiveWorkspacePath || workspacePath || null,
+    dispatched: !!(prompt && typeof sendMessage === 'function'),
+    warning: prompt && typeof sendMessage !== 'function' ? '已新建对话，但没有可用的发送入口，prompt 未发出' : undefined
+  };
+}
+
 // 入参必须已归一：两个入口（本地调用 / Main 反向委托）都先过 `executeAgentTool`，
 // 归一发生在那里一次即可。内层再归一既无用、又会让人误以为"这里也可以传原始名"。
 async function executeAgentToolInner(name, args, sessionId) {
@@ -139,6 +192,13 @@ async function executeAgentToolInner(name, args, sessionId) {
       return await showClarifyInBubble(el, args);
     } catch (e) {
       return { error: e.message || String(e) };
+    }
+  }
+  if (name === 'session_new') {
+    try {
+      return await createSessionFromTool(args || {});
+    } catch (e) {
+      return { error: e && e.message ? e.message : String(e) };
     }
   }
   return { error: `未知 UI 工具: ${name}` };
