@@ -90,6 +90,16 @@ const AGENT_LIMITS_DEFAULTS = {
   visionShotsPerRound: 2,
   visionReattachPerRound: 2,
   visionMaxBase64Chars: 4 * 1024 * 1024,
+  // 截图长边上限（电脑控制 / 浏览器截图注入视觉通道前先缩放）。
+  // 为什么必须有：4K 屏整屏 PNG 的 base64 能到 4.7MB，直接顶穿上面那条单张上限，
+  // 结果就是「截了图但模型永远看不见」。1568 是主流多模态模型的最优像素区间：
+  // 再大只是白烧 token，再小则界面小字糊掉。缩放后通常 300–800KB，稳定过限。
+  visionShotMaxEdge: 1568,
+  // 工具产出图片的只读副本保留张数（内容寻址去重后按 mtime 留最新 N 张）。
+  // 为什么要留副本：base64 注入完即丢，模型想再看局部细节只能重拍，而当时那一帧可能已过；
+  // 为什么要有上限：电脑控制一次任务能产生几十张整屏图，不留上限就是无底占盘。
+  // 与 visionShotMaxEdge 同属「本机磁盘策略」，不进设置页。
+  visionImageKeepFiles: 200,
   // 图片 part 计入上下文预算时的等效字符数。图片在请求里会换算成图片 token，
   // 不能按 base64 长度计；否则单张图就顶穿 chat 预算并触发无意义的压缩。
   // 注意：这是「账本折算系数」而非策略上限，故意不出现在设置页——
@@ -677,6 +687,16 @@ const AGENT_LIMITS_SCHEMA = [
         max: 8388608,
         step: 262144,
         unit: '字'
+      },
+      {
+        key: 'visionShotMaxEdge',
+        label: '截图长边上限',
+        hint: '电脑控制/浏览器截图注入前按长边缩放到此像素（1568 是主流多模态模型的最优区间）；调小更省 token，调大字形更清楚',
+        type: 'number',
+        min: 512,
+        max: 2560,
+        step: 128,
+        unit: 'px'
       }
     ]
   },

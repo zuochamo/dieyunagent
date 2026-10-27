@@ -121,7 +121,7 @@ function createComputerService(deps = {}) {
     // 让模型与自己记忆的坐标脱节（与输入动作同一口径）。
     const remembered = lastView(params.sessionId);
     const display = resolveDisplay(params.display, remembered ? remembered.displayIndex : null);
-    const shot = await captureDisplay(display);
+    const shot = await captureDisplay(display, params.visionBudget);
     rememberView(params.sessionId, display.index, shot.width, shot.height);
     log(`COMPUTER_SHOT display=${display.index} ${shot.width}x${shot.height}`);
     return buildResult('screenshot', display, shot, inp.getPhysicalCursorPos(), {
@@ -227,7 +227,7 @@ function createComputerService(deps = {}) {
     }
 
     await inp.sleep(SETTLE_DELAY_MS);
-    const shot = await captureDisplay(display);
+    const shot = await captureDisplay(display, params.visionBudget);
     rememberView(sessionId, display.index, shot.width, shot.height);
     log(`COMPUTER_ACTION ${act} display=${display.index}`);
     return buildResult(act, display, shot, inp.getPhysicalCursorPos(), {

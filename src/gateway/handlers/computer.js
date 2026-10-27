@@ -1,13 +1,27 @@
 'use strict';
 
 const { decideOsControlAction } = require('../sandbox-policy');
+const { getAgentLimits } = require('../../agent/agent-limits');
 
 /**
  * computer 工具的 gateway handler：开关断言 → 沙箱判定/审批 → 调 service。
  * 判定单一来源在 sandbox-policy.js（decideOsControlAction），这里不做任何白名单判断。
  */
 function createComputerHandlers(d) {
-  const { computer, assertOsControlEnabled, sandbox, getActiveCallSessionId, getRemoteFs } = d;
+  const { computer, assertOsControlEnabled, sandbox, getActiveCallSessionId, getRemoteFs, ctx } = d;
+
+  /**
+   * 截图编码预算（长边上限 + 单张 base64 上限）：数字唯一来源是 agent-limits。
+   * 必须在这里解析，不能只在 capture 里读默认值 —— 否则设置页调了不生效。
+   */
+  function resolveVisionBudget() {
+    const userDataPath = ctx && ctx.userDataPath;
+    const limits = (userDataPath && getAgentLimits(userDataPath)) || {};
+    return {
+      maxEdge: limits.visionShotMaxEdge,
+      maxBase64Chars: limits.visionMaxBase64Chars
+    };
+  }
 
   /**
    * 沙箱档位对 computer 动作的判定（输入动作 → 问一次；截屏 → 开关即同意）。
@@ -50,7 +64,7 @@ function createComputerHandlers(d) {
       }
       const { sessionId, ...rest } = params;
       await guardComputer(String(rest.action || ''), sessionId);
-      return computer.action({ ...rest, sessionId });
+      return computer.action({ ...rest, sessionId, visionBudget: resolveVisionBudget() });
     }
   };
 }

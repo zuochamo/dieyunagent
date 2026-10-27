@@ -21,9 +21,11 @@ const {
   recordBrowserScreenshot,
   recordVisionImage,
   resolveVisionLimits,
+  extractShot,
   SOURCE_ATTACHMENT,
   SOURCE_MCP
 } = require('./browser-vision');
+const { storeVisionImage, visionHandleText, visionOmitText, visionTokensForSize } = require('./vision-image');
 
 /**
  * 用文件头魔数判断 base64 是否为图片，并给出准确的 mime。
@@ -64,9 +66,13 @@ function sanitizeToolResultForApi(name, result) {
       mime: result.mime,
       width: result.width,
       height: result.height,
+      ...(result.visionImage ? { visionImage: result.visionImage } : {}),
+      ...(result.visionTokens ? { visionTokens: result.visionTokens } : {}),
       base64Omitted: true,
       base64Length: String(result.base64).length,
-      note: result.note || '已截取当前屏幕画面；PNG 不随本工具结果返回，将作为视觉输入附到下一轮'
+      // 只陈述事实：是否真进了视觉通道由 after 关卡判定后改写本字段，
+      // 这里绝不能再写「将作为视觉输入附到下一轮」（那正是模型干等一张图的根因）。
+      note: result.note || '已截取当前屏幕画面；图片本体不随工具结果返回'
     };
   }
   if (name === 'browser_screenshot' && result.base64) {
@@ -85,9 +91,11 @@ function sanitizeToolResultForApi(name, result) {
       bytes: result.bytes,
       savePath: result.savePath,
       saveError: result.saveError,
+      ...(result.visionImage ? { visionImage: result.visionImage } : {}),
+      ...(result.visionTokens ? { visionTokens: result.visionTokens } : {}),
       base64Omitted: true,
       base64Length: String(result.base64).length,
-      note: 'Screenshot captured; PNG kept out of this tool payload'
+      note: result.note || 'Screenshot captured; PNG kept out of this tool payload'
     };
   }
   if (name === 'browser_snapshot') {
@@ -413,6 +421,55 @@ function createMainToolBridge(deps) {
   }
 
   /**
+   * 截图没进视觉通道时的**原因**。
+   *
+   * 文案本身不在这里拼：成功/失败两句都归 `vision-image` 的单一来源
+   * （`visionHandleText` / `visionOmitText`），本函数只负责判定「为什么」。
+   */
+  function visionDropReason(result, limits) {
+    const len = result && typeof result.base64 === 'string' ? result.base64.length : 0;
+    // 上限口径必须经 resolveVisionLimits 归一：agent-limits 的键是 visionMaxBase64Chars，
+    // 过去这里直接读 limits.maxBase64Chars，取到 undefined，于是「超体积」被误报成
+    // 「张数已满或格式不支持」—— 说明文案比没有文案更误导。
+    const cap = resolveVisionLimits(limits).maxBase64Chars;
+    return cap > 0 && len > cap
+      ? `编码后 base64 ${len} 字符，超过单张上限 ${cap}`
+      : '本轮同来源截图张数已满，或图片格式不被上游支持';
+  }
+
+  /**
+   * 取这张图的「可寻址凭证」。
+   *
+   * 已有落盘路径就直接用（browser_screenshot 自己会存盘），否则现写一份内容寻址副本
+   * （computer / browser_observe 的图只活在内存里，base64 注入完即丢）。
+   * 模型拿到路径后可以 fs_read_file / host_exec 再看局部细节，不必重拍。
+   */
+  function visionHandleForShot(shot, result, opts) {
+    if (!shot) return null;
+    const saved =
+      (typeof result.path === 'string' && result.path) ||
+      (typeof result.savePath === 'string' && result.savePath) ||
+      '';
+    const width = Number(shot.width) || 0;
+    const height = Number(shot.height) || 0;
+    if (saved) {
+      return {
+        path: saved,
+        width,
+        height,
+        mime: shot.mime || 'image/png',
+        bytes: Number(result.bytes) || 0,
+        tokens: visionTokensForSize(width, height)
+      };
+    }
+    try {
+      return storeVisionImage(shot, opts);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * MCP 工具返回的图片：送进视觉缓冲，并把 base64 从工具结果里摘掉。
    *
    * 为什么必须在这里做：runtime-manager 把 image part 提炼成 visionImages，
@@ -424,9 +481,16 @@ function createMainToolBridge(deps) {
   function absorbMcpVision(result, toolName, ctx, visionEnabled, visionLimits) {
     if (!result || typeof result !== 'object' || !Array.isArray(result.visionImages)) return result;
     const images = result.visionImages;
-    const { visionImages, ...rest } = result;
+    const rest = { ...result };
+    delete rest.visionImages;
     const runId = ctx && ctx.runId;
+    const storeOpts = {
+      workspacePath: (ctx && (ctx.workspacePath || ctx.worktreePath)) || '',
+      userDataPath,
+      limits: visionLimits
+    };
     let queued = 0;
+    const handles = [];
     if (visionEnabled && runId) {
       for (const img of images) {
         try {
@@ -441,7 +505,12 @@ function createMainToolBridge(deps) {
             visionLimits,
             { evictOldest: true }
           );
-          if (ok) queued += 1;
+          if (ok) {
+            queued += 1;
+            // 入队的图才留副本：没入队的图模型本来就够不着，留文件只是占盘
+            const handle = storeVisionImage(img, storeOpts);
+            if (handle) handles.push(handle);
+          }
         } catch {
           /* 单张失败不影响其它图片与工具结果 */
         }
@@ -449,13 +518,19 @@ function createMainToolBridge(deps) {
     }
     let suffix;
     if (queued > 0) {
-      suffix = `图片已作为视觉输入附在下一轮（${queued} 张），请直接据此判断，无需重复调用。`;
+      // 副本路径一并给出：MCP 图往往「看过一次就想放大看细节」，重调工具未必拿得到同一帧
+      const shown = handles.slice(0, 2).map((h) => visionHandleText(h)).join('');
+      const more = handles.length > 2 ? `（另有 ${handles.length - 2} 张副本同目录）` : '';
+      suffix = `图片已作为视觉输入附在下一轮（${queued} 张），请直接据此判断，无需重复调用。${shown}${more}`;
     } else if (visionEnabled) {
+      // 失败句与截图路径同一来源（vision-image），这里只补「怎么办」
       suffix =
-        '图片未能注入（超出单张体积或每轮张数上限）；需要看图请降低分辨率后重取，或分批调用。';
+        visionOmitText('超出单张体积或每轮张数上限', null) +
+        '需要看图请降低分辨率后重取，或分批调用。';
     } else {
       suffix =
-        '当前模型未开启视觉输入，图片不会被看到；请改用工具返回的文字/数值字段判断，或让用户看图确认。';
+        visionOmitText('当前模型未开启视觉输入', null) +
+        '请改用工具返回的文字/数值字段判断，或让用户看图确认。';
     }
     return {
       ...rest,
@@ -527,15 +602,48 @@ function createMainToolBridge(deps) {
                 c.result = {
                   ...c.result,
                   note:
-                    '当前模型未开启视觉输入，这张截图不会被看到。请让用户在模型设置里选择多模态模型后重试，或改用文本途径（host_exec / browser_snapshot）获取信息。'
+                    visionOmitText('当前模型未开启视觉输入', null) +
+                    '请让用户在模型设置里选择多模态模型后重试，或改用文本途径（host_exec / browser_snapshot）获取信息。'
                 };
               }
               return;
             }
+            // 结果里确实带了图（base64 还没被 sanitize 摘掉）却没能入队时，必须明说。
+            // 过去这里忽略返回值，而工具结果默认还写着「将作为视觉输入附到下一轮」——
+            // 4K 整屏 PNG 顶穿单张上限被整张丢弃，模型却一直在等一张永不到来的图。
+            const shot = extractShot(c.name, c.result);
+            // 先落盘再入队：入队失败时模型至少还有一份可读副本，不至于彻底够不着这一帧。
+            const handle = shot
+              ? visionHandleForShot(shot, c.result, {
+                  workspacePath: ctx.workspacePath || ctx.worktreePath,
+                  userDataPath,
+                  limits: visionLimits
+                })
+              : null;
+            let queued = false;
             try {
-              recordBrowserScreenshot(ctx.runId, c.name, c.result, visionLimits);
+              queued = recordBrowserScreenshot(ctx.runId, c.name, c.result, visionLimits);
             } catch {
               /* 截图暂存失败不影响工具结果 */
+            }
+            if (shot || handle) {
+              // 成功也明说，失败更明说：模型对「我到底看见没看见」的判断只能靠这句话。
+              c.result = {
+                ...c.result,
+                ...(handle
+                  ? {
+                      ...(handle.id ? { visionImage: handle.id } : {}),
+                      ...(handle.tokens > 0 ? { visionTokens: handle.tokens } : {})
+                    }
+                  : {}),
+                note: queued
+                  ? visionHandleText(handle, '这张图会作为图片输入附在下一轮；不要重复截同一屏。') ||
+                    '截图已进入视觉通道，会作为图片输入附在下一轮；不要重复截同一屏。'
+                  : visionOmitText(
+                      visionDropReason(shot ? { base64: shot.base64 } : c.result, visionLimits),
+                      handle
+                    )
+              };
             }
           }
         },

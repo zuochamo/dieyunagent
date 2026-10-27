@@ -16,9 +16,71 @@
  */
 
 const { displayPhysicalSize, displayPhysicalOrigin } = require('./coordinate-map');
+const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
+
+/**
+ * 缩放后仍超预算时换 JPEG 的质量（界面截图对 JPEG 很耐受，只有极端细节图会走到这一步）。
+ */
+const JPEG_QUALITY = 82;
+/** 逐次缩小的下限：再小就完全看不清界面了，此时宁可如实报「没注入」。 */
+const MIN_SHOT_EDGE = 320;
 
 function electronScreen() {
   return require('electron').screen;
+}
+
+/**
+ * 按长边上限等比缩小；不需要缩小时原样返回。
+ * @param {object} image Electron nativeImage
+ * @param {number} maxEdge
+ */
+function shrinkToEdge(image, maxEdge) {
+  const size = image.getSize();
+  const longEdge = Math.max(size.width, size.height);
+  if (!(maxEdge > 0) || longEdge <= maxEdge) return image;
+  const ratio = maxEdge / longEdge;
+  const width = Math.max(1, Math.round(size.width * ratio));
+  const height = Math.max(1, Math.round(size.height * ratio));
+  const out = image.resize({ width, height, quality: 'good' });
+  return out && typeof out.isEmpty === 'function' && out.isEmpty() ? image : out;
+}
+
+/**
+ * 把截图编码到「视觉注入预算」以内 —— 这是 computer/browser 截图能力的最后一环：
+ * 编码超限的图会被 browser-vision 整张丢弃，模型就只能反复说「下一轮就能看到」。
+ *
+ * 顺序：长边缩放到上限 → PNG；仍超单张 base64 上限则换 JPEG；还超就再缩 30%（最多 4 轮）。
+ * 全程不静默：走到最后仍超预算时回 `overBudget: true`，由工具结果如实告诉模型。
+ *
+ * @param {{ getSize: Function, resize: Function, isEmpty?: Function, toPNG: Function, toJPEG: Function }} image
+ * @param {{ maxEdge?: number, maxBase64Chars?: number }} [opts]
+ * @returns {{ mime: string, base64: string, width: number, height: number,
+ *   native: { width: number, height: number }, overBudget?: boolean }}
+ */
+function encodeWithinBudget(image, opts = {}) {
+  const wantEdge = Number(opts.maxEdge);
+  const wantChars = Number(opts.maxBase64Chars);
+  const maxEdge = wantEdge > 0 ? Math.round(wantEdge) : AGENT_LIMITS_DEFAULTS.visionShotMaxEdge;
+  const maxBase64Chars =
+    wantChars > 0 ? Math.round(wantChars) : AGENT_LIMITS_DEFAULTS.visionMaxBase64Chars;
+  const native = image.getSize();
+  let current = shrinkToEdge(image, maxEdge);
+  /** @type {{ mime: string, base64: string, width: number, height: number }|null} */
+  let last = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const size = current.getSize();
+    const png = current.toPNG().toString('base64');
+    last = { mime: 'image/png', base64: png, width: size.width, height: size.height };
+    if (png.length <= maxBase64Chars) return { ...last, native };
+    const jpeg = current.toJPEG(JPEG_QUALITY).toString('base64');
+    last = { mime: 'image/jpeg', base64: jpeg, width: size.width, height: size.height };
+    if (jpeg.length <= maxBase64Chars) return { ...last, native };
+    const longEdge = Math.max(size.width, size.height);
+    const nextEdge = Math.max(MIN_SHOT_EDGE, Math.round(longEdge * 0.7));
+    if (nextEdge >= longEdge) break;
+    current = shrinkToEdge(current, nextEdge);
+  }
+  return { ...last, native, overBudget: true };
 }
 
 /** 系统换算出的显示器左上角物理坐标；平台/版本不支持时返回 null。 */
@@ -109,9 +171,16 @@ function pickSourceForDisplay(sources, display, opts = {}) {
 }
 
 /**
- * 截取指定显示器，返回 { mime, base64, width, height }（像素即模型坐标系）。
+ * 截取指定显示器，返回 { mime, base64, width, height }。
+ *
+ * **width/height 是注入给模型的那张图的尺寸**（按 agent-limits 的长边上限缩放过），
+ * 也就是模型坐标系本身 —— coordinate-map 的换算一直以「模型看到的截图」为准，
+ * 所以缩放是安全的：模型报的坐标与窗口物理坐标仍能对上，只是屏幕像素被等比压缩。
+ *
+ * @param {object} display listDisplays() 的条目
+ * @param {{ maxEdge?: number, maxBase64Chars?: number }} [visionBudget] 缺省取 agent-limits 默认值
  */
-async function captureDisplay(display) {
+async function captureDisplay(display, visionBudget) {
   const desktopCapturer = require('electron').desktopCapturer;
   const want = displayPhysicalSize(display);
   const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: want });
@@ -121,14 +190,21 @@ async function captureDisplay(display) {
     e.code = 'CAPTURE_FAILED';
     throw e;
   }
-  const image = hit.thumbnail;
-  const size = image.getSize();
+  const shot = encodeWithinBudget(hit.thumbnail, visionBudget || {});
   return {
-    mime: 'image/png',
-    base64: image.toPNG().toString('base64'),
-    width: size.width,
-    height: size.height
+    mime: shot.mime,
+    base64: shot.base64,
+    width: shot.width,
+    height: shot.height,
+    nativeWidth: shot.native.width,
+    nativeHeight: shot.native.height
   };
 }
 
-module.exports = { listDisplays, getDisplay, captureDisplay, pickSourceForDisplay };
+module.exports = {
+  listDisplays,
+  getDisplay,
+  captureDisplay,
+  encodeWithinBudget,
+  pickSourceForDisplay
+};
