@@ -18,6 +18,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createLspDiagnosticsService } = require('../../src/lsp/diagnostics-service');
+const { runRemoteTscBatch } = require('../../src/lsp/cli-fallback');
 
 const ROOT = '/home/u/proj';
 const FILES = ['a.ts', 'b.ts', 'c.ts'];
@@ -76,6 +77,20 @@ afterEach(() => {
 });
 
 describe('远程引擎负缓存', () => {
+  it('远程 tsc 命令必须显式点名 tsc 这个 bin', async () => {
+    // 包 `typescript` 有两个 bin（tsc / tsserver），`npx -y typescript …` 在装了 5.x 的机器上
+    // 必报 `npm error could not determine executable to run`：命令根本没跑，诊断却当引擎失败。
+    const cmds = [];
+    const exec = async (cmd) => {
+      cmds.push(String(cmd));
+      return { stdout: '', code: 0 };
+    };
+    await runRemoteTscBatch({ exec, projectRoot: ROOT, absPaths: [`${ROOT}/a.ts`] });
+    expect(cmds.length).toBe(1);
+    expect(cmds[0]).toContain('-p typescript tsc');
+    expect(cmds[0]).not.toMatch(/npx -y typescript\b/);
+  });
+
   it('结构性失败只发一轮命令，TTL 内不再发，且仍如实汇报 failures', async () => {
     const calls = [];
     const sshExec = missingEnginesExec(calls);

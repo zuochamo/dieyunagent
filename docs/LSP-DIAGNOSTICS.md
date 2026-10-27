@@ -284,7 +284,7 @@ flowchart TB
 | 首次 `npx` 下载慢 | 超时 `lsp-settings.timeoutMs`（默认 8s）+ 缓存；设置页说明需 Node |
 | 大仓库 TS 分析慢 | 只 didOpen **指定文件**，不 open 全库 |
 | 多 language server 内存 | 每 workspace 每语言单进程 + 空闲 shutdown |
-| SSH 远程 | 不 spawn 本地 LSP；SSH 已连接时在远程跑 `npx typescript --noEmit`（仅 TS）；需 Shell 权限 |
+| SSH 远程 | 不 spawn 本地 LSP；SSH 已连接时在远程跑 `npx -y -p typescript tsc --noEmit`（仅 TS）；需 Shell 权限 |
 | SSH 远端没装 tsc/eslint/prettier | 负缓存：结构性失败（命令不存在）后 10 分钟不再发命令，见 §11.1 |
 | 与 Monaco 重复造轮 | **单一 DiagnosticsService**，Monaco 仅订阅 |
 
@@ -302,6 +302,12 @@ flowchart TB
 | 失败分类 | `exit 126/127` 或输出命中 `command not found / could not determine executable / cannot find module / ENOENT` → **结构性**；`exitCode == null`（exec 抛错/超时/断线）→ **瞬时**，不记 |
 | 负缓存 TTL | 结构性 10 分钟、瞬时 1 分钟；TTL 到期删缓存放行一次探测（远端装好依赖后自愈，不用重启）；`stopWorkspaceDiagnosticsWatch` 清掉该根的全部判定 |
 | 日志 | 只在**写判定那一刻**记一行（带「暂停该引擎 N 分钟」提示），TTL 内跳过的不再记；失败仍照实回报到 `diagnoseFilesRemote().failures`（`blocked:true` 表示本轮连命令都没发），绝不把失败洗成「0 个问题」 |
+
+另一个独立根因：远程 tsc 命令原来写的是 `npx -y typescript --noEmit`。包 `typescript` 有两个 bin
+（`tsc` / `tsserver`），npx 无法自行选定 → 在装了 typescript 5.x 的机器上**必报**
+`npm error could not determine executable to run`（本地实测 5.8.3 复现），远程 tsc 从来就没跑起来过。
+现已统一为 `npx -y -p typescript tsc --noEmit --pretty false`（与 §5 里 language server 的写法一致），
+本地兜底 `resolveTscCommand` 的 npx 分支也一并修正。
 
 
 ---

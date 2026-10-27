@@ -286,7 +286,9 @@ function resolveTscCommand(projectRoot) {
       }
     }
   }
-  return { command: 'npx', args: ['-y', 'typescript', '--noEmit', '--pretty', 'false'] };
+  // 包 `typescript` 有两个 bin（tsc / tsserver），`npx -y typescript` 会报
+  // `npm error could not determine executable to run`（实测 5.8.3 必现）—— 必须显式点名 `tsc`。
+  return { command: 'npx', args: ['-y', '-p', 'typescript', 'tsc', '--noEmit', '--pretty', 'false'] };
 }
 
 async function runTscFallback(opts) {
@@ -1039,7 +1041,9 @@ async function runRemoteTscBatch(opts) {
   const byFile = new Map(absPaths.map((p) => [p, []]));
   if (!absPaths.length) return remoteEngineSuccess('tsc', byFile);
 
-  const cmd = 'npx -y typescript --noEmit --pretty false 2>&1';
+  // `-p typescript tsc`：包有两个 bin（tsc/tsserver），直接 `npx -y typescript` 会
+  // 报 `npm error could not determine executable to run`，远程 tsc 永远跑不起来。
+  const cmd = 'npx -y -p typescript tsc --noEmit --pretty false 2>&1';
   const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
   const all = parseTscOutput(scan.text);
   // 与项目扫描同判据：解析不出诊断但退出码非 0 ⇒ 工具没跑起来（npx/tsconfig 缺失）。
@@ -1378,7 +1382,9 @@ async function runRemoteTscProjectScan(opts) {
   const maxFiles = opts.maxFiles != null ? Number(opts.maxFiles) : 0;
   const maxPerFile = opts.maxPerFile != null ? Number(opts.maxPerFile) : 12;
   const minSeverity = opts.minSeverity || 'warning';
-  const cmd = 'npx -y typescript --noEmit --pretty false 2>&1';
+  // `-p typescript tsc`：包有两个 bin（tsc/tsserver），直接 `npx -y typescript` 会
+  // 报 `npm error could not determine executable to run`，远程 tsc 永远跑不起来。
+  const cmd = 'npx -y -p typescript tsc --noEmit --pretty false 2>&1';
   const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
   const all = parseTscOutput(scan.text);
   // tsc 干净时零输出且 exit 0；解析不出诊断但**退出码非 0** ⇒ 没跑起来（npx/tsconfig 缺失）。
