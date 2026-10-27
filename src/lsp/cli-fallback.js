@@ -1268,6 +1268,9 @@ async function runRemotePrettierBatch(opts) {
     if (scan.code != null && scan.code > 1) {
       failedCount += 1;
       if (!failedScan) failedScan = scan;
+      // 126/127 = 命令本身不存在（如 `sh: prettier: not found`）：后面的文件必然同样失败，
+      // 立刻停下，别把整批文件逐个重试一遍（线上实测：远端没装 prettier 时文件数=命令数）。
+      if (scan.code === 126 || scan.code === 127) break;
       continue;
     }
     if (remotePrettierOutputHasFormatIssue(scan.text, rel)) {

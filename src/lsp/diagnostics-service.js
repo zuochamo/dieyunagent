@@ -88,6 +88,17 @@ const WATCH_BATCH_MAX_FILES = 24;
 const WATCH_BATCH_GAP_MS = 800;
 const WATCH_DIRTY_MAX_QUEUE = 400;
 const SSH_DIRTY_POLL_MS = 25000;
+
+/**
+ * 远程引擎负缓存的 TTL（见 `remoteEngineVerdicts`）。
+ * - `structural`：命令/工具确实不存在 → 长时间不再试（每 10 分钟才探测一次，日志也才一行）；
+ * - `transient` ：引擎跑起来了但报错（tsconfig 坏了之类）→ 只压 1 分钟，避免每文件刷一轮。
+ */
+const REMOTE_ENGINE_BLOCK_MS = Object.freeze({ structural: 10 * 60 * 1000, transient: 60 * 1000 });
+/** 「工具本身不存在」的签名：包管理器/内核报的这几种，与「代码有问题」不重叠。 */
+const REMOTE_ENGINE_MISSING_RE =
+  /command not found|not recognized as an internal|could not determine executable|cannot find module|no such file or directory|ENOENT/i;
+
 const WATCH_IGNORE_DIRS = new Set([
   '.git',
   'node_modules',
@@ -238,6 +249,19 @@ function createLspDiagnosticsService(opts) {
   const projectScanState = new Map();
   /** @type {Map<string, { watcher: import('fs').FSWatcher|null, pollTimer: NodeJS.Timeout|null, queueTimer: NodeJS.Timeout|null, draining: boolean, dirty: Map<string, { abs: string, ts: number }>, refreshing: Set<string>, retry: Map<string, number>, workspaceRoot: string, mode: string, sshExec?: Function|null }>} */
   const watchState = new Map();
+  /**
+   * 远程引擎「跑不起来」的负缓存（`root|engine`）。
+   *
+   * 事故形态（2026-10-27 实测日志）：远端没装 typescript / eslint / prettier 时，
+   * watch 每来一个脏文件就重新 spawn 三条必然失败的命令（tsc→eslint→prettier，约 1.4s 一轮），
+   * 且每次失败都打一行日志 —— 打开一个大工程＝几千条无效 SSH 命令 + 刷屏。
+   *
+   * 纪律：**只记「结构性不可用」**（命令/工具本身不存在），超时与断线不记
+   * （把一次网络抖动记成「引擎不可用」会让诊断永久失灵）。TTL 到期放行一次探测，
+   * 用户在远端装好依赖 / 修好 tsconfig 后能自愈，无需重启应用。
+   * @type {Map<string, { at: number, ttlMs: number, kind: string, reason: string, skipped: number }>}
+   */
+  const remoteEngineVerdicts = new Map();
 
   function getWorkspaceBucket(workspaceRoot) {
     const wk = workspaceStoreKey(workspaceRoot);
@@ -471,12 +495,16 @@ function createLspDiagnosticsService(opts) {
    * 批量路径的上层以前一律 `.catch(() => new Map())`，失败被吞成「0 条诊断」⇒ 面板显示
    * 「没有问题」。现在失败只做两件事：落一行可检索的日志 + 由调用方**跳过写空诊断**，
    * 保留上一次可信结果（引擎残废时最危险的不是报错，是假装干净）。
+   *
+   * 只能由 `runRemoteEngine` 调用：那里已把「同一个引擎连续失败」压成 TTL 内只记一次，
+   * 否则每个脏文件都会重打一行（线上实测 1.4s 一条）。
    */
-  function logRemoteEngineUnavailable(workspaceRoot, r) {
+  function logRemoteEngineUnavailable(workspaceRoot, r, opts = {}) {
     if (!r || r.ok !== false) return;
+    const pause = opts.latchedMs ? `（本轮起暂停该引擎 ${Math.round(opts.latchedMs / 60000)} 分钟后再探测）` : '';
     log(
       `[diagnostics] 远程引擎未运行 engine=${r.engine || '?'} exitCode=${r.exitCode == null ? '-' : r.exitCode} ` +
-        `root=${workspaceRoot} error=${r.error || '未知错误'}${r.detail ? ` detail=${r.detail}` : ''}`
+        `root=${workspaceRoot} error=${r.error || '未知错误'}${r.detail ? ` detail=${r.detail}` : ''}${pause}`
     );
   }
 
@@ -491,15 +519,90 @@ function createLspDiagnosticsService(opts) {
     }));
   }
 
+  function remoteEngineVerdictKey(root, engine) {
+    return `${String(root || '').replace(/\/$/, '').toLowerCase()}|${String(engine || '?')}`;
+  }
+
+  /**
+   * 失败分类（唯一来源）：只有「命令/工具本身不存在」才算结构性不可用。
+   * `exitCode == null` = exec 抛错（超时 / 断线 / 权限），属瞬时问题，**绝不**记成引擎缺失。
+   * @returns {{ kind: 'structural'|'transient', ttlMs: number } | null}
+   */
+  function classifyRemoteEngineFailure(r) {
+    if (!r || r.ok !== false) return null;
+    const exit = r.exitCode == null ? null : Number(r.exitCode);
+    const hay = `${r.error || ''} ${r.detail || ''}`;
+    if (exit === 126 || exit === 127 || REMOTE_ENGINE_MISSING_RE.test(hay)) {
+      return { kind: 'structural', ttlMs: REMOTE_ENGINE_BLOCK_MS.structural };
+    }
+    if (exit == null) return null;
+    return { kind: 'transient', ttlMs: REMOTE_ENGINE_BLOCK_MS.transient };
+  }
+
+  /** TTL 内已知不可用 → 返回负缓存条目（调用方据此跳过 spawn，且不再打日志）。 */
+  function takeBlockedRemoteEngine(root, engine) {
+    const key = remoteEngineVerdictKey(root, engine);
+    const hit = remoteEngineVerdicts.get(key);
+    if (!hit) return null;
+    if (Date.now() - hit.at >= hit.ttlMs) {
+      // TTL 到期：删缓存、放行一次探测（远端装好依赖 / 修好 tsconfig 后自愈，不必重启）
+      remoteEngineVerdicts.delete(key);
+      return null;
+    }
+    hit.skipped += 1;
+    return hit;
+  }
+
+  /** 工作区重建（stop / 本地↔SSH 切换）时清掉该根的负缓存，下次从头探测。 */
+  function clearRemoteEngineVerdicts(workspaceRoot) {
+    const prefix = `${String(workspaceRoot || '').replace(/\/$/, '').toLowerCase()}|`;
+    for (const key of [...remoteEngineVerdicts.keys()]) {
+      if (key.startsWith(prefix)) remoteEngineVerdicts.delete(key);
+    }
+  }
+
+  /**
+   * 远程引擎调用的**唯一出口**：负缓存判定 → 执行 → 失败分类 → 日志限流。
+   *
+   * 返回形状与 cli-fallback 的 `remoteEngineFailure` 一致：`ok:false` 时上层不写 store
+   * （保留上一次可信结果），`blocked:true` 表示这次连命令都没发（TTL 内已知不可用）。
+   */
+  async function runRemoteEngine(root, engine, runFn) {
+    const blocked = takeBlockedRemoteEngine(root, engine);
+    if (blocked) {
+      return {
+        ok: false,
+        engine,
+        blocked: true,
+        byFile: new Map(),
+        error: `引擎近期不可用，本轮跳过（${blocked.reason}）`,
+        exitCode: null,
+        skipped: blocked.skipped
+      };
+    }
+    // async IIFE：`runFn` 同步抛错也要归一成 ok:false，不能穿透到 watch 队列里
+    const settled = await settleRemoteBatch((async () => runFn())());
+    const named = settled && settled.engine && settled.engine !== '?' ? settled : { ...settled, engine };
+    const verdict = classifyRemoteEngineFailure(named);
+    if (verdict) {
+      remoteEngineVerdicts.set(remoteEngineVerdictKey(root, engine), {
+        at: Date.now(),
+        ttlMs: verdict.ttlMs,
+        kind: verdict.kind,
+        reason: String(named.error || '引擎未运行'),
+        skipped: 0
+      });
+      logRemoteEngineUnavailable(root, named, { latchedMs: verdict.ttlMs });
+    }
+    return named;
+  }
+
   /**
    * 单文件远程 CLI 诊断的统一落库出口：**只写 ok 的引擎**。
-   * 失败时不 upsert（保留上一次可信结果），并落一行 `远程引擎未运行` 日志。
+   * 失败时不 upsert（保留上一次可信结果）；日志与负缓存在 `runRemoteEngine` 里（唯一出口）。
    */
   function upsertRemoteCliEntry(root, abs, scan, meta) {
-    if (!scan || !scan.ok) {
-      logRemoteEngineUnavailable(root, scan || { ok: false, engine: meta.engine, error: '引擎未运行' });
-      return false;
-    }
+    if (!scan || !scan.ok) return false;
     upsertWorkspaceStoreEntry(
       root,
       {
@@ -569,17 +672,25 @@ function createLspDiagnosticsService(opts) {
     };
 
     const [tscScan, eslintScan, ruffScan, prettierScan] = await Promise.all([
-      tsTargets.length ? settleRemoteBatch(runRemoteTscBatch({ ...scanOpts, absPaths: tsTargets })) : null,
-      eslintTargets.length
-        ? settleRemoteBatch(runRemoteEslintBatch({ ...scanOpts, absPaths: eslintTargets }))
+      tsTargets.length
+        ? runRemoteEngine(workspaceRoot, 'tsc', () => runRemoteTscBatch({ ...scanOpts, absPaths: tsTargets }))
         : null,
-      pyTargets.length ? settleRemoteBatch(runRemoteRuffBatch({ ...scanOpts, absPaths: pyTargets })) : null,
+      eslintTargets.length
+        ? runRemoteEngine(workspaceRoot, 'eslint', () =>
+            runRemoteEslintBatch({ ...scanOpts, absPaths: eslintTargets })
+          )
+        : null,
+      pyTargets.length
+        ? runRemoteEngine(workspaceRoot, 'ruff', () => runRemoteRuffBatch({ ...scanOpts, absPaths: pyTargets }))
+        : null,
       prettierTargets.length
-        ? settleRemoteBatch(runRemotePrettierBatch({ ...scanOpts, absPaths: prettierTargets }))
+        ? runRemoteEngine(workspaceRoot, 'prettier', () =>
+            runRemotePrettierBatch({ ...scanOpts, absPaths: prettierTargets })
+          )
         : null
     ]);
+    // 失败引擎的日志与负缓存都在 runRemoteEngine 里（唯一出口），这里不再重复记。
     const engineFailures = [tscScan, eslintScan, ruffScan, prettierScan].filter((r) => r && r.ok === false);
-    for (const r of engineFailures) logRemoteEngineUnavailable(workspaceRoot, r);
     // 只有 ok 的引擎才写 store：失败引擎不写空数组，避免把上次的问题「洗白」。
     const tscDiags = tscScan && tscScan.ok ? tscScan.byFile : new Map();
     const eslintDiags = eslintScan && eslintScan.ok ? eslintScan.byFile : new Map();
@@ -669,7 +780,9 @@ function createLspDiagnosticsService(opts) {
               engine: r.engine || '?',
               error: r.error || '引擎未运行',
               detail: r.detail || '',
-              exitCode: r.exitCode == null ? null : r.exitCode
+              exitCode: r.exitCode == null ? null : r.exitCode,
+              // true = 这次连命令都没发（TTL 内已知不可用，见 remoteEngineVerdicts）
+              ...(r.blocked ? { blocked: true } : {})
             }))
           }
         : null)
@@ -689,7 +802,20 @@ function createLspDiagnosticsService(opts) {
         });
       }
     }
-    return { settings, active, cacheSize: cache.size, storeWorkspaces: workspaceStores.size };
+    return {
+      settings,
+      active,
+      cacheSize: cache.size,
+      storeWorkspaces: workspaceStores.size,
+      // 远程引擎负缓存快照：面板/排查用（引擎不可用时，TTL 内不会再发远程命令）
+      remoteEngines: [...remoteEngineVerdicts.entries()].map(([key, v]) => ({
+        key,
+        kind: v.kind,
+        reason: v.reason,
+        skipped: v.skipped,
+        retryInMs: Math.max(0, v.ttlMs - (Date.now() - v.at))
+      }))
+    };
   }
 
   async function shutdown() {
@@ -788,6 +914,8 @@ function createLspDiagnosticsService(opts) {
   }
 
   function stopWorkspaceDiagnosticsWatch(workspaceRoot) {
+    // 停止/重建 watch 时清掉该根的远程引擎负缓存：重连、切工作区后应当重新探测一次。
+    clearRemoteEngineVerdicts(workspaceRoot);
     const wk = workspaceStoreKey(workspaceRoot);
     const bucket = watchState.get(wk);
     if (!bucket) return;
@@ -1099,33 +1227,43 @@ function createLspDiagnosticsService(opts) {
     };
 
     if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
-      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemoteTscBatch(scanOpts)), {
+      upsertRemoteCliEntry(root, abs, await runRemoteEngine(root, 'tsc', () => runRemoteTscBatch(scanOpts)), {
         language: 'typescript',
         server: 'tsc-cli-remote',
         engine: 'tsc'
       });
-      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemoteEslintBatch(scanOpts)), {
+      upsertRemoteCliEntry(root, abs, await runRemoteEngine(root, 'eslint', () => runRemoteEslintBatch(scanOpts)), {
         language: 'javascript',
         server: 'eslint-cli-remote',
         engine: 'eslint'
       });
-      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemotePrettierBatch(scanOpts)), {
-        language: 'javascript',
-        server: 'prettier-cli-remote',
-        engine: 'prettier'
-      });
+      upsertRemoteCliEntry(
+        root,
+        abs,
+        await runRemoteEngine(root, 'prettier', () => runRemotePrettierBatch(scanOpts)),
+        {
+          language: 'javascript',
+          server: 'prettier-cli-remote',
+          engine: 'prettier'
+        }
+      );
     } else if (ext === '.py') {
-      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemoteRuffBatch(scanOpts)), {
+      upsertRemoteCliEntry(root, abs, await runRemoteEngine(root, 'ruff', () => runRemoteRuffBatch(scanOpts)), {
         language: 'python',
         server: 'ruff-cli-remote',
         engine: 'ruff'
       });
     } else if (PRETTIER_FILE_RE.test(abs)) {
-      upsertRemoteCliEntry(root, abs, await settleRemoteBatch(runRemotePrettierBatch(scanOpts)), {
-        language: '',
-        server: 'prettier-cli-remote',
-        engine: 'prettier'
-      });
+      upsertRemoteCliEntry(
+        root,
+        abs,
+        await runRemoteEngine(root, 'prettier', () => runRemotePrettierBatch(scanOpts)),
+        {
+          language: '',
+          server: 'prettier-cli-remote',
+          engine: 'prettier'
+        }
+      );
     }
 
     notifyStoreUpdated(root, abs);

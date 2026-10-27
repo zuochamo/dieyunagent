@@ -285,7 +285,24 @@ flowchart TB
 | 大仓库 TS 分析慢 | 只 didOpen **指定文件**，不 open 全库 |
 | 多 language server 内存 | 每 workspace 每语言单进程 + 空闲 shutdown |
 | SSH 远程 | 不 spawn 本地 LSP；SSH 已连接时在远程跑 `npx typescript --noEmit`（仅 TS）；需 Shell 权限 |
+| SSH 远端没装 tsc/eslint/prettier | 负缓存：结构性失败（命令不存在）后 10 分钟不再发命令，见 §11.1 |
 | 与 Monaco 重复造轮 | **单一 DiagnosticsService**，Monaco 仅订阅 |
+
+### 11.1 远程引擎负缓存（`remoteEngineVerdicts`）
+
+远端没装 `typescript` / `eslint` / `prettier` 时，watch 每来一个脏文件都会重跑三条必然失败的命令
+（`tsc → eslint → prettier`，实测约 1.4s 一轮）并各打一行 `[diagnostics] 远程引擎未运行`。
+打开一个大工程 = 几千条无效 SSH 命令 + 刷屏日志。
+
+处置：`diagnostics-service.js` 里 `runRemoteEngine(root, engine, runFn)` 是**远程引擎调用的唯一出口**
+（`diagnoseFilesRemote` 与 `refreshFileDiagnosticsRemote` 都走它），负责三件事：
+
+| 环节 | 规则 |
+|------|------|
+| 失败分类 | `exit 126/127` 或输出命中 `command not found / could not determine executable / cannot find module / ENOENT` → **结构性**；`exitCode == null`（exec 抛错/超时/断线）→ **瞬时**，不记 |
+| 负缓存 TTL | 结构性 10 分钟、瞬时 1 分钟；TTL 到期删缓存放行一次探测（远端装好依赖后自愈，不用重启）；`stopWorkspaceDiagnosticsWatch` 清掉该根的全部判定 |
+| 日志 | 只在**写判定那一刻**记一行（带「暂停该引擎 N 分钟」提示），TTL 内跳过的不再记；失败仍照实回报到 `diagnoseFilesRemote().failures`（`blocked:true` 表示本轮连命令都没发），绝不把失败洗成「0 个问题」 |
+
 
 ---
 
