@@ -98,6 +98,10 @@ const REMOTE_ENGINE_BLOCK_MS = Object.freeze({ structural: 10 * 60 * 1000, trans
 /** 「工具本身不存在」的签名：包管理器/内核报的这几种，与「代码有问题」不重叠。 */
 const REMOTE_ENGINE_MISSING_RE =
   /command not found|not recognized as an internal|could not determine executable|cannot find module|no such file or directory|ENOENT/i;
+/** 远程项目探测：结果缓存多久（项目加/删配置文件属低频事件）。 */
+const REMOTE_PROJECT_CAPS_TTL_MS = 5 * 60 * 1000;
+/** 探测命令里「配置文件清单」与「package.json 依赖清单」的分隔标记。 */
+const REMOTE_DEPS_MARKER = '--dieyun-deps--';
 
 const WATCH_IGNORE_DIRS = new Set([
   '.git',
@@ -262,6 +266,11 @@ function createLspDiagnosticsService(opts) {
    * @type {Map<string, { at: number, ttlMs: number, kind: string, reason: string, skipped: number }>}
    */
   const remoteEngineVerdicts = new Map();
+  /**
+   * 远程项目「该跑哪些引擎」的探测缓存（`root`），TTL 见 `REMOTE_PROJECT_CAPS_TTL_MS`。
+   * @type {Map<string, { at: number, ok: boolean, engines?: { ts: boolean, eslint: boolean, ruff: boolean, prettier: boolean }, error?: string }>}
+   */
+  const remoteProjectCaps = new Map();
 
   function getWorkspaceBucket(workspaceRoot) {
     const wk = workspaceStoreKey(workspaceRoot);
@@ -553,12 +562,13 @@ function createLspDiagnosticsService(opts) {
     return hit;
   }
 
-  /** 工作区重建（stop / 本地↔SSH 切换）时清掉该根的负缓存，下次从头探测。 */
+  /** 工作区重建（stop / 本地↔SSH 切换）时清掉该根的负缓存与探测缓存，下次从头探测。 */
   function clearRemoteEngineVerdicts(workspaceRoot) {
-    const prefix = `${String(workspaceRoot || '').replace(/\/$/, '').toLowerCase()}|`;
+    const prefix = `${String(workspaceRoot || '').replace(/\/$/, '').toLowerCase()}`;
     for (const key of [...remoteEngineVerdicts.keys()]) {
-      if (key.startsWith(prefix)) remoteEngineVerdicts.delete(key);
+      if (key.startsWith(`${prefix}|`)) remoteEngineVerdicts.delete(key);
     }
+    remoteProjectCaps.delete(prefix);
   }
 
   /**
@@ -663,6 +673,27 @@ function createLspDiagnosticsService(opts) {
       }
     }
 
+    // 先探测项目自带哪些工具，再决定跑谁：项目没配 eslint/prettier 就**不跑**
+    // （`npx -y eslint` 会去拉一个用户没装的 eslint 来指责他的代码风格，那是替用户决定装什么）。
+    const caps = await getRemoteProjectEngines(workspaceRoot, sshExec, timeoutMs);
+    if (!caps.ok) {
+      return {
+        ok: false,
+        error: `远程项目探测失败：${caps.error}`,
+        items: [],
+        skipped,
+        failures: [{ engine: 'probe', error: caps.error || '探测失败', detail: caps.detail || '', exitCode: caps.exitCode == null ? null : caps.exitCode }]
+      };
+    }
+    const want = caps.engines;
+    // 只报「本批文件本来该跑、但项目没配」的引擎：没有 .py 文件时提 ruff 是噪音。
+    const unusedEngines = [
+      tsTargets.length && !want.ts ? 'tsc' : null,
+      eslintTargets.length && !want.eslint ? 'eslint' : null,
+      pyTargets.length && !want.ruff ? 'ruff' : null,
+      prettierTargets.length && !want.prettier ? 'prettier' : null
+    ].filter(Boolean);
+
     const scanOpts = {
       exec: sshExec,
       projectRoot: workspaceRoot,
@@ -672,18 +703,18 @@ function createLspDiagnosticsService(opts) {
     };
 
     const [tscScan, eslintScan, ruffScan, prettierScan] = await Promise.all([
-      tsTargets.length
+      want.ts && tsTargets.length
         ? runRemoteEngine(workspaceRoot, 'tsc', () => runRemoteTscBatch({ ...scanOpts, absPaths: tsTargets }))
         : null,
-      eslintTargets.length
+      want.eslint && eslintTargets.length
         ? runRemoteEngine(workspaceRoot, 'eslint', () =>
             runRemoteEslintBatch({ ...scanOpts, absPaths: eslintTargets })
           )
         : null,
-      pyTargets.length
+      want.ruff && pyTargets.length
         ? runRemoteEngine(workspaceRoot, 'ruff', () => runRemoteRuffBatch({ ...scanOpts, absPaths: pyTargets }))
         : null,
-      prettierTargets.length
+      want.prettier && prettierTargets.length
         ? runRemoteEngine(workspaceRoot, 'prettier', () =>
             runRemotePrettierBatch({ ...scanOpts, absPaths: prettierTargets })
           )
@@ -785,7 +816,9 @@ function createLspDiagnosticsService(opts) {
               ...(r.blocked ? { blocked: true } : {})
             }))
           }
-        : null)
+        : null),
+      // 项目里没有对应工具 ⇒ 这些引擎**故意没跑**（不是失败，也不是「0 个问题」）
+      ...(unusedEngines.length ? { skippedEngines: unusedEngines } : null)
     };
   }
 
@@ -814,6 +847,13 @@ function createLspDiagnosticsService(opts) {
         reason: v.reason,
         skipped: v.skipped,
         retryInMs: Math.max(0, v.ttlMs - (Date.now() - v.at))
+      })),
+      // 远程项目探测快照：哪些引擎是「项目里没有，所以没跑」
+      remoteProjects: [...remoteProjectCaps.entries()].map(([root, v]) => ({
+        root,
+        ok: v.ok !== false,
+        engines: v.ok ? v.engines : null,
+        ...(v.ok ? {} : { error: v.error || '' })
       }))
     };
   }
@@ -1217,6 +1257,14 @@ function createLspDiagnosticsService(opts) {
     const root = String(workspaceRoot || '').replace(/\\/g, '/').replace(/\/$/, '');
     const abs = String(absPath || '').replace(/\\/g, '/');
     const ext = path.extname(abs).toLowerCase();
+    // 探测闸门与 `diagnoseFilesRemote` / 项目扫描**同一来源**：项目没配的工具不跑。
+    // 没有这道闸，watch 会对着「项目里根本没有 eslint」的文件反复 `npx -y eslint`，
+    // 把「用户没装也没用」变成一串引擎失败刷屏。
+    const caps = await getRemoteProjectEngines(root, sshExec, settings.timeoutMs);
+    if (!caps.ok) {
+      return { ok: false, file: abs, skipped: 'probe_failed', error: caps.error || '远程项目探测失败' };
+    }
+    const want = caps.engines;
     const scanOpts = {
       exec: sshExec,
       projectRoot: root,
@@ -1226,34 +1274,56 @@ function createLspDiagnosticsService(opts) {
       maxPerFile: settings.maxPerFile
     };
 
+    const unconfigured = [];
     if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
-      upsertRemoteCliEntry(root, abs, await runRemoteEngine(root, 'tsc', () => runRemoteTscBatch(scanOpts)), {
-        language: 'typescript',
-        server: 'tsc-cli-remote',
-        engine: 'tsc'
-      });
-      upsertRemoteCliEntry(root, abs, await runRemoteEngine(root, 'eslint', () => runRemoteEslintBatch(scanOpts)), {
-        language: 'javascript',
-        server: 'eslint-cli-remote',
-        engine: 'eslint'
-      });
-      upsertRemoteCliEntry(
-        root,
-        abs,
-        await runRemoteEngine(root, 'prettier', () => runRemotePrettierBatch(scanOpts)),
-        {
-          language: 'javascript',
-          server: 'prettier-cli-remote',
-          engine: 'prettier'
-        }
-      );
+      if (want.ts) {
+        upsertRemoteCliEntry(root, abs, await runRemoteEngine(root, 'tsc', () => runRemoteTscBatch(scanOpts)), {
+          language: 'typescript',
+          server: 'tsc-cli-remote',
+          engine: 'tsc'
+        });
+      } else {
+        unconfigured.push('tsc');
+      }
+      if (want.eslint) {
+        upsertRemoteCliEntry(
+          root,
+          abs,
+          await runRemoteEngine(root, 'eslint', () => runRemoteEslintBatch(scanOpts)),
+          {
+            language: 'javascript',
+            server: 'eslint-cli-remote',
+            engine: 'eslint'
+          }
+        );
+      } else {
+        unconfigured.push('eslint');
+      }
+      if (want.prettier) {
+        upsertRemoteCliEntry(
+          root,
+          abs,
+          await runRemoteEngine(root, 'prettier', () => runRemotePrettierBatch(scanOpts)),
+          {
+            language: 'javascript',
+            server: 'prettier-cli-remote',
+            engine: 'prettier'
+          }
+        );
+      } else {
+        unconfigured.push('prettier');
+      }
     } else if (ext === '.py') {
-      upsertRemoteCliEntry(root, abs, await runRemoteEngine(root, 'ruff', () => runRemoteRuffBatch(scanOpts)), {
-        language: 'python',
-        server: 'ruff-cli-remote',
-        engine: 'ruff'
-      });
-    } else if (PRETTIER_FILE_RE.test(abs)) {
+      if (want.ruff) {
+        upsertRemoteCliEntry(root, abs, await runRemoteEngine(root, 'ruff', () => runRemoteRuffBatch(scanOpts)), {
+          language: 'python',
+          server: 'ruff-cli-remote',
+          engine: 'ruff'
+        });
+      } else {
+        unconfigured.push('ruff');
+      }
+    } else if (PRETTIER_FILE_RE.test(abs) && want.prettier) {
       upsertRemoteCliEntry(
         root,
         abs,
@@ -1268,7 +1338,12 @@ function createLspDiagnosticsService(opts) {
 
     notifyStoreUpdated(root, abs);
     const view = getWorkspaceStoreEntry(root, abs);
-    return { ok: true, file: abs, count: view ? view.diagnostics.length : 0 };
+    return {
+      ok: true,
+      file: abs,
+      count: view ? view.diagnostics.length : 0,
+      ...(unconfigured.length ? { skippedEngines: unconfigured } : {})
+    };
   }
 
   async function refreshFileDiagnostics(workspaceRoot, absPath, opts = {}) {
@@ -1518,7 +1593,7 @@ function createLspDiagnosticsService(opts) {
       return { ok: true, enabled: false, mode: 'store', items: [], skipped: [] };
     }
 
-    const workspaceRoot = path.resolve(String(opts.workspaceRoot || ''));
+    const workspaceRoot = watchRootPath(opts.workspaceRoot);
     if (!workspaceRoot) {
       return { ok: false, error: 'workspaceRoot 必填', items: [], skipped: [] };
     }
@@ -1568,6 +1643,7 @@ function createLspDiagnosticsService(opts) {
     );
 
     const skipped = [];
+    const skippedEngines = new Set();
     const toRefresh = [];
     for (const abs of pathMap.values()) {
       const entry = getWorkspaceStoreEntry(workspaceRoot, abs);
@@ -1587,10 +1663,14 @@ function createLspDiagnosticsService(opts) {
 
     for (const abs of toRefresh.slice(0, maxFiles)) {
       if (typeof opts.sshExec === 'function') {
-        await refreshFileDiagnostics(workspaceRoot, abs, {
+        const refreshed = await refreshFileDiagnostics(workspaceRoot, abs, {
           mode: 'ssh',
           sshExec: opts.sshExec
         });
+        // 项目没配的引擎要如实带出去：否则模型/面板只能看到「没有诊断」，分不清「干净」与「没扫」
+        if (refreshed && Array.isArray(refreshed.skippedEngines)) {
+          for (const engine of refreshed.skippedEngines) skippedEngines.add(engine);
+        }
         continue;
       }
       const result = await diagnoseOneLocalFile(abs, {
@@ -1646,6 +1726,7 @@ function createLspDiagnosticsService(opts) {
       workspaceRoot,
       items: items.slice(0, maxFiles),
       skipped,
+      ...(skippedEngines.size ? { skippedEngines: [...skippedEngines] } : null),
       storeSize: outBucket.size,
       projectScan: getProjectScanStatus(workspaceRoot)
     };
@@ -1677,23 +1758,41 @@ function createLspDiagnosticsService(opts) {
    * 会白付四次 `npx -y` 冷启动（慢且耗网络），并把「这个项目没有 eslint 配置」
    * 汇报成「扫描完成，0 个问题」——用户与模型都无法区分「干净」与「没扫」。
    *
+   * 判据也包含 `package.json` 里**声明了**哪些工具：只有 package.json 而没有 eslint 依赖/配置
+   * 的项目不该跑 lint —— `npx -y eslint` 会去拉一个用户没装的 eslint 来指责他的代码风格，
+   * 那是「我们替他决定装什么」，不是他项目的一部分（本地路径同样只跑项目自带的工具）。
+   *
    * @returns {Promise<{ ok: boolean, engines?: {ts:boolean,eslint:boolean,ruff:boolean,prettier:boolean}, error?: string, detail?: string, exitCode?: number|null }>}
    */
   async function probeRemoteProjectEngines(sshExec, workspaceRoot, timeoutMs) {
-    const cmd =
-      'ls -1d tsconfig.json jsconfig.json package.json eslint.config.js eslint.config.mjs ' +
-      "eslint.config.cjs eslint.config.ts .eslintrc .eslintrc.js .eslintrc.cjs .eslintrc.json " +
+    const files =
+      'tsconfig.json jsconfig.json package.json eslint.config.js eslint.config.mjs ' +
+      'eslint.config.cjs eslint.config.ts .eslintrc .eslintrc.js .eslintrc.cjs .eslintrc.json ' +
       'pyproject.toml ruff.toml .ruff.toml setup.cfg .prettierrc .prettierrc.json .prettierrc.js ' +
-      'prettier.config.js 2>/dev/null';
+      '.prettierrc.yml .prettierrc.yaml prettier.config.js prettier.config.mjs';
+    // 一条命令同时拿「有哪些配置文件」与「package.json 声明了哪些工具」：分成两条会让
+    // watch 路径的固定成本翻倍，而这里只需要一个布尔矩阵。
+    const cmd =
+      `ls -1d ${files} 2>/dev/null; ` +
+      `echo '${REMOTE_DEPS_MARKER}'; ` +
+      `grep -oE '"(eslint|prettier|typescript|@typescript-eslint/[a-z-]+|@vue/eslint-config-[a-z-]+)":' package.json 2>/dev/null | head -40`;
     let r;
     try {
       r = await sshExec(cmd, workspaceRoot, Math.min(15000, timeoutMs || 15000));
     } catch (err) {
       return { ok: false, error: err && err.message ? String(err.message) : String(err) };
     }
-    const names = String((r && r.stdout) || '')
+    const stdout = String((r && r.stdout) || '');
+    const markerAt = stdout.indexOf(REMOTE_DEPS_MARKER);
+    const listPart = markerAt >= 0 ? stdout.slice(0, markerAt) : stdout;
+    const depsPart = markerAt >= 0 ? stdout.slice(markerAt + REMOTE_DEPS_MARKER.length) : '';
+    const names = listPart
       .split('\n')
       .map((s) => s.trim().replace(/^\.\//, ''))
+      .filter(Boolean);
+    const deps = depsPart
+      .split('\n')
+      .map((s) => (s.match(/"([^"]+)"/) || [])[1] || '')
       .filter(Boolean);
     // 一条都没列出来未必是「探测失败」：空目录 / 没有上述配置文件都正常。
     // 但 stderr 非空且 exit != 0 时（cd 不进去、目录不存在）必须报错而不是当成空项目。
@@ -1703,16 +1802,40 @@ function createLspDiagnosticsService(opts) {
       return { ok: false, error: `探测命令失败（退出码 ${code}）`, detail: stderr.slice(-400), exitCode: code };
     }
     const has = (re) => names.some((n) => re.test(n));
+    const dep = (name) => deps.includes(name);
     return {
       ok: true,
       engines: {
         ts: has(/^(tsconfig|jsconfig)\.json$/),
-        eslint: has(/^(package\.json|eslint\.config\.|\.eslintrc)/),
+        eslint:
+          has(/^(eslint\.config\.|\.eslintrc)/) ||
+          dep('eslint') ||
+          deps.some((d) => d.startsWith('@typescript-eslint/') || d.startsWith('@vue/eslint-config-')),
         ruff: has(/^(pyproject\.toml|ruff\.toml|\.ruff\.toml|setup\.cfg)$/),
-        prettier: has(/^(package\.json|\.prettierrc|prettier\.config\.)/)
+        prettier: has(/^(\.prettierrc|prettier\.config\.)/) || dep('prettier')
       }
     };
   }
+
+  /**
+   * 探测结果的缓存（`root` 一档，TTL 5 分钟）。
+   *
+   * watch 每来一个脏文件都会问「这个项目该跑哪些引擎」；缓存后固定成本从「每文件一次 ls」
+   * 降到「每 5 分钟一次」。失败也缓存：目录不可读时不该每个文件都去撞一次 SSH。
+   */
+  async function getRemoteProjectEngines(root, sshExec, timeoutMs, opts = {}) {
+    const key = String(root || '').replace(/\/$/, '').toLowerCase();
+    const hit = remoteProjectCaps.get(key);
+    if (!opts.fresh && hit && Date.now() - hit.at < REMOTE_PROJECT_CAPS_TTL_MS) return hit;
+    const fresh = await probeRemoteProjectEngines(sshExec, root, timeoutMs);
+    const entry = { at: Date.now(), ...fresh };
+    remoteProjectCaps.set(key, entry);
+    if (!fresh.ok) {
+      log(`[diagnostics] 远程项目探测失败 root=${root} error=${fresh.error || '未知'}${fresh.detail ? ` detail=${fresh.detail}` : ''}`);
+    }
+    return entry;
+  }
+
 
   async function runWorkspaceProjectScan(opts) {
     const settings = loadLspSettings(userDataPath);
@@ -1745,7 +1868,8 @@ function createLspDiagnosticsService(opts) {
         // 远程必须**先探测项目类型**再决定跑哪些引擎：此前无条件跑 tsc+eslint+ruff+prettier，
         // 对 Go / PHP / 纯文档仓库等于白付四次 npx 冷启动，而且「工具没装/没配置」
         // 和「扫完没问题」被压成同一种结果。一次 ls 的成本远低于四次 npx。
-        const probe = await probeRemoteProjectEngines(opts.sshExec, workspaceRoot, timeoutMs);
+        // 用**同一份**探测（含 watch 路径共用的缓存）；显式扫描要求最新的项目现状。
+        const probe = await getRemoteProjectEngines(workspaceRoot, opts.sshExec, timeoutMs, { fresh: true });
         if (!probe.ok) {
           const result = {
             ok: false,

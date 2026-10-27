@@ -285,17 +285,32 @@ flowchart TB
 | 大仓库 TS 分析慢 | 只 didOpen **指定文件**，不 open 全库 |
 | 多 language server 内存 | 每 workspace 每语言单进程 + 空闲 shutdown |
 | SSH 远程 | 不 spawn 本地 LSP；SSH 已连接时在远程跑 `npx -y -p typescript tsc --noEmit`（仅 TS）；需 Shell 权限 |
-| SSH 远端没装 tsc/eslint/prettier | 负缓存：结构性失败（命令不存在）后 10 分钟不再发命令，见 §11.1 |
+| SSH 远端没装/没配某工具 | **闸门**：项目里没有就不跑（`skippedEngines` 说明原因）；跑了却失败才进负缓存，见 §11.1 |
 | 与 Monaco 重复造轮 | **单一 DiagnosticsService**，Monaco 仅订阅 |
 
-### 11.1 远程引擎负缓存（`remoteEngineVerdicts`）
+### 11.1 远程诊断的两道闸门（`remoteProjectCaps` / `remoteEngineVerdicts`）
 
-远端没装 `typescript` / `eslint` / `prettier` 时，watch 每来一个脏文件都会重跑三条必然失败的命令
-（`tsc → eslint → prettier`，实测约 1.4s 一轮）并各打一行 `[diagnostics] 远程引擎未运行`。
-打开一个大工程 = 几千条无效 SSH 命令 + 刷屏日志。
+**设计口径：不需要用户手动装任何东西，也不需要手动写配置。** 判据是「项目自己有没有这个东西」——
+和本地路径（`findWorkspaceEslintProjectRoot` 等）同一个口径；VS Code / Cursor 也是只在项目配了
+eslint 时才 lint。项目没有 eslint 配置、也没有 eslint 依赖，就不跑 lint，而不是 `npx -y` 拉一个
+用户从没装过的 eslint 来指责他写的代码风格。
 
-处置：`diagnostics-service.js` 里 `runRemoteEngine(root, engine, runFn)` 是**远程引擎调用的唯一出口**
-（`diagnoseFilesRemote` 与 `refreshFileDiagnosticsRemote` 都走它），负责三件事：
+**闸门一：先探测，再决定跑谁**（`probeRemoteProjectEngines` → `getRemoteProjectEngines`）
+
+一条 SSH 命令同时拿「根目录有哪些配置文件」与「`package.json` 声明了哪些工具」
+（`ls …; echo --dieyun-deps--; grep -oE '"…":' package.json`），结果按 root 缓存 5 分钟：
+
+| 引擎 | 跑的条件 |
+|------|----------|
+| `tsc` | `tsconfig.json` / `jsconfig.json` 存在 |
+| `eslint` | `eslint.config.*` / `.eslintrc*` 存在，或 `package.json` 声明 `eslint` / `@typescript-eslint/*` / `@vue/eslint-config-*` |
+| `prettier` | `.prettierrc*` / `prettier.config.*` 存在，或 `package.json` 声明 `prettier` |
+| `ruff` | `pyproject.toml` / `ruff.toml` / `.ruff.toml` / `setup.cfg` 存在 |
+
+没跑的引擎进 `skippedEngines`（不是 `failures`）：调用方/模型能区分「干净」与「没扫」。
+项目扫描、`diagnoseFilesRemote`、watch 三条路径共用这一份探测（项目扫描取 `{fresh:true}`）。
+
+**闸门二：跑了却失败，压成 TTL 一次**（`runRemoteEngine` 是远程引擎调用的唯一出口）
 
 | 环节 | 规则 |
 |------|------|
@@ -303,11 +318,18 @@ flowchart TB
 | 负缓存 TTL | 结构性 10 分钟、瞬时 1 分钟；TTL 到期删缓存放行一次探测（远端装好依赖后自愈，不用重启）；`stopWorkspaceDiagnosticsWatch` 清掉该根的全部判定 |
 | 日志 | 只在**写判定那一刻**记一行（带「暂停该引擎 N 分钟」提示），TTL 内跳过的不再记；失败仍照实回报到 `diagnoseFilesRemote().failures`（`blocked:true` 表示本轮连命令都没发），绝不把失败洗成「0 个问题」 |
 
+**为什么之前会刷屏**（2026-10-27 线上日志）：watch 每来一个脏文件就把 `tsc → eslint → prettier`
+重跑一遍（约 1.4s 一轮、每轮三行日志）。闸门一让「项目里没有」的工具根本不进调用，
+闸门二让「确实坏了」的工具 10 分钟才探测一次 —— 6 个文件的批量刷新从 18 条远程命令降到 4 条。
+
 另一个独立根因：远程 tsc 命令原来写的是 `npx -y typescript --noEmit`。包 `typescript` 有两个 bin
 （`tsc` / `tsserver`），npx 无法自行选定 → 在装了 typescript 5.x 的机器上**必报**
 `npm error could not determine executable to run`（本地实测 5.8.3 复现），远程 tsc 从来就没跑起来过。
 现已统一为 `npx -y -p typescript tsc --noEmit --pretty false`（与 §5 里 language server 的写法一致），
 本地兜底 `resolveTscCommand` 的 npx 分支也一并修正。
+
+**已知限制**：探测只看工作区根目录。monorepo 若把 `tsconfig` / eslint 配置放在子包里，根目录探测不到
+（与项目扫描口径一致；后续若需要，应把探测做成「按目录缓存」而不是每文件重跑）。
 
 
 ---
