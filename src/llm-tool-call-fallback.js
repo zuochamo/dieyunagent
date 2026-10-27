@@ -68,7 +68,8 @@ const TOOL_PARAM_NAMES = new Set([
   'browser_expect',
   'browser_visual_diff',
   'browser_status',
-  'browser_close'
+  'browser_close',
+  'computer'
 ]);
 
 function genToolCallId(index) {

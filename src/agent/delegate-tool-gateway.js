@@ -83,6 +83,21 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       return gateway.invokeRpc('host.open_url', { url: a.url });
     case 'host_print_image':
       return gateway.invokeRpc('host.print_image', withRunWorkspace({ filePath: resolvePath(a.filePath) }));
+    case 'computer': {
+      const params = {
+        action: a.action,
+        button: a.button,
+        text: a.text,
+        key: a.key,
+        direction: a.direction,
+        amount: a.amount,
+        ms: a.ms,
+        display: a.display
+      };
+      if (Array.isArray(a.coordinate)) params.coordinate = a.coordinate;
+      if (Array.isArray(a.to)) params.to = a.to;
+      return gateway.invokeRpc('computer.action', withRunWorkspace(params));
+    }
     case 'host_exec':
       return gateway.invokeRpc(
         'host.exec',

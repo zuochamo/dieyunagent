@@ -316,7 +316,9 @@ const SANDBOX_CATEGORIES = Object.freeze({
   READ: 'read',
   WRITE: 'write',
   NETWORK: 'network',
-  DANGEROUS: 'dangerous'
+  DANGEROUS: 'dangerous',
+  /** computer 工具的鼠标/键盘输入动作（截屏属于读，走开关即同意，不进审批）。 */
+  OS_CONTROL: 'os-control'
 });
 
 function normPath(p) {
@@ -555,6 +557,55 @@ function decideFsWrite(absPath, opts = {}) {
 }
 
 /**
+ * computer 工具中**只读**的动作：screenshot 是读屏、wait 只是等时间，不改变系统状态。
+ *
+ * 白名单**倒置**是刻意的：除这两个之外的一切 action（包括以后新增的、被拼错的、
+ * 上游校验漏掉的）一律按「会改变系统状态」处理。动作枚举在 tool-validate 与
+ * computer/service 各有一份，若在此正列为「输入动作」集合，任何一处新增动作忘了同步
+ * 这里就会变成无审批直通；倒置后最坏结果只是「多问用户一次」。
+ */
+const OS_CONTROL_READ_ONLY_ACTIONS = new Set(['screenshot', 'wait']);
+
+/**
+ * computer 工具（OS 级电脑控制）的档位判定。结构化动作、无路径语义，
+ * 所以这是第三个判定入口（前两个：shell 文本 decideShellCommand、fs 路径 decideFsWrite）。
+ *
+ * 口径：
+ * - screenshot / wait 是只读 —— 电脑控制总开关（permissions.osControl）本身就是用户同意，
+ *   档位不再拦（否则 read-only 档连「看一眼」都做不到，开关形同虚设）；
+ * - 其余动作改变系统状态 —— 非 danger-full-access 档问一次，
+ *   审批记忆是「会话 × os-control 类别」（无路径，scope='-'）；
+ * - SANDBOX_DENY_LIST 是 shell 命令词表，与本判定正交（computer 不走 shell）。
+ *
+ * @param {string} action computer 工具的 action 值
+ * @param {{ mode?: string }} [opts]
+ */
+function decideOsControlAction(action, opts = {}) {
+  const mode = normalizeSandboxMode(opts.mode);
+  const meta = SANDBOX_MODE_META[mode];
+  const act = String(action || '');
+  const isReadOnly = OS_CONTROL_READ_ONLY_ACTIONS.has(act);
+
+  if (isReadOnly || mode === 'danger-full-access') {
+    return {
+      action: 'allow',
+      category: SANDBOX_CATEGORIES.OS_CONTROL,
+      reason: isReadOnly
+        ? '截屏/等待属只读，电脑控制开关已同意。'
+        : '当前为完全放开档，直接放行。',
+      mode
+    };
+  }
+  return {
+    action: 'ask',
+    category: SANDBOX_CATEGORIES.OS_CONTROL,
+    reason: `当前档位「${meta.label}」下，操作本机鼠标/键盘需要你同意一次（本会话有效）。`,
+    mode,
+    detail: `动作：${act}`
+  };
+}
+
+/**
  * 越界被拒后给模型的话术：**必须包含"不要重试"**，否则模型会反复撞同一堵墙，
  * 把步数预算烧在不可能成功的调用上（这也是判定结果要带 category 的原因）。
  */
@@ -610,5 +661,6 @@ module.exports = {
   extractPathTokens,
   decideShellCommand,
   decideFsWrite,
+  decideOsControlAction,
   sandboxErrorFor
 };

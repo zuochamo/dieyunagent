@@ -97,6 +97,13 @@ const AGENT_LIMITS_DEFAULTS = {
   // 两个计费口径都从本值换算：字符口径 session-context.contentCharLen、
   // token 口径 token-estimate.IMAGE_PART_EQUIV_TOKENS（Rust 同值见 compaction/tokens.rs）。
   visionPartEqChars: 6000,
+  // 电脑控制（computer 工具）输入参数上限。动作枚举/坐标形状等结构校验在
+  // tool-validate，这里只放数字上限（AGENTS.md §6：数字护栏唯一来源）。
+  computerTextMaxLen: 2000,
+  computerKeyMaxLen: 64,
+  computerScrollMaxNotches: 10,
+  computerWaitMinMs: 50,
+  computerWaitMaxMs: 10000,
   // 字符→token 折算系数（上下文账本 / 用量估算用）。与 visionPartEqChars 同为「折算系数」
   // 而非策略上限，故意不上设置页。Rust 侧同值见
   // crates/dieyun-core/src/compaction/tokens.rs::estimate_text_tokens。

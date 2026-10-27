@@ -4,6 +4,14 @@
   --accent-dark: #e889b5;
 }
 
+/* ---------- 字体（单一来源）----------
+   界面/正文文本与等宽文本各只有一套栈：其它地方一律引用 --font-ui / --font-mono，
+   不要再就地写一串字体名（移动端、更新窗口在各自 CSS 里声明同名变量，值保持一致）。 */
+:root {
+  --font-ui: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -13,7 +21,7 @@ body {
   margin: 0;
   width: 100%;
   height: 100%;
-  font-family: 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+  font-family: var(--font-ui);
   background: #12151f;
   color: var(--text);
   overflow: hidden;

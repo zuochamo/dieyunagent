@@ -1557,6 +1557,51 @@ const SUBAGENT_TOOL = {
 
 const GRAPH_TOOLS = [GRAPH_TOOL];
 
+/**
+ * OS 级电脑控制（截屏 + 鼠标键盘注入）。单一工具、action 枚举（Anthropic computer use 同构）：
+ * 每个输入动作后自动截图走视觉管线回传，模型「动一下看一眼」，不需要显式补 screenshot。
+ * 注入条件：permissions.osControl 开关（renderer-tool-defs），审批与档位判定在 gateway。
+ */
+const COMPUTER_TOOL = {
+  type: 'function',
+  function: {
+    name: 'computer',
+    description:
+      '控制本机屏幕（OS 级电脑控制）：截屏、移动/点击鼠标、键盘输入、滚动、拖拽、等待。' +
+      '坐标系 = 你最近一次看到的截图的像素（左上角为原点）；多显示器时默认落在你看到的那块屏，可用 display 指定。' +
+      '正确用法：先 action=screenshot 看清画面，再发动作；每个输入动作都会自动返回最新截图，据此决定下一步，不要凭记忆连点。' +
+      'action 取值：screenshot | click | double_click | right_click | middle_click | move | drag | type | key | scroll | wait。' +
+      '无法操作需要管理员权限的窗口（UIPI）；首次操作鼠标/键盘会请求用户批准。本工具操作的是叠云所在机器的物理屏幕。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          description: 'screenshot | click | double_click | right_click | middle_click | move | drag | type | key | scroll | wait'
+        },
+        coordinate: {
+          type: 'array',
+          items: { type: 'number' },
+          description: '[x, y] 截图像素坐标。click/double_click/right_click/middle_click/move 必填（省略则在当前光标位置点击）；drag 为起点；scroll 可选（先移过去再滚）'
+        },
+        to: { type: 'array', items: { type: 'number' }, description: 'drag：终点坐标 [x, y]' },
+        button: { type: 'string', description: 'click/drag 用的鼠标键：left（默认）| right | middle' },
+        text: { type: 'string', description: 'type：要输入的文本（支持中文；\\n 会按回车键发送）。type 必填' },
+        key: {
+          type: 'string',
+          description:
+            'key：组合键，如 "ctrl+c"、"alt+f4"、"win"、"enter"、"ctrl+shift+esc"。支持 win/ctrl/alt/shift 修饰键。key 必填'
+        },
+        direction: { type: 'string', description: 'scroll：up | down（默认 down）' },
+        amount: { type: 'number', description: 'scroll：滚动格数（默认 3）' },
+        ms: { type: 'number', description: 'wait：等待毫秒（50–10000），给界面加载留时间' },
+        display: { type: 'number', description: '多显示器时的屏幕序号（0 = 主屏）；默认沿用你最近一次截图的屏幕' }
+      },
+      required: ['action']
+    }
+  }
+};
+
 const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   WEB_TOOLS,
   BROWSER_TOOLS,
@@ -1564,7 +1609,8 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   GRAPH_TOOLS,
   [AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL],
   PLAN_TOOLS,
-  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SUBAGENT_TOOL]
+  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SUBAGENT_TOOL],
+  [COMPUTER_TOOL]
 );
 
 const BY_NAME = Object.create(null);
@@ -1613,6 +1659,7 @@ module.exports = {
   MCP_TOOL_SCHEMA_TOOL,
   CLARIFY_TOOL,
   SUBAGENT_TOOL,
+  COMPUTER_TOOL,
   ALL_STATIC_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
   RENDERER_ONLY_TOOLS,

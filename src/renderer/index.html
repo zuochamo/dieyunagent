@@ -1131,6 +1131,7 @@
           <button type="button" class="settings-nav-item" data-settings-tab="theme" data-i18n="settings_theme">主题</button>
           <button type="button" class="settings-nav-item" data-settings-tab="worktrees" data-i18n="settings_worktrees">Worktree</button>
           <button type="button" class="settings-nav-item" data-settings-tab="perms" data-i18n="settings_perms">权限</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="sandbox" data-i18n="settings_sandbox">沙箱</button>
           <button type="button" class="settings-nav-item" data-settings-tab="agent-knowledge" data-i18n="settings_agent_knowledge">知识</button>
           <div class="settings-nav-group-label" data-i18n="settings_extensions">扩展</div>
           <button type="button" class="settings-nav-item" data-settings-action="components" data-i18n="settings_components">组件</button>
@@ -1252,7 +1253,6 @@
               </div>
             </div>
             <div class="settings-page" data-settings="worktrees">
-              <p class="settings-page-desc">Plan 隔离副本的磁盘管理与自动清理。字段含义、SSH 限制见 <strong>帮助 → 使用说明 → Worktree</strong>。</p>
               <div class="settings-runtime-section">
                 <h3 class="settings-subsection-title">自动清理</h3>
                 <div class="worktrees-cleanup-fields">
@@ -1298,53 +1298,64 @@
                   <input type="checkbox" id="theme-auto-launch" checked />
                   <span data-i18n="theme_auto_launch">开机自启</span>
                 </label>
-                <p class="settings-page-desc theme-auto-launch-hint" id="theme-auto-launch-hint" data-i18n="theme_auto_launch_hint" hidden>开发模式下不可用；请使用安装包。</p>
+                <p class="settings-page-desc check-row-hint auto-launch-hint" data-i18n="theme_auto_launch_desc">随系统启动自动打开叠云 Agent（安装版可用）。</p>
+                <p class="settings-page-desc check-row-hint theme-auto-launch-hint" id="theme-auto-launch-hint" data-i18n="theme_auto_launch_hint" hidden>开发模式下不可用；请使用安装包。</p>
               </div>
               <label class="check-row"><input type="checkbox" id="perm-host-control" checked /><span>启用本机控制</span></label>
-              <div class="settings-field sandbox-mode-field">
-                <label for="perm-sandbox-mode" class="settings-field-label">沙箱档位</label>
-                <select id="perm-sandbox-mode">
-                  <option value="read-only">只读：只看不改，写文件会先问你</option>
-                  <option value="workspace-write" selected>工作区内可写（默认）：出工作区先问你</option>
-                  <option value="danger-full-access">完全放开：整盘可写，仅限完全信任的任务</option>
-                </select>
-                <p class="settings-page-desc" id="perm-sandbox-hint">越界操作会弹一次确认，允许后本会话内同类不再问。</p>
-              </div>
-              <label class="check-row"><input type="checkbox" id="perm-unrestricted-paths" /><span>完全放开路径限制（= 沙箱档位「完全放开」）</span></label>
+              <p class="settings-page-desc check-row-hint host-control-hint">总开关：关掉后 Agent 不能执行命令、读写本机文件、打开链接/浏览器，也不能做电脑控制，只剩联网抓取按自己的开关生效。</p>
+              <label class="check-row"><input type="checkbox" id="perm-os-control" /><span>启用电脑控制</span></label>
+              <p class="settings-page-desc check-row-hint os-control-hint">Agent 可截屏并操作鼠标键盘；鼠标键盘动作首次使用会请求确认。</p>
               <label class="check-row"><input type="checkbox" id="perm-lsp-diagnostics" checked /><span>启用 LSP 诊断注入</span></label>
+              <p class="settings-page-desc check-row-hint lsp-diagnostics-hint">改完源码后把语言服务器报的错（类型、语法、未定义符号）自动带回给 Agent，让它自己发现编译不过的地方；关掉后只能靠跑命令暴露错误。</p>
               <label class="check-row"><input type="checkbox" id="perm-workplace-monitor" checked /><span>工位监控上报</span></label>
-              <label class="check-row"><input type="checkbox" id="codebase-auto-incremental" checked /><span>代码索引：保存源文件或打开工作区后，自动后台增量更新（含向量）</span></label>
-              <label class="check-row"><input type="checkbox" id="graph-auto-incremental" checked /><span>结构索引：保存源文件或打开工作区后，自动后台增量更新</span></label>
+              <p class="settings-page-desc check-row-hint workplace-monitor-hint">每 5 秒把本机状态（CPU/内存、机器码、版本、公网 IP、今日键鼠活跃度）推给监控服务端；开启时会钩住全系统键盘鼠标计数。关掉即停止钩子与上报，本地功能不受影响。</p>
+              <label class="check-row"><input type="checkbox" id="codebase-auto-incremental" checked /><span>代码索引</span></label>
+              <p class="settings-page-desc check-row-hint codebase-auto-hint">保存源文件或打开工作区后，自动后台增量更新（含向量）。</p>
+              <label class="check-row"><input type="checkbox" id="graph-auto-incremental" checked /><span>结构索引</span></label>
+              <p class="settings-page-desc check-row-hint graph-auto-hint">保存源文件或打开工作区后，自动后台增量更新。</p>
               <div class="theme-long-horizon-options">
                 <label class="check-row" id="theme-long-horizon-row">
                   <input type="checkbox" id="theme-long-horizon" />
                   <span data-i18n="theme_long_horizon">长程 Agent 任务</span>
                 </label>
+                <p class="settings-page-desc check-row-hint long-horizon-hint">长任务档：把单轮步数、连续工具调用、续跑轮次的预算放大约 2 倍（仍有硬顶）并允许分段续跑；普通会话建议关着，省时间与费用。</p>
               </div>
               <span class="save-hint" id="perms-hint"></span>
             </div>
+            <div class="settings-page" data-settings="sandbox">
+              <p class="settings-page-desc">Agent 读写磁盘、执行命令、联网抓取的越界边界。改这里即时生效，也决定越界时要不要先问你。</p>
+              <div class="settings-field sandbox-mode-field">
+                <nav class="settings-segmented-tabs sandbox-mode-tabs" id="perm-sandbox-mode" role="radiogroup" aria-label="沙箱档位">
+                  <button type="button" class="settings-segmented-tab sandbox-mode-tab" data-mode="read-only">只读</button>
+                  <button type="button" class="settings-segmented-tab sandbox-mode-tab" data-mode="workspace-write">工作区内可写</button>
+                  <button type="button" class="settings-segmented-tab sandbox-mode-tab" data-mode="danger-full-access">完全放开</button>
+                </nav>
+              </div>
+              <hr class="settings-section-divider" />
+              <h3 class="settings-subsection-title">三档的边界</h3>
+              <p class="settings-page-desc"><strong>只读</strong>：不落盘。写文件、已知会改文件的命令，逐次弹确认。</p>
+              <p class="settings-page-desc"><strong>工作区内可写</strong>：工作区内直接改；写工作区外、装到系统目录、联网等越界动作先问一次。</p>
+              <p class="settings-page-desc"><strong>完全放开</strong>：整盘可写可跑，不再询问。高危命令（卸载、格式化、删系统目录等）在任何档位下都拒绝。</p>
+              <p class="settings-page-desc">输入区右侧的路径权限图标与这里同一件事：点一下等价于切到「完全放开」或退回上一档。</p>
+            </div>
             <div class="settings-page" data-settings="agent-knowledge">
               <h3 class="settings-subsection-title">全局用户规则 · dieyun.md</h3>
-              <div class="defined-model-toolbar">
-                <button type="button" class="ghost-btn" id="dieyun-md-open">编辑</button>
-              </div>
-              <p class="settings-page-desc">跨项目的个人偏好（语言、风格、编码习惯）。项目命令与目录请维护下方 AGENTS.md。</p>
               <div class="field agents-md-mode-field dieyun-md-inject-field">
                 <span class="field-label">注入模式</span>
-                <nav class="settings-segmented-tabs dieyun-md-inject-tabs" role="radiogroup" aria-label="dieyun.md 注入模式">
+                <nav class="settings-segmented-tabs dieyun-md-inject-tabs" aria-label="dieyun.md 注入模式与编辑">
                   <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="always" title="每轮对话都注入全文">始终</button>
                   <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="auto" title="仅注入与本轮查询命中的章节；无命中则不注入">自动</button>
                   <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="manual" title="输入 @dieyun.md 时注入">手动</button>
+                  <button type="button" class="settings-segmented-tab settings-segmented-tab-action" id="dieyun-md-open" title="用系统默认编辑器打开 dieyun.md">编辑</button>
                 </nav>
                 <div class="dieyun-md-path-row">
                   <code class="settings-path-hint" id="dieyun-md-path"></code>
                   <span class="save-hint" id="dieyun-md-settings-hint"></span>
                 </div>
               </div>
+              <p class="settings-page-desc">跨项目的个人偏好（语言、风格、编码习惯）。项目命令与目录请维护下方 AGENTS.md。</p>
               <hr class="settings-section-divider" />
               <h3 class="settings-subsection-title">项目地图 · AGENTS.md</h3>
-              <p class="settings-page-desc">维护当前工作空间 <code>.dieyun/AGENTS.md</code>：记录目录结构、常用命令与项目约定。任务完成或 Agent 工具提议的变更，在<strong>自动合并</strong>模式下可经 Diff 预览后采纳。<br />
-                <strong>文件上限 24,000 字</strong>（超出时按段裁剪，不再整段丢弃）；<strong>每轮只注入其中约 13,500 字</strong>的「概览 + 踩坑 + 命令」三段，其余段由 Agent 按需读取。维护记录只保留最近 5 条。</p>
               <div class="field agents-md-mode-field">
                 <span class="field-label">维护模式</span>
                 <nav class="settings-segmented-tabs" id="agents-md-mode-tabs" role="radiogroup" aria-label="维护模式">
@@ -1358,11 +1369,10 @@
                 <button type="button" class="ghost-btn" id="agents-md-review-pending" hidden>查看待采纳变更</button>
                 <span class="save-hint" id="agents-md-settings-hint"></span>
               </div>
+              <p class="settings-page-desc">维护当前工作空间 <code>.dieyun/AGENTS.md</code>：记录目录结构、常用命令与项目约定。任务完成或 Agent 工具提议的变更，在<strong>自动合并</strong>模式下可经 Diff 预览后采纳。<br />
+                <strong>文件上限 24,000 字</strong>（超出时按段裁剪，不再整段丢弃）；<strong>每轮只注入其中约 13,500 字</strong>的「概览 + 踩坑 + 命令」三段，其余段由 Agent 按需读取。维护记录只保留最近 5 条。</p>
               <hr class="settings-section-divider" />
               <h3 class="settings-subsection-title">定时知识归纳</h3>
-              <p class="settings-page-desc">
-                后台按间隔调用<strong>当前对话模型</strong>，对照近期对话整理长期记忆、项目记忆，并可归纳 AGENTS.md（受下方各模块开关约束）。衰减与向量重建仍由程序执行。
-              </p>
               <div class="field agents-md-mode-field">
                 <span class="field-label">运行模式</span>
                 <nav class="settings-segmented-tabs" id="knowledge-consol-mode-tabs" role="radiogroup" aria-label="定时知识归纳模式">
@@ -1388,6 +1398,9 @@
                   <label class="check-row"><input type="checkbox" data-scope="agents" checked /><span>AGENTS.md</span></label>
                 </div>
               </div>
+              <p class="settings-page-desc">
+                后台按间隔调用<strong>当前对话模型</strong>，对照近期对话整理长期记忆、项目记忆，并可归纳 AGENTS.md（受上方各模块开关约束）。衰减与向量重建仍由程序执行。
+              </p>
               <span class="save-hint" id="knowledge-consol-hint"></span>
               <p class="settings-path-hint" id="knowledge-consol-status" style="margin-top:0.4rem"></p>
             </div>

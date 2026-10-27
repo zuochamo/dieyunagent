@@ -13,6 +13,12 @@ const DEFAULTS = {
   webFetch: true,
   browserAutomation: true,
   /**
+   * OS 级电脑控制（computer 工具：截屏 + 鼠标键盘注入）。默认关：
+   * 打开即代表同意 Agent 读屏（截屏不再走审批），鼠标/键盘动作仍按
+   * sandbox-policy 的档位判定 ask-once（danger-full-access 除外）。
+   */
+  osControl: false,
+  /**
    * 沙箱档位（唯一旋钮）：`read-only` | `workspace-write` | `danger-full-access`。
    * 语义与判定在 `sandbox-policy.js`；落盘白名单的唯一组装点是
    * gateway/server.js `_collectReadRoots/_collectWritableRoots`（远程侧同源
@@ -21,7 +27,7 @@ const DEFAULTS = {
   sandboxMode: DEFAULT_SANDBOX_MODE,
   /**
    * 历史字段：仅作为 `sandboxMode === 'danger-full-access'` 的**派生视图**保留，
-   * 供设置页开关与输入区图标读取（它们表达的是同一件事）。
+   * 供输入区快捷图标与设置页下拉读取（它们表达的是同一件事；设置页不再有独立复选框）。
    * 写入时会自动折算成 sandboxMode —— 不要在别处再读它做判定。
    */
   unrestrictedPaths: false

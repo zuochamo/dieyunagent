@@ -97,6 +97,7 @@ function summarizeLineDiff(beforeText, afterText) {
  *   getEmbeddingConfig?: () => object
  *   onPluginsChanged?: Function
  *   browser?: import('../browser/service').createBrowserService extends (...args: any[]) => infer R ? R : never | null
+ *   computer?: ReturnType<import('../computer/service').createComputerService> | null
  *   ssh?: ReturnType<import('../ssh/session-manager').createSshSessionManager> | null
  *   getWorkspaceTarget?: () => import('../workspace/target').WorkspaceTarget | null
  *   isSshWorkspaceConnected?: () => boolean
@@ -115,6 +116,7 @@ function createRpcHandlers(ctx) {
   const defaultCwd = ctx.defaultCwd || null;
   const plugins = ctx.plugins || null;
   const browser = ctx.browser || null;
+  const computer = ctx.computer || null;
   const ssh = ctx.ssh || null;
   const portForwardManager = ctx.portForwardManager || null;
   const turnUndo = ctx.turnUndo || null;
@@ -1306,6 +1308,23 @@ function createRpcHandlers(ctx) {
     }
   }
 
+  /** computer 工具总开关：hostControl 之下再要 osControl（默认关，设置页开启）。 */
+  function assertOsControlEnabled() {
+    assertHostEnabled(ctx);
+    if (!perms.osControl) {
+      const e = new Error('电脑控制未启用：请在 设置 → 权限 打开「启用电脑控制」');
+      e.code = 'OS_CONTROL_DISABLED';
+      e.retryable = false;
+      e.suggestedFix = '不要重试；告知用户到设置页开启电脑控制后再继续。';
+      throw e;
+    }
+    if (!computer) {
+      const e = new Error('电脑控制服务未初始化');
+      e.code = 'COMPUTER_UNAVAILABLE';
+      throw e;
+    }
+  }
+
   function getActiveEmbeddingConfig() {
     if (typeof ctx.getEmbeddingConfig !== 'function') return {};
     try {
@@ -2032,11 +2051,13 @@ function createRpcHandlers(ctx) {
     openExternalUrl,
     printImage,
     assertBrowserEnabled,
+    assertOsControlEnabled,
     resolveBrowserNavigateUrl,
     parseRemotePreviewTarget,
     sshTargetKey,
     portForwardManager,
     browser,
+    computer,
     roots,
     writable,
     turnUndo,

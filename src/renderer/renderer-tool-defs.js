@@ -317,6 +317,8 @@ const MCP_TOOL_SCHEMA_TOOL = _tc.MCP_TOOL_SCHEMA_TOOL;
 const CLARIFY_TOOL = _tc.CLARIFY_TOOL;
 // 只读并发调研子 Agent：schema 单一来源在 src/agent/tool-catalog.js（Main 执行）。
 const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
+// OS 级电脑控制（截屏 + 鼠标键盘）：schema 单一来源同上，注入受 osControl 开关控制。
+const COMPUTER_TOOL = _tc.COMPUTER_TOOL || null;
 const isWeakToolCallerModel = _tc.isWeakToolCallerModel || function () { return false; };
 const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return entry && entry.tool; };
 
@@ -333,12 +335,13 @@ async function loadPluginToolsForAgent() {
 
 async function getHostToolFlags() {
   if (!gwState.authed || !toolDefsApi.getPermissions) {
-    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false };
+    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false };
   }
   try {
     const p = await toolDefsApi.getPermissions();
     const webFetch = p?.webFetch !== false;
     const browser = p?.browserAutomation !== false;
+    const osControl = p?.osControl === true;
     if (!p || !p.hostControl) {
       return {
         openUrl: false,
@@ -347,6 +350,7 @@ async function getHostToolFlags() {
         fsWrite: false,
         webFetch,
         browser: false,
+        osControl: false,
         hostControl: false
       };
     }
@@ -357,10 +361,11 @@ async function getHostToolFlags() {
       fsRead: !!p.fsRead,
       fsWrite: !!p.fsWrite,
       webFetch,
-      browser
+      browser,
+      osControl
     };
   } catch {
-    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false };
+    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false };
   }
 }
 
@@ -457,6 +462,10 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   }
   if (host.browser && !weakModel && (await shouldExposeAdvancedBrowserTools(prepSid))) {
     tools.push(...BROWSER_ADVANCED_TOOLS);
+  }
+  // 电脑控制：开关即同意读屏；坐标点击对弱模型不可靠，与 browser 高级工具同样不给弱模型。
+  if (host.osControl && !weakModel && COMPUTER_TOOL) {
+    tools.push(COMPUTER_TOOL);
   }
   if (gwState.authed) {
     tools.push(CODEBASE_TOOL);

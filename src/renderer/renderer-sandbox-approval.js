@@ -15,7 +15,8 @@ const SANDBOX_CATEGORY_LABEL = {
   write: '写文件',
   network: '联网',
   read: '读取',
-  dangerous: '高危操作'
+  dangerous: '高危操作',
+  'os-control': '电脑控制'
 };
 
 const SANDBOX_MODE_LABEL = {

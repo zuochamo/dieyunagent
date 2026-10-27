@@ -35,6 +35,9 @@ async function syncPermissionsToMain() {
 
     hostControl: $('perm-host-control')?.checked !== false,
 
+    // 电脑控制（computer 工具：截屏 + 鼠标键盘）：默认关，用户显式打开即同意读屏
+    osControl: $('perm-os-control')?.checked === true,
+
     // 读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、UI 不提供开关；
     // 显式回写 true，纠正历史持久化里的关闭值
     fsRead: true,
@@ -47,13 +50,11 @@ async function syncPermissionsToMain() {
 
     browserAutomation: true,
 
-    // 沙箱档位是文件/命令越界的唯一旋钮；「完全放开路径限制」开关是它的派生视图
-    // （勾上 = danger-full-access）。两者在 UI 里互相同步，落盘只认 sandboxMode。
-    sandboxMode: $('perm-unrestricted-paths')?.checked === true
-      ? 'danger-full-access'
-      : $('perm-sandbox-mode')?.value || 'workspace-write',
-
-    unrestrictedPaths: $('perm-unrestricted-paths')?.checked === true
+    // 沙箱档位是文件/命令/电脑控制越界的唯一旋钮；设置页只认分段点选，
+    // 「完全放开路径限制」的快捷入口在输入区图标（toggleComposerPathPerm），
+    // 它切换后会把点选组一起拉齐 —— 两处是同一旋钮的两个视图，落盘只认 sandboxMode。
+    // unrestrictedPaths 不从这里发：Gateway normalizePermissions 会按 sandboxMode 派生。
+    sandboxMode: getSelectedSandboxMode() || 'workspace-write'
 
   };
 
@@ -136,7 +137,7 @@ async function loadPermissionsUI() {
 
     if ($('perm-host-control')) $('perm-host-control').checked = !!p.hostControl;
 
-    if ($('perm-unrestricted-paths')) $('perm-unrestricted-paths').checked = p.unrestrictedPaths === true;
+    if ($('perm-os-control')) $('perm-os-control').checked = p.osControl === true;
 
     renderSandboxModeUI(p.sandboxMode, p.unrestrictedPaths === true);
 
@@ -196,7 +197,7 @@ function bindPermissionCheckboxes() {
 
     'perm-host-control',
 
-    'perm-unrestricted-paths'
+    'perm-os-control'
 
   ].forEach((id) => {
 
@@ -241,8 +242,8 @@ function initPermissionsUI() {
 }
 
 // ---------- 输入区「完全放开路径限制」快捷开关 ----------
-// 状态唯一落盘点是 permissions.unrestrictedPaths（Gateway），设置页与输入区图标都只是它的视图：
-// 这里切换后必须回写设置页 checkbox，SetPermissions 是从 checkbox 读值写盘的。
+// 状态唯一落盘点是 permissions.sandboxMode（Gateway），设置页下拉与输入区图标都只是它的视图：
+// 这里切换后必须把设置页下拉一起拉齐（renderSandboxModeUI），否则两处视图会对不上。
 const COMPOSER_PATH_PERM_TITLES = {
 
   restricted: '路径权限：受白名单限制（点击完全放开）',
@@ -266,10 +267,6 @@ function renderComposerPathPerm(unrestricted) {
     btn.title = on ? COMPOSER_PATH_PERM_TITLES.unrestricted : COMPOSER_PATH_PERM_TITLES.restricted;
 
   }
-
-  const box = $('perm-unrestricted-paths');
-
-  if (box) box.checked = on;
 
 }
 
@@ -372,19 +369,26 @@ function initComposerPathPerm() {
 
 }
 
-const SANDBOX_MODE_HINT = {
+const SANDBOX_MODE_TABS_ID = 'perm-sandbox-mode';
 
-  'read-only': '只看不改：写文件、已知会改文件的命令都会先弹一次确认（脚本内部的写盘无法逐条判断）。',
+function getSelectedSandboxMode() {
+  const group = $(SANDBOX_MODE_TABS_ID);
+  return group?.querySelector('.sandbox-mode-tab.active')?.dataset.mode || null;
+}
 
-  'workspace-write': '工作区内随便改；写工作区之外、装到系统目录这类动作会先弹一次确认。',
-
-  'danger-full-access': '整盘可写可跑，不再询问。只在你完全信任当前任务时使用。'
-
-};
+function setSelectedSandboxMode(value) {
+  const group = $(SANDBOX_MODE_TABS_ID);
+  if (!group) return;
+  group.querySelectorAll('.sandbox-mode-tab').forEach((btn) => {
+    const active = btn.dataset.mode === value;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
+}
 
 /**
 
- * 档位下拉与「完全放开路径限制」开关是同一件事的两种表达：始终互相同步，
+ * 档位点选组与输入区「完全放开路径限制」图标是同一件事的两种表达：始终互相同步，
 
  * 落盘只认 sandboxMode（Gateway `permissions-store.normalizePermissions` 负责折算）。
 
@@ -401,57 +405,30 @@ function rememberNonDangerMode(mode) {
 
 function renderSandboxModeUI(mode, dangerToggle) {
 
-  const select = $('perm-sandbox-mode');
-
-  const checkbox = $('perm-unrestricted-paths');
-
   const value = dangerToggle === true ? 'danger-full-access' : mode || 'workspace-write';
 
-  if (select) select.value = value;
-
-  if (checkbox) checkbox.checked = value === 'danger-full-access';
+  setSelectedSandboxMode(value);
 
   rememberNonDangerMode(value);
-
-  const hint = $('perm-sandbox-hint');
-
-  if (hint) hint.textContent = SANDBOX_MODE_HINT[value] || '';
 
 }
 
 function initSandboxModeControls() {
 
-  const select = $('perm-sandbox-mode');
+  document.querySelectorAll(`#${SANDBOX_MODE_TABS_ID} .sandbox-mode-tab`).forEach((btn) => {
 
-  const checkbox = $('perm-unrestricted-paths');
+    btn.addEventListener('click', () => {
 
-  if (select) {
+      if (btn.classList.contains('active')) return;
 
-    select.addEventListener('change', () => {
-
-      if (checkbox) checkbox.checked = select.value === 'danger-full-access';
-
-      const hint = $('perm-sandbox-hint');
-
-      if (hint) hint.textContent = SANDBOX_MODE_HINT[select.value] || '';
+      setSelectedSandboxMode(btn.dataset.mode);
 
       // 档位是唯一旋钮：选完必须落盘，否则「只读」只是界面上好看（重开设置就被改回旧值）
       void syncPermissionsToMain();
 
     });
 
-  }
-
-  if (checkbox) {
-
-    checkbox.addEventListener('change', () => {
-
-      // 勾上 = 完全放开；取消 = 回到上一次的非放开档（不能停在 danger，也不能硬写 workspace-write）
-      renderSandboxModeUI(checkbox.checked ? 'danger-full-access' : rememberNonDangerMode(), checkbox.checked);
-
-    });
-
-  }
+  });
 
 }
 

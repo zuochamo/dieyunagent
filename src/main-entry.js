@@ -29,6 +29,7 @@ const { createCoreBridge } = require('./core-bridge');
 const { resolveDieyunCoreBinary, isRustCoreEnabled } = require('./core-bridge-path');
 const { createStatusOutbox } = require('./monitor/status-outbox');
 const { createBrowserService } = require('./browser/service');
+const { createComputerService } = require('./computer/service');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const QRCode = require('qrcode');
@@ -224,6 +225,8 @@ let agentService = null;
 let mobileBridge = null;
 /** @type {ReturnType<createBrowserService> | null} */
 let browserService = null;
+/** @type {ReturnType<import('./computer/service').createComputerService> | null} */
+let computerService = null;
 let windowTray = null;
 let autoLaunch = null;
 
@@ -559,6 +562,13 @@ app.whenReady().then(async () => {
     localGateway.setBrowser(browserService);
   } catch (e) {
     log.error('浏览器服务注册失败:', e);
+  }
+  try {
+    computerService = createComputerService({ log: (m) => log.info(m) });
+    localGateway.setComputer(computerService);
+  } catch (e) {
+    log.error('电脑控制服务注册失败:', e);
+    computerService = null;
   }
   agentCoordinator = new AgentRunCoordinator();
   agentService = new AgentService({

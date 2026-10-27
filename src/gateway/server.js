@@ -137,6 +137,8 @@ class LocalGateway {
     this.plugins.loadUserPlugins();
     /** @type {ReturnType<import('../browser/service').createBrowserService> | null} */
     this.browser = opts.browser || null;
+    /** @type {ReturnType<import('../computer/service').createComputerService> | null} */
+    this.computer = opts.computer || null;
     /** @type {ReturnType<import('../ssh/session-manager').createSshSessionManager> | null} */
     this.ssh = opts.ssh || null;
     this.getRemoteAgentInfo = typeof opts.getRemoteAgentInfo === 'function' ? opts.getRemoteAgentInfo : () => null;
@@ -271,6 +273,11 @@ class LocalGateway {
 
   setBrowser(browser) {
     this.browser = browser || null;
+    this._refreshHandlers();
+  }
+
+  setComputer(computer) {
+    this.computer = computer || null;
     this._refreshHandlers();
   }
 
@@ -809,6 +816,7 @@ class LocalGateway {
         this._refreshHandlers();
       },
       browser: this.browser,
+      computer: this.computer,
       ssh: this.ssh,
       portForwardManager: this.portForwardManager,
       getWorkspaceTarget: () => this.getWorkspaceTarget(),

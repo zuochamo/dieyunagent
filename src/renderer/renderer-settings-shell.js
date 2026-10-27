@@ -8,6 +8,7 @@ const SETTINGS_TITLE_KEYS = {
   worktrees: ['settings_worktrees', 'Worktree'],
   plugins: ['settings_plugins', '插件'],
   perms: ['settings_perms', '权限'],
+  sandbox: ['settings_sandbox', '沙箱'],
   'agent-knowledge': ['settings_agent_knowledge', '知识']
 };
 const MODEL_TAB_TITLE_KEYS = {
@@ -137,8 +138,10 @@ function switchSettingsTab(tab) {
   });
   const titleEl = $('settings-main-title');
   if (titleEl) titleEl.textContent = titleFromMap(SETTINGS_TITLE_KEYS, tab, tab);
-  if (tab === 'perms') {
+  if (tab === 'perms' || tab === 'sandbox') {
     loadPermissionsUI().catch(() => {});
+  }
+  if (tab === 'perms') {
     if (typeof window.syncThemeAutoLaunchToggle === 'function') {
       window.syncThemeAutoLaunchToggle();
     }

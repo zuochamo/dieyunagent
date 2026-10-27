@@ -14,6 +14,7 @@ const { createLspWorkspaceHandlers } = require('./lsp-workspace');
 const { createFsHandlers } = require('./fs');
 const { createHostHandlers } = require('./host');
 const { createBrowserHandlers } = require('./browser');
+const { createComputerHandlers } = require('./computer');
 const { createUndoHandlers } = require('./undo');
 const { createScmHandlers } = require('./scm');
 const { createWorkspaceHandlers } = require('./workspace');
@@ -38,6 +39,7 @@ function createExtractedHandlers(deps) {
     ...createFsHandlers(deps),
     ...createHostHandlers(deps),
     ...createBrowserHandlers(deps),
+    ...createComputerHandlers(deps),
     ...createUndoHandlers(deps),
     ...createScmHandlers(deps),
     ...createWorkspaceHandlers(deps)

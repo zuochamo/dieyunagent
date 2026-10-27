@@ -93,6 +93,18 @@
       "docs": ["docs/AGENT-DEV.md"]
     },
     {
+      "id": "computer-control",
+      "paths": ["src/computer/", "src/gateway/handlers/computer.js"],
+      "owns": [
+        "computer 工具（OS 级电脑控制：截屏 + 鼠标键盘注入）",
+        "Win32 输入注入（koffi + SendInput，N-API 预编译免 ABI 重建）",
+        "desktopCapturer 截屏与 DPI 坐标换算（coordinate-map 纯函数）",
+        "动作编排（点击/双击/拖拽/输入/组合键/滚动/等待，动后自动截图）"
+      ],
+      "tests": ["test:unit"],
+      "docs": ["docs/SANDBOX.md"]
+    },
+    {
       "id": "lsp",
       "paths": ["src/lsp/"],
       "owns": [

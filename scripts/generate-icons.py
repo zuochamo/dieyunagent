@@ -8,7 +8,7 @@
 尺寸自适应（同一份美术、一套配方）：
   ≥48px  描边加粗（512 网格上膨胀 +10px，缩到 48px 仍有约 3.6px 粗）
   ≤32px  描边会退化到 1px 以下，改用同一轮廓的实心剪影（16px 才有实体感）
-  统一   6% 安全边距、#303037 底色（与深色任务栏拉开层次）、22% 圆角
+  统一   6% 安全边距、#000000 纯黑底色、22% 圆角
 
 小尺寸（≤32px）正是 Windows 任务栏 / 托盘 / Alt-Tab 的实际显示尺寸，所以另外出
 assets/icon-tray.png（实心版 64px）：Electron 的 nativeImage 读 ICO 只能拿到最大帧，
@@ -30,7 +30,7 @@ MASTER_PX = 512
 STROKE_LUM = 140          # 「亮色线稿」的亮度阈值
 TILE_INSET = 0.06         # 安全边距（占整图比例）
 TILE_RADIUS = 0.22        # 圆角（占卡片边长比例）
-TILE_COLOR = (48, 48, 55, 255)
+TILE_COLOR = (0, 0, 0, 255)
 MARK_COLOR = (255, 255, 255, 255)
 SOLID_MAX_PX = 32         # ≤ 此值改实心剪影
 STROKE_BOLD_PASSES = 5    # 5 趟 3x3 最大值滤波 = 描边 +10px（512 网格）

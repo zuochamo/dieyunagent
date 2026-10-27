@@ -53,6 +53,9 @@ const MUTATING_TOOL_NAMES = Object.freeze(
     'fs_write_file',
     'fs_edit',
     'host_print_image',
+    // computer（OS 级电脑控制）整体按名字进串行队列：动作天然必须串行
+    // （截屏→点→看→点），并行投递只会互相踩；screenshot 也随工具名一同串行，代价可忽略。
+    'computer',
     'skill_create',
     'plan_create',
     'plan_delete',

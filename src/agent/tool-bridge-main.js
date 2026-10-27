@@ -48,6 +48,25 @@ function isVisionImageReadRequest(toolName, args) {
 function sanitizeToolResultForApi(name, result) {
   if (result == null) return result;
   if (typeof result !== 'object') return result;
+  if (name === 'computer' && result.base64) {
+    // 与 browser_screenshot 同一策略：base64 从工具 payload 剥离（走视觉缓冲注入下一轮），
+    // 结果里只留动作事实（坐标/前台窗口/截图尺寸），模型据此衔接下一步。
+    return {
+      ok: result.ok,
+      action: result.action,
+      display: result.display,
+      primary: result.primary,
+      screen: result.screen,
+      cursor: result.cursor,
+      activeWindow: result.activeWindow,
+      mime: result.mime,
+      width: result.width,
+      height: result.height,
+      base64Omitted: true,
+      base64Length: String(result.base64).length,
+      note: result.note || '已截取当前屏幕画面；PNG 不随本工具结果返回，将作为视觉输入附到下一轮'
+    };
+  }
   if (name === 'browser_screenshot' && result.base64) {
     return {
       ok: result.ok,
@@ -499,7 +518,18 @@ function createMainToolBridge(deps) {
           id: 'record-browser-screenshot',
           stage: 'after',
           run(c) {
-            if (!visionEnabled || !ctx.runId) return;
+            if (!ctx.runId) return;
+            if (!visionEnabled) {
+              // 文本模型：截图照常剥离，但要明说「看不到」，否则模型以为画面已入眼
+              if (c.name === 'computer' && c.result && c.result.base64) {
+                c.result = {
+                  ...c.result,
+                  note:
+                    '当前模型未开启视觉输入，这张截图不会被看到。请让用户在模型设置里选择多模态模型后重试，或改用文本途径（host_exec / browser_snapshot）获取信息。'
+                };
+              }
+              return;
+            }
             try {
               recordBrowserScreenshot(ctx.runId, c.name, c.result, visionLimits);
             } catch {

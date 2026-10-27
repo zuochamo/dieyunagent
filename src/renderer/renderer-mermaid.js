@@ -12,7 +12,7 @@ const MERMAID_BASE_OPTIONS = {
   startOnLoad: false,
   theme: 'neutral',
   securityLevel: 'loose',
-  fontFamily: 'Segoe UI, system-ui, sans-serif',
+  fontFamily: "'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif",
   flowchart: { htmlLabels: false, curve: 'basis' }
 };
 

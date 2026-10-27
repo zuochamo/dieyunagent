@@ -12,7 +12,7 @@ module.exports = {
   ],
   overrides: [
     {
-      files: ['src/agent/**/*.js', 'scripts/test-*.cjs'],
+      files: ['src/agent/**/*.js', 'src/computer/**/*.js', 'scripts/test-*.cjs'],
       env: { node: true, es2022: true },
       parserOptions: { ecmaVersion: 2022 },
       extends: ['eslint:recommended'],

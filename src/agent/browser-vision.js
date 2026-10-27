@@ -13,6 +13,7 @@
  * - `mcp`：MCP 工具返回的图片（如 blender-mcp 的 look / viewport_capture 视口截图）。
  *   MCP 结果里的 image part 过去被降级成 `[image]` 文本，模型只能知道「有张图」
  *   却看不到像素——3D 建模「看一眼再改」的闭环就断在这里。
+ * - `computer`：computer 工具（OS 级电脑控制）每次动作后自动截取的本机屏幕画面。
  *
  * 约束（与 dieyun-core 的 strip_inline_images_from_messages 同源策略一致）：
  * - 只暂存、不写入 Rust 消息账本，也不进 checkpoint，避免 base64 长期驻留与重复发送；
@@ -29,6 +30,7 @@ const { normalizeVisionImageMime } = require('./guardrails-shared');
 const SOURCE_BROWSER = 'browser';
 const SOURCE_ATTACHMENT = 'attachment';
 const SOURCE_MCP = 'mcp';
+const SOURCE_COMPUTER = 'computer';
 
 /** 兼容旧调用方的常量（现由 agent-limits 单一来源，此处仅做再导出） */
 const MAX_SHOTS_PER_RUN = AGENT_LIMITS_DEFAULTS.visionShotsPerRound;
@@ -63,7 +65,10 @@ function resolveVisionLimits(limits) {
       ),
       // MCP 图（视口截图/渲染预览）属「工具隐式产出」，与浏览器截图同口径：
       // 每轮最多 visionShotsPerRound 张，超了挤掉最旧的（保留最新画面）。
-      [SOURCE_MCP]: toPositiveInt(l.visionShotsPerRound, MAX_SHOTS_PER_RUN)
+      [SOURCE_MCP]: toPositiveInt(l.visionShotsPerRound, MAX_SHOTS_PER_RUN),
+      // 电脑控制截图（computer 工具）同口径：动作后自动截图，满额挤旧留新 ——
+      // 模型要的永远是「最新一屏」。
+      [SOURCE_COMPUTER]: toPositiveInt(l.visionShotsPerRound, MAX_SHOTS_PER_RUN)
     },
     maxBase64Chars: toPositiveInt(l.visionMaxBase64Chars, MAX_BASE64_CHARS)
   };
@@ -81,6 +86,11 @@ function extractShot(toolName, result) {
     mime = result.mime || mime;
     width = result.width;
     height = result.height;
+  } else if (toolName === 'computer' && typeof result.base64 === 'string') {
+    base64 = result.base64;
+    mime = result.mime || mime;
+    width = result.width;
+    height = result.height;
   } else if (
     toolName === 'browser_observe' &&
     result.screenshot &&
@@ -94,7 +104,7 @@ function extractShot(toolName, result) {
     return null;
   }
   if (!base64) return null;
-  return { source: SOURCE_BROWSER, tool: toolName, mime, base64, width, height };
+  return { source: toolName === 'computer' ? SOURCE_COMPUTER : SOURCE_BROWSER, tool: toolName, mime, base64, width, height };
 }
 
 /**
@@ -127,7 +137,9 @@ function recordVisionImage(runId, entry, limits, opts = {}) {
       ? SOURCE_ATTACHMENT
       : entry.source === SOURCE_MCP
         ? SOURCE_MCP
-        : SOURCE_BROWSER;
+        : entry.source === SOURCE_COMPUTER
+          ? SOURCE_COMPUTER
+          : SOURCE_BROWSER;
   const cap = cfg.maxPerSource[source] || 0;
   if (!(cap > 0)) return false;
 
@@ -222,6 +234,13 @@ function buildVisionMessage(images) {
         '请据此做视觉判断（构图、光照、比例、模型朝向等）；数值仍以工具返回的结构化字段为准。'
     );
   }
+  const computer = list.filter((s) => s.source === SOURCE_COMPUTER);
+  if (computer.length) {
+    lines.push(
+      `以下是电脑屏幕当前画面截图（${computer.length} 张）。请据此决定 computer 工具的下一步动作；` +
+        'coordinate 直接用截图里的像素位置（左上角为原点），最后一张截图就是当前画面。'
+    );
+  }
   return {
     role: 'user',
     content: [
@@ -238,9 +257,11 @@ module.exports = {
   SOURCE_BROWSER,
   SOURCE_ATTACHMENT,
   SOURCE_MCP,
+  SOURCE_COMPUTER,
   MAX_SHOTS_PER_RUN,
   MAX_BASE64_CHARS,
   resolveVisionLimits,
+  extractShot,
   recordVisionImage,
   recordBrowserScreenshot,
   takePendingVisionImages,

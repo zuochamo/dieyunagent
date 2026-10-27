@@ -2,6 +2,174 @@
 
 const { validateShellCommand } = require('../gateway/exec-policy');
 const { GRAPH_LEGACY_OPS, GRAPH_OPERATIONS, fsEditArgsPresent } = require('./guardrails-shared');
+// 数字护栏单一来源（AGENTS.md §6）：computer 输入长度上限只改 agent-limits。
+const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+
+const COMPUTER_ACTIONS = [
+  'screenshot',
+  'click',
+  'double_click',
+  'right_click',
+  'middle_click',
+  'move',
+  'drag',
+  'type',
+  'key',
+  'scroll',
+  'wait'
+];
+const COMPUTER_CLICK_ACTIONS = new Set(['click', 'double_click', 'right_click', 'middle_click']);
+
+/** 校验 [x, y] 坐标：二元数值数组（像素坐标，允许小数/越界由执行端钳制）。 */
+function computerPointOk(v) {
+  return (
+    Array.isArray(v) &&
+    v.length === 2 &&
+    Number.isFinite(Number(v[0])) &&
+    Number.isFinite(Number(v[1]))
+  );
+}
+
+/**
+ * computer 工具参数校验（形状与枚举；档位/审批在 gateway，坐标换算在 computer/service）。
+ */
+function validateComputerArgs(a) {
+  const act = String(a.action || '');
+  if (!COMPUTER_ACTIONS.includes(act)) {
+    return {
+      ok: false,
+      error: `computer 未知动作「${act}」`,
+      errorCode: 'INVALID_ACTION',
+      retryable: false,
+      suggestedFix: `action 取值：${COMPUTER_ACTIONS.join(' | ')}`
+    };
+  }
+  if (COMPUTER_CLICK_ACTIONS.has(act) || act === 'move' || act === 'drag') {
+    if (act === 'drag' || act === 'move') {
+      // move/drag 必须给坐标（没有「移到当前光标」的语义）；click 家族可省略=在当前位置点
+      if (!computerPointOk(a.coordinate)) {
+        return {
+          ok: false,
+          error: `computer ${act} 需要 coordinate（[x, y] 截图像素坐标）`,
+          errorCode: 'MISSING_ARG',
+          retryable: false,
+          suggestedFix: '先 action=screenshot 看画面，再按截图里的像素位置传 coordinate'
+        };
+      }
+    } else if (a.coordinate != null && !computerPointOk(a.coordinate)) {
+      return {
+        ok: false,
+        error: 'coordinate 必须是 [x, y] 两个数字',
+        errorCode: 'INVALID_ARG',
+        retryable: false
+      };
+    }
+    if (act === 'drag') {
+      if (!computerPointOk(a.to)) {
+        return {
+          ok: false,
+          error: 'computer drag 需要 to（终点 [x, y]）',
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+    }
+    if (a.button != null && !['left', 'right', 'middle'].includes(String(a.button))) {
+      return {
+        ok: false,
+        error: `button 取值 left|right|middle，收到「${a.button}」`,
+        errorCode: 'INVALID_ARG',
+        retryable: false
+      };
+    }
+    return { ok: true };
+  }
+  if (act === 'type') {
+    const text = String(a.text == null ? '' : a.text);
+    if (!text) {
+      return {
+        ok: false,
+        error: 'computer type 需要 text',
+        errorCode: 'MISSING_ARG',
+        retryable: false
+      };
+    }
+    if (text.length > AGENT_LIMITS_DEFAULTS.computerTextMaxLen) {
+      return {
+        ok: false,
+        error: `text 超长（${text.length} > ${AGENT_LIMITS_DEFAULTS.computerTextMaxLen}）`,
+        errorCode: 'INVALID_ARG',
+        retryable: false,
+        suggestedFix: '分段输入：先 type 前半段，再 type 后半段'
+      };
+    }
+    return { ok: true };
+  }
+  if (act === 'key') {
+    const key = String(a.key == null ? '' : a.key).trim();
+    if (!key) {
+      return { ok: false, error: 'computer key 需要 key（如 "ctrl+c"）', errorCode: 'MISSING_ARG', retryable: false };
+    }
+    if (key.length > AGENT_LIMITS_DEFAULTS.computerKeyMaxLen) {
+      return {
+        ok: false,
+        error: `key 超长（> ${AGENT_LIMITS_DEFAULTS.computerKeyMaxLen}）`,
+        errorCode: 'INVALID_ARG',
+        retryable: false
+      };
+    }
+    // 键名合法性在执行端 parseKeyCombo 判（那里有完整 VK 表与具体报错），
+    // 这里只挡明显结构性错误：纯数字坐标等类型错误。
+    if (!/^[A-Za-z0-9+]+$/.test(key)) {
+      return {
+        ok: false,
+        error: `key 含非法字符（只支持字母/数字 + 「+」分隔）`,
+        errorCode: 'INVALID_ARG',
+        retryable: false,
+        suggestedFix: '修饰键 win/ctrl/alt/shift，主键如 enter/tab/f1/a/1'
+      };
+    }
+    return { ok: true };
+  }
+  if (act === 'scroll') {
+    if (a.direction != null && !['up', 'down'].includes(String(a.direction))) {
+      return {
+        ok: false,
+        error: `direction 取值 up|down，收到「${a.direction}」`,
+        errorCode: 'INVALID_ARG',
+        retryable: false
+      };
+    }
+    if (a.amount != null) {
+      const n = Number(a.amount);
+      if (!Number.isFinite(n) || n < 1 || n > AGENT_LIMITS_DEFAULTS.computerScrollMaxNotches) {
+        return {
+          ok: false,
+          error: `amount 需在 1–${AGENT_LIMITS_DEFAULTS.computerScrollMaxNotches}`,
+          errorCode: 'INVALID_ARG',
+          retryable: false,
+          suggestedFix: '大距离滚动分多次调用，中间看截图调整'
+        };
+      }
+    }
+    return { ok: true };
+  }
+  if (act === 'wait') {
+    const n = Number(a.ms);
+    if (!Number.isFinite(n) || n < AGENT_LIMITS_DEFAULTS.computerWaitMinMs || n > AGENT_LIMITS_DEFAULTS.computerWaitMaxMs) {
+      return {
+        ok: false,
+        error: `wait 的 ms 需在 ${AGENT_LIMITS_DEFAULTS.computerWaitMinMs}–${AGENT_LIMITS_DEFAULTS.computerWaitMaxMs}`,
+        errorCode: 'INVALID_ARG',
+        retryable: false
+      };
+    }
+    return { ok: true };
+  }
+  // screenshot：无附加参数
+  return { ok: true };
+}
+
 
 function isHttpUrl(s) {
   try {
@@ -130,6 +298,8 @@ function validateToolArgs(name, args, opts) {
   }
 
   switch (n) {
+    case 'computer':
+      return validateComputerArgs(a);
     case 'host_exec': {
       const cmd = String(a.command || '').trim();
       if (!cmd) {
@@ -542,6 +712,7 @@ function validateToolArgs(name, args, opts) {
 
 module.exports = {
   validateToolArgs,
+  validateComputerArgs,
   validateMcpInputArgs,
   isHttpUrl,
   applyPatchUnsupported

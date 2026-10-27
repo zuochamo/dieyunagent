@@ -120,6 +120,30 @@
 浏览器产物（截图 / PDF）走同一条判定：`writeArtifact` 先 `assertSandboxWritable`，
 再 `assertAllowedPath(rawPath, writeRootsForCall())` —— 指示"存到某路径"时不能只查白名单不查沙箱。
 
+### 3.1 第三个判定入口：computer（OS 级电脑控制）
+
+`computer` 工具（截屏 + 鼠标键盘注入，`src/computer/`）是结构化动作、无路径语义，
+判定入口是 `sandbox-policy.decideOsControlAction`：
+
+- **总开关**：`permissions.osControl`（默认关，设置页「启用电脑控制」）。打开即代表
+  同意读屏 —— `action=screenshot` 在任何档位直接放行，不走审批（否则开关形同虚设）。
+- **只读动作**：仅 `screenshot` / `wait`。判定是**白名单倒置**的 —— 除这两个之外的一切
+  action（含以后新增的、拼错的、上游漏校验的）都按「会改变系统状态」处理：非
+  `danger-full-access` 档**问一次**，类别 `os-control`、无路径（scope=`-`）→ 审批记忆是
+  「会话 × 类别」级；完全放开档放行。动作枚举在 tool-validate 与 service 各有一份，
+  倒置保证「漏登记」的最坏结果是多问一次，而不是静默无审批直通。
+- `SANDBOX_DENY_LIST` 是 shell 命令词表，与 computer 正交（它不走 shell，不进 `guardShell`）。
+- computer 控制的是**叠云所在机器**的屏幕；SSH 远程工作区下明确不支持
+  （`REMOTE_OS_CONTROL_UNSUPPORTED`，同 host.print_image 的立场）。
+- 职责分层：`src/computer/service.js` 是纯执行体（Win32 注入 + desktopCapturer 截图 +
+  坐标换算），档位判定在 `sandbox-policy.js`、审批在 handler（`gateway/handlers/computer.js`），
+  与 host.exec 的三层同构。参数数字上限在 `agent-limits.js`（`computer*` 字段）。
+- 多显示器两条硬口径（`src/computer/capture.js`，改前必读注释）：捕获源只能按
+  `display_id === String(Display.id)` 匹配（`Display` 上没有 `displayId` 字段，且
+  `getSources()` 顺序与 `getAllDisplays()` 不一致，按序号猜会截到另一块屏）；
+  显示器物理原点只能问系统 `screen.dipToScreenPoint`（`bounds.x × 本屏 scaleFactor`
+  在混合 DPI 下会偏，实测 960px 且区间与主屏重叠）。`display` 序号恒以主屏为 0。
+
 拒绝话术里**必须包含"不要重试"**（`sandboxErrorFor` 统一生成）：否则模型会反复撞同一堵墙，
 把步数预算烧在不可能成功的调用上。
 
@@ -127,9 +151,11 @@
 
 ## 4. 设置与观测
 
-- 设置页「沙箱档位」下拉 = 唯一旋钮；「完全放开路径限制」开关是它的派生视图（勾上 = danger），
-  输入区图标点一下也等价。三者互相同步，落盘只认 `sandboxMode`。
-  下拉切换后会立刻回写并重绘三处视图 —— 以前下拉只写存储不重绘，开关状态会和档位对不上。
+- 设置页独立「沙箱」标签页里的档位点选 = 唯一旋钮（该页只放这一个旋钮，权限页不再重复展示；
+  设置页也没有独立的「完全放开路径限制」复选框——它与档位是同一件事，纯重复展示已删）；
+  「完全放开」的快捷入口是输入区图标，点一下等价于切档。图标与档位点选是同一旋钮的两个视图，
+  互相同步，落盘只认 `sandboxMode`。
+  切换后会立刻回写并重绘视图 —— 以前只写存储不重绘，开关状态会和档位对不上。
 - `permissions.sandbox_state` RPC：返回 `mode`、`writableRoots`、`internalRoots`、`workspaceRoots`、
   本会话已批准的 `grants`（含 `scope` 目录）、`sessionId`、`remoteGoverned`（排查"为什么被拦"）。
 - 日志前缀：`SANDBOX_ASK` / `SANDBOX_GRANTED` / `SANDBOX_DECLINED` / `SANDBOX_APPROVED` /
@@ -160,4 +186,5 @@
 | `npm run test:sandbox-policy` | 三档判定矩阵、路径抽取（含 `/E` 不是路径）、命令位高危词、拒绝话术与错误码、批准粒度（会话×类别×目录、卷根退化）、fail-closed、过期 |
 | `npm run test:sandbox-gateway` | 真 Gateway + 真文件 + 真命令：档位切换、越界询问、批准后落盘、拒绝不留文件、高危命令恒拒、read-only 可写根不含 `~/.dieyun`、档位收紧清批准、无通道错误码、`host.exec` 引号（带空格路径） |
 | `npm run test:sandbox-real` | **真实项目验收**：把本仓库当工作区。真 git 只读命令放行、`grep -rn shutdown src/` 不被当关机、程序路径带空格、绝对路径/`cmd /c` 包装的解释器在 read-only 下必问、默认工作区写入必问、收紧档位清批准。临时目录测不出的坑都在这一层 |
+| `npx vitest run test/unit/computer-*.test.cjs` | computer 判定口径（截屏放行 / 输入 ask-once / danger 放行）、组合键解析与安全序列拒绝、坐标换算（DPI/多屏/比例校正）、参数校验、出站净化剥 base64、视觉缓冲 computer 来源挤旧留新 |
 | `npm run test:local-gateway-smoke` | 白名单随档位变化，`unrestrictedPaths` 开关往返 |

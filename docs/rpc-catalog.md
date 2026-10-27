@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-10-24T01:43:21.453Z
+生成时间：2026-10-27T00:09:11.669Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 195 |
-| Gateway only | 117 |
+| 总计 | 196 |
+| Gateway only | 118 |
 | Rust only | 24 |
 | Both | 54 |
 
@@ -100,6 +100,12 @@
 | `compaction.estimate` | rust | — | yes |
 | `compaction.maybe_compact` | rust | — | yes |
 | `compaction.prepare` | rust | — | yes |
+
+### computer (1)
+
+| Method | Layer | Gateway source | Rust |
+|--------|-------|----------------|------|
+| `computer.action` | gateway | gateway/handlers/computer.js | — |
 
 ### core (2)
 

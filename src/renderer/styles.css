@@ -31,6 +31,14 @@
   --text-primary: #e8e8e8;
 }
 
+/* ---------- 字体（单一来源）----------
+   界面/正文文本与等宽文本各只有一套栈：其它地方一律引用 --font-ui / --font-mono，
+   不要再就地写一串字体名（移动端、更新窗口在各自 CSS 里声明同名变量，值保持一致）。 */
+:root {
+  --font-ui: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
 :root[data-theme='light'] {
   --bg: #f0f2f7;
   --chat-pane-bg: rgba(255, 255, 255, 0.96);
@@ -141,7 +149,7 @@ body {
 }
 
 body {
-  font-family: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: 13px;
   color: var(--text);
   background: var(--bg);
@@ -202,7 +210,7 @@ body {
 
 .titlebar-update-progress {
   display: block;
-  font-family: ui-monospace, 'Cascadia Code', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.03em;
   color: var(--titlebar-text);
@@ -490,55 +498,53 @@ body {
 .skills-search::placeholder {
   color: var(--text-dim);
 }
+/* 无框标签条：仿浏览器标签，项与项之间用 / 分隔，选中只靠文字层级表达 */
 .skills-category-tabs {
   display: flex;
   flex-wrap: nowrap;
-  gap: 10px;
+  align-items: baseline;
+  gap: 0;
   flex-shrink: 0;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 4px 2px 10px;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.skills-category-tabs::-webkit-scrollbar {
+  height: 0;
 }
 .skills-category-tab {
+  position: relative;
   flex: 0 0 auto;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 0;
   background: transparent;
   color: var(--text-dim);
   font-family: inherit;
   font-size: 13px;
   line-height: 1.2;
-  padding: 7px 16px;
+  padding: 4px 8px;
   cursor: pointer;
   white-space: nowrap;
   font-weight: normal;
-  transition:
-    background 0.15s ease,
-    color 0.15s ease,
-    border-color 0.15s ease;
+  transition: color 0.15s ease;
+}
+.skills-category-tab + .skills-category-tab::before {
+  content: '/';
+  margin-right: 8px;
+  color: var(--text-mute);
+  pointer-events: none;
 }
 .skills-category-tab:hover {
   color: var(--text);
-  border-color: var(--text-dim);
-  background: rgba(128, 128, 128, 0.08);
+  background: transparent;
 }
 .skills-category-tab.active {
   color: var(--text);
-  border-color: var(--text);
-  background: rgba(128, 128, 128, 0.12);
+  background: transparent;
   font-weight: 600;
   box-shadow: none;
-}
-:root:not([data-theme='light']) .skills-category-tab {
-  background: transparent;
-  border-color: var(--border);
-  color: var(--text-dim);
-}
-:root:not([data-theme='light']) .skills-category-tab.active {
-  color: var(--text);
-  border-color: var(--accent-dark);
-  background: rgba(255, 255, 255, 0.08);
 }
 .skills-page[data-skills-tab='list'].active,
 .skills-page[data-skills-tab='mcp'].active,
@@ -1610,6 +1616,22 @@ body.composer-resizing {
 
 :root:not([data-theme='light']) .settings-segmented-tab.active {
   background: rgba(255, 255, 255, 0.16);
+}
+
+/* 分段条里的动作项（如 dieyun.md 的「编辑」）：同框同高，但不可选中，
+   所以不做 active 态、悬停直接提亮到正文色，与三档模式项区分开。 */
+.settings-segmented-tab-action,
+[data-theme='light'] .settings-segmented-tab-action,
+:root:not([data-theme='light']) .settings-segmented-tab-action {
+  flex: 0 0 auto;
+  padding: 8px 18px;
+  color: var(--text-dim);
+}
+
+.settings-segmented-tab-action:hover,
+[data-theme='light'] .settings-segmented-tab-action:hover,
+:root:not([data-theme='light']) .settings-segmented-tab-action:hover {
+  color: var(--text);
 }
 
 .theme-trace-options {
@@ -3375,7 +3397,7 @@ body.composer-resizing {
 }
 .agent-clarify-preview pre {
   margin: 0;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.5;
   white-space: pre;
@@ -3468,7 +3490,7 @@ body.composer-resizing {
   padding: 6px 8px;
   border: 1px solid var(--border-subtle, #30363d);
   background: var(--surface-2, #21262d);
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -4055,7 +4077,7 @@ body.composer-resizing {
 
 .ssh-agent-deploy-progress {
   display: block;
-  font-family: ui-monospace, 'Cascadia Code', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.03em;
   color: var(--text-dim);
@@ -4115,7 +4137,7 @@ body.composer-resizing {
 
 .ssh-host-key-meta {
   margin: 0 0 8px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
 }
 
@@ -4169,7 +4191,7 @@ body.composer-resizing {
 }
 
 .ssh-remote-dir-path {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   padding: 6px 8px;
   margin-bottom: 8px;
@@ -4991,7 +5013,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   margin: 0;
   padding: 0 12px 8px;
   list-style: none;
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
@@ -5141,7 +5163,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   margin: 0;
   padding: 10px 12px;
   overflow: auto;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -5380,7 +5402,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 
 .worktrees-repo-path {
   margin: 0 0 6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
   color: var(--text-muted, #888);
@@ -5417,7 +5439,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 .worktrees-run-title {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
 }
@@ -5657,8 +5679,9 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   grid-template-columns: 168px 1fr;
   width: min(760px, calc(100vw - 48px));
   height: min(560px, calc(100vh - 80px));
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
+  /* 与对话区同一套纯黑底：设置不再用灰色纵深（--bg-elev/-2），弹窗边界靠一圈描边交代 */
+  background: var(--bg);
+  border: 1px solid var(--border-subtle);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -5774,7 +5797,8 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   flex-direction: column;
   gap: 2px;
   padding: 12px 8px;
-  background: var(--bg-elev-2);
+  /* 导航与主区同为纯黑，仅用一条分隔线区分（同对话侧栏） */
+  background: transparent;
   border-right: 1px solid var(--border);
   overflow-y: auto;
 }
@@ -5828,7 +5852,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: var(--bg-elev);
+  background: transparent;
 }
 
 .settings-main-head {
@@ -6079,7 +6103,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 #mobile-connect-url {
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
 }
 
 @media (max-width: 760px) {
@@ -6620,7 +6644,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 .supplier-editor-model-name {
   flex: 1;
   font-size: 13px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   word-break: break-all;
 }
 
@@ -6670,7 +6694,8 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   gap: 10px;
   padding: 8px 10px;
   border-radius: 0;
-  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  /* 设置页统一纯黑底：列表行不再铺灰块，只留描边 */
+  background: transparent;
   border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
 }
 
@@ -6681,7 +6706,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 .settings-builtin-row-name {
   flex: 1;
   font-size: 13px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   word-break: break-all;
 }
 
@@ -6713,6 +6738,14 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   color: var(--text-mute);
   font-size: 12px;
   flex-shrink: 0;
+}
+
+/* 勾选项下方的说明：缩进到标签文字，和下一项拉开距离 ——
+ * 否则一长串说明文字会被读成"下一个开关的说明"。 */
+.check-row-hint {
+  margin: -2px 0 12px;
+  padding-left: 24px;
+  line-height: 1.55;
 }
 
 .settings-page-toolbar {
@@ -6795,7 +6828,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 .help-usage-section code {
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   color: var(--text);
 }
 
@@ -6818,7 +6851,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   margin: 0;
   padding: 12px;
   overflow: auto;
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -7501,7 +7534,7 @@ body.pane-resizing {
 .ssh-panel-log {
   margin: 8px 0 0;
   padding: 0 2px;
-  font-family: var(--mono-font, ui-monospace, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 10.5px;
   line-height: 1.5;
   color: var(--text-muted, #9a9aa3);
@@ -7790,7 +7823,7 @@ body.pane-resizing {
   flex-shrink: 0;
   width: 12px;
   text-align: center;
-  font-family: var(--mono, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   color: var(--text-dim);
@@ -7964,7 +7997,7 @@ body.pane-resizing {
 }
 
 .scm-history-sha {
-  font-family: var(--mono, Consolas, monospace);
+  font-family: var(--font-mono);
   color: var(--text-mute);
   flex-shrink: 0;
 }
@@ -8214,7 +8247,7 @@ body.pane-resizing {
 }
 .changes-worktree-preview-path {
   flex: 1 1 100%;
-  font-family: var(--mono, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text);
   word-break: break-all;
@@ -8244,7 +8277,7 @@ body.pane-resizing {
 }
 
 .changes-diff-pre {
-  font-family: var(--mono, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.4;
   margin-top: 8px;
@@ -8403,7 +8436,7 @@ body.pane-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-dim);
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
 }
 
 .help-harness-tool-rate {
@@ -8435,7 +8468,7 @@ body.pane-resizing {
   border: 1px solid var(--border);
   border-radius: 0;
   color: var(--text-mute);
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
 }
 
 .changes-file-list {
@@ -8529,7 +8562,7 @@ body.pane-resizing {
 }
 
 .changes-view-meta {
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
   word-break: break-all;
@@ -8593,7 +8626,7 @@ body.pane-resizing {
   margin: 0;
   padding: 10px 12px;
   overflow: auto;
-  font-family: var(--mono, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
   color: #e6edf3;
@@ -8887,7 +8920,7 @@ body.pane-resizing {
 }
 
 .artifacts-problems-loc {
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
   color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -8903,7 +8936,7 @@ body.pane-resizing {
 .artifacts-file-view-content {
   margin: 0;
   padding: 8px 12px;
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -9007,7 +9040,7 @@ body.pane-resizing {
   border: 0;
   outline: none;
   resize: vertical;
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   background: transparent;
@@ -9790,7 +9823,7 @@ body.pane-resizing {
   padding: 6px 8px;
   background: rgba(0, 0, 0, 0.25);
   border-radius: 6px;
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   white-space: pre-wrap;
   word-break: break-all;
@@ -9818,5 +9851,5 @@ body.pane-resizing {
 }
 
 .sandbox-approval-btn:hover { filter: brightness(1.15); }
-.sandbox-mode-field { margin: 6px 0 10px; }
-.sandbox-mode-field select { min-width: 280px; }
+.sandbox-mode-field { margin: 6px 0 10px; max-width: 420px; }
+.sandbox-mode-field .settings-segmented-tabs { margin-top: 0; }

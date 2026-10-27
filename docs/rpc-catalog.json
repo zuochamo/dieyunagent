@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "generatedAt": "2026-10-24T01:43:21.453Z",
+  "generatedAt": "2026-10-27T00:09:11.669Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 195,
-    "gatewayOnly": 117,
+    "total": 196,
+    "gatewayOnly": 118,
     "rustOnly": 24,
     "both": 54
   },
@@ -532,6 +532,14 @@
       "rust": [
         "dieyun-core/rpc/mod.rs"
       ]
+    },
+    {
+      "method": "computer.action",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/computer.js"
+      ],
+      "rust": []
     },
     {
       "method": "core.configure",

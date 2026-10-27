@@ -69,13 +69,14 @@ node .agents/skills/full-test/scripts/run-batch.cjs [--timeout MS] suite1 suite2
 
 逐套件运行 `npm run -s <suite>`，单个失败不中断后续；失败自动单独重跑一次（端口/时序抖动常见）再定论；超时默认 10 分钟并 taskkill 整棵进程树。输出 `PASS/FAIL(code) <suite>`，FAIL 附最后几行日志，结尾给通过数汇总。
 
-## 已知问题基线（截至 2026-10-24，本机）
+## 已知问题基线（截至 2026-10-27，本机）
 
 判定规则：FAIL 的**签名**（失败信息 + 通过项数量）与基线一致 → 已知问题，报告标「非回归」；签名不同、通过项变少、或出现新 FAIL → 按新回归排查。基线会过时——每次全量测试后核对，状态变了就更新本节，并同步 auto-memory 对应条目。
 
 1. **test:builtin-embedding-rust 全仓超时**：签名 = `RPC_TIMEOUT codebase.index`，600s 预算 < 实测 ~789s。容量问题非回归，功能用小目录变体验证（2026-10-24 以 `src/agent` 变体跑通：778 vectors / vectorSearch true / OK）。
 2. 历史项 test:local-gateway-smoke 白名单 FAIL（`关闭开关后白名单未收窄`）已于 2026-09-21、2026-10-24 连续两轮 PASS，按规则移出基线；若该签名再现，重新立案排查。
-3. 环境前提备忘：宿主全局 gitconfig 已于 2026-10-24 配好 user.name/email（此前缺失曾致 test:scm 场景 5 失败）。test:scm 已改为临时仓库自配身份（scripts/test-scm-service.cjs），不依赖宿主配置，换了机器也稳；其他新建临时 git 仓库做提交的测试若报 GIT_IDENTITY_MISSING，同法自配。
+3. **test:lsp 在 Electron 宿主下必假 FAIL**：签名 = `Error: npx child keeps default env`（scripts/test-lsp.cjs:116，断言 `childEnvForCommand('npx').ELECTRON_RUN_AS_NODE == null`）。根因是宿主（DSH / 任何以 `ELECTRON_RUN_AS_NODE=1` 启动的 shell）把该变量注入 `process.env`，被测函数对非 `process.execPath` 命令**原样返回 process.env**，断言因此不成立。排除法：同一命令加 `Remove-Item Env:ELECTRON_RUN_AS_NODE` 后 `test-lsp.cjs ok` → 环境问题非回归。
+4. 环境前提备忘：宿主全局 gitconfig 已于 2026-10-24 配好 user.name/email（此前缺失曾致 test:scm 场景 5 失败）。test:scm 已改为临时仓库自配身份（scripts/test-scm-service.cjs），不依赖宿主配置，换了机器也稳；其他新建临时 git 仓库做提交的测试若报 GIT_IDENTITY_MISSING，同法自配。
 
 ## 报告格式
 
