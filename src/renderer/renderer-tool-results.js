@@ -28,6 +28,19 @@ function formatToolArgsBrief(name, args) {
   }
   if (name === 'codebase_search') return String(args.query || '').slice(0, 120);
   if (name === 'host_print_image') return args.filePath || '';
+  if (name === 'computer') {
+    const act = String(args.action || '');
+    const pt = Array.isArray(args.coordinate) ? ` (${args.coordinate[0]}, ${args.coordinate[1]})` : '';
+    const to = Array.isArray(args.to) ? `→(${args.to[0]}, ${args.to[1]})` : '';
+    const detail = args.text
+      ? ` ${String(args.text).slice(0, 40)}`
+      : args.key
+        ? ` ${String(args.key)}`
+        : args.direction
+          ? ` ${args.direction}`
+          : '';
+    return `${act}${pt}${to}${detail}`.trim().slice(0, 120);
+  }
   try {
     const s = JSON.stringify(args);
     return s.length > 80 ? `${s.slice(0, 80)}…` : s;
@@ -298,6 +311,14 @@ function summarizeToolResult(name, result) {
     if (result.kind === 'hover') return result.hover ? 'hover' : '无 hover';
     const n = Array.isArray(result.locations) ? result.locations.length : 0;
     return `${n} 个位置`;
+  }
+  if (name === 'computer') {
+    const parts = [String(result.action || '动作')];
+    if (result.display != null) parts.push(`屏 ${result.display}`);
+    if (result.screen) parts.push(`${result.screen.width}×${result.screen.height}`);
+    if (result.typed != null) parts.push(`输入 ${result.typed} 字`);
+    if (result.activeWindow) parts.push(String(result.activeWindow).slice(0, 40));
+    return parts.join(' · ');
   }
   return '完成';
 }

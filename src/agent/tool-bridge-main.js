@@ -59,6 +59,8 @@ function sanitizeToolResultForApi(name, result) {
       screen: result.screen,
       cursor: result.cursor,
       activeWindow: result.activeWindow,
+      // type 动作实际投递的字符数：模型要靠它核对「打进去了多少」（见 computer/service 注释）
+      ...(result.typed != null ? { typed: result.typed } : {}),
       mime: result.mime,
       width: result.width,
       height: result.height,

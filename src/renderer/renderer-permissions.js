@@ -60,12 +60,15 @@ async function syncPermissionsToMain() {
 
   try {
 
-    await permissionsApi.setPermissions(perms);
+    // 落盘后一律以**服务端归一结果**为准：本地 perms 里没有 unrestrictedPaths（派生视图，
+    // 见上方注释），拿本地值渲染会让输入区图标在「完全放开」下跳回「受限制」。
+    const saved = await permissionsApi.setPermissions(perms);
 
-    renderComposerPathPerm(perms.unrestrictedPaths === true);
+    const unrestricted = saved ? saved.unrestrictedPaths === true : perms.sandboxMode === 'danger-full-access';
 
-    // 落盘后把下拉/复选框/hint 拉回服务端的最终值（normalizePermissions 可能会改判）
-    renderSandboxModeUI(perms.sandboxMode, perms.unrestrictedPaths === true);
+    renderComposerPathPerm(unrestricted);
+
+    renderSandboxModeUI(saved?.sandboxMode, unrestricted);
 
     setPermsHint('权限已保存 ✓');
 
