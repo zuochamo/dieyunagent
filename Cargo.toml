@@ -4,7 +4,10 @@ resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+# edition 2024：与工具链（rustc 1.96）对齐，拿到新的借用检查与语言级整理。
+# rust-version 一并固定，避免有人用旧工具链构建出看不懂的错误。
+edition = "2024"
+rust-version = "1.90"
 license = "MIT"
 authors = ["PixelOffice"]
 

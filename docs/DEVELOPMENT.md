@@ -170,6 +170,42 @@ npm run serve:updates
 
 ---
 
+## Rust 依赖升级约定（`crates/dieyun-core`）
+
+**工具链**：`edition = "2024"`、`rust-version = "1.90"`（在根 `Cargo.toml` 的
+`[workspace.package]` 声明，crate 用 `.workspace = true` 继承）。
+
+**升级分两档，别混在同一个提交里**：
+
+| 档位 | 命令 | 判据 |
+|------|------|------|
+| 补丁 / 次版本（semver 内） | `cargo update` | 跑 `cargo test -p dieyun-core --lib` 全绿即可 |
+| 主版本 / 预发布跨段 | 手改 `Cargo.toml` 版本号 | 需单独评估 API 变更 + 预下载产物，见下 |
+
+**已完成的升级（2026-10）**：`rusqlite 0.32 → 0.41`（`libsqlite3-sys` 0.39，FTS5 trigram 与
+`auto_vacuum` 行为已由测试覆盖）、`tree-sitter 0.24 → 0.27` + `tree-sitter-javascript/python/go → 0.25`、
+`base64 0.22 → 0.23`、`sha2 0.10 → 0.11`。
+
+**升级 `tree-sitter` 时必须先跑 `treesitter::lang::tests::every_language_parses_a_minimal_sample`。**
+该测试是护栏：grammar 的 ABI 超出 `tree-sitter` 支持范围时 `set_language` 会失败、
+`parse_source` 返回 `None`，整条 AST 抽取就**静默**退回正则启发式 —— 表现是「符号还在、
+跨文件边和调用边全没了」。`tree-sitter-rust 0.24.2` 配 `tree-sitter 0.24` 就是这个状态：
+Rust 从来没走过 AST 路径，`mod util;` 的模块边一直是正则兜出来的。升到 0.27 后 AST 才真正生效，
+`collect_rust` 也补上了 `mod_item`（无 body）→ 模块依赖 import（`mod:` spec 约定）。
+
+**两个暂时固定在旧版的（各有硬理由，不要盲目 `cargo update`）**：
+
+| crate | 固定值 | 为什么 |
+|-------|--------|--------|
+| `ort` | `=2.0.0-rc.12` | `download-binaries` 在 build script 里联网取 ONNX Runtime；升 rc.15 时下载会长时间卡住并**一直持有构建目录锁**（所有 `cargo build` 停在 `Compiling ort-sys`、CPU 为 0）。要升先把预下载产物放进缓存/CI。 |
+| `reqwest` | `0.12` | 0.13 的 `rustls` 特性默认走 `aws-lc-rs`，它需要 `cmake` + NASM 才能构建（本机与打包机都没有）；改 `rustls-no-provider` 要在运行时装 crypto provider，改 `native-tls` 会让 Linux 产物多一条 OpenSSL 依赖。0.13 把 `rustls-tls` 特性名也改成了 `rustls`。 |
+
+**不要随手跑 `cargo fmt`。** 仓库现有代码按旧 rustfmt 排序（`{json, Value}`），
+edition 2024 的 import 排序规则会把它改成 `{Value, json}` —— 一次 `cargo fmt`
+会产生整仓无关 diff。要格式化就只格式化自己新增的文件。
+
+---
+
 ## 相关文档
 
 - [README.md](../README.md) — 安装与监控上报

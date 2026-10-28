@@ -252,7 +252,17 @@ fn collect_rust(node: tree_sitter::Node, src: &[u8], out: &mut AstGraphExtract) 
         }
         "mod_item" => {
             if let Some(name) = node.child_by_field_name("name") {
-                push_symbol(out, "mod", node_text(name, src), node);
+                let mod_name = node_text(name, src);
+                push_symbol(out, "mod", mod_name, node);
+                // `mod util;`（没有 body）是**跨文件**依赖；`mod x { … }` 是文件内联
+                // 模块，不产生文件边。spec 沿用启发式的 `mod:` 约定 ——
+                // 「spec → 哪个文件」只在 `resolve_rust_import` 一处解算。
+                if node.child_by_field_name("body").is_none() && is_ident(mod_name) {
+                    out.imports.push(ParsedImport {
+                        spec: format!("mod:{mod_name}"),
+                        line: line_of(node),
+                    });
+                }
             }
         }
         "impl_item" => {
