@@ -75,7 +75,22 @@ pub async fn serve_stdio(state: AppState) -> anyhow::Result<()> {
 }
 
 async fn handle_request(state: &AppState, req: RpcRequest) -> RpcResponse {
-    match state.dispatch(&req.method, req.params).await {
+    let method = req.method.clone();
+    let dispatched = state.dispatch(&req.method, req.params);
+    // 预算只加在宿主轮询类方法上（见 `request_budget_ms` 的取舍说明）。
+    let result = match super::request_budget_ms(&method) {
+        Some(budget) => {
+            match tokio::time::timeout(std::time::Duration::from_millis(budget), dispatched).await {
+                Ok(r) => r,
+                Err(_) => Err(CoreError::rpc(
+                    "RPC_TIMEOUT",
+                    format!("{method} 超过 {budget}ms 在途预算（core 正忙于长任务）"),
+                )),
+            }
+        }
+        None => dispatched.await,
+    };
+    match result {
         Ok(result) => RpcResponse::ok(req.id, result),
         Err(err) => RpcResponse::err(req.id, err.into()),
     }

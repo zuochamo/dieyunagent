@@ -26,6 +26,29 @@ fn _assert_app_state_is_send_sync() {
     assert_send_sync::<AppState>();
 }
 
+/// 快读方法的在途预算（毫秒）。
+///
+/// 只给**宿主会反复轮询**的方法设预算：`core.ping` / `*.status` / `rpc.cancel`。
+/// 这几条正常都是毫秒级；一旦超过这个数，说明读侧排在了长任务后面 —— 把
+/// `RPC_TIMEOUT` 明确报回去，比让宿主客户端 45s 后才超时（然后重试、把队列压得更满）
+/// 有用得多：错误里有方法名，宿主能立刻判断是「core 忙」而不是「core 死了」。
+///
+/// 长任务（建库 / 检索 / 压缩）**刻意不设**预算：它们是分钟级工作，掐断 awaiter 也停不下
+/// 底下已经跑起来的阻塞任务，只会制造「假失败」。减法优先：不为超时再造一层取消机制。
+pub const FAST_METHOD_BUDGET_MS: u64 = 20_000;
+
+/// 方法名 → 在途预算；`None` 表示不设预算。分类是**结构性的**（RPC 方法名），
+/// 不涉及对用户意图的猜测。
+pub fn request_budget_ms(method: &str) -> Option<u64> {
+    if method == "core.ping" || method == "rpc.cancel" {
+        return Some(FAST_METHOD_BUDGET_MS);
+    }
+    if method.ends_with(".status") {
+        return Some(FAST_METHOD_BUDGET_MS);
+    }
+    None
+}
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<RwLock<StateInner>>,
@@ -105,8 +128,20 @@ impl ServiceSnapshot {
                 self.memory.touch_session(session_id, title)?;
                 Ok(json!({ "ok": true }))
             }
-            "memory.sessions_list" => {
-                let limit = params
+            // 显式标题写入（AI 总结 / 用户改名）：无条件覆盖，来源落 title_source。
+            "memory.session_set_title" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let source = params
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "source 必填"))?;
+                self.memory.set_session_title(session_id, title, source)
+            }
+            "memory.sessions_list" => {                let limit = params
                     .get("limit")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(40)
@@ -615,49 +650,12 @@ fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     na == nb
 }
 
-/// 图谱索引收尾：同步的两段 `status` 查询走阻塞池，中间的 `embed_symbols` 才 `.await`。
-///
-/// `graph` 按值传入（`GraphService` 内部全是 `Arc`，克隆廉价），这样每段同步查询
-/// 都能把自己的那份句柄移进闭包，不必在 `.await` 前后借用调用方。
-async fn graph_status_with_optional_embed(
-    graph: GraphService,
-    workspace_root: &str,
-    force: bool,
-    should_embed: bool,
-) -> Result<Value, CoreError> {
-    let mut embed_error: Option<String> = None;
-    if should_embed {
-        let st = {
-            let graph = graph.clone();
-            let workspace_root = workspace_root.to_string();
-            run_blocking(move || graph.status(&workspace_root)).await?
-        };
-        if st.indexed && st.symbol_count > 0 {
-            if let Err(e) = graph.embed_symbols(workspace_root, force).await {
-                embed_error = Some(e.to_string());
-            }
-        }
-    }
-    let st = {
-        let graph = graph.clone();
-        let workspace_root = workspace_root.to_string();
-        run_blocking(move || graph.status(&workspace_root)).await?
-    };
-    let mut val = serde_json::to_value(st).map_err(|e| CoreError::rpc("SERIALIZE", e.to_string()))?;
-    if let Some(err) = embed_error {
-        if let Value::Object(ref mut map) = val {
-            map.insert("embedError".to_string(), Value::String(err));
-        }
-    }
-    Ok(val)
-}
-
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
         // 索引与图谱落在同一个库文件上，共用同一条常驻连接。
         let codebase_db = crate::codebase_db::handle(config.codebase_db_path());
         let index = IndexService::from_config(&config, Arc::clone(&codebase_db));
-        let graph = GraphService::from_config(&config, Arc::clone(&codebase_db));
+        let graph = GraphService::new(Arc::clone(&codebase_db));
         let memory = memory::MemoryStore::from_config(&config)
             .unwrap_or_else(|e| panic!("memory store init failed: {e}"));
         Self {
@@ -898,7 +896,7 @@ impl AppState {
                     guard.codebase_db = Arc::clone(&codebase_db);
                     guard.index =
                         IndexService::from_config(&guard.config, Arc::clone(&codebase_db));
-                    guard.graph = GraphService::from_config(&guard.config, codebase_db);
+                    guard.graph = GraphService::new(codebase_db);
                     if same_path(&old_mem_path, &new_mem_path) {
                         let embedding = guard.config.embedding.clone();
                         let models_dirs = guard.config.models_dirs.clone();
@@ -946,26 +944,68 @@ impl AppState {
                 let importance = params.get("importance").and_then(|v| v.as_i64());
                 let expires_at = params.get("expiresAt").and_then(|v| v.as_i64());
                 let metadata = params.get("metadata").cloned();
+                // 会话溯源：归纳器/工具写入时带上 sessionId，之后才能回答
+                // 「这个会话沉淀了什么 / 把这个会话记的都忘掉」。
+                let session_id = params.get("sessionId").and_then(|v| v.as_str());
                 let memory = self.snapshot().await.memory;
-                let ins = memory.add_long_memory(
-                    content,
-                    source,
-                    kind,
-                    scope,
-                    importance,
-                    expires_at,
-                    metadata.as_ref(),
-                )?;
-                let memory_id = ins
-                    .get("localMemoryId")
+                // 写入唯一政策点：低价值闸 + 近重复抑制 + 写入即索引（一次 embedding）
+                memory
+                    .add_long_memory_deduped(
+                        content,
+                        source,
+                        kind,
+                        scope,
+                        importance,
+                        expires_at,
+                        metadata.as_ref(),
+                        session_id,
+                    )
+                    .await
+            }
+            "memory.project_resolve" => {
+                let path = params
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "path 必填"))?;
+                let git_origin = params.get("gitOrigin").and_then(|v| v.as_str());
+                let memory = self.snapshot().await.memory;
+                memory.resolve_project(path, git_origin)
+            }
+            "memory.project_list" => {
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+                let memory = self.snapshot().await.memory;
+                memory.list_projects(limit)
+            }
+            "memory.project_alias_add" => {
+                let project_id = params
+                    .get("projectId")
                     .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let vector = memory.index_long_memory(memory_id).await?;
-                Ok(json!({
-                    "ok": true,
-                    "localMemoryId": memory_id,
-                    "vector": vector,
-                }))
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "projectId 必填"))?;
+                let path = params
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "path 必填"))?;
+                let memory = self.snapshot().await.memory;
+                memory.add_project_alias(project_id, path)
+            }
+            "memory.long_by_session" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+                let memory = self.snapshot().await.memory;
+                let rows = memory.long_memories_by_session(session_id, limit)?;
+                Ok(json!({ "results": rows }))
+            }
+            "memory.long_forget_session" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let memory = self.snapshot().await.memory;
+                let archived = memory.archive_long_memories_by_session(session_id)?;
+                Ok(json!({ "archived": archived }))
             }
             "memory.long_reindex" => {
                 let limit = params
@@ -1012,10 +1052,6 @@ impl AppState {
                     .get("limit")
                     .and_then(|v| v.as_u64())
                     .map(|n| n as u32);
-                let auto_index = params
-                    .get("autoIndex")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
                 let index = self.snapshot().await.index;
                 // status 是同步 SQLite 聚合：走阻塞池，别压在 async worker 上
                 let st = {
@@ -1030,21 +1066,11 @@ impl AppState {
                             "代码库索引构建中，请等待完成后再搜索",
                         ));
                     }
-                    if auto_index {
-                        let ws = crate::index::resolve_workspace(&workspace_root)?;
-                        if ws.is_remote {
-                            return Err(CoreError::rpc(
-                                "INDEX_REQUIRED",
-                                "远程工作区需先完成代码库索引",
-                            ));
-                        }
-                        // 不再在 search 内同步全量建库；交给 prep / index.start
-                        return Err(CoreError::rpc(
-                            "INDEX_REQUIRED",
-                            "代码库尚未索引，请先等待准备工作中的索引完成",
-                        ));
-                    }
-                    return Err(CoreError::rpc("INDEX_REQUIRED", "代码库尚未索引"));
+                    // search 内不再同步建库（建库要跑 embedding）：交给面板 / prep 的 index.start
+                    return Err(CoreError::rpc(
+                        "INDEX_REQUIRED",
+                        "代码库尚未索引，请稍后再试或使用 grep/读文件",
+                    ));
                 }
                 let r = index.search(&workspace_root, query, limit).await?;
                 Ok(serde_json::to_value(r)?)
@@ -1123,18 +1149,18 @@ impl AppState {
                     .get("force")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let embed_symbols = params
-                    .get("embedSymbols")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
                 let graph = self.snapshot().await.graph;
-                let should_embed = embed_symbols && graph.embedding_enabled();
                 {
                     let graph = graph.clone();
                     let workspace_root = workspace_root.clone();
                     run_blocking(move || graph.index_workspace(&workspace_root, force)).await?
                 };
-                graph_status_with_optional_embed(graph, &workspace_root, force, should_embed).await
+                let st = {
+                    let graph = graph.clone();
+                    let workspace_root = workspace_root.clone();
+                    run_blocking(move || graph.status(&workspace_root)).await?
+                };
+                Ok(serde_json::to_value(st)?)
             }
             "graph.index_remote" => {
                 let workspace_root = params
@@ -1151,10 +1177,6 @@ impl AppState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let embed_symbols = params
-                    .get("embedSymbols")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
                 let files: Vec<crate::index::RemoteFileInput> = serde_json::from_value(
                     params
                         .get("files")
@@ -1163,7 +1185,6 @@ impl AppState {
                 )
                 .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
                 let graph = self.snapshot().await.graph;
-                let should_embed = embed_symbols && graph.embedding_enabled();
                 match phase.as_str() {
                     "begin" => {
                         let r = {
@@ -1199,71 +1220,12 @@ impl AppState {
                         .await?;
                     }
                 }
-                graph_status_with_optional_embed(graph, &workspace_root, force, should_embed).await
-            }
-            "graph.embed_symbols" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
-                let force = params
-                    .get("force")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let graph = self.snapshot().await.graph;
-                let r = graph.embed_symbols(workspace_root, force).await?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "graph.symbol_semantic_search" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?
-                    .to_string();
-                let query = params
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_QUERY", "query 必填"))?;
-                let kind = params.get("kind").and_then(|v| v.as_str());
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as u32);
-                let auto_embed = params
-                    .get("autoEmbed")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let graph = self.snapshot().await.graph;
-                let mut embed_error: Option<String> = None;
-                if auto_embed {
-                    let st = {
-                        let graph = graph.clone();
-                        let workspace_root = workspace_root.clone();
-                        run_blocking(move || graph.status(&workspace_root)).await?
-                    };
-                    if st.indexed
-                        && st.symbol_count > 0
-                        && (st.symbol_vector_count < st.symbol_count
-                            || graph.embedding_signature()
-                                != st.symbol_embedding_model.as_deref().unwrap_or(""))
-                        && graph.embedding_enabled()
-                    {
-                        if let Err(e) = graph.embed_symbols(&workspace_root, false).await {
-                            embed_error = Some(e.to_string());
-                        }
-                    }
-                }
-                let r = graph
-                    .symbol_semantic_search(&workspace_root, query, kind, limit)
-                    .await?;
-                let mut val =
-                    serde_json::to_value(r).map_err(|e| CoreError::rpc("SERIALIZE", e.to_string()))?;
-                if let Some(err) = embed_error {
-                    if let Value::Object(ref mut map) = val {
-                        map.insert("embedError".to_string(), Value::String(err));
-                    }
-                }
-                Ok(val)
+                let st = {
+                    let graph = graph.clone();
+                    let workspace_root = workspace_root.clone();
+                    run_blocking(move || graph.status(&workspace_root)).await?
+                };
+                Ok(serde_json::to_value(st)?)
             }
             // 兜底：其余全部是同步分支（SQLite / 文件系统 / 纯 CPU）。
             //
@@ -1311,5 +1273,25 @@ impl RpcResponse {
             result: None,
             error: Some(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 预算只覆盖宿主轮询类方法；长任务必须保持「不设预算」，否则会制造假失败。
+    #[test]
+    fn budget_covers_polling_methods_only() {
+        assert_eq!(request_budget_ms("core.ping"), Some(FAST_METHOD_BUDGET_MS));
+        assert_eq!(request_budget_ms("rpc.cancel"), Some(FAST_METHOD_BUDGET_MS));
+        assert_eq!(request_budget_ms("codebase.status"), Some(FAST_METHOD_BUDGET_MS));
+        assert_eq!(request_budget_ms("graph.status"), Some(FAST_METHOD_BUDGET_MS));
+        assert_eq!(request_budget_ms("memory.status"), Some(FAST_METHOD_BUDGET_MS));
+
+        assert_eq!(request_budget_ms("codebase.index"), None);
+        assert_eq!(request_budget_ms("codebase.search"), None);
+        assert_eq!(request_budget_ms("agent.loop.start"), None);
+        assert_eq!(request_budget_ms("compaction.auto"), None);
     }
 }
