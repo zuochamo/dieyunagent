@@ -122,7 +122,7 @@ function createLiveLoopTraceTracker(
     const n = Math.max(1, Number(roundNo) || 1);
     let row = rounds.find((x) => x.round === n);
     if (!row) {
-      row = { round: n, thought: '', fullThought: '', tools: [] };
+      row = { round: n, thought: '', fullThought: '', tools: [], placeholder: false };
       rounds.push(row);
       rounds.sort((a, b) => a.round - b.round);
     }
@@ -171,7 +171,9 @@ function createLiveLoopTraceTracker(
     // 结构事件立即推；纯流式增量（llm_delta）合并节流（见 LIVE_TRACE_MIN_INTERVAL_MS）。
     const immediate = LIVE_TRACE_IMMEDIATE_PHASES.has(name);
     if (name === 'start') {
-      getRound(1).thought = '启动…';
+      const startRow = getRound(1);
+      startRow.thought = '启动…';
+      startRow.placeholder = true;
       sync(immediate);
       return;
     }
@@ -180,6 +182,7 @@ function createLiveLoopTraceTracker(
       const row = getRound(eventRoundNo(data));
       row.thought =
         data && data.model ? `请求 LLM · ${String(data.model).trim()}…` : '请求 LLM…';
+        row.placeholder = true;
       sync(immediate);
       return;
     }
@@ -194,6 +197,7 @@ function createLiveLoopTraceTracker(
       const row = getRound(eventRoundNo(data));
       row.thought = thoughtSource.slice(0, LIVE_THOUGHT_CHARS) || '生成中…';
       row.fullThought = thoughtSource;
+      row.placeholder = !thoughtSource;
       // 只有真正的正文才进回答区；单通道模型的 content 属于思考，不泄漏。
       liveContent = reasoning || !contentIsReasoning ? contentOnly.slice(0, 800) : '';
       sync(immediate);
@@ -213,7 +217,10 @@ function createLiveLoopTraceTracker(
       }
       // 不写「执行工具…」占位文本：卡片正文只显示真实模型输出，工具进度由工具行自己表达。
       // 顺手清掉上一轮的「请求 LLM…」，避免工具已经跑起来了还挂着过期的请求提示。
-      if (!row.thought || String(row.thought).startsWith('请求 LLM')) row.thought = '';
+      if (!row.thought || row.placeholder) {
+        row.thought = '';
+        row.placeholder = false;
+      }
       sync(immediate);
       return;
     }
@@ -464,6 +471,7 @@ function buildIsolatedCard(meta, rounds, subagentId) {
     round: r && r.round != null ? r.round : i + 1,
     thought: String((r && (r.thought || r.fullThought)) || ''),
     fullThought: String((r && (r.fullThought || r.thought)) || ''),
+    placeholder: !!(r && r.placeholder),
     tools: Array.isArray(r && r.tools) ? r.tools.map(toCardTool) : []
   }));
   const latest = list.length ? list[list.length - 1] : null;
@@ -474,6 +482,7 @@ function buildIsolatedCard(meta, rounds, subagentId) {
     phase: subagentCardTitle(m),
     thought: latest ? latest.thought : '',
     fullThought: latest ? latest.fullThought : '',
+    placeholder: !!(latest && latest.placeholder),
     subagentId: subagentId || m.subagentId || '',
     isolated: true,
     worker: m.worker || '',

@@ -94,32 +94,16 @@ function entryHasPendingTools(entry) {
   return false;
 }
 
-function isPlaceholderThoughtText(text) {
-  const t = String(text || '').trim();
-  return (
-    !t ||
-    t === '…' ||
-    /^(请求中|思考中|生成中|处理中|启动|等待|连接中断|请求 LLM|多模态识图|执行工具)/.test(t)
-  );
-}
-
-function thoughtTextForDisplay(entry, index, trace) {
-  const raw = String(entry?.fullThought || entry?.thought || '').trim();
-  if (!raw) return '';
-  if (typeof AgentRoundText === 'undefined' || typeof AgentRoundText.sanitizeAgentThoughtText !== 'function') {
-    return raw;
-  }
-  const prev = (trace || [])
-    .slice(0, Math.max(0, index))
-    .map((e) => e.fullThought || e.thought);
-  return AgentRoundText.sanitizeAgentThoughtText(raw, prev);
+function thoughtTextForDisplay(entry) {
+  // 账本只记模型原文：不再做 status 剥离 / 重复前言去重（2026-10-28 整改）。
+  return String(entry?.fullThought || entry?.thought || '').trim();
 }
 
 function visibleThoughtDisplay(entry, index, trace, streaming) {
   const raw = String(entry?.fullThought || entry?.thought || '').trim();
-  const thoughtText = thoughtTextForDisplay(entry, index, trace);
-  if (thoughtText && thoughtText !== '请求中…') return thoughtText;
-  if (raw && !isPlaceholderThoughtText(raw)) return '';
+  const thoughtText = thoughtTextForDisplay(entry);
+  if (thoughtText && !entry?.placeholder) return thoughtText;
+  if (raw && !entry?.placeholder) return '';
   return streaming ? '思考中…' : thoughtText || '';
 }
 
@@ -129,14 +113,13 @@ function isThinkingRoundInProgress(entry, index, trace, streaming, streamContent
   if (entryHasPendingTools(entry)) return true;
   const phase = String(entry.phase || '').trim();
   if (phase === '汇总') {
-    const t = String(entry.fullThought || entry.thought || '').trim();
-    return isPlaceholderThoughtText(t) || /生成中|请求中/.test(t);
+    return entry?.placeholder === true;
   }
   const tools = entry.tools || [];
   if (tools.length > 0) return false;
   if (String(streamContent || '').trim()) return false;
   const full = String(entry.fullThought || entry.thought || '').trim();
-  return isPlaceholderThoughtText(full) || !!full;
+  return entry?.placeholder === true || !!full;
 }
 
 function isThinkingRoundComplete(entry, index, trace, streaming, streamContent) {
@@ -188,8 +171,7 @@ function isolatedCardRunning(entry) {
   if (entry && entry.runDone === true) return false;
   if (entry && entry.runDone === false) return true;
   const last = rounds.length ? rounds[rounds.length - 1] : null;
-  const text = String((last && (last.fullThought || last.thought)) || '').trim();
-  return !!text && isPlaceholderThoughtText(text);
+  return !!(last && last.placeholder);
 }
 
 function thinkingRoundTitle(entry) {
@@ -376,13 +358,14 @@ function syncPrepStepsPanel(panel, steps) {
 var THINKING_SUMMARY_PREVIEW_CHARS = 110;
 var THINKING_SUMMARY_TOOL_SUFFIX_MAX = 3;
 
-function compactReasoningPreviewText(text, maxChars = THINKING_SUMMARY_PREVIEW_CHARS) {
+function compactReasoningPreviewText(text, maxChars = THINKING_SUMMARY_PREVIEW_CHARS, placeholder = false) {
   let t = String(text || '')
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!t || isPlaceholderThoughtText(t)) return '';
+  // 平台占位文案（结构标记）不进摘要预览
+  if (!t || placeholder) return '';
   if (t.length <= maxChars) return t;
   const cut = t.slice(0, maxChars);
   const lastSpace = cut.lastIndexOf(' ');
@@ -394,9 +377,9 @@ function reasoningPreviewFromEntry(entry, index, trace) {
   if (tracePrefs.showReasoning === false) return '';
   const text =
     typeof index === 'number' && Array.isArray(trace)
-      ? thoughtTextForDisplay(entry, index, trace)
+      ? thoughtTextForDisplay(entry)
       : String(entry.fullThought || entry.thought || '');
-  return compactReasoningPreviewText(text);
+  return compactReasoningPreviewText(text, THINKING_SUMMARY_PREVIEW_CHARS, entry?.placeholder === true);
 }
 
 function briefToolLabelForSummary(tool) {

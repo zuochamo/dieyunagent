@@ -206,8 +206,10 @@ function mapRustAgentTrace(rustTrace, prefixTrace) {
     const row = {
       round: r.round,
       phase: r.phase || '',
-      thought: sanitizeTraceThought(r.thought || '', out.map((e) => e.fullThought || e.thought)),
-      fullThought: sanitizeTraceThought(r.fullThought || r.thought || '', out.map((e) => e.fullThought || e.thought)),
+      thought: r.thought || '',
+      fullThought: r.fullThought || r.thought || '',
+      // 占位文案是平台写的，不是模型思考：随行不变地搬结构标记（2026-10-28 整改）
+      ...(r.placeholder ? { placeholder: true } : {}),
       subagentId: r.subagentId,
       isolated: r.isolated,
       worker: r.worker,
@@ -538,7 +540,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       const base = llmWaitBaseLabel.replace(/…\s*$/, '');
       if (!llmStreaming) {
         const sec = Math.max(1, Math.round((Date.now() - llmWaitStartedAt) / 1000));
-        pushLive(`${base}（已等 ${sec}s）…`, []);
+        pushPlaceholder(`${base}（已等 ${sec}s）…`, []);
         return;
       }
       const idleMs = Date.now() - llmLastDeltaAt;
@@ -587,16 +589,21 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     syncBootStepsToLiveTrace({ immediate });
   };
 
-  const pushLive = (thoughtPreview, toolsRows, fullThoughtText, extra = {}) => {
-    const previous = [...trace, ...frozenRounds].map((e) => e.fullThought || e.thought);
+  /**
+   * `placeholder`（第 5 个参数）表示这一行是**平台占位文案**（「请求 LLM…」「生成中…」），
+   * 不是模型思考。它是结构标记：账本 `reasoning` 提取、思考区渲染都按标记过滤，
+   * 不再靠中文词表去猜哪句「像占位」。
+   */
+  const pushLive = (thoughtPreview, toolsRows, fullThoughtText, extra = {}, placeholder = false) => {
     const rawFull = fullThoughtText != null ? String(fullThoughtText) : String(thoughtPreview || '');
-    const full = sanitizeTraceThought(rawFull, previous);
+    const full = rawFull;
     const preview = full.slice(0, TRACE_DESKTOP_THOUGHT_CHARS);
     const entry = {
       round: trace.length + frozenRounds.length + 1,
       thought: preview,
       fullThought: full,
       tools: toolsRows || [],
+      ...(placeholder ? { placeholder: true } : {}),
       ...(extra || {})
     };
     if (rustBootVisible && rustBootSteps && !entry.bootSteps) {
@@ -608,6 +615,10 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     displayedTrace = [...trace, ...frozenRounds, entry];
     notifyRustProgress(displayedTrace, liveContent);
   };
+
+  /** 平台占位文案的唯一写法：等价 `pushLive(..., { placeholder: true })`。 */
+  const pushPlaceholder = (text, toolsRows, fullThoughtText) =>
+    pushLive(text, toolsRows, fullThoughtText, {}, true);
 
   /** 给当前轮打「确认不再调工具」标记：思考区折叠的唯一信号来源 */
   const markAnswerPhaseRound = (traceRows) => {
@@ -630,17 +641,12 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       thought: live.thought || live.fullThought || '',
       fullThought: live.fullThought || live.thought || ''
     });
-    pushLive('…', []);
+    pushPlaceholder('…', []);
   };
 
   const liveThoughtLooksEphemeral = () => {
     const live = displayedTrace.length ? displayedTrace[displayedTrace.length - 1] : null;
-    const full = String((live && (live.fullThought || live.thought)) || '').trim();
-    if (!full || full === '…' || full === '生成中…') return true;
-    if (full.startsWith('压缩上下文：') || full.startsWith('启动 Rust') || full.startsWith('连接中断')) {
-      return true;
-    }
-    return false;
+    return !!(live && live.placeholder);
   };
 
   const offSubagentTrace = (() => {
@@ -691,7 +697,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             finishRustBootDisplay({ immediate: true });
             const modelId = (ev.data && ev.data.model) || body.model || '';
             const phaseLabel = formatLlmWaitLabel(options.hasImages ? 'vision' : 'text', modelId);
-            pushLive(phaseLabel, []);
+            pushPlaceholder(phaseLabel, []);
             startLlmWaitTimer(phaseLabel);
           } else if (ev.phase === 'llm_delta') {
             // 不结束心跳：出字后从「请求 LLM（已等 Ns）」切到「静默时长」监控，
@@ -717,9 +723,9 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             } else if (content) {
               // 普通模型：content 是正文，进回答区；思考区不镜像正文
               liveContent = content;
-              pushLive('生成中…', []);
+              pushPlaceholder('生成中…', []);
             } else {
-              pushLive('生成中…', []);
+              pushPlaceholder('生成中…', []);
             }
           } else if (ev.phase === 'llm_response') {
             clearLlmWaitTimer();
@@ -887,19 +893,23 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
               }
             }
             const live = displayedTrace[displayedTrace.length - 1];
-            pushLive(live?.thought || '…', fr?.tools || live?.tools || []);
+            pushLive(
+              live?.thought || '…',
+              fr?.tools || live?.tools || [],
+              live?.fullThought || live?.thought || '',
+              {},
+              !!(live && live.placeholder)
+            );
           } else if (ev.phase === 'llm_reconnect_wait') {
             const waitData = ev.data || {};
             const sec = Math.max(1, Math.round((waitData.waitMs || 0) / 1000));
             const remainMin = waitData.remainingMs > 0 ? Math.ceil(waitData.remainingMs / 60000) : 0;
             const budgetNote = remainMin > 0 ? `，最长再等 ${remainMin} 分钟` : '';
             // 不冻结当前轮：中断的那次尝试是「正在被重新生成」的东西，不属于历史。
-            // 若把它推进 frozenRounds，重试后的累积串会与残段前缀相同，被 sanitizeTraceThought
-            // 判成重复而抑制；模型换措辞则拼接。这里只把 live 槽位换成等待提示，重试的 delta
-            // 自然接管同一槽位（previous 不含残段 → 无抑制/无拼接）。彻底失败时 Main 用
-            // frozenPartial 以 llm_response 交回残片，信息不丢。
+            // 这里只把 live 槽位换成等待提示（带 placeholder 标记），重试的 delta 自然接管
+            // 同一槽位；彻底失败时 Main 用 frozenPartial 以 llm_response 交回残片，信息不丢。
             const waitLabel = `连接中断，等待第 ${waitData.attempt || 1} 次自动重试${budgetNote}`;
-            pushLive(waitLabel, [], '等待模型连接恢复，恢复后将从当前进度继续…');
+            pushPlaceholder(waitLabel, [], '等待模型连接恢复，恢复后将从当前进度继续…');
             startLlmWaitTimer(waitLabel);
             maybeShowLlmReconnectToast(
               '模型连接中断',
@@ -933,7 +943,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       throw err;
     }
 
-    pushLive('启动 Rust agent loop…', []);
+    pushPlaceholder('启动 Rust agent loop…', []);
     patchRustBootSteps((steps) => {
       rustBootStepStart(steps, 'compact_preflight');
       return steps;
@@ -968,7 +978,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
         const live = displayedTrace[displayedTrace.length - 1];
         freezeLiveWithTools((live && live.tools) || []);
       }
-      pushLive(`压缩上下文：${note}`, []);
+      pushPlaceholder(`压缩上下文：${note}`, []);
     };
     if (typeof window !== 'undefined') {
       window.addEventListener('dieyun:compaction-progress', onCompactionProgressUi);
@@ -1032,13 +1042,16 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             : undefined,
         // 请求快照用：Renderer 拼 prompt 时算出的折叠/裁剪事实（Main 无法重算）。
         contextAudit: options.contextAudit || null,
+        // 运行模式（agent / explore / plan）随请求交给 Main：完成验收的判定在 Main，
+        // 而「只读 explore 不该被运行时错误追着提示」只有 Renderer 知道。
+        agentMode: options.agentMode || undefined,
         undoTurnId: runIsLongHorizon(options)
           ? undefined
           : options.undoTurnId ||
             (typeof getUndoTurnIdForSession === 'function' && options.sessionId
               ? getUndoTurnIdForSession(options.sessionId)
               : null),
-        turnEndSynthesis: !options.readinessRetry
+        turnEndSynthesis: true
       });
     };
 
@@ -1066,7 +1079,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
         notifyRustProgress(displayedTrace, finalContent, { immediate: true });
         break;
       }
-      finalContent = stripVisibleAgentStatus(stripVisibleToolCallMarkup(done.content || ''));
+      finalContent = stripVisibleToolCallMarkup(done.content || '');
       mapped = mapRustAgentTrace(done.trace, tracePrefix);
       mapped = mergeTraceVisibleContent(mapped, displayedTrace);
       // 账本 result 被截断顶替的工具，diff 从实时 trace 回填（slice 掉前段前缀，避免串段）

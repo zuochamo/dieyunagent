@@ -8,59 +8,18 @@ use serde_json::{json, Value};
 use crate::config::AppConfig;
 use crate::error::CoreError;
 use crate::index::IndexService;
-/// Host should pass `maxToolCalls` from `agent-limits` `ctxAgentToolCallLimit` (or the model setting).
-const DEFAULT_MAX_TOOL_CALLS: u32 = 150;
-const DEFAULT_MAX_ROUNDS: u32 = 96;
-const MIN_RECORDED_PLAN_CHARS: usize = 80;
-const MIN_DUP_CHARS: usize = 12;
+/// 护栏数字的唯一来源是 Node `agent-limits.js`（`ctxAgentToolCallLimit` / `agentMaxRounds`），
+/// 由 `rust-loop-runner.applyResolvedLoopSpec` 在唯一入口填进 `StartParams`。
+/// 内核**不留**同名默认值：跨语言复制一个数字，改一边就静默分叉。
 
-fn is_passthrough_thought(text: &str) -> bool {
-    let t = text.trim();
-    t.is_empty()
-        || t == "…"
-        || t.starts_with("请求中")
-        || t.starts_with("思考中")
-        || t.starts_with("生成中")
-        || t.starts_with("处理中")
-        || t.starts_with("启动")
-        || t.starts_with("等待")
-        || t.starts_with("连接中断")
-        || t.starts_with("请求 LLM")
-        || t.starts_with("多模态识图")
-        || t.starts_with("执行工具")
-}
 
-fn collapse_ws(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn split_paras(text: &str) -> Vec<String> {
-    text.split("\n\n")
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect()
-}
-
-fn parse_status_value(raw: &str) -> Option<&'static str> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "continue" => Some("continue"),
-        "final" => Some("final"),
-        "blocked" => Some("blocked"),
-        "ask_user" => Some("ask_user"),
-        _ => None,
-    }
-}
-
-/// 本段结束、交给下游的正文 —— **四条终态路径（正常收尾 / 轮次上限 / 工具次数上限）
-/// 只有这一处口径**：
+/// 本段结束、交给下游的正文 —— **四条终态路径（正常收尾 / 轮次上限 / 工具次数上限）**
+/// 只有这一处口径：
 /// - 思考通道（`ContentChannel::Reasoning`，单通道模型的 `content` 键）**永不**作为正文；
 /// - 其余情况正文为空即 `None`：下游（`applyTurnEndSynthesis`、子 Agent 摘要）据此
 ///   判定「空回复」，而不是拿到一段空字符串的假正文。
 ///
-/// 旧实现会在正文为空时把「像正文的」reasoning 顶上来（`chars().count() >= 24` 且不含
-/// `<tool_call`）。那条兜底让「模型到底有没有给结论」在 UI 上失真 —— 思考被复述成回答，
-/// 且阈值纯属拍脑袋的启发式。通道身份改由入口盖章（`ContentChannel`）后即可删掉。
-/// 「被轮次/预算截断」这一事实由 `hit_round_limit` 与 `TraceRound.content_source` 表达，
+/// 「被轮次/预算截断」这一事实用 `hit_round_limit` 与 `TraceRound.content_source` 表达；
 /// 交付形态交给 Node 侧的四态收口（见 docs/REASONING-ISOLATION-PLAN.md §3.4）。
 fn delivered_content(content: Option<&str>, channel: ContentChannel) -> Option<String> {
     if channel == ContentChannel::Reasoning {
@@ -72,117 +31,6 @@ fn delivered_content(content: Option<&str>, channel: ContentChannel) -> Option<S
     } else {
         Some(text.to_string())
     }
-}
-
-fn strip_agent_status(raw: &str) -> String {
-    let s = raw.trim_start();
-    let lower = s.to_ascii_lowercase();
-    if let Some(rest) = lower.strip_prefix("<agent_status>") {
-        if let Some(end) = rest.find("</agent_status>") {
-            let after_tag = end + "</agent_status>".len();
-            let prefix_len = "<agent_status>".len();
-            let byte_end = prefix_len + after_tag;
-            if byte_end <= s.len() {
-                return s[byte_end..].trim_start().to_string();
-            }
-        }
-    }
-
-    let (first, rest) = match s.split_once('\n') {
-        Some((a, b)) => (a, Some(b)),
-        None => (s, None),
-    };
-    let line = first.trim().trim_start_matches('[').trim_end_matches(']').trim();
-    let lower_line = line.to_ascii_lowercase();
-    if let Some(after) = lower_line.strip_prefix("agent_status") {
-        let after = after.trim_start_matches(|c: char| c == ':' || c == '=' || c.is_whitespace());
-        if parse_status_value(after).is_some() {
-            return rest.unwrap_or("").trim_start().to_string();
-        }
-        if rest.is_none() {
-            return String::new();
-        }
-    }
-    s.trim().to_string()
-}
-
-fn strip_repeated_preamble(current: &str, previous: &str) -> String {
-    let cur = strip_agent_status(current);
-    let cur = cur.trim().to_string();
-    let prev = strip_agent_status(previous);
-    let prev = prev.trim().to_string();
-    if cur.is_empty() {
-        return String::new();
-    }
-    if prev.is_empty() {
-        return cur;
-    }
-    if cur == prev {
-        return String::new();
-    }
-
-    let cur_n = collapse_ws(&cur);
-    let prev_n = collapse_ws(&prev);
-    if cur_n == prev_n {
-        return String::new();
-    }
-    if prev_n.starts_with(&cur_n) && cur_n.chars().count() >= MIN_DUP_CHARS {
-        return String::new();
-    }
-    if cur.starts_with(&prev) {
-        return cur[prev.len()..].trim().to_string();
-    }
-    if cur_n.starts_with(&prev_n) && prev_n.chars().count() >= MIN_DUP_CHARS {
-        let paras = split_paras(&cur);
-        let prev_paras = split_paras(&prev);
-        let mut i = 0;
-        while i < paras.len() && i < prev_paras.len() && collapse_ws(&paras[i]) == collapse_ws(&prev_paras[i])
-        {
-            i += 1;
-        }
-        if i > 0 {
-            return paras[i..].join("\n\n");
-        }
-    }
-
-    let paras = split_paras(&cur);
-    let mut i = 0;
-    while i < paras.len() {
-        let p_n = collapse_ws(&paras[i]);
-        if p_n.chars().count() < MIN_DUP_CHARS {
-            if prev_n.contains(&p_n) {
-                i += 1;
-                continue;
-            }
-            break;
-        }
-        if prev_n.contains(&p_n) {
-            i += 1;
-            continue;
-        }
-        break;
-    }
-    if i == 0 {
-        return cur;
-    }
-    paras[i..].join("\n\n")
-}
-
-fn sanitize_thought(raw: &str, previous: &[String]) -> String {
-    if is_passthrough_thought(raw) {
-        return raw.trim().to_string();
-    }
-    let mut out = strip_agent_status(raw);
-    for prev in previous {
-        if prev.trim().is_empty() || is_passthrough_thought(prev) {
-            continue;
-        }
-        out = strip_repeated_preamble(&out, prev);
-        if out.is_empty() {
-            break;
-        }
-    }
-    out
 }
 
 fn parse_tool_arguments(raw: &Value) -> Value {
@@ -236,10 +84,10 @@ pub struct StartParams {
     pub tools: Vec<Value>,
     #[serde(default)]
     pub workspace_root: Option<String>,
-    #[serde(default)]
-    pub max_tool_calls: Option<u32>,
-    #[serde(default)]
-    pub max_rounds: Option<u32>,
+    /// 必填：唯一来源是 Node `agent-limits.js`（`applyResolvedLoopSpec` 填入）。
+    /// 缺参直接报错，而不是在内核里回落到一份会静默分叉的默认值。
+    pub max_tool_calls: u32,
+    pub max_rounds: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -372,7 +220,6 @@ struct RunState {
     trace: Vec<TraceRound>,
     cancelled: bool,
     pending_delegate: Vec<(String, String, Value)>,
-    recorded_plan: Option<String>,
 }
 
 pub struct AgentLoopManager {
@@ -453,14 +300,13 @@ impl AgentLoopManager {
             messages: params.messages,
             tools: params.tools,
             workspace_root: params.workspace_root,
-            max_tool_calls: params.max_tool_calls.unwrap_or(DEFAULT_MAX_TOOL_CALLS),
-            max_rounds: params.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
+            max_tool_calls: params.max_tool_calls,
+            max_rounds: params.max_rounds,
             round: 0,
             tool_calls_used: 0,
             trace: Vec::new(),
             cancelled: false,
             pending_delegate: Vec::new(),
-            recorded_plan: None,
         };
         self.runs
             .lock()
@@ -548,36 +394,18 @@ impl AgentLoopManager {
 
         state.round += 1;
         let round_no = state.round;
-        let previous_thoughts: Vec<String> = state
-            .trace
-            .iter()
-            .map(|r| {
-                r.full_thought
-                    .clone()
-                    .unwrap_or_else(|| r.thought.clone())
-            })
-            .collect();
-        let content_raw = llm.content.clone().unwrap_or_default();
-        let content_stripped = strip_agent_status(&content_raw);
-        let had_plan = state.recorded_plan.is_some();
-        let stored_content = if let Some(plan) = state.recorded_plan.as_ref() {
-            strip_repeated_preamble(&content_stripped, plan)
-        } else {
-            content_stripped.clone()
-        };
-        if !had_plan && content_stripped.chars().count() >= MIN_RECORDED_PLAN_CHARS {
-            state.recorded_plan = Some(content_stripped.clone());
-        }
+        // 本段正文就是模型原文：不再剥 `agent_status` 行，也不做「重复前言」字符串去重
+        // —— 每轮 assistant 消息本身就是增量；跨轮重复是模型行为，不是账本该改写的事实。
+        let stored_content = llm.content.clone().unwrap_or_default();
         // 思考原文只来自思考通道：`reasoning` 键，或（单通道模型）`content` 键。
         // 不再用「正文」兜底思考 —— 那正是旧实现让思考区复述回答的路径。
         let thought_raw = llm_thought_raw(&llm).unwrap_or_default();
-        let display_thought = sanitize_thought(&thought_raw, &previous_thoughts);
-        let full_thought = if display_thought.is_empty() {
+        let full_thought = if thought_raw.is_empty() {
             None
         } else {
-            Some(display_thought.clone())
+            Some(thought_raw.clone())
         };
-        let thought = display_thought.chars().take(500).collect::<String>();
+        let thought = thought_raw.chars().take(500).collect::<String>();
         // 可交付正文 = 非思考通道 且 内容非空。思考通道的 `content` 只是思考的存放处，
         // 交给下游会把推理复述成结论（UI 上就是「回答区出现了思考」）。
         let visible_content = if channel != ContentChannel::Reasoning
@@ -881,8 +709,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"hello"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: None,
-                max_rounds: None,
+                max_tool_calls: 150,
+                max_rounds: 96,
             })
             .unwrap();
         assert_eq!(r.phase, "need_llm");
@@ -906,8 +734,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"inspect project"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: Some(10),
-                max_rounds: Some(10),
+                max_tool_calls: 10,
+                max_rounds: 10,
             })
             .unwrap();
 
@@ -949,8 +777,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"summarize work"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: Some(10),
-                max_rounds: Some(10),
+                max_tool_calls: 10,
+                max_rounds: 10,
             })
             .unwrap();
 
@@ -997,8 +825,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"改一处 bug"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: Some(10),
-                max_rounds: Some(10),
+                max_tool_calls: 10,
+                max_rounds: 10,
             })
             .unwrap();
 
@@ -1096,8 +924,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"run tools"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: Some(10),
-                max_rounds: Some(1),
+                max_tool_calls: 10,
+                max_rounds: 1,
             })
             .unwrap();
         {
@@ -1130,8 +958,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"run tools"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: Some(0),
-                max_rounds: Some(10),
+                max_tool_calls: 0,
+                max_rounds: 10,
             })
             .unwrap();
         let done2 = mgr
@@ -1169,8 +997,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"run tools"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: Some(0),
-                max_rounds: Some(10),
+                max_tool_calls: 0,
+                max_rounds: 10,
             })
             .unwrap();
 
@@ -1227,8 +1055,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"run tools"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: None,
-                max_rounds: Some(10),
+                max_tool_calls: 150,
+                max_rounds: 10,
             })
             .unwrap();
 
@@ -1283,8 +1111,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"run tools"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: Some(10),
-                max_rounds: Some(1),
+                max_tool_calls: 10,
+                max_rounds: 1,
             })
             .unwrap();
 
@@ -1318,154 +1146,6 @@ mod tests {
         assert!(done.delegates.is_none());
     }
 
-    #[test]
-    fn strip_agent_status_drops_protocol_line() {
-        let body = "可以补全，主人。\n\n验收目标";
-        assert_eq!(
-            strip_agent_status(&format!("agent_status: continue\n{body}")),
-            body
-        );
-        assert_eq!(
-            strip_agent_status("<agent_status>final</agent_status>\n完成。"),
-            "完成。"
-        );
-        assert_eq!(strip_agent_status("agent_status: continue"), "");
-    }
-
-    #[test]
-    fn strip_repeated_preamble_keeps_only_delta() {
-        let plan = "可以补全，主人。\n\n验收目标\n- 单人/多人三档难度\n- 房间创建后锁定难度";
-        let round2 = format!("agent_status: continue\n{plan}\n\n接下来读取 difficulty.cjs。");
-        assert_eq!(
-            strip_repeated_preamble(&round2, plan),
-            "接下来读取 difficulty.cjs。"
-        );
-        assert_eq!(strip_repeated_preamble(plan, plan), "");
-    }
-
-    #[tokio::test]
-    async fn later_tool_round_does_not_repeat_recorded_plan() {
-        let dir = tempdir().unwrap();
-        let config = AppConfig::default();
-        let index = IndexService::new(
-            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
-            EmbeddingConfig::default(),
-            Vec::new(),
-        );
-        let mgr = AgentLoopManager::default();
-        let start = mgr
-            .start(StartParams {
-                model: "test-model".into(),
-                messages: vec![json!({"role":"user","content":"补难度档位"})],
-                tools: vec![],
-                workspace_root: None,
-                max_tool_calls: Some(10),
-                max_rounds: Some(10),
-            })
-            .unwrap();
-
-        let plan = "可以补全，主人。\n\n验收目标\n- 单人/多人三档难度\n- 房间创建后锁定难度\n- 普通/困难调整非 Boss 参数\n- 语法检查、构建、Boss HP 断言与浏览器进程作为证据";
-        assert!(plan.chars().count() >= MIN_RECORDED_PLAN_CHARS);
-        let content = format!("agent_status: continue\n{plan}");
-
-        let first = mgr
-            .continue_llm(
-                &config,
-                &index,
-                &start.run_id,
-                LlmResponseInput {
-                    content: Some(content.clone()),
-                    reasoning: None,
-                    tool_calls: vec![ToolCallInput {
-                        id: "tc1".into(),
-                        name: "read_file".into(),
-                        arguments: json!({"path":"difficulty.cjs"}),
-                    }],
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(first.phase, "need_delegate");
-
-        let need = mgr
-            .submit_tool_results(
-                &config,
-                &index,
-                &start.run_id,
-                vec![ToolResultInput {
-                    id: "tc1".into(),
-                    result: json!({"ok": true}),
-                    error: None,
-                }],
-            )
-            .unwrap();
-        assert_eq!(need.phase, "need_llm");
-        let msgs = need
-            .llm_body
-            .as_ref()
-            .and_then(|b| b.get("messages"))
-            .and_then(|m| m.as_array())
-            .cloned()
-            .unwrap_or_default();
-        assert!(
-            !msgs.iter().any(|m| {
-                m.get("role").and_then(|r| r.as_str()) == Some("user")
-                    && m.get("content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .contains("验收计划已记录")
-            }),
-            "must not inject plan-recorded reminder"
-        );
-        let first_assistant = msgs
-            .iter()
-            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
-            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-            .unwrap_or("");
-        assert!(!first_assistant.contains("agent_status"));
-        assert!(first_assistant.contains("验收目标"));
-
-        let second = mgr
-            .continue_llm(
-                &config,
-                &index,
-                &start.run_id,
-                LlmResponseInput {
-                    content: Some(format!("{content}\n\n接下来再搜一遍。")),
-                    reasoning: None,
-                    tool_calls: vec![ToolCallInput {
-                        id: "tc2".into(),
-                        name: "grep".into(),
-                        arguments: json!({"pattern":"difficulty"}),
-                    }],
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(second.phase, "need_delegate");
-
-        let runs = mgr.runs.lock().unwrap();
-        let state = runs.get(&start.run_id).expect("run still live");
-        let assistants: Vec<&str> = state
-            .messages
-            .iter()
-            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
-            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-            .collect();
-        assert_eq!(assistants.len(), 2);
-        assert!(
-            !assistants[1].contains("验收目标"),
-            "second assistant content must not repeat the plan: {}",
-            assistants[1]
-        );
-        let last_thought = state.trace.last().map(|r| r.thought.as_str()).unwrap_or("");
-        assert!(!last_thought.contains("agent_status"));
-        assert!(
-            !last_thought.contains("验收目标"),
-            "second thought must not repeat the plan: {last_thought}"
-        );
-    }
-
     #[tokio::test]
     async fn length_stop_does_not_delegate_truncated_tool_calls() {
         let dir = tempdir().unwrap();
@@ -1482,8 +1162,8 @@ mod tests {
                 messages: vec![json!({"role":"user","content":"edit"})],
                 tools: vec![],
                 workspace_root: None,
-                max_tool_calls: Some(10),
-                max_rounds: Some(10),
+                max_tool_calls: 10,
+                max_rounds: 10,
             })
             .unwrap();
 

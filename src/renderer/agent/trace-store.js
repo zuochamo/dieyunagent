@@ -260,8 +260,8 @@ function maybeSaveRunningTraceCheckpoint(live, params = {}) {
 function normalizeStoppedTrace(trace) {
   return stripTraceUiOnlyFields(trace).map((entry) => {
     const full = String(entry.fullThought || '').trim();
-    let thought = full || String(entry.thought || '').trim();
-    if (!thought || thought === '请求中…') thought = full || '（已停止）';
+    // 占位行（placeholder: true）没有模型原文可留：落「已停止」，不把「生成中…」写进账本
+    const thought = entry.placeholder === true ? '（已停止）' : full || String(entry.thought || '').trim() || '（已停止）';
     const tools = (entry.tools || []).map((t) =>
       t && t.pending
         ? { ...t, pending: false, summary: t.summary === '执行中…' ? '已停止' : t.summary || '已停止' }

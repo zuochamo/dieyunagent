@@ -74,7 +74,7 @@ function createPlanRunTrace(opts = {}) {
     const n = Math.max(1, Number(roundNo) || 1);
     let row = rounds.find((x) => x.round === n);
     if (!row) {
-      row = { round: n, thought: '', fullThought: '', tools: [] };
+      row = { round: n, thought: '', fullThought: '', tools: [], placeholder: false };
       rounds.push(row);
       rounds.sort((a, b) => a.round - b.round);
     }
@@ -89,6 +89,7 @@ function createPlanRunTrace(opts = {}) {
       thought: r.thought,
       fullThought: r.fullThought || r.thought,
       visibleContent: r.visibleContent || '',
+      placeholder: r.placeholder === true,
       tools: r.tools.map((t) => ({ ...t, args: t.args ? { ...t.args } : {} }))
     }));
   }
@@ -123,7 +124,10 @@ function createPlanRunTrace(opts = {}) {
     }
     // 不再写「执行工具…」占位文本：正文只显示真实模型输出，工具进度由工具行自己表达。
     // 顺手清掉上一轮的「请求 LLM…」，避免工具跑起来了还挂着过期的请求提示。
-    if (!row.thought || String(row.thought).startsWith('请求 LLM')) row.thought = '';
+    if (!row.thought || row.placeholder) {
+      row.thought = '';
+      row.placeholder = false;
+    }
     return true;
   }
 
@@ -155,7 +159,9 @@ function createPlanRunTrace(opts = {}) {
   function handlePhase(name, data) {
     const d = data && typeof data === 'object' ? data : {};
     if (name === 'start') {
-      getRound(1).thought = '启动…';
+      const startRow = getRound(1);
+      startRow.thought = '启动…';
+      startRow.placeholder = true;
       sync();
       return;
     }
@@ -163,6 +169,7 @@ function createPlanRunTrace(opts = {}) {
       llmRound = d.round != null ? Number(d.round) : llmRound;
       const row = getRound(eventRoundNo(d));
       row.thought = d.model ? `请求 LLM · ${String(d.model).trim()}…` : '请求 LLM…';
+      row.placeholder = true;
       sync();
       return;
     }
@@ -176,18 +183,23 @@ function createPlanRunTrace(opts = {}) {
       if (reasoning) {
         row.thought = reasoning.slice(0, LIVE_THOUGHT_CHARS);
         row.fullThought = reasoning.slice(0, LIVE_THOUGHT_CHARS);
+        row.placeholder = false;
         if (d.hasToolCalls) row.visibleContent = contentOnly;
         else if (contentOnly && !contentIsReasoning) streamContent = contentOnly;
       } else if (contentIsReasoning) {
         // 单通道模型（能力表声明，如 mimo）：流式 content 是推理，不应泄漏进回答区
         row.thought = contentOnly.slice(0, LIVE_THOUGHT_CHARS);
         row.fullThought = contentOnly.slice(0, LIVE_THOUGHT_CHARS);
+        row.placeholder = false;
         streamContent = '';
       } else if (contentOnly) {
         // 普通模型：content 是正文，进回答区
         streamContent = contentOnly;
       } else {
-        row.thought = row.thought || '生成中…';
+        if (!row.thought) {
+          row.thought = '生成中…';
+          row.placeholder = true;
+        }
       }
       sync();
       return;
@@ -212,6 +224,7 @@ function createPlanRunTrace(opts = {}) {
       const sec = Math.max(1, Math.round((Number(d.waitMs) || 0) / 1000));
       const row = getRound(llmRound || 1);
       row.thought = `连接中断，${sec}s 后自动重试…`;
+      row.placeholder = true;
       sync();
       return;
     }
