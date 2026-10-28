@@ -1,5 +1,4 @@
 mod build;
-mod embed;
 mod extract;
 mod lsp_ingest;
 mod query;
@@ -10,25 +9,18 @@ pub use schema::ensure_schema;
 pub use types::{IngestLspResult, LspCallSiteIn};
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection};
 
-use crate::config::AppConfig;
-use crate::embedding::{self, EmbeddingConfig};
 use crate::error::CoreError;
 use crate::graph::build::{run_build_with_progress, run_remote_build};
-use crate::graph::embed::run_embed_symbols;
 use crate::graph::lsp_ingest::ingest_lsp_callers;
-use crate::graph::query::{
-    callees, callers, impact, module_deps, repo_map, symbol_search, symbol_semantic_search,
-};
+use crate::graph::query::{callees, callers, impact, module_deps, repo_map, symbol_search};
 use crate::graph::types::{
     CallGraphResult, GraphStartIndexResult, GraphStatusResult, ImpactResult, ModuleDepsResult,
     RepoMapResult, SymbolSearchResult,
 };
-use crate::index::vector_pool::{PoolCache, VectorPool};
 use crate::index::{resolve_workspace, RemoteFileInput, WorkspaceRef};
 use crate::sqlite::SqliteHandle;
 
@@ -47,60 +39,25 @@ struct GraphProgressSnapshot {
 pub struct GraphService {
     /// codebase.db 句柄：与 `IndexService` 共享同一条常驻连接（同库，故同连接）。
     db: Arc<SqliteHandle>,
-    embedding: EmbeddingConfig,
-    models_dirs: Vec<PathBuf>,
     building: Arc<Mutex<HashSet<String>>>,
-    embedding_symbols: Arc<Mutex<HashSet<String>>>,
     remote_files: Arc<Mutex<HashMap<String, Vec<RemoteFileInput>>>>,
     progress: Arc<Mutex<HashMap<String, GraphProgressSnapshot>>>,
-    /// root_hash -> 常驻内存符号向量池
-    symbol_pools: PoolCache,
 }
 
 impl GraphService {
-    pub fn new(db: Arc<SqliteHandle>, embedding: EmbeddingConfig, models_dirs: Vec<PathBuf>) -> Self {
+    pub fn new(db: Arc<SqliteHandle>) -> Self {
         Self {
             db,
-            embedding,
-            models_dirs,
             building: Arc::new(Mutex::new(HashSet::new())),
-            embedding_symbols: Arc::new(Mutex::new(HashSet::new())),
             remote_files: Arc::new(Mutex::new(HashMap::new())),
             progress: Arc::new(Mutex::new(HashMap::new())),
-            symbol_pools: PoolCache::new(),
         }
     }
 
-    /// 取工作区的符号向量池：命中刷新 LRU，否则从 SQLite 全量载入。
-    /// 池只是加速层，加载失败返回 None，调用方回退到 SQL 路径。
-    fn symbol_pool_for(&self, conn: &Connection, root_hash: &str) -> Option<Arc<VectorPool>> {
-        if let Some(pool) = self.symbol_pools.get(root_hash) {
-            return Some(pool);
-        }
-        let pool = Arc::new(VectorPool::load_symbols(conn, root_hash).ok().flatten()?);
-        self.symbol_pools.insert(root_hash, Arc::clone(&pool));
-        Some(pool)
-    }
-
-    /// 符号向量写回后重建池（仅当该工作区已加载过）。
-    fn refresh_symbol_pool(&self, conn: &Connection, root_hash: &str) {
-        if !self.symbol_pools.contains(root_hash) {
-            return;
-        }
-        match VectorPool::load_symbols(conn, root_hash) {
-            Ok(Some(p)) => self.symbol_pools.insert(root_hash, Arc::new(p)),
-            _ => self.symbol_pools.remove(root_hash),
-        }
-    }
-
-    pub fn from_config(config: &AppConfig, db: Arc<SqliteHandle>) -> Self {
-        Self::new(db, config.embedding.clone(), config.models_dirs.clone())
-    }
-
-    /// 复用常驻连接执行一次读/写（见 `SqliteHandle::with_conn`）。
+    /// 复用常驻连接执行一次**秒回级**短操作（见 `SqliteHandle::with_conn`）。
     ///
     /// 非重入锁：调用方**不得**在闭包内再调 `with_conn` / `status`，否则死锁。
-    /// 需要串联多步时用 `*_with_conn` 形态的私有方法。
+    /// 数据查询不算短操作 —— 一律走 [`read_dedicated`](Self::read_dedicated)。
     fn with_conn<T>(
         &self,
         f: impl FnOnce(&Connection) -> Result<T, CoreError>,
@@ -108,19 +65,36 @@ impl GraphService {
         self.db.with_conn(f)
     }
 
-    /// 独立连接：用于跨 `.await` 或分钟级长任务，避免长时间占用常驻锁。
+    /// 独立连接：用于跨 `.await`、分钟级长任务，以及**所有数据查询**。
     fn open_dedicated(&self) -> Result<Connection, CoreError> {
         self.db.open_dedicated()
     }
 
-    pub fn embedding_enabled(&self) -> bool {
-        self.embedding.enabled(&self.models_dirs)
+    /// 读侧取数的唯一姿势：**状态快照走读池**（纯读、必须秒回），
+    /// **数据查询也走读池**（仓库地图 / 符号检索 / 调用链都可能扫全表）。
+    ///
+    /// 拆开的原因见 `docs/SQLITE-ACCESS.md`：常驻连接是
+    /// index / graph 共用的唯一写入连接，只要有一条慢读占着它，期间所有
+    /// `codebase.status` / `graph.status` 都会排队到客户端 45s 超时。
+    fn read_dedicated<T>(
+        &self,
+        ws: &WorkspaceRef,
+        f: impl FnOnce(&Connection, bool) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let (st, stale_flag) = self.status_snapshot(ws)?;
+        if stale_flag {
+            // 维修不在读路径上做：独立连接 + `busy_timeout(0)`，抢不到写锁就下次再来。
+            if let Ok(conn) = self.open_dedicated() {
+                repair_stale_indexing_flag(&conn, &ws.root_hash);
+            }
+        }
+        self.db.read(|conn| f(conn, st.indexed))
     }
 
-    pub fn embedding_signature(&self) -> String {
-        self.embedding.signature(&self.models_dirs)
+    /// 状态快照：读池上纯读；第二个返回值表示「库里有脏旗标需要修」。
+    fn status_snapshot(&self, ws: &WorkspaceRef) -> Result<(GraphStatusResult, bool), CoreError> {
+        self.db.read(|conn| self.status_with_conn(conn, ws))
     }
-
 
     fn set_progress(
         &self,
@@ -186,29 +160,35 @@ impl GraphService {
 
     pub fn status(&self, workspace_root: &str) -> Result<GraphStatusResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        self.with_conn(|conn| self.status_with_conn(conn, &ws))
+        let (st, stale_flag) = self.status_snapshot(&ws)?;
+        if stale_flag {
+            // 修复不在读路径上做：独立连接 + `busy_timeout(0)`，抢不到写锁就下次再修
+            if let Ok(conn) = self.open_dedicated() {
+                repair_stale_indexing_flag(&conn, &ws.root_hash);
+            }
+        }
+        Ok(st)
     }
 
     /// `status` 的实现本体：连接由调用方提供。
     ///
-    /// 常驻连接的锁非重入，凡是「已经拿着连接」的地方都必须走这个入口 ——
-    /// `module_deps` / `repo_map` / `symbol_search` / `callers` / `callees` / `impact`
-    /// 都是「先查状态、再用同一连接查数据」。在这里再调一次 `self.status` 会直接自锁。
+    /// **纯读**：库里的脏旗标（`indexing = 1` 却没人真在跑，通常是崩溃残留）只发现、
+    /// 不在这里写，第二个返回值交给调用方用独立连接补写（见
+    /// [`read_conn`](Self::read_conn) / [`status`](Self::status)）。
     fn status_with_conn(
         &self,
         conn: &Connection,
         ws: &WorkspaceRef,
-    ) -> Result<GraphStatusResult, CoreError> {
+    ) -> Result<(GraphStatusResult, bool), CoreError> {
         let live_indexing = self
             .building
             .lock()
             .map(|g| g.contains(&ws.root_hash))
             .unwrap_or(false);
 
-        let row: Option<(i64, i64, i64, i64, i64, i64, i64, Option<String>)> = conn
+        let row: Option<(i64, i64, i64, i64, i64, i64)> = conn
             .query_row(
-                "SELECT file_count, edge_count, symbol_count, call_count, symbol_vector_count,
-                        indexed_at, indexing, symbol_embedding_model
+                "SELECT file_count, edge_count, symbol_count, call_count, indexed_at, indexing
                  FROM graph_workspaces WHERE root_hash = ?1",
                 params![ws.root_hash],
                 |r| {
@@ -219,8 +199,6 @@ impl GraphService {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
                     ))
                 },
             )
@@ -235,8 +213,6 @@ impl GraphService {
                     edge_count: 0,
                     symbol_count: 0,
                     call_count: 0,
-                    symbol_vector_count: 0,
-                    symbol_embedding_model: None,
                     indexed_at: 0,
                     indexing: live_indexing,
                     phase: None,
@@ -245,15 +221,13 @@ impl GraphService {
                     last_error: None,
                 };
                 self.apply_live_progress(&ws.root_hash, &mut st);
-                st
+                (st, false)
             }
-            Some((fc, ec, sc, cc, svc, ia, db_indexing, sem)) => {
+            Some((fc, ec, sc, cc, ia, db_indexing)) => {
                 let mut db_flag = db_indexing;
-                if !live_indexing && db_flag != 0 {
-                    let _ = conn.execute(
-                        "UPDATE graph_workspaces SET indexing = 0 WHERE root_hash = ?1",
-                        params![ws.root_hash],
-                    );
+                let stale_flag = !live_indexing && db_flag != 0;
+                if stale_flag {
+                    // 读路径不写库：交给调用方用独立连接补（见 status / read_conn）
                     db_flag = 0;
                 }
                 let mut st = GraphStatusResult {
@@ -264,8 +238,6 @@ impl GraphService {
                     edge_count: ec,
                     symbol_count: sc,
                     call_count: cc,
-                    symbol_vector_count: svc,
-                    symbol_embedding_model: sem,
                     indexed_at: ia,
                     indexing: live_indexing || db_flag != 0,
                     phase: None,
@@ -274,7 +246,7 @@ impl GraphService {
                     last_error: None,
                 };
                 self.apply_live_progress(&ws.root_hash, &mut st);
-                st
+                (st, stale_flag)
             }
         })
     }
@@ -410,8 +382,6 @@ impl GraphService {
                 edge_count: 0,
                 symbol_count: 0,
                 call_count: 0,
-                symbol_vector_count: 0,
-                symbol_embedding_model: None,
                 indexed_at: 0,
                 indexing: true,
                 phase: Some("walking".into()),
@@ -575,9 +545,8 @@ impl GraphService {
         depth: Option<u32>,
     ) -> Result<ModuleDepsResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        self.with_conn(|conn| {
-            let st = self.status_with_conn(conn, &ws)?;
-            module_deps(conn, &ws.root_hash, path, depth.unwrap_or(1), st.indexed)
+        self.read_dedicated(&ws, |conn, indexed| {
+            module_deps(conn, &ws.root_hash, path, depth.unwrap_or(1), indexed)
         })
     }
 
@@ -587,9 +556,8 @@ impl GraphService {
         limit: Option<u32>,
     ) -> Result<RepoMapResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        self.with_conn(|conn| {
-            let st = self.status_with_conn(conn, &ws)?;
-            repo_map(conn, &ws.root_hash, limit.unwrap_or(32), st.indexed)
+        self.read_dedicated(&ws, |conn, indexed| {
+            repo_map(conn, &ws.root_hash, limit.unwrap_or(32), indexed)
         })
     }
 
@@ -601,102 +569,14 @@ impl GraphService {
         limit: Option<u32>,
     ) -> Result<SymbolSearchResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        self.with_conn(|conn| {
-            let st = self.status_with_conn(conn, &ws)?;
+        self.read_dedicated(&ws, |conn, indexed| {
             symbol_search(
                 conn,
                 &ws.root_hash,
                 query,
                 kind,
                 limit.unwrap_or(20),
-                st.indexed,
-            )
-        })
-    }
-
-    pub async fn embed_symbols(
-        &self,
-        workspace_root: &str,
-        force: bool,
-    ) -> Result<GraphStatusResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        let root_hash = ws.root_hash.clone();
-        {
-            let mut guard = self
-                .embedding_symbols
-                .lock()
-                .map_err(|_| CoreError::rpc("GRAPH_BUSY", "符号向量构建锁不可用"))?;
-            if guard.contains(&root_hash) {
-                drop(guard);
-                return self.status(workspace_root);
-            }
-            guard.insert(root_hash.clone());
-        }
-
-        // 跨 await + 分钟级任务：既拿不住 MutexGuard，也不该占着常驻锁。
-        // `&mut Connection` 才是 Send（`&Connection` 因 `Connection: !Sync` 而非 Send），
-        // 否则该 future 无法在多线程运行时上 spawn。
-        let mut conn = self.open_dedicated()?;
-        let result =
-            run_embed_symbols(&mut conn, &self.embedding, &self.models_dirs, &root_hash, force)
-                .await;
-
-        if let Ok(mut guard) = self.embedding_symbols.lock() {
-            guard.remove(&root_hash);
-        }
-        result?;
-        // 符号向量已写回 DB：若池已加载则就地重建，避免检索读到旧向量
-        self.refresh_symbol_pool(&conn, &root_hash);
-        self.status(workspace_root)
-    }
-
-    pub async fn symbol_semantic_search(
-        &self,
-        workspace_root: &str,
-        query: &str,
-        kind: Option<&str>,
-        limit: Option<u32>,
-    ) -> Result<SymbolSearchResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        // 分两段用连接：中间要 await embedding，而常驻锁的 MutexGuard 拿不过 await。
-        // `st` 在两段之间沿用同一份快照，与改造前「先取状态、再检索」的取值时机一致。
-        let st = self.with_conn(|conn| self.status_with_conn(conn, &ws))?;
-
-        let mut query_vector = None;
-        let can_vector = self.embedding.enabled(&self.models_dirs)
-            && st.symbol_vector_count > 0
-            && self.embedding.signature(&self.models_dirs)
-                == st.symbol_embedding_model.as_deref().unwrap_or("");
-        if can_vector {
-            let q = query.trim();
-            if !q.is_empty() {
-                let vectors =
-                    embedding::embed_texts(&self.embedding, &self.models_dirs, &[q.to_string()])
-                        .await?;
-                if let Some(vec) = vectors.into_iter().next() {
-                    query_vector = Some(vec);
-                }
-            }
-        }
-
-        self.with_conn(|conn| {
-            // 有池则走内存扫描（只加速，不改语义：仍是全量精确余弦）
-            let pool = if query_vector.is_some() {
-                self.symbol_pool_for(conn, &ws.root_hash)
-            } else {
-                None
-            };
-
-            symbol_semantic_search(
-                conn,
-                &ws.root_hash,
-                query,
-                kind,
-                limit.unwrap_or(20),
-                st.indexed,
-                st.symbol_vector_count,
-                query_vector.as_deref(),
-                pool.as_deref(),
+                indexed,
             )
         })
     }
@@ -709,9 +589,8 @@ impl GraphService {
         name: Option<&str>,
     ) -> Result<CallGraphResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        self.with_conn(|conn| {
-            let st = self.status_with_conn(conn, &ws)?;
-            callers(conn, &ws.root_hash, symbol_id, path, name, st.indexed)
+        self.read_dedicated(&ws, |conn, indexed| {
+            callers(conn, &ws.root_hash, symbol_id, path, name, indexed)
         })
     }
 
@@ -723,9 +602,8 @@ impl GraphService {
         name: Option<&str>,
     ) -> Result<CallGraphResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        self.with_conn(|conn| {
-            let st = self.status_with_conn(conn, &ws)?;
-            callees(conn, &ws.root_hash, symbol_id, path, name, st.indexed)
+        self.read_dedicated(&ws, |conn, indexed| {
+            callees(conn, &ws.root_hash, symbol_id, path, name, indexed)
         })
     }
 
@@ -736,9 +614,8 @@ impl GraphService {
         depth: Option<u32>,
     ) -> Result<ImpactResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
-        self.with_conn(|conn| {
-            let st = self.status_with_conn(conn, &ws)?;
-            impact(conn, &ws.root_hash, path, depth.unwrap_or(4), st.indexed)
+        self.read_dedicated(&ws, |conn, indexed| {
+            impact(conn, &ws.root_hash, path, depth.unwrap_or(4), indexed)
         })
     }
 
@@ -756,23 +633,31 @@ impl GraphService {
     }
 }
 
+/// 修掉崩溃 / 异常退出残留的 `graph_workspaces.indexing = 1`。
+///
+/// best-effort：`busy_timeout(0)`，抢不到写锁就放弃（下次读再修）。
+/// 维修绝不能把读请求拖进等锁 —— 那正是 `codebase.status` 45s 超时的来源。
+fn repair_stale_indexing_flag(conn: &Connection, root_hash: &str) {
+    let _ = conn.busy_timeout(std::time::Duration::ZERO);
+    let _ = conn.execute(
+        "UPDATE graph_workspaces SET indexing = 0 WHERE root_hash = ?1",
+        params![root_hash],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embedding::EmbeddingConfig;
     use crate::graph::extract::files::is_graph_path;
     use crate::graph::extract::go::is_go_path;
     use crate::graph::extract::js_ts::is_js_ts_path;
     use crate::graph::extract::python::is_python_path;
     use crate::graph::extract::rust_lang::is_rust_path;
     use std::fs;
+    use std::path::PathBuf;
 
     fn test_graph(db: std::path::PathBuf) -> GraphService {
-        GraphService::new(
-            crate::codebase_db::handle(db),
-            EmbeddingConfig::default(),
-            Vec::new(),
-        )
+        GraphService::new(crate::codebase_db::handle(db))
     }
 
     #[test]
@@ -822,6 +707,77 @@ mod tests {
         assert!(is_go_path("main.go"));
         assert!(is_rust_path("lib.rs"));
         assert!(!is_graph_path("a.java"));
+    }
+
+    /// 读侧：状态秒回、数据查询不占常驻锁。另一个连接占着写事务时同样不许被堵。
+    ///
+    /// 常驻连接被 index / graph 共用一把非重入锁，慢读占住它 => 所有 status 45s 超时
+    /// （见 `docs/SQLITE-ACCESS.md`）。
+    #[test]
+    fn graph_reads_do_not_wait_on_open_write_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("graph.sqlite");
+        let handle = crate::codebase_db::handle(db);
+        let svc = GraphService::new(Arc::clone(&handle));
+        let root = dir.path().to_string_lossy().to_string();
+        let ws = resolve_workspace(&root).unwrap();
+
+        // 造脏状态：indexing=1（崩溃残留），且已有一个符号
+        handle
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO graph_workspaces (root_hash, root_path, indexing, indexed_at)
+                     VALUES (?1, ?2, 1, 1)",
+                    params![ws.root_hash, &root],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                conn.execute(
+                    "INSERT INTO graph_symbols (root_hash, rel_path, kind, name, qualified_name,
+                                                start_line, end_line, mtime)
+                     VALUES (?1, 'a.rs', 'function', 'alpha', 'a.rs::alpha', 1, 2, 0)",
+                    params![ws.root_hash],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                Ok(())
+            })
+            .expect("seed stale graph workspace");
+
+        let writer = handle.open_dedicated().expect("open writer");
+        writer
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 INSERT INTO graph_symbols (root_hash, rel_path, kind, name, qualified_name,
+                                            start_line, end_line, mtime)
+                 VALUES ('other', 'b.rs', 'function', 'beta', 'b.rs::beta', 1, 2, 0);",
+            )
+            .expect("hold write transaction");
+
+        let started = std::time::Instant::now();
+        let st = svc.status(&root).expect("status");
+        let status_elapsed = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let hits = svc
+            .symbol_search(&root, "alpha", None, Some(5))
+            .expect("symbol_search");
+        let search_elapsed = started.elapsed();
+
+        writer.execute_batch("ROLLBACK").expect("rollback");
+        drop(writer);
+
+        assert!(!st.indexing, "没人在跑结构索引时不应报 indexing");
+        assert!(
+            hits.results.iter().any(|s| s.name == "alpha"),
+            "写事务在飞时读侧仍应看到已提交的符号"
+        );
+        assert!(
+            status_elapsed < std::time::Duration::from_secs(1),
+            "graph.status 等了 {status_elapsed:?}：读路径被写锁堵住了"
+        );
+        assert!(
+            search_elapsed < std::time::Duration::from_secs(2),
+            "symbol_search 等了 {search_elapsed:?}：读路径被写锁堵住了"
+        );
     }
 
     #[test]
@@ -879,6 +835,149 @@ mod tests {
         assert_eq!(st.file_count, 2);
         assert!(st.edge_count >= 1);
         assert!(st.symbol_count >= 2);
+    }
+
+    /// 增量重建时只改了**被调用方**：其它文件指向它的调用边不能丢。
+    ///
+    /// 曾经 `clear_file_graph` 会把 `callee_symbol_id` 指向本文件符号的行整行删掉，
+    /// 而那些调用方文件没变、增量直接跳过 → 调用关系再也不会被插回来，图谱随每次
+    /// 编辑变稀疏（实测 callers(foo): 1 → 0）。
+    #[test]
+    fn incremental_rebuild_keeps_inbound_call_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("aa.js"),
+            "export function foo() { return 1; }\nexport function baz() { return 3; }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("zz.js"),
+            "import { foo } from './aa.js';\nexport function useIt() { return foo(); }\n",
+        )
+        .unwrap();
+
+        let svc = test_graph(dir.path().join("g.db"));
+        let root = dir.path().canonicalize().unwrap();
+        let key = root.to_string_lossy().to_string();
+        let st = svc.index_workspace(&key, true).unwrap();
+        assert_eq!(st.call_count, 1, "首次建库应有 1 条调用边");
+        let before = svc.callers(&key, None, None, Some("foo")).unwrap();
+        assert_eq!(before.sites.len(), 1, "首次建库应能查到调用点");
+        assert_eq!(before.sites[0].caller_path, "zz.js");
+
+        // 只改被调用方：aa.js 追加一个无关函数，zz.js 一动不动
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(
+            dir.path().join("aa.js"),
+            "export function foo() { return 1; }\nexport function baz() { return 3; }\nexport function extra() { return 2; }\n",
+        )
+        .unwrap();
+        svc.index_workspace(&key, false).unwrap();
+
+        let after = svc.callers(&key, None, None, Some("foo")).unwrap();
+        assert_eq!(
+            after
+                .sites
+                .iter()
+                .filter(|s| s.caller_path == "zz.js")
+                .count(),
+            1,
+            "增量重建后入边不能丢: {:?}",
+            after.sites
+        );
+    }
+
+    /// 解析不受文件处理顺序影响：调用方排在前面（先处理）时也要解析成功。
+    #[test]
+    fn call_resolution_does_not_depend_on_file_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // aa.js 先处理，它调用 zz.js 里的唯一函数 foo
+        fs::write(
+            dir.path().join("aa.js"),
+            "import { foo } from './zz.js';\nexport function callIt() { return foo(); }\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("zz.js"), "export function foo() { return 1; }\n").unwrap();
+
+        let svc = test_graph(dir.path().join("g.db"));
+        let root = dir.path().canonicalize().unwrap();
+        let key = root.to_string_lossy().to_string();
+        svc.index_workspace(&key, true).unwrap();
+
+        let res = svc.callers(&key, None, None, Some("foo")).unwrap();
+        assert_eq!(res.sites.len(), 1, "应查到 aa.js 的调用点");
+        assert!(
+            res.sites[0].callee_symbol_id.is_some(),
+            "名字唯一的跨文件调用必须被解析，不该留成未解析: {:?}",
+            res.sites[0]
+        );
+    }
+
+    /// 调用归属必须看符号的作用域：函数体之后的文件级调用不能算到上一个函数头上。
+    #[test]
+    fn file_level_calls_are_not_attributed_to_previous_function() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("server.js"),
+            "export function setup() {\n  return 1;\n}\nserver.listen(3000);\n",
+        )
+        .unwrap();
+
+        let svc = test_graph(dir.path().join("g.db"));
+        let root = dir.path().canonicalize().unwrap();
+        let key = root.to_string_lossy().to_string();
+        svc.index_workspace(&key, true).unwrap();
+
+        let res = svc.callees(&key, None, Some("server.js"), Some("setup")).unwrap();
+        assert!(
+            !res.sites.iter().any(|s| s.callee_name == "listen"),
+            "listen 在 setup 作用域之外，不该算成 setup 的调用: {:?}",
+            res.sites
+        );
+    }
+
+    /// 符号被改名/删除后，`callers(name)` 仍要给出**悬空调用点**：
+    /// 调用点还在源码里，只是解析不到目标了，这正是「谁还在调这个已经不存在的东西」。
+    #[test]
+    fn callers_reports_dangling_sites_when_symbol_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("aa.js"), "export function foo() { return 1; }\n").unwrap();
+        fs::write(
+            dir.path().join("zz.js"),
+            "import { foo } from './aa.js';\nexport function useIt() { return foo(); }\n",
+        )
+        .unwrap();
+
+        let svc = test_graph(dir.path().join("g.db"));
+        let root = dir.path().canonicalize().unwrap();
+        let key = root.to_string_lossy().to_string();
+        svc.index_workspace(&key, true).unwrap();
+        let before = svc.callers(&key, None, None, Some("foo")).unwrap();
+        assert!(before.symbol.is_some(), "建库后 foo 应存在");
+        assert_eq!(before.sites.len(), 1);
+
+        // 只把被调用方改名，调用方源码原样不动
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(dir.path().join("aa.js"), "export function bar() { return 1; }\n").unwrap();
+        svc.index_workspace(&key, false).unwrap();
+
+        let after = svc.callers(&key, None, None, Some("foo")).unwrap();
+        assert!(after.symbol.is_none(), "foo 已不存在");
+        assert_eq!(
+            after
+                .sites
+                .iter()
+                .filter(|s| s.caller_path == "zz.js")
+                .count(),
+            1,
+            "应报出 zz.js 里那个悬空的 foo() 调用点: {:?}",
+            after.sites
+        );
+
+        // 新名字本身没有调用点
+        let bar = svc.callers(&key, None, None, Some("bar")).unwrap();
+        assert!(bar.symbol.is_some());
+        assert!(bar.sites.is_empty(), "没人调 bar: {:?}", bar.sites);
     }
 
     #[test]
