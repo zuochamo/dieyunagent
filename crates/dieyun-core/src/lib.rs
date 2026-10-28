@@ -24,6 +24,7 @@ pub mod config;
 pub mod embedding;
 pub mod error;
 pub mod fs_ops;
+pub mod fts;
 pub mod graph;
 pub mod index;
 pub mod memory;

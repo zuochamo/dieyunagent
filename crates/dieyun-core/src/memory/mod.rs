@@ -1,6 +1,6 @@
 mod agent;
-mod keyword;
 mod misc;
+mod projects;
 mod schema;
 mod snapshot;
 
@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use crate::config::AppConfig;
 use crate::embedding::{self, EmbeddingConfig};
 use crate::error::CoreError;
+use crate::sqlite::SqliteHandle;
 
 const MEMORY_EMBED_TEXT_MAX: usize = 6000;
 const GLOBAL_MEMORY_SCOPE: &str = "global";
@@ -125,12 +126,27 @@ fn map_long_mem_semantic_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LongMe
     ))
 }
 
+/// 近重复判定的余弦阈值：同一 scope 内相似度 ≥ 该值的写入视为「同一件事的另一种说法」。
+/// 取 0.92 而不是 0.8：记忆粒度本来就抽象，0.8 会把「偏好中文」和「偏好简短」并成一条。
+const NEAR_DUP_COSINE: f64 = 0.92;
+
+/// 自动归纳（source 含 consolidation）条目的 importance 下限，低于此值不落库。
+/// 依据是库里的真实分布：importance ≤ 2 的条目既进不了每轮 8+5 的注入预算，
+/// 又会在语义召回里占位 —— 那就别写进来。
+const CONSOLIDATION_MIN_IMPORTANCE: i64 = 3;
+
+/// 悬空归纳作业的判定阈值：`pending` 且开始时间早于 now - 该值 → 判 failed。
+/// 真实归纳是秒到分钟级，超过 30 分钟还 pending 只可能是进程已经退出。
+const STALE_CONSOLIDATION_JOB_MS: i64 = 30 * 60 * 1000;
+
 #[derive(Clone)]
 pub struct MemoryStore {
     db_path: PathBuf,
     embedding: std::sync::Arc<Mutex<EmbeddingConfig>>,
     models_dirs: std::sync::Arc<Mutex<Vec<PathBuf>>>,
-    conn: std::sync::Arc<Mutex<Connection>>,
+    /// 库生命周期归口到 `SqliteHandle`（写入连接 + 池化读连接 + 长任务连接），
+    /// 记忆侧不再自己持有裸 `Connection` 和一把私锁。
+    db: std::sync::Arc<SqliteHandle>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +155,9 @@ pub struct SessionRow {
     pub id: String,
     pub updated_at: i64,
     pub title: Option<String>,
+    /// 标题来源（`heuristic` / `ai` / `user`）。AI 标题的「只生成一次」判据在这里，
+    /// 见 [`MemoryStore::set_session_title`]。
+    pub title_source: Option<String>,
     pub preview: Option<String>,
     pub archived: bool,
     pub workspace_path: Option<String>,
@@ -180,24 +199,33 @@ impl MemoryStore {
         embedding: EmbeddingConfig,
         models_dirs: Vec<PathBuf>,
     ) -> Result<Self, CoreError> {
-        let conn = crate::sqlite::open_tuned(&db_path)?;
-        // 外键只在这里显式打开：index / graph 原本没开，统一打开会改变它们的行为
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(|e| CoreError::rpc("DB_OPEN_FAILED", e.to_string()))?;
-        schema::init_schema(&conn)?;
+        // 调优 / 建表 / 外键全部归口 `SqliteHandle`：memory 库需要 `foreign_keys = ON`
+        // （`ON DELETE CASCADE` 是它清子表的方式），index / graph 则刻意不开，
+        // 所以这是**按库声明**的开关，写入连接与池化读连接共用同一份。
+        //
+        // 惰性初始化：库一时打不开不会打死配置热更新路径，首次真正用到时以 RPC 错误暴露。
+        let db = std::sync::Arc::new(SqliteHandle::new_with_foreign_keys(
+            db_path.clone(),
+            schema::init_schema,
+        ));
         let store = Self {
             db_path: db_path.clone(),
             embedding: std::sync::Arc::new(Mutex::new(embedding)),
             models_dirs: std::sync::Arc::new(Mutex::new(models_dirs)),
-            conn: std::sync::Arc::new(Mutex::new(conn)),
+            db,
         };
         // 后台周期修剪，勿阻塞 serve-stdio 启动（4GB 库同步 DELETE / VACUUM 可卡数十秒）
-        Self::spawn_prune_loop(db_path);
+        //
+        // 测试进程里不起这条线程：它会立刻跑一次账本自愈，与「显式调用 reconcile」的测试
+        // 抢同一批行（自愈是幂等的，但断言计数就不可重复了）。自愈逻辑由测试直接调用覆盖。
+        if !cfg!(test) {
+            Self::spawn_prune_loop(db_path, store.clone());
+        }
         Ok(store)
     }
 
     /// 周期修剪线程：同一 `db_path` 只起一条，随进程退出而结束。
-    fn spawn_prune_loop(db_path: PathBuf) {
+    fn spawn_prune_loop(db_path: PathBuf, store: Self) {
         static STARTED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
         let started = STARTED.get_or_init(|| Mutex::new(HashSet::new()));
         match started.lock() {
@@ -211,6 +239,12 @@ impl MemoryStore {
         let _ = std::thread::Builder::new()
             .name("dieyun-memory-prune".into())
             .spawn(move || {
+                // 启动自愈：孤儿项目 scope / 悬空归纳作业。放在这条后台线程里是因为
+                // 主 open() 走惰性初始化（库打不开不该打死启动），而自愈只是一次幂等 UPDATE。
+                // 失败要留一句日志：库损坏时自愈会静默不生效，而「数据一直脏」是最难查的那种故障。
+                if let Err(e) = store.reconcile_memory_ledger(now_ms()) {
+                    eprintln!("[dieyun:memory] 账本自愈失败（下次启动重试）: {e}");
+                }
                 std::thread::sleep(PRUNE_STARTUP_DELAY);
                 loop {
                     // 每轮独立开关连接：不长期持有库文件（Windows 下会挡住备份 / 删除），
@@ -405,15 +439,29 @@ impl MemoryStore {
         (embedding, models_dirs)
     }
 
+    /// 写入连接（**唯一**一条，串行短事务）。见 `docs/SQLITE-ACCESS.md`。
     fn with_conn<T, F>(&self, f: F) -> Result<T, CoreError>
     where
         F: FnOnce(&Connection) -> Result<T, CoreError>,
     {
-        let guard = self
-            .conn
-            .lock()
-            .map_err(|_| CoreError::rpc("DB_LOCK", "memory db lock poisoned"))?;
-        f(&guard)
+        self.db.with_conn(f)
+    }
+
+    /// 只读查询：池化连接、不占写入连接（聊天落库很频繁，读路径不该排队等它）。
+    fn read<T, F>(&self, f: F) -> Result<T, CoreError>
+    where
+        F: FnOnce(&Connection) -> Result<T, CoreError>,
+    {
+        self.db.read(f)
+    }
+
+    /// 测试用连接：独立池化连接（`Deref` 到 `Connection`）。
+    ///
+    /// 测试里既要造「老库」形态又要断言，用独立连接比去争写入连接更稳：
+    /// 不参与业务锁，断言前也不会把别的写操作挡住。
+    #[cfg(test)]
+    fn test_conn(&self) -> crate::sqlite::ReadConn<'_> {
+        self.db.read_conn().expect("open test connection")
     }
 
     pub fn touch_session(&self, session_id: &str, title: Option<&str>) -> Result<(), CoreError> {
@@ -430,9 +478,18 @@ impl MemoryStore {
                     let sanitized = title_from_user_content(t)
                         .unwrap_or_else(|| t.chars().take(80).collect::<String>());
                     conn.execute(
-                        "INSERT INTO sessions (id, updated_at, title) VALUES (?1, ?2, ?3)
+                        "INSERT INTO sessions (id, updated_at, title, title_source) VALUES (?1, ?2, ?3, ?4)
                          ON CONFLICT(id) DO UPDATE SET
                            updated_at = excluded.updated_at,
+                           title_source = CASE
+                             WHEN sessions.title IS NULL
+                               OR sessions.title = '对话'
+                               OR sessions.title = '新对话'
+                               OR sessions.title LIKE '【叠云meta】%'
+                               OR (sessions.title LIKE '{%' AND sessions.title LIKE '%inputText%')
+                             THEN excluded.title_source
+                             ELSE sessions.title_source
+                           END,
                            title = CASE
                              WHEN sessions.title IS NULL
                                OR sessions.title = '对话'
@@ -442,7 +499,7 @@ impl MemoryStore {
                              THEN excluded.title
                              ELSE sessions.title
                            END",
-                        params![session_id, now, sanitized],
+                        params![session_id, now, sanitized, TITLE_SOURCE_HEURISTIC],
                     )?;
                 }
             } else {
@@ -456,10 +513,39 @@ impl MemoryStore {
         })
     }
 
-    pub fn list_sessions(&self, limit: i64, archived: bool) -> Result<Vec<SessionRow>, CoreError> {
-        self.with_conn(|conn| {
+    /// 显式覆盖会话标题（AI 总结 / 用户改名），**无条件**生效。
+    ///
+    /// 与 [`Self::touch_session`] 的分工：touch 是「必要时补一个启发式标题」，
+    /// 只在占位 / meta 脏值时落笔；这里写的是「有明确作者的标题」，必须盖得住启发式值。
+    /// `updated_at` 刻意不动：改标题不是新活动，不该把会话顶到历史列表最前面。
+    pub fn set_session_title(
+        &self,
+        session_id: &str,
+        title: &str,
+        source: &str,
+    ) -> Result<Value, CoreError> {
+        let sid = session_id.trim();
+        if sid.is_empty() {
+            return Err(CoreError::rpc("INVALID_PARAMS", "sessionId 必填"));
+        }
+        let source = normalize_title_source(source)?;
+        // 与启发式标题同一套整形（首行 / 折叠空白 / 48 字上限）：标题是列表里的单行文本，
+        // 模型偶尔会回「标题 + 解释」，多行内容会把列表撑坏。
+        let title =
+            first_line_title(title).ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "title 必填"))?;
+        let changed = self.with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE sessions SET title = ?1, title_source = ?2 WHERE id = ?3",
+                params![title, source, sid],
+            )?;
+            Ok(n)
+        })?;
+        Ok(json!({ "ok": true, "updated": changed }))
+    }
+
+    pub fn list_sessions(&self, limit: i64, archived: bool) -> Result<Vec<SessionRow>, CoreError> {        self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT s.id, s.updated_at, s.title,
+                "SELECT s.id, s.updated_at, s.title, s.title_source,
                         COALESCE(s.archived, 0) AS archived, s.workspace_path,
                         (SELECT m.content FROM messages m
                          WHERE m.session_id = s.id AND m.role = 'user'
@@ -476,9 +562,10 @@ impl MemoryStore {
                         id: row.get(0)?,
                         updated_at: row.get(1)?,
                         title: row.get(2)?,
-                        archived: row.get::<_, i64>(3)? != 0,
-                        workspace_path: row.get(4)?,
-                        preview: row.get(5)?,
+                        title_source: row.get(3)?,
+                        archived: row.get::<_, i64>(4)? != 0,
+                        workspace_path: row.get(5)?,
+                        preview: row.get(6)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -490,10 +577,11 @@ impl MemoryStore {
                     if title_needs_repair(row.title.as_deref()) {
                         if let Some(t) = title_from_user_content(plain) {
                             let _ = conn.execute(
-                                "UPDATE sessions SET title = ?1 WHERE id = ?2",
-                                params![t, row.id],
+                                "UPDATE sessions SET title = ?1, title_source = ?2 WHERE id = ?3",
+                                params![t, TITLE_SOURCE_HEURISTIC, row.id],
                             );
                             row.title = Some(t);
+                            row.title_source = Some(TITLE_SOURCE_HEURISTIC.to_string());
                         } else {
                             row.title = None;
                         }
@@ -510,7 +598,7 @@ impl MemoryStore {
         self.with_conn(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT id, updated_at, title, COALESCE(archived,0), workspace_path
+                    "SELECT id, updated_at, title, title_source, COALESCE(archived,0), workspace_path
                      FROM sessions WHERE id = ?1",
                     params![session_id],
                     |row| {
@@ -518,8 +606,9 @@ impl MemoryStore {
                             id: row.get(0)?,
                             updated_at: row.get(1)?,
                             title: row.get(2)?,
-                            archived: row.get::<_, i64>(3)? != 0,
-                            workspace_path: row.get(4)?,
+                            title_source: row.get(3)?,
+                            archived: row.get::<_, i64>(4)? != 0,
+                            workspace_path: row.get(5)?,
                             preview: None,
                         })
                     },
@@ -616,6 +705,7 @@ impl MemoryStore {
                 id,
                 updated_at: now,
                 title: title.map(str::to_string),
+                title_source: None,
                 archived: false,
                 workspace_path: workspace_path.map(str::to_string),
                 preview: None,
@@ -775,6 +865,7 @@ impl MemoryStore {
         importance: Option<i64>,
         expires_at: Option<i64>,
         metadata: Option<&Value>,
+        session_id: Option<&str>,
     ) -> Result<Value, CoreError> {
         let normalized = content.trim();
         if normalized.is_empty() {
@@ -790,6 +881,10 @@ impl MemoryStore {
             .take(120)
             .collect::<String>();
         let importance = normalize_importance(importance);
+        let session_id = session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(64).collect::<String>());
         let metadata_json = metadata.map(|m| {
             if m.is_string() {
                 m.as_str().unwrap_or("").to_string()
@@ -806,16 +901,17 @@ impl MemoryStore {
                 conn.execute(
                     "UPDATE long_memories
                      SET updated_at = ?1, source = COALESCE(source, ?2),
-                         status = CASE WHEN status = 'archived' THEN 'active' ELSE status END
+                         status = CASE WHEN status = 'archived' THEN 'active' ELSE status END,
+                         session_id = COALESCE(session_id, ?4)
                      WHERE id = ?3",
-                    params![now, source, existing],
+                    params![now, source, existing, session_id],
                 )?;
                 return Ok(json!({ "localMemoryId": existing, "duplicate": true }));
             }
             conn.execute(
                 "INSERT INTO long_memories
-                  (content, source, scope, kind, importance, status, created_at, updated_at, expires_at, metadata_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, ?7, ?8)",
+                  (content, source, scope, kind, importance, status, created_at, updated_at, expires_at, metadata_json, session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, ?7, ?8, ?9)",
                 params![
                     normalized,
                     source,
@@ -824,11 +920,186 @@ impl MemoryStore {
                     importance,
                     now,
                     expires_at.filter(|v| *v > 0),
-                    metadata_json
+                    metadata_json,
+                    session_id
                 ],
             )?;
             Ok(json!({ "localMemoryId": conn.last_insert_rowid() }))
         })
+    }
+
+    /// 会话维度：这个会话沉淀了哪些记忆（只读，走读池）。
+    ///
+    /// 存在的理由只有一个：归纳器把记忆写成项目级/用户级之后，「哪条是这次对话产生的」
+    /// 在库里没有任何痕迹 —— 用户问「这个会话是不是乱记了什么 / 把它记的忘掉」时,
+    /// 只能全表翻 + 猜时间。写入点就在 add_long_memory，一列即可回答。
+    pub fn long_memories_by_session(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Value>, CoreError> {
+        let sid = session_id.trim();
+        if sid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let lim = limit.clamp(1, 200);
+        let now = now_ms();
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, content, source, scope, kind, importance, status, created_at, updated_at, last_used_at, access_count
+                 FROM long_memories
+                 WHERE session_id = ?1
+                   AND status IN ('active', 'stale')
+                   AND (expires_at IS NULL OR expires_at <= 0 OR expires_at > ?2)
+                 ORDER BY id DESC
+                 LIMIT ?3",
+            )?;
+            let mapped = stmt.query_map(params![sid, now, lim], map_long_memory_row)?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(CoreError::from)
+        })
+    }
+
+    /// 会话维度：把这个会话沉淀的记忆整体**软归档**（可恢复，不物理删除）。
+    ///
+    /// 与「删掉记忆」分开：状态位是既有生命周期（active/stale/archived）的一部分，
+    /// 不新增删除路径，也不需要询问模型；恢复走 memory.long_status_set。
+    pub fn archive_long_memories_by_session(&self, session_id: &str) -> Result<i64, CoreError> {
+        let sid = session_id.trim();
+        if sid.is_empty() {
+            return Ok(0);
+        }
+        let now = now_ms();
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE long_memories
+                 SET status = 'archived', updated_at = ?1
+                 WHERE session_id = ?2 AND status != 'archived'",
+                params![now, sid],
+            )?;
+            Ok(n as i64)
+        })
+    }
+
+    /// 写入策略层（**唯一**政策点）：低价值闸 + 近重复抑制 + 写入即索引。
+    ///
+    /// 为什么政策放在这里而不在 Node：memory.long_add 是全部写入方（归纳器、记忆工具、
+    /// 手动）的共同终点，也是唯一能在**插入前**看到 embedding 的地方。
+    ///
+    /// - 低价值闸：source 带 consolidation（自动归纳）且 importance 低于阈值则不落库。
+    ///   数据事实：注入预算每轮只给 8+5 条，importance ≤ 2 的近 400 条既进不去又挤占召回。
+    /// - 近重复抑制：同 scope 内余弦 ≥ 阈值视为「同一件事的另一种说法」，只更新既有行
+    ///   （importance 取大、updated_at 刷新、来源会话 COALESCE 补齐），不再新增一行。
+    ///   复用既有 embedding 与语义检索，不另造一套文本相似度。
+    pub async fn add_long_memory_deduped(
+        &self,
+        content: &str,
+        source: &str,
+        kind: Option<&str>,
+        scope: Option<&str>,
+        importance: Option<i64>,
+        expires_at: Option<i64>,
+        metadata: Option<&Value>,
+        session_id: Option<&str>,
+    ) -> Result<Value, CoreError> {
+        let normalized = content.trim();
+        if normalized.is_empty() {
+            return Err(CoreError::rpc("INVALID_CONTENT", "content 必填"));
+        }
+        let imp = normalize_importance(importance);
+        if source.contains("consolidation") && imp < CONSOLIDATION_MIN_IMPORTANCE {
+            return Ok(json!({
+                "ok": true,
+                "skipped": "low_importance",
+                "importance": imp,
+                "vector": json!({ "ok": true, "indexed": false, "reason": "skipped" }),
+            }));
+        }
+        let scope_value = scope
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("global")
+            .chars()
+            .take(120)
+            .collect::<String>();
+        let (vector, duplicate) = self.embed_for_write(normalized, &scope_value).await?;
+        if let Some((dup_id, similarity)) = duplicate {
+            let now = now_ms();
+            self.with_conn(|conn| {
+                conn.execute(
+                    "UPDATE long_memories
+                     SET updated_at = ?1,
+                         importance = MAX(COALESCE(importance, 3), ?2),
+                         session_id = COALESCE(session_id, ?4)
+                     WHERE id = ?3",
+                    params![now, imp, dup_id, session_id],
+                )?;
+                Ok(())
+            })?;
+            return Ok(json!({
+                "ok": true,
+                "localMemoryId": dup_id,
+                "duplicate": "near",
+                "similarity": round_score(similarity),
+                "vector": json!({ "ok": true, "indexed": false, "reason": "duplicate" }),
+            }));
+        }
+        let ins = self.add_long_memory(
+            normalized,
+            source,
+            kind,
+            scope,
+            importance,
+            expires_at,
+            metadata,
+            session_id,
+        )?;
+        let memory_id = ins
+            .get("localMemoryId")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let vector_res = self.store_long_memory_vector(memory_id, &vector)?;
+        Ok(json!({
+            "ok": true,
+            "localMemoryId": memory_id,
+            "duplicate": ins.get("duplicate").cloned().unwrap_or(Value::Bool(false)),
+            "vector": vector_res,
+        }))
+    }
+
+    /// 写入前的 embedding + 近重复查询（一次向量往返，供插入与「写入即索引」共用）。
+    async fn embed_for_write(
+        &self,
+        content: &str,
+        scope: &str,
+    ) -> Result<(Vec<f32>, Option<(i64, f64)>), CoreError> {
+        let (embedding, models_dirs) = self.embedding_pair();
+        if !embedding.enabled(&models_dirs) {
+            // 没有向量能力就不判定近重复（不另造文本相似度第二套）
+            return Ok((Vec::new(), None));
+        }
+        let text = content
+            .chars()
+            .take(MEMORY_EMBED_TEXT_MAX)
+            .collect::<String>();
+        let vector = embedding::embed_texts(&embedding, &models_dirs, &[text])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        if vector.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let hits = self.semantic_search_long(scope, &vector, 1)?;
+        let dup = hits.first().and_then(|hit| {
+            let id = hit.get("id").and_then(|v| v.as_i64())?;
+            let score = hit.get("score").and_then(|v| v.as_f64())?;
+            if score >= NEAR_DUP_COSINE {
+                Some((id, score))
+            } else {
+                None
+            }
+        });
+        Ok((vector, dup))
     }
 
     pub fn recent_long_memories(
@@ -941,9 +1212,21 @@ impl MemoryStore {
         if vector.is_empty() {
             return Ok(json!({ "ok": false, "indexed": false, "reason": "embedding_failed" }));
         }
+        self.store_long_memory_vector(memory_id, &vector)
+    }
+
+    /// 向量落库（**唯一**实现）：index_long_memory 与「写入即索引」共用。
+    ///
+    /// 抽出来的理由只有一个：抑制近重复时必须先算一次 embedding，
+    /// 算完不该为了入库再算第二次（远程 embedding 一次往返就是几百毫秒）。
+    fn store_long_memory_vector(&self, memory_id: i64, vector: &[f32]) -> Result<Value, CoreError> {
+        if vector.is_empty() {
+            return Ok(json!({ "ok": false, "indexed": false, "reason": "embedding_failed" }));
+        }
+        let (embedding, models_dirs) = self.embedding_pair();
         let sig = embedding.signature(&models_dirs);
         let dims = embedding.effective_dimensions(&models_dirs);
-        let blob = embedding::vector_to_blob(&vector);
+        let blob = embedding::vector_to_blob(vector);
         let now = now_ms();
         self.with_conn(|conn| {
             conn.execute(
@@ -1059,83 +1342,31 @@ impl MemoryStore {
         if q.is_empty() {
             return Ok(json!({ "ok": true, "mode": "keyword", "results": [] }));
         }
-        let lim = limit.clamp(1, 50);
-        let q_lower = q.to_lowercase();
-        let q_tokens = keyword::tokenize_memory(q);
-        let now = now_ms();
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, content, source, scope, kind, importance, status, created_at
-                 FROM long_memories
-                 WHERE status IN ('active', 'stale')
-                   AND (expires_at IS NULL OR expires_at <= 0 OR expires_at > ?1)
-                 ORDER BY id DESC
-                 LIMIT 1000",
-            )?;
-            let mut scored: Vec<(f64, i64, Value)> = Vec::new();
-            for row in stmt.query_map(params![now], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                ))
-            })? {
-                let (id, content, source, scope, kind, importance, status, created_at) = row?;
-                let score = keyword::keyword_score_row(
-                    &q_tokens,
-                    &q_lower,
-                    &content,
-                    source.as_deref(),
-                    scope.as_deref(),
-                    kind.as_deref(),
-                    importance,
-                    &status,
-                    created_at,
-                    now,
-                );
-                if score <= 0.05 {
-                    continue;
-                }
-                let rounded = (score * 1000.0).round() / 1000.0;
-                scored.push((
-                    score,
-                    id,
-                    json!({
-                        "id": id,
-                        "content": content,
-                        "source": source,
-                        "scope": scope,
-                        "kind": kind,
-                        "importance": importance,
-                        "status": status,
-                        "created_at": created_at,
-                        "score": rounded,
-                    }),
-                ));
-            }
-            scored.sort_by(|a, b| {
-                b.0.partial_cmp(&a.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(b.1.cmp(&a.1))
-            });
-            let total = scored.len();
-            let results: Vec<Value> = scored
-                .into_iter()
-                .take(lim as usize)
-                .map(|(_, _, v)| v)
-                .collect();
-            Ok(json!({
-                "ok": true,
-                "mode": "keyword",
-                "results": results,
-                "totalCandidates": total,
-            }))
-        })
+        let hits = self.fts_search_long(None, q, limit)?;
+        let total = hits.len();
+        let results: Vec<Value> = hits
+            .into_iter()
+            .map(|(score, row)| {
+                let (id, content, source, scope, kind, importance, status, created_at) = row;
+                json!({
+                    "id": id,
+                    "content": content,
+                    "source": source,
+                    "scope": scope,
+                    "kind": kind,
+                    "importance": importance,
+                    "status": status,
+                    "created_at": created_at,
+                    "score": round_score(score),
+                })
+            })
+            .collect();
+        Ok(json!({
+            "ok": true,
+            "mode": "keyword",
+            "results": results,
+            "totalCandidates": total,
+        }))
     }
 
     pub fn save_compaction_archive(
@@ -1240,6 +1471,7 @@ impl MemoryStore {
                     row
                 })
                 .collect();
+            self.bump_memory_usage(&results)?;
             return Ok(json!({ "ok": true, "mode": "recent", "results": results }));
         }
         if {
@@ -1254,6 +1486,7 @@ impl MemoryStore {
             if !query_vec.is_empty() {
                 let semantic = self.semantic_search_long(scope_str, &query_vec, limit)?;
                 if !semantic.is_empty() {
+                    self.bump_memory_usage(&semantic)?;
                     return Ok(json!({
                         "ok": true,
                         "mode": "semantic",
@@ -1265,6 +1498,7 @@ impl MemoryStore {
         }
         let keyword = self.keyword_search_long(scope_str, q, limit)?;
         if !keyword.is_empty() {
+            self.bump_memory_usage(&keyword)?;
             return Ok(json!({
                 "ok": true,
                 "mode": "keyword",
@@ -1272,6 +1506,34 @@ impl MemoryStore {
             }));
         }
         Ok(json!({ "ok": true, "mode": "none", "results": [] }))
+    }
+
+    /// 召回即「用了一次」：`last_used_at` / `access_count` 的唯一写入点。
+    ///
+    /// 这两列此前只有读者没有写者，于是 `decay_long_memories` 里的
+    /// `COALESCE(access_count, 0) = 0` 恒成立 ——「用过的记忆越用越牢」这条反馈闭环
+    /// 实际不存在。召回成功后统一 bump，衰减只会碰真的没人再用的条目。
+    fn bump_memory_usage(&self, rows: &[Value]) -> Result<(), CoreError> {
+        let now = now_ms();
+        let ids: Vec<i64> = rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_i64()))
+            .filter(|id| *id > 0)
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "UPDATE long_memories
+                 SET last_used_at = ?1, access_count = COALESCE(access_count, 0) + 1
+                 WHERE id = ?2",
+            )?;
+            for id in &ids {
+                stmt.execute(params![now, id])?;
+            }
+            Ok(())
+        })
     }
 
     fn count_active_long_memories(&self, scope: &str) -> Result<i64, CoreError> {
@@ -1294,6 +1556,116 @@ impl MemoryStore {
         })
     }
 
+    /// 长记忆词法检索本体（**唯一**实现；scope 过滤与 JSON 组装由调用方各自负责）。
+    ///
+    /// 主路径是 FTS5 + `bm25`；排序口径与 `index/search.rs` 一致：**只用名次，不用分数
+    /// 绝对值** —— bm25 的量纲随语料统计漂移、跨查询不可比。bm25 决定候选顺序，
+    /// 重要度 / 新鲜度 / stale 惩罚只做同一查询内的微调（权重刻意小于一个名次位）。
+    ///
+    /// `scope == None` 表示不限 scope（记忆界面跨 scope 检索）。
+    ///
+    /// 分词器边界：`long_memories_fts` 用的是 trigram，只能索引 **≥3 字符** 的片段。
+    /// 中文双字词（`索引` / `记忆`）因此没有可命中的 trigram，`MATCH` 必然空结果 ——
+    /// 这类查询退回 `LIKE` 子串扫描（`long_memories` 行数由修剪策略封顶，扫描是有界的），
+    /// 相关度记常量，排序由重要度 / 新鲜度决定。
+    fn fts_search_long(
+        &self,
+        scope: Option<&str>,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<(f64, LongMemKeywordRow)>, CoreError> {
+        let lim = limit.clamp(1, 50);
+        let now = now_ms();
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let scope_trimmed = scope.map(str::trim);
+        let (scope_sql, binds_scope) = match scope_trimmed {
+            None => (String::new(), false),
+            Some(s) => (
+                format!("AND {}", long_memory_scope_filter("m.scope", s, 4)),
+                !is_global_memory_scope(s),
+            ),
+        };
+        let (sql, first_param) = if crate::fts::has_indexable_term(query) {
+            let Some(match_q) = crate::fts::match_query(query) else {
+                return Ok(Vec::new());
+            };
+            (
+                format!(
+                    "SELECT m.id, m.content, m.source, m.scope, m.kind, m.importance, m.status, m.created_at,
+                            bm25(long_memories_fts) AS rank
+                     FROM long_memories_fts
+                     JOIN long_memories m ON m.id = long_memories_fts.rowid
+                     WHERE long_memories_fts MATCH ?1
+                       AND m.status IN ('active', 'stale')
+                       AND (m.expires_at IS NULL OR m.expires_at <= 0 OR m.expires_at > ?2)
+                       {scope_sql}
+                     ORDER BY rank
+                     LIMIT ?3"
+                ),
+                match_q,
+            )
+        } else {
+            let pattern = like_pattern(query);
+            (
+                format!(
+                    "SELECT m.id, m.content, m.source, m.scope, m.kind, m.importance, m.status, m.created_at,
+                            -1.0 AS rank
+                     FROM long_memories m
+                     WHERE m.content LIKE ?1 ESCAPE '\\'
+                       AND m.status IN ('active', 'stale')
+                       AND (m.expires_at IS NULL OR m.expires_at <= 0 OR m.expires_at > ?2)
+                       {scope_sql}
+                     ORDER BY m.importance DESC, m.id DESC
+                     LIMIT ?3"
+                ),
+                pattern,
+            )
+        };
+        let mut args = vec![
+            rusqlite::types::Value::Text(first_param),
+            rusqlite::types::Value::Integer(now),
+            rusqlite::types::Value::Integer(lim),
+        ];
+        if binds_scope {
+            if let Some(s) = scope_trimmed {
+                args.push(rusqlite::types::Value::Text(s.to_string()));
+            }
+        }
+        // 读池：词法检索不该排在「聊天落库」的写连接后面。
+        self.read(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(LongMemKeywordRow, f64)> {
+                Ok((map_long_mem_keyword_row(row)?, row.get(8)?))
+            };
+            let rows: Vec<(LongMemKeywordRow, f64)> = stmt
+                .query_map(rusqlite::params_from_iter(args), map)?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut scored: Vec<(f64, LongMemKeywordRow)> = rows
+                .into_iter()
+                .map(|(row, rank)| {
+                    let importance = row.5;
+                    let status = row.6.as_str();
+                    let created_at = row.7;
+                    let relevance = -rank; // bm25 越相关越「负」，取反得到正相关度
+                    let status_penalty = if status == "stale" { -0.15 } else { 0.0 };
+                    let score = relevance
+                        + (importance as f64) * 0.035
+                        + freshness_score(now, created_at) * 0.08
+                        + status_penalty;
+                    (score, row)
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(b.1 .0.cmp(&a.1 .0))
+            });
+            Ok(scored)
+        })
+    }
+
     fn keyword_search_long(
         &self,
         scope: &str,
@@ -1304,76 +1676,25 @@ impl MemoryStore {
         if q.is_empty() {
             return Ok(Vec::new());
         }
-        let lim = limit.clamp(1, 50);
-        let q_lower = q.to_lowercase();
-        let q_tokens = keyword::tokenize_memory(q);
-        let now = now_ms();
-        let scope_filter = scope.trim();
-        let sql = format!(
-            "SELECT id, content, source, scope, kind, importance, status, created_at
-             FROM long_memories
-             WHERE status IN ('active', 'stale')
-               AND (expires_at IS NULL OR expires_at <= 0 OR expires_at > ?1)
-               AND {}
-             ORDER BY id DESC
-             LIMIT 1000",
-            long_memory_scope_filter("scope", scope_filter, 2)
-        );
-        self.with_conn(|conn| {
-            let mut scored: Vec<(f64, i64, Value)> = Vec::new();
-            let mut stmt = conn.prepare(&sql)?;
-            let rows: Vec<LongMemKeywordRow> = if is_global_memory_scope(scope_filter) {
-                stmt.query_map(params![now], map_long_mem_keyword_row)?
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                stmt.query_map(params![now, scope_filter], map_long_mem_keyword_row)?
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            for (id, content, source, scope, kind, importance, status, created_at) in rows {
-                let score = keyword::keyword_score_row(
-                    &q_tokens,
-                    &q_lower,
-                    &content,
-                    source.as_deref(),
-                    scope.as_deref(),
-                    kind.as_deref(),
-                    importance,
-                    &status,
-                    created_at,
-                    now,
-                );
-                if score <= 0.05 {
-                    continue;
-                }
-                let rounded = (score * 1000.0).round() / 1000.0;
-                scored.push((
-                    score,
-                    id,
-                    json!({
-                        "id": id,
-                        "content": content,
-                        "source": source,
-                        "createdAt": created_at,
-                        "scope": scope,
-                        "kind": kind,
-                        "importance": importance,
-                        "status": status,
-                        "score": rounded,
-                        "vectorSearch": false,
-                    }),
-                ));
-            }
-            scored.sort_by(|a, b| {
-                b.0.partial_cmp(&a.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(b.1.cmp(&a.1))
-            });
-            Ok(scored
-                .into_iter()
-                .take(lim as usize)
-                .map(|(_, _, v)| v)
-                .collect())
-        })
+        Ok(self
+            .fts_search_long(Some(scope), q, limit)?
+            .into_iter()
+            .map(|(score, row)| {
+                let (id, content, source, scope, kind, importance, status, created_at) = row;
+                json!({
+                    "id": id,
+                    "content": content,
+                    "source": source,
+                    "createdAt": created_at,
+                    "scope": scope,
+                    "kind": kind,
+                    "importance": importance,
+                    "status": status,
+                    "score": round_score(score),
+                    "vectorSearch": false,
+                })
+            })
+            .collect())
     }
 
     fn semantic_search_long(
@@ -1532,15 +1853,36 @@ fn maybe_set_title_from_user_message(
     let plain = strip_message_meta(content);
     if let Some(t) = title_from_user_content(plain) {
         conn.execute(
-            "UPDATE sessions SET title = ?1 WHERE id = ?2",
-            params![t, session_id],
+            "UPDATE sessions SET title = ?1, title_source = ?2 WHERE id = ?3",
+            params![t, TITLE_SOURCE_HEURISTIC, session_id],
         )?;
     }
     Ok(())
 }
 
-fn title_needs_repair(title: Option<&str>) -> bool {
-    match title.map(str::trim).filter(|s| !s.is_empty()) {
+/// 标题来源：`sessions.title_source` 的取值域。
+///
+/// - `heuristic`：首条用户消息切片（`title_from_user_content`），随时可被更好的标题替换；
+/// - `ai`：模型总结出来的标题，每会话只生成一次（Node 侧据此决定是否再调模型）；
+/// - `user`：用户手动改名，任何自动流程都不得覆盖。
+pub(crate) const TITLE_SOURCE_HEURISTIC: &str = "heuristic";
+pub(crate) const TITLE_SOURCE_AI: &str = "ai";
+pub(crate) const TITLE_SOURCE_USER: &str = "user";
+
+/// 标题来源只能由服务端枚举决定：写进来的是 SQL 列值，不能是任意字符串。
+fn normalize_title_source(source: &str) -> Result<&'static str, CoreError> {
+    match source.trim() {
+        TITLE_SOURCE_AI => Ok(TITLE_SOURCE_AI),
+        TITLE_SOURCE_USER => Ok(TITLE_SOURCE_USER),
+        TITLE_SOURCE_HEURISTIC => Ok(TITLE_SOURCE_HEURISTIC),
+        other => Err(CoreError::rpc(
+            "INVALID_PARAMS",
+            format!("未知的标题来源: {other}"),
+        )),
+    }
+}
+
+fn title_needs_repair(title: Option<&str>) -> bool {    match title.map(str::trim).filter(|s| !s.is_empty()) {
         None => true,
         Some("对话") | Some("新对话") => true,
         Some(t) if t.starts_with("【叠云meta】") => true,
@@ -1664,6 +2006,32 @@ pub(crate) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// 新鲜度（0..1，180 天线性衰减）：检索打分的**稳定**信号之一，与语料统计无关。
+fn freshness_score(now: i64, created_at: i64) -> f64 {
+    let age_ms = (now - created_at).max(0) as f64;
+    let max_age = 180.0 * 24.0 * 60.0 * 60.0 * 1000.0;
+    (1.0 - (age_ms / max_age).min(1.0)).max(0.0)
+}
+
+/// `LIKE` 子串扫描的匹配模式：`%片段%`，转义用户输入里的 `%` / `_` / `\`。
+fn like_pattern(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 2);
+    out.push('%');
+    for ch in query.trim().chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    out
+}
+
+/// 对外暴露的分数保留 3 位小数（展示 / 断言用，不参与排序）。
+fn round_score(score: f64) -> f64 {
+    (score * 1000.0).round() / 1000.0
+}
+
 fn rand_suffix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = SystemTime::now()
@@ -1750,9 +2118,53 @@ mod tests {
         assert_eq!(untouched, long_body, "无 meta 大正文原样保留");
     }
 
+    /// 显式标题（AI 总结）必须盖得住启发式标题，并把来源记成 `ai` ——
+    /// Node 侧靠这一列判断「这个会话已经有过模型标题，别再调一次模型」。
     #[test]
-    fn handoff_roundtrip_and_latest() {
-        let db = std::env::temp_dir().join(format!("dieyun-handoff-test-{}.sqlite", now_ms()));
+    fn set_session_title_overrides_heuristic_and_records_source() {
+        let db = std::env::temp_dir().join(format!("dieyun-title-test-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let session = store.create_session(None, None).unwrap();
+        store
+            .append_message(&session.id, "user", "帮我修一下这个 bug", None)
+            .unwrap();
+
+        // 启发式标题先落库（首条用户消息切片）
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.title.as_deref(), Some("帮我修一下这个 bug"));
+        assert_eq!(row.title_source.as_deref(), Some(TITLE_SOURCE_HEURISTIC));
+
+        // 模型标题无条件覆盖
+        let out = store
+            .set_session_title(&session.id, "  修复登录崩溃\n多余的第二行  ", TITLE_SOURCE_AI)
+            .unwrap();
+        assert_eq!(out["updated"].as_i64(), Some(1));
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.title.as_deref(), Some("修复登录崩溃"), "只留首行并折叠空白");
+        assert_eq!(row.title_source.as_deref(), Some(TITLE_SOURCE_AI));
+
+        // 已有 ai 标题后，后续用户轮次的启发式写入不得覆盖它
+        store
+            .append_message(&session.id, "user", "再改一处", None)
+            .unwrap();
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.title.as_deref(), Some("修复登录崩溃"));
+
+        // 空标题 / 未知来源都拒绝，且不弄脏现有标题
+        assert!(store.set_session_title(&session.id, "   ", TITLE_SOURCE_AI).is_err());
+        assert!(store
+            .set_session_title(&session.id, "x", "robot")
+            .is_err());
+        assert!(store.set_session_title("", "x", TITLE_SOURCE_AI).is_err());
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.title.as_deref(), Some("修复登录崩溃"));
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn handoff_roundtrip_and_latest() {        let db = std::env::temp_dir().join(format!("dieyun-handoff-test-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
         let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
         let a = store.create_session(Some("会话A"), None).unwrap();
@@ -1815,6 +2227,369 @@ mod tests {
     }
 
     #[test]
+    fn recall_bumps_usage_counters() {
+        // `access_count` / `last_used_at` 此前只有读者没有写者，衰减里的
+        // `COALESCE(access_count, 0) = 0` 于是恒成立。这里锁住唯一写入口的行为。
+        let db = std::env::temp_dir().join(format!("dieyun-mem-usage-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        store
+            .add_long_memory(
+                "用户偏好中文回复并给出简短结论",
+                "user",
+                None,
+                Some("global"),
+                Some(3),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let before = store.recent_long_memories(5, Some("global")).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0]["access_count"].as_i64().unwrap_or(0), 0);
+        assert!(before[0]["last_used_at"].is_null());
+        // 召回结果就是这些行：bump 一下等价于「这条被用过」
+        store.bump_memory_usage(&before).unwrap();
+        store.bump_memory_usage(&before).unwrap();
+        let after = store.recent_long_memories(5, Some("global")).unwrap();
+        assert_eq!(after[0]["access_count"].as_i64().unwrap(), 2);
+        assert!(after[0]["last_used_at"].as_i64().unwrap() > 0);
+        // 空白输入不该触发任何写入
+        store.bump_memory_usage(&[]).unwrap();
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn session_memories_are_traceable_and_forgettable() {
+        // 归纳器写的记忆是项目级/用户级的，库里原本没有任何「哪个会话写的」的痕迹：
+        // 这里锁住唯一写入口（session_id）与两个会话维度查询/归档的行为。
+        let db = std::env::temp_dir().join(format!("dieyun-mem-session-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        store
+            .add_long_memory(
+                "本次会话决定用 JWT 而不是 session cookie",
+                "auto_consolidation",
+                None,
+                Some("project:/ws/a"),
+                Some(3),
+                None,
+                None,
+                Some("sess-a"),
+            )
+            .unwrap();
+        store
+            .add_long_memory(
+                "另一个会话的独立结论",
+                "auto_consolidation",
+                None,
+                Some("project:/ws/a"),
+                Some(3),
+                None,
+                None,
+                Some("sess-b"),
+            )
+            .unwrap();
+        // 无 session 的历史写入口径必须仍然可用（NULL 不算任何会话）
+        store
+            .add_long_memory("旧记忆没有会话来源", "user", None, Some("global"), Some(3), None, None, None)
+            .unwrap();
+
+        let a = store.long_memories_by_session("sess-a", 20).unwrap();
+        assert_eq!(a.len(), 1);
+        assert!(a[0]["content"].as_str().unwrap().contains("JWT"));
+        assert_eq!(store.long_memories_by_session("sess-b", 20).unwrap().len(), 1);
+        assert!(store.long_memories_by_session("  ", 20).unwrap().is_empty());
+
+        // 软归档：只影响该会话的条目，可恢复
+        assert_eq!(store.archive_long_memories_by_session("sess-a").unwrap(), 1);
+        assert!(store.long_memories_by_session("sess-a", 20).unwrap().is_empty());
+        assert_eq!(store.long_memories_by_session("sess-b", 20).unwrap().len(), 1);
+        assert_eq!(store.archive_long_memories_by_session("sess-a").unwrap(), 0);
+        assert!(store.recent_long_memories(10, Some("global")).unwrap().len() >= 1);
+
+        // 同内容再次写入会复活既有行，并把来源会话补上（COALESCE 不覆盖旧来源）
+        store
+            .add_long_memory(
+                "另一个会话的独立结论",
+                "auto_consolidation",
+                None,
+                Some("project:/ws/a"),
+                Some(3),
+                None,
+                None,
+                Some("sess-c"),
+            )
+            .unwrap();
+        assert_eq!(store.long_memories_by_session("sess-c", 20).unwrap().len(), 0);
+        assert_eq!(store.long_memories_by_session("sess-b", 20).unwrap().len(), 1);
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[tokio::test]
+    async fn write_policy_gates_low_value_and_exact_duplicates() {
+        // 写入策略（唯一政策点）：自动归纳的低价值条目不落库；显式写入不受此闸；
+        // 完全相同的正文仍然只留一行（近重复判定需要 embedding，测试环境无向量能力，走 none 分支）。
+        let db = std::env::temp_dir().join(format!("dieyun-mem-policy-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+
+        let skipped = store
+            .add_long_memory_deduped(
+                "顺手打开了个网页",
+                "auto_consolidation",
+                None,
+                Some("global"),
+                Some(2),
+                None,
+                None,
+                Some("sess-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(skipped.get("skipped").and_then(|v| v.as_str()), Some("low_importance"));
+        assert_eq!(store.recent_long_memories(10, Some("global")).unwrap().len(), 0);
+
+        // 显式写入（非 consolidation）即使 importance=1 也要落库：用户说过的就是事实
+        let kept = store
+            .add_long_memory_deduped(
+                "我的猫叫咪咪",
+                "user",
+                None,
+                Some("global"),
+                Some(1),
+                None,
+                None,
+                Some("sess-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(kept.get("skipped"), None);
+        assert!(kept.get("localMemoryId").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+        assert_eq!(store.recent_long_memories(10, Some("global")).unwrap().len(), 1);
+
+        // 归纳器写 importance=3 通过闸门
+        let ok = store
+            .add_long_memory_deduped(
+                "camera 模块导出统一走 runtime 配置",
+                "auto_consolidation",
+                None,
+                Some("global"),
+                Some(3),
+                None,
+                None,
+                Some("sess-2"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.get("skipped"), None);
+        assert_eq!(store.recent_long_memories(10, Some("global")).unwrap().len(), 2);
+
+        // 正文完全相同 → 复用既有行，不再新增
+        let dup = store
+            .add_long_memory_deduped(
+                "camera 模块导出统一走 runtime 配置",
+                "auto_consolidation",
+                None,
+                Some("global"),
+                Some(3),
+                None,
+                None,
+                Some("sess-3"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dup.get("duplicate"), Some(&Value::Bool(true)));
+        assert_eq!(store.recent_long_memories(10, Some("global")).unwrap().len(), 2);
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn reconcile_rekeys_legacy_path_scopes_to_project_ids() {
+        // 老库的 scope 是路径字符串。projects 表登记了根路径后，能正向复算出这些历史 key，
+        // 于是整批重挂到 project:<id>（而不是把可认领的行当孤儿埋掉）。
+        let db = std::env::temp_dir().join(format!("dieyun-mem-rescope-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+
+        let root = "E:\\repo\\legacyproj";
+        let proj = store.resolve_project(root, None).unwrap();
+        let id = proj.get("projectId").and_then(|v| v.as_i64()).unwrap();
+        let legacy = super::projects::legacy_scope_key(root);
+        assert!(legacy.starts_with("project:E:\\repo"), "短路径用原路径形态");
+
+        for (content, scope) in [
+            ("老行 1", legacy.as_str()),
+            ("老行 2", legacy.as_str()),
+            ("认领不了的行", "project:E:\\gone\\nowhere"),
+        ] {
+            store
+                .test_conn()
+                .execute(
+                    "INSERT INTO long_memories (content, source, scope, kind, importance, status, created_at)
+                     VALUES (?1, 'auto_consolidation', ?2, 'normal', 3, 'active', ?3)",
+                    params![content, scope, now_ms()],
+                )
+                .unwrap();
+        }
+
+        let res = store.reconcile_memory_ledger(now_ms()).unwrap();
+        assert_eq!(res.get("rescopedMemories").and_then(|v| v.as_i64()), Some(2));
+
+        let rescoped: i64 = store
+            .test_conn()
+            .query_row(
+                "SELECT COUNT(*) FROM long_memories WHERE scope = ?1",
+                params![format!("project:{id}")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rescoped, 2, "两条老行都挂到了 project:<id>");
+        let untouched: i64 = store
+            .test_conn()
+            .query_row(
+                "SELECT COUNT(*) FROM long_memories WHERE scope = 'project:E:\\gone\\nowhere' AND status = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(untouched, 1, "认领不了的行不动它（不猜、不删）");
+
+        // 幂等：再跑一次不再改
+        let again = store.reconcile_memory_ledger(now_ms()).unwrap();
+        assert_eq!(again.get("rescopedMemories").and_then(|v| v.as_i64()), Some(0));
+
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn reconcile_heals_orphan_scope_and_dangling_jobs() {
+        // 两条都是「进程没跑完」留下的脏数据：孤儿 scope='project' 永远召回不到，
+        // 悬空 pending 作业让账本永远显示「还在跑」。自愈必须幂等且不动新鲜作业。
+        let db = std::env::temp_dir().join(format!("dieyun-mem-reconcile-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+
+        // 旧版本按路径算 scope 失败留下的字面量 project
+        store
+            .test_conn()
+            .execute(
+                "INSERT INTO long_memories (content, source, scope, kind, importance, status, created_at)
+                 VALUES ('孤儿项目记忆', 'auto_consolidation', 'project', 'normal', 3, 'active', ?1)",
+                params![now_ms()],
+            )
+            .unwrap();
+        let stale = store.create_consolidation_job(Some("global"), Some("task"), None).unwrap();
+        let stale_id = stale.get("jobId").and_then(|v| v.as_i64()).unwrap();
+        let fresh = store.create_consolidation_job(Some("global"), Some("task"), None).unwrap();
+        let fresh_id = fresh.get("jobId").and_then(|v| v.as_i64()).unwrap();
+        store
+            .test_conn()
+            .execute(
+                "UPDATE memory_consolidation_jobs SET started_at = ?1 WHERE id = ?2",
+                params![now_ms() - 60 * 60 * 1000, stale_id],
+            )
+            .unwrap();
+
+        let res = store.reconcile_memory_ledger(now_ms()).unwrap();
+        assert_eq!(res.get("orphanScopes").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(res.get("staleJobs").and_then(|v| v.as_i64()), Some(1));
+
+        let orphan_status: String = store
+            .test_conn()
+            .query_row(
+                "SELECT status FROM long_memories WHERE scope = 'project'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_status, "archived");
+        let stale_status: String = store
+            .test_conn()
+            .query_row(
+                "SELECT status FROM memory_consolidation_jobs WHERE id = ?1",
+                params![stale_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_status, "failed");
+        let fresh_status: String = store
+            .test_conn()
+            .query_row(
+                "SELECT status FROM memory_consolidation_jobs WHERE id = ?1",
+                params![fresh_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh_status, "pending", "新鲜作业不能被自愈判死");
+
+        // 幂等：再跑一次什么都不改
+        let again = store.reconcile_memory_ledger(now_ms()).unwrap();
+        assert_eq!(again.get("orphanScopes").and_then(|v| v.as_i64()), Some(0));
+        assert_eq!(again.get("staleJobs").and_then(|v| v.as_i64()), Some(0));
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn project_identity_survives_rename_case_and_worktree_paths() {
+        // 老实现把路径编进 scope：改目录名 / 大小写差异 / 换盘符都会变成「另一个项目」，
+        // 之前沉淀的记忆静默失联。而且同一个 git remote 的新路径应该自动成为别名。
+        let db = std::env::temp_dir().join(format!("dieyun-mem-projects-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+
+        let a = store
+            .resolve_project(
+                "E:\\repo\\dieyunagent",
+                Some("github.com/acme/dieyunagent"),
+            )
+            .unwrap();
+        let id = a.get("projectId").and_then(|v| v.as_i64()).unwrap();
+        assert_eq!(a.get("scope").and_then(|v| v.as_str()), Some(format!("project:{id}").as_str()));
+        assert_eq!(a.get("aliased").and_then(|v| v.as_bool()), Some(false));
+
+        // 大小写 / 斜杠 / 尾分隔符差异 → 同一个 project（不新建）
+        for same in ["e:/repo/dieyunagent/", "E:\\repo\\DIEYUNAGENT", "e:\\repo\\dieyunagent"] {
+            let r = store
+                .resolve_project(same, Some("github.com/acme/dieyunagent"))
+                .unwrap();
+            assert_eq!(
+                r.get("projectId").and_then(|v| v.as_i64()),
+                Some(id),
+                "同一路径的不同写法必须解析到同一个 project：{same}"
+            );
+        }
+
+        // 仓库搬家（换盘符）：git origin 相同 → 自动挂成别名，记忆跟着走
+        let moved = store
+            .resolve_project("D:\\work\\dieyunagent", Some("github.com/acme/dieyunagent"))
+            .unwrap();
+        assert_eq!(moved.get("projectId").and_then(|v| v.as_i64()), Some(id));
+        assert_eq!(moved.get("aliased").and_then(|v| v.as_bool()), Some(true));
+
+        // 没有 remote 的本地仓库：手动挂别名（`memory.project_alias_add`）
+        let local = store.resolve_project("E:\\scratch\\app", None).unwrap();
+        let local_id = local.get("projectId").and_then(|v| v.as_i64()).unwrap();
+        assert_ne!(local_id, id, "无 remote 的不同路径是不同项目");
+        store.add_project_alias(local_id, "E:\\scratch\\app-old").unwrap();
+        let aliased = store.resolve_project("E:\\scratch\\app-old", None).unwrap();
+        assert_eq!(aliased.get("projectId").and_then(|v| v.as_i64()), Some(local_id));
+
+        // 清单：路径别名条数如实反映
+        let list = store.list_projects(10).unwrap();
+        let rows = list.get("results").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(rows.len(), 2);
+        let first = rows
+            .iter()
+            .find(|r| r.get("projectId").and_then(|v| v.as_i64()) == Some(id))
+            .expect("第一个项目应在清单里");
+        assert_eq!(first.get("pathCount").and_then(|v| v.as_i64()), Some(2));
+
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
     fn prunes_finished_runs_and_cascades_children() {
         let db = std::env::temp_dir().join(format!("dieyun-prune-runs-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
@@ -1861,7 +2636,7 @@ mod tests {
             run_max_age_ms: i64::MAX / 2,
             ..PrunePolicy::default()
         };
-        let guard = store.conn.lock().unwrap();
+        let guard = store.test_conn();
         let deleted = MemoryStore::prune_finished_agent_runs(&guard, &policy).unwrap();
         assert_eq!(deleted, 2, "应删掉 2 个超出保留窗口的终态 run");
         let runs: i64 = guard
@@ -1892,7 +2667,7 @@ mod tests {
         // 新写入已是原地覆盖，这里直接造出「老库」形态（同一 run 堆多份 checkpoint）
         // 来验证裁剪逻辑本身。
         {
-            let guard = store.conn.lock().unwrap();
+            let guard = store.test_conn();
             for i in 0..5 {
                 guard
                     .execute(
@@ -1914,13 +2689,13 @@ mod tests {
             traces_per_run: 2,
             ..PrunePolicy::default()
         };
-        let guard = store.conn.lock().unwrap();
+        let guard = store.test_conn();
         let deleted = MemoryStore::prune_surplus_agent_traces(&guard, &policy).unwrap();
         assert_eq!(deleted, 3, "5 条只留 2 条");
         drop(guard);
 
         let remaining: i64 = {
-            let guard = store.conn.lock().unwrap();
+            let guard = store.test_conn();
             guard
                 .query_row("SELECT COUNT(*) FROM agent_traces", [], |r| r.get(0))
                 .unwrap()
@@ -2053,4 +2828,155 @@ mod tests {
         assert_eq!(thoughts(&row), vec!["A", "B2", "C3"], "stale 时不改已存快照");
         let _ = std::fs::remove_file(db);
     }
+
+    // ---- 长记忆词法检索（FTS5 + bm25，取代手写 CJK 打分）----
+
+    fn seed_memory(store: &MemoryStore, content: &str, source: &str, age_days: i64) {
+        let created = now_ms() - age_days * 24 * 60 * 60 * 1000;
+        store
+            .test_conn()
+            .execute(
+                "INSERT INTO long_memories
+                   (content, source, scope, kind, importance, status, created_at, updated_at)
+                 VALUES (?1, ?2, 'global', 'normal', 3, 'active', ?3, ?3)",
+                params![content, source, created],
+            )
+            .expect("seed long memory");
+    }
+
+    /// 中文子串与标识符子串都要召回：trigram 分词器的语义就是子串命中。
+    #[test]
+    fn fts_search_hits_cjk_and_identifier_substrings() {
+        let db = std::env::temp_dir().join(format!("dieyun-fts-hit-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        seed_memory(&store, "代码库索引的增量更新逻辑走 root_hash 比对", "codebase", 1);
+        seed_memory(&store, "fn parseConfig(path: &str) 读取配置", "src/config.rs", 1);
+        seed_memory(&store, "用户偏好：回答用中文，少用列表", "chat", 1);
+
+        let cjk = store.keyword_search_long_memories("索引", 5).unwrap();
+        let cjk_contents = json_strings(&cjk, "results", "content");
+        assert_eq!(cjk_contents.len(), 1, "中文子串应精确命中一条：{cjk}");
+        assert!(cjk_contents[0].contains("增量更新"));
+
+        // trigram 让「标识符中间一段」也能召回（unicode61 分词器做不到）
+        let ident = store.keyword_search_long_memories("onfig", 5).unwrap();
+        assert_eq!(
+            json_strings(&ident, "results", "content"),
+            vec!["fn parseConfig(path: &str) 读取配置".to_string()],
+            "标识符子串应命中：{ident}"
+        );
+
+        assert!(
+            store
+                .keyword_search_long_memories("不存在的词", 5)
+                .unwrap()
+                .get("results")
+                .and_then(|v| v.as_array())
+                .map(|a| a.is_empty())
+                .unwrap_or(false),
+            "无命中应返回空数组"
+        );
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// 旧实现 `ORDER BY id DESC LIMIT 1000` 只能看到最近 1000 行；FTS 没有这个窗口。
+    #[test]
+    fn fts_search_sees_memories_beyond_the_old_1000_row_window() {
+        let db = std::env::temp_dir().join(format!("dieyun-fts-window-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        // 最老的一条是唯一命中项，后面再压 1200 条噪声
+        seed_memory(&store, "早期决定：向量检索先用精确余弦，不接 ANN", "design", 30);
+        {
+            let conn = store.test_conn();
+            conn.execute_batch("BEGIN;").unwrap();
+            for i in 0..1200 {
+                conn.execute(
+                    "INSERT INTO long_memories
+                       (content, source, scope, kind, importance, status, created_at, updated_at)
+                     VALUES (?1, 'noise', 'global', 'normal', 3, 'active', ?2, ?2)",
+                    params![format!("噪声记录 {i}"), now_ms()],
+                )
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT;").unwrap();
+        }
+
+        let hits = store.keyword_search_long_memories("ANN", 5).unwrap();
+        assert_eq!(
+            json_strings(&hits, "results", "content"),
+            vec!["早期决定：向量检索先用精确余弦，不接 ANN".to_string()],
+            "窗口外的那条必须能检索到：{hits}"
+        );
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// 触发器保证增删改与索引一致（外部内容表不复制正文，靠触发器同步）。
+    #[test]
+    fn fts_index_follows_update_and_delete() {
+        let db = std::env::temp_dir().join(format!("dieyun-fts-sync-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        seed_memory(&store, "旧内容：使用 SQLite 全文索引", "note", 2);
+        let id = store
+            .keyword_search_long_memories("全文索引", 5)
+            .unwrap()
+            .get("results")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_i64())
+            .expect("先能检索到");
+
+        store
+            .test_conn()
+            .execute(
+                "UPDATE long_memories SET content = ?1 WHERE id = ?2",
+                params!["新内容：改用 bm25 排序", id],
+            )
+            .unwrap();
+        let after_update = json_strings(
+            &store.keyword_search_long_memories("bm25", 5).unwrap(),
+            "results",
+            "content",
+        );
+        assert_eq!(after_update, vec!["新内容：改用 bm25 排序".to_string()]);
+        assert!(
+            json_strings(
+                &store.keyword_search_long_memories("全文索引", 5).unwrap(),
+                "results",
+                "content"
+            )
+            .is_empty(),
+            "改前的内容不该再被召回"
+        );
+
+        store
+            .test_conn()
+            .execute("DELETE FROM long_memories WHERE id = ?1", params![id])
+            .unwrap();
+        assert!(
+            json_strings(
+                &store.keyword_search_long_memories("bm25", 5).unwrap(),
+                "results",
+                "content"
+            )
+            .is_empty(),
+            "删掉的记忆不该再被召回"
+        );
+        let _ = std::fs::remove_file(db);
+    }
+
+    fn json_strings(v: &Value, list_key: &str, field: &str) -> Vec<String> {
+        v.get(list_key)
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.get(field).and_then(|f| f.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
+

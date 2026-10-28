@@ -37,6 +37,26 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
         updated_at INTEGER NOT NULL,
         FOREIGN KEY(memory_id) REFERENCES long_memories(id) ON DELETE CASCADE
       );
+      -- 项目身份（scope = project:<id> 的唯一来源，见 memory/projects.rs）。
+      -- 不再把路径编进 scope：改目录名、大小写差异、worktree 入口都应指向同一个项目。
+      CREATE TABLE IF NOT EXISTS projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        root_path TEXT NOT NULL,
+        -- git remote.origin.url：仓库搬家/换盘符时靠它把新路径挂成别名（Node 侧探测后传入）
+        git_origin TEXT,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_projects_origin ON projects(git_origin);
+      -- 见过的每个路径（别名）：path_key = 规范化后的小写路径，唯一
+      CREATE TABLE IF NOT EXISTS project_paths (
+        path_key TEXT PRIMARY KEY,
+        project_id INTEGER NOT NULL,
+        path TEXT NOT NULL,
+        first_seen_at INTEGER NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_project_paths_project ON project_paths(project_id);
       CREATE TABLE IF NOT EXISTS memory_consolidation_jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         scope TEXT,
@@ -180,6 +200,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
         [],
     );
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN workspace_path TEXT", []);
+    // 会话标题的来源（heuristic = 首条用户消息切片，ai = 模型总结，user = 用户改名）。
+    // 存在的理由只有一个：AI 标题**每会话只生成一次** —— 没有这一列就只能在
+    // 「是不是首轮」「标题像不像模型写的」上猜，猜错的代价是每次开话题都重新调一次模型。
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN title_source TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE long_memories ADD COLUMN scope TEXT DEFAULT 'global'",
         [],
@@ -216,6 +240,11 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
         "ALTER TABLE long_memories ADD COLUMN metadata_json TEXT",
         [],
     );
+    // 写入溯源：这条记忆是哪个会话沉淀下来的。
+    // 存在的理由只有一个 —— 「这个会话沉淀了什么 / 把这个会话写的都忘掉」必须可查，
+    // metadata_json 里的 sessionId 是 JSON，做过滤要么 LIKE 猜串要么开 JSON1，
+    // 两者都不如一个带索引的一等列。旧行为 NULL（不影响召回与注入）。
+    let _ = conn.execute("ALTER TABLE long_memories ADD COLUMN session_id TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE compaction_archives ADD COLUMN folded_text TEXT",
         [],
@@ -232,9 +261,94 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
       CREATE INDEX IF NOT EXISTS idx_long_memories_status ON long_memories(status, id);
       CREATE INDEX IF NOT EXISTS idx_long_memories_kind ON long_memories(kind);
       CREATE INDEX IF NOT EXISTS idx_long_memories_last_used ON long_memories(last_used_at);
+      CREATE INDEX IF NOT EXISTS idx_long_memories_session ON long_memories(session_id, id);
     "#,
     )
     .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
+
+    // ---- 长记忆全文索引（FTS5 + trigram）----
+    //
+    // 取代原先「取 1000 行到 Rust 里做 CJK unigram/bigram 手写打分」的检索
+    // （`memory/keyword.rs`，已删除）：那种实现既扫不全（`LIMIT 1000` 之外的记忆
+    // 永远检索不到），又把分词规则抄成第二套。trigram 分词器对中文与标识符都是
+    // 子串级召回（`索引` 命中「代码库索引」，`onfig` 命中 `parseConfig`），
+    // 与 index 侧 `chunks_fts` 同一口径。
+    //
+    // 外部内容表 + 触发器：不复制正文，增删改由触发器保证一致。
+    conn.execute_batch(
+        r#"
+      CREATE VIRTUAL TABLE IF NOT EXISTS long_memories_fts USING fts5(
+        content, source, scope, kind,
+        content='long_memories', content_rowid='id',
+        tokenize='trigram'
+      );
+      CREATE TRIGGER IF NOT EXISTS long_memories_fts_ai AFTER INSERT ON long_memories BEGIN
+        INSERT INTO long_memories_fts(rowid, content, source, scope, kind)
+        VALUES (new.id, new.content, COALESCE(new.source, ''), COALESCE(new.scope, ''), COALESCE(new.kind, ''));
+      END;
+      CREATE TRIGGER IF NOT EXISTS long_memories_fts_ad AFTER DELETE ON long_memories BEGIN
+        INSERT INTO long_memories_fts(long_memories_fts, rowid, content, source, scope, kind)
+        VALUES ('delete', old.id, old.content, COALESCE(old.source, ''), COALESCE(old.scope, ''), COALESCE(old.kind, ''));
+      END;
+      CREATE TRIGGER IF NOT EXISTS long_memories_fts_au AFTER UPDATE ON long_memories BEGIN
+        INSERT INTO long_memories_fts(long_memories_fts, rowid, content, source, scope, kind)
+        VALUES ('delete', old.id, old.content, COALESCE(old.source, ''), COALESCE(old.scope, ''), COALESCE(old.kind, ''));
+        INSERT INTO long_memories_fts(rowid, content, source, scope, kind)
+        VALUES (new.id, new.content, COALESCE(new.source, ''), COALESCE(new.scope, ''), COALESCE(new.kind, ''));
+      END;
+    "#,
+    )
+    .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
+
+    // 老库首次建 FTS 时索引是空的：行数对不上就 rebuild 一次
+    // （幂等，且只在真偏差时跑，不给每次开库加成本）。
+    let fts_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM long_memories_fts", [], |r| r.get(0))
+        .unwrap_or(-1);
+    let src_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM long_memories", [], |r| r.get(0))
+        .unwrap_or(-2);
+    if fts_rows != src_rows {
+        let _ = conn.execute(
+            "INSERT INTO long_memories_fts(long_memories_fts) VALUES('rebuild')",
+            [],
+        );
+    }
+
+    // 行数对得上也可能已经坏了：FTS 影子表损坏时**任何**对 long_memories 的写入都会被触发器
+    // 带崩（`database disk image is malformed`），而读路径完全正常 —— 于是「记忆写不进去」
+    // 看起来像归纳器不干活。自查方式：做一次会被触发器拦下的写入探针（同值 UPDATE 同样触发
+    // AFTER UPDATE 触发器），失败就 rebuild 再探一次。
+    let probe_ok = conn
+        .execute_batch(
+            "SAVEPOINT fts_probe;
+             UPDATE long_memories SET status = status WHERE id = (SELECT MIN(id) FROM long_memories);
+             ROLLBACK TO fts_probe;
+             RELEASE fts_probe;",
+        )
+        .is_ok();
+    if !probe_ok {
+        let rebuilt = conn
+            .execute(
+                "INSERT INTO long_memories_fts(long_memories_fts) VALUES('rebuild')",
+                [],
+            )
+            .is_ok();
+        let after_ok = rebuilt
+            && conn
+                .execute_batch(
+                    "SAVEPOINT fts_probe2;
+                     UPDATE long_memories SET status = status WHERE id = (SELECT MIN(id) FROM long_memories);
+                     ROLLBACK TO fts_probe2;
+                     RELEASE fts_probe2;",
+                )
+                .is_ok();
+        if !after_ok {
+            eprintln!(
+                "[dieyun:memory] FTS 索引重建后写入仍失败：long_memories 的写入路径可能已被其它损坏阻塞"
+            );
+        }
+    }
 
     Ok(())
 }

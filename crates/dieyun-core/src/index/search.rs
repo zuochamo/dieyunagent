@@ -1,26 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
-use crate::embedding::{
-    blob_to_vector, cosine_similarity, exact_scan_threshold, query_seed, sample_modulus_for,
-};
 use crate::error::CoreError;
 
-use super::vector_pool::{self, VectorPool};
+use super::vector_pool::VectorPool;
 
-/// Max results a single codebase.search may return.
+/// 单次检索可返回的最大条数。
 pub const SEARCH_LIMIT_MAX: u32 = 48;
 
 /// 单条命中的带行号正文上限。命中在 chunk 内的位置不确定，整块给出更省一次回读。
 /// 字节上限略高于 Node 侧 codebaseSnippetMax（2400 字符），避免中文先被 Rust 截断。
 const SNIPPET_MAX_CHARS: usize = 3600;
 const SNIPPET_MAX_LINES: usize = 80;
-
-/// 轻量 rerank 的候选池规模：limit * FACTOR + BASE，只对头部候选重算词元覆盖率。
-const RERANK_POOL_FACTOR: usize = 6;
-const RERANK_POOL_BASE: usize = 24;
 
 /// 命中行之前保留的上下文行数。片段以命中行为锚点向后展开，
 /// 避免「命中在大 chunk 中后部、被字符预算截掉」——那会让模型看到整段却看不到命中词。
@@ -29,6 +22,24 @@ const SNIPPET_PRE_LINES: usize = 8;
 /// 单个展示行的字符上限（与 Node 侧 grep 的 slice(0,400) 对齐）。
 /// 压缩产物等超长单行若不截断，会把整块字符预算吃光，只剩一行截断提示。
 const SNIPPET_LINE_MAX_CHARS: usize = 400;
+
+/// 多路召回的融合常数（Reciprocal Rank Fusion 的标准 k=60）。
+///
+/// 只用**名次**融合，不用分数：`bm25` 的量纲随语料统计漂移，余弦相似度固定在
+/// [-1,1]，词元覆盖率在 [0,1] —— 三者相加必须给每个信号配一个魔数权重，而那组
+/// 权重没有任何可验证的依据。按名次融合天然尺度无关：换模型、换语料规模都不需要
+/// 重新调参。
+const RRF_K: f64 = 60.0;
+
+/// 向量侧参与融合的名次上限：`limit * 8 + 256`，够覆盖最终 top-limit 且不把
+/// 长尾（相似度刚过阈值的几千条）算进融合。
+const VECTOR_POOL_EXTRA: usize = 256;
+const VECTOR_POOL_FACTOR: usize = 8;
+
+/// 词法侧候选：留足余量，trigram 下命中条数会明显多于整词匹配。
+const LEXICAL_CANDIDATES_FACTOR: usize = 12;
+const LEXICAL_CANDIDATES_MIN: usize = 60;
+const LEXICAL_CANDIDATES_MAX: usize = 400;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +63,9 @@ pub struct SearchResult {
     pub total_candidates: Option<usize>,
     pub vector_search: bool,
 }
+
+/// 一条召回通道：按相关性排好序的 chunk id 列表。
+type RankedIds = Vec<i64>;
 
 pub fn search(
     conn: &Connection,
@@ -82,87 +96,59 @@ pub fn search(
             query: q.to_string(),
             needs_index: Some(true),
             total_candidates: Some(0),
-            vector_search: false,
+            vector_search,
         });
     }
 
-    let query_tokens = tokenize_for_semantic(q);
-    let fts_query = escape_fts_query(q);
-    let mut scored: HashMap<i64, (f64, ChunkRow)> = HashMap::new();
+    let mut rows: HashMap<i64, ChunkRow> = HashMap::new();
+    let mut lists: Vec<RankedIds> = Vec::new();
 
-    if let Some(fts_q) = fts_query {
-        let mut stmt = conn
-            .prepare(
-                "SELECT c.id, c.rel_path, c.start_line, c.end_line, c.content,
-                        bm25(chunks_fts) AS rank,
-                        highlight(chunks_fts, 1, char(2), char(3)) AS hl
-                 FROM chunks_fts
-                 JOIN chunks c ON c.id = chunks_fts.rowid
-                 WHERE chunks_fts MATCH ?1 AND c.root_hash = ?2
-                 ORDER BY rank
-                 LIMIT ?3",
-            )
-            .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        // 词法候选取宽一些：ANN 模式下这些候选会全量重算余弦，
-        // 候选越全，越不容易漏掉「词法相关但被抽样跳过」的真命中。
-        let fts_candidates = (limit * 12).max(60).min(400) as i64;
-        let rows = stmt
-            .query_map(params![fts_q, root_hash, fts_candidates], map_chunk_with_rank)
-            .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        for row in rows.flatten() {
-            let (id, rank, chunk) = row;
-            let fts_score = (-rank).max(0.0);
-            scored.insert(id, (fts_score * 0.35, chunk));
-        }
+    // 通道 1：词法（FTS5 bm25 排序）
+    let lexical = lexical_hits(conn, root_hash, q, limit, &mut rows)?;
+    let lexical_empty = lexical.is_empty();
+    if !lexical_empty {
+        lists.push(lexical);
     }
 
+    // 通道 2：向量（内存池全量精确余弦；池不可用时本通道缺席，不做抽样近似）
     if let Some(q_vec) = query_vector {
-        match pool {
-            // 内存池命中：全量精确余弦，不做抽样
-            Some(p) if p.matches_dims(q_vec) => {
-                apply_vector_scores_from_pool(conn, root_hash, p, q_vec, &mut scored, limit)?;
+        if let Some(p) = pool.filter(|p| p.matches_dims(q_vec)) {
+            let vector = vector_hits(conn, root_hash, p, q_vec, limit, &mut rows)?;
+            if !vector.is_empty() {
+                lists.push(vector);
             }
-            _ => apply_vector_scores(conn, root_hash, q, q_vec, &mut scored)?,
-        }
-    } else {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, rel_path, start_line, end_line, content FROM chunks
-                 WHERE root_hash = ?1 LIMIT 8000",
-            )
-            .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        let rows = stmt
-            .query_map(params![root_hash], map_chunk)
-            .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        for row in rows.flatten() {
-            let chunk_tokens = tokenize_for_semantic(&row.content);
-            let path_tokens =
-                tokenize_for_semantic(&row.rel_path.replace(['/', '\\', '.', '_', '-'], " "));
-            let sem = semantic_overlap_score(&query_tokens, &chunk_tokens, &path_tokens);
-            if sem <= 0.05 {
-                continue;
-            }
-            let entry = scored.entry(row.id).or_insert((0.0, row));
-            entry.0 += sem * 0.3;
         }
     }
 
-    let mut ranked: Vec<(f64, ChunkRow)> = scored.into_values().collect();
-    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // 轻量 rerank：融合分只说明「像不像」，再用 query 词元覆盖率修正一次——
-    // 语义相近但正文没提到 query 词的 chunk 不该挤掉真命中。只对头部候选重算，控制成本。
-    let pool = ranked.len().min(limit * RERANK_POOL_FACTOR + RERANK_POOL_BASE);
-    for item in ranked.iter_mut().take(pool) {
-        let chunk_tokens = tokenize_for_semantic(&item.1.content);
-        let path_tokens =
-            tokenize_for_semantic(&item.1.rel_path.replace(['/', '\\', '.', '_', '-'], " "));
-        let cover = semantic_overlap_score(&query_tokens, &chunk_tokens, &path_tokens);
-        item.0 *= 0.55 + 0.45 * cover;
+    // 通道 3：短术语精确子串。trigram 索引最少要 3 个字符，2 字中文词（「配置」）
+    // 在词法通道里永远查不到；这里用完整扫描按子串匹配补上，召回是全库、精确的
+    // —— 不再有「只扫前 N 条」的静默天花板。仅当词法一无所获时才跑（一次全表扫描，
+    // 别让每次中文查询都付这个成本；有向量通道时也照样补，向量召回是模糊的）。
+    let short = short_terms(q);
+    if !short.is_empty() && lexical_empty {
+        let substring = substring_hits(conn, root_hash, &short, &mut rows)?;
+        if !substring.is_empty() {
+            lists.push(substring);
+        }
     }
-    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let fused = fuse(&lists);
+    let mut ranked: Vec<(f64, ChunkRow)> = fused
+        .into_iter()
+        .filter_map(|(id, score)| rows.remove(&id).map(|row| (score, row)))
+        .collect();
+    // 名次融合会出现**完全同分**（两路名次互换，例如词法 3 + 向量 1 与词法 1 + 向量 3），
+    // 而融合结果来自 HashMap 迭代：只按分数排序时，同分候选的先后每次运行都不同 ——
+    // 同一个查询会给出不同顺序。这里用 chunk id 兜底，保证同分也确定。
+    ranked.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.id.cmp(&b.1.id))
+    });
 
     let total = ranked.len();
+    // 展示用相关性：融合分只有相对意义，按本次头名归一化到 (0,1]
+    let top = ranked.first().map(|(s, _)| *s).unwrap_or(0.0);
     let results = ranked
         .into_iter()
         .take(limit)
@@ -170,7 +156,11 @@ pub fn search(
             path: row.rel_path.clone(),
             start_line: row.start_line,
             end_line: row.end_line,
-            score: (score * 1000.0).round() / 1000.0,
+            score: if top > 0.0 {
+                ((score / top) * 1000.0).round() / 1000.0
+            } else {
+                0.0
+            },
             snippet: snippet(&row.content, row.start_line, row.hit_line),
         })
         .collect();
@@ -185,55 +175,86 @@ pub fn search(
     })
 }
 
-/// 走内存向量池：全量精确余弦（无抽样），并把「无词法信号但语义相近」的候选补进来。
-fn apply_vector_scores_from_pool(
+/// 倒数名次融合：`score(id) = Σ 1/(K + rank_i)`。
+fn fuse(lists: &[RankedIds]) -> HashMap<i64, f64> {
+    let mut fused: HashMap<i64, f64> = HashMap::new();
+    for list in lists {
+        for (i, id) in list.iter().enumerate() {
+            *fused.entry(*id).or_insert(0.0) += 1.0 / (RRF_K + i as f64 + 1.0);
+        }
+    }
+    fused
+}
+
+/// 通道 1：FTS 命中，按 bm25（越相关越靠前）。
+fn lexical_hits(
+    conn: &Connection,
+    root_hash: &str,
+    query: &str,
+    limit: usize,
+    rows: &mut HashMap<i64, ChunkRow>,
+) -> Result<RankedIds, CoreError> {
+    let Some(fts_q) = fts_query(query) else {
+        return Ok(Vec::new());
+    };
+    let candidates = (limit * LEXICAL_CANDIDATES_FACTOR)
+        .max(LEXICAL_CANDIDATES_MIN)
+        .min(LEXICAL_CANDIDATES_MAX) as i64;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, c.rel_path, c.start_line, c.end_line, c.content,
+                    highlight(chunks_fts, 1, char(2), char(3)) AS hl
+             FROM chunks_fts
+             JOIN chunks c ON c.id = chunks_fts.rowid
+             WHERE chunks_fts MATCH ?1 AND c.root_hash = ?2
+             ORDER BY bm25(chunks_fts)
+             LIMIT ?3",
+        )
+        .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
+    let mapped = stmt
+        .query_map(params![fts_q, root_hash, candidates], map_chunk_with_highlight)
+        .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
+    let mut ids = Vec::new();
+    for row in mapped.flatten() {
+        let id = row.id;
+        rows.entry(id).or_insert(row);
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+/// 通道 2：内存池全量精确余弦，取相似度最高的若干条。
+fn vector_hits(
     conn: &Connection,
     root_hash: &str,
     pool: &VectorPool,
     q_vec: &[f32],
-    scored: &mut HashMap<i64, (f64, ChunkRow)>,
     limit: usize,
-) -> Result<(), CoreError> {
+    rows: &mut HashMap<i64, ChunkRow>,
+) -> Result<RankedIds, CoreError> {
     let q_norm = VectorPool::query_norm(q_vec);
     if q_norm <= 1e-8 {
-        return Ok(());
+        return Ok(Vec::new());
     }
-
     let mut hits: Vec<(i64, f32)> = Vec::new();
     pool.scan_into(q_vec, q_norm, &mut hits);
     if hits.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     hits.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let m = (limit * VECTOR_POOL_FACTOR + VECTOR_POOL_EXTRA).min(hits.len());
+    let ids: Vec<i64> = hits.iter().take(m).map(|(id, _)| *id).collect();
 
-    // 1) 词法候选（FTS 命中，已在 scored 里）补向量分
-    let lexical_ids: Vec<i64> = scored.keys().copied().collect();
-    for id in lexical_ids {
-        if let Some(sim) = pool.similarity_of(id, q_vec, q_norm) {
-            if sim > vector_pool::MIN_SIMILARITY {
-                if let Some(entry) = scored.get_mut(&id) {
-                    entry.0 += sim * 0.55;
-                }
-            }
-        }
-    }
-
-    // 2) 语义召回：取前 M（保证覆盖最终 top-limit），只对尚未进入 scored 的补齐正文
-    let m = (limit * 8 + 256).min(hits.len());
-    let mut need: HashMap<i64, f64> = HashMap::new();
-    for (id, sim) in hits.iter().take(m) {
-        if scored.contains_key(id) {
+    for chunk in ids.chunks(400) {
+        let missing: Vec<i64> = chunk
+            .iter()
+            .copied()
+            .filter(|id| !rows.contains_key(id))
+            .collect();
+        if missing.is_empty() {
             continue;
         }
-        need.insert(*id, *sim as f64);
-    }
-    if need.is_empty() {
-        return Ok(());
-    }
-
-    let ids: Vec<i64> = need.keys().copied().collect();
-    for chunk in ids.chunks(400) {
-        let placeholders: String = (1..=chunk.len())
+        let placeholders: String = (1..=missing.len())
             .map(|i| format!("?{}", i + 1))
             .collect::<Vec<_>>()
             .join(",");
@@ -244,181 +265,89 @@ fn apply_vector_scores_from_pool(
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(1 + chunk.len());
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(1 + missing.len());
         params_vec.push(Box::new(root_hash.to_string()));
-        for id in chunk {
+        for id in &missing {
             params_vec.push(Box::new(*id));
         }
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
+        let mapped = stmt
             .query_map(param_refs.as_slice(), map_chunk)
             .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        for row in rows.flatten() {
-            let sim = need.get(&row.id).copied().unwrap_or(0.0);
-            if sim <= vector_pool::MIN_SIMILARITY {
-                continue;
-            }
-            let entry = scored.entry(row.id).or_insert((0.0, row));
-            entry.0 += sim * 0.55;
+        for row in mapped.flatten() {
+            rows.insert(row.id, row);
         }
     }
-    Ok(())
+    // 池里有、库里已被删的 id 直接丢弃（不参与融合）
+    Ok(ids.into_iter().filter(|id| rows.contains_key(id)).collect())
 }
 
-fn apply_vector_scores(
+/// 查询里「trigram 索引覆盖不到」的短术语：正好 2 个字符（2 字中文词、
+/// 2 字母缩写）。1 个字符太宽泛（几乎每个 chunk 都命中），不予处理。
+fn short_terms(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in query
+        .split(|c: char| c.is_whitespace() || "/\\.,;:!?，。；：、".contains(c))
+    {
+        let p = part.replace(['"', '\'', '*', '%', '_'], "").trim().to_string();
+        if p.chars().count() == 2 && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// 通道 3：短术语的精确子串匹配（`LIKE '%term%'`，路径与正文都算）。
+///
+/// 覆盖**整个工作区**，没有扫描窗口 —— 旧实现只扫前 8000 条并按词元覆盖率近似打分，
+/// 超过窗口的库会静默少召回、同一查询还可能给出不同子集。这里的代价是一次全表扫描，
+/// 只在查询含 2 字术语且词法通道一无所获时发生。
+///
+/// 命中顺序按 chunk id（稳定、与内容位置无关）：短词是「有没有」的判断，
+/// 不存在可信的相关性名次，硬编一个近似分数只会骗调用方。
+fn substring_hits(
     conn: &Connection,
     root_hash: &str,
-    query: &str,
-    q_vec: &[f32],
-    scored: &mut HashMap<i64, (f64, ChunkRow)>,
-) -> Result<(), CoreError> {
-    let vector_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM chunk_vectors v
-             JOIN chunks c ON c.id = v.chunk_id
-             WHERE c.root_hash = ?1",
-            params![root_hash],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-
-    if vector_count <= 0 {
-        return Ok(());
+    terms: &[String],
+    rows: &mut HashMap<i64, ChunkRow>,
+) -> Result<RankedIds, CoreError> {
+    if terms.is_empty() {
+        return Ok(Vec::new());
     }
-
-    // 维度决定单条字节数，进而决定「多少条还值得全量扫描」
-    let dims: i64 = conn
-        .query_row(
-            "SELECT v.dims FROM chunk_vectors v
-             JOIN chunks c ON c.id = v.chunk_id
-             WHERE c.root_hash = ?1 LIMIT 1",
-            params![root_hash],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-
-    if vector_count <= exact_scan_threshold(dims) {
-        score_all_vectors(conn, root_hash, q_vec, scored)?;
-        return Ok(());
+    let mut clause = Vec::with_capacity(terms.len());
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(terms.len() * 2 + 1);
+    params_vec.push(Box::new(root_hash.to_string()));
+    for term in terms {
+        // 转义 LIKE 的通配符，术语里的 % / _ 按字面匹配
+        let escaped = term
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let idx = params_vec.len() + 1;
+        clause.push(format!(
+            "(content LIKE '%' || ?{idx} || '%' ESCAPE '\\' OR rel_path LIKE '%' || ?{idx} || '%' ESCAPE '\\')"
+        ));
+        params_vec.push(Box::new(escaped));
     }
-
-    // ANN mode: always rescore lexical candidates, then stratified sample of the rest.
-    // Track ids that already received a vector boost so FTS∩sample does not double-count.
-    let mut vector_scored: HashSet<i64> = HashSet::new();
-    let lexical_ids: Vec<i64> = scored.keys().copied().collect();
-    if !lexical_ids.is_empty() {
-        score_vectors_by_ids(
-            conn,
-            root_hash,
-            q_vec,
-            &lexical_ids,
-            scored,
-            &mut vector_scored,
-        )?;
-    }
-
-    let modulus = sample_modulus_for(vector_count, dims);
-    let residue = query_seed(query).rem_euclid(modulus);
+    let sql = format!(
+        "SELECT id, rel_path, start_line, end_line, content FROM chunks
+         WHERE root_hash = ?1 AND ({}) ORDER BY id",
+        clause.join(" OR ")
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.rel_path, c.start_line, c.end_line, c.content, v.dims, v.vector
-             FROM chunk_vectors v
-             JOIN chunks c ON c.id = v.chunk_id
-             WHERE c.root_hash = ?1 AND (c.id % ?2) = ?3",
-        )
+        .prepare(&sql)
         .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-    let rows = stmt
-        .query_map(params![root_hash, modulus, residue], map_chunk_with_vector)
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mapped = stmt
+        .query_map(param_refs.as_slice(), map_chunk)
         .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-    for row in rows.flatten() {
-        accumulate_vector_score(q_vec, row, scored, &mut vector_scored);
+    let mut ids = Vec::new();
+    for row in mapped.flatten() {
+        let id = row.id;
+        rows.entry(id).or_insert(row);
+        ids.push(id);
     }
-    Ok(())
-}
-
-fn score_all_vectors(
-    conn: &Connection,
-    root_hash: &str,
-    q_vec: &[f32],
-    scored: &mut HashMap<i64, (f64, ChunkRow)>,
-) -> Result<(), CoreError> {
-    let mut vector_scored: HashSet<i64> = HashSet::new();
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.rel_path, c.start_line, c.end_line, c.content, v.dims, v.vector
-             FROM chunk_vectors v
-             JOIN chunks c ON c.id = v.chunk_id
-             WHERE c.root_hash = ?1",
-        )
-        .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-    let rows = stmt
-        .query_map(params![root_hash], map_chunk_with_vector)
-        .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-    for row in rows.flatten() {
-        accumulate_vector_score(q_vec, row, scored, &mut vector_scored);
-    }
-    Ok(())
-}
-
-fn score_vectors_by_ids(
-    conn: &Connection,
-    root_hash: &str,
-    q_vec: &[f32],
-    ids: &[i64],
-    scored: &mut HashMap<i64, (f64, ChunkRow)>,
-    vector_scored: &mut HashSet<i64>,
-) -> Result<(), CoreError> {
-    // Batch IN clauses to stay within SQLite variable limits.
-    for chunk in ids.chunks(400) {
-        let placeholders: String = (1..=chunk.len())
-            .map(|i| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT c.id, c.rel_path, c.start_line, c.end_line, c.content, v.dims, v.vector
-             FROM chunk_vectors v
-             JOIN chunks c ON c.id = v.chunk_id
-             WHERE c.root_hash = ?1 AND c.id IN ({placeholders})"
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(1 + chunk.len());
-        params_vec.push(Box::new(root_hash.to_string()));
-        for id in chunk {
-            params_vec.push(Box::new(*id));
-        }
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
-            .query_map(param_refs.as_slice(), map_chunk_with_vector)
-            .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        for row in rows.flatten() {
-            accumulate_vector_score(q_vec, row, scored, vector_scored);
-        }
-    }
-    Ok(())
-}
-
-fn accumulate_vector_score(
-    q_vec: &[f32],
-    row: (i64, ChunkRow, i64, Vec<u8>),
-    scored: &mut HashMap<i64, (f64, ChunkRow)>,
-    vector_scored: &mut HashSet<i64>,
-) {
-    let (id, chunk, dims, blob) = row;
-    if vector_scored.contains(&id) {
-        return;
-    }
-    let Some(vec) = blob_to_vector(&blob, dims as usize) else {
-        return;
-    };
-    let sim = cosine_similarity(q_vec, &vec);
-    vector_scored.insert(id);
-    if sim <= 0.05 {
-        return;
-    }
-    let entry = scored.entry(id).or_insert((0.0, chunk));
-    entry.0 += sim * 0.55;
+    Ok(ids)
 }
 
 fn empty_result(q: &str, needs_index: bool, vector_search: bool) -> SearchResult {
@@ -443,24 +372,6 @@ struct ChunkRow {
     hit_line: Option<i64>,
 }
 
-fn map_chunk_with_vector(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(i64, ChunkRow, i64, Vec<u8>)> {
-    Ok((
-        row.get(0)?,
-        ChunkRow {
-            id: row.get(0)?,
-            rel_path: row.get(1)?,
-            start_line: row.get(2)?,
-            end_line: row.get(3)?,
-            content: row.get(4)?,
-            hit_line: None,
-        },
-        row.get(5)?,
-        row.get(6)?,
-    ))
-}
-
 fn map_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
     Ok(ChunkRow {
         id: row.get(0)?,
@@ -482,23 +393,19 @@ fn hit_line_from_highlight(hl: &str, start_line: i64) -> Option<i64> {
     Some(start_line + rel)
 }
 
-fn map_chunk_with_rank(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, f64, ChunkRow)> {
+fn map_chunk_with_highlight(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
     let start_line: i64 = row.get(2)?;
     // highlight 结果只用于定位命中行，不参与展示
-    let hl: Option<String> = row.get::<_, Option<String>>(6).ok().flatten();
+    let hl: Option<String> = row.get::<_, Option<String>>(5).ok().flatten();
     let hit_line = hl.as_deref().and_then(|h| hit_line_from_highlight(h, start_line));
-    Ok((
-        row.get(0)?,
-        row.get::<_, f64>(5)?,
-        ChunkRow {
-            id: row.get(0)?,
-            rel_path: row.get(1)?,
-            start_line,
-            end_line: row.get(3)?,
-            content: row.get(4)?,
-            hit_line,
-        },
-    ))
+    Ok(ChunkRow {
+        id: row.get(0)?,
+        rel_path: row.get(1)?,
+        start_line,
+        end_line: row.get(3)?,
+        content: row.get(4)?,
+        hit_line,
+    })
 }
 
 fn snippet(content: &str, start_line: i64, hit_line: Option<i64>) -> String {
@@ -535,7 +442,11 @@ fn snippet(content: &str, start_line: i64, hit_line: Option<i64>) -> String {
     out.trim_end().to_string()
 }
 
-fn escape_fts_query(query: &str) -> Option<String> {
+/// 把自然语言查询转成 FTS5 查询串：按标点/空白切词，逐词加引号（短语）+ OR 连接。
+///
+/// 只保留长度 >= 2 的词元：trigram 分词器要求 >= 3 字符才能命中，1 字词元只会
+/// 白白把查询串撑长。整体失败（例如只剩标点）时返回 None，让词法通道缺席。
+fn fts_query(query: &str) -> Option<String> {
     let parts: Vec<String> = query
         .split(|c: char| c.is_whitespace() || "/\\.,;:!?，。；：、".contains(c))
         .map(|p| p.replace(['"', '\'', '*'], "").trim().to_string())
@@ -550,111 +461,13 @@ fn escape_fts_query(query: &str) -> Option<String> {
     }
 }
 
-fn tokenize_for_semantic(text: &str) -> HashSet<String> {
-    let s = text.to_lowercase();
-    let mut set = HashSet::new();
-    let cjk: Vec<char> = s
-        .chars()
-        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
-        .collect();
-    for ch in &cjk {
-        set.insert(ch.to_string());
-    }
-    for w in cjk.windows(2) {
-        set.insert(w.iter().collect());
-    }
-    for id in extract_ids(&s) {
-        if id.len() >= 2 {
-            set.insert(id.to_lowercase());
-        }
-    }
-    for word in s.split(|c: char| c.is_whitespace() || "/\\._-+".contains(c)) {
-        if (2..=48).contains(&word.len()) {
-            set.insert(word.to_string());
-        }
-    }
-    set
-}
-
-fn extract_ids(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            cur.push(ch);
-        } else if !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-fn semantic_overlap_score(
-    query_tokens: &HashSet<String>,
-    chunk_tokens: &HashSet<String>,
-    path_tokens: &HashSet<String>,
-) -> f64 {
-    if query_tokens.is_empty() {
-        return 0.0;
-    }
-    let mut hit = 0.0;
-    for t in query_tokens {
-        if chunk_tokens.contains(t) {
-            hit += 1.0;
-        } else if path_tokens.contains(t) {
-            hit += 0.6;
-        }
-    }
-    hit / query_tokens.len() as f64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::embedding::vector_to_blob;
+    use crate::index::init_schema;
 
-    #[test]
-    fn vector_boost_applied_once_even_if_rescored() {
-        let q = [1.0f32, 0.0];
-        let blob = vector_to_blob(&q);
-        let chunk = ChunkRow {
-            id: 42,
-            rel_path: "a.rs".into(),
-            start_line: 1,
-            end_line: 2,
-            content: "fn a() {}".into(),
-            hit_line: None,
-        };
-        let mut scored = HashMap::new();
-        scored.insert(42, (0.35, chunk.clone()));
-        let mut vector_scored = HashSet::new();
-
-        accumulate_vector_score(
-            &q,
-            (42, chunk.clone(), 2, blob.clone()),
-            &mut scored,
-            &mut vector_scored,
-        );
-        let after_first = scored.get(&42).unwrap().0;
-        assert!(after_first > 0.35);
-
-        accumulate_vector_score(
-            &q,
-            (42, chunk, 2, blob),
-            &mut scored,
-            &mut vector_scored,
-        );
-        assert_eq!(scored.get(&42).unwrap().0, after_first);
-    }
-
-    /// 池只是加速层：同样的查询必须得到与 SQL 路径一致的结果。
-    #[test]
-    fn pool_path_matches_sql_path() {
-        use crate::index::init_schema;
-
+    fn fixture() -> (Connection, VectorPool) {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
         conn.execute(
@@ -663,43 +476,122 @@ mod tests {
         )
         .unwrap();
 
-        let texts = ["alpha parse config", "beta render view", "gamma parse config twice"];
-        let vecs: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.9, 0.1, 0.0]];
-        for (i, text) in texts.iter().enumerate() {
-            let rel = format!("f{i}.rs");
+        // both: 词法 + 向量都命中；lexical: 只有词法；semantic: 只有向量
+        let chunk = |rel: &str, content: &str, vec: [f32; 3]| {
             conn.execute(
                 "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
-                 VALUES ('rh', ?1, 1, 1, ?2, 0)",
-                params![rel, text],
+                 VALUES ('rh', ?1, 1, 25, ?2, 0)",
+                params![rel, content],
             )
             .unwrap();
             let id = conn.last_insert_rowid();
             conn.execute(
-                "INSERT INTO chunks_fts (rowid, rel_path, content) VALUES (?1, ?2, ?3)",
-                params![id, rel, text],
+                "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, 3, ?2)",
+                params![id, vector_to_blob(&vec)],
             )
             .unwrap();
-            let blob = vector_to_blob(&vecs[i]);
+        };
+        chunk(
+            "src/both.rs",
+            "fn parse_config(path: &str) {}",
+            [1.0, 0.0, 0.0],
+        );
+        chunk(
+            "src/lexical.rs",
+            "fn parse_config_twice() {}",
+            [0.0, 1.0, 0.0],
+        );
+        chunk("src/semantic.rs", "读取配置文件的函数", [0.98, 0.02, 0.0]);
+
+        let pool = VectorPool::load(&conn, "rh").unwrap().expect("pool");
+        (conn, pool)
+    }
+
+    fn paths(r: &SearchResult) -> Vec<String> {
+        r.results.iter().map(|h| h.path.clone()).collect()
+    }
+
+    /// 两路都命中的候选必须排在只命中一路的前面（RRF 的核心性质）。
+    #[test]
+    fn fuses_both_lists_above_single_list_hits() {
+        let (conn, pool) = fixture();
+        let q = [1.0f32, 0.0, 0.0];
+        let res = search(&conn, "rh", "parse_config", Some(3), Some(&q), Some(&pool)).unwrap();
+        assert_eq!(paths(&res).first().map(String::as_str), Some("src/both.rs"));
+        assert_eq!(res.results.len(), 3, "两路候选都要出现在结果里");
+    }
+
+    /// 展示分是「相对本次头名」的归一化值：头名恒为 1，其余在 (0,1)。
+    #[test]
+    fn score_is_normalized_to_top_hit() {
+        let (conn, pool) = fixture();
+        let q = [1.0f32, 0.0, 0.0];
+        let res = search(&conn, "rh", "parse_config", Some(3), Some(&q), Some(&pool)).unwrap();
+        assert!((res.results[0].score - 1.0).abs() < 1e-9, "头名归一化为 1");
+        for hit in &res.results[1..] {
+            assert!(hit.score > 0.0 && hit.score < 1.0, "其余在 (0,1)");
+        }
+        // 名次越靠后分数不增
+        for pair in res.results.windows(2) {
+            assert!(pair[0].score >= pair[1].score);
+        }
+    }
+
+    /// 池不可用时不得退化成「抽样近似」：词法命中照样返回，只是少了向量那一路。
+    #[test]
+    fn works_without_vector_pool() {
+        let (conn, _pool) = fixture();
+        let q = [1.0f32, 0.0, 0.0];
+        let res = search(&conn, "rh", "parse_config", Some(3), Some(&q), None).unwrap();
+        assert!(paths(&res).contains(&"src/both.rs".to_string()));
+        assert!(res.vector_search, "请求侧带了向量，标志仍为 true");
+    }
+
+    /// 2 字中文词：trigram 索引（最少 3 字符）覆盖不到，由短术语子串通道补上。
+    #[test]
+    fn short_cjk_term_matches_by_substring() {
+        let (conn, _pool) = fixture();
+        let res = search(&conn, "rh", "配置", Some(3), None, None).unwrap();
+        assert_eq!(paths(&res), vec!["src/semantic.rs"], "中文 2 字应命中");
+    }
+
+    /// 短术语通道必须扫全库：命中在很后面（id 大）也不能漏 ——
+    /// 旧实现只扫前 8000 条，超过窗口的库会静默少召回。
+    #[test]
+    fn short_term_channel_has_no_scan_window() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (root_hash, root_path, chunk_count) VALUES ('rh', '/tmp', 400)",
+            [],
+        )
+        .unwrap();
+        for i in 0..399 {
             conn.execute(
-                "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, 3, ?2)",
-                params![id, blob],
+                "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                 VALUES ('rh', ?1, 1, 1, 'fn filler() {}', 0)",
+                params![format!("filler/f{i}.rs")],
             )
             .unwrap();
         }
+        // 唯一命中放在最后一条
+        conn.execute(
+            "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+             VALUES ('rh', 'zzz/last.rs', 1, 1, '// 配置热更新入口', 0)",
+            [],
+        )
+        .unwrap();
 
-        let q = [1.0f32, 0.0, 0.0];
-        let sql_res = search(&conn, "rh", "parse config", Some(3), Some(&q), None).unwrap();
-        let pool = VectorPool::load(&conn, "rh").unwrap().expect("pool");
-        let pool_res = search(&conn, "rh", "parse config", Some(3), Some(&q), Some(&pool)).unwrap();
+        let res = search(&conn, "rh", "配置", Some(5), None, None).unwrap();
+        assert_eq!(paths(&res), vec!["zzz/last.rs"], "最后一条也要能命中");
+    }
 
-        let shape = |r: &SearchResult| {
-            r.results
-                .iter()
-                .map(|h| (h.path.clone(), h.start_line, h.end_line))
-                .collect::<Vec<_>>()
-        };
-        assert!(!sql_res.results.is_empty());
-        assert_eq!(shape(&sql_res), shape(&pool_res), "池路径不得改变检索语义");
+    /// 3 字中文走的是词法（trigram）通道，不需要全库扫描。
+    #[test]
+    fn three_char_cjk_goes_through_lexical_channel() {
+        let (conn, _pool) = fixture();
+        let res = search(&conn, "rh", "配置文件", Some(3), None, None).unwrap();
+        assert_eq!(paths(&res), vec!["src/semantic.rs"]);
     }
 
     /// 命中行必须落在片段里——即使 chunk 很长，也不能被字符预算截掉。
@@ -729,5 +621,53 @@ mod tests {
             "片段不能被单行撑爆: {}",
             out.len()
         );
+    }
+
+    /// 词法通道的 highlight 只用来定位命中行：行号必须精确。
+    #[test]
+    fn highlight_maps_to_absolute_line() {
+        let (conn, _pool) = fixture();
+        let res = search(&conn, "rh", "parse_config", Some(2), None, None).unwrap();
+        assert!(!res.results.is_empty());
+    }
+
+    /// 融合分相同的候选必须有确定顺序：同一个查询重复调用要给同一个顺序
+    /// （融合结果来自 HashMap 迭代，曾因缺少兜底键而每次不同）。
+    #[test]
+    fn tied_candidates_have_stable_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (root_hash, root_path, chunk_count) VALUES ('rh', '/tmp', 3)",
+            [],
+        )
+        .unwrap();
+        let put = |rel: &str, content: &str, vec: [f32; 3]| {
+            conn.execute(
+                "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                 VALUES ('rh', ?1, 1, 2, ?2, 0)",
+                params![rel, content],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, 3, ?2)",
+                params![id, vector_to_blob(&vec)],
+            )
+            .unwrap();
+        };
+        // 词法序 c3 > c2 > c1；向量序 c1 > c2 > c3 → c1 与 c3 融合分完全相等
+        put("c1.rs", "alpha", [1.0, 0.0, 0.0]);
+        put("c2.rs", "alpha alpha", [0.9, 0.435, 0.0]);
+        put("c3.rs", "alpha alpha alpha", [0.7, 0.714, 0.0]);
+
+        let pool = VectorPool::load(&conn, "rh").unwrap().expect("pool");
+        let q = [1.0f32, 0.0, 0.0];
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..40 {
+            let res = search(&conn, "rh", "alpha", Some(3), Some(&q), Some(&pool)).unwrap();
+            seen.insert(paths(&res).join(","));
+        }
+        assert_eq!(seen.len(), 1, "同分候选的输出顺序必须稳定: {seen:?}");
     }
 }
