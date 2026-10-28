@@ -1,19 +1,22 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use ignore::WalkBuilder;
+use rayon::prelude::*;
+
+/// 「这一层目录一定不是源码」的显式名单。
+///
+/// 只保留 **.gitignore 通常管不到**的那几个：`node_modules` / `dist` / `target` 之类
+/// 即使仓库没写 .gitignore 也必须跳过（否则首索引等于把整个依赖树读一遍）。
+/// 隐藏目录（`.git` / `.venv` / `.next` / `.dieyun` …）不再列出：`ignore` crate 默认
+/// 跳过隐藏项，维护两份名单只会让两份逐渐不一致。
 const IGNORE_DIRS: &[&str] = &[
     "node_modules",
-    ".git",
     "dist",
     "build",
     "out",
-    ".dieyun",
     "coverage",
     "__pycache__",
-    ".venv",
     "venv",
-    ".next",
-    ".nuxt",
     "target",
     "vendor",
     "win-unpacked",
@@ -45,47 +48,74 @@ const KNOWN_TEXT_EXT: &[&str] = &[
 const SNIFF_BYTES: usize = 8192;
 const MAX_SNIFF_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
+/// 内容嗅探阶段的候选超采样倍数。
+///
+/// 遍历阶段只能按扩展名先粗筛（快），真正的「是不是文本」要开文件读 8KB（慢）。
+/// 我们不需要为了 max_files 个结果只嗅探 max_files 个文件——二进制多的仓库会
+/// 提前触顶。多取几倍候选并行嗅探，再按相对路径排序截断，结果仍然确定。
+const SNIFF_OVERSAMPLE: usize = 4;
+const SNIFF_MIN_HEADROOM: usize = 256;
+
 pub struct FileEntry {
     pub abs: PathBuf,
     pub rel: String,
 }
 
+/// 收集可索引文本文件。
+///
+/// 两段式，职责分开：
+/// 1. **遍历**（串行、`ignore` crate）：忽略规则只有一份 —— `.gitignore` /
+///    `.git/info/exclude` / 全局 gitignore / `.ignore` 全部由 crate 提供，
+///    我们只额外声明 `IGNORE_DIRS` 那几条（见其文档）。不跟符号链接（防环 + 防越界）。
+/// 2. **嗅探**（并行、`rayon`）：逐文件开 IO 判定是否文本，这是真正的耗时项。
+///
+/// 隐藏项由 crate 默认跳过：`.env` / `.gitignore` 这类点文件因此不再进索引。
+/// 这是**有意**的取舍 —— 少索引几个点配置文件，换掉「把 `.env` 里的密钥送进向量库」。
 pub fn collect_text_files(root: &Path, max_files: usize) -> Vec<FileEntry> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let read_dir = match std::fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        for ent in read_dir.flatten() {
-            let path = ent.path();
-            let name = ent.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
-                if should_skip_dir(&name) {
-                    continue;
-                }
-                stack.push(path);
-            } else if is_indexable_text_file(&path) {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .into_owned();
-                out.push(FileEntry { abs: path, rel });
-                if out.len() >= max_files {
-                    out.sort_by(|a, b| a.rel.cmp(&b.rel));
-                    return out;
-                }
+    let cap = max_files
+        .saturating_mul(SNIFF_OVERSAMPLE)
+        .max(max_files.saturating_add(SNIFF_MIN_HEADROOM));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let walker = WalkBuilder::new(root)
+        // 工作区不一定是 git 仓库，但 .gitignore 依然是对「哪些是产物」的准确声明
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
             }
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy();
+                return !IGNORE_DIRS.contains(&name.as_ref());
+            }
+            true
+        })
+        .build();
+    for entry in walker.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        candidates.push(entry.into_path());
+        if candidates.len() >= cap {
+            break;
         }
     }
-    out.sort_by(|a, b| a.rel.cmp(&b.rel));
-    out
-}
 
-fn should_skip_dir(name: &str) -> bool {
-    IGNORE_DIRS.contains(&name) || name.starts_with('.')
+    let mut entries: Vec<FileEntry> = candidates
+        .into_par_iter()
+        .filter(|path| is_indexable_text_file(path))
+        .map(|path| FileEntry {
+            rel: path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned(),
+            abs: path,
+        })
+        .collect();
+    entries.sort_by(|a, b| a.rel.cmp(&b.rel));
+    entries.truncate(max_files);
+    entries
 }
 
 fn file_ext_lower(path: &Path) -> String {
@@ -181,28 +211,6 @@ fn printable_ratio(buf: &[u8]) -> f32 {
     good as f32 / buf.len() as f32
 }
 
-#[allow(dead_code)]
-fn tokenize_for_semantic(text: &str) -> HashSet<String> {
-    let s = text.to_lowercase();
-    let mut set = HashSet::new();
-    for ch in s.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)) {
-        set.insert(ch.to_string());
-    }
-    let cjk: Vec<char> = s
-        .chars()
-        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
-        .collect();
-    for w in cjk.windows(2) {
-        set.insert(w.iter().collect());
-    }
-    for word in s.split(|c: char| c.is_whitespace() || "/\\._-+".contains(c)) {
-        if (2..=48).contains(&word.len()) {
-            set.insert(word.to_string());
-        }
-    }
-    set
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +235,50 @@ mod tests {
         let png_named = dir.path().join("x.png");
         std::fs::write(&png_named, b"not really png but ignored by ext").unwrap();
         assert!(!is_indexable_text_file(&png_named));
+    }
+
+    fn rel_paths(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = collect_text_files(dir, 1000)
+            .into_iter()
+            .map(|e| e.rel.replace('\\', "/"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// 忽略规则的唯一来源是 `ignore` crate：项目自己的 .gitignore 必须被尊重。
+    #[test]
+    fn respects_project_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "generated/\n*.min.js\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("generated")).unwrap();
+        std::fs::write(dir.path().join("generated/schema.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("app.min.js"), "var a=1;").unwrap();
+        std::fs::write(dir.path().join("app.js"), "var a=1;").unwrap();
+        assert_eq!(rel_paths(dir.path()), vec!["app.js".to_string()]);
+    }
+
+    /// 没有 .gitignore 也必须跳过依赖树 / 构建产物目录（`IGNORE_DIRS` 存在的理由）。
+    #[test]
+    fn skips_dependency_and_build_dirs_without_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        for sub in ["node_modules/pkg", "target/debug", "src"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+        }
+        std::fs::write(dir.path().join("node_modules/pkg/index.js"), "x").unwrap();
+        std::fs::write(dir.path().join("target/debug/out.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        assert_eq!(rel_paths(dir.path()), vec!["src/main.rs".to_string()]);
+    }
+
+    /// 隐藏项不进索引（有意取舍：宁可少索引点配置文件，也不把 .env 送进向量库）。
+    #[test]
+    fn skips_hidden_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".venv/lib")).unwrap();
+        std::fs::write(dir.path().join(".venv/lib/site.py"), "x").unwrap();
+        std::fs::write(dir.path().join(".env"), "API_KEY=1").unwrap();
+        std::fs::write(dir.path().join("main.py"), "print(1)").unwrap();
+        assert_eq!(rel_paths(dir.path()), vec!["main.py".to_string()]);
     }
 }

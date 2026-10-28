@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 #[cfg(feature = "builtin-ort")]
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use crate::error::CoreError;
 
@@ -55,8 +55,118 @@ mod ort_backend {
 
     static BUILTIN_CACHE: OnceLock<Mutex<Option<(PathBuf, Arc<BuiltinEmbedder>)>>> = OnceLock::new();
 
+/// 进程内最多同时持有几个 ONNX Session。
+///
+/// 为什么不是一个：`Session::run` 要 `&mut self`，单 session + 单 Mutex 等于把所有
+/// 向量化请求串成一条线 —— 建库时「多文件并行取向量」是假的，批与批之间还要重新抢锁。
+/// 为什么不无限：ORT 每个 session 自带线程池，session 越多总线程越多，超过核数
+/// 只会互相抢占。所以池容量按核数摊开，每个 session 的 intra-op 线程数同比例缩小。
+const MAX_SESSIONS: usize = 4;
+
+struct SessionPool {
+    onnx: PathBuf,
+    /// 池容量（`min(核数, MAX_SESSIONS)`）。
+    cap: usize,
+    /// 每个 session 的 intra-op 线程数（核数 / cap，至少 1）。
+    intra_threads: usize,
+    state: Mutex<PoolState>,
+    released: Condvar,
+}
+
+#[derive(Default)]
+struct PoolState {
+    idle: Vec<Session>,
+    /// 已加载的 session 数（含正在外面跑的）。
+    live: usize,
+}
+
+impl SessionPool {
+    fn new(onnx: PathBuf) -> Self {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .max(1);
+        let cap = cores.min(MAX_SESSIONS).max(1);
+        Self {
+            onnx,
+            cap,
+            intra_threads: (cores / cap).max(1),
+            state: Mutex::new(PoolState::default()),
+            released: Condvar::new(),
+        }
+    }
+
+    /// 借一个 session 跑一批，跑完放回。
+    fn run<T>(&self, f: impl FnOnce(&mut Session) -> Result<T, CoreError>) -> Result<T, CoreError> {
+        let mut session = self.acquire()?;
+        match f(&mut session) {
+            Ok(value) => {
+                self.release(session);
+                Ok(value)
+            }
+            Err(err) => {
+                // 不放回：出错可能是 session 级故障，放回池里等于让它复发
+                // （与读池 `ReadConn::discard` 同一条原则）。
+                self.drop_live();
+                Err(err)
+            }
+        }
+    }
+
+    fn acquire(&self) -> Result<Session, CoreError> {
+        let mut state = self.state.lock().map_err(poisoned)?;
+        loop {
+            if let Some(session) = state.idle.pop() {
+                return Ok(session);
+            }
+            if state.live < self.cap {
+                state.live += 1;
+                // 建 session 要读模型文件，别持着锁做
+                drop(state);
+                return match create_session(&self.onnx, self.intra_threads) {
+                    Ok(session) => Ok(session),
+                    Err(err) => {
+                        self.drop_live();
+                        Err(err)
+                    }
+                };
+            }
+            // 到上限：等别人跑完放回，而不是再多开一个（与读池同一条原则）
+            state = self.released.wait(state).map_err(poisoned)?;
+        }
+    }
+
+    fn release(&self, session: Session) {
+        if let Ok(mut state) = self.state.lock() {
+            state.idle.push(session);
+            self.released.notify_one();
+        }
+    }
+
+    fn drop_live(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.live = state.live.saturating_sub(1);
+            self.released.notify_one();
+        }
+    }
+}
+
+fn poisoned<T>(_: T) -> CoreError {
+    CoreError::rpc("BUILTIN_ONNX", "session pool lock poisoned")
+}
+
+fn create_session(onnx: &Path, intra_threads: usize) -> Result<Session, CoreError> {
+    let builder = Session::builder().map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?;
+    let mut builder = builder
+        .with_intra_threads(intra_threads)
+        .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?;
+    builder
+        .commit_from_file(onnx)
+        .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))
+}
+
 struct BuiltinEmbedder {
-    session: Mutex<Session>,
+    pool: SessionPool,
     tokenizer: Tokenizer,
 }
 
@@ -72,15 +182,16 @@ impl BuiltinEmbedder {
         let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
             CoreError::rpc("BUILTIN_TOKENIZER", format!("加载 tokenizer 失败: {e}"))
         })?;
-        let mut builder =
-            Session::builder().map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?;
-        let session = builder
-            .commit_from_file(&onnx)
-            .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?;
-        Ok(Self {
-            session: Mutex::new(session),
-            tokenizer,
-        })
+        // 预热一个 session 就够：模型加载是秒级成本，别在启动路径上建满池。
+        // 其余 session 在首次并发向量化时按需创建。
+        let pool = SessionPool::new(onnx);
+        let first = create_session(&pool.onnx, pool.intra_threads)?;
+        {
+            let mut state = pool.state.lock().map_err(poisoned)?;
+            state.live = 1;
+        }
+        pool.release(first);
+        Ok(Self { pool, tokenizer })
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, CoreError> {
@@ -123,24 +234,20 @@ impl BuiltinEmbedder {
         let type_array = Array2::from_shape_vec((batch, max_len), token_type_ids)
             .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?;
 
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| CoreError::rpc("BUILTIN_ONNX", "session lock poisoned"))?;
-
-        let outputs = session
-            .run(ort::inputs![
-                "input_ids" => TensorRef::from_array_view(ids_array.view())
-                    .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?,
-                "attention_mask" => TensorRef::from_array_view(mask_array.view())
-                    .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?,
-                "token_type_ids" => TensorRef::from_array_view(type_array.view())
-                    .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?,
-            ])
-            .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?;
-
-        let hidden = extract_hidden_state(&outputs)?;
-        let pooled = mean_pool(&hidden, &mask_array);
+        let pooled = self.pool.run(|session| {
+            let outputs = session
+                .run(ort::inputs![
+                    "input_ids" => TensorRef::from_array_view(ids_array.view())
+                        .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?,
+                    "attention_mask" => TensorRef::from_array_view(mask_array.view())
+                        .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?,
+                    "token_type_ids" => TensorRef::from_array_view(type_array.view())
+                        .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?,
+                ])
+                .map_err(|e| CoreError::rpc("BUILTIN_ONNX", e.to_string()))?;
+            let hidden = extract_hidden_state(&outputs)?;
+            Ok(mean_pool(&hidden, &mask_array))
+        })?;
         Ok(l2_normalize_rows(pooled))
     }
 }
@@ -278,6 +385,41 @@ fn get_embedder(model_dir: &Path) -> Result<Arc<BuiltinEmbedder>, CoreError> {
             assert_eq!(vecs.len(), 2);
             assert_eq!(vecs[0].len(), BUILTIN_DIMENSIONS as usize);
             assert!(vecs[0].iter().any(|v| v.abs() > 1e-6));
+        }
+
+        /// session 池的核心承诺：并发向量化与串行结果一致，超过池容量时排队而不是报错。
+        #[test]
+        fn concurrent_embedding_matches_sequential() {
+            let dir = repo_models_dir();
+            let Some(model_dir) = resolve_builtin_model_dir(&[dir]) else {
+                eprintln!("skip: builtin model not present");
+                return;
+            };
+            let embedder = Arc::new(BuiltinEmbedder::load(&model_dir).expect("load"));
+            let text = "并发向量化一致性".to_string();
+            let baseline = embedder.embed(&[text.clone()]).expect("baseline");
+
+            // 线程数刻意大于池容量：让「池满排队」这条路径真的被走到。
+            let threads = MAX_SESSIONS + 3;
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let embedder = Arc::clone(&embedder);
+                        let text = text.clone();
+                        scope.spawn(move || embedder.embed(&[text]).expect("embed"))
+                    })
+                    .collect();
+                for handle in handles {
+                    let got = handle.join().expect("thread");
+                    assert_eq!(got.len(), 1);
+                    let max_diff = got[0]
+                        .iter()
+                        .zip(&baseline[0])
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f32, f32::max);
+                    assert!(max_diff < 1e-4, "并发结果应与串行一致，最大偏差 {max_diff}");
+                }
+            });
         }
     }
 }

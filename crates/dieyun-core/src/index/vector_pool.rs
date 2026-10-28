@@ -1,13 +1,18 @@
-//! 常驻内存的向量池（chunk 向量与符号向量共用）。
+//! 常驻内存的 chunk 向量池（`codebase.search` 用）。
 //!
 //! 向量原本以 f32 BLOB 存在 SQLite 里，每次检索都要逐行读出 + 反序列化
 //! （实测 4096 维 31MB 约 54ms，而余弦只占 18ms）。搬进连续内存后，
 //! 检索路径只剩余弦计算。
 //!
 //! 设计约束：
-//! - **只做加速，不改语义**：仍是全量精确余弦，recall 保持 100%；
+//! - **仍是全量精确扫描**（没有 ANN 索引）：召回不依赖任何近似结构，
+//!   误差只来自下面的 int8 量化；
 //! - 池只是缓存，缺失/不一致时回退到 SQL 路径，不影响正确性；
-//! - 范数在加载时预计算，扫描时每个元素只做一次乘加。
+//! - 范数在加载时预计算，扫描时每个元素只做一次乘加；
+//! - **int8 量化存储**：池子的瓶颈是内存（`VECTOR_POOL_MAX_BYTES`）而不是算力。
+//!   句向量本身已 L2 归一化、分量集中在小范围内，对称量化到 int8 的余弦误差在
+//!   1e-3 量级，比 `MIN_SIMILARITY`（0.05）小两个数量级；换来 4× 的内存与带宽。
+//!   量化的误差界与「什么时候该换 ANN」见 `docs/VECTOR-SEARCH.md`。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -21,42 +26,47 @@ use crate::error::CoreError;
 /// 低于此相似度的向量命中直接丢弃（与 SQL 路径保持一致）。
 pub(crate) const MIN_SIMILARITY: f64 = 0.05;
 
-/// 每类向量缓存（chunk / 符号各一份）的内存上限；超出按最久未用淘汰。
+/// 向量池的内存上限；超出按最久未用淘汰。
 pub(crate) const VECTOR_POOL_MAX_BYTES: usize = 3 * 1024 * 1024 * 1024;
+
+/// int8 对称量化的分母：`q = round(v / scale)`，`scale = max|v| / 127`。
+const QUANT_RANGE: f32 = 127.0;
 
 const CHUNK_VECTOR_SQL: &str = "SELECT c.id, v.dims, v.vector FROM chunk_vectors v
      JOIN chunks c ON c.id = v.chunk_id
      WHERE c.root_hash = ?1
      ORDER BY c.id";
 
-const SYMBOL_VECTOR_SQL: &str = "SELECT s.id, v.dims, v.vector FROM graph_symbol_vectors v
-     JOIN graph_symbols s ON s.id = v.symbol_id
-     WHERE s.root_hash = ?1
-     ORDER BY s.id";
-
 pub(crate) struct VectorPool {
     dims: usize,
-    /// 连续存储：slot * dims .. (slot+1) * dims 为第 slot 条向量
-    data: Vec<f32>,
-    /// slot -> 主键（chunk_id 或 symbol_id）
+    /// 连续存储：`slot * dims .. (slot+1) * dims` 为第 slot 条向量（int8 量化值）
+    data: Vec<i8>,
+    /// slot -> 该向量的量化步长（复原 = `q * scale`）
+    scales: Vec<f32>,
+    /// slot -> 主键（chunk_id）
     ids: Vec<i64>,
-    /// slot -> 向量 L2 范数（预计算）
+    /// slot -> 向量 L2 范数（原始 f32 上预计算）
     norms: Vec<f32>,
-    slot_of: HashMap<i64, usize>,
+}
+
+/// 对称 int8 量化；`scale_out` 为步长（全零向量记 0，复原仍为全零）。
+fn quantize(vec: &[f32], scale_out: &mut f32) -> Vec<i8> {
+    let max_abs = vec.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    if max_abs <= 0.0 || !max_abs.is_finite() {
+        *scale_out = 0.0;
+        return vec![0i8; vec.len()];
+    }
+    let scale = max_abs / QUANT_RANGE;
+    *scale_out = scale;
+    vec.iter()
+        .map(|v| ((v / scale).round() as i32).clamp(-127, 127) as i8)
+        .collect()
 }
 
 impl VectorPool {
     /// 读取 chunk 向量（codebase.search 用）。
     pub(crate) fn load(conn: &Connection, root_hash: &str) -> Result<Option<Self>, CoreError> {
         Self::load_with_sql(conn, CHUNK_VECTOR_SQL, root_hash)
-    }
-
-    /// 读取符号向量（graph.symbol_semantic_search 用）。
-    pub(crate) fn load_symbols(
-        conn: &Connection,
-        root_hash: &str,
-    ) -> Result<Option<Self>, CoreError> {
-        Self::load_with_sql(conn, SYMBOL_VECTOR_SQL, root_hash)
     }
 
     fn load_with_sql(
@@ -70,7 +80,8 @@ impl VectorPool {
 
         let mut dims = 0usize;
         let mut ids: Vec<i64> = Vec::new();
-        let mut data: Vec<f32> = Vec::new();
+        let mut data: Vec<i8> = Vec::new();
+        let mut scales: Vec<f32> = Vec::new();
         let mut norms: Vec<f32> = Vec::new();
 
         while let Some(row) = rows.next().map_err(fail)? {
@@ -91,28 +102,27 @@ impl VectorPool {
             let Some(vec) = blob_to_vector(&blob, d) else {
                 continue;
             };
+            // 范数用原始 f32 算：分母保持与 SQL 路径同一口径
             let mut acc = 0.0f64;
             for v in &vec {
                 acc += (*v as f64) * (*v as f64);
             }
+            let mut scale = 0.0f32;
+            data.extend_from_slice(&quantize(&vec, &mut scale));
             ids.push(id);
-            data.extend_from_slice(&vec);
+            scales.push(scale);
             norms.push(acc.sqrt() as f32);
         }
 
         if dims == 0 || ids.is_empty() {
             return Ok(None);
         }
-        let mut slot_of = HashMap::with_capacity(ids.len());
-        for (slot, id) in ids.iter().enumerate() {
-            slot_of.insert(*id, slot);
-        }
         Ok(Some(Self {
             dims,
             data,
+            scales,
             ids,
             norms,
-            slot_of,
         }))
     }
 
@@ -128,10 +138,10 @@ impl VectorPool {
 
     /// 池占用的近似字节数，用于全局预算淘汰。
     pub(crate) fn bytes(&self) -> usize {
-        self.data.len() * std::mem::size_of::<f32>()
+        self.data.len() * std::mem::size_of::<i8>()
+            + self.scales.len() * std::mem::size_of::<f32>()
             + self.norms.len() * std::mem::size_of::<f32>()
             + self.ids.len() * std::mem::size_of::<i64>()
-            + self.slot_of.len() * 24
     }
 
     pub(crate) fn query_norm(q: &[f32]) -> f64 {
@@ -149,6 +159,7 @@ impl VectorPool {
     fn similarity_with_norm(&self, slot: usize, q: &[f32], q_norm: f64) -> f64 {
         let base = slot * self.dims;
         let v = &self.data[base..base + self.dims];
+        let scale = self.scales[slot] as f64;
         let mut dot = 0.0f64;
         for i in 0..self.dims {
             dot += (q[i] as f64) * (v[i] as f64);
@@ -157,14 +168,9 @@ impl VectorPool {
         if denom <= 1e-8 {
             0.0
         } else {
-            dot / denom
+            // int8 复原：点积累加完再一次乘回步长（每元素少一次乘法）
+            dot * scale / denom
         }
-    }
-
-    /// 单个 id 的相似度（用于给词法候选补向量分）。
-    pub(crate) fn similarity_of(&self, id: i64, q: &[f32], q_norm: f64) -> Option<f64> {
-        let slot = *self.slot_of.get(&id)?;
-        Some(self.similarity_with_norm(slot, q, q_norm))
     }
 
     /// 全量扫描，收集 (id, 相似度)，只保留超过阈值的项。
@@ -317,13 +323,12 @@ mod tests {
         assert_eq!(hits[0].0, a);
         assert!((hits[0].1 - 1.0).abs() < 1e-5);
 
-        assert!((pool.similarity_of(a, &q, qn).unwrap() - 1.0).abs() < 1e-5);
-        assert!(pool.similarity_of(b, &q, qn).unwrap().abs() < 1e-5);
+        // 正交的那条相似度为 0（被阈值滤掉，但内核算得出来）
+        assert!(pool.similarity_with_norm(1, &q, qn).abs() < 1e-5);
     }
 
     #[test]
-    fn skips_mismatched_dims_while_loading() {
-        let conn = pool_conn();
+    fn skips_mismatched_dims_while_loading() {        let conn = pool_conn();
         let a = insert_chunk(&conn, "a.rs", "alpha");
         let b = insert_chunk(&conn, "b.rs", "beta");
         insert_vector(&conn, a, &[1.0, 0.0]);
@@ -333,46 +338,6 @@ mod tests {
         assert_eq!(pool.dims(), 2);
     }
 
-    #[test]
-    fn loads_symbol_vectors_from_graph_tables() {
-        let conn = pool_conn();
-        conn.execute_batch(
-            "CREATE TABLE graph_symbols (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT, root_hash TEXT NOT NULL, rel_path TEXT NOT NULL,
-                 kind TEXT NOT NULL, name TEXT NOT NULL, qualified_name TEXT NOT NULL,
-                 start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, mtime INTEGER NOT NULL);
-             CREATE TABLE graph_symbol_vectors (
-                 symbol_id INTEGER PRIMARY KEY, dims INTEGER NOT NULL, vector BLOB NOT NULL,
-                 symbol_mtime INTEGER NOT NULL);",
-        )
-        .unwrap();
-        for (name, vec) in [
-            ("alpha", [1.0f32, 0.0]),
-            ("beta", [0.0f32, 1.0]),
-        ] {
-            conn.execute(
-                "INSERT INTO graph_symbols (root_hash, rel_path, kind, name, qualified_name,
-                                            start_line, end_line, mtime)
-                 VALUES ('rh', 'a.rs', 'function', ?1, ?1, 1, 2, 0)",
-                params![name],
-            )
-            .unwrap();
-            let id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO graph_symbol_vectors (symbol_id, dims, vector, symbol_mtime)
-                 VALUES (?1, 2, ?2, 0)",
-                params![id, crate::embedding::vector_to_blob(&vec)],
-            )
-            .unwrap();
-        }
-        let pool = VectorPool::load_symbols(&conn, "rh").unwrap().expect("pool");
-        assert_eq!(pool.len(), 2);
-        let q = [1.0f32, 0.0];
-        let qn = VectorPool::query_norm(&q);
-        let mut hits = Vec::new();
-        pool.scan_into(&q, qn, &mut hits);
-        assert_eq!(hits.len(), 1);
-    }
 
     #[test]
     fn cache_is_lru_and_evictable() {
@@ -392,5 +357,68 @@ mod tests {
         cache.insert("rh", Arc::clone(&pool));
         cache.insert("rh", pool);
         assert!(cache.contains("rh"));
+    }
+
+    /// int8 量化只允许引入「远小于阈值」的误差：top-1 必须不变，分数偏差 < 1e-2。
+    #[test]
+    fn int8_quantization_preserves_top1_and_error_bound() {
+        let conn = pool_conn();
+        let dims = 128usize;
+        let q: Vec<f32> = (0..dims).map(|i| ((i * 37 % 11) as f32) - 5.0).collect();
+        let qn = VectorPool::query_norm(&q);
+
+        let mut exact: Vec<(i64, f64)> = Vec::new();
+        for k in 0..8 {
+            // 与 query 同向但幅度、噪声各不同：相似度全部为正且互相拉开，
+            // 这样「量化后 top-1 是否还一样」才是有意义的断言。
+            let v: Vec<f32> = (0..dims)
+                .map(|i| {
+                    let noise = (((i + k * 13) * 29 % 17) as f32) - 8.0;
+                    q[i] * (0.4 + 0.1 * k as f32) + noise * 0.3
+                })
+                .collect();
+            let id = insert_chunk(&conn, &format!("f{k}.rs"), "x");
+            insert_vector(&conn, id, &v);
+            let vn = VectorPool::query_norm(&v);
+            let dot: f64 = q
+                .iter()
+                .zip(&v)
+                .map(|(a, b)| (*a as f64) * (*b as f64))
+                .sum();
+            exact.push((id, dot / (qn * vn)));
+        }
+
+        let pool = VectorPool::load(&conn, "rh").unwrap().unwrap();
+        let mut hits = Vec::new();
+        pool.scan_into(&q, qn, &mut hits);
+
+        let best = |rows: &[(i64, f64)]| -> i64 {
+            rows.iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .map(|(id, _)| *id)
+                .unwrap()
+        };
+        let pool_rows: Vec<(i64, f64)> = hits.iter().map(|(id, s)| (*id, *s as f64)).collect();
+        assert_eq!(
+            best(&pool_rows),
+            best(&exact),
+            "int8 量化不应改变 top-1 命中"
+        );
+
+        for (id, expect) in &exact {
+            if let Some((_, got)) = hits.iter().find(|(hid, _)| hid == id) {
+                assert!(
+                    (*got as f64 - expect).abs() < 1e-2,
+                    "id={id} 精确={expect} 量化后={got}"
+                );
+            }
+        }
+        // 量化后每向量只占 1 字节（外加一个 f32 步长）
+        let per_vector = pool.bytes() / pool.len();
+        assert!(
+            per_vector < dims * 2,
+            "int8 量化后每向量应远小于 f32（{per_vector} vs {}）",
+            dims * 4
+        );
     }
 }
