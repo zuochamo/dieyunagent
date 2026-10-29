@@ -102,7 +102,9 @@ function printHelp() {
   --skip-build          跳过编译，仅下载已有产物
 
 也可复制 dieyun-linux-build.example.json 为 dieyun-linux-build.local.json 填写默认值。
-若编译机 glibc 新于 Ubuntu 22.04（2.35），会自动用 cargo-zigbuild 链接到 DIEYUN_LINUX_GLIBC_TARGET（默认 2.35）。
+编译机 glibc 高于目标时自动改用 cargo-zigbuild 链接到 DIEYUN_LINUX_GLIBC_TARGET（默认 2.17，
+= Rust std 的下限，也是 manylinux2014 口径）。**编译机的 glibc 有多新都无所谓**，产物要求哪个
+版本由这个目标决定，打包时 assertCoreGlibcTarget() 会核对。
 
 认证: 推荐配置 SSH 公钥；密码登录请在配置里设 "interactive": true 或加 --interactive。
 `);
@@ -282,8 +284,9 @@ function shellQuote(value) {
 }
 
 function glibcTarget() {
-  const v = String(process.env.DIEYUN_LINUX_GLIBC_TARGET || '2.35').trim();
-  return /^\d+\.\d+$/.test(v) ? v : '2.35';
+  const fallback = require('./pack-dieyun-core-linux-lib.cjs').CORE_GLIBC_TARGET;
+  const v = String(process.env.DIEYUN_LINUX_GLIBC_TARGET || fallback).trim();
+  return /^\d+\.\d+$/.test(v) ? v : fallback;
 }
 
 function remoteBuild(opts) {
