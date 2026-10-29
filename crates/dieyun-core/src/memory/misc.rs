@@ -79,10 +79,19 @@ impl MemoryStore {
                     )
                     .optional()?;
                 if let Some(content) = preview {
+                    // 撤回一轮后按新的首条用户消息重算**启发式**标题；
+                    // 已有明确作者的标题（ai / user）保持不变 —— 撤回不是改标题的入口。
                     if let Some(title) = title_from_user_content(&content) {
                         conn.execute(
-                            "UPDATE sessions SET title = ?1 WHERE id = ?2",
-                            params![title, sid],
+                            "UPDATE sessions SET title = ?1, title_source = ?2
+                             WHERE id = ?3
+                               AND (title_source IS NULL OR title_source = ?4)",
+                            params![
+                                title,
+                                super::TITLE_SOURCE_HEURISTIC,
+                                sid,
+                                super::TITLE_SOURCE_HEURISTIC
+                            ],
                         )?;
                     }
                 }
@@ -91,6 +100,47 @@ impl MemoryStore {
         })?;
 
         Ok(json!({ "ok": true, "deleted": deleted, "messageId": ids }))
+    }
+
+    /// 账本自愈（**唯一**实现，幂等）：孤儿项目 scope + 悬空归纳作业。
+    ///
+    /// 这两条都是「进程没跑完就没人结账」的遗留数据，不修就会一直骗人：
+    ///
+    /// 1. `scope = 'project'`（字面量）是旧版本按路径算 scope 失败时的产物：
+    ///    召回永远算不出这个 scope，于是这些记忆既不能被注入也不会衰减（看着是 active，
+    ///    实际是黑洞）。归档而不是删除：内容仍可恢复，`status` 也终于说实话。
+    /// 2. `pending` 归纳作业：作业账本只由 Main 的归纳器结账，进程退出就没人管。
+    ///    超过阈值的 pending 一律判 failed（不是「正在跑」，是「已经死了」）。
+    ///    阈值取 30 分钟：真实归纳单次是秒到分钟级，超过阈值的 pending 不可能是活的。
+    pub fn reconcile_memory_ledger(&self, now: i64) -> Result<Value, CoreError> {
+        let stale_job_before = now - super::STALE_CONSOLIDATION_JOB_MS;
+        // 先把能认领的历史 scope 重挂到 project:<id>，再清真正认领不了的孤儿
+        // （顺序不能反：先归档就会把可认领的行一起埋掉）。
+        let rewritten = self
+            .migrate_legacy_project_scopes()
+            .map(|v| v.get("rewritten").and_then(|n| n.as_i64()).unwrap_or(0))
+            .unwrap_or(0);
+        self.with_conn(|conn| {
+            let orphan_scopes = conn.execute(
+                "UPDATE long_memories
+                 SET status = 'archived', updated_at = ?1
+                 WHERE scope = 'project' AND status != 'archived'",
+                params![now],
+            )?;
+            let stale_jobs = conn.execute(
+                "UPDATE memory_consolidation_jobs
+                 SET status = 'failed', finished_at = ?1,
+                     error = COALESCE(error, '进程退出后未结账（启动自愈）')
+                 WHERE status = 'pending' AND COALESCE(started_at, 0) < ?2",
+                params![now, stale_job_before],
+            )?;
+            Ok(json!({
+                "ok": true,
+                "orphanScopes": orphan_scopes,
+                "staleJobs": stale_jobs,
+                "rescopedMemories": rewritten
+            }))
+        })
     }
 
     pub fn create_consolidation_job(

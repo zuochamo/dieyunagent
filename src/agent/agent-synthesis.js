@@ -265,5 +265,6 @@ module.exports = {
   applyTurnEndSynthesis,
   buildAgentSynthesisBody,
   buildTraceFactsDigest,
+  extractLastUserMessageText,
   upsertSynthesisTraceRound
 };
