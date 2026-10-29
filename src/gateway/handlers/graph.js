@@ -6,22 +6,42 @@ function createGraphHandlers(d) {
     invokeIndexCore,
     startGraphIndexForContext,
     scheduleGraphLspEnrich,
-    getActiveEmbeddingConfig,
     assertGraphIndexReady,
     runGraphLspEnrich,
     resolveGraphSymbolCallersAndIngest
   } = d;
+
+  /**
+   * 调用图按需建（R5）：结构索引（符号 + import + mtime）常建，调用边只在第一次
+   * 真正用到调用关系时补建一次。返回 true = 本次刚发起构建，调用方应提示稍后再试。
+   */
+  async function ensureCallGraph(ctxInfo, st, autoIndex) {
+    if (autoIndex === false) return false;
+    if (!st || !st.indexed) return false;
+    if (Number(st.callCount) > 0) return false;
+    await startGraphIndexForContext(ctxInfo, { force: false, skipIfReady: false, calls: true });
+    return true;
+  }
+
+  function callGraphBuildingError() {
+    const e = new Error('调用图正在按需构建（第一次查调用关系要建一次），请稍后再试');
+    e.code = 'GRAPH_INDEXING_IN_PROGRESS';
+    return e;
+  }
+
   return {
     'graph.status': async ({ workspaceRoot }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
       return invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
     },
 
-    'graph.index.start': async ({ workspaceRoot, force, skipIfReady }) => {
+    'graph.index.start': async ({ workspaceRoot, force, skipIfReady, calls }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
       const r = await startGraphIndexForContext(ctxInfo, {
         force: force === undefined ? true : !!force,
-        skipIfReady: skipIfReady === undefined ? true : !!skipIfReady
+        skipIfReady: skipIfReady === undefined ? true : !!skipIfReady,
+        // 调用图按需（R5）
+        calls: !!calls
       });
       const { job, ...rest } = r || {};
       void job;
@@ -31,14 +51,14 @@ function createGraphHandlers(d) {
       return { ok: true, ...rest };
     },
 
-    'graph.index': async ({ workspaceRoot, force, embedSymbols }) => {
+    'graph.index': async ({ workspaceRoot, force, calls }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
       const st = await invokeIndexCore(
         ctxInfo,
         'graph.index',
         {
           force: force !== false,
-          embedSymbols: embedSymbols !== false
+          calls: !!calls
         },
         600000
       );
@@ -48,56 +68,9 @@ function createGraphHandlers(d) {
       return st;
     },
 
-    'graph.embed_symbols': async ({ workspaceRoot, force }) => {
-      const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const embedding = getActiveEmbeddingConfig();
-      if (!embedding || embedding.disabled || !embedding.model) {
-        const e = new Error('未配置 Embedding 模型，无法构建符号向量');
-        e.code = 'EMBEDDING_DISABLED';
-        throw e;
-      }
-      if (ctxInfo.kind === 'remote') {
-        const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
-        assertGraphIndexReady(st, {});
-      }
-      return invokeIndexCore(
-        ctxInfo,
-        'graph.embed_symbols',
-        { force: force === true },
-        600000
-      );
-    },
-
-    'graph.symbol_semantic_search': async ({
-      workspaceRoot,
-      query,
-      kind,
-      limit,
-      autoIndex,
-      autoEmbed
-    }) => {
-      const q = String(query || '').trim();
-      if (!q) {
-        const e = new Error('query 必填');
-        e.code = 'INVALID_QUERY';
-        throw e;
-      }
-      const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
-      if (autoIndex !== false) {
-        assertGraphIndexReady(st, {});
-      }
-      return invokeIndexCore(ctxInfo, 'graph.symbol_semantic_search', {
-        query: q,
-        kind,
-        limit,
-        autoEmbed: autoEmbed !== false
-      });
-    },
-
     'graph.module_deps': async ({ workspaceRoot, path, depth, autoIndex }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
+      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
       if (autoIndex !== false) {
         assertGraphIndexReady(st, { requireEdges: true });
       }
@@ -109,7 +82,7 @@ function createGraphHandlers(d) {
 
     'graph.repo_map': async ({ workspaceRoot, limit }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
+      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
       if (!st || !st.indexed) {
         return {
           ok: true,
@@ -158,7 +131,7 @@ function createGraphHandlers(d) {
         throw e;
       }
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
+      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
       if (autoIndex !== false) {
         assertGraphIndexReady(st, {});
       }
@@ -171,7 +144,8 @@ function createGraphHandlers(d) {
 
     'graph.callers': async ({ workspaceRoot, path, name, symbolId, autoIndex }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
+      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
+      if (await ensureCallGraph(ctxInfo, st, autoIndex)) throw callGraphBuildingError();
       if (autoIndex !== false) {
         assertGraphIndexReady(st, { requireCalls: true });
       }
@@ -184,7 +158,8 @@ function createGraphHandlers(d) {
 
     'graph.callees': async ({ workspaceRoot, path, name, symbolId, autoIndex }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
+      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
+      if (await ensureCallGraph(ctxInfo, st, autoIndex)) throw callGraphBuildingError();
       if (autoIndex !== false) {
         assertGraphIndexReady(st, { requireCalls: true });
       }
@@ -203,7 +178,7 @@ function createGraphHandlers(d) {
         throw e;
       }
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
+      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
       if (autoIndex !== false) {
         assertGraphIndexReady(st, {});
       }
@@ -228,7 +203,8 @@ function createGraphHandlers(d) {
         throw e;
       }
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
+      const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
+      if (await ensureCallGraph(ctxInfo, st, true)) throw callGraphBuildingError();
       assertGraphIndexReady(st, { requireCalls: true });
       const searchQuery = symName || 'symbol';
       const search = await invokeIndexCore(ctxInfo, 'graph.symbol_search', {

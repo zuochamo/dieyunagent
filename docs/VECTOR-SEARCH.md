@@ -8,11 +8,25 @@
 
 | 路径 | 向量来源 | 存储形态 | 扫描实现 |
 |------|----------|----------|----------|
-| `codebase.search` 词法之外的语义通道 | `chunk_vectors`（建库时批量写入） | **常驻内存 `VectorPool`**（int8 + 每向量 f32 步长） | `VectorPool::scan_into` 全量余弦 |
+| `codebase.search` 词法之外的语义通道 | `chunk_vectors`（**只在本次建库显式要向量时**写入，`vectors: true`） | **常驻内存 `VectorPool`**（int8 + 每向量 f32 步长） | `VectorPool::scan_into` 全量余弦 |
 | 记忆语义召回（`memory.long_recall` 第一级） | `long_memory_vectors` | 每次查询从 SQLite 读 BLOB、反序列化 | Rust 内全量余弦（f32，量远小于代码块） |
 | 远端索引（SSH / WSL） | 远端库 | 远端进程内同样走 `VectorPool` | 同上 |
 
 三者共用同一套「余弦 + 阈值」口径（`MIN_SIMILARITY = 0.05`），没有第二套打分公式。
+
+> 代码索引的**词法通道**现在只有一条：子串 `LIKE`（按命中词数排序）。trigram FTS 已于 `SCHEMA_VERSION 4` 删除（体积/使用率判据见 `docs/INDEX-VALUE-REVIEW.md` R2）；`memory` 的 `long_memories_fts` 仍用 trigram，两者互不影响。
+
+### 1.1 向量的生命周期（谁建、谁删、什么时候失效）
+
+`vectors` 是**请求参数**，描述「本次建库要不要顺手写向量」，不是工作区的持久开关。据此有三条硬规则：
+
+1. **只有显式 `vectors: true` 才写向量**：面板「建向量」（增量补齐）、CLI `--vectors`、显式传参的 RPC 调用方，以及**已经建过向量的工作区的保存增量**（`codebase-incremental-scheduler` 仅在 `vectorCount > 0` 时才跑，带 `vectors: true` 沿用同一意图 —— 它按文件删旧 chunk 会连向量一起删，不跟着补就等于让覆盖率单向下滑；`embeddingEnabled === false` 时退回不带向量，避免每次保存都撞 `EMBEDDING_NOT_CONFIGURED`）。`@Codebase` 与 prep 首次建库**不**带向量（见 `INDEX-VALUE-REVIEW.md` §8 的取舍）。
+2. **`vectors: false` 不删已有向量**（`INDEX-VALUE-REVIEW.md` R3 补丁）：删过一次就会「用户建了几分钟的向量，一次重建片段/一次保存全没了」，语义通道无声消失。清空只发生在两种地方 —— `force` 全量重建（chunk id 全换）与 embedding 签名变更（维度不兼容）。
+3. **元数据描述真实存在的向量**：`workspace.vector_count` 查库实数，`embedding_model/dims` 在「本次没建但库里还有」时沿用旧签名。`codebase.search` 只有在「端点可用 **且** `vector_count > 0` **且** 签名与当前设置一致」时才挂向量通道，否则静默走子串（`vectorSearch: false`，面板会显示原因）。
+
+覆盖度是**可观测**的：`vectorCount < chunkCount` 说明增量改过的文件只有 chunk 没向量（那部分只能靠子串召回），面板「向量一致性」会显示「仅覆盖 N/M 段」，点「建向量」补齐（`load_chunks_missing_vectors` 只补缺的，不重算全部）。
+
+请求 `vectors: true` 但端点没配（`model` / `base_url` 为空或被禁用）时，RPC 返回 `EMBEDDING_NOT_CONFIGURED`，不会静默降级成「只建片段」。
 
 ## 2. `VectorPool` 的三个硬边界
 

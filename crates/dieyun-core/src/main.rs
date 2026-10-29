@@ -29,6 +29,9 @@ enum Commands {
         workspace: PathBuf,
         #[arg(long, default_value_t = true)]
         force: bool,
+        /// 同时生成向量（显式 opt-in；默认只建 chunk，子串检索即可用）
+        #[arg(long, default_value_t = false)]
+        vectors: bool,
     },
     /// Search indexed workspace
     Search {
@@ -58,7 +61,6 @@ async fn main() -> anyhow::Result<()> {
                         workspace_roots: vec![ws.to_string_lossy().into_owned()],
                         embedding: Default::default(),
                         llm: Default::default(),
-                        models_dirs: Default::default(),
                         ..Default::default()
                     })
                     .ok();
@@ -66,14 +68,17 @@ async fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&config.data_dir)?;
             serve_stdio(new_state(config)).await
         }
-        Commands::Index { workspace, force } => {
+        Commands::Index {
+            workspace,
+            force,
+            vectors,
+        } => {
             config
                 .apply_configure(&dieyun_core::config::ConfigureParams {
                     data_dir: None,
                     workspace_roots: vec![workspace.to_string_lossy().into_owned()],
                     embedding: Default::default(),
                     llm: Default::default(),
-                    models_dirs: Default::default(),
                     ..Default::default()
                 })
                 .ok();
@@ -81,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
             let db = dieyun_core::codebase_db::handle(config.codebase_db_path());
             let svc = IndexService::from_config(&config, db);
             let st = svc
-                .index_workspace(&workspace.to_string_lossy(), force)
+                .index_workspace(&workspace.to_string_lossy(), force, vectors)
                 .await?;
             println!("{}", serde_json::to_string_pretty(&st)?);
             Ok(())
@@ -97,7 +102,6 @@ async fn main() -> anyhow::Result<()> {
                     workspace_roots: vec![workspace.to_string_lossy().into_owned()],
                     embedding: Default::default(),
                     llm: Default::default(),
-                    models_dirs: Default::default(),
                     ..Default::default()
                 })
                 .ok();

@@ -163,16 +163,21 @@ async function runPrepKnowledge() {
       hasActiveRun: false
     },
     {
-      invokeRpc: async (method) => {
+      invokeRpc: async (method, params) => {
         calls.push(method);
         if (method === 'fs.read_file') {
+          // 项目记忆的唯一真相是 <workspace>/.dieyun/memory.md（注入只读文件）
+          const fp = String((params && params.filePath) || '');
+          if (fp.endsWith('memory.md')) {
+            return { data: '# 项目记忆\n\n- 登录用 JWT\n', encoding: 'utf8' };
+          }
           return { data: '', encoding: 'utf8' };
         }
         if (method === 'graph.repo_map' || method === 'graph.lsp_enrich') {
           throw new Error(`${method} should not run in this case`);
         }
         if (method === 'memory.project_recall') {
-          return { mode: 'keyword', results: [{ id: 7, kind: 'normal', score: 0.5, content: '登录用 JWT' }] };
+          throw new Error('项目记忆不再走 DB 召回');
         }
         if (method === 'memory.long_recall') {
           return { mode: 'keyword', results: [{ id: 3, kind: 'normal', score: 0.4, content: '用户偏好中文' }] };
@@ -228,7 +233,18 @@ async function runPrepKnowledge() {
   assert(!packed.turnRide.includes('用 HTTP 查天气'), 'skill body not injected');
   assert(packed.stable.includes('【MCP · 1 个服务已启用】Filesystem'), 'compact MCP on Main stable');
   assert(!calls.includes('graph.repo_map'), 'did not fetch graph');
-  assert(calls.includes('memory.project_recall'), 'fetched project memory');
+  assert(packed.turnRide.includes('登录用 JWT'), 'project memory injected from .dieyun/memory.md');
+  // 注入事实：哪几条记忆真的进了 system prompt（方案2 的 UI / 快照依据）
+  assert(packed.memoryAudit, 'memoryAudit returned with the pack');
+  // 文件条目没有数据库 id：审计记来源与条数（「本轮注入了哪些项目记忆」仍可回答）
+  assert(packed.memoryAudit.project.mode === 'file', 'memoryAudit records file-based project memory');
+  assert(packed.memoryAudit.project.entries === 1, 'memoryAudit records project entry count');
+  assert(JSON.stringify(packed.memoryAudit.project.ids) === '[]', 'file entries carry no db ids');
+  assert(
+    JSON.stringify(packed.memoryAudit.global && packed.memoryAudit.global.ids) === '[3]',
+    'memoryAudit records global ids'
+  );
+  assert(packed.memoryAudit.workMemory && 'runId' in packed.memoryAudit.workMemory, 'work memory audit');
 }
 
 async function runPrepGraph() {
@@ -266,6 +282,63 @@ async function runPrepGraph() {
   );
   assert(packed.turnRide.includes('【仓库结构】') || packed.turnRide.includes('src/login.js'), 'graph on injectCode');
   assert(calls.includes('graph.repo_map'), 'fetched graph with injectCode');
+}
+
+/**
+ * R1：结构索引骨架（repo_map）是这套索引里**唯一**「便宜且高频有用」的部分，
+ * 因此它必须满足两条不变量：
+ *  1. 不要求用户先点名文件（injectCode=false 也要注入）——这正是旧管线 0 注入的根因；
+ *  2. 字符预算由 agent-limits 的 graphRepoMapMaxChars 兜住，绝不无限膨胀。
+ */
+async function runRepoMapInjection() {
+  const calls = [];
+  const { AGENT_LIMITS_DEFAULTS } = require('../src/agent/agent-limits.js');
+  const maxChars = AGENT_LIMITS_DEFAULTS.graphRepoMapMaxChars;
+  const huge = [
+    '# 仓库结构图',
+    '## 枢纽文件',
+    '- src/core/app.js（被引用 42 次）',
+    '## 关键符号',
+    '- createServer (src/core/server.js:12)',
+    '- 填充'.repeat(Math.ceil(maxChars)) // 刻意超长，验证预算
+  ].join('\n');
+  const packed = await prepSystemPrompt(
+    {
+      userQuery: '这个项目的服务端入口在哪',
+      graphIndexOk: true,
+      skipFastIndex: false,
+      injectCode: false,
+      allowCodebase: true,
+      workspaceInfo: { workspacePath: 'D:/proj', kind: 'local' },
+      openFilePaths: []
+    },
+    {
+      invokeRpc: async (method) => {
+        calls.push(method);
+        if (method === 'fs.read_file') return { data: '', encoding: 'utf8' };
+        if (method === 'graph.repo_map') return { indexed: true, markdown: huge };
+        if (method === 'graph.lsp_enrich') return { ok: true };
+        if (method === 'workspace.git_diff') return { ok: false };
+        if (method === 'memory.project_recall' || method === 'memory.long_recall') {
+          return { mode: 'none', results: [] };
+        }
+        if (method === 'memory.compaction_recent' || method === 'agent.state_get') {
+          return method === 'agent.state_get' ? null : [];
+        }
+        throw new Error('unexpected ' + method);
+      },
+      getPermissions: () => ({}),
+      getAgentHome: () => ({})
+    }
+  );
+  assert(calls.includes('graph.repo_map'), '没有 injectCode 也要取 repo_map');
+  assert(packed.turnRide.includes('枢纽文件'), '骨架必须带枢纽文件');
+  assert(packed.turnRide.includes('关键符号'), '骨架必须带关键符号');
+  assert(
+    packed.turnRide.length < maxChars * 3,
+    `repo_map 必须被 ${maxChars} 字符预算截断，实际 ${packed.turnRide.length}`
+  );
+  assert(packed.turnRide.includes('…'), '超长骨架要留截断标记');
 }
 
 async function runPrepSkipAutoGraph() {
@@ -344,6 +417,7 @@ async function runPrepMcpFull() {
 runPrep()
   .then(() => runPrepKnowledge())
   .then(() => runPrepGraph())
+  .then(() => runRepoMapInjection())
   .then(() => runPrepSkipAutoGraph())
   .then(() => runPrepMcpFull())
   .then(() => {

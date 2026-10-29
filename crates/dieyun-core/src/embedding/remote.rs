@@ -79,11 +79,12 @@ pub async fn embed_remote(
         .await
         .map_err(|e| CoreError::rpc("EMBEDDING_HTTP", e.to_string()))?;
 
+    // 错误体可能是任意 UTF-8（反代的 502 页面、中文报错）：按**字符**截断。
+    // 按字节切会在多字节字符中间切断，直接 panic（`&raw[..200]` 曾如此）。
+    let body_preview: String = raw.chars().take(200).collect();
+
     let json: Value = serde_json::from_str(&raw).map_err(|e| {
-        CoreError::rpc(
-            "EMBEDDING_PARSE",
-            format!("{e}; body={}", &raw[..raw.len().min(200)]),
-        )
+        CoreError::rpc("EMBEDDING_PARSE", format!("{e}; body={body_preview}"))
     })?;
 
     if !status.is_success() || json.get("error").is_some() {
@@ -91,7 +92,7 @@ pub async fn embed_remote(
             .pointer("/error/message")
             .and_then(|v| v.as_str())
             .or_else(|| json.get("message").and_then(|v| v.as_str()))
-            .unwrap_or(&raw);
+            .unwrap_or(&body_preview);
         return Err(CoreError::rpc("EMBEDDING_API", msg.to_string()));
     }
 

@@ -24,6 +24,11 @@ const {
   NEAR_LIMIT_CHARS
 } = require('../agents-md');
 const { describeAgentHome } = require('../agent-home');
+const {
+  PROJECT_MEMORY_REL_PATH,
+  formatProjectMemoryBlock,
+  parseProjectMemoryEntries
+} = require('./project-memory-file');
 
 /**
  * 注入块的兜底上限。唯一来源是 `agent-limits.js`，这里只映射不重复字面量 ——
@@ -41,10 +46,8 @@ const DEFAULT_LIMITS = {
   AGENTS_MD_MAX: AGENT_LIMITS_DEFAULTS.agentsMdMaxChars,
   GRAPH_REPO_MAP_LIMIT: AGENT_LIMITS_DEFAULTS.graphRepoMapLimit,
   GRAPH_REPO_MAP_MAX_CHARS: AGENT_LIMITS_DEFAULTS.graphRepoMapMaxChars,
-  PROJECT_MEMORY_LIMIT: AGENT_LIMITS_DEFAULTS.projectMemoryLimit,
+  PROJECT_MEMORY_FILE_MAX_CHARS: AGENT_LIMITS_DEFAULTS.projectMemoryFileMaxChars,
   GLOBAL_MEMORY_LIMIT: AGENT_LIMITS_DEFAULTS.globalMemoryLimit,
-  SKILL_BODY_MAX: AGENT_LIMITS_DEFAULTS.skillBodyMax,
-  SKILL_FULL_COUNT: AGENT_LIMITS_DEFAULTS.skillFullCount,
   SKILL_TOTAL_COUNT: AGENT_LIMITS_DEFAULTS.skillTotalCount
 };
 
@@ -296,7 +299,7 @@ async function fetchCodebaseBlock(snapshot, invokeRpc, lim) {
   try {
     const data = await withTimeout(
       invokeRpc('codebase.search', {
-        ...rpcScope(snapshot, { query, limit, autoIndex: false })
+        ...rpcScope(snapshot, { query, limit })
       }),
       15000,
       'codebase.search'
@@ -419,7 +422,10 @@ async function fetchAgentsMdBlock(snapshot, invokeRpc, userDataPath) {
 }
 
 async function fetchGraphRepoMapBlock(snapshot, invokeRpc, lim) {
-  if (!snapshot.injectCode) return '';
+  // 仓库结构骨架是「这一类项目长什么样」，与用户是否点名了文件无关：
+  // 只要这轮要碰代码库（`allowCodebase`）且结构索引就绪，就注入。
+  // 曾经这里要求 `injectCode`，导致结构索引在真实会话里 0 次进上下文。
+  if (!snapshot.injectCode && !snapshot.allowCodebase) return '';
   const root =
     (snapshot.workspaceInfo && snapshot.workspaceInfo.workspacePath) || snapshot.runWorkspaceRoot;
   if (!root || snapshot.skipAuto || snapshot.skipFastIndex || !snapshot.graphIndexOk) return '';
@@ -462,6 +468,19 @@ function kickGraphLspEnrich(snapshot, invokeRpc) {
   void invokeRpc('graph.lsp_enrich', { workspaceRoot: root, limit: 16 }).catch(() => {});
 }
 
+/**
+ * 哪些长期记忆可以自动进 system prompt。
+ *
+ * `secret` / `private`（归纳器允许写、Rust 落库时标 kind）**不进自动注入**：
+ * 自动注入等于每轮把密钥/隐私再发给模型一次，而记忆一旦被召回就再无「按需」可言。
+ * 它们仍然留在库里（设置页可见、可手动删），归纳器语料里也会带上，避免被重复写入。
+ * @param {{kind?: string}} row
+ */
+function isInjectableMemoryRow(row) {
+  const kind = String((row && row.kind) || '').toLowerCase();
+  return kind !== 'secret' && kind !== 'private';
+}
+
 function formatMemoryLines(rows, maxLen) {
   return (rows || [])
     .slice(0, 20)
@@ -474,41 +493,72 @@ function formatMemoryLines(rows, maxLen) {
     .filter(Boolean);
 }
 
-async function fetchProjectMemoryBlock(snapshot, invokeRpc, lim) {
+/**
+ * 「本轮到底注入了哪几条记忆」——Main 是唯一知道的人。
+ *
+ * 召回发生在 `prepSystemPrompt`，结果只以文本形式进了 system；如果不在这里留一份
+ * 结构化事实，事后（上下文面板 / request_snapshots）只能看到「有一块【项目记忆】」，
+ * 回答不了「为什么模型没记住 X」。所以每个记忆块把自己写进了 audit。
+ *
+ * @typedef {{mode?: string, ids?: number[], excluded?: number, scope?: string}} MemoryBlockAudit
+ * @typedef {{project?: MemoryBlockAudit, global?: MemoryBlockAudit, handoff?: {from: string},
+ *            workMemory?: {runId?: string}}} MemoryInjectionAudit
+ */
+
+/**
+ * @param {MemoryInjectionAudit | null | undefined} audit
+ * @param {string} key
+ * @param {MemoryBlockAudit & {from?: string, runId?: string}} data
+ */
+function recordMemoryAudit(audit, key, data) {
+  if (!audit || !data) return;
+  audit[key] = data;
+}
+
+/**
+ * 【项目记忆】注入块 —— **只读文件** `<workspace>/.dieyun/memory.md`。
+ *
+ * 为什么不在这里查 SQLite：项目记忆的唯一真相是文件（人可读、可手改、可提交、跟着仓库走），
+ * 库里 1500+ 行项目记忆没人看得见也没人改得动，而每轮注入只给 8 条 —— 写了等于没写。
+ * 旧数据不再走注入路径，需要时由 memory_recall（DB 语义召回）按需取。
+ */
+async function fetchProjectMemoryBlock(snapshot, invokeRpc, lim, audit) {
   const root =
     (snapshot.workspaceInfo && snapshot.workspaceInfo.workspacePath) || snapshot.runWorkspaceRoot;
   if (!root) return '';
+  let raw = '';
   try {
-    const recall = await withTimeout(
-      invokeRpc(
-        'memory.project_recall',
-        rpcScope(snapshot, {
-          workspacePath: root,
-          query: String(snapshot.userQuery || '').trim(),
-          limit: lim.PROJECT_MEMORY_LIMIT
-        })
-      ),
-      10000,
-      'memory.project_recall'
+    const r = await withTimeout(
+      invokeRpc('fs.read_file', rpcScope(snapshot, { filePath: PROJECT_MEMORY_REL_PATH, maxBytes: 96000 })),
+      8000,
+      'fs.read_file(memory.md)'
     );
-    const rows = recall && Array.isArray(recall.results) ? recall.results : [];
-    const minScore = recall && recall.mode === 'semantic' ? 0.32 : recall && recall.mode === 'keyword' ? 0.12 : 0;
-    const filtered = minScore > 0 ? rows.filter((r) => (Number(r.score) || 0) >= minScore) : rows;
-    if (!filtered.length) return '';
-    const modeLabel =
-      recall.mode === 'semantic' ? '语义' : recall.mode === 'keyword' ? '关键词' : '最近';
-    return (
-      `【项目记忆 · ${modeLabel} · 跨会话/历史沉淀，非本轮对话记录】\n` +
-      `绑定工作空间：${root}\n` +
-      `与当前任务相关时优先遵守；与用户最新输入或【本会话近期对话】冲突时以会话对话为准。\n` +
-      `${formatMemoryLines(filtered, 420).join('\n')}`
-    );
+    raw = r && r.encoding === 'base64' ? '' : String((r && r.data) || '');
   } catch {
+    raw = '';
+  }
+  if (!String(raw).trim()) {
+    recordMemoryAudit(audit, 'project', { mode: 'file', ids: [] });
     return '';
   }
+  const block = formatProjectMemoryBlock(raw, {
+    maxChars: lim.PROJECT_MEMORY_FILE_MAX_CHARS,
+    workspacePath: root
+  });
+  if (!block) {
+    recordMemoryAudit(audit, 'project', { mode: 'file', ids: [] });
+    return '';
+  }
+  // 文件条目没有数据库 id：审计只记条数与来源，便于回答「本轮注入了哪些项目记忆」
+  recordMemoryAudit(audit, 'project', {
+    mode: 'file',
+    ids: [],
+    entries: parseProjectMemoryEntries(raw).length
+  });
+  return block;
 }
 
-async function fetchGlobalMemoryBlock(snapshot, invokeRpc, lim) {
+async function fetchGlobalMemoryBlock(snapshot, invokeRpc, lim, audit) {
   try {
     const q = String(snapshot.userQuery || '').trim();
     const recall = q
@@ -534,8 +584,17 @@ async function fetchGlobalMemoryBlock(snapshot, invokeRpc, lim) {
         };
     const rows = recall && Array.isArray(recall.results) ? recall.results : [];
     const minScore = recall && recall.mode === 'semantic' ? 0.32 : recall && recall.mode === 'keyword' ? 0.12 : 0;
-    const filtered = minScore > 0 ? rows.filter((r) => (Number(r.score) || 0) >= minScore) : rows;
-    if (!filtered.length || (recall && recall.mode === 'none')) return '';
+    const scored = minScore > 0 ? rows.filter((r) => (Number(r.score) || 0) >= minScore) : rows;
+    const filtered = scored.filter(isInjectableMemoryRow);
+    if (!filtered.length || (recall && recall.mode === 'none')) {
+      recordMemoryAudit(audit, 'global', { mode: String((recall && recall.mode) || ''), ids: [] });
+      return '';
+    }
+    recordMemoryAudit(audit, 'global', {
+      mode: String((recall && recall.mode) || ''),
+      ids: filtered.map((r) => Number(r.id)).filter((n) => Number.isFinite(n)),
+      excluded: Math.max(0, scored.length - filtered.length)
+    });
     const modeLabel =
       recall && recall.mode === 'semantic'
         ? '语义召回'
@@ -562,12 +621,13 @@ const HANDOFF_BLOCK_MAX_CHARS = 4000;
  * （发送一次即清），不做任何关键词判定（AGENTS.md 原则 3）。
  * 取回走 memory.handoff_get（按 session_id 精确取，不参与语义召回）。
  */
-async function fetchSessionHandoffBlock(snapshot, invokeRpc) {
+async function fetchSessionHandoffBlock(snapshot, invokeRpc, audit) {
   const fromId = String((snapshot && snapshot.continueFromSessionId) || '').trim();
   if (!fromId) return '';
   try {
     const handoff = await invokeRpc('memory.handoff_get', { sessionId: fromId });
     if (!handoff || !handoff.payload) return '';
+    recordMemoryAudit(audit, 'handoff', { from: fromId });
     const title = handoff.title ? ` · ${String(handoff.title).slice(0, 48)}` : '';
     const body = String(handoff.payload).slice(0, HANDOFF_BLOCK_MAX_CHARS);
     return `【上个会话交接${title}】\n${body}\n（交接来自旧会话，仅供接续参考；与当前任务冲突时以当前任务为准）`;
@@ -585,6 +645,86 @@ async function fetchCompactionBlock(snapshot, invokeRpc) {
     return formatCompactionArchiveBlock(rows);
   } catch {
     return '';
+  }
+}
+
+/** 后台任务补报：条数与长度都收紧 —— 细节让模型自己 host_proc 读，这里只负责「它结束了」。 */
+const SETTLED_JOBS_MAX = 3;
+const SETTLED_JOBS_TAIL = 900;
+
+/**
+ * 取尾部 chars 个字符，且不把代理对切成半个（半个 surrogate 进 prompt 会让
+ * 请求 JSON 里出现孤立代理项，严格的服务端会直接 400）。
+ */
+function trimTailForPrompt(text, chars) {
+  const s = String(text || '');
+  let tail = s.length > chars ? s.slice(-chars) : s;
+  if (/^[\uDC00-\uDFFF]/.test(tail)) tail = tail.slice(1);
+  return tail.trim();
+}
+
+function formatStartedAgo(startedAt, now) {
+  const start = Number(startedAt);
+  if (!Number.isFinite(start) || start <= 0) return '';
+  const mins = Math.floor((Number(now) - start) / 60000);
+  if (!Number.isFinite(mins) || mins < 1) return '刚刚';
+  if (mins < 60) return `${mins} 分钟前`;
+  return `${Math.floor(mins / 60)} 小时前`;
+}
+
+function formatSettledJobsBlock(jobs, now) {
+  const list = (Array.isArray(jobs) ? jobs : []).filter((j) => j && j.id);
+  if (!list.length) return '';
+  const lines = [
+    '【后台任务已结束】（下面这些后台/长任务已经跑完；用户很可能还不知道结果，必要时在正文里说清）'
+  ];
+  for (const job of list.slice(0, SETTLED_JOBS_MAX)) {
+    const status = job.exitCode == null ? '已结束（退出码未知）' : `已结束，exit ${job.exitCode}`;
+    const cmd = compactPlainText(String(job.command || '').trim(), 120);
+    const ago = formatStartedAgo(job.startedAt, now);
+    lines.push(`- ${job.id}（${cmd || '命令未记录'}${ago ? `，${ago}启动` : ''}）${status}`);
+    const tail = trimTailForPrompt(
+      [String(job.stdout || '').trim(), String(job.stderr || '').trim()].filter(Boolean).join('\n'),
+      SETTLED_JOBS_TAIL
+    );
+    if (tail) {
+      // 用缩进而不是 ``` 围栏：命令输出里本来就可能带围栏，会把块提前闭合、后面的输出变成散文
+      lines.push('  尾部输出：', ...tail.split('\n').map((l) => `    ${l}`));
+    }
+    lines.push(`  读完整输出用 host_proc action=output id=${job.id}。`);
+  }
+  lines.push('  它们都已经结束，不要再等或轮询；要复核全部句柄用 host_proc action=list includeFinished=true。');
+  return lines.join('\n');
+}
+
+/**
+ * 「后台任务结束」的静默补报（对齐 DSH 的 completionDelivery: 'quiet'）。
+ *
+ * 后台任务结束时**不唤醒任何一轮**（`AGENTS.md` 原则 5：不做假用户续跑），
+ * 只在下一次组 prompt 时取走一次：模型因此知道「刚才那条跑完了、结果在哪」，
+ * 用户不必回来问一句。取走即标记已投递（游标在 Gateway 侧，见
+ * `gateway/host-control.js#takeSettledReports`），同一条不会重复刷。
+ *
+ * @param {object} snapshot prep 快照
+ * @param {(method: string, params?: object) => Promise<any>} invokeRpc
+ * @returns {Promise<string>}
+ */
+async function fetchSettledJobsBlock(snapshot, invokeRpc) {
+  const sessionId = String(snapshot.sessionId || '').trim();
+  if (!sessionId) return '';
+  try {
+    const res = await withTimeout(
+      invokeRpc('host.proc_settled', {
+        sessionId,
+        tailBytes: 1200,
+        limit: SETTLED_JOBS_MAX
+      }),
+      4000,
+      'settled-jobs'
+    );
+    return formatSettledJobsBlock(res && res.jobs);
+  } catch {
+    return ''; // 补报只是上下文增益，取不到不阻塞本轮
   }
 }
 
@@ -627,7 +767,7 @@ function shouldInjectWorkMemory(state, snapshot) {
   return !!snapshot.hasActiveRun;
 }
 
-async function fetchWorkMemoryBlock(snapshot, invokeRpc) {
+async function fetchWorkMemoryBlock(snapshot, invokeRpc, audit) {
   const sid = String(snapshot.sessionId || '').trim();
   if (!sid) return '';
   try {
@@ -638,6 +778,7 @@ async function fetchWorkMemoryBlock(snapshot, invokeRpc) {
     );
     if (!shouldInjectWorkMemory(state, snapshot)) return '';
     const block = formatAgentStateBlock(state);
+    if (block) recordMemoryAudit(audit, 'workMemory', { runId: String(state.runId || '') });
     return block ? `【工作记忆模板】\n${block}` : '';
   } catch {
     return '';
@@ -668,15 +809,23 @@ async function fetchSkillsBlock(snapshot, deps, lim) {
     snapshot.enabledSkillMap && typeof snapshot.enabledSkillMap === 'object' ? snapshot.enabledSkillMap : {};
   const ids = (catalog.skills || []).filter((sk) => isSkillEnabled(enabledMap, sk.id)).map((sk) => sk.id);
   if (!ids.length) return '';
+  const budget = lim.SKILL_TOTAL_COUNT;
+  const catalogById = new Map((catalog.skills || []).map((s) => [s.id, s]));
   let selected = [];
   let recallMeta = null;
   let recallFailed = false;
-  if (typeof skills.recall === 'function' && userQuery) {
+  // 启用技能本身就不超过注入上限时，全员进索引即可，不必再打一次 embedding 换排序：
+  // 索引块只是「名称 + 路径 + 简介」，5 条一起给的噪音远小于一次多余的网络往返。
+  // 与工具侧 `candidates <= limit` 的短路同一策略。
+  const allEnabled = ids.length <= budget;
+  if (allEnabled) {
+    selected = ids.map((id) => catalogById.get(id)).filter(Boolean);
+  } else if (typeof skills.recall === 'function' && userQuery) {
     try {
       const recalled = await skills.recall({
         query: userQuery,
         enabledIds: ids,
-        limit: lim.SKILL_TOTAL_COUNT
+        limit: budget
       });
       recallMeta = recalled || null;
       selected = Array.isArray(recalled && recalled.skills) ? recalled.skills : [];
@@ -686,14 +835,11 @@ async function fetchSkillsBlock(snapshot, deps, lim) {
     }
   }
   if (!selected.length && recallFailed) {
-    selected = ids
-      .slice(0, lim.SKILL_TOTAL_COUNT)
-      .map((id) => (catalog.skills || []).find((s) => s.id === id))
-      .filter(Boolean);
+    selected = ids.map((id) => catalogById.get(id)).slice(0, budget).filter(Boolean);
   }
   if (!selected.length) return '';
   const parts = [];
-  const pick = selected.slice(0, lim.SKILL_TOTAL_COUNT);
+  const pick = selected.slice(0, budget);
   for (const item of pick) {
     const id = item.id || item;
     const fromCatalog = (catalog.skills || []).find((s) => s.id === id) || {};
@@ -713,20 +859,32 @@ async function fetchSkillsBlock(snapshot, deps, lim) {
     const dirHint = skillDir
       ? `> 技能目录：${skillDir}\n> host_exec 时 cwd 设为该目录。\n`
       : '';
+    // 市场安装的技能会与安装基线比对（skills/install-integrity.js）。变了就说变了：
+    // SKILL.md 是要被当指令执行的，模型有权知道这份是不是原版。
+    const integrityHint =
+      meta.integrity === 'changed'
+        ? `> ⚠ 该技能安装后本地内容已变更${
+            meta.installSource ? `（来源 ${meta.installSource}）` : ''
+          }：可能与市场版本不一致。\n`
+        : '';
     const desc = String(meta.description || '').trim().slice(0, 320);
     parts.push(
-      `### 技能：${meta.name || id}\n${scoreHint}> SKILL.md：${skillPath}\n${dirHint}${
+      `### 技能：${meta.name || id}\n${scoreHint}> SKILL.md：${skillPath}\n${dirHint}${integrityHint}${
         desc ? `${desc}\n` : ''
       }（索引；全文用 fs_read_file 读 SKILL.md）`
     );
   }
   if (!parts.length) return '';
-  const modeLabel =
-    recallMeta && recallMeta.mode === 'semantic'
+  // recallMeta 为 null 只有两种来源：① 已启用技能未超上限，直接全给（未召回）；
+  // ② 召回抛异常后走保底。两者含义完全不同，不能共用一句话 ——
+  // 否则「召回挂了」看起来和「本来就不需要召回」一模一样。
+  const modeLabel = allEnabled
+    ? `全部已启用 · ${pick.length} 项`
+    : recallMeta && recallMeta.mode === 'semantic'
       ? `语义召回 · ${recallMeta.embeddingModel || '向量模型'}`
       : recallMeta && recallMeta.mode === 'keyword'
         ? '关键词召回'
-        : '已启用前置';
+        : '召回失败 · 已启用降级';
   return (
     `【相关技能 · 索引 · ${modeLabel}】\n` +
     `执行前请 fs_read_file 读取 SKILL.md。\n\n${parts.join('\n\n---\n\n')}`
@@ -740,7 +898,9 @@ function formatMcpPromptBlock(servers, compactToolsPresent) {
     const names = enabled.map((s) => s.name || s.id).join('、');
     return (
       `【MCP · ${enabled.length} 个服务已启用】${names}\n` +
-      '工具已注册为 mcp_*，参数见各工具 schema。嵌套结构可再调 mcp_tool_schema。'
+      '工具已注册为 mcp_*，参数见各工具 schema。本轮只挂了与当前提问相关的一部分：' +
+      '缺工具时用 mcp_tool_schema({ query }) 在全部已启用服务里检索，返回的 agentName 可直接调用；' +
+      '嵌套字段被折叠时用 mcp_tool_schema({ agentName }) 查完整 schema。'
     );
   }
   const lines = enabled.map((server) => {
@@ -754,7 +914,8 @@ function formatMcpPromptBlock(servers, compactToolsPresent) {
   return (
     '【已启用 MCP 服务】\n' +
     lines.join('\n') +
-    '\n说明：启用后叠云会 spawn MCP 子进程并将其工具注册到 Agent（以 mcp_ 开头）；首次连接可能需下载 npm 包。'
+    '\n说明：启用后叠云会 spawn MCP 子进程并将其工具注册到 Agent（以 mcp_ 开头）；首次连接可能需下载 npm 包。' +
+    '\n工具列表里没有 mcp_* 时，用 mcp_tool_schema({ query }) 检索已启用服务的工具（可能只是本轮未召回，不是没注册）。'
   );
 }
 
@@ -783,10 +944,14 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     snapshot.injectCode != null
       ? !!snapshot.injectCode
       : shouldInjectCodeContext(userQuery, snapshot);
+  // `injectCode` 只回答「用户是不是把代码点给了我们」；`allowCodebase` 才是「要不要碰索引」。
+  // 两者曾经是同一个条件，于是没点路径的轮次连索引都不碰（947 轮 0 注入，见
+  // docs/INDEX-VALUE-REVIEW.md §R8）。这里把自动检索的放行条件并进来。
+  const autoCodebase = shouldAutoCodebaseSearch(userQuery, snapshot.workspaceInfo, snapshot.editor);
   const allowCodebase =
     snapshot.allowCodebase != null
       ? !!snapshot.allowCodebase
-      : injectCode || textHasCodebaseMention(userQuery);
+      : injectCode || autoCodebase || textHasCodebaseMention(userQuery);
   let taskTierEnabled;
   try {
     const agentLimits = deps.userDataPath ? getAgentLimits(deps.userDataPath) : getAgentLimits();
@@ -804,6 +969,9 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   };
 
   const turnHost = [];
+  // 后台任务补报排在最前：先解释「上一轮启动的那条跑完了没」，再谈代码与记忆
+  const settledJobsBlock = await fetchSettledJobsBlock(snap, invokeRpc);
+  if (settledJobsBlock) turnHost.push(settledJobsBlock);
   if (allowCodebase) {
     const codebaseBlock = await fetchCodebaseBlock(
       {
@@ -842,13 +1010,15 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
 
   kickGraphLspEnrich(snap, invokeRpc);
   const injectKnowledge = !!String(userQuery || '').trim();
+  /** @type {MemoryInjectionAudit} */
+  const memoryAudit = {};
   const knowledgeBlocks = await Promise.all([
-    fetchSessionHandoffBlock(snapshot, invokeRpc),
+    fetchSessionHandoffBlock(snapshot, invokeRpc, memoryAudit),
     fetchGraphRepoMapBlock(snap, invokeRpc, lim),
-    injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim) : Promise.resolve(''),
-    fetchGlobalMemoryBlock(snap, invokeRpc, lim),
+    injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim, memoryAudit) : Promise.resolve(''),
+    fetchGlobalMemoryBlock(snap, invokeRpc, lim, memoryAudit),
     fetchCompactionBlock(snap, invokeRpc),
-    fetchWorkMemoryBlock(snap, invokeRpc),
+    fetchWorkMemoryBlock(snap, invokeRpc, memoryAudit),
     fetchSkillsBlock(snap, deps, lim)
   ]);
   for (const block of knowledgeBlocks) {
@@ -872,7 +1042,7 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
       agentHome = null;
     }
   }
-  return assembleSystemPrompt({
+  const packed = assembleSystemPrompt({
     languagePrompt: snapshot.languagePrompt,
     userSystem: snapshot.userSystem,
     composerMode: snapshot.composerMode,
@@ -890,6 +1060,9 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     ],
     now: snapshot.now
   });
+  // 注入事实随 prompt 一起返回：Renderer 把它塞进 contextAudit → request_snapshots，
+  // 上下文面板据此显示「本轮注入了哪几条」。
+  return Object.keys(memoryAudit).length ? { ...packed, memoryAudit } : packed;
 }
 
 function resolveAgentHome(userDataPath, workspacePath) {
@@ -911,6 +1084,8 @@ module.exports = {
   fetchOpenFilesBlock,
   fetchAgentsMdBlock,
   fetchSessionHandoffBlock,
+  isInjectableMemoryRow,
+  formatSettledJobsBlock,
   prepSystemPrompt,
   resolveAgentHome
 };

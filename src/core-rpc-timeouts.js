@@ -17,13 +17,13 @@ function resolveCoreRpcTimeoutMs(method, timeoutMs) {
   if (
     m === 'codebase.index' ||
     m === 'graph.index' ||
-    m === 'graph.index_remote' ||
-    m === 'graph.embed_symbols'
+    m === 'graph.index_remote'
   ) {
     return INDEX_TIMEOUT_MS;
   }
   if (m === 'codebase.index.start' || m === 'graph.index.start') return 60000;
-  if (m === 'codebase.status' || m === 'graph.status') return 45000;
+  // status 是纯读库，健康库上应毫秒级返回；45s 只会在真卡住时把调用拖成「假死」。
+  if (m === 'codebase.status' || m === 'graph.status') return 15000;
   if (
     m === 'graph.lsp_resolve' ||
     m === 'graph.ingest_lsp_callers' ||

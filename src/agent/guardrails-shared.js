@@ -32,7 +32,6 @@ const TOOL_NAME_ALIASES = Object.freeze({
 const GRAPH_LEGACY_OPS = Object.freeze({
   graph_module_deps: 'module_deps',
   graph_find_symbol: 'find_symbol',
-  graph_semantic_find_symbol: 'semantic_find',
   graph_callers: 'callers',
   graph_callees: 'callees',
   graph_impact: 'impact',
@@ -40,7 +39,7 @@ const GRAPH_LEGACY_OPS = Object.freeze({
 });
 
 const GRAPH_OPERATIONS = Object.freeze(
-  new Set(['find_symbol', 'semantic_find', 'module_deps', 'callers', 'callees', 'impact', 'lsp_callers'])
+  new Set(['find_symbol', 'module_deps', 'callers', 'callees', 'impact', 'lsp_callers'])
 );
 
 /** 工具名归类单一来源（Main + Renderer 共用）。含 host_exec，调用方按命令内容细分。 */

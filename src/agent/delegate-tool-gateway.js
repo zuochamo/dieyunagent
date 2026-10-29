@@ -255,8 +255,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         withRunWorkspace({
           query: a.query,
           limit: a.limit,
-          workspaceRoot: a.workspaceRoot || ws || wt || undefined,
-          autoIndex: false
+          workspaceRoot: a.workspaceRoot || ws || wt || undefined
         })
       );
     case 'graph': {
@@ -282,19 +281,6 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
             limit: a.limit,
             workspaceRoot: wr,
             autoIndex: false
-          })
-        );
-      }
-      if (op === 'semantic_find') {
-        return gateway.invokeRpc(
-          'graph.symbol_semantic_search',
-          withRunWorkspace({
-            query: a.query,
-            kind: a.kind,
-            limit: a.limit,
-            workspaceRoot: wr,
-            autoIndex: false,
-            autoEmbed: true
           })
         );
       }
@@ -673,12 +659,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         const blocked = applyPatchUnsupported();
         return { error: blocked.error, errorCode: blocked.errorCode, suggestedFix: blocked.suggestedFix };
       }
-      if (name.startsWith('plugin_')) {
-        return gateway.invokeRpc(
-          'plugins.tool_call',
-          withRunWorkspace({ name, arguments: a || {} })
-        );
-      }
+      // 插件不再提供工具（只保留事件钩子）：第三方工具一律走 MCP。
       return { error: `未知工具: ${name}` };
   }
 }

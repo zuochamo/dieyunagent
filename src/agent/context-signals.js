@@ -43,6 +43,23 @@ function shouldInjectCodeContext(userQuery, snapshot = {}) {
   return false;
 }
 
+/**
+ * 是否值得拿**用户这句话**去自动检索代码库。
+ *
+ * 这里曾经要求「用户已经点名了某个文件/路径/选区」才允许检索 —— 而那正是
+ * `request_snapshots` 里 947 轮请求、0 次代码注入的直接原因：用户给了路径时，
+ * 模型读那个文件就够了，语义检索本来就不需要；用户没给路径时（真正需要检索的场景）
+ * 反而完全不放行。索引于是「建了没人用」。
+ *
+ * 现在的判定全部是**结构信号**（禁止意图关键词表）：
+ *  - 有工作区、SSH 已连接（`workspaceInfo`）——没工作区就没有索引可查；
+ *  - 消息长度 >= 4 ——太短的消息没有可检索词元（Rust 侧只收 >=2 字符词元）；
+ *  - 没有 `@Codebase` ——显式提及走 explicit 分支（不同 limit 与标签）；
+ *  - 编辑器里已有打开文件/产物 ——那部分内容已经随「当前关注文件」进上下文，再检索是重复。
+ *
+ * 放行之后**是否真的注入**由召回决定：检索无命中就返回空块（`formatCodebaseBlock` 空结果返回 ''），
+ * 不再靠前置关键词猜测。
+ */
 function shouldAutoCodebaseSearch(userQuery, workspaceInfo, editor) {
   if (!workspaceInfo || !workspaceInfo.workspacePath) return false;
   if (workspaceInfo.kind === 'ssh' && !workspaceInfo.sshConnected) return false;
@@ -50,12 +67,13 @@ function shouldAutoCodebaseSearch(userQuery, workspaceInfo, editor) {
   if (!q || q.length < 4) return false;
   if (textHasCodebaseMention(q)) return false;
   if (editor && (editor.hasActiveFile || editor.hasArtifact)) return false;
-  return shouldInjectCodeContext(q, { workspaceInfo, includeEditor: false, editor });
+  return true;
 }
 
 function formatCodebaseBlock(query, data, snippetMax, label) {
   const results = Array.isArray(data && data.results) ? data.results : [];
-  const mode = data && data.vectorSearch ? '向量+全文' : data && data.grepFallback ? 'grep' : '全文/词元';
+  // v4 起词法通道是子串扫描（没有 FTS，也没有 grep 兜底），两态即可
+  const mode = data && data.vectorSearch ? '向量+子串' : '子串';
   const head = label || '【相关代码 · 自动检索】';
   if (!results.length) return '';
   const maxSnip = snippetMax || AGENT_LIMITS_DEFAULTS.codebaseSnippetMax;

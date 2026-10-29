@@ -55,7 +55,8 @@ function setGraphPanelText(id, text) {
 function isGraphPaneActive() {
   const panel = document.getElementById('artifacts-panel');
   if (!panel || panel.hidden || panel.classList.contains('is-panel-closing')) return false;
-  const pane = document.querySelector('.side-panel-pane[data-side-pane="graph"]');
+  // 两个索引已合并在同一个「索引」面板里（data-side-pane="index"）
+  const pane = document.querySelector('.side-panel-pane[data-side-pane="index"]');
   return !!(pane && !pane.hidden);
 }
 
@@ -83,19 +84,12 @@ function syncGraphAutoIncrementalCheckbox() {
   autoCb.checked = !!(settings && settings.graphAutoIncremental !== false);
 }
 
-function syncGraphRailBusy(busy, tip) {
-  const rail = document.querySelector('.side-panel-rail-btn[data-side-tab="graph"]');
+function syncGraphRailBusy(busy) {
+  const rail = document.querySelector('.side-panel-rail-btn[data-side-tab="index"]');
   if (!rail) return;
-  const on = !!busy;
-  rail.classList.toggle('is-busy', on);
-  if (on) {
-    const msg = tip || '构建中…';
-    rail.title = `结构索引 · ${msg}`;
-    rail.setAttribute('aria-label', `结构索引，${msg}`);
-  } else {
-    rail.title = '结构索引';
-    rail.setAttribute('aria-label', '结构索引');
-  }
+  // 与代码片段侧同一条规则：各自只标记自己那半，合成状态见 applyIndexRailBusy
+  rail.dataset.busyGraph = busy ? '1' : '';
+  if (typeof window.applyIndexRailBusy === 'function') window.applyIndexRailBusy();
 }
 
 async function refreshGraphPanelStatus() {
@@ -105,7 +99,7 @@ async function refreshGraphPanelStatus() {
   if (!root) {
     if (summary) summary.textContent = '未选工作区';
     setGraphPanelText('gr-stat-state', '请先选择工作空间');
-    ['gr-stat-files', 'gr-stat-edges', 'gr-stat-symbols', 'gr-stat-calls', 'gr-stat-vectors', 'gr-stat-updated', 'gr-stat-progress'].forEach(
+    ['gr-stat-files', 'gr-stat-edges', 'gr-stat-symbols', 'gr-stat-calls', 'gr-stat-updated', 'gr-stat-progress'].forEach(
       (id) => setGraphPanelText(id, '—')
     );
     if (rebuildBtn) rebuildBtn.disabled = true;
@@ -134,10 +128,6 @@ async function refreshGraphPanelStatus() {
     setGraphPanelText('gr-stat-edges', String(st.edgeCount ?? 0));
     setGraphPanelText('gr-stat-symbols', String(st.symbolCount ?? 0));
     setGraphPanelText('gr-stat-calls', String(st.callCount ?? 0));
-    setGraphPanelText(
-      'gr-stat-vectors',
-      st.symbolVectorCount ? `${st.symbolVectorCount}（语义找符号）` : '0'
-    );
     setGraphPanelText('gr-stat-updated', formatGraphPanelIndexedAt(st.indexedAt));
 
     const phase = String(st.phase || '').trim();
@@ -226,7 +216,6 @@ function renderGraphSymbolHits(data) {
     box.innerHTML = '<p class="artifacts-empty">无命中符号</p>';
     return;
   }
-  const mode = data.vectorSearch ? '语义+名称' : '名称匹配';
   const items = results
     .slice(0, 16)
     .map((hit) => {
@@ -246,37 +235,7 @@ function renderGraphSymbolHits(data) {
       </article>`;
     })
     .join('');
-  box.innerHTML = `<p class="codebase-search-meta">模式：${mode} · ${results.length} 条</p>${items}`;
-}
-
-async function runGraphPanelSymbolSearch() {
-  const root = await resolveGraphPanelWorkspaceRootAsync();
-  const input = $('graph-panel-query');
-  const box = $('graph-panel-results');
-  const q = input ? String(input.value || '').trim() : '';
-  if (!root) {
-    if (box) box.innerHTML = '<p class="artifacts-empty">请先选择工作空间</p>';
-    return;
-  }
-  if (!q) {
-    if (box) box.innerHTML = '<p class="artifacts-empty">请输入符号名</p>';
-    return;
-  }
-  if (box) box.innerHTML = '<p class="artifacts-empty">查找中…</p>';
-  try {
-    const data = await gatewayCall(
-      'graph.symbol_search',
-      { workspaceRoot: root, query: q, limit: 12, autoIndex: false },
-      { timeoutMs: 60000 }
-    );
-    renderGraphSymbolHits(data);
-  } catch (err) {
-    if (box) {
-      box.innerHTML = `<p class="artifacts-empty">查找失败：${
-        err && err.message ? err.message : err
-      }</p>`;
-    }
-  }
+  box.innerHTML = `<p class="codebase-search-meta">按名称匹配 · ${results.length} 条</p>${items}`;
 }
 
 function onGraphPanelShown() {
@@ -295,9 +254,9 @@ function onGraphPanelHidden() {
 
 function openGraphSidePanel() {
   if (typeof openSidePanel === 'function') {
-    openSidePanel({ tab: 'graph' });
+    openSidePanel({ tab: 'index' });
   } else if (typeof window.openSidePanel === 'function') {
-    window.openSidePanel({ tab: 'graph' });
+    window.openSidePanel({ tab: 'index' });
   }
   onGraphPanelShown();
 }
@@ -313,21 +272,10 @@ function initGraphPanel() {
       if (typeof saveSettings === 'function') saveSettings(settings);
     });
   }
-  $('graph-panel-refresh')?.addEventListener('click', () => {
-    refreshGraphPanelStatus().catch(() => {});
-  });
   $('graph-panel-rebuild')?.addEventListener('click', () => {
     rebuildGraphPanelIndex().catch(() => {});
   });
-  $('graph-panel-search-btn')?.addEventListener('click', () => {
-    runGraphPanelSymbolSearch().catch(() => {});
-  });
-  $('graph-panel-query')?.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter') {
-      ev.preventDefault();
-      runGraphPanelSymbolSearch().catch(() => {});
-    }
-  });
+  // 「试查符号」入口已合并到统一的索引搜索框，见 renderer-index-panel.js
 }
 
 function onGraphSettingsTabShown() {
@@ -343,3 +291,6 @@ window.refreshGraphPanelStatus = refreshGraphPanelStatus;
 window.onGraphSettingsTabShown = onGraphSettingsTabShown;
 window.refreshGraphIndexStatus = refreshGraphPanelStatus;
 window.openGraphSidePanel = openGraphSidePanel;
+// 符号命中的渲染唯一实现（统一搜索框复用；勿在别处再写一份）
+window.renderGraphSymbolHits = renderGraphSymbolHits;
+window.resolveGraphPanelWorkspaceRootAsync = resolveGraphPanelWorkspaceRootAsync;

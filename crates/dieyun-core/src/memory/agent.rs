@@ -609,7 +609,7 @@ mod tests {
             super::super::now_ms()
         ));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let session = store.create_session(Some("agent"), None).unwrap();
         store
             .upsert_agent_run(&json!({
@@ -650,7 +650,7 @@ mod tests {
             super::super::now_ms()
         ));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let session = store.create_session(Some("trace"), None).unwrap();
         store
             .upsert_agent_run(&json!({
@@ -670,7 +670,7 @@ mod tests {
                 .unwrap();
         }
         let rows: i64 = {
-            let guard = store.conn.lock().unwrap();
+            let guard = store.test_conn();
             guard
                 .query_row(
                     "SELECT COUNT(*) FROM agent_traces WHERE run_id = 'run-ow'",

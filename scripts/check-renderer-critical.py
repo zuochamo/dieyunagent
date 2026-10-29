@@ -19,7 +19,6 @@ CRITICAL = [
     "loadEnabledSkillIds",
     "isSkillEnabled",
     "DEFAULT_ENABLED_SKILL_IDS",
-    "loadPluginsUI",
     "connectGateway",
     "gatewayCall",
     "renderAssistantBubbleContent",
@@ -34,6 +33,12 @@ CRITICAL = [
     "buildCompletionMessages",
     "dispatchAgentRunEvent",
     "buildSessionChatHistoryBlock",
+    # 「索引」面板把代码片段索引与结构索引合并成一个页签：这三处是合并外壳的
+    # 唯一入口（tab 名 index、两个索引的 shown 扇出、rail busy 合成）。
+    # 缺任何一个侧栏就会退化成半残页面，故列为关键符号。
+    "initIndexPanel",
+    "onIndexPanelShown",
+    "applyIndexRailBusy",
 ]
 
 NAMESPACE_CRITICAL = [

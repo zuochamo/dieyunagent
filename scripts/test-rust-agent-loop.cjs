@@ -42,10 +42,8 @@ async function main() {
   await bridge.configure({
     data_dir: userData,
     workspace_roots: [workspace],
-    models_dirs: [path.join(__dirname, '..', 'models')],
     embedding: {
       disabled: !!embedding.disabled,
-      builtin: !!embedding.builtin,
       baseUrl: embedding.baseUrl || '',
       apiKey: embedding.apiKey || '',
       model: embedding.model || '',

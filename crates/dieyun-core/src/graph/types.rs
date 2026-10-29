@@ -21,9 +21,6 @@ pub struct SymbolSearchResult {
     pub indexed: bool,
     pub query: String,
     pub results: Vec<SymbolHit>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub needs_embed: Option<bool>,
-    pub vector_search: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,8 +32,6 @@ pub struct GraphStatusResult {
     pub edge_count: i64,
     pub symbol_count: i64,
     pub call_count: i64,
-    pub symbol_vector_count: i64,
-    pub symbol_embedding_model: Option<String>,
     pub indexed_at: i64,
     pub indexing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

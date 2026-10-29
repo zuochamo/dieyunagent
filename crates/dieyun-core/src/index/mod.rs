@@ -6,7 +6,7 @@ mod walker;
 mod workspace;
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection};
@@ -74,7 +74,6 @@ pub struct IndexService {
     /// codebase.db 句柄：与 `GraphService` 共享同一条常驻连接（同库，故同连接）。
     db: Arc<SqliteHandle>,
     embedding: EmbeddingConfig,
-    models_dirs: Vec<PathBuf>,
     indexing: Arc<Mutex<HashSet<String>>>,
     progress: Arc<Mutex<HashMap<String, ProgressSnapshot>>>,
     remote_ingest: remote::RemoteIngestHandle,
@@ -83,11 +82,10 @@ pub struct IndexService {
 }
 
 impl IndexService {
-    pub fn new(db: Arc<SqliteHandle>, embedding: EmbeddingConfig, models_dirs: Vec<PathBuf>) -> Self {
+    pub fn new(db: Arc<SqliteHandle>, embedding: EmbeddingConfig) -> Self {
         Self {
             db,
             embedding,
-            models_dirs,
             indexing: Arc::new(Mutex::new(HashSet::new())),
             progress: Arc::new(Mutex::new(HashMap::new())),
             remote_ingest: remote::RemoteIngestHandle::default(),
@@ -161,7 +159,15 @@ impl IndexService {
     }
 
     pub fn from_config(config: &AppConfig, db: Arc<SqliteHandle>) -> Self {
-        Self::new(db, config.embedding.clone(), config.models_dirs.clone())
+        Self::new(db, config.embedding.clone())
+    }
+
+    /// embedding 端点是否可用（`model` 与 `base_url` 都配了且没被禁用）。
+    ///
+    /// 调用方要求 `vectors=true` 时先问这个：配置缺失时建库会**静默**退化成只建 chunk，
+    /// 用户看着进度条走完、向量还是 0，不知道是没配端点。校验放在 RPC 入口，报错才可解释。
+    pub fn vectors_available(&self) -> bool {
+        self.embedding.enabled()
     }
 
     /// 独立连接：用于跨 `.await` 或分钟级长任务，避免长时间占用常驻锁。
@@ -233,8 +239,8 @@ impl IndexService {
 
         // 向量元信息：模型 / 维度取**库里实际写入**的值（下面 row 里读），
         // 当前配置的签名只用来回答「库里的向量是不是当前这个模型产的」。
-        let current_signature = self.embedding.signature(&self.models_dirs);
-        let embedding_enabled = self.embedding.enabled(&self.models_dirs);
+        let current_signature = self.embedding.signature();
+        let embedding_enabled = self.embedding.enabled();
 
         let row: Option<(i64, i64, i64, i64, i64, Option<String>, i64)> = conn
             .query_row(
@@ -405,11 +411,15 @@ impl IndexService {
     /// 后台启动本地索引（立即返回，便于轮询 status 进度）
     /// - `force`: 全量清空再建
     /// - `skip_if_ready`: true 时若已就绪则跳过（prep 门闩）；false 时即使已索引也启动 mtime 增量（保存后刷新）
+    /// - `vectors`: 是否同时生成向量。**显式 opt-in**（默认 false）：向量是这套索引里
+    ///   最贵的一环（embedding 调用 + 343 MB 库体），而实测调用率极低（见
+    ///   docs/INDEX-VALUE-REVIEW.md §3）。只有调用方明确要语义检索时才建。
     pub fn start_index_workspace(
         &self,
         workspace_root: &str,
         force: bool,
         skip_if_ready: bool,
+        vectors: bool,
     ) -> Result<StartIndexResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
         if ws.is_remote {
@@ -511,7 +521,7 @@ impl IndexService {
                         return;
                     }
                 };
-                let result = rt.block_on(svc.run_index(&root, &hash, force));
+                let result = rt.block_on(svc.run_index(&root, &hash, force, vectors));
                 finish(&svc, &hash, result);
                 let _ = workspace_key;
             })
@@ -531,7 +541,7 @@ impl IndexService {
                 indexing: true,
                 embedding_model: None,
                 embedding_dims: 0,
-                embedding_enabled: self.embedding.enabled(&self.models_dirs),
+                embedding_enabled: self.embedding.enabled(),
                 embedding_stale: false,
                 phase: Some("walking".into()),
                 files_done: Some(0),
@@ -545,6 +555,7 @@ impl IndexService {
         &self,
         workspace_root: &str,
         force: bool,
+        vectors: bool,
     ) -> Result<StatusResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
         if ws.is_remote {
@@ -574,7 +585,7 @@ impl IndexService {
         }
 
         self.set_progress(&root_hash, "walking", 0, 0, 0, 0);
-        let result = self.run_index(root, &root_hash, force).await;
+        let result = self.run_index(root, &root_hash, force, vectors).await;
         if let Ok(mut guard) = self.indexing.lock() {
             guard.remove(&root_hash);
         }
@@ -591,6 +602,7 @@ impl IndexService {
         workspace_root: &str,
         files: Vec<RemoteFileInput>,
         force: bool,
+        vectors: bool,
     ) -> Result<StatusResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
         if !ws.is_remote {
@@ -599,10 +611,10 @@ impl IndexService {
                 "本地工作空间请使用 codebase.index",
             ));
         }
-        self.index_remote_begin(&ws, force).await?;
+        self.index_remote_begin(&ws, force, vectors).await?;
         if !force {
             let st = self.status(workspace_root)?;
-            let sig = self.embedding.signature(&self.models_dirs);
+            let sig = self.embedding.signature();
             let embedding_stale = st.chunk_count > 0
                 && !sig.is_empty()
                 && st.embedding_model.as_deref().unwrap_or("") != sig;
@@ -623,6 +635,7 @@ impl IndexService {
         root: &Path,
         root_hash: &str,
         force: bool,
+        vectors: bool,
     ) -> Result<(), CoreError> {
         // 跨 await + 分钟级任务：既拿不住 MutexGuard，也不该占着常驻锁。
         let conn = self.open_dedicated()?;
@@ -655,21 +668,24 @@ impl IndexService {
             purge_stale_chunk_paths(&conn, root_hash, &rel_set)?;
         }
 
-        let use_vectors = self.embedding.enabled(&self.models_dirs);
-        let embed_sig = self.embedding.signature(&self.models_dirs);
-        let embed_dims = if use_vectors {
-            self.embedding.effective_dimensions(&self.models_dirs)
-        } else {
-            0
-        };
-        let prev_embed_model: Option<String> = conn
+        // 向量是**显式 opt-in**：调用方要（`vectors=true`）且 embedding 配置可用才建。
+        // 没有向量时 `chunks` 仍可检索（子串通道），索引照样能用。
+        let use_vectors = vectors && self.embedding.enabled();
+        let embed_sig = self.embedding.signature();
+        // 库里已有的向量签名：本次**不要**向量时要沿用它（见下方 opt-in 语义说明），
+        // 不能因为"这次不写向量"就把元数据抹掉。
+        let (prev_embed_model, prev_embed_dims): (Option<String>, i64) = conn
             .query_row(
-                "SELECT embedding_model FROM workspaces WHERE root_hash = ?1",
+                "SELECT embedding_model, embedding_dims FROM workspaces WHERE root_hash = ?1",
                 params![root_hash],
-                |r| r.get(0),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    ))
+                },
             )
-            .ok()
-            .flatten();
+            .unwrap_or((None, 0));
         let model_changed = use_vectors
             && !embed_sig.is_empty()
             && prev_embed_model.as_deref().unwrap_or("") != embed_sig;
@@ -760,21 +776,22 @@ impl IndexService {
         // 以库里的真实条数为准（增量时大部分文件被跳过，逐块累加没有意义）
         let chunk_count = count_chunks(&conn, root_hash)?;
 
-        if !use_vectors {
-            conn.execute(
-                "DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE root_hash = ?1)",
-                params![root_hash],
-            )
-            .ok();
-        } else if model_changed {
+        // 本次不要向量（`vectors=false`：面板「重建片段」、增量建库、prep 首次建库…）
+        // **不删**已有向量。「这次不写向量」≠「用户不要向量了」——按后者实现时，一次
+        // 重建或一次保存就会把整库向量清空，语义检索无声失效（面板显示 0，用户以为没用）。
+        // 需要清空的只有两种情况：`force` 全量重建（chunk id 全换，`delete_all_chunks`
+        // 已清）与签名变更（维度不兼容，必须重建）。
+        if model_changed {
             conn.execute(
                 "DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE root_hash = ?1)",
                 params![root_hash],
             )
             .ok();
             pending_embed = load_all_chunk_texts(&conn, root_hash)?;
-        } else {
-            // 补齐缺向量的 chunk（例如上次 embedding 中断）
+        } else if use_vectors {
+            // 补齐缺向量的 chunk（例如上次 embedding 中断，或增量改过文件但那次没带向量）。
+            // 只在本次真要写向量时算：这条是 chunks ⨝ chunk_vectors 的反连接，`vectors=false`
+            // 的增量（每次保存都可能跑）没必要为一次用不上的结果扫全表。
             let missing = load_chunks_missing_vectors(&conn, root_hash)?;
             if !missing.is_empty() {
                 let mut seen: HashSet<i64> = pending_embed.iter().map(|(id, _)| *id).collect();
@@ -786,8 +803,9 @@ impl IndexService {
             }
         }
 
-        // 只有本次确实产生了新向量（或向量被清空/模型变更）时才重建内存池；
-        // 否则保留现有池，避免"保存一下就把整库向量重读一遍"。
+        // 只有本次确实产生了新向量（或模型变更）时才重建内存池；否则保留现有池，避免
+        // "保存一下就把整库向量重读一遍"。`!use_vectors` 也要刷：增量重建会按文件删掉
+        // 旧 chunk（连同其向量），池里那些 chunk id 已作废，不刷会留下查不到行的僵尸条目。
         let vectors_changed = !use_vectors || model_changed || !pending_embed.is_empty();
 
         let mut vector_count = 0i64;
@@ -801,7 +819,7 @@ impl IndexService {
                 0,
             );
             let embedded =
-                embedding::embed_batches(&self.embedding, &self.models_dirs, &pending_embed)
+                embedding::embed_batches(&self.embedding, &pending_embed)
                     .await?;
             for (chunk_id, vec) in embedded {
                 let blob = embedding::vector_to_blob(&vec);
@@ -840,10 +858,15 @@ impl IndexService {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let embedding_model = if use_vectors && vector_count > 0 {
-            Some(embed_sig)
+        // 元数据必须描述"库里真实存在的向量"：本次没建向量、但之前建的还在，就沿用旧
+        // 签名；否则会出现 vectorCount>0 而 embedding_model=NULL，检索侧 `can_vector`
+        // 判 false，整条向量通道静默消失。
+        let (embedding_model, embed_dims) = if vector_count == 0 {
+            (None, 0i64)
+        } else if use_vectors {
+            (Some(embed_sig), self.embedding.dimensions as i64)
         } else {
-            None
+            (prev_embed_model.clone(), prev_embed_dims)
         };
 
         conn.execute(
@@ -867,7 +890,7 @@ impl IndexService {
                 vector_count,
                 now,
                 embedding_model,
-                embed_dims as i64
+                embed_dims
             ],
         )
         .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
@@ -892,15 +915,15 @@ impl IndexService {
         let st = self.status_impl(&ws)?;
 
         let mut query_vector = None;
-        let can_vector = self.embedding.enabled(&self.models_dirs)
+        let can_vector = self.embedding.enabled()
             && st.vector_count > 0
-            && self.embedding.signature(&self.models_dirs)
+            && self.embedding.signature()
                 == st.embedding_model.as_deref().unwrap_or("");
         if can_vector {
             let q = query.trim();
             if !q.is_empty() {
                 let vectors =
-                    embedding::embed_texts(&self.embedding, &self.models_dirs, &[q.to_string()])
+                    embedding::embed_texts(&self.embedding, &[q.to_string()])
                         .await?;
                 if let Some(vec) = vectors.into_iter().next() {
                     query_vector = Some(vec);
@@ -974,8 +997,8 @@ pub struct StartIndexResult {
 
 /// chunk 写入的唯一入口（本机索引与远程摄取共用）。
 ///
-/// 只写 `chunks` 一行：`chunks_fts` 由触发器同步（见 `schema.rs`），**不许**在这里
-/// 再手写 FTS 语句 —— 那正是 v1 里「删漏一行就留孤儿倒排项」的来源。
+/// 只写 `chunks` 一行：v4 起没有全文倒排表（`search.rs` 走子串扫描），`chunks` 是正文
+/// 唯一来源；`chunk_vectors` 由调用方在拿到返回正文后单独写。
 /// 空白片段不落库，返回 `None` 让调用方跳过；返回的正文与入库内容一致，可直接拿去算向量。
 fn insert_chunk(
     conn: &Connection,
@@ -1154,10 +1177,9 @@ mod tests {
         let svc = IndexService::new(
             crate::codebase_db::handle(db),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let root = dir.path().to_string_lossy();
-        let st = svc.index_workspace(&root, true).await.unwrap();
+        let st = svc.index_workspace(&root, true, false).await.unwrap();
         assert!(st.indexed);
         assert!(st.chunk_count > 0);
         let sr = svc.search(&root, "hello", Some(5)).await.unwrap();
@@ -1173,7 +1195,6 @@ mod tests {
         let svc = IndexService::new(
             crate::codebase_db::handle(db),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let key = "ssh://dev@192.168.1.10/home/dev/project";
         let files = vec![RemoteFileInput {
@@ -1181,7 +1202,7 @@ mod tests {
             content: "fn main() {\n    println!(\"remote hello\");\n}\n".into(),
             mtime: 1,
         }];
-        let st = svc.index_remote(key, files, true).await.unwrap();
+        let st = svc.index_remote(key, files, true, false).await.unwrap();
         assert!(st.indexed);
         assert!(st.chunk_count > 0);
         let sr = svc.search(key, "remote hello", Some(5)).await.unwrap();
@@ -1199,26 +1220,125 @@ mod tests {
         let svc = IndexService::new(
             crate::codebase_db::handle(db),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let root = dir.path().to_string_lossy();
-        let st1 = svc.index_workspace(&root, true).await.unwrap();
+        let st1 = svc.index_workspace(&root, true, false).await.unwrap();
         assert!(st1.indexed);
         assert!(st1.chunk_count >= 2);
         let c1 = st1.chunk_count;
 
         // 不变 → 增量后 chunk 数不变
-        let st2 = svc.index_workspace(&root, false).await.unwrap();
+        let st2 = svc.index_workspace(&root, false, false).await.unwrap();
         assert!(st2.indexed);
         assert_eq!(st2.chunk_count, c1);
 
         // 改一个文件 → 仍可搜到新内容
         std::thread::sleep(std::time::Duration::from_millis(1100));
         std::fs::write(&b, "fn b() { /* unique_token_xyz */ }\n").unwrap();
-        let st3 = svc.index_workspace(&root, false).await.unwrap();
+        let st3 = svc.index_workspace(&root, false, false).await.unwrap();
         assert!(st3.indexed);
         let sr = svc.search(&root, "unique_token_xyz", Some(5)).await.unwrap();
         assert!(!sr.results.is_empty());
+    }
+
+    /// 回归：`vectors=false` 只该表示「这次不建向量」，**不能**把已有向量删掉。
+    ///
+    /// 旧实现把两者混为一谈（`if !use_vectors { DELETE FROM chunk_vectors ... }`），于是
+    /// 面板「重建片段」、增量建库、prep 首次建库任意一次都会清空整库向量 —— 用户花几分钟
+    /// 建好的向量一次保存就没，面板回到「0（子串检索）」，自然得出「向量没用」的结论。
+    #[tokio::test]
+    async fn rebuild_without_vectors_keeps_existing_vectors() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() { /* keep */ }\n").unwrap();
+        let db = dir.path().join("idx.sqlite");
+        let handle = crate::codebase_db::handle(db);
+        let svc = IndexService::new(Arc::clone(&handle), EmbeddingConfig::default());
+        let root = dir.path().to_string_lossy().to_string();
+        let ws = resolve_workspace(&root).unwrap();
+
+        let st = svc.index_workspace(&root, true, false).await.unwrap();
+        assert!(st.chunk_count > 0);
+
+        // 造出「库里已有向量」的状态（不依赖真实 embedding 端点）
+        const SIG: &str = "test-embed@3";
+        let seeded = handle
+            .with_conn(|conn| {
+                let ids: Vec<i64> = conn
+                    .prepare("SELECT id FROM chunks WHERE root_hash = ?1")
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?
+                    .query_map(params![ws.root_hash], |r| r.get(0))
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                for id in &ids {
+                    let blob = crate::embedding::vector_to_blob(&[1.0f32, 0.0, 0.0]);
+                    conn.execute(
+                        "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, 3, ?2)",
+                        params![id, blob],
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                }
+                conn.execute(
+                    "UPDATE workspaces SET vector_count = ?2, embedding_model = ?3,
+                                           embedding_dims = 3
+                     WHERE root_hash = ?1",
+                    params![ws.root_hash, ids.len() as i64, SIG],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                Ok(ids.len() as i64)
+            })
+            .expect("seed vectors");
+        assert!(seeded > 0);
+
+        // 增量建库、这次不要向量
+        let st2 = svc.index_workspace(&root, false, false).await.unwrap();
+        assert_eq!(
+            st2.vector_count, seeded,
+            "vectors=false 不得清空已有向量（否则语义检索会无声消失）"
+        );
+        assert_eq!(
+            st2.embedding_model.as_deref(),
+            Some(SIG),
+            "签名元数据必须沿用到库里真实存在的向量，不能抹成 NULL"
+        );
+        assert_eq!(st2.embedding_dims, 3, "维度不能被抹成 0");
+    }
+
+    /// RPC 入口用 `vectors_available()` 决定「要求向量但端点没配」要不要报
+    /// `EMBEDDING_NOT_CONFIGURED`。判据必须与 `EmbeddingConfig::enabled` 完全一致：
+    /// 只有「没被禁用 + model + base_url 都非空」才算可用，缺一项就不该假装配好了。
+    #[test]
+    fn vectors_available_follows_embedding_config() {
+        let dir = tempdir().unwrap();
+        let off = IndexService::new(
+            crate::codebase_db::handle(dir.path().join("a.sqlite")),
+            EmbeddingConfig::default(),
+        );
+        assert!(!off.vectors_available(), "默认配置（空 model/base_url）不可用");
+
+        let mut only_model = EmbeddingConfig::default();
+        only_model.model = "text-embedding-3-small".into();
+        let half = IndexService::new(
+            crate::codebase_db::handle(dir.path().join("b.sqlite")),
+            only_model,
+        );
+        assert!(!half.vectors_available(), "只有 model、没有 base_url 仍不可用");
+
+        let mut disabled = EmbeddingConfig::default();
+        disabled.model = "text-embedding-3-small".into();
+        disabled.base_url = "https://api.example.com/v1".into();
+        disabled.disabled = true;
+        let off2 = IndexService::new(
+            crate::codebase_db::handle(dir.path().join("c.sqlite")),
+            disabled,
+        );
+        assert!(!off2.vectors_available(), "显式禁用时不可用");
+
+        let mut on = EmbeddingConfig::default();
+        on.model = "text-embedding-3-small".into();
+        on.base_url = "https://api.example.com/v1".into();
+        let svc = IndexService::new(crate::codebase_db::handle(dir.path().join("d.sqlite")), on);
+        assert!(svc.vectors_available());
     }
 
     /// status 是**纯读**：哪怕库里有崩溃残留（`indexing=1`、元数据残缺）且另一个连接
@@ -1231,7 +1351,6 @@ mod tests {
         let svc = IndexService::new(
             Arc::clone(&handle),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let root = dir.path().to_string_lossy().to_string();
         let ws = resolve_workspace(&root).unwrap();
@@ -1291,7 +1410,6 @@ mod tests {
         let svc = IndexService::new(
             Arc::clone(&handle),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let root = dir.path().to_string_lossy().to_string();
         let ws = resolve_workspace(&root).unwrap();
@@ -1330,7 +1448,7 @@ mod tests {
         cfg.model = "test-model".into();
         cfg.base_url = "http://127.0.0.1:1".into();
         cfg.dimensions = 768;
-        let svc = IndexService::new(Arc::clone(&handle), cfg, Vec::new());
+        let svc = IndexService::new(Arc::clone(&handle), cfg);
         let root = dir.path().to_string_lossy().to_string();
         let ws = resolve_workspace(&root).unwrap();
 
@@ -1380,16 +1498,15 @@ mod tests {
         let svc = IndexService::new(
             crate::codebase_db::handle(db),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let root = dir.path().to_string_lossy().to_string();
-        let started = svc.start_index_workspace(&root, true, true).unwrap();
+        let started = svc.start_index_workspace(&root, true, true, false).unwrap();
         assert!(started.started);
         assert!(started.status.indexing);
         assert_eq!(started.status.phase.as_deref(), Some("walking"));
         // 给后台线程一点时间；不强制 join，避免阻塞 CI
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let again = svc.start_index_workspace(&root, true, true).unwrap();
+        let again = svc.start_index_workspace(&root, true, true, false).unwrap();
         // 要么仍在跑要么已完成
         assert!(again.already_running || again.status.indexed || again.started || !again.status.indexing);
     }

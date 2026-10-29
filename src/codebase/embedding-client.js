@@ -1,16 +1,53 @@
 'use strict';
 
-const {
-  BUILTIN_EMBEDDING_DIMENSIONS,
-  BUILTIN_EMBEDDING_ID,
-  embedWithBuiltin,
-  hasBuiltinEmbeddingModel
-} = require('./local-embedding');
 const { runInEmbeddingQueue } = require('./embedding-queue');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('../agent/llm-request');
+const crypto = require('crypto');
 
 const EMBEDDING_DIMENSIONS_MIN = 64;
 const EMBEDDING_DIMENSIONS_MAX = 8192;
+const EMBEDDING_DIMENSIONS_DEFAULT = 1024;
+
+/**
+ * 查询向量缓存（只缓存「单条文本」= 查询，不缓存批量文档）。
+ *
+ * 为什么放在这里：同一轮里技能召回（Main 的 system-prompt-prep）与 MCP 工具召回
+ * （Renderer → IPC tools:recall）会各自 embed 一次**同一句 userQuery**。嵌入是确定性的
+ * （同端点 + 同模型 + 同维度 + 同文本 ⇒ 同向量），第二次请求纯属白付一次网络往返，
+ * 而它正好压在「系统提示组装 → 首字输出」的关键路径上。
+ *
+ * 为什么不做成两个调用点各自的缓存：本文件是 embed 请求的唯一出口，缓存放别处
+ * 就会变成第三份「谁在什么时候该请求向量」的实现。
+ */
+const QUERY_CACHE_MAX = 64;
+const QUERY_CACHE_TTL_MS = 120000;
+/** @type {Map<string, { at: number, vector: number[] }>} */
+const queryEmbedCache = new Map();
+
+function queryCacheKey(url, model, dimensions, text) {
+  const digest = crypto.createHash('sha1').update(String(text)).digest('hex');
+  return `${url}|${model}|${dimensions}|${digest}`;
+}
+
+function readQueryCache(key) {
+  const hit = queryEmbedCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > QUERY_CACHE_TTL_MS) {
+    queryEmbedCache.delete(key);
+    return null;
+  }
+  return hit.vector;
+}
+
+function writeQueryCache(key, vector) {
+  if (!Array.isArray(vector) || !vector.length) return;
+  if (queryEmbedCache.size >= QUERY_CACHE_MAX) {
+    // 最旧优先淘汰（Map 保持插入顺序），不引入 LRU 结构：这里没有热点访问模式
+    const oldest = queryEmbedCache.keys().next();
+    if (!oldest.done) queryEmbedCache.delete(oldest.value);
+  }
+  queryEmbedCache.set(key, { at: Date.now(), vector });
+}
 
 function resolveEmbeddingsUrl(baseUrl) {
   // 端点拼接单一来源 llm-request.js（含 /embed 直连写法；空 baseUrl 返回 ''）
@@ -22,23 +59,25 @@ function isDirectEmbedUrl(baseUrl) {
 }
 
 /**
- * @param {{ baseUrl?: string, apiKey?: string, model?: string, dimensions?: number, builtin?: boolean, localFallback?: boolean }} config
+ * 向量客户端：**只有远程 OpenAI 兼容端点**。
+ *
+ * 进程内 ONNX 推理（内置 bge-base-zh-v1.5）已删除：模型体积、首次加载耗时与
+ * 打包体积都不值得，语义检索改为用户在「设置 → 模型 → 向量索引」里配一个
+ * 外部 embedding 端点。没配就 `enabled() === false`，召回退化为纯关键词。
+ *
+ * @param {{ baseUrl?: string, apiKey?: string, model?: string, dimensions?: number, disabled?: boolean }} config
  */
 function createEmbeddingClient(config) {
-  const requestedModel = String(config?.model || '').trim();
+  const model = String(config?.model || '').trim();
   const apiKey = String(config?.apiKey || '').trim();
   const url = resolveEmbeddingsUrl(config?.baseUrl);
-  const useRemote = !!(requestedModel && url && config?.builtin !== true);
-  const model = useRemote ? requestedModel : BUILTIN_EMBEDDING_ID;
-  const dimensions = useRemote
-    ? Math.min(EMBEDDING_DIMENSIONS_MAX, Math.max(EMBEDDING_DIMENSIONS_MIN, Number(config?.dimensions) || 1024))
-    : BUILTIN_EMBEDDING_DIMENSIONS;
+  const dimensions = Math.min(
+    EMBEDDING_DIMENSIONS_MAX,
+    Math.max(EMBEDDING_DIMENSIONS_MIN, Number(config?.dimensions) || EMBEDDING_DIMENSIONS_DEFAULT)
+  );
 
   function enabled() {
-    if (config?.disabled === true) return false;
-    if (useRemote) return true;
-    if (config?.builtin === true) return config?.localFallback !== false && hasBuiltinEmbeddingModel();
-    return config?.localFallback !== false && hasBuiltinEmbeddingModel();
+    return config?.disabled !== true && !!model && !!url;
   }
 
   /**
@@ -49,10 +88,14 @@ function createEmbeddingClient(config) {
     if (!enabled()) {
       throw new Error('未配置 Embedding 模型');
     }
-    if (!useRemote) {
-      return embedWithBuiltin(input);
+    // 单条文本 = 查询（召回用）；数组 = 批量文档（索引用，按 textHash 去重即可，不进本缓存）
+    const single = !Array.isArray(input);
+    const cacheKey = single ? queryCacheKey(url, model, dimensions, String(input ?? '')) : '';
+    if (single) {
+      const cached = readQueryCache(cacheKey);
+      if (cached) return [cached];
     }
-    return runInEmbeddingQueue(async () => {
+    const out = await runInEmbeddingQueue(async () => {
       const texts = Array.isArray(input) ? input : [input];
       if (!texts.length) return [];
 
@@ -104,12 +147,14 @@ function createEmbeddingClient(config) {
         if (!Array.isArray(vec) || !vec.length) {
           throw new Error('Embedding 向量为空');
         }
-        if (useRemote && vec.length !== dimensions) {
+        if (vec.length !== dimensions) {
           throw new Error(`Embedding dimensions mismatch: expected ${dimensions}, got ${vec.length}`);
         }
         return vec;
       });
     });
+    if (single && out && out[0]) writeQueryCache(cacheKey, out[0]);
+    return out;
   }
 
   return {
@@ -117,8 +162,7 @@ function createEmbeddingClient(config) {
     embed,
     model,
     dimensions,
-    url: useRemote ? url : '',
-    builtin: !useRemote
+    url
   };
 }
 
@@ -150,14 +194,10 @@ function cosineSimilarity(a, b) {
   return denom > 1e-8 ? dot / denom : 0;
 }
 
-const DEFAULT_EMBED_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-
 module.exports = {
   createEmbeddingClient,
   vectorToBlob,
   blobToVector,
   cosineSimilarity,
-  DEFAULT_EMBED_URL,
-  BUILTIN_EMBEDDING_ID,
-  BUILTIN_EMBEDDING_DIMENSIONS
+  EMBEDDING_DIMENSIONS_DEFAULT
 };

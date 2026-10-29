@@ -1,0 +1,284 @@
+# 代码索引 / 结构索引：收益评估与整改清单
+
+> 评估日期：2026-10-29 · 样本：本机 `%APPDATA%/dieyunagent/codebase-index.sqlite`（29 个工作区）+ 7 天工具遥测
+> 相关：`docs/VECTOR-SEARCH.md`（向量边界）、`docs/ARCHITECTURE.md` §15（索引实现）、`issue/2026-10-28-read-queries-share-resident-conn.md`（长读争用事故）
+> 本页只做两件事：**给「这两个设计值不值」一个可复核的结论**，并把结论落成**可执行的减法清单**。所有建议默认服从 `AGENTS.md` 原则 2（减法优先）：能删就不加，删不掉必须写明理由。
+
+---
+
+## 0. 结论（先看这七条）
+
+1. **代码索引是这两者里唯一的重资产，也是唯一该被削的**：库体 1056 MB，其中 trigram 倒排 40%（426 MB）、向量 33%（344 MB）；图只占 7%。
+2. **代码索引最贵的那一半（trigram FTS）与既有 `grep` 工具功能重叠，且新鲜度更差** → 删除本地词法通道（R2，已落地）。
+3. **向量通道不是伪需求，但不该默认建**：中文自然语言提问确有增益（Cursor 自评 +12.5%、SWE-QA 65.2% vs 46.2%），代价是首建要跑 embedding + 库体 1/3 → 改为显式 opt-in（R3，已落地）。
+4. **结构索引里只有 `repo_map` + 符号/import 表值得常驻**（9.8 MB，每轮注入 ≤4500 字符换全局骨架）；**调用图 391k 行 / 65 MB 服务了 7 天里 1 次 `graph` 调用** → 按需建（R5，已落地）。
+5. **实测使用率**：7 天 8345 次工具调用中，`codebase_search` 4 次（0.05%）、`graph` 1 次、`lsp` 3 次；`read_symbol` 101 次（结构索引的真实消费者）；`host_exec`/`grep`/`fs_read_file` 才是主力。
+6. **流行度**：语义索引已从「默认必备」降级为「可索引只读问答的加速器」（Anthropic 已撤、Cursor 仍用、AAAI 2026 关键词 agent 达 RAG 94.5% 忠实度）；结构化 repo map 仍在（aider 一脉 + LSP 符号工具 + code-graph MCP），但从未是编辑型 agent 的主流默认。**结论：设计没过时，默认值过时了。**
+7. **但比默认值更致命的是「接线」**：7 天 947 次请求快照里【相关代码】注入 **0 次**、【仓库结构图】注入 **0 次**（同期【项目地图】884 次正常）。原因是注入判定 `injectCode` 要求用户**先点名文件/选中代码/打 `@Codebase`**，而这只在「已经有了目标文件」时成立——索引恰好在它唯一有用（用户不知道文件在哪）的时候不触发。**所以本轮真正的修复不是删，而是把触发条件从「是否有路径」换成「这轮是否要碰代码库」（R8）。**
+
+### 0.1 实施状态（2026-10-29 已全部落地）
+
+| 项 | 状态 | 落点 |
+|---|---|---|
+| R4 增量默认关 | ✅ | `src/model-settings.js`（`codebaseAutoIncremental=false`，`graphAutoIncremental` 仍默认为 `true`）、`src/index/codebase-incremental-scheduler.js`（无向量不维护、busy 不排重试）、`src/renderer/index.html`、`test/unit/incremental-index-dedupe.test.cjs` |
+| R2 删 trigram FTS | ✅ | `crates/dieyun-core/src/index/schema.rs`（`SCHEMA_VERSION=4`，迁移只做 `DROP`）、`index/search.rs`（词法只剩子串通道，双路 RRF） |
+| R3 向量 opt-in | ✅ | `index/mod.rs` / `index/remote.rs`（`vectors` 请求参数）、`rpc/mod.rs`、`src/gateway/handlers/codebase.js`、`src/gateway/rpc.js`、面板「建向量」按钮、CLI `--vectors` |
+| R3 补丁：向量生命周期 | ✅ | `index/mod.rs`（`vectors=false` 不再 `DELETE FROM chunk_vectors`；`embedding_model/dims` 沿用库里真实存在的向量）、`index/remote.rs`（`vector_count` 取库里实数、签名不归零）、`rpc/mod.rs`（`vectors:true` 且端点未配置 → `EMBEDDING_NOT_CONFIGURED`）、`src/index/codebase-incremental-scheduler.js`（增量带 `vectors:true`，只在已有向量时跑）、`renderer-utils.js:describeVectorSync`（覆盖不足要提示）、面板「建向量」改走增量补齐；用例 `index::tests::rebuild_without_vectors_keeps_existing_vectors` / `vectors_available_follows_embedding_config` / `test/unit/vector-sync-label.test.cjs` / `test/unit/incremental-index-dedupe.test.cjs` |
+| R5 调用图按需 | ✅ | `graph/build.rs`（`GraphScope::Structural \| WithCalls`）、`graph/mod.rs`、`rpc/mod.rs`（`calls` 参数）、`src/gateway/handlers/graph.js`（`callers`/`callees`/`lsp_resolve` 首次自动补建一次）、`test/unit` + 新增 Rust 用例 |
+| R7 删死代码 | ✅ | `src/gateway/rpc.js`（`tryRemoteGrepFallback` / `formatGrepMatchesAsSearchResults` 已删）、`src/agent/context-signals.js`（模式文案读真实字段） |
+| R8 修注入接线 | ✅ | `src/agent/context-signals.js:shouldAutoCodebaseSearch`（不再依赖 `shouldInjectCodeContext`）、`src/agent/system-prompt-prep.js`（`allowCodebase` 独立于 `injectCode`、`repo_map` 去路径前置）、`src/renderer/renderer-agent-system-message.js`、`src/renderer/agent/agent-bundle-entry.js`（`shouldAutoCodebaseSearch` 进 compat） |
+| R1 加固 repo_map | ✅ | `scripts/test-system-prompt-prep.cjs:runRepoMapInjection`（无 `injectCode` 也取骨架、字符预算截断、必有「枢纽文件/关键符号」） |
+| 界面合并（R8 之后） | ✅ | 侧栏两个页签（代码索引 / 结构索引）合并为一个「索引」页签：两个区块各自带状态摘要与重建按钮，一个搜索框同时查片段 + 符号。外壳 `src/renderer/renderer-index-panel.js`，护栏 `scripts/check-renderer-index-panel.cjs`（rail/pane 页签唯一性 + 面板 JS 引用的 DOM id 必须存在） |
+
+细节见 §6 各项；R6（三个月后复核）仍未到点。
+
+---
+## 1. 现状：两个索引各自是什么
+
+| | 代码索引（`codebase.*`） | 结构索引（`graph.*`） |
+|---|---|---|
+| 产物（v4 后） | `chunks` + `chunk_vectors`（int8，opt-in） | `graph_symbols` / `graph_imports` / `graph_file_mtime` 常建；`graph_calls` 按需 |
+| 建库 | Tree-sitter 切块（失败回退行窗）→ 写 `chunks`；向量只在本次请求显式要时写 | Tree-sitter 抽符号/import（+调用，仅 `WithCalls`）→ 收尾按「同文件 → import 目标 → 全库唯一同名」解析调用边 |
+| 查询 | 向量余弦 / 子串 `LIKE` 两路 RRF(k=60) 融合（trigram FTS 已于 R2 删除） | `symbol_search` / `module_deps` / `repo_map` 常驻；`callers` / `callees` / `impact` 需调用边 |
+| 出口 | `codebase.search`（工具 `codebase_search`）+ prep 自动注入块 | 工具 `graph` + prep 注入 `【仓库结构图】` + `read_symbol`/`lsp` 的本地回退 |
+| 增量 | `src/index/codebase-incremental-scheduler.js`（**默认关**，且无向量时直接不跑） | `src/graph/graph-incremental-scheduler.js`（默认开：便宜，且 `repo_map` 要新鲜） |
+| 单一来源 | Rust `crates/dieyun-core/src/index/`（schema/search/vector_pool/walker） | Rust `crates/dieyun-core/src/graph/`（build/query/extract） |
+| 界面入口 | 侧栏「索引」页签的上半区（`codebase-panel-*`） | 同一页签的下半区（`graph-panel-*`）；试搜框是一个，同查两路 |
+| 触发（v4 后） | 本轮「要碰代码库」即允许：`@Codebase` / 消息内路径 / 编辑器选区 / **结构信号下的自动检索** | 同上（`allowCodebase`），不再要求用户先点名文件 |
+
+关键常量（`src/agent/agent-limits.js`）：`codebaseAutoLimit=12`、`codebaseMentionLimit=16`、`codebaseSnippetMax=2400`、`graphRepoMapLimit=32`、`graphRepoMapMaxChars=4500`。
+
+---
+
+## 2. 实测成本（本机，2026-10-29）
+
+### 2.1 磁盘
+
+| 对象 | 体积 | 占比 | 备注 |
+|---|---|---|---|
+| `chunks_fts_data`（trigram） | 425.6 MB | 40.3% | 相对正文 192.9 MB 放大 ≈ 2.2×（`ARCHITECTURE.md` 小样本口径 4.7×）；**v4 迁移已 DROP，此项为历史基线** |
+| `chunk_vectors`（int8） | 343.5 MB | 32.5% | 115,042 chunk / 33,099 向量 |
+| `chunks`（正文） | 192.9 MB | 18.3% | 平均 chunk 1100 字符 |
+| `graph_calls` + 3 索引 | 64.7 MB | 6.1% | 391,401 行 |
+| `graph_symbols` / `graph_imports` | 9.8 MB | 0.9% | 54,128 符号 / 17,916 边 |
+| **`codebase-index.sqlite` 合计** | **1056.4 MB** | 100% | 29 个工作区 |
+
+### 2.2 查询延迟（都不是瓶颈）
+
+| 操作 | 实测 | 口径 |
+|---|---|---|
+| FTS `match "工具调用"` | 1.2 ms | 10,846 chunk（`E:\dieyunagent`） |
+| FTS `match "sandbox"` | 2.8 ms | 同上 |
+| FTS `match "配置"`（2 字中文） | **0 命中** | trigram 物理下限，改走 `LIKE` |
+| `LIKE '%配置%'` 全表扫 | 19.8 ms（192 命中） | 同上；74k chunk 仓按线性外推 ≈ 140 ms |
+| `graph.repo_map` | 198 ms 热 / 1.9 s 冷 | `issue/2026-10-28` 修复后 |
+| 向量全量扫描 | ≈350 ms @114k chunk 768 维 | `ARCHITECTURE.md` §15.1 |
+
+> 说明：延迟从来不是这套设计的问题。把它当「慢」去优化是打错靶子；成本在**磁盘、首建时间、注入 token、维护噪音**。
+
+### 2.3 Token（真正的每轮成本）
+
+| 注入块 | 上限 | 触发条件 |
+|---|---|---|
+| `【相关代码】/【Codebase 检索】` | `12 × 2400` 字符（`@Codebase` 时 `16 × 2400`）≈ 最高 9k token | 结构信号：`@Codebase` / 消息内路径 / 编辑器选区 / artifact / **结构信号下的自动检索**（`src/agent/context-signals.js`） |
+| `【仓库结构图】`（repo_map） | 4500 字符 ≈ 1–2k token | `allowCodebase`（含自动检索）且图已就绪 |
+
+### 2.4 维护噪音
+
+- `main.log` 出现 `[codebase] incremental index skipped: still busy after 60 retries` —— 60 次重试后放弃，属「用重试层绕失败」，违反原则 2。
+- 结构索引长事务曾把 `codebase.status` 打到 45 s 全量超时（`issue/2026-10-28-read-queries-share-resident-conn.md`）。
+- 默认值：`codebaseAutoIncremental=true` / `graphAutoIncremental=true` / `embeddingEnabled=true`（`src/model-settings.js:52-53` 与 `:46`）——**三个重活默认全开**。
+
+---
+
+## 3. 实测收益（本机，7 天 8345 次工具调用）
+
+| 工具 | 次数 | 成功率 | 归属 |
+|---|---|---|---|
+| `host_exec` | 4922 | 98% | 通用 |
+| `fs_read_file` | 704 | 99% | 通用 |
+| `fs_write_file` / `fs_edit` | 583 / 578 | 100% / 85% | 通用 |
+| `grep` | 526 | 99% | **实际承担了「找代码」** |
+| `glob` | 118 | 100% | 通用 |
+| `read_symbol` | 101 | 72% | **结构索引/LSP 的真实消费者** |
+| **`codebase_search`** | **4** | 100% | 代码索引 |
+| **`lsp`** | **3** | 67% | LSP + 结构索引 |
+| **`graph`** | **1** | 100% | 结构索引 |
+
+口径提醒：
+
+- 遥测只记**工具调用**，不记 prep 自动注入（路径/选区触发的 `codebase.search` 与 `repo_map` 走 RPC，不进 `tool-telemetry.jsonl`）→ 真实调用次数高于此表，但「模型主动想起来用索引」这件事，上表就是答案。
+- 该样本 7 天、单机、以本仓 + 若干业务仓为主，不能外推到「所有用户」。
+
+---
+
+## 4. 拆成四个能力分别定级
+
+| 能力 | 不可替代性 | 成本 | 新鲜度 | 定级 |
+|---|---|---|---|---|
+| **trigram 全文（FTS）** | 低：与 `grep` 工具重叠；`grep` 直读文件系统，永远不旧 | 库体 40%（426 MB） | 落后一轮增量 | **删默认通道（R2）** |
+| **向量语义（chunk_vectors）** | 中：中文自然语言 / 标识符未知 / 跨语言确有增益；本仓覆盖率 100%（外部 embedding 端点，bge-base-zh 768），但 74k chunk 的大仓 0 向量（半残）；内置 ONNX 推理已删除 ⇒ 不配端点即 0 向量 | 库体 33% + 首建 embedding 墙钟 | 落后一轮增量 | **保留，显式 opt-in（R3）** |
+| **符号 + import 图** | 高：`repo_map` 骨架、`find_symbol`、远程无 LSP 时的定位兜底 | 9.8 MB，便宜 | 同轮增量 | **保留（R1）** |
+| **调用图（graph_calls）** | 中：`callers/callees/impact`「改一处影响哪」，但 LSP 更准 | 65 MB + LSP enrich 后台任务 | 需 LSP 补强 | **按需建（R5）** |
+
+---
+
+## 5. 是否还流行（外部证据）
+
+### 5.1 代码索引 / 语义检索：默认地位已翻转
+
+- **唱衰侧**：Anthropic 于 2025-05 从 Claude Code 移除向量管线（embedding、本地向量库、切块启发式全删），换 `grep`，作者称 "outperformed everything, by a lot"；Windsurf / Cline / Devin / Sourcegraph Amp 相继转工具驱动检索；AAAI 2026《Keyword Search Is All You Need》测得纯关键词 ReAct agent 达 RAG **94.5%** 忠实度、**91.5%** 答案正确性。综述见 [dbaplus：向量数据库凉了？](https://dbaplus.cn/news-160-7481-1.html)。
+- **支撑侧**：Cursor 2026-01 仍以语义索引为主打，自评**平均 +12.5% 回答准确率**，并用 Merkle 树 + 团队索引复用把「首查时间」压到秒级（[secure-codebase-indexing](https://cursor.com/de/blog/secure-codebase-indexing)）；[arXiv 2608.01507](https://browse-export.arxiv.org/abs/2608.01507)（2026-08，SWE-QA）实测**语义检索 65.2% vs 深度 agentic 检索 46.2%，且单题成本不到一半**，并指出 agentic 检索最大失败模式（41.8%）发生在 planner→subagent 交接处且**静默出错**。
+- **判定**：不是「过时」，是「从默认掉到可选」。它成立的前提有两条硬约束——**增量足够便宜**（内容哈希/Merkle，不重跑全库）与**新鲜度可接受**。本仓两条都踩了（每次保存都触发增量、常驻连接争用），所以低使用率不能全赖设计。
+
+### 5.2 结构索引 / repo map：一直活在少数派
+
+- 仍在用的三类：aider 式 repo map（rank 裁剪后注入）、LSP 符号级工具（定义/引用/诊断）、以及一批 code-graph MCP 服务。
+- 在编辑型 agent 里它始终是**辅助位**：Claude Code 连向量都撤了，也没引入调用图，改用 `Explore` 子代理 + Grep。
+- **判定**：`repo_map` 这种「压缩骨架」是低成本高杠杆，值得留；「全量调用图常驻」是重资产轻使用，该收。
+
+---
+
+## 6. 整改清单（R1–R5 + 顺带发现的 R7、R8）
+
+执行顺序：**R4 → R2 → R7 → R3 → R5 → R1 + R8**（先止血、再减重、最后修接线并加回归护栏）。R6 是三个月后的复核判据，不在本轮执行。
+
+### R4 关闭「保存后自动增量」默认值
+
+| 项 | 内容 |
+|---|---|
+| 问题 | 每次保存触发一次增量建库，`main.log` 里出现 60 次重试后放弃；这是「用重试绕失败」 |
+| 动作 | `codebaseAutoIncremental` 默认改 `false`；改为**会话内首次 prep 需要时触发一次**（复用 `index.start` 的 `skipIfReady`），面板仍可手动开。**`graphAutoIncremental` 保留默认 `true`**（有意偏离初版方案：图增量只做 mtime 比对 + 单文件重解析，代价小，而 `repo_map` 的新鲜度直接决定注入骨架对不对；关掉它省不到钱却会让骨架过期） |
+| diff 面 | `src/model-settings.js:52-53`（默认值）+ `:200-201`（归一化 `!== false` 保留）、`src/index/codebase-incremental-scheduler.js:57`、`src/graph/graph-incremental-scheduler.js:58`、`src/renderer/index.html:1410-1412`（默认勾选态文案）、`docs/ARCHITECTURE.md` §15 |
+| 验收 | 连续编辑 20 个文件 → `main.log` 零 `incremental index started (save)`；无 `still busy after 60 retries`；面板手动「重建」仍可用 |
+| 测试 | `npm run test:unit`（`test/unit/incremental-index-dedupe.test.cjs`）、`npm run test:local-gateway-smoke` |
+| 回滚 | 纯默认值改动，改回 `true` 即可 |
+
+### R2 删除本地 trigram FTS 词法通道
+
+| 项 | 内容 |
+|---|---|
+| 问题 | 426 MB（40%）买一个与 `grep` 重叠、且落后一轮增量的能力；2 字中文仍要走 `LIKE` 全表扫 |
+| 动作（方案 A，推荐） | `SCHEMA_VERSION 3 → 4`：迁移里 `DROP` 三个触发器 + `DROP TABLE chunks_fts`；`search.rs` 删 `lexical_hits`，词法只剩 `substring_hits`（放宽为「对切词后的每个词各跑一次 `LIKE`」，不再只限 2 字术语）；RRF 降为「向量 + 子串」两路 |
+| diff 面 | Rust：`crates/dieyun-core/src/index/schema.rs`（版本+迁移+触发器+测试）、`index/search.rs`（`lexical_hits` / `fts_query` / `fuse` / `empty_result` / `hit_line_from_highlight`）、`index/mod.rs`（`codebase.status` 若有 FTS 相关字段）<br>Main：`src/gateway/handlers/codebase.js`（错误文案「请稍后再试或使用 grep/读文件」保持）、`src/gateway/rpc.js`（`phase` 文案）<br>Renderer：`src/renderer/renderer-codebase-panel.js:245`（模式文案）、`src/renderer/index.html:1693-1695`（帮助文案）<br>文档：`docs/ARCHITECTURE.md` §15.1、`docs/VECTOR-SEARCH.md` §1 |
+| 为何不新增兜底 | `grep` 工具（`src/gateway/rg-search.js`）已在用 526 次/周，**它就是唯一来源**；不要复活已经死掉的 `tryRemoteGrepFallback`（见 R7） |
+| 风险（必须在验收里量化） | 中文 3 字以上从「bm25 排名」降为「子串命中按 chunk id 排序」，**召回不降、排序变差**；74k chunk 仓每次 `LIKE` ≈140 ms |
+| 保守替代（方案 B） | 只把分词器 `trigram → unicode61`（trigram 索引全部三字滑窗，unicode61 只索引词元，预计省 70–85% FTS 体积**待实测**；中文词法失效由 `LIKE`/`grep` 承担），代码结构不动，diff 面最小 |
+| 决策规则 | 方案 A 验收时若 74k chunk 仓 P95 > 200 ms，或 `codebase.search` 词法召回在 5 个真实查询上低于方案 B → 退方案 B |
+| 测试 | `npm run cargo:test`（新增迁移测试 + 现有 `search` 用例）、`npm run test:local-gateway-smoke`、`npm run verify:rpc-catalog`（若 `codebase.status` 字段有增减）、`npm run test:unit` |
+
+> 索引库是派生产物，**删库可无痛重建**——这是本次整改里唯一「删错了也能恢复」的一类改动，风险最低。
+
+### R3 向量通道改为显式 opt-in
+
+| 项 | 内容 |
+|---|---|
+| 问题 | `embeddingEnabled` 默认 `true`，建库即跑 embedding（首建墙钟 + 344 MB），而模型主动用 `codebase_search` 4 次/周；大仓还常年停在「chunk 有、向量 0」的半残态 |
+| 动作 | 建库默认只写 `chunks`（不写向量）；向量只在显式请求 `vectors: true` 时建：面板「建向量」按钮、CLI `--vectors`、以及任何显式传 `vectors` 的 RPC 调用方（`@Codebase` 与 prep 自动建库**不**带，见 §8 的取舍说明）。已存在向量照常可用 |
+| diff 面 | Rust：`crates/dieyun-core/src/index/mod.rs`（`use_vectors = self.embedding.enabled()` 的判定改为「配置启用 **且** 本次请求要求向量」）、`index/schema.rs`（`vector_count` 语义不变）、`crates/dieyun-core/src/embedding/`（`EmbeddingConfig::enabled` 不动，勿改语义）<br>Main：`src/gateway/rpc.js:667-682`（configure payload 增加「本次是否建向量」）、`src/gateway/handlers/codebase.js`（`codebase.index.start` 透传）<br>Renderer：`renderer-codebase-panel.js`（「建向量」按钮 + 未建提示）、`src/renderer/index.html:1694-1695`<br>文档：`docs/VECTOR-SEARCH.md` §1/§2、`docs/ARCHITECTURE.md` §15.1 |
+| 为何删不掉（保留理由） | 只有向量通道能回答「中文自然语言 + 不知道标识符」的查询（`LIKE` 只能字面、`grep` 要求你已知关键词）；`docs/VECTOR-SEARCH.md` §4 的换 ANN 触发条件也只在保留通道时才有意义 |
+| 为何不新增开关字段 | 不新增独立配置项：请求参数即「本次意图」，面板按钮与 `@Codebase` 都走同一个 `codebase.index.start`（单一来源），开关不进 `agent-limits` |
+| 验收 | 新建工作区 → 建库后 `codebase.status.vector_count = 0` 且不报错；`@Codebase` 一次后向量补满；`codebase.search` 在无向量时返回词法结果且 `vectorSearch=false` |
+| 测试 | `npm run test:unit`（`test/unit/vector-index.test.cjs`）、`npm run test:local-gateway-smoke`、`npm run cargo:test` |
+
+### R3 补丁：`vectors=false` 不再等于「清空向量」
+
+R3 把向量从「配置项」改成「请求参数」后，`run_index` 里那句 `if !use_vectors { DELETE FROM chunk_vectors ... }` 从「几乎不会走到」变成「最常见的路径」：面板「重建片段」、增量建库、prep 首次建库、裸 `codebase.index` 调用全都不带 `vectors`。后果是用户点「建向量」跑完几分钟、一次「重建片段」或一次保存就清零，面板回到「0（子串检索）」——**用户因此得出「向量没用」的结论，而实际从来没活过一轮**。
+
+| 项 | 内容 |
+|---|---|
+| 问题 | 「这次不要向量」被实现成「这个工作区不要向量了」：本地物理删 `chunk_vectors`；远程把 `workspace.embedding_model` 写 NULL、`vector_count` 写本批条数（增量时=0） |
+| 根因 | 请求参数承载的是**本次意图**，而代码把它当成**持久状态**。同一处代码里 `force` 全量重建（chunk id 全换）与签名变更（维度不兼容）才是真正必须清空的两种场景 |
+| 动作 | 删掉 `!use_vectors` 的 DELETE 分支；`model_changed` 的删除保留（否则新旧维度混库）。本地/远程都改成「元数据描述库里真实存在的向量」：`vector_count == 0` → `(None, 0)`，本次建了 → 用当前签名，本次没建但库里有 → **沿用旧签名与维度**。远程 `vector_count` 直接查库（`super::count_vectors`），不再累加本批 |
+| 附带 | `vectors: true` 但 embedding 端点没配（`model`/`base_url` 空或被禁用）时，RPC 直接返回 `EMBEDDING_NOT_CONFIGURED`，而不是静默跑一次「只建片段」让用户以为建好了 |
+| 增量 | `codebase-incremental-scheduler` 对「已建过向量」的工作区增量时带 `vectors: true`（此前只在 `vectorCount > 0` 才跑增量、却不带向量：按文件删旧 chunk 时向量一起没，改过的文件从此只有子串召回 —— 日志承诺「增量接管」，代码却在让覆盖率单向下滑） |
+| 面板 | `describeVectorSync` 增加覆盖度判定：`vectorCount < chunkCount` 说明增量重建过文件却没带向量，那部分只能靠子串召回 —— 以前显示「与当前设置一致」，等于把半残说成正常。同时「建向量」改为增量（`force: false`）：只补缺向量的 chunk（签名变了才整库重算），不再为了补几个文件也全量重切+重嵌 —— 那条路径太贵，等于没人点，覆盖率只会往下掉 |
+| 验收 | 建过向量的工作区跑一次「重建片段」→ 面板向量数不变、`vectorSearch=true`；未配 embedding 点「建向量」→ 明确报错；`vectorCount < chunkCount` 时面板出现「仅覆盖 N/M 段」 |
+| 测试 | `cargo test -p dieyun-core --lib`（新增 `index::tests::rebuild_without_vectors_keeps_existing_vectors`：把 DELETE 分支加回去该用例立刻红，`left: 0, right: 1`；另加 `vectors_available_follows_embedding_config`）、`test/unit/incremental-index-dedupe.test.cjs`（断言增量带 `vectors: true`）、`test/unit/vector-sync-label.test.cjs`（覆盖度文案 7 例） |
+
+### R5 调用图改为按需构建
+
+| 项 | 内容 |
+|---|---|
+| 问题 | `graph_calls` 391k 行 / 65 MB，服务 7 天 1 次 `graph` 调用；建它还要 LSP enrich 后台任务 |
+| 动作 | `graph.index` 默认只建 `symbols + imports + file_mtime`（够 `repo_map` / `symbol_search` / `module_deps`）；`callers` / `callees` / `impact` / `lsp_callers` 命中空表时，用**已有的** `autoIndex` 参数触发一次局部 calls 构建 |
+| diff 面 | Rust：`crates/dieyun-core/src/graph/build.rs`（拆分 build scope：`symbols+imports` / `+calls`）、`graph/mod.rs`（`graph.index.start` 参数）、`graph/query.rs`（`callers/callees/impact` 在 calls 缺失时返回既有的「未就绪」语义，勿新增错误码）、`graph/schema.rs`（表结构不变）<br>Main：`src/gateway/handlers/graph.js:19-37`（`graph.index.start` / `graph.index` 透传 scope；`123/136/149` 的 `autoIndex` 保持）<br>Agent：`src/agent/tool-catalog.js` `GRAPH_TOOL` 描述补一句「callers 首次可能触发一次建边」<br>Renderer：`renderer-graph-panel.js`（状态行区分「符号已建 / 调用边未建」） |
+| 唯一需新增的参数 | `graph.index.start` / `graph.index` / `graph.index_remote` 增加 `calls: boolean`（缺省 `false`）。**为何删不掉**：调用边的产物量级（65 MB / 391k 行）与触发频次（1 次/周）相差 5 个数量级，必须可选；它不进 `agent-limits`，也不是「绕过失败」的开关，而是构建范围本身。实现形态是 Rust 内部的 `GraphScope::Structural \| WithCalls` 枚举，RPC 只做布尔映射（`rpc/mod.rs:graph_scope_from_params`），不引入配置字段 |
+| 实现要点 | ①`graph/build.rs` 的 `index_file` 在 `Structural` 下直接跳过调用抽取与 `backfill_unique_callees`；②**补建必须重解析未变文件**：`calls_missing = scope.with_calls() && !force && call_count == 0` 时禁用 mtime 跳过，否则「按需建调用图」在增量模式下永远抽不到边；③`handlers/graph.js` 的 `callers`/`callees`/`lsp_resolve` 在 `indexed && callCount===0` 时自动发起一次 `calls: true` 构建并返回 `GRAPH_INDEXING_IN_PROGRESS`（提示稍后再试），不新增错误码 |
+| 验收 | 新建工作区 → `graph.status` 报 `symbol_count>0 && call_count=0`；`repo_map`/`symbol_search` 正常；`callers` 首次调用后 `call_count>0`；`graph.lsp_enrich` 不再默认后台跑 |
+| 测试 | `npm run cargo:test`、`npm run test:local-gateway-smoke`、`npm run test:lsp`（回退链）、`npm run verify:rpc-catalog` |
+
+### R7 删掉已死的 grep 兜底与误导性判定（本轮顺带发现）
+
+| 项 | 内容 |
+|---|---|
+| 问题 | `src/gateway/rpc.js:1205 tryRemoteGrepFallback` **全仓零调用**（`formatGrepMatchesAsSearchResults:1187` 仅被它使用）；`src/agent/context-signals.js:58` 判断 `data.grepFallback`，但没有任何生产者写这个字段（远端返回的是 `source`），注入块标题会恒走「全文/词元」分支 |
+| 动作 | 删 `tryRemoteGrepFallback` + `formatGrepMatchesAsSearchResults`（约 40 行）；`formatCodebaseBlock` 的模式判定改为读实际存在的字段（`vectorSearch` / `source`），或直接删掉该行 |
+| diff 面 | `src/gateway/rpc.js`、`src/agent/context-signals.js:58` |
+| 为何不做 | 不要为「远端没索引」补一条 grep 兜底：`grep` 工具本身就是那条路，补丁只会再造一个第二来源 |
+| 验收 | `npm run check:js` 通过；远端（SSH）`codebase.search` 未建库时仍抛 `INDEX_REQUIRED`，错误文案指向 `grep` |
+| 测试 | `npm run test:unit`、`npm run test:local-gateway-smoke`、`npm run test:agent` |
+
+### R1 保留并加固 `repo_map` 注入（唯一保留项）
+
+| 项 | 内容 |
+|---|---|
+| 动作 | 不动实现，只做三件事：①在 `docs/ARCHITECTURE.md` §15.2 写明「repo_map 是结构索引的保留理由」；②给注入块加断言（≤`graphRepoMapMaxChars`，且含「枢纽文件/关键符号」段）；③把 `repo_map` 的规模护栏测试保留在改动清单里（防止再次出现 O(符号×调用)） |
+| diff 面 | `docs/ARCHITECTURE.md`、`scripts/test-system-prompt-prep.cjs`（断言） |
+| 为什么必须留 | 它是唯一用 ≤1–2k token 换来「全局骨架 + 枢纽 + 模块边 + 循环依赖」的通道；`grep`/`read_file` 结构上无法回答「这个仓库长什么样、哪里是枢纽、有没有环」 |
+| 测试 | `npm run cargo:test`（`graph::query::tests::repo_map_*` 两条）、`npm run test:system-prompt-prep`（新增 `runRepoMapInjection`）、`npm run test:agent-system-prompt` |
+
+### R8 修注入触发接线（本轮最重要的一项）
+
+| 项 | 内容 |
+|---|---|
+| 问题（实测） | 7 天 947 次请求快照、33 个会话：【相关代码】注入 **0 次**、【仓库结构图】注入 **0 次**；同批快照里【项目地图 · AGENTS.md】884 次、【本轮上下文】775 次、【系统时间】正常。即**索引链路本身没坏，是根本没被触发** |
+| 根因 | Renderer 的 `injectCode` = `@Codebase` \| 消息内含路径 \| 编辑器有选区 \| 有 artifact；`allowCodebase` 由 `injectCode` 派生；`fetchGraphRepoMapBlock` 又要求 `injectCode`。于是「用户已知文件在哪」时才检索——恰好是语义检索最没用的场景；用户说「这个项目的服务端入口在哪」时，全部关卡为 false |
+| 动作 | ①`context-signals.js:shouldAutoCodebaseSearch()` 不再委托 `shouldInjectCodeContext`（那是「要不要把代码贴进上下文」的判定，语义不同），改为结构化信号：有工作区 + SSH 已连 + 查询长度 ≥4 + 无 `@Codebase` + 无打开文件/artifact；②`system-prompt-prep.js` 里 `allowCodebase = snapshot.allowCodebase ?? (injectCode \|\| autoCodebase \|\| textHasCodebaseMention(query))`；③`fetchGraphRepoMapBlock` 的门从 `if (!injectCode)` 改为 `if (!injectCode && !allowCodebase)`；④`shouldAutoCodebaseSearch` 进 renderer bundle 的 `compat` 名单，Renderer 侧用同一个判定（否则两侧漂移，索引又会 0 次被用到） |
+| 为何不是「新开关」 | 没有新增配置项、没有新增意图词表。判定只喂结构信号（工作区/连接/查询形态/显式 `@Codebase`/打开文件），符合 `AGENTS.md` 原则 3；「是否检索」这件事仍然只有一份实现 |
+| 验收 | 打开任意仓库，问一个不含路径、不含文件名的自然语言问题（如「服务端入口在哪」）→ 请求快照里出现【仓库结构图】（`repo_map` 已就绪时）或 `codebase.search` 调用；点名文件的轮次行为不变 |
+| 测试 | `npm run test:system-prompt-prep`（`runRepoMapInjection` 断言「无 `injectCode` 也要取 repo_map」）、`npm run test:unit`、`npm run check:js`、`npm run check:renderer` |
+
+---
+
+## 7. R6 Revisit 判据（3 个月后执行）
+
+3 个月后（≈2027-01-29）用同一套口径复核，满足任一条即执行「停用并删除」：
+
+1. `codebase_search` + `graph` 工具调用合计 **< 总调用 1%**（当前 5/8345 ≈ 0.06%）→ 删工具通道，只留 `repo_map` 注入；
+2. 索引库体积 **> 2 GB** 或单仓 `codebase.index` 首建 **> 10 min** → 强制走 R2 方案 A；
+3. 出现「索引滞后导致答错」的用户可见事故 ≥2 次 → 向量通道也降级为手动；
+4. 反之，若向量 opt-in 后 `codebase_search` 使用率 **> 3%** 且成功率 >90% → 证明通道有用，可考虑恢复自动建向量（但**不**恢复 trigram）。
+
+---
+
+## 8. 明确不做的事（写清楚，免得当成 TODO）
+
+- 不实现 ANN / HNSW：触发条件见 `docs/VECTOR-SEARCH.md` §4，触发前是纯负收益。
+- 不恢复符号级语义检索（`graph.embed_symbols` 一族已于本轮之前整体移除）。
+- 不把「有路径才检索」再写回去（R8 已改判据：`allowCodebase` 独立于 `injectCode`，改回即等于让索引重新 0 次被用到）。
+- 不为「远端无索引」补 grep 兜底（R7）。
+- 不做「索引新鲜度增量校验/双写/事件溯源」——索引是派生物，过期就重建一次，比补一致性机制便宜。
+- 不改 Tree-sitter 切块策略、不改 RRF 公式（本轮只删通道，不动剩下通道的算法）。
+- 不把「这次不建向量」再写成「删掉已有向量」（R3 补丁已改：`vectors=false` 只表示本次不写，清空仅限 `force` 全量重建与签名变更）。
+- 不让 `@Codebase` / prep 自动建库隐式建向量：那是把「用户的显式检索手势」变成为整库 embedding 付费的授权，且首建在 prep 里不阻塞（后台继续跑）但也不可见。向量入口保持显式（面板「建向量」/ CLI），缺口用面板的覆盖度提示暴露。要改这条，先拿 `codebase_search` 使用率与向量覆盖率数据（见 §7 复核点 4）。
+
+---
+
+## 9. 附录：数据复现
+
+```powershell
+# ① 库体与各表体积（需 better-sqlite3，仓库内已装）
+node -e "const D=require('better-sqlite3');const db=new D(process.env.APPDATA+'\\dieyunagent\\codebase-index.sqlite',{readonly:true});console.table(db.prepare('select name,round(sum(pgsize)/1048576.0,1) MB from dbstat group by name order by MB desc limit 12').all())"
+
+# ② 行数
+node -e "const D=require('better-sqlite3');const db=new D(process.env.APPDATA+'\\dieyunagent\\codebase-index.sqlite',{readonly:true});for(const t of ['workspaces','chunks','chunk_vectors','graph_symbols','graph_imports','graph_calls'])console.log(t,db.prepare('select count(*) c from '+t).get().c)"
+
+# ③ 7 天工具使用分布
+node -e "const fs=require('fs');const m=new Map();for(const l of fs.readFileSync(process.env.APPDATA+'\\dieyunagent\\tool-telemetry.jsonl','utf8').trim().split('\n')){try{const r=JSON.parse(l);m.set(r.tool,(m.get(r.tool)||0)+1)}catch{}};console.table([...m].sort((a,b)=>b[1]-a[1]).slice(0,15).map(([tool,n])=>({tool,n})))"
+
+# ④ FTS vs LIKE 延迟（把 root_hash 换成目标工作区）
+node -e "const D=require('better-sqlite3');const db=new D(process.env.APPDATA+'\\dieyunagent\\codebase-index.sqlite',{readonly:true});const q=db.prepare('select count(*) c from chunks where root_hash=? and content like ?');const t=Date.now();console.log('LIKE hits',q.get('edf29efc5f04d515','%配置%').c,Date.now()-t+'ms')"
+```
+
+> 单机单周样本 + 公开资料，够下「默认值该翻」的判断，不够下「全量删除」的判断——所以 R2/R3/R5 都保留了保守分支与 revisit 判据。

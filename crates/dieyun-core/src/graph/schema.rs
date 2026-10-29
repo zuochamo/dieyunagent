@@ -19,6 +19,9 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), CoreError> {
         .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?
         .is_some();
     if has_graph {
+        // 老库才需要清残留；新库在 init_graph_schema 里压根不会建那张表
+        drop_legacy_symbol_vectors(conn)
+            .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
         return Ok(());
     }
     init_graph_schema(conn).map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))
@@ -83,13 +86,6 @@ pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_graph_calls_root ON graph_calls(root_hash);
         CREATE INDEX IF NOT EXISTS idx_graph_calls_caller ON graph_calls(caller_symbol_id);
         CREATE INDEX IF NOT EXISTS idx_graph_calls_callee ON graph_calls(root_hash, callee_name);
-        CREATE TABLE IF NOT EXISTS graph_symbol_vectors (
-            symbol_id INTEGER PRIMARY KEY,
-            dims INTEGER NOT NULL,
-            vector BLOB NOT NULL,
-            symbol_mtime INTEGER NOT NULL,
-            FOREIGN KEY(symbol_id) REFERENCES graph_symbols(id) ON DELETE CASCADE
-        );
         ",
     )?;
     ensure_column(
@@ -99,14 +95,34 @@ pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
         "INTEGER DEFAULT 0",
     )?;
     ensure_column(conn, "graph_workspaces", "call_count", "INTEGER DEFAULT 0")?;
-    ensure_column(
-        conn,
-        "graph_workspaces",
-        "symbol_vector_count",
-        "INTEGER DEFAULT 0",
-    )?;
-    ensure_column(conn, "graph_workspaces", "symbol_embedding_model", "TEXT")?;
     Ok(())
+}
+
+/// 收掉已删除能力的残留状态：`graph_symbol_vectors` 表连同向量 BLOB、以及
+/// `graph_workspaces` 上的两列。
+///
+/// 在 [`ensure_schema`] 里**无条件**跑（新建的库是空操作）：只放在 `init_graph_schema`
+/// 里没用 —— 那个函数在 `graph_workspaces` 已存在时直接返回，老库永远走不到。
+fn drop_legacy_symbol_vectors(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("DROP TABLE IF EXISTS graph_symbol_vectors;")?;
+    drop_column_if_exists(conn, "graph_workspaces", "symbol_vector_count")?;
+    drop_column_if_exists(conn, "graph_workspaces", "symbol_embedding_model")?;
+    Ok(())
+}
+
+fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+    let sql = format!("ALTER TABLE {table} DROP COLUMN {column}");
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("no such column") {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 fn ensure_column(
@@ -126,5 +142,59 @@ fn ensure_column(
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 老库迁移：符号向量表与两列在打开时被收掉，且不损伤其它结构图谱数据。
+    #[test]
+    fn ensure_schema_drops_legacy_symbol_vector_state() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_graph_schema(&conn).unwrap();
+        // 造出老库形状：表 + 两列 + 一行真实数据
+        conn.execute_batch(
+            "CREATE TABLE graph_symbol_vectors (
+                 symbol_id INTEGER PRIMARY KEY, dims INTEGER NOT NULL,
+                 vector BLOB NOT NULL, symbol_mtime INTEGER NOT NULL);
+             ALTER TABLE graph_workspaces ADD COLUMN symbol_vector_count INTEGER DEFAULT 0;
+             ALTER TABLE graph_workspaces ADD COLUMN symbol_embedding_model TEXT;
+             INSERT INTO graph_workspaces (root_hash, root_path, file_count, symbol_count)
+                 VALUES ('rh', '/tmp', 7, 42);",
+        )
+        .unwrap();
+
+        ensure_schema(&conn).expect("migrate");
+
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='graph_symbol_vectors'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 0, "死表应被删掉");
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(graph_workspaces)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(!cols.iter().any(|c| c == "symbol_vector_count"));
+        assert!(!cols.iter().any(|c| c == "symbol_embedding_model"));
+        // 原有数据不受影响
+        let (files, symbols): (i64, i64) = conn
+            .query_row(
+                "SELECT file_count, symbol_count FROM graph_workspaces WHERE root_hash = 'rh'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((files, symbols), (7, 42));
+        // 再跑一次：幂等
+        ensure_schema(&conn).expect("idempotent");
     }
 }

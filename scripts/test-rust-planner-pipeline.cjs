@@ -19,7 +19,6 @@ async function main() {
   await bridge.configure({
     data_dir: path.join(require('os').tmpdir(), 'dieyun-planner-rpc-test'),
     workspace_roots: [process.cwd()],
-    models_dirs: [path.join(__dirname, '..', 'models')],
     embedding: { disabled: true, builtin: false, baseUrl: '', apiKey: '', model: '', dimensions: 1024 }
   });
 

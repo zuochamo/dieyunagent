@@ -2,76 +2,12 @@
 
 const fs = require('fs');
 const path = require('path');
+const { isIgnoredRelPath } = require('./source-files');
 
 const DEFAULT_DEBOUNCE_MS = 1200;
 /** watcher 出错（EMFILE / NFS 抖动 / 目录被替换）后的自动重建参数 */
 const WATCH_RETRY_MS = 5000;
 const MAX_WATCH_RETRIES = 3;
-
-/** 粗过滤：明显不属于源码的目录/扩展名直接跳过，细过滤交给索引调度器 */
-const IGNORE_DIRS = new Set([
-  'node_modules',
-  '.git',
-  'dist',
-  'build',
-  'out',
-  '.dieyun',
-  'coverage',
-  '__pycache__',
-  '.venv',
-  'venv',
-  '.next',
-  '.nuxt',
-  'target',
-  'vendor',
-  'win-unpacked'
-]);
-
-const IGNORE_EXT = new Set([
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.gif',
-  '.webp',
-  '.ico',
-  '.bmp',
-  '.zip',
-  '.7z',
-  '.rar',
-  '.gz',
-  '.exe',
-  '.dll',
-  '.so',
-  '.dylib',
-  '.wasm',
-  '.pdf',
-  '.woff',
-  '.woff2',
-  '.ttf',
-  '.mp4',
-  '.mp3',
-  '.sqlite',
-  '.db',
-  '.pyc',
-  '.class',
-  '.jar'
-]);
-
-function isIgnoredRelPath(rel) {
-  const norm = String(rel || '').replace(/\\/g, '/');
-  if (!norm) return true;
-  const parts = norm.split('/');
-  for (const seg of parts.slice(0, -1)) {
-    if (IGNORE_DIRS.has(seg) || seg.startsWith('.')) return true;
-  }
-  const base = parts[parts.length - 1];
-  if (!base) return true;
-  const ext = path.extname(base).toLowerCase();
-  // 无扩展名的隐藏文件（.DS_Store 等）忽略；带扩展名的按类型判断，
-  // 否则 .eslintrc.js / .babelrc.js 这类源码级 dotfile 会被漏掉
-  if (!ext) return base.startsWith('.');
-  return IGNORE_EXT.has(ext);
-}
 
 /**
  * 工作区索引监听：让**外部改动**（git checkout、外部编辑器、构建产物）也能触发

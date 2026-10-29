@@ -1,6 +1,6 @@
 /* global window, document, $, gwState, gatewayCall, settings, saveSettings, currentSessionId,
    resolveSessionWorkspacePathForRpc, resolveSessionWorkspacePathSync,
-   resolveWorkspaceRootForIndexPanels */
+   resolveWorkspaceRootForIndexPanels, describeVectorSync */
 'use strict';
 
 let codebasePanelPollTimer = null;
@@ -50,7 +50,8 @@ async function resolveCodebaseWorkspaceRootAsync() {
 function isCodebasePaneActive() {
   const panel = document.getElementById('artifacts-panel');
   if (!panel || panel.hidden || panel.classList.contains('is-panel-closing')) return false;
-  const pane = document.querySelector('.side-panel-pane[data-side-pane="codebase"]');
+  // 两个索引已合并在同一个「索引」面板里（data-side-pane="index"）
+  const pane = document.querySelector('.side-panel-pane[data-side-pane="index"]');
   return !!(pane && !pane.hidden);
 }
 
@@ -80,22 +81,18 @@ function scheduleCodebasePanelPoll(mode) {
 function syncCodebaseAutoIncrementalCheckbox() {
   const autoCb = $('codebase-auto-incremental');
   if (!autoCb) return;
-  autoCb.checked = !!(settings && settings.codebaseAutoIncremental !== false);
+  // 默认关（重活：chunk + FTS + embedding），只有显式打开才跑；见 docs/INDEX-VALUE-REVIEW.md §R4
+  autoCb.checked = !!(settings && settings.codebaseAutoIncremental === true);
 }
 
-function syncCodebaseRailBusy(busy, tip) {
-  const rail = document.querySelector('.side-panel-rail-btn[data-side-tab="codebase"]');
+function syncCodebaseRailBusy(busy) {
+  const rail = document.querySelector('.side-panel-rail-btn[data-side-tab="index"]');
   if (!rail) return;
-  const on = !!busy;
-  rail.classList.toggle('is-busy', on);
-  if (on) {
-    const msg = tip || '构建中…';
-    rail.title = `代码索引 · ${msg}`;
-    rail.setAttribute('aria-label', `代码索引，${msg}`);
-  } else {
-    rail.title = '代码索引';
-    rail.setAttribute('aria-label', '代码索引');
-  }
+  // rail 现在是「索引」共用入口：两个索引各自只标记自己那半，合成状态
+  // （is-busy / title）由 renderer-index-panel.js:applyIndexRailBusy 唯一决定，
+  // 否则两边 refresh 会互相把对方的 busy 清掉。
+  rail.dataset.busyCodebase = busy ? '1' : '';
+  if (typeof window.applyIndexRailBusy === 'function') window.applyIndexRailBusy();
 }
 
 async function refreshCodebasePanelStatus() {
@@ -109,6 +106,8 @@ async function refreshCodebasePanelStatus() {
     setCodebasePanelText('cb-stat-chunks', '—');
     setCodebasePanelText('cb-stat-vectors', '—');
     setCodebasePanelText('cb-stat-embedding', '—');
+    setCodebasePanelText('cb-stat-embedding-dims', '—');
+    setCodebasePanelText('cb-stat-embedding-sync', '—');
     setCodebasePanelText('cb-stat-updated', '—');
     setCodebasePanelText('cb-stat-progress', '—');
     if (rebuildBtn) rebuildBtn.disabled = true;
@@ -132,11 +131,22 @@ async function refreshCodebasePanelStatus() {
     setCodebasePanelText('cb-stat-chunks', String(st.chunkCount ?? 0));
     setCodebasePanelText(
       'cb-stat-vectors',
-      st.vectorCount ? `${st.vectorCount}（语义搜索）` : '0（仅关键词）'
+      st.vectorCount ? `${st.vectorCount}（语义搜索）` : '0（子串检索）'
+    );
+    // 向量元信息：模型/维度是**库里实际写入**的值，一致性由 core 比对当前设置得出
+    setCodebasePanelText('cb-stat-embedding', st.embeddingModel || '—');
+    setCodebasePanelText(
+      'cb-stat-embedding-dims',
+      Number(st.embeddingDims) > 0 ? String(st.embeddingDims) : '—'
     );
     setCodebasePanelText(
-      'cb-stat-embedding',
-      st.embeddingModel || (st.vectorCount ? '—' : '未启用 / 未写入')
+      'cb-stat-embedding-sync',
+      describeVectorSync({
+        count: st.vectorCount,
+        chunks: st.chunkCount,
+        stale: st.embeddingStale,
+        enabled: st.embeddingEnabled,
+      })
     );
     setCodebasePanelText('cb-stat-updated', formatCodebaseIndexedAt(st.indexedAt));
 
@@ -200,16 +210,20 @@ async function refreshCodebasePanelStatus() {
   }
 }
 
-async function rebuildCodebasePanelIndex() {
+async function rebuildCodebasePanelIndex(opts = {}) {
   const root = await resolveCodebaseWorkspaceRootAsync();
-  const btn = $('codebase-panel-rebuild');
+  const btn = $(opts.vectors ? 'codebase-panel-vectors' : 'codebase-panel-rebuild');
   if (!root) return;
   if (btn) btn.disabled = true;
-  setCodebasePanelText('cb-stat-state', '正在重建…');
+  // 「建向量」走增量（force:false）：core 只补缺向量的 chunk，签名变了才整库重算。
+  // 以前这里一律 force:true —— 为了补几个改过的文件也要把整库重新切块 + 重新 embedding，
+  // 于是没人愿意点，向量覆盖率就一直掉。全量重切是「重建片段」按钮的职责。
+  const force = opts.vectors ? false : true;
+  setCodebasePanelText('cb-stat-state', opts.vectors ? '正在补齐向量…' : '正在重建…');
   try {
     await gatewayCall(
       'codebase.index.start',
-      { workspaceRoot: root, force: true, skipIfReady: false },
+      { workspaceRoot: root, force, skipIfReady: false, vectors: !!opts.vectors },
       { timeoutMs: 60000 }
     );
   } catch (err) {
@@ -230,7 +244,7 @@ function renderCodebaseSearchHits(data) {
     }</p>`;
     return;
   }
-  const mode = data.vectorSearch ? '语义+关键词' : '关键词';
+  const mode = data.vectorSearch ? '语义+子串' : '子串';
   const items = results
     .slice(0, 12)
     .map((hit) => {
@@ -250,36 +264,6 @@ function renderCodebaseSearchHits(data) {
     })
     .join('');
   box.innerHTML = `<p class="codebase-search-meta">模式：${mode} · ${results.length} 条</p>${items}`;
-}
-
-async function runCodebasePanelSearch() {
-  const root = await resolveCodebaseWorkspaceRootAsync();
-  const input = $('codebase-panel-query');
-  const box = $('codebase-panel-results');
-  const q = input ? String(input.value || '').trim() : '';
-  if (!root) {
-    if (box) box.innerHTML = '<p class="artifacts-empty">请先选择工作空间</p>';
-    return;
-  }
-  if (!q) {
-    if (box) box.innerHTML = '<p class="artifacts-empty">请输入搜索词</p>';
-    return;
-  }
-  if (box) box.innerHTML = '<p class="artifacts-empty">搜索中…</p>';
-  try {
-    const data = await gatewayCall(
-      'codebase.search',
-      { workspaceRoot: root, query: q, limit: 10, autoIndex: false },
-      { timeoutMs: 60000 }
-    );
-    renderCodebaseSearchHits(data);
-  } catch (err) {
-    if (box) {
-      box.innerHTML = `<p class="artifacts-empty">搜索失败：${
-        err && err.message ? err.message : err
-      }</p>`;
-    }
-  }
 }
 
 function onCodebasePanelShown() {
@@ -313,18 +297,18 @@ function initCodebasePanel() {
   $('codebase-panel-rebuild')?.addEventListener('click', () => {
     rebuildCodebasePanelIndex().catch(() => {});
   });
-  $('codebase-panel-search-btn')?.addEventListener('click', () => {
-    runCodebasePanelSearch().catch(() => {});
+  // 向量是显式 opt-in：只有点这个按钮才让 core 跑 embedding
+  $('codebase-panel-vectors')?.addEventListener('click', () => {
+    rebuildCodebasePanelIndex({ vectors: true }).catch(() => {});
   });
-  $('codebase-panel-query')?.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter') {
-      ev.preventDefault();
-      runCodebasePanelSearch().catch(() => {});
-    }
-  });
+  // 「试搜」入口已合并到统一的索引搜索框，见 renderer-index-panel.js
 }
 
 window.initCodebasePanel = initCodebasePanel;
 window.onCodebasePanelShown = onCodebasePanelShown;
 window.onCodebasePanelHidden = onCodebasePanelHidden;
 window.refreshCodebasePanelStatus = refreshCodebasePanelStatus;
+// 片段命中的渲染唯一实现（统一搜索框复用；勿在别处再写一份）
+window.renderCodebaseSearchHits = renderCodebaseSearchHits;
+// 工作区解析的唯一来源（统一搜索框与「刷新」共用）
+window.resolveCodebaseWorkspaceRootAsync = resolveCodebaseWorkspaceRootAsync;

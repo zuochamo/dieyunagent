@@ -5,9 +5,7 @@ use rusqlite::params;
 use serde::Deserialize;
 
 use super::workspace::WorkspaceRef;
-use super::{
-    truncate_chars, IndexService, StatusResult, CHUNK_CONTENT_MAX_CHARS,
-};
+use super::{delete_all_chunks, insert_chunk, IndexService, StatusResult};
 use crate::embedding;
 use crate::error::CoreError;
 
@@ -39,10 +37,11 @@ impl IndexService {
         &self,
         ws: &WorkspaceRef,
         force: bool,
+        vectors: bool,
     ) -> Result<(), CoreError> {
         if !force {
             let st = self.status(&ws.key)?;
-            let sig = self.embedding.signature(&self.models_dirs);
+            let sig = self.embedding.signature();
             let embedding_stale = st.chunk_count > 0
                 && !sig.is_empty()
                 && st.embedding_model.as_deref().unwrap_or("") != sig;
@@ -71,32 +70,20 @@ impl IndexService {
             params![ws.root_hash, ws.key],
         )
         .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
-        conn.execute(
-            "DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE root_hash = ?1)",
-            params![ws.root_hash],
-        )
-        .ok();
-        conn.execute(
-            "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE root_hash = ?1)",
-            params![ws.root_hash],
-        )
-        .ok();
-        conn.execute(
-            "DELETE FROM chunks WHERE root_hash = ?1",
-            params![ws.root_hash],
-        )
-        .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
+        // 清空复用本机索引的同一个入口
+        delete_all_chunks(&conn, &ws.root_hash)?;
 
-        let use_vectors = self.embedding.enabled(&self.models_dirs);
+        // 与 `run_index` 同一条规则：向量只在调用方显式要求时建。
+        let use_vectors = vectors && self.embedding.enabled();
         let state = RemoteIngestState {
             root_key: ws.key.clone(),
             pending_embed: Vec::new(),
             file_count: 0,
             chunk_count: 0,
             use_vectors,
-            embed_sig: self.embedding.signature(&self.models_dirs),
+            embed_sig: self.embedding.signature(),
             embed_dims: if use_vectors {
-                self.embedding.effective_dimensions(&self.models_dirs)
+                self.embedding.dimensions
             } else {
                 0
             },
@@ -136,35 +123,25 @@ impl IndexService {
             state.file_count += 1;
             let rel = file.rel_path.replace('\\', "/");
 
-            let mut push_chunk =
-                |start_line: i64, end_line: i64, slice: &str| -> Result<(), CoreError> {
-                    if slice.trim().is_empty() {
-                        return Ok(());
-                    }
-                    let content = truncate_chars(slice, CHUNK_CONTENT_MAX_CHARS);
-                    tx.execute(
-                    "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![ws.root_hash, rel, start_line, end_line, content, file.mtime],
-                )
-                .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
-                    let id = tx.last_insert_rowid();
-                    tx.execute(
-                        "INSERT INTO chunks_fts (rowid, rel_path, content) VALUES (?1, ?2, ?3)",
-                        params![id, rel, content],
-                    )
-                    .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
-                    state.chunk_count += 1;
-                    if state.use_vectors && !content.trim().is_empty() {
-                        state.pending_embed.push((id, content.to_string()));
-                    }
-                    Ok(())
-                };
-
             for (start_line, end_line, slice) in
                 crate::treesitter::iter_chunk_slices(&rel, &file.content)
             {
-                push_chunk(start_line, end_line, &slice)?;
+                let Some((id, content)) = insert_chunk(
+                    &tx,
+                    &ws.root_hash,
+                    &rel,
+                    start_line,
+                    end_line,
+                    &slice,
+                    file.mtime,
+                )?
+                else {
+                    continue;
+                };
+                state.chunk_count += 1;
+                if state.use_vectors {
+                    state.pending_embed.push((id, content));
+                }
             }
         }
 
@@ -185,7 +162,41 @@ impl IndexService {
         Ok(())
     }
 
+    /// 远程摄取的收尾：**成功与失败都必须走到**，否则该工作区会被永久卡住。
+    ///
+    /// 半路失败（embedding 报错、写库失败）时若不清理：`self.indexing` 里留着这个
+    /// root → `status` 恒报「索引中」、`codebase.search` 一直被 `INDEXING_IN_PROGRESS`
+    /// 挡掉；`workspaces.indexing` 停在 1；`jobs` 里已无 state，再 `begin` 静默返回
+    /// Ok 而 `push` 必然报 `REMOTE_INDEX_STATE`。只有重启进程能恢复。
     pub async fn index_remote_finish(&self, ws: &WorkspaceRef) -> Result<StatusResult, CoreError> {
+        let result = self.index_remote_finish_inner(ws).await;
+
+        // 唯一收尾点：无论成败，放锁 + 清 job + 清进度 / 落 indexing=0
+        if let Ok(mut guard) = self.indexing.lock() {
+            guard.remove(&ws.root_hash);
+        }
+        if let Ok(mut jobs) = self.remote_ingest.jobs.lock() {
+            jobs.remove(&ws.root_hash);
+        }
+        match &result {
+            Ok(_) => self.clear_progress(&ws.root_hash),
+            Err(e) => {
+                self.set_progress_error(&ws.root_hash, &e.to_string());
+                if let Ok(conn) = self.open_dedicated() {
+                    let _ = conn.execute(
+                        "UPDATE workspaces SET indexing = 0 WHERE root_hash = ?1",
+                        params![ws.root_hash],
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    async fn index_remote_finish_inner(
+        &self,
+        ws: &WorkspaceRef,
+    ) -> Result<StatusResult, CoreError> {
         let state = self
             .remote_ingest
             .jobs
@@ -195,7 +206,22 @@ impl IndexService {
             .ok_or_else(|| CoreError::rpc("REMOTE_INDEX_STATE", "远程索引未 begin"))?;
 
         let conn = self.open_dedicated()?;
-        let mut vector_count = 0i64;
+        // 本次不要向量时（`vectors=false`）沿用库里的签名与维度，别把已有向量的元数据
+        // 抹成 NULL/0——那会让 status 报 vectorCount=0，检索侧 `can_vector` 直接判 false，
+        // 一次不带向量的重建就把语义检索通道静默关掉（与本地 `run_index` 同一条规则）。
+        let (prev_embed_model, prev_embed_dims): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT embedding_model, embedding_dims FROM workspaces WHERE root_hash = ?1",
+                params![ws.root_hash],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    ))
+                },
+            )
+            .unwrap_or((None, 0));
+
         if state.use_vectors && !state.pending_embed.is_empty() {
             self.set_progress(
                 &ws.root_hash,
@@ -206,7 +232,7 @@ impl IndexService {
                 0,
             );
             let embedded =
-                embedding::embed_batches(&self.embedding, &self.models_dirs, &state.pending_embed)
+                embedding::embed_batches(&self.embedding, &state.pending_embed)
                     .await?;
             for (chunk_id, vec) in embedded {
                 let blob = embedding::vector_to_blob(&vec);
@@ -215,9 +241,12 @@ impl IndexService {
                     params![chunk_id, vec.len() as i64, blob],
                 )
                 .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
-                vector_count += 1;
             }
         }
+
+        // 以库里的真实条数为准：本次没建向量（增量 / 远端 push）时库里的向量仍在，
+        // 只累加本批条数会把它写成 0。
+        let vector_count = super::count_vectors(&conn, &ws.root_hash)?;
 
         self.set_progress(
             &ws.root_hash,
@@ -232,10 +261,12 @@ impl IndexService {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let embedding_model = if state.use_vectors && vector_count > 0 {
-            Some(state.embed_sig)
+        let (embedding_model, embed_dims) = if vector_count == 0 {
+            (None, 0i64)
+        } else if state.use_vectors {
+            (Some(state.embed_sig.clone()), state.embed_dims as i64)
         } else {
-            None
+            (prev_embed_model, prev_embed_dims)
         };
 
         conn.execute(
@@ -259,15 +290,16 @@ impl IndexService {
                 vector_count,
                 now,
                 embedding_model,
-                state.embed_dims as i64
+                embed_dims
             ],
         )
         .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
 
-        if let Ok(mut guard) = self.indexing.lock() {
-            guard.remove(&ws.root_hash);
-        }
-        self.clear_progress(&ws.root_hash);
+        // chunks 被整批换掉（begin 里 delete_all_chunks），常驻向量池里的 chunk id 全部
+        // 作废。不刷新的话池里只剩查不到行的旧 id，向量通道整条静默消失（检索退化成
+        // 词法 / 词元覆盖率），直到进程重启才恢复。
+        self.refresh_pool(&conn, &ws.root_hash);
+
         self.status(&ws.key)
     }
 }

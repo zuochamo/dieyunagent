@@ -26,7 +26,6 @@ async function main() {
   await bridge.configure({
     data_dir: dataDir,
     workspace_roots: [workspace],
-    models_dirs: [path.join(__dirname, '..', 'models')]
   });
 
   const ping = await bridge.invoke('core.ping', {});
@@ -38,8 +37,7 @@ async function main() {
   const search = await bridge.invoke('codebase.search', {
     workspaceRoot: workspace,
     query: 'AgentRunEvent',
-    limit: 3,
-    autoIndex: false
+    limit: 3
   });
   console.log('search hits:', search.results?.length || 0);
   if (search.results?.[0]) console.log('first:', search.results[0].path);

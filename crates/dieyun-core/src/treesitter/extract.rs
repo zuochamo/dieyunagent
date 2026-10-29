@@ -45,6 +45,13 @@ fn line_of(node: tree_sitter::Node) -> i64 {
     (node.start_position().row + 1) as i64
 }
 
+/// 去掉字符串字面量两端的引号（`'x'` / `"x"` / `` `x` ``）。
+fn unquote(text: &str) -> String {
+    text.trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .to_string()
+}
+
 fn end_line_of(node: tree_sitter::Node) -> i64 {
     (node.end_position().row + 1) as i64
 }
@@ -52,13 +59,18 @@ fn end_line_of(node: tree_sitter::Node) -> i64 {
 fn collect_js_like(node: tree_sitter::Node, src: &[u8], out: &mut AstGraphExtract) {
     match node.kind() {
         "import_statement" | "export_statement" => {
-            // import ... from 'x' / require('x') 旁支在 call 处理
-            let text = node_text(node, src);
-            if let Some(spec) = extract_quoted_module(text) {
-                out.imports.push(ParsedImport {
-                    spec,
-                    line: line_of(node),
-                });
+            // 模块名只认 AST 的 `source` 字段：`import ... from 'x'`、`export ... from 'x'`
+            // 才有它。不能扫「节点文本里的第一个字符串」—— `export const MODE = "foo"`
+            // 会把 "foo" 当模块名，凭空造出一条外部依赖；`export function f() { return "a" }`
+            // 同理（require('x') 的旁支在 call_expression 处理）。
+            if let Some(source) = node.child_by_field_name("source") {
+                let spec = unquote(node_text(source, src));
+                if !spec.is_empty() {
+                    out.imports.push(ParsedImport {
+                        spec,
+                        line: line_of(node),
+                    });
+                }
             }
         }
         "call_expression" => {
@@ -442,5 +454,28 @@ class Foo { bar() { caller(); } }
         assert!(r.imports.iter().any(|i| i.spec.contains(".helper") || i.spec == ".helper"));
         assert!(r.symbols.iter().any(|s| s.name == "main"));
         assert!(r.calls.iter().any(|c| c.callee == "work"));
+    }
+
+    /// `export_statement` 里的普通字符串不是模块名：只有 `export ... from 'x'` 才算依赖。
+    /// （曾把节点文本里第一个字符串当模块名，`export const MODE = "foo"` 会造出假依赖）
+    #[test]
+    fn export_statement_without_source_is_not_an_import() {
+        let src = r#"
+export const MODE = "foo";
+export function f() { return "a"; }
+export { x } from './real';
+"#;
+        let r = extract_graph_ast("a.js", src).expect("ast");
+        let specs: Vec<&str> = r.imports.iter().map(|i| i.spec.as_str()).collect();
+        assert_eq!(specs, vec!["./real"], "只应有 export ... from 那一条: {specs:?}");
+    }
+
+    /// `import` 的模块名取 AST 的 source 字段，不受语句里其它字符串影响。
+    #[test]
+    fn import_spec_comes_from_source_field() {
+        let src = "import { a } from './lib';\nconst s = 'not-a-module';\n";
+        let r = extract_graph_ast("a.js", src).expect("ast");
+        let specs: Vec<&str> = r.imports.iter().map(|i| i.spec.as_str()).collect();
+        assert_eq!(specs, vec!["./lib"], "不应把普通字符串当模块名: {specs:?}");
     }
 }

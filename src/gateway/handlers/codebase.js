@@ -24,7 +24,7 @@ function createCodebaseHandlers(d) {
     while (st && st.indexing && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, INDEX_WAIT_INTERVAL_MS));
       try {
-        const next = await invokeIndexCore(ctxInfo, 'codebase.status', {}, 20000);
+        const next = await invokeIndexCore(ctxInfo, 'codebase.status', {}, 45000);
         if (!next) break;
         st = next;
         if (!st.indexing) break;
@@ -58,31 +58,38 @@ function createCodebaseHandlers(d) {
       };
     },
 
-    'codebase.index.start': async ({ workspaceRoot, force, skipIfReady }) => {
+    'codebase.index.start': async ({ workspaceRoot, force, skipIfReady, vectors }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
       // 显式 false 才跳过；缺省 force 走 true（手动重建）
       const r = await startCodebaseIndexForContext(ctxInfo, {
         force: force === undefined ? true : !!force,
-        skipIfReady: skipIfReady === undefined ? true : !!skipIfReady
+        skipIfReady: skipIfReady === undefined ? true : !!skipIfReady,
+        // 向量是显式 opt-in：面板/调用方要语义检索才传 true
+        vectors: !!vectors
       });
       const { job, ...rest } = r || {};
       void job;
       return { ok: true, ...rest };
     },
 
-    'codebase.index': async ({ workspaceRoot, force }) => {
+    'codebase.index': async ({ workspaceRoot, force, vectors }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
       if (ctxInfo.kind === 'remote') {
-        return invokeIndexCore(ctxInfo, 'codebase.index', { force: force !== false }, 600000);
+        return invokeIndexCore(
+          ctxInfo,
+          'codebase.index',
+          { force: force !== false, vectors: !!vectors },
+          600000
+        );
       }
       return requireRustCore(
         'codebase.index',
-        { workspaceRoot: ctxInfo.rootKey, force: force !== false },
+        { workspaceRoot: ctxInfo.rootKey, force: force !== false, vectors: !!vectors },
         600000
       );
     },
 
-    'codebase.search': async ({ workspaceRoot, query, limit, autoIndex }) => {
+    'codebase.search': async ({ workspaceRoot, query, limit }) => {
       const q = String(query || '').trim();
       if (!q) {
         const e = new Error('query 必填');
@@ -100,20 +107,14 @@ function createCodebaseHandlers(d) {
         throw e;
       }
       if (!codebaseHasSearchableIndex(st)) {
-        // 不做 search 内同步建库 / grep 降级
-        if (autoIndex !== false) {
-          const e = new Error('代码库尚未索引，请稍后再试或使用 grep/读文件');
-          e.code = 'INDEX_REQUIRED';
-          throw e;
-        }
-        const e = new Error('代码库尚未索引');
+        // 不在 search 内同步建库：建库要跑 embedding，由面板 / prep 的 index.start 负责
+        const e = new Error('代码库尚未索引，请稍后再试或使用 grep/读文件');
         e.code = 'INDEX_REQUIRED';
         throw e;
       }
       return invokeIndexCore(ctxInfo, 'codebase.search', {
         query: q,
-        limit,
-        autoIndex: false
+        limit
       });
     },
   };

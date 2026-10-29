@@ -24,7 +24,9 @@ function isSidePanelOpen() {
 
 function loadSavedSideTab() {
   try {
-    const t = window.localStorage.getItem(SIDE_PANEL_TAB_KEY);
+    const raw = window.localStorage.getItem(SIDE_PANEL_TAB_KEY);
+    // 旧版本把「代码索引 / 结构索引」存成两个页签；现在合并为「索引」，读回时迁移
+    const t = raw === 'codebase' || raw === 'graph' ? 'index' : raw;
     if (
     t === 'changes' ||
     t === 'scm' ||
@@ -34,8 +36,7 @@ function loadSavedSideTab() {
     t === 'artifacts' ||
     t === 'context' ||
     t === 'subagents' ||
-    t === 'codebase' ||
-    t === 'graph' ||
+    t === 'index' ||
     t === 'ssh'
   )
     return t;
@@ -124,10 +125,9 @@ function setSidePanelTab(tab, opts) {
   }
   if (next === 'subagents' && typeof onSubagentsPanelShown === 'function') onSubagentsPanelShown();
   else if (typeof onSubagentsPanelHidden === 'function') onSubagentsPanelHidden();
-  if (next === 'codebase' && typeof onCodebasePanelShown === 'function') onCodebasePanelShown();
-  else if (typeof onCodebasePanelHidden === 'function') onCodebasePanelHidden();
-  if (next === 'graph' && typeof onGraphPanelShown === 'function') onGraphPanelShown();
-  else if (typeof onGraphPanelHidden === 'function') onGraphPanelHidden();
+  // 代码片段索引与结构索引合并在同一个「索引」页签里（见 renderer-index-panel.js）
+  if (next === 'index' && typeof onIndexPanelShown === 'function') onIndexPanelShown();
+  else if (typeof onIndexPanelHidden === 'function') onIndexPanelHidden();
 
   // 离开浏览器页时必须收起 BrowserView，否则会盖住侧栏按钮导致无法切换
   if (typeof syncBrowserBounds === 'function') {

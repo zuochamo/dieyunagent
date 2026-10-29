@@ -9,7 +9,7 @@ use crate::compaction;
 use crate::config::{AppConfig, ConfigureParams, VERSION};
 use crate::error::{CoreError, RpcErrorBody};
 use crate::fs_ops;
-use crate::graph::GraphService;
+use crate::graph::{GraphScope, GraphService};
 use crate::index::IndexService;
 use crate::memory;
 use crate::planner::PlannerRunManager;
@@ -496,9 +496,21 @@ impl ServiceSnapshot {
                     .get("skipIfReady")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
+                // 向量是显式 opt-in：不传就只建 chunk（子串检索可用）
+                let vectors = params
+                    .get("vectors")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                // 要求向量却没配 embedding 端点时必须报错：静默退化会让用户以为建好了
+                if vectors && !self.index.vectors_available() {
+                    return Err(CoreError::rpc(
+                        "EMBEDDING_NOT_CONFIGURED",
+                        "未配置 Embedding 端点（模型 / base_url），无法生成向量；可先只建片段，或在设置里配好 embedding 后重试",
+                    ));
+                }
                 let r = self
                     .index
-                    .start_index_workspace(workspace_root, force, skip_if_ready)?;
+                    .start_index_workspace(workspace_root, force, skip_if_ready, vectors)?;
                 Ok(serde_json::to_value(r)?)
             }
             "graph.status" => {
@@ -522,9 +534,11 @@ impl ServiceSnapshot {
                     .get("skipIfReady")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
+                // 调用图按需（R5）：只有 callers/callees/impact 才需要它
+                let scope = graph_scope_from_params(&params);
                 let r = self
                     .graph
-                    .start_index_workspace(workspace_root, force, skip_if_ready)?;
+                    .start_index_workspace(workspace_root, force, skip_if_ready, scope)?;
                 Ok(serde_json::to_value(r)?)
             }
             "graph.module_deps" => {
@@ -638,6 +652,23 @@ impl ServiceSnapshot {
                 format!("未知 RPC: {method}"),
             )),
         }
+    }
+}
+
+/// 结构索引的建库范围（R5 的唯一解析点）。
+///
+/// `calls` 缺省 **false**：符号 + import + mtime 是 `repo_map` / `find_symbol` /
+/// `module_deps` 的底座，必须常建；调用关系只有 `callers` / `callees` / `impact`
+/// 用得到，由调用方按需打开（传 `calls: true`）。
+fn graph_scope_from_params(params: &Value) -> GraphScope {
+    let with_calls = params
+        .get("calls")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if with_calls {
+        GraphScope::WithCalls
+    } else {
+        GraphScope::Structural
     }
 }
 
@@ -899,8 +930,7 @@ impl AppState {
                     guard.graph = GraphService::new(codebase_db);
                     if same_path(&old_mem_path, &new_mem_path) {
                         let embedding = guard.config.embedding.clone();
-                        let models_dirs = guard.config.models_dirs.clone();
-                        guard.memory.set_embedding(embedding, models_dirs);
+                        guard.memory.set_embedding(embedding);
                         None
                     } else {
                         Some(guard.config.clone())
@@ -1034,8 +1064,18 @@ impl AppState {
                     .get("force")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
+                let vectors = params
+                    .get("vectors")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let index = self.snapshot().await.index;
-                let r = index.index_workspace(&workspace_root, force).await?;
+                if vectors && !index.vectors_available() {
+                    return Err(CoreError::rpc(
+                        "EMBEDDING_NOT_CONFIGURED",
+                        "未配置 Embedding 端点（模型 / base_url），无法生成向量；可先只建片段，或在设置里配好 embedding 后重试",
+                    ));
+                }
+                let r = index.index_workspace(&workspace_root, force, vectors).await?;
                 Ok(serde_json::to_value(r)?)
             }
             "codebase.search" => {
@@ -1090,6 +1130,10 @@ impl AppState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("full")
                     .to_string();
+                let vectors = params
+                    .get("vectors")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let index = self.snapshot().await.index;
                 let ws = crate::index::resolve_workspace(&workspace_root)?;
                 if !ws.is_remote {
@@ -1098,9 +1142,15 @@ impl AppState {
                         "本地工作空间请使用 codebase.index",
                     ));
                 }
+                if vectors && !index.vectors_available() {
+                    return Err(CoreError::rpc(
+                        "EMBEDDING_NOT_CONFIGURED",
+                        "未配置 Embedding 端点（模型 / base_url），无法生成向量；可先只建片段，或在设置里配好 embedding 后重试",
+                    ));
+                }
                 match phase.as_str() {
                     "begin" => {
-                        index.index_remote_begin(&ws, force).await?;
+                        index.index_remote_begin(&ws, force, vectors).await?;
                         let st = {
                             let index = index.clone();
                             let workspace_root = workspace_root.clone();
@@ -1134,7 +1184,7 @@ impl AppState {
                             .transpose()
                             .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
                             .unwrap_or_default();
-                        let r = index.index_remote(&workspace_root, files, force).await?;
+                        let r = index.index_remote(&workspace_root, files, force, vectors).await?;
                         Ok(serde_json::to_value(r)?)
                     }
                 }
@@ -1150,10 +1200,11 @@ impl AppState {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
                 let graph = self.snapshot().await.graph;
+                let scope = graph_scope_from_params(&params);
                 {
                     let graph = graph.clone();
                     let workspace_root = workspace_root.clone();
-                    run_blocking(move || graph.index_workspace(&workspace_root, force)).await?
+                    run_blocking(move || graph.index_workspace(&workspace_root, force, scope)).await?
                 };
                 let st = {
                     let graph = graph.clone();
@@ -1185,6 +1236,7 @@ impl AppState {
                 )
                 .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
                 let graph = self.snapshot().await.graph;
+                let scope = graph_scope_from_params(&params);
                 match phase.as_str() {
                     "begin" => {
                         let r = {
@@ -1208,14 +1260,14 @@ impl AppState {
                     "finish" => {
                         let graph = graph.clone();
                         let workspace_root = workspace_root.clone();
-                        run_blocking(move || graph.index_remote_finish(&workspace_root, force))
+                        run_blocking(move || graph.index_remote_finish(&workspace_root, force, scope))
                             .await?;
                     }
                     _ => {
                         let graph = graph.clone();
                         let workspace_root = workspace_root.clone();
                         run_blocking(move || {
-                            graph.index_remote(&workspace_root, files, force)
+                            graph.index_remote(&workspace_root, files, force, scope)
                         })
                         .await?;
                     }

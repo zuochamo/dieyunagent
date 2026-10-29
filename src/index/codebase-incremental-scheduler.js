@@ -1,42 +1,8 @@
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
 const { loadModelSettings } = require('../model-settings');
-const {
-  isUnderWorkspaceRoot
-} = require('../graph/graph-incremental-scheduler');
-
-/** 明确二进制：永不触发增量索引。未知扩展名交给 dieyun-core 内容嗅探。 */
-const CODEBASE_IGNORE_EXT = new Set([
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.gif',
-  '.webp',
-  '.ico',
-  '.bmp',
-  '.zip',
-  '.7z',
-  '.rar',
-  '.gz',
-  '.exe',
-  '.dll',
-  '.so',
-  '.dylib',
-  '.pdf',
-  '.woff',
-  '.woff2',
-  '.ttf',
-  '.mp4',
-  '.mp3',
-  '.sqlite',
-  '.db',
-  '.wasm',
-  '.pyc',
-  '.class',
-  '.jar'
-]);
+const { isCodebaseSourcePath, isUnderWorkspaceRoot } = require('./source-files');
 
 /**
  * 与 `graph-incremental-scheduler.js` 同构：一次保存有「工具主动上报 + watcher」两个来源，
@@ -44,42 +10,14 @@ const CODEBASE_IGNORE_EXT = new Set([
  */
 const DEFAULT_DEBOUNCE_MS = 3500;
 const WORKSPACE_OPEN_DEBOUNCE_MS = 1500;
-const INDEX_BUSY_RETRY_MS = 5000;
-const MAX_BUSY_RETRIES = 60;
 /**
- * `!indexed` 是「此工作区从未建立过初始索引」，属正常状态而非故障：
- * 增量只维护已有索引，首次建库由「代码索引」面板或 prep 触发（建库要跑 embedding，不能默默代做）。
- * 但原来的实现是静默 return —— 日志里只剩 graph 一侧在跑，容易被误判成「codebase 增量坏了」。
- * 每个工作区 10 分钟最多记一条，既能诊断又不会刷屏。
+ * `!indexed` / `vectorCount === 0` 都是正常状态，不是故障：
+ * 增量只维护**已经有向量**的索引。没有向量时 chunk 表对检索毫无贡献（R2 之后连 FTS 也没有），
+ * 因此「保持新鲜」没有意义 —— 等真正需要向量时一次建库即可。
+ * 原来的实现静默 return，日志里只剩 graph 一侧在跑，容易被误判成「codebase 增量坏了」，
+ * 所以每个工作区 10 分钟记一条，既能诊断又不会刷屏。
  */
 const NOT_INDEXED_LOG_THROTTLE_MS = 10 * 60 * 1000;
-
-function isCodebaseSourcePath(filePath) {
-  const p = String(filePath || '');
-  const ext = path.extname(p).toLowerCase();
-  if (ext && CODEBASE_IGNORE_EXT.has(ext)) return false;
-  const base = path.basename(p);
-  if (base === 'Dockerfile' || base === 'Makefile' || base.startsWith('.env')) return true;
-  // 已知文本或未知扩展：只要不像二进制就触发（具体是否可索引由 dieyun-core walker 嗅探）
-  if (!ext) return true;
-  try {
-    const fd = fs.openSync(p, 'r');
-    try {
-      const buf = Buffer.alloc(512);
-      const n = fs.readSync(fd, buf, 0, 512, 0);
-      if (n <= 0) return false;
-      for (let i = 0; i < n; i++) {
-        if (buf[i] === 0) return false;
-      }
-      return true;
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    // 文件可能刚删：仍返回 true，让后端侧忽略
-    return true;
-  }
-}
 
 /**
  * Debounced background codebase.index (force=false, mtime 增量) after saves / workspace open.
@@ -98,8 +36,6 @@ function createCodebaseIncrementalScheduler(opts) {
   const log = typeof opts.log === 'function' ? opts.log : () => {};
   /** @type {Map<string, ReturnType<typeof setTimeout>>} */
   const timers = new Map();
-  /** @type {Map<string, number>} */
-  const busyRetries = new Map();
   /** @type {Map<string, number>} 最近一次「保存触发了刷新意图」的时间 */
   const lastSavedAt = new Map();
   /** @type {Map<string, number>} 最近一次「未建初始索引」跳过日志的时间（节流用） */
@@ -115,7 +51,7 @@ function createCodebaseIncrementalScheduler(opts) {
 
   function isAutoEnabled() {
     const settings = loadModelSettings(opts.userDataPath);
-    return settings.codebaseAutoIncremental !== false;
+    return settings.codebaseAutoIncremental === true;
   }
 
   async function runIncremental(workspaceRoot, reason) {
@@ -132,27 +68,39 @@ function createCodebaseIncrementalScheduler(opts) {
         logSkipThrottled(
           workspaceRoot,
           `[codebase] incremental index idle: 尚未建立初始索引，增量不代建（${workspaceRoot}）` +
-            '——恢复方式是先在「代码索引」面板建立一次，或提一个带代码上下文的请求由 prep 触发'
+            '——恢复方式是先在「代码索引」面板建立一次（或在「设置 → 权限」打开自动增量）'
         );
         return;
       }
-      if (st.indexing) {
-        const n = (busyRetries.get(workspaceRoot) || 0) + 1;
-        busyRetries.set(workspaceRoot, n);
-        if (n > MAX_BUSY_RETRIES) {
-          busyRetries.delete(workspaceRoot);
-          log(`[codebase] incremental index skipped: still busy after ${MAX_BUSY_RETRIES} retries`);
-          return;
-        }
-        schedule(workspaceRoot, INDEX_BUSY_RETRY_MS, reason);
+      if (!(Number(st.vectorCount) > 0)) {
+        logSkipThrottled(
+          workspaceRoot,
+          `[codebase] incremental index idle: 该工作区没有向量，先不维护新鲜度（${workspaceRoot}）` +
+            '——需要语义检索时在面板建一次向量，之后增量才会接管'
+        );
         return;
       }
-      busyRetries.delete(workspaceRoot);
+      // 索引正在跑时不再排队重试：保存是高频事件，重试风暴比「这次不增量」更贵。
+      // 下一次保存/打开工作区自然会再触发一次。
+      if (st.indexing) {
+        logSkipThrottled(
+          workspaceRoot,
+          `[codebase] incremental index skipped: 索引正在运行，本次保存不排队（${workspaceRoot}）`
+        );
+        return;
+      }
 
-      // 用 index.start 后台增量，避免同步 codebase.index 堵死 dieyun-core stdio
+      // 用 index.start 后台增量，避免同步 codebase.index 堵死 dieyun-core stdio。
+      //
+      // `vectors: true` 是**沿用这个工作区已有的向量意图**（上面已经确认过 `vectorCount > 0`
+      // 才走到这里）：增量会按文件删掉旧 chunk，连它们的向量一起没了；不跟着补，改过的文件
+      // 从此只能靠子串召回，向量覆盖率只会一路往下掉 —— 而这行日志承诺的正是「增量接管」。
+      // 端点后来被关掉时退回不带向量（增量照跑，向量留原样），否则每次保存都会撞
+      // EMBEDDING_NOT_CONFIGURED，连 chunk 新鲜度也一起丢掉。
+      const wantVectors = Number(st.vectorCount) > 0 && st.embeddingEnabled !== false;
       const result = await opts.invokeRustCore(
         'codebase.index.start',
-        { workspaceRoot, force: false, skipIfReady: false },
+        { workspaceRoot, force: false, skipIfReady: false, vectors: wantVectors },
         60000
       );
       if (!result) {
@@ -221,13 +169,10 @@ function createCodebaseIncrementalScheduler(opts) {
   return {
     notifyFileSaved,
     notifyWorkspaceOpened,
-    getRefreshState,
-    isCodebaseSourcePath
+    getRefreshState
   };
 }
 
 module.exports = {
-  createCodebaseIncrementalScheduler,
-  isCodebaseSourcePath,
-  CODEBASE_IGNORE_EXT
+  createCodebaseIncrementalScheduler
 };

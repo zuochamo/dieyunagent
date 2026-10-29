@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Health check: memory SQLite (read-only) + embedding models (builtin + configured remote).
+ * Health check: memory SQLite (read-only) + configured remote embedding endpoint.
  *
  * 手动排障工具，不接入 npm scripts / CI / smoke 链路。
  * Usage: node scripts/dev/check-memory-health.cjs [--user-data PATH]
@@ -13,11 +13,6 @@ const os = require('os');
 const Database = require('better-sqlite3');
 
 const { createEmbeddingClient } = require('../../src/codebase/embedding-client');
-const {
-  hasBuiltinEmbeddingModel,
-  BUILTIN_EMBEDDING_ID,
-  BUILTIN_EMBEDDING_DIMENSIONS
-} = require('../../src/codebase/local-embedding');
 const { loadModelSettings, getEmbeddingConfig } = require('../../src/model-settings');
 
 function guessUserData() {
@@ -42,8 +37,7 @@ async function probeEmbedding(label, config) {
     enabled: client.enabled(),
     model: client.model,
     dimensions: client.dimensions,
-    builtin: !!config?.builtin || client.builtin,
-    url: client.url || '(builtin local)',
+    url: client.url || '(not configured)',
     ok: false,
     vectorLen: 0,
     error: null
@@ -137,23 +131,14 @@ async function main() {
     fs.existsSync(path.join(userData, 'model-settings.json')) ? 'found' : 'missing (using defaults)'
   );
 
-  const builtinProbe = await probeEmbedding('builtin:bge-base-zh-v1.5', {
-    model: BUILTIN_EMBEDDING_ID,
-    builtin: true,
-    localFallback: true
-  });
-  const remoteProbe = embeddingCfg.builtin
-    ? null
-    : await probeEmbedding(`remote:${embeddingCfg.model}`, embeddingCfg);
+  const remoteProbe = await probeEmbedding(`remote:${embeddingCfg.model || '(none)'}`, embeddingCfg);
 
   console.log('\n--- 向量模型 ---');
-  console.log('Builtin model files:', hasBuiltinEmbeddingModel() ? 'OK' : 'MISSING');
-  console.log('Builtin embed test:', formatProbe(builtinProbe));
-  if (embeddingCfg.builtin) {
-    console.log('Active config: fallback to builtin (no remote baseUrl/model in settings)');
-  } else {
+  if (remoteProbe.enabled) {
     console.log('Active config:', `${embeddingCfg.model} @ ${embeddingCfg.baseUrl} (${embeddingCfg.dimensions}d)`);
-    console.log('Remote embed test:', formatProbe(remoteProbe));
+    console.log('Embed test:', formatProbe(remoteProbe));
+  } else {
+    console.log('向量模型未配置：语义检索关闭，召回只用关键词（内置 BGE 已删除）');
   }
 
   const mem = checkMemoryDb(userData);
@@ -185,9 +170,7 @@ async function main() {
 
   console.log('\n--- 结论 ---');
   const issues = [];
-  if (!hasBuiltinEmbeddingModel()) issues.push('内置 bge-base-zh-v1.5 模型文件缺失');
-  if (!builtinProbe.ok) issues.push(`内置向量推理失败: ${builtinProbe.error}`);
-  if (remoteProbe && !remoteProbe.ok) issues.push(`配置的远程向量模型不可用: ${remoteProbe.error}`);
+  if (remoteProbe.enabled && !remoteProbe.ok) issues.push(`配置的远程向量模型不可用: ${remoteProbe.error}`);
   if (!mem.dbExists) issues.push('记忆数据库尚未创建');
   else if (mem.error) issues.push(`记忆库读取失败: ${mem.error}`);
 

@@ -25,10 +25,9 @@ const SNIPPET_LINE_MAX_CHARS: usize = 400;
 
 /// 多路召回的融合常数（Reciprocal Rank Fusion 的标准 k=60）。
 ///
-/// 只用**名次**融合，不用分数：`bm25` 的量纲随语料统计漂移，余弦相似度固定在
-/// [-1,1]，词元覆盖率在 [0,1] —— 三者相加必须给每个信号配一个魔数权重，而那组
-/// 权重没有任何可验证的依据。按名次融合天然尺度无关：换模型、换语料规模都不需要
-/// 重新调参。
+/// 只用**名次**融合，不用分数：子串命中数是整数计数、余弦相似度固定在 [-1,1]，
+/// 两者相加必须给每个信号配一个魔数权重，而那组权重没有任何可验证的依据。
+/// 按名次融合天然尺度无关：换模型、换语料规模都不需要重新调参。
 const RRF_K: f64 = 60.0;
 
 /// 向量侧参与融合的名次上限：`limit * 8 + 256`，够覆盖最终 top-limit 且不把
@@ -36,7 +35,7 @@ const RRF_K: f64 = 60.0;
 const VECTOR_POOL_EXTRA: usize = 256;
 const VECTOR_POOL_FACTOR: usize = 8;
 
-/// 词法侧候选：留足余量，trigram 下命中条数会明显多于整词匹配。
+/// 词法（子串）侧候选：留足余量。按 `hits` 降序取前 N 条，截掉的都是命中词更少的。
 const LEXICAL_CANDIDATES_FACTOR: usize = 12;
 const LEXICAL_CANDIDATES_MIN: usize = 60;
 const LEXICAL_CANDIDATES_MAX: usize = 400;
@@ -103,11 +102,20 @@ pub fn search(
     let mut rows: HashMap<i64, ChunkRow> = HashMap::new();
     let mut lists: Vec<RankedIds> = Vec::new();
 
-    // 通道 1：词法（FTS5 bm25 排序）
-    let lexical = lexical_hits(conn, root_hash, q, limit, &mut rows)?;
-    let lexical_empty = lexical.is_empty();
-    if !lexical_empty {
-        lists.push(lexical);
+    // 通道 1：词法 = 子串扫描（路径 + 正文，`LIKE '%term%'`）。
+    //
+    // v4 起没有 FTS 倒排表：trigram 索引占库体 40% 却只换来「按 bm25 排名」，
+    // 而排名这件事与 `grep` 工具重叠、且索引永远落后一轮增量（见
+    // docs/INDEX-VALUE-REVIEW.md §R2）。这里改为直接扫 `chunks`：
+    // 召回口径与 trigram 一致（子串命中），排序改用**命中词数**（可解释、无需魔数权重），
+    // 并且一次 `LIKE` 覆盖任意长度的词 —— 2 字中文（trigram 的物理下限）也在内。
+    // 代价是一次全表扫描：10k chunk 实测约 20ms（见文档 §2.2）。
+    let terms = query_terms(q);
+    if !terms.is_empty() {
+        let substring = substring_hits(conn, root_hash, &terms, limit, &mut rows)?;
+        if !substring.is_empty() {
+            lists.push(substring);
+        }
     }
 
     // 通道 2：向量（内存池全量精确余弦；池不可用时本通道缺席，不做抽样近似）
@@ -117,18 +125,6 @@ pub fn search(
             if !vector.is_empty() {
                 lists.push(vector);
             }
-        }
-    }
-
-    // 通道 3：短术语精确子串。trigram 索引最少要 3 个字符，2 字中文词（「配置」）
-    // 在词法通道里永远查不到；这里用完整扫描按子串匹配补上，召回是全库、精确的
-    // —— 不再有「只扫前 N 条」的静默天花板。仅当词法一无所获时才跑（一次全表扫描，
-    // 别让每次中文查询都付这个成本；有向量通道时也照样补，向量召回是模糊的）。
-    let short = short_terms(q);
-    if !short.is_empty() && lexical_empty {
-        let substring = substring_hits(conn, root_hash, &short, &mut rows)?;
-        if !substring.is_empty() {
-            lists.push(substring);
         }
     }
 
@@ -184,43 +180,6 @@ fn fuse(lists: &[RankedIds]) -> HashMap<i64, f64> {
         }
     }
     fused
-}
-
-/// 通道 1：FTS 命中，按 bm25（越相关越靠前）。
-fn lexical_hits(
-    conn: &Connection,
-    root_hash: &str,
-    query: &str,
-    limit: usize,
-    rows: &mut HashMap<i64, ChunkRow>,
-) -> Result<RankedIds, CoreError> {
-    let Some(fts_q) = fts_query(query) else {
-        return Ok(Vec::new());
-    };
-    let candidates = (limit * LEXICAL_CANDIDATES_FACTOR)
-        .max(LEXICAL_CANDIDATES_MIN)
-        .min(LEXICAL_CANDIDATES_MAX) as i64;
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.rel_path, c.start_line, c.end_line, c.content,
-                    highlight(chunks_fts, 1, char(2), char(3)) AS hl
-             FROM chunks_fts
-             JOIN chunks c ON c.id = chunks_fts.rowid
-             WHERE chunks_fts MATCH ?1 AND c.root_hash = ?2
-             ORDER BY bm25(chunks_fts)
-             LIMIT ?3",
-        )
-        .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-    let mapped = stmt
-        .query_map(params![fts_q, root_hash, candidates], map_chunk_with_highlight)
-        .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-    let mut ids = Vec::new();
-    for row in mapped.flatten() {
-        let id = row.id;
-        rows.entry(id).or_insert(row);
-        ids.push(id);
-    }
-    Ok(ids)
 }
 
 /// 通道 2：内存池全量精确余弦，取相似度最高的若干条。
@@ -282,40 +241,52 @@ fn vector_hits(
     Ok(ids.into_iter().filter(|id| rows.contains_key(id)).collect())
 }
 
-/// 查询里「trigram 索引覆盖不到」的短术语：正好 2 个字符（2 字中文词、
-/// 2 字母缩写）。1 个字符太宽泛（几乎每个 chunk 都命中），不予处理。
-fn short_terms(query: &str) -> Vec<String> {
+/// 把自然语言查询切成词元：按标点/空白切分，丢掉 1 字符词元（几乎每个 chunk 都命中，
+/// 只会把预算烧光），去重后最多 12 个。
+///
+/// 只剥掉引号与通配星号（模型写 FTS 风格 `parse*` 时的残留）；
+/// **下划线与百分号必须原样保留** —— `parse_config` 去掉下划线就变成 `parseconfig`，
+/// 谁都不匹配（这是把旧 FTS 通道改写成子串通道时最容易踩的一脚）。
+fn query_terms(query: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for part in query
         .split(|c: char| c.is_whitespace() || "/\\.,;:!?，。；：、".contains(c))
     {
-        let p = part.replace(['"', '\'', '*', '%', '_'], "").trim().to_string();
-        if p.chars().count() == 2 && !out.contains(&p) {
-            out.push(p);
+        let p = part.replace(['"', '\'', '*'], "").trim().to_string();
+        if p.chars().count() < 2 || out.contains(&p) {
+            continue;
+        }
+        out.push(p);
+        if out.len() >= 12 {
+            break;
         }
     }
     out
 }
 
-/// 通道 3：短术语的精确子串匹配（`LIKE '%term%'`，路径与正文都算）。
+/// 通道 1：子串命中（`LIKE '%term%'`，路径与正文都算）。
 ///
-/// 覆盖**整个工作区**，没有扫描窗口 —— 旧实现只扫前 8000 条并按词元覆盖率近似打分，
-/// 超过窗口的库会静默少召回、同一查询还可能给出不同子集。这里的代价是一次全表扫描，
-/// 只在查询含 2 字术语且词法通道一无所获时发生。
+/// 覆盖**整个工作区**，没有扫描窗口 —— 旧实现（v1）只扫前 8000 条并按词元覆盖率近似打分，
+/// 超过窗口的库会静默少召回。这里的代价是一次全表扫描。
 ///
-/// 命中顺序按 chunk id（稳定、与内容位置无关）：短词是「有没有」的判断，
-/// 不存在可信的相关性名次，硬编一个近似分数只会骗调用方。
+/// 排序用**命中词数**（`hits`：有几个查询词出现在该 chunk 里），同分按 chunk id：
+/// 这是唯一一个「不需要给每路信号配魔数权重」又能表达相关性的信号。
+/// 候选上限 `SUBSTRING_CANDIDATES_MAX` 只截长尾：`hits` 降序保证截掉的都是命中更少的。
 fn substring_hits(
     conn: &Connection,
     root_hash: &str,
     terms: &[String],
+    limit: usize,
     rows: &mut HashMap<i64, ChunkRow>,
 ) -> Result<RankedIds, CoreError> {
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let mut clause = Vec::with_capacity(terms.len());
-    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(terms.len() * 2 + 1);
+    let candidates = (limit * LEXICAL_CANDIDATES_FACTOR)
+        .max(LEXICAL_CANDIDATES_MIN)
+        .min(LEXICAL_CANDIDATES_MAX) as i64;
+    let mut hit_exprs = Vec::with_capacity(terms.len());
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(terms.len() * 2 + 2);
     params_vec.push(Box::new(root_hash.to_string()));
     for term in terms {
         // 转义 LIKE 的通配符，术语里的 % / _ 按字面匹配
@@ -324,30 +295,54 @@ fn substring_hits(
             .replace('%', "\\%")
             .replace('_', "\\_");
         let idx = params_vec.len() + 1;
-        clause.push(format!(
-            "(content LIKE '%' || ?{idx} || '%' ESCAPE '\\' OR rel_path LIKE '%' || ?{idx} || '%' ESCAPE '\\')"
+        hit_exprs.push(format!(
+            "((content LIKE '%' || ?{idx} || '%' ESCAPE '\\') + (rel_path LIKE '%' || ?{idx} || '%' ESCAPE '\\'))"
         ));
         params_vec.push(Box::new(escaped));
     }
+    let limit_idx = params_vec.len() + 1;
+    params_vec.push(Box::new(candidates));
+    // 别名不能用在 WHERE 里，所以套一层子查询：内层算 hits，外层过滤 + 排序 + 限流。
     let sql = format!(
-        "SELECT id, rel_path, start_line, end_line, content FROM chunks
-         WHERE root_hash = ?1 AND ({}) ORDER BY id",
-        clause.join(" OR ")
+        "SELECT id, rel_path, start_line, end_line, content, hits FROM (
+            SELECT id, rel_path, start_line, end_line, content,
+                   ({}) AS hits
+            FROM chunks WHERE root_hash = ?1
+         ) WHERE hits > 0 ORDER BY hits DESC, id LIMIT ?{limit_idx}",
+        hit_exprs.join(" + ")
     );
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
     let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
     let mapped = stmt
-        .query_map(param_refs.as_slice(), map_chunk)
+        .query_map(param_refs.as_slice(), |row| {
+            let mut chunk = map_chunk(row)?;
+            // 子串命中也知道命中行：取最早出现的位置，让 snippet 从命中行开始展开
+            chunk.hit_line = first_hit_line(&chunk.content, chunk.start_line, terms);
+            Ok(chunk)
+        })
         .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
     let mut ids = Vec::new();
-    for row in mapped.flatten() {
+    // 行映射失败必须显式报错：静默 flatten 掉会让「查询语法写错」表现成「没有命中」
+    for row in mapped {
+        let row = row.map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
         let id = row.id;
         rows.entry(id).or_insert(row);
         ids.push(id);
     }
     Ok(ids)
+}
+
+/// 命中行：内容里最早出现的任一查询词所在行（行号是相对文件的绝对行号）。
+fn first_hit_line(content: &str, start_line: i64, terms: &[String]) -> Option<i64> {
+    let mut earliest: Option<usize> = None;
+    for term in terms {
+        if let Some(pos) = content.find(term.as_str()) {
+            earliest = Some(earliest.map_or(pos, |cur| cur.min(pos)));
+        }
+    }
+    earliest.map(|pos| start_line + content[..pos].matches('\n').count() as i64)
 }
 
 fn empty_result(q: &str, needs_index: bool, vector_search: bool) -> SearchResult {
@@ -368,7 +363,7 @@ struct ChunkRow {
     start_line: i64,
     end_line: i64,
     content: String,
-    /// 词法命中的行号（FTS highlight 推出）；仅向量命中时为 None
+    /// 词法（子串）命中的行号；仅向量命中时为 None
     hit_line: Option<i64>,
 }
 
@@ -380,31 +375,6 @@ fn map_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
         end_line: row.get(3)?,
         content: row.get(4)?,
         hit_line: None,
-    })
-}
-
-/// FTS5 highlight 的起始标记（对应 SQL 里的 char(2)）。
-const HL_OPEN: char = '\u{2}';
-
-/// 从 FTS5 highlight 文本里推出第一个命中所在的绝对行号。
-fn hit_line_from_highlight(hl: &str, start_line: i64) -> Option<i64> {
-    let idx = hl.find(HL_OPEN)?;
-    let rel = hl[..idx].matches('\n').count() as i64;
-    Some(start_line + rel)
-}
-
-fn map_chunk_with_highlight(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
-    let start_line: i64 = row.get(2)?;
-    // highlight 结果只用于定位命中行，不参与展示
-    let hl: Option<String> = row.get::<_, Option<String>>(5).ok().flatten();
-    let hit_line = hl.as_deref().and_then(|h| hit_line_from_highlight(h, start_line));
-    Ok(ChunkRow {
-        id: row.get(0)?,
-        rel_path: row.get(1)?,
-        start_line,
-        end_line: row.get(3)?,
-        content: row.get(4)?,
-        hit_line,
     })
 }
 
@@ -440,25 +410,6 @@ fn snippet(content: &str, start_line: i64, hit_line: Option<i64>) -> String {
         out.push_str(&piece);
     }
     out.trim_end().to_string()
-}
-
-/// 把自然语言查询转成 FTS5 查询串：按标点/空白切词，逐词加引号（短语）+ OR 连接。
-///
-/// 只保留长度 >= 2 的词元：trigram 分词器要求 >= 3 字符才能命中，1 字词元只会
-/// 白白把查询串撑长。整体失败（例如只剩标点）时返回 None，让词法通道缺席。
-fn fts_query(query: &str) -> Option<String> {
-    let parts: Vec<String> = query
-        .split(|c: char| c.is_whitespace() || "/\\.,;:!?，。；：、".contains(c))
-        .map(|p| p.replace(['"', '\'', '*'], "").trim().to_string())
-        .filter(|p| p.len() >= 2)
-        .take(12)
-        .map(|p| format!("\"{}\"", p.replace('"', "")))
-        .collect();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" OR "))
-    }
 }
 
 #[cfg(test)]
@@ -547,12 +498,71 @@ mod tests {
         assert!(res.vector_search, "请求侧带了向量，标志仍为 true");
     }
 
-    /// 2 字中文词：trigram 索引（最少 3 字符）覆盖不到，由短术语子串通道补上。
+    /// 2 字中文词：没有分词器下限，子串通道直接命中（trigram 时代需要专门补一条通道）。
     #[test]
     fn short_cjk_term_matches_by_substring() {
         let (conn, _pool) = fixture();
         let res = search(&conn, "rh", "配置", Some(3), None, None).unwrap();
         assert_eq!(paths(&res), vec!["src/semantic.rs"], "中文 2 字应命中");
+    }
+
+    /// 命中词数决定名次：同时命中两个查询词的 chunk 必须排在只命中一个的前面。
+    #[test]
+    fn ranks_by_matched_term_count() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (root_hash, root_path, chunk_count) VALUES ('rh', '/tmp', 3)",
+            [],
+        )
+        .unwrap();
+        for (rel, content) in [
+            ("src/one.rs", "// 只有配置"),
+            ("src/two.rs", "// 配置与索引都在这里"),
+            ("src/three.rs", "// 无关内容"),
+        ] {
+            conn.execute(
+                "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                 VALUES ('rh', ?1, 1, 1, ?2, 0)",
+                params![rel, content],
+            )
+            .unwrap();
+        }
+        let res = search(&conn, "rh", "配置 索引", Some(5), None, None).unwrap();
+        assert_eq!(paths(&res), vec!["src/two.rs", "src/one.rs"], "命中两词者优先");
+    }
+
+    /// 子串通道也要定位命中行：snippet 从命中行展开，长 chunk 不会被开头占满。
+    #[test]
+    fn substring_hit_locates_hit_line() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (root_hash, root_path, chunk_count) VALUES ('rh', '/tmp', 1)",
+            [],
+        )
+        .unwrap();
+        let mut content = String::new();
+        for i in 1..=40 {
+            content.push_str(&format!("line {i}\n"));
+            if i == 30 {
+                content.push_str("// 配置热更新入口\n");
+            }
+        }
+        conn.execute(
+            "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+             VALUES ('rh', 'src/long.rs', 100, 160, ?1, 0)",
+            params![content],
+        )
+        .unwrap();
+        let res = search(&conn, "rh", "配置", Some(1), None, None).unwrap();
+        assert_eq!(res.results.len(), 1);
+        // chunk 起始行 100，命中出现在第 31 行 → 130
+        assert!(
+            res.results[0].snippet.contains("130| // 配置热更新入口"),
+            "命中行必须出现在片段里: {}",
+            res.results[0].snippet
+        );
     }
 
     /// 短术语通道必须扫全库：命中在很后面（id 大）也不能漏 ——
@@ -586,9 +596,9 @@ mod tests {
         assert_eq!(paths(&res), vec!["zzz/last.rs"], "最后一条也要能命中");
     }
 
-    /// 3 字中文走的是词法（trigram）通道，不需要全库扫描。
+    /// 3 字以上中文同样走子串通道（没有单独的词法分支了）。
     #[test]
-    fn three_char_cjk_goes_through_lexical_channel() {
+    fn three_char_cjk_goes_through_substring_channel() {
         let (conn, _pool) = fixture();
         let res = search(&conn, "rh", "配置文件", Some(3), None, None).unwrap();
         assert_eq!(paths(&res), vec!["src/semantic.rs"]);

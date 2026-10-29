@@ -2,25 +2,14 @@
 
 const path = require('path');
 const { loadModelSettings } = require('../model-settings');
-
-const GRAPH_SOURCE_EXT = new Set([
-  '.js',
-  '.mjs',
-  '.cjs',
-  '.ts',
-  '.tsx',
-  '.jsx',
-  '.py',
-  '.go',
-  '.rs'
-]);
+const { isGraphSourcePath, isUnderWorkspaceRoot } = require('../index/source-files');
 
 /**
  * 去抖窗口必须**大于 watcher 的事件延迟**，否则同一次保存会被算成两次。
  *
  * 一次保存有两个来源都会调 `notifyFileSaved`：
  * 1. `handlers/fs.js` 里工具写完主动上报（即时）；
- * 2. `gateway/server.js` 的 chokidar watcher（外部改动也要覆盖，延迟实测约 3s）。
+ * 2. `gateway/server.js` 的 `createWorkspaceIndexWatcher`（`fs.watch`，外部改动也要覆盖，延迟实测约 3s）。
  *
  * 两者都保留是必要的（远程/未 watch 时工具上报是唯一来源，外部编辑器改动只有 watcher 看得到），
  * 但 800ms 窗口合并不上，实测 `main.log` 里 `(save)` 成对出现且间隔卡在 3.2s / 1.2s 双峰 ——
@@ -33,17 +22,6 @@ const RETRY_DELAY_MS = 2000;
 const CODEBASE_BUSY_RETRY_MS = 5000;
 /** 与 codebase 侧同构：`!indexed` 时每工作区 10 分钟一条日志，避免「静默不跑」无从判断。 */
 const NOT_INDEXED_LOG_THROTTLE_MS = 10 * 60 * 1000;
-
-function isGraphSourcePath(filePath) {
-  return GRAPH_SOURCE_EXT.has(path.extname(String(filePath || '')).toLowerCase());
-}
-
-function isUnderWorkspaceRoot(filePath, workspaceRoot) {
-  if (!filePath || !workspaceRoot) return false;
-  const rel = path.relative(path.resolve(workspaceRoot), path.resolve(filePath));
-  if (rel === '') return true;
-  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
 
 /**
  * Debounced background graph.index (force=false) after saves / workspace open.
@@ -177,14 +155,10 @@ function createGraphIncrementalScheduler(opts) {
 
   return {
     notifyFileSaved,
-    notifyWorkspaceOpened,
-    isGraphSourcePath
+    notifyWorkspaceOpened
   };
 }
 
 module.exports = {
-  createGraphIncrementalScheduler,
-  isGraphSourcePath,
-  isUnderWorkspaceRoot,
-  GRAPH_SOURCE_EXT
+  createGraphIncrementalScheduler
 };

@@ -1,4 +1,4 @@
-/* global loopApi, settings, currentSessionId, gwState, gatewayCall, createAgentAbortError, buildDieyunMdSystemBlock, assembleSystemPrompt, getContextFilePathsForAgent, getSessionChangeRowsForAgent, waitRemoteCoreForPrep, recordAgentPrepTrace, throwIfAgentAborted, getComposerAgentMode, CTX_LIMITS, getEffectiveInputBudget, skipAutoCodebaseForTaskTier, isTaskTierFeatureEnabled, shouldInjectCodeContext, textHasCodebaseMention, loadEnabledSkillIds, hasAgentContinueCheckpoint, sessionActiveRuns */
+/* global loopApi, settings, currentSessionId, gwState, gatewayCall, createAgentAbortError, buildDieyunMdSystemBlock, assembleSystemPrompt, getContextFilePathsForAgent, getSessionChangeRowsForAgent, waitRemoteCoreForPrep, recordAgentPrepTrace, throwIfAgentAborted, getComposerAgentMode, CTX_LIMITS, getEffectiveInputBudget, skipAutoCodebaseForTaskTier, isTaskTierFeatureEnabled, shouldInjectCodeContext, shouldAutoCodebaseSearch, textHasCodebaseMention, loadEnabledSkillIds, hasAgentContinueCheckpoint, sessionActiveRuns */
 'use strict';
 
 const systemMessageCache = new Map();
@@ -157,8 +157,18 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
           )
         })
       : true;
+  // `injectCode` = 用户把代码点给了我们（路径 / 选区 / @Codebase）；
+  // `allowCodebase` = 这轮要不要碰索引。两者不能是同一个条件：没点路径的轮次恰恰
+  // 才是最需要检索的轮次（R8）。自动检索的放行判定统一走 context-signals 单一来源。
+  // Renderer 侧没有 Monaco 状态（编辑器块由 Main 侧的 snapshot.editor 提供），故 editor 传 null。
+  const autoCodebase =
+    typeof shouldAutoCodebaseSearch === 'function'
+      ? shouldAutoCodebaseSearch(userQuery, workspaceInfo, null)
+      : false;
   const allowCodebase =
-    injectCode || (typeof textHasCodebaseMention === 'function' && textHasCodebaseMention(userQuery));
+    injectCode ||
+    autoCodebase ||
+    (typeof textHasCodebaseMention === 'function' && textHasCodebaseMention(userQuery));
   const skipFastIndex =
     typeof skipAutoCodebaseForTaskTier === 'function' &&
     skipAutoCodebaseForTaskTier(
@@ -381,7 +391,6 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
       hasArtifact: !!selectedArtifact
     },
     enabledSkillMap: typeof loadEnabledSkillIds === 'function' ? loadEnabledSkillIds() : {},
-    skillCatalogMode: true,
     hasContinueCheckpoint:
       typeof hasAgentContinueCheckpoint === 'function' && hasAgentContinueCheckpoint(sessionId),
     hasActiveRun:

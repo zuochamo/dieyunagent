@@ -79,70 +79,45 @@ fn walk_defs(
 }
 
 /// Produce chunk slices: `(start_line, end_line, content)` using AST ranges when possible.
+///
+/// AST 只给出「定义体」的行范围，函数/类之间的注释、顶层语句不属于任何节点。
+/// 这里把**未被定义体覆盖的行**也切成 chunk，保证文件的每一行都进索引 ——
+/// 之前用「首个符号在第 5 行之后才收前导」+「缺口 ≥8 行才补」两条阈值近似，
+/// 结果是函数正上方的注释成块丢失（中文注释恰好是最该被搜到的内容）。
 pub fn iter_chunk_slices(rel_path: &str, text: &str) -> Vec<(i64, i64, String)> {
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
         return Vec::new();
     }
 
-    let mut ranges = structural_chunk_ranges(rel_path, text).unwrap_or_default();
-    if ranges.is_empty() {
+    let Some(ranges) = structural_chunk_ranges(rel_path, text) else {
         return line_window_chunks(&lines);
-    }
+    };
 
-    // Preamble before first symbol
-    if ranges[0].0 > 5 {
-        ranges.insert(0, (1, ranges[0].0.saturating_sub(1)));
-    }
-
+    let total = lines.len();
     let mut out = Vec::new();
+    let mut cursor = 1usize; // 下一个待覆盖的行号
     for (s, e) in ranges {
+        let s = s.clamp(1, total);
+        let e = e.clamp(1, total);
+        if e < cursor {
+            continue;
+        }
+        if s > cursor {
+            push_range_chunks(&lines, cursor, s - 1, &mut out);
+        }
+        let s = s.max(cursor);
         push_range_chunks(&lines, s, e, &mut out);
+        cursor = e + 1;
     }
-
-    // If AST coverage is thin, fill remainder with line windows for uncovered regions
-    let covered = covered_line_set(&out, lines.len());
-    let uncovered = uncovered_windows(&covered, lines.len());
-    for (s, e) in uncovered {
-        push_range_chunks(&lines, s, e, &mut out);
+    if cursor <= total {
+        push_range_chunks(&lines, cursor, total, &mut out);
     }
 
     if out.is_empty() {
         return line_window_chunks(&lines);
     }
     out.sort_by_key(|(s, _, _)| *s);
-    out
-}
-
-fn covered_line_set(chunks: &[(i64, i64, String)], total: usize) -> Vec<bool> {
-    let mut covered = vec![false; total + 1];
-    for (s, e, _) in chunks {
-        let s = (*s as usize).clamp(1, total);
-        let e = (*e as usize).clamp(1, total);
-        for i in s..=e {
-            covered[i] = true;
-        }
-    }
-    covered
-}
-
-fn uncovered_windows(covered: &[bool], total: usize) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let mut i = 1usize;
-    while i <= total {
-        if covered[i] {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i <= total && !covered[i] {
-            i += 1;
-        }
-        let end = i - 1;
-        if end >= start && (end - start + 1) >= (CHUNK_LINES / 2).max(8) {
-            out.push((start, end));
-        }
-    }
     out
 }
 
@@ -248,5 +223,35 @@ function bar() {
         let src = "line1\nline2\nline3\n";
         let slices = iter_chunk_slices("readme.txt", src);
         assert_eq!(slices.len(), 1);
+    }
+
+    /// 函数正上方的注释也是索引内容（曾经的阈值把它们整块丢掉）。
+    #[test]
+    fn keeps_leading_comments_before_first_symbol() {
+        let src = "// 代码库索引：增量更新与向量检索\n// 索引写库后由触发器同步倒排索引\nfunction foo() {\n  return 1;\n}\n";
+        let slices = iter_chunk_slices("a.js", src);
+        let all: String = slices.iter().map(|(_, _, c)| c.as_str()).collect();
+        assert!(all.contains("增量更新"), "首个函数上方的注释必须进索引: {slices:?}");
+        assert!(all.contains("function foo"));
+    }
+
+    /// 不变量：文件的每一行都必须落在某个 chunk 里（除纯空白行外不得静默丢失）。
+    #[test]
+    fn every_line_is_covered() {
+        let src = "// header comment\nconst x = 1;\n\n// doc for foo\nfunction foo() {\n  return 1;\n}\n\n// 中间注释\n// 第二行\nfunction bar() {\n  return 2;\n}\n\n// tail comment\n";
+        let slices = iter_chunk_slices("a.js", src);
+        let total = src.lines().count();
+        let mut covered = vec![false; total + 2];
+        for (s, e, _) in &slices {
+            for i in (*s as usize)..=(*e as usize) {
+                covered[i] = true;
+            }
+        }
+        for (idx, line) in src.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            assert!(covered[idx + 1], "第 {} 行未进任何 chunk: {line}", idx + 1);
+        }
     }
 }

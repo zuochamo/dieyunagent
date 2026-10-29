@@ -1,4 +1,5 @@
 mod build;
+pub use build::GraphScope;
 mod extract;
 mod lsp_ingest;
 mod query;
@@ -253,11 +254,13 @@ impl GraphService {
 
     /// 后台启动结构索引（立即返回）
     /// `skip_if_ready`: true 时已索引则跳过；false 时启动 mtime 增量刷新
+    /// `scope`: `Structural` 只建符号/import/mtime；`WithCalls` 额外抽调用关系（R5）
     pub fn start_index_workspace(
         &self,
         workspace_root: &str,
         force: bool,
         skip_if_ready: bool,
+        scope: GraphScope,
     ) -> Result<GraphStartIndexResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
         if ws.is_remote {
@@ -355,6 +358,7 @@ impl GraphService {
                     &root,
                     &hash,
                     force,
+                    scope,
                     Some(&|phase, done, total, edges, symbols, calls| {
                         progress_svc.set_progress(
                             &progress_hash,
@@ -396,6 +400,7 @@ impl GraphService {
         &self,
         workspace_root: &str,
         force: bool,
+        scope: GraphScope,
     ) -> Result<GraphStatusResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
         if ws.is_remote {
@@ -432,6 +437,7 @@ impl GraphService {
             root,
             &root_hash,
             force,
+            scope,
             Some(&|phase, done, total, edges, symbols, calls| {
                 progress_svc.set_progress(
                     &progress_hash,
@@ -460,10 +466,11 @@ impl GraphService {
         workspace_root: &str,
         files: Vec<RemoteFileInput>,
         force: bool,
+        scope: GraphScope,
     ) -> Result<GraphStatusResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
         if !ws.is_remote {
-            return self.index_workspace(workspace_root, force);
+            return self.index_workspace(workspace_root, force, scope);
         }
         let root_hash = ws.root_hash.clone();
 
@@ -480,7 +487,7 @@ impl GraphService {
         }
 
         let conn = self.open_dedicated()?;
-        let result = run_remote_build(&conn, &ws.key, &root_hash, &files, force);
+        let result = run_remote_build(&conn, &ws.key, &root_hash, &files, force, scope);
         if let Ok(mut guard) = self.building.lock() {
             guard.remove(&root_hash);
         }
@@ -524,6 +531,7 @@ impl GraphService {
         &self,
         workspace_root: &str,
         force: bool,
+        scope: GraphScope,
     ) -> Result<GraphStatusResult, CoreError> {
         let ws = resolve_workspace(workspace_root)?;
         if !ws.is_remote {
@@ -535,7 +543,7 @@ impl GraphService {
             .map_err(|_| CoreError::rpc("GRAPH_BUSY", "远程结构索引状态锁不可用"))?
             .remove(&ws.root_hash)
             .unwrap_or_default();
-        self.index_remote(workspace_root, files, force)
+        self.index_remote(workspace_root, files, force, scope)
     }
 
     pub fn module_deps(
@@ -670,7 +678,7 @@ mod tests {
         let svc = test_graph(dir.path().join("graph-test.db"));
         let root = repo.canonicalize().unwrap();
         let st = svc
-            .index_workspace(&root.to_string_lossy(), true)
+            .index_workspace(&root.to_string_lossy(), true, GraphScope::WithCalls)
             .expect("index");
         assert!(st.edge_count > 0, "expected import edges");
         assert!(st.symbol_count > 0, "expected symbols");
@@ -803,6 +811,7 @@ mod tests {
                     },
                 ],
                 true,
+                GraphScope::WithCalls,
             )
             .unwrap();
         assert!(st.indexed);
@@ -831,7 +840,9 @@ mod tests {
 
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
-        let st = svc.index_workspace(&root.to_string_lossy(), true).unwrap();
+        let st = svc
+            .index_workspace(&root.to_string_lossy(), true, GraphScope::WithCalls)
+            .unwrap();
         assert_eq!(st.file_count, 2);
         assert!(st.edge_count >= 1);
         assert!(st.symbol_count >= 2);
@@ -859,7 +870,7 @@ mod tests {
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
         let key = root.to_string_lossy().to_string();
-        let st = svc.index_workspace(&key, true).unwrap();
+        let st = svc.index_workspace(&key, true, GraphScope::WithCalls).unwrap();
         assert_eq!(st.call_count, 1, "首次建库应有 1 条调用边");
         let before = svc.callers(&key, None, None, Some("foo")).unwrap();
         assert_eq!(before.sites.len(), 1, "首次建库应能查到调用点");
@@ -872,7 +883,7 @@ mod tests {
             "export function foo() { return 1; }\nexport function baz() { return 3; }\nexport function extra() { return 2; }\n",
         )
         .unwrap();
-        svc.index_workspace(&key, false).unwrap();
+        svc.index_workspace(&key, false, GraphScope::WithCalls).unwrap();
 
         let after = svc.callers(&key, None, None, Some("foo")).unwrap();
         assert_eq!(
@@ -902,7 +913,7 @@ mod tests {
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
         let key = root.to_string_lossy().to_string();
-        svc.index_workspace(&key, true).unwrap();
+        svc.index_workspace(&key, true, GraphScope::WithCalls).unwrap();
 
         let res = svc.callers(&key, None, None, Some("foo")).unwrap();
         assert_eq!(res.sites.len(), 1, "应查到 aa.js 的调用点");
@@ -926,7 +937,7 @@ mod tests {
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
         let key = root.to_string_lossy().to_string();
-        svc.index_workspace(&key, true).unwrap();
+        svc.index_workspace(&key, true, GraphScope::WithCalls).unwrap();
 
         let res = svc.callees(&key, None, Some("server.js"), Some("setup")).unwrap();
         assert!(
@@ -951,7 +962,7 @@ mod tests {
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
         let key = root.to_string_lossy().to_string();
-        svc.index_workspace(&key, true).unwrap();
+        svc.index_workspace(&key, true, GraphScope::WithCalls).unwrap();
         let before = svc.callers(&key, None, None, Some("foo")).unwrap();
         assert!(before.symbol.is_some(), "建库后 foo 应存在");
         assert_eq!(before.sites.len(), 1);
@@ -959,7 +970,7 @@ mod tests {
         // 只把被调用方改名，调用方源码原样不动
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(dir.path().join("aa.js"), "export function bar() { return 1; }\n").unwrap();
-        svc.index_workspace(&key, false).unwrap();
+        svc.index_workspace(&key, false, GraphScope::WithCalls).unwrap();
 
         let after = svc.callers(&key, None, None, Some("foo")).unwrap();
         assert!(after.symbol.is_none(), "foo 已不存在");
@@ -994,7 +1005,7 @@ mod tests {
 
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
-        let st = svc.index_workspace(&root.to_string_lossy(), true).unwrap();
+        let st = svc.index_workspace(&root.to_string_lossy(), true, GraphScope::WithCalls).unwrap();
         assert!(st.file_count >= 3);
         assert!(st.symbol_count >= 2);
         assert!(st.edge_count >= 1);
@@ -1020,7 +1031,7 @@ mod tests {
         let svc = test_graph(dir.path().join("g.db"));
         let root = core.canonicalize().unwrap();
         let st = svc
-            .index_workspace(&root.to_string_lossy(), true)
+            .index_workspace(&root.to_string_lossy(), true, GraphScope::WithCalls)
             .expect("index");
         assert!(st.file_count > 10, "expected rust graph files");
         assert!(st.symbol_count > 50, "expected rust symbols");
@@ -1055,7 +1066,7 @@ mod tests {
 
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
-        let st = svc.index_workspace(&root.to_string_lossy(), true).unwrap();
+        let st = svc.index_workspace(&root.to_string_lossy(), true, GraphScope::WithCalls).unwrap();
         assert_eq!(st.file_count, 2);
         assert!(st.edge_count >= 1);
         assert!(st.symbol_count >= 2);
@@ -1097,7 +1108,7 @@ mod tests {
 
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
-        let st = svc.index_workspace(&root.to_string_lossy(), true).unwrap();
+        let st = svc.index_workspace(&root.to_string_lossy(), true, GraphScope::WithCalls).unwrap();
         assert_eq!(st.file_count, 2);
         assert!(st.edge_count >= 1);
         assert!(st.symbol_count >= 2);
@@ -1138,8 +1149,43 @@ mod tests {
         let svc = test_graph(dir.path().join("g.db"));
         let root = dir.path().canonicalize().unwrap();
         let root_s = root.to_string_lossy().to_string();
-        let st1 = svc.index_workspace(&root_s, true).unwrap();
-        let st2 = svc.index_workspace(&root_s, false).unwrap();
+        let st1 = svc.index_workspace(&root_s, true, GraphScope::Structural).unwrap();
+        let st2 = svc.index_workspace(&root_s, false, GraphScope::Structural).unwrap();
         assert_eq!(st1.symbol_count, st2.symbol_count);
+    }
+
+    /// R5：默认只建结构（符号 + import），调用边为 0；问到调用关系时再补建，
+    /// 且补建必须**重解析未变文件**（增量默认会跳过 mtime 未变的文件）。
+    #[test]
+    fn call_graph_is_built_on_demand_and_backfills_unchanged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.js"),
+            "export function helper() { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("b.js"),
+            "import { helper } from './a.js';\nexport function caller() { return helper(); }\n",
+        )
+        .unwrap();
+        let svc = test_graph(dir.path().join("g.db"));
+        let root = dir.path().canonicalize().unwrap();
+        let key = root.to_string_lossy().to_string();
+
+        let st1 = svc.index_workspace(&key, true, GraphScope::Structural).unwrap();
+        assert!(st1.symbol_count > 0, "符号是结构层，必须常建");
+        assert_eq!(st1.call_count, 0, "默认不抽调用边");
+        let none = svc.callers(&key, None, None, Some("helper")).unwrap();
+        assert!(none.sites.is_empty(), "没有调用边就没有调用点");
+
+        // 按需补建（force=false，走增量）：未变文件也必须重新解析出调用边
+        let st2 = svc.index_workspace(&key, false, GraphScope::WithCalls).unwrap();
+        assert!(st2.call_count > 0, "按需建调用图必须真的抽到调用边");
+        let sites = svc.callers(&key, None, None, Some("helper")).unwrap();
+        assert!(
+            sites.sites.iter().any(|s| s.caller_path == "b.js"),
+            "补建后应能查到 b.js 的调用点"
+        );
     }
 }

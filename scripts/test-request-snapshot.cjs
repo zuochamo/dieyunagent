@@ -57,7 +57,6 @@ async function main() {
     await bridge.configure({
       data_dir: dataDir,
       workspace_roots: [path.resolve(__dirname, '..')],
-      models_dirs: [path.join(__dirname, '..', 'models')]
     });
     await bridge.invoke('core.ping', {}, RPC_TIMEOUT_MS);
 

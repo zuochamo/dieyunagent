@@ -41,14 +41,37 @@ pub struct BuildStats {
     pub call_count: i64,
 }
 
+/// 建库范围（R5）：调用图是结构索引里唯一「贵且少用」的部分。
+///
+/// 实测 39 万条 `graph_calls` 占结构索引库体约 42%（33.8 MB / 81 MB），而
+/// `callers`/`callees`/`impact` 三类工具在 7 天里合计 1 次调用。符号 + import +
+/// mtime 是 `repo_map` 与 `find_symbol`/`module_deps` 的底座，必须常建；
+/// 调用关系改为**按需**（第一次问到调用关系时再建一次）。
+///
+/// 只在「建库」这一层表达，不加配置项、不加第二个索引服务。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphScope {
+    /// 符号 + import + mtime（repo_map / find_symbol / module_deps 够用）
+    Structural,
+    /// 结构 + 调用关系（callers / callees / impact 需要）
+    WithCalls,
+}
+
+impl GraphScope {
+    pub fn with_calls(self) -> bool {
+        matches!(self, GraphScope::WithCalls)
+    }
+}
+
 #[allow(dead_code)]
 pub fn run_build(
     conn: &Connection,
     root: &Path,
     root_hash: &str,
     force: bool,
+    scope: GraphScope,
 ) -> Result<BuildStats, CoreError> {
-    run_build_with_progress(conn, root, root_hash, force, None)
+    run_build_with_progress(conn, root, root_hash, force, scope, None)
 }
 
 pub fn run_build_with_progress(
@@ -56,6 +79,7 @@ pub fn run_build_with_progress(
     root: &Path,
     root_hash: &str,
     force: bool,
+    scope: GraphScope,
     on_progress: Option<&dyn Fn(&str, i64, i64, i64, i64, i64)>,
 ) -> Result<BuildStats, CoreError> {
     let report = |phase: &str, done: i64, total: i64, edges: i64, symbols: i64, calls: i64| {
@@ -93,6 +117,9 @@ pub fn run_build_with_progress(
     let mut symbol_count = count_symbols(conn, root_hash)?;
     let mut call_count = count_calls(conn, root_hash)?;
     let mut files_done = 0i64;
+    // 上次只建了结构（没有调用边）而这次要调用图：mtime 没变也必须重解析，
+    // 否则「按需建调用图」永远抽不出任何东西（增量只处理变过的文件）。
+    let calls_missing = scope.with_calls() && !force && call_count == 0;
 
     for rel in &rel_files {
         let abs = root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -102,11 +129,12 @@ pub fn run_build_with_progress(
         };
         let mtime = crate::index::file_mtime_stamp(&meta);
         if !force {
-            let unchanged = stored_mtimes
-                .get(rel)
-                .copied()
-                .map(|prev| crate::index::mtime_unchanged(prev, mtime))
-                .unwrap_or(false);
+            let unchanged = !calls_missing
+                && stored_mtimes
+                    .get(rel)
+                    .copied()
+                    .map(|prev| crate::index::mtime_unchanged(prev, mtime))
+                    .unwrap_or(false);
             if unchanged {
                 files_done += 1;
                 if files_done == 1 || files_done % 16 == 0 || files_done == files_total {
@@ -132,7 +160,7 @@ pub fn run_build_with_progress(
             _ => continue,
         };
 
-        let (ic, sc, cc) = index_file(conn, root_hash, rel, &text, mtime, &rel_files)?;
+        let (ic, sc, cc) = index_file(conn, root_hash, rel, &text, mtime, &rel_files, scope)?;
         import_count += ic;
         symbol_count += sc;
         call_count += cc;
@@ -156,6 +184,11 @@ pub fn run_build_with_progress(
                 call_count,
             );
         }
+    }
+
+    // 所有文件都入库后再回填「名字唯一」的解析目标（消除文件处理顺序的影响）
+    if scope.with_calls() {
+        backfill_unique_callees(conn, root_hash)?;
     }
 
     report(
@@ -202,6 +235,7 @@ pub fn run_remote_build(
     root_hash: &str,
     files: &[RemoteFileInput],
     force: bool,
+    scope: GraphScope,
 ) -> Result<BuildStats, CoreError> {
     conn.execute(
         "INSERT INTO graph_workspaces (root_hash, root_path, indexing)
@@ -246,6 +280,8 @@ pub fn run_remote_build(
     let mut import_count = count_imports(conn, root_hash)?;
     let mut symbol_count = count_symbols(conn, root_hash)?;
     let mut call_count = count_calls(conn, root_hash)?;
+    // 与本地建库同一条规则：要调用图但没有调用边 → 未变文件也要重解析
+    let calls_missing = scope.with_calls() && !force && call_count == 0;
 
     for rel in &rel_files {
         let Some(file) = files.iter().find(|f| f.rel_path.replace('\\', "/") == *rel) else {
@@ -256,7 +292,7 @@ pub fn run_remote_build(
         }
         let mtime = file.mtime;
         if !force {
-            if stored_mtimes.get(rel).copied() == Some(mtime) {
+            if !calls_missing && stored_mtimes.get(rel).copied() == Some(mtime) {
                 continue;
             }
             clear_file_graph(conn, root_hash, rel)?;
@@ -265,7 +301,7 @@ pub fn run_remote_build(
             call_count = count_calls(conn, root_hash)?;
         }
 
-        let (ic, sc, cc) = index_file(conn, root_hash, rel, &file.content, mtime, &rel_files)?;
+        let (ic, sc, cc) = index_file(conn, root_hash, rel, &file.content, mtime, &rel_files, scope)?;
         import_count += ic;
         symbol_count += sc;
         call_count += cc;
@@ -278,6 +314,9 @@ pub fn run_remote_build(
         )
         .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
     }
+
+    // 远端摄取同理：候选文件全部入库后回填名字唯一的解析目标
+    backfill_unique_callees(conn, root_hash)?;
 
     let indexed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -315,6 +354,7 @@ fn index_file(
     text: &str,
     mtime: i64,
     rel_files: &[String],
+    scope: GraphScope,
 ) -> Result<(i64, i64, i64), CoreError> {
     // Tree-sitter 优先；失败回退启发式
     let ast = crate::treesitter::extract_graph_ast(rel, text);
@@ -374,7 +414,7 @@ fn index_file(
     } else {
         Vec::new()
     };
-    let mut symbol_ids: Vec<(i64, i64)> = Vec::new();
+    let mut symbol_ids: Vec<(i64, i64, i64)> = Vec::new();
     let mut symbol_count = 0i64;
     for sym in &symbols {
         let qn = format!("{rel}::{}", sym.name);
@@ -395,8 +435,14 @@ fn index_file(
         )
         .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
         let id = conn.last_insert_rowid();
-        symbol_ids.push((id, sym.line));
+        symbol_ids.push((id, sym.line, sym.end_line));
         symbol_count += 1;
+    }
+
+    // 调用关系只在 `WithCalls` 范围内抽取：它是全量建库中最贵的一段（每条 call 都要
+    // 走一次 callee 解析），而用到它的工具最少。`Structural` 下直接跳过。
+    if !scope.with_calls() {
+        return Ok((import_count, symbol_count, 0));
     }
 
     let import_targets = load_import_targets(conn, root_hash, rel)?;
@@ -473,12 +519,19 @@ fn insert_import(
     Ok(1)
 }
 
-fn caller_symbol_for_line(symbol_ids: &[(i64, i64)], call_line: i64) -> Option<i64> {
+/// 把调用行归属到**包住它**的最近符号。
+///
+/// 只比 start_line 是不够的：函数体结束后、文件作用域的调用（`server.listen(3000)`）
+/// 会被算到上一个函数头上，`callees(setup)` 于是凭空多出一条 listen。
+/// `end_line` 缺失（0 或小于 start）的解析器按「直到文件末尾」处理，保持老行为。
+fn caller_symbol_for_line(symbol_ids: &[(i64, i64, i64)], call_line: i64) -> Option<i64> {
     symbol_ids
         .iter()
-        .filter(|(_, line)| *line <= call_line)
-        .max_by_key(|(_, line)| line)
-        .map(|(id, _)| *id)
+        .filter(|(_, start, end)| {
+            *start <= call_line && (*end <= *start || call_line <= *end)
+        })
+        .max_by_key(|(_, start, _)| *start)
+        .map(|(id, _, _)| *id)
 }
 
 fn resolve_callee_symbol(
@@ -511,15 +564,85 @@ fn resolve_callee_symbol(
             return Ok(Some(id));
         }
     }
-    Ok(conn
-        .query_row(
-            "SELECT id FROM graph_symbols
-             WHERE root_hash = ?1 AND name = ?2
-             ORDER BY rel_path LIMIT 1",
-            params![root_hash, callee],
-            |r| r.get(0),
-        )
-        .ok())
+    // 没有 import 依据时**不猜**：曾经这里回落到「全工作区同名的第一个（按 rel_path）」，
+    // 于是两处同名函数（如 `init`）会被解析到字典序更小的那个，凭空造出一条假边。
+    // 名字唯一的跨文件调用统一由 `backfill_unique_callees` 在建库收尾时回填，
+    // 那里的判据是「整个工作区只有这一个同名符号」，不需要猜。
+    Ok(None)
+}
+
+/// 建库收尾：把「按名字能唯一定位」的未解析调用回填成解析边。
+///
+/// 必须在**所有文件都索引完**之后跑：索引顺序是按 rel_path 的，调用方先于被调用方
+/// 处理时（`a.js` 调 `b.js` 的函数）当场查不到目标，于是永久留成未解析 —— 图谱精度
+/// 就变成了「文件名的字典序」决定的。名字在库内不唯一的保持未解析（按名字匹配由
+/// `callers` / `callees` 负责），绝不猜。
+///
+/// 实现上把「一次性分组扫描 + 内存映射」放在前面，行更新收在一个事务里：
+/// 建库是 autocommit 的，几万条逐行提交会让收尾比整个建库还慢。
+fn backfill_unique_callees(conn: &Connection, root_hash: &str) -> Result<i64, CoreError> {
+    let mut unique: HashMap<String, i64> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, MIN(id) FROM graph_symbols
+                  WHERE root_hash = ?1 GROUP BY name HAVING COUNT(*) = 1",
+            )
+            .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
+        let rows = stmt
+            .query_map(params![root_hash], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
+        for row in rows.flatten() {
+            unique.insert(row.0, row.1);
+        }
+    }
+    if unique.is_empty() {
+        return Ok(0);
+    }
+
+    let mut pending: Vec<(i64, i64)> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, callee_name FROM graph_calls
+                  WHERE root_hash = ?1 AND callee_symbol_id IS NULL",
+            )
+            .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
+        let rows = stmt
+            .query_map(params![root_hash], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
+        for row in rows.flatten() {
+            if let Some(sym_id) = unique.get(&row.1) {
+                pending.push((row.0, *sym_id));
+            }
+        }
+    }
+    if pending.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
+    let mut updated = 0i64;
+    {
+        let mut upd = tx
+            .prepare("UPDATE graph_calls SET callee_symbol_id = ?2, confidence = 0.9 WHERE id = ?1")
+            .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
+        for (call_id, sym_id) in pending {
+            updated += upd
+                .execute(params![call_id, sym_id])
+                .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?
+                as i64;
+        }
+    }
+    tx.commit()
+        .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
+    Ok(updated)
 }
 
 fn load_import_targets(
@@ -579,9 +702,14 @@ fn clear_file_graph(conn: &Connection, root_hash: &str, rel: &str) -> Result<(),
             params![id],
         )
         .ok();
+        // 指向本文件符号的调用边来自**别的文件**：那些文件的源码没变，调用点也还在，
+        // 只是解析目标要重新算。整行删掉等于把它们的调用关系一段段吃掉 —— 增量重建
+        // （未改文件直接跳过）不会把这些行再插回来，图谱会随每次编辑变稀疏。
+        // 所以这里只**撤销解析**，保留调用点按名字匹配。
         conn.execute(
-            "DELETE FROM graph_calls WHERE root_hash = ?1 AND callee_symbol_id = ?2",
-            params![root_hash, id],
+            "UPDATE graph_calls SET callee_symbol_id = NULL, confidence = 0.8
+             WHERE root_hash = ?1 AND callee_symbol_id = ?2 AND caller_path <> ?3",
+            params![root_hash, id, rel],
         )
         .ok();
     }

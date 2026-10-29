@@ -2,15 +2,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use rusqlite::{params, Connection};
 
-use crate::embedding::{
-    blob_to_vector, cosine_similarity, exact_scan_threshold, query_seed, sample_modulus_for,
-};
 use crate::error::CoreError;
 use crate::graph::types::{
     CallGraphResult, CallSiteHit, ImpactResult, ImportEdge, ModuleDepsResult, SymbolHit,
     SymbolSearchResult,
 };
-use crate::index::vector_pool::VectorPool;
 
 struct EdgeRow {
     from_path: String,
@@ -84,8 +80,6 @@ pub fn symbol_search(
             indexed,
             query: String::new(),
             results: vec![],
-            needs_embed: None,
-            vector_search: false,
         });
     }
     let q_lower = q.to_lowercase();
@@ -132,391 +126,7 @@ pub fn symbol_search(
         indexed,
         query: q.to_string(),
         results: rows.filter_map(|r| r.ok()).collect(),
-        needs_embed: None,
-        vector_search: false,
     })
-}
-
-pub fn symbol_semantic_search(
-    conn: &Connection,
-    root_hash: &str,
-    query: &str,
-    kind: Option<&str>,
-    limit: u32,
-    indexed: bool,
-    symbol_vector_count: i64,
-    query_vector: Option<&[f32]>,
-    pool: Option<&VectorPool>,
-) -> Result<SymbolSearchResult, CoreError> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(SymbolSearchResult {
-            ok: true,
-            indexed,
-            query: String::new(),
-            results: vec![],
-            needs_embed: None,
-            vector_search: false,
-        });
-    }
-
-    let can_vector = symbol_vector_count > 0 && query_vector.is_some();
-    if !can_vector {
-        let mut result = symbol_search(conn, root_hash, q, kind, limit, indexed)?;
-        if symbol_vector_count == 0 && indexed {
-            let symbol_count: i64 = conn
-                .query_row(
-                    "SELECT symbol_count FROM graph_workspaces WHERE root_hash = ?1",
-                    params![root_hash],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            if symbol_count > 0 {
-                result.needs_embed = Some(true);
-            }
-        }
-        return Ok(result);
-    }
-
-    let q_vec = query_vector.unwrap();
-    let q_lower = q.to_lowercase();
-    let limit = limit.clamp(1, 80) as usize;
-    let kind_filter = kind.filter(|k| !k.is_empty());
-
-    let mut ranked: Vec<(f64, SymbolHit)> = Vec::new();
-    if let Some(p) = pool.filter(|p| p.matches_dims(q_vec)) {
-        // 内存池命中：全量精确余弦 + 名称加成，不做抽样
-        symbol_scores_from_pool(
-            conn,
-            root_hash,
-            p,
-            q_vec,
-            &q_lower,
-            kind_filter,
-            limit,
-            &mut ranked,
-        )?;
-    } else {
-        // 符号向量维度同样由模型决定（768 / 4096 并存），阈值按字节预算换算
-        let symbol_dims: i64 = conn
-            .query_row(
-                "SELECT v.dims FROM graph_symbol_vectors v
-                 JOIN graph_symbols s ON s.id = v.symbol_id
-                 WHERE s.root_hash = ?1 LIMIT 1",
-                params![root_hash],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-
-        if symbol_vector_count <= exact_scan_threshold(symbol_dims) {
-            score_symbol_vectors(
-                conn,
-                root_hash,
-                kind_filter,
-                None,
-                None,
-                q_vec,
-                &q_lower,
-                &mut ranked,
-            )?;
-        } else {
-            // Prefer symbols whose name already matches the query (lexical anchors).
-            // Skip when the LIKE pattern would be "%" (matches everything).
-            let like_body = q.replace(['%', '_'], "");
-            if !like_body.is_empty() {
-                let like = format!("%{like_body}%");
-                let lexical_sql = if kind_filter.is_some() {
-                    "SELECT s.id, s.rel_path, s.kind, s.name, s.qualified_name, s.start_line, s.end_line,
-                            v.dims, v.vector
-                     FROM graph_symbol_vectors v
-                     JOIN graph_symbols s ON s.id = v.symbol_id
-                     WHERE s.root_hash = ?1 AND s.kind = ?2
-                       AND (LOWER(s.name) LIKE LOWER(?3) OR LOWER(s.qualified_name) LIKE LOWER(?3))
-                     LIMIT 200"
-                } else {
-                    "SELECT s.id, s.rel_path, s.kind, s.name, s.qualified_name, s.start_line, s.end_line,
-                            v.dims, v.vector
-                     FROM graph_symbol_vectors v
-                     JOIN graph_symbols s ON s.id = v.symbol_id
-                     WHERE s.root_hash = ?1
-                       AND (LOWER(s.name) LIKE LOWER(?2) OR LOWER(s.qualified_name) LIKE LOWER(?2))
-                     LIMIT 200"
-                };
-                let mut stmt = conn
-                    .prepare(lexical_sql)
-                    .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
-                let rows = if let Some(k) = kind_filter {
-                    stmt.query_map(params![root_hash, k, like], map_symbol_vector_row)
-                } else {
-                    stmt.query_map(params![root_hash, like], map_symbol_vector_row)
-                }
-                .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
-                for row in rows.flatten() {
-                    accumulate_symbol_vector_score(q_vec, &q_lower, row, &mut ranked);
-                }
-            }
-
-            let modulus = sample_modulus_for(symbol_vector_count, symbol_dims);
-            let residue = query_seed(q).rem_euclid(modulus);
-            score_symbol_vectors(
-                conn,
-                root_hash,
-                kind_filter,
-                Some(modulus),
-                Some(residue),
-                q_vec,
-                &q_lower,
-                &mut ranked,
-            )?;
-        }
-    }
-
-    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let results = ranked.into_iter().take(limit).map(|(_, hit)| hit).collect();
-
-    Ok(SymbolSearchResult {
-        ok: true,
-        indexed,
-        query: q.to_string(),
-        results,
-        needs_embed: None,
-        vector_search: true,
-    })
-}
-
-/// 走内存符号向量池：与 SQL 路径同一套打分公式（余弦 + 名称加成），但向量分数
-/// 来自常驻内存，且是**全量精确**而非抽样。
-fn symbol_scores_from_pool(
-    conn: &Connection,
-    root_hash: &str,
-    pool: &VectorPool,
-    q_vec: &[f32],
-    q_lower: &str,
-    kind_filter: Option<&str>,
-    limit: usize,
-    ranked: &mut Vec<(f64, SymbolHit)>,
-) -> Result<(), CoreError> {
-    let q_norm = VectorPool::query_norm(q_vec);
-    if q_norm <= 1e-8 {
-        return Ok(());
-    }
-    let mut seen: HashSet<i64> = ranked.iter().map(|(_, h)| h.id).collect();
-
-    let name_bonus = |name: &str| -> f64 {
-        let lower = name.to_lowercase();
-        if lower == q_lower {
-            0.35
-        } else if lower.contains(q_lower) {
-            0.15
-        } else {
-            0.0
-        }
-    };
-
-    // 1) 名称词法锚点：名字精确/包含匹配的符号即使余弦排名靠后也要保留
-    let like_body = q_lower.replace(['%', '_'], "");
-    if !like_body.is_empty() {
-        let like = format!("%{like_body}%");
-        let sql = if kind_filter.is_some() {
-            "SELECT id, rel_path, kind, name, qualified_name, start_line, end_line
-             FROM graph_symbols
-             WHERE root_hash = ?1 AND kind = ?2
-               AND (LOWER(name) LIKE LOWER(?3) OR LOWER(qualified_name) LIKE LOWER(?3))
-             LIMIT 200"
-        } else {
-            "SELECT id, rel_path, kind, name, qualified_name, start_line, end_line
-             FROM graph_symbols
-             WHERE root_hash = ?1
-               AND (LOWER(name) LIKE LOWER(?2) OR LOWER(qualified_name) LIKE LOWER(?2))
-             LIMIT 200"
-        };
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
-        let rows = if let Some(k) = kind_filter {
-            stmt.query_map(params![root_hash, k, like], map_symbol_hit)
-        } else {
-            stmt.query_map(params![root_hash, like], map_symbol_hit)
-        }
-        .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
-        for hit in rows.flatten() {
-            if !seen.insert(hit.id) {
-                continue;
-            }
-            let sim = pool.similarity_of(hit.id, q_vec, q_norm).unwrap_or(0.0);
-            let score = sim + name_bonus(&hit.name);
-            if score <= 0.05 {
-                continue;
-            }
-            ranked.push((
-                score,
-                SymbolHit {
-                    score: Some(score),
-                    ..hit
-                },
-            ));
-        }
-    }
-
-    // 2) 语义召回：池全量扫描后取前 M，补齐这些符号的元数据
-    let mut hits: Vec<(i64, f32)> = Vec::new();
-    pool.scan_into(q_vec, q_norm, &mut hits);
-    if hits.is_empty() {
-        return Ok(());
-    }
-    hits.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let m = (limit * 8 + 256).min(hits.len());
-    let sim_of: HashMap<i64, f64> = hits.iter().take(m).map(|(id, s)| (*id, *s as f64)).collect();
-    let need: Vec<i64> = sim_of
-        .keys()
-        .copied()
-        .filter(|id| !seen.contains(id))
-        .collect();
-    if need.is_empty() {
-        return Ok(());
-    }
-
-    for chunk in need.chunks(400) {
-        let placeholders: String = (1..=chunk.len())
-            .map(|i| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT id, rel_path, kind, name, qualified_name, start_line, end_line
-             FROM graph_symbols WHERE root_hash = ?1 AND id IN ({placeholders})"
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(1 + chunk.len());
-        params_vec.push(Box::new(root_hash.to_string()));
-        for id in chunk {
-            params_vec.push(Box::new(*id));
-        }
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
-            .query_map(param_refs.as_slice(), map_symbol_hit)
-            .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
-        for hit in rows.flatten() {
-            // 池里没有 kind 信息，按 kind 过滤在这一步完成
-            if let Some(k) = kind_filter {
-                if hit.kind != k {
-                    continue;
-                }
-            }
-            if seen.contains(&hit.id) {
-                continue;
-            }
-            let sim = sim_of.get(&hit.id).copied().unwrap_or(0.0);
-            let score = sim + name_bonus(&hit.name);
-            if score <= 0.05 {
-                continue;
-            }
-            seen.insert(hit.id);
-            ranked.push((
-                score,
-                SymbolHit {
-                    score: Some(score),
-                    ..hit
-                },
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn score_symbol_vectors(
-    conn: &Connection,
-    root_hash: &str,
-    kind: Option<&str>,
-    modulus: Option<i64>,
-    residue: Option<i64>,
-    q_vec: &[f32],
-    q_lower: &str,
-    ranked: &mut Vec<(f64, SymbolHit)>,
-) -> Result<(), CoreError> {
-    let has_kind = kind.map(|k| !k.is_empty()).unwrap_or(false);
-    let has_mod = modulus.is_some();
-    let sql = match (has_kind, has_mod) {
-        (true, true) => {
-            "SELECT s.id, s.rel_path, s.kind, s.name, s.qualified_name, s.start_line, s.end_line,
-                    v.dims, v.vector
-             FROM graph_symbol_vectors v
-             JOIN graph_symbols s ON s.id = v.symbol_id
-             WHERE s.root_hash = ?1 AND s.kind = ?2 AND (s.id % ?3) = ?4"
-        }
-        (true, false) => {
-            "SELECT s.id, s.rel_path, s.kind, s.name, s.qualified_name, s.start_line, s.end_line,
-                    v.dims, v.vector
-             FROM graph_symbol_vectors v
-             JOIN graph_symbols s ON s.id = v.symbol_id
-             WHERE s.root_hash = ?1 AND s.kind = ?2"
-        }
-        (false, true) => {
-            "SELECT s.id, s.rel_path, s.kind, s.name, s.qualified_name, s.start_line, s.end_line,
-                    v.dims, v.vector
-             FROM graph_symbol_vectors v
-             JOIN graph_symbols s ON s.id = v.symbol_id
-             WHERE s.root_hash = ?1 AND (s.id % ?2) = ?3"
-        }
-        (false, false) => {
-            "SELECT s.id, s.rel_path, s.kind, s.name, s.qualified_name, s.start_line, s.end_line,
-                    v.dims, v.vector
-             FROM graph_symbol_vectors v
-             JOIN graph_symbols s ON s.id = v.symbol_id
-             WHERE s.root_hash = ?1"
-        }
-    };
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
-    let rows = match (kind.filter(|k| !k.is_empty()), modulus, residue) {
-        (Some(k), Some(m), Some(r)) => {
-            stmt.query_map(params![root_hash, k, m, r], map_symbol_vector_row)
-        }
-        (Some(k), None, None) => stmt.query_map(params![root_hash, k], map_symbol_vector_row),
-        (None, Some(m), Some(r)) => {
-            stmt.query_map(params![root_hash, m, r], map_symbol_vector_row)
-        }
-        _ => stmt.query_map(params![root_hash], map_symbol_vector_row),
-    }
-    .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
-    for row in rows.flatten() {
-        accumulate_symbol_vector_score(q_vec, q_lower, row, ranked);
-    }
-    Ok(())
-}
-
-fn accumulate_symbol_vector_score(
-    q_vec: &[f32],
-    q_lower: &str,
-    row: (SymbolHit, i64, Vec<u8>),
-    ranked: &mut Vec<(f64, SymbolHit)>,
-) {
-    let (hit, dims, blob) = row;
-    let Some(vec) = blob_to_vector(&blob, dims as usize) else {
-        return;
-    };
-    let mut score = cosine_similarity(q_vec, &vec);
-    let name_lower = hit.name.to_lowercase();
-    if name_lower == q_lower {
-        score += 0.35;
-    } else if name_lower.contains(q_lower) {
-        score += 0.15;
-    }
-    if score <= 0.05 {
-        return;
-    }
-    if ranked.iter().any(|(_, existing)| existing.id == hit.id) {
-        return;
-    }
-    ranked.push((
-        score,
-        SymbolHit {
-            score: Some(score),
-            ..hit
-        },
-    ));
 }
 
 pub fn callers(
@@ -529,20 +139,47 @@ pub fn callers(
 ) -> Result<CallGraphResult, CoreError> {
     let symbol = resolve_symbol(conn, root_hash, symbol_id, path, name)?;
     let Some(sym) = symbol.clone() else {
+        // 符号已经不在库里（被改名 / 删除 / 还没索引到）：调用点本身可能还留在源码里。
+        // 按裸名把**未解析**的调用点报出来（只认 `callee_symbol_id IS NULL`，解析到别处
+        // 的同名调用不会混进来）——这就是「悬空引用」，改名后「谁还在调它」全靠它。
+        // `symbol: null` 同时告诉调用方：这个名字在库里没有对应符号。
+        let sites = match name {
+            Some(n) if !n.is_empty() => load_call_sites(
+                conn,
+                "SELECT c.caller_path, s.name, c.callee_name, c.callee_symbol_id, c.line, c.confidence, cs.rel_path
+                 FROM graph_calls c
+                 JOIN graph_symbols s ON s.id = c.caller_symbol_id
+                 LEFT JOIN graph_symbols cs ON cs.id = c.callee_symbol_id
+                 WHERE c.root_hash = ?1
+                   AND c.callee_symbol_id IS NULL
+                   AND c.callee_name = ?2
+                 ORDER BY c.caller_path, c.line",
+                params![root_hash, n],
+            )?,
+            _ => Vec::new(),
+        };
         return Ok(CallGraphResult {
             ok: true,
             indexed,
             symbol: None,
-            sites: vec![],
+            sites,
         });
     };
     let sites = load_call_sites(
         conn,
+        // 已解析的调用按**符号 id**认，未解析的才按裸名认。
+        //
+        // 原实现写成 `callee_symbol_id = ?2 OR callee_name = ?3`：一条已解析到别处
+        // `render()` 的调用，会因为同名的 `render()` 也被算成它的调用者 —— 跨文件同名
+        // 越常见，`callers` 越会把不相干的位置报给模型。名字只是「未解析行」的唯一证据，
+        // 与 repo_map 的 refs_by_id / refs_by_name 是同一套口径。
         "SELECT c.caller_path, s.name, c.callee_name, c.callee_symbol_id, c.line, c.confidence, cs.rel_path
          FROM graph_calls c
          JOIN graph_symbols s ON s.id = c.caller_symbol_id
          LEFT JOIN graph_symbols cs ON cs.id = c.callee_symbol_id
-         WHERE c.root_hash = ?1 AND (c.callee_symbol_id = ?2 OR c.callee_name = ?3)",
+         WHERE c.root_hash = ?1
+           AND (c.callee_symbol_id = ?2
+                OR (c.callee_symbol_id IS NULL AND c.callee_name = ?3))",
         params![root_hash, sym.id, sym.name],
     )?;
     Ok(CallGraphResult {
@@ -715,23 +352,6 @@ fn map_symbol_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolHit> {
     })
 }
 
-fn map_symbol_vector_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(SymbolHit, i64, Vec<u8>)> {
-    Ok((
-        SymbolHit {
-            id: row.get(0)?,
-            path: row.get(1)?,
-            kind: row.get(2)?,
-            name: row.get(3)?,
-            qualified_name: row.get(4)?,
-            start_line: row.get(5)?,
-            end_line: row.get(6)?,
-            score: None,
-        },
-        row.get(7)?,
-        row.get(8)?,
-    ))
-}
-
 fn normalize_path_key(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
 }
@@ -894,18 +514,37 @@ pub fn repo_map(
 
     let mut hub_symbols = Vec::new();
     {
+        // 引用数必须用**两次聚合 + LEFT JOIN**，不能写成「每符号一个相关子查询」。
+        //
+        // 相关子查询的 WHERE 里带 OR（callee_symbol_id = s.id OR callee_name = s.name），
+        // 索引 idx_graph_calls_callee 只能吃到 root_hash 前缀，于是执行计划退化成
+        // 「每个符号全扫一遍本工作区的全部 graph_calls」：O(符号数 × 调用数)。
+        // 在真实工作区上（7742 符号 / 114377 调用）单符号 155ms ⇒ 整体约 20 分钟，
+        // 而这段查询是在**常驻连接**（index / graph 共用那一把非重入锁）上跑的，
+        // 期间所有 codebase.status / graph.status / codebase.index.start 全部排队，
+        // 上层只能看到「Gateway RPC 超时: codebase.status (45s)」。
+        //
+        // 两次 GROUP BY 各扫一遍 graph_calls（走 root_hash 索引），与符号数无关：
+        // 同一份数据实测 322ms。
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.rel_path, s.kind, s.name, s.qualified_name, s.start_line,
-                        (
-                          SELECT COUNT(*) FROM graph_calls c
-                          WHERE c.root_hash = s.root_hash
-                            AND (
-                              c.callee_symbol_id = s.id
-                              OR (c.callee_symbol_id IS NULL AND c.callee_name = s.name)
-                            )
-                        ) AS refs
+                "WITH refs_by_id AS (
+                   SELECT callee_symbol_id AS sid, COUNT(*) AS n
+                   FROM graph_calls
+                   WHERE root_hash = ?1 AND callee_symbol_id IS NOT NULL
+                   GROUP BY callee_symbol_id
+                 ),
+                 refs_by_name AS (
+                   SELECT callee_name AS nm, COUNT(*) AS n
+                   FROM graph_calls
+                   WHERE root_hash = ?1 AND callee_symbol_id IS NULL AND callee_name IS NOT NULL
+                   GROUP BY callee_name
+                 )
+                 SELECT s.id, s.rel_path, s.kind, s.name, s.qualified_name, s.start_line,
+                        COALESCE(rb.n, 0) + COALESCE(rn.n, 0) AS refs
                  FROM graph_symbols s
+                 LEFT JOIN refs_by_id rb ON rb.sid = s.id
+                 LEFT JOIN refs_by_name rn ON rn.nm = s.name
                  WHERE s.root_hash = ?1
                    AND s.kind IN (
                      'function','method','class','struct','interface','type','trait','enum','mod','module'
@@ -1070,58 +709,132 @@ mod tests {
         conn
     }
 
-    fn add_symbol(conn: &Connection, name: &str, vec: [f32; 2]) -> i64 {
+    fn add_repo_symbol(conn: &Connection, name: &str, kind: &str) -> i64 {
         conn.execute(
             "INSERT INTO graph_symbols (root_hash, rel_path, kind, name, qualified_name,
                                         start_line, end_line, mtime)
-             VALUES ('rh', 'src/a.js', 'function', ?1, ?2, 1, 3, 0)",
-            params![name, format!("src/a.js::{name}")],
+             VALUES ('rh', 'src/a.js', ?1, ?2, ?3, 1, 3, 0)",
+            params![kind, name, format!("src/a.js::{name}")],
         )
         .unwrap();
-        let id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO graph_symbol_vectors (symbol_id, dims, vector, symbol_mtime)
-             VALUES (?1, 2, ?2, 0)",
-            params![id, crate::embedding::vector_to_blob(&vec)],
-        )
-        .unwrap();
-        id
+        conn.last_insert_rowid()
     }
 
-    /// 符号池只是加速层：同样的查询必须与 SQL 路径结果一致。
-    #[test]
-    fn pool_path_matches_sql_path_for_symbols() {
-        let conn = test_conn();
-        let exact = add_symbol(&conn, "parseConfig", [1.0, 0.0]);
-        add_symbol(&conn, "renderView", [0.0, 1.0]);
-        let partial = add_symbol(&conn, "parse", [0.9, 0.1]);
-
-        let q = [1.0f32, 0.0];
-        let sql_res =
-            symbol_semantic_search(&conn, "rh", "parseConfig", None, 5, true, 3, Some(&q), None)
-                .unwrap();
-        let pool = VectorPool::load_symbols(&conn, "rh").unwrap().expect("pool");
-        let pool_res = symbol_semantic_search(
-            &conn,
-            "rh",
-            "parseConfig",
-            None,
-            5,
-            true,
-            3,
-            Some(&q),
-            Some(&pool),
+    fn add_call(conn: &Connection, callee_name: &str, callee_symbol_id: Option<i64>) {
+        conn.execute(
+            "INSERT INTO graph_calls (root_hash, caller_symbol_id, caller_path, callee_name,
+                                      callee_symbol_id, line)
+             VALUES ('rh', 1, 'src/a.js', ?1, ?2, 1)",
+            params![callee_name, callee_symbol_id],
         )
         .unwrap();
+    }
 
-        let ids = |r: &SymbolSearchResult| r.results.iter().map(|h| h.id).collect::<Vec<_>>();
-        assert!(!sql_res.results.is_empty());
-        assert_eq!(ids(&sql_res), ids(&pool_res), "符号池路径不得改变检索语义");
+    fn add_symbol_at(conn: &Connection, rel_path: &str, name: &str, kind: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO graph_symbols (root_hash, rel_path, kind, name, qualified_name,
+                                        start_line, end_line, mtime)
+             VALUES ('rh', ?1, ?2, ?3, ?4, 1, 3, 0)",
+            params![rel_path, kind, name, format!("{rel_path}::{name}")],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 已解析的调用不得按裸名匹配到同名符号：`callers` 只报真调用点。
+    #[test]
+    fn callers_do_not_match_resolved_edges_by_bare_name() {
+        let conn = test_conn();
+        let _caller = add_symbol_at(&conn, "src/a.js", "caller", "function"); // id 1
+        let render_a = add_symbol_at(&conn, "src/a.js", "render", "function");
+        let render_b = add_symbol_at(&conn, "src/b.js", "render", "function");
+
+        add_call(&conn, "render", Some(render_b)); // 已解析：指向 b 的 render
+        add_call(&conn, "render", None); // 未解析：只有名字
+
+        let a = callers(&conn, "rh", Some(render_a), None, None, true).unwrap();
         assert_eq!(
-            ids(&sql_res).first().copied(),
-            Some(exact),
-            "名称精确匹配应排第一"
+            a.sites.len(),
+            1,
+            "已解析到别的符号的调用，不能按同名算给 render_a：{:?}",
+            a.sites.iter().map(|s| s.line).collect::<Vec<_>>()
         );
-        assert!(ids(&sql_res).contains(&partial), "名称部分匹配应保留");
+        let b = callers(&conn, "rh", Some(render_b), None, None, true).unwrap();
+        assert_eq!(b.sites.len(), 2, "未解析调用按名归属同名符号，已解析的也要算");
+    }
+
+    /// 引用数 = 「按 id 命中」+「未解析 callee_symbol_id、按名字命中」，两者都要算。
+    #[test]
+    fn repo_map_counts_refs_by_symbol_id_and_by_name() {
+        let conn = test_conn();
+        let alpha = add_repo_symbol(&conn, "alpha", "function");
+        add_repo_symbol(&conn, "beta", "method");
+        let gamma = add_repo_symbol(&conn, "gamma", "class");
+        add_repo_symbol(&conn, "localVar", "variable"); // 非枢纽 kind，不应出现
+
+        add_call(&conn, "alpha", Some(alpha));
+        add_call(&conn, "alpha", Some(alpha));
+        add_call(&conn, "beta", None);
+        add_call(&conn, "beta", None);
+        add_call(&conn, "beta", None);
+        add_call(&conn, "gamma", Some(gamma));
+        add_call(&conn, "gamma", None);
+        add_call(&conn, "unrelated", None);
+
+        let map = repo_map(&conn, "rh", 32, true).unwrap();
+        let refs = |name: &str| {
+            map.hub_symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("缺少枢纽符号 {name}"))
+                .call_refs
+        };
+        assert_eq!(refs("alpha"), 2, "按 id 命中的调用都要计入");
+        assert_eq!(refs("beta"), 3, "未解析调用按名字计入");
+        assert_eq!(refs("gamma"), 2, "id + 名字两种命中要相加");
+        assert!(
+            !map.hub_symbols.iter().any(|s| s.name == "localVar"),
+            "非枢纽 kind 不应进仓库地图"
+        );
+    }
+
+    /// 回归护栏：引用数不得是「每符号全扫 graph_calls」。
+    ///
+    /// 曾经的实现是相关子查询（WHERE 里带 OR，索引只用得上 root_hash 前缀），
+    /// 复杂度 O(符号数 × 调用数)：真实工作区（7742 符号 / 114377 调用）要算约 20 分钟，
+    /// 而它跑在 index / graph 共用的那条常驻连接上，于是期间所有 status 请求 45s 超时。
+    /// 下面这组数据在旧实现上约 4 秒起步、且随规模继续线性放大；改写成两次聚合后是几十毫秒。
+    #[test]
+    fn repo_map_refs_scale_with_calls_not_symbols_times_calls() {
+        let conn = test_conn();
+        const SYMBOLS: usize = 600;
+        const CALLS: usize = 40_000;
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            for i in 0..SYMBOLS {
+                add_repo_symbol(&tx, &format!("sym{i}"), "function");
+            }
+            for i in 0..CALLS {
+                let callee = format!("sym{}", i % SYMBOLS);
+                let resolved = if i % 3 == 0 { None } else { Some(((i % SYMBOLS) + 1) as i64) };
+                add_call(&tx, &callee, resolved);
+            }
+            tx.commit().unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let map = repo_map(&conn, "rh", 32, true).unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(!map.hub_symbols.is_empty(), "应返回枢纽符号");
+        assert!(
+            map.hub_symbols.iter().any(|s| s.call_refs > 0),
+            "引用数应被统计到"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "{SYMBOLS} 符号 × {CALLS} 调用的仓库地图耗时 {elapsed:?}，\
+             说明引用数统计又退化成了 O(符号数 × 调用数)"
+        );
     }
 }

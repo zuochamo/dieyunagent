@@ -158,15 +158,34 @@ function showTextPrompt(title, defaultValue = '', opts = {}) {
       finish(input ? input.value : '');
     });
     overlay.querySelector('.text-prompt-cancel')?.addEventListener('click', () => finish(null));
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) finish(null);
-    });
   });
+}
+
+/**
+ * 代码片段向量的一致性文案（唯一一份）。
+ *
+ * 判定由 core 给出（库里实际写入的签名 vs 当前设置），这里只负责措辞 —— `stale` 为真时
+ * 语义检索会静默退化成子串匹配，所以要提示重建。
+ *
+ * `chunks` 是 chunk 总数：向量数少于 chunk 数说明增量重建过文件却没带向量，那部分内容
+ * 只能靠子串通道召回 —— 这条以前显示成「与当前设置一致」，等于把"半残"说成"正常"。
+ * @param {{count?: number, chunks?: number, stale?: boolean, enabled?: boolean}} info
+ * @returns {string}
+ */
+function describeVectorSync(info) {
+  const count = Number(info && info.count) || 0;
+  const chunks = Number(info && info.chunks) || 0;
+  if (count <= 0) return '未写入向量';
+  if (info && info.stale) return '⚠ 与当前设置不一致，建议重建';
+  if (info && info.enabled === false) return '当前未启用向量（库内为旧数据）';
+  if (chunks > count) return `⚠ 仅覆盖 ${count}/${chunks} 段，建议重建补齐`;
+  return '与当前设置一致';
 }
 
 window.showTextPrompt = showTextPrompt;
 window.showOverlay = showOverlay;
 window.parentRemotePath = parentRemotePath;
+window.describeVectorSync = describeVectorSync;
 window.escapeHtml = escapeHtml;
 
 window.addEventListener('error', (event) => {

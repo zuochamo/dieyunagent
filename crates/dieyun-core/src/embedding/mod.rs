@@ -1,20 +1,8 @@
-mod ann;
-mod builtin;
 mod remote;
 
-pub use ann::{
-    exact_scan_threshold, query_seed, sample_modulus_for, vector_bytes,
-    VECTOR_ANN_SAMPLE_MAX_BYTES, VECTOR_EXACT_MAX_BYTES,
-};
-
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
-
-pub use builtin::{
-    resolve_builtin_model_dir, BUILTIN_DIMENSIONS, BUILTIN_EMBEDDING_ID, BUILTIN_MODEL_NAME,
-};
 
 use crate::error::CoreError;
 
@@ -27,13 +15,13 @@ fn embed_serial() -> &'static Mutex<()> {
     EMBED_SERIAL.get_or_init(|| Mutex::new(()))
 }
 
+/// 向量后端配置。**只支持远程 OpenAI 兼容 /embeddings 端点**：
+/// 进程内 ONNX 推理（内置 bge-base-zh-v1.5）已删除，索引在未配置端点时退化为纯关键词检索。
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddingConfig {
     #[serde(default)]
     pub disabled: bool,
-    #[serde(default)]
-    pub builtin: bool,
     #[serde(default)]
     pub base_url: String,
     #[serde(default)]
@@ -55,41 +43,15 @@ fn default_dimensions() -> u32 {
 }
 
 impl EmbeddingConfig {
-    pub fn enabled(&self, models_dirs: &[PathBuf]) -> bool {
-        if self.disabled {
-            return false;
-        }
-        if self.builtin {
-            if !cfg!(feature = "builtin-ort") {
-                return false;
-            }
-            return resolve_builtin_model_dir(models_dirs).is_some();
-        }
-        !self.model.trim().is_empty() && !self.base_url.trim().is_empty()
+    pub fn enabled(&self) -> bool {
+        !self.disabled && !self.model.trim().is_empty() && !self.base_url.trim().is_empty()
     }
 
-    pub fn signature(&self, models_dirs: &[PathBuf]) -> String {
-        if self.disabled {
-            return String::new();
-        }
-        if self.builtin {
-            if resolve_builtin_model_dir(models_dirs).is_none() {
-                return String::new();
-            }
-            return format!("{BUILTIN_EMBEDDING_ID}@{BUILTIN_DIMENSIONS}");
-        }
-        if self.model.trim().is_empty() || self.base_url.trim().is_empty() {
+    pub fn signature(&self) -> String {
+        if !self.enabled() {
             return String::new();
         }
         format!("{}@{}", self.model.trim(), self.dimensions)
-    }
-
-    pub fn effective_dimensions(&self, models_dirs: &[PathBuf]) -> u32 {
-        if self.builtin && resolve_builtin_model_dir(models_dirs).is_some() {
-            BUILTIN_DIMENSIONS
-        } else {
-            self.dimensions
-        }
     }
 }
 
@@ -130,12 +92,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-pub async fn embed_texts(
-    cfg: &EmbeddingConfig,
-    models_dirs: &[PathBuf],
-    inputs: &[String],
-) -> Result<Vec<Vec<f32>>, CoreError> {
-    if !cfg.enabled(models_dirs) {
+pub async fn embed_texts(cfg: &EmbeddingConfig, inputs: &[String]) -> Result<Vec<Vec<f32>>, CoreError> {
+    if !cfg.enabled() {
         return Err(CoreError::rpc(
             "EMBEDDING_DISABLED",
             "未配置 Embedding 模型",
@@ -145,30 +103,15 @@ pub async fn embed_texts(
         return Ok(Vec::new());
     }
     let _slot = embed_serial().lock().await;
-    embed_texts_nowait(cfg, models_dirs, inputs).await
-}
-
-async fn embed_texts_nowait(
-    cfg: &EmbeddingConfig,
-    models_dirs: &[PathBuf],
-    inputs: &[String],
-) -> Result<Vec<Vec<f32>>, CoreError> {
     let prepared: Vec<String> = inputs
         .iter()
         .map(|text| truncate_embed_text(text))
         .collect();
-    if cfg.builtin {
-        let dirs = models_dirs.to_vec();
-        return tokio::task::spawn_blocking(move || builtin::embed_builtin(&dirs, &prepared))
-            .await
-            .map_err(|e| CoreError::rpc("EMBEDDING_BUILTIN", e.to_string()))?;
-    }
     remote::embed_remote(cfg, &prepared).await
 }
 
 pub async fn embed_batches(
     cfg: &EmbeddingConfig,
-    models_dirs: &[PathBuf],
     pending: &[(i64, String)],
 ) -> Result<Vec<(i64, Vec<f32>)>, CoreError> {
     let mut out = Vec::with_capacity(pending.len());
@@ -177,7 +120,7 @@ pub async fn embed_batches(
             .iter()
             .map(|(_, text)| truncate_embed_text(text))
             .collect();
-        let vectors = embed_texts(cfg, models_dirs, &texts).await?;
+        let vectors = embed_texts(cfg, &texts).await?;
         if vectors.len() != batch.len() {
             return Err(CoreError::rpc(
                 "EMBEDDING_PARSE",
