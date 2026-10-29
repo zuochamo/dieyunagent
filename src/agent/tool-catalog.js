@@ -4,6 +4,8 @@
 const { ENGINE_PARAM_SCHEMA } = require('../browser/engine-target');
 // ref 参数文案的唯一来源（ref origin 身份见 src/browser/ref-namespace.js）
 const { REF_PARAM_SCHEMA } = require('../browser/ref-namespace');
+// computer 动作枚举的唯一来源（schema 里的 action 取值由它拼出，避免与执行端漂移）
+const { COMPUTER_ACTIONS_TEXT } = require('../computer/actions');
 
 const HOST_TOOLS = [
   {
@@ -49,7 +51,8 @@ const HOST_TOOLS = [
         'Windows GUI 推荐：command=pythonw main.py，cwd=项目目录，detached=true。' +
         '长任务（编译/打包/渲染/训练，几分钟级）设 waitMs=180000：到点仍未结束会自动转后台继续跑（不会杀进程），' +
         '返回 handle + 已产生的输出，再用 host_proc action=output 续读、action=kill 结束。' +
-        'detached=true 的返回体会带 handle（进程句柄），之后可用 host_proc 查看/读输出/结束。',
+        'detached=true 的返回体会带 handle（本机 hostproc-N / SSH 远端 sshproc-N），之后可用 host_proc 查看/读输出/结束；' +
+        '远程 detached 的输出落在远端 /tmp/dieyun-host-proc/ 下，路径在返回值里。',
       parameters: {
         type: 'object',
         properties: {
@@ -78,7 +81,8 @@ const HOST_TOOLS = [
         '管理由 host_exec 启动的进程：action=list 列出仍在运行的进程（含 handle、PID、命令、存活状态）；' +
         'action=output 读取该进程的输出（detached 与「waitMs 转后台」的进程都能读，可读增量、可等待新输出）；' +
         'action=kill 用 handle 或 pid 结束进程树。' +
-        '只能操作本会话经 host_exec 启动的进程，不能结束任意系统进程。用于跟进长任务进度、清理未退出的 GUI/后台进程。',
+        '只能操作本会话经 host_exec 启动的进程，不能结束任意系统进程。用于跟进长任务进度、清理未退出的 GUI/后台进程。' +
+        'SSH 远端工作空间同样可用（远端句柄形如 sshproc-3，kill 按独立进程组结束整棵树）。',
       parameters: {
         type: 'object',
         properties: {
@@ -1214,7 +1218,7 @@ const GRAPH_TOOL = {
     name: 'graph',
     description:
       '结构索引查询（JS/TS/Python/Go/Rust）。用 operation 选择动作，不要为同一类查询换工具名。' +
-      'find_symbol：按符号名（query）。semantic_find：按自然语言描述（需 embedding）。' +
+      'find_symbol：按符号名（query）。' +
       'module_deps：文件 import 依赖（path 可空=全库边）。callers/callees：静态调用关系（name，可选 path）。' +
       'impact：改某文件沿 import 可能波及谁（path）。lsp_callers：精确引用（本地 LSP；SSH 用远程 rg 补强）。' +
       '精确字符串用 grep；语义代码片段用 codebase_search；已打开行列跳转用 lsp。',
@@ -1224,16 +1228,16 @@ const GRAPH_TOOL = {
         operation: {
           type: 'string',
           description:
-            'find_symbol | semantic_find | module_deps | callers | callees | impact | lsp_callers'
+            'find_symbol | module_deps | callers | callees | impact | lsp_callers'
         },
-        query: { type: 'string', description: 'find_symbol / semantic_find：符号名或描述' },
+        query: { type: 'string', description: 'find_symbol：符号名' },
         name: { type: 'string', description: 'callers / callees / lsp_callers：符号名' },
         path: {
           type: 'string',
           description: '文件相对路径；module_deps/impact 的起点，或给 callers 消歧'
         },
-        kind: { type: 'string', description: 'find_symbol / semantic_find：可选 function 或 class' },
-        limit: { type: 'number', description: 'find_symbol / semantic_find 返回条数，默认 20' },
+        kind: { type: 'string', description: 'find_symbol：可选 function 或 class' },
+        limit: { type: 'number', description: 'find_symbol 返回条数，默认 20' },
         depth: { type: 'number', description: 'module_deps / impact 展开层数' },
         symbolId: { type: 'number', description: '可选 graph 符号 id' },
         persist: {
@@ -1305,6 +1309,60 @@ const SKILL_CREATE_TOOL = {
   }
 };
 
+// —— 记忆工具：让「读记忆 / 纠错」发生在对话内，而不是只能等自动注入 ——
+//
+// 记忆系统的老问题是「写得多、读得少」：每轮只自动注入 8+5 条，模型想不起别的只能认。
+// 这两个工具把检索与纠错交回模型：recall 按需拉原始条目（带 id），forget 把记错的
+// 那条软归档（可恢复，非物理删除）。都在轮内完成，不需要新增表或界面。
+const MEMORY_RECALL_TOOL = {
+  type: 'function',
+  function: {
+    name: 'memory_recall',
+    description:
+      '按需检索长期记忆（项目级 + 用户级），返回带 id 的条目。' +
+      '自动注入每轮只带最相关的几条；需要想起更多细节、或确认「之前定过什么」时用它。' +
+      '只有本次召回/注入出现过的 id 才能用于 memory_forget。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '要查的主题，自然语言即可' },
+        scope: {
+          type: 'string',
+          enum: ['all', 'project', 'global'],
+          description: '检索范围：默认 all（项目 + 用户级）'
+        },
+        limit: { type: 'number', description: '返回条数上限（默认 8，最多 12）' }
+      },
+      required: ['query']
+    }
+  }
+};
+
+const MEMORY_FORGET_TOOL = {
+  type: 'function',
+  function: {
+    name: 'memory_forget',
+    description:
+      '归档（软删除、可恢复）用户明确说记错了的记忆条目。' +
+      '只接受本次请求里通过 memory_recall 或自动注入出现过的 id；' +
+      '不要用它自行清理「看起来没用」的记忆。',
+    parameters: {
+      type: 'object',
+      properties: {
+        memoryIds: {
+          type: 'array',
+          items: { type: 'number' },
+          description: '要归档的记忆 id（来自本次召回结果）'
+        },
+        reason: { type: 'string', description: '为何归档（写进审计日志，帮助事后复盘）' }
+      },
+      required: ['memoryIds']
+    }
+  }
+};
+
+const MEMORY_TOOLS = [MEMORY_RECALL_TOOL, MEMORY_FORGET_TOOL];
+
 const PLAN_TOOLS = [
   {
     type: 'function',
@@ -1322,7 +1380,7 @@ const PLAN_TOOLS = [
           rrule: {
             type: 'string',
             description:
-              'iCalendar RRULE（不含 RRULE: 前缀），与 onceAt 二选一。如 每天9:00 → FREQ=DAILY;BYHOUR=9;BYMINUTE=0；每周一9:00 → FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0；每30分钟 → FREQ=MINUTELY;INTERVAL=30'
+              'iCalendar RRULE（不含 RRULE: 前缀），与 onceAt 二选一。如 每天9:00 → FREQ=DAILY;BYHOUR=9;BYMINUTE=0；每周一9:00 → FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0；每30分钟 → FREQ=MINUTELY;INTERVAL=30；每2小时 → FREQ=HOURLY;INTERVAL=2；总共跑5次加 ;COUNT=5'
           },
           onceAt: {
             type: 'string',
@@ -1346,6 +1404,11 @@ const PLAN_TOOLS = [
             type: 'array',
             items: { type: 'string' },
             description: '可选 TODO 清单，每项是一个可执行检查项'
+          },
+          workspace: {
+            type: 'string',
+            description:
+              '可选：计划执行时使用的工作空间（本地绝对路径，如 E:\\\\project）。留空 = 跟随执行时当前打开的工作空间'
           }
         },
         required: []
@@ -1376,18 +1439,33 @@ const PLAN_TOOLS = [
   }
 ];
 
+/**
+ * MCP 工具的两个入口，刻意合并在一个工具里（不新增第二个工具）：
+ * - `agentName`：已知名字，查完整 JSON Schema（本轮工具表里的 schema 被折叠时用）。
+ * - `query`：不知道叫什么 / 本轮工具表里没有它时，按自然语言检索「全部已启用 MCP 服务」。
+ *
+ * 为什么必须有 query：本轮 mcp_* 工具是按用户提问召回的子集（见 renderer-tool-defs.js），
+ * 任务中途换向时新工具不会自己冒出来。没有 query 这条路，一次召回 miss 就等于该工具
+ * 整轮不存在 —— 模型连「有这个工具」都不知道，无法补救。
+ */
 const MCP_TOOL_SCHEMA_TOOL = {
   type: 'function',
   function: {
     name: 'mcp_tool_schema',
     description:
-      '查询 MCP 工具的完整 JSON Schema。mcp_* 工具列表已含常用参数；仅当嵌套对象被折叠或仍缺字段时再调用。',
+      '查 MCP 工具。两种用法：① agentName=已知工具名，返回完整 JSON Schema（嵌套字段被折叠时用）；' +
+      '② query=你现在要做的事，在全部已启用 MCP 服务里检索工具，返回命中工具的 schema —— ' +
+      '返回的 agentName 可直接当工具名调用，不必等它出现在工具列表里。' +
+      '本轮工具列表只是召回来的子集，缺工具先用 query 找。',
     parameters: {
       type: 'object',
       properties: {
-        agentName: { type: 'string', description: 'MCP agent 工具名，如 mcp_server_tool' }
-      },
-      required: ['agentName']
+        agentName: { type: 'string', description: 'MCP agent 工具名，如 mcp_server_tool' },
+        query: {
+          type: 'string',
+          description: '要完成的事情（自然语言或关键词），如「查上个月开票收入」「看某表结构」'
+        }
+      }
     }
   }
 };
@@ -1607,25 +1685,51 @@ const COMPUTER_TOOL = {
   function: {
     name: 'computer',
     description:
-      '控制本机屏幕（OS 级电脑控制）：截屏、移动/点击鼠标、键盘输入、滚动、拖拽、等待。' +
-      '坐标系 = 你最近一次看到的截图的像素（左上角为原点）；多显示器时默认落在你看到的那块屏，可用 display 指定。' +
+      '控制本机屏幕（OS 级电脑控制）：截屏、移动/点击鼠标、键盘输入、滚动、拖拽、等待、列窗口/切窗口。' +
+      '坐标系 = 你最近一次看到的那张图的像素（左上角为原点）；多显示器时默认落在你看到的那块屏，可用 display 指定。' +
       '正确用法：先 action=screenshot 看清画面，再发动作；每个输入动作都会自动返回最新截图，据此决定下一步，不要凭记忆连点。' +
-      'action 取值：screenshot | click | double_click | right_click | middle_click | move | drag | type | key | scroll | wait。' +
+      '结果里的三个事实要当真：applied=true 表示动作确实执行了；changed=false 表示画面与上次看到的完全一样' +
+      '（这一下没有可见反应，不要重复点同一处，换个思路）；stable=false 表示界面还在变化（加载中），先等再看。' +
+      '要等界面就用 wait_until（condition=changed 等画面变化 / stable 等界面稳定），不要用 wait 猜毫秒数；' +
+      '它超时会返回 timedOut=true（等的东西没发生）—— 这是「上一步大概没生效」的信号，别原样重复。' +
+      '不知道该点哪里时先 list_windows 看窗口清单（比截图省 token），要切窗口用 activate_window + handle；' +
+      '小字/小目标用 screenshot 的 region 裁出来看：裁出的区域就是新坐标系，之后的 click 坐标相对那块区域（要回整屏坐标就再截一次整屏）。' +
+      '需要区间选择/多选/复制时用 modifiers（按住 shift / ctrl / alt）。' +
+      `action 取值：${COMPUTER_ACTIONS_TEXT}。` +
       '无法操作需要管理员权限的窗口（UIPI）；首次操作鼠标/键盘会请求用户批准。本工具操作的是叠云所在机器的物理屏幕。',
     parameters: {
       type: 'object',
       properties: {
-        action: {
-          type: 'string',
-          description: 'screenshot | click | double_click | right_click | middle_click | move | drag | type | key | scroll | wait'
-        },
+        action: { type: 'string', description: COMPUTER_ACTIONS_TEXT },
         coordinate: {
           type: 'array',
           items: { type: 'number' },
-          description: '[x, y] 截图像素坐标。click/double_click/right_click/middle_click/move 必填（省略则在当前光标位置点击）；drag 为起点；scroll 可选（先移过去再滚）'
+          description:
+            '[x, y] 截图像素坐标。move/drag 必填（drag 为起点）；click 家族省略 = 在当前光标位置点击；scroll 可选（先移过去再滚）'
         },
         to: { type: 'array', items: { type: 'number' }, description: 'drag：终点坐标 [x, y]' },
         button: { type: 'string', description: 'click/drag 用的鼠标键：left（默认）| right | middle' },
+        modifiers: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            '动作期间按住的修饰键：shift | ctrl | alt | win（click 家族与 drag 可用）。例：shift 点击 = 选中一段区间；ctrl 点击 = 多选；ctrl 拖拽 = 复制'
+        },
+        region: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            'screenshot：只截这块区域 [x, y, 宽, 高]（相对你最近一次看到的那张图）。裁出的是 1:1 像素，小字看得清；之后点击坐标就相对这块区域'
+        },
+        condition: {
+          type: 'string',
+          description:
+            'wait_until：changed（等画面发生变化，默认）| stable（等界面连续两帧不再变化）。超时会返回 timedOut=true'
+        },
+        handle: {
+          type: 'number',
+          description: 'activate_window：list_windows 返回的窗口句柄（必须在最近一次清单里）'
+        },
         text: { type: 'string', description: 'type：要输入的文本（支持中文；\\n 会按回车键发送）。type 必填' },
         key: {
           type: 'string',
@@ -1634,7 +1738,10 @@ const COMPUTER_TOOL = {
         },
         direction: { type: 'string', description: 'scroll：up | down（默认 down）' },
         amount: { type: 'number', description: 'scroll：滚动格数（默认 3）' },
-        ms: { type: 'number', description: 'wait：等待毫秒（50–10000），给界面加载留时间' },
+        ms: {
+          type: 'number',
+          description: 'wait：等待毫秒（50–10000）；wait_until：超时上限（默认 8000，最多 20000）'
+        },
         display: { type: 'number', description: '多显示器时的屏幕序号（0 = 主屏）；默认沿用你最近一次截图的屏幕' }
       },
       required: ['action']
@@ -1642,15 +1749,95 @@ const COMPUTER_TOOL = {
   }
 };
 
+/**
+ * 内网 agent 互通（`src/peer/`）。三个工具分工刻意保持最小：
+ * - `peer_list`   只读：谁在线、谁和我在同一个项目、谁已经声明在改哪些文件/任务；
+ * - `peer_send`   发一句话给某个对端 agent（可等它跑完一轮再回）；
+ * - `peer_claim`  建议式租约（声明 / 查询 / 释放），减少两人同时改同一个文件。
+ *
+ * 为什么不给「列对端会话 / 读对端历史」的工具：跨机器读别人的会话上下文等于
+ * 绕过「消息即接口」这条边界，也让人无法判断哪句话是对自己说的。要上下文就让对方说。
+ */
+const PEER_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'peer_list',
+      description:
+        '列出内网里在线的其他 Agent（同一局域网、已配对）。返回每台的名称、地址、是否与我同一个项目、' +
+        '以及它已经声明在改的文件/任务租约。开新活之前先看一眼：有人正在改同一个文件时，优先走消息商量而不是硬改。',
+      parameters: {
+        type: 'object',
+        properties: {
+          refresh: {
+            type: 'boolean',
+            description: 'true = 先主动广播一次宣告再列（对方刚上线时用），默认 false'
+          },
+          sameProjectOnly: { type: 'boolean', description: '只看和我同一个项目（同一 git remote）的对端' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'peer_send',
+      description:
+        '给内网另一台 Agent 发消息（按名称或 peerId 指定对端）。对方会收到一条带来源的来信，' +
+        '并在其项目上下文里自行处理。expectReply=true 时本调用会等对方跑完一轮并把它的最终答复作为结果返回；' +
+        '不等就用默认值，让对方稍后回你。一次只问一件事，别连发；重复追问同一个问题会被对方当噪音。' +
+        '长内容（代码、diff、大段日志）请用文件路径传递，不要塞进消息体。',
+      parameters: {
+        type: 'object',
+        properties: {
+          peer: { type: 'string', description: '对端名称或 peerId（用 peer_list 查）；也可用 host+port 直连' },
+          host: { type: 'string', description: '直连时用：对端 IP' },
+          port: { type: 'number', description: '直连时用：对端 peer 服务端口' },
+          text: { type: 'string', description: '要发的内容（包含背景、要什么、期望产出）' },
+          expectReply: { type: 'boolean', description: 'true = 等对方跑完一轮再返回；默认 false' },
+          timeoutMs: { type: 'number', description: '等待回复的超时（毫秒），仅 expectReply=true 时生效' }
+        },
+        required: ['text']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'peer_claim',
+      description:
+        '同项目协同的建议式租约：声明「我要改这个文件 / 我要做这个任务」，让同项目的其他 Agent 看见并避让。' +
+        '它不是锁——不会阻止写入，冲突仍以 git/worktree 为准；但它能让对方在动手前先来问你。' +
+        'action=list 查全部租约；acquire 申请（已有人持有时返回冲突与持有者）；release 释放。' +
+        '改完就释放，别长期占着。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', description: 'acquire | release | list' },
+          kind: { type: 'string', description: 'file（默认）| task' },
+          key: {
+            type: 'string',
+            description: 'file：工作区相对路径（如 src/peer/wire.js）；task：简短任务标识'
+          },
+          note: { type: 'string', description: '为什么要占它 / 打算怎么改，给对方判断依据' }
+        },
+        required: ['action']
+      }
+    }
+  }
+];
+
 const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   WEB_TOOLS,
   BROWSER_TOOLS,
   [CODEBASE_TOOL, GREP_TOOL, GLOB_TOOL, READ_SYMBOL_TOOL, LSP_TOOL],
   GRAPH_TOOLS,
   [AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL],
+  MEMORY_TOOLS,
   PLAN_TOOLS,
   [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SESSION_TOOL, SUBAGENT_TOOL],
-  [COMPUTER_TOOL]
+  [COMPUTER_TOOL],
+  PEER_TOOLS
 );
 
 const BY_NAME = Object.create(null);
@@ -1696,12 +1883,16 @@ module.exports = {
   GRAPH_TOOLS,
   AGENTS_MD_PROPOSE_TOOL,
   SKILL_CREATE_TOOL,
+  MEMORY_TOOLS,
+  MEMORY_RECALL_TOOL,
+  MEMORY_FORGET_TOOL,
   PLAN_TOOLS,
   MCP_TOOL_SCHEMA_TOOL,
   CLARIFY_TOOL,
   SESSION_TOOL,
   SUBAGENT_TOOL,
   COMPUTER_TOOL,
+  PEER_TOOLS,
   ALL_STATIC_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
   RENDERER_ONLY_TOOLS,

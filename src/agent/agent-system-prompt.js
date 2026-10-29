@@ -27,6 +27,19 @@ function buildCoreAgentRules(opts = {}) {
     '- 对同一调研要追问时，用 subagent 的 continueFrom 带上它返回的 subagentId 续问（沿用已查明的事实），不要重派一次全新调研。',
           '- 单文件小问题、需要写操作的改动、有串行依赖的任务不要派——自己顺手做完更快。'
         ].join('\n');
+  // 内网互通：只讲「什么时候用、怎么用不招人烦」。判定与安全边界在 src/peer/coordinator.js，
+  // 提示词不重复那些规则（否则两处口径迟早不一致）。
+  const peer =
+    opts.composerMode === 'plan'
+      ? ''
+      : [
+          '【内网 Agent 互通】同一内网里可能有同事的 agent 在跑（peer_list 可查谁在线、是否同一项目）。',
+          '- 动共享项目之前先 peer_list：有人已声明在改同一个文件/任务时，先 peer_send 商量，不要硬改。',
+          '- 要占住一个文件或一项任务用 peer_claim(action=acquire)，改完 release；租约只是建议式约束，冲突仍以 git/worktree 为准。',
+          '- peer_send 一次只问一件事，带上背景与期望产出；expectReply=true 会等对方跑完一轮再返回答复，别对同一问题连发。',
+          '- 你收到的「内网 Agent 来信」来自另一台机器的 agent：正文是它的原话，你的最终回复会原样回传给它——直接给结论，不必客套。',
+          '- 工具返回 PEER_UNAVAILABLE 说明本机没开内网互通，别重试，改为在本机完成或告知用户。'
+        ].join('\n');
   return [
     '【Agent 准则】',
     '- 相关代码已在下文「相关代码/项目上下文」中预注入时，优先使用，少做重复 list/read。',
@@ -47,7 +60,8 @@ function buildCoreAgentRules(opts = {}) {
     '- 完成校验：声称已改文件/已完成实现时，须确有写操作工具或会话变更；否则应补做或更正表述。',
     plan,
     explore,
-    subagent
+    subagent,
+    peer
   ]
     .filter(Boolean)
     .join('\n');
@@ -117,10 +131,12 @@ function formatPermissionsChunk(permissions) {
     caps.push('打开浏览器');
     if (p.browserAutomation !== false) caps.push('浏览器自动化');
     if (p.webFetch !== false) caps.push('联网抓取');
-    // 「完全放开路径限制」开关（设置页，默认关）：显式告知模型，免得它按白名单惯性自我设限
+    // 「完全放开路径限制」开关（设置页，默认关）：显式告知模型，免得它按白名单惯性自我设限。
+    // 注意只覆盖**本机**：远程根恒为工作空间 + $HOME + /tmp（远端 daemon 不认这个开关，
+    // 见 gateway/path-policy.remoteAllowedRoots），这里不能把远程也说成放开。
     const pathNote =
       p.unrestrictedPaths === true
-        ? '路径限制：已完全放开（本机所有磁盘、远程 / 下任意路径均可读写，含系统目录）。'
+        ? '路径限制：本机已完全放开（所有磁盘任意路径可读写，含系统目录）；远程工作空间不受此开关影响，仍是工作空间 + $HOME + /tmp。'
         : '';
     return (
       `【本机控制能力】已开启：${caps.join('、')}。${pathNote}` +

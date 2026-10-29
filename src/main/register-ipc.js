@@ -7,11 +7,12 @@ const { registerSettingsIpc } = require('./ipc/settings');
 const { registerPlansIpc } = require('./ipc/plans');
 const { registerAppShellIpc } = require('./ipc/app-shell');
 const { registerWorkspaceRemoteIpc } = require('./ipc/workspace-remote');
-const { registerOptionalAssetsIpc } = require('./ipc/optional-assets');
+const { registerBundledAssetsIpc } = require('./ipc/bundled-assets');
 const { registerTerminalIpc } = require('./ipc/terminal');
 const { registerWorktreeIpc } = require('./ipc/worktree');
 const { registerAttachmentsIpc } = require('./ipc/attachments');
 const { registerSkillsMcpIpc } = require('./ipc/skills-mcp');
+const { registerPeerIpc } = require('./ipc/peer');
 
 /**
  * IPC registered before app.whenReady (deploy, agents-md, embedding test).
@@ -32,8 +33,9 @@ function registerMainIpc(ctx) {
   registerDialogIpc(ctx);
   registerAppShellIpc(ctx);
   registerWorkspaceRemoteIpc(ctx);
-  registerOptionalAssetsIpc(ctx);
+  registerBundledAssetsIpc();
   registerTerminalIpc(ctx);
+  registerPeerIpc(ctx);
   registerAgentsMdReadyIpc(ctx);
 }
 

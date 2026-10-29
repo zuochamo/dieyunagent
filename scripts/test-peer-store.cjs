@@ -1,0 +1,170 @@
+'use strict';
+
+/**
+ * peer 落盘层（身份 / 信任清单 / 会话绑定 / 手工对端 / 开关）与「项目身份 key」的断言。
+ *
+ * 这两块是内网互通的地基：身份错了就等于换了台机器，key 错了就会把两个不相干的项目
+ * 当成同一个项目协同（比不协同更坏）。网络层另见 `scripts/test-peer-mesh.cjs`。
+ */
+
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const { createPeerStore } = require('../src/peer/store');
+const { readGitRemoteUrl, workspaceKeyFor, workspaceInfoFor, normalizeRemoteUrl } = require('../src/peer/workspace-key');
+
+function mkTmp(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `dieyun-peer-${prefix}-`));
+}
+
+function main() {
+  const root = mkTmp('store');
+  try {
+    // —— 身份 ——
+    const store = createPeerStore(root);
+    const id = store.identity();
+    assert.match(id.peerId, /^peer_[0-9a-f]{18}$/, `peerId 形状不对: ${id.peerId}`);
+    assert.ok(id.name && id.name.length > 0, '名称不能为空');
+    assert.ok(fs.existsSync(store.files.identity), 'identity.json 应落盘');
+
+    const store2 = createPeerStore(root);
+    assert.strictEqual(store2.identity().peerId, id.peerId, '重启后 peerId 必须不变');
+
+    store.setName('  前端   机器 ');
+    assert.strictEqual(store.identity().name, '前端 机器', '名称应折叠空白');
+    assert.strictEqual(createPeerStore(root).identity().name, '前端 机器', '名称应持久化');
+
+    // —— 信任清单（取代配对码）：allow / deny / 撤销，按 peerId 记住 ——
+    assert.deepStrictEqual(store.trustEntries(), [], '初始没有任何信任记录');
+    assert.strictEqual(store.trustStatus('peer_cccccccccccccccccc'), '', '没记录 → 空状态（= 需要确认）');
+    assert.strictEqual(store.isTrusted('peer_cccccccccccccccccc'), false);
+
+    store.setTrust('peer_cccccccccccccccccc', 'allow', '同事A');
+    assert.strictEqual(store.trustStatus('peer_cccccccccccccccccc'), 'allow');
+    assert.strictEqual(store.isTrusted('peer_cccccccccccccccccc'), true);
+    assert.ok(fs.existsSync(store.files.trust), 'trusted-peers.json 应落盘');
+    assert.strictEqual(
+      createPeerStore(root).trustStatus('peer_cccccccccccccccccc'),
+      'allow',
+      '允许决定必须持久化（重启后不用再确认）'
+    );
+    const entries = createPeerStore(root).trustEntries();
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].name, '同事A', '名字要一起记住，面板上才看得懂');
+    assert.ok(entries[0].at > 0, '要记时间（按最近决定排序）');
+
+    store.setTrust('peer_dddddddddddddddddd', 'deny');
+    assert.strictEqual(store.trustStatus('peer_dddddddddddddddddd'), 'deny');
+    assert.strictEqual(store.isTrusted('peer_dddddddddddddddddd'), false);
+
+    // 撤销：回到「不认识」，下次来信要重新确认
+    store.setTrust('peer_cccccccccccccccccc', 'clear');
+    assert.strictEqual(store.trustStatus('peer_cccccccccccccccccc'), '', '撤销后应回到未知');
+    assert.deepStrictEqual(
+      store.trustEntries().map((e) => e.peerId),
+      ['peer_dddddddddddddddddd'],
+      '撤销只删这一条'
+    );
+
+    // 非法输入不进文件（避免面板上出现点不动的幽灵条目）
+    store.setTrust('   ', 'allow');
+    store.setTrust('peer_eeeeeeeeeeeeeeeeee', /** @type {any} */ ('whatever'));
+    assert.strictEqual(store.trustStatus('peer_eeeeeeeeeeeeeeeeee'), '', '未知状态不应写入');
+
+    // —— 会话绑定 ——
+    assert.deepStrictEqual(store.links(), {}, '初始没有绑定');
+    store.linkSession('sess_1', 'peer_aaaaaaaaaaaaaaaaaa');
+    assert.strictEqual(store.peerForSession('sess_1'), 'peer_aaaaaaaaaaaaaaaaaa');
+    assert.deepStrictEqual(store.sessionsForPeer('peer_aaaaaaaaaaaaaaaaaa'), ['sess_1']);
+    store.linkSession('sess_1', 'peer_bbbbbbbbbbbbbbbbbb');
+    assert.strictEqual(store.peerForSession('sess_1'), 'peer_bbbbbbbbbbbbbbbbbb', '同一会话改绑应覆盖');
+    assert.deepStrictEqual(createPeerStore(root).links(), { sess_1: 'peer_bbbbbbbbbbbbbbbbbb' }, '绑定应持久化');
+    store.unlinkSession('sess_1');
+    assert.strictEqual(store.peerForSession('sess_1'), '', '解绑后应为空');
+    assert.strictEqual(store.peerForSession(''), '', '空会话 id 不应崩');
+
+    // —— 手工对端（端口必须合法，坏条目静默丢弃）——
+    const cleaned = store.setStaticPeers([
+      { host: ' 192.168.31.9 ', port: '17350', name: '同事A' },
+      { host: '', port: 17351 },
+      { host: '10.0.0.2', port: 0 },
+      { host: '10.0.0.3', port: 70000 }
+    ]);
+    assert.deepStrictEqual(cleaned, [{ host: '192.168.31.9', port: 17350, name: '同事A' }]);
+    assert.deepStrictEqual(createPeerStore(root).staticPeers(), cleaned, '手工对端应持久化');
+
+    // —— 开关 ——
+    assert.deepStrictEqual(
+      store.settings(),
+      { enabled: true, autoTurn: false },
+      '默认开互通但**不自动跑一轮**（跑一轮 = 别人一句话就能在这台机器上执行工具）'
+    );
+    assert.deepStrictEqual(store.setSettings({ autoTurn: true }), { enabled: true, autoTurn: true });
+    assert.deepStrictEqual(createPeerStore(root).settings(), { enabled: true, autoTurn: true }, '开关应持久化');
+    assert.deepStrictEqual(
+      createPeerStore(root).setSettings({ autoTurn: /** @type {any} */ ('yes') }),
+      { enabled: true, autoTurn: false },
+      '非 true 一律当关（不做真值猜测）'
+    );
+
+    // —— 项目身份 key ——
+    assert.strictEqual(workspaceKeyFor(''), '', '空路径应返回空 key');
+    const repoDir = mkTmp('repo');
+    const otherDir = mkTmp('repo-other');
+    try {
+      // 没有 git：退回路径哈希，两个不同目录必须不同 key
+      const pathKey = workspaceKeyFor(repoDir);
+      assert.strictEqual(pathKey.length, 12);
+      assert.notStrictEqual(pathKey, workspaceKeyFor(otherDir));
+
+      // 有 git remote：key 由 remote 决定 —— 同一 remote 的两个克隆必须同 key
+      const gitDir = path.join(repoDir, '.git');
+      fs.mkdirSync(gitDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(gitDir, 'config'),
+        ['[core]', '\trepositoryformatversion = 0', '[remote "origin"]', '\turl = git@github.com:dieyun/agent.git', '\tfetch = +refs/heads/*:refs/remotes/origin/*', ''].join('\n'),
+        'utf8'
+      );
+      assert.strictEqual(readGitRemoteUrl(repoDir), 'github.com/dieyun/agent', 'SSH remote 应归一为 host/path');
+      assert.strictEqual(normalizeRemoteUrl('https://GitHub.com/dieyun/agent.git/'), 'github.com/dieyun/agent');
+
+      const cloneDir = mkTmp('clone');
+      try {
+        fs.mkdirSync(path.join(cloneDir, '.git'), { recursive: true });
+        fs.writeFileSync(
+          path.join(cloneDir, '.git', 'config'),
+          ['[remote "origin"]', '\turl = https://github.com/dieyun/agent', ''].join('\n'),
+          'utf8'
+        );
+        assert.strictEqual(workspaceKeyFor(cloneDir), workspaceKeyFor(repoDir), '同一 remote 的两个克隆应同 key');
+        assert.strictEqual(workspaceInfoFor(cloneDir).name, path.basename(cloneDir), 'name 用目录名展示');
+      } finally {
+        fs.rmSync(cloneDir, { recursive: true, force: true });
+      }
+
+      // worktree：`.git` 是文件（gitdir: ...），真正的 remote 在主仓库 git 目录里，
+      // worktree 的 gitdir 通过 commondir 指过去 —— 必须顺着这一跳才能判成同一项目。
+      const wtDir = mkTmp('wt');
+      try {
+        const wtGitDir = path.join(gitDir, 'worktrees', 'wt');
+        fs.mkdirSync(wtGitDir, { recursive: true });
+        fs.writeFileSync(path.join(wtGitDir, 'commondir'), '../..\n', 'utf8');
+        fs.writeFileSync(path.join(wtDir, '.git'), `gitdir: ${wtGitDir}\n`, 'utf8');
+        assert.strictEqual(workspaceKeyFor(wtDir), workspaceKeyFor(repoDir), 'worktree 应与其主仓库同 key（同 remote）');
+      } finally {
+        fs.rmSync(wtDir, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  console.log('test-peer-store.cjs ok');
+}
+
+main();

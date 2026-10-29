@@ -1,4 +1,4 @@
-/* global window, document, $, uiText, gwState, closeMobileConnectModal, isMobileConnectModalOpen, openHelpModal, closeHelpModal, openSettingsSkillsPage, openSettingsComponentsPage, isSettingsComponentsPageOpen, isHelpModalOpen, isSettingsModalOpen, setDialogMaximized, resetDialogMaximize, renderSuppliersList */
+/* global window, document, $, uiText, gwState, closeConnectModal, isConnectModalOpen, openHelpModal, closeHelpModal, openSettingsSkillsPage, isHelpModalOpen, isSettingsModalOpen, isPeerTrustPromptOpen, dismissPeerTrustPrompt, setDialogMaximized, resetDialogMaximize, renderSuppliersList */
 'use strict';
 
 const panels = document.querySelectorAll('.tab-panel');
@@ -6,7 +6,6 @@ const SETTINGS_TITLE_KEYS = {
   settings: ['settings_model', '模型'],
   theme: ['settings_theme', '主题'],
   worktrees: ['settings_worktrees', 'Worktree'],
-  plugins: ['settings_plugins', '插件'],
   perms: ['settings_perms', '权限'],
   sandbox: ['settings_sandbox', '沙箱'],
   'agent-knowledge': ['settings_agent_knowledge', '知识']
@@ -50,17 +49,11 @@ function ensureSettingsSidebar() {
   overlay.classList.add('settings-mode-model');
 }
 
-function showPluginListView() {
-  document.querySelectorAll('.plugin-settings-view').forEach((el) => {
-    el.classList.toggle('active', el.dataset.pluginView === 'list');
-  });
-}
-
 function openSettingsShell() {
   const overlay = $('settings-overlay');
   if (!overlay) return false;
   closeAllMenus();
-  closeMobileConnectModal();
+  closeConnectModal();
   closeExecuteModal();
   closeHelpModal();
   overlay.hidden = false;
@@ -145,9 +138,6 @@ function switchSettingsTab(tab) {
     if (typeof window.syncThemeAutoLaunchToggle === 'function') {
       window.syncThemeAutoLaunchToggle();
     }
-    if (typeof window.syncThemeLongHorizonToggle === 'function') {
-      window.syncThemeLongHorizonToggle();
-    }
   }
   if (tab === 'worktrees' && typeof onWorktreesSettingsTabShown === 'function') {
     onWorktreesSettingsTabShown();
@@ -158,7 +148,7 @@ function openPermissionsSettingsModal() {
   const overlay = $('settings-overlay');
   if (!overlay) return;
   closeAllMenus();
-  closeMobileConnectModal();
+  closeConnectModal();
   closeSettingsSkillsPage();
   closeExecuteModal();
   closeHelpModal();
@@ -197,7 +187,7 @@ function openModelSettingsModal(modelTab = 'defined') {
   const overlay = $('settings-overlay');
   if (!overlay) return;
   closeAllMenus();
-  closeMobileConnectModal();
+  closeConnectModal();
   closeSettingsSkillsPage();
   closeExecuteModal();
   closeHelpModal();
@@ -214,7 +204,7 @@ function openSettingsModal(tab) {
   const overlay = $('settings-overlay');
   if (!overlay) return;
   closeAllMenus();
-  closeMobileConnectModal();
+  closeConnectModal();
   closeSettingsSkillsPage();
   closeExecuteModal();
   closeHelpModal();
@@ -236,7 +226,6 @@ function handleMenuAction(el) {
   const menu = el.dataset.settingsAction;
   if (!menu) return;
   if (menu === 'skills') openSettingsSkillsPage(el.dataset.skillsTab || 'list');
-  else if (menu === 'components') openSettingsComponentsPage();
 }
 function closeSettingsModal() {
   const overlay = $('settings-overlay');
@@ -248,10 +237,6 @@ function closeSettingsModal() {
 
 function isSettingsSkillsPageOpen() {
   return isSettingsPageOpen('skills');
-}
-
-function isSettingsComponentsPageOpen() {
-  return isSettingsPageOpen('components');
 }
 
 function initSettingsShell() {
@@ -282,24 +267,18 @@ function initSettingsShell() {
     });
   });
 
-  const settingsOverlay = $('settings-overlay');
-  if (settingsOverlay) {
-    settingsOverlay.addEventListener('click', (e) => {
-      if (e.target === settingsOverlay) closeSettingsModal();
-    });
-  }
-
   document.addEventListener('click', () => closeAllMenus());
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       const autoEd = $('automation-editor-overlay');
       if (autoEd && !autoEd.hidden) closeAutomationEditor();
-      else if (isMobileConnectModalOpen()) closeMobileConnectModal();
+      // 首次来信确认弹在最上层：Esc = 「先不看」（请求仍在面板待确认里）
+      else if (isPeerTrustPromptOpen()) dismissPeerTrustPrompt();
+      else if (isConnectModalOpen()) closeConnectModal();
       else if (isHelpModalOpen()) closeHelpModal();
       else if (isSettingsModalOpen()) closeSettingsModal();
       else if (isExecuteModalOpen()) closeExecuteModal();
       else if (isSettingsSkillsPageOpen()) closeSettingsSkillsPage();
-      else if (isSettingsComponentsPageOpen()) closeSettingsModal();
       else closeAllMenus();
     }
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -332,12 +311,6 @@ function initSettingsShell() {
     }
   });
 
-  const executeOverlay = $('execute-overlay');
-  if (executeOverlay) {
-    executeOverlay.addEventListener('click', (e) => {
-      if (e.target === executeOverlay) closeExecuteModal();
-    });
-  }
   document.querySelectorAll('.execute-nav-item[data-execute-tab]').forEach((el) => {
     el.addEventListener('click', () => switchExecuteTab(el.dataset.executeTab));
   });

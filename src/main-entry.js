@@ -53,6 +53,9 @@ const {
 const { AgentRunCoordinator } = require('./agent/coordinator');
 const { AgentService } = require('./agent/service');
 const { MobileBridge } = require('./mobile/bridge');
+// 内网 agent 互通（P2P）：身份/发现/WS 直连/会话投递/建议式租约，语义全在 src/peer/
+const { createPeerCoordinator } = require('./peer');
+const { getAgentLimits } = require('./agent/agent-limits');
 const subagentStore = require('./agent/subagent-store');
 const worktreeService = require('./git/worktree-service');
 const { createTrayNotify } = require('./main/tray-notify');
@@ -64,11 +67,12 @@ const { createWindowTray } = require('./main/window-tray');
 const { createRemoteGatewayRuntime } = require('./main/remote-gateway');
 const { bootWorkspaceRemoteRuntime } = require('./main/workspace-remote-runtime');
 const { createSshReconnect } = require('./ssh/reconnect');
+const { getSshConfigBlocks } = require('./ssh/ssh-config');
 const { loadModelSettings, saveModelSettings } = require('./model-settings');
 const { createMainToolBridge } = require('./agent/tool-bridge-main');
 const { clearToolHarnessSessionsForSession } = require('./agent/tool-harness');
 const { registerRendererToolDelegateIpc, requestSandboxApproval } = require('./agent/renderer-tool-delegate');
-const { createMainCompactionAgent, getEffectiveInputBudget } = require('./agent/compaction-main');
+const { createMainCompactionAgent } = require('./agent/compaction-main');
 const { killActiveShellChildren } = require('./gateway/host-control');
 const { registerEarlyMainIpc, registerMainIpc, registerLateMainIpc } = require('./main/register-ipc');
 const { registerAgentRuntimeIpc } = require('./main/ipc/agent-runtime');
@@ -223,6 +227,8 @@ let skillCatalog = null;
 let agentService = null;
 /** @type {import('./mobile/bridge').MobileBridge | null} */
 let mobileBridge = null;
+/** @type {ReturnType<typeof createPeerCoordinator> | null} */
+let peerCoordinator = null;
 /** @type {ReturnType<createBrowserService> | null} */
 let browserService = null;
 /** @type {ReturnType<import('./computer/service').createComputerService> | null} */
@@ -245,6 +251,7 @@ const sshReconnect = createSshReconnect({
   getLocalGateway: () => localGateway,
   getSshSessionManager: () => sshSessionManager,
   getSshCredentialsStore: () => sshCredentialsStore,
+  getSshConfigBlocks: () => getSshConfigBlocks(),
   getSshConnectionPool: () => sshConnectionPool,
   getSessionRemoteTransport: () => sessionRemoteTransport,
   invalidateRemoteAgentClient,
@@ -585,6 +592,13 @@ app.whenReady().then(async () => {
   agentService.on('event', (event) => {
     if (mobileBridge) mobileBridge.broadcast(event);
     windowTray.sendRendererAgentService('agent-service:event', event);
+    // 跨机回合的回传：进度攒正文（summary 只有 400 字），结束把完整正文回给对方。
+    if (peerCoordinator && event) {
+      if (event.type === 'task.progress') peerCoordinator.noteTurnProgress(event.requestId, event);
+      else if (event.type === 'task.completed' || event.type === 'task.failed' || event.type === 'task.stopped') {
+        void peerCoordinator.noteTurnCompleted(event.requestId, event);
+      }
+    }
   });
   mobileBridge = new MobileBridge({
     agentService,
@@ -595,6 +609,39 @@ app.whenReady().then(async () => {
     mobileBridge.start();
   } catch (e) {
     log.error('手机端桥接启动失败:', e);
+  }
+
+  // 内网 agent 互通：与手机桥同级（都是 Main 持有的一扇网络门），但方向相反 ——
+  // 手机桥是「外部前端连进来」，peer 是「别的 agent 连进来 + 本机连出去」。
+  // 启动失败只关掉互通，不影响本地 agent。
+  try {
+    peerCoordinator = createPeerCoordinator({
+      userDataPath: userData,
+      getWorkspace: () => {
+        try {
+          const ws = localGateway.getWorkspace();
+          return { workspacePath: ws && ws.workspacePath ? String(ws.workspacePath) : '' };
+        } catch {
+          return { workspacePath: '' };
+        }
+      },
+      rpc: (method, params) => localGateway.invokeRpc(method, params),
+      submitTask: (task) => agentService.submitTask(task),
+      limits: () => getAgentLimits(userData),
+      onEvent: (event) => {
+        if (windowTray) windowTray.sendRendererEvent('peer:event', event);
+      },
+      log: (m) => log.info(m)
+    });
+    peerCoordinator
+      .start()
+      .then((s) => {
+        if (s && s.port) log.info(`内网 agent 互通已启动: ${s.name} @ :${s.port}`);
+      })
+      .catch((e) => log.warn('内网 agent 互通启动失败:', e && e.message));
+  } catch (e) {
+    log.error('内网 agent 互通初始化失败:', e);
+    peerCoordinator = null;
   }
 
   try {
@@ -652,7 +699,6 @@ app.whenReady().then(async () => {
     getTrayNotify: () => trayNotify,
     createToolBridge: (webContents) => createRustLoopToolBridge(webContents),
     ensureMainCompactionAgent: () => ensureMainCompactionAgent(),
-    getTokenBudget: (model) => getEffectiveInputBudget(loadModelSettings(userData), model),
     log
   });
   plansStore = plansBoot.plansStore;
@@ -673,6 +719,7 @@ app.whenReady().then(async () => {
     getLocalGateway: () => localGateway,
     getBrowserService: () => browserService,
     getMobileBridge: () => mobileBridge,
+    getPeerCoordinator: () => peerCoordinator,
     getCoreBridge: () => coreBridge,
     getPlansStore: () => plansStore,
     getPlansScheduler: () => plansScheduler,
@@ -709,6 +756,7 @@ app.whenReady().then(async () => {
       sshReconnect.tryReconnectCurrentSshWorkspace(reason, opts),
     getSshSessionManager: () => sshSessionManager,
     getSshCredentialsStore: () => sshCredentialsStore,
+    getSshConfigBlocks: () => getSshConfigBlocks(),
     getSshConnectionPool: () => sshConnectionPool,
     getRemoteGatewayPool: () => remoteGatewayPool,
     getPortForwardManager: () => portForwardManager,
@@ -756,6 +804,7 @@ app.whenReady().then(async () => {
       plansStore,
       userDataPath: userData,
       browserService,
+      peerCoordinator,
       createUserSkill,
       onSkillsChanged: (created) => notifySkillsCatalogChanged(webContents, created),
       plansCreateFromText: createPlansCreateFromText({
@@ -814,6 +863,7 @@ app.whenReady().then(async () => {
     ipcMain,
     clipboard,
     getLocalGateway: () => localGateway,
+    getSshConnectionPool: () => sshConnectionPool,
     getUserDataPath: () => userData,
     getReadableDirPath: () => readableDirPath,
     getWorktreeService: () => worktreeService,
@@ -885,9 +935,28 @@ app.on('before-quit', () => {
     mobileBridge.stop();
     mobileBridge = null;
   }
+  if (peerCoordinator) {
+    try {
+      peerCoordinator.stop();
+    } catch {
+      // 退出路径不因关闭失败而卡住
+    }
+    peerCoordinator = null;
+  }
   workplaceMonitor.dispose();
   appUpdater.disposeTimers();
   sshReconnect.disposeSshReconnectTimer();
+  // 远端 agent 必须跟着退出一起收：它们是 nohup 起的独立进程，不管就变成远端孤儿
+  // （占端口 + 占 <workspace>/.dieyun/index.sqlite，下次启动要先清孤儿）。
+  if (remoteGatewayPool) {
+    remoteGatewayPool
+      .stopAll(() => (sshConnectionPool ? sshConnectionPool.disconnectAll() : undefined))
+      .catch(() => {});
+    remoteGatewayPool = null;
+  } else if (sshConnectionPool) {
+    sshConnectionPool.disconnectAll().catch(() => {});
+  }
+  sshConnectionPool = null;
   if (mcpRuntime) {
     mcpRuntime.shutdown().catch(() => {});
     mcpRuntime = null;

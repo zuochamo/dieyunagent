@@ -4,6 +4,35 @@ contextBridge.exposeInMainWorld('diecloud', {
   getGatewayInfo: () => ipcRenderer.invoke('gateway:get-info'),
   getMobileInfo: () => ipcRenderer.invoke('mobile:get-info'),
 
+  // 内网 agent 互通（src/peer）：语义全在 Main 的协调器，Renderer 只发命令与收事件。
+  peerStatus: () => ipcRenderer.invoke('peer:status'),
+  peerRefresh: () => ipcRenderer.invoke('peer:refresh'),
+  peerSetName: (name) => ipcRenderer.invoke('peer:set-name', { name }),
+  peerSetEnabled: (enabled) => ipcRenderer.invoke('peer:set-enabled', { enabled: !!enabled }),
+  peerSetAutoTurn: (enabled) => ipcRenderer.invoke('peer:set-auto-turn', { enabled: !!enabled }),
+  // 授权：首次来信 → 允许 / 拒绝；撤销回到「不认识」（取代 P0 的配对码）
+  peerTrust: (peerId, decision) => ipcRenderer.invoke('peer:trust', { peerId, decision }),
+  peerUntrust: (peerId) => ipcRenderer.invoke('peer:untrust', { peerId }),
+  peerTrustList: () => ipcRenderer.invoke('peer:trust-list'),
+  peerSetStaticPeers: (peers) => ipcRenderer.invoke('peer:set-static-peers', { peers: peers || [] }),
+  peerSend: (payload) => ipcRenderer.invoke('peer:send', payload || {}),
+  peerSendSession: (payload) => ipcRenderer.invoke('peer:send-session', payload || {}),
+  peerOpenSession: (peer) => ipcRenderer.invoke('peer:open-session', { peer }),
+  peerLinkSession: (sessionId, peerId) => ipcRenderer.invoke('peer:link-session', { sessionId, peerId }),
+  peerUnlinkSession: (sessionId) => ipcRenderer.invoke('peer:unlink-session', { sessionId }),
+  peerClaim: (payload) => ipcRenderer.invoke('peer:claim', payload || {}),
+  onPeerEvent: (cb) => {
+    const handler = (_evt, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on('peer:event', handler);
+    return () => ipcRenderer.removeListener('peer:event', handler);
+  },
+
   getPermissions: () => ipcRenderer.invoke('permissions:get'),
   setPermissions: (perms) => ipcRenderer.invoke('permissions:set', perms),
 
@@ -20,26 +49,8 @@ contextBridge.exposeInMainWorld('diecloud', {
   sshHome: () => ipcRenderer.invoke('ssh:home'),
   sshGetProfile: (payload) => ipcRenderer.invoke('ssh:get-profile', payload),
   sshAutoReconnect: () => ipcRenderer.invoke('ssh:auto-reconnect'),
-  sshEnsureRemoteGateway: () => ipcRenderer.invoke('ssh:ensure-remote-gateway'),
   sshRemoteGatewayStatus: () => ipcRenderer.invoke('ssh:remote-gateway-status'),
-  ensureOptionalAsset: (assetId, opts) =>
-    ipcRenderer.invoke('optional-assets:ensure', { assetId, ...(opts || {}) }),
-  installOptionalAssetFromFile: (assetId) => ipcRenderer.invoke('optional-assets:install-from-file', { assetId }),
-  getComponentsStatus: () => ipcRenderer.invoke('components:status'),
-  testBuiltinEmbedding: () => ipcRenderer.invoke('embedding:test-builtin'),
-  setComponentInUse: (componentId, inUse) =>
-    ipcRenderer.invoke('components:set-usage', { componentId, inUse: !!inUse }),
-  onOptionalAssetProgress: (cb) => {
-    const handler = (_e, payload) => {
-      try {
-        cb(payload);
-      } catch {
-        // ignore
-      }
-    };
-    ipcRenderer.on('optional-assets:progress', handler);
-    return () => ipcRenderer.removeListener('optional-assets:progress', handler);
-  },
+  getMonacoVsUrl: () => ipcRenderer.invoke('bundled-assets:monaco-vs-url'),
   onSshRemoteAgentDeployProgress: (cb) => {
     const handler = (_e, payload) => {
       try {
@@ -109,7 +120,6 @@ contextBridge.exposeInMainWorld('diecloud', {
   formatAgentsMdBlock: (payload) => ipcRenderer.invoke('agents-md:format-block', payload),
   parseAgentsMdMaintainer: (payload) => ipcRenderer.invoke('agents-md:parse-maintainer', payload),
   pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
-  pickPluginZip: () => ipcRenderer.invoke('dialog:pick-plugin-zip'),
   pickFiles: () => ipcRenderer.invoke('dialog:pick-files'),
   stageFiles: (paths) => ipcRenderer.invoke('files:stage', paths),
   stageBase64: (payload) => ipcRenderer.invoke('files:stage-base64', payload),
@@ -253,6 +263,8 @@ contextBridge.exposeInMainWorld('diecloud', {
   getModelSettingsFromMain: () => ipcRenderer.invoke('model:get-settings'),
   syncAgentLimits: (limits) => ipcRenderer.invoke('agent:sync-limits', limits),
   getAgentLimitsFromMain: () => ipcRenderer.invoke('agent:get-limits'),
+  syncRuntimeByTier: (byTier) => ipcRenderer.invoke('model:sync-runtime-by-tier', byTier),
+  getRuntimeByTierFromMain: () => ipcRenderer.invoke('model:get-runtime-by-tier'),
   fetchBuiltinModels: (payload) => ipcRenderer.invoke('models:fetch-list', payload),
 
   streamChatViaMain: ({ url, headers, body, onRaw, onControl }) =>
@@ -405,6 +417,21 @@ contextBridge.exposeInMainWorld('diecloud', {
   agentArbitrate: (runId, decision) => ipcRenderer.invoke('agent:arbitrate', { runId, decision }),
   agentRustLoopPing: () => ipcRenderer.invoke('agent:rust-loop-ping'),
   agentPrepSystemPrompt: (payload) => ipcRenderer.invoke('agent:prep-system-prompt', payload || {}),
+  // 记忆归纳：触发与执行都在 Main（src/agent/knowledge-maintainer.js）。
+  // Renderer 只剩两件事：读写设置、上报计划 worktree 的应用结果。
+  agentKnowledgePlanOutcome: (payload) => ipcRenderer.invoke('agent:knowledge-plan-outcome', payload || {}),
+  agentKnowledgeSettingsGet: () => ipcRenderer.invoke('agent:knowledge-settings-get'),
+  agentKnowledgeSettingsSet: (patch) => ipcRenderer.invoke('agent:knowledge-settings-set', patch || {}),
+  onKnowledgeStatus: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('agent:knowledge-maintenance-status', handler);
+    const doneHandler = (_e, payload) => cb(payload);
+    ipcRenderer.on('agent:knowledge-maintenance-done', doneHandler);
+    return () => {
+      ipcRenderer.removeListener('agent:knowledge-maintenance-status', handler);
+      ipcRenderer.removeListener('agent:knowledge-maintenance-done', doneHandler);
+    };
+  },
   sessionHandoffGenerate: (payload) => ipcRenderer.invoke('session:handoff-generate', payload || {}),
   agentRustLoopRun: (payload) =>
     ipcRenderer
@@ -463,6 +490,21 @@ contextBridge.exposeInMainWorld('diecloud', {
     };
     ipcRenderer.on('agent:rust-loop-phase', handler);
     return () => ipcRenderer.removeListener('agent:rust-loop-phase', handler);
+  },
+  /**
+   * 会话标题被 Main 用模型重新总结（每会话一次，轮末异步）。与 rust-loop phase 分通道：
+   * 它不是某一次运行的过程事件，只是「历史列表这一行文字变了」。
+   */
+  onAgentSessionTitle: (cb) => {
+    const handler = (_evt, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on('agent:session-title', handler);
+    return () => ipcRenderer.removeListener('agent:session-title', handler);
   },
   /**
    * 主循环并发 subagent 的隔离 trace（过程卡片）。与 agent:rust-loop-phase 分通道，
@@ -613,5 +655,8 @@ contextBridge.exposeInMainWorld('diecloud', {
       forceChangeIds: (opts && opts.forceChangeIds) || [],
       allowOverwriteMainDirty: !!(opts && opts.allowOverwriteMainDirty)
     }),
-  worktreeChangeDiff: (change) => ipcRenderer.invoke('worktree:change-diff', { change })
+  worktreeChangeDiff: (change) => ipcRenderer.invoke('worktree:change-diff', { change }),
+  // 远端会话副本（SSH 每会话一份 worktree）：预览 / 应用回主目录
+  worktreeRemotePreview: (payload) => ipcRenderer.invoke('worktree:remote-preview', payload || {}),
+  worktreeRemoteApply: (payload) => ipcRenderer.invoke('worktree:remote-apply', payload || {})
 });

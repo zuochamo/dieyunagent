@@ -1,18 +1,25 @@
-/* global navigator, document, $, closeAllMenus, closeSettingsModal, closeSettingsSkillsPage, closeExecuteModal, closeHelpModal, showAgentToast */
+/* global navigator, document, window, $, showAgentToast, uiText */
 const mobileApi = window.diecloud || {};
+
+/** 连接面板文案统一走 i18n（键见 renderer-i18n.js）；缺键时回落到中文原文。 */
+function mobileText(key, fallback, ...args) {
+  let s = typeof uiText === 'function' ? uiText(key, fallback) : fallback;
+  for (const arg of args) s = s.replace(/%[sd]/, String(arg));
+  return s;
+}
 
 async function refreshMobileConnectInfo() {
   const status = $('mobile-connect-status');
   const qr = $('mobile-connect-qr');
   const urlInput = $('mobile-connect-url');
   const hint = $('mobile-connect-hint');
-  if (status) status.textContent = '正在读取连接信息…';
+  if (status) status.textContent = mobileText('connect_reading', '正在读取连接信息…');
   if (hint) {
     hint.textContent = '';
     hint.classList.remove('ok', 'warn', 'show');
   }
   if (!mobileApi.getMobileInfo) {
-    if (status) status.textContent = '当前版本未提供手机连接接口';
+    if (status) status.textContent = mobileText('mobile_api_missing', '当前版本未提供手机连接接口');
     if (qr) qr.removeAttribute('src');
     if (urlInput) urlInput.value = '';
     return;
@@ -27,31 +34,14 @@ async function refreshMobileConnectInfo() {
     }
     if (status) {
       status.textContent = url
-        ? `内网服务已启动 · 端口 ${info.port || 17331}`
-        : '手机连接服务已启动，但未找到可用内网地址';
+        ? mobileText('mobile_ready', '内网服务已启动 · 端口 %s', info.port || 17331)
+        : mobileText('mobile_no_lan', '手机连接服务已启动，但未找到可用内网地址');
     }
   } catch (e) {
-    if (status) status.textContent = `读取失败：${e.message || e}`;
+    if (status) status.textContent = mobileText('mobile_load_failed', '读取失败：%s', e.message || e);
     if (qr) qr.removeAttribute('src');
     if (urlInput) urlInput.value = '';
   }
-}
-
-function openMobileConnectModal() {
-  const overlay = $('mobile-connect-overlay');
-  if (!overlay) return;
-  closeAllMenus();
-  closeSettingsModal();
-  closeSettingsSkillsPage();
-  closeExecuteModal();
-  closeHelpModal();
-  overlay.hidden = false;
-  refreshMobileConnectInfo().catch(() => {});
-}
-
-function closeMobileConnectModal() {
-  const overlay = $('mobile-connect-overlay');
-  if (overlay) overlay.hidden = true;
 }
 
 function setMobileConnectHint(text, ok) {
@@ -93,51 +83,44 @@ async function copyMobileConnectUrl() {
   const input = $('mobile-connect-url');
   const url = input ? input.value.trim() : '';
   if (!url) {
-    setMobileConnectHint('暂无可复制链接', false);
+    setMobileConnectHint(mobileText('mobile_hint_no_link', '暂无可复制链接'), false);
     if (typeof showAgentToast === 'function') {
-      showAgentToast('复制失败', '没有可复制的连接地址', { variant: 'error' });
+      showAgentToast(
+        mobileText('mobile_copy_failed_title', '复制失败'),
+        mobileText('mobile_copy_no_link', '没有可复制的连接地址'),
+        { variant: 'error' }
+      );
     }
     return;
   }
   try {
     await copyTextToClipboard(url);
     if (input && typeof input.select === 'function') input.select();
-    setMobileConnectHint('已复制连接地址', true);
+    setMobileConnectHint(mobileText('mobile_hint_copied', '已复制连接地址'), true);
     if (typeof showAgentToast === 'function') {
-      showAgentToast('已复制', url, { variant: 'success' });
+      showAgentToast(mobileText('mobile_copied_title', '已复制'), url, { variant: 'success' });
     }
   } catch (e) {
-    setMobileConnectHint(`复制失败：${e.message || e}`, false);
+    setMobileConnectHint(mobileText('mobile_hint_copy_failed', '复制失败：%s', e.message || e), false);
     if (typeof showAgentToast === 'function') {
-      showAgentToast('复制失败', '无法写入剪贴板', { variant: 'error' });
+      showAgentToast(
+        mobileText('mobile_copy_failed_title', '复制失败'),
+        mobileText('mobile_clipboard_failed', '无法写入剪贴板'),
+        { variant: 'error' }
+      );
     }
   }
 }
 
-function isMobileConnectModalOpen() {
-  const overlay = $('mobile-connect-overlay');
-  return overlay && !overlay.hidden;
-}
-
-const menuMobileTrigger = $('menu-mobile-trigger');
-if (menuMobileTrigger) {
-  menuMobileTrigger.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openMobileConnectModal();
-  });
-}
-
-const mobileConnectOverlay = $('mobile-connect-overlay');
-if (mobileConnectOverlay) {
-  mobileConnectOverlay.addEventListener('click', (e) => {
-    if (e.target === mobileConnectOverlay) closeMobileConnectModal();
-  });
-}
-
-$('mobile-connect-close')?.addEventListener('click', closeMobileConnectModal);
 $('mobile-connect-refresh')?.addEventListener('click', () => {
   refreshMobileConnectInfo().catch(() => {});
 });
 $('mobile-connect-copy')?.addEventListener('click', () => {
   copyMobileConnectUrl().catch(() => {});
+});
+
+// 语言切换：静态文案由 data-i18n 重刷；状态行是动态生成的，按可见性重取一次。
+window.addEventListener('dieyun:language-change', () => {
+  const pane = $('connect-pane-mobile');
+  if (pane && !pane.hidden) refreshMobileConnectInfo().catch(() => {});
 });

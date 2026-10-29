@@ -1,6 +1,10 @@
 'use strict';
 
 const { delegateAgentToolViaGateway } = require('./delegate-tool-gateway');
+const {
+  PROJECT_MEMORY_REL_PATH,
+  parseProjectMemoryEntries
+} = require('./project-memory-file');
 const { isRendererOnlyTool, requestToolFromRenderer } = require('./renderer-tool-delegate');
 const { getToolHarnessSession, clearToolHarnessSession } = require('./tool-harness');
 // 关卡装配（归一 + before/after 顺序）的唯一来源；本文件只追加自己的 after 关卡。
@@ -15,6 +19,11 @@ const {
   filterDirNames
 } = require('./write-smell-hints');
 const { executeAgentsMdProposeMain } = require('./propose-tools-main');
+// MCP 工具的「按用户提问召回」只此一份实现：渲染器装工具表用它，模型的
+// mcp_tool_schema(query) 也用它 —— 两处若各写一套排序，检索结果会互相打架。
+const { recallAgentTools } = require('../tools/tool-vector-index');
+const { slimMcpInputSchema } = require('./tool-catalog');
+const { loadModelSettings, getEmbeddingConfig } = require('../model-settings');
 
 const { runExclusive } = require('./mutate-queue');
 const {
@@ -56,6 +65,8 @@ function sanitizeToolResultForApi(name, result) {
     return {
       ok: result.ok,
       action: result.action,
+      // 动作是否真的执行过：模型靠它区分「生效了」与「被系统丢了」（见 computer/service）
+      ...(result.applied === true ? { applied: true } : {}),
       display: result.display,
       primary: result.primary,
       screen: result.screen,
@@ -63,6 +74,12 @@ function sanitizeToolResultForApi(name, result) {
       activeWindow: result.activeWindow,
       // type 动作实际投递的字符数：模型要靠它核对「打进去了多少」（见 computer/service 注释）
       ...(result.typed != null ? { typed: result.typed } : {}),
+      // 画面事实：变了没有 / 是否已稳定（模型的下一步全靠这两条）
+      ...(result.changed != null ? { changed: result.changed } : {}),
+      ...(result.stable != null ? { stable: result.stable } : {}),
+      // 等待事实：等到了没有、等了多久（wait_until 的核心信号是 timedOut）
+      ...(result.timedOut != null ? { timedOut: result.timedOut } : {}),
+      ...(result.waitedMs != null ? { waitedMs: result.waitedMs } : {}),
       mime: result.mime,
       width: result.width,
       height: result.height,
@@ -72,7 +89,9 @@ function sanitizeToolResultForApi(name, result) {
       base64Length: String(result.base64).length,
       // 只陈述事实：是否真进了视觉通道由 after 关卡判定后改写本字段，
       // 这里绝不能再写「将作为视觉输入附到下一轮」（那正是模型干等一张图的根因）。
-      note: result.note || '已截取当前屏幕画面；图片本体不随工具结果返回'
+      note: result.note
+        ? `${result.note}图片本体不随工具结果返回`
+        : '已截取当前屏幕画面；图片本体不随工具结果返回'
     };
   }
   if (name === 'browser_screenshot' && result.base64) {
@@ -156,6 +175,9 @@ function createMainToolBridge(deps) {
   const onSkillsChanged = deps.onSkillsChanged || null;
   const browserService = deps.browserService || null;
   const userDataPath = deps.userDataPath || '';
+  // 内网 agent 互通（src/peer）：Main 创建的协调器；未启用时三个 peer_* 工具退化为结构化错误，
+  // 不做「静默无此工具」——模型需要知道「这个能力没开」而不是「能力不存在」。
+  const peerCoordinator = deps.peerCoordinator || null;
 
   /** 有界等待：超时或失败一律 resolve(null)，交由调用方降级。 */
   function withTimeout(promise, ms) {
@@ -245,11 +267,91 @@ function createMainToolBridge(deps) {
     return delegateAgentToolViaGateway(gateway, name, args, ctx);
   }
 
+  /**
+   * 按 query 检索「本轮工具表里没有」的 MCP 工具，返回可直接调用的 agentName + 精简 schema。
+   *
+   * 为什么需要它：mcp_* 工具是每个用户回合按提问召回的子集（renderer-tool-defs.js），
+   * run 内不再刷新。任务中途换向时，未被召回的工具对模型完全不可见 —— 它连名字都不知道，
+   * 无法补救。此函数把「渐进披露」的最后一步交给模型自己触发：披露要能按需再发生。
+   *
+   * 召回走 tools/tool-vector-index 的同一份实现；召回不可用（无向量模型 / 全被阈值挡掉）时
+   * 退到名字与描述的子串匹配 —— 宁可粗排，也不能让「有工具却找不到」。
+   */
+  async function searchMcpToolSchemas(query, limit) {
+    if (!mcpRuntime || typeof mcpRuntime.listAgentTools !== 'function') {
+      return { error: 'MCP 运行时未就绪', errorCode: 'MCP_UNAVAILABLE', retryable: false };
+    }
+    const listed = await mcpRuntime.listAgentTools({ catalogOnly: true });
+    const all = Array.isArray(listed.tools) ? listed.tools : [];
+    if (!all.length) {
+      return {
+        ok: true,
+        matched: [],
+        total: 0,
+        note: '已启用的 MCP 服务当前没有任何缓存工具；请先在 MCP 设置页刷新工具目录'
+      };
+    }
+    const candidates = all.map((item) => ({
+      id: item.agentName,
+      name: item.agentName,
+      description: `[MCP · ${item.serverId || ''}] ${item.description || item.toolName || ''}`,
+      source: 'mcp',
+      serverId: item.serverId || ''
+    }));
+    const max = Math.min(5, Math.max(1, Number(limit) || 3));
+    let picked = [];
+    try {
+      const recalled = await recallAgentTools({
+        userData: userDataPath,
+        embeddingConfig: getEmbeddingConfig(loadModelSettings(userDataPath)),
+        candidates,
+        query,
+        limit: max
+      });
+      picked = Array.isArray(recalled && recalled.tools) ? recalled.tools : [];
+    } catch {
+      picked = [];
+    }
+    if (!picked.length) {
+      const q = String(query || '').toLowerCase();
+      picked = candidates
+        .filter(
+          (c) =>
+            c.id.toLowerCase().includes(q) || String(c.description || '').toLowerCase().includes(q)
+        )
+        .slice(0, max)
+        .map((c) => ({ id: c.id }));
+    }
+    const byName = new Map(all.map((item) => [item.agentName, item]));
+    const matched = picked
+      .map((row) => byName.get(row && row.id))
+      .filter(Boolean)
+      .map((item) => ({
+        agentName: item.agentName,
+        serverId: item.serverId || '',
+        description: String(item.description || item.toolName || '').slice(0, 240),
+        inputSchema: slimMcpInputSchema(item.inputSchema || {})
+      }));
+    return {
+      ok: true,
+      matched,
+      total: all.length,
+      note: matched.length
+        ? 'matched[].agentName 可直接当工具名调用（不必等它进入工具列表）。嵌套字段被折叠时，再用 agentName 模式查完整 schema。'
+        : '没有命中；换个说法，或直接给 agentName'
+    };
+  }
+
   async function executeMainOnlyTool(name, args, ctx) {
     const a = args || {};
     switch (name) {
       case 'mcp_tool_schema': {
-        if (!mcpRuntime || typeof mcpRuntime.lookupToolSchema !== 'function') {
+        if (!mcpRuntime) {
+          return { error: 'MCP 运行时未就绪', errorCode: 'MCP_UNAVAILABLE', retryable: false };
+        }
+        const query = String(a.query || '').trim();
+        if (query) return searchMcpToolSchemas(query, a.limit);
+        if (typeof mcpRuntime.lookupToolSchema !== 'function') {
           return { error: 'MCP 运行时未就绪', errorCode: 'MCP_UNAVAILABLE', retryable: false };
         }
         return mcpRuntime.lookupToolSchema(String(a.agentName || ''));
@@ -292,7 +394,9 @@ function createMainToolBridge(deps) {
             onceAt: a.onceAt,
             prompt: a.prompt,
             todos: a.todos,
-            skillIds: a.skillIds
+            skillIds: a.skillIds,
+            // 计划工作空间：不填 = 跟随执行时当前工作空间
+            workspace: a.workspace
           },
           // 计划绑定本次运行的路由：定时执行（无 Renderer）据此自洽解析模型配置
           modelRoute: ctx && ctx.modelRoute ? ctx.modelRoute : undefined,
@@ -319,6 +423,8 @@ function createMainToolBridge(deps) {
             model: p.model || '',
             modelRoute: p.modelRoute || '',
             sessionId: p.deliver?.sessionId,
+            // 计划绑定的工作空间（空 = 跟随当前工作空间）
+            workspace: p.workspace || '',
             lastRunAt: p.lastRunAt
           }))
         };
@@ -330,6 +436,241 @@ function createMainToolBridge(deps) {
       }
       case 'agents_md_propose':
         return executeAgentsMdProposeMain(gateway, a, ctx, userDataPath);
+      // —— 记忆工具：轮内召回与纠错 ——
+      //
+      // 自动注入每轮只带 8+5 条，此前模型想不起别的只能认。这里把检索与纠错交回模型；
+      // 写入策略（低价值闸 / 近重复）仍然只在 memory.long_add 一处，工具不绕过它。
+      case 'memory_recall': {
+        if (!gateway) return { error: 'Gateway 未就绪', errorCode: 'GATEWAY_UNAVAILABLE' };
+        const query = String(a.query || '').trim();
+        if (!query) return { error: 'query 必填' };
+        const recallLimits = getAgentLimits(userDataPath, ctx.contextTierId);
+        const wantScope = String(a.scope || 'all');
+        const limit = Math.min(12, Math.max(1, Number(a.limit) || recallLimits.memoryToolRecallLimit));
+        const wsRoot = ctx.workspacePath || ctx.worktreePath || '';
+        const collected = [];
+        const take = (res, tag) => {
+          const rows = res && Array.isArray(res.results) ? res.results : [];
+          for (const r of rows) collected.push({ ...r, memoryScope: tag });
+        };
+        if (wantScope !== 'global' && wsRoot) {
+          // 项目记忆的真相是文件 `<workspace>/.dieyun/memory.md`：这里按关键词过滤文件条目
+          // 就够了（≤200 条、最新在前），不必为此维护一套项目向量索引。
+          try {
+            const fr = await gateway.invokeRpc('fs.read_file', {
+              filePath: PROJECT_MEMORY_REL_PATH,
+              maxBytes: 96000,
+              runWorkspaceRoot: wsRoot
+            });
+            const text = fr && fr.encoding === 'base64' ? '' : String((fr && fr.data) || '');
+            const tokens = String(query)
+              .toLowerCase()
+              .split(/[\s,，、;；/\\]+/)
+              .filter((t) => t.length >= 2);
+            for (const entry of parseProjectMemoryEntries(text)) {
+              const hay = entry.toLowerCase();
+              if (tokens.length && !tokens.some((t) => hay.includes(t))) continue;
+              collected.push({ memoryScope: 'project', source: PROJECT_MEMORY_REL_PATH, content: entry });
+            }
+          } catch {
+            // 没有文件 = 这个项目还没有沉淀，不是错误
+          }
+        }
+        if (wantScope !== 'project') {
+          take(await gateway.invokeRpc('memory.long_recall', { query, scope: 'global', limit }), 'global');
+        }
+        const seen = new Set();
+        const rows = collected
+          .filter((r) => r && (r.source === PROJECT_MEMORY_REL_PATH || Number.isFinite(Number(r.id))))
+          .filter((r) => {
+            const key = r.source === PROJECT_MEMORY_REL_PATH ? `md:${String(r.content || '').slice(0, 80)}` : `id:${Number(r.id)}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          // 文件条目没有相似度分数：项目记忆在前（它就是本项目的「硬约定」），DB 结果按分数排
+          .sort((x, y) => {
+            const fx = x.source === PROJECT_MEMORY_REL_PATH ? 1 : 0;
+            const fy = y.source === PROJECT_MEMORY_REL_PATH ? 1 : 0;
+            if (fx !== fy) return fy - fx;
+            return (Number(y.score) || 0) - (Number(x.score) || 0);
+          })
+          .slice(0, limit);
+        if (!rows.length) {
+          return {
+            ok: true,
+            total: 0,
+            results: [],
+            note: '没找到相关记忆（可能确实没记过，或换个更具体的说法再试）'
+          };
+        }
+        return {
+          ok: true,
+          total: rows.length,
+          results: rows.map((r) =>
+            r.source === PROJECT_MEMORY_REL_PATH
+              ? {
+                  scope: 'project',
+                  source: PROJECT_MEMORY_REL_PATH,
+                  content: String(r.content || '').slice(0, 400)
+                }
+              : {
+                  id: Number(r.id),
+                  scope: r.memoryScope,
+                  kind: r.kind || 'normal',
+                  importance: r.importance,
+                  score: Number(r.score) || 0,
+                  content: String(r.content || '').slice(0, 400)
+                }
+          ),
+          note:
+            'source=.dieyun/memory.md 的条目没有 id：它们就是文件里的一行，改/删请直接编辑文件；' +
+            '其余带 id 的条目可在用户说记错时交给 memory_forget 归档'
+        };
+      }
+      case 'memory_forget': {
+        if (!gateway) return { error: 'Gateway 未就绪', errorCode: 'GATEWAY_UNAVAILABLE' };
+        const forgetLimits = getAgentLimits(userDataPath, ctx.contextTierId);
+        const ids = (Array.isArray(a.memoryIds) ? a.memoryIds : [a.memoryId])
+          .map((n) => Number(n))
+          .filter((n) => Number.isFinite(n) && n > 0)
+          .slice(0, forgetLimits.memoryToolForgetMaxIds);
+        if (!ids.length) return { error: 'memoryIds 必填（来自 memory_recall 的结果）' };
+        const archived = [];
+        for (const id of ids) {
+          try {
+            await gateway.invokeRpc('memory.long_status_set', { memoryId: id, status: 'archived' });
+            archived.push(id);
+          } catch {
+            // 单条失败不影响其余（id 不存在就是 0 影响）
+          }
+        }
+        if (a.reason) {
+          console.log(`[dieyun:memory] forget ${archived.join(',')} · ${String(a.reason).slice(0, 200)}`);
+        }
+        return {
+          ok: archived.length > 0,
+          archived,
+          requested: ids.length,
+          note: archived.length
+            ? '已软归档（可恢复）：不再参与注入与召回'
+            : '没有可归档的条目（id 可能不存在或已归档）'
+        };
+      }
+      // —— 内网 agent 互通（语义全在 src/peer/coordinator.js，这里只做形状转换）——
+      case 'peer_list': {
+        if (!peerCoordinator) return { ok: false, error: '内网互通未启用', errorCode: 'PEER_UNAVAILABLE' };
+        let peers = peerCoordinator.peers();
+        if (a.refresh && typeof peerCoordinator.refresh === 'function') {
+          peerCoordinator.refresh();
+          peers = peerCoordinator.peers();
+        }
+        if (a.sameProjectOnly) peers = peers.filter((p) => p.sameWorkspace);
+        return {
+          ok: true,
+          total: peers.length,
+          peers: peers.map((p) => ({
+            name: p.name,
+            peerId: p.peerId,
+            address: p.host && p.port ? `${p.host}:${p.port}` : '',
+            sameProject: !!p.sameWorkspace,
+            lastSeenSec: Math.max(0, Math.round((Date.now() - Number(p.lastSeenAt || 0)) / 1000)),
+            claims: (p.claims || []).map((c) => ({
+              kind: c.kind,
+              key: c.key,
+              note: c.note || '',
+              expiresInSec: Math.max(0, Math.round((Number(c.expiresAt || 0) - Date.now()) / 1000))
+            }))
+          })),
+          note: peers.length
+            ? '同项目（sameProject=true）的对端可以问它正在改什么；它已声明的租约见 claims。'
+            : '当前没有发现其他在线 Agent。若确定对方在线，可试 refresh=true 再列一次。'
+        };
+      }
+      case 'peer_claim': {
+        if (!peerCoordinator) return { ok: false, error: '内网互通未启用', errorCode: 'PEER_UNAVAILABLE' };
+        const action = String(a.action || 'list');
+        const r = await peerCoordinator.claim({
+          action,
+          kind: a.kind,
+          key: a.key,
+          note: a.note,
+          sessionId: ctx.sessionId
+        });
+        if (r.ok) return r;
+        const holders = (r.holders || []).map((c) => ({
+          peerName: c.peerName || c.peerId,
+          kind: c.kind,
+          key: c.key,
+          note: c.note || ''
+        }));
+        return {
+          ok: false,
+          error: r.error === 'CLAIM_CONFLICT' ? '该文件/任务已被同项目的其他 Agent 声明' : String(r.error || '申领失败'),
+          errorCode: String(r.error || 'CLAIM_FAILED'),
+          retryable: false,
+          // 归一化失败信封会收窄字段，结构化细节一律走 diagnostics（模型能看到、日志也留得住）
+          diagnostics: holders.length ? { holders } : undefined,
+          suggestedFix:
+            r.error === 'CLAIM_CONFLICT'
+              ? `先用 peer_send 问 ${holders.map((h) => h.peerName).join('、') || '对方'} 能否让给你，或改做别的文件；不要绕过租约直接改。`
+              : undefined
+        };
+      }
+      case 'peer_send': {
+        if (!peerCoordinator) return { ok: false, error: '内网互通未启用', errorCode: 'PEER_UNAVAILABLE' };
+        const target = String(a.peer || '').trim();
+        const host = String(a.host || '').trim();
+        const port = Number(a.port) || 0;
+        const knownPeers = () => peerCoordinator.peers().map((p) => ({ name: p.name, peerId: p.peerId }));
+        if (!target && !(host && port)) {
+          const peers = knownPeers();
+          return {
+            ok: false,
+            error: `缺少对端：请给 peer（名称/peerId）或 host+port${peers.length ? `。当前在线：${peers.map((p) => p.name).join('、')}` : '（当前没有其他在线 Agent）'}`,
+            errorCode: 'MISSING_ARG',
+            retryable: false,
+            diagnostics: { peers }
+          };
+        }
+        const r = await peerCoordinator.sendToPeer({
+          peer: target,
+          host,
+          port,
+          text: a.text,
+          expectReply: !!a.expectReply,
+          timeoutMs: a.timeoutMs,
+          sessionId: ctx.sessionId
+        });
+        if (r.ok) {
+          return {
+            ok: true,
+            delivered: true,
+            peer: r.peer ? r.peer.name || r.peer.peerId : target,
+            reply: r.reply == null ? null : String(r.reply),
+            waitedForReply: !!a.expectReply,
+            timedOut: r.timeout === true,
+            note:
+              a.expectReply && r.reply == null && r.timeout
+                ? '对方收下了消息，但在超时前没跑完一轮；稍后它的答复会作为你的下一条消息出现。'
+                : undefined
+          };
+        }
+        return {
+          ok: false,
+          error:
+            r.error === 'PEER_NOT_FOUND'
+              ? '没找到这个对端（可能不在线，或名字不对）'
+              : r.error === 'PEER_UNREACHABLE'
+                ? '连不上这个对端（不在线 / 防火墙挡住了 peer 端口）'
+                : r.error === 'NOT_TRUSTED'
+                  ? '对方还没确认这台机器（它那边会弹一次「允许 / 拒绝」，通过后会补投这条消息）'
+                  : String(r.error || '发送失败'),
+          errorCode: String(r.errorCode || r.error || 'PEER_SEND_FAILED'),
+          retryable: r.retryable === true,
+          diagnostics: { peers: knownPeers(), address: r.address, detail: r.detail }
+        };
+      }
       default:
         if (String(name).startsWith('mcp_')) {
           if (!mcpRuntime) return { error: 'MCP 运行时未就绪', errorCode: 'MCP_UNAVAILABLE', retryable: true };
@@ -568,7 +909,6 @@ function createMainToolBridge(deps) {
       model: ctx.model,
       contextTierId: ctx.contextTierId,
       taskTier: ctx.taskTier || null,
-      longHorizon: !!ctx.longHorizon,
       workspacePath: ctx.workspacePath || ctx.worktreePath,
       userDataPath
     };

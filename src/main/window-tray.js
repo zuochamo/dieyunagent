@@ -362,6 +362,19 @@ function createWindowTray(deps) {
   }
 
   /**
+   * 只推给「已经存在的窗口」，**不创建窗口**。
+   *
+   * 与 `sendRendererAgentService` 的差别只在这一点：前者是手机端发起任务，必须把窗口叫出来；
+   * 而内网 peer 的收信通知不该因为同事发来一条消息就把用户藏起来的主窗口弹出来。
+   */
+  function sendRendererEvent(channel, payload) {
+    const win = getMainWindow();
+    if (!win) return false;
+    safeWebContentsSend(win.webContents, channel, payload);
+    return true;
+  }
+
+  /**
    * 渲染进程冻结/崩溃取证落盘（问题 B）。现场采集在 src/main/ipc/renderer-freeze.js，
    * 这里只负责「何时取」；只读渲染侧快照由该模块经 IPC 直接落盘。
    */
@@ -398,6 +411,7 @@ function createWindowTray(deps) {
     refreshTrayContextMenu,
     pushStatus,
     sendRendererAgentService,
+    sendRendererEvent,
     getMainWindow,
     recoverMainWindowSurface,
     getTray: () => tray
