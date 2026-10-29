@@ -171,16 +171,16 @@ function pickSourceForDisplay(sources, display, opts = {}) {
 }
 
 /**
- * 截取指定显示器，返回 { mime, base64, width, height }。
+ * 抓取目标屏的**原生帧**（未编码、未缩放）。
  *
- * **width/height 是注入给模型的那张图的尺寸**（按 agent-limits 的长边上限缩放过），
- * 也就是模型坐标系本身 —— coordinate-map 的换算一直以「模型看到的截图」为准，
- * 所以缩放是安全的：模型报的坐标与窗口物理坐标仍能对上，只是屏幕像素被等比压缩。
+ * 为什么要把「抓帧」和「编码」分开：动作后要判断画面有没有变化 / 是否已经稳定
+ * （连续两帧相同），这需要反复取帧但只需要编码最后一次的结果。以前只有
+ * `captureDisplay`（抓+编码一步到位），稳定性判断就只能靠固定 sleep。
  *
  * @param {object} display listDisplays() 的条目
- * @param {{ maxEdge?: number, maxBase64Chars?: number }} [visionBudget] 缺省取 agent-limits 默认值
+ * @returns {Promise<{ image: object, width: number, height: number }>} width/height 是原生位图尺寸
  */
-async function captureDisplay(display, visionBudget) {
+async function grabDisplay(display) {
   const desktopCapturer = require('electron').desktopCapturer;
   const want = displayPhysicalSize(display);
   const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: want });
@@ -190,7 +190,55 @@ async function captureDisplay(display, visionBudget) {
     e.code = 'CAPTURE_FAILED';
     throw e;
   }
-  const shot = encodeWithinBudget(hit.thumbnail, visionBudget || {});
+  const size = hit.thumbnail.getSize();
+  return { image: hit.thumbnail, width: size.width, height: size.height };
+}
+
+/** 指纹取样的宽度：够敏感（几十像素的箭头/勾选也能反映出来），又便宜到可以每次动作后连拍。 */
+const SIGNATURE_WIDTH = 192;
+
+/**
+ * 帧指纹（FNV-1a over 缩略位图）。用途只有两个：
+ * - `changed`：动作后的画面和模型上次看到的那张是否同一帧；
+ * - `stable`：连续两帧相同 → UI 已经不再动，这一帧可以交付。
+ *
+ * 取不到（平台不支持 toBitmap / 空图）时返回 null：调用方按「无法判断」处理，
+ * 绝不能把 null 当成「没变化」—— 那会变成假信号。
+ *
+ * @param {{ getSize: Function, resize: Function, toBitmap: Function }} image
+ * @returns {string|null}
+ */
+function frameSignature(image) {
+  try {
+    if (!image || typeof image.toBitmap !== 'function') return null;
+    const size = image.getSize();
+    const width = Math.max(1, Math.min(SIGNATURE_WIDTH, size.width));
+    const small = width >= size.width ? image : image.resize({ width });
+    const buf = small.toBitmap();
+    if (!buf || !buf.length) return null;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < buf.length; i += 1) {
+      h ^= buf[i];
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把原生帧（或它的裁剪块）编码到视觉注入预算内 —— 唯一的编码出口。
+ *
+ * **width/height 是注入给模型的那张图的尺寸**（按 agent-limits 的长边上限缩放过），
+ * 也就是模型坐标系本身 —— 坐标换算一直以「模型看到的图」为准，所以缩放是安全的：
+ * 模型报的坐标与屏幕物理坐标仍能对上，只是像素被等比压缩。
+ *
+ * @param {object} image Electron nativeImage
+ * @param {{ maxEdge?: number, maxBase64Chars?: number }} [visionBudget] 缺省取 agent-limits 默认值
+ */
+function encodeShot(image, visionBudget) {
+  const shot = encodeWithinBudget(image, visionBudget || {});
   return {
     mime: shot.mime,
     base64: shot.base64,
@@ -204,7 +252,9 @@ async function captureDisplay(display, visionBudget) {
 module.exports = {
   listDisplays,
   getDisplay,
-  captureDisplay,
+  grabDisplay,
+  frameSignature,
+  encodeShot,
   encodeWithinBudget,
   pickSourceForDisplay
 };

@@ -317,6 +317,14 @@ function summarizeToolResult(name, result) {
     if (result.display != null) parts.push(`屏 ${result.display}`);
     if (result.screen) parts.push(`${result.screen.width}×${result.screen.height}`);
     if (result.typed != null) parts.push(`输入 ${result.typed} 字`);
+    if (Array.isArray(result.windows)) parts.push(`${result.windows.length} 个窗口`);
+    // 动作生效但截图失败：必须让用户看见「做了，但这一帧没截到」
+    if (result.screenshotError) parts.push('动作已执行 · 截图失败');
+    if (result.changed === false) parts.push('画面未变');
+    if (result.stable === false) parts.push('画面仍在变');
+    // wait_until：等到了没有（超时 = 等的东西没发生，是重要信号）
+    if (result.timedOut === true) parts.push('等待超时');
+    else if (result.waitedMs != null) parts.push(`等了 ${Math.round(result.waitedMs / 100) / 10}s`);
     if (result.activeWindow) parts.push(String(result.activeWindow).slice(0, 40));
     return parts.join(' · ');
   }

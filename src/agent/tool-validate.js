@@ -4,21 +4,16 @@ const { validateShellCommand } = require('../gateway/exec-policy');
 const { GRAPH_LEGACY_OPS, GRAPH_OPERATIONS, fsEditArgsPresent } = require('./guardrails-shared');
 // 数字护栏单一来源（AGENTS.md §6）：computer 输入长度上限只改 agent-limits。
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
-
-const COMPUTER_ACTIONS = [
-  'screenshot',
-  'click',
-  'double_click',
-  'right_click',
-  'middle_click',
-  'move',
-  'drag',
-  'type',
-  'key',
-  'scroll',
-  'wait'
-];
-const COMPUTER_CLICK_ACTIONS = new Set(['click', 'double_click', 'right_click', 'middle_click']);
+// 修饰键/键名的单一来源是注入层（VK 表在那里），这里只引用不复制。
+const { MODIFIER_NAMES } = require('../computer/win32-input');
+// 动作枚举的单一来源（性质声明在 computer/actions.js，任何新增动作只改那一处）。
+const {
+  COMPUTER_ACTIONS_TEXT,
+  CLICK_ACTIONS,
+  MODIFIER_ACTIONS,
+  REGION_ACTIONS,
+  actionMeta
+} = require('../computer/actions');
 
 /** 校验 [x, y] 坐标：二元数值数组（像素坐标，允许小数/越界由执行端钳制）。 */
 function computerPointOk(v) {
@@ -30,49 +25,106 @@ function computerPointOk(v) {
   );
 }
 
+/** computer 参数形状错误的统一信封（避免重复写五个字段）。 */
+function computerArgError(error, suggestedFix) {
+  return {
+    ok: false,
+    error,
+    errorCode: 'INVALID_ARG',
+    retryable: false,
+    ...(suggestedFix ? { suggestedFix } : {})
+  };
+}
+
+/**
+ * 修饰键 / region 的**归属**校验：静默忽略比报错更难查 ——
+ * 拼错的 `shfit` 会变成「按普通点击执行」，`region` 挂在 click 上会让模型的坐标凭空错位。
+ */
+function validateComputerExtras(args) {
+  if (args.modifiers != null) {
+    if (MODIFIER_ACTIONS.has(args.action)) {
+      if (!Array.isArray(args.modifiers)) {
+        return computerArgError('modifiers 必须是字符串数组', `例：modifiers=["shift"]（可选 ${MODIFIER_NAMES.join(' / ')}）`);
+      }
+      const bad = args.modifiers
+        .map((n) => String(n == null ? '' : n).trim().toLowerCase())
+        .filter((n) => n && !MODIFIER_NAMES.includes(n));
+      if (bad.length) {
+        return computerArgError(
+          `不支持的修饰键「${bad.join('、')}」`,
+          `modifiers 只支持：${MODIFIER_NAMES.join(' / ')}`
+        );
+      }
+    } else {
+      return computerArgError(
+        `modifiers 只用于点击与拖拽（收到 ${args.action}）`,
+        '需要按住修饰键的组合操作用 action=key（如 "ctrl+v"）；区间选择/多选用 click + modifiers'
+      );
+    }
+  }
+  if (args.region != null) {
+    if (!REGION_ACTIONS.has(args.action)) {
+      return computerArgError(
+        `region 只用于 action=screenshot（收到 ${args.action}）`,
+        '要看局部细节：先 screenshot + region 裁出来，再按该区域的坐标操作'
+      );
+    }
+    const r = args.region;
+    if (!Array.isArray(r) || r.length !== 4 || !r.every((n) => Number.isFinite(Number(n)))) {
+      return computerArgError('region 必须是 [x, y, 宽, 高] 四个数字', '例：region=[100, 80, 600, 400]');
+    }
+    if (Number(r[2]) <= 0 || Number(r[3]) <= 0) {
+      return computerArgError(`region 的宽高必须大于 0（收到 ${r[2]}×${r[3]}）`, 'region=[x, y, 宽, 高]');
+    }
+  }
+  return null;
+}
+
 /**
  * computer 工具参数校验（形状与枚举；档位/审批在 gateway，坐标换算在 computer/service）。
  */
 function validateComputerArgs(a) {
   const act = String(a.action || '');
-  if (!COMPUTER_ACTIONS.includes(act)) {
+  const meta = actionMeta(act);
+  if (!meta) {
     return {
       ok: false,
       error: `computer 未知动作「${act}」`,
       errorCode: 'INVALID_ACTION',
       retryable: false,
-      suggestedFix: `action 取值：${COMPUTER_ACTIONS.join(' | ')}`
+      suggestedFix: `action 取值：${COMPUTER_ACTIONS_TEXT}`
     };
   }
-  if (COMPUTER_CLICK_ACTIONS.has(act) || act === 'move' || act === 'drag') {
-    if (act === 'drag' || act === 'move') {
-      // move/drag 必须给坐标（没有「移到当前光标」的语义）；click 家族可省略=在当前位置点
-      if (!computerPointOk(a.coordinate)) {
-        return {
-          ok: false,
-          error: `computer ${act} 需要 coordinate（[x, y] 截图像素坐标）`,
-          errorCode: 'MISSING_ARG',
-          retryable: false,
-          suggestedFix: '先 action=screenshot 看画面，再按截图里的像素位置传 coordinate'
-        };
-      }
-    } else if (a.coordinate != null && !computerPointOk(a.coordinate)) {
+  const extras = validateComputerExtras({ ...a, action: act });
+  if (extras) return extras;
+
+  // 坐标按动作性质判（性质声明在 computer/actions.js，不在这里再列一遍动作名）
+  if (meta.coordinate === 'required' && !computerPointOk(a.coordinate)) {
+    // move/drag 必须给坐标（没有「移到当前光标」的语义）；click 家族可省略=在当前位置点
+    return {
+      ok: false,
+      error: `computer ${act} 需要 coordinate（[x, y] 截图像素坐标）`,
+      errorCode: 'MISSING_ARG',
+      retryable: false,
+      suggestedFix: '先 action=screenshot 看画面，再按截图里的像素位置传 coordinate'
+    };
+  }
+  if (meta.coordinate === 'optional' && a.coordinate != null && !computerPointOk(a.coordinate)) {
+    return {
+      ok: false,
+      error: 'coordinate 必须是 [x, y] 两个数字',
+      errorCode: 'INVALID_ARG',
+      retryable: false
+    };
+  }
+  if (meta.click || act === 'drag') {
+    if (act === 'drag' && !computerPointOk(a.to)) {
       return {
         ok: false,
-        error: 'coordinate 必须是 [x, y] 两个数字',
-        errorCode: 'INVALID_ARG',
+        error: 'computer drag 需要 to（终点 [x, y]）',
+        errorCode: 'MISSING_ARG',
         retryable: false
       };
-    }
-    if (act === 'drag') {
-      if (!computerPointOk(a.to)) {
-        return {
-          ok: false,
-          error: 'computer drag 需要 to（终点 [x, y]）',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
     }
     if (a.button != null && !['left', 'right', 'middle'].includes(String(a.button))) {
       return {
@@ -166,7 +218,39 @@ function validateComputerArgs(a) {
     }
     return { ok: true };
   }
-  // screenshot：无附加参数
+  if (act === 'wait_until') {
+    const cond = String(a.condition == null ? 'changed' : a.condition);
+    if (!['changed', 'stable'].includes(cond)) {
+      return computerArgError(
+        `wait_until 的 condition 取值 changed|stable，收到「${a.condition}」`,
+        'condition=changed 等画面发生变化；condition=stable 等界面不再变化'
+      );
+    }
+    if (a.ms != null) {
+      const n = Number(a.ms);
+      if (!Number.isFinite(n) || n <= 0 || n > AGENT_LIMITS_DEFAULTS.computerWaitUntilMaxMs) {
+        return computerArgError(
+          `wait_until 的 ms 需在 1–${AGENT_LIMITS_DEFAULTS.computerWaitUntilMaxMs}`,
+          'ms 是等不到就放弃的超时上限，不传则用默认值'
+        );
+      }
+    }
+    return { ok: true };
+  }
+  if (act === 'activate_window') {
+    const h = Number(a.handle);
+    if (!Number.isFinite(h) || h <= 0) {
+      return {
+        ok: false,
+        error: 'computer activate_window 需要 handle（list_windows 返回的窗口句柄）',
+        errorCode: 'MISSING_ARG',
+        retryable: false,
+        suggestedFix: '先 action=list_windows 看有哪些窗口，再用它返回的 handle 激活'
+      };
+    }
+    return { ok: true };
+  }
+  // screenshot / list_windows：region 已在 validateComputerExtras 里校验，这里没有别的参数
   return { ok: true };
 }
 
@@ -555,12 +639,12 @@ function validateToolArgs(name, args, opts) {
         return {
           ok: false,
           error:
-            'graph.operation 必须是 find_symbol / semantic_find / module_deps / callers / callees / impact / lsp_callers',
+            'graph.operation 必须是 find_symbol / module_deps / callers / callees / impact / lsp_callers',
           errorCode: 'MISSING_ARG',
           retryable: false
         };
       }
-      if ((op === 'find_symbol' || op === 'semantic_find') && !String(a.query || '').trim()) {
+      if (op === 'find_symbol' && !String(a.query || '').trim()) {
         return {
           ok: false,
           error: `graph.${op} 缺少 query`,
@@ -597,16 +681,20 @@ function validateToolArgs(name, args, opts) {
       }
       return { ok: true };
     }
-    case 'mcp_tool_schema':
-      if (!String(a.agentName || '').trim()) {
+    case 'mcp_tool_schema': {
+      // 两种模式二选一：agentName 查已知道具的完整 schema，query 在全部已启用服务里检索。
+      const agentName = String(a.agentName || '').trim();
+      const query = String(a.query || '').trim();
+      if (!agentName && !query) {
         return {
           ok: false,
-          error: 'mcp_tool_schema 缺少 agentName',
+          error: 'mcp_tool_schema 需要 agentName（按名查 schema）或 query（检索没有出现在工具列表里的 MCP 工具）',
           errorCode: 'MISSING_ARG',
           retryable: false
         };
       }
       return { ok: true };
+    }
     default:
       if (n.startsWith('mcp_') && n !== 'mcp_tool_schema') {
         return validateMcpInputArgs(n, a, opts && opts.mcpSchema);
