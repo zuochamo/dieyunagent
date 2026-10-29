@@ -61,17 +61,6 @@ function main() {
       );
     }
   }
-  const optionalSrc = path.join(dist, 'optional');
-  if (fs.existsSync(optionalSrc)) {
-    const optionalOut = path.join(out, 'optional');
-    fs.mkdirSync(optionalOut, { recursive: true });
-    for (const name of fs.readdirSync(optionalSrc)) {
-      const srcFile = path.join(optionalSrc, name);
-      if (!fs.statSync(srcFile).isFile()) continue;
-      fs.copyFileSync(srcFile, path.join(optionalOut, name));
-      console.log('[sync-updates]', `optional/${name}`);
-    }
-  }
 }
 
 main();

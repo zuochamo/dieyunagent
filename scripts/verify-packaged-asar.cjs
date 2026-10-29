@@ -70,6 +70,23 @@ function main() {
     process.exit(1);
   }
 
+  // Monaco 现在随安装包预装（extraResources → resources/monaco-editor）。
+  // 少了它编辑器会静默不可用，所以在打包校验里当硬失败；标记路径来自
+  // src/bundled-assets/monaco.js（运行时定位与打包校验同一份）。
+  const { MONACO_RESOURCE_DIR, MONACO_MARKER_REL } = require('../src/bundled-assets/monaco');
+  const monacoMarker = path.join(
+    getBuildDistRoot(),
+    'win-unpacked',
+    'resources',
+    MONACO_RESOURCE_DIR,
+    MONACO_MARKER_REL
+  );
+  if (!fs.existsSync(monacoMarker)) {
+    console.error('[verify-asar] 安装包缺少内置 Monaco 编辑器:', monacoMarker);
+    console.error('  检查 package.json build.extraResources 是否拷贝了 node_modules/monaco-editor');
+    process.exit(1);
+  }
+
   // Packaged UI uses index.bundled.html + dist/bundle.js; stale bundles ship old UI while npm run dev looks fine.
   const srcIndex = path.join(root, 'src', 'renderer', 'index.html');
   const srcBundle = path.join(root, 'src', 'renderer', 'dist', 'bundle.js');
@@ -87,7 +104,7 @@ function main() {
     }
   }
 
-  console.log(`[verify-asar] OK: checked ${files.length} JS files; renderer bundle present`);
+  console.log(`[verify-asar] OK: checked ${files.length} JS files; renderer bundle + monaco present`);
 }
 
 main();

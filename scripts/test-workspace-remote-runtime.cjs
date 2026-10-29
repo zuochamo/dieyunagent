@@ -8,7 +8,6 @@ const {
 const {
   REMOTE_PACK_OK_MARKER,
   REMOTE_PACK_REQUIRED_FILES,
-  REMOTE_DEPLOY_REQUIRED_FILES,
   inspectRemotePack,
   parseRemotePackMissing,
   parseRemotePackMarker,
@@ -59,28 +58,26 @@ const noScope = [];
 invalidateRemoteAgentsForScope(pool, '', () => noScope.push('g'));
 assert(noScope.length === 1, 'empty scope → global invalidate');
 
-const liteEntries = {};
-for (const rel of REMOTE_PACK_REQUIRED_FILES) liteEntries[`P/${rel}`] = 'ok';
-liteEntries['P/manifest.json'] = JSON.stringify({ lite: true, entry: 'remote/run-cli.js' });
-const lite = describeRemoteGatewayPack('P', fakeFs(liteEntries));
-assert(lite.ok && lite.detail.includes('lite'), 'lite pack is ready without bin/node');
+const fullEntries = {};
+for (const rel of REMOTE_PACK_REQUIRED_FILES) fullEntries[`P/${rel}`] = 'ok';
+fullEntries['P/manifest.json'] = JSON.stringify({ entry: 'remote/run-cli.js' });
+const full = describeRemoteGatewayPack('P', fakeFs(fullEntries));
+assert(full.ok, 'complete pack (with bundled node) is ready');
 
 // electron-builder 会剔除 pack 根 node_modules，远程注入因此报「安装包不完整」：
-// 缺 ws 的 lite 包不能报 ok。
-const noWsEntries = { ...liteEntries };
+// 缺 ws 的包不能报 ok。
+const noWsEntries = { ...fullEntries };
 delete noWsEntries['P/node_modules/ws/package.json'];
 const noWs = describeRemoteGatewayPack('P', fakeFs(noWsEntries));
-assert(!noWs.ok && noWs.detail.includes('node_modules/ws/package.json'), 'lite pack without ws is not ready');
+assert(!noWs.ok && noWs.detail.includes('node_modules/ws/package.json'), 'pack without ws is not ready');
 
-// 部署包（lite 包 + 内置 Node）清单包含 bin/node
-const deployEntries = {};
-for (const rel of REMOTE_DEPLOY_REQUIRED_FILES) deployEntries[`P/${rel}`] = 'ok';
-deployEntries['P/manifest.json'] = JSON.stringify({ lite: false });
-assert(inspectRemotePack('P', { deploy: true, fsApi: fakeFs(deployEntries) }).ok, 'deploy pack with bin/node is ready');
-const noNodeEntries = { ...deployEntries };
+// 内置 Node 随安装包预装：缺 bin/node 的包既不能显示 ready，也不能通过注入清单。
+const noNodeEntries = { ...fullEntries };
 delete noNodeEntries['P/bin/node'];
-const noNode = inspectRemotePack('P', { deploy: true, fsApi: fakeFs(noNodeEntries) });
-assert(!noNode.ok && noNode.missing.join(',') === 'bin/node', 'deploy pack without bin/node reports bin/node');
+const noNode = describeRemoteGatewayPack('P', fakeFs(noNodeEntries));
+assert(!noNode.ok && noNode.detail.includes('内置 Node'), 'pack without bin/node is not ready');
+const noNodeCheck = inspectRemotePack('P', { fsApi: fakeFs(noNodeEntries) });
+assert(!noNodeCheck.ok && noNodeCheck.missing.join(',') === 'bin/node', 'inspectRemotePack requires bin/node');
 
 const missing = describeRemoteGatewayPack('P', {
   existsSync: () => false,

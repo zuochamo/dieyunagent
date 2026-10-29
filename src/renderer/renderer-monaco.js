@@ -50,9 +50,6 @@ async function createMonacoArtifactEditor(hostEl, opts) {
     const options = opts || {};
     const monaco = await loadMonaco();
     applyDieyunMonacoTheme(monaco);
-    if (window.diecloud && typeof window.diecloud.setComponentInUse === 'function') {
-      window.diecloud.setComponentInUse('monaco-editor', true);
-    }
 
     if (!canReuseActiveMonacoEditor(hostEl)) {
       await disposeMonacoArtifactEditor();
@@ -334,13 +331,10 @@ window.clearMonacoPathDirty = clearMonacoPathDirty;
 
 var monacoPreloadPromise = null;
 
-/** Gateway 连接后预装 Monaco（安装包内置或 dev node_modules），避免首次打开文件才下载/加载 */
+/** Gateway 连接后预装 Monaco（安装包内置），避免首次打开文件才加载 */
 function preloadMonacoEditor() {
   if (monacoPreloadPromise) return monacoPreloadPromise;
   monacoPreloadPromise = (async () => {
-    if (window.diecloud && typeof window.diecloud.ensureOptionalAsset === 'function') {
-      await window.diecloud.ensureOptionalAsset('monaco-editor');
-    }
     await loadMonaco();
   })().catch((err) => {
     monacoPreloadPromise = null;

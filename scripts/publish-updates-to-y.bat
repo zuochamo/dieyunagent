@@ -76,7 +76,6 @@ if exist "%MOBILE_SRC%\mobile-latest.json" (
 )
 
 echo.
-echo [NOTE] Monaco / Linux Node 请单独上传至 COS: npm run upload:optional-cos
 echo.
 echo [DONE] Published v%VER% to %DST%
 echo.

@@ -64,11 +64,15 @@ function main() {
     process.exit(1);
   }
 
+  // 内置 Node 是预装的一部分：远程机器不装 Node 也能跑 Agent。
   const bundledNode = path.join(packRoot, 'bin', 'node');
-  if (fs.existsSync(bundledNode)) {
-    console.warn(
-      '[verify-remote-pack] 含 bin/node（lite 安装包应省略，改由 optional-assets 按需下载）'
+  const nodeStat = fs.statSync(bundledNode);
+  const NODE_MIN_BYTES = 50 * 1024 * 1024;
+  if (!nodeStat.isFile() || nodeStat.size < NODE_MIN_BYTES) {
+    console.error(
+      `[verify-remote-pack] bin/node 体积异常 (${nodeStat.size} bytes，需 >= ${NODE_MIN_BYTES})`
     );
+    process.exit(1);
   }
 
   if (manifest && manifest.indexCore === false) {

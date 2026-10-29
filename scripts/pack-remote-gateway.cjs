@@ -18,6 +18,11 @@ const {
   computeRemoteGatewaySourceHash,
   inspectRemotePack
 } = require('../src/remote/remote-pack-layout.js');
+const {
+  CORE_GLIBC_TARGET,
+  compareNeed,
+  glibcRequirementOf
+} = require('./pack-dieyun-core-linux-lib.cjs');
 const NODE_MIRRORS = [
   process.env.DIEYUN_NODE_MIRROR,
   'https://npmmirror.com/mirrors/node',
@@ -151,7 +156,6 @@ function pkgNeedsInstall(outDir, pkgJson) {
 }
 
 async function main() {
-  const lite = process.argv.includes('--lite') || process.env.DIEYUN_REMOTE_PACK_LITE === '1';
   await fsp.rm(OUT, { recursive: true, force: true });
   await fsp.mkdir(OUT, { recursive: true });
 
@@ -187,25 +191,32 @@ async function main() {
   }
 
   const appVersion = require(path.join(ROOT, 'package.json')).version;
-  let nodeVer = NODE_VERSION;
-  if (lite) {
-    console.log('[remote-agent] lite pack: skip bundling Linux node (按需下载)');
-    const nodePath = path.join(OUT, 'bin', 'node');
-    if (fs.existsSync(nodePath)) {
-      await fsp.unlink(nodePath);
-    }
-    await fsp.rm(path.join(OUT, '.tmp-node'), { recursive: true, force: true });
-    if (!hasLinuxCore && fs.existsSync(path.join(OUT, 'bin'))) {
-      const binEntries = await fsp.readdir(path.join(OUT, 'bin'));
-      if (!binEntries.length) {
-        await fsp.rm(path.join(OUT, 'bin'), { recursive: true, force: true });
-      }
-    }
-  } else {
-    nodeVer = await ensureBundledNode(OUT);
-  }
+  // 内置 Node 是预装的一部分：没有「lite 不带 Node」的变体，远程机器不需要装 Node。
+  const nodeVer = await ensureBundledNode(OUT);
 
   hasLinuxCore = fs.existsSync(linuxCoreDest) && fs.statSync(linuxCoreDest).size > 500 * 1024;
+
+  // 远端包能跑在「多老的机器」上 = 包里所有 ELF 里**最高**的那个 glibc 需求。
+  // 这条只能在这里算（core 与 node 同时在场）。约束：core 不得成为那个上限 ——
+  // 否则 host 上 node 起得来、core 起不来，症状是「远端索引莫名不可用」。
+  if (hasLinuxCore) {
+    const core = glibcRequirementOf(linuxCoreDest);
+    const node = glibcRequirementOf(path.join(OUT, 'bin', 'node'));
+    const floor = core.maxGlibc && node.maxGlibc
+      ? compareNeed(core.maxGlibc, node.maxGlibc) >= 0
+        ? core.maxGlibc
+        : node.maxGlibc
+      : core.maxGlibc || node.maxGlibc || '';
+    console.log(
+      `[remote-agent] GLIBC 地板: core ${core.maxGlibc || '—'} / node ${node.maxGlibc || '—'} → 生效 ${floor || '未知'}`
+    );
+    if (core.maxGlibc && node.maxGlibc && compareNeed(core.maxGlibc, node.maxGlibc) > 0) {
+      throw new Error(
+        `Remote Agent pack: bundled dieyun-core 需要 GLIBC ${core.maxGlibc}，比同包的 node（${node.maxGlibc}）还新。` +
+          `core 一旦成为地板，宿主就会出现「node 起得来、索引起不来」。请用 npm run pack:dieyun-core:linux 重建（zig 目标 ${CORE_GLIBC_TARGET}）`
+      );
+    }
+  }
 
   const pkg = {
     name: 'dieyun-remote-agent',
@@ -235,8 +246,6 @@ async function main() {
     entry: 'remote/run-cli.js',
     runtime: 'bin/node',
     indexCore: hasLinuxCore,
-    injected: !lite,
-    lite,
     sourceHash,
     builtAt: new Date().toISOString()
   };

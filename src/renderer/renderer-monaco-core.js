@@ -1,7 +1,6 @@
 /* global window, document, gatewayCall, gwState, updateProblemsPanel, initProblemsPanel, refreshWorkspaceProblemsPanel, getAgentLimits, resetArtifactFollowState */
 'use strict';
 
-var MONACO_BASE = '../../node_modules/monaco-editor/min/vs';
 
 var EXT_MONACO_LANG = {
   '.ts': 'typescript',
@@ -144,31 +143,27 @@ function loadMonaco() {
   }
   if (monacoReady) return monacoReady;
   monacoReady = (async () => {
-    let vsBase = `${MONACO_BASE}`;
-    if (window.diecloud && typeof window.diecloud.ensureOptionalAsset === 'function') {
-      try {
-        const r = await window.diecloud.ensureOptionalAsset('monaco-editor');
-        if (r && r.ok && r.vsUrl) vsBase = r.vsUrl;
-      } catch (err) {
-        console.warn('[monaco] 按需下载失败，尝试本地 node_modules', err);
-      }
+    // Monaco 随安装包预装：vs 目录只有 Main 知道（安装包 = resources/monaco-editor，
+    // 开发 = node_modules/monaco-editor），渲染进程不再猜路径、也不再按需下载。
+    const api = window.diecloud || {};
+    if (typeof api.getMonacoVsUrl !== 'function') {
+      throw new Error('Monaco 加载接口不可用');
     }
+    const info = await api.getMonacoVsUrl();
+    if (!info || !info.ok || !info.vsUrl) {
+      throw new Error((info && info.error) || '内置 Monaco 编辑器不可用');
+    }
+    const vsBase = info.vsUrl;
     if (!document.getElementById('monaco-editor-css')) {
       const link = document.createElement('link');
       link.id = 'monaco-editor-css';
       link.rel = 'stylesheet';
-      link.href =
-        vsBase.startsWith('file:') || vsBase.startsWith('http')
-          ? `${vsBase}/editor/editor.main.css`
-          : `${MONACO_BASE}/editor/editor.main.css`;
+      link.href = `${vsBase}/editor/editor.main.css`;
       document.head.appendChild(link);
     }
     await new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src =
-        vsBase.startsWith('file:') || vsBase.startsWith('http')
-          ? `${vsBase}/loader.js`
-          : `${MONACO_BASE}/loader.js`;
+      s.src = `${vsBase}/loader.js`;
       s.onload = () => {
         window.require.config({ paths: { vs: vsBase } });
         window.require(['vs/editor/editor.main'], () => {
@@ -667,9 +662,6 @@ async function disposeMonacoArtifactEditorCore() {
   // 注意：不清 editorDirtyPathKeys —— 未保存标记属于「标签」而不是「编辑器实例」，
   // 编辑器因展示 diff / 切会话被销毁后，模型的未保存内容仍在，标记也必须留着。
   if (typeof resetArtifactFollowState === 'function') resetArtifactFollowState();
-  if (window.diecloud && typeof window.diecloud.setComponentInUse === 'function') {
-    window.diecloud.setComponentInUse('monaco-editor', false);
-  }
   if (typeof updateProblemsPanel === 'function') {
     updateProblemsPanel('', []);
   }

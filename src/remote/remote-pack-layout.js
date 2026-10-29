@@ -7,7 +7,7 @@
  * 远程注入却报安装包不完整」这类无法定位的故障：
  *   1. 打包         scripts/pack-remote-gateway.cjs
  *   2. 拷贝进安装包  package.json extraResources（electron-builder 会剔除根 node_modules）
- *   3. 部署包装配    src/optional-assets/service.js（lite 包 + 按需下载的 Linux Node）
+ *   3. 装配闸门    assertRemotePackReady（本文件）—— 安装包里的 pack 就是最终内容
  *   4. 远程注入校验  src/ssh/remote-gateway-manager.js
  * 清单与校验函数集中在本文件，任一环节的不完整都能报出具体缺项。
  */
@@ -21,11 +21,14 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/remote/run-cli.js',
   'src/remote/minimal-gateway-host.js',
   'src/remote/remote-index-core.js',
-  'src/remote/linux-elf-compat.js',
   'src/remote/workspace-index-path.js',
   'src/core-bridge.js',
   'src/core-rpc-timeouts.js',
   'src/gateway/path-policy.js',
+  // host-control（runShell）依赖它判定「命令何时算结束」，漏打包会让远程 Agent 起不来
+  'src/exec-settlement.js',
+  // exec 的超时上限 / 输出上限唯一来源：本机 runShell 与远端 exec 共用同一份契约
+  'src/exec-limits.js',
   'src/gateway/host-control.js',
   'src/gateway/fs-read-limits.js',
   // artifact.list_files 的目录遍历与排除表（远程 Agent 与本地/SFTP 网关共用同一份）
@@ -39,6 +42,8 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/git/git-target.js',
   // navigate-service 的「行内标识符纠正」复用网关侧同一套符号文本工具
   'src/gateway/symbol-text.js',
+  // 远程宿主判断「哪些文件要触发结构索引增量」：与本地调度器共用同一份口径
+  'src/index/source-files.js',
   // 远程 LSP 定位：只依赖 Node 内置模块，server 由远程环境提供
   // （rust-analyzer / gopls 走 PATH，ts/py 走远程工作区 node_modules）。
   'src/lsp/language-registry.js',
@@ -49,7 +54,7 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/lsp/navigate-service.js'
 ];
 
-/** 内置 Linux Node 运行时。lite 包省略，由 optional-assets 注入前按需补全。 */
+/** 内置 Linux Node 运行时：随安装包一起预装，远程不需要目标机装 Node。 */
 const REMOTE_PACK_NODE_REL = 'bin/node';
 
 /** Linux dieyun-core。缺失只影响远程项目内索引，不阻塞 Agent 启动。 */
@@ -61,15 +66,13 @@ const REMOTE_PACK_GENERATED_FILES = ['package.json', 'manifest.json'];
 /** npm install 产出的运行时依赖（必须落在 pack 根的 node_modules/ 下）。 */
 const REMOTE_PACK_RUNTIME_DEP_FILES = ['node_modules/ws/package.json'];
 
-/** 远程 Agent 启动并加载模块所必需的全部文件（不含 bin/node）。 */
+/** 远程 Agent 启动并加载模块所必需的全部文件（含内置 Node）。 */
 const REMOTE_PACK_REQUIRED_FILES = [
+  REMOTE_PACK_NODE_REL,
   ...REMOTE_GATEWAY_SOURCE_PATHS.map((rel) => rel.replace(/^src\//, '')),
   ...REMOTE_PACK_GENERATED_FILES,
   ...REMOTE_PACK_RUNTIME_DEP_FILES
 ];
-
-/** 可直接注入远程的部署包：必需文件之外还必须有内置 Node。 */
-const REMOTE_DEPLOY_REQUIRED_FILES = [...REMOTE_PACK_REQUIRED_FILES, REMOTE_PACK_NODE_REL];
 
 /** 远程 preflight 成功标记：必须整行匹配，避免把诊断输出误判为成功。 */
 const REMOTE_PACK_OK_MARKER = 'PACK_OK';
@@ -197,16 +200,12 @@ function isFile(fsApi, abs) {
 
 /**
  * @param {string} packRoot
- * @param {{ deploy?: boolean, rels?: string[], fsApi?: typeof fs }} [opts]
+ * @param {{ rels?: string[], fsApi?: typeof fs }} [opts]
  * @returns {{ ok: boolean, missing: string[], detail: string, required: string[] }}
  */
 function inspectRemotePack(packRoot, opts = {}) {
   const required =
-    Array.isArray(opts.rels) && opts.rels.length
-      ? opts.rels
-      : opts.deploy
-        ? REMOTE_DEPLOY_REQUIRED_FILES
-        : REMOTE_PACK_REQUIRED_FILES;
+    Array.isArray(opts.rels) && opts.rels.length ? opts.rels : REMOTE_PACK_REQUIRED_FILES;
   const fsApi = opts.fsApi || fs;
   const root = String(packRoot || '');
   const missing = root ? required.filter((rel) => !isFile(fsApi, path.join(root, rel))) : required.slice();
@@ -216,6 +215,36 @@ function inspectRemotePack(packRoot, opts = {}) {
     required,
     detail: missing.length ? `缺少 ${missing.join(', ')}` : '完整'
   };
+}
+
+/**
+ * 注入前的最后一道本地闸门：部署包必须满足本文件的清单，否则宁可在这里失败，
+ * 也不要上传几百 MB 后在远程报「安装包不完整」。
+ */
+function assertRemotePackReady(packRoot) {
+  const check = inspectRemotePack(packRoot);
+  if (check.ok) return packRoot;
+  // 整个包还没打过（dev 首次启动）：按「未打包」报，让上层走 SFTP 兜底 + 给出打包命令。
+  const manifestMissing = check.missing.includes('manifest.json');
+  if (manifestMissing) {
+    throw Object.assign(
+      new Error('远程 Agent 部署包缺失：请先执行 npm run pack:remote-gateway（npm run dev 会自动打包）'),
+      { code: 'REMOTE_GATEWAY_PACK_MISSING' }
+    );
+  }
+  const onlyNodeMissing = check.missing.length === 1 && check.missing[0] === REMOTE_PACK_NODE_REL;
+  if (onlyNodeMissing) {
+    throw Object.assign(
+      new Error('远程 Agent 内置 Node 缺失：请重新执行 npm run pack:remote-gateway'),
+      { code: 'REMOTE_GATEWAY_PACK_MISSING' }
+    );
+  }
+  throw Object.assign(
+    new Error(
+      `远程 Agent 部署包不完整：${check.detail}。请重新执行 npm run pack:remote-gateway（安装包用 npm run build 重新打包）`
+    ),
+    { code: 'REMOTE_GATEWAY_PACK_INCOMPLETE', missing: check.missing }
+  );
 }
 
 /**
@@ -258,8 +287,8 @@ module.exports = {
   REMOTE_PACK_OK_MARKER,
   REMOTE_PACK_MARKER_REL,
   REMOTE_PACK_REQUIRED_FILES,
-  REMOTE_DEPLOY_REQUIRED_FILES,
   inspectRemotePack,
+  assertRemotePackReady,
   parseRemotePackMissing,
   parseRemotePackMarker,
   evaluateRemotePackPreflight,

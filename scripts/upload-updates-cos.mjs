@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Upload dist/ update artifacts to Tencent COS, then delete previous
- * versioned Setup.exe / blockmap / APK objects (keep latest.yml, *-latest.exe, optional/).
+ * versioned Setup.exe / blockmap / APK objects (keep latest.yml, *-latest.exe).
  * Env: COS_SECRET_ID, COS_SECRET_KEY, optional COS_BUCKET, COS_REGION
  * COS_KEEP_OLD=1 skips stale cleanup. COS_PC_ONLY skips APK upload and APK cleanup.
  */
@@ -59,15 +59,6 @@ if (!process.env.COS_PC_ONLY && fs.existsSync(mobileManifest)) {
     if (/^dieyun-mobile-.*\.apk$/i.test(name)) {
       uploads.push({ local: path.join(mobileSrc, name), key: name });
     }
-  }
-}
-
-const optionalDir = path.join(src, 'optional');
-if (fs.existsSync(optionalDir)) {
-  for (const name of fs.readdirSync(optionalDir)) {
-    const local = path.join(optionalDir, name);
-    if (!fs.statSync(local).isFile()) continue;
-    uploads.push({ local, key: `optional/${name}` });
   }
 }
 
@@ -129,7 +120,7 @@ async function listKeys(prefix) {
 
 /**
  * After a successful upload, drop previous Setup.exe / blockmap / APK objects.
- * Keeps latest.yml, *-latest.exe, optional/, icons, and keys just uploaded.
+ * Keeps latest.yml, *-latest.exe, icons, and keys just uploaded.
  * Set COS_KEEP_OLD=1 to skip. COS_PC_ONLY skips APK cleanup.
  */
 async function deleteStaleVersionedObjects(keepKeys) {
