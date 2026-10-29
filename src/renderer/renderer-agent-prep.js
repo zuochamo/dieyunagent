@@ -27,7 +27,7 @@ function createInitialPrepSteps(opts = {}) {
         id: def.id,
         label: def.label,
         status: 'skipped',
-        detail: opts.skipUndoReason || '长程模式，已跳过'
+        detail: opts.skipUndoReason || '已跳过'
       };
     }
     if (def.id === 'remote_core' && skipRemoteCore) {

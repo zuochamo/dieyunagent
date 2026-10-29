@@ -277,56 +277,6 @@ async function syncAutoLaunchToggle() {
 
 window.syncThemeAutoLaunchToggle = syncAutoLaunchToggle;
 
-const LONG_HORIZON_KEY = 'dieyun.composer.longHorizon.v1';
-
-let composerLongHorizon = false;
-
-function loadComposerLongHorizon() {
-  try {
-    return window.localStorage.getItem(LONG_HORIZON_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function saveComposerLongHorizon(on) {
-  composerLongHorizon = !!on;
-  try {
-    window.localStorage.setItem(LONG_HORIZON_KEY, composerLongHorizon ? '1' : '0');
-  } catch {
-    // ignore
-  }
-  syncLongHorizonToggle();
-}
-
-/** 设置 → 权限：长程任务开关；开启后发送不走 undo / 回撤，并放宽工具护栏与段预算。 */
-function getComposerLongHorizon() {
-  return !!composerLongHorizon;
-}
-
-function isTurnLongHorizon(meta) {
-  return !!(meta && meta.longHorizon);
-}
-
-function syncLongHorizonToggle() {
-  const el = $('theme-long-horizon');
-  if (el) el.checked = !!composerLongHorizon;
-}
-
-(function initLongHorizonToggle() {
-  composerLongHorizon = loadComposerLongHorizon();
-  syncLongHorizonToggle();
-  const el = $('theme-long-horizon');
-  if (!el) return;
-  el.addEventListener('change', () => {
-    saveComposerLongHorizon(!!el.checked);
-  });
-})();
-
-window.syncThemeLongHorizonToggle = syncLongHorizonToggle;
-window.getComposerLongHorizon = getComposerLongHorizon;
-window.isTurnLongHorizon = isTurnLongHorizon;
-
 syncTracePrefInputs();
 [
   ['trace-show-reasoning', 'showReasoning', true],

@@ -48,7 +48,7 @@ const AGENT_RUN_EVENT_FIELDS = Object.freeze([
   { name: 'mode', type: 'string', required: false },
   { name: 'phase', type: 'string', required: false },
   { name: 'tool', type: 'object|null', required: false },
-  { name: 'meta', type: 'object|null', required: false, description: 'prepSteps 等扩展' }
+  { name: 'meta', type: 'object|null', required: false, description: 'prepSteps 等扩展；done 带 isPlanRun / reviewAccepted / completionGatePassed / completionStatus / agentStatus / readinessReason（完成验收原因码，判定在 src/agent/completion-readiness.js）' }
 ]);
 
 /** Mobile AgentService 旧事件 → AgentRunEvent 映射 */

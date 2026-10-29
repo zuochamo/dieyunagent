@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, skillsCatalog, loadEnabledSkillIds, isSkillEnabled, currentSessionId, resetDialogMaximize, showTrayBalloon, toastPreviewText, gwState, refreshHistoryList, loadChatFromGateway, ensureLocalGatewayReady, invalidateSessionMessageCache, scrollChatToBottom, SKILLS_GRID_PAGE_SIZE, settings, getSupplierById, isSupplierModelEnabled, builtinModelsFromSavedSuppliers, ensureSelectMenu, sessionActiveRuns, updateSessionRunProgress, dispatchAgentRunEvent, finishSessionActiveRun, mapRustAgentTrace, registerActiveAgentBackendCancel, AGENT_RUN_EVENT_TYPES, normalizeAgentRunEvent, reconcileSessionLiveRunUi, syncComposerForActiveSession, saveAssistantTraceRecord */
+/* global window, document, $, escapeHtml, skillsCatalog, loadEnabledSkillIds, isSkillEnabled, currentSessionId, resetDialogMaximize, showTrayBalloon, toastPreviewText, gwState, refreshHistoryList, loadChatFromGateway, ensureLocalGatewayReady, invalidateSessionMessageCache, scrollChatToBottom, SKILLS_GRID_PAGE_SIZE, settings, getSupplierById, isSupplierModelEnabled, builtinModelsFromSavedSuppliers, ensureSelectMenu, sessionActiveRuns, updateSessionRunProgress, dispatchAgentRunEvent, finishSessionActiveRun, mapRustAgentTrace, registerActiveAgentBackendCancel, AGENT_RUN_EVENT_TYPES, normalizeAgentRunEvent, reconcileSessionLiveRunUi, syncComposerForActiveSession, saveAssistantTraceRecord, gatewayCall, historyWorkspaceKey, historyWorkspaceLabel */
 'use strict';
 
 function getAutomationApi() {
@@ -51,6 +51,7 @@ function setAutomationHint(msg) {
 
 function scheduleLabelPlan(plan) {
   if (plan.trigger === 'idle') return '空闲时执行';
+  if (plan.trigger === 'goal') return automationGoalSummary(plan);
   if (plan.onceAt) {
     try {
       return `单次 · ${new Date(plan.onceAt).toLocaleString('zh-CN')}`;
@@ -58,7 +59,38 @@ function scheduleLabelPlan(plan) {
       return `单次 · ${plan.onceAt}`;
     }
   }
-  return plan.rrule || '—';
+  const total = automationRunCountLabel(plan);
+  const base = plan.rrule || '—';
+  return total ? `${base} · ${total}` : base;
+}
+
+/**
+ * 「总共执行 N 次」的一行摘要：次数真相是 rrule 里的 COUNT，
+ * 这里只做展示（不另存一份计数器，避免两处对不上）。
+ */
+function automationRunCountLabel(plan) {
+  const rrule = String((plan && plan.rrule) || '');
+  if (!rrule) return '';
+  const parse = AUTOMATION_SCHEDULE_API.parseRruleParts;
+  if (typeof parse !== 'function') return '';
+  const count = Number((parse(rrule) || {}).COUNT || 0);
+  return Number.isFinite(count) && count > 0 ? `共 ${count} 次` : '';
+}
+
+/**
+ * 目标型计划的一句话进度：轮次 + 上次验收结论。
+ * 轮次默认值不在这里兜底（数字唯一来源是 agent-limits）：用户没填上限就只显示已跑轮数。
+ */
+function automationGoalSummary(plan) {
+  const budget = (plan && plan.budget) || {};
+  const attempt = Math.max(0, Math.floor(Number(plan && plan.attempt) || 0));
+  const maxAttempts = Number(budget.maxAttempts) > 0 ? Math.floor(Number(budget.maxAttempts)) : null;
+  const round = maxAttempts ? `第 ${attempt}/${maxAttempts} 轮` : `已跑 ${attempt} 轮`;
+  const v = plan && plan.lastVerify;
+  let last = '尚未验收';
+  if (v) last = `上次验收${v.ok ? '通过' : '未通过'}${v.exitCode == null ? '' : ` (exit ${v.exitCode})`}`;
+  else if (plan && plan.baseline && plan.baseline.red) last = '基线已确认会红';
+  return `目标 · ${round} · ${last}`;
 }
 
 function automationPlanDesc(plan) {
@@ -74,14 +106,22 @@ function automationPlanHint(plan) {
   const sessionNote = plan.deliver?.sessionId
     ? ` · 会话 …${String(plan.deliver.sessionId).slice(-10)}`
     : '';
+  const ws = String(plan.workspace || '').trim();
+  // 卡片上只写目录名：完整路径太长会挤掉「上次成功/失败」这类更要紧的信息
+  const wsName = ws
+    ? typeof historyWorkspaceLabel === 'function'
+      ? historyWorkspaceLabel(ws)
+      : ws
+    : '';
+  const wsNote = wsName ? ` · 工作空间 ${wsName}` : '';
   if (plan.lastRunAt) {
     const status = plan.lastRunOk ? '上次成功' : '上次失败';
     const when = new Date(plan.lastRunAt).toLocaleString('zh-CN');
     const summary = plan.lastRunSummary ? ` · ${String(plan.lastRunSummary).slice(0, 36)}` : '';
-    return `${status} ${when}${summary}${sessionNote}`;
+    return `${status} ${when}${summary}${sessionNote}${wsNote}`;
   }
-  if (promptInPlan(plan)) return `${schedule}${sessionNote}`;
-  return sessionNote ? `点击卡片编辑${sessionNote}` : '点击卡片编辑';
+  if (promptInPlan(plan)) return `${schedule}${sessionNote}${wsNote}`;
+  return sessionNote || wsNote ? `点击卡片编辑${sessionNote}${wsNote}` : '点击卡片编辑';
 }
 
 function promptInPlan(plan) {
@@ -91,9 +131,13 @@ function promptInPlan(plan) {
 function resolveAutomationCategory(plan) {
   if (!plan || plan.enabled === false) return 'disabled';
   if (plan.trigger === 'idle') return 'idle';
+  if (plan.trigger === 'goal') return 'goal';
   if (plan.onceAt) return 'once';
   const r = String(plan.rrule || '').toUpperCase();
-  if (r.includes('MINUTELY') || r.includes('FREQ=HOURLY')) return 'interval';
+  // 间隔页签能生成的三种规则：MINUTELY / HOURLY / 带 INTERVAL 的 DAILY。
+  // WEEKLY 的 INTERVAL 是「隔 N 周」，仍归周期。
+  if (r.includes('FREQ=MINUTELY') || r.includes('FREQ=HOURLY')) return 'interval';
+  if (r.includes('INTERVAL=') && !r.includes('FREQ=WEEKLY')) return 'interval';
   return 'periodic';
 }
 
@@ -104,6 +148,8 @@ function automationSearchHaystack(plan) {
     plan.prompt,
     plan.rrule,
     plan.onceAt,
+    plan.workspace,
+    plan.goal && plan.goal.verify,
     plan.lastRunSummary,
     scheduleLabelPlan(plan)
   ]
@@ -256,7 +302,7 @@ function updateAutomationRunningTiles() {
   }
 }
 
-/** 表单当前值 → 调度对象（含「生效结束」→ UNTIL）。结构化控件的唯一读取入口。 */
+/** 表单当前值 → 调度对象（含「生效结束」→ UNTIL、「总共执行次数」→ COUNT）。结构化控件的唯一读取入口。 */
 function readAutomationScheduleForm() {
   const time =
     typeof AUTOMATION_SCHEDULE_API.parseTimeValue === 'function'
@@ -268,7 +314,9 @@ function readAutomationScheduleForm() {
     weekdayKey: automationWeekDayMenu?.getValue() || '1',
     hour: time.hour,
     minute: time.minute,
-    intervalMin: $('automation-interval-min')?.value || '',
+    intervalUnit: automationIntervalUnitMenu?.getValue() || 'minute',
+    intervalValue: $('automation-interval-value')?.value || '',
+    runCount: $('automation-run-count')?.value || '',
     onceAtInput: $('automation-run-at')?.value || '',
     untilDate: $('automation-date-end')?.value || ''
   };
@@ -338,23 +386,29 @@ function applyAutomationScheduleToForm(plan) {
           weekdayKey: '1',
           hour: 9,
           minute: 0,
-          intervalMin: 60,
+          intervalUnit: 'minute',
+          intervalValue: 60,
+          runCount: '',
           onceAtInput: '',
           dtstartDate: '',
           untilDate: ''
         };
   const timeEl = $('automation-daily-time');
-  const intervalEl = $('automation-interval-min');
+  const intervalEl = $('automation-interval-value');
+  const runCountEl = $('automation-run-count');
   const runAtEl = $('automation-run-at');
   const startEl = $('automation-date-start');
   const endEl = $('automation-date-end');
   if (timeEl && typeof api.timeValueOf === 'function') timeEl.value = api.timeValueOf(state.hour, state.minute);
-  if (intervalEl) intervalEl.value = String(state.intervalMin || 60);
+  if (intervalEl) intervalEl.value = String(state.intervalValue || 60);
+  if (runCountEl) runCountEl.value = state.runCount || '';
   if (runAtEl) runAtEl.value = state.onceAtInput || '';
   if (startEl) startEl.value = state.dtstartDate || '';
   if (endEl) endEl.value = state.untilDate || '';
   ensureAutomationPeriodicUnitMenu()?.setValue(state.unit);
   ensureAutomationWeekDayMenu()?.setValue(state.weekdayKey);
+  ensureAutomationIntervalUnitMenu()?.setValue(state.intervalUnit || 'minute');
+  syncAutomationIntervalBounds();
   syncAutomationWeekDayVisibility();
   setAutomationScheduleType(state.tab);
   const rruleEl = $('plan-rrule');
@@ -362,6 +416,26 @@ function applyAutomationScheduleToForm(plan) {
   if (rruleEl) rruleEl.value = originRrule;
   automationScheduleOrigin = { rrule: originRrule, onceAt: String((plan && plan.onceAt) || '').trim() };
   resetAutomationScheduleDirty();
+}
+
+/**
+ * 目标型计划 → 表单（验收命令 / 预算 / 工作目录）。
+ * 与 collectAutomationForm 成对：只写不回填或只读不写，都会「保存了但界面显示不对」。
+ */
+function fillAutomationGoalForm(plan) {
+  const goal = (plan && plan.goal) || {};
+  const budget = (plan && plan.budget) || {};
+  const verifyEl = $('automation-goal-verify');
+  const cwdEl = $('automation-goal-cwd');
+  const attemptsEl = $('automation-goal-attempts');
+  const wallEl = $('automation-goal-wall-min');
+  if (verifyEl) verifyEl.value = goal.verify || '';
+  if (cwdEl) cwdEl.value = goal.cwd || '';
+  // 0 = 用户没填（用默认值），界面就留空，避免把默认数字写死在输入框里
+  if (attemptsEl) attemptsEl.value = Number(budget.maxAttempts) > 0 ? String(budget.maxAttempts) : '';
+  if (wallEl) {
+    wallEl.value = Number(budget.maxWallMs) > 0 ? String(Math.round(Number(budget.maxWallMs) / 60000)) : '';
+  }
 }
 
 function parseTodoText(text) {
@@ -505,10 +579,25 @@ function setAutomationScheduleType(type) {
   document.querySelectorAll('.automation-schedule-panel').forEach((el) => {
     el.classList.toggle('active', el.dataset.schedulePanel === automationScheduleType);
   });
+  syncAutomationScheduleExtras();
 }
 
 /**
- * 计划编辑器里的四处「实体选择」下拉统一走直角自定义下拉组件（renderer-select-menu.js）：
+ * 随页签显示/隐藏的调度字段（唯一判定点，页签切换都经过 setAutomationScheduleType）。
+ * 「总共执行次数」和「生效范围」只在会重复的页签（周期 / 按间隔）里有意义：
+ * 单次由那一个时间点决定，空闲/目标根本没有调度字符串。
+ */
+function syncAutomationScheduleExtras() {
+  const show = automationScheduleType === 'periodic' || automationScheduleType === 'interval';
+  for (const id of ['automation-run-count-wrap', 'automation-date-range', 'automation-limit-hint']) {
+    const el = $(id);
+    if (el) el.hidden = !show;
+  }
+}
+
+/**
+ * 计划编辑器里的「实体选择」下拉（技能 / 模型 / 工作空间 / 频率 / 间隔单位 / 星期）
+ * 统一走直角自定义下拉组件（renderer-select-menu.js）：
  * 原生 <select> 的弹出列表由系统绘制，圆角无法用 CSS 去掉，与全站直角设计冲突。
  */
 const AUTOMATION_MODEL_KEEP_KEY = '__keep';
@@ -521,6 +610,9 @@ const AUTOMATION_SCHEDULE_API = window.DieyunAutomationSchedule || {};
 const AUTOMATION_PERIODIC_UNIT_OPTIONS = Array.isArray(AUTOMATION_SCHEDULE_API.PERIODIC_UNIT_OPTIONS)
   ? AUTOMATION_SCHEDULE_API.PERIODIC_UNIT_OPTIONS
   : [];
+const AUTOMATION_INTERVAL_UNIT_OPTIONS = Array.isArray(AUTOMATION_SCHEDULE_API.INTERVAL_UNIT_OPTIONS)
+  ? AUTOMATION_SCHEDULE_API.INTERVAL_UNIT_OPTIONS
+  : [];
 const AUTOMATION_WEEK_DAY_OPTIONS = Array.isArray(AUTOMATION_SCHEDULE_API.WEEK_DAY_OPTIONS)
   ? AUTOMATION_SCHEDULE_API.WEEK_DAY_OPTIONS
   : [];
@@ -528,7 +620,21 @@ const AUTOMATION_WEEK_DAY_OPTIONS = Array.isArray(AUTOMATION_SCHEDULE_API.WEEK_D
 let automationModelMenu = null;
 let automationSkillMenu = null;
 let automationPeriodicUnitMenu = null;
+let automationIntervalUnitMenu = null;
 let automationWeekDayMenu = null;
+let automationWorkspaceMenu = null;
+
+/**
+ * 工作空间选择的两个「非路径」选项：
+ *   ''       = 跟随执行时当前工作空间（历史行为，默认）
+ *   __pick   = 打开系统目录选择器（只存在于下拉列表里，绝不落盘）
+ */
+const AUTOMATION_WORKSPACE_FOLLOW_KEY = '';
+const AUTOMATION_WORKSPACE_PICK_KEY = '__pick';
+/** 下拉里真正选中的路径（「手动选择目录」取消时回退到它） */
+let automationWorkspaceValue = '';
+/** 历史对话用过的工作空间（去重后的路径列表）；null = 尚未加载 */
+let automationHistoryWorkspaces = null;
 
 function ensureAutomationModelMenu() {
   if (automationModelMenu) return automationModelMenu;
@@ -578,6 +684,159 @@ function ensureAutomationWeekDayMenu() {
     onPick: () => markAutomationScheduleDirty()
   });
   return automationWeekDayMenu;
+}
+
+/** 「每 N <单位>」的单位下拉：分钟 / 小时 / 天（选项与 rrule 映射的单一来源在调度模块）。 */
+function ensureAutomationIntervalUnitMenu() {
+  if (automationIntervalUnitMenu) return automationIntervalUnitMenu;
+  automationIntervalUnitMenu = ensureSelectMenu('automation-interval-unit', {
+    options: AUTOMATION_INTERVAL_UNIT_OPTIONS,
+    value: 'minute',
+    ariaLabel: '间隔单位',
+    onPick: () => {
+      // 换单位 = 换上下限（分钟 ≥5、小时 ≥1、天 ≥1）：先把输入框收敛到新单位能表达的范围，
+      // 免得「填了 1 分钟、规则里却是 5 分钟」这种输入框与规则对不上的情况。
+      syncAutomationIntervalBounds();
+      markAutomationScheduleDirty();
+    }
+  });
+  return automationIntervalUnitMenu;
+}
+
+/** 间隔输入的 min/max 与取值按当前单位归一（clamp 的真相在调度模块，这里只反映到控件上）。 */
+function syncAutomationIntervalBounds() {
+  const el = $('automation-interval-value');
+  if (!el) return;
+  const key = automationIntervalUnitMenu?.getValue() || 'minute';
+  const meta =
+    typeof AUTOMATION_SCHEDULE_API.intervalUnitMeta === 'function'
+      ? AUTOMATION_SCHEDULE_API.intervalUnitMeta(key)
+      : { min: 1, max: 1440, def: 60 };
+  el.min = String(meta.min);
+  el.max = String(meta.max);
+  if (typeof AUTOMATION_SCHEDULE_API.clampInterval === 'function') {
+    el.value = String(AUTOMATION_SCHEDULE_API.clampInterval(key, el.value));
+  }
+}
+
+function ensureAutomationWorkspaceMenu() {
+  if (automationWorkspaceMenu) return automationWorkspaceMenu;
+  automationWorkspaceMenu = ensureSelectMenu('automation-workspace', {
+    placeholder: '跟随当前工作空间',
+    emptyText: '暂无可选工作空间',
+    ariaLabel: '工作空间',
+    onPick: (key) => {
+      if (key === AUTOMATION_WORKSPACE_PICK_KEY) {
+        // 「手动选择本地目录」不是值而是一次动作：选目录成功才写入，取消则回退到上一次的选择
+        void pickAutomationWorkspaceFolder();
+        return;
+      }
+      automationWorkspaceValue = String(key || '');
+    }
+  });
+  return automationWorkspaceMenu;
+}
+
+/** 路径显示名：优先复用历史列表的同一套标签（同名目录靠完整路径区分） */
+function automationWorkspaceLabel(path) {
+  const raw = String(path || '').trim();
+  if (!raw) return '跟随当前工作空间';
+  const name = typeof historyWorkspaceLabel === 'function' ? historyWorkspaceLabel(raw) : raw;
+  return name && name !== raw ? `${name} · ${raw}` : raw;
+}
+
+/** 工作空间下拉的选项：跟随当前 / 历史对话用过的工作空间 / 手动选择本地目录… */
+function setAutomationWorkspaceOptions(extraPath) {
+  const ctl = ensureAutomationWorkspaceMenu();
+  if (!ctl) return;
+  const items = [{ key: AUTOMATION_WORKSPACE_FOLLOW_KEY, label: '跟随当前工作空间' }];
+  const seen = new Set([AUTOMATION_WORKSPACE_FOLLOW_KEY]);
+  const add = (p) => {
+    const path = String(p || '').trim();
+    if (!path) return;
+    // 去重口径与历史列表分组一致（windows 大小写 / 分隔符 / 远端 uri）
+    const key = typeof historyWorkspaceKey === 'function' ? historyWorkspaceKey(path) : path;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({ key: path, label: automationWorkspaceLabel(path), title: path });
+  };
+  for (const p of automationHistoryWorkspaces || []) add(p);
+  // 计划已绑定的目录可能不在历史里（比如换了机器/删了会话）：必须保住它，否则编辑一次就丢
+  add(extraPath);
+  items.push({ key: AUTOMATION_WORKSPACE_PICK_KEY, label: '手动选择本地目录…' });
+  ctl.setOptions(items);
+}
+
+/** 历史对话用过的工作空间（memory.sessions_list 的项目身份，按首次出现顺序去重） */
+async function loadAutomationHistoryWorkspaces() {
+  if (automationHistoryWorkspaces) return automationHistoryWorkspaces;
+  const out = [];
+  try {
+    if (typeof gatewayCall === 'function') {
+      const rows = await gatewayCall('memory.sessions_list', { limit: 100, archived: false });
+      const seen = new Set();
+      for (const row of Array.isArray(rows) ? rows : []) {
+        // 项目身份而非会话副本：自动化不该被塞进某个会话的 worktree 里跑
+        const path = String((row && (row.workspaceProjectPath || row.workspacePath)) || '').trim();
+        if (!path) continue;
+        const key = typeof historyWorkspaceKey === 'function' ? historyWorkspaceKey(path) : path;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(path);
+      }
+    }
+  } catch {
+    // 历史列表不可用不影响编辑：仍然可以手动选择本地目录
+    return out;
+  }
+  automationHistoryWorkspaces = out;
+  return out;
+}
+
+/**
+ * 回填并刷新工作空间下拉。
+ * 历史列表是异步取的，取回来时用户可能已经改了选择 —— 以当下值为准，不用旧值覆盖。
+ */
+async function applyAutomationWorkspaceToForm(workspace) {
+  const ctl = ensureAutomationWorkspaceMenu();
+  if (!ctl) return;
+  const want = String(workspace || '').trim();
+  automationWorkspaceValue = want;
+  setAutomationWorkspaceOptions(want);
+  ctl.setValue(want);
+  await loadAutomationHistoryWorkspaces();
+  const cur = ctl.getValue();
+  setAutomationWorkspaceOptions(cur);
+  ctl.setValue(cur);
+}
+
+/** 「手动选择本地目录…」：成功后把该目录插入选项并选中 */
+async function pickAutomationWorkspaceFolder() {
+  const ctl = ensureAutomationWorkspaceMenu();
+  if (!ctl) return;
+  const prev = automationWorkspaceValue;
+  let dir = '';
+  try {
+    const api = getAutomationApi();
+    dir = api.pickFolder ? await api.pickFolder() : '';
+  } catch (err) {
+    setAutomationHint(`选择目录失败：${err.message || err}`);
+  }
+  if (!dir) {
+    ctl.setValue(prev);
+    return;
+  }
+  automationWorkspaceValue = String(dir);
+  setAutomationWorkspaceOptions(automationWorkspaceValue);
+  ctl.setValue(automationWorkspaceValue);
+}
+
+/** 表单当前选择的计划工作空间（'' = 跟随当前工作空间；「手动选择」不是值） */
+function readAutomationWorkspacePick() {
+  if (!automationWorkspaceMenu) return String(automationWorkspaceValue || '').trim();
+  const v = automationWorkspaceMenu.getValue();
+  if (v === AUTOMATION_WORKSPACE_PICK_KEY) return automationWorkspaceValue.trim();
+  return String(v || '').trim();
 }
 
 async function populateAutomationSkillSelect(selectedId) {
@@ -692,6 +951,7 @@ function openAutomationEditor(taskId) {
   // 下拉是按需挂载的（容器常驻，实例懒建），保证本次打开一定有实例可读写
   ensureAutomationPeriodicUnitMenu();
   ensureAutomationWeekDayMenu();
+  ensureAutomationIntervalUnitMenu();
   syncAutomationWeekDayVisibility();
   const title = $('automation-editor-title');
   const seq = ++automationEditorSeq;
@@ -705,7 +965,9 @@ function openAutomationEditor(taskId) {
     // 调度（频率/时间/间隔/单次/生效区间）统一由调度模块回填：
     // 只写不回填，界面就永远停在 HTML 默认值 09:00。
     applyAutomationScheduleToForm(p);
+    fillAutomationGoalForm(p);
     populateAutomationModelSelect(p.modelRoute, p.model);
+    applyAutomationWorkspaceToForm(p.workspace).catch(() => {});
     populateAutomationSkillSelect((p.skillIds && p.skillIds[0]) || '').catch(() => {});
   };
   if (!taskId) {
@@ -715,10 +977,13 @@ function openAutomationEditor(taskId) {
     if ($('automation-todos')) $('automation-todos').value = '';
     // null = 全新计划：回填成默认调度（每天 09:00）并清空 origin / dirty
     applyAutomationScheduleToForm(null);
+    fillAutomationGoalForm(null);
     populateAutomationModelSelect('', '');
+    applyAutomationWorkspaceToForm('').catch(() => {});
     populateAutomationSkillSelect('').catch(() => {});
   } else {
     automationEditingPlan = null;
+    applyAutomationWorkspaceToForm('').catch(() => {});
     getAutomationApi().plansList().then((plans) => {
       // 期间用户已切换到别的计划 / 关掉重开：这次回填作废
       if (seq !== automationEditorSeq) return;
@@ -737,6 +1002,7 @@ function closeAutomationEditor() {
   if (overlay) overlay.hidden = true;
   if (automationModelMenu) automationModelMenu.close();
   if (automationSkillMenu) automationSkillMenu.close();
+  if (automationWorkspaceMenu) automationWorkspaceMenu.close();
   resetDialogMaximize('automation-editor-overlay', 'automation-editor-max');
 }
 
@@ -745,6 +1011,7 @@ function collectAutomationForm() {
   const sched = resolveScheduleFromForm();
   const pick = readAutomationModelPick();
   const startInput = $('automation-date-start')?.value || '';
+  const isGoal = (sched.trigger || 'schedule') === 'goal';
   return {
     id: id || undefined,
     name: $('automation-name')?.value || '未命名计划',
@@ -753,6 +1020,20 @@ function collectAutomationForm() {
     rrule: sched.rrule,
     onceAt: sched.onceAt,
     trigger: sched.trigger || 'schedule',
+    // 目标型的验收面与预算：命令只从这一个结构化字段进库（不解析提示词）
+    goal: isGoal
+      ? {
+          verify: ($('automation-goal-verify')?.value || '').trim(),
+          cwd: ($('automation-goal-cwd')?.value || '').trim()
+        }
+      : undefined,
+    budget: isGoal
+      ? {
+          // 0 = 未填 = 交给 agent-limits 默认值（clamp 也在那边）
+          maxAttempts: Math.max(0, Math.floor(Number($('automation-goal-attempts')?.value || 0) || 0)),
+          maxWallMs: Math.max(0, Math.floor(Number($('automation-goal-wall-min')?.value || 0) || 0)) * 60000
+        }
+      : undefined,
     tz: 'Asia/Shanghai',
     // 生效开始只在用户显式填过时上送：undefined 会让 store 保留原 dtstart（新建则兜底为当前时间），
     // 否则「打开编辑器保存一次」就会把已有计划的起始相位冲成保存时刻。
@@ -761,6 +1042,9 @@ function collectAutomationForm() {
     enabled: $('automation-enabled')?.checked !== false,
     model: pick.model,
     modelRoute: pick.modelRoute,
+    // 计划绑定的工作空间（空 = 跟随执行时当前工作空间）。定时执行没有打开着的会话，
+    // 工作区必须随计划落盘，否则「选过的目录」到点就会跑回当前视图的那个。
+    workspace: readAutomationWorkspacePick(),
     skillIds: (() => {
       const sid = automationSkillMenu ? automationSkillMenu.getValue() : '';
       return sid ? [sid] : [];
@@ -1043,15 +1327,40 @@ function syncPlanRunningFromList(plans) {
 
 /**
  * 结构化调度控件 → 脏标记。
- * 时间/间隔/单次时间/生效结束都直接决定 rrule 或 onceAt，改动后必须回显到 plan-rrule；
+ * 时间/间隔/单次时间/生效结束/总次数都直接决定 rrule 或 onceAt，改动后必须回显到 plan-rrule；
  * 「生效开始」只决定 dtstart，不参与 rrule 合成，因此单独记脏。
  */
 function bindAutomationScheduleInputs() {
-  for (const id of ['automation-daily-time', 'automation-interval-min', 'automation-run-at', 'automation-date-end']) {
+  for (const id of [
+    'automation-daily-time',
+    'automation-interval-value',
+    'automation-run-at',
+    'automation-date-end'
+  ]) {
     const el = $(id);
     if (!el) continue;
     el.addEventListener('input', markAutomationScheduleDirty);
     el.addEventListener('change', markAutomationScheduleDirty);
+  }
+  // COUNT 与 UNTIL 在 RRULE 里互斥（RFC 5545）：界面上也做成二选一，
+  // 免得用户两边都填了，却只能生效一侧（被丢掉的那侧看起来「填了没用」）。
+  const countEl = $('automation-run-count');
+  const endEl = $('automation-date-end');
+  if (countEl) {
+    const onCount = () => {
+      if (String(countEl.value || '').trim() && endEl && endEl.value) endEl.value = '';
+      markAutomationScheduleDirty();
+    };
+    countEl.addEventListener('input', onCount);
+    countEl.addEventListener('change', onCount);
+  }
+  if (endEl) {
+    const onEnd = () => {
+      if (String(endEl.value || '').trim() && countEl && countEl.value) countEl.value = '';
+      // 上面循环里已挂过 markAutomationScheduleDirty，这里只负责清空对面的字段
+    };
+    endEl.addEventListener('input', onEnd);
+    endEl.addEventListener('change', onEnd);
   }
   const startEl = $('automation-date-start');
   if (startEl) {
@@ -1093,9 +1402,6 @@ function switchAutomationScheduleTab(type) {
 function initAutomationUI() {
   $('automation-add')?.addEventListener('click', () => openAutomationEditor(null));
   $('automation-editor-cancel')?.addEventListener('click', closeAutomationEditor);
-  $('automation-editor-overlay')?.addEventListener('click', (e) => {
-    if (e.target.id === 'automation-editor-overlay') closeAutomationEditor();
-  });
   $('automation-editor-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     try {

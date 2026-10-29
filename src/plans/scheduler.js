@@ -49,7 +49,9 @@ class PlansScheduler {
   }
 
   _arm(plan) {
-    if (plan.trigger === 'idle') return; // 闲时计划不走定时器（见 _idleTick）
+    // 闲时（idle）与目标型（goal）都不走定时器：前者看「静默达标」，后者看 nextRunAt 退避，
+    // 统一由 _idleTick 的轮询触发 —— 触发源只有一处。
+    if (plan.trigger === 'idle' || plan.trigger === 'goal') return;
     const ms = msUntilNextRun(plan);
     if (ms == null) return;
     if (ms > TIMER_MAX_MS) {
@@ -102,6 +104,13 @@ class PlansScheduler {
       this.lastBusyAt = Date.now();
       return;
     }
+    // 目标型优先，且不吃 idleQuietMs：它的节奏由 nextRunAt 退避决定。
+    // 夜里没人操作时 isBusy() 为 false，目标要能一轮接一轮推进，而不是每轮先等 5 分钟静默。
+    const goal = this._dueGoal();
+    if (goal) {
+      await this._runGoal(goal);
+      return;
+    }
     if (Date.now() - this.lastBusyAt < this.idleQuietMs) return;
     const plan = this.getPlans().find(
       (p) => p && p.enabled && p.trigger === 'idle' && !this.running.has(p.id)
@@ -113,6 +122,33 @@ class PlansScheduler {
       await this.runPlan(plan);
     } catch (e) {
       this.log(`闲时计划执行失败 ${plan.name}: ${e.message}`);
+    } finally {
+      this.running.delete(plan.id);
+      this.lastBusyAt = Date.now();
+    }
+  }
+
+  /** 到点的目标型计划（无 nextRunAt = 立即，或 nextRunAt 已过）；取列表里第一个 */
+  _dueGoal() {
+    const now = Date.now();
+    return (
+      this.getPlans().find((p) => {
+        if (!p || !p.enabled || p.trigger !== 'goal') return false;
+        if (this.running.has(p.id)) return false;
+        if (!p.nextRunAt) return true;
+        const at = Date.parse(p.nextRunAt);
+        return !Number.isFinite(at) || at <= now;
+      }) || null
+    );
+  }
+
+  async _runGoal(plan) {
+    this.running.add(plan.id);
+    this.lastBusyAt = Date.now();
+    try {
+      await this.runPlan(plan);
+    } catch (e) {
+      this.log(`目标型计划执行失败 ${plan.name}: ${e.message}`);
     } finally {
       this.running.delete(plan.id);
       this.lastBusyAt = Date.now();

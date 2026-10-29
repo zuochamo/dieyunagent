@@ -1,6 +1,6 @@
 'use strict';
 
-const { buildPlanRunUserText, endPlanRunTurn } = require('./plan-run-turn');
+const { planRunUserTurn, endPlanRunTurn } = require('./plan-run-turn');
 
 /**
  * 计划结果投递（降级兜底）。
@@ -18,10 +18,11 @@ async function deliverPlanResult(gateway, plan, result) {
   if (!sessionId) return null;
 
   // 与运行边界完全同一份文案与 meta（不再各写一套）
+  const turn = planRunUserTurn(plan);
   await gateway.invokeRpc('memory.message_append', {
     sessionId,
     role: 'user',
-    content: buildPlanRunUserText(plan)
+    content: turn.content
   });
   await endPlanRunTurn(gateway, sessionId, plan, result);
   return sessionId;

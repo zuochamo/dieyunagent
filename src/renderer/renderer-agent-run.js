@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, loopApi, settings, gwState, chatCompletionWithToolsViaRust, isDieyunCoreReady, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, getSessionAbortSignal, throwIfAgentAborted, waitForAgentAbortable, createAgentAbortError, renderAssistantBubbleContent, getPlannerBestOfN, applyContextCompaction, noteContextCompaction, getEffectiveInputBudget, getAgentToolCallLimit, getAgentMaxRounds, getComposerLongHorizon, LONG_HORIZON_MAX_SEGMENTS, buildAgentSegmentContinuePartial, pauseAgentForToolLimit, pauseAgentForNetworkDisconnect, shouldPauseForNetworkDisconnect, clearAgentContinueState, setAgentContinueState, showAgentToast, formatToolArgsBrief, summarizeToolResult, reprojectContinueLoopMessages, refreshTurnRideFromArchive, scheduleArtifactsUiRefresh, schedulePlanWorktreeChangesRefresh, renderChangesPane, trackArtifactsFromTrace, maybeSaveRunningTraceCheckpoint, setSessionLastTrace, setAgentExecutionContext, createTraceRunId, updateSessionRunProgress, mergeRetryTrace, getSessionChangeRowsForAgent */
+/* global sessionActiveRuns, currentSessionId, loopApi, settings, gwState, chatCompletionWithToolsViaRust, isDieyunCoreReady, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, getSessionAbortSignal, throwIfAgentAborted, waitForAgentAbortable, createAgentAbortError, renderAssistantBubbleContent, getPlannerBestOfN, applyContextCompaction, noteContextCompaction, getEffectiveInputBudget, getAgentToolCallLimit, getAgentMaxRounds, pauseAgentForToolLimit, pauseAgentForNetworkDisconnect, shouldPauseForNetworkDisconnect, clearAgentContinueState, setAgentContinueState, showAgentToast, formatToolArgsBrief, summarizeToolResult, reprojectContinueLoopMessages, refreshTurnRideFromArchive, scheduleArtifactsUiRefresh, schedulePlanWorktreeChangesRefresh, renderChangesPane, trackArtifactsFromTrace, maybeSaveRunningTraceCheckpoint, setSessionLastTrace, setAgentExecutionContext, createTraceRunId, updateSessionRunProgress, mergeTraceSegments, getSessionChangeRowsForAgent */
 'use strict';
 
 async function reprojectContinueFromBody(continueFrom, payload, runOpts, runSessionId) {
@@ -67,12 +67,7 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
     ) {
       return;
     }
-    const mergedTrace =
-      runOpts.readinessRetry && baseTrace.length
-        ? Array.isArray(trace)
-          ? trace
-          : []
-        : mergeRetryTrace(baseTrace, trace);
+    const mergedTrace = mergeTraceSegments(baseTrace, trace);
     setSessionLastTrace(runSessionId, mergedTrace);
     updateSessionRunProgress(runSessionId, mergedTrace, streamContent, { runId: checkpointRunId });
     if (plan && typeof window.syncPlanPreviewFromPlan === 'function') {
@@ -100,150 +95,111 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
       ensureUserLocalMsgId: runOpts.ensureUserLocalMsgId
     });
   };
-  const longHorizon =
-    runOpts.longHorizon != null
-      ? !!runOpts.longHorizon
-      : typeof getComposerLongHorizon === 'function' && getComposerLongHorizon();
-  const maxSegments =
-    typeof LONG_HORIZON_MAX_SEGMENTS === 'number' ? LONG_HORIZON_MAX_SEGMENTS : 20;
-  let segmentIndex = 0;
   let continueFrom = runOpts.continueFrom || null;
 
   try {
-    while (true) {
-      throwIfAgentAborted(runOpts.signal);
-      const toolOpts = {
-        signal: runOpts.signal,
-        onProgress: progress,
-        apiConfig: runOpts.apiConfig,
-        modelRoute: runOpts.modelRoute,
-        sessionId: runSessionId,
-        runWorkspaceRoot: runWorkspacePath || undefined,
-        undoTurnId: runUndoTurnId || undefined,
-        taskTier: runOpts.taskTier || null,
-        longHorizon: !!longHorizon,
-        // 请求快照的审计事实：只有「首段」的 messages 是这次刚拼出来的，
-        // 续段的 messages 来自循环账本，折叠事实不再适用，因此显式置空。
-        contextAudit: runOpts.contextAudit || null
-      };
-      if (continueFrom && continueFrom.body) {
-        continueFrom = await reprojectContinueFromBody(
-          continueFrom,
-          payload,
-          runOpts,
-          runSessionId
-        );
-        toolOpts.body = continueFrom.body;
-        toolOpts.contextAudit = null;
-        toolOpts.trace = continueFrom.trace;
-        toolOpts.tokensUsed = continueFrom.tokensUsed;
-        toolOpts.tokenUsage = continueFrom.tokenUsage;
-        toolOpts.toolCallsUsed = 0;
-        toolOpts.toolFingerprintHistory = continueFrom.toolFingerprintHistory;
-      }
-
-      let result;
-      const resumeCheckpoint =
-        segmentIndex === 0 && runOpts.allowPlannerResume
-          ? getPendingResumeCheckpoint(runSessionId)
-          : null;
-      if (segmentIndex === 0) clearPendingResumeCheckpoint(runSessionId);
-      throwIfAgentAborted(runOpts.signal);
-
-      const usePlanner =
-        !runOpts.suppressPlanner &&
-        (runOpts.forcePlanner || !!resumeCheckpoint);
-      if (usePlanner) {
-        throwIfAgentAborted(runOpts.signal);
-        if (typeof runPlannerPipelineViaMain !== 'function') {
-          throw new Error('Rust Planner IPC 不可用');
-        }
-        if (typeof isDieyunCoreReady === 'function' && !isDieyunCoreReady()) {
-          throw new Error('Plan 模式需要 dieyun-core（请运行 npm run pack:dieyun-core 并重启）');
-        }
-        if (typeof beginPlanWorktreeTracking === 'function') {
-          beginPlanWorktreeTracking(null, runSessionId);
-        }
-        result = await waitForAgentAbortable(
-          runPlannerPipelineViaMain(
-            {
-              userText: runOpts.userText,
-              userContent: runOpts.userContent,
-              hasImages: !!runOpts.hasImages,
-              sysContent: runOpts.sysContent,
-              chatHistoryBlock: runOpts.chatHistoryBlock || '',
-              tools,
-              apiConfig: runOpts.apiConfig,
-              model: payload?.model,
-              contextTierId: runContextTierId,
-              resumeFromRunId: resumeCheckpoint?.runId || null,
-              plannerBestOfN: typeof getPlannerBestOfN === 'function' ? getPlannerBestOfN() : 0,
-              longHorizon: !!longHorizon
-            },
-            { signal: runOpts.signal, onProgress: progress, sessionId: runSessionId }
-          ),
-          runOpts.signal
-        );
-      } else {
-        throwIfAgentAborted(runOpts.signal);
-        if (typeof isDieyunCoreReady === 'function' && !isDieyunCoreReady()) {
-          throw new Error('需要 dieyun-core sidecar（npm run pack:dieyun-core）');
-        }
-        if (typeof chatCompletionWithToolsViaRust !== 'function') {
-          throw new Error('Rust agent loop IPC 不可用');
-        }
-        result = await waitForAgentAbortable(
-          chatCompletionWithToolsViaRust(payload, tools, {
-            ...toolOpts,
-            readinessRetry: !!runOpts.readinessRetry,
-            runId: checkpointRunId,
-            hasImages: !!runOpts.hasImages,
-            taskTier: runOpts.taskTier || null,
-            ...(runOpts.readinessRetry && baseTrace.length ? { trace: baseTrace } : {})
-          }),
-          runOpts.signal
-        );
-      }
-
-      if (result && result.hitRoundLimit) {
-        if (baseTrace.length && Array.isArray(result.trace) && !runOpts.readinessRetry) {
-          result = { ...result, trace: mergeRetryTrace(baseTrace, result.trace) };
-        }
-        // Plan 子 loop 已在 rust-planner-runner 内续段；此处仅 Agent 模式做外层续跑。
-        const canAutoContinue = longHorizon && !usePlanner && segmentIndex + 1 < maxSegments;
-        if (canAutoContinue) {
-          segmentIndex += 1;
-          if (typeof showAgentToast === 'function') {
-            showAgentToast('长程续段', `正在启动第 ${segmentIndex + 1} 段…`, { variant: 'info' });
-          }
-          if (typeof buildAgentSegmentContinuePartial === 'function') {
-            continueFrom = buildAgentSegmentContinuePartial(result);
-          } else {
-            continueFrom = {
-              body: result.body,
-              trace: result.trace,
-              content: result.content,
-              tokensUsed: result.tokensUsed,
-              toolFingerprintHistory: result.toolFingerprintHistory
-            };
-          }
-          renderAssistantBubbleContent(placeholderEl, {
-            content: result.content || '',
-            trace: result.trace || [],
-            loading: true,
-            hitRoundLimit: false
-          });
-          continue;
-        }
-        return { done: false, needContinue: true, result, segmentLimitReached: longHorizon && segmentIndex + 1 >= maxSegments };
-      }
-
-      clearAgentContinueState(runSessionId);
-      if (baseTrace.length && Array.isArray(result?.trace) && !runOpts.readinessRetry) {
-        result = { ...result, trace: mergeRetryTrace(baseTrace, result.trace) };
-      }
-      return { done: true, result, segmentsUsed: segmentIndex + 1 };
+    throwIfAgentAborted(runOpts.signal);
+    const toolOpts = {
+      signal: runOpts.signal,
+      onProgress: progress,
+      apiConfig: runOpts.apiConfig,
+      modelRoute: runOpts.modelRoute,
+      sessionId: runSessionId,
+      runWorkspaceRoot: runWorkspacePath || undefined,
+      undoTurnId: runUndoTurnId || undefined,
+      taskTier: runOpts.taskTier || null,
+      // 请求快照的审计事实：只有这次刚拼出来的 messages 才有折叠事实，
+      // 续跑（continueFrom）的 messages 来自循环账本，因此显式置空。
+      contextAudit: runOpts.contextAudit || null
+    };
+    if (continueFrom && continueFrom.body) {
+      continueFrom = await reprojectContinueFromBody(
+        continueFrom,
+        payload,
+        runOpts,
+        runSessionId
+      );
+      toolOpts.body = continueFrom.body;
+      toolOpts.contextAudit = null;
+      toolOpts.trace = continueFrom.trace;
+      toolOpts.tokensUsed = continueFrom.tokensUsed;
+      toolOpts.tokenUsage = continueFrom.tokenUsage;
+      toolOpts.toolCallsUsed = 0;
+      toolOpts.toolFingerprintHistory = continueFrom.toolFingerprintHistory;
     }
+
+    let result;
+    const resumeCheckpoint = runOpts.allowPlannerResume
+      ? getPendingResumeCheckpoint(runSessionId)
+      : null;
+    clearPendingResumeCheckpoint(runSessionId);
+    throwIfAgentAborted(runOpts.signal);
+
+    const usePlanner =
+      !runOpts.suppressPlanner && (runOpts.forcePlanner || !!resumeCheckpoint);
+    if (usePlanner) {
+      throwIfAgentAborted(runOpts.signal);
+      if (typeof runPlannerPipelineViaMain !== 'function') {
+        throw new Error('Rust Planner IPC 不可用');
+      }
+      if (typeof isDieyunCoreReady === 'function' && !isDieyunCoreReady()) {
+        throw new Error('Plan 模式需要 dieyun-core（请运行 npm run pack:dieyun-core 并重启）');
+      }
+      if (typeof beginPlanWorktreeTracking === 'function') {
+        beginPlanWorktreeTracking(null, runSessionId);
+      }
+      result = await waitForAgentAbortable(
+        runPlannerPipelineViaMain(
+          {
+            userText: runOpts.userText,
+            userContent: runOpts.userContent,
+            hasImages: !!runOpts.hasImages,
+            sysContent: runOpts.sysContent,
+            chatHistoryBlock: runOpts.chatHistoryBlock || '',
+            tools,
+            apiConfig: runOpts.apiConfig,
+            model: payload?.model,
+            contextTierId: runContextTierId,
+            resumeFromRunId: resumeCheckpoint?.runId || null,
+            plannerBestOfN: typeof getPlannerBestOfN === 'function' ? getPlannerBestOfN() : 0
+          },
+          { signal: runOpts.signal, onProgress: progress, sessionId: runSessionId }
+        ),
+        runOpts.signal
+      );
+    } else {
+      throwIfAgentAborted(runOpts.signal);
+      if (typeof isDieyunCoreReady === 'function' && !isDieyunCoreReady()) {
+        throw new Error('需要 dieyun-core sidecar（npm run pack:dieyun-core）');
+      }
+      if (typeof chatCompletionWithToolsViaRust !== 'function') {
+        throw new Error('Rust agent loop IPC 不可用');
+      }
+      result = await waitForAgentAbortable(
+        chatCompletionWithToolsViaRust(payload, tools, {
+          ...toolOpts,
+          runId: checkpointRunId,
+          hasImages: !!runOpts.hasImages,
+          taskTier: runOpts.taskTier || null
+        }),
+        runOpts.signal
+      );
+    }
+
+    // 撞上用尽（轮次 / 工具段）就交回用户：「继续」= 再给同样额度。
+    // 单轮内不再自动续跑；无人值守的连续推进归目标型计划（src/plans/goal-run.js）。
+    if (result && result.hitRoundLimit) {
+      if (baseTrace.length && Array.isArray(result.trace)) {
+        result = { ...result, trace: mergeTraceSegments(baseTrace, result.trace) };
+      }
+      return { done: false, needContinue: true, result };
+    }
+
+    clearAgentContinueState(runSessionId);
+    if (baseTrace.length && Array.isArray(result?.trace)) {
+      result = { ...result, trace: mergeTraceSegments(baseTrace, result.trace) };
+    }
+    return { done: true, result };
   } finally {
     if (typeof clearAgentExecutionContext === 'function') clearAgentExecutionContext(runSessionId);
   }

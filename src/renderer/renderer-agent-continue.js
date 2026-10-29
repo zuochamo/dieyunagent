@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, getModelRuntimeValues, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview */
 'use strict';
 
 var agentApi = window.diecloud || {};
@@ -21,21 +21,9 @@ var STREAM_ROUND_MAX_ATTEMPTS = () =>
   (typeof getAgentLimits === 'function' ? getAgentLimits().streamRoundMaxAttempts : 3) || 3;
 var LLM_RETRY_BASE_MS = () =>
   (typeof getAgentLimits === 'function' ? getAgentLimits().llmRetryBaseMs : 800) || 800;
-var LONG_HORIZON_MAX_SEGMENTS = 20;
+/** 「继续」= 再给同样额度：这条合成用户消息是「撞上段上限后接着跑」的唯一入口。 */
 var SEGMENT_CONTINUE_USER_MSG =
   '[系统] 本段工具轮次已达上限，请在同一会话中继续未完成任务，勿重复已完成的步骤。';
-
-function runIsLongHorizon(options) {
-  if (options && options.longHorizon != null) return !!options.longHorizon;
-  return typeof getComposerLongHorizon === 'function' && getComposerLongHorizon();
-}
-
-function scaleRunLimit(key, value, options) {
-  if (typeof scaleLimitForLongHorizon === 'function') {
-    return scaleLimitForLongHorizon(key, value, runIsLongHorizon(options));
-  }
-  return value;
-}
 
 var activeAgentBackendCancels = new Map();
 
@@ -104,32 +92,6 @@ function buildSegmentContinueMessages(messages, partialContent) {
   return msgs;
 }
 
-function stripVisibleAgentStatus(text) {
-  if (typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.stripAgentStatusLine === 'function') {
-    return AgentRoundText.stripAgentStatusLine(text);
-  }
-  return String(text || '').trim();
-}
-
-function sanitizeTraceThought(text, previousTexts) {
-  if (typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.sanitizeAgentThoughtText === 'function') {
-    return AgentRoundText.sanitizeAgentThoughtText(text, previousTexts);
-  }
-  return String(text || '');
-}
-
-function buildAgentSegmentContinuePartial(result) {
-  const body = result.body ? { ...result.body } : {};
-  return {
-    body,
-    trace: result.trace,
-    content: result.content,
-    tokensUsed: result.tokensUsed,
-    tokenUsage: result.tokenUsage,
-    toolFingerprintHistory: result.toolFingerprintHistory || []
-  };
-}
-
 /** 展示层剥掉模型误输出的 tool_call XML（须与 src/llm-tool-call-fallback.js 同步） */
 function stripVisibleToolCallMarkup(text) {
   const normalized = String(text || '')
@@ -158,26 +120,17 @@ function stripVisibleToolCallMarkup(text) {
     .trim();
 }
 
+/**
+ * 每段工具调用上限 / 轮次上限：唯一来源是「编码参数 → 模型与段预算」里**当前会话档位**的值
+ * （getModelRuntimeValues 会按会话模型解析档位；default 档另镜像进扁平 settings）。
+ * 这里不再自带 min 5 / 600 / 96 的兜底 —— 区间由 model-runtime-schema 统一 clamp。
+ */
 function getAgentToolCallLimit() {
-  if (typeof settings !== 'undefined' && settings) {
-    const n = Number(settings.agentToolCallLimit);
-    if (Number.isFinite(n) && n > 0) {
-      return Math.min(600, Math.max(5, Math.floor(n)));
-    }
-  }
-  return typeof CTX_LIMITS !== 'undefined' && CTX_LIMITS.AGENT_TOOL_CALL_LIMIT
-    ? CTX_LIMITS.AGENT_TOOL_CALL_LIMIT
-    : 300;
+  return getModelRuntimeValues().agentToolCallLimit;
 }
 
 function getAgentMaxRounds() {
-  if (typeof settings !== 'undefined' && settings) {
-    const n = Number(settings.agentMaxRounds);
-    if (Number.isFinite(n) && n > 0) {
-      return Math.min(600, Math.max(5, Math.floor(n)));
-    }
-  }
-  return 96;
+  return getModelRuntimeValues().agentMaxRounds;
 }
 
 function getAgentContinueState(sessionId) {

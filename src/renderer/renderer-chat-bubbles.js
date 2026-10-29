@@ -33,7 +33,6 @@ function checkpointRestoreOptsForLastTurn() {
   const userIdx = getLastUserMessageIndex();
   if (userIdx < 0 || messages[userIdx]?.role !== 'user') return null;
   const meta = messages[userIdx].meta || resolveUserFooterMeta(messages[userIdx], userIdx);
-  if (typeof isTurnLongHorizon === 'function' && isTurnLongHorizon(meta)) return null;
   const undoTurnId =
     meta.undoTurnId ||
     (typeof getCurrentUndoTurnId === 'function' ? getCurrentUndoTurnId() : null);
@@ -384,7 +383,6 @@ function isAgentRunStillActive() {
 }
 
 function isWithdrawableTurn(msgIndex, meta) {
-  if (typeof isTurnLongHorizon === 'function' && isTurnLongHorizon(meta)) return false;
   const next = messages[msgIndex + 1];
   const hasAssistantReply = !!(next && next.role === 'assistant');
   if (meta?.undoTurnId) {
@@ -473,6 +471,104 @@ function appendUserTurn(displayContent, opts = {}) {
     scrollChatToBottom({ force: opts.forceScroll !== false });
   }
   return { turn, bubble };
+}
+
+/**
+ * 回合触发归因条的标题：kind → 文案，唯一一份。
+ *
+ * kind 只在有 Producer 时才登记（当前是 `plans/plan-run-turn.js#buildPlanRunTrigger`）；
+ * 未登记的 kind 回落「系统触发」—— 不猜、不关键词匹配。
+ */
+const TRIGGER_NOTICE_TITLES = {
+  schedule: '定时任务触发',
+  goal: '目标续跑触发'
+};
+
+const TRIGGER_NOTICE_ICONS = {
+  schedule:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  goal:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>',
+  default:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>'
+};
+
+function triggerNoticeTitle(trigger) {
+  const t = trigger || {};
+  const base = TRIGGER_NOTICE_TITLES[String(t.kind || '')] || '系统触发';
+  const name = String(t.planName || '').trim();
+  return name ? `${base} · ${name}` : base;
+}
+
+/**
+ * 非人类触发的一轮：渲染成「触发条」，不再冒充用户气泡。
+ *
+ * 折叠一行（图标 + 标题 + 时间 + 折叠箭头），点开看这一轮实际收到的正文。
+ * 正文原样展示（就是模型当时读到的那段），不做任何前缀剥离——归因由 meta 表达，
+ * 不靠解析字符串。落库来源唯一：user meta 的 `trigger`
+ * （见 `agent/session-context.js#slimTriggerForPersist` / `plans/plan-run-turn.js`）。
+ */
+function appendTriggerNotice(displayContent, opts = {}) {
+  const empty = $('chat-empty');
+  if (empty && empty.parentNode) empty.remove();
+  const trigger = opts.trigger || {};
+  const turn = document.createElement('div');
+  turn.className = 'msg-turn msg-turn-trigger';
+  const notice = document.createElement('div');
+  notice.className = 'msg-trigger';
+
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'msg-trigger-header';
+  header.setAttribute('aria-expanded', 'false');
+
+  const icon = document.createElement('span');
+  icon.className = 'msg-trigger-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML =
+    TRIGGER_NOTICE_ICONS[String(trigger.kind || '')] || TRIGGER_NOTICE_ICONS.default;
+
+  const title = document.createElement('span');
+  title.className = 'msg-trigger-title';
+  title.textContent = triggerNoticeTitle(trigger);
+
+  const time = document.createElement('time');
+  time.className = 'msg-trigger-time';
+  const ts = Number(opts.ts) > 0 ? Number(opts.ts) : Date.now();
+  time.dateTime = new Date(ts).toISOString();
+  time.textContent = formatMsgFooterTime(ts);
+
+  const chevron = document.createElement('span');
+  chevron.className = 'msg-trigger-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.innerHTML =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>';
+
+  header.appendChild(icon);
+  header.appendChild(title);
+  header.appendChild(time);
+  header.appendChild(chevron);
+
+  const body = document.createElement('div');
+  body.className = 'msg-trigger-body';
+  body.textContent = String(displayContent || '');
+  body.hidden = true;
+
+  header.addEventListener('click', () => {
+    const open = notice.classList.toggle('is-open');
+    body.hidden = !open;
+    header.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  notice.appendChild(header);
+  notice.appendChild(body);
+  turn.appendChild(notice);
+  if (opts.footer) turn.appendChild(opts.footer);
+  chatList.appendChild(turn);
+  if (opts.skipScroll !== true) {
+    scrollChatToBottom({ force: opts.forceScroll !== false });
+  }
+  return { turn, bubble: notice };
 }
 
 function updateUserTurnFooter(turnEl, meta, footerOpts) {

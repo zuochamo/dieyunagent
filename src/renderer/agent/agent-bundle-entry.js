@@ -48,7 +48,12 @@ register('DieyunModelRuntimePresets', presets, {
 });
 
 register('DieyunModelRuntimeSchema', schema, {
-  compat: ['CONTEXT_WINDOW_MAX', 'MODEL_RUNTIME_SCHEMA', 'formatModelRuntimeValue']
+  compat: [
+    'CONTEXT_WINDOW_MAX',
+    'MODEL_RUNTIME_SCHEMA',
+    'clampModelRuntimeValue',
+    'formatModelRuntimeValue'
+  ]
 });
 
 // CHARS_PER_TOKEN / CJK_CHARS_PER_TOKEN 改造前由 agent-limits 的 window 导出块额外挂载，
@@ -66,9 +71,6 @@ register(
       'AGENT_LIMITS_SCHEMA',
       'CHARS_PER_TOKEN',
       'CJK_CHARS_PER_TOKEN',
-      'LONG_HORIZON_GUARDRAIL_SCALE',
-      'scaleLimitForLongHorizon',
-      'applyLongHorizonGuardrails',
       'getAgentLimits',
       'getAgentLimit',
       'setAgentLimits',
@@ -115,15 +117,20 @@ register('DieyunModelRuntimeByTier', runtimeByTier, {
   compat: [
     'STORAGE_KEY',
     'reloadRuntimeByTier',
+    'listContextTierIds',
     'getRuntimeValuesForTier',
     'getRuntimeOverridesForTier',
     'setRuntimeValuesForTier',
     'resetRuntimeValuesForTier',
+    'getAllRuntimeByTier',
+    'hydrateRuntimeByTier',
+    'applyTierRuntime',
     'getEditingContextTierId',
     'setEditingContextTierId',
     'migrateGlobalSettingsToDefaultTier',
     'inferContextTierFromModelName',
     'inferContextWindowFromModelName',
+    'resolveModelFacts',
     'resolveModelContextWindowFromSettings',
     'normalizeContextTierId',
     'resolveContextTierIdFromSettings',
@@ -273,9 +280,17 @@ register('DieyunAgentSystemPrompt', agentSystemPrompt, {
 // 勿再自抄 textHasCodebaseMention / extractPathHintsFromText / formatCodebaseBlock。
 // 注：shouldInjectCodeContext 不进 compat —— Renderer 需先把 Monaco 状态适配成
 // snapshot.editor，故 renderer-context-engine.js 只保留 shouldInjectCodeContext 一层薄适配器。
-// shouldAutoCodebaseSearch 仅 Main（system-prompt-prep.js）使用，Renderer 侧适配器已删除。
+// `shouldAutoCodebaseSearch` 必须进 compat：Renderer 决定「这轮要不要碰代码索引」时
+// 用的是**同一个**判定（否则两侧漂移，索引又会在真实会话里 0 次被用到）。
 register('DieyunContextSignals', { ...contextSignals, ContextSignals: contextSignals }, {
-  compat: ['ContextSignals', 'textHasCodebaseMention', 'extractPathHintsFromText', 'extractCodebasePathsFromBlock', 'formatCodebaseBlock']
+  compat: [
+    'ContextSignals',
+    'textHasCodebaseMention',
+    'extractPathHintsFromText',
+    'extractCodebasePathsFromBlock',
+    'formatCodebaseBlock',
+    'shouldAutoCodebaseSearch'
+  ]
 });
 
 register('DieyunReviewerJson', reviewerJson, {

@@ -65,8 +65,7 @@ function buildFallbackTurnMeta(userMsgIndex, turnWithdrawMeta) {
     ts: resolveUserMsgCreatedAt(userMsgIndex),
     inputText: turnWithdrawMeta?.inputText,
     attachments: turnWithdrawMeta?.attachments,
-    undoTurnId: turnWithdrawMeta?.undoTurnId || existingMeta?.undoTurnId || null,
-    longHorizon: !!turnWithdrawMeta?.longHorizon
+    undoTurnId: turnWithdrawMeta?.undoTurnId || existingMeta?.undoTurnId || null
   };
 }
 
@@ -84,8 +83,7 @@ function buildStoppedFooterMeta(userMsgIndex, turnMeta, turnWithdrawMeta) {
     inputText: turnWithdrawMeta?.inputText ?? base.inputText ?? userMeta.inputText,
     attachments: turnWithdrawMeta?.attachments ?? base.attachments ?? userMeta.attachments,
     undoTurnId:
-      turnWithdrawMeta?.undoTurnId || base.undoTurnId || userMeta.undoTurnId || null,
-    longHorizon: !!(turnWithdrawMeta?.longHorizon ?? base.longHorizon ?? userMeta.longHorizon)
+      turnWithdrawMeta?.undoTurnId || base.undoTurnId || userMeta.undoTurnId || null
   };
 }
 

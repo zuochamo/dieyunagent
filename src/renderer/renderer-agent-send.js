@@ -1,4 +1,4 @@
-/* global isSessionSwitchInFlight, loopApi, currentSessionId, cleanupStaleSessionRun, resolveComposerModelForSend, attachmentNeedsVision, getCustomModelApiConfig, appendBubble, isCurrentSessionSending, getAgentContinueState, resumeAgentToolLoop, clearAgentContinueState, closeStaleAgentRunForSession, getPendingResumeCheckpoint, tryDetectResumeCheckpoint, clearPendingResumeCheckpoint, cloneAttachmentSnapshot, getPendingAttachments, appendUserTurn, setComposerSendingState, isImageAttachment, revokeAttachmentPreview, renderAttachmentChips, processAttachmentsForSend, syncComposerForActiveSession, focusChatInput, invalidateSessionMessageCache, packUserMessageMeta, messages, setMessagesOwnerSessionId, getMessagesOwnerSessionId, messagesBelongToSession, getSessionMessageCache, selectHistoryMessagesForSession, cloneHistoryMessages, renderChatFromMessages, gwState, resolveSessionWorkspacePath, bindCurrentSessionWorkspace, gatewayCall, sessionListTitle, refreshHistoryList, createTraceRunId, getComposerLongHorizon, getComposerAgentMode, resetActiveRunContextUiState, beginComposerUsageAttribution, sessionActiveRuns, refreshContextProgress, throwIfAgentAborted, waitForAgentAbortable, isRemoteSessionWorkspacePath, syncSessionRemoteLease, finishSessionActiveRun, finalizeAssistantBubble, initAgentPrepSteps, renderAssistantBubbleContent, scrollChatToBottom, agentPrepStepStart, beginTurnUndo, agentPrepStepDone, agentPrepStepSkip, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, buildSystemMessage, buildAgentTools, buildExploreTools, buildExploreCoordinatorTools, setSessionContextEstimate, estimateToolsTokens, modelSupportsMultimodal, extractPreparedImageParts, composerModeLabel, formatModelFooterLabel, resolveUserMsgCreatedAt, canMutateViewMessages, settings, buildCompletionMessages, unwrapSystemPromptPack, joinPromptChunks, getMaxOutputTokens, buildSessionChatHistoryBlock, runAgentCompletion, pauseAgentForToolLimit, completeAgentRunAfterSuccess, finishAgentPrepPhase, isUserAbortError, resolveStoppedDisplayTrace, resolveFailedDisplayTrace, normalizeStoppedTrace, getLastAgentDisplayedTrace, buildFallbackTurnMeta, finalizeUndoForUserTurn, buildStoppedFooterMeta, persistStoppedAssistant, finalizeUserTurnFooter, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, formatAgentApiError, persistFailedAssistantTurn, scheduleWorktreePolicyCleanup, autoCloseBrowserAfterAgentRun, isTaskTierFeatureEnabled, inferTaskTierFromStructure, extractPathHintsFromText, textHasCodebaseMention, getAgentLimits, fetchChatCompletion, pauseComposerQueueAfterUserStop */
+/* global isSessionSwitchInFlight, loopApi, currentSessionId, cleanupStaleSessionRun, resolveComposerModelForSend, attachmentNeedsVision, getCustomModelApiConfig, appendBubble, isCurrentSessionSending, getAgentContinueState, resumeAgentToolLoop, clearAgentContinueState, closeStaleAgentRunForSession, getPendingResumeCheckpoint, tryDetectResumeCheckpoint, clearPendingResumeCheckpoint, cloneAttachmentSnapshot, getPendingAttachments, appendUserTurn, setComposerSendingState, isImageAttachment, revokeAttachmentPreview, renderAttachmentChips, processAttachmentsForSend, syncComposerForActiveSession, focusChatInput, invalidateSessionMessageCache, packUserMessageMeta, messages, setMessagesOwnerSessionId, getMessagesOwnerSessionId, messagesBelongToSession, getSessionMessageCache, selectHistoryMessagesForSession, cloneHistoryMessages, renderChatFromMessages, gwState, resolveSessionWorkspacePath, bindCurrentSessionWorkspace, gatewayCall, sessionListTitle, refreshHistoryList, createTraceRunId, getComposerAgentMode, resetActiveRunContextUiState, beginComposerUsageAttribution, sessionActiveRuns, refreshContextProgress, throwIfAgentAborted, waitForAgentAbortable, isRemoteSessionWorkspacePath, syncSessionRemoteLease, finishSessionActiveRun, finalizeAssistantBubble, initAgentPrepSteps, renderAssistantBubbleContent, scrollChatToBottom, agentPrepStepStart, beginTurnUndo, agentPrepStepDone, agentPrepStepSkip, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, buildSystemMessage, buildAgentTools, buildExploreTools, buildExploreCoordinatorTools, setSessionContextEstimate, estimateToolsTokens, modelSupportsMultimodal, extractPreparedImageParts, composerModeLabel, formatModelFooterLabel, resolveUserMsgCreatedAt, canMutateViewMessages, settings, buildCompletionMessages, unwrapSystemPromptPack, joinPromptChunks, getMaxOutputTokens, buildSessionChatHistoryBlock, runAgentCompletion, pauseAgentForToolLimit, completeAgentRunAfterSuccess, finishAgentPrepPhase, isUserAbortError, resolveStoppedDisplayTrace, resolveFailedDisplayTrace, normalizeStoppedTrace, getLastAgentDisplayedTrace, buildFallbackTurnMeta, finalizeUndoForUserTurn, buildStoppedFooterMeta, persistStoppedAssistant, finalizeUserTurnFooter, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, formatAgentApiError, persistFailedAssistantTurn, scheduleWorktreePolicyCleanup, autoCloseBrowserAfterAgentRun, isTaskTierFeatureEnabled, inferTaskTierFromStructure, extractPathHintsFromText, textHasCodebaseMention, getAgentLimits, fetchChatCompletion, pauseComposerQueueAfterUserStop, setLastMemoryInjectionAudit */
 'use strict';
 
 function rejectAgentServiceTask(requestId, sessionId, error) {
@@ -287,7 +287,6 @@ function installSendRunShell(state) {
   state.agentRunId = createTraceRunId();
   state.runAbortController = new AbortController();
 
-  state.longHorizon = typeof getComposerLongHorizon === 'function' && getComposerLongHorizon();
   const runMode =
     typeof getComposerAgentMode === 'function' ? getComposerAgentMode(runSessionId) : 'agent';
   state.agentRunMode = runMode;
@@ -377,7 +376,6 @@ async function executeSendPrepAndRun(state) {
     runSessionId,
     runAbortController,
     placeholder,
-    longHorizon,
     execUsesPlanner,
     prepared,
     fullText,
@@ -414,12 +412,8 @@ async function executeSendPrepAndRun(state) {
 
   if (typeof initAgentPrepSteps === 'function') {
     initAgentPrepSteps(runSessionId, {
-      skipUndo: longHorizon || state.execExplore,
-      skipUndoReason: longHorizon
-        ? '长程模式，已跳过'
-        : state.execExplore
-          ? 'Explore 只读模式，已跳过'
-          : undefined,
+      skipUndo: state.execExplore,
+      skipUndoReason: state.execExplore ? 'Explore 只读模式，已跳过' : undefined,
       isRemote: isRemoteSessionWorkspacePath(runWorkspacePath),
       requestId: agentServiceRequestId || null
     });
@@ -438,7 +432,7 @@ async function executeSendPrepAndRun(state) {
   throwIfAgentAborted(runAbortController.signal);
 
   let undoTurnId = null;
-  if (!longHorizon && !state.execExplore) {
+  if (!state.execExplore) {
     if (typeof agentPrepStepStart === 'function') agentPrepStepStart(runSessionId, 'undo');
     undoTurnId = await waitForAgentAbortable(
       beginTurnUndo({
@@ -456,31 +450,23 @@ async function executeSendPrepAndRun(state) {
       if (liveRun) liveRun.undoTurnId = undoTurnId;
     }
   } else if (typeof agentPrepStepSkip === 'function') {
-    agentPrepStepSkip(
-      runSessionId,
-      'undo',
-      state.execExplore && !longHorizon ? 'Explore 只读模式，已跳过' : undefined
-    );
+    agentPrepStepSkip(runSessionId, 'undo', 'Explore 只读模式，已跳过');
   }
-  turnWithdrawMeta.longHorizon = !!longHorizon;
 
   emitAgentRunEvent(runSessionId, AGENT_RUN_EVENT_TYPES.RUN_START, {
     requestId: agentServiceRequestId || null,
-    mode: execUsesPlanner ? 'plan' : state.execExplore ? 'explore' : 'agent',
-    meta: {
-      longHorizon: !!longHorizon
-    }
+    mode: execUsesPlanner ? 'plan' : state.execExplore ? 'explore' : 'agent'
   });
   refreshHistoryList().catch(() => {});
 
-  const cp = !longHorizon && undoTurnId ? { undoTurnId, checkpointRestore: true } : null;
+  const cp = undoTurnId ? { undoTurnId, checkpointRestore: true } : null;
   const prepTrace = sessionActiveRuns.get(runSessionId)?.trace || [];
   renderAssistantBubbleContent(placeholder, {
     content: '',
     trace: prepTrace,
     hitRoundLimit: false,
     loading: true,
-    undoTurnId: longHorizon ? null : undoTurnId || null,
+    undoTurnId: undoTurnId || null,
     checkpointRestore: !!cp?.checkpointRestore
   });
   placeholder.classList.add('loading');
@@ -531,6 +517,10 @@ async function executeSendPrepAndRun(state) {
   const sysStable = sysPack.stable;
   const turnRide = sysPack.turnRide;
   const sysContent = sysPack.content;
+  // 注入事实：Main 才知道本轮命中了哪几条记忆，这里只搬运到 UI 与 contextAudit。
+  if (typeof setLastMemoryInjectionAudit === 'function') {
+    setLastMemoryInjectionAudit(runSessionId, sysPack.memoryAudit || null);
+  }
   throwIfAgentAborted(runAbortController.signal);
   const agentTools = await waitForAgentAbortable(
     buildAgentTools(fullText, {
@@ -586,8 +576,7 @@ async function executeSendPrepAndRun(state) {
     ts: resolveUserMsgCreatedAt(userMsgIndex),
     inputText: turnWithdrawMeta.inputText,
     attachments: turnWithdrawMeta.attachments,
-    undoTurnId: turnWithdrawMeta.undoTurnId || null,
-    longHorizon: !!turnWithdrawMeta.longHorizon
+    undoTurnId: turnWithdrawMeta.undoTurnId || null
   };
   if (
     userMsgIndex >= 0 &&
@@ -603,7 +592,11 @@ async function executeSendPrepAndRun(state) {
   // 审计事实：折叠/裁剪只发生在这里（Renderer 拼 prompt），Main 拿到的是结果。
   // 这里算出来的 `contextAudit` 随请求送下去，最终落到 request_snapshots，
   // 让「历史为什么只剩 24 条」可查（见 docs/REQUEST-SNAPSHOT.md）。
-  const contextAudit = { taskTier: taskTier || null, longHorizon: !!longHorizon };
+  const contextAudit = {
+    taskTier: taskTier || null,
+    // 本轮注入的记忆条目（id + 召回模式 + 按 kind 隐去数）：随请求落 request_snapshots
+    memory: sysPack.memoryAudit || null
+  };
   const payload = {
     model: composerModel,
     messages: buildCompletionMessages(
@@ -671,11 +664,12 @@ async function executeSendPrepAndRun(state) {
     forcePlanner: execUsesPlanner,
     allowPlannerResume,
     runId: agentRunId,
-    longHorizon: !!longHorizon,
     turnRide,
     bookPrefixMessages,
     ensureUserLocalMsgId: state.ensureUserLocalMsgId,
     taskTier,
+    // 完成验收的判定在 Main；「本轮是不是 explore（只读）」这个事实只有 Renderer 知道
+    agentMode: state.agentRunMode || 'agent',
     contextAudit
   });
   if (!run.done) {
@@ -834,6 +828,12 @@ function finalizeSendAgentRun(state) {
 }
 
 async function sendMessage(text, options = {}) {
+  // 绑定对端的会话 = 「与那台内网 agent 的通道」：在这里打字就是发给它，不跑本机模型。
+  // 只接管**人手动发送**；由 agent-service / peer 回调触发的回合必须继续走本机循环，
+  // 否则「对方来信 → 本机跑一轮 → 又把原话发回去」会互相弹皮球（路由判据在 renderer-peer.js）。
+  if (typeof routePeerSessionSend === 'function' && (await routePeerSessionSend(text, options))) {
+    return true;
+  }
   const gate = await gateSendMessage(text, options);
   if (!gate) return false;
 
@@ -856,7 +856,6 @@ async function sendMessage(text, options = {}) {
     userGatewayPersist: null,
     agentRunId: null,
     runAbortController: null,
-    longHorizon: false,
     execUsesPlanner: false,
     execExplore: false,
     agentRunMode: 'agent',

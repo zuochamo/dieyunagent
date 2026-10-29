@@ -1,6 +1,31 @@
 'use strict';
 
 /**
+ * 计划会话的工作空间绑定。
+ *
+ * 定时执行没有 Renderer 会话，工具调用的工作区只能由计划自己带：
+ * 计划的 `workspace`（本地目录 / ssh:// 远端）必须同时落到
+ *   1. 会话行（`sessions.workspace_path`）—— 用户点开这条计划会话时视图一致；
+ *   2. 进程内会话上下文（`setSessionWorkspaceContext`）—— RPC 立刻按它解析路径。
+ * 两处都写才是「绑定」，只写一处会在下次 hydrate 时又回到未绑定。
+ */
+async function bindPlanSessionWorkspace(gateway, sessionId, workspacePath) {
+  const ws = String(workspacePath || '').trim();
+  if (!ws || !sessionId || !gateway) return false;
+  if (typeof gateway.setSessionWorkspaceContext === 'function') {
+    try {
+      gateway.setSessionWorkspaceContext(sessionId, ws);
+    } catch {
+      // 内存上下文写失败不致命：下面的会话行仍会被 hydrate 回来
+    }
+  }
+  if (typeof gateway.invokeRpc === 'function') {
+    await gateway.invokeRpc('memory.session_workspace_set', { sessionId, workspacePath: ws });
+  }
+  return true;
+}
+
+/**
  * 为定时计划绑定专用会话；若已有有效 sessionId 则复用。
  *
  * 绑定会话失联（被删除）时会重建，但**不静默**：`rebuilt` 会连同
@@ -16,6 +41,7 @@ async function ensurePlanSession(gateway, plansStore, plan) {
   if (!plan || !plan.id) throw new Error('计划无效');
   if (!plansStore) throw new Error('计划存储未就绪');
 
+  const planWorkspace = String(plan.workspace || '').trim();
   let sessionId = plan.deliver && plan.deliver.sessionId ? String(plan.deliver.sessionId).trim() : '';
   const staleSessionId = sessionId;
   let rebuilt = false;
@@ -23,6 +49,10 @@ async function ensurePlanSession(gateway, plansStore, plan) {
     try {
       const row = await gateway.invokeRpc('memory.session_get', { sessionId });
       if (row && row.id) {
+        // 计划改过工作空间（或旧会话还没绑）：这次运行前同步，避免「编辑了目录却还跑在旧目录」
+        if (planWorkspace && String(row.workspacePath || '').trim() !== planWorkspace) {
+          await bindPlanSessionWorkspace(gateway, row.id, planWorkspace);
+        }
         return { plan: plansStore.get(plan.id) || plan, sessionId: row.id, rebuilt: false, staleSessionId: '' };
       }
     } catch {
@@ -33,10 +63,11 @@ async function ensurePlanSession(gateway, plansStore, plan) {
 
   const created = await gateway.invokeRpc('memory.session_create', {
     title: `[计划] ${plan.name || '未命名计划'}`,
-    workspacePath: null
+    workspacePath: planWorkspace || null
   });
   if (!created || !created.id) throw new Error('创建计划专用会话失败');
   sessionId = created.id;
+  if (planWorkspace) await bindPlanSessionWorkspace(gateway, sessionId, planWorkspace);
 
   const bound = plansStore.upsert({
     ...plan,
@@ -48,4 +79,4 @@ async function ensurePlanSession(gateway, plansStore, plan) {
   return { plan: bound, sessionId, rebuilt, staleSessionId: rebuilt ? staleSessionId : '' };
 }
 
-module.exports = { ensurePlanSession };
+module.exports = { ensurePlanSession, bindPlanSessionWorkspace };

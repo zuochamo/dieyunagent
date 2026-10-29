@@ -57,7 +57,13 @@ function registerPlansIpc(ctx) {
     const localGateway = getLocalGateway();
     const plansScheduler = getPlansScheduler();
     if (!plansStore) return { ok: false, error: 'plans not ready' };
-    const saved = plansStore.upsert(plan);
+    const before = plan && plan.id ? plansStore.get(plan.id) : null;
+    let saved = plansStore.upsert(plan);
+    // 目标型：从「停用」被重新启用 = 从零再来一遍。
+    // 不清掉上一轮的 attempt/baseline/lastVerify，就会带着旧账续跑（轮次已用尽、基线还是旧的）。
+    if (saved && saved.trigger === 'goal' && saved.enabled && before && before.enabled === false) {
+      saved = plansStore.clearGoalRuntime(saved.id) || saved;
+    }
     let bound = saved;
     if (localGateway) {
       try {

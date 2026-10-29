@@ -39,13 +39,39 @@ function planDraftFromStructured(input, opts = {}) {
   const rrule = String(src.rrule || '').trim();
   const onceAt = String(src.onceAt || '').trim();
   const prompt = String(src.prompt || src.description || '').trim();
-  if ((!rrule && !onceAt) || !prompt) return null;
 
   const skillIds = Array.isArray(src.skillIds) && src.skillIds.length
     ? src.skillIds
     : Array.isArray(opts.skillIds)
       ? opts.skillIds
       : [];
+
+  // 目标型（trigger=goal）：调用方给了**结构化**验收命令就能确定性落盘。
+  // 不需要 rrule/onceAt；也**不从自然语言里抠命令**（本模块不做关键词解析）。
+  const goalSrc = src.goal && typeof src.goal === 'object' ? src.goal : null;
+  const verify = String((goalSrc && goalSrc.verify) || '').trim();
+  if (verify && prompt) {
+    return normalizePlan({
+      id: newId(),
+      name: src.name,
+      trigger: 'goal',
+      goal: { verify, cwd: String(goalSrc.cwd || '').trim() },
+      budget: src.budget && typeof src.budget === 'object' ? src.budget : undefined,
+      tz: 'Asia/Shanghai',
+      dtstart: new Date().toISOString(),
+      prompt,
+      todos: Array.isArray(src.todos) ? src.todos : [],
+      skillIds,
+      workspace: src.workspace,
+      deliver: {
+        type: 'session',
+        sessionId: opts.sessionId || ''
+      },
+      enabled: true
+    });
+  }
+
+  if ((!rrule && !onceAt) || !prompt) return null;
 
   return normalizePlan({
     id: newId(),
@@ -57,6 +83,7 @@ function planDraftFromStructured(input, opts = {}) {
     prompt,
     todos: Array.isArray(src.todos) ? src.todos : [],
     skillIds,
+    workspace: src.workspace,
     deliver: {
       type: 'session',
       sessionId: opts.sessionId || ''

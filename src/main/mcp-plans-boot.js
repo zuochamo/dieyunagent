@@ -28,6 +28,8 @@ const { ensurePlanSession } = require('../plans/plan-session');
 const { beginPlanRunTurn, endPlanRunTurn, assistantReplyText, interruptedRunResult } = require(
   '../plans/plan-run-turn'
 );
+// 目标型计划（trigger=goal）的判定与验收：唯一来源，本文件只负责接线
+const { runGoalVerify, decideContinuation, buildGoalAuditReport } = require('../plans/goal-run');
 const { deliverPlanResult } = require('../plans/deliver');
 const { parsePlanFromText } = require('../plans/parser');
 const { AGENT_RUN_EVENT_TYPES, createAgentRunEvent } = require('../agent/run-events');
@@ -167,7 +169,7 @@ function bootMcpSkillCatalogs(deps) {
 /**
  * @param {object} deps
  * @param {() => object | null} deps.getPlansStore
- * @param {() => { plugins?: { dispatchHook: Function } } | null} deps.getLocalGateway
+ * @param {() => object | null} deps.getLocalGateway
  * @param {() => { notifyScheduledPlanTray: Function } | null} deps.getTrayNotify
  * @param {() => { getMainWindow?: () => { webContents?: { send: Function } } | null } | null} deps.getWindowTray
  * @param {McpPlansLog} deps.log
@@ -202,9 +204,6 @@ function createFinishPlanRun(deps) {
     };
     const trayNotify = deps.getTrayNotify && deps.getTrayNotify();
     if (trayNotify) trayNotify.notifyScheduledPlanTray(fresh, result);
-    if (localGateway && localGateway.plugins) {
-      void localGateway.plugins.dispatchHook('onPlanRan', payload);
-    }
     const windowTray = deps.getWindowTray && deps.getWindowTray();
     const win = windowTray && windowTray.getMainWindow ? windowTray.getMainWindow() : null;
     if (win && win.webContents) {
@@ -223,7 +222,6 @@ function createFinishPlanRun(deps) {
  * @param {() => object | null} deps.getWindowTray
  * @param {(webContents?: object | null) => object} deps.createToolBridge
  * @param {() => object} deps.ensureMainCompactionAgent
- * @param {(model?: string) => number} deps.getTokenBudget
  * @param {() => object | null} deps.getTrayNotify
  * @param {McpPlansLog} deps.log
  * @param {typeof PlansStore} [deps.PlansStore]
@@ -281,13 +279,33 @@ function bootPlansRuntime(deps) {
       })
     );
 
+  /** agent-limits 快照：轮询间隔、目标型预算/超时/退避的唯一数字来源 */
+  const agentLimits = () => getAgentLimits(userData, '') || {};
+
+  /**
+   * 计划运行的工作空间：计划显式绑定优先，否则用此刻的当前工作空间（历史行为）。
+   * 定时执行没有打开的会话，计划的目录必须随计划落盘（见 plans/store#workspace），
+   * 否则「选了目录」到点仍会跑在碰巧开着的那个工作区里。
+   */
+  const resolvePlanWorkspacePath = (plan) => {
+    const bound = String((plan && plan.workspace) || '').trim();
+    if (bound) return bound;
+    try {
+      const gw = deps.getLocalGateway();
+      const ws = gw && typeof gw.getWorkspace === 'function' ? gw.getWorkspace() || {} : {};
+      return ws.workspacePath || null;
+    } catch {
+      return null;
+    }
+  };
+
   const plansScheduler = new Scheduler({
     getPlans: () => plansStore.list(),
     // 闲时队列（plans trigger=idle）：忙信号唯一来源 = 活跃 agent loop 计数
     //（聊天 / Planner worker / 计划运行全走 runRustAgentLoop）。数值上限只认 agent-limits。
     isBusy: deps.isBusy || (() => getActiveAgentLoopCount() > 0),
-    idlePollMs: (getAgentLimits(userData, '') || {}).plansIdlePollMs,
-    idleQuietMs: (getAgentLimits(userData, '') || {}).plansIdleQuietMs,
+    idlePollMs: agentLimits().plansIdlePollMs,
+    idleQuietMs: agentLimits().plansIdleQuietMs,
     runPlan: async (plan) => {
       log.info(`计划开始: ${plan.name}`);
       const runId = `plan-${plan.id}-${Date.now().toString(36)}`;
@@ -343,11 +361,12 @@ function bootPlansRuntime(deps) {
       // Renderer 才能在运行一开始就刷新出该会话与「运行中」；反过来（只在收尾投递时写）
       // 就表现为「计划跑完了才出现会话」。
       const gw = deps.getLocalGateway();
+      const limits = agentLimits();
       let boundPlan = plan;
       let planUserPrompt = '';
       if (gw && typeof gw.invokeRpc === 'function') {
         try {
-          const begun = await beginPlanRunTurn(gw, plansStore, plan);
+          const begun = await beginPlanRunTurn(gw, plansStore, plan, { limits });
           boundPlan = begun.plan;
           sessionId = begun.sessionId;
           planUserPrompt = begun.userText;
@@ -366,10 +385,54 @@ function bootPlansRuntime(deps) {
       }
       emitRunStart(record);
 
+      const isGoal = boundPlan.trigger === 'goal';
+      /** 本次运行的工作空间：计划绑定优先，否则当前工作空间 */
+      const planWorkspacePath = resolvePlanWorkspacePath(boundPlan);
+      /** 验收命令的工作目录：计划显式指定优先，否则用计划运行的工作区 */
+      const verifyCwd = (boundPlan.goal && boundPlan.goal.cwd) || planWorkspacePath || undefined;
+      /** 目标型收尾判定结果（非目标型恒为 null） */
+      let goalStop = null;
+      let goalVerify = null;
+      let goalBudget = null;
+      let goalNextDelayMs = null;
+
+      // 目标型第一步：开工基线（尺子自检）。
+      // 只在「还没跑过任何一轮」「还没量过」时做一次：命令若在未动工时就已经通过，
+      // 它无法区分「干没干完」，此时继续跑一整晚毫无意义 —— 直接停并说明原因。
+      if (isGoal && !boundPlan.baseline && (Number(boundPlan.attempt) || 0) === 0) {
+        if (gw && typeof gw.invokeRpc === 'function') {
+          const b = await runGoalVerify({
+            gateway: gw,
+            plan: boundPlan,
+            limits,
+            cwd: verifyCwd,
+            sessionId: sessionId || undefined,
+            runId,
+            log: (m) => log.warn(m)
+          });
+          plansStore.setBaseline(plan.id, {
+            red: !b.ok,
+            exitCode: b.exitCode,
+            tail: b.tail,
+            note: b.note
+          });
+          if (b.ok) {
+            goalStop = 'baseline-green';
+            goalVerify = { ...b, ok: true, note: 'baseline-green' };
+            plansStore.updateVerify(plan.id, goalVerify);
+            log.warn(`目标型验收命令在未动工时已通过，已终止: ${plan.name}`);
+          }
+        } else {
+          log.warn('Gateway 未就绪，跳过验收基线自检');
+        }
+      }
+
+      if (isGoal && !goalStop) plansStore.beginAttempt(plan.id);
+
       let result;
       const planCtx = {
         userData,
-        workspacePath: gw && gw.getWorkspace ? gw.getWorkspace().workspacePath : null,
+        workspacePath: planWorkspacePath,
         gateway: gw,
         plansStore,
         coreBridge: deps.getCoreBridge(),
@@ -379,7 +442,6 @@ function bootPlansRuntime(deps) {
           return deps.createToolBridge(win || null);
         },
         compactionAgent: deps.ensureMainCompactionAgent(),
-        getTokenBudget: deps.getTokenBudget,
         webContents: getMainWindowWebContents(),
         signal: controller.signal,
         // 会话与本次触发的用户轮次已经在 run_start 之前就绪，这里只转发执行阶段的进度
@@ -390,19 +452,66 @@ function bootPlansRuntime(deps) {
         },
         log: (m) => log.info(m)
       };
-      try {
-        result = await run(planCtx, boundPlan);
-      } catch (e) {
-        result = { ok: false, error: (e && e.message) || String(e) };
-      } finally {
-        runningPlans.delete(plan.id);
+      if (goalStop) {
+        // 基线就红了（尺子无效）：这一轮不执行 agent，只落一条「为什么没跑」的说明
+        result = {
+          ok: false,
+          error: '验收命令在尚未动工时就已经通过，无法判定完成，已停止',
+          summary: '验收基线未通过（尺子无效）'
+        };
+      } else {
+        try {
+          result = await run(planCtx, boundPlan);
+        } catch (e) {
+          result = { ok: false, error: (e && e.message) || String(e) };
+        } finally {
+          runningPlans.delete(plan.id);
+        }
       }
       if (!result || typeof result !== 'object') {
         result = { ok: false, error: '计划执行未返回结果' };
       }
+
+      // 目标型：跑完命令再判定（判定权在 Main，不在模型；模型自称完成不算）
+      if (isGoal && !goalStop) {
+        goalVerify = await runGoalVerify({
+          gateway: gw,
+          plan: plansStore.get(plan.id) || boundPlan,
+          limits,
+          cwd: verifyCwd,
+          sessionId: sessionId || undefined,
+          runId,
+          log: (m) => log.warn(m)
+        });
+        plansStore.updateVerify(plan.id, goalVerify);
+        const fresh = plansStore.get(plan.id) || boundPlan;
+        const decision = decideContinuation({ plan: fresh, verify: goalVerify, limits, now: Date.now() });
+        goalBudget = decision.budget;
+        if (decision.cont) {
+          goalNextDelayMs = decision.delayMs;
+        } else {
+          goalStop = decision.stop;
+        }
+        log.info(
+          `目标型验收: ${plan.name} / ${goalVerify.note}${goalVerify.exitCode == null ? '' : ` (exit ${goalVerify.exitCode})`}` +
+            (decision.cont ? ` → ${Math.round(decision.delayMs / 1000)}s 后续跑` : ` → 停止(${decision.stop})`)
+        );
+      }
+      // 目标型的「这一轮是否成功」= 验收是否通过：交给 updateRunResult 统一落 lastRunOk
+      if (goalVerify) result.verify = goalVerify;
+
       // assistant 轮次必须在终态事件之前落库：Renderer 收到 DONE/STOPPED/ERROR 就会重载该会话，
       // 消息先在库里，重载才能立刻看到这一轮（含 traceRunId —— 思考过程靠它挂回气泡）
-      const replyText = assistantReplyText(result);
+      let replyText = assistantReplyText(result);
+      if (isGoal && goalStop && goalStop !== 'done') {
+        // 停下来时附「未完成报告」：预算耗尽不是完成，措辞上必须能与「做完了」区分开
+        replyText = `${replyText}\n\n${buildGoalAuditReport({
+          plan: plansStore.get(plan.id) || boundPlan,
+          verify: goalVerify,
+          stop: goalStop,
+          budget: goalBudget
+        })}`;
+      }
       if (sessionId) {
         result.sessionId = sessionId;
         try {
@@ -414,6 +523,12 @@ function bootPlansRuntime(deps) {
       // 边界收束：assistant 轮次已落库（或已确认落不了），运行态不再需要重启恢复。
       // 残留只可能来自「进程被杀」，那时这里根本不会执行 —— 由启动恢复接管。
       plansStore.endRun(plan.id);
+      // 目标型收尾：只有「还要继续」才排下一轮；任何停止（完成/预算/阻塞/尺子无效）
+      // 都直接停用，不留一条会在凌晨自己又跑起来的尾巴。
+      if (isGoal) {
+        if (goalNextDelayMs != null) plansStore.scheduleNextAttempt(plan.id, goalNextDelayMs);
+        else if (goalStop) plansStore.setEnabled(plan.id, false);
+      }
       // 终态之前先把攒着的 trace 推完，否则最后几轮进度会被终态事件吃掉
       flushTrace();
 
@@ -481,6 +596,29 @@ function bootPlansRuntime(deps) {
       await finishPlanRun(plan, result).catch((e) =>
         log.warn('计划中断收尾失败:', (e && e.message) || String(e))
       );
+      // 目标型：崩溃时这一轮没有被验收过，恢复的语义是「再排一轮」而不是「重跑同一轮」。
+      // 仍然受 attempt / 墙钟预算约束，且带退避——崩溃本身不构成「无限重试」的理由。
+      if (plan.trigger === 'goal' && plan.enabled) {
+        try {
+          const decision = decideContinuation({
+            plan: plansStore.get(plan.id) || plan,
+            verify: { ok: false, note: 'interrupted' },
+            limits: agentLimits(),
+            now: Date.now()
+          });
+          if (decision.cont) {
+            plansStore.scheduleNextAttempt(plan.id, decision.delayMs);
+            log.warn(
+              `目标型计划上次未收尾，已排下一轮（${Math.round(decision.delayMs / 1000)}s 后）: ${plan.name}`
+            );
+          } else {
+            plansStore.setEnabled(plan.id, false);
+            log.warn(`目标型计划上次未收尾且预算已尽，已停用: ${plan.name}（${decision.stop}）`);
+          }
+        } catch (e) {
+          log.warn('目标型崩溃恢复排程失败:', (e && e.message) || String(e));
+        }
+      }
       recovered += 1;
       log.warn(`计划上次未收尾，已补写中断回执: ${plan.name}`);
     }

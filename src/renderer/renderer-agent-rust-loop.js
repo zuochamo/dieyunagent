@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getComposerLongHorizon, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, scaleLimitForLongHorizon, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS, SUBAGENT_TOOL */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS, SUBAGENT_TOOL */
 'use strict';
 
 function isDieyunCoreReady() {
@@ -1025,17 +1025,15 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             segmentBody.model
           ),
           tools: segmentBody.tools || tools || [],
-          maxToolCalls: scaleRunLimit('ctxAgentToolCallLimit', getAgentToolCallLimit(), options),
-          maxRounds: scaleRunLimit('agentMaxRounds', getAgentMaxRounds(), options),
-          taskTier: options.taskTier || undefined,
-          longHorizon: runIsLongHorizon(options)
+          maxToolCalls: getAgentToolCallLimit(),
+          maxRounds: getAgentMaxRounds(),
+          taskTier: options.taskTier || undefined
         },
         apiConfig,
         modelRoute: options.modelRoute || undefined,
         sessionId: options.sessionId || undefined,
         model: segmentBody.model,
         taskTier: options.taskTier || undefined,
-        longHorizon: runIsLongHorizon(options),
         contextTierId:
           typeof resolveContextTierId === 'function'
             ? resolveContextTierId({ sessionId: options.sessionId })
@@ -1045,12 +1043,11 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
         // 运行模式（agent / explore / plan）随请求交给 Main：完成验收的判定在 Main，
         // 而「只读 explore 不该被运行时错误追着提示」只有 Renderer 知道。
         agentMode: options.agentMode || undefined,
-        undoTurnId: runIsLongHorizon(options)
-          ? undefined
-          : options.undoTurnId ||
-            (typeof getUndoTurnIdForSession === 'function' && options.sessionId
-              ? getUndoTurnIdForSession(options.sessionId)
-              : null),
+        undoTurnId:
+          options.undoTurnId ||
+          (typeof getUndoTurnIdForSession === 'function' && options.sessionId
+            ? getUndoTurnIdForSession(options.sessionId)
+            : null),
         turnEndSynthesis: true
       });
     };

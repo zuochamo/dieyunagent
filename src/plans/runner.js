@@ -61,7 +61,7 @@ async function chatCompletion(userData, prompt, extraSystem, opts = {}) {
 }
 
 /**
- * @param {{ userData: string, workspacePath?: string | null, log?: Function, gateway?: object, plansStore?: object, coreBridge?: object, mcpRuntime?: object, createToolBridge?: Function, compactionAgent?: object, getTokenBudget?: Function, webContents?: object }} ctx
+ * @param {{ userData: string, workspacePath?: string | null, log?: Function, gateway?: object, plansStore?: object, coreBridge?: object, mcpRuntime?: object, createToolBridge?: Function, compactionAgent?: object, webContents?: object }} ctx
  * @param {object} plan
  */
 async function runPlan(ctx, plan) {

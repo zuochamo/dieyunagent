@@ -91,3 +91,21 @@ describe('msUntilNextRun：onceAt 与停用', () => {
     expect(msUntilNextRun(null, now)).toBeNull();
   });
 });
+
+describe('msUntilNextRun：总共执行次数（COUNT）', () => {
+  it('COUNT 是总次数上限：跑满之后没有下一次', () => {
+    // dtstart 本身算第 1 次触发（iCal 语义），所以「从 now 起还会跑几次」= COUNT - 已过去的那次。
+    // 「填 3 次要真跑 3 次」由 plans/store 保存时把 dtstart 对齐到下一次触发来保证。
+    const dtstart = new Date(2026, 8, 21, 9, 0, 0).toISOString();
+    const rrule = 'FREQ=MINUTELY;INTERVAL=30;COUNT=3';
+    let cursor = new Date(2026, 8, 21, 9, 0, 0);
+    const hits = [];
+    for (let i = 0; i < 6; i += 1) {
+      const ms = msUntilNextRun(planOf({ rrule, dtstart }), cursor);
+      if (ms == null) break;
+      cursor = new Date(cursor.getTime() + ms);
+      hits.push(cursor);
+    }
+    expect(hits.map((d) => d.getHours() * 60 + d.getMinutes())).toEqual([570, 600]);
+  });
+});

@@ -551,7 +551,6 @@ function syncThinkingRoundSummaryLabel(summary, entry, index, trace) {
 }
 
 function shouldShowCheckpointRestore(entry, { checkpointRestore, undoTurnId, complete }) {
-  if (typeof getComposerLongHorizon === 'function' && getComposerLongHorizon()) return false;
   return !!(
     checkpointRestore &&
     undoTurnId &&

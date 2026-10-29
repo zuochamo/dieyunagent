@@ -82,7 +82,6 @@ function patchUserMessageUndoMeta(userMsgIndex, turnId) {
  * @param {{ mode?: 'agent'|'plan', userMsgIndex: number, runId?: string|null, sessionId?: string, workspacePath?: string|null }} opts
  */
 async function beginTurnUndo(opts) {
-  if (typeof getComposerLongHorizon === 'function' && getComposerLongHorizon()) return null;
   const sessionId = String((opts && opts.sessionId) || currentSessionId || '').trim();
   if (!gwState.authed || !sessionId) return null;
   const turnId = createUndoTurnId();
@@ -257,7 +256,6 @@ function extractUndoTouchPathsFromTools(tools) {
 }
 
 async function captureTurnBatchCheckpoint(opts = {}) {
-  if (typeof getComposerLongHorizon === 'function' && getComposerLongHorizon()) return null;
   const sessionId = String(opts.sessionId || currentSessionId || '').trim();
   if (!gwState.authed || !sessionId) return null;
   const turnId =

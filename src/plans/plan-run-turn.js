@@ -1,6 +1,7 @@
 'use strict';
 
 const { ensurePlanSession } = require('./plan-session');
+const { resolveGoalBudget } = require('./goal-run');
 const { packMessageMeta, unpackMessageMeta } = require('../agent/session-context');
 // 空交付文案 / 「思考回退不落库」闸门的单一来源，勿在此另造一句
 const roundText = require('../agent/agent-round-text');
@@ -30,12 +31,105 @@ function planSessionTitle(plan) {
   return `[计划] ${name}`;
 }
 
-/** 本次触发的用户轮次文本（同时是 Agent 的「本次任务」输入，两处必须完全一致） */
-function buildPlanRunUserText(plan, at) {
+/**
+ * 目标型计划的「交接班」段落（唯一来源）：轮次、预算、上一轮验收证据。
+ *
+ * 这是对抗「开局失忆」和「提前宣布完成」的主要手段：新的一轮 context 是空的，
+ * 靠这段文本把「已经试过什么、还差什么、上轮怎么红的」交回来。
+ *
+ * @param {object} plan
+ * @param {object} [limits] agent-limits（缺省用默认值）
+ */
+function buildGoalRoundBlock(plan, limits) {
+  const budget = resolveGoalBudget(plan, limits);
+  const done = Math.max(0, Math.floor(Number(plan && plan.attempt) || 0));
+  const head = [`目标型第 ${done + 1}/${budget.maxAttempts} 轮`];
+  const startedAt = plan && plan.attemptStartedAt ? Date.parse(plan.attemptStartedAt) : NaN;
+  if (Number.isFinite(startedAt)) {
+    const usedMin = Math.max(0, Math.round((Date.now() - startedAt) / 60000));
+    head.push(`已跑 ${usedMin} 分钟 / 预算 ${Math.round(budget.maxWallMs / 60000)} 分钟`);
+  }
+  const lines = [head.join('（') + (head.length > 1 ? '）' : '')];
+
+  const verify = plan && plan.lastVerify;
+  if (verify) {
+    const why = verify.note === 'timeout' ? '超时' : verify.note === 'fail' ? '未通过' : String(verify.note || '');
+    lines.push(
+      '',
+      `上一轮验收${why ? `「${why}」` : ''}${verify.exitCode == null ? '' : `（exit ${verify.exitCode}）`}` +
+        (verify.at ? ` @ ${verify.at}` : '') +
+        '：'
+    );
+    if (verify.tail) lines.push('```', verify.tail, '```');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 本次触发的用户轮次文本（同时是 Agent 的「本次任务」输入，两处必须完全一致）。
+ * @param {object} plan
+ * @param {Date} [at]
+ * @param {object} [limits]
+ */
+function buildPlanRunUserText(plan, at, limits) {
   const when = (at instanceof Date ? at : new Date()).toLocaleString('zh-CN');
+  const isGoal = !!(plan && plan.trigger === 'goal');
   const todos = plan && Array.isArray(plan.todos) ? plan.todos : [];
-  const todoBlock = todos.length ? `\n\n执行 TODO：\n${todos.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : '';
-  return `[计划 · ${(plan && plan.name) || '未命名计划'}]\n${when} · 定时触发\n\n${(plan && plan.prompt) || ''}${todoBlock}`;
+  const todoBlock = todos.length
+    ? `\n\n执行 TODO：\n${todos.map((t, i) => `${i + 1}. ${t}`).join('\n')}`
+    : '';
+  const goalBlock = isGoal ? `\n\n${buildGoalRoundBlock(plan, limits)}` : '';
+  const goalTail = isGoal
+    ? '\n\n要求：本轮只推进一个尚未完成的 TODO；改完必须留下可复跑的验证路径（验收由外部命令判定，不要自称完成）。'
+    : '';
+  return (
+    `[计划 · ${(plan && plan.name) || '未命名计划'}]\n` +
+    `${when} · ${isGoal ? '目标续跑' : '定时触发'}` +
+    goalBlock +
+    `\n\n${(plan && plan.prompt) || ''}` +
+    todoBlock +
+    goalTail
+  );
+}
+
+/**
+ * 本次触发的结构化归因（落进 user meta 的 `trigger`）。
+ *
+ * 与正文抬头 `[计划 · 名字] … · 定时触发` 是同一事实的两种载体：正文给模型读，
+ * meta 给 UI 与回放读（Renderer 据此渲染成「触发条」，不再把系统自己开的一轮
+ * 冒充成用户气泡）。kind 只在有 Producer 时才登记，未登记的类型由 Renderer 回落通用标题。
+ *
+ * @param {object} plan
+ * @param {Date} [at]
+ * @returns {{ kind: string, planId: string, planName: string, at: string }}
+ */
+function buildPlanRunTrigger(plan, at) {
+  const when = at instanceof Date ? at : new Date();
+  return {
+    kind: plan && plan.trigger === 'goal' ? 'goal' : 'schedule',
+    planId: String((plan && plan.id) || ''),
+    planName: String((plan && plan.name) || '').trim() || '未命名计划',
+    at: when.toISOString()
+  };
+}
+
+/**
+ * 计划用户轮次的落库形态：正文（= 模型输入）+ 触发归因一次产出、一次打包。
+ *
+ * 运行边界（`beginPlanRunTurn`）与降级投递（`deliver.js`）共用这一处，
+ * 避免两处各拼一次 meta 导致「计划轮次有的带归因、有的不带」。
+ *
+ * @param {object} plan
+ * @param {Date} [at]
+ * @param {object} [limits]
+ * @returns {{ userText: string, content: string }}
+ */
+function planRunUserTurn(plan, at, limits) {
+  const userText = buildPlanRunUserText(plan, at, limits);
+  return {
+    userText,
+    content: packMessageMeta(userText, { trigger: buildPlanRunTrigger(plan, at) }, { role: 'user' })
+  };
 }
 
 /**
@@ -47,17 +141,17 @@ function buildPlanRunUserText(plan, at) {
  *
  * @returns {Promise<{ plan: object, sessionId: string, userText: string, rebuilt: boolean, staleSessionId: string }>}
  */
-async function beginPlanRunTurn(gateway, plansStore, plan) {
+async function beginPlanRunTurn(gateway, plansStore, plan, opts = {}) {
   const { plan: boundPlan, sessionId, rebuilt, staleSessionId } = await ensurePlanSession(
     gateway,
     plansStore,
     plan
   );
-  const userText = buildPlanRunUserText(boundPlan);
+  const { userText, content } = planRunUserTurn(boundPlan, undefined, opts.limits);
   await gateway.invokeRpc('memory.message_append', {
     sessionId,
     role: 'user',
-    content: userText
+    content
   });
   await gateway.invokeRpc('memory.touch_session', {
     sessionId,
@@ -141,7 +235,10 @@ module.exports = {
   stripAssistantMeta,
   stripUserMeta,
   planSessionTitle,
+  buildGoalRoundBlock,
   buildPlanRunUserText,
+  buildPlanRunTrigger,
+  planRunUserTurn,
   beginPlanRunTurn,
   endPlanRunTurn,
   assistantReplyText,

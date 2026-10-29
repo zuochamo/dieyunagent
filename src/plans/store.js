@@ -3,8 +3,34 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { msUntilNextRun } = require('./rrule-next');
 
 const FILE_NAME = 'plans.json';
+
+/** rrule 里的「总共执行多少次」（COUNT=）。只用于判定「跑满即停用」，规则的真相仍是 rrule。 */
+const COUNT_LIMIT_RE = /(?:^|;)COUNT=\d+/i;
+
+/** 规则签名：只用于判断「频率规则是否被改过」（改过才重新对齐计数锚点） */
+function ruleSignature(rrule) {
+  return String(rrule || '').trim().toUpperCase();
+}
+
+/**
+ * 把 COUNT 计划的 dtstart 对齐到「下一次触发」。
+ *
+ * RRULE 的 COUNT 是「从 dtstart 起的第 N 次触发」：dtstart 落在今天 00:00（或计划创建前），
+ * 今天已经过去的那一次也会占掉一个名额 —— 用户填「总共 3 次」却只跑 2 次。
+ * 对齐到下一次触发不会改变后续触发序列（它本身就是序列里的一个成员），
+ * 只让 COUNT 数的正好是「从现在起还会跑几次」。
+ */
+function alignCountLimitedStart(plan) {
+  if (!plan || plan.trigger !== 'schedule' || !COUNT_LIMIT_RE.test(String(plan.rrule || ''))) return;
+  // enabled 先当作 true 再算：停用状态不影响「下一次触发是什么时候」
+  const ms = msUntilNextRun({ ...plan, enabled: true });
+  // 规则无效 / 已经跑满：不动锚点，交给调度器与 updateRunResult 的停用逻辑
+  if (ms == null) return;
+  plan.dtstart = new Date(Date.now() + ms).toISOString();
+}
 
 function newId() {
   return crypto.randomBytes(8).toString('hex');
@@ -28,6 +54,62 @@ function normalizeRunState(raw) {
   };
 }
 
+function normalizeTrigger(v) {
+  if (v === 'idle') return 'idle';
+  if (v === 'goal') return 'goal';
+  return 'schedule';
+}
+
+function normalizeIso(v) {
+  if (!v) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  return Number.isFinite(Date.parse(s)) ? s : null;
+}
+
+/**
+ * 目标型验收面：**只存结构化字段**，不解析自然语言（禁意图关键词硬编码）。
+ * `verify` 是一条用户填的可执行命令，语义只有一条通用契约：退出码 0 = 通过。
+ */
+function normalizeGoal(raw) {
+  const g = raw && typeof raw === 'object' ? raw : {};
+  return {
+    verify: String(g.verify || '').trim().slice(0, 2000),
+    cwd: String(g.cwd || '').trim()
+  };
+}
+
+/** 预算：只存用户选择（0/空 = 用 agent-limits 默认值），clamp 在 goal-run.resolveGoalBudget */
+function normalizeBudget(raw) {
+  const b = raw && typeof raw === 'object' ? raw : {};
+  const num = (v) => {
+    const n = Math.floor(Number(v));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  return {
+    maxAttempts: num(b.maxAttempts),
+    maxWallMs: num(b.maxWallMs)
+  };
+}
+
+/** 验收证据（lastVerify / baseline 同构）：只保留可判定的字段 */
+function normalizeVerify(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const note = String(raw.note || '').trim().slice(0, 40);
+  const at = normalizeIso(raw.at);
+  if (!note && !at) return null;
+  const exitCodeNum = Number(raw.exitCode);
+  return {
+    ok: raw.ok === true,
+    // 基线用 red 表达「活没干时尺子是不是红的」
+    red: raw.red === true,
+    exitCode: Number.isFinite(exitCodeNum) ? exitCodeNum : null,
+    at: at || new Date().toISOString(),
+    tail: String(raw.tail || '').slice(0, 8000),
+    note
+  };
+}
+
 function normalizePlan(raw) {
   const p = raw && typeof raw === 'object' ? raw : {};
   const deliver = p.deliver && typeof p.deliver === 'object' ? p.deliver : {};
@@ -38,8 +120,11 @@ function normalizePlan(raw) {
     id: p.id || newId(),
     name: String(p.name || '未命名计划').trim() || '未命名计划',
     enabled: p.enabled !== false,
-    // 触发方式：schedule（按 rrule/onceAt 定时）| idle（无活跃 Agent 运行且静默达标后触发，跑一次即停用）
-    trigger: p.trigger === 'idle' ? 'idle' : 'schedule',
+    // 触发方式：
+    //   schedule：按 rrule/onceAt 定时
+    //   idle：无活跃 Agent 运行且静默达标后触发，跑一次即停用
+    //   goal：目标型 —— 每轮结束后跑 goal.verify，未通过且预算未尽则自动续跑（见 goal-run.js）
+    trigger: normalizeTrigger(p.trigger),
     rrule: String(p.rrule || '').trim(),
     onceAt: p.onceAt ? String(p.onceAt).trim() : '',
     tz: String(p.tz || 'Asia/Shanghai').trim() || 'Asia/Shanghai',
@@ -57,13 +142,25 @@ function normalizePlan(raw) {
       type: deliver.type === 'session' ? 'session' : 'session',
       sessionId: String(deliver.sessionId || p.sessionId || '').trim()
     },
+    // 计划绑定的工作空间（本地目录，或 ssh:// 远端工作区）。
+    // 空 = 跟随执行时当前打开的工作空间（历史行为）：定时执行没有打开的会话，
+    // 工作区不随计划落盘就只能「跑在碰巧开着的那个目录里」。
+    workspace: String(p.workspace || '').trim(),
+    // 目标型计划的验收面与预算（仅 trigger==='goal' 时使用；其余触发方式原样保留不影响行为）
+    goal: normalizeGoal(p.goal),
+    budget: normalizeBudget(p.budget),
+    // 运行态：只在下方专用方法里维护，normalize 只负责保留合法值
+    runState: normalizeRunState(p.runState),
+    attempt: Math.max(0, Math.floor(Number(p.attempt) || 0)),
+    attemptStartedAt: normalizeIso(p.attemptStartedAt),
+    nextRunAt: normalizeIso(p.nextRunAt),
+    lastVerify: normalizeVerify(p.lastVerify),
+    baseline: normalizeVerify(p.baseline),
     createdAt: p.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastRunAt: p.lastRunAt || null,
     lastRunOk: p.lastRunOk == null ? null : !!p.lastRunOk,
-    lastRunSummary: String(p.lastRunSummary || '').slice(0, 4000),
-    // 运行边界标记：只在 beginRun/endRun 中维护，normalize 只负责保留合法值
-    runState: normalizeRunState(p.runState)
+    lastRunSummary: String(p.lastRunSummary || '').slice(0, 4000)
   };
 }
 
@@ -104,8 +201,15 @@ class PlansStore {
 
   upsert(patch) {
     const plan = normalizePlan(patch);
-    if (plan.trigger !== 'idle' && !plan.rrule && !plan.onceAt) {
-      const err = new Error('rrule 或 onceAt 至少填一项（空闲触发计划除外）');
+    if (plan.trigger === 'goal') {
+      // 目标型没有定时语义，但必须有可执行的验收面：没有尺子就不该无人值守跑
+      if (!plan.goal.verify) {
+        const err = new Error('目标型计划必须填验收命令（goal.verify）');
+        err.code = 'INVALID_GOAL_VERIFY';
+        throw err;
+      }
+    } else if (plan.trigger !== 'idle' && !plan.rrule && !plan.onceAt) {
+      const err = new Error('rrule 或 onceAt 至少填一项（空闲/目标触发计划除外）');
       err.code = 'INVALID_SCHEDULE';
       throw err;
     }
@@ -115,15 +219,25 @@ class PlansStore {
       throw err;
     }
     const idx = this.plans.findIndex((p) => p.id === plan.id);
-    if (idx >= 0) {
-      plan.createdAt = this.plans[idx].createdAt;
-      if (!patch.dtstart) plan.dtstart = this.plans[idx].dtstart;
-      // 运行态不是表单字段：UI 保存不应清掉正在运行的边界标记，只由 beginRun/endRun 维护
-      if (!patch || !('runState' in patch)) plan.runState = this.plans[idx].runState;
+    const prev = idx >= 0 ? this.plans[idx] : null;
+    if (prev) {
+      plan.createdAt = prev.createdAt;
+      if (!patch.dtstart) plan.dtstart = prev.dtstart;
+      // 运行态不是表单字段：UI 保存不应清掉正在运行的边界标记与轮次证据，
+      // 只由 beginRun/endRun/beginAttempt/setBaseline/updateVerify/scheduleNextAttempt 维护
+      if (!patch || !('runState' in patch)) plan.runState = prev.runState;
+      plan.attempt = prev.attempt;
+      plan.attemptStartedAt = prev.attemptStartedAt;
+      plan.nextRunAt = prev.nextRunAt;
+      plan.lastVerify = prev.lastVerify;
+      plan.baseline = prev.baseline;
       this.plans[idx] = plan;
     } else {
       this.plans.push(plan);
     }
+    // 「总共执行 N 次」的计数锚点：只在新建或换了规则时对齐一次
+    //（每次保存都对齐会把次数重新充满，等于「永远跑不完」）。
+    if (!prev || ruleSignature(prev.rrule) !== ruleSignature(plan.rrule)) alignCountLimitedStart(plan);
     this._save();
     return plan;
   }
@@ -139,14 +253,105 @@ class PlansStore {
     const p = this.plans.find((x) => x.id === id);
     if (!p) return;
     p.lastRunAt = new Date().toISOString();
-    p.lastRunOk = !!(result && result.ok);
+    // 目标型：这一轮「成功」的定义是验收通过，不是模型说完了
+    p.lastRunOk =
+      result && result.verify ? !!result.verify.ok : !!(result && result.ok);
     p.lastRunSummary = result
       ? result.summary || result.error || ''
       : '';
     p.updatedAt = p.lastRunAt;
     // onceAt 与 idle 都是「一次性」语义：成功跑完即停用，重新启用 = 重新排队
-    if ((p.onceAt || p.trigger === 'idle') && p.lastRunOk) p.enabled = false;
+    // 目标型（goal）不在这里收尾：它由 updateVerify + decideContinuation 决定，见 goal-run.js
+    if ((p.onceAt || p.trigger === 'idle') && p.lastRunOk) {
+      p.enabled = false;
+    } else if (p.trigger === 'schedule' && COUNT_LIMIT_RE.test(String(p.rrule || ''))) {
+      // 「总共执行 N 次」的计划跑满即完成：RRULE 已没有下一次触发就停用，
+      // 免得列表里长期挂着一条「启用中」却永远不会再跑的计划。
+      if (msUntilNextRun(p) == null) p.enabled = false;
+    }
     this._save();
+  }
+
+  /** 开关（用户唯一的手动开关；目标型收尾也只是替用户关掉，不会自己打开） */
+  setEnabled(id, enabled) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p) return null;
+    p.enabled = enabled !== false;
+    p.updatedAt = new Date().toISOString();
+    if (p.enabled) {
+      // 重新启用 = 重新排队：清掉上一轮的待跑时间，避免一启用就立刻触发
+      p.nextRunAt = null;
+    }
+    this._save();
+    return { ...p };
+  }
+
+  /**
+   * 目标型：一轮开始。轮次 +1、清掉待跑时间；首轮记下墙钟预算起点。
+   * 与 runState 同处维护，进程被杀的场景下靠它和 runState 一起恢复。
+   *
+   * @returns {object|null} 更新后的计划快照
+   */
+  beginAttempt(id) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p) return null;
+    p.attempt = Math.max(0, Math.floor(Number(p.attempt) || 0)) + 1;
+    p.nextRunAt = null;
+    if (!p.attemptStartedAt) p.attemptStartedAt = new Date().toISOString();
+    p.updatedAt = new Date().toISOString();
+    this._save();
+    return { ...p };
+  }
+
+  /**
+   * 目标型：开工基线（尺子自检）。只在 attempt===0 时写一次。
+   * `red === false` 表示「活还没干，命令就已经通过了」——尺子无效。
+   */
+  setBaseline(id, raw) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p) return null;
+    p.baseline = normalizeVerify({ ...raw, at: (raw && raw.at) || new Date().toISOString() });
+    p.updatedAt = new Date().toISOString();
+    this._save();
+    return p.baseline;
+  }
+
+  /** 目标型：落一条验收证据（收尾判定的唯一输入） */
+  updateVerify(id, raw) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p) return null;
+    p.lastVerify = normalizeVerify({ ...raw, at: (raw && raw.at) || new Date().toISOString() });
+    p.updatedAt = new Date().toISOString();
+    this._save();
+    return p.lastVerify;
+  }
+
+  /**
+   * 目标型：排下一轮（`delayMs` 后）。写的是「最早可跑时间」，不启动定时器：
+   * 真正的触发由 PlansScheduler 的轮询统一负责（单一触发源）。
+   */
+  scheduleNextAttempt(id, delayMs) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p) return null;
+    const delay = Math.max(0, Math.floor(Number(delayMs) || 0));
+    p.nextRunAt = new Date(Date.now() + delay).toISOString();
+    p.updatedAt = new Date().toISOString();
+    this._save();
+    return p.nextRunAt;
+  }
+
+  /** 目标型：清空运行态（用户重新启用 / 从零开始时用），保留 goal/budget 配置 */
+  clearGoalRuntime(id) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p) return null;
+    p.attempt = 0;
+    p.attemptStartedAt = null;
+    p.nextRunAt = null;
+    p.lastVerify = null;
+    p.baseline = null;
+    p.updatedAt = new Date().toISOString();
+    this._save();
+    return { ...p };
   }
 
   /**
