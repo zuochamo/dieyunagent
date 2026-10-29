@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, openSettingsShell, switchSettingsPage, refreshAutomationList, showPluginListView, showMcpListView, loadPluginsUI, showAgentToast, getEffectiveInputBudget, CTX_LIMITS */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, openSettingsShell, switchSettingsPage, refreshAutomationList, showMcpListView, showAgentToast, getEffectiveInputBudget, CTX_LIMITS */
 'use strict';
 
 var skillsApi = window.diecloud || {};
@@ -8,7 +8,7 @@ var SKILLS_HIDDEN_KEY = 'diecloud.skills.hidden.v1';
 var SKILLS_PAGE_SIZE = 15;
 var DEFAULT_ENABLED_SKILL_IDS = ['builtin:weather'];
 var DEFAULT_ENABLED_SKILL_PREFIXES = ['builtin:minimax:', 'builtin:curated:'];
-var SKILLS_TAB_TITLES = { list: '技能', plugins: '插件', mcp: 'MCP', automation: '定时' };
+var SKILLS_TAB_TITLES = { list: '技能', mcp: 'MCP', automation: '定时' };
 
 /** 技能列表功能分类（「全部」单独一项；内置/预装技能按规则打散到下列分类） */
 var SKILLS_TAXONOMY = [
@@ -180,24 +180,18 @@ var SKILLS_TAXONOMY = [
 var SKILLS_TAXONOMY_DEFAULT = 'efficiency';
 var SKILLS_TAXONOMY_REMOVED = new Set(['minimax', 'curated', 'dieyun']);
 
-/** MCP / 插件列表分组（与技能页相同的 Tab 风格） */
+/** MCP 列表分组（与技能页相同的 Tab 风格） */
 var MCP_TAXONOMY = [
   { id: 'dev', label: '开发工具' },
   { id: 'efficiency', label: '效率工具' },
   { id: 'user', label: '用户添加' }
 ];
 
-var PLUGIN_TAXONOMY = [
-  { id: 'integration', label: '集成通知' },
-  { id: 'data', label: '数据存储' },
-  { id: 'utility', label: '效率工具' },
-  { id: 'user', label: '用户安装' }
-];
-
 var AUTOMATION_TAXONOMY = [
   { id: 'periodic', label: '周期' },
   { id: 'interval', label: '按间隔' },
   { id: 'once', label: '单次' },
+  { id: 'goal', label: '目标' },
   { id: 'disabled', label: '已停用' }
 ];
 
@@ -458,11 +452,6 @@ function switchSkillsTab(tab) {
     renderMcpCategoryTabs();
     renderMcpList().catch(() => {});
   }
-  if (skillsTab === 'plugins') {
-    showPluginListView();
-    if (typeof renderPluginCategoryTabs === 'function') renderPluginCategoryTabs();
-    loadPluginsUI().catch(() => {});
-  }
   if (skillsTab === 'automation') {
     const activate = window.activateAutomationTab;
     if (typeof activate === 'function') activate().catch(() => {});
@@ -684,6 +673,21 @@ async function deleteSkillItem(sk) {
   await refreshSkillsCatalog();
 }
 
+/**
+ * 技能「最近使用」提示。
+ * 数据来自 skills:scan 合并的使用账本（Main 侧 skills/usage-ledger.js），
+ * 这里只负责显示 —— 不要在 Renderer 再判断「算不算用过」。
+ * @param {{ lastUsedAt?: number, useCount?: number }} sk
+ */
+function formatSkillUsageHint(sk) {
+  const at = Number(sk && sk.lastUsedAt) || 0;
+  if (!at) return '';
+  const days = Math.floor(Math.max(0, Date.now() - at) / 86400000);
+  const when = days <= 0 ? '今天' : days === 1 ? '昨天' : `${days} 天前`;
+  const times = Number(sk.useCount) || 0;
+  return `最近使用：${when}${times > 1 ? ` · 共 ${times} 次` : ''}`;
+}
+
 function renderSkillsList() {
   const grid = $('skills-grid');
   if (!grid) return;
@@ -716,6 +720,7 @@ function renderSkillsList() {
   for (const sk of slice) {
     const on = isSkillEnabled(enabled, sk.id);
     const desc = sk.description || sk.preview || '暂无简介';
+    const usageHint = formatSkillUsageHint(sk);
     const tile = document.createElement('article');
     tile.className = `skill-tile${on ? ' enabled' : ''}`;
     tile.setAttribute('role', 'button');
@@ -726,7 +731,7 @@ function renderSkillsList() {
         <div class="skill-tile-title">${escapeHtml(sk.name)}</div>
       </div>
       <p class="skill-tile-desc">${escapeHtml(desc)}</p>
-      <p class="skill-tile-hint">点击查看完整介绍</p>
+      <p class="skill-tile-hint">${escapeHtml(usageHint || '点击查看完整介绍')}</p>
       <div class="skill-tile-foot">
         <label>
           <input type="checkbox" ${on ? 'checked' : ''} />

@@ -2,7 +2,7 @@
 
 /**
  * SSRF 白名单：全仓唯一的 URL 安全校验。
- * mcp/plugins/skills catalog 与 web 抓取链路共用，勿在别处再写一份。
+ * mcp/skills catalog 与 web 抓取链路共用，勿在别处再写一份。
  *
  * 语义约定（改动会影响调用方）：
  * - 解析失败 → code=INVALID_URL

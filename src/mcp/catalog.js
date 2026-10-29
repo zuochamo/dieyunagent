@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { assertSafeUrl } = require('../gateway/web/url-safety');
-const { compareSemver } = require('../plugins/version');
+const { compareSemver } = require('./package-store');
 const { listBuiltinMcpServers } = require('./registry');
 
 const DEFAULT_REGISTRY_URL = 'https://registry.modelcontextprotocol.io/v0.1/servers';

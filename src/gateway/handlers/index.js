@@ -6,7 +6,6 @@ const { createMemoryHandlers } = require('./memory');
 const { createWebHandlers } = require('./web');
 const { createSpeechHandlers } = require('./speech');
 const { createIndexRemoteHandlers } = require('./index-remote');
-const { createPluginsHandlers } = require('./plugins');
 const { createArtifactHandlers } = require('./artifact');
 const { createCodebaseHandlers } = require('./codebase');
 const { createGraphHandlers } = require('./graph');
@@ -31,7 +30,6 @@ function createExtractedHandlers(deps) {
     ...createWebHandlers(deps),
     ...createSpeechHandlers(deps),
     ...createIndexRemoteHandlers(deps),
-    ...createPluginsHandlers(deps),
     ...createArtifactHandlers(deps),
     ...createCodebaseHandlers(deps),
     ...createGraphHandlers(deps),

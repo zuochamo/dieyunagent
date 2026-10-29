@@ -1,4 +1,4 @@
-/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal, openPluginDetail, openPluginSchemaSettings, renderGridCategoryTabs, updateGridPagination, bindGridSearchInput, bindGridPagination, PLUGIN_TAXONOMY, SKILLS_GRID_PAGE_SIZE, buildExploreTools */
+/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal, buildExploreTools */
 const toolDefsApi = window.diecloud || {};
 
 // Explore / Shell / Build 工具白名单与采集函数的唯一来源是
@@ -21,282 +21,6 @@ function buildExploreCoordinatorTools(allTools) {
   return SUBAGENT_TOOL ? base.concat([SUBAGENT_TOOL]) : base;
 }
 
-function formatPluginInstallHint(result) {
-  if (!result || typeof result !== 'object') return '已安装';
-  const action = result.action || 'install';
-  const version = result.version ? ` v${result.version}` : '';
-  if (action === 'upgrade') return `已更新${version}`;
-  if (action === 'reinstall') return `已重新安装${version}`;
-  return `已安装${version}`;
-}
-
-async function installPluginRpc(method, params) {
-  try {
-    return await gatewayCall(method, params);
-  } catch (err) {
-    const msg = err && err.message ? err.message : String(err);
-    if (msg.includes('低于已安装')) {
-      const ok = window.confirm(`${msg}\n\n仍要覆盖安装吗？`);
-      if (!ok) throw err;
-      return gatewayCall(method, { ...params, allowDowngrade: true });
-    }
-    throw err;
-  }
-}
-
-const PLUGIN_PAGE_SIZE = typeof SKILLS_GRID_PAGE_SIZE === 'number' ? SKILLS_GRID_PAGE_SIZE : 15;
-const PLUGIN_TAXONOMY_LIST = Array.isArray(PLUGIN_TAXONOMY)
-  ? PLUGIN_TAXONOMY
-  : [
-      { id: 'integration', label: '集成通知' },
-      { id: 'data', label: '数据存储' },
-      { id: 'utility', label: '效率工具' },
-      { id: 'user', label: '用户安装' }
-    ];
-
-let pluginsListCache = [];
-let pluginCategoryFilter = 'all';
-let pluginSearchQuery = '';
-let pluginPageIndex = 0;
-
-function resolvePluginCategory(plugin) {
-  if (!plugin) return 'utility';
-  if (plugin.source === 'user') return 'user';
-  const id = String(plugin.id || '').toLowerCase();
-  const cat = String(plugin.category || 'general').toLowerCase();
-  if (cat === 'data' || /database|sql/.test(id)) return 'data';
-  if (cat === 'integration' || /webhook|feishu|dingtalk|http|bot|notify/.test(id)) return 'integration';
-  return 'utility';
-}
-
-function pluginSearchHaystack(plugin) {
-  return [plugin.id, plugin.name, plugin.description, plugin.category, plugin.version, plugin.source]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-}
-
-function getFilteredPlugins() {
-  const q = pluginSearchQuery.trim().toLowerCase();
-  let list = pluginsListCache.slice();
-  if (pluginCategoryFilter !== 'all') {
-    list = list.filter((p) => resolvePluginCategory(p) === pluginCategoryFilter);
-  }
-  if (q) {
-    list = list.filter((p) => pluginSearchHaystack(p).includes(q));
-  }
-  list.sort((a, b) => {
-    const ea = a.enabled ? 1 : 0;
-    const eb = b.enabled ? 1 : 0;
-    if (eb !== ea) return eb - ea;
-    return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN');
-  });
-  return list;
-}
-
-function countPluginsInCategory(catId) {
-  if (catId === 'all') return pluginsListCache.length;
-  return pluginsListCache.filter((p) => resolvePluginCategory(p) === catId).length;
-}
-
-function renderPluginCategoryTabs() {
-  if (typeof renderGridCategoryTabs !== 'function') return;
-  renderGridCategoryTabs(
-    $('plugin-category-tabs'),
-    pluginCategoryFilter,
-    PLUGIN_TAXONOMY_LIST,
-    countPluginsInCategory,
-    (id) => {
-      pluginCategoryFilter = id;
-      pluginPageIndex = 0;
-      renderPluginCategoryTabs();
-      loadPluginsUI().catch(() => {});
-    }
-  );
-}
-
-function wirePluginTileEvents(grid) {
-  grid.querySelectorAll('.plugin-tile').forEach((tile) => {
-    const hasSettings = tile.dataset.pluginHasSettings === '1';
-    const pluginId = tile.dataset.pluginId || '';
-    const pluginName = tile.dataset.pluginName || pluginId;
-
-    tile.querySelector('.skill-tile-foot')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-    });
-
-    if (hasSettings) {
-      tile.setAttribute('role', 'button');
-      tile.tabIndex = 0;
-      tile.title = '点击打开设置';
-      const openSettings = () => {
-        if (typeof openPluginDetail === 'function') {
-          openPluginDetail({
-            id: pluginId,
-            name: pluginName,
-            description: tile.dataset.pluginDescription || '',
-            installPath: tile.dataset.pluginInstallPath || ''
-          });
-        } else if (typeof openPluginSchemaSettings === 'function') {
-          openPluginSchemaSettings(pluginId, pluginName);
-        }
-      };
-      tile.addEventListener('click', openSettings);
-      tile.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          openSettings();
-        }
-      });
-    }
-  });
-
-  grid.querySelectorAll('[data-plugin-enable-cb]').forEach((cb) => {
-    cb.addEventListener('change', async (e) => {
-      e.stopPropagation();
-      const id = cb.dataset.pluginEnableCb;
-      if (!id || !gwState.authed) return;
-      cb.disabled = true;
-      try {
-        await gatewayCall('plugins.set_enabled', { id, enabled: cb.checked });
-        await loadPluginsUI();
-      } catch (err) {
-        cb.disabled = false;
-        cb.checked = !cb.checked;
-        showAgentToast('插件设置失败', err.message || String(err), { variant: 'error' });
-      }
-    });
-  });
-}
-
-function renderPluginTileHtml(p) {
-  const on = !!p.enabled;
-  const sourceLabel = p.source === 'user' ? '用户' : '内置';
-  const deleteLabel = p.source === 'user' ? '卸载' : '删除';
-  const hasSettings = !!p.hasSettings;
-  const hintText = hasSettings ? '点击打开设置' : `${p.category || 'general'} · ${sourceLabel}`;
-  return `<article class="skill-tile plugin-tile${on ? ' enabled' : ''}${hasSettings ? ' plugin-tile-clickable' : ''}" data-plugin-id="${escapeHtml(p.id)}" data-plugin-name="${escapeHtml(p.name || p.id)}" data-plugin-description="${escapeHtml(p.description || '')}" data-plugin-install-path="${escapeHtml(p.installPath || '')}" data-plugin-has-settings="${hasSettings ? '1' : '0'}">
-    <div class="skill-tile-head">
-      <div class="skill-tile-title">${escapeHtml(p.name || p.id)}</div>
-      <span class="skill-tile-tag">v${escapeHtml(p.version || '1.0.0')}</span>
-    </div>
-    <p class="skill-tile-desc">${escapeHtml(p.description || '暂无简介')}</p>
-    <p class="skill-tile-hint">${escapeHtml(hintText)}</p>
-    <div class="skill-tile-foot">
-      <label>
-        <input type="checkbox" data-plugin-enable-cb="${escapeHtml(p.id)}" ${on ? 'checked' : ''} />
-        <span>${on ? '已启用' : '启用'}</span>
-      </label>
-      <button type="button" class="skill-tile-delete plugin-btn-danger" data-plugin-remove="${escapeHtml(p.id)}" data-plugin-name="${escapeHtml(p.name || p.id)}" data-plugin-source="${escapeHtml(p.source || 'builtin')}">${deleteLabel}</button>
-    </div>
-  </article>`;
-}
-
-async function loadPluginsUI() {
-  const grid = $('plugin-list');
-  if (!grid) return;
-  if (!gwState.authed) {
-    grid.innerHTML = '<p class="skills-empty">Gateway 未连接</p>';
-    if (typeof updateGridPagination === 'function') updateGridPagination('plugin', 0, 0, 0);
-    return;
-  }
-  if (!pluginsListCache.length) {
-    grid.innerHTML = '<p class="skills-empty">加载中…</p>';
-  }
-  try {
-    pluginsListCache = await gatewayCall('plugins.list', {});
-    if (!Array.isArray(pluginsListCache)) pluginsListCache = [];
-    renderPluginCategoryTabs();
-    if (!pluginsListCache.length) {
-      grid.innerHTML =
-        '<p class="skills-empty">暂无插件。点击「添加」选择本地插件目录，或打开「市场」从目录安装</p>';
-      if (typeof updateGridPagination === 'function') updateGridPagination('plugin', 0, 0, 0);
-      return;
-    }
-    const visible = getFilteredPlugins();
-    if (!visible.length) {
-      const hint = pluginSearchQuery.trim()
-        ? '没有匹配的插件，请调整搜索或分类'
-        : '当前分类下暂无插件';
-      grid.innerHTML = `<p class="skills-empty">${escapeHtml(hint)}</p>`;
-      if (typeof updateGridPagination === 'function') updateGridPagination('plugin', 0, 0, 0);
-      return;
-    }
-    const pageCount = Math.max(1, Math.ceil(visible.length / PLUGIN_PAGE_SIZE));
-    if (pluginPageIndex >= pageCount) pluginPageIndex = pageCount - 1;
-    if (pluginPageIndex < 0) pluginPageIndex = 0;
-    const slice = visible.slice(
-      pluginPageIndex * PLUGIN_PAGE_SIZE,
-      pluginPageIndex * PLUGIN_PAGE_SIZE + PLUGIN_PAGE_SIZE
-    );
-    grid.innerHTML = slice.map((p) => renderPluginTileHtml(p)).join('');
-    wirePluginTileEvents(grid);
-    if (typeof updateGridPagination === 'function') {
-      updateGridPagination('plugin', pluginPageIndex, pageCount, visible.length);
-    }
-  } catch (e) {
-    grid.innerHTML = `<p class="skills-empty">加载失败：${escapeHtml(e.message || e)}</p>`;
-    if (typeof updateGridPagination === 'function') updateGridPagination('plugin', 0, 0, 0);
-  }
-}
-
-function initPluginListFilters() {
-  if (typeof bindGridSearchInput === 'function') {
-    bindGridSearchInput(
-      'plugin-search',
-      () => pluginSearchQuery,
-      (v) => {
-        pluginSearchQuery = v;
-      },
-      () => pluginPageIndex,
-      (v) => {
-        pluginPageIndex = v;
-      },
-      () => loadPluginsUI().catch(() => {})
-    );
-  }
-  if (typeof bindGridPagination === 'function') {
-    bindGridPagination(
-      'plugin',
-      () => pluginPageIndex,
-      (v) => {
-        pluginPageIndex = v;
-      },
-      () => loadPluginsUI().catch(() => {})
-    );
-  }
-}
-
-document.addEventListener('click', async (e) => {
-  const removeBtn = e.target && e.target.closest ? e.target.closest('[data-plugin-remove]') : null;
-  if (!removeBtn) return;
-  e.preventDefault();
-  e.stopPropagation();
-  if (!gwState.authed) return;
-  const removeId = removeBtn.dataset.pluginRemove;
-  const removeName = removeBtn.dataset.pluginName || removeId;
-  const removeSource = removeBtn.dataset.pluginSource || 'builtin';
-  const confirmMsg =
-    removeSource === 'user'
-      ? `确定卸载插件「${removeName}」？\n将从本机删除插件文件。`
-      : `确定删除插件「${removeName}」？\n将从列表隐藏并停用。`;
-  if (!window.confirm(confirmMsg)) {
-    return;
-  }
-  removeBtn.disabled = true;
-  try {
-    if (removeSource === 'user') {
-      await gatewayCall('plugins.uninstall', { id: removeId });
-    } else {
-      await gatewayCall('plugins.remove', { id: removeId });
-    }
-    await loadPluginsUI();
-  } catch (err) {
-    removeBtn.disabled = false;
-    showAgentToast('删除插件失败', err.message || String(err), { variant: 'error' });
-  }
-});
-
 const _tc = typeof DieyunToolCatalog !== 'undefined' ? DieyunToolCatalog : {};
 const HOST_TOOLS = _tc.HOST_TOOLS || [];
 const WEB_TOOLS = _tc.WEB_TOOLS || [];
@@ -311,6 +35,7 @@ const READ_SYMBOL_TOOL = _tc.READ_SYMBOL_TOOL;
 const LSP_TOOL = _tc.LSP_TOOL;
 const GRAPH_TOOL = _tc.GRAPH_TOOL;
 const AGENTS_MD_PROPOSE_TOOL = _tc.AGENTS_MD_PROPOSE_TOOL;
+const MEMORY_TOOLS = Array.isArray(_tc.MEMORY_TOOLS) ? _tc.MEMORY_TOOLS : [];
 const SKILL_CREATE_TOOL = _tc.SKILL_CREATE_TOOL;
 const PLAN_TOOLS = _tc.PLAN_TOOLS || [];
 const MCP_TOOL_SCHEMA_TOOL = _tc.MCP_TOOL_SCHEMA_TOOL;
@@ -323,17 +48,6 @@ const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
 const COMPUTER_TOOL = _tc.COMPUTER_TOOL || null;
 const isWeakToolCallerModel = _tc.isWeakToolCallerModel || function () { return false; };
 const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return entry && entry.tool; };
-
-async function loadPluginToolsForAgent() {
-  if (!gwState.authed) return [];
-  try {
-    const tools = await gatewayCall('plugins.list_tools', {});
-    if (!Array.isArray(tools) || !tools.length) return [];
-    return tools;
-  } catch {
-    return [];
-  }
-}
 
 async function getHostToolFlags() {
   if (!gwState.authed || !toolDefsApi.getPermissions) {
@@ -471,9 +185,10 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   }
   if (gwState.authed) {
     tools.push(CODEBASE_TOOL);
+    // 记忆读写都在 Gateway：召回（只读）与软归档（可恢复）跟 codebase 同条件暴露。
+    tools.push(...MEMORY_TOOLS);
     if (await shouldExposeGraphTools()) pushGraphTools(tools);
   }
-  tools.push(...(await loadPluginToolsForAgent()));
   tools.push(...PLAN_TOOLS);
   tools.push(CLARIFY_TOOL);
   // 建会话 / 换工作空间：与「新对话」按钮同一条渲染器流程，不依赖 host 权限开关。
@@ -576,42 +291,4 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   }
 }
 
-function initPluginSettingsUI() {
-  if (typeof initPluginDetailOverlay === 'function') initPluginDetailOverlay();
-
-  const pluginAddBtn = $('plugin-add-btn');
-  if (pluginAddBtn) {
-    pluginAddBtn.addEventListener('click', async () => {
-      const hint = $('plugin-install-hint');
-      const api = window.diecloud || {};
-      if (!api.pickFolder) {
-        if (hint) hint.textContent = '当前环境无法选择文件夹';
-        return;
-      }
-      if (!gwState.authed) {
-        if (hint) hint.textContent = 'Gateway 未连接';
-        return;
-      }
-      const folder = await api.pickFolder();
-      if (!folder) return;
-      if (hint) hint.textContent = '安装中…';
-      pluginAddBtn.disabled = true;
-      try {
-        const result = await installPluginRpc('plugins.install_from_path', { sourcePath: folder });
-        if (hint) hint.textContent = formatPluginInstallHint(result);
-        await loadPluginsUI();
-      } catch (err) {
-        if (hint) hint.textContent = `失败：${err.message || err}`;
-      } finally {
-        pluginAddBtn.disabled = false;
-      }
-    });
-  }
-}
-
 window.isWeakToolCallerModel = isWeakToolCallerModel;
-window.formatPluginInstallHint = formatPluginInstallHint;
-window.installPluginRpc = installPluginRpc;
-window.loadPluginsUI = loadPluginsUI;
-window.renderPluginCategoryTabs = renderPluginCategoryTabs;
-window.initPluginListFilters = initPluginListFilters;

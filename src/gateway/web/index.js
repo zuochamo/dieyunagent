@@ -4,7 +4,7 @@
  * 联网能力对外接口（Gateway RPC 与工具层只 require 这一层）。
  *
  * 目录职责：
- *   url-safety.js  SSRF 白名单（mcp/plugins/skills catalog 也用它）
+ *   url-safety.js  SSRF 白名单（mcp/skills catalog 也用它）
  *   transport.js   出网取字节（Electron net 优先，跟随系统代理）
  *   text.js        文本清洗
  *   extract.js     正文定位与抽取

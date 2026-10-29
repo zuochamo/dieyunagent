@@ -176,8 +176,8 @@ function renderMcpCatalogGrid() {
           </div>
           <p class="skill-tile-desc">${escapeHtml(ent.description || '暂无简介')}</p>
           <p class="skill-tile-hint">${installedNote}${envNote}${remoteNote}</p>
-          <div class="skill-tile-foot plugin-catalog-foot">
-            <span class="plugin-catalog-state">${installed ? '已安装' : ent.hasRemote || ent.remoteUrl ? '远程' : ent.hasPackage ? '本地' : ''}</span>
+          <div class="skill-tile-foot catalog-tile-foot">
+            <span class="catalog-tile-state">${installed ? '已安装' : ent.hasRemote || ent.remoteUrl ? '远程' : ent.hasPackage ? '本地' : ''}</span>
             <button
               type="button"
               class="${actionClass}"
