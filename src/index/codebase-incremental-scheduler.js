@@ -3,6 +3,7 @@
 const path = require('path');
 const { loadModelSettings } = require('../model-settings');
 const { isCodebaseSourcePath, isUnderWorkspaceRoot } = require('./source-files');
+const { isRemoteWorkspacePath } = require('../workspace/target');
 
 /**
  * 与 `graph-incremental-scheduler.js` 同构：一次保存有「工具主动上报 + watcher」两个来源，
@@ -22,10 +23,13 @@ const NOT_INDEXED_LOG_THROTTLE_MS = 10 * 60 * 1000;
 /**
  * Debounced background codebase.index (force=false, mtime 增量) after saves / workspace open.
  *
+ * **只处理本地工作区**：增量跑的是本地 dieyun-core，输入必须是本地目录。远程工作区的索引
+ * 由远端 agent 自己维护，本地这一侧连 `fs.watch` 都不该挂（判定在 `resolveWorkspaceRoot`，
+ * 见那里的注释）。
+ *
  * @param {{
  *   userDataPath: string,
  *   getWorkspaceRoot: () => string | null,
- *   isRemoteWorkspace: () => boolean,
  *   invokeRustCore: (method: string, params: object, timeoutMs?: number) => Promise<object | null>,
  *   log?: (msg: string) => void,
  *   debounceMs?: number,
@@ -127,19 +131,27 @@ function createCodebaseIncrementalScheduler(opts) {
     );
   }
 
+  /**
+   * 增量索引只认本地路径 —— 这一条必须在这里判，不能靠调用方记着别传远程。
+   *
+   * 调用方传进来的 root 有两种来源：watcher/工具上报（本地）与 RPC 的 `workspaceRoot`
+   * 原值（远端会话时是 `ssh://…`）。后者若漏进来，`path.resolve` 会把 URI 变成一个
+   * 根本不存在的本地目录（实测 `E:\…\ssh:user@host:\path`），于是 `fs.watch` 只剩 ENOENT、
+   * `codebase.status` 只剩 "status unavailable" —— 全是噪声，还挡住真正的诊断信号。
+   */
   function resolveWorkspaceRoot(override) {
     const raw =
       override != null && String(override).trim()
         ? String(override).trim()
         : opts.getWorkspaceRoot();
     if (!raw) return null;
+    if (isRemoteWorkspacePath(raw)) return null;
     return path.resolve(raw);
   }
 
   function notifyFileSaved(absPath, workspaceRootOverride) {
     const root = resolveWorkspaceRoot(workspaceRootOverride);
     if (!root) return;
-    if (!workspaceRootOverride && opts.isRemoteWorkspace()) return;
     if (!isCodebaseSourcePath(absPath)) return;
     if (!isUnderWorkspaceRoot(absPath, root)) return;
     lastSavedAt.set(root, Date.now());
@@ -149,7 +161,6 @@ function createCodebaseIncrementalScheduler(opts) {
   function notifyWorkspaceOpened(workspaceRootOverride) {
     const root = resolveWorkspaceRoot(workspaceRootOverride);
     if (!root) return;
-    if (!workspaceRootOverride && opts.isRemoteWorkspace()) return;
     schedule(root, WORKSPACE_OPEN_DEBOUNCE_MS, 'workspace');
   }
 

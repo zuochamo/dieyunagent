@@ -162,6 +162,7 @@ const I18N_MESSAGES = {
     peer_why_not_linked: '这个会话没有绑定对端 agent',
     peer_why_not_trusted: '对方还没确认这台机器；它点一次「允许」后，这条会补投过去',
     peer_why_unreachable: '连不上对方（不在线，或防火墙挡住了 peer 端口）',
+    peer_why_session_gone: '这个会话在本地记忆库里已经不存在了；从「连接 → Agent 互通」重新打开对话即可继续',
     peer_toast_send_failed: '发送失败',
     peer_toast_name_saved: '已保存',
     peer_toast_name_saved_hint: '其他 agent 会看到「%s」',
@@ -338,6 +339,8 @@ const I18N_MESSAGES = {
     peer_why_not_linked: 'This conversation is not bound to a peer agent',
     peer_why_not_trusted: 'That machine has not trusted this one yet; once it clicks “Allow”, this message will be delivered',
     peer_why_unreachable: 'Cannot reach the peer (offline, or the peer port is blocked by a firewall)',
+    peer_why_session_gone:
+      'This conversation no longer exists in the local memory store; reopen it from Connect → Agent mesh to continue',
     peer_toast_send_failed: 'Send failed',
     peer_toast_name_saved: 'Saved',
     peer_toast_name_saved_hint: 'Other agents will see “%s”',

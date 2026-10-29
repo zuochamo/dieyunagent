@@ -1,7 +1,29 @@
 'use strict';
 
-const { projectWorkspacePath } = require('../../workspace/target');
+const { projectWorkspacePath, parseWorkspaceInput, buildSshUri } = require('../../workspace/target');
 const { readGitRemoteUrl } = require('../../peer/workspace-key');
+
+/**
+ * 会话工作区字符串的**唯一写入口径**（`session_create` / `session_workspace_set`）。
+ *
+ * 能解析就存规范形态（ssh 存 `ssh://user@host/path`，本地存解析后的绝对路径）；
+ * 解析失败直接抛 INVALID_PARAMS，不落库。
+ *
+ * 不加兜底的理由：历史事故里 `ssh:user@host:/path`（scp 风格）被原样写进表，
+ * 解析端把它当成本地路径，整条会话的 cwd 都指向一个不存在的 Windows 目录。
+ * 写入端拒绝一次，比在读取端猜永远更便宜。
+ */
+function normalizeSessionWorkspacePath(workspacePath) {
+  const raw = String(workspacePath == null ? '' : workspacePath).trim();
+  if (!raw) return null;
+  const target = parseWorkspaceInput(raw);
+  if (!target) {
+    const e = new Error(`工作空间路径无法识别：${raw}（远端须写成 ssh://user@host/path）`);
+    e.code = 'INVALID_PARAMS';
+    throw e;
+  }
+  return target.kind === 'ssh' ? buildSshUri(target) : target.path;
+}
 
 /**
  * 项目身份（**唯一来源** = Rust `projects` 表，见 `memory/projects.rs`）。
@@ -42,6 +64,16 @@ async function resolveProjectScope(workspacePath, requireRustCore) {
     rootPath: String(out.rootPath || root),
     aliased: !!out.aliased
   };
+}
+
+/**
+ * 交接的「来自哪个工作区」对外只给项目身份（仓库根），不给来源会话的 worktree：
+ * 接手的新会话会自己派生自己的 worktree，继承别人的副本只会让两边写同一棵树。
+ */
+function handoffWithProjectWorkspace(row) {
+  if (!row || typeof row !== 'object') return row;
+  const ws = String(row.workspacePath || '').trim();
+  return { ...row, workspacePath: ws ? projectWorkspacePath(ws) || ws : null };
 }
 
 /**
@@ -107,7 +139,7 @@ function createMemoryHandlers({ requireRustCore }) {
     'memory.session_create': async ({ title, workspacePath }) =>
       requireRustCore('memory.session_create', {
         title: title ? String(title) : undefined,
-        workspacePath: workspacePath || null
+        workspacePath: normalizeSessionWorkspacePath(workspacePath)
       }),
 
     'memory.session_get': async ({ sessionId }) =>
@@ -116,7 +148,7 @@ function createMemoryHandlers({ requireRustCore }) {
     'memory.session_workspace_set': async ({ sessionId, workspacePath }) =>
       requireRustCore('memory.session_workspace_set', {
         sessionId: String(sessionId || ''),
-        workspacePath: workspacePath || null
+        workspacePath: normalizeSessionWorkspacePath(workspacePath)
       }),
 
     'memory.session_delete': async ({ sessionId }) =>
@@ -137,12 +169,16 @@ function createMemoryHandlers({ requireRustCore }) {
     },
 
     'memory.handoff_get': async ({ sessionId }) =>
-      requireRustCore('memory.handoff_get', { sessionId: String(sessionId || '') }),
+      handoffWithProjectWorkspace(
+        await requireRustCore('memory.handoff_get', { sessionId: String(sessionId || '') })
+      ),
 
     'memory.handoff_latest': async ({ excludeSessionId }) =>
-      requireRustCore('memory.handoff_latest', {
-        excludeSessionId: excludeSessionId ? String(excludeSessionId) : null
-      }),
+      handoffWithProjectWorkspace(
+        await requireRustCore('memory.handoff_latest', {
+          excludeSessionId: excludeSessionId ? String(excludeSessionId) : null
+        })
+      ),
 
     'memory.message_append': async ({ sessionId, role, content, reasoning }) => {
       const sid = String(sessionId);

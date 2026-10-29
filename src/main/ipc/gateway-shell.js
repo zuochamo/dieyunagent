@@ -6,7 +6,7 @@
  *   getBrowserService: () => object | null,
  *   getMobileBridge: () => object | null,
  *   getCoreBridge: () => object | null,
- *   getActiveRemoteGatewayInfo: () => object | null,
+ *   getActiveRemoteGatewayWireInfo: () => object | null,
  *   resolveDieyunCoreBinary: () => string,
  *   QRCode: { toDataURL: (url: string, opts: object) => Promise<string> },
  *   log: { warn: (msg: string, ...args: unknown[]) => void }
@@ -19,7 +19,7 @@ function registerGatewayShellIpc(ctx) {
     getBrowserService,
     getMobileBridge,
     getCoreBridge,
-    getActiveRemoteGatewayInfo,
+    getActiveRemoteGatewayWireInfo,
     resolveDieyunCoreBinary,
     QRCode,
     log
@@ -28,7 +28,10 @@ function registerGatewayShellIpc(ctx) {
   ipcMain.handle('gateway:get-info', () => {
     const localGateway = getLocalGateway();
     const local = localGateway ? localGateway.getInfo() : null;
-    const remote = getActiveRemoteGatewayInfo();
+    // IPC 只能返回 structured-clone 友好的数据：`getInfo()` 带 openChannel（函数），
+    // 原样塞进 reply 会让整个 `gateway:get-info` 抛 `An object could not be cloned`。
+    const remote =
+      typeof getActiveRemoteGatewayWireInfo === 'function' ? getActiveRemoteGatewayWireInfo() : null;
     const coreBridge = getCoreBridge();
     const rust = !!(coreBridge && coreBridge.isReady());
     const rustCore = {

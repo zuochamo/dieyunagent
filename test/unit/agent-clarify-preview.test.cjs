@@ -5,6 +5,7 @@
  * 守的语义：
  * 1. 任一选项带非空 preview → 卡片进入并排布局（.agent-clarify-split + .agent-clarify-preview）；
  * 2. 全部无 preview → 走原表格布局，不出现 split / preview 节点（存量行为零变化）；
+ *    内容可变部分统一挂在 .agent-clarify-body 内胆下（收起时由 grid-template-rows 压掉，见 styles.css）；
  * 3. 预览面板初始显示第一个带 preview 的选项，change / mouseenter 切换预览内容；
  * 4. hasClarifyPreviews 只认非空字符串。
  */
@@ -51,6 +52,13 @@ function load() {
   return factory(document);
 }
 
+/** 卡片内容全挂在内胆里（.agent-clarify-body 是收起动画的被压对象） */
+function bodyOf(card) {
+  const body = card.children.find((c) => c.className === 'agent-clarify-body');
+  assert.ok(body, '卡片应有 .agent-clarify-body 内胆');
+  return body;
+}
+
 const OPTS = [
   { id: 'left', label: '左侧栏', description: '侧栏在左', preview: '┌──┬────┐\n│S │ C  │\n└──┴────┘' },
   { id: 'top', label: '顶栏', description: '侧栏在上', preview: '┌──────┐\n│  S   │\n├──────┤\n│  C   │\n└──────┘' }
@@ -70,7 +78,7 @@ test('hasClarifyPreviews 只认非空字符串', () => {
 test('带 preview → split 并排布局，初始预览为第一个带 preview 的选项', () => {
   const api = load();
   const card = api.buildClarifyCard({ question: '布局选哪种？', options: OPTS }, () => {});
-  const split = card.children.find((c) => c.className === 'agent-clarify-split');
+  const split = bodyOf(card).children.find((c) => c.className === 'agent-clarify-split');
   assert.ok(split, '带 preview 时应有 .agent-clarify-split');
   const preview = split.children.find((c) => c.className === 'agent-clarify-preview');
   assert.ok(preview, 'split 内应有预览面板');
@@ -83,7 +91,7 @@ test('带 preview → split 并排布局，初始预览为第一个带 preview �
 test('选项 change / 行 hover 切换预览内容', () => {
   const api = load();
   const card = api.buildClarifyCard({ question: '布局选哪种？', options: OPTS }, () => {});
-  const split = card.children.find((c) => c.className === 'agent-clarify-split');
+  const split = bodyOf(card).children.find((c) => c.className === 'agent-clarify-split');
   const preview = split.children.find((c) => c.className === 'agent-clarify-preview');
   const pre = preview.children.find((c) => c.tagName === 'pre');
   const table = split.children.find((c) => c.className === 'agent-clarify-table');
@@ -101,13 +109,15 @@ test('选项 change / 行 hover 切换预览内容', () => {
   assert.equal(pre.textContent, OPTS[0].preview, 'hover 第一行回到第一预览');
 });
 
-test('无 preview → 原表格布局，零新增节点', () => {
+test('无 preview → 原表格布局，除内胆外不新增节点', () => {
   const api = load();
   const plainCard = api.buildClarifyCard(
     { question: '继续吗？', options: [{ id: 'y', label: '是' }, { id: 'n', label: '否' }] },
     () => {}
   );
-  assert.equal(plainCard.children.some((c) => c.className === 'agent-clarify-split'), false);
-  assert.ok(plainCard.children.some((c) => c.className === 'agent-clarify-table'));
-  assert.equal(plainCard.children.some((c) => c.className === 'agent-clarify-preview'), false);
+  const body = bodyOf(plainCard);
+  assert.equal(plainCard.children.length, 1, '卡片下只有内胆一层');
+  assert.equal(body.children.some((c) => c.className === 'agent-clarify-split'), false);
+  assert.ok(body.children.some((c) => c.className === 'agent-clarify-table'));
+  assert.equal(body.children.some((c) => c.className === 'agent-clarify-preview'), false);
 });

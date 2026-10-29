@@ -35,8 +35,9 @@ async function syncPermissionsToMain() {
 
     hostControl: $('perm-host-control')?.checked !== false,
 
-    // 电脑控制（computer 工具：截屏 + 鼠标键盘）：默认关，用户显式打开即同意读屏
-    osControl: $('perm-os-control')?.checked === true,
+    // 电脑控制（computer 工具：截屏 + 鼠标键盘）：默认开（与 gateway `permissions-store` 的默认一致），
+    // 关掉即整个 computer 工具不再注入；键鼠动作仍由沙箱档位判 ask-once
+    osControl: $('perm-os-control')?.checked !== false,
 
     // 读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、UI 不提供开关；
     // 显式回写 true，纠正历史持久化里的关闭值
@@ -140,7 +141,7 @@ async function loadPermissionsUI() {
 
     if ($('perm-host-control')) $('perm-host-control').checked = !!p.hostControl;
 
-    if ($('perm-os-control')) $('perm-os-control').checked = p.osControl === true;
+    if ($('perm-os-control')) $('perm-os-control').checked = p.osControl !== false;
 
     renderSandboxModeUI(p.sandboxMode, p.unrestrictedPaths === true);
 

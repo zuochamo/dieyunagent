@@ -95,7 +95,14 @@ async function writeWorkspaceTextFile(relPath, data, workspacePath) {
     if (workspacePath) params.runWorkspaceRoot = String(workspacePath);
     return await gatewayCall('fs.write_file', params);
   } catch (err) {
-    console.warn('agents-md write failed', err);
+    // 带上「哪个文件 / 哪个工作区 / 哪个错误码」：只有一句「路径不在白名单内」时，
+    // 分不清是 SSH 未连、工作区不在写根里，还是档位只读 —— 定位全靠猜。
+    console.warn('agents-md write failed', {
+      filePath: relPath,
+      workspacePath: workspacePath || '(未指定，用当前工作区)',
+      code: (err && err.code) || '',
+      message: (err && err.message) || String(err)
+    });
     return { ok: false, error: err.message || String(err) };
   }
 }

@@ -256,7 +256,7 @@ function migrateGlobalSettingsToDefaultTier(globalSettings) {
   }
   if (changed) {
     runtimeByTier.default = overrides;
-    saveRuntimeByTierToDisk();
+    saveBrowserRuntimeByTier();
   }
   return changed;
 }

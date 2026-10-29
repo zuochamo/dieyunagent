@@ -73,11 +73,16 @@
 - **按 `peerId` 而不是 IP 记**：DHCP 回收 IP 会让「同一个 IP 换了一台机器」变成免确认的旁路。重装 = 新 `peerId` = 重新确认，这是想要的语义。
 - 未确认的机器**看不到租约快照**（`hello_ok.claims` 只发给已确认的机器）：我在改哪些文件不泄露给陌生人。
 - 没有加密、没有签名、没有证书；**信任模型是「同一内网 + 你点过一次允许」**。不要在不可信网络里开。
-- 收到信的 agent 与本地用户同等权限（它就是你自己的 agent 在跑）。所以：跳数与小时预算双重限流、来信带来源抬头、**默认不让来信触发跑一轮**（见 §8）。
+- 收到信的 agent 与本地用户同等权限（它就是你自己的 agent 在跑）。所以：跳数与小时预算双重限流、来信带来源抬头、**自动跑一轮可关**（默认开，见 §8）。
 
 ## 7. 会话即通道
 
 - `store.links` 记录 `sessionId → peerId`，一对多（同一个对端可以有多个会话）。
+  **它是缓存，不是真相**：会话是否存在只由 Rust 的 `sessions` 表决定。库被回退 / 会话被清掉后，
+  链接里会留下死 id —— 拿死 id 写消息只会得到 `FOREIGN KEY constraint failed`（面板上就是「发送失败」+ 一串英文），
+  而且每次「打开对话」都返回同一个写不进消息的会话。所以 `ensureSessionForPeer` 交出会话前必回源问
+  `memory.session_get`，死链接一律解绑后重建（`memory.message_append` 对不存在的会话也改回稳定错误码
+  `SESSION_NOT_FOUND`，不再透传 SQLite 原文）。
 - 「发消息」按钮：`peer:open-session` → 复用/新建「与 <名字> 的对话」→ 绑定 → 切过去。
 - 发送路由在 `renderer-agent-send.js` 的 `sendMessage` 最前面一行：命中 `routePeerSessionSend` 就直接发给对端（先 `memory.message_append` 落库，再由 Main 发出去，最后按会话重载），**不跑本机模型**。
 - 排除外部触发（`agentServiceRequestId` / `source=peer|agent-service|plan`）：否则「对方来信 → 本机跑一轮 → 又把原话发回去」会两边弹皮球。
@@ -86,7 +91,7 @@
 
 一封来信要自动开跑，必须同时满足：
 
-1. 设置里 `autoTurn` 打开（**默认关**：只投递到会话，用户自己点开看）；
+1. 设置里 `autoTurn` 打开（**默认开**：互通就是「另一台机器上的我」，来信直接跑；用户可显式关掉，退化成只投递到会话）；
 2. 发送方已在本机信任清单里（`allow`）；
 3. `hops < peerMaxHops`；
 4. 该对端最近 1 小时内自动轮数 `< peerTurnBudgetPerHour`；
@@ -130,14 +135,14 @@ IPC（`src/main/ipc/peer.js`）：`peer:status/refresh/set-name/set-enabled/set-
 
 - `scripts/test-peer-store.cjs`：身份持久化、信任清单（allow/deny/撤销/持久化/非法输入）、会话绑定、手工对端清洗、开关默认值、项目 key（含 worktree `commondir`）。
 - `scripts/test-peer-tools.cjs`：三个工具在工具层的形状（`PEER_UNAVAILABLE` / `MISSING_ARG`+`diagnostics.peers` / `PEER_NOT_FOUND` 不可重试 / 连不通可重试 / 租约 acquire-list-release）。
-- `scripts/test-peer-mesh.cjs`：进程内两台实例回环互连 — 陌生来信被拦（`NOT_TRUSTED` + 待确认 + 不落会话不跑）、允许后补投、**默认不自动跑**、打开后跑一轮、**回合结束回传完整正文**、跳数用尽只投递、**小时预算用尽只投递**、presence + 同项目 + 信任状态、**会话发信 → 对端跑一轮 → 答复落回同一会话**、租约冲突/广播/释放、线协议归一、陌生机器拿不到租约快照、拒绝后静默、撤销后重新确认。
+- `scripts/test-peer-mesh.cjs`：进程内两台实例回环互连 — 陌生来信被拦（`NOT_TRUSTED` + 待确认 + 不落会话不跑）、允许后补投、**默认就自动跑一轮（用例里显式关掉以单测各道门）**、打开后跑一轮、**回合结束回传完整正文**、跳数用尽只投递、**小时预算用尽只投递**、presence + 同项目 + 信任状态、**会话发信 → 对端跑一轮 → 答复落回同一会话**、**会话链接是缓存（库里没了就解绑重建，不返回死 id）**、租约冲突/广播/释放、线协议归一、陌生机器拿不到租约快照、拒绝后静默、撤销后重新确认。
 
 手工（两台真机，同一局域网）：
 
 1. 两台都开「Agent 互通」：标题栏左上角图标条里的**「连接」**图标（两台设备连着那个）→ 切到「Agent 互通」标签页 → 勾「启用内网互通」。面板里的在线列表应互相出现（**不需要配对码**）。
 
 > 手机连接与 Agent 互通共用一个「连接」图标、两个标签页（外壳在 `src/renderer/renderer-connect.js`；手机侧仍由 `renderer-mobile.js` 渲染，互通侧由 `renderer-peer.js` 渲染）。
-2. A 点「发消息」→ 打开的会话里问一句具体的（例如「src/peer/wire.js 的信封归一在哪个函数」）；B 侧应**弹一次确认**，点「允许」后这条补投进会话。因为默认 `autoTurn` 关，B 只落会话不跑。
+2. A 点「发消息」→ 打开的会话里问一句具体的（例如「src/peer/wire.js 的信封归一在哪个函数」）；B 侧应**弹一次确认**，点「允许」后这条补投进会话 —— 因为 `autoTurn` 默认开，B 会在确认后**直接跑一轮**（要验「只投递不跑」，先把「收到消息自动跑一轮」取消勾选）。
 3. 在 B 勾上「收到消息自动跑一轮」：A 再发，B 自己跑一轮，回答回到 A 的会话。
 4. 把 B 的信任清单里撤销 A：A 再发应重新弹确认。
 5. 把 A 的 `peerMaxHops` 调到 1 之后连发多次：确认不再自动跑（防互相撩）。

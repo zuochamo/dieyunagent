@@ -1614,7 +1614,10 @@ const SESSION_TOOL = {
         workspacePath: {
           type: 'string',
           description:
-            '工作空间的绝对路径（例如 D:\\UE5-Tutorial-Course），或 ssh:<host>:<远端路径>。省略则沿用当前对话的工作空间。'
+            '工作空间的绝对路径（例如 D:\\UE5-Tutorial-Course），或远端工作区 URI：ssh://<用户名>@<主机>/<远端路径>' +
+            '（例如 ssh://dieyunx@192.168.31.62/run/media/dieyunx/dieyunserver/dieyuntools）。' +
+            '远端 URI 必须带 //，不要写成 ssh:主机:/路径 或 user@host:/path——那不是合法工作空间，挂上后整条对话的 cwd 都是错的。' +
+            '省略则沿用当前对话的工作空间。'
         },
         title: {
           type: 'string',

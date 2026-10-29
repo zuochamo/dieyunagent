@@ -104,11 +104,22 @@ function createRemoteGatewayRuntime(deps) {
     return null;
   }
 
+  /**
+   * IPC 专用：`getInfo()` 带 `openChannel`（函数），原样进 IPC 返回值会让整条 reply
+   * 抛 `An object could not be cloned`。可序列化投影的单一来源在
+   * `remote-gateway-manager.wireInfo`，这里只是按「当前生效目标」取一次。
+   */
+  function getActiveRemoteGatewayWireInfo() {
+    const status = getActiveRemoteGatewayStatus();
+    return status ? status.info : null;
+  }
+
   return {
     getRemoteGatewayPackRoot: packRoot,
     buildRemoteGatewayPackContext,
     ensureRemoteGatewayForCurrentWorkspace,
     getActiveRemoteGatewayInfo,
+    getActiveRemoteGatewayWireInfo,
     getActiveRemoteGatewayStatus
   };
 }

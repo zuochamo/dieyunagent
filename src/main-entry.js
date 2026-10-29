@@ -257,7 +257,7 @@ const sshReconnect = createSshReconnect({
   invalidateRemoteAgentClient,
   ensureRemoteGatewayForCurrentWorkspace: () =>
     remoteGatewayRuntime.ensureRemoteGatewayForCurrentWorkspace(),
-  getActiveRemoteGatewayInfo: () => remoteGatewayRuntime.getActiveRemoteGatewayInfo(),
+  getActiveRemoteGatewayWireInfo: () => remoteGatewayRuntime.getActiveRemoteGatewayWireInfo(),
   broadcastToRenderers: (channel, payload) => broadcastToRenderers(channel, payload)
 });
 
@@ -724,7 +724,7 @@ app.whenReady().then(async () => {
     getPlansStore: () => plansStore,
     getPlansScheduler: () => plansScheduler,
     getUserDataPath: () => userData,
-    getActiveRemoteGatewayInfo: () => remoteGatewayRuntime.getActiveRemoteGatewayInfo(),
+    getActiveRemoteGatewayWireInfo: () => remoteGatewayRuntime.getActiveRemoteGatewayWireInfo(),
     resolveDieyunCoreBinary,
     saveModelSettings,
     loadModelSettings,

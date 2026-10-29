@@ -87,6 +87,20 @@ function applyThinkingFlowPref() {
   else root.removeAttribute('data-thinking-flow');
 }
 
+/**
+ * 系统的「减少动效」在运行中被改动时必须重算一次属性：CSS 只认 :root 上的属性，
+ * 而 JS 的贴底阻尼读的是实时偏好 —— 不听这条事件，两半会分裂
+ * （系统刚开减少动效：动画没了、视口还在阻尼追；反过来是动画没有、硬钉也没有）。
+ */
+function watchReducedMotionPref() {
+  try {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', applyThinkingFlowPref);
+  } catch {
+    // ignore
+  }
+}
+
 function syncThemeCards() {
   const cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
   document.querySelectorAll('.theme-choice').forEach((el) => {
@@ -304,6 +318,7 @@ window.syncThemeAutoLaunchToggle = syncAutoLaunchToggle;
 
 syncTracePrefInputs();
 applyThinkingFlowPref();
+watchReducedMotionPref();
 [
   ['trace-show-reasoning', 'showReasoning', true],
   ['trace-show-titles', 'showTitles', true],

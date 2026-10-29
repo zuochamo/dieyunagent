@@ -24,7 +24,7 @@ function registerWorkspaceRemoteIpc(ctx) {
     getPortForwardManager,
     resolveSshConnectSessionStatus,
     getActiveRemoteGatewayStatus,
-    getActiveRemoteGatewayInfo,
+    getActiveRemoteGatewayWireInfo,
     getRemoteGatewayPackRoot,
     invalidateRemoteAgentClient,
     ensureRemoteGatewayForCurrentWorkspace,
@@ -261,6 +261,15 @@ function registerWorkspaceRemoteIpc(ctx) {
     }
   });
 
+  /**
+   * 可跨进程的远端 Gateway 信息（IPC 专用）。
+   * `getInfo()` 带 `openChannel` 函数，原样进 IPC 会让整条 reply 抛
+   * `An object could not be cloned`；投影的单一来源见 `remote-gateway-manager.wireInfo`。
+   */
+  function activeRemoteGatewayWireInfo() {
+    return typeof getActiveRemoteGatewayWireInfo === 'function' ? getActiveRemoteGatewayWireInfo() : null;
+  }
+
   ipcMain.handle('ssh:remote-gateway-status', () => {
     const localGateway = getLocalGateway();
     const sshSessionManager = getSshSessionManager();
@@ -307,7 +316,7 @@ function registerWorkspaceRemoteIpc(ctx) {
       return {
         ...r,
         workspace: localGateway ? localGateway.getWorkspace() : null,
-        remoteGateway: getActiveRemoteGatewayInfo()
+        remoteGateway: activeRemoteGatewayWireInfo()
       };
     } catch (e) {
       return { ok: false, error: e.message || String(e), workspace: localGateway ? localGateway.getWorkspace() : null };

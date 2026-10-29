@@ -48,7 +48,10 @@ function parseWorkspaceInput(input) {
   }
   if (typeof input === 'object' && input.kind === 'local') {
     const p = String(input.path || input.workspacePath || '').trim();
-    return p ? { kind: 'local', path: path.resolve(p) } : null;
+    // 对象形态也要挡住远端 URI：`{kind:'local', path:'ssh://…'}` 若被 path.resolve，
+    // 就得到 `E:\...\ssh:\user@host\path` 这种假目录（索引键被污染、面板恒「未建立」）。
+    if (!p || isRemoteWorkspacePath(p)) return null;
+    return { kind: 'local', path: path.resolve(p) };
   }
   const s = String(input).trim();
   if (!s) return null;
@@ -60,6 +63,10 @@ function parseWorkspaceInput(input) {
   if (ssh) {
     return { kind: 'ssh', ...ssh };
   }
+  // 认得出是远端前缀（`ssh:`）但形态不合法，例如 `ssh:user@host:/path`：
+  // 宁可不挂工作区，也不要把它 path.resolve 成本地目录——那会让整条会话的 cwd
+  // 指向一个不存在的 Windows 路径，远端工具全部 CWD_NOT_FOUND。
+  if (isRemoteWorkspacePath(s)) return null;
   return { kind: 'local', path: path.resolve(s) };
 }
 
@@ -81,7 +88,9 @@ function targetFromDisk(raw) {
     return null;
   }
   if (raw.kind === 'local' && raw.workspacePath) {
-    return { kind: 'local', path: path.resolve(String(raw.workspacePath)) };
+    // 存量里可能躺着被写坏的本地条目（workspacePath 是 ssh URI）：交给统一解析，
+    // 别在这里 path.resolve 成假目录。
+    return parseWorkspaceInput(String(raw.workspacePath));
   }
   if (raw.workspacePath) return parseWorkspaceInput(raw.workspacePath);
   return null;

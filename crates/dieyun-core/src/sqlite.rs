@@ -243,7 +243,22 @@ impl SqliteHandle {
         }
         // 建表已完成 —— 读侧从此不必再碰这把锁（`initialized` 见字段注释）。
         self.initialized.store(true, Ordering::Release);
-        f(guard.as_ref().expect("connection initialized above"))
+        let conn = guard.as_ref().expect("connection initialized above");
+        // 不变量：常驻写连接必须处于 autocommit。
+        //
+        // 带着未提交事务进来，只可能是前面某条语句在事务里报错后没人回滚 —— SQLite 不会
+        // 替你回滚语句级错误，`execute_batch("BEGIN…; 失败; ROLLBACK")` 这类写法会把 ROLLBACK
+        // 自己跳过（真实事故：memory 的 FTS 探针，见 `memory/schema.rs`）。后果不是「慢一点」，
+        // 而是此后每条写入都进那个永不提交的事务，进程一退全部丢失，且全程没有任何报错。
+        // 这里报告并回滚：宁可丢掉那笔来路不明的未提交写入，也不能让它吞掉整个进程的数据。
+        if !conn.is_autocommit() {
+            eprintln!(
+                "[dieyun:db] 常驻写连接带着未提交事务进入 with_conn（{}），已回滚",
+                self.path.display()
+            );
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        f(conn)
     }
 
     /// 读侧取数：从**池子**里借一条连接，用完归还。
@@ -573,6 +588,42 @@ mod tests {
             })
             .expect("read via resident");
         assert_eq!(n, 1, "独立连接的已提交写入对常驻连接可见");
+        cleanup(&db);
+    }
+
+    /// 建表钩子把连接留在事务里（历史事故的真实形状）：后续写入必须照样提交。
+    fn init_leaving_transaction(conn: &Connection) -> Result<(), CoreError> {
+        create_table_t(conn)?;
+        // 模拟 `execute_batch("BEGIN; …")` 里那句语句报错后没人回滚的残留
+        conn.execute_batch("BEGIN; INSERT INTO t (a) VALUES (99);")
+            .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))
+    }
+
+    /// 漏事务必须在这里被拦住：它是静默的，代价是整个进程的数据。
+    #[test]
+    fn with_conn_rolls_back_transaction_leaked_by_schema_init() {
+        let db = temp_db("leaked-txn");
+        let handle = SqliteHandle::new(db.clone(), init_leaving_transaction);
+
+        handle
+            .with_conn(|conn| conn.execute("INSERT INTO t (a) VALUES (1)", []).map_err(db_failed))
+            .expect("write after leaked transaction");
+
+        // 用一条全新连接看「已提交」状态：常驻连接自己会看见脏数据，不能作证。
+        let fresh = Connection::open(&db).expect("fresh conn");
+        let rows: Vec<i64> = fresh
+            .prepare("SELECT a FROM t ORDER BY a")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        assert_eq!(
+            rows,
+            vec![1],
+            "残留事务应被回滚（99 消失），本轮写入必须真的提交"
+        );
+        drop(fresh);
         cleanup(&db);
     }
 

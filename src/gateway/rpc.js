@@ -22,7 +22,7 @@ const { resolveBrowserNavigateUrl, parseRemotePreviewTarget } = require('../brow
 const { createRemoteFsAdapter } = require('./remote-fs');
 const { createRemoteAgentFsAdapter } = require('./remote-agent-fs');
 const { AsyncLocalStorage } = require('async_hooks');
-const { buildSshUri, normalizeRemotePath, parseWorkspaceInput, isSameSshTarget, workspacePathForSession, sshTargetKey } = require('../workspace/target');
+const { buildSshUri, normalizeRemotePath, parseWorkspaceInput, isSameSshTarget, workspacePathForSession, sshTargetKey, isRemoteWorkspacePath } = require('../workspace/target');
 const { remoteAgentInfoKey, remoteIndexCacheKey } = require('../workspace/workspace-cache-keys');
 const { isGraphSourcePath } = require('../index/source-files');
 const { normalizeReadParams, ABSOLUTE_READ_MAX_BYTES } = require('./fs-read-limits');
@@ -1243,6 +1243,20 @@ function createRpcHandlers(ctx) {
       e.code = 'WORKSPACE_REQUIRED';
       throw e;
     }
+    // 远端 URI 只认上面那条「本次调用解析到了 SSH 目标」的路。落到这里说明作用域里
+    // 没有远端目标，此时 path.resolve 只会得到 `E:\...\ssh:user@host:\path` 这种永远
+    // 不存在的键：索引面板会把它当成真工作区，于是恒显示「未建立 / 0 / 从未构建」，
+    // 而 agent 侧其实在远端正常的库里检索。宁可报错，不许静默查一个假目标。
+    if (isRemoteWorkspacePath(input)) {
+      const e = new Error(
+        `远端工作区缺少可用的 SSH 作用域，无法索引/检索：${String(input).slice(0, 160)}`
+      );
+      e.code = 'REMOTE_TARGET_UNRESOLVED';
+      e.retryable = false;
+      e.suggestedFix =
+        '不要重试；调用方需带上会话作用域（sessionId + runWorkspaceRoot），或先连接远端 Agent。';
+      throw e;
+    }
     const resolved = normalizeFilePathInput(input, cwdForCall());
     const root = assertAllowedPath(resolved, readRootsForCall());
     return { kind: 'local', rootKey: root };
@@ -1274,7 +1288,7 @@ function createRpcHandlers(ctx) {
     }
   }
 
-  /** computer 工具总开关：hostControl 之下再要 osControl（默认关，设置页开启）。 */
+  /** computer 工具总开关：hostControl 之下再要 osControl（默认开，设置页可关掉）。 */
   function assertOsControlEnabled() {
     assertHostEnabled(ctx);
     if (!perms.osControl) {

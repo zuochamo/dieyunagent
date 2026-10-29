@@ -275,14 +275,20 @@ var chatScrollBottomSettleTimer = null;
 
 /**
  * 「滑到底部」浮条显隐的唯一判定：不在底部就出现，点击后平滑回底并消失。
- * 所有触发源（滚动 / 钉底 / 会话切换还原）都走 updateLastTurnFloat 或
- * updateChatAutoFollowFromScroll 这两条既有刷新路径，不另开定时器。
+ * 跟着流式跑的时候（chatAutoFollow）根本不需要这颗按钮 —— 视口本来就归我们管，
+ * 阻尼追帧造成的「暂时不在底部」是动画中间态，不能当成「用户离开了底部」。
+ * 判定用 chatAutoFollow（跨帧稳定的用户意图）而不是任何逐帧翻转的中间量：
+ * 逐帧状态位会让浮条/按钮按 delta 节奏一闪一闪。
  */
 function updateChatScrollBottomBtn() {
   const btn = $('chat-scroll-bottom');
   if (!btn) return;
   const el = chatList || document.getElementById('chat-list');
-  const hide = !el || chatScrollToBottomPending || isChatNearBottom(el);
+  const hide =
+    !el ||
+    chatScrollToBottomPending ||
+    (typeof getChatAutoFollow === 'function' && getChatAutoFollow()) ||
+    isChatNearBottom(el);
   // 幂等写入：本函数在流式跟底时每帧都会走到，避免重复写同一个属性
   if (btn.hidden !== hide) btn.hidden = hide;
 }

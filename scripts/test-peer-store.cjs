@@ -98,16 +98,17 @@ function main() {
     // —— 开关 ——
     assert.deepStrictEqual(
       store.settings(),
-      { enabled: true, autoTurn: false },
-      '默认开互通但**不自动跑一轮**（跑一轮 = 别人一句话就能在这台机器上执行工具）'
+      { enabled: true, autoTurn: true },
+      '默认开互通，且**默认就自动跑一轮**（互通 = 另一台机器上的我；显式关掉才退化成只投递）'
     );
-    assert.deepStrictEqual(store.setSettings({ autoTurn: true }), { enabled: true, autoTurn: true });
-    assert.deepStrictEqual(createPeerStore(root).settings(), { enabled: true, autoTurn: true }, '开关应持久化');
+    assert.deepStrictEqual(store.setSettings({ autoTurn: false }), { enabled: true, autoTurn: false });
+    assert.deepStrictEqual(createPeerStore(root).settings(), { enabled: true, autoTurn: false }, '开关应持久化');
     assert.deepStrictEqual(
       createPeerStore(root).setSettings({ autoTurn: /** @type {any} */ ('yes') }),
       { enabled: true, autoTurn: false },
       '非 true 一律当关（不做真值猜测）'
     );
+    assert.deepStrictEqual(createPeerStore(root).setSettings({}), { enabled: true, autoTurn: false }, '缺省沿用落盘值');
 
     // —— 项目身份 key ——
     assert.strictEqual(workspaceKeyFor(''), '', '空路径应返回空 key');

@@ -343,7 +343,14 @@ async function resolveSendWorkspace(state) {
     );
     const liveAfterWs = sessionActiveRuns.get(runSessionId);
     if (liveAfterWs) liveAfterWs.workspacePath = state.runWorkspacePath;
-    if (state.runWorkspacePath && typeof bindCurrentSessionWorkspace === 'function') {
+    // 远端会话的工作区归 Main 的 session-worktree：建/复用 worktree 之后它已经落库并设好上下文。
+    // 渲染端这里再拿「租约之前的仓库根」写一次，会把 worktree 盖回仓库根（重启后再从 DB 读回来），
+    // 于是 agent 又跑在共享树上。远端只认 Main 那次写，渲染端只补本地工作区。
+    if (
+      state.runWorkspacePath &&
+      !isRemoteSessionWorkspacePath(state.runWorkspacePath) &&
+      typeof bindCurrentSessionWorkspace === 'function'
+    ) {
       await bindCurrentSessionWorkspace(runSessionId, state.runWorkspacePath, { bindOnly: true });
     }
   } catch (err) {

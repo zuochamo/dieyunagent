@@ -1,6 +1,6 @@
 /* global window, document, $, gwState, gatewayCall, settings, saveSettings, currentSessionId,
    resolveSessionWorkspacePathForRpc, resolveSessionWorkspacePathSync,
-   resolveWorkspaceRootForIndexPanels, describeVectorSync */
+   resolveWorkspaceRootForIndexPanels, describeVectorSync, indexPanelRpcParams */
 'use strict';
 
 let codebasePanelPollTimer = null;
@@ -118,7 +118,9 @@ async function refreshCodebasePanelStatus() {
   }
   if (rebuildBtn) rebuildBtn.disabled = false;
   try {
-    const st = await gatewayCall('codebase.status', { workspaceRoot: root });
+    // 作用域（sessionId + runWorkspaceRoot）必须带：不带就是查本机 core 的另一个键，
+    // 见 renderer-gateway.js:indexPanelRpcParams。
+    const st = await gatewayCall('codebase.status', indexPanelRpcParams(root));
     const indexing = !!(st && st.indexing);
     const indexed = !!(st && st.indexed);
     let state = '未建立';
@@ -223,7 +225,7 @@ async function rebuildCodebasePanelIndex(opts = {}) {
   try {
     await gatewayCall(
       'codebase.index.start',
-      { workspaceRoot: root, force, skipIfReady: false, vectors: !!opts.vectors },
+      indexPanelRpcParams(root, { force, skipIfReady: false, vectors: !!opts.vectors }),
       { timeoutMs: 60000 }
     );
   } catch (err) {

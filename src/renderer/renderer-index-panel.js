@@ -1,4 +1,4 @@
-/* global window, document, gatewayCall */
+/* global window, document, gatewayCall, indexPanelRpcParams */
 
 'use strict';
 
@@ -61,10 +61,12 @@ async function runIndexPanelSearch() {
   setIndexPanelBox('codebase-panel-results', '<p class="artifacts-empty">搜索中…</p>');
   setIndexPanelBox('graph-panel-results', '<p class="artifacts-empty">查找中…</p>');
 
+  // 两路查询都要带会话作用域（同 renderer-gateway.js:indexPanelRpcParams）：少了它，
+  // SSH 工作区会查到本机 core 的空键上，试搜永远「尚未建立可检索索引」。
   const [chunks, symbols] = await Promise.all([
     gatewayCall(
       'codebase.search',
-      { workspaceRoot: root, query: q, limit: 10 },
+      indexPanelRpcParams(root, { query: q, limit: 10 }),
       { timeoutMs: 60000 }
     ).then(
       (data) => ({ ok: true, data }),
@@ -72,7 +74,7 @@ async function runIndexPanelSearch() {
     ),
     gatewayCall(
       'graph.symbol_search',
-      { workspaceRoot: root, query: q, limit: 12, autoIndex: false },
+      indexPanelRpcParams(root, { query: q, limit: 12, autoIndex: false }),
       { timeoutMs: 60000 }
     ).then(
       (data) => ({ ok: true, data }),

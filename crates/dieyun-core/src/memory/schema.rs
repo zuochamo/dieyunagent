@@ -300,50 +300,26 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
     )
     .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
 
-    // 老库首次建 FTS 时索引是空的：行数对不上就 rebuild 一次
-    // （幂等，且只在真偏差时跑，不给每次开库加成本）。
-    let fts_rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM long_memories_fts", [], |r| r.get(0))
-        .unwrap_or(-1);
-    let src_rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM long_memories", [], |r| r.get(0))
-        .unwrap_or(-2);
-    if fts_rows != src_rows {
-        let _ = conn.execute(
-            "INSERT INTO long_memories_fts(long_memories_fts) VALUES('rebuild')",
-            [],
-        );
-    }
-
-    // 行数对得上也可能已经坏了：FTS 影子表损坏时**任何**对 long_memories 的写入都会被触发器
-    // 带崩（`database disk image is malformed`），而读路径完全正常 —— 于是「记忆写不进去」
-    // 看起来像归纳器不干活。自查方式：做一次会被触发器拦下的写入探针（同值 UPDATE 同样触发
-    // AFTER UPDATE 触发器），失败就 rebuild 再探一次。
-    let probe_ok = conn
-        .execute_batch(
-            "SAVEPOINT fts_probe;
-             UPDATE long_memories SET status = status WHERE id = (SELECT MIN(id) FROM long_memories);
-             ROLLBACK TO fts_probe;
-             RELEASE fts_probe;",
-        )
-        .is_ok();
-    if !probe_ok {
+    // 写入探针：唯一一处「索引到底建全了没有」的判定，也是唯一一处修复。
+    //
+    // 这里曾经有一条「`COUNT(*) FROM long_memories_fts` 与源表不一致就 rebuild」的守卫，
+    // 它是**死代码**：`long_memories_fts` 是 external content 表（`content='long_memories'`），
+    // 它的 count(*) 走的就是源表扫描，索引空着也是同一个数 —— 于是「老库首次建 FTS，索引空、
+    // 源表 1694 行」这个真实场景永远触发不了 rebuild。删掉它，判定只留探针一份。
+    //
+    // 探针失败的含义（FTS5 只报一句笼统的 `database disk image is malformed`，别被它骗了）：
+    // 触发器的 delete 路径找不到这篇 doc —— 最常见就是「索引根本没建」。此时 INSERT 仍然成功，
+    // 读也正常，只有 UPDATE / DELETE 报错，所以表面症状是「记忆写不进去」，而对话账本照旧。
+    //
+    // 用同值 UPDATE 当探针：它同时走 delete + insert 两条触发器路径，是这条链路上最脆的一步。
+    if !long_memory_write_probe(conn) {
         let rebuilt = conn
             .execute(
                 "INSERT INTO long_memories_fts(long_memories_fts) VALUES('rebuild')",
                 [],
             )
             .is_ok();
-        let after_ok = rebuilt
-            && conn
-                .execute_batch(
-                    "SAVEPOINT fts_probe2;
-                     UPDATE long_memories SET status = status WHERE id = (SELECT MIN(id) FROM long_memories);
-                     ROLLBACK TO fts_probe2;
-                     RELEASE fts_probe2;",
-                )
-                .is_ok();
-        if !after_ok {
+        if !rebuilt || !long_memory_write_probe(conn) {
             eprintln!(
                 "[dieyun:memory] FTS 索引重建后写入仍失败：long_memories 的写入路径可能已被其它损坏阻塞"
             );
@@ -351,4 +327,175 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
     }
 
     Ok(())
+}
+
+/// 「long_memories 这条写入路径还能不能写」的探针：能否写都要把连接留在 autocommit。
+///
+/// 用 rusqlite 的 [`rusqlite::Transaction`] 而不是手写
+/// `SAVEPOINT …; UPDATE …; ROLLBACK TO …; RELEASE …` 批次：批次里中间那句报错时
+/// **后面两句不会再执行**，连接就永久停在那个 SAVEPOINT 打开的事务里 —— 之后该库的
+/// 每条写入都进这个永不提交的事务，进程一退全部丢失（历史事故：WAL 里 7611 帧、
+/// 只有 10 个 commit 标记，09:49–10:12 的整段对话随重启蒸发）。
+/// Transaction 的 Drop 一定会回滚，语句报错也逃不掉。
+fn long_memory_write_probe(conn: &Connection) -> bool {
+    let tx = match conn.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(_) => return false,
+    };
+    let writable = tx
+        .execute(
+            "UPDATE long_memories SET status = status WHERE id = (SELECT MIN(id) FROM long_memories)",
+            [],
+        )
+        .is_ok();
+    // 探针只回答「能不能写」：无论成败都回滚，不留数据变更，也不留事务。
+    tx.rollback().is_ok() && writable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sqlite::SqliteHandle;
+    use rusqlite::Connection;
+    use std::path::PathBuf;
+
+    fn db_failed(e: rusqlite::Error) -> CoreError {
+        CoreError::rpc("TEST_DB", e.to_string())
+    }
+
+    fn temp_db_path(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "dieyun-memory-schema-{tag}-{}-{nanos}.sqlite",
+            std::process::id()
+        ))
+    }
+
+    /// 探针的 UPDATE 只命中行才会被触发器拦下 —— 空表探针必然「成功」。
+    fn seed_long_memory(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO long_memories (content, source, created_at) VALUES ('x', 'test', 1)",
+            [],
+        )
+        .expect("seed long_memories");
+    }
+
+    /// 模拟「FTS 影子表损坏」：任何命中行的 long_memories 写入都报错。
+    /// 真实故障是 FTS 触发器抛 `database disk image is malformed`，形状相同：语句报错。
+    fn break_long_memory_writes(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TRIGGER break_lm_write BEFORE UPDATE ON long_memories
+             BEGIN SELECT RAISE(ABORT, 'fts shadow table is malformed'); END;",
+        )
+        .expect("inject failing trigger");
+    }
+
+    /// 探针失败绝不能让常驻写连接停在事务里。
+    ///
+    /// 曾经的手写 `execute_batch("SAVEPOINT …; ROLLBACK TO …; RELEASE …")` 会在中间语句
+    /// 报错时跳过自己的 ROLLBACK/RELEASE：连接从此停在事务里，此后**所有**写入都进同一个
+    /// 永不提交的事务（WAL 里一天 7611 帧、0 个 commit 标记），进程一退全部丢失。
+    #[test]
+    fn broken_fts_must_not_leave_write_conn_in_open_transaction() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        init_schema(&conn).expect("schema");
+        seed_long_memory(&conn);
+        break_long_memory_writes(&conn);
+
+        init_schema(&conn).expect("探针失败不是致命错误，建表仍应成功");
+
+        assert!(
+            conn.is_autocommit(),
+            "探针失败后连接必须回到 autocommit，否则之后的每条写入都会被永远吞掉"
+        );
+    }
+
+    /// 真实首装路径：老库有数据、还没有 FTS 索引时第一次启动。
+    ///
+    /// 钉住两件事：判定只能靠探针（`COUNT(*) FROM long_memories_fts` 对 external content 表
+    /// 读的就是源表，行数守卫永远相等）；修好之后重建必须**提交**。
+    #[test]
+    fn legacy_db_gets_fts_index_built_on_first_open() {
+        let path = temp_db_path("legacy-fts");
+        {
+            let conn = Connection::open(&path).expect("file db");
+            init_schema(&conn).expect("schema");
+            conn.execute(
+                "INSERT INTO long_memories (content, source, created_at) VALUES ('老库里的记忆', 'legacy', 1)",
+                [],
+            )
+            .expect("seed");
+            // 退回「有数据、无索引」的老库状态
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS long_memories_fts_ai;
+                 DROP TRIGGER IF EXISTS long_memories_fts_au;
+                 DROP TRIGGER IF EXISTS long_memories_fts_ad;
+                 DROP TABLE long_memories_fts;",
+            )
+            .expect("drop fts");
+        }
+
+        // 首次用新代码打开：建表把 FTS 建出来（空索引），探针必须发现并重建
+        let handle = SqliteHandle::new_with_foreign_keys(path.clone(), init_schema);
+        handle
+            .with_conn(|conn| {
+                conn.execute("UPDATE long_memories SET status = 'archived' WHERE id = 1", [])
+                    .map_err(db_failed)?;
+                Ok(())
+            })
+            .expect("索引重建后，走 delete 路径的 UPDATE 不应再失败");
+
+        // 而且这次重建必须真的提交，不是躲在某个未提交事务里
+        let fresh = Connection::open(&path).expect("fresh conn");
+        let status: String = fresh
+            .query_row("SELECT status FROM long_memories WHERE id = 1", [], |r| r.get(0))
+            .expect("read back");
+        assert_eq!(status, "archived");
+        let docsize: i64 = fresh
+            .query_row("SELECT COUNT(*) FROM long_memories_fts_docsize", [], |r| r.get(0))
+            .expect("docsize");
+        assert_eq!(docsize, 1, "重建后的索引必须已提交（docsize 有行）");
+        drop(fresh);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 承接上一例：探针失败之后，写入必须真的落地（另一个连接看得见）。
+    #[test]
+    fn memory_writes_still_commit_after_broken_fts_probe() {
+        let path = temp_db_path("fts-probe-commit");
+        {
+            let conn = Connection::open(&path).expect("file db");
+            init_schema(&conn).expect("schema");
+            seed_long_memory(&conn);
+            break_long_memory_writes(&conn);
+        }
+
+        let handle = SqliteHandle::new_with_foreign_keys(path.clone(), init_schema);
+        // 首次 with_conn 会跑建表 → 探针失败 → 随后这条写入必须提交
+        handle
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO sessions (id, updated_at, title) VALUES ('s1', 1, 't')",
+                    [],
+                )
+                .map_err(db_failed)?;
+                Ok(())
+            })
+            .expect("write via resident conn");
+
+        let dedicated = handle.open_dedicated().expect("dedicated");
+        let n: i64 = dedicated
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .map_err(db_failed)
+            .expect("count sessions");
+        assert_eq!(
+            n, 1,
+            "探针失败不得让后续写入卡在未提交事务里（独立连接必须看得见这条写入）"
+        );
+        drop(dedicated);
+        let _ = std::fs::remove_file(&path);
+    }
 }

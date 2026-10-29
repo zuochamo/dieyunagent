@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow */
 'use strict';
 
 /** 工具行的稳定签名（不含思考正文） */
@@ -194,7 +194,8 @@ function getThinkingUiState(hostEl) {
       expanded: new Set(),
       collapsed: new Set(),
       liveRun: false,
-      userOpen: null
+      userOpen: null,
+      flowEntered: new Set()
     };
   }
   return hostEl._thinkingUi;
@@ -208,7 +209,8 @@ function resetThinkingUiState(hostEl) {
     expanded: new Set(),
     collapsed: new Set(),
     liveRun: false,
-    userOpen: prev && typeof prev.userOpen === 'boolean' ? prev.userOpen : null
+    userOpen: prev && typeof prev.userOpen === 'boolean' ? prev.userOpen : null,
+    flowEntered: new Set()
   };
   delete hostEl.dataset.thinkingTraceSig;
 }
@@ -960,6 +962,27 @@ function fillThinkingRoundBlock(block, entry, index, trace, streaming, streamCon
   syncThinkingLiveNote(block, entry);
 }
 
+/**
+ * 「流式新生块」的入场标记（唯一写入口）：只在无极阻尼**当前生效**时打标，
+ * 并在入场动画结束时立刻摘掉。
+ * 两条都必须：CSS 的语义是「有 data-flow-enter 就播一次」，标记若永久留着，
+ * 用户之后在设置里打开无极阻尼时，当前会话里所有历史块会整片重放一次淡入 ——
+ * 正是这个开关要避免的事；阻尼关着时不打标，同理避免「补放一遍」。
+ * @returns {boolean} 是否真的打了标记（调用方据此记账，见 flowEntered）
+ */
+function markThinkingFlowEnter(el) {
+  if (!el) return false;
+  if (typeof isThinkingDampedFlow !== 'function' || !isThinkingDampedFlow()) return false;
+  el.dataset.flowEnter = '1';
+  const done = (e) => {
+    if (e.target !== el || e.animationName !== 'thinking-damped-in') return;
+    el.removeEventListener('animationend', done);
+    delete el.dataset.flowEnter;
+  };
+  el.addEventListener('animationend', done);
+  return true;
+}
+
 function fillThinkingRoundBeat(beat, entry, index, trace, streaming, streamContent) {
   if (!beat) return;
   const vis = String(entry.visibleContent || '').trim();
@@ -968,8 +991,9 @@ function fillThinkingRoundBeat(beat, entry, index, trace, streaming, streamConte
     if (!nar) {
       nar = document.createElement('div');
       nar.className = 'msg-thinking-narration';
-      // 同 mountThinkingRoundDetails：只标记流式新生的那一条，由 CSS 决定是否入场
-      if (streaming) nar.dataset.flowEnter = '1';
+      // 旁白刻意不加入场动画：它随 visibleContent 的有无被反复重建（每个 delta 都可能
+      // 移除再新建），打标就等于一帧播一次入场，看起来一直在闪。这一轮要不要入场
+      // 由外层 .msg-thinking-step 负责，旁白跟着它一起出来就够了。
       beat.insertBefore(nar, beat.firstChild);
     }
     updateIncrementalTextContent(nar, vis);
@@ -1120,9 +1144,14 @@ function mountThinkingRoundDetails(
   const wrap = document.createElement('div');
   wrap.className = 'msg-thinking-step';
   wrap.dataset.stepKey = thinkingStepDomKey(entry, index);
-  // 「流式期间新生」是纯事实标记；要不要入场动画由 CSS 按无极阻尼开关决定，
-  // 这样历史重绘（streaming=false）不会让整片思考区重新淡入一遍。
-  if (streaming) wrap.dataset.flowEnter = '1';
+  /*
+   * 入流标记按轮次记账：流式期间思考区会被反复重绘（同一轮的节点可能整棵重建），
+   * 每次重建都打标就等于每帧重播一次入场动画 —— 表现是整片思考区一直闪。
+   * flowEntered 记「这一轮已经入过流」，随本轮 run 的重置一起清空（见 resetThinkingUiState）。
+   */
+  if (streaming && uiState && !uiState.flowEntered.has(stepKey) && markThinkingFlowEnter(wrap)) {
+    uiState.flowEntered.add(stepKey);
+  }
   const details = document.createElement('details');
   details.className = 'msg-thinking-round-details';
   details.dataset.stepKey = wrap.dataset.stepKey;

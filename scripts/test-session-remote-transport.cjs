@@ -206,7 +206,7 @@ async function testSameHostPathChangeDoesNotDropSsh() {
   console.log('ok same-host path change keeps ssh');
 }
 
-async function testGetLeasedSshTargetsDedupesGatewayPaths() {
+async function testGetLeasedTargetsCarriesSessionId() {
   const targetA1 = { kind: 'ssh', host: 'h1', port: 22, username: 'u', remotePath: '/a' };
   const targetA2 = { kind: 'ssh', host: 'h1', port: 22, username: 'u', remotePath: '/b' };
   const targetB = { kind: 'ssh', host: 'h2', port: 22, username: 'u', remotePath: '/x' };
@@ -226,11 +226,16 @@ async function testGetLeasedSshTargetsDedupesGatewayPaths() {
   await transport.setSessionRemoteLease('sess-b', true, targetA2);
   await transport.setSessionRemoteLease('sess-c', true, targetB);
 
-  const leased = transport.getLeasedSshTargets();
+  // 重连只要目标不够：端点相同、仓库不同，必须能分辨出是哪条会话
+  const leased = transport.getLeasedTargets();
   if (leased.length !== 3) {
-    throw new Error(`expected 3 leased ssh gateway paths, got ${leased.length}`);
+    throw new Error(`expected 3 leased entries, got ${leased.length}`);
   }
-  console.log('ok getLeasedSshTargets dedupes gateway paths');
+  const bySession = new Map(leased.map((e) => [e.sessionId, e.target.remotePath]));
+  if (bySession.get('sess-a') !== '/a' || bySession.get('sess-b') !== '/b' || bySession.get('sess-c') !== '/x') {
+    throw new Error(`leased entries must carry session identity, got ${JSON.stringify(leased)}`);
+  }
+  console.log('ok getLeasedTargets carries session id');
 }
 
 async function testGetLeasedSessionIds() {
@@ -375,15 +380,98 @@ async function testLeaseHoldIsIdempotentAndDropForce() {
   console.log('ok lease hold idempotent + drop force');
 }
 
+async function testForeignRepoGatewayEnsureDoesNotHijackOtherSession() {
+  const HOST = { host: 'h1', port: 22, username: 'u' };
+  const repoA = { kind: 'ssh', ...HOST, remotePath: '/proj-a' }; // 会话 sess-a 的仓库
+  const repoB = { kind: 'ssh', ...HOST, remotePath: '/proj-b' }; // 同机另一个仓库
+
+  const wsWrites = [];
+  const contexts = [];
+  const slots = [];
+
+  const manager = {
+    status: () => ({ connected: true }),
+    execScript: async () => ({ code: 0, stdout: 'WT_REUSED\n', stderr: '' })
+  };
+  const transport = createSessionRemoteTransport({
+    localGateway: {
+      activeSessionId: 'sess-a',
+      getSessionWorkspaceTarget: () => repoA,
+      setSessionWorkspaceContext: (sid, ws) => contexts.push([sid, ws]),
+      invokeRpc: async (method, params) => {
+        if (method === 'memory.session_workspace_set') wsWrites.push([params.sessionId, params.workspacePath]);
+        return {};
+      }
+    },
+    sshPool: {
+      acquire: async () => {},
+      release: () => {},
+      isConnected: () => true,
+      getManagerForTarget: () => manager,
+      getConnectedManager: () => manager
+    },
+    remoteGatewayPool: {
+      ensureForTarget: async (t) => {
+        slots.push(t.remotePath);
+        return null;
+      },
+      releaseForTarget: () => {},
+      getInfoForTarget: () => null
+    },
+    sshFacade: null,
+    sshCredentialsStore: null,
+    tryAutoReconnectSsh: null,
+    buildRemoteGatewayPackContext: async () => ({}),
+    invalidateRemoteAgentClient: () => {}
+  });
+
+  await transport.setSessionRemoteLease('sess-a', true, repoA);
+  const leaseTarget = transport.getLeasedTargets();
+  if (leaseTarget.length !== 1 || leaseTarget[0].sessionId !== 'sess-a') {
+    throw new Error(`leased targets must carry session id, got ${JSON.stringify(leaseTarget)}`);
+  }
+
+  wsWrites.length = 0;
+  contexts.length = 0;
+  slots.length = 0;
+
+  // 同机另一仓库要重连/起槽位，但没有会话身份：不许替任何会话建 worktree、不许改任何会话工作区
+  await transport.ensureRemoteGatewayForTarget(repoB);
+  if (wsWrites.length || contexts.length) {
+    throw new Error(
+      `端点上没有会话身份时不许写会话工作区，got ws=${JSON.stringify(wsWrites)} ctx=${JSON.stringify(contexts)}`
+    );
+  }
+  if (slots.length !== 1 || slots[0] !== '/proj-b') {
+    throw new Error(`应只按传入目标起槽位，got ${JSON.stringify(slots)}`);
+  }
+
+  wsWrites.length = 0;
+  contexts.length = 0;
+  slots.length = 0;
+
+  // 带了正确会话身份：worktree 建在**自己的**仓库里，会话工作区指向自己的 worktree
+  await transport.ensureRemoteGatewayForTarget(repoB, 'sess-b');
+  const wroteA = wsWrites.some(([sid]) => sid === 'sess-a');
+  const wroteB = wsWrites.some(([sid]) => sid === 'sess-b' && String(wsWrites[0][1] || '').includes('/proj-b/.dieyun/worktrees/'));
+  if (wroteA) throw new Error('sess-a 的工作区被 sess-b 的仓库改写了');
+  if (!wroteB) throw new Error(`sess-b 应绑到 /proj-b 的 worktree，got ${JSON.stringify(wsWrites)}`);
+  if (!String(slots[0] || '').startsWith('/proj-b/.dieyun/worktrees/')) {
+    throw new Error(`槽位应按 worktree 分，got ${JSON.stringify(slots)}`);
+  }
+  console.log('ok foreign-repo gateway ensure cannot hijack another session');
+}
+
 async function main() {
   testRemoteAgentInfoScopedToSession();
   await testRemoteLeaseKeepsTransportOnLocalSwitch();
   await testKeepSshViewOnLocalSwitchWithoutLease();
   await testSameHostPathChangeDoesNotDropSsh();
-  await testGetLeasedSshTargetsDedupesGatewayPaths();
+  await testGetLeasedTargetsCarriesSessionId();
   await testGetLeasedSessionIds();
   await testParallelSameHostDifferentPathLeases();
   await testLeaseHoldIsIdempotentAndDropForce();
+  await testForeignRepoGatewayEnsureDoesNotHijackOtherSession();
   console.log('\nsession-remote-transport: ALL OK');
 }
 

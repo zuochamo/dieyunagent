@@ -125,8 +125,9 @@
 `computer` 工具（截屏 + 鼠标键盘注入，`src/computer/`）是结构化动作、无路径语义，
 判定入口是 `sandbox-policy.decideOsControlAction`：
 
-- **总开关**：`permissions.osControl`（默认关，设置页「启用电脑控制」）。打开即代表
-  同意读屏 —— `action=screenshot` 在任何档位直接放行，不走审批（否则开关形同虚设）。
+- **总开关**：`permissions.osControl`（默认开，设置页「启用电脑控制」可关掉）。打开即代表
+  同意读屏 —— `action=screenshot` 在任何档位直接放行，不走审批（否则开关形同虚设）；
+  关掉则整个 `computer` 工具不再注入（键鼠动作仍按下面的档位判 ask-once，不受此开关替代）。
 - **只读动作**：`screenshot` / `wait` / `wait_until` / `list_windows`。判定是**白名单倒置**的 ——
   除只读集合之外的一切 action（含以后新增的、拼错的、上游漏校验的）都按「会改变系统状态」处理：
   非 `danger-full-access` 档**问一次**，类别 `os-control`、无路径（scope=`-`）→ 审批记忆是

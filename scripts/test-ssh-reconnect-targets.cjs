@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { collectSshReconnectTargets } = require('../src/ssh/reconnect');
+const { collectSshReconnectEntries } = require('../src/ssh/reconnect');
 const { getRemoteGatewayPackRoot } = require('../src/main/remote-gateway');
 
 function assert(cond, msg) {
@@ -13,15 +13,20 @@ const aDup = { kind: 'ssh', host: 'h1', port: 22, username: 'u', remotePath: '/h
 const b = { kind: 'ssh', host: 'h1', port: 22, username: 'u', remotePath: '/opt/app' };
 const local = { kind: 'local', path: 'D:\\proj' };
 
-assert(collectSshReconnectTargets(null, null).length === 0, 'empty');
-assert(collectSshReconnectTargets(local, [a]).length === 1, 'skip local view, keep leased');
+assert(collectSshReconnectEntries(null, null).length === 0, 'empty');
+assert(collectSshReconnectEntries({ target: local }, [{ target: a }]).length === 1, 'skip local view, keep leased');
 
-const merged = collectSshReconnectTargets(a, [aDup, b, local]);
+const merged = collectSshReconnectEntries({ target: a, sessionId: 'sA' }, [
+  { target: aDup, sessionId: 'sA' },
+  { target: b, sessionId: 'sB' },
+  { target: local, sessionId: '' }
+]);
 assert(merged.length === 2, 'dedupe same host+path, keep other path');
-assert(merged[0].remotePath === '/home/u' || merged[0].remotePath === '/home/u/', 'view first');
+assert(merged[0].target.remotePath === '/home/u' || merged[0].target.remotePath === '/home/u/', 'view first');
+assert(merged[0].sessionId === 'sA', 'view entry keeps its session id');
 assert(
-  merged.some((t) => String(t.remotePath || '').replace(/\\/g, '/').includes('opt')),
-  'second target kept'
+  merged.some((e) => String(e.target.remotePath || '').replace(/\\/g, '/').includes('opt') && e.sessionId === 'sB'),
+  'second target kept together with its session id'
 );
 
 const unpack = getRemoteGatewayPackRoot({ isPackaged: false }).replace(/\\/g, '/');

@@ -205,7 +205,17 @@ function handleGatewayMessage(state, ev) {
   if (!box) return;
   state.pending.delete(id);
   if (msg.ok) box.resolve(msg.data);
-  else box.reject(new Error((msg.error && msg.error.message) || 'RPC 失败'));
+  else {
+    // 服务端刻意把 code / retryable / suggestedFix 一起送回来（见 gateway/server.js
+    // 「跨 WebSocket 传的时候不许只剩一条 message」），这里不能把它们丢掉：
+    // 调用方（发送路径、工具层）靠 code 决定「重开对话 / 重试 / 就此打住」。
+    const info = msg.error && typeof msg.error === 'object' ? msg.error : {};
+    const err = new Error(info.message || 'RPC 失败');
+    if (info.code) err.code = String(info.code);
+    if (typeof info.retryable === 'boolean') err.retryable = info.retryable;
+    if (info.suggestedFix) err.suggestedFix = String(info.suggestedFix);
+    box.reject(err);
+  }
 }
 
 async function connectOneGateway(state, info, label) {
@@ -516,8 +526,25 @@ function withSessionRpcScope(params, sessionId) {
   return base;
 }
 
+/**
+ * 索引 / 结构索引面板的 RPC 参数：与发消息前的 prep（`ensurePrepIndexReady`）同一条作用域。
+ *
+ * 面板以前只传 `workspaceRoot`，于是 Gateway 解析不到本会话的远端目标，把这个 SSH
+ * 工作区的 URI 当本地路径 resolve 成本机 core 里的一个空键 —— 面板恒显示「未建立 / 0 /
+ * 从未构建」，而 agent 侧其实在远端正常的库里检索。作用域缺一不可：`sessionId` 让
+ * Gateway hydrate 会话目标，`runWorkspaceRoot` 让远端分支带上真正的 remotePath。
+ *
+ * @param {string} workspaceRoot
+ * @param {object} [extra]
+ */
+function indexPanelRpcParams(workspaceRoot, extra) {
+  const params = { workspaceRoot, ...(extra || {}) };
+  return withSessionRpcScope(params);
+}
+
 if (typeof window !== 'undefined') {
   window.resolveSessionWorkspacePathForRpc = resolveSessionWorkspacePathForRpc;
   window.resolveWorkspaceRootForIndexPanels = resolveWorkspaceRootForIndexPanels;
   window.withSessionRpcScope = withSessionRpcScope;
+  window.indexPanelRpcParams = indexPanelRpcParams;
 }

@@ -1,6 +1,6 @@
 /* global window, document, $, gwState, gatewayCall, settings, saveSettings, openSidePanel, closeSettingsModal,
    currentSessionId, resolveSessionWorkspacePathForRpc, resolveSessionWorkspacePathSync,
-   resolveWorkspaceRootForIndexPanels */
+   resolveWorkspaceRootForIndexPanels, indexPanelRpcParams */
 'use strict';
 
 let graphPanelPollTimer = null;
@@ -110,7 +110,8 @@ async function refreshGraphPanelStatus() {
   }
   if (rebuildBtn) rebuildBtn.disabled = false;
   try {
-    const st = await gatewayCall('graph.status', { workspaceRoot: root });
+    // 与代码索引面板同一条作用域规则，见 renderer-gateway.js:indexPanelRpcParams
+    const st = await gatewayCall('graph.status', indexPanelRpcParams(root));
     const indexing = !!(st && st.indexing);
     const indexed = !!(st && st.indexed);
     let state = '未建立';
@@ -197,7 +198,7 @@ async function rebuildGraphPanelIndex() {
   try {
     await gatewayCall(
       'graph.index.start',
-      { workspaceRoot: root, force: true, skipIfReady: false },
+      indexPanelRpcParams(root, { force: true, skipIfReady: false }),
       { timeoutMs: 60000 }
     );
   } catch (err) {

@@ -985,7 +985,8 @@ function createRemoteGatewayManager(opts = {}) {
     return {
       active,
       deploying: !!deploying,
-      info: getInfo(),
+      // IPC 与界面都读这份：必须可 structured clone（见 wireInfo）
+      info: wireInfo(getInfo()),
       workspaceRoot: remoteWorkspace || '',
       socketPath: socketPath || '',
       runtimeSource,
@@ -1006,8 +1007,27 @@ function createRemoteGatewayManager(opts = {}) {
   };
 }
 
+/**
+ * `getInfo()` 的**可跨进程投影**：去掉 `openChannel`。
+ *
+ * `getInfo()` 是给进程内消费者（`RemoteAgentClient`）的「怎么开通道」，带函数；
+ * 只要它原样进 IPC 返回值，整条 reply 就会抛
+ * `Error: An object could not be cloned`（structured clone 不支持函数）——
+ * `ssh:remote-gateway-status` / `ssh:auto-reconnect` 实测就挂在这里。
+ * 所以「对外可见的远端状态」一律走这个投影，别把 `getInfo()` 直接塞进 IPC。
+ *
+ * @param {object | null} info
+ * @returns {object | null}
+ */
+function wireInfo(info) {
+  if (!info) return null;
+  const { openChannel, ...rest } = info;
+  return rest;
+}
+
 module.exports = {
   createRemoteGatewayManager,
+  wireInfo,
   // 路径的单一来源（IPC / 单测都走这里，别再各自拼 `current/agent.log`）
   remoteLogDir,
   remoteLogPathFor,

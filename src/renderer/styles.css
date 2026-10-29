@@ -2331,14 +2331,17 @@ body.composer-resizing {
 /*
  * 无极阻尼流水（设置 → 主题 → 无极阻尼；开关只翻 :root 上的 data-thinking-flow）。
  * 关闭时思考区保持「整块瞬现 + 行高硬跳」，打开后由两半共同构成连续下淌：
- *   1) 流式新生的每一段（data-flow-enter 只打在 streaming 时新建的块上，
- *      历史重绘不会重新入场）按 enter 曲线滑入淡入，见下；
+ *   1) 流式新生的每一轮（data-flow-enter 只在 streaming 时、且这一轮第一次出现时打，
+ *      历史重绘与同轮重建都不再入场）按 enter 曲线滑入淡入，见下；
  *   2) 视口贴底改为阻尼跟随（renderer-chat-render.js:dampedChatFollowStep），
  *      新一行的高度增长被逐帧吸收 —— 只做 1) 不做 2) 仍然是一行一行跳。
  * 动画不设 fill：终态就是元素自身的自然样式，跑完不留合成层/常驻动画。
+ * 标记本身也是临时的：renderer-thinking-trace-dom.js:markThinkingFlowEnter 在 animationend
+ * 后即摘掉 data-flow-enter —— 属性留着的话，用户之后打开开关会让已有块整片重放一次淡入。
+ * 只挂步（.msg-thinking-step），不挂旁白：旁白随 visibleContent 的有无被反复重建，
+ * 打标就是一帧播一次入场，看起来一直在闪。
  */
-:root[data-thinking-flow='damped'] .msg-thinking-step[data-flow-enter],
-:root[data-thinking-flow='damped'] .msg-thinking-narration[data-flow-enter] {
+:root[data-thinking-flow='damped'] .msg-thinking-step[data-flow-enter] {
   animation: thinking-damped-in var(--motion-slow) var(--motion-ease-enter);
 }
 @keyframes thinking-damped-in {
@@ -2360,8 +2363,7 @@ body.composer-resizing {
 }
 /* 放在上面几条之后：同特异度下靠后者胜，否则减少动效关不掉入流动画 */
 @media (prefers-reduced-motion: reduce) {
-  :root[data-thinking-flow='damped'] .msg-thinking-step[data-flow-enter],
-  :root[data-thinking-flow='damped'] .msg-thinking-narration[data-flow-enter] {
+  :root[data-thinking-flow='damped'] .msg-thinking-step[data-flow-enter] {
     animation: none;
   }
 }

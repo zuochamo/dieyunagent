@@ -13,11 +13,12 @@ const DEFAULTS = {
   webFetch: true,
   browserAutomation: true,
   /**
-   * OS 级电脑控制（computer 工具：截屏 + 鼠标键盘注入）。默认关：
-   * 打开即代表同意 Agent 读屏（截屏不再走审批），鼠标/键盘动作仍按
-   * sandbox-policy 的档位判定 ask-once（danger-full-access 除外）。
+   * OS 级电脑控制（computer 工具：截屏 + 鼠标键盘注入）。**默认开**：
+   * 装好即可让 Agent 读屏干活（此前默认关，用户还得自己去设置页开一次）；
+   * 鼠标/键盘动作仍按 sandbox-policy 的档位判定 ask-once（`danger-full-access` 除外），
+   * 所以「默认开」放开的是截屏读屏，不是无确认的乱点。关掉即整个 computer 工具不再注入。
    */
-  osControl: false,
+  osControl: true,
   /**
    * 沙箱档位（唯一旋钮）：`read-only` | `workspace-write` | `danger-full-access`。
    * 语义与判定在 `sandbox-policy.js`；落盘白名单的唯一组装点是

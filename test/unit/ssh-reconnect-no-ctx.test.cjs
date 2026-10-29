@@ -12,7 +12,7 @@
  */
 const assert = require('node:assert/strict');
 
-const { createSshReconnect, collectSshReconnectTargets } = require('../../src/ssh/reconnect');
+const { createSshReconnect, collectSshReconnectEntries } = require('../../src/ssh/reconnect');
 
 const TARGET = {
   kind: 'ssh',
@@ -76,6 +76,6 @@ describe('SSH 重连入口不许引用未声明的 ctx', () => {
     const r = await reconnect.reconnectActiveAndLeasedSsh('close');
     assert.equal(r.ok, true);
     assert.equal(r.count, 0);
-    assert.deepEqual(collectSshReconnectTargets(null, []), []);
+    assert.deepEqual(collectSshReconnectEntries(null, []), []);
   });
 });

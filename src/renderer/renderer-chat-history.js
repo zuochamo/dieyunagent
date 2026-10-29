@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, disconnectSshIfConnected, ensureLocalGatewayReady, clearAgentContinueState, saveComposerAgentMode, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, disconnectSshIfConnected, ensureLocalGatewayReady, clearAgentContinueState, saveComposerAgentMode, loadComposerModelPickForSession, saveComposerModelPick, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta */
 'use strict';
 
 const historyApi = window.diecloud || {};
@@ -852,6 +852,12 @@ function consumePendingSessionHandoff(sessionId) {
   return from;
 }
 
+/** 只读探测（不消费）：系统提示缓存键要看「本轮是否带交接」，消费仍归 consumePendingSessionHandoff */
+function peekPendingSessionHandoff(sessionId) {
+  const sid = String(sessionId || '').trim();
+  return sid ? pendingHandoffBySession.get(sid) || null : null;
+}
+
 /** 历史行「⇄」：为该会话生成交接（Main 单轮 LLM → memory.handoff_save） */
 async function generateHandoffForSession(sessionId, btn) {
   if (!gwState.authed) return;
@@ -954,7 +960,19 @@ async function openNewChatMenu() {
 async function continueFromHandoff(latest) {
   const fromId = String((latest && latest.sessionId) || '').trim();
   if (!fromId) return;
-  await createNewSession();
+  // 交接自带来源工作区（memory.handoff_* 已剥到仓库根）：跨项目「继续上次」必须挂到
+  // 交接讲的仓库，而不是用户当前视图的工作区；没有记录才沿用当前视图。
+  const handoffWs = String((latest && latest.workspacePath) || '').trim();
+  await createNewSession(handoffWs || undefined);
+  // 模型也跟着交接走：交接可能来自别的会话，新会话要用**来源会话**的模型，而不是
+  // 当前视图会话的模型（createNewSession 默认继承的是当前会话）。
+  if (
+    currentSessionId &&
+    typeof loadComposerModelPickForSession === 'function' &&
+    typeof saveComposerModelPick === 'function'
+  ) {
+    saveComposerModelPick(loadComposerModelPickForSession(fromId), currentSessionId);
+  }
   if (currentSessionId) setPendingSessionHandoff(currentSessionId, fromId);
 }
 
@@ -1444,12 +1462,24 @@ async function createNewSession(workspacePath, opts = {}) {
         invalidateWorkspaceArtifacts();
       }
     }
+    // 派生出的新对话沿用来源会话的模型选择（交接 / 新对话默认就是「同一个模型」），
+    // 不让它悄悄回到全局上次选择。模型选择的唯一来源仍是 composer 的 per-session pick。
+    const inheritModelFrom = String(
+      (typeof currentSessionId !== 'undefined' && currentSessionId) || ''
+    ).trim();
+    const inheritModelPick =
+      inheritModelFrom && typeof loadComposerModelPickForSession === 'function'
+        ? loadComposerModelPickForSession(inheritModelFrom)
+        : null;
     const s = await gatewayCall('memory.session_create', {
       workspacePath: keepWorkspace ? inheritWs : null,
       title: opts && opts.title ? String(opts.title) : undefined
     });
     currentSessionId = s.id;
     setCurrentSessionId(s.id);
+    if (inheritModelPick && typeof saveComposerModelPick === 'function') {
+      saveComposerModelPick(inheritModelPick, s.id);
+    }
     messages.length = 0;
     if (typeof setMessagesOwnerSessionId === 'function') {
       setMessagesOwnerSessionId(s.id);
@@ -1640,6 +1670,7 @@ function initChatHistoryUI() {
 window.switchSession = switchSession;
 window.setPendingSessionHandoff = setPendingSessionHandoff;
 window.consumePendingSessionHandoff = consumePendingSessionHandoff;
+window.peekPendingSessionHandoff = peekPendingSessionHandoff;
 window.continueFromLastSession = continueFromLastSession;
 window.loadChatFromGateway = loadChatFromGateway;
 window.healActiveSessionFromHistory = healActiveSessionFromHistory;

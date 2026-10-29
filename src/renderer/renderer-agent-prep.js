@@ -247,18 +247,19 @@ const INDEX_PREP_TRANSIENT_RE =
   /超时|timeout|dieyun-core 已停止|dieyun-core 已退出|EXEC_ERROR/i;
 
 /**
- * 发消息前索引门闩（codebase / graph 共用）：
- * status → 已可检索则注入 → 构建中则仅提示 → 未建立则 start 一次 → **一律不等待**。
+ * 索引准备区的进度文案。
  *
- * @param {{
- *   kind: 'codebase'|'graph',
- *   workspacePath: string,
- *   prepSid: string,
- *   abortIfNeeded: () => void,
- *   gatewayCall: (method: string, params: object, timeoutMs?: number) => Promise<object>,
- *   isReady: (st: object) => boolean
- * }} opts
- * @returns {Promise<{ ok: boolean, status: object|null, skipped?: boolean, phase?: string, error?: string }>}
+ * **「创建中」与「更新中」不是同义词**：`st.indexed === true` 说明库里已经有一份可用索引，
+ * 这次只是增量刷新（通常几秒）；一律写「创建中」，用户会看到「面板上明明已建好、
+ * 准备区却在创建」而当成 bug，进而去重建一份根本不需要重建的索引。
+ *
+ * 前面统一带「本会话工作区」也是同一个理由：远端会话的索引在它自己的 worktree 里
+ * （`<workspace>/.dieyun/index.sqlite`，不可复用主工作区那份），只写「创建中」看不出主语。
+ *
+ * @param {object|null} st `codebase.status` / `graph.status` 的返回值
+ * @param {'codebase'|'graph'} kind
+ * @param {'creating'|'started'} [mode] creating=正在跑；started=本轮刚发起、没等到状态
+ * @returns {string}
  */
 function formatPrepIndexProgress(st, kind, mode) {
   const label = kind === 'codebase' ? '代码索引' : '结构索引';
@@ -287,12 +288,16 @@ function formatPrepIndexProgress(st, kind, mode) {
               : '建立结构';
   const done = Number(st && st.filesDone) || 0;
   const total = Number(st && st.filesTotal) || 0;
-  const progress = total > 0 ? `（${done}/${total} 文件）` : done > 0 ? `（${done} 文件）` : '';
+  // 行内不套括号：skipped 行的整体就渲染成 `label（detail）`，detail 里再带括号会变成双层
+  const progress = total > 0 ? ` · ${done}/${total} 文件` : done > 0 ? ` · ${done} 文件` : '';
+  // 「已经在建」和「已有索引在刷新」是两种状态：进度数字（远端可能只有 done、没有 total）
+  // 对两者都成立，差别只在动词，所以动词由 `st.indexed` 决定。
+  const verb = st && st.indexed ? '更新中' : '创建中';
   if (mode === 'creating') {
-    return `${label}创建中${progress}，本次不等待`;
+    return `本会话工作区${label}${verb}${progress}，本次不等待`;
   }
   if (mode === 'started') {
-    return `已发起${label}创建任务（后台），本次不等待`;
+    return `已发起本会话工作区${label}建库（后台），本次不等待`;
   }
   return `${label}${phaseLabel ? ` · ${phaseLabel}` : ''}${progress}`;
 }
@@ -328,6 +333,21 @@ async function waitForFreshPrepIndex({ callRpc, statusMethod, workspacePath, not
   return st;
 }
 
+/**
+ * 发消息前索引门闩（codebase / graph 共用）：
+ * status → 已可检索则注入 → 构建中则仅提示 → 未建立则 start 一次 → **一律不等待**。
+ * 提示文案的唯一成形处是 {@link formatPrepIndexProgress}（「创建中 / 更新中」在那里区分）。
+ *
+ * @param {{
+ *   kind: 'codebase'|'graph',
+ *   workspacePath: string,
+ *   prepSid: string,
+ *   abortIfNeeded: () => void,
+ *   gatewayCall: (method: string, params: object, timeoutMs?: number) => Promise<object>,
+ *   isReady: (st: object) => boolean
+ * }} opts
+ * @returns {Promise<{ ok: boolean, status: object|null, skipped?: boolean, phase?: string, error?: string }>}
+ */
 async function ensurePrepIndexReady(opts) {
   const { kind, workspacePath, prepSid, abortIfNeeded, gatewayCall: rpc, isReady } = opts;
   const statusMethod = kind === 'codebase' ? 'codebase.status' : 'graph.status';
@@ -398,7 +418,6 @@ async function ensurePrepIndexReady(opts) {
     return { ok: false, status: st, skipped: true, phase: 'error', error: detail };
   }
 
-  let started = false;
   try {
     const startRes = await callRpc(
       startMethod,
@@ -408,9 +427,8 @@ async function ensurePrepIndexReady(opts) {
       '索引启动失败，重试…'
     );
     st = startRes || st;
-    started = true;
   } catch {
-    started = true;
+    // 短超时没答复不等于没发起：用长超时再发一次，结果只影响面板忙态，不影响本轮
     void callRpc(
       startMethod,
       { workspaceRoot: workspacePath, force: false, skipIfReady: false },
@@ -428,9 +446,7 @@ async function ensurePrepIndexReady(opts) {
     return { ok: false, status: st, skipped: true, phase: 'creating', error: detail };
   }
 
-  const detail = started
-    ? formatPrepIndexProgress(st, kind, 'started')
-    : `已发起${label}创建任务（后台），本次不等待`;
+  const detail = formatPrepIndexProgress(st, kind, 'started');
   note(detail);
   return { ok: false, status: st, skipped: true, phase: 'started', error: detail };
 }

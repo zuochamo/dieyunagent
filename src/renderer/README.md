@@ -131,7 +131,7 @@
 - 会随指针/流式内容逐帧变化的尺寸（分隔条拖拽、语音波形）**不挂过渡**，波形用 `transform: scaleY()` 而不是逐帧写 `height`。
 - JS 需要「等过渡结束」时用 `renderer-constants.js:motionMs('--motion-slow')` 读同名 token，不要复制毫秒数。
 - 无限脉冲/旋转的节奏（0.75s–1.4s）是另一族，不并入过渡尺度。
-- **无极阻尼**（设置 → 主题 开关，偏好 `tracePrefs.dampedFlow`，落到 `:root[data-thinking-flow='damped']`）：思考区改为连续入流。两半缺一不可 —— 流式新生块的入场动画（`thinking-damped-in`，只有 `data-flow-enter` 的块会有，历史重绘不重放）＋ 贴底改阻尼跟随（`renderer-chat-render.js:dampedChatFollowStep`）；只加动画不阻尼滚动仍然是一行一行跳。系统「减少动效」时整体退回整块瞬现。
+- **无极阻尼**（设置 → 主题 开关，偏好 `tracePrefs.dampedFlow`，落到 `:root[data-thinking-flow='damped']`）：思考区改为连续入流。两半缺一不可 —— 流式新生块的入场动画（`thinking-damped-in`，只有 `data-flow-enter` 的块会有，历史重绘不重放）＋ 贴底改阻尼跟随（`renderer-chat-render.js:dampedChatFollowStep`）；只加动画不阻尼滚动仍然是一行一行跳。入场标记 `markThinkingFlowEnter` 必须在 `animationend` 后即摘（留着会让之后打开开关时整片重放）。**浮条/按钮的显隐只认 `chatAutoFollow` 这一个跨帧稳定的意图位**：追帧期间视口暂时不在底部是我们自己的动画中间态，用逐帧置位/复位的状态位去压它们，会让「上一问」浮条按 delta 节奏一闪一闪（无极阻尼开启后浮条狂闪的根因）。系统「减少动效」时整体退回整块瞬现，`matchMedia` 变化要实时重算，别只判一次。**入场动画必须幂等**：同一轮在流式期间会被重绘多次（节点可能整棵重建），入场按 `uiState.flowEntered` 记账、一轮只入一次流；旁白这类「随 `visibleContent` 有无反复重建」的节点一律不挂入场 —— 否则等于一帧播一次，看起来就是一直在闪。
 
 ## 改完验证
 

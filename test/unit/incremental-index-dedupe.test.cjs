@@ -60,7 +60,6 @@ describe('增量索引去抖', () => {
     const sched = createGraphIncrementalScheduler({
       userDataPath: ROOT,
       getWorkspaceRoot: () => ROOT,
-      isRemoteWorkspace: () => false,
       invokeRustCore: ops.invokeRustCore,
       debounceMs: 80
     });
@@ -77,7 +76,6 @@ describe('增量索引去抖', () => {
     const sched = createGraphIncrementalScheduler({
       userDataPath: ROOT,
       getWorkspaceRoot: () => ROOT,
-      isRemoteWorkspace: () => false,
       invokeRustCore: ops.invokeRustCore,
       debounceMs: 80
     });
@@ -94,7 +92,6 @@ describe('增量索引去抖', () => {
     const sched = createGraphIncrementalScheduler({
       userDataPath: ROOT,
       getWorkspaceRoot: () => ROOT,
-      isRemoteWorkspace: () => false,
       invokeRustCore: ops.invokeRustCore,
       debounceMs: 80
     });
@@ -108,7 +105,6 @@ describe('增量索引去抖', () => {
     const sched = createCodebaseIncrementalScheduler({
       userDataPath: ROOT,
       getWorkspaceRoot: () => ROOT,
-      isRemoteWorkspace: () => false,
       invokeRustCore: ops.invokeRustCore,
       debounceMs: 80
     });
@@ -146,7 +142,6 @@ describe('增量索引去抖', () => {
     const sched = createCodebaseIncrementalScheduler({
       userDataPath: ROOT,
       getWorkspaceRoot: () => dir,
-      isRemoteWorkspace: () => false,
       invokeRustCore: async (method) => {
         if (method === 'codebase.status') return { indexed: false, indexing: false, vectorCount: 0 };
         starts.push(method);
@@ -186,7 +181,6 @@ describe('增量索引去抖', () => {
     const sched = createCodebaseIncrementalScheduler({
       userDataPath: ROOT,
       getWorkspaceRoot: () => dir,
-      isRemoteWorkspace: () => false,
       invokeRustCore: async (method) => {
         if (method === 'codebase.status') return { indexed: true, indexing: false, vectorCount: 0 };
         starts.push(method);
@@ -216,7 +210,6 @@ describe('增量索引去抖', () => {
     const sched = createCodebaseIncrementalScheduler({
       userDataPath: ROOT,
       getWorkspaceRoot: () => dir,
-      isRemoteWorkspace: () => false,
       invokeRustCore: async (method) => {
         if (method === 'codebase.status') return { indexed: true, indexing: false, vectorCount: 99 };
         starts.push(method);
@@ -245,7 +238,6 @@ describe('增量索引去抖', () => {
     const sched = createCodebaseIncrementalScheduler({
       userDataPath: ROOT,
       getWorkspaceRoot: () => dir,
-      isRemoteWorkspace: () => false,
       invokeRustCore: async (method) => {
         if (method === 'codebase.status') return { indexed: true, indexing: true, vectorCount: 99 };
         starts.push(method);
@@ -260,5 +252,42 @@ describe('增量索引去抖', () => {
 
     assert.deepEqual(starts, [], 'busy 时不排重试');
     assert.equal(logs.filter((l) => l.includes('索引正在运行')).length, 1);
+  });
+
+  /**
+   * 远程工作区的增量索引由远端 agent 维护，本地这一侧必须原地停手：
+   * `path.resolve('ssh://…')` 会把它变成一个不存在的本地目录（实测
+   * `E:\…\ssh:user@host:\path`），于是只剩 `fs.watch` ENOENT 与
+   * `incremental index skipped: status unavailable` 的噪声。
+   * 判定按「这个 root 是不是本地路径」，与调用方有没有显式传 override 无关。
+   */
+  it('远程工作区（ssh:）不参与本地增量，也不产生噪声日志', async () => {
+    enableCodebaseAuto();
+    const logs = [];
+    const calls = [];
+    const invokeRustCore = async (method) => {
+      calls.push(method);
+      return { indexed: true, indexing: false, vectorCount: 99 };
+    };
+    const sshUri = 'ssh://dieyunx@192.168.31.62/run/media/dieyunx/dieyunserver/dieyuntools';
+    const legacySsh = 'ssh:dieyunx@192.168.31.62:/run/media/dieyunx/dieyunserver/dieyuntools';
+
+    for (const create of [createGraphIncrementalScheduler, createCodebaseIncrementalScheduler]) {
+      const sched = create({
+        userDataPath: ROOT,
+        getWorkspaceRoot: () => sshUri,
+        invokeRustCore,
+        log: (msg) => logs.push(msg),
+        debounceMs: 40
+      });
+      sched.notifyWorkspaceOpened();
+      sched.notifyWorkspaceOpened(sshUri);
+      sched.notifyFileSaved(`${sshUri}/a.js`, sshUri);
+      sched.notifyWorkspaceOpened(legacySsh);
+    }
+    await sleep(200);
+
+    assert.deepEqual(calls, [], '远程工作区不该唤起本地 core 的 status / index.start');
+    assert.deepEqual(logs, [], '也不该留下「尚未建立…」之类的噪声');
   });
 });

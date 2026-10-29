@@ -1,11 +1,6 @@
 'use strict';
 
-const {
-  isSameSshTarget,
-  normalizeRemotePath,
-  sshGatewayKey,
-  sshTargetKey
-} = require('../workspace/target');
+const { isSameSshTarget, normalizeRemotePath, sshTargetKey } = require('../workspace/target');
 const { ensureSessionWorktree } = require('./session-worktree');
 const { remoteWorktreePath, repoRemotePathOf } = require('../ssh/remote-worktree');
 
@@ -197,7 +192,7 @@ function createSessionRemoteTransport(deps) {
       });
       if (ok) {
         try {
-          await ensureRemoteGatewayForTarget(effective);
+          await ensureRemoteGatewayForTarget(effective, sid);
         } catch (e) {
           const log = deps.log || (() => {});
           log('session remote lease gateway: ' + (e && e.message ? e.message : String(e)));
@@ -252,19 +247,20 @@ function createSessionRemoteTransport(deps) {
     return true;
   }
 
-  /** 这个端点当前归哪个会话：租约优先，其次当前会话（端点一致才算） */
-  function sessionIdForTarget(target) {
-    const leased = listLeaseSessionIdsForTarget(target);
-    if (leased.length) return leased[0];
-    const active = deps.localGateway && deps.localGateway.activeSessionId;
-    if (!active) return '';
-    const t =
-      deps.localGateway && typeof deps.localGateway.getSessionWorkspaceTarget === 'function'
-        ? deps.localGateway.getSessionWorkspaceTarget(active)
-        : null;
-    return t && t.kind === 'ssh' && isSameSshTarget(t, target) ? String(active) : '';
-  }
-
+  /**
+   * 起/复用某条 SSH 端点上的远端 Agent 槽位。
+   *
+   * `sessionId` 必须由调用方给：以前缺省时用「按端点反查会话」补（端点只认
+   * `user@host:port`，不含仓库），同机多仓库时会把**别的会话**挑出来，接着
+   * `withSessionWorktree(别人的会话, 这个仓库)` 在该仓库里建一份别人的 worktree，
+   * 并把仓库路径写回别人的会话工作区 —— 历史分组跟着跳到另一个项目，
+   * 远端 agent 也可能被起在错仓库的 worktree 上。
+   *
+   * 没有会话身份时只起槽位、不建 worktree、不碰任何会话工作区（拿到的仍是传进来的目标）。
+   *
+   * @param {object} target 端点目标；可以是仓库根，也可以已是该会话的 worktree
+   * @param {string} [sessionId] 会话身份（唯一来源是调用方手里的 sessionId）
+   */
   async function ensureRemoteGatewayForTarget(target, sessionId) {
     if (!target || target.kind !== 'ssh' || !deps.remoteGatewayPool) return null;
     const manager = sshManagerForTarget(target);
@@ -272,10 +268,14 @@ function createSessionRemoteTransport(deps) {
     // 不要在这里先看 isActiveForTarget：那个布尔不能证明隧道/对端还活着，
     // 幂等 + 活体探测统一由 manager.ensureRemoteGateway 判定（单一来源）。
     // 重连等外部入口传进来的是仓库根：先换成本会话的 worktree，再按它分槽起 agent
-    const sid = String(sessionId || '').trim() || sessionIdForTarget(target);
-    const wtPath = sid ? remoteWorktreePath(repoRemotePathOf(target.remotePath), sid) : '';
-    const resolved = sid && normalizeRemotePath(target.remotePath) !== wtPath ? await withSessionWorktree(sid, target) : target;
-    const effective = resolved || target;
+    const sid = String(sessionId || '').trim();
+    let effective = target;
+    if (sid) {
+      const wtPath = remoteWorktreePath(repoRemotePathOf(target.remotePath), sid);
+      if (normalizeRemotePath(target.remotePath) !== wtPath) {
+        effective = (await withSessionWorktree(sid, target)) || target;
+      }
+    }
     const ctx = await deps.buildRemoteGatewayPackContext();
     return deps.remoteGatewayPool.ensureForTarget(effective, manager, ctx);
   }
@@ -297,15 +297,16 @@ function createSessionRemoteTransport(deps) {
     }
   }
 
-  function getLeasedSshTargets() {
-    const seen = new Set();
+  /**
+   * 重连要的是「哪条会话跑在哪个目标上」：只有目标时端点（user@host:port）分不出会话，
+   * 同机多仓库就会串仓（见 `ensureRemoteGatewayForTarget`）。
+   * @returns {Array<{ sessionId: string, target: object }>}
+   */
+  function getLeasedTargets() {
     const out = [];
-    for (const lease of sessionLeases.values()) {
-      if (lease.target.kind !== 'ssh') continue;
-      const ek = sshGatewayKey(lease.target);
-      if (!ek || seen.has(ek)) continue;
-      seen.add(ek);
-      out.push(lease.target);
+    for (const [sessionId, lease] of sessionLeases) {
+      if (!lease.target || lease.target.kind !== 'ssh') continue;
+      out.push({ sessionId, target: lease.target });
     }
     return out;
   }
@@ -352,7 +353,7 @@ function createSessionRemoteTransport(deps) {
       // 连上之后才知道该会话跑在哪份 worktree 上；pool 槽位 / 端口 / agent 全按它分
       const effective = await withSessionWorktree(sid, target);
       try {
-        await ensureRemoteGatewayForTarget(effective);
+        await ensureRemoteGatewayForTarget(effective, sid);
       } catch (e) {
         log('session ssh remote gateway: ' + (e && e.message ? e.message : String(e)));
       }
@@ -376,7 +377,7 @@ function createSessionRemoteTransport(deps) {
     ensureSshForTarget,
     ensureRemoteGatewayForTarget,
     getActiveViewTarget: () => activeViewTarget,
-    getLeasedSshTargets,
+    getLeasedTargets,
     getLeasedSessionIds,
     isEndpointLeased
   };

@@ -12,6 +12,9 @@ const {
   saveRuntimeByTierToMain,
   getRuntimeValuesForTierFromMain,
   listContextTierIds,
+  migrateGlobalSettingsToDefaultTier,
+  reloadRuntimeByTier,
+  STORAGE_KEY,
   MIN_INPUT_BUDGET_TOKENS,
   RUNTIME_BY_TIER_FILE,
   resolveModelFacts,
@@ -99,6 +102,35 @@ describe('编码参数按档生效（Main 侧唯一入口）', () => {
       const untouched = getRuntimeValuesForTierFromMain(dir, 'ctx-64k');
       assert.equal(untouched.contextWindow, 65536);
     });
+  });
+
+  it('旧全局 settings 迁移进 default 档：写 localStorage，且不引用未定义函数', () => {
+    const store = new Map();
+    const prev = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k)
+    };
+    try {
+      reloadRuntimeByTier();
+      // 出厂值 temperature 0.3 / contextWindow 524288，这里两个都不同 → 应被迁移
+      const changed = migrateGlobalSettingsToDefaultTier({
+        temperature: 0.7,
+        contextWindow: 131072,
+        // 与出厂值相同的键不该写进覆盖
+        maxOutputTokens: 32768
+      });
+      assert.equal(changed, true);
+      const saved = JSON.parse(store.get(STORAGE_KEY));
+      assert.deepEqual(saved.default, { temperature: 0.7, contextWindow: 131072 });
+      // 已经迁过：内存表非空，再调不再重复迁移
+      assert.equal(migrateGlobalSettingsToDefaultTier({ temperature: 0.1 }), false);
+    } finally {
+      if (prev === undefined) delete globalThis.localStorage;
+      else globalThis.localStorage = prev;
+      reloadRuntimeByTier();
+    }
   });
 
   it('预算公式只有一份，且带地板', () => {

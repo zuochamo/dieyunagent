@@ -115,9 +115,17 @@ git worktree add -B dieyun/agent-<runId>-<roleId> .dieyun/worktrees/<runId>/<rol
 | # | 位置 | 做法 |
 |---|---|---|
 | 1 | `src/session/session-worktree.js`（新） | `ensureSessionWorktree()`：会话说「我要用远端」时建/复用它的 worktree，然后把**会话工作区本身**改成 worktree 路径（`setSessionWorkspaceContext` + 落库 `memory.session_workspace_set`） |
-| 2 | `src/session/session-remote-transport.js` | `setSessionRemoteLease` / `applySessionRemoteTransport` 在**租约快照之前**先 resolve worktree；`ensureRemoteGatewayForTarget(target, sessionId)` 也自解析，覆盖 `ssh/reconnect.js` 这个入口 |
+| 2 | `src/session/session-remote-transport.js` | `setSessionRemoteLease` / `applySessionRemoteTransport` 在**租约快照之前**先 resolve worktree；`ensureRemoteGatewayForTarget(target, sessionId)` 的会话身份**必须由调用方显式给**（见下方 C2.1 修正） |
 | 3 | `src/main/remote-gateway.js` | `ensureRemoteGatewayForCurrentWorkspace` 先 ensure worktree，再把 effective target 交给 pool |
 | — | `src/gateway/server.js` | `_storeSessionWorkspaceTarget()` 唯一写入口 + 一条保护：会话已有 worktree 时，「把仓库根写回来」被忽略（防渲染端旧缓存抹掉 worktree） |
+
+**C2.1 修正（2026-10-29）：会话身份不许按端点反推**
+
+现场：同一台机器上开着两个仓库（`dieyundaizhang` / `dieyuntools`），一个 dieyuntools 会话的 `workspace_path` 每几秒在两个仓库的 worktree 之间翻一次，历史列表把这条会话画到了 dieyundaizhang 文件夹下。
+
+根因：`ensureRemoteGatewayForTarget(target)` 三个调用点（`setSessionRemoteLease`、`applySessionRemoteTransport`、`ssh/reconnect.js`）都没传 sessionId，函数内部用 `sessionIdForTarget(target)` 补 —— 端点只认 `user@host:port`，同机多仓库时挑到了**别的会话**，随后 `withSessionWorktree(别人的会话, 这个仓库)` 在该仓库里建了一份别人的 worktree，`session-worktree.js` 又把它落库成那条会话的工作区。
+
+修正（减法，无新机制）：删掉 `sessionIdForTarget`；`ensureRemoteGatewayForTarget` 没有 sessionId 时**只起槽位**（不建 worktree、不写任何会话工作区）；三个调用点补齐会话身份（`getLeasedTargets()` 让重连拿到 `(sessionId, target)` 对，`collectSshReconnectEntries` 保留会话身份）。同轮收掉渲染端 `resolveSendWorkspace` 在租约之后把**仓库根**写回会话工作区的那次写（远端只认 Main 那次落库，否则重启后又跑在共享树上）。回归：`npm run test:session-remote-transport` 的 `foreign-repo gateway ensure cannot hijack another session`。
 
 **为什么「会话工作区 = worktree」而不是加一层 overlay**
 渲染端解析会话工作区走 `memory.session_get`，RPC 路径解析走 `resolveCallWorkspaceTarget()`（`rpc.js:163`，内部读 `getSessionWorkspaceTarget`）。让**存下来的那个路径**就是 worktree，两条链路自然同源；加 overlay 则会出现「渲染端以为在仓库、RPC 在 worktree」的双份路径，正是本方案要消除的错位。

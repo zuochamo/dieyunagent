@@ -623,12 +623,16 @@ impl MemoryStore {
         })
     }
 
+    /// 交接带着来源会话的工作区一起返回：跨项目「继续上次」时，新会话必须挂到
+    /// 交接**讲的**那个工作区，而不是用户当前视图的工作区。
     pub fn handoff_get(&self, session_id: &str) -> Result<Option<Value>, CoreError> {
         self.with_conn(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT session_id, title, payload, created_at
-                     FROM session_handoffs WHERE session_id = ?1",
+                    "SELECT h.session_id, h.title, h.payload, h.created_at, s.workspace_path
+                     FROM session_handoffs h
+                     LEFT JOIN sessions s ON s.id = h.session_id
+                     WHERE h.session_id = ?1",
                     params![session_id],
                     |row| {
                         Ok(json!({
@@ -636,6 +640,7 @@ impl MemoryStore {
                             "title": row.get::<_, String>(1)?,
                             "payload": row.get::<_, String>(2)?,
                             "createdAt": row.get::<_, i64>(3)?,
+                            "workspacePath": row.get::<_, Option<String>>(4)?,
                         }))
                     },
                 )
@@ -651,10 +656,11 @@ impl MemoryStore {
     ) -> Result<Option<Value>, CoreError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT session_id, title, payload, created_at
-                 FROM session_handoffs
-                 WHERE (?1 IS NULL OR session_id != ?1)
-                 ORDER BY created_at DESC LIMIT 1",
+                "SELECT h.session_id, h.title, h.payload, h.created_at, s.workspace_path
+                 FROM session_handoffs h
+                 LEFT JOIN sessions s ON s.id = h.session_id
+                 WHERE (?1 IS NULL OR h.session_id != ?1)
+                 ORDER BY h.created_at DESC LIMIT 1",
             )?;
             let mut rows = stmt.query(params![exclude_session_id])?;
             if let Some(row) = rows.next()? {
@@ -663,6 +669,7 @@ impl MemoryStore {
                     "title": row.get::<_, String>(1)?,
                     "payload": row.get::<_, String>(2)?,
                     "createdAt": row.get::<_, i64>(3)?,
+                    "workspacePath": row.get::<_, Option<String>>(4)?,
                 })));
             }
             Ok(None)
@@ -710,6 +717,23 @@ impl MemoryStore {
             .map(str::to_string);
         let now = now_ms();
         self.with_conn(|conn| {
+            // 会话行是唯一真相：不先问一句就写，外键只会吐
+            // `FOREIGN KEY constraint failed`（界面上就是一句「发送失败」+ 一串英文），
+            // 调用方既不知道该重开对话还是参数写错了。这里给稳定错误码。
+            let session_exists = conn
+                .query_row(
+                    "SELECT 1 FROM sessions WHERE id = ?1",
+                    params![session_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .is_some();
+            if !session_exists {
+                return Err(CoreError::rpc(
+                    "SESSION_NOT_FOUND",
+                    format!("会话 {session_id} 不存在（可能已被删除或清理）"),
+                ));
+            }
             conn.execute(
                 "INSERT INTO messages (session_id, role, content, reasoning, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![session_id, role, &content, &reasoning, now],
@@ -2138,12 +2162,37 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
+    /// 往不存在的会话写消息要给稳定错误码，而不是把 SQLite 的外键串抛给界面
+    /// （peer 会话链接过期时，用户看到的就是「发送失败 · FOREIGN KEY constraint failed」）。
+    #[test]
+    fn append_message_reports_missing_session() {
+        let db = std::env::temp_dir().join(format!("dieyun-append-missing-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+        let session = store.create_session(None, None).unwrap();
+        store
+            .append_message(&session.id, "user", "在的会话", None)
+            .unwrap();
+
+        let err = store
+            .append_message("s-does-not-exist", "user", "写不进去", None)
+            .unwrap_err();
+        match err {
+            CoreError::Rpc { code, .. } => assert_eq!(code, "SESSION_NOT_FOUND"),
+            other => panic!("应给出 SESSION_NOT_FOUND，实际: {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(&db);
+    }
+
     #[test]
     fn handoff_roundtrip_and_latest() {        let db = std::env::temp_dir().join(format!("dieyun-handoff-test-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
         let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let a = store.create_session(Some("会话A"), None).unwrap();
-        let b = store.create_session(Some("会话B"), None).unwrap();
+        let b = store
+            .create_session(Some("会话B"), Some("ssh://dieyunx@192.168.31.62/srv/repo"))
+            .unwrap();
 
         // 空载荷拒绝
         assert!(store.handoff_save(&a.id, "t", "   ").is_err());
@@ -2162,6 +2211,12 @@ mod tests {
         assert_eq!(latest["sessionId"].as_str().unwrap(), a.id);
         let latest_all = store.handoff_latest(None).unwrap().expect("应取到 B");
         assert_eq!(latest_all["sessionId"].as_str().unwrap(), b.id);
+        // 交接带着来源会话的工作区：跨项目「继续上次」靠它挂到正确的仓库
+        assert_eq!(
+            latest_all["workspacePath"].as_str().unwrap(),
+            "ssh://dieyunx@192.168.31.62/srv/repo"
+        );
+        assert!(got["workspacePath"].is_null());
 
         // 同会话重生成 → 覆盖（每会话最多一份）
         store.handoff_save(&a.id, "会话A", "更新后的交接").unwrap();

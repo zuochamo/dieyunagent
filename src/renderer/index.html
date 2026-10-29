@@ -1178,7 +1178,7 @@
               </div>
               <div class="peer-foot-row">
                 <label class="peer-toggle"><input type="checkbox" id="peer-enabled" /> <span data-i18n="peer_enable">启用内网互通</span></label>
-                <label class="peer-toggle"><input type="checkbox" id="peer-auto-turn" /> <span data-i18n="peer_auto_turn">收到消息自动跑一轮</span></label>
+                <label class="peer-toggle"><input type="checkbox" id="peer-auto-turn" checked /> <span data-i18n="peer_auto_turn">收到消息自动跑一轮</span></label>
               </div>
               <div class="peer-hint">
                 <div data-i18n="peer_hint_confirm">不需要配对码：对方第一次来信时确认一次即可，撤销后要重新确认。</div>
@@ -1402,7 +1402,7 @@
               </div>
               <label class="check-row"><input type="checkbox" id="perm-host-control" checked /><span>启用本机控制</span></label>
               <p class="settings-page-desc check-row-hint host-control-hint">总开关：关掉后 Agent 不能执行命令、读写本机文件、打开链接/浏览器，也不能做电脑控制，只剩联网抓取按自己的开关生效。</p>
-              <label class="check-row"><input type="checkbox" id="perm-os-control" /><span>启用电脑控制</span></label>
+              <label class="check-row"><input type="checkbox" id="perm-os-control" checked /><span>启用电脑控制</span></label>
               <p class="settings-page-desc check-row-hint os-control-hint">Agent 可截屏并操作鼠标键盘；鼠标键盘动作首次使用会请求确认。</p>
               <label class="check-row"><input type="checkbox" id="perm-lsp-diagnostics" checked /><span>启用 LSP 诊断注入</span></label>
               <p class="settings-page-desc check-row-hint lsp-diagnostics-hint">改完源码后把语言服务器报的错（类型、语法、未定义符号）自动带回给 Agent，让它自己发现编译不过的地方；关掉后只能靠跑命令暴露错误。</p>
@@ -1724,7 +1724,7 @@
                 <section class="help-usage-section">
                   <h3>权限</h3>
                   <p><strong>本机权限</strong>：读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、不提供开关（沙箱档位决定它们能越界到哪）。<strong>启用本机控制</strong>是总开关：关掉后 Agent 不能执行命令、读写本机文件、打开链接与浏览器，也不做电脑控制。权限仅在本地回环 Gateway 中生效。</p>
-                  <p><strong>启用电脑控制</strong>（默认关）：允许 Agent 截屏并操作鼠标键盘；首次执行键鼠动作会先请求确认。</p>
+                  <p><strong>启用电脑控制</strong>（默认开）：允许 Agent 截屏并操作鼠标键盘；首次执行键鼠动作会先请求确认。</p>
                   <p><strong>代码索引 / 结构索引</strong>：这里管的是「保存后自动增量」，索引本身的查看、试搜与重建在侧栏对应视图。</p>
                   <p><strong>启用 LSP 诊断注入</strong>（默认开）：发消息前拉取 TS/Python 等语言服务报错，注入 Agent 上下文（类似 Cursor Problems）；需本地工作区与读取文件权限。</p>
                   <p><strong>工位监控上报</strong>（默认开启）：内网 Socket.IO 实时上报 CPU / 键鼠统计，可在「设置 → 权限」关闭。</p>

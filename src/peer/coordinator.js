@@ -275,21 +275,56 @@ function createPeerCoordinator(deps) {
     return String(created.id);
   }
 
+  /**
+   * 「这个会话还在不在」**只能问 Rust 的 `sessions` 表**（唯一真相）。
+   *
+   * `session-links.json` 只是「哪个会话属于哪个对端」的缓存：库被回退、会话被删、
+   * 或者用户清掉历史之后，它里面会留下死 id。拿死 id 去写消息，SQLite 只会回
+   * `FOREIGN KEY constraint failed`（用户在面板上看到的就是「发送失败」+ 这串英文），
+   * 而且这条绑定会一直是死的 —— 每次「打开对话」都返回同一个写不进消息的会话。
+   */
+  async function sessionAlive(sessionId) {
+    const row = await d.rpc('memory.session_get', { sessionId });
+    return !!(row && row.id);
+  }
+
   /** 会话绑定：一个对端一个会话（同项目时便于把「谁说了什么」放在一起看）。 */
   async function ensureSessionForPeer(peerId, peerName, preferredSessionId) {
+    let linksChanged = false;
+    const flush = () => {
+      if (linksChanged) emit({ kind: 'links-changed', links: store.links() });
+      linksChanged = false;
+    };
     const preferred = String(preferredSessionId || '').trim();
-    if (preferred) {
-      const bound = store.peerForSession(preferred);
-      if (!bound || bound === peerId) {
-        store.linkSession(preferred, peerId);
-        return preferred;
+    const candidates = [preferred, ...store.sessionsForPeer(peerId)].filter(
+      (id, i, arr) => id && arr.indexOf(id) === i
+    );
+    // 1) 库里已经没有的会话链接一律解绑：死 id 留着只会让「打开对话」永远指向写不进消息的会话
+    const aliveIds = [];
+    for (const sessionId of candidates) {
+      if (await sessionAlive(sessionId)) {
+        aliveIds.push(sessionId);
+      } else if (store.peerForSession(sessionId)) {
+        store.unlinkSession(sessionId);
+        linksChanged = true;
       }
     }
-    const linked = store.sessionsForPeer(peerId);
-    if (linked.length) return linked[0];
+    // 2) 选第一条能用的（别的对端的绑定不动，另建一条）
+    for (const sessionId of aliveIds) {
+      const bound = store.peerForSession(sessionId);
+      if (bound && bound !== peerId) continue;
+      if (bound !== peerId) {
+        store.linkSession(sessionId, peerId);
+        linksChanged = true;
+      }
+      flush();
+      return sessionId;
+    }
+    flush();
     const sessionId = await createSessionForPeer(peerName);
     store.linkSession(sessionId, peerId);
-    emit({ kind: 'links-changed', links: store.links() });
+    linksChanged = true;
+    flush();
     return sessionId;
   }
 

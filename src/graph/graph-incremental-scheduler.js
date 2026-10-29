@@ -3,6 +3,7 @@
 const path = require('path');
 const { loadModelSettings } = require('../model-settings');
 const { isGraphSourcePath, isUnderWorkspaceRoot } = require('../index/source-files');
+const { isRemoteWorkspacePath } = require('../workspace/target');
 
 /**
  * 去抖窗口必须**大于 watcher 的事件延迟**，否则同一次保存会被算成两次。
@@ -26,10 +27,11 @@ const NOT_INDEXED_LOG_THROTTLE_MS = 10 * 60 * 1000;
 /**
  * Debounced background graph.index (force=false) after saves / workspace open.
  *
+ * 只处理本地工作区，判定与理由见 `resolveWorkspaceRoot`（与 codebase 侧同构）。
+ *
  * @param {{
  *   userDataPath: string,
  *   getWorkspaceRoot: () => string | null,
- *   isRemoteWorkspace: () => boolean,
  *   invokeRustCore: (method: string, params: object, timeoutMs?: number) => Promise<object | null>,
  *   log?: (msg: string) => void,
  *   debounceMs?: number,
@@ -128,19 +130,20 @@ function createGraphIncrementalScheduler(opts) {
     );
   }
 
+  /** 增量索引只认本地路径；远程工作区的结构索引由远端 agent 维护（理由同 codebase 侧）。 */
   function resolveWorkspaceRoot(override) {
     const raw =
       override != null && String(override).trim()
         ? String(override).trim()
         : opts.getWorkspaceRoot();
     if (!raw) return null;
+    if (isRemoteWorkspacePath(raw)) return null;
     return path.resolve(raw);
   }
 
   function notifyFileSaved(absPath, workspaceRootOverride) {
     const root = resolveWorkspaceRoot(workspaceRootOverride);
     if (!root) return;
-    if (!workspaceRootOverride && opts.isRemoteWorkspace()) return;
     if (!isGraphSourcePath(absPath)) return;
     if (!isUnderWorkspaceRoot(absPath, root)) return;
     schedule(root, debounceMs, 'save');
@@ -149,7 +152,6 @@ function createGraphIncrementalScheduler(opts) {
   function notifyWorkspaceOpened(workspaceRootOverride) {
     const root = resolveWorkspaceRoot(workspaceRootOverride);
     if (!root) return;
-    if (!workspaceRootOverride && opts.isRemoteWorkspace()) return;
     schedule(root, WORKSPACE_OPEN_DEBOUNCE_MS, 'workspace');
   }
 

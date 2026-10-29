@@ -3,6 +3,13 @@
 
 const agentToolsApi = window.diecloud || {};
 
+/**
+ * `session_new` 派发 prompt 后，等待「早期失败」的窗口（毫秒）。
+ * sendMessage 整轮跑完可能几分钟，等不得；但「发不出去」几乎都在这个窗口内就拒绝。
+ * 取值只影响工具返回里 `dispatched` 的真实性，不影响发送本身。
+ */
+const SESSION_NEW_DISPATCH_PROBE_MS = 800;
+
 /** @type {Map<string, { runId: string, roleId?: string, worktreePath?: string, workspacePath?: string, sessionId: string, undoTurnId?: string }>} */
 const agentExecutionContexts = new Map();
 
@@ -113,7 +120,12 @@ async function createSessionFromTool(args = {}) {
   const beforeId = String((typeof currentSessionId !== 'undefined' && currentSessionId) || '');
   await createNewSession(workspacePath, title ? { title } : {});
   const sessionId = String((typeof currentSessionId !== 'undefined' && currentSessionId) || '');
-  if (!sessionId || sessionId === beforeId) return { error: '新建对话失败：会话 id 没有变化' };
+  if (!sessionId || sessionId === beforeId) {
+    return {
+      error:
+        '新建对话失败：会话 id 没有变化。常见原因是 workspacePath 无法识别（远端须写成 ssh://user@host/path）或工作空间不可用'
+    };
+  }
   // 路径不存在时 Main 会把该会话的 workspace_path 清回 null（见 workspace:set-active-session），
   // 所以这里回读一次账本，把「建了但没挂上」如实告诉模型，别让它以为工作空间已经就位。
   let effectiveWorkspacePath = null;
@@ -134,17 +146,39 @@ async function createSessionFromTool(args = {}) {
       warning: `已新建对话，但工作空间 ${workspacePath} 不存在或不可用，未挂上；确认路径后可用工作空间选择器重设`
     };
   }
+  let dispatched = false;
+  let dispatchWarning;
   if (prompt && typeof sendMessage === 'function') {
-    // 不能 await：sendMessage 会一直阻塞到那一轮 Agent 跑完，工具调用不能挂在那里。
-    // 也不能让它把异常冒成未处理拒绝：这已经是新会话那边的事，失败只影响 prompt 是否发出。
-    void Promise.resolve(sendMessage(prompt)).catch(() => {});
+    // 不能 await 整轮（sendMessage 会阻塞到那一轮 Agent 跑完），但「发不出去」通常是
+    // 同步/近同步就拒绝的（模型未配置、会话正忙、正在切换对话、SSH 没连上）。
+    // 所以只等一个短窗口把早期失败如实回给模型 —— 否则 dispatched 恒为 true，
+    // 失败就成了静默的「已派发，其实什么都没跑」。
+    const sending = Promise.resolve(sendMessage(prompt));
+    let state = 'pending';
+    sending.then(
+      () => {
+        state = 'done';
+      },
+      (err) => {
+        state = 'failed';
+        const msg = err && err.message ? String(err.message) : String(err || '');
+        dispatchWarning = msg ? `prompt 未派发成功：${msg}` : 'prompt 未派发成功';
+      }
+    );
+    await new Promise((resolve) => setTimeout(resolve, SESSION_NEW_DISPATCH_PROBE_MS));
+    dispatched = state !== 'failed';
+    void sending.catch(() => {});
   }
   return {
     ok: true,
     sessionId,
     workspacePath: effectiveWorkspacePath || workspacePath || null,
-    dispatched: !!(prompt && typeof sendMessage === 'function'),
-    warning: prompt && typeof sendMessage !== 'function' ? '已新建对话，但没有可用的发送入口，prompt 未发出' : undefined
+    dispatched,
+    warning:
+      dispatchWarning ||
+      (prompt && typeof sendMessage !== 'function'
+        ? '已新建对话，但没有可用的发送入口，prompt 未发出'
+        : undefined)
   };
 }
 

@@ -91,7 +91,8 @@ function dampedChatFollowStep() {
     updateLastTurnFloat();
     return false;
   }
-  updateLastTurnFloat();
+  // 追帧期间不碰浮条/按钮的显隐：那两颗 UI 读的是 chatAutoFollow（跨帧稳定的用户意图），
+  // 逐帧翻转的中间态只会让它们一闪一闪。
   return true;
 }
 

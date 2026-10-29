@@ -38,21 +38,51 @@ function mkTmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `dieyun-peer-${prefix}-`));
 }
 
+/**
+ * 假的 memory RPC：会话表是「唯一真相」，`session_get` 必须如实回答，
+ * 否则协调器无法判断会话链接是不是过期缓存（真 core 里这就是外键约束）。
+ */
 function mkRpc() {
   const calls = [];
+  const sessions = new Map();
   let seq = 0;
+  function newSession(id) {
+    sessions.set(id, { id });
+    return { id };
+  }
   return {
     calls,
     messages() {
       return calls.filter((c) => c.method === 'memory.message_append');
     },
+    hasSession(id) {
+      return sessions.has(String(id));
+    },
+    registerSession(id) {
+      return newSession(String(id));
+    },
+    dropSession(id) {
+      sessions.delete(String(id));
+    },
     async rpc(method, params) {
       calls.push({ method, params });
+      const sessionId = String((params && params.sessionId) || '');
       if (method === 'memory.session_create') {
         seq += 1;
-        return { id: `sess_${seq}` };
+        return newSession(`sess_${seq}`);
       }
-      if (method === 'memory.message_append') return { ok: true };
+      if (method === 'memory.session_get') {
+        return sessions.get(sessionId) || null;
+      }
+      if (method === 'memory.message_append') {
+        // 与真 core 一致：会话不存在时写不进去（原先是 SQLite 的外键失败）
+        if (!sessions.has(sessionId)) {
+          const e = new Error(`会话 ${sessionId} 不存在`);
+          e.code = 'SESSION_NOT_FOUND';
+          throw e;
+        }
+        return { ok: true };
+      }
       return { ok: true };
     }
   };
@@ -110,7 +140,10 @@ async function main() {
     check('A 已监听', statusA.port > 0, `port=${statusA.port}`);
     check('B 已监听', statusB.port > 0, `port=${statusB.port}`);
     check('身份稳定（重启不变）', A.status().peerId === statusA.peerId);
-    check('默认不自动跑一轮（只投递）', A.status().autoTurn === false, JSON.stringify(A.status().autoTurn));
+    check('默认就自动跑一轮', A.status().autoTurn === true, JSON.stringify(A.status().autoTurn));
+    // 下面几段验的是「信任 / 跳数 / 预算」这些门，先显式关掉自动跑，免得默认开把断言搅在一起
+    A.setAutoTurn(false);
+    B.setAutoTurn(false);
     check('初始信任清单为空', A.status().trusted.length === 0);
 
     // —— 1. 陌生机器来信：拦下 + 弹一次确认，不落会话、不跑一轮 ——
@@ -208,6 +241,7 @@ async function main() {
 
     // —— 6. 会话即通道：从会话发信 → 对端跑一轮 → 答复落回同一个会话 ——
     const sessLocal = 'sess_peer_channel';
+    rpcA.registerSession(sessLocal); // 会话先存在于库里（与「打开对话」建会话的顺序一致）
     const notLinked = await A.sendFromSession(sessLocal, '还没绑定就发');
     check(
       '未绑定会话 → PEER_NOT_LINKED',
@@ -230,6 +264,17 @@ async function main() {
       .map((m) => String(m.params.content))
       .join('\n');
     check('对端答复落回同一个会话', /这是对会话消息的答复/.test(sessReplies), sessReplies.slice(0, 120));
+
+    // —— 6b. 会话链接是缓存：「打开对话」必须先确认会话还在，否则永远返回写不进消息的死 id ——
+    rpcA.dropSession(sessLocal); // 模拟库被回退 / 会话被清理（会话行没了）
+    check('死链接还在（缓存过期）', A.linkForSession(sessLocal) === seenB.peerId);
+    const reopened = await A.openSessionForPeer(seenB.peerId, seenB.name);
+    check('打开对话不再返回死 id', !!reopened && reopened !== sessLocal, String(reopened));
+    check('给回的会话确实在库里', rpcA.hasSession(reopened), String(reopened));
+    check('死链接已解绑', A.linkForSession(sessLocal) === '', A.linkForSession(sessLocal));
+    check('新会话已绑定到这台机器', A.linkForSession(reopened) === seenB.peerId);
+    const reopenedAgain = await A.openSessionForPeer(seenB.peerId, seenB.name);
+    check('再打开复用同一个活会话', reopenedAgain === reopened, `${reopenedAgain} vs ${reopened}`);
 
     // —— 7. 建议式租约 ——
     const claimA = await A.claim({ action: 'acquire', kind: 'file', key: 'src/peer/wire.js', note: '正在改信封' });

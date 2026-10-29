@@ -4,19 +4,31 @@ const { tryAutoReconnectSsh } = require('./auto-reconnect');
 const { sshGatewayKey } = require('../workspace/target');
 const { remoteAgentInfoKey } = require('../workspace/workspace-cache-keys');
 
-function collectSshReconnectTargets(viewTarget, leasedTargets) {
+/**
+ * 重连目标清单。
+ *
+ * 每条都必须带**会话身份**：`sshGatewayKey` 只到「登录端点 + 仓库」，端点本身（`user@host:port`）
+ * 分不出会话。以前这里只传裸 target，下游 `ensureRemoteGatewayForTarget` 只能按端点反查会话，
+ * 同机多仓库时把别人的 worktree 建到这个仓库，并把仓库路径写回别人的会话工作区。
+ *
+ * @param {{ target: object|null, sessionId?: string }|null} viewEntry 当前视图（含当前会话）
+ * @param {Array<{ target: object, sessionId?: string }>} [leasedEntries] 已持租约的会话与目标
+ * @returns {Array<{ target: object, sessionId: string }>}
+ */
+function collectSshReconnectEntries(viewEntry, leasedEntries) {
   const seen = new Set();
   const out = [];
-  const push = (target) => {
+  const push = (entry) => {
+    const target = entry && entry.target;
     if (!target || target.kind !== 'ssh') return;
     const key = sshGatewayKey(target);
     if (!key || seen.has(key)) return;
     seen.add(key);
-    out.push(target);
+    out.push({ target, sessionId: entry.sessionId ? String(entry.sessionId) : '' });
   };
-  push(viewTarget);
-  if (Array.isArray(leasedTargets)) {
-    for (const t of leasedTargets) push(t);
+  push(viewEntry);
+  if (Array.isArray(leasedEntries)) {
+    for (const e of leasedEntries) push(e);
   }
   return out;
 }
@@ -140,7 +152,8 @@ function createSshReconnect(deps) {
       log.info(`SSH auto reconnect OK (${reason}): ${target.username}@${target.host}`);
       if (opts.ensureGateway !== false && sessionRemoteTransport) {
         try {
-          await sessionRemoteTransport.ensureRemoteGatewayForTarget(target);
+          // 会话身份必须显式给：端点分不出会话，缺了就只能起槽位（不再替别的会话建 worktree）
+          await sessionRemoteTransport.ensureRemoteGatewayForTarget(target, opts.sessionId);
         } catch (e) {
           log.warn('SSH leased reconnect gateway:', e && e.message);
         }
@@ -152,10 +165,15 @@ function createSshReconnect(deps) {
   function listReconnectTargets() {
     const localGateway = getLocalGateway();
     const sessionRemoteTransport = getSessionRemoteTransport();
-    const viewTarget = localGateway?.getEffectiveWorkspaceTarget?.();
+    const activeSid = localGateway?.activeSessionId ? String(localGateway.activeSessionId) : '';
+    const viewEntry = {
+      // getEffectiveWorkspaceTarget() 就是「当前会话（没有才回落到视图）的目标」，与会话身份同源
+      target: localGateway?.getEffectiveWorkspaceTarget?.() || null,
+      sessionId: activeSid
+    };
     const leased =
-      sessionRemoteTransport?.getLeasedSshTargets ? sessionRemoteTransport.getLeasedSshTargets() : [];
-    return collectSshReconnectTargets(viewTarget, leased);
+      sessionRemoteTransport?.getLeasedTargets ? sessionRemoteTransport.getLeasedTargets() : [];
+    return collectSshReconnectEntries(viewEntry, leased);
   }
 
   async function reconnectActiveAndLeasedSsh(reason = 'close', opts = {}) {
@@ -168,9 +186,10 @@ function createSshReconnect(deps) {
     for (let i = 0; i < targets.length; i += batchSize) {
       const batch = targets.slice(i, i + batchSize);
       const results = await Promise.all(
-        batch.map((t) =>
-          tryReconnectSshTarget(t, reason, {
-            ensureGateway: opts.ensureGateway !== false
+        batch.map((entry) =>
+          tryReconnectSshTarget(entry.target, reason, {
+            ensureGateway: opts.ensureGateway !== false,
+            sessionId: entry.sessionId
           })
         )
       );
@@ -204,7 +223,11 @@ function createSshReconnect(deps) {
       return { ok: true, already: true };
     }
     const target = localGateway.getEffectiveWorkspaceTarget();
-    const r = await tryReconnectSshTarget(target, reason, opts);
+    // getEffectiveWorkspaceTarget() 有当前会话时就是它的目标：会话身份一起带上，别让下游按端点猜
+    const r = await tryReconnectSshTarget(target, reason, {
+      ...opts,
+      sessionId: localGateway.activeSessionId ? String(localGateway.activeSessionId) : ''
+    });
     if (r.ok && r.reconnected) {
       const after = afterSshReconnectSuccess();
       if (opts.awaitAfterReconnect) {
@@ -331,4 +354,4 @@ function createSshReconnect(deps) {
   };
 }
 
-module.exports = { createSshReconnect, collectSshReconnectTargets };
+module.exports = { createSshReconnect, collectSshReconnectEntries };

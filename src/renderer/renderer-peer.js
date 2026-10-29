@@ -245,8 +245,8 @@ async function refreshPeerPanel() {
     const enabledBox = $('peer-enabled');
     if (enabledBox) enabledBox.checked = !!status.enabled;
     const autoBox = $('peer-auto-turn');
-    // 默认关：给别人的消息自动跑一轮 = 在这台机器上执行工具，必须用户明确勾选
-    if (autoBox) autoBox.checked = status.autoTurn === true;
+    // 默认开（与 Main 的 `peer/store.js` 默认一致）；用户显式关掉才是关：只有 false 才不勾
+    if (autoBox) autoBox.checked = status.autoTurn !== false;
     const dot = $('peer-dot');
     if (dot) dot.className = `peer-dot ${status.enabled ? 'peer-dot-on' : 'peer-dot-off'}`;
     if (statusEl) {
@@ -485,8 +485,17 @@ async function sendPeerSessionText(text, sessionIdOverride) {
     if (typeof refreshHistoryList === 'function') refreshHistoryList().catch(() => {});
     return true;
   } catch (e) {
+    // 落库失败最常见的一种：这条会话在库里已经不存在了（历史被清、库被回退）。
+    // 死链由 Main 侧 `ensureSessionForPeer` 负责解绑重建，这里只如实告诉用户下一步。
+    const why =
+      e && e.code === 'SESSION_NOT_FOUND'
+        ? peerText(
+            'peer_why_session_gone',
+            '这个会话在本地记忆库里已经不存在了；从「连接 → Agent 互通」重新打开对话即可继续'
+          )
+        : String((e && e.message) || e);
     if (typeof showAgentToast === 'function') {
-      showAgentToast(peerText('peer_toast_send_failed', '发送失败'), String((e && e.message) || e), { variant: 'error' });
+      showAgentToast(peerText('peer_toast_send_failed', '发送失败'), why, { variant: 'error' });
     }
     return true;
   }

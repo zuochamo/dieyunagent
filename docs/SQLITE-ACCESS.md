@@ -56,6 +56,23 @@ SqliteHandle::new_with_foreign_keys(path, init_schema)   // memory 库
 抢不到写锁就下次再来（`index::IndexService::apply_status_repair`、
 `graph::GraphService::read_dedicated`）。维修绝不能拖慢读。
 
+## 常驻连接必须常驻 autocommit
+
+`with_conn` 的 `f` 里可以自己开事务（`conn.unchecked_transaction()`），但**进去之前必须是 autocommit**。
+带着未提交事务进来，只可能是前面某条语句在事务里报错后没人回滚：
+
+- SQLite **不会**替你回滚语句级错误，事务继续开着；
+- `execute_batch("BEGIN/SAVEPOINT …; 会失败的语句; ROLLBACK; RELEASE")` 这种写法，失败点到 `ROLLBACK`
+  之间的语句全部被跳过 —— 包括那句回滚自己；
+- 之后这个库的每条写入都进那个永不提交的事务，进程一退全部丢失，而且**全程没有报错**。
+
+真实事故：`memory/schema.rs` 的 FTS 写入探针用了这种批次，一次探针失败让 memory 库在 14 小时里
+写了 31MB / 7611 帧 WAL、只有 10 个 commit 标记，重启后整段对话蒸发。
+
+所以：**需要事务就用 `rusqlite::Transaction`（Drop 必回滚），不要手写 BEGIN/ROLLBACK 批次**；
+`with_conn` 入口同时兜一层不变量：发现残留事务就记日志并 `ROLLBACK`，宁可丢掉那笔来路不明的
+未提交写入，也不让它吞掉整个进程的数据。
+
 ## 在途预算（`rpc::request_budget_ms`）
 
 `core.ping` / `*.status` / `rpc.cancel` 这些**宿主轮询**方法带 20s 在途预算，

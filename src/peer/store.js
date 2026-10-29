@@ -252,14 +252,18 @@ function createPeerStore(userDataPath) {
     return {
       // 默认开：用户装了客户端就能被同项目同事找到；关掉即完全静默（不监听、不宣告）。
       enabled: raw.enabled !== false,
-      // 默认关：对方来信只投递到会话，不替你动手跑一轮（跑一轮 = 在这台机器上执行工具）。
-      autoTurn: raw.autoTurn === true
+      // 默认开：对方来信直接在这台机器上跑一轮（互通即「另一台机器上的我」，用户要的是马上有回应）。
+      // 只认字面 true/false：缺省或脏值都按默认开；显式关掉必须落成 false 才生效。
+      autoTurn: raw.autoTurn == null ? true : raw.autoTurn === true
     };
   }
 
   function setSettings(patch) {
     const next = { ...settings(), ...(patch && typeof patch === 'object' ? patch : {}) };
-    const clean = { enabled: next.enabled !== false, autoTurn: next.autoTurn === true };
+    const clean = {
+      enabled: next.enabled !== false,
+      autoTurn: next.autoTurn == null ? true : next.autoTurn === true
+    };
     if (files.settings) writeJson(files.settings, clean);
     return clean;
   }

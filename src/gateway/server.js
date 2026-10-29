@@ -153,10 +153,6 @@ class LocalGateway {
     this.graphIncremental = createGraphIncrementalScheduler({
       userDataPath: this.userDataPath,
       getWorkspaceRoot: () => this._effectiveWorkspaceRoot() || this.workspaceRoot,
-      isRemoteWorkspace: () => {
-        const t = this.getEffectiveWorkspaceTarget();
-        return t?.kind === 'ssh';
-      },
       invokeRustCore: async (method, params, timeoutMs) => {
         if (!this.rustCore || !this.rustCore.isReady()) return null;
         try {
@@ -170,10 +166,6 @@ class LocalGateway {
     this.codebaseIncremental = createCodebaseIncrementalScheduler({
       userDataPath: this.userDataPath,
       getWorkspaceRoot: () => this._effectiveWorkspaceRoot() || this.workspaceRoot,
-      isRemoteWorkspace: () => {
-        const t = this.getEffectiveWorkspaceTarget();
-        return t?.kind === 'ssh';
-      },
       invokeRustCore: async (method, params, timeoutMs) => {
         if (!this.rustCore || !this.rustCore.isReady()) return null;
         try {

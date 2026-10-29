@@ -27,7 +27,16 @@ function buildSystemMessageCacheKey(sessionId, userQuery, workspacePath, opts = 
     typeof getComposerAgentMode === 'function'
       ? getComposerAgentMode(String(sessionId || '') || undefined)
       : 'agent';
-  return `${String(sessionId || '_default')}|${String(workspacePath || '_none')}|${budget}|${mcpFlag}|${modeFlag}|${normalizeSystemCacheQuery(userQuery)}`;
+  // 交接是一次性信号：本轮系统提示里有没有【上个会话交接】必须进键。
+  // 不进键的话，命中缓存会跳过 consumePendingSessionHandoff（交接漏注入），
+  // 或者把已注入过交接的 packed 再喂一次（交接重复）。探测只读，消费仍归 body。
+  const handoffFlag =
+    typeof window !== 'undefined' &&
+    typeof window.peekPendingSessionHandoff === 'function' &&
+    window.peekPendingSessionHandoff(String(sessionId || ''))
+      ? 'handoff'
+      : 'nohandoff';
+  return `${String(sessionId || '_default')}|${String(workspacePath || '_none')}|${budget}|${mcpFlag}|${modeFlag}|${handoffFlag}|${normalizeSystemCacheQuery(userQuery)}`;
 }
 
 function invalidateSystemMessageCache(sessionId) {
@@ -73,7 +82,7 @@ async function buildSystemMessage(userQuery = '', opts = {}) {
     }
   }
   const cacheKey = buildSystemMessageCacheKey(
-    opts.sessionId,
+    sessionId || opts.sessionId,
     userQuery,
     workspacePathEarly,
     opts
