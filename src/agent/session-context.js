@@ -90,6 +90,32 @@ function slimAttachmentsForPersist(list) {
   return (Array.isArray(list) ? list : []).map(slimAttachmentForPersist).filter(Boolean);
 }
 
+/**
+ * 回合触发归因（user meta 的 `trigger` 字段）：这一轮**不是用户打的字**，
+ * 而是某个外部事件唤醒的（定时计划 / 目标续跑 / 内网来信 …）。
+ *
+ * 为什么要落到 meta 而不是只写在正文抬头里：归因若只存在于 `[计划 · x]` 这类
+ * 中文字符串里，Renderer 回放、手机端、交接时都无法分辨「这条是不是用户发的」，
+ * 模型也只能靠解析前缀猜。meta 是结构信号，正文保持「模型看到的原文」不变。
+ *
+ * 只存「谁触发的」这一层事实：kind + 指针 + 时间。触发内容的正文本来就在这条
+ * 消息的 content 里，再存一份就是同一事实的第二来源。
+ */
+const TRIGGER_KIND_MAX = 40;
+const TRIGGER_FIELD_MAX = 200;
+
+function slimTriggerForPersist(trigger) {
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return null;
+  const kind = String(trigger.kind || '').trim().slice(0, TRIGGER_KIND_MAX);
+  if (!kind) return null;
+  const out = { kind };
+  for (const key of ['planId', 'planName', 'at']) {
+    const v = String(trigger[key] == null ? '' : trigger[key]).trim();
+    if (v) out[key] = v.slice(0, TRIGGER_FIELD_MAX);
+  }
+  return out;
+}
+
 /** 递归剔除 meta 里的「字节形态」值：超长字符串与 data:/blob: 临时 URL。 */
 function sanitizeMetaValue(value, depth) {
   if (typeof value === 'string') {
@@ -130,9 +156,15 @@ function packMessageMeta(content, meta, opts) {
     if (inputText) payload.inputText = inputText;
     const attachments = slimAttachmentsForPersist(meta.attachments);
     if (attachments.length) payload.attachments = attachments;
+    // 非人类触发的一轮：归因与正文一起落库，Renderer 据此渲染成触发条而不是用户气泡。
+    const trigger = slimTriggerForPersist(meta.trigger);
+    if (trigger) payload.trigger = trigger;
   } else {
     payload = sanitizeMetaValue(meta, 0) || {};
     delete payload.attachments;
+    // 触发归因属于「这一轮是谁唤醒的」，唯一来源是那条 user 行；assistant 再存一份就是
+    // 同一事实的第二来源（与附件同理）。
+    delete payload.trigger;
   }
   if (!Object.keys(payload).length) return text;
   try {
@@ -171,12 +203,16 @@ function packSystemPrompt(stableChunks, turnChunks) {
   };
 }
 
+/**
+ * 只规整 stable/turnRide/content，**其余字段原样保留**（如 `memoryAudit`）——
+ * prep 侧附加的注入事实必须能穿过这一层到达 contextAudit / request_snapshots。
+ */
 function unwrapSystemPromptPack(pack) {
   if (pack && typeof pack === 'object' && !Array.isArray(pack)) {
     const stable = String(pack.stable || '');
     const turnRide = String(pack.turnRide || '');
     const content = String(pack.content || joinPromptChunks([stable, turnRide]));
-    return { stable, turnRide, content };
+    return { ...pack, stable, turnRide, content };
   }
   const content = String(pack || '');
   return { stable: content, turnRide: '', content };
@@ -265,7 +301,6 @@ function isSyntheticLoopUserContent(content) {
   return (
     t.startsWith('[系统] 本段工具轮次已达上限') ||
     t.startsWith('[系统] 上一轮回复像中间检查过程') ||
-    t.startsWith('[系统] 你声明了 agent_status') ||
     t.startsWith('[系统] 修改/修复类任务禁止反复只输出')
   );
 }

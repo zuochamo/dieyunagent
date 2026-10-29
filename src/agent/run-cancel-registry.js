@@ -100,11 +100,21 @@ function clearRunAbortController(runId) {
   }
 }
 
+/**
+ * 是否有 agent run 在跑（Main 侧「空闲」判据，供后台任务避开前台）。
+ * 唯一来源：`agent:rust-loop-run` 的 finally 会 clearRunAbortController。
+ * @returns {boolean}
+ */
+function hasActiveRuns() {
+  return runControllers.size > 0;
+}
+
 module.exports = {
   ensureRunAbortController,
   getRunAbortSignal,
   isRunAborted,
   abortRun,
   abortSessionRuns,
-  clearRunAbortController
+  clearRunAbortController,
+  hasActiveRuns
 };

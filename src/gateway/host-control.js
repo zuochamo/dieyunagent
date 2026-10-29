@@ -5,15 +5,17 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const { attachExecSettlement } = require('../exec-settlement');
+const { EXEC_OUTPUT_MAX_CHARS, clampExecTimeoutMs } = require('../exec-limits');
+
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tif', '.tiff']);
 
 /**
  * host_exec 长任务语义（B2）相关常量。
- * - 单条命令的硬上限：10 分钟（编译/渲染/打包常见量级）；默认仍是 90s。
- * - 输出缓冲：长任务转后台后要靠它读增量，太小会丢关键报错，太大又占内存。
+ * - 超时上限/默认值与输出上限**不在这里定**：`src/exec-limits.js` 是唯一来源，远端
+ *   （ssh/session-manager.js）必须与本机用同一份契约，否则同一条命令在本地能跑完、在远端被夹短。
+ * - 下面这些是本机侧独有的缓冲窗口（长任务转后台后靠它读增量）。
  */
-const SHELL_TIMEOUT_DEFAULT_MS = 90000;
-const SHELL_TIMEOUT_MAX_MS = 600000;
 const OUTPUT_BUFFER_MAX = 256 * 1024;
 const OUTPUT_TAIL_DEFAULT = 32 * 1024;
 const OUTPUT_WAIT_MAX_MS = 120000;
@@ -139,7 +141,8 @@ function isPidAlive(pid) {
 /**
  * 登记一个进程句柄。
  * @param {{ command?: string, cwd?: string, sessionId?: string, detached?: boolean, pid?: number|null,
- *   child?: import('child_process').ChildProcess|null, output?: object|null, logPath?: string }} info
+ *   child?: import('child_process').ChildProcess|null, output?: object|null, logPath?: string,
+ *   awaitReport?: boolean }} info
  */
 function registerProcessHandle(info = {}) {
   const id = `hostproc-${++processHandleSeq}`;
@@ -161,6 +164,16 @@ function registerProcessHandle(info = {}) {
     child,
     exited: false,
     exitCode: null,
+    /**
+     * 是否需要在「下一轮」补给模型一条「这个后台任务已经结束了」。
+     *
+     * 只有模型**没拿到退出码**的进程才置 true：前台 host_exec 当轮就把 exitCode/尾部
+     * 返回给模型了，再补一条纯噪音；而 detached 启动、以及 waitMs 到点转后台的，
+     * 模型手上只有 handle，进程何时结束它无从知晓（也没有任何事件通知）。
+     */
+    awaitReport: info.awaitReport === true,
+    /** 已经补报过（或模型自己读过它的输出）——一次性投递，不重复刷屏。 */
+    reportedAt: 0,
     /** runShell 转后台时共享的 { stdout, stderr } 缓冲；detached 时为 null。 */
     output: info.output || null,
     /** detached 进程的 stdout/stderr 落盘路径（活进程也能读）。 */
@@ -250,6 +263,47 @@ function clampNumber(value, min, max, fallback) {
 }
 
 /**
+ * 取一段输出窗口（本机 host_proc 与远端 host_proc 共用同一份规则）：
+ * - 给了 offset：从该字符位置往后取，用于「增量续读」；
+ * - 没给：取尾部 tailBytes 字符；
+ * - `more` 表示还有没取完的内容（单次读取被 tailBytes 截断）。
+ * @param {string} text
+ * @param {{ offset?: number | null, tailBytes: number }} opts
+ * @returns {{ text: string, next: number, more: boolean }}
+ */
+function pickOutputWindow(text, opts = {}) {
+  const s = String(text || '');
+  const tailBytes = Math.max(1, Number(opts.tailBytes) || OUTPUT_TAIL_DEFAULT);
+  const offset = Number.isFinite(Number(opts.offset)) && Number(opts.offset) >= 0 ? Number(opts.offset) : null;
+  if (offset != null) {
+    if (offset >= s.length) return { text: '', next: s.length, more: false };
+    const chunk = s.slice(offset);
+    if (chunk.length <= tailBytes) return { text: chunk, next: s.length, more: false };
+    return { text: chunk.slice(0, tailBytes), next: offset + tailBytes, more: true };
+  }
+  if (s.length <= tailBytes) return { text: s, next: s.length, more: false };
+  return { text: s.slice(-tailBytes), next: s.length, more: true };
+}
+
+/**
+ * 一个句柄当前可读到的输出快照（唯一来源：readProcessOutput 与补报共用）。
+ * - runShell 转后台：内存环形缓冲；
+ * - detached：stdout/stderr 落盘，取尾部 OUTPUT_BUFFER_MAX。
+ * @param {object} rec 句柄记录
+ */
+function readRecordSnapshot(rec) {
+  if (!rec) return { stdout: '', stderr: '', bytes: 0 };
+  if (rec.output) {
+    const so = String(rec.output.stdout || '');
+    const se = String(rec.output.stderr || '');
+    return { stdout: so, stderr: se, bytes: so.length + se.length };
+  }
+  const out = readFileTailSafe(rec.logPath, OUTPUT_BUFFER_MAX);
+  const err = readFileTailSafe(rec.errLogPath, OUTPUT_BUFFER_MAX);
+  return { stdout: out.text, stderr: err.text, bytes: out.bytes + err.bytes };
+}
+
+/**
  * 读取已登记进程的输出（B2）。
  * 两类来源：
  * - runShell 转后台：内存环形缓冲（rec.output），活进程可增量读；
@@ -292,16 +346,7 @@ async function readProcessOutput(opts = {}) {
   const alive = () =>
     !rec.exited && (rec.child ? rec.child.exitCode == null : isPidAlive(rec.pid));
 
-  const snapshot = () => {
-    if (rec.output) {
-      const so = String(rec.output.stdout || '');
-      const se = String(rec.output.stderr || '');
-      return { stdout: so, stderr: se, bytes: so.length + se.length };
-    }
-    const out = readFileTailSafe(rec.logPath, OUTPUT_BUFFER_MAX);
-    const err = readFileTailSafe(rec.errLogPath, OUTPUT_BUFFER_MAX);
-    return { stdout: out.text, stderr: err.text, bytes: out.bytes + err.bytes };
-  };
+  const snapshot = () => readRecordSnapshot(rec);
 
   let snap = snapshot();
   let waitedMs = 0;
@@ -327,19 +372,8 @@ async function readProcessOutput(opts = {}) {
     waitedMs = Math.min(waitMs, waitedMs);
   }
 
-  const pick = (text) => {
-    if (offset != null) {
-      if (offset >= text.length) return { text: '', next: text.length, more: false };
-      const chunk = text.slice(offset);
-      if (chunk.length <= tailBytes) return { text: chunk, next: text.length, more: false };
-      return { text: chunk.slice(0, tailBytes), next: offset + tailBytes, more: true };
-    }
-    if (text.length <= tailBytes) return { text, next: text.length, more: false };
-    return { text: text.slice(-tailBytes), next: text.length, more: true };
-  };
-
-  const so = pick(snap.stdout);
-  const se = pick(snap.stderr);
+  const so = pickOutputWindow(snap.stdout, { offset, tailBytes });
+  const se = pickOutputWindow(snap.stderr, { offset, tailBytes });
   const running = alive();
   const result = {
     ok: true,
@@ -362,6 +396,8 @@ async function readProcessOutput(opts = {}) {
   } else if (running) {
     result.hint = '进程仍在运行，上面是到目前为止的输出。';
   }
+  // 模型自己把已结束的后台任务读过了：下一轮不必再补报一遍。
+  if (rec.awaitReport && !running && !rec.reportedAt) rec.reportedAt = Date.now();
   return result;
 }
 
@@ -382,6 +418,59 @@ function listProcessHandles(opts = {}) {
   }
   rows.sort((a, b) => b.startedAt - a.startedAt);
   return { ok: true, count: rows.length, processes: rows };
+}
+
+/**
+ * 取「后台任务已经结束、但模型还不知道」的那些，**并当场标记为已投递**。
+ *
+ * 这是「静默补报」的唯一来源：不唤醒任何一轮，只在下一次组 prompt 时被取走一次
+ * （`agent/system-prompt-prep.js#fetchSettledJobsBlock`）。因此不需要唤醒预算、
+ * 不碰循环语义（`AGENTS.md` 原则 5 的「禁止假用户续跑」）。
+ *
+ * 只报 `awaitReport` 的句柄：前台命令当轮就把退出码给了模型，再报一次是噪音。
+ *
+ * @param {{ sessionId?: string, tailBytes?: number, limit?: number }} [opts]
+ * @returns {{ ok: true, count: number, jobs: Array<{ id: string, command: string, detached: boolean,
+ *   exitCode: number|null, startedAt: number, alive: false, stdout: string, stderr: string }> }}
+ */
+function takeSettledReports(opts = {}) {
+  const sid =
+    opts.sessionId != null && String(opts.sessionId).trim() ? String(opts.sessionId).trim() : null;
+  const tailBytes = clampNumber(opts.tailBytes, 256, OUTPUT_BUFFER_MAX, 1200);
+  const limit = clampNumber(opts.limit, 1, 8, 4);
+  const settled = [];
+  for (const rec of processHandles.values()) {
+    if (!rec.awaitReport || rec.reportedAt) continue;
+    // 严格按会话归属：推给用户的上下文不像 list/output 那样是「你问了我才给」，
+    // 一旦错了就是别人会话的输出尾巴跑进这轮对话，撤不回来。没有归属的句柄宁可不报。
+    if (sid && rec.sessionId !== sid) continue;
+    // 既没有 pid 也没有 child：当初就没真起来（Start-Process 没解析出 pid 等），
+    // isPidAlive(null) 恒为 false，不拦就会误报一条「已结束」。
+    if (!rec.pid && !rec.child) continue;
+    if (publicProcessRecord(rec).alive) continue;
+    settled.push({ rec, at: rec.startedAt });
+  }
+  // 先结束的先报；超出上限的留到下一轮（不丢，只是排队）
+  settled.sort((a, b) => a.at - b.at);
+  const jobs = [];
+  for (const item of settled.slice(0, limit)) {
+    const { rec } = item;
+    const snap = readRecordSnapshot(rec);
+    const out = pickOutputWindow(snap.stdout, { tailBytes });
+    const err = pickOutputWindow(snap.stderr, { tailBytes });
+    rec.reportedAt = Date.now();
+    jobs.push({
+      id: rec.id,
+      command: rec.command,
+      detached: rec.detached,
+      exitCode: publicProcessRecord(rec).exitCode,
+      startedAt: rec.startedAt,
+      alive: false,
+      stdout: out.text.trim(),
+      stderr: err.text.trim()
+    });
+  }
+  return { ok: true, count: jobs.length, jobs };
 }
 
 /**
@@ -515,18 +604,50 @@ function tailOf(text, max) {
 }
 
 /**
+ * 本机 spawn 的 cwd 唯一解析点（`runShell` / `spawnDetachedProcess` 共用）。
+ *
+ * 必须在这里校验目录**存在**：libuv 遇到不存在的 cwd 返回的是
+ * `spawn C:\WINDOWS\system32\cmd.exe ENOENT` —— 报的是 ComSpec 找不到（其实它好好的），
+ * 完全看不出真因。线上实测模型据此在 2–6ms 内盲试 4 次（tool-telemetry errorCode=ENOENT）。
+ * 把远端路径 / 已删除的 worktree 当本机 cwd 时尤其容易踩到，所以错误必须点名到路径。
+ *
+ * @param {string} [rawCwd]
+ * @returns {string} 可直接交给 spawn 的目录
+ */
+function resolveSpawnCwd(rawCwd) {
+  const cwd = rawCwd && String(rawCwd).trim() ? String(rawCwd) : os.homedir();
+  let stat = null;
+  try {
+    stat = fs.statSync(cwd);
+  } catch {
+    stat = null;
+  }
+  if (!stat || !stat.isDirectory()) {
+    const err = new Error(`cwd 不是本机存在的目录：${cwd}`);
+    // 声明式失败契约：不声明 code 就会塌成 EXCEPTION，模型分不清「目录不对」和「命令崩了」
+    err.code = 'CWD_NOT_FOUND';
+    err.retryable = false;
+    err.cwd = cwd;
+    err.suggestedFix =
+      'SSH 会话的远端路径不能当本机 cwd。用 host_exec 的 cwd 指到本机真实存在的目录（工作区根即可），' +
+      '不要在同一个不存在的路径上重复重试。';
+    throw err;
+  }
+  return cwd;
+}
+
+/**
  * @param {string} command
  * @param {{ cwd?: string, timeoutMs?: number, maxBuffer?: number, signal?: AbortSignal, sessionId?: string,
  *   trackProcess?: boolean, keepOnTimeout?: boolean }} opts
  *   keepOnTimeout=true：到点不杀进程，转入后台并把已输出内容返回（配合 host_proc action=output 续读）。
  */
 function runShell(command, opts = {}) {
-  const timeoutMs = Math.min(
-    SHELL_TIMEOUT_MAX_MS,
-    Math.max(1000, Number(opts.timeoutMs) || SHELL_TIMEOUT_DEFAULT_MS)
+  const timeoutMs = clampExecTimeoutMs(opts.timeoutMs);
+  const maxBuffer = Math.min(
+    2 * 1024 * 1024,
+    Math.max(4096, Number(opts.maxBuffer) || EXEC_OUTPUT_MAX_CHARS)
   );
-  const maxBuffer = Math.min(2 * 1024 * 1024, Math.max(4096, Number(opts.maxBuffer) || 512 * 1024));
-  const cwd = opts.cwd && String(opts.cwd).trim() ? opts.cwd : os.homedir();
   const shell = process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : '/bin/sh';
   const shellFlag = process.platform === 'win32' ? '/c' : '-c';
   const signal = opts.signal || null;
@@ -536,6 +657,15 @@ function runShell(command, opts = {}) {
     if (signal?.aborted) {
       const err = new Error('已停止');
       err.name = 'AbortError';
+      reject(err);
+      return;
+    }
+
+    // cwd 取唯一解析点（含存在性校验），不在这里自己拼
+    let cwd;
+    try {
+      cwd = resolveSpawnCwd(opts.cwd);
+    } catch (err) {
       reject(err);
       return;
     }
@@ -646,6 +776,8 @@ function runShell(command, opts = {}) {
       }
       if (keepOnTimeout && handleRec) {
         // 长任务语义：到点不杀，转后台继续跑，句柄已登记，可用 host_proc 续读/结束
+        // 模型从这里起就拿不到退出码了 → 结束时要靠「静默补报」告知它一次。
+        handleRec.awaitReport = true;
         settleResolve({
           code: null,
           stdout: tailOf(outputState.stdout, OUTPUT_TAIL_DEFAULT).trim(),
@@ -721,7 +853,12 @@ function runShell(command, opts = {}) {
       }
     });
 
-    child.on('close', (code) => {
+    /**
+     * 命令结束的唯一判定来自 exec-settlement：`close` 优先，后台进程握着输出管道时
+     * 按 exit-status + 静默窗口收尾（否则 `sh -c 'daemon &'` 这种写法要等到超时才返回，
+     * 而那时进程其实早就跑起来了 —— 与 SSH 侧同一个坑）。
+     */
+    const finishFromSettlement = (code, settledBy) => {
       if (abortReason || child.__dieyunStopKill || (killed && !settled)) {
         const e = new Error('已停止');
         e.name = 'AbortError';
@@ -738,9 +875,19 @@ function runShell(command, opts = {}) {
         stderr: outputState.stderr.trim(),
         cwd,
         truncated: outputState.dropped > 0,
-        droppedChars: outputState.dropped || undefined
+        droppedChars: outputState.dropped || undefined,
+        // close 之外收尾 = 命令主体已退出，但输出管道仍被它拉起的后台进程占着
+        behindStillHoldingStdio: settledBy === 'exit' || undefined
       });
-    });
+    };
+
+    // 收尾判定只是「补足 exit-status 之后的尾部输出」，失败不是第二种失败：
+    // spawn 失败（ENOENT/EACCES）等情况 child.on('error') 上面已经 settleReject 过外层 Promise，
+    // 而 attachExecSettlement 会因同一个 error 再 reject 一次 —— 不接住就冒成
+    // main.log 的 `Unhandled rejection: Error: spawn ... ENOENT`，掩盖真正的错误来源。
+    attachExecSettlement({ out: child.stdout, err: child.stderr, life: child })
+      .then((r) => finishFromSettlement(r.code, r.settledBy))
+      .catch(() => {});
   });
 }
 
@@ -792,6 +939,9 @@ async function runShellDetached(command, opts = {}) {
       sessionId: opts && opts.sessionId,
       detached: true,
       pid: result && result.pid,
+      // 拿得到 child 时带上：精确的 exit 事件/退出码（拿不到就退化为 PID 判活）
+      child: (result && result.child) || null,
+      awaitReport: true,
       logPath,
       errLogPath
     });
@@ -834,7 +984,13 @@ function closeQuiet(fd) {
  * @param {{ cwd?: string, sessionId?: string, logPath?: string, errLogPath?: string }} opts
  */
 function spawnDetachedProcess(command, opts = {}) {
-  const cwd = opts.cwd && String(opts.cwd).trim() ? opts.cwd : os.homedir();
+  // cwd 取唯一解析点（含存在性校验），不在这里自己拼
+  let cwd;
+  try {
+    cwd = resolveSpawnCwd(opts.cwd);
+  } catch (err) {
+    return Promise.reject(err);
+  }
   const cmd = String(command || '').trim();
   if (!cmd) {
     return Promise.reject(new Error('command 为空'));
@@ -865,7 +1021,9 @@ function spawnDetachedProcess(command, opts = {}) {
           stderr: '',
           cwd,
           detached: true,
-          pid: child.pid
+          pid: child.pid,
+          // 带着 child 回上层登记：能收到精确的 exit/退出码，不必只靠 PID 判活
+          child
         });
       });
     }
@@ -937,7 +1095,8 @@ function spawnDetachedProcess(command, opts = {}) {
         stderr: '',
         cwd,
         detached: true,
-        pid: child.pid
+        pid: child.pid,
+        child
       });
     });
   }
@@ -1049,9 +1208,16 @@ module.exports = {
   registerProcessHandle,
   forgetProcessHandle,
   listProcessHandles,
+  takeSettledReports,
   killProcessHandle,
   readProcessOutput,
   openExternalUrl,
   normalizeFilePathInput,
-  printImage
+  printImage,
+  // 输出窗口/上限与远端（SSH）侧共用同一份，避免本地与远程读到不同的截断规则
+  OUTPUT_BUFFER_MAX,
+  OUTPUT_TAIL_DEFAULT,
+  OUTPUT_WAIT_MAX_MS,
+  clampNumber,
+  pickOutputWindow
 };

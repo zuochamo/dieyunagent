@@ -87,6 +87,37 @@ describe('runShell keepOnTimeout（超时转后台）', () => {
   }, 20000);
 });
 
+describe('后台进程握着输出管道时的收尾', () => {
+  /**
+   * 同源坑（POSIX）：`sh -c 'sleep N & echo hi'` 里 sleep 继承了 stdout 管道，
+   * Node 的 close 要等管道 EOF → 旧代码会一直等到超时，把「命令早就跑完了」报成失败。
+   * 判定改由 exec-settlement 给（exit-status + 静默窗口），这里锁住「不再等到超时」。
+   */
+  it('命令退出但孙进程占着 stdout 时，不再等超时', async () => {
+    if (process.platform === 'win32') return; // Windows 走 cmd.exe，没有同款继承语义
+    const t0 = Date.now();
+    const res = await runShell(`sh -c 'sleep 3 & echo hi'`, { timeoutMs: 20000 });
+    const elapsed = Date.now() - t0;
+    expect(res.stdout).toContain('hi');
+    expect(res.code).toBe(0);
+    expect(elapsed).toBeLessThan(2500);
+    expect(res.behindStillHoldingStdio).toBe(true);
+  }, 20000);
+
+  it('真正长驻的前台命令仍然按等待窗口超时（不误判成功）', async () => {
+    if (process.platform === 'win32') return;
+    const t0 = Date.now();
+    let err = null;
+    try {
+      await runShell('sleep 5', { timeoutMs: 900 });
+    } catch (e) {
+      err = e;
+    }
+    expect(err && err.timedOut).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(4000);
+  }, 20000);
+});
+
 describe('超时终止的进程树语义', () => {
   it('连孙进程一起杀掉，不是只杀 cmd.exe', async () => {
     if (process.platform !== 'win32') return; // taskkill /T 是 Win32 专用，POSIX 走进程组

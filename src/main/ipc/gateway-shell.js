@@ -51,9 +51,10 @@ function registerGatewayShellIpc(ctx) {
     let qrDataUrl = '';
     if (url) {
       try {
+        // 320：面板里按 ~288 显示，生成得比显示大一点才是清晰缩小（240 会被放大发虚）
         qrDataUrl = await QRCode.toDataURL(url, {
           margin: 1,
-          width: 240,
+          width: 320,
           errorCorrectionLevel: 'M',
           color: {
             dark: '#111111',

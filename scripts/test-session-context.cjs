@@ -776,4 +776,41 @@ assert(
   'slim keeps only reference-shaped attachments'
 );
 
+// 回合触发归因：定时计划 / 目标续跑这类「系统自己开的一轮」必须能与用户输入区分开，
+// 否则回放、手机端与交接时无法分辨这条到底是不是用户打的字。
+const planTurn = require('../src/plans/plan-run-turn');
+const plan = { id: 'p1', name: '每日构建', trigger: 'schedule', prompt: '跑一遍测试' };
+const scheduleTurn = planTurn.planRunUserTurn(plan);
+const scheduleUnpacked = unpackMessageMeta(scheduleTurn.content);
+assert(scheduleUnpacked.content === scheduleTurn.userText, '触发轮的正文（= 模型输入）原样保留');
+assert(scheduleUnpacked.meta.trigger.kind === 'schedule', 'schedule 触发类型落库');
+assert(scheduleUnpacked.meta.trigger.planId === 'p1', '计划 id 落库');
+assert(scheduleUnpacked.meta.trigger.planName === '每日构建', '计划名直接用于触发条标题');
+assert(
+  Number.isFinite(Date.parse(scheduleUnpacked.meta.trigger.at)),
+  '触发时间可被 Renderer 解析成时钟'
+);
+assert(
+  planTurn.planRunUserTurn({ ...plan, trigger: 'goal' }).content.includes('"kind":"goal"'),
+  '目标续跑用独立 kind，不与定时触发混淆'
+);
+
+const strayTrigger = packMessageMeta(
+  '正文',
+  { trigger: { kind: 'schedule', planName: 'x', sneaky: 'should drop' } },
+  { role: 'user' }
+);
+assert(!strayTrigger.includes('sneaky'), 'trigger 只收登记过的字段');
+assert(
+  packMessageMeta('正文', { trigger: { planId: 'p1' } }, { role: 'user' }) === '正文',
+  '没有 kind 的 trigger 不落库'
+);
+const strippedAssistant = unpackMessageMeta(
+  packMessageMeta('改完了。', { trigger: { kind: 'schedule' } })
+);
+assert(
+  !strippedAssistant.meta || !strippedAssistant.meta.trigger,
+  'assistant 行不复制触发归因'
+);
+
 console.log('test-session-context.cjs ok');

@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav */
 'use strict';
 
 
@@ -255,22 +255,22 @@ function appendRenderedMessageAtIndex(i, opts) {
     const attachments = userMeta.attachments || packedMeta?.attachments || [];
     const next = messages[i + 1];
     const turnDone = next && next.role === 'assistant';
-    if (turnDone) {
-      const footerMeta = userMeta;
-      const copyText = resolveUserTurnCopyText(m, footerMeta);
-      appendUserTurn(display, {
-        forceScroll,
-        skipScroll,
-        attachments,
-        footer: buildMsgTurnFooter(footerMeta, {
+    const footer = turnDone
+      ? buildMsgTurnFooter(userMeta, {
           canWithdraw: canWithdrawUserTurn(i),
           msgIndex: i,
-          copyText
+          copyText: resolveUserTurnCopyText(m, userMeta)
         })
-      });
-    } else {
-      appendUserTurn(display, { forceScroll, skipScroll, attachments });
+      : null;
+    // 非人类触发的一轮（定时计划 / 目标续跑）：归因只在 user 行的 meta 里，
+    // 命中就渲染成触发条 —— 否则回放/交接时这轮会看起来像用户自己打的字。
+    const trigger = packedMeta?.trigger || null;
+    if (trigger) {
+      const ts = Date.parse(trigger.at) || Number(m.created_at) || 0;
+      appendTriggerNotice(display, { trigger, ts, footer, forceScroll, skipScroll });
+      return;
     }
+    appendUserTurn(display, { forceScroll, skipScroll, attachments, ...(footer ? { footer } : {}) });
     return;
   }
   if (m.role !== 'assistant') return;
@@ -440,6 +440,7 @@ function renderChatFromMessages(opts = {}) {
 
 function initChatRenderUI() {
   initChatScrollFollow();
+  if (typeof initChatNav === 'function') initChatNav();
   if (typeof initMermaidRender === 'function') initMermaidRender();
 }
 
