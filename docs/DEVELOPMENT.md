@@ -193,11 +193,10 @@ npm run serve:updates
 Rust 从来没走过 AST 路径，`mod util;` 的模块边一直是正则兜出来的。升到 0.27 后 AST 才真正生效，
 `collect_rust` 也补上了 `mod_item`（无 body）→ 模块依赖 import（`mod:` spec 约定）。
 
-**两个暂时固定在旧版的（各有硬理由，不要盲目 `cargo update`）**：
+**暂时固定在旧版的（有硬理由，不要盲目 `cargo update`）**：
 
 | crate | 固定值 | 为什么 |
 |-------|--------|--------|
-| `ort` | `=2.0.0-rc.12` | `download-binaries` 在 build script 里联网取 ONNX Runtime；升 rc.15 时下载会长时间卡住并**一直持有构建目录锁**（所有 `cargo build` 停在 `Compiling ort-sys`、CPU 为 0）。要升先把预下载产物放进缓存/CI。 |
 | `reqwest` | `0.12` | 0.13 的 `rustls` 特性默认走 `aws-lc-rs`，它需要 `cmake` + NASM 才能构建（本机与打包机都没有）；改 `rustls-no-provider` 要在运行时装 crypto provider，改 `native-tls` 会让 Linux 产物多一条 OpenSSL 依赖。0.13 把 `rustls-tls` 特性名也改成了 `rustls`。 |
 
 **不要随手跑 `cargo fmt`。** 仓库现有代码按旧 rustfmt 排序（`{json, Value}`），

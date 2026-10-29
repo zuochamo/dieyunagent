@@ -2,7 +2,7 @@
 
 > 源文件：[`src/agent/run-events.js`](../src/agent/run-events.js)。更新后运行 `npm run generate:agent-events`。
 
-生成时间：2026-09-09T01:43:03.652Z
+生成时间：2026-10-28T11:40:17.954Z
 
 ## 事件类型
 
@@ -37,7 +37,7 @@
 | `mode` | string | 否 |  |
 | `phase` | string | 否 |  |
 | `tool` | object|null | 否 |  |
-| `meta` | object|null | 否 | prepSteps 等扩展 |
+| `meta` | object|null | 否 | prepSteps 等扩展；done 带 isPlanRun / reviewAccepted / completionGatePassed / completionStatus / agentStatus / readinessReason（完成验收原因码，判定在 src/agent/completion-readiness.js） |
 
 ## Mobile AgentService 映射
 

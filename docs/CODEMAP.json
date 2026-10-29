@@ -4,10 +4,31 @@
   "modules": [
     {
       "id": "renderer-chat",
-      "paths": ["src/renderer/renderer-chat-scroll.js", "src/renderer/renderer-chat-live-run.js", "src/renderer/renderer-chat-bubbles.js", "src/renderer/renderer-chat-render.js", "src/renderer/renderer-thinking-trace-dom.js", "src/renderer/renderer-thinking-trace.js", "src/renderer/renderer-subagent-panel.js", "src/agent/agent-round-text.js"],
-      "owns": ["Chat bubbles", "thinking trace UI", "subagent detail panel", "mobile trace push"],
-      "tests": ["check:renderer", "test:agent-round-text"],
-      "docs": ["docs/AGENT-DEV.md"]
+      "paths": [
+        "src/renderer/renderer-chat-scroll.js",
+        "src/renderer/renderer-chat-live-run.js",
+        "src/renderer/renderer-chat-bubbles.js",
+        "src/renderer/renderer-chat-render.js",
+        "src/renderer/renderer-chat-nav.js",
+        "src/renderer/renderer-thinking-trace-dom.js",
+        "src/renderer/renderer-thinking-trace.js",
+        "src/renderer/renderer-subagent-panel.js",
+        "src/agent/agent-round-text.js"
+      ],
+      "owns": [
+        "Chat bubbles",
+        "thinking trace UI",
+        "subagent detail panel",
+        "mobile trace push",
+        "message navigation rail"
+      ],
+      "tests": [
+        "check:renderer",
+        "test:agent-round-text"
+      ],
+      "docs": [
+        "docs/AGENT-DEV.md"
+      ]
     },
     {
       "id": "renderer-agent-loop",
@@ -33,47 +54,125 @@
         "src/agent/run-cancel-registry.js",
         "src/core-bridge.js"
       ],
-      "owns": ["Composer send", "IPC to Main", "Agent loop UI lifecycle", "system prompt assembly"],
-      "tests": ["check:renderer", "test:agent-system-prompt", "test:system-prompt-prep", "test:rust-agent-loop-smoke", "test:agent-round-text"],
-      "docs": ["docs/ARCHITECTURE.md"]
+      "owns": [
+        "Composer send",
+        "IPC to Main",
+        "Agent loop UI lifecycle",
+        "system prompt assembly"
+      ],
+      "tests": [
+        "check:renderer",
+        "test:agent-system-prompt",
+        "test:system-prompt-prep",
+        "test:rust-agent-loop-smoke",
+        "test:agent-round-text"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md"
+      ]
     },
     {
       "id": "agent-rust",
-      "paths": ["crates/dieyun-core/src/agent/"],
-      "owns": ["Rust agent loop", "tool rounds", "trace structure"],
-      "tests": ["cargo:test", "test:rust-agent-loop-smoke", "test:rust-agent-loop"],
-      "docs": ["docs/DEVELOPMENT.md"]
+      "paths": [
+        "crates/dieyun-core/src/agent/"
+      ],
+      "owns": [
+        "Rust agent loop",
+        "tool rounds",
+        "trace structure"
+      ],
+      "tests": [
+        "cargo:test",
+        "test:rust-agent-loop-smoke",
+        "test:rust-agent-loop"
+      ],
+      "docs": [
+        "docs/DEVELOPMENT.md"
+      ]
     },
     {
       "id": "planner-rust",
-      "paths": ["crates/dieyun-core/src/planner/", "src/agent/rust-planner-runner.js"],
-      "owns": ["Planner orchestration", "multi-agent plans"],
-      "tests": ["test:rust-planner-smoke", "test:rust-planner-pipeline", "test:planner-parallel"],
-      "docs": ["docs/ARCHITECTURE.md"]
+      "paths": [
+        "crates/dieyun-core/src/planner/",
+        "src/agent/rust-planner-runner.js"
+      ],
+      "owns": [
+        "Planner orchestration",
+        "multi-agent plans"
+      ],
+      "tests": [
+        "test:rust-planner-smoke",
+        "test:rust-planner-pipeline",
+        "test:planner-parallel"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md"
+      ]
     },
     {
       "id": "llm-request",
-      "paths": ["src/agent/llm-request.js"],
+      "paths": [
+        "src/agent/llm-request.js"
+      ],
       "owns": [
         "LLM 端点解析（chat / models / embeddings / transcriptions）",
         "请求头装配（自定义头、User-Agent、{{sessionId}} 占位符、authMode）"
       ],
-      "tests": ["test:unit"],
-      "docs": ["docs/AGENT-DEV.md"]
+      "tests": [
+        "test:unit"
+      ],
+      "docs": [
+        "docs/AGENT-DEV.md"
+      ]
     },
     {
       "id": "agent-node",
-      "paths": ["src/agent/"],
-      "owns": ["run-events", "service", "guardrails", "tool-gate（工具关卡：before/after 唯一流程）", "compaction-main", "request-snapshot", "rust runners"],
-      "tests": ["test:agent-limits", "test:task-tier", "test:unit", "test:tool-harness", "test:tool-gate", "test:local-gateway-smoke", "test:planner-parallel", "test:rust-loop-runner", "test:request-snapshot"],
-      "docs": ["docs/AGENT-STRATEGY.md", "docs/REQUEST-SNAPSHOT.md"]
+      "paths": [
+        "src/agent/"
+      ],
+      "owns": [
+        "run-events",
+        "service",
+        "guardrails",
+        "tool-gate（工具关卡：before/after 唯一流程）",
+        "compaction-main",
+        "model-runtime-by-tier（编码参数按档 → Main 生效值的唯一入口）",
+        "request-snapshot",
+        "rust runners"
+      ],
+      "tests": [
+        "test:agent-limits",
+        "test:task-tier",
+        "test:unit",
+        "test:tool-harness",
+        "test:tool-gate",
+        "test:local-gateway-smoke",
+        "test:planner-parallel",
+        "test:rust-loop-runner",
+        "test:request-snapshot"
+      ],
+      "docs": [
+        "docs/AGENT-STRATEGY.md",
+        "docs/REQUEST-SNAPSHOT.md"
+      ]
     },
     {
       "id": "gateway",
-      "paths": ["src/gateway/"],
-      "owns": ["WebSocket RPC", "tool routing", "memory handlers"],
-      "tests": ["test:local-gateway-smoke", "test:core-bridge"],
-      "docs": ["docs/ARCHITECTURE.md#4-本地-gateway"]
+      "paths": [
+        "src/gateway/"
+      ],
+      "owns": [
+        "WebSocket RPC",
+        "tool routing",
+        "memory handlers"
+      ],
+      "tests": [
+        "test:local-gateway-smoke",
+        "test:core-bridge"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md#4-本地-gateway"
+      ]
     },
     {
       "id": "gateway-web",
@@ -86,99 +185,239 @@
         "web_search / web_fetch（联网搜索与抓取）",
         "搜索引擎注册表（一个引擎一个 parser）",
         "出网传输（Electron net 优先，跟随系统代理）",
-        "SSRF 白名单 assertSafeUrl（mcp/plugins/skills catalog 共用）",
+        "SSRF 白名单 assertSafeUrl（mcp/skills catalog 共用）",
         "正文抽取与搜索页显式失败语义"
       ],
-      "tests": ["test:unit"],
-      "docs": ["docs/AGENT-DEV.md"]
+      "tests": [
+        "test:unit"
+      ],
+      "docs": [
+        "docs/AGENT-DEV.md"
+      ]
     },
     {
       "id": "computer-control",
-      "paths": ["src/computer/", "src/gateway/handlers/computer.js"],
+      "paths": [
+        "src/computer/",
+        "src/gateway/handlers/computer.js"
+      ],
       "owns": [
         "computer 工具（OS 级电脑控制：截屏 + 鼠标键盘注入）",
+        "动作枚举唯一来源（actions.js：mutates / coordinate / click / modifiers / region 各只声明一次）",
         "Win32 输入注入（koffi + SendInput，N-API 预编译免 ABI 重建）",
-        "desktopCapturer 截屏与 DPI 坐标换算（coordinate-map 纯函数）",
-        "动作编排（点击/双击/拖拽/输入/组合键/滚动/等待，动后自动截图）"
+        "desktopCapturer 截屏与 DPI 坐标换算（coordinate-map「视图」模型：全屏与 region 裁剪同一套映射）",
+        "动作编排（点击/双击/拖拽/输入/组合键/滚动/等待/等画面变化/列窗口/切前台，动后自动截图）",
+        "画面事实回报（changed 是否变化 / stable 是否稳定 / timedOut 等不到）"
       ],
-      "tests": ["test:unit"],
-      "docs": ["docs/SANDBOX.md"]
+      "tests": [
+        "test:unit"
+      ],
+      "docs": [
+        "docs/SANDBOX.md"
+      ]
     },
     {
       "id": "lsp",
-      "paths": ["src/lsp/"],
+      "paths": [
+        "src/lsp/"
+      ],
       "owns": [
         "LSP 定位（definition/references/hover/documentSymbol/workspaceSymbol）",
         "诊断 store / 项目扫描 / watch",
         "远程与 grep 降级链路"
       ],
-      "tests": ["test:lsp"],
-      "docs": ["docs/LSP-DIAGNOSTICS.md"]
+      "tests": [
+        "test:lsp"
+      ],
+      "docs": [
+        "docs/LSP-DIAGNOSTICS.md"
+      ]
     },
     {
       "id": "mcp",
-      "paths": ["src/mcp/", "src/main/ipc/skills-mcp.js", "src/main/mcp-plans-boot.js"],
-      "owns": ["MCP json store", "credentials", "npx package install", "bundled dieyun-open-api", "skills/MCP IPC", "whenReady MCP/plans boot"],
-      "tests": ["test:mcp-store", "test:phase5-handlers", "test:unit"],
-      "docs": ["docs/ARCHITECTURE.md#9-技能、mcp-与插件"]
+      "paths": [
+        "src/mcp/",
+        "src/main/ipc/skills-mcp.js",
+        "src/main/mcp-plans-boot.js"
+      ],
+      "owns": [
+        "MCP json store",
+        "credentials",
+        "npx package install",
+        "bundled dieyun-open-api",
+        "skills/MCP IPC",
+        "whenReady MCP/plans boot"
+      ],
+      "tests": [
+        "test:mcp-store",
+        "test:phase5-handlers",
+        "test:unit"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md#9-技能、mcp-与插件"
+      ]
     },
     {
       "id": "core-rpc",
-      "paths": ["crates/dieyun-core/src/rpc/", "src/core-bridge.js"],
-      "owns": ["Rust RPC surface", "stdio bridge"],
-      "tests": ["test:core-bridge", "cargo:test"],
-      "docs": ["docs/ARCHITECTURE.md#6-dieyun-corerust-sidecar"]
+      "paths": [
+        "crates/dieyun-core/src/rpc/",
+        "src/core-bridge.js"
+      ],
+      "owns": [
+        "Rust RPC surface",
+        "stdio bridge"
+      ],
+      "tests": [
+        "test:core-bridge",
+        "cargo:test"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md#6-dieyun-corerust-sidecar"
+      ]
     },
     {
       "id": "memory",
-      "paths": ["crates/dieyun-core/src/memory/"],
+      "paths": [
+        "crates/dieyun-core/src/memory/"
+      ],
       "owns": [
         "SQLite messages",
         "agent traces",
         "sessions",
         "request snapshots（请求信封留底）",
-        "周期修剪（agent_runs 为根 + CASCADE + 空闲页回收）"
+        "周期修剪（agent_runs 为根 + CASCADE + 空闲页回收）",
+        "长期记忆写入侧策略（近重复合并 / 归纳低价值闸，add_long_memory_deduped）",
+        "会话溯源（long_memories.session_id）与软归档遗忘",
+        "账本自愈（孤儿 project scope / 悬空归纳作业，reconcile_memory_ledger）",
+        "项目身份（projects / project_paths：scope = project:<id>，路径别名与 git origin）"
       ],
-      "tests": ["test:local-gateway-smoke", "test:request-snapshot", "cargo:test"],
-      "docs": ["docs/MEMORY.md", "docs/REQUEST-SNAPSHOT.md"]
+      "tests": [
+        "test:local-gateway-smoke",
+        "test:request-snapshot",
+        "cargo:test"
+      ],
+      "docs": [
+        "docs/MEMORY.md",
+        "docs/REQUEST-SNAPSHOT.md",
+        "docs/SQLITE-ACCESS.md"
+      ]
     },
     {
       "id": "core-sqlite",
-      "paths": ["crates/dieyun-core/src/sqlite.rs"],
+      "paths": [
+        "crates/dieyun-core/src/sqlite.rs"
+      ],
       "owns": [
         "SQLite 调优单一来源（WAL / synchronous=NORMAL / wal_autocheckpoint / cache_size / auto_vacuum=INCREMENTAL）",
         "连接生命周期单一来源（SqliteHandle：每库一条常驻连接 + 惰性建表 + open_dedicated）"
       ],
-      "tests": ["cargo:test"],
-      "docs": ["docs/MEMORY.md"]
+      "tests": [
+        "cargo:test"
+      ],
+      "docs": [
+        "docs/MEMORY.md"
+      ]
     },
     {
       "id": "mobile",
-      "paths": ["src/mobile/", "src/agent/service.js"],
-      "owns": ["Mobile WebView UI", "LAN bridge", "task.* events"],
-      "tests": ["test:mobile", "test:agent-run-events"],
-      "docs": ["docs/AGENT-DEV.md#手机端"]
+      "paths": [
+        "src/mobile/",
+        "src/agent/service.js"
+      ],
+      "owns": [
+        "Mobile WebView UI",
+        "LAN bridge",
+        "task.* events"
+      ],
+      "tests": [
+        "test:mobile",
+        "test:agent-run-events"
+      ],
+      "docs": [
+        "docs/AGENT-DEV.md#手机端"
+      ]
+    },
+    {
+      "id": "peer-mesh",
+      "paths": [
+        "src/peer/",
+        "src/net/lan.js",
+        "src/main/ipc/peer.js",
+        "src/renderer/renderer-peer.js"
+      ],
+      "owns": [
+        "内网 agent 互通（P2P）：身份 / 配对码 / UDP 发现 / WS 直连",
+        "来信落会话 + 跳数与小时预算约束下的自动跑一轮",
+        "会话 ↔ 对端绑定（在这个会话里打字就是发给它）",
+        "建议式文件/任务租约（advisory，不阻止写入）",
+        "peer_list / peer_send / peer_claim 三个工具"
+      ],
+      "tests": [
+        "test:peer",
+        "check:js",
+        "check:renderer"
+      ],
+      "docs": [
+        "docs/PEER-MESH-PLAN.md"
+      ]
     },
     {
       "id": "renderer-all",
-      "paths": ["src/renderer/"],
-      "owns": ["All renderer UI modules"],
-      "tests": ["check:renderer", "test:agent-round-text"],
-      "docs": ["docs/ARCHITECTURE.md#8-渲染进程-ui-模块"]
+      "paths": [
+        "src/renderer/"
+      ],
+      "owns": [
+        "All renderer UI modules"
+      ],
+      "tests": [
+        "check:renderer",
+        "test:agent-round-text"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md#8-渲染进程-ui-模块"
+      ]
     },
     {
       "id": "main-entry",
-      "paths": ["src/main-entry.js", "src/main/", "src/ssh/"],
-      "owns": ["Electron main", "IPC registration", "Remote Agent pack", "SSH reconnect"],
-      "tests": ["test:local-gateway-smoke", "test:monitor-outbox"],
-      "docs": ["docs/ARCHITECTURE.md#3-进程与启动链"]
+      "paths": [
+        "src/main-entry.js",
+        "src/main/",
+        "src/ssh/"
+      ],
+      "owns": [
+        "Electron main",
+        "IPC registration",
+        "Remote Agent pack",
+        "SSH reconnect"
+      ],
+      "tests": [
+        "test:local-gateway-smoke",
+        "test:monitor-outbox"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md#3-进程与启动链"
+      ]
     },
     {
       "id": "scripts-pack",
-      "paths": ["scripts/", "build-installer.bat"],
-      "owns": ["Build", "pack", "verify", "publish"],
-      "tests": ["test:dieyun-core-pack", "verify:asar", "check:contracts"],
-      "docs": ["docs/DEVELOPMENT.md"]
+      "paths": [
+        "scripts/",
+        "build-installer.bat"
+      ],
+      "owns": [
+        "Build",
+        "pack",
+        "verify",
+        "publish"
+      ],
+      "tests": [
+        "test:dieyun-core-pack",
+        "verify:asar",
+        "check:contracts"
+      ],
+      "docs": [
+        "docs/DEVELOPMENT.md"
+      ]
     },
     {
       "id": "codebase-index",
@@ -194,144 +433,1013 @@
         "FTS+ANN vector search",
         "codebase.db 唯一入口（索引 + 图谱共享同一条常驻连接与一份建表）"
       ],
-      "tests": ["cargo:test"],
-      "docs": ["docs/ARCHITECTURE.md#15-代码库索引"]
+      "tests": [
+        "cargo:test"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md#15-代码库索引"
+      ]
     },
     {
       "id": "code-graph",
-      "paths": ["crates/dieyun-core/src/graph/"],
-      "owns": ["Dependency graph", "repo_map", "LSP enrich standing job"],
-      "tests": ["cargo:test"],
-      "docs": ["docs/ARCHITECTURE.md#15-代码库索引", "docs/AGENT-DEV.md"]
+      "paths": [
+        "crates/dieyun-core/src/graph/"
+      ],
+      "owns": [
+        "Dependency graph",
+        "repo_map",
+        "LSP enrich standing job"
+      ],
+      "tests": [
+        "cargo:test"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md#15-代码库索引",
+        "docs/AGENT-DEV.md"
+      ]
+    },
+    {
+      "id": "project-memory-file",
+      "paths": [
+        "src/agent/project-memory-file.js"
+      ],
+      "owns": [
+        "项目记忆文件 <workspace>/.dieyun/memory.md（唯一真相）",
+        "条目解析 / 归一化去重 / 字符预算注入块 / secret 过滤"
+      ],
+      "tests": [
+        "test:project-memory-file",
+        "test:knowledge-maintainer",
+        "test:system-prompt-prep"
+      ],
+      "docs": [
+        "docs/MEMORY.md"
+      ]
     }
   ],
   "pathRules": [
-    { "prefix": "crates/dieyun-core/src/agent/", "tests": ["cargo:test", "test:rust-agent-loop-smoke"] },
-    { "prefix": "crates/dieyun-core/src/planner/", "tests": ["test:rust-planner-smoke", "cargo:test"] },
-    { "prefix": "crates/dieyun-core/src/index/", "tests": ["cargo:test"] },
-    { "prefix": "crates/dieyun-core/src/graph/", "tests": ["cargo:test"] },
-    { "prefix": "crates/dieyun-core/src/treesitter/", "tests": ["cargo:test"] },
-    { "prefix": "crates/dieyun-core/src/embedding/", "tests": ["cargo:test"] },
-    { "prefix": "crates/dieyun-core/", "tests": ["cargo:test", "test:core-bridge"] },
-    { "prefix": "crates/dieyun-core/src/memory/snapshot.rs", "tests": ["cargo:test", "test:request-snapshot"] },
-    { "prefix": "src/agent/request-snapshot.js", "tests": ["test:unit", "test:request-snapshot"] },
-    { "prefix": "src/agent/compaction-main.js", "tests": ["test:session-context"] },
-    { "prefix": "src/agent/session-transcript.js", "tests": ["test:session-context"] },
-    { "prefix": "src/agent/session-context.js", "tests": ["test:session-context"] },
-    { "prefix": "src/agent/tool-result-cap.js", "tests": ["test:session-context"] },
-    { "prefix": "src/agent/agent-system-prompt.js", "tests": ["test:agent-system-prompt", "check:renderer"] },
-    { "prefix": "src/agent/system-prompt-prep.js", "tests": ["test:system-prompt-prep"] },
-    { "prefix": "src/agent/parallel-batch.js", "tests": ["test:planner-parallel"] },
-    { "prefix": "src/agent/rust-planner-runner.js", "tests": ["test:planner-parallel", "test:rust-planner-smoke"] },
-    { "prefix": "src/agent/rust-loop-runner.js", "tests": ["test:rust-loop-runner", "test:rust-agent-loop-smoke", "test:request-snapshot"] },
-    { "prefix": "src/agent/browser-vision.js", "tests": ["test:rust-loop-runner"] },
-    { "prefix": "src/agent/agent-synthesis.js", "tests": ["test:rust-loop-runner"] },
-    { "prefix": "src/attachment-store.js", "tests": ["test:unit"] },
-    { "prefix": "src/attachment-retention.js", "tests": ["test:unit"] },
-    { "prefix": "src/renderer/renderer-attachments.js", "tests": ["check:renderer"] },
-    { "prefix": "src/main/ipc/attachments.js", "tests": ["test:unit"] },
-    { "prefix": "src/agent/delegate-batch.js", "tests": ["test:delegate-batch"] },
-    { "prefix": "src/agent/delegate-tool-gateway.js", "tests": ["test:tool-harness"] },
-    { "prefix": "src/gateway/sandbox-policy.js", "tests": ["test:sandbox-policy", "test:sandbox-gateway", "test:sandbox-real"] },
-    { "prefix": "src/gateway/sandbox-approvals.js", "tests": ["test:sandbox-policy", "test:sandbox-gateway", "test:sandbox-real"] },
-    { "prefix": "src/gateway/exec-policy.js", "tests": ["test:sandbox-policy", "test:sandbox-gateway", "test:sandbox-real", "test:local-gateway-smoke"] },
-    { "prefix": "src/gateway/host-control.js", "tests": ["test:sandbox-real", "test:unit"] },
-    { "prefix": "src/gateway/permissions-store.js", "tests": ["test:sandbox-gateway", "test:local-gateway-smoke"] },
-    { "prefix": "src/renderer/renderer-sandbox-approval.js", "tests": ["check:renderer", "test:sandbox-gateway"] },
-    { "prefix": "src/gateway/str-replace.js", "tests": ["test:fs-edit"] },
-    { "prefix": "src/gateway/fs-edit-file.js", "tests": ["test:fs-edit", "test:local-gateway-smoke"] },
-    { "prefix": "src/agent/tool-catalog.js", "tests": ["test:tool-harness", "check:renderer"] },
-    { "prefix": "src/plans/plan-tools.js", "tests": ["test:tool-harness"] },
-    { "prefix": "src/plans/plan-run-events.js", "tests": ["test:unit"] },
-    { "prefix": "src/plans/plan-run-turn.js", "tests": ["test:unit"] },
-    { "prefix": "src/plans/plan-session.js", "tests": ["test:unit"] },
-    { "prefix": "src/plans/plan-agent-runner.js", "tests": ["test:unit"] },
-    { "prefix": "src/plans/rrule-next.js", "tests": ["test:unit"] },
-    { "prefix": "src/plans/scheduler.js", "tests": ["test:unit"] },
-    { "prefix": "src/renderer/renderer-automation.js", "tests": ["check:renderer"] },
-    { "prefix": "src/llm-tool-call-fallback.js", "tests": ["test:llm-tool-call-fallback"] },
-    { "prefix": "src/llm-stream-utils.js", "tests": ["test:llm-tool-call-fallback", "test:task-tier", "test:unit"] },
-    { "prefix": "src/llm-reconnect-retry.js", "tests": ["test:llm-reconnect-retry", "test:rust-loop-runner", "test:planner-parallel"] },
-    { "prefix": "src/agent/task-tier.js", "tests": ["test:task-tier"] },
-    { "prefix": "src/agent/guardrails-shared.js", "tests": ["test:guardrails-sync", "test:tool-harness"] },
-    { "prefix": "src/agent/model-api-config.js", "tests": ["test:unit"] },
-    { "prefix": "src/agent/llm-request.js", "tests": ["test:unit"] },
-    { "prefix": "src/agent/llm-channel.js", "tests": ["test:llm-channel", "test:unit"] },
-    { "prefix": "src/agent/sse-delta-parse.js", "tests": ["test:unit", "test:llm-tool-call-fallback", "check:renderer"] },
-    { "prefix": "src/agent/tool-guardrails.js", "tests": ["test:guardrails-sync", "test:tool-harness"] },
-    { "prefix": "src/agent/tool-gate.js", "tests": ["test:tool-gate", "test:tool-harness"] },
-    { "prefix": "src/agent/tool-harness.js", "tests": ["test:tool-gate", "test:tool-harness"] },
-    { "prefix": "src/agent/tool-bridge-main.js", "tests": ["test:tool-gate", "test:tool-harness"] },
-    { "prefix": "src/agent/write-smell-hints.js", "tests": ["test:write-smell-hints"] },
-    { "prefix": "src/agent/reviewer-json.js", "tests": ["test:reviewer-json"] },
-    { "prefix": "src/renderer/renderer-agent-reviewer.js", "tests": ["test:reviewer-json", "check:renderer"] },
-    { "prefix": "src/agent/", "tests": ["test:agent-limits", "test:task-tier", "test:tool-harness"] },
-    { "prefix": "src/renderer/agent-guardrails.js", "tests": ["test:guardrails-sync", "check:renderer"] },
-    { "prefix": "examples/agent-sandbox/", "tests": ["test:sandbox-smoke", "test:tool-harness"] },
-    { "prefix": "src/agent/run-events.js", "tests": ["test:agent-run-events"] },
-    { "prefix": "src/agent/service.js", "tests": ["test:agent-run-events"] },
-    { "prefix": "crates/dieyun-core/src/rpc/", "tests": ["verify:rpc-catalog", "cargo:test"] },
-    { "prefix": "src/gateway/web/", "tests": ["test:unit", "test:local-gateway-smoke", "verify:rpc-catalog"] },
-    { "prefix": "src/gateway/artifact-scan.js", "tests": ["test:unit", "test:local-gateway-smoke"] },
-    { "prefix": "src/gateway/", "tests": ["test:local-gateway-smoke", "verify:rpc-catalog"] },
-    { "prefix": "src/lsp/", "tests": ["test:lsp"] },
-    { "prefix": "src/browser/", "tests": ["test:browser-smoke", "test:tool-harness"] },
-    { "prefix": "src/renderer/renderer-thinking-trace.js", "tests": ["test:agent-round-text", "check:renderer"] },
-    { "prefix": "src/renderer/renderer-agent-continue.js", "tests": ["check:renderer"] },
-    { "prefix": "src/renderer/renderer-agent-llm.js", "tests": ["check:renderer", "test:llm-tool-call-fallback"] },
-    { "prefix": "src/renderer/renderer-agent-compaction.js", "tests": ["check:renderer"] },
-    { "prefix": "src/renderer/renderer-agent-rust-loop.js", "tests": ["check:renderer", "test:agent-round-text"] },
-    { "prefix": "src/renderer/renderer-agent-api.js", "tests": ["test:agent-round-text", "check:renderer", "test:llm-tool-call-fallback"] },
-    { "prefix": "src/renderer/renderer-agent-system-message.js", "tests": ["test:agent-system-prompt", "check:renderer"] },
-    { "prefix": "src/renderer/renderer-composer-queue.js", "tests": ["test:composer-queue", "check:renderer"] },
-    { "prefix": "src/renderer/renderer-agent-send.js", "tests": ["test:session-context", "check:renderer", "test:request-snapshot"] },
-    { "prefix": "src/mobile/", "tests": ["test:mobile", "test:agent-run-events"] },
-    { "prefix": "src/monitor/", "tests": ["test:monitor-outbox"] },
-    { "prefix": "src/mcp/", "tests": ["test:mcp-store"] },
-    { "prefix": "src/main-entry.js", "tests": ["test:monitor-outbox", "test:local-gateway-smoke", "test:phase5-handlers", "test:mcp-store"] },
-    { "prefix": "src/ssh/port-forward-manager.js", "tests": ["test:browser-smoke"] },
-    { "prefix": "src/ssh/", "tests": ["test:ssh-reconnect-targets"] },
-    { "prefix": "src/main/remote-gateway.js", "tests": ["test:ssh-reconnect-targets"] },
-    { "prefix": "src/main/workspace-remote-runtime.js", "tests": ["test:workspace-remote-runtime"] },
-    { "prefix": "src/remote/remote-pack-layout.js", "tests": ["test:remote-pack", "test:workspace-remote-runtime", "test:unit", "test:fs-edit"] },
-    { "prefix": "src/remote/pack-archive.js", "tests": ["test:unit"] },
-    { "prefix": "src/remote/run-cli.js", "tests": ["test:remote-pack"] },
-    { "prefix": "test/unit/pack-archive.test.cjs", "tests": ["test:unit"] },
-    { "prefix": "src/optional-assets/", "tests": ["test:workspace-remote-runtime"] },
-    { "prefix": "src/main/mcp-plans-boot.js", "tests": ["test:unit"] },
-    { "prefix": "src/main/app-config.js", "tests": ["test:main-shell"] },
-    { "prefix": "src/main/activity-stats.js", "tests": ["test:main-shell"] },
-    { "prefix": "src/main/workplace-monitor.js", "tests": ["test:main-shell", "test:monitor-outbox"] },
-    { "prefix": "src/main/window-tray.js", "tests": ["test:main-shell"] },
-    { "prefix": "src/main/auto-launch.js", "tests": ["test:main-shell"] },
-    { "prefix": "src/main/app-updater.js", "tests": ["test:app-updater-feeds"] },
-    { "prefix": "src/main/tray-notify.js", "tests": ["test:phase5-handlers"] },
-    { "prefix": "src/git/worktree-service.js", "tests": ["test:worktree"] },
-    { "prefix": "src/git/git-target.js", "tests": ["test:scm", "test:unit"] },
-    { "prefix": "src/git/status.js", "tests": ["test:unit"] },
-    { "prefix": "src/git/diff-text.js", "tests": ["test:unit"] },
-    { "prefix": "src/git/scm-service.js", "tests": ["test:scm", "test:unit"] },
-    { "prefix": "src/git/diff-context.js", "tests": ["test:scm"] },
-    { "prefix": "src/git/baseline-capture.js", "tests": ["test:worktree"] },
-    { "prefix": "src/git/remote-baseline-capture.js", "tests": ["test:worktree"] },
-    { "prefix": "scripts/test-scm-service.cjs", "tests": ["test:scm"] },
-    { "prefix": "test/unit/scm-service.test.cjs", "tests": ["test:unit"] },
-    { "prefix": "test/unit/git-status.test.cjs", "tests": ["test:unit"] },
-    { "prefix": "src/gateway/handlers/scm.js", "tests": ["test:scm", "verify:rpc-catalog"] },
-    { "prefix": "src/gateway/handlers/workspace.js", "tests": ["test:unit", "verify:rpc-catalog"] },
-    { "prefix": "src/workspace/resolve-path-candidates.js", "tests": ["test:unit"] },
-    { "prefix": "src/renderer/renderer-scm-pane.js", "tests": ["check:renderer"] },
-    { "prefix": "src/main/ipc/worktree.js", "tests": ["test:worktree", "verify:rpc-catalog"] },
-    { "prefix": "src/renderer/agent/worktree-ui.js", "tests": ["test:worktree", "check:renderer"] },
-    { "prefix": "src/renderer/renderer-changes-pane.js", "tests": ["test:worktree", "check:renderer"] },
-    { "prefix": "src/renderer/renderer-worktrees-settings.js", "tests": ["test:worktree", "check:renderer"] },
-    { "prefix": "scripts/test-worktree-baseline.cjs", "tests": ["test:worktree"] },
-    { "prefix": "src/main/ipc/renderer-freeze.js", "tests": ["test:main-shell"] },
-    { "prefix": "src/renderer/renderer-freeze-watch.js", "tests": ["check:renderer"] },
-    { "prefix": "scripts/", "tests": ["test:agent-limits"] }
+    {
+      "prefix": "crates/dieyun-core/src/agent/",
+      "tests": [
+        "cargo:test",
+        "test:rust-agent-loop-smoke"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/planner/",
+      "tests": [
+        "test:rust-planner-smoke",
+        "cargo:test"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/index/",
+      "tests": [
+        "cargo:test"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/graph/",
+      "tests": [
+        "cargo:test"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/treesitter/",
+      "tests": [
+        "cargo:test"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/embedding/",
+      "tests": [
+        "cargo:test"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/",
+      "tests": [
+        "cargo:test",
+        "test:core-bridge"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/memory/snapshot.rs",
+      "tests": [
+        "cargo:test",
+        "test:request-snapshot"
+      ]
+    },
+    {
+      "prefix": "src/agent/request-snapshot.js",
+      "tests": [
+        "test:unit",
+        "test:request-snapshot"
+      ]
+    },
+    {
+      "prefix": "src/agent/compaction-main.js",
+      "tests": [
+        "test:session-context"
+      ]
+    },
+    {
+      "prefix": "src/agent/session-transcript.js",
+      "tests": [
+        "test:session-context"
+      ]
+    },
+    {
+      "prefix": "src/agent/session-context.js",
+      "tests": [
+        "test:session-context"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-result-cap.js",
+      "tests": [
+        "test:session-context"
+      ]
+    },
+    {
+      "prefix": "src/agent/agent-system-prompt.js",
+      "tests": [
+        "test:agent-system-prompt",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/agent/system-prompt-prep.js",
+      "tests": [
+        "test:system-prompt-prep"
+      ]
+    },
+    {
+      "prefix": "src/agent/parallel-batch.js",
+      "tests": [
+        "test:planner-parallel"
+      ]
+    },
+    {
+      "prefix": "src/agent/rust-planner-runner.js",
+      "tests": [
+        "test:planner-parallel",
+        "test:rust-planner-smoke"
+      ]
+    },
+    {
+      "prefix": "src/agent/rust-loop-runner.js",
+      "tests": [
+        "test:rust-loop-runner",
+        "test:rust-agent-loop-smoke",
+        "test:request-snapshot"
+      ]
+    },
+    {
+      "prefix": "src/agent/browser-vision.js",
+      "tests": [
+        "test:rust-loop-runner"
+      ]
+    },
+    {
+      "prefix": "src/agent/agent-synthesis.js",
+      "tests": [
+        "test:rust-loop-runner"
+      ]
+    },
+    {
+      "prefix": "src/attachment-store.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/attachment-retention.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-attachments.js",
+      "tests": [
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/main/ipc/attachments.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/delegate-batch.js",
+      "tests": [
+        "test:delegate-batch"
+      ]
+    },
+    {
+      "prefix": "src/agent/delegate-tool-gateway.js",
+      "tests": [
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/gateway/sandbox-policy.js",
+      "tests": [
+        "test:sandbox-policy",
+        "test:sandbox-gateway",
+        "test:sandbox-real"
+      ]
+    },
+    {
+      "prefix": "src/gateway/sandbox-approvals.js",
+      "tests": [
+        "test:sandbox-policy",
+        "test:sandbox-gateway",
+        "test:sandbox-real"
+      ]
+    },
+    {
+      "prefix": "src/gateway/exec-policy.js",
+      "tests": [
+        "test:sandbox-policy",
+        "test:sandbox-gateway",
+        "test:sandbox-real",
+        "test:local-gateway-smoke"
+      ]
+    },
+    {
+      "prefix": "src/gateway/host-control.js",
+      "tests": [
+        "test:sandbox-real",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/gateway/permissions-store.js",
+      "tests": [
+        "test:sandbox-gateway",
+        "test:local-gateway-smoke"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-sandbox-approval.js",
+      "tests": [
+        "check:renderer",
+        "test:sandbox-gateway"
+      ]
+    },
+    {
+      "prefix": "src/gateway/str-replace.js",
+      "tests": [
+        "test:fs-edit"
+      ]
+    },
+    {
+      "prefix": "src/gateway/fs-edit-file.js",
+      "tests": [
+        "test:fs-edit",
+        "test:local-gateway-smoke"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-catalog.js",
+      "tests": [
+        "test:tool-harness",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/plans/plan-tools.js",
+      "tests": [
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/plans/plan-run-events.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/plans/plan-run-turn.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/plans/plan-session.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/plans/plan-agent-runner.js",
+      "tests": [
+        "test:unit",
+        "test:knowledge-maintainer"
+      ]
+    },
+    {
+      "prefix": "src/plans/rrule-next.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/plans/scheduler.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-automation.js",
+      "tests": [
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/llm-tool-call-fallback.js",
+      "tests": [
+        "test:llm-tool-call-fallback"
+      ]
+    },
+    {
+      "prefix": "src/llm-stream-utils.js",
+      "tests": [
+        "test:llm-tool-call-fallback",
+        "test:task-tier",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/llm-reconnect-retry.js",
+      "tests": [
+        "test:llm-reconnect-retry",
+        "test:rust-loop-runner",
+        "test:planner-parallel"
+      ]
+    },
+    {
+      "prefix": "src/agent/task-tier.js",
+      "tests": [
+        "test:task-tier"
+      ]
+    },
+    {
+      "prefix": "src/agent/guardrails-shared.js",
+      "tests": [
+        "test:guardrails-sync",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/agent/model-api-config.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/llm-request.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/llm-channel.js",
+      "tests": [
+        "test:llm-channel",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/sse-delta-parse.js",
+      "tests": [
+        "test:unit",
+        "test:llm-tool-call-fallback",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-guardrails.js",
+      "tests": [
+        "test:guardrails-sync",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-gate.js",
+      "tests": [
+        "test:tool-gate",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-harness.js",
+      "tests": [
+        "test:tool-gate",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-bridge-main.js",
+      "tests": [
+        "test:tool-bridge-delegate",
+        "test:tool-gate",
+        "test:guardrails-sync"
+      ]
+    },
+    {
+      "prefix": "src/agent/write-smell-hints.js",
+      "tests": [
+        "test:write-smell-hints"
+      ]
+    },
+    {
+      "prefix": "src/agent/reviewer-json.js",
+      "tests": [
+        "test:reviewer-json"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-agent-reviewer.js",
+      "tests": [
+        "test:reviewer-json",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-knowledge-maintainer.js",
+      "tests": [
+        "check:renderer",
+        "test:knowledge-maintainer"
+      ]
+    },
+    {
+      "prefix": "src/agent/",
+      "tests": [
+        "test:agent-limits",
+        "test:task-tier",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/renderer/agent-guardrails.js",
+      "tests": [
+        "test:unit",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "examples/agent-sandbox/",
+      "tests": [
+        "test:sandbox-smoke",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/agent/run-events.js",
+      "tests": [
+        "test:agent-run-events"
+      ]
+    },
+    {
+      "prefix": "src/agent/service.js",
+      "tests": [
+        "test:agent-run-events"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/rpc/",
+      "tests": [
+        "verify:rpc-catalog",
+        "cargo:test"
+      ]
+    },
+    {
+      "prefix": "src/gateway/web/",
+      "tests": [
+        "test:unit",
+        "test:local-gateway-smoke",
+        "verify:rpc-catalog"
+      ]
+    },
+    {
+      "prefix": "src/gateway/artifact-scan.js",
+      "tests": [
+        "test:unit",
+        "test:local-gateway-smoke"
+      ]
+    },
+    {
+      "prefix": "src/gateway/",
+      "tests": [
+        "test:local-gateway-smoke",
+        "verify:rpc-catalog"
+      ]
+    },
+    {
+      "prefix": "src/lsp/",
+      "tests": [
+        "test:lsp"
+      ]
+    },
+    {
+      "prefix": "src/browser/",
+      "tests": [
+        "test:browser-smoke",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-thinking-trace.js",
+      "tests": [
+        "test:agent-round-text",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-agent-continue.js",
+      "tests": [
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-agent-llm.js",
+      "tests": [
+        "check:renderer",
+        "test:llm-tool-call-fallback"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-agent-compaction.js",
+      "tests": [
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-agent-rust-loop.js",
+      "tests": [
+        "check:renderer",
+        "test:agent-round-text"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-agent-api.js",
+      "tests": [
+        "test:agent-round-text",
+        "check:renderer",
+        "test:llm-tool-call-fallback"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-agent-system-message.js",
+      "tests": [
+        "test:agent-system-prompt",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-composer-queue.js",
+      "tests": [
+        "test:composer-queue",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-agent-send.js",
+      "tests": [
+        "test:session-context",
+        "check:renderer",
+        "test:request-snapshot"
+      ]
+    },
+    {
+      "prefix": "src/mobile/",
+      "tests": [
+        "test:mobile",
+        "test:agent-run-events"
+      ]
+    },
+    {
+      "prefix": "src/monitor/",
+      "tests": [
+        "test:monitor-outbox"
+      ]
+    },
+    {
+      "prefix": "src/mcp/",
+      "tests": [
+        "test:mcp-store"
+      ]
+    },
+    {
+      "prefix": "src/main-entry.js",
+      "tests": [
+        "test:monitor-outbox",
+        "test:local-gateway-smoke",
+        "test:phase5-handlers",
+        "test:mcp-store"
+      ]
+    },
+    {
+      "prefix": "src/ssh/port-forward-manager.js",
+      "tests": [
+        "test:browser-smoke"
+      ]
+    },
+    {
+      "prefix": "src/ssh/",
+      "tests": [
+        "test:ssh-reconnect-targets"
+      ]
+    },
+    {
+      "prefix": "src/main/remote-gateway.js",
+      "tests": [
+        "test:ssh-reconnect-targets"
+      ]
+    },
+    {
+      "prefix": "src/main/workspace-remote-runtime.js",
+      "tests": [
+        "test:workspace-remote-runtime"
+      ]
+    },
+    {
+      "prefix": "src/remote/remote-pack-layout.js",
+      "tests": [
+        "test:remote-pack",
+        "test:workspace-remote-runtime",
+        "test:unit",
+        "test:fs-edit"
+      ]
+    },
+    {
+      "prefix": "src/remote/pack-archive.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/remote/run-cli.js",
+      "tests": [
+        "test:remote-pack"
+      ]
+    },
+    {
+      "prefix": "test/unit/pack-archive.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/bundled-assets/",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/main/mcp-plans-boot.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/main/app-config.js",
+      "tests": [
+        "test:main-shell"
+      ]
+    },
+    {
+      "prefix": "src/main/activity-stats.js",
+      "tests": [
+        "test:main-shell"
+      ]
+    },
+    {
+      "prefix": "src/main/workplace-monitor.js",
+      "tests": [
+        "test:main-shell",
+        "test:monitor-outbox"
+      ]
+    },
+    {
+      "prefix": "src/main/window-tray.js",
+      "tests": [
+        "test:main-shell"
+      ]
+    },
+    {
+      "prefix": "src/main/auto-launch.js",
+      "tests": [
+        "test:main-shell"
+      ]
+    },
+    {
+      "prefix": "src/main/app-updater.js",
+      "tests": [
+        "test:app-updater-feeds"
+      ]
+    },
+    {
+      "prefix": "src/main/tray-notify.js",
+      "tests": [
+        "test:phase5-handlers"
+      ]
+    },
+    {
+      "prefix": "src/git/worktree-service.js",
+      "tests": [
+        "test:worktree"
+      ]
+    },
+    {
+      "prefix": "src/git/git-target.js",
+      "tests": [
+        "test:scm",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/git/status.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/git/diff-text.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/git/scm-service.js",
+      "tests": [
+        "test:scm",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/git/diff-context.js",
+      "tests": [
+        "test:scm"
+      ]
+    },
+    {
+      "prefix": "src/git/baseline-capture.js",
+      "tests": [
+        "test:worktree"
+      ]
+    },
+    {
+      "prefix": "src/git/remote-baseline-capture.js",
+      "tests": [
+        "test:worktree"
+      ]
+    },
+    {
+      "prefix": "scripts/test-scm-service.cjs",
+      "tests": [
+        "test:scm"
+      ]
+    },
+    {
+      "prefix": "test/unit/scm-service.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "test/unit/git-status.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/gateway/handlers/scm.js",
+      "tests": [
+        "test:scm",
+        "verify:rpc-catalog"
+      ]
+    },
+    {
+      "prefix": "src/gateway/handlers/workspace.js",
+      "tests": [
+        "test:unit",
+        "verify:rpc-catalog"
+      ]
+    },
+    {
+      "prefix": "src/workspace/resolve-path-candidates.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-scm-pane.js",
+      "tests": [
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/main/ipc/worktree.js",
+      "tests": [
+        "test:worktree",
+        "verify:rpc-catalog"
+      ]
+    },
+    {
+      "prefix": "src/renderer/agent/worktree-ui.js",
+      "tests": [
+        "test:worktree",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-changes-pane.js",
+      "tests": [
+        "test:worktree",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-worktrees-settings.js",
+      "tests": [
+        "test:worktree",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "scripts/test-worktree-baseline.cjs",
+      "tests": [
+        "test:worktree"
+      ]
+    },
+    {
+      "prefix": "src/main/ipc/renderer-freeze.js",
+      "tests": [
+        "test:main-shell"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-freeze-watch.js",
+      "tests": [
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/memory/",
+      "tests": [
+        "cargo:test"
+      ]
+    },
+    {
+      "prefix": "src/agent/project-memory-file.js",
+      "tests": [
+        "test:project-memory-file",
+        "test:knowledge-maintainer"
+      ]
+    },
+    {
+      "prefix": "src/agent/knowledge-maintainer.js",
+      "tests": [
+        "test:knowledge-maintainer"
+      ]
+    },
+    {
+      "prefix": "src/gateway/handlers/memory.js",
+      "tests": [
+        "test:local-gateway-smoke",
+        "test:knowledge-maintainer",
+        "test:project-memory-file"
+      ]
+    },
+    {
+      "prefix": "src/agent/session-title.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/plans/store.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-automation-schedule.js",
+      "tests": [
+        "test:unit",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/agent/completion-readiness.js",
+      "tests": [
+        "test:guardrails-sync",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/exec-settlement.js",
+      "tests": [
+        "test:unit",
+        "test:ssh-reconnect-targets"
+      ]
+    },
+    {
+      "prefix": "src/ssh/session-manager.js",
+      "tests": [
+        "test:unit",
+        "test:ssh-reconnect-targets"
+      ]
+    },
+    {
+      "prefix": "src/gateway/remote-processes.js",
+      "tests": [
+        "test:unit",
+        "test:local-gateway-smoke"
+      ]
+    },
+    {
+      "prefix": "src/ssh/remote-worktree.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/ssh/remote-worktree-apply.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/session/session-worktree.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "test/unit/exec-settlement.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "test/unit/remote-processes.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "test/unit/session-title.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/peer/",
+      "tests": [
+        "test:peer",
+        "check:js"
+      ]
+    },
+    {
+      "prefix": "src/net/lan.js",
+      "tests": [
+        "test:mobile",
+        "test:peer"
+      ]
+    },
+    {
+      "prefix": "src/main/ipc/peer.js",
+      "tests": [
+        "test:peer",
+        "check:js"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-peer.js",
+      "tests": [
+        "check:renderer",
+        "test:peer"
+      ]
+    },
+    {
+      "prefix": "scripts/",
+      "tests": [
+        "test:agent-limits"
+      ]
+    }
   ],
   "suites": {
-    "minimal": ["test:agent-limits", "test:task-tier", "test:unit", "test:local-gateway-smoke"],
+    "minimal": [
+      "test:agent-limits",
+      "test:task-tier",
+      "test:unit",
+      "test:local-gateway-smoke"
+    ],
     "agent": [
       "test:agent-limits",
       "test:task-tier",
@@ -360,6 +1468,7 @@
       "test:request-snapshot",
       "test:agent-system-prompt",
       "test:system-prompt-prep",
+      "test:knowledge-maintainer",
       "test:llm-tool-call-fallback",
       "test:monitor-outbox",
       "test:planner-parallel",
@@ -367,6 +1476,7 @@
       "test:fs-edit",
       "test:delegate-batch",
       "test:mobile",
+      "test:peer",
       "test:write-smell-hints",
       "test:worktree",
       "test:scm",
@@ -402,6 +1512,7 @@
       "test:request-snapshot",
       "test:agent-system-prompt",
       "test:system-prompt-prep",
+      "test:knowledge-maintainer",
       "test:llm-tool-call-fallback",
       "test:monitor-outbox",
       "test:planner-parallel",
@@ -409,6 +1520,7 @@
       "test:fs-edit",
       "test:delegate-batch",
       "test:mobile",
+      "test:peer",
       "test:write-smell-hints",
       "test:worktree",
       "test:scm",

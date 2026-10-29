@@ -177,8 +177,7 @@ CREATE INDEX IF NOT EXISTS idx_reqsnap_created ON request_snapshots(created_at);
   },
   "turnRideChars": 9200,
   "sysStableChars": 15200,
-  "taskTier": "standard",
-  "longHorizon": false
+  "taskTier": "standard"
 }
 ```
 

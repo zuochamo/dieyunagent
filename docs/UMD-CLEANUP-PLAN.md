@@ -134,7 +134,7 @@ Step 2 的 `compat` 列表必须**额外**包含这两个键（由 entry 显式�
 |------|-----------|
 | `model-runtime-presets` | `MODEL_RUNTIME_PRESETS` `MODEL_RUNTIME_DEFAULTS` `getModelRuntimePresetById` `remapLegacyContextTierId` `foldLegacyContextTierRecord` `LEGACY_CONTEXT_TIER_ALIASES` |
 | `model-runtime-schema` | `CONTEXT_WINDOW_MAX` `MODEL_RUNTIME_SCHEMA` `formatModelRuntimeValue` `MODEL_RUNTIME_DEFAULTS` |
-| `agent-limits` | `AGENT_LIMITS_DEFAULTS` `normalizeAgentLimits` `getAgentLimits` `resolveContextTierIdForNode` `resolveLoopToolCallLimit` `resolveAgentLoopSpec` `scaleLimitForLongHorizon` `applyLongHorizonGuardrails` `LONG_HORIZON_GUARDRAIL_SCALE` …（全量） |
+| `agent-limits` | `AGENT_LIMITS_DEFAULTS` `normalizeAgentLimits` `getAgentLimits` `resolveContextTierIdForNode` `resolveLoopToolCallLimit` `resolveAgentLoopSpec` …（全量） |
 | `agent-limits-by-tier` | 全量 11 键 |
 | `model-runtime-by-tier` | `inferContextTierFromModelName` `inferContextWindowFromModelName` `resolveModelContextWindowFromSettings` `normalizeContextTierId` …（全量） |
 | `task-tier` | `formatTaskTierSystemBlock` `isTaskTierFeatureEnabled` … |

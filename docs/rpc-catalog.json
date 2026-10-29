@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generatedAt": "2026-10-27T00:09:11.669Z",
+  "generatedAt": "2026-10-28T13:35:10.658Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 196,
-    "gatewayOnly": 118,
-    "rustOnly": 24,
-    "both": 54
+    "total": 186,
+    "gatewayOnly": 104,
+    "rustOnly": 27,
+    "both": 55
   },
   "methods": [
     {
@@ -654,16 +654,6 @@
       ]
     },
     {
-      "method": "graph.embed_symbols",
-      "layer": "both",
-      "gateway": [
-        "gateway/handlers/graph.js"
-      ],
-      "rust": [
-        "dieyun-core/rpc/mod.rs"
-      ]
-    },
-    {
       "method": "graph.impact",
       "layer": "both",
       "gateway": [
@@ -769,16 +759,6 @@
       ]
     },
     {
-      "method": "graph.symbol_semantic_search",
-      "layer": "both",
-      "gateway": [
-        "gateway/handlers/graph.js"
-      ],
-      "rust": [
-        "dieyun-core/rpc/mod.rs"
-      ]
-    },
-    {
       "method": "host.exec",
       "layer": "gateway",
       "gateway": [
@@ -820,6 +800,14 @@
     },
     {
       "method": "host.proc_output",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/host.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "host.proc_settled",
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/host.js"
@@ -971,11 +959,27 @@
       ]
     },
     {
+      "method": "memory.long_by_session",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
       "method": "memory.long_decay",
       "layer": "both",
       "gateway": [
         "gateway/handlers/memory.js"
       ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_forget_session",
+      "layer": "rust",
+      "gateway": [],
       "rust": [
         "dieyun-core/rpc/mod.rs"
       ]
@@ -1125,12 +1129,40 @@
       "rust": []
     },
     {
+      "method": "memory.project_alias_add",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.project_list",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
       "method": "memory.project_recall",
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/memory.js"
       ],
       "rust": []
+    },
+    {
+      "method": "memory.project_resolve",
+      "layer": "rust",
+      "gateway": [],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
     },
     {
       "method": "memory.project_scope",
@@ -1200,6 +1232,32 @@
     },
     {
       "method": "memory.session_get",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.session_memories",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "memory.session_memories_forget",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "memory.session_set_title",
       "layer": "both",
       "gateway": [
         "gateway/handlers/memory.js"
@@ -1311,142 +1369,6 @@
       "rust": [
         "dieyun-core/rpc/mod.rs"
       ]
-    },
-    {
-      "method": "plugins.catalog.install",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.catalog.install_from_url",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.catalog.list",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.catalog.sources.get",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.catalog.sources.set",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.hooks.agent_turn_end",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.install_from_path",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.install_from_zip",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.list",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.list_tools",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.remove",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.set_enabled",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.settings.get",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.settings.schema",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.settings.set",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.tool_call",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "plugins.uninstall",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/plugins.js"
-      ],
-      "rust": []
     },
     {
       "method": "rpc.cancel",

@@ -10,7 +10,7 @@
 | 项 | 约定 |
 |----|------|
 | 运行位置 | **主进程** spawn / 管理 language server；Gateway RPC 对外 |
-| 渲染进程 | 只 `gatewayCall` 取诊断块，拼进 `buildSystemMessage`；改后验收用 `fetchWorkspaceVerifyDiagnostics` |
+| 渲染进程 | 只 `gatewayCall` 取诊断块拼进 `buildSystemMessage`（写后验收不走 Renderer，见 `src/agent/completion-readiness.js`） |
 | 工作区 | **本地**：LSP + CLI 降级；**SSH**：仅远程 `tsc` CLI（无本地 LSP spawn） |
 | UI | **无** Problems 面板、无 Monaco；可选设置页「启用 LSP 诊断」开关 |
 | 与 Monaco 关系 | 共用 `src/lsp/` 管理器；Monaco 后期只加 `didChange` 同步与 gutter 展示 |
@@ -54,7 +54,7 @@ flowchart TB
 | 场景 | 是否拉诊断 |
 |------|------------|
 | Agent 模式 + 已绑定工作区 + 代码结构信号 | **是**（见 `shouldFetchWorkspaceDiagnostics` / `shouldInjectCodeContext`：`@Codebase`、消息内路径、编辑器选区、**编辑器已打开文件**等；无意图关键词门闩） |
-| Plan / 长程 / 无工作区 | **否** 或受限 |
+| Plan / 无工作区 | **否** 或受限 |
 | 无代码结构信号 | **否** |
 
 ### 2.2 诊断哪些文件
@@ -167,8 +167,9 @@ flowchart TB
 
 **接入点**：
 
-- `src/renderer/renderer-context-engine.js` — `fetchWorkspaceDiagnosticsContext` / `fetchWorkspaceVerifyDiagnostics`
-- `src/renderer/renderer-agent-loop.js` — `buildSystemMessage` 与完成验收注入
+- `src/renderer/renderer-context-engine.js` — `fetchWorkspaceDiagnosticsContext`（注入 system）
+- `src/renderer/renderer-agent-loop.js` — `buildSystemMessage` 组装
+- `src/agent/completion-readiness.js` — 写后完成验收：Main 直接调 Gateway `workspace.diagnostics`（Renderer 不再采集）
 
 ---
 
@@ -197,7 +198,7 @@ flowchart TB
 
 ### Phase 1 — 注入 Agent（0.5 天）
 
-- [x] `fetchWorkspaceDiagnosticsContext` + 注入 Agent system；改后验收用 `fetchWorkspaceVerifyDiagnostics`
+- [x] `fetchWorkspaceDiagnosticsContext` + 注入 Agent system；写后验收由 Main 的 `completion-readiness.js` 调 `workspace.diagnostics`
 - [x] `extractPathHintsFromText` + `getContextFilePathsForAgent` 合并逻辑
 - [x] 设置 → 权限：**启用 LSP 诊断**（默认 **开**）→ `%APPDATA%/dieyunagent/lsp-settings.json`
 
@@ -225,8 +226,9 @@ flowchart TB
 | `src/lsp/language-registry.js` | **新建** 扩展名 → server 命令 |
 | `src/gateway/rpc.js` | `workspace.diagnostics` handler |
 | `src/main-entry.js` | 创建单例 service，注入 Gateway ctx（可选 shutdown on quit） |
-| `src/renderer/renderer-context-engine.js` | `fetchWorkspaceDiagnosticsContext` / `fetchWorkspaceVerifyDiagnostics` |
-| `src/renderer/renderer-agent-loop.js` | `buildSystemMessage` 与完成验收注入 |
+| `src/renderer/renderer-context-engine.js` | `fetchWorkspaceDiagnosticsContext`（注入 system） |
+| `src/renderer/renderer-agent-loop.js` | `buildSystemMessage` 组装 |
+| `src/agent/completion-readiness.js` | 写后完成验收：Main 调 Gateway `workspace.diagnostics` |
 | `src/renderer/index.html` | 设置页 checkbox（可选） |
 | `docs/DESIGN.md` | 指向本文 |
 
@@ -343,7 +345,7 @@ eslint 时才 lint。项目没有 eslint 配置、也没有 eslint 依赖，就�
        ├─ buildOpenFilesContext
        └─ fetchWorkspaceDiagnosticsContext（绑定工作区时）
   → Rust agent loop 消费 richer system prompt
-  → 写入后 fetchWorkspaceVerifyDiagnostics（完成验收）
+  → 写入后 Main 的 completion-readiness 调 workspace.diagnostics（完成验收）
 ```
 
 诊断在 **prep 阶段**完成；loop 只消费已拼好的 system prompt。

@@ -65,8 +65,7 @@ JSON.parse(full.messagesJson)   // ← 就是当时发出去的 messages 数组
   },
   "turnRideChars": 9200,
   "sysStableChars": 15200,
-  "taskTier": "standard",
-  "longHorizon": false
+  "taskTier": "standard"
 }
 ```
 

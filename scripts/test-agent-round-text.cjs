@@ -1,16 +1,15 @@
 'use strict';
 
 /**
- * Unit checks for agent-round-text sanitizer.
+ * Unit checks for agent-round-text（交付四态 / 真思考提取）。
  * Run: node scripts/test-agent-round-text.cjs
+ *
+ * 已删除（2026-10-28）：
+ * - `agent_status` 协议解析与「重复前言」字符串去重（Rust 账本侧同步删除）；
+ * - 中文占位文案词表 —— 占位改由写入处的 `placeholder: true` 结构标记表达。
  */
 
-const {
-  parseAgentStatusEnvelope,
-  stripAgentStatusLine,
-  stripRepeatedAgentPreamble,
-  sanitizeAgentThoughtText
-} = require('../src/agent/agent-round-text');
+const { reasoningTextFromTrace } = require('../src/agent/agent-round-text');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assert failed');
@@ -26,36 +25,18 @@ const plan = [
   '- 语法检查、构建、Boss HP 断言与浏览器进程作为证据'
 ].join('\n');
 
-const round1 = `agent_status: continue\n${plan}`;
-const round2 = `agent_status: continue\n${plan}\n\n接下来读取 difficulty.cjs。`;
-
-const parsed = parseAgentStatusEnvelope(round1);
-assert(parsed.status === 'continue', 'parse continue status');
-assert(parsed.content.startsWith('可以补全'), 'strip status leaves body');
-
-assert(stripAgentStatusLine(round1) === plan, 'stripAgentStatusLine');
-assert(parseAgentStatusEnvelope('<agent_status>final</agent_status>\n完成。').status === 'final', 'xml status');
-assert(stripAgentStatusLine('agent_status: continue') === '', 'status-only line hides while streaming');
-
-assert(stripRepeatedAgentPreamble(round2, round1) === '接下来读取 difficulty.cjs。', 'drop repeated plan keep delta');
-assert(stripRepeatedAgentPreamble(round1, round1) === '', 'verbatim repeat is empty');
-assert(stripRepeatedAgentPreamble('agent_status: continue\n' + plan, plan) === '', 'repeat after first-round body');
-
-const shown1 = sanitizeAgentThoughtText(round1, []);
-assert(shown1 === plan, 'first round keeps plan, drops status');
-assert(!shown1.includes('agent_status'), 'no protocol line in first thought');
-
-const shown2 = sanitizeAgentThoughtText(round2, [shown1]);
-assert(shown2 === '接下来读取 difficulty.cjs。', 'later round keeps only new sentence');
-assert(!shown2.includes('验收目标'), 'later round does not repeat 验收目标');
-
-const streaming = sanitizeAgentThoughtText(`agent_status: continue\n${plan.slice(0, 40)}`, [shown1]);
-assert(streaming === '', 'partial repeat while streaming is hidden');
-
-assert(sanitizeAgentThoughtText('请求 LLM…', [shown1]) === '请求 LLM…', 'passthrough placeholders');
+// 占位行靠结构标记排除：文案写什么都不影响（不再维护中文词表）
 assert(
-  sanitizeAgentThoughtText('先读共享难度文件。', []) === '先读共享难度文件。',
-  'short unique thought kept'
+  reasoningTextFromTrace([
+    { phase: '思考', fullThought: plan },
+    { phase: '思考', placeholder: true, fullThought: '请求 LLM…' },
+    { phase: '思考', placeholder: true, fullThought: '生成中…' }
+  ]) === plan,
+  'placeholder rows are excluded by flag, not by wording'
+);
+assert(
+  reasoningTextFromTrace([{ phase: '思考', placeholder: true, fullThought: '启动…' }]) === '',
+  'all-placeholder trace yields no reasoning'
 );
 
 const {
@@ -63,7 +44,6 @@ const {
   synthesizedReplyIsUsable,
   pickNormalizedAssistantReply,
   resolveTurnDelivery,
-  reasoningTextFromTrace,
   reasoningFallbackText,
   persistableTurnText,
   isReasoningFallbackText,
@@ -119,12 +99,12 @@ assert(persistableTurnText(fallback.text) === TURN_EMPTY_REPLY_TEXT, 'reasoning 
 assert(persistableTurnText('真实答复') === '真实答复', 'plain answer persists as-is');
 assert(persistableTurnText('') === TURN_EMPTY_REPLY_TEXT, 'empty reply persists as placeholder');
 
-// trace → 真思考（单一来源，跳过汇总轮与占位思考）
+// trace → 真思考（单一来源，跳过汇总轮与 placeholder 标记行）
 assert(
   reasoningTextFromTrace([
     { phase: '思考', fullThought: deepThought },
     { phase: '汇总', fullThought: '已完成' },
-    { phase: '思考', fullThought: '请求 LLM…' }
+    { phase: '思考', placeholder: true, fullThought: '请求 LLM…' }
   ]) === deepThought,
   'trace reasoning skips synthesis round + placeholder'
 );

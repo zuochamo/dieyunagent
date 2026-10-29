@@ -35,26 +35,28 @@
 
 #### A1.1 `src/agent/agent-limits.js` — 唯一配置源
 
-> **本节只记区块与条数，不记行号** —— 行号每次改动都会漂移，定位请用符号名（`AGENT_LIMITS_DEFAULTS` / `AGENT_LIMITS_SCHEMA` / `LONG_HORIZON_*`）。
+> **本节只记区块与条数，不记行号** —— 行号每次改动都会漂移，定位请用符号名（`AGENT_LIMITS_DEFAULTS` / `AGENT_LIMITS_SCHEMA` / `SCHEMA_BY_KEY`）。
 
 | 区块 | 条数 |
 |---|---|
-| `AGENT_LIMITS_DEFAULTS` | **52** 键（51 数字 + 1 布尔） |
+| `AGENT_LIMITS_DEFAULTS` | **129** 键（127 数字 + 2 布尔） |
 | ↳ 其中不上设置页的折算系数 | 3（`visionPartEqChars` / `charsPerToken` / `cjkCharsPerToken`） |
-| `LONG_HORIZON_GUARDRAIL_SCALE`（长程放大倍数） | 5 |
-| `LONG_HORIZON_HARD_CAP`（长程硬顶） | 5 |
-| `AGENT_LIMITS_SCHEMA`（min/max/step/单位/中文标签） | **49** 项（= 52 − 3 个折算系数） |
-| 存储键：`dieyun.agent-limits.v1` / `agent-limits-by-tier.json` | 2 |
+| `AGENT_LIMITS_SCHEMA`（min/max/step/单位/中文标签） | **71** 项 |
+
+> 条数会随改动漂移：**核对命令**（不靠肉眼数）：
+> `node -e "const L=require('./src/agent/agent-limits');const D=L.AGENT_LIMITS_DEFAULTS;const k=Object.keys(D);console.log(k.length,k.filter(x=>typeof D[x]==='number').length,k.filter(x=>typeof D[x]==='boolean').length,L.AGENT_LIMITS_SCHEMA.flatMap(g=>g.items).length)"`
+| 存储键：`dieyun.agent.limitsByTier.v1` / `agent-limits-by-tier.json`（Renderer / Main） | 2 |
 | 兜底 tier 白名单（default / ctx-16k…ctx-2m） | 9 |
 
-`AGENT_LIMITS_DEFAULTS` 52 键分组（键名即定位）：
+`AGENT_LIMITS_DEFAULTS` 分组（键名即定位）：
 
 | 组 | 键 |
 |---|---|
-| 护栏 | `repeatToolStreakLimit` `repeatHistoryMax` `completionRepairAttempts` `verifyDiagMaxChars` `writeSmellHintMaxItems` `writeSmellHintMaxChars` `writeSmellScanTimeoutMs` `taskTierEnabled` |
+| 护栏 | `repeatToolStreakLimit` `repeatHistoryMax` `writeSmellHintMaxItems` `writeSmellHintMaxChars` `writeSmellScanTimeoutMs` `taskTierEnabled` |
+| 完成验收（内部预算，不进 schema） | `readinessRpcTimeoutMs` `readinessMaxDiagFiles` `readinessBrowserQueryLimit` `readinessBrowserQueryTimeoutMs` `readinessMaxErrorSamples` `readinessErrorSampleChars` |
 | Harness | `transientMaxRetries` `retryBaseMs` |
 | UI 联动 | `artifactsUiFlushMs` `lspSyncDebounceMs` `monacoMaxChars` |
-| 上下文 | `ctxAgentToolCallLimit` `toolResultMaxJson` `codebaseSnippetMax` `codebaseAutoLimit` `openFilesMax` `filePreviewMaxChars` `fsReadDefaultMaxBytes` `lspDiagMaxChars` `visionShotsPerRound` `visionReattachPerRound` `visionMaxBase64Chars` `visionPartEqChars` `completionHistoryMaxChars` `completionMessageMaxChars` `completionLastUserMaxChars` `completionTurnRideMaxChars` `completionRecentTurns` `completionFoldedMaxChars` `userSystemMaxChars` `systemStableMaxChars` `llmRequestMaxChars` `charsPerToken` `cjkCharsPerToken` |
+| 上下文 | `toolResultMaxJson` `codebaseSnippetMax` `codebaseAutoLimit` `openFilesMax` `filePreviewMaxChars` `fsReadDefaultMaxBytes` `lspDiagMaxChars` `visionShotsPerRound` `visionReattachPerRound` `visionMaxBase64Chars` `visionPartEqChars` `completionHistoryMaxChars` `completionMessageMaxChars` `completionLastUserMaxChars` `completionTurnRideMaxChars` `completionRecentTurns` `completionFoldedMaxChars` `userSystemMaxChars` `systemStableMaxChars` `llmRequestMaxChars` `charsPerToken` `cjkCharsPerToken` `projectMemoryFileMaxChars` `memoryToolRecallLimit` `memoryToolForgetMaxIds` |
 | LLM 重试 | `streamRoundMaxAttempts` `llmRetryBaseMs` `llmReconnectMaxWaitMs` `llmFirstTokenTimeoutMs` `llmStreamIdleTimeoutMs` `synthesisTimeoutMs` `synthesisReconnectMaxWaitMs` |
 | 编辑器/Diff | `maxUndoSteps` `editorSelectionMax` `editorVisibleLines` `maxDiffChars` `diffFullTextCap` `chatImagePreviewMaxMb` `attachmentRetentionMaxMb` `attachmentDownsampleMaxPx` `attachmentDownsampleMinKb` |
 
@@ -78,7 +80,7 @@
 | `agent/write-smell-hints.js:27,295` | 64 / 6 | 追踪器 run 上限、同胞文件展示数 |
 | `agent/agent-synthesis.js` | 2048 / 2500 / 8000 / 500 | 摘要阈值 |
 | `agent/session-context.js` | 8 / 14000 / 2400 | 近轮/字符上限 |
-| `renderer/agent-guardrails.js:159,180,270` | 3 / 160 / 120 | 错误样本、summary 截断 |
+| `agent/completion-readiness.js` | 160 | 断言摘要截断（样本条数/长度、诊断文件数、RPC/浏览器查询超时全部读 `agent-limits.readiness*`） |
 | `renderer/renderer-skills-grid.js:8,11,12,13,248` | 15 / 3500 / 3 / 5 / 200 | 分页、注入上限、防抖 |
 | `browser/url-policy.js:39,44,185` | 255 / 2 / 443·80 | IPv4 段、TLD 长度、默认端口 |
 | `agent/guardrails-shared.js:146-152,226` | 500 / 2 | 参数截断、止损下限 |
@@ -98,8 +100,7 @@
 | `agent/loop_run.rs` | `DEFAULT_MAX_TOOL_CALLS=150`:12 `DEFAULT_MAX_ROUNDS=96`:13 `MIN_RECORDED_PLAN_CHARS=80`:14 `MIN_DUP_CHARS=12`:15 `24`:60 `500`:510 |
 | `planner/run.rs` | explore `maxRounds=24`:342、worker `maxRounds=96`:1008、plan 修复 `<2`:504、best-of-n `.max(2).min(3)`:712、`take(4000)`:417,687、title `take(48)`:1086 |
 | `planner/plan_parse.rs` | todos `take(20)`:216 / `take(8)`:238、title `take(48)`:178、brief `take(4000)`:338、best_of_n `.min(3)`:323 |
-| `memory/mod.rs` | `MEMORY_EMBED_TEXT_MAX=6000`:17、`count<4000`:180、`rn<=2`:193、`clamp(1,500)`:450、`take(120)`:546、`take(80)`:270、`clamp(1,50)`:818,1063、阈值 `<=0.05`:857,1101,1168、`LIMIT 1000`:829,1075、`take(4000)`:907、`take(200_000)`:923、`clamp(1,5)`:1260 |
-| `memory/keyword.rs` | 权重 `0.65`:140 `0.25`:141 `0.035`:142 `0.08`:143、stale `-0.15`:138、时龄 180 天:148 |
+| `memory/mod.rs` | `MEMORY_EMBED_TEXT_MAX=6000`:22、`clamp(1,500)`:774、`clamp(1,200)`:936、`clamp(1,50)`:1568（词法 / 语义召回上限）、`take(120)`:872,1013、`take(80)`:470、`chars().take(64)`:878、`take(4000)`:1373,1379、`take(200_000)`:1389；检索打分只剩稳定信号：重要度 `0.035`:1645、新鲜度 `0.08`:1646、stale `-0.15`、语义阈值 `0.05`:1724（词法排序交给 bm25 + `fts::match_query`，手写分词与 `LIMIT 1000` 窗口已删除） |
 | `compaction/llm.rs` | `3`:10 `800`:11 `3000`:12 `60_000`:13 `180_000`:15 `3`:16 `5_000`:17 `75`:19、`min(4)`:108、温度 `0.15`:141、`max_tokens=4096`:142 |
 | `compaction/mod.rs` + `atoms.rs` | `POST_COMPACTION_ROUND_COUNT=1`:76 `max(8192)`:125 `clamp(0.3,0.95)`:126、`recent_budget=budget*0.42`:233、keep `len*0.3`:246、`take(32_000/48_000/120_000)`、正文截断 6000/4000（预算 / 触发比 / 冷却轮数已改为**调用方必传**，Rust 不再存默认值） |
 | `index/search.rs` | `SEARCH_LIMIT_MAX=48`:12、`limit*6`:87、权重 `0.35`:94 `0.3`:119 `0.55`:290 `0.6`:435、阈值 `0.05`:116,286、`LIMIT 8000`:104、`chunks(400)`:241、`take(12/900)`:357,361 |
@@ -130,7 +131,7 @@
 | `browser/url-policy.js:210` | `REMOTE_PREVIEW_HOSTS` | 4 | localhost/127.0.0.1/0.0.0.0/::1 |
 | `renderer/renderer-skills-grid.js:17-181` | `SKILLS_TAXONOMY[].keywords` | 8 组 / **127** 词 | 技能 UI 分类 |
 | `renderer/renderer-skills-grid.js:184` | `SKILLS_TAXONOMY_REMOVED` | 3 | 分类黑名单 |
-| `renderer/renderer-skills-grid.js:187-205` | `MCP/PLUGIN/AUTOMATION_TAXONOMY` | 3/4/4 | 分类表 |
+| `renderer/renderer-skills-grid.js:184-196` | `MCP/AUTOMATION_TAXONOMY` | 3/5 | 分类表 |
 | `agent/write-smell-hints.js:24` | `CONTENT_WRITE_TOOLS` | 2 | 内容写工具 |
 | `agent/write-smell-hints.js:109-113` | `SWALLOWED_EXCEPTION_PATTERNS` | 3 | 吞异常形态 |
 | `agent/agent-round-text.js:33` | `isPassthroughThought` 前缀 | 9 | 过场思考前缀（**中文词表，见 §A6**） |
@@ -198,7 +199,7 @@
 | `gateway/exec-policy.js` | 13 | 高危命令黑名单 + 引号剥离 |
 | `agent/write-smell-hints.js` | 13 | 吞异常 / 明文凭据 / 常量赋值 / 路径归一 |
 | `agent/agent-round-text.js` | 8 | 状态行、过场思考、tool_call 标记 |
-| `renderer/agent-guardrails.js` | 4 | argsBrief 清洗、exit code、校验类工具 |
+| `agent/completion-readiness.js` | 3 | 结构化 exit code、写入/验证工具归类、断言只看最后一次 |
 | `agent/tool-output-spill.js` | 4 | 行切分、文件名清洗 |
 | `agent/task-schema.js` | 3 | workerId 格式 |
 | `agent/tool-harness.js` | 3 | 错误瞬时/策略分类 |
@@ -238,10 +239,9 @@
 | 位置 | 说明 |
 |---|---|
 | `src/agent/task-tier.js:41` | 注释「结构信号…**不用意图词表**，不另打分级 LLM」 |
-| `src/renderer/agent-guardrails.js:96-99` | `replyClaimsFileWork` 直接 `return false`，注释「禁用『宣称完成』关键词」 |
-| `src/renderer/agent-guardrails.js:101-102` | `hasFileModificationStructureSignal` 注释「**禁用任务意图词表**」，只用 @Codebase / 路径 / Monaco 选区 / 产物 |
+| `src/agent/completion-readiness.js` | 完成验收：工具名归类（写入/验证）+ 结构化退出码，**不读模型自述文字**，不解析用户意图 |
 | `src/agent/context-signals.js:2-12` | 「结构信号（@Codebase / 路径 / 编辑器选区）→ 是否注入代码 / 自动检索」的**唯一来源**，注释声明「不含任何平台分支或关键词表」 |
-| `src/renderer/renderer-knowledge-maintainer.js:272` | 「结构信号；**禁用寒暄关键词门闩**」 |
+| `src/agent/knowledge-maintainer.js`（`shouldRunKnowledgeMaintenance`） | 注释「结构信号；**禁用寒暄关键词门闩**」，阈值走 `agent-limits` 的 `knowledge*` |
 | `src/agent/write-smell-hints.js:16` | 「判定对象是写入产物…**不构成意图关键词路由**」 |
 | `src/agent/system-prompt-prep.js:34-49` | 注入判定 = `@Codebase` 正则 + 路径正则（结构信号） |
 
@@ -301,17 +301,19 @@
 
 | 文件:行号 | 构造器 | 注入块 |
 |---|---|---|
-| `agent/system-prompt-prep.js:104-118` | `formatCodebaseBlock` | 【相关代码 · 自动检索】 |
-| `agent/system-prompt-prep.js:134-142` | `formatRecentChanges` | 【本会话变更文件】 |
-| `agent/system-prompt-prep.js:213-251` | `fetchOpenFilesBlock` | 【当前关注文件 · 会话上下文】 |
-| `agent/system-prompt-prep.js:274-301` | `fetchAgentsMdBlock` | 项目地图（→ `agents-md.js`） |
-| `agent/system-prompt-prep.js:347-357` | `formatMemoryLines` | 记忆行 |
-| `agent/system-prompt-prep.js:359-391` | `fetchProjectMemoryBlock` | 【项目记忆】 |
-| `agent/system-prompt-prep.js:393-435` | `fetchGlobalMemoryBlock` | 【长期记忆】 |
-| `agent/system-prompt-prep.js:488-517` | `formatAgentStateBlock` | ## 工作记忆快照 / ## 最近步骤 |
-| `agent/system-prompt-prep.js:527-542` | `fetchWorkMemoryBlock` | 【工作记忆模板】 |
-| `agent/system-prompt-prep.js:554-631` | `fetchSkillsBlock` | 【相关技能 · 索引】 |
-| `agent/system-prompt-prep.js:633-653` | `formatMcpPromptBlock` | 【MCP · 服务列表】 |
+| `agent/context-signals.js` | `formatCodebaseBlock` | 【相关代码 · 自动检索】 |
+| `agent/system-prompt-prep.js:82` | `formatRecentChanges` | 【本会话变更文件】 |
+| `agent/system-prompt-prep.js:309` | `fetchOpenFilesBlock` | 【当前关注文件 · 会话上下文】 |
+| `agent/system-prompt-prep.js:370` | `fetchAgentsMdBlock` | 项目地图（→ `agents-md.js`） |
+| `agent/system-prompt-prep.js:471` | `isInjectableMemoryRow` | `kind=secret/private` 不进自动注入 |
+| `agent/system-prompt-prep.js:476` | `formatMemoryLines` | 记忆行 |
+| `agent/system-prompt-prep.js:488` | `fetchProjectMemoryBlock` | 【项目记忆】 |
+| `agent/system-prompt-prep.js:523` | `fetchGlobalMemoryBlock` | 【长期记忆】 |
+| `agent/system-prompt-prep.js:578` | `fetchSessionHandoffBlock` | 【上个会话交接】 |
+| `agent/system-prompt-prep.js:604` | `formatAgentStateBlock` | ## 工作记忆快照 / ## 最近步骤 |
+| `agent/system-prompt-prep.js:643` | `fetchWorkMemoryBlock` | 【工作记忆模板】 |
+| `agent/system-prompt-prep.js:670` | `fetchSkillsBlock` | 【相关技能 · 索引】 |
+| `agent/system-prompt-prep.js:766` | `formatMcpPromptBlock` | 【MCP · 服务列表】 |
 | `agent/session-context.js:18-25` | 4 个 header 常量 | 近期对话 / 压缩摘要 / 已折叠 / Turn Context |
 | `agent/session-context.js:79-98` | `formatCompactionArchiveBlock` | 压缩背景块 |
 | `agent/session-context.js:242-252` | `buildCurrentTaskText` | 【当前任务】 |
@@ -337,8 +339,8 @@
 | ~~`src/renderer/renderer-thinking-trace.js` 汇总助手~~ | — | — | **已删除**：Renderer 侧那份逐字重复且无调用点 |
 | `src/renderer/renderer-agent-reviewer.js:86-88` | 格式修复器 | system | 强制合法 JSON |
 | `src/renderer/renderer-agent-reviewer.js:186-194` | Reviewer | system/user | 独立验收（浏览器证据规则） |
-| `src/renderer/renderer-agent-llm.js:692-706` | 记忆归纳器 | system/user | 长期记忆提取（kind/scope/importance） |
-| `src/renderer/renderer-knowledge-maintainer.js:45-159` | 知识维护器 | system | 三分支（fullPeriodic / periodicOnly / 默认） |
+| ~~`src/renderer/renderer-agent-llm.js` 记忆归纳器~~ | — | — | **已删除**：与知识维护器重复的第二份归纳提示词 |
+| `src/agent/knowledge-maintainer.js` | 知识维护器（**Main 侧唯一实现，含触发**） | system | 两分支（fullPeriodic / 默认）；触发由 `afterAgentRun` 在三个 loop 调用点统一发起 |
 | `src/renderer/renderer-agents-md.js:635-637` | AGENTS 冷启动 | system | 初始化 section |
 | `src/plans/parser.js:6-19` | `PARSE_SYSTEM` | system | 自然语言 → RRULE JSON |
 | `src/plans/plan-agent-runner.js:36-69` | 计划 Agent | system/user | 定时任务执行 |
@@ -424,6 +426,7 @@
 | 10 | 助手身份串 | `dieyun-instructions.js` `ASSISTANT_IDENTITY` =「叠云 Agent（小芸）」 | **已解决**：`assets/dieyun.md` / 仓库根 `dieyun.md` / `index.html` 关于面板同口径 |
 | 11 | weather 技能 | `BUNDLED-MANIFEST.json` `required` | **本就已登记**（`weather/SKILL.md`），原文「未登记」是误记，已更正 |
 | 12 | 工具调用关卡（校验 / 重复止损 / 遥测 / 落盘顺序） | `src/agent/tool-gate.js`（流程 + 冻结关卡清单） | **已收敛**：`ToolHarnessSession` 只留会话状态与重试；**已删** Renderer `agent-guardrails.js` 三个无人调用的止损薄包装 + 恒 false 的 `replyClaimsFileWork` 死分支。见 [`TOOL-GATE.md`](TOOL-GATE.md) |
+| 12b | 完成验收（证据采集 + 判定） | `src/agent/completion-readiness.js`（Main 唯一来源） | **已迁移**：原 Renderer 规则门、`verifyTargetCompletion` 空壳、summary 正则抠 exit code、诊断伪 trace 轮次、`readinessRetry` 死分支全部删除；Renderer 只 `applyReadinessNote`。见 [`AGENT-STRATEGY.md`](AGENT-STRATEGY.md) §4.3 |
 | 13 | 执行能力边界（能不能写、能不能越界跑） | `src/gateway/sandbox-policy.js`（三档判定，唯一来源）、`sandbox-approvals.js`（ask-once） | **策略层已实施**：`read-only` / `workspace-write` / `danger-full-access` + 越界问一次（拒绝/超时即拒）；`exec-policy.js` 的高危词表已并到同一份。**内核级强制（受限令牌 / AppContainer）未做**。见 [`SANDBOX.md`](SANDBOX.md) |
 
 ---
@@ -436,7 +439,7 @@
 |---|---|---|
 | **兼容垫片**（模型换代即失效） | `guardrails-shared.js` `TOOL_NAME_ALIASES`(15，**全仓单一来源**) / `GRAPH_LEGACY_OPS`(7)、`llm-tool-call-fallback.js` 参数表(50) | **观察使用率后删除**；不要无限增长。工具名别名表已合并到 `guardrails-shared.js`（`llm-tool-call-fallback.js` 改为 require 引用同一对象），由 `test:guardrails-sync` 断言两侧一致 |
 | **模型行为假设** | 核心准则 21 条、`compaction-prompts.js` 强制 JSON/字数 | 用**行为回归**（同批任务看工具轨迹）而非字符串快照；改前跑 `test:agent-system-prompt` |
-| **调参值** | `agent-limits.js` 全部 49 项（+3 折算系数不上设置页） | 已配置化（设置 UI + tier 分层 + 长程缩放），**改配置不改代码** |
+| **调参值** | `agent-limits.js` 全部 49 项（+3 折算系数不上设置页） | 已配置化（设置 UI + tier 分层），**改配置不改代码** |
 | **环境事实** | `IGNORE_DIRS`/`KNOWN_TEXT_EXT`、`CALL_SKIP`、`BLOCKED_PATTERNS`、`url-policy` 扩展名 | 腐坏慢；新增语言/工具时补 |
 | **UI 分类词表** | `renderer-skills-grid.js` 127 词 + 14 正则 | 新增技能时补；不影响行为 |
 

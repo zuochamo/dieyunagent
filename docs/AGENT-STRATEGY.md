@@ -43,7 +43,7 @@ agent-limits + 护栏   → 数字上限与安全（硬）
 - `REPEAT_TOOL_STREAK_LIMIT`（防相同工具死循环）
 - `agentToolCallLimit`、token /  spill 上限
 - 探索达上限后 **禁止** 只读工具（含只读 `host_exec`）
-- 「声称已完成」vs「实际 write」的 **完成验收**（`verifyAgentCompletionReadiness`）
+- 「声称已完成」vs「实际留下证据」的 **完成验收**（`src/agent/completion-readiness.js`）
 - explore / shell / build 阶段的 **工具白名单**（`planner-tool-filters.js`）
 
 ---
@@ -66,7 +66,7 @@ flowchart TD
 | 现有模块 | 改造后角色 |
 |----------|------------|
 | `tool-guardrails.js` | 硬底线：完全相同工具+参数止损；无只读探索/同文件重读硬拦 |
-| `agent-guardrails.js` | 与 `tool-guardrails` **单一来源**，禁止再手写数字 |
+| `tool-gate.js` + `guardrails-shared.js` | 关卡清单与工具名归类**单一来源**；Renderer 不再留任何判定/常量 |
 | `renderer-context-engine.js` `CTX_LIMITS` | 字符硬顶保留；**选哪些文件**可听 `suggestedFiles` |
 | `agent-limits.js` | 护栏数字单一配置源（已实现） |
 
@@ -88,7 +88,7 @@ flowchart TD
 
 `trivial` + `readyToWrite`（或已有建议文件）时跳过 **自动** codebase 检索；用户消息含 `@Codebase` 仍检索。不再按分级硬拦只读工具。
 
-完成验收默认只走规则门 + 诊断（`verifyAgentCompletionReadiness`）：诊断 error / 测试失败会提示用户，不自动续跑。LLM Reviewer **非默认**。
+完成验收的**判定与证据采集都在 Main**（`src/agent/completion-readiness.js`）：证据 = 循环账本 trace（工具名 + 结构化退出码/`ok:false`）+ Gateway `workspace.diagnostics`（只请求 error 级）+ `browser.console/network`（按本轮开始时刻切时间窗）；诊断 error / 验证失败 / 浏览器运行时错误会提示用户，不自动续跑。验证类按**命令的最后一次结果**判定：静态诊断干净不能抵消失败，「先通过后失败」也算失败。Renderer 只做 `applyReadinessNote` 渲染。LLM Reviewer **非默认**。**作用范围只有对话单轮**（`agent:run`）：计划模式与定时计划的产出走计划审阅 + worktree 应用，没有这道门。
 
 流式：SSE 中断时把已收到的 `content`/`reasoning` 挂到 error.partial；重试/非流式回退时合并；重连耗尽且已有残片时，直接用残片走正常 `llm_response` 通道继续，而不是整轮空白失败（不再单独发「已恢复」事件）。
 
@@ -124,7 +124,8 @@ flowchart TD
 | `src/llm-stream-utils.js` | `mergeMissingReasoning` / `attachPartialStreamError` |
 | `src/agent/rust-loop-runner.js` | 流式残片合并（重连耗尽直接用残片续走 `llm_response`） |
 | `src/renderer/renderer-agent-send.js` | 发送前分类 |
-| `src/renderer/agent-guardrails.js` | 完成验收规则门 |
+| `src/agent/completion-readiness.js` | 完成验收判定（证据在 Main） |
+| `src/renderer/agent-guardrails.js` | 只渲染验收提示（`applyReadinessNote`） |
 | `src/renderer/renderer-agent-reviewer.js` | 可选 files+diff Reviewer |
 | `test/unit/task-tier.test.cjs` | 分级与流式残片单测 |
 
@@ -134,9 +135,9 @@ flowchart TD
 
 | 职责 | 路径 |
 |------|------|
-| 重复工具止损 | `src/agent/tool-guardrails.js`、`src/renderer/agent-guardrails.js` |
+| 重复工具止损 | `src/agent/tool-guardrails.js`（跑它的是 `src/agent/tool-gate.js` 的 `repeat-guard` 关卡） |
 | 工具执行拦截 | `src/agent/tool-harness.js` |
-| 完成验收 | `src/renderer/agent-guardrails.js` → `verifyAgentCompletionReadiness` |
+| 完成验收 | `src/agent/completion-readiness.js` → `evaluateTurnReadiness`（渲染：`src/renderer/agent-guardrails.js` → `applyReadinessNote`） |
 | 可选 diff Reviewer | `src/renderer/renderer-agent-reviewer.js`（默认关） |
 | Shell 安全 | `src/gateway/exec-policy.js` |
 | 工具能力白名单 | `src/agent/planner-tool-filters.js` |
@@ -151,7 +152,7 @@ flowchart TD
 2. **host_exec 绕开**：连续只读 `sed -n` 计入 streak（见 `test-tool-harness.cjs`）
 3. **分级**：只结构信号，发送不另打 LLM
 4. **heavy**：不走已删除的 Fast loop
-5. **完成验收**：规则门失败只提示、不自动续跑；LLM Reviewer 非默认
+5. **完成验收**：判定在 Main（`test/unit/completion-readiness.test.cjs`）——退出码只认 `result.code`、断言只看最后一次、网关挂了只降级成少一条证据；失败只提示、不自动续跑；LLM Reviewer 非默认
 
 ---
 
@@ -162,6 +163,8 @@ flowchart TD
 | 2026-06-30 | 初稿：开放设计，源自「探索 8 步硬编码」评审与 tank 小改失败 case |
 | 2026-09-02 | 落地 taskTier / 完成验收自动重试 / 流式残片；明确不做 regex 与 Fast Path |
 | 2026-09-09 | 去掉发送前分级 LLM；`taskTier` 仅结构信号 + 检索门闩 |
+| 2026-10-28 | **完成验收判定迁到 Main**（`src/agent/completion-readiness.js`）：证据取自循环账本 trace + Gateway 诊断/浏览器事实，退出码改读结构化 `result.code`；删除 Renderer 规则门、`verifyTargetCompletion` 空壳、`readinessRetry` 死分支与「诊断伪 trace 轮次」 |
+| 2026-10-28 | **完成验收误判修整**：验证类按「命令的最后一次结果」判定（不再用「任意一次通过」抵消失败，静态诊断干净也不再抵消失败）；失败的工具认结果对象的 `ok:false`/`error`（`browser_expect` 断言失败此前完全漏判，因为它刻意不带 `error`）；写失败的文件不进诊断清单；浏览器证据按本轮开始时刻切 `sinceMs` 窗口（观察账本按会话累计、并无「每轮 reset」）；诊断只请求 `minSeverity:'error'`（防 warning 占满每文件上限）；两段采集并行 + 调用点兜底，采集预算收进 `agent-limits.readiness*`，删死键 `completionRepairAttempts` / `verifyDiagMaxChars` |
 
 ---
 

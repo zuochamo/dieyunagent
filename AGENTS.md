@@ -35,9 +35,16 @@
 | 打包 / 安装包 | `scripts/`、`build-installer.bat` | 任务无关不改 `electron-builder` 配置 |
 | 离线预装的 MCP 产物 | `scripts/pack-mcp-bundled.cjs`（版本唯一来源 `src/mcp/registry.js`） | 再写一份版本/校验和或另造预装机制 |
 | 护栏 / 探索限制 | `src/agent/agent-limits.js`（数字）、`guardrails-shared.js`（逻辑） | 多处重复常量 |
+| 内网 agent 互通（跨机消息 / 会话即通道 / 建议式租约） | `src/peer/`（语义全在 `coordinator.js`，线协议 `wire.js`）、`src/main/ipc/peer.js`、`src/renderer/renderer-peer.js`（面板）、`src/renderer/renderer-connect.js`（「连接」外壳：手机连接 / Agent 互通 两个标签页）、`src/net/lan.js` | 另写一套发现/配对码；在 Renderer 判「谁可以自动跑一轮」；在 Rust 循环里堆跨机协议 |
+| 完成验收（单轮「做完了没」） | `src/agent/completion-readiness.js`（Main：证据 + 判定唯一来源，只提示不续跑）、`src/renderer/agent-guardrails.js`（只渲染 note） | 在 Renderer 判定、从 `summary` 文本抠 exit code、把诊断塞成 trace 轮次 |
 | 沙箱档位 / 越界审批 | `src/gateway/sandbox-policy.js`（三档判定，唯一来源）、`sandbox-approvals.js`（ask-once）、`permissions-store.js`（档位持久化） | 在 handler 里自己拼白名单；另写一份高危命令词表（`exec-policy.js` 已复用同一份） |
 | 工具调用关卡（校验 / 止损 / 遥测 / 落盘顺序） | `src/agent/tool-gate.js`（流程 + 冻结关卡清单，加检查只改清单） | 在 `ToolHarnessSession` / `executeAgentTool` 里手写顺序，或另起一个"前置钩子层" |
 | 请求快照 / 「模型看到了什么」 | `src/agent/request-snapshot.js`（唯一装配与写入点）、`crates/dieyun-core/src/memory/snapshot.rs`（表与保留裁剪） | 在 Renderer/Main 各拼一份；另写事件溯源或格式迁移链 |
+| 远端 Agent 传输 / 进程 / 多工作区 | `src/ssh/remote-gateway-manager.js`（懒拉起 daemon、`openAgentChannel` 走 SSH `direct-streamlocal`、探活与回收）、`src/remote/minimal-gateway-host.js`（socket 监听 + 单例 + `hello{workspace}` 按连接路由）、`remote-agent-client.js`（`openChannel` 通道客户端） | 重新引入远端 TCP 端口 / pid 文件 / 本地隧道 / token；按 socket 键缓存客户端而不带 workspace |
+| 远端文件读写（哪条传输） | `src/gateway/rpc.js:getRemoteFs()`（**唯一出口**：Agent 可用走 `gateway/remote-agent-fs.js` 的 RPC；没 Agent 才走 `gateway/remote-fs.js` 的 SFTP；两者同接口，`transport` 标识决定谁补 `index.notify_change`） | 在 handler 里自己判「用 SFTP 还是 RPC」；写两套适配器形状；RPC 失败悄悄退 SSH exec |
+| 「远端 Agent 是否可用」/ 客户端与缓存键 | `remote-agent-client.js:isRemoteAgentUsable`、`workspace-cache-keys.js:remoteAgentInfoKey` | 再写 `info.url && info.token`（P2 之后没有这两个字段）；按 socketPath 单键缓存（两个工作区会共用一份连接/索引缓存） |
+| 远端 core 的 glibc 下限 | `scripts/pack-dieyun-core-linux-lib.cjs`（`CORE_GLIBC_TARGET` + `assertCoreGlibcTarget`，打包期闸门）、`pack-dieyun-core-linux-remote.cjs`（zig 目标） | 在远端运行时再「量宿主 glibc 猜兼容性」（已删；会误诊成「服务器太老」，真实原因是产物版本） |
+| SSH 连接参数 / 认证方式 / 别名 / 跳板 | `src/ssh/connect-payload.js`（「连接意图 → 有效参数」唯一入口）、`ssh-config.js`（`~/.ssh/config` 解析）、`auth-methods.js`（agent / keyboard-interactive / 有序认证）、`proxy-jump.js`（`forwardOut` 串接） | 在 IPC 或自动重连里各拼一份 payload；自己手搓跳板串接 |
 
 ---
 
@@ -146,6 +153,9 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/agent-run-events.md`](docs/agent-run-events.md) | AgentRunEvent 契约 |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 设计原理 |
 | [`docs/MEMORY.md`](docs/MEMORY.md) | 记忆系统分层与注入规则 |
+| [`docs/SQLITE-ACCESS.md`](docs/SQLITE-ACCESS.md) | SQLite 访问模型：写入连接 / 读池 / 长任务三条通道与在途预算（**改 core 库访问前先读**） |
+| [`docs/VECTOR-SEARCH.md`](docs/VECTOR-SEARCH.md) | 向量检索：int8 量化全量扫描的误差界 / 内存上限 / **换 ANN 的触发条件**（改向量检索前先读） |
+| [`docs/INDEX-VALUE-REVIEW.md`](docs/INDEX-VALUE-REVIEW.md) | 代码索引 / 结构索引：实测成本与使用率 / 能力定级 / **删 trigram、向量 opt-in、调用图按需** 的整改清单（改 `index/` 或 `graph/` 前先读） |
 | [`docs/AGENT-STRATEGY.md`](docs/AGENT-STRATEGY.md) | Agent 策略分层 / taskTier 护栏 |
 | [`docs/LSP-DIAGNOSTICS.md`](docs/LSP-DIAGNOSTICS.md) | LSP 定位 / 诊断链路 |
 | [`docs/HARNESS-INVENTORY.md`](docs/HARNESS-INVENTORY.md) | harness 能力清单 |
@@ -153,6 +163,10 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/REQUEST-SNAPSHOT.md`](docs/REQUEST-SNAPSHOT.md) | 请求快照：模型看到了什么 / 为什么折叠 / 预留策略（**已实施**） |
 | [`docs/TOOL-GATE.md`](docs/TOOL-GATE.md) | 工具关卡：一次工具调用的唯一流程与关卡清单（**已实施**） |
 | [`docs/SANDBOX.md`](docs/SANDBOX.md) | 沙箱：三档能力边界 / ask-once 审批 / 未做的内核强制（**策略层已实施**） |
+| [`docs/GOAL-RUN-PLAN.md`](docs/GOAL-RUN-PLAN.md) | 目标型长任务：跑到「真的完成」（**已实施 P0**；续跑决策 / 可执行验收 / 崩溃重入队） |
+| [`docs/PEER-MESH-PLAN.md`](docs/PEER-MESH-PLAN.md) | 内网 agent 互通：按机器确认的信任清单 / UDP 发现 / 会话即通道 / 跳数与小时预算 / 建议式租约（**已实施 P0 + P1 授权**） |
+| [`docs/MULTI-AGENT-WORKTREE-ISOLATION-PLAN.md`](docs/MULTI-AGENT-WORKTREE-ISOLATION-PLAN.md) | 多 agent 并行时 workspace 资源隔离（**SSH 会话已实施**：每会话一个远端 worktree；含 flock 设计） |
+| [`docs/SSH-MODULE-REVIEW.md`](docs/SSH-MODULE-REVIEW.md) | SSH 模块全面审查：架构 / 整洁 / 完成度 + 与 Rust 核心的三个脆弱点（**改 src/ssh 或 src/remote 前先读**） |
 | [`docs/UMD-CLEANUP-PLAN.md`](docs/UMD-CLEANUP-PLAN.md) | UMD 清理计划 |
 
 ---

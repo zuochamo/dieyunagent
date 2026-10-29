@@ -190,7 +190,7 @@ flowchart TB
     PathPol["path-policy.js 白名单"]
     Web["web-fetch.js SSRF 防护"]
     RemoteFS["remote-fs.js SSH 文件"]
-    ProjMem["project-memory.js"]
+    ProjId["handlers/memory.js 项目身份"]
   end
 
   WS[渲染进程 gatewayCall] -->|auth + call| Server
@@ -338,11 +338,12 @@ Planner 子 Agent 通过 coordinator 按 `toRole` 投递（`message-bus.js`）�
 flowchart TB
   subgraph Crate["crates/dieyun-core/"]
     RPCio["rpc/stdio JSON-RPC"]
-    Agent["agent/ loop_run + tools"]
+    Agent["agent/ loop_run（账本状态机，不含工具）"]
     Planner["planner/ run + plan_parse"]
     Memory["memory/ SQLite store"]
     Compaction["compaction/ tokens + LLM 摘要"]
     Index["index/ walker + search + embedding"]
+    Graph["graph/ 符号图 + 调用边 + LSP 回灌"]
     Embed["embedding/ builtin + remote"]
     FS["fs_ops"]
   end
@@ -353,17 +354,25 @@ flowchart TB
   RPCio --> Memory
   RPCio --> Compaction
   RPCio --> Index
+  RPCio --> Graph
   Index --> Embed
 ```
 
 | RPC 前缀 | 职责 |
 |----------|------|
-| `agent.loop.*` | 单 Agent 工具循环状态机 |
+| `agent.loop.*` | 单 Agent 工具循环状态机（工具在 Main，`need_delegate` 委托） |
 | `agent.ping` | 能力探测 |
 | `planner.run.*` | Planner 编排状态机 |
 | `memory.*` | SQLite 会话/消息/长期记忆/向量 |
 | `compaction.*` | token 预算、原子块折叠、摘要 |
 | `codebase.*` | 工作区索引与语义搜索 |
+| `graph.*` | 符号/调用图索引查询（`repo_map` / `callers` / `impact` …） |
+
+账本口径（2026-10-28 整改）：内核**只记模型原文** —— 不解析 `agent_status`、
+不做「重复前言」字符串去重、不用中文词表判定思考是否过场；通道身份由入口
+`contentChannel` 盖章，交付形态由 Node 四态收口决定。
+护栏数字（`maxToolCalls` / `maxRounds`）唯一来源是 `src/agent/agent-limits.js`，
+经 `rust-loop-runner.applyResolvedLoopSpec` 填入 `agent.loop.start`，内核不留默认值。
 
 打包：`npm run pack:dieyun-core` → `build/dieyun-core/dieyun-core.exe`。
 
@@ -379,26 +388,35 @@ flowchart TB
 flowchart TB
   subgraph Write["写入"]
     ChatMsg[对话消息] --> GWmem[memory.message_append]
-    LongMem[长期记忆] --> GWlong[memory.long_add]
+    LongMem[长期/项目记忆 · 归纳器] --> GWlong[memory.long_add / project_add]
+    Handoff[会话交接] --> GWho[memory.handoff_save]
+    Comp[压缩摘要] --> GWcomp[memory.compaction_archive]
     GWmem --> RustMem
     GWlong --> RustMem
+    GWho --> RustMem
+    GWcomp --> RustMem
   end
 
   subgraph RustMem["Rust MemoryStore"]
     Sessions[(sessions)]
     Messages[(messages)]
     Long[(long_memories)]
+    HandoffT[(session_handoffs)]
+    Archives[(compaction_archives)]
   end
 
   subgraph Read["读取 / 注入"]
     Recent[messages_recent] --> Render[重绘聊天]
-    Recall[long_recall / keyword_search] --> Prompt[system prompt]
+    Recall[long_recall / project_recall] --> Prompt[system prompt]
+    HandoffGet[handoff_get] --> Prompt
     Vector[向量语义召回] --> Prompt
   end
 
   RustMem --> Sessions
   RustMem --> Messages
   RustMem --> Long
+  RustMem --> HandoffT
+  RustMem --> Archives
 ```
 
 ### 7.1 表结构（逻辑）
@@ -406,8 +424,15 @@ flowchart TB
 | 表 | 用途 |
 |----|------|
 | `sessions` | 会话元数据：title、archived、workspace_path |
-| `messages` | 短期对话：user / assistant / system |
-| `long_memories` | 长期笔记式记忆 |
+| `messages` | 短期对话：user / assistant / system（含 `reasoning` 分列） |
+| `long_memories` | 长期记忆：`scope=global` 用户级、`scope=project:*` 项目级；`kind` 决定能否自动注入 |
+| `long_memory_vectors` | 语义索引（模型未启用则召回退到关键词） |
+| `session_handoffs` | 会话交接，每会话一份 |
+| `compaction_archives` | 压缩摘要归档，下轮 turn-ride 投影 |
+| `request_snapshots` | 请求信封留底（旁路事实，不参与流程） |
+
+写入方唯一性：账本 = Rust `MemoryStore`；长期/项目记忆 = Main 归纳器（`src/agent/knowledge-maintainer.js`）；
+交接 = `src/agent/session-handoff.js`。详见 [MEMORY.md](./MEMORY.md)。
 
 ### 7.2 会话生命周期
 
@@ -452,7 +477,6 @@ flowchart TB
     Model[renderer-model-settings.js]
     MCP[renderer-mcp-catalog.js]
     Perms[renderer-permissions.js]
-    Components[renderer-components.js]
   end
 
   HTML --> Chat
@@ -496,11 +520,6 @@ flowchart TB
 
   Bundled --> Runtime
   Runtime --> Tools[Agent 工具列表]
-
-  subgraph Plugins["plugins/"]
-    Loader[loader.js]
-    Host[host.js]
-  end
 ```
 
 - **Bundled**：随安装包（`extraResources`）。
@@ -508,6 +527,9 @@ flowchart TB
 - **启用状态**：`localStorage` `diecloud.skills.enabled.v1` 等。
 - **技能本质**：主要是 system prompt 知识；部分解锁工具（如天气）。
 - **预装 MCP**：`src/mcp/registry.js`；`bundledServer`（如 `dieyun-open-api`）随 asar 打包，用 `ELECTRON_RUN_AS_NODE` 启动，密钥走环境变量。
+- **插件通道已下线**：曾有的 `src/plugins/`（宿主 + 工具注入 + 生命周期钩子）与内置目录、`plugins.*` RPC、设置页已整体删除。第三方工具只有 MCP 一条路；`onAgentTurnEnd` / `onPlanRan` 两个事件钩子在真实的钩子作者出现之前不保留抽象——需要时按当时的实际需求重做，而不是先揣测一个进程外钩子协议。历史结论见 `docs/PLUGIN-REMOVAL.md`。
+
+
 
 ---
 
@@ -528,6 +550,33 @@ flowchart TB
 ```
 
 远程路径约束在 `ssh/remote-path.js`；工作空间 URI 形如 `ssh://user@host/path`。
+
+### 远程 exec 与后台进程（句柄 / 日志 / 结束判定）
+
+`src/exec-settlement.js`（`attachExecSettlement`）是「一条命令什么时候算跑完」的**唯一判定**，
+本机 `runShell`（Node spawn）与远程 `session-manager.exec` 共用；两端各自只做超时兜底：
+
+| 事件 | 含义 | 处理 |
+|------|------|------|
+| `close` | 输出管道全关了（sshd 关 session 管道 / Node 子进程 stdio 关闭） | 正常收尾，用 close 的 exit code |
+| `exit`（exit-status） | 命令主体已退出，但输出管道仍被后台进程继承（`cmd &` / nohup / setsid） | 静默 400ms 后收尾（每来一段输出重置）；SSH 侧此时主动 close channel 释放资源 |
+| 都不来 | 命令链还在前台跑 | 由各自的 timeout 兜底 → `SSH_EXEC_TIMEOUT` / `SHELL_TIMEOUT` |
+
+少了这一层，后台命令就会「命令已生效却报超时」：命令早就结束了，却要等到 timeout 才把「已启动」
+报成失败（见 [`issue/issue-host-exec-background-timeout.md`](../issue/issue-host-exec-background-timeout.md)）。
+
+两条配套契约（本机 `runShell` / `spawnDetachedProcess` 共用）：
+
+- **spawn 失败只算一次失败**：失败由 `child.on('error')` settle 外层 Promise，
+  `attachExecSettlement` 因同一个 error 再 reject 时由调用方接住 —— 否则会冒成主进程
+  `Unhandled rejection: Error: spawn ... ENOENT`，把真错掩盖掉。
+- **cwd 由 `resolveSpawnCwd` 唯一解析并校验存在**：给一个不存在的 cwd，libuv 只会回
+  `spawn C:\WINDOWS\system32\cmd.exe ENOENT`（报的是 ComSpec 找不到，看不出真因）。
+  现在统一回 `CWD_NOT_FOUND` + 具体路径（`retryable=false`），避免模型在同一路径上盲试。
+
+远程 `detached` 与本地同形（`gateway/remote-processes.js`）：`setsid` 让命令自成进程组 →
+`pid` 即命令本身（可 `kill -TERM -pid` 结束整棵树），stdout/stderr 落 `/tmp/dieyun-host-proc/`，
+并登记 `sshproc-N` 句柄供 `host_proc`（list / output / kill）使用 —— 与本地 `hostproc-N` 一套语义。
 
 ---
 
@@ -692,7 +741,7 @@ flowchart TB
   UI[索引触发 / Agent 搜索] --> GWcode[Gateway codebase.* / graph.*]
   GWcode --> RustIdx[Rust index + treesitter]
   GWcode --> RustGraph[Rust graph build + query]
-  RustIdx --> Embed[embedding builtin BGE / remote]
+  RustIdx --> Embed[embedding remote endpoint (opt-in)]
   RustIdx --> SQLiteIdx[(索引 SQLite)]
   RustGraph --> SQLiteGraph[(图 SQLite)]
   LSP[Gateway LSP enrich] -->|standing job| SQLiteGraph
@@ -701,16 +750,24 @@ flowchart TB
 ### 15.1 Codebase 文本索引
 
 - `codebase.*` 仅 Rust 实现（含远程仓库的采集与索引）。
-- 切块优先 **Tree-sitter**（JS/TS/Python/Go/Rust 按函数/类边界）；失败回退行窗（`CHUNK_LINES` / overlap）。
+- 切块优先 **Tree-sitter**（JS/TS/Python/Go/Rust 按函数/类边界）；失败回退行窗（`CHUNK_LINES` / overlap）。AST 之外的**未覆盖行**（函数上方的注释、顶层语句）单独成 chunk：文件的每一行都进索引。
 - 单仓库文件上限 **16000**；`codebase.search` 结果上限 **48**。
-- 向量检索：≤2500 条精确余弦；更大库走 **FTS 候选重打分 + 分层模量采样**（`embedding/ann.rs`），不依赖 sqlite-vec / 原生 HNSW 扩展。
+- 向量检索：**只有一条路径** —— 常驻内存池（`index/vector_pool.rs`）全量精确余弦，recall 100%。池装不上（IO 异常 / 维度不符）时该通道缺席、只出词法结果，**不做抽样近似**（抽样会让同一查询在池冷/暖时给出不同答案）。
+  - 实测成本（114k chunk）：建池 2.2s（一次），单次扫描 768 维约 350ms、内存 340MB。更大规模要提速就上真正的 ANN 索引，而不是模量抽样。
+- 检索融合：向量（余弦）/ 子串（`LIKE`，见下）两路**按名次**做 RRF（`k=60`），不拼分数 —— 余弦与子串命中量纲不同，加权求和必须配不可验证的魔数。`score` 字段是「相对本次头名」的归一化值（头名恒 1.0），只用于展示排序信心。同分候选按 chunk id 兜底排序，保证同一查询两次调用顺序一致（融合结果来自 HashMap 迭代）。
+- **本地 trigram FTS 通道已删除**（`SCHEMA_VERSION = 4`，迁移只做 `DROP TRIGGER` ×3 + `DROP TABLE chunks_fts`）：它占索引库 40%（426 MB / 1056 MB）却与 `grep` 工具功能重叠、且新鲜度落后一轮增量。评测与判据见 `docs/INDEX-VALUE-REVIEW.md`（R2）。
+- 词法召回取而代之的是**子串通道**（唯一词法来源）：查询按空白与标点切词（去掉 1 字词，上限 12 个），每个词对 `content` 与 `rel_path` 各跑一次 `LIKE '%term%' ESCAPE '\'`，按「命中词数」降序、chunk id 兜底排序；命中行号由首个命中位置回填。中文 2 字、3 字、标识符子串（`parse_config`）走同一条路 —— **没有分词下限、也没有扫描窗口**。代价是单次全表扫（本仓 10,846 chunk ≈ 20 ms，74k chunk 外推 ≈ 140 ms）。
+- 向量通道是**建库时显式 opt-in**：`codebase.index.start` / `codebase.index` / `codebase.index_remote` 的 `vectors` 参数（缺省 `false`），出口是面板「建向量」按钮与 CLI `--vectors`；查询侧不变（`vector_count > 0` 且签名匹配就自动用）。`vectors` 描述的是**本次请求**：不带它不会删掉已有向量（清空只发生在 `force` 全量重建与 embedding 签名变更），元数据（`vector_count` / `embedding_model` / `embedding_dims`）始终描述库里真实存在的向量；要向量但端点没配时返回 `EMBEDDING_NOT_CONFIGURED` 而不是静默只建片段。`codebase-incremental-scheduler` 对「已建过向量」的工作区增量时带 `vectors: true`（否则增量删掉的旧 chunk 会把向量一起带走，覆盖率单向下滑）。生命周期细则见 `docs/VECTOR-SEARCH.md` §1.1。
 
 ### 15.2 代码图谱
 
-- 构建：`graph.index` / `graph.index.start`，AST 抽取符号、import、call（与 codebase 同语言范围）。
-- 查询：`graph.symbols`、`graph.callers` / `callees`、`graph.repo_map`（枢纽文件/符号 + markdown 摘要）。
+- 构建：`graph.index` / `graph.index.start`，AST 抽取符号、import（与 codebase 同语言范围）。模块名只认 AST 的 `source` 字段（`export const X = "lit"` 不是依赖）。
+- **建库范围分两档**（`GraphScope`，RPC 参数 `calls: boolean`，缺省 `false`）：`Structural` 只建 `graph_symbols` / `graph_imports` / `graph_file_mtime`（`repo_map`、`symbol_search`、`module_deps` 的底座，常建）；`WithCalls` 额外抽 `graph_calls`（实测 391k 行 / 65 MB，而 7 天里只有 1 次 `graph` 调用）。`graph.callers` / `callees` / `lsp_resolve` 在「已建库但 `call_count === 0`」时会自动补建一次（`calls: true`，增量模式下对未变文件也会重解析，否则永远抽不出边）并返回 `GRAPH_INDEXING_IN_PROGRESS` 提示稍后再试。
+- 结构索引保留的核心理由是 **`repo_map`**：≤4500 字符换来「全局骨架 + 枢纽文件 + 关键符号 + 模块边 + 循环依赖」，`grep` / `read_file` 结构上无法回答「这个仓库长什么样、哪里是枢纽」。它**不再要求用户先点名文件**（注入门是 `allowCodebase`，与 `injectCode` 解耦；详见 `docs/INDEX-VALUE-REVIEW.md` R8）。
+- 解析口径：调用边只按**证据**解析 —— 同文件符号 → import 目标文件的符号 → （建库收尾）**全库唯一**同名符号；找不到证据就保持未解析（`callee_symbol_id IS NULL`），**不按字典序猜同名**（那会凭空造边，且结果取决于文件名排序）。增量重建时改动文件的入边只**撤销解析**、不删行（调用方文件没变、不会重扫）。
+- 查询：`graph.symbols`、`graph.callers` / `callees`、`graph.repo_map`（枢纽文件/符号 + markdown 摘要）。`callers` 按符号 id 认已解析边、按裸名只认未解析边；**符号已不存在**时（改名/删除）返回 `symbol: null` + 该名字的悬空调用点，正是「谁还在调这个已经没了的东西」。调用归属按作用域（`start_line <= line <= end_line`），函数体之后的文件级调用不算上一个函数的。
 - Agent 准备上下文时注入「仓库结构图」；后台可 kick `graph.lsp_enrich`（冷却约 10 分钟）用 LSP 补全 callers。
-- 符号向量检索与 codebase 共用 ANN 分层策略；单次语义结果上限 **80**。
+- 符号级语义检索已整体移除（`graph.embed_symbols` / `graph.symbol_semantic_search` / `graph_symbol_vectors`）：自然语言找代码走 `codebase.search`（chunk 级向量），按名/按关系找符号走 `graph.symbol_search` / `callers` / `callees`。
 
 ---
 
@@ -731,7 +788,6 @@ flowchart TB
 | `src/browser/` | 内嵌浏览器自动化 |
 | `src/update-bootstrap/` | 更新安装引导 |
 | `src/mcp/` | MCP 运行时 |
-| `src/plugins/` | 插件宿主 |
 | `src/lsp/` | 语言服务诊断 |
 | `src/git/worktree-service.js` | Planner Worker 隔离 |
 

@@ -2,14 +2,14 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-10-27T00:09:11.669Z
+生成时间：2026-10-28T13:35:10.658Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 196 |
-| Gateway only | 118 |
-| Rust only | 24 |
-| Both | 54 |
+| 总计 | 186 |
+| Gateway only | 104 |
+| Rust only | 27 |
+| Both | 55 |
 
 ## 按命名空间
 
@@ -128,13 +128,12 @@
 | `fs.stat` | gateway | gateway/handlers/fs.js | — |
 | `fs.write_file` | gateway | gateway/handlers/fs.js | — |
 
-### graph (15)
+### graph (13)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `graph.callees` | both | gateway/handlers/graph.js | yes |
 | `graph.callers` | both | gateway/handlers/graph.js | yes |
-| `graph.embed_symbols` | both | gateway/handlers/graph.js | yes |
 | `graph.impact` | both | gateway/handlers/graph.js | yes |
 | `graph.index` | both | gateway/handlers/graph.js, gateway/rpc.js | yes |
 | `graph.index.start` | both | gateway/handlers/graph.js, gateway/rpc.js | yes |
@@ -146,9 +145,8 @@
 | `graph.repo_map` | both | gateway/handlers/graph.js | yes |
 | `graph.status` | both | gateway/handlers/graph.js, gateway/rpc.js | yes |
 | `graph.symbol_search` | both | gateway/handlers/graph.js | yes |
-| `graph.symbol_semantic_search` | both | gateway/handlers/graph.js | yes |
 
-### host (6)
+### host (7)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -158,6 +156,7 @@
 | `host.proc_kill` | gateway | gateway/handlers/host.js | — |
 | `host.proc_list` | gateway | gateway/handlers/host.js | — |
 | `host.proc_output` | gateway | gateway/handlers/host.js | — |
+| `host.proc_settled` | gateway | gateway/handlers/host.js | — |
 
 ### index (2)
 
@@ -177,7 +176,7 @@
 | `lsp.settings_get` | gateway | gateway/handlers/lsp-workspace.js | — |
 | `lsp.settings_set` | gateway | gateway/handlers/lsp-workspace.js | — |
 
-### memory (37)
+### memory (45)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -189,7 +188,9 @@
 | `memory.handoff_latest` | both | gateway/handlers/memory.js | yes |
 | `memory.handoff_save` | both | gateway/handlers/memory.js | yes |
 | `memory.long_add` | both | gateway/handlers/memory.js | yes |
+| `memory.long_by_session` | rust | — | yes |
 | `memory.long_decay` | both | gateway/handlers/memory.js | yes |
+| `memory.long_forget_session` | rust | — | yes |
 | `memory.long_keyword_search` | both | gateway/handlers/memory.js | yes |
 | `memory.long_memories_after` | both | gateway/handlers/memory.js | yes |
 | `memory.long_recall` | both | gateway/handlers/memory.js | yes |
@@ -205,7 +206,10 @@
 | `memory.messages_recent` | both | gateway/handlers/memory.js | yes |
 | `memory.ping` | rust | — | yes |
 | `memory.project_add` | gateway | gateway/handlers/memory.js | — |
+| `memory.project_alias_add` | both | gateway/handlers/memory.js | yes |
+| `memory.project_list` | both | gateway/handlers/memory.js | yes |
 | `memory.project_recall` | gateway | gateway/handlers/memory.js | — |
+| `memory.project_resolve` | rust | — | yes |
 | `memory.project_scope` | gateway | gateway/handlers/memory.js | — |
 | `memory.request_snapshot_append` | rust | — | yes |
 | `memory.request_snapshot_get` | both | gateway/handlers/memory.js | yes |
@@ -214,6 +218,9 @@
 | `memory.session_create` | both | gateway/handlers/memory.js | yes |
 | `memory.session_delete` | both | gateway/handlers/memory.js | yes |
 | `memory.session_get` | both | gateway/handlers/memory.js | yes |
+| `memory.session_memories` | gateway | gateway/handlers/memory.js | — |
+| `memory.session_memories_forget` | gateway | gateway/handlers/memory.js | — |
+| `memory.session_set_title` | both | gateway/handlers/memory.js | yes |
 | `memory.session_workspace_set` | both | gateway/handlers/memory.js | yes |
 | `memory.sessions_list` | both | gateway/handlers/memory.js | yes |
 | `memory.sessions_with_messages` | both | gateway/handlers/memory.js | yes |
@@ -236,28 +243,6 @@
 | `planner.run.start` | rust | — | yes |
 | `planner.run.state` | rust | — | yes |
 | `planner.run.worker_loop` | rust | — | yes |
-
-### plugins (17)
-
-| Method | Layer | Gateway source | Rust |
-|--------|-------|----------------|------|
-| `plugins.catalog.install` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.catalog.install_from_url` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.catalog.list` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.catalog.sources.get` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.catalog.sources.set` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.hooks.agent_turn_end` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.install_from_path` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.install_from_zip` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.list` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.list_tools` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.remove` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.set_enabled` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.settings.get` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.settings.schema` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.settings.set` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.tool_call` | gateway | gateway/handlers/plugins.js | — |
-| `plugins.uninstall` | gateway | gateway/handlers/plugins.js | — |
 
 ### rpc (1)
 

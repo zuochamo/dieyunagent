@@ -63,7 +63,8 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - 测试同守此规：`scripts/test-*.cjs` 里的上限与探针必须**从 `agent-limits` 或本轮传入的 cap 推导**，勿抄裸字面量（抄了就会在改护栏数字时假红／假绿）。同理，断言优先写「精确契约」（集合相等、cap+1 探针），少用「条目数变多变少」这类代理指标。
 - `src/agent/guardrails-shared.js` — 工具拦截常量/逻辑（Main + Renderer 共用）。无只读探索/同文件重读硬拦。
 - `src/agent/tool-guardrails.js` — Main 薄封装
-- `src/renderer/agent-guardrails.js` — Renderer 薄封装 + 完成验收提示（不自动续跑）
+- `src/agent/completion-readiness.js` — **完成验收的唯一来源**（Main）：证据 = 循环账本 trace + Gateway `workspace.diagnostics` + 浏览器运行时事实；只提示、不自动续跑、不挡交付
+- `src/renderer/agent-guardrails.js` — 只渲染验收提示（`applyReadinessNote`，不判定）
 - `src/renderer/renderer-agent-reviewer.js` — 可选 LLM Reviewer（默认关；独立模型 + 文件 diff）
 
 ## 3. 开发命令
@@ -126,9 +127,10 @@ npm run verify:agent-events
 ### 索引 / 图谱（Rust）
 
 - `crates/dieyun-core/src/treesitter/` — AST 切块与符号抽取
-- `crates/dieyun-core/src/index/` — codebase 索引与混合检索（FTS + 向量 ANN 采样）
-- `crates/dieyun-core/src/graph/` — 依赖图、repo_map、符号向量
-- `crates/dieyun-core/src/embedding/ann.rs` — 大库向量扫描阈值与采样模量
+- `crates/dieyun-core/src/index/` — codebase 索引与混合检索（FTS `trigram` + 向量池精确余弦 + 2 字短术语子串扫描，按名次 RRF 融合）
+- `crates/dieyun-core/src/index/vector_pool.rs` — 常驻内存向量池（唯一的向量检索通道）
+- `crates/dieyun-core/src/index/schema.rs` — 表 / `chunks_fts`（external content + 触发器）/ `SCHEMA_VERSION` 迁移
+- `crates/dieyun-core/src/graph/` — 依赖图、repo_map
 
 Rust 侧注册：`crates/dieyun-core/src/rpc/mod.rs`。Node 侧：`src/gateway/handlers/`。
 

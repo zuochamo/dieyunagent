@@ -189,7 +189,7 @@ sequenceDiagram
 要点：
 
 - Rust **只负责循环状态机**（轮次、tool_calls 配对、delegate 调度）；**LLM HTTP 仍在 Node**（Main）。
-- **工具执行**（R6）：loop 内无 native 工具入口，全部 `need_delegate` → `src/agent/tool-bridge-main.js`。次数上限由宿主传入 `agent-limits` `ctxAgentToolCallLimit`（或模型设置 `agentToolCallLimit`）。
+- **工具执行**（R6）：loop 内无 native 工具入口，全部 `need_delegate` → `src/agent/tool-bridge-main.js`。次数上限由宿主传入，唯一来源是「编码参数 → 模型与段预算 → 工具调用段上限」（`model-settings.agentToolCallLimit`，按 Context 档位存；`agent-limits.resolveLoopToolCallLimit` 只是读取 + clamp）。
 - **流式**：Main 经 IPC `agent:rust-loop-phase` 推送 delta，Renderer 更新思考 UI。
 - **压缩**：Main 侧 `compaction-main.js` 在每轮 LLM 前可压缩 messages，并可选归档到 `memory.compaction_archive`。
 - 开启 Rust 后 **不再** silent 回退 JS loop；IPC 不可用则报错。
@@ -283,7 +283,8 @@ flowchart TD
 
 存储：`crates/dieyun-core/src/memory/`（Rust `MemoryStore`）→ `%APPDATA%/dieyunagent/diecloud-memory.sqlite`（WAL）。**唯一写入路径**：Gateway `requireRustCore('memory.*')`；sidecar 未就绪时 RPC 直接抛 `RUST_CORE_UNAVAILABLE`（JS `memory-store.js` 已删除）。
 
-**Rust memory RPC**（完整）：`memory.ping`、`touch_session`、`sessions_list`、`session_*`、`message_append`、`messages_recent/clear/delete_turn`、`long_add/recent/recall/keyword_search/reindex/vector_status/status_set/decay`、`consolidation_job_*`、`compaction_archive/recent`、`sessions_with_messages`、`messages_after`、`long_memories_after`；`agent.run_upsert`、`plan_save`、`steps_save`、`state_get`、`trace_save/get`。
+**Rust memory RPC**（完整）：`memory.ping`、`touch_session`、`sessions_list`、`session_*`、`message_append`、`messages_recent/clear/delete_turn/after/older`、`long_add/recent/recall/keyword_search/reindex/vector_status/status_set/decay`、`handoff_save/get/latest`、`consolidation_job_*`、`compaction_archive/recent`、`request_snapshot_append/get/recent`、`sessions_with_messages`、`long_memories_after`；`agent.run_upsert`、`plan_save`、`steps_save`、`state_get`、`trace_save/get`。
+Gateway 侧另有 `memory.project_add/project_recall/project_scope`（项目 scope 归一化的唯一入口，见 [MEMORY.md](./MEMORY.md) §4.1）。
 
 **代码库索引**：`codebase.*` 全部由 Rust 实现（含远程采集）。
 
@@ -292,8 +293,15 @@ flowchart TD
 | 表               | 用途                                        |
 | --------------- | ----------------------------------------- |
 | `sessions`      | 会话元数据：`title`、`archived`、`workspace_path` |
-| `messages`      | 短期对话：`user` / `assistant` / `system`      |
-| `long_memories` | 长期笔记式记忆（带来源字段）                            |
+| `messages`      | 短期对话：`user` / `assistant` / `system`（含 `reasoning` 分列） |
+| `long_memories` | 长期记忆：`scope=global` 用户级 / `scope=project:*` 项目级；`kind` 决定能否自动注入 |
+| `long_memory_vectors` | 语义索引（模型未启用则召回退到关键词） |
+| `session_handoffs` | 会话交接，每会话一份 |
+| `compaction_archives` | 压缩摘要归档，下轮 turn-ride 投影 |
+| `request_snapshots` | 请求信封留底（旁路事实） |
+
+写入方唯一性：账本 = Rust `MemoryStore`；长期/项目记忆 = Main 归纳器 `src/agent/knowledge-maintainer.js`；
+交接 = `src/agent/session-handoff.js`。分层、注入规则与归纳预算见 [MEMORY.md](./MEMORY.md)。
 
 ### 5.2 会话生命周期
 
@@ -396,6 +404,17 @@ Agent 也可用 `skill_create` IPC 在用户目录新建技能。
 **设计原因**：计划任务要可预测、可停止、少副作用；复杂自动化应让用户明确指定会话与技能子集。
 
 调度：`plans/scheduler.js` + 主进程定时器；解析自然语言创建计划：`plans/parser.js`。
+
+调度字段（唯一实现 `renderer/renderer-automation-schedule.js` ⇄ `plans/rrule-next.js`）：
+
+- **执行频率**：周期（每天/每周 HH:MM）或间隔（每 N 分钟/小时/天 → `FREQ=MINUTELY|HOURLY|DAILY;INTERVAL=N`）。
+- **总共执行多少次**：写成 `COUNT=`；与「生效结束」（`UNTIL=`）互斥，两者都填以次数为准。
+  `COUNT` 是「从 `dtstart` 起的第 N 次」，所以 `plans/store.js` 在新建/换规则时把 `dtstart`
+  对齐到下一次触发（否则今天已过去那次会吃掉一个名额），跑满即自动停用。
+- **工作空间**：`plans.json` 的 `workspace`（本地目录或 `ssh://` 远端）。空 = 跟随执行时当前工作空间。
+  定时执行没有打开的会话，工作区不随计划落盘就只能「跑在碰巧开着的那个目录里」；绑定关系落
+  `sessions.workspace_path` + 进程内会话上下文（`plan-session.js`），本次运行的
+  `runWorkspaceRoot` 也按它传（`mcp-plans-boot.js#resolvePlanWorkspacePath`）。
 
 ### 9.1 运行态如何进入 UI
 

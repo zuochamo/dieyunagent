@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-09T01:43:03.652Z",
+  "generatedAt": "2026-10-28T11:40:17.954Z",
   "source": "src/agent/run-events.js",
   "eventTypes": [
     {
@@ -141,7 +141,7 @@
       "name": "meta",
       "type": "object|null",
       "required": false,
-      "description": "prepSteps 等扩展"
+      "description": "prepSteps 等扩展；done 带 isPlanRun / reviewAccepted / completionGatePassed / completionStatus / agentStatus / readinessReason（完成验收原因码，判定在 src/agent/completion-readiness.js）"
     }
   ],
   "mobileServiceEventMap": {
