@@ -1,8 +1,7 @@
-/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden */
+/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden, motionMs, requestAnimationFrame, cancelAnimationFrame */
 'use strict';
 
 const SIDE_PANEL_TAB_KEY = 'diecloud.ui.sidePanelTab.v1';
-const PANEL_MOTION_MS = 560;
 
 const sidePanelState = {
   open: false,
@@ -10,8 +9,38 @@ const sidePanelState = {
 };
 
 let panelCloseTimer = null;
+let panelMotionRaf = null;
+/** 面板动画期间逐帧同步原生视图边界的令牌：新一次开/关让上一次收手 */
+let panelMotionToken = 0;
 /** SSH 页请求被 rail 可用性拦下时（会话切换中工作区类型尚未落地）暂存，等 rail 就绪后落地 */
 let pendingSshTabRequest = false;
+
+/**
+ * 面板宽度过渡期间逐帧同步原生 BrowserView 边界（唯一来源）。
+ * 原生 WebContentsView 不吃 CSS transform/transition：只在结束时同步会让它
+ * 整段动画期间停在过渡起点/中途的 rect 上，看上去「画面和面板错位」。
+ * 别处不要再写 setTimeout(syncBrowserBounds, 80/120/280) 这类拍脑袋延时 —— 时长从
+ * --motion-slow 来（与 CSS 同源），过渡一结束自动停。
+ */
+function syncPanelMotionBounds() {
+  if (typeof syncBrowserBounds !== 'function') return;
+  const token = ++panelMotionToken;
+  if (panelMotionRaf) {
+    cancelAnimationFrame(panelMotionRaf);
+    panelMotionRaf = null;
+  }
+  const deadline = Date.now() + motionMs('--motion-slow') + 120;
+  const tick = () => {
+    if (token !== panelMotionToken) return;
+    syncBrowserBounds();
+    if (Date.now() < deadline) {
+      panelMotionRaf = requestAnimationFrame(tick);
+    } else {
+      panelMotionRaf = null;
+    }
+  };
+  panelMotionRaf = requestAnimationFrame(tick);
+}
 
 function getSidePanelEl() {
   return document.getElementById('artifacts-panel');
@@ -130,12 +159,8 @@ function setSidePanelTab(tab, opts) {
   else if (typeof onIndexPanelHidden === 'function') onIndexPanelHidden();
 
   // 离开浏览器页时必须收起 BrowserView，否则会盖住侧栏按钮导致无法切换
-  if (typeof syncBrowserBounds === 'function') {
-    requestAnimationFrame(function () {
-      syncBrowserBounds();
-      setTimeout(syncBrowserBounds, 80);
-    });
-  }
+  // （页签切换会改变原生视图可用高度，边界交给同一条过渡期同步链）
+  if (typeof syncBrowserBounds === 'function') syncPanelMotionBounds();
 }
 
 function finishPanelClose(panel, resizer) {
@@ -186,12 +211,14 @@ function applySidePanelOpenState(open) {
     requestAnimationFrame(function () {
       panel.classList.add('is-panel-open');
     });
+    syncPanelMotionBounds();
     const btnArtifacts = document.getElementById('win-artifacts');
     if (btnArtifacts) btnArtifacts.classList.add('active');
   } else {
     panel.classList.remove('is-panel-open');
     panel.classList.add('is-panel-closing');
     if (resizer) resizer.classList.add('is-panel-closing');
+    syncPanelMotionBounds();
 
     const onEnd = function (e) {
       if (!panel.classList.contains('is-panel-closing')) return;
@@ -202,7 +229,7 @@ function applySidePanelOpenState(open) {
     panel.addEventListener('transitionend', onEnd, { once: true });
     panelCloseTimer = setTimeout(function () {
       if (panel.classList.contains('is-panel-closing')) finishPanelClose(panel, resizer);
-    }, PANEL_MOTION_MS + 100);
+    }, motionMs('--motion-slow') + 120);
   }
 }
 

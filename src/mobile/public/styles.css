@@ -30,6 +30,19 @@
   --font-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
 }
 
+/* ---------- 动效尺度（单一来源）----------
+   与桌面端 src/renderer/styles.css 同一套 token、同一组值：fast 悬停/按下/颜色、
+   base 小位移（chevron/开关）、slow 会改变布局占位的动作（折叠、抽屉、分栏）。
+   声明处不要再就地写 180ms / ease。 */
+:root {
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 280ms;
+  --motion-ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
 body[data-theme='light'] {
   color-scheme: light;
   --bg: #f6f6f6;
@@ -206,7 +219,7 @@ button.secondary {
   background: var(--surface);
   box-shadow: var(--shadow);
   transform: translateX(-102%);
-  transition: transform 180ms ease;
+  transition: transform var(--motion-slow) var(--motion-ease-enter);
 }
 
 .session-drawer.open {
@@ -230,7 +243,7 @@ button.secondary {
   background: var(--surface);
   box-shadow: var(--shadow);
   transform: translateX(102%);
-  transition: transform 180ms ease;
+  transition: transform var(--motion-slow) var(--motion-ease-enter);
 }
 
 .settings-drawer.open {
@@ -646,7 +659,7 @@ body.think-sheet-open {
   margin-right: 0.35em;
   opacity: 0.55;
   transform-origin: center;
-  transition: transform 140ms ease;
+  transition: transform var(--motion-base) var(--motion-ease-standard);
 }
 
 .msg-thinking-outer[open] > .msg-thinking-outer-summary::before {
@@ -662,13 +675,19 @@ body.think-sheet-open {
   grid-template-rows: 0fr;
   opacity: 0;
   transform: translateY(-4px);
-  transition: grid-template-rows 180ms ease, opacity 160ms ease, transform 180ms ease;
+  transition: grid-template-rows var(--motion-slow) var(--motion-ease-exit),
+    opacity var(--motion-slow) var(--motion-ease-standard),
+    transform var(--motion-slow) var(--motion-ease-exit);
 }
 
+/* 展开方向用 enter 曲线（CSS 取「变化后」那条 transition），收起走基线里的 exit */
 .msg-thinking-outer[open] > .msg-thinking {
   grid-template-rows: 1fr;
   opacity: 1;
   transform: translateY(0);
+  transition: grid-template-rows var(--motion-slow) var(--motion-ease-enter),
+    opacity var(--motion-slow) var(--motion-ease-standard),
+    transform var(--motion-slow) var(--motion-ease-enter);
 }
 
 .msg-thinking-outer > .msg-thinking > .msg-thinking-body {
@@ -844,17 +863,20 @@ body.think-sheet-open {
   overflow: hidden;
 }
 
+/* 固定占位高度，音量只改 scaleY（逐帧写 height 会触发布局） */
 .composer-voice-bar {
   display: block;
   flex: 0 0 auto;
   width: 3px;
-  height: 6px;
+  height: 100%;
   border-radius: var(--radius-pill);
   background: var(--accent-2);
+  transform: scaleY(0.25);
+  transform-origin: center bottom;
 }
 
 .composer-voice-bar.is-idle {
-  height: 8px;
+  transform: scaleY(0.34);
   opacity: 0.45;
 }
 

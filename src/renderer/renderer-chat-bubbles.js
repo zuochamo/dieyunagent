@@ -770,6 +770,5 @@ function toastPreviewText(text, max = 72) {
 }
 
 var SCROLL_CHAT_THROTTLE_MS = 100;
-var THINKING_COLLAPSE_FOLLOW_MS = 1100;
 var scrollChatTimer = null;
 var scrollChatForcePending = false;

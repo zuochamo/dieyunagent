@@ -968,6 +968,8 @@ function fillThinkingRoundBeat(beat, entry, index, trace, streaming, streamConte
     if (!nar) {
       nar = document.createElement('div');
       nar.className = 'msg-thinking-narration';
+      // 同 mountThinkingRoundDetails：只标记流式新生的那一条，由 CSS 决定是否入场
+      if (streaming) nar.dataset.flowEnter = '1';
       beat.insertBefore(nar, beat.firstChild);
     }
     updateIncrementalTextContent(nar, vis);
@@ -1118,6 +1120,9 @@ function mountThinkingRoundDetails(
   const wrap = document.createElement('div');
   wrap.className = 'msg-thinking-step';
   wrap.dataset.stepKey = thinkingStepDomKey(entry, index);
+  // 「流式期间新生」是纯事实标记；要不要入场动画由 CSS 按无极阻尼开关决定，
+  // 这样历史重绘（streaming=false）不会让整片思考区重新淡入一遍。
+  if (streaming) wrap.dataset.flowEnter = '1';
   const details = document.createElement('details');
   details.className = 'msg-thinking-round-details';
   details.dataset.stepKey = wrap.dataset.stepKey;

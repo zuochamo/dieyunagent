@@ -71,6 +71,8 @@ const I18N_MESSAGES = {
     trace_edit: '展开编辑工具部分',
     trace_follow_writes: '编辑区跟随 Agent 写入',
     trace_readiness: '显示完成验收提示',
+    trace_damped_flow: '无极阻尼',
+    trace_damped_flow_desc: '思考区改为连续入流：新内容按阻尼曲线滑入，视口跟着连续下淌，不再一行一行蹦。',
     help_usage: '使用说明',
     help_stats: '统计信息',
     help_logs: '运行日志',
@@ -244,6 +246,9 @@ const I18N_MESSAGES = {
     trace_edit: 'Expand edit tool sections',
     trace_follow_writes: 'Follow agent writes in editor',
     trace_readiness: 'Show completion checks',
+    trace_damped_flow: 'Stepless damping',
+    trace_damped_flow_desc:
+      'Thoughts flow in continuously: new content glides in on a damped curve and the view follows without jumping line by line.',
     help_usage: 'Guide',
     help_stats: 'Stats',
     help_logs: 'Logs',

@@ -162,8 +162,8 @@
         analyser.getByteFrequencyData(data);
         for (let i = 0; i < bars.length; i++) {
           const v = data[i + 2] || 0;
-          const h = Math.max(4, Math.round((v / 255) * 24));
-          bars[i].style.height = `${h}px`;
+          // 只改 scaleY：条高固定（占满波形区），逐帧写 height 会触发布局
+          bars[i].style.transform = `scaleY(${Math.max(0.17, v / 255).toFixed(3)})`;
         }
         waveAnimId = requestAnimationFrame(tick);
       };

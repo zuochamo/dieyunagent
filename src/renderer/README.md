@@ -113,6 +113,26 @@
 | `renderer-peer.js` | 内网 Agent 互通面板 + 会话即对端通道，渲染在「连接 → Agent 互通」标签页 |
 | `core/bootstrap.js` | 命名空间引导 | 
 
+## 动效（唯一来源）
+
+时长与曲线只有一份：`styles.css` 的 `:root --motion-*`（移动端、更新窗口声明同名同值 token）。
+
+| token | 值 | 用在哪 |
+|-------|----|--------|
+| `--motion-fast` | 120ms | 悬停 / 按下 / 颜色变化 |
+| `--motion-base` | 180ms | 小位移：chevron、开关、图标、进度条 |
+| `--motion-slow` | 280ms | 会改布局占位的动作：折叠展开、侧栏进出场、列表分栏、toast 入场 |
+| `--motion-ease-enter` / `-exit` / `-standard` | cubic-bezier | 减速进 / 加速出 / 对称（悬停、颜色） |
+
+规则：
+
+- 声明处**不写** `0.15s` / `ease`，一律引用 token；方向相关的曲线写在不同状态上（CSS 取「变化后」那条 transition，所以 `[open]` 用 enter、基线用 exit）。
+- 折叠只有一种实现：容器 `grid-template-rows: 0fr ⇄ 1fr` + 子元素 `min-height:0` / `overflow:hidden`。`max-height: auto|none ⇄ 0` 不可插值，别再用。
+- 会随指针/流式内容逐帧变化的尺寸（分隔条拖拽、语音波形）**不挂过渡**，波形用 `transform: scaleY()` 而不是逐帧写 `height`。
+- JS 需要「等过渡结束」时用 `renderer-constants.js:motionMs('--motion-slow')` 读同名 token，不要复制毫秒数。
+- 无限脉冲/旋转的节奏（0.75s–1.4s）是另一族，不并入过渡尺度。
+- **无极阻尼**（设置 → 主题 开关，偏好 `tracePrefs.dampedFlow`，落到 `:root[data-thinking-flow='damped']`）：思考区改为连续入流。两半缺一不可 —— 流式新生块的入场动画（`thinking-damped-in`，只有 `data-flow-enter` 的块会有，历史重绘不重放）＋ 贴底改阻尼跟随（`renderer-chat-render.js:dampedChatFollowStep`）；只加动画不阻尼滚动仍然是一行一行跳。系统「减少动效」时整体退回整块瞬现。
+
 ## 改完验证
 
 ```bash

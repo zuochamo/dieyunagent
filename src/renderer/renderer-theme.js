@@ -19,7 +19,8 @@ const TRACE_PREF_DEFAULTS = {
   expandShell: false,
   expandEdit: true,
   followWrites: true,
-  showReadiness: true
+  showReadiness: true,
+  dampedFlow: false
 };
 var tracePrefs = loadTracePrefs();
 
@@ -32,7 +33,8 @@ function loadTracePrefs() {
       expandShell: raw.expandShell === true,
       expandEdit: raw.expandEdit !== false,
       followWrites: raw.followWrites !== false,
-      showReadiness: raw.showReadiness !== false
+      showReadiness: raw.showReadiness !== false,
+      dampedFlow: raw.dampedFlow === true
     };
   } catch {
     return { ...TRACE_PREF_DEFAULTS };
@@ -60,6 +62,29 @@ function syncTracePrefInputs() {
   if (follow) follow.checked = tracePrefs.followWrites !== false;
   const readiness = $('trace-show-readiness');
   if (readiness) readiness.checked = tracePrefs.showReadiness !== false;
+  const damped = $('trace-damped-flow');
+  if (damped) damped.checked = tracePrefs.dampedFlow === true;
+}
+
+/**
+ * 「无极阻尼」（设置 → 主题）的唯一判定：思考区连续入流（CSS 侧看
+ * :root[data-thinking-flow='damped']）与贴底阻尼跟随（renderer-chat-render.js）都以它为准。
+ * 系统的「减少动效」优先：宁可退回整块瞬现，也不做与无障碍设置相抗的动画。
+ */
+function isThinkingDampedFlow() {
+  if (tracePrefs.dampedFlow !== true) return false;
+  try {
+    return !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return true;
+  }
+}
+
+/** 把开关落到 :root 上的一个属性，CSS 只认它（不在选择器里重复判偏好） */
+function applyThinkingFlowPref() {
+  const root = document.documentElement;
+  if (isThinkingDampedFlow()) root.setAttribute('data-thinking-flow', 'damped');
+  else root.removeAttribute('data-thinking-flow');
 }
 
 function syncThemeCards() {
@@ -278,6 +303,7 @@ async function syncAutoLaunchToggle() {
 window.syncThemeAutoLaunchToggle = syncAutoLaunchToggle;
 
 syncTracePrefInputs();
+applyThinkingFlowPref();
 [
   ['trace-show-reasoning', 'showReasoning', true],
   ['trace-show-titles', 'showTitles', true],
@@ -286,13 +312,16 @@ syncTracePrefInputs();
   // 跟随开关只影响后续写入，重绘整轮聊天开销大且无必要
   ['trace-follow-writes', 'followWrites', false],
   // 完成验收提示只作用于之后的新回复，历史消息已落库，重绘也不会变
-  ['trace-show-readiness', 'showReadiness', false]
-].forEach(([id, key, rerender]) => {
+  ['trace-show-readiness', 'showReadiness', false],
+  // 无极阻尼是纯呈现层开关：只翻 :root 属性，聊天重绘一遍反而会让历史块白跑一遍入场
+  ['trace-damped-flow', 'dampedFlow', false, applyThinkingFlowPref]
+].forEach(([id, key, rerender, effect]) => {
   const el = $(id);
   if (!el) return;
   el.addEventListener('change', () => {
     tracePrefs = { ...tracePrefs, [key]: el.checked === true };
     saveTracePrefs();
+    if (typeof effect === 'function') effect();
     if (!rerender) return;
     if (typeof renderChatFromMessagesYielding === 'function') {
       void renderChatFromMessagesYielding();

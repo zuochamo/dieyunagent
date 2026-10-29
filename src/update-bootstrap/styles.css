@@ -12,6 +12,15 @@
   --font-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
 }
 
+/* ---------- 动效尺度（单一来源）----------
+   与主窗口 / 移动端同一套 token、同一组值（见 src/renderer/styles.css）。 */
+:root {
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 280ms;
+  --motion-ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -99,7 +108,7 @@ body {
   width: 0%;
   border-radius: 0;
   background: linear-gradient(90deg, #3d7eff, #5ec8ff);
-  transition: width 0.25s ease;
+  transition: width var(--motion-base) var(--motion-ease-standard);
 }
 
 .update-progress-label {

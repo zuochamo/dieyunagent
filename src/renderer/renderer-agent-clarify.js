@@ -1,4 +1,4 @@
-/* global document, scrollChatToBottom, getSessionAbortSignal, currentSessionId */
+/* global document, scrollChatToBottom, getSessionAbortSignal, currentSessionId, motionMs */
 'use strict';
 
 const CLARIFY_DISMISS_MS = 5000;
@@ -11,8 +11,15 @@ function scheduleClarifyCardDismiss(card) {
     const remove = () => {
       if (card.parentNode) card.remove();
     };
-    card.addEventListener('transitionend', remove, { once: true });
-    window.setTimeout(remove, 480);
+    // 收起是 grid-template-rows 一条过渡（见 .agent-clarify-dismiss），等它走完再摘节点
+    card.addEventListener(
+      'transitionend',
+      (e) => {
+        if (e.target === card && e.propertyName === 'grid-template-rows') remove();
+      },
+      { once: true }
+    );
+    window.setTimeout(remove, motionMs('--motion-slow') + 120);
   }, CLARIFY_DISMISS_MS);
   card.dataset.dismissTimer = String(timer);
 }
@@ -51,10 +58,15 @@ function buildClarifyPreviewPane(options) {
 function buildClarifyCard(args, onSubmit) {
   const card = document.createElement('div');
   card.className = 'agent-clarify-card';
+  // 内胆承载内容与内边距：收起时整行压掉（grid-template-rows 1fr→0fr），
+  // 否则 auto→0 的 max-height 不可插值，卡片会先瞬消、只剩边距空转
+  const body = document.createElement('div');
+  body.className = 'agent-clarify-body';
+  card.appendChild(body);
   const q = document.createElement('p');
   q.className = 'agent-clarify-question';
   q.textContent = String(args.question || '请确认以下选项');
-  card.appendChild(q);
+  body.appendChild(q);
 
   const options = Array.isArray(args.options) ? args.options.slice(0, 8) : [];
   const allowMultiple = !!args.allowMultiple;
@@ -94,7 +106,7 @@ function buildClarifyCard(args, onSubmit) {
     const preview = buildClarifyPreviewPane(options);
     split.appendChild(table);
     split.appendChild(preview.wrap);
-    card.appendChild(split);
+    body.appendChild(split);
     const firstWithPreview = options.find((o) => hasClarifyPreviews([o]));
     if (firstWithPreview) preview.show(firstWithPreview.id);
     for (let i = 0; i < inputs.length; i++) {
@@ -106,7 +118,7 @@ function buildClarifyCard(args, onSubmit) {
       row.addEventListener('focusin', focus);
     }
   } else {
-    card.appendChild(table);
+    body.appendChild(table);
   }
 
   const actions = document.createElement('div');
@@ -138,7 +150,7 @@ function buildClarifyCard(args, onSubmit) {
   btn.addEventListener('click', submitSelection);
   actions.appendChild(freeInput);
   actions.appendChild(btn);
-  card.appendChild(actions);
+  body.appendChild(actions);
   return card;
 }
 

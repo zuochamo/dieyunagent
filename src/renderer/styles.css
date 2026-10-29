@@ -80,12 +80,30 @@
   --text-primary: #111827;
 }
 
+/*
+ * 动效尺度（唯一来源）。
+ * 所有 transition 的时长/曲线都从这里取，声明处不再就地写 0.12s / ease：
+ *   --motion-fast     悬停、按下、颜色（只为去掉硬切，不做位移）
+ *   --motion-base     小位移：chevron、开关、图标、进度条
+ *   --motion-slow     会改变布局占位的动作：折叠展开（grid-template-rows）、
+ *                     侧栏进出场、列表分栏、toast 入场
+ * 三条曲线：enter 减速进（展开/入场）、exit 加速出（收起/退场）、
+ * standard 对称（悬停/颜色/小位移）。方向相关的曲线写在目标状态上
+ * （CSS 取「变化后」那条 transition），所以 [open] 用 enter、基线用 exit。
+ * JS 需要「等过渡结束」时读同名 token（renderer-constants.js:motionMs），不要复制数字。
+ * 无限脉冲/旋转的节奏（0.75s–1.4s）是另一族，不并入上面的过渡尺度。
+ */
+:root {
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 280ms;
+  --motion-ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
 /* 全局滚动条：与聊天主窗口一致（细条、透明轨道、浅灰滑块） */
 :root {
-  --motion-collapse-duration: 1s;
-  --motion-collapse-ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --motion-panel-duration: 0.56s;
-  --motion-panel-ease: cubic-bezier(0.16, 1, 0.3, 1);
   /*
    * 子 Agent 卡片正文：按「行」定尺，固定 10 行，超出走卡片内滚动。
    * 不再有「初始 3 行 → 随内容增长」的过程：卡片出现即占满 10 行、高度恒定，
@@ -286,7 +304,7 @@ body {
   cursor: pointer;
   padding: 0;
   border-radius: 0;
-  transition: background 0.12s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -359,7 +377,7 @@ body {
   line-height: 32px;
   height: 100%;
   min-height: 32px;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard), color var(--motion-fast) var(--motion-ease-standard);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -418,7 +436,7 @@ body {
   font-size: 12px;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard), border-color var(--motion-fast) var(--motion-ease-standard);
 }
 .sidebar-skills-btn:hover {
   background: rgba(255, 255, 255, 0.04);
@@ -536,7 +554,7 @@ body {
   cursor: pointer;
   white-space: nowrap;
   font-weight: normal;
-  transition: color 0.15s ease;
+  transition: color var(--motion-fast) var(--motion-ease-standard);
 }
 .skills-category-tab + .skills-category-tab::before {
   content: '/';
@@ -665,7 +683,7 @@ body {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard), border-color var(--motion-fast) var(--motion-ease-standard);
 }
 .status-summary:hover {
   background: rgba(255, 255, 255, 0.04);
@@ -699,7 +717,7 @@ body {
   flex-shrink: 0;
   font-size: 10px;
   color: var(--text-mute);
-  transition: transform 0.15s ease;
+  transition: transform var(--motion-fast) var(--motion-ease-standard);
 }
 .sidebar-status.expanded .status-chevron {
   transform: rotate(180deg);
@@ -1246,7 +1264,7 @@ body {
   align-items: center;
   gap: 2px;
   border-radius: 0;
-  transition: background 0.12s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard);
 }
 .history-row:hover {
   background: rgba(128, 128, 128, 0.1);
@@ -1403,7 +1421,7 @@ body {
   border-radius: 0;
   background: var(--scrollbar-thumb);
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background var(--motion-fast) var(--motion-ease-standard);
 }
 .chat-scroll-bottom:hover {
   background: var(--scrollbar-thumb-hover);
@@ -1457,7 +1475,7 @@ body {
   background: color-mix(in srgb, var(--text) 20%, transparent);
   cursor: pointer;
   pointer-events: auto;
-  transition: width 0.12s ease, background 0.12s ease;
+  transition: width var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard);
 }
 /* 刻度只有 2px 高：命中区上下各外扩 --chat-nav-hit（= 间距的一半，由 JS 按实际间距写入，
    密集时不重叠，否则相邻刻度的热区互相压住，点哪根都可能跳到隔壁那条）；
@@ -1557,22 +1575,21 @@ body.composer-resizing {
   background: var(--text, #1a1a1a);
   transform: scaleX(0);
   transform-origin: left center;
-  transition: transform 420ms linear, opacity 280ms ease;
+  transition: transform var(--motion-slow) linear, opacity var(--motion-slow) var(--motion-ease-standard);
   will-change: transform, opacity;
   box-shadow: 0 0 6px color-mix(in srgb, var(--text, #1a1a1a) 35%, transparent);
 }
 .boot-chat-progress:not(.is-idle):not(.is-done) .boot-chat-progress-fill {
   animation: boot-progress-pulse 1.1s ease-in-out infinite;
 }
+/* 只动 opacity：filter: brightness 每帧都要重绘，而透明度可交给合成层 */
 @keyframes boot-progress-pulse {
   0%,
   100% {
     opacity: 0.72;
-    filter: brightness(1);
   }
   50% {
     opacity: 1;
-    filter: brightness(1.15);
   }
 }
 .boot-chat-progress:not(.is-idle):not(.is-done) .boot-chat-progress-track::after {
@@ -1711,9 +1728,9 @@ body.composer-resizing {
   line-height: 1.2;
   cursor: pointer;
   transition:
-    background 0.15s ease,
-    color 0.15s ease,
-    box-shadow 0.15s ease;
+    background var(--motion-fast) var(--motion-ease-standard),
+    color var(--motion-fast) var(--motion-ease-standard),
+    box-shadow var(--motion-fast) var(--motion-ease-standard);
 }
 
 .settings-segmented-tab:last-child {
@@ -1792,7 +1809,7 @@ body.composer-resizing {
   font-size: 13px;
   padding: 9px 16px;
   border-radius: 0;
-  transition: transform 0.05s ease, background 0.15s ease, opacity 0.15s ease;
+  transition: transform var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard), opacity var(--motion-fast) var(--motion-ease-standard);
 }
 .primary-btn {
   background: var(--accent-dark);
@@ -1854,11 +1871,11 @@ body.composer-resizing {
 
 .agent-main .chat.chat-session-fade-out {
   opacity: 0;
-  transition: opacity 80ms cubic-bezier(0.2, 0, 0.2, 1);
+  transition: opacity var(--motion-fast) var(--motion-ease-standard);
 }
 
 .agent-main .chat.chat-session-fade-in {
-  animation: chatSessionFadeIn 120ms cubic-bezier(0.2, 0, 0.2, 1);
+  animation: chatSessionFadeIn var(--motion-fast) var(--motion-ease-standard);
 }
 
 @keyframes chatSessionFadeIn {
@@ -1877,12 +1894,18 @@ body.composer-resizing {
     transition: none;
   }
   .artifacts-panel,
+  .artifacts-panel.is-panel-open,
   .pane-resizer-v,
+  .artifacts-file-list,
+  .agent-clarify-card,
+  .agent-clarify-card.agent-clarify-dismiss,
   .msg-thinking-outer > .msg-thinking,
+  .msg-thinking-outer[open] > .msg-thinking,
   .msg-thinking-round,
+  .msg-thinking-round-details[open] > .msg-thinking-round,
+  .msg-thinking-outer-summary,
   .msg-thinking-outer-summary::before,
-  .msg-thinking-round-summary::before,
-  .changes-file-list {
+  .msg-thinking-round-summary::before {
     transition: none !important;
   }
   .msg-thinking-outer > .msg-thinking,
@@ -2037,7 +2060,7 @@ body.composer-resizing {
   display: inline-flex;
   flex: none;
   color: var(--text-mute);
-  transition: transform 0.15s ease;
+  transition: transform var(--motion-fast) var(--motion-ease-standard);
 }
 .msg-trigger.is-open .msg-trigger-chevron {
   transform: rotate(180deg);
@@ -2064,7 +2087,7 @@ body.composer-resizing {
   pointer-events: none;
   position: relative;
   z-index: 1;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--motion-fast) var(--motion-ease-standard);
 }
 .msg-turn:hover .msg-turn-footer,
 .msg-turn:focus-within .msg-turn-footer,
@@ -2146,7 +2169,8 @@ body.composer-resizing {
   color: var(--text-mute);
   padding: 4px 2px;
   user-select: none;
-  transition: color 0.22s ease, margin-bottom var(--motion-collapse-duration) var(--motion-collapse-ease);
+  transition: color var(--motion-base) var(--motion-ease-standard),
+    margin-bottom var(--motion-slow) var(--motion-ease-standard);
 }
 .msg-thinking-outer-summary::-webkit-details-marker {
   display: none;
@@ -2157,8 +2181,8 @@ body.composer-resizing {
   margin-right: 0.3em;
   opacity: 0.55;
   transform-origin: center;
-  transition: transform var(--motion-collapse-duration) var(--motion-collapse-ease),
-    opacity calc(var(--motion-collapse-duration) * 0.7) ease;
+  transition: transform var(--motion-base) var(--motion-ease-standard),
+    opacity var(--motion-base) var(--motion-ease-standard);
 }
 .msg-thinking-outer[open] > .msg-thinking-outer-summary::before {
   transform: rotate(90deg);
@@ -2173,19 +2197,28 @@ body.composer-resizing {
   pointer-events: none;
   opacity: 0.65;
 }
+/*
+ * 折叠（闭合 → 展开）由 grid-template-rows 承担：0fr ⇄ 1fr 是唯一可插值的
+ * 「高度随内容变」写法（子元素 min-height:0 + overflow:hidden 见下）。
+ * 展开用 enter 曲线、收起用 exit 曲线 —— CSS 取「变化后」那条 transition，
+ * 所以方向相关的曲线要分别写在 [open] 与基线两处。
+ */
 .msg-thinking-outer > .msg-thinking {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
   transform: translateY(-4px);
-  transition: grid-template-rows var(--motion-collapse-duration) var(--motion-collapse-ease),
-    opacity calc(var(--motion-collapse-duration) * 0.82) var(--motion-collapse-ease),
-    transform var(--motion-collapse-duration) var(--motion-collapse-ease);
+  transition: grid-template-rows var(--motion-slow) var(--motion-ease-exit),
+    opacity var(--motion-slow) var(--motion-ease-standard),
+    transform var(--motion-slow) var(--motion-ease-exit);
 }
 .msg-thinking-outer[open] > .msg-thinking {
   grid-template-rows: 1fr;
   opacity: 1;
   transform: translateY(0);
+  transition: grid-template-rows var(--motion-slow) var(--motion-ease-enter),
+    opacity var(--motion-slow) var(--motion-ease-standard),
+    transform var(--motion-slow) var(--motion-ease-enter);
 }
 .msg-thinking-outer > .msg-thinking > .msg-thinking-body {
   overflow: hidden;
@@ -2212,7 +2245,7 @@ body.composer-resizing {
   box-shadow: var(--shadow);
   transform: translateX(12px);
   opacity: 0;
-  transition: opacity 0.28s ease, transform 0.28s ease;
+  transition: opacity var(--motion-slow) var(--motion-ease-standard), transform var(--motion-slow) var(--motion-ease-standard);
 }
 .agent-toast.show {
   opacity: 1;
@@ -2261,7 +2294,7 @@ body.composer-resizing {
   padding: 0 2px;
 }
 .msg-thinking-round-details > .msg-thinking-round-summary {
-  transition: color 0.18s ease;
+  transition: color var(--motion-base) var(--motion-ease-standard);
 }
 .msg-thinking-round-details {
   border: none;
@@ -2295,14 +2328,51 @@ body.composer-resizing {
   line-height: 1.55;
   margin: 0 0 8px;
 }
+/*
+ * 无极阻尼流水（设置 → 主题 → 无极阻尼；开关只翻 :root 上的 data-thinking-flow）。
+ * 关闭时思考区保持「整块瞬现 + 行高硬跳」，打开后由两半共同构成连续下淌：
+ *   1) 流式新生的每一段（data-flow-enter 只打在 streaming 时新建的块上，
+ *      历史重绘不会重新入场）按 enter 曲线滑入淡入，见下；
+ *   2) 视口贴底改为阻尼跟随（renderer-chat-render.js:dampedChatFollowStep），
+ *      新一行的高度增长被逐帧吸收 —— 只做 1) 不做 2) 仍然是一行一行跳。
+ * 动画不设 fill：终态就是元素自身的自然样式，跑完不留合成层/常驻动画。
+ */
+:root[data-thinking-flow='damped'] .msg-thinking-step[data-flow-enter],
+:root[data-thinking-flow='damped'] .msg-thinking-narration[data-flow-enter] {
+  animation: thinking-damped-in var(--motion-slow) var(--motion-ease-enter);
+}
+@keyframes thinking-damped-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 内容自己在连续流入，标题行的脉冲点就不必再闪：闪烁又是一撮离散节奏 */
+:root[data-thinking-flow='damped']
+  .msg-thinking-round-details.msg-thinking-subagent.is-running
+  > .msg-thinking-round-summary::after {
+  animation: none;
+  opacity: 0.5;
+}
+/* 放在上面几条之后：同特异度下靠后者胜，否则减少动效关不掉入流动画 */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-thinking-flow='damped'] .msg-thinking-step[data-flow-enter],
+  :root[data-thinking-flow='damped'] .msg-thinking-narration[data-flow-enter] {
+    animation: none;
+  }
+}
 .msg-thinking-round-summary::before {
   content: '▸';
   display: inline-block;
   margin-right: 0.3em;
   opacity: 0.55;
   transform-origin: center;
-  transition: transform var(--motion-collapse-duration) var(--motion-collapse-ease),
-    opacity calc(var(--motion-collapse-duration) * 0.7) ease;
+  transition: transform var(--motion-base) var(--motion-ease-standard),
+    opacity var(--motion-base) var(--motion-ease-standard);
 }
 .msg-thinking-round-details[open] > .msg-thinking-round-summary::before {
   transform: rotate(90deg);
@@ -2418,8 +2488,8 @@ body.composer-resizing {
  * 的增长过程），再多的轮次一律走卡片内滚动（并发 4 张卡片时尤其明显：
  * 谁都不会把别人顶下去）。运行中自动跟随最新一轮，见 fillIsolatedCardBody。
  * padding 已在行数预算里算进去了（border-box）。
- * 只挂在 [open] 上：一是要压过 .msg-thinking-round-details[open] > .msg-thinking-round
- * 的 max-height:none，二是不干扰折叠态由 max-height:0 驱动的收起动画。
+ * 只挂在 [open] 上：收起态本来就不渲染子节点，加上这一层是为了让「固定行数」
+ * 只描述展开后的卡片本体，不与其它 .msg-thinking-round 的排版规则混在一起。
  * 排除 .is-empty：还没收到第一轮时不要先占出 10 行空白。
  */
 .msg-thinking-round-details[open] > .msg-thinking-round.msg-thinking-subagent-body:not(.is-empty) {
@@ -2480,6 +2550,12 @@ body.composer-resizing {
     opacity: 0.6;
   }
 }
+/*
+ * 轮次正文的折叠动效由外层 <details> 的 grid-template-rows 承担（见 .msg-thinking-outer）。
+ * 这里留 max-height:0 + overflow:hidden 只是「收起态不占位」的兜底：max-height 在
+ * 0 ⇄ none 之间不可插值，挂 transition 也只会两个方向都瞬变（原先的 1s 就是这样空转），
+ * 所以过渡只挂在能动的 opacity/transform 上。
+ */
 .msg-thinking-round {
   padding: 0 0 6px 12px;
   margin: 0 0 2px;
@@ -2488,17 +2564,16 @@ body.composer-resizing {
   max-height: 0;
   opacity: 0;
   transform: translateY(-3px);
-  transition: max-height var(--motion-collapse-duration) var(--motion-collapse-ease),
-    opacity calc(var(--motion-collapse-duration) * 0.85) var(--motion-collapse-ease),
-    transform var(--motion-collapse-duration) var(--motion-collapse-ease),
-    padding var(--motion-collapse-duration) var(--motion-collapse-ease),
-    margin var(--motion-collapse-duration) var(--motion-collapse-ease);
+  transition: opacity var(--motion-slow) var(--motion-ease-exit),
+    transform var(--motion-slow) var(--motion-ease-exit);
 }
 .msg-thinking-round-details[open] > .msg-thinking-round {
   /* 展开后不再限制高度：原先 min(80vh, 3200px) 会把超过该高度的整轮推理裁掉（文字被截半、看似被遮挡） */
   max-height: none;
   opacity: 1;
   transform: translateY(0);
+  transition: opacity var(--motion-slow) var(--motion-ease-standard),
+    transform var(--motion-slow) var(--motion-ease-enter);
 }
 .msg-thinking-round-title {
   font-weight: 600;
@@ -2734,7 +2809,7 @@ body.composer-resizing {
   cursor: pointer;
   opacity: 0.78;
   box-shadow: none;
-  transition: opacity 0.12s ease, background 0.12s ease;
+  transition: opacity var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard);
 }
 .msg-mermaid-expand-btn:hover,
 .msg-mermaid-expand-btn:focus-visible {
@@ -3017,13 +3092,15 @@ body.composer-resizing {
 .composer-voice-bar {
   display: block;
   width: 4px;
-  height: 6px;
+  /* 固定占位高度，音量只改 scaleY：逐帧写 height 会与过渡互相打断，还每帧触发布局 */
+  height: 100%;
   border-radius: 0;
   background: var(--accent-dark, #bec2ca);
-  transition: height 0.08s linear;
+  transform: scaleY(0.15);
+  transform-origin: center bottom;
 }
 .composer-voice-bar.is-idle {
-  height: 8px;
+  transform: scaleY(0.25);
   opacity: 0.45;
 }
 .composer-voice-timer {
@@ -3404,7 +3481,7 @@ body.composer-resizing {
   cursor: pointer;
   color: var(--text-dim);
   background: transparent;
-  transition: color 0.15s, background 0.15s, opacity 0.15s;
+  transition: color var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard), opacity var(--motion-fast) var(--motion-ease-standard);
 }
 .composer-send-btn:hover {
   color: var(--text);
@@ -3498,14 +3575,29 @@ body.composer-resizing {
   width: 100%;
   margin-top: 8px;
 }
+/*
+ * 卡片刻意做成「行容器 + 内胆」：收起时只让 grid-template-rows 0fr 把内胆压掉，
+ * 内边距归内胆所有，跟着一起收 —— 否则 max-height: auto → 0 无法插值，
+ * 卡片会先瞬间消失、再让 margin/padding 空转一段（原实现就是这个问题）。
+ */
 .agent-clarify-card {
+  display: grid;
+  grid-template-rows: 1fr;
   margin: 10px 0;
-  padding: 10px 12px;
   border: 1px solid var(--accent);
   border-radius: 0;
   background: rgba(190, 194, 202, 0.08);
   font-size: 12px;
   color: var(--text);
+  transition: grid-template-rows var(--motion-slow) var(--motion-ease-enter),
+    margin var(--motion-slow) var(--motion-ease-enter),
+    opacity var(--motion-slow) var(--motion-ease-standard),
+    border-color var(--motion-slow) var(--motion-ease-standard);
+}
+.agent-clarify-body {
+  min-height: 0;
+  overflow: hidden;
+  padding: 10px 12px;
 }
 .agent-clarify-question {
   margin: 0 0 8px;
@@ -3621,21 +3713,17 @@ body.composer-resizing {
   opacity: 0.92;
   pointer-events: none;
 }
+/* 收起：行高归零 + 淡出 + 外框褪色（内胆一起压掉，不留下空档） */
 .agent-clarify-card.agent-clarify-dismiss {
+  grid-template-rows: 0fr;
   opacity: 0;
-  max-height: 0;
   margin-top: 0;
   margin-bottom: 0;
-  padding-top: 0;
-  padding-bottom: 0;
   border-color: transparent;
-  overflow: hidden;
-  transition:
-    opacity 0.35s ease,
-    max-height 0.35s ease,
-    margin 0.35s ease,
-    padding 0.35s ease,
-    border-color 0.35s ease;
+  transition: grid-template-rows var(--motion-slow) var(--motion-ease-exit),
+    margin var(--motion-slow) var(--motion-ease-exit),
+    opacity var(--motion-slow) var(--motion-ease-standard),
+    border-color var(--motion-slow) var(--motion-ease-standard);
 }
 
 .msg-thinking-tool-pending {
@@ -3777,7 +3865,7 @@ body.composer-resizing {
 }
 
 .composer-context-ring-fg {
-  transition: stroke-dashoffset 0.25s ease, stroke 0.25s ease;
+  transition: stroke-dashoffset var(--motion-base) var(--motion-ease-standard), stroke var(--motion-base) var(--motion-ease-standard);
 }
 
 .composer-context-wrap[data-level='mid'] .composer-context-ring-fg {
@@ -3870,7 +3958,7 @@ body.composer-resizing {
   font-weight: 500;
   border-radius: 0;
   cursor: pointer;
-  transition: color 0.12s ease;
+  transition: color var(--motion-fast) var(--motion-ease-standard);
 }
 
 .composer-foot .composer-agent-mode-trigger:hover,
@@ -3943,7 +4031,7 @@ body.composer-resizing {
   font-size: 12px;
   border-radius: 0;
   cursor: pointer;
-  transition: color 0.12s ease, background 0.12s ease;
+  transition: color var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard);
 }
 
 .composer-foot .composer-model-trigger:hover,
@@ -4492,7 +4580,7 @@ input.ssh-remote-dir-path {
   border-radius: 0;
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard), border-color var(--motion-fast) var(--motion-ease-standard);
 }
 
 .toggle-switch-track::after {
@@ -4505,7 +4593,7 @@ input.ssh-remote-dir-path {
   border-radius: 0;
   background: var(--text);
   box-shadow: none;
-  transition: transform 0.15s ease;
+  transition: transform var(--motion-fast) var(--motion-ease-standard);
 }
 
 .toggle-switch input:checked + .toggle-switch-track {
@@ -4532,7 +4620,7 @@ input.ssh-remote-dir-path {
   border-radius: 0;
   background: var(--bg-elev-2);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard), border-color var(--motion-fast) var(--motion-ease-standard);
 }
 
 .settings-page[data-settings='theme'] .check-row input[type='checkbox']::after,
@@ -4546,7 +4634,7 @@ input.ssh-remote-dir-path {
   height: 16px;
   border-radius: 0;
   background: var(--text);
-  transition: transform 0.15s ease, background 0.15s ease;
+  transition: transform var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard);
 }
 
 .settings-page[data-settings='theme'] .check-row input[type='checkbox']:checked,
@@ -4588,7 +4676,7 @@ input.ssh-remote-dir-path {
   font-size: 13px;
   text-align: left;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard);
 }
 
 .composer-model-item:hover {
@@ -4648,7 +4736,7 @@ input.ssh-remote-dir-path {
   cursor: pointer;
   border-radius: 0;
   flex-shrink: 0;
-  transition: color 0.12s ease, background 0.12s ease;
+  transition: color var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard);
 }
 .icon-btn:hover {
   color: var(--accent);
@@ -4710,7 +4798,7 @@ input.ssh-remote-dir-path {
   border: 1px solid var(--border);
   background: transparent;
   overflow: hidden;
-  transition: border-color 0.12s ease;
+  transition: border-color var(--motion-fast) var(--motion-ease-standard);
 }
 .skill-tile.enabled {
   border-color: rgba(190, 194, 202, 0.45);
@@ -5771,7 +5859,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard), color var(--motion-fast) var(--motion-ease-standard);
 }
 
 .worktrees-stepper-btn:hover {
@@ -6024,7 +6112,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   font-family: inherit;
   font-size: 13px;
   outline: none;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard);
 }
 /*
  * 原生日期/时间控件默认由系统绘制：不声明 color-scheme 时 Chromium 按「浅色控件」渲染，
@@ -6104,7 +6192,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   border-radius: 50%;
   background: var(--accent-dark);
   box-shadow: 0 0 0 0 rgba(128, 128, 128, 0);
-  transition: transform 120ms ease, box-shadow 160ms ease;
+  transition: transform var(--motion-fast) var(--motion-ease-standard), box-shadow var(--motion-base) var(--motion-ease-standard);
   cursor: grab;
 }
 .encoding-params-fields .field input[type='range']:hover::-webkit-slider-thumb {
@@ -6131,7 +6219,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   font-size: 12px;
   color: var(--ok);
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity var(--motion-base) var(--motion-ease-standard);
 }
 .save-hint.show {
   opacity: 1;
@@ -6187,12 +6275,12 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 
 #settings-overlay:not([hidden]),
 #help-overlay:not([hidden]) {
-  animation: settings-overlay-enter 160ms ease-out both;
+  animation: settings-overlay-enter var(--motion-fast) var(--motion-ease-enter) both;
 }
 
 #settings-overlay:not([hidden]) .settings-dialog,
 #help-overlay:not([hidden]) .settings-dialog {
-  animation: side-panel-enter 180ms ease-out both;
+  animation: side-panel-enter var(--motion-base) var(--motion-ease-enter) both;
 }
 
 @keyframes settings-overlay-enter {
@@ -6355,7 +6443,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   text-align: left;
   padding: 10px 12px;
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background var(--motion-fast) var(--motion-ease-standard), color var(--motion-fast) var(--motion-ease-standard);
 }
 
 .settings-nav-item:hover {
@@ -6739,8 +6827,8 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   cursor: pointer;
   font-family: inherit;
   transition:
-    background 0.15s ease,
-    color 0.15s ease;
+    background var(--motion-fast) var(--motion-ease-standard),
+    color var(--motion-fast) var(--motion-ease-standard);
 }
 
 .model-modality-tag:last-child {
@@ -6840,7 +6928,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   border: 1px solid var(--border);
   background: var(--bg-elev);
   box-shadow: -12px 0 32px rgba(0, 0, 0, 0.28);
-  animation: side-panel-enter 180ms ease-out both;
+  animation: side-panel-enter var(--motion-base) var(--motion-ease-enter) both;
 }
 
 .defined-model-editor-head {
@@ -7384,7 +7472,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   text-align: left;
   cursor: pointer;
   outline: none;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard);
 }
 .select-menu-trigger::after {
   content: '';
@@ -7546,9 +7634,9 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   position: relative;
   z-index: 2;
   touch-action: none;
-  transition: flex-basis var(--motion-panel-duration) var(--motion-panel-ease),
-    max-width var(--motion-panel-duration) var(--motion-panel-ease),
-    opacity calc(var(--motion-panel-duration) * 0.7) ease;
+  transition: flex-basis var(--motion-slow) var(--motion-ease-exit),
+    max-width var(--motion-slow) var(--motion-ease-exit),
+    opacity var(--motion-slow) var(--motion-ease-standard);
 }
 .pane-resizer-v.is-panel-closing {
   flex: 0 0 0;
@@ -7580,6 +7668,17 @@ body.pane-resizing {
   user-select: none;
 }
 
+/*
+ * 拖拽分隔条时关掉过渡：指针每次移动都会改 --artifacts-panel-width/--artifacts-list-width，
+ * 留着 280ms 缓动等于每条过渡都被下一次移动重启 —— 分隔条永远慢半拍、像橡皮筋。
+ * 过渡只属于「开/关」状态切换，宽度跟手必须即时。
+ */
+body.pane-resizing .artifacts-panel,
+body.pane-resizing .pane-resizer-v,
+body.pane-resizing .artifacts-file-list {
+  transition: none;
+}
+
 .artifacts-panel {
   flex: 0 0 var(--artifacts-panel-width, 45%);
   min-width: 0;
@@ -7592,15 +7691,21 @@ body.pane-resizing {
   transform: translateX(32px);
   opacity: 0;
   overflow: hidden;
-  will-change: transform, opacity, flex-basis;
-  transition: transform var(--motion-panel-duration) var(--motion-panel-ease),
-    opacity calc(var(--motion-panel-duration) * 0.92) var(--motion-panel-ease),
-    flex-basis var(--motion-panel-duration) var(--motion-panel-ease),
-    max-width var(--motion-panel-duration) var(--motion-panel-ease);
+  /* flex-basis 不可合成，别写进 will-change（只会白占一层图层内存） */
+  will-change: transform, opacity;
+  transition: transform var(--motion-slow) var(--motion-ease-exit),
+    opacity var(--motion-slow) var(--motion-ease-standard),
+    flex-basis var(--motion-slow) var(--motion-ease-exit),
+    max-width var(--motion-slow) var(--motion-ease-exit);
 }
+/* 展开方向用 enter 曲线；收起方向取 .is-panel-closing 上的 exit 曲线 */
 .artifacts-panel.is-panel-open {
   transform: translateX(0);
   opacity: 1;
+  transition: transform var(--motion-slow) var(--motion-ease-enter),
+    opacity var(--motion-slow) var(--motion-ease-standard),
+    flex-basis var(--motion-slow) var(--motion-ease-enter),
+    max-width var(--motion-slow) var(--motion-ease-enter);
 }
 .artifacts-panel.is-panel-closing {
   flex: 0 0 0 !important;
@@ -7845,7 +7950,7 @@ body.pane-resizing {
   bottom: 0;
   width: 0%;
   background: rgba(128, 128, 128, 0.22);
-  transition: width 0.25s ease;
+  transition: width var(--motion-base) var(--motion-ease-standard);
   pointer-events: none;
 }
 
@@ -8354,7 +8459,7 @@ body.pane-resizing {
   gap: 2px;
   flex-shrink: 0;
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: opacity var(--motion-fast) var(--motion-ease-standard);
 }
 
 .scm-file-item:hover .scm-file-actions,
@@ -8586,12 +8691,12 @@ body.pane-resizing {
   padding: 12px;
 }
 
+/* gap 一直是 0（没有任何规则改它），所以这里没有可过渡的东西 */
 .changes-panel-body {
   flex: 1;
   display: flex;
   min-height: 0;
   min-width: 0;
-  transition: gap var(--motion-collapse-duration) var(--motion-collapse-ease);
 }
 
 /* display 会覆盖 UA 的 [hidden]，需显式隐藏（否则非 Plan 待审时留一条空工具条） */
@@ -9201,9 +9306,9 @@ body.pane-resizing {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 4px 0;
-  transition: flex-basis var(--motion-collapse-duration) var(--motion-collapse-ease),
-    width var(--motion-collapse-duration) var(--motion-collapse-ease),
-    max-width var(--motion-collapse-duration) var(--motion-collapse-ease);
+  transition: flex-basis var(--motion-slow) var(--motion-ease-enter),
+    width var(--motion-slow) var(--motion-ease-enter),
+    max-width var(--motion-slow) var(--motion-ease-enter);
 }
 
 /* 文件面板右栏：标签条 + 内容区（内容区仍是 #artifacts-file-view，保持既有预览语义） */
@@ -9570,6 +9675,7 @@ body.pane-resizing {
   -webkit-text-fill-color: var(--text, inherit) !important;
   caret-color: var(--text, inherit);
   border-color: var(--border, rgba(127, 127, 127, 0.35)) !important;
+  /* 不是动效：Chromium 自动填充底色只能靠「超长过渡时间」压住，别换成 motion token */
   transition: background-color 99999s ease-out 0s;
   box-shadow: 0 0 0 1000px var(--bg-elev, #121212) inset !important;
 }
@@ -9815,7 +9921,7 @@ body.pane-resizing {
   color: var(--accent-2, #93c5fd);
 }
 .artifacts-file-diff.is-live-count-pulse {
-  animation: changes-live-count-pulse 0.35s ease;
+  animation: changes-live-count-pulse var(--motion-slow) var(--motion-ease-standard);
 }
 @keyframes changes-live-count-pulse {
   0% { opacity: 0.55; transform: scale(0.96); }
@@ -10248,7 +10354,7 @@ body.pane-resizing {
   margin-right: 0.1em;
   opacity: 0.55;
   transform-origin: center;
-  transition: transform var(--motion-collapse-duration) var(--motion-collapse-ease);
+  transition: transform var(--motion-base) var(--motion-ease-standard);
 }
 .subagent-panel-card[open] > .subagent-panel-card-head::before {
   transform: rotate(90deg);

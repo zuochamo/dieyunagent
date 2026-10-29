@@ -1,5 +1,24 @@
 /* Shared numeric limits loaded before chat/agent modules */
+/* global window, document */
 'use strict';
+
+/**
+ * 动效时长的唯一来源是 styles.css 里 :root 的 --motion-* token。
+ * 需要「等过渡结束」的 JS 一律读这里，不要再写 560 / 1100 这类复制品：
+ * 复制品与 CSS 一旦不同步，就会「动画早结束了 JS 还在跑」或「JS 先收手留半截动画」。
+ * @param {string} name 形如 '--motion-slow'
+ * @returns {number} 毫秒（token 缺失时退回 --motion-slow 的 280ms）
+ */
+function motionMs(name) {
+  try {
+    const raw = String(window.getComputedStyle(document.documentElement).getPropertyValue(name)).trim();
+    const n = parseFloat(raw);
+    if (!Number.isFinite(n) || n <= 0) return 280;
+    return /ms$/.test(raw) ? n : n * 1000;
+  } catch {
+    return 280;
+  }
+}
 
 const TRACE_DESKTOP_THOUGHT_CHARS = 2000;
 /** 新轮次 / 工具状态变化 */

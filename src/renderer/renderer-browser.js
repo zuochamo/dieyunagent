@@ -1,4 +1,4 @@
-/* global window, document, gatewayCall, showAgentToast, openSidePanel, isSidePanelOpen, closeBrowserPanelSilently, clampNumber, loadPaneSizeVar, savePaneSizeVar, bindPaneDrag, isSending, syncBrowserBounds, currentSessionId, sessionActiveRuns */
+/* global window, document, gatewayCall, showAgentToast, openSidePanel, isSidePanelOpen, closeBrowserPanelSilently, clampNumber, loadPaneSizeVar, savePaneSizeVar, bindPaneDrag, isSending, syncBrowserBounds, syncPanelMotionBounds, motionMs, currentSessionId, sessionActiveRuns */
 'use strict';
 
 const browserApi = window.diecloud || {};
@@ -177,10 +177,8 @@ function openBrowserPanel(opts) {
   const wasHidden = !!(panelEl && panelEl.hidden);
   openSidePanel({ tab: 'browser' });
   clampBrowserPanelWidthToChatMin();
-  requestAnimationFrame(function () {
-    syncBrowserBounds();
-    setTimeout(syncBrowserBounds, 80);
-  });
+  // 面板宽度过渡期间由 syncPanelMotionBounds 逐帧跟随（openSidePanel 已启动），
+  // 这里不再补 setTimeout 延时同步。
   // 只在面板真正打开时补一次标签列表：导航类调用都会走这里，不做门控等于每次翻页多一次 RPC
   if (wasHidden) refreshBrowserTabs();
 }
@@ -280,10 +278,8 @@ function renderBrowserTabs(tabs, activeTabId) {
   });
 
   // 标签条出现/消失会改变 BrowserView 的可用高度，边界必须重算
-  requestAnimationFrame(function () {
-    syncBrowserBounds();
-    setTimeout(syncBrowserBounds, 80);
-  });
+  // （交给过渡期同步链，时长与 --motion-slow 同源）
+  syncPanelMotionBounds();
 }
 
 function refreshBrowserTabs() {
@@ -347,20 +343,14 @@ function browserTabStripClick(event) {
 }
 
 /** Agent 浏览器工具调用前：打开侧栏并等待 BrowserView 布局就绪 */
-function ensureBrowserPanelReady() {
+async function ensureBrowserPanelReady() {
   openBrowserPanel();
-  return new Promise(function (resolve) {
-    requestAnimationFrame(function () {
-      syncBrowserBounds();
-      setTimeout(function () {
-        syncBrowserBounds();
-        setTimeout(function () {
-          syncBrowserBounds();
-          resolve();
-        }, 280);
-      }, 120);
-    });
+  // 面板宽度过渡期间原生视图边界逐帧跟随（见 syncPanelMotionBounds），
+  // 这里只需等过渡走完再确认一次，不再用 120/280 的魔法延时拼三次探测
+  await new Promise(function (resolve) {
+    setTimeout(resolve, motionMs('--motion-slow') + 120);
   });
+  syncBrowserBounds();
 }
 
 function initBrowserPanel() {

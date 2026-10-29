@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat */
 'use strict';
 
 
@@ -24,8 +24,9 @@ function requestChatBottomFollow(holdMs = 0) {
   if (chatBottomFollowRaf) return;
   const tick = () => {
     chatBottomFollowRaf = null;
-    pinStreamingChatToBottom();
-    if (Date.now() < chatBottomFollowHoldUntil) {
+    // 阻尼跟随时「还没到位」要继续续帧，否则视口会在半路停住
+    const settling = pinStreamingChatToBottom();
+    if (settling || Date.now() < chatBottomFollowHoldUntil) {
       chatBottomFollowRaf = requestAnimationFrame(tick);
     }
   };
@@ -43,7 +44,9 @@ function scheduleStreamingChatFollow() {
 }
 
 function isThinkingLayoutSizeProperty(name) {
-  return name === 'grid-template-rows' || name === 'max-height';
+  // 折叠只由 grid-template-rows 驱动（见 styles.css .msg-thinking-outer），
+  // 不再有 max-height 过渡。
+  return name === 'grid-template-rows';
 }
 
 function isThinkingLayoutTransitionTarget(target) {
@@ -55,9 +58,51 @@ function isThinkingLayoutTransitionTarget(target) {
   );
 }
 
+/**
+ * 无极阻尼（设置 → 主题 → 无极阻尼）：贴底不再一帧钉死，而是每帧朝目标阻尼逼近 ——
+ * 新一行的高度增长被视口连续吸收（瀑布式下淌），不再「整行跳一下」。
+ * 时间常数按帧间隔算（120Hz / 60Hz 手感一致），追到 1px 内落回精确贴底。
+ * 返回 true 表示这一帧还没到位，调度器据此继续续帧。
+ */
+var CHAT_DAMP_TAU_MS = 90;
+var chatDampLastTs = 0;
+
+function dampedChatFollowStep() {
+  const el = chatList || document.getElementById('chat-list');
+  if (!el) return false;
+  const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+  const delta = maxScroll - el.scrollTop;
+  const now = Date.now();
+  const dt = chatDampLastTs ? Math.min(64, Math.max(8, now - chatDampLastTs)) : 16;
+  chatDampLastTs = now;
+  // 1px 内直接落位：亚像素取整会让「每帧推进 0.1px」变成永远追不到
+  if (maxScroll <= 0 || Math.abs(delta) <= 1) {
+    el.scrollTop = maxScroll;
+    chatDampLastTs = 0;
+    updateLastTurnFloat();
+    return false;
+  }
+  const before = el.scrollTop;
+  el.scrollTop = before + delta * (1 - Math.exp(-dt / CHAT_DAMP_TAU_MS));
+  if (el.scrollTop === before) {
+    // 写不进去（被夹住或取整成 0）：落位收摊，绝不留一条空转的帧链
+    el.scrollTop = maxScroll;
+    chatDampLastTs = 0;
+    updateLastTurnFloat();
+    return false;
+  }
+  updateLastTurnFloat();
+  return true;
+}
+
+/** @returns {boolean} 是否还需要继续续帧（只有阻尼跟随时可能为 true） */
 function pinStreamingChatToBottom() {
-  if (typeof getChatAutoFollow === 'function' && !getChatAutoFollow()) return;
+  if (typeof getChatAutoFollow === 'function' && !getChatAutoFollow()) return false;
+  if (typeof isThinkingDampedFlow === 'function' && isThinkingDampedFlow()) {
+    return dampedChatFollowStep();
+  }
   pinChatToBottom();
+  return false;
 }
 
 /**
@@ -65,7 +110,8 @@ function pinStreamingChatToBottom() {
  * 由唯一调度器续期，不再自建第二条 rAF 链（两条链会在同一帧各写一次 scrollTop）。
  */
 function startThinkingTransitionPin() {
-  requestChatBottomFollow(THINKING_COLLAPSE_FOLLOW_MS);
+  // 逐帧跟随的时长与 CSS 折叠时长同源（--motion-slow），再留一帧余量收尾
+  requestChatBottomFollow(motionMs('--motion-slow') + 40);
 }
 
 /** 流式中改 <details open> 会把 summary 滚进视口；跟底时改完立刻钉回底部 */
