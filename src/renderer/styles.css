@@ -39,6 +39,14 @@
   --font-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
 }
 
+/* ---------- 内容弹窗尺寸（单一来源）----------
+   技能 / 插件 / MCP / 定时任务这类「内容弹窗」只有一个默认尺寸（沿用 MCP 配置弹窗），
+   想统一放大或缩小全部弹窗，只改下面两个值。 */
+:root {
+  --dialog-lg-w: min(960px, calc(100vw - 48px));
+  --dialog-lg-max-h: min(90vh, 860px);
+}
+
 :root[data-theme='light'] {
   --bg: #f0f2f7;
   --chat-pane-bg: rgba(255, 255, 255, 0.96);
@@ -548,7 +556,6 @@ body {
 }
 .skills-page[data-skills-tab='list'].active,
 .skills-page[data-skills-tab='mcp'].active,
-.skills-page[data-skills-tab='plugins'].active,
 .skills-page[data-skills-tab='automation'].active {
   display: flex;
   flex-direction: column;
@@ -560,7 +567,6 @@ body {
 
 .skills-page[data-skills-tab='list'] .skill-settings-view,
 .skills-page[data-skills-tab='mcp'] .mcp-settings-view,
-.skills-page[data-skills-tab='plugins'] .plugin-settings-view,
 .skills-page[data-skills-tab='automation'] .automation-settings-view {
   display: none;
   flex-direction: column;
@@ -571,7 +577,6 @@ body {
 
 .skills-page[data-skills-tab='list'] .skill-settings-view.active,
 .skills-page[data-skills-tab='mcp'] .mcp-settings-view.active,
-.skills-page[data-skills-tab='plugins'] .plugin-settings-view.active,
 .skills-page[data-skills-tab='automation'] .automation-settings-view.active {
   flex: 1;
   min-height: 0;
@@ -580,7 +585,6 @@ body {
 
 .skills-page[data-skills-tab='list'] .skill-settings-view.active .skills-grid-wrap,
 .skills-page[data-skills-tab='mcp'] .mcp-settings-view.active .skills-grid-wrap,
-.skills-page[data-skills-tab='plugins'] .plugin-settings-view.active .skills-grid-wrap,
 .skills-page[data-skills-tab='automation'] .automation-settings-view.active .skills-grid-wrap {
   flex: 1;
   min-height: 0;
@@ -1049,6 +1053,54 @@ body {
   align-items: center;
   gap: 4px;
 }
+/* 顶部「+」：一个按键两种结局（新对话 / 继续上次交接），有交接才弹菜单 */
+.history-new-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.history-new-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  min-width: 188px;
+  max-width: 260px;
+  padding: 4px 0;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+}
+.history-new-menu[hidden] {
+  display: none;
+}
+.history-new-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.history-new-menu-item:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
+}
+.history-new-menu-item[hidden] {
+  display: none;
+}
+.history-new-menu-item-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .icon-btn-sm {
   width: auto;
   height: 24px;
@@ -1190,7 +1242,6 @@ body {
   display: none;
 }
 .history-row {
-  position: relative;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -1236,27 +1287,23 @@ body {
   color: var(--text-mute);
   font-variant-numeric: tabular-nums;
 }
-.history-row:hover .history-item-meta {
-  visibility: hidden;
-}
+/* 操作按钮占位而非浮在标题上：hover 时把「时间」让出去，标题随之提前截断，
+   避免半透明按钮压住标题尾巴导致看不清。 */
 .history-actions {
-  position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
+  display: none;
+  align-items: center;
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.12s ease;
+  padding-right: 4px;
 }
-.history-row:hover .history-actions {
-  opacity: 1;
-}
+.history-row:hover .history-actions,
+.history-row:focus-within .history-actions,
 .history-row.thinking .history-actions {
-  opacity: 1;
+  display: flex;
 }
+.history-row:hover .history-item-meta,
+.history-row:focus-within .history-item-meta,
 .history-row.thinking .history-item-meta {
-  visibility: hidden;
+  display: none;
 }
 .history-act {
   width: 22px;
@@ -1265,7 +1312,7 @@ body {
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: var(--text-mute);
+  color: var(--text-dim);
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
@@ -1373,6 +1420,98 @@ body {
 }
 .chat-scroll-bottom[hidden] {
   display: none !important;
+}
+
+/*
+ * 消息导航：聊天区右缘的刻度带（对齐 DSH 的消息导航设计）。
+ * 每条消息一根 8×2 刻度，当前视口顶部那条变白加宽；悬停出摘要，点击跳转。
+ * 位置由 renderer-chat-nav 写入 top；空轨道用 visibility 隐藏，
+ * 保持可量高（隐藏后仍要继续算容量），不用 display:none / [hidden]。
+ *
+ * 横向必须留在 .chat-viewport（= 聊天列）内部：右侧开面板时聊天列会变窄，
+ * 一旦按 .agent-main 的留白去定位，刻度就会脱列、跑到面板上方。
+ * 所以改成「滚动条槽右侧的那条预留带」：.chat 的 padding-right 让出这条带，
+ * 刻度落在滚动条（0..8px）与正文之间，既不压字也不挡滚动条。
+ */
+.chat-nav {
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  right: calc(var(--scrollbar-size) + 2px);
+  width: 22px;
+  z-index: 4;
+  pointer-events: none;
+}
+.chat-nav.is-empty {
+  visibility: hidden;
+}
+.chat-nav-tick {
+  position: absolute;
+  right: 0;
+  width: 8px;
+  height: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 1px;
+  /* 深浅主题同权：暗色 = 20% 白，浅色 = 20% 近黑（跟 --text 走，不写死灰） */
+  background: color-mix(in srgb, var(--text) 20%, transparent);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: width 0.12s ease, background 0.12s ease;
+}
+/* 刻度只有 2px 高：命中区上下各外扩 --chat-nav-hit（= 间距的一半，由 JS 按实际间距写入，
+   密集时不重叠，否则相邻刻度的热区互相压住，点哪根都可能跳到隔壁那条）；
+   横向只往左扩 8px（右边是滚动条槽，不能抢它的点击） */
+.chat-nav-tick::after {
+  content: '';
+  position: absolute;
+  inset: calc(-1 * var(--chat-nav-hit, 4px)) 0 calc(-1 * var(--chat-nav-hit, 4px)) -8px;
+}
+.chat-nav-tick:hover {
+  width: 11px;
+  background: color-mix(in srgb, var(--text) 60%, transparent);
+}
+/* 当前视口顶部那条：变白加宽（14px = 留白里最宽的整条，再宽就越界压到滚动条槽） */
+.chat-nav-tick.is-active {
+  width: 14px;
+  background: var(--text);
+}
+.chat-nav-tick:focus-visible {
+  outline: 1px solid var(--text-dim);
+  outline-offset: 2px;
+}
+.chat-nav-tip {
+  position: absolute;
+  right: calc(100% + 6px);
+  /* 轨道本身只有 22px 宽：不定宽会被压成竖排单字，先取 max-content 再用 max-width 夹住 */
+  width: max-content;
+  max-width: min(280px, 42vw);
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+  transform: translateY(-50%);
+  z-index: 7;
+}
+.chat-nav-tip[hidden] {
+  display: none !important;
+}
+.chat-nav-tip-meta {
+  color: var(--text-mute);
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+.chat-nav-tip-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  word-break: break-word;
 }
 
 /* 启动进度 = 输入框顶边（深/浅主题共用）；可拖动改输入框高度 */
@@ -1618,22 +1757,6 @@ body.composer-resizing {
   background: rgba(255, 255, 255, 0.16);
 }
 
-/* 分段条里的动作项（如 dieyun.md 的「编辑」）：同框同高，但不可选中，
-   所以不做 active 态、悬停直接提亮到正文色，与三档模式项区分开。 */
-.settings-segmented-tab-action,
-[data-theme='light'] .settings-segmented-tab-action,
-:root:not([data-theme='light']) .settings-segmented-tab-action {
-  flex: 0 0 auto;
-  padding: 8px 18px;
-  color: var(--text-dim);
-}
-
-.settings-segmented-tab-action:hover,
-[data-theme='light'] .settings-segmented-tab-action:hover,
-:root:not([data-theme='light']) .settings-segmented-tab-action:hover {
-  color: var(--text);
-}
-
 .theme-trace-options {
   display: grid;
   gap: 10px;
@@ -1641,16 +1764,14 @@ body.composer-resizing {
   margin-top: 4px;
 }
 
-.theme-auto-launch-options,
-.theme-long-horizon-options {
+.theme-auto-launch-options {
   display: grid;
   gap: 6px;
   max-width: 420px;
   margin-top: 8px;
 }
 
-.settings-page[data-settings='perms'] .theme-auto-launch-options,
-.settings-page[data-settings='perms'] .theme-long-horizon-options {
+.settings-page[data-settings='perms'] .theme-auto-launch-options {
   margin-top: 4px;
 }
 
@@ -1713,7 +1834,8 @@ body.composer-resizing {
   overscroll-behavior: contain;
   background: var(--chat-pane-bg);
   border: none;
-  padding: 14px 0 8px;
+  /* 右侧 20px 是消息导航刻度带的预留带（刻度落在滚动条与正文之间，见 .chat-nav） */
+  padding: 14px 20px 8px 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -1860,6 +1982,76 @@ body.composer-resizing {
   max-width: min(360px, 54vw);
   padding: 3px 7px;
   background: rgba(190, 194, 202, 0.12);
+}
+/* 回合触发归因条：定时计划 / 目标续跑这类「系统自己开的一轮」。
+   不再渲染成用户气泡 —— 否则回放、手机端与交接时无法分辨这条是不是用户打的。 */
+.msg-turn-trigger {
+  align-self: stretch;
+  align-items: stretch;
+  max-width: none;
+}
+.msg-trigger {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.18));
+  background: var(--bg-elev);
+  color: var(--text-dim);
+}
+.msg-trigger-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.msg-trigger-header:hover {
+  color: var(--text);
+}
+.msg-trigger-icon {
+  display: inline-flex;
+  flex: none;
+  opacity: 0.85;
+}
+.msg-trigger-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-trigger-time {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-mute);
+}
+.msg-trigger-chevron {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-mute);
+  transition: transform 0.15s ease;
+}
+.msg-trigger.is-open .msg-trigger-chevron {
+  transform: rotate(180deg);
+}
+.msg-trigger-body {
+  max-height: 240px;
+  overflow: auto;
+  padding: 0 12px 10px 34px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 .msg-turn-footer {
   display: flex;
@@ -4608,8 +4800,7 @@ input.ssh-remote-dir-path {
   font-size: 12px;
   cursor: pointer;
 }
-.skills-main-body .skill-tile-foot input[type='checkbox'],
-.skills-page[data-skills-tab='plugins'] .skill-tile-foot input[type='checkbox'] {
+.skills-main-body .skill-tile-foot input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;
   flex: 0 0 16px;
@@ -4633,8 +4824,7 @@ input.ssh-remote-dir-path {
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
-:root[data-theme='light'] .skills-main-body .skill-tile-foot input[type='checkbox']:checked::after,
-:root[data-theme='light'] .skills-page[data-skills-tab='plugins'] .skill-tile-foot input[type='checkbox']:checked::after {
+:root[data-theme='light'] .skills-main-body .skill-tile-foot input[type='checkbox']:checked::after {
   border-color: #111827;
 }
 .skill-tile-delete {
@@ -4669,19 +4859,17 @@ body.modal-config-open #help-overlay:not([hidden]) {
   visibility: hidden;
   pointer-events: none;
 }
+/* 弹窗默认尺寸（单一来源）：技能详情 / 添加技能 / 市场技能 / 插件详情 / MCP 配置 / 定时任务编辑
+   共用同一套尺寸，都按 MCP 配置弹窗的大小来；要统一放大或缩小只改这里。 */
 .skill-detail-dialog {
   display: flex;
   flex-direction: column;
-  width: min(720px, calc(100vw - 48px));
-  max-height: min(85vh, 720px);
+  width: var(--dialog-lg-w);
+  max-height: var(--dialog-lg-max-h);
   background: var(--bg-elev);
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
   overflow: hidden;
-}
-.mcp-config-dialog {
-  width: min(960px, calc(100vw - 48px));
-  max-height: min(90vh, 860px);
 }
 .skill-detail-head {
   display: flex;
@@ -4848,7 +5036,6 @@ body.modal-config-open #help-overlay:not([hidden]) {
 
 .skills-main-body:has(.skills-page[data-skills-tab='list'].active),
 .skills-main-body:has(.skills-page[data-skills-tab='mcp'].active),
-.skills-main-body:has(.skills-page[data-skills-tab='plugins'].active),
 .skills-main-body:has(.skills-page[data-skills-tab='automation'].active) {
   overflow: hidden;
 }
@@ -5084,22 +5271,6 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   word-break: break-all;
 }
 
-.dieyun-md-inject-field {
-  max-width: 420px;
-}
-
-.dieyun-md-inject-field .settings-segmented-tabs {
-  margin-top: 0;
-}
-
-.dieyun-md-path-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 4px;
-}
-
 .agents-md-mode-field {
   display: flex;
   flex-direction: column;
@@ -5111,10 +5282,211 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   margin-top: 0;
 }
 
-.agents-md-settings-actions {
-  align-items: center;
+/* ---- 知识页（data-settings="agent-knowledge"）：两张文件卡 + 一条归纳调度区 ----
+ * 结构见 index.html；这里只提供「卡片 → 控件 → 一句话说明」的层级，
+ * 意在替代原先「三段并列 + 每段一长段实现细节」的平铺表单。 */
+.knowledge-group {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  margin-top: 8px;
+  max-width: 760px;
+}
+
+.knowledge-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.knowledge-group-head .settings-subsection-title,
+.knowledge-group > .settings-subsection-title {
+  margin: 0;
+}
+
+.knowledge-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 0 14px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+}
+
+.knowledge-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.knowledge-card-name {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.knowledge-card-tag {
+  font-size: 12px;
+  color: var(--text-mute);
+}
+
+/* 路径紧跟文件名；「编辑 / 查看待采纳变更」靠右锚定 */
+.knowledge-card-path {
+  padding-left: 2px;
+}
+
+.knowledge-card-action {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+/* 分段控件在本页走「无底色」：只有外框与分隔线，选中靠字重 —— 整页不再是一排灰块 */
+.settings-page[data-settings='agent-knowledge'] .settings-segmented-tab {
+  background: transparent;
+  color: var(--text-mute);
+}
+
+.settings-page[data-settings='agent-knowledge'] .settings-segmented-tab:hover {
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--text-dim);
+}
+
+/* 分段控件里「选中的那个」要一眼看出来：只在本页加强，不动全局 ——
+ * 选中态用下划线而不是灰底，整页因此没有一块填充色。 */
+.settings-page[data-settings='agent-knowledge'] .settings-segmented-tab.active {
+  background: transparent;
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--text-dim);
+}
+
+/* 没有卡片底之后，靠一条发丝线 + 字号分级区分两份文件与下方调度区 */
+.knowledge-card:first-child {
+  padding-top: 0;
+}
+
+.knowledge-group + .knowledge-group {
+  margin-top: 6px;
+}
+
+.knowledge-card-check {
+  margin: 0;
+}
+
+/* 一句话说明：只讲当前选中项的效果，替代原来的整段介绍 */
+.knowledge-mode-hint {
+  margin: 0;
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* 说明与「已保存」同一行，避免保存提示出现时把上方的路径文字挤动 */
+.knowledge-card-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.knowledge-card-foot .knowledge-mode-hint {
+  flex: 1 1 auto;
+}
+
+.knowledge-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* 卡片 / 网格内部不再需要字段级的独立宽度限制 */
+.knowledge-card .knowledge-field,
+.knowledge-controls .knowledge-field {
+  max-width: none;
+}
+
+.knowledge-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 20px;
+}
+
+.knowledge-scopes .check-row {
+  margin: 2px 0;
+}
+
+/* 本页的勾选改成 14px 小方块：一排 40px 的开关滑轨在这里只是四块灰，
+ * 而「整理范围」本来就是多选清单，不是一排独立开关。 */
+.settings-page[data-settings='agent-knowledge'] .check-row input[type='checkbox'] {
+  position: static;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--text-mute);
+  background: transparent;
+}
+
+.settings-page[data-settings='agent-knowledge'] .check-row input[type='checkbox']::after {
+  display: none;
+}
+
+.settings-page[data-settings='agent-knowledge'] .check-row input[type='checkbox']:checked {
+  border-color: var(--text-dim);
+  background: var(--text-dim);
+}
+
+.settings-page[data-settings='agent-knowledge'] .check-row input[type='checkbox']:disabled {
+  border-color: var(--border);
+  background: transparent;
+}
+
+.settings-page[data-settings='agent-knowledge'] .check-row input[type='checkbox']:disabled:checked {
+  background: var(--text-mute);
+}
+
+/* 依赖态：父开关关掉时子项置灰（disabled 属性由 renderer 同步） */
+.settings-page[data-settings='agent-knowledge'] .is-dimmed {
+  opacity: 0.45;
+}
+
+.settings-page[data-settings='agent-knowledge'] :disabled {
+  cursor: not-allowed;
+}
+
+.knowledge-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* 归纳是否在跑，比实现细节更值得在标题行看到 */
+.knowledge-status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-mute);
+}
+
+.knowledge-status.is-ok::before {
+  background: var(--ok, #22c55e);
+}
+
+.knowledge-status.is-fail::before {
+  background: var(--danger, #dc2626);
+}
+
+@media (max-width: 760px) {
+  .knowledge-controls {
+    grid-template-columns: 1fr;
+  }
 }
 
 .agents-md-preview-overlay {
@@ -5305,28 +5677,19 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 /* Master 模式：浅蓝色主题 */
-.plugin-grid.skills-grid {
+.catalog-grid.skills-grid {
   width: 100%;
 }
 
-.plugin-tile {
-  cursor: default;
-}
-
-.plugin-tile.plugin-tile-clickable {
-  cursor: pointer;
-}
-
-.plugin-catalog-foot {
+.catalog-tile-foot {
   justify-content: space-between;
 }
 
-.plugin-catalog-state {
+.catalog-tile-state {
   font-size: 12px;
   color: var(--text-mute);
 }
 
-.skill-tile-delete.plugin-catalog-install-disabled,
 .skill-tile-delete:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -5348,56 +5711,150 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   cursor: not-allowed;
 }
 
-.plugin-btn-danger:hover {
-  color: #ef4444;
-  background: rgba(220, 80, 80, 0.12);
-}
-
-.skills-page[data-skills-tab='plugins'] .plugin-settings-view.active[data-plugin-view='list'],
-.skills-page[data-skills-tab='plugins'] .plugin-settings-view.active[data-plugin-view='catalog'] {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.skills-page[data-skills-tab='plugins'] .plugin-settings-view.active[data-plugin-view='list'] .skills-grid-wrap,
-.skills-page[data-skills-tab='plugins'] .plugin-settings-view.active[data-plugin-view='catalog'] .skills-grid-wrap {
-  flex: 1;
-  min-height: 0;
-}
-
 /* ---------- Settings form ---------- */
-.worktrees-cleanup-fields {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px 24px;
-  margin-bottom: 8px;
+/* Worktree 自动清理：每个上限一行（左标签 + 右步进器），保存按钮落在末行，
+   只用细描边 + 行间分隔线分组，不铺底色（黑底上是干净的，也不会和下方列表抢视线）。 */
+/* 本页的清理区块与下方「当前工作空间」同宽，右边缘对齐（.settings-runtime-section 的 420px 上限只给别的表单页用） */
+.settings-page[data-settings='worktrees'] .settings-runtime-section {
+  max-width: none;
 }
 
-.worktrees-stepper-field {
-  gap: 8px;
+.worktrees-cleanup-card {
+  border: 1px solid var(--border-subtle);
 }
 
-.worktrees-stepper {
+.worktrees-cleanup-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+}
+
+.worktrees-cleanup-row + .worktrees-cleanup-row {
+  border-top: 1px solid var(--border);
+}
+
+.worktrees-cleanup-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.worktrees-cleanup-name {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.worktrees-cleanup-desc {
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+/* 步进器：− / 输入 / + 合成一个控件（共用外框与分隔线），不再是三个各自带框的方块 */
+.worktrees-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+}
+
+.worktrees-stepper-btn {
+  width: 30px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.worktrees-stepper-btn:hover {
+  background: rgba(128, 128, 128, 0.16);
+  color: var(--text);
+}
+
+.worktrees-stepper-btn:active {
+  background: rgba(128, 128, 128, 0.26);
+}
+
+.worktrees-stepper-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .worktrees-stepper input[type='number'] {
-  width: 72px;
-  text-align: center;
-  padding: 6px 8px;
-  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.35));
-  background: var(--panel, transparent);
-  color: inherit;
+  width: 60px;
+  padding: 5px 4px;
+  border: none;
+  border-left: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text);
   font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  appearance: textfield;
+  -moz-appearance: textfield;
 }
 
-.worktrees-toolbar {
-  margin-top: 8px;
+.worktrees-stepper input[type='number']::-webkit-outer-spin-button,
+.worktrees-stepper input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.worktrees-stepper input[type='number']:focus {
+  outline: none;
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.worktrees-cleanup-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.worktrees-cleanup-foot .ghost-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+}
+
+.worktrees-cleanup-hint {
+  margin-right: auto;
+}
+
+/* 进度/状态提示默认走中性灰，只有保存成功才用 .save-hint 的绿 */
+.save-hint.worktrees-cleanup-hint {
+  color: var(--text-mute);
+}
+
+.save-hint.worktrees-cleanup-hint.ok {
+  color: var(--ok);
+}
+
+.worktrees-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.worktrees-list-head .settings-subsection-title {
+  margin-bottom: 0;
+}
+
+.worktrees-list-refresh {
+  padding: 5px 12px;
+  font-size: 12px;
 }
 
 .worktrees-repo-path {
@@ -5501,6 +5958,31 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   grid-template-columns: 1fr 1fr;
   gap: 16px;
 }
+/* 行内字段（「每 N 分钟/小时/天」「总共执行 N 次」这类一句话表单）：标签与控件同一行，不要竖着堆 */
+.field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+/* 行内字段里夹在控件之间的文字（「每」「总共执行」「次」）：与 field-label 同级别，不与输入值抢注意力 */
+.field-inline > span {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.field-inline input[type='number'] {
+  width: 96px;
+}
+.field-inline input[type='time'] {
+  width: 120px;
+}
+.field-inline .select-menu {
+  min-width: 96px;
+}
+/* display:flex / grid 会覆盖 UA 的 [hidden]，随页签隐藏的调度字段必须显式隐藏 */
+.automation-editor-form .automation-schedule-extras[hidden] {
+  display: none;
+}
 .field-label {
   font-size: 12px;
   color: var(--text-dim);
@@ -5530,6 +6012,9 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 .field input[type='password'],
 .field input[type='number'],
 .field input[type='url'],
+.field input[type='date'],
+.field input[type='time'],
+.field input[type='datetime-local'],
 .field textarea {
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -5540,6 +6025,27 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   font-size: 13px;
   outline: none;
   transition: border-color 0.15s ease, background 0.15s ease;
+}
+/*
+ * 原生日期/时间控件默认由系统绘制：不声明 color-scheme 时 Chromium 按「浅色控件」渲染，
+ * 深色表单里会突兀地变成一块白底（图标、占位「年/月/日」也不跟随主题）。
+ * 这里跟着主题变量走，避免每个调用点单独改 appearance。
+ */
+:root:not([data-theme='light']) .field input[type='date'],
+:root:not([data-theme='light']) .field input[type='time'],
+:root:not([data-theme='light']) .field input[type='datetime-local'] {
+  color-scheme: dark;
+}
+:root[data-theme='light'] .field input[type='date'],
+:root[data-theme='light'] .field input[type='time'],
+:root[data-theme='light'] .field input[type='datetime-local'] {
+  color-scheme: light;
+}
+/* 占位符跟随主题：原生默认色与已填值几乎同亮度，「还没填」看着像「已填」 */
+.field input::placeholder,
+.field textarea::placeholder {
+  color: var(--text-dim);
+  opacity: 1;
 }
 .field input:focus,
 .field textarea:focus {
@@ -5568,6 +6074,50 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   background: var(--accent);
   margin-top: -5px;
   cursor: pointer;
+}
+
+/* 「编码参数」滑杆：可拖动 + 拖动反馈。
+   修复前提是 DOM 在拖动期间不再整块重绘（见 renderer-encoding-params.js 的
+   panelWriteInFlight）；这里负责「看得出在拖」：已生效轨道填充 + 拇指 hover/active 缩放。
+   `--range-fill` 由 paintRangeFill() 按当前值写入，纯视觉，不参与取值。 */
+.encoding-params-fields .field input[type='range'] {
+  --range-fill: 0%;
+  width: 100%;
+  height: 18px;
+  cursor: pointer;
+}
+.encoding-params-fields .field input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--range-fill),
+    rgba(128, 128, 128, 0.22) var(--range-fill) 100%
+  );
+}
+.encoding-params-fields .field input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent-dark);
+  box-shadow: 0 0 0 0 rgba(128, 128, 128, 0);
+  transition: transform 120ms ease, box-shadow 160ms ease;
+  cursor: grab;
+}
+.encoding-params-fields .field input[type='range']:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+.encoding-params-fields .field input[type='range']:active::-webkit-slider-thumb {
+  transform: scale(1.3);
+  box-shadow: 0 0 0 5px rgba(128, 128, 128, 0.25);
+  cursor: grabbing;
+}
+.encoding-params-fields .field input[type='range']:focus-visible::-webkit-slider-thumb {
+  transform: scale(1.2);
+  box-shadow: 0 0 0 4px rgba(128, 128, 128, 0.3);
 }
 
 .form-actions {
@@ -5760,36 +6310,12 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 
-.plugin-settings-view {
-  display: none;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-  flex: 1;
-  overflow: hidden;
-}
-
-.plugin-settings-view.active {
-  display: flex;
-}
-
-.plugin-settings-back-row {
+.settings-subpage-back-row {
   margin-bottom: 4px;
 }
 
-.plugin-catalog-toolbar {
+.settings-subpage-toolbar {
   flex-wrap: wrap;
-}
-
-.plugin-catalog-url-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.plugin-catalog-url-row input {
-  flex: 1;
-  min-width: 0;
 }
 
 .settings-nav {
@@ -6008,24 +6534,47 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   display: block;
 }
 
-.mobile-connect-dialog {
-  grid-template-columns: 1fr;
-  width: min(720px, calc(100vw - 80px));
-  height: auto;
-  min-height: 420px;
+/* 「连接」对话框：手机连接 / Agent 互通 两个标签页共用一个外壳。
+   尺寸**不做覆盖**，直接沿用共享的基础弹窗尺寸（`width: min(760px, 100vw-48px)`、
+   `height: min(560px, 100vh-80px)`，见 .settings-dialog）：
+   两个标签页因此上下左右完全一致；内容多的一页（互通）在面板内部滚动，
+   不会把窗口撑高。用 `height:auto` 会让高度跟着内容走，切标签页就跳。 */
+.connect-dialog {
+  grid-template-columns: 1fr; /* 基础 .settings-dialog 是「左导航 + 右内容」两列，这里只有内容 */
 }
-
-.mobile-connect-main {
-  min-width: 0;
+.connect-main { min-width: 0; }
+.connect-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
 }
+.connect-tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 10px 12px;
+  margin-bottom: -1px;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.connect-tab:hover { color: var(--text); }
+.connect-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.connect-pane[hidden] { display: none; }
 
+/* 手机连接页：对话框尺寸与「Agent 互通」一致（固定高度），所以这里要让内容**铺满**这块高度，
+   而不是贴在顶上留一大片空白。布局 = 状态条 + （二维码 | 说明）两列，两列在剩余高度里垂直居中。 */
 .mobile-connect-body {
-  padding: 20px;
+  padding: 20px 24px 24px;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .mobile-connect-status {
-  margin-bottom: 16px;
+  margin-bottom: 0;
   padding: 10px 12px;
   border: 1px solid var(--border);
   background: transparent;
@@ -6034,24 +6583,27 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 .mobile-connect-grid {
+  flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: 260px 1fr;
-  gap: 20px;
-  align-items: start;
+  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+  gap: 28px;
+  align-items: center;
 }
 
 .mobile-connect-qr-wrap {
   display: grid;
   place-items: center;
-  min-height: 260px;
   border: 1px solid var(--border);
   background: #fff;
-  padding: 10px;
+  padding: 16px;
 }
 
 .mobile-connect-qr {
-  width: 240px;
-  height: 240px;
+  width: 100%;
+  max-width: 288px;
+  height: auto;
+  aspect-ratio: 1 / 1;
   object-fit: contain;
   display: block;
 }
@@ -6061,6 +6613,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  justify-content: center;
 }
 
 .mobile-connect-title {
@@ -6107,7 +6660,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 @media (max-width: 760px) {
-  .mobile-connect-dialog {
+  .connect-dialog {
     width: calc(100vw - 32px);
   }
 
@@ -6227,138 +6780,6 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   grid-template-columns: minmax(130px, 1fr) minmax(190px, 1.4fr) minmax(120px, 0.8fr) 64px 72px 72px;
   gap: 8px;
   align-items: center;
-}
-
-.components-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-}
-
-.components-panel .defined-model-toolbar {
-  margin-bottom: 0;
-}
-
-.components-table {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.components-table-head,
-.components-table-row {
-  display: grid;
-  grid-template-columns: minmax(168px, 2fr) 64px 64px 72px 64px minmax(148px, 1.1fr);
-  gap: 8px;
-  align-items: center;
-}
-
-.components-table-head {
-  padding: 0 10px;
-  border-left: 1px solid transparent;
-  border-right: 1px solid transparent;
-  color: var(--text-mute);
-  font-size: 12px;
-}
-
-.components-table-head > span:last-child {
-  text-align: right;
-}
-
-.components-table-row {
-  padding: 10px;
-  border: 1px solid var(--border);
-  background: transparent;
-  border-radius: 0;
-}
-
-.components-col-name {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.components-title {
-  font-weight: 600;
-  color: var(--text);
-}
-
-.components-sub {
-  font-size: 12px;
-  color: var(--text-mute);
-  line-height: 1.4;
-}
-
-.components-source {
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.components-tag {
-  display: inline-block;
-  min-width: 52px;
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-radius: 0;
-  font-size: 12px;
-  line-height: 1.35;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.components-tag-ok {
-  color: #3fb950;
-  border-color: rgba(63, 185, 80, 0.45);
-  background: rgba(46, 160, 67, 0.1);
-}
-
-.components-tag-err {
-  color: #f85149;
-  border-color: rgba(248, 81, 73, 0.45);
-  background: rgba(248, 81, 73, 0.08);
-}
-
-.components-tag-pending {
-  color: #d29922;
-  border-color: rgba(210, 153, 34, 0.45);
-  background: rgba(210, 153, 34, 0.1);
-}
-
-.components-tag-active {
-  color: #58a6ff;
-  border-color: rgba(88, 166, 255, 0.45);
-  background: rgba(56, 139, 253, 0.1);
-}
-
-.components-tag-idle {
-  color: var(--text-mute);
-  background: transparent;
-}
-
-.components-col-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  justify-content: flex-end;
-}
-
-.components-btn {
-  min-width: 64px;
-  padding: 4px 8px;
-  font-size: 12px;
-  border-radius: 0;
-}
-
-.components-muted,
-.components-empty {
-  color: var(--text-mute);
-  font-size: 13px;
-}
-
-.components-empty {
-  padding: 16px 10px;
 }
 
 .embedding-model-list-head {
@@ -7070,9 +7491,9 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   display: flex;
   flex-direction: column;
   grid-template-columns: 1fr;
-  width: min(560px, calc(100vw - 48px));
+  width: var(--dialog-lg-w);
   height: auto;
-  max-height: min(90vh, 720px);
+  max-height: var(--dialog-lg-max-h);
   overflow: hidden;
 }
 
@@ -7106,8 +7527,11 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   margin-top: 8px;
 }
 
+/* 面板里可能有一组字段（目标型：验收命令 / 轮次预算 / 工作目录），块级堆叠会挤成一片 */
 .automation-schedule-panel.active {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .automation-editor-actions {
@@ -7493,6 +7917,43 @@ body.pane-resizing {
   text-align: right;
 }
 
+.context-stats-note {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mute);
+}
+
+.context-stats-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.context-stats-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+}
+
+.context-stats-btn.is-danger {
+  color: var(--danger, #e5534b);
+}
+
+.context-stats-memory-list {
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-mute);
+}
+
+.context-stats-memory-item {
+  padding: 3px 0;
+  border-top: 1px solid var(--border);
+}
+
 /* SSH 远程面板 */
 .ssh-panel-actions {
   display: flex;
@@ -7620,6 +8081,49 @@ body.pane-resizing {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* 「索引」面板：一个搜索框同时查两路（片段 / 符号），结果左右两栏；
+   侧栏窄时自动堆叠成上下两栏 */
+.index-panel-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+/* 每个索引区块自带状态摘要与动作（重建片段 / 建向量 / 重建结构），
+   head 只留「索引 + 刷新」——按钮全堆在 head 会把标题挤成竖排 */
+.index-section-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+
+.index-section-head .context-stats-section-title {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.index-section-head .side-panel-pane-meta {
+  white-space: nowrap;
+}
+
+.index-section-btn {
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.index-panel-result-col {
+  min-width: 0;
+}
+
+.index-panel-result-title {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.72;
 }
 
 .codebase-search-meta {
@@ -9853,3 +10357,137 @@ body.pane-resizing {
 .sandbox-approval-btn:hover { filter: brightness(1.15); }
 .sandbox-mode-field { margin: 6px 0 10px; max-width: 420px; }
 .sandbox-mode-field .settings-segmented-tabs { margin-top: 0; }
+
+/* —— 内网 Agent 互通面板（renderer-peer.js，挂在「连接」对话框的第二个标签页）——
+   结构只有三块：固定的状态条 / 可滚动的唯一列表 / 固定的设置区。
+   按钮与输入框复用既有 .ghost-btn / .primary-btn / .field；对话框外壳见 .connect-* 。 */
+.peer-body {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.peer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.peer-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-mute);
+  flex: none;
+}
+.peer-dot-on { background: #4caf7d; box-shadow: 0 0 0 3px rgba(76, 175, 125, 0.16); }
+.peer-dot-off { background: var(--text-mute); }
+.peer-bar-text { flex: 1; min-width: 0; font-size: 12px; color: var(--text-dim); }
+.peer-bar-btn { flex: none; padding: 5px 12px; font-size: 12px; }
+.peer-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.peer-row-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'main action' 'detail action';
+  gap: 4px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  align-items: center;
+}
+/* 没有第二行（没租约、没待确认来信）的行压成一行，列表才不会被空白撑长 */
+.peer-row-item.peer-row-slim { grid-template-areas: 'main action'; }
+.peer-row-main { grid-area: main; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; min-width: 0; }
+.peer-row-detail { grid-area: detail; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.peer-row-preview {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.peer-row-actions { grid-area: action; display: flex; gap: 6px; align-items: center; }
+.peer-row-actions .ghost-btn,
+.peer-row-actions .primary-btn { padding: 6px 12px; font-size: 12px; }
+/* 主行动（允许）：与 .model-modality-tag.is-active 同一套「实心」语义，浅底深字保证对比度 */
+.peer-cta { background: var(--text); color: var(--bg); font-weight: 600; }
+.peer-cta:hover { filter: brightness(0.92); }
+.peer-row-pending { border-color: #c79a3a; }
+/* 次要动作（撤销）不与主动作抢注意力，但仍可读 */
+.peer-sub-btn { opacity: 0.6; }
+.peer-sub-btn:hover { opacity: 1; }
+.peer-name { font-size: 13px; font-weight: 600; }
+.peer-addr { font-size: 11px; color: var(--text-dim); }
+.peer-badge { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim); }
+.peer-badge-same { border-color: var(--accent, #4c8dff); color: var(--accent, #4c8dff); }
+.peer-badge-pending { border-color: #c79a3a; color: #c79a3a; }
+.peer-badge-denied,
+.peer-badge-offline { border-color: var(--text-mute); color: var(--text-mute); }
+.peer-badge-unknown { border-style: dashed; }
+.peer-claim { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim); }
+.peer-empty { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+.peer-session-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 16px 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+/* display:flex 会盖掉 UA 的 [hidden]，必须显式隐藏 */
+.peer-session-row[hidden] { display: none; }
+.peer-session-unlink { padding: 4px 10px; font-size: 12px; }
+.peer-foot {
+  flex: none;
+  border-top: 1px solid var(--border);
+  padding: 12px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.peer-name-row { align-items: center; gap: 8px; }
+.peer-name-row .field-label { flex: none; }
+.peer-name-row input[type='text'] { flex: 1; min-width: 0; padding: 7px 10px; font-size: 12px; }
+.peer-name-row .ghost-btn { padding: 7px 12px; font-size: 12px; }
+.peer-foot-row { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+.peer-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+.peer-toggle input[type='checkbox'] { margin: 0; }
+.peer-hint { font-size: 11px; color: var(--text-mute); line-height: 1.6; }
+
+/* 首次来信确认弹窗：窄、矮、只有两个按钮 —— 它会在用户干别的事时突然出现，不该抢满屏 */
+.peer-trust-dialog {
+  grid-template-columns: 1fr;
+  width: min(520px, calc(100vw - 48px));
+  height: auto;
+  min-height: 0;
+}
+.peer-trust-main { min-width: 0; }
+.peer-trust-body { padding: 18px 24px 22px; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+.peer-trust-lead { margin: 0; font-size: 14px; color: var(--text); }
+.peer-trust-preview {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow: auto;
+}
+.peer-trust-desc { margin: 0; font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+.peer-trust-actions { display: flex; gap: 8px; justify-content: flex-end; }

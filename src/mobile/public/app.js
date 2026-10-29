@@ -1567,10 +1567,8 @@
 
   on('sessions-open', 'click', () => setDrawerOpen(true));
   on('sessions-close', 'click', () => setDrawerOpen(false));
-  on('drawer-backdrop', 'click', () => setDrawerOpen(false));
   on('settings-open', 'click', () => setSettingsOpen(true));
   on('settings-close', 'click', () => setSettingsOpen(false));
-  on('settings-backdrop', 'click', () => setSettingsOpen(false));
   on('settings-reconnect', 'click', reconnect);
   on('settings-change-computer', 'click', changeComputer);
   on('settings-check-update', 'click', checkUpdate);
@@ -1585,7 +1583,6 @@
     jumpToFollowTail('traceSheet');
   });
   on('think-sheet-close', 'click', () => closeThinkSheet());
-  on('think-sheet-backdrop', 'click', () => closeThinkSheet());
   const traceRoundTitles = $('settings-trace-round-titles');
   if (traceRoundTitles) {
     traceRoundTitles.addEventListener('change', () => {

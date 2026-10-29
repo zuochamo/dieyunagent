@@ -4,6 +4,8 @@
 
 **原则**：Renderer 只做展示与 IPC；Agent 循环在 Main + `dieyun-core`，勿把业务状态机堆进 renderer。
 
+**弹窗约定**：所有 modal / overlay 弹窗（`*-overlay`、lightbox、`showTextPrompt`）**只能由关闭按钮（× / 取消）或 Esc 关闭** —— 禁止给遮罩绑「点击空白处关闭」的 click 监听（误触会丢半截表单）。移动端抽屉同理：只由左侧「×」/ 面板内关闭按钮关闭，`*-backdrop` 仅用于挡住下层点击。下拉菜单（`renderer-select-menu.js`、Composer 的模型/模式菜单、工作区菜单）不属于弹窗，保持「点外部 / Esc 关闭」。
+
 ## 核心链路（Agent / 聊天）
 
 | 文件 | 职责 | 改 UI 时关联 |
@@ -11,7 +13,7 @@
 | `renderer-agent-loop.js` | AgentService / 会话辅助 | 非发送主路径 |
 | `renderer-agent-send.js` | sendMessage 编排（gate→prep→run→catch） | 发送主路径 |
 | `renderer-agent-run.js` | runAgentCompletion（模型/工具轮） | 执行中气泡更新 |
-| `renderer-agent-complete.js` | 成功收尾 / 完成验收提示 / 断网暂停 | 完成门槛（不自动续跑） |
+| `renderer-agent-complete.js` | 成功收尾 / 验收提示渲染（判定在 Main）/ 断网暂停 | 完成门槛（不自动续跑） |
 | `renderer-agent-resume.js` | resumeAgentToolLoop | 「继续」协议续跑 |
 | `renderer-agent-abort.js` | 停止 / abort 等待 / 停止页脚 | 停止按钮 |
 | `renderer-agent-prep-remote.js` | 远程 core 等待（`index.remote_wait_ready`） | 准备阶段远程 |
@@ -31,6 +33,7 @@
 | `renderer-chat-live-run.js` | live run 气泡 / Agent 事件 | 执行中气泡 |
 | `renderer-chat-bubbles.js` | 气泡、页脚、附件、toast | 聊天气泡 |
 | `renderer-chat-render.js` | 历史渲染、流式钉底 | 会话重绘 |
+| `renderer-chat-nav.js` | 消息导航刻度带（右缘：每条消息一根刻度 / 当前视口高亮 / 悬停摘要 / 点击跳转） | 聊天区右缘导航 |
 | `renderer-thinking-trace-dom.js` | 思考区 DOM / 轮次块（折叠思考，旁白+工具在折叠外） | 思考过程 |
 | `renderer-thinking-trace.js` | 流式 patch / 合成回退 | 思考区更新 |
 | `renderer-subagent-panel.js` | 右侧面板「子代理」页：本次运行的子 Agent 全文思考（复用思考区卡片渲染原语） | 子代理详情 |
@@ -78,8 +81,9 @@
 | `renderer-scm-pane.js` | 源码管理（更改/历史双模式：git 状态 + 暂存/提交、提交时间线泳道图 + 提交内 diff） |
 | `renderer-path-utils.js` | 路径归一 / 匹配、trace 工具参数还原 |
 | `renderer-artifacts.js` | 产物列表面板（session/browse/diff 见上表） |
-| `renderer-codebase-panel.js` | 代码索引侧栏 |
-| `renderer-graph-panel.js` | 结构索引侧栏 |
+| `renderer-codebase-panel.js` | 代码片段索引：状态 / 重建 / 建向量（面板已并入「索引」页签） |
+| `renderer-graph-panel.js` | 结构索引：状态 / 重建 / 符号命中渲染（面板已并入「索引」页签） |
+| `renderer-index-panel.js` | 「索引」面板外壳（`data-side-tab="index"`）：一个搜索框同查片段+符号、两个索引的 shown/hidden 扇出、rail busy 合成 |
 | `renderer-problems.js` | LSP 诊断 |
 
 ## 设置 / 模型 / 技能
@@ -104,7 +108,9 @@
 | `renderer-i18n.js` | 文案 |
 | `renderer-utils.js` | 通用工具函数 |
 | `renderer-window.js` | 窗口控制 |
-| `renderer-mobile.js` | 手机桥接 UI（二维码等） |
+| `renderer-connect.js` | 「连接」对话框外壳：手机连接 / Agent 互通 两个标签页（只切页与按需刷新，不做业务判定） |
+| `renderer-mobile.js` | 手机桥接 UI（二维码等），渲染在「连接 → 手机连接」标签页 |
+| `renderer-peer.js` | 内网 Agent 互通面板 + 会话即对端通道，渲染在「连接 → Agent 互通」标签页 |
 | `core/bootstrap.js` | 命名空间引导 | 
 
 ## 改完验证

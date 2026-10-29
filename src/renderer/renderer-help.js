@@ -251,12 +251,6 @@ function initHelpUI() {
   if (menuAbout) {
     menuAbout.addEventListener('click', () => openHelpModal('about'));
   }
-  const helpOverlay = $('help-overlay');
-  if (helpOverlay) {
-    helpOverlay.addEventListener('click', (e) => {
-      if (e.target === helpOverlay) closeHelpModal();
-    });
-  }
   const helpLogsRefresh = $('help-logs-refresh');
   if (helpLogsRefresh) {
     helpLogsRefresh.addEventListener('click', () => loadHelpLogs().catch(() => {}));

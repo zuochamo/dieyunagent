@@ -414,13 +414,7 @@ let composerImageLightboxBound = false;
 function bindComposerImageLightbox() {
   if (composerImageLightboxBound) return;
   composerImageLightboxBound = true;
-  const overlay = $('composer-image-lightbox');
   const closeBtn = $('composer-image-lightbox-close');
-  if (overlay) {
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) closeComposerImageLightbox();
-    });
-  }
   if (closeBtn) {
     closeBtn.addEventListener('click', (e) => {
       e.preventDefault();

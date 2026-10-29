@@ -23,11 +23,12 @@
               </svg>
             </button>
           </div>
-          <div class="menu-item" id="menu-mobile">
-            <button type="button" class="menu-trigger menu-icon-trigger" id="menu-mobile-trigger" title="手机连接" aria-label="手机连接" data-i18n-title="menu_mobile" data-i18n-aria="menu_mobile">
+          <div class="menu-item" id="menu-connect">
+            <button type="button" class="menu-trigger menu-icon-trigger" id="menu-connect-trigger" title="连接（手机 / Agent 互通）" aria-label="连接" data-i18n-title="menu_connect_title" data-i18n-aria="menu_connect">
               <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
-                <rect x="7" y="2.8" width="10" height="18.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.7"/>
-                <path d="M10.5 6h3M11.4 18h1.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                <rect x="2.6" y="6" width="7.2" height="12" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                <rect x="14.2" y="9.4" width="7.2" height="9" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                <path d="M10.2 12h3.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="1.6 1.6" stroke-linecap="round"/>
               </svg>
             </button>
           </div>
@@ -48,7 +49,7 @@
         </div>
       </div>
       <div class="titlebar-controls">
-        <button type="button" class="titlebar-btn titlebar-btn-icon" id="win-artifacts" title="工作区面板（文件 / 浏览器 / 终端）" aria-label="工作区面板" data-i18n-title="side_panel_title" data-i18n-aria="side_panel">
+        <button type="button" class="titlebar-btn titlebar-btn-icon" id="win-artifacts" title="工作区面板（变更 / 文件 / 产物 / 上下文 …）" aria-label="工作区面板" data-i18n-title="side_panel_title" data-i18n-aria="side_panel">
           <svg class="titlebar-artifacts-icon" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
             <rect x="5" y="5" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" />
             <path d="M10 5v14M14 5v14" fill="none" stroke="currentColor" stroke-width="1.75" />
@@ -71,8 +72,16 @@
         <div class="sidebar-history chat-history" id="chat-history">
           <div class="history-head">
             <span class="history-title" data-i18n="history_title">历史对话</span>
-            <button type="button" class="icon-btn" id="chat-continue" title="继续上次（带交接新建会话）" aria-label="继续上次">⇄</button>
-            <button type="button" class="icon-btn" id="chat-new" title="新对话" aria-label="新对话" data-i18n-title="new_chat" data-i18n-aria="new_chat">+</button>
+            <div class="history-new-wrap" id="history-new-wrap">
+              <button type="button" class="icon-btn" id="chat-new" title="新对话（有交接时可继续上次）" aria-label="新对话" data-i18n-title="new_chat_menu_title" data-i18n-aria="new_chat" aria-haspopup="menu" aria-expanded="false" aria-controls="history-new-menu">+</button>
+              <div class="history-new-menu" id="history-new-menu" role="menu" hidden>
+                <button type="button" class="history-new-menu-item" data-history-new="new" role="menuitem" data-i18n="new_chat">新对话</button>
+                <button type="button" class="history-new-menu-item" id="history-continue-item" data-history-new="continue" role="menuitem" hidden>
+                  <span class="history-new-menu-item-label" data-i18n="continue_last">继续上次（交接）</span>
+                  <span class="history-new-menu-item-sub" id="history-continue-sub"></span>
+                </button>
+              </div>
+            </div>
           </div>
           <div class="history-list" id="history-list"></div>
         </div>
@@ -86,6 +95,7 @@
           <div class="chat agent-scroll" id="chat-list">
           </div>
           <button type="button" class="chat-scroll-bottom" id="chat-scroll-bottom" hidden title="滑到底部" aria-label="滑到底部"></button>
+          <div class="chat-nav is-empty" id="chat-nav" aria-hidden="true" aria-label="消息导航"></div>
           </div>
           <div class="thinking-live-float" id="last-turn-float" hidden>
             <div class="thinking-live-float-user" id="last-turn-float-user"></div>
@@ -323,20 +333,13 @@
                     <path d="M8 6.8 15.8 11M8 17.2 15.8 13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
                   </svg>
                 </button>
-                <button type="button" class="side-panel-rail-btn" data-side-tab="codebase" title="代码索引" aria-label="代码索引">
+                <button type="button" class="side-panel-rail-btn" data-side-tab="index" title="索引" aria-label="索引">
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                     <line class="codebase-rail-col" x1="8" y1="5" x2="8" y2="19" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
                     <line class="codebase-rail-col" x1="16" y1="5" x2="16" y2="19" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
                     <line class="codebase-rail-row" x1="5" y1="9" x2="19" y2="9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
                     <line class="codebase-rail-row" x1="5" y1="15" x2="19" y2="15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-                  </svg>
-                </button>
-                <button type="button" class="side-panel-rail-btn" data-side-tab="graph" title="结构索引" aria-label="结构索引">
-                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-                    <circle class="graph-rail-node" cx="6" cy="7" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
-                    <circle class="graph-rail-node" cx="18" cy="7" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
-                    <circle class="graph-rail-node" cx="12" cy="17" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
-                    <path class="graph-rail-edge" d="M8 8.2 10.4 15M16 8.2 13.6 15M8.2 7h7.6" fill="none" stroke="currentColor" stroke-width="1.4"/>
+                    <circle class="graph-rail-node" cx="18" cy="5" r="1.8" fill="currentColor"/>
                   </svg>
                 </button>
               </nav>
@@ -455,6 +458,14 @@
                       </div>
                       <pre class="ssh-panel-log agent-scroll" id="ssh-panel-rg-log" hidden title="~/.dieyun/remote-agent/current/agent.log"></pre>
                     </section>
+                    <section class="context-stats-section">
+                      <h4 class="context-stats-section-title">会话副本</h4>
+                      <div class="context-stats-row"><span>位置</span><span id="ssh-panel-wt-path">—</span></div>
+                      <div class="context-stats-row"><span>未应用</span><span id="ssh-panel-wt-pending">—</span></div>
+                      <div class="ssh-panel-actions">
+                        <button type="button" class="ghost-btn" data-ws-action="worktree-apply" hidden>应用改动到主目录</button>
+                      </div>
+                    </section>
                   </div>
                 </div>
                 <div class="side-panel-pane" data-side-pane="browser" hidden>
@@ -533,6 +544,18 @@
                       <div class="context-stats-row"><span>进行中</span><span id="ctx-stat-inflight">—</span></div>
                     </section>
                     <section class="context-stats-section">
+                      <h4 class="context-stats-section-title">本轮注入记忆</h4>
+                      <div class="context-stats-row"><span>项目记忆</span><span id="ctx-memory-project">—</span></div>
+                      <div class="context-stats-row"><span>长期记忆</span><span id="ctx-memory-global">—</span></div>
+                      <div class="context-stats-row" id="ctx-memory-extra-row" hidden><span>交接 / 工作记忆</span><span id="ctx-memory-extra">—</span></div>
+                      <div class="context-stats-note" id="ctx-memory-note">仅显示最近一次发送实际进入 system prompt 的条目</div>
+                      <div class="context-stats-actions">
+                        <button type="button" class="ghost-btn context-stats-btn" id="ctx-memory-session-btn">本会话沉淀…</button>
+                        <button type="button" class="ghost-btn context-stats-btn is-danger" id="ctx-memory-session-forget" hidden>忘掉这些</button>
+                      </div>
+                      <div class="context-stats-memory-list" id="ctx-memory-session-items" hidden></div>
+                    </section>
+                    <section class="context-stats-section">
                       <h4 class="context-stats-section-title">上下文压缩</h4>
                       <div class="context-stats-row"><span>压缩次数</span><span id="ctx-compaction-attempted">—</span></div>
                       <div class="context-stats-row"><span>动态压缩</span><span id="ctx-compaction-auto">—</span></div>
@@ -576,71 +599,66 @@
                     </div>
                   </div>
                 </div>
-                <div class="side-panel-pane" data-side-pane="codebase" hidden>
+                <div class="side-panel-pane" data-side-pane="index" hidden>
                   <div class="side-panel-pane-head">
                     <div class="side-panel-pane-head-main">
-                      <span class="side-panel-pane-title">代码索引</span>
-                      <span class="side-panel-pane-meta" id="codebase-panel-summary">—</span>
+                      <span class="side-panel-pane-title">索引</span>
                     </div>
                     <div class="side-panel-pane-actions">
-                      <button type="button" class="ghost-btn" id="codebase-panel-refresh" title="刷新状态">刷新</button>
-                      <button type="button" class="ghost-btn" id="codebase-panel-rebuild" title="强制重建索引">重建</button>
+                      <button type="button" class="ghost-btn" id="codebase-panel-refresh" title="刷新代码片段与结构索引状态">刷新</button>
                     </div>
                   </div>
                   <div class="context-stats-panel agent-scroll" id="codebase-stats-panel">
                     <section class="context-stats-section">
-                      <h4 class="context-stats-section-title">索引状态</h4>
+                      <div class="index-section-head">
+                        <h4 class="context-stats-section-title">代码片段 · 子串 + 向量</h4>
+                        <span class="side-panel-pane-meta" id="codebase-panel-summary">—</span>
+                        <button type="button" class="ghost-btn index-section-btn" id="codebase-panel-rebuild" title="强制重建代码片段（只建可检索片段，不建向量）">重建片段</button>
+                        <button type="button" class="ghost-btn index-section-btn" id="codebase-panel-vectors" title="补齐向量：只给缺向量的片段做 embedding，模型换了才整库重算；语义检索才需要（需先在设置里配好 embedding 模型）">建向量</button>
+                      </div>
                       <div class="context-stats-row"><span>状态</span><span id="cb-stat-state">—</span></div>
                       <div class="context-stats-row"><span>源文件</span><span id="cb-stat-files">—</span></div>
                       <div class="context-stats-row"><span>代码片段</span><span id="cb-stat-chunks">—</span></div>
                       <div class="context-stats-row"><span>向量</span><span id="cb-stat-vectors">—</span></div>
-                      <div class="context-stats-row"><span>Embedding</span><span id="cb-stat-embedding">—</span></div>
+                      <div class="context-stats-row"><span>向量模型</span><span id="cb-stat-embedding">—</span></div>
+                      <div class="context-stats-row"><span>向量维度</span><span id="cb-stat-embedding-dims">—</span></div>
+                      <div class="context-stats-row"><span>向量一致性</span><span id="cb-stat-embedding-sync">—</span></div>
                       <div class="context-stats-row"><span>更新时间</span><span id="cb-stat-updated">—</span></div>
                       <div class="context-stats-row"><span>进度</span><span id="cb-stat-progress">—</span></div>
                     </section>
                     <section class="context-stats-section">
-                      <h4 class="context-stats-section-title">试搜（验证索引）</h4>
-                      <div class="codebase-panel-search-row">
-                        <input type="text" id="codebase-panel-query" class="codebase-panel-query" placeholder="例如：SSH 连接池 / login validation" spellcheck="false" />
-                        <button type="button" class="ghost-btn" id="codebase-panel-search-btn">搜索</button>
+                      <div class="index-section-head">
+                        <h4 class="context-stats-section-title">符号与结构 · 骨架 / 依赖边</h4>
+                        <span class="side-panel-pane-meta" id="graph-panel-summary">—</span>
+                        <button type="button" class="ghost-btn index-section-btn" id="graph-panel-rebuild" title="强制重建结构索引（符号 + 依赖边；调用关系按需建）">重建结构</button>
                       </div>
-                      <div class="codebase-panel-results agent-scroll" id="codebase-panel-results">
-                        <p class="artifacts-empty">建好索引后可在此试搜，看命中哪些文件片段</p>
-                      </div>
-                    </section>
-                  </div>
-                </div>
-                <div class="side-panel-pane" data-side-pane="graph" hidden>
-                  <div class="side-panel-pane-head">
-                    <div class="side-panel-pane-head-main">
-                      <span class="side-panel-pane-title">结构索引</span>
-                      <span class="side-panel-pane-meta" id="graph-panel-summary">—</span>
-                    </div>
-                    <div class="side-panel-pane-actions">
-                      <button type="button" class="ghost-btn" id="graph-panel-refresh" title="刷新状态">刷新</button>
-                      <button type="button" class="ghost-btn" id="graph-panel-rebuild" title="强制重建结构索引">重建</button>
-                    </div>
-                  </div>
-                  <div class="context-stats-panel agent-scroll" id="graph-stats-panel">
-                    <section class="context-stats-section">
-                      <h4 class="context-stats-section-title">索引状态</h4>
                       <div class="context-stats-row"><span>状态</span><span id="gr-stat-state">—</span></div>
                       <div class="context-stats-row"><span>源文件</span><span id="gr-stat-files">—</span></div>
                       <div class="context-stats-row"><span>依赖边</span><span id="gr-stat-edges">—</span></div>
                       <div class="context-stats-row"><span>符号</span><span id="gr-stat-symbols">—</span></div>
                       <div class="context-stats-row"><span>调用关系</span><span id="gr-stat-calls">—</span></div>
-                      <div class="context-stats-row"><span>符号向量</span><span id="gr-stat-vectors">—</span></div>
                       <div class="context-stats-row"><span>更新时间</span><span id="gr-stat-updated">—</span></div>
                       <div class="context-stats-row"><span>进度</span><span id="gr-stat-progress">—</span></div>
                     </section>
                     <section class="context-stats-section">
-                      <h4 class="context-stats-section-title">试查符号</h4>
+                      <h4 class="context-stats-section-title">试搜 · 一次查两路</h4>
                       <div class="codebase-panel-search-row">
-                        <input type="text" id="graph-panel-query" class="codebase-panel-query" placeholder="例如：createCoreBridge / IndexService" spellcheck="false" />
-                        <button type="button" class="ghost-btn" id="graph-panel-search-btn">查找</button>
+                        <input type="text" id="index-panel-query" class="codebase-panel-query" placeholder="例如：SSH 连接池 / createCoreBridge" spellcheck="false" />
+                        <button type="button" class="ghost-btn" id="index-panel-search-btn">搜索</button>
                       </div>
-                      <div class="codebase-panel-results agent-scroll" id="graph-panel-results">
-                        <p class="artifacts-empty">建好后可试查函数/类名，验证符号是否入库</p>
+                      <div class="index-panel-results">
+                        <div class="index-panel-result-col">
+                          <h5 class="index-panel-result-title">片段命中</h5>
+                          <div class="codebase-panel-results agent-scroll" id="codebase-panel-results">
+                            <p class="artifacts-empty">未知目标在哪时用它：按子串/语义命中文件片段</p>
+                          </div>
+                        </div>
+                        <div class="index-panel-result-col">
+                          <h5 class="index-panel-result-title">符号命中</h5>
+                          <div class="codebase-panel-results agent-scroll" id="graph-panel-results">
+                            <p class="artifacts-empty">已知名字时用它：按函数/类名定位</p>
+                          </div>
+                        </div>
                       </div>
                     </section>
                   </div>
@@ -749,7 +767,7 @@
     </div>
 
     <div class="skill-detail-overlay mcp-config-overlay" id="mcp-config-overlay" hidden>
-      <div class="skill-detail-dialog mcp-config-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-config-title">
+      <div class="skill-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-config-title">
         <header class="skill-detail-head">
           <div class="skill-detail-head-main">
             <h2 class="skill-detail-title" id="mcp-config-title">MCP 配置</h2>
@@ -829,28 +847,6 @@
       </div>
     </div>
 
-    <div class="skill-detail-overlay" id="plugin-detail-overlay" hidden>
-      <div class="skill-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="plugin-detail-title">
-        <header class="skill-detail-head">
-          <h2 class="skill-detail-title" id="plugin-detail-title">插件</h2>
-          <button type="button" class="titlebar-btn titlebar-btn-win titlebar-btn-close" id="plugin-detail-close" data-win-control="close" title="关闭" aria-label="关闭"></button>
-        </header>
-        <div class="skill-detail-body" id="plugin-detail-body">
-          <div id="plugin-detail-intro"></div>
-          <div id="plugin-detail-schema" hidden>
-            <section class="skill-detail-section">
-              <h3>设置</h3>
-              <div class="settings-form" id="plugin-detail-schema-form"></div>
-            </section>
-          </div>
-        </div>
-        <footer class="skill-detail-foot skills-form-foot">
-          <span class="save-hint" id="plugin-detail-hint"></span>
-          <button type="button" class="primary-btn" id="plugin-detail-save">保存</button>
-        </footer>
-      </div>
-    </div>
-
     <div class="automation-editor-overlay settings-overlay" id="automation-editor-overlay" hidden>
       <div class="automation-editor-dialog settings-dialog automation-editor-dialog-layout" role="dialog" aria-modal="true" aria-labelledby="automation-editor-title">
         <header class="automation-editor-head settings-main-head">
@@ -882,6 +878,11 @@
             <div class="select-menu" id="automation-model"></div>
             <span class="field-hint">定时执行没有会话上下文，计划需自己记住模型；留空则用第一个可用供应商模型。</span>
           </div>
+          <div class="field" id="automation-workspace-wrap">
+            <span class="field-label">工作空间（可选）</span>
+            <div class="select-menu" id="automation-workspace"></div>
+            <span class="field-hint">留空 = 用执行时当前打开的工作空间；也可选历史对话用过的工作空间，或「手动选择本地目录…」。远端（SSH）工作空间需在执行期间保持连接。</span>
+          </div>
           <label class="field" id="automation-prompt-wrap">
             <span class="field-label">提示词</span>
             <textarea id="automation-prompt" rows="4" placeholder="描述要执行的任务…"></textarea>
@@ -893,6 +894,7 @@
               <button type="button" class="automation-schedule-tab skills-category-tab" data-schedule="interval">按间隔</button>
               <button type="button" class="automation-schedule-tab skills-category-tab" data-schedule="once">单次</button>
               <button type="button" class="automation-schedule-tab skills-category-tab" data-schedule="idle">空闲时</button>
+              <button type="button" class="automation-schedule-tab skills-category-tab" data-schedule="goal">目标</button>
             </div>
             <div class="automation-schedule-panel active" data-schedule-panel="periodic">
               <div class="field field-inline">
@@ -902,22 +904,53 @@
               </div>
             </div>
             <div class="automation-schedule-panel" data-schedule-panel="interval">
-              <label class="field field-inline">
+              <div class="field field-inline">
                 <span>每</span>
-                <input type="number" id="automation-interval-min" min="5" max="1440" value="60" />
-                <span>分钟</span>
-              </label>
+                <input type="number" id="automation-interval-value" min="1" max="1440" value="60" aria-label="间隔数量" />
+                <div class="select-menu" id="automation-interval-unit"></div>
+              </div>
             </div>
             <div class="automation-schedule-panel" data-schedule-panel="once">
               <label class="field">
+                <span class="field-label">执行时间</span>
                 <input type="datetime-local" id="automation-run-at" />
+                <span class="field-hint">到点执行一次，跑完自动停用；重新启用 = 重新排队。</span>
               </label>
             </div>
             <div class="automation-schedule-panel" data-schedule-panel="idle">
               <p class="settings-page-desc">无活跃 Agent 运行且静默一段时间后自动执行一次；跑完自动停用，重新启用即重新排队。</p>
             </div>
+            <div class="automation-schedule-panel" data-schedule-panel="goal">
+              <label class="field">
+                <span class="field-label">验收命令</span>
+                <textarea id="automation-goal-verify" rows="2" placeholder="例如 npm test / cargo build / 项目自带的检查脚本；退出码 0 = 通过"></textarea>
+                <span class="field-hint">每轮结束后自动跑一次，只有退出码为 0 才算完成。开工前会先跑一次：若此刻就已通过，说明这条命令量不出「活干没干」，计划会直接停下。</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span class="field-label">最多轮次（留空用默认）</span>
+                  <input type="number" id="automation-goal-attempts" min="1" max="48" placeholder="12" />
+                </label>
+                <label class="field">
+                  <span class="field-label">时长预算·分钟（留空用默认）</span>
+                  <input type="number" id="automation-goal-wall-min" min="30" max="1440" step="30" placeholder="480" />
+                </label>
+              </div>
+              <label class="field">
+                <span class="field-label">命令工作目录（可选）</span>
+                <input type="text" id="automation-goal-cwd" placeholder="留空则用计划运行的工作区" />
+              </label>
+              <p class="settings-page-desc">没通过就自动再来一轮（轮次越靠后退避越久），通过即完成并停用；轮次或时长用完会停下并写「未完成」报告。需要应用保持运行。</p>
+            </div>
+            <!-- 次数属于「多久跑一次」的一部分：紧跟频率控件，且只在有周期语义的页签显示 -->
+            <div class="field field-inline automation-schedule-extras" id="automation-run-count-wrap" hidden>
+              <span>总共执行</span>
+              <input type="number" id="automation-run-count" min="1" max="9999" placeholder="不限" aria-label="总共执行次数" />
+              <span>次</span>
+            </div>
           </div>
-          <div class="field-row">
+          <!-- 生效范围：单次/空闲/目标没有「重复范围」概念，整行随页签隐藏 -->
+          <div class="field-row automation-schedule-extras" id="automation-date-range" hidden>
             <label class="field">
               <span class="field-label">生效开始（可选）</span>
               <input type="date" id="automation-date-start" />
@@ -927,6 +960,7 @@
               <input type="date" id="automation-date-end" />
             </label>
           </div>
+          <span class="field-hint automation-schedule-extras" id="automation-limit-hint" hidden>「总共执行次数」与「生效结束」二选一：填了次数就按次数截断，跑满后自动停用。</span>
           <label class="check-row">
             <input type="checkbox" id="automation-enabled" checked />
             <span>启用任务</span>
@@ -983,12 +1017,12 @@
             </div>
           </header>
           <div class="settings-main-body">
-            <p class="field-hint">支持密码或私钥登录。填写私钥文件则优先使用私钥。勾选「记住登录」后下次启动可自动重连。新连接会断开已有 SSH 会话。</p>
+            <p class="field-hint">支持 ssh-agent、私钥、密码三种登录方式；主机可填 <code>~/.ssh/config</code> 里的 Host 别名（HostName / User / Port / IdentityFile / ProxyJump 会自动生效）。勾选「记住登录」后下次启动可自动重连。新连接会断开已有 SSH 会话。</p>
             <form id="ssh-connect-form" class="ssh-connect-form">
               <div class="ssh-connect-row">
                 <label class="field ssh-field-host">
                   <span class="field-label">主机</span>
-                  <input type="text" id="ssh-connect-host" required autocomplete="off" spellcheck="false" placeholder="192.168.1.10" />
+                  <input type="text" id="ssh-connect-host" required autocomplete="off" spellcheck="false" placeholder="别名或 192.168.1.10" />
                 </label>
                 <label class="field ssh-field-port">
                   <span class="field-label">端口</span>
@@ -998,7 +1032,7 @@
               <div class="ssh-connect-row">
                 <label class="field ssh-field-user">
                   <span class="field-label">用户名</span>
-                  <input type="text" id="ssh-connect-user" required autocomplete="username" spellcheck="false" />
+                  <input type="text" id="ssh-connect-user" autocomplete="username" spellcheck="false" placeholder="留空则取 ssh config 的 User" />
                 </label>
                 <label class="field ssh-field-pass">
                   <span class="field-label">密码</span>
@@ -1009,7 +1043,7 @@
                 <label class="field ssh-field-key">
                   <span class="field-label">私钥文件</span>
                   <div class="ssh-key-path-row">
-                    <input type="text" id="ssh-connect-key-path" readonly spellcheck="false" placeholder="可选，填写则使用私钥登录" />
+                    <input type="text" id="ssh-connect-key-path" readonly spellcheck="false" placeholder="可选，留空则用 ssh-agent / config 的 IdentityFile" />
                     <button type="button" class="ghost-btn" id="ssh-connect-pick-key">浏览…</button>
                   </div>
                 </label>
@@ -1018,6 +1052,10 @@
                   <input type="password" id="ssh-connect-key-passphrase" autocomplete="off" placeholder="可选" />
                 </label>
               </div>
+              <label class="ssh-remember-row">
+                <input type="checkbox" id="ssh-connect-use-agent" />
+                <span>使用 ssh-agent 免密登录（不填密码与私钥时默认尝试）</span>
+              </label>
               <span class="save-hint" id="ssh-connect-encrypt-hint" hidden></span>
               <span class="save-hint ssh-connect-error" id="ssh-connect-error" hidden></span>
               <div class="ssh-host-key-confirm" id="ssh-host-key-confirm" hidden>
@@ -1084,19 +1122,23 @@
       </div>
     </div>
 
-    <div class="settings-overlay" id="mobile-connect-overlay" hidden>
-      <div class="settings-dialog mobile-connect-dialog" role="dialog" aria-modal="true" aria-labelledby="mobile-connect-title">
-        <div class="settings-main mobile-connect-main">
+    <div class="settings-overlay" id="connect-overlay" hidden>
+      <div class="settings-dialog connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title">
+        <div class="settings-main connect-main">
           <header class="settings-main-head">
-            <h2 class="settings-main-title" id="mobile-connect-title" data-i18n="mobile_connect_title">手机连接</h2>
+            <h2 class="settings-main-title" id="connect-title" data-i18n="connect_title">连接</h2>
             <div class="dialog-window-controls" aria-label="窗口控制">
-              <button type="button" class="titlebar-btn titlebar-btn-win titlebar-btn-close" id="mobile-connect-close" data-win-control="close" title="关闭" aria-label="关闭">
+              <button type="button" class="titlebar-btn titlebar-btn-win titlebar-btn-close" id="connect-close" data-win-control="close" title="关闭" aria-label="关闭">
                 <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>
               </button>
             </div>
           </header>
-          <div class="settings-main-body mobile-connect-body">
-            <div class="mobile-connect-status" id="mobile-connect-status">正在读取连接信息…</div>
+          <div class="connect-tabs" role="tablist" aria-label="连接方式" data-i18n-aria="connect_tabs_label">
+            <button type="button" class="connect-tab active" id="connect-tab-mobile" role="tab" data-connect-tab="mobile" aria-selected="true" data-i18n="mobile_connect_title">手机连接</button>
+            <button type="button" class="connect-tab" id="connect-tab-peer" role="tab" data-connect-tab="peer" aria-selected="false" data-i18n="connect_tab_peer">Agent 互通</button>
+          </div>
+          <div class="settings-main-body connect-pane mobile-connect-body" id="connect-pane-mobile" role="tabpanel" aria-labelledby="connect-tab-mobile">
+            <div class="mobile-connect-status" id="mobile-connect-status" data-i18n="connect_reading">正在读取连接信息…</div>
             <div class="mobile-connect-grid">
               <div class="mobile-connect-qr-wrap">
                 <img id="mobile-connect-qr" class="mobile-connect-qr" alt="手机连接二维码" />
@@ -1114,6 +1156,58 @@
                 </div>
                 <span class="save-hint" id="mobile-connect-hint"></span>
               </div>
+            </div>
+          </div>
+
+          <div class="settings-main-body connect-pane peer-body" id="connect-pane-peer" role="tabpanel" aria-labelledby="connect-tab-peer" hidden>
+            <div class="peer-bar">
+              <span class="peer-dot" id="peer-dot"></span>
+              <span class="peer-bar-text" id="peer-status" data-i18n="connect_reading">正在读取连接信息…</span>
+              <button type="button" class="ghost-btn peer-bar-btn" id="peer-refresh" data-i18n="refresh">刷新</button>
+            </div>
+            <div class="peer-session-row" id="peer-session-row" hidden>
+              <span id="peer-session-info"></span>
+              <button type="button" class="ghost-btn peer-session-unlink" id="peer-session-unlink" data-i18n="peer_unlink">解除绑定</button>
+            </div>
+            <div class="peer-list" id="peer-list"></div>
+            <div class="peer-foot">
+              <div class="field field-inline peer-name-row">
+                <span class="field-label" data-i18n="peer_name_label">名称</span>
+                <input type="text" id="peer-name" spellcheck="false" placeholder="其他 agent 看到的名字" data-i18n-placeholder="peer_name_placeholder" />
+                <button type="button" class="ghost-btn" id="peer-save-name" data-i18n="peer_save_name">保存</button>
+              </div>
+              <div class="peer-foot-row">
+                <label class="peer-toggle"><input type="checkbox" id="peer-enabled" /> <span data-i18n="peer_enable">启用内网互通</span></label>
+                <label class="peer-toggle"><input type="checkbox" id="peer-auto-turn" /> <span data-i18n="peer_auto_turn">收到消息自动跑一轮</span></label>
+              </div>
+              <div class="peer-hint">
+                <div data-i18n="peer_hint_confirm">不需要配对码：对方第一次来信时确认一次即可，撤销后要重新确认。</div>
+                <div data-i18n="peer_hint_send">「发消息」打开与它的会话，在那里发的内容直接发给它，不消耗本机模型。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-overlay" id="peer-trust-overlay" hidden>
+      <div class="settings-dialog peer-trust-dialog" role="dialog" aria-modal="true" aria-labelledby="peer-trust-title">
+        <div class="settings-main peer-trust-main">
+          <header class="settings-main-head">
+            <h2 class="settings-main-title" id="peer-trust-title" data-i18n="peer_trust_title">内网 Agent 请求与你互通</h2>
+            <div class="dialog-window-controls" aria-label="窗口控制">
+              <button type="button" class="titlebar-btn titlebar-btn-win titlebar-btn-close" id="peer-trust-close" data-win-control="close" title="关闭" aria-label="关闭">
+                <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+          </header>
+          <div class="settings-main-body peer-trust-body">
+            <p class="peer-trust-lead" id="peer-trust-lead">有机器想与你的 agent 互通。</p>
+            <div class="peer-trust-preview" id="peer-trust-preview" hidden></div>
+            <p class="peer-trust-desc" data-i18n="peer_trust_desc">允许后，对方发来的消息会投递到它单独的会话里；只有你另外勾选「收到消息自动跑一轮」，对方一句话才会直接触发这台机器上的 agent 执行。</p>
+            <div class="peer-trust-actions">
+              <button type="button" class="ghost-btn" id="peer-trust-deny" data-i18n="peer_btn_deny">拒绝</button>
+              <button type="button" class="ghost-btn peer-cta" id="peer-trust-allow" data-i18n="peer_btn_allow">允许</button>
             </div>
           </div>
         </div>
@@ -1134,10 +1228,8 @@
           <button type="button" class="settings-nav-item" data-settings-tab="sandbox" data-i18n="settings_sandbox">沙箱</button>
           <button type="button" class="settings-nav-item" data-settings-tab="agent-knowledge" data-i18n="settings_agent_knowledge">知识</button>
           <div class="settings-nav-group-label" data-i18n="settings_extensions">扩展</div>
-          <button type="button" class="settings-nav-item" data-settings-action="components" data-i18n="settings_components">组件</button>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="mcp" data-i18n="settings_mcp">MCP</button>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="list" data-i18n="settings_skills_list">技能</button>
-          <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="plugins" data-i18n="settings_plugins">插件</button>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="automation" data-i18n="settings_automation">定时</button>
         </aside>
         <div class="settings-main">
@@ -1255,41 +1347,46 @@
             <div class="settings-page" data-settings="worktrees">
               <div class="settings-runtime-section">
                 <h3 class="settings-subsection-title">自动清理</h3>
-                <div class="worktrees-cleanup-fields">
-                  <div class="field worktrees-stepper-field">
-                    <span class="field-label">最多保留 run 数</span>
+                <div class="worktrees-cleanup-card">
+                  <div class="worktrees-cleanup-row">
+                    <div class="worktrees-cleanup-text">
+                      <span class="worktrees-cleanup-name">最多保留 run 数</span>
+                      <span class="worktrees-cleanup-desc">0 = 不限数量</span>
+                    </div>
                     <div class="worktrees-stepper">
-                      <button type="button" class="ghost-btn" id="worktrees-max-runs-minus" aria-label="减少">−</button>
-                      <input type="number" id="worktrees-max-runs" min="0" max="200" step="1" value="25" />
-                      <button type="button" class="ghost-btn" id="worktrees-max-runs-plus" aria-label="增加">+</button>
+                      <button type="button" class="worktrees-stepper-btn" id="worktrees-max-runs-minus" aria-label="减少数量">−</button>
+                      <input type="number" id="worktrees-max-runs" min="0" max="200" step="1" value="25" aria-label="最多保留 run 数" />
+                      <button type="button" class="worktrees-stepper-btn" id="worktrees-max-runs-plus" aria-label="增加数量">+</button>
                     </div>
                   </div>
-                  <div class="field worktrees-stepper-field">
-                    <span class="field-label">总容量上限 (GB)</span>
+                  <div class="worktrees-cleanup-row">
+                    <div class="worktrees-cleanup-text">
+                      <span class="worktrees-cleanup-name">总容量上限</span>
+                      <span class="worktrees-cleanup-desc">单位 GB · 0 = 不限</span>
+                    </div>
                     <div class="worktrees-stepper">
-                      <button type="button" class="ghost-btn" id="worktrees-max-size-gb-minus" aria-label="减少">−</button>
-                      <input type="number" id="worktrees-max-size-gb" min="0" max="500" step="1" value="0" />
-                      <button type="button" class="ghost-btn" id="worktrees-max-size-gb-plus" aria-label="增加">+</button>
+                      <button type="button" class="worktrees-stepper-btn" id="worktrees-max-size-gb-minus" aria-label="减少容量">−</button>
+                      <input type="number" id="worktrees-max-size-gb" min="0" max="500" step="1" value="0" aria-label="总容量上限（GB）" />
+                      <button type="button" class="worktrees-stepper-btn" id="worktrees-max-size-gb-plus" aria-label="增加容量">+</button>
                     </div>
                   </div>
-                </div>
-                <div class="defined-model-toolbar worktrees-toolbar">
-                  <button type="button" class="ghost-btn" id="worktrees-cleanup-save">保存</button>
-                  <button type="button" class="ghost-btn" id="worktrees-enforce-now">立即按规则清理</button>
+                  <div class="worktrees-cleanup-foot">
+                    <span class="save-hint worktrees-cleanup-hint" id="worktrees-settings-hint"></span>
+                    <button type="button" class="ghost-btn" id="worktrees-cleanup-save" title="保存上限设置，并立即按新规则清理一次">保存并清理</button>
+                  </div>
                 </div>
               </div>
               <hr class="settings-section-divider" />
-              <h3 class="settings-subsection-title">当前工作空间</h3>
+              <div class="worktrees-list-head">
+                <h3 class="settings-subsection-title">当前工作空间</h3>
+                <button type="button" class="ghost-btn worktrees-list-refresh" id="worktrees-refresh">刷新列表</button>
+              </div>
               <p class="worktrees-repo-path" id="worktrees-repo-path">—</p>
               <p class="worktrees-run-summary" id="worktrees-run-summary"></p>
-              <div class="defined-model-toolbar worktrees-toolbar">
-                <button type="button" class="ghost-btn" id="worktrees-refresh">刷新列表</button>
-              </div>
               <p class="settings-page-desc worktrees-list-hint">列表仅含<strong>本机 Git 项目</strong>下的副本；远程工作空间或未选文件夹时显示「暂无 worktree」。</p>
               <div class="worktrees-run-list" id="worktrees-run-list">
                 <div class="worktrees-empty">打开本页后自动加载…</div>
               </div>
-              <span class="save-hint" id="worktrees-settings-hint"></span>
             </div>
             <div class="settings-page" data-settings="perms">
               <h3 class="settings-subsection-title">本机权限</h3>
@@ -1309,17 +1406,10 @@
               <p class="settings-page-desc check-row-hint lsp-diagnostics-hint">改完源码后把语言服务器报的错（类型、语法、未定义符号）自动带回给 Agent，让它自己发现编译不过的地方；关掉后只能靠跑命令暴露错误。</p>
               <label class="check-row"><input type="checkbox" id="perm-workplace-monitor" checked /><span>工位监控上报</span></label>
               <p class="settings-page-desc check-row-hint workplace-monitor-hint">每 5 秒把本机状态（CPU/内存、机器码、版本、公网 IP、今日键鼠活跃度）推给监控服务端；开启时会钩住全系统键盘鼠标计数。关掉即停止钩子与上报，本地功能不受影响。</p>
-              <label class="check-row"><input type="checkbox" id="codebase-auto-incremental" checked /><span>代码索引</span></label>
-              <p class="settings-page-desc check-row-hint codebase-auto-hint">保存源文件或打开工作区后，自动后台增量更新（含向量）。</p>
+              <label class="check-row"><input type="checkbox" id="codebase-auto-incremental" /><span>代码索引</span></label>
+              <p class="settings-page-desc check-row-hint codebase-auto-hint">默认关。打开后保存源文件或打开工作区会后台增量更新；只有已经建过向量的工作区才会真正跑起来。</p>
               <label class="check-row"><input type="checkbox" id="graph-auto-incremental" checked /><span>结构索引</span></label>
               <p class="settings-page-desc check-row-hint graph-auto-hint">保存源文件或打开工作区后，自动后台增量更新。</p>
-              <div class="theme-long-horizon-options">
-                <label class="check-row" id="theme-long-horizon-row">
-                  <input type="checkbox" id="theme-long-horizon" />
-                  <span data-i18n="theme_long_horizon">长程 Agent 任务</span>
-                </label>
-                <p class="settings-page-desc check-row-hint long-horizon-hint">长任务档：把单轮步数、连续工具调用、续跑轮次的预算放大约 2 倍（仍有硬顶）并允许分段续跑；普通会话建议关着，省时间与费用。</p>
-              </div>
               <span class="save-hint" id="perms-hint"></span>
             </div>
             <div class="settings-page" data-settings="sandbox">
@@ -1339,70 +1429,87 @@
               <p class="settings-page-desc">输入区右侧的路径权限图标与这里同一件事：点一下等价于切到「完全放开」或退回上一档。</p>
             </div>
             <div class="settings-page" data-settings="agent-knowledge">
-              <h3 class="settings-subsection-title">全局用户规则 · dieyun.md</h3>
-              <div class="field agents-md-mode-field dieyun-md-inject-field">
-                <span class="field-label">注入模式</span>
-                <nav class="settings-segmented-tabs dieyun-md-inject-tabs" aria-label="dieyun.md 注入模式与编辑">
-                  <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="always" title="每轮对话都注入全文">始终</button>
-                  <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="auto" title="仅注入与本轮查询命中的章节；无命中则不注入">自动</button>
-                  <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="manual" title="输入 @dieyun.md 时注入">手动</button>
-                  <button type="button" class="settings-segmented-tab settings-segmented-tab-action" id="dieyun-md-open" title="用系统默认编辑器打开 dieyun.md">编辑</button>
-                </nav>
-                <div class="dieyun-md-path-row">
-                  <code class="settings-path-hint" id="dieyun-md-path"></code>
-                  <span class="save-hint" id="dieyun-md-settings-hint"></span>
+              <p class="settings-page-desc">Agent 每轮自动读取的持久知识。机制细节见「帮助 → 知识」。</p>
+
+              <section class="knowledge-group">
+                <article class="knowledge-card">
+                  <header class="knowledge-card-head">
+                    <span class="knowledge-card-name">dieyun.md</span>
+                    <span class="knowledge-card-tag">跨项目个人偏好</span>
+                    <code class="settings-path-hint knowledge-card-path" id="dieyun-md-path"></code>
+                    <button type="button" class="ghost-btn knowledge-card-action" id="dieyun-md-open" title="用系统默认编辑器打开 dieyun.md">编辑</button>
+                  </header>
+                  <div class="field agents-md-mode-field knowledge-field">
+                    <span class="field-label">注入</span>
+                    <nav class="settings-segmented-tabs dieyun-md-inject-tabs" role="radiogroup" aria-label="dieyun.md 注入模式">
+                      <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="always" role="radio">始终</button>
+                      <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="auto" role="radio">自动</button>
+                      <button type="button" class="settings-segmented-tab dieyun-md-inject-tab" data-mode="manual" role="radio">手动</button>
+                    </nav>
+                  </div>
+                  <div class="knowledge-card-foot">
+                    <p class="knowledge-mode-hint" id="dieyun-md-mode-hint"></p>
+                    <span class="save-hint" id="dieyun-md-settings-hint"></span>
+                  </div>
+                </article>
+
+                <article class="knowledge-card">
+                  <header class="knowledge-card-head">
+                    <span class="knowledge-card-name">AGENTS.md</span>
+                    <span class="knowledge-card-tag">当前项目地图</span>
+                    <code class="settings-path-hint knowledge-card-path">.dieyun/AGENTS.md</code>
+                    <button type="button" class="ghost-btn knowledge-card-action" id="agents-md-review-pending" hidden>查看待采纳变更</button>
+                  </header>
+                  <div class="field agents-md-mode-field knowledge-field">
+                    <span class="field-label">维护</span>
+                    <nav class="settings-segmented-tabs" id="agents-md-mode-tabs" role="radiogroup" aria-label="AGENTS.md 维护模式">
+                      <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="auto" role="radio" title="任务完成后或工具提议时合并">自动合并</button>
+                      <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="draft-only" role="radio" title="只写 agents-draft，不改文件">仅草稿</button>
+                      <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="off" role="radio" title="不再提议、不再合并">关闭</button>
+                    </nav>
+                  </div>
+                  <label class="check-row knowledge-card-check" id="agents-md-preview-row">
+                    <input type="checkbox" id="agents-md-preview" checked />
+                    <span>采纳前看 Diff</span>
+                  </label>
+                  <div class="knowledge-card-foot">
+                    <p class="knowledge-mode-hint" id="agents-md-mode-hint"></p>
+                    <span class="save-hint" id="agents-md-settings-hint"></span>
+                  </div>
+                </article>
+              </section>
+
+              <section class="knowledge-group">
+                <div class="knowledge-group-head">
+                  <h3 class="settings-subsection-title">定时归纳</h3>
+                  <span class="knowledge-status" id="knowledge-consol-status">读取中…</span>
                 </div>
-              </div>
-              <p class="settings-page-desc">跨项目的个人偏好（语言、风格、编码习惯）。项目命令与目录请维护下方 AGENTS.md。</p>
-              <hr class="settings-section-divider" />
-              <h3 class="settings-subsection-title">项目地图 · AGENTS.md</h3>
-              <div class="field agents-md-mode-field">
-                <span class="field-label">维护模式</span>
-                <nav class="settings-segmented-tabs" id="agents-md-mode-tabs" role="radiogroup" aria-label="维护模式">
-                  <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="auto" title="任务后 / 工具提议">自动合并</button>
-                  <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="draft-only" title="写入 agents-draft，不直接改文件">仅草稿</button>
-                  <button type="button" class="settings-segmented-tab agents-md-mode-tab" data-mode="off">关闭</button>
-                </nav>
-              </div>
-              <label class="check-row"><input type="checkbox" id="agents-md-preview" checked /><span>采纳前 Diff 预览（auto 模式下生效）</span></label>
-              <div class="field-row agents-md-settings-actions">
-                <button type="button" class="ghost-btn" id="agents-md-review-pending" hidden>查看待采纳变更</button>
-                <span class="save-hint" id="agents-md-settings-hint"></span>
-              </div>
-              <p class="settings-page-desc">维护当前工作空间 <code>.dieyun/AGENTS.md</code>：记录目录结构、常用命令与项目约定。任务完成或 Agent 工具提议的变更，在<strong>自动合并</strong>模式下可经 Diff 预览后采纳。<br />
-                <strong>文件上限 24,000 字</strong>（超出时按段裁剪，不再整段丢弃）；<strong>每轮只注入其中约 13,500 字</strong>的「概览 + 踩坑 + 命令」三段，其余段由 Agent 按需读取。维护记录只保留最近 5 条。</p>
-              <hr class="settings-section-divider" />
-              <h3 class="settings-subsection-title">定时知识归纳</h3>
-              <div class="field agents-md-mode-field">
-                <span class="field-label">运行模式</span>
-                <nav class="settings-segmented-tabs" id="knowledge-consol-mode-tabs" role="radiogroup" aria-label="定时知识归纳模式">
-                  <button type="button" class="settings-segmented-tab knowledge-consol-mode-tab" data-mode="on" title="按间隔后台整理">开启</button>
-                  <button type="button" class="settings-segmented-tab knowledge-consol-mode-tab" data-mode="idle" title="仅在无 Agent 任务进行时整理">闲时</button>
-                  <button type="button" class="settings-segmented-tab knowledge-consol-mode-tab" data-mode="off">关闭</button>
-                </nav>
-              </div>
-              <div class="field agents-md-mode-field">
-                <span class="field-label">间隔</span>
-                <nav class="settings-segmented-tabs" id="knowledge-consol-interval-tabs" role="radiogroup" aria-label="归纳间隔">
-                  <button type="button" class="settings-segmented-tab knowledge-consol-interval-tab" data-hours="6">6 小时</button>
-                  <button type="button" class="settings-segmented-tab knowledge-consol-interval-tab" data-hours="12">12 小时</button>
-                  <button type="button" class="settings-segmented-tab knowledge-consol-interval-tab" data-hours="24">24 小时</button>
-                </nav>
-              </div>
-              <div class="field">
-                <span class="field-label">整理范围</span>
-                <div id="knowledge-consol-scopes">
-                  <label class="check-row"><input type="checkbox" data-scope="recentChat" checked /><span>近期对话</span></label>
-                  <label class="check-row"><input type="checkbox" data-scope="longMemory" checked /><span>长期记忆</span></label>
-                  <label class="check-row"><input type="checkbox" data-scope="projectMemory" checked /><span>项目记忆</span></label>
-                  <label class="check-row"><input type="checkbox" data-scope="agents" checked /><span>AGENTS.md</span></label>
+                <div class="knowledge-controls">
+                  <div class="field agents-md-mode-field knowledge-field">
+                    <span class="field-label">模式</span>
+                    <nav class="settings-segmented-tabs" id="knowledge-consol-mode-tabs" role="radiogroup" aria-label="定时归纳模式">
+                      <button type="button" class="settings-segmented-tab knowledge-consol-mode-tab" data-mode="on" role="radio" title="按频率后台整理">开启</button>
+                      <button type="button" class="settings-segmented-tab knowledge-consol-mode-tab" data-mode="idle" role="radio" title="任务进行中先跳过，结束后补跑">闲时</button>
+                      <button type="button" class="settings-segmented-tab knowledge-consol-mode-tab" data-mode="off" role="radio" title="停掉全部归纳（含每轮收尾）">关闭</button>
+                    </nav>
+                  </div>
+                  <div class="field agents-md-mode-field knowledge-field" id="knowledge-consol-interval-field">
+                    <span class="field-label">频率</span>
+                    <!-- 档位清单由 Main（KNOWLEDGE_INTERVAL_CHOICES）经设置 IPC 下发，这里只放容器 -->
+                    <nav class="settings-segmented-tabs" id="knowledge-consol-interval-tabs" role="radiogroup" aria-label="归纳间隔"></nav>
+                  </div>
                 </div>
-              </div>
-              <p class="settings-page-desc">
-                后台按间隔调用<strong>当前对话模型</strong>，对照近期对话整理长期记忆、项目记忆，并可归纳 AGENTS.md（受上方各模块开关约束）。衰减与向量重建仍由程序执行。
-              </p>
-              <span class="save-hint" id="knowledge-consol-hint"></span>
-              <p class="settings-path-hint" id="knowledge-consol-status" style="margin-top:0.4rem"></p>
+                <div class="field knowledge-field" id="knowledge-consol-scope-field">
+                  <span class="field-label">整理</span>
+                  <div id="knowledge-consol-scopes" class="knowledge-scopes">
+                    <label class="check-row"><input type="checkbox" data-scope="recentChat" checked /><span>近期对话</span></label>
+                    <label class="check-row"><input type="checkbox" data-scope="longMemory" checked /><span>长期记忆</span></label>
+                    <label class="check-row"><input type="checkbox" data-scope="projectMemory" checked /><span>项目记忆</span></label>
+                    <label class="check-row"><input type="checkbox" data-scope="agents" checked /><span>AGENTS.md</span></label>
+                  </div>
+                </div>
+                <span class="save-hint" id="knowledge-consol-hint"></span>
+              </section>
             </div>
             <div class="settings-page" data-settings="skills">
               <div class="settings-embedded-body skills-main-body" id="settings-skills-body">
@@ -1425,7 +1532,7 @@
                     </div>
                   </div>
                   <div class="skill-settings-view" data-skill-view="catalog">
-                    <div class="plugin-settings-back-row defined-model-toolbar plugin-catalog-toolbar">
+                    <div class="settings-subpage-back-row defined-model-toolbar settings-subpage-toolbar">
                       <button type="button" class="ghost-btn" id="skill-catalog-back">返回技能</button>
                       <button type="button" class="ghost-btn" id="skill-catalog-refresh">刷新目录</button>
                       <span class="save-hint" id="skill-catalog-hint"></span>
@@ -1435,7 +1542,7 @@
                       <input type="search" class="skills-search" id="skill-catalog-search" placeholder="搜索 skills.sh 市场（至少 2 个字符）…" autocomplete="off" />
                     </div>
                     <div class="skills-grid-wrap">
-                      <div class="skills-grid plugin-grid" id="skill-catalog-list"><p class="skills-empty">加载中…</p></div>
+                      <div class="skills-grid catalog-grid" id="skill-catalog-list"><p class="skills-empty">加载中…</p></div>
                     </div>
                     <div class="skills-pagination" id="skill-catalog-pagination" hidden>
                       <button type="button" class="ghost-btn" id="skill-catalog-page-prev" disabled>上一页</button>
@@ -1463,7 +1570,7 @@
                     </div>
                   </div>
                   <div class="mcp-settings-view" data-mcp-view="catalog">
-                    <div class="plugin-settings-back-row defined-model-toolbar plugin-catalog-toolbar">
+                    <div class="settings-subpage-back-row defined-model-toolbar settings-subpage-toolbar">
                       <button type="button" class="ghost-btn" id="mcp-catalog-back">返回 MCP</button>
                       <button type="button" class="ghost-btn" id="mcp-catalog-refresh">刷新目录</button>
                       <button type="button" class="ghost-btn" id="mcp-catalog-sources-save">保存目录源</button>
@@ -1479,56 +1586,12 @@
                       <nav class="skills-category-tabs" id="mcp-catalog-filter-tabs" aria-label="MCP 市场筛选"></nav>
                     </div>
                     <div class="skills-grid-wrap">
-                      <div class="skills-grid plugin-grid" id="mcp-catalog-list"><p class="skills-empty">加载中…</p></div>
+                      <div class="skills-grid catalog-grid" id="mcp-catalog-list"><p class="skills-empty">加载中…</p></div>
                     </div>
                     <div class="skills-pagination" id="mcp-catalog-pagination" hidden>
                       <button type="button" class="ghost-btn" id="mcp-catalog-page-prev" disabled>上一页</button>
                       <span class="skills-page-info" id="mcp-catalog-page-info">1 / 1</span>
                       <button type="button" class="ghost-btn" id="mcp-catalog-page-next" disabled>下一页</button>
-                    </div>
-                  </div>
-                </div>
-                <div class="skills-page" data-skills-tab="plugins">
-                  <div class="plugin-settings-view active" data-plugin-view="list">
-                    <div class="skills-add-toolbar">
-                      <button type="button" class="primary-btn" id="plugin-add-btn">添加</button>
-                      <button type="button" class="ghost-btn" id="plugin-catalog-open-btn">市场</button>
-                      <span class="save-hint" id="plugin-install-hint"></span>
-                    </div>
-                    <div class="skills-list-toolbar">
-                      <input type="search" class="skills-search" id="plugin-search" placeholder="搜索插件名称、简介、ID…" autocomplete="off" />
-                      <nav class="skills-category-tabs" id="plugin-category-tabs" aria-label="插件分类"></nav>
-                    </div>
-                    <div class="skills-grid-wrap">
-                      <div class="skills-grid plugin-grid" id="plugin-list"><p class="skills-empty">加载中…</p></div>
-                    </div>
-                    <div class="skills-pagination" id="plugin-pagination" hidden>
-                      <button type="button" class="ghost-btn" id="plugin-page-prev" disabled>上一页</button>
-                      <span class="skills-page-info" id="plugin-page-info">1 / 1</span>
-                      <button type="button" class="ghost-btn" id="plugin-page-next" disabled>下一页</button>
-                    </div>
-                  </div>
-                  <div class="plugin-settings-view" data-plugin-view="catalog">
-                    <div class="plugin-settings-back-row defined-model-toolbar plugin-catalog-toolbar">
-                      <button type="button" class="ghost-btn" id="plugin-catalog-back">返回插件</button>
-                      <button type="button" class="ghost-btn" id="plugin-catalog-refresh">刷新目录</button>
-                      <button type="button" class="ghost-btn" id="plugin-catalog-sources-save">保存目录源</button>
-                      <span class="save-hint" id="plugin-catalog-hint"></span>
-                    </div>
-                    <p class="settings-page-desc">官方与扩展插件目录；企业可添加内网 catalog.json 地址（HTTPS）。</p>
-                    <label class="field">
-                      <span class="field-label">扩展目录 URL（每行一个）</span>
-                      <textarea id="plugin-catalog-source-url" rows="2" placeholder="https://intranet.example.com/dieyun-plugins/catalog.json"></textarea>
-                    </label>
-                    <label class="field">
-                      <span class="field-label">从 URL 直接安装（zip 包地址）</span>
-                      <div class="plugin-catalog-url-row">
-                        <input type="text" id="plugin-catalog-direct-url" placeholder="https://example.com/dieyun-plugin.zip" autocomplete="off" />
-                        <button type="button" class="ghost-btn" id="plugin-catalog-direct-install">安装</button>
-                      </div>
-                    </label>
-                    <div class="skills-grid-wrap">
-                      <div class="skills-grid plugin-grid" id="plugin-catalog-list"><p class="skills-empty">加载中…</p></div>
                     </div>
                   </div>
                 </div>
@@ -1551,17 +1614,6 @@
                       <button type="button" class="ghost-btn" id="automation-page-next" disabled>下一页</button>
                     </div>
                   </div>
-                </div>
-              </div>
-            </div>
-            <div class="settings-page" data-settings="components">
-              <div class="components-panel">
-                <div class="defined-model-toolbar">
-                  <button type="button" class="ghost-btn" id="components-refresh-btn">刷新</button>
-                  <span class="save-hint" id="components-hint"></span>
-                </div>
-                <div id="components-list">
-                  <div class="components-empty">加载中…</div>
                 </div>
               </div>
             </div>
@@ -1593,20 +1645,23 @@
               <div class="help-usage-panel">
                 <section class="help-usage-section">
                   <h3>概览</h3>
-                  <p>叠云 Agent 是本地优先的桌面 AI 助手：在对话中调用模型，并通过本机 Gateway 读写工作区、执行 Shell、联网抓取、查库与浏览器自动化等。左侧为会话历史，中间为对话区，标题栏可打开<strong>工作区面板</strong>（文件 / 变更 / 终端 / 浏览器）。顶部菜单提供<strong>设置</strong>、<strong>手机连接</strong>与<strong>帮助</strong>。</p>
+                  <p>叠云 Agent 是本地优先的桌面 AI 助手：在对话中调用模型，并通过本机 Gateway 读写工作区、执行 Shell、联网抓取与浏览器自动化等。左侧为会话历史，中间为对话区，标题栏右侧可打开<strong>工作区面板</strong>（变更 / 源码管理 / 终端 / 文件 / 产物 / 上下文 / 子代理 / 代码索引 / 结构索引等，SSH 工作空间另有 SSH 与浏览器视图）。顶部菜单只有三组：<strong>设置</strong>、<strong>连接</strong>（手机连接 · Agent 互通）与<strong>帮助</strong>。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>对话与 Composer</h3>
-                  <p>输入框下方可选<strong>工作空间</strong>（本地文件夹或远程 SSH）、<strong>模型</strong>（Auto 或指定模型）、<strong>Agent / Plan</strong> 模式。支持粘贴或拖入图片作为附件；输入 <code>@Codebase</code> 可对工作区做语义检索。工作区面板「上下文」图标为圆环，指示当前上下文用量估算。</p>
+                  <p>输入框下方可选<strong>工作空间</strong>（本地文件夹或远程 SSH）、<strong>模型</strong>（Auto 或指定模型）、<strong>Agent / Plan</strong> 模式。支持粘贴或拖入图片作为附件；点麦克风图标或按 <code>Ctrl+M</code> 可语音输入（录完批量转写为文字）。输入 <code>@Codebase</code> 可对工作区做语义检索。工作区面板「上下文」图标为圆环，指示当前上下文用量估算。</p>
+                  <p><strong>运行中继续说话</strong>：Agent 跑着时按 Enter 把消息排进队列，发送键临时变成停止；队列里的消息可逐条发送、编辑或清空。</p>
+                  <p><strong>路径权限图标</strong>（输入框右侧的锁）：点一下等价于在「设置 → 沙箱」切到「完全放开」，或退回上一档；两处是同一个旋钮。</p>
                   <p><strong>Agent 模式</strong>：单 Agent 直接调用工具完成任务，改动写入当前工作区（非 Plan 隔离时）。</p>
                   <p><strong>Plan 模式</strong>：规划师拆解子任务，执行器在 git worktree 中并行改代码，规划师验收后在侧栏「变更」审核 diff，勾选<strong>应用已选</strong>写回主区或<strong>放弃全部</strong>。模式由输入框旁 Agent / Plan 切换决定，不会根据任务内容自动改道。</p>
                   <p>普通任务支持<strong>撤回</strong>（还原本轮文件变更）与 Plan 中断后的<strong>检查点续跑</strong>；二者机制不同，检查点不能替代逐步撤文件。</p>
+                  <p><strong>子代理</strong>：复杂任务里 Agent 可派生 subagent 并行干活，各自只回一份结论；进度与产出在侧栏「子代理」视图里看。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>工作空间与侧栏</h3>
                   <p><strong>本地文件夹</strong>：Agent 读写、Shell、索引均相对该目录；未选择时使用 <code>~/.dieyun/workspace/</code> 默认目录。</p>
                   <p><strong>远程 SSH</strong>：通过 SSH 连接远程主机并选择工作目录；支持记住登录、主机指纹校验、端口转发，以及远程 Agent / Gateway 部署。文件浏览、终端与工具调用在远程上下文中执行。内置浏览器在本机运行，因此在 SSH 工作空间里打开 <code>localhost</code> / <code>127.0.0.1</code> 地址时会自动建立端口转发（优先占用同号本地端口）再加载，地址栏仍显示你输入的远端地址。</p>
-                  <p>侧栏四个视图：<strong>文件</strong>（层级浏览与打开）、<strong>变更</strong>（Plan worktree diff 与应用）、<strong>终端</strong>（交互式 Shell 输出）、<strong>浏览器</strong>（内嵌页面预览与自动化）。</p>
+                  <p>侧栏视图（图标自上而下）：<strong>变更</strong>（本轮与 Plan worktree 的 diff，可应用/放弃）、<strong>源码管理</strong>（git 状态与提交）、<strong>终端</strong>（交互式 Shell 输出）、<strong>SSH 远程</strong>（连接状态 / 远程索引 Agent / 会话副本，仅在远程工作空间出现）、<strong>浏览器</strong>（内嵌页面预览与自动化）、<strong>文件</strong>（层级浏览、打开与编辑）、<strong>产物</strong>（本会话生成或改动过的文件）、<strong>上下文</strong>（用量圆环、分段预算、压缩统计、记忆命中）、<strong>子代理</strong>、<strong>代码索引</strong>、<strong>结构索引</strong>。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>Worktree（Plan 隔离副本）</h3>
@@ -1620,14 +1675,14 @@
                   <p><strong>本机 vs 远程工作空间</strong></p>
                   <ul class="help-usage-list">
                     <li><strong>本地文件夹</strong>：设置页可列出并删除 <code>.dieyun/worktrees</code> 下的 run；与侧栏「变更」配合使用。</li>
-                    <li><strong>SSH</strong>：Plan 在远程执行，副本在远程主机文件系统中。设置页<strong>无法列出</strong>远程副本（仅管理本机路径）；审改动仍用侧栏「变更」。若需在本机查看目录，请在 Windows 打开对应本地映射路径。</li>
+                    <li><strong>SSH</strong>：Plan 在远程执行，副本落在<strong>远程主机</strong>的文件系统里，同一会话固定复用一份；本机没有对应目录。位置与未应用改动看侧栏「SSH 远程 → 会话副本」，审改动仍用侧栏「变更」。设置页只管理本机 <code>.dieyun/worktrees</code>，列不出远程副本。</li>
                     <li><strong>未设置工作空间</strong>：列表为空。请先在对话页顶部选择本地 Git 项目文件夹后再刷新。</li>
                   </ul>
                   <p><strong>设置 → Worktree 字段</strong></p>
                   <ul class="help-usage-list">
                     <li><strong>最多保留 run 数</strong>：超出按最旧删除；<code>0</code> 表示不限数量。默认 <code>25</code>。</li>
                     <li><strong>总容量上限 (GB)</strong>：所有 run 合计上限；<code>0</code> 表示不限。</li>
-                    <li><strong>保存 / 立即按规则清理</strong>：保存并立刻清理；不会删侧栏「变更」中<strong>待审</strong>的 run（列表标「待审」）。</li>
+                    <li><strong>保存并清理</strong>：保存上限并立刻按规则清理；不会删侧栏「变更」中<strong>待审</strong>的 run（列表标「待审」）。</li>
                     <li><strong>刷新列表 / 删除</strong>：查看遗留 run 与占用；待审 run 需先在「变更」应用或放弃。</li>
                   </ul>
                   <p><strong>自动清理时机：</strong>Plan 结束并应用或放弃后删除对应 run；保存设置或任务结束后按上限回收。异常退出可能留残留，可刷新后手动删或调低上限。</p>
@@ -1647,40 +1702,48 @@
                 <section class="help-usage-section">
                   <h3>结构索引</h3>
                   <p>在右侧工作面板的「结构索引」页维护：查看状态、试查符号、重建索引；「保存后自动增量」开关在「设置 → 权限」。结构索引解析模块 import、函数/类符号与静态调用关系。Agent 用它查「谁依赖谁 / 谁调用谁 / 改一处会影响哪」；与「代码索引」互补（后者偏文本/语义搜片段）。</p>
-                  <p>本地分析 JS/TS/Python/Go/Rust，供 Agent 工具 <code>graph</code>（<code>operation</code>：<code>module_deps</code> / <code>find_symbol</code> / <code>semantic_find</code> / <code>callers</code> / <code>callees</code> / <code>impact</code> / <code>lsp_callers</code>）使用。</p>
-                  <p><strong>语义找符号</strong>（<code>graph</code> 的 <code>semantic_find</code>）需先在「向量索引」中配置并启用 Embedding 模型；点击「重建」时会自动构建符号向量。</p>
+                  <p>本地分析 JS/TS/Python/Go/Rust，供 Agent 工具 <code>graph</code>（<code>operation</code>：<code>module_deps</code> / <code>find_symbol</code> / <code>callers</code> / <code>callees</code> / <code>impact</code> / <code>lsp_callers</code>）使用。</p>
                   <p>与向量索引（<code>@Codebase</code> / <code>codebase_search</code>）相互独立，不依赖 MCP。SSH 工作区支持远程结构索引；<code>graph</code> 的 <code>lsp_callers</code> 在 SSH 下会使用远程 rg/grep 补强调用点。</p>
                   <p><strong>自动增量更新</strong>（默认开）：保存源文件或打开工作区后，在后台增量更新索引；需先对工作区完成一次「重建」。关闭后仅手动重建时更新。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>主题</h3>
                   <p>切换浅色 / 深色主题，调节字体大小（90%～150%）、窗口透明度（50%～100%）与色温（偏冷 / 中性 / 偏暖），均保存在本机。</p>
-                  <p>可单独设置思考 trace 的展示偏好：推理摘要、思考标题，以及 Shell / 编辑工具结果的默认展开状态。</p>
+                  <p>可单独设置思考 trace 的展示偏好：推理摘要、思考标题，以及 Shell / 编辑工具结果的默认展开状态；也可关掉「显示完成验收提示」（每轮结束时按证据提示「做完了没」，只提示、不自动续跑）。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>编码参数</h3>
                   <p>在「<strong>帮助 → 编码参数</strong>」按 <strong>Context 档位</strong>分别保存全部编码参数（模型与段预算、护栏、Harness 等）。在供应商/模型上指定档位后，对话会自动套用对应配置。修改后立即生效并保存到本机。</p>
-                  <p><strong>档位说明</strong>：默认、16K、32K、64K、128K、200K、512K、1M、2M——各档独立保存，互不影响。8K 档已删除，旧数据自动并入「16K」；模型真实窗口更小时，可在「模型 → 上下文窗口」单独填写覆盖档位。「恢复当前」只重置正在编辑的那一档。</p>
+                  <p><strong>档位说明</strong>：默认、16K、32K、64K、128K、200K、512K、1M、2M——各档独立保存，互不影响。8K 档已删除，旧数据自动并入「16K」；模型真实窗口更小时，可在「模型 → 上下文窗口」单独填写覆盖档位。「恢复」只重置正在编辑的那一档。</p>
                   <p><strong>模型与段预算</strong>（每档可调）：温度、上下文窗口、最大输出 Tokens、系统预留 Tokens、压缩触发比例、工具调用段上限、Agent 轮次段上限。切换 Composer 模型时会自动解析该模型绑定的档位；圆环上下文用量亦按当前档位估算。</p>
+                  <p><strong>档位在 Main 侧同样生效</strong>：这些值除了界面预算，也会写入本机 <code>model-runtime-by-tier.json</code>，主进程的压缩阈值、planner、定时计划都按同一档位读取——不是「只在界面上看起来按档」。</p>
                   <p><strong>护栏与其它</strong>（每档可调）：工具护栏、Harness、UI 联动、上下文注入阈值、LLM 重试、编辑器与 Diff 等，同样随档位分别保存。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>权限</h3>
-                  <p><strong>本机权限</strong>：读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、不提供开关；可逐项开关的是本机控制、路径限制（含「完全放开」）等，关闭后对应工具不再注册。权限仅在本地回环 Gateway 中生效。</p>
+                  <p><strong>本机权限</strong>：读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、不提供开关（沙箱档位决定它们能越界到哪）。<strong>启用本机控制</strong>是总开关：关掉后 Agent 不能执行命令、读写本机文件、打开链接与浏览器，也不做电脑控制。权限仅在本地回环 Gateway 中生效。</p>
+                  <p><strong>启用电脑控制</strong>（默认关）：允许 Agent 截屏并操作鼠标键盘；首次执行键鼠动作会先请求确认。</p>
+                  <p><strong>代码索引 / 结构索引</strong>：这里管的是「保存后自动增量」，索引本身的查看、试搜与重建在侧栏对应视图。</p>
                   <p><strong>启用 LSP 诊断注入</strong>（默认开）：发消息前拉取 TS/Python 等语言服务报错，注入 Agent 上下文（类似 Cursor Problems）；需本地工作区与读取文件权限。</p>
                   <p><strong>工位监控上报</strong>（默认开启）：内网 Socket.IO 实时上报 CPU / 键鼠统计，可在「设置 → 权限」关闭。</p>
-                  <p><strong>长程 Agent 任务</strong>（默认关）：打开即生效，无需改编码参数。适合跨很多工具轮次的长任务：<strong>不启用文件回撤</strong>；撞上轮次上限时自动续段（最多 20 段）；<strong>不再硬拦</strong>同文件反复读取、只读探索步数、重复工具调用。每段工具次数与轮次上限自动提高。页脚显示「· 长程」。Plan 下 worktree 隔离仍有效；Agent 下建议在重要节点自行 <code>git commit</code>。</p>
                   <p>另可设置<strong>开机自启</strong>（安装包环境；开发模式不可用）。</p>
                 </section>
                 <section class="help-usage-section">
+                  <h3>沙箱</h3>
+                  <p>「设置 → 沙箱」决定 Agent 读写磁盘、执行命令、联网抓取的越界边界，改完即时生效。三档：<strong>只读</strong>（不落盘，写文件与会改文件的命令逐次确认）、<strong>工作区内可写</strong>（工作区内直接改；写工作区外、装进系统目录、联网等越界动作先问一次）、<strong>完全放开</strong>（整盘可写可跑，不再询问）。</p>
+                  <p>越界确认是 ask-once：批准按「本次会话 × 操作类别 × 所在目录」记住，换个任务或换个目录会重新问；没人可问（超时）即拒绝。无论哪一档，卸载、格式化、删系统目录这类高危命令都直接拒绝。输入框右侧的路径权限图标与这里同一件事。</p>
+                </section>
+                <section class="help-usage-section">
                   <h3>知识</h3>
-                  <p>三层持久化知识，在「设置 → 知识」维护：</p>
+                  <p>以下几类持久化知识，大部分在「设置 → 知识」维护：</p>
                   <p><strong>dieyun.md</strong>（<code>~/.dieyun/dieyun.md</code>）：跨项目个人规则与编码偏好。注入模式：始终 / 自动（编程类任务）/ 手动（<code>@dieyun.md</code>）。</p>
-                  <p><strong>AGENTS.md</strong>（<code>.dieyun/AGENTS.md</code>）：当前工作空间项目地图（目录、命令、约定）。维护模式：自动合并 / 仅草稿 / 关闭；auto 模式下可开启采纳前 Diff 预览。</p>
+                  <p><strong>AGENTS.md</strong>（<code>.dieyun/AGENTS.md</code>）：当前工作空间项目地图（目录、命令、约定）。维护模式：自动合并 / 仅草稿 / 关闭；auto 模式下可开启采纳前 Diff 预览。<strong>文件上限 24,000 字</strong>（超出时按段裁剪，不再整段丢弃）；<strong>每轮只注入其中约 13,500 字</strong>的「概览 + 踩坑 + 命令」三段，其余段由 Agent 按需读取。维护记录只保留最近 5 条。</p>
+                  <p><strong>长期记忆 · 项目记忆</strong>（自动沉淀）：跨会话的经验由归纳器写入两处 —— 用户级偏好在<strong>本机库</strong>（带语义索引，可跨项目召回），项目架构与踩坑在仓库里的 <code>.dieyun/memory.md</code>（人可读、可手改、可 diff、可提交）。Agent 也可用 <code>memory_recall</code> / <code>memory_forget</code> 主动查与忘；命中条数见侧栏「上下文」。</p>
+                  <p><strong>定时知识归纳</strong>：可选 开启 / 闲时 / 关闭，并设置间隔与整理范围（近期对话、长期记忆、项目记忆、AGENTS.md）。归纳在后台由主程序执行，不依赖窗口开着；定时归纳用设置页的默认文本模型，每轮任务收尾的归纳跟随该轮所用模型。选「关闭」会同时停掉两者；「闲时」遇到任务进行中先跳过，任务结束后补跑。项目记忆落在仓库 <code>.dieyun/memory.md</code>，衰减与向量重建仍由程序执行。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>组件</h3>
-                  <p>Monaco 与 Linux Node 从官方源按需下载；BGE 随安装包内置。是否启用请在「向量索引」中设置。</p>
+                  <p>Monaco 与 Linux Node 从官方源按需下载；BGE 随安装包内置，缺失时可手动安装 zip。是否启用请在「向量索引」中设置。</p>
                   <p>在「设置 → 组件」查看健康、安装与运行状态；Monaco 与 Linux Node 支持重新下载或手动安装。</p>
                 </section>
                 <section class="help-usage-section">
@@ -1693,20 +1756,18 @@
                   <p>MCP（Model Context Protocol）连接外部工具服务。在列表中启用后，叠云启动对应进程并将其工具（<code>mcp_*</code> 前缀）注册到 Agent。支持本地命令、远程 HTTP/SSE，以及<strong>市场</strong>从官方 Registry 安装。部分服务需在环境变量或卡片配置中填写 Token / API Key。</p>
                 </section>
                 <section class="help-usage-section">
-                  <h3>插件</h3>
-                  <p>插件扩展 Gateway 能力（如数据库只读查询等）。本地已安装插件在列表中管理；<strong>市场</strong>可浏览官方与扩展目录（支持配置内网 <code>catalog.json</code> URL），一键安装到本地插件目录。</p>
-                </section>
-                <section class="help-usage-section">
                   <h3>定时</h3>
                   <p>按 RRULE 调度自动执行任务，保存在本机 <code>plans.json</code>。到点后创建专用会话，使用完整 Agent 工具循环执行，结果投递到指定对话。适合巡检、日报、定期同步等重复性工作。</p>
+                  <p>还有一种<strong>目标</strong>型任务：只写目标不起时间，配一条<strong>验收命令</strong>（退出码 0 即通过）与尝试次数、时间上限，Agent 会反复迭代直到验收通过或预算用尽；可为它指定工作区与模型。</p>
                 </section>
                 <section class="help-usage-section">
-                  <h3>手机连接</h3>
-                  <p>标题栏菜单「手机连接」展示内网 URL 与二维码。手机浏览器扫码后可查看会话、同步思考过程、发送任务与停止任务；<strong>实际执行仍在电脑端</strong>完成。需与电脑在同一局域网。</p>
+                  <h3>连接（手机 / Agent 互通）</h3>
+                  <p><strong>手机连接</strong>：标题栏「连接」→「手机连接」标签页展示内网 URL 与二维码。手机浏览器扫码后可查看会话、同步思考过程、发送任务与停止任务；<strong>实际执行仍在电脑端</strong>完成。需与电脑在同一局域网。</p>
+                  <p><strong>Agent 互通</strong>：同一内网的多台叠云可以互相发消息。在「Agent 互通」标签页起个名字并勾选<strong>启用内网互通</strong>；对方首次来信时本机弹窗确认，不需要配对码，撤销授权后要重新确认。允许后对方消息投递到它单独的会话里；只有再勾选<strong>收到消息自动跑一轮</strong>，对方一句话才会直接触发本机执行——默认只收消息、不动手。</p>
                 </section>
                 <section class="help-usage-section">
                   <h3>帮助中心</h3>
-                  <p><strong>统计信息</strong>：Gateway 连接状态、今日按键与 Token、工具 Harness 成功率、上下文压缩次数与成功率、模型用量图表等。</p>
+                  <p><strong>统计信息</strong>：Gateway 连接状态、今日按键与 Token、工具 Harness（近 200 次调用）的成功率与拦截、模型用量图表等；上下文压缩次数与成功率在侧栏<strong>「上下文」</strong>面板。</p>
                   <p><strong>运行日志</strong>：查看应用主进程与 Gateway 最近日志，支持刷新、清理与复制（默认保留 3 天）。</p>
                   <p><strong>编码参数</strong>：模型与段预算、Agent 护栏与上下文注入阈值等，详见上文「编码参数」小节。</p>
                   <p><strong>关于应用</strong>：当前版本与简要说明。关闭窗口后应用可驻留系统托盘，Gateway 与定时任务继续在后台运行。</p>
@@ -2021,11 +2082,14 @@
     <script src="./renderer-constants.js"></script>
     <script src="./renderer-theme.js"></script>
     <script src="./renderer-mobile.js"></script>
+    <script src="./renderer-peer.js"></script>
+    <script src="./renderer-connect.js"></script>
     <script src="./renderer-model-capabilities.js"></script>
     <script src="./renderer-model-runtime.js"></script>
     <script src="./renderer-model-settings.js"></script>
     <script src="./renderer-codebase-panel.js"></script>
     <script src="./renderer-graph-panel.js"></script>
+    <script src="./renderer-index-panel.js"></script>
     <script src="./renderer-worktrees-settings.js"></script>
     <!-- gateway + workspace panels -->
     <script src="./renderer-gateway.js"></script>
@@ -2069,6 +2133,7 @@
     <script src="./renderer-chat-live-run.js"></script>
     <script src="./renderer-chat-bubbles.js"></script>
     <script src="./renderer-chat-render.js"></script>
+    <script src="./renderer-chat-nav.js"></script>
     <script src="./renderer-session-message-cache.js"></script>
     <script src="./renderer-agent-session.js"></script>
     <script src="./agent/trace-store.js"></script>
@@ -2079,17 +2144,14 @@
     <script src="./renderer-pane-layout.js"></script>
     <script src="./renderer-tool-results.js"></script>
     <script src="./renderer-dialog-utils.js"></script>
-    <!-- settings: permissions, skills, plugins -->
+    <!-- settings: permissions, skills, mcp -->
     <script src="./renderer-permissions.js"></script>
     <script src="./renderer-sandbox-approval.js"></script>
     <script src="./renderer-dieyun-md.js"></script>
     <script src="./renderer-encoding-params.js"></script>
     <script src="./renderer-help.js"></script>
     <script src="./renderer-update.js"></script>
-    <script src="./renderer-plugin-settings.js"></script>
-    <script src="./renderer-plugin-catalog.js"></script>
     <script src="./renderer-settings-shell.js"></script>
-    <script src="./renderer-components.js"></script>
     <script src="./renderer-skills-grid.js"></script>
     <script src="./renderer-skills-ui.js"></script>
     <script src="./renderer-skill-catalog.js"></script>

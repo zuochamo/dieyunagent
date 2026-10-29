@@ -591,11 +591,6 @@ function openMermaidLightbox(sourceWrap) {
   panel.appendChild(resizeHandle);
   overlay.appendChild(panel);
 
-  overlay.addEventListener('click', (ev) => {
-    if (ev.target === overlay) closeMermaidLightbox();
-  });
-  panel.addEventListener('click', (ev) => ev.stopPropagation());
-
   document.body.appendChild(overlay);
   document.addEventListener('keydown', onMermaidLightboxKeydown, true);
   closeBtn.focus();
