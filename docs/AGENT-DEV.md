@@ -45,6 +45,13 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - `src/renderer/renderer-agent-tools.js` — Renderer 侧的 UI 工具执行体；`session_new` 复用 `createNewSession`（与「新对话」按钮同一条流程），勿另写一遍建会话 + 绑工作空间
 - `src/gateway/fs-edit-file.js` — 本地 Gateway 与 remote host 共用 `fs.edit_file`
 
+### 模型选型（Auto / 手动）
+
+- `src/renderer/renderer-composer.js` — `resolveComposerModelForSend` 是唯一选型点。Auto 只按**结构性事实**选：本条消息有无图片 → 设置里声明为 `vision` 的模型前置；其余一律「候选顺序即偏好」（供应商启用顺序 → 自定义模型顺序）。**不要**再用模型名正则猜「谁更强 / 该给复杂请求换 pro」：模型一换代就静默失效，而设置里没有可维护的对应字段。
+- `src/agent/model-runtime-by-tier.js` — `resolveModelFacts(settings, route)` 是「route → 模型事实」唯一解析点（模型名 / 供应商 / 模态 / 自带窗口 / 上下文档位，`auto-*` 前缀同一口径）；`resolveContextTierIdFromSettings` / `resolveModelContextWindowFromSettings` 只是它的薄封装。勿再在 Main / Renderer 各自 `indexOf(':')` 拼 supplierId。
+- `src/renderer/renderer-model-runtime.js` — Auto 下 `resolveActiveModelRoute` 取**上一次发送真正选中的 route**（由 `noteResolvedModelRoute` 回填），Renderer 预算与 Main 压缩才同口径。
+- `scripts/report-auto-model-misfit.cjs` — 只读报表：从既有 `request_snapshots` 量「Auto 选中的模型有没有顶穿预算」。要加「route → 近期失败」这类试错账本之前先跑它，别凭感觉加机制。
+
 ### 手机端
 
 - `src/mobile/public/app.js` — WebView UI、WebSocket、`task.progress`

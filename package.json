@@ -70,6 +70,7 @@
     "test:ssh-reconnect-targets": "node scripts/test-ssh-reconnect-targets.cjs",
     "test:workspace-remote-runtime": "node scripts/test-workspace-remote-runtime.cjs",
     "test:main-shell": "node scripts/test-main-shell.cjs",
+    "report:auto-model-misfit": "node scripts/report-auto-model-misfit.cjs",
     "lint:agent": "eslint \"src/agent/**/*.js\" \"scripts/test-*.cjs\"",
     "generate:rpc-catalog": "node scripts/generate-rpc-catalog.cjs",
     "verify:rpc-catalog": "node scripts/generate-rpc-catalog.cjs --check",
