@@ -1,6 +1,6 @@
 {
   "name": "dieyunagent",
-  "version": "0.1.57",
+  "version": "0.1.59",
   "description": "叠云 agent",
   "main": "src/main.js",
   "scripts": {
@@ -14,17 +14,19 @@
     "start": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-remote-gateway-pack.cjs && node scripts/ensure-mcp-bundled.cjs && electron .",
     "dev": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-remote-gateway-pack.cjs && node scripts/ensure-mcp-bundled.cjs && electron . --enable-logging",
     "dev:fast": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-mcp-bundled.cjs && electron . --enable-logging",
-    "build": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway:lite && npm run pack:optional-assets && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
-    "build:dir": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway:lite && npm run pack:optional-assets && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win --dir && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
-    "build:nsis": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway:lite && npm run pack:optional-assets && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
+    "build": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
+    "build:dir": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win --dir && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
+    "build:nsis": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
     "build:installer": "npm run build:nsis",
     "sync:updates": "node scripts/sync-updates-from-dist.mjs",
     "verify:asar": "node scripts/verify-packaged-asar.cjs",
     "verify:remote-pack": "node scripts/verify-remote-gateway-pack.cjs",
+    "verify:remote-agent-socket": "node scripts/verify-remote-agent-socket.cjs",
+    "verify:remote-agent-fs": "node scripts/verify-remote-agent-fs.cjs",
     "verify:mcp-bundled": "node scripts/verify-mcp-bundled.cjs",
     "serve:updates": "node scripts/update-static-server.mjs",
     "serve:online-users": "npm --prefix deploy/online-users start",
-    "check:renderer": "python scripts/check-renderer-globals.py && python scripts/check-renderer-critical.py",
+    "check:renderer": "python scripts/check-renderer-globals.py && python scripts/check-renderer-critical.py && node scripts/check-renderer-index-panel.cjs",
     "check:contracts": "node scripts/check-repo-contracts.cjs",
     "check:js": "tsc -p tsconfig.check.json --noEmit --pretty false",
     "test:renderer": "npm run check:renderer",
@@ -54,10 +56,15 @@
     "test:session-context": "node scripts/test-session-context.cjs",
     "test:agent-system-prompt": "node scripts/test-agent-system-prompt.cjs",
     "test:system-prompt-prep": "node scripts/test-system-prompt-prep.cjs",
+    "test:knowledge-maintainer": "node scripts/test-knowledge-maintainer.cjs",
+    "test:project-memory-file": "node scripts/test-project-memory-file.cjs",
     "test:llm-tool-call-fallback": "node scripts/test-llm-tool-call-fallback.cjs",
     "test:monitor-outbox": "node scripts/test-monitor-outbox.cjs",
     "test:planner-parallel": "node scripts/test-planner-parallel.cjs",
     "test:mobile": "node scripts/test-mobile-smoke.cjs",
+    "test:peer": "node scripts/test-peer-store.cjs && node scripts/test-peer-tools.cjs && node scripts/test-peer-mesh.cjs",
+    "test:peer-mesh": "node scripts/test-peer-mesh.cjs",
+    "test:peer-tools": "node scripts/test-peer-tools.cjs",
     "test:mcp-store": "node scripts/test-mcp-store.cjs",
     "test:app-updater-feeds": "node scripts/test-app-updater-feeds.cjs",
     "test:ssh-reconnect-targets": "node scripts/test-ssh-reconnect-targets.cjs",
@@ -79,7 +86,6 @@
     "test:reviewer-json": "node scripts/test-reviewer-json.cjs",
     "test:core-bridge": "node scripts/test-core-bridge.cjs",
     "test:request-snapshot": "node scripts/test-request-snapshot.cjs",
-    "test:builtin-embedding-rust": "node scripts/test-builtin-embedding-rust.cjs",
     "test:rust-agent-loop": "node scripts/test-rust-agent-loop.cjs",
     "test:rust-agent-loop-smoke": "node scripts/test-rust-agent-loop-smoke.cjs",
     "test:rust-loop-runner": "node scripts/test-rust-loop-runner.cjs",
@@ -94,10 +100,7 @@
     "test:agent-round-text": "node scripts/test-agent-round-text.cjs",
     "test:llm-channel": "node scripts/test-llm-channel.cjs",
     "pack:remote-gateway": "node scripts/pack-remote-gateway.cjs",
-    "pack:remote-gateway:lite": "node scripts/pack-remote-gateway.cjs --lite",
-    "pack:optional-assets": "node scripts/pack-optional-assets.mjs",
     "pack:deploy-defaults": "node scripts/pack-deploy-defaults.cjs",
-    "upload:optional-cos": "node scripts/upload-optional-cos.mjs",
     "postinstall": "electron-builder install-app-deps"
   },
   "author": "PixelOffice",
@@ -117,7 +120,6 @@
     "vitest": "3.2.4"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "electron-log": "^5.0.1",
     "electron-updater": "^6.1.7",
@@ -177,16 +179,10 @@
     "files": [
       "src/**/*",
       "assets/**/*",
-      "plugins/bundled/**/*",
-      "examples/plugins/**/*",
       "scripts/bootstrap.cjs",
       "!**/*.map",
       "!**/node_modules/**/*.{pdb,iobj,ipdb,obj,lib,ilk,exp,tlog}",
       "!**/node_modules/**/{test,tests,__tests__,docs,example,examples}/**",
-      "!**/node_modules/onnxruntime-web/**",
-      "!**/node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
-      "!**/node_modules/onnxruntime-node/bin/napi-v6/linux/**",
-      "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",
       "!**/node_modules/monaco-editor/**",
       "!**/node_modules/better-sqlite3/**",
       "!**/node_modules/better-sqlite3-multiple-ciphers/**",
@@ -218,8 +214,17 @@
         "from": "build/remote-gateway-pack",
         "to": "remote-gateway-pack",
         "filter": [
-          "**/*",
-          "!bin/node"
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/monaco-editor",
+        "to": "monaco-editor",
+        "filter": [
+          "min/**",
+          "!**/*.map",
+          "LICENSE",
+          "package.json"
         ]
       },
       {
@@ -245,7 +250,6 @@
       }
     ],
     "asarUnpack": [
-      "node_modules/onnxruntime-node/**/*.node",
       "node_modules/uiohook-napi/**/*.node",
       "node_modules/koffi/**/*.node",
       "node_modules/playwright-core/**/*"
