@@ -518,12 +518,30 @@ function setAgentsMdSettingsHint(text) {
   }
 }
 
+/** 维护模式的一句话说明：只讲当前选中项的效果（原来这段讲在设置页正文里） */
+const AGENTS_MD_MODE_HINTS = {
+  auto: '任务完成或 Agent 提议时直接合并进 .dieyun/AGENTS.md',
+  'draft-only': '只写 agents-draft 草稿，不改动 AGENTS.md',
+  off: '不再新增条目；已有内容照常读取'
+};
+
 function syncAgentsMdModeTabs(mode) {
   document.querySelectorAll('#agents-md-mode-tabs .agents-md-mode-tab').forEach((btn) => {
     const active = btn.dataset.mode === mode;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-checked', active ? 'true' : 'false');
   });
+  const hint = $('agents-md-mode-hint');
+  if (hint) hint.textContent = AGENTS_MD_MODE_HINTS[mode] || '';
+  // 「采纳前看 Diff」只在「自动合并」下有意义：其余模式整行置灰并禁用，
+  // 免得开关看着能点、实际上不生效。
+  const previewRow = $('agents-md-preview-row');
+  if (previewRow) {
+    const live = mode === 'auto';
+    previewRow.classList.toggle('is-dimmed', !live);
+    const box = previewRow.querySelector('input');
+    if (box) box.disabled = !live;
+  }
 }
 
 function initAgentsMdSettingsUI() {

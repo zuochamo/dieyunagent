@@ -1,8 +1,14 @@
-/* global window, document, $, settings, currentSessionId, messages, sessionActiveRuns, chatInput, composerSendBtn, isSending, isCurrentSessionSending, estimateContextTokensFallback, estimateMessagesTokensViaMain, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, lastComposerContextEstimate, reportTokensToMain, estimateTextTokens, getTextModelId, humanizeModelId, escapeHtml, CTX_LIMITS, dieyunI18n, invalidateSystemMessageCache */
+/* global window, document, $, settings, currentSessionId, messages, sessionActiveRuns, chatInput, composerSendBtn, isSending, isCurrentSessionSending, estimateContextTokensFallback, estimateMessagesTokensViaMain, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, lastComposerContextEstimate, reportTokensToMain, estimateTextTokens, getTextModelId, humanizeModelId, escapeHtml, CTX_LIMITS, dieyunI18n, invalidateSystemMessageCache, gatewayCall, toast */
 'use strict';
 
 const sessionContextEstimates = new Map();
 let activeRunWorkingTokens = null;
+/**
+ * 最近一次发送里**实际进入 system prompt** 的记忆条目（Main `prepSystemPrompt` 的 memoryAudit）。
+ * 只存最近一次：这是「本轮模型看到了什么」的事实，不是历史审计（历史在 request_snapshots）。
+ * @type {{ sessionId: string, audit: object | null } | null}
+ */
+let lastMemoryInjection = null;
 /** @type {Map<string, { tokensBefore: number, tokensAfter: number }>} */
 const sessionCompactionSnapshots = new Map();
 let lastContextAutoCollapseBand = 0;
@@ -345,6 +351,8 @@ function updateComposerContextStatsUi(used, capacity, ratio, sending) {
     )
   );
   setRow('ctx-stat-inflight', formatTokenCountFull(lastContextBreakdown.inflight));
+  renderMemoryInjectionRows();
+  bindMemorySessionControls();
   setRow('ctx-stat-budget', budgetLine);
   setRow('ctx-stat-requests', String(stats.llmRequests));
   setRow('ctx-stat-session-tokens', formatTokenCountFull(stats.totalTokens));
@@ -381,6 +389,150 @@ function updateComposerContextStatsUi(used, capacity, ratio, sending) {
   setRow('ctx-stat-safety-reserve', getContextReserveTokens().toLocaleString());
   setRow('ctx-panel-summary', `${formatCompactTokenCount(used)}/${formatCompactTokenCount(capacity)} · 剩 ${remainPct}%`);
   renderComposerModelUsageBreakdown(stats.modelStats);
+}
+
+/**
+ * 记录本轮注入事实（Renderer 只搬运：召回、阈值、kind 过滤、条数都在 Main）。
+ * @param {string} sessionId
+ * @param {object | null} audit prepSystemPrompt 返回的 memoryAudit
+ */
+function setLastMemoryInjectionAudit(sessionId, audit) {
+  lastMemoryInjection = {
+    sessionId: String(sessionId || ''),
+    audit: audit && typeof audit === 'object' ? audit : null
+  };
+  renderMemoryInjectionRows();
+}
+
+function formatMemoryAuditCell(block) {
+  if (!block) return '未注入';
+  const ids = Array.isArray(block.ids) ? block.ids : [];
+  const modeLabel =
+    block.mode === 'semantic'
+      ? '语义'
+      : block.mode === 'keyword'
+        ? '关键词'
+        : block.mode === 'recent'
+          ? '最近'
+          : '未命中';
+  const excluded = Number(block.excluded) || 0;
+  if (!ids.length) return `${modeLabel} · 0 条`;
+  const shown = ids
+    .slice(0, 4)
+    .map((id) => `#${id}`)
+    .join(' ');
+  return `${modeLabel} · ${ids.length} 条 · ${shown}${ids.length > 4 ? ' …' : ''}${
+    excluded > 0 ? `（按 kind 隐去 ${excluded}）` : ''
+  }`;
+}
+
+function renderMemoryInjectionRows() {
+  const audit = lastMemoryInjection && lastMemoryInjection.audit;
+  const setRow = (id, value, title) => {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = value;
+    if (title) el.title = title;
+    else el.removeAttribute('title');
+  };
+  if (!audit) {
+    setRow('ctx-memory-project', '—');
+    setRow('ctx-memory-global', '—');
+    setRow('ctx-memory-extra', '');
+    const emptyExtraRow = $('ctx-memory-extra-row');
+    if (emptyExtraRow) emptyExtraRow.hidden = true;
+    return;
+  }
+  setRow('ctx-memory-project', formatMemoryAuditCell(audit.project), audit.project ? `mode=${audit.project.mode || ''}` : '');
+  setRow('ctx-memory-global', formatMemoryAuditCell(audit.global), audit.global ? `mode=${audit.global.mode || ''}` : '');
+  const extras = [];
+  if (audit.handoff && audit.handoff.from) extras.push(`交接 ${audit.handoff.from}`);
+  if (audit.workMemory) {
+    extras.push(`工作记忆${audit.workMemory.runId ? ` ${audit.workMemory.runId}` : ''}`);
+  }
+  const extraRow = $('ctx-memory-extra-row');
+  if (extraRow) extraRow.hidden = extras.length === 0;
+  setRow('ctx-memory-extra', extras.join(' · '));
+}
+
+/**
+ * 会话维度的「沉淀了什么 / 忘掉」——唯一入口是 Gateway `memory.session_memories*`
+ * （写入时带 session_id，见 memory.long_add）。Renderer 只渲染，不判断该不该记。
+ */
+async function loadSessionMemories() {
+  const listEl = $('ctx-memory-session-items');
+  const forgetBtn = $('ctx-memory-session-forget');
+  const sid = String(typeof currentSessionId !== 'undefined' ? currentSessionId || '' : '');
+  if (!listEl) return;
+  if (!sid || typeof gatewayCall !== 'function') {
+    listEl.hidden = false;
+    listEl.textContent = '当前没有会话';
+    if (forgetBtn) forgetBtn.hidden = true;
+    return;
+  }
+  listEl.hidden = false;
+  listEl.textContent = '读取中…';
+  try {
+    const res = await gatewayCall('memory.session_memories', { sessionId: sid, limit: 50 });
+    const rows = res && Array.isArray(res.results) ? res.results : [];
+    if (!rows.length) {
+      listEl.textContent = '本会话没有沉淀记忆（旧版本写入的记忆没有会话来源）';
+      if (forgetBtn) forgetBtn.hidden = true;
+      return;
+    }
+    listEl.innerHTML = rows
+      .map((r) => {
+        const kind = r.kind && r.kind !== 'normal' ? ` [${escapeHtml(String(r.kind))}]` : '';
+        const imp = r.importance != null ? ` ·${r.importance}` : '';
+        return `<div class="context-stats-memory-item">#${escapeHtml(String(r.id))}${kind}${imp} ${
+          escapeHtml(String(r.content || '').slice(0, 120))
+        }</div>`;
+      })
+      .join('');
+    if (forgetBtn) {
+      forgetBtn.hidden = false;
+      forgetBtn.textContent = `忘掉这 ${rows.length} 条`;
+    }
+  } catch (err) {
+    listEl.textContent = `读取失败：${err && (err.message || err)}`;
+    if (forgetBtn) forgetBtn.hidden = true;
+  }
+}
+
+async function forgetSessionMemories() {
+  const listEl = $('ctx-memory-session-items');
+  const sid = String(typeof currentSessionId !== 'undefined' ? currentSessionId || '' : '');
+  if (!sid || typeof gatewayCall !== 'function') return;
+  try {
+    const res = await gatewayCall('memory.session_memories_forget', { sessionId: sid });
+    const n = Number(res && res.archived) || 0;
+    if (listEl) {
+      listEl.textContent = n ? `已归档 ${n} 条（可在记忆库里恢复）` : '没有可归档的记忆';
+    }
+    const forgetBtn = $('ctx-memory-session-forget');
+    if (forgetBtn) forgetBtn.hidden = true;
+    if (typeof toast === 'function') toast('记忆已归档', `${n} 条本会话沉淀的记忆已软归档`);
+  } catch (err) {
+    if (listEl) listEl.textContent = `归档失败：${err && (err.message || err)}`;
+  }
+}
+
+let memorySessionControlsBound = false;
+function bindMemorySessionControls() {
+  if (memorySessionControlsBound) return;
+  const btn = $('ctx-memory-session-btn');
+  const forgetBtn = $('ctx-memory-session-forget');
+  if (!btn && !forgetBtn) return;
+  memorySessionControlsBound = true;
+  if (btn) btn.addEventListener('click', () => void loadSessionMemories());
+  if (forgetBtn) {
+    forgetBtn.addEventListener('click', () => {
+      if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+        if (!window.confirm('把这期间由本会话沉淀的记忆全部归档？可在记忆库里恢复。')) return;
+      }
+      void forgetSessionMemories();
+    });
+  }
 }
 
 function estimateSystemPromptTokens(sessionId) {
@@ -493,6 +645,7 @@ function clearSessionCompactionSnapshot(sessionId) {
 
 if (typeof window !== 'undefined') {
   window.clearSessionCompactionSnapshot = clearSessionCompactionSnapshot;
+  window.setLastMemoryInjectionAudit = setLastMemoryInjectionAudit;
 }
 
 /** 圆环用「预计发送」历史量：优先压缩后工作集，否则用原始堆积估算 */

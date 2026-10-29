@@ -11,6 +11,8 @@ const EXPLORE_TOOL_NAMES = new Set([
   'lsp',
   'web_fetch',
   'web_search',
+  // 只读召回：研究子 Agent 需要「之前定过什么」时按需查，写入/归档不在白名单内
+  'memory_recall',
   'browser_snapshot',
   'browser_observe',
   'browser_wait_for',

@@ -1,12 +1,55 @@
 'use strict';
 
+const { projectWorkspacePath } = require('../../workspace/target');
+const { readGitRemoteUrl } = require('../../peer/workspace-key');
+
+/**
+ * 项目身份（**唯一来源** = Rust `projects` 表，见 `memory/projects.rs`）。
+ *
+ * 以前 scope 由路径派生（`project:<路径>` / `project:<sha256前16>:<路径尾72>`），于是
+ * 「改目录名 = 换项目」、大小写/尾斜杠/worktree 入口各算一个 scope，记忆静默失联。
+ * 现在：`projectWorkspacePath()` 归一入口（多 agent worktree 会话不另起 scope）+
+ * `projects(id, root_path, git_origin)` 认身份，scope 恒为 `project:<id>`；
+ * 仓库搬家时 `git_origin` 相同 → 新路径挂成同一 project 的别名，记忆不丢。
+ *
+ * git 探测复用 `src/peer/workspace-key.js`（同一份「同一项目」判定，不另写一套）。
+ * @param {string | null | undefined} workspacePath
+ * @param {(method: string, params?: object, timeoutMs?: number) => Promise<any>} requireRustCore
+ */
+async function resolveProjectScope(workspacePath, requireRustCore) {
+  const raw = String(workspacePath || '').trim();
+  if (!raw) return { scope: '', projectId: 0, rootPath: '', aliased: false };
+  let root = raw;
+  try {
+    root = projectWorkspacePath(raw) || raw;
+  } catch {
+    root = raw;
+  }
+  let gitOrigin = '';
+  try {
+    gitOrigin = readGitRemoteUrl(root);
+  } catch {
+    gitOrigin = '';
+  }
+  const res = await requireRustCore('memory.project_resolve', {
+    path: root,
+    gitOrigin: gitOrigin || null
+  });
+  const out = res && typeof res === 'object' ? res : {};
+  return {
+    scope: String(out.scope || ''),
+    projectId: Number(out.projectId) || 0,
+    rootPath: String(out.rootPath || root),
+    aliased: !!out.aliased
+  };
+}
+
 /**
  * @param {{
- *   requireRustCore: (method: string, params?: object, timeoutMs?: number) => Promise<unknown>,
- *   projectMemoryScope: (workspacePath?: string) => string | null
+ *   requireRustCore: (method: string, params?: object, timeoutMs?: number) => Promise<unknown>
  * }} deps
  */
-function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
+function createMemoryHandlers({ requireRustCore }) {
   return {
     'memory.touch_session': async ({ sessionId, title }) => {
       const sid = String(sessionId);
@@ -14,9 +57,45 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
       return r.ok === false ? r : { ok: true, ...r };
     },
 
+    // 显式标题写入（AI 总结 / 用户改名）：与「必要时补启发式标题」的 touch_session 分列。
+    // 来源必须由调用方声明，免得自动标题冒充用户改名。
+    'memory.session_set_title': async ({ sessionId, title, source }) => {
+      const sid = String(sessionId || '').trim();
+      if (!sid) {
+        const e = new Error('sessionId 必填');
+        e.code = 'INVALID_PARAMS';
+        throw e;
+      }
+      const text = String(title || '').trim();
+      if (!text) {
+        const e = new Error('title 必填');
+        e.code = 'INVALID_CONTENT';
+        throw e;
+      }
+      const src = String(source || '').trim();
+      if (!src) {
+        const e = new Error('source 必填（ai / user）');
+        e.code = 'INVALID_PARAMS';
+        throw e;
+      }
+      return requireRustCore('memory.session_set_title', {
+        sessionId: sid,
+        title: text,
+        source: src
+      });
+    },
+
     'memory.sessions_list': async ({ limit, archived }) => {
       const lim = Math.min(100, Math.max(1, Number(limit) || 40));
-      return requireRustCore('memory.sessions_list', { limit: lim, archived: !!archived });
+      const rows = await requireRustCore('memory.sessions_list', { limit: lim, archived: !!archived });
+      if (!Array.isArray(rows)) return rows;
+      // workspacePath 是会话**实际写入**的位置（远端会话就是它自己那份 worktree）；
+      // 对外的项目身份另给一份，渲染端据此分组与显示，否则同一项目的每个会话都会
+      // 变成一个独立的、名为 `main` 的文件夹。
+      return rows.map((row) => {
+        const workspacePath = String((row && row.workspacePath) || '');
+        return { ...row, workspaceProjectPath: projectWorkspacePath(workspacePath) };
+      });
     },
 
     'memory.session_archive': async ({ sessionId, archived }) =>
@@ -123,7 +202,16 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
     'memory.messages_clear': async ({ sessionId }) =>
       requireRustCore('memory.messages_clear', { sessionId: String(sessionId) }),
 
-    'memory.long_add': async ({ content, source, kind, scope, importance, expiresAt, metadata }) => {
+    'memory.long_add': async ({
+      content,
+      source,
+      kind,
+      scope,
+      importance,
+      expiresAt,
+      metadata,
+      sessionId
+    }) => {
       if (!content || typeof content !== 'string') {
         const e = new Error('content 必填');
         e.code = 'INVALID_CONTENT';
@@ -138,12 +226,25 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
           scope,
           importance,
           expiresAt,
-          metadata
+          metadata,
+          // 溯源：谁沉淀的（会话）。之后「这个会话写了什么 / 忘掉这个会话写的」靠它。
+          sessionId: sessionId ? String(sessionId) : undefined
         },
         120000
       );
       return rustAdd;
     },
+
+    /** 会话维度：这个会话沉淀了哪些记忆（id/kind/importance 都在，供 UI 直接展示） */
+    'memory.session_memories': async ({ sessionId, limit }) =>
+      requireRustCore('memory.long_by_session', {
+        sessionId: String(sessionId || ''),
+        limit: Math.min(200, Math.max(1, Number(limit) || 50))
+      }),
+
+    /** 会话维度：把这个会话沉淀的记忆整体软归档（可恢复，不物理删除） */
+    'memory.session_memories_forget': async ({ sessionId }) =>
+      requireRustCore('memory.long_forget_session', { sessionId: String(sessionId || '') }),
 
     'memory.long_recent': async ({ limit, scope }) => {
       const lim = Math.min(100, Math.max(1, Number(limit) || 20));
@@ -195,12 +296,19 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
     'memory.long_memories_after': async ({ afterId, limit }) =>
       requireRustCore('memory.long_memories_after', { afterId, limit }),
 
-    'memory.project_scope': ({ workspacePath } = {}) => ({
-      scope: projectMemoryScope(workspacePath)
-    }),
+    'memory.project_scope': async ({ workspacePath } = {}) =>
+      resolveProjectScope(workspacePath, requireRustCore),
+
+    // 项目清单（id / 根路径 / git origin / 别名数 / 记忆数）：排查「这条记忆属于谁」用
+    'memory.project_list': async ({ limit } = {}) =>
+      requireRustCore('memory.project_list', { limit }),
+
+    // 人工挂别名：同一个仓库换了路径、但 git remote 不可用（纯本地仓库）时的兜底动作
+    'memory.project_alias_add': async ({ projectId, path } = {}) =>
+      requireRustCore('memory.project_alias_add', { projectId, path }),
 
     'memory.project_recall': async ({ workspacePath, query, limit } = {}) => {
-      const scope = projectMemoryScope(workspacePath);
+      const { scope } = await resolveProjectScope(workspacePath, requireRustCore);
       if (!scope) return { ok: true, mode: 'recent', results: [] };
       // 新工作区常无项目记忆；短超时 + 服务端空库快路，避免拖死 dieyun-core 单线程 RPC
       return requireRustCore(
@@ -216,9 +324,10 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
       source,
       kind,
       importance,
-      metadata
+      metadata,
+      sessionId
     } = {}) => {
-      const scope = projectMemoryScope(workspacePath);
+      const { scope } = await resolveProjectScope(workspacePath, requireRustCore);
       if (!scope) {
         const e = new Error('workspacePath 必填');
         e.code = 'INVALID_WORKSPACE';
@@ -237,7 +346,8 @@ function createMemoryHandlers({ requireRustCore, projectMemoryScope }) {
           kind,
           scope,
           importance,
-          metadata
+          metadata,
+          sessionId: sessionId ? String(sessionId) : undefined
         },
         120000
       );

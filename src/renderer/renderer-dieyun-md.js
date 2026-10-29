@@ -170,12 +170,21 @@ async function openDieyunMdInEditorUi() {
   return { ok: true, path: filePath };
 }
 
+/** 注入模式的一句话说明：只讲当前选中项的效果，设置页不再为此写整段介绍 */
+const DIEYUN_MD_INJECT_MODE_HINTS = {
+  always: '每轮都注入全文，占用最稳也最大',
+  auto: '只注入与本轮相关的条目；一条都不命中就不注入',
+  manual: '不自动注入，输入 @dieyun.md 时才带上'
+};
+
 function syncDieyunMdInjectModeTabs(mode) {
   document.querySelectorAll('.dieyun-md-inject-tab').forEach((btn) => {
     const active = btn.dataset.mode === mode;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-checked', active ? 'true' : 'false');
   });
+  const hint = $('dieyun-md-mode-hint');
+  if (hint) hint.textContent = DIEYUN_MD_INJECT_MODE_HINTS[mode] || '';
 }
 
 function initDieyunMdSettingsUI() {

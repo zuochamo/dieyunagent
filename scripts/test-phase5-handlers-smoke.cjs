@@ -16,8 +16,11 @@ function assert(cond, msg) {
 async function testHandlerFactories() {
   const fakeDeps = {
     perms: { webFetch: true, browserAutomation: true },
-    requireRustCore: async (method, params) => ({ ok: true, method, params }),
-    projectMemoryScope: () => 'proj:test',
+    // 作用域解析已下沉到 Rust（memory.project_resolve）：fake 只需模仿该方法的返回形状
+    requireRustCore: async (method, params) =>
+      method === 'memory.project_resolve'
+        ? { scope: 'proj:test', projectId: 1, rootPath: (params && params.path) || '', aliased: false }
+        : { ok: true, method, params },
     assertHostEnabled: () => {},
     assertWebFetchEnabled: () => {},
     webFetch: {
@@ -40,7 +43,6 @@ async function testHandlerFactories() {
     'speech.transcribe',
     'index.remote_sync_configure',
     'index.remote_wait_ready',
-    'plugins.list',
     'codebase.status',
     'graph.status',
     'fs.stat',
@@ -51,7 +53,12 @@ async function testHandlerFactories() {
   for (const k of keys) assert(typeof h[k] === 'function', `missing ${k}`);
 
   assert((await h['permissions.get']()).webFetch === true, 'perms');
-  assert((await h['memory.project_scope']({})).scope === 'proj:test', 'project scope');
+  // 作用域归一化的唯一入口：没给路径就不许猜「主工作区」，给了才落到项目作用域
+  assert((await h['memory.project_scope']({})).scope === '', 'empty path must not guess a scope');
+  assert(
+    (await h['memory.project_scope']({ workspacePath: '/tmp/proj' })).scope === 'proj:test',
+    'project scope'
+  );
   assert((await h['agent.state_get']({ sessionId: 's1' })).method === 'agent.state_get', 'agent');
   assert((await h['index.remote_sync_configure']()).ok === true, 'index');
   assert((await h['index.remote_wait_ready']({})).skipped === true, 'remote wait local skip');
@@ -112,9 +119,16 @@ async function testLiveGatewayRpc() {
   try {
     const perms = await gateway.invokeRpc('permissions.get', {});
     assert(perms && typeof perms === 'object', 'live permissions.get');
-    const scope = await gateway.invokeRpc('memory.project_scope', { workspacePath: tmp });
-    assert(scope && scope.scope, 'live memory.project_scope');
-    console.log('ok live gateway RPC (permissions + memory.project_scope)');
+    // 项目作用域已下沉到 Rust（memory.project_resolve）：本 smoke 不拉起 core，
+    // 所以要验的是「RPC 存在且失败是结构化错误」，而不是崩在 host 里。
+    const scopeErr = await gateway
+      .invokeRpc('memory.project_scope', { workspacePath: tmp })
+      .then(() => null, (e) => e);
+    assert(
+      !scopeErr || scopeErr.code === 'RUST_CORE_UNAVAILABLE',
+      `live memory.project_scope unexpected error: ${scopeErr && scopeErr.message}`
+    );
+    console.log('ok live gateway RPC (permissions.get + memory.project_scope contract)');
   } finally {
     await stop();
     fs.rmSync(tmp, { recursive: true, force: true });

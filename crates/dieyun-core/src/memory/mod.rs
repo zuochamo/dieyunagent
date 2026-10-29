@@ -143,7 +143,6 @@ const STALE_CONSOLIDATION_JOB_MS: i64 = 30 * 60 * 1000;
 pub struct MemoryStore {
     db_path: PathBuf,
     embedding: std::sync::Arc<Mutex<EmbeddingConfig>>,
-    models_dirs: std::sync::Arc<Mutex<Vec<PathBuf>>>,
     /// 库生命周期归口到 `SqliteHandle`（写入连接 + 池化读连接 + 长任务连接），
     /// 记忆侧不再自己持有裸 `Connection` 和一把私锁。
     db: std::sync::Arc<SqliteHandle>,
@@ -194,11 +193,7 @@ pub struct CompactionArchiveInput {
 }
 
 impl MemoryStore {
-    pub fn open(
-        db_path: PathBuf,
-        embedding: EmbeddingConfig,
-        models_dirs: Vec<PathBuf>,
-    ) -> Result<Self, CoreError> {
+    pub fn open(db_path: PathBuf, embedding: EmbeddingConfig) -> Result<Self, CoreError> {
         // 调优 / 建表 / 外键全部归口 `SqliteHandle`：memory 库需要 `foreign_keys = ON`
         // （`ON DELETE CASCADE` 是它清子表的方式），index / graph 则刻意不开，
         // 所以这是**按库声明**的开关，写入连接与池化读连接共用同一份。
@@ -211,7 +206,6 @@ impl MemoryStore {
         let store = Self {
             db_path: db_path.clone(),
             embedding: std::sync::Arc::new(Mutex::new(embedding)),
-            models_dirs: std::sync::Arc::new(Mutex::new(models_dirs)),
             db,
         };
         // 后台周期修剪，勿阻塞 serve-stdio 启动（4GB 库同步 DELETE / VACUUM 可卡数十秒）
@@ -394,11 +388,7 @@ impl MemoryStore {
     }
 
     pub fn from_config(config: &AppConfig) -> Result<Self, CoreError> {
-        Self::open(
-            config.memory_db_path(),
-            config.embedding.clone(),
-            config.models_dirs.clone(),
-        )
+        Self::open(config.memory_db_path(), config.embedding.clone())
     }
 
     pub fn db_path(&self) -> &Path {
@@ -406,37 +396,27 @@ impl MemoryStore {
     }
 
     pub fn ping(&self) -> Value {
-        let (embedding, models_dirs) = self.embedding_pair();
+        let embedding = self.embedding();
         json!({
             "ok": true,
             "engine": "rust",
             "dbPath": self.db_path.to_string_lossy(),
-            "embeddingEnabled": embedding.enabled(&models_dirs),
+            "embeddingEnabled": embedding.enabled(),
         })
     }
 
     /// Update embedding settings without reopening the (possibly huge) SQLite file.
-    pub fn set_embedding(&self, embedding: EmbeddingConfig, models_dirs: Vec<PathBuf>) {
+    pub fn set_embedding(&self, embedding: EmbeddingConfig) {
         if let Ok(mut g) = self.embedding.lock() {
             *g = embedding;
         }
-        if let Ok(mut g) = self.models_dirs.lock() {
-            *g = models_dirs;
-        }
     }
 
-    fn embedding_pair(&self) -> (EmbeddingConfig, Vec<PathBuf>) {
-        let embedding = self
-            .embedding
+    fn embedding(&self) -> EmbeddingConfig {
+        self.embedding
             .lock()
             .map(|g| g.clone())
-            .unwrap_or_default();
-        let models_dirs = self
-            .models_dirs
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        (embedding, models_dirs)
+            .unwrap_or_default()
     }
 
     /// 写入连接（**唯一**一条，串行短事务）。见 `docs/SQLITE-ACCESS.md`。
@@ -1072,8 +1052,8 @@ impl MemoryStore {
         content: &str,
         scope: &str,
     ) -> Result<(Vec<f32>, Option<(i64, f64)>), CoreError> {
-        let (embedding, models_dirs) = self.embedding_pair();
-        if !embedding.enabled(&models_dirs) {
+        let embedding = self.embedding();
+        if !embedding.enabled() {
             // 没有向量能力就不判定近重复（不另造文本相似度第二套）
             return Ok((Vec::new(), None));
         }
@@ -1081,7 +1061,7 @@ impl MemoryStore {
             .chars()
             .take(MEMORY_EMBED_TEXT_MAX)
             .collect::<String>();
-        let vector = embedding::embed_texts(&embedding, &models_dirs, &[text])
+        let vector = embedding::embed_texts(&embedding, &[text])
             .await?
             .into_iter()
             .next()
@@ -1157,8 +1137,8 @@ impl MemoryStore {
     }
 
     pub fn long_memory_vector_status(&self) -> Result<Value, CoreError> {
-        let (embedding, models_dirs) = self.embedding_pair();
-        let sig = embedding.signature(&models_dirs);
+        let embedding = self.embedding();
+        let sig = embedding.signature();
         self.with_conn(|conn| {
             let total: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM long_memories WHERE status IN ('active', 'stale')",
@@ -1199,15 +1179,15 @@ impl MemoryStore {
         let Some(content) = row.filter(|c| !c.trim().is_empty()) else {
             return Ok(json!({ "ok": false, "indexed": false, "reason": "not_found" }));
         };
-        let (embedding, models_dirs) = self.embedding_pair();
-        if !embedding.enabled(&models_dirs) {
+        let embedding = self.embedding();
+        if !embedding.enabled() {
             return Ok(json!({ "ok": false, "indexed": false, "reason": "embedding_disabled" }));
         }
         let text = content
             .chars()
             .take(MEMORY_EMBED_TEXT_MAX)
             .collect::<String>();
-        let vectors = embedding::embed_texts(&embedding, &models_dirs, &[text]).await?;
+        let vectors = embedding::embed_texts(&embedding, &[text]).await?;
         let vector = vectors.into_iter().next().unwrap_or_default();
         if vector.is_empty() {
             return Ok(json!({ "ok": false, "indexed": false, "reason": "embedding_failed" }));
@@ -1223,9 +1203,9 @@ impl MemoryStore {
         if vector.is_empty() {
             return Ok(json!({ "ok": false, "indexed": false, "reason": "embedding_failed" }));
         }
-        let (embedding, models_dirs) = self.embedding_pair();
-        let sig = embedding.signature(&models_dirs);
-        let dims = embedding.effective_dimensions(&models_dirs);
+        let embedding = self.embedding();
+        let sig = embedding.signature();
+        let dims = embedding.dimensions;
         let blob = embedding::vector_to_blob(vector);
         let now = now_ms();
         self.with_conn(|conn| {
@@ -1249,12 +1229,12 @@ impl MemoryStore {
     }
 
     pub async fn reindex_long_memories(&self, limit: i64) -> Result<Value, CoreError> {
-        let (embedding, models_dirs) = self.embedding_pair();
-        if !embedding.enabled(&models_dirs) {
+        let embedding = self.embedding();
+        if !embedding.enabled() {
             return Ok(json!({ "ok": false, "indexed": 0, "reason": "embedding_disabled" }));
         }
-        let sig = embedding.signature(&models_dirs);
-        let dims = embedding.effective_dimensions(&models_dirs);
+        let sig = embedding.signature();
+        let dims = embedding.dimensions;
         let now = now_ms();
         let rows = self.with_conn(|conn| -> Result<Vec<(i64, String)>, CoreError> {
             let mut stmt = conn.prepare(
@@ -1281,7 +1261,7 @@ impl MemoryStore {
                 .take(MEMORY_EMBED_TEXT_MAX)
                 .collect::<String>();
             let vectors =
-                embedding::embed_texts(&embedding, &models_dirs, &[text]).await?;
+                embedding::embed_texts(&embedding, &[text]).await?;
             let vector = vectors.into_iter().next().unwrap_or_default();
             if vector.is_empty() {
                 continue;
@@ -1474,14 +1454,9 @@ impl MemoryStore {
             self.bump_memory_usage(&results)?;
             return Ok(json!({ "ok": true, "mode": "recent", "results": results }));
         }
-        if {
-            let (embedding, models_dirs) = self.embedding_pair();
-            embedding.enabled(&models_dirs)
-        } {
-            let (embedding, models_dirs) = self.embedding_pair();
-            let vectors =
-                embedding::embed_texts(&embedding, &models_dirs, &[q.to_string()])
-                    .await?;
+        if self.embedding().enabled() {
+            let embedding = self.embedding();
+            let vectors = embedding::embed_texts(&embedding, &[q.to_string()]).await?;
             let query_vec = vectors.into_iter().next().unwrap_or_default();
             if !query_vec.is_empty() {
                 let semantic = self.semantic_search_long(scope_str, &query_vec, limit)?;
@@ -1703,8 +1678,8 @@ impl MemoryStore {
         query_vec: &[f32],
         limit: i64,
     ) -> Result<Vec<Value>, CoreError> {
-        let (embedding, models_dirs) = self.embedding_pair();
-        let sig = embedding.signature(&models_dirs);
+        let embedding = self.embedding();
+        let sig = embedding.signature();
         if sig.is_empty() {
             return Ok(Vec::new());
         }
@@ -2124,7 +2099,7 @@ mod tests {
     fn set_session_title_overrides_heuristic_and_records_source() {
         let db = std::env::temp_dir().join(format!("dieyun-title-test-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let session = store.create_session(None, None).unwrap();
         store
             .append_message(&session.id, "user", "帮我修一下这个 bug", None)
@@ -2166,7 +2141,7 @@ mod tests {
     #[test]
     fn handoff_roundtrip_and_latest() {        let db = std::env::temp_dir().join(format!("dieyun-handoff-test-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let a = store.create_session(Some("会话A"), None).unwrap();
         let b = store.create_session(Some("会话B"), None).unwrap();
 
@@ -2200,7 +2175,7 @@ mod tests {
     fn memory_roundtrip() {
         let db = std::env::temp_dir().join(format!("dieyun-mem-test-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let session = store.create_session(Some("测试"), None).unwrap();
         store
             .append_message(&session.id, "user", "你好，Rust memory", None)
@@ -2232,7 +2207,7 @@ mod tests {
         // `COALESCE(access_count, 0) = 0` 于是恒成立。这里锁住唯一写入口的行为。
         let db = std::env::temp_dir().join(format!("dieyun-mem-usage-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         store
             .add_long_memory(
                 "用户偏好中文回复并给出简短结论",
@@ -2266,7 +2241,7 @@ mod tests {
         // 这里锁住唯一写入口（session_id）与两个会话维度查询/归档的行为。
         let db = std::env::temp_dir().join(format!("dieyun-mem-session-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         store
             .add_long_memory(
                 "本次会话决定用 JWT 而不是 session cookie",
@@ -2333,7 +2308,7 @@ mod tests {
         // 完全相同的正文仍然只留一行（近重复判定需要 embedding，测试环境无向量能力，走 none 分支）。
         let db = std::env::temp_dir().join(format!("dieyun-mem-policy-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
 
         let skipped = store
             .add_long_memory_deduped(
@@ -2411,7 +2386,7 @@ mod tests {
         // 于是整批重挂到 project:<id>（而不是把可认领的行当孤儿埋掉）。
         let db = std::env::temp_dir().join(format!("dieyun-mem-rescope-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
 
         let root = "E:\\repo\\legacyproj";
         let proj = store.resolve_project(root, None).unwrap();
@@ -2469,7 +2444,7 @@ mod tests {
         // 悬空 pending 作业让账本永远显示「还在跑」。自愈必须幂等且不动新鲜作业。
         let db = std::env::temp_dir().join(format!("dieyun-mem-reconcile-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
 
         // 旧版本按路径算 scope 失败留下的字面量 project
         store
@@ -2537,7 +2512,7 @@ mod tests {
         // 之前沉淀的记忆静默失联。而且同一个 git remote 的新路径应该自动成为别名。
         let db = std::env::temp_dir().join(format!("dieyun-mem-projects-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
 
         let a = store
             .resolve_project(
@@ -2593,7 +2568,7 @@ mod tests {
     fn prunes_finished_runs_and_cascades_children() {
         let db = std::env::temp_dir().join(format!("dieyun-prune-runs-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let session = store.create_session(Some("修剪"), None).unwrap();
 
         for i in 0..3 {
@@ -2655,7 +2630,7 @@ mod tests {
     fn prunes_surplus_traces_per_run() {
         let db = std::env::temp_dir().join(format!("dieyun-prune-traces-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let session = store.create_session(Some("修剪"), None).unwrap();
         store
             .upsert_agent_run(&json!({
@@ -2720,7 +2695,7 @@ mod tests {
     fn merges_incremental_trace_checkpoints() {
         let db = std::env::temp_dir().join(format!("dieyun-trace-delta-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         let session = store.create_session(Some("增量"), None).unwrap();
 
         // 首帧是全量：客户端游标为空，traceFrom 缺省为 0。
@@ -2849,7 +2824,7 @@ mod tests {
     fn fts_search_hits_cjk_and_identifier_substrings() {
         let db = std::env::temp_dir().join(format!("dieyun-fts-hit-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         seed_memory(&store, "代码库索引的增量更新逻辑走 root_hash 比对", "codebase", 1);
         seed_memory(&store, "fn parseConfig(path: &str) 读取配置", "src/config.rs", 1);
         seed_memory(&store, "用户偏好：回答用中文，少用列表", "chat", 1);
@@ -2885,7 +2860,7 @@ mod tests {
     fn fts_search_sees_memories_beyond_the_old_1000_row_window() {
         let db = std::env::temp_dir().join(format!("dieyun-fts-window-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         // 最老的一条是唯一命中项，后面再压 1200 条噪声
         seed_memory(&store, "早期决定：向量检索先用精确余弦，不接 ANN", "design", 30);
         {
@@ -2917,7 +2892,7 @@ mod tests {
     fn fts_index_follows_update_and_delete() {
         let db = std::env::temp_dir().join(format!("dieyun-fts-sync-{}.sqlite", now_ms()));
         let _ = std::fs::remove_file(&db);
-        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default(), vec![]).unwrap();
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
         seed_memory(&store, "旧内容：使用 SQLite 全文索引", "note", 2);
         let id = store
             .keyword_search_long_memories("全文索引", 5)

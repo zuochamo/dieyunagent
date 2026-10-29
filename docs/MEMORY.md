@@ -1,29 +1,36 @@
 # 叠云 Agent 记忆系统设计
 
-> 本文专门说明「记忆」在叠云里指什么、存在哪、何时读写、如何进入模型上下文。  
-> 总体架构见 [DESIGN.md](./DESIGN.md)。
+> 本文说明「记忆」在叠云里指什么、存在哪、何时读写、如何进入模型上下文。
+> 总体架构见 [DESIGN.md](./DESIGN.md)；请求信封见 [REQUEST-SNAPSHOT.md](./REQUEST-SNAPSHOT.md)。
+> 记忆相关行为变更时，请同步本文与 `docs/CODEMAP.json`。
 
 ---
 
 ## 1. 核心结论（先读这段）
 
-叠云**没有**单一的「万能记忆模块」，而是 **多层并行** 的记忆机制，职责不同：
+叠云**没有**单一的「万能记忆模块」，而是 **多层并行、各司其职**，每一层只有一个写入者：
 
-| 层次 | 存储 | 生命周期 | 谁写入 | 谁读取 |
-|------|------|----------|--------|--------|
-| **会话消息** | SQLite `messages` | 永久（按会话） | 用户发送 / Agent 完成 | UI 历史、下轮对话上下文 |
-| **上下文压缩** | 当次 `body.messages` + SQLite `compaction_archives` | 运行内替换工具链；摘要按会话持久 | 压缩 LLM | 同一次运行的后续工具轮；**下轮** turn-ride 投影最近一条摘要 |
-| **长期记忆** | SQLite `long_memories` | 永久（全局） | **用户手动**（设置页） | 每轮 `buildSystemMessage` |
-| **dieyun.md** | `~/.dieyun/dieyun.md` | 永久（全局） | 用户编辑文件 | 每轮 `buildSystemMessage` |
-| **文件笔记目录** | `~/.dieyun/memory/` | 永久 | 用户自行维护 | **不自动注入**（预留） |
-| **技能记忆** | `~/memory/` 等 | 由技能定义 | 启用对应技能后由 Agent | 技能 SKILL.md 指引 |
+| 层次 | 存储 | 谁写 | 谁读 |
+|------|------|------|------|
+| **会话消息**（账本） | SQLite `messages` | 用户发送 / Agent 完成 / 定时计划 | UI 历史；下轮对话上下文 |
+| **上下文压缩** | 当次 `body.messages` + `compaction_archives` | Rust 决策 + 压缩 LLM（Node 搬运） | 本轮后续工具轮；下轮 turn-ride 投影最近一条摘要 |
+| **请求快照**（旁路事实） | SQLite `request_snapshots` | Node `request-snapshot.js`（唯一装配点） | 排查工具；不参与任何流程 |
+| **长期记忆（用户级）** | SQLite `long_memories`，`scope='global'`（带向量索引） | **Main 归纳器**（`src/agent/knowledge-maintainer.js`） | 每轮 system prompt（召回 5 条）+ `memory_recall` 工具 |
+| **项目记忆** | **文件** `<workspace>/.dieyun/memory.md`（人可读、可手改、随仓库走） | 同上（归纳器合并写入）+ 用户手改 + Agent `fs_edit` | 每轮 system prompt（按字符预算读文件头部）+ `memory_recall` 工具 |
+| **轮内记忆工具** | 读：上面两处；写：软归档 | Agent 在对话中调用（`memory_recall` / `memory_forget`） | 本轮工具结果 |
+| **会话交接** | SQLite `session_handoffs` | 用户点「生成交接」→ Main `session-handoff.js` | 新会话「继续上次」时注入 |
+| **工作记忆快照** | `agent_runs.summary/state_snapshot` + `agent_steps` | Agent 运行台账 | 结构信号命中时注入 |
+| **dieyun.md** | `~/.dieyun/dieyun.md` | 用户编辑文件 | 每轮（受注入模式约束） |
+| **AGENTS.md** | 工作空间根 | 用户编辑；归纳器提案（三态） | 每轮 system |
+| **技能记忆** | 技能自带路径（如 `~/memory/`） | 启用该技能后由 Agent 按 SKILL.md 写 | 技能正文指引，非系统注入 |
+| **文件笔记目录** | `~/.dieyun/memory/` | 用户自行维护 | **不自动注入**（预留） |
 
-**重要区分：**
+**四个必须记住的区分：**
 
-- **SQLite 里存的是会话账本**（user/assistant 正文）。下轮送给模型的聊天历史只从这份账本投影：近 N 条原文 + 更早折叠条，再套字符硬顶；`transientTrace` 只服务 UI，不进模型请求。弱回复（空/「已完成。」/「已停止生成。」）在落库时折成工具摘要写入正文，这样下一轮能从 content 读到，不必再刮 live trace。**真思考另走 `reasoning` 列**：不回灌正文、重建历史时不读它（只在该轮需上行回传 `reasoning_content` 时按需取真值）。
-- **SQLite 不是 OpenAI 多轮里的完整 `tool` 消息链**；工具过程仍嵌在 assistant 气泡元数据里供思考区展示。
-- **Agent 不会自动写入 `long_memories`**；要长期记住偏好，需用户在设置里点「追加到长期记忆」，或写入 `dieyun.md` / 文件 / 技能记忆。
-- **上下文压缩是有损的**：当次运行只保留摘要 + 最近 atoms；摘要写入 `compaction_archives`，下轮从该表投影进 turn-ride，不改聊天气泡。完整 tool 链仍不进 `messages` 表。
+1. **账本 ≠ 请求**。`messages` 存 user/assistant 正文（思考走 `reasoning` 列，默认不回灌正文）；完整 tool 链只在当次 `body.messages` 里流转，不进库。下轮历史从账本投影。
+2. **项目记忆是文件，用户级记忆是库**：项目记忆（架构/约定/命令/坑点）写进仓库里的 `.dieyun/memory.md` —— **能看、能改、能 diff、能提交**；用户级偏好写 `long_memories`（带语义索引，可跨项目召回）。归纳器是唯一自动写入者，但文件随时可以手改，下一轮注入立刻生效。
+3. **压缩有损**：保留摘要 + 最近 atoms，摘要落 `compaction_archives`，下轮从该表投影进 turn-ride，不改聊天气泡。
+4. **注入要克制**：`kind` 为 `secret` / `private` 的记忆**不进自动 system prompt**（详见 §5.3）——自动注入等于每轮把它们再发一次。
 
 ---
 
@@ -34,34 +41,53 @@ flowchart TB
   subgraph persist["持久化 · 真相源"]
     DB[(diecloud-memory.sqlite)]
     DYM[~/.dieyun/dieyun.md]
+    AGM[AGENTS.md]
+    PMF[.dieyun/memory.md<br/>项目记忆 · 人可读真相]
+  end
+
+  subgraph main["Main / Node"]
+    KM[knowledge-maintainer<br/>归纳器 · 唯一写入者]
+    SP[system-prompt-prep<br/>注入块装配]
+    HO[session-handoff]
   end
 
   subgraph ephemeral["非持久 / 运行态"]
     RAM[渲染进程 messages 数组]
-    COMP[上下文压缩后的 body.messages]
-    TOOLS[工具轮 tool_calls / tool 结果]
+    COMP[压缩后的 body.messages]
+    TOOLS[工具轮 tool_calls / 结果]
   end
 
   User[用户] -->|发送| RAM
-  User -->|设置页 long_add| DB
   User -->|编辑| DYM
+  User -->|编辑| AGM
+  User -->|编辑| PMF
+  Agent -->|fs_edit| PMF
 
-  RAM -->|message_append user| DB
-  Agent[Agent 完成] -->|message_append assistant| DB
+  RAM -->|message_append| DB
+  Agent[Agent 完成] -->|message_append| DB
   Agent --> COMP
   TOOLS --> COMP
   COMP -->|compaction_archive| DB
+  Agent -->|结构信号 IPC| KM
+  KM -->|long_add / status_set| DB
+  KM -->|合并写入| PMF
+  KM -->|propose AGENTS.md| AGM
+  User -->|生成交接| HO
+  HO -->|handoff_save| DB
 
   DB -->|messages_recent| RAM
-  DB -->|long_recent| SYS[buildSystemMessage]
+  DB -->|long_recall（用户级）| SP
+  PMF -->|按字符预算直读| SP
+  DB -->|handoff_get| SP
+  DB -->|state_get| SP
   DB -->|compaction_recent| TURN[turn-ride]
-  DYM --> SYS
+  DYM --> SP
+  AGM --> SP
 
-  SYS --> LLM[模型 API]
+  SP --> LLM[模型 API]
   TURN --> LLM
   RAM --> LLM
   COMP --> LLM
-
 ```
 
 ---
@@ -76,18 +102,17 @@ flowchart TB
 
 - 引擎：`dieyun-core`（Rust / rusqlite），WAL + `synchronous=NORMAL` + `auto_vacuum=INCREMENTAL`；
   连接调优单一来源 `crates/dieyun-core/src/sqlite.rs`，外键由各 store 显式开启。
-- 实现：`crates/dieyun-core/src/memory/`（Gateway `requireRustCore`）
-- 访问：渲染进程经 Gateway RPC（`memory.*`），不直接读文件。
+- 实现：`crates/dieyun-core/src/memory/`（Node 侧一律经 Gateway `requireRustCore` 访问）。
+- 目录名唯一来源 `src/app-paths.js`；旧 `pixel-office-agent` 首次启动自动迁移。
 
-### 3.1.1 Agent 运行历史（`agent_runs` / `agent_traces`）
+### 3.1.1 Agent 运行历史（`agent_runs` / `agent_traces` / `agent_plans` / `agent_steps`）
 
 - 运行中的 checkpoint 每 ~2.5s 一次，**原地覆盖**该 run 的最新一行 trace：
   唯一读取路径 `agent.trace_get` 只取 `ORDER BY id DESC LIMIT 1`，历史行没有读者。
 - 子表 `agent_traces` / `agent_plans` / `agent_steps` 都以 `ON DELETE CASCADE` 挂在 `agent_runs` 上，
-  所以修剪必须以 `agent_runs` 为根。
-- 后台每 30 分钟修剪一次：终态 run 保留最近 **500 条 / 30 天**，`running` 与 `planned` 不动；
-  空闲页占比 ≥ 25% 才回收磁盘（`auto_vacuum=INCREMENTAL` 走 `incremental_vacuum`，
-  否则用一次 `VACUUM` 重建并顺带完成模式转换）。
+  所以修剪以 `agent_runs` 为根。
+- 后台每 30 分钟修剪一次：终态 run 保留最近 **500 条 / 30 天**，`running` / `planned` 不动；
+  空闲页 ≥ 25% 才回收磁盘（`auto_vacuum=INCREMENTAL` 走 `incremental_vacuum`，否则一次 `VACUUM`）。
 
 ### 3.2 表结构
 
@@ -95,157 +120,387 @@ flowchart TB
 
 | 字段 | 说明 |
 |------|------|
-| `id` | 主键，如 `s-1712345678900` 或历史 `default` |
+| `id` | 主键，如 `s-1712345678900` |
 | `updated_at` | 最后活跃时间（毫秒） |
-| `title` | 侧边栏标题；首条用户消息自动提炼（最多 48 字） |
+| `title` / `title_source` | 侧边栏标题 + 来源（`heuristic` / `ai` / `user`，见 §10） |
 | `archived` | 0/1，归档后不出现在默认历史列表 |
-| `workspace_path` | **v1.3.68+** 该会话绑定的工作空间路径（可 null） |
+| `workspace_path` | 该会话绑定的工作空间（可 null） |
 
-当前活跃会话 ID 另存渲染进程 `localStorage`：`diecloud.active.session.v1`。
+当前活跃会话 ID 存渲染进程 `localStorage`：`diecloud.active.session.v1`。
 
 #### `messages` — 短期对话存档
 
 | 字段 | 说明 |
 |------|------|
-| `id` | 自增主键 |
-| `session_id` | 所属会话 |
-| `role` | `user` \| `assistant` \| `system`（实际对话主要用前两者） |
-| `content` | 文本；可含 `【叠云meta】{...}\n` 前缀存 UI 元数据 |
-| `reasoning` | 该轮**真思考**（`assistant` 独有，可空）。与 `content` **分列不混**：只为该轮上行回传 `reasoning_content` 提供真值，**默认不进历史重建**；空/空白落 `NULL`（单一写库口 `MemoryStore::append_message` 统一归一）。老库由 `schema.rs` 迁移补列，老数据为 `NULL` |
-| `created_at` | 时间戳 |
+| `id` / `session_id` / `created_at` | 自增主键、所属会话、时间戳 |
+| `role` | `user` \| `assistant` \| `system`（对话主要用前两者） |
+| `content` | 正文；可含 `【叠云meta】{...}\n` 前缀存 UI 元数据 |
+| `reasoning` | 该轮**真思考**（`assistant` 独有，可空）。与 `content` 分列不混：只为该轮上行回传 `reasoning_content` 提供真值，**默认不进历史重建**；空/空白落 `NULL`（唯一写库口 `MemoryStore::append_message` 归一） |
 
-**写入时机：**
+**写入时机：** ① 用户发送 → `memory.message_append`（user）；② Agent 正常结束 / 停止 → `message_append`（assistant，含 trace 打包与本轮 `reasoning`）；③ 定时计划投递 → 主进程 `plans/deliver.js` / `plan-run-turn.js`。
 
-1. 用户发送 → 立即 `memory.message_append`（user）。
-2. Agent 正常结束 / 停止 → `memory.message_append`（assistant，含 trace 打包 + 本轮 `reasoning`）。
-3. 定时计划投递 → 主进程 `plans/deliver.js` 直接 `store.appendMessage`。
+**读取时机：** ① 切会话 / 启动：`memory.messages_recent`（默认 50，上限 500）→ 渲染进程 `messages` → 重绘；② 下轮对话：`buildCompletionMessages()` 把已存正文拼进 payload（不含历史 tool 链）。
 
-**读取时机：**
+**不写入库的：** 单次运行中的中间 `tool` / 带 `tool_calls` 的 assistant 消息；压缩前的完整 tool 原文。
 
-- 切换会话 / 启动：`memory.messages_recent`（RPC 默认 limit 50，上限 500；UI/会话服务层可显式传更大值）→ 填充渲染进程 `messages` → 重绘聊天。
-- 下轮对话：`buildCompletionMessages()` 把 `messages` 里**已存储的 user/assistant 正文**拼进 API payload（不含历史轮的 tool 消息链）。
+**正文只装正文：** 交付层在「预算截断且只有思考」时会显示带标签的思考引用（`agent-round-text.js` 四态交付），但落库口 `persistableAssistantText → persistableTurnText` 会把它与空串统一换成 `（模型未生成文字答复。）`；思考本体只进 `reasoning`。
 
-**不写入 SQLite 的内容：**
-
-- 单次 Agent 运行中的中间 `tool` / 带 `tool_calls` 的 assistant 消息（仅在内存 `body.messages` 里流转）。
-- 压缩前的完整中间 tool 链（摘要进 `compaction_archives`，原文不进 `messages` 表）。
-
-**assistant 存档格式：**
-
-```
-【叠云meta】{"modeLabel":"Agent","modelLabel":"...",...}
-<最终回复正文 + 内嵌 trace 结构>
-```
-
-UI 用 `unpackAssistantMeta()` 拆开展示模型名、思考过程等；发给模型的通常只用正文部分。
-
-**正文只装正文：** 交付层（气泡）在「预算截断且只有思考」时会显示一段带标签的思考引用
-（`（以下为模型思考，本轮未成文）…`，见 `agent-round-text.js` 四态交付），但该标签**只用于展示** ——
-落库口 `persistableAssistantText → persistableTurnText` 会把它与空串统一换成 `（模型未生成文字答复。）`，
-思考本体只进 `reasoning` 列。即：**展示可以与账本不同，账本永远是「模型真的说了什么」**。
-
-#### `long_memories` — 长期笔记式记忆
+#### `long_memories` — 长期记忆（用户级；项目记忆已改文件，见 §4.1）
 
 | 字段 | 说明 |
 |------|------|
 | `id` | 自增主键 |
 | `content` | 记忆正文 |
-| `source` | 来源标记，如 `user` |
-| `created_at` | 时间戳 |
+| `source` | 来源标记：`user` / `auto_consolidation` / `project` 等（`source` 含 `consolidation` 才会被低价值闸约束） |
+| `kind` | `normal`（默认）/ `private` / `secret` —— **决定是否允许自动注入**（§5.3） |
+| `scope` | `global` = 用户级；`project:<id>` = 项目级（§4.1，指向 `projects.id`）。历史行的 `project:<路径…>` 形态不回填 |
+| `importance` | 1–5，归纳器给的权重；衰减只看 `<= 2` 的条目 |
+| `status` | `active` / `stale` / `archived`（召回只取前两者，见 §3.3） |
+| `session_id` | 哪次会话沉淀的（`idx_long_memories_session`），支撑「本会话沉淀了什么 / 忘掉这些」（§6.5） |
+| `created_at` / `updated_at` | 时间戳 |
+| `last_used_at` / `access_count` | 被召回时由 Rust `recall_long_memories` 统一 bump（§3.3） |
+| `expires_at` | 可选过期时间（毫秒），过期即不参与召回 |
+| `metadata_json` | 附加结构（定时归纳用 `consolidationJobId` 记账等） |
 
-**写入：** 仅用户主动 — 设置 → 长期记忆 →「追加到长期记忆」（`memory.long_add`）。  
-**无** Agent 自动 `long_add`、无从对话自动提炼入库。
+#### `long_memory_vectors` — 语义索引
 
-**读取：** 每轮 `buildSystemMessage()` 调用 `memory.long_recent`（RPC 默认 limit **20**），按时间**从旧到新**排进 system：
+`memory_id`（主键，级联删除）/ `model` / `dimensions` / `vector`（BLOB）/ `updated_at`。
+向量模型未启用或索引缺失时，召回自动退到关键词（§5.2）。
 
-```
-【长期记忆（本地 SQLite）】
-- <条目1>
-- <条目2>
-...
-```
+#### `projects` / `project_paths` — 项目身份（scope = `project:<id>`）
+
+| 表 | 字段 | 说明 |
+|----|------|------|
+| `projects` | `id` / `root_path` / `git_origin` / `created_at` / `last_seen_at` | 一个项目一行；`git_origin` 让「仓库搬家」仍指向同一 id（§4.1） |
+| `project_paths` | `path_key`（主键）/ `project_id` / `path` / `first_seen_at` | 见过的每个路径（别名）；`path_key` = 小写 + 斜杠统一 + 去尾分隔符 |
+
+#### `memory_consolidation_jobs` — 归纳作业台账
+
+`id` / `scope` / `status`（`pending`→`completed` | `failed`）/ `reason` / `started_at` / `finished_at` / `error`。
+归纳器每次运行一条，成功与失败都结账，便于排查「为什么这轮没写记忆」。
+
+#### `session_handoffs` — 会话交接（每会话一份）
+
+`session_id`（主键）/ `title` / `payload` / `created_at`。
+重生成即覆盖；**不参与语义召回**，只按 `session_id` 精确读写，另有 `handoff_latest` 取最新一条供「继续上次」选源。
 
 #### `request_snapshots` — 请求信封留底（旁路事实）
 
-每轮**真发出去的请求**一行：messages 原文（超限存信封）、system/tools 的 hash（未变则 NULL 去重）、
+每轮真发出去的请求一行：messages 原文（超限存信封）、system/tools 的 hash（未变则 NULL 去重）、
 `est_tokens`、压缩结论、以及 Renderer 带下来的折叠/裁剪事实（`context_audit_json`）。
+**不是对话账本**：真相仍是 `messages`；该表可裁剪、丢失不影响任何流程。
+写入唯一入口 `src/agent/rust-loop-runner.js` 的 `fetchRoundOnce`；保留每会话最近 **40** 行 + 压缩过的 **200** 行。
+完整语义见 [REQUEST-SNAPSHOT.md](./REQUEST-SNAPSHOT.md)。
 
-- **不是对话账本**：真相仍是 `messages`；该表可裁剪、丢失不影响任何流程。
-- 写入唯一入口：`src/agent/rust-loop-runner.js` 的 `fetchRoundOnce` → `memory.request_snapshot_append`；
-  读取走 `memory.request_snapshot_recent` / `_get`（列表不带大字段）。
-- 保留：每会话最近 **40** 行 + 压缩过的行 **200** 行，写入同一次调用里就地裁剪。
-- 完整语义与排查用法见 [`REQUEST-SNAPSHOT.md`](REQUEST-SNAPSHOT.md)。
+#### `compaction_archives` — 压缩归档
 
+`session_id` / `workspace_path` / `tokens_before` / `tokens_after` / `summary_text` / `summary_json` / `folded_text` / `created_at`。
+下轮 `memory.compaction_recent` 投影最近一条进 turn-ride（§9）。
+
+### 3.3 长期记忆的生命周期
+
+```
+写入(active) ──长期不被召回──> stale ──更久──> archived（不参与召回）
+   ▲                  │
+   └── recall 命中即 bump last_used_at / access_count（Rust 唯一写点）
+```
+
+- `decay_long_memories`（`memory.long_decay`）只在**定时归纳**里跑：`importance <= 2` 的条目超过 `staleDays`(120) 未用 → `stale`，再超过 `archiveDays`(240) → `archived`。
+- `access_count` / `last_used_at` 此前只有读者没有写者，上述衰减等于恒真 —— 现在由 `recall_long_memories` 在召回后统一 bump（单一写点，见 `memory/mod.rs::bump_memory_usage`），「用过越多的越不容易被衰减掉」才真正成立。
+- 语义索引重建：定时归纳里 `memory.long_reindex`（limit 100）补建缺失向量。
 
 ---
 
-## 4. Gateway RPC 一览
+## 4. Gateway RPC
 
 | 方法 | 作用 |
 |------|------|
-| `memory.sessions_list` | 历史列表（仅有消息的会话） |
-| `memory.session_create` | 新建会话 |
-| `memory.session_get` | 会话详情含 `workspacePath` |
+| `memory.sessions_list` / `sessions_with_messages` | 历史列表（后者用于归纳器取有内容的会话） |
+| `memory.session_create` / `session_get` / `session_archive` / `session_delete` | 会话生命周期 |
 | `memory.session_workspace_set` | 绑定工作空间 |
-| `memory.session_archive` | 归档 |
-| `memory.session_delete` | 删会话及消息 |
-| `memory.touch_session` | 更新 `updated_at` / 可选 title |
-| `memory.message_append` | 追加消息 |
-| `memory.messages_recent` | 按会话拉最近 N 条 |
-| `memory.messages_clear` | 清空会话（同 delete 消息部分） |
-| `memory.long_add` | 追加长期记忆 |
-| `memory.long_recent` | 最近 N 条长期记忆 |
-| `memory.request_snapshot_recent` | 请求快照列表（不含 messages/system/tools 大字段） |
-| `memory.request_snapshot_get` | 单条请求快照全文（排查「模型看到了什么」） |
+| `memory.touch_session` / `session_set_title` | 活跃时间 / 标题（§10） |
+| `memory.message_append` / `messages_recent` / `messages_after` / `messages_older` / `messages_delete_turn` / `messages_clear` | 消息账本 |
+| `memory.long_add` | 追加长期记忆（**唯一生产调用方是归纳器**）。**写入侧策略只在这里**：近重复合并（cosine ≥ 0.92）+ 归纳低价值闸（`source` 含 `consolidation` 且 importance < 3 → 不落库） |
+| `memory.long_recent` | 最近 N 条（按 scope 过滤） |
+| `memory.long_recall` | 召回：语义 → 关键词 → 最近（§5.2） |
+| `memory.long_keyword_search` | 纯关键词检索 |
+| `memory.long_memories_after` | 增量拉取（设置页/调试） |
+| `memory.long_status_set` | 改 `status`（归纳归档、人工停用） |
+| `memory.long_decay` / `long_reindex` / `long_vector_status` | 衰减 / 补建向量 / 向量状态 |
+| `memory.project_add` / `project_recall` / `project_scope` | 项目记忆的库接口（**身份解析在这三个入口内**，§4.1）。注入已改读 `.dieyun/memory.md`，这三个入口只剩「材料化 / 调试」用途 |
+| `memory.project_resolve` / `project_list` / `project_alias_add` | 项目身份（`projects` 表）：路径 → `project:<id>`；同 git remote 的新路径自动成别名；无 remote 时人工挂（§4.1） |
+| `memory.long_by_session` / `long_forget_session` | 按会话列 / 软归档长期记忆（`session_id` 列，§6.5） |
+| `memory.session_memories` / `session_memories_forget` | 上面两个的 Gateway 入口（上下文面板「本会话沉淀…」用） |
+| `memory.handoff_save` / `handoff_get` / `handoff_latest` | 会话交接 |
+| `memory.compaction_archive` / `compaction_recent` | 压缩归档 |
+| `memory.request_snapshot_append` / `_recent` / `_get` | 请求快照 |
+| `memory.consolidation_job_create` / `consolidation_job_finish` | 归纳台账 |
 
-权限：记忆 RPC **不**走 `hostControl` 开关；只要 Gateway 已鉴权即可（本机信任模型）。
+权限：记忆 RPC **不**走 `hostControl` 开关；Gateway 已鉴权即可（本机信任模型）。完整清单见 [rpc-catalog.md](./rpc-catalog.md)。
+
+### 4.1 项目身份：`projects` 表（scope = `project:<id>`）
+
+> **项目记忆正文的真相是文件**（`.dieyun/memory.md`），身份则存在库里：`projects` 表把「哪个目录」变成稳定的数字 id。
+> 老实现把路径编进 scope（`project:<路径>` / `project:<sha256 前16>:<路径尾72>`），于是**改目录名 = 换项目**、
+> 大小写/尾斜杠/worktree 入口各算一个 scope —— 记忆静默失联，而且这种断裂只有用户发现「它怎么不记得了」才暴露。
+
+```
+projects(id, root_path, git_origin, created_at, last_seen_at)
+project_paths(path_key PRIMARY KEY, project_id, path, first_seen_at)   -- 别名：一个项目多个入口
+scope = 'project:' + projects.id
+```
+
+解析（`memory.project_resolve`，唯一实现 `crates/dieyun-core/src/memory/projects.rs`）：
+
+1. `path_key`（小写 + 斜杠统一 + 去尾分隔符）命中 `project_paths` → 用该 project；
+2. 未命中但有 `git_origin` 且已有同 origin 的 project → 这条路径**自动成为它的别名**（仓库搬家 / 换盘符，记忆跟着走）；
+3. 都没有 → 新建 project。
+
+- 入口归一：Gateway 三个 `project_*` handler 先 `projectWorkspacePath()` 剥 worktree 后缀再解析（多 agent worktree 不另起 scope）。
+- `git_origin` 探测复用 `src/peer/workspace-key.js::readGitRemoteUrl`（同一份「同一项目」判定，含 worktree 的 `commondir` 跳转），不 fork git。
+- 无 remote 的纯本地仓库换了目录：`memory.project_alias_add` 人工挂别名（`memory.project_list` 可查 id / 根路径 / 别名数 / 记忆数）。
+- 历史行：老 `scope` 是路径形态，无法反推路径，**不回填**；材料化进文件后即退化为残留，`memory_recall` 仍能按需查到。
 
 ---
 
-## 5. 会话内上下文：渲染进程 `messages` 与工具轮
+## 5. 每轮注入：`prepSystemPrompt`（Main）
 
-### 5.1 两层 messages
+每轮用户发送前，Main 装配 system 块与工具说明；Renderer 只上传「本轮发生了什么」的快照（不含任何记忆读取逻辑）。
 
-| 变量 | 含义 |
+### 5.1 注入块顺序（相关部分）
+
+| # | 块 | 来源 |
+|---|----|------|
+| 1 | 系统时间 / 工具与编排说明 | 固定文案 |
+| 2 | 已启用技能、MCP | 技能目录 / `mcp-store` |
+| 3 | `dieyun.md` | `buildDieyunMdSystemBlock`（注入模式 `dieyun.dieyunMd.injectMode`：`auto`/`always`/`manual`；超长按 `dieyunMdMaxChars`(6000) 裁剪） |
+| 4 | `AGENTS.md` | 工作空间根（`agentsMdMaxChars`） |
+| 5 | **【项目记忆】** | `fs.read_file` 读 `<workspace>/.dieyun/memory.md`，按 `projectMemoryFileMaxChars`(2400) 取文件头部（最新在前）；文件条目无 id |
+| 6 | **【长期记忆（用户级）】** | `memory.long_recall`（`scope='global'`，limit `globalMemoryLimit`=5；无 query 时用 `long_recent`） |
+| 7 | **【上个会话交接】** | `memory.handoff_get`（结构信号 `continueFromSessionId`） |
+| 8 | **工作记忆快照** | `agent.state_get`（`shouldInjectWorkMemory` 结构判定） |
+| 9 | 相关代码 / Codebase / 打开文件 | 索引与结构信号 |
+| 10 | 本机权限能力 / 工作空间路径 | 运行态 |
+
+这些块由 `Promise.all` 并发取，任一失败只丢该块（不阻断发送）。
+
+### 5.2 召回模式与阈值
+
+**用户级记忆**（`memory.long_recall`、`memory_recall` 工具）在 Rust 侧按「语义 → 关键词 → 最近」三级降级：
+
+| mode | 条件 | 注入阈值 |
+|------|------|----------|
+| `semantic` | Embedding 已启用且有 `long_memory_vectors` | score ≥ **0.32** |
+| `keyword` | 语义不可用或未命中（FTS5 `long_memories_fts` + bm25，见 §5.2.1） | score ≥ **0.12** |
+| `recent` | query 为空（首次/新会话） | 不过滤，按时间取最近 |
+| `none` | 该 scope 无 active 条目 | 不注入 |
+
+每块最多渲染 20 行（`formatMemoryLines`），单行正文裁剪到 360–420 字。
+
+项目记忆块不参与这套打分：它是文件，按**字符预算**读头部（最新在前，条数与字节自洽），语义检索退化为 `memory_recall` 的关键词过滤 —— 一个项目撑死两百条，不值得再养一套项目向量索引。
+
+#### 5.2.1 关键词通道：FTS5 + bm25（不再有手写分词）
+
+原来 Rust 侧把最近 1000 行 `long_memories` 捞进内存，用一套手写的 CJK unigram/bigram +
+驼峰/下划线切词打分（`memory/keyword.rs`，**已删除**）。两个结构性问题：
+
+- **扫不全**：`ORDER BY id DESC LIMIT 1000` 之外的记忆永远检索不到；
+- **分词抄了第二份**：规则只活在那一个文件里，与 `index/search.rs` 各写一套。
+
+现在词法与索引用同一个 SQLite 能力：
+
+| 项 | 实现 |
+|----|------|
+| 索引 | `long_memories_fts`（FTS5 **external content** 表，`content='long_memories'`，`tokenize='trigram'`） |
+| 一致性 | 三个触发器（`long_memories_fts_ai/ad/au`）维护增删改；老库首次建表后按行数差异 `rebuild` 一次 |
+| 排序 | `ORDER BY bm25(long_memories_fts)`，再叠加重要度 / 新鲜度 / `stale` 惩罚做同一查询内微调 |
+| 查询串 | `crates/dieyun-core/src/fts.rs::match_query`（唯一来源，索引与记忆共用；逐片段加引号、`OR` 连接、剥掉 FTS5 语法字符） |
+
+**分词器边界（写清楚，免得当 bug 排查）：** trigram 只能索引 **≥3 字符** 的片段，
+所以中文双字词（`索引`、`记忆`）在 `MATCH` 里必然查不到。这类查询由
+`fts::has_indexable_term` 判定后**退回 `LIKE` 子串扫描**（`long_memories` 行数由修剪策略
+封顶，扫描有界），相关度记常量，排序由重要度 / 新鲜度决定。
+
+**读路径**：词法检索与语义检索都走 memory 库的**池化读连接**（`MemoryStore::read`），
+不再与「聊天落库」的写连接共用一把锁 —— 见 [`SQLITE-ACCESS.md`](SQLITE-ACCESS.md)。
+
+### 5.3 `kind` 决定能否自动注入
+
+```js
+// src/agent/system-prompt-prep.js::isInjectableMemoryRow
+kind === 'secret' || kind === 'private' → 不进自动 system prompt
+```
+
+- 这两类记忆**仍然落库**（`long_memories` 里可见、可经 `long_status_set` 停用），归纳器语料也会带上它们（避免重复写入）。
+- 理由：自动注入 = 每轮把隐私/密钥再发给模型一次，而记忆一旦被注入就再无「按需」可言。
+- **`secret` / `private` 永不写入 `.dieyun/memory.md`**：那是仓库文件，会随提交外泄（`project-memory-file.js::filterEntriesForFile`）。
+- 需要按需读取时用轮内工具 `memory_recall`（`kind` 过滤同样生效）。
+
+### 5.4 本轮注入审计（`memoryAudit`）
+
+每轮装配时 `prepSystemPrompt` 会顺手记下**这一轮到底注入了什么**，随 pack 交给 Renderer：
+
+| 字段 | 含义 |
 |------|------|
-| `messages`（renderer 全局数组） | 与 UI 同步的**已持久化**对话轮次 |
-| `body.messages`（单次 completion） | 当次 API 请求的完整上下文，可含 system、多轮 user/assistant、tool |
+| `project` | `{ mode: 'file', entries }`（文件条目数；无 id） |
+| `global` | `{ mode: semantic/keyword/recent, ids: [], excluded }`（`excluded` = 被 `kind` 挡掉的条数） |
+| `sessionHandoff` / `workMemory` | `{ from }` / `{ runId }` |
 
-发送新消息时：
+去向**复用既有管道**：`contextAudit` → `request_snapshots.context_audit_json`（只写第 0 轮）+ 上下文面板「本轮注入记忆」。
+没有新表、没有新写入者 —— 「模型看到了什么」只能有一个答案来源。
 
-```
-buildSystemMessage()  →  system 块（技能、dieyun.md、长期记忆、工作空间…）
-+ buildCompletionMessages()  →  历史 user/assistant 正文
-+ 当前 user（含图片多模态）
-→ payload.messages
-→ chatCompletionWithToolsViaRust / runPlannerPipelineViaMain (Main IPC)
-```
+### 5.5 不进 system 的清单
 
-工具循环中，`body.messages` 不断增长；**只有本轮结束**才把 assistant 摘要写回 `messages` 数组和 SQLite。
-
-### 5.2 切换会话时的记忆隔离
-
-- 消息按 `session_id` 隔离。
-- **工作空间**按 `sessions.workspace_path` 隔离（v1.3.68+）：`switchSession` → `applySessionWorkspace()` 恢复该会话目录。
-- `sessionActiveRuns` 允许后台跑 Agent；完成后写入**发起时**的 `runSessionId`，不是当前正在看的会话。
+其他会话的消息；已压缩掉的完整 tool 原文；`~/.dieyun/memory/` 笔记；未启用技能的记忆文件；`kind=secret/private` 的长期记忆。
 
 ---
 
-## 6. 上下文压缩（Compaction）
+## 6. 写入链路（唯一来源：`src/agent/knowledge-maintainer.js`）
 
-控制当次 Agent 运行的上下文窗口；**摘要按会话落库**，供下一轮投影，不改聊天气泡。
+归纳执行体与**触发**都在 **Main**：prompt、取模型、调用 LLM、写记忆、写 AGENTS.md、定时、冷却、队列、状态事件、计划 pending 暂存都在这里。
+Renderer 只剩设置页 UI（读写设置 + 显示状态）和「计划 worktree 的应用结果」一句话（`renderer-knowledge-maintainer.js` 是薄客户端）。
+
+### 6.1 任务收尾归纳
+
+```
+Main（对话 / 计划模式对话 / 定时计划，三个 runRustAgentLoop 调用点跑完）
+  → afterAgentRun({ result, opts })        // src/agent/knowledge-maintainer.js
+      · buildRunFacts：正文 / trace / plan / review / readiness 全部取自 result（不再由 Renderer 带货）
+      · 结构门闩（§6.3）不过 → return（不发 LLM），但仍会检查定时归纳是否该补跑
+  → 计划 worktree 未应用 → 暂存 pending（knowledgePlanApplyWaitMs），等应用结果或超时
+  → 其他 → schedule() 入队（冷却 + 队列 + 收尾延迟）
+  → runTaskMaintenance
+      ① memory.consolidation_job_create（记账）
+      ② 取模型：本轮 model/apiConfig → 否则设置页默认文本模型
+      ③ 一次 JSON 归纳请求（timeout knowledgeTimeoutMs）
+      ④ 解析 { memories[], archive_memory_ids[], agents_updates[] }
+      ⑤ 写记忆：scope=project → 合并进 .dieyun/memory.md（文件）；否则 memory.long_add（scope 一律 global）
+      ⑥ AGENTS.md 提案（§6.4）
+      ⑦ consolidation_job_finish(completed|failed) + 状态事件
+```
+
+- **触发在 Main 的收益**：定时计划、手机端、子代理轮次也会沉淀（旧实现只有 Renderer 收尾路径会归纳，自动跑出来的成果一条都没进记忆），且 payload 里不再塞上千行 trace。
+- 模型输出必须宽松解析（代码块包裹、多余字段都容忍），`kind` 走白名单，非法值归一为 `normal`。
+- `scope` 只有两个值：`project` / `global`。模型给的中文/别名由 `normalizeMemoryScope` 归一（`本项目`→project，`长期`→global）；自由文本 scope 会写进库里变成永远召不回的孤儿 scope。
+- 同一批最多写 `knowledgeMemoryItemsMax`(8) 条，正文短于 8 字的丢弃。
+- 计数按**写入侧事实**报：`memorySaved`（新增）/ `memoryMerged`（近重复或文件已有同条）/ `memorySkipped`（被闸门或 `kind` 挡掉）。合并与弃用不算新增，否则「今天记住了几条」永远是假的。
+- 计划（plan）场景：worktree 变更**应用后**才归纳；用户放弃应用则不写；没有待合并项（非 git 工作空间 / 纯读计划）按「验收通过」整理。三种结论由 Renderer 经 `agent:knowledge-plan-outcome` 回给 Main（`applied` / `no_changes` / `skipped`），上下文本身留在 Main，切会话或关窗都不丢。
+
+### 6.2 定时完整归纳
+
+```
+Main 定时器（intervalHours，档位清单由 Main 经设置 IPC 下发；启动时排期）
+  → 组装语料：sessions_with_messages → 取最近 knowledgeRecentChatSessions(5) 个会话各取尾部几条
+              （总条数 ≤ knowledgeRecentChatItems=20，不再只看「最近一个会话」）
+              + long_recent（global，knowledgeCorpusMemoryRows=24）
+              + .dieyun/memory.md 当前内容 + AGENTS.md 正文（fs.read_file）
+  → 一次「完整版」归纳（knowledgePeriodicTimeoutMs / knowledgePeriodicMaxTokens）
+  → 写记忆（同 6.1）+ archive_memory_ids 归档 + AGENTS.md 提案
+  → 机械维护：materializeProjectMemoryFile（库里旧项目行 → .dieyun/memory.md，只在文件为空时）
+             + long_decay(knowledgeDecayStaleDays/…ArchiveDays) + long_reindex(knowledgeReindexLimit)
+```
+
+- 定时运行**不依赖任何 Renderer 会话**：没有 composer 时模型取设置页默认文本模型，语料全部从 Rust / 文件取。
+- 语料里的「项目记忆」就是 `.dieyun/memory.md` 的当前内容（库里旧行不再当真相喂给模型，否则手改过的条目会被写回来）。
+- `mode='off'` **全部关掉**（定时 + 每轮收尾都不跑）；`mode='idle'` 定时只在 App 空闲时跑，撞上忙碌则跳过，等某一轮收尾后补跑（`knowledgeIdleRetryMs` 重排一次，不再傻等下一个整间隔）。
+- 每个归档 id 必须能在本次语料里找到，否则丢弃（防模型编 id 归档掉无关记忆）。
+
+### 6.3 门闩与预算（数字只在 `src/agent/agent-limits.js`）
+
+| 常量 | 默认 | 作用 |
+|------|------|------|
+| `knowledgeMaintenanceCooldownMs` | 50s | 全局冷却，两次归纳最小间隔 |
+| `knowledgeMaintenanceQueueMax` | 8 | 队列上限（超出丢弃并回 `queue_full`） |
+| `knowledgeMaintenanceDelayMs` / `…DelayMaxMs` | 15s / 5min | 收尾后延迟（等落库、等 worktree）及上限 |
+| `knowledgeMinUserChars` / `knowledgeMinReplyChars` | 40 / 20 | 纯文字轮次的最低信息量 |
+| `knowledgeMemoryItemsMax` / `knowledgeTraceLinesMax` | 8 / 28 | 单次写记忆条数 / trace 采样行数 |
+| `knowledgeAgentsMaxChars` / `knowledgeRecentChatItems` / `knowledgeCorpusMemoryRows` | 12000 / 20 / 24 | 归纳语料上限 |
+| `knowledgeRecentChatSessions` | 5 | 定时语料跨几个会话取样 |
+| `knowledgePlanApplyWaitMs` | 20min | 计划 worktree「应用后才归纳」的最长等待（暂存在 Main） |
+| `knowledgeIdleRetryMs` | 5min | idle 模式忙完补跑的一次性重试间隔 |
+| `knowledgeDecayStaleDays` / `…ArchiveDays` / `knowledgeReindexLimit` | 120 / 240 / 100 | 机械维护（与 Rust 默认一致，唯一来源在这里） |
+| `knowledgeTimeoutMs` / `knowledgePeriodicTimeoutMs` | 65s / 90s | 请求超时 |
+| `knowledgeMaxTokens` / `knowledgePeriodicMaxTokens` | 2800 / 3500 | 输出预算 |
+
+**触发判定（结构信号，不做意图关键词匹配）：**
+
+- 有工具执行轨迹 / 文件变更 / 成功命令 / 计划步骤 ⇒ 触发；
+- 否则要求「用户文本 ≥ 40 字 **且** 答复 ≥ 20 字」；
+- 「算不算文件变更」由 `guardrails-shared` 的 `FILE_WRITE_TOOL_NAMES` 判定；Renderer 不再上报 `changes`，Main 从 trace 里写文件工具的 `filePath` 推导；
+- 定时归纳走自己的语料判空，不吃这个门闩（历史上为此留过一个 `periodicOnly` 分支，生产路径从未调用，已删除）。
+
+> 历史教训：旧实现的门是 `userText.length >= 8`，几乎恒真 —— 等于每轮成功对话都多打一次小模型请求。
+
+### 6.4 AGENTS.md 提案三态
+
+归纳器不直接写 AGENTS.md，统一走 `executeAgentsMdProposeMain`（`src/agent/propose-tools-main.js`），遵循 `agents-md-prefs`：
+
+| 设置 | 行为 |
+|------|------|
+| `off` | 不生成提案；prompt 里也要求 `agents_updates` 为空 |
+| `draft-only` | 写入 `.dieyun/agents-pending.json`，等用户确认 |
+| `preview` / 自动 | 校验后直接落盘 |
+
+### 6.5 会话溯源、遗忘与账本自愈
+
+**会话溯源**：`long_memories.session_id`（列 + `idx_long_memories_session` 索引）记录「这条是哪个会话沉淀的」。
+任务收尾归纳带上会话 id；定时归纳跨会话，不编造 id，只写 `metadata.consolidationJobId`。
+由此得到两条能力：上下文面板可列「本会话沉淀了哪些记忆」，并可整体**忘掉**（软归档 `status='archived'`，可恢复，不物理删除）。
+
+**写入侧策略**（唯一位置 `MemoryStore::add_long_memory_deduped`，`memory.long_add` 背后）：
+
+| 策略 | 规则 | 为什么在这个位置 |
+|------|------|------------------|
+| 近重复抑制 | 写入前算一次 embedding，与同 scope 最相似条目 cosine ≥ **0.92** → 不新增，`updated_at`/`importance`/`session_id` 合并进旧行 | 这是唯一在插入前拿得到向量的地方；放到 Node 会多一份 embedding 调用与第二套阈值 |
+| 低价值闸 | `source` 含 `consolidation` 且 importance < **3** → 直接跳过（返回 `skipped:'low_importance'`） | 按 `source` 结构字段判定，不是关键词表：用户/工具显式写入永不被丢 |
+
+**账本自愈**（`MemoryStore::reconcile_memory_ledger`，启动后由现有 prune 线程跑一次，幂等）：
+
+1. **历史 scope 重挂**（`migrate_legacy_project_scopes` / 登记时 `rekey_legacy_scope_for_path`）：老行的 scope 是路径串（`project:<路径>` / `project:<sha256前16>:<路径尾72>`）。
+   `projects` 表存了各项目根路径，于是能**正向复算**老 key 再反查 → 命中就整批改写成 `project:<id>`（`rescopedMemories`）。
+   认领不了的（目录已删除、从未登记）**保持原样** —— 不猜、不删。
+   注意**时机**：`memory.project_resolve` 首次登记某路径时立刻认领（启动时 `projects` 还是空的，一条也认领不到）。
+   **实测**（真实库副本演练）：192 条字面量孤儿归档、36 条悬空作业判死、已登记项目的那批路径 scope 就地改写。
+2. `scope = 'project'`（字面量）的孤儿行：旧版本算 scope 失败留下的，召回归一化构造不出这个 scope → 归档（内容可恢复，`status` 终于说实话）。
+3. `pending` 且开始时间早于 30 分钟的归纳作业 → 判 `failed`：归纳作业只有 Main 会结账，进程退出后没人管，它不可能是「正在跑」。
+
+> 顺序不能反：先重挂、再归档，否则可认领的行会被一起埋掉。
+> 测试里 `MemoryStore::open` 不起 prune 线程（`cfg!(test)`）—— 后台自愈会和「显式调用自愈」的断言抢同一批行；自愈逻辑本身由测试直接调用覆盖。
+
+**FTS 影子表自查（开库时，`schema.rs`）**：行数对得上 ≠ 索引是好的。FTS 影子表损坏时 `long_memories` 的**任何写入**都会被触发器带崩（`database disk image is malformed`），而读路径完全正常 ——
+症状是「记忆永远写不进去、归纳器看着像没干活」。所以开库时做一次会被 AFTER UPDATE 触发器拦下的写入探针（同值 UPDATE 同样触发），失败就 `rebuild` 再探一次。真实库上抓到的正是这种损坏。
+
+---
+
+## 7. 会话交接（`session_handoffs`）
+
+- 生成：用户点「生成交接」→ `agent:session-handoff` IPC → Main `generateSessionHandoff`（`memory.messages_recent` 取骨架 → 单轮 LLM → `memory.handoff_save`）。每会话一份，重生成覆盖。
+- 消费：新会话「继续上次」显式带上 `continueFromSessionId`（**结构信号**，不猜语义），system 注入 `【上个会话交接…】`，上限 `HANDOFF_BLOCK_MAX_CHARS`(4000)。
+- 与长期记忆的区别：交接**不参与语义召回**，只按 session 精确读取，且天然带「来自旧会话，冲突以当前任务为准」的说明。
+
+---
+
+## 8. 工作记忆快照（长任务续跑）
+
+- 数据：`agent_runs.summary` / `state_snapshot`（`completedSubtasks`、`pendingItems`、`importantConstraints`、`taskStage`…）+ `agent_steps` 最近若干步。
+- 注入判定 `shouldInjectWorkMemory`：**有续跑 checkpoint**，或该 run 仍 `running` 且本会话有活跃 run。
+- 渲染为 `## 工作记忆快照`（附「与本轮 user 消息冲突时以用户输入为准」），不是对话原文。
+
+---
+
+## 9. 上下文压缩（Compaction）
+
+控制当次 Agent 运行的上下文窗口；摘要按会话落库，供下一轮投影，不改聊天气泡。
 
 | 项目 | 说明 |
 |------|------|
 | 实现 | Main `compaction-main.js` → Rust `compaction.maybe_compact`（Renderer 经 IPC，无本地 LLM） |
-| 预算 | `窗口 − maxOutputTokens − contextReserveTokens`；**工具 schema 超出预留的部分再从这里扣**（封顶 25%），因为 tools 占窗口却不进 messages |
-| 触发 | **唯一决策点**：Rust `maybe_compact` 的 `prepare` —— 估算 token ≥ 预算 × `triggerRatio`（默认档 0.85）且不在冷却期才压。Node 侧只搬运，不再有「条数 / 字符比」预判（那套拿不到真 token 账本，必然与 Rust 分叉） |
-| 策略 | 消息**原子分组**（`assistant.tool_calls` + 对应 `tool` 不拆散）；保留最近若干 atom；中间段用 LLM 摘要。摘要提示与折叠集合同源，不会出现「被折叠却未摘要」的段落 |
-| 冷却 | `coolDownRounds`（Main `COMPACTION_COOL_DOWN_ROUNDS = 6`，作为必传参数给 Rust，Rust 不再存默认值）；压缩成功后轮次计数置 1（不是 0），否则下一轮冷却不成立会连续复压；`force` 可穿透冷却（上下文溢出兜底） |
+| 预算 | `窗口 − maxOutputTokens − contextReserveTokens`；工具 schema 超出预留的部分从这里再扣（封顶 25%） |
+| 触发 | **唯一决策点**：Rust `maybe_compact` 的 `prepare` —— 估算 token ≥ 预算 × `triggerRatio`（默认 0.85）且不在冷却期 |
+| 策略 | 消息**原子分组**（`assistant.tool_calls` + 对应 `tool` 不拆散）；保留最近若干 atom；中间段 LLM 摘要 |
+| 冷却 | `coolDownRounds`（Main `COMPACTION_COOL_DOWN_ROUNDS = 6`，作为必传参数给 Rust）；压缩成功后轮次计数置 1（不是 0）；`force` 可穿透冷却 |
 | 落库 | `memory.compaction_archive` → `compaction_archives`；下轮 `memory.compaction_recent` 投影进 turn-ride |
 | 累计摘要 | Main 内存 `cumulativeSummary`；进程重启后从最近一条 archive 补水 |
-| 续跑 / 验收重试 | 从发送时快照的账本前缀 + 本轮工具尾巴重投影；丢掉内存里压过的中间历史（摘要走 turn-ride） |
-| 用户感知 | Toast：「上下文已压缩」 |
 
 ```mermaid
 flowchart LR
@@ -258,75 +513,20 @@ flowchart LR
   F --> G[下轮 turn-ride]
 ```
 
-**设计含义：**
-
-- 长跑任务靠压缩续命，**早期 tool 细节会丢**；摘要可在之后的用户轮次被模型看到。
-- 需要长期保留的信息 → `long_memories`、`dieyun.md`、或写到工作空间文件。
-- Planner / Worker 子上下文压缩在 Main `compaction-main.js`（Rust loop 每轮 LLM 前）。定时计划压缩同样归档到该会话。
+**设计含义：** 长跑任务靠压缩续命，早期 tool 细节会丢；需要长期保留的信息应写入项目记忆 / AGENTS.md / 工作空间文件，而不是指望压缩摘要。
 
 ---
 
-## 7. 全局指令与文件型记忆
+## 10. 会话标题（启发式 + 模型总结一次）
 
-### 7.1 `dieyun.md`（强推荐）
+| 阶段 | 谁写 | `title_source` | 说明 |
+|------|------|----------------|------|
+| 首条用户消息落库 | Rust `title_from_user_content` | `heuristic` | 首行切片、48 字上限，永远有值可用 |
+| 一轮跑完 | Node `src/agent/session-title.js` → `memory.session_set_title` | `ai` | 一次小请求，输入只有「用户需求 + 本轮答复节选」 |
+| 用户改名 | `memory.session_set_title` | `user` | 自动流程不再覆盖 |
 
-- 路径：`~/.dieyun/dieyun.md`（首次启动由 `agent-home.js` 创建模板）。
-- 读取：`api.getDieyunMd()` → 每轮 system 注入 `【全局持久指令 · dieyun.md】`。
-- 用途：项目级准则、口吻、禁忌 — **优先级高于普通长期记忆条目**。
-- 与 SQLite 无关，用户直接编辑文件即可。
-
-### 7.2 `~/.dieyun/memory/`
-
-- 在 `agent-home.js` 中初始化 README，说明可放 Markdown 笔记。
-- **当前产品未实现**自动扫描注入；与 SQLite `long_memories` 并行存在，靠用户自觉或未来功能。
-
-### 7.3 技能自带记忆（与内置分离）
-
-预装技能如 `memory-1.0.2`、`self-improving` 等，在 `~/.dieyun/skills` 或用户目录下维护 **另一套** 文件记忆（`~/memory/`、`~/self-improving/memory.md`）。
-
-设计原则（技能文档原文精神）：
-
-- **不与**内置 `long_memories` 混用；
-- 由技能 SKILL.md 教 Agent 何时读写在何路径；
-- 启用技能后通过 system 里的技能正文间接影响行为。
-
-## 9. 注入 system 的完整顺序（`buildSystemMessage`）
-
-每轮用户发送前构建，大致顺序：
-
-1. 系统时间块  
-2. 工具与编排说明（固定文案）  
-3. **已启用技能**（`fetchSkillsBlock`）  
-4. **`dieyun.md`**（若存在）  
-5. 技能目录 / 计划任务说明  
-6. **当前工作空间**路径  
-7. 本机权限能力说明  
-8. **长期记忆** — `long_recent` 20 条（RPC 默认）  
-
-然后与 **会话 `messages` 历史** 合并送入模型。
-
-**不在 system 里自动出现的：**
-
-- 其他会话的消息  
-- 未启用技能的记忆文件  
-- `~/.dieyun/memory/` 下笔记  
-- 已压缩掉的完整 tool 原文（只有 archive 摘要进 turn-ride） 
-
----
-
-## 10. 定时计划与记忆的关系
-
-定时任务主流路径是 **工具循环**（`plans/plan-agent-runner.js`），core 不可用时降级为单次 LLM（`plans/runner.js`）；两条路径都不写 `long_memories`。
-
-会话轮次由 `plans/plan-run-turn.js` 在运行边界写入 **计划专用会话**（同 `deliver.sessionId`）的 `messages`：
-**运行开始（`run_start` 之前）** 写 user 轮次，**终态事件之前** 写 assistant 轮次（含 `traceRunId`）：
-
-```
-[user]  [计划 · 名称] 时间 · 定时触发
-[assistant] 执行摘要或错误（meta.traceRunId 挂回思考区）
-```
-
-因此计划产出是 **会话短期记忆** 的一部分，不是独立记忆层。
+- `title_source` 是「每会话只生成一次」的唯一判据；已是 `ai` / `user` 直接跳过。
+- Main 在 run 收尾 fire-and-forget 触发（不 await），写库后推 `agent:session-title`，Renderer 只刷新一次列表。
 
 ---
 
@@ -335,63 +535,97 @@ flowchart LR
 | 原则 | 说明 |
 |------|------|
 | **本地优先** | SQLite 是单机真相源 |
-| **会话隔离** | 消息、工作空间按 session 分 |
-| **短期 vs 长期分开** | 对话自动存档 ≠ 自动长期记忆 |
-| **长期记忆用户可控** | 避免 Agent 乱写污染 `long_memories` |
+| **一层一个写入者** | 账本 = Rust；长期/项目记忆 = 归纳器；交接 = 交接服务；快照 = `request-snapshot.js`。同层出现第二个写口视为缺陷 |
+| **执行体不在 Renderer** | 归纳（含触发）、压缩、注入装配都在 Main；Renderer 只做设置页 UI 与「计划应用结果」这类 UI 事实（原则见 `AGENTS.md`） |
+| **短期 vs 长期分开** | 对话自动存档 ≠ 长期记忆；长期记忆靠归纳器的结构化输出 |
+| **注入克制** | 阈值 + 上限 + `kind` 白名单；宁可少注入，不与用户最新输入争优先级 |
 | **工具链不整库持久化** | 省空间、省 token；trace 嵌 assistant 供 UI |
 | **压缩可牺牲细节** | 用 LLM 换上下文空间，必须接受有损 |
-| **全局准则走 dieyun.md** | 文件编辑比设置页 textarea 更适合长文规范 |
+| **全局准则走文件** | `dieyun.md` / `AGENTS.md` / 项目记忆 `.dieyun/memory.md` 比数据库更适合长文规范，且可被 git 管理、可手改 |
+| **看得见才叫记忆** | 写进数据库却没人能看、没人能改的行等于没有记忆；项目记忆因此文件化，注入按字符预算直读 |
+| **软归档不用硬删** | 「忘掉」= `status=archived`（可恢复）；物理删除只发生在库修剪这类事务性路径 |
 
 ---
 
-## 12. 常见误区
+## 12. 已知边界（写清楚，免得当成 bug 排查）
+
+| 边界 | 现状 |
+|------|------|
+| **轮内记忆工具是只读+软归档** | `memory_recall`（读文件 / 语义召回）与 `memory_forget`（软归档）已可用；**没有**轮内直接写记忆的工具 —— 写入仍只在归纳器，避免「模型随手记一堆噪声」 |
+| **`kind=secret/private` 不自动注入** | 只落库 + 归纳语料可见，模型在正文里看不到（§5.3） |
+| **项目记忆的手动编辑就是改文件** | 没有专门的记忆编辑器：`.dieyun/memory.md` 用任何编辑器改，下一轮注入即生效。用户级记忆仍无列表 UI，清理走 `memory_recall` + `memory_forget` 或 RPC |
+| **去重分两层** | 库侧：向量近重复（cosine ≥ 0.92）合并 + 精确同文去重。文件侧：归一化正文相同即视为同条（不引入第二套相似度判定，近义合并交给归纳 prompt） |
+| **`~/.dieyun/memory/` 不注入** | 预留目录，仅在 `agent-home.js` 初始化 README |
+| **技能记忆与内置分离** | 技能自带 `~/memory/` 等路径，由 SKILL.md 指引，不进 `long_memories` |
+| **计划 pending 的超时补跑** | 暂存在 Main（`pending` map，`knowledgePlanApplyWaitMs` 20 分钟），等应用结果；超时按「验收通过但未应用」补一次归纳。不在 Renderer 也不在窗口里，切会话/关窗都不丢 |
+
+---
+
+## 13. 常见误区
 
 | 误区 | 事实 |
 |------|------|
-| 「换历史对话，模型还记得上次工具读了哪个文件」 | 历史轮只存 user/assistant 正文；中间 tool 链未入库，仅靠 assistant trace 或压缩前当轮内存 |
-| 「说了请记住，就会自动进长期记忆」 | 不会；需手动 long_add 或写 dieyun.md / 文件 |
-| 「压缩后的摘要以后还能从库里捞出来」 | 能。`compaction_archives` 按会话保存；下轮 turn-ride 注入最近一条。完整 tool 原文仍不在库里 |
-| 「技能 memory 技能 = 内置长期记忆」 | 两套系统，路径与触发方式不同 |
-| 「Master 和 Slave 共用同一份 long_memories」 | Slave 上传 raw；Master 读 consolidated |
+| 「说了请记住，也会进长期记忆」 | 会，但**异步**：任务收尾/定时归纳跑完才写库，且要过结构门闩；当轮 system prompt 不会立刻出现 |
+| 「换会话后模型还记得上次工具读了哪个文件」 | 历史轮只存 user/assistant 正文；中间 tool 链未入库 |
+| 「压缩后的摘要以后还能捞出来」 | 能，`compaction_archives` 按会话保存，下轮 turn-ride 注入最近一条；完整 tool 原文仍不在库里 |
+| 「长期记忆一写入每轮都会发给我看」 | 不是。要过召回（语义/关键词阈值）与 `kind` 白名单，且每块最多 20 行 |
+| 「项目记忆跟着会话走」 | 跟着**仓库文件**走（`<workspace>/.dieyun/memory.md`）：换会话照旧、改目录名只要文件跟着走就还在 |
+| 「记忆写进去模型就一定知道」 | 项目记忆按字符预算直读文件头部；用户级记忆要过召回阈值与 `kind` 白名单。更早的条目要用 `memory_recall` 或直接读文件 |
+| 「归纳器是 Renderer 里的定时器」 | 已迁到 Main（触发也在 Main：三个 loop 调用点跑完各调一次 fterAgentRun）；关掉窗口也会按排期跑，Renderer 只显示设置与状态 |
+| 「技能 memory = 内置长期记忆」 | 两套系统，路径与触发方式不同 |
 
 ---
 
-## 13. 扩展记忆能力时改哪里
+## 14. 扩展记忆能力时改哪里
 
-| 目标 | 建议触点 |
-|------|----------|
-| 新持久字段 | Rust `memory/schema.rs` 迁移 + `rpc.js` + 可选 UI |
-| 自动从对话提炼长期记忆 | `sendMessage` 结束钩子或新 RPC；需防 spam |
-| 扫描 `~/.dieyun/memory/` 注入 | `buildSystemMessage` 增块 + 文件 watcher |
-| 按会话长期记忆 | 需 `long_memories.session_id` 或新表（当前长期记忆是**全局**的） |
-| 工具链持久化 | 新表存 tool 消息或扩 `messages.content`；注意 token 与体积 |
+| 目标 | 触点 |
+|------|------|
+| 新增持久字段 | `crates/dieyun-core/src/memory/schema.rs` 迁移 + 相关 RPC + `docs/CODEMAP.json` |
+| 调归纳 prompt / 输出 schema | `src/agent/knowledge-maintainer.js`（唯一来源；勿在 Renderer 再写一份） |
+| 调触发门 / 预算 | `src/agent/agent-limits.js` 的 `knowledge*` 组 |
+| 新增注入块 | `src/agent/system-prompt-prep.js`（装配处 `Promise.all`）+ 本文 §5 |
+| 让 Agent 在轮内读写记忆 | 读/软归档已由 `memory_recall` / `memory_forget` 提供（schema 在 `tool-catalog.js`，执行在 `tool-bridge-main.js`）；再加写入类工具前先回答「为什么归纳器不够用」 |
+| 人工查看/清理记忆 | 项目记忆直接改 `.dieyun/memory.md`；用户级记忆用上下文面板「本会话沉淀…」→「忘掉这些」，或 `memory.session_memories` + `session_memories_forget` |
+| 压缩策略 | `src/compaction-prompts.js` + Rust `compaction/`（数字走 `agent-limits`） |
 
 ---
 
-## 14. 相关源码索引
+## 15. 源码索引
 
 ```
-crates/dieyun-core/src/memory/   # SQLite MemoryStore（唯一写入）
-src/gateway/rpc.js               # memory.* RPC → requireRustCore
-src/gateway/server.js            # Gateway 生命周期
-src/agent/compaction-main.js     # IPC compaction → Rust
-src/compaction-prompts.js        # 压缩 prompt（Main → Rust）
-src/renderer/renderer-agent-api.js  # applyContextCompaction / estimateMessagesTokensViaMain
-src/renderer/renderer.js         # messages 数组、buildSystemMessage、sendMessage、long_add UI
-src/agent-home.js                # ~/.dieyun 目录与 dieyun.md
-src/plans/deliver.js             # 计划结果写入会话
+crates/dieyun-core/src/memory/          # SQLite MemoryStore（唯一写入），schema/mod/misc/agent/snapshot（词法检索已并入 FTS5，见 §5.2.1）
+crates/dieyun-core/src/memory/projects.rs   # 项目身份：projects / project_paths / 别名解析（唯一实现）
+crates/dieyun-core/src/rpc/             # memory.* 查询类 RPC
+src/gateway/handlers/memory.js          # memory.* handler；project_* 的项目身份解析在此
+src/workspace/target.js                 # projectWorkspacePath（剥 worktree 后缀）
+src/agent/knowledge-maintainer.js       # 归纳器：触发(afterAgentRun)/prompt/取模型/写记忆(文件+库)/AGENTS 提案/定时/冷却/队列/pending/材料化
+src/agent/project-memory-file.js        # 项目记忆文件：格式/合并去重/字符预算/secret 过滤（唯一实现）
+src/agent/system-prompt-prep.js         # 注入块装配 + isInjectableMemoryRow
+src/agent/session-handoff.js            # 会话交接生成
+src/agent/request-snapshot.js           # 请求快照唯一装配与写入
+src/agent/compaction-main.js            # IPC compaction → Rust
+src/compaction-prompts.js               # 压缩 prompt
+src/renderer/renderer-knowledge-maintainer.js  # 只做设置页 UI + 上报计划应用结果（薄客户端）
+src/renderer/renderer-dieyun-md.js      # dieyun.md 注入模式与裁剪
+src/main/ipc/agent-runtime.js           # agent:knowledge-* IPC（含 plan-outcome）、prep-system-prompt、定时排期、实例注册
+src/plans/deliver.js                    # 计划结果写入会话
+scripts/test-knowledge-maintainer.cjs   # 归纳器 smoke（门闩/设置/scope 归一/写入/归档/队列/afterRun 分流/文件材料化）
+scripts/test-project-memory-file.cjs    # 项目记忆文件层（解析/去重/预算/secret 过滤）
+scripts/test-system-prompt-prep.cjs     # 注入块与 memoryAudit
 ```
 
 ---
 
-## 15. 文档关系
+## 16. 文档关系
 
 | 文档 | 内容 |
 |------|------|
-| **MEMORY.md**（本文） | 记忆分层、读写时机、注入规则 |
-| [DESIGN.md](./DESIGN.md) | 全架构；第 5、6 节为记忆与压缩摘要 |
-| [DEVELOPMENT.md](./DEVELOPMENT.md) | 开发与发版；部分历史描述可能过时，以本文与代码为准 |
+| **MEMORY.md**（本文） | 记忆分层、读写时机、注入规则、归纳预算 |
+| [DESIGN.md](./DESIGN.md) | 全架构 |
+| [REQUEST-SNAPSHOT.md](./REQUEST-SNAPSHOT.md) | 「模型看到了什么」的留底 |
+| [AGENT-DEV.md](./AGENT-DEV.md) | Agent 一页速查 |
+| [CODEMAP.json](./CODEMAP.json) | 模块 → 测试映射（记忆相关改动按此跑 smoke） |
 
 ---
 
-*对齐版本：**v1.3.68**（会话 `workspace_path`、产物面板）。记忆相关行为变更时请同步更新第 3、8、11 节。*
+*对齐版本：**0.1.58**（记忆归纳迁移到 Main、项目 scope 归一化、召回 bump 使用计数、`kind` 注入过滤；**本轮**：项目记忆文件化、会话溯源与软遗忘、写入侧近重复/低价值闸、注入审计、账本自愈、轮内记忆工具）。上述行为变更时请同步 §3、§5、§6、§12。*

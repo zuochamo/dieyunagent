@@ -23,33 +23,6 @@ function registerAgentsMdIpc(ctx) {
       maxChars: p.maxChars
     });
   });
-
-  ipcMain.handle('embedding:test-builtin', async () => {
-    try {
-      const {
-        embedWithBuiltin,
-        BUILTIN_EMBEDDING_DIMENSIONS,
-        hasBuiltinEmbeddingModel
-      } = require('../../codebase/local-embedding');
-      if (!hasBuiltinEmbeddingModel()) {
-        return {
-          ok: false,
-          error: '内置向量模型未安装。请打开设置 → 组件，下载 bge-base-zh-v1.5，或手动安装 zip'
-        };
-      }
-      const vectors = await embedWithBuiltin('叠云向量模型测试');
-      const vec = vectors && vectors[0];
-      if (!Array.isArray(vec) || vec.length !== BUILTIN_EMBEDDING_DIMENSIONS) {
-        return {
-          ok: false,
-          error: `向量维度异常：${Array.isArray(vec) ? vec.length : 0}`
-        };
-      }
-      return { ok: true, dimensions: vec.length };
-    } catch (e) {
-      return { ok: false, error: e.message || String(e) };
-    }
-  });
 }
 
 /**

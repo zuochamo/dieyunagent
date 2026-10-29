@@ -1,767 +1,146 @@
-/* global gatewayCall, gwState, fetchChatCompletion, resolveComposerModelForSend, getCustomModelApiConfig, compactPlainText, showAgentToast, getAgentsMdMode, ensureAgentsMd, loadAgentsMdRecord, parseMaintainerResponse, proposeAgentsMdUpdates, messages, isSending, sessionActiveRuns, $, diecloud */
+/* global window, document, $, loopApi */
 'use strict';
 
-let knowledgeMaintenancePending = false;
-let lastKnowledgeMaintenanceAt = 0;
-/** @type {Map<string, object>} */
-const pendingKnowledgeMaintenanceBySession = new Map();
-/** @type {object[]} */
-const knowledgeMaintenanceQueue = [];
-/** @type {Map<string, number>} */
-const backgroundKnowledgeFallbackTimers = new Map();
-/** @type {string | null} */
-let backgroundFallbackSessionId = null;
-
-const KNOWLEDGE_CONSOL_KEY = 'dieyun.knowledge.consolidation.v1';
-const KNOWLEDGE_CONSOL_DEFAULTS = Object.freeze({
-  mode: 'on',
-  intervalHours: 6,
-  scopes: Object.freeze({
-    recentChat: true,
-    longMemory: true,
-    projectMemory: true,
-    agents: true
-  }),
-  lastRunAt: 0,
-  lastRunOk: null,
-  lastRunSummary: ''
-});
-
-/** @type {ReturnType<typeof setInterval> | null} */
-let knowledgeConsolTimer = null;
-/** @type {ReturnType<typeof setTimeout> | null} */
-let knowledgeConsolKickTimer = null;
-let knowledgeConsolRunning = false;
-
-function planStepsFromInput(plan) {
-  if (!plan) return [];
-  if (Array.isArray(plan.subtasks)) return plan.subtasks;
-  if (Array.isArray(plan.tasks)) return plan.tasks;
-  return [];
-}
-
-const UNIFIED_KNOWLEDGE_SCHEMA = `只输出 JSON，不要 Markdown 包裹或额外说明。格式：
-{
-  "memories": [{"content":"…","kind":"normal|private|secret","importance":1-5,"scope":"global|project"}],
-  "archive_memory_ids": ["记忆id"],
-  "agents_updates": [{"section":"commands","action":"append|merge|replace","anchor":"merge 时填已有条目的开头片段","content":"- …","confidence":0.9}]
-}`;
-
 /**
- * 同主题合并的唯一可执行路径（merge + anchor）。
+ * 记忆归纳 —— **Renderer 侧只剩设置页**。
  *
- * 不给这条引导，后台归纳器只会 append —— 实测某项目文件在一天内被加了 20 条，
- * 其中 CameraCut 同主题重复两次，直接把文件顶到 24000 上限、要靠人工压。
- * 注意这里的措辞与 `tool-catalog.js` 的 agents_md_propose 描述保持一致。
+ * 执行体与**触发**都在 Main（`src/agent/knowledge-maintainer.js` 唯一实现）：
+ * 三个 `runRustAgentLoop` 调用点（对话 / 计划模式 / 定时计划）跑完各调一次
+ * `afterAgentRun`，计划 worktree 的「应用后才归纳」也暂存在 Main。
+ *
+ * 所以这里**没有**：定时器、队列、冷却、记忆写入、prompt、门闩、pending 上下文与兜底超时
+ * —— 那些曾经写在窗口里，切会话或关窗就停摆。本文件只做三件事：
+ *   1. 读 Main 的设置与选项清单（模式 / 间隔档都由 Main 给，不再本地写第二份默认值）；
+ *   2. 写设置（Main 负责落盘与重排定时器）；
+ *   3. 显示上次运行结果，并把「计划 worktree 的应用结果」回给 Main。
  */
-const AGENTS_MERGE_RULE =
-  '   **同主题已有条目要合并，不要追加第二条**：用 action:"merge" + anchor' +
-  '（已有条目的开头片段，如 "**CameraCut"），content 写合并后的完整条目；' +
-  '确实没有同主题条目时才用 action:"append"；整段重写用 action:"replace"。\n';
 
-/**
- * 给归纳器一个体积感。没有这句，它不知道自己在往一个快写满的文件里塞东西，
- * 于是照旧 append（实测正是这条路径把文件顶到 24000）。
- * 阈值取 18000（文件自带口径「涨到约 20000 就压一轮」的提前量）。
- */
-function agentsPressureNote(content) {
-  const len = String(content || '').length;
-  if (len < 18000) return '';
-  return `\n⚠ 当前已约 ${len} 字（上限 24000，接近写满）：本次 agents_updates 只做合并（merge），不要 append 新增条目。`;
+/** 设置缓存：Main 是唯一真相源，这里只是异步读回来给 UI 同步渲染 */
+let knowledgeSettingsCache = null;
+let knowledgeSettingsLoading = null;
+let knowledgeStatusUnsubscribe = null;
+
+function knowledgeApi() {
+  return typeof loopApi === 'object' && loopApi ? loopApi : null;
 }
 
-function getKnowledgeConsolidationSettings() {
-  const base = {
-    mode: KNOWLEDGE_CONSOL_DEFAULTS.mode,
-    intervalHours: KNOWLEDGE_CONSOL_DEFAULTS.intervalHours,
-    scopes: { ...KNOWLEDGE_CONSOL_DEFAULTS.scopes },
-    lastRunAt: 0,
-    lastRunOk: null,
-    lastRunSummary: ''
-  };
-  try {
-    const raw = window.localStorage.getItem(KNOWLEDGE_CONSOL_KEY);
-    if (!raw) return base;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return base;
-    if (parsed.mode === 'off' || parsed.mode === 'idle' || parsed.mode === 'on') base.mode = parsed.mode;
-    const hours = Number(parsed.intervalHours);
-    if (hours === 6 || hours === 12 || hours === 24) base.intervalHours = hours;
-    if (parsed.scopes && typeof parsed.scopes === 'object') {
-      for (const k of Object.keys(base.scopes)) {
-        if (typeof parsed.scopes[k] === 'boolean') base.scopes[k] = parsed.scopes[k];
-      }
-    }
-    if (Number.isFinite(Number(parsed.lastRunAt))) base.lastRunAt = Number(parsed.lastRunAt);
-    if (parsed.lastRunOk === true || parsed.lastRunOk === false) base.lastRunOk = parsed.lastRunOk;
-    if (typeof parsed.lastRunSummary === 'string') base.lastRunSummary = parsed.lastRunSummary.slice(0, 240);
-  } catch {
-    // ignore
-  }
-  return base;
-}
-
-function saveKnowledgeConsolidationSettings(patch) {
-  const cur = getKnowledgeConsolidationSettings();
-  const next = {
-    ...cur,
-    ...(patch || {}),
-    scopes: { ...cur.scopes, ...((patch && patch.scopes) || {}) }
-  };
-  try {
-    window.localStorage.setItem(KNOWLEDGE_CONSOL_KEY, JSON.stringify(next));
-  } catch {
-    // ignore
-  }
-  return next;
-}
-
-function buildUnifiedKnowledgeSystemPrompt(opts = {}) {
-  const { periodicOnly, fullPeriodic, agentsEnabled } = opts;
-  if (fullPeriodic) {
-    let boundary =
-      '你是叠云 Agent 的定时知识归纳器。根据输入中的对话与已有知识，合并去重、提炼稳定事实，并建议归档过时记忆。' +
-      UNIFIED_KNOWLEDGE_SCHEMA +
-      '【写入边界】\n' +
-      '1. memories：可复用事实/偏好/密钥（标 kind）；不要寒暄与无结论过程。\n' +
-      '2. archive_memory_ids：仅填输入里给出的过时/重复记忆 id。\n';
-    if (agentsEnabled) {
-      boundary +=
-        '3. agents_updates：稳定命令/目录/规范/坑点短列表；section=overview|structure|commands|conventions|testing|architecture|gotchas。\n' +
-        AGENTS_MERGE_RULE;
-    } else {
-      boundary += '3. agents_updates 必须为 []。\n';
-    }
-    boundary += '禁止编造未出现的路径/命令；无内容则对应数组为空。';
-    return boundary;
-  }
-  if (periodicOnly) {
-    return (
-      '你是叠云 Agent 的知识维护器（定时归纳）。只从近期对话提取 SQLite 碎片记忆。' +
-      UNIFIED_KNOWLEDGE_SCHEMA +
-      '【写入边界】memories：临时事实、偏好、密钥（标 kind）、未写入 AGENTS 的坑点；不要命令清单/目录树/多步流程。' +
-      'archive_memory_ids / agents_updates 必须为 []。'
-    );
-  }
-  let boundary =
-    '【存储分工 · 必须遵守】\n' +
-    '1. memories（SQLite 碎片）：临时事实、未验证假设、单次踩坑、密钥/偏好（标 kind）。' +
-    '不写：稳定命令清单、目录树、完整多步流程。与 AGENTS 将写入的内容重复则不要放 memories。\n' +
-    '2. agents_updates（AGENTS.md 项目地图）：稳定命令、目录、规范、长期坑点（短列表项）。' +
-    'section 取值：overview, structure, commands, conventions, testing, architecture, gotchas。' +
-    '不写：完整 SOP、逐步操作过程。\n' +
-    AGENTS_MERGE_RULE;
-  boundary +=
-    '【互斥】同一命令优先 agents_updates.commands，不要同时写 memories；' +
-    '无内容则对应数组为空。' +
-    '禁止编造未出现的命令或路径。archive_memory_ids 在本触发下必须为 []。';
-  if (!agentsEnabled) {
-    boundary += '\nagents_updates 必须为 []（项目地图维护已关闭）。';
-  }
-  return `你是叠云 Agent 的统一知识维护器。一次决策，分路写入 memories / AGENTS.md。\n${boundary}\n${UNIFIED_KNOWLEDGE_SCHEMA}`;
-}
-
-function extractJsonBlock(text) {
-  const s = String(text || '').trim();
-  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) {
-    try {
-      return JSON.parse(fence[1].trim());
-    } catch {
-      // ignore
-    }
-  }
-  const start = s.indexOf('{');
-  const end = s.lastIndexOf('}');
-  if (start >= 0 && end > start) {
-    try {
-      return JSON.parse(s.slice(start, end + 1));
-    } catch {
-      // ignore
-    }
-  }
-  return null;
-}
-
-function collectKnowledgeSignals(input) {
-  const trace = input?.trace || [];
-  const changes = (input?.changes || []).slice(0, 14).map((c) => {
-    const p = c.relativePath || c.path || '';
-    return `- ${p}${c.source ? ` (${c.source})` : ''}`;
-  });
-  const execLines = [];
-  let writeCount = 0;
-  for (const entry of trace) {
-    for (const tool of entry.tools || []) {
-      if (tool.pending) continue;
-      if (tool.name === 'host_exec') {
-        const s = String(tool.summary || '');
-        if (/失败|error|exit\s*[1-9]/i.test(s)) continue;
-        execLines.push(`- ${tool.argsBrief || 'host_exec'} → ${compactPlainText(s, 140)}`);
-      }
-      if (
-        (tool.name === 'fs_write_file' || tool.name === 'fs_edit') &&
-        !/失败|error/i.test(String(tool.summary || ''))
-      ) {
-        writeCount += 1;
-      }
-    }
-  }
-  const plan = input?.plan;
-  const planSteps = planStepsFromInput(plan);
-  let planSummary = '';
-  if (planSteps.length) {
-    planSummary = planSteps
-      .slice(0, 12)
-      .map((t, i) => `${i + 1}. ${compactPlainText(t.title || t.id || '', 120)}`)
-      .join('\n');
-  }
-  return {
-    userText: compactPlainText(input?.userText || '', 1400),
-    assistantText: compactPlainText(input?.assistantText || '', 1800),
-    recentText: compactPlainText(input?.recentText || '', 2400),
-    toolTrace: summarizeTraceForKnowledge(trace),
-    changes: changes.join('\n'),
-    execLines: execLines.slice(0, 10).join('\n'),
-    writeCount,
-    planSummary,
-    reviewNotes: compactPlainText(input?.review?.notes || '', 600),
-    appliedPaths: (input?.appliedPaths || []).slice(0, 12).join('\n')
-  };
-}
-
-function summarizeTraceForKnowledge(trace) {
-  const lines = [];
-  for (const entry of trace || []) {
-    for (const tool of entry.tools || []) {
-      if (tool.pending) continue;
-      const name = tool.name || 'tool';
-      const brief = tool.argsBrief ? ` ${tool.argsBrief}` : '';
-      const sum = compactPlainText(tool.summary || '', 180);
-      lines.push(`- ${name}${brief}: ${sum}`);
-    }
-  }
-  return lines.slice(0, 28).join('\n');
-}
-
-function parseUnifiedKnowledgeJson(text) {
-  const json = extractJsonBlock(text) || {};
-  const memories = (Array.isArray(json.memories) ? json.memories : Array.isArray(json.items) ? json.items : [])
-    .map((item) => ({
-      content: compactPlainText(item.content || item.memory || item.text || '', 420),
-      kind: ['normal', 'private', 'secret'].includes(String(item.kind || '').toLowerCase())
-        ? String(item.kind).toLowerCase()
-        : undefined,
-      importance: Math.min(5, Math.max(1, Number(item.importance) || 3)),
-      scope: compactPlainText(item.scope || 'global', 80)
-    }))
-    .filter((item) => item.content && item.content.length >= 8)
-    .slice(0, 8);
-  const agents_updates = Array.isArray(json.agents_updates)
-    ? json.agents_updates
-    : Array.isArray(json.updates)
-      ? json.updates
-      : [];
-  const archive_memory_ids = (Array.isArray(json.archive_memory_ids) ? json.archive_memory_ids : [])
-    .map((id) => String(id || '').trim())
-    .filter(Boolean)
-    .slice(0, 24);
-  return { memories, agents_updates, archive_memory_ids };
-}
-
-function shouldRunUnifiedMaintenance(input) {
-  const signals = collectKnowledgeSignals(input);
-  if (input?.periodicOnly) {
-    return !!signals.recentText;
-  }
-  // 结构信号（文本长度/工具/变更）；禁用寒暄关键词门闩
-  return (
-    signals.userText.length >= 8 ||
-    !!signals.toolTrace ||
-    !!signals.changes ||
-    !!signals.execLines ||
-    !!signals.planSummary
-  );
-}
-
-async function applyMemoryItems(items, input) {
-  const wsPath = input?.workspacePath ? String(input.workspacePath).trim() : '';
-  let saved = 0;
-  for (const item of items || []) {
-    const useProject =
-      wsPath &&
-      (String(item.scope || '').toLowerCase() === 'project' ||
-        String(item.scope || '').toLowerCase() === 'workspace' ||
-        Number(item.importance) >= 4);
-    if (useProject) {
-      await gatewayCall('memory.project_add', {
-        workspacePath: wsPath,
-        content: item.content,
-        source: input?.memorySource || 'auto_consolidation',
-        kind: item.kind,
-        importance: item.importance
-      });
-    } else {
-      await gatewayCall('memory.long_add', {
-        content: item.content,
-        source: input?.memorySource || 'auto_consolidation',
-        kind: item.kind,
-        scope: item.scope,
-        importance: item.importance
-      });
-    }
-    saved += 1;
-  }
-  return saved;
-}
-
-async function applyAgentsUpdates(updates, workspacePath, source, input) {
-  if (!updates?.length || !workspacePath || getAgentsMdMode() === 'off') {
-    return { applied: 0 };
-  }
-  await ensureAgentsMd(workspacePath);
-  return proposeAgentsMdUpdates(updates, source || 'task-completed', workspacePath);
-}
-
-async function runUnifiedKnowledgeMaintenance(input) {
-  if (!gwState.authed) return { ok: false, reason: 'gateway_disconnected' };
-  if (!shouldRunUnifiedMaintenance(input)) return { ok: false, reason: 'skip' };
-
-  const signals = collectKnowledgeSignals(input);
-  const workspacePath = input?.workspacePath ? String(input.workspacePath).trim() : '';
-  const agentsEnabled = !!workspacePath && getAgentsMdMode() !== 'off';
-  const periodicOnly = !!input?.periodicOnly;
-
-  const model =
-    input?.model || resolveComposerModelForSend(signals.userText || signals.recentText || 'x').model;
-  const apiConfig =
-    input?.apiConfig ||
-    resolveComposerModelForSend(signals.userText || signals.recentText || 'x').apiConfig ||
-    getCustomModelApiConfig();
-  if (!model || !apiConfig?.baseUrl) return { ok: false, reason: 'no_model' };
-
-  let agentsContext = '';
-  let agentsPressure = '';
-  if (agentsEnabled && !periodicOnly) {
-    if (input?.agentsMdSnapshot) {
-      const full = String(input.agentsMdSnapshot);
-      agentsContext = full.slice(0, 12000);
-      agentsPressure = agentsPressureNote(full);
-    } else {
-      try {
-        await ensureAgentsMd(workspacePath);
-        const rec = await loadAgentsMdRecord(workspacePath);
-        const full = String(rec?.content || '');
-        agentsContext = full.slice(0, 12000);
-        agentsPressure = agentsPressureNote(full);
-      } catch {
-        agentsContext = '';
-      }
-    }
-  }
-
-  const sourceLabel = periodicOnly
-    ? '定时归纳'
-    : input?.source === 'plan-worktree-applied'
-      ? 'Plan 验收通过且 worktree 已应用'
-      : input?.source === 'plan-completed'
-        ? 'Plan 验收通过'
-        : 'Agent 任务完成';
-
-  const job = await gatewayCall('memory.consolidation_job_create', {
-    scope: periodicOnly ? 'global' : workspacePath ? 'unified' : 'global',
-    reason: input?.reason || (periodicOnly ? 'periodic' : 'task_completed')
-  }).catch(() => null);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 65000);
-  let llmText = '';
-  try {
-    llmText = await fetchChatCompletion({
-      model,
-      apiConfig,
-      temperature: 0.12,
-      max_tokens: 2800,
-      signal: controller.signal,
-      messages: [
-        {
-          role: 'system',
-          content: buildUnifiedKnowledgeSystemPrompt({ periodicOnly, agentsEnabled })
-        },
-        {
-          role: 'user',
-          content: periodicOnly
-            ? `【触发】${sourceLabel}\n\n【近期上下文】\n${signals.recentText || '无'}`
-            : [
-                `【触发】${sourceLabel}`,
-                `【当前 AGENTS.md】\n${agentsContext || '（未启用或无工作空间）'}${agentsPressure}`,
-                `【用户任务】\n${signals.userText || '无'}`,
-                `【Agent 结果】\n${signals.assistantText || '无'}`,
-                `【Plan 步骤】\n${signals.planSummary || '无'}`,
-                `【验收说明】\n${signals.reviewNotes || '无'}`,
-                `【工具执行】\n${signals.toolTrace || '无'}`,
-                `【成功命令】\n${signals.execLines || '无'}`,
-                `【文件变更】\n${signals.changes || '无'}`,
-                `【已应用路径】\n${signals.appliedPaths || '无'}`
-              ].join('\n\n')
-        }
-      ]
+async function hydrateKnowledgeSettings() {
+  const api = knowledgeApi();
+  if (!api || typeof api.agentKnowledgeSettingsGet !== 'function') return knowledgeSettingsCache;
+  if (knowledgeSettingsLoading) return knowledgeSettingsLoading;
+  knowledgeSettingsLoading = api
+    .agentKnowledgeSettingsGet()
+    .then((raw) => {
+      knowledgeSettingsCache = raw && typeof raw === 'object' ? raw : null;
+      renderKnowledgeConsolIntervalTabs();
+      syncKnowledgeConsolControls(knowledgeSettingsCache);
+      return knowledgeSettingsCache;
+    })
+    .catch(() => knowledgeSettingsCache)
+    .finally(() => {
+      knowledgeSettingsLoading = null;
     });
-  } catch (err) {
-    console.warn('unified knowledge maintenance llm', err);
-    if (job?.jobId) {
-      await gatewayCall('memory.consolidation_job_finish', {
-        jobId: job.jobId,
-        status: 'failed',
-        error: err.message || String(err)
-      }).catch(() => {});
-    }
-    return { ok: false, reason: 'llm_failed' };
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  const parsed = parseUnifiedKnowledgeJson(llmText);
-  let memorySaved = 0;
-  let agentsApplied = 0;
-
-  try {
-    memorySaved = await applyMemoryItems(parsed.memories, input);
-
-    if (agentsEnabled && !periodicOnly && parsed.agents_updates?.length) {
-      const agentsParsed = await parseMaintainerResponse(JSON.stringify({ updates: parsed.agents_updates }));
-      const updates = agentsParsed?.updates || parsed.agents_updates;
-      const agentsRes = await applyAgentsUpdates(updates, workspacePath, 'task-completed', input);
-      agentsApplied = agentsRes?.applied || 0;
-    }
-
-    if (job?.jobId) {
-      await gatewayCall('memory.consolidation_job_finish', {
-        jobId: job.jobId,
-        status: 'completed'
-      }).catch(() => {});
-    }
-    lastKnowledgeMaintenanceAt = Date.now();
-    return {
-      ok: true,
-      memorySaved,
-      agentsApplied
-    };
-  } catch (err) {
-    if (job?.jobId) {
-      await gatewayCall('memory.consolidation_job_finish', {
-        jobId: job.jobId,
-        status: 'failed',
-        error: err.message || String(err)
-      }).catch(() => {});
-    }
-    return { ok: false, error: err.message || String(err) };
-  }
-}
-
-function formatMemoryRowsForPrompt(rows, label) {
-  const list = Array.isArray(rows) ? rows : [];
-  if (!list.length) return `【${label}】\n无`;
-  const lines = list.slice(0, 28).map((r) => {
-    const id = r.id != null ? r.id : r.memoryId;
-    const content = compactPlainText(r.content || '', 220);
-    return `- id=${id} · ${content}`;
-  });
-  return `【${label}】\n${lines.join('\n')}`;
-}
-
-async function resolveConsolidationWorkspacePath() {
-  if (gwState?.workspacePath) return String(gwState.workspacePath).trim();
-  try {
-    if (window.diecloud?.getWorkspace) {
-      const ws = await window.diecloud.getWorkspace();
-      if (ws?.workspacePath) return String(ws.workspacePath).trim();
-    }
-  } catch {
-    // ignore
-  }
-  return '';
-}
-
-function isKnowledgeConsolAgentBusy() {
-  try {
-    if (typeof isSending !== 'undefined' && isSending) return true;
-  } catch {
-    // ignore
-  }
-  try {
-    if (sessionActiveRuns && typeof sessionActiveRuns.size === 'number' && sessionActiveRuns.size > 0) {
-      return true;
-    }
-  } catch {
-    // ignore
-  }
-  return false;
-}
-
-async function gatherFullConsolidationCorpus(settings, workspacePath) {
-  const scopes = settings.scopes || {};
-  const parts = [];
-  let knownMemoryIds = new Set();
-
-  if (scopes.recentChat !== false) {
-    const recent =
-      typeof messages !== 'undefined' && Array.isArray(messages)
-        ? messages
-            .slice(-20)
-            .map((m) => `${m.role}: ${compactPlainText(m.content || '', 360)}`)
-            .join('\n')
-        : '';
-    parts.push(`【近期对话】\n${recent || '无'}`);
-  }
-
-  if (scopes.longMemory !== false) {
-    try {
-      const rows = await gatewayCall('memory.long_recent', { limit: 24, scope: 'global' });
-      const list = Array.isArray(rows) ? rows : rows?.results || [];
-      for (const r of list) {
-        if (r?.id != null) knownMemoryIds.add(String(r.id));
-      }
-      parts.push(formatMemoryRowsForPrompt(list, '长期记忆（global）'));
-    } catch {
-      parts.push('【长期记忆（global）】\n读取失败');
-    }
-  }
-
-  if (scopes.projectMemory !== false && workspacePath) {
-    try {
-      const scopeRes = await gatewayCall('memory.project_scope', { workspacePath });
-      const scope = scopeRes?.scope;
-      if (scope) {
-        const rows = await gatewayCall('memory.long_recent', { limit: 24, scope });
-        const list = Array.isArray(rows) ? rows : rows?.results || [];
-        for (const r of list) {
-          if (r?.id != null) knownMemoryIds.add(String(r.id));
-        }
-        parts.push(formatMemoryRowsForPrompt(list, '项目记忆'));
-      } else {
-        parts.push('【项目记忆】\n无 scope');
-      }
-    } catch {
-      parts.push('【项目记忆】\n读取失败');
-    }
-  }
-
-  if (scopes.agents !== false && workspacePath && getAgentsMdMode() !== 'off') {
-    try {
-      await ensureAgentsMd(workspacePath);
-      const rec = await loadAgentsMdRecord(workspacePath);
-      const full = String(rec?.content || '');
-      parts.push(`【当前 AGENTS.md】\n${full.slice(0, 10000) || '空'}${agentsPressureNote(full)}`);
-    } catch {
-      parts.push('【当前 AGENTS.md】\n读取失败');
-    }
-  }
-
-  return { userContent: parts.join('\n\n'), knownMemoryIds };
-}
-
-async function applyArchiveMemoryIds(ids, knownMemoryIds) {
-  let n = 0;
-  for (const id of ids || []) {
-    const memoryId = Number(id);
-    if (!Number.isFinite(memoryId) || memoryId <= 0) continue;
-    if (knownMemoryIds && knownMemoryIds.size && !knownMemoryIds.has(String(memoryId))) continue;
-    try {
-      await gatewayCall('memory.long_status_set', { memoryId, status: 'archived' });
-      n += 1;
-    } catch {
-      // ignore
-    }
-  }
-  return n;
+  return knowledgeSettingsLoading;
 }
 
 /**
- * 完整版定时知识归纳：对话模型整理记忆 + 可选 AGENTS.md。
- * @param {{ force?: boolean, reason?: string }} opts
+ * 写设置：Main 落盘并重排定时器，返回最新设置。
+ * 不做本地乐观归一 —— 归一化只有 Main 一份（`normalizeKnowledgeSettings`）。
+ * @param {{mode?: string, intervalHours?: number, scopes?: object}} patch
  */
-async function runFullPeriodicKnowledgeConsolidation(opts = {}) {
-  if (!gwState.authed) return { ok: false, reason: 'gateway_disconnected' };
-  if (knowledgeConsolRunning) return { ok: false, reason: 'busy' };
-
-  const settings = getKnowledgeConsolidationSettings();
-  if (!opts.force && settings.mode === 'off') return { ok: false, reason: 'disabled' };
-  if (!opts.force && settings.mode === 'idle' && isKnowledgeConsolAgentBusy()) {
-    return { ok: false, reason: 'agent_busy' };
-  }
-
-  knowledgeConsolRunning = true;
-  const workspacePath = await resolveConsolidationWorkspacePath();
-  const agentsEnabled =
-    !!workspacePath && settings.scopes.agents !== false && getAgentsMdMode() !== 'off';
-
-  const model = resolveComposerModelForSend('knowledge consolidation').model;
-  const apiConfig =
-    resolveComposerModelForSend('knowledge consolidation').apiConfig || getCustomModelApiConfig();
-  if (!model || !apiConfig?.baseUrl) {
-    knowledgeConsolRunning = false;
-    const summary = '无可用对话模型';
-    saveKnowledgeConsolidationSettings({
-      lastRunAt: Date.now(),
-      lastRunOk: false,
-      lastRunSummary: summary
-    });
-    refreshKnowledgeConsolStatusUi();
-    return { ok: false, reason: 'no_model' };
-  }
-
-  let corpus;
+async function saveKnowledgeConsolidationSettings(patch = {}) {
+  const api = knowledgeApi();
+  if (!api || typeof api.agentKnowledgeSettingsSet !== 'function') return knowledgeSettingsCache;
   try {
-    corpus = await gatherFullConsolidationCorpus(settings, workspacePath);
-  } catch (err) {
-    knowledgeConsolRunning = false;
-    return { ok: false, reason: 'gather_failed', error: err.message || String(err) };
-  }
-
-  if (!String(corpus.userContent || '').replace(/【[^】]+】/g, '').replace(/无|读取失败|空|scope/gi, '').trim()) {
-    knowledgeConsolRunning = false;
-    const summary = '无可整理内容';
-    saveKnowledgeConsolidationSettings({
-      lastRunAt: Date.now(),
-      lastRunOk: true,
-      lastRunSummary: summary
-    });
-    refreshKnowledgeConsolStatusUi();
-    return { ok: true, skipped: true, reason: 'empty' };
-  }
-
-  const job = await gatewayCall('memory.consolidation_job_create', {
-    scope: workspacePath ? 'workspace' : 'global',
-    reason: opts.reason || 'periodic_full'
-  }).catch(() => null);
-
-  // 机械维护：衰减 + 向量重建
-  await gatewayCall('memory.long_decay', { staleDays: 120, archiveDays: 240 }).catch(() => {});
-  await gatewayCall('memory.long_reindex', { limit: 100 }).catch(() => {});
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 90000);
-  let llmText = '';
-  try {
-    llmText = await fetchChatCompletion({
-      model,
-      apiConfig,
-      temperature: 0.12,
-      max_tokens: 3500,
-      signal: controller.signal,
-      messages: [
-        {
-          role: 'system',
-          content: buildUnifiedKnowledgeSystemPrompt({
-            fullPeriodic: true,
-            agentsEnabled
-          })
-        },
-        {
-          role: 'user',
-          content:
-            `【触发】定时知识归纳（完整版）\n工作空间：${workspacePath || '（未绑定，仅全局记忆）'}\n模型：跟随对话 · ${model}\n\n` +
-            corpus.userContent
-        }
-      ]
-    });
-  } catch (err) {
-    console.warn('full periodic consolidation llm', err);
-    if (job?.jobId) {
-      await gatewayCall('memory.consolidation_job_finish', {
-        jobId: job.jobId,
-        status: 'failed',
-        error: err.message || String(err)
-      }).catch(() => {});
+    const saved = await api.agentKnowledgeSettingsSet(patch || {});
+    if (saved && typeof saved === 'object') {
+      // 写回响应不带选项清单（choices 是读接口附带的），保留旧的那份
+      const choices = knowledgeSettingsCache && knowledgeSettingsCache.choices;
+      knowledgeSettingsCache = choices ? { ...saved, choices } : saved;
     }
-    knowledgeConsolRunning = false;
-    saveKnowledgeConsolidationSettings({
-      lastRunAt: Date.now(),
-      lastRunOk: false,
-      lastRunSummary: err.message || '模型调用失败'
-    });
-    refreshKnowledgeConsolStatusUi();
-    return { ok: false, reason: 'llm_failed' };
-  } finally {
-    clearTimeout(timeout);
+  } catch {
+    // 写失败保留当前展示，下次补水会覆盖回真相
   }
-
-  const parsed = parseUnifiedKnowledgeJson(llmText);
-  const input = {
-    workspacePath,
-    memorySource: 'periodic_consolidation',
-    source: 'periodic_consolidation'
-  };
-
-  try {
-    const memorySaved = await applyMemoryItems(parsed.memories, input);
-    const archived = await applyArchiveMemoryIds(parsed.archive_memory_ids, corpus.knownMemoryIds);
-
-    let agentsApplied = 0;
-    if (agentsEnabled && parsed.agents_updates?.length) {
-      const agentsParsed = await parseMaintainerResponse(
-        JSON.stringify({ updates: parsed.agents_updates })
-      );
-      const updates = agentsParsed?.updates || parsed.agents_updates;
-      const agentsRes = await applyAgentsUpdates(updates, workspacePath, 'periodic', input);
-      agentsApplied = agentsRes?.applied || 0;
-    }
-
-    if (job?.jobId) {
-      await gatewayCall('memory.consolidation_job_finish', {
-        jobId: job.jobId,
-        status: 'completed'
-      }).catch(() => {});
-    }
-
-    lastKnowledgeMaintenanceAt = Date.now();
-    const summary = `记忆+${memorySaved} 归档${archived} AGENTS${agentsApplied}`;
-    saveKnowledgeConsolidationSettings({
-      lastRunAt: Date.now(),
-      lastRunOk: true,
-      lastRunSummary: summary
-    });
-    refreshKnowledgeConsolStatusUi();
-    return {
-      ok: true,
-      memorySaved,
-      archived,
-      agentsApplied
-    };
-  } catch (err) {
-    if (job?.jobId) {
-      await gatewayCall('memory.consolidation_job_finish', {
-        jobId: job.jobId,
-        status: 'failed',
-        error: err.message || String(err)
-      }).catch(() => {});
-    }
-    saveKnowledgeConsolidationSettings({
-      lastRunAt: Date.now(),
-      lastRunOk: false,
-      lastRunSummary: err.message || String(err)
-    });
-    refreshKnowledgeConsolStatusUi();
-    return { ok: false, error: err.message || String(err) };
-  } finally {
-    knowledgeConsolRunning = false;
-  }
+  refreshKnowledgeConsolStatusUi();
+  syncKnowledgeConsolControls(knowledgeSettingsCache);
+  return knowledgeSettingsCache;
 }
 
+/**
+ * 计划 worktree 的应用结果 → Main（`resolvePending`）。
+ *
+ * 三种结论：`applied`（按应用后的路径整理）/ `no_changes`（验收通过但无待合并项）/
+ * 其他（用户放弃，plan 相关知识不写）。上下文与兜底超时都在 Main，所以切会话、关窗都不会丢。
+ */
+function reportKnowledgePlanOutcome(sessionId, outcome, extra = {}) {
+  const api = knowledgeApi();
+  const verdict =
+    outcome === 'applied' ? 'applied' : outcome === 'no_changes' ? 'no_changes' : 'skipped';
+  if (!api || typeof api.agentKnowledgePlanOutcome !== 'function') return;
+  Promise.resolve(
+    api.agentKnowledgePlanOutcome({
+      sessionId: String(sessionId || ''),
+      outcome: verdict,
+      appliedPaths: verdict === 'applied' && Array.isArray(extra.appliedPaths) ? extra.appliedPaths : []
+    })
+  ).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// 设置页 UI（只做展示与写入，不做执行）
+// ---------------------------------------------------------------------------
+
+/**
+ * 状态只讲「有没有在跑、上次什么时候、成没成」；
+ * 归纳器内部的计数（记忆+3 合并0 弃0 归档0）放进 title，不占版面。
+ */
 function formatKnowledgeConsolLastRun(settings) {
-  if (!settings.lastRunAt) return '尚未运行';
+  if (!settings) return { text: '状态读取中…', detail: '', state: '' };
+  const off = settings.mode === 'off';
+  if (!settings.lastRunAt) {
+    return { text: off ? '已关闭 · 尚未运行' : '尚未运行', detail: '', state: '' };
+  }
   const t = new Date(settings.lastRunAt);
-  const when = Number.isNaN(t.getTime()) ? String(settings.lastRunAt) : t.toLocaleString();
-  const flag = settings.lastRunOk === false ? '失败' : settings.lastRunOk === true ? '成功' : '';
-  return `上次：${when}${flag ? ` · ${flag}` : ''}${settings.lastRunSummary ? ` · ${settings.lastRunSummary}` : ''}`;
+  let when = String(settings.lastRunAt);
+  if (!Number.isNaN(t.getTime())) {
+    const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+    const sameDay = t.toDateString() === new Date().toDateString();
+    when = sameDay ? `今天 ${hhmm}` : `${t.getMonth() + 1}/${t.getDate()} ${hhmm}`;
+  }
+  const state = settings.lastRunOk === true ? 'ok' : settings.lastRunOk === false ? 'fail' : '';
+  const verdict = state === 'ok' ? '成功' : state === 'fail' ? '失败' : '';
+  const text = off
+    ? `已关闭 · 上次 ${when}${verdict ? ` ${verdict}` : ''}`
+    : `上次归纳 ${when}${verdict ? ` · ${verdict}` : ''}`;
+  return { text, detail: settings.lastRunSummary ? String(settings.lastRunSummary) : '', state: off ? '' : state };
 }
 
 function refreshKnowledgeConsolStatusUi() {
   const el = typeof $ === 'function' ? $('knowledge-consol-status') : null;
   if (!el) return;
-  const s = getKnowledgeConsolidationSettings();
-  el.textContent = formatKnowledgeConsolLastRun(s);
+  const view = formatKnowledgeConsolLastRun(knowledgeSettingsCache);
+  el.textContent = view.text;
+  el.title = view.detail;
+  el.classList.toggle('is-ok', view.state === 'ok');
+  el.classList.toggle('is-fail', view.state === 'fail');
+}
+
+/** 状态事件（Main 定时器跑完 / 用户改设置）→ 刷新展示 */
+function bindKnowledgeStatusEvents() {
+  const api = knowledgeApi();
+  if (knowledgeStatusUnsubscribe || !api || typeof api.onKnowledgeStatus !== 'function') return;
+  knowledgeStatusUnsubscribe = api.onKnowledgeStatus((payload) => {
+    if (payload && typeof payload === 'object' && 'lastRunAt' in payload) {
+      knowledgeSettingsCache = {
+        ...payload,
+        choices: (knowledgeSettingsCache && knowledgeSettingsCache.choices) || null
+      };
+      refreshKnowledgeConsolStatusUi();
+      syncKnowledgeConsolControls(knowledgeSettingsCache);
+      return;
+    }
+    void hydrateKnowledgeSettings();
+  });
 }
 
 function syncKnowledgeConsolModeTabs(mode) {
@@ -783,8 +162,32 @@ function syncKnowledgeConsolIntervalTabs(hours) {
 function syncKnowledgeConsolScopeChecks(scopes) {
   document.querySelectorAll('#knowledge-consol-scopes input[data-scope]').forEach((input) => {
     const key = input.dataset.scope;
-    input.checked = scopes[key] !== false;
+    input.checked = (scopes || {})[key] !== false;
   });
+}
+
+/**
+ * 归纳模式关掉后，频率与整理范围整块置灰 + 禁用：
+ * 否则用户改了它们却不生效，只能靠猜为什么没用。
+ */
+function syncKnowledgeConsolDependents(mode) {
+  const off = mode === 'off';
+  for (const id of ['knowledge-consol-interval-field', 'knowledge-consol-scope-field']) {
+    const field = typeof document === 'undefined' ? null : document.getElementById(id);
+    if (!field) continue;
+    field.classList.toggle('is-dimmed', off);
+    field.querySelectorAll('button, input').forEach((el) => {
+      el.disabled = off;
+    });
+  }
+}
+
+function syncKnowledgeConsolControls(settings) {
+  if (!settings) return;
+  syncKnowledgeConsolModeTabs(settings.mode);
+  syncKnowledgeConsolIntervalTabs(settings.intervalHours);
+  syncKnowledgeConsolScopeChecks(settings.scopes);
+  syncKnowledgeConsolDependents(settings.mode);
 }
 
 function setKnowledgeConsolHint(text) {
@@ -797,200 +200,79 @@ function setKnowledgeConsolHint(text) {
   }
 }
 
+/**
+ * 间隔档位按 Main 下发的 `choices.intervals` 渲染。
+ * 加一档只改 Main 的 `KNOWLEDGE_INTERVAL_CHOICES`，不用同时改 HTML / Renderer 校验 / Main 常量。
+ */
+function renderKnowledgeConsolIntervalTabs() {
+  const host = typeof $ === 'function' ? $('knowledge-consol-interval-tabs') : null;
+  const choices = knowledgeSettingsCache && knowledgeSettingsCache.choices;
+  const intervals = Array.isArray(choices && choices.intervals) ? choices.intervals : [];
+  if (!host || !intervals.length) return;
+  const signature = intervals.join('|');
+  if (host.dataset.rendered === signature) return;
+  host.dataset.rendered = signature;
+  host.textContent = '';
+  for (const hours of intervals) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'settings-segmented-tab knowledge-consol-interval-tab';
+    btn.dataset.hours = String(hours);
+    btn.textContent = `${hours} 小时`;
+    btn.setAttribute('role', 'radio');
+    host.appendChild(btn);
+  }
+  bindKnowledgeConsolIntervalTabs();
+}
+
+function bindKnowledgeConsolIntervalTabs() {
+  document.querySelectorAll('.knowledge-consol-interval-tab').forEach((btn) => {
+    if (btn.dataset.bound === '1') return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', () => {
+      const hours = Number(btn.dataset.hours);
+      if (!(hours > 0)) return;
+      const cur = knowledgeSettingsCache || {};
+      if (hours === Number(cur.intervalHours)) return;
+      void saveKnowledgeConsolidationSettings({ intervalHours: hours }).then(() => setKnowledgeConsolHint('已保存'));
+      syncKnowledgeConsolIntervalTabs(hours);
+    });
+  });
+}
+
 function initKnowledgeConsolidationSettingsUI() {
-  const settings = getKnowledgeConsolidationSettings();
-  syncKnowledgeConsolModeTabs(settings.mode);
-  syncKnowledgeConsolIntervalTabs(settings.intervalHours);
-  syncKnowledgeConsolScopeChecks(settings.scopes);
+  renderKnowledgeConsolIntervalTabs();
+  syncKnowledgeConsolControls(knowledgeSettingsCache);
   refreshKnowledgeConsolStatusUi();
+  void hydrateKnowledgeSettings();
+  bindKnowledgeStatusEvents();
 
   document.querySelectorAll('.knowledge-consol-mode-tab').forEach((btn) => {
     if (btn.dataset.bound === '1') return;
     btn.dataset.bound = '1';
     btn.addEventListener('click', () => {
       const mode = btn.dataset.mode;
-      if (!mode || mode === getKnowledgeConsolidationSettings().mode) return;
-      saveKnowledgeConsolidationSettings({ mode });
+      if (!mode || mode === (knowledgeSettingsCache || {}).mode) return;
+      void saveKnowledgeConsolidationSettings({ mode }).then(() => setKnowledgeConsolHint('已保存'));
       syncKnowledgeConsolModeTabs(mode);
-      setKnowledgeConsolHint('已保存');
-      startKnowledgeConsolidationTimers({ reschedule: true });
     });
   });
 
-  document.querySelectorAll('.knowledge-consol-interval-tab').forEach((btn) => {
-    if (btn.dataset.bound === '1') return;
-    btn.dataset.bound = '1';
-    btn.addEventListener('click', () => {
-      const hours = Number(btn.dataset.hours);
-      if (!(hours === 6 || hours === 12 || hours === 24)) return;
-      if (hours === getKnowledgeConsolidationSettings().intervalHours) return;
-      saveKnowledgeConsolidationSettings({ intervalHours: hours });
-      syncKnowledgeConsolIntervalTabs(hours);
-      setKnowledgeConsolHint('已保存');
-      startKnowledgeConsolidationTimers({ reschedule: true });
-    });
-  });
+  bindKnowledgeConsolIntervalTabs();
 
   document.querySelectorAll('#knowledge-consol-scopes input[data-scope]').forEach((input) => {
     if (input.dataset.bound === '1') return;
     input.dataset.bound = '1';
     input.addEventListener('change', () => {
-      const scopes = { ...getKnowledgeConsolidationSettings().scopes };
+      const scopes = { ...((knowledgeSettingsCache || {}).scopes || {}) };
       scopes[input.dataset.scope] = !!input.checked;
-      saveKnowledgeConsolidationSettings({ scopes });
-      setKnowledgeConsolHint('已保存');
+      void saveKnowledgeConsolidationSettings({ scopes }).then(() => setKnowledgeConsolHint('已保存'));
     });
   });
 }
 
-function startKnowledgeConsolidationTimers(opts = {}) {
-  if (knowledgeConsolTimer) {
-    clearInterval(knowledgeConsolTimer);
-    knowledgeConsolTimer = null;
-  }
-  if (knowledgeConsolKickTimer) {
-    clearTimeout(knowledgeConsolKickTimer);
-    knowledgeConsolKickTimer = null;
-  }
+window.reportKnowledgePlanOutcome = reportKnowledgePlanOutcome;
 
-  const settings = getKnowledgeConsolidationSettings();
-  if (settings.mode === 'off') return;
-
-  const intervalMs = Math.max(1, Number(settings.intervalHours) || 6) * 60 * 60 * 1000;
-
-  const tick = () => {
-    if (!gwState.authed) return;
-    runFullPeriodicKnowledgeConsolidation({ reason: 'periodic' }).catch((err) =>
-      console.warn('knowledge consolidation', err)
-    );
-  };
-
-  knowledgeConsolTimer = setInterval(tick, intervalMs);
-
-  const due = !settings.lastRunAt || Date.now() - settings.lastRunAt >= intervalMs;
-  if (due || opts.reschedule) {
-    knowledgeConsolKickTimer = setTimeout(tick, opts.immediate ? 2000 : 90 * 1000);
-  }
-}
-
-function pumpKnowledgeMaintenanceQueue() {
-  if (!gwState.authed || knowledgeMaintenancePending || knowledgeMaintenanceQueue.length === 0) return;
-  const now = Date.now();
-  const waitMs = 50 * 1000 - (now - lastKnowledgeMaintenanceAt);
-  if (waitMs > 0) {
-    setTimeout(pumpKnowledgeMaintenanceQueue, waitMs + 50);
-    return;
-  }
-  const next = knowledgeMaintenanceQueue.shift();
-  if (!next) return;
-  knowledgeMaintenancePending = true;
-  const delayMs = Math.max(4000, Number(next.delayMs) || 15000);
-  setTimeout(() => {
-    runUnifiedKnowledgeMaintenance(next)
-      .catch((err) => console.warn('unified knowledge maintenance', err))
-      .finally(() => {
-        knowledgeMaintenancePending = false;
-        pumpKnowledgeMaintenanceQueue();
-      });
-  }, delayMs);
-}
-
-function scheduleUnifiedKnowledgeMaintenance(input) {
-  if (!gwState.authed || !input) return;
-  knowledgeMaintenanceQueue.push({ ...input, enqueuedAt: Date.now() });
-  pumpKnowledgeMaintenanceQueue();
-}
-
-function stashKnowledgeMaintenanceContext(input) {
-  const sid = String(input && input.sessionId ? input.sessionId : '').trim();
-  if (!sid || !input) return;
-  pendingKnowledgeMaintenanceBySession.set(sid, { ...input, sessionId: sid });
-}
-
-function restoreKnowledgeMaintenanceContext(input) {
-  stashKnowledgeMaintenanceContext(input);
-}
-
-function clearKnowledgeMaintenanceContext(sessionId) {
-  const sid = String(sessionId || '').trim();
-  if (sid) pendingKnowledgeMaintenanceBySession.delete(sid);
-  else pendingKnowledgeMaintenanceBySession.clear();
-}
-
-function hasKnowledgeMaintenanceContext(sessionId) {
-  const sid = String(sessionId || '').trim();
-  if (sid) return pendingKnowledgeMaintenanceBySession.has(sid);
-  return pendingKnowledgeMaintenanceBySession.size > 0;
-}
-
-function flushKnowledgeMaintenanceAfterPlan(outcome, extra = {}) {
-  const sid = String(extra.sessionId || '').trim();
-  const ctx = sid
-    ? pendingKnowledgeMaintenanceBySession.get(sid)
-    : pendingKnowledgeMaintenanceBySession.size === 1
-      ? pendingKnowledgeMaintenanceBySession.values().next().value
-      : null;
-  if (sid) clearKnowledgeMaintenanceContext(sid);
-  else if (ctx && ctx.sessionId) clearKnowledgeMaintenanceContext(ctx.sessionId);
-  if (ctx?.sessionId) cancelBackgroundKnowledgeFallback(ctx.sessionId);
-  if (!ctx) return;
-
-  const merged = { ...ctx, ...extra };
-
-  if (outcome === 'applied') {
-    scheduleUnifiedKnowledgeMaintenance({
-      ...merged,
-      source: 'plan-worktree-applied',
-      delayMs: 5000
-    });
-    return;
-  }
-  if (outcome === 'skipped-no-changes' && merged.reviewAccepted) {
-    scheduleUnifiedKnowledgeMaintenance({
-      ...merged,
-      source: 'plan-completed',
-      delayMs: 5000
-    });
-  }
-  // 用户放弃应用 worktree 变更时不写入 plan 相关知识
-}
-
-function scheduleBackgroundKnowledgeFallback(sessionId) {
-  const key = String(sessionId || '');
-  if (!key) return;
-  backgroundFallbackSessionId = key;
-  const prev = backgroundKnowledgeFallbackTimers.get(key);
-  if (prev) clearTimeout(prev);
-  const timer = setTimeout(() => {
-    backgroundKnowledgeFallbackTimers.delete(key);
-    if (!hasKnowledgeMaintenanceContext(key)) return;
-    flushKnowledgeMaintenanceAfterPlan('skipped-no-changes', { sessionId: key });
-  }, 20 * 60 * 1000);
-  backgroundKnowledgeFallbackTimers.set(key, timer);
-}
-
-function cancelBackgroundKnowledgeFallback(sessionId) {
-  const key = String(sessionId || '');
-  if (backgroundFallbackSessionId === key) backgroundFallbackSessionId = null;
-  const timer = backgroundKnowledgeFallbackTimers.get(key);
-  if (timer) {
-    clearTimeout(timer);
-    backgroundKnowledgeFallbackTimers.delete(key);
-  }
-}
-
-window.runUnifiedKnowledgeMaintenance = runUnifiedKnowledgeMaintenance;
-window.scheduleUnifiedKnowledgeMaintenance = scheduleUnifiedKnowledgeMaintenance;
-window.stashKnowledgeMaintenanceContext = stashKnowledgeMaintenanceContext;
-window.restoreKnowledgeMaintenanceContext = restoreKnowledgeMaintenanceContext;
-window.flushKnowledgeMaintenanceAfterPlan = flushKnowledgeMaintenanceAfterPlan;
-window.hasKnowledgeMaintenanceContext = hasKnowledgeMaintenanceContext;
-window.clearKnowledgeMaintenanceContext = clearKnowledgeMaintenanceContext;
-window.scheduleBackgroundKnowledgeFallback = scheduleBackgroundKnowledgeFallback;
-window.cancelBackgroundKnowledgeFallback = cancelBackgroundKnowledgeFallback;
-window.getKnowledgeConsolidationSettings = getKnowledgeConsolidationSettings;
-window.runFullPeriodicKnowledgeConsolidation = runFullPeriodicKnowledgeConsolidation;
-window.startKnowledgeConsolidationTimers = startKnowledgeConsolidationTimers;
 window.initKnowledgeConsolidationSettingsUI = initKnowledgeConsolidationSettingsUI;
 
 if (typeof document !== 'undefined') {
