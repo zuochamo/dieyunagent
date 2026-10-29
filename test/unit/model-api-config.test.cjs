@@ -172,6 +172,64 @@ describe('resolveDefaultApiConfig', () => {
   });
 });
 
+describe('resolveDefaultApiConfig / 显式默认文本模型（textModel）优先', () => {
+  const SUPPLIER_ORDERED = {
+    id: 's1',
+    baseUrl: 'https://lan/v1',
+    apiKey: 'sk-lan',
+    enabledModels: { 'space-bunny': true, 'm-c': true },
+    modelModalities: { 'space-bunny': 'vision', 'm-c': 'text' }
+  };
+
+  it('供应商已启用模型里有同 id → 用它，而不是数组第一个', () => {
+    // 不带 textModel 时按数组顺序，会选中第一个（vision 那个）
+    expect(
+      resolveDefaultApiConfig(settingsWith({ modelSuppliers: [SUPPLIER_ORDERED] })).model
+    ).toBe('space-bunny');
+    expect(
+      resolveDefaultApiConfig(settingsWith({ textModel: 'm-c', modelSuppliers: [SUPPLIER_ORDERED] }))
+    ).toEqual({ baseUrl: 'https://lan/v1', apiKey: 'sk-lan', model: 'm-c' });
+  });
+
+  it('自定义模型里有同 name → 用它（vision 类也认：用户点名的就是它）', () => {
+    const settings = settingsWith({
+      textModel: 'deepseek-flash',
+      modelSuppliers: [SUPPLIER_ORDERED],
+      customModels: [
+        {
+          id: 'v1',
+          name: 'deepseek-flash',
+          kind: 'vision',
+          baseUrl: 'https://api.deepseek.com',
+          apiKey: 'sk-ds'
+        }
+      ]
+    });
+    // 供应商仍然可用，但显式点名优先
+    expect(resolveDefaultApiConfig(settings)).toEqual({
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'sk-ds',
+      model: 'deepseek-flash'
+    });
+  });
+
+  it('点名的是被禁用的供应商模型 / 找不到承载端点 → 回落到原顺序（不猜、不换 key）', () => {
+    // m-b 被显式禁用：显式点名不该复活一个被关掉的模型
+    const disabled = settingsWith({
+      textModel: 'm-b',
+      modelSuppliers: [{ ...SUPPLIER_ORDERED, enabledModels: { 'm-b': false } }]
+    });
+    expect(resolveDefaultApiConfig(disabled)).toEqual({
+      baseUrl: 'https://lan/v1',
+      apiKey: 'sk-lan',
+      model: 'space-bunny'
+    });
+
+    const ghost = settingsWith({ textModel: 'ghost-model', modelSuppliers: [SUPPLIER_ORDERED] });
+    expect(resolveDefaultApiConfig(ghost).model).toBe('space-bunny');
+  });
+});
+
 describe('resolveApiConfigForRoute', () => {
   it('custom:<id> 命中自定义模型', () => {
     const settings = settingsWith({ customModels: [CUSTOM_TEXT] });

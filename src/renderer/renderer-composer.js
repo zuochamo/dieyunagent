@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, getBuiltinApiConfig, getCustomModelApiConfig, getTextModelId, openModelSettingsModal, pendingAttachments, isImageAttachment, gwState, currentSessionId, sessionActiveRuns, gatewayCall, refreshHistoryList, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, initComposerPasteAndDrop, initComposerMentionMenu, initComposerVoice, initComposerPathPerm, addAttachmentsFromPaths, initWorkspacePicker, restartTerminalSession, isSupplierModelEnabled, getSupplierById, supplierDisplayName, renderSuppliersList, normalizeSettings, saveSettings, refreshRemoteGatewayMeta, resetRemoteGatewayClient, ensureDefaultWorkspaceEditor, isActiveSessionSwitch */
+/* global window, document, $, escapeHtml, settings, getBuiltinApiConfig, getCustomModelApiConfig, getTextModelId, openModelSettingsModal, pendingAttachments, isImageAttachment, gwState, currentSessionId, sessionActiveRuns, gatewayCall, refreshHistoryList, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, initComposerPasteAndDrop, initComposerMentionMenu, initComposerVoice, initComposerPathPerm, addAttachmentsFromPaths, initWorkspacePicker, restartTerminalSession, isSupplierModelEnabled, getSupplierById, supplierDisplayName, renderSuppliersList, normalizeSettings, saveSettings, refreshRemoteGatewayMeta, resetRemoteGatewayClient, ensureDefaultWorkspaceEditor, isActiveSessionSwitch, noteResolvedModelRoute, forgetResolvedModelRoute */
 const composerApi = window.diecloud || {};
 
 // ---------- 输入区模型选择 ----------
@@ -286,6 +286,8 @@ function cleanupSessionComposerModelPick(sessionId) {
   if (!sid) return;
   sessionComposerModelPicks.delete(sid);
   persistSessionComposerModels();
+  // 会话结束：Auto 上次选中的 route 一并忘掉，避免档位 / 预算按旧模型算
+  if (typeof forgetResolvedModelRoute === 'function') forgetResolvedModelRoute(sid);
 }
 
 function resolveComposerModelPickForSend(sessionId) {
@@ -419,6 +421,7 @@ function getModelCandidatesForAuto(context = {}) {
     return {
       source: 'builtin',
       id: m.id,
+      supplierId: m.supplierId || '',
       model: m.id,
       kind,
       apiConfig: getBuiltinApiConfig(m.supplierId),
@@ -428,9 +431,11 @@ function getModelCandidatesForAuto(context = {}) {
   const custom = (settings.customModels || []).map((m) => ({
     source: 'custom',
     id: m.id,
+    supplierId: '',
     model: m.name,
     kind:
-      m.kind === 'vision' ? 'vision' : m.kind === 'speech' ? 'speech' : 'text',
+      window.ModelCapabilities?.effectiveCustomModelKind?.(m) ||
+      (m.kind === 'vision' ? 'vision' : m.kind === 'speech' ? 'speech' : 'text'),
     // 走单一来源解析：手工只取两个标量会丢掉 headers / authMode / userAgent
     apiConfig: getCustomModelApiConfig(`custom:${m.id}`),
     route: `custom:${m.id}`
@@ -448,12 +453,31 @@ function getModelCandidatesForAuto(context = {}) {
   return visionFirst.concat(rest);
 }
 
-function pickBuiltinModelForContext(context) {
-  const enabled = getEnabledBuiltinModels();
-  if (!enabled.length) return '';
-  return pickAutoBuiltinModelId(enabled, context);
+/**
+ * Auto 命中的候选 → route 记号。
+ *
+ * `auto-` 前缀表示「这条是自动选的」（`parseModelRoute` 会 strip，解析行为与手选一致）；
+ * 供应商模型一定带 supplierId —— 否则档位 / 端点只能退到「第一个可用供应商」，
+ * 而实际发请求用的是候选自己的供应商，两侧又分叉。
+ */
+function autoRouteOf(candidate) {
+  if (!candidate || candidate.route === 'default') return 'default';
+  if (candidate.source === 'custom') return `auto-custom:${candidate.id}`;
+  return `auto-builtin:${candidate.supplierId || ''}:${candidate.id || ''}`;
 }
 
+/**
+ * Auto 选型唯一入口：**候选顺序即偏好**。
+ *
+ * 顺序完全由「设置里的声明」决定，代码不再猜「谁更强」：
+ *   1. 有图片附件 → 设置了 `vision` 模态的模型整体前置（`getModelCandidatesForAuto`）；
+ *   2. 供应商 `enabledModels` / `modelModalities` 的键顺序 = 用户在该供应商里排的顺序；
+ *   3. 再之后是自定义模型的顺序。
+ *
+ * 为什么删掉了「复杂度打分 + 模型名正则挑 pro/flash」：那套判据里没有任何字段可维护，
+ * 只能靠 `glm-5` / `deepseek-v4` 这类名字猜能力等级 —— 模型一换代（`glm-5.3`、`gpt-6`）
+ * 就静默失效，且与设置里用户真实标注（模态 / 档位）无关。要调偏好就调启用顺序。
+ */
 function pickAnyModelForContext(context) {
   const candidates = getModelCandidatesForAuto(context);
   if (!candidates.length) {
@@ -464,11 +488,7 @@ function pickAnyModelForContext(context) {
       apiConfig: getCustomModelApiConfig('default')
     };
   }
-  const pickedName = pickAutoBuiltinModelId(
-    candidates.map((m) => ({ id: m.model })),
-    context
-  );
-  return candidates.find((m) => m.model === pickedName) || candidates[0];
+  return candidates[0];
 }
 
 function builtinModelsFromSavedSuppliers() {
@@ -531,95 +551,24 @@ function modelSupportsMultimodal(model, route) {
   return false;
 }
 
-function scoreMessageComplexity(text) {
-  const t = String(text || '');
-  if (t.length > 2500) return 2;
-  if (t.length > 1200) return 1;
-  if (/```[\s\S]*```/.test(t)) return 2;
-  if (/\b(class |function |import |def |async |SELECT |CREATE TABLE)\b/i.test(t)) return 1;
-  return 0;
-}
-
-function pickAutoBuiltinModelId(models, context) {
-  const ids = (models || []).map((m) => m.id).filter(Boolean);
-  if (!ids.length) return getTextModelId(settings) || '';
-
-  const findFirst = (patterns) => {
-    for (const re of patterns) {
-      const hit = ids.find((id) => re.test(id));
-      if (hit) return hit;
-    }
-    return null;
-  };
-
-  if (context.needsVision) {
-    return (
-      findFirst([/vision/i, /vl/i, /4o/i, /multimodal/i, /glm-4v/i, /qwen.*vl/i]) || ids[0]
-    );
-  }
-
-  if (context.complex >= 2) {
-    return (
-      findFirst([
-        /deepseek.*v[34]/i,
-        /deepseek.*r1/i,
-        /glm-5/i,
-        /glm-4\.7/i,
-        /pro/i,
-        /max/i,
-        /opus/i,
-        /ultra/i
-      ]) || ids[0]
-    );
-  }
-  if (context.complex >= 1) {
-    return (
-      findFirst([/glm-4/i, /deepseek/i, /plus/i, /turbo/i, /sonnet/i]) ||
-      findFirst([/flash/i, /lite/i, /mini/i]) ||
-      ids[0]
-    );
-  }
-  return (
-    findFirst([/^auto$/i, /auto/i, /flash/i, /lite/i, /mini/i, /fast/i, /turbo/i]) ||
-    getTextModelId(settings) ||
-    ids[0]
-  );
-}
-
-function classifyModelTier(modelId) {
-  const m = String(modelId || '').toLowerCase();
-  if (/fast|flash|lite|mini|turbo|instant|haiku|7b|small|nano/.test(m)) return 'fast';
-  if (/pro|max|opus|ultra|r1|deepseek-v3|deepseek.*v[34]|glm-5|gpt-4|sonnet|plus|thinking/.test(m)) {
-    return 'pro';
-  }
-  return 'standard';
-}
-
-function pickModelWithProTier(context) {
-  const candidates = getModelCandidatesForAuto(context).filter((m) => m.kind !== 'vision');
-  if (candidates.length <= 1) {
-    return candidates[0] || pickAnyModelForContext(context);
-  }
-  const pro = candidates.filter((m) => classifyModelTier(m.model) === 'pro');
-  if (pro.length) return pro[0];
-  return pickAnyModelForContext(context);
-}
-
-/** 解析本次发送实际使用的模型（Cursor Auto：按附件/长度/代码复杂度路由） */
+/**
+ * 解析本次发送实际使用的模型。
+ *
+ * Auto 的判据只有一条**结构性事实**：本条消息带不带图片（`needsVision`）。
+ * 「消息有多复杂 / 该用哪个更强的模型」不再由 Renderer 猜 —— 没有可维护的数据源，
+ * 名字正则一换代就失效；要调偏好就调供应商里启用模型的顺序（见 `pickAnyModelForContext`）。
+ * 选出来的 route 会回填给 `noteResolvedModelRoute`，让档位 / 预算与 Main 压缩同口径。
+ */
 function resolveComposerModelForSend(text, opts = {}) {
   const pick = resolveComposerModelPickForSend(opts.sessionId);
   const ctx = {
-    needsVision: opts.hasImages != null ? !!opts.hasImages : attachmentNeedsVision(),
-    complex: scoreMessageComplexity(text)
+    needsVision: opts.hasImages != null ? !!opts.hasImages : attachmentNeedsVision()
   };
-  const preferPro = ctx.complex >= 1;
 
   let resolved;
   if (pick.autoMode || pick.selection === 'auto') {
-    const picked = preferPro ? pickModelWithProTier(ctx) : pickAnyModelForContext(ctx);
-    const autoRoute = picked.route === 'default'
-      ? 'default'
-      : (picked.source === 'custom' ? `auto-custom:${picked.id}` : `auto-builtin:${picked.id || ''}`);
+    const picked = pickAnyModelForContext(ctx);
+    const autoRoute = autoRouteOf(picked);
     resolved = {
       model: picked.model || '',
       route: autoRoute,
@@ -650,12 +599,9 @@ function resolveComposerModelForSend(text, opts = {}) {
       const supplier = match ? getSupplierById(match.supplierId) : null;
       if (!match || !supplier || !isSupplierModelEnabled(supplier, modelId)) {
         const fallback = pickAnyModelForContext(ctx);
-        const fallbackRoute = fallback.route === 'default'
-          ? 'default'
-          : (fallback.source === 'custom' ? `auto-custom:${fallback.id}` : `auto-builtin:${fallback.id || ''}`);
         resolved = {
           model: fallback.model || '',
-          route: fallbackRoute,
+          route: autoRouteOf(fallback),
           apiConfig: fallback.apiConfig || getCustomModelApiConfig(fallback.route)
         };
       } else {
@@ -670,6 +616,11 @@ function resolveComposerModelForSend(text, opts = {}) {
     if (!resolved) {
       resolved = { model: getTextModelId(settings), route: 'default', apiConfig: getCustomModelApiConfig('default') };
     }
+  }
+
+  // 档位 / 预算按「真正发出去的那条 route」算：Auto 下 Renderer 与 Main 压缩才不会分叉
+  if (typeof noteResolvedModelRoute === 'function') {
+    noteResolvedModelRoute(opts.sessionId, resolved.route);
   }
 
   return resolved;

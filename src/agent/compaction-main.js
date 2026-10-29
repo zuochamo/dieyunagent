@@ -6,7 +6,8 @@ const { mergedRequestOptions } = require('./model-api-config');
 const {
   resolveModelContextWindowFromSettings,
   computeEffectiveInputBudget,
-  MIN_INPUT_BUDGET_TOKENS
+  MIN_INPUT_BUDGET_TOKENS,
+  applyTierRuntime
 } = require('./model-runtime-by-tier');
 const { MODEL_RUNTIME_DEFAULTS } = require('./model-runtime-presets');
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
@@ -244,7 +245,13 @@ function createMainCompactionAgent(userData, coreBridge = null) {
     // 本函数是 loop / planner / plan / IPC / Renderer 五条路径的唯一汇聚点，遥测只此一处。
     const startedAt = Date.now();
     const bridge = requireCoreBridge(coreBridge);
-    const settings = loadModelSettings(userData);
+    // 按档位叠加「模型与段预算」：磁盘 settings 只有 default 档（Renderer 只镜像 default），
+    // 非 default 档的窗口 / 输出 / 预留 / 触发比必须在这一层生效，否则 16K、128K 档
+    // 在压缩侧仍按 default 档的 512K 算阈值。
+    const settings = applyTierRuntime(loadModelSettings(userData), userData, {
+      tierId: opts.contextTierId,
+      model: opts.model
+    });
     const llm = resolveCompactionLlm(settings, opts);
     const st = getSessionState(opts.sessionId);
     const signal = opts.signal || null;

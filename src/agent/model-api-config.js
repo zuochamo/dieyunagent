@@ -196,11 +196,43 @@ function resolveSupplierApiConfig(settings, supplierId) {
 }
 
 /**
+ * 顶层 `textModel` 就是「默认文本模型」：用户显式写了就按它解析端点。
+ *
+ * 为什么需要这一步：兜底顺序里供应商在前，而供应商只按 `enabledModels` 的**数组顺序**
+ * 挑第一个（`pickSupplierModelId`），于是用户明确写下的默认模型在有供应商时形同虚设 ——
+ * 实际生效的可能是数组第一个、甚至是个 vision 模型。这里让显式选择优先。
+ *
+ * 命中顺序：供应商已启用模型里有同 id → 该供应商；否则自定义模型里有同 name → 该模型。
+ * 自定义模型**刻意不做 kind 过滤**：这是用户点名的模型（`isTextCustomModel` 的
+ * vision/speech 排除只用于「没点名时自动挑」的兜底链）。
+ * 都找不到能承载它的端点时返回 null，调用方继续走原有兜底顺序（不猜、不静默换 key）。
+ */
+function resolveExplicitDefaultModel(s) {
+  const id = String(s.textModel == null ? '' : s.textModel).trim();
+  if (!id) return null;
+  for (const supplier of listSuppliers(s)) {
+    if (!isUsableApiConfig(asConfig(supplier.baseUrl, supplier.apiKey))) continue;
+    if (!supplierModelIds(supplier).includes(id)) continue;
+    if (!isSupplierModelEnabled(supplier, id)) continue;
+    return asConfig(supplier.baseUrl, supplier.apiKey, id, requestOptionsFrom(supplier));
+  }
+  const custom = listCustomModels(s).find(
+    (m) => String(m.name == null ? '' : m.name).trim() === id && isUsableApiConfig(asConfig(m.baseUrl, m.apiKey))
+  );
+  if (custom) return asConfig(custom.baseUrl, custom.apiKey, id, requestOptionsFrom(custom));
+  return null;
+}
+
+/**
  * 无 route 信息时的兜底，顺序刻意对齐 Renderer auto 语义：
- *   可用供应商 → 文本自定义模型 → 顶层 baseUrl/apiKey（legacy 单模型）→ builtin
+ *   显式默认文本模型（`textModel`）→ 可用供应商 → 文本自定义模型
+ *   → 顶层 baseUrl/apiKey（legacy 单模型）→ builtin
  */
 function resolveDefaultApiConfig(settings) {
   const s = asSettings(settings);
+
+  const explicit = resolveExplicitDefaultModel(s);
+  if (explicit) return explicit;
 
   const supplier = listSuppliers(s).find((row) =>
     isUsableApiConfig(asConfig(row.baseUrl, row.apiKey))
@@ -307,6 +339,7 @@ module.exports = {
   parseModelRoute,
   resolveApiConfigForRoute,
   resolveDefaultApiConfig,
+  resolveExplicitDefaultModel,
   resolveSupplierApiConfig,
   pickSupplierModelId,
   isSupplierModelEnabled,

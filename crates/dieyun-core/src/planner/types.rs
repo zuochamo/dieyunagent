@@ -91,7 +91,7 @@ pub struct PlannerStartParams {
     pub temperature: f64,
     #[serde(default)]
     pub resume_checkpoint: Option<Value>,
-    /// Host passes `agent-limits` `ctxAgentToolCallLimit` (or the model setting).
+    /// Host passes the model setting `agentToolCallLimit` (per Context tier).
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
 }

@@ -62,6 +62,20 @@ function registerSettingsIpc(ctx) {
   });
   ipcMain.handle('agent:get-limits', async () => loadLimitsByTierFromDisk(getUserDataPath()));
 
+  // 「模型与段预算」按档持久化：Main 侧的压缩 / planner / 定时计划都从这里读，
+  // 磁盘那一份是唯一真相，Renderer 的 localStorage 只是同步读的缓存。
+  const {
+    loadRuntimeByTierFromMain,
+    saveRuntimeByTierToMain
+  } = require('../../agent/model-runtime-by-tier');
+  ipcMain.handle('model:sync-runtime-by-tier', async (_evt, byTier) => {
+    if (byTier && typeof byTier === 'object') {
+      saveRuntimeByTierToMain(getUserDataPath(), byTier);
+    }
+    return { ok: true };
+  });
+  ipcMain.handle('model:get-runtime-by-tier', async () => loadRuntimeByTierFromMain(getUserDataPath()));
+
   registerLlmIpc(ipcMain);
 
   ipcMain.handle('models:fetch-list', async (_evt, payload) => {

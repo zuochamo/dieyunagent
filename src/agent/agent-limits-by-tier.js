@@ -5,11 +5,14 @@
  * 工厂默认值来自 agent-limits.js；用户微调按 tier id 分别保存。
  */
 // 纯 CJS 依赖：顶层 require 真源，替代原先「全局 → 运行期 require → 硬编码副本」三层兜底。
+// 档位清单 / 别名 / 折叠规则的唯一来源是 model-runtime-by-tier（「模型与段预算」同用一套），
+// 本文件只负责「limits 的按档存储」，不再各写一份 listPresetTierIds / isValidTierId。
 const {
-  MODEL_RUNTIME_PRESETS,
-  remapLegacyContextTierId,
-  foldLegacyContextTierRecord
-} = require('./model-runtime-presets');
+  listContextTierIds,
+  isValidContextTierId,
+  normalizeContextTierId
+} = require('./model-runtime-by-tier');
+const { remapLegacyContextTierId, foldLegacyContextTierRecord } = require('./model-runtime-presets');
 const { AGENT_LIMITS_DEFAULTS, normalizeAgentLimits } = require('./agent-limits');
 
 const STORAGE_KEY = 'dieyun.agent.limitsByTier.v1';
@@ -19,7 +22,7 @@ const LEGACY_STORAGE_KEY = 'dieyun.agent-limits.v1';
 let limitsByTier = {};
 
 function listPresetTierIds() {
-  return MODEL_RUNTIME_PRESETS.map((p) => p.id);
+  return listContextTierIds();
 }
 
 function remapTierId(id) {
@@ -27,17 +30,15 @@ function remapTierId(id) {
 }
 
 function foldTierRecord(raw) {
-  return foldLegacyContextTierRecord(raw, (tid) => listPresetTierIds().includes(tid));
+  return foldLegacyContextTierRecord(raw, (tid) => listContextTierIds().includes(tid));
 }
 
 function isValidTierId(id) {
-  const key = String(id || '').trim();
-  return key && listPresetTierIds().includes(key);
+  return isValidContextTierId(id);
 }
 
 function resolveStoredTierId(tierId) {
-  const mapped = remapTierId(tierId);
-  return listPresetTierIds().includes(mapped) ? mapped : 'default';
+  return normalizeContextTierId(tierId);
 }
 
 function getDefaults() {

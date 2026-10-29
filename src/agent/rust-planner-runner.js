@@ -15,7 +15,7 @@ const {
   extractUsageStats
 } = require('../llm-usage-stats');
 const { loadModelSettings } = require('../model-settings');
-const { resolveAgentLoopSpec, scaleLimitForLongHorizon, LONG_HORIZON_HARD_CAP } = require('./agent-limits');
+const { resolveAgentLoopSpec } = require('./agent-limits');
 const { settleAllAbortable } = require('./parallel-batch');
 const { createPlannerMainBridge } = require('./planner-main-bridge');
 const { buildExploreTools, buildShellTools, buildBuildTools } = require('./planner-tool-filters');
@@ -24,11 +24,9 @@ const { createSubagentRunner } = require('./subagent-runner');
 const { runRustAgentLoop, resolveChatUrl } = require('./rust-loop-runner');
 const { buildLlmHeadersFromConfig } = require('./llm-request');
 const { getEffectiveInputBudget } = require('./compaction-main');
+const { applyTierRuntime } = require('./model-runtime-by-tier');
+const { clampModelRuntimeValue } = require('./model-runtime-schema');
 const { stripToolCallMarkup } = require('../llm-tool-call-fallback');
-const {
-  LONG_HORIZON_MAX_SEGMENTS,
-  buildSegmentContinueMessages
-} = require('./segment-continue');
 const {
   createLiveLoopTraceTracker,
   createSubagentNamer,
@@ -186,7 +184,12 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   if (!bridge || !bridge.isReady()) {
     throw new Error('dieyun-core 未就绪');
   }
-  const settings = loadModelSettings(deps.userData);
+  // 与主链同一份「模型与段预算」：磁盘 settings 叠上本轮 Context 档位
+  // （planner 的预算 / 触发比 / 段上限都随档位走，别只落 default 档）。
+  const settings = applyTierRuntime(loadModelSettings(deps.userData), deps.userData, {
+    tierId: payload.contextTierId,
+    model: payload.model || undefined
+  });
   // sessionId 注入配置：planner 的若干 LLM 调用（计划解析 / 评审 / 汇总）与主对话同属一个会话，
   // 带上它才能让 {{sessionId}} 这类自定义头生效，并命中上游 prompt 缓存。
   const apiConfig = { ...(payload.apiConfig || {}) };
@@ -278,11 +281,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     maxDelayMs: loopSpec.llmMaxRetryDelayMs,
     maxWaitMs: loopSpec.llmReconnectMaxWaitMs
   };
-  const loopMaxToolCalls = scaleLimitForLongHorizon(
-    'ctxAgentToolCallLimit',
-    loopSpec.maxToolCalls,
-    payload.longHorizon
-  );
+  const loopMaxToolCalls = loopSpec.maxToolCalls;
 
   const startParams = {
     model: payload.model || settings.textModel,
@@ -293,8 +292,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     hasExploreTools: exploreTools.length > 0,
     maxWorkerRetries: 1,
     bestOfN: enabledBestOfN,
-    maxOutputTokens: Math.min(240000, Math.max(1, Number(settings.maxOutputTokens || settings.maxTokens || 8192))),
-    temperature: Number(settings.temperature) || 0.7,
+    maxOutputTokens: clampModelRuntimeValue('maxOutputTokens', settings.maxOutputTokens ?? settings.maxTokens),
+    temperature: clampModelRuntimeValue('temperature', settings.temperature),
     maxToolCalls: loopMaxToolCalls,
     resumeCheckpoint: resumeCheckpoint?.ok ? resumeCheckpoint.data || resumeCheckpoint : null
   };
@@ -424,7 +423,6 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   }
 
   async function runToolLoopOnce(spec, tools, worktreePath, traceMeta, opts = {}) {
-    const deferFinalize = !!opts.deferFinalize;
     // allowSubagent 只对「协调者」开放（当前仅 Plan 的 explore 阶段）。
     // 子 Agent 循环不会再传它，因此不会出现嵌套派发。
     const coordinatorTools =
@@ -463,13 +461,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           workspaceRoot: workspacePath,
           maxToolCalls:
             Number(spec.maxToolCalls) > 0 ? Number(spec.maxToolCalls) : loopMaxToolCalls,
-          maxRounds: scaleLimitForLongHorizon(
+          maxRounds: clampModelRuntimeValue(
             'agentMaxRounds',
-            Math.min(
-              LONG_HORIZON_HARD_CAP.agentMaxRounds,
-              Math.max(5, Number(spec.maxRounds || settings.agentMaxRounds) || 96)
-            ),
-            payload.longHorizon
+            Number(spec.maxRounds) > 0 ? Number(spec.maxRounds) : settings.agentMaxRounds
           )
         },
         settings,
@@ -503,8 +497,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
             sessionId: payload.sessionId || undefined,
             runId: traceMeta?.subagentId || undefined,
             model: body.model || payload.model,
-            taskTier: payload.taskTier || null,
-            longHorizon: !!payload.longHorizon
+            taskTier: payload.taskTier || null
           };
           // 协调者（Plan explore 阶段）派发的只读研究子 Agent 走 subagent-runner，
           // 不落回普通工具委托 —— 否则「子 Agent」会被当成一个不存在的网关工具。
@@ -525,74 +518,23 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         }
       }
     }
-    if (!deferFinalize) {
-      if (liveMeta) {
-        finalizeLoopTrace(loopResult, liveMeta, liveContent);
-      } else if (traceMeta) {
-        const entries = mapLoopTraceToUi(loopResult && loopResult.trace, traceMeta);
-        if (entries.length) {
-          uiTrace.push(...entries);
-          pushUiTrace(loopResult.content || '');
-        }
+    if (liveMeta) {
+      finalizeLoopTrace(loopResult, liveMeta, liveContent);
+    } else if (traceMeta) {
+      const entries = mapLoopTraceToUi(loopResult && loopResult.trace, traceMeta);
+      if (entries.length) {
+        uiTrace.push(...entries);
+        pushUiTrace(loopResult.content || '');
       }
     }
     return loopResult;
   }
 
-  function finalizeToolLoopTrace(loopResult, traceMeta, liveContent, liveMeta) {
-    if (liveMeta) {
-      finalizeLoopTrace(loopResult, liveMeta, liveContent);
-      return;
-    }
-    if (!traceMeta) return;
-    const entries = mapLoopTraceToUi(loopResult && loopResult.trace, traceMeta);
-    if (entries.length) {
-      uiTrace.push(...entries);
-      pushUiTrace(loopResult.content || '');
-    }
-  }
-
+  /** 单段执行：撞到轮次/工具上限就停并交付，不再自动续段（无人值守的连续推进归目标型计划）。 */
   async function runToolLoopFromSpec(spec, tools, worktreePath, traceMeta, opts = {}) {
-    const longHorizon = !!payload.longHorizon;
-    let segmentIndex = 0;
-    let currentSpec = { ...(spec || {}) };
-    let mergedTrace = [];
-    let lastLiveContent = '';
-    const liveMeta = traceMeta && traceMeta.subagentId ? traceMeta : null;
-
-    while (true) {
-      const multiSegment = longHorizon;
-      const loopResult = await runToolLoopOnce(currentSpec, tools, worktreePath, traceMeta, {
-        deferFinalize: multiSegment,
-        allowSubagent: !!opts.allowSubagent
-      });
-      if (Array.isArray(loopResult.trace) && loopResult.trace.length) {
-        mergedTrace = mergedTrace.concat(loopResult.trace);
-        loopResult.trace = mergedTrace.slice();
-      }
-      if (loopResult.content) lastLiveContent = loopResult.content;
-
-      if (!loopResult.hitRoundLimit || !longHorizon) {
-        if (multiSegment && mergedTrace.length) {
-          loopResult.trace = mergedTrace.slice();
-        }
-        if (multiSegment) {
-          finalizeToolLoopTrace(loopResult, traceMeta, lastLiveContent, liveMeta);
-        }
-        return loopResult;
-      }
-      segmentIndex += 1;
-      if (segmentIndex >= LONG_HORIZON_MAX_SEGMENTS) {
-        if (mergedTrace.length) loopResult.trace = mergedTrace.slice();
-        finalizeToolLoopTrace(loopResult, traceMeta, lastLiveContent, liveMeta);
-        return loopResult;
-      }
-      const messages = buildSegmentContinueMessages(
-        loopResult.messages || currentSpec.messages,
-        loopResult.content
-      );
-      currentSpec = { ...currentSpec, messages };
-    }
+    return runToolLoopOnce(spec, tools, worktreePath, traceMeta, {
+      allowSubagent: !!opts.allowSubagent
+    });
   }
 
   async function runWorkerJob(job, isRetry, opts = {}) {

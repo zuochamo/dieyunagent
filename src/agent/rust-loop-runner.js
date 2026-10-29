@@ -114,11 +114,19 @@ async function capAndSyncLoopMessages(body, runId, signal, bridge, userData, tie
   return imagesSanitized;
 }
 
+/**
+ * `agent.loop.start` 的唯一填参口：把 `agent-limits` 解析出的护栏数字补进 startParams。
+ *
+ * Rust 内核不再自带 `maxToolCalls=150` / `maxRounds=96` 兜底（跨语言复制数字会静默分叉），
+ * 缺参即 `INVALID_PARAMS` —— 所以两个数字必须在这一处补齐，而不是散在各调用点。
+ */
 function applyResolvedLoopSpec(startParams, spec) {
   const out = { ...(startParams || {}) };
-  const resolved = spec && spec.maxToolCalls;
-  if ((out.maxToolCalls == null || out.maxToolCalls === '') && resolved != null && resolved !== '') {
-    out.maxToolCalls = resolved;
+  for (const key of ['maxToolCalls', 'maxRounds']) {
+    const resolved = spec && spec[key];
+    if ((out[key] == null || out[key] === '') && resolved != null && resolved !== '') {
+      out[key] = resolved;
+    }
   }
   return out;
 }

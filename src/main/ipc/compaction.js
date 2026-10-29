@@ -1,6 +1,7 @@
 'use strict';
 
 const { getEffectiveInputBudget } = require('../../agent/compaction-main');
+const { applyTierRuntime } = require('../../agent/model-runtime-by-tier');
 
 /**
  * @param {object} ctx
@@ -25,9 +26,16 @@ function registerCompactionIpc(ctx) {
     const tokenBudget =
       Number(payload.tokenBudget) > 0
         ? Number(payload.tokenBudget)
-        : getEffectiveInputBudget(settings, payloadModel);
+        : getEffectiveInputBudget(
+            applyTierRuntime(settings, userData, {
+              tierId: payload.contextTierId,
+              model: payloadModel
+            }),
+            payloadModel
+          );
     return agent.maybeCompactMessages(Array.isArray(payload.messages) ? payload.messages : [], {
       tokenBudget,
+      contextTierId: payload.contextTierId,
       force: !!payload.force,
       toolsChars: payload.toolsChars,
       sessionId: payload.sessionId || null,

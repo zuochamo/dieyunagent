@@ -13,12 +13,13 @@ const nodeRequire =
       };
 
 // 纯 CJS 依赖：顶层 require 真源，替代原先「全局 → 运行期 require → 硬编码副本」三层兜底。
+const { remapLegacyContextTierId, foldLegacyContextTierRecord } = require('./model-runtime-presets');
 const {
-  MODEL_RUNTIME_PRESETS,
-  remapLegacyContextTierId,
-  foldLegacyContextTierRecord
-} = require('./model-runtime-presets');
-const { isValidContextTierId, getEditingContextTierId } = require('./model-runtime-by-tier');
+  getEditingContextTierId,
+  normalizeContextTierId,
+  listContextTierIds
+} = require('./model-runtime-by-tier');
+const { clampModelRuntimeValue } = require('./model-runtime-schema');
 
 /** @typedef {{ key: string, label: string, hint?: string, type: 'number'|'boolean', min?: number, max?: number, step?: number, unit?: string, format?: 'int'|'ms'|'min'|'mb'|'ratio' }} AgentLimitSchemaItem */
 /** @typedef {{ group: string, groupId: string, items: AgentLimitSchemaItem[] }} AgentLimitSchemaGroup */
@@ -26,22 +27,66 @@ const { isValidContextTierId, getEditingContextTierId } = require('./model-runti
 const AGENT_LIMITS_DEFAULTS = {
   repeatToolStreakLimit: 9,
   repeatHistoryMax: 96,
-  completionRepairAttempts: 6,
-  verifyDiagMaxChars: 18000,
+  // 完成验收（单轮「做完了没」，`completion-readiness.js`）的证据采集预算。
+  // 只影响提示的及时性与样本量；采集超时一律降级成「没有这条证据」，不挡交付。
+  // 故意不进 AGENT_LIMITS_SCHEMA：这是内部预算，不该在护栏面板里成为可调项。
+  readinessRpcTimeoutMs: 10000,
+  readinessMaxDiagFiles: 6,
+  readinessBrowserQueryLimit: 20,
+  readinessBrowserQueryTimeoutMs: 5000,
+  readinessMaxErrorSamples: 3,
+  readinessErrorSampleChars: 120,
   transientMaxRetries: 3,
   retryBaseMs: 400,
   // 闲时队列（plans trigger=idle）：轮询间隔与「静默多久才算闲」。
   // 「忙」的唯一来源是 rust-loop-runner 的活跃 agent loop 计数（聊天/规划/定时任务全走它）。
   plansIdlePollMs: 60 * 1000,
   plansIdleQuietMs: 5 * 60 * 1000,
+  // 目标型计划（plans trigger=goal）：跑到「验收命令退出码为 0」为止的预算与退避。
+  // 「要不要再来一轮」只由 Main 的 decideContinuation 依据落盘证据判定；这里只提供默认值
+  // 与 clamp 上限（表单里填的数不能突破上限，防一晚烧穿预算）。
+  goalMaxAttempts: 12,
+  goalMaxWallMs: 8 * 60 * 60 * 1000,
+  goalRetryBackoffMs: 60 * 1000,
+  goalRetryBackoffMaxMs: 15 * 60 * 1000,
+  // 验收命令超时。**必须 ≤ src/exec-limits.js 的 EXEC_TIMEOUT_MAX_MS（600s）**，
+  // 否则合法的重编译会被 host.exec 的硬上限截断、误判为失败（本机与远端共用这份契约）。
+  goalVerifyTimeoutMs: 5 * 60 * 1000,
+  // 验收失败时注入下一轮的证据尾部字符数（只给尾巴）。
+  goalVerifyTailChars: 4000,
+  // 内网 agent 互通（src/peer）：把这些数字集中在这里，是为了让「两个 agent 互相撩爆 token」
+  // 这类失控只有一处可调，而不是散在发现/服务/协调器三层各写一个上限。
+  // hops = 一条跨机消息链上已经过手的 agent 数；达到上限即**不再自动跑一轮**，只投递。
+  peerMaxHops: 4,
+  peerTurnBudgetPerHour: 12,
+  peerTurnBudgetWindowMs: 60 * 60 * 1000,
+  peerMaxMessageChars: 8000,
+  peerMaxPeers: 64,
+  /** 一次 outbound 建连 + hello 握手的预算 */
+  peerSendTimeoutMs: 20000,
+  /** peer_send 等对端回话的预算（对端要跑完一轮，所以比握手长得多） */
+  peerReplyTimeoutMs: 120000,
+  peerDiscoveryPort: 17341,
+  peerDiscoveryIntervalMs: 30 * 1000,
+  peerPresenceIntervalMs: 30 * 1000,
+  /** 超过这个时间没再收到宣告，就把对端视为离线 */
+  peerPresenceTtlMs: 90 * 1000,
+  peerPortBase: 17350,
+  peerPortTryCount: 11,
+  /** 文件 / 任务租约的存活时间与「收集对端应答」的等待窗口 */
+  peerClaimTtlMs: 15 * 60 * 1000,
+  peerClaimWaitMs: 1500,
   artifactsUiFlushMs: 80,
   lspSyncDebounceMs: 500,
   monacoMaxChars: 200000,
-  ctxAgentToolCallLimit: 150,
+  // 工具段上限（每段最多多少次工具调用）的唯一来源是「编码参数 → 模型与段预算 →
+  // 工具调用段上限」（model-settings.agentToolCallLimit，按 Context 档位存）。
+  // 这里原来还有一个 ctxAgentToolCallLimit（默认 150）与它抢同一笔预算，
+  // 而 resolveLoopToolCallLimit 先取 settings、于是那个旋钮**永远不生效** —— 已删除。
   toolResultMaxJson: 14000,
   // 单次工具执行的「无进展看门狗」：超过该时长仍未 settle，判定工具卡住，按 TOOL_STALLED
   // 失败返回并让循环继续（原调用不终止）。**必须大于 host_exec 的硬上限 600s**
-  // （src/gateway/host-control.js: SHELL_TIMEOUT_MAX_MS），否则合法的编译/渲染会被误杀。
+  // （src/exec-limits.js: EXEC_TIMEOUT_MAX_MS），否则合法的编译/渲染会被误杀。
   // 故意不上设置页：这是兜底护栏，不是用户可调的探索策略。
   // 2026-10-23→24 事故：host_exec 起前台长驻脚本 + 链路无回包 ⇒ run 静默 running 11 小时，
   // 期间零请求、零 trace、零日志 —— 除遥测外没有任何一层能看出「它停了」。
@@ -79,6 +124,11 @@ const AGENT_LIMITS_DEFAULTS = {
   llmStreamIdleTimeoutMs: 180000,
   synthesisTimeoutMs: 25000,
   synthesisReconnectMaxWaitMs: 8000,
+  // 会话标题（历史列表里那行字）：每会话只生成一次的小请求。
+  // 超时取得比摘要短得多——它是列表装饰，用户不会为了它等；超时就保留启发式标题。
+  // 字符上限同时进提示词与落库整形（Rust first_line_title 的 48 字上限是硬边界）。
+  sessionTitleTimeoutMs: 15000,
+  sessionTitleMaxChars: 32,
   maxUndoSteps: 5,
   editorSelectionMax: 2400,
   editorVisibleLines: 40,
@@ -114,6 +164,19 @@ const AGENT_LIMITS_DEFAULTS = {
   computerScrollMaxNotches: 10,
   computerWaitMinMs: 50,
   computerWaitMaxMs: 10000,
+  // 动作后「等界面稳定」的节奏：先等起步动画（delay），再连拍到连续两帧相同（poll）为止，
+  // 总时长有上限（max）。为什么不用固定 sleep：慢弹窗/列表加载会截到半截，模型按半截画面
+  // 决定下一步就是误点；而固定等久了又是纯粹的浪费。超时如实回 stable:false，不硬等。
+  computerSettleDelayMs: 180,
+  computerSettlePollMs: 100,
+  computerSettleMaxMs: 900,
+  // wait_until：等「画面变化 / 界面稳定」的超时预算。默认给到常见网页加载量级，
+  // 上限是单次工具调用的等待天花板（超过就该换策略，而不是继续傻等）。
+  computerWaitUntilDefaultMs: 8000,
+  computerWaitUntilMaxMs: 20000,
+  // list_windows 返回的窗口条数上限：挡住「几十个窗口灌满上下文」，
+  // 提示词注入伪造窗口标题的成本也随条数可控。
+  computerWindowListMax: 25,
   // 字符→token 折算系数（上下文账本 / 用量估算用）。与 visionPartEqChars 同为「折算系数」
   // 而非策略上限，故意不上设置页。Rust 侧同值见
   // crates/dieyun-core/src/compaction/tokens.rs::estimate_text_tokens。
@@ -177,11 +240,20 @@ const AGENT_LIMITS_DEFAULTS = {
   recentChangeMax: 16,
   graphRepoMapLimit: 32,
   graphRepoMapMaxChars: 4500,
-  projectMemoryLimit: 8,
+  // 项目记忆注入预算：项目记忆的真相是 `<workspace>/.dieyun/memory.md`（人可读、可手改、
+  // 跟着仓库走），注入按字符预算读文件头部（最新在前）。不再有「取前 N 条」的条数上限 ——
+  // 条数上限只会让「写进去的看不到」，这正是本次要消灭的形态。
+  projectMemoryFileMaxChars: 2400,
   globalMemoryLimit: 5,
+  // 轮内记忆工具的上限：recall 一次最多返回多少条、forget 一次最多归档多少条。
+  // 为什么需要上限：自动注入每轮只给 8+5 条，工具若能把上千条一次拉进上下文，
+  // 预算立刻被打穿；forget 同理，模型不该一次抹掉一大片。
+  memoryToolRecallLimit: 8,
+  memoryToolForgetMaxIds: 6,
   toolRecallLimit: 10,
-  skillBodyMax: 3500,
-  skillFullCount: 3,
+  // 技能索引条数上限：注入的只是「名称 + 路径 + 简介」，全文由模型自己 fs_read_file 读。
+  // 不要再加 skillBodyMax / skillFullCount 这类「给前 N 个技能全文」的旋钮 ——
+  // 全文常驻注入正是渐进披露要消灭的形态，所以它从未实现，也就不该留配置（留着等于撒谎）。
   skillTotalCount: 5,
 
   // —— 请求快照（审计）参数 ——
@@ -195,56 +267,45 @@ const AGENT_LIMITS_DEFAULTS = {
   requestSnapshotKeepCompacted: 200,
   requestSnapshotMaxMessagesChars: 400000,
   requestSnapshotSystemMaxChars: 64000,
-  requestSnapshotToolsMaxChars: 96000
+  requestSnapshotToolsMaxChars: 96000,
+
+  // —— 记忆归纳（knowledge maintenance）参数 ——
+  // 定位：**机制预算**，不是用户可调护栏，故不进 AGENT_LIMITS_SCHEMA（设置页不展开）。
+  // 唯一读者：`src/agent/knowledge-maintainer.js`（Main 侧唯一实现）。
+  // 老实现把「文本长度 >= 8」当门闩（几乎恒真）+ 50s 冷却写死在 Renderer，
+  // 且队列无上限；这里把门、冷却、队列、超时、单次产出量全部收口。
+  /** 两次归纳之间最小间隔（等价于全局速率上限：1/50s） */
+  knowledgeMaintenanceCooldownMs: 50 * 1000,
+  /** 待归纳任务队列上限，满了直接丢新任务（不堆积） */
+  knowledgeMaintenanceQueueMax: 8,
+  /** 收尾归纳前的最小静默（让落库/事件先跑完） */
+  knowledgeMaintenanceDelayMs: 15000,
+  knowledgeMaintenanceDelayMaxMs: 5 * 60 * 1000,
+  /** 纯文字轮次的触发门槛：需求与答复都要够长，否则只靠结构信号触发 */
+  knowledgeMinUserChars: 40,
+  knowledgeMinReplyChars: 20,
+  /** 单次归纳的产出与输入上限 */
+  knowledgeMemoryItemsMax: 8,
+  knowledgeTraceLinesMax: 28,
+  knowledgeAgentsMaxChars: 12000,
+  knowledgeRecentChatItems: 20,
+  knowledgeCorpusMemoryRows: 24,
+  /** 定时语料跨几个会话取样（只看「最近一个会话的尾部」不足以代表近期对话） */
+  knowledgeRecentChatSessions: 5,
+  /** 计划 worktree「应用后才归纳」的最长等待（暂存在 Main，窗口关掉也不丢） */
+  knowledgePlanApplyWaitMs: 20 * 60 * 1000,
+  /** idle 模式「忙完补跑」的一次性重试间隔（只重排一次，不再叠兜底层） */
+  knowledgeIdleRetryMs: 5 * 60 * 1000,
+  /** 机械维护：衰减/归档窗口与向量重建批量（与 Rust 默认一致，但由这里单一来源声明） */
+  knowledgeDecayStaleDays: 120,
+  knowledgeDecayArchiveDays: 240,
+  knowledgeReindexLimit: 100,
+  /** 模型调用预算 */
+  knowledgeTimeoutMs: 65000,
+  knowledgePeriodicTimeoutMs: 90000,
+  knowledgeMaxTokens: 2800,
+  knowledgePeriodicMaxTokens: 3500
 };
-
-/** Long-horizon run: multiply these guardrails (still hard-capped; not disabled). */
-const LONG_HORIZON_GUARDRAIL_SCALE = Object.freeze({
-  repeatToolStreakLimit: 2,
-  repeatHistoryMax: 2,
-  ctxAgentToolCallLimit: 2,
-  completionRepairAttempts: 2,
-  agentMaxRounds: 2
-});
-
-const LONG_HORIZON_HARD_CAP = Object.freeze({
-  repeatToolStreakLimit: 36,
-  repeatHistoryMax: 384,
-  ctxAgentToolCallLimit: 600,
-  completionRepairAttempts: 20,
-  agentMaxRounds: 600
-});
-
-/**
- * @param {string} key
- * @param {unknown} value
- * @param {boolean} [longHorizon]
- * @returns {number}
- */
-function scaleLimitForLongHorizon(key, value, longHorizon) {
-  const n = Math.floor(Number(value));
-  if (!Number.isFinite(n)) return n;
-  if (!longHorizon) return n;
-  const mul = LONG_HORIZON_GUARDRAIL_SCALE[key];
-  if (mul == null) return n;
-  const scaled = Math.max(1, n * mul);
-  const cap = LONG_HORIZON_HARD_CAP[key];
-  return cap != null ? Math.min(cap, scaled) : scaled;
-}
-
-/**
- * @param {Record<string, unknown>} limits
- * @param {boolean} [longHorizon]
- */
-function applyLongHorizonGuardrails(limits, longHorizon) {
-  if (!longHorizon || !limits || typeof limits !== 'object') return limits;
-  const out = { ...limits };
-  for (const key of Object.keys(LONG_HORIZON_GUARDRAIL_SCALE)) {
-    if (out[key] == null) continue;
-    out[key] = scaleLimitForLongHorizon(key, out[key], true);
-  }
-  return out;
-}
 
 /** @type {AgentLimitSchemaGroup[]} */
 const AGENT_LIMITS_SCHEMA = [
@@ -303,28 +364,79 @@ const AGENT_LIMITS_SCHEMA = [
         unit: 'ms'
       },
       {
-        key: 'completionRepairAttempts',
-        label: '完成验收修复轮次',
-        type: 'number',
-        min: 0,
-        max: 15,
-        step: 1,
-        unit: '次'
-      },
-      {
-        key: 'verifyDiagMaxChars',
-        label: '改后校验诊断上限',
-        type: 'number',
-        min: 6000,
-        max: 36000,
-        step: 200,
-        unit: '字'
-      },
-      {
         key: 'taskTierEnabled',
         label: '发送前任务分级',
         hint: '用结构信号（路径/选区/@Codebase）推断规模并跳过多余自动检索；不另打分级 LLM，不据此强迫写入',
         type: 'boolean'
+      }
+    ]
+  },
+  {
+    group: '内网 Agent 互通',
+    groupId: 'peer',
+    items: [
+      {
+        key: 'peerMaxHops',
+        label: '跨机消息跳数上限',
+        hint: '一条消息链上最多经过几个 agent；达到上限只投递、不再自动跑一轮（防两个 agent 互相撩）',
+        type: 'number',
+        min: 1,
+        max: 10,
+        step: 1,
+        unit: '跳'
+      },
+      {
+        key: 'peerTurnBudgetPerHour',
+        label: '每对端每小时自动回合',
+        hint: '同一台对端触发本机自动跑一轮的次数上限；超出只落会话不自动跑',
+        type: 'number',
+        min: 0,
+        max: 120,
+        step: 1,
+        unit: '次'
+      },
+      {
+        key: 'peerMaxMessageChars',
+        label: '单条跨机消息字符上限',
+        hint: '超长内容请用文件/路径传递，不要塞进消息体',
+        type: 'number',
+        min: 500,
+        max: 32000,
+        step: 500,
+        unit: '字'
+      },
+      {
+        key: 'peerReplyTimeoutMs',
+        label: '等对端回复超时',
+        hint: 'peer_send 带 expectReply 时最多等多久；对端要跑完一整轮，故默认两分钟',
+        type: 'number',
+        min: 5000,
+        max: 600000,
+        step: 5000,
+        format: 'ms',
+        unit: 'ms'
+      },
+      {
+        key: 'peerPresenceTtlMs',
+        label: '对端在线判定时长',
+        hint: '超过该时长没再收到对端宣告即视为离线',
+        type: 'number',
+        min: 30000,
+        max: 600000,
+        step: 10000,
+        format: 'ms',
+        unit: 'ms'
+      },
+      {
+        key: 'peerClaimTtlMs',
+        label: '文件/任务租约时长',
+        hint: '租约到期自动释放；建议式约束，不替代 git 与 worktree 隔离',
+        type: 'number',
+        min: 60000,
+        max: 3600000,
+        step: 60000,
+        format: 'ms',
+        unit: 'ms'
       }
     ]
   },
@@ -458,6 +570,76 @@ const AGENT_LIMITS_SCHEMA = [
     ]
   },
   {
+    group: '目标型计划（跑到完成）',
+    groupId: 'goal-run',
+    items: [
+      {
+        key: 'goalMaxAttempts',
+        label: '续跑轮次上限',
+        hint: '默认轮数与表单可填上限：目标型计划最多跑几轮；填 0 表示用默认值',
+        type: 'number',
+        min: 1,
+        max: 48,
+        step: 1,
+        unit: '轮'
+      },
+      {
+        key: 'goalMaxWallMs',
+        label: '续跑墙钟预算',
+        hint: '从首轮开始计算的总时长预算；用完即停并写审计报告（预算耗尽 ≠ 完成）',
+        type: 'number',
+        min: 30 * 60 * 1000,
+        max: 24 * 60 * 60 * 1000,
+        step: 30 * 60 * 1000,
+        format: 'ms',
+        unit: 'ms'
+      },
+      {
+        key: 'goalRetryBackoffMs',
+        label: '续跑退避基数',
+        hint: '上一轮未通过验收后，隔多久再开下一轮；按轮次指数增长',
+        type: 'number',
+        min: 5000,
+        max: 600000,
+        step: 5000,
+        format: 'ms',
+        unit: 'ms'
+      },
+      {
+        key: 'goalRetryBackoffMaxMs',
+        label: '续跑退避上限',
+        hint: '指数退避的封顶值，避免轮次多了以后间隔长到天亮',
+        type: 'number',
+        min: 60000,
+        max: 3600000,
+        step: 60000,
+        format: 'ms',
+        unit: 'ms'
+      },
+      {
+        key: 'goalVerifyTimeoutMs',
+        label: '验收命令超时',
+        hint: '跑验收命令的等待时长；必须 ≤ host.exec 硬上限 600s，否则合法构建会被截断误判',
+        type: 'number',
+        min: 10000,
+        max: 600000,
+        step: 10000,
+        format: 'ms',
+        unit: 'ms'
+      },
+      {
+        key: 'goalVerifyTailChars',
+        label: '验收证据尾部字符',
+        hint: '验收失败时只把输出的尾巴注入下一轮，避免整份日志灌进上下文',
+        type: 'number',
+        min: 400,
+        max: 20000,
+        step: 400,
+        unit: '字'
+      }
+    ]
+  },
+  {
     group: 'UI 联动',
     groupId: 'ui-link',
     items: [
@@ -496,16 +678,6 @@ const AGENT_LIMITS_SCHEMA = [
     group: '上下文注入',
     groupId: 'context',
     items: [
-      {
-        key: 'ctxAgentToolCallLimit',
-        label: '上下文工具段上限',
-        hint: '与「编码参数 → 模型与段预算 → 工具调用段上限」取较大值生效',
-        type: 'number',
-        min: 30,
-        max: 600,
-        step: 1,
-        unit: '次'
-      },
       {
         key: 'toolResultMaxJson',
         label: '工具结果 JSON 上限',
@@ -915,11 +1087,8 @@ function formatAgentLimitValue(item, value) {
   return Math.round(n).toLocaleString('zh-CN') + (item.unit ? ` ${item.unit}` : '');
 }
 
-// --- browser cache (legacy flat cache, kept for node fallback) ---
-const AGENT_LIMITS_STORAGE_KEY = 'dieyun.agent-limits.v1';
+// --- 按档持久化（磁盘 userData/agent-limits-by-tier.json；Renderer localStorage 由 by-tier 模块管）---
 const AGENT_LIMITS_BY_TIER_FILE = 'agent-limits-by-tier.json';
-/** @type {Record<string, unknown>|null} */
-let browserCache = null;
 /** @type {string|null} */
 let nodeCacheUserData = null;
 /** @type {Record<string, Record<string, unknown>>|null} */
@@ -945,9 +1114,8 @@ function crossLayerGlobalFn(name) {
 
 function resolveAgentLimitsTierId(opts = {}) {
   if (opts && opts.tierId) {
-    const id = String(opts.tierId).trim();
-    if (limitsByTierModule().isValidLimitsTierId(id)) return id;
-    if (isValidContextTierId(id)) return id;
+    const id = normalizeContextTierId(String(opts.tierId).trim(), '');
+    if (id) return id;
   }
   if (opts && opts.editing === true) {
     return getEditingContextTierId();
@@ -972,7 +1140,7 @@ function isUserDataPath(value) {
 }
 
 function listKnownTierIds() {
-  return MODEL_RUNTIME_PRESETS.map((p) => p.id);
+  return listContextTierIds();
 }
 
 function remapLimitsTierId(id) {
@@ -993,28 +1161,12 @@ function extractLimitOverridesFromNormalized(values) {
   return limitsByTierModule().extractLimitOverrides(values);
 }
 
-function readBrowserStorage() {
-  if (typeof window === 'undefined' || !window.localStorage) return {};
-  try {
-    return JSON.parse(window.localStorage.getItem(AGENT_LIMITS_STORAGE_KEY) || '{}');
-  } catch {
-    return {};
-  }
-}
-
-function writeBrowserStorage(limits) {
-  if (typeof window === 'undefined' || !window.localStorage) return;
-  window.localStorage.setItem(AGENT_LIMITS_STORAGE_KEY, JSON.stringify(limits));
-}
-
 function syncLimitsToMainProcess() {
   if (typeof window === 'undefined') return;
   /** @type {any} */
   const w = window;
   if (!w.diecloud || !w.diecloud.syncAgentLimits) return;
-  const getAll = limitsByTierModule().getAllLimitsByTier;
-  const payload = getAll ? getAll() : getAgentLimits();
-  w.diecloud.syncAgentLimits(payload).catch(() => {});
+  w.diecloud.syncAgentLimits(limitsByTierModule().getAllLimitsByTier()).catch(() => {});
 }
 
 function getAgentLimits(arg, tierIdArg) {
@@ -1024,16 +1176,7 @@ function getAgentLimits(arg, tierIdArg) {
   }
 
   const opts = arg && typeof arg === 'object' && !Array.isArray(arg) ? arg : {};
-  const tierId = resolveAgentLimitsTierId(opts);
-  const getForTier = limitsByTierModule().getLimitsForTier;
-  if (getForTier) {
-    return getForTier(tierId);
-  }
-
-  if (!browserCache) {
-    browserCache = normalizeAgentLimits(readBrowserStorage());
-  }
-  return { ...browserCache };
+  return limitsByTierModule().getLimitsForTier(resolveAgentLimitsTierId(opts));
 }
 
 function getAgentLimit(key, userDataPathOrOpts, tierIdArg) {
@@ -1042,15 +1185,7 @@ function getAgentLimit(key, userDataPathOrOpts, tierIdArg) {
 
 function setAgentLimits(partial, opts = {}) {
   const tierId = resolveAgentLimitsTierId(opts);
-  let merged;
-  const setForTier = limitsByTierModule().setLimitsForTier;
-  if (setForTier) {
-    merged = setForTier(tierId, partial || {});
-  } else {
-    merged = normalizeAgentLimits({ ...getAgentLimits(), ...(partial || {}) });
-    browserCache = merged;
-    writeBrowserStorage(merged);
-  }
+  const merged = limitsByTierModule().setLimitsForTier(tierId, partial || {});
   if (!opts.skipSync) syncLimitsToMainProcess();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
@@ -1064,15 +1199,7 @@ function setAgentLimits(partial, opts = {}) {
 
 function resetAgentLimits(opts = {}) {
   const tierId = resolveAgentLimitsTierId(opts);
-  let merged;
-  const resetForTier = limitsByTierModule().resetLimitsForTier;
-  if (resetForTier) {
-    merged = resetForTier(tierId);
-  } else {
-    merged = normalizeAgentLimits({});
-    browserCache = merged;
-    writeBrowserStorage(merged);
-  }
+  const merged = limitsByTierModule().resetLimitsForTier(tierId);
   if (!opts.skipSync) syncLimitsToMainProcess();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
@@ -1085,21 +1212,17 @@ function resetAgentLimits(opts = {}) {
 }
 
 function hydrateAgentLimitsFromDisk(limits) {
-  if (limitsByTierModule().hydrateLimitsByTier(limits)) {
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('dieyun:agent-limits-change', {
-          detail: {
-            ...getAgentLimits({ editing: true }),
-            contextTierId: resolveAgentLimitsTierId({ editing: true })
-          }
-        })
-      );
-    }
-    return;
+  limitsByTierModule().hydrateLimitsByTier(limits);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('dieyun:agent-limits-change', {
+        detail: {
+          ...getAgentLimits({ editing: true }),
+          contextTierId: resolveAgentLimitsTierId({ editing: true })
+        }
+      })
+    );
   }
-  browserCache = normalizeAgentLimits(limits || {});
-  writeBrowserStorage(browserCache);
 }
 
 function agentLimitsFilePath(userDataPath) {
@@ -1184,19 +1307,26 @@ function saveAgentLimitsToDisk(userDataPath, limits) {
   return saveLimitsByTierToDisk(userDataPath, byTier);
 }
 
-function resolveLoopToolCallLimit(settings, userDataPath, tierId) {
-  const schema = SCHEMA_BY_KEY.get('ctxAgentToolCallLimit') || {};
-  const max = schema.max != null ? schema.max : 600;
-  const clamp = (n) => {
-    const x = Math.floor(Number(n));
-    if (!Number.isFinite(x) || x < 1) return null;
-    return Math.min(max, x);
-  };
-  const fromSettings = clamp(settings && settings.agentToolCallLimit);
-  if (fromSettings != null) return fromSettings;
-  const fromLimits = clamp(getAgentLimit('ctxAgentToolCallLimit', userDataPath, tierId));
-  if (fromLimits != null) return fromLimits;
-  return AGENT_LIMITS_DEFAULTS.ctxAgentToolCallLimit;
+/**
+ * 工具段上限（每段最多多少次工具调用）的唯一来源：`model-settings.agentToolCallLimit`
+ * （「编码参数 → 模型与段预算 → 工具调用段上限」，按 Context 档位存、与 `agentMaxRounds` 成对）。
+ *
+ * 这里过去还有一条「agent-limits 的 ctxAgentToolCallLimit 兜底」，但取的是
+ * `settings` 优先 —— settings 永远有值（默认 600），所以那个旋钮从来不会生效，
+ * 只是多出一份能改却不生效的配置。现在只认 settings，区间由 model-runtime-schema 统一 clamp。
+ */
+function resolveLoopToolCallLimit(settings) {
+  return clampModelRuntimeValue('agentToolCallLimit', settings && settings.agentToolCallLimit);
+}
+
+/**
+ * 轮次上限的唯一来源（`model-settings.agentMaxRounds`，默认 `PRESET_DEFAULTS.agentMaxRounds`）。
+ *
+ * Loop 启动前由 `rust-loop-runner.applyResolvedLoopSpec` 填进 `agent.loop.start`；
+ * 内核（`loop_run.rs`）**不再自带** 96 的兜底 —— 跨语言各留一份默认值，改一边就静默分叉。
+ */
+function resolveAgentMaxRounds(settings) {
+  return clampModelRuntimeValue('agentMaxRounds', settings && settings.agentMaxRounds);
 }
 
 function resolveFirstTokenTimeoutMs(userDataPath, tierId) {
@@ -1227,7 +1357,8 @@ function resolveAgentLoopSpec(settings, userDataPath, tierId) {
   const retryBaseMs = Number(limits.llmRetryBaseMs);
   const reconnectMaxWaitMs = Number(limits.llmReconnectMaxWaitMs);
   return {
-    maxToolCalls: resolveLoopToolCallLimit(settings, userDataPath, tierId),
+    maxToolCalls: resolveLoopToolCallLimit(settings),
+    maxRounds: resolveAgentMaxRounds(settings),
     firstTokenTimeoutMs: resolveFirstTokenTimeoutMs(userDataPath, tierId),
     streamIdleTimeoutMs: resolveStreamIdleTimeoutMs(userDataPath, tierId),
     llmMaxRetries: Number.isFinite(maxRetries) && maxRetries > 0 ? maxRetries : 3,
@@ -1260,10 +1391,6 @@ function resolveContextTierIdForNode(userDataPath, modelRouteOrId) {
 const agentLimitsApi = {
   AGENT_LIMITS_DEFAULTS,
   AGENT_LIMITS_SCHEMA,
-  LONG_HORIZON_GUARDRAIL_SCALE,
-  LONG_HORIZON_HARD_CAP,
-  scaleLimitForLongHorizon,
-  applyLongHorizonGuardrails,
   SCHEMA_BY_KEY,
   normalizeAgentLimits,
   formatAgentLimitValue,
@@ -1278,6 +1405,7 @@ const agentLimitsApi = {
   loadLimitsByTierFromDisk,
   resolveContextTierIdForNode,
   resolveLoopToolCallLimit,
+  resolveAgentMaxRounds,
   resolveFirstTokenTimeoutMs,
   resolveStreamIdleTimeoutMs,
   resolveAgentLoopSpec,

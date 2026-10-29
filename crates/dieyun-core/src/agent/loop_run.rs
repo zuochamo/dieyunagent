@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 use crate::config::AppConfig;
 use crate::error::CoreError;
 use crate::index::IndexService;
-/// 护栏数字的唯一来源是 Node `agent-limits.js`（`ctxAgentToolCallLimit` / `agentMaxRounds`），
+/// 护栏数字的唯一来源是 Node：`agent-limits.js` 解析、模型设置 `agentToolCallLimit`
+/// （按 Context 档位存）/ `agentMaxRounds` 提供数值，
 /// 由 `rust-loop-runner.applyResolvedLoopSpec` 在唯一入口填进 `StartParams`。
 /// 内核**不留**同名默认值：跨语言复制一个数字，改一边就静默分叉。
 
@@ -725,7 +726,6 @@ mod tests {
         let index = IndexService::new(
             crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let mgr = AgentLoopManager::default();
         let start = mgr
@@ -768,7 +768,6 @@ mod tests {
         let index = IndexService::new(
             crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let mgr = AgentLoopManager::default();
         let start = mgr
@@ -816,7 +815,6 @@ mod tests {
         let index = IndexService::new(
             crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let mgr = AgentLoopManager::default();
         let start = mgr
@@ -907,7 +905,6 @@ mod tests {
         let index = IndexService::new(
             crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let reasoning = "已定位 loop_run.rs 的四条终态路径，接下来统一正文口径。";
         let tool_call = |id: &str| ToolCallInput {
@@ -988,7 +985,6 @@ mod tests {
         let index = IndexService::new(
             crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let mgr = AgentLoopManager::default();
         let start = mgr
@@ -1046,7 +1042,6 @@ mod tests {
         let index = IndexService::new(
             crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let mgr = AgentLoopManager::default();
         let start = mgr
@@ -1102,7 +1097,6 @@ mod tests {
         let index = IndexService::new(
             crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let mgr = AgentLoopManager::default();
         let start = mgr
@@ -1153,7 +1147,6 @@ mod tests {
         let index = IndexService::new(
             crate::codebase_db::handle(dir.path().join("idx.sqlite")),
             EmbeddingConfig::default(),
-            Vec::new(),
         );
         let mgr = AgentLoopManager::default();
         let start = mgr

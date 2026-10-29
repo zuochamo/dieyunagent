@@ -71,7 +71,7 @@ const SUMMARY_CUT_SUFFIX = '\n…（摘要已截断，完整内容见对话中�
  */
 function resolveSubagentLimits(userDataPath, contextTierId) {
   // 只支持 Node 侧（按 userDataPath 读落盘配置）。没有 userDataPath 说明可能是
-  // Renderer/测试环境，此时直接回退默认值，不去碰 browserCache。
+  // Renderer/测试环境，此时直接用工厂默认值，不去读磁盘。
   if (!userDataPath || typeof userDataPath !== 'string') return { ...FALLBACK_LIMITS };
   try {
     const merged = getAgentLimits(userDataPath, contextTierId) || {};

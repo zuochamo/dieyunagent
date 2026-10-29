@@ -15,16 +15,23 @@ const LEGACY_CONTEXT_TIER_ALIASES = Object.freeze({
  * 两个档位各自展开一份（`{ ...TIER_SHARED_512K_VALUES }`），不共享可变对象引用。
  *
  * 关于 `agentToolCallLimit`：**所有档位统一 600**（= model-runtime-schema 的 max 上限）。
- * 小窗口档位不再配更小的工具段预算，额度差异只由窗口 / 轮次体现。
+ * 小窗口档位不再配更小的工具段预算，额度差异只由窗口体现。
+ *
+ * 关于 `agentMaxRounds`：**所有档位统一 500**。原来按窗口分档（32 / 64 / 80 / 96），
+ * 结果是「小窗口档位明明只是模型小，却被砍掉一半轮次」，而段预算耗尽后会直接截断任务。
+ * 两笔段预算都不再随窗口缩放，档位差异只由窗口 / 输出 / 预留体现。
  */
+const AGENT_TOOL_CALL_LIMIT_ALL_TIERS = 600;
+const AGENT_MAX_ROUNDS_ALL_TIERS = 500;
+
 const TIER_SHARED_512K_VALUES = Object.freeze({
   temperature: 0.3,
   contextWindow: 524288,
   maxOutputTokens: 32768,
   contextReserveTokens: 32768,
   compactionTriggerRatio: 0.88,
-  agentToolCallLimit: 600,
-  agentMaxRounds: 96
+  agentToolCallLimit: AGENT_TOOL_CALL_LIMIT_ALL_TIERS,
+  agentMaxRounds: AGENT_MAX_ROUNDS_ALL_TIERS
 });
 
 /** @type {ModelRuntimePreset[]} */
@@ -45,8 +52,8 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 4096,
       contextReserveTokens: 4096,
       compactionTriggerRatio: 0.75,
-      agentToolCallLimit: 600,
-      agentMaxRounds: 32
+      agentToolCallLimit: AGENT_TOOL_CALL_LIMIT_ALL_TIERS,
+      agentMaxRounds: AGENT_MAX_ROUNDS_ALL_TIERS
     }
   },
   {
@@ -59,8 +66,8 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 8192,
       contextReserveTokens: 8192,
       compactionTriggerRatio: 0.8,
-      agentToolCallLimit: 600,
-      agentMaxRounds: 64
+      agentToolCallLimit: AGENT_TOOL_CALL_LIMIT_ALL_TIERS,
+      agentMaxRounds: AGENT_MAX_ROUNDS_ALL_TIERS
     }
   },
   {
@@ -73,8 +80,8 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 12288,
       contextReserveTokens: 12288,
       compactionTriggerRatio: 0.82,
-      agentToolCallLimit: 600,
-      agentMaxRounds: 80
+      agentToolCallLimit: AGENT_TOOL_CALL_LIMIT_ALL_TIERS,
+      agentMaxRounds: AGENT_MAX_ROUNDS_ALL_TIERS
     }
   },
   {
@@ -87,8 +94,8 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 24576,
       contextReserveTokens: 24576,
       compactionTriggerRatio: 0.85,
-      agentToolCallLimit: 600,
-      agentMaxRounds: 96
+      agentToolCallLimit: AGENT_TOOL_CALL_LIMIT_ALL_TIERS,
+      agentMaxRounds: AGENT_MAX_ROUNDS_ALL_TIERS
     }
   },
   {
@@ -101,8 +108,8 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 32768,
       contextReserveTokens: 32768,
       compactionTriggerRatio: 0.88,
-      agentToolCallLimit: 600,
-      agentMaxRounds: 96
+      agentToolCallLimit: AGENT_TOOL_CALL_LIMIT_ALL_TIERS,
+      agentMaxRounds: AGENT_MAX_ROUNDS_ALL_TIERS
     }
   },
   {
@@ -121,8 +128,8 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 32768,
       contextReserveTokens: 65536,
       compactionTriggerRatio: 0.9,
-      agentToolCallLimit: 600,
-      agentMaxRounds: 96
+      agentToolCallLimit: AGENT_TOOL_CALL_LIMIT_ALL_TIERS,
+      agentMaxRounds: AGENT_MAX_ROUNDS_ALL_TIERS
     }
   },
   {
@@ -135,8 +142,8 @@ const MODEL_RUNTIME_PRESETS = [
       maxOutputTokens: 32768,
       contextReserveTokens: 65536,
       compactionTriggerRatio: 0.9,
-      agentToolCallLimit: 600,
-      agentMaxRounds: 96
+      agentToolCallLimit: AGENT_TOOL_CALL_LIMIT_ALL_TIERS,
+      agentMaxRounds: AGENT_MAX_ROUNDS_ALL_TIERS
     }
   }
 ];

@@ -11,44 +11,11 @@ var modelSettingsApi = window.diecloud || {};
  */
 var PRESET_DEFAULTS = window.DieyunModelRuntimePresets.MODEL_RUNTIME_DEFAULTS;
 
-var REMOVED_BUILTIN_BASE_URLS = new Set(['http://192.168.31.127:30001/v1']);
 var DEFAULT_BUILTIN_BASE_URL = '';
 var DEFAULT_BUILTIN_API_KEY = '';
-function isRemovedBuiltinBaseUrl(url) {
-  return REMOVED_BUILTIN_BASE_URLS.has(String(url || '').trim());
-}
 
-var BUILTIN_EMBEDDING_LIST_ID = 'embedding-builtin-bge-base-zh-v1.5';
-var BUILTIN_EMBEDDING_NAME = 'bge-base-zh-v1.5';
-var BUILTIN_EMBEDDING_DIMENSIONS = 768;
 var EMBEDDING_DIMENSIONS_MIN = 64;
 var EMBEDDING_DIMENSIONS_MAX = 8192;
-
-function isBuiltinEmbeddingListEntry(model) {
-  if (!model) return false;
-  if (model.builtin === true) return true;
-  const id = String(model.id || '');
-  return id === BUILTIN_EMBEDDING_LIST_ID || id.startsWith('embedding-builtin-');
-}
-
-function createBuiltinEmbeddingListEntry(active = false) {
-  return {
-    id: BUILTIN_EMBEDDING_LIST_ID,
-    name: BUILTIN_EMBEDDING_NAME,
-    baseUrl: '内置',
-    apiKey: '',
-    dimensions: BUILTIN_EMBEDDING_DIMENSIONS,
-    active: active === true,
-    builtin: true
-  };
-}
-
-function mergeEmbeddingModelsList(models) {
-  const list = Array.isArray(models) ? models : [];
-  const userModels = list.filter((m) => !isBuiltinEmbeddingListEntry(m));
-  const prevBuiltin = list.find((m) => isBuiltinEmbeddingListEntry(m));
-  return [...userModels, createBuiltinEmbeddingListEntry(prevBuiltin != null ? prevBuiltin.active !== false : true)];
-}
 
 var DEFAULTS = {
   baseUrl: DEFAULT_BUILTIN_BASE_URL,
@@ -78,47 +45,41 @@ var DEFAULTS = {
   speechLanguage: 'zh',
   customModels: [],
   modelSuppliers: [],
-  embeddingModels: mergeEmbeddingModelsList([]),
+  embeddingModels: [],
   graphAutoIncremental: true,
-  codebaseAutoIncremental: true
+  codebaseAutoIncremental: false
 };
 
-var MAX_TOKENS_LIMIT = 240000;
-
-function clampMaxTokensInput(n) {
+/**
+ * 区间数字的单一来源是 model-runtime-schema（经 agent-bundle 暴露为
+ * `window.clampModelRuntimeValue`）：本文件此前自己写了一份 240000 / 8192 / 500000 /
+ * 0.3–0.95 / min 5，和 schema 的 min 15 已经漂移，滑杆与实际 clamp 能不一致。
+ */
+function clampRuntimeValue(key, n) {
+  const fn = typeof window !== 'undefined' ? window.clampModelRuntimeValue : null;
+  if (typeof fn === 'function') return fn(key, n);
   const v = Number(n);
-  if (!Number.isFinite(v) || v < 1) return DEFAULTS.maxTokens;
-  return Math.min(MAX_TOKENS_LIMIT, Math.max(1, Math.floor(v)));
+  return Number.isFinite(v) ? v : DEFAULTS[key];
 }
 
-function contextWindowMaxTokens() {
-  const fromSchema =
-    typeof window !== 'undefined' && Number(window.CONTEXT_WINDOW_MAX);
-  return Number.isFinite(fromSchema) && fromSchema > 0 ? fromSchema : 2000000;
+function clampMaxTokensInput(n) {
+  return clampRuntimeValue('maxOutputTokens', n);
 }
 
 function clampContextWindowInput(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 8192) return DEFAULTS.contextWindow;
-  return Math.min(contextWindowMaxTokens(), Math.max(8192, Math.floor(v)));
+  return clampRuntimeValue('contextWindow', n);
 }
 
 function clampContextReserveInput(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 0) return DEFAULTS.contextReserveTokens;
-  return Math.min(500000, Math.max(0, Math.floor(v)));
+  return clampRuntimeValue('contextReserveTokens', n);
 }
 
 function clampCompactionTriggerRatioInput(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return DEFAULTS.compactionTriggerRatio;
-  return Math.min(0.95, Math.max(0.3, v));
+  return clampRuntimeValue('compactionTriggerRatio', n);
 }
 
 function clampAgentToolCallLimitInput(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 1) return DEFAULTS.agentToolCallLimit;
-  return Math.min(600, Math.max(5, Math.floor(v)));
+  return clampRuntimeValue('agentToolCallLimit', n);
 }
 
 function getAgentToolCallLimitSetting(s) {
@@ -127,9 +88,7 @@ function getAgentToolCallLimitSetting(s) {
 }
 
 function clampAgentMaxRoundsInput(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 1) return DEFAULTS.agentMaxRounds;
-  return Math.min(600, Math.max(5, Math.floor(v)));
+  return clampRuntimeValue('agentMaxRounds', n);
 }
 
 function getAgentMaxRoundsSetting(s) {
@@ -152,66 +111,74 @@ function resolveActiveSessionId(explicitSessionId) {
   return '';
 }
 
-function parseModelRouteSelection(selection) {
-  const sel = String(selection || '');
-  if (sel.startsWith('builtin:')) {
-    const rest = sel.slice('builtin:'.length);
-    const idx = rest.indexOf(':');
-    return {
-      kind: 'builtin',
-      supplierId: idx >= 0 ? rest.slice(0, idx) : null,
-      modelId: idx >= 0 ? rest.slice(idx + 1) : rest
-    };
+/** 共享解析入口（agent-bundle 暴露；route / 档位 / 模型事实的唯一口径）。 */
+function modelFactsApi() {
+  return (typeof window !== 'undefined' && window.DieyunModelRuntimeByTier) || null;
+}
+
+/** 当前设置 + route → 模型事实（kind / 供应商 / 模态 / 自带窗口 / 档位）。 */
+function resolveModelFactsForRoute(route) {
+  const api = modelFactsApi();
+  if (api && typeof api.resolveModelFacts === 'function') {
+    return api.resolveModelFacts(settings, route);
   }
-  if (sel.startsWith('custom:')) {
-    return { kind: 'custom', customId: sel.slice('custom:'.length) };
-  }
-  return { kind: 'unknown' };
+  return { route: String(route || ''), kind: 'default', contextTierId: 'default', contextWindow: null };
 }
 
 function resolveContextTierIdForRoute(route) {
-  const parsed = parseModelRouteSelection(route);
-  if (parsed.kind === 'builtin') {
-    const supplier = parsed.supplierId ? getSupplierById(parsed.supplierId) : (settings.modelSuppliers || [])[0];
-    const modelId = String(parsed.modelId || '');
-    const perModel = supplier?.contextTierByModel?.[modelId];
-    if (perModel) return normalizeContextTierId(perModel);
-    if (supplier?.contextTier) return normalizeContextTierId(supplier.contextTier);
-    if (typeof inferContextTierFromModelName === 'function') {
-      return normalizeContextTierId(inferContextTierFromModelName(modelId));
-    }
-    return 'default';
-  }
-  if (parsed.kind === 'custom') {
-    const model = (settings.customModels || []).find((m) => m.id === parsed.customId);
-    if (model?.contextTier) return normalizeContextTierId(model.contextTier);
-    if (model?.name && typeof inferContextTierFromModelName === 'function') {
-      return normalizeContextTierId(inferContextTierFromModelName(model.name));
-    }
-    return 'default';
-  }
-  return 'default';
+  return normalizeContextTierId(resolveModelFactsForRoute(route).contextTierId);
 }
 
-/** 当前会话选中的模型路由（`custom:xxx` / `supplierId:modelId`）；未确认选择时返回 ''。 */
-function resolveActiveModelRoute(opts = {}) {
+/**
+ * 会话 → Auto 实际选中的 route（由 `resolveComposerModelForSend` 回填）。
+ *
+ * 为什么需要它：Auto 的选型依赖本条消息的内容与附件，静态解析不出来；而「档位 / 预算」
+ * 必须先知道 route 才能算。用「上一次发送真正选中的那条 route」作为当前口径，
+ * Renderer 的预算与 Main 压缩（收到同一个 `payload.modelRoute`）才是同一把尺子。
+ */
+var resolvedModelRouteBySession = new Map();
+
+function noteResolvedModelRoute(sessionId, route) {
+  const sid = resolveActiveSessionId(sessionId);
+  const text = String(route || '').trim();
+  if (!text || text === 'default') {
+    resolvedModelRouteBySession.delete(sid);
+    return;
+  }
+  resolvedModelRouteBySession.set(sid, text);
+}
+
+function forgetResolvedModelRoute(sessionId) {
+  resolvedModelRouteBySession.delete(resolveActiveSessionId(sessionId));
+}
+
+function getResolvedModelRoute(sessionId) {
+  return resolvedModelRouteBySession.get(resolveActiveSessionId(sessionId)) || '';
+}
+
+function activeComposerModelPick(opts = {}) {
   const sessionId = resolveActiveSessionId(opts.sessionId);
   try {
     if (typeof resolveComposerModelPickForSend === 'function') {
-      const pick = resolveComposerModelPickForSend(sessionId || undefined);
-      if (pick && !pick.autoMode && pick.selection && pick.selection !== 'auto') {
-        return String(pick.selection);
-      }
-      return '';
+      return resolveComposerModelPickForSend(sessionId || undefined) || null;
     }
-    const pick = getComposerModelPick();
-    if (pick && !pick.autoMode && pick.selection && pick.selection !== 'auto') {
-      return String(pick.selection);
-    }
+    return typeof getComposerModelPick === 'function' ? getComposerModelPick() : null;
   } catch {
     // 打包 TDZ / 初始化竞态时回退 default，避免启动崩
+    return null;
   }
-  return '';
+}
+
+/**
+ * 当前会话实际生效的模型路由；解析不出来时返回 ''（= default 档 / 无模型自带窗口覆盖）。
+ * - 手动选择：用户选的那条 route；
+ * - Auto：上一次发送真正选中的 route（见 `noteResolvedModelRoute`）。
+ */
+function resolveActiveModelRoute(opts = {}) {
+  const pick = activeComposerModelPick(opts);
+  if (!pick) return '';
+  if (!pick.autoMode && pick.selection && pick.selection !== 'auto') return String(pick.selection);
+  return getResolvedModelRoute(opts.sessionId);
 }
 
 function resolveContextTierId(opts = {}, knownRoute) {
@@ -226,10 +193,7 @@ function resolveContextTierId(opts = {}, knownRoute) {
 }
 
 function getRuntimeValuesForTierId(tierId) {
-  if (typeof getRuntimeValuesForTier === 'function') {
-    return getRuntimeValuesForTier(normalizeContextTierId(tierId));
-  }
-  return getModelRuntimeValues(settings);
+  return getRuntimeValuesForTier(normalizeContextTierId(tierId));
 }
 
 function buildSettingsWithRuntimeTier(s, tierId) {
@@ -311,65 +275,6 @@ function getCompactionTriggerRatio(s) {
   );
 }
 var STORAGE_KEY = 'diecloud.model.settings.v1';
-var LEGACY_RUNTIME_PRESETS = {
-  temperature: [0.7],
-  compactionTriggerRatio: [0.75, 0.68],
-  // 旧版内置人设：身份已统一为「叠云 Agent（小芸）」（唯一来源 dieyun.md + ASSISTANT_IDENTITY）。
-  // 老装机 localStorage 里可能残留这串，迁移时清掉，避免与 dieyun.md 的人设冲突。
-  system: [
-    '你是叠云编程助手，优先给出可运行、可验证的代码与具体修改步骤；不确定时先读文件再动手。'
-  ]
-};
-
-function migrateLegacyRuntimeDefaults(raw, s) {
-  if (!raw || typeof raw !== 'object') return false;
-  let changed = false;
-  const temp = Number(s.temperature);
-  if (LEGACY_RUNTIME_PRESETS.temperature.some((v) => Math.abs(temp - v) < 0.001)) {
-    s.temperature = DEFAULTS.temperature;
-    changed = true;
-  }
-  const ratio = Number(s.compactionTriggerRatio);
-  if (LEGACY_RUNTIME_PRESETS.compactionTriggerRatio.some((v) => Math.abs(ratio - v) < 0.001)) {
-    s.compactionTriggerRatio = DEFAULTS.compactionTriggerRatio;
-    changed = true;
-  }
-  const sys = String(s.system || '').trim();
-  if (sys && LEGACY_RUNTIME_PRESETS.system.some((v) => sys === v)) {
-    s.system = DEFAULTS.system;
-    changed = true;
-  }
-  if (
-    raw &&
-    !Object.prototype.hasOwnProperty.call(raw, 'embeddingModels') &&
-    !s.embeddingModels.some((m) => m.active)
-  ) {
-    s.embeddingModels = s.embeddingModels.map((m) => ({
-      ...m,
-      active: !!m.builtin
-    }));
-    const activeEmbedding = s.embeddingModels.find((m) => m.active) || null;
-    s.embeddingEnabled = !!activeEmbedding;
-    if (activeEmbedding) {
-      s.embeddingModel = activeEmbedding.name;
-      s.embeddingBaseUrl = activeEmbedding.builtin ? '' : activeEmbedding.baseUrl || '';
-      s.embeddingApiKey = activeEmbedding.builtin ? '' : activeEmbedding.apiKey || '';
-      s.embeddingDimensions = activeEmbedding.dimensions || DEFAULTS.embeddingDimensions;
-    }
-    changed = true;
-  }
-  return changed;
-}
-
-function normalizeContextTierId(value, fallback = 'default') {
-  const remap =
-    typeof remapLegacyContextTierId === 'function'
-      ? remapLegacyContextTierId
-      : (id) => (String(id || '').trim() === 'ctx-8k' ? 'ctx-16k' : String(id || '').trim());
-  const id = remap(String(value || '').trim());
-  if (typeof isValidContextTierId === 'function' && isValidContextTierId(id)) return id;
-  return fallback;
-}
 
 function normalizeSupplierEntry(m, index) {
   const enabledModels =
@@ -453,12 +358,8 @@ function normalizeSettings(raw) {
   if (raw && raw.model && !raw.textModel) s.textModel = raw.model;
   s.builtinBaseUrl = String(s.builtinBaseUrl || '').trim();
   s.builtinApiKey = String(s.builtinApiKey || '').trim();
-  if (!s.builtinBaseUrl || isRemovedBuiltinBaseUrl(s.builtinBaseUrl)) {
-    s.builtinBaseUrl = DEFAULT_BUILTIN_BASE_URL;
-  }
-  if (!s.builtinApiKey || isRemovedBuiltinBaseUrl(raw?.builtinBaseUrl)) {
-    s.builtinApiKey = DEFAULT_BUILTIN_API_KEY;
-  }
+  if (!s.builtinBaseUrl) s.builtinBaseUrl = DEFAULT_BUILTIN_BASE_URL;
+  if (!s.builtinApiKey) s.builtinApiKey = DEFAULT_BUILTIN_API_KEY;
   const hasSuppliersField = raw && Object.prototype.hasOwnProperty.call(raw, 'modelSuppliers');
   if (hasSuppliersField && Array.isArray(raw.modelSuppliers)) {
     s.modelSuppliers = raw.modelSuppliers.map(normalizeSupplierEntry).filter((m) => m.baseUrl);
@@ -491,7 +392,7 @@ function normalizeSettings(raw) {
   s.agentToolCallLimit = getAgentToolCallLimitSetting(s);
   s.agentMaxRounds = getAgentMaxRoundsSetting(s);
   s.graphAutoIncremental = s.graphAutoIncremental !== false;
-  s.codebaseAutoIncremental = s.codebaseAutoIncremental !== false;
+  s.codebaseAutoIncremental = s.codebaseAutoIncremental === true;
   const normalizeDefined = (m, index) => {
     const modalitySetting =
       window.ModelCapabilities?.normalizeModalitySetting(m?.modalitySetting, m?.kind) || 'text';
@@ -537,7 +438,10 @@ function normalizeSettings(raw) {
     s.baseUrl = firstText.baseUrl || '';
     s.apiKey = firstText.apiKey || '';
   } else {
-    s.textModel = '';
+    // 没有自定义文本模型时不再抹掉「默认文本模型」：textModel 是用户在 model-settings.json
+    // 里显式写下的兜底模型（无 route 的调用按它解析，见 agent/model-api-config.js#
+    // resolveDefaultApiConfig），Renderer 只是同步缓存 —— 在这里清空等于每次同步都把它冲掉。
+    s.textModel = String(s.textModel == null ? '' : s.textModel).trim();
     s.baseUrl = '';
     s.apiKey = '';
   }
@@ -548,21 +452,24 @@ function normalizeSettings(raw) {
   } else if (!String(s.speechWhisperModel || '').trim()) {
     s.speechWhisperModel = DEFAULTS.speechWhisperModel;
   }
-  const normalizeEmbedding = (m, index) => {
-    const builtin = isBuiltinEmbeddingListEntry(m);
-    return {
-      id: String(m?.id || `embedding-${Date.now()}-${index}`),
-      name: String(m?.name || '').trim(),
-      baseUrl: builtin ? '内置' : String(m?.baseUrl || '').trim(),
-      apiKey: builtin ? '' : String(m?.apiKey || '').trim(),
-      dimensions: Math.min(
-        EMBEDDING_DIMENSIONS_MAX,
-        Math.max(EMBEDDING_DIMENSIONS_MIN, Number(m?.dimensions) || (builtin ? BUILTIN_EMBEDDING_DIMENSIONS : DEFAULTS.embeddingDimensions))
-      ),
-      active: m?.active === true,
-      builtin
-    };
+  // 历史配置里的「内置 BGE」条目：模型已删除，baseUrl 存的是占位词「内置」，直接丢弃。
+  const isLegacyBuiltinEmbedding = (m) => {
+    if (!m) return false;
+    if (m.builtin === true) return true;
+    if (String(m.id || '').startsWith('embedding-builtin-')) return true;
+    return String(m.baseUrl || '').trim() === '内置';
   };
+  const normalizeEmbedding = (m, index) => ({
+    id: String(m?.id || `embedding-${Date.now()}-${index}`),
+    name: String(m?.name || '').trim(),
+    baseUrl: String(m?.baseUrl || '').trim(),
+    apiKey: String(m?.apiKey || '').trim(),
+    dimensions: Math.min(
+      EMBEDDING_DIMENSIONS_MAX,
+      Math.max(EMBEDDING_DIMENSIONS_MIN, Number(m?.dimensions) || DEFAULTS.embeddingDimensions)
+    ),
+    active: m?.active === true
+  });
   const hasRawEmbeddingModels =
     raw && Object.prototype.hasOwnProperty.call(raw, 'embeddingModels');
   let sourceEmbeddingModels = hasRawEmbeddingModels && Array.isArray(raw.embeddingModels)
@@ -578,12 +485,11 @@ function normalizeSettings(raw) {
       active: s.embeddingEnabled !== false
     }];
   }
-  const normalizedEmbeddingSource = sourceEmbeddingModels.map(normalizeEmbedding);
-  const userEmbeddingModels = normalizedEmbeddingSource.filter((m) => m.name && !m.builtin);
-  const builtinEmbeddingEntry = normalizedEmbeddingSource.find((m) => m.builtin);
-  s.embeddingModels = mergeEmbeddingModelsList(
-    builtinEmbeddingEntry ? [...userEmbeddingModels, builtinEmbeddingEntry] : userEmbeddingModels
-  );
+  // 内置 BGE 已删除：只保留「有名字 + 有端点」的外部模型条目（历史内置条目在此被丢弃）。
+  s.embeddingModels = sourceEmbeddingModels
+    .filter((m) => !isLegacyBuiltinEmbedding(m))
+    .map(normalizeEmbedding)
+    .filter((m) => m.name && m.baseUrl);
   s.embeddingModels = s.embeddingModels.filter(
     (m) => !(m.id === 'embedding-default' && m.name === 'text-embedding-v4')
   );
@@ -593,15 +499,8 @@ function normalizeSettings(raw) {
     if (active) activeSeen = true;
     return { ...m, active };
   });
-  if (!activeSeen) {
-    let pickedBuiltin = false;
-    s.embeddingModels = s.embeddingModels.map((m) => {
-      if (!pickedBuiltin && m.builtin) {
-        pickedBuiltin = true;
-        return { ...m, active: true };
-      }
-      return { ...m, active: false };
-    });
+  if (!activeSeen && s.embeddingModels.length) {
+    s.embeddingModels = s.embeddingModels.map((m, index) => ({ ...m, active: index === 0 }));
   }
   const activeEmbedding = s.embeddingModels.find((m) => m.active) || null;
   s.embeddingEnabled = !!activeEmbedding;
@@ -612,12 +511,10 @@ function normalizeSettings(raw) {
     s.embeddingDimensions = DEFAULTS.embeddingDimensions;
     return s;
   }
-  if (activeEmbedding) {
-    s.embeddingModel = activeEmbedding.name;
-    s.embeddingBaseUrl = activeEmbedding.builtin ? '' : activeEmbedding.baseUrl || DEFAULTS.embeddingBaseUrl;
-    s.embeddingApiKey = activeEmbedding.builtin ? '' : activeEmbedding.apiKey || '';
-    s.embeddingDimensions = activeEmbedding.dimensions || DEFAULTS.embeddingDimensions;
-  }
+  s.embeddingModel = activeEmbedding.name;
+  s.embeddingBaseUrl = activeEmbedding.baseUrl || DEFAULTS.embeddingBaseUrl;
+  s.embeddingApiKey = activeEmbedding.apiKey || '';
+  s.embeddingDimensions = activeEmbedding.dimensions || DEFAULTS.embeddingDimensions;
   return s;
 }
 
@@ -625,12 +522,7 @@ function loadSettings() {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return normalizeSettings({});
-    const parsed = JSON.parse(raw);
-    const normalized = normalizeSettings(parsed);
-    if (migrateLegacyRuntimeDefaults(parsed, normalized)) {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-    }
-    return normalized;
+    return normalizeSettings(JSON.parse(raw));
   } catch {
     return normalizeSettings({});
   }
@@ -850,6 +742,12 @@ async function hydrateModelSettingsFromMain() {
     next.customModels = disk.customModels;
     changed = true;
   }
+  // 默认文本模型：本地为空时认磁盘上的显式值（Main 是 model-settings.json 的唯一落盘方，
+  // Renderer 这层只是缓存；不合并就永远看不到别人写的默认模型，还会在下次同步时覆盖掉）。
+  if (!String(local.textModel || '').trim() && String(disk.textModel || '').trim()) {
+    next.textModel = disk.textModel;
+    changed = true;
+  }
   if (!changed) return false;
   settings = normalizeSettings(next);
   try {
@@ -944,6 +842,35 @@ function mirrorDefaultTierToGlobalSettings(values) {
   syncModelSettingsToMain();
 }
 
+/**
+ * 把内存里的「按档覆盖」同步到 Main：压缩 / planner / 定时计划读的是 Main 磁盘那一份
+ * （`userData/model-runtime-by-tier.json`），localStorage 只是 Renderer 的同步缓存。
+ */
+function syncRuntimeByTierToMain() {
+  const api = window.diecloud;
+  if (!api || typeof api.syncRuntimeByTier !== 'function') return;
+  if (typeof getAllRuntimeByTier !== 'function') return;
+  api.syncRuntimeByTier(getAllRuntimeByTier()).catch(() => {});
+}
+
+/**
+ * 启动时用 Main 存档回填内存表。Main 为空时（老装机只有 localStorage）不动本地，
+ * 等下一次编辑/复位时双写过去 —— 否则会把用户已有的按档覆盖清空。
+ */
+async function hydrateRuntimeByTierFromMain() {
+  const api = window.diecloud;
+  if (!api || typeof api.getRuntimeByTierFromMain !== 'function') return false;
+  if (typeof hydrateRuntimeByTier !== 'function') return false;
+  let disk;
+  try {
+    disk = await api.getRuntimeByTierFromMain();
+  } catch {
+    return false;
+  }
+  if (!disk || typeof disk !== 'object' || !Object.keys(disk).length) return false;
+  return hydrateRuntimeByTier(disk);
+}
+
 function setModelRuntimeValues(partial, opts = {}) {
   const tierId = opts.tierId
     ? normalizeContextTierId(opts.tierId)
@@ -951,15 +878,9 @@ function setModelRuntimeValues(partial, opts = {}) {
       ? resolveContextTierId({ editing: true })
       : resolveContextTierId({ sessionId: opts.sessionId, editing: false });
   const patch = clampModelRuntimePatch(partial);
-  let values;
-  if (typeof setRuntimeValuesForTier === 'function') {
-    values = setRuntimeValuesForTier(tierId, patch);
-    values = getModelRuntimeValues({ tierId });
-  } else {
-    settings = normalizeSettings({ ...settings, ...patch });
-    saveSettings(settings);
-    values = getModelRuntimeValues({ tierId: 'default' });
-  }
+  setRuntimeValuesForTier(tierId, patch);
+  syncRuntimeByTierToMain();
+  const values = getModelRuntimeValues({ tierId });
   if (tierId === 'default') {
     mirrorDefaultTierToGlobalSettings(values);
   }
@@ -984,9 +905,8 @@ function resetModelRuntimeValues(opts = {}) {
     : opts.editing === true
       ? resolveContextTierId({ editing: true })
       : 'default';
-  if (typeof resetRuntimeValuesForTier === 'function') {
-    resetRuntimeValuesForTier(tierId);
-  }
+  resetRuntimeValuesForTier(tierId);
+  syncRuntimeByTierToMain();
   const values = getModelRuntimeValues({ tierId });
   if (tierId === 'default') {
     mirrorDefaultTierToGlobalSettings(values);

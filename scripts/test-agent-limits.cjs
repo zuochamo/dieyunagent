@@ -16,22 +16,28 @@ assert(mergedHigh.repeatToolStreakLimit === 18, 'clamp max');
 const mergedLow = normalizeAgentLimits({ repeatToolStreakLimit: 1 });
 assert(mergedLow.repeatToolStreakLimit === 6, 'clamp min');
 
-const merged = normalizeAgentLimits({ repeatToolStreakLimit: 10, verifyDiagMaxChars: 8000 });
+const merged = normalizeAgentLimits({ repeatToolStreakLimit: 10, goalMaxAttempts: 5 });
 assert(merged.repeatToolStreakLimit === 10, 'merge repeat');
-assert(merged.verifyDiagMaxChars === 8000, 'merge verify diag');
-assert(merged.completionRepairAttempts === AGENT_LIMITS_DEFAULTS.completionRepairAttempts, 'default kept');
+assert(merged.goalMaxAttempts === 5, 'merge goal attempts');
+assert(merged.repeatHistoryMax === AGENT_LIMITS_DEFAULTS.repeatHistoryMax, 'default kept');
+// 完成验收的采集预算是内部预算（不进 schema）：既不落盘也不被用户改动覆盖
+assert(
+  merged.readinessMaxDiagFiles === AGENT_LIMITS_DEFAULTS.readinessMaxDiagFiles,
+  'readiness budget not user-tunable'
+);
 
 assert(
   resolveLoopToolCallLimit({ agentToolCallLimit: 200 }) === 200,
   'settings tool-call limit wins'
 );
+// 唯一来源是 model-settings.agentToolCallLimit：缺失 / 非法值一律按 schema 区间收敛
 assert(
-  resolveLoopToolCallLimit({ agentToolCallLimit: 0 }) === AGENT_LIMITS_DEFAULTS.ctxAgentToolCallLimit,
-  'invalid setting falls back to agent-limits default'
+  resolveLoopToolCallLimit({ agentToolCallLimit: 0 }) === 15,
+  'invalid setting clamps to schema min'
 );
 assert(
-  resolveLoopToolCallLimit({}) === AGENT_LIMITS_DEFAULTS.ctxAgentToolCallLimit,
-  'missing setting uses agent-limits default'
+  resolveLoopToolCallLimit({}) === 600,
+  'missing setting falls back to schema default'
 );
 assert(
   resolveLoopToolCallLimit({ agentToolCallLimit: 9999 }) === 600,
@@ -92,31 +98,9 @@ assert(AGENT_LIMITS_DEFAULTS.taskTierEnabled === true, 'taskTier enabled default
 assert(normalizeAgentLimits({ taskTierEnabled: false }).taskTierEnabled === false, 'taskTier can disable');
 assert(AGENT_LIMITS_DEFAULTS.taskTierTimeoutMs === undefined, 'no classify LLM timeout');
 
-const {
-  scaleLimitForLongHorizon,
-  applyLongHorizonGuardrails,
-  LONG_HORIZON_GUARDRAIL_SCALE
-} = require('../src/agent/agent-limits');
-assert(scaleLimitForLongHorizon('repeatToolStreakLimit', 9, false) === 9, 'long horizon off keeps repeat');
-assert(
-  scaleLimitForLongHorizon('repeatToolStreakLimit', 9, true) ===
-    9 * LONG_HORIZON_GUARDRAIL_SCALE.repeatToolStreakLimit,
-  'long horizon scales repeat'
-);
-assert(
-  scaleLimitForLongHorizon('ctxAgentToolCallLimit', AGENT_LIMITS_DEFAULTS.ctxAgentToolCallLimit, true) ===
-    AGENT_LIMITS_DEFAULTS.ctxAgentToolCallLimit * LONG_HORIZON_GUARDRAIL_SCALE.ctxAgentToolCallLimit,
-  'long horizon scales tool-call budget'
-);
 assert(AGENT_LIMITS_DEFAULTS.exploreStreakLimit == null, 'explore streak hard-block removed');
 assert(AGENT_LIMITS_DEFAULTS.sameFileReadLimit == null, 'same-file reread hard-block removed');
 assert(AGENT_LIMITS_DEFAULTS.planOnlyRoundLimit == null, 'plan-only round hard-block removed');
-const scaledLimits = applyLongHorizonGuardrails(
-  { ctxAgentToolCallLimit: 150, repeatToolStreakLimit: 9 },
-  true
-);
-assert(scaledLimits.ctxAgentToolCallLimit === 300, 'apply long horizon to limits object');
-assert(scaledLimits.repeatToolStreakLimit === 18, 'apply long horizon repeat');
 
 const {
   MODEL_RUNTIME_PRESETS,

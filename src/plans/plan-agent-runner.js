@@ -1,10 +1,13 @@
 'use strict';
 
-const { loadModelSettings, clampAgentMaxRounds, resolveTextApiConfig } = require('../model-settings');
+const { loadModelSettings, resolveTextApiConfig } = require('../model-settings');
 const { ASSISTANT_IDENTITY, formatDieyunSystemBlock, loadDieyunInstructions } = require('../dieyun-instructions');
 const { buildTaskSkillsSystem } = require('../automation/skill-prompt');
 const { runRustAgentLoop } = require('../agent/rust-loop-runner');
 const { resolveLoopToolCallLimit } = require('../agent/agent-limits');
+const { applyTierRuntime, resolveContextTierIdFromSettings } = require('../agent/model-runtime-by-tier');
+const { clampModelRuntimeValue } = require('../agent/model-runtime-schema');
+const { getEffectiveInputBudget } = require('../agent/compaction-main');
 const { buildCompletionMessagesFromHistory } = require('../agent/session-context');
 const { clearToolHarnessSessionsForSession } = require('../agent/tool-harness');
 const { buildPlanRunUserText, stripAssistantMeta, stripUserMeta } = require('./plan-run-turn');
@@ -18,6 +21,9 @@ async function buildPlanSystemMessage(userData, workspacePath, plan, userPrompt)
     '【定时计划 Agent】你正在执行叠云定时任务。这是该计划的专用会话，可读取上文历次执行记录。请使用工具完成可执行步骤，给出明确结果。',
     `计划名称：${plan.name || '未命名计划'}`
   ];
+  // 计划可以绑定自己的工作空间（见 plans/store#workspace）：不写进上下文，模型只能用相对路径猜根目录
+  const ws = String(workspacePath || '').trim();
+  if (ws) chunks.push(`【工作空间】\n${ws}`);
   const dieyunBlock = formatDieyunSystemBlock();
   if (dieyunBlock) chunks.push(dieyunBlock);
   try {
@@ -91,7 +97,6 @@ async function runPlanAgentLoop(ctx, plan) {
     mcpRuntime,
     createToolBridge,
     compactionAgent,
-    getTokenBudget,
     webContents,
     signal,
     onPlanPhase,
@@ -136,6 +141,10 @@ async function runPlanAgentLoop(ctx, plan) {
   if (!sessionId) {
     throw new Error('计划会话未就绪：Main 未能在运行前准备计划专用会话');
   }
+  // 按计划绑定的路由解析出本轮 Context 档位，再叠出真正生效的「模型与段预算」：
+  // 定时执行没有 Renderer，档位必须在这里解析，不能假设用户在 default 档。
+  const contextTierId = resolveContextTierIdFromSettings(settings, plan.modelRoute || llmModel);
+  const runSettings = applyTierRuntime(settings, userData, { tierId: contextTierId, model: llmModel });
   const boundPlan = plan;
   const userPrompt = String(ctx.planUserPrompt || '') || buildPlanRunUserText(boundPlan);
   const sysContent = await buildPlanSystemMessage(userData, workspacePath, boundPlan, userPrompt);
@@ -144,8 +153,7 @@ async function runPlanAgentLoop(ctx, plan) {
   const messages = buildPlanCompletionMessages(history, sysContent);
   const tools = await buildPlanAgentTools(mcpRuntime);
   const toolBridge = createToolBridge(webContents || null);
-  const tokenBudget =
-    typeof getTokenBudget === 'function' ? getTokenBudget(llmModel) : 96000;
+  const tokenBudget = getEffectiveInputBudget(runSettings, llmModel);
   // 整体继承 llm：逐字段重建会丢掉 headers / authMode / userAgent（压缩也复用这份 apiCfg）
   const apiCfg = { ...llm, baseUrl: llm.baseUrl, apiKey: llm.apiKey };
 
@@ -155,7 +163,7 @@ async function runPlanAgentLoop(ctx, plan) {
     loopResult = await runRustAgentLoop({
       coreBridge,
       llm: apiCfg,
-      settings,
+      settings: runSettings,
       userData,
       useStream: true,
       signal: signal || null,
@@ -167,18 +175,19 @@ async function runPlanAgentLoop(ctx, plan) {
         model: llmModel,
         messages,
         tools,
-        maxToolCalls: resolveLoopToolCallLimit(settings, userData),
-        maxRounds: clampAgentMaxRounds(settings.agentMaxRounds),
+        maxToolCalls: resolveLoopToolCallLimit(runSettings),
+        maxRounds: clampModelRuntimeValue('agentMaxRounds', runSettings.agentMaxRounds),
         workspaceRoot: workspacePath || undefined
       },
       compactMessages: compactionAgent
-        ? async (msgs, ctx) => {
+        ? async (msgs, compactCtx) => {
             const cr = await compactionAgent.maybeCompactMessages(msgs, {
               tokenBudget,
+              contextTierId,
               apiConfig: { ...apiCfg, model: llmModel },
               model: llmModel,
               sessionId,
-              toolsChars: ctx?.toolsChars
+              toolsChars: compactCtx?.toolsChars
             });
             if (cr && cr.compacted) {
               // 归档 id 回填给请求快照（旁路记录，失败就让快照留 null）。
@@ -258,6 +267,31 @@ async function runPlanAgentLoop(ctx, plan) {
   const summary = traceNote ? `${reply.slice(0, 6000)}\n\n---\n${traceNote}` : reply.slice(0, 8000);
 
   if (log) log(`计划 Agent 完成: ${boundPlan.name} · session ${sessionId}`);
+
+  // 记忆归纳：定时计划 / 目标任务的轮次同样要沉淀（以前只有对话收尾路径会归纳，
+  // 自动跑出来的成果一条都没进长期记忆）。事实直接取本轮 result，不额外上报。
+  try {
+    const { afterAgentRun } = require('../agent/knowledge-maintainer');
+    afterAgentRun({
+      result: {
+        content: reply,
+        trace,
+        runId: loopResult && loopResult.runId,
+        plan: null,
+        review: null,
+        readiness: loopResult && loopResult.readiness
+      },
+      opts: {
+        sessionId,
+        workspacePath: workspacePath || '',
+        model: llmModel,
+        apiConfig: apiCfg,
+        userText: userPrompt
+      }
+    });
+  } catch {
+    // 归纳失败不影响任务本身
+  }
 
   // 只回结果：assistant 轮次由 Main 在运行边界统一落库（plan-run-turn#endPlanRunTurn）
   return {

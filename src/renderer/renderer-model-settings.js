@@ -265,7 +265,7 @@ function renderEmbeddingModelsList() {
     row.innerHTML = `
       <span class="defined-model-value defined-model-name">${escapeHtml(m.name)}</span>
       <span class="defined-model-value">${escapeHtml(m.baseUrl || '-')}</span>
-      <span class="defined-model-value">${m.builtin ? '—' : escapeHtml(maskSecret(m.apiKey))}</span>
+      <span class="defined-model-value">${escapeHtml(maskSecret(m.apiKey))}</span>
       <span class="defined-model-value">${escapeHtml(String(m.dimensions || DEFAULTS.embeddingDimensions))}</span>
       <span class="defined-model-value">${status}</span>
       <span class="defined-model-value"><button type="button" class="ghost-btn" data-edit-embedding="${escapeHtml(m.id)}">编辑</button></span>
@@ -275,7 +275,8 @@ function renderEmbeddingModelsList() {
   if (!models.some((m) => m.active)) {
     const hint = document.createElement('div');
     hint.className = 'defined-model-empty';
-    hint.textContent = '默认使用内置 BGE 向量（需在设置 → 组件下载模型，约 100MB）。若仅需关键词匹配，可关闭全部向量模型。';
+    hint.textContent =
+      '未配置向量模型：语义检索关闭，召回只用关键词匹配。添加一个外部向量模型（OpenAI 兼容 /embeddings 端点）即可启用。';
     list.appendChild(hint);
   }
   list.querySelectorAll('[data-edit-embedding]').forEach((btn) => {
@@ -701,7 +702,6 @@ function initSupplierEditor() {
   const deleteBtn = $('supplier-editor-delete');
   const detectBtn = $('supplier-editor-detect');
   const form = $('supplier-editor-form');
-  const overlay = $('supplier-editor-overlay');
   if (closeBtn) closeBtn.addEventListener('click', closeSupplierEditor);
   if (cancelBtn) cancelBtn.addEventListener('click', closeSupplierEditor);
   if (deleteBtn) deleteBtn.addEventListener('click', deleteSupplierFromEditor);
@@ -714,11 +714,6 @@ function initSupplierEditor() {
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       saveSupplierFromEditor();
-    });
-  }
-  if (overlay) {
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) closeSupplierEditor();
     });
   }
   renderSuppliersList();
@@ -879,25 +874,19 @@ function openEmbeddingModelEditor(id) {
   editingEmbeddingModelId = id || null;
   const model = settings.embeddingModels.find((m) => m.id === id) || {
     name: '',
-    baseUrl: settings.embeddingBaseUrl || '',
+    baseUrl: '',
     apiKey: '',
     dimensions: settings.embeddingDimensions || DEFAULTS.embeddingDimensions,
-    active: false,
-    builtin: false
+    active: false
   };
-  const isBuiltin = isBuiltinEmbeddingListEntry(model);
   $('embedding-model-editor-title').textContent = id ? '编辑向量模型' : '添加向量模型';
   $('embedding-model-editor-name').value = model.name || '';
-  $('embedding-model-editor-base-url').value = isBuiltin ? '内置' : model.baseUrl || '';
-  $('embedding-model-editor-api-key').value = isBuiltin ? '' : model.apiKey || '';
-  $('embedding-model-editor-api-key').placeholder = isBuiltin ? '—' : 'sk-...';
+  $('embedding-model-editor-base-url').value = model.baseUrl || '';
+  $('embedding-model-editor-api-key').value = model.apiKey || '';
+  $('embedding-model-editor-api-key').placeholder = 'sk-...';
   $('embedding-model-editor-dimensions').value = model.dimensions || DEFAULTS.embeddingDimensions;
   $('embedding-model-editor-active').checked = model.active === true;
-  $('embedding-model-editor-name').readOnly = isBuiltin;
-  $('embedding-model-editor-base-url').readOnly = isBuiltin;
-  $('embedding-model-editor-api-key').readOnly = isBuiltin;
-  $('embedding-model-editor-dimensions').readOnly = isBuiltin;
-  $('embedding-model-editor-delete').hidden = !id || isBuiltin;
+  $('embedding-model-editor-delete').hidden = !id;
   setEmbeddingTestStatus('');
   $('embedding-model-editor-overlay').hidden = false;
 }
@@ -942,29 +931,6 @@ function setEmbeddingTestStatus(text, ok) {
 
 async function testEmbeddingModelFromEditor() {
   const btn = $('embedding-model-editor-test');
-  const existing = settings.embeddingModels.find((m) => m.id === editingEmbeddingModelId);
-  if (isBuiltinEmbeddingListEntry(existing)) {
-    const api = window.diecloud || {};
-    if (!api.testBuiltinEmbedding) {
-      setEmbeddingTestStatus('内置模型测试接口不可用', false);
-      return;
-    }
-    if (btn) btn.disabled = true;
-    setEmbeddingTestStatus('测试中…（首次加载模型可能较慢）');
-    try {
-      const r = await api.testBuiltinEmbedding();
-      if (r && r.ok) {
-        setEmbeddingTestStatus(`测试通过，维度 ${r.dimensions}`, true);
-      } else {
-        throw new Error((r && r.error) || '测试失败');
-      }
-    } catch (err) {
-      setEmbeddingTestStatus(`测试失败：${err.message || err}`, false);
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-    return;
-  }
   const cfg = collectEmbeddingEditorConfig();
   if (!cfg.name || !cfg.baseUrl) {
     setEmbeddingTestStatus('请先填写模型名称和接口地址', false);
@@ -1017,21 +983,7 @@ async function testEmbeddingModelFromEditor() {
 }
 
 function saveEmbeddingModelFromEditor() {
-  const existing = settings.embeddingModels.find((m) => m.id === editingEmbeddingModelId);
-  const isBuiltin = isBuiltinEmbeddingListEntry(existing);
   const active = $('embedding-model-editor-active').checked;
-  if (isBuiltin) {
-    let models = [...(settings.embeddingModels || [])];
-    if (active) models = models.map((m) => ({ ...m, active: false }));
-    models = models.map((m) =>
-      isBuiltinEmbeddingListEntry(m) ? { ...m, active } : m
-    );
-    settings = normalizeSettings({ ...settings, embeddingModels: models });
-    updateSettingsFromModelLists();
-    renderEmbeddingModelsList();
-    closeEmbeddingModelEditor();
-    return;
-  }
   const { name, baseUrl, apiKey, dimensions } = collectEmbeddingEditorConfig();
   if (!name || !baseUrl) return;
   let models = [...(settings.embeddingModels || [])];
@@ -1056,7 +1008,7 @@ function saveEmbeddingModelFromEditor() {
 function deleteEmbeddingModelFromEditor() {
   if (!editingEmbeddingModelId) return;
   const target = settings.embeddingModels.find((m) => m.id === editingEmbeddingModelId);
-  if (!target || isBuiltinEmbeddingListEntry(target)) return;
+  if (!target) return;
   const models = (settings.embeddingModels || []).filter((m) => m.id !== editingEmbeddingModelId);
   settings = normalizeSettings({ ...settings, embeddingModels: models });
   updateSettingsFromModelLists();
@@ -1091,12 +1043,6 @@ function initDefinedModelEditors() {
   $('embedding-model-editor-form').addEventListener('submit', (e) => {
     e.preventDefault();
     saveEmbeddingModelFromEditor();
-  });
-  $('defined-model-editor-overlay').addEventListener('click', (e) => {
-    if (e.target === $('defined-model-editor-overlay')) closeDefinedModelEditor();
-  });
-  $('embedding-model-editor-overlay').addEventListener('click', (e) => {
-    if (e.target === $('embedding-model-editor-overlay')) closeEmbeddingModelEditor();
   });
   renderDefinedModelsList();
   renderEmbeddingModelsList();

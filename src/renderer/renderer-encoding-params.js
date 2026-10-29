@@ -1,4 +1,4 @@
-/* global document, $, AGENT_LIMITS_SCHEMA, getAgentLimits, setAgentLimits, resetAgentLimits, formatAgentLimitValue, formatModelRuntimeValue, hydrateAgentLimitsFromDisk, applyAgentLimitsToRuntime, getModelRuntimeValues, setModelRuntimeValues, resetModelRuntimeValues, getEditingContextTierId, setEditingContextTierId, MODEL_RUNTIME_PRESETS */
+/* global document, $, AGENT_LIMITS_SCHEMA, getAgentLimits, setAgentLimits, resetAgentLimits, formatAgentLimitValue, formatModelRuntimeValue, hydrateAgentLimitsFromDisk, hydrateRuntimeByTierFromMain, applyAgentLimitsToRuntime, getModelRuntimeValues, setModelRuntimeValues, resetModelRuntimeValues, getEditingContextTierId, setEditingContextTierId, MODEL_RUNTIME_PRESETS */
 'use strict';
 
 function getModelRuntimeSchema() {
@@ -25,6 +25,36 @@ function getActiveEditingTierId() {
     return getEditingContextTierId();
   }
   return 'default';
+}
+
+/**
+ * 面板「自己写自己」期间为 true。
+ *
+ * 为什么必须有：`setAgentLimits` / `setModelRuntimeValues` 会**同步派发** change 事件
+ * （`dieyun:agent-limits-change` / `dieyun:model-runtime-change`），监听器随即
+ * `root.innerHTML = ''` 整块重绘 —— 正在拖动的 `input[type=range]` 被替换成新元素，
+ * 指针捕获当场丢失，表现就是「滑杆只能点一下，一拖就断」。
+ * 自己发起的写入不需要重绘（值标签已在 input 处理器里更新），因此整段写入期间屏蔽重绘。
+ */
+let panelWriteInFlight = false;
+
+function withPanelWrite(fn) {
+  panelWriteInFlight = true;
+  try {
+    return fn();
+  } finally {
+    panelWriteInFlight = false;
+  }
+}
+
+/** 已生效部分的轨道填充宽度（拖动时跟着拇指走；纯视觉，不参与取值）。 */
+function paintRangeFill(input) {
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 100);
+  const value = Number(input.value || 0);
+  const span = max - min;
+  const pct = span > 0 ? ((value - min) / span) * 100 : 0;
+  input.style.setProperty('--range-fill', `${Math.max(0, Math.min(100, pct))}%`);
 }
 
 function renderEncodingParamsTierTabs() {
@@ -127,12 +157,8 @@ function renderSchemaGroup(root, group, opts) {
     input.max = String(item.max);
     input.step = String(item.step != null ? item.step : 1);
     input.value = String(value);
-    if (item.hint && item.key === 'agentToolCallLimit') {
-      input.title = item.hint;
-    }
-    if (item.hint && item.key === 'agentMaxRounds') {
-      input.title = item.hint;
-    }
+    paintRangeFill(input);
+    if (item.hint) input.title = item.hint;
     label.appendChild(input);
     if (item.hint) {
       const hint = document.createElement('span');
@@ -193,6 +219,24 @@ function findSchemaItem(kind, key) {
   return null;
 }
 
+/**
+ * 拖动 / 键盘操作结束（change）时，把「落库后的真实值」写回滑杆。
+ * 为什么需要：写入路径会 clamp（如温度 0.3–0.95、轮次 15–600），用户拖到的值可能被改；
+ * 不重绘面板（要保持拖动连续性），所以只能就地回写 value + 标签。
+ */
+function reconcileRangeInput(el, item, stored, kind, key) {
+  const n = Number(stored);
+  if (!Number.isFinite(n)) return;
+  if (Number(el.value) === n) return;
+  el.value = String(n);
+  paintRangeFill(el);
+  const tag = document.getElementById(`encoding-param-${kind}-${key}-value`);
+  if (tag) {
+    tag.textContent =
+      kind === 'runtime' ? formatModelRuntimeValue(item, n) : formatAgentLimitValue(item, n);
+  }
+}
+
 function onEncodingParamInput(ev) {
   const el = ev.target;
   if (!el || !el.dataset || !el.dataset.paramKey) return;
@@ -200,41 +244,62 @@ function onEncodingParamInput(ev) {
   const key = el.dataset.paramKey;
   const item = findSchemaItem(kind, key);
   if (!item) return;
+  /** 'change' = 本次拖动 / 按键结束；'input' = 拖动过程中（不重绘、只更新标签） */
+  const committed = ev.type === 'change';
 
   if (kind === 'runtime') {
     if (item.type === 'boolean') {
-      setModelRuntimeValues({ [key]: el.checked }, { editing: true });
+      withPanelWrite(() => setModelRuntimeValues({ [key]: el.checked }, { editing: true }));
       return;
     }
+    paintRangeFill(/** @type {HTMLInputElement} */ (el));
     const tag = document.getElementById(`encoding-param-runtime-${key}-value`);
     if (tag) tag.textContent = formatModelRuntimeValue(item, el.value);
-    setModelRuntimeValues({ [key]: Number(el.value) }, { editing: true });
+    withPanelWrite(() => setModelRuntimeValues({ [key]: Number(el.value) }, { editing: true }));
+    if (committed && typeof getModelRuntimeValues === 'function') {
+      const stored = getModelRuntimeValues({ editing: true })[key];
+      reconcileRangeInput(el, item, stored, kind, key);
+    }
     return;
   }
 
   if (item.type === 'boolean') {
-    setAgentLimits({ [key]: el.checked }, { editing: true });
-    if (typeof applyAgentLimitsToRuntime === 'function') applyAgentLimitsToRuntime({ editing: true });
+    withPanelWrite(() => {
+      setAgentLimits({ [key]: el.checked }, { editing: true });
+      if (typeof applyAgentLimitsToRuntime === 'function') applyAgentLimitsToRuntime({ editing: true });
+    });
     return;
   }
 
+  paintRangeFill(/** @type {HTMLInputElement} */ (el));
   const tag = document.getElementById(`encoding-param-limit-${key}-value`);
   if (tag) tag.textContent = formatAgentLimitValue(item, el.value);
-  setAgentLimits({ [key]: Number(el.value) }, { editing: true });
-  if (typeof applyAgentLimitsToRuntime === 'function') applyAgentLimitsToRuntime({ editing: true });
+  withPanelWrite(() => {
+    setAgentLimits({ [key]: Number(el.value) }, { editing: true });
+    if (typeof applyAgentLimitsToRuntime === 'function') applyAgentLimitsToRuntime({ editing: true });
+  });
+  if (committed) {
+    reconcileRangeInput(el, item, getAgentLimits({ editing: true })[key], kind, key);
+  }
 }
 
 async function loadEncodingParamsFromMain() {
   const api = window.diecloud;
-  if (!api?.getAgentLimitsFromMain) return;
-  try {
-    const disk = await api.getAgentLimitsFromMain();
-    if (disk && typeof disk === 'object') {
-      hydrateAgentLimitsFromDisk(disk);
-      if (typeof applyAgentLimitsToRuntime === 'function') applyAgentLimitsToRuntime();
+  if (!api) return;
+  if (api.getAgentLimitsFromMain) {
+    try {
+      const disk = await api.getAgentLimitsFromMain();
+      if (disk && typeof disk === 'object') {
+        hydrateAgentLimitsFromDisk(disk);
+        if (typeof applyAgentLimitsToRuntime === 'function') applyAgentLimitsToRuntime();
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
+  }
+  // 模型与段预算的按档覆盖同样以 Main 存档为准（压缩 / planner / 定时计划读的是那份）
+  if (typeof hydrateRuntimeByTierFromMain === 'function') {
+    await hydrateRuntimeByTierFromMain();
   }
 }
 
@@ -270,12 +335,14 @@ function initEncodingParamsUI() {
   }
 
   window.addEventListener('dieyun:agent-limits-change', () => {
+    if (panelWriteInFlight) return;
     if (!$('help-overlay')?.hidden && document.querySelector('.help-page[data-help-tab="encoding-params"]')?.classList.contains('active')) {
       renderEncodingParamsPanel();
     }
   });
 
   window.addEventListener('dieyun:model-runtime-change', () => {
+    if (panelWriteInFlight) return;
     if (!$('help-overlay')?.hidden && document.querySelector('.help-page[data-help-tab="encoding-params"]')?.classList.contains('active')) {
       renderEncodingParamsTierTabs();
       renderEncodingParamsPanel();

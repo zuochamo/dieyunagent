@@ -95,6 +95,40 @@ for (const group of MODEL_RUNTIME_SCHEMA) {
   }
 }
 
+/**
+ * 各键的区间事实（min/max/是否小数）只从这里派生。
+ * Main（src/model-settings.js）与 Renderer（renderer-model-runtime.js）都委托
+ * `clampModelRuntimeValue`，不再各写一份 8192 / 500000 / 0.3–0.95 / 240000 ——
+ * 之前两侧 min 已经漂移（滑杆 min 15 vs clamp min 5）。
+ */
+const MODEL_RUNTIME_RANGES = new Map();
+for (const [key, item] of MODEL_RUNTIME_SCHEMA_BY_KEY) {
+  MODEL_RUNTIME_RANGES.set(key, {
+    min: item.min,
+    max: item.max,
+    isFloat: item.format === 'temp' || item.format === 'ratio'
+  });
+}
+
+/**
+ * 把单个编码参数收敛到 schema 区间。
+ * 非数值 → 工厂默认值；越界 → 夹到 min/max。
+ * 「小于下限即视为未填写」这类语义由调用方自己判（如模型自带窗口），本函数不做丢弃。
+ *
+ * @param {string} key
+ * @param {unknown} value
+ * @returns {number}
+ */
+function clampModelRuntimeValue(key, value) {
+  const fallback = Number(MODEL_RUNTIME_DEFAULTS[key]);
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  const range = MODEL_RUNTIME_RANGES.get(key);
+  if (!range) return n;
+  const x = range.isFloat ? n : Math.floor(n);
+  return Math.min(range.max, Math.max(range.min, x));
+}
+
 function formatModelRuntimeValue(item, value) {
   const n = Number(value);
   if (item.format === 'temp') return Number(n).toFixed(1);
@@ -108,5 +142,7 @@ module.exports = {
   MODEL_RUNTIME_DEFAULTS,
   MODEL_RUNTIME_SCHEMA,
   MODEL_RUNTIME_SCHEMA_BY_KEY,
+  MODEL_RUNTIME_RANGES,
+  clampModelRuntimeValue,
   formatModelRuntimeValue
 };

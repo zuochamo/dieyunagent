@@ -2,16 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const {
-  BUILTIN_EMBEDDING_DIMENSIONS,
-  BUILTIN_EMBEDDING_ID
-} = require('./codebase/local-embedding');
-const {
-  isBuiltinEmbeddingListEntry,
-  mergeEmbeddingModelsList,
-  resolveActiveEmbeddingModel
-} = require('./embedding-model-presets');
-const { CONTEXT_WINDOW_MAX } = require('./agent/model-runtime-schema');
+const { clampModelRuntimeValue } = require('./agent/model-runtime-schema');
 const { MODEL_RUNTIME_DEFAULTS: PRESET_DEFAULTS } = require('./agent/model-runtime-presets');
 const {
   resolveApiConfigForRoute,
@@ -26,15 +17,9 @@ const COMPACTION_TRIGGER_RATIO_DEFAULT = PRESET_DEFAULTS.compactionTriggerRatio;
 const AGENT_TOOL_CALL_LIMIT_DEFAULT = PRESET_DEFAULTS.agentToolCallLimit;
 const AGENT_MAX_ROUNDS_DEFAULT = PRESET_DEFAULTS.agentMaxRounds;
 const MAX_TOKENS_DEFAULT = MAX_OUTPUT_TOKENS_DEFAULT;
-const MAX_TOKENS_LIMIT = 240000;
 const EMBEDDING_DIMENSIONS_MIN = 64;
 const EMBEDDING_DIMENSIONS_MAX = 8192;
 
-const REMOVED_BUILTIN_BASE_URLS = new Set(['http://192.168.31.127:30001/v1']);
-
-function isRemovedBuiltinBaseUrl(url) {
-  return REMOVED_BUILTIN_BASE_URLS.has(String(url || '').trim());
-}
 const DEFAULT_BUILTIN_BASE_URL = '';
 const DEFAULT_BUILTIN_API_KEY = '';
 const DEFAULTS = {
@@ -57,9 +42,11 @@ const DEFAULTS = {
   embeddingApiKey: '',
   embeddingModel: '',
   embeddingDimensions: 1024,
-  embeddingModels: mergeEmbeddingModelsList([]),
+  embeddingModels: [],
   graphAutoIncremental: true,
-  codebaseAutoIncremental: true,
+  // 代码索引增量默认关：它要跑 chunk + FTS + embedding，属重活；且 R2/R3 之后
+  // 没有向量的仓没有「新鲜度」要求（见 docs/INDEX-VALUE-REVIEW.md §R4）。
+  codebaseAutoIncremental: false,
   speechWhisperModel: 'whisper-1',
   speechLanguage: 'zh'
 };
@@ -113,65 +100,73 @@ function resolveTextApiConfig(settings, opts = {}) {
   };
 }
 
+/**
+ * 区间数字的唯一来源是 `agent/model-runtime-schema.js`（min / max / step / 默认值）。
+ * 本文件此前自己写了一份 240000 / 8192 / 500000 / 0.3–0.95 / min 5，
+ * 与 schema 的 min 15 已经漂移：设置页滑杆停在 15、这里却能存 5。
+ */
+function clampSetting(key, value) {
+  return clampModelRuntimeValue(key, value);
+}
+
 function clampMaxTokens(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 1) return MAX_OUTPUT_TOKENS_DEFAULT;
-  return Math.min(MAX_TOKENS_LIMIT, Math.max(1, Math.floor(v)));
+  return clampSetting('maxOutputTokens', n);
 }
 
 function clampContextWindow(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 8192) return CONTEXT_WINDOW_DEFAULT;
-  return Math.min(CONTEXT_WINDOW_MAX, Math.max(8192, Math.floor(v)));
+  return clampSetting('contextWindow', n);
 }
 
 function clampContextReserve(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 0) return CONTEXT_RESERVE_DEFAULT;
-  return Math.min(500000, Math.max(0, Math.floor(v)));
+  return clampSetting('contextReserveTokens', n);
 }
 
 function clampTriggerRatio(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return COMPACTION_TRIGGER_RATIO_DEFAULT;
-  return Math.min(0.95, Math.max(0.3, v));
+  return clampSetting('compactionTriggerRatio', n);
 }
 
 function clampAgentToolCallLimit(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 1) return AGENT_TOOL_CALL_LIMIT_DEFAULT;
-  return Math.min(600, Math.max(5, Math.floor(v)));
+  return clampSetting('agentToolCallLimit', n);
 }
 
 function clampAgentMaxRounds(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v < 1) return AGENT_MAX_ROUNDS_DEFAULT;
-  return Math.min(600, Math.max(5, Math.floor(v)));
+  return clampSetting('agentMaxRounds', n);
 }
 
 function modelSettingsPath(userData) {
   return path.join(userData, 'model-settings.json');
 }
 
+/**
+ * 历史配置里的「内置 BGE」条目：模型已删除，条目本身也没有可用的 /embeddings 端点
+ * （baseUrl 存的是占位词「内置」）。归一化阶段丢弃，避免检索时往空地址发请求。
+ * @param {any} m
+ */
+function isLegacyBuiltinEmbeddingEntry(m) {
+  if (!m) return false;
+  if (m.builtin === true) return true;
+  if (String(m.id || '').startsWith('embedding-builtin-')) return true;
+  return String(m.baseUrl || '').trim() === '内置';
+}
+
 function normalizeEmbeddingEntry(m, index) {
-  const builtin = isBuiltinEmbeddingListEntry(m);
+  /** @type {{ id: string, name: string, baseUrl: string, apiKey: string, dimensions: number, active: boolean, headers?: object, authMode?: string, userAgent?: string }} */
   const entry = {
     id: String(m?.id || `embedding-${index + 1}`),
     name: String(m?.name || '').trim(),
-    baseUrl: builtin ? '内置' : String(m?.baseUrl || '').trim(),
-    apiKey: builtin ? '' : String(m?.apiKey || '').trim(),
+    baseUrl: String(m?.baseUrl || '').trim(),
+    apiKey: String(m?.apiKey || '').trim(),
     dimensions: Math.min(
       EMBEDDING_DIMENSIONS_MAX,
-      Math.max(EMBEDDING_DIMENSIONS_MIN, Number(m?.dimensions) || (builtin ? BUILTIN_EMBEDDING_DIMENSIONS : DEFAULTS.embeddingDimensions))
+      Math.max(EMBEDDING_DIMENSIONS_MIN, Number(m?.dimensions) || DEFAULTS.embeddingDimensions)
     ),
-    active: m?.active === true,
-    builtin
+    active: m?.active === true
   };
   // 请求修饰字段：与供应商 / 自定义模型同源，由 llm-request.js 统一装配。
-  // 内置模型不出网，不参与；无值时不挂键，保持既有结构契约。
-  if (!builtin && m && m.headers) entry.headers = m.headers;
-  if (!builtin && m && m.authMode) entry.authMode = String(m.authMode).trim();
-  if (!builtin && m && m.userAgent) entry.userAgent = String(m.userAgent).trim();
+  // 无值时不挂键，保持既有结构契约。
+  if (m && m.headers) entry.headers = m.headers;
+  if (m && m.authMode) entry.authMode = String(m.authMode).trim();
+  if (m && m.userAgent) entry.userAgent = String(m.userAgent).trim();
   return entry;
 }
 
@@ -182,12 +177,8 @@ function normalize(raw) {
   // ~/.dieyun/dieyun.md（模板 assets/dieyun.md）与 dieyun-instructions.js 的 ASSISTANT_IDENTITY。
   if (raw && raw.model && !raw.textModel) s.textModel = raw.model;
   if (raw && raw.maxTokens && !raw.maxOutputTokens) s.maxOutputTokens = raw.maxTokens;
-  if (!s.builtinBaseUrl || isRemovedBuiltinBaseUrl(s.builtinBaseUrl)) {
-    s.builtinBaseUrl = DEFAULT_BUILTIN_BASE_URL;
-  }
-  if (!s.builtinApiKey || isRemovedBuiltinBaseUrl(raw?.builtinBaseUrl)) {
-    s.builtinApiKey = DEFAULT_BUILTIN_API_KEY;
-  }
+  if (!s.builtinBaseUrl) s.builtinBaseUrl = DEFAULT_BUILTIN_BASE_URL;
+  if (!s.builtinApiKey) s.builtinApiKey = DEFAULT_BUILTIN_API_KEY;
   s.maxOutputTokens = clampMaxTokens(s.maxOutputTokens);
   s.maxTokens = s.maxOutputTokens;
   s.contextWindow = clampContextWindow(s.contextWindow);
@@ -195,20 +186,16 @@ function normalize(raw) {
     clampContextReserve(s.contextReserveTokens),
     Math.max(0, s.contextWindow - s.maxOutputTokens)
   );
+  // 温度 / 压缩比只 clamp，不做「命中旧默认值就重置」：0.7、0.75、0.68 如今都是用户可合法选择的值，
+  // 命中即改会让人「设了存不住」（旧默认值是 0.7 / 0.75，早年的迁移逻辑该退场了）。
+  s.temperature = clampModelRuntimeValue('temperature', s.temperature);
   s.compactionTriggerRatio = clampTriggerRatio(s.compactionTriggerRatio);
-  if (Math.abs(Number(s.temperature) - 0.7) < 0.001) {
-    s.temperature = DEFAULTS.temperature;
-  }
-  if (
-    Math.abs(Number(s.compactionTriggerRatio) - 0.75) < 0.001 ||
-    Math.abs(Number(s.compactionTriggerRatio) - 0.68) < 0.001
-  ) {
-    s.compactionTriggerRatio = COMPACTION_TRIGGER_RATIO_DEFAULT;
-  }
   s.agentToolCallLimit = clampAgentToolCallLimit(s.agentToolCallLimit);
   s.agentMaxRounds = clampAgentMaxRounds(s.agentMaxRounds);
+  // 结构索引增量很便宜（只重解析改动文件），且 repo_map 依赖它的新鲜度 → 默认开。
   s.graphAutoIncremental = s.graphAutoIncremental !== false;
-  s.codebaseAutoIncremental = s.codebaseAutoIncremental !== false;
+  // 代码索引增量相反：只有显式开启才跑（旧的 `!== false` 会把「未设置」也变成 true）。
+  s.codebaseAutoIncremental = s.codebaseAutoIncremental === true;
 
   const hasRawEmbeddingModels =
     raw && Object.prototype.hasOwnProperty.call(raw, 'embeddingModels');
@@ -225,12 +212,13 @@ function normalize(raw) {
       active: s.embeddingEnabled !== false
     }];
   }
-  const normalizedEmbeddingSource = sourceEmbeddingModels.map(normalizeEmbeddingEntry);
-  const normalizedUserModels = normalizedEmbeddingSource.filter((m) => m.name && !m.builtin);
-  const builtinEmbeddingEntry = normalizedEmbeddingSource.find((m) => m.builtin);
-  s.embeddingModels = mergeEmbeddingModelsList(
-    builtinEmbeddingEntry ? [...normalizedUserModels, builtinEmbeddingEntry] : normalizedUserModels
-  );
+  // 内置 BGE 已删除：只保留「有名字 + 有端点」的外部模型条目。
+  // 历史配置里的内置条目（baseUrl 是「内置」占位、没有可用的 /embeddings 端点）在这里被丢弃，
+  // 用户重新选一个外部模型即恢复语义检索；不选就退化为纯关键词召回。
+  s.embeddingModels = sourceEmbeddingModels
+    .filter((m) => !isLegacyBuiltinEmbeddingEntry(m))
+    .map(normalizeEmbeddingEntry)
+    .filter((m) => m.name && m.baseUrl);
 
   let activeSeen = false;
   s.embeddingModels = s.embeddingModels.map((m) => {
@@ -238,18 +226,11 @@ function normalize(raw) {
     if (active) activeSeen = true;
     return { ...m, active };
   });
-  if (!activeSeen) {
-    let pickedBuiltin = false;
-    s.embeddingModels = s.embeddingModels.map((m) => {
-      if (!pickedBuiltin && m.builtin) {
-        pickedBuiltin = true;
-        return { ...m, active: true };
-      }
-      return { ...m, active: false };
-    });
+  if (!activeSeen && s.embeddingModels.length) {
+    s.embeddingModels = s.embeddingModels.map((m, index) => ({ ...m, active: index === 0 }));
   }
 
-  const activeEmbedding = resolveActiveEmbeddingModel(s.embeddingModels);
+  const activeEmbedding = s.embeddingModels.find((m) => m.active) || null;
   s.embeddingEnabled = !!activeEmbedding;
   if (!activeEmbedding) {
     s.embeddingModel = '';
@@ -259,8 +240,8 @@ function normalize(raw) {
     return s;
   }
   s.embeddingModel = activeEmbedding.name;
-  s.embeddingBaseUrl = activeEmbedding.builtin ? '' : activeEmbedding.baseUrl;
-  s.embeddingApiKey = activeEmbedding.builtin ? '' : activeEmbedding.apiKey;
+  s.embeddingBaseUrl = activeEmbedding.baseUrl;
+  s.embeddingApiKey = activeEmbedding.apiKey;
   s.embeddingDimensions = activeEmbedding.dimensions || DEFAULTS.embeddingDimensions;
   return s;
 }
@@ -283,7 +264,7 @@ function saveModelSettings(userData, settings) {
 /** @param {object} [settings] */
 function getEmbeddingConfig(settings) {
   const s = normalize(settings);
-  const active = resolveActiveEmbeddingModel(s.embeddingModels);
+  const active = s.embeddingModels.find((m) => m.active) || null;
   if (!active) {
     return {
       baseUrl: '',
@@ -291,15 +272,6 @@ function getEmbeddingConfig(settings) {
       model: '',
       dimensions: 0,
       disabled: true
-    };
-  }
-  if (active.builtin) {
-    return {
-      baseUrl: '',
-      apiKey: '',
-      model: BUILTIN_EMBEDDING_ID,
-      dimensions: BUILTIN_EMBEDDING_DIMENSIONS,
-      builtin: true
     };
   }
   const out = {
@@ -330,10 +302,8 @@ module.exports = {
   resolveTextApiConfig,
   DEFAULTS,
   MAX_TOKENS_DEFAULT,
-  MAX_TOKENS_LIMIT,
   clampMaxTokens,
   clampContextWindow,
-  CONTEXT_WINDOW_MAX,
   clampContextReserve,
   clampTriggerRatio,
   clampAgentToolCallLimit,
