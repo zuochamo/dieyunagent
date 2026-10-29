@@ -39,8 +39,6 @@ pub struct ConfigureParams {
     pub embedding: crate::embedding::EmbeddingConfig,
     #[serde(default)]
     pub llm: LlmConfig,
-    #[serde(default)]
-    pub models_dirs: Vec<String>,
     /// 覆盖默认的 codebase-index.sqlite 路径（远程工作区可用 `<project>/.dieyun/index.sqlite`）
     #[serde(default)]
     pub index_db_path: Option<String>,
@@ -52,7 +50,6 @@ pub struct AppConfig {
     pub workspace_roots: Vec<PathBuf>,
     pub embedding: crate::embedding::EmbeddingConfig,
     pub llm: LlmConfig,
-    pub models_dirs: Vec<PathBuf>,
     pub index_db_path: Option<PathBuf>,
 }
 
@@ -66,7 +63,6 @@ impl Default for AppConfig {
             workspace_roots: Vec::new(),
             embedding: crate::embedding::EmbeddingConfig::default(),
             llm: LlmConfig::default(),
-            models_dirs: default_models_dirs(),
             index_db_path: None,
         }
     }
@@ -84,14 +80,6 @@ fn dirs_fallback() -> PathBuf {
         return PathBuf::from(home).join(".dieyunagent");
     }
     std::env::temp_dir().join("dieyunagent")
-}
-
-fn default_models_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(dir) = std::env::var("DIEYUN_MODELS_DIR") {
-        dirs.push(PathBuf::from(dir));
-    }
-    dirs
 }
 
 impl AppConfig {
@@ -118,9 +106,6 @@ impl AppConfig {
         }
         self.embedding = params.embedding.clone();
         self.llm = params.llm.clone();
-        if !params.models_dirs.is_empty() {
-            self.models_dirs = params.models_dirs.iter().map(PathBuf::from).collect();
-        }
         if let Some(p) = &params.index_db_path {
             self.index_db_path = Some(PathBuf::from(p));
         }

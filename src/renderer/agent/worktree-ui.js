@@ -1,4 +1,4 @@
-/* global window, document, $, currentSessionId, sessionActiveRuns, showAgentToast, renderChangesPane, getSessionChangeRowsForAgent, capturePlanApplyForUndo, flushKnowledgeMaintenanceAfterPlan, hasKnowledgeMaintenanceContext, dispatchAgentRunEvent, createAgentRunEvent, AGENT_RUN_EVENT_TYPES, maybeEnforceWorktreeCleanupPolicy, openSidePanel, setSidePanelTab, DieyunNamespaces */
+/* global window, document, $, currentSessionId, sessionActiveRuns, showAgentToast, renderChangesPane, getSessionChangeRowsForAgent, capturePlanApplyForUndo, reportKnowledgePlanOutcome, dispatchAgentRunEvent, createAgentRunEvent, AGENT_RUN_EVENT_TYPES, maybeEnforceWorktreeCleanupPolicy, openSidePanel, setSidePanelTab, DieyunNamespaces */
 'use strict';
 
 const worktreeLoopApi = window.diecloud || {};
@@ -110,7 +110,6 @@ function beginPlanWorktreeTracking(runId, sessionId) {
     runId: runId || prev?.runId || null,
     sessionId: sid,
     undoTurnId: prev?.undoTurnId || null,
-    knowledgeBase: prev?.knowledgeBase || null,
     live: true,
     traceFallback,
     traceFallbackReason,
@@ -154,7 +153,7 @@ function schedulePlanWorktreeChangesRefresh(sessionId) {
   }, 1200);
 }
 
-function finalizePlanWorktreeTracking(runId, sessionId, undoTurnId, knowledgeBase) {
+function finalizePlanWorktreeTracking(runId, sessionId, undoTurnId) {
   if (!runId) return;
   const sid = worktreeSid(sessionId);
   const prev = pendingWorktreeRow(sid);
@@ -162,7 +161,6 @@ function finalizePlanWorktreeTracking(runId, sessionId, undoTurnId, knowledgeBas
     runId,
     sessionId: sid,
     undoTurnId: undoTurnId || prev?.undoTurnId || null,
-    knowledgeBase: knowledgeBase || prev?.knowledgeBase || null,
     traceFallback: !!prev?.traceFallback,
     traceFallbackReason: prev?.traceFallbackReason || '',
     planPreview: prev?.planPreview || null
@@ -278,15 +276,22 @@ async function applyWorktreeChangesCore(runId, undoTurnId, paths, forceConflict,
   }
 }
 
-function finalizeWorktreeKnowledge(appliedOk, appliedPaths, sessionId) {
+/**
+ * 计划 worktree 的最终归宿 → Main 的归纳暂存（`agent:knowledge-plan-outcome`）。
+ *
+ * 归纳的上下文与兜底超时都在 Main，所以这里**只报结论**：
+ *   applied   —— 已写回工作区，按应用后的路径整理；
+ *   no_changes—— 没有待合并项（非 git 工作空间或纯读计划），按「验收通过」整理；
+ *   skipped   —— 用户放弃，plan 相关知识不写入。
+ */
+function finalizeWorktreeKnowledge(outcome, appliedPaths, sessionId) {
   const sid = worktreeSid(sessionId);
-  const knowledgeDefer =
-    typeof hasKnowledgeMaintenanceContext === 'function' &&
-    hasKnowledgeMaintenanceContext(sid);
-  if (!knowledgeDefer) return;
-  flushKnowledgeMaintenanceAfterPlan(
-    appliedOk ? 'applied' : 'skipped',
-    appliedOk ? { appliedPaths: appliedPaths || [], sessionId: sid } : { sessionId: sid }
+  if (!sid) return;
+  if (typeof reportKnowledgePlanOutcome !== 'function') return;
+  reportKnowledgePlanOutcome(
+    sid,
+    outcome,
+    outcome === 'applied' ? { appliedPaths: appliedPaths || [] } : {}
   );
 }
 
@@ -318,7 +323,7 @@ async function applyWorktreeReview(paths, opts = {}) {
     await worktreeLoopApi.worktreeCleanupRun(pending.runId).catch(() => {});
   }
   scheduleWorktreePolicyCleanup();
-  finalizeWorktreeKnowledge(result.appliedOk, result.appliedOk ? paths : [], pending.sessionId);
+  finalizeWorktreeKnowledge(result.appliedOk ? 'applied' : 'skipped', paths, pending.sessionId);
   if (result.appliedOk) setPendingWorktreeRow(null, pending.sessionId);
   if (typeof window.invalidateWorktreeReviewCache === 'function') {
     window.invalidateWorktreeReviewCache();
@@ -351,7 +356,7 @@ async function dismissWorktreeReview() {
   }
   scheduleWorktreePolicyCleanup();
   setPendingWorktreeRow(null, pending.sessionId);
-  finalizeWorktreeKnowledge(false, [], pending.sessionId);
+  finalizeWorktreeKnowledge('skipped', [], pending.sessionId);
   if (typeof window.invalidateWorktreeReviewCache === 'function') {
     window.invalidateWorktreeReviewCache();
   }
@@ -359,8 +364,8 @@ async function dismissWorktreeReview() {
   if (typeof renderChangesPane === 'function') renderChangesPane();
 }
 
-async function openWorktreeReviewAfterPlan(runId, sessionId, undoTurnId, knowledgeBase) {
-  finalizePlanWorktreeTracking(runId, sessionId, undoTurnId, knowledgeBase);
+async function openWorktreeReviewAfterPlan(runId, sessionId, undoTurnId) {
+  finalizePlanWorktreeTracking(runId, sessionId, undoTurnId);
   let preview = null;
   if (worktreeLoopApi.worktreePreviewRun) {
     try {
@@ -375,6 +380,8 @@ async function openWorktreeReviewAfterPlan(runId, sessionId, undoTurnId, knowled
       scheduleWorktreePolicyCleanup();
     }
     setPendingWorktreeRow(null, sessionId);
+    // 没有待合并项：这一轮照样验收通过，归应按「已完成」整理（上下文在 Main 暂存）
+    finalizeWorktreeKnowledge('no_changes', [], sessionId);
     if (typeof window.clearPlanPreviewState === 'function') window.clearPlanPreviewState();
     if (typeof window.invalidateWorktreeReviewCache === 'function') {
       window.invalidateWorktreeReviewCache();
@@ -400,7 +407,6 @@ async function openWorktreeReviewAfterPlan(runId, sessionId, undoTurnId, knowled
     runId,
     sessionId,
     undoTurnId: undoTurnId || null,
-    knowledgeBase: knowledgeBase ? { ...knowledgeBase } : null,
     planPreview: null
   }, sessionId);
   openWorktreeReviewPane();

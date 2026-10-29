@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, disconnectSshIfConnected, ensureLocalGatewayReady, clearAgentContinueState, restoreKnowledgeMaintenanceContext, cancelBackgroundKnowledgeFallback, saveComposerAgentMode, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, disconnectSshIfConnected, ensureLocalGatewayReady, clearAgentContinueState, saveComposerAgentMode, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta */
 'use strict';
 
 const historyApi = window.diecloud || {};
@@ -200,7 +200,10 @@ function groupSessionsByWorkspace(sessions) {
   const groups = [];
   const index = new Map();
   for (const s of sessions || []) {
-    const path = String((s && s.workspacePath) || '').trim();
+    // 按「项目」分组，不按会话副本：远端会话的 workspacePath 是它自己那份 worktree
+    // （…/.dieyun/worktrees/sess-xxx/main）。按原值分组会让同一项目的每个会话
+    // 各自变成一个名为 main 的文件夹；项目身份由 Main 侧给出（workspaceProjectPath）。
+    const path = String((s && (s.workspaceProjectPath || s.workspacePath)) || '').trim();
     const key = historyWorkspaceKey(path);
     let g = index.get(key);
     if (!g) {
@@ -881,26 +884,89 @@ async function generateHandoffForSession(sessionId, btn) {
   }
 }
 
-/** 顶部「⇄ 继续上次」：取最近交接 → 新建会话 → 首轮自动注入【上个会话交接】 */
-async function continueFromLastSession() {
-  if (!gwState.authed) return;
-  let latest = null;
+/**
+ * 顶部「+」菜单：一个按键两件事（新对话 / 继续上次交接）。
+ * 有可继续的交接才弹菜单，没有就直接新建 —— 空菜单不如没有菜单。
+ */
+const newChatMenuState = { open: false };
+/** 打开菜单时现取的那份交接；点「继续上次」直接用它，不再二次查询 */
+let newChatMenuHandoff = null;
+/** 开菜单/新建之间有一次交接查询，连点两次会各建一个会话 —— 用它在查询窗口内挡重复点击 */
+let newChatMenuBusy = false;
+
+function setNewChatMenuOpen(open) {
+  newChatMenuState.open = !!open;
+  const menu = $('history-new-menu');
+  const btn = $('chat-new');
+  if (menu) menu.hidden = !newChatMenuState.open;
+  if (btn) btn.setAttribute('aria-expanded', newChatMenuState.open ? 'true' : 'false');
+  if (!newChatMenuState.open) newChatMenuHandoff = null;
+}
+
+/** 把交接写进菜单第二项：副标题「来自「<会话标题>」· <时间>」；没有交接就整项隐藏 */
+function renderNewChatHandoffItem(latest) {
+  const item = $('history-continue-item');
+  const sub = $('history-continue-sub');
+  if (!item) return;
+  item.hidden = !latest;
+  if (!latest || !sub) return;
+  const title = String(latest.title || '').trim();
+  const when = formatHistoryTime(Number(latest.createdAt) || 0);
+  const fromText = title
+    ? (typeof t === 'function' ? t('continue_last_from').replace('%s', title) : `来自「${title}」`)
+    : '';
+  sub.textContent = [fromText, when].filter(Boolean).join(' · ');
+}
+
+/** 最近一份交接（排除当前会话）；读不到按「没有交接」处理 —— 菜单是增强，不能挡新建 */
+async function fetchLatestHandoff() {
   try {
-    latest = await gatewayCall('memory.handoff_latest', {
+    const latest = await gatewayCall('memory.handoff_latest', {
       excludeSessionId: String(currentSessionId || '') || null
     });
+    return latest && latest.payload ? latest : null;
   } catch (e) {
-    window.alert(`读取交接失败：${(e && e.message) || e}`);
-    return;
+    console.warn('读取会话交接失败:', e);
+    return null;
   }
-  if (!latest || !latest.payload) {
-    window.alert('没有可用的会话交接（先在历史记录里对某个会话点 ⇄ 生成交接）');
-    return;
+}
+
+/** 顶部「+」：有可继续的交接 → 弹二选一；没有 → 直接新对话（保持单键手感） */
+async function openNewChatMenu() {
+  if (!gwState.authed || newChatMenuBusy) return;
+  newChatMenuBusy = true;
+  try {
+    const latest = await fetchLatestHandoff();
+    if (!latest) {
+      setNewChatMenuOpen(false);
+      await createNewSession();
+      return;
+    }
+    newChatMenuHandoff = latest;
+    renderNewChatHandoffItem(latest);
+    setNewChatMenuOpen(true);
+  } finally {
+    newChatMenuBusy = false;
   }
-  const fromId = String(latest.sessionId || '').trim();
+}
+
+/** 用一份交接新建会话，首轮自动注入【上个会话交接】 */
+async function continueFromHandoff(latest) {
+  const fromId = String((latest && latest.sessionId) || '').trim();
   if (!fromId) return;
   await createNewSession();
   if (currentSessionId) setPendingSessionHandoff(currentSessionId, fromId);
+}
+
+/** 「继续上次」的取回入口（取最近交接 → 新建会话）；无交接时给出可执行提示 */
+async function continueFromLastSession() {
+  if (!gwState.authed) return;
+  const latest = await fetchLatestHandoff();
+  if (!latest) {
+    window.alert('没有可用的会话交接（先在历史记录里对某个会话点 ⇄ 生成交接）');
+    return;
+  }
+  await continueFromHandoff(latest);
 }
 
 async function archiveSession(sessionId, archived) {
@@ -1155,12 +1221,7 @@ async function performSwitchSession(sessionId, switchGen) {
     const pendingWt =
       typeof window.getPendingWorktreeApply === 'function' ? window.getPendingWorktreeApply() : null;
     if (pendingWt?.sessionId === target && pendingWt.runId) {
-      if (typeof cancelBackgroundKnowledgeFallback === 'function') {
-        cancelBackgroundKnowledgeFallback(target);
-      }
-      if (pendingWt.knowledgeBase && typeof restoreKnowledgeMaintenanceContext === 'function') {
-        restoreKnowledgeMaintenanceContext(pendingWt.knowledgeBase);
-      }
+      // 归纳的 pending 上下文在 Main（与窗口/会话无关），切回来只需要把侧栏拉起来
       if (typeof openSidePanel === 'function') openSidePanel({ tab: 'changes' });
       if (typeof setSidePanelTab === 'function') setSidePanelTab('changes');
       if (typeof renderChangesPane === 'function') renderChangesPane();
@@ -1303,12 +1364,9 @@ async function settleSessionSidePanelAfterSwitch(sessionId, switchGen, opts = {}
     if (typeof renderProductsPanel === 'function') renderProductsPanel({ force: true });
     return;
   }
-  if (tab === 'codebase' && typeof onCodebasePanelShown === 'function') {
-    onCodebasePanelShown();
-    return;
-  }
-  if (tab === 'graph' && typeof onGraphPanelShown === 'function') {
-    onGraphPanelShown();
+  // 代码片段索引与结构索引合并在同一个「索引」页签里
+  if (tab === 'index' && typeof onIndexPanelShown === 'function') {
+    onIndexPanelShown();
     return;
   }
   // 与 setSidePanelTab 同源：压缩统计是「按会话」口径，切会话后必须重拉（onContextPanelShown
@@ -1535,17 +1593,47 @@ function initChatHistoryUI() {
     });
   }
 
+  const newChatWrap = $('history-new-wrap');
   const chatNewBtn = $('chat-new');
+  const newChatMenu = $('history-new-menu');
   if (chatNewBtn) {
-    // 顶部「新对话」继承当前会话的工作空间（含 SSH）。必须传 undefined：
-    // 显式传 null 会走 createNewSession 的「不继承」分支，连带 disconnectSshIfConnected()
-    // 主动断 SSH 并清空工作空间。需要换工作空间用文件夹入口的 +（显式传 path）。
-    chatNewBtn.addEventListener('click', () => createNewSession());
+    // 顶部「+」同时承担「新对话」与「继续上次交接」：有交接才弹菜单，没有就直接新建。
+    // 新建必须传 undefined：显式传 null 会走 createNewSession 的「不继承」分支，连带
+    // disconnectSshIfConnected() 主动断 SSH 并清空工作空间。需要换工作空间用文件夹入口的 +。
+    chatNewBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (newChatMenuState.open) {
+        setNewChatMenuOpen(false);
+        return;
+      }
+      void openNewChatMenu();
+    });
+  }
+  if (newChatMenu) {
+    newChatMenu.addEventListener('click', (e) => {
+      const item = e.target.closest?.('[data-history-new]');
+      if (!item) return;
+      const action = item.getAttribute('data-history-new');
+      const latest = newChatMenuHandoff;
+      setNewChatMenuOpen(false);
+      if (action === 'continue' && latest) void continueFromHandoff(latest);
+      else void createNewSession();
+    });
+    document.addEventListener('click', (e) => {
+      if (!newChatMenuState.open) return;
+      if (newChatWrap && !newChatWrap.contains(e.target)) setNewChatMenuOpen(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && newChatMenuState.open) setNewChatMenuOpen(false);
+    });
   }
 
-  const chatContinueBtn = $('chat-continue');
-  if (chatContinueBtn) {
-    chatContinueBtn.addEventListener('click', () => void continueFromLastSession());
+  // 会话标题由 Main 在轮末异步总结（agent/session-title.js）。生成完只做一件事：
+  // 刷一次列表 —— 标题存在 sessions.title 里，刷新即可见，不需要 Renderer 记状态。
+  if (typeof historyApi.onAgentSessionTitle === 'function') {
+    historyApi.onAgentSessionTitle(() => {
+      void refreshHistoryList({ softFail: true });
+    });
   }
 }
 

@@ -24,7 +24,6 @@ const {
   systemTempDir
 } = require('../agent-home');
 const { dieyunMdPath } = require('../dieyun-instructions');
-const { PluginHost } = require('../plugins/host');
 const { getEmbeddingConfig, loadModelSettings } = require('../model-settings');
 const { buildLlmHeadersFromConfig } = require('../agent/llm-request');
 const { createGraphIncrementalScheduler } = require('../graph/graph-incremental-scheduler');
@@ -37,7 +36,10 @@ const {
   workspacePathForSession,
   parseWorkspaceInput,
   isSameSshTarget,
+  normalizeRemotePath,
+  stripWorktreeSuffix,
 } = require('../workspace/target');
+const { repoRemotePathOf } = require('../ssh/remote-worktree');
 
 const DEFAULT_PORT = 17330;
 
@@ -128,13 +130,6 @@ class LocalGateway {
     /** @type {ReturnType<createRpcHandlers> | null} */
     this.handlers = null;
     this.token = '';
-    this.plugins = new PluginHost({
-      userDataPath: this.userDataPath,
-      log: this.log,
-      appVersion: opts.appVersion || '0.0.0',
-      appRoot: opts.appRoot || process.cwd()
-    });
-    this.plugins.loadUserPlugins();
     /** @type {ReturnType<import('../browser/service').createBrowserService> | null} */
     this.browser = opts.browser || null;
     /** @type {ReturnType<import('../computer/service').createComputerService> | null} */
@@ -233,10 +228,8 @@ class LocalGateway {
 
   getSshManagerForTarget(target) {
     if (target && target.kind === 'ssh' && this.sshPool) {
-      if (typeof this.sshPool.getConnectedManagerForEndpoint === 'function') {
-        const m = this.sshPool.getConnectedManagerForEndpoint(target);
-        if (m) return m;
-      }
+      const m = this.sshPool.getConnectedManager(target);
+      if (m) return m;
       return this.sshPool.getManagerForTarget(target);
     }
     return null;
@@ -296,10 +289,8 @@ class LocalGateway {
       .configure({
         data_dir: this.userDataPath,
         workspace_roots: roots,
-        models_dirs: this._collectModelsDirs(),
         embedding: {
           disabled: !!embedding.disabled,
-          builtin: !!embedding.builtin,
           baseUrl: embedding.baseUrl || '',
           apiKey: embedding.apiKey || '',
           model: embedding.model || '',
@@ -334,32 +325,6 @@ class LocalGateway {
       this.log('remote index configure: ' + (e && e.message ? e.message : String(e)));
       return { ok: false, error: e.message || String(e) };
     }
-  }
-
-  _collectModelsDirs() {
-    const dirs = [];
-    if (this.userDataPath) {
-      dirs.push(path.join(this.userDataPath, '.dieyun', 'optional-assets'));
-    }
-    if (process.resourcesPath) {
-      dirs.push(path.join(process.resourcesPath, 'models'));
-    }
-    try {
-      const { app } = require('electron');
-      if (app && typeof app.getAppPath === 'function') {
-        dirs.push(path.join(app.getAppPath(), 'models'));
-      }
-    } catch {
-      // ignore outside Electron
-    }
-    dirs.push(path.join(__dirname, '..', '..', 'models'));
-    const seen = new Set();
-    return dirs.filter((d) => {
-      const key = path.resolve(d);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
   }
 
   getRustCore() {
@@ -739,6 +704,26 @@ class LocalGateway {
     this.indexWatcher.start(root);
   }
 
+  /**
+   * 会话工作区目标的唯一写入口。
+   *
+   * 会话已经落在自己的 worktree 上之后，把仓库根再写回来不该把它抹掉：渲染端缓存里
+   * 可能还是用户选的仓库路径，抹掉就会出现「agent 在 worktree、RPC 却查仓库」的错位。
+   * 只有同一个仓库的「worktree → 仓库根」这一种写回被忽略，其它改动照常生效。
+   */
+  _storeSessionWorkspaceTarget(sid, target) {
+    const prev = this.sessionWorkspaceTargets.get(sid);
+    if (prev && prev.kind === 'ssh' && target && target.kind === 'ssh') {
+      const prevPath = normalizeRemotePath(prev.remotePath);
+      const nextPath = normalizeRemotePath(target.remotePath);
+      const prevRepo = repoRemotePathOf(prevPath);
+      const prevIsWorktree = prevRepo !== prevPath;
+      const nextIsRepoRoot = repoRemotePathOf(nextPath) === nextPath;
+      if (prevIsWorktree && nextIsRepoRoot && prevRepo === nextPath) return;
+    }
+    this.sessionWorkspaceTargets.set(sid, { ...target });
+  }
+
   setSessionWorkspaceContext(sessionId, workspacePath) {
     const sid = String(sessionId || '').trim();
     if (!sid) return;
@@ -746,7 +731,7 @@ class LocalGateway {
       this.sessionWorkspaceTargets.delete(sid);
     } else {
       const target = parseWorkspaceInput(workspacePath);
-      if (target) this.sessionWorkspaceTargets.set(sid, { ...target });
+      if (target) this._storeSessionWorkspaceTarget(sid, target);
       else this.sessionWorkspaceTargets.delete(sid);
     }
     // 任意会话绑定本地工作区都刷新白名单，保证并行后台任务可用
@@ -780,7 +765,7 @@ class LocalGateway {
       this.sessionWorkspaceTargets.delete(this.activeSessionId);
       return;
     }
-    this.sessionWorkspaceTargets.set(this.activeSessionId, { ...this.workspaceTarget });
+    this._storeSessionWorkspaceTarget(this.activeSessionId, this.workspaceTarget);
   }
 
   /**
@@ -810,11 +795,7 @@ class LocalGateway {
         writableRoots: () => this._collectWritableRoots()
       },
       defaultCwd: this._defaultCwd(),
-      plugins: this.plugins,
       getEmbeddingConfig: () => getEmbeddingConfig(loadModelSettings(this.userDataPath)),
-      onPluginsChanged: () => {
-        this._refreshHandlers();
-      },
       browser: this.browser,
       computer: this.computer,
       ssh: this.ssh,
@@ -891,7 +872,15 @@ class LocalGateway {
   _workspaceView(target) {
     const sshConnected = this._sshConnectedForTarget(target);
     const connected = target?.kind === 'ssh' ? sshConnected : false;
-    const displayPath = formatWorkspaceDisplay(target, { connected });
+    // 会话副本（worktree）是「写到哪儿」，不是「在哪个项目」。显示用项目路径，
+    // 否则同一项目的每个会话都显示成 …/.dieyun/worktrees/sess-xxx/main。
+    // 功能路径（workspacePath / ssh.remotePath）保持副本原值，别让显示污染路由。
+    const displayTarget = target
+      ? target.kind === 'ssh'
+        ? { ...target, remotePath: stripWorktreeSuffix(normalizeRemotePath(target.remotePath)) }
+        : { ...target, path: stripWorktreeSuffix(target.path) }
+      : target;
+    const displayPath = formatWorkspaceDisplay(displayTarget, { connected });
     const workspacePath = workspacePathForSession(target);
     if (!target) {
       return {
@@ -1038,8 +1027,7 @@ class LocalGateway {
       token: this.token,
       listening: !!this.wss,
       permissions: this.getPermissions(),
-      workspace: this.getWorkspace(),
-      plugins: this.plugins.listPublic()
+      workspace: this.getWorkspace()
     };
   }
 
@@ -1049,7 +1037,6 @@ class LocalGateway {
     fs.mkdirSync(this.readableDir, { recursive: true });
     this._ensureToken();
 
-    this.plugins.initAll();
     this._loadWorkspaceFromDisk();
     this._refreshHandlers();
     this._syncWorkspaceDiagnosticsWatch();
@@ -1163,7 +1150,11 @@ class LocalGateway {
               ok: false,
               error: {
                 code: err.code || 'EXEC_ERROR',
-                message: err.message || String(err)
+                message: err.message || String(err),
+                // retryable / suggestedFix 是工具失败契约的一半（tool-harness 直接读它们），
+                // 跨 WebSocket 传的时候不许只剩一条 message。
+                ...(typeof err.retryable === 'boolean' ? { retryable: err.retryable } : {}),
+                ...(err.suggestedFix ? { suggestedFix: String(err.suggestedFix) } : {})
               }
             });
           }
@@ -1272,7 +1263,6 @@ class LocalGateway {
     }
     this.wsClients.clear();
     if (this.indexWatcher) this.indexWatcher.stop();
-    if (this.plugins) this.plugins.disposeAll();
     this.handlers = null;
     if (this.lspDiagnostics) {
       void this.lspDiagnostics.shutdown();

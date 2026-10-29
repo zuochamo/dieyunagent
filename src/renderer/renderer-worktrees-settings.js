@@ -72,9 +72,14 @@ async function maybeEnforceWorktreeCleanupPolicy() {
   }
 }
 
-function setWorktreesSettingsHint(text) {
+function setWorktreesSettingsHint(text, tone) {
   const el = $('worktrees-settings-hint');
-  if (el) el.textContent = text || '';
+  if (!el) return;
+  el.textContent = text || '';
+  // .save-hint 默认 opacity:0，只有带 .show 才可见；不切这个类等于提示永远不显示。
+  el.classList.toggle('show', !!text);
+  // 只有「确实完成了」才染绿；「加载中…/保存中…/删除中…」保持中性灰。
+  el.classList.toggle('ok', !!text && tone === 'ok');
 }
 
 function bindWorktreeStepper(inputId, minusId, plusId, onChange) {
@@ -300,7 +305,7 @@ async function saveWorktreeCleanupAndEnforce() {
     if (removedN) bits.push(`自动清理 ${removedN} 个旧 run`);
     if (prunedN) bits.push(`回收 ${prunedN} 个已合并分支`);
     if (blockedN) bits.push(`${blockedN} 个因归档失败保留`);
-    setWorktreesSettingsHint(`已保存${bits.length ? ` · ${bits.join(' · ')}` : ''}`);
+    setWorktreesSettingsHint(`已保存${bits.length ? ` · ${bits.join(' · ')}` : ''}`, 'ok');
     showAgentToast('Worktree 设置已保存', bits.join(' · '), {
       variant: blockedN ? 'warn' : 'success',
       duration: 2600
@@ -335,9 +340,6 @@ function initWorktreesSettings() {
   });
   $('worktrees-refresh')?.addEventListener('click', () => {
     void refreshWorktreesSettingsPanel({ fromUser: true });
-  });
-  $('worktrees-enforce-now')?.addEventListener('click', () => {
-    void saveWorktreeCleanupAndEnforce();
   });
 }
 

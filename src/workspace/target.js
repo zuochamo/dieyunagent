@@ -118,6 +118,36 @@ function workspacePathForSession(target) {
   return target.path;
 }
 
+/**
+ * worktree 是「会话写到哪儿」的实现细节，不是它对外的身份。
+ * 目录规则（本地 / 远端共用）：`<repo>/.dieyun/worktrees/<id>[/<role>]`。
+ * 去掉这一段就回到它所属的仓库——远端建 worktree、本地跑 Plan、历史列表分组都只认这一个形状。
+ */
+const WORKTREE_TAIL_RE = /[\\/]\.dieyun[\\/]worktrees[\\/][^\\/]+(?:[\\/][^\\/]+)?$/i;
+
+/** @param {string} p @returns {string} 去掉 worktree 尾巴后的路径（没尾巴就原样返回） */
+function stripWorktreeSuffix(p) {
+  const s = String(p || '');
+  if (!s) return '';
+  const out = s.replace(WORKTREE_TAIL_RE, '');
+  return out === s ? s : out;
+}
+
+/**
+ * 会话工作区的「项目身份」： ssh URI 与本地路径都支持，形态与输入保持一致。
+ * 同一项目的多个会话因此落在同一个分组里，而不是各自变成名为 `main` 的文件夹。
+ *
+ * 只剥尾巴、不做 path.resolve：远端会话存的是 POSIX 路径，在 Windows 上 resolve
+ * 会把它变成 `E:\srv\...`。剥尾巴这个动作与平台、与是不是 URI 都无关。
+ * @param {string} input ssh://user@host:port/path 或本地路径
+ * @returns {string}
+ */
+function projectWorkspacePath(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  return stripWorktreeSuffix(raw) || raw;
+}
+
 function normalizeSshEndpoint(target) {
   if (!target) return null;
   const host = String(target.host || '').trim();
@@ -163,6 +193,8 @@ module.exports = {
   targetToDisk,
   formatWorkspaceDisplay,
   workspacePathForSession,
+  stripWorktreeSuffix,
+  projectWorkspacePath,
   isSameSshTarget,
   sshTargetKey,
   sshGatewayKey,

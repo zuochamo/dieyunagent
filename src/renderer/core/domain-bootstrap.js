@@ -1,4 +1,4 @@
-/* global window, DieyunBootstrap, DieyunNamespaces, api, currentSessionId, initPermissionsUI, initSettingsShell, initHelpUI, initUpdateUI, initSkillsUI, initSkillCatalogUI, initComposerToolbar, initDefinedModelEditors, initPluginSettingsUI, initPluginCatalogUI, initMcpCatalogUI, initAutomationUI, initCodebasePanel, initGraphPanel, initWorktreesSettings, initTerminalPane, initBrowserPanel, initPaneResizers, initSelectionToComposerDrag, applySessionWorkspace, setGatewayMeta, maybeEnforceWorktreeCleanupPolicy */
+/* global window, DieyunBootstrap, DieyunNamespaces, api, currentSessionId, initPermissionsUI, initSettingsShell, initHelpUI, initUpdateUI, initSkillsUI, initSkillCatalogUI, initComposerToolbar, initDefinedModelEditors, initMcpCatalogUI, initAutomationUI, initCodebasePanel, initGraphPanel, initIndexPanel, initWorktreesSettings, initTerminalPane, initBrowserPanel, initPaneResizers, initSelectionToComposerDrag, applySessionWorkspace, setGatewayMeta, maybeEnforceWorktreeCleanupPolicy */
 'use strict';
 
 (function registerDomainInits() {
@@ -55,9 +55,8 @@
       if (typeof initDefinedModelEditors === 'function') initDefinedModelEditors();
       if (typeof initCodebasePanel === 'function') initCodebasePanel();
       if (typeof initGraphPanel === 'function') initGraphPanel();
+      if (typeof initIndexPanel === 'function') initIndexPanel();
       if (typeof initWorktreesSettings === 'function') initWorktreesSettings();
-      if (typeof initPluginSettingsUI === 'function') initPluginSettingsUI();
-      if (typeof initPluginCatalogUI === 'function') initPluginCatalogUI();
       if (typeof initMcpCatalogUI === 'function') initMcpCatalogUI();
       if (typeof initAutomationUI === 'function') initAutomationUI();
     }

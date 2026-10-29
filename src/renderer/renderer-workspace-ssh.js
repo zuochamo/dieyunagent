@@ -288,6 +288,77 @@ async function refreshWorkspaceMenuItems() {
     await refreshRemoteGatewayMenuStatus(false, false);
     refreshSshPanelAgentLog(false).catch(() => {});
   }
+  refreshSessionWorktreePanel(sshLinked).catch(() => {});
+}
+
+/**
+ * 「会话副本」区块：这个会话在远端有自己的 worktree，改动要手动应用回主目录。
+ * 只在 SSH 已连接时查（预览 = 远端跑一次 git status）。
+ */
+async function refreshSessionWorktreePanel(sshLinked) {
+  const applyBtn = document.querySelector('[data-ws-action="worktree-apply"]');
+  const pathEl = $('ssh-panel-wt-path');
+  const pendingEl = $('ssh-panel-wt-pending');
+  if (applyBtn) applyBtn.hidden = true;
+  if (pathEl) pathEl.textContent = '—';
+  if (pendingEl) pendingEl.textContent = '—';
+  if (!sshLinked || !wsApi.worktreeRemotePreview) return;
+  let r = null;
+  try {
+    r = await wsApi.worktreeRemotePreview({});
+  } catch {
+    return;
+  }
+  if (!r || !r.ok) {
+    if (pathEl && r && r.code !== 'not_session_worktree') pathEl.textContent = r.error || '—';
+    return;
+  }
+  if (pathEl) {
+    const parts = String(r.wtPath || '').split('/').filter(Boolean);
+    pathEl.textContent = parts.slice(-2).join('/') || '—';
+    pathEl.title = r.wtPath || '';
+  }
+  if (pendingEl) pendingEl.textContent = r.files.length ? `${r.files.length} 个文件` : '无';
+  if (applyBtn) applyBtn.hidden = r.files.length === 0;
+}
+
+/** 应用会话副本改动到远端主目录（提交到副本分支 → 合并；冲突自动回滚主目录） */
+async function applySessionWorktreeChanges() {
+  if (!wsApi.worktreeRemotePreview || !wsApi.worktreeRemoteApply) return;
+  let preview = null;
+  try {
+    preview = await wsApi.worktreeRemotePreview({});
+  } catch (e) {
+    showAgentToast('读取副本改动失败', (e && e.message) || String(e), { variant: 'warn' });
+    return;
+  }
+  if (!preview || !preview.ok) {
+    showAgentToast('无法应用', (preview && preview.error) || '未知原因', { variant: 'warn' });
+    return;
+  }
+  if (!preview.files.length) {
+    showAgentToast('没有需要应用的改动', '', { variant: 'info' });
+    return;
+  }
+  const list = preview.files
+    .slice(0, 8)
+    .map((f) => `${f.code}  ${f.path}`)
+    .join('\n');
+  const more = preview.files.length > 8 ? `\n…还有 ${preview.files.length - 8} 个文件` : '';
+  if (!confirm(`把 ${preview.files.length} 个文件的改动应用到主目录？\n\n${list}${more}`)) return;
+  let r = null;
+  try {
+    r = await wsApi.worktreeRemoteApply({});
+  } catch (e) {
+    showAgentToast('应用失败', (e && e.message) || String(e), { variant: 'warn' });
+    return;
+  }
+  if (r && r.ok) {
+    showAgentToast('已应用到主目录', `${preview.files.length} 个文件已合并`, { variant: 'info' });
+  } else {
+    showAgentToast('应用失败', (r && r.error) || '未知原因', { variant: 'warn' });
+  }
+  refreshSessionWorktreePanel(true).catch(() => {});
 }
 
 async function refreshRemoteGatewayMenuStatus(isRemote, remoteLinked) {
@@ -321,8 +392,8 @@ async function refreshRemoteGatewayMenuStatus(isRemote, remoteLinked) {
       statusEl.className = 'ssh-panel-status is-pending';
       if (retryBtn) retryBtn.hidden = true;
     } else if (rg.active) {
-      statusEl.textContent = `已启动 · 索引隧道 :${rg.localPort}`;
-      statusEl.title = `远程索引 Agent ws://127.0.0.1:${rg.localPort}`;
+      statusEl.textContent = `已启动 · 索引 Agent socket:${rg.socketPath || ''}`;
+      statusEl.title = `远程索引 Agent ${rg.socketPath || ''}（经 SSH direct-streamlocal，无本地隧道）`;
       statusEl.className = 'ssh-panel-status is-ok';
       if (retryBtn) retryBtn.hidden = true;
     } else if (rg.lastError) {
@@ -675,6 +746,21 @@ async function finishSshConnectFlow(payload, reconnectOnly) {
   await openRemoteDirPicker(startPath);
 }
 
+/**
+ * 别名/跳板是「用户看不见的真相」：连上后说一句实际连到哪，
+ * 否则用户会以为连接走的是他自己输的那个字符串。
+ */
+function showSshResolvedHint(resolved) {
+  if (!resolved || typeof showAgentToast !== 'function') return;
+  const bits = [];
+  if (resolved.fromSshConfig) bits.push(`${resolved.username}@${resolved.hostname}:${resolved.port}`);
+  if (resolved.viaJump && resolved.viaJump.length) bits.push(`经跳板 ${resolved.viaJump.join(' → ')}`);
+  if (resolved.authType === 'agent') bits.push('ssh-agent 认证');
+  if (resolved.warnings && resolved.warnings.length) bits.push(resolved.warnings[0]);
+  if (!bits.length) return;
+  showAgentToast('已按 ~/.ssh/config 连接', bits.join(' · '), { variant: 'info' });
+}
+
 async function submitSshConnect(e, opts = {}) {
   if (e) e.preventDefault();
   if (!wsApi.sshConnect) {
@@ -687,33 +773,29 @@ async function submitSshConnect(e, opts = {}) {
   const port = ($('ssh-connect-port') && $('ssh-connect-port').value) || '22';
   const username = ($('ssh-connect-user') && $('ssh-connect-user').value) || '';
   const remember = !!($('ssh-connect-remember') && $('ssh-connect-remember').checked);
+  const useAgent = !!($('ssh-connect-use-agent') && $('ssh-connect-use-agent').checked);
   const privateKeyPath = ($('ssh-connect-key-path') && $('ssh-connect-key-path').value) || '';
+  const password = ($('ssh-connect-password') && $('ssh-connect-password').value) || '';
   const useKey = !!privateKeyPath.trim();
+  // 认证方式交给主进程按「显式输入 > 已存凭据 > ~/.ssh/config」落定：
+  // 这里只表达用户意图（勾了 agent / 选了私钥 / 填了密码 / 什么都没填=auto）
+  const authType = useAgent ? 'agent' : useKey ? 'key' : password ? 'password' : 'auto';
   const payload = {
     host,
     port,
     username,
-    authType: useKey ? 'key' : 'password',
+    authType,
     remember,
+    // 已存的密码/私钥路径，即使这次没勾「记住」也应当被复用（勾选只控制是否保存）
+    useSaved: true,
     acceptNewHostKey: opts.acceptNewHostKey === true
   };
 
   if (useKey) {
     payload.privateKeyPath = privateKeyPath.trim();
     payload.passphrase = ($('ssh-connect-key-passphrase') && $('ssh-connect-key-passphrase').value) || '';
-  } else {
-    payload.password = ($('ssh-connect-password') && $('ssh-connect-password').value) || '';
-    if (!payload.password && !remember) {
-      setSshError('ssh-connect-error', '请输入密码或选择私钥文件');
-      return;
-    }
-    if (!payload.password && remember && wsApi.sshGetProfile) {
-      const profile = await wsApi.sshGetProfile({ host, port, username });
-      if (!profile || !profile.hasSecret || profile.authType === 'key') {
-        setSshError('ssh-connect-error', '无已保存密码，请输入密码或选择私钥');
-        return;
-      }
-    }
+  } else if (!useAgent && password) {
+    payload.password = password;
   }
 
   resetSshHostKeyConfirm();
@@ -730,6 +812,7 @@ async function submitSshConnect(e, opts = {}) {
     if (connResult && connResult.connected === false && connResult.ok !== true) {
       throw new Error('SSH 连接未就绪，请重试');
     }
+    showSshResolvedHint(connResult && connResult.resolved);
 
     beginSshDeployProgressWatch({ phase: 'connect', percent: 32, message: '已连通…' });
     await finishSshConnectFlow(
@@ -760,6 +843,7 @@ async function trustSshHostKeyAndConnect() {
       throw new Error('SSH 连接未就绪，请重试');
     }
     resetSshHostKeyConfirm();
+    showSshResolvedHint(connResult && connResult.resolved);
     beginSshDeployProgressWatch({ phase: 'connect', percent: 32, message: '已连通…' });
     await finishSshConnectFlow(
       {
@@ -1016,6 +1100,10 @@ async function handleWorkspaceMenuAction(action) {
   }
   if (action === 'remote-gateway-retry') {
     await tryStartRemoteGateway();
+    return;
+  }
+  if (action === 'worktree-apply') {
+    await applySessionWorktreeChanges();
     return;
   }
 }
