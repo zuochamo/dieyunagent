@@ -16,6 +16,7 @@ const {
   formatBilingualBlurb
 } = require('./skill-frontmatter');
 const { zhDescriptionForSkillKey } = require('./bundled-i18n-zh');
+const { verifySkillContent } = require('./install-integrity');
 
 function defaultSkillRoots() {
   const home = os.homedir();
@@ -68,6 +69,7 @@ async function tryAddSkill(dir, seen, out, bundledRoots) {
   seen.add(id);
   const raw = await fs.readFile(skillMd, 'utf8');
   const { meta: rawMeta, body } = parseFrontmatter(raw);
+  const integrity = await verifySkillContent(dir, raw);
   const skillId = resolveBundledSkillId(dir, rawMeta, bundledRoots);
   const meta = enrichMetaDescriptions(rawMeta, skillId);
   const folderName = path.basename(dir);
@@ -88,7 +90,11 @@ async function tryAddSkill(dir, seen, out, bundledRoots) {
     preview: blurb,
     category,
     // 「内置」= 落在预装种子分类目录内（与可删性同源）。skillKey 只用于 id 与召回，不再是内置判据。
-    builtin: bundledRoots.some((root) => isSeededSkillDir(dir, root))
+    builtin: bundledRoots.some((root) => isSeededSkillDir(dir, root)),
+    // 安装基线比对结果：ok = 与安装时一致；changed = 本地被改过；untracked = 非市场安装（手写/预装）。
+    // 只做「可比对」，不做「阻止执行」——见 install-integrity.js 的边界说明。
+    integrity: integrity.state,
+    installSource: integrity.source
   });
   return true;
 }

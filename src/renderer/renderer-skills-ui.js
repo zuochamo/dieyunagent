@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, openSettingsShell, switchSettingsPage, refreshAutomationList, showPluginListView, showMcpListView, loadPluginsUI, showAgentToast, getEffectiveInputBudget, CTX_LIMITS, updateSshPanelVisibility, ensureSelectMenu */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, openSettingsShell, switchSettingsPage, refreshAutomationList, showMcpListView, showAgentToast, getEffectiveInputBudget, CTX_LIMITS, updateSshPanelVisibility, ensureSelectMenu */
 'use strict';
 
 /** MCP 远程传输类型（取值与 Gateway 侧 transport 字段一致）。 */
@@ -853,14 +853,8 @@ function initSkillsUI() {
     });
   }
 
-  const skillDetailOverlay = $('skill-detail-overlay');
   const skillDetailClose = $('skill-detail-close');
   if (skillDetailClose) skillDetailClose.addEventListener('click', closeSkillDetail);
-  if (skillDetailOverlay) {
-    skillDetailOverlay.addEventListener('click', (e) => {
-      if (e.target === skillDetailOverlay) closeSkillDetail();
-    });
-  }
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     const skillDetail = $('skill-detail-overlay');
@@ -875,12 +869,6 @@ function initSkillsUI() {
   $('skill-create-form')?.addEventListener('submit', (e) => {
     submitSkillCreate(e).catch(() => {});
   });
-  const skillCreateOverlay = $('skill-create-overlay');
-  if (skillCreateOverlay) {
-    skillCreateOverlay.addEventListener('click', (e) => {
-      if (e.target === skillCreateOverlay) closeSkillCreateDialog();
-    });
-  }
 
   $('mcp-add-btn')?.addEventListener('click', openMcpAddDialog);
   $('mcp-add-close')?.addEventListener('click', closeMcpAddDialog);
@@ -888,12 +876,6 @@ function initSkillsUI() {
   $('mcp-add-form')?.addEventListener('submit', (e) => {
     submitMcpAdd(e).catch(() => {});
   });
-  const mcpAddOverlay = $('mcp-add-overlay');
-  if (mcpAddOverlay) {
-    mcpAddOverlay.addEventListener('click', (e) => {
-      if (e.target === mcpAddOverlay) closeMcpAddDialog();
-    });
-  }
 
   $('mcp-config-close')?.addEventListener('click', closeMcpConfigDialog);
   $('mcp-config-cancel')?.addEventListener('click', closeMcpConfigDialog);
@@ -912,12 +894,6 @@ function initSkillsUI() {
   $('mcp-config-upgrade')?.addEventListener('click', () => {
     upgradeMcpPackageForCurrent().catch(() => {});
   });
-  const mcpConfigOverlay = $('mcp-config-overlay');
-  if (mcpConfigOverlay) {
-    mcpConfigOverlay.addEventListener('click', (e) => {
-      if (e.target === mcpConfigOverlay) closeMcpConfigDialog();
-    });
-  }
 
   bindGridSearchInput(
     'mcp-search',
@@ -960,14 +936,12 @@ function initSkillsUI() {
   }
 
   initWorkspaceUI().catch(() => {});
-  if (typeof initPluginListFilters === 'function') initPluginListFilters();
 }
 
 window.renderGridCategoryTabs = renderGridCategoryTabs;
 window.updateGridPagination = updateGridPagination;
 window.bindGridSearchInput = bindGridSearchInput;
 window.bindGridPagination = bindGridPagination;
-window.PLUGIN_TAXONOMY = PLUGIN_TAXONOMY;
 window.AUTOMATION_TAXONOMY = AUTOMATION_TAXONOMY;
 window.SKILLS_GRID_PAGE_SIZE = SKILLS_PAGE_SIZE;
 window.openMcpConfigDialog = openMcpConfigDialog;

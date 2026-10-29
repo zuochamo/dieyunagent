@@ -4,6 +4,7 @@ const path = require('path');
 const fsp = require('fs/promises');
 const { scanSkills, readSkillContent, assertReadableSkillPath } = require('../../skills/scanner');
 const { recallSkills } = require('../../skills/vector-index');
+const { readSkillUsage, usageFor } = require('../../skills/usage-ledger');
 const { recallAgentTools } = require('../../tools/tool-vector-index');
 const { getEmbeddingConfig } = require('../../model-settings');
 const { listBuiltinMcpServers } = require('../../mcp/registry');
@@ -49,7 +50,19 @@ function registerSkillsMcpIpc(ctx) {
     const localGateway = getLocalGateway();
     const userData = getUserDataPath();
     const workspacePath = localGateway ? localGateway.getWorkspace().workspacePath : null;
-    return scanSkills({ userData, workspacePath });
+    const catalog = await scanSkills({ userData, workspacePath });
+    // 把使用账本并进扫描结果：技能列表要回答「这个技能到底有没有在用」，
+    // 而账本记的是「模型读过 SKILL.md」这件事（见 skills/usage-ledger.js）。
+    const usage = await readSkillUsage(userData);
+    return {
+      ...catalog,
+      skills: (catalog.skills || []).map((skill) => {
+        const entry = usageFor(usage, skill.skillPath);
+        return entry
+          ? { ...skill, lastUsedAt: entry.lastAt || 0, useCount: entry.count || 0 }
+          : skill;
+      })
+    };
   });
 
   ipcMain.handle('skills:recall', async (_evt, payload) => {

@@ -242,8 +242,8 @@ function renderSkillCatalogGrid() {
           </div>
           <p class="skill-tile-desc">${escapeHtml(ent.description || sourceNote || '点击查看 SKILL.md 详情')}</p>
           <p class="skill-tile-hint">${sourceNote}${installsNote ? ` · ${installsNote}` : ''}</p>
-          <div class="skill-tile-foot plugin-catalog-foot">
-            <span class="plugin-catalog-state">${installed ? '已安装' : '市场'}</span>
+          <div class="skill-tile-foot catalog-tile-foot">
+            <span class="catalog-tile-state">${installed ? '已安装' : '市场'}</span>
             <button
               type="button"
               class="${actionClass}"
@@ -475,14 +475,8 @@ function initSkillCatalogUI() {
     });
   }
 
-  const detailOverlay = $('skill-catalog-detail-overlay');
   const detailClose = $('skill-catalog-detail-close');
   if (detailClose) detailClose.addEventListener('click', closeSkillCatalogDetail);
-  if (detailOverlay) {
-    detailOverlay.addEventListener('click', (e) => {
-      if (e.target === detailOverlay) closeSkillCatalogDetail();
-    });
-  }
 
   const detailInstallBtn = $('skill-catalog-detail-install');
   if (detailInstallBtn) {

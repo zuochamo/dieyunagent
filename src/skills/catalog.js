@@ -9,6 +9,7 @@ const {
   sanitizeSkillFolderName
 } = require('../agent-home');
 const { parseFrontmatter } = require('./skill-frontmatter');
+const { writeInstallMarker, sha256Text } = require('./install-integrity');
 
 const SKILLS_SH_BASE = 'https://skills.sh';
 const CACHE_FILE = 'skill-catalog-cache.json';
@@ -376,8 +377,11 @@ class SkillCatalog {
       const raw = fs.readFileSync(skillPath, 'utf8');
       const { meta } = parseFrontmatter(raw);
       if (meta && meta.name) name = String(meta.name);
+      // 安装基线：市场下载没有任何签名，先把「装进来的样子」记下来，
+      // 之后扫描才能回答「本地这份是否与安装时一致」（见 skills/install-integrity.js）。
+      writeInstallMarker(finalDir, { source: parsed.source, sha256: sha256Text(raw), files: files.length });
     } catch {
-      // ignore
+      // 读不到内容就不写基线：宁可为 untracked，也不要写一条假基线
     }
 
     return {
