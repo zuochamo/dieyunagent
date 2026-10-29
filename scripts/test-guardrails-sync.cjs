@@ -60,41 +60,22 @@ assert(
   'repeat block parity'
 );
 
-// --- 浏览器验收证据（renderer/agent-guardrails.js，需要 window + GuardrailsShared）---
-global.GuardrailsShared = shared;
-global.window = {};
-require('../src/renderer/agent-guardrails');
-const rendererGuardrails = global.window;
+// --- 完成验收（Main 单一来源 src/agent/completion-readiness.js）---
+// 判定与证据采集都在 Main：这里直接测模块，不再经 Renderer 的 window 全局。
+const readiness = require('../src/agent/completion-readiness');
 
 const browserTrace = [
   {
     round: 1,
     tools: [
       { name: 'browser_navigate', result: {} },
-      { name: 'browser_click', failed: true }
+      { name: 'browser_click', result: { ok: false, error: '找不到元素' } }
     ]
   }
 ];
 
-const sig = rendererGuardrails.collectBrowserEvidence(browserTrace, {
-  errorCount: 2,
-  errors: ['boom']
-});
-assert(sig.used === true, 'browser evidence detects browser tools');
-assert(sig.failedTools.includes('browser_click'), 'browser evidence keeps failed tools');
-assert(sig.errorCount === 2, 'browser evidence keeps runtime error count');
-
-const noBrowser = rendererGuardrails.collectBrowserEvidence(
-  [{ round: 1, tools: [{ name: 'fs_edit' }] }],
-  { errorCount: 5 }
-);
-assert(noBrowser.used === false && noBrowser.errorCount === 0, 'non-browser trace ignores runtime errors');
-
-// 纯浏览器任务没有写入信号，运行时错误提示不能被「无证据即跳过」吞掉
-const gate = rendererGuardrails.verifyAgentCompletionReadiness('已完成页面登录', browserTrace, [], {
-  mode: 'agent',
-  diagnostics: null,
-  browser: { errorCount: 1, errors: ['[pageerror] boom'] }
+const gate = readiness.evaluateReadiness(readiness.collectEvidence(browserTrace), {
+  browser: { used: true, errorCount: 1, errors: ['[pageerror] boom'] }
 });
 assert(
   gate.ok === false && gate.reason === 'browser_runtime_errors',
@@ -104,32 +85,36 @@ assert(/浏览器/.test(gate.note) && gate.surfaceToUser === true, 'readiness no
 assert(gate.shouldRetry === false, 'browser readiness note never auto-retries');
 
 // 无运行时错误 → 纯浏览器任务仍然跳过（不误报）
-const clean = rendererGuardrails.verifyAgentCompletionReadiness('已完成页面登录', browserTrace, [], {
-  mode: 'agent',
-  diagnostics: null,
-  browser: { errorCount: 0, errors: [] }
+const clean = readiness.evaluateReadiness(readiness.collectEvidence(browserTrace), {
+  browser: { used: true, errorCount: 0, errors: [] }
 });
 assert(clean.ok === true && clean.skipped === true, 'clean browser task still skips readiness');
 
 // 断言证据：只看最后一次 browser_expect（先失败后修复重跑通过不应误报）
+// 真形状：断言未通过时 ok=false 但**不带 error**（src/browser/expect.js），失败只在 failed 计数里
+const expectFail = {
+  ok: false,
+  total: 2,
+  passed: 1,
+  failed: 1,
+  results: [
+    { id: 'login', kind: 'text', pass: false, expected: '登录', actual: '登录中' },
+    { kind: 'visible', pass: true }
+  ]
+};
+const expectPass = { ok: true, total: 2, passed: 2, failed: 0, results: [{ kind: 'text', pass: true }, { kind: 'visible', pass: true }] };
 const fixedExpectTrace = [
-  { round: 1, tools: [{ name: 'browser_expect', failed: true, summary: '断言 1/2 通过 · 1 条未通过' }] },
-  { round: 2, tools: [{ name: 'browser_expect', failed: false, summary: '断言全部通过（2 条）' }] }
+  { round: 1, tools: [{ name: 'browser_expect', result: expectFail }] },
+  { round: 2, tools: [{ name: 'browser_expect', result: expectPass }] }
 ];
-const fixedGate = rendererGuardrails.verifyAgentCompletionReadiness('已修复并复验', fixedExpectTrace, [], {
-  mode: 'agent',
-  diagnostics: null,
-  browser: { errorCount: 0, errors: [] }
+const fixedGate = readiness.evaluateReadiness(readiness.collectEvidence(fixedExpectTrace), {
+  browser: { used: true, errorCount: 0, errors: [] }
 });
 assert(fixedGate.ok === true && fixedGate.skipped === true, 'fixed expectation passes readiness');
 
-const failedExpectTrace = [
-  { round: 1, tools: [{ name: 'browser_expect', failed: true, summary: '断言 1/2 通过 · 1 条未通过' }] }
-];
-const failedGate = rendererGuardrails.verifyAgentCompletionReadiness('已完成', failedExpectTrace, [], {
-  mode: 'agent',
-  diagnostics: null,
-  browser: { errorCount: 0, errors: [] }
+const failedExpectTrace = [{ round: 1, tools: [{ name: 'browser_expect', result: expectFail }] }];
+const failedGate = readiness.evaluateReadiness(readiness.collectEvidence(failedExpectTrace), {
+  browser: { used: true, errorCount: 0, errors: [] }
 });
 assert(
   failedGate.ok === false && failedGate.reason === 'browser_expect_failed',
@@ -137,7 +122,20 @@ assert(
 );
 assert(/browser_expect/.test(failedGate.note) && failedGate.shouldRetry === false, 'expectation note is advisory only');
 
-const sigExpect = rendererGuardrails.collectExpectationSignals(fixedExpectTrace);
-assert(sigExpect.total === 2 && sigExpect.failedCount === 1 && sigExpect.lastFailed === false, 'expectation signals track last call');
+// 退出码只认结构化 result.code（summary 里的文本不算）
+const exitTrace = [
+  {
+    round: 1,
+    tools: [
+      { name: 'fs_edit', toolArgs: { filePath: 'src/a.js' } },
+      { name: 'host_exec', toolArgs: { command: 'npm test' }, summary: 'exit 0', result: { code: 1 } }
+    ]
+  }
+];
+const exitGate = readiness.evaluateReadiness(readiness.collectEvidence(exitTrace), {});
+assert(
+  exitGate.ok === false && exitGate.reason === 'validation_failed' && /exit 1/.test(exitGate.note),
+  'validation failure reads structured exit code, not summary text'
+);
 
 console.log('test-guardrails-sync.cjs ok');

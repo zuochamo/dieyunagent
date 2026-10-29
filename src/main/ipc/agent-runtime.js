@@ -8,14 +8,16 @@ const {
   mergeIsolatedCards
 } = require('../../agent/live-loop-trace');
 const { createMainPlannerRunner } = require('../../agent/planner-runner-main');
-const { getEffectiveInputBudget } = require('../../agent/compaction-main');
+const { maybeGenerateSessionTitle } = require('../../agent/session-title');
 const { summarizeTelemetry } = require('../../agent/tool-telemetry');
+const { evaluateTurnReadiness } = require('../../agent/completion-readiness');
 const { summarizeCompactionTelemetry } = require('../../agent/compaction-telemetry');
 const {
   ensureRunAbortController,
   abortRun,
   abortSessionRuns,
-  clearRunAbortController
+  clearRunAbortController,
+  hasActiveRuns
 } = require('../../agent/run-cancel-registry');
 
 /** 压缩归档（旁路记录）的写入上限：它在发请求之前 await，不能让它拖住整轮。 */
@@ -94,6 +96,29 @@ function registerAgentRuntimeIpc(ctx) {
       return { ok: false, error: e.message || String(e) };
     }
   });
+
+  /**
+   * 一次运行归属哪个工作空间（`agent:run` / `agent:planner-run` / `agent:retry-tool` 共用口径）：
+   * payload 显式给的 > 会话绑定的 > 当前 Gateway 视图工作区。
+   * 有 sessionId 时禁止回落到「当前视图工作区」，避免并行本地任务串台。
+   * @returns {Promise<string>} 空串表示没有可用工作空间
+   */
+  async function resolveRunWorkspacePath(payload = {}) {
+    let workspacePath =
+      payload.runWorkspaceRoot ||
+      payload.workspaceRoot ||
+      payload.workspacePath ||
+      (payload.startParams && payload.startParams.workspaceRoot) ||
+      null;
+    if (!workspacePath && payload.sessionId) {
+      workspacePath = await live.resolveAgentRunWorkspacePath(payload.sessionId);
+    }
+    if (!workspacePath && !payload.sessionId) {
+      const ws = live.localGateway ? live.localGateway.getWorkspace() : null;
+      workspacePath = ws && ws.kind === 'local' ? ws.workspacePath : live.workspaceRootPath();
+    }
+    return workspacePath || '';
+  }
 
   ipcMain.handle('agent:prep-system-prompt', async (_evt, payload = {}) => {
     const gateway = live.localGateway;
@@ -179,22 +204,11 @@ function registerAgentRuntimeIpc(ctx) {
       sessionId: payload.sessionId || null
     };
     rustLoopCancels.set(cancelToken, entry);
-    const settings = live.loadModelSettings(live.userData);
+    const rawSettings = live.loadModelSettings(live.userData);
     const apiConfig = payload.apiConfig || {};
-    const baseUrl = apiConfig.baseUrl || settings.baseUrl;
-    const apiKey = apiConfig.apiKey || settings.apiKey;
-    let workspacePath =
-      payload.runWorkspaceRoot ||
-      payload.workspaceRoot ||
-      (payload.startParams && payload.startParams.workspaceRoot) ||
-      null;
-    if (!workspacePath && payload.sessionId) {
-      workspacePath = await live.resolveAgentRunWorkspacePath(payload.sessionId);
-    }
-    // 有 sessionId 时禁止回落到当前视图工作区，避免并行本地任务串台
-    if (!workspacePath && !payload.sessionId) {
-      workspacePath = live.workspaceRootPath();
-    }
+    const baseUrl = apiConfig.baseUrl || rawSettings.baseUrl;
+    const apiKey = apiConfig.apiKey || rawSettings.apiKey;
+    const workspacePath = await resolveRunWorkspacePath(payload);
     const ctx = {
       workspacePath: workspacePath || undefined,
       worktreePath: payload.worktreePath || undefined,
@@ -206,10 +220,6 @@ function registerAgentRuntimeIpc(ctx) {
         undefined,
       contextTierId: payload.contextTierId || undefined,
       taskTier: payload.taskTier || (payload.startParams && payload.startParams.taskTier) || undefined,
-      longHorizon: !!(
-        payload.longHorizon ||
-        (payload.startParams && payload.startParams.longHorizon)
-      ),
       runId: undefined,
       // 本次运行实际使用的模型路由（Renderer 传入）：
       // plan_create 等 Main 侧要自己调模型的地方据此解析配置，勿只看顶层 settings.apiKey
@@ -220,6 +230,13 @@ function registerAgentRuntimeIpc(ctx) {
     if (!ctx.contextTierId && ctx.model) {
       ctx.contextTierId = resolveContextTierIdForNode(live.userData, ctx.model);
     }
+    // 本轮生效的「模型与段预算」= 磁盘 settings 叠上该 Context 档位（见 applyTierRuntime）。
+    // 主循环的 loopSpec、压缩预算、快照都用这一份；别再各处自己读扁平 settings。
+    const { applyTierRuntime } = require('../../agent/model-runtime-by-tier');
+    const settings = applyTierRuntime(rawSettings, live.userData, {
+      tierId: ctx.contextTierId,
+      model: ctx.model || rawSettings.textModel
+    });
     const sendPhase = (phase, data) => {
       live.safeWebContentsSend(evt.sender, 'agent:rust-loop-phase', {
         cancelToken,
@@ -240,7 +257,6 @@ function registerAgentRuntimeIpc(ctx) {
         startParams.model ||
         settings.textModel ||
         '';
-      const tokenBudget = getEffectiveInputBudget(settings, sessionModel);
       // 整体继承 payload.apiConfig：逐字段重建会丢掉 headers / authMode / userAgent，
       // 结果就是「设置页配了自定义头，主循环却不带」。压缩走同一份 apiCfg。
       const apiCfg = {
@@ -402,6 +418,8 @@ function registerAgentRuntimeIpc(ctx) {
         }
       };
       abortController.signal.addEventListener('abort', protocolAbort, { once: true });
+      // 本轮开始时刻：完成验收拿它给浏览器观察账本切时间窗（那份账本按会话累计、不自动清空）
+      const turnStartedAt = Date.now();
       const result = await runRustAgentLoop({
         coreBridge: live.coreBridge,
         // 请求头 / 会话标识随配置一并交给 loop runner（装配单一来源：llm-request.js）。
@@ -433,16 +451,17 @@ function registerAgentRuntimeIpc(ctx) {
           }
           sendPhase(phase, data);
         },
-        compactMessages: async (messages, ctx) => {
+        compactMessages: async (messages, compactCtx) => {
           const cr = await mainCompactionAgent.maybeCompactMessages(messages, {
-            tokenBudget,
+            // 预算 / 触发比由 compaction-main 按本轮 Context 档位自己算（它才是唯一算预算的地方）
+            contextTierId: ctx.contextTierId,
             apiConfig: apiCfg,
             model: sessionModel,
             sessionId: payload.sessionId || null,
-            signal: ctx?.signal || abortController.signal,
-            runId: ctx?.runId || entry.runId || undefined,
-            force: !!ctx?.force,
-            toolsChars: ctx?.toolsChars
+            signal: compactCtx?.signal || abortController.signal,
+            runId: compactCtx?.runId || entry.runId || undefined,
+            force: !!compactCtx?.force,
+            toolsChars: compactCtx?.toolsChars
           });
           if (cr.compacted && payload.sessionId && live.localGateway) {
             // 归档 id 回填给快照：让「这一轮压缩过」与 compaction_archives 行对得上。
@@ -486,7 +505,64 @@ function registerAgentRuntimeIpc(ctx) {
           return toolBridge.executeAgentTool(name, args, ctx);
         }
       });
+      // 完成验收：证据采集与判定都在 Main（trace 是循环账本，诊断/浏览器证据走 Gateway），
+      // Renderer 只负责把 note 渲染进正文。判定失败不挡交付、不自动续跑；
+      // 验收本身出意外也**不能**把这一轮判成失败（采集内部已逐段降级，这里是最后一道）。
+      try {
+        result.readiness = await evaluateTurnReadiness({
+          gateway: live.localGateway,
+          trace: result.trace,
+          mode: payload.agentMode || 'agent',
+          sessionId: payload.sessionId || null,
+          workspacePath,
+          userDataPath: live.userData,
+          startedAt: turnStartedAt
+        });
+      } catch {
+        result.readiness = null;
+      }
       runFinishedOk = true;
+      // 记忆归纳触发：事实（trace / plan / review / 正文）都在 Main，装配后入队即可；
+      // 计划 worktree 未应用时先暂存，等 Renderer 报应用结果（或超时）再决定写不写。
+      // 归纳失败不影响交付（不是主链路）。
+      try {
+        const { afterAgentRun } = require('../../agent/knowledge-maintainer');
+        afterAgentRun({
+          result,
+          opts: {
+            sessionId: payload.sessionId || '',
+            workspacePath: workspacePath || '',
+            model: apiCfg.model,
+            apiConfig: apiCfg,
+            userText: runUserText(payload)
+          }
+        });
+      } catch {
+        // ignore
+      }
+      // 历史列表标题：一轮正常跑完后补一次模型总结（每会话只一次，判据见 session-title.js）。
+      // 刻意不 await —— 标题是列表装饰，不能让它拖住交付；生成完再推事件让 Renderer 刷列表。
+      if (payload.sessionId && live.localGateway && typeof live.localGateway.invokeRpc === 'function') {
+        const titleSessionId = payload.sessionId;
+        void maybeGenerateSessionTitle({
+          invokeRpc: (method, params) => live.localGateway.invokeRpc(method, params || {}),
+          // 与主链路同一份配置：同一供应商、同一模型、同一套自定义头。
+          llm: apiCfg,
+          sessionId: titleSessionId,
+          messages: startParams.messages,
+          done: result,
+          userData: live.userData,
+          signal: abortController.signal
+        })
+          .then((title) => {
+            if (!title) return;
+            live.safeWebContentsSend(evt.sender, 'agent:session-title', {
+              sessionId: titleSessionId,
+              title
+            });
+          })
+          .catch(() => {});
+      }
       return result;
     } catch (err) {
       const msg = String(err && (err.message || err));
@@ -539,14 +615,7 @@ function registerAgentRuntimeIpc(ctx) {
 
   ipcMain.handle('agent:retry-tool', async (evt, payload = {}) => {
     const settings = live.loadModelSettings(live.userData);
-    let workspacePath = payload.workspacePath ? String(payload.workspacePath) : null;
-    if (!workspacePath && payload.sessionId) {
-      workspacePath = await live.resolveAgentRunWorkspacePath(payload.sessionId);
-    }
-    if (!workspacePath && !payload.sessionId) {
-      const ws = live.localGateway ? live.localGateway.getWorkspace() : null;
-      workspacePath = ws && ws.kind === 'local' ? ws.workspacePath : live.workspaceRootPath();
-    }
+    const workspacePath = await resolveRunWorkspacePath(payload);
     const toolBridge = live.createRustLoopToolBridge(evt.sender);
     const model = payload.model || settings.textModel || undefined;
     const { resolveContextTierIdForNode } = require('../../agent/agent-limits');
@@ -711,6 +780,23 @@ function registerAgentRuntimeIpc(ctx) {
         }
       });
       plannerFinishedOk = true;
+      // 计划模式（planner 管线）也是「一轮任务」：不在这里触发，计划模式的产出永远不会
+      // 进记忆（Renderer 的收尾路径只管对话）。worktree 未应用时由 Main 暂存等应用结果。
+      try {
+        const { afterAgentRun } = require('../../agent/knowledge-maintainer');
+        afterAgentRun({
+          result: plannerResult,
+          opts: {
+            sessionId: payload.sessionId || '',
+            workspacePath: await resolveRunWorkspacePath(payload),
+            model: payload.model || (payload.startParams && payload.startParams.model) || '',
+            apiConfig: payload.apiConfig || null,
+            userText: runUserText(payload)
+          }
+        });
+      } catch {
+        // 归纳失败不影响交付
+      }
       return plannerResult;
     } catch (err) {
       const msg = String(err && (err.message || err));
@@ -876,6 +962,111 @@ function registerAgentRuntimeIpc(ctx) {
   ipcMain.on('agent-service:task-completed', (_evt, payload) => {
     if (live.agentService) live.agentService.completeTask(payload || {});
   });
+
+  // —— 记忆归纳（Main 侧唯一实现；Renderer 只发触发与设置读写）——
+  // 旧实现把定时器 / 队列 / prompt / 写库全放在 Renderer，窗口一关就停摆，
+  // 且与 renderer-agent-llm.js 的 legacy 版重复。现在执行体在这里，
+  // 数字预算见 agent-limits.js 的 knowledge* 一组。
+  let knowledgeMaintainer = null;
+  const notifyKnowledge = (channel, payload) => {
+    try {
+      const { BrowserWindow } = require('electron');
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win && win.webContents) live.safeWebContentsSend(win.webContents, channel, payload);
+      }
+    } catch {
+      // 无窗口（后台/定时）时静默：归纳结果已落库
+    }
+  };
+  const ensureKnowledgeMaintainer = () => {
+    if (!knowledgeMaintainer) {
+      const {
+        createKnowledgeMaintainer,
+        registerKnowledgeMaintainer
+      } = require('../../agent/knowledge-maintainer');
+      knowledgeMaintainer = createKnowledgeMaintainer({
+        getGateway: () => live.localGateway,
+        getUserDataPath: () => live.userData,
+        getAgentBusy: () => hasActiveRuns(),
+        // 定时归纳没有会话：项目记忆 / AGENTS.md 语料取「当前工作空间」
+        getWorkspacePath: () => {
+          try {
+            const ws = live.localGateway ? live.localGateway.getWorkspace() : null;
+            return ws && ws.workspacePath ? String(ws.workspacePath) : '';
+          } catch {
+            return '';
+          }
+        },
+        notify: notifyKnowledge
+      });
+      // 三个 `runRustAgentLoop` 调用点（对话 / 计划模式 / 定时计划）跑完都经
+      // `afterAgentRun` 进这里 —— 触发不再依赖 Renderer 的收尾路径。
+      registerKnowledgeMaintainer(knowledgeMaintainer);
+      // 定时归纳由 Main 拥有：应用启动即排期，不依赖任何窗口
+      knowledgeMaintainer.startSchedule();
+    }
+    return knowledgeMaintainer;
+  };
+  ensureKnowledgeMaintainer();
+
+  // 计划 worktree 的应用结果（Renderer → 这里）：applied / no_changes / skipped。
+  // 归纳的其余触发点都在 `afterAgentRun`，Renderer 不再上报整包上下文。
+  ipcMain.handle('agent:knowledge-plan-outcome', async (_evt, payload = {}) => {
+    const { resolveKnowledgePlanOutcome } = require('../../agent/knowledge-maintainer');
+    ensureKnowledgeMaintainer();
+    return resolveKnowledgePlanOutcome(
+      (payload && payload.sessionId) || '',
+      (payload && payload.outcome) || 'skipped',
+      { appliedPaths: (payload && payload.appliedPaths) || [] }
+    );
+  });
+
+  // 设置读写：选项清单（模式 / 间隔档）也由 Main 给，Renderer 不再自己写死一份
+  ipcMain.handle('agent:knowledge-settings-get', async () => {
+    const { KNOWLEDGE_INTERVAL_CHOICES, KNOWLEDGE_MODES } = require('../../agent/knowledge-maintainer');
+    return {
+      ...ensureKnowledgeMaintainer().getSettings(),
+      choices: { modes: [...KNOWLEDGE_MODES], intervals: [...KNOWLEDGE_INTERVAL_CHOICES] }
+    };
+  });
+
+  ipcMain.handle('agent:knowledge-settings-set', async (_evt, patch = {}) =>
+    ensureKnowledgeMaintainer().updateSettings(patch || {})
+  );
+}
+
+/**
+ * 最后一条 user 消息的文本（归纳语料里的「用户任务」）。
+ * 多模态消息按 text 片段拼接，图片不参与归纳。
+ */
+function lastUserTextOf(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const m = list[i];
+    if (!m || m.role !== 'user') continue;
+    const c = m.content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) {
+      return c
+        .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
+        .join(' ')
+        .trim();
+    }
+    return '';
+  }
+  return '';
+}
+
+/**
+ * 归纳语料里的「用户任务」一句话。
+ * 对话/计划模式的 payload 形状不同（`startParams.messages` vs 扁平 `messages`），
+ * 两种都认，别在调用点各写一份。
+ */
+function runUserText(payload = {}) {
+  return (
+    lastUserTextOf(payload.messages) ||
+    lastUserTextOf(payload.startParams && payload.startParams.messages)
+  );
 }
 
 module.exports = { registerAgentRuntimeIpc };

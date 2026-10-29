@@ -1,27 +1,26 @@
-/* global fetchChatCompletion, settings, compactPlainText, getSessionAbortSignal, extractReviewerJson, collectReviewerFileDiffs, collectExpectationSignals */
+/* global fetchChatCompletion, settings, compactPlainText, getSessionAbortSignal, extractReviewerJson, collectReviewerFileDiffs */
 'use strict';
 
 /**
  * 浏览器侧证据（给 Reviewer）：console/网络硬错误 + 最后一次 browser_expect 结果。
- * 无浏览器动作且无断言时返回 null，避免给 Reviewer 增加噪声。
+ *
+ * 证据本身由 Main 采（`src/agent/completion-readiness.js`），这里只做字段改名，
+ * 不再自己扫 trace / 调 gateway。没有浏览器动作时返回 null，避免给 Reviewer 增加噪声。
  */
-function buildReviewerBrowserEvidence(browser, trace) {
+function buildReviewerBrowserEvidence(browser) {
   const src = browser && typeof browser === 'object' ? browser : null;
-  const exp =
-    typeof collectExpectationSignals === 'function' ? collectExpectationSignals(trace) : null;
-  const usedExpectation = !!(exp && exp.used);
-  if (!src && !usedExpectation) return null;
+  if (!src) return null;
 
   const out = {
-    consoleErrors: src ? Number(src.consoleErrorCount) || 0 : 0,
-    networkFailures: src ? Number(src.networkErrorCount) || 0 : 0
+    consoleErrors: Number(src.consoleErrorCount) || 0,
+    networkFailures: Number(src.networkErrorCount) || 0
   };
-  if (src && Array.isArray(src.errors) && src.errors.length) {
+  if (Array.isArray(src.errors) && src.errors.length) {
     out.errorSamples = src.errors.slice(0, 3).map((e) => compactPlainText(String(e || ''), 160));
   }
-  if (usedExpectation) {
-    out.lastAssertion = exp.lastFailed ? 'failed' : 'passed';
-    if (exp.lastSummary) out.assertionSummary = compactPlainText(exp.lastSummary, 160);
+  if (src.lastAssertion) {
+    out.lastAssertion = String(src.lastAssertion);
+    if (src.assertionSummary) out.assertionSummary = compactPlainText(String(src.assertionSummary), 160);
   }
   return out;
 }
@@ -201,17 +200,26 @@ async function runReviewerValidation(run, fc, context = {}) {
   }
   const pick = resolveReviewerModelForRun();
   const diagnostics = context.diagnostics && typeof context.diagnostics === 'object' ? context.diagnostics : null;
+  // 诊断证据由 Main 给（`completion-readiness`）：只有计数与样本，没有格式化块文本。
+  const diagnosticsText = diagnostics
+    ? String(
+        diagnostics.text ||
+          (Array.isArray(diagnostics.samples) && diagnostics.samples.length
+            ? `error ${Number(diagnostics.errorCount) || diagnostics.samples.length} 处：${diagnostics.samples.join('；')}`
+            : '')
+      )
+    : '';
   const payload = {
     userTask: compactPlainText(fc.fullText || '', 1800),
     files,
     diagnostics: diagnostics
       ? {
           hasErrors: !!diagnostics.hasErrors,
-          text: compactPlainText(diagnostics.text || '', 800)
+          text: compactPlainText(diagnosticsText, 800)
         }
       : null,
     planSummary: compactPlainText(run?.result?.plan?.planSummary || '', 600),
-    browser: buildReviewerBrowserEvidence(context.browser, trace)
+    browser: buildReviewerBrowserEvidence(context.browser)
   };
 
   let parsed = null;

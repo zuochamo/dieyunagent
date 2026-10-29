@@ -8,7 +8,7 @@
  * 根因：`buildConsoleErrorHookScript` 用 `addEventListener('error', fn, true)`（capture），
  * 于是 <img>/<script>/<link> 404 也会进回调；这类事件没有 message、target 是元素，
  * 旧代码直接落到 `'unknown error'` 兜底 → 变成「无信息」的运行时错误证据，
- * 触发 `verifyAgentCompletionReadiness` 的 browser_runtime_errors 分支。
+ * 触发完成验收（`src/agent/completion-readiness.js`）的 browser_runtime_errors 分支。
  *
  * 修法：没有 message 且 target 不是 window 的事件不转发（真 uncaught 异常 target 是 window）。
  */

@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, messages, loopApi, settings, gwState, showAgentToast, finalizeAssistantBubble, settleAssistantBubbleAfterLoop, finalizeUserTurnFooter, renderAssistantBubbleContent, resolveRunPlaceholder, runAgentCompletion, getSessionAbortSignal, createAgentAbortError, throwIfAgentAborted, waitForAgentAbortable, isUserAbortError, formatAgentApiError, compactPlainText, compactTraceForReviewer, runReviewerValidation, applyReadinessNote, getTraceWriteFilePaths, fetchWorkspaceVerifyDiagnostics, COMPLETION_REPAIR_ATTEMPT_LIMIT, LONG_HORIZON_MAX_SEGMENTS, capturePlanApplyForUndo, handleWorktreeApplyAfterRun, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, markTurnWorktreeOnly, getCurrentUndoTurnId, finalizeUndoForUserTurn, saveAgentPlanState, saveAgentRunState, saveAssistantTraceRecord, persistStoppedAssistant, buildAgentStateSnapshot, stepsFromAgentPlan, trackArtifactsFromTrace, scheduleUnifiedKnowledgeMaintenance, stashKnowledgeMaintenanceContext, flushKnowledgeMaintenanceAfterPlan, hasKnowledgeMaintenanceContext, clearKnowledgeMaintenanceContext, scheduleBackgroundKnowledgeFallback, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, finishSessionActiveRun, syncComposerForActiveSession, noteComposerSessionUsage, reportTokensToMain, clearAgentContinueState, setAgentContinueState, setPlannerParallelWorkersActive, setAgentExecutionContext, invalidateSessionMessageCache, refreshHistoryList, scrollChat, collapseChatThinkingTraces, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, extractBookPrefixMessages, reprojectContinueLoopMessages, refreshTurnRideFromArchive, normalizeAssistantReplyForStorage, unpackAssistantMeta, splitPersistedAssistantTrace, humanizeModelId, formatModelFooterLabel, getTextModelId, composerModeLabel, buildStoppedFooterMeta, buildFallbackTurnMeta, resolveUserMsgCreatedAt, withdrawUserTurn, appendBubble, agentApi, captureTurnBatchCheckpoint, getPendingWorktreeApply, clearPendingResumeCheckpoint, tryDetectResumeCheckpoint, maybeSaveRunningTraceCheckpoint, createTraceRunId, getComposerLongHorizon, buildAgentSegmentContinuePartial, getAgentToolCallLimit, getAgentMaxRounds, clearComposerQueuePause, getAgentLimits, scaleLimitForLongHorizon, AgentRoundText */
+/* global sessionActiveRuns, currentSessionId, messages, loopApi, settings, gwState, showAgentToast, finalizeAssistantBubble, settleAssistantBubbleAfterLoop, finalizeUserTurnFooter, renderAssistantBubbleContent, resolveRunPlaceholder, runAgentCompletion, getSessionAbortSignal, createAgentAbortError, throwIfAgentAborted, waitForAgentAbortable, isUserAbortError, formatAgentApiError, compactPlainText, compactTraceForReviewer, runReviewerValidation, applyReadinessNote, capturePlanApplyForUndo, handleWorktreeApplyAfterRun, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, markTurnWorktreeOnly, getCurrentUndoTurnId, finalizeUndoForUserTurn, saveAgentPlanState, saveAgentRunState, saveAssistantTraceRecord, persistStoppedAssistant, buildAgentStateSnapshot, stepsFromAgentPlan, trackArtifactsFromTrace, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, finishSessionActiveRun, syncComposerForActiveSession, noteComposerSessionUsage, reportTokensToMain, clearAgentContinueState, setAgentContinueState, setPlannerParallelWorkersActive, setAgentExecutionContext, invalidateSessionMessageCache, refreshHistoryList, scrollChat, collapseChatThinkingTraces, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, extractBookPrefixMessages, reprojectContinueLoopMessages, refreshTurnRideFromArchive, normalizeAssistantReplyForStorage, unpackAssistantMeta, splitPersistedAssistantTrace, humanizeModelId, formatModelFooterLabel, getTextModelId, composerModeLabel, buildStoppedFooterMeta, buildFallbackTurnMeta, resolveUserMsgCreatedAt, withdrawUserTurn, appendBubble, agentApi, captureTurnBatchCheckpoint, getPendingWorktreeApply, clearPendingResumeCheckpoint, tryDetectResumeCheckpoint, maybeSaveRunningTraceCheckpoint, createTraceRunId, getAgentToolCallLimit, getAgentMaxRounds, clearComposerQueuePause, getAgentLimits, AgentRoundText */
 'use strict';
 
 function buildAgentRunOptsForContinue(fc) {
@@ -11,19 +11,11 @@ function buildAgentRunOptsForContinue(fc) {
     hasImages: fc.hasImages,
     sysContent: fc.sysContent,
     turnRide: fc.turnRide,
-    bookPrefixMessages: fc.bookPrefixMessages,
-    longHorizon: !!fc.longHorizon
+    bookPrefixMessages: fc.bookPrefixMessages
   };
 }
 
 function pauseAgentForToolLimit(run, fc) {
-  if (run.segmentLimitReached && typeof showAgentToast === 'function') {
-    const cap =
-      typeof LONG_HORIZON_MAX_SEGMENTS === 'number' ? LONG_HORIZON_MAX_SEGMENTS : 20;
-    showAgentToast('续段上限', `已达 ${cap} 段自动续跑上限，请点击继续或拆分任务`, {
-      variant: 'info'
-    });
-  }
   if (run.result?.body) {
     setAgentContinueState({
       sessionId: fc.runSessionId,
@@ -152,112 +144,12 @@ async function pauseAgentForNetworkDisconnect(fc, err) {
 }
 
 /**
- * 采集浏览器侧验收证据：只有 trace 里用过 browser_* 工具才查询，避免误报。
- * console error / 未捕获异常 / 5xx 或请求级失败 → errorCount（触发验收提示）；
- * 4xx 只作上下文不单独触发（favicon、统计接口等常见噪声）。
+ * 分段收尾：把本段 trace 接到已有前缀后面，轮次号连续。
+ * （原 `mergeRetryTrace`：完成验收自动重试已删除，这里只剩「续段拼接」一个用途。）
  */
-async function collectBrowserEvidenceForRun(trace, opts = {}) {
-  let used = false;
-  for (const entry of trace || []) {
-    for (const tool of entry.tools || []) {
-      if (String(tool?.name || '').trim().startsWith('browser_')) {
-        used = true;
-        break;
-      }
-    }
-    if (used) break;
-  }
-  if (!used || !gwState.authed || typeof gatewayCall !== 'function') return null;
-
-  const out = { errorCount: 0, errors: [], consoleErrorCount: 0, networkErrorCount: 0 };
-  const scope = { sessionId: opts.sessionId || undefined };
-
-  try {
-    const con = await gatewayCall('browser.console', {
-      action: 'list',
-      errorsOnly: true,
-      limit: 20,
-      ...scope
-    });
-    const rows = con && Array.isArray(con.entries) ? con.entries : [];
-    out.consoleErrorCount = rows.length;
-    out.errors.push(
-      ...rows
-        .slice(-5)
-        .map((e) => `[${e.source || 'console'}] ${String(e.text || '').trim()}`.slice(0, 160))
-    );
-  } catch {
-    /* 浏览器服务不可用时忽略 */
-  }
-
-  try {
-    const net = await gatewayCall('browser.network', {
-      action: 'list',
-      errorsOnly: true,
-      limit: 20,
-      ...scope
-    });
-    const rows = net && Array.isArray(net.entries) ? net.entries : [];
-    const hard = rows.filter((e) => Number(e.status) >= 500 || !e.status);
-    out.networkErrorCount = hard.length;
-    out.errors.push(
-      ...hard
-        .slice(-5)
-        .map((e) =>
-          `${e.method || 'GET'} ${String(e.url || '').slice(0, 100)} → ${e.status || e.error || 'failed'}`.slice(
-            0,
-            160
-          )
-        )
-    );
-  } catch {
-    /* ignore */
-  }
-
-  out.errorCount = out.consoleErrorCount + out.networkErrorCount;
-  return out;
-}
-
-async function collectCompletionDiagnosticsForRun(trace, sessionChanges, opts = {}) {
-  if (typeof getTraceWriteFilePaths !== 'function' || typeof fetchWorkspaceVerifyDiagnostics !== 'function') {
-    return null;
-  }
-  const paths = [...new Set(getTraceWriteFilePaths(trace || []))].slice(0, 6);
-  if (!paths.length) return null;
-
-  const diagnostics = await fetchWorkspaceVerifyDiagnostics(paths, {
-    timeoutMs: 8000,
-    sessionId: opts.sessionId,
-    workspaceRoot: opts.workspaceRoot || opts.workspacePath || null
-  });
-  if (!diagnostics) return null;
-
-  if (Array.isArray(trace)) {
-    trace.push({
-      round: trace.length + 1,
-      phase: '完成验收',
-      thought: diagnostics.hasErrors
-        ? '静态检查发现 error，已作为完成验收证据。'
-        : '静态检查通过，已作为完成验收证据。',
-      tools: [
-        {
-          name: 'workspace.diagnostics',
-          argsBrief: paths.join(', '),
-          summary: diagnostics.hasErrors ? '发现 error 级诊断' : '静态检查通过',
-          result: diagnostics.text || '',
-          failed: !!diagnostics.hasErrors,
-          toolArgs: { files: paths }
-        }
-      ]
-    });
-  }
-
-  return diagnostics;
-}
-
-function mergeRetryTrace(baseTrace, retryTrace) {
+function mergeTraceSegments(baseTrace, segmentTrace) {
   const base = Array.isArray(baseTrace) ? baseTrace : [];
-  const next = Array.isArray(retryTrace) ? retryTrace : [];
+  const next = Array.isArray(segmentTrace) ? segmentTrace : [];
   if (!base.length) return next;
   const offset = base.length;
   return base.concat(
@@ -322,35 +214,21 @@ async function completeAgentRunAfterSuccess(run, fc) {
       typeof getSessionChangeRowsForAgent === 'function'
         ? getSessionChangeRowsForAgent(runSessionId)
         : [];
-    const runWs =
-      (typeof sessionActiveRuns !== 'undefined' &&
-        sessionActiveRuns.get(runSessionId)?.workspacePath) ||
-      null;
-    const diagnostics = await collectCompletionDiagnosticsForRun(trace, sessionChanges, {
-      sessionId: runSessionId,
-      workspaceRoot: runWs
-    });
-    const browserEvidence = await collectBrowserEvidenceForRun(trace, { sessionId: runSessionId });
-    if (typeof verifyAgentCompletionReadiness === 'function') {
-      const ruleGate = verifyAgentCompletionReadiness(rawReply, trace, sessionChanges, {
-        userText: fc.fullText,
-        mode: fc.agentMode || 'agent',
-        diagnostics,
-        browser: browserEvidence,
-        retryAttempt: fc.readinessRetryAttempt || 0,
-        readinessRetryAttempt: fc.readinessRetryAttempt || 0,
-        taskTier: fc.taskTier || null
-      });
-      if (!ruleGate.ok && !ruleGate.skipped) {
-        finalReadiness = { ...ruleGate, shouldRetry: false, surfaceToUser: true };
-      }
+    // 完成验收的判定在 Main（证据 = 循环账本 trace + Gateway 的静态诊断/浏览器证据）。
+    // Renderer 只消费结论、渲染 note：不判定、不重采证据、不自动续跑。
+    const readiness =
+      run.result && run.result.readiness && typeof run.result.readiness === 'object'
+        ? run.result.readiness
+        : null;
+    if (readiness && readiness.ok === false) {
+      finalReadiness = { ...readiness, shouldRetry: false, surfaceToUser: true };
     }
     if (completionGatePassed && typeof runReviewerValidation === 'function') {
       const reviewer = await runReviewerValidation(run, fc, {
         sessionChanges,
-        diagnostics,
+        diagnostics: (readiness && readiness.evidence && readiness.evidence.diagnostics) || null,
         trace,
-        browser: browserEvidence
+        browser: (readiness && readiness.evidence && readiness.evidence.browser) || null
       });
       if (reviewer && !reviewer.ok) {
         completionGatePassed = false;
@@ -391,110 +269,16 @@ async function completeAgentRunAfterSuccess(run, fc) {
     summary: compactPlainText(reply, 200),
     runId: completingRunId || run.result?.runId || null,
     requestId: fc.agentServiceRequestId || null,
-    meta: { isPlanRun, reviewAccepted, completionGatePassed, completionStatus, agentStatus: agentTerminalStatus }
+    meta: {
+      isPlanRun,
+      reviewAccepted,
+      completionGatePassed,
+      completionStatus,
+      agentStatus: agentTerminalStatus,
+      // 验收结论的可追溯字段（正文里已带 note；这里只留原因码，便于排查与手机端）
+      readinessReason: finalReadiness ? finalReadiness.reason || null : null
+    }
   });
-  if (gwState.authed) {
-    void gatewayCall('plugins.hooks.agent_turn_end', {
-      sessionId: runSessionId,
-      ok: completionGatePassed,
-      isPlanRun,
-      reviewAccepted,
-      summary: compactPlainText(reply, 400),
-      runId: run.result?.runId || null
-    }).catch(() => {});
-  }
-  /** @type {object | null} */
-  let knowledgeBase = null;
-
-  {
-    let consolidationWorkspace = null;
-    const liveWs = sessionActiveRuns.get(runSessionId)?.workspacePath;
-    if (liveWs) {
-      consolidationWorkspace = String(liveWs);
-    } else if (typeof resolveSessionWorkspacePath === 'function') {
-      try {
-        consolidationWorkspace = await resolveSessionWorkspacePath(runSessionId);
-      } catch {
-        consolidationWorkspace = null;
-      }
-    }
-    if (!consolidationWorkspace && String(runSessionId) === String(currentSessionId || '') && loopApi.getWorkspace) {
-      try {
-        const ws = await loopApi.getWorkspace();
-        consolidationWorkspace = ws && ws.workspacePath ? ws.workspacePath : null;
-      } catch {
-        // ignore
-      }
-    }
-    const sessionChanges =
-      consolidationWorkspace && typeof getSessionChangeRowsForAgent === 'function'
-        ? getSessionChangeRowsForAgent(runSessionId)
-        : [];
-    let agentsMdSnapshot = '';
-    if (consolidationWorkspace && typeof getAgentsMdMode === 'function' && getAgentsMdMode() !== 'off') {
-      try {
-        if (typeof ensureAgentsMd === 'function') await ensureAgentsMd(consolidationWorkspace);
-        if (typeof loadAgentsMdRecord === 'function') {
-          const rec = await loadAgentsMdRecord(consolidationWorkspace);
-          agentsMdSnapshot = String(rec?.content || '').slice(0, 12000);
-        }
-      } catch {
-        agentsMdSnapshot = '';
-      }
-    }
-    knowledgeBase = {
-      reason: completionGatePassed ? 'task_completed' : 'task_not_completed',
-      memorySource: 'auto_consolidation',
-      source: completionGatePassed
-        ? isPlanRun && reviewAccepted
-          ? 'plan-completed'
-          : 'task-completed'
-        : completionStatus,
-      userText: fc.fullText,
-      assistantText: reply,
-      trace,
-      changes: sessionChanges,
-      sessionId: runSessionId,
-      workspacePath: consolidationWorkspace,
-      agentsMdSnapshot,
-      model: fc.composerModel,
-      apiConfig: fc.apiConfig,
-      plan: run.result?.plan,
-      review: run.result?.review,
-      reviewAccepted,
-      isPlanRun,
-      delayMs: 15000
-    };
-
-    const skipKnowledge = !completionGatePassed || (isPlanRun && !reviewAccepted);
-    const traceWriteEvidence = (trace || []).some((entry) =>
-      (entry.tools || []).some((t) => {
-        if (t && t.pending) return false;
-        const n = String((t && t.name) || '').toLowerCase();
-        return /write|edit|str_replace|apply_patch|search_replace/.test(n);
-      })
-    );
-    if (
-      deferWorktree &&
-      (!completionGatePassed ||
-        (isPlanRun && !reviewAccepted && !hasWorktreeChanges && !traceWriteEvidence)) &&
-      loopApi.worktreeCleanupRun
-    ) {
-      loopApi.worktreeCleanupRun(run.result.runId).catch(() => scheduleWorktreePolicyCleanup());
-      if (typeof clearKnowledgeMaintenanceContext === 'function') {
-        clearKnowledgeMaintenanceContext(runSessionId);
-      }
-    } else if (!skipKnowledge) {
-      if (completionGatePassed && deferWorktree && reviewAccepted && consolidationWorkspace) {
-        stashKnowledgeMaintenanceContext(knowledgeBase);
-        if (backgroundDone && typeof scheduleBackgroundKnowledgeFallback === 'function') {
-          scheduleBackgroundKnowledgeFallback(runSessionId);
-        }
-      } else {
-        scheduleUnifiedKnowledgeMaintenance(knowledgeBase);
-      }
-    }
-  }
   const state = buildAgentStateSnapshot({
     reply,
     trace,
@@ -616,8 +400,7 @@ async function completeAgentRunAfterSuccess(run, fc) {
       await openWorktreeReviewAfterPlan(
         run.result.runId,
         runSessionId,
-        fc.undoTurnId || fc.turnMeta?.undoTurnId || null,
-        knowledgeBase
+        fc.undoTurnId || fc.turnMeta?.undoTurnId || null
       );
     }
   } else {
@@ -803,8 +586,7 @@ async function completeAgentRunAfterSuccess(run, fc) {
       await openWorktreeReviewAfterPlan(
         run.result.runId,
         runSessionId,
-        fc.undoTurnId || fc.turnMeta?.undoTurnId || null,
-        knowledgeBase
+        fc.undoTurnId || fc.turnMeta?.undoTurnId || null
       );
       const liveAfterWorktree = sessionActiveRuns.get(runSessionId);
       if (

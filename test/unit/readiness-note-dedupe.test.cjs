@@ -6,9 +6,10 @@
  * 现场（2026-10-17，messages.id=4834）：
  *   正文 → --- → > ⚠️ **完成验收**：… → --- → > ⚠️ **完成验收**：…（一字不差两遍）
  *
- * 链路：`collectCompletionDiagnosticsForRun` 往 trace 写了「完成验收」phase，其 thought 被
- * `reasoningTextFromTrace` 当真思考落进 `messages.reasoning` 并上行回传；正文里的提示也随
- * `messages.content` 作为历史回显 ⇒ 模型照着复述一遍，渲染层再追加一次 = 两段。
+ * 链路：旧的 `collectCompletionDiagnosticsForRun` 往 trace 里写了一条「完成验收」phase（伪轮次），
+ * 其 thought 被 `reasoningTextFromTrace` 当真思考落进 `messages.reasoning` 并上行回传；正文里的
+ * 提示也随 `messages.content` 作为历史回显 ⇒ 模型照着复述一遍，渲染层再追加一次 = 两段。
+ * （那条伪轮次已随「完成验收判定搬到 Main」一起删除，但正文提示仍会进历史，幂等闸门要留着。）
  *
  * 修法（两条同源闸门）：
  *   1. `session-context.assistantTextFromMessage`（历史投影唯一出口）剥掉验收提示；

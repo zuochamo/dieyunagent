@@ -105,8 +105,6 @@ const CTX_LIMITS = {
   },
 
   // —— 与 agent-limits.js 单一来源（可在设置中调整的护栏）——
-  /** 每段 Agent 请求的工具调用上限；继续后重置计数（可在设置中调整） */
-  AGENT_TOOL_CALL_LIMIT: ctxAgentLimitDefault('ctxAgentToolCallLimit', 150),
   TOOL_RESULT_MAX_JSON: ctxAgentLimitDefault('toolResultMaxJson', 14000),
   OPEN_FILES_MAX: ctxAgentLimitDefault('openFilesMax', 12),
   FILE_PREVIEW_MAX_CHARS: ctxAgentLimitDefault('filePreviewMaxChars', 4000),
@@ -133,7 +131,6 @@ const CTX_LIMITS = {
  * 「设置里改了不生效」，且只在某个档位下复现 —— 极难定位。
  */
 const CTX_LIMITS_FROM_AGENT_LIMITS = [
-  ['ctxAgentToolCallLimit', 'AGENT_TOOL_CALL_LIMIT'],
   ['toolResultMaxJson', 'TOOL_RESULT_MAX_JSON'],
   ['openFilesMax', 'OPEN_FILES_MAX'],
   ['filePreviewMaxChars', 'FILE_PREVIEW_MAX_CHARS'],
@@ -649,107 +646,3 @@ window.shouldFetchWorkspaceDiagnostics = shouldFetchWorkspaceDiagnostics;
 window.shouldInjectCodeContext = shouldInjectCodeContext;
 window.fetchWorkspaceDiagnosticsContext = fetchWorkspaceDiagnosticsContext;
 window.formatDiagnosticsBlock = formatDiagnosticsBlock;
-
-/**
- * 改后 LSP/tsc 校验 — 供完成验收在 fs_write_file 后注入。
- * @returns {Promise<{ text: string, hasErrors: boolean, hasDiagnostics: boolean } | null>}
- */
-async function fetchWorkspaceVerifyDiagnostics(filePaths, opts = {}) {
-  if (!gwState.authed || !filePaths?.length) return null;
-
-  const files = [...new Set(filePaths.map((p) => String(p || '').trim()).filter(Boolean))].slice(0, 6);
-  if (!files.length) return null;
-
-  let workspaceRoot = opts.workspaceRoot || null;
-  if (!workspaceRoot && opts.sessionId && typeof resolveSessionWorkspacePath === 'function') {
-    try {
-      workspaceRoot = await resolveSessionWorkspacePath(opts.sessionId);
-    } catch {
-      workspaceRoot = null;
-    }
-  }
-  if (!workspaceRoot && opts.sessionId && typeof resolveSessionWorkspacePathSync === 'function') {
-    workspaceRoot = resolveSessionWorkspacePathSync(opts.sessionId);
-  }
-  // 有 sessionId 时禁止回落到当前视图工作区
-  if (!workspaceRoot && !opts.sessionId && window.diecloud?.getWorkspace) {
-    try {
-      const ws = await window.diecloud.getWorkspace();
-      workspaceRoot = ws?.workspacePath || null;
-    } catch {
-      // ignore
-    }
-  }
-  if (!workspaceRoot) return null;
-
-  const lspSettings =
-    typeof getLspSettingsCached === 'function'
-      ? await getLspSettingsCached()
-      : { maxPerFile: 20, minSeverity: 'warning' };
-  const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : 8000;
-  const limits = typeof getAgentLimits === 'function' ? getAgentLimits() : {};
-  const maxChars = opts.maxChars != null ? opts.maxChars : limits.verifyDiagMaxChars || 6000;
-
-  try {
-    const data = await gatewayCall(
-      'workspace.diagnostics',
-      typeof withSessionRpcScope === 'function'
-        ? withSessionRpcScope(
-            {
-              workspaceRoot,
-              files,
-              maxFiles: files.length,
-              maxPerFile: lspSettings.maxPerFile,
-              minSeverity: 'warning',
-              timeoutMs
-            },
-            opts.sessionId
-          )
-        : {
-            workspaceRoot,
-            files,
-            maxFiles: files.length,
-            maxPerFile: lspSettings.maxPerFile,
-            minSeverity: 'warning',
-            timeoutMs
-          }
-    );
-    if (!data?.ok) return null;
-
-    const items = data.items || [];
-    const allDiags = items.flatMap((it) =>
-      (it.diagnostics || []).map((d) => ({ ...d, file: it.file }))
-    );
-    const hasErrors = allDiags.some((d) => d.severity === 'error');
-    const hasDiagnostics = allDiags.length > 0;
-
-    if (!hasDiagnostics) {
-      return {
-        text: '【改后静态检查 · LSP/tsc】\n说明：已检查刚写入的文件，未发现 warning/error 级诊断。',
-        hasErrors: false,
-        hasDiagnostics: false
-      };
-    }
-
-    let text =
-      typeof formatDiagnosticsBlock === 'function'
-        ? formatDiagnosticsBlock(workspaceRoot, items, maxChars)
-        : '';
-    if (text) {
-      text = text
-        .replace('【工作区诊断 · LSP】', '【改后静态检查 · LSP/tsc】')
-        .replace(
-          '说明：以下为语言服务静态分析结果；修 bug 时优先处理 error，勿臆造不存在的行号。',
-          '说明：这是你刚写入文件后的语言服务/tsc 结果；若有 error 请继续修复。'
-        );
-    } else {
-      text = '【改后静态检查 · LSP/tsc】\n（诊断格式化失败）';
-    }
-
-    return { text, hasErrors, hasDiagnostics };
-  } catch {
-    return null;
-  }
-}
-
-window.fetchWorkspaceVerifyDiagnostics = fetchWorkspaceVerifyDiagnostics;
