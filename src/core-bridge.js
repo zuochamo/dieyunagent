@@ -55,6 +55,13 @@ function parseCompactionLlmLogLine(line) {
 }
 
 /**
+ * SIGTERM 后等 core 自行退出的上限，超过才 SIGKILL。
+ * 索引 / embedding 批次是阻塞调用，响应信号需要时间；2s 太紧，会把「正常收尾」
+ * 变成日志里的 signal=SIGKILL，让人误判成崩溃/OOM。
+ */
+const STOP_GRACE_MS = 5000;
+
+/**
  * dieyun-core stdio JSON-RPC 客户端（Main 进程 sidecar）
  */
 function createCoreBridge(opts) {
@@ -345,6 +352,9 @@ function createCoreBridge(opts) {
     if (!proc) return;
     const child = proc;
     proc = null;
+    // 已退出的子进程不会再发 exit 事件，等满 grace 纯属空等——「core 已死→重启」
+    // 这条重试路径上每次 stop() 都会踩到它。
+    if (child.exitCode != null || child.signalCode != null) return;
     try {
       child.kill('SIGTERM');
     } catch {
@@ -352,13 +362,16 @@ function createCoreBridge(opts) {
     }
     await new Promise((resolve) => {
       const timer = setTimeout(() => {
+        // 必须留痕：日志里的 signal=SIGKILL 到底是「自己人兜底强杀」还是「被外部杀掉」，
+        // 是排查 remote index 事故的第一分歧点，不能靠猜。
+        log(`dieyun-core 未响应 SIGTERM（${STOP_GRACE_MS}ms），强制 SIGKILL`);
         try {
           child.kill('SIGKILL');
         } catch {
           // ignore
         }
         resolve();
-      }, 2000);
+      }, STOP_GRACE_MS);
       child.once('exit', () => {
         clearTimeout(timer);
         resolve();

@@ -7,6 +7,7 @@ const {
   runShell,
   runShellDetached,
   listProcessHandles,
+  takeSettledReports,
   killProcessHandle,
   readProcessOutput,
   openExternalUrl,
@@ -19,9 +20,11 @@ const { decideFsWrite } = require('./sandbox-policy');
 const { validateShellCommand } = require('./exec-policy');
 const { resolveBrowserNavigateUrl, parseRemotePreviewTarget } = require('../browser/url-policy');
 const { createRemoteFsAdapter } = require('./remote-fs');
+const { createRemoteAgentFsAdapter } = require('./remote-agent-fs');
 const { AsyncLocalStorage } = require('async_hooks');
 const { buildSshUri, normalizeRemotePath, parseWorkspaceInput, isSameSshTarget, workspacePathForSession, sshTargetKey } = require('../workspace/target');
 const { remoteAgentInfoKey, remoteIndexCacheKey } = require('../workspace/workspace-cache-keys');
+const { isGraphSourcePath } = require('../index/source-files');
 const { normalizeReadParams, ABSOLUTE_READ_MAX_BYTES } = require('./fs-read-limits');
 const { runEditFile } = require('./fs-edit-file');
 const {
@@ -30,7 +33,12 @@ const {
   DEFAULT_ARTIFACT_SCAN_LIMIT
 } = require('./artifact-scan');
 const { grepWorkspace, globWorkspace, TYPE_EXT } = require('./rg-search');
-const { getRemoteAgentClient, setRemoteAgentInvalidateListener, isDisconnectError } = require('./remote-agent-client');
+const {
+  getRemoteAgentClient,
+  setRemoteAgentInvalidateListener,
+  isDisconnectError,
+  isRemoteAgentUsable
+} = require('./remote-agent-client');
 const { shellQuoteSingle, resolveRemotePath, remoteAllowedRoots } = require('../ssh/remote-path');
 const { encodeWorktreeContent, WORKTREE_SNAPSHOT_MAX_BYTES } = require('../git/git-target');
 const { captureRemoteGitWorkingBaseline } = require('../git/remote-baseline-capture');
@@ -42,8 +50,8 @@ const { resolveHostSidecarLocalPath } = require('../agent/host-sidecar');
 const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 
 const { createExtractedHandlers } = require('./handlers');
-const { projectMemoryScope } = require('./project-memory');
 const { resolveCoreRpcTimeoutMs } = require('../core-rpc-timeouts');
+const { buildLlmHeadersFromConfig } = require('../agent/llm-request');
 const { computeLineDiffStats } = require('./line-diff-stats');
 
 function assertHostEnabled(ctx) {
@@ -98,9 +106,7 @@ function summarizeLineDiff(beforeText, afterText) {
  *   writableRoots: string[],
  *   permissions: import('./permissions-store').DEFAULTS & object,
  *   defaultCwd?: string | null
- *   plugins?: import('../plugins/host').PluginHost | null
  *   getEmbeddingConfig?: () => object
- *   onPluginsChanged?: Function
  *   browser?: import('../browser/service').createBrowserService extends (...args: any[]) => infer R ? R : never | null
  *   computer?: ReturnType<import('../computer/service').createComputerService> | null
  *   ssh?: ReturnType<import('../ssh/session-manager').createSshSessionManager> | null
@@ -119,7 +125,6 @@ function createRpcHandlers(ctx) {
   const writable = ctx.writableRoots.map((r) => path.resolve(r));
   const perms = ctx.permissions;
   const defaultCwd = ctx.defaultCwd || null;
-  const plugins = ctx.plugins || null;
   const browser = ctx.browser || null;
   const computer = ctx.computer || null;
   const ssh = ctx.ssh || null;
@@ -571,14 +576,6 @@ function createRpcHandlers(ctx) {
         );
       }
 
-      if (lastPing && lastPing.incompatible) {
-        throw remoteIndexError(
-          'REMOTE_INDEX_UNAVAILABLE',
-          (lastPing.lastError && String(lastPing.lastError).trim()) ||
-            formatRemoteIndexWaitFailure(configureAttempts, lastConfigureError, lastPing)
-        );
-      }
-
       if (lastPing && lastPing.lastError && isFatalRemoteCoreStartError(lastPing.lastError)) {
         throw remoteIndexError(
           'REMOTE_INDEX_UNAVAILABLE',
@@ -673,13 +670,16 @@ function createRpcHandlers(ctx) {
       await client.call(
         'index.configure',
         {
+          // 与本地 _syncRustCoreConfig 同一份字段：缺 headers/authMode 时，远程嵌入请求
+          // 只能靠 apiKey 硬拼，自定义头（代理 / 会话头）在远端全部丢失。
           embedding: {
             disabled: !!embedding.disabled,
-            builtin: !!embedding.builtin,
             baseUrl: embedding.baseUrl || '',
             apiKey: embedding.apiKey || '',
             model: embedding.model || '',
-            dimensions: Number(embedding.dimensions) || 1024
+            dimensions: Number(embedding.dimensions) || 1024,
+            headers: buildLlmHeadersFromConfig(embedding),
+            authMode: String(embedding.authMode || '').trim()
           }
         },
         45000
@@ -1015,11 +1015,11 @@ function createRpcHandlers(ctx) {
     let target = '.';
     if (o.path) {
       try {
-        // 与 fs / host.exec 共用同一套远程根（含「完全放开路径限制」开关），
-        // 避免同一开关下有的操作放开、有的仍报 PATH_NOT_ALLOWED
-        const roots = remoteAllowedRoots(cwd, sshCall.getHomeDir ? sshCall.getHomeDir() : '', {
-          unrestricted: perms.unrestrictedPaths === true
-        });
+        // 与 fs / host.exec 共用同一套远程根。
+        // 注意：设置页的「完全放开路径限制」是**本地**档位，远端不认这个开关（daemon 只按
+        // 工作空间 + HOME + /tmp 校验）。桌面端若在这里放宽，就会出现「SFTP 能写、RPC 写不了」
+        // 或「grep 能搜、read 报越界」这种同一开关下两个答案的局面。
+        const roots = remoteAllowedRoots(cwd, sshCall.getHomeDir ? sshCall.getHomeDir() : '');
         const abs = resolveRemotePath(String(o.path), roots, cwd);
         target = shellQuoteSingle(path.posix.relative(cwd, abs) || '.');
       } catch (err) {
@@ -1184,57 +1184,15 @@ function createRpcHandlers(ctx) {
     return { ok: true, files, truncated: files.length >= n, source: 'remote_rg' };
   }
 
-  function formatGrepMatchesAsSearchResults(matches, limit) {
-    const max = Math.min(20, Math.max(1, Number(limit) || 8));
-    const list = Array.isArray(matches) ? matches : [];
-    return list.slice(0, max).map((m, i) => {
-      const rawPath = m.path ? String(m.path) : '';
-      const relPath = rawPath.replace(/^.*[/\\]/, '') || (m.raw ? String(m.raw).slice(0, 80) : '');
-      const text = m.text != null ? String(m.text) : m.raw ? String(m.raw) : '';
-      return {
-        path: relPath,
-        startLine: m.line || 1,
-        endLine: m.line || 1,
-        score: Math.max(0.1, 1 - i * 0.05),
-        snippet: text.slice(0, 900),
-        source: 'grep_fallback'
-      };
-    });
-  }
-
-  async function tryRemoteGrepFallback(ctxInfo, query, limit) {
-    const q = String(query || '').trim();
-    if (!q || ctxInfo.kind !== 'remote') return null;
-
-    const agentInfo = getRemoteAgentInfo();
-    if (agentInfo && agentInfo.url) {
-      try {
-        const client = getRemoteAgentClient(agentInfo);
-        let r = null;
-        try {
-          r = await client.call('fs.grep', { pattern: q, maxResults: limit });
-        } catch {
-          r = await client.call('codebase.grep', { pattern: q, maxResults: limit });
-        }
-        const results = formatGrepMatchesAsSearchResults(r && r.matches, limit);
-        if (results.length) return { results, source: 'remote_agent_grep' };
-      } catch {
-        // fall through to SSH exec
-      }
-    }
-
-    if (!isSshConnectedForCall()) {
-      return null;
-    }
-    const cwd = normalizeRemotePath(ctxInfo.remotePath);
-    const n = Math.min(200, Math.max(1, Number(limit) || 50));
-    const g = await grepViaRemoteExec(cwd, { pattern: q, regex: false, maxResults: n });
-    const matches = g && g.ok !== false && Array.isArray(g.matches) ? g.matches : [];
-    if (!matches.length) return null;
-    const results = formatGrepMatchesAsSearchResults(matches, limit);
-    return results.length ? { results, source: g.source || 'ssh_grep' } : null;
-  }
-
+  /**
+   * 远端文件系统适配器（**唯一出口**）：调用方只看这个方法，不关心底下是哪种传输。
+   *
+   *  - 远端 Agent 在（P2 的 SSH `direct-streamlocal` 通道）→ 走 RPC：写路径与远端自己的
+   *    `fs.write_file` 合一，diff 与增量索引都在远端算（不再「整读一遍 + 写完补通知」）；
+   *  - 没装 Agent 的会话（`sshBackend === 'sftp'`）→ 走 SFTP：仍要能读写文件。
+   *
+   * 两个实现是同一个接口（`remote-fs.js` / `remote-agent-fs.js`），所以「用哪个」只在这里判断一次。
+   */
   function getRemoteFs() {
     const target = resolveCallWorkspaceTarget();
     if (!target) return null;
@@ -1244,21 +1202,24 @@ function createRpcHandlers(ctx) {
     // 兜底根 <HOME>/.dieyun/workspace：与本地默认 workspace 对称，保证远程也有一个
     // 「工作空间之外但稳定可写」的落脚点（截图/临时产物）。HOME 由 ssh 层连接时缓存。
     const homeDir = typeof sshCall.getHomeDir === 'function' ? sshCall.getHomeDir() : '';
-    return createRemoteFsAdapter(
-      sshCall,
-      {
-        kind: 'ssh',
-        host: st.host,
-        port: st.port,
-        username: st.username,
-        remotePath: target.remotePath
-      },
-      {
-        roots: remoteAllowedRoots(target.remotePath, homeDir, {
-          unrestricted: perms.unrestrictedPaths === true
-        })
-      }
-    );
+    const targetDesc = {
+      kind: 'ssh',
+      host: st.host,
+      port: st.port,
+      username: st.username,
+      remotePath: target.remotePath
+    };
+    const opts = {
+      // 远端根只由**一份规则**决定（`remoteAllowedRoots`）：工作空间 + 远端 HOME + /tmp。
+      // 设置页的「完全放开路径限制」是本地档位，远端 daemon 不认它 —— 桌面端在这里放宽
+      // 只会让 SFTP 传输放宽、RPC 传输仍被 daemon 拒（同一操作两个答案），所以两边都不放宽。
+      roots: remoteAllowedRoots(target.remotePath, homeDir)
+    };
+    const agentInfo = getRemoteAgentInfo();
+    if (isRemoteAgentUsable(agentInfo)) {
+      return createRemoteAgentFsAdapter(agentInfo, targetDesc, opts);
+    }
+    return createRemoteFsAdapter(sshCall, targetDesc, opts);
   }
 
   function resolveCodebaseContext(workspaceRoot) {
@@ -1337,11 +1298,6 @@ function createRpcHandlers(ctx) {
     } catch {
       return {};
     }
-  }
-
-  function isGraphFilePath(relPath) {
-    const rel = String(relPath || '').toLowerCase();
-    return /\.(?:[cm]?[jt]sx?|py|go|rs)$/.test(rel);
   }
 
   function formatGraphIndexProgress(st) {
@@ -1497,7 +1453,7 @@ function createRpcHandlers(ctx) {
     const limit = Math.max(4, Math.min(40, Number(opts.limit) || 20));
     const perSymbolMs = Math.max(3000, Math.min(20000, Number(opts.timeoutMs) || 12000));
     const wallMs = Math.max(10000, Math.min(120000, Number(opts.wallMs) || 45000));
-    const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 20000);
+    const st = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
     if (!st || !st.indexed) {
       return { ok: false, error: 'graph_not_indexed', enriched: 0, attempted: 0 };
     }
@@ -1691,10 +1647,14 @@ function createRpcHandlers(ctx) {
 
     const force = !!opts.force;
     const skipIfReady = opts.skipIfReady !== false;
+    // 向量（codebase）与调用图（graph）都是显式 opt-in，缺省不建
+    const vectors = isGraph ? undefined : !!opts.vectors;
+    const calls = isGraph ? !!opts.calls : undefined;
+    const startParams = isGraph ? { force, skipIfReady, calls } : { force, skipIfReady, vectors };
 
     let startResult;
     try {
-      startResult = await invokeIndexCore(ctxInfo, startMethod, { force, skipIfReady }, 60000);
+      startResult = await invokeIndexCore(ctxInfo, startMethod, startParams, 60000);
     } catch (err) {
       const msg = err && err.message ? String(err.message) : String(err);
       const code = err && err.code ? String(err.code) : '';
@@ -1702,9 +1662,7 @@ function createRpcHandlers(ctx) {
         code === 'REMOTE_INDEX_UNSUPPORTED' ||
         /unknown method|Method not found|不支持的方法/i.test(msg);
       if (!missing) throw err;
-      const syncParams = isGraph
-        ? { force: true, embedSymbols: false }
-        : { force: true };
+      const syncParams = { force: true };
       const job = attachIndexJob(jobsMap, rootKey, () =>
         invokeIndexCore(ctxInfo, syncMethod, syncParams, INDEX_JOB_WALL_MS)
       );
@@ -1746,7 +1704,7 @@ function createRpcHandlers(ctx) {
     const m = /^(.+?):(\d+):(?:(\d+):)?(.*)$/.exec(String(line || ''));
     if (!m) return null;
     const rel = m[1].replace(/\\/g, '/').replace(/^\.\//, '');
-    if (!rel || rel.startsWith('../') || !isGraphFilePath(rel)) return null;
+    if (!rel || rel.startsWith('../') || !isGraphSourcePath(rel)) return null;
     return {
       callerPath: rel,
       line: Number(m[2]) || 1,
@@ -1754,6 +1712,14 @@ function createRpcHandlers(ctx) {
     };
   }
 
+  /**
+   * 远程搜索调用方的传输选择。
+   *
+   * 三种返回值必须分清，不许糊成一种：
+   *   - `null`            ：这条通道走不通（没连、没权限）→ 调用方可以退到下一层；
+   *   - `{ error }`       ：命令真跑了但失败（超时 / 非零退出）→ 原样上报，不许当「没匹配」；
+   *   - `{ code, stdout }`：命令跑完，按 rg/grep 语义（0/1 都是「成功查询」）。
+   */
   async function execRemoteGrepForCallers(ctxInfo, script, timeoutMs) {
     const execTimeout = timeoutMs != null ? Number(timeoutMs) : 30000;
     const agentInfo = getRemoteAgentInfo();
@@ -1770,8 +1736,16 @@ function createRpcHandlers(ctx) {
           execTimeout + 5000
         );
         return { ...r, mode: 'remote_agent_exec', server: 'remote-rg' };
-      } catch {
-        // fall through to SSH
+      } catch (err) {
+        // 带 code 的是「远端执行失败」，换个传输重跑一遍只会重复同样的失败
+        if (err && err.code) {
+          return {
+            error: String(err.code),
+            message: String((err && err.message) || err),
+            mode: 'remote_agent_exec'
+          };
+        }
+        // 没 code：隧道没起来，退到 SSH
       }
     }
     if (!isSshConnectedForCall() || typeof resolveSshManager()?.exec !== 'function') {
@@ -1783,8 +1757,12 @@ function createRpcHandlers(ctx) {
     try {
       const r = await requireSshForCall().exec(script, ctxInfo.remotePath, execTimeout, { bashScript: true });
       return { ...r, mode: 'ssh_rg', server: 'remote-rg' };
-    } catch {
-      return null;
+    } catch (err) {
+      return {
+        error: String((err && err.code) || 'SSH_EXEC_FAILED'),
+        message: String((err && err.message) || err),
+        mode: 'ssh_rg'
+      };
     }
   }
 
@@ -1794,12 +1772,18 @@ function createRpcHandlers(ctx) {
       return { ok: false, error: 'symbol_name_required', mode: 'ssh_rg', sites: [] };
     }
     const regex = `\\b${escapeRegExp(name)}\\s*\\(`;
+    // rg / grep 的退出码是有语义的：0=有匹配，1=没匹配，≥2=真出错（找不到路径、权限、
+    // 二进制损坏…）。以前每条命令都挂 `|| true`，把三者压成同一个 0，于是下面那条
+    // 「非 0 就报错」的分支永远走不到 —— 「搜不到调用方」和「搜索根本没跑成」长得一样。
     const script = [
       'if command -v rg >/dev/null 2>&1; then',
-      `  rg -n --column --no-heading --color never -S -g '!node_modules/**' -g '!vendor/**' -g '!dist/**' -g '!build/**' -g '!target/**' -g '!coverage/**' -g '!*.min.js' ${shellQuoteSingle(regex)} . || true`,
+      `  rg -n --column --no-heading --color never -S -g '!node_modules/**' -g '!vendor/**' -g '!dist/**' -g '!build/**' -g '!target/**' -g '!coverage/**' -g '!*.min.js' ${shellQuoteSingle(regex)} .`,
+      '  rc=$?',
       'else',
-      `  grep -RInF --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=dist --exclude-dir=build --exclude-dir=target --exclude-dir=coverage ${shellQuoteSingle(name)} . || true`,
-      'fi'
+      `  grep -RInF --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=dist --exclude-dir=build --exclude-dir=target --exclude-dir=coverage ${shellQuoteSingle(name)} .`,
+      '  rc=$?',
+      'fi',
+      'case $rc in 0) exit 0 ;; 1) exit 0 ;; *) exit $rc ;; esac'
     ].join('\n');
     const r = await execRemoteGrepForCallers(ctxInfo, script, timeoutMs);
     if (!r) {
@@ -1810,10 +1794,20 @@ function createRpcHandlers(ctx) {
         sites: []
       };
     }
-    if (r && r.code != null && r.code !== 0 && !r.stdout) {
+    if (r.error) {
+      return {
+        ok: false,
+        error: r.message || r.error,
+        code: r.error,
+        mode: r.mode,
+        sites: []
+      };
+    }
+    if (r.code != null && Number(r.code) !== 0) {
       return {
         ok: false,
         error: r.stderr || `remote_rg_exit_${r.code}`,
+        code: `REMOTE_RG_EXIT_${Number(r.code)}`,
         mode: 'ssh_rg',
         sites: []
       };
@@ -1952,12 +1946,10 @@ function createRpcHandlers(ctx) {
   const extractedHandlers = createExtractedHandlers({
     perms,
     requireRustCore,
-    projectMemoryScope,
     assertHostEnabled,
     assertWebFetchEnabled,
     webTools,
     ctx,
-    plugins,
     syncRemoteIndexCoreConfig,
     waitRemoteIndexCoreReady,
     resolveCodebaseContext,
@@ -2013,6 +2005,7 @@ function createRpcHandlers(ctx) {
     runShellDetached,
     runShell,
     listProcessHandles,
+    takeSettledReports,
     killProcessHandle,
     readProcessOutput,
     getActiveCallSessionId,

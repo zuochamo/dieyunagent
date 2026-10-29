@@ -63,19 +63,27 @@ function createRemoteFsAdapter(ssh, target, opts = {}) {
     const enc = encoding === 'base64' ? 'base64' : 'utf8';
     const buf = enc === 'base64' ? Buffer.from(String(data), 'base64') : Buffer.from(String(data), 'utf8');
     let beforeText = null;
+    /** 旧内容是否**完整**读到：读不全就不能当「改动前」（不存在 ⇒ 按新建处理，全算新增） */
+    let beforeKnown = true;
     try {
       if (enc === 'utf8') {
         const prev = await readFile(safe, 'utf8');
-        beforeText = prev.data;
+        // 旧内容被读上限截断时**不能**当作"改动前"：拿 2MB 的前缀去比一个更大的文件，
+        // diff 会报出巨量 added/removed（前端改动摘要与 undo 快照都建在这个数字上）。
+        if (prev.truncated) {
+          beforeKnown = false;
+        } else {
+          beforeText = prev.data;
+        }
       }
     } catch {
-      beforeText = null;
+      beforeText = null; // 文件不存在：按新建处理
     }
     const dir = path.posix.dirname(safe);
     if (dir && dir !== '/') await ssh.sftpMkdirp(dir);
     await ssh.sftpWriteFile(safe, buf);
     let diff = null;
-    if (enc === 'utf8') diff = summarizeLineDiff(beforeText, data);
+    if (enc === 'utf8' && beforeKnown) diff = summarizeLineDiff(beforeText, data);
     return { ok: true, path: safe, diff, remote: true };
   }
 
@@ -149,6 +157,9 @@ function createRemoteFsAdapter(ssh, target, opts = {}) {
 
   return {
     root,
+    // 传输标识：写文件的增量索引通知只在 SFTP 这条路上需要补
+    // （RPC 写入由远端 handler 自己调度，见 remote-agent-fs.js）
+    transport: 'sftp',
     resolve,
     readFile,
     writeFile,

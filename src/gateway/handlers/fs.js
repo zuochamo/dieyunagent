@@ -5,9 +5,36 @@ const fsSync = require('fs');
 const path = require('path');
 const { DEFLIKE_RE, breEscape, firstIdentifier, inferBlockEnd } = require('../symbol-text');
 const { ABSOLUTE_READ_MAX_BYTES } = require('../fs-read-limits');
+const { isRemoteAgentUsable } = require('../remote-agent-client');
+const { recordSkillRead } = require('../../skills/usage-ledger');
 
 /** 远程 read_symbol 走 LSP 时的超时（远程 LSP 可能冷启动，超时即回落结构索引） */
 const REMOTE_READ_SYMBOL_LSP_TIMEOUT_MS = 20000;
+/** 通知远端索引「文件变了」的 RPC 预算：只做调度，很快；超时也不影响这次写 */
+const REMOTE_INDEX_NOTIFY_TIMEOUT_MS = 8000;
+
+/**
+ * 通知远端进程「这个文件变了」。
+ *
+ * 桌面端的远端写入走 SFTP（`remote-fs`），**不经过**远端进程的 `fs.write_file`，
+ * 于是远端的增量索引调度永远不触发 —— 远端 `codebase.grep` / 图谱会一直照着旧内容答。
+ * 调度规则不在这里判断：远端 `index.notify_change` 用与 `fs.write_file` 同一份规则决定要不要索引。
+ *
+ * fire-and-forget：索引新鲜度是次生效果，不许拖慢、更不许弄失败这次写。
+ */
+function notifyRemoteIndexChange({ getRemoteAgentInfo, getRemoteAgentClient }, params) {
+  try {
+    if (typeof getRemoteAgentClient !== 'function') return;
+    const info = typeof getRemoteAgentInfo === 'function' ? getRemoteAgentInfo() : null;
+    if (!isRemoteAgentUsable(info)) return;
+    void Promise.resolve(
+      getRemoteAgentClient(info).call('index.notify_change', params || {}, REMOTE_INDEX_NOTIFY_TIMEOUT_MS)
+    ).catch(() => {});
+  } catch {
+    // 远端 agent 不可用：这轮索引不更新，下一次写入或状态轮询会补上
+  }
+}
+
 
 function createFsHandlers(d) {
   const {
@@ -83,7 +110,7 @@ function createFsHandlers(d) {
     if (isSsh && wantLine > 0 && relHint && getRemoteAgentInfo && getRemoteAgentClient) {
       try {
         const info = getRemoteAgentInfo();
-        if (info && info.url) {
+        if (isRemoteAgentUsable(info)) {
           const res = await getRemoteAgentClient(info).call(
             'lsp.query',
             { operation: 'documentSymbol', filePath: String(relHint) },
@@ -249,7 +276,7 @@ function createFsHandlers(d) {
   }
 
   const handlers = {
-    'fs.read_file': async ({ filePath, encoding, offset, maxBytes }) => {
+    'fs.read_file': async ({ filePath, encoding, offset, maxBytes, sessionId }) => {
       if (!perms.hostControl || !perms.fsRead) {
         const e = new Error('文件读取未授权');
         e.code = 'FS_READ_DISABLED';
@@ -261,14 +288,24 @@ function createFsHandlers(d) {
       if (remote) return remote.readFile(filePath, encoding, { offset, maxBytes });
       const resolved = normalizeFilePathInput(filePath, cwdForCall());
       const safe = assertAllowedPath(resolved, readRootsForCall());
+      // 技能使用账本：这条读的是 SKILL.md 就记一笔（只记事实，不记内容）。
+      // 记录点必须在「读成功」之后，且自己吞错 —— 账本是旁证，不许影响读取本身。
+      const noteSkillRead = () => {
+        void recordSkillRead({ userData: ctx.userDataPath, skillPath: safe, sessionId });
+      };
       const rustRead = await invokeRustCore('fs.read_file', {
         filePath: safe,
         encoding,
         offset,
         maxBytes
       });
-      if (rustRead) return rustRead;
-      return readAllowedTextFile(filePath, encoding, { offset, maxBytes });
+      if (rustRead) {
+        noteSkillRead();
+        return rustRead;
+      }
+      const textRead = await readAllowedTextFile(filePath, encoding, { offset, maxBytes });
+      noteSkillRead();
+      return textRead;
     },
 
     'fs.read_symbol': async ({ filePath, name, line, maxLines }) => {
@@ -477,6 +514,15 @@ function createFsHandlers(d) {
           beforeText = null;
         }
         const r = await remote.writeFile(filePath, data, encoding);
+        // SFTP 写入远端看不见 → 必须补一条通知，否则远端索引停在旧内容，
+        // 同一回合里 grep / 图谱都按旧代码答。走 RPC 时远端 handler 自己已经按
+        // 同一份规则调度过了，再通知一遍只是多一次往返。
+        if (remote.transport === 'sftp') {
+          notifyRemoteIndexChange(
+            { getRemoteAgentInfo, getRemoteAgentClient },
+            { filePath: r.path || filePath, encoding: enc, op: 'write' }
+          );
+        }
         if (
           lspDiagnostics &&
           enc === 'utf8' &&
@@ -691,34 +737,23 @@ function createFsHandlers(d) {
         count: count === true
       };
       const agentInfo = getRemoteAgentInfo();
-      if (agentInfo && agentInfo.url) {
-        try {
-          const client = getRemoteAgentClient(agentInfo);
-          return await client.call('fs.grep', {
-            pattern: pat,
-            glob,
-            path: searchPath,
-            regex: regex === true,
-            caseInsensitive: ci,
-            ...ctxArgs,
-            maxResults
-          });
-        } catch {
-          try {
-            const fb = await getRemoteAgentClient(agentInfo).call('codebase.grep', {
-              pattern: pat,
-              glob,
-              maxResults
-            });
-            // codebase.grep 是降级路径（basename 级 --include、无 -i/regex/上下文）：
-            // 空结果继续往下走，否则会把「降级查不到」当成最终「0 命中」
-            if (fb && Array.isArray(fb.matches) && fb.matches.length) return fb;
-          } catch {
-            /* fall through */
-          }
-        }
+      if (isRemoteAgentUsable(agentInfo)) {
+        // 远端 Agent：rg-search 在远端跑（没装 rg 时它自己退 grep）。
+        // 不再叠「codebase.grep 降级 → SSH exec grep」两层：那会让一次真实失败
+        // 变成「查到了但结果不全」，比直接报错更难查。
+        return await getRemoteAgentClient(agentInfo).call('fs.grep', {
+          pattern: pat,
+          glob,
+          path: searchPath,
+          regex: regex === true,
+          caseInsensitive: ci,
+          ...ctxArgs,
+          maxResults
+        });
       }
-      if (getRemoteFs()) {
+      const remote = getRemoteFs();
+      if (remote && remote.transport === 'sftp') {
+        // 没装 Agent 的会话：本地没有工作区文件，只能靠 ssh exec 的 grep
         const via = await grepViaRemoteExec(cwdForCall(), {
           pattern: pat,
           glob,
@@ -766,14 +801,12 @@ function createFsHandlers(d) {
         throw e;
       }
       const agentInfo = getRemoteAgentInfo();
-      if (agentInfo && agentInfo.url) {
-        try {
-          return await getRemoteAgentClient(agentInfo).call('fs.glob', { pattern: pat, maxResults });
-        } catch {
-          /* fall through */
-        }
+      if (isRemoteAgentUsable(agentInfo)) {
+        // 远端失败就让失败如实上抛：吞掉再退 ssh exec 会把「命令坏了」说成「没有匹配」
+        return await getRemoteAgentClient(agentInfo).call('fs.glob', { pattern: pat, maxResults });
       }
-      if (getRemoteFs()) {
+      const remote = getRemoteFs();
+      if (remote && remote.transport === 'sftp') {
         const via = await globViaRemoteExec(cwdForCall(), { pattern: pat, maxResults });
         if (via) return via;
       }
@@ -809,4 +842,4 @@ function createFsHandlers(d) {
   return handlers;
 }
 
-module.exports = { createFsHandlers };
+module.exports = { createFsHandlers, notifyRemoteIndexChange };

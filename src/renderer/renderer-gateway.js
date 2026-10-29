@@ -18,7 +18,7 @@ const remoteGwState = {
 };
 
 /** 对话记忆、权限等必须走本地 Gateway，不能经 SSH 远程隧道 */
-const LOCAL_RPC_PREFIXES = ['memory.', 'agent.state_', 'permissions.', 'plugins.', 'undo.', 'speech.'];
+const LOCAL_RPC_PREFIXES = ['memory.', 'agent.state_', 'permissions.', 'undo.', 'speech.'];
 
 function isLocalOnlyMethod(method) {
   const m = String(method || '');
@@ -94,7 +94,7 @@ async function refreshRemoteGatewayMeta(opts = {}) {
       el.textContent = '正在注入远程 Agent（索引）…';
       el.title = 'Main 进程索引加速；文件/命令走 Local Gateway';
     } else if (rg.active) {
-      el.textContent = `远程索引 Agent :${rg.localPort || rg.info?.port || ''}`;
+      el.textContent = `远程索引 Agent socket:${rg.socketPath || ''}`;
       el.title = `工作目录: ${rg.workspaceRoot || ''}\n工具 RPC 经 Local Gateway + runWorkspaceRoot`;
     } else if (st.sshBackend === 'sftp') {
       el.textContent = 'SFTP 模式';
@@ -123,7 +123,6 @@ const GATEWAY_RPC_TIMEOUT_OVERRIDES = {
   'graph.rebuild': 120000,
   'memory.long_reindex': 120000,
   'memory.long_decay': 90000,
-  'codebase.grep': 60000,
   'fs.grep': 60000,
   'fs.glob': 45000,
   'lsp.query': 60000,

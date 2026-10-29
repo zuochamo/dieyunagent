@@ -2,10 +2,13 @@
 
 const fs = require('fs');
 const fsp = require('fs/promises');
+const http = require('http');
+const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 const { WebSocketServer } = require('ws');
-const { assertAllowedPath } = require('../gateway/path-policy');
+const { assertAllowedPath, remoteAllowedRoots } = require('../gateway/path-policy');
 const { runShell, normalizeFilePathInput } = require('../gateway/host-control');
 const { normalizeReadParams } = require('../gateway/fs-read-limits');
 const { runEditFile } = require('../gateway/fs-edit-file');
@@ -16,19 +19,10 @@ const { LspClient } = require('../lsp/lsp-client');
 const { getServerSpec } = require('../lsp/language-registry');
 const { computeLineDiffStats } = require('../gateway/line-diff-stats');
 const { scanRecentArtifactFiles, createLocalScanIo } = require('../gateway/artifact-scan');
+const { isGraphSourcePath } = require('../index/source-files');
 
-const GRAPH_SOURCE_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.go', '.rs']);
-
-function isGraphSourcePath(filePath) {
-  return GRAPH_SOURCE_EXT.has(path.extname(String(filePath || '')).toLowerCase());
-}
-
-/** POSIX 单引号转义：远程 shell 拼接命令时统一走这里（本文件不打包 ssh/remote-path） */
-function shq(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
-
-const DEFAULT_REMOTE_PORT = 17331;
+/** 已有 daemon 在跑时的退出码：调用方据此判断「复用现成的」，不是失败 */
+const AGENT_ALREADY_RUNNING_EXIT = 42;
 
 function summarizeLineDiff(beforeText, afterText) {
   return computeLineDiffStats(beforeText, afterText);
@@ -36,8 +30,16 @@ function summarizeLineDiff(beforeText, afterText) {
 
 function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
   const root = path.resolve(String(workspaceRoot || '/'));
-  const roots = [root];
-  const writable = [root];
+  /**
+   * 可用根与桌面端**同一份规则**（`gateway/path-policy.remoteAllowedRoots`）：
+   * 工作空间根 + 远端 HOME + /tmp。
+   *
+   * 不只是放宽体验：桌面端把截图 / 临时产物落到 `<HOME>/.dieyun/workspace` 是常态，
+   * 这里若只认工作空间单根，同一批写操作就会「经 RPC 被拒、经 SFTP 成功」——
+   * 两种传输对同一件事给出不同答案，比两边都拒绝更难查。
+   */
+  const roots = remoteAllowedRoots(root, os.homedir());
+  const writable = roots;
   const defaultCwd = root;
   const log = typeof opts.log === 'function' ? opts.log : () => {};
   const packRoot = opts.packRoot ? path.resolve(String(opts.packRoot)) : path.resolve(__dirname, '..');
@@ -149,6 +151,36 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
     return assertAllowedPath(resolved, roots);
   }
 
+  /**
+   * 「这个文件变了」→ 调度增量索引。判定规则只有这一份：`fs.write_file`（远端自己写）
+   * 与 `index.notify_change`（桌面端走 SFTP 写/删）都从这里走。
+   *
+   * 桌面端的写不经过本进程，若不通知，远端索引会一直停留在旧内容上 —— grep / 图谱
+   * 全部基于旧索引，Agent 会照着旧代码改。
+   */
+  function scheduleIndexForChange({ filePath, encoding, op } = {}) {
+    const kind = String(op || 'write');
+    if (kind === 'write' && encoding && encoding !== 'utf8') {
+      return { scheduled: false, reason: 'non_utf8' };
+    }
+    let safe = '';
+    if (filePath) {
+      try {
+        safe = resolvePath(filePath);
+      } catch {
+        return { scheduled: false, reason: 'out_of_root' };
+      }
+      if (shouldSkipIncrementalPath(safe)) return { scheduled: false, reason: 'ignored_path' };
+    }
+    // core 没就绪时调度器本来就是空转（scheduleRemote* 自己会 return），
+    // 这里显式说出来，免得调用方以为「通知成功了，索引应该新了」
+    if (!indexCore || !indexCore.isReady()) return { scheduled: false, reason: 'core_not_ready' };
+    scheduleRemoteCodebaseIncremental(kind === 'write' ? 'save' : `external_${kind}`);
+    // 删掉的文件本身已经不是源码了（后缀还在），仍然按源码路径处理：删除同样改变图谱
+    if (!safe || isGraphSourcePath(safe)) scheduleRemoteGraphIncremental('save');
+    return { scheduled: true };
+  }
+
   async function readFile(filePath, encoding, readOpts = {}) {
     const safe = resolvePath(filePath);
     const st = await fsp.stat(safe);
@@ -209,12 +241,7 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
       }
       await fsp.mkdir(path.dirname(safe), { recursive: true });
       await fsp.writeFile(safe, buf);
-      if (enc === 'utf8' && !shouldSkipIncrementalPath(safe)) {
-        scheduleRemoteCodebaseIncremental('save');
-      }
-      if (enc === 'utf8' && isGraphSourcePath(safe)) {
-        scheduleRemoteGraphIncremental('save');
-      }
+      scheduleIndexForChange({ filePath: safe, encoding: enc, op: 'write' });
       return {
         ok: true,
         path: safe,
@@ -296,8 +323,15 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
     'fs.delete_file': async ({ filePath }) => {
       const safe = resolvePath(filePath);
       await fsp.unlink(safe);
+      scheduleIndexForChange({ filePath: safe, op: 'delete' });
       return { ok: true, path: safe, remote: true };
     },
+
+    /**
+     * 桌面端改完远端文件后的通知（写入/删除都走 SFTP，不经过本进程的 fs.write_file）。
+     * 只调度增量索引，不做校验之外的事：调用方是 fire-and-forget，失败不影响那次写。
+     */
+    'index.notify_change': async (params) => scheduleIndexForChange(params || {}),
 
     'host.exec': async ({ command, cwd, timeoutMs }) => {
       if (!command || typeof command !== 'string') {
@@ -315,53 +349,10 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
       return runShell(wrapped, { cwd: workDir, timeoutMs });
     },
 
-    'codebase.grep': async ({ pattern, glob, maxResults }) => {
-      const pat = String(pattern || '').trim();
-      if (!pat) {
-        const e = new Error('pattern 必填');
-        e.code = 'INVALID_PATTERN';
-        throw e;
-      }
-      const limit = Math.min(200, Math.max(1, Number(maxResults) || 50));
-      // glob 只按 basename 下发：GNU grep 的 --include 不匹配目录前缀（src/**/*.js 会 0 命中）
-      const globBase = glob
-        ? String(glob)
-            .replace(/\\/g, '/')
-            .split('/')
-            .filter(Boolean)
-            .pop()
-        : '';
-      const globPart = globBase ? `--include=${shq(globBase)}` : '';
-      // -F 字面匹配 + 单引号引用（此前 JSON.stringify 走双引号，pattern 里的 $ ` \ 会被 shell 展开）；
-      // 不再 2>/dev/null，否则 grep 报错也会被当成「0 命中」
-      const cmd = `grep -RIn -F ${globPart} --exclude-dir=.git --exclude-dir=node_modules -m ${limit} ${shq(pat)} . | head -n ${limit}`;
-      const r = await runShell(cmd, { cwd: root, timeoutMs: 60000 });
-      const lines = String(r.stdout || '')
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .slice(0, limit)
-        .map((line) => {
-          const m = line.match(/^([^:]+):(\d+):(.*)$/);
-          if (!m) return { raw: line };
-          return { path: path.resolve(root, m[1]), line: Number(m[2]), text: m[3] };
-        });
-      const stderrText = String(r.stderr || '').trim();
-      // runShell 走 `sh -c "… | head"`，退出码是 head 的（恒为 0），只能靠 stderr 认「命令没跑起来」
-      const cmdErrorRe = /command not found|unrecognized option|invalid option|usage:|No such file or directory|not a directory/i;
-      if (!lines.length && (Number(r.code) > 1 || cmdErrorRe.test(stderrText))) {
-        return {
-          ok: false,
-          errorCode: 'REMOTE_GREP_FAILED',
-          error: `远程 grep 没有返回结果且命令报错（exit ${r.code}）：${
-            stderrText.slice(0, 300) || '无 stderr'
-          }`,
-          matches: [],
-          remote: true
-        };
-      }
-      return { ok: true, matches: lines, remote: true };
-    },
-
+    /**
+     * 远端唯一 grep：rg-search（`grepWorkspace`）在远端跑，**没有 rg 时它自己退到 GNU grep**
+     * ——那套降级与退出码归一已经在 rg-search 里做过一次（P5），这里不再叠一层自拼 grep。
+     */
     'fs.grep': async ({ pattern, glob, path: searchPath, regex, caseInsensitive, maxResults }) => {
       const r = await grepWorkspace(root, {
         pattern,
@@ -378,14 +369,6 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
       const r = await globWorkspace(root, { pattern, maxResults });
       return { ...r, remote: true };
     },
-
-    'agent.ping': async () => ({
-      ok: true,
-      remote: true,
-      workspaceRoot: root,
-      pid: process.pid,
-      uptimeSec: Math.floor(process.uptime())
-    }),
 
     'artifact.read_file': async ({ filePath, encoding, offset, maxBytes }) =>
       readFile(filePath, encoding, { offset, maxBytes }),
@@ -442,58 +425,157 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
 
 class MinimalRemoteGatewayHost {
   /**
-   * @param {{ workspaceRoot: string, packRoot?: string, port?: number, token?: string, log?: (msg: string) => void }} opts
+   * @param {{ workspaceRoot?: string, socketPath?: string, packRoot?: string, log?: (msg: string) => void }} opts
+   *
+   * P2 之后只有一种形态：**每主机一个 daemon**，`socketPath` 指向用户私有的 AF_UNIX socket，
+   * 一个进程按连接服务任意多个 workspace（连接上 `hello` 声明根路径）。
+   * 没有 TCP 端口、没有 token —— 安全边界就是文件权限（目录 0700 / socket 0600，同 uid 才能连）。
    */
   constructor(opts) {
-    this.workspaceRoot = path.resolve(String(opts.workspaceRoot || '/'));
+    this.defaultWorkspaceRoot = opts.workspaceRoot ? path.resolve(String(opts.workspaceRoot)) : '';
+    this.workspaceRoot = this.defaultWorkspaceRoot;
+    this.socketPath = String(opts.socketPath || '');
     this.packRoot = opts.packRoot ? path.resolve(String(opts.packRoot)) : path.resolve(__dirname, '..');
-    this.port = Number(opts.port) || DEFAULT_REMOTE_PORT;
-    this.token = String(opts.token || crypto.randomBytes(24).toString('hex'));
     this.log = opts.log || (() => {});
     /** @type {import('ws').WebSocketServer | null} */
     this.wss = null;
-    this.handlers = createRemoteGatewayHandlers(this.workspaceRoot, {
-      packRoot: this.packRoot,
-      log: this.log
-    });
+    /** @type {import('http').Server | null} */
+    this.httpServer = null;
+    /**
+     * workspace 根 → handlers。同一个根被两条连接用到时**共用同一份**（索引 core / 定时器 /
+     * LSP 池都在 handler 闭包里，重复创建等于两个实例抢同一个 index.sqlite）。
+     * @type {Map<string, { root: string, handlers: object }>}
+     */
+    this.sessions = new Map();
+    // 旧形态（单 workspace 预建）只在 port 模式用；socket 模式按连接懒建
+    if (!this.socketPath) this._sessionFor(this.defaultWorkspaceRoot);
+  }
+
+  /**
+   * 取某个 workspace 的 handler 集合（脚本 / 单测直接调用，不必起 socket）。
+   * @param {string} [workspaceRoot]
+   */
+  getHandlers(workspaceRoot) {
+    return this._sessionFor(workspaceRoot || this.defaultWorkspaceRoot).handlers;
+  }
+
+  /** @param {string} workspaceRoot */
+  _sessionFor(workspaceRoot) {
+    const root = path.resolve(String(workspaceRoot || this.defaultWorkspaceRoot || '/'));
+    const hit = this.sessions.get(root);
+    if (hit) return hit;
+    const handlers = createRemoteGatewayHandlers(root, { packRoot: this.packRoot, log: this.log });
+    const session = { root, handlers };
+    this.sessions.set(root, session);
+    if (typeof handlers.__warmupRemoteIndex === 'function') {
+      try {
+        handlers.__warmupRemoteIndex();
+      } catch {
+        // 预热失败不影响后续按需启动
+      }
+    }
+    return session;
   }
 
   getInfo() {
     return {
-      host: '127.0.0.1',
-      port: this.port,
-      url: `ws://127.0.0.1:${this.port}`,
-      token: this.token,
-      workspaceRoot: this.workspaceRoot,
+      socketPath: this.socketPath,
+      workspaceRoot: this.defaultWorkspaceRoot,
       remoteGateway: true
     };
   }
 
   start() {
     if (this.wss) return;
-    this.wss = new WebSocketServer({ host: '127.0.0.1', port: this.port });
-    this.wss.on('connection', (ws) => this._bindClient(ws));
-    this.wss.on('listening', () => {
-      this.log(`remote gateway ws://127.0.0.1:${this.port} workspace=${this.workspaceRoot}`);
-      const warmup = this.handlers && this.handlers.__warmupRemoteIndex;
-      if (typeof warmup === 'function') warmup();
+    if (!this.socketPath) {
+      const e = new Error('远端 Agent 必须给 socketPath（P2 之后没有 TCP 端口形态）');
+      e.code = 'REMOTE_AGENT_NO_SOCKET';
+      throw e;
+    }
+    this._startSocket();
+  }
+
+  /**
+   * Unix socket 监听。安全边界就是文件系统：目录 0700、socket 0600，
+   * 只有同一个 uid 能连（SSH 的 direct-streamlocal 也是以登录用户身份连）。所以这里**没有 token**。
+   *
+   * 单例也由 socket 自己承担（不需要 flock / pid 文件）：
+   * - 能 connect 上 → 已有 daemon 在跑，进程以 42 退出，让调用方去复用；
+   * - connect 报 ENOENT/ECONNREFUSED → 上一次崩溃留下的陈旧文件，删掉重绑；
+   * - 并发抢绑 → 后到者 bind 拿 EADDRINUSE，同样以 42 退出。
+   */
+  _startSocket() {
+    const socketPath = this.socketPath;
+    const dir = path.dirname(socketPath);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(dir, 0o700);
+    } catch {
+      // 目录不是自己的时 chmod 会失败，交给 listen 报错
+    }
+    const probe = net.connect(socketPath);
+    probe.once('connect', () => {
+      probe.destroy();
+      this.log(`remote agent already listening on ${socketPath} (exit 42)`);
+      process.exit(AGENT_ALREADY_RUNNING_EXIT);
     });
-    this.wss.on('error', (err) => {
-      this.log('remote gateway error: ' + (err && err.message ? err.message : err));
-      if (err && err.code === 'EADDRINUSE') {
-        process.exit(1);
+    probe.once('error', () => {
+      probe.destroy();
+      try {
+        fs.unlinkSync(socketPath);
+      } catch {
+        // 不存在就是好事
       }
+      this._bindSocket();
+    });
+  }
+
+  _bindSocket() {
+    const socketPath = this.socketPath;
+    this.httpServer = http.createServer((req, res) => {
+      res.statusCode = 426;
+      res.end('dieyun-agent: websocket only');
+    });
+    this.wss = new WebSocketServer({ server: this.httpServer });
+    this.wss.on('connection', (ws) => this._bindClient(ws));
+    this.httpServer.on('error', (err) => {
+      if (err && err.code === 'EADDRINUSE') {
+        this.log(`remote agent socket busy: ${socketPath} (exit 42)`);
+        process.exit(AGENT_ALREADY_RUNNING_EXIT);
+      }
+      this.log('remote agent socket error: ' + (err && err.message ? err.message : err));
+      process.exit(1);
+    });
+    this.httpServer.listen(socketPath, () => {
+      try {
+        fs.chmodSync(socketPath, 0o600);
+      } catch {
+        // ignore
+      }
+      this.log(`remote agent listening on ${socketPath}`);
+      if (this.defaultWorkspaceRoot) this._sessionFor(this.defaultWorkspaceRoot);
     });
   }
 
   stop() {
-    if (this.handlers && typeof this.handlers.__disposeRemoteIndex === 'function') {
+    for (const { handlers } of this.sessions.values()) {
+      if (handlers && typeof handlers.__disposeRemoteIndex === 'function') {
+        try {
+          const p = handlers.__disposeRemoteIndex();
+          if (p && typeof p.then === 'function') p.catch(() => {});
+        } catch {
+          // ignore
+        }
+      }
+    }
+    this.sessions.clear();
+    if (this.httpServer) {
       try {
-        const p = this.handlers.__disposeRemoteIndex();
-        if (p && typeof p.then === 'function') p.catch(() => {});
+        this.httpServer.close();
       } catch {
         // ignore
       }
+      this.httpServer = null;
     }
     if (!this.wss) return;
     try {
@@ -502,6 +584,13 @@ class MinimalRemoteGatewayHost {
       // ignore
     }
     this.wss = null;
+    if (this.socketPath) {
+      try {
+        fs.unlinkSync(this.socketPath);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   _send(ws, obj) {
@@ -517,11 +606,13 @@ class MinimalRemoteGatewayHost {
     ws.on('error', (err) => {
       this.log('remote gateway client ws error: ' + (err && err.message ? err.message : err));
     });
+    /** @type {{ root: string, handlers: object } | null} */
+    let session = null;
     let authed = false;
     const authTimer = setTimeout(() => {
       if (!authed) {
         try {
-          ws.close(4001, 'auth timeout');
+          ws.close(4001, 'handshake timeout');
         } catch {
           // ignore
         }
@@ -538,20 +629,30 @@ class MinimalRemoteGatewayHost {
       }
       const id = msg.id != null ? msg.id : null;
 
-      if (msg.type === 'auth') {
-        if (msg.token === this.token) {
-          authed = true;
-          clearTimeout(authTimer);
-          this._send(ws, { v: 1, type: 'auth_ok', id });
-        } else {
-          this._send(ws, { v: 1, type: 'error', id, error: { code: 'AUTH_FAILED', message: 'invalid token' } });
-          ws.close(4003, 'auth failed');
+      // 一条连接 = 一个 workspace，握手时声明根路径。
+      // 没有 token 握手：能连上这个 0600 socket 的只有同一个 uid。
+      if (msg.type === 'hello') {
+        const root = String(msg.workspace || msg.runWorkspaceRoot || '').trim();
+        try {
+          session = this._sessionFor(root || this.defaultWorkspaceRoot);
+        } catch (err) {
+          this._send(ws, {
+            v: 1,
+            type: 'error',
+            id,
+            error: { code: 'WORKSPACE_UNAVAILABLE', message: String((err && err.message) || err) }
+          });
+          ws.close(4004, 'workspace unavailable');
+          return;
         }
+        authed = true;
+        clearTimeout(authTimer);
+        this._send(ws, { v: 1, type: 'hello_ok', id, workspace: session.root });
         return;
       }
 
-      if (!authed) {
-        this._send(ws, { v: 1, type: 'error', id, error: { code: 'NOT_AUTHED', message: 'send auth first' } });
+      if (!authed || !session) {
+        this._send(ws, { v: 1, type: 'error', id, error: { code: 'NOT_READY', message: 'send hello first' } });
         return;
       }
 
@@ -560,7 +661,7 @@ class MinimalRemoteGatewayHost {
         return;
       }
 
-      const fn = this.handlers[msg.method];
+      const fn = session.handlers[msg.method];
       if (!fn) {
         this._send(ws, {
           v: 1,
@@ -582,7 +683,14 @@ class MinimalRemoteGatewayHost {
           type: 'result',
           id,
           ok: false,
-          error: { code: err.code || 'EXEC_ERROR', message: err.message || String(err) }
+          // 与本地 Gateway 同一份失败契约：code / retryable / suggestedFix 一起过隧道，
+          // 否则隧道另一头只剩一句中文文案，工具层没法判断能不能重试。
+          error: {
+            code: err.code || 'EXEC_ERROR',
+            message: err.message || String(err),
+            ...(typeof err.retryable === 'boolean' ? { retryable: err.retryable } : {}),
+            ...(err.suggestedFix ? { suggestedFix: String(err.suggestedFix) } : {})
+          }
         });
       }
     });
@@ -591,4 +699,8 @@ class MinimalRemoteGatewayHost {
   }
 }
 
-module.exports = { MinimalRemoteGatewayHost, DEFAULT_REMOTE_PORT };
+module.exports = {
+  MinimalRemoteGatewayHost,
+  AGENT_ALREADY_RUNNING_EXIT,
+  createRemoteGatewayHandlers
+};

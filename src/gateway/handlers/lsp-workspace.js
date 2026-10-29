@@ -13,6 +13,7 @@ const {
 
 /** lsp-settings 缺省值（文件数 / 条数 / 超时的唯一来源在 src/lsp/diagnostics-service.js） */
 const { LSP_SETTINGS_DEFAULTS } = require('../../lsp/diagnostics-service');
+const { isRemoteAgentUsable } = require('../remote-agent-client');
 
 /** 远程 LSP 首次调用要等 server 启动（rust-analyzer 首次会索引整个 crate） */
 const REMOTE_LSP_TIMEOUT_MS = 60000;
@@ -161,7 +162,7 @@ function createLspWorkspaceHandlers(d) {
         // 远程 LSP：远程 agent 用它自己环境里的 Language Server
         // （rust-analyzer / gopls 走 PATH，ts/py 走远程工作区的 node_modules）。
         const remoteInfo = typeof getRemoteAgentInfo === 'function' ? getRemoteAgentInfo() : null;
-        if (remoteInfo && remoteInfo.url && opName) {
+        if (isRemoteAgentUsable(remoteInfo) && opName) {
           if (opName !== 'workspaceSymbol' && (!fpArg || !String(fpArg).trim())) {
             return {
               ok: false,

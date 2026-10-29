@@ -3,6 +3,13 @@
 const path = require('path');
 
 const { decideShellCommand } = require('../sandbox-policy');
+const {
+  startRemoteDetached,
+  listRemoteProcesses,
+  takeSettledRemoteReports,
+  readRemoteOutput,
+  killRemoteProcess
+} = require('../remote-processes');
 
 function createHostHandlers(d) {
   const {
@@ -19,6 +26,7 @@ function createHostHandlers(d) {
     runShellDetached,
     runShell,
     listProcessHandles,
+    takeSettledReports,
     killProcessHandle,
     readProcessOutput,
     getActiveCallSessionId,
@@ -91,24 +99,35 @@ function createHostHandlers(d) {
         const workDir = cwd ? remote.resolve(cwd, remote.root) : remote.root;
         await guardShell(command, workDir, sessionId, { remote: true });
         if (detached) {
-          const bg = `nohup ${command} >/dev/null 2>&1 & echo $!`;
-          const r = await requireSshForCall().exec(bg, workDir, Math.min(30000, Number(timeoutMs) || 15000), {
-            loginShell: false
+          // 远程也要有本机那套「能查、能读、能停」：setsid 起独立进程组 + 输出落盘 + 登记句柄
+          const res = await startRemoteDetached({
+            ssh: requireSshForCall(),
+            cwd: workDir,
+            command,
+            sessionId: sessionId || getActiveCallSessionId() || undefined,
+            timeoutMs
           });
-          const pid = parseInt(String(r.stdout || '').trim(), 10);
-          const code = Number(r.code) || 0;
+          // 没拿到 pid = 这次启动没成（cd 失败 / bash -c 立刻退出），别回一个用不了的句柄
+          if (res.code !== 0 || !res.pid) {
+            return {
+              code: res.code || 1,
+              stdout: String(res.stderr || ''),
+              stderr: res.stderr || '',
+              remote: true,
+              detached: true,
+              hint: `后台启动失败：先确认 cwd「${workDir}」在远端存在、命令本身能跑；启动日志在 ${res.logPath}。`
+            };
+          }
           return {
-            code,
-            stdout:
-              code === 0
-                ? Number.isFinite(pid)
-                  ? `已后台启动 PID ${pid}`
-                  : '已后台启动'
-                : String(r.stdout || ''),
-            stderr: r.stderr || '',
+            code: 0,
+            stdout: `已后台启动 PID ${res.pid}（句柄 ${res.id}；输出写入 ${res.logPath}）`,
+            stderr: res.stderr || '',
             remote: true,
             detached: true,
-            pid: code === 0 && Number.isFinite(pid) ? pid : undefined
+            pid: res.pid,
+            handle: res.id,
+            logPath: res.logPath,
+            hint: `用 host_proc action=output id=${res.id} 读输出（可加 waitMs），action=kill id=${res.id} 结束。`
           };
         }
         const r = await requireSshForCall().exec(command, workDir, timeoutMs);
@@ -116,7 +135,13 @@ function createHostHandlers(d) {
           code: r.code,
           stdout: r.stdout,
           stderr: r.stderr,
-          remote: true
+          remote: true,
+          // 输出超上限时只保留尾部：必须告诉模型，否则它会把半截输出当成全部
+          truncated: r.truncated === true,
+          droppedChars: r.droppedChars,
+          ...(r.truncated === true
+            ? { hint: '输出超过上限，只保留了尾部；要更多请缩小范围（head / tail / grep）。' }
+            : {})
         };
       }
       const workDir = (() => {
@@ -153,10 +178,44 @@ function createHostHandlers(d) {
         e.code = 'SHELL_DISABLED';
         throw e;
       }
+      const callSessionId = sessionId || getActiveCallSessionId() || undefined;
+      // 远程工作空间：句柄在远端那张表里（同一套 list/output/kill 语义）
+      if (getRemoteFs()) {
+        return listRemoteProcesses({
+          ssh: requireSshForCall(),
+          sessionId: callSessionId,
+          includeFinished: includeFinished === true
+        });
+      }
       return listProcessHandles({
-        sessionId: sessionId || getActiveCallSessionId() || undefined,
+        sessionId: callSessionId,
         includeFinished: includeFinished === true
       });
+    },
+
+    /**
+     * 「后台任务已结束、但模型还不知道」的一次性投递口：不唤醒任何一轮（静默补报），
+     * 只在下一次组 prompt 时被取走一次。唯一消费者是
+     * `agent/system-prompt-prep.js#fetchSettledJobsBlock`；取走即标记已投递，
+     * 同一条不会报第二次（模型自己用 host_proc 读过也一样算已投递）。
+     */
+    'host.proc_settled': async ({ sessionId, tailBytes, limit } = {}) => {
+      assertHostEnabled(ctx);
+      if (!perms.shellExec) {
+        const e = new Error('Shell 执行未授权');
+        e.code = 'SHELL_DISABLED';
+        throw e;
+      }
+      const callSessionId = sessionId || getActiveCallSessionId() || undefined;
+      if (getRemoteFs()) {
+        return takeSettledRemoteReports({
+          ssh: requireSshForCall(),
+          sessionId: callSessionId,
+          tailBytes,
+          limit
+        });
+      }
+      return takeSettledReports({ sessionId: callSessionId, tailBytes, limit });
     },
 
     'host.proc_output': async ({ id, pid, offset, tailBytes, waitMs, sessionId } = {}) => {
@@ -166,14 +225,18 @@ function createHostHandlers(d) {
         e.code = 'SHELL_DISABLED';
         throw e;
       }
-      const result = await readProcessOutput({
-        id,
-        pid,
-        offset,
-        tailBytes,
-        waitMs,
-        sessionId: sessionId || getActiveCallSessionId() || undefined
-      });
+      const callSessionId = sessionId || getActiveCallSessionId() || undefined;
+      const result = getRemoteFs()
+        ? await readRemoteOutput({
+            ssh: requireSshForCall(),
+            id,
+            pid,
+            offset,
+            tailBytes,
+            waitMs,
+            sessionId: callSessionId
+          })
+        : await readProcessOutput({ id, pid, offset, tailBytes, waitMs, sessionId: callSessionId });
       if (!result.ok) {
         const e = new Error(result.error || '读取进程输出失败');
         e.code = result.errorCode || 'PROC_OUTPUT_FAILED';
@@ -190,11 +253,10 @@ function createHostHandlers(d) {
         e.code = 'SHELL_DISABLED';
         throw e;
       }
-      const result = await killProcessHandle({
-        id,
-        pid,
-        sessionId: sessionId || getActiveCallSessionId() || undefined
-      });
+      const callSessionId = sessionId || getActiveCallSessionId() || undefined;
+      const result = getRemoteFs()
+        ? await killRemoteProcess({ ssh: requireSshForCall(), id, pid, sessionId: callSessionId })
+        : await killProcessHandle({ id, pid, sessionId: callSessionId });
       if (!result.ok) {
         const e = new Error(result.error || '结束进程失败');
         e.code = result.errorCode || 'PROC_KILL_FAILED';

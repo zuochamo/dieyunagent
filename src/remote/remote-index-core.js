@@ -4,15 +4,10 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFile } = require('child_process');
 const { createCoreBridge } = require('../core-bridge');
+const { resolveCoreRpcTimeoutMs } = require('../core-rpc-timeouts');
 const { workspaceDieyunDir, workspaceIndexDbPath } = require('./workspace-index-path');
-const {
-  maxGlibcInFile,
-  hostGlibcVersion,
-  glibcMismatchHint,
-  sanitizeCoreErrorText
-} = require('./linux-elf-compat');
 
 const INDEX_RPC_METHODS = new Set([
   'codebase.status',
@@ -22,8 +17,6 @@ const INDEX_RPC_METHODS = new Set([
   'graph.status',
   'graph.index',
   'graph.index.start',
-  'graph.embed_symbols',
-  'graph.symbol_semantic_search',
   'graph.module_deps',
   'graph.repo_map',
   'graph.symbol_search',
@@ -33,7 +26,14 @@ const INDEX_RPC_METHODS = new Set([
   'graph.ingest_lsp_callers'
 ]);
 
-const INDEX_TIMEOUT_MS = 600000;
+/**
+ * status 类超时 / core 已死的重试次数上限：含首次共 STATUS_RETRY_MAX + 1 次。
+ * 超时值本身由 core-rpc-timeouts.js 单一来源决定（status 15s）。
+ * 上限取 1 而不是随手一个数：网关侧 status RPC 预算是 45s，15s×2 + 0.3s ≈ 30s 严格
+ * 小于它，这样上层拿到的是本层带日志的真实错误，而不是它自己的 RPC_TIMEOUT。
+ */
+const STATUS_RETRY_MAX = 1;
+const STATUS_RETRY_BACKOFF_MS = 300;
 const STATUS_FAST_METHODS = new Set([
   'codebase.status',
   'graph.status',
@@ -41,6 +41,111 @@ const STATUS_FAST_METHODS = new Set([
   'codebase.index.start',
   'graph.index.start'
 ]);
+
+/**
+ * 谁能被当作「孤儿 core」清理掉。
+ *
+ * `fuser <index.sqlite>` 只回答「谁持有这个文件」：sqlite3、备份脚本、**另一个 App 实例
+ * 正在用的 core** 都算。按 PID 盲杀就是互杀 —— 两个会话共享同一工作区时会互相把对方
+ * 的 core 杀成重启风暴（原事故的加速器）。
+ *
+ * 判据只留一条真正能证明「没人管它」的证据：**父进程是 init（ppid<=1）**。
+ * 有活着的父进程 = 有人监督 = 不是我们的孤儿，不碰。
+ *
+ * @param {{ pids: number[], selfPid?: number, probe: (pid: number) => ({ cmdline?: string, ppid?: number } | null) }} input
+ * @returns {{ kill: number[], skip: Array<{ pid: number, reason: string }> }}
+ */
+function selectStaleCoreHolders({ pids, selfPid, probe }) {
+  const kill = [];
+  const skip = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(pids) ? pids : []) {
+    const pid = Number(raw);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    if (selfPid && pid === selfPid) {
+      skip.push({ pid, reason: 'self' });
+      continue;
+    }
+    let info = null;
+    try {
+      info = probe(pid);
+    } catch {
+      info = null;
+    }
+    if (!info) {
+      skip.push({ pid, reason: 'unknown_pid' });
+      continue;
+    }
+    const cmdline = String(info.cmdline || '');
+    if (!/dieyun-core/.test(cmdline)) {
+      skip.push({ pid, reason: 'not_dieyun_core' });
+      continue;
+    }
+    const ppid = Number(info.ppid);
+    if (!Number.isFinite(ppid) || ppid > 1) {
+      skip.push({ pid, reason: 'supervised' });
+      continue;
+    }
+    kill.push(pid);
+  }
+  return { kill, skip };
+}
+
+/** 读 /proc/<pid> 的 cmdline 与 ppid；读不到返回 null（非 Linux / 已退出 / 无权限） */
+function readProcInfo(pid) {
+  try {
+    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // stat 格式：pid (comm) state ppid ...；comm 里可能有空格和括号，取最后一个 ')' 之后切
+    const tail = stat.slice(stat.lastIndexOf(')') + 1).trim();
+    const fields = tail.split(/\s+/);
+    const ppid = Number(fields[1]);
+    return { cmdline, ppid };
+  } catch {
+    return null;
+  }
+}
+
+/** fuser 输出里的 PID（异步，别在启动路径上阻塞事件循环 4 秒） */
+function listFileHolders(dbPath) {
+  return new Promise((resolve) => {
+    execFile('fuser', [dbPath], { timeout: 4000 }, (err, stdout, stderr) => {
+      if (err && err.code === 'ENOENT') {
+        resolve([]);
+        return;
+      }
+      const text = `${stdout || ''}${stderr || ''}`;
+      resolve(String(text).match(/\d+/g) || []);
+    });
+  });
+}
+
+/**
+ * 远程 core 的 configure 载荷（纯函数，便于验证「记忆库不落在工作区」）。
+ * @param {{ workspaceRoot: string, runtimeDataDir: string, indexDbPath: string, opts?: object }} p
+ */
+function buildCoreConfigurePayload({ workspaceRoot, runtimeDataDir, indexDbPath, opts = {} }) {
+  const embedding = (opts && opts.embedding) || { disabled: true };
+  return {
+    // data_dir 只放记忆/账本库，必须与 spawn 时的 DIEYUN_DATA_DIR 一致（$HOME 下）。
+    // 早前这里写的是 <workspace>/.dieyun，等于把记忆库塞回用户项目里，
+    // 还会和项目 index.sqlite 抢同一目录 —— 项目目录只留索引（index_db_path）。
+    data_dir: runtimeDataDir,
+    index_db_path: indexDbPath,
+    workspace_roots: [workspaceRoot],
+    embedding: {
+      disabled: !!embedding.disabled,
+      baseUrl: embedding.baseUrl || '',
+      apiKey: embedding.apiKey || '',
+      model: embedding.model || '',
+      dimensions: Number(embedding.dimensions) || 1024,
+      headers: embedding.headers && typeof embedding.headers === 'object' ? embedding.headers : {},
+      authMode: String(embedding.authMode || '').trim()
+    }
+  };
+}
 
 /**
  * 远程工作区项目内 dieyun-core（索引库：<workspace>/.dieyun/index.sqlite）
@@ -58,11 +163,11 @@ class RemoteIndexCoreHost {
     this.binaryPath = path.join(this.packRoot, 'bin', 'dieyun-core');
     // 进程 data-dir 用 HOME，避免把记忆库和项目 index.sqlite 混在一起；
     // 也不把 --workspace 传给 CLI：旧 Linux 二进制没有该参数时 clap 会立刻退出。
-    const runtimeDataDir = path.join(os.homedir() || '/tmp', '.dieyunagent');
+    this.runtimeDataDir = path.join(os.homedir() || '/tmp', '.dieyunagent');
     this.bridge = createCoreBridge({
       binaryPath: this.binaryPath,
       args: ['serve-stdio'],
-      env: { DIEYUN_DATA_DIR: runtimeDataDir },
+      env: { DIEYUN_DATA_DIR: this.runtimeDataDir },
       pingTimeoutMs: 30000,
       log: (m) => this.log(m)
     });
@@ -73,10 +178,6 @@ class RemoteIndexCoreHost {
     this.starting = null;
     /** @type {string} */
     this.lastStartError = '';
-    /** @type {string|undefined} */
-    this._cachedMaxGlibc = undefined;
-    /** @type {string|undefined} */
-    this._cachedHostGlibc = undefined;
     /** @type {Promise<unknown>} */
     this._opQueue = Promise.resolve();
   }
@@ -98,28 +199,16 @@ class RemoteIndexCoreHost {
     }
   }
 
-  _maxGlibcNeeded() {
-    if (this._cachedMaxGlibc === undefined) {
-      this._cachedMaxGlibc = this.hasBinary() ? maxGlibcInFile(this.binaryPath) : '';
-    }
-    return this._cachedMaxGlibc || '';
-  }
-
-  _hostGlibc() {
-    if (this._cachedHostGlibc === undefined) {
-      this._cachedHostGlibc = hostGlibcVersion();
-    }
-    return this._cachedHostGlibc || '';
-  }
-
-  _glibcMismatchHint() {
-    return glibcMismatchHint(this._maxGlibcNeeded(), this._hostGlibc());
-  }
-
+  /**
+   * 启动失败时的取证信息。
+   *
+   * 这里**不再**判断「宿主 glibc 够不够」：那是产物侧的性质，已经在打包时用
+   * `assertCoreGlibcTarget()` 卡死在 GLIBC ≤ 2.17 上了（scripts/pack-dieyun-core-linux-lib.cjs）。
+   * 运行时再猜一遍宿主版本只会把「产物不对」误诊成「你的机器太老」。
+   * 留下的是「二进制在不在 / 是不是 ELF / 动态库缺不缺」——这些只有现场才能知道。
+   */
   _diagnoseBinary() {
     const hints = [];
-    const mismatch = this._glibcMismatchHint();
-    if (mismatch) hints.push(mismatch);
     try {
       const fd = fs.openSync(this.binaryPath, 'r');
       const buf = Buffer.alloc(4);
@@ -150,30 +239,22 @@ class RemoteIndexCoreHost {
   }
 
   /**
-   * 清掉仍占用本工作区 index.sqlite 的孤儿 dieyun-core（PPID=1 等），
+   * 清掉仍占用本工作区 index.sqlite 的**孤儿** dieyun-core（父进程已是 init），
    * 避免 busy 锁导致 codebase.status 一直超时。
+   * 有监督者的 core 不碰：那是别的实例正在用的进程，杀了就是互杀。
    */
-  _killStaleIndexHolders() {
+  async _killStaleIndexHolders() {
     const dbPath = this.indexDbPath;
     if (!dbPath) return;
-    let pidText = '';
-    try {
-      pidText = execFileSync('fuser', [dbPath], {
-        encoding: 'utf8',
-        timeout: 4000,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-    } catch (err) {
-      if (err && err.code === 'ENOENT') return;
-      pidText = `${err && err.stdout ? err.stdout : ''}${err && err.stderr ? err.stderr : ''}`;
-    }
-    const pids = String(pidText).match(/\d+/g) || [];
+    const pids = await listFileHolders(dbPath);
     if (!pids.length) return;
-    const self = process.pid;
+    const { kill, skip } = selectStaleCoreHolders({
+      pids,
+      selfPid: process.pid,
+      probe: readProcInfo
+    });
     const killed = [];
-    for (const raw of pids) {
-      const pid = Number(raw);
-      if (!pid || pid === self) continue;
+    for (const pid of kill) {
       try {
         process.kill(pid, 'SIGTERM');
         killed.push(pid);
@@ -182,7 +263,12 @@ class RemoteIndexCoreHost {
       }
     }
     if (killed.length) {
-      this.log(`remote index: 已清理占用库的旧进程 pid=${killed.join(',')}`);
+      this.log(`remote index: 已清理占库孤儿 core pid=${killed.join(',')}`);
+    }
+    if (skip.length) {
+      this.log(
+        `remote index: 占库进程未清理 ${skip.map((s) => `${s.pid}(${s.reason})`).join(',')}`
+      );
     }
   }
 
@@ -193,21 +279,14 @@ class RemoteIndexCoreHost {
   }
 
   async _configureBridge(opts = {}) {
-    const embedding = opts.embedding || { disabled: true };
-    return this.bridge.configure({
-      data_dir: this.dieyunDir,
-      index_db_path: this.indexDbPath,
-      workspace_roots: [this.workspaceRoot],
-      models_dirs: Array.isArray(opts.modelsDirs) ? opts.modelsDirs : [],
-      embedding: {
-        disabled: !!embedding.disabled,
-        builtin: !!embedding.builtin,
-        baseUrl: embedding.baseUrl || '',
-        apiKey: embedding.apiKey || '',
-        model: embedding.model || '',
-        dimensions: Number(embedding.dimensions) || 1024
-      }
-    });
+    return this.bridge.configure(
+      buildCoreConfigurePayload({
+        workspaceRoot: this.workspaceRoot,
+        runtimeDataDir: this.runtimeDataDir,
+        indexDbPath: this.indexDbPath,
+        opts
+      })
+    );
   }
 
   async _ensureStarted() {
@@ -222,17 +301,10 @@ class RemoteIndexCoreHost {
       this.lastStartError = e.message;
       throw e;
     }
-    const mismatch = this._glibcMismatchHint();
-    if (mismatch) {
-      this.lastStartError = mismatch;
-      const e = new Error(mismatch);
-      e.code = 'REMOTE_INDEX_CORE_INCOMPATIBLE';
-      throw e;
-    }
     this.starting = (async () => {
       await fsp.mkdir(this.dieyunDir, { recursive: true });
       try {
-        this._killStaleIndexHolders();
+        await this._killStaleIndexHolders();
         this._ensureExecutable();
         await this.bridge.start();
         this.started = true;
@@ -246,9 +318,9 @@ class RemoteIndexCoreHost {
         } catch {
           // ignore
         }
-        const msg = sanitizeCoreErrorText(err && err.message ? err.message : String(err));
+        const msg = String(err && err.message ? err.message : String(err)).replace(/`/g, "'");
         const hints = this._diagnoseBinary();
-        const detail = sanitizeCoreErrorText(hints.length ? `${hints.join('\n')}\n${msg}` : msg);
+        const detail = (hints.length ? `${hints.join('\n')}\n${msg}` : msg).replace(/`/g, "'");
         this.lastStartError = detail;
         this.log(`remote index start failed: ${detail}`);
         const e = new Error(detail);
@@ -282,7 +354,7 @@ class RemoteIndexCoreHost {
   }
 
   /**
-   * @param {{ embedding?: object, modelsDirs?: string[] }} opts
+   * @param {{ embedding?: object }} opts
    */
   async applyConfigure(opts = {}) {
     return this._runExclusive(async () => {
@@ -303,16 +375,11 @@ class RemoteIndexCoreHost {
         // lastStartError already set
       }
     }
-    const mismatch = this._glibcMismatchHint();
-    if (mismatch && !this.isReady() && !this.lastStartError) {
-      this.lastStartError = mismatch;
-    }
     return {
       ok: true,
       hasCore: this.isReady(),
       hasBinary: this.hasBinary(),
-      incompatible: !!mismatch && !this.isReady(),
-      lastError: this.lastStartError || mismatch || undefined,
+      lastError: this.lastStartError || undefined,
       indexDbPath: this.indexDbPath,
       workspaceRoot: this.workspaceRoot
     };
@@ -328,43 +395,45 @@ class RemoteIndexCoreHost {
       e.code = 'REMOTE_INDEX_UNSUPPORTED';
       throw e;
     }
-    const run = async () => {
+    /** @param {number} [attempt] 已失败次数；超过 STATUS_RETRY_MAX 一律 throw */
+    const run = async (attempt = 0) => {
       await this._ensureStarted();
       const workspaceRoot = params.workspaceRoot
         ? path.resolve(String(params.workspaceRoot))
         : this.workspaceRoot;
       const payload = { ...params, workspaceRoot };
-      const timeout =
-        method === 'codebase.index' || method === 'graph.index' || method === 'graph.embed_symbols'
-          ? INDEX_TIMEOUT_MS
-          : method === 'codebase.index.start' || method === 'graph.index.start'
-            ? 60000
-            : method === 'codebase.status' || method === 'graph.status'
-              ? 45000
-              : undefined;
+      // 超时映射不再在本文件维护第二份：与本地 core-bridge 共用 core-rpc-timeouts.js。
+      const timeout = resolveCoreRpcTimeoutMs(method);
       try {
         return await this.bridge.invoke(method, payload, timeout);
       } catch (err) {
         const msg = err && err.message ? String(err.message) : String(err);
+        const retriesLeft = attempt < STATUS_RETRY_MAX;
         // 进程真挂了：再拉起。仅「超时」绝不要 SIGTERM——会杀掉正在 embedding/建库的任务
         if (/已停止|已退出|not running|未启动/i.test(msg)) {
-          this.log(`remote index: ${method} 检测到 core 已死，重启后重试`);
+          if (!retriesLeft) throw err;
+          this.log(
+            `remote index: ${method} 检测到 core 已死，重启后重试（第 ${attempt + 1}/${STATUS_RETRY_MAX} 次）`
+          );
           this.started = false;
           try {
             await this.bridge.stop();
           } catch {
             // ignore
           }
-          await this._ensureStarted();
-          return this.bridge.invoke(method, payload, timeout);
+          return run(attempt + 1);
         }
-        if (
-          STATUS_FAST_METHODS.has(method) &&
-          method !== 'index.ping' &&
-          /超时|timeout/i.test(msg)
-        ) {
-          this.log(`remote index: ${method} 超时，不杀进程，再试一次`);
-          return this.bridge.invoke(method, payload, timeout);
+        // index.ping 不走 invoke（走 handlers / host.ping()），所以这里无需排除它
+        if (STATUS_FAST_METHODS.has(method) && /超时|timeout/i.test(msg)) {
+          // 重试必须回到 run()：只有 run() 会重新 _ensureStarted 并复用启动态。
+          // 直接 bridge.invoke 会绕过这两步，让「超时重试」和「重启后重试」语义分叉。
+          if (!retriesLeft) {
+            this.log(`remote index: ${method} 连续失败 ${attempt + 1} 次，放弃重试并上报`);
+            throw err;
+          }
+          this.log(`remote index: ${method} 超时，第 ${attempt + 1}/${STATUS_RETRY_MAX} 次重试`);
+          await new Promise((r) => setTimeout(r, STATUS_RETRY_BACKOFF_MS * (attempt + 1)));
+          return run(attempt + 1);
         }
         throw err;
       }
@@ -391,5 +460,8 @@ function createRemoteIndexCoreHandlers(coreHost) {
 module.exports = {
   RemoteIndexCoreHost,
   createRemoteIndexCoreHandlers,
-  INDEX_RPC_METHODS
+  buildCoreConfigurePayload,
+  INDEX_RPC_METHODS,
+  selectStaleCoreHolders,
+  readProcInfo
 };

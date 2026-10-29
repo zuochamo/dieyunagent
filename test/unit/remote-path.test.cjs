@@ -73,19 +73,19 @@ describe('resolveRemotePath（多根宽松档）', () => {
   });
 });
 
-describe('remoteAllowedRoots（完全放开路径限制开关，默认关）', () => {
-  it('开关打开 → 只剩 /，任意绝对路径放行', () => {
-    expect(remoteAllowedRoots(WS, HOME, { unrestricted: true })).toEqual(['/']);
-    expect(remoteAllowedRoots(WS, '', { unrestricted: true })).toEqual(['/']);
-    const roots = remoteAllowedRoots(WS, HOME, { unrestricted: true });
-    expect(resolveRemotePath('/etc/passwd', roots)).toBe('/etc/passwd');
-    expect(resolveRemotePath('/home/other-user/x', roots)).toBe('/home/other-user/x');
-    expect(resolveRemotePath('/var/log/syslog', roots)).toBe('/var/log/syslog');
-  });
-
-  it('开关关闭（含未传）时行为不变', () => {
-    expect(remoteAllowedRoots(WS, HOME, { unrestricted: false })).toEqual([WS, HOME, '/tmp']);
+/**
+ * 「完全放开路径限制」是**本地**档位，远端没有这个开关。
+ *
+ * 以前桌面端把 `unrestricted: true` 也传给远端根（SFTP 传输因此放宽），而远端 daemon 只按
+ * ws + HOME + /tmp 校验（RPC 传输照旧拒）。同一个开关下同一操作两个答案，用户看到的是
+ * 「SFTP 能写、RPC 报 PATH_NOT_ALLOWED」。现在开关这一层被删掉：远端只有一份规则。
+ */
+describe('远端根不接受「完全放开」开关（远端只认一份规则）', () => {
+  it('无论传什么 opts，都只给 ws + HOME + /tmp', () => {
     expect(remoteAllowedRoots(WS, HOME)).toEqual([WS, HOME, '/tmp']);
-    expect(remoteAllowedRoots(WS, HOME, {})).toEqual([WS, HOME, '/tmp']);
+    // 老调用方若还传 unrestricted，也必须无效（不能靠调用方自律）
+    expect(remoteAllowedRoots(WS, HOME, { unrestricted: true })).toEqual([WS, HOME, '/tmp']);
+    const roots = remoteAllowedRoots(WS, HOME, { unrestricted: true });
+    expect(() => resolveRemotePath('/etc/passwd', roots)).toThrow(/不在远程工作空间内/);
   });
 });
