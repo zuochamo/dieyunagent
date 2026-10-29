@@ -2,6 +2,7 @@
 
 const { tryAutoReconnectSsh } = require('./auto-reconnect');
 const { sshGatewayKey } = require('../workspace/target');
+const { remoteAgentInfoKey } = require('../workspace/workspace-cache-keys');
 
 function collectSshReconnectTargets(viewTarget, leasedTargets) {
   const seen = new Set();
@@ -31,6 +32,7 @@ function createSshReconnect(deps) {
     getSshSessionManager,
     getSshCredentialsStore,
     getSshConnectionPool,
+    getSshConfigBlocks,
     getSessionRemoteTransport,
     invalidateRemoteAgentClient,
     ensureRemoteGatewayForCurrentWorkspace,
@@ -76,9 +78,8 @@ function createSshReconnect(deps) {
         remotePath
       };
       const manager =
-        (typeof sshConnectionPool.getConnectedManagerForEndpoint === 'function'
-          ? sshConnectionPool.getConnectedManagerForEndpoint(targetHint)
-          : null) || sshConnectionPool.getManagerForTarget(targetHint);
+        sshConnectionPool.getConnectedManager(targetHint) ||
+        sshConnectionPool.getManagerForTarget(targetHint);
       if (manager) {
         const st = manager.status();
         if (st.connected) return st;
@@ -130,6 +131,9 @@ function createSshReconnect(deps) {
       sshPool: sshConnectionPool,
       target,
       credentialsStore: sshCredentialsStore,
+      // 走与手动连接同一套装配（connect-payload）：别名解析、已存凭据、ssh_config 都在那里定。
+      // 这里必须把 deps 里的函数原样传下去，不能读不存在的局部变量。
+      getSshConfigBlocks: typeof getSshConfigBlocks === 'function' ? getSshConfigBlocks : undefined,
       log: (m) => log.info(m)
     });
     if (r.ok && r.reconnected) {
@@ -273,7 +277,9 @@ function createSshReconnect(deps) {
             steps
           };
         }
-        if (prevInfo && (prevInfo.token !== info.token || prevInfo.url !== info.url)) {
+        // 重建后的 Agent 身份变了（socket 路径或 workspace 变了）→ 旧客户端必须丢弃，
+        // 否则后续 RPC 还挂在上一代通道上。身份只有 remoteAgentInfoKey 一份。
+        if (prevInfo && remoteAgentInfoKey(prevInfo) !== remoteAgentInfoKey(info)) {
           try {
             invalidateRemoteAgentClient(prevInfo);
             steps.push('invalidate_rotated_client');

@@ -2,13 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
-const { createSshTunnel, closeSshTunnel } = require('./tunnel');
 const { shellQuoteSingle } = require('./remote-path');
-const { DEFAULT_REMOTE_PORT } = require('../remote/minimal-gateway-host');
 const { endpointScopeOf, withEndpointDeployLock } = require('./deploy-lock');
 const {
-  REMOTE_DEPLOY_REQUIRED_FILES,
+  REMOTE_PACK_REQUIRED_FILES,
   REMOTE_PACK_OK_MARKER,
   REMOTE_PACK_MARKER_REL,
   inspectRemotePack,
@@ -22,39 +19,137 @@ const REMOTE_HOME_DIR = '.dieyun/remote-agent';
 const REMOTE_LOG_DIR = 'logs';
 
 /**
- * 远程 Agent 日志**按项目分开**（2026-10-23）。
+ * 远程 Agent 日志**按项目 + 按实例**分开（2026-10-23 按项目，2026-10-28 加端口）。
  *
  * 原来所有 remotePath 共用 `~/.dieyun/remote-agent/current/agent.log`：同一台机器跑两个项目时
  * 两个进程 `>>` 追加同一个文件，日志交错混写，排查时根本分不清哪行属于哪个 workspace；
  * 而 `current` 是随版本切换的软链，日志还会跟着安装目录一起被替换掉。
  *
- * 现在落在 `~/.dieyun/remote-agent/logs/agent-<路径slug>-<hash8>.log`：
- * - slug 给人看（`srv_projA`），hash8 保证唯一且与端口分配无关（换端口不换文件）；
+ * 现在落在 `~/.dieyun/remote-agent/logs/agent-<路径slug>-<hash8>-<port>.log`：
+ * - slug 给人看（`srv_projA`），hash8 定位到项目，port 区分**同一项目的多个实例**；
+ * - 只按项目哈希是不够的：多 agent 并行 / 客户端重连后旧实例未死时，两个实例会追加同一个
+ *   文件，日志里端口交替出现，看起来像「单实例反复重启」——这正是 2026-10-28 那次误判的来源；
+ * - 端口不做成可选参数：漏传就静默退回「按项目」= 悄悄丢隔离，比名字难看坏得多；
  * - 目录在版本目录之外，升级安装包不会丢日志。
  */
 function remoteLogDir(home) {
   return `${home}/${REMOTE_HOME_DIR}/${REMOTE_LOG_DIR}`;
 }
 
-function remoteLogFileName(remotePath) {
-  const raw = String(remotePath || '/');
-  const slug = raw.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
-  const hash = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 8);
-  return slug ? `agent-${slug}-${hash}.log` : `agent-path-${hash}.log`;
-}
-
-function remoteLogPathFor(home, remotePath) {
-  return `${remoteLogDir(home)}/${remoteLogFileName(remotePath)}`;
+/** 每主机只有一份日志：daemon 只有一个进程，日志再分文件就是人为制造「到底看哪一份」的成本。 */
+function remoteLogPathFor(home) {
+  return `${remoteLogDir(home)}/agent.log`;
 }
 
 /** 展示用的 `~/...` 形式（getStatus / UI 只读这个，不再假设 current 目录）。 */
-function remoteLogDisplayPath(remotePath) {
-  return `~/${REMOTE_HOME_DIR}/${REMOTE_LOG_DIR}/${remoteLogFileName(remotePath)}`;
+function remoteLogDisplayPath() {
+  return `~/${REMOTE_HOME_DIR}/${REMOTE_LOG_DIR}/agent.log`;
 }
 
-function remotePidBasename(remotePort, kind) {
-  const p = Number(remotePort) || DEFAULT_REMOTE_PORT;
-  return kind === 'gateway' ? `gateway-${p}.pid` : `agent-${p}.pid`;
+/** 远端运行目录：socket 落在这里（目录 0700 + socket 0600 = 只有同一个 uid 能连）。 */
+function remoteRunDir(home) {
+  return `${home}/${REMOTE_HOME_DIR}/run`;
+}
+
+function remoteSocketPathFor(home) {
+  return `${remoteRunDir(home)}/agent.sock`;
+}
+
+/**
+ * 收「占库的孤儿 core」的远端脚本（`dbQ` 必须是已 shell 引用的路径）。
+ *
+ * 正常路径不会用到：daemon 收到 SIGTERM 会自己 dispose 每个 workspace 的 handlers。
+ * 只有被 SIGKILL（来不及 dispose）时才可能留下 ppid=1 的 core 继续占着 index.sqlite，
+ * 下一次 codebase.status 永远 busy —— 所以这一份兜底只服务「强杀之后」这一个场景。
+ * 反过来，ppid>1 的 core 有活着的父进程在管，杀了就是互杀。
+ */
+function buildStaleCoreCleanupScript(dbQ) {
+  return [
+    `DB=${dbQ}`,
+    'if test -e "$DB" && test -d /proc; then',
+    '  for pid in $( (fuser "$DB" 2>/dev/null; if command -v lsof >/dev/null 2>&1; then lsof -ti "$DB" 2>/dev/null; fi) | tr -s " " "\\n"); do',
+    '    if test "$pid" = "$$"; then continue; fi',
+    '    cmd=$(tr "\\0" " " < "/proc/$pid/cmdline" 2>/dev/null) || continue',
+    '    case "$cmd" in *dieyun-core*) ;; *) continue ;; esac',
+    '    ppid=$(sed "s/.*) //" "/proc/$pid/stat" 2>/dev/null | awk \'{print $2}\')',
+    '    if test "$ppid" = "1"; then kill "$pid" 2>/dev/null || true; fi',
+    '  done',
+    'fi',
+    'sleep 0.3'
+  ].join('\n');
+}
+
+/**
+ * 活体探测（socket 版）：从**已有的 SSH 连接**上开一条 direct-streamlocal 通道去连 socket。
+ * 能开出来就说明「SSH 活着 + 远端 daemon 正在监听」——不再有本地端口要探，
+ * 也不再需要「`active` 布尔 + 端口 + token」三件套来判断可复用性。
+ * @param {any} sshManager
+ * @param {string} socketPath
+ * @param {number} [timeoutMs]
+ */
+function probeAgentSocket(sshManager, socketPath, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    let client = null;
+    try {
+      client = sshManager && typeof sshManager.getClient === 'function' ? sshManager.getClient() : null;
+    } catch {
+      client = null;
+    }
+    if (!client || typeof client.openssh_forwardOutStreamLocal !== 'function') {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    const done = (ok, stream) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (stream) {
+        try {
+          stream.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    try {
+      client.openssh_forwardOutStreamLocal(socketPath, (err, stream) => done(!err, stream));
+    } catch {
+      done(false);
+    }
+  });
+}
+
+/**
+ * 读远端 `.pack-ok` 标记（版本 + 内容 hash）。
+ *
+ * 读不到标记只有两种正当结论：
+ *   a) 标记确实不存在（脚本尾巴 `|| true`，退出码 0 且 stdout 为空）→ 首次注入；
+ *   b) 传输/连接失败（超时、通道断开）→ **必须抛错**。
+ * 以前把 (b) 也当成「首次注入」，于是网络抖一下就会把装好的目录 `rm -rf` 再重传整包
+ * （几十 MB + 内置 Node），而且对象是一个完全健康的安装。
+ *
+ * @param {{ execScript: (script: string, timeoutMs?: number) => Promise<{code?: number, stdout?: string, stderr?: string}> }} sshManager
+ * @param {string} remoteMarker
+ * @returns {Promise<{ remoteVersion: string, remoteHash: string }>}
+ */
+async function readRemoteMarkerState(sshManager, remoteMarker) {
+  let r;
+  try {
+    r = await sshManager.execScript(`cat ${shellQuoteSingle(remoteMarker)} 2>/dev/null || true`, 8000);
+  } catch (e) {
+    throw Object.assign(
+      new Error(
+        `无法读取远端 Agent 就绪标记（${(e && e.message) || e}）：为避免把已安装的目录误判成` +
+          '「首次注入」而重传整包，这里直接失败。请确认 SSH 连接正常后重试。'
+      ),
+      { code: 'REMOTE_GATEWAY_MARKER_UNREADABLE', retryable: true, cause: e }
+    );
+  }
+  const st = parseRemotePackMarker(String(r.stdout || ''));
+  return { remoteVersion: st.version, remoteHash: st.contentHash };
 }
 
 /**
@@ -62,16 +157,24 @@ function remotePidBasename(remotePort, kind) {
  */
 function createRemoteGatewayManager(opts = {}) {
   const log = opts.log || (() => {});
-  /** @type {import('net').Server | null} */
-  let tunnelServer = null;
-  let localPort = 0;
-  let token = '';
   let remoteWorkspace = '';
-  let activeRemotePort = DEFAULT_REMOTE_PORT;
-  /** 当前槽位的远程日志（`~/...` 展示形式）；每个 workspace 一份，不随版本目录变化 */
+  /** 当前生效的远端 socket 绝对路径；空字符串表示还没有可用 daemon */
+  let socketPath = '';
+  /** 当前槽位的远程日志（`~/...` 展示形式），每主机一份 */
   let activeLogRel = '';
   let active = false;
+  /** 在途部署 Promise；null 表示空闲 */
   let deploying = null;
+  /** 在途部署的「意图」标识（workspace|port|force），只用于合并同一个意图的并发调用 */
+  let deployingKey = '';
+  /**
+   * 连接意图的世代号。每次 ensure 或 stop 都 +1。
+   *
+   * 部署里有十几个 await（上传、起进程、等端口、建隧道），任何一个回来时用户可能已经
+   * 切换了工作区或断开连接。回来发现世代号变了就**丢弃这次结果**，并且由它自己回收
+   * 已经起出来的进程/隧道 —— 这是「stop 期间照旧部署」和「旧结果覆盖新状态」两个洞的共用闸门。
+   */
+  let epoch = 0;
   /** @type {ReturnType<import('./session-manager').createSshSessionManager> | null} */
   let lastSshManager = null;
   /** @type {string} */
@@ -83,45 +186,114 @@ function createRemoteGatewayManager(opts = {}) {
   let lastErrorAt = 0;
   let lastOkAt = 0;
 
-  async function stopTunnel() {
-    await closeSshTunnel(tunnelServer);
-    tunnelServer = null;
-    localPort = 0;
-    token = '';
+  /** 清空「当前生效」的全部状态（不留半真半假的 socketPath） */
+  function markInactive() {
+    socketPath = '';
+    remoteWorkspace = '';
+    runtimeSource = '';
+    activeLogRel = '';
     active = false;
+  }
+
+  function supersededError() {
+    return Object.assign(new Error('远端 Agent 部署已被新的连接意图取代'), {
+      code: 'REMOTE_GATEWAY_SUPERSEDED'
+    });
+  }
+
+  /**
+   * 复用的前置条件：SSH 还连着，且**从这条 SSH 连接**能开出一条到远端 socket 的通道。
+   * 这是唯一可信的活体证据 —— `active` 布尔在 daemon 被杀之后仍然是 true。
+   */
+  async function isAliveNow() {
+    if (!active || !socketPath) return false;
+    try {
+      if (lastSshManager && !lastSshManager.status().connected) return false;
+    } catch {
+      return false;
+    }
+    return probeAgentSocket(lastSshManager, socketPath);
   }
 
   async function stop(sshManager, opts = {}) {
     const killRemote = opts.killRemote !== false;
     const sm = sshManager || lastSshManager;
+    // 先作废在途部署：它们各自的 catch 会杀掉自己起的 daemon
+    epoch += 1;
+    const sock = socketPath;
     const ws = remoteWorkspace;
-    if (killRemote && sm) {
+    markInactive();
+    if (killRemote && sm && sock) {
       try {
         if (sm.status().connected) {
-          await stopRemoteProcess(sm, activeRemotePort || DEFAULT_REMOTE_PORT, ws);
+          await stopAgentDaemon(sm, sock, ws);
         }
       } catch {
         // ignore
       }
     }
-    remoteWorkspace = '';
-    runtimeSource = '';
-    activeLogRel = '';
-    await stopTunnel();
   }
 
+  /**
+   * 给 `RemoteAgentClient` 的信息：不再有 url/token，改为「怎么开一条到 socket 的通道」。
+   * `openChannel` 每次调用都重新取当前 SSH client —— 断线重连后 client 是新对象，
+   * 闭包里若捕获旧 client，重连后所有 RPC 都会拿一个已销毁的连接。
+   */
   function getInfo() {
-    if (!active || !localPort || !token) return null;
+    if (!active || !socketPath) return null;
+    const activeSocket = socketPath;
     return {
-      host: '127.0.0.1',
-      port: localPort,
-      url: `ws://127.0.0.1:${localPort}`,
-      token,
+      // key 必须带上 workspace：同一个 socket 上「一条连接 = 一个 workspace」，
+      // 只按 socket 做缓存会把 B 的连接复用成 A 的（实测症状：B 的 cwd 被判 PATH_NOT_ALLOWED）。
+      key: `${activeSocket}#${remoteWorkspace}`,
+      socketPath: activeSocket,
+      openChannel: () => openAgentChannel(activeSocket),
       remoteGateway: true,
       remoteAgent: true,
       workspaceRoot: remoteWorkspace,
       runtimeSource
     };
+  }
+
+  /**
+   * 打开一条 direct-streamlocal 通道到远端 daemon（`direct-streamlocal@openssh.com`）。
+   * 远端不需要 TCP 端口，本地也不需要隧道。
+   * @param {string} activeSocket
+   */
+  function openAgentChannel(activeSocket) {
+    return new Promise((resolve, reject) => {
+      let client = null;
+      try {
+        client = lastSshManager && typeof lastSshManager.getClient === 'function' ? lastSshManager.getClient() : null;
+      } catch {
+        client = null;
+      }
+      if (!client || typeof client.openssh_forwardOutStreamLocal !== 'function') {
+        reject(Object.assign(new Error('SSH 会话未就绪，无法连接远端 Agent'), { code: 'SSH_NOT_CONNECTED' }));
+        return;
+      }
+      try {
+        client.openssh_forwardOutStreamLocal(activeSocket, (err, stream) => {
+          if (err) {
+            reject(
+              Object.assign(new Error(`远端 Agent 通道打不开（${activeSocket}）：${err.message || err}`), {
+                code: 'REMOTE_AGENT_CHANNEL_FAILED',
+                retryable: true
+              })
+            );
+            return;
+          }
+          resolve(stream);
+        });
+      } catch (err) {
+        reject(
+          Object.assign(new Error(`远端 Agent 通道异常：${(err && err.message) || err}`), {
+            code: 'REMOTE_AGENT_CHANNEL_FAILED',
+            retryable: true
+          })
+        );
+      }
+    });
   }
 
   function isActive() {
@@ -163,16 +335,15 @@ function createRemoteGatewayManager(opts = {}) {
 
   /**
    * 远端已就绪判定：只认 `.pack-ok` 标记（版本 + 内容 hash 两个口径）。
+   *
+   * 读不到标记只有两种正当结论：
+   *   a) 标记确实不存在（脚本 `|| true`，退出码 0、stdout 为空）→ 首次注入；
+   *   b) 传输/连接失败（超时、通道断开）→ **必须抛错**（见模块级 remoteMarkerState）。
+   *
    * @returns {Promise<{ remoteVersion: string, remoteHash: string }>}
    */
-  async function remoteMarkerState(sshManager, remoteMarker) {
-    try {
-      const r = await sshManager.execScript(`cat ${shellQuoteSingle(remoteMarker)} 2>/dev/null || true`, 8000);
-      const st = parseRemotePackMarker(String(r.stdout || ''));
-      return { remoteVersion: st.version, remoteHash: st.contentHash };
-    } catch {
-      return { remoteVersion: '', remoteHash: '' };
-    }
+  function remoteMarkerState(sshManager, remoteMarker) {
+    return readRemoteMarkerState(sshManager, remoteMarker);
   }
 
   /** 远端工具 preflight：解压与校验各依赖一个工具，缺了必须在上传前报出来。 */
@@ -230,7 +401,7 @@ function createRemoteGatewayManager(opts = {}) {
         detail: localCheck.missing.join(', ')
       });
     }
-    // 内容 hash 对「最终注入目录」现场计算（lite 直用 / 缓存装配统一覆盖），
+    // 内容 hash 对「最终注入目录」现场计算（安装包里的 pack 就是最终内容），
     // 跳过判定与写标记共用这一份，保证两处口径一致
     const contentHash = await computePackContentHash(packRoot);
 
@@ -258,10 +429,20 @@ function createRemoteGatewayManager(opts = {}) {
 
     if (needUpload) {
       await assertRemoteDeployTools(sshManager);
-      await sshManager.execScript(
-        `rm -rf ${shellQuoteSingle(remoteBase)} && mkdir -p ${shellQuoteSingle(remoteBase)}`,
+      // 清目录必须成功：失败还继续上传，解压会落在残留的旧文件上，出一个「半新半旧」的安装
+      const cleared = await sshManager.execScript(
+        `set -e\nrm -rf ${shellQuoteSingle(remoteBase)}\nmkdir -p ${shellQuoteSingle(remoteBase)}`,
         20000
       );
+      if (cleared.code !== 0) {
+        throw Object.assign(new Error('远程 Agent 安装目录清理失败（~/.dieyun/remote-agent/<版本>）'), {
+          code: 'REMOTE_GATEWAY_CLEANUP_FAILED',
+          detail: [String(cleared.stdout || '').trim(), String(cleared.stderr || '').trim()]
+            .filter(Boolean)
+            .join('\n')
+            .slice(0, 500)
+        });
+      }
 
       // 本地打包：单归档，进度口径为已送入压缩的未压缩字节
       emit({ phase: 'prepare', percent: 2, message: '正在打包…' });
@@ -334,7 +515,7 @@ function createRemoteGatewayManager(opts = {}) {
           `DIR=${dirQ}`,
           `tar -xzpf ${shellQuoteSingle(remoteArchive)} -C "$DIR"`,
           `rm -f ${shellQuoteSingle(remoteArchive)}`,
-          ...remoteMissingCheckLines('"$DIR"', REMOTE_DEPLOY_REQUIRED_FILES),
+          ...remoteMissingCheckLines('"$DIR"', REMOTE_PACK_REQUIRED_FILES),
           'if test -n "$MISSING"; then exit 1; fi',
           `echo ${REMOTE_PACK_OK_MARKER}`
         ].join('\n');
@@ -355,13 +536,23 @@ function createRemoteGatewayManager(opts = {}) {
           );
         }
 
-        // 写就绪标记：跳过判定的唯一依据
-        await sshManager.execScript(
+        // 写就绪标记：跳过判定的唯一依据。写不进去就等于「下次还得重传整包」，
+        // 必须当场失败，别让这次看起来成功、下次白传 100MB。
+        const markerR = await sshManager.execScript(
           `printf 'VERSION=%s\nCONTENT_HASH=%s\n' ${shellQuoteSingle(version)} ${shellQuoteSingle(
             contentHash
           )} > ${shellQuoteSingle(remoteMarker)}`,
           8000
         );
+        if (markerR.code !== 0) {
+          throw Object.assign(new Error('远程 Agent 就绪标记写入失败（.pack-ok）'), {
+            code: 'REMOTE_GATEWAY_MARKER_WRITE_FAILED',
+            detail: [String(markerR.stdout || '').trim(), String(markerR.stderr || '').trim()]
+              .filter(Boolean)
+              .join('\n')
+              .slice(0, 500)
+          });
+        }
         log('远程 Agent 整包上传并解压完成');
       } finally {
         try {
@@ -395,6 +586,9 @@ function createRemoteGatewayManager(opts = {}) {
           .slice(0, 500)
       });
     }
+    // uploaded 决定「已经在跑的 daemon 还能不能复用」：注入过新内容就必须重启，
+    // 否则进程里跑的还是旧代码（新 RPC 方法/字段对不上，表现为莫名其妙的 unsupported method）。
+    return { uploaded: needUpload === true };
   }
 
   async function checkSystemNode(sshManager) {
@@ -477,80 +671,65 @@ function createRemoteGatewayManager(opts = {}) {
     }
   }
 
-  async function freeRemoteAgentPort(sshManager, port) {
-    const p = Number(port) || DEFAULT_REMOTE_PORT;
+  /**
+   * 收掉这台主机上的 daemon。
+   *
+   * 只按「命令行里带 `--socket <这个 socket>`」精确匹配，不再有 pid 文件、不再 fuser/lsof 收尸：
+   * daemon 收到 SIGTERM 会自己 `stop()`（逐个 dispose 每个 workspace 的 handlers，
+   * 索引 core 跟着收），因此不需要外部兜「孤儿 core 占库」。等不到退出再 SIGKILL。
+   */
+  async function stopAgentDaemon(sshManager, activeSocket, workspaceRoot) {
+    const sockQ = shellQuoteSingle(activeSocket);
     try {
       await sshManager.execScript(
         [
-          `PORT=${p}`,
-          'if command -v fuser >/dev/null 2>&1; then fuser -k ${PORT}/tcp 2>/dev/null || true; fi',
-          'if command -v lsof >/dev/null 2>&1; then for pid in $(lsof -ti :${PORT} 2>/dev/null); do kill "$pid" 2>/dev/null || true; done; fi',
-          'if command -v ss >/dev/null 2>&1; then for pid in $(ss -ltnp 2>/dev/null | grep ":${PORT} " | grep -o "pid=[0-9]*" | cut -d= -f2 | sort -u); do kill "$pid" 2>/dev/null || true; done; fi',
-          'sleep 0.8',
-          `(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${PORT} " && echo IN_USE || echo FREE`
+          `PAT=${sockQ}`,
+          'if command -v pgrep >/dev/null 2>&1; then',
+          '  for pid in $(pgrep -f -- "--socket $PAT" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done',
+          'else',
+          '  for pid in $(ps -eo pid=,args= 2>/dev/null | grep -F -- "--socket $PAT" | grep -v grep | awk \'{print $1}\'); do kill "$pid" 2>/dev/null || true; done',
+          'fi',
+          'for i in 1 2 3 4 5 6 7 8 9 10; do',
+          '  test -e "$PAT" || break',
+          '  sleep 0.2',
+          'done',
+          'if command -v pgrep >/dev/null 2>&1; then',
+          '  for pid in $(pgrep -f -- "--socket $PAT" 2>/dev/null); do kill -9 "$pid" 2>/dev/null || true; done',
+          'fi',
+          'rm -f "$PAT" 2>/dev/null || true'
         ].join('\n'),
-        15000
+        12000
       );
     } catch {
-      // ignore — best effort
+      // ignore — 连接已断或安装目录不存在
     }
-  }
-
-  async function stopRemoteProcess(sshManager, remotePort, workspaceRoot) {
-    const home = await getRemoteHome(sshManager);
-    const currentDir = `${home}/${REMOTE_HOME_DIR}/current`;
-    const port = Number(remotePort) || DEFAULT_REMOTE_PORT;
-    const agentPidFile = remotePidBasename(port, 'agent');
-    const gatewayPidFile = remotePidBasename(port, 'gateway');
-    const legacyCleanup =
-      port === DEFAULT_REMOTE_PORT
-        ? 'if test -f agent.pid; then kill "$(cat agent.pid)" 2>/dev/null || true; rm -f agent.pid; fi; if test -f gateway.pid; then kill "$(cat gateway.pid)" 2>/dev/null || true; rm -f gateway.pid; fi'
-        : 'true';
-    try {
-      await sshManager.execScript(
-        [
-          `cd ${shellQuoteSingle(currentDir)} || exit 0`,
-          `if test -f ${agentPidFile}; then kill "$(cat ${agentPidFile})" 2>/dev/null || true; rm -f ${agentPidFile}; fi`,
-          `if test -f ${gatewayPidFile}; then kill "$(cat ${gatewayPidFile})" 2>/dev/null || true; rm -f ${gatewayPidFile}; fi`,
-          legacyCleanup
-        ].join('\n'),
-        8000
-      );
-    } catch {
-      // ignore if install dir missing
-    }
-    await freeRemoteAgentPort(sshManager, port);
     const ws = String(workspaceRoot || '').trim();
     if (ws) {
+      // daemon 被 SIGKILL 时它来不及 dispose，core 可能变孤儿：只在「socket 已经没了」时兜一次
       const dbQ = shellQuoteSingle(`${ws.replace(/\/+$/, '')}/.dieyun/index.sqlite`);
       try {
-        await sshManager.execScript(
-          [
-            `DB=${dbQ}`,
-            'if test -e "$DB" && command -v fuser >/dev/null 2>&1; then fuser -k "$DB" 2>/dev/null || true; fi',
-            'if test -e "$DB" && command -v lsof >/dev/null 2>&1; then for pid in $(lsof -ti "$DB" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done; fi',
-            'sleep 0.3'
-          ].join('\n'),
-          8000
-        );
+        await sshManager.execScript(buildStaleCoreCleanupScript(dbQ), 8000);
       } catch {
-        // best effort — 避免 agent 被 kill 后 dieyun-core 变孤儿占库
+        // best effort
       }
     }
   }
 
-  async function startRemoteProcess(sshManager, workspaceRoot, remotePort, tok, nodeRuntime) {
+  async function startAgentDaemon(sshManager, workspaceRoot, nodeRuntime) {
     const home = await getRemoteHome(sshManager);
     const currentDir = `${home}/${REMOTE_HOME_DIR}/current`;
     const wsQ = shellQuoteSingle(workspaceRoot);
-    const tokQ = shellQuoteSingle(tok);
     const nodeBin = nodeRuntime.nodeBin || `${currentDir}/bin/node`;
     const nodeQ = shellQuoteSingle(nodeBin);
     const dirQ = shellQuoteSingle(currentDir);
-    // 每个项目一份日志：避免同机器两个 workspace 混写同一个文件（见 remoteLogDir 注释）
+    // 每主机一份日志：daemon 只有一个进程（见 remoteLogDir 注释）
     const logDir = remoteLogDir(home);
-    const logPath = remoteLogPathFor(home, workspaceRoot);
+    const logPath = remoteLogPathFor(home);
     const logQ = shellQuoteSingle(logPath);
+    const runDir = remoteRunDir(home);
+    const sockPath = remoteSocketPathFor(home);
+    const sockQ = shellQuoteSingle(sockPath);
+    const runQ = shellQuoteSingle(runDir);
 
     // 检查项与缺项诊断都来自 remote-pack-layout（与打包 / 部署包装配同一份清单），
     // 失败时必须报出到底缺什么，否则只剩一句「安装包不完整」无法定位。
@@ -559,7 +738,7 @@ function createRemoteGatewayManager(opts = {}) {
       [
         `DIR=${dirQ}`,
         `if test ! -d "$DIR" && test ! -L "$DIR"; then echo "DIR_MISSING"; exit 1; fi`,
-        ...remoteMissingCheckLines('"$DIR"', REMOTE_DEPLOY_REQUIRED_FILES),
+        ...remoteMissingCheckLines('"$DIR"', REMOTE_PACK_REQUIRED_FILES),
         'if test -n "$MISSING"; then ls -la "$DIR" 2>&1 | head -n 40; exit 1; fi',
         `echo ${REMOTE_PACK_OK_MARKER}`
       ].join('\n'),
@@ -594,165 +773,212 @@ function createRemoteGatewayManager(opts = {}) {
       });
     }
 
-    const agentPidFile = remotePidBasename(remotePort, 'agent');
+    // 启动脚本必须用**绝对 node 路径**：远端非登录 bash 的 PATH 里没有 ~/.local/bin、~/.cargo/bin、
+    // nvm 路径（真机实测 `command -v node` 直接 MISSING），靠 PATH 找 node 在这类机器上必然起不来。
     const startCmd = [
-      `cd ${dirQ}`,
-      `PORT=${remotePort}`,
-      'if command -v fuser >/dev/null 2>&1; then fuser -k ${PORT}/tcp 2>/dev/null || true; fi',
-      'if command -v lsof >/dev/null 2>&1; then for pid in $(lsof -ti :${PORT} 2>/dev/null); do kill "$pid" 2>/dev/null || true; done; fi',
-      `kill $(cat ${agentPidFile} 2>/dev/null) 2>/dev/null || true`,
-      `rm -f ${agentPidFile}`,
+      `cd ${dirQ} || exit 1`,
+      `mkdir -p ${runQ}`,
+      `chmod 700 ${runQ}`,
       `mkdir -p ${shellQuoteSingle(logDir)}`,
-      'sleep 0.5',
-      // token 走 env：argv 里的 --token 会被同机其他用户从 ps 里读到
-      `DIEYUN_REMOTE_TOKEN=${tokQ} nohup ${nodeQ} ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)} --workspace ${wsQ} --port ${remotePort} >> ${logQ} 2>&1 &`,
-      `echo $! > ${agentPidFile}`,
-      'sleep 2',
-      `PID=$(cat ${agentPidFile} 2>/dev/null || true)`,
-      `if kill -0 "$PID" 2>/dev/null; then echo "$PID"; else echo START_FAILED; tail -n 30 ${logQ} 2>/dev/null || true; fi`
+      // setsid + 无 stdin：daemon 不跟着 SSH channel 一起死；输出进日志
+      `setsid ${nodeQ} ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)} --socket ${sockQ} --workspace ${wsQ} >> ${logQ} 2>&1 < /dev/null &`,
+      'echo STARTED'
     ].join('\n');
 
     const r = await sshManager.execScript(startCmd, 30000);
     const out = String(r.stdout || '').trim();
-    const outLines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const pidLine = outLines.find((l) => /^\d+$/.test(l));
-    const pid = pidLine || outLines[0];
-
-    if (!pid || pid === 'START_FAILED' || !/^\d+$/.test(pid)) {
+    if (!out.includes('STARTED')) {
       const logTail = await readRemoteGatewayLog(sshManager, logPath);
-      const detail = [out, String(r.stderr || '').trim(), logTail].filter(Boolean).join('\n---\n');
-      const portBusy = /EADDRINUSE|address already in use/i.test(detail);
-      throw Object.assign(
-        new Error(portBusy ? `远程 Agent 端口 :${remotePort} 被占用，已尝试清理仍无法启动` : '远程 Agent 进程启动失败'),
-        {
-          code: portBusy ? 'REMOTE_GATEWAY_PORT_IN_USE' : 'REMOTE_GATEWAY_START_FAILED',
-          detail: detail.slice(0, 2000)
-        }
-      );
+      throw Object.assign(new Error('远程 Agent 启动命令失败'), {
+        code: 'REMOTE_GATEWAY_START_FAILED',
+        detail: [out, String(r.stderr || '').trim(), logTail].filter(Boolean).join('\n---\n').slice(0, 2000)
+      });
     }
-    log(`远程 Agent 已启动 pid=${pid} port=${remotePort} runtime=${nodeRuntime.source || 'unknown'}`);
-    activeLogRel = remoteLogDisplayPath(workspaceRoot);
+    await waitAgentSocket(sshManager, sockPath);
+    const pid = await readAgentPid(sshManager, sockPath);
+    log(`远程 Agent 已就绪 socket=${sockPath}${pid ? ` pid=${pid}` : ''} runtime=${nodeRuntime.source || 'unknown'}`);
+    activeLogRel = remoteLogDisplayPath();
+    return sockPath;
   }
 
-  async function waitRemotePort(sshManager, remotePort, attempts = 12) {
-    for (let i = 0; i < attempts; i++) {
+  /** daemon 的 pid：从「谁在用这个 socket」反查，不落 pid 文件 */
+  async function readAgentPid(sshManager, activeSocket) {
+    try {
       const r = await sshManager.execScript(
-        `(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${remotePort} " && echo OK || echo WAIT`,
+        `if command -v pgrep >/dev/null 2>&1; then pgrep -f -- "--socket ${shellQuoteSingle(activeSocket)}" 2>/dev/null | head -n 1; fi`,
         6000
       );
-      if (String(r.stdout || '').trim() === 'OK') return;
-      await new Promise((res) => setTimeout(res, 500));
+      const pid = String(r.stdout || '').trim();
+      return /^\d+$/.test(pid) ? pid : '';
+    } catch {
+      return '';
     }
-    throw Object.assign(new Error('远程 Agent 端口未就绪'), { code: 'REMOTE_GATEWAY_PORT_TIMEOUT' });
   }
 
-  async function pickFreeLocalPort() {
-    const net = require('net');
-    return new Promise((resolve, reject) => {
-      const s = net.createServer();
-      s.listen(0, '127.0.0.1', () => {
-        const addr = s.address();
-        const port = typeof addr === 'object' && addr ? addr.port : 0;
-        s.close(() => resolve(port));
-      });
-      s.on('error', reject);
+  /**
+   * 等 socket 可连。判据是「从这条 SSH 连接能开出 direct-streamlocal 通道」，
+   * 不再轮询 `ss -ltn` 找端口。
+   */
+  async function waitAgentSocket(sshManager, activeSocket, attempts = 24) {
+    for (let i = 0; i < attempts; i++) {
+      if (await probeAgentSocket(sshManager, activeSocket, 1500)) return;
+      await new Promise((res) => setTimeout(res, 250));
+    }
+    const logTail = await readRemoteGatewayLog(sshManager, remoteLogPathFor(await getRemoteHome(sshManager)));
+    throw Object.assign(new Error('远程 Agent socket 未就绪'), {
+      code: 'REMOTE_GATEWAY_SOCKET_TIMEOUT',
+      detail: logTail.slice(0, 2000)
     });
   }
 
   async function ensureRemoteGateway(ctx) {
-    if (deploying) return deploying;
     const emit = typeof ctx.onProgress === 'function' ? ctx.onProgress : () => {};
     const workspaceRemotePath = String(ctx.workspaceRemotePath || '/').trim() || '/';
-    const requestedPort = Number(ctx.remotePort) || DEFAULT_REMOTE_PORT;
-    if (
-      active &&
-      remoteWorkspace === workspaceRemotePath &&
-      requestedPort === activeRemotePort &&
-      ctx.force !== true
-    ) {
-      return getInfo();
+    const intent = workspaceRemotePath;
+
+    if (deploying) {
+      // 同一个意图（同一 workspace、同一端口）就共享这次部署；换了意图则等它收尾再判断
+      if (deployingKey === intent) return deploying;
+      try {
+        await deploying;
+      } catch {
+        // 上一轮失败不影响本次重新判断
+      }
     }
-    deploying = (async () => {
+
+    if (active && remoteWorkspace === workspaceRemotePath) {
+      // 幂等快速路径必须带活体探测：`active` 只是个布尔，daemon 被杀后它还是 true
+      if (await isAliveNow()) {
+        lastOkAt = Date.now();
+        return getInfo();
+      }
+      log('远端 Agent 无响应（socket 连不上），重建…');
+      emit({ phase: 'prepare', percent: 1, message: '远端无响应，重建…' });
+      await stop(null, { killRemote: true });
+    }
+
+    const myEpoch = ++epoch;
+    const assertFresh = () => {
+      if (myEpoch !== epoch) throw supersededError();
+    };
+
+    const run = (async () => {
       const sshManager = ctx.sshManager;
       lastSshManager = sshManager;
       const packRoot = ctx.packRoot;
       const version = String(ctx.appVersion || 'dev');
-
-      emit({ phase: 'prepare', percent: 1, message: '准备注入…' });
-      sshManager.assertConnected();
-      await deployPack(sshManager, packRoot, version, {
-        onProgress: emit,
-        force: ctx.force === true
-      });
-      emit({ phase: 'runtime', percent: 88, message: '检测 Node…' });
-      let nodeRuntime;
+      /** 我们自己起过 daemon：失败或作废时必须回收，否则它留着索引库与 workspace 状态 */
+      let startedRemote = false;
+      let mySocket = '';
       try {
-        nodeRuntime = await resolveNodeRuntime(sshManager, packRoot);
-      } catch (firstErr) {
-        if (firstErr && firstErr.code === 'REMOTE_RUNTIME_FAILED') {
-          log('内置 Node 校验失败，强制重新注入…');
-          emit({ phase: 'upload', percent: 10, message: '重新注入…' });
-          await deployPack(sshManager, packRoot, version, { onProgress: emit, force: true });
-          emit({ phase: 'runtime', percent: 88, message: '检测 Node…' });
+        emit({ phase: 'prepare', percent: 1, message: '准备注入…' });
+        sshManager.assertConnected();
+        assertFresh();
+        let deployed = await deployPack(sshManager, packRoot, version, { onProgress: emit });
+        assertFresh();
+        emit({ phase: 'runtime', percent: 88, message: '检测 Node…' });
+        let nodeRuntime;
+        try {
           nodeRuntime = await resolveNodeRuntime(sshManager, packRoot);
-        } else {
-          throw firstErr;
+        } catch (firstErr) {
+          if (firstErr && firstErr.code === 'REMOTE_RUNTIME_FAILED') {
+            log('内置 Node 校验失败，强制重新注入…');
+            emit({ phase: 'upload', percent: 10, message: '重新注入…' });
+            deployed = await deployPack(sshManager, packRoot, version, { onProgress: emit, force: true });
+            emit({ phase: 'runtime', percent: 88, message: '检测 Node…' });
+            nodeRuntime = await resolveNodeRuntime(sshManager, packRoot);
+          } else {
+            throw firstErr;
+          }
         }
+        runtimeSource = nodeRuntime.source || '';
+        assertFresh();
+
+        emit({ phase: 'start', percent: 92, message: '连接 Agent…' });
+        const home = await getRemoteHome(sshManager);
+        const sockPath = remoteSocketPathFor(home);
+        mySocket = sockPath;
+        const alive = await probeAgentSocket(sshManager, sockPath, 2000);
+        assertFresh();
+        if (alive && deployed.uploaded) {
+          // 刚注入了新内容：还在跑的那个进程用的是**旧代码**（拉起的代码在进程启动时就固定了）。
+          // 复用它会得到一个「部署成功但行为还是老版本」的假象，必须换新的。
+          log('远端 Agent 已更新内容，重启 daemon 以加载新代码');
+          await stopAgentDaemon(sshManager, sockPath, workspaceRemotePath);
+          assertFresh();
+          emit({ phase: 'start', percent: 94, message: '重启 Agent…' });
+          await startAgentDaemon(sshManager, workspaceRemotePath, nodeRuntime);
+          startedRemote = true;
+          assertFresh();
+        } else if (alive) {
+          log(`复用已在运行的远端 Agent socket=${sockPath}`);
+        } else {
+          // 已有 daemon 但 socket 连不上 = 陈旧文件或旧版本残留：先收干净再起。
+          // 清理要带 workspace：daemon 被 SIGKILL 后 core 可能变孤儿，占着索引库，
+          // 不带 workspace 就跳过这段清理（下次启动撞 busy 锁）。
+          await stopAgentDaemon(sshManager, sockPath, workspaceRemotePath);
+          assertFresh();
+          emit({ phase: 'start', percent: 94, message: '启动 Agent…' });
+          await startAgentDaemon(sshManager, workspaceRemotePath, nodeRuntime);
+          startedRemote = true;
+          assertFresh();
+        }
+
+        // ---- 提交点：到 active=true 之间没有 await，中途不会被打断 ----
+        socketPath = sockPath;
+        remoteWorkspace = workspaceRemotePath;
+        active = true;
+        lastError = '';
+        lastErrorCode = '';
+        lastErrorAt = 0;
+        lastOkAt = Date.now();
+        log(`远端 Agent socket=${sockPath} via SSH direct-streamlocal (${runtimeSource})`);
+        emit({ phase: 'done', percent: 100, message: '完成' });
+        return getInfo();
+      } catch (e) {
+        if (startedRemote && mySocket) {
+          // 起过 daemon 就一定要收：否则失败的这一次留下一个占库的孤儿进程
+          try {
+            await stopAgentDaemon(sshManager, mySocket, workspaceRemotePath);
+          } catch {
+            // ignore
+          }
+        }
+        throw e;
       }
-      runtimeSource = nodeRuntime.source || '';
+    })();
 
-      const remotePort = requestedPort;
-      const newToken = crypto.randomBytes(24).toString('hex');
-      emit({ phase: 'start', percent: 92, message: '启动 Agent…' });
-      await stopRemoteProcess(sshManager, remotePort, workspaceRemotePath);
-      await startRemoteProcess(sshManager, workspaceRemotePath, remotePort, newToken, nodeRuntime);
-      emit({ phase: 'port', percent: 96, message: '等待端口…' });
-      await waitRemotePort(sshManager, remotePort);
-
-      const nextLocalPort = await pickFreeLocalPort();
-      await stopTunnel();
-      lastSshManager = sshManager;
-      const client = sshManager.getClient();
-      emit({ phase: 'tunnel', percent: 98, message: '建立隧道…' });
-      tunnelServer = await createSshTunnel(client, {
-        localHost: '127.0.0.1',
-        localPort: nextLocalPort,
-        remoteHost: '127.0.0.1',
-        remotePort,
-        isConnected: () => sshManager.status().connected,
-        onDisconnect: () => {
-          active = false;
-          localPort = 0;
-          token = '';
+    const wrapped = run
+      .catch((e) => {
+        if (e && e.code === 'REMOTE_GATEWAY_SUPERSEDED') {
+          log('远端 Agent 部署已取消（连接意图变化）');
+          throw e;
+        }
+        const detail = e.detail ? String(e.detail) : '';
+        lastError = detail ? `${e.message}\n${detail}`.slice(0, 800) : e.message || String(e);
+        lastErrorCode = e.code || 'REMOTE_GATEWAY_FAILED';
+        lastErrorAt = Date.now();
+        // 这里**不能**把 active 置 false：这次部署失败不代表「当前生效的部署」失效 ——
+        // socketPath/remoteWorkspace 可能属于另一个工作区，或者是上一次成功部署的结果。
+        // 以前盲置 active=false，就会留下「active=false 但 socketPath 还在」的半真半假状态，
+        // 一边让 getInfo() 返回 null（界面显示未连接），一边让 isAliveNow() 永远为 false。
+        // 需要清状态只有两条路：stop()（用户主动断/切工作区）与下面这次部署自己的失败回滚。
+        log(
+          `Remote Agent 注入失败 [${lastErrorCode}]: ${e.message || e}${detail ? ` | ${detail.slice(0, 200)}` : ''}`
+        );
+        emit({ phase: 'error', percent: 0, message: '失败', hidden: true });
+        throw e;
+      })
+      .finally(() => {
+        if (deploying === wrapped) {
+          deploying = null;
+          deployingKey = '';
         }
       });
 
-      localPort = nextLocalPort;
-      token = newToken;
-      remoteWorkspace = workspaceRemotePath;
-      activeRemotePort = remotePort;
-      active = true;
-      lastError = '';
-      lastErrorCode = '';
-      lastErrorAt = 0;
-      lastOkAt = Date.now();
-      log(`SSH 隧道 ws://127.0.0.1:${localPort} → 127.0.0.1:${remotePort} (${runtimeSource})`);
-      emit({ phase: 'done', percent: 100, message: '完成' });
-
-      return getInfo();
-    })().catch((e) => {
-      const detail = e.detail ? String(e.detail) : '';
-      lastError = detail ? `${e.message}\n${detail}`.slice(0, 800) : e.message || String(e);
-      lastErrorCode = e.code || 'REMOTE_GATEWAY_FAILED';
-      lastErrorAt = Date.now();
-      active = false;
-      log(`Remote Agent 注入失败 [${lastErrorCode}]: ${e.message || e}${detail ? ` | ${detail.slice(0, 200)}` : ''}`);
-      emit({ phase: 'error', percent: 0, message: '失败', hidden: true });
-      throw e;
-    }).finally(() => {
-      deploying = null;
-    });
-    return deploying;
+    deploying = wrapped;
+    deployingKey = intent;
+    return wrapped;
   }
 
   function getStatus() {
@@ -761,14 +987,13 @@ function createRemoteGatewayManager(opts = {}) {
       deploying: !!deploying,
       info: getInfo(),
       workspaceRoot: remoteWorkspace || '',
-      localPort: localPort || 0,
-      remotePort: activeRemotePort || DEFAULT_REMOTE_PORT,
+      socketPath: socketPath || '',
       runtimeSource,
       lastError,
       lastErrorCode,
       lastErrorAt,
       lastOkAt,
-      remoteLogPath: activeLogRel || remoteLogDisplayPath(remoteWorkspace || '/')
+      remoteLogPath: activeLogRel || remoteLogDisplayPath()
     };
   }
 
@@ -783,9 +1008,13 @@ function createRemoteGatewayManager(opts = {}) {
 
 module.exports = {
   createRemoteGatewayManager,
-  // 日志路径的单一来源（IPC / 单测都走这里，别再各自拼 `current/agent.log`）
+  // 路径的单一来源（IPC / 单测都走这里，别再各自拼 `current/agent.log`）
   remoteLogDir,
-  remoteLogFileName,
   remoteLogPathFor,
-  remoteLogDisplayPath
+  remoteLogDisplayPath,
+  remoteRunDir,
+  remoteSocketPathFor,
+  probeAgentSocket,
+  readRemoteMarkerState,
+  buildStaleCoreCleanupScript
 };

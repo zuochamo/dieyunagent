@@ -194,7 +194,7 @@ async function assertRemoteGatewayLspHandler() {
   const { MinimalRemoteGatewayHost } = require('../src/remote/minimal-gateway-host');
   const host = new MinimalRemoteGatewayHost({ workspaceRoot: tmpRoot, log: () => {} });
   try {
-    const handler = host.handlers['lsp.query'];
+    const handler = host.getHandlers(tmpRoot)['lsp.query'];
     assert(typeof handler === 'function', 'remote lsp.query registered');
     const res = await handler({ operation: 'goToDefinition', filePath: 'notes.md', line: 1 });
     assert(res && res.ok === false, 'unsupported file should fail');
@@ -214,7 +214,7 @@ async function assertRemoteGatewayLspHandler() {
       'missing filePath returns structured error'
     );
   } finally {
-    await host.handlers.__disposeRemoteIndex();
+    host.stop();
   }
 }
 

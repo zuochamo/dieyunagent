@@ -2,25 +2,18 @@
 
 const { createRemoteGatewayManager } = require('./remote-gateway-manager');
 const { sshGatewayKey, sshTargetKey, normalizeRemotePath } = require('../workspace/target');
-const { DEFAULT_REMOTE_PORT } = require('../remote/minimal-gateway-host');
 
 /**
+ * 一个主机只跑一个 daemon（Unix socket），所以「槽位」不再各占一个 TCP 端口，
+ * 也不再需要端口分配：同主机的多个槽位探测到已有 daemon 就直接复用，
+ * workspace 由每条 WS 连接的 `hello{workspace}` 决定。
+ *
  * @param {{ log?: (msg: string) => void }} opts
  */
 function createRemoteGatewayPool(opts = {}) {
   const log = opts.log || (() => {});
-  /** @type {Map<string, { manager: ReturnType<createRemoteGatewayManager>, targetKey: string, remotePort: number, refCount: number }>} */
+  /** @type {Map<string, { manager: ReturnType<createRemoteGatewayManager>, targetKey: string, refCount: number }>} */
   const entries = new Map();
-
-  function allocateRemotePort(targetKey) {
-    const used = new Set();
-    for (const entry of entries.values()) {
-      if (entry.targetKey === targetKey) used.add(entry.remotePort);
-    }
-    let port = DEFAULT_REMOTE_PORT;
-    while (used.has(port)) port += 1;
-    return port;
-  }
 
   function getEntryForTarget(target) {
     const key = sshGatewayKey(target);
@@ -42,7 +35,7 @@ function createRemoteGatewayPool(opts = {}) {
   /**
    * @param {import('../workspace/target').SshWorkspaceTarget} target
    * @param {ReturnType<import('./session-manager').createSshSessionManager>} sshManager
-   * @param {object} ctx ensureRemoteGateway context (packRoot, appVersion, onProgress, force)
+   * @param {object} ctx ensureRemoteGateway context (packRoot, appVersion, onProgress)
    */
   async function ensureForTarget(target, sshManager, ctx) {
     const gKey = sshGatewayKey(target);
@@ -51,27 +44,23 @@ function createRemoteGatewayPool(opts = {}) {
       throw Object.assign(new Error('无效的远程 Gateway 目标'), { code: 'REMOTE_GATEWAY_INVALID_TARGET' });
     }
     let entry = entries.get(gKey);
-    if (entry && entry.manager.isActive()) {
-      entry.refCount += 1;
-      return entry.manager.getInfo();
-    }
     if (!entry) {
       entry = {
         manager: createRemoteGatewayManager({ log }),
         targetKey: tKey,
-        remotePort: allocateRemotePort(tKey),
         refCount: 0
       };
       entries.set(gKey, entry);
-      log(`Remote Gateway pool slot ${gKey} → remote :${entry.remotePort}`);
+      log(`Remote Gateway pool slot ${gKey}`);
     }
     entry.refCount += 1;
+    // 幂等判定只在 manager 里做一份（含活体探测）：池子自己再看一眼 isActive
+    // 就等于把「active 就复用」这条错误假设复制一遍，探活永远不生效。
     const remotePath = normalizeRemotePath(target.remotePath || '/');
     return entry.manager.ensureRemoteGateway({
       ...ctx,
       sshManager,
-      workspaceRemotePath: remotePath,
-      remotePort: entry.remotePort
+      workspaceRemotePath: remotePath
     });
   }
 
@@ -83,12 +72,19 @@ function createRemoteGatewayPool(opts = {}) {
     entry.refCount = Math.max(0, entry.refCount - 1);
   }
 
+  /**
+   * 单个 workspace 释放：**不杀**远端 daemon。
+   *
+   * daemon 是按主机一份的，同一台机器上别的 workspace 可能正连着它；
+   * 切工作区就把 daemon 杀掉 = 让邻居重连一次。真正要收的是「SSH 断开 / 应用退出」
+   * （`stopForEndpoint` / `stopAll`），那里才 killRemote。
+   */
   async function stopForTarget(target, sshManager) {
     const gKey = sshGatewayKey(target);
     if (!gKey) return;
     const entry = entries.get(gKey);
     if (!entry) return;
-    await entry.manager.stop(sshManager, { killRemote: true });
+    await entry.manager.stop(sshManager, { killRemote: false });
     entries.delete(gKey);
   }
 
@@ -116,48 +112,29 @@ function createRemoteGatewayPool(opts = {}) {
     return stopped;
   }
 
+  /**
+   * 退出时把**所有**远端 agent 停掉（先杀进程再断 SSH）。
+   *
+   * 不调用它的话，`nohup` 起的 agent 在远端成为孤儿：占着端口与
+   * `<workspace>/.dieyun/index.sqlite`，下次启动要先靠「清孤儿 core」兜。
+   */
   async function stopAll(sshPoolDisconnect) {
     for (const [gKey, entry] of [...entries.entries()]) {
       try {
         await entry.manager.stop(null, { killRemote: true });
       } catch {
-        // ignore
+        // ignore — 一个槽失败不能挡住退出
       }
       entries.delete(gKey);
-      void gKey;
+      log(`Remote Gateway pool stopped ${gKey}`);
     }
     if (typeof sshPoolDisconnect === 'function') await sshPoolDisconnect();
-  }
-
-  /**
-   * 停止不在 keepKeys 中的 Remote Gateway（无视 refCount，用于视图切换释放）。
-   * @param {Set<string>} keepKeys sshGatewayKey 集合
-   */
-  async function stopExceptGatewayKeys(keepKeys) {
-    const keep = keepKeys instanceof Set ? keepKeys : new Set();
-    for (const [gKey, entry] of [...entries.entries()]) {
-      if (keep.has(gKey)) continue;
-      if (entry.refCount > 0) continue;
-      try {
-        await entry.manager.stop(null, { killRemote: true });
-      } catch {
-        // ignore
-      }
-      entries.delete(gKey);
-      log(`Remote Gateway pool stopped unleased ${gKey}`);
-    }
-  }
-
-  function isActiveForTarget(target) {
-    const entry = getEntryForTarget(target);
-    return !!(entry && entry.manager.isActive());
   }
 
   function getStatusSummary() {
     return [...entries.entries()].map(([gKey, e]) => ({
       gatewayKey: gKey,
       targetKey: e.targetKey,
-      remotePort: e.remotePort,
       refCount: e.refCount,
       active: e.manager.isActive(),
       info: e.manager.getInfo()
@@ -172,8 +149,6 @@ function createRemoteGatewayPool(opts = {}) {
     stopForTarget,
     stopForEndpoint,
     stopAll,
-    stopExceptGatewayKeys,
-    isActiveForTarget,
     getStatusSummary
   };
 }

@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createSshCredentialsStore } = require('../ssh/credentials-store');
+const { getSshConfigBlocks } = require('../ssh/ssh-config');
 const { tryAutoReconnectSsh } = require('../ssh/auto-reconnect');
 const { createPortForwardManager } = require('../ssh/port-forward-manager');
 const { createSshConnectionPool } = require('../ssh/connection-pool');
@@ -35,24 +36,19 @@ function describeRemoteGatewayPack(packRoot, fsApi = fs) {
   if (!fsApi.existsSync(manifestPath)) {
     return { ok: false, detail: '(缺失，dev 启动时会自动打包)' };
   }
-  let lite = false;
   try {
-    const m = JSON.parse(fsApi.readFileSync(manifestPath, 'utf8'));
-    lite = !!m.lite;
+    JSON.parse(fsApi.readFileSync(manifestPath, 'utf8'));
   } catch {
     return { ok: false, detail: '(manifest 无效)' };
   }
   // 完整性清单与远程注入校验同源（src/remote/remote-pack-layout.js）：
   // 这里显示 ok 就必须真的能注入，否则只会把问题推迟到远程报错。
-  const check = inspectRemotePack(root, { deploy: !lite, fsApi });
+  const check = inspectRemotePack(root, { fsApi });
   if (!check.ok) {
-    if (!lite && check.missing.length === 1 && check.missing[0] === REMOTE_PACK_NODE_REL) {
-      return { ok: false, detail: '(缺失 Node，dev 启动时会自动打包)' };
+    if (check.missing.length === 1 && check.missing[0] === REMOTE_PACK_NODE_REL) {
+      return { ok: false, detail: '(缺失内置 Node，dev 启动时会自动打包)' };
     }
-    return { ok: false, detail: `(${lite ? 'lite 包' : '包'}不完整：${check.detail})` };
-  }
-  if (lite) {
-    return { ok: true, detail: '(lite，Node 随远程注入)' };
+    return { ok: false, detail: `(包不完整：${check.detail})` };
   }
   const mb = Math.round(fsApi.statSync(path.join(root, REMOTE_PACK_NODE_REL)).size / 1024 / 1024);
   return { ok: true, detail: `(Node ${mb}MB)` };
@@ -133,6 +129,7 @@ function bootWorkspaceRemoteRuntime(deps) {
       sshFacade: sshSessionManager,
       sshCredentialsStore,
       tryAutoReconnectSsh,
+      getSshConfigBlocks,
       buildRemoteGatewayPackContext: () => remoteGatewayRuntime.buildRemoteGatewayPackContext(),
       invalidateRemoteAgentClient,
       log: (m) => log.info(m)

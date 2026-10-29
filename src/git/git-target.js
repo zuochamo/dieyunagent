@@ -170,24 +170,44 @@ function createSshGitTarget(root, sshExec) {
       const command = ['git', ...list.map(gitShellQuote)].join(' ');
       try {
         const r = await sshExec(command, cwd, timeoutMs);
-        const code = Number(r && r.code);
-        const safeCode = Number.isFinite(code) ? code : 0;
+        // 不给「没拿到退出码」补 0：exec 层已经把它当失败拒掉了，这里只做透传，
+        // 免得重新长出「未知 ⇒ 成功」那条路（`Number(null) === 0` 就是它）。
+        const code = r && r.code != null ? Number(r.code) : null;
         return {
-          ok: safeCode === 0,
-          code: safeCode,
+          ok: code === 0,
+          code,
           stdout: String((r && r.stdout) || ''),
           stderr: String((r && r.stderr) || '')
         };
       } catch (err) {
-        return { ok: false, code: 1, stdout: '', stderr: String((err && err.message) || err) };
+        const raw = Number(err && err.code);
+        return {
+          ok: false,
+          code: Number.isFinite(raw) ? raw : null,
+          stdout: '',
+          stderr: String((err && err.message) || err)
+        };
       }
     },
 
     async readText(rel, opts = {}) {
       const maxBytes = clampReadBytes(opts.maxBytes);
-      // head 而非 cat：仓库里可能有大文件，先掐住字节数再谈内容
-      const script = `head -c ${maxBytes + 1} -- ${gitShellQuote(rel)} 2>/dev/null || true`;
+      // 与本地目标同语义：文件不存在 / 读不了 → 抛错，由调用方显式决定要不要当空内容。
+      // 以前的 `head ... || true` 把「不存在」「无权限」「读到了空文件」糊成同一个 ''，
+      // diff 里就成了「这文件是空的」，而不是「我们没读到」。
+      const q = gitShellQuote(rel);
+      const script = `if [ -e ${q} ]; then head -c ${maxBytes + 1} -- ${q}; else exit 44; fi`;
       const r = await sshExec(script, cwd, 20000);
+      const code = r && r.code != null ? Number(r.code) : null;
+      if (code === 44) {
+        throw Object.assign(new Error(`远程文件不存在：${rel}`), { code: 'ENOENT' });
+      }
+      if (code !== 0) {
+        const detail = normalizeGitText(String((r && r.stderr) || ''), '');
+        throw Object.assign(new Error(detail || `远程读取失败（exit=${code == null ? '?' : code}）：${rel}`), {
+          code: 'EIO'
+        });
+      }
       const raw = String((r && r.stdout) || '');
       if (!raw) return { ok: true, binary: false, truncated: false, text: '' };
       if (raw.includes('\u0000')) return { ok: false, binary: true, truncated: false, text: '' };
@@ -197,8 +217,8 @@ function createSshGitTarget(root, sshExec) {
 
     async removeFile(rel) {
       const r = await sshExec(`rm -f -- ${gitShellQuote(rel)}`, cwd, 15000);
-      const code = Number(r && r.code);
-      if (Number.isFinite(code) && code !== 0) {
+      const code = r && r.code != null ? Number(r.code) : null;
+      if (code !== 0) {
         throw new Error(normalizeGitText((r && r.stderr) || '', '') || '远程删除文件失败');
       }
       return { ok: true };
@@ -206,7 +226,8 @@ function createSshGitTarget(root, sshExec) {
 
     async pathExists(rel) {
       const r = await sshExec(`test -e ${gitShellQuote(rel)}`, cwd, 15000);
-      return !!r && Number(r.code) === 0;
+      // `Number(null) === 0` 会把「不知道」报成「存在」，路径判断错会让上层去读一个不存在的文件
+      return !!(r && r.code != null && Number(r.code) === 0);
     }
   };
 }

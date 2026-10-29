@@ -2,45 +2,14 @@
 
 const path = require('path');
 const { normalizeRemotePath } = require('../workspace/target');
-
-/** 远程共享临时目录：构建产物 / 截图 / 一次性脚本的常规落点。 */
-const REMOTE_SHARED_TMP_ROOT = '/tmp';
+// 「远程可用根」的唯一实现在 gateway/path-policy.js（远端 daemon 的 pack 里也有它）。
+// 这里保留 re-export，是为了不把 SSH 侧调用点改成跨层 require。
+const { remoteAllowedRoots, REMOTE_SHARED_TMP_ROOT } = require('../gateway/path-policy');
 
 function stripSshUriPath(input) {
   const s = String(input || '').trim();
   const m = s.match(/^ssh:(?:\/\/)?[^@/]+@[^/:]+(?::\d+)?(\/.*)?$/i);
   return m ? m[1] || '/' : s;
-}
-
-/**
- * 远程可用根（**单一来源**）：
- *   1. 工作空间根（相对路径基准）；
- *   2. 远程 HOME 整棵——含 `<HOME>/.dieyun/workspace` 这个与本地对称的兜底目录，
- *      以及用户自己的其它工程/脚本目录；
- *   3. `/tmp`——构建产物、截图、一次性脚本的常规落点。
- *
- * 原因：远程只绑工作空间单根时，"中途截个图 / 落个临时文件 / 跑个不在工作空间里的脚本"
- * 都会吃 PATH_NOT_ALLOWED，连落脚点都没有。本地默认 workspace 是恒定可用的
- * （见 gateway/server.js `_collectReadRoots`），远程这次取同一宽松档位。
- *
- * 仍未放开的：`/`（除工作空间与 HOME 外的系统目录）、`/etc`、其它用户目录。
- * homeDir 拿不到（未连接 / 服务端不认 realpath）时退化为「工作空间根 + /tmp」。
- *
- * @param {string} workspaceRoot
- * @param {string} [homeDir] 远程 HOME 绝对路径（同步缓存值，见 ssh/session-manager.getHomeDir）
- * @param {{ unrestricted?: boolean }} [opts] `unrestricted` = 设置页「完全放开路径限制」（默认关）
- * @returns {string[]} 已 normalize 的绝对根，首个恒为工作空间根
- */
-function remoteAllowedRoots(workspaceRoot, homeDir, opts = {}) {
-  if (opts.unrestricted === true) return ['/'];
-  const roots = [normalizeRemotePath(workspaceRoot || '/')];
-  const home = String(homeDir || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
-  if (home && home !== '/') {
-    const h = normalizeRemotePath(home);
-    if (h !== '/' && !roots.includes(h)) roots.push(h);
-  }
-  if (!roots.includes(REMOTE_SHARED_TMP_ROOT)) roots.push(REMOTE_SHARED_TMP_ROOT);
-  return Array.from(new Set(roots));
 }
 
 /**

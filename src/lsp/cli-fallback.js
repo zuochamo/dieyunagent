@@ -6,6 +6,9 @@ const { spawn } = require('child_process');
 const { resolveTsServerPath } = require('./language-registry');
 const { filterByMinSeverity, severityRank } = require('./lsp-client');
 const { buildCmdLine } = require('./spawn-args');
+// 远端命令是拼成 shell 字符串执行的：JSON.stringify 只给双引号，`$(...)` / 反引号仍会被远端
+// shell 解释（文件名可控 → 远端任意命令执行）。POSIX 单引号才能挡住。
+const { shellQuoteSingle } = require('../ssh/remote-path');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 
@@ -1185,7 +1188,7 @@ async function runRemoteEslintBatch(opts) {
     const rel = p.startsWith(projectRoot) ? p.slice(projectRoot.length + 1) : path.posix.basename(p);
     return rel.replace(/^\.\//, '');
   });
-  const cmd = `npx -y eslint ${rels.map((r) => JSON.stringify(r)).join(' ')} --format json --no-error-on-unmatched-pattern 2>&1`;
+  const cmd = `npx -y eslint ${rels.map((r) => shellQuoteSingle(r)).join(' ')} --format json --no-error-on-unmatched-pattern 2>&1`;
   const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
   if (!findJsonArray(scan.text)) {
     return remoteEngineFailure(
@@ -1226,7 +1229,7 @@ async function runRemoteRuffBatch(opts) {
     const rel = p.startsWith(projectRoot) ? p.slice(projectRoot.length + 1) : path.posix.basename(p);
     return rel.replace(/^\.\//, '');
   });
-  const cmd = `npx -y ruff check ${rels.map((r) => JSON.stringify(r)).join(' ')} --output-format json 2>&1`;
+  const cmd = `npx -y ruff check ${rels.map((r) => shellQuoteSingle(r)).join(' ')} --output-format json 2>&1`;
   const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
   if (!findJsonArray(scan.text)) {
     return remoteEngineFailure('ruff', scan, 'ruff 未产生 JSON 输出（远程可能没装 node/npx，或命令失败）');
@@ -1265,7 +1268,7 @@ async function runRemotePrettierBatch(opts) {
     const rel = absPath.startsWith(projectRoot)
       ? absPath.slice(projectRoot.length + 1)
       : path.posix.basename(absPath);
-    const cmd = `npx -y prettier --check ${JSON.stringify(rel)} 2>&1`;
+    const cmd = `npx -y prettier --check ${shellQuoteSingle(rel)} 2>&1`;
     const scan = await runRemoteCliJsonScan({ exec: opts.exec, projectRoot, timeoutMs, command: cmd });
     // `prettier --check` 的退出码有语义：0=已格式化，1=待格式化（正常结果），>1=执行错误。
     // 只把 >1 当失败，绝不因为「有文件待格式化」就判引擎不可用。

@@ -55,7 +55,9 @@ function testRemoteLeaseKeepsTransportOnLocalSwitch() {
     sshPool: {
       acquire: (t) => acquired.push(t),
       release: (t) => released.push(t),
-      isConnected: () => true
+      isConnected: () => true,
+      getManagerForTarget: () => null,
+      getConnectedManager: () => null
     },
     remoteGatewayPool: {
       releaseForTarget: () => {}
@@ -98,10 +100,7 @@ async function testKeepSshViewOnLocalSwitchWithoutLease() {
       release: () => {},
       isConnected: () => true,
       getManagerForTarget: () => ({ status: () => ({ connected: true }) }),
-      getConnectedManagerForEndpoint: () => ({ status: () => ({ connected: true }) }),
-      disconnectTarget: async (t) => {
-        disconnected.push(t.remotePath);
-      },
+      getConnectedManager: () => ({ status: () => ({ connected: true }) }),
       disconnectExceptEndpointKeys: async () => {
         disconnected.push('except');
       }
@@ -109,8 +108,8 @@ async function testKeepSshViewOnLocalSwitchWithoutLease() {
     remoteGatewayPool: {
       getInfoForTarget: () => infoA,
       isActiveForTarget: () => gatewayActive,
-      ensureForTarget: async () => {
-        ensured.push('/proj-a');
+      ensureForTarget: async (t) => {
+        ensured.push(String((t && t.remotePath) || ''));
         gatewayActive = true;
         return infoA;
       },
@@ -148,8 +147,14 @@ async function testKeepSshViewOnLocalSwitchWithoutLease() {
   lg.activeSessionId = 'sess-a';
   lg.getEffectiveWorkspaceTarget = () => targetA;
   await transport.applySessionRemoteTransport('sess-a');
-  if (ensured.length !== 1) {
-    throw new Error(`switch back should reuse running agent, ensure count=${ensured.length}`);
+  // 复用与否只由 manager 的幂等路径（含活体探测）判定；transport 不再自己看
+  // isActiveForTarget 抄一份判断。这里能验的是：切回来必须落在**同一个槽位**
+  // （同一 effective workspace），而不是又开一个。
+  if (ensured.length !== 2) {
+    throw new Error(`switch back should reuse the same slot, ensure count=${ensured.length}`);
+  }
+  if (ensured[0] !== ensured[1]) {
+    throw new Error(`switch back must target the same slot, got ${JSON.stringify(ensured)}`);
   }
   console.log('ok keep ssh view idle on local switch and reuse agent');
 }
@@ -172,7 +177,7 @@ async function testSameHostPathChangeDoesNotDropSsh() {
       release: () => {},
       isConnected: () => true,
       getManagerForTarget: () => ({ status: () => ({ connected: true }) }),
-      getConnectedManagerForEndpoint: () => ({ status: () => ({ connected: true }) }),
+      getConnectedManager: () => ({ status: () => ({ connected: true }) }),
       disconnectTarget: async (t) => {
         disconnected.push(t.remotePath);
       }
@@ -232,7 +237,13 @@ async function testGetLeasedSessionIds() {
   const target = { kind: 'ssh', host: 'h1', port: 22, username: 'u', remotePath: '/bg' };
   const transport = createSessionRemoteTransport({
     localGateway: { activeSessionId: 's0', getSessionWorkspaceTarget: () => null },
-    sshPool: { acquire: () => {}, release: () => {}, isConnected: () => true },
+    sshPool: {
+      acquire: () => {},
+      release: () => {},
+      isConnected: () => true,
+      getManagerForTarget: () => null,
+      getConnectedManager: () => null
+    },
     remoteGatewayPool: { releaseForTarget: () => {} },
     sshFacade: null,
     sshCredentialsStore: null,
@@ -265,7 +276,8 @@ async function testParallelSameHostDifferentPathLeases() {
       acquire: () => {},
       release: () => {},
       isConnected: () => true,
-      getManagerForTarget: () => ({ status: () => ({ connected: true }) })
+      getManagerForTarget: () => ({ status: () => ({ connected: true }) }),
+      getConnectedManager: () => ({ status: () => ({ connected: true }) })
     },
     remoteGatewayPool: {
       getInfoForTarget: (t) =>
@@ -323,7 +335,9 @@ async function testLeaseHoldIsIdempotentAndDropForce() {
     sshPool: {
       acquire: (t) => acquired.push(t),
       release: (t) => released.push(t),
-      isConnected: () => true
+      isConnected: () => true,
+      getManagerForTarget: () => null,
+      getConnectedManager: () => null
     },
     remoteGatewayPool: {
       releaseForTarget: () => {}

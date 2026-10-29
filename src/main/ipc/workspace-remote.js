@@ -18,6 +18,7 @@ function registerWorkspaceRemoteIpc(ctx) {
     tryReconnectCurrentSshWorkspace,
     getSshSessionManager,
     getSshCredentialsStore,
+    getSshConfigBlocks,
     getSshConnectionPool,
     getRemoteGatewayPool,
     getPortForwardManager,
@@ -163,26 +164,12 @@ function registerWorkspaceRemoteIpc(ctx) {
     const sshSessionManager = getSshSessionManager();
     const sshCredentialsStore = getSshCredentialsStore();
     if (!sshSessionManager) throw new Error('SSH 服务未就绪');
-    const p = { ...(payload || {}) };
-    if (sshCredentialsStore) {
-      const authType = p.authType === 'key' ? 'key' : 'password';
-      const needsSaved =
-        p.remember &&
-        ((authType === 'password' && !p.password) ||
-          (authType === 'key' && !p.passphrase && !p.privateKeyPath));
-      if (needsSaved || (p.remember && authType === 'key' && !p.passphrase)) {
-        const saved = sshCredentialsStore.loadConnectSecrets(p.host, p.port, p.username);
-        if (saved) {
-          p.authType = saved.authType;
-          if (saved.authType === 'key') {
-            if (!p.privateKeyPath) p.privateKeyPath = saved.privateKeyPath;
-            if (!p.passphrase) p.passphrase = saved.passphrase;
-          } else if (!p.password) {
-            p.password = saved.password;
-          }
-        }
-      }
-    }
+    // 「连接意图 → 有效参数」的唯一来源（~/.ssh/config 别名、已存凭据、认证方式都在这里定）
+    const { resolveConnectPayload } = require('../../ssh/connect-payload');
+    const p = resolveConnectPayload(payload || {}, {
+      credentialsStore: sshCredentialsStore,
+      sshConfigBlocks: typeof getSshConfigBlocks === 'function' ? getSshConfigBlocks() : []
+    });
     let result;
     try {
       result = await sshSessionManager.connect(p);
@@ -214,12 +201,38 @@ function registerWorkspaceRemoteIpc(ctx) {
       }
       throw e;
     }
+    // 「记住登录信息」是连接的**副产物**，失败不许把已经建立的连接判成失败。
+    // 典型触发：系统钥匙串不可用（无法加密）、私钥认证 + 没填 passphrase（passphrase 本就可选）。
+    let credentialsWarning = '';
     if (sshCredentialsStore) {
-      if (p.remember) sshCredentialsStore.saveProfile(p);
-      else if (p.host && p.username) sshCredentialsStore.clearProfile(p.host, p.port, p.username);
+      try {
+        // agent 认证没有可保存的秘密，别写成一条空记录再报「无有效凭据可保存」
+        const hasSecret = !!(p.password || p.passphrase);
+        if (p.remember && hasSecret) sshCredentialsStore.saveProfile(p);
+        else if (!p.remember && p.host && p.username) sshCredentialsStore.clearProfile(p.host, p.port, p.username);
+      } catch (e) {
+        credentialsWarning = (e && e.message) || String(e);
+        console.warn('[ssh:connect] 保存登录信息失败（连接本身已成功）:', credentialsWarning);
+      }
     }
     const session = resolveSshConnectSessionStatus(p, result);
-    return { ...result, connected: !!session.connected, session };
+    return {
+      ...result,
+      connected: !!session.connected,
+      session,
+      credentialsWarning,
+      // 让 UI 说清「实际连到哪」：别名只是入口，地址/认证方式/跳板才是事实
+      resolved: {
+        host: p.host,
+        hostname: p.hostname,
+        port: p.port,
+        username: p.username,
+        authType: p.authType,
+        viaJump: (p.jumps || []).map((h) => h.hostname),
+        fromSshConfig: !!(p.config && p.config.matched),
+        warnings: p.warnings || []
+      }
+    };
   });
 
   ipcMain.handle('ssh:remote-agent-log', async (_evt, { lines } = {}) => {
@@ -270,33 +283,6 @@ function registerWorkspaceRemoteIpc(ctx) {
       packRoot: getRemoteGatewayPackRoot(),
       packExists: fs.existsSync(getRemoteGatewayPackRoot())
     };
-  });
-
-  ipcMain.handle('ssh:ensure-remote-gateway', async () => {
-    const localGateway = getLocalGateway();
-    try {
-      const info = await ensureRemoteGatewayForCurrentWorkspace();
-      if (info && localGateway && typeof localGateway.syncRemoteIndexCoreConfig === 'function') {
-        await localGateway.syncRemoteIndexCoreConfig();
-      }
-      if (!info) {
-        return {
-          ok: false,
-          code: 'REMOTE_GATEWAY_SKIPPED',
-          error: '远程工作空间未连接或当前不是 SSH 工作空间',
-          remoteGateway: getActiveRemoteGatewayStatus()
-        };
-      }
-      return { ok: true, remoteGateway: info, status: getActiveRemoteGatewayStatus() };
-    } catch (e) {
-      return {
-        ok: false,
-        error: e.message || String(e),
-        code: e.code || 'REMOTE_GATEWAY_FAILED',
-        detail: e.detail || '',
-        status: getActiveRemoteGatewayStatus()
-      };
-    }
   });
 
   ipcMain.handle('ssh:get-profile', (_evt, { host, port, username } = {}) => {
@@ -357,23 +343,13 @@ function registerWorkspaceRemoteIpc(ctx) {
     }
     if (target && target.kind === 'ssh' && sshConnectionPool && remoteGatewayPool) {
       const manager =
-        (typeof sshConnectionPool.getConnectedManagerForEndpoint === 'function'
-          ? sshConnectionPool.getConnectedManagerForEndpoint(target)
-          : null) || sshConnectionPool.getManagerForTarget(target);
-      // 连接按端点前缀断（disconnectEndpoint），Remote Gateway 也要按端点停 ——
-      // 只停 exact key 会把同服务器其它项目的 agent 进程留在远端成为孤儿。
-      if (typeof remoteGatewayPool.stopForEndpoint === 'function') {
-        await remoteGatewayPool.stopForEndpoint(target, manager);
-      } else if (manager) {
-        await remoteGatewayPool.stopForTarget(target, manager);
-      }
+        sshConnectionPool.getConnectedManager(target) || sshConnectionPool.getManagerForTarget(target);
+      // 一条 SSH 连接就是一个端点，断开也按端点：同服务器其它会话的 agent 进程
+      // 必须一起停，否则它们在远端变成孤儿（占端口、占索引库）。
+      await remoteGatewayPool.stopForEndpoint(target, manager);
       if (portForwardManager) await portForwardManager.removeAll();
       invalidateRemoteAgentClient();
-      if (typeof sshConnectionPool.disconnectEndpoint === 'function') {
-        await sshConnectionPool.disconnectEndpoint(target, { force: true });
-      } else {
-        await sshConnectionPool.disconnectTarget(target, { force: true });
-      }
+      await sshConnectionPool.disconnectEndpoint(target, { force: true });
       return { ok: true, forced: force };
     }
     if (portForwardManager) await portForwardManager.removeAll();

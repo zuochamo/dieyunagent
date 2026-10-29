@@ -1,11 +1,19 @@
 'use strict';
 
 const { createSshSessionManager } = require('./session-manager');
-const { sshGatewayKey, sshTargetKey } = require('../workspace/target');
+const { sshTargetKey } = require('../workspace/target');
 
-/** Scheme B: one TCP + exec chain per host+remotePath (parallel agents on same host). */
+/**
+ * 一条 SSH 连接对应**一个端点**（user@host:port）。
+ *
+ * 旧实现按 `user@host:port|remotePath` 分槽：同一台机器上的两个会话（各自一份 worktree =
+ * 两个 remotePath）会各开一条 TCP + exec 链，于是同一份连接身份被复制成 N 份 ——
+ * 断开要不要断、谁在用它、refCount 该记在哪个键上，全都变成判断题（已经出过一次
+ * acquire 用仓库键、release 用 worktree 键的泄漏）。
+ * 连接是端点级资源，路径级状态（工作目录、索引、agent 端口）都属于调用方。
+ */
 function poolKeyForTarget(target) {
-  return sshGatewayKey(target);
+  return sshTargetKey(target);
 }
 
 /**
@@ -23,17 +31,12 @@ function createSshConnectionPool(opts = {}) {
   const idleTtlMs = Math.max(30_000, Number(opts.idleTtlMs) || 5 * 60 * 1000);
   /** @type {Map<string, { manager: ReturnType<createSshSessionManager>, refCount: number, lastUsedAt: number }>} */
   const entries = new Map();
-  /** @type {string} */
-  let lastConnectedKey = '';
-
-  function listTargetKeys() {
-    return [...entries.keys()];
-  }
 
   function getEntry(targetKey) {
     return targetKey ? entries.get(targetKey) || null : null;
   }
 
+  /** 端点对应的连接对象（不管连没连上） */
   function getManagerForTarget(target) {
     const key = poolKeyForTarget(target);
     if (!key) return null;
@@ -41,33 +44,15 @@ function createSshConnectionPool(opts = {}) {
     return entry ? entry.manager : null;
   }
 
-  function endpointPrefixFor(target) {
-    const tk = sshTargetKey(target);
-    return tk ? `${tk}|` : '';
-  }
-
-  function getConnectedManagerForEndpoint(target) {
-    const exact = getManagerForTarget(target);
-    if (exact && exact.status().connected) return exact;
-    const prefix = endpointPrefixFor(target);
-    if (!prefix) return null;
-    if (lastConnectedKey && lastConnectedKey.startsWith(prefix)) {
-      const last = entries.get(lastConnectedKey);
-      if (last?.manager?.status()?.connected) return last.manager;
-    }
-    for (const [key, entry] of entries) {
-      if (!key.startsWith(prefix)) continue;
-      if (entry?.manager?.status()?.connected) return entry.manager;
-    }
-    return null;
+  /** 端点对应的连接对象，但只有真连着才给 */
+  function getConnectedManager(target) {
+    const m = getManagerForTarget(target);
+    return m && m.status().connected ? m : null;
   }
 
   function getLastConnectedManager() {
-    if (lastConnectedKey) {
-      const entry = entries.get(lastConnectedKey);
-      if (entry?.manager?.status()?.connected) return entry.manager;
-    }
-    for (const [, entry] of entries) {
+    // 后进先出：最近建立/使用的端点优先（entries 的插入顺序即创建顺序）
+    for (const entry of [...entries.values()].reverse()) {
       if (entry?.manager?.status()?.connected) return entry.manager;
     }
     return null;
@@ -76,14 +61,6 @@ function createSshConnectionPool(opts = {}) {
   function isConnected(target) {
     const m = getManagerForTarget(target);
     return !!(m && m.status().connected);
-  }
-
-  function markConnected(key) {
-    if (key) lastConnectedKey = key;
-  }
-
-  function clearLastIfKey(key) {
-    if (key && lastConnectedKey === key) lastConnectedKey = '';
   }
 
   function touchEntry(entry) {
@@ -100,32 +77,47 @@ function createSshConnectionPool(opts = {}) {
       } catch {
         // ignore
       }
+      // disconnect 有 await：期间可能有人 acquire 了同一条（refCount 变 1），
+      // 也可能这个槽位已经被换成新对象。两种情况都不能删。
+      const current = entries.get(key);
+      if (current !== entry) continue;
+      if (entry.refCount > 0) {
+        log(`SSH pool keep ${key} (acquired during evict)`);
+        continue;
+      }
       entries.delete(key);
-      clearLastIfKey(key);
       log(`SSH pool evicted idle ${key}`);
     }
   }
 
   async function evictIfOverCap() {
     const connected = [...entries.entries()].filter(([, e]) => e.manager.status().connected);
-    if (connected.length <= maxConnections) return;
+    const over = connected.length - maxConnections;
+    if (over <= 0) return;
     const candidates = connected
       .filter(([, e]) => e.refCount <= 0)
       .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+    let evicted = 0;
     for (const [key, entry] of candidates) {
-      if (entries.size <= maxConnections) break;
+      if (evicted >= over) break;
+      // 同样的道理：await 之后要重新确认这条还没被需要
+      if (entries.get(key) !== entry || entry.refCount > 0) continue;
       try {
         await entry.manager.disconnect();
       } catch {
         // ignore
       }
+      if (entries.get(key) !== entry || entry.refCount > 0) continue;
       entries.delete(key);
-      clearLastIfKey(key);
+      evicted += 1;
       log(`SSH pool evicted over-cap ${key}`);
     }
   }
 
   function createManagerForKey(targetKey) {
+    // 单测注入点：连接对象的生命周期（单飞、驱逐时二次校验、facade 不回落到别的主机）
+    // 都是竞态行为，只能靠可控制的假 manager 锁住。
+    if (typeof opts.createManager === 'function') return opts.createManager(targetKey);
     return createSshSessionManager({
       userDataPath: opts.userDataPath,
       log: (msg) => log(`[${targetKey}] ${msg}`),
@@ -160,12 +152,26 @@ function createSshConnectionPool(opts = {}) {
         throw err;
       }
       await entry.manager.connect(connectPayload);
-      markConnected(key);
     } else {
-      markConnected(key);
     }
     touchEntry(entry);
     await evictIfOverCap();
+    return entry.manager;
+  }
+
+  /**
+   * UI 手动连上的端点也是「有人要用」：记一个最小引用（幂等，不累加）。
+   *
+   * 否则这类连接 refCount 恒为 0，`evictIdle` 一旦在别处被 `release()` 触发，
+   * 就会把用户明明连着的连接当成闲置回收掉（界面显示已连接、实际断了）。
+   */
+  function holdEndpoint(target) {
+    const key = poolKeyForTarget(target);
+    if (!key) return null;
+    const entry = entries.get(key);
+    if (!entry) return null;
+    if (entry.refCount < 1) entry.refCount = 1;
+    touchEntry(entry);
     return entry.manager;
   }
 
@@ -212,45 +218,27 @@ function createSshConnectionPool(opts = {}) {
   }
 
   /**
+   * 断开一个端点的连接（键就是端点，所以只有这一个断开动作）。
+   * `force:false` 时只要还有人持有（refCount>0）就不动，避免把别的会话的连接掐掉。
    * @param {import('../workspace/target').SshWorkspaceTarget} target
    * @param {{ force?: boolean }} [opts]
    */
-  async function disconnectTarget(target, opts = {}) {
-    const force = opts.force === true;
+  async function disconnectEndpoint(target, opts = {}) {
     const key = poolKeyForTarget(target);
     if (!key) return;
     const entry = entries.get(key);
     if (!entry) return;
-    if (!force && entry.refCount > 0) {
+    if (opts.force !== true && entry.refCount > 0) {
       log(`SSH pool skip disconnect ${key} (refCount=${entry.refCount})`);
       return;
     }
     entry.refCount = 0;
-    await entry.manager.disconnect();
+    try {
+      await entry.manager.disconnect();
+    } catch {
+      // 断开失败也要把槽位清掉：留着它只会让下一次 acquire 拿到死连接
+    }
     entries.delete(key);
-    clearLastIfKey(key);
-  }
-
-  async function disconnectEndpoint(target, opts = {}) {
-    const prefix = endpointPrefixFor(target);
-    if (!prefix) {
-      await disconnectTarget(target, opts);
-      return;
-    }
-    for (const key of [...entries.keys()]) {
-      if (!key.startsWith(prefix)) continue;
-      const entry = entries.get(key);
-      if (!entry) continue;
-      if (!opts.force && entry.refCount > 0) continue;
-      entry.refCount = 0;
-      try {
-        await entry.manager.disconnect();
-      } catch {
-        // ignore
-      }
-      entries.delete(key);
-      clearLastIfKey(key);
-    }
   }
 
   async function disconnectAll() {
@@ -263,28 +251,6 @@ function createSshConnectionPool(opts = {}) {
       }
     }
     entries.clear();
-    lastConnectedKey = '';
-  }
-
-  /**
-   * 断开未在 keepKeys 中的 SSH 端点（refCount 为 0 时）；供会话切换释放视图传输层。
-   * @param {Set<string>} keepKeys sshGatewayKey 集合
-   */
-  async function disconnectExceptEndpointKeys(keepKeys) {
-    const keep = keepKeys instanceof Set ? keepKeys : new Set();
-    for (const key of listTargetKeys()) {
-      if (keep.has(key)) continue;
-      const entry = entries.get(key);
-      if (!entry || entry.refCount > 0) continue;
-      try {
-        await entry.manager.disconnect();
-      } catch {
-        // ignore
-      }
-      entries.delete(key);
-      clearLastIfKey(key);
-      log(`SSH pool disconnected unleased ${key}`);
-    }
   }
 
   /**
@@ -299,10 +265,9 @@ function createSshConnectionPool(opts = {}) {
 
     function activeManager() {
       const t = activeTarget();
-      if (t) {
-        const m = getConnectedManagerForEndpoint(t);
-        if (m) return m;
-      }
+      // 有明确的活动工作区时**不回落**：回落到「最近连上的端点」会让 browse / exec / 日志
+      // 静默打到另一台主机上（而路径白名单用的是活动目标的根）。这里没连就报没连。
+      if (t) return getConnectedManager(t);
       return getLastConnectedManager();
     }
 
@@ -332,18 +297,16 @@ function createSshConnectionPool(opts = {}) {
           username: payload.username,
           remotePath: sameHost ? active.remotePath || '/' : payload.remotePath || '/'
         };
-        const existing = getConnectedManagerForEndpoint(target);
-        if (existing && existing.status().connected) {
-          const st = existing.status();
-          if (
-            st.host === target.host &&
-            (Number(st.port) || 22) === target.port &&
-            st.username === target.username
-          ) {
-            return st;
-          }
+        const existing = getConnectedManager(target);
+        if (existing) {
+          // 键就是端点，走到这里就说明「同一个端点已经连着」——不必再比对 host/port，
+          // 只要补上持有标记，别让闲置回收把用户手动连上的连接掐掉
+          holdEndpoint(target);
+          return existing.status();
         }
-        return connect(target, payload);
+        const st = await connect(target, payload);
+        holdEndpoint(target);
+        return st;
       },
       disconnect: async () => {
         const t = activeTarget();
@@ -403,7 +366,7 @@ function createSshConnectionPool(opts = {}) {
 
   function findConnectedEndpoint(hint) {
     if (hint && hint.host && hint.username) {
-      const m = getConnectedManagerForEndpoint({
+      const m = getConnectedManager({
         kind: 'ssh',
         host: hint.host,
         port: Number(hint.port) || 22,
@@ -421,15 +384,13 @@ function createSshConnectionPool(opts = {}) {
     release,
     connect,
     getManagerForTarget,
-    getConnectedManagerForEndpoint,
+    getConnectedManager,
+    holdEndpoint,
     getLastConnectedManager,
     isConnected,
-    disconnectTarget,
     disconnectEndpoint,
     disconnectAll,
-    disconnectExceptEndpointKeys,
     createFacade,
-    listTargetKeys,
     getEntry,
     findConnectedEndpoint
   };
