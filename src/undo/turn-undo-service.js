@@ -10,6 +10,9 @@ const { createTurnUndoStore } = require('./turn-undo-store');
 const { normalizeRemotePath, parseWorkspaceInput } = require('../workspace/target');
 
 const MAX_STACK = 5;
+// 单轮 checkpoint 上限：到顶后**合并最老两个**而不是停止拍快照 ——
+// 停止拍会让长回合从某一批之后彻底失去「退回这一批之前」的能力（而且不留任何痕迹）。
+// 合并保住的语义：恢复点仍在，只是最老的那几个粒度变粗（宁可粗，不可悄悄消失）。
 const MAX_BATCHES_PER_TURN = 32;
 
 function cloneFilesMap(files) {
@@ -70,7 +73,8 @@ function restoreIsRemote(record, meta) {
  *   runId: string|null,
  *   gitHead: string|null,
  *   files: Record<string, { before: string|null, encoding: 'utf8'|'base64', remote?: boolean }>,
- *   batches: Array<{ id: string, round: number, files: Record<string, { before: string|null, encoding: 'utf8'|'base64', remote?: boolean }>, createdAt: number }>,
+ *   batches: Array<{ id: string, round: number, files: Record<string, { before: string|null, encoding: 'utf8'|'base64', remote?: boolean }>, createdAt: number, mergedCount?: number }>,
+ *   batchSeq?: number,
  *   planApplied: boolean,
  *   rolledBack: boolean,
  *   createdAt: number,
@@ -274,7 +278,45 @@ function createTurnUndoService(opts = {}) {
   }
 
   /**
+   * 把最老的两个 checkpoint 合并成一个（最老那一批的 id / round / createdAt 保留）：
+   * 同一路径取**较早**那份 before（已有则保留、没有则补上），因此「退回该点」永远不超过
+   * 原来那一批该退的范围，只是少了中间那个更细的边界。
+   */
+  function mergeOldestBatch(record) {
+    const batches = record.batches;
+    if (!Array.isArray(batches) || batches.length < 2) return 0;
+    const older = batches[0];
+    const newer = batches[1];
+    const merged = cloneFilesMap(newer && newer.files);
+    for (const [p, meta] of Object.entries((older && older.files) || {})) {
+      merged[p] = meta;
+    }
+    const mergedCount =
+      (Number(older && older.mergedCount) || 1) + (Number(newer && newer.mergedCount) || 1);
+    batches.splice(0, 2, {
+      id: older.id,
+      round: older.round,
+      files: merged,
+      createdAt: older.createdAt,
+      mergedCount
+    });
+    return mergedCount;
+  }
+
+  function nextBatchId(record) {
+    if (!Number.isFinite(record.batchSeq)) record.batchSeq = 0;
+    const used = new Set((record.batches || []).map((b) => b && b.id));
+    let id;
+    do {
+      id = `b${record.batchSeq}`;
+      record.batchSeq += 1;
+    } while (used.has(id));
+    return id;
+  }
+
+  /**
    * Phase B：工具批次执行前拍 checkpoint（合并后的 files 深拷贝）。
+   * 到 MAX_BATCHES_PER_TURN 后先合并最老两个再拍，永不「超过 N 批就不再记录」。
    * @param {{ sessionId: string, turnId?: string, round?: number, merged?: number, filesSnapshot?: Record<string, unknown> }} input
    */
   function captureBatchCheckpoint(input) {
@@ -294,10 +336,11 @@ function createTurnUndoService(opts = {}) {
       markTouchedPaths(record, Object.keys(record.files || {}));
     }
     if (!Array.isArray(record.batches)) record.batches = [];
+    let mergedBatches = 0;
     if (record.batches.length >= MAX_BATCHES_PER_TURN) {
-      return { ok: false, error: 'checkpoint 数量已达上限', skipped: true };
+      mergedBatches = mergeOldestBatch(record);
     }
-    const batchId = `b${record.batches.length}`;
+    const batchId = nextBatchId(record);
     const snapshot = input.filesSnapshot
       ? cloneFilesMap(input.filesSnapshot)
       : cloneFilesMap(record.files);
@@ -313,6 +356,7 @@ function createTurnUndoService(opts = {}) {
       batchId,
       batchIndex: record.batches.length - 1,
       merged: Number(input.merged) || 0,
+      mergedBatches,
       fileCount: Object.keys(record.files).length
     };
   }
@@ -333,7 +377,10 @@ function createTurnUndoService(opts = {}) {
     }
     const bid = String(batchId || '').trim();
     const batch = (record.batches || []).find((b) => b.id === bid);
-    if (!batch) return { ok: false, error: 'checkpoint 不存在' };
+    if (!batch) {
+      // 超长回合里最老的几个 checkpoint 会被合并，只剩合并后的那个 id
+      return { ok: false, error: '该检查点已被合并（单轮最多 32 个），请用整轮撤回或较新的检查点' };
+    }
 
     const batchFiles = batch.files || {};
     const allPaths = new Set([...Object.keys(record.files), ...Object.keys(batchFiles)]);
