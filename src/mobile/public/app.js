@@ -104,6 +104,12 @@
       update_check_unsupported: '当前环境不支持 App 更新检测',
       stopping: '正在停止…',
       not_connected: '未连接电脑端',
+      camera_capturing: '叠云正在拍一张…',
+      camera_unsupported: '当前环境不能拍照：请用叠云 App 打开，或在 https 页面里使用',
+      tts_read: '朗读',
+      tts_stop: '停止',
+      tts_failed: '朗读失败',
+      tts_no_model: '电脑端还没配置「语音合成」模型',
       app_title: '叠云AI'
     },
     en: {
@@ -164,6 +170,12 @@
       update_check_unsupported: 'In-app update check is not available here',
       stopping: 'Stopping…',
       not_connected: 'Not connected to computer',
+      camera_capturing: 'Dieyun is taking a photo…',
+      camera_unsupported: 'Camera unavailable here: open this in the Dieyun app, or use an https page',
+      tts_read: 'Read aloud',
+      tts_stop: 'Stop',
+      tts_failed: 'Read-aloud failed',
+      tts_no_model: 'No "Speech synthesis" model configured on the computer',
       app_title: 'Dieyun AI'
     }
   };
@@ -328,6 +340,189 @@
       state.pending.set(id, { resolve, reject });
       state.ws.send(JSON.stringify({ type: 'call', id, method, params: params || {} }));
     });
+  }
+
+  // ---------- 摄像头：电脑端「看一眼」的唯一落点 ----------
+  //
+  // 为什么在手机上拍而不是在电脑上：见 AGENTS/设计讨论 —— 笔记本摄像头只能看见你的脸和背后那面墙，
+  // 「看到真实世界」绝大多数时候要看桌面、手上的东西。手机能摆、能转视角、画质更好。
+  //
+  // 为什么是「按需一张」而不是常开预览：常开视频流的代价（带宽、电量、上下文、隐私）都不需要付；
+  // 而且这台页面通常是 http://局域网IP（非安全上下文），浏览器根本给不了 getUserMedia，
+  // 所以 Android App 里走原生拍照接口，浏览器里只有安全上下文才降级到 getUserMedia。
+
+  /** 单次拍摄的等待上限（毫秒）。比服务端略短，保证「超时」由手机端先如实说出口。 */
+  const CAMERA_CAPTURE_TIMEOUT_MS = 18000;
+
+  /** 等待原生拍照回调的箱子：id → { resolve, reject, timer }。 */
+  const cameraWaiters = new Map();
+
+  /** 原生拍照的回调入口（由 MainActivity 通过 evaluateJavascript 调用）。 */
+  window.__dieyunCameraResult = function (id, ok, base64, width, height, errorCode) {
+    const key = String(id || '');
+    const box = cameraWaiters.get(key);
+    if (!box) return;
+    cameraWaiters.delete(key);
+    clearTimeout(box.timer);
+    if (ok) {
+      box.resolve({
+        base64: String(base64 || ''),
+        width: Number(width) || 0,
+        height: Number(height) || 0
+      });
+      return;
+    }
+    const err = new Error(String(errorCode || 'CAMERA_FAILED'));
+    err.code = String(errorCode || 'CAMERA_FAILED');
+    box.reject(err);
+  };
+
+  /** 当前环境怎么拍：native（App 内）/ web（安全上下文的 getUserMedia）/ ''（拍不了）。 */
+  function cameraCapable() {
+    const app = window.DieyunApp;
+    if (app && typeof app.capturePhoto === 'function') return 'native';
+    // 只认安全上下文：本页面通常是 http://局域网IP，浏览器在那里即便露出 getUserMedia
+    // 也会直接拒绝。先声明能力、再失败，等于骗电脑端「这台能拍」。
+    if (
+      window.isSecureContext &&
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === 'function'
+    ) {
+      return 'web';
+    }
+    return '';
+  }
+
+  function cameraCapabilities() {
+    return cameraCapable() ? ['camera'] : [];
+  }
+
+  /** App 内原生拍照：一次一张，手机上同时有可见提示（见 Android 侧 toast）。 */
+  function captureViaNative(facing, maxEdge) {
+    return new Promise((resolve, reject) => {
+      const id = `cam-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const timer = setTimeout(() => {
+        cameraWaiters.delete(id);
+        const err = new Error('TIMEOUT');
+        err.code = 'TIMEOUT';
+        reject(err);
+      }, CAMERA_CAPTURE_TIMEOUT_MS);
+      cameraWaiters.set(id, { resolve, reject, timer });
+      try {
+        window.DieyunApp.capturePhoto(String(id), String(facing), Number(maxEdge) || 1280);
+      } catch (e) {
+        cameraWaiters.delete(id);
+        clearTimeout(timer);
+        reject(e);
+      }
+    });
+  }
+
+  /**
+   * 浏览器兜底：只在安全上下文（https / localhost）可用。
+   * 非安全上下文里 `navigator.mediaDevices` 直接不存在，cameraCapable() 会返回 ''，
+   * 这里不做「假装能拍」的尝试。
+   */
+  async function captureViaGetUserMedia(facing, maxEdge) {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: facing === 'user' ? 'user' : 'environment',
+        width: { ideal: maxEdge },
+        height: { ideal: maxEdge }
+      }
+    });
+    try {
+      const video = document.createElement('video');
+      video.playsInline = true;
+      video.muted = true;
+      video.srcObject = stream;
+      await video.play();
+      // 刚拿到流时曝光还没稳定，白光/暗光下第一帧常是黑的：短暂等待换一帧可用的。
+      await new Promise((r) => setTimeout(r, 280));
+      const w = video.videoWidth || 0;
+      const h = video.videoHeight || 0;
+      if (!w || !h) throw new Error('相机没有出帧');
+      const scale = Math.min(1, maxEdge / Math.max(w, h));
+      const cw = Math.max(1, Math.round(w * scale));
+      const ch = Math.max(1, Math.round(h * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = cw;
+      canvas.height = ch;
+      canvas.getContext('2d').drawImage(video, 0, 0, cw, ch);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+      const base64 = String(dataUrl.split(',')[1] || '');
+      if (!base64) throw new Error('编码失败');
+      return { base64, width: cw, height: ch };
+    } finally {
+      for (const track of stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  function sendResponse(id, ok, payload) {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+    try {
+      state.ws.send(
+        JSON.stringify(
+          ok
+            ? { type: 'response', id, ok: true, data: payload }
+            : { type: 'response', id, ok: false, error: payload }
+        )
+      );
+    } catch {
+      // 通道断了：电脑端会按断开处理，这里不必再补救
+    }
+  }
+
+  /**
+   * 电脑端发来的请求（目前只有 camera.capture）。
+   * 约定：无论成败都必须回一条 response —— 电脑端在等，沉默只会变成超时。
+   */
+  async function handleRequest(msg) {
+    const id = msg && msg.id;
+    const method = String((msg && msg.method) || '');
+    if (method !== 'camera.capture') {
+      sendResponse(id, false, { code: 'UNKNOWN_METHOD', message: `未知方法: ${method}` });
+      return;
+    }
+    const params = (msg && msg.params) || {};
+    const facing = params.facing === 'user' ? 'user' : 'environment';
+    const maxEdge = Math.max(320, Math.min(2048, Number(params.maxEdge) || 1280));
+    const mode = cameraCapable();
+    if (!mode) {
+      sendResponse(id, false, {
+        code: 'CAMERA_NO_BRIDGE',
+        message: t('camera_unsupported')
+      });
+      return;
+    }
+    // 可见提示：每次拍摄都必须让手机这头知道「正在被拍」（不做隐蔽采集）。
+    showInAppToast(t('camera_capturing'));
+    try {
+      const shot =
+        mode === 'native'
+          ? await captureViaNative(facing, maxEdge)
+          : await captureViaGetUserMedia(facing, maxEdge);
+      sendResponse(id, true, {
+        base64: shot.base64,
+        mime: 'image/jpeg',
+        width: shot.width,
+        height: shot.height,
+        facing,
+        capturedAt: Date.now()
+      });
+    } catch (err) {
+      sendResponse(id, false, {
+        code: String((err && err.code) || 'CAMERA_FAILED'),
+        message: String((err && err.message) || err || '拍摄失败')
+      });
+    }
   }
 
   function renderSessions() {
@@ -647,6 +842,17 @@
         changed = true;
       }
     }
+    // 朗读能力（电脑端是否配了「语音合成」模型）+ 自动朗读开关：决定显不显示朗读按钮
+    const ttsReadyFlag = cfg.ttsReady === true ? '1' : '0';
+    if (localStorage.getItem(TTS_READY_KEY) !== ttsReadyFlag) {
+      localStorage.setItem(TTS_READY_KEY, ttsReadyFlag);
+      changed = true;
+    }
+    const autoReadFlag = cfg.ttsAutoRead === true ? '1' : '0';
+    if (localStorage.getItem(TTS_AUTOREAD_KEY) !== autoReadFlag) {
+      localStorage.setItem(TTS_AUTOREAD_KEY, autoReadFlag);
+      changed = true;
+    }
     return changed;
   }
 
@@ -658,6 +864,188 @@
     } catch {
       return false;
     }
+  }
+
+  // ── 朗读（语音合成）──────────────────────────────────────────────────────
+  // 电脑端同一能力的实现在 src/renderer/renderer-tts.js。手机端是独立 bundle（无模块
+  // 系统），只保留必要部分：分句切块 + 顺序播放 + 停止。切块阈值与电脑端保持一致
+  // （90 字一块：实测这家服务器 60~90 字约 2~3 秒就能回来，首字不用干等十几秒）。
+  const TTS_CHUNK_TARGET = 90;
+  const TTS_CHUNK_MAX = 180;
+  const TTS_BREAK = '。！？!?；;\n';
+  const TTS_READY_KEY = 'dieyun.speech.ttsReady';
+  const TTS_AUTOREAD_KEY = 'dieyun.speech.ttsAutoRead';
+  const ttsState = { token: 0, audio: null, urls: new Set(), settle: null, btn: null, text: '' };
+
+  function ttsReady() {
+    return localStorage.getItem(TTS_READY_KEY) === '1';
+  }
+
+  function ttsAutoReadOn() {
+    return localStorage.getItem(TTS_AUTOREAD_KEY) === '1';
+  }
+
+  function splitTtsChunks(text) {
+    const raw = String(text || '').replace(/\r\n?/g, '\n');
+    if (!raw.trim()) return [];
+    const sentences = [];
+    let buf = '';
+    for (const ch of raw) {
+      buf += ch;
+      if (TTS_BREAK.includes(ch)) {
+        if (buf.trim()) sentences.push(buf.trim());
+        buf = '';
+      }
+    }
+    if (buf.trim()) sentences.push(buf.trim());
+    const chunks = [];
+    let cur = '';
+    const flush = () => {
+      const t = cur.trim();
+      if (t) chunks.push(t);
+      cur = '';
+    };
+    for (const s of sentences) {
+      if (cur && cur.length + s.length > TTS_CHUNK_TARGET) flush();
+      cur += s;
+      while (cur.length > TTS_CHUNK_MAX) {
+        chunks.push(cur.slice(0, TTS_CHUNK_MAX).trim());
+        cur = cur.slice(TTS_CHUNK_MAX);
+      }
+    }
+    flush();
+    return chunks;
+  }
+
+  function ttsSetBtn(btn, speaking) {
+    if (!btn) return;
+    btn.classList.toggle('is-speaking', !!speaking);
+    btn.textContent = speaking ? t('tts_stop') : t('tts_read');
+  }
+
+  function ttsStop() {
+    ttsState.token += 1; // 作废在途请求，迟到的结果不再播
+    if (ttsState.audio) {
+      try {
+        ttsState.audio.pause();
+      } catch {
+        /* ignore */
+      }
+      ttsState.audio = null;
+    }
+    for (const url of ttsState.urls) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        /* ignore */
+      }
+    }
+    ttsState.urls.clear();
+    const settle = ttsState.settle;
+    ttsState.settle = null;
+    const btn = ttsState.btn;
+    ttsState.btn = null;
+    ttsState.text = '';
+    ttsSetBtn(btn, false);
+    if (settle) settle();
+  }
+
+  async function ttsFetchUrl(chunkText, token) {
+    const res = await call('speech.synthesize', { text: chunkText });
+    if (token !== ttsState.token) return null;
+    const b64 = String((res && res.audioBase64) || '');
+    if (!b64) throw new Error(t('tts_failed'));
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: (res && res.mimeType) || 'audio/mpeg' }));
+    ttsState.urls.add(url);
+    return url;
+  }
+
+  function ttsPlayUrl(url) {
+    return new Promise((resolve, reject) => {
+      const audio = new Audio(url);
+      ttsState.audio = audio;
+      let settled = false;
+      const settle = (err) => {
+        if (settled) return;
+        settled = true;
+        if (ttsState.settle === settle) ttsState.settle = null;
+        if (ttsState.audio === audio) ttsState.audio = null;
+        if (err) reject(err);
+        else resolve();
+      };
+      ttsState.settle = () => settle(null);
+      audio.addEventListener('ended', () => settle(null));
+      audio.addEventListener('error', () => settle(new Error(t('tts_failed'))));
+      const started = audio.play();
+      if (started && typeof started.catch === 'function') started.catch((err) => settle(err));
+    });
+  }
+
+  async function ttsSpeak(text, btn) {
+    const content = String(text || '').trim();
+    if (!content) return false;
+    if (!ttsReady()) {
+      setStatus(t('tts_no_model'), true);
+      return false;
+    }
+    // 切歌：先停旧的一段（stop 会让旧代次失效），再取自己的代次
+    if (ttsState.audio || ttsState.btn) ttsStop();
+    const token = (ttsState.token += 1);
+    ttsState.btn = btn || null;
+    ttsState.text = content;
+    ttsSetBtn(ttsState.btn, true);
+    const chunks = splitTtsChunks(content);
+    const inflight = new Map();
+    const startChunk = (i) => {
+      if (i >= chunks.length) return null;
+      if (!inflight.has(i)) {
+        const p = ttsFetchUrl(chunks[i], token);
+        p.catch(() => {});
+        inflight.set(i, p);
+      }
+      return inflight.get(i);
+    };
+    try {
+      startChunk(0);
+      for (let i = 0; i < chunks.length; i += 1) {
+        const url = await startChunk(i);
+        if (token !== ttsState.token) return true;
+        startChunk(i + 1); // 边播边合成下一块
+        if (!url) continue;
+        await ttsPlayUrl(url);
+        if (token !== ttsState.token) return true;
+      }
+    } catch (err) {
+      if (token === ttsState.token) {
+        ttsStop();
+        setStatus(`${t('tts_failed')}：${(err && err.message) || String(err)}`, true);
+      }
+      return false;
+    }
+    if (token === ttsState.token) ttsStop();
+    return true;
+  }
+
+  /** 给一条助手消息挂「朗读」按钮（没有合成模型时什么都不加）。 */
+  function attachTtsButton(msgEl, content) {
+    if (!msgEl || !ttsReady()) return null;
+    const text = String(content || '').trim();
+    if (!text) return null;
+    if (msgEl.querySelector('.msg-tts-btn')) return msgEl.querySelector('.msg-tts-btn');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'msg-tts-btn';
+    btn.textContent = t('tts_read');
+    btn.addEventListener('click', () => {
+      if (ttsState.btn === btn) {
+        ttsStop();
+        return;
+      }
+      ttsSpeak(text, btn).catch(() => {});
+    });
+    msgEl.appendChild(btn);
+    return btn;
   }
 
   function appendOptimisticUserMessage(text) {
@@ -786,6 +1174,7 @@
       item.appendChild(meta);
       item.appendChild(bubble);
       root.appendChild(item);
+      if (row.role !== 'user' && content) attachTtsButton(item, content);
     }
     if (stickToBottom) scrollToFollowTail('messages');
     setFollowScrolling('messages', stickToBottom);
@@ -1234,6 +1623,7 @@
   async function selectSession(sessionId) {
     try {
       setDrawerOpen(false);
+      ttsStop(); // 切会话：别让上一段的朗读继续念
       await loadMessages(sessionId, { scrollToBottom: false });
     } catch (e) {
       setStatus(e.message || String(e), true);
@@ -1358,12 +1748,22 @@
       }
       stopAllTraceTypewriters();
       state.traceManualClosed = false;
+      // 自动朗读要用到最后这段正文，清空之前先取出来
+      const finalAnswer = String(state.lastStreamContent || '').trim();
       state.lastStreamContent = '';
       hideThinkDock();
       const viewing = isViewingSession(incomingSessionId);
       const sessionId = incomingSessionId || state.activeSessionId;
       refreshSessions(sessionId).catch(() => {});
       const ok = event.type === 'task.completed';
+      if (ok && viewing && finalAnswer) {
+        // 跑完的这一拍：给流式气泡补上「朗读」按钮，并按设置决定是否自动朗读
+        const liveMsg = document.querySelector('#messages .msg.assistant[data-live-assistant="1"]');
+        if (liveMsg) {
+          const btn = attachTtsButton(liveMsg, finalAnswer);
+          if (btn && ttsAutoReadOn()) ttsSpeak(finalAnswer, btn).catch(() => {});
+        }
+      }
       setStatus(
         ok ? t('task_complete') : event.type === 'task.stopped' ? t('task_stopped_msg') : t('task_failed'),
         !ok && event.type !== 'task.stopped'
@@ -1391,7 +1791,9 @@
     state.ws = ws;
     ws.onopen = () => {
       if (generation !== state.wsGeneration) return;
-      ws.send(JSON.stringify({ type: 'auth', token }));
+      // 自报能力：电脑端据此决定「Agent 主动拍一张」该不该路由到这台手机。
+      // 没有 camera 能力也照常认证——只是 camera_look 会得到「手机没连上摄像头」而不是静默失败。
+      ws.send(JSON.stringify({ type: 'auth', token, capabilities: cameraCapabilities() }));
     };
     ws.onmessage = (ev) => {
       if (generation !== state.wsGeneration) return;
@@ -1429,6 +1831,10 @@
             if (state.taskRunning) return refreshActiveTrace();
           })
           .catch((e) => setStatus(e.message || String(e), true));
+        return;
+      }
+      if (msg.type === 'request') {
+        void handleRequest(msg);
         return;
       }
       if (msg.type === 'event') {

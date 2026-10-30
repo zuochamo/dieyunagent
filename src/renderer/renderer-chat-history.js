@@ -1110,6 +1110,8 @@ function switchSession(sessionId) {
   const target = String(sessionId);
   if (currentSessionId && target !== String(currentSessionId)) {
     captureSessionScrollPosition(currentSessionId, { force: true });
+    // 换会话就停朗读：音频属于上一段对话，跟着切走会「串台」
+    if (typeof stopTtsPlayback === 'function') stopTtsPlayback();
   }
   const switchGen = bumpSessionSwitchGeneration();
   pendingSwitchTarget = target;

@@ -142,7 +142,11 @@ const GATEWAY_RPC_TIMEOUT_OVERRIDES = {
   'memory.sessions_list': 120000,
   'memory.messages_recent': 90000,
   'agent.trace_get': 90000,
-  'index.remote_wait_ready': 120000
+  'index.remote_wait_ready': 120000,
+  // 语音：合成/转写的耗时由文本长度和录音长度决定，实测 400 字中文约 20s、
+  // 1200 字接近 1 分钟，默认 45s 会稳定超时（超时后音频直接丢掉，用户只会看到失败）。
+  'speech.synthesize': 180000,
+  'speech.transcribe': 120000
 };
 
 function gatewayCallTimeoutMs(method, overrideMs) {

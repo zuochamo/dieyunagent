@@ -743,6 +743,7 @@ app.whenReady().then(async () => {
     getLocalGateway: () => localGateway,
     getBrowserService: () => browserService,
     getMobileBridge: () => mobileBridge,
+    getAgentService: () => agentService,
     getPeerCoordinator: () => peerCoordinator,
     getCoreBridge: () => coreBridge,
     getPlansStore: () => plansStore,
@@ -829,6 +830,8 @@ app.whenReady().then(async () => {
       userDataPath: userData,
       browserService,
       peerCoordinator,
+      // 手机摄像头（camera_look）：工具层只要「现在连着哪台手机」，不自己管桥。
+      getMobileBridge: () => mobileBridge,
       createUserSkill,
       onSkillsChanged: (created) => notifySkillsCatalogChanged(webContents, created),
       plansCreateFromText: createPlansCreateFromText({

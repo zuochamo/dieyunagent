@@ -1870,6 +1870,39 @@ const PEER_TOOLS = [
   }
 ];
 
+/**
+ * 手机摄像头（现实世界视觉）。
+ *
+ * 为什么是「拍一张」而不是「开一路视频」：见 browser-vision 的相机来源注释与
+ * AGENTS 的减法原则 —— 视频流的成本（带宽/电量/上下文）与隐私代价都不需要付，
+ * 模型真正需要的是「此刻这里长什么样」，一张就够，不够再拍。
+ */
+const CAMERA_TOOL = {
+  type: 'function',
+  function: {
+    name: 'camera_look',
+    description:
+      '让用户的手机摄像头拍一张现实世界的照片，图片会作为视觉输入附到下一轮（你随后就能看见）。' +
+      '这是唯一能看到「真实世界」的工具：屏幕里的东西用 computer / browser 截图，桌面上的物品、用户本人、房间与现场用这个。' +
+      'focus 选摄像头：face = 前置，看用户本人（表情、是否在、手上拿着什么）；desk / scene = 后置，看桌面与周围环境（默认）。' +
+      '一次只拍一张，不常开、不做视频流，每次拍摄手机上都会有可见提示，所以只在真的需要看的时候调用。' +
+      '必须如实对待结果：ok=false 时你**没有**拿到任何画面，不要编造看到的内容；' +
+      'CAMERA_NO_DEVICE = 手机没连上（让用户去手机端连电脑）；CAMERA_NO_BRIDGE = 手机连着但页面拿不到相机（改用叠云 App 打开）；' +
+      'CAMERA_DENIED = 用户在手机上拒了相机权限（重试无用，让用户去系统设置里开）；' +
+      'CAMERA_TIMEOUT = 手机在但没拍成（可以再试一次，连续两次失败就改用文字问用户）。' +
+      '照片是「刚才那一刻」，不要拿上一次的画面推断现在；需要新画面就再拍。',
+    parameters: {
+      type: 'object',
+      properties: {
+        focus: {
+          type: 'string',
+          description: 'face = 前置看人 | desk = 后置看桌面/手上的东西（默认）| scene = 后置看周围环境'
+        }
+      }
+    }
+  }
+};
+
 const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   WEB_TOOLS,
   BROWSER_TOOLS,
@@ -1880,6 +1913,7 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   PLAN_TOOLS,
   [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL],
   [COMPUTER_TOOL],
+  [CAMERA_TOOL],
   PEER_TOOLS
 );
 
@@ -1942,6 +1976,7 @@ module.exports = {
   SUBAGENT_TOOL,
   SESSION_WORKSPACE_TOOL,
   COMPUTER_TOOL,
+  CAMERA_TOOL,
   PEER_TOOLS,
   ALL_STATIC_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,

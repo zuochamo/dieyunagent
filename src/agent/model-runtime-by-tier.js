@@ -360,11 +360,12 @@ function inferContextWindowFromModelName(modelId) {
   return null;
 }
 
-/** 设置行声明的模态（text / vision / speech）；未声明按 text —— 与 Renderer `ModelCapabilities` 同判据。 */
+/** 设置行声明的模态（text / vision / speech / tts）；未声明按 text —— 与 Renderer `ModelCapabilities` 同判据。 */
 function declaredModality(value, kind) {
-  if (value === 'vision' || value === 'text' || value === 'speech') return value;
+  if (value === 'vision' || value === 'text' || value === 'speech' || value === 'tts') return value;
   if (kind === 'vision') return 'vision';
   if (kind === 'speech') return 'speech';
+  if (kind === 'tts') return 'tts';
   return 'text';
 }
 

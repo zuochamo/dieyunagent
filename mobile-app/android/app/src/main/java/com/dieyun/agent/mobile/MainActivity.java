@@ -12,13 +12,18 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.hardware.Camera;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.util.Base64;
 import android.view.Gravity;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -42,6 +47,7 @@ import android.widget.Toast;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -68,6 +74,8 @@ public class MainActivity extends Activity {
     private static final int REQ_NOTIFY = 2002;
     private static final int REQ_CAMERA = 2003;
     private static final int REQ_AUDIO = 2004;
+    /** Agent 主动拍照的一次性权限申请（与扫码用的 REQ_CAMERA 分开：两条流程后续动作不同）。 */
+    private static final int REQ_CAMERA_CAPTURE = 2005;
     private static final String CHANNEL_ID = "dieyun_tasks";
 
     private FrameLayout root;
@@ -84,6 +92,15 @@ public class MainActivity extends Activity {
     private TextView connectStatus;
     private boolean decodingFrame = false;
     private Camera camera;
+    /** Agent 主动拍照专用的相机会话（与扫码的 `camera` 分开：两者的预览/生命周期不同）。 */
+    private Camera captureCamera;
+    private boolean captureInFlight = false;
+    /** 预览是否真的起来了（决定 6s 兜底是「再等等」还是「判定失败」）。 */
+    private boolean capturePreviewStarted = false;
+    private String captureRequestId = "";
+    private String captureFacing = "environment";
+    private int captureMaxEdge = 1280;
+    private SurfaceView captureSurfaceView;
     private TextView scannerStatus;
     private final MultiFormatReader qrReader = new MultiFormatReader();
 
@@ -676,6 +693,12 @@ public class MainActivity extends Activity {
     }
 
     private void destroyWebView() {
+        // 页面要没了：正在飞的那次拍照必须收尾（释放相机 + 让电脑端看到明确失败）
+        if (captureInFlight) {
+            releaseCaptureCamera();
+            captureInFlight = false;
+            deliverCameraResult(captureRequestId, false, null, 0, 0, "CAMERA_BUSY");
+        }
         if (webView == null) return;
         try {
             webView.stopLoading();
@@ -722,6 +745,14 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         stopCamera();
+        // 页面切后台时正在拍的这一张没意义了：立刻释放相机，并让电脑端收到明确的失败。
+        // 注意只在**相机已经打开**时才收尾：权限对话框弹出同样会触发 onPause，
+        // 那种情况下这次拍摄还没开始，收尾会把「刚申请的权限」变成一次假失败。
+        if (captureInFlight && captureCamera != null) {
+            releaseCaptureCamera();
+            captureInFlight = false;
+            deliverCameraResult(captureRequestId, false, null, 0, 0, "CAMERA_BUSY");
+        }
     }
 
     @Override
@@ -732,6 +763,18 @@ public class MainActivity extends Activity {
                 showScannerScreen();
             } else {
                 toast("未授权摄像头，无法扫码");
+            }
+            return;
+        }
+        if (requestCode == REQ_CAMERA_CAPTURE) {
+            // 授权期间这次拍摄可能已被取消（切后台 / 换页面）：没人在等就别再开相机
+            if (!captureInFlight) return;
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                toast("叠云正在拍一张…");
+                openCaptureCamera();
+            } else {
+                captureInFlight = false;
+                deliverCameraResult(captureRequestId, false, null, 0, 0, "CAMERA_DENIED");
             }
             return;
         }
@@ -913,6 +956,345 @@ public class MainActivity extends Activity {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
+    // ---------- Agent 主动拍照（camera_look 的手机端） ----------
+    //
+    // 为什么走原生而不是页面的 getUserMedia：手机端页面通常是 http://局域网IP，
+    // 属非安全上下文，Chromium（WebView 也一样）在这些源上根本不提供 navigator.mediaDevices。
+    // 原生相机没这个限制，还能自己定分辨率和压缩质量，回传体积因此可控。
+    //
+    // 为什么是「一次一张」：不做常开预览、不做视频流 —— 每次拍摄都 toast 提示（不隐蔽采集），
+    // 拍完立刻释放相机，不长期占用硬件（也就不会挡住扫码或别的 App）。
+
+    /** 页面（app.js）请求拍一张。跑在 JS 线程，所有相机动作都转回主线程。 */
+    private void startAgentCapture(String requestId, String facing, int maxEdge) {
+        if (webView == null) {
+            deliverCameraResult(requestId, false, null, 0, 0, "CAMERA_UNAVAILABLE");
+            return;
+        }
+        if (captureInFlight || scannerActive) {
+            // 扫码相机占着硬件 / 已经有一次拍摄在飞：不抢，让电脑端知道换个时机
+            deliverCameraResult(requestId, false, null, 0, 0, "CAMERA_BUSY");
+            return;
+        }
+        captureRequestId = requestId == null ? "" : requestId;
+        captureFacing = "user".equals(facing) ? "user" : "environment";
+        captureMaxEdge = maxEdge <= 0 ? 1280 : Math.max(320, Math.min(2048, maxEdge));
+        captureInFlight = true;
+        if (Build.VERSION.SDK_INT >= 23
+                && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            // 首次使用：先要权限，结果回来后再继续这同一次拍摄（不丢请求）
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA_CAPTURE);
+            return;
+        }
+        // 可见提示只有页面那一处（app.js 的 toast）：这里再弹一次就是两条重复提示。
+        // 唯一例外是刚拿到权限的情况（见 onRequestPermissionsResult），那时页面提示
+        // 可能已被权限弹窗盖掉，需要补一句让用户知道「现在真的在拍」。
+        openCaptureCamera();
+    }
+
+    private void openCaptureCamera() {
+        // 权限对话框弹出/页面切走可能已经把这次拍摄取消了：没人在等就别再开相机
+        if (!captureInFlight) return;
+        try {
+            releaseCaptureCamera();
+            captureCamera = Camera.open(findCaptureCameraId(captureFacing));
+            Camera.Parameters params = captureCamera.getParameters();
+            List<String> focusModes = params.getSupportedFocusModes();
+            if (focusModes != null && focusModes.contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE)) {
+                params.setFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE);
+            }
+            Camera.Size preview = choosePreviewSize(params);
+            if (preview != null) params.setPreviewSize(preview.width, preview.height);
+            Camera.Size picture = choosePictureSize(params, captureMaxEdge);
+            if (picture != null) params.setPictureSize(picture.width, picture.height);
+            params.setJpegQuality(85);
+            try {
+                captureCamera.setParameters(params);
+            } catch (Exception ignored) {
+                // 部分机型不支持「这个预览尺寸 + 这个照片尺寸」的组合：退回相机默认参数。
+                // 宁可分辨率低一点，也不要整次拍摄直接失败。
+            }
+        } catch (Exception e) {
+            releaseCaptureCamera();
+            captureInFlight = false;
+            deliverCameraResult(captureRequestId, false, null, 0, 0, "CAMERA_OPEN_FAILED");
+            return;
+        }
+        // takePicture 要求预览在跑：用 1dp 的离屏 SurfaceView 当预览目标。
+        // 它被 WebView 完全盖住（用户看不见），但 Surface 是真实存在的 ——
+        // 这是「不弹系统相机 UI、静默拍一张」的标准做法。
+        SurfaceView surface = ensureCaptureSurface();
+        SurfaceHolder holder = surface == null ? null : surface.getHolder();
+        if (holder == null) {
+            releaseCaptureCamera();
+            captureInFlight = false;
+            deliverCameraResult(captureRequestId, false, null, 0, 0, "CAMERA_OPEN_FAILED");
+            return;
+        }
+        // Surface 可能还没创建（视图刚加上去）：等 surfaceCreated 再 startPreview，
+        // 否则 setPreviewDisplay 会抛 IllegalArgumentException / IOException。
+        if (holder.getSurface() != null && holder.getSurface().isValid()) {
+            beginCapturePreview(holder);
+        } else {
+            holder.addCallback(new SurfaceHolder.Callback() {
+                @Override
+                public void surfaceCreated(SurfaceHolder h) {
+                    beginCapturePreview(h);
+                }
+
+                @Override
+                public void surfaceChanged(SurfaceHolder h, int format, int width, int height) {
+                    // 预览尺寸在 openCaptureCamera 里已设定，这里不需要重配。
+                }
+
+                @Override
+                public void surfaceDestroyed(SurfaceHolder h) {
+                    // 释放由 releaseCaptureCamera 统一负责。
+                }
+            });
+            // 兜底：Surface 迟迟不创建就别让电脑端干等到超时（相机开着不释放更糟）
+            View anchor = root != null ? root : webView;
+            if (anchor != null) {
+                anchor.postDelayed(() -> {
+                    if (!captureInFlight || captureCamera == null) return;
+                    if (capturePreviewStarted) return;
+                    releaseCaptureCamera();
+                    captureInFlight = false;
+                    deliverCameraResult(captureRequestId, false, null, 0, 0, "CAMERA_OPEN_FAILED");
+                }, 6000);
+            }
+        }
+    }
+
+    private void beginCapturePreview(SurfaceHolder holder) {
+        Camera cam = captureCamera;
+        if (cam == null) return;
+        try {
+            cam.setPreviewDisplay(holder);
+            cam.startPreview();
+            capturePreviewStarted = true;
+        } catch (Exception e) {
+            releaseCaptureCamera();
+            captureInFlight = false;
+            deliverCameraResult(captureRequestId, false, null, 0, 0, "CAMERA_OPEN_FAILED");
+            return;
+        }
+        // 给自动对焦/曝光一点时间再按快门：立刻拍到的常是模糊或过暗的一帧，白交给模型。
+        View anchor = root != null ? root : webView;
+        if (anchor != null) anchor.postDelayed(this::takeCaptureShot, 700);
+        else takeCaptureShot();
+    }
+
+    private void takeCaptureShot() {
+        Camera cam = captureCamera;
+        if (cam == null) return;
+        try {
+            cam.takePicture(null, null, (data, source) -> onCaptureJpeg(data));
+        } catch (Exception e) {
+            releaseCaptureCamera();
+            captureInFlight = false;
+            deliverCameraResult(captureRequestId, false, null, 0, 0, "CAMERA_CAPTURE_FAILED");
+        }
+    }
+
+    /** JPEG 解码/缩放/旋转/压缩都在后台线程做，避免卡住 WebView。 */
+    private void onCaptureJpeg(final byte[] data) {
+        final String requestId = captureRequestId;
+        final String facing = captureFacing;
+        final int maxEdge = captureMaxEdge;
+        new Thread(() -> {
+            String base64 = null;
+            int width = 0;
+            int height = 0;
+            String error = "CAMERA_ENCODE_FAILED";
+            try {
+                if (data != null && data.length > 0) {
+                    Bitmap bitmap = decodeScaledJpeg(data, maxEdge);
+                    if (bitmap != null) {
+                        int orientation = captureRotationDegrees(facing);
+                        if (orientation != 0) {
+                            Matrix matrix = new Matrix();
+                            matrix.postRotate(orientation);
+                            Bitmap rotated = Bitmap.createBitmap(
+                                    bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+                            if (rotated != bitmap) bitmap.recycle();
+                            bitmap = rotated;
+                        }
+                        width = bitmap.getWidth();
+                        height = bitmap.getHeight();
+                        ByteArrayOutputStream out = new ByteArrayOutputStream();
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 72, out);
+                        bitmap.recycle();
+                        base64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+                        error = null;
+                    }
+                }
+            } catch (Exception e) {
+                base64 = null;
+                error = "CAMERA_ENCODE_FAILED";
+            } catch (OutOfMemoryError e) {
+                base64 = null;
+                error = "CAMERA_ENCODE_FAILED";
+            }
+            final String encoded = base64;
+            final int w = width;
+            final int h = height;
+            final String err = error;
+            runOnUiThread(() -> {
+                releaseCaptureCamera();
+                captureInFlight = false;
+                deliverCameraResult(requestId, err == null, encoded, w, h, err);
+            });
+        }).start();
+    }
+
+    private Bitmap decodeScaledJpeg(byte[] data, int maxEdge) {
+        BitmapFactory.Options probe = new BitmapFactory.Options();
+        probe.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(data, 0, data.length, probe);
+        int longEdge = Math.max(probe.outWidth, probe.outHeight);
+        int sample = 1;
+        while (longEdge / (sample * 2) >= maxEdge * 2 && sample < 8) sample *= 2;
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        opts.inSampleSize = sample;
+        Bitmap bitmap = BitmapFactory.decodeByteArray(data, 0, data.length, opts);
+        if (bitmap == null) return null;
+        int current = Math.max(bitmap.getWidth(), bitmap.getHeight());
+        if (current <= maxEdge) return bitmap;
+        float scale = (float) maxEdge / (float) current;
+        Bitmap scaled = Bitmap.createScaledBitmap(
+                bitmap,
+                Math.max(1, Math.round(bitmap.getWidth() * scale)),
+                Math.max(1, Math.round(bitmap.getHeight() * scale)),
+                true);
+        if (scaled != bitmap) bitmap.recycle();
+        return scaled;
+    }
+
+    /** 选「不小于目标长边的最小档」，让相机少出无用的像素（回传更快，也更省内存）。 */
+    private Camera.Size choosePictureSize(Camera.Parameters params, int maxEdge) {
+        Camera.Size fallback = params.getPictureSize();
+        List<Camera.Size> sizes = params.getSupportedPictureSizes();
+        if (sizes == null || sizes.isEmpty()) return fallback;
+        Camera.Size best = null;
+        for (Camera.Size size : sizes) {
+            int longEdge = Math.max(size.width, size.height);
+            if (longEdge < maxEdge) continue;
+            if (best == null || longEdge < Math.max(best.width, best.height)) best = size;
+        }
+        if (best != null) return best;
+        for (Camera.Size size : sizes) {
+            if (best == null || Math.max(size.width, size.height) > Math.max(best.width, best.height)) {
+                best = size;
+            }
+        }
+        return best != null ? best : fallback;
+    }
+
+    private int findCaptureCameraId(String facing) {
+        int wanted = "user".equals(facing)
+                ? Camera.CameraInfo.CAMERA_FACING_FRONT
+                : Camera.CameraInfo.CAMERA_FACING_BACK;
+        int count = Camera.getNumberOfCameras();
+        Camera.CameraInfo info = new Camera.CameraInfo();
+        for (int i = 0; i < count; i++) {
+            Camera.getCameraInfo(i, info);
+            if (info.facing == wanted) return i;
+        }
+        return 0;
+    }
+
+    /**
+     * JPEG 相对「自然方向」的旋转角。
+     *
+     * 为什么不能只用 `info.orientation`：那是**传感器**的装配角度，只对「手机竖直握持」成立。
+     * 用户横着把手机举到桌面前一拍，只按传感器角度转会得到一张侧倒的图 —— 模型看这样的图
+     * 会把桌面读成墙、把横向读成纵向。所以把设备当前旋转一起算进去（前后置公式不同）。
+     */
+    private int captureRotationDegrees(String facing) {
+        try {
+            Camera.CameraInfo info = new Camera.CameraInfo();
+            Camera.getCameraInfo(findCaptureCameraId(facing), info);
+            int degrees;
+            switch (getWindowManager().getDefaultDisplay().getRotation()) {
+                case Surface.ROTATION_90:
+                    degrees = 90;
+                    break;
+                case Surface.ROTATION_180:
+                    degrees = 180;
+                    break;
+                case Surface.ROTATION_270:
+                    degrees = 270;
+                    break;
+                default:
+                    degrees = 0;
+                    break;
+            }
+            if (info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
+                return (info.orientation + degrees) % 360;
+            }
+            return (info.orientation - degrees + 360) % 360;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private SurfaceView ensureCaptureSurface() {
+        if (captureSurfaceView != null && captureSurfaceView.getParent() != null) return captureSurfaceView;
+        SurfaceView surface = new SurfaceView(this);
+        captureSurfaceView = surface;
+        if (root != null) {
+            root.addView(surface, 0, new FrameLayout.LayoutParams(dp(1), dp(1)));
+        }
+        return surface;
+    }
+
+    private void releaseCaptureCamera() {
+        capturePreviewStarted = false;
+        if (captureCamera != null) {
+            try {
+                captureCamera.stopPreview();
+            } catch (Exception e) {
+                // ignore
+            }
+            try {
+                captureCamera.release();
+            } catch (Exception e) {
+                // ignore
+            }
+            captureCamera = null;
+        }
+        if (captureSurfaceView != null && root != null) {
+            try {
+                root.removeView(captureSurfaceView);
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+        captureSurfaceView = null;
+    }
+
+    /** 把结果交给页面：页面拿着 base64 回给电脑端（协议见 src/mobile/bridge.js）。 */
+    private void deliverCameraResult(String requestId, boolean ok, String base64, int width, int height, String errorCode) {
+        WebView view = webView;
+        if (view == null) return;
+        if (!ok && (base64 == null || base64.isEmpty())) {
+            toast("拍照失败：" + (errorCode == null ? "UNKNOWN" : errorCode));
+        }
+        String js = "(function(){var f=window.__dieyunCameraResult;if(typeof f==='function'){f("
+                + JSONObject.quote(requestId == null ? "" : requestId) + ","
+                + (ok ? "true" : "false") + ","
+                + JSONObject.quote(base64 == null ? "" : base64) + ","
+                + width + "," + height + ","
+                + JSONObject.quote(errorCode == null ? "" : errorCode)
+                + ");}})()";
+        try {
+            view.evaluateJavascript(js, null);
+        } catch (Exception e) {
+            // 页面已销毁：请求侧会按超时处理
+        }
+    }
+
     public class NativeBridge {
         @JavascriptInterface
         public void notify(String title, String body) {
@@ -943,6 +1325,18 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void pageReady() {
             runOnUiThread(() -> markWebPageReady());
+        }
+
+        /**
+         * Agent 主动拍照：参数由页面按电脑端的 `camera.capture` 请求原样转来。
+         * 完成后通过 window.__dieyunCameraResult(...) 回给页面（异步，可能走权限申请）。
+         */
+        @JavascriptInterface
+        public void capturePhoto(String requestId, String facing, int maxEdge) {
+            final String rid = requestId == null ? "" : requestId;
+            final String face = facing == null ? "environment" : facing;
+            final int edge = maxEdge;
+            runOnUiThread(() -> startAgentCapture(rid, face, edge));
         }
     }
 }

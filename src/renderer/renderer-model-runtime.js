@@ -47,7 +47,9 @@ var DEFAULTS = {
   modelSuppliers: [],
   embeddingModels: [],
   graphAutoIncremental: true,
-  codebaseAutoIncremental: false
+  codebaseAutoIncremental: false,
+  // 自动朗读每条新回复（手动点气泡下的「朗读」不受此开关影响）
+  ttsAutoRead: false
 };
 
 /**
@@ -392,6 +394,7 @@ function normalizeSettings(raw) {
   s.agentToolCallLimit = getAgentToolCallLimitSetting(s);
   s.agentMaxRounds = getAgentMaxRoundsSetting(s);
   s.graphAutoIncremental = s.graphAutoIncremental !== false;
+  s.ttsAutoRead = s.ttsAutoRead === true;
   s.codebaseAutoIncremental = s.codebaseAutoIncremental === true;
   const normalizeDefined = (m, index) => {
     const modalitySetting =
@@ -415,6 +418,8 @@ function normalizeSettings(raw) {
     if (m && m.headers) entry.headers = m.headers;
     if (m && m.authMode) entry.authMode = String(m.authMode).trim();
     if (m && m.userAgent) entry.userAgent = String(m.userAgent).trim();
+    // 语音合成模型的音色（只有 tts 有意义；留空表示用服务端默认）
+    if (m && entry.kind === 'tts' && String(m.voice || '').trim()) entry.voice = String(m.voice).trim();
     return entry;
   };
   s.customModels = Array.isArray(s.customModels)

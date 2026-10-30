@@ -180,7 +180,20 @@ const I18N_MESSAGES = {
     close_tray: '关闭到托盘',
     minimize: '最小化',
     maximize: '最大化',
-    restore: '向下还原'
+    restore: '向下还原',
+    tts_read: '朗读',
+    tts_stop: '停止',
+    tts_btn_title: '朗读这条回复',
+    tts_btn_title_stop: '停止朗读',
+    tts_fail_title: '朗读失败',
+    tts_empty_text: '没有可朗读的文本',
+    tts_empty_bubble: '这条回复没有可朗读的文本',
+    tts_no_model_title: '未配置朗读模型',
+    tts_no_model_hint: '在设置 → 模型里添加一个「语音合成」类型的模型',
+    tts_audio_error: '音频无法播放（code %s）',
+    tts_auto_read_label: '自动朗读新回复',
+    tts_auto_read_hint_on: '每轮回复结束后自动朗读。朗读中可在回复下方点「停止」，切换会话也会停。',
+    tts_auto_read_hint_off: '目前没有「语音合成」类型的模型：先在「自定义模型」里把模型类型改成「语音合成」，这里才能启用。'
   },
   en: {
     app_title: 'Dieyun Agent',
@@ -359,7 +372,22 @@ const I18N_MESSAGES = {
     close_tray: 'Close to tray',
     minimize: 'Minimize',
     maximize: 'Maximize',
-    restore: 'Restore'
+    restore: 'Restore',
+    tts_read: 'Read aloud',
+    tts_stop: 'Stop',
+    tts_btn_title: 'Read this reply aloud',
+    tts_btn_title_stop: 'Stop reading',
+    tts_fail_title: 'Read-aloud failed',
+    tts_empty_text: 'Nothing to read',
+    tts_empty_bubble: 'This reply has no readable text',
+    tts_no_model_title: 'No read-aloud model configured',
+    tts_no_model_hint: 'Add a model of type "Speech synthesis" under Settings → Models',
+    tts_audio_error: 'Audio could not be played (code %s)',
+    tts_auto_read_label: 'Read new replies aloud',
+    tts_auto_read_hint_on:
+      'Reads each reply aloud when the turn finishes. While reading, press "Stop" under the reply; switching sessions also stops it.',
+    tts_auto_read_hint_off:
+      'No "Speech synthesis" model yet: change a custom model type to "Speech synthesis" first — then this switch can be enabled.'
   }
 };
 

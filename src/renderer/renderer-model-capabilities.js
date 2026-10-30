@@ -1,12 +1,28 @@
-/** Shared modality helpers for custom & supplier models (text / vision / speech). */
+/** Shared modality helpers for custom & supplier models (text / vision / speech / tts). */
 (function () {
+  /**
+   * 模态标签**唯一一份**（设置页的标签、徽标、供应商行摘要都从这里取）。
+   *
+   * speech 与 tts 必须分开：前者是「语音转文字」（Composer 麦克风 →
+   * /v1/audio/transcriptions），后者是「文字转语音」（朗读 →
+   * chat/completions 出音频）。混成一个「语音」档位，用户给语音档位填 TTS 模型后
+   * 麦克风转写会 404、朗读也拿不到音色配置 —— 这正是本次拆开的原因。
+   */
   const MODALITY_LABELS = {
     text: { label: '文本', short: '文本' },
     vision: { label: '全模态', short: '全模态' },
-    speech: { label: '语音', short: '语音' }
+    speech: { label: '语音转写', short: '转写' },
+    tts: { label: '语音合成', short: '合成' }
   };
 
-  const MODALITY_OPTIONS = ['text', 'vision', 'speech'];
+  const MODALITY_OPTIONS = ['text', 'vision', 'speech', 'tts'];
+
+  /** 不能当对话模型用的模态（与 Main 侧 model-api-config.js#isNonChatModality 同判据）。 */
+  const NON_CHAT_MODALITIES = new Set(['speech', 'tts']);
+
+  function isNonChatModality(kind) {
+    return NON_CHAT_MODALITIES.has(String(kind == null ? '' : kind).trim());
+  }
 
   /**
    * 「供应商 / 自定义模型 → { baseUrl, apiKey }」的单一来源是
@@ -42,9 +58,10 @@
   }
 
   function normalizeModalitySetting(value, kind) {
-    if (value === 'vision' || value === 'text' || value === 'speech') return value;
+    if (value === 'vision' || value === 'text' || value === 'speech' || value === 'tts') return value;
     if (kind === 'vision') return 'vision';
     if (kind === 'speech') return 'speech';
+    if (kind === 'tts') return 'tts';
     return 'text';
   }
 
@@ -161,6 +178,52 @@
     };
   }
 
+  /**
+   * 「朗读用哪个模型」唯一入口 —— 与 `pickSpeechModel` **不可互相兜底**。
+   *
+   * 只认 `kind: 'tts'`：转写模型（`speech`）走的是 `/v1/audio/transcriptions`，
+   * 拿不到音频，把它塞进朗读只会再多一个 404。
+   *
+   * @returns {{ model: string, route: string, source: 'custom'|'supplier',
+   *             apiConfig: object, voice: string, format: string } | null}
+   */
+  function pickTtsModel(settings) {
+    const s = settings && typeof settings === 'object' ? settings : {};
+    const customTts = (s.customModels || []).find(
+      (m) => m && m.kind === 'tts' && m.name && m.baseUrl
+    );
+    if (customTts) {
+      return {
+        model: String(customTts.name).trim(),
+        route: `custom:${customTts.id}`,
+        source: 'custom',
+        apiConfig: customModelApiConfig(customTts),
+        voice: String(customTts.voice || '').trim(),
+        format: String(customTts.format || '').trim()
+      };
+    }
+    const supplierHit = findSupplierModelByModality(s, 'tts');
+    if (supplierHit) return { ...supplierHit, source: 'supplier', voice: '', format: '' };
+    return null;
+  }
+
+  /**
+   * 朗读请求配置（未配置朗读模型时返回 null —— UI 据此不显示「朗读」按钮）。
+   * 一并带出 headers / authMode / userAgent：否则「设置的测试」与真实朗读头不同。
+   */
+  function getTtsApiConfigFromSettings(settings) {
+    const pick = pickTtsModel(settings);
+    if (!pick) return null;
+    return {
+      ...pick.apiConfig,
+      baseUrl: String(pick.apiConfig?.baseUrl || '').trim(),
+      apiKey: String(pick.apiConfig?.apiKey || '').trim(),
+      model: String(pick.model || '').trim(),
+      voice: pick.voice || '',
+      format: pick.format || ''
+    };
+  }
+
   function modelSupportsMultimodalInSettings(settings, modelId, route) {
     const id = String(modelId || '').trim();
     if (!id) return false;
@@ -191,14 +254,17 @@
     if (!keys.length) return '';
     let vision = 0;
     let speech = 0;
+    let tts = 0;
     for (const modelId of keys) {
       const kind = getSupplierModelModality(supplier, modelId);
       if (kind === 'vision') vision += 1;
       if (kind === 'speech') speech += 1;
+      if (kind === 'tts') tts += 1;
     }
     const parts = [];
     if (vision) parts.push(`全模态×${vision}`);
-    if (speech) parts.push(`语音×${speech}`);
+    if (speech) parts.push(`转写×${speech}`);
+    if (tts) parts.push(`合成×${tts}`);
     return parts.join(' · ');
   }
 
@@ -210,6 +276,7 @@
   window.ModelCapabilities = {
     MODALITY_LABELS,
     MODALITY_OPTIONS,
+    isNonChatModality,
     normalizeModalitySetting,
     effectiveCustomModelKind,
     customModelSupportsMultimodal,
@@ -222,6 +289,8 @@
     findSupplierModelByModality,
     pickSpeechModel,
     getSpeechApiConfigFromSettings,
+    pickTtsModel,
+    getTtsApiConfigFromSettings,
     modelSupportsMultimodalInSettings,
     supplierModalitySummary,
     resolveChatCompletionsEndpoint

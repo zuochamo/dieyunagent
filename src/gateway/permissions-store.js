@@ -20,6 +20,15 @@ const DEFAULTS = {
    */
   osControl: true,
   /**
+   * 手机摄像头（`camera_look` 工具：让手机拍一张现实画面）。**默认关**。
+   *
+   * 为什么不像 osControl 那样默认开：它拍的是**现实世界**——镜头里的人、房间、桌上的东西，
+   * 这些内容一旦进上下文/落盘就收不回来，还涉及旁人。所以必须由用户显式打开一次，
+   * 打开后每次拍摄手机上仍有可见提示（不做常开预览、不做视频流）。
+   * 关掉即整个工具不再注入；模型会看到「能力没开」而不是「能力不存在」。
+   */
+  camera: false,
+  /**
    * 沙箱档位（唯一旋钮）：`read-only` | `workspace-write` | `danger-full-access`。
    * 语义与判定在 `sandbox-policy.js`；落盘白名单的唯一组装点是
    * gateway/server.js `_collectReadRoots/_collectWritableRoots`（远程侧同源

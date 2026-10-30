@@ -25,7 +25,7 @@
  * - **不吞错误**：抛错由调用方归一成信封后**才**进 after 关卡，观察者只需处理一种形状。
  */
 
-const { normalizeAgentToolName } = require('./guardrails-shared');
+const { normalizeAgentToolName, PERMISSION_GATED_TOOLS, permissionGateBlockMessage } = require('./guardrails-shared');
 const {
   shouldBlockRepeatToolCall,
   recordToolCallFingerprint,
@@ -143,6 +143,53 @@ const hookValidateArgs = {
   }
 };
 
+/**
+ * 能力授权：`camera_look` 这类「碰得到现实世界」的工具，执行前必须确认用户此刻是开着的。
+ *
+ * 权限快照的来路：优先用调用方给的 `call.permissions`（Main 手里就有 gateway 的
+ * `getPermissions()`）；没给就按 ctx 的 userDataPath 读一次 `host-permissions.json`
+ * （`ToolHarnessSession` 那条路径就是这种情况）。两处都读**同一份** store，
+ * 这里不做第二套判定规则，只做「键名 → 工具名」的映射（`PERMISSION_GATED_TOOLS`）。
+ *
+ * 放在 repeat-guard 之前：没授权的调用不该占用重复调用的计数。
+ */
+const hookToolPermission = {
+  id: 'tool-permission',
+  stage: 'before',
+  run(call) {
+    const key = PERMISSION_GATED_TOOLS[call.name];
+    if (!key) return;
+    const perms = permissionSnapshot(call);
+    if (!perms) return; // 拿不到权限快照时不假装拦截：执行层另有失败兜底
+    if (perms[key] === true) return;
+    recordTelemetry(call, false, 'PERMISSION_DENIED', 0);
+    call.block = wrapStructuredError({
+      retryable: false,
+      errorCode: 'PERMISSION_DENIED',
+      error: permissionGateBlockMessage(call.name, key)
+    });
+  }
+};
+
+/**
+ * 权限快照（`permissions-store` 的形状）。读不到返回 null。
+ *
+ * 为什么懒 require：`permissions-store` 在 gateway 层，模块顶层引入会把
+ * 「agent → gateway」的加载顺序固化下来；这里只在真需要时才取一次。
+ */
+function permissionSnapshot(call) {
+  if (call && call.permissions && typeof call.permissions === 'object') return call.permissions;
+  const userDataPath = callContext(call).userDataPath;
+  if (!userDataPath) return null;
+  try {
+    const path = require('node:path');
+    const { loadPermissions } = require('../gateway/permissions-store');
+    return loadPermissions(path.join(userDataPath, 'host-permissions.json'));
+  } catch {
+    return null;
+  }
+}
+
 const hookRepeatGuard = {
   id: 'repeat-guard',
   stage: 'before',
@@ -215,6 +262,7 @@ const hookSpillOutput = {
  */
 const DEFAULT_TOOL_GATE_HOOKS = Object.freeze([
   hookValidateArgs,
+  hookToolPermission,
   hookRepeatGuard,
   hookTelemetry,
   hookSpillOutput

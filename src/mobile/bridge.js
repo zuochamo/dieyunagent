@@ -10,6 +10,26 @@ const { lanHosts } = require('../net/lan');
 
 const DEFAULT_MOBILE_PORT = 17331;
 
+/**
+ * 服务端 → 手机端的请求等待上限。
+ * 手机拍照要「唤醒相机 + 对焦 + 编码 JPEG」，比一次静态查询慢得多，所以默认给 20s；
+ * 调用方（`src/mobile/camera-source.js`）按 agent-limits 的 cameraCaptureTimeoutMs 覆盖。
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 20000;
+
+/** 客户端自报能力的白名单：只有这里列出的能力会被记录，其余丢弃。 */
+const KNOWN_CAPABILITIES = Object.freeze(['camera']);
+
+function normalizeCapabilities(raw) {
+  const out = new Set();
+  if (!Array.isArray(raw)) return out;
+  for (const item of raw) {
+    const v = String(item || '').trim();
+    if (v && KNOWN_CAPABILITIES.includes(v)) out.add(v);
+  }
+  return out;
+}
+
 function contentType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.html') return 'text/html; charset=utf-8';
@@ -33,6 +53,13 @@ class MobileBridge {
     this.server = null;
     this.wss = null;
     this.clients = new Set();
+    /**
+     * 服务端发起的「请求 / 响应」（与手机的 `call` 方向相反）：id → 等待中的调用。
+     * 目前只有一条用途——Agent 主动让手机拍一张（`camera.capture`）。
+     */
+    this.pending = new Map();
+    /** 已认证客户端声明的能力（ws → Set<string>）。拍照走 `camera`，见 `_pickClient`。 */
+    this.clientCaps = new Map();
   }
 
   _ensureToken() {
@@ -162,6 +189,9 @@ class MobileBridge {
           authed = true;
           clearTimeout(authTimer);
           this.clients.add(ws);
+          // 能力由客户端自报（它才知道自己有没有原生拍照接口）：不认识的一律丢弃，
+          // 避免页面随便声明一个能力就把「Agent 主动拍照」路由到拿不到画面的客户端。
+          this.clientCaps.set(ws, normalizeCapabilities(msg.capabilities));
           this._send(ws, { type: 'auth_ok', id, data: this.agentService.info() });
         } else {
           this._send(ws, { type: 'error', id, error: 'AUTH_FAILED' });
@@ -171,6 +201,10 @@ class MobileBridge {
       }
       if (!authed) {
         this._send(ws, { type: 'error', id, error: 'NOT_AUTHED' });
+        return;
+      }
+      if (msg.type === 'response') {
+        this._settlePending(msg);
         return;
       }
       if (msg.type !== 'call') {
@@ -183,6 +217,92 @@ class MobileBridge {
     ws.on('close', () => {
       clearTimeout(authTimer);
       this.clients.delete(ws);
+      this.clientCaps.delete(ws);
+      // 这台手机断线/关页面时，等它回话的请求必须立刻失败：
+      // 否则 Agent 会一直挂到超时，把「手机没了」误读成「手机很慢」。
+      this._rejectPendingOf(ws);
+    });
+  }
+
+  _settlePending(msg) {
+    const id = msg && msg.id ? String(msg.id) : '';
+    const box = id ? this.pending.get(id) : null;
+    if (!box) return;
+    this.pending.delete(id);
+    clearTimeout(box.timer);
+    if (msg.ok) {
+      box.resolve(msg.data);
+      return;
+    }
+    const err = new Error(
+      (msg.error && (msg.error.message || msg.error.code)) || '手机端处理失败'
+    );
+    err.code = (msg.error && msg.error.code) || 'CLIENT_ERROR';
+    box.reject(err);
+  }
+
+  _rejectPendingOf(ws) {
+    for (const [id, box] of this.pending) {
+      if (box.ws !== ws) continue;
+      this.pending.delete(id);
+      clearTimeout(box.timer);
+      const err = new Error('手机端连接已断开');
+      err.code = 'NO_CLIENT';
+      box.reject(err);
+    }
+  }
+
+  /** 有该能力的最早/最新客户端。取「最新认证的那个」：重连/换机后它就是用户眼前那台。 */
+  _pickClient(capability) {
+    const want = String(capability || '');
+    const list = Array.from(this.clients);
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const ws = list[i];
+      if (ws.readyState !== 1) continue;
+      if (!want) return ws;
+      const caps = this.clientCaps.get(ws);
+      if (caps && caps.has(want)) return ws;
+    }
+    return null;
+  }
+
+  /** 是否有客户端在线（可选：要求具备某项能力）。 */
+  hasClient(capability) {
+    return !!this._pickClient(capability);
+  }
+
+  /**
+   * 服务端 → 手机端的请求（目前只有 `camera.capture`）。
+   *
+   * 与 `_handleCall` 是同一套线协议的镜像方向：请求带 id，客户端回
+   * `{ type: 'response', id, ok, data | error }`。没有可用客户端时**立即拒绝**
+   * （NO_CLIENT），不等超时——调用方要能马上告诉模型「手机没连上」而不是卡 20 秒。
+   *
+   * @param {string} method 方法名
+   * @param {object} [params] 参数
+   * @param {{ capability?: string, timeoutMs?: number }} [opts]
+   * @returns {Promise<any>} 客户端回传的 data
+   */
+  request(method, params, opts = {}) {
+    const capability = opts.capability ? String(opts.capability) : '';
+    const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : DEFAULT_REQUEST_TIMEOUT_MS;
+    const ws = this._pickClient(capability);
+    if (!ws) {
+      const err = new Error('手机端未连接');
+      err.code = 'NO_CLIENT';
+      return Promise.reject(err);
+    }
+    const id = crypto.randomBytes(8).toString('hex');
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        const err = new Error('手机端未在限定时间内回应');
+        err.code = 'TIMEOUT';
+        reject(err);
+      }, timeoutMs);
+      if (timer.unref) timer.unref();
+      this.pending.set(id, { resolve, reject, timer, ws });
+      this._send(ws, { type: 'request', id, method: String(method || ''), params: params || {} });
     });
   }
 
@@ -196,6 +316,7 @@ class MobileBridge {
       else if (method === 'task.submit') data = await this.agentService.submitTask(params);
       else if (method === 'task.stop') data = this.agentService.stopTask(params);
       else if (method === 'speech.transcribe') data = await this.agentService.transcribeSpeech(params);
+      else if (method === 'speech.synthesize') data = await this.agentService.synthesizeSpeech(params);
       else if (method === 'service.info') data = this.agentService.info();
       else throw new Error('未知方法: ' + method);
       this._send(ws, { type: 'result', id, ok: true, data });
@@ -219,6 +340,15 @@ class MobileBridge {
   }
 
   stop() {
+    for (const [id, box] of this.pending) {
+      this.pending.delete(id);
+      clearTimeout(box.timer);
+      const err = new Error('手机桥已停止');
+      err.code = 'NO_CLIENT';
+      box.reject(err);
+    }
+    this.pending.clear();
+    this.clientCaps.clear();
     for (const ws of this.clients) {
       try {
         ws.close(1001, 'server stop');
@@ -246,4 +376,4 @@ class MobileBridge {
   }
 }
 
-module.exports = { MobileBridge, DEFAULT_MOBILE_PORT };
+module.exports = { MobileBridge, DEFAULT_MOBILE_PORT, DEFAULT_REQUEST_TIMEOUT_MS, KNOWN_CAPABILITIES };

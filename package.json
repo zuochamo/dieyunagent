@@ -62,6 +62,7 @@
     "test:monitor-outbox": "node scripts/test-monitor-outbox.cjs",
     "test:planner-parallel": "node scripts/test-planner-parallel.cjs",
     "test:mobile": "node scripts/test-mobile-smoke.cjs",
+    "test:mobile-camera": "node scripts/test-mobile-camera.cjs",
     "test:peer": "node scripts/test-peer-store.cjs && node scripts/test-peer-tools.cjs && node scripts/test-peer-mesh.cjs",
     "test:peer-mesh": "node scripts/test-peer-mesh.cjs",
     "test:peer-tools": "node scripts/test-peer-tools.cjs",

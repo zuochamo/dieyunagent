@@ -2149,6 +2149,60 @@ body.composer-resizing {
   padding: 4px 0;
   max-width: 88%;
 }
+/* 助手回复的「朗读」操作条：气泡的兄弟节点，随气泡悬停显现 */
+/* 助手回复的「朗读」操作条：气泡的兄弟节点（气泡内容会被 replaceChildren 清空）。
+   常驻但压暗 —— 早先是「悬停气泡才浮现」，结果鼠标从气泡往按钮移动时，
+   指针落在气泡下边界与操作条之间的缝里，气泡 :hover 已失效、按钮还没 hit，
+   按钮当场消失，用户永远点不到。所以这里不再依赖悬停：常态 0.35 透明度可点，
+   悬停/聚焦/播放中提亮到 1。 */
+.msg-tts-bar {
+  align-self: flex-start;
+  display: flex;
+  gap: 4px;
+  margin: -2px 0 6px;
+  opacity: 0.45;
+  transition: opacity var(--motion-fast) var(--motion-ease-standard);
+}
+.msg.assistant:hover + .msg-tts-bar,
+.msg.assistant:focus-within + .msg-tts-bar,
+.msg-tts-bar:hover,
+.msg-tts-bar:focus-within,
+.msg-tts-bar.has-active-run {
+  opacity: 1;
+}
+.msg-tts-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 0;
+  background: rgba(128, 128, 128, 0.14);
+  color: var(--text-mute);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.msg-tts-btn:hover {
+  color: var(--text);
+  background: rgba(128, 128, 128, 0.22);
+}
+.msg-tts-btn.is-speaking {
+  color: var(--text);
+  background: rgba(128, 128, 128, 0.3);
+}
+.msg-tts-btn svg {
+  display: block;
+  pointer-events: none;
+}
+[data-theme='light'] .msg-tts-btn {
+  background: rgba(0, 0, 0, 0.06);
+}
+[data-theme='light'] .msg-tts-btn:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
 .msg.assistant.loading {
   color: var(--text-mute);
   font-style: normal;

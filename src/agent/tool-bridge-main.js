@@ -1,6 +1,8 @@
 'use strict';
 
 const { delegateAgentToolViaGateway } = require('./delegate-tool-gateway');
+// 手机摄像头（camera_look）的唯一出口：协议参数、结果校验、失败文案都在那边。
+const { createPhoneCameraSource } = require('../mobile/camera-source');
 const {
   PROJECT_MEMORY_REL_PATH,
   parseProjectMemoryEntries
@@ -34,7 +36,13 @@ const {
   SOURCE_ATTACHMENT,
   SOURCE_MCP
 } = require('./browser-vision');
-const { storeVisionImage, visionHandleText, visionOmitText, visionTokensForSize } = require('./vision-image');
+const {
+  storeVisionImage,
+  visionHandleText,
+  visionCameraText,
+  visionOmitText,
+  visionTokensForSize
+} = require('./vision-image');
 
 /**
  * 用文件头魔数判断 base64 是否为图片，并给出准确的 mime。
@@ -92,6 +100,23 @@ function sanitizeToolResultForApi(name, result) {
       note: result.note
         ? `${result.note}图片本体不随工具结果返回`
         : '已截取当前屏幕画面；图片本体不随工具结果返回'
+    };
+  }
+  if (name === 'camera_look' && result.base64) {
+    // 与截图同一策略：像素本体不随工具结果返回（走视觉缓冲注入下一轮），
+    // 结果里只留「拍了哪颗、多大、什么时候拍的」这几条事实。
+    return {
+      ok: result.ok,
+      facing: result.facing,
+      mime: result.mime,
+      width: result.width,
+      height: result.height,
+      capturedAt: result.capturedAt,
+      ...(result.visionImage ? { visionImage: result.visionImage } : {}),
+      ...(result.visionTokens ? { visionTokens: result.visionTokens } : {}),
+      base64Omitted: true,
+      base64Length: String(result.base64).length,
+      note: result.note || '手机已拍好一张照片；图片本体不随工具结果返回'
     };
   }
   if (name === 'browser_screenshot' && result.base64) {
@@ -178,6 +203,12 @@ function createMainToolBridge(deps) {
   // 内网 agent 互通（src/peer）：Main 创建的协调器；未启用时三个 peer_* 工具退化为结构化错误，
   // 不做「静默无此工具」——模型需要知道「这个能力没开」而不是「能力不存在」。
   const peerCoordinator = deps.peerCoordinator || null;
+  // 手机摄像头：`getMobileBridge` 用取值函数传进来（手机桥由 Main 启动时创建，
+  // 工具桥装配时刻可能还没有它；重连/换端口后也总是拿到最新实例）。
+  // 没接手机桥时保留 null —— camera_look 会退化成一句结构化错误，而不是「工具不存在」。
+  const cameraSource = typeof deps.getMobileBridge === 'function'
+    ? createPhoneCameraSource({ getBridge: deps.getMobileBridge })
+    : null;
 
   /** 有界等待：超时或失败一律 resolve(null)，交由调用方降级。 */
   function withTimeout(promise, ms) {
@@ -345,6 +376,22 @@ function createMainToolBridge(deps) {
   async function executeMainOnlyTool(name, args, ctx) {
     const a = args || {};
     switch (name) {
+      case 'camera_look': {
+        if (!cameraSource) {
+          return {
+            ok: false,
+            errorCode: 'CAMERA_UNAVAILABLE',
+            retryable: false,
+            error: '这台机器没有手机桥，无法调用手机摄像头。请改用其它方式（让用户描述，或用 computer 看屏幕）。'
+          };
+        }
+        const cameraLimits = getAgentLimits(userDataPath, ctx.contextTierId);
+        return cameraSource.capture({
+          focus: a.focus,
+          maxEdge: cameraLimits.cameraShotMaxEdge,
+          timeoutMs: cameraLimits.cameraCaptureTimeoutMs
+        });
+      }
       case 'mcp_tool_schema': {
         if (!mcpRuntime) {
           return { error: 'MCP 运行时未就绪', errorCode: 'MCP_UNAVAILABLE', retryable: false };
@@ -937,8 +984,9 @@ function createMainToolBridge(deps) {
           run(c) {
             if (!ctx.runId) return;
             if (!visionEnabled) {
-              // 文本模型：截图照常剥离，但要明说「看不到」，否则模型以为画面已入眼
-              if (c.name === 'computer' && c.result && c.result.base64) {
+              // 文本模型：截图/照片照常剥离，但要明说「看不到」，否则模型以为画面已入眼
+              // （camera_look 同样处理：拍了照却没进视觉通道时，模型最容易编造看到的内容）
+              if ((c.name === 'computer' || c.name === 'camera_look') && c.result && c.result.base64) {
                 c.result = {
                   ...c.result,
                   note:
@@ -952,8 +1000,11 @@ function createMainToolBridge(deps) {
             // 过去这里忽略返回值，而工具结果默认还写着「将作为视觉输入附到下一轮」——
             // 4K 整屏 PNG 顶穿单张上限被整张丢弃，模型却一直在等一张永不到来的图。
             const shot = extractShot(c.name, c.result);
+            // 手机照片**不落盘**：现实画面（人、房间、桌上的东西）留副本等于把手机变成
+            // 一台没人要求的录音笔，而「再看细节」的正当解法是再拍一张。
+            const isCameraShot = c.name === 'camera_look';
             // 先落盘再入队：入队失败时模型至少还有一份可读副本，不至于彻底够不着这一帧。
-            const handle = shot
+            const handle = shot && !isCameraShot
               ? visionHandleForShot(shot, c.result, {
                   workspacePath: ctx.workspacePath || ctx.worktreePath,
                   userDataPath,
@@ -977,8 +1028,10 @@ function createMainToolBridge(deps) {
                     }
                   : {}),
                 note: queued
-                  ? visionHandleText(handle, '这张图会作为图片输入附在下一轮；不要重复截同一屏。') ||
-                    '截图已进入视觉通道，会作为图片输入附在下一轮；不要重复截同一屏。'
+                  ? isCameraShot
+                    ? visionCameraText(shot.width, shot.height)
+                    : visionHandleText(handle, '这张图会作为图片输入附在下一轮；不要重复截同一屏。') ||
+                      '截图已进入视觉通道，会作为图片输入附在下一轮；不要重复截同一屏。'
                   : visionOmitText(
                       visionDropReason(shot ? { base64: shot.base64 } : c.result, visionLimits),
                       handle

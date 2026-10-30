@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, maybeAutoReadAssistantBubble, attachTtsBarToBubble */
 'use strict';
 
 function findAssistantLoadingBubble(sessionId) {
@@ -309,6 +309,24 @@ function dispatchAgentRunEvent(sessionId, rawEvent) {
     pushAgentServiceCompletion(live, sessionId, event);
   }
   renderLiveRunFromEvent(sessionId, live, event);
+  // 「自动朗读」的唯一触发点：本轮正常结束（DONE）这一拍，气泡刚渲染成终态。
+  // 为什么不在 finalizeAssistantBubble 里挂：正常完成根本走事件路径（run-events 置
+  // live.finished + renderLiveRunFromEvent 收尾），那个函数只被「中断/失败/轮次上限」用到，
+  // 挂在那边等于从不触发。ERROR / STOPPED 不到这里（类型判等），后台会话也不念。
+  if (
+    event.type === AGENT_RUN_EVENT_TYPES.DONE &&
+    live.finished &&
+    !live.autoReadFired &&
+    sessionId === currentSessionId
+  ) {
+    live.autoReadFired = true;
+    const bubble =
+      live.placeholderEl && live.placeholderEl.isConnected ? live.placeholderEl : null;
+    // 流式期间不挂「朗读」按钮（见 renderer-chat-bubbles.js），正文定稿这一拍补挂；
+    // 自动朗读随后会用到这个按钮来显示「停止」。
+    if (bubble && typeof attachTtsBarToBubble === 'function') attachTtsBarToBubble(bubble);
+    if (typeof maybeAutoReadAssistantBubble === 'function') maybeAutoReadAssistantBubble(bubble);
+  }
   // 右侧「子代理」面板与思考区卡片同源（同一份 live.trace），跟着同一拍事件刷新；
   // 面板不可见时该函数自行返回，不做任何工作。
   if (typeof scheduleSubagentPanelRefresh === 'function') scheduleSubagentPanelRefresh();

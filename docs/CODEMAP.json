@@ -602,7 +602,8 @@
     {
       "prefix": "src/agent/browser-vision.js",
       "tests": [
-        "test:rust-loop-runner"
+        "test:rust-loop-runner",
+        "test:mobile-camera"
       ]
     },
     {
@@ -683,7 +684,8 @@
       "prefix": "src/gateway/permissions-store.js",
       "tests": [
         "test:sandbox-gateway",
-        "test:local-gateway-smoke"
+        "test:local-gateway-smoke",
+        "test:mobile-camera"
       ]
     },
     {
@@ -710,7 +712,8 @@
       "prefix": "src/agent/tool-catalog.js",
       "tests": [
         "test:tool-harness",
-        "check:renderer"
+        "check:renderer",
+        "test:mobile-camera"
       ]
     },
     {
@@ -819,7 +822,8 @@
       "prefix": "src/agent/guardrails-shared.js",
       "tests": [
         "test:guardrails-sync",
-        "test:tool-harness"
+        "test:tool-harness",
+        "test:mobile-camera"
       ]
     },
     {
@@ -860,7 +864,8 @@
       "prefix": "src/agent/tool-gate.js",
       "tests": [
         "test:tool-gate",
-        "test:tool-harness"
+        "test:tool-harness",
+        "test:mobile-camera"
       ]
     },
     {
@@ -875,7 +880,8 @@
       "tests": [
         "test:tool-bridge-delegate",
         "test:tool-gate",
-        "test:guardrails-sync"
+        "test:guardrails-sync",
+        "test:mobile-camera"
       ]
     },
     {
@@ -1062,7 +1068,8 @@
       "prefix": "src/mobile/",
       "tests": [
         "test:mobile",
-        "test:agent-run-events"
+        "test:agent-run-events",
+        "test:mobile-camera"
       ]
     },
     {
@@ -1526,7 +1533,8 @@
       "test:scm",
       "lint:agent",
       "check:js",
-      "check:renderer"
+      "check:renderer",
+      "test:mobile-camera"
     ],
     "agent-full": [
       "test:agent-limits",
@@ -1572,7 +1580,8 @@
       "test:rust-planner-smoke",
       "test:rust-agent-loop-smoke",
       "check:js",
-      "check:renderer"
+      "check:renderer",
+      "test:mobile-camera"
     ]
   }
 }

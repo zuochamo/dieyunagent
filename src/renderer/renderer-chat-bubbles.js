@@ -62,6 +62,18 @@ function appendBubble(role, content, opts = {}) {
     div.textContent = content;
   }
   chatList.appendChild(div);
+  // 助手回复的「朗读」按钮：挂在气泡**外侧**（气泡内容在流式/重渲染时会被
+  // renderAssistantBubbleContent 的 replaceChildren 清空，挂在里面会被一起抹掉）。
+  // 流式中的气泡不挂 —— 常驻按钮会诱使用户去念半截话；跑完那一拍由
+  // renderer-chat-live-run.js#dispatchAgentRunEvent(DONE) 补挂。
+  if (
+    role === 'assistant' &&
+    !opts.error &&
+    !opts.loading &&
+    typeof attachTtsBarToBubble === 'function'
+  ) {
+    attachTtsBarToBubble(div);
+  }
   if (opts.skipScroll !== true) {
     if (role === 'assistant' && opts.loading) {
       // 新一轮开始：上一轮的收尾跟底窗口到此为止，滚动交回流式跟随

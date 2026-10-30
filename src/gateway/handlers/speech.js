@@ -1,6 +1,7 @@
 'use strict';
 
 const { transcribeWhisper, MAX_AUDIO_BYTES } = require('../speech-transcribe');
+const { synthesizeSpeech } = require('../speech-synthesize');
 
 /**
  * @param {{}} _deps
@@ -47,6 +48,34 @@ function createSpeechHandlers(_deps) {
         audioBuffer,
         filename: params?.filename,
         mimeType: params?.mimeType
+      });
+    },
+
+    /**
+     * 文本 → 音频。参数由 Renderer 按「当前设置里 kind=tts 的模型」传入
+     * （与 speech.transcribe 同一套：调用方给配置，本层只做请求）。
+     * 请求修饰字段（headers / userAgent / authMode）一并透传 —— 否则
+     * 设置页「测试」与真实朗读会因头不同而一个通一个 400。
+     */
+    'speech.synthesize': async (params) => {
+      const text = String(params?.text || '');
+      const baseUrl = String(params?.baseUrl || '').trim();
+      if (!baseUrl) {
+        const e = new Error('未配置 API Base URL');
+        e.code = 'MISSING_BASE_URL';
+        throw e;
+      }
+      return synthesizeSpeech({
+        baseUrl,
+        apiKey: params?.apiKey,
+        model: params?.model,
+        text,
+        voice: params?.voice,
+        format: params?.format,
+        authMode: params?.authMode,
+        headers: params?.headers,
+        userAgent: params?.userAgent,
+        vars: { sessionId: params?.sessionId, model: params?.model }
       });
     }
   };

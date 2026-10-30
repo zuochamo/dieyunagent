@@ -450,6 +450,38 @@ body[data-theme='light'] .msg.user .bubble {
   color: var(--bg);
 }
 
+/* 助手回复的「朗读」按钮：常驻但压暗（手机上没有悬停，藏起来就永远点不到） */
+.msg-tts-btn {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.16);
+  color: var(--text-mute, #9aa0a6);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.75;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.msg-tts-btn.is-speaking {
+  opacity: 1;
+  color: var(--text, #e8eaed);
+  background: rgba(128, 128, 128, 0.3);
+}
+
+body[data-theme='light'] .msg-tts-btn {
+  background: rgba(0, 0, 0, 0.07);
+  color: #555;
+}
+
+body[data-theme='light'] .msg-tts-btn.is-speaking {
+  color: #111;
+  background: rgba(0, 0, 0, 0.14);
+}
+
 .msg.assistant .bubble {
   background: var(--surface);
   box-shadow: none;

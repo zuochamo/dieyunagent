@@ -67,4 +67,19 @@ assert(/button\s*\{[\s\S]{0,60}border-radius:\s*var\(--radius-md\)/.test(css), '
 assert(!/border-radius:\s*0(px)?\s*;/.test(css), 'no square-corner leftovers');
 assert(/\.think-sheet\s*\{[\s\S]{0,400}border-radius:\s*var\(--radius-xl\) var\(--radius-xl\) 0 0/.test(css), 'bottom sheet keeps square feet, rounded head');
 
+// 朗读（语音合成）：手机端只发文本，模型 / 端点 / 密钥都留在电脑端解析
+assert(/speech\.synthesize/.test(appJs), 'app.js calls speech.synthesize');
+assert(/function attachTtsButton/.test(appJs), 'assistant bubbles get a read-aloud button');
+assert(/function splitTtsChunks/.test(appJs), 'mobile chunks long replies before synthesizing');
+assert(/dieyun\.speech\.ttsReady/.test(appJs) && /dieyun\.speech\.ttsAutoRead/.test(appJs), 'tts readiness + auto-read synced from PC');
+assert(/\.msg-tts-btn/.test(css), 'read-aloud button styled');
+assert(/tts_read:/.test(appJs) && /tts_stop:/.test(appJs), 'read-aloud labels localized');
+
+const bridgeJs = fs.readFileSync(path.join(__dirname, '..', 'src', 'mobile', 'bridge.js'), 'utf8');
+assert(/'speech\.synthesize'/.test(bridgeJs), 'bridge dispatches speech.synthesize');
+assert(!/apiKey/.test(appJs), 'mobile never handles the provider api key');
+
+const serviceJs = fs.readFileSync(path.join(__dirname, '..', 'src', 'agent', 'service.js'), 'utf8');
+assert(/resolveTtsApiConfig/.test(serviceJs), 'main resolves the tts model for mobile');
+
 console.log('test-mobile-smoke.cjs ok');

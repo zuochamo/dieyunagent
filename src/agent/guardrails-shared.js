@@ -598,6 +598,25 @@ function createGuardrailApi(getLimits) {
 }
 
 /**
+ * 「能力型」工具：执行前必须由用户显式授权（键 = `permissions-store` 里的字段）。
+ *
+ * 为什么注入之外还要拦一道：工具不在模型清单里 ≠ 模型不会调用它 ——
+ * 上一轮开着、这一轮用户关掉（或历史里留着同名调用）时，模型仍可能发出这个名字。
+ * 摄像头拍的是现实世界，用户关掉就是关掉，执行前必须在同一处再确认一次。
+ */
+const PERMISSION_GATED_TOOLS = Object.freeze({ camera_look: 'camera' });
+
+/** 能力未授权时的拦截文案（模型据此换策略，不要反复试）。 */
+function permissionGateBlockMessage(name, key) {
+  const label = key === 'camera' ? '手机摄像头' : key;
+  return (
+    `工具 ${name} 没有执行：用户没有打开「${label}」权限（默认关）。` +
+    '这不是故障，重试也不会成功。请改用其它方式（文字问用户、computer 看屏幕、browser_snapshot），' +
+    '或请用户到「设置 → 本机权限」里打开后再说。'
+  );
+}
+
+/**
  * 「完成验收」提示（`> ⚠️ **完成验收**：…`）是**当轮 UI 提醒**，不属于模型正文。
  *
  * 落库的 `content` 里带着它 → 下一轮作为历史上行 → 模型原样复述一遍 →
@@ -649,6 +668,8 @@ const SHARED_EXPORTS = {
   parseRejectedImageMessageIndices,
   dropRejectedChatImagesForApi,
   isMutatingAgentTool: isMutatingAgentToolName,
+  PERMISSION_GATED_TOOLS,
+  permissionGateBlockMessage,
   fsEditArgsPresent,
   createGuardrailApi,
   READINESS_NOTE_RE,

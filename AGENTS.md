@@ -31,6 +31,7 @@
 | 联网搜索 / 网页抓取 | `src/gateway/web/`（`engines/` 一个引擎一个 parser；出网走 `transport.js`） | 另写一份 SERP 解析、fetch 或 SSRF 校验 |
 | 手机端 UI / 桥接 | `src/mobile/public/`、`src/mobile/bridge.js`、`src/agent/service.js` | 复制整套 PC Renderer |
 | 模型 / 语音设置 | `src/model-settings.js`、`src/renderer/renderer-model-settings.js` | 散落硬编码 API URL |
+| 朗读（语音合成 / TTS） | `src/gateway/speech-synthesize.js`（合成请求体 / 超时 / 长度上限的唯一来源）、`src/gateway/tts-cache.js`（按 text+voice+format+model+baseUrl 的字节上限 LRU）、`src/renderer/renderer-tts.js`（分句切块 + 边合成边播 + 停止/切歌语义）、`src/model-settings.js:resolveTtsApiConfig`（无 Renderer 的调用方与手机端选模型）、`src/mobile/public/app.js`（手机端朗读） | 在 Renderer / 手机端各拼一份合成请求体或选模型逻辑；拿 `speech`（转写）槽位跑合成 —— 两种能力常不同时存在 |
 | LLM 端点拼接 / 请求头 | `src/agent/llm-request.js`（端点与请求头唯一来源） | 在调用点内联 `Content-Type + Authorization` |
 | 打包 / 安装包 | `scripts/`、`build-installer.bat` | 任务无关不改 `electron-builder` 配置 |
 | 离线预装的 MCP 产物 | `scripts/pack-mcp-bundled.cjs`（版本唯一来源 `src/mcp/registry.js`） | 再写一份版本/校验和或另造预装机制 |

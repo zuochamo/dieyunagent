@@ -145,6 +145,16 @@ const AGENT_LIMITS_DEFAULTS = {
   // 结果就是「截了图但模型永远看不见」。1568 是主流多模态模型的最优像素区间：
   // 再大只是白烧 token，再小则界面小字糊掉。缩放后通常 300–800KB，稳定过限。
   visionShotMaxEdge: 1568,
+  // 手机摄像头（camera_look 工具）：**一次一张、不常开**。
+  // cameraCaptureTimeoutMs：手机端「唤醒相机 + 对焦 + 编码」的等待上限；超时就如实说没拍到，
+  //   不要用更长的超时硬等——锁屏/后台的手机永远不会回图。
+  // cameraShotMaxEdge：手机侧压缩的长边。取 1280 而非 1568，是因为回传链路是
+  //   App 内 JS 桥（base64 字符串过 evaluateJavascript），体积翻倍会明显拖慢并可能被丢；
+  //   而 1280 已足够看清桌面物品与人的表情，细节可让模型再拍一张。
+  // cameraShotsPerRound：每轮在途张数（与视觉缓冲同口径，注入后清空）。
+  cameraCaptureTimeoutMs: 20000,
+  cameraShotMaxEdge: 1280,
+  cameraShotsPerRound: 2,
   // 工具产出图片的只读副本保留张数（内容寻址去重后按 mtime 留最新 N 张）。
   // 为什么要留副本：base64 注入完即丢，模型想再看局部细节只能重拍，而当时那一帧可能已过；
   // 为什么要有上限：电脑控制一次任务能产生几十张整屏图，不留上限就是无底占盘。

@@ -14,6 +14,9 @@
  *   MCP 结果里的 image part 过去被降级成 `[image]` 文本，模型只能知道「有张图」
  *   却看不到像素——3D 建模「看一眼再改」的闭环就断在这里。
  * - `computer`：computer 工具（OS 级电脑控制）每次动作后自动截取的本机屏幕画面。
+ * - `camera`：`camera_look` 让**手机**拍的一张现实世界照片（前置看人 / 后置看桌面）。
+ *   它与屏幕截图的区别是「一次一张、不常开」：手机端每次拍摄都有可见提示，
+ *   额度也单独计（`cameraShotsPerRound`），不和浏览器截图抢额度。
  *
  * 约束（与 dieyun-core 的 strip_inline_images_from_messages 同源策略一致）：
  * - 只暂存、不写入 Rust 消息账本，也不进 checkpoint，避免 base64 长期驻留与重复发送；
@@ -31,6 +34,15 @@ const SOURCE_BROWSER = 'browser';
 const SOURCE_ATTACHMENT = 'attachment';
 const SOURCE_MCP = 'mcp';
 const SOURCE_COMPUTER = 'computer';
+const SOURCE_CAMERA = 'camera';
+/** 来源白名单：不在其中的一律归到 browser（保持历史语义），不让调用方字符串决定配额。 */
+const KNOWN_SOURCES = Object.freeze([
+  SOURCE_BROWSER,
+  SOURCE_ATTACHMENT,
+  SOURCE_MCP,
+  SOURCE_COMPUTER,
+  SOURCE_CAMERA
+]);
 
 /** 兼容旧调用方的常量（现由 agent-limits 单一来源，此处仅做再导出） */
 const MAX_SHOTS_PER_RUN = AGENT_LIMITS_DEFAULTS.visionShotsPerRound;
@@ -68,7 +80,13 @@ function resolveVisionLimits(limits) {
       [SOURCE_MCP]: toPositiveInt(l.visionShotsPerRound, MAX_SHOTS_PER_RUN),
       // 电脑控制截图（computer 工具）同口径：动作后自动截图，满额挤旧留新 ——
       // 模型要的永远是「最新一屏」。
-      [SOURCE_COMPUTER]: toPositiveInt(l.visionShotsPerRound, MAX_SHOTS_PER_RUN)
+      [SOURCE_COMPUTER]: toPositiveInt(l.visionShotsPerRound, MAX_SHOTS_PER_RUN),
+      // 手机摄像头同属「模型主动要的画面」：一次一张、不常开，额度单独设
+      // （`cameraShotsPerRound`），避免「多截几屏」把「再看一眼现实」挤掉。
+      [SOURCE_CAMERA]: toPositiveInt(
+        l.cameraShotsPerRound,
+        AGENT_LIMITS_DEFAULTS.cameraShotsPerRound
+      )
     },
     maxBase64Chars: toPositiveInt(l.visionMaxBase64Chars, MAX_BASE64_CHARS)
   };
@@ -91,6 +109,12 @@ function extractShot(toolName, result) {
     mime = result.mime || mime;
     width = result.width;
     height = result.height;
+  } else if (toolName === 'camera_look' && typeof result.base64 === 'string') {
+    // 手机摄像头：相机出的是 JPEG，不能沿用默认的 png 声明。
+    base64 = result.base64;
+    mime = result.mime || 'image/jpeg';
+    width = result.width;
+    height = result.height;
   } else if (
     toolName === 'browser_observe' &&
     result.screenshot &&
@@ -104,7 +128,13 @@ function extractShot(toolName, result) {
     return null;
   }
   if (!base64) return null;
-  return { source: toolName === 'computer' ? SOURCE_COMPUTER : SOURCE_BROWSER, tool: toolName, mime, base64, width, height };
+  const source =
+    toolName === 'computer'
+      ? SOURCE_COMPUTER
+      : toolName === 'camera_look'
+        ? SOURCE_CAMERA
+        : SOURCE_BROWSER;
+  return { source, tool: toolName, mime, base64, width, height };
 }
 
 /**
@@ -132,14 +162,7 @@ function recordVisionImage(runId, entry, limits, opts = {}) {
   const cfg = resolveVisionLimits(limits);
   const base64 = typeof entry.base64 === 'string' ? entry.base64 : '';
   if (!base64 || base64.length > cfg.maxBase64Chars) return false;
-  const source =
-    entry.source === SOURCE_ATTACHMENT
-      ? SOURCE_ATTACHMENT
-      : entry.source === SOURCE_MCP
-        ? SOURCE_MCP
-        : entry.source === SOURCE_COMPUTER
-          ? SOURCE_COMPUTER
-          : SOURCE_BROWSER;
+  const source = KNOWN_SOURCES.includes(entry.source) ? entry.source : SOURCE_BROWSER;
   const cap = cfg.maxPerSource[source] || 0;
   if (!(cap > 0)) return false;
 
@@ -241,6 +264,13 @@ function buildVisionMessage(images) {
         'coordinate 直接用截图里的像素位置（左上角为原点），最后一张截图就是当前画面。'
     );
   }
+  const camera = list.filter((s) => s.source === SOURCE_CAMERA);
+  if (camera.length) {
+    lines.push(
+      `以下是手机摄像头刚拍的现实画面（${camera.length} 张）。请据此回答「你看到了什么」类问题；` +
+        '看不清就说看不清并再拍一张，不要凭想象补细节。'
+    );
+  }
   return {
     role: 'user',
     content: [
@@ -258,6 +288,8 @@ module.exports = {
   SOURCE_ATTACHMENT,
   SOURCE_MCP,
   SOURCE_COMPUTER,
+  SOURCE_CAMERA,
+  KNOWN_SOURCES,
   MAX_SHOTS_PER_RUN,
   MAX_BASE64_CHARS,
   resolveVisionLimits,

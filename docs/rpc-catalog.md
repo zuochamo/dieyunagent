@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-10-28T13:35:10.658Z
+生成时间：2026-10-30T11:45:58.964Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 186 |
-| Gateway only | 104 |
+| 总计 | 187 |
+| Gateway only | 105 |
 | Rust only | 27 |
 | Both | 55 |
 
@@ -264,10 +264,11 @@
 | `scm.status` | gateway | gateway/handlers/scm.js | — |
 | `scm.unstage` | gateway | gateway/handlers/scm.js | — |
 
-### speech (1)
+### speech (2)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
+| `speech.synthesize` | gateway | gateway/handlers/speech.js | — |
 | `speech.transcribe` | gateway | gateway/handlers/speech.js | — |
 
 ### undo (11)

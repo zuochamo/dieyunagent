@@ -866,7 +866,12 @@ async function populateAutomationSkillSelect(selectedId) {
 function listAutomationModelOptions() {
   const out = [];
   const seen = new Set();
-  // 语音（TTS）模型不接受 chat 请求，选进计划必然失败；模态判据与 Composer 同源（ModelCapabilities）
+  // 语音模型（转写 speech / 合成 tts）不接受 chat 请求，选进计划必然失败；
+  // 模态判据与 Composer 同源（ModelCapabilities.isNonChatModality）
+  const isNonChat = (kind) =>
+    typeof window !== 'undefined' && window.ModelCapabilities
+      ? window.ModelCapabilities.isNonChatModality(kind) === true
+      : kind === 'speech';
   const modalityOf = (supplier, modelId) =>
     typeof window !== 'undefined' && window.ModelCapabilities
       ? window.ModelCapabilities.getSupplierModelModality(supplier, modelId)
@@ -877,7 +882,7 @@ function listAutomationModelOptions() {
     for (const m of builtins) {
       const supplier = typeof getSupplierById === 'function' ? getSupplierById(m.supplierId) : null;
       if (!supplier || !isSupplierModelEnabled(supplier, m.id)) continue;
-      if (modalityOf(supplier, m.id) === 'speech') continue;
+      if (isNonChat(modalityOf(supplier, m.id))) continue;
       const route = m.routeKey || `builtin:${m.supplierId}:${m.id}`;
       if (seen.has(route)) continue;
       seen.add(route);
@@ -887,7 +892,7 @@ function listAutomationModelOptions() {
     // ignore：模型列表不可用时只留「跟随默认」
   }
   for (const m of (settings && settings.customModels) || []) {
-    if (!m || !m.id || !m.name || m.kind === 'speech') continue;
+    if (!m || !m.id || !m.name || isNonChat(m.kind)) continue;
     const route = `custom:${m.id}`;
     if (seen.has(route)) continue;
     seen.add(route);

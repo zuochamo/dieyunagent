@@ -49,18 +49,22 @@ const SESSION_WORKSPACE_TOOL = _tc.SESSION_WORKSPACE_TOOL || null;
 const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
 // OS 级电脑控制（截屏 + 鼠标键盘）：schema 单一来源同上，注入受 osControl 开关控制。
 const COMPUTER_TOOL = _tc.COMPUTER_TOOL || null;
+// 手机摄像头（拍一张现实画面）：schema 单一来源同上，注入受 camera 权限开关控制（默认关）。
+const CAMERA_TOOL = _tc.CAMERA_TOOL || null;
 const isWeakToolCallerModel = _tc.isWeakToolCallerModel || function () { return false; };
 const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return entry && entry.tool; };
 
 async function getHostToolFlags() {
   if (!gwState.authed || !toolDefsApi.getPermissions) {
-    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false };
+    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false, camera: false };
   }
   try {
     const p = await toolDefsApi.getPermissions();
     const webFetch = p?.webFetch !== false;
     const browser = p?.browserAutomation !== false;
     const osControl = p?.osControl === true;
+    // 摄像头拍的是现实世界，默认关：只有用户显式打开才注入 camera_look。
+    const camera = p?.camera === true;
     if (!p || !p.hostControl) {
       return {
         openUrl: false,
@@ -70,6 +74,7 @@ async function getHostToolFlags() {
         webFetch,
         browser: false,
         osControl: false,
+        camera: false,
         hostControl: false
       };
     }
@@ -81,10 +86,11 @@ async function getHostToolFlags() {
       fsWrite: !!p.fsWrite,
       webFetch,
       browser,
-      osControl
+      osControl,
+      camera
     };
   } catch {
-    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false };
+    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false, camera: false };
   }
 }
 
@@ -185,6 +191,10 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   // 电脑控制：开关即同意读屏；坐标点击对弱模型不可靠，与 browser 高级工具同样不给弱模型。
   if (host.osControl && !weakModel && COMPUTER_TOOL) {
     tools.push(COMPUTER_TOOL);
+  }
+  // 手机摄像头：拍一张看一眼，无坐标、无参数依赖，弱模型也能用，故不按 weakModel 收窄。
+  if (host.camera && CAMERA_TOOL) {
+    tools.push(CAMERA_TOOL);
   }
   if (gwState.authed) {
     tools.push(CODEBASE_TOOL);

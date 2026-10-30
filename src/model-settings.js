@@ -7,7 +7,10 @@ const { MODEL_RUNTIME_DEFAULTS: PRESET_DEFAULTS } = require('./agent/model-runti
 const {
   resolveApiConfigForRoute,
   resolveDefaultApiConfig,
-  requestOptionsFrom
+  requestOptionsFrom,
+  listSuppliers,
+  supplierModelIds,
+  isSupplierModelEnabled
 } = require('./agent/model-api-config');
 
 const MAX_OUTPUT_TOKENS_DEFAULT = PRESET_DEFAULTS.maxOutputTokens;
@@ -48,7 +51,9 @@ const DEFAULTS = {
   // 没有向量的仓没有「新鲜度」要求（见 docs/INDEX-VALUE-REVIEW.md §R4）。
   codebaseAutoIncremental: false,
   speechWhisperModel: 'whisper-1',
-  speechLanguage: 'zh'
+  speechLanguage: 'zh',
+  // 自动朗读每条新回复（Renderer 写入；Main 只做落盘与默认值）
+  ttsAutoRead: false
 };
 
 function resolveSpeechApiConfig(settings) {
@@ -71,6 +76,59 @@ function resolveSpeechApiConfig(settings) {
   const language = String(s.speechLanguage || 'zh').trim();
   // 一并带出请求修饰字段（转写端点也可能要求自定义头 / User-Agent）
   return { ...requestOptionsFrom(supplier || s), baseUrl, apiKey, model, language };
+}
+
+/**
+ * 语音**合成**（朗读）的配置解析 —— Main 侧唯一入口。
+ *
+ * 与 `resolveSpeechApiConfig`（转写）**刻意分开**：一台服务端往往只有其中一种能力
+ * （用户那台 5018 有 tts、没有 /v1/audio/transcriptions），混用一个槽位就会出
+ * 「设置了却 404」。
+ *
+ * 判据与 Renderer 的 `ModelCapabilities.pickTtsModel` 一致（两处都只按
+ * 「kind/modelModalities === 'tts'」认），区别只在这里要 apiKey 等出站字段：
+ *   - 自定义模型：`kind: 'tts'`（含音色 voice、格式 format）；
+ *   - 供应商模型：`modelModalities[id] === 'tts'` 且已启用。
+ * 都不存在 → null（调用方据此明确报「没有可用的朗读模型」，不猜、不兜底到转写模型）。
+ *
+ * @param {object} settings loadModelSettings() 结果
+ * @returns {{baseUrl: string, apiKey: string, model: string, voice: string, format: string}|null}
+ */
+function resolveTtsApiConfig(settings) {
+  const s = settings && typeof settings === 'object' ? settings : {};
+  const customModels = Array.isArray(s.customModels) ? s.customModels : [];
+  const custom = customModels.find((m) => m && m.kind === 'tts' && String(m.name || '').trim());
+  if (custom) {
+    const baseUrl = String(custom.baseUrl || '').trim();
+    if (!baseUrl) return null;
+    return {
+      ...requestOptionsFrom(custom),
+      baseUrl,
+      apiKey: String(custom.apiKey || '').trim(),
+      model: String(custom.name).trim(),
+      voice: String(custom.voice || '').trim(),
+      format: String(custom.format || '').trim()
+    };
+  }
+  for (const supplier of listSuppliers(s)) {
+    if (!String(supplier?.baseUrl || '').trim()) continue;
+    const modalities = supplier.modelModalities && typeof supplier.modelModalities === 'object'
+      ? supplier.modelModalities
+      : {};
+    for (const modelId of supplierModelIds(supplier)) {
+      if (!modelId || !isSupplierModelEnabled(supplier, modelId)) continue;
+      if (String(modalities[modelId] || '').trim() !== 'tts') continue;
+      return {
+        ...requestOptionsFrom(supplier),
+        baseUrl: String(supplier.baseUrl).trim(),
+        apiKey: String(supplier.apiKey || '').trim(),
+        model: String(modelId).trim(),
+        voice: '',
+        format: ''
+      };
+    }
+  }
+  return null;
 }
 
 /**
@@ -299,6 +357,7 @@ module.exports = {
   getEmbeddingConfig,
   embeddingSignature,
   resolveSpeechApiConfig,
+  resolveTtsApiConfig,
   resolveTextApiConfig,
   DEFAULTS,
   MAX_TOKENS_DEFAULT,

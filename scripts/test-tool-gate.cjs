@@ -33,7 +33,7 @@ async function main() {
   assert(TOOL_GATE_STAGES.join(',') === 'before,after', 'stages are before/after');
   assert(
     listHookIds().join(',') ===
-      'before:validate-args,before:repeat-guard,after:telemetry,after:spill-output',
+      'before:validate-args,before:tool-permission,before:repeat-guard,after:telemetry,after:spill-output',
     `默认关卡顺序固定，实际 ${listHookIds().join(',')}`
   );
   assert(
@@ -82,6 +82,28 @@ async function main() {
     assert(last.repeated === true, 'repeat envelope marks repeated');
     assert(invoked === limit - 1, `blocked calls are not dispatched (invoked=${invoked})`);
     assert(session.fingerprints.length <= limit + 4, 'fingerprint history stays bounded');
+  }
+
+  // 4b) 能力授权：camera_look 只在用户打开「手机摄像头」时才能执行
+  //     （工具不在清单里 ≠ 模型不会调它：历史里留着名字、权限中途关掉都可能发生）
+  {
+    const permsPath = path.join(userDataPath, 'host-permissions.json');
+    const cameraSession = new ToolHarnessSession({ runId: 'gate-camera', userDataPath });
+    let invoked = 0;
+    const runCamera = () =>
+      cameraSession.execute(createToolCall({ name: 'camera_look', args: { focus: 'desk' } }), async () => {
+        invoked += 1;
+        return { ok: true, base64: 'AAAA' };
+      });
+
+    fs.writeFileSync(permsPath, JSON.stringify({ camera: false }), 'utf8');
+    const denied = await runCamera();
+    assert(denied.ok === false && denied.errorCode === 'PERMISSION_DENIED', 'camera denied while permission off');
+    assert(invoked === 0, 'denied camera call must not reach the phone');
+
+    fs.writeFileSync(permsPath, JSON.stringify({ camera: true }), 'utf8');
+    const okShot = await runCamera();
+    assert(okShot.ok === true && invoked === 1, 'camera runs once the permission is on');
   }
 
   // 5) after 关卡：顺序 = 声明顺序，且外层追加项排在默认项之后

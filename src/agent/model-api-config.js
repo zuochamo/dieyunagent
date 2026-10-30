@@ -94,10 +94,22 @@ function listCustomModels(settings) {
   return Array.isArray(rows) ? rows.filter(Boolean) : [];
 }
 
-/** 仅文本类自定义模型参与文本兜底（speech / vision 不参与）。 */
+/**
+ * 「不能当对话模型用」的模态：语音转写（speech）/ 语音合成（tts）/ 全模态外的纯语音。
+ *
+ * 为什么要有这一处判据：原先各处写 `kind !== 'speech'`，加一个 `tts` 模态时
+ * 每处都得记得补一个 `&& kind !== 'tts'`，漏一处就会让朗读模型被选进对话/计划。
+ */
+const NON_CHAT_MODALITIES = new Set(['speech', 'tts']);
+
+function isNonChatModality(kind) {
+  return NON_CHAT_MODALITIES.has(String(kind == null ? '' : kind).trim());
+}
+
+/** 仅文本类自定义模型参与文本兜底（speech / tts / vision 不参与）。 */
 function isTextCustomModel(model) {
   const kind = String((model && model.kind) || 'text');
-  return kind !== 'speech' && kind !== 'vision';
+  return kind !== 'vision' && !isNonChatModality(kind);
 }
 
 function findCustomModelById(settings, id) {
@@ -168,7 +180,7 @@ function pickSupplierModelId(supplier) {
   const ids = supplierModelIds(row).filter((id) => isSupplierModelEnabled(row, id));
   if (!ids.length) return '';
   const modalities = isPlainMap(row.modelModalities) ? row.modelModalities : {};
-  const speakable = (id) => String(modalities[id] || 'text') === 'speech';
+  const speakable = (id) => isNonChatModality(modalities[id] || 'text');
   return ids.find((id) => !speakable(id)) || ids[0];
 }
 
@@ -344,6 +356,8 @@ module.exports = {
   pickSupplierModelId,
   isSupplierModelEnabled,
   supplierModelIds,
+  isNonChatModality,
+  isTextCustomModel,
   isUsableApiConfig,
   asConfig,
   requestOptionsFrom,

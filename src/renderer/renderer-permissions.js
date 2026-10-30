@@ -39,6 +39,10 @@ async function syncPermissionsToMain() {
     // 关掉即整个 computer 工具不再注入；键鼠动作仍由沙箱档位判 ask-once
     osControl: $('perm-os-control')?.checked !== false,
 
+    // 手机摄像头（camera_look）：默认关（拍的是现实世界），勾了才注入工具；
+    // 这里用 `=== true` 而非 `!== false`，缺省复选框时也不会把默认关的东西打开
+    camera: $('perm-camera')?.checked === true,
+
     // 读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、UI 不提供开关；
     // 显式回写 true，纠正历史持久化里的关闭值
     fsRead: true,
@@ -143,6 +147,8 @@ async function loadPermissionsUI() {
 
     if ($('perm-os-control')) $('perm-os-control').checked = p.osControl !== false;
 
+    if ($('perm-camera')) $('perm-camera').checked = p.camera === true;
+
     renderSandboxModeUI(p.sandboxMode, p.unrestrictedPaths === true);
 
   } catch {
@@ -201,7 +207,9 @@ function bindPermissionCheckboxes() {
 
     'perm-host-control',
 
-    'perm-os-control'
+    'perm-os-control',
+
+    'perm-camera'
 
   ].forEach((id) => {
 

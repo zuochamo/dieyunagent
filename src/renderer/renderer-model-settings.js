@@ -1,4 +1,4 @@
-/* global window, document, $, fetch, escapeHtml, openModelSettingsModal, renderComposerModelLists, renderSuppliersList, updateComposerModelTriggerLabel, refreshContextProgress, resetCompactionInstances, refreshComposerBuiltinModels, clearBuiltinModelsCache, migrateLegacyBuiltinEnabledToSuppliers, showAgentToast, mountSelectMenu, ensureSelectMenu */
+/* global window, document, $, fetch, escapeHtml, openModelSettingsModal, renderComposerModelLists, renderSuppliersList, updateComposerModelTriggerLabel, refreshContextProgress, resetCompactionInstances, refreshComposerBuiltinModels, clearBuiltinModelsCache, migrateLegacyBuiltinEnabledToSuppliers, showAgentToast, mountSelectMenu, ensureSelectMenu, gatewayCall, currentSessionId, uiText */
 'use strict';
 
 function applyModelRuntimePreset(presetId) {
@@ -24,6 +24,7 @@ function applyFormValues(s) {
   if (cfg.apiKey) cfg.apiKey.value = s.apiKey;
   if (cfg.textModel) cfg.textModel.value = getTextModelId(s);
   if (cfg.system) cfg.system.value = s.system;
+  if (typeof syncTtsAutoReadControl === 'function') syncTtsAutoReadControl(s);
 }
 
 var settings = loadSettings();
@@ -170,9 +171,11 @@ function renderSupplierModelModalityTags(modelId) {
   wrap.setAttribute('role', 'radiogroup');
   wrap.setAttribute('aria-label', `${modelId} 模型类型`);
   const current = getSupplierEditorModelModality(modelId);
-  for (const kind of window.ModelCapabilities?.MODALITY_OPTIONS || ['text', 'vision', 'speech']) {
-    const label =
-      kind === 'vision' ? '全模态' : kind === 'speech' ? '语音' : '文本';
+  const mc = window.ModelCapabilities;
+  const options = mc?.MODALITY_OPTIONS || ['text', 'vision', 'speech', 'tts'];
+  for (const kind of options) {
+    // 标签文案唯一来源：ModelCapabilities.MODALITY_LABELS（别在这里再写一份三元表达式）
+    const label = mc?.MODALITY_LABELS?.[kind]?.label || kind;
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'model-modality-tag supplier-model-modality-tag';
@@ -203,6 +206,30 @@ function updateSettingsFromModelLists() {
   updateComposerModelTriggerLabel();
 }
 
+/**
+ * 「自动朗读新回复」开关的显示状态。
+ *
+ * 没有「语音合成」模型时置灰 —— 打开一个永远不会生效的开关比不显示更糟。
+ * 判据与朗读按钮同源（`ModelCapabilities.pickTtsModel`）。
+ */
+function syncTtsAutoReadControl(s) {
+  const input = $('tts-auto-read');
+  if (!input) return;
+  const src = s && typeof s === 'object' ? s : settings;
+  const hasTts = !!window.ModelCapabilities?.pickTtsModel?.(src);
+  input.checked = src.ttsAutoRead === true;
+  input.disabled = !hasTts;
+  const hint = $('tts-auto-read-hint');
+  if (hint) {
+    hint.textContent = hasTts
+      ? uiText('tts_auto_read_hint_on', '每轮回复结束后自动朗读。朗读中可在回复下方点「停止」，切换会话也会停。')
+      : uiText(
+          'tts_auto_read_hint_off',
+          '目前没有「语音合成」类型的模型：先在「自定义模型」里把模型类型改成「语音合成」，这里才能启用。'
+        );
+  }
+}
+
 function getDefinedModelEditorModality() {
   const active = document.querySelector('#defined-model-editor-modality-tags .model-modality-tag[aria-pressed="true"]');
   const value = active?.dataset?.modality;
@@ -216,13 +243,16 @@ function setDefinedModelEditorModality(value) {
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     btn.classList.toggle('is-active', on);
   });
+  // 音色只对「语音合成」有意义；转写/文本/全模态模型上留着只会被误填
+  const voiceField = $('defined-model-editor-voice-field');
+  if (voiceField) voiceField.hidden = setting !== 'tts';
 }
 
 function renderDefinedModelModalityBadge(model) {
   const mc = window.ModelCapabilities;
   if (!mc) return '<span class="model-modality-badge text">—</span>';
   const info = mc.describeCustomModelModality(model);
-  const cls = info.kind === 'vision' ? 'vision' : info.kind === 'speech' ? 'speech' : 'text';
+  const cls = ['vision', 'speech', 'tts'].includes(info.kind) ? info.kind : 'text';
   return `<span class="model-modality-badge ${cls}" title="${escapeHtml(info.label)}">${escapeHtml(info.short)}</span>`;
 }
 
@@ -734,6 +764,8 @@ function openDefinedModelEditor(id) {
   $('defined-model-editor-api-key').value = model.apiKey || '';
   $('defined-model-editor-user-agent').value = model.userAgent || '';
   $('defined-model-editor-headers').value = headersToEditorText(model.headers);
+  const voiceInput = $('defined-model-editor-voice');
+  if (voiceInput) voiceInput.value = model.voice || '';
   const windowInput = $('defined-model-editor-context-window');
   if (windowInput) windowInput.value = model.contextWindow ? String(model.contextWindow) : '';
   populateContextTierMenu(ensureDefinedModelEditorContextTierMenu(), model.contextTier || '', {
@@ -767,6 +799,7 @@ function collectDefinedModelEditorConfig() {
     contextTier: contextTier ? normalizeContextTierId(contextTier) : '',
     contextWindow: String($('defined-model-editor-context-window')?.value || '').trim(),
     userAgent: ($('defined-model-editor-user-agent')?.value || '').trim(),
+    voice: ($('defined-model-editor-voice')?.value || '').trim(),
     headers: readHeadersFromEditor('defined-model-editor-headers')
   };
 }
@@ -779,6 +812,19 @@ function setDefinedModelTestStatus(text, ok) {
   el.classList.toggle('warn', ok === false);
 }
 
+/**
+ * 模型编辑器里的「测试」。
+ *
+ * 按声明模态分流 —— 以前这里对任何模态都发 `chat/completions` + 一条 user 消息，
+ * 于是「语音」档位永远失败，且报的还是服务端的话（`Param Incorrect`），
+ * 用户根本看不出是自己选错了档位还是端点填错了。实测 TTS 模型的要求是
+ * `messages` 里必须有 assistant 角色，所以：
+ *   - 文本 / 全模态：探针与原逻辑一致（一条 user 消息，要它回 OK）；
+ *   - 语音合成（tts）：**走真实 RPC** `speech.synthesize`（同一份请求体与请求头，
+ *     不再手抄第二份），拿回音频即视为通过；
+ *   - 语音转写（speech）：转写端点只吃音频，文字探针无法验证 —— 明确说明，
+ *     而不是发一个注定 400 的 chat 请求。
+ */
 async function testDefinedModelFromEditor() {
   const btn = $('defined-model-editor-test');
   const cfg = collectDefinedModelEditorConfig();
@@ -786,18 +832,41 @@ async function testDefinedModelFromEditor() {
     setDefinedModelTestStatus('请先填写模型名称和接口地址', false);
     return;
   }
-  const url = resolveChatCompletionsEndpointForTest(cfg.baseUrl);
-  // 测试连接必须与真实请求用同一套头，否则会出现「测试通过但聊天 400」
-  const headers = buildHeadersFromConfigLoose(cfg, { sessionId: currentSessionId });
-  const body = {
-    model: cfg.name,
-    messages: [{ role: 'user', content: '叠云模型连接测试。请只回复 OK。' }],
-    temperature: 0,
-    max_tokens: 16
-  };
+  const modality = cfg.modalitySetting;
+  if (modality === 'speech') {
+    setDefinedModelTestStatus(
+      '语音转写档位无法用文字测试：它要的是 /v1/audio/transcriptions（送录音进去）。请在输入框点麦克风实测。',
+      null
+    );
+    return;
+  }
   if (btn) btn.disabled = true;
   setDefinedModelTestStatus('测试中…');
   try {
+    if (modality === 'tts') {
+      const res = await gatewayCall('speech.synthesize', {
+        text: '叠云语音合成测试。',
+        model: cfg.name,
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        voice: cfg.voice,
+        headers: cfg.headers,
+        userAgent: cfg.userAgent,
+        sessionId: currentSessionId
+      });
+      const kb = Math.max(1, Math.round(((res?.audioBase64 || '').length * 3) / 4 / 1024));
+      setDefinedModelTestStatus(`测试通过：合成 ${res?.format || '音频'}，约 ${kb} KB`, true);
+      return;
+    }
+    const url = resolveChatCompletionsEndpointForTest(cfg.baseUrl);
+    // 测试连接必须与真实请求用同一套头，否则会出现「测试通过但聊天 400」
+    const headers = buildHeadersFromConfigLoose(cfg, { sessionId: currentSessionId });
+    const body = {
+      model: cfg.name,
+      messages: [{ role: 'user', content: '叠云模型连接测试。请只回复 OK。' }],
+      temperature: 0,
+      max_tokens: 16
+    };
     const res = await fetch(url, {
       method: 'POST',
       headers,
@@ -818,6 +887,14 @@ async function testDefinedModelFromEditor() {
       json?.choices?.[0]?.delta?.content ||
       json?.choices?.[0]?.text ||
       '';
+    // 服务端把音频放在 message.audio 里 = 这是个语音模型；填成文本/全模态档位用不了
+    if (json?.choices?.[0]?.message?.audio) {
+      setDefinedModelTestStatus(
+        '测试通过，但它返回的是音频：这是语音合成模型，请把模型类型改成「语音合成」',
+        true
+      );
+      return;
+    }
     setDefinedModelTestStatus(content ? `测试通过：${String(content).trim().slice(0, 30)}` : '测试通过', true);
   } catch (err) {
     setDefinedModelTestStatus(`测试失败：${err.message || err}`, false);
@@ -827,7 +904,7 @@ async function testDefinedModelFromEditor() {
 }
 
 function saveDefinedModelFromEditor() {
-  const { name, baseUrl, apiKey, modalitySetting, contextTier, contextWindow, userAgent } =
+  const { name, baseUrl, apiKey, modalitySetting, contextTier, contextWindow, userAgent, voice } =
     collectDefinedModelEditorConfig();
   if (!name || !baseUrl) return;
   // 格式写错时停下并提示，而不是静默丢弃用户刚填的内容
@@ -853,6 +930,9 @@ function saveDefinedModelFromEditor() {
   // 请求修饰字段按需落盘：未配置时保持配置干净，不写空对象
   if (userAgent) next.userAgent = userAgent;
   if (Object.keys(headers || {}).length) next.headers = headers;
+  // 音色只属于语音合成模型：留空 = 用服务端默认音色（各服务端的音色名互不通用，
+  // 硬塞一个 OpenAI 的 alloy 会让只认自家音色名的服务端直接 400）
+  if (next.kind === 'tts' && voice) next.voice = voice;
   if (idx >= 0) models[idx] = next;
   else models.push(next);
   settings = normalizeSettings({ ...settings, customModels: models });
@@ -1029,6 +1109,13 @@ function initDefinedModelEditors() {
       setDefinedModelEditorModality(btn.dataset.modality);
     });
   });
+  const autoReadToggle = $('tts-auto-read');
+  if (autoReadToggle) {
+    autoReadToggle.addEventListener('change', () => {
+      settings = normalizeSettings({ ...settings, ttsAutoRead: autoReadToggle.checked === true });
+      updateSettingsFromModelLists();
+    });
+  }
   $('defined-model-editor-form').addEventListener('submit', (e) => {
     e.preventDefault();
     saveDefinedModelFromEditor();

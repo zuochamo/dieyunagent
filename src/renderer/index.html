@@ -2,8 +2,11 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!-- media-src blob: 是「朗读」播放音频的必需品：Blob URL 不是 'self'，
+         漏了它 Chromium 会报 Media load rejected by URL safety check
+         （表现为 NotSupportedError: no supported source found）。 -->
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; connect-src *;" />
+          content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; media-src 'self' blob: data:; connect-src *;" />
     <title>叠云 Agent</title>
     <script src="./renderer-theme-bootstrap.js"></script>
     <link rel="stylesheet" href="./styles.css" />
@@ -1292,6 +1295,11 @@
                     <div id="supplier-list"></div>
                   </div>
                 </div>
+                <label class="check-row">
+                  <input type="checkbox" id="tts-auto-read" />
+                  <span data-i18n="tts_auto_read_label">自动朗读新回复</span>
+                </label>
+                <p class="settings-page-desc check-row-hint" id="tts-auto-read-hint">需要有一个「语音合成」类型的模型才能启用。</p>
               </form>
             </div>
             <div class="settings-page" data-settings="theme">
@@ -1472,6 +1480,8 @@
               <p class="settings-page-desc check-row-hint host-control-hint">总开关：关掉后 Agent 不能执行命令、读写本机文件、打开链接/浏览器，也不能做电脑控制，只剩联网抓取按自己的开关生效。</p>
               <label class="check-row"><input type="checkbox" id="perm-os-control" checked /><span>启用电脑控制</span></label>
               <p class="settings-page-desc check-row-hint os-control-hint">Agent 可截屏并操作鼠标键盘；鼠标键盘动作首次使用会请求确认。</p>
+              <label class="check-row"><input type="checkbox" id="perm-camera" /><span>启用手机摄像头</span></label>
+              <p class="settings-page-desc check-row-hint camera-hint">让 Agent 通过手机摄像头看一眼现实世界（桌上的东西、你本人、现场），一次一张、不常开；每次拍摄手机上都会显示提示。默认关。</p>
               <label class="check-row"><input type="checkbox" id="perm-lsp-diagnostics" checked /><span>启用 LSP 诊断注入</span></label>
               <p class="settings-page-desc check-row-hint lsp-diagnostics-hint">改完源码后把语言服务器报的错（类型、语法、未定义符号）自动带回给 Agent，让它自己发现编译不过的地方；关掉后只能靠跑命令暴露错误。</p>
               <label class="check-row"><input type="checkbox" id="perm-workplace-monitor" checked /><span>工位监控上报</span></label>
@@ -1967,8 +1977,13 @@
             <div class="model-modality-tags" id="defined-model-editor-modality-tags" role="radiogroup" aria-label="模型类型">
               <button type="button" class="model-modality-tag" data-modality="text" aria-pressed="true">文本</button>
               <button type="button" class="model-modality-tag" data-modality="vision" aria-pressed="false">全模态</button>
-              <button type="button" class="model-modality-tag" data-modality="speech" aria-pressed="false">语音</button>
+              <button type="button" class="model-modality-tag" data-modality="speech" aria-pressed="false">语音转写</button>
+              <button type="button" class="model-modality-tag" data-modality="tts" aria-pressed="false">语音合成</button>
             </div>
+          </label>
+          <label class="field" id="defined-model-editor-voice-field" hidden>
+            <span class="field-label">合成音色（可选）</span>
+            <input type="text" id="defined-model-editor-voice" placeholder="留空用服务端默认音色，例如：mimo_default" autocomplete="off" />
           </label>
         </div>
         <footer class="defined-model-editor-actions">
@@ -2058,7 +2073,7 @@
               <span class="field-label">可用模型</span>
               <button type="button" class="ghost-btn" id="supplier-editor-detect">检测模型</button>
             </div>
-            <p class="field-hint" id="supplier-editor-detect-status">列表来自已保存配置。需要刷新时再点「检测模型」；为每个模型选择类型（文本 / 全模态 / 语音）与 Context 档位，默认继承供应商档位。</p>
+            <p class="field-hint" id="supplier-editor-detect-status">列表来自已保存配置。需要刷新时再点「检测模型」；为每个模型选择类型（文本 / 全模态 / 语音转写 / 语音合成）与 Context 档位，默认继承供应商档位。</p>
             <div class="supplier-editor-models-list" id="supplier-editor-models-list"></div>
           </div>
         </div>
@@ -2247,6 +2262,7 @@
     <script src="./renderer-selection-drag.js"></script>
     <script src="./renderer-attachments.js"></script>
     <script src="./renderer-composer-voice.js"></script>
+<script src="./renderer-tts.js"></script>
     <script src="./renderer-agent-context-ui.js"></script>
     <script src="./renderer-agent-abort.js"></script>
     <script src="./renderer-agent-prep-remote.js"></script>

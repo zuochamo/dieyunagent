@@ -435,14 +435,15 @@ function getModelCandidatesForAuto(context = {}) {
     model: m.name,
     kind:
       window.ModelCapabilities?.effectiveCustomModelKind?.(m) ||
-      (m.kind === 'vision' ? 'vision' : m.kind === 'speech' ? 'speech' : 'text'),
+      (m.kind === 'vision' ? 'vision' : m.kind === 'speech' ? 'speech' : m.kind === 'tts' ? 'tts' : 'text'),
     // 走单一来源解析：手工只取两个标量会丢掉 headers / authMode / userAgent
     apiConfig: getCustomModelApiConfig(`custom:${m.id}`),
     route: `custom:${m.id}`
   }));
+  const isNonChat = (kind) => window.ModelCapabilities?.isNonChatModality?.(kind) === true;
   const candidates = builtins
     .concat(custom)
-    .filter((m) => m.model && m.apiConfig.baseUrl && m.kind !== 'speech');
+    .filter((m) => m.model && m.apiConfig.baseUrl && !isNonChat(m.kind));
   if (!context.needsVision) {
     return candidates.filter((m) => m.kind !== 'vision').concat(
       candidates.filter((m) => m.kind === 'vision')
@@ -720,7 +721,9 @@ function renderComposerModelLists() {
 
   if (customList) {
     customList.innerHTML = '';
-    const models = (settings.customModels || []).filter((m) => m.kind !== 'speech');
+    const models = (settings.customModels || []).filter(
+      (m) => window.ModelCapabilities?.isNonChatModality?.(m.kind) !== true
+    );
     const customTitle = document.getElementById('composer-custom-title');
     const hasCustom = models.length > 0;
     if (customTitle) customTitle.hidden = !hasCustom;

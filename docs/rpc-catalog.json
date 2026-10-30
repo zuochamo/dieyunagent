@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "generatedAt": "2026-10-28T13:35:10.658Z",
+  "generatedAt": "2026-10-30T11:45:58.964Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 186,
-    "gatewayOnly": 104,
+    "total": 187,
+    "gatewayOnly": 105,
     "rustOnly": 27,
     "both": 55
   },
@@ -1447,6 +1447,14 @@
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/scm.js"
+      ],
+      "rust": []
+    },
+    {
+      "method": "speech.synthesize",
+      "layer": "gateway",
+      "gateway": [
+        "gateway/handlers/speech.js"
       ],
       "rust": []
     },

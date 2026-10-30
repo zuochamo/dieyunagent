@@ -331,6 +331,26 @@ function visionOmitText(reason, handle) {
   return `${head}只读副本仍在：${handle.path}${dims}；要看就 fs_read_file 它，或用 host_exec 裁剪放大。`;
 }
 
+/**
+ * 手机摄像头那一张的「进视觉通道」文案（**没有**落盘副本）。
+ *
+ * 为什么与 `visionHandleText` 分开：现实画面（你本人、房间、桌上的东西）默认**不留副本** ——
+ * 屏幕截图留副本是为了「用 fs_read_file 再看局部」，而现实画面要看就再拍一张，
+ * 落盘只会让摄像头变成一台没人要求的录音笔。所以这里的文案不给路径，只给「再拍」的退路。
+ *
+ * @param {number} width
+ * @param {number} height
+ * @returns {string}
+ */
+function visionCameraText(width, height) {
+  const dims = width > 0 && height > 0 ? `（${width}×${height}）` : '';
+  return (
+    `这张手机照片${dims}会作为图片输入附在下一轮，请直接据此回答。` +
+    '现实画面不落盘、也没有可读副本：需要更清楚或换个角度，就再拍一张（改 focus 或请用户调整），' +
+    '不要凭记忆补细节。'
+  );
+}
+
 module.exports = {
   VISION_IMAGE_DIR,
   MAX_IMAGE_TOKENS,
@@ -338,5 +358,6 @@ module.exports = {
   storeVisionImage,
   pruneVisionImages,
   visionHandleText,
+  visionCameraText,
   visionOmitText
 };

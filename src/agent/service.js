@@ -4,7 +4,7 @@ const { agentRunEventFromServicePayload } = require('./run-events');
 
 const { EventEmitter } = require('events');
 const { dieyunDefaultWorkspaceDir } = require('../agent-home');
-const { loadModelSettings, resolveSpeechApiConfig } = require('../model-settings');
+const { loadModelSettings, resolveSpeechApiConfig, resolveTtsApiConfig } = require('../model-settings');
 
 function normalizeLimit(value, fallback, max) {
   const n = Number(value);
@@ -112,10 +112,47 @@ class AgentService extends EventEmitter {
   getSpeechSettings() {
     const settings = this.userDataPath ? loadModelSettings(this.userDataPath) : {};
     const cfg = resolveSpeechApiConfig(settings);
+    // 朗读（合成）能力：手机端据此决定显不显示「朗读」按钮。
+    // 与转写是两个独立槽位 —— 一台服务端常常只有其中一种能力。
+    const tts = resolveTtsApiConfig(settings);
     return {
       model: cfg.model || 'whisper-1',
-      language: cfg.language || 'zh'
+      language: cfg.language || 'zh',
+      ttsReady: !!(tts && tts.baseUrl && tts.model),
+      ttsModel: tts ? tts.model : '',
+      ttsAutoRead: settings.ttsAutoRead === true
     };
+  }
+
+  /**
+   * 手机端朗读：**只传文本**，模型 / 端点 / 密钥都在 Main 解析
+   * （手机不该拿到 apiKey，也不该在两处各维护一份选模型逻辑）。
+   */
+  async synthesizeSpeech(params = {}) {
+    const text = String(params.text || '').trim();
+    if (!text) {
+      const e = new Error('text 必填');
+      e.code = 'EMPTY_TEXT';
+      throw e;
+    }
+    const settings = this.userDataPath ? loadModelSettings(this.userDataPath) : {};
+    const cfg = resolveTtsApiConfig(settings);
+    if (!cfg || !cfg.baseUrl || !cfg.model) {
+      const e = new Error('未配置朗读模型（请在电脑端「设置 → 模型」里添加一个「语音合成」类型的模型）');
+      e.code = 'MISSING_TTS_MODEL';
+      throw e;
+    }
+    return this._rpc('speech.synthesize', {
+      text,
+      baseUrl: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      model: cfg.model,
+      voice: cfg.voice,
+      format: cfg.format,
+      authMode: cfg.authMode,
+      headers: cfg.headers,
+      userAgent: cfg.userAgent
+    });
   }
 
   async getTrace(params = {}) {

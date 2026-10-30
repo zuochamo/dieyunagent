@@ -1,19 +1,24 @@
 'use strict';
 
 const { registerLlmIpc } = require('../../llm-stream-bridge');
-const { loadModelSettings, resolveSpeechApiConfig } = require('../../model-settings');
+const { loadModelSettings } = require('../../model-settings');
 
+/**
+ * 把语音相关设置推给手机端。
+ *
+ * 载荷**只有一份来源**：`AgentService.getSpeechSettings()`（手机端拉取时用的是同一个函数）。
+ * 早先这里自己按 resolveSpeechApiConfig 拼了一遍，加「朗读（合成）」能力时就会
+ * 出现「手机拉取有、推送没有」的两套字段。
+ */
 function broadcastSpeechSettingsToMobile(ctx) {
   const bridge = typeof ctx.getMobileBridge === 'function' ? ctx.getMobileBridge() : null;
   if (!bridge || typeof bridge.broadcast !== 'function') return;
-  const settings = loadModelSettings(ctx.getUserDataPath());
-  const cfg = resolveSpeechApiConfig(settings);
-  bridge.broadcast({
-    type: 'settings.speech',
-    at: Date.now(),
-    model: cfg.model || 'whisper-1',
-    language: cfg.language || 'zh'
-  });
+  const agentService = typeof ctx.getAgentService === 'function' ? ctx.getAgentService() : null;
+  const payload = agentService && typeof agentService.getSpeechSettings === 'function'
+    ? agentService.getSpeechSettings()
+    : null;
+  if (!payload) return;
+  bridge.broadcast({ type: 'settings.speech', at: Date.now(), ...payload });
 }
 
 /**
