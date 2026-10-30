@@ -11,15 +11,9 @@ build/dieyun-core-linux/
 build/.cache/
 build/remote-gateway-pack/
 build/mcp-bundled/
-.dieyun/attachments/
-.dieyun/cleanup-backup/
-.dieyun/worktrees/
-.dieyun/backup/
-.dieyun/agents-meta.json
-.dieyun/agents-draft.md
-.dieyun/agents-pending.json
-.dieyun/index.sqlite
-.dieyun/*.sqlite
+# 仓库内 .dieyun/ 全是本机运行时数据（索引 / 附件副本 / worktree 缓存 / 终端记录 / 备份），
+# 一条目录规则就够，不再逐个文件列（历史上逐条列过，漏一条就会被 `git add -A` 收进来）
+.dieyun/
 skills/bundled/**/mcp_output/
 skills/bundled/**/*.log
 updates-published/*
@@ -55,11 +49,14 @@ release/
 deploy/*.zip
 
 # 本地工具输出 / 集成终端日志 / 临时调试文件 / 生成产物（不进版本库）
-.dieyun/tool-output/
-.dieyun/terminals/
 /tmp-*
 /.tmp-*
+_tmp/
 /generated-images/
+# 其它 AI 工具与调试落在仓库根的本地缓存 / 日志
+.workbuddy/
+.zcode/
+debug.log
 
 # 根目录 dieyun.md 为运行时用户文件（实际位置 ~/.dieyun/dieyun.md），
 # 仓库内唯一模板是 assets/dieyun.md，勿在根目录再放一份副本
