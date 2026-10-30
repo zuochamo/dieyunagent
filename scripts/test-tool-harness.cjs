@@ -17,7 +17,7 @@ const { resolveHostSidecarLocalPath } = require('../src/agent/host-sidecar');
 const { ToolHarnessSession, classifyFailure } = require('../src/agent/tool-harness');
 const { createMainToolBridge } = require('../src/agent/tool-bridge-main');
 const catalog = require('../src/agent/tool-catalog');
-const planTools = require('../src/plans/plan-tools');
+const { buildMainAgentTools } = require('../src/agent/main-agent-tools');
 const { createMockGateway } = require('./lib/test-gateway-mock.cjs');
 const { agentSandboxPath } = require('./lib/agent-sandbox-path.cjs');
 
@@ -34,16 +34,47 @@ async function main() {
       catalog.PLAN_RUNTIME_TOOL_NAMES.length,
     'plan runtime tools in catalog'
   );
-  assert(planTools.PLAN_HOST_TOOLS.length === 5, 'PLAN_HOST_TOOLS');
+  // Main 侧（无 Renderer）一轮的工具集：静态工具 + MCP 工具，唯一构造入口
+  const mainSideTools = await buildMainAgentTools(null);
+  assert(
+    mainSideTools.length === catalog.PLAN_RUNTIME_TOOL_NAMES.length,
+    'main-side tools match PLAN_RUNTIME_TOOL_NAMES'
+  );
+  assert(
+    mainSideTools.some((t) => t.function && t.function.name === 'host_exec'),
+    'main-side tools include host_exec'
+  );
   assert(catalog.RENDERER_ONLY_TOOLS.includes('agent_clarify'), 'renderer-only clarify');
   assert(catalog.RENDERER_ONLY_TOOLS.includes('session_new'), 'renderer-only session_new');
   // 渲染器专属只放「只有渲染器才做得到」的动作：确认卡片、建会话/换工作空间（会话与视图状态归渲染器）。
   // propose 类、fs_*、host_* 在 Main 都有真实现，一旦被列进来就会变成两处执行。
-  const RENDERER_ONLY_EXPECTED = ['agent_clarify', 'session_new'];
+  const RENDERER_ONLY_EXPECTED = ['agent_clarify', 'session_new', 'session_set_workspace'];
   assert(
     catalog.RENDERER_ONLY_TOOLS.every((n) => RENDERER_ONLY_EXPECTED.includes(n)) &&
       !catalog.RENDERER_ONLY_TOOLS.includes('agents_md_propose'),
     'propose tools are not renderer-only'
+  );
+  // 外部频道（没有 UI）的额外工具：只在频道那一轮注入，不能混进计划
+  assert(
+    catalog.toolsByNames(catalog.CHANNEL_RUNTIME_TOOL_NAMES).length ===
+      catalog.CHANNEL_RUNTIME_TOOL_NAMES.length,
+    'channel runtime tools in catalog'
+  );
+  assert(
+    catalog.CHANNEL_RUNTIME_TOOL_NAMES.every((n) => !catalog.PLAN_RUNTIME_TOOL_NAMES.includes(n)),
+    'channel-only tools stay out of plan runs'
+  );
+  // session_set_workspace 是唯一允许两边都出现的名字：桌面由渲染器执行（工作空间视图归渲染器），
+  // 频道由 Main 执行（会话绑定归 Main）。其余工具两头都出现就等于两处执行。
+  assert(
+    catalog.CHANNEL_RUNTIME_TOOL_NAMES.every(
+      (n) => n === 'session_set_workspace' || !catalog.RENDERER_ONLY_TOOLS.includes(n)
+    ),
+    'only session_set_workspace is dual-context'
+  );
+  assert(
+    catalog.RENDERER_ONLY_TOOLS.includes('session_set_workspace'),
+    'desktop path executes session_set_workspace in renderer'
   );
 
   const v1 = validateToolArgs('host_exec', { command: '' });

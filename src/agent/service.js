@@ -16,6 +16,15 @@ function eventPreview(text, max = 120) {
   return String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+/** 两个工作空间字符串是否指同一个目录（本地路径不区分大小写与斜杠，远端路径区分）。 */
+function sameWorkspacePath(a, b) {
+  const norm = (v) => {
+    const s = String(v == null ? '' : v).trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    return /^ssh:/i.test(s) ? s : s.toLowerCase();
+  };
+  return norm(a) === norm(b);
+}
+
 class AgentService extends EventEmitter {
   constructor(opts = {}) {
     super();
@@ -159,6 +168,21 @@ class AgentService extends EventEmitter {
     return trace || null;
   }
 
+  /**
+   * 「跟随桌面」模式的取值来源：提交任务的这一刻，桌面视图显示的工作空间。
+   * 取不到就交给会话默认（~/.dieyun/workspace）。
+   */
+  _desktopWorkspacePath() {
+    const gw = this.gateway;
+    if (!gw || typeof gw.getWorkspace !== 'function') return '';
+    try {
+      const ws = gw.getWorkspace();
+      return ws && ws.workspacePath ? String(ws.workspacePath) : '';
+    } catch {
+      return '';
+    }
+  }
+
   async submitTask(input = {}) {
     const text = String(input.text || '').trim();
     if (!text) {
@@ -172,6 +196,14 @@ class AgentService extends EventEmitter {
       throw e;
     }
 
+    // 外部频道（手机内网桥 / 企微转接器等）可以显式声明本会话的工作空间。绑定归会话所有：
+    // 一旦落库，桌面 UI 之后切工作空间/切会话都没有资格改写它。
+    // 未声明时沿用「跟随桌面」，但取值在**提交这一刻**定下来并落成绑定 —— 不再让 Renderer
+    // 在任务启动时用当时的视图去猜（那正是会话工作空间漂移的成因，见
+    // issues/2026-10-30-agent-channel-and-workspace-binding.md 问题 2）。
+    const declaredWorkspacePath = String(input.workspacePath || '').trim();
+    const workspacePath = declaredWorkspacePath || this._desktopWorkspacePath();
+
     const requestedSessionId = String(input.sessionId || '').trim();
     let sessionId = '';
     if (requestedSessionId) {
@@ -182,10 +214,22 @@ class AgentService extends EventEmitter {
         throw e;
       }
       sessionId = row.id;
+      // 显式声明的绑定是该渠道的固定工作空间，要能纠正存量会话（含历史上被桌面拽偏的）。
+      // 隐式「跟随桌面」不覆盖已有绑定，否则桌面切目录会把正在用的外部会话拽走。
+      if (declaredWorkspacePath && !sameWorkspacePath(row.workspacePath, declaredWorkspacePath)) {
+        await this._rpc('memory.session_workspace_set', {
+          sessionId,
+          workspacePath: declaredWorkspacePath
+        });
+      } else if (!declaredWorkspacePath && !row.workspacePath && workspacePath) {
+        // 「跟随桌面」且会话还没绑定：把提交这一刻的桌面工作空间钉到会话上。
+        // 之后桌面再切目录不会把这个会话拽走 —— 这正是问题 2 里看到的那种翻转。
+        await this._rpc('memory.session_workspace_set', { sessionId, workspacePath });
+      }
     } else {
       const created = await this._rpc('memory.session_create', {
         title: input.title || null,
-        workspacePath: null
+        workspacePath: workspacePath || null
       });
       if (!created || !created.id) {
         const e = new Error('创建会话失败');

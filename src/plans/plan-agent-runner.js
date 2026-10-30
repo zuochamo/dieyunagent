@@ -11,7 +11,8 @@ const { getEffectiveInputBudget } = require('../agent/compaction-main');
 const { buildCompletionMessagesFromHistory } = require('../agent/session-context');
 const { clearToolHarnessSessionsForSession } = require('../agent/tool-harness');
 const { buildPlanRunUserText, stripAssistantMeta, stripUserMeta } = require('./plan-run-turn');
-const { buildPlanAgentTools } = require('./plan-tools');
+const { buildMainAgentTools } = require('../agent/main-agent-tools');
+const { buildLoopCompactionHandler } = require('../agent/compaction-loop');
 const { isAbortError } = require('../llm-reconnect-retry');
 const { appendPlanLog } = require('./plan-log');
 
@@ -151,7 +152,7 @@ async function runPlanAgentLoop(ctx, plan) {
 
   const history = await loadSessionMessages(gateway, sessionId, 120);
   const messages = buildPlanCompletionMessages(history, sysContent);
-  const tools = await buildPlanAgentTools(mcpRuntime);
+  const tools = await buildMainAgentTools(mcpRuntime);
   const toolBridge = createToolBridge(webContents || null);
   const tokenBudget = getEffectiveInputBudget(runSettings, llmModel);
   // 整体继承 llm：逐字段重建会丢掉 headers / authMode / userAgent（压缩也复用这份 apiCfg）
@@ -179,40 +180,17 @@ async function runPlanAgentLoop(ctx, plan) {
         maxRounds: clampModelRuntimeValue('agentMaxRounds', runSettings.agentMaxRounds),
         workspaceRoot: workspacePath || undefined
       },
-      compactMessages: compactionAgent
-        ? async (msgs, compactCtx) => {
-            const cr = await compactionAgent.maybeCompactMessages(msgs, {
-              tokenBudget,
-              contextTierId,
-              apiConfig: { ...apiCfg, model: llmModel },
-              model: llmModel,
-              sessionId,
-              toolsChars: compactCtx?.toolsChars
-            });
-            if (cr && cr.compacted) {
-              // 归档 id 回填给请求快照（旁路记录，失败就让快照留 null）。
-              // 短超时：它在发请求之前 await，不能按默认上限一直等着。
-              try {
-                const archived = await gateway.invokeRpc(
-                  'memory.compaction_archive',
-                  {
-                    sessionId,
-                    workspacePath: workspacePath || null,
-                    tokensBefore: cr.tokensBefore,
-                    tokensAfter: cr.tokensAfter,
-                    summary: cr.summary || null,
-                    foldedTranscript: cr.foldedTranscript || null
-                  },
-                  { timeoutMs: 2000 }
-                );
-                if (archived && archived.id != null) cr.compactionArchiveId = archived.id;
-              } catch {
-                // 归档失败不改变压缩结论
-              }
-            }
-            return cr;
-          }
-        : null,
+      compactMessages: buildLoopCompactionHandler({
+        compactionAgent,
+        gateway,
+        userData,
+        sessionId,
+        workspacePath,
+        tokenBudget,
+        contextTierId,
+        apiConfig: apiCfg,
+        model: llmModel
+      }),
       // 交付决策的单一来源是 `agent-round-text` 的四态（§3.4）：计划这一路同样要把
       // 「有工具轮但没写正文」交给汇总轮，而不是自己拼一句占位文案。
       // 汇总只在此开关打开时发生，且是**追加**一轮无工具 LLM，不改变有正文的行为。

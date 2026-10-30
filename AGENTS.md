@@ -39,6 +39,8 @@
 | 完成验收（单轮「做完了没」） | `src/agent/completion-readiness.js`（Main：证据 + 判定唯一来源，只提示不续跑）、`src/renderer/agent-guardrails.js`（只渲染 note） | 在 Renderer 判定、从 `summary` 文本抠 exit code、把诊断塞成 trace 轮次 |
 | 沙箱档位 / 越界审批 | `src/gateway/sandbox-policy.js`（三档判定，唯一来源）、`sandbox-approvals.js`（ask-once）、`permissions-store.js`（档位持久化） | 在 handler 里自己拼白名单；另写一份高危命令词表（`exec-policy.js` 已复用同一份） |
 | 工具调用关卡（校验 / 止损 / 遥测 / 落盘顺序） | `src/agent/tool-gate.js`（流程 + 冻结关卡清单，加检查只改清单） | 在 `ToolHarnessSession` / `executeAgentTool` 里手写顺序，或另起一个"前置钩子层" |
+| 会话工作空间绑定（外部频道指定 / 跟随桌面） | `src/agent/service.js`（外部提交入口：`task.submit.workspacePath`，未声明时按提交时刻的桌面工作空间钉住）、`renderer-composer.js`（`resolveSessionWorkspacePathSync` + `rememberActiveViewSessionWorkspace`：视图路径与会话 id 成对写）、`src/agent/session-workspace-bind.js`（会话行 + 进程内上下文两处都写的唯一实现）、工具 `session_set_workspace`（桌面：`renderer-workspace-ssh.js#applySessionWorkspaceFromTool`；频道：`channels/workspace-switch.js`） | 用 `sid === currentSessionId` 判定「视图路径就是该会话的绑定」（会话切换瞬间会把桌面目录写成外部会话的工作空间，见 `issue/2026-10-30-agent-channel-and-workspace-binding.md`） |
+| 外部频道（企业微信等）接入 / 频道设置页 | `src/channels/`（`store` 配置与凭据、`wecom-client` 长连接与帧、`runtime` 调度与节流、`agent-turn` 在 Main 跑一轮、`workspace-switch` 微信里换项目、`boot` 装配）、`src/main/ipc/channels.js`、`src/renderer/renderer-channels.js`（设置 →「频道」） | 再写一份 Agent 装配（系统提示/工具/压缩/交付闸门都有单一来源）；让频道任务经 Renderer 或手机桥跑（会抢桌面焦点） |
 | 请求快照 / 「模型看到了什么」 | `src/agent/request-snapshot.js`（唯一装配与写入点）、`crates/dieyun-core/src/memory/snapshot.rs`（表与保留裁剪） | 在 Renderer/Main 各拼一份；另写事件溯源或格式迁移链 |
 | 远端 Agent 传输 / 进程 / 多工作区 | `src/ssh/remote-gateway-manager.js`（懒拉起 daemon、`openAgentChannel` 走 SSH `direct-streamlocal`、探活与回收）、`src/remote/minimal-gateway-host.js`（socket 监听 + 单例 + `hello{workspace}` 按连接路由）、`remote-agent-client.js`（`openChannel` 通道客户端） | 重新引入远端 TCP 端口 / pid 文件 / 本地隧道 / token；按 socket 键缓存客户端而不带 workspace |
 | 远端文件读写（哪条传输） | `src/gateway/rpc.js:getRemoteFs()`（**唯一出口**：Agent 可用走 `gateway/remote-agent-fs.js` 的 RPC；没 Agent 才走 `gateway/remote-fs.js` 的 SFTP；两者同接口，`transport` 标识决定谁补 `index.notify_change`） | 在 handler 里自己判「用 SFTP 还是 RPC」；写两套适配器形状；RPC 失败悄悄退 SSH exec |
@@ -168,6 +170,7 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/MULTI-AGENT-WORKTREE-ISOLATION-PLAN.md`](docs/MULTI-AGENT-WORKTREE-ISOLATION-PLAN.md) | 多 agent 并行时 workspace 资源隔离（**SSH 会话已实施**：每会话一个远端 worktree；含 flock 设计） |
 | [`docs/SSH-MODULE-REVIEW.md`](docs/SSH-MODULE-REVIEW.md) | SSH 模块全面审查：架构 / 整洁 / 完成度 + 与 Rust 核心的三个脆弱点（**改 src/ssh 或 src/remote 前先读**） |
 | [`docs/UMD-CLEANUP-PLAN.md`](docs/UMD-CLEANUP-PLAN.md) | UMD 清理计划 |
+| [`docs/CHANNEL-WECOM.md`](docs/CHANNEL-WECOM.md) | 内置频道（企业微信智能机器人）：设置页 / 长连接协议帧 / 在 Main 后台跑一轮 / 附件与主动推送（**已实施**） |
 
 ---
 

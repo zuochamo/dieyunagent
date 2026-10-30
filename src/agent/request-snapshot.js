@@ -32,12 +32,13 @@ const ENVELOPE_PREVIEW_CHARS = 2000;
 /** 失败日志节流：同一次运行里每 60s 最多一条，避免每轮都刷。 */
 const ERROR_LOG_INTERVAL_MS = 60000;
 
-/** 请求来源。与 `runRustAgentLoop` 的四个入口一一对应。 */
+/** 请求来源。与 `runRustAgentLoop` 的入口一一对应（channel = 企业微信等外部频道，Main 侧发起）。 */
 const SNAPSHOT_SOURCES = Object.freeze({
   CHAT: 'chat',
   SUBAGENT: 'subagent',
   PLANNER: 'planner',
-  PLAN: 'plan'
+  PLAN: 'plan',
+  CHANNEL: 'channel'
 });
 
 /** 写入原因：一轮里可能发多次（溢出重发 / 图片被拒重发），必须能区分。 */

@@ -76,6 +76,8 @@ const { createMainCompactionAgent } = require('./agent/compaction-main');
 const { killActiveShellChildren } = require('./gateway/host-control');
 const { registerEarlyMainIpc, registerMainIpc, registerLateMainIpc } = require('./main/register-ipc');
 const { registerAgentRuntimeIpc } = require('./main/ipc/agent-runtime');
+const { registerChannelIpc } = require('./main/ipc/channels');
+const { bootChannelsRuntime } = require('./channels/boot');
 const { registerCompactionIpc } = require('./main/ipc/compaction');
 const { createRendererFreezeReporter } = require('./main/ipc/renderer-freeze');
 const { invalidateRemoteAgentClient } = require('./gateway/remote-agent-client');
@@ -297,6 +299,10 @@ let readableDirPath = '';
 let plansStore = null;
 /** @type {object | null} */
 let plansScheduler = null;
+/** @type {object | null} 频道（企业微信等外部入口）配置存储 */
+let channelStore = null;
+/** @type {object | null} 频道长连接与调度 */
+let channelRuntime = null;
 
 
 const earlyIpcCtx = {
@@ -707,6 +713,24 @@ app.whenReady().then(async () => {
   const listRunningPlans = plansBoot.listRunningPlans;
   const cancelPlanRun = plansBoot.cancelPlanRun;
 
+  // 频道（企业微信等外部入口）：自己的会话、自己的工作空间，在 Main 后台跑一轮，
+  // 与桌面当前会话无关（见 issue/2026-10-30-agent-channel-and-workspace-binding.md）。
+  const channelsBoot = bootChannelsRuntime({
+    userData,
+    safeStorage,
+    getLocalGateway: () => localGateway,
+    getCoreBridge: () => coreBridge,
+    getMcpRuntime: () => mcpRuntime,
+    getCompactionAgent: () => ensureMainCompactionAgent(),
+    createToolBridge: (webContents) => createRustLoopToolBridge(webContents),
+    listMcpServers: mcpStore.listMcpServersForUi,
+    // 频道在 Main 后台写会话账本，桌面历史列表得知道有新会话（只刷新列表，不切当前会话）
+    notifySessionsChanged: (payload) => broadcastToRenderers('channels:sessions-changed', payload),
+    log
+  });
+  channelStore = channelsBoot.channelStore;
+  channelRuntime = channelsBoot.channelRuntime;
+
   registerMainIpc({
     ipcMain,
     app,
@@ -859,6 +883,13 @@ app.whenReady().then(async () => {
     clearToolHarnessSessionsForSession
   });
 
+  registerChannelIpc({
+    ipcMain,
+    getChannelStore: () => channelStore,
+    getChannelRuntime: () => channelRuntime,
+    log: (msg) => log.info(msg)
+  });
+
   registerLateMainIpc({
     ipcMain,
     clipboard,
@@ -902,6 +933,16 @@ app.whenReady().then(async () => {
   });
   appUpdater.setupAutoUpdater();
 
+  // 频道（企业微信等）：只连「已启用且有凭据」的那些；连接失败只记日志，
+  // 用户能在设置页看到状态并自行修凭据（不做静默重试风暴）。
+  if (channelRuntime) {
+    try {
+      channelRuntime.startEnabled();
+    } catch (e) {
+      log.warn('频道启动失败:', e && e.message);
+    }
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       windowTray.createWindow();
@@ -919,6 +960,16 @@ app.on('before-quit', () => {
   if (windowTray) windowTray.destroyTray();
   activityStats.dispose();
   log.info('应用退出');
+  // 频道长连接先断：它是外部系统的连接，不能等 Gateway/core 停完再断，
+  // 否则退出瞬间的来电消息会写进一个正在关闭的会话。
+  if (channelRuntime) {
+    try {
+      channelRuntime.stopAll();
+    } catch {
+      // 退出路径不因关闭失败而卡住
+    }
+    channelRuntime = null;
+  }
   if (localGateway) {
     localGateway.stop();
     localGateway = null;

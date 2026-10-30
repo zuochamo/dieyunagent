@@ -815,6 +815,29 @@ function hasSessionWorkspacePathCache(sessionId) {
   return !!sid && sessionWorkspacePathCache.has(sid);
 }
 
+/**
+ * 「桌面视图正在显示哪个会话的哪个工作空间」的唯一写入口。
+ *
+ * `activeViewSessionWorkspacePath` 只描述**它正在显示的那个会话**：会话切换时
+ * `currentSessionId` 先行指向新会话，而视图路径还是旧会话的。以前只按
+ * `sid === currentSessionId` 相等就把视图路径当成该会话的绑定，于是外部频道
+ * （手机桥 / 企微转接器）新建/切到的会话会被「猜」成桌面当前工作空间，本轮 Agent
+ * 跑错目录，并经 send 流程把这个错路径写回会话行（见
+ * issues/2026-10-30-agent-channel-and-workspace-binding.md 问题 2）。
+ * 所以这一对必须整体写入，读侧只认 sessionId 对得上的那份。
+ *
+ * @param {string|null} sessionId 视图正在显示的会话；空 = 视图不代表任何会话
+ * @param {string|null} workspacePath
+ * @param {string|null} [kind] 省略 = 不改动 kind
+ */
+function rememberActiveViewSessionWorkspace(sessionId, workspacePath, kind) {
+  if (typeof window === 'undefined') return;
+  const sid = sessionId ? String(sessionId) : '';
+  window.activeViewSessionWorkspacePath = workspacePath ? String(workspacePath) : null;
+  window.activeViewSessionWorkspaceSessionId = workspacePath && sid ? sid : null;
+  if (kind !== undefined) window.activeViewSessionWorkspaceKind = kind ? String(kind) : null;
+}
+
 function resolveSessionWorkspacePathSync(sessionId) {
   if (!sessionId) return null;
   const sid = String(sessionId);
@@ -826,25 +849,26 @@ function resolveSessionWorkspacePathSync(sessionId) {
     const cached = sessionWorkspacePathCache.get(sid);
     return cached || null;
   }
-  if (sid === String(currentSessionId) && typeof window !== 'undefined') {
-    return window.activeViewSessionWorkspacePath || null;
+  // 视图路径只在它确实属于这个会话时才算数（见 rememberActiveViewSessionWorkspace）
+  if (
+    typeof window !== 'undefined' &&
+    window.activeViewSessionWorkspacePath &&
+    String(window.activeViewSessionWorkspaceSessionId || '') === sid
+  ) {
+    return window.activeViewSessionWorkspacePath;
   }
   return null;
 }
 
-async function refreshSessionWorkspaceUi(workspacePath) {
-  if (typeof window !== 'undefined') {
-    window.activeViewSessionWorkspacePath = workspacePath || null;
-    if (!workspacePath) {
-      window.activeViewSessionWorkspaceKind = null;
-    } else if (/^ssh:/i.test(workspacePath)) {
-      window.activeViewSessionWorkspaceKind = 'ssh';
-    } else {
-      window.activeViewSessionWorkspaceKind = 'local';
-    }
-  }
+/**
+ * @param {string} sessionId 这个工作空间属于哪个会话（视图路径与会话必须成对落，见
+ *   rememberActiveViewSessionWorkspace）
+ * @param {string|null} workspacePath
+ */
+async function refreshSessionWorkspaceUi(sessionId, workspacePath) {
+  const sid = sessionId ? String(sessionId) : '';
   if (!workspacePath) {
-    updateWorkspaceLabel({ kind: 'local', workspacePath: null, displayPath: '' });
+    updateWorkspaceLabel({ sessionId: sid, kind: 'local', workspacePath: null, displayPath: '' });
     return;
   }
   if (/^ssh:/i.test(workspacePath)) {
@@ -877,6 +901,7 @@ async function refreshSessionWorkspaceUi(workspacePath) {
       }
     }
     updateWorkspaceLabel({
+      sessionId: sid,
       kind: 'ssh',
       workspacePath,
       displayPath: workspacePath,
@@ -885,6 +910,7 @@ async function refreshSessionWorkspaceUi(workspacePath) {
     return;
   }
   updateWorkspaceLabel({
+    sessionId: sid,
     kind: 'local',
     workspacePath,
     displayPath: workspacePath,
@@ -897,6 +923,7 @@ if (typeof window !== 'undefined') {
   window.resolveSessionWorkspacePathSync = resolveSessionWorkspacePathSync;
   window.rememberSessionWorkspacePath = rememberSessionWorkspacePath;
   window.hasSessionWorkspacePathCache = hasSessionWorkspacePathCache;
+  window.rememberActiveViewSessionWorkspace = rememberActiveViewSessionWorkspace;
 }
 
 async function applySessionWorkspace(sessionId, opts = {}) {
@@ -947,9 +974,10 @@ async function applySessionWorkspace(sessionId, opts = {}) {
     const sameWorkspace = unchanged && !missingCleared;
     if (!stillActive()) return { sameWorkspace };
     if (!sameWorkspace) {
-      await refreshSessionWorkspaceUi(effectivePath);
-    } else if (typeof window !== 'undefined') {
-      window.activeViewSessionWorkspacePath = effectivePath || null;
+      await refreshSessionWorkspaceUi(sid, effectivePath);
+    } else {
+      // 路径没变，仍要把「视图属于哪个会话」对齐：切换会话时 currentSessionId 先动、视图后动
+      rememberActiveViewSessionWorkspace(sid, effectivePath);
     }
     if (!stillActive()) return { sameWorkspace };
     if (!sameWorkspace && typeof refreshRemoteGatewayMeta === 'function') {
@@ -971,7 +999,7 @@ async function applySessionWorkspace(sessionId, opts = {}) {
     if (!sameWorkspace) {
       const ws = composerApi.getWorkspace ? await composerApi.getWorkspace() : null;
       if (!stillActive()) return { sameWorkspace, workspacePath: effectivePath };
-      if (ws) updateWorkspaceLabel(ws);
+      if (ws) updateWorkspaceLabel({ ...ws, sessionId: sid });
       invalidateWorkspaceArtifacts();
       if (typeof restartTerminalSession === 'function') restartTerminalSession();
       if (effectivePath && !opts.skipDefaultEditor && typeof ensureDefaultWorkspaceEditor === 'function') {

@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, refreshProductsPanelIfActive, bindCurrentSessionWorkspace, restartTerminalSession, showAgentToast, connectRemoteGatewayLocked, resetRemoteGatewayClient, refreshRemoteGatewayMeta, refreshHistoryList, showOverlay, parentRemotePath, showTextPrompt, setSidePanelTab, getSidePanelTab, consumePendingSshTabRequest */
+/* global window, document, $, escapeHtml, currentSessionId, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, refreshProductsPanelIfActive, bindCurrentSessionWorkspace, restartTerminalSession, showAgentToast, connectRemoteGatewayLocked, resetRemoteGatewayClient, refreshRemoteGatewayMeta, refreshHistoryList, showOverlay, parentRemotePath, showTextPrompt, setSidePanelTab, getSidePanelTab, consumePendingSshTabRequest */
 'use strict';
 
 const wsApi = window.diecloud || {};
@@ -588,31 +588,90 @@ async function loadSshProfileIntoForm(ws) {
   }
 }
 
-async function pickLocalWorkspace() {
-  if (!wsApi.pickFolder || !wsApi.setLocalWorkspace) return;
+/**
+ * 把「工作空间视图 + 当前会话绑定」一起切到 dir（null = 回到默认工作空间）。
+ *
+ * 这是本地工作空间切换的**唯一流程**，两个入口共用：
+ * 用户在菜单里点「选择本地文件夹」（`pickLocalWorkspace`），和 Agent 收到「切到 XX 项目」
+ * 时调的工具（`session_set_workspace`，见 applySessionWorkspaceFromTool）。
+ * 别在这里之外再拼一遍「设视图 / 写会话行 / 重载编辑器 / 重启终端」。
+ *
+ * @param {string|null} dir
+ * @returns {Promise<{ ok: boolean, workspacePath?: string, error?: string }>}
+ */
+async function applyLocalWorkspacePath(dir) {
+  if (!wsApi.setLocalWorkspace) return { ok: false, error: '工作空间切换不可用（preload 未就绪）' };
   if (
     typeof window.currentSessionHasActiveRemoteRun === 'function' &&
     window.currentSessionHasActiveRemoteRun()
   ) {
-    showAgentToast(
-      '无法切换',
-      '当前对话有远程任务正在运行，请等待完成、切换到其他对话后再选本地文件夹',
-      { variant: 'warn' }
-    );
-    return;
+    return { ok: false, error: '当前对话有远程任务正在运行，等它结束再切本地目录' };
   }
-  const folder = await wsApi.pickFolder();
-  if (!folder) return;
-  const ws = await wsApi.setLocalWorkspace(folder);
+  const target = dir ? String(dir).trim() : '';
+  const ws = await wsApi.setLocalWorkspace(target || null);
+  if (!ws) return { ok: false, error: '设置工作空间失败' };
+  const bound = ws.workspacePath ? String(ws.workspacePath) : target || null;
   updateWorkspaceLabel(ws);
   invalidateWorkspaceArtifacts();
-  await bindCurrentSessionWorkspace(ws && ws.workspacePath ? ws.workspacePath : folder);
-  if (typeof ensureDefaultWorkspaceEditor === 'function') {
+  // 会话行 + 进程内上下文一起改（bindCurrentSessionWorkspace 是渲染器侧的单一入口）
+  await bindCurrentSessionWorkspace(bound);
+  if (bound && typeof ensureDefaultWorkspaceEditor === 'function') {
     await ensureDefaultWorkspaceEditor({ force: true });
   }
   if (typeof restartTerminalSession === 'function') restartTerminalSession();
   refreshWorkspaceScopedPanes();
+  return { ok: true, workspacePath: bound || '' };
 }
+
+async function pickLocalWorkspace() {
+  if (!wsApi.pickFolder || !wsApi.setLocalWorkspace) return;
+  const folder = await wsApi.pickFolder();
+  if (!folder) return;
+  const res = await applyLocalWorkspacePath(folder);
+  if (!res.ok && res.error) showAgentToast('无法切换', res.error, { variant: 'warn' });
+}
+
+/**
+ * Agent 工具 `session_set_workspace` 的渲染器执行体（桌面这条路的入口）。
+ * 频道里同一个工具名由 Main 自己执行（`src/channels/workspace-switch.js`），不走这里。
+ *
+ * `args.sessionId` 是这一轮真正跑的会话（由工具委派带来）。它不在前台时只改那条会话的绑定，
+ * 不动桌面视图 —— 否则后台会话一换项目，用户正在看的目录就被换掉了。
+ *
+ * @param {{ workspace?: string, sessionId?: string }} args
+ * @returns {Promise<{ ok: boolean, workspacePath?: string, note?: string, error?: string }>}
+ */
+async function applySessionWorkspaceFromTool(args) {
+  const raw = String((args && args.workspace) || '').trim();
+  const isDefault = raw.toLowerCase() === 'default' || raw === '默认' || raw === '默认工作空间';
+  if (!raw) {
+    const current =
+      (typeof window !== 'undefined' && window.activeViewSessionWorkspacePath) || '默认工作空间';
+    return { ok: false, error: `未指定 workspace，当前是 ${current}。要切就给绝对路径，回默认传 "default"。` };
+  }
+  const target = isDefault ? '' : raw;
+  const runSid = String((args && args.sessionId) || '');
+  const curSid = typeof currentSessionId !== 'undefined' ? String(currentSessionId || '') : '';
+  if (runSid && curSid && runSid !== curSid) {
+    await bindCurrentSessionWorkspace(runSid, target || null);
+    return {
+      ok: true,
+      workspacePath: target,
+      note: '已切换这条会话的工作空间；它不在前台，桌面正在看的目录没有动。新目录从下一轮生效。'
+    };
+  }
+  const res = await applyLocalWorkspacePath(target || null);
+  if (!res.ok) return { ok: false, error: res.error || '切换失败' };
+  return {
+    ok: true,
+    workspacePath: res.workspacePath,
+    note:
+      '已把当前对话的工作空间切过去。本轮已装配的上下文（系统提示 / AGENTS.md / 索引）仍是原目录的，' +
+      '新目录从下一轮生效；不确定目录对不对先用 fs_list_dir 看一眼。'
+  };
+}
+
+window.applySessionWorkspaceFromTool = applySessionWorkspaceFromTool;
 
 /**
  * 工作区切换后刷新「依赖工作区根」的 pane。
@@ -627,13 +686,8 @@ function refreshWorkspaceScopedPanes() {
 }
 
 async function clearWorkspaceToDefault() {
-  if (!wsApi.setLocalWorkspace) return;
-  const ws = await wsApi.setLocalWorkspace(null);
-  updateWorkspaceLabel(ws);
-  invalidateWorkspaceArtifacts();
-  await bindCurrentSessionWorkspace(null);
-  if (typeof restartTerminalSession === 'function') restartTerminalSession();
-  refreshWorkspaceScopedPanes();
+  const res = await applyLocalWorkspacePath(null);
+  if (!res.ok && res.error) showAgentToast('无法切换', res.error, { variant: 'warn' });
 }
 
 function openSshConnectModal(opts) {

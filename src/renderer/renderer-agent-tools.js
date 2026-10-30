@@ -235,6 +235,20 @@ async function executeAgentToolInner(name, args, sessionId) {
       return { error: e && e.message ? e.message : String(e) };
     }
   }
+  if (name === 'session_set_workspace') {
+    if (typeof window.applySessionWorkspaceFromTool !== 'function') {
+      return { error: '工作空间切换不可用（渲染器未就绪）' };
+    }
+    try {
+      // 带上这一轮真正跑的会话：它不在前台时只改那条会话的绑定，不动桌面视图
+      return await window.applySessionWorkspaceFromTool({
+        ...(args || {}),
+        sessionId: sessionId || undefined
+      });
+    } catch (e) {
+      return { error: e && e.message ? e.message : String(e) };
+    }
+  }
   return { error: `未知 UI 工具: ${name}` };
 }
 

@@ -267,6 +267,16 @@ async function openAgentServiceSession(sessionId) {
     await createNewSession();
     return currentSessionId;
   }
+  // 外部频道（手机内网桥 / 企微转接器）可以带 workspacePath 提交任务，Main 会直接把绑定
+  // 写进会话行（含纠正存量会话）。任务开跑前先按库里的真值刷新本会话缓存，否则渲染端的
+  // 旧缓存会在 send 时把它顶回旧路径（issues/2026-10-30-agent-channel-and-workspace-binding.md）。
+  if (typeof resolveSessionWorkspacePath === 'function') {
+    try {
+      await resolveSessionWorkspacePath(sessionId);
+    } catch (e) {
+      console.warn(e);
+    }
+  }
   if (sessionId !== currentSessionId && typeof switchSession === 'function') {
     await switchSession(sessionId);
     return currentSessionId;

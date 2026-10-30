@@ -444,9 +444,10 @@ function resolveSessionWorkspacePathForRpc(sessionId) {
     const sync = resolveSessionWorkspacePathSync(sid);
     if (sync) return sync;
   }
-  if (typeof window !== 'undefined' && String(sid) === String(currentSessionId)) {
-    return window.activeViewSessionWorkspacePath || null;
-  }
+  // 这里以前还有一段「sid === currentSessionId 就返回 activeViewSessionWorkspacePath」的
+  // 回落：它把视图路径当成该会话的绑定，而切会话时视图路径还是上一个会话的
+  // （会话工作空间漂移的根因，见 issues/2026-10-30-agent-channel-and-workspace-binding.md）。
+  // 该判定现在只在 resolveSessionWorkspacePathSync 里、且按「视图属于哪个会话」做一次。
   return null;
 }
 
@@ -472,21 +473,18 @@ async function resolveWorkspaceRootForIndexPanels(sessionId) {
     if (p) return p;
   }
   if (typeof window !== 'undefined' && window.activeViewSessionWorkspacePath) {
-    p = pick(window.activeViewSessionWorkspacePath);
-    if (p) return p;
+    // 视图路径只代表「它正在显示的那个会话」；会话已切换但视图还没跟上时不能拿来顶
+    const viewSid = String(window.activeViewSessionWorkspaceSessionId || '');
+    if (!sid || viewSid === String(sid)) {
+      p = pick(window.activeViewSessionWorkspacePath);
+      if (p) return p;
+    }
   }
   if (sid && typeof resolveSessionWorkspacePath === 'function') {
     try {
+      // resolveSessionWorkspacePath 自带写缓存，下一次 sync 就能命中，不必在这里补窗口变量
       p = pick(await resolveSessionWorkspacePath(sid));
-      if (p) {
-        if (
-          typeof window !== 'undefined' &&
-          String(sid) === String(currentSessionId || '')
-        ) {
-          window.activeViewSessionWorkspacePath = p;
-        }
-        return p;
-      }
+      if (p) return p;
     } catch {
       // ignore
     }

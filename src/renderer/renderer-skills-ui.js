@@ -790,10 +790,20 @@ async function renderMcpList() {
 function updateWorkspaceLabel(ws) {
   const el = $('composer-workspace');
   if (typeof window !== 'undefined') {
-    window.activeViewSessionWorkspacePath =
-      ws && ws.workspacePath ? String(ws.workspacePath) : null;
-    window.activeViewSessionWorkspaceKind =
-      ws && ws.kind ? String(ws.kind) : null;
+    // 标签永远描述「视图正在显示的那个会话」；`ws.sessionId` 由按会话刷新的调用方显式给
+    // （见 composer#refreshSessionWorkspaceUi）。视图路径与会话 id 必须成对落，
+    // 否则切会话的瞬间会被当成「新会话的工作空间就是旧的视图路径」。
+    const labelSessionId =
+      ws && ws.sessionId
+        ? String(ws.sessionId)
+        : typeof currentSessionId !== 'undefined' && currentSessionId
+          ? String(currentSessionId)
+          : '';
+    window.rememberActiveViewSessionWorkspace(
+      labelSessionId,
+      ws && ws.workspacePath ? String(ws.workspacePath) : null,
+      ws && ws.kind ? String(ws.kind) : null
+    );
   }
   if (typeof updateSshPanelVisibility === 'function') {
     updateSshPanelVisibility(ws);

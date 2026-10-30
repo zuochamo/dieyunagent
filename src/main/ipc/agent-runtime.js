@@ -125,48 +125,18 @@ function registerAgentRuntimeIpc(ctx) {
     if (!gateway || typeof gateway.invokeRpc !== 'function') {
       throw new Error('Gateway 未就绪');
     }
-    const { prepSystemPrompt, resolveAgentHome } = require('../../agent/system-prompt-prep');
-    const userData = live.userData;
     const snapshot = payload && typeof payload === 'object' ? payload : {};
-    const wsPath =
-      (snapshot.workspaceInfo && snapshot.workspaceInfo.workspacePath) ||
-      snapshot.runWorkspaceRoot ||
-      null;
-    const path = require('path');
-    const { scanSkills, readSkillContent, assertReadableSkillPath } = require('../../skills/scanner');
-    const { recallSkills } = require('../../skills/vector-index');
-    const { getEmbeddingConfig } = require('../../model-settings');
-    const { getScanRoots, filterAccessibleSkillRoots } = require('../../agent-home');
-    return prepSystemPrompt(snapshot, {
-      invokeRpc: (method, params) => gateway.invokeRpc(method, params),
-      getPermissions: () => gateway.getPermissions(),
-      getAgentHome: () => resolveAgentHome(userData, wsPath),
-      userDataPath: userData,
-      listMcpServers: () =>
-        typeof listMcpServersForUi === 'function' ? listMcpServersForUi(userData) : [],
-      skills: {
-        scan: () => scanSkills({ userData, workspacePath: wsPath }),
-        recall: async ({ query, enabledIds, limit }) => {
-          const settings = loadModelSettings(userData);
-          const embeddingConfig = getEmbeddingConfig(settings);
-          return recallSkills({
-            userData,
-            workspacePath: wsPath,
-            embeddingConfig,
-            enabledIds: Array.isArray(enabledIds) ? enabledIds : [],
-            query: query || '',
-            limit: limit || 8
-          });
-        },
-        read: async (skillPath) => {
-          const roots = filterAccessibleSkillRoots(
-            getScanRoots(userData, wsPath).map((r) => path.resolve(r))
-          );
-          assertReadableSkillPath(skillPath, roots);
-          return readSkillContent(skillPath);
-        }
-      }
+    // 依赖装配（AGENTS.md / 记忆 / 技能 / MCP / 召回范围）与频道运行共用同一份实现：
+    // src/agent/system-prompt-prep-main.js
+    const { buildPrepSystemPromptDeps } = require('../../agent/system-prompt-prep-main');
+    const built = buildPrepSystemPromptDeps({
+      gateway,
+      userData: live.userData,
+      snapshot,
+      listMcpServers: (userDataPath) =>
+        typeof listMcpServersForUi === 'function' ? listMcpServersForUi(userDataPath) : []
     });
+    return built.prepSystemPrompt(snapshot, built.deps);
   });
 
   // 会话交接：生成（Main 单轮 LLM + Rust 唯一写入口）；读取走 Gateway memory.handoff_*

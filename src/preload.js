@@ -15,6 +15,14 @@ contextBridge.exposeInMainWorld('diecloud', {
   peerUntrust: (peerId) => ipcRenderer.invoke('peer:untrust', { peerId }),
   peerTrustList: () => ipcRenderer.invoke('peer:trust-list'),
   peerSetStaticPeers: (peers) => ipcRenderer.invoke('peer:set-static-peers', { peers: peers || [] }),
+  // 频道（企业微信等外部入口）：凭据加密存 Main，Renderer 只看状态
+  channelsList: () => ipcRenderer.invoke('channels:list'),
+  channelsCreate: (payload) => ipcRenderer.invoke('channels:create', payload || {}),
+  channelsUpdate: (payload) => ipcRenderer.invoke('channels:update', payload || {}),
+  channelsDelete: (id) => ipcRenderer.invoke('channels:delete', { id }),
+  channelsSetEnabled: (id, enabled) => ipcRenderer.invoke('channels:set-enabled', { id, enabled: !!enabled }),
+  channelsTest: (payload) => ipcRenderer.invoke('channels:test', payload || {}),
+  channelsTestPush: (payload) => ipcRenderer.invoke('channels:test-push', payload || {}),
   peerSend: (payload) => ipcRenderer.invoke('peer:send', payload || {}),
   peerSendSession: (payload) => ipcRenderer.invoke('peer:send-session', payload || {}),
   peerOpenSession: (peer) => ipcRenderer.invoke('peer:open-session', { peer }),
@@ -505,6 +513,21 @@ contextBridge.exposeInMainWorld('diecloud', {
     };
     ipcRenderer.on('agent:session-title', handler);
     return () => ipcRenderer.removeListener('agent:session-title', handler);
+  },
+  /**
+   * 外部频道（企业微信等）在 Main 后台跑完一轮后的通知：只用于「让会话出现在历史列表里」，
+   * 不切换当前会话。payload: { channelId, sessionId, title }。
+   */
+  onChannelsSessionsChanged: (cb) => {
+    const handler = (_evt, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore
+      }
+    };
+    ipcRenderer.on('channels:sessions-changed', handler);
+    return () => ipcRenderer.removeListener('channels:sessions-changed', handler);
   },
   /**
    * 主循环并发 subagent 的隔离 trace（过程卡片）。与 agent:rust-loop-phase 分通道，

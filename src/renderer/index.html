@@ -73,7 +73,7 @@
           <div class="history-head">
             <span class="history-title" data-i18n="history_title">历史对话</span>
             <div class="history-new-wrap" id="history-new-wrap">
-              <button type="button" class="icon-btn" id="chat-new" title="新对话（有交接时可继续上次）" aria-label="新对话" data-i18n-title="new_chat_menu_title" data-i18n-aria="new_chat" aria-haspopup="menu" aria-expanded="false" aria-controls="history-new-menu">+</button>
+              <button type="button" class="icon-btn" id="chat-new" title="新对话（不绑工作空间；有交接时可继续上次）" aria-label="新对话" data-i18n-title="new_chat_menu_title" data-i18n-aria="new_chat" aria-haspopup="menu" aria-expanded="false" aria-controls="history-new-menu">+</button>
               <div class="history-new-menu" id="history-new-menu" role="menu" hidden>
                 <button type="button" class="history-new-menu-item" data-history-new="new" role="menuitem" data-i18n="new_chat">新对话</button>
                 <button type="button" class="history-new-menu-item" id="history-continue-item" data-history-new="continue" role="menuitem" hidden>
@@ -1227,6 +1227,7 @@
           <button type="button" class="settings-nav-item" data-settings-tab="perms" data-i18n="settings_perms">权限</button>
           <button type="button" class="settings-nav-item" data-settings-tab="sandbox" data-i18n="settings_sandbox">沙箱</button>
           <button type="button" class="settings-nav-item" data-settings-tab="agent-knowledge" data-i18n="settings_agent_knowledge">知识</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="channels" data-i18n="settings_channels">频道</button>
           <div class="settings-nav-group-label" data-i18n="settings_extensions">扩展</div>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="mcp" data-i18n="settings_mcp">MCP</button>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="list" data-i18n="settings_skills_list">技能</button>
@@ -1389,6 +1390,73 @@
               <div class="worktrees-run-list" id="worktrees-run-list">
                 <div class="worktrees-empty">打开本页后自动加载…</div>
               </div>
+            </div>
+            <div class="settings-page" data-settings="channels">
+              <section class="settings-runtime-section channels-section">
+                <h3 class="settings-subsection-title">外部频道</h3>
+                <p class="settings-page-desc">
+                  在微信里直接跟这台机器上的 Agent 对话。每条频道连一个企业微信智能机器人，拥有<strong>自己的会话与工作空间</strong>，不会切走你桌面正在进行的对话。
+                </p>
+                <p class="channels-footnote">凭据以系统加密保存在本机，页面不会回显 Secret。</p>
+                <div class="channels-toolbar">
+                  <button type="button" class="ghost-btn" id="channels-add-btn">添加频道</button>
+                  <button type="button" class="ghost-btn" id="channels-refresh-btn">刷新状态</button>
+                  <span class="save-hint" id="channels-hint"></span>
+                </div>
+                <div class="channels-list" id="channels-list">
+                  <p class="channels-empty">打开本页后自动加载…</p>
+                </div>
+              </section>
+
+              <section class="settings-runtime-section channels-section" id="channels-editor" hidden>
+                <h3 class="settings-subsection-title" id="channels-editor-title">添加频道</h3>
+                <div class="channels-form">
+                  <label class="field">
+                    <span class="field-label">名称</span>
+                    <input type="text" id="channel-name" placeholder="例如：研发群助手" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">Bot ID</span>
+                    <input type="text" id="channel-bot-id" placeholder="企业微信智能机器人的 Bot ID" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">Secret</span>
+                    <input type="password" id="channel-secret" placeholder="企业微信智能机器人的 Secret" autocomplete="off" />
+                    <span class="channels-footnote" id="channel-secret-hint" hidden>已保存过 Secret，留空表示不修改</span>
+                  </label>
+                  <div class="field">
+                    <span class="field-label">默认工作空间</span>
+                    <div class="channels-workspace-row">
+                      <input type="text" id="channel-workspace" placeholder="留空 = 默认工作空间（~/.dieyun/workspace）" autocomplete="off" />
+                      <button type="button" class="ghost-btn" id="channel-workspace-pick">选择…</button>
+                    </div>
+                    <span class="channels-footnote">新会话从这里开始，工具的读写落在它下面；桌面切工作空间不会把它拽走。想换项目直接在微信里说「切到 XX 项目」，可切到本机已经用过的项目，这个默认值不受影响。</span>
+                  </div>
+                  <label class="field">
+                    <span class="field-label">欢迎语</span>
+                    <input type="text" id="channel-welcome" placeholder="进入会话时自动回复，留空不发" autocomplete="off" />
+                  </label>
+                </div>
+                <div class="channels-form-foot">
+                  <button type="button" class="ghost-btn" id="channels-save-btn">保存</button>
+                  <button type="button" class="ghost-btn" id="channels-test-btn">测试连接</button>
+                  <button type="button" class="ghost-btn" id="channels-cancel-btn">取消</button>
+                </div>
+              </section>
+
+              <hr class="settings-section-divider" />
+
+              <section class="settings-runtime-section channels-section">
+                <h3 class="settings-subsection-title">主动推送</h3>
+                <p class="settings-page-desc">
+                  让计划任务、巡检结果直接推到微信。群聊填 <code>chatid</code>，单聊填 <code>single:用户ID</code>。
+                </p>
+                <div class="channels-push-row">
+                  <select class="channels-select" id="channels-push-channel" aria-label="推送使用的频道"></select>
+                  <input type="text" class="channels-select" id="channels-push-target" placeholder="chatid 或 single:userid" autocomplete="off" />
+                  <button type="button" class="ghost-btn" id="channels-push-btn">发送测试推送</button>
+                </div>
+              </section>
             </div>
             <div class="settings-page" data-settings="perms">
               <h3 class="settings-subsection-title">本机权限</h3>
@@ -2160,6 +2228,7 @@
     <script src="./renderer-skill-catalog.js"></script>
     <script src="./renderer-mcp-catalog.js"></script>
     <script src="./renderer-workspace-ssh.js"></script>
+    <script src="./renderer-channels.js"></script>
     <!-- composer + agent execution（agent-limits-runtime 依赖 composer 的 sessionComposerModelPicks，须在其后） -->
     <script src="./renderer-composer-mention.js"></script>
     <script src="./renderer-composer.js"></script>

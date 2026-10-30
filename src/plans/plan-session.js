@@ -1,29 +1,70 @@
 'use strict';
 
+const { bindSessionWorkspace } = require('../agent/session-workspace-bind');
+
 /**
  * 计划会话的工作空间绑定。
  *
  * 定时执行没有 Renderer 会话，工具调用的工作区只能由计划自己带：
- * 计划的 `workspace`（本地目录 / ssh:// 远端）必须同时落到
- *   1. 会话行（`sessions.workspace_path`）—— 用户点开这条计划会话时视图一致；
- *   2. 进程内会话上下文（`setSessionWorkspaceContext`）—— RPC 立刻按它解析路径。
- * 两处都写才是「绑定」，只写一处会在下次 hydrate 时又回到未绑定。
+ * 计划的 `workspace`（本地目录 / ssh:// 远端）必须同时落到会话行与进程内会话上下文 ——
+ * 绑定实现本身是 `agent/session-workspace-bind.js` 的单一来源（频道运行也用它）。
  */
-async function bindPlanSessionWorkspace(gateway, sessionId, workspacePath) {
-  const ws = String(workspacePath || '').trim();
-  if (!ws || !sessionId || !gateway) return false;
-  if (typeof gateway.setSessionWorkspaceContext === 'function') {
+
+/**
+ * 为定时计划绑定专用会话；若已有有效 sessionId 则复用。
+ *
+ * 绑定会话失联（被删除）时会重建，但**不静默**：`rebuilt` 会连同
+ * `staleSessionId` 一起返回，交由调用方记日志/提示 —— 否则报告会
+ * 落到一条用户根本没在看的会话里，表现为「计划跑完却没回复」。
+ *
+ * @returns {Promise<{ plan: object, sessionId: string, rebuilt: boolean, staleSessionId: string }>}
+ */
+async function ensurePlanSession(gateway, plansStore, plan) {
+  if (!gateway || typeof gateway.invokeRpc !== 'function') {
+    throw new Error('Gateway 未就绪，无法绑定计划会话');
+  }
+  if (!plan || !plan.id) throw new Error('计划无效');
+  if (!plansStore) throw new Error('计划存储未就绪');
+
+  const planWorkspace = String(plan.workspace || '').trim();
+  let sessionId = plan.deliver && plan.deliver.sessionId ? String(plan.deliver.sessionId).trim() : '';
+  const staleSessionId = sessionId;
+  let rebuilt = false;
+  if (sessionId) {
     try {
-      gateway.setSessionWorkspaceContext(sessionId, ws);
+      const row = await gateway.invokeRpc('memory.session_get', { sessionId });
+      if (row && row.id) {
+        // 计划改过工作空间（或旧会话还没绑）：这次运行前同步，避免「编辑了目录却还跑在旧目录」
+        if (planWorkspace && String(row.workspacePath || '').trim() !== planWorkspace) {
+          await bindSessionWorkspace(gateway, row.id, planWorkspace);
+        }
+        return { plan: plansStore.get(plan.id) || plan, sessionId: row.id, rebuilt: false, staleSessionId: '' };
+      }
     } catch {
-      // 内存上下文写失败不致命：下面的会话行仍会被 hydrate 回来
+      // 会话已删除，下面重建
     }
+    rebuilt = true;
   }
-  if (typeof gateway.invokeRpc === 'function') {
-    await gateway.invokeRpc('memory.session_workspace_set', { sessionId, workspacePath: ws });
-  }
-  return true;
+
+  const created = await gateway.invokeRpc('memory.session_create', {
+    title: `[计划] ${plan.name || '未命名计划'}`,
+    workspacePath: planWorkspace || null
+  });
+  if (!created || !created.id) throw new Error('创建计划专用会话失败');
+  sessionId = created.id;
+  if (planWorkspace) await bindSessionWorkspace(gateway, sessionId, planWorkspace);
+
+  const bound = plansStore.upsert({
+    ...plan,
+    deliver: {
+      type: 'session',
+      sessionId
+    }
+  });
+  return { plan: bound, sessionId, rebuilt, staleSessionId: rebuilt ? staleSessionId : '' };
 }
+
+module.exports = { ensurePlanSession };
 
 /**
  * 为定时计划绑定专用会话；若已有有效 sessionId 则复用。
@@ -79,4 +120,4 @@ async function ensurePlanSession(gateway, plansStore, plan) {
   return { plan: bound, sessionId, rebuilt, staleSessionId: rebuilt ? staleSessionId : '' };
 }
 
-module.exports = { ensurePlanSession, bindPlanSessionWorkspace };
+module.exports = { ensurePlanSession };

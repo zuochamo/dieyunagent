@@ -714,9 +714,34 @@
       ]
     },
     {
-      "prefix": "src/plans/plan-tools.js",
+      "prefix": "src/channels/",
       "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/main-agent-tools.js",
+      "tests": [
+        "test:unit",
         "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "src/agent/session-workspace-bind.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/compaction-loop.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/system-prompt-prep-main.js",
+      "tests": [
+        "test:unit"
       ]
     },
     {

@@ -1606,7 +1606,7 @@ const SESSION_TOOL = {
       '适用：用户说「开个新对话做这件事」「换到 <某目录> 继续」「这个项目单独开一个会话」，' +
       '或当前对话已被别的任务占住、需要干净起点（新对话会按该目录重新加载 AGENTS.md / 记忆 / 索引）。' +
       '效果：立即切到新对话并挂上工作空间；原对话的消息与工作空间不受影响，可从历史列表切回。' +
-      '只想改当前对话的工作空间、不新建对话时不要用它。' +
+      '只想改当前对话的工作空间、不新建对话时，用 session_set_workspace，不要用本工具。' +
       '传 prompt 时本轮应就此收尾：任务在新的对话里独立执行，你在这里继续调工具不会再影响它。',
     parameters: {
       type: 'object',
@@ -1626,6 +1626,46 @@ const SESSION_TOOL = {
         prompt: {
           type: 'string',
           description: '可选：新对话的第一条消息，会立即发送并开始执行。用户已把任务说清时，把任务原样写进来。'
+        }
+      },
+      required: []
+    }
+  }
+};
+
+/**
+ * 「把当前对话的工作空间换到指定目录」——一个名字，两种执行现场：
+ *
+ * - **桌面**（Renderer 执行，见 `renderer-workspace-ssh.js#applySessionWorkspaceFromTool`）：
+ *   会话列表、当前会话、工作空间视图都是渲染器的状态，Main 单方面改绑定只会让 UI 与账本脱钩，
+ *   所以列在 RENDERER_ONLY_TOOLS 里，Main 收到只做反委托。执行体复用「工作空间选择器」
+ *   那条流程（改视图 + 写会话行 + 重载 AGENTS/索引 + 重启终端），不另写一份。
+ * - **外部频道**（Main 执行，见 `channels/workspace-switch.js`）：没有 UI 可点，只能在 Main 落绑定，
+ *   并额外限制候选（频道默认 + 本机已有会话的工作空间）——群聊里任何人都能发消息，
+ *   不能让一句话把 Agent 指到系统目录。
+ *
+ * 与 `session_new` 的分工：本工具**不动当前会话**（消息与历史留着），只是换它绑定的目录；
+ * 要一个干净起点、新开对话才用 session_new。
+ */
+const SESSION_WORKSPACE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'session_set_workspace',
+    description:
+      '把**当前这条对话**的工作空间换到指定目录（不新建对话，消息与历史仍留在本会话）。' +
+      '适用：用户说「切到 XX 项目」「这个事在 XX 目录做」「换个工作空间」——他要的是在本会话里换项目。' +
+      '外部频道（企业微信等）里只能切到本机已有会话用过的项目或该频道默认目录，不在范围内时会返回可选列表，' +
+      '别自己编路径；不知道有哪些候选就先不传参数调用一次。' +
+      '传 "default" 表示回到默认工作空间。' +
+      '切换从下一轮生效：本轮已装配的系统提示、AGENTS.md、索引仍是原目录的，需要在新目录干活就本轮收尾，下一轮再做。',
+    parameters: {
+      type: 'object',
+      properties: {
+        workspace: {
+          type: 'string',
+          description:
+            '目标工作空间的绝对路径（如 F:\\dieyundaizhang），外部频道里也可用项目目录名（如 dieyundaizhang，需唯一）；' +
+            '传 "default" 回到默认工作空间；留空则只返回候选清单、不做切换。'
         }
       },
       required: []
@@ -1838,7 +1878,7 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   [AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL],
   MEMORY_TOOLS,
   PLAN_TOOLS,
-  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SESSION_TOOL, SUBAGENT_TOOL],
+  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL],
   [COMPUTER_TOOL],
   PEER_TOOLS
 );
@@ -1860,7 +1900,13 @@ const PLAN_RUNTIME_TOOL_NAMES = [
 ];
 
 // 只认渲染器能做的事：确认卡片、会话/工作空间切换。Main 收到这些名字只做反委托，不自己执行。
-const RENDERER_ONLY_TOOLS = ['agent_clarify', 'session_new'];
+// session_set_workspace 同时在频道里由 Main 自己执行（见 CHANNEL_RUNTIME_TOOL_NAMES）：
+// 「换工作空间的真相」分属两边 —— 桌面归渲染器视图，频道归 Main 的会话绑定，各写各的那一份。
+const RENDERER_ONLY_TOOLS = ['agent_clarify', 'session_new', 'session_set_workspace'];
+
+// 外部频道（Main 后台跑、没有 UI）额外需要的工具：换工作空间只能靠模型显式调用。
+// 不进 PLAN_RUNTIME_TOOL_NAMES（计划的工作空间由计划自己定）。
+const CHANNEL_RUNTIME_TOOL_NAMES = ['session_set_workspace'];
 
 function getToolByName(name) {
   return BY_NAME[String(name || '')] || null;
@@ -1894,10 +1940,12 @@ module.exports = {
   CLARIFY_TOOL,
   SESSION_TOOL,
   SUBAGENT_TOOL,
+  SESSION_WORKSPACE_TOOL,
   COMPUTER_TOOL,
   PEER_TOOLS,
   ALL_STATIC_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
+  CHANNEL_RUNTIME_TOOL_NAMES,
   RENDERER_ONLY_TOOLS,
   getToolByName,
   toolsByNames,

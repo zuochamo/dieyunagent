@@ -8,7 +8,8 @@ const SETTINGS_TITLE_KEYS = {
   worktrees: ['settings_worktrees', 'Worktree'],
   perms: ['settings_perms', '权限'],
   sandbox: ['settings_sandbox', '沙箱'],
-  'agent-knowledge': ['settings_agent_knowledge', '知识']
+  'agent-knowledge': ['settings_agent_knowledge', '知识'],
+  channels: ['settings_channels', '频道']
 };
 const MODEL_TAB_TITLE_KEYS = {
   defined: ['model_defined', '定义模型'],
@@ -141,6 +142,9 @@ function switchSettingsTab(tab) {
   }
   if (tab === 'worktrees' && typeof onWorktreesSettingsTabShown === 'function') {
     onWorktreesSettingsTabShown();
+  }
+  if (tab === 'channels' && typeof window.onChannelsSettingsTabShown === 'function') {
+    window.onChannelsSettingsTabShown();
   }
 }
 

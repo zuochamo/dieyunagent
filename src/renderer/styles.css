@@ -5915,8 +5915,199 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 /* ---------- Settings form ---------- */
-/* Worktree 自动清理：每个上限一行（左标签 + 右步进器），保存按钮落在末行，
-   只用细描边 + 行间分隔线分组，不铺底色（黑底上是干净的，也不会和下方列表抢视线）。 */
+/* 频道（企业微信等外部入口）：顶部一条工具行，下面一行一条频道（描边卡片，不铺底色）；
+   表单沿用 .field / .field-label（与「定义模型」编辑器同一套），不另造标签样式。 */
+.settings-page[data-settings='channels'] .settings-runtime-section {
+  max-width: none;
+}
+
+.channels-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* `hidden` 只是 UA 的 display:none，压不过上面的 display:flex，必须显式声明 */
+.channels-section[hidden] {
+  display: none;
+}
+
+/* 列表区块与下方编辑表单之间留一道分隔线（编辑器未展开时不存在，不会多出一条空线） */
+.channels-section + .channels-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.channels-section .settings-page-desc {
+  max-width: 760px;
+}
+
+.channels-section > .settings-subsection-title {
+  margin: 0;
+}
+
+.channels-footnote {
+  margin: 0;
+  color: var(--text-mute);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.channels-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.channels-toolbar .save-hint {
+  margin-left: auto;
+}
+
+.channels-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.channels-empty {
+  margin: 0;
+  padding: 16px 10px;
+  border: 1px dashed var(--border);
+  color: var(--text-mute);
+  font-size: 12px;
+  text-align: center;
+}
+
+.channels-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px;
+  border: 1px solid var(--border);
+}
+
+.channels-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.channels-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.channels-row-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.channels-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  color: var(--text-mute);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.channels-badge-ok {
+  color: #3fb950;
+  border-color: rgba(63, 185, 80, 0.4);
+}
+
+.channels-badge-warn {
+  color: #d29922;
+  border-color: rgba(210, 153, 34, 0.4);
+}
+
+.channels-badge-bad {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.channels-row-meta {
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.channels-row-error {
+  color: #ef4444;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.channels-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.channels-form {
+  display: grid;
+  gap: 14px;
+  max-width: 560px;
+}
+
+.channels-workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.channels-workspace-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.channels-form-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.channels-push-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 760px;
+}
+
+.channels-select {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--bg-elev);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard);
+}
+
+.channels-select:focus {
+  border-color: rgba(190, 194, 202, 0.65);
+  background-color: var(--bg-elev-2);
+}
+
+.channels-select::placeholder {
+  color: var(--text-dim);
+  opacity: 1;
+}
+
 /* 本页的清理区块与下方「当前工作空间」同宽，右边缘对齐（.settings-runtime-section 的 420px 上限只给别的表单页用） */
 .settings-page[data-settings='worktrees'] .settings-runtime-section {
   max-width: none;

@@ -42,6 +42,9 @@ const MCP_TOOL_SCHEMA_TOOL = _tc.MCP_TOOL_SCHEMA_TOOL;
 const CLARIFY_TOOL = _tc.CLARIFY_TOOL;
 // 新建对话 + 挂工作空间：schema 单一来源同上，执行在 Renderer（会话状态归 Renderer 所有）。
 const SESSION_TOOL = _tc.SESSION_TOOL || null;
+// 只改当前对话的工作空间（不新建对话）：同样由 Renderer 执行，复用工作空间选择器那条流程。
+// 频道那条路由 Main 自己执行同一个工具名（`channels/workspace-switch.js`），这里不参与。
+const SESSION_WORKSPACE_TOOL = _tc.SESSION_WORKSPACE_TOOL || null;
 // 只读并发调研子 Agent：schema 单一来源在 src/agent/tool-catalog.js（Main 执行）。
 const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
 // OS 级电脑控制（截屏 + 鼠标键盘）：schema 单一来源同上，注入受 osControl 开关控制。
@@ -193,6 +196,7 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   tools.push(CLARIFY_TOOL);
   // 建会话 / 换工作空间：与「新对话」按钮同一条渲染器流程，不依赖 host 权限开关。
   if (SESSION_TOOL) tools.push(SESSION_TOOL);
+  if (SESSION_WORKSPACE_TOOL) tools.push(SESSION_WORKSPACE_TOOL);
   // Agent 主循环是协调者：可派只读研究子 Agent（深度恒为 1）。
   if (SUBAGENT_TOOL) tools.push(SUBAGENT_TOOL);
 

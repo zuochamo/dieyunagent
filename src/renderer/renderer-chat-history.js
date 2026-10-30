@@ -937,6 +937,17 @@ async function fetchLatestHandoff() {
   }
 }
 
+/**
+ * 顶部「+」里的「新对话」：永远开一条**不挂工作空间**的对话（落到默认 ~/.dieyun/workspace）。
+ * 必须显式传 null —— 传 undefined 会继承当前视图的工作空间。只「不写绑定字段」还不够：
+ * 未绑定会话的视图/工具目标本来就跟随当前视图，视图还挂着那个工作空间时新对话照样在用它，
+ * 等于又绑上了；null 分支会连视图工作空间一起清掉（有远端在跑时不动）。
+ * 要在某个工作空间里开新对话，用历史分组行上的 +（显式传该分组的 path）。
+ */
+function startUnboundNewChat() {
+  return createNewSession(null);
+}
+
 /** 顶部「+」：有可继续的交接 → 弹二选一；没有 → 直接新对话（保持单键手感） */
 async function openNewChatMenu() {
   if (!gwState.authed || newChatMenuBusy) return;
@@ -945,7 +956,7 @@ async function openNewChatMenu() {
     const latest = await fetchLatestHandoff();
     if (!latest) {
       setNewChatMenuOpen(false);
-      await createNewSession();
+      await startUnboundNewChat();
       return;
     }
     newChatMenuHandoff = latest;
@@ -1456,8 +1467,7 @@ async function createNewSession(workspacePath, opts = {}) {
         updateWorkspaceLabel({ workspacePath: null });
         invalidateWorkspaceArtifacts();
       } else {
-        if (typeof window !== 'undefined') window.activeViewSessionWorkspacePath = null;
-        if (typeof window !== 'undefined') window.activeViewSessionWorkspaceKind = null;
+        // 视图路径 / kind 由 updateWorkspaceLabel 一并清（它同时落「视图属于哪个会话」）
         updateWorkspaceLabel({ workspacePath: null });
         invalidateWorkspaceArtifacts();
       }
@@ -1628,8 +1638,7 @@ function initChatHistoryUI() {
   const newChatMenu = $('history-new-menu');
   if (chatNewBtn) {
     // 顶部「+」同时承担「新对话」与「继续上次交接」：有交接才弹菜单，没有就直接新建。
-    // 新建必须传 undefined：显式传 null 会走 createNewSession 的「不继承」分支，连带
-    // disconnectSshIfConnected() 主动断 SSH 并清空工作空间。需要换工作空间用文件夹入口的 +。
+    // 「新对话」的「永不绑定工作空间」规则只在 startUnboundNewChat() 一处实现。
     chatNewBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (newChatMenuState.open) {
@@ -1647,7 +1656,7 @@ function initChatHistoryUI() {
       const latest = newChatMenuHandoff;
       setNewChatMenuOpen(false);
       if (action === 'continue' && latest) void continueFromHandoff(latest);
-      else void createNewSession();
+      else void startUnboundNewChat();
     });
     document.addEventListener('click', (e) => {
       if (!newChatMenuState.open) return;
@@ -1662,6 +1671,15 @@ function initChatHistoryUI() {
   // 刷一次列表 —— 标题存在 sessions.title 里，刷新即可见，不需要 Renderer 记状态。
   if (typeof historyApi.onAgentSessionTitle === 'function') {
     historyApi.onAgentSessionTitle(() => {
+      void refreshHistoryList({ softFail: true });
+    });
+  }
+
+  // 外部频道（企业微信等）在 Main 里后台跑完一轮：会话写进的是同一份账本，
+  // 标题与工作空间分组都能从 sessions 行推导，所以这里也只做一件事 —— 刷列表。
+  // 不切换当前会话：频道会话归频道自己，别把用户正在看的对话顶掉。
+  if (typeof historyApi.onChannelsSessionsChanged === 'function') {
+    historyApi.onChannelsSessionsChanged(() => {
       void refreshHistoryList({ softFail: true });
     });
   }
