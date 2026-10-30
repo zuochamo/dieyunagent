@@ -1,4 +1,4 @@
-/* global window, document, nudgeChatFollowSettle */
+/* global window, document, nudgeChatFollowSettle, scanAnswerBlocks, hasAnswerMarkdown, renderAnswerMarkdownToHtml, bindAnswerMarkdownLinks */
 'use strict';
 
 let mermaidReady = false;
@@ -38,30 +38,33 @@ function initMermaidRender() {
   }
 }
 
-function hasMermaidBlock(text) {
-  return /```\s*mermaid\b/i.test(String(text || ''));
-}
-
 /**
+ * 顶层围栏里挑出 mermaid 块（与回答区 Markdown 共用 `scanAnswerBlocks` 这一份解析）。
+ * 只有顶层围栏算图：包在 ```text 里讲解语法时写的 ```mermaid 仍是文本，不会触发渲染。
+ * 非 mermaid 的围栏保持原文进文本段，由 Markdown 渲染器输出代码块。
  * @param {string} text
  * @returns {{ type: 'text'|'mermaid', value: string }[]}
  */
-function splitMermaidBlocks(text) {
+function splitAnswerMermaidSegments(text) {
   const src = String(text || '');
+  const blocks =
+    typeof scanAnswerBlocks === 'function' ? scanAnswerBlocks(src) : [{ type: 'text', value: src, raw: src }];
   const segments = [];
-  const re = /```\s*mermaid(?:[^\n\r]*)?\r?\n([\s\S]*?)```/gi;
-  let last = 0;
-  let m;
-  while ((m = re.exec(src)) !== null) {
-    if (m.index > last) {
-      segments.push({ type: 'text', value: src.slice(last, m.index) });
+  let buf = [];
+  const flush = () => {
+    if (!buf.length) return;
+    segments.push({ type: 'text', value: buf.join('\n') });
+    buf = [];
+  };
+  for (const block of blocks) {
+    if (block.type === 'fence' && /^mermaid\b/i.test(block.info || '')) {
+      flush();
+      segments.push({ type: 'mermaid', value: String(block.value || '').trim() });
+      continue;
     }
-    segments.push({ type: 'mermaid', value: (m[1] || '').replace(/^\s+|\s+$/g, '') });
-    last = m.index + m[0].length;
+    buf.push(block.raw == null ? block.value : block.raw);
   }
-  if (last < src.length) {
-    segments.push({ type: 'text', value: src.slice(last) });
-  }
+  flush();
   return segments.length ? segments : [{ type: 'text', value: src }];
 }
 
@@ -201,12 +204,23 @@ function sanitizeMermaidCode(raw) {
   return out.join('\n').trim();
 }
 
+/**
+ * 正文里的一段文本：含 Markdown 就渲染成受控 HTML，否则保持纯文本（回答区的纯文本观感）。
+ * @param {HTMLElement} container
+ * @param {string} text
+ */
 function appendTextSegment(container, text) {
   const chunk = String(text || '').replace(/^\s+|\s+$/g, '');
   if (!chunk) return;
   const el = document.createElement('div');
-  el.className = 'msg-answer-text';
-  el.textContent = chunk;
+  if (typeof hasAnswerMarkdown === 'function' && hasAnswerMarkdown(chunk)) {
+    el.className = 'msg-answer-md';
+    el.innerHTML = renderAnswerMarkdownToHtml(chunk);
+    if (typeof bindAnswerMarkdownLinks === 'function') bindAnswerMarkdownLinks(el);
+  } else {
+    el.className = 'msg-answer-text';
+    el.textContent = chunk;
+  }
   container.appendChild(el);
 }
 
@@ -229,15 +243,21 @@ function formatMermaidError(err) {
 
 function appendMermaidFallback(container, code, err) {
   if (!container) return;
+  // 完整错误进控制台（供排查），气泡里只给用户能读懂的一句话 + 原文
+  console.warn('[mermaid] 流程图渲染失败', err, code);
   const wrap = document.createElement('div');
   wrap.className = 'msg-mermaid msg-mermaid-error';
   const title = document.createElement('div');
   title.className = 'msg-mermaid-error-title';
-  title.textContent = `流程图渲染失败：${formatMermaidError(err)}`;
+  title.textContent = '流程图语法有误，已按原文显示';
+  const detail = document.createElement('div');
+  detail.className = 'msg-mermaid-error-detail';
+  detail.textContent = formatMermaidError(err);
   const pre = document.createElement('pre');
   pre.className = 'msg-mermaid-fallback';
   pre.textContent = code;
   wrap.appendChild(title);
+  wrap.appendChild(detail);
   wrap.appendChild(pre);
   container.appendChild(wrap);
 }
@@ -339,17 +359,17 @@ async function renderMermaidDiagram(wrap, code) {
 }
 
 /**
- * 渲染含 mermaid 的 assistant 正文；无 mermaid 时由调用方走 textContent。
+ * 渲染 assistant 正文（Markdown + 顶层 mermaid）。同步返回「是否接管了正文」：
+ * false 表示原文不值得走富文本，调用方用 textContent 直出即可。
  * @param {HTMLElement} answerEl
  * @param {string} content
- * @returns {Promise<boolean>}
+ * @returns {boolean}
  */
-async function renderAssistantAnswerContent(answerEl, content) {
+function renderAssistantAnswerContent(answerEl, content) {
   const text = String(content || '');
-  if (!hasMermaidBlock(text)) return false;
+  if (typeof hasAnswerMarkdown !== 'function' || !hasAnswerMarkdown(text)) return false;
 
-  const segments = splitMermaidBlocks(text);
-  if (!segments.some((s) => s.type === 'mermaid')) return false;
+  const segments = splitAnswerMermaidSegments(text);
 
   answerEl.replaceChildren();
   answerEl.classList.add('msg-answer-rich');
@@ -369,9 +389,10 @@ async function renderAssistantAnswerContent(answerEl, content) {
     pending.push(renderMermaidDiagram(wrap, seg.value));
   }
 
-  await Promise.all(pending);
-  // 显式「正文已落位」信号：收尾跟底窗口据此补最后一次钉底
-  if (typeof nudgeChatFollowSettle === 'function') nudgeChatFollowSettle();
+  // 显式「正文已落位」信号：收尾跟底窗口据此补最后一次钉底（图是异步长高的）
+  void Promise.all(pending).then(() => {
+    if (typeof nudgeChatFollowSettle === 'function') nudgeChatFollowSettle();
+  });
   return true;
 }
 
@@ -596,7 +617,6 @@ function openMermaidLightbox(sourceWrap) {
   closeBtn.focus();
 }
 
-window.hasMermaidBlock = hasMermaidBlock;
 window.renderAssistantAnswerContent = renderAssistantAnswerContent;
 window.initMermaidRender = initMermaidRender;
 window.sanitizeMermaidCode = sanitizeMermaidCode;

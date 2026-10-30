@@ -36,6 +36,7 @@
 | `renderer-chat-nav.js` | 消息导航刻度带（右缘：每条消息一根刻度 / 当前视口高亮 / 悬停摘要 / 点击跳转） | 聊天区右缘导航 |
 | `renderer-thinking-trace-dom.js` | 思考区 DOM / 轮次块（折叠思考，旁白+工具在折叠外） | 思考过程 |
 | `renderer-thinking-trace.js` | 流式 patch / 合成回退 | 思考区更新 |
+| `renderer-answer-md.js` | 回答区 Markdown 渲染（无依赖）：顶层围栏扫描 / GFM 表格 / 标题 / 列表 / 行内语法 / 链接点击走 `host.open_url`。单一来源，`renderer-mermaid.js` 复用它挑 mermaid 块 | 正式回复排版 |
 | `renderer-subagent-panel.js` | 右侧面板「子代理」页：本次运行的子 Agent 全文思考（复用思考区卡片渲染原语） | 子代理详情 |
 | `renderer-artifacts-session.js` | 会话产物桶 / UI batch | 产物会话态 |
 | `renderer-artifacts-browse.js` | 工作区浏览路径 | 产物目录 |

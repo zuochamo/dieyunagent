@@ -2771,6 +2771,110 @@ body.composer-resizing {
   white-space: pre-wrap;
   margin: 0.35em 0;
 }
+/* 回答区 Markdown（结构由 renderer-answer-md.js 生成，样式只此一份） */
+.msg-answer-md {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+.msg-answer-md > :first-child {
+  margin-top: 0;
+}
+.msg-answer-md > :last-child {
+  margin-bottom: 0;
+}
+.msg-md-h {
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.35;
+}
+h1.msg-md-h {
+  font-size: 1.35em;
+}
+h2.msg-md-h {
+  font-size: 1.22em;
+}
+h3.msg-md-h {
+  font-size: 1.1em;
+}
+.msg-md-p {
+  margin: 0.45em 0;
+}
+.msg-md-hr {
+  margin: 0.8em 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+.msg-md-list {
+  margin: 0.45em 0;
+  padding-left: 1.4em;
+}
+.msg-md-list li {
+  margin: 0.15em 0;
+}
+.msg-md-quote {
+  margin: 0.5em 0;
+  padding: 0.2em 0 0.2em 0.8em;
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
+}
+.msg-md-pre {
+  margin: 0.6em 0;
+  padding: 0.7em 0.85em;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.12);
+  font-size: 0.92em;
+}
+.msg-md-pre code {
+  font-family: ui-monospace, Consolas, Menlo, monospace;
+  white-space: pre;
+}
+.msg-answer-md code {
+  font-family: ui-monospace, Consolas, Menlo, monospace;
+  background: rgba(127, 127, 127, 0.15);
+  padding: 0.1em 0.32em;
+  border-radius: 4px;
+}
+.msg-answer-md blockquote code,
+.msg-md-pre code {
+  background: transparent;
+  padding: 0;
+}
+.msg-md-link {
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+/* 表格：横向滚动收在气泡内（超宽表格不撑破布局、不产生整屏横向滚动） */
+.msg-md-table-wrap {
+  margin: 0.6em 0;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+table.msg-md-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.94em;
+}
+table.msg-md-table th,
+table.msg-md-table td {
+  padding: 0.42em 0.6em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  vertical-align: top;
+}
+table.msg-md-table th {
+  background: rgba(128, 128, 128, 0.1);
+  color: var(--text-dim);
+  font-weight: 600;
+  text-align: left;
+}
+table.msg-md-table tbody tr:last-child td {
+  border-bottom: none;
+}
 .msg-mermaid {
   position: relative;
   margin: 0.65em 0;
@@ -2942,6 +3046,15 @@ body.composer-resizing {
   font-size: 12px;
   color: var(--text-mute);
   margin-bottom: 0.35em;
+}
+/* Mermaid 内部报错只留一行给人看，完整堆栈在控制台 */
+.msg-mermaid-error-detail {
+  font-size: 11px;
+  color: var(--text-mute);
+  opacity: 0.8;
+  margin-bottom: 0.35em;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .msg-mermaid-fallback {
   margin: 0;

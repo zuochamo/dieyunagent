@@ -12,19 +12,23 @@
         "src/renderer/renderer-chat-nav.js",
         "src/renderer/renderer-thinking-trace-dom.js",
         "src/renderer/renderer-thinking-trace.js",
+        "src/renderer/renderer-answer-md.js",
+        "src/renderer/renderer-mermaid.js",
         "src/renderer/renderer-subagent-panel.js",
         "src/agent/agent-round-text.js"
       ],
       "owns": [
         "Chat bubbles",
         "thinking trace UI",
+        "answer bubble markdown rendering (renderer-answer-md.js)",
         "subagent detail panel",
         "mobile trace push",
         "message navigation rail"
       ],
       "tests": [
         "check:renderer",
-        "test:agent-round-text"
+        "test:agent-round-text",
+        "test:unit"
       ],
       "docs": [
         "docs/AGENT-DEV.md"
@@ -955,6 +959,21 @@
       "prefix": "src/renderer/renderer-thinking-trace.js",
       "tests": [
         "test:agent-round-text",
+        "test:unit",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-answer-md.js",
+      "tests": [
+        "test:unit",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-mermaid.js",
+      "tests": [
+        "test:unit",
         "check:renderer"
       ]
     },

@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText, shouldShowTraceTitle */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText, shouldShowTraceTitle */
 'use strict';
 
 function patchThinkingTrace(
@@ -388,13 +388,11 @@ function renderAssistantBubbleContent(
       const answer = document.createElement('div');
       answer.className = 'msg-answer';
       div.appendChild(answer);
-      if (typeof renderAssistantAnswerContent === 'function' && hasMermaidBlock(content)) {
-        void renderAssistantAnswerContent(answer, content).then((rendered) => {
-          if (!rendered) answer.textContent = content;
-        });
-      } else {
+      // 复制/导出读 rawContent（渲染成 HTML 后 textContent 会丢语法）
+      answer.dataset.rawContent = content;
+      // 富文本（Markdown / 顶层 mermaid）由一个入口判定；不接管就用纯文本直出
+      if (typeof renderAssistantAnswerContent !== 'function' || !renderAssistantAnswerContent(answer, content)) {
         answer.textContent = content;
-        if (content) answer.dataset.rawContent = content;
       }
     }
     if (hitRoundLimit) {

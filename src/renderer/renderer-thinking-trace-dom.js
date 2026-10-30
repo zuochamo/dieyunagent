@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, hasMermaidBlock, rollbackToBatchCheckpoint, showAgentToast, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow */
 'use strict';
 
 /** 工具行的稳定签名（不含思考正文） */
