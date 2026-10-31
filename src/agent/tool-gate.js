@@ -69,7 +69,10 @@ function wrapStructuredError(failure, extra = {}) {
  * 归一本身幂等，但"归一发生在哪"决定了别名工具（write_file / edit / str_replace_editor …）
  * 会不会在某一层被跳过判定 —— 所以只留一个入口。
  *
- * @param {{ name: string, args?: object, session?: object, harness?: object, extraAfterHooks?: Array<object> }} desc
+ * @param {{ name: string, args?: object, session?: object, harness?: object, permissions?: object,
+ *           extraAfterHooks?: Array<object> }} desc
+ *   `permissions` 是调用方手上已有的权限快照（Main 的 `gateway.getPermissions()`）；
+ *   给不出就看关卡自己按 userDataPath 读同一份 store，两条路读的是**同一个文件**。
  */
 function createToolCall(desc) {
   const d = desc || {};
@@ -85,6 +88,8 @@ function createToolCall(desc) {
     args: norm.args,
     /** ToolHarnessSession 实例：关卡通过它拿会话 ctx / 指纹表 / 落盘序号 */
     harness: d.harness || null,
+    /** 调用方已有的权限快照（缺省时关卡读 host-permissions.json，同一份 store） */
+    permissions: d.permissions && typeof d.permissions === 'object' ? d.permissions : null,
     /** 外层追加的 after 关卡（sanitize / 写味提示 / 视觉吸收…） */
     extraAfterHooks: Array.isArray(d.extraAfterHooks) ? d.extraAfterHooks.slice() : [],
     startedAt: Date.now(),

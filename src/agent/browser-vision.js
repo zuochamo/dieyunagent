@@ -289,7 +289,6 @@ module.exports = {
   SOURCE_MCP,
   SOURCE_COMPUTER,
   SOURCE_CAMERA,
-  KNOWN_SOURCES,
   MAX_SHOTS_PER_RUN,
   MAX_BASE64_CHARS,
   resolveVisionLimits,

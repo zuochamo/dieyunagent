@@ -335,6 +335,7 @@
       ],
       "tests": [
         "test:mobile",
+        "test:mobile-camera",
         "test:agent-run-events"
       ],
       "docs": [
@@ -1527,14 +1528,14 @@
       "test:fs-edit",
       "test:delegate-batch",
       "test:mobile",
+      "test:mobile-camera",
       "test:peer",
       "test:write-smell-hints",
       "test:worktree",
       "test:scm",
       "lint:agent",
       "check:js",
-      "check:renderer",
-      "test:mobile-camera"
+      "check:renderer"
     ],
     "agent-full": [
       "test:agent-limits",
@@ -1572,6 +1573,7 @@
       "test:fs-edit",
       "test:delegate-batch",
       "test:mobile",
+      "test:mobile-camera",
       "test:peer",
       "test:write-smell-hints",
       "test:worktree",
@@ -1580,8 +1582,7 @@
       "test:rust-planner-smoke",
       "test:rust-agent-loop-smoke",
       "check:js",
-      "check:renderer",
-      "test:mobile-camera"
+      "check:renderer"
     ]
   }
 }

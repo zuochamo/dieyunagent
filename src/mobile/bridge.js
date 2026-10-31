@@ -376,4 +376,4 @@ class MobileBridge {
   }
 }
 
-module.exports = { MobileBridge, DEFAULT_MOBILE_PORT, DEFAULT_REQUEST_TIMEOUT_MS, KNOWN_CAPABILITIES };
+module.exports = { MobileBridge, DEFAULT_MOBILE_PORT };

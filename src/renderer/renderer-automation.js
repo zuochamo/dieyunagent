@@ -866,12 +866,9 @@ async function populateAutomationSkillSelect(selectedId) {
 function listAutomationModelOptions() {
   const out = [];
   const seen = new Set();
-  // 语音模型（转写 speech / 合成 tts）不接受 chat 请求，选进计划必然失败；
-  // 模态判据与 Composer 同源（ModelCapabilities.isNonChatModality）
-  const isNonChat = (kind) =>
-    typeof window !== 'undefined' && window.ModelCapabilities
-      ? window.ModelCapabilities.isNonChatModality(kind) === true
-      : kind === 'speech';
+  // 语音模型（转写 speech / 合成 tts）不接受 chat 请求，选进计划必然失败。
+  // 判据只有一份：`ModelCapabilities.isNonChatModality`（与 Composer 同一处，勿在这里再列一遍模态名）。
+  const isNonChat = (kind) => window.ModelCapabilities?.isNonChatModality?.(kind) === true;
   const modalityOf = (supplier, modelId) =>
     typeof window !== 'undefined' && window.ModelCapabilities
       ? window.ModelCapabilities.getSupplierModelModality(supplier, modelId)

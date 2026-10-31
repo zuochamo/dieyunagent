@@ -968,6 +968,9 @@ function createMainToolBridge(deps) {
       name,
       args,
       harness,
+      // 权限快照由 Main 直接给（这里 `gateway` 就是那份 store 的主人），关卡不必每次调用再读盘；
+      // 拿不到（gateway 未起）时传 null，关卡自己按 userDataPath 读**同一个** host-permissions.json。
+      permissions: gateway && typeof gateway.getPermissions === 'function' ? gateway.getPermissions() : null,
       // 外层追加的 after 关卡：与 harness 自带的遥测/落盘共用一个顺序机制，
       // 位置即语义（落盘 → 视觉吸收 → 截图暂存 → 出站净化 → 写味提示）。
       extraAfterHooks: [

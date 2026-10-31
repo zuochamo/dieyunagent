@@ -356,8 +356,6 @@ module.exports = {
   pickSupplierModelId,
   isSupplierModelEnabled,
   supplierModelIds,
-  isNonChatModality,
-  isTextCustomModel,
   isUsableApiConfig,
   asConfig,
   requestOptionsFrom,
