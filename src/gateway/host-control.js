@@ -7,6 +7,7 @@ const os = require('os');
 
 const { attachExecSettlement } = require('../exec-settlement');
 const { EXEC_OUTPUT_MAX_CHARS, clampExecTimeoutMs } = require('../exec-limits');
+const { isForeignPosixPath } = require('../workspace/target');
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tif', '.tiff']);
 
@@ -1116,6 +1117,37 @@ function spawnDetachedProcess(command, opts = {}) {
 }
 
 /**
+ * Windows 上以 `/` 开头的输入有两种可能的意图：工作区相对路径（模型常写 `/src/x.js`），
+ * 或者 daemon 侧的绝对路径（远端会话自己的 worktree）。以前一律按前者拼到 cwd 的盘符上，
+ * 于是第二种意图被静默改写成 `E:\run\media\…` 这种**不存在**的本地路径，后续索引、检索、
+ * 读文件都照着这个幻觉路径答（症状是 INVALID_WORKSPACE / ENOENT / 0 命中）。
+ *
+ * 只有一条硬证据能区分「猜错了」和「猜对了但文件还没建」：拼出来的位置连父目录都不存在。
+ * 命中这条就不许再往下走 —— 报错比返回一个幻觉路径诚实（SSH-MODULE-REVIEW S14）。
+ */
+function assertForeignPathInterpretable(rawInput, resolved) {
+  for (const candidate of [resolved, path.dirname(resolved)]) {
+    try {
+      if (fs.existsSync(candidate)) return;
+    } catch {
+      /* 读不到 = 当作不存在，继续判 */
+    }
+  }
+  const err = new Error(
+    `无法把「${rawInput}」解析成本机路径：Windows 上以 / 开头的路径不是本地绝对路径，` +
+      `按工作区相对路径拼出来是「${resolved}」，但那里连目录都不存在。` +
+      '它更像远端会话里的路径 —— 那种路径必须带该会话的工作区（ssh://user@host/…）才有人认；' +
+      '要操作本机工作区里的文件，请给相对路径。'
+  );
+  err.code = 'REMOTE_PATH_AS_LOCAL';
+  err.retryable = false;
+  err.suggestedFix = '不要重试；改用工作区相对路径，或确认这条调用带着远端会话的 ssh:// 工作区。';
+  err.requestedPath = String(rawInput);
+  err.resolvedPath = resolved;
+  throw err;
+}
+
+/**
  * 规范化模型传入的路径，避免 dir + "绝对路径" 拼接错误。
  * @param {string} filePath
  * @param {string | null | undefined} defaultCwd
@@ -1133,10 +1165,13 @@ function normalizeFilePathInput(filePath, defaultCwd) {
     p = absMatches[absMatches.length - 1].trim();
   }
   p = p.replace(/^["']+|["']+$/g, '').trim();
+  const foreign = isForeignPosixPath(p);
   if (!path.isAbsolute(p) && defaultCwd) {
     p = path.join(defaultCwd, p);
   }
-  return path.resolve(p);
+  const resolved = path.resolve(p);
+  if (foreign) assertForeignPathInterpretable(String(filePath || '').trim(), resolved);
+  return resolved;
 }
 
 function printImageWindows(absPath) {

@@ -35,6 +35,26 @@ function isRemoteWorkspacePath(input) {
   return /^ssh:/i.test(String(input || '').trim());
 }
 
+/**
+ * 「这是 daemon 侧的 POSIX 绝对路径」——在 Windows 上它**不可能是**本地工作区路径。
+ *
+ * 为什么必须有这条判据（不是防御式编程，是一次真实事故的根因）：win32 上
+ * `path.isAbsolute('/run/media/x')` 返回 true，而 `path.resolve` 会把盘符沿用 cwd 得到
+ * `E:\run\media\x`。于是一个远端会话的 worktree 路径被当成本地路径，一路「成功」地指向
+ * 一个不存在的位置：索引报 INVALID_WORKSPACE、读文件 ENOENT、grep 给 0 命中
+ * （最后这个最像「仓库里真的没有」）。
+ *
+ * 判据只在 win32 成立：非 Windows 上 `/srv/app` 本来就是合法的本地绝对路径，同一条
+ * 字符串在那里没有歧义。`//host/share` 是 UNC，本就可达，不算「外来路径」。
+ */
+function isForeignPosixPath(input) {
+  if (process.platform !== 'win32') return false;
+  const s = String(input == null ? '' : input).trim();
+  if (!s.startsWith('/')) return false;
+  if (s.startsWith('//')) return false;
+  return true;
+}
+
 function parseWorkspaceInput(input) {
   if (input == null || input === '') return null;
   if (typeof input === 'object' && input.kind === 'ssh') {
@@ -208,5 +228,6 @@ module.exports = {
   sshTargetKey,
   sshGatewayKey,
   isRemoteWorkspacePath,
+  isForeignPosixPath,
   isRemoteWorkspaceKind
 };

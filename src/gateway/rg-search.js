@@ -683,6 +683,57 @@ async function withOversizeHint(result, absRoot, searchPath) {
   };
 }
 
+/**
+ * 搜索根必须真的存在——否则「没搜到」和「没搜」在返回值里长得一模一样。
+ *
+ * 为什么不能省：rg 找不到路径时退出码是 2，`grepWorkspace` 随即退到 JS 兜底；而兜底的
+ * `walkFiles` 读不到目录只是返回空列表，于是整条链路以 `{ok:true, matches:[], count:0}`
+ * 收尾。模型据此得出「仓库里没有这段代码」并放弃检索，真实原因却是**根不对**
+ * （远端会话的路径被拼成本机盘符等，见 SSH-MODULE-REVIEW S14）。
+ *
+ * 只判「根是否存在、是不是目录」：这是唯一能确定的证据，不做路径猜测。
+ *
+ * @param {string} absRoot 已 resolve 的搜索根
+ * @param {string} searchPath 已 resolve 的搜索范围（可能等于根，也可能是文件）
+ * @returns {Promise<null | { ok: false, errorCode: string, error: string, root: string }>}
+ */
+async function searchRootProblem(absRoot, searchPath) {
+  let rootStat = null;
+  try {
+    rootStat = await fsp.stat(absRoot);
+  } catch {
+    rootStat = null;
+  }
+  if (!rootStat || !rootStat.isDirectory()) {
+    return {
+      ok: false,
+      errorCode: 'SEARCH_ROOT_UNREADABLE',
+      error:
+        `搜索根不存在或不是目录：${absRoot}。这不是「没有匹配」，而是一个文件都没搜到 —— ` +
+        '确认这个路径在本机真的存在；远端会话的路径必须带 ssh:// 工作区作用域，' +
+        '否则会被拼成本机盘符下的同名路径。',
+      root: absRoot
+    };
+  }
+  if (searchPath && searchPath !== absRoot) {
+    let targetStat = null;
+    try {
+      targetStat = await fsp.stat(searchPath);
+    } catch {
+      targetStat = null;
+    }
+    if (!targetStat) {
+      return {
+        ok: false,
+        errorCode: 'SEARCH_ROOT_UNREADABLE',
+        error: `搜索范围不存在：${searchPath}（工作区 ${absRoot} 下）。这不是「没有匹配」。`,
+        root: searchPath
+      };
+    }
+  }
+  return null;
+}
+
 async function grepWorkspace(root, opts = {}) {
   const absRoot = path.resolve(root);
   const pattern = String(opts.pattern || '');
@@ -700,6 +751,9 @@ async function grepWorkspace(root, opts = {}) {
   if (searchKey !== rootKey && !searchKey.startsWith(rootKey + path.sep.toLowerCase())) {
     return { ok: false, errorCode: 'PATH_OUTSIDE', error: 'path 必须在工作空间内' };
   }
+  // 「根不对」必须在两条搜索通道之前拦住：它们都会把「读不到」折成「0 命中」。
+  const rootProblem = await searchRootProblem(absRoot, searchPath);
+  if (rootProblem) return rootProblem;
 
   // 命中判定 + 类型/跨行过滤，两种模式共用
   const common = [];
@@ -803,6 +857,8 @@ async function globWorkspace(root, opts = {}) {
     return { ok: false, errorCode: 'MISSING_PATTERN', error: 'pattern 必填' };
   }
   const limit = clampLimit(opts.maxResults, DEFAULT_GLOB_LIMIT, MAX_GLOB_LIMIT);
+  const rootProblem = await searchRootProblem(absRoot);
+  if (rootProblem) return rootProblem;
   const args = [
     '--files',
     '--no-config',
