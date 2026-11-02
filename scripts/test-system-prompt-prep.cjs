@@ -73,7 +73,17 @@ assert(
   extractCodebasePathsFromBlock('### 1. src/a.ts:1-2\nfoo').includes('src/a.ts'),
   'extract codebase path'
 );
-assert(formatCodebaseBlock('q', { results: [] }) === '', 'empty codebase search is silent');
+// 0 命中不再静默：未建向量时的 0 命中要说「改用 grep」，只有「有向量且真无命中」才返回空
+// （旧口径 `results: []` 一律返回 ''，等于让模型把「没建向量」当成「没有这段代码」）。
+assert(
+  formatCodebaseBlock('q', { results: [], vectorSearch: false }).includes('未建向量'),
+  'empty lexical-only search must explain the degraded channel'
+);
+assert(
+  formatCodebaseBlock('q', { results: [], needsIndex: true }).includes('可检索的代码索引'),
+  'empty search without index must say the index is missing'
+);
+assert(formatCodebaseBlock('q', { results: [], vectorSearch: true }) === '', 'empty vector search is silent');
 
 async function runPrep() {
   const calls = [];

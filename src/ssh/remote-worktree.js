@@ -28,6 +28,11 @@ const MARK_NOT_GIT = 'WT_NOT_GIT';
 const MARK_ADD_FAILED = 'WT_ADD_FAILED';
 const MARK_BAD_BASE = 'WT_BAD_BASE';
 
+const MARK_PRUNED = 'WT_PRUNED';
+const MARK_KEPT_DIRTY = 'WT_KEPT_DIRTY';
+const MARK_PRUNE_END = 'WT_PRUNE_END';
+const MARK_PRUNE_NOT_GIT = 'WT_PRUNE_NOT_GIT';
+
 /** @param {string} sessionId */
 function remoteWorktreeKey(sessionId) {
   const sid = String(sessionId || '').trim();
@@ -147,6 +152,82 @@ async function ensureRemoteWorktree(sshManager, opts) {
   return { ok: true, path: wtPath, branch, reused: parsed.reused, reason: parsed.reason };
 }
 
+/**
+ * 生成「回收过期会话 worktree」的脚本。
+ *
+ * 每会话一份 worktree、里面还有一份索引库（实测 19–38 MB / 份），不回收就是无限增长。
+ * 三条安全线：
+ *   1. **只删 `keepKeys` 之外的** —— 「哪份会话还活着」在 Main 判定（会话表是唯一来源），
+ *      远端不猜 mtime：只读的会话几天不改文件，按 mtime 会把正在用的 worktree 当旧的删掉；
+ *   2. 只认 `sess-*` 这种我们自己命名的目录形状，别人的目录一律不碰；
+ *   3. 有未提交改动的 worktree **跳过并报出来** —— 那是会话里的真改动，不是缓存。
+ *
+ * 分支 `dieyun/agent-<key>-main` 不删：它可能装着会话的提交，删目录不等于丢它们。
+ * @param {{ repoPath: string, keepKeys?: string[] }} opts
+ * @returns {string[]}
+ */
+function buildPruneWorktreesScript(opts) {
+  const repoQ = shellQuoteSingle(normalizeRemotePath(opts.repoPath));
+  const keep = (opts.keepKeys || []).filter((k) => typeof k === 'string' && k);
+  // 逗号包住做整词匹配，否则 `sess-ab` 会命中 `sess-abc`
+  const keepQ = shellQuoteSingle(keep.length ? `,${keep.join(',')},` : ',');
+  return [
+    `REPO=${repoQ}`,
+    `KEEP=${keepQ}`,
+    'if ! git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then echo ' + MARK_PRUNE_NOT_GIT + '; exit 3; fi',
+    `ROOT="$REPO/${WORKTREES_DIR}"`,
+    `if ! test -d "$ROOT"; then echo ${MARK_PRUNE_END}; exit 0; fi`,
+    'for d in "$ROOT"/sess-*; do',
+    '  test -d "$d" || continue',
+    '  key=$(basename "$d")',
+    '  case "$KEEP" in *",$key,"*) continue;; esac',
+    '  WT="$d/main"',
+    // 只有真的是一份 worktree（`.git` 是文件）才谈得上「未提交改动」。
+    // 少了这个前提，`git -C` 会顺着父仓库往上找到外层的 git，把 worktrees 目录里
+    // 任意一个未跟踪文件当成脏，于是删不掉的残骸永远留在这里。
+    '  if test -f "$WT/.git" && [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then',
+    `    echo "${MARK_KEPT_DIRTY} $key"; continue`,
+    '  fi',
+    '  git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1 || rm -rf "$WT"',
+    '  rm -rf "$d"',
+    `  echo "${MARK_PRUNED} $key"`,
+    'done',
+    'git -C "$REPO" worktree prune >/dev/null 2>&1',
+    `echo ${MARK_PRUNE_END}`
+  ];
+}
+
+/**
+ * @param {string} stdout
+ * @returns {{ ok: boolean, reason: string, pruned: string[], keptDirty: string[] }}
+ */
+function parsePruneResult(stdout) {
+  const text = String(stdout || '');
+  const pruned = [];
+  const keptDirty = [];
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (t.startsWith(`${MARK_PRUNED} `)) pruned.push(t.slice(MARK_PRUNED.length + 1).trim());
+    else if (t.startsWith(`${MARK_KEPT_DIRTY} `)) {
+      keptDirty.push(t.slice(MARK_KEPT_DIRTY.length + 1).trim());
+    }
+  }
+  const notGit = text.includes(MARK_PRUNE_NOT_GIT);
+  return { ok: !notGit, reason: notGit ? MARK_NOT_GIT : '', pruned, keptDirty };
+}
+
+/**
+ * 回收远端过期会话 worktree（幂等）。
+ * @param {{ execScript: (script: string, timeoutMs?: number) => Promise<{ code?: number, stdout?: string, stderr?: string }> }} sshManager
+ * @param {{ repoPath: string, keepKeys?: string[], timeoutMs?: number }} opts
+ */
+async function pruneRemoteWorktrees(sshManager, opts) {
+  const repoPath = normalizeRemotePath(opts.repoPath);
+  const script = buildPruneWorktreesScript({ repoPath, keepKeys: opts.keepKeys }).join('\n');
+  const res = await sshManager.execScript(script, opts.timeoutMs || 120000);
+  return parsePruneResult(res && res.stdout);
+}
+
 module.exports = {
   WORKTREES_DIR,
   SESSION_ROLE_ID,
@@ -156,5 +237,8 @@ module.exports = {
   repoRemotePathOf,
   buildEnsureWorktreeScript,
   parseEnsureWorktreeResult,
-  ensureRemoteWorktree
+  ensureRemoteWorktree,
+  buildPruneWorktreesScript,
+  parsePruneResult,
+  pruneRemoteWorktrees
 };

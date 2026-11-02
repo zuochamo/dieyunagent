@@ -219,11 +219,16 @@ function isRemoteSessionWorkspacePath(ws) {
 
 async function syncSessionRemoteLease(sessionId, workspacePath, active) {
   const api = window.diecloud;
-  if (!api?.setSessionRemoteLease || !isRemoteSessionWorkspacePath(workspacePath)) return;
+  if (!api?.setSessionRemoteLease || !isRemoteSessionWorkspacePath(workspacePath)) return '';
   try {
-    await api.setSessionRemoteLease({ sessionId, active: !!active, workspacePath });
+    const res = await api.setSessionRemoteLease({ sessionId, active: !!active, workspacePath });
+    // Main 返回**租约生效后**的会话工作区（SSH 会话会被切进自己的 worktree）。
+    // 调用方必须采用它：租约前那条路径是「仓库根」，拿它去查索引会得到另一份 index.sqlite。
+    const effective = res && res.workspacePath != null ? String(res.workspacePath).trim() : '';
+    return effective || '';
   } catch (e) {
     console.warn(e);
+    return '';
   }
 }
 

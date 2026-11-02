@@ -1,6 +1,7 @@
 'use strict';
 
 const { createSessionRemoteTransport } = require('../src/session/session-remote-transport');
+const { remoteWorktreePath } = require('../src/ssh/remote-worktree');
 
 function testRemoteAgentInfoScopedToSession() {
   const targetA = { kind: 'ssh', host: 'h1', port: 22, username: 'u', remotePath: '/proj-a' };
@@ -462,6 +463,54 @@ async function testForeignRepoGatewayEnsureDoesNotHijackOtherSession() {
   console.log('ok foreign-repo gateway ensure cannot hijack another session');
 }
 
+/**
+ * 租约必须回**生效后**的会话工作区：SSH 会话会被切进自己的 worktree，渲染端若继续用
+ * 租约前的仓库根去查索引，就会撞上 `WORKSPACE_SCOPE_MISMATCH`（两份 index.sqlite）。
+ */
+async function testLeaseReturnsEffectiveWorktreeWorkspace() {
+  const repo = '/srv/proj';
+  const target = { kind: 'ssh', host: 'h1', port: 22, username: 'u', remotePath: repo };
+  const expected = `ssh://u@h1${remoteWorktreePath(repo, 'sess-a')}`;
+  const sshManager = {
+    status: () => ({ connected: true }),
+    async execScript() {
+      return { code: 0, stdout: 'WT_CREATED\n', stderr: '' };
+    }
+  };
+  const writes = [];
+  const transport = createSessionRemoteTransport({
+    localGateway: {
+      activeSessionId: 'sess-a',
+      getSessionWorkspaceTarget: () => target,
+      setSessionWorkspaceContext: (sid, ws) => writes.push([sid, ws]),
+      invokeRpc: async () => ({})
+    },
+    sshPool: {
+      acquire: async () => {},
+      release: () => {},
+      isConnected: () => true,
+      getManagerForTarget: () => sshManager,
+      getConnectedManager: () => sshManager
+    },
+    remoteGatewayPool: { releaseForTarget: () => {} },
+    sshFacade: null,
+    sshCredentialsStore: null,
+    tryAutoReconnectSsh: null,
+    buildRemoteGatewayPackContext: async () => ({}),
+    invalidateRemoteAgentClient: () => {}
+  });
+
+  const leased = await transport.setSessionRemoteLease('sess-a', true, target);
+  if (leased !== expected) {
+    throw new Error(`租约应回 worktree 工作区，got ${JSON.stringify(leased)} / want ${expected}`);
+  }
+  const released = await transport.setSessionRemoteLease('sess-a', false, target);
+  if (released !== '') {
+    throw new Error(`释放后不该再给工作区，got ${JSON.stringify(released)}`);
+  }
+  console.log('ok lease returns effective worktree workspace');
+}
+
 async function main() {
   testRemoteAgentInfoScopedToSession();
   await testRemoteLeaseKeepsTransportOnLocalSwitch();
@@ -472,6 +521,7 @@ async function main() {
   await testParallelSameHostDifferentPathLeases();
   await testLeaseHoldIsIdempotentAndDropForce();
   await testForeignRepoGatewayEnsureDoesNotHijackOtherSession();
+  await testLeaseReturnsEffectiveWorktreeWorkspace();
   console.log('\nsession-remote-transport: ALL OK');
 }
 

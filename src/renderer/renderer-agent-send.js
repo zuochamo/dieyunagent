@@ -338,7 +338,18 @@ async function resolveSendWorkspace(state) {
           p = await resolveSessionWorkspacePath(runSessionId);
         }
         if (isRemoteSessionWorkspacePath(p)) {
-          await syncSessionRemoteLease(runSessionId, p, true);
+          const leased =
+            typeof syncSessionRemoteLease === 'function'
+              ? await syncSessionRemoteLease(runSessionId, p, true)
+              : '';
+          // 租约把会话切进 worktree 时，p 已经是「仓库根」的旧值：整轮都得以 Main 的生效路径为准，
+          // 否则索引/记忆/沙箱各自对着不同的根（症状：面板「索引根不一致 · 状态暂不可用」）。
+          if (leased && leased !== p) {
+            p = leased;
+            if (typeof rememberSessionWorkspacePath === 'function') {
+              rememberSessionWorkspacePath(runSessionId, leased);
+            }
+          }
         }
         return p;
       })(),

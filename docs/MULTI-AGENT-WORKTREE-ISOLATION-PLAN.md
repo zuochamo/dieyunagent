@@ -215,12 +215,65 @@ fuser -v ~/repo/.dieyun/worktrees/*/main/.dieyun/index.sqlite
 
 界面上判定：会话工作区路径会变成 `…/.dieyun/worktrees/sess-xxxxxxxx/main` —— 这就是「这个会话在自己那份副本里干活」的证据。
 
+### 租约必须回「生效后」的工作区（2026-10-31）
+
+worktree 是**在租约里**建的（`remote:session-lease` → `ensureSessionWorktree`），而渲染端在租约**之前**
+就已经取好了会话工作区（当时还是仓库根）。两边差一条路径，症状是索引/图面板
+
+```
+索引根不一致——远端 Agent 连接声明的根是「…/worktrees/sess-xxx/main」，请求的根是「…/repo」
+```
+
+（两份 `index.sqlite`，`WORKSPACE_SCOPE_MISMATCH`）—— 而且这一轮**不会去建库**，于是「面板永远未建立」
++ `codebase_search` 0 次。真机实测：`dieyuntools` 的 10 个 worktree 里 0 份 `index.sqlite`。
+
+约定：**`setSessionRemoteLease` 返回生效后的会话工作区**，调用方必须采用它
+（`src/main/ipc/workspace-remote.js` → `src/renderer/renderer-agent-loop.js` →
+`src/renderer/renderer-agent-send.js:resolveSendWorkspace`，并写回渲染端缓存）。
+渲染端不许拿「租约前的路径」当这一轮的作用域 —— 那正是 `WORKSPACE_SCOPE_MISMATCH` 的制造方式。
+
+### 会话 worktree 的回收规则（2026-10-31 实施）
+
+乙案下每会话一份远端 worktree + 一份 `index.sqlite`（真机实测 19–38 MB / 份），而**远端会话
+worktree 之前没有任何回收路径**：`enforceWorktreeCleanupPolicy` 是本地文件系统策略（拿远端仓库根
+去扫，只会看到本机不存在的路径），`worktree:remove` 只服务 planner 的 worktree。结果是
+`…/.dieyun/worktrees/` 随会话数无限增长（真机一次测得 13 份 ≈ 300 MB）。
+
+规则（三处单一来源）：
+
+| 事项 | 唯一来源 |
+|---|---|
+| 哪份会话还活着 | `memory.sessions_list` 的 `updatedAt` + 在途租约（`sessionLeases`）—— **不猜远端 mtime**（只读的会话几天不写文件，按 mtime 会删掉正在用的那份） |
+| 保留期 | `src/session/session-worktree.js:SESSION_WORKTREE_KEEP_DAYS = 7` |
+| 怎么删干净 | `src/ssh/remote-worktree.js:buildPruneWorktreesScript` / `pruneRemoteWorktrees` |
+
+- **触发点**：新建 worktree 时（`ensureSessionWorktree` 拿到 `WT_CREATED`）。目录数就是在那时增长的，
+  所以不需要定时器、不需要额外状态；复用分支（`WT_REUSED`）不扫。
+- **保留**：当前会话 + 正在租用端点的会话 + 保留期内活跃过的会话，一份都不动。
+  **归档不影响保留期**：归档是侧栏整理动作，不是「这份副本可以立刻删」，规则只有「最后活跃时间」一个判据
+  （首跑时按 `archived:false` 单列表判断，把 10 份刚归档会话的副本直接收掉了 —— 见下方「首跑记录」）。
+- **保护**：只碰 `sess-*` 形状的目录；`main/.git` 是文件（确实是 worktree）且 `git status --porcelain`
+  有输出时**跳过**并记日志 —— 那是会话里未提交的改动，不是缓存。
+- **分支不删**：`dieyun/agent-<key>-main` 可能装着会话的提交，删目录不等于丢它们。
+- **已知边界**：会话表按 `updatedAt DESC` 取两份各 100 条（core 上限）；两份都没出现的会话，
+  一定比第 100 个更老，正是该回收的那批。
+
+**首跑记录（2026-10-31 17:24，真机）**：新建会话触发第一次扫描，回收 11 份
+（`sess-zzsentinel` 哨兵 + 10 份归档会话副本），另有 5 份因有未提交改动被保留。
+事后核对：被删的 10 份删前都是 clean（脚本的脏检查保证了这点），对应分支 9/10 仍在库里，
+第 10 份本就是 detached 无分支 —— **没有内容丢失**，重开这些会话会按 `WT_CREATED` 重建副本（~2s）。
+那次暴露的真问题不是「删太多」而是「判据漏了归档」：`sessions_list{archived:false}` 只给了活跃会话，
+归档会话于是全被当成「表里没有」而回收。已改成两份列表都取、归档只当普通会话看待。
+
+真机演练（2026-10-31，dieyuntools，19 份 worktree）：干净 worktree → `WT_PRUNED`，且
+`git worktree list` 同步消失；带未提交改动 → `WT_KEPT_DIRTY` 保留；19 份真实会话 worktree 一份没动。
+
 ## 11. 已定决策（2026-10-28）
 
 | # | 问题 | 决策 | 依据 |
 |---|---|---|---|
 | 1 | 远端 workspace 是 git 仓库吗 | **是**。SSH 工作区本身就在远端，与本地无关 | 用户确认 |
-| 2 | worktree 生命周期 | **会话结束不自动删**。改动先提交到该 worktree 的分支（存档），之后由既有 `enforceWorktreeCleanupPolicy`（maxRuns / maxSizeGb，设置页已存在）淘汰 | 删也不丢内容的前提已被 Planner 验证；不新增生命周期状态机 |
+| 2 | worktree 生命周期 | **会话结束不自动删**。改动先提交到该 worktree 的分支（存档），之后由既有 `enforceWorktreeCleanupPolicy`（maxRuns / maxSizeGb，设置页已存在）淘汰 | 删也不丢内容的前提已被 Planner 验证；不新增生命周期状态机。**2026-10-31 修正**：`enforceWorktreeCleanupPolicy` 是本地文件系统策略，压根覆盖不到远端会话 worktree（实测无限增长），远端改由 `SESSION_WORKTREE_KEEP_DAYS` 保留期规则回收，见 §10 |
 | 3 | 分支 / 目录命名 | 目录 `.dieyun/worktrees/sess-<会话id短hash>/main`，分支 `dieyun/agent-sess-<会话id短hash>-main` | 与 `createAgentWorktree(repoPath, {runId, roleId})` 同一套规则：runId 塞 `sess-<hash8>`、roleId 固定 `main`，**本地远端共用一套命名**；hash 规避会话 id 里的路径非法字符 |
 | 5 | worktree 路径要不要反推回仓库 | **要**，`repoRemotePathOf()` | 会话工作区存的就是 worktree 路径；建库前反推回仓库根，保证重连不会派生嵌套目录（`.dieyun/worktrees/x/main/.dieyun/worktrees/...`） |
 | 6 | 远端不是 git 仓库怎么办 | 沿用原目录，只打日志 | 属既有能力边界，不新增拦截；若为此加开关就是「用机制绕失败」 |

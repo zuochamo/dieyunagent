@@ -1,7 +1,116 @@
 'use strict';
 
 const { buildSshUri, normalizeRemotePath } = require('../workspace/target');
-const { ensureRemoteWorktree, remoteWorktreePath, repoRemotePathOf } = require('../ssh/remote-worktree');
+const {
+  ensureRemoteWorktree,
+  remoteWorktreePath,
+  remoteWorktreeKey,
+  repoRemotePathOf,
+  pruneRemoteWorktrees
+} = require('../ssh/remote-worktree');
+
+/**
+ * 会话 worktree 的保留期：多久没活动的会话，其远端 worktree（含索引库）在下次建新
+ * worktree 时被回收。每份 worktree 带一份 19–38 MB 的索引库，不回收就是无限增长。
+ */
+const SESSION_WORKTREE_KEEP_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** `memory.sessions_list` 的上限就是 100（core 侧 clamp） */
+const SESSIONS_QUERY_LIMIT = 100;
+
+/**
+ * 哪些会话键必须留着：当前会话 + 正在租用远端端点的 + 保留期内活跃过的。
+ *
+ * 「哪份会话还活着」的唯一来源是**会话表**（`memory.sessions_list` 的 `updatedAt`），
+ * 不靠远端目录 mtime 猜 —— 只读的会话几天不写文件，按 mtime 会把正在用的 worktree 当旧的删掉。
+ * @param {{
+ *   sessions?: Array<{ id?: string, updatedAt?: number }>,
+ *   nowMs?: number,
+ *   keepDays?: number,
+ *   leasedSessionIds?: string[],
+ *   currentSessionId?: string
+ * }} opts
+ * @returns {string[]} 排序后的 `sess-xxxxxxxx` 键
+ */
+function sessionKeysToKeep(opts = {}) {
+  const keepDays = Number(opts.keepDays) > 0 ? Number(opts.keepDays) : SESSION_WORKTREE_KEEP_DAYS;
+  const cutoff = Number(opts.nowMs || Date.now()) - keepDays * DAY_MS;
+  const keys = new Set();
+  const add = (sid) => {
+    const k = remoteWorktreeKey(sid);
+    if (k) keys.add(k);
+  };
+  for (const sid of opts.leasedSessionIds || []) add(sid);
+  add(opts.currentSessionId);
+  for (const row of opts.sessions || []) {
+    if (Number(row && row.updatedAt) >= cutoff) add(row && row.id);
+  }
+  return [...keys].sort();
+}
+
+/** @param {any} localGateway */
+async function listRecentSessions(localGateway) {
+  if (!localGateway || typeof localGateway.invokeRpc !== 'function') return [];
+  // 归档的会话也必须算进来：归档是侧栏整理动作，不是「这份副本可以立刻删」。
+  // 保留期只有一个判据 —— 最后活跃时间（`updatedAt`），不按 archived 分叉。
+  // 两份列表都取 100 条（core 的上限）：排序是 updatedAt DESC，所以「两份都没有」的会话
+  // 一定比第 100 个更老，正是该回收的那批。
+  const [active, archived] = await Promise.all([
+    localGateway.invokeRpc('memory.sessions_list', { limit: SESSIONS_QUERY_LIMIT, archived: false }),
+    localGateway.invokeRpc('memory.sessions_list', { limit: SESSIONS_QUERY_LIMIT, archived: true })
+  ]);
+  return [
+    ...(Array.isArray(active) ? active : []),
+    ...(Array.isArray(archived) ? archived : [])
+  ];
+}
+
+/**
+ * 回收过期会话的远端 worktree（连同里面的索引库）。
+ *
+ * 只在**新建** worktree 时调用：目录数就是在那时候增长的，不需要定时器，也不需要状态。
+ * 失败只记日志 —— 缓存清不掉不该拦住会话。
+ * @param {{
+ *   localGateway: any,
+ *   sshManager: any,
+ *   repoPath: string,
+ *   sessionId: string,
+ *   listLeasedSessionIds?: () => string[],
+ *   log?: (msg: string) => void
+ * }} deps
+ */
+async function pruneStaleSessionWorktrees(deps) {
+  const log = typeof deps.log === 'function' ? deps.log : () => {};
+  try {
+    const sessions = await listRecentSessions(deps.localGateway);
+    const leased =
+      typeof deps.listLeasedSessionIds === 'function' ? deps.listLeasedSessionIds() : [];
+    const keepKeys = sessionKeysToKeep({
+      sessions,
+      nowMs: Date.now(),
+      keepDays: SESSION_WORKTREE_KEEP_DAYS,
+      leasedSessionIds: [...(leased || []), deps.sessionId],
+      currentSessionId: deps.sessionId
+    });
+    const res = await pruneRemoteWorktrees(deps.sshManager, { repoPath: deps.repoPath, keepKeys });
+    if (!res.ok) {
+      log(`session worktree: 回收跳过（${res.reason || '未知原因'}）`);
+      return res;
+    }
+    if (res.pruned.length) {
+      log(`session worktree: 回收 ${res.pruned.length} 份过期 worktree（${res.pruned.join(', ')}）`);
+    }
+    if (res.keptDirty.length) {
+      log(
+        `session worktree: ${res.keptDirty.length} 份有未提交改动，保留（${res.keptDirty.join(', ')}）`
+      );
+    }
+    return res;
+  } catch (err) {
+    log(`session worktree 回收失败: ${err && err.message ? err.message : err}`);
+    return { ok: false, reason: 'PRUNE_FAILED', pruned: [], keptDirty: [] };
+  }
+}
 
 /**
  * 让 SSH 会话跑在自己的 git worktree 里（方案 C）。
@@ -54,6 +163,18 @@ async function ensureSessionWorktree(deps) {
   }
 
   const effective = { ...target, remotePath: normalizeRemotePath(res.path) };
+  // 新建 = 目录数在增长的那一刻：顺手回收过期会话的 worktree（不 await，失败只记日志）。
+  // 复用分支不扫：复用不会让目录数变多，扫了只是白跑一次远端脚本。
+  if (!res.reused) {
+    void pruneStaleSessionWorktrees({
+      localGateway,
+      sshManager,
+      repoPath,
+      sessionId: sid,
+      listLeasedSessionIds: deps.listLeasedSessionIds,
+      log
+    });
+  }
   if (normalizeRemotePath(target.remotePath) === effective.remotePath) return effective;
 
   const workspacePath = buildSshUri(effective);
@@ -72,4 +193,9 @@ async function ensureSessionWorktree(deps) {
   return effective;
 }
 
-module.exports = { ensureSessionWorktree };
+module.exports = {
+  ensureSessionWorktree,
+  sessionKeysToKeep,
+  pruneStaleSessionWorktrees,
+  SESSION_WORKTREE_KEEP_DAYS
+};

@@ -1,6 +1,6 @@
 'use strict';
 
-const { isSameSshTarget, normalizeRemotePath, sshTargetKey } = require('../workspace/target');
+const { isSameSshTarget, normalizeRemotePath, sshTargetKey, workspacePathForSession } = require('../workspace/target');
 const { ensureSessionWorktree } = require('./session-worktree');
 const { remoteWorktreePath, repoRemotePathOf } = require('../ssh/remote-worktree');
 
@@ -157,19 +157,24 @@ function createSessionRemoteTransport(deps) {
       sshManager: manager,
       sessionId: sid,
       target,
+      // 「哪些会话正在用远端」只有租约表知道：回收过期 worktree 必须把它们全部保住
+      listLeasedSessionIds: () => [...sessionLeases.keys()],
       log: deps.log
     });
   }
 
   async function setSessionRemoteLease(sessionId, active, target) {
     const sid = String(sessionId || '').trim();
-    if (!sid) return;
+    if (!sid) return '';
     if (active && target && isRemoteTarget(target)) {
       const prev = sessionLeases.get(sid);
       if (prev && sameViewTransport(prev.target, target)) {
         // 端点已持有：refCount 不变，但仍补一次 worktree（首次激活时可能还没连上）
-        await withSessionWorktree(sid, target);
-        return;
+        const effective = await withSessionWorktree(sid, target);
+        sessionLeases.set(sid, { ...prev, target: snapshotTarget(effective) });
+        // 返回值是**生效后**的会话工作区：租约可能把会话切进 worktree，渲染端缓存的是
+        // 租约之前的值，不告诉它就会拿着旧根去查索引（根不一致 → 面板「状态暂不可用」）。
+        return workspacePathForSession(effective) || '';
       }
       if (prev) {
         // Workspace path changed mid-run: release old then re-hold.
@@ -198,10 +203,10 @@ function createSessionRemoteTransport(deps) {
           log('session remote lease gateway: ' + (e && e.message ? e.message : String(e)));
         }
       }
-      return;
+      return workspacePathForSession(effective) || '';
     }
     const lease = sessionLeases.get(sid);
-    if (!lease) return;
+    if (!lease) return '';
     // Release is session-level: drop the whole lease (matches single hold on activate).
     sessionLeases.delete(sid);
     if (lease.target.kind === 'ssh') {
@@ -209,6 +214,7 @@ function createSessionRemoteTransport(deps) {
       // 只在真记过引用时释放（见 setSessionRemoteLease 里 acquired 的注释）
       if (deps.sshPool && lease.acquired) deps.sshPool.release(lease.target);
     }
+    return '';
   }
 
   async function ensureSshForTarget(target, opts = {}) {

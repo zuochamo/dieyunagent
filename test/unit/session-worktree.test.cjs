@@ -48,9 +48,14 @@ describe('会话 worktree 编排', () => {
     assert.equal(out.remotePath, WT);
     assert.equal(out.host, 'h', 'SSH 端点信息不能被改掉');
     assert.deepEqual(gw.state.contexts, [{ sid: SID, ws: `ssh://u@h${WT}` }]);
-    assert.deepEqual(gw.state.rpc, [
-      { method: 'memory.session_workspace_set', params: { sessionId: SID, workspacePath: `ssh://u@h${WT}` } }
-    ]);
+    // 新建成功还会顺手扫一次过期 worktree（读的是会话表），回收规则本身在
+    // session-worktree-prune.test.cjs 里验；这里只锁定「落库」这一条
+    assert.deepEqual(
+      gw.state.rpc.filter((c) => c.method !== 'memory.sessions_list'),
+      [
+        { method: 'memory.session_workspace_set', params: { sessionId: SID, workspacePath: `ssh://u@h${WT}` } }
+      ]
+    );
     // 脚本跑在仓库根上，不是 worktree 里
     assert.ok(ssh.state.scripts[0].includes(`REPO='${REPO}'`));
   });

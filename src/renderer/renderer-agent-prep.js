@@ -243,63 +243,77 @@ function agentPrepStepsSig(steps) {
     .join(',');
 }
 
-const INDEX_PREP_TRANSIENT_RE =
-  /超时|timeout|dieyun-core 已停止|dieyun-core 已退出|EXEC_ERROR/i;
+/**
+ * 索引根在文案里的短名：`…/<项目>/.dieyun/worktrees/<id>/main` → `<项目>`，本地取末段目录名。
+ *
+ * 为什么要带它：SSH 会话的索引在它**自己那份** worktree 里（另一份 `index.sqlite`），
+ * 只写「创建中」看不出是哪一份，用户只能当成 bug（2026-10-29 已误判过一次）。
+ */
+function shortIndexRoot(root) {
+  const raw = String(root || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!raw) return '';
+  // 会话副本剥尾：与 UI / 会话身份的显示口径一致（项目才是身份，副本是实现细节）
+  const m = raw.match(/^(.*)\/\.dieyun\/worktrees\/[^/]+\/[^/]+$/);
+  const seg = String(m ? m[1] : raw)
+    .split('/')
+    .filter(Boolean);
+  return seg.length ? seg[seg.length - 1] : '';
+}
 
 /**
- * 索引准备区的进度文案。
+ * 索引步骤的一句话。**唯一成形处**——别在别处再拼「创建中」。
  *
- * **「创建中」与「更新中」不是同义词**：`st.indexed === true` 说明库里已经有一份可用索引，
- * 这次只是增量刷新（通常几秒）；一律写「创建中」，用户会看到「面板上明明已建好、
- * 准备区却在创建」而当成 bug，进而去重建一份根本不需要重建的索引。
- *
- * 前面统一带「本会话工作区」也是同一个理由：远端会话的索引在它自己的 worktree 里
- * （`<workspace>/.dieyun/index.sqlite`，不可复用主工作区那份），只写「创建中」看不出主语。
+ * 三条硬约束（都是踩过的坑）：
+ * 1. 动词由 `st.indexed` 决定：`indexed=false` 是**首建**（这个根从来没建成过一次），
+ *    `indexed=true` 只是**刷新**。一律写「创建中」，用户会看到「面板上明明已建好、
+ *    准备区却在创建」而当成 bug，进而去重建一份根本不需要重建的索引。
+ * 2. **错误优先于进度**：`lastError` 有值就必须显示。旧实现要求 `!indexing && !indexed`，
+ *    于是「一边失败一边重试」时错误被进度永久盖住，症状就是「永远创建中」。
+ * 3. 行内不套括号：skipped 行整体会渲染成 `label（detail）`，detail 内再套括号是双层。
  *
  * @param {object|null} st `codebase.status` / `graph.status` 的返回值
  * @param {'codebase'|'graph'} kind
- * @param {'creating'|'started'} [mode] creating=正在跑；started=本轮刚发起、没等到状态
+ * @param {'creating'|'started'} [mode] creating=已在跑；started=本轮刚发起、没拿到状态
+ * @param {string} [root] 索引根（用于显示是哪个项目的哪份库）
  * @returns {string}
  */
-function formatPrepIndexProgress(st, kind, mode) {
-  const label = kind === 'codebase' ? '代码索引' : '结构索引';
-  const phase = String(st && st.phase ? st.phase : '').trim();
-  const phaseLabel =
-    kind === 'codebase'
-      ? phase === 'walking'
-        ? '扫描文件'
-        : phase === 'chunking'
-          ? '切分代码'
-          : phase === 'embedding'
-            ? '生成向量'
-            : phase === 'finishing'
-              ? '写入索引'
-              : phase === 'error'
-                ? '索引失败'
-                : '建立索引'
-      : phase === 'walking'
-        ? '扫描文件'
-        : phase === 'parsing'
-          ? '解析符号'
-          : phase === 'finishing'
-            ? '写入结构'
-            : phase === 'error'
-              ? '索引失败'
-              : '建立结构';
+function formatPrepIndexProgress(st, kind, mode, root) {
+  // 注意：这里的返回值是 skipped 行的 detail，渲染成 `label（detail）`（renderer-thinking-trace-dom.js:350），
+  // 所以 detail 里不要再带「代码索引 / 结构索引」，也不要再套括号。
+  const where = shortIndexRoot(root);
+  const at = where ? ` · ${where}` : '';
   const done = Number(st && st.filesDone) || 0;
   const total = Number(st && st.filesTotal) || 0;
-  // 行内不套括号：skipped 行的整体就渲染成 `label（detail）`，detail 里再带括号会变成双层
   const progress = total > 0 ? ` · ${done}/${total} 文件` : done > 0 ? ` · ${done} 文件` : '';
-  // 「已经在建」和「已有索引在刷新」是两种状态：进度数字（远端可能只有 done、没有 total）
-  // 对两者都成立，差别只在动词，所以动词由 `st.indexed` 决定。
-  const verb = st && st.indexed ? '更新中' : '创建中';
+
+  // 真错误排在进度前面：正在跑不代表没问题（半路失败后 core 会继续重试）
+  const lastError = st && st.lastError ? String(st.lastError).trim().slice(0, 120) : '';
+  if (lastError) return `索引失败：${lastError}，本轮用 grep`;
+
+  const verb = st && st.indexed ? '刷新' : '首建';
   if (mode === 'creating') {
-    return `本会话工作区${label}${verb}${progress}，本次不等待`;
+    const stall = prepProgressStalled(kind, root, done) ? ' · 进度未前进' : '';
+    return `后台${verb}${at}${progress}${stall}，本轮用 grep`;
   }
   if (mode === 'started') {
-    return `已发起本会话工作区${label}建库（后台），本次不等待`;
+    return `已发起后台首建${at}，本轮用 grep`;
   }
-  return `${label}${phaseLabel ? ` · ${phaseLabel}` : ''}${progress}`;
+  if (mode === 'idle') {
+    // 没在跑也没就绪：只在「发起过但被打断 / 建完 0 内容」时出现，必须给出可执行的下一步
+    return `未就绪且未在跑，本轮用 grep，可在侧栏「索引」面板重建`;
+  }
+  return `阶段 ${String((st && st.phase) || '未知')}${at}${progress}`;
+}
+
+/** 上一轮的 filesDone（进程内，不落库）：连续两轮没前进就提示「进度未前进」 */
+const prepProgressSeen = new Map();
+
+function prepProgressStalled(kind, root, done) {
+  if (!done) return false;
+  const key = `${kind}:${String(root || '')}`;
+  const prev = prepProgressSeen.get(key);
+  prepProgressSeen.set(key, done);
+  return typeof prev === 'number' && prev === done;
 }
 
 /** 保存触发的增量索引尚未跟上时，注入前最多等待多久 */
@@ -309,34 +323,155 @@ const PREP_FRESH_POLL_MS = 250;
 /**
  * 刚保存过文件、增量索引还没跑完时，最多等待 PREP_FRESH_WAIT_MS 再装配上下文。
  * 只在 status 明确报 refreshPending 时调用，避免每次发送都平白加延迟。
+ *
+ * 等待期间**不再刷进度文案**：那是「准备区一直显示在创建」的主要噪声源，
+ * 而它一句话也回答不了「为什么没建完」。
  */
-async function waitForFreshPrepIndex({ callRpc, statusMethod, workspacePath, note, kind }) {
+async function waitForFreshPrepIndex({ callRpc, statusMethod, workspacePath, root }) {
+  const target = root || workspacePath;
   const deadline = Date.now() + PREP_FRESH_WAIT_MS;
   let st = null;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, PREP_FRESH_POLL_MS));
     try {
-      st = await callRpc(statusMethod, { workspaceRoot: workspacePath }, 20000);
+      st = await callRpc(statusMethod, { workspaceRoot: target }, 20000);
     } catch {
       return null;
     }
     if (!st) return null;
     if (!st.refreshPending && !st.indexing) return st;
-    if (st.indexing) {
-      try {
-        note(formatPrepIndexProgress(st, kind, 'creating'));
-      } catch {
-        /* 进度提示失败不影响等待 */
-      }
-    }
   }
   return st;
 }
 
+/** 状态查询预算（与网关 `codebase.status` / `graph.status` 的 RPC 预算一致） */
+const PREP_STATUS_TIMEOUT_MS = 45000;
+/** 发起建库：短超时（没答复不等于没发起） */
+const PREP_BUILD_KICK_TIMEOUT_MS = 30000;
+/** 短超时后的补发：只影响面板忙态，不影响本轮 */
+const PREP_BUILD_KICK_RETRY_TIMEOUT_MS = 120000;
+
 /**
- * 发消息前索引门闩（codebase / graph 共用）：
- * status → 已可检索则注入 → 构建中则仅提示 → 未建立则 start 一次 → **一律不等待**。
- * 提示文案的唯一成形处是 {@link formatPrepIndexProgress}（「创建中 / 更新中」在那里区分）。
+ * 读一次索引状态（**只读**：不发 start、不重试、不改文案）。
+ *
+ * 为什么要拆出来：建库是一次性的、慢的、后台的事，而 prep 是「发一轮消息」的热路径。
+ * 两者耦合时每一轮都会重新判一次、必要时重新发起，准备区于是永远停在「创建中」——
+ * 用户从中分不出「首建」「卡住」「建在另一个路径」三种完全不同的处境。
+ *
+ * @param {{
+ *   kind: 'codebase'|'graph',
+ *   workspacePath: string,
+ *   prepSid?: string,
+ *   abortIfNeeded?: () => void,
+ *   gatewayCall: (method: string, params: object, timeoutMs?: number) => Promise<object>,
+ *   isReady: (st: object) => boolean
+ * }} opts
+ * @returns {Promise<{ ok: boolean, status: object|null, root: string, skipped?: boolean, phase?: string, error?: string }>}
+ */
+async function readPrepIndexStatus(opts) {
+  const { kind, workspacePath, prepSid, abortIfNeeded, gatewayCall: rpc, isReady } = opts;
+  const root = String(workspacePath || '').trim();
+  const statusMethod = kind === 'codebase' ? 'codebase.status' : 'graph.status';
+  if (!root || typeof rpc !== 'function') {
+    return { ok: false, status: null, root, skipped: true, phase: 'no_workspace', error: '' };
+  }
+  const scope = { workspaceRoot: root, sessionId: prepSid || undefined, runWorkspaceRoot: root };
+
+  let st = null;
+  try {
+    if (typeof abortIfNeeded === 'function') abortIfNeeded();
+    st = await rpc(statusMethod, scope, PREP_STATUS_TIMEOUT_MS);
+  } catch (err) {
+    const msg = err && err.message ? String(err.message) : String(err);
+    // 状态查不到 != 没有索引（常见于 SSH 瞬断）：本轮不注入，也不要去 kick
+    return {
+      ok: false,
+      status: null,
+      root,
+      skipped: true,
+      phase: 'unavailable',
+      error: `索引状态暂不可用：${msg}`
+    };
+  }
+
+  // 刚保存过文件：防抖窗口 / 增量还没跟上时先等一小会儿，
+  // 否则本次装配会用旧索引（「改完查不到」的主要来源）。
+  if (kind === 'codebase' && st && st.refreshPending) {
+    const caughtUp = await waitForFreshPrepIndex({
+      callRpc: (method, params, timeoutMs) => rpc(method, { ...scope, ...(params || {}) }, timeoutMs),
+      statusMethod,
+      root
+    });
+    if (caughtUp) st = caughtUp;
+  }
+
+  if (typeof isReady === 'function' && isReady(st)) return { ok: true, status: st, root };
+  if (st && st.indexing) {
+    return {
+      ok: false,
+      status: st,
+      root,
+      skipped: true,
+      phase: 'creating',
+      error: formatPrepIndexProgress(st, kind, 'creating', root)
+    };
+  }
+  return { ok: false, status: st, root, skipped: true, phase: 'not_ready', error: '' };
+}
+
+/**
+ * 已经发起过首建的索引根（进程内，不落库）。
+ *
+ * 一个根只 kick 一次是刻意的：失败后继续每轮重试，等于把「建不完」变成常态且对用户不可见。
+ * 能再次发起的只有三条显式路径——用户点侧栏「索引」面板的重建、会话换工作区（换根）、进程重启。
+ * 这不需要新增状态机：key 是索引根本身，换根天然就是新的 key。
+ */
+const kickedIndexRoots = new Set();
+
+/**
+ * 该索引根**从未发起过**建库时才发起一次（后台，不等）。
+ *
+ * @param {{
+ *   kind: 'codebase'|'graph',
+ *   workspacePath: string,
+ *   prepSid?: string,
+ *   gatewayCall: (method: string, params: object, timeoutMs?: number) => Promise<object>
+ * }} opts
+ * @returns {Promise<{ kicked: boolean, status: object|null }>}
+ */
+async function kickIndexBuildOnce(opts) {
+  const { kind, workspacePath, prepSid, gatewayCall: rpc } = opts;
+  const root = String(workspacePath || '').trim();
+  const startMethod = kind === 'codebase' ? 'codebase.index.start' : 'graph.index.start';
+  const key = `${kind}:${root}`;
+  if (!root || typeof rpc !== 'function' || kickedIndexRoots.has(key)) {
+    return { kicked: false, status: null };
+  }
+  kickedIndexRoots.add(key);
+  kickPrepIndexRailBusy(kind);
+  const params = {
+    workspaceRoot: root,
+    sessionId: prepSid || undefined,
+    runWorkspaceRoot: root,
+    // 未就绪时勿 skipIfReady：空仓 indexed 壳也需触发后台 refresh
+    force: false,
+    skipIfReady: false
+  };
+  try {
+    const startRes = await rpc(startMethod, params, PREP_BUILD_KICK_TIMEOUT_MS);
+    return { kicked: true, status: startRes || null };
+  } catch {
+    // 短超时没答复不等于没发起：用长超时再发一次，结果只影响面板忙态
+    void rpc(startMethod, params, PREP_BUILD_KICK_RETRY_TIMEOUT_MS).catch(() => {});
+    return { kicked: true, status: null };
+  }
+}
+
+/**
+ * 发消息前的索引门闩（codebase / graph 共用）：**只读判断 + 从未发起过才 kick 一次**。
+ *
+ * 顺序：status → 已可检索则注入 → 在跑/未就绪则记一句**可读的**跳过理由 →
+ * 从未发起过才 kick。**一律不等待**；文案的唯一成形处是 {@link formatPrepIndexProgress}。
  *
  * @param {{
  *   kind: 'codebase'|'graph',
@@ -346,109 +481,27 @@ async function waitForFreshPrepIndex({ callRpc, statusMethod, workspacePath, not
  *   gatewayCall: (method: string, params: object, timeoutMs?: number) => Promise<object>,
  *   isReady: (st: object) => boolean
  * }} opts
- * @returns {Promise<{ ok: boolean, status: object|null, skipped?: boolean, phase?: string, error?: string }>}
+ * @returns {Promise<{ ok: boolean, status: object|null, root?: string, skipped?: boolean, phase?: string, error?: string }>}
  */
 async function ensurePrepIndexReady(opts) {
-  const { kind, workspacePath, prepSid, abortIfNeeded, gatewayCall: rpc, isReady } = opts;
-  const statusMethod = kind === 'codebase' ? 'codebase.status' : 'graph.status';
-  const startMethod = kind === 'codebase' ? 'codebase.index.start' : 'graph.index.start';
-  const label = kind === 'codebase' ? '代码索引' : '结构索引';
-  const note = (detail) => {
-    if (prepSid && typeof agentPrepStepNote === 'function') {
-      agentPrepStepNote(prepSid, kind, detail);
-    }
+  const { kind, isReady } = opts;
+  const read = await readPrepIndexStatus(opts);
+  if (read.ok) return read;
+  if (read.phase === 'unavailable' || read.phase === 'no_workspace') return read;
+
+  const kicked = await kickIndexBuildOnce({ ...opts, workspacePath: read.root || opts.workspacePath });
+  const st = kicked.status || read.status;
+  if (typeof isReady === 'function' && isReady(st)) return { ok: true, status: st, root: read.root };
+
+  const mode = st && st.indexing ? 'creating' : kicked.kicked ? 'started' : 'idle';
+  return {
+    ok: false,
+    status: st,
+    root: read.root,
+    skipped: true,
+    phase: mode,
+    error: formatPrepIndexProgress(st, kind, mode, read.root)
   };
-
-  const callRpc = async (method, params, timeoutMs, retryNote) => {
-    let lastErr = null;
-    const scoped = {
-      ...(params || {}),
-      sessionId: prepSid || params?.sessionId,
-      runWorkspaceRoot: workspacePath || params?.runWorkspaceRoot
-    };
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (typeof abortIfNeeded === 'function') abortIfNeeded();
-      try {
-        return await rpc(method, scoped, timeoutMs);
-      } catch (err) {
-        lastErr = err;
-        const msg = err && err.message ? String(err.message) : String(err);
-        if (!INDEX_PREP_TRANSIENT_RE.test(msg) || attempt >= 1) throw err;
-        note(retryNote || '索引服务瞬断，重试…');
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-    }
-    throw lastErr;
-  };
-
-  let st = null;
-  try {
-    st = await callRpc(statusMethod, { workspaceRoot: workspacePath }, 45000, '状态查询失败，重试…');
-  } catch (err) {
-    const msg = err && err.message ? String(err.message) : String(err);
-    note(`状态暂不可用，跳过：${msg}`);
-    return { ok: false, status: null, skipped: true, phase: 'unavailable', error: msg };
-  }
-
-  // 刚保存过文件：防抖窗口/增量索引还没跟上时先等一小会儿，
-  // 否则本次装配会用旧索引（「改完查不到」的主要来源）。
-  if (kind === 'codebase' && st && st.refreshPending) {
-    const caughtUp = await waitForFreshPrepIndex({
-      callRpc,
-      statusMethod,
-      workspacePath,
-      note,
-      kind
-    });
-    if (caughtUp) st = caughtUp;
-  }
-
-  if (isReady(st)) return { ok: true, status: st };
-
-  if (st && st.indexing) {
-    const detail = formatPrepIndexProgress(st, kind, 'creating');
-    note(detail);
-    kickPrepIndexRailBusy(kind);
-    return { ok: false, status: st, skipped: true, phase: 'creating', error: detail };
-  }
-
-  if (st && st.lastError && !st.indexing && !st.indexed) {
-    const detail = `${label}失败：${String(st.lastError).slice(0, 120)}（本次不等待）`;
-    note(detail);
-    return { ok: false, status: st, skipped: true, phase: 'error', error: detail };
-  }
-
-  try {
-    const startRes = await callRpc(
-      startMethod,
-      // 未就绪时勿 skipIfReady：空仓 indexed 壳也需触发后台 refresh
-      { workspaceRoot: workspacePath, force: false, skipIfReady: false },
-      30000,
-      '索引启动失败，重试…'
-    );
-    st = startRes || st;
-  } catch {
-    // 短超时没答复不等于没发起：用长超时再发一次，结果只影响面板忙态，不影响本轮
-    void callRpc(
-      startMethod,
-      { workspaceRoot: workspacePath, force: false, skipIfReady: false },
-      120000
-    ).catch(() => {});
-  }
-
-  kickPrepIndexRailBusy(kind);
-
-  if (isReady(st)) return { ok: true, status: st };
-
-  if (st && st.indexing) {
-    const detail = formatPrepIndexProgress(st, kind, 'creating');
-    note(detail);
-    return { ok: false, status: st, skipped: true, phase: 'creating', error: detail };
-  }
-
-  const detail = formatPrepIndexProgress(st, kind, 'started');
-  note(detail);
-  return { ok: false, status: st, skipped: true, phase: 'started', error: detail };
 }
 
 function kickPrepIndexRailBusy(kind) {
@@ -489,7 +542,10 @@ if (typeof window !== 'undefined') {
   window.resolveFailedDisplayTrace = resolveFailedDisplayTrace;
   window.agentPrepStepsSig = agentPrepStepsSig;
   window.ensurePrepIndexReady = ensurePrepIndexReady;
+  window.readPrepIndexStatus = readPrepIndexStatus;
+  window.kickIndexBuildOnce = kickIndexBuildOnce;
   window.formatPrepIndexProgress = formatPrepIndexProgress;
+  window.shortIndexRoot = shortIndexRoot;
   window.isCodebasePrepReady = isCodebasePrepReady;
   window.isGraphPrepReady = isGraphPrepReady;
 }

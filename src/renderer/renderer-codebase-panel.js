@@ -83,6 +83,10 @@ function syncCodebaseAutoIncrementalCheckbox() {
   if (!autoCb) return;
   // 默认关（重活：chunk + FTS + embedding），只有显式打开才跑；见 docs/INDEX-VALUE-REVIEW.md §R4
   autoCb.checked = !!(settings && settings.codebaseAutoIncremental === true);
+  // 语义检索意图：打开后每次建库都带向量（唯一可行的触发方式，见
+  // docs/SSH-INDEX-COLD-START-PLAN.md §0.5 —— 面板手点「建向量」在 SSH 每会话一份库时等于没有）
+  const semanticCb = $('index-semantic-search');
+  if (semanticCb) semanticCb.checked = !!(settings && settings.indexSemanticSearch === true);
 }
 
 function syncCodebaseRailBusy(busy) {
@@ -134,6 +138,17 @@ async function refreshCodebasePanelStatus() {
     setCodebasePanelText(
       'cb-stat-vectors',
       st.vectorCount ? `${st.vectorCount}（语义搜索）` : '0（子串检索）'
+    );
+    // 上一次建库的向量来源分布：打开「语义检索（向量）」后要能看出复用到底生效没有，
+    // 否则「每会话重算整仓」和「命中跨 worktree 缓存」在界面上长得一模一样。
+    // 复用口径见 crates/dieyun-core/src/index/vector_cache.rs。
+    const vectorsReused = Number(st.vectorsReused) || 0;
+    const vectorsEmbedded = Number(st.vectorsEmbedded) || 0;
+    setCodebasePanelText(
+      'cb-stat-vector-source',
+      vectorsReused === 0 && vectorsEmbedded === 0
+        ? '—'
+        : `复用 ${vectorsReused} / 新算 ${vectorsEmbedded}`
     );
     // 向量元信息：模型/维度是**库里实际写入**的值，一致性由 core 比对当前设置得出
     setCodebasePanelText('cb-stat-embedding', st.embeddingModel || '—');
@@ -291,6 +306,18 @@ function initCodebasePanel() {
       if (!settings) return;
       settings.codebaseAutoIncremental = autoCb.checked;
       if (typeof saveSettings === 'function') saveSettings(settings);
+    });
+  }
+  const semanticCb = $('index-semantic-search');
+  if (semanticCb && !semanticCb.dataset.bound) {
+    semanticCb.dataset.bound = '1';
+    semanticCb.addEventListener('change', () => {
+      if (!settings) return;
+      settings.indexSemanticSearch = semanticCb.checked;
+      if (typeof saveSettings === 'function') saveSettings(settings);
+      // 打开后立刻在**当前**工作区补一次向量（新意图对已建过库的工作区也要生效），
+      // 走的是与面板「建向量」同一条路径：增量补齐缺向量的 chunk。
+      if (semanticCb.checked) rebuildCodebasePanelIndex({ vectors: true }).catch(() => {});
     });
   }
   $('codebase-panel-refresh')?.addEventListener('click', () => {

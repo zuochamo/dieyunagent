@@ -48,6 +48,8 @@ var DEFAULTS = {
   embeddingModels: [],
   graphAutoIncremental: true,
   codebaseAutoIncremental: false,
+  // 代码索引要不要带向量（语义检索）：默认关，打开后每次建库都带 vectors:true
+  indexSemanticSearch: false,
   // 自动朗读每条新回复（手动点气泡下的「朗读」不受此开关影响）
   ttsAutoRead: false
 };
@@ -396,6 +398,8 @@ function normalizeSettings(raw) {
   s.graphAutoIncremental = s.graphAutoIncremental !== false;
   s.ttsAutoRead = s.ttsAutoRead === true;
   s.codebaseAutoIncremental = s.codebaseAutoIncremental === true;
+  // 语义检索意图：缺省/脏值一律 false（别把「未设置」变成「每次建库都调 embedding」）
+  s.indexSemanticSearch = s.indexSemanticSearch === true;
   const normalizeDefined = (m, index) => {
     const modalitySetting =
       window.ModelCapabilities?.normalizeModalitySetting(m?.modalitySetting, m?.kind) || 'text';
