@@ -1,6 +1,6 @@
 'use strict';
 
-const { transcribeWhisper, MAX_AUDIO_BYTES } = require('../speech-transcribe');
+const { transcribeWhisper, probeTranscription, MAX_AUDIO_BYTES } = require('../speech-transcribe');
 const { synthesizeSpeech } = require('../speech-synthesize');
 
 /**
@@ -48,6 +48,29 @@ function createSpeechHandlers(_deps) {
         audioBuffer,
         filename: params?.filename,
         mimeType: params?.mimeType
+      });
+    },
+
+    /**
+     * 「语音」（转写）档位的连接测试：静音样片走真实转写请求。
+     * 参数与 speech.transcribe 同形，只是不带 audioBase64 —— 音频由本层生成，
+     * 这样测试不需要麦克风、也不需要用户先说话。
+     */
+    'speech.transcribe_probe': async (params) => {
+      const baseUrl = String(params?.baseUrl || '').trim();
+      if (!baseUrl) {
+        const e = new Error('未配置 API Base URL');
+        e.code = 'MISSING_BASE_URL';
+        throw e;
+      }
+      return probeTranscription({
+        baseUrl,
+        apiKey: params?.apiKey,
+        model: params?.model,
+        language: params?.language,
+        authMode: params?.authMode,
+        headers: params?.headers,
+        userAgent: params?.userAgent
       });
     },
 
