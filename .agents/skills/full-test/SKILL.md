@@ -53,12 +53,13 @@ cargo test -p dieyun-core
 
 首次需编译测试二进制，可能 10 分钟以上——后台运行并轮询，勿前台死等。
 
-### 5. embedding 测试（特殊，永远单独跑）
+### 5. embedding / 向量链路（特殊，永远单独跑）
 
-全仓默认**必超时**：测试脚本硬编码 600s RPC 超时，而全仓 force 重建实测约 13 分钟（CPU ONNX，~1 万 chunk × 批 8）。所以：
+脚本 `test:builtin-embedding-rust` 已在 v0.1.59 之后下线（package.json 里查不到，`npm run` 会直接报 missing script）。现在这一档改用仓库内的验收脚本：
 
-- **功能验证（默认做这个）**：`npm run -s test:builtin-embedding-rust src/agent` —— 小目录，几分钟内过，能验证向量写入 / 签名 / 检索全链路。
-- 仅当用户明确要验证全仓索引时：把脚本复制到 /tmp，`bridge.invoke('codebase.index', ..., 600000)` 的超时改大（如 3600000），`nohup node ... &` 脱离运行（后台任务有 ~10 分钟上限），等 ~15 分钟后看结果。
+- **功能验证（默认做这个）**：`node scripts/verify-vector-cache-reuse.cjs` —— 起一个假 embedding 端点 + 真实 core 进程，跑「库 A 首建 → 库 B 复用」，几秒到一分钟出结论，覆盖向量写入 / 签名 / 跨库复用 / 检索命中。期望：库 A `vectorsEmbedded>0, vectorsReused=0`；库 B `vectorsReused>0, vectorsEmbedded=0`；检索 `vectorSearch=true` 且 hits>0。
+- **全仓耗时/召回复测**：`verify:index-timing-local` / `verify:index-timing-ssh` / `verify:index-effectiveness`（脚本在 `scripts/`，SSH 那条要真远端）。
+- 仅当用户明确要验证**全仓真 embedding**时：把 `bridge.invoke('codebase.index', ..., 600000)` 的超时改大（如 3600000）后脱离运行（后台任务有 ~10 分钟上限），等 ~15 分钟看结果。
 - 排障常识：嵌入阶段「CPU 跑满但索引库文件零增长」是设计使然（`embed_batches` 全算完才落盘），不是卡死；看到 code=143 先想是不是自己的 timeout 杀的。
 
 ## 批量 runner
@@ -69,11 +70,11 @@ node .agents/skills/full-test/scripts/run-batch.cjs [--timeout MS] suite1 suite2
 
 逐套件运行 `npm run -s <suite>`，单个失败不中断后续；失败自动单独重跑一次（端口/时序抖动常见）再定论；超时默认 10 分钟并 taskkill 整棵进程树。输出 `PASS/FAIL(code) <suite>`，FAIL 附最后几行日志，结尾给通过数汇总。
 
-## 已知问题基线（截至 2026-10-27，本机）
+## 已知问题基线（截至 2026-11-02，本机）
 
 判定规则：FAIL 的**签名**（失败信息 + 通过项数量）与基线一致 → 已知问题，报告标「非回归」；签名不同、通过项变少、或出现新 FAIL → 按新回归排查。基线会过时——每次全量测试后核对，状态变了就更新本节，并同步 auto-memory 对应条目。
 
-1. **test:builtin-embedding-rust 全仓超时**：签名 = `RPC_TIMEOUT codebase.index`，600s 预算 < 实测 ~789s。容量问题非回归，功能用小目录变体验证（2026-10-24 以 `src/agent` 变体跑通：778 vectors / vectorSearch true / OK）。
+1. **（已失效）test:builtin-embedding-rust 全仓超时**：该脚本自 v0.1.59 后已从 package.json 下线，本项不再适用于任何一次运行；向量链路按步骤 5 改用 `verify-vector-cache-reuse.cjs`（2026-11-02 实测：库 A embedded=3/reused=0，库 B reused=3/embedded=0，检索 3 命中）。
 2. 历史项 test:local-gateway-smoke 白名单 FAIL（`关闭开关后白名单未收窄`）已于 2026-09-21、2026-10-24 连续两轮 PASS，按规则移出基线；若该签名再现，重新立案排查。
 3. **test:lsp 在 Electron 宿主下必假 FAIL**：签名 = `Error: npx child keeps default env`（scripts/test-lsp.cjs:116，断言 `childEnvForCommand('npx').ELECTRON_RUN_AS_NODE == null`）。根因是宿主（DSH / 任何以 `ELECTRON_RUN_AS_NODE=1` 启动的 shell）把该变量注入 `process.env`，被测函数对非 `process.execPath` 命令**原样返回 process.env**，断言因此不成立。排除法：同一命令加 `Remove-Item Env:ELECTRON_RUN_AS_NODE` 后 `test-lsp.cjs ok` → 环境问题非回归。
 4. 环境前提备忘：宿主全局 gitconfig 已于 2026-10-24 配好 user.name/email（此前缺失曾致 test:scm 场景 5 失败）。test:scm 已改为临时仓库自配身份（scripts/test-scm-service.cjs），不依赖宿主配置，换了机器也稳；其他新建临时 git 仓库做提交的测试若报 GIT_IDENTITY_MISSING，同法自配。
