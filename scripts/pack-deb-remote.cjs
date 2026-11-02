@@ -48,7 +48,14 @@ const TAR_NAME = 'dieyun-src.deb-build.tgz';
 // 本机产物目录与其它构建产物的唯一来源一致（build-dist-root.cjs：dist / dist-build 由标记文件决定）
 const OUT_DIR = require('./build-dist-root.cjs').getBuildDistRoot();
 
-/** 上传源码时排除的东西：要么平台相关，要么是产物，传过去只会污染远端 */
+/**
+ * 上传源码时排除的东西：要么平台相关，要么是产物，要么**是本机凭据**。
+ *
+ * 凭据这几条不是洁癖：源码包会 scp 到构建机并在那里解包，`pkg` 目录只有
+ * `--clean-remote` 才清（默认关），等于把 `deploy.local.json`（Open API key）、
+ * Android 签名口令与 keystore 在另一台机器上长期留一份。构建过程一个都用不到
+ * （打包态只读 `~/.dieyun/deploy.json`，签名只在出 APK 的机器上做）。
+ */
 const SRC_EXCLUDES = [
   'node_modules',
   'dist',
@@ -62,12 +69,31 @@ const SRC_EXCLUDES = [
   '.workbuddy',
   '_tmp',
   '.venv',
+  '.env',
+  '.env.local',
+  'deploy.local.json',
+  'deploy.packaged.json',
+  'dieyun-linux-build.local.json',
   'mobile-app/node_modules',
   'mobile-app/.gradle',
   'mobile-app/android/build',
   'mobile-app/android/apk-build',
   'mobile-app/android/manual-build',
-  'mobile-app/android/app/build'
+  'mobile-app/android/app/build',
+  'mobile-app/android/keys',
+  'mobile-app/android/signing.properties',
+  'mobile-app/android/local.properties'
+];
+
+/** 命中了就不许上传的**凭据类**文件名（`--exclude` 之外再校验一次清单，防止将来加漏） */
+const SECRET_NAME_PATTERNS = [
+  /^\.env(\..*)?$/,
+  /^deploy(\..*)?\.json$/,
+  /^dieyun-linux-build\.local\.json$/,
+  /^signing\.properties$/,
+  /^local\.properties$/,
+  /\.keystore$/,
+  /\.jks$/
 ];
 
 /** target → 远程执行的 npm script（build-desktop.cjs 的包装） */
@@ -76,6 +102,39 @@ const BUILD_SCRIPTS = {
   appimage: 'build:linux:appimage',
   dir: 'build:linux:dir'
 };
+
+/**
+ * 上传前把源码包清单过一遍：出现凭据类文件就停下。
+ *
+ * `SRC_EXCLUDES` 是「按名字排除」，将来加一个凭据文件很容易忘了往里加；这一步按
+ * **清单反查**兜住那个遗忘。宁可不打这次包，也不要把 key 落到构建机上。
+ * @param {string} tgzPath
+ */
+function assertNoSecretsInSources(tgzPath) {
+  const r = require('node:child_process').spawnSync('tar', ['-tzf', tgzPath], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024
+  });
+  if (r.error || r.status !== 0) {
+    throw new Error(
+      `无法读取源码包清单（tar -tzf ${tgzPath}）：${r.error ? r.error.message : (r.stderr || '').trim()}`
+    );
+  }
+  const offenders = String(r.stdout || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((entry) => {
+      const base = entry.split('/').pop();
+      return SECRET_NAME_PATTERNS.some((re) => re.test(base));
+    });
+  if (offenders.length) {
+    throw new Error(
+      '源码包里出现凭据文件，已中止上传（加到 scripts/pack-deb-remote.cjs 的 SRC_EXCLUDES）：\n  ' +
+        offenders.slice(0, 10).join('\n  ')
+    );
+  }
+}
 
 /** 内网构建镜像 —— 单一来源，改这里即可 */
 const NPM_REGISTRY = 'https://registry.npmmirror.com';
@@ -414,6 +473,7 @@ function main() {
   if (!opts.skipSync) {
     const mcpFiles = ensureLinuxMcpCache();
     const tgz = packSources(ROOT, TAR_NAME, SRC_EXCLUDES);
+    assertNoSecretsInSources(tgz);
     const sizeMb = Math.round((fs.statSync(tgz).size / 1024 / 1024) * 10) / 10;
     console.log(`[deb:remote] 源码包 ${sizeMb} MB，上传中 …`);
 

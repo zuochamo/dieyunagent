@@ -185,6 +185,56 @@ function electronBuilderArgs(opts) {
   return targetArg === '--dir' ? ['--win', '--dir'] : ['--win', targetArg];
 }
 
+/**
+ * 打包前的最小产物闸门。
+ *
+ * electron-builder 对**不存在的** `extraResources.from` 只 `log.warn`（app-builder-lib
+ * fileMatcher），不会失败；Windows 侧还有 `verify:asar/remote-pack/mcp-bundled` 与
+ * after-pack 的体积检查兜底，Linux 侧此前一个都没有 —— 于是「某个 pack 步骤静默出了空目录」
+ * 会一路走到出包、拉回、发布，装出来才发现远端 Agent 没有 core。
+ *
+ * 这里只断言「本平台必需的产物在、且不是空壳」：判据就是 electron-builder 配置里
+ * `extraResources` 的 from 路径，别在这里另立一套清单。
+ */
+const REQUIRED_ARTIFACTS = {
+  win: [
+    ['build/dieyun-core/dieyun-core.exe', 500 * 1024, 'sidecar（pack:dieyun-core）'],
+    ['build/dieyun-core-linux/dieyun-core', 500 * 1024, 'remote-gateway 里的 Linux core（pack:dieyun-core:linux）'],
+    ['build/remote-gateway-pack/manifest.json', 1, '远端 Agent 包（pack:remote-gateway）'],
+    ['build/mcp-bundled', 1, '离线预装 MCP（pack:mcp-bundled）']
+  ],
+  linux: [
+    ['build/dieyun-core-linux/dieyun-core', 500 * 1024, 'Linux core（pack:dieyun-core:linux）'],
+    ['build/remote-gateway-pack/manifest.json', 1, '远端 Agent 包（pack:remote-gateway）'],
+    ['build/mcp-bundled', 1, '离线预装 MCP（pack:mcp-bundled）']
+  ]
+};
+
+function assertBuildArtifacts(platform) {
+  const missing = [];
+  for (const [rel, minBytes, label] of REQUIRED_ARTIFACTS[platform]) {
+    const abs = path.join(ROOT, rel);
+    let st = null;
+    try {
+      st = fs.statSync(abs);
+    } catch {
+      st = null;
+    }
+    if (!st) {
+      missing.push(`${label}：缺少 ${rel}`);
+    } else if (st.isFile() && st.size < minBytes) {
+      missing.push(`${label}：${rel} 只有 ${st.size} 字节（应 ≥ ${minBytes}）`);
+    } else if (st.isDirectory() && !fs.readdirSync(abs).length) {
+      missing.push(`${label}：${rel} 是空目录`);
+    }
+  }
+  if (missing.length) {
+    throw new Error(
+      '打包产物不完整，已中止（否则会出一个装上去才发现缺件的安装包）：\n  ' + missing.join('\n  ')
+    );
+  }
+}
+
 function main() {
   const opts = parseArgs(process.argv);
   if (opts.help) {
@@ -208,6 +258,8 @@ function main() {
   for (const step of CORE_STEPS[opts.platform]) runNpm(`npm run ${step}`, ['run', step]);
   for (const step of RESOURCE_STEPS) runNpm(`npm run ${step}`, ['run', step]);
 
+  assertBuildArtifacts(opts.platform);
+
   const ebArgs = electronBuilderArgs(opts);
   run(`electron-builder ${ebArgs.join(' ')}`, process.execPath, [ebEntry, ...ebArgs]);
 
@@ -229,4 +281,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { main, parseArgs, electronBuilderArgs, PLATFORM_TARGETS };
+module.exports = { main, parseArgs, electronBuilderArgs, assertBuildArtifacts, PLATFORM_TARGETS };
