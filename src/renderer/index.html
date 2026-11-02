@@ -623,6 +623,7 @@
                       <div class="context-stats-row"><span>源文件</span><span id="cb-stat-files">—</span></div>
                       <div class="context-stats-row"><span>代码片段</span><span id="cb-stat-chunks">—</span></div>
                       <div class="context-stats-row"><span>向量</span><span id="cb-stat-vectors">—</span></div>
+                      <div class="context-stats-row"><span>向量来源</span><span id="cb-stat-vector-source">—</span></div>
                       <div class="context-stats-row"><span>向量模型</span><span id="cb-stat-embedding">—</span></div>
                       <div class="context-stats-row"><span>向量维度</span><span id="cb-stat-embedding-dims">—</span></div>
                       <div class="context-stats-row"><span>向量一致性</span><span id="cb-stat-embedding-sync">—</span></div>
@@ -1283,11 +1284,6 @@
                     <div id="supplier-list"></div>
                   </div>
                 </div>
-                <label class="check-row">
-                  <input type="checkbox" id="tts-auto-read" />
-                  <span data-i18n="tts_auto_read_label">自动朗读新回复</span>
-                </label>
-                <p class="settings-page-desc check-row-hint" id="tts-auto-read-hint">需要有一个「语音合成」类型的模型才能启用。</p>
               </form>
             </div>
             <div class="settings-page" data-settings="theme">
@@ -1331,7 +1327,7 @@
                     <span data-i18n="color_temp_warm">暖</span>
                   </span>
                 </label>
-                <div class="theme-trace-options">
+                <div class="theme-check-options">
                   <label class="check-row"><input type="checkbox" id="trace-show-reasoning" checked /><span data-i18n="trace_reasoning">显示推理摘要</span></label>
                   <label class="check-row"><input type="checkbox" id="trace-show-titles" checked /><span data-i18n="trace_titles">显示思考标题</span></label>
                   <label class="check-row"><input type="checkbox" id="trace-expand-shell" /><span data-i18n="trace_shell">展开 Shell 工具部分</span></label>
@@ -1339,7 +1335,8 @@
                   <label class="check-row"><input type="checkbox" id="trace-follow-writes" checked /><span data-i18n="trace_follow_writes">编辑区跟随 Agent 写入</span></label>
                   <label class="check-row"><input type="checkbox" id="trace-show-readiness" checked /><span data-i18n="trace_readiness">显示完成验收提示</span></label>
                   <label class="check-row"><input type="checkbox" id="trace-damped-flow" /><span data-i18n="trace_damped_flow">无极阻尼</span></label>
-                  <p class="settings-page-desc check-row-hint" data-i18n="trace_damped_flow_desc">思考区改为连续入流：新内容按阻尼曲线滑入，视口跟着连续下淌，不再一行一行蹦。</p>
+                  <label class="check-row"><input type="checkbox" id="tts-auto-read" /><span data-i18n="tts_auto_read_label">自动朗读新回复</span></label>
+                  <p class="settings-page-desc check-row-hint" id="tts-auto-read-hint" hidden>需要有一个「语音合成」类型的模型才能启用。</p>
                 </div>
               </div>
             </div>
@@ -1476,6 +1473,8 @@
               <p class="settings-page-desc check-row-hint workplace-monitor-hint">每 5 秒把本机状态（CPU/内存、机器码、版本、公网 IP、今日键鼠活跃度）推给监控服务端；开启时会钩住全系统键盘鼠标计数。关掉即停止钩子与上报，本地功能不受影响。</p>
               <label class="check-row"><input type="checkbox" id="codebase-auto-incremental" /><span>代码索引</span></label>
               <p class="settings-page-desc check-row-hint codebase-auto-hint">默认关。打开后保存源文件或打开工作区会后台增量更新；只有已经建过向量的工作区才会真正跑起来。</p>
+              <label class="check-row"><input type="checkbox" id="index-semantic-search" /><span>代码索引语义检索（向量）</span></label>
+              <p class="settings-page-desc check-row-hint index-semantic-hint">默认关。打开后，之后每次建代码索引都会同时生成向量，中文自然语言提问才可能命中；代价是建库要调 embedding（新会话首次会慢一些）。关掉后只按子串匹配。</p>
               <label class="check-row"><input type="checkbox" id="graph-auto-incremental" checked /><span>结构索引</span></label>
               <p class="settings-page-desc check-row-hint graph-auto-hint">保存源文件或打开工作区后，自动后台增量更新。</p>
               <span class="save-hint" id="perms-hint"></span>
@@ -1869,6 +1868,16 @@
                     <div class="status-meta"><span class="meta-label">瞬态重试</span><span id="help-harness-retries">—</span></div>
                   </div>
                   <div class="help-harness-by-tool" id="help-harness-by-tool">
+                    <p class="model-usage-empty">打开本页后加载</p>
+                  </div>
+                </section>
+                <section class="help-tool-harness" aria-labelledby="help-index-usage-title">
+                  <div class="model-usage-head">
+                    <h3 id="help-index-usage-title">索引使用率（全部遥测记录）</h3>
+                    <span id="help-index-usage-window" class="help-index-window"></span>
+                  </div>
+                  <p class="settings-page-desc">Agent 主动调用代码索引 / 结构索引的比例。索引只在「用户不知道文件在哪」时才比 grep 强，占比长期接近 0 说明触发链路或能力本身有问题；库状态见侧栏「索引」面板。</p>
+                  <div class="help-index-usage-rows" id="help-index-usage-rows">
                     <p class="model-usage-empty">打开本页后加载</p>
                   </div>
                 </section>

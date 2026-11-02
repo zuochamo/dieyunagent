@@ -86,9 +86,61 @@ async function loadHelpToolStats() {
         `<div class="help-harness-errors"><span class="meta-label">常见错误</span>${errHtml}</div>`
       );
     }
+    renderIndexUsage(s.indexUsage);
   } catch (e) {
     if (byToolEl) byToolEl.innerHTML = `<p class="model-usage-empty">加载失败: ${escapeHelpHtml(e.message || String(e))}</p>`;
   }
+}
+
+/**
+ * 索引使用率（代码索引 / 结构索引）。
+ *
+ * 口径与分组**只来自** `src/agent/tool-telemetry.js:INDEX_TOOL_GROUPS`：
+ * 这里只负责把后端算好的数字渲染出来，不在 Renderer 再列一遍工具名单，
+ * 也不重算占比（否则两处口径迟早不一致，见 AGENTS.md 原则 1）。
+ */
+function renderIndexUsage(usage) {
+  const rowsEl = $('help-index-usage-rows');
+  const windowEl = $('help-index-usage-window');
+  if (!rowsEl) return;
+  const u = usage || {};
+  const total = Number(u.total) || 0;
+  if (!total) {
+    if (windowEl) windowEl.textContent = '';
+    rowsEl.innerHTML = '<p class="model-usage-empty">暂无工具调用记录</p>';
+    return;
+  }
+  if (windowEl) {
+    const fmt = (ts) => (ts ? new Date(ts).toLocaleString() : '—');
+    windowEl.textContent = `窗口 ${fmt(u.since)} ~ ${fmt(u.until)} · 共 ${total} 次调用`;
+  }
+  const groups = Array.isArray(u.groups) ? u.groups : [];
+  rowsEl.innerHTML = groups
+    .map((g) => {
+      const toolNote = (g.byTool || [])
+        .filter((t) => t.calls > 0)
+        .map((t) => `${escapeHelpHtml(t.tool)} ${t.calls}`)
+        .join(' · ');
+      const errNote = (g.topErrors || []).length
+        ? `<div class="help-harness-errors"><span class="meta-label">错误</span>${g.topErrors
+            .map((e) => `<span class="help-harness-err-tag">${escapeHelpHtml(e.errorCode)} ×${e.count}</span>`)
+            .join('')}</div>`
+        : '';
+      const empty = g.calls === 0 ? '<div class="help-index-usage-zero">窗口内 0 次</div>' : '';
+      return (
+        `<div class="help-index-usage-row">` +
+        `<div class="help-index-usage-line">` +
+        `<span class="help-harness-tool-name">${escapeHelpHtml(g.label)}</span>` +
+        `<span class="help-index-usage-share">${g.share}%</span>` +
+        `<span class="help-harness-tool-count">${g.calls} 次 · 成功 ${g.successRate}%` +
+        `${toolNote ? `（${toolNote}）` : ''}</span>` +
+        `</div>` +
+        empty +
+        errNote +
+        `</div>`
+      );
+    })
+    .join('');
 }
 
 function escapeHelpHtml(str) {

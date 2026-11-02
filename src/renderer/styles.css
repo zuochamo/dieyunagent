@@ -15,6 +15,10 @@
   --ok: #22c55e;
   --live-write-bg: rgba(190, 194, 202, 0.1);
   --live-write-pulse: rgba(190, 194, 202, 0.18);
+  /* 朗读「正在念这一句」的记号（逐句推进；见 renderer-tts.js 的 TTS_HIGHLIGHT_NAME）。
+     用户能不能看出「读的是哪句」全靠这一个对比度，别调得太淡。 */
+  --tts-read-bg: rgba(132, 162, 255, 0.46);
+  --tts-read-fg: #ffffff;
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   --titlebar-bg: #000000;
   --titlebar-text: #e8e8e8;
@@ -63,6 +67,8 @@
   --ok: #16a34a;
   --live-write-bg: rgba(168, 173, 183, 0.14);
   --live-write-pulse: rgba(168, 173, 183, 0.22);
+  --tts-read-bg: rgba(88, 124, 240, 0.30);
+  --tts-read-fg: #0b1020;
   --shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
   --titlebar-bg: #ffffff;
   --titlebar-text: #111827;
@@ -757,7 +763,7 @@ body {
 }
 
 .help-stats-panel {
-  width: min(560px, 100%);
+  width: min(840px, 100%);
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1774,7 +1780,7 @@ body.composer-resizing {
   background: rgba(255, 255, 255, 0.16);
 }
 
-.theme-trace-options {
+.theme-check-options {
   display: grid;
   gap: 10px;
   max-width: 420px;
@@ -1786,6 +1792,11 @@ body.composer-resizing {
   gap: 6px;
   max-width: 420px;
   margin-top: 8px;
+}
+
+/* 主题页的勾选项是 40px 开关，说明文字按标签起始位置缩进。 */
+.settings-page[data-settings='theme'] .check-row-hint {
+  padding-left: 48px;
 }
 
 .settings-page[data-settings='perms'] .theme-auto-launch-options {
@@ -2202,6 +2213,32 @@ body.composer-resizing {
 }
 [data-theme='light'] .msg-tts-btn:hover {
   background: rgba(0, 0, 0, 0.1);
+}
+/* 朗读中「正在念这一句」（renderer-tts.js 用 CSS Custom Highlight 挂上，按音频进度逐句推进）。
+   名字必须与 TTS_HIGHLIGHT_NAME 一致；::highlight 只吃颜色/装饰类属性，不吃 transition。
+   只用底色标位置：不加下划线（会和正文里的链接、行内代码的样式打架）。
+   也不要做成整条气泡的动画 —— 那只会让人看出「这条在念」，看不出「念到哪」。 */
+::highlight(tts-reading) {
+  background-color: var(--tts-read-bg);
+  color: var(--tts-read-fg);
+}
+/* 喇叭图标随朗读轻轻呼吸（按钮上的「正在播」提示，只动图标，不动正文） */
+.msg-tts-btn.is-speaking svg {
+  animation: tts-speaking-pulse 1.6s ease-in-out infinite;
+}
+@keyframes tts-speaking-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-tts-btn.is-speaking svg {
+    animation: none;
+  }
 }
 .msg.assistant.loading {
   color: var(--text-mute);
@@ -2876,7 +2913,7 @@ h3.msg-md-h {
   margin: 0.6em 0;
   padding: 0.7em 0.85em;
   overflow: auto;
-  border-radius: 8px;
+  border-radius: 0;
   background: rgba(127, 127, 127, 0.12);
   font-size: 0.92em;
 }
@@ -2888,7 +2925,7 @@ h3.msg-md-h {
   font-family: ui-monospace, Consolas, Menlo, monospace;
   background: rgba(127, 127, 127, 0.15);
   padding: 0.1em 0.32em;
-  border-radius: 4px;
+  border-radius: 0;
 }
 .msg-answer-md blockquote code,
 .msg-md-pre code {
@@ -2906,7 +2943,7 @@ h3.msg-md-h {
   max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 0;
 }
 table.msg-md-table {
   border-collapse: collapse;
@@ -7284,7 +7321,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 }
 
 .defined-model-editor {
-  width: min(560px, calc(100vw - 48px));
+  width: min(840px, calc(100vw - 48px));
   border: 1px solid var(--border);
   background: var(--bg-elev);
   box-shadow: -12px 0 32px rgba(0, 0, 0, 0.28);
@@ -9430,6 +9467,50 @@ body.pane-resizing .artifacts-file-list {
   padding-top: 8px;
   border-top: 1px solid var(--border);
   font-size: 11px;
+}
+
+/* 索引使用率（代码索引 / 结构索引）：与「工具 Harness」同一套行样式，多一层子行 */
+.help-index-window {
+  color: var(--text-mute);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.help-index-usage-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.help-index-usage-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.help-index-usage-line {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) 52px minmax(72px, max-content);
+  gap: 8px;
+  align-items: center;
+}
+
+.help-index-usage-share {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.help-index-usage-zero {
+  color: var(--text-mute);
+  font-size: 11px;
+}
+
+.help-index-usage-row .help-harness-errors {
+  margin-top: 2px;
+  padding-top: 6px;
 }
 
 .help-harness-err-tag {

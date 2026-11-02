@@ -92,12 +92,77 @@ function clampBrowserPanelWidthToChatMin() {
   }
 }
 
-function isWorktreeStyleOverlayOpen() {
-  var nodes = document.querySelectorAll('.worktree-apply-overlay');
+/**
+ * 会整块盖住面板区的模态弹层（唯一来源）。
+ *
+ * 原生 BrowserView 画在所有 DOM 之上：这些弹层一打开，弹层在面板区的部分就会被
+ * 浏览器画面盖住、点击也被原生视图吞掉。所以「有模态层 ⇒ 先收起原生视图」，
+ * 弹层关掉再由同一条同步链恢复（见 setupBlockingOverlayWatch）。
+ *
+ * 只列铺满窗口的模态层：.select-menu-layer 这类要浮在浏览器上方的浮层不在其中
+ * （它不该让浏览器画面消失）。
+ */
+var BLOCKING_OVERLAY_SELECTOR = [
+  '.settings-overlay', // 设置 / 帮助 / 连接 / 端信任 / 定时编辑 / 文本输入
+  '.worktree-apply-overlay', // Worktree 变更应用 / AGENTS.md 预览
+  '.skill-detail-overlay', // 技能详情 / 新建 / MCP 添加
+  '.execute-overlay', // 定时任务
+  '.defined-model-editor-overlay', // 模型编辑器
+  '.agent-arbitration-overlay'
+].join(',');
+
+function isBlockingOverlayOpen() {
+  var nodes = document.querySelectorAll(BLOCKING_OVERLAY_SELECTOR);
   for (var i = 0; i < nodes.length; i++) {
     if (!nodes[i].hidden) return true;
   }
   return false;
+}
+
+/**
+ * 模态层开/关 → 重算原生视图边界（唯一触发点）。
+ *
+ * 弹层有两个开法：改 hidden（设置、帮助、Worktree…）与现造现插（showTextPrompt）。
+ * 所以既看属性也看增删；命中弹层才同步，避免聊天气泡流把这条链拖成每帧一次 IPC。
+ */
+function setupBlockingOverlayWatch() {
+  if (typeof MutationObserver !== 'function' || !document.body) return;
+
+  function isOverlayNode(node) {
+    return !!(node && node.nodeType === 1 && node.matches && node.matches(BLOCKING_OVERLAY_SELECTOR));
+  }
+
+  function touchesOverlay(records) {
+    for (var i = 0; i < records.length; i++) {
+      var record = records[i];
+      if (record.type === 'attributes') {
+        if (isOverlayNode(record.target)) return true;
+        continue;
+      }
+      var lists = [record.addedNodes, record.removedNodes];
+      for (var l = 0; l < lists.length; l++) {
+        var nodes = lists[l];
+        for (var n = 0; n < nodes.length; n++) {
+          var node = nodes[n];
+          if (isOverlayNode(node)) return true;
+          if (node && node.nodeType === 1 && node.querySelector && node.querySelector(BLOCKING_OVERLAY_SELECTOR)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  new MutationObserver(function (records) {
+    if (!touchesOverlay(records)) return;
+    syncBrowserBounds();
+  }).observe(document.body, {
+    attributes: true,
+    attributeFilter: ['hidden'],
+    childList: true,
+    subtree: true
+  });
 }
 
 function syncBrowserBounds() {
@@ -107,7 +172,7 @@ function syncBrowserBounds() {
   var browserPane = document.querySelector('[data-side-pane="browser"]');
   var open = !!(panel && !panel.hidden && browserPane && !browserPane.hidden);
   // Native BrowserView paints above the page and steals clicks on overlapping modals.
-  if (!open || isWorktreeStyleOverlayOpen()) {
+  if (!open || isBlockingOverlayOpen()) {
     browserApi.browserSetPanelState({ open: false }).catch(function () {});
     return;
   }
@@ -508,11 +573,7 @@ function initBrowserPanel() {
     window.addEventListener('resize', function () {
       syncBrowserBounds();
     });
-    document.querySelectorAll('.worktree-apply-overlay').forEach(function (el) {
-      new MutationObserver(function () {
-        syncBrowserBounds();
-      }).observe(el, { attributes: true, attributeFilter: ['hidden'] });
-    });
+    setupBlockingOverlayWatch();
   } catch (e) {
     // ignore
   }
