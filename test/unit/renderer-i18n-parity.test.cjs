@@ -59,7 +59,6 @@ describe('renderer-i18n 文案表', () => {
       'tts_no_model_hint',
       'tts_audio_error',
       'tts_auto_read_label',
-      'tts_auto_read_hint_on',
       'tts_auto_read_hint_off'
     ];
     for (const key of needed) {

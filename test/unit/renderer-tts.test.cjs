@@ -97,13 +97,19 @@ function makeEl(tag) {
   return el;
 }
 
+/**
+ * 默认 `makeEl` 只会造空壳（没有 childNodes / TreeWalker）：此时的映射为 null，
+   * 朗读退回 rawContent —— 正是「气泡还没渲染成 DOM」的退化路径。
+   * 需要验偏移数学的用例传 `dom`（见 makeFakeDom）。
+   */
 function loadTtsModule({
   settings,
   modelCapabilities,
   gatewayCall,
   toasts,
   audioFails = false,
-  audioEnds = 'auto'
+  audioEnds = 'auto',
+  dom = null
 }) {
   const source = fs.readFileSync(SRC, 'utf8');
   const factory = new Function(
@@ -126,11 +132,16 @@ function loadTtsModule({
        playTtsText,
        maybeAutoReadAssistantBubble,
        stopTtsPlayback,
-       splitTtsChunks
+       splitTtsChunks,
+       splitTtsChunksDetailed,
+       ttsTextMapOf,
+       ttsRangesForSpan,
+       ttsSentenceCursor,
+       ttsTrimSpan
      };`
   );
-  const window = { ModelCapabilities: modelCapabilities };
-  const document = { createElement: makeEl };
+  const window = { ModelCapabilities: modelCapabilities, ...(dom ? dom.window : {}) };
+  const document = dom ? dom.document : { createElement: makeEl };
   const audioCalls = [];
   let blobSeq = 0;
   class FakeAudio {
@@ -199,6 +210,98 @@ function makeBubbleWithText(text) {
 
 function ttsCapabilities(config) {  return {
     getTtsApiConfigFromSettings: (s) => (config && (s || {}).customModels ? config : null)
+  };
+}
+
+/**
+ * 极简假 DOM：只实现 renderer-tts 用到的 `childNodes / parentElement / closest /
+ * createTreeWalker / createRange`。用来验「朗读文本 ↔ DOM 偏移」的数学，
+ * 不模拟样式与布局。
+ */
+function makeFakeDom() {
+  function closestOf(el, selector) {
+    const parts = String(selector)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      for (const part of parts) {
+        const byClass = part.startsWith('.') ? (` ${node.className || ''} `).includes(` ${part.slice(1)} `) : false;
+        const byTag = !part.startsWith('.') && node.tagName === part.toUpperCase();
+        if (byClass || byTag) return node;
+      }
+    }
+    return null;
+  }
+
+  function el(tag, className) {
+    const node = {
+      nodeType: 1,
+      tagName: String(tag || 'div').toUpperCase(),
+      className: className || '',
+      childNodes: [],
+      parentElement: null,
+      dataset: {},
+      appendChild(child) {
+        node.childNodes.push(child);
+        child.parentElement = node;
+        return child;
+      },
+      querySelector() {
+        return null;
+      },
+      closest(selector) {
+        return closestOf(node, selector);
+      }
+    };
+    return node;
+  }
+
+  function text(value) {
+    return { nodeType: 3, nodeValue: value, childNodes: [], parentElement: null };
+  }
+
+  function textNodesOf(root) {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.childNodes || []) {
+        if (child.nodeType === 3) out.push(child);
+        else walk(child);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  const document = {
+    createElement: makeEl,
+    createTreeWalker(root, _what, filter) {
+      const accepted = textNodesOf(root).filter((n) => filter.acceptNode(n) === 1);
+      let index = -1;
+      return {
+        nextNode() {
+          index += 1;
+          return index < accepted.length ? accepted[index] : null;
+        }
+      };
+    },
+    createRange() {
+      const range = { start: null, end: null };
+      range.setStart = (node, offset) => {
+        range.start = { node, offset };
+      };
+      range.setEnd = (node, offset) => {
+        range.end = { node, offset };
+      };
+      return range;
+    }
+  };
+
+  return {
+    document,
+    window: { NodeFilter: { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 } },
+    el,
+    text
   };
 }
 
@@ -367,6 +470,169 @@ describe('splitTtsChunks（分句切块：首字 2~3 秒出声的前提）', () 
     const { splitTtsChunks } = load();
     expect(splitTtsChunks('   ')).toEqual([]);
     expect(splitTtsChunks('')).toEqual([]);
+  });
+});
+
+describe('splitTtsChunksDetailed（切块要带原文偏移：「正在念哪一句」靠它对上 DOM）', () => {
+  function load() {
+    return loadTtsModule({
+      settings: settingsWithTts,
+      modelCapabilities: ttsCapabilities({ baseUrl: 'http://x/v1', model: 'm' }),
+      gatewayCall: async () => ({}),
+      toasts: []
+    });
+  }
+
+  it('每块报出的偏移恰好圈住这块的文本，且顺序不重叠', () => {
+    const { splitTtsChunksDetailed } = load();
+    const text = '第一句话在这里。第二句稍微长一点，凑到目标长度。第三句。\n第四段换行了。';
+    const chunks = splitTtsChunksDetailed(text);
+    expect(chunks.length).toBeGreaterThan(0);
+    let prevEnd = 0;
+    for (const chunk of chunks) {
+      // 块文本是各句裁剪后拼起来的，与原文区间只差空白
+      expect(text.slice(chunk.start, chunk.end).replace(/\s/g, '')).toBe(
+        chunk.text.replace(/\s/g, '')
+      );
+      expect(chunk.start).toBeGreaterThanOrEqual(prevEnd);
+      prevEnd = chunk.end;
+    }
+  });
+
+  it('文本与 splitTtsChunks 完全一致（偏移是附加信息，不改念的内容）', () => {
+    const { splitTtsChunks, splitTtsChunksDetailed } = load();
+    const text = '第一句。第二句。第三句。第四句。'.repeat(6);
+    expect(splitTtsChunksDetailed(text).map((c) => c.text)).toEqual(splitTtsChunks(text));
+  });
+
+  it('单句超长被硬切时偏移仍落在这句里（高亮不跳到别处）', () => {
+    const { splitTtsChunksDetailed } = load();
+    const long = '啊'.repeat(500);
+    const chunks = splitTtsChunksDetailed(long);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.start).toBe(0);
+      expect(chunk.end).toBe(long.length);
+    }
+  });
+});
+
+describe('ttsTextMapOf / ttsRangesForSpan（逐句高亮：切块偏移必须落回正文 DOM）', () => {
+  function loadWithDom(dom) {
+    return loadTtsModule({
+      settings: settingsWithTts,
+      modelCapabilities: ttsCapabilities({ baseUrl: 'http://x/v1', model: 'm' }),
+      gatewayCall: async () => ({}),
+      toasts: [],
+      dom
+    });
+  }
+
+  /** 一段渲染后的正文：两个段落 + 一个代码块（代码块不念也不高亮）。
+      第一段刻意超过一块的目标长度，好让「第二段」落在下一块里。 */
+  function buildAnswer(dom) {
+    const answer = dom.el('div', 'msg-answer msg-answer-rich');
+    const md = answer.appendChild(dom.el('div', 'msg-answer-md'));
+    md.appendChild(dom.el('p')).appendChild(dom.text('甲'.repeat(100) + '。'));
+    md.appendChild(dom.el('p')).appendChild(dom.text('第二段。'));
+    md.appendChild(dom.el('pre')).appendChild(dom.text('const a = 1;'));
+    return answer;
+  }
+
+  function textOfRanges(ranges) {
+    return ranges
+      .map((range) => {
+        const value = range.start.node.nodeValue;
+        const to = range.start.node === range.end.node ? range.end.offset : value.length;
+        return value.slice(range.start.offset, to);
+      })
+      .join('');
+  }
+
+  it('正文文本按块断句，代码块不参与（否则会念出代码）', () => {
+    const dom = makeFakeDom();
+    const answer = buildAnswer(dom);
+    const { ttsTextMapOf } = loadWithDom(dom);
+    const map = ttsTextMapOf(answer);
+    expect(map.text).toBe(`${'甲'.repeat(100)}。\n第二段。`);
+    expect(map.text).not.toContain('const a = 1');
+  });
+
+  it('每块的偏移换成 Range 后取回的就是这块文本（念的和高亮的是同一段）', () => {
+    const dom = makeFakeDom();
+    const answer = buildAnswer(dom);
+    const { ttsTextMapOf, splitTtsChunksDetailed, ttsRangesForSpan } = loadWithDom(dom);
+    const map = ttsTextMapOf(answer);
+    const chunks = splitTtsChunksDetailed(map.text);
+    expect(chunks).toHaveLength(2);
+    for (const chunk of chunks) {
+      const ranges = ttsRangesForSpan(map, chunk.start, chunk.end);
+      expect(ranges.length).toBeGreaterThan(0);
+      expect(textOfRanges(ranges).replace(/\s/g, '')).toBe(chunk.text.replace(/\s/g, ''));
+    }
+    // 第二块必须落在第二段的那个文本节点上（不是第一段的节点）
+    const second = ttsRangesForSpan(map, chunks[1].start, chunks[1].end);
+    expect(second).toHaveLength(1);
+    expect(second[0].start.node.nodeValue).toBe('第二段。');
+    expect(second[0].start.offset).toBe(0);
+  });
+
+  it('首尾空白被裁掉后偏移仍指向原文位置', () => {
+    const dom = makeFakeDom();
+    const answer = dom.el('div', 'msg-answer');
+    const p = answer.appendChild(dom.el('p'));
+    const node = p.appendChild(dom.text('  开头一句。  '));
+    const { ttsTextMapOf, splitTtsChunksDetailed, ttsRangesForSpan } = loadWithDom(dom);
+    const map = ttsTextMapOf(answer);
+    expect(map.text).toBe('开头一句。');
+    const chunks = splitTtsChunksDetailed(map.text);
+    const [range] = ttsRangesForSpan(map, chunks[0].start, chunks[0].end);
+    expect(range.start.node).toBe(node);
+    expect(range.start.offset).toBe(2);
+    expect(range.end.node).toBe(node);
+    expect(range.end.offset).toBe(7);
+  });
+});
+
+describe('ttsSentenceCursor（一块多句：跟着音频进度在句之间推进高亮）', () => {
+  const chunk = {
+    start: 0,
+    end: 20,
+    sentences: [
+      { start: 0, end: 5 },
+      { start: 5, end: 15 },
+      { start: 15, end: 20 }
+    ]
+  };
+
+  it('按字数加权：进度走到哪，高亮就落在哪一句', () => {
+    const { ttsSentenceCursor } = loadTtsModule({
+      settings: settingsWithTts,
+      modelCapabilities: ttsCapabilities({ baseUrl: 'http://x/v1', model: 'm' }),
+      gatewayCall: async () => ({}),
+      toasts: []
+    });
+    const cursor = ttsSentenceCursor(chunk);
+    cursor.show(0);
+    expect(cursor.current()).toEqual({ start: 0, end: 5 });
+    cursor.show(0.5); // 权重 5/10/5 → 中点落在第二句
+    expect(cursor.current()).toEqual({ start: 5, end: 15 });
+    cursor.show(0.99);
+    expect(cursor.current()).toEqual({ start: 15, end: 20 });
+    cursor.show(0); // 进度回退（重播 / 时间戳抖动）也能跟着回去
+    expect(cursor.current()).toEqual({ start: 0, end: 5 });
+  });
+
+  it('没有 sentences 的块退化成整块高亮', () => {
+    const { ttsSentenceCursor } = loadTtsModule({
+      settings: settingsWithTts,
+      modelCapabilities: ttsCapabilities({ baseUrl: 'http://x/v1', model: 'm' }),
+      gatewayCall: async () => ({}),
+      toasts: []
+    });
+    const cursor = ttsSentenceCursor({ start: 3, end: 42 });
+    cursor.show(0.5);
+    expect(cursor.current()).toEqual({ start: 3, end: 42 });
   });
 });
 

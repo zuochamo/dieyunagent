@@ -73,7 +73,6 @@ const I18N_MESSAGES = {
     trace_follow_writes: '编辑区跟随 Agent 写入',
     trace_readiness: '显示完成验收提示',
     trace_damped_flow: '无极阻尼',
-    trace_damped_flow_desc: '思考区改为连续入流：新内容按阻尼曲线滑入，视口跟着连续下淌，不再一行一行蹦。',
     help_usage: '使用说明',
     help_stats: '统计信息',
     help_logs: '运行日志',
@@ -193,7 +192,6 @@ const I18N_MESSAGES = {
     tts_no_model_hint: '在设置 → 模型里添加一个「语音合成」类型的模型',
     tts_audio_error: '音频无法播放（code %s）',
     tts_auto_read_label: '自动朗读新回复',
-    tts_auto_read_hint_on: '每轮回复结束后自动朗读。朗读中可在回复下方点「停止」，切换会话也会停。',
     tts_auto_read_hint_off: '目前没有「语音合成」类型的模型：先在「自定义模型」里把模型类型改成「语音合成」，这里才能启用。'
   },
   en: {
@@ -264,8 +262,6 @@ const I18N_MESSAGES = {
     trace_follow_writes: 'Follow agent writes in editor',
     trace_readiness: 'Show completion checks',
     trace_damped_flow: 'Stepless damping',
-    trace_damped_flow_desc:
-      'Thoughts flow in continuously: new content glides in on a damped curve and the view follows without jumping line by line.',
     help_usage: 'Guide',
     help_stats: 'Stats',
     help_logs: 'Logs',
@@ -386,8 +382,6 @@ const I18N_MESSAGES = {
     tts_no_model_hint: 'Add a model of type "Speech synthesis" under Settings → Models',
     tts_audio_error: 'Audio could not be played (code %s)',
     tts_auto_read_label: 'Read new replies aloud',
-    tts_auto_read_hint_on:
-      'Reads each reply aloud when the turn finishes. While reading, press "Stop" under the reply; switching sessions also stops it.',
     tts_auto_read_hint_off:
       'No "Speech synthesis" model yet: change a custom model type to "Speech synthesis" first — then this switch can be enabled.'
   }

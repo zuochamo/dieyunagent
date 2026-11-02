@@ -1,4 +1,4 @@
-/* global window, document, settings, currentSessionId, gatewayCall, showAgentToast, base64ToUint8Array, uiText, syncTtsAutoReadControl */
+/* global window, document, settings, currentSessionId, gatewayCall, showAgentToast, base64ToUint8Array, uiText, syncTtsAutoReadControl, chatList */
 'use strict';
 
 /**
@@ -13,6 +13,10 @@
  *
  * 配置来源：设置里 `kind: 'tts'` 的模型（`ModelCapabilities.getTtsApiConfigFromSettings`）。
  * 没配就**不显示**朗读按钮 —— 不猜、不兜底到转写模型。
+ *
+ * 「读到哪一句」：朗读文本就是渲染后正文的文本（`ttsTextMapOf`），切块带原文偏移
+ * （`splitTtsChunksDetailed`），偏移换成 DOM Range 交给 CSS Custom Highlight 高亮。
+ * 一体化的一条链 —— 不做「按字符串在 DOM 里搜句子」的二次匹配（错位比没有更难发现）。
  */
 
 /** 播放器单例：同一时刻只播一段；再次点同一条 = 停止。 */
@@ -41,6 +45,17 @@ let ttsSettleCurrentChunk = null;
  * 不去重就是两条 toast 叠在一起（用户看到的是同一件事说了两遍）。
  */
 let ttsFailureNotified = false;
+
+/**
+ * 「正在念哪一句」的现场状态（高亮的唯一来源）。
+ * 只在两处动：`playTtsText`（一轮开始 / 每句推进）与 `teardownTtsPlayer`（收尾）。
+ */
+/** @type {{ text: string, parts: { node: Node, start: number, end: number }[], shift: number }|null} */
+let ttsReadMap = null;
+/** @type {{ text: string, start: number, end: number, sentences: { start: number, end: number }[] }[]} */
+let ttsReadChunks = [];
+let ttsReadChunkIndex = -1;
+let ttsReadChunkSentence = -1;
 
 /** 文案走 i18n（`renderer-i18n.js` 的 uiText），英文界面下不会冒中文。 */
 function ttsMsg(key, fallback) {
@@ -81,6 +96,12 @@ function teardownTtsPlayer() {
   ttsActiveBtn = null;
   ttsPlayingText = '';
   if (btn) setTtsBtnState(btn, false);
+  // 高亮跟着一起收（否则停了声音还留着「正在念这句」的记号）
+  clearTtsReadingMark();
+  ttsReadMap = null;
+  ttsReadChunks = [];
+  ttsReadChunkIndex = -1;
+  ttsReadChunkSentence = -1;
 }
 
 function stopTtsPlayback() {
@@ -133,10 +154,90 @@ function ttsSpeakableText(raw) {
   return text.trim();
 }
 
-/** 气泡里「这条回复的正文」：优先取渲染时留下的原文（渲染成 HTML 后 textContent 会丢结构）。 */
+/**
+ * 不念也不高亮的子树：代码块（念出来是噪音）、流程图（SVG 里全是标签文字）、按钮。
+ * 行内代码不在其中 —— 它本来就该念。
+ */
+const TTS_SKIP_SELECTOR = 'pre, svg, button, script, style, .msg-mermaid';
+/** 这些标签的文字之间要断句（相邻段落不能被当成同一句话连读）。 */
+const TTS_BLOCK_TAGS =
+  'p, li, ol, ul, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, summary, div';
+
+/**
+ * 气泡里的正文元素：可朗读文本与逐句高亮都以它为根。
+ *
+ * 大多数气泡有 `.msg-answer`（正文与思考区分开）。历史消息没有 trace 时走的是
+ * 「纯文本直接塞进气泡」那条渲染路，此时正文就是气泡本身 —— 只有确认气泡里
+ * 没有思考区才认它，避免把思考过程念出来。
+ */
+function ttsAnswerElOf(bubble) {
+  if (!bubble || typeof bubble.querySelector !== 'function') return null;
+  const answer = bubble.querySelector('.msg-answer');
+  if (answer) return answer;
+  if (bubble.querySelector('.msg-thinking-outer, .msg-thinking')) return null;
+  return bubble;
+}
+
+/**
+ * 渲染后正文 → `{ text, parts, shift }`：朗读文本 ↔ DOM 节点的一一映射。
+ *
+ * 为什么要映射：逐句高亮必须落成 DOM Range，只有「念的文本就是这份 DOM 的文本」时，
+ * 切块偏移才对得上。所以正文优先用这里的文本，`rawContent` 只在 DOM 不可用时退化
+ * （气泡还没渲染、或单测没有真实 DOM）。
+ *
+ * - `parts` 是每个文本节点在 `text` 里的区间（用于偏移 → Range）；
+ * - `shift` 是首尾空白被裁掉的长度（偏移先加 `shift` 再落回 `parts`）。
+ *
+ * @param {HTMLElement|null} root
+ * @returns {{ text: string, parts: { node: Node, start: number, end: number }[], shift: number }|null}
+ */
+function ttsTextMapOf(root) {
+  if (!root || !root.childNodes) return null;
+  if (typeof document === 'undefined' || typeof document.createTreeWalker !== 'function') return null;
+  const NF = typeof window !== 'undefined' ? window.NodeFilter : null;
+  if (!NF || typeof NF.SHOW_TEXT !== 'number') return null;
+  let walker;
+  try {
+    walker = document.createTreeWalker(root, NF.SHOW_TEXT, {
+      acceptNode(node) {
+        const value = node.nodeValue || '';
+        // HTML 解析器不会留下 \r，出现就说明不是正常渲染结果 —— 不参与映射（偏移会失真）
+        if (!value.trim() || value.includes('\r')) return NF.FILTER_REJECT;
+        const parent = node.parentElement;
+        if (parent && typeof parent.closest === 'function' && parent.closest(TTS_SKIP_SELECTOR)) {
+          return NF.FILTER_REJECT;
+        }
+        return NF.FILTER_ACCEPT;
+      }
+    });
+  } catch {
+    return null;
+  }
+  let text = '';
+  const parts = [];
+  let lastBlock = null;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const parent = node.parentElement;
+    const block = parent && typeof parent.closest === 'function' ? parent.closest(TTS_BLOCK_TAGS) : null;
+    // 换块补一个断句符：否则相邻段落会被当成同一句话连读（长短与停顿都乱）
+    if (text && block !== lastBlock) text += '\n';
+    lastBlock = block;
+    const start = text.length;
+    text += node.nodeValue || '';
+    parts.push({ node, start, end: text.length });
+  }
+  const shift = text.length - text.trimStart().length;
+  const trimmed = text.trim();
+  if (!trimmed || !parts.length) return null;
+  return { text: trimmed, parts, shift };
+}
+
+/** 气泡里「这条回复的正文」：优先渲染后的正文（可与高亮共用同一份偏移）。 */
 function ttsTextOfBubble(bubble) {
   if (!bubble) return '';
-  const answer = bubble.querySelector ? bubble.querySelector('.msg-answer') : null;
+  const answer = ttsAnswerElOf(bubble);
+  const map = ttsTextMapOf(answer);
+  if (map) return map.text;
   const raw = String(answer?.dataset?.rawContent || '').trim();
   const text = ttsSpeakableText(raw || answer?.innerText || bubble.innerText || bubble.textContent || '');
   return text;
@@ -179,47 +280,218 @@ function ttsSafeSlice(str, max) {
   return str.slice(0, end);
 }
 
+/** 裁掉空白后的句子（带原文偏移，供高亮定位）。 */
+function ttsTrimSpan(raw, start, end) {
+  let from = start;
+  let to = end;
+  while (from < to && /\s/.test(raw[from])) from += 1;
+  while (to > from && /\s/.test(raw[to - 1])) to -= 1;
+  if (to <= from) return null;
+  return { text: raw.slice(from, to), start: from, end: to };
+}
+
 /**
- * 把可朗读文本切成播放块。
+ * 按句末标点成句（带原文偏移）。切块与高亮都只认这一个句界，不会出现
+ * 「念的是这句、高亮的是那句」。
+ * @param {string} raw 已做换行归一化的文本
+ * @returns {{ text: string, start: number, end: number }[]}
+ */
+function ttsSentenceSpans(raw) {
+  const spans = [];
+  let bufStart = 0;
+  let inBuf = false;
+  for (let i = 0; i < raw.length; i += 1) {
+    if (!inBuf) {
+      bufStart = i;
+      inBuf = true;
+    }
+    if (TTS_CHUNK_BREAK.includes(raw[i])) {
+      const span = ttsTrimSpan(raw, bufStart, i + 1);
+      if (span) spans.push(span);
+      inBuf = false;
+    }
+  }
+  if (inBuf) {
+    const span = ttsTrimSpan(raw, bufStart, raw.length);
+    if (span) spans.push(span);
+  }
+  return spans;
+}
+
+/**
+ * 把可朗读文本切成播放块，并报出每块覆盖原文的哪一段、由哪几句组成。
  *
  * 先按句末标点成句，再把短句合并到 TTS_CHUNK_TARGET；单句超长时按上限硬切。
  * 拼接结果与原文只差空白（不丢内容 —— 少念一句比念错更难发现）。
+ *
+ * 块是为了「合成延迟」而合并的，用户要看的是**句**：`sentences` 记下这块由哪几句
+ * 拼成，播放时按音频进度把高亮在句之间推进（见 `playTtsText`）。
+ *
+ * `start/end` 是字面偏移（不含首尾空白）：正常块 = 首句起点到末句终点；
+ * 硬切出来的块仍指回它所在的那一句（同一句被切成几口，高亮看不出差别）。
+ *
+ * @param {string} text
+ * @returns {{ text: string, start: number, end: number, sentences: { start: number, end: number }[] }[]}
+ */
+function splitTtsChunksDetailed(text) {
+  const raw = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
+  if (!raw.trim()) return [];
+  const chunks = [];
+  /** @type {{ text: string, start: number, end: number, sentences: { start: number, end: number }[] }|null} */
+  let cur = null;
+  const flush = () => {
+    const body = cur && cur.text.trim();
+    if (body) chunks.push({ text: body, start: cur.start, end: cur.end, sentences: cur.sentences });
+    cur = null;
+  };
+  for (const sentence of ttsSentenceSpans(raw)) {
+    const span = { start: sentence.start, end: sentence.end };
+    if (cur && cur.text.length + sentence.text.length > TTS_CHUNK_TARGET) flush();
+    if (!cur) {
+      cur = { text: sentence.text, start: sentence.start, end: sentence.end, sentences: [span] };
+    } else {
+      cur.text += sentence.text;
+      cur.end = sentence.end;
+      cur.sentences.push(span);
+    }
+    while (cur.text.length > TTS_CHUNK_MAX) {
+      const head = ttsSafeSlice(cur.text, TTS_CHUNK_MAX);
+      const body = head.trim();
+      if (body) chunks.push({ text: body, start: cur.start, end: cur.end, sentences: cur.sentences.slice() });
+      cur.text = cur.text.slice(head.length);
+      // 切剩的部分在同一句里：进度与高亮都按这一句算
+      cur.start = sentence.start;
+      cur.end = sentence.end;
+      cur.sentences = [span];
+    }
+    if (!cur.text.trim()) cur = null;
+  }
+  flush();
+  return chunks;
+}
+
+/**
+ * 把可朗读文本切成播放块（只要文本）。
+ * 切块规则与偏移的唯一实现在 `splitTtsChunksDetailed`。
  *
  * @param {string} text
  * @returns {string[]}
  */
 function splitTtsChunks(text) {
-  const raw = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
-  if (!raw.trim()) return [];
-  const sentences = [];
-  let buf = '';
-  for (const ch of raw) {
-    buf += ch;
-    if (TTS_CHUNK_BREAK.includes(ch)) {
-      if (buf.trim()) sentences.push(buf.trim());
-      buf = '';
-    }
-  }
-  if (buf.trim()) sentences.push(buf.trim());
+  return splitTtsChunksDetailed(text).map((chunk) => chunk.text);
+}
 
-  const chunks = [];
-  let cur = '';
-  const flush = () => {
-    const t = cur.trim();
-    if (t) chunks.push(t);
-    cur = '';
-  };
-  for (const sentence of sentences) {
-    if (cur && cur.length + sentence.length > TTS_CHUNK_TARGET) flush();
-    cur += sentence;
-    while (cur.length > TTS_CHUNK_MAX) {
-      const head = ttsSafeSlice(cur, TTS_CHUNK_MAX);
-      chunks.push(head.trim());
-      cur = cur.slice(head.length);
+/** CSS Custom Highlight 名字（样式在 styles.css 的 `::highlight(tts-reading)`）。 */
+const TTS_HIGHLIGHT_NAME = 'tts-reading';
+
+function ttsHighlightSupported() {
+  return (
+    typeof CSS !== 'undefined' &&
+    !!CSS &&
+    !!CSS.highlights &&
+    typeof window !== 'undefined' &&
+    typeof window.Highlight === 'function'
+  );
+}
+
+/**
+ * 文本偏移 → DOM Range（一块可能横跨多个文本节点，也可能只覆盖某句的一部分）。
+ * @param {typeof ttsReadMap} map
+ */
+function ttsRangesForSpan(map, start, end) {
+  if (!map || typeof document === 'undefined' || typeof document.createRange !== 'function') return [];
+  const from = start + map.shift;
+  const to = end + map.shift;
+  const out = [];
+  for (const part of map.parts) {
+    const a = Math.max(from, part.start);
+    const b = Math.min(to, part.end);
+    if (b <= a) continue;
+    try {
+      const range = document.createRange();
+      range.setStart(part.node, a - part.start);
+      range.setEnd(part.node, b - part.start);
+      out.push(range);
+    } catch {
+      // 节点已脱离文档（整篇重渲染）：这一块不留高亮，重渲染后的重新认领会重算
     }
   }
-  flush();
-  return chunks;
+  return out;
+}
+
+/** 念到看不见的位置时把这一句带进视野（本来就看得到就不动，不抢用户的滚动）。 */
+function ttsScrollRangeIntoView(range) {
+  const host = typeof chatList !== 'undefined' ? chatList : null;
+  if (!host || typeof host.getBoundingClientRect !== 'function') return;
+  if (!range || typeof range.getBoundingClientRect !== 'function') return;
+  const rect = range.getBoundingClientRect();
+  if (!rect.height && !rect.width) return;
+  const box = host.getBoundingClientRect();
+  if (rect.top >= box.top + 8 && rect.bottom <= box.bottom - 8) return;
+  const delta = rect.top - box.top - box.height / 2 + rect.height / 2;
+  try {
+    host.scrollTo({ top: Math.max(0, host.scrollTop + delta), behavior: 'smooth' });
+  } catch {
+    // ignore：老滚动容器 / 元素已失效
+  }
+}
+
+/**
+ * 把高亮落在「正在念的这一句」上；没有映射或不支持 Highlight API 时清掉（朗读不受影响）。
+ * @param {{ start: number, end: number }|null} span
+ */
+function markTtsReadingSpan(span) {
+  if (!ttsHighlightSupported()) return;
+  const ranges = span ? ttsRangesForSpan(ttsReadMap, span.start, span.end) : [];
+  if (!ranges.length) {
+    CSS.highlights.delete(TTS_HIGHLIGHT_NAME);
+    return;
+  }
+  CSS.highlights.set(TTS_HIGHLIGHT_NAME, new window.Highlight(...ranges));
+  ttsScrollRangeIntoView(ranges[0]);
+}
+
+function clearTtsReadingMark() {
+  if (typeof CSS !== 'undefined' && CSS && CSS.highlights && CSS.highlights.delete) {
+    CSS.highlights.delete(TTS_HIGHLIGHT_NAME);
+  }
+}
+
+/**
+ * 一块之内按音频进度在句子之间推进高亮。
+ *
+ * 块是为了合成延迟才把几句合并起来的，念的时候是连续的：用 `currentTime / duration`
+ * 按字数加权落到具体的句子上（不需要服务器给时间戳）。拿不到 duration 时退回整块高亮。
+ *
+ * @param {{ sentences: { start: number, end: number }[], start: number, end: number }} chunk
+ * @returns {{ show: (ratio: number) => void, current: () => { start: number, end: number } }}
+ */
+function ttsSentenceCursor(chunk) {
+  const spans = chunk && chunk.sentences && chunk.sentences.length
+    ? chunk.sentences
+    : [{ start: chunk.start, end: chunk.end }];
+  const weights = spans.map((span) => Math.max(1, span.end - span.start));
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  let index = -1;
+  const pick = (ratio) => {
+    const target = Math.max(0, Math.min(1, ratio)) * total;
+    let acc = 0;
+    for (let i = 0; i < spans.length; i += 1) {
+      acc += weights[i];
+      if (target < acc) return i;
+    }
+    return spans.length - 1;
+  };
+  return {
+    show(ratio) {
+      const next = pick(ratio);
+      if (next === index) return;
+      index = next;
+      ttsReadChunkSentence = next;
+      markTtsReadingSpan(spans[next]);
+    },
+    current: () => spans[Math.max(0, index)]
+  };
 }
 
 /** 合成一块，返回可直接播放的 Blob URL。 */
@@ -251,8 +523,11 @@ async function ttsFetchChunkUrl(chunkText, cfg, token) {
 /**
  * 播一块，等到播完（或被停止 / 出错）才 resolve。
  * 停止时 `teardownTtsPlayer` 会调 `ttsSettleCurrentChunk` 让这里结算，不悬挂。
+ *
+ * @param {string} url
+ * @param {(ratio: number) => void} [onProgress] 播放进度（0~1），用来推进句级高亮
  */
-function ttsPlayChunkUrl(url) {
+function ttsPlayChunkUrl(url, onProgress) {
   return new Promise((resolve, reject) => {
     const audio = new Audio(url);
     ttsAudioEl = audio;
@@ -275,6 +550,13 @@ function ttsPlayChunkUrl(url) {
       );
       settle(err);
     });
+    if (typeof onProgress === 'function') {
+      audio.addEventListener('timeupdate', () => {
+        const total = audio.duration;
+        if (!Number.isFinite(total) || total <= 0) return;
+        onProgress(Math.min(1, audio.currentTime / total));
+      });
+    }
     const started = audio.play();
     if (started && typeof started.catch === 'function') started.catch((err) => settle(err));
   });
@@ -284,8 +566,9 @@ function ttsPlayChunkUrl(url) {
  * 合成并播放一段文本：**分块 + 边播边合成下一块**。
  * @param {string} text
  * @param {HTMLButtonElement} [btn]
+ * @param {HTMLElement} [bubble] 这条回复的气泡：给了才知道该高亮正文里的哪一句
  */
-async function playTtsText(text, btn) {
+async function playTtsText(text, btn, bubble) {
   const content = String(text || '').trim();
   if (!content) {
     if (typeof showAgentToast === 'function') {
@@ -317,13 +600,25 @@ async function playTtsText(text, btn) {
   ttsPlayingText = content;
   setTtsBtnState(ttsActiveBtn, true);
 
-  const chunks = splitTtsChunks(content);
+  // 「正在念哪一句」的现场：同一个文本里出切块偏移，映射也必须来自这份文本
+  // （对不上就宁可不高亮 —— 错位高亮比没有高亮更难发现）
+  const map = bubble ? ttsTextMapOf(ttsAnswerElOf(bubble)) : null;
+  ttsReadMap = map && map.text === content ? map : null;
+  if (map && !ttsReadMap) {
+    // 不静默降级：正文与朗读文本对不上就标不出位置，留一句可排查的日志（朗读照常）
+    console.warn('[tts] 逐句高亮不可用：朗读文本与正文 DOM 不一致，本次只朗读、不标位置');
+  }
+
+  const chunks = splitTtsChunksDetailed(content);
+  ttsReadChunks = chunks;
+  ttsReadChunkIndex = -1;
+  ttsReadChunkSentence = -1;
   /** 已发出的块：index → Promise<url|null>，用来「播一块、预取下一块」 */
   const inflight = new Map();
   const startChunk = (index) => {
     if (index >= chunks.length) return null;
     if (!inflight.has(index)) {
-      const p = ttsFetchChunkUrl(chunks[index], cfg, token);
+      const p = ttsFetchChunkUrl(chunks[index].text, cfg, token);
       // 预取的块失败不该变成 unhandled rejection：真错会在 await 处抛出
       p.catch(() => {});
       inflight.set(index, p);
@@ -341,7 +636,15 @@ async function playTtsText(text, btn) {
       if (ttsActiveBtn) setTtsBtnState(ttsActiveBtn, true);
       startChunk(index + 1); // 边播边合成下一块
       if (!url) continue;
-      await ttsPlayChunkUrl(url);
+      // 出声的同时把高亮挪到这一句（合成等待期间不挪，避免「还没念就跳过去」）：
+      // 一块里有好几句，先亮第一句，之后按音频进度在句之间推进
+      ttsReadChunkIndex = index;
+      const cursor = ttsSentenceCursor(chunks[index]);
+      cursor.show(0);
+      await ttsPlayChunkUrl(url, (ratio) => {
+        if (token !== ttsToken) return;
+        cursor.show(ratio);
+      });
       if (token !== ttsToken) return;
     }
   } catch (err) {
@@ -396,7 +699,7 @@ function attachTtsBarToBubble(bubble) {
       }
       return;
     }
-    void playTtsText(text, btn);
+    void playTtsText(text, btn, bubble);
   });
   bar.appendChild(btn);
   bubble.parentNode.insertBefore(bar, bubble.nextSibling);
@@ -411,6 +714,12 @@ function attachTtsBarToBubble(bubble) {
   ) {
     ttsActiveBtn = btn;
     setTtsBtnState(btn, true);
+    // 重渲染换了整棵 DOM：旧 Range 全部失效，映射与高亮按新节点重算一次
+    const map = ttsTextMapOf(ttsAnswerElOf(bubble));
+    ttsReadMap = map && map.text === ttsPlayingText ? map : null;
+    const chunk = ttsReadChunks[ttsReadChunkIndex];
+    const sentences = chunk ? chunk.sentences || [] : [];
+    markTtsReadingSpan(sentences[ttsReadChunkSentence] || (chunk ? { start: chunk.start, end: chunk.end } : null));
   }
   return bar;
 }
@@ -438,7 +747,7 @@ function maybeAutoReadAssistantBubble(bubble, opts = {}) {
   if (!text) return false;
   if (ttsPending) return false;
   const btn = bubble.nextElementSibling?.querySelector?.('.msg-tts-btn') || null;
-  void playTtsText(text, btn);
+  void playTtsText(text, btn, bubble);
   return true;
 }
 

@@ -209,7 +209,8 @@ function updateSettingsFromModelLists() {
 /**
  * 「自动朗读新回复」开关的显示状态。
  *
- * 没有「语音合成」模型时置灰 —— 打开一个永远不会生效的开关比不显示更糟。
+ * 没有「语音合成」模型时置灰 —— 打开一个永远不会生效的开关比不显示更糟，
+ * 且只有在点不动的时候才需要一行文案解释原因；能正常朗读时不占多余说明。
  * 判据与朗读按钮同源（`ModelCapabilities.pickTtsModel`）。
  */
 function syncTtsAutoReadControl(s) {
@@ -221,8 +222,9 @@ function syncTtsAutoReadControl(s) {
   input.disabled = !hasTts;
   const hint = $('tts-auto-read-hint');
   if (hint) {
+    hint.hidden = hasTts;
     hint.textContent = hasTts
-      ? uiText('tts_auto_read_hint_on', '每轮回复结束后自动朗读。朗读中可在回复下方点「停止」，切换会话也会停。')
+      ? ''
       : uiText(
           'tts_auto_read_hint_off',
           '目前没有「语音合成」类型的模型：先在「自定义模型」里把模型类型改成「语音合成」，这里才能启用。'
@@ -834,10 +836,30 @@ async function testDefinedModelFromEditor() {
   }
   const modality = cfg.modalitySetting;
   if (modality === 'speech') {
-    setDefinedModelTestStatus(
-      '语音转写档位无法用文字测试：它要的是 /v1/audio/transcriptions（送录音进去）。请在输入框点麦克风实测。',
-      null
-    );
+    // 转写档位以前只能提示「请自己去点麦克风」。现在用一段静音样片走真实转写请求：
+    // 能测出端点是否存在（404）/ 参数形态（422）/ 鉴权，且不需要麦克风。
+    if (btn) btn.disabled = true;
+    setDefinedModelTestStatus('测试中…');
+    try {
+      const res = await gatewayCall('speech.transcribe_probe', {
+        model: cfg.name,
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        language: typeof getSpeechLanguage === 'function' ? getSpeechLanguage() : undefined,
+        headers: cfg.headers,
+        userAgent: cfg.userAgent
+      });
+      setDefinedModelTestStatus(
+        res?.silent
+          ? '测试通过：转写端点可用（样片是静音，所以没有文字）'
+          : `测试通过：${String(res?.text || '').trim().slice(0, 30)}`,
+        true
+      );
+    } catch (err) {
+      setDefinedModelTestStatus(`测试失败：${err.message || err}`, false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
     return;
   }
   if (btn) btn.disabled = true;
@@ -1001,6 +1023,17 @@ function collectEmbeddingEditorConfig() {
   };
 }
 
+/** 测试成功后把服务端**实际返回**的向量长度写进维度输入框（口径与保存时一致：同一上下限）。 */
+function fillTestedEmbeddingDimensions(length) {
+  const n = Math.min(
+    EMBEDDING_DIMENSIONS_MAX,
+    Math.max(EMBEDDING_DIMENSIONS_MIN, Number(length) || DEFAULTS.embeddingDimensions)
+  );
+  const el = $('embedding-model-editor-dimensions');
+  if (el) el.value = String(n);
+  return n;
+}
+
 function setEmbeddingTestStatus(text, ok) {
   const el = $('embedding-model-editor-test-status');
   if (!el) return;
@@ -1054,7 +1087,15 @@ async function testEmbeddingModelFromEditor() {
       json?.embedding ||
       json?.vector;
     if (!Array.isArray(vec) || !vec.length) throw new Error('响应中没有向量数据');
-    setEmbeddingTestStatus(`测试通过，维度 ${vec.length}`, true);
+    // 维度是硬约束（库里的向量必须与设置一致），而手填的默认 1024 常常是多打一位的猜测：
+    // 测试即测量 —— 返回长度直接填回输入框，用户不必再凭文档猜数字。
+    const filled = fillTestedEmbeddingDimensions(vec.length);
+    setEmbeddingTestStatus(
+      filled === vec.length
+        ? `测试通过，维度 ${vec.length}（已填入）`
+        : `测试通过，维度 ${vec.length}（超出 ${EMBEDDING_DIMENSIONS_MIN}-${EMBEDDING_DIMENSIONS_MAX}，已填 ${filled}）`,
+      true
+    );
   } catch (err) {
     setEmbeddingTestStatus(`测试失败：${err.message || err}`, false);
   } finally {
