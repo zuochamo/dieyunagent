@@ -3,6 +3,7 @@
 const { spawn } = require('child_process');
 const {
   DEFAULT_TIMEOUT_MS,
+  SLOW_RPC_LOG_MS,
   resolveCoreRpcTimeoutMs
 } = require('./core-rpc-timeouts');
 
@@ -243,6 +244,14 @@ function createCoreBridge(opts) {
       if (!entry) continue;
       clearTimeout(entry.timer);
       pending.delete(id);
+      // 端到端慢请求落日志：与 core 自己打的 `[rpc-slow]` 一比，就能分清
+      // 「core 内部慢」还是「RPC 堵在管道 / 守护进程 / SSH 里」。
+      // 口径 2000ms 与 Rust 侧 `rpc::SLOW_RPC_LOG_MS` 同值（跨语言无法共享常量，
+      // 改一个必须改另一个，见 docs/LOGGING.md）。
+      const elapsedMs = Date.now() - entry.startedAt;
+      if (elapsedMs >= SLOW_RPC_LOG_MS) {
+        log(`[dieyun:core] RPC_SLOW ${entry.method} ${elapsedMs}ms (id=${id})`);
+      }
       if (msg.error) {
         const err = new Error(msg.error.message || 'rust core error');
         err.code = msg.error.code || 'RUST_CORE_ERROR';
@@ -414,7 +423,7 @@ function createCoreBridge(opts) {
         err.code = 'CORE_RPC_TIMEOUT';
         reject(err);
       }, timeout);
-      pending.set(id, { resolve, reject, timer, method: String(method || ''), runId });
+      pending.set(id, { resolve, reject, timer, method: String(method || ''), runId, startedAt: Date.now() });
       const stdin = proc.stdin;
       if (!stdin || proc.killed || proc.exitCode != null || stdin.destroyed || stdin.writableEnded) {
         clearTimeout(timer);

@@ -7,6 +7,15 @@ const INDEX_TIMEOUT_MS = 600000;
 const COMPACTION_MAYBE_COMPACT_TIMEOUT_MS = 90 * 1000;
 
 /**
+ * 端到端耗时超过它就打 `RPC_SLOW <method> <ms>`。
+ *
+ * 与 Rust `dieyun_core::rpc::SLOW_RPC_LOG_MS` 同值（跨语言没法共享常量）：
+ * 两边都记录才能分辨「core 内部慢」还是「RPC 堵在管道 / 守护进程 / SSH 里」——
+ * `memory.long_recall` 那次 120s 超时就是缺了这组对照，只能靠猜。
+ */
+const SLOW_RPC_LOG_MS = 2000;
+
+/**
  * @param {string} method
  * @param {number} [timeoutMs] 显式覆盖
  * @returns {number}
@@ -39,5 +48,6 @@ module.exports = {
   DEFAULT_TIMEOUT_MS,
   INDEX_TIMEOUT_MS,
   COMPACTION_MAYBE_COMPACT_TIMEOUT_MS,
+  SLOW_RPC_LOG_MS,
   resolveCoreRpcTimeoutMs
 };
