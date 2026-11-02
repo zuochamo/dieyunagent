@@ -1112,7 +1112,9 @@ impl MemoryStore {
         scope: Option<&str>,
     ) -> Result<Vec<Value>, CoreError> {
         let now = now_ms();
-        self.with_conn(|conn| {
+        // 读池：召回是每轮系统提示的读路径，绝不能排在「聊天落库」的写入连接后面
+        // （`memory.long_recall` 两次 120s 超时就是在写入连接上排队，见 docs/SQLITE-ACCESS.md）
+        self.read(|conn| {
             let rows = if let Some(sc) = scope.filter(|s| !s.is_empty()) {
                 if is_global_memory_scope(sc) {
                     let sql = format!(
@@ -1522,7 +1524,10 @@ impl MemoryStore {
         if ids.is_empty() {
             return Ok(());
         }
-        self.with_conn(|conn| {
+        // 「用了哪条记忆」是排序/修剪的提示信号，不是召回结果的一部分：
+        // 拿不到写连接就跳过这一次，绝不为此让每轮的召回排在聊天落库后面
+        // （实测差额见 `SqliteHandle::try_with_conn` 的注释）。
+        let _ = self.db.try_with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "UPDATE long_memories
                  SET last_used_at = ?1, access_count = COALESCE(access_count, 0) + 1
@@ -1532,7 +1537,8 @@ impl MemoryStore {
                 stmt.execute(params![now, id])?;
             }
             Ok(())
-        })
+        })?;
+        Ok(())
     }
 
     fn count_active_long_memories(&self, scope: &str) -> Result<i64, CoreError> {
@@ -1544,7 +1550,8 @@ impl MemoryStore {
                AND {}",
             long_memory_scope_filter("scope", scope_filter, 2)
         );
-        self.with_conn(|conn| {
+        // 只读计数，走读池：它和召回同一条路径，写在「写入连接」上会跟着排队
+        self.read(|conn| {
             let now = now_ms();
             let n: i64 = if is_global_memory_scope(scope_filter) {
                 conn.query_row(&sql, params![now], |r| r.get(0))?
@@ -1714,7 +1721,8 @@ impl MemoryStore {
              WHERE m.status = 'active' AND {} AND v.model = ?1",
             long_memory_scope_filter("m.scope", scope, 2)
         );
-        self.with_conn(|conn| {
+        // 语义召回是纯读（全量余弦在 Rust 侧算），同样走读池
+        self.read(|conn| {
             let mut scored: Vec<(f64, Value)> = Vec::new();
             let mut stmt = conn.prepare(&sql)?;
             let rows: Vec<LongMemSemanticRow> = if is_global_memory_scope(scope) {

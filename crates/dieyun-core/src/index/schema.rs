@@ -11,7 +11,10 @@ use crate::error::CoreError;
 ///   （本机实测 425.6 MB / 1056 MB），而它提供的「按词排名」与既有 `grep` 工具重叠、
 ///   且永远落后一轮增量。词法召回改由 `search.rs` 的**子串扫描**承担（见那里注释）。
 ///   记忆侧的 `long_memories_fts` 不受影响（数据量级完全不同）。
-pub const SCHEMA_VERSION: i32 = 4;
+/// - v5：`workspaces` 增加 `vectors_reused` / `vectors_embedded`（上一次建库里
+///   「复用内容哈希缓存」与「真算」的条数）。这是**只加列**的纯增量迁移，不重建任何表：
+///   加这两列是为了让「向量复用到底生效没有」可观测，否则打开语义检索后只能靠猜。
+pub const SCHEMA_VERSION: i32 = 5;
 
 /// 确保索引表就绪。
 ///
@@ -26,7 +29,10 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), CoreError> {
     if ver >= SCHEMA_VERSION {
         return Ok(());
     }
-    if table_exists(conn, "chunks")? {
+    // 「这个库初始化过没有」看两张表里的任意一张：初始化中途崩溃可能只留下 `workspaces`
+    // （先建的那张），只看 `chunks` 会把这种半初始化库当成新库 → `CREATE IF NOT EXISTS`
+    // 不会补 `workspaces` 上缺的列，迁移就此被跳过。
+    if table_exists(conn, "chunks")? || table_exists(conn, "workspaces")? {
         migrate(conn, ver)
     } else {
         init_schema(conn)
@@ -34,7 +40,9 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), CoreError> {
     .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))
 }
 
-fn table_exists(conn: &Connection, name: &str) -> Result<bool, CoreError> {
+/// 「这张表在这个库里存在吗」的唯一定义：索引侧多处要判「结构索引建了没」（两个索引共用一个库），
+/// 各自写一份 `sqlite_master` 查询迟早会漏掉其中一处。
+pub(super) fn table_exists(conn: &Connection, name: &str) -> Result<bool, CoreError> {
     match conn.query_row(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 LIMIT 1",
         [name],
@@ -66,7 +74,46 @@ fn migrate(conn: &Connection, from: i32) -> rusqlite::Result<()> {
         // 这一步只删表、不动 `chunks`（正文唯一来源始终是它）。
         drop_fts(conn, 4)?;
     }
+    if from < 5 {
+        // v4 → v5：记录上一次建库的向量来源（复用缓存 / 真算），见 SCHEMA_VERSION 注释。
+        add_vector_stats_columns(conn, 5)?;
+    }
     Ok(())
+}
+
+/// 给 `workspaces` 补两列（幂等：列已存在就跳过）。
+///
+/// 用 `PRAGMA table_info` 判断而不是无脑 `ALTER TABLE`：SQLite 没有
+/// `ADD COLUMN IF NOT EXISTS`，重复执行会报 duplicate column 并把整次迁移打回。
+fn add_vector_stats_columns(conn: &Connection, to_version: i32) -> rusqlite::Result<()> {
+    let mut have_reused = false;
+    let mut have_embedded = false;
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(workspaces)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            match row.get::<_, String>(1)?.as_str() {
+                "vectors_reused" => have_reused = true,
+                "vectors_embedded" => have_embedded = true,
+                _ => {}
+            }
+        }
+    }
+    let tx = conn.unchecked_transaction()?;
+    if !have_reused {
+        tx.execute(
+            "ALTER TABLE workspaces ADD COLUMN vectors_reused INTEGER DEFAULT 0",
+            [],
+        )?;
+    }
+    if !have_embedded {
+        tx.execute(
+            "ALTER TABLE workspaces ADD COLUMN vectors_embedded INTEGER DEFAULT 0",
+            [],
+        )?;
+    }
+    tx.pragma_update(None, "user_version", to_version)?;
+    tx.commit()
 }
 
 /// 丢弃 `chunks_fts` 与三个同步触发器（v4 起不再存在）。
@@ -98,7 +145,10 @@ const BASE_TABLES: &str = "
         indexed_at INTEGER DEFAULT 0,
         indexing INTEGER DEFAULT 0,
         embedding_model TEXT,
-        embedding_dims INTEGER DEFAULT 0
+        embedding_dims INTEGER DEFAULT 0,
+        -- 上一次建库的向量来源分布（面板/诊断用）：复用跨 worktree 内容哈希缓存 vs 真算
+        vectors_reused INTEGER DEFAULT 0,
+        vectors_embedded INTEGER DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS chunks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,5 +286,70 @@ mod tests {
                 .unwrap();
             assert_eq!(cur, SCHEMA_VERSION);
         }
+    }
+
+    /// v4 → v5：补两列统计，**不动任何已有数据**（厂里的 daemon 都是 v4 库）。
+    #[test]
+    fn migrates_v4_db_by_adding_vector_stat_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 造一个 v4 的库：没有 vectors_reused / vectors_embedded 两列
+        conn.execute_batch(
+            "CREATE TABLE workspaces (
+                 root_hash TEXT PRIMARY KEY,
+                 root_path TEXT NOT NULL,
+                 file_count INTEGER DEFAULT 0,
+                 chunk_count INTEGER DEFAULT 0,
+                 vector_count INTEGER DEFAULT 0,
+                 indexed_at INTEGER DEFAULT 0,
+                 indexing INTEGER DEFAULT 0,
+                 embedding_model TEXT,
+                 embedding_dims INTEGER DEFAULT 0
+             );
+             INSERT INTO workspaces (root_hash, root_path, file_count, chunk_count,
+                                     vector_count, indexed_at, embedding_model, embedding_dims)
+                 VALUES ('rh', '/repo', 7, 42, 42, 1700000000, 'bge@768', 768);
+             CREATE TABLE chunks (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 root_hash TEXT NOT NULL,
+                 rel_path TEXT NOT NULL,
+                 start_line INTEGER NOT NULL,
+                 end_line INTEGER NOT NULL,
+                 content TEXT NOT NULL,
+                 mtime INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+
+        ensure_schema(&conn).unwrap();
+
+        let row: (i64, i64, i64, Option<String>, i64, i64, i64) = conn
+            .query_row(
+                "SELECT file_count, chunk_count, vector_count, embedding_model, embedding_dims,
+                        vectors_reused, vectors_embedded
+                 FROM workspaces WHERE root_hash = 'rh'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, (7, 42, 42, Some("bge@768".into()), 768, 0, 0),
+            "迁移只加列：存量计数与签名必须原样保留，新列默认 0");
+        let cur: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(cur, SCHEMA_VERSION);
+
+        // 幂等：再跑一遍不报 duplicate column
+        ensure_schema(&conn).unwrap();
     }
 }

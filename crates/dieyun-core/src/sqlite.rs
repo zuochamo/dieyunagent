@@ -235,6 +235,37 @@ impl SqliteHandle {
         // 中毒不致命：panic 穿过 `Transaction` 时 drop 已经回滚，连接本身仍然可用。
         // 反过来，让一次 panic 永久毒化这个库、此后所有 RPC 一律报错，代价更大。
         let mut guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.prepare_locked(&mut guard)?;
+        f(conn)
+    }
+
+    /// 拿不到写连接就**放弃**的写入版本（返回 `Ok(None)`）。
+    ///
+    /// 只给「读路径顺手做的非必要写」用，典型是召回时的 `access_count` 自增：那是
+    /// 排序与修剪的提示信号，丢一次无害；而召回是每轮系统提示都要等的读，为了一个
+    /// 计数器去排在「聊天落库」后面，就会把整轮拖慢（实测：写入压满时 p95 从 12ms
+    /// 变成 219ms，差额全在这把锁上）。正经写入一律用 [`with_conn`](Self::with_conn)，
+    /// 那里该等就得等。
+    pub fn try_with_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, CoreError>,
+    ) -> Result<Option<T>, CoreError> {
+        let Ok(mut guard) = self.conn.try_lock() else {
+            return Ok(None);
+        };
+        let conn = self.prepare_locked(&mut guard)?;
+        Ok(Some(f(conn)?))
+    }
+
+    /// [`with_conn`](Self::with_conn) 与 [`try_with_conn`](Self::try_with_conn)
+    /// 共用的不变量：连接就绪 → 标记已初始化 → 必须在 autocommit。
+    ///
+    /// 分成helper而不是各抄一遍：这两条不变量都是「抄漏了会静默毁数据」的类型
+    /// （半初始化连接缓存、带未提交事务的常驻连接）。
+    fn prepare_locked<'a>(
+        &self,
+        guard: &'a mut Option<Connection>,
+    ) -> Result<&'a Connection, CoreError> {
         if guard.is_none() {
             let conn = open_tuned_with(&self.path, self.opts)?;
             (self.init)(&conn)?;
@@ -258,7 +289,7 @@ impl SqliteHandle {
             );
             let _ = conn.execute_batch("ROLLBACK");
         }
-        f(conn)
+        Ok(conn)
     }
 
     /// 读侧取数：从**池子**里借一条连接，用完归还。
@@ -535,6 +566,49 @@ mod tests {
             .expect("count");
         assert_eq!(rows, 5, "五次写入都落在同一条常驻连接上");
         assert_eq!(handle.path(), db.as_path());
+        cleanup(&db);
+    }
+
+    /// 读路径上的「非必要写」不许排队：写连接被占着时立刻返回 `None`。
+    ///
+    /// 这条钉住的是 `memory::MemoryStore::bump_memory_usage` 的语义（`access_count` 提示信号），
+    /// 一旦有人把它改回 `with_conn`，召回就会重新排在聊天落库后面
+    /// （实测 p50 1ms → 135ms，见 `docs/SQLITE-ACCESS.md`）。
+    #[test]
+    fn try_with_conn_skips_instead_of_waiting_when_write_conn_is_busy() {
+        let db = temp_db("try-conn");
+        // 用不带进程级计数器的 init：并行跑测试时另一个用例正盯着 INITS 那个 static
+        let handle = std::sync::Arc::new(SqliteHandle::new(db.clone(), create_table_t));
+        handle.with_conn(|_| Ok(())).expect("warm up");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let holder = std::sync::Arc::clone(&handle);
+        let worker = std::thread::spawn(move || {
+            holder
+                .with_conn(|_| {
+                    tx.send(()).expect("signal");
+                    std::thread::sleep(Duration::from_millis(400));
+                    Ok(())
+                })
+                .expect("hold write conn");
+        });
+        rx.recv().expect("写连接已被占用");
+
+        let started = std::time::Instant::now();
+        let skipped = handle.try_with_conn(|_| Ok(7)).expect("try_with_conn");
+        assert!(skipped.is_none(), "写连接繁忙时应跳过，而不是排队");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "try_with_conn 不许等待写连接（实测 {:?}）",
+            started.elapsed()
+        );
+
+        worker.join().expect("holder thread");
+        // 空闲时它照样要能写进去
+        assert_eq!(
+            handle.try_with_conn(|_| Ok(7)).expect("try_with_conn idle"),
+            Some(7)
+        );
         cleanup(&db);
     }
 

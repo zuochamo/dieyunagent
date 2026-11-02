@@ -25,6 +25,7 @@
 | 手机无流式回复 | `[dieyun:mobile]` task.progress | Renderer `pushAgentServiceProgress` |
 | 工具执行失败 | `[dieyun:gateway]` RPC 错误 | 对应 tool handler |
 | 索引 / 记忆异常 | `[dieyun:core]` | `memory.*` / `codebase.*` RPC |
+| 某个 RPC 慢 / 超时（`RPC_TIMEOUT`、`CORE_RPC_TIMEOUT`） | Main `[dieyun:core] RPC_SLOW <method> <ms>`（端到端） | core stderr `[rpc-slow] <method> <ms>`（core 内部）；**只有前者 ⇒ 卡在传输 / 守护进程 / 宿主进程，两者都有 ⇒ 卡在 core**。两个阈值同值 2000ms（`src/core-rpc-timeouts.js:SLOW_RPC_LOG_MS` 与 `rpc::SLOW_RPC_LOG_MS`，跨语言无法共享常量） |
 | 压缩失败 / 跳过 | `[dieyun:agent]` compaction | Rust `compaction.*` |
 | 远程 SSH/WSL | `[remote-agent]`（已有） | `session-remote-transport` 测试 |
 | 窗口冻结 / 卡顿 / 渲染进程崩溃重载 | Main `[dieyun:renderer] freeze`（`snapshot` → `unresponsive` → `render-process-gone`，看 `silentMs` 与 `metrics`） | Renderer DevTools Performance 面板 |

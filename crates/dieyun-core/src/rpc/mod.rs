@@ -37,6 +37,13 @@ fn _assert_app_state_is_send_sync() {
 /// 底下已经跑起来的阻塞任务，只会制造「假失败」。减法优先：不为超时再造一层取消机制。
 pub const FAST_METHOD_BUDGET_MS: u64 = 20_000;
 
+/// core 内部耗时超过这个值就打一行 `[rpc-slow] <method> <ms>` 到 stderr。
+///
+/// 取值 2000ms：正常读库/读状态的量级是毫秒到几十毫秒，2s 已经意味着「排在了长任务后面」；
+/// 而 120s 那种级别的卡死必须能在日志里一眼看到起点。这不是超时机制（不掐断、不重试），
+/// 只是让「谁把 core 卡住了」事后可查——`memory.long_recall` 那两次超时吃亏就在这里。
+pub const SLOW_RPC_LOG_MS: u64 = 2_000;
+
 /// 方法名 → 在途预算；`None` 表示不设预算。分类是**结构性的**（RPC 方法名），
 /// 不涉及对用户意图的猜测。
 pub fn request_budget_ms(method: &str) -> Option<u64> {

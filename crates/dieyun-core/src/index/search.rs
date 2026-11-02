@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::error::CoreError;
 
+use super::schema::table_exists;
 use super::vector_pool::VectorPool;
 
 /// 单次检索可返回的最大条数。
@@ -39,6 +40,10 @@ const VECTOR_POOL_FACTOR: usize = 8;
 const LEXICAL_CANDIDATES_FACTOR: usize = 12;
 const LEXICAL_CANDIDATES_MIN: usize = 60;
 const LEXICAL_CANDIDATES_MAX: usize = 400;
+
+/// 定义点通道的候选上限：同名符号可能散落在多个文件（`get_user` 这种），
+/// 但排在前面的几十条足够覆盖，再多只会把「只是提到这个名字」的块挤进融合。
+const DEFINITION_CANDIDATES_MAX: usize = 24;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +116,14 @@ pub fn search(
     // 并且一次 `LIKE` 覆盖任意长度的词 —— 2 字中文（trigram 的物理下限）也在内。
     // 代价是一次全表扫描：10k chunk 实测约 20ms（见文档 §2.2）。
     let terms = query_terms(q);
+    // 通道 0：符号定义（结构索引的 `graph_symbols`，与 `chunks` 同一份 `index.sqlite`）。
+    // 放在词法之前没有任何排序含义（RRF 只按名次求和），只是读起来「先结构、后词法、再向量」。
+    if let Some(name) = identifier_query(q, &terms) {
+        let defs = definition_hits(conn, root_hash, name, limit, &mut rows)?;
+        if !defs.is_empty() {
+            lists.push(defs);
+        }
+    }
     if !terms.is_empty() {
         let substring = substring_hits(conn, root_hash, &terms, limit, &mut rows)?;
         if !substring.is_empty() {
@@ -264,8 +277,106 @@ fn query_terms(query: &str) -> Vec<String> {
     out
 }
 
-/// 通道 1：子串命中（`LIKE '%term%'`，路径与正文都算）。
+/// 查询是否「就是一个标识符」：`parse_config` / `useEffect` / `_parse_ts` / `Store.save`。
 ///
+/// 只有这种查询才有明确的「定义在哪」答案，也才值得去问符号表；自然语言问句没有定义点。
+/// 刻意**不**用语言关键词表判断，只看形状（单一词元 + 标识符字符集）。
+fn identifier_query<'a>(query: &str, terms: &'a [String]) -> Option<&'a str> {
+    if terms.len() != 1 {
+        return None;
+    }
+    let q = query.trim();
+    // `parse_config file` 这种「一个词元 + 一些标点」的查询不走这里：词元与原串不一致时
+    // 说明用户还说了别的，定义点未必是他要的东西。
+    if q != terms[0] {
+        return None;
+    }
+    let mut chars = q.chars();
+    let first = chars.next()?;
+    if !(first.is_alphabetic() || first == '_' || first == '$') {
+        return None;
+    }
+    let len = q.chars().count();
+    if !(3..=80).contains(&len) {
+        return None;
+    }
+    if !q
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == '.')
+    {
+        return None;
+    }
+    Some(terms[0].as_str())
+}
+
+/// 通道 0：符号定义 —— 结构索引已经知道「这个名字定义在哪个文件哪一行」，直接拿来当一路召回。
+///
+/// 为什么需要它：词法通道按**命中词数**排序，对 `_parse_ts` 这类查询，「某个文件里用过一次」
+/// 与「定义它的那个文件」得分完全一样，只靠 chunk id 决胜负 —— 实测「找定义」MRR 0.63，
+/// 还不如 `grep -rc | sort -rn` 的 0.84（`docs/INDEX-VALUE-REVIEW.md` §7.2）。
+/// 定义点不需要给词法通道加权重，它是同一份库里另一张表已有的**事实**，按名次融合天然叠分。
+///
+/// 结构索引没建（整张 `graph_symbols` 表都不存在）或没索引过这个工作区时，这一路为空，
+/// 行为与改造前完全一致 —— 不猜、不兜底。
+fn definition_hits(
+    conn: &Connection,
+    root_hash: &str,
+    name: &str,
+    limit: usize,
+    rows: &mut HashMap<i64, ChunkRow>,
+) -> Result<RankedIds, CoreError> {
+    if !table_exists(conn, "graph_symbols")? {
+        return Ok(Vec::new());
+    }
+    let candidates = (limit * 4)
+        .max(DEFINITION_CANDIDATES_MAX)
+        .min(LEXICAL_CANDIDATES_MAX) as i64;
+    // 定义行 → 覆盖该行的 chunk。`kind` 排序只是「同名符号挑哪个先」：
+    // 可调用的定义（函数/方法）优先，其次类型，最后 trait/其他。
+    let sql = "SELECT c.id, c.rel_path, c.start_line, c.end_line, c.content, g.start_line
+         FROM graph_symbols g
+         JOIN chunks c
+           ON c.root_hash = g.root_hash
+          AND c.rel_path = g.rel_path
+          AND c.start_line <= g.start_line
+          AND g.start_line <= c.end_line
+        WHERE g.root_hash = ?1 AND (g.name = ?2 OR g.qualified_name = ?2)
+        ORDER BY CASE g.kind
+                   WHEN 'function' THEN 0
+                   WHEN 'class' THEN 1
+                   WHEN 'type' THEN 2
+                   WHEN 'trait' THEN 2
+                   ELSE 3
+                 END,
+                 g.rel_path,
+                 g.start_line
+        LIMIT ?3";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
+    let mapped = stmt
+        .query_map(params![root_hash, name, candidates], |row| {
+            let mut chunk = map_chunk(row)?;
+            // 命中行 = 符号定义行，片段从定义处展开（而不是从 chunk 开头）
+            chunk.hit_line = Some(row.get::<_, i64>(5)?);
+            Ok(chunk)
+        })
+        .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
+    let mut ids: RankedIds = Vec::new();
+    // 行映射失败必须显式报错（与词法通道同一口径）：静默丢行会让「索引读坏了」表现成「没有命中」
+    for row in mapped {
+        let row = row.map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
+        let id = row.id;
+        if ids.contains(&id) {
+            continue; // 同文件同名符号（重载/多个绑定）落进同一个 chunk
+        }
+        rows.entry(id).or_insert(row);
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+/// 通道 1：子串命中（`LIKE '%term%'`，路径与正文都算）。
 /// 覆盖**整个工作区**，没有扫描窗口 —— 旧实现（v1）只扫前 8000 条并按词元覆盖率近似打分，
 /// 超过窗口的库会静默少召回。这里的代价是一次全表扫描。
 ///
@@ -460,6 +571,87 @@ mod tests {
 
     fn paths(r: &SearchResult) -> Vec<String> {
         r.results.iter().map(|h| h.path.clone()).collect()
+    }
+
+    /// 只有 chunks、没有结构索引的库（绝大多数工作区改造前就是这样）。
+    fn lexical_only_fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (root_hash, root_path, chunk_count) VALUES ('rh', '/tmp', 2)",
+            [],
+        )
+        .unwrap();
+        // 使用点先插入（chunk id 更小）：只靠词法通道时它排在定义点前面
+        conn.execute(
+            "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+             VALUES ('rh', 'src/use_it.rs', 1, 40, 'let n = parse_config(path);', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+             VALUES ('rh', 'src/def_it.rs', 100, 140, 'pub fn parse_config(p: &str) {}', 0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// 结构索引建过这张表、且这个名字有定义。
+    fn add_definition(conn: &Connection) {
+        crate::graph::ensure_schema(conn).unwrap();
+        conn.execute(
+            "INSERT INTO graph_symbols (root_hash, rel_path, kind, name, qualified_name, start_line, end_line, mtime)
+             VALUES ('rh', 'src/def_it.rs', 'function', 'parse_config', 'parse_config', 101, 103, 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// 「按名字找定义」：定义点必须排在「只是用到这个名字」的块前面。
+    ///
+    /// 这是 §7.2 实测出来的差距（索引 MRR 0.63 vs grep 0.84）的回归测试：
+    /// 词法通道按命中词数排序时这两个 chunk 完全同分，只靠 chunk id 决胜负。
+    #[test]
+    fn definition_site_ranks_above_usage() {
+        let conn = lexical_only_fixture();
+        let before = search(&conn, "rh", "parse_config", Some(5), None, None).unwrap();
+        assert_eq!(
+            paths(&before).first().map(String::as_str),
+            Some("src/use_it.rs"),
+            "没有结构索引时，词法通道会把使用点排在前面（这正是要修的现状）"
+        );
+
+        add_definition(&conn);
+        let after = search(&conn, "rh", "parse_config", Some(5), None, None).unwrap();
+        assert_eq!(
+            paths(&after).first().map(String::as_str),
+            Some("src/def_it.rs"),
+            "定义点应被符号表顶到第一"
+        );
+    }
+
+    /// 定义点通道只在「查询就是一个标识符」时接上：自然语言问句没有定义点可找。
+    #[test]
+    fn multi_term_query_does_not_use_definition_channel() {
+        let conn = lexical_only_fixture();
+        add_definition(&conn);
+        let res = search(&conn, "rh", "parse config path", Some(5), None, None).unwrap();
+        assert_eq!(paths(&res).len(), 2, "两路词法命中都要返回");
+        assert_eq!(
+            paths(&res).first().map(String::as_str),
+            Some("src/use_it.rs"),
+            "多词查询不该被符号表改写排序"
+        );
+    }
+
+    /// 结构索引没建（`graph_symbols` 表都不存在）时不能报错，也不能改变结果。
+    #[test]
+    fn missing_graph_tables_is_not_an_error() {
+        let conn = lexical_only_fixture();
+        let res = search(&conn, "rh", "parse_config", Some(5), None, None).unwrap();
+        assert_eq!(paths(&res).len(), 2);
     }
 
     /// 两路都命中的候选必须排在只命中一路的前面（RRF 的核心性质）。

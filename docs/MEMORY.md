@@ -297,6 +297,13 @@ scope = 'project:' + projects.id
 
 每块最多渲染 20 行（`formatMemoryLines`），单行正文裁剪到 360–420 字。
 
+**召回的读写归属**（`docs/SQLITE-ACCESS.md`）：这条链路是每轮系统提示都要等的读，
+所以三处纯读（`count_active_long_memories` / `recent_long_memories` / `semantic_search_long`）
+走读池，**不碰**那条唯一的写入连接（聊天落库占着它）；末尾的 `bump_memory_usage`
+（`access_count` / `last_used_at`）只是排序与修剪的提示信号，走 `try_with_conn`，
+抢不到写锁就跳过。2026-10-31 之前它全在写入连接上，写入一密集召回就被拖慢
+（实测 p50 135ms → 1ms），建库窗口内更是会撞满宿主的 120s 预算。
+
 项目记忆块不参与这套打分：它是文件，按**字符预算**读头部（最新在前，条数与字节自洽），语义检索退化为 `memory_recall` 的关键词过滤 —— 一个项目撑死两百条，不值得再养一套项目向量索引。
 
 #### 5.2.1 关键词通道：FTS5 + bm25（不再有手写分词）

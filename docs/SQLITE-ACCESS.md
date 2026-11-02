@@ -33,6 +33,22 @@ SqliteHandle::new_with_foreign_keys(path, init_schema)   // memory 库
 
 写入连接与池化读连接用的是**同一份** `TuneOptions` —— 否则同一条语句在不同连接上语义不同。
 
+### 唯一的例外：向量复用缓存（独立库、独立连接）
+
+`index/vector_cache.rs` 里的 `<data_dir>/vector-cache.sqlite` **不走 `SqliteHandle`**，也不在这三条通道里：
+
+- 它是**另一个库文件**（不与索引库同文件 ⇒ 不会有「建库时写它、status 读它」的锁耦合），
+  所以拿不到 `SqliteHandle` 也借不到读池；
+- 用法只有两种极短的同步操作：建库前一次 `get_many`、建库后一次 `put_many + prune`；
+- 它自己持有 `busy_timeout(1500ms)` + WAL，抢不到锁就返回错误，调用方**吞掉**并按
+  「全部未命中」继续 —— 缓存永不让建库失败；
+- 因为 `rusqlite::Connection` 不是 `Sync`，它被包在 `Mutex<Option<VectorCache>>` 里，
+  且 `apply_cached_vectors` / `store_embedded_vectors` 都是**同步**函数：
+  `&Connection` 一旦跨 `.await`，整个 RPC handler 的 future 就不再 `Send`（踩过一次）。
+
+任何新增的「跨库缓存」都照这个形状做：独立文件 + 极短同步操作 + 失败即降级，
+别塞进索引库，也别在持锁时 `await`。
+
 ## 为什么读侧要单独一个池
 
 常驻连接是 index / graph / memory **共用的一条**写入连接，外面是一把非重入 `Mutex`。
@@ -55,6 +71,24 @@ SqliteHandle::new_with_foreign_keys(path, init_schema)   // memory 库
 读只把脏状态以结构体形式交回，由调用方用独立连接 + `busy_timeout(0)` 补写，
 抢不到写锁就下次再来（`index::IndexService::apply_status_repair`、
 `graph::GraphService::read_dedicated`）。维修绝不能拖慢读。
+
+### 读路径顺手做的写：`try_with_conn`
+
+有些读路径末尾会顺手写一笔统计，最典型的是召回时的
+`UPDATE long_memories SET last_used_at = ?, access_count = access_count + 1`
+（`memory::MemoryStore::bump_memory_usage`）。这笔写**不是召回结果的一部分**，
+只是排序与修剪的提示信号，丢一次无害。
+
+它曾经走 `with_conn`，于是「每轮系统提示都要等的召回」要去排「聊天落库」的写入队列。
+实测（`scripts/repro-recall-blocked-by-writes.cjs`，一个 60MB 快照写入 ≈ 500ms 持锁）：
+
+| 召回（scope=global，关键词路径） | 安静 | 写入持锁期间 p50 | p95 | max |
+|---|---|---|---|---|
+| 修前（读 + bump 都走 `with_conn`） | 0ms | **135ms** | 230ms | 519ms |
+| 修后（读走池、bump 走 `try_with_conn`） | 0ms | **1ms** | 138ms | 139ms |
+
+规则：**读路径上的读一律 `read()`；读路径上的非必要写一律 `try_with_conn`
+（拿不到锁就跳过）**。正经写入仍走 `with_conn` —— 那里该等就得等。
 
 ## 常驻连接必须常驻 autocommit
 

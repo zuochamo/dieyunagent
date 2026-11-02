@@ -197,7 +197,7 @@ impl IndexService {
         &self,
         ws: &WorkspaceRef,
     ) -> Result<StatusResult, CoreError> {
-        let state = self
+        let mut state = self
             .remote_ingest
             .jobs
             .lock()
@@ -222,6 +222,8 @@ impl IndexService {
             )
             .unwrap_or((None, 0));
 
+        let mut vectors_reused = 0i64;
+        let mut vectors_embedded = 0i64;
         if state.use_vectors && !state.pending_embed.is_empty() {
             self.set_progress(
                 &ws.root_hash,
@@ -231,16 +233,48 @@ impl IndexService {
                 state.chunk_count,
                 0,
             );
-            let embedded =
-                embedding::embed_batches(&self.embedding, &state.pending_embed)
-                    .await?;
-            for (chunk_id, vec) in embedded {
-                let blob = embedding::vector_to_blob(&vec);
-                conn.execute(
-                    "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, ?2, ?3)",
-                    params![chunk_id, vec.len() as i64, blob],
-                )
-                .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
+            // 与本机建库同一条实现（含跨 worktree 内容哈希复用）：SFTP 摄取也不能每次重算整仓
+            let (misses, reused) = self.apply_cached_vectors(
+                &conn,
+                std::mem::take(&mut state.pending_embed),
+            )?;
+            vectors_reused = reused;
+            if reused > 0 {
+                self.set_progress(
+                    &ws.root_hash,
+                    "embedding",
+                    state.file_count,
+                    state.file_count,
+                    state.chunk_count,
+                    reused,
+                );
+            }
+            if !misses.is_empty() {
+                let inputs: Vec<(i64, String)> = misses
+                    .iter()
+                    .map(|(id, text, _)| (*id, text.clone()))
+                    .collect();
+                let hash_by_id: HashMap<i64, String> = misses
+                    .iter()
+                    .map(|(id, _, h)| (*id, h.clone()))
+                    .collect();
+                let rows = embedding::embed_batches(&self.embedding, &inputs).await?;
+                vectors_embedded = self.store_embedded_vectors(
+                    &conn,
+                    rows,
+                    &hash_by_id,
+                    reused,
+                    |written| {
+                        self.set_progress(
+                            &ws.root_hash,
+                            "embedding",
+                            state.file_count,
+                            state.file_count,
+                            state.chunk_count,
+                            written,
+                        );
+                    },
+                )?;
             }
         }
 
@@ -271,8 +305,8 @@ impl IndexService {
 
         conn.execute(
             "INSERT INTO workspaces (root_hash, root_path, file_count, chunk_count, vector_count,
-             indexed_at, indexing, embedding_model, embedding_dims)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)
+             indexed_at, indexing, embedding_model, embedding_dims, vectors_reused, vectors_embedded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10)
              ON CONFLICT(root_hash) DO UPDATE SET
                root_path = excluded.root_path,
                file_count = excluded.file_count,
@@ -281,7 +315,9 @@ impl IndexService {
                indexed_at = excluded.indexed_at,
                indexing = 0,
                embedding_model = excluded.embedding_model,
-               embedding_dims = excluded.embedding_dims",
+               embedding_dims = excluded.embedding_dims,
+               vectors_reused = excluded.vectors_reused,
+               vectors_embedded = excluded.vectors_embedded",
             params![
                 ws.root_hash,
                 state.root_key,
@@ -290,7 +326,9 @@ impl IndexService {
                 vector_count,
                 now,
                 embedding_model,
-                embed_dims
+                embed_dims,
+                vectors_reused,
+                vectors_embedded
             ],
         )
         .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
