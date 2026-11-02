@@ -9,9 +9,12 @@ function createCodebaseHandlers(d) {
     resolveCodebaseContext,
     invokeIndexCore,
     startCodebaseIndexForContext,
+    startGraphIndexForContext,
     requireRustCore,
     codebaseHasSearchableIndex,
-    codebaseIncremental
+    codebaseIncremental,
+    // 「这次建库要不要带向量」的唯一判定（读持久意图 indexSemanticSearch）
+    resolveIndexVectors
   } = d;
 
   /**
@@ -33,6 +36,28 @@ function createCodebaseHandlers(d) {
       }
     }
     return st;
+  }
+
+  /**
+   * 「找定义」这半条能力靠结构索引的符号表（core 的通道 0，见 `docs/INDEX-VALUE-REVIEW.md` §7.3：
+   * 命中单一标识符时用 `graph_symbols` 的定义点把结果顶到最前）。
+   *
+   * 结构索引的触发点一直只在 `graph.*` 工具里（`ensureCallGraph` 那套），于是新会话
+   * （乙案：每个会话一个 worktree、一份 `index.sqlite`）第一次做代码检索时符号表是空的，
+   * 实测「找定义」MRR 0.63 —— 比 grep 还差。这里在**被用到**时顺手拉起一次，
+   * `calls: false` 只建符号/import、不建调用边（R5：调用边仍按需）。
+   *
+   * 不阻塞本次检索：这次返回词法结果，建好后下一次检索就带定义优先。建图失败只是少一条
+   * 排序信号，不能让已经拿到的检索结果变成报错。
+   */
+  async function ensureSymbolIndex(ctxInfo) {
+    try {
+      const gs = await invokeIndexCore(ctxInfo, 'graph.status', {}, 45000);
+      if (!gs || gs.indexed || gs.indexing) return;
+      await startGraphIndexForContext(ctxInfo, { force: false, skipIfReady: false, calls: false });
+    } catch {
+      // 结构索引读不到 / 建不起来：本次检索照旧（只是没有定义优先）
+    }
   }
 
   return {
@@ -64,8 +89,9 @@ function createCodebaseHandlers(d) {
       const r = await startCodebaseIndexForContext(ctxInfo, {
         force: force === undefined ? true : !!force,
         skipIfReady: skipIfReady === undefined ? true : !!skipIfReady,
-        // 向量是显式 opt-in：面板/调用方要语义检索才传 true
-        vectors: !!vectors
+        // 原样传：`undefined` 表示「听持久意图 indexSemanticSearch」，见 resolveIndexVectorsIntent。
+        // 以前这里写 `vectors: !!vectors`，把「没说话」压成了「不要向量」。
+        vectors
       });
       const { job, ...rest } = r || {};
       void job;
@@ -74,17 +100,19 @@ function createCodebaseHandlers(d) {
 
     'codebase.index': async ({ workspaceRoot, force, vectors }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
+      // 老 daemon 没有 index.start 时走这条同步路径；向量同样听持久意图
+      const wantVectors = typeof resolveIndexVectors === 'function' ? resolveIndexVectors(vectors) : !!vectors;
       if (ctxInfo.kind === 'remote') {
         return invokeIndexCore(
           ctxInfo,
           'codebase.index',
-          { force: force !== false, vectors: !!vectors },
+          { force: force !== false, vectors: wantVectors },
           600000
         );
       }
       return requireRustCore(
         'codebase.index',
-        { workspaceRoot: ctxInfo.rootKey, force: force !== false, vectors: !!vectors },
+        { workspaceRoot: ctxInfo.rootKey, force: force !== false, vectors: wantVectors },
         600000
       );
     },
@@ -102,20 +130,40 @@ function createCodebaseHandlers(d) {
         st = await waitForIndexIdle(ctxInfo, st);
       }
       if (st && st.indexing) {
-        const e = new Error('代码库索引创建中，请稍后再试');
+        // 首建是分钟级的后台事：告诉模型改用 grep，而不是让它「稍后再试」空转
+        const e = new Error('代码库索引正在后台首建，本轮改用 grep / host_exec 直接查（建好后自动可用）');
         e.code = 'INDEXING_IN_PROGRESS';
+        e.retryable = false;
         throw e;
       }
       if (!codebaseHasSearchableIndex(st)) {
         // 不在 search 内同步建库：建库要跑 embedding，由面板 / prep 的 index.start 负责
-        const e = new Error('代码库尚未索引，请稍后再试或使用 grep/读文件');
+        const e = new Error('本工作区还没有可检索的代码索引，改用 grep / host_exec 直接查');
         e.code = 'INDEX_REQUIRED';
+        e.retryable = false;
         throw e;
       }
-      return invokeIndexCore(ctxInfo, 'codebase.search', {
+      const res = await invokeIndexCore(ctxInfo, 'codebase.search', {
         query: q,
         limit
       });
+      // 符号表是「找定义」排序的前提，而它的建库触发点一直在 graph 工具里 —— 检索这边
+      // 自己保证一次。不 await：本次结果已定，建好后下一次检索才带定义优先。
+      void ensureSymbolIndex(ctxInfo);
+      // 0 命中 + 库里没有向量 = 通道退化，不是「没有相关代码」。
+      // 子串通道对中文自然语言查询几乎必然 0 命中，此时不给提示，
+      // 模型只会得出「这仓库里没这段代码」并放弃检索。
+      const vectors = Number(st && st.vectorCount) || 0;
+      if (res && Array.isArray(res.results) && !res.results.length && !vectors) {
+        return {
+          ...res,
+          hint:
+            '本工作区索引未建向量：中文自然语言查询在子串通道上基本不会命中。' +
+            '改用 grep / host_exec；要长期用语义检索，到 设置 →「代码索引语义检索（向量）」打开，' +
+            '或在侧栏「索引」面板点「建向量」补一次。'
+        };
+      }
+      return res;
     },
   };
 }

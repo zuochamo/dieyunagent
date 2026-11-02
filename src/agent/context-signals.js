@@ -70,12 +70,29 @@ function shouldAutoCodebaseSearch(userQuery, workspaceInfo, editor) {
   return true;
 }
 
+/**
+ * 代码召回块。
+ *
+ * **0 命中必须说清是「哪种 0」**：旧实现命中为空直接返回 `''`，于是
+ * 「本工作区没建索引」「建了但没建向量（中文自然语言基本不会命中子串通道）」
+ * 「确实没有相关代码」在模型眼里长得一模一样——它只会得出最后一个结论然后放弃检索。
+ * 这三种状态的价格差着几十倍，必须分开说；只在第三种返回空。
+ */
 function formatCodebaseBlock(query, data, snippetMax, label) {
   const results = Array.isArray(data && data.results) ? data.results : [];
   // v4 起词法通道是子串扫描（没有 FTS，也没有 grep 兜底），两态即可
-  const mode = data && data.vectorSearch ? '向量+子串' : '子串';
+  const vector = !!(data && data.vectorSearch);
+  const mode = vector ? '向量+子串' : '子串';
   const head = label || '【相关代码 · 自动检索】';
-  if (!results.length) return '';
+  if (!results.length) {
+    if (data && data.needsIndex) {
+      return `${head}\n查询：${query}\n状态：本工作区还没有可检索的代码索引，改用 grep / host_exec 直接查。`;
+    }
+    if (!vector) {
+      return `${head}\n查询：${query}\n状态：0 命中。本工作区索引未建向量，中文自然语言查询在子串通道上基本不会命中，改用 grep / host_exec。`;
+    }
+    return '';
+  }
   const maxSnip = snippetMax || AGENT_LIMITS_DEFAULTS.codebaseSnippetMax;
   const lines = results.map((r, i) => {
     const loc = `${r.path || ''}:${r.startLine || 1}-${r.endLine || r.startLine || 1}`;
