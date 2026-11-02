@@ -7,6 +7,8 @@ const {
   hostSidecarRoots,
   workspaceRelativeSpillPath
 } = require('./host-sidecar');
+// 「是不是 MCP 服务注册的工具」唯一判定（mcp_manage / mcp_tool_schema 例外）
+const { isMcpServerToolName } = require('../mcp/tool-name');
 
 const SPILL_CHAR_THRESHOLD = 8192;
 const PREVIEW_LINES = 40;
@@ -44,7 +46,7 @@ function extractSpillText(name, payload) {
   } else if (name === 'browser_snapshot') {
     if (payload.textPreview) parts.push(String(payload.textPreview));
     else if (payload.text) parts.push(String(payload.text));
-  } else if (String(name).startsWith('mcp_')) {
+  } else if (isMcpServerToolName(name)) {
     if (payload.content) parts.push(String(payload.content));
   } else if (name === 'codebase_search' && Array.isArray(payload.results)) {
     parts.push(JSON.stringify(payload.results, null, 2));
@@ -107,7 +109,7 @@ function spillToolOutputIfLarge(name, payload, opts = {}) {
   } else if (name === 'browser_snapshot') {
     delete out.textPreview;
     delete out.text;
-  } else if (String(name).startsWith('mcp_')) {
+  } else if (isMcpServerToolName(name)) {
     delete out.content;
     delete out.raw;
   } else if (name === 'codebase_search') {

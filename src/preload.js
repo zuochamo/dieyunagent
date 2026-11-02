@@ -170,6 +170,13 @@ contextBridge.exposeInMainWorld('diecloud', {
   callMcpRuntimeTool: (payload) => ipcRenderer.invoke('mcp:runtime-call', payload),
   getMcpConfig: (payload) => ipcRenderer.invoke('mcp:get-config', payload || {}),
   updateMcpConfig: (payload) => ipcRenderer.invoke('mcp:update-config', payload || {}),
+  /** Agent 通过 mcp_manage request_credential 请求填凭据：弹出该服务的配置弹窗，由人亲手输入 */
+  onMcpCredentialRequest: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const handler = (_evt, payload) => cb(payload || {});
+    ipcRenderer.on('mcp:credential-request', handler);
+    return () => ipcRenderer.removeListener('mcp:credential-request', handler);
+  },
   installMcpPackage: (payload) => ipcRenderer.invoke('mcp:install-package', payload || {}),
   repairMcpEnv: (payload) => ipcRenderer.invoke('mcp:repair-env', payload || {}),
   checkMcpUpdate: (payload) => ipcRenderer.invoke('mcp:check-update', payload || {}),

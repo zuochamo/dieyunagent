@@ -7,16 +7,17 @@ const { getMcpNpmPackageMeta, runtimeArgsWithoutNpxPackage } = require('./packag
 /**
  * 预装（bundled）MCP 的启动解析 —— 一律从 app 资源里取，绝不联网。
  *
- * 两种预装形态，共用本文件：
- * 1. **纯 JS 服务**（`resources/…/src/mcp/servers/<key>/server.js`）：仓库自带代码，随 app.asar 分发。
- * 2. **离线预装的外部服务**（`<resources>/mcp/bundled/<key>/manifest.json`）：npm 包 + 平台二进制，
- *    由 `scripts/pack-mcp-bundled.cjs` 在构建期取产物、校 sha256 后打进安装包
- *    （package.json build.extraResources → mcp/bundled）。manifest 是布局的唯一声明，
- *    本文件不假设目录结构，只按 manifest 声明的 entry/binary 校验。
+ * 形态：离线预装的外部服务（`<resources>/mcp/bundled/<key>/manifest.json`）：npm 包 + 平台二进制，
+ * 由 `scripts/pack-mcp-bundled.cjs` 在构建期取产物、校 sha256 后打进安装包
+ * （package.json build.extraResources → mcp/bundled）。manifest 是布局的唯一声明，
+ * 本文件不假设目录结构，只按 manifest 声明的 entry/binary 校验。
  *
- * 第二种形态的存在理由：这类包默认在**首次使用**时才 npm install + 从 GitHub Releases
+ * 为什么必须预打包而不是用时装：这类包默认在**首次使用**时才 npm install + 从 GitHub Releases
  * 下载平台二进制；内网（以及 Node fetch 不认企业 TLS 代理的环境）两条路都不通，
  * 表现为「MCP 已启用但永远连不上」。
+ *
+ * 曾经还有「形态 2：仓库自带的纯 JS 服务随 app.asar 分发」这条捷径（叠云 Open API 四件套用的就是它）。
+ * 那四条服务 2026-11 起不再预装，纯 JS 分支随之删除 —— 现在预装＝必须有 manifest 产物。
  */
 
 const MANIFEST_FILE = 'manifest.json';
@@ -64,37 +65,10 @@ function bundledMissing(message) {
 }
 
 /**
- * 纯 JS 预装服务的既有位置约定（形态 1）。
- * @param {string} key
- * @returns {string[]}
- */
-function legacyJsEntryCandidates(key) {
-  const rel = path.join('src', 'mcp', 'servers', key, 'server.js');
-  const candidates = [];
-  try {
-    const { app } = require('electron');
-    if (app && typeof app.getAppPath === 'function') {
-      candidates.push(path.join(app.getAppPath(), rel));
-      candidates.push(path.join(app.getAppPath(), 'mcp', 'servers', key, 'server.js'));
-    }
-  } catch {
-    // 非 Electron 环境
-  }
-  if (process.resourcesPath) {
-    candidates.push(path.join(process.resourcesPath, 'app.asar', rel));
-    candidates.push(path.join(process.resourcesPath, rel));
-    candidates.push(path.join(process.resourcesPath, 'mcp', 'bundled', key, 'server.js'));
-  }
-  candidates.push(path.join(__dirname, 'servers', key, 'server.js'));
-  candidates.push(path.resolve(process.cwd(), rel));
-  return candidates;
-}
-
-/**
  * 解析预装 MCP 入口。
  * @param {string} serverKey registry 里的 bundledServer
  * @param {string[]} [roots] 预装根目录（测试可注入；默认按打包/开发两种布局探测）
- * @returns {{ entry: string, dir: string, manifest: object|null }|null}
+ * @returns {{ entry: string, dir: string, manifest: object }|null}
  */
 function resolveBundledMcpEntry(serverKey, roots) {
   const key = String(serverKey || '').trim();
@@ -123,15 +97,6 @@ function resolveBundledMcpEntry(serverKey, roots) {
     return { entry, dir, manifest };
   }
 
-  for (const candidate of legacyJsEntryCandidates(key)) {
-    try {
-      if (candidate && fs.existsSync(candidate)) {
-        return { entry: path.resolve(candidate), dir: path.dirname(candidate), manifest: null };
-      }
-    } catch {
-      // ignore
-    }
-  }
   return null;
 }
 
@@ -167,10 +132,7 @@ function resolveBundledMcpLaunch(server, roots) {
     args: [resolved.entry, ...bundledOwnArgs(server)],
     launchEnv: {
       ...(server.launchEnv && typeof server.launchEnv === 'object' ? server.launchEnv : {}),
-      ELECTRON_RUN_AS_NODE: '1',
-      ...(server.openApiService
-        ? { DIEYUN_OPEN_API_SERVICE: String(server.openApiService) }
-        : {})
+      ELECTRON_RUN_AS_NODE: '1'
     }
   };
 }

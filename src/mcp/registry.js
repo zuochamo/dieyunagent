@@ -1,78 +1,23 @@
 'use strict';
 
-const { OPEN_API_MCP_DEFS } = require('./open-api-deploy-env');
-
-/** 预装 MCP 服务（可通过设置 → 技能 → MCP 启用） */
+/**
+ * 预装 MCP 服务（可通过设置 → 技能 → MCP 启用）。
+ *
+ * **只保留离线预打包的 mcp-postgres**。2026-11 发版决策：不再预装
+ * - 叠云 Open API 四件套（mcp-daizhang / mcp-tools / mcp-index / mcp-pixel，原 `bundledServer: 'dieyun-open-api'`）；
+ * - 6 个第三方 npx 模板（sequential-thinking / everything / playwright / context7 / github / brave-search）。
+ *
+ * 为什么这么减：
+ * - 叠云四件套默认开启，等于每台客户端一装完就把内网地址 + Key 摆进 Agent 工具表；
+ *   要去哪家客户，就由谁按需接入（MCP 设置页「新增远端」，或 Agent 的 mcp_manage），
+ *   而不是替所有人预置一套。
+ * - 6 个 npx 模板本身不占体积也不默认开，但它们是「列表里的噪音」：内网断网场景下点开即失败
+ *   （要联网拉包），留着只会制造无效重试与误解。
+ *
+ * 注意：这里只影响**没有显式记录**的机器（store.js 里 `hasOwnProperty(enabled, id)` 优先）
+ * 与新装客户端；老机器 mcp.json 里残留的 `enabled` / `removed` 键不再对应任何服务，属惰性数据。
+ */
 const BUILTIN_MCP_SERVERS = [
-  // 这四个是「零配置即用」：内置内网 Base URL + API Key（随 build/deploy-packaged.json 注入），
-  // 走纯 JS 服务随 app.asar 分发，无需 npm install / 无需外网，懒连接（不用不 spawn）。
-  // 所以默认开启 —— 装完客户端就能让 Agent 查内网数据，不必每台手点一次。
-  //
-  // 其余预装服务保持 defaultEnabled: false：npx 型要联网拉包（内网断网会反复失败并退避重试），
-  // github / brave-search 缺 token 会连不上，postgres 没有 DATABASE_URL 也是空转。
-  //
-  // 注意：这里只影响**没有显式记录**的机器（store.js 里 `hasOwnProperty(enabled, id)` 优先），
-  // 用户手动关过的不会被这次改动重新打开。
-  ...OPEN_API_MCP_DEFS.map((def) => ({
-    id: def.id,
-    name: def.name,
-    description: def.description,
-    bundledServer: 'dieyun-open-api',
-    openApiService: def.service,
-    command: 'bundled',
-    args: [],
-    defaultEnabled: true
-  })),
-  {
-    id: 'mcp-sequential-thinking',
-    name: 'Sequential Thinking',
-    description: '结构化分步推理：复杂问题拆解为可追踪的思考链。',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
-    defaultEnabled: false
-  },
-  {
-    id: 'mcp-everything',
-    name: 'MCP Everything（测试）',
-    description: '官方 Everything 示例服务，用于验证 MCP 安装与 Agent 工具桥接。',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-everything'],
-    defaultEnabled: false
-  },
-  {
-    id: 'mcp-playwright',
-    name: 'Playwright',
-    description: 'Playwright 浏览器自动化 MCP（与叠云内置浏览器工具互补）。',
-    command: 'npx',
-    args: ['-y', '@playwright/mcp'],
-    defaultEnabled: false
-  },
-  {
-    id: 'mcp-context7',
-    name: 'Context7',
-    description: 'Context7 文档检索：查询开源库最新文档与示例（需联网）。',
-    command: 'npx',
-    args: ['-y', '@upstash/context7-mcp'],
-    defaultEnabled: false
-  },
-  {
-    id: 'mcp-github',
-    name: 'GitHub',
-    description: 'GitHub 仓库 / Issue / PR 操作。',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-github'],
-    defaultEnabled: false,
-    envHint: 'GITHUB_PERSONAL_ACCESS_TOKEN'
-  },
-  {
-    id: 'mcp-brave-search',
-    name: 'Brave 搜索',
-    description: 'Brave Search API 网页搜索。',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-brave-search'],
-    defaultEnabled: false,
-    envHint: 'BRAVE_API_KEY'
-  },
   {
     // 版本与 --stdio 是该包的行为契约（写死在 AST 层拒写、不带参数会改成开 HTTP 服务），
     // 浮动版本会让预装行为静默变化，故锁定版本；升级需同时确认 --stdio 与只读语义未变。

@@ -5,29 +5,10 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { listBuiltinMcpServers } = require('./registry');
-const { enrichMcpServerForUi } = require('./server-config');
+const { enrichMcpServerForUi, isMcpServerConfigured } = require('./server-config');
 const { getEnvHintNames } = require('./env-hints');
 const { createMcpCredentialsStore } = require('./credentials-store');
 const mcpPackageStore = require('./package-store');
-const {
-  isOpenApiMcpId,
-  getOpenApiMcpDef,
-  buildDieyunServiceConfigForUi,
-  writeDieyunServiceToDeployLocal
-} = require('./open-api-deploy-env');
-
-/**
- * safeStorage 不可用时会降级写 deploy.local.json；该文件损坏时写入会抛错。
- * 这里只告警不向上抛：本次保存仍通过 process.env 生效（当前会话可用），
- * 避免中断用户操作，也避免影响 MCP 安装 / 打包流程。
- */
-function warnDeployLocalWriteFailure(serverId, err) {
-  console.warn(
-    `[mcp] ${serverId} 凭据未能写入 deploy.local.json（本次仍生效，重启后可能丢失）：${
-      err && err.message ? err.message : err
-    }`
-  );
-}
 
 /**
  * MCP json store + catalog install/upgrade/repair. Bound to Electron safeStorage.
@@ -108,13 +89,6 @@ function createMcpStore(opts) {
             ? enabled[server.id] !== false
             : !!server.defaultEnabled
         };
-        // 只覆写「占位命令」型预装服务（registry 里 command 写的是 bundled）用于展示。
-        // 带真实启动规格的预装服务（如 mcp-postgres：npx 规格 + bundledServer）必须保留
-        // command/args —— 启动侧要靠 args 里的 `--stdio`（丢掉会变成开 HTTP 监听而静默挂住）。
-        if (merged.bundledServer && merged.command === 'bundled') {
-          merged.command = '内置';
-          merged.args = [String(merged.openApiService || merged.bundledServer)];
-        }
         return enrich(merged);
       });
     const customs = (store.custom || []).map((server) =>
@@ -149,45 +123,82 @@ function createMcpStore(opts) {
     return listMcpServersForUi(userDataPath);
   }
 
+  /**
+   * 新增自定义服务（UI「新增」表单的入口；Agent 走 mcp_manage → upsert 同一路径）。
+   *
+   * 远端 HTTP 服务与 stdio 的条目构造都在 `upsertMcpFromCatalog`（唯一一处），这里只补
+   * 「新增」语义：必填校验给出调用方习惯的中文提示、id 重复直接报错（不按升级覆盖）。
+   * 原先这里只认 command，于是 UI 和 Agent 都造不出一个远端服务，remote + 自定义鉴权头
+   * 只能靠「先建 stdio 再改 remoteUrl」的绕法。
+   */
   function addMcpServer(userDataPath, payload) {
-    const id = payload && payload.id != null ? String(payload.id).trim() : '';
-    const name = payload && payload.name != null ? String(payload.name).trim() : '';
-    const description =
-      payload && payload.description != null ? String(payload.description).trim() : '';
-    const command = payload && payload.command != null ? String(payload.command).trim() : '';
-    const args = Array.isArray(payload.args)
-      ? payload.args.map((a) => String(a).trim()).filter(Boolean)
-      : [];
+    const p = payload || {};
+    const id = p.id != null ? String(p.id).trim() : '';
+    const command = p.command != null ? String(p.command).trim() : '';
+    const remoteUrl = String(p.remoteUrl || p.url || '').trim();
+    const transportKind = p.transportKind === 'remote' || (!command && !!remoteUrl) ? 'remote' : 'stdio';
     if (!id) throw new Error('MCP id 必填');
     if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(id)) {
       throw new Error('id 须以字母开头，仅允许字母、数字、下划线、连字符');
     }
-    if (!name) throw new Error('名称必填');
-    if (!command) throw new Error('启动命令必填');
+    if (transportKind === 'remote' && !remoteUrl) throw new Error('远程 URL 必填');
+    if (transportKind === 'stdio' && !command) throw new Error('启动命令必填');
 
     const store = loadMcpStore(userDataPath);
-    const removed = new Set(store.removed || []);
-    const builtin = listBuiltinMcpServers().find((s) => s.id === id);
-    if (builtin && !removed.has(id)) {
-      throw new Error('该 id 已被预装 MCP 占用');
-    }
     if ((store.custom || []).some((s) => s.id === id)) {
       throw new Error('该 id 已存在');
     }
 
-    store.custom = store.custom || [];
-    store.custom.push({
+    return upsertMcpFromCatalog(userDataPath, {
       id,
-      name,
-      description,
-      command,
-      args,
-      defaultEnabled: false
-    });
+      name: p.name,
+      description: p.description,
+      transportKind,
+      remoteUrl,
+      remoteTransport: p.remoteTransport || 'streamable-http',
+      authHeaderName: p.authHeaderName || 'Authorization',
+      authRequired: !!p.authRequired,
+      command: command || undefined,
+      args: p.args
+    }).list;
+  }
+
+  /**
+   * 启用 / 停用某个已存在的服务 —— **唯一实现**。
+   *
+   * 原先这段判定（「服务是否存在」「未配置不许启用」）写在 IPC handler 里，Agent 工具
+   * （`mcp_manage`）需要同一套判定，复制一份必然漂移，故下移到 store。
+   * @param {string} userDataPath
+   * @param {{ id?: string, enabled?: boolean }} payload
+   */
+  function setMcpServerEnabled(userDataPath, payload) {
+    const id = payload && payload.id != null ? String(payload.id).trim() : '';
+    if (!id) throw new Error('MCP id 必填');
+    const store = loadMcpStore(userDataPath);
+    const removed = new Set(store.removed || []);
+    const exists =
+      listBuiltinMcpServers().some((s) => s.id === id && !removed.has(id)) ||
+      (store.custom || []).some((s) => s.id === id);
+    if (!exists) throw new Error('MCP 服务不存在');
+    const enabled = !(payload && payload.enabled === false);
+    if (enabled) {
+      const creds = ensureMcpCredentialsStore(userDataPath);
+      const server = listMcpServersForUi(userDataPath).find((s) => s.id === id);
+      if (server && !isMcpServerConfigured(server, { getSecretMeta: (sid) => creds.getSecretMeta(sid) })) {
+        throw new Error('请先完成配置（URL / Token / 环境变量）');
+      }
+    }
+    store.enabled = store.enabled || {};
+    store.enabled[id] = enabled;
     saveMcpStore(userDataPath, store);
     return listMcpServersForUi(userDataPath);
   }
 
+  /**
+   * 自定义服务的**创建/更新唯一入口**：stdio 与 remote 都在这里建条目，
+   * id 已存在时按 upgrade 覆盖。市场安装、UI 安装、Agent `mcp_manage` 全都走它 ——
+   * 新增一条「另写一份 entry 构造」的路径就是重复实现。
+   */
   function upsertMcpFromCatalog(userDataPath, payload) {
     const restoreBuiltinId =
       payload && payload.restoreBuiltinId != null ? String(payload.restoreBuiltinId).trim() : '';
@@ -292,7 +303,6 @@ function createMcpStore(opts) {
     if (!server) throw new Error('MCP 服务不存在');
     const creds = ensureMcpCredentialsStore(userDataPath);
     const meta = creds.getSecretMeta(serverId);
-    const secrets = creds.loadSecrets(serverId);
     // listMcpServersForUi 已经把声明规范化成带状态的逐项表（env-hints.js 是唯一来源）
     const envDefs = Array.isArray(server.envHints) ? server.envHints : [];
     const envRequirement = server.envRequirement === 'any' ? 'any' : 'all';
@@ -303,10 +313,6 @@ function createMcpStore(opts) {
       : false;
     const packageMeta = mcpPackageStore.getMcpNpmPackageMeta(server);
     const packageStatus = mcpPackageStore.getMcpPackageStatus(userDataPath, server);
-    const openApiDef = getOpenApiMcpDef(serverId) || (server.openApiService ? getOpenApiMcpDef(`mcp-${server.openApiService}`) : null);
-    const isDieyunService = isOpenApiMcpId(serverId) || !!server.openApiService;
-    const serviceId = openApiDef ? openApiDef.service : server.openApiService || '';
-    const dieyunService = isDieyunService && serviceId ? buildDieyunServiceConfigForUi(serviceId, secrets) : null;
     return {
       id: server.id,
       name: server.name,
@@ -314,9 +320,6 @@ function createMcpStore(opts) {
       builtin: !!server.builtin,
       enabled: !!server.enabled,
       bundledServer: server.bundledServer || '',
-      openApiService: serviceId || '',
-      configKind: dieyunService ? dieyunService.configKind : '',
-      dieyunService,
       transportKind: server.transportKind || (server.remoteUrl ? 'remote' : 'stdio'),
       remoteUrl: server.remoteUrl || '',
       remoteTransport: server.remoteTransport || 'streamable-http',
@@ -341,11 +344,7 @@ function createMcpStore(opts) {
       configured: !!server.configured,
       needsConfig: !!server.needsConfig,
       hasToken: !!meta.hasToken,
-      hasEnvValue: envDefs.length
-        ? envSatisfied
-        : dieyunService
-          ? dieyunService.hasKey
-          : meta.hasEnv,
+      hasEnvValue: envDefs.length ? envSatisfied : meta.hasEnv,
       undecryptable: Array.isArray(meta.undecryptable) ? meta.undecryptable : []
     };
   }
@@ -431,43 +430,6 @@ function createMcpStore(opts) {
     }
     if (Object.keys(envPatch).length) {
       creds.saveSecrets(serverId, { env: envPatch });
-    }
-    if (
-      (isOpenApiMcpId(serverId) || (builtin && builtin.openApiService)) &&
-      (payload.dieyunServiceUrl != null || payload.dieyunServiceKey != null)
-    ) {
-      const def = getOpenApiMcpDef(serverId) || (builtin && builtin.openApiService
-        ? { service: builtin.openApiService }
-        : null);
-      const serviceId = def && def.service ? def.service : '';
-      const svc = serviceId ? require('./servers/dieyun-open-api/client').SERVICES[serviceId] : null;
-      if (svc) {
-        const url = String(payload.dieyunServiceUrl != null ? payload.dieyunServiceUrl : '')
-          .trim()
-          .replace(/\/+$/, '');
-        const key = String(payload.dieyunServiceKey != null ? payload.dieyunServiceKey : '').trim();
-        const env = {};
-        if (url) env[svc.urlEnv] = url;
-        if (key) env[svc.keyEnv] = key;
-        if (Object.keys(env).length) {
-          try {
-            creds.saveSecrets(serverId, { env });
-          } catch (err) {
-            if (err && err.code === 'CREDENTIALS_ENCRYPT_UNAVAILABLE') {
-              try {
-                writeDieyunServiceToDeployLocal(serviceId, { url, key });
-              } catch (writeErr) {
-                warnDeployLocalWriteFailure(serverId, writeErr);
-              }
-            } else {
-              throw err;
-            }
-          }
-          for (const [k, v] of Object.entries(env)) {
-            process.env[k] = v;
-          }
-        }
-      }
     }
 
     return listMcpServersForUi(userDataPath);
@@ -674,6 +636,7 @@ function createMcpStore(opts) {
     listMcpServersForUi,
     deleteMcpServer,
     addMcpServer,
+    setMcpServerEnabled,
     upsertMcpFromCatalog,
     getMcpServerConfigForUi,
     updateMcpServerConfig,

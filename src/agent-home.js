@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
 
@@ -285,6 +286,35 @@ function createUserSkill(userData, workspacePath, payload) {
   return { dir: finalDir, skillPath, name, description, skillKey };
 }
 
+/**
+ * 删除技能目录的**唯一实现**：IPC（设置页删除按钮）与 Agent 工具 `skill_delete` 共用。
+ *
+ * 判定用 `evaluateSkillDeletable`（可删范围 = 扫描根内、非根本身、非种子技能），
+ * 再加一条「目录里真有 SKILL.md」加固 —— 防伪造 dir 误删根内其它目录。
+ * @param {string} userData userData 目录
+ * @param {string|null} workspacePath 当前工作空间（决定扫描根）
+ * @param {string} dir 要删的技能目录
+ * @returns {{ ok: true, dir: string }}
+ */
+async function deleteUserSkill(userData, workspacePath, dir) {
+  if (!dir || typeof dir !== 'string') throw new Error('dir 必填');
+  const roots = filterAccessibleSkillRoots(getScanRoots(userData, workspacePath).map((r) => path.resolve(r)));
+  const verdict = evaluateSkillDeletable(dir, roots);
+  if (!verdict.deletable) {
+    if (verdict.reason === 'ROOT_DIR') throw new Error('不能删除技能根目录');
+    if (verdict.reason === 'SEEDED') throw new Error('预装内置技能不可删除');
+    throw new Error('仅可删除当前扫描范围内的技能目录');
+  }
+  const resolved = path.resolve(dir);
+  try {
+    await fsp.access(path.join(resolved, 'SKILL.md'));
+  } catch {
+    throw new Error('目标目录不是技能目录（缺少 SKILL.md）');
+  }
+  await fsp.rm(resolved, { recursive: true, force: true });
+  return { ok: true, dir: resolved };
+}
+
 function describeAgentHome(userData, workspacePath) {
   ensureAgentHomeDirs(userData, workspacePath);
   return {
@@ -322,6 +352,7 @@ module.exports = {
   isSkillRootAccessible,
   filterAccessibleSkillRoots,
   createUserSkill,
+  deleteUserSkill,
   describeAgentHome,
   sanitizeSkillFolderName
 };

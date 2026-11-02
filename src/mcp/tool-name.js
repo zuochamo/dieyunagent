@@ -20,6 +20,26 @@
 /** MCP 工具名长度上限（协议/上游 API 的既有约束，勿单独调整） */
 const MCP_TOOL_NAME_MAX = 64;
 
+/**
+ * Agent 侧与 MCP 打交道、但**不是**远端服务注册出来的内置工具名。
+ *
+ * 为什么要这张名单：多处判定「这个名字是不是 MCP 服务注册的工具」用的是 `mcp_` 前缀
+ * （执行分发 / 入参校验 / 输出分流 / 渲染层缓存键）。管理类工具天然也以 `mcp_` 开头，
+ * 不排除的话 `mcp_manage` 会被当成远端工具丢给 `mcpRuntime.callAgentTool` 而失败。
+ * 名单与谓词只在这里维护一处，四个调用点共用（`mcp_tool_schema` 的特例原本是散着写的）。
+ */
+const MCP_BUILTIN_TOOL_NAMES = Object.freeze(['mcp_tool_schema', 'mcp_manage']);
+
+/**
+ * 该工具名是否「由某个 MCP 服务注册」（形如 `mcp_<serverId>__<tool>`）。
+ * @param {string} name
+ * @returns {boolean}
+ */
+function isMcpServerToolName(name) {
+  const n = String(name == null ? '' : name);
+  return n.startsWith('mcp_') && !MCP_BUILTIN_TOOL_NAMES.includes(n);
+}
+
 function simpleHash(text) {
   let h = 2166136261;
   for (let i = 0; i < text.length; i++) {
@@ -65,6 +85,8 @@ function encodeMcpToolName(serverId, toolName) {
 
 module.exports = {
   MCP_TOOL_NAME_MAX,
+  MCP_BUILTIN_TOOL_NAMES,
+  isMcpServerToolName,
   simpleHash,
   mcpToolNamePrefix,
   encodeMcpToolName

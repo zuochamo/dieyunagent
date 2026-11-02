@@ -274,19 +274,27 @@ describe('配置页保存多个环境变量', () => {
     expect(cfg.envHint).toBe('DATABASE_URL');
   });
 
-  it('单变量服务（如 GitHub）行为不变：仍只有一个输入项，且未填即未配置', () => {
+  it('单变量服务（原 GitHub 形态）行为不变：仍只有一个输入项，且未填即未配置', () => {
     const userDataPath = tempUserData();
     const store = createMcpStore({ safeStorage: fakeSafeStorage('A') });
-    const cfg = store.getMcpServerConfigForUi(userDataPath, 'mcp-github');
+    // mcp-github 已不再预装（2026-11 发版决策），单变量语义改由自定义服务覆盖 —— 断言的行为不变。
+    store.upsertMcpFromCatalog(userDataPath, {
+      id: 'gh-like',
+      name: 'GH-like',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-github'],
+      envHint: 'GITHUB_PERSONAL_ACCESS_TOKEN'
+    });
+    const cfg = store.getMcpServerConfigForUi(userDataPath, 'gh-like');
     expect(cfg.envHintNames).toEqual(['GITHUB_PERSONAL_ACCESS_TOKEN']);
     expect(cfg.envRequirement).toBe('all');
     expect(cfg.configured).toBe(false);
 
     store.updateMcpServerConfig(userDataPath, {
-      id: 'mcp-github',
+      id: 'gh-like',
       envValue: 'ghp_fake_token_value'
     });
-    const after = store.getMcpServerConfigForUi(userDataPath, 'mcp-github');
+    const after = store.getMcpServerConfigForUi(userDataPath, 'gh-like');
     expect(after.envHints.map((def) => def.saved)).toEqual([true]);
     expect(after.configured).toBe(true);
   });

@@ -1,9 +1,24 @@
-/* global loopApi, settings, currentSessionId, gwState, gatewayCall, createAgentAbortError, buildDieyunMdSystemBlock, assembleSystemPrompt, getContextFilePathsForAgent, getSessionChangeRowsForAgent, waitRemoteCoreForPrep, recordAgentPrepTrace, throwIfAgentAborted, getComposerAgentMode, CTX_LIMITS, getEffectiveInputBudget, skipAutoCodebaseForTaskTier, isTaskTierFeatureEnabled, shouldInjectCodeContext, shouldAutoCodebaseSearch, textHasCodebaseMention, loadEnabledSkillIds, hasAgentContinueCheckpoint, sessionActiveRuns */
+/* global loopApi, settings, currentSessionId, gwState, gatewayCall, createAgentAbortError, buildDieyunMdSystemBlock, assembleSystemPrompt, getContextFilePathsForAgent, getSessionChangeRowsForAgent, waitRemoteCoreForPrep, recordAgentPrepTrace, throwIfAgentAborted, getComposerAgentMode, CTX_LIMITS, getEffectiveInputBudget, skipAutoCodebaseForTaskTier, isTaskTierFeatureEnabled, shouldInjectCodeContext, shouldAutoCodebaseSearch, textHasCodebaseMention, loadEnabledSkillIds, hasAgentContinueCheckpoint, sessionActiveRuns, DieyunToolCatalog */
 'use strict';
 
 const systemMessageCache = new Map();
 const SYSTEM_MESSAGE_CACHE_TTL_MS = 3 * 60 * 1000;
 const SYSTEM_MESSAGE_CACHE_MAX = 32;
+
+/**
+ * 「这个工具是不是 MCP 服务注册出来的」—— 判定唯一来源在 `src/mcp/tool-name.js`
+ * （经 agent-bundle 暴露为 `DieyunToolCatalog.isMcpServerToolName`）：
+ * `mcp_manage` / `mcp_tool_schema` 同前缀但属于内置能力，不能算成 MCP 工具，
+ * 否则「本轮有没有 MCP 工具」这个缓存键会恒为真，系统提示会串用带 MCP 块的那版。
+ * bundle 未加载时保守返回 false。
+ */
+function isMcpServerToolNameGlobal(name) {
+  const catalog = typeof DieyunToolCatalog !== 'undefined' ? DieyunToolCatalog : null;
+  if (catalog && typeof catalog.isMcpServerToolName === 'function') {
+    return catalog.isMcpServerToolName(name);
+  }
+  return false;
+}
 
 function normalizeSystemCacheQuery(q) {
   return String(q || '')
@@ -19,7 +34,7 @@ function buildSystemMessageCacheKey(sessionId, userQuery, workspacePath, opts = 
     Array.isArray(opts.agentTools) &&
     opts.agentTools.some((t) => {
       const name = t && t.function && t.function.name ? String(t.function.name) : '';
-      return name.startsWith('mcp_') && name !== 'mcp_tool_schema';
+      return isMcpServerToolNameGlobal(name);
     })
       ? 'mcp'
       : 'nomcp';
@@ -221,7 +236,7 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
             isReady: readyFn
           });
           indexOk = !!(r && r.ok);
-          if (r && r.skipped && !r.ok) softSkip = r.error || '索引未就绪，本次不等待';
+          if (r && r.skipped && !r.ok) softSkip = r.error || '索引未就绪，本轮用 grep';
         } else if (!ensure) {
           indexOk = true;
         }
@@ -310,7 +325,7 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
         });
         graphIndexOk = !!(r && r.ok);
         if (r && r.skipped && !r.ok && typeof agentPrepStepSkip === 'function') {
-          agentPrepStepSkip(prepSid, 'graph', r.error || '结构索引未就绪，本次不等待');
+          agentPrepStepSkip(prepSid, 'graph', r.error || '结构索引未就绪，本轮用 grep');
         } else {
           prepDone('graph');
         }
@@ -390,7 +405,7 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
       Array.isArray(opts.agentTools) &&
       opts.agentTools.some((t) => {
         const name = t && t.function && t.function.name ? String(t.function.name) : '';
-        return name.startsWith('mcp_') && name !== 'mcp_tool_schema';
+        return isMcpServerToolNameGlobal(name);
       }),
     openFilePaths,
     changeRows,

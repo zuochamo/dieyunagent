@@ -44,17 +44,11 @@ electron-builder always drops the **root** `node_modules` of a copied directory,
 
 `npm run verify:remote-pack` checks this at the end of every build using the shared manifest in `src/remote/remote-pack-layout.js`. If it reports missing files, fix `package.json` → `build.extraResources` rather than shipping the artifact.
 
-### Optional: Bundle Default Credentials
+### No Bundled Credential Layer
 
-Copy `deploy.defaults.example.json` to `deploy.packaged.json` (gitignored) and fill in the `openApi` keys. `npm run pack:deploy-defaults` runs before `electron-builder` and injects it as `resources/deploy-packaged.json` via `extraResources`.
+Installers no longer embed any credential layer: the `pack:deploy-defaults` step and its `resources/deploy-packaged.json` were removed together with the 叠云 Open API MCP subsystem (2026-11). File layers are now just `~/.dieyun/deploy.json` → repo `deploy.local.json`, both gitignored and local-only.
 
-At runtime this is the lowest-priority file layer, so `~/.dieyun/deploy.json` and `deploy.local.json` still override it.
-
-If the source file is missing, the script writes an empty object and warns: the build continues and no stale keys leak into the next installer. If the file exists but is not valid JSON, the build fails on purpose, so a broken credential layer is never shipped.
-
-Run this through the npm scripts above. Calling `electron-builder` directly skips the step and `build/deploy-packaged.json` may not exist.
-
-Note: asar and extraResources are not encrypted — keys shipped this way can be extracted from the installer. Use only for internal read-only services that accept this trade-off.
+MCP endpoints and keys are per-service: saved from the settings page into `mcp-secrets.json` (safeStorage-encrypted under the app's userData dir). Nothing secret should be added to `extraResources` — asar and extraResources are not encrypted, so anything shipped that way can be extracted from the installer.
 
 ## Publish Existing Artifacts
 

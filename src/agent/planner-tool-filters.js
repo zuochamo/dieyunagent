@@ -1,6 +1,6 @@
 'use strict';
 
-const { mcpToolNamePrefix } = require('../mcp/tool-name');
+const { mcpToolNamePrefix, isMcpServerToolName } = require('../mcp/tool-name');
 
 const EXPLORE_TOOL_NAMES = new Set([
   'fs_read_file',
@@ -85,7 +85,9 @@ const READONLY_MCP_TOOL_PREFIXES = Object.freeze(
  */
 function isReadOnlyMcpToolName(name) {
   const n = String(name || '');
-  if (!n.startsWith('mcp_')) return false;
+  // 用统一谓词而不是裸前缀：mcp_manage / mcp_tool_schema 不是服务注册的工具，
+  // 管理类能力不该出现在只读阶段（Explore / Shell 白名单只放行只读工具）。
+  if (!isMcpServerToolName(n)) return false;
   return READONLY_MCP_TOOL_PREFIXES.some((prefix) => n.startsWith(prefix));
 }
 

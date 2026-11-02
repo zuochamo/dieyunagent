@@ -248,7 +248,7 @@
         "MCP json store",
         "credentials",
         "npx package install",
-        "bundled dieyun-open-api",
+        "bundled MCP artifacts (build/mcp-bundled)",
         "skills/MCP IPC",
         "whenReady MCP/plans boot"
       ],
@@ -1101,9 +1101,21 @@
       ]
     },
     {
+      "prefix": "src/ssh/actions.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
       "prefix": "src/ssh/",
       "tests": [
         "test:ssh-reconnect-targets"
+      ]
+    },
+    {
+      "prefix": "src/worktree/actions.js",
+      "tests": [
+        "test:unit"
       ]
     },
     {

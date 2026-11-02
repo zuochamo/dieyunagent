@@ -14,6 +14,12 @@ const {
   REGION_ACTIONS,
   actionMeta
 } = require('../computer/actions');
+// 「是不是 MCP 服务注册的工具」唯一判定（mcp_manage / mcp_tool_schema 例外）
+const { isMcpServerToolName } = require('../mcp/tool-name');
+// mcp_manage 的动作清单唯一来源（与 schema enum / apply() 分派同源，不在这里另抄一份）
+const { MCP_MANAGE_ACTIONS } = require('../mcp/manage');
+
+const MCP_MANAGE_REMOTE_TRANSPORTS = ['remote', 'streamable-http', 'http'];
 
 /** 校验 [x, y] 坐标：二元数值数组（像素坐标，允许小数/越界由执行端钳制）。 */
 function computerPointOk(v) {
@@ -384,6 +390,124 @@ function validateToolArgs(name, args, opts) {
   switch (n) {
     case 'computer':
       return validateComputerArgs(a);
+    case 'skill_delete': {
+      const dir = String(a.dir || '').trim();
+      if (!dir) {
+        return {
+          ok: false,
+          error: 'skill_delete 需要 dir（技能目录绝对路径）',
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      // 只接受绝对路径：相对路径由「当前工作空间」解释，删错目录的代价太大
+      if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(dir)) {
+        return {
+          ok: false,
+          error: 'skill_delete 的 dir 必须是绝对路径',
+          errorCode: 'INVALID_ARG',
+          retryable: false
+        };
+      }
+      return { ok: true };
+    }
+    case 'worktree': {
+      const action = String(a.action || 'list').trim();
+      const allowed = ['list', 'create', 'remove', 'list_runs', 'preview_run', 'apply_run', 'cleanup_run', 'prune'];
+      if (!allowed.includes(action)) {
+        return {
+          ok: false,
+          error: `worktree 的 action 必须是 ${allowed.join(' / ')}（收到「${action || '空'}」）`,
+          errorCode: 'INVALID_ARG',
+          retryable: false
+        };
+      }
+      if (['create', 'preview_run', 'apply_run', 'cleanup_run'].includes(action) && !String(a.runId || '').trim()) {
+        return {
+          ok: false,
+          error: `worktree ${action} 需要 runId`,
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      if (action === 'remove' && !String(a.path || '').trim()) {
+        return {
+          ok: false,
+          error: 'worktree remove 需要 path（先用 action=list 取）',
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      return { ok: true };
+    }
+    case 'ssh': {
+      // 只挡「明显缺东西」与「模型不该自己决定的」两件事；连接细节（别名/凭据/指纹）由
+      // src/ssh/actions.js + connect-payload 统一处理。
+      const action = String(a.action || 'status').trim();
+      const allowed = ['list', 'status', 'connect', 'disconnect', 'port_forward', 'use_workspace', 'browse', 'home'];
+      if (!allowed.includes(action)) {
+        return {
+          ok: false,
+          error: `ssh 的 action 必须是 ${allowed.join(' / ')}（收到「${action || '空'}」）`,
+          errorCode: 'INVALID_ARG',
+          retryable: false
+        };
+      }
+      // 明文密钥一律不许经模型传递：密码/口令只能来自本机凭据库
+      if (a.password != null || a.passphrase != null) {
+        return {
+          ok: false,
+          error: 'ssh 不接受明文密码/口令参数：让用户在「连接」面板保存一次凭据后重试',
+          errorCode: 'INVALID_ARG',
+          retryable: false
+        };
+      }
+      if (action === 'connect' && !String(a.profile || a.host || '').trim()) {
+        return {
+          ok: false,
+          error: 'ssh connect 需要 profile（~/.ssh/config 别名）或 host',
+          errorCode: 'MISSING_ARG',
+          retryable: false,
+          suggestedFix: '先 action=list 看有哪些别名可用'
+        };
+      }
+      if (action === 'use_workspace' && !String(a.remotePath || '').trim()) {
+        return {
+          ok: false,
+          error: 'ssh use_workspace 需要 remotePath',
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      if (action === 'port_forward') {
+        const sub = String(a.forwardAction || 'list').trim();
+        if (!['list', 'add', 'remove'].includes(sub)) {
+          return {
+            ok: false,
+            error: 'ssh port_forward 的 forwardAction 必须是 list / add / remove',
+            errorCode: 'INVALID_ARG',
+            retryable: false
+          };
+        }
+        if (sub === 'add' && !(Number(a.remotePort) > 0)) {
+          return {
+            ok: false,
+            error: 'ssh port_forward add 需要 remotePort',
+            errorCode: 'MISSING_ARG',
+            retryable: false
+          };
+        }
+        if (sub === 'remove' && !String(a.id || '').trim()) {
+          return {
+            ok: false,
+            error: 'ssh port_forward remove 需要 id（先用 forwardAction=list 取）',
+            errorCode: 'MISSING_ARG',
+            retryable: false
+          };
+        }
+      }
+      return { ok: true };
+    }
     case 'host_exec': {
       const cmd = String(a.command || '').trim();
       if (!cmd) {
@@ -681,6 +805,91 @@ function validateToolArgs(name, args, opts) {
       }
       return { ok: true };
     }
+    case 'mcp_manage': {
+      // 动作枚举的唯一来源是 mcp/manage.js 的 MCP_MANAGE_ACTIONS（apply() 按它分派）；
+      // 这里只挡「明显缺东西」的调用，真正的取舍（id 规则 / 白名单 / 是否已配置）在 store 里。
+      const action = String(a.action || '').trim();
+      if (!MCP_MANAGE_ACTIONS.includes(action)) {
+        return {
+          ok: false,
+          error: `mcp_manage 的 action 必须是 ${MCP_MANAGE_ACTIONS.join(' / ')}（收到「${action || '空'}」）`,
+          errorCode: 'INVALID_ARG',
+          retryable: false
+        };
+      }
+      // 包运维里只有 repair_env 不需要 id（它修的是整机环境，不是某个服务）
+      if (action === 'repair_env') {
+        const kind = String(a.repairKind || '').trim();
+        if (!['windows-vctools', 'npm-cache-busy'].includes(kind)) {
+          return {
+            ok: false,
+            error: 'mcp_manage repair_env 需要 repairKind（windows-vctools / npm-cache-busy）',
+            errorCode: 'MISSING_ARG',
+            retryable: false
+          };
+        }
+        return { ok: true };
+      }
+      if (action === 'list') return { ok: true };
+      if (!String(a.id || '').trim()) {
+        return {
+          ok: false,
+          error: `mcp_manage ${action} 需要 id`,
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      if (action === 'add' && !String(a.name || '').trim()) {
+        return {
+          ok: false,
+          error: 'mcp_manage add 需要 name（显示名）',
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      if (action === 'add' || action === 'update') {
+        const transport = String(a.transport || '').trim();
+        const remote =
+          MCP_MANAGE_REMOTE_TRANSPORTS.includes(transport) || (!transport && !!String(a.url || '').trim());
+        if (action === 'add') {
+          if (remote && !String(a.url || '').trim()) {
+            return {
+              ok: false,
+              error: 'mcp_manage add 远端服务需要 url',
+              errorCode: 'MISSING_ARG',
+              retryable: false
+            };
+          }
+          if (!remote && !String(a.command || '').trim()) {
+            return {
+              ok: false,
+              error: 'mcp_manage add 本地服务需要 command（远端 HTTP 服务请改给 url）',
+              errorCode: 'MISSING_ARG',
+              retryable: false
+            };
+          }
+        }
+        if (
+          action === 'update' &&
+          a.url == null &&
+          a.command == null &&
+          a.args == null &&
+          a.token == null &&
+          a.env == null &&
+          a.name == null &&
+          a.description == null &&
+          a.authHeaderName == null
+        ) {
+          return {
+            ok: false,
+            error: 'mcp_manage update 至少要给一项要改的内容（url / command / args / token / env / name）',
+            errorCode: 'MISSING_ARG',
+            retryable: false
+          };
+        }
+      }
+      return { ok: true };
+    }
     case 'mcp_tool_schema': {
       // 两种模式二选一：agentName 查已知道具的完整 schema，query 在全部已启用服务里检索。
       const agentName = String(a.agentName || '').trim();
@@ -696,7 +905,7 @@ function validateToolArgs(name, args, opts) {
       return { ok: true };
     }
     default:
-      if (n.startsWith('mcp_') && n !== 'mcp_tool_schema') {
+      if (isMcpServerToolName(n)) {
         return validateMcpInputArgs(n, a, opts && opts.mcpSchema);
       }
       if (n.startsWith('browser_') && n !== 'browser_status' && n !== 'browser_close') {

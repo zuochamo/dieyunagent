@@ -44,6 +44,9 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - `src/agent/vision-image.js` — 工具图片的**可寻址凭证**：内容寻址落盘副本（`tool-output/vision/`，按 `visionImageKeepFiles` 裁剪）+ 视觉 token 口径（`visionTokensForSize`，DeepSeek 公开格网算法，≤1024）+ 成功/失败两句模型可见文案（唯一来源）。图入不进视觉通道都要在工具结果里留 `visionImage` / `visionTokens` / 只读副本路径
 - `src/renderer/renderer-agent-tools.js` — Renderer 侧的 UI 工具执行体；`session_new` 复用 `createNewSession`（与「新对话」按钮同一条流程），勿另写一遍建会话 + 绑工作空间
 - `src/gateway/fs-edit-file.js` — 本地 Gateway 与 remote host 共用 `fs.edit_file`
+- `src/ssh/actions.js` — SSH 动作唯一实现（连/断/端口转发/切远端工作空间）：IPC `ssh:*` 与 Agent 工具 `ssh` 共用，勿在 handler 里重写
+- `src/worktree/actions.js` — worktree 动作唯一实现（仓库上下文解析 + list/create/remove/cleanup/prune/preview/apply）：IPC `worktree:*` 与 Agent 工具 `worktree` 共用
+- MCP 凭据：`mcp_manage` 的 `request_credential` 由 Main 推 `mcp:credential-request`（preload `onMcpCredentialRequest`）→ Renderer 打开同一个 MCP 配置弹窗由人填写；**模型永远拿不到明文**
 
 ### 模型选型（Auto / 手动）
 

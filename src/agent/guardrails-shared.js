@@ -56,8 +56,19 @@ const MUTATING_TOOL_NAMES = Object.freeze(
     // （截屏→点→看→点），并行投递只会互相踩；screenshot 也随工具名一同串行，代价可忽略。
     'computer',
     'skill_create',
+    // 删技能目录是物理删除（不可恢复），与 skill_create 一样进串行队列
+    'skill_delete',
     'plan_create',
     'plan_delete',
+    // 立即执行 / 中止计划：动的是正在跑的后台轮次，必须串行
+    'plan_run',
+    'plan_cancel',
+    // mcp_manage 改的是 MCP 服务配置并重建会话（进程级副作用），与 skill_create 同类
+    'mcp_manage',
+    // ssh 会改连接/端口转发状态，甚至把工作空间切到远端：同一时刻只能有一个在跑
+    'ssh',
+    // worktree 建/删副本、写回主工作区都是仓库级操作，串行才安全
+    'worktree',
     'agents_md_propose'
   ])
 );

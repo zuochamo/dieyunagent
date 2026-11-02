@@ -75,7 +75,7 @@ describe('预装 MCP 的凭据闸门', () => {
   it('无 envHint 的预装服务视为已配置（不要求填 command）', () => {
     expect(
       isMcpServerConfigured(
-        { id: 'mcp-daizhang', bundledServer: 'dieyun-open-api', command: 'bundled' },
+        { id: 'mcp-postgres', bundledServer: 'mcp-postgres', command: 'npx' },
         { getSecretMeta: () => ({ envKeys: [] }) }
       )
     ).toBe(true);

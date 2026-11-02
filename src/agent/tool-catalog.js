@@ -6,6 +6,11 @@ const { ENGINE_PARAM_SCHEMA } = require('../browser/engine-target');
 const { REF_PARAM_SCHEMA } = require('../browser/ref-namespace');
 // computer 动作枚举的唯一来源（schema 里的 action 取值由它拼出，避免与执行端漂移）
 const { COMPUTER_ACTIONS_TEXT } = require('../computer/actions');
+// 「这个工具名是不是 MCP 服务注册出来的」唯一判定（Main 与 Renderer 共用）：
+// mcp_manage / mcp_tool_schema 虽同前缀，但不是远端工具，判定细则在 mcp/tool-name.js。
+const { isMcpServerToolName, MCP_BUILTIN_TOOL_NAMES } = require('../mcp/tool-name');
+// mcp_manage 的动作清单唯一来源（apply() 按它分派；schema enum 与校验都从这里取）
+const { MCP_MANAGE_ACTIONS } = require('../mcp/manage');
 
 const HOST_TOOLS = [
   {
@@ -1436,6 +1441,38 @@ const PLAN_TOOLS = [
         required: ['id']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'plan_run',
+      description:
+        '立刻手动执行一次指定计划（等价于界面上的「立即运行」，不等定时点）。' +
+        '执行是异步的：起跑后结果出现在计划绑定的会话里，别在这里等它跑完。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '计划 id（先用 plan_list 取）' }
+        },
+        required: ['id']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'plan_cancel',
+      description:
+        '中止某个计划正在跑的那一次执行（计划本身保留，下次到点照常触发）。' +
+        '只在用户明确要停的时候用，别用它顺手清后台任务。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '计划 id（先用 plan_list 取）' }
+        },
+        required: ['id']
+      }
+    }
   }
 ];
 
@@ -1471,11 +1508,82 @@ const MCP_TOOL_SCHEMA_TOOL = {
 };
 
 /**
+ * 管理 MCP **服务本身**（不是调用它们的工具）：装、改、启停、删。
+ *
+ * 与 `mcp_tool_schema` 的分工：那个查「工具叫什么、参数什么」，这个管「服务在不在、连不连得上」。
+ * 之前装服务只有设置页一条路（`mcp:add` 只收 stdio），远端 HTTP 服务连正规入口都没有 ——
+ * 于是「让 Agent 自己把某台 Open API 接进来」是不可能的。执行端走 mcp/manage.js 的
+ * `applyToolRequest`，与 IPC 共用同一份 store 与同一次运行时重挂。
+ */
+const MCP_MANAGE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'mcp_manage',
+    description:
+      '管理 MCP 服务本身（装/改/启停/删），不是调用它们的工具。' +
+      'action=list 看现有服务与启停状态；add 新增；update 改 URL/命令/Token/环境变量；' +
+      'enable 启停；remove 删除自定义服务；restore 恢复被移除的预装服务；' +
+      'request_credential 让界面上弹出该服务的凭据输入框（由用户亲手填，你永远拿不到明文）；' +
+      'check_update 查该 npx 包的最新版本；install_package 把它装到本地后离线可用；upgrade_package 升到指定/最新版本；repair_env 打开环境修复（缺 VS Build Tools 等）。' +
+      '远端服务：transport=streamable-http + url，鉴权头不是 Authorization 时给 authHeaderName（如 X-API-Key）并把密钥放 token；' +
+      '本地服务：command + args。改动会立即重建 MCP 会话，下一轮工具表里即出现（或消失）该服务的工具；' +
+      '具体工具名用 mcp_tool_schema 查。**不知道密钥时不要向用户索要明文**，用 request_credential。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          // 枚举只有一份：mcp/manage.js 的 MCP_MANAGE_ACTIONS（apply() 按它分派）。
+          // 在这里抄一份就会漂移 —— 加了动作忘了改 schema，模型永远调不到。
+          enum: [...MCP_MANAGE_ACTIONS],
+          description: '要做的操作'
+        },
+        id: {
+          type: 'string',
+          description: '服务 id（字母开头，仅字母/数字/_/-），用短名即可，如 daizhang、pg-prod'
+        },
+        name: { type: 'string', description: 'add 时的显示名（必填）' },
+        description: { type: 'string', description: '可选说明，会显示在设置页' },
+        transport: {
+          type: 'string',
+          enum: ['stdio', 'streamable-http'],
+          description: 'add/update 时选传输方式；省略时按是否给 url 判断'
+        },
+        url: { type: 'string', description: '远端服务端点，如 http://192.168.31.62:3011/api/open-api/mcp' },
+        authHeaderName: {
+          type: 'string',
+          description: '鉴权请求头名，默认 Authorization；叠云 Open API 系列用 X-API-Key'
+        },
+        token: { type: 'string', description: '鉴权值：加密存进凭据库（mcp-secrets.json），不写进 mcp.json' },
+        command: { type: 'string', description: 'stdio 服务的启动命令，如 npx' },
+        args: { type: 'array', items: { type: 'string' }, description: 'stdio 服务的启动参数' },
+        env: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          description: 'update 时覆盖环境变量；只允许服务自己声明过的键（如 mcp-postgres 的 DATABASE_URL）'
+        },
+        enabled: { type: 'boolean', description: 'enable 时用：true 启用（默认）/ false 停用' },
+        reason: {
+          type: 'string',
+          description: 'request_credential 时用：一句话说明为什么要这个凭据，会显示在输入框上方'
+        },
+        version: { type: 'string', description: 'upgrade_package 时用：目标版本号；省略则升到 npm latest' },
+        repairKind: {
+          type: 'string',
+          enum: ['windows-vctools', 'npm-cache-busy'],
+          description: 'repair_env 时用：要修的问题类型（来自安装失败的诊断）'
+        }
+      },
+      required: ['action']
+    }
+  }
+};
+
+/**
  * 判断模型是否「工具调用能力弱」——只依据可量化的规模信号，禁止按厂商名（deepseek/mimo/qwen 等）
  * 一刀切：同一厂商既有弱模型也有强模型，命中厂商子串会误伤强模型（如 DeepSeek-V4.1-Flash）。
  * 命中条件：模型 id 标注了 ≤8B 参数量，或带 tiny/small/nano/micro/mini 等小模型后缀。
- */
-function isWeakToolCallerModel(modelId) {
+ */function isWeakToolCallerModel(modelId) {
   const m = String(modelId || '').toLowerCase();
   if (!m) return false;
   // 参数量标记（1.8b / 7b / 8b …）：仅 ≤8B 视为弱；排除 8x7b 这类 MoE 总参数写法
@@ -1903,17 +2011,168 @@ const CAMERA_TOOL = {
   }
 };
 
+/**
+ * SSH：连服务器 / 端口转发 / 把工作空间切到远端。
+ *
+ * 为什么 Agent 需要它：远端能力原先只挂在设置页的连接面板上（`ssh:connect` 等 6 个 IPC），
+ * Agent 只有本机 fs/host_exec —— 用户说「连上 192.168.1.9 看下磁盘」只能自己点界面。
+ * 执行端走 `src/ssh/actions.js`（与 IPC 同一份实现：别名解析、凭据库、租约、端口转发清理）。
+ *
+ * 密钥/密码**不经过模型**：能连上靠 ~/.ssh/config 的 IdentityFile 或本机已保存的凭据；
+ * 需要密码时让用户去「连接」面板保存一次，再重连。
+ */
+const SSH_TOOL = {
+  type: 'function',
+  function: {
+    name: 'ssh',
+    description:
+      'SSH 远程主机：连接、查看连接状态、端口转发、把当前工作空间切到远端目录。' +
+      'action=list 看 ~/.ssh/config 里的可用别名与当前连接态；connect 连上（profile=别名，或 host/username）；' +
+      'disconnect 断开；port_forward 管本地端口转发；use_workspace 把工作空间切到远端路径后 fs_* / host_exec 都作用于远端；' +
+      'browse 列远端目录，home 取远端家目录。密码/私钥必须是本机已保存的（不接收明文密钥参数）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'status', 'connect', 'disconnect', 'port_forward', 'use_workspace', 'browse', 'home'],
+          description: '要做的操作，默认 status'
+        },
+        profile: {
+          type: 'string',
+          description: 'connect 时用：~/.ssh/config 里的 Host 别名（推荐，私钥/跳板自动带上）'
+        },
+        host: { type: 'string', description: 'connect 时用：主机名或 IP（没有别名时给这个）' },
+        port: { type: 'number', description: 'connect 时用：端口，默认 22' },
+        username: { type: 'string', description: 'connect 时用：登录用户' },
+        authType: {
+          type: 'string',
+          enum: ['auto', 'key', 'password', 'agent', 'keyboard-interactive'],
+          description: '认证方式，默认 auto（agent → 私钥 → 密码）'
+        },
+        privateKeyPath: { type: 'string', description: 'key 认证时可指定私钥路径；省略则用别名/已存凭据里的' },
+        remotePath: {
+          type: 'string',
+          description: 'connect 后顺手切到的工作空间路径，或 use_workspace 的目标远端目录'
+        },
+        force: { type: 'boolean', description: 'disconnect 时用：连有会话租约的连接也强制断开' },
+        forwardAction: {
+          type: 'string',
+          enum: ['list', 'add', 'remove'],
+          description: 'port_forward 的子操作，默认 list'
+        },
+        id: { type: 'string', description: 'port_forward remove 时用：转发条目 id' },
+        localPort: { type: 'number', description: 'port_forward add 时用：本地端口（0 = 自动分配）' },
+        remoteHost: { type: 'string', description: 'port_forward add 时用：远端目标地址，默认 127.0.0.1' },
+        remotePort: { type: 'number', description: 'port_forward add 时用：远端目标端口' },
+        path: { type: 'string', description: 'browse 时用：远端目录，默认 /' },
+        acceptNewHostKey: {
+          type: 'boolean',
+          description:
+            'connect 时用：首次连接信任该主机指纹。**必须先问过用户并得到明确同意**才能置 true —— ' +
+            '指纹第一次出现时工具会连失败并把指纹回给你，那是让你拿去问人的，不是让你自己决定的'
+        }
+      },
+      required: ['action']
+    }
+  }
+};
+
+/**
+ * Worktree（并行副本）：给一次改动开独立分支/目录、跑完再决定写回主工作区。
+ *
+ * 为什么 Agent 需要它：设置页里 13 个 `worktree:*` 通道一直是人在点，Agent 只会直接改主工作区 ——
+ * 「先开副本再改，别动我当前分支」这种要求它做不到。执行端走 `src/worktree/actions.js`（与 IPC 同一份）。
+ */
+const WORKTREE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'worktree',
+    description:
+      'Git worktree（副本）管理：在独立分支/目录里干活，再预览并写回主工作区。' +
+      'action=list 列当前副本；create 为一次运行新建副本（runId 相同则同属一次运行）；list_runs 看历次运行的副本与占用；' +
+      'preview_run 看这次运行改了什么；apply_run 把改动写回主工作区；cleanup_run 清理（可先存档）；prune 删过期分支；remove 删单个副本。' +
+      '只在本地 Git 工作空间可用（SSH 远程工作区走会话自带的远端副本）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'create', 'remove', 'list_runs', 'preview_run', 'apply_run', 'cleanup_run', 'prune'],
+          description: '要做的操作'
+        },
+        runId: { type: 'string', description: '一次运行的 id（create / preview_run / apply_run / cleanup_run 用）' },
+        roleId: { type: 'string', description: 'create 时用：这条副本承担的职责名（如 reviewer / fixer）' },
+        baseRef: { type: 'string', description: 'create 时用：基线引用，默认 HEAD' },
+        path: { type: 'string', description: 'remove 时用：副本目录路径（先 action=list 取）' },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'apply_run 时用：只写回这些文件；省略表示全部'
+        },
+        changeIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'apply_run 时用：只写回这些改动 id（来自 preview_run）'
+        },
+        forceConflict: { type: 'boolean', description: 'apply_run 时用：冲突也强制写回（默认 false）' },
+        allowOverwriteMainDirty: {
+          type: 'boolean',
+          description: 'apply_run 时用：主工作区有未提交改动时也覆盖（默认 false）'
+        },
+        archive: { type: 'boolean', description: 'cleanup_run 时用：先存档再清理，默认 true' },
+        allowDiscardUncommitted: {
+          type: 'boolean',
+          description: 'cleanup_run 时用：允许丢弃副本里未提交的改动（默认 false，先跟用户确认）'
+        },
+        deleteBranches: { type: 'boolean', description: 'cleanup_run 时用：连分支一起删（默认 false）' },
+        keep: {
+          type: 'number',
+          description:
+            'prune 时用：保留最近 N 个 dieyun 分支不删。**省略等于 0 = 把已合并的历史分支全删**，' +
+            '所以不确定就先传 5 这类小数字'
+        }
+      },
+      required: ['action']
+    }
+  }
+};
+
+/**
+ * 删除技能：`skills:delete` 通道一直只有设置页按钮，Agent 能建技能却不能收。
+ * 判定/删除的唯一实现在 `src/agent-home.js#deleteUserSkill`（与 IPC 同一份：
+ * 只删扫描根内、非根本身、非种子技能，且目录里必须真有 SKILL.md）。
+ */
+const SKILL_DELETE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'skill_delete',
+    description:
+      '删除一个技能目录（用户自建 / 工作空间内的技能）。预装内置技能与技能根目录不可删。' +
+      '只在用户明确要删时用；删之前先确认目录里就是他说的那个技能（可用 fs_read_file 看 SKILL.md）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        dir: { type: 'string', description: '技能目录绝对路径（技能列表里显示的那个目录）' }
+      },
+      required: ['dir']
+    }
+  }
+};
+
 const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   WEB_TOOLS,
   BROWSER_TOOLS,
   [CODEBASE_TOOL, GREP_TOOL, GLOB_TOOL, READ_SYMBOL_TOOL, LSP_TOOL],
   GRAPH_TOOLS,
-  [AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL],
+  [AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL, SKILL_DELETE_TOOL],
   MEMORY_TOOLS,
   PLAN_TOOLS,
-  [MCP_TOOL_SCHEMA_TOOL, CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL],
+  [MCP_TOOL_SCHEMA_TOOL, MCP_MANAGE_TOOL, CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL],
   [COMPUTER_TOOL],
   [CAMERA_TOOL],
+  [SSH_TOOL],
+  [WORKTREE_TOOL],
   PEER_TOOLS
 );
 
@@ -1966,11 +2225,17 @@ module.exports = {
   GRAPH_TOOLS,
   AGENTS_MD_PROPOSE_TOOL,
   SKILL_CREATE_TOOL,
+  SKILL_DELETE_TOOL,
   MEMORY_TOOLS,
   MEMORY_RECALL_TOOL,
   MEMORY_FORGET_TOOL,
   PLAN_TOOLS,
   MCP_TOOL_SCHEMA_TOOL,
+  MCP_MANAGE_TOOL,
+  SSH_TOOL,
+  WORKTREE_TOOL,
+  isMcpServerToolName,
+  MCP_BUILTIN_TOOL_NAMES,
   CLARIFY_TOOL,
   SESSION_TOOL,
   SUBAGENT_TOOL,

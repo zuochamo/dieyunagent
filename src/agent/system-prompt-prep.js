@@ -900,7 +900,8 @@ function formatMcpPromptBlock(servers, compactToolsPresent) {
       `【MCP · ${enabled.length} 个服务已启用】${names}\n` +
       '工具已注册为 mcp_*，参数见各工具 schema。本轮只挂了与当前提问相关的一部分：' +
       '缺工具时用 mcp_tool_schema({ query }) 在全部已启用服务里检索，返回的 agentName 可直接调用；' +
-      '嵌套字段被折叠时用 mcp_tool_schema({ agentName }) 查完整 schema。'
+      '嵌套字段被折叠时用 mcp_tool_schema({ agentName }) 查完整 schema。' +
+      '要新增/改配置/启停服务（含远端 HTTP + 自定义鉴权头）时用 mcp_manage，不必让用户去设置页点。'
     );
   }
   const lines = enabled.map((server) => {
@@ -915,7 +916,8 @@ function formatMcpPromptBlock(servers, compactToolsPresent) {
     '【已启用 MCP 服务】\n' +
     lines.join('\n') +
     '\n说明：启用后叠云会 spawn MCP 子进程并将其工具注册到 Agent（以 mcp_ 开头）；首次连接可能需下载 npm 包。' +
-    '\n工具列表里没有 mcp_* 时，用 mcp_tool_schema({ query }) 检索已启用服务的工具（可能只是本轮未召回，不是没注册）。'
+    '\n工具列表里没有 mcp_* 时，用 mcp_tool_schema({ query }) 检索已启用服务的工具（可能只是本轮未召回，不是没注册）。' +
+    '\n要接一个新服务（stdio 命令或远端 HTTP）、改配置、启停：直接用 mcp_manage（action=list 先看现状），不需要用户去设置页操作。'
   );
 }
 

@@ -13,11 +13,6 @@ const { createMcpRuntimeManager } = require('../mcp/runtime-manager');
 const { isMcpServerConfigured } = require('../mcp/server-config');
 const mcpPackageStore = require('../mcp/package-store');
 const { resolveBundledMcpLaunch } = require('../mcp/bundled-launch');
-const {
-  OPEN_API_MCP_IDS,
-  getDieyunOpenApiEnvFromDeploy,
-  mergeMcpServerSecrets
-} = require('../mcp/open-api-deploy-env');
 const { PlansStore } = require('../plans/store');
 const { PlansScheduler } = require('../plans/scheduler');
 const { runPlan } = require('../plans/runner');
@@ -74,29 +69,9 @@ function bootMcpSkillCatalogs(deps) {
   const listIds = deps.listInstalledCatalogIds || listInstalledCatalogIds;
   const skillsDir = deps.dieyunSkillsDir || dieyunSkillsDir;
 
-  try {
-    const { app } = require('electron');
-    if (app && !app.isPackaged) {
-      const store = mcpStore.loadMcpStore(userData);
-      let changed = false;
-      for (const mcpId of OPEN_API_MCP_IDS) {
-        const service = String(mcpId).replace(/^mcp-/, '');
-        const deployEnv = getDieyunOpenApiEnvFromDeploy({ serviceId: service });
-        const hasKey = Object.keys(deployEnv).some(
-          (k) => k.endsWith('_API_KEY') && String(deployEnv[k] || '').trim()
-        );
-        if (hasKey && !Object.prototype.hasOwnProperty.call(store.enabled || {}, mcpId)) {
-          store.enabled = store.enabled || {};
-          store.enabled[mcpId] = true;
-          changed = true;
-          log.info(`开发模式：已启用预装 MCP ${mcpId}（凭据来自 deploy.local.json）`);
-        }
-      }
-      if (changed) mcpStore.saveMcpStore(userData, store);
-    }
-  } catch {
-    // 非 Electron / 测试环境
-  }
+  // 这里原本有一段「开发模式自动启用叠云 Open API 四件套」的捷径：它只写 enabled、不动 removed，
+  // 于是删过内置服务的机器会出现「enabled 为 true 但列表里没有」的自相矛盾状态（2026-11 实证踩到）。
+  // 那四条服务已不再预装，这段捷径随之删除 —— 不要再为开发态单独造一条绕过 store 判定的写入口。
 
   let mcpRuntime = deps.existingRuntime || null;
   if (!mcpRuntime) {
@@ -114,10 +89,9 @@ function bootMcpSkillCatalogs(deps) {
         catalogPath: path.join(userData, 'mcp-tools-catalog.json'),
         // 会话断开 / 连接失败落到主日志：MCP 出问题时的第一现场在 logs/main.log
         log: (msg) => log.warn(msg),
-        getServerSecrets: (id) => {
-          const raw = mcpStore.ensureMcpCredentialsStore(userData).loadSecrets(id);
-          return mergeMcpServerSecrets(id, raw);
-        },
+        // 凭据只有一条来路：加密凭据库（mcp-secrets.json）。原先是 mergeMcpServerSecrets 再叠一层
+        // deploy 注入，那只服务叠云 Open API 四件套；四件套不再预装后这层就用不上了。
+        getServerSecrets: (id) => mcpStore.ensureMcpCredentialsStore(userData).loadSecrets(id),
         getWorkspacePath: () => {
           try {
             const gw = getLocalGateway();

@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 
 const {
+  deleteUserSkill,
   dieyunSkillsDir,
   evaluateSkillDeletable,
   isSeededSkillDir,
@@ -122,5 +123,37 @@ describe('scanSkills 下发 builtin / deletable', () => {
     expect(sameName.builtin).toBe(false);
     expect(sameName.deletable).toBe(true);
     expect(sameName.undeletableReason).toBe('');
+  });
+
+  // Agent 工具 skill_delete 与设置页删除按钮共用 deleteUserSkill：
+  // 判定之外还有一条「目录里必须真有 SKILL.md」，防伪造 dir 误删根内其它目录。
+  describe('deleteUserSkill（IPC 与 Agent 工具共用的唯一实现）', () => {
+    it('删掉扫描根内真正的技能目录', async () => {
+      const dir = path.join(userData, 'skills', 'user', 'to-remove');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: to-remove\n---\n\nbody\n', 'utf8');
+      const r = await deleteUserSkill(userData, null, dir);
+      expect(r.ok).toBe(true);
+      expect(fs.existsSync(dir)).toBe(false);
+    });
+
+    it('缺 SKILL.md 的目录拒绝删除（不当成技能目录）', async () => {
+      const dir = path.join(userData, 'skills', 'user', 'not-a-skill');
+      fs.mkdirSync(dir, { recursive: true });
+      await expect(deleteUserSkill(userData, null, dir)).rejects.toThrow(/SKILL\.md/);
+      expect(fs.existsSync(dir)).toBe(true);
+    });
+
+    it('扫描根之外的目录拒绝删除', async () => {
+      const outside = path.join(tmpRoot, 'elsewhere');
+      fs.mkdirSync(outside, { recursive: true });
+      fs.writeFileSync(path.join(outside, 'SKILL.md'), '---\nname: x\n---\n', 'utf8');
+      await expect(deleteUserSkill(userData, null, outside)).rejects.toThrow(/扫描范围内/);
+      expect(fs.existsSync(outside)).toBe(true);
+    });
+
+    it('dir 缺失时给出明确错误', async () => {
+      await expect(deleteUserSkill(userData, null, '')).rejects.toThrow(/dir 必填/);
+    });
   });
 });

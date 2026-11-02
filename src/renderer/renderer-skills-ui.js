@@ -258,13 +258,14 @@ async function upgradeMcpPackageForCurrent() {
   }
 }
 
-async function openMcpConfigDialog(server) {
+async function openMcpConfigDialog(server, opts) {
   const overlay = $('mcp-config-overlay');
   const titleEl = $('mcp-config-title');
   const descEl = $('mcp-config-desc');
   const remoteFields = $('mcp-config-remote-fields');
   const stdioFields = $('mcp-config-stdio-fields');
-  const simpleFields = $('mcp-config-simple-fields');
+  // Agent 发起 request_credential 时带来的一句话说明：显示在弹窗顶部，替代服务自带的 description
+  const requestReason = String((opts && opts.reason) || '').trim();
   if (!overlay || !server) return;
   if (!skillsApi.getMcpConfig) {
     window.alert('当前版本未提供 MCP 配置接口');
@@ -287,42 +288,19 @@ async function openMcpConfigDialog(server) {
     return;
   }
 
-  const isDieyunService = config.configKind === 'dieyun-service' || !!config.dieyunService;
-  const isSimpleCred = isDieyunService;
-  const isRemote = !isSimpleCred && config.transportKind === 'remote';
+  const isRemote = config.transportKind === 'remote';
   /** 存在但解不开的凭据键（Main 侧凭据库给出），只用于把提示写成"请重新填写" */
   const undecryptable = Array.isArray(config.undecryptable) ? config.undecryptable : [];
   if (descEl) {
-    descEl.textContent = config.description || (isRemote ? '远程 MCP 服务' : '本地 stdio MCP');
+    descEl.textContent = requestReason
+      ? `Agent 请求你填写凭据：${requestReason}`
+      : config.description || (isRemote ? '远程 MCP 服务' : '本地 stdio MCP');
   }
   renderMcpVersionStatus(config, null);
   if (remoteFields) remoteFields.hidden = !isRemote;
-  if (simpleFields) simpleFields.hidden = !isSimpleCred;
   if (stdioFields) stdioFields.hidden = isRemote;
 
-  const envField = $('mcp-config-env-field');
-  if (envField) envField.hidden = isSimpleCred;
-
-  if (isSimpleCred) {
-    const cred = config.dieyunService || {};
-    $('mcp-config-simple-url') && ($('mcp-config-simple-url').value = cred.url || '');
-    $('mcp-config-simple-key') && ($('mcp-config-simple-key').value = cred.key || '');
-    const hint = $('mcp-config-simple-hint');
-    if (hint) {
-      hint.textContent = `${cred.label || '叠云'} 只读 Open API：填写 Base URL 与 API Key。`;
-    }
-    const keyHint = $('mcp-config-simple-key-hint');
-    if (keyHint) {
-      keyHint.textContent = cred.hasKey
-        ? `已填充（来源：${cred.keySource || '配置'}）${cred.enableHint ? ` · 开关：${cred.enableHint}` : ''}`
-        : '请填写 API Key';
-    }
-    $('mcp-config-command') && ($('mcp-config-command').value = config.command || '内置');
-    $('mcp-config-args') &&
-      ($('mcp-config-args').value =
-        (config.args || []).join('\n') ||
-        String(config.openApiService || config.bundledServer || ''));
-  } else if (isRemote) {
+  if (isRemote) {
     $('mcp-config-url') && ($('mcp-config-url').value = config.remoteUrl || '');
     ensureMcpConfigTransportMenu()?.setValue(config.remoteTransport || 'streamable-http');
     $('mcp-config-auth-header') &&
@@ -452,10 +430,7 @@ async function submitMcpConfig(e) {
   try {
     const config = await skillsApi.getMcpConfig({ id: mcpConfigServerId });
     const payload = { id: mcpConfigServerId };
-    if (config.configKind === 'dieyun-service' || config.dieyunService) {
-      payload.dieyunServiceUrl = ($('mcp-config-simple-url')?.value || '').trim();
-      payload.dieyunServiceKey = ($('mcp-config-simple-key')?.value || '').trim();
-    } else if (config.transportKind === 'remote') {
+    if (config.transportKind === 'remote') {
       payload.remoteUrl = ($('mcp-config-url')?.value || '').trim();
       payload.remoteTransport = ensureMcpConfigTransportMenu()?.getValue() || 'streamable-http';
       payload.authHeaderName = ($('mcp-config-auth-header')?.value || 'Authorization').trim();
@@ -901,6 +876,19 @@ function initSkillsUI() {
   $('mcp-config-check-update')?.addEventListener('click', () => {
     checkMcpUpdateForCurrent().catch(() => {});
   });
+
+  // Agent 的 mcp_manage request_credential：直接打开该服务的配置弹窗，由人亲手填 Key。
+  // 复用同一个弹窗（含 token / 环境变量、加密保存、保存后重挂会话），不另造一套输入界面。
+  if (skillsApi && typeof skillsApi.onMcpCredentialRequest === 'function') {
+    skillsApi.onMcpCredentialRequest((payload) => {
+      const id = String((payload && payload.serverId) || '').trim();
+      if (!id) return;
+      openMcpConfigDialog(
+        { id, name: payload.name || id },
+        { reason: String((payload && payload.reason) || '') }
+      ).catch(() => {});
+    });
+  }
   $('mcp-config-upgrade')?.addEventListener('click', () => {
     upgradeMcpPackageForCurrent().catch(() => {});
   });

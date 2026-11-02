@@ -45,6 +45,7 @@ const {
 } = require('./dieyun-instructions');
 const { fetchOpenAiModelList } = require('./openai-models');
 const { createMcpStore } = require('./mcp/store');
+const { createMcpManager } = require('./mcp/manage');
 const {
   bootMcpSkillCatalogs,
   bootPlansRuntime,
@@ -68,6 +69,8 @@ const { createRemoteGatewayRuntime } = require('./main/remote-gateway');
 const { bootWorkspaceRemoteRuntime } = require('./main/workspace-remote-runtime');
 const { createSshReconnect } = require('./ssh/reconnect');
 const { getSshConfigBlocks } = require('./ssh/ssh-config');
+const { createSshActions } = require('./ssh/actions');
+const { createWorktreeActions } = require('./worktree/actions');
 const { loadModelSettings, saveModelSettings } = require('./model-settings');
 const { createMainToolBridge } = require('./agent/tool-bridge-main');
 const { clearToolHarnessSessionsForSession } = require('./agent/tool-harness');
@@ -696,6 +699,13 @@ app.whenReady().then(async () => {
   mcpCatalog = catalogs.mcpCatalog;
   skillCatalog = catalogs.skillCatalog;
 
+  // MCP 配置变更的唯一入口（IPC 与 Agent 工具 mcp_manage 共用）：写 store + 重挂运行时。
+  const mcpManager = createMcpManager({
+    userDataPath: userData,
+    mcpStore,
+    getRuntime: () => mcpRuntime
+  });
+
   const plansBoot = bootPlansRuntime({
     userData,
     getLocalGateway: () => localGateway,
@@ -731,6 +741,33 @@ app.whenReady().then(async () => {
   channelStore = channelsBoot.channelStore;
   channelRuntime = channelsBoot.channelRuntime;
 
+  // SSH 动作的唯一实现：IPC（设置页 / 连接面板）与 Agent 工具 `ssh` 共用这份 getter 绑定，
+  // 谁也不许再把「连/断/端口转发」写第二遍。晚绑定（取值函数）避免捕获启动期的 null。
+  const sshActions = createSshActions({
+    log,
+    getLocalGateway: () => localGateway,
+    getSessionRemoteTransport: () => sessionRemoteTransport,
+    tryReconnectCurrentSshWorkspace: (reason, opts) =>
+      sshReconnect.tryReconnectCurrentSshWorkspace(reason, opts),
+    getSshSessionManager: () => sshSessionManager,
+    getSshCredentialsStore: () => sshCredentialsStore,
+    getSshConfigBlocks: () => getSshConfigBlocks(),
+    getSshConnectionPool: () => sshConnectionPool,
+    getRemoteGatewayPool: () => remoteGatewayPool,
+    getPortForwardManager: () => portForwardManager,
+    resolveSshConnectSessionStatus: (payload, connectResult) =>
+      sshReconnect.resolveSshConnectSessionStatus(payload, connectResult),
+    getActiveRemoteGatewayStatus: () => remoteGatewayRuntime.getActiveRemoteGatewayStatus(),
+    invalidateRemoteAgentClient,
+    suppressSshReconnect: () => sshReconnect.suppressSshReconnect()
+  });
+
+  // Worktree 副本：设置页「副本」面板与 Agent 工具 `worktree` 共用这一份实例。
+  const worktreeActions = createWorktreeActions({
+    getLocalGateway: () => localGateway,
+    getWorktreeService: () => worktreeService
+  });
+
   registerMainIpc({
     ipcMain,
     app,
@@ -739,6 +776,8 @@ app.whenReady().then(async () => {
     log,
     logsSources,
     usageToActivityPatch,
+    sshActions,
+    worktreeActions,
     getMainWindow: () => (windowTray ? windowTray.getMainWindow() : null),
     getLocalGateway: () => localGateway,
     getBrowserService: () => browserService,
@@ -826,7 +865,14 @@ app.whenReady().then(async () => {
       gateway: localGateway,
       webContents,
       mcpRuntime,
+      mcpManager,
       plansStore,
+      sshActions,
+      worktreeActions,
+      // 计划的「立即执行 / 中止」与 IPC plans:run-now / plans:cancel 共用同一套调度实例
+      getPlansScheduler: () => plansScheduler,
+      finishPlanRun,
+      cancelPlanRun,
       userDataPath: userData,
       browserService,
       peerCoordinator,
@@ -904,6 +950,7 @@ app.whenReady().then(async () => {
     loadModelSettings,
     getMcpCatalog: () => mcpCatalog,
     getMcpRuntime: () => mcpRuntime,
+    mcpManager,
     getSkillCatalog: () => skillCatalog,
     listMcpServersForUi: mcpStore.listMcpServersForUi,
     loadMcpStore: mcpStore.loadMcpStore,
@@ -911,6 +958,7 @@ app.whenReady().then(async () => {
     ensureMcpCredentialsStore: mcpStore.ensureMcpCredentialsStore,
     deleteMcpServer: mcpStore.deleteMcpServer,
     addMcpServer: mcpStore.addMcpServer,
+    setMcpServerEnabled: mcpStore.setMcpServerEnabled,
     getMcpServerConfigForUi: mcpStore.getMcpServerConfigForUi,
     updateMcpServerConfig: mcpStore.updateMcpServerConfig,
     checkMcpServerUpdate: mcpStore.checkMcpServerUpdate,

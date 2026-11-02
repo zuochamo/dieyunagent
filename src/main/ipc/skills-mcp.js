@@ -7,8 +7,6 @@ const { recallSkills } = require('../../skills/vector-index');
 const { readSkillUsage, usageFor } = require('../../skills/usage-ledger');
 const { recallAgentTools } = require('../../tools/tool-vector-index');
 const { getEmbeddingConfig } = require('../../model-settings');
-const { listBuiltinMcpServers } = require('../../mcp/registry');
-const { isMcpServerConfigured } = require('../../mcp/server-config');
 const {
   createUserSkill,
   describeAgentHome,
@@ -28,13 +26,12 @@ function registerSkillsMcpIpc(ctx) {
     loadModelSettings,
     getMcpCatalog,
     getMcpRuntime,
+    mcpManager,
     getSkillCatalog,
     listMcpServersForUi,
-    loadMcpStore,
-    saveMcpStore,
-    ensureMcpCredentialsStore,
     deleteMcpServer,
     addMcpServer,
+    setMcpServerEnabled,
     getMcpServerConfigForUi,
     updateMcpServerConfig,
     checkMcpServerUpdate,
@@ -93,13 +90,9 @@ function registerSkillsMcpIpc(ctx) {
 
   ipcMain.handle('mcp:catalog-install', async (_evt, payload) => {
     const mcpCatalog = getMcpCatalog();
-    const mcpRuntime = getMcpRuntime();
     if (!mcpCatalog) throw new Error('MCP 目录未就绪');
     const result = await mcpCatalog.install(String((payload && payload.id) || ''));
-    if (mcpRuntime) {
-      mcpRuntime.invalidateToolsCache();
-      await mcpRuntime.syncSessions().catch(() => {});
-    }
+    await mcpManager.reload();
     return result;
   });
 
@@ -137,50 +130,24 @@ function registerSkillsMcpIpc(ctx) {
 
   ipcMain.handle('mcp:set-enabled', async (_evt, payload) => {
     const userData = getUserDataPath();
-    const mcpRuntime = getMcpRuntime();
     const id = payload && payload.id ? String(payload.id) : '';
-    if (!id) throw new Error('MCP id 必填');
-    const store = loadMcpStore(userData);
-    const exists =
-      listBuiltinMcpServers().some((s) => s.id === id && !(store.removed || []).includes(id)) ||
-      (store.custom || []).some((s) => s.id === id);
-    if (!exists) throw new Error('MCP 服务不存在');
-    if (payload.enabled !== false) {
-      const creds = ensureMcpCredentialsStore(userData);
-      const server = listMcpServersForUi(userData).find((s) => s.id === id);
-      if (server && !isMcpServerConfigured(server, { getSecretMeta: (sid) => creds.getSecretMeta(sid) })) {
-        throw new Error('请先点击 MCP 卡片完成配置（URL / Token / 环境变量）');
-      }
-    }
-    store.enabled[id] = payload.enabled !== false;
-    saveMcpStore(userData, store);
-    if (mcpRuntime) {
-      mcpRuntime.invalidateToolsCache();
-      await mcpRuntime.syncSessions().catch(() => {});
-    }
-    return listMcpServersForUi(userData);
+    const list = setMcpServerEnabled(userData, { id, enabled: payload && payload.enabled !== false });
+    await mcpManager.reload();
+    return list;
   });
 
   ipcMain.handle('mcp:delete', async (_evt, payload) => {
     const userData = getUserDataPath();
-    const mcpRuntime = getMcpRuntime();
     const id = payload && payload.id ? String(payload.id) : '';
     const result = deleteMcpServer(userData, id);
-    if (mcpRuntime) {
-      mcpRuntime.invalidateToolsCache();
-      await mcpRuntime.syncSessions().catch(() => {});
-    }
+    await mcpManager.reload();
     return result;
   });
 
   ipcMain.handle('mcp:add', async (_evt, payload) => {
     const userData = getUserDataPath();
-    const mcpRuntime = getMcpRuntime();
     const result = addMcpServer(userData, payload || {});
-    if (mcpRuntime) {
-      mcpRuntime.invalidateToolsCache();
-      await mcpRuntime.syncSessions().catch(() => {});
-    }
+    await mcpManager.reload();
     return result;
   });
 
@@ -191,12 +158,8 @@ function registerSkillsMcpIpc(ctx) {
 
   ipcMain.handle('mcp:update-config', async (_evt, payload) => {
     const userData = getUserDataPath();
-    const mcpRuntime = getMcpRuntime();
     const result = updateMcpServerConfig(userData, payload || {});
-    if (mcpRuntime) {
-      mcpRuntime.invalidateToolsCache();
-      await mcpRuntime.syncSessions().catch(() => {});
-    }
+    await mcpManager.reload();
     return result;
   });
 
@@ -207,13 +170,9 @@ function registerSkillsMcpIpc(ctx) {
 
   ipcMain.handle('mcp:install-package', async (_evt, payload) => {
     const userData = getUserDataPath();
-    const mcpRuntime = getMcpRuntime();
     const id = payload && payload.id ? String(payload.id) : '';
     const result = await installMcpServerPackage(userData, id);
-    if (mcpRuntime) {
-      mcpRuntime.invalidateToolsCache();
-      await mcpRuntime.syncSessions().catch(() => {});
-    }
+    await mcpManager.reload();
     return result;
   });
 
@@ -221,12 +180,8 @@ function registerSkillsMcpIpc(ctx) {
 
   ipcMain.handle('mcp:upgrade-package', async (_evt, payload) => {
     const userData = getUserDataPath();
-    const mcpRuntime = getMcpRuntime();
     const result = await upgradeMcpServerPackage(userData, payload || {});
-    if (mcpRuntime) {
-      mcpRuntime.invalidateToolsCache();
-      await mcpRuntime.syncSessions().catch(() => {});
-    }
+    await mcpManager.reload();
     return result;
   });
 
@@ -319,29 +274,10 @@ function registerSkillsMcpIpc(ctx) {
   });
 
   ipcMain.handle('skills:delete', async (_evt, payload) => {
-    const dir = payload && payload.dir;
-    if (!dir || typeof dir !== 'string') throw new Error('dir 必填');
+    // 实现唯一来源 src/agent-home.js#deleteUserSkill（Agent 工具 skill_delete 走同一份）
     const localGateway = getLocalGateway();
-    const userData = getUserDataPath();
     const workspacePath = localGateway ? localGateway.getWorkspace().workspacePath : null;
-    // 删除作用域 == 扫描作用域（~/.dieyun/skills、userData/skills/user、<workspace>/.dieyun/skills）
-    const roots = filterAccessibleSkillRoots(
-      getScanRoots(userData, workspacePath).map((r) => path.resolve(r))
-    );
-    const verdict = evaluateSkillDeletable(dir, roots);
-    if (!verdict.deletable) {
-      if (verdict.reason === 'ROOT_DIR') throw new Error('不能删除技能根目录');
-      if (verdict.reason === 'SEEDED') throw new Error('预装内置技能不可删除');
-      throw new Error('仅可删除当前扫描范围内的技能目录');
-    }
-    const resolved = path.resolve(dir);
-    // 加固：只删真正的技能目录，避免伪造 dir 误删根内其它目录
-    try {
-      await fsp.access(path.join(resolved, 'SKILL.md'));
-    } catch {
-      throw new Error('目标目录不是技能目录（缺少 SKILL.md）');
-    }
-    await fsp.rm(resolved, { recursive: true, force: true });
+    await deleteUserSkill(getUserDataPath(), workspacePath, payload && payload.dir);
     return { ok: true };
   });
 }

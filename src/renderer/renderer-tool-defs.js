@@ -37,8 +37,13 @@ const GRAPH_TOOL = _tc.GRAPH_TOOL;
 const AGENTS_MD_PROPOSE_TOOL = _tc.AGENTS_MD_PROPOSE_TOOL;
 const MEMORY_TOOLS = Array.isArray(_tc.MEMORY_TOOLS) ? _tc.MEMORY_TOOLS : [];
 const SKILL_CREATE_TOOL = _tc.SKILL_CREATE_TOOL;
+// 删除技能：schema 单一来源同上，删除判定在 src/agent-home.js#deleteUserSkill。
+const SKILL_DELETE_TOOL = _tc.SKILL_DELETE_TOOL || null;
 const PLAN_TOOLS = _tc.PLAN_TOOLS || [];
 const MCP_TOOL_SCHEMA_TOOL = _tc.MCP_TOOL_SCHEMA_TOOL;
+// 装/改/启停 MCP 服务：schema 单一来源同 tool-catalog，执行在 Main（mcp/manage.js）。
+// 只给桌面聊天路径（计划/频道那档静态工具集刻意不含它 —— 后台轮次不该改用户配置）。
+const MCP_MANAGE_TOOL = _tc.MCP_MANAGE_TOOL || null;
 const CLARIFY_TOOL = _tc.CLARIFY_TOOL;
 // 新建对话 + 挂工作空间：schema 单一来源同上，执行在 Renderer（会话状态归 Renderer 所有）。
 const SESSION_TOOL = _tc.SESSION_TOOL || null;
@@ -51,6 +56,10 @@ const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
 const COMPUTER_TOOL = _tc.COMPUTER_TOOL || null;
 // 手机摄像头（拍一张现实画面）：schema 单一来源同上，注入受 camera 权限开关控制（默认关）。
 const CAMERA_TOOL = _tc.CAMERA_TOOL || null;
+// SSH 远程主机（连/断/端口转发/切远端工作空间）：schema 单一来源同上，执行在 Main（ssh/actions.js）。
+const SSH_TOOL = _tc.SSH_TOOL || null;
+// Worktree 副本（开/清/写回）：schema 单一来源同上，执行在 Main（worktree/actions.js）。
+const WORKTREE_TOOL = _tc.WORKTREE_TOOL || null;
 const isWeakToolCallerModel = _tc.isWeakToolCallerModel || function () { return false; };
 const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return entry && entry.tool; };
 
@@ -179,6 +188,7 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   }
   if (host.fsWrite && getAgentsMdMode() !== 'off') tools.push(AGENTS_MD_PROPOSE_TOOL);
   if (host.hostControl) tools.push(SKILL_CREATE_TOOL);
+  if (host.hostControl && SKILL_DELETE_TOOL) tools.push(SKILL_DELETE_TOOL);
   if (host.webFetch) tools.push(...WEB_TOOLS);
   if (host.browser && !weakModel) tools.push(...BROWSER_CORE_TOOLS);
   else if (host.browser && weakModel) {
@@ -196,6 +206,11 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   if (host.camera && CAMERA_TOOL) {
     tools.push(CAMERA_TOOL);
   }
+  // SSH 远端：与 host 权限开关无关（连接参数/凭据由用户在界面上给），常驻。
+  if (SSH_TOOL) tools.push(SSH_TOOL);
+  // Worktree 会写回主工作区（apply_run 落的是本机仓库里的文件），所以跟「文件写入」同一个闸：
+  // 用户关掉写入后还能让 Agent 通过副本把文件塞进仓库，这个开关就等于没关。
+  if (host.fsWrite && WORKTREE_TOOL) tools.push(WORKTREE_TOOL);
   if (gwState.authed) {
     tools.push(CODEBASE_TOOL);
     // 记忆读写都在 Gateway：召回（只读）与软归档（可恢复）跟 codebase 同条件暴露。
@@ -204,6 +219,9 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   }
   tools.push(...PLAN_TOOLS);
   tools.push(CLARIFY_TOOL);
+  // MCP 服务管理（装/改/启停）：不需要 MCP 已启用 —— 它的用途正是「还没有服务时把服务接进来」，
+  // 所以不放在 line 下方 hasMcpOptional 的条件里。
+  if (MCP_MANAGE_TOOL) tools.push(MCP_MANAGE_TOOL);
   // 建会话 / 换工作空间：与「新对话」按钮同一条渲染器流程，不依赖 host 权限开关。
   if (SESSION_TOOL) tools.push(SESSION_TOOL);
   if (SESSION_WORKSPACE_TOOL) tools.push(SESSION_WORKSPACE_TOOL);

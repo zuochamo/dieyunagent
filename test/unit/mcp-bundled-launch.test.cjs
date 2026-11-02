@@ -119,12 +119,10 @@ describe('预装 MCP 启动解析（离线预装产物）', () => {
     }
   });
 
-  // 纯 JS 预装服务（仓库自带代码，随 app.asar 分发）走既有约定，不受 manifest 机制影响。
-  it('无 manifest 的纯 JS 预装服务仍按既有约定解析', () => {
-    const resolved = resolveBundledMcpEntry('dieyun-open-api', []);
-    expect(resolved).toBeTruthy();
-    expect(resolved.manifest).toBeNull();
-    expect(resolved.entry.replace(/\\/g, '/').endsWith('src/mcp/servers/dieyun-open-api/server.js')).toBe(true);
+  // 纯 JS 预装服务（随 app.asar 分发、不需要 manifest 产物）这条捷径已随叠云 Open API 四件套一起删除：
+  // 现在「预装」＝必须有 manifest 产物，没有就是没预装（返回 null，交给调用方按普通服务走）。
+  it('没有 manifest 产物就不算预装', () => {
+    expect(resolveBundledMcpEntry('not-bundled-anywhere', [])).toBeNull();
   });
 });
 

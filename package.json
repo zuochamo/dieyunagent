@@ -14,9 +14,9 @@
     "start": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-remote-gateway-pack.cjs && node scripts/ensure-mcp-bundled.cjs && electron .",
     "dev": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-remote-gateway-pack.cjs && node scripts/ensure-mcp-bundled.cjs && electron . --enable-logging",
     "dev:fast": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-mcp-bundled.cjs && electron . --enable-logging",
-    "build": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
-    "build:dir": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win --dir && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
-    "build:nsis": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && npm run pack:deploy-defaults && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
+    "build": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
+    "build:dir": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && electron-builder --win --dir && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
+    "build:nsis": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
     "build:installer": "npm run build:nsis",
     "sync:updates": "node scripts/sync-updates-from-dist.mjs",
     "verify:asar": "node scripts/verify-packaged-asar.cjs",
@@ -102,7 +102,6 @@
     "test:agent-round-text": "node scripts/test-agent-round-text.cjs",
     "test:llm-channel": "node scripts/test-llm-channel.cjs",
     "pack:remote-gateway": "node scripts/pack-remote-gateway.cjs",
-    "pack:deploy-defaults": "node scripts/pack-deploy-defaults.cjs",
     "postinstall": "electron-builder install-app-deps"
   },
   "author": "PixelOffice",
@@ -201,10 +200,6 @@
       "!**/node_modules/@types/**"
     ],
     "extraResources": [
-      {
-        "from": "build/deploy-packaged.json",
-        "to": "deploy-packaged.json"
-      },
       {
         "from": "skills/bundled/weather",
         "to": "skills/bundled/weather",
