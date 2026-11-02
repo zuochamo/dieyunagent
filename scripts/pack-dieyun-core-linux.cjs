@@ -28,6 +28,67 @@ const {
   readLinuxCoreManifest
 } = require('./pack-dieyun-core-linux-lib.cjs');
 
+function parseGlibcVersion(text) {
+  const m = /(\d+)\.(\d+)/.exec(String(text || ''));
+  return m ? { major: Number(m[1]), minor: Number(m[2]) } : null;
+}
+
+/**
+ * 宿主 glibc 是否新于产物下限（2.17）。
+ *
+ * 新了就**不能**再走原生 `cargo build`：产物会链到宿主 glibc，被
+ * `assertCoreGlibcTarget` 的 CORE_GLIBC_TOO_NEW 闸门拒绝（闸门是硬约束，不可放宽）。
+ * 这与 SSH 远程编译分支的策略一致：改用 cargo-zigbuild 交叉到 2.17。
+ */
+function hostGlibcTooNew() {
+  const { CORE_GLIBC_TARGET } = require('./pack-dieyun-core-linux-lib.cjs');
+  let out = '';
+  try {
+    out = execSync("ldd --version 2>&1 | head -1", { encoding: 'utf8' });
+  } catch (e) {
+    out = String((e && e.stdout) || '');
+  }
+  const host = parseGlibcVersion(out);
+  const target = parseGlibcVersion(CORE_GLIBC_TARGET);
+  if (!host || !target) {
+    console.warn('[dieyun-core-linux] 无法解析 glibc 版本，按「宿主过新」处理（走 zigbuild）');
+    return true;
+  }
+  const tooNew =
+    host.major > target.major || (host.major === target.major && host.minor > target.minor);
+  if (tooNew) {
+    console.log(
+      `[dieyun-core-linux] 宿主 glibc ${host.major}.${host.minor} > 产物下限 ${CORE_GLIBC_TARGET}，改用 cargo zigbuild`
+    );
+  }
+  return tooNew;
+}
+
+/** Linux 宿主上用 zigbuild 产出 2.17 口径的 core（产物与远程编译同一 target 目录） */
+function buildZig() {
+  const { CORE_GLIBC_TARGET } = require('./pack-dieyun-core-linux-lib.cjs');
+  const zig = String(process.env.DIEYUN_ZIG || 'zig').trim();
+  try {
+    execSync(`${zig} version`, { stdio: 'ignore' });
+  } catch {
+    throw new Error(
+      'cargo zigbuild 需要 zig 可执行文件：请把 zig 加入 PATH、或用 DIEYUN_ZIG 指向它后重试。\n' +
+        '  （远程构建机若已按 pack:dieyun-core:linux:remote 装过，通常在 ~/.dieyun/zig/zig）'
+    );
+  }
+  const targetTriple = `${TARGET}.${CORE_GLIBC_TARGET}`;
+  console.log(`[dieyun-core-linux] cargo zigbuild --target ${targetTriple} …`);
+  // 编译参数与同文件「Linux 原生」分支保持一致，避免两条路径产出不同特性的二进制
+  execSync(`cargo zigbuild -p dieyun-core --release --target ${targetTriple}`, {
+    cwd: ROOT,
+    stdio: 'inherit'
+  });
+  if (!fs.existsSync(CROSS_BIN)) {
+    throw new Error('zigbuild 产物未找到: ' + CROSS_BIN);
+  }
+  return CROSS_BIN;
+}
+
 function crossGccAvailable() {
   if (process.env.CC_x86_64_unknown_linux_gnu || process.env['CC_x86_64-unknown-linux-gnu']) {
     return true;
@@ -188,6 +249,11 @@ async function main() {
   } else if (via === 'cross') {
     releaseBin = buildCross();
   } else if (process.platform === 'linux') {
+    // 宿主 glibc 新于 2.17 时必须走 zigbuild，否则产物过不了闸门（见 hostGlibcTooNew）
+    if (hostGlibcTooNew()) {
+      await installLinuxCoreBin(buildZig());
+      return;
+    }
     console.log('[dieyun-core-linux] cargo build --release …');
     execSync('cargo build -p dieyun-core --release', { cwd: ROOT, stdio: 'inherit' });
     releaseBin = NATIVE_BIN;

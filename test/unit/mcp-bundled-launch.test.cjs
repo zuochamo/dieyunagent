@@ -148,6 +148,10 @@ describe('预装产物完成判定（决定是否重新 pack）', () => {
       JSON.stringify({
         packageName: 'x',
         version: '0.1.10',
+        // 平台/架构是产物的一部分：同一份 build/ 目录被多平台构建复用时，
+        // 不能把 Windows 产物当成 Linux 的「已完成」用（pack 脚本里那条闸门）。
+        platform: process.platform,
+        arch: process.arch,
         entry: path.join('pkg', 'bin', 'cli.js'),
         binary: path.join('pkg', 'vendor', 'x.exe'),
         binarySha256: sha256(FAKE_EXE)
@@ -158,6 +162,35 @@ describe('预装产物完成判定（决定是否重新 pack）', () => {
     expect(packLooksComplete(dir, { name: 'x', version: '0.1.10' })).toBe(true);
     // 版本脱钩（registry 升版但产物没重打）
     expect(packLooksComplete(dir, { name: 'x', version: '0.1.11' })).toBe(false);
+    // 换了平台（产物是别的系统打的）同样要重打包
+    fs.writeFileSync(
+      path.join(dir, 'manifest.json'),
+      JSON.stringify({
+        packageName: 'x',
+        version: '0.1.10',
+        platform: process.platform === 'win32' ? 'linux' : 'win32',
+        arch: process.arch,
+        entry: path.join('pkg', 'bin', 'cli.js'),
+        binary: path.join('pkg', 'vendor', 'x.exe'),
+        binarySha256: sha256(FAKE_EXE)
+      }),
+      'utf8'
+    );
+    expect(packLooksComplete(dir, { name: 'x', version: '0.1.10' })).toBe(false);
+    // 复原成当前平台产物，再验证「字节被替换」这条
+    fs.writeFileSync(
+      path.join(dir, 'manifest.json'),
+      JSON.stringify({
+        packageName: 'x',
+        version: '0.1.10',
+        platform: process.platform,
+        arch: process.arch,
+        entry: path.join('pkg', 'bin', 'cli.js'),
+        binary: path.join('pkg', 'vendor', 'x.exe'),
+        binarySha256: sha256(FAKE_EXE)
+      }),
+      'utf8'
+    );
     // 产物被替换/损坏
     fs.writeFileSync(path.join(dir, 'pkg', 'vendor', 'x.exe'), Buffer.from('tampered'));
     expect(packLooksComplete(dir, { name: 'x', version: '0.1.10' })).toBe(false);

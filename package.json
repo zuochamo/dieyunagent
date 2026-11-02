@@ -1,7 +1,8 @@
 {
   "name": "dieyunagent",
-  "version": "0.1.63",
+  "version": "0.1.65",
   "description": "叠云 agent",
+  "homepage": "http://192.168.31.62:3099/",
   "main": "src/main.js",
   "scripts": {
     "bootstrap": "node scripts/bootstrap.cjs",
@@ -14,10 +15,15 @@
     "start": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-remote-gateway-pack.cjs && node scripts/ensure-mcp-bundled.cjs && electron .",
     "dev": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-remote-gateway-pack.cjs && node scripts/ensure-mcp-bundled.cjs && electron . --enable-logging",
     "dev:fast": "node scripts/bootstrap.cjs && node scripts/ensure-dieyun-core.cjs && node scripts/ensure-mcp-bundled.cjs && electron . --enable-logging",
-    "build": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
-    "build:dir": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && electron-builder --win --dir && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
-    "build:nsis": "node scripts/bootstrap.cjs && npm run verify:bundled-skills && npm run build:renderer && npm run pack:dieyun-core && npm run pack:dieyun-core:linux && npm run pack:remote-gateway && npm run pack:mcp-bundled && electron-builder --win nsis && npm run verify:asar && npm run verify:remote-pack && npm run verify:mcp-bundled",
+    "build": "node scripts/build-desktop.cjs --platform win --target nsis",
+    "build:dir": "node scripts/build-desktop.cjs --platform win --target dir",
+    "build:nsis": "node scripts/build-desktop.cjs --platform win --target nsis",
+    "build:linux": "node scripts/build-desktop.cjs --platform linux --target deb",
+    "build:linux:appimage": "node scripts/build-desktop.cjs --platform linux --target appimage",
+    "build:linux:dir": "node scripts/build-desktop.cjs --platform linux --target dir",
+    "pack:deb:remote": "node scripts/pack-deb-remote.cjs",
     "build:installer": "npm run build:nsis",
+    "build:all": "npm run build:nsis && npm run pack:deb:remote",
     "sync:updates": "node scripts/sync-updates-from-dist.mjs",
     "verify:asar": "node scripts/verify-packaged-asar.cjs",
     "verify:remote-pack": "node scripts/verify-remote-gateway-pack.cjs",
@@ -79,6 +85,12 @@
     "verify:agent-events": "node scripts/generate-agent-run-events-doc.cjs --check",
     "cargo:build": "cargo build -p dieyun-core --release",
     "cargo:test": "cargo test -p dieyun-core",
+    "verify:vector-cache-reuse": "node scripts/verify-vector-cache-reuse.cjs",
+    "verify:index-timing-local": "node scripts/verify-index-timing-local.cjs",
+    "verify:index-timing-ssh": "node scripts/verify-index-timing-ssh.cjs",
+    "verify:index-effectiveness": "node scripts/verify-index-effectiveness.cjs",
+    "repro:recall-stall": "node scripts/repro-recall-stall.cjs",
+    "repro:recall-writes": "node scripts/repro-recall-blocked-by-writes.cjs",
     "cargo:run": "cargo run -p dieyun-core --",
     "pack:dieyun-core": "node scripts/pack-dieyun-core.cjs",
     "pack:dieyun-core:linux": "node scripts/pack-dieyun-core-linux.cjs",
@@ -104,7 +116,10 @@
     "pack:remote-gateway": "node scripts/pack-remote-gateway.cjs",
     "postinstall": "electron-builder install-app-deps"
   },
-  "author": "PixelOffice",
+  "author": {
+    "name": "PixelOffice",
+    "email": "dev@pixeloffice.local"
+  },
   "license": "MIT",
   "overrides": {
     "nan": "^2.29.0"
@@ -162,6 +177,78 @@
           ]
         }
       ]
+    },
+    "linux": {
+      "icon": "assets/icons/linux",
+      "executableName": "dieyunagent",
+      "category": "Development",
+      "target": [
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "skills/bundled/weather",
+          "to": "skills/bundled/weather",
+          "filter": [
+            "**/*"
+          ]
+        },
+        {
+          "from": "build/remote-gateway-pack",
+          "to": "remote-gateway-pack",
+          "filter": [
+            "**/*"
+          ]
+        },
+        {
+          "from": "node_modules/monaco-editor",
+          "to": "monaco-editor",
+          "filter": [
+            "min/**",
+            "!**/*.map",
+            "LICENSE",
+            "package.json"
+          ]
+        },
+        {
+          "from": "build/remote-gateway-pack/node_modules",
+          "to": "remote-gateway-pack/node_modules",
+          "filter": [
+            "**/*"
+          ]
+        },
+        {
+          "from": "build/dieyun-core-linux",
+          "to": "dieyun-core",
+          "filter": [
+            "**/*"
+          ]
+        },
+        {
+          "from": "build/mcp-bundled",
+          "to": "mcp/bundled",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
+    },
+    "deb": {
+      "artifactName": "dieyunagent_${version}_amd64.${ext}"
+    },
+    "appImage": {
+      "artifactName": "dieyunagent-${version}-x86_64.${ext}"
     },
     "nsis": {
       "oneClick": false,

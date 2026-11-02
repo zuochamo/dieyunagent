@@ -1,10 +1,12 @@
 @echo off
-REM Full release entry (PC NSIS + Android + Y: + COS). Delegates to repo-root build-installer.bat.
+REM Full release entry (PC NSIS + Ubuntu deb + Android + Y: + COS). Delegates to repo-root build-installer.bat.
 REM
 REM No argument: auto-detect the dev version (package.json) + 1 patch and hand it to the build as
 REM the suggested unified PC / mobile release version. build-installer-ui.ps1 still shows that
 REM suggestion and asks the operator to confirm (Enter = accept) before anything runs.
 REM With an argument (build-installer-version.bat 0.1.36): pass through, no prompt.
+REM Pass -SkipDeb to skip the Ubuntu deb step (it needs the Linux build host; without
+REM dieyun-linux-build.local.json / DIEYUN_LINUX_CORE_SSH that step is skipped automatically).
 REM Version parsing / suggestion: scripts/app-version.cjs -> scripts/resolve-next-version.cjs.
 setlocal EnableExtensions
 

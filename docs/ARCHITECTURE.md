@@ -712,8 +712,10 @@ flowchart LR
 ```mermaid
 flowchart LR
   BuildAll[build-installer.bat] --> PC[electron-builder NSIS]
+  BuildAll --> Deb[Ubuntu deb\npack:deb:remote 跨机]
   BuildAll --> Mobile[Android APK]
   PC --> Dist[dist/ latest.yml + Setup.exe]
+  Deb --> DistDeb[dist/ dieyunagent_<ver>_amd64.deb]
   Mobile --> DistMobile[dist/mobile/ mobile-latest.json + apk]
   Dist --> Y[Y: 内网 updates-published]
   Dist --> COS[腾讯云 COS]
@@ -725,8 +727,9 @@ flowchart LR
 
 | 步骤 | 命令 / 路径 |
 |------|-------------|
-| 一键打包发布 | `build-installer.bat`（输入版本号，构建 PC + 手机，发布 Y: + COS） |
+| 一键打包发布 | `build-installer.bat`（输入版本号，构建 PC + Ubuntu deb + 手机，发布 Y: + COS） |
 | 仅 PC 打包 | `npm run build:nsis` |
+| 仅 Ubuntu deb | `npm run pack:deb:remote`（跨机打到 Linux 构建机，产物拉回 `dist/`） |
 | 仅内网发布 | `scripts\publish-updates-to-y.bat` |
 | 仅 COS 上传 | `node scripts\upload-updates-cos.mjs` |
 | 可选资源上传 | `npm run upload:optional-cos` |

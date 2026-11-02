@@ -488,8 +488,9 @@ Main 运行边界：plan-run-turn.beginPlanRunTurn（建会话 + 写 user 轮次
 ### 11.2 构建
 
 ```bash
-build-installer.bat   # PC + 手机打包，并发布到 Y: 与腾讯 COS
+build-installer.bat   # PC + Ubuntu deb + 手机打包，并发布到 Y: 与腾讯 COS（deb 只出产物，不发车）
 npm run build:nsis    # 仅 PC 安装包：dist/dieyunagent-Setup-x.y.z.exe + latest.yml + blockmap
+npm run pack:deb:remote  # 仅 Ubuntu deb：跨机打到 Linux 构建机，产物拉回 dist/
 ```
 
 客户端默认 `UPDATE_URL`：`http://192.168.31.62:3099/`（`main-entry.js`）。

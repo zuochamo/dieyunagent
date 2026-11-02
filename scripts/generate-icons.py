@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成应用图标：icon.ico / icon.png / icon-tray.png，全部来自 assets/logo-source.png。
+"""生成应用图标：icon.ico / icon.png / icon-tray.png / icons/linux/*，全部来自 assets/logo-source.png。
 
 唯一美术来源是 assets/logo-source.png（替换为你的品牌图后执行本脚本即可）；
 文件不存在时回退为内置的像素风占位图。配方假定源图是「深底 + 亮色线稿」，
@@ -13,6 +13,11 @@
 小尺寸（≤32px）正是 Windows 任务栏 / 托盘 / Alt-Tab 的实际显示尺寸，所以另外出
 assets/icon-tray.png（实心版 64px）：Electron 的 nativeImage 读 ICO 只能拿到最大帧，
 取不到 32px 帧，托盘只能自己按 DPI 缩放这张图。
+
+Linux 出的是「图标集目录」assets/icons/linux/{N}x{N}.png（见 LINUX_SIZES），不是单张 PNG：
+electron-builder 按源图像素尺寸决定装到 hicolor/<size>/apps/ 下，而 freedesktop 的
+hicolor index.theme 只声明到 512x512（再加 scalable/symbolic），1024x1024 目录不被
+GtkIconTheme 索引 —— 单张 1024 装出来的包在 Ubuntu 应用列表里就是「有名字、图标空白/齿轮」。
 """
 from __future__ import annotations
 
@@ -25,6 +30,11 @@ W = H = 256
 SOURCE_NAME = "logo-source.png"
 ICO_SIZES = (256, 128, 64, 48, 32, 24, 16)
 TRAY_PX = 64
+# Linux 图标（deb/AppImage）：必须出「图标集」，覆盖 hicolor index.theme 声明过的标准尺寸。
+# 只给一张 1024 PNG 时 electron-builder 只会装 /usr/share/icons/hicolor/1024x1024/apps/，
+# 而该目录不在 index.theme 里，GNOME 查不到 → 应用列表显示空白/齿轮图标。
+LINUX_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+LINUX_DIR = "icons/linux"
 
 MASTER_PX = 512
 STROKE_LUM = 140          # 「亮色线稿」的亮度阈值
@@ -168,6 +178,14 @@ def save_multi_size_ico(path: str, marks) -> None:
     )
 
 
+def save_linux_icon_set(dir_path: str, marks) -> None:
+    os.makedirs(dir_path, exist_ok=True)
+    for s in LINUX_SIZES:
+        render_icon(s, solid_mark=s <= SOLID_MAX_PX, marks=marks).save(
+            os.path.join(dir_path, f"{s}x{s}.png"), "PNG"
+        )
+
+
 def main() -> int:
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     assets = os.path.join(root, "assets")
@@ -175,6 +193,7 @@ def main() -> int:
     png_path = os.path.join(assets, "icon.png")
     ico_path = os.path.join(assets, "icon.ico")
     tray_path = os.path.join(assets, "icon-tray.png")
+    linux_dir = os.path.join(assets, *LINUX_DIR.split("/"))
 
     from_source = load_source(assets)
     master = from_source or draw_logo()
@@ -183,12 +202,14 @@ def main() -> int:
     render_icon(W, solid_mark=False, marks=marks).save(png_path, "PNG")
     save_multi_size_ico(ico_path, marks)
     render_icon(TRAY_PX, solid_mark=True, marks=marks).save(tray_path, "PNG")
+    save_linux_icon_set(linux_dir, marks)
 
     src = SOURCE_NAME if from_source is not None else "内置占位"
     print(
         "Wrote", png_path, tray_path, "and", ico_path,
         f"(来源: {src} {master.width}x{master.height}, 实心档: ≤{SOLID_MAX_PX}px)",
     )
+    print(f"Wrote Linux 图标集 {linux_dir}: {', '.join(f'{s}x{s}' for s in LINUX_SIZES)}")
     return 0
 
 

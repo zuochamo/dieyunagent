@@ -51,16 +51,19 @@ const RELEASE_REPO = 'Eszetael/postgres-mcp-hardened';
 /**
  * npm 平台名 → Rust target（决定 Release 资源名）。
  * 与包内 npm/lib/install.js 的 TARGETS 对应，这里只声明本仓要预装的平台；
- * 目前交付面是 electron-builder --win nsis，故只做 win32-x64。
+ * 交付面是 Windows NSIS 与 Ubuntu deb/AppImage，故登记 win32-x64 与 linux-x64。
  */
-const TARGETS = { 'win32-x64': 'x86_64-pc-windows-msvc' };
+const TARGETS = {
+  'win32-x64': 'x86_64-pc-windows-msvc',
+  'linux-x64': 'x86_64-unknown-linux-gnu'
+};
 
 function targetOrExplain() {
   const key = `${process.platform}-${process.arch}`;
   const target = TARGETS[key];
   if (target) return target;
   throw new Error(
-    `预装 MCP 暂不支持 ${key}（当前只做 Windows x64）。\n` +
+    `预装 MCP 暂不支持 ${key}（当前只做 win32-x64 / linux-x64）。\n` +
       `  要加平台：在 scripts/pack-mcp-bundled.cjs 的 TARGETS 里补 ${key} → Rust target，\n` +
       `  并确认 package.json build.extraResources 的 mcp/bundled 只随对应平台的安装包分发。`
   );
@@ -108,6 +111,33 @@ function extractZip(archive, destDir) {
       { stdio: 'inherit' }
     );
   }
+}
+
+/** 当前平台是否需要给上游 launcher 补 windowsHide（控制台弹窗只是 Windows 的问题） */
+function needsConsolePatch() {
+  return process.platform === 'win32';
+}
+
+/**
+ * 上游资产的扩展名不统一：Windows 发 .zip，Linux 发 .tar.gz。
+ * 因此**不猜扩展名**，以 npm 包内 checksums.json 的键为准（它同时是 sha256 的来源）。
+ */
+function archiveNameFor(name, target, checksums) {
+  const prefix = `${name}-${target}.`;
+  const hit = Object.keys(checksums || {}).find(
+    (k) => k.startsWith(prefix) && /\.(zip|tar\.gz)$/.test(k)
+  );
+  if (!hit) {
+    throw new Error(
+      `checksums.json 里没有 ${prefix}zip / ${prefix}tar.gz —— 发布不完整，拒绝产出未校验的二进制`
+    );
+  }
+  return hit;
+}
+
+/** 解压 tar.gz（Linux 资产内部是单个文件、无顶层目录，故不能 --strip-components） */
+function extractTarballFlat(archive, destDir) {
+  execFileSync('tar', ['-xzf', archive, '-C', destDir], { stdio: 'inherit' });
 }
 
 async function downloadWithCurl(url, dest) {
@@ -255,12 +285,14 @@ function packLooksComplete(dir, meta) {
     if (!fs.existsSync(manifestPath)) return false;
     const manifest = readJson(manifestPath);
     if (!manifest || manifest.packageName !== meta.name || manifest.version !== meta.version) return false;
+    // 平台也要对得上：同一份 build/ 目录被多个平台构建复用时，不能把 Windows 产物当 Linux 的用
+    if (manifest.platform !== process.platform || manifest.arch !== process.arch) return false;
     const entry = path.join(dir, manifest.entry || '');
     const binary = path.join(dir, manifest.binary || '');
     if (!manifest.entry || !manifest.binary) return false;
     if (!fs.existsSync(entry) || !fs.existsSync(binary)) return false;
     // 补丁是同版本下也必须重打包的一项：否则旧产物会被判定「已是最新」而继续弹窗
-    if (!launcherHidesConsole(entry)) return false;
+    if (needsConsolePatch() && !launcherHidesConsole(entry)) return false;
     return sha256File(binary) === manifest.binarySha256;
   } catch {
     return false;
@@ -301,7 +333,7 @@ async function packOne(serverId, target, force) {
   extractTarball(tarball, pkgDir);
 
   const checksums = readJson(path.join(pkgDir, 'checksums.json'));
-  const archive = `${meta.name}-${target}.zip`;
+  const archive = archiveNameFor(meta.name, target, checksums);
   const expectedSha = checksums[archive];
   if (!expectedSha) {
     throw new Error(
@@ -312,8 +344,10 @@ async function packOne(serverId, target, force) {
 
   const vendorDir = path.join(pkgDir, 'vendor');
   await fsp.mkdir(vendorDir, { recursive: true });
-  extractZip(archivePath, vendorDir);
-  const exeName = `${meta.name}.exe`;
+  if (archive.endsWith('.tar.gz')) extractTarballFlat(archivePath, vendorDir);
+  else extractZip(archivePath, vendorDir);
+  // 资产内部的可执行名：Windows 带 .exe，Linux 无扩展名（实测 tar.gz 里就叫包名）
+  const exeName = needsConsolePatch() ? `${meta.name}.exe` : meta.name;
   const exePath = path.join(vendorDir, exeName);
   if (!fs.existsSync(exePath)) {
     throw new Error(`${archive} 解压后未找到 ${exeName}（该包 install.js 约定的位置是 pkg/vendor/）`);
@@ -327,7 +361,10 @@ async function packOne(serverId, target, force) {
   // 给上游 launcher 补 windowsHide（理由见 patchLauncherHideConsole 的注释）：
   // 不改这一行，app 每次连接 mcp-postgres 都会弹一个黑窗口。
   const entryAbs = path.join(dir, entry);
-  const patched = patchLauncherHideConsole(fs.readFileSync(entryAbs, 'utf8'));
+  const needsPatch = needsConsolePatch();
+  const patched = needsPatch
+    ? patchLauncherHideConsole(fs.readFileSync(entryAbs, 'utf8'))
+    : { ok: true, changed: false, text: '' };
   if (!patched.ok) {
     throw new Error(
       `${meta.name}@${meta.version} 的 ${entry} 结构与补丁锚点不符，拒绝产出：\n` +
@@ -354,7 +391,7 @@ async function packOne(serverId, target, force) {
     binarySha256: sha256File(exePath),
     // 本仓对上游字节做过的改动（目前一项）：launcher 起原生二进制时补 windowsHide。
     // 打包侧的唯一声明；`packLooksComplete` 按它复检，缺了视为产物过期。
-    patches: ['launcher-windowsHide'],
+    patches: needsPatch ? ['launcher-windowsHide'] : [],
     archive,
     archiveSha256: expectedSha,
     packedAt: new Date().toISOString()
@@ -387,6 +424,8 @@ module.exports = {
   OUT,
   CACHE_DIR,
   BUNDLED_MCP_IDS,
+  TARGETS,
+  releaseUrl,
   packLooksComplete,
   patchLauncherHideConsole,
   launcherHidesConsole,

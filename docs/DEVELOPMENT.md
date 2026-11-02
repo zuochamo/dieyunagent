@@ -15,7 +15,7 @@
 
 外网或自建部署时，用 `deploy.json` 或环境变量覆盖即可。仓库根 [`deploy.defaults.example.json`](../deploy.defaults.example.json) 与内置默认一致，便于复制修改。
 
-开发机可在 `deploy.local.json`（gitignore）填写 `openApi` 四系统 URL/Key；`npm run dev` 时会注入到预装 MCP「叠云四系统 Open API」，并在首次启动时自动启用（若尚未手动开关过）。
+`deploy*.json` 里的 `openApi` 段（叠云四系统 URL/Key）自 2026-11 起**没有运行时消费者**：叠云 Open API 四件套不再预装，读取它的 `src/mcp/open-api-deploy-env.js` 已随之下线。要在开发机上连过去，就在设置 → 技能 → MCP 里「新增远端」填 URL + API Key（凭据存在 `mcp-secrets.json`），或在对话里让 Agent 用 `mcp_manage` 按需接入。别再往 `openApi` 段填 key —— 没人生效，还会随安装包一起分发。
 
 ---
 
@@ -96,9 +96,10 @@ build-installer.bat 0.0.29
 
 - 更新 PC 与手机端版本号
 - 构建 Windows NSIS 安装包
+- 构建 Ubuntu deb（`npm run pack:deb:remote`，跨机打到 Linux 构建机；没配 `dieyun-linux-build.local.json` / `DIEYUN_LINUX_CORE_SSH` 或加 `-SkipDeb` 时跳过）
 - 构建 Android APK
-- 发布到 `Y:\client-electron\updates-published`
-- 上传到腾讯 COS
+- 发布到 `Y:\client-electron\updates-published`（deb 不在此列）
+- 上传到腾讯 COS（deb 不在此列）
 
 发布前确认：
 
