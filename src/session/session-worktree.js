@@ -48,21 +48,29 @@ function sessionKeysToKeep(opts = {}) {
   return [...keys].sort();
 }
 
-/** @param {any} localGateway */
+/**
+ * @param {any} localGateway
+ * @returns {Promise<Array<object> | null>} **null = 拿不到会话表**（≠「没有会话」）。
+ *   两者必须分开：拿不到时按「谁都不留」去回收，会把还活着的会话副本（连同索引库、
+ *   未提交改动之外的一切）一次性删掉 —— 回收是删目录，宁可这一轮不回收。
+ */
 async function listRecentSessions(localGateway) {
-  if (!localGateway || typeof localGateway.invokeRpc !== 'function') return [];
+  if (!localGateway || typeof localGateway.invokeRpc !== 'function') return null;
   // 归档的会话也必须算进来：归档是侧栏整理动作，不是「这份副本可以立刻删」。
   // 保留期只有一个判据 —— 最后活跃时间（`updatedAt`），不按 archived 分叉。
-  // 两份列表都取 100 条（core 的上限）：排序是 updatedAt DESC，所以「两份都没有」的会话
-  // 一定比第 100 个更老，正是该回收的那批。
-  const [active, archived] = await Promise.all([
-    localGateway.invokeRpc('memory.sessions_list', { limit: SESSIONS_QUERY_LIMIT, archived: false }),
-    localGateway.invokeRpc('memory.sessions_list', { limit: SESSIONS_QUERY_LIMIT, archived: true })
-  ]);
-  return [
-    ...(Array.isArray(active) ? active : []),
-    ...(Array.isArray(archived) ? archived : [])
-  ];
+  // 两份列表各取 core 的上限 100 条。已知缺口：**排不进前 100 的会话不在名单里**，
+  // 理论上可能被提前回收（有未提交改动的那份仍会被跳过并报出来）。要彻底消除，
+  // 得让 core 的 sessions_list 支持「按 updatedAt 窗口查」而不是只给最新 100 条。
+  try {
+    const [active, archived] = await Promise.all([
+      localGateway.invokeRpc('memory.sessions_list', { limit: SESSIONS_QUERY_LIMIT, archived: false }),
+      localGateway.invokeRpc('memory.sessions_list', { limit: SESSIONS_QUERY_LIMIT, archived: true })
+    ]);
+    if (!Array.isArray(active) || !Array.isArray(archived)) return null;
+    return [...active, ...archived];
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -83,6 +91,11 @@ async function pruneStaleSessionWorktrees(deps) {
   const log = typeof deps.log === 'function' ? deps.log : () => {};
   try {
     const sessions = await listRecentSessions(deps.localGateway);
+    if (!sessions) {
+      // fail-closed：拿不到会话表就不回收。删目录是不可逆的，下一轮再删也不迟。
+      log('session worktree: 回收跳过（拿不到会话表，宁可不删）');
+      return { ok: false, reason: 'SESSIONS_UNAVAILABLE', pruned: [], keptDirty: [] };
+    }
     const leased =
       typeof deps.listLeasedSessionIds === 'function' ? deps.listLeasedSessionIds() : [];
     const keepKeys = sessionKeysToKeep({

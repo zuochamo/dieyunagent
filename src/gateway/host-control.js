@@ -1117,33 +1117,50 @@ function spawnDetachedProcess(command, opts = {}) {
 }
 
 /**
- * Windows 上以 `/` 开头的输入有两种可能的意图：工作区相对路径（模型常写 `/src/x.js`），
- * 或者 daemon 侧的绝对路径（远端会话自己的 worktree）。以前一律按前者拼到 cwd 的盘符上，
- * 于是第二种意图被静默改写成 `E:\run\media\…` 这种**不存在**的本地路径，后续索引、检索、
- * 读文件都照着这个幻觉路径答（症状是 INVALID_WORKSPACE / ENOENT / 0 命中）。
+ * Windows 上以 `/` 开头的输入有三种可能的意图，按**结构证据**依次判定（不猜关键词）：
  *
- * 只有一条硬证据能区分「猜错了」和「猜对了但文件还没建」：拼出来的位置连父目录都不存在。
- * 命中这条就不许再往下走 —— 报错比返回一个幻觉路径诚实（SSH-MODULE-REVIEW S14）。
+ * 1. `/c:/Users/…` —— 被 URI 化过的盘符路径（LSP `file:///c%3A/…` 解码后的常见形态）；
+ * 2. 工作区相对路径（模型常写 `/src/x.js`）—— 判据是「首段在工作区里真的存在」，
+ *    这样 `/src/new/deep/x.js`（要新建的深层文件）也能按工作区相对解释；
+ * 3. daemon 侧的绝对路径（远端会话自己的 worktree）—— 本机没有对应目录。
+ *
+ * 以前一律按「盘符根」解释（`path.resolve('/run/media/…')` → `E:\run\media\…`），于是第 3 种
+ * 被静默改写成**不存在**的本地路径，后续索引、检索、读文件都照着这个幻觉路径答
+ * （症状是 INVALID_WORKSPACE / ENOENT / 0 命中）。现在：前两种按各自意图解析，
+ * 第三种在「连父目录都不存在」时报错 —— 报错比返回一个幻觉路径诚实（SSH-MODULE-REVIEW S14）。
  */
-function assertForeignPathInterpretable(rawInput, resolved) {
-  for (const candidate of [resolved, path.dirname(resolved)]) {
-    try {
-      if (fs.existsSync(candidate)) return;
-    } catch {
-      /* 读不到 = 当作不存在，继续判 */
+function resolveForeignPosixInput(rawInput, input, defaultCwd) {
+  const rel = input.replace(/^[/\\]+/, '');
+  // ① 「/c:/Users/…」= 盘符路径被 URI 化：还原成盘符路径
+  if (/^[A-Za-z]:[\\/]/.test(rel)) return path.resolve(rel);
+  // ② 工作区相对：首段在工作区里存在就说明这个读法说得通（含「要新建的深层文件」）
+  if (defaultCwd && rel) {
+    const root = path.resolve(defaultCwd);
+    const candidate = path.resolve(root, rel);
+    const relFromRoot = path.relative(root, candidate);
+    if (relFromRoot && !relFromRoot.startsWith('..') && !path.isAbsolute(relFromRoot)) {
+      const firstSegment = relFromRoot.split(path.sep)[0];
+      if (firstSegment && fs.existsSync(path.join(root, firstSegment))) return candidate;
     }
   }
+  // ③ 整个输入就是一串斜杠（'/'）：那是「盘符根」，本身没有远端路径歧义
+  const naive = path.resolve(input);
+  if (!rel) return naive;
+  // ④ 三种读法都说不通：不返回幻觉路径。
+  //    刻意**不**用「盘符根下恰好存在同名目录」来放行 —— 那正是事故原形：
+  //    开发机上 `E:\run` 或 `E:\srv` 一旦存在，/run/media/… 又会变回幻觉路径。**
   const err = new Error(
-    `无法把「${rawInput}」解析成本机路径：Windows 上以 / 开头的路径不是本地绝对路径，` +
-      `按工作区相对路径拼出来是「${resolved}」，但那里连目录都不存在。` +
-      '它更像远端会话里的路径 —— 那种路径必须带该会话的工作区（ssh://user@host/…）才有人认；' +
-      '要操作本机工作区里的文件，请给相对路径。'
+    `无法把「${rawInput}」解析成本机路径：Windows 上以 / 开头的路径不是本地绝对路径。` +
+      `按工作区相对拼是「${path.resolve(defaultCwd || '.', rel || '.')}」、按盘符拼是「${naive}」，` +
+      '但这两处连目录都不存在。它更像远端会话里的路径 —— 那种路径必须带该会话的工作区（ssh://user@host/…）才有人认。'
   );
   err.code = 'REMOTE_PATH_AS_LOCAL';
   err.retryable = false;
-  err.suggestedFix = '不要重试；改用工作区相对路径，或确认这条调用带着远端会话的 ssh:// 工作区。';
+  err.suggestedFix =
+    '别原样重试：若这是工作区里的文件，去掉开头的 / 再试一次（如 src/x.js）；' +
+    '若确实是远端会话里的路径，先切到该会话的 ssh:// 工作区再操作。';
   err.requestedPath = String(rawInput);
-  err.resolvedPath = resolved;
+  err.resolvedPath = naive;
   throw err;
 }
 
@@ -1165,13 +1182,13 @@ function normalizeFilePathInput(filePath, defaultCwd) {
     p = absMatches[absMatches.length - 1].trim();
   }
   p = p.replace(/^["']+|["']+$/g, '').trim();
-  const foreign = isForeignPosixPath(p);
+  // 外来 POSIX 写法要按「解释得到底说不说得通」解析，不能直接丢给 path.resolve
+  // （win32 上 isAbsolute('/x') 为 true、resolve 会沿用 cwd 盘符，见 resolveForeignPosixInput）
+  if (isForeignPosixPath(p)) return resolveForeignPosixInput(String(filePath || '').trim(), p, defaultCwd);
   if (!path.isAbsolute(p) && defaultCwd) {
     p = path.join(defaultCwd, p);
   }
-  const resolved = path.resolve(p);
-  if (foreign) assertForeignPathInterpretable(String(filePath || '').trim(), resolved);
-  return resolved;
+  return path.resolve(p);
 }
 
 function printImageWindows(absPath) {

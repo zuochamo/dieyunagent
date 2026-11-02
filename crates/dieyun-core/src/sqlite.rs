@@ -250,8 +250,12 @@ impl SqliteHandle {
         &self,
         f: impl FnOnce(&Connection) -> Result<T, CoreError>,
     ) -> Result<Option<T>, CoreError> {
-        let Ok(mut guard) = self.conn.try_lock() else {
-            return Ok(None);
+        // 抢不到锁 → None（调用方跳过这笔写）。锁被毒化时按「数据仍然可用」继续，
+        // 与 with_conn 同规则：一次 panic 不该让 usage 计数这类反馈永久停在旧值上。
+        let mut guard = match self.conn.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
         };
         let conn = self.prepare_locked(&mut guard)?;
         Ok(Some(f(conn)?))

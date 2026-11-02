@@ -79,10 +79,22 @@ describe('准备区索引文案', () => {
 
   it('进度连续两轮没前进时说出来（否则「卡住」和「在建」长得一样）', () => {
     const st = { indexed: false, indexing: true, filesDone: 40, filesTotal: 900 };
-    const first = format({ ...st }, 'codebase', 'creating', '/srv/stall');
+    const track = { trackStall: true };
+    const first = format({ ...st }, 'codebase', 'creating', '/srv/stall', track);
     assert.doesNotMatch(first, /进度未前进/);
-    const second = format({ ...st }, 'codebase', 'creating', '/srv/stall');
+    const second = format({ ...st }, 'codebase', 'creating', '/srv/stall', track);
     assert.match(second, /进度未前进/);
+  });
+
+  it('同一轮里的最终报错文案不许再判一次卡住（否则每轮必误报）', () => {
+    const st = { indexed: false, indexing: true, filesDone: 40, filesTotal: 900 };
+    // 一轮 = 「读状态」一次（记下本轮进度）+ 「拼最终文案」一次（不记、也不判）
+    format({ ...st }, 'codebase', 'creating', '/srv/round', { trackStall: true });
+    const finalText = format({ ...st }, 'codebase', 'creating', '/srv/round');
+    assert.doesNotMatch(finalText, /进度未前进/);
+    // 下一轮真的没前进，才说卡住
+    const nextRound = format({ ...st }, 'codebase', 'creating', '/srv/round', { trackStall: true });
+    assert.match(nextRound, /进度未前进/);
   });
 });
 

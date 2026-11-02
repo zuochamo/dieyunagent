@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::params;
@@ -222,8 +222,9 @@ impl IndexService {
             )
             .unwrap_or((None, 0));
 
-        let mut vectors_reused = 0i64;
-        let mut vectors_embedded = 0i64;
+        // 本轮没建向量（增量 / 远端 push）时保留上一轮的复用统计，别把它抹成 0/0
+        let mut vectors_reused: Option<i64> = None;
+        let mut vectors_embedded: Option<i64> = None;
         if state.use_vectors && !state.pending_embed.is_empty() {
             self.set_progress(
                 &ws.root_hash,
@@ -238,7 +239,7 @@ impl IndexService {
                 &conn,
                 std::mem::take(&mut state.pending_embed),
             )?;
-            vectors_reused = reused;
+            vectors_reused = Some(reused);
             if reused > 0 {
                 self.set_progress(
                     &ws.root_hash,
@@ -259,7 +260,7 @@ impl IndexService {
                     .map(|(id, _, h)| (*id, h.clone()))
                     .collect();
                 let rows = embedding::embed_batches(&self.embedding, &inputs).await?;
-                vectors_embedded = self.store_embedded_vectors(
+                vectors_embedded = Some(self.store_embedded_vectors(
                     &conn,
                     rows,
                     &hash_by_id,
@@ -274,7 +275,7 @@ impl IndexService {
                             written,
                         );
                     },
-                )?;
+                )?);
             }
         }
 
@@ -306,7 +307,7 @@ impl IndexService {
         conn.execute(
             "INSERT INTO workspaces (root_hash, root_path, file_count, chunk_count, vector_count,
              indexed_at, indexing, embedding_model, embedding_dims, vectors_reused, vectors_embedded)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, COALESCE(?9, 0), COALESCE(?10, 0))
              ON CONFLICT(root_hash) DO UPDATE SET
                root_path = excluded.root_path,
                file_count = excluded.file_count,
@@ -316,8 +317,8 @@ impl IndexService {
                indexing = 0,
                embedding_model = excluded.embedding_model,
                embedding_dims = excluded.embedding_dims,
-               vectors_reused = excluded.vectors_reused,
-               vectors_embedded = excluded.vectors_embedded",
+               vectors_reused = COALESCE(?9, workspaces.vectors_reused),
+               vectors_embedded = COALESCE(?10, workspaces.vectors_embedded)",
             params![
                 ws.root_hash,
                 state.root_key,

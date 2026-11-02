@@ -113,7 +113,12 @@ impl IndexService {
     /// 调用方按「全部未命中」处理。**不要**在这类闭包里 `await`：锁不能跨 await 持有。
     fn vector_cache_op<T>(&self, f: impl FnOnce(&vector_cache::VectorCache) -> Result<T, CoreError>) -> Option<T> {
         let path = self.vector_cache_path.clone()?;
-        let mut guard = self.vector_cache.lock().ok()?;
+        // 毒化的锁按「数据仍然可用」处理（与 sqlite.rs 的 with_conn 同规则）：
+        // 这里持锁只是在用缓存连接，一次 panic 不该让本进程永久失去向量复用。
+        let mut guard = self
+            .vector_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             *guard = vector_cache::VectorCache::open(&path).ok();
         }
@@ -201,7 +206,7 @@ impl IndexService {
         self.vector_cache_op(|cache| {
             let written = cache.put_many(&cache_key, &fresh, now_ts)?;
             if written > 0 {
-                cache.prune(vector_cache::DEFAULT_MAX_ROWS)?;
+                cache.prune(vector_cache::DEFAULT_MAX_ROWS, now_ts)?;
             }
             Ok(())
         });
@@ -935,8 +940,11 @@ impl IndexService {
         let vectors_changed = !use_vectors || model_changed || !pending_embed.is_empty();
 
         // 本轮「复用缓存命中」与「真的调了 embedding」的条数，写进 workspaces 供面板/诊断读。
-        let mut vectors_reused = 0i64;
-        let mut vectors_embedded = 0i64;
+        // `use_vectors == false` 时必须**保留上一轮的值**（下面 SQL 用 COALESCE 只在本轮真建向量
+        // 时才覆盖）：每轮保存后的后台增量刷新都是 `vectors=false`，若无条件写 0，面板会立刻
+        // 把上一条「复用 7000 / 新算 0」抹成 0/0 —— 那正是这两列存在的唯一目的。
+        let mut vectors_reused: Option<i64> = None;
+        let mut vectors_embedded: Option<i64> = None;
         if use_vectors && !pending_embed.is_empty() {
             self.set_progress(
                 root_hash,
@@ -948,7 +956,7 @@ impl IndexService {
             );
             // ① 缓存命中直接落库（不碰网络）② 未命中的才真的调端点 ③ 新算的回填缓存
             let (misses, reused) = self.apply_cached_vectors(&conn, pending_embed)?;
-            vectors_reused = reused;
+            vectors_reused = Some(reused);
             if reused > 0 {
                 self.set_progress(
                     root_hash,
@@ -969,7 +977,7 @@ impl IndexService {
                     .map(|(id, _, h)| (*id, h.clone()))
                     .collect();
                 let rows = embedding::embed_batches(&self.embedding, &inputs).await?;
-                vectors_embedded = self.store_embedded_vectors(
+                vectors_embedded = Some(self.store_embedded_vectors(
                     &conn,
                     rows,
                     &hash_by_id,
@@ -984,7 +992,7 @@ impl IndexService {
                             written,
                         );
                     },
-                )?;
+                )?);
             }
         }
         let vector_count = count_vectors(&conn, root_hash)?;
@@ -1014,7 +1022,7 @@ impl IndexService {
         conn.execute(
             "INSERT INTO workspaces (root_hash, root_path, file_count, chunk_count, vector_count,
              indexed_at, indexing, embedding_model, embedding_dims, vectors_reused, vectors_embedded)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, COALESCE(?9, 0), COALESCE(?10, 0))
              ON CONFLICT(root_hash) DO UPDATE SET
                root_path = excluded.root_path,
                file_count = excluded.file_count,
@@ -1024,8 +1032,8 @@ impl IndexService {
                indexing = 0,
                embedding_model = excluded.embedding_model,
                embedding_dims = excluded.embedding_dims,
-               vectors_reused = excluded.vectors_reused,
-               vectors_embedded = excluded.vectors_embedded",
+               vectors_reused = COALESCE(?9, workspaces.vectors_reused),
+               vectors_embedded = COALESCE(?10, workspaces.vectors_embedded)",
             params![
                 root_hash,
                 root.to_string_lossy(),

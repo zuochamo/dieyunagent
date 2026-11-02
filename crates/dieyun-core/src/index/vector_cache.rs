@@ -41,9 +41,11 @@ use crate::error::CoreError;
 /// 缓存文件名（`<data_dir>/vector-cache.sqlite`）。
 pub const CACHE_FILE_NAME: &str = "vector-cache.sqlite";
 
-/// 默认行数上限：1024 维 ≈ 4 KB/行，15 万行 ≈ 600 MB。
+/// 默认行数上限。**体积随模型维度变**，别按固定 4 KB/行 估：
+/// 1024 维 ≈ 4 KB/行 ⇒ 15 万行 ≈ 600 MB；真机在用的 2560 维 ≈ 10 KB/行 ⇒ 约 1.5 GB
+/// （见 `docs/VECTOR-SEARCH.md`）。这里的上限是「行数」，磁盘预算要按实际维度算。
 ///
-/// 这个量级与「一份完整索引里的向量部分」（本机实测 344 MB）相当——缓存换来的正是
+/// 这个量级与「一份完整索引里的向量部分」（本机实测 344 MB）同阶——缓存换来的正是
 /// 「不再为每个新 worktree 重算一遍」，所以允许它和一份索引一样大。超了按插入时间裁最老的。
 pub const DEFAULT_MAX_ROWS: i64 = 150_000;
 
@@ -207,7 +209,12 @@ impl VectorCache {
     ///
     /// 命中时**不**刷新 `created_at`：读路径上不写库（一次建库几千次命中就是几千次写），
     /// 所以这是「按写入时间」而不是严格 LRU。对缓存够用——最近新建的向量最可能被再次用到。
-    pub fn prune(&self, max_rows: i64) -> Result<usize, CoreError> {
+    ///
+    /// `keep_after`（通常是本批写入的时间戳）之后的行**一律不裁**：同一批 `put_many` 的
+    /// `created_at` 完全相同，只按 `created_at ASC` 排序会在这批里随机删——刚算完的向量
+    /// 当场被丢掉，下一次建库还得重算一遍，正是这个缓存要避免的事。超大仓（>15 万片段）
+    /// 会因此暂时超出上限，下次建库再裁。
+    pub fn prune(&self, max_rows: i64, keep_after: i64) -> Result<usize, CoreError> {
         if max_rows <= 0 {
             return Ok(0);
         }
@@ -223,9 +230,10 @@ impl VectorCache {
             .execute(
                 "DELETE FROM vector_cache WHERE (content_hash, model_sig) IN (
                      SELECT content_hash, model_sig FROM vector_cache
+                     WHERE created_at < ?2
                      ORDER BY created_at ASC, content_hash ASC LIMIT ?1
                  )",
-                params![excess],
+                params![excess, keep_after],
             )
             .map_err(|e| CoreError::rpc("VECTOR_CACHE_WRITE", e.to_string()))?;
         Ok(deleted)
@@ -277,7 +285,7 @@ mod tests {
         }
         assert_eq!(cache.count().unwrap(), 5);
 
-        let deleted = cache.prune(3).unwrap();
+        let deleted = cache.prune(3, i64::MAX).unwrap();
         assert_eq!(deleted, 2, "超出的两行要被裁掉");
         assert_eq!(cache.count().unwrap(), 3);
 
@@ -288,6 +296,31 @@ mod tests {
         for h in &hashes[2..] {
             assert!(hits.contains_key(h), "较新的三条要留着");
         }
+    }
+
+    #[test]
+    fn prune_keeps_the_batch_that_was_just_written() {
+        let cache = VectorCache::open_in_memory().unwrap();
+        // 老的一批（ts=1），新的一批（ts=2）；上限只够放新的这批
+        for i in 0..4 {
+            let row = (content_hash(&format!("old-{i}")), vec3(i as f32, 0.0, 0.0));
+            cache.put_many("m@3", &[row], 1).unwrap();
+        }
+        for i in 0..4 {
+            let row = (content_hash(&format!("new-{i}")), vec3(i as f32, 0.0, 0.0));
+            cache.put_many("m@3", &[row], 2).unwrap();
+        }
+        assert_eq!(cache.count().unwrap(), 8);
+
+        // keep_after = 2：同批（created_at=2）一条都不许裁，只裁老的那批
+        let deleted = cache.prune(4, 2).unwrap();
+        assert_eq!(deleted, 4);
+        assert_eq!(cache.count().unwrap(), 4);
+        let new_hashes: Vec<String> = (0..4)
+            .map(|i| content_hash(&format!("new-{i}")))
+            .collect();
+        let hits = cache.get_many("m@3", &new_hashes, 3).unwrap();
+        assert_eq!(hits.len(), 4, "刚算完的向量必须还在");
     }
 
     #[test]

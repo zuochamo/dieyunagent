@@ -184,7 +184,7 @@ describe('触发点：只在新建 worktree 时扫一次', () => {
     assert.equal(scripts.filter((s) => s.includes('WT_KEPT_DIRTY')).length, 0);
   });
 
-  it('回收失败只吞在日志里，不影响会话（本地 core 没起来也算失败）', async () => {
+  it('拿不到会话表 → 这一轮不回收（宁可不删，也不按「谁都不留」删）', async () => {
     const logged = [];
     const gw = {
       setSessionWorkspaceContext() {},
@@ -200,8 +200,9 @@ describe('触发点：只在新建 worktree 时扫一次', () => {
       log: (m) => logged.push(m)
     });
     assert.equal(res.ok, false);
+    assert.equal(res.reason, 'SESSIONS_UNAVAILABLE');
     assert.equal(logged.length, 1);
-    assert.match(logged[0], /回收失败/);
+    assert.match(logged[0], /回收跳过/);
   });
 
   it('保留名单同时覆盖「活跃」和「已归档」两份列表', async () => {

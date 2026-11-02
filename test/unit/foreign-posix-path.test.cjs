@@ -7,10 +7,11 @@
  * 于是索引报 INVALID_WORKSPACE、读文件 ENOENT、grep 给「ok 但 0 命中」——最后这个最坑：
  * 模型会得出「仓库里没有这段代码」并放弃检索，而真相是根根本没解析成功。
  *
- * 这里锁两件事：
+ * 这里锁三件事：
  *   1. 判据只在 win32 成立（非 Windows 上 `/srv/app` 就是合法本地路径，同串无歧义）；
  *   2. 拼出来连父目录都不存在 → 报 `REMOTE_PATH_AS_LOCAL`，不许返回幻觉路径；
- *      而「工作区相对写法」（`/src/x.js`，模型常这么写）在父目录存在时仍按老规矩容忍。
+ *   3. 「工作区相对写法」（`/src/x.js`，模型常这么写）必须按**工作区相对**解析成功，
+ *      包括要新建的深层文件（`/src/new/x.js`）；「/c:/Users/…」这种被 URI 化过的盘符路径还原。
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -70,13 +71,44 @@ describe('normalizeFilePathInput：daemon 路径不许拼成本机盘符路径',
     assert.ok(String(err.resolvedPath || '').toLowerCase().includes('run\\media'));
   });
 
-  itWin('工作区相对写法（/src/x.js）父目录存在时仍照旧容忍 —— 不制造回归', () => {
-    const ws = cwd;
-    const driveRoot = path.parse(ws).root; // 'E:\'
-    const rel = path.relative(driveRoot, ws).replace(/\\/g, '/'); // 'dieyunagent'
-    const input = `/${rel}/not-created-yet.js`;
-    const resolved = normalizeFilePathInput(input, ws);
-    assert.equal(resolved.toLowerCase(), path.join(ws, 'not-created-yet.js').toLowerCase());
+  itWin('工作区相对写法（/src/x.js）按工作区解析 —— 包括要新建的深层文件', () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'dieyun-foreign-rel-'));
+    try {
+      fs.mkdirSync(path.join(ws, 'src'));
+      // 首段 src 存在 ⇒ 工作区相对说得通；文件本身还不存在也必须能拼对（写入前就调用）
+      assert.equal(
+        normalizeFilePathInput('/src/a.js', ws).toLowerCase(),
+        path.join(ws, 'src', 'a.js').toLowerCase()
+      );
+      assert.equal(
+        normalizeFilePathInput('/src/new/deep/c.js', ws).toLowerCase(),
+        path.join(ws, 'src', 'new', 'deep', 'c.js').toLowerCase()
+      );
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  itWin('「/c:/Users/…」这种被 URI 化过的盘符路径要还原（LSP 常见）', () => {
+    const resolved = normalizeFilePathInput('/E:/dieyunagent/package.json', cwd);
+    assert.equal(resolved, path.resolve('E:\\dieyunagent\\package.json'));
+  });
+
+  itWin('工作区里说不通的路径照旧报错（不因为放宽而漏网）', () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'dieyun-foreign-miss-'));
+    try {
+      fs.mkdirSync(path.join(ws, 'src'));
+      let err = null;
+      try {
+        normalizeFilePathInput('/run/media/dieyunx/app/src/x.js', ws);
+      } catch (e) {
+        err = e;
+      }
+      assert.ok(err, '首段 run 不在工作区里 → 必须报错');
+      assert.equal(err.code, 'REMOTE_PATH_AS_LOCAL');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
   });
 
   it('相对路径与盘符路径完全不受影响', () => {

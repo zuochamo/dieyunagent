@@ -275,9 +275,13 @@ function shortIndexRoot(root) {
  * @param {'codebase'|'graph'} kind
  * @param {'creating'|'started'} [mode] creating=已在跑；started=本轮刚发起、没拿到状态
  * @param {string} [root] 索引根（用于显示是哪个项目的哪份库）
+ * @param {{trackStall?: boolean}} [opts] trackStall 只给「每轮读一次状态」的调用方传：
+ *   它会在进程内记下本轮 filesDone 供**下一轮**比较。最终的报错文案必须不传 ——
+ *   否则同一轮里第二次调用会把第一次刚写进去的同一个 done 当成「上一轮」，
+ *   健康的在建会被读成「进度没前进」（本轮就踩过）。
  * @returns {string}
  */
-function formatPrepIndexProgress(st, kind, mode, root) {
+function formatPrepIndexProgress(st, kind, mode, root, opts) {
   // 注意：这里的返回值是 skipped 行的 detail，渲染成 `label（detail）`（renderer-thinking-trace-dom.js:350），
   // 所以 detail 里不要再带「代码索引 / 结构索引」，也不要再套括号。
   const where = shortIndexRoot(root);
@@ -292,7 +296,7 @@ function formatPrepIndexProgress(st, kind, mode, root) {
 
   const verb = st && st.indexed ? '刷新' : '首建';
   if (mode === 'creating') {
-    const stall = prepProgressStalled(kind, root, done) ? ' · 进度未前进' : '';
+    const stall = opts && opts.trackStall && prepProgressStalled(kind, root, done) ? ' · 进度未前进' : '';
     return `后台${verb}${at}${progress}${stall}，本轮用 grep`;
   }
   if (mode === 'started') {
@@ -413,7 +417,7 @@ async function readPrepIndexStatus(opts) {
       root,
       skipped: true,
       phase: 'creating',
-      error: formatPrepIndexProgress(st, kind, 'creating', root)
+      error: formatPrepIndexProgress(st, kind, 'creating', root, { trackStall: true })
     };
   }
   return { ok: false, status: st, root, skipped: true, phase: 'not_ready', error: '' };
