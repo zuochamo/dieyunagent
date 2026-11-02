@@ -8,6 +8,7 @@ const { execFile } = require('child_process');
 const { createCoreBridge } = require('../core-bridge');
 const { resolveCoreRpcTimeoutMs } = require('../core-rpc-timeouts');
 const { workspaceDieyunDir, workspaceIndexDbPath } = require('./workspace-index-path');
+const { resolveIndexRoot, normalizeIndexRoot } = require('./index-root');
 
 const INDEX_RPC_METHODS = new Set([
   'codebase.status',
@@ -156,6 +157,10 @@ class RemoteIndexCoreHost {
    */
   constructor(opts) {
     this.workspaceRoot = path.resolve(String(opts.workspaceRoot || '/'));
+    // 比对用的身份（POSIX 归一）与文件系统路径分开：`path.resolve` 是平台相关的
+    // （Windows 上把 `/srv/app` 变成 `E:\srv\app`），而请求里的根永远是 daemon 坐标。
+    // 用「原始声明串」算身份，两边才可比；Linux daemon 上两者本来就相同。
+    this.indexRoot = normalizeIndexRoot(String(opts.workspaceRoot || '/')) || this.workspaceRoot;
     this.packRoot = path.resolve(String(opts.packRoot || '.'));
     this.log = typeof opts.log === 'function' ? opts.log : () => {};
     this.dieyunDir = workspaceDieyunDir(this.workspaceRoot);
@@ -397,10 +402,17 @@ class RemoteIndexCoreHost {
     }
     /** @param {number} [attempt] 已失败次数；超过 STATUS_RETRY_MAX 一律 throw */
     const run = async (attempt = 0) => {
+      // 本进程只服务一个根（`index_db_path` 在 configure 时已钉死在这个根下）。
+      // 请求带来的根必须与它一致：旧实现照抄 `params.workspaceRoot` 传给 core，
+      // 于是用「A 的库」建/查「B 的哈希」，两边看起来都成功，症状却是永远「未建立」。
+      // 比对放在起进程之前：根不对是调用方的错，不必先花几十秒拉一个用不上的 core。
+      const workspaceRoot = resolveIndexRoot({
+        explicitRoot: params.workspaceRoot,
+        scopeRoot: this.indexRoot,
+        label: String(method),
+        scopeLabel: '本进程负责的工作区根'
+      }).root;
       await this._ensureStarted();
-      const workspaceRoot = params.workspaceRoot
-        ? path.resolve(String(params.workspaceRoot))
-        : this.workspaceRoot;
       const payload = { ...params, workspaceRoot };
       // 超时映射不再在本文件维护第二份：与本地 core-bridge 共用 core-rpc-timeouts.js。
       const timeout = resolveCoreRpcTimeoutMs(method);

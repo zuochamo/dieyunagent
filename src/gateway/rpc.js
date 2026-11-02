@@ -24,6 +24,8 @@ const { createRemoteAgentFsAdapter } = require('./remote-agent-fs');
 const { AsyncLocalStorage } = require('async_hooks');
 const { buildSshUri, normalizeRemotePath, parseWorkspaceInput, isSameSshTarget, workspacePathForSession, sshTargetKey, isRemoteWorkspacePath } = require('../workspace/target');
 const { remoteAgentInfoKey, remoteIndexCacheKey } = require('../workspace/workspace-cache-keys');
+const { resolveIndexRoot } = require('../remote/index-root');
+const { resolveIndexVectorsIntent } = require('../model-settings');
 const { isGraphSourcePath } = require('../index/source-files');
 const { normalizeReadParams, ABSOLUTE_READ_MAX_BYTES } = require('./fs-read-limits');
 const { runEditFile } = require('./fs-edit-file');
@@ -648,11 +650,21 @@ function createRpcHandlers(ctx) {
         }
       }
       const client = getRemoteAgentClient(info);
+      // 单一句：调用/上下文里请求的根，与这条 daemon 连接用 `hello{workspace}` 声明的根，
+      // 必须是同一个（那份连接上的 `index.sqlite` 只属于它）。旧实现直接把 ctxInfo.remotePath
+      // 写进 payload、把调用方的 workspaceRoot 静默覆盖掉，于是「索引建在 A、查的是 B」
+      // 谁也看不出来。这里改成显式比对，错了就报 WORKSPACE_SCOPE_MISMATCH。
+      const resolved = resolveIndexRoot({
+        explicitRoot: params.workspaceRoot != null ? params.workspaceRoot : ctxInfo.remotePath,
+        scopeRoot: info.workspaceRoot || ctxInfo.remotePath,
+        label: String(method),
+        scopeLabel: '远端 Agent 连接声明的根'
+      });
       return client.call(
         method,
         {
           ...params,
-          workspaceRoot: ctxInfo.remotePath
+          workspaceRoot: resolved.root
         },
         remoteRpcTimeout(method, timeoutMs)
       );
@@ -1230,10 +1242,19 @@ function createRpcHandlers(ctx) {
         e.code = 'SSH_NOT_CONNECTED';
         throw e;
       }
+      // 显式根与作用域根在这里合一：以前这一步把 `workspaceRoot` 直接丢掉，
+      // 于是「调用方要 A、实际索引 B」从来不会报错（见 src/remote/index-root.js）。
+      const resolved = resolveIndexRoot({
+        explicitRoot: workspaceRoot,
+        scopeRoot: target.remotePath,
+        label: 'Codebase',
+        scopeLabel: '本次调用的会话作用域根'
+      });
       return {
         kind: 'remote',
-        rootKey: buildSshUri(target),
-        remotePath: target.remotePath
+        rootKey: buildSshUri({ ...target, remotePath: resolved.root }),
+        remotePath: resolved.root,
+        rootSource: resolved.source
       };
     }
     const input =
@@ -1661,8 +1682,19 @@ function createRpcHandlers(ctx) {
 
     const force = !!opts.force;
     const skipIfReady = opts.skipIfReady !== false;
-    // 向量（codebase）与调用图（graph）都是显式 opt-in，缺省不建
-    const vectors = isGraph ? undefined : !!opts.vectors;
+    // 向量（codebase）与调用图（graph）都是显式 opt-in；codebase 的**缺省**来自持久意图
+    // `indexSemanticSearch`（设置 →「代码索引语义检索」）。以前这里写死 `!!opts.vectors`，
+    // 而 prep/agent 路径从来不传这个参数 → 无论用户怎么想，索引里永远 0 向量。
+    const vectors = isGraph ? undefined : resolveIndexVectorsIntent(ctx.userDataPath, opts.vectors);
+    // 建向量前把 embedding 端点配置推到**这次调用要用的那条连接**上。
+    //
+    // 远端 daemon 每个工作区一份 core host（乙案：每个会话一个 worktree）。新工作区的 host
+    // 冷启动时没有任何配置，而 `invokeIndexCore` 只看「core 已就绪」缓存、命中就跳过 configure，
+    // 于是建向量必然回 `EMBEDDING_NOT_CONFIGURED`（真机实测：手动调一次 index.remote_sync_configure
+    // 后同一工作区立刻 embeddingEnabled=true）。configure 是幂等的一句话，不是重试层。
+    if (!isGraph && vectors && ctxInfo.kind === 'remote') {
+      await syncRemoteIndexCoreConfig();
+    }
     const calls = isGraph ? !!opts.calls : undefined;
     const startParams = isGraph ? { force, skipIfReady, calls } : { force, skipIfReady, vectors };
 
@@ -1972,6 +2004,8 @@ function createRpcHandlers(ctx) {
     REMOTE_INDEX_PREP_TIMEOUT_MS,
     invokeIndexCore,
     startCodebaseIndexForContext,
+    // 同一条判定既给 start 路径（内部）也给老 daemon 的同步路径（handler）用
+    resolveIndexVectors: (explicit) => resolveIndexVectorsIntent(ctx.userDataPath, explicit),
     codebaseHasSearchableIndex,
     startGraphIndexForContext,
     scheduleGraphLspEnrich,

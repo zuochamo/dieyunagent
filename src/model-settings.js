@@ -50,6 +50,14 @@ const DEFAULTS = {
   // 代码索引增量默认关：它要跑 chunk + FTS + embedding，属重活；且 R2/R3 之后
   // 没有向量的仓没有「新鲜度」要求（见 docs/INDEX-VALUE-REVIEW.md §R4）。
   codebaseAutoIncremental: false,
+  // 「这个工作区的代码索引要不要带向量」的**持久意图**。默认关——embedding 是最贵的一环，
+  // 不能替用户默认打开。
+  //
+  // 为什么必须是持久设置而不是一个按钮：唯一的另一处触发点是索引面板的「建向量」，
+  // 而 SSH 会话的索引库是每会话一份（`<worktree>/.dieyun/index.sqlite`），
+  // 人要每开一个会话就手点一次全仓 embedding —— 实际上等于永远不点，
+  // 于是 `vectorCount` 长期为 0、检索只剩子串通道（见 docs/SSH-INDEX-COLD-START-PLAN.md §0.5）。
+  indexSemanticSearch: false,
   speechWhisperModel: 'whisper-1',
   speechLanguage: 'zh',
   // 自动朗读每条新回复（Renderer 写入；Main 只做落盘与默认值）
@@ -254,6 +262,8 @@ function normalize(raw) {
   s.graphAutoIncremental = s.graphAutoIncremental !== false;
   // 代码索引增量相反：只有显式开启才跑（旧的 `!== false` 会把「未设置」也变成 true）。
   s.codebaseAutoIncremental = s.codebaseAutoIncremental === true;
+  // 语义检索意图同理：只有显式开启才算（缺省/脏值一律 false，别把「未设置」变成「建向量」）。
+  s.indexSemanticSearch = s.indexSemanticSearch === true;
 
   const hasRawEmbeddingModels =
     raw && Object.prototype.hasOwnProperty.call(raw, 'embeddingModels');
@@ -351,11 +361,32 @@ function embeddingSignature(settings) {
   return `${cfg.model}@${cfg.dimensions}`;
 }
 
+/**
+ * 「这次建库要不要带向量」的**唯一判定处**。
+ *
+ * `explicit` 给了布尔就听调用方的（面板「建向量」是一次性动作、增量调度器是「沿用库里已有向量」），
+ * 没给才看持久意图 `indexSemanticSearch`。用户只要打开一次，之后每一轮 prep / agent 触发的
+ * 建库都会带上向量——这正是 SSH 每会话冷库场景下唯一可行的触发方式。
+ *
+ * @param {string} userData userData 目录（`loadModelSettings` 的入参）
+ * @param {boolean|undefined} explicit
+ * @returns {boolean}
+ */
+function resolveIndexVectorsIntent(userData, explicit) {
+  if (explicit === true || explicit === false) return explicit;
+  try {
+    return loadModelSettings(userData).indexSemanticSearch === true;
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   loadModelSettings,
   saveModelSettings,
   getEmbeddingConfig,
   embeddingSignature,
+  resolveIndexVectorsIntent,
   resolveSpeechApiConfig,
   resolveTtsApiConfig,
   resolveTextApiConfig,

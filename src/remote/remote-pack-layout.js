@@ -22,6 +22,11 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/remote/minimal-gateway-host.js',
   'src/remote/remote-index-core.js',
   'src/remote/workspace-index-path.js',
+  // 远端索引根的单一解析处：漏打包 = daemon 侧 `require('./index-root')` 直接崩，
+  // 索引 RPC 全不可用（且 hash 不含它时还会判定「已存在、跳过上传」，修也修不掉）。
+  'src/remote/index-root.js',
+  // index-root 用它解析 ssh URI / 归一 POSIX 根（远端只认这一份口径）
+  'src/workspace/target.js',
   'src/core-bridge.js',
   'src/core-rpc-timeouts.js',
   'src/gateway/path-policy.js',
