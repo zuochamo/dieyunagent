@@ -177,9 +177,25 @@
 | 动作 | 建库默认只写 `chunks`（不写向量）；向量只在显式请求 `vectors: true` 时建：面板「建向量」按钮、CLI `--vectors`、以及任何显式传 `vectors` 的 RPC 调用方（`@Codebase` 与 prep 自动建库**不**带，见 §8 的取舍说明）。已存在向量照常可用 |
 | diff 面 | Rust：`crates/dieyun-core/src/index/mod.rs`（`use_vectors = self.embedding.enabled()` 的判定改为「配置启用 **且** 本次请求要求向量」）、`index/schema.rs`（`vector_count` 语义不变）、`crates/dieyun-core/src/embedding/`（`EmbeddingConfig::enabled` 不动，勿改语义）<br>Main：`src/gateway/rpc.js:667-682`（configure payload 增加「本次是否建向量」）、`src/gateway/handlers/codebase.js`（`codebase.index.start` 透传）<br>Renderer：`renderer-codebase-panel.js`（「建向量」按钮 + 未建提示）、`src/renderer/index.html:1694-1695`<br>文档：`docs/VECTOR-SEARCH.md` §1/§2、`docs/ARCHITECTURE.md` §15.1 |
 | 为何删不掉（保留理由） | 只有向量通道能回答「中文自然语言 + 不知道标识符」的查询（`LIKE` 只能字面、`grep` 要求你已知关键词）；`docs/VECTOR-SEARCH.md` §4 的换 ANN 触发条件也只在保留通道时才有意义 |
-| 为何不新增开关字段 | 不新增独立配置项：请求参数即「本次意图」，面板按钮与 `@Codebase` 都走同一个 `codebase.index.start`（单一来源），开关不进 `agent-limits` |
+| 为何不新增开关字段 | 原判：不新增独立配置项：请求参数即「本次意图」，面板按钮与 `@Codebase` 都走同一个 `codebase.index.start`（单一来源），开关不进 `agent-limits`。**2026-10-31 修正**：新增 `indexSemanticSearch`（`src/model-settings.js`）——因为在「每会话一份索引库」下手点按钮根本不可用，见下方「R3 后续修正」 |
 | 验收 | 新建工作区 → 建库后 `codebase.status.vector_count = 0` 且不报错；`@Codebase` 一次后向量补满；`codebase.search` 在无向量时返回词法结果且 `vectorSearch=false` |
 | 测试 | `npm run test:unit`（`test/unit/vector-index.test.cjs`）、`npm run test:local-gateway-smoke`、`npm run cargo:test` |
+
+#### R3 后续修正（2026-10-31）：opt-in 不是「默认关向量」，而是「别每次重算」
+
+opt-in 落地后发现一个设计错误：在**每会话一份索引库**（SSH worktree）的场景下，
+「要向量就手点一次」等于**永远没有向量**——每开一个会话都是空库。实测 `codebase_search`
+4 次/周里有相当一部分是「库刚建、向量还没有」，而 0 命中又被静默成空串（见
+`docs/SSH-INDEX-COLD-START-PLAN.md` §0.5）。两处修正：
+
+1. **意图持久化**：设置项 `indexSemanticSearch`（`src/model-settings.js:resolveIndexVectorsIntent`），
+   打开后 agent / prep 的每次建库都带 `vectors: true`，不再依赖手点面板。
+2. **内容哈希复用**：`<data_dir>/vector-cache.sqlite`（`crates/dieyun-core/src/index/vector_cache.rs`），
+   同签名下同一段代码只算一次向量，跨 worktree / 跨会话命中（见 `docs/VECTOR-SEARCH.md` §1.2）。
+   没有这一条，上面那个开关在日常使用里就是「每个新会话等一次全仓 embedding」。
+
+R3 的成本判断不变（向量确实贵），变的是「贵」不该由**重复计算**来承担。R6 复核判据里
+「`codebase_search` 使用率」这一条也因此加了先决条件（见 §7 开头）。
 
 ### R3 补丁：`vectors=false` 不再等于「清空向量」
 
@@ -243,12 +259,185 @@ R3 把向量从「配置项」改成「请求参数」后，`run_index` 里那�
 
 ## 7. R6 Revisit 判据（3 个月后执行）
 
+> ⚠️ **2026-10-31 更正：第 1 条不能按现在的 0.06% 触发。** 那个数字被三处缺陷压成了 0，
+> 不是「语义检索没价值」的证据：
+> ① 向量只有「面板手点建向量」一条触发路径，agent/prep 建库固定 `vectors:false`，
+> SSH 每会话一份索引库 ⇒ 实际上永远 0 向量；
+> ② 没有向量时词法通道是纯子串 `LIKE`（`index/search.rs:275`），中文问句整句就是一个词元
+> ⇒ 必然 0 命中，而命中为空时 `formatCodebaseBlock` 直接返回 `''`，模型看到的是
+> 「这个仓库里没有相关代码」；
+> ③ SSH 会话冷库 + prep 每轮跳过，「索引从未建成过」被 UI 画成一行永远的「创建中」。
+> 现在 ①已修（`model-settings:indexSemanticSearch` 持久意图 + `resolveIndexVectorsIntent`）、
+> ②已改为「0 命中必须说清是哪种 0」、③已改为「首建只 kick 一次 + 可诊断文案」。
+> **复核前的先决条件**：向量开关打开、`codebase_search` 的成功率与非空命中率、注入块非空率
+> 都进入统计口径（见 `docs/SSH-INDEX-COLD-START-PLAN.md` §0.5 与 §6）。
+> 用「没通电的灯泡从没亮过」证明灯泡没用，是本次最容易犯的错。
+
 3 个月后（≈2027-01-29）用同一套口径复核，满足任一条即执行「停用并删除」：
 
-1. `codebase_search` + `graph` 工具调用合计 **< 总调用 1%**（当前 5/8345 ≈ 0.06%）→ 删工具通道，只留 `repo_map` 注入；
+1. **在向量可用、注入非空的前提下**，`codebase_search` + `graph` 工具调用合计 **< 总调用 1%** → 删工具通道，只留 `repo_map` 注入；
 2. 索引库体积 **> 2 GB** 或单仓 `codebase.index` 首建 **> 10 min** → 强制走 R2 方案 A；
 3. 出现「索引滞后导致答错」的用户可见事故 ≥2 次 → 向量通道也降级为手动；
 4. 反之，若向量 opt-in 后 `codebase_search` 使用率 **> 3%** 且成功率 >90% → 证明通道有用，可考虑恢复自动建向量（但**不**恢复 trigram）。
+
+### 7.1 现在有地方看了：统计信息页「索引使用率」
+
+复核判据要能执行，数字就得随手可见，否则又变成「凭感觉砍功能」。统计信息页新增
+**「索引使用率（全部遥测记录）」**，口径定义只有一处：
+`src/agent/tool-telemetry.js:INDEX_TOOL_GROUPS`
+
+| 分组 | 工具 | 为什么这么分组 |
+|---|---|---|
+| 代码索引 | `codebase_search` | 代码索引**唯一**的 Agent 出口（`codebase.status` 等是面板内部调用，不过工具闸门、不进遥测） |
+| 结构索引 | `graph`、`read_symbol` | `graph` 查模块依赖 / 调用关系，`read_symbol` 是远端无 LSP 时的符号定位兜底 |
+
+`grep` 与 `lsp` **不计入**：前者直读文件系统、恰恰是索引的替代品（算进来会让「索引没用」看起来像「索引在用」），
+后者是语言服务器而非索引库。
+
+窗口用**全量遥测文件**（2 MB 上限，约数千到数万次调用），不是「近 200 次」：用短窗口评估索引，
+「刚建完索引的一次使用」会被放大成 50% —— 这正是 0.05% 那个数字的反向同类错误。
+清单 + 占比 + 成功率 + 错误码都显示，`0 次` 如实写 `0`，不伪装成「无数据」。
+
+实测（2026-10-31，本机 30 小时内 2234 次工具调用）：
+
+| 分组 | 次数 | 占比 | 成功率 |
+|---|---|---|---|
+| 代码索引 | 0 | 0% | — |
+| 结构索引 | 15（`read_symbol` 15，`graph` 0） | 0.7% | 33.3% |
+
+两条必须一起记下的结论：
+
+1. `codebase_search` **仍然是 0 次**。批次 1-6 修的是「索引建不起来 / 建了不生效」，
+   没有改变「模型没有理由去用代码索引」这件事本身；本机会话里用户往往直接给了路径，`grep` 就够。
+   所以 §7 第 1 条判据**先决条件仍未满足**，现在拿这个 0 去砍工具通道还是同一个错误。
+2. **`read_symbol` 成功率只有 33.3%（10/15 是 `SYMBOL_NOT_FOUND`）**，且集中在一个会话的
+   4 秒内连打 5 次 —— 形态更像「模型猜符号名」而不是「结构索引不可用」。
+   **已按 §7.2 实测结案**：抽 20 个真实存在的符号，`read_symbol` 20/20 成功、路径全对；
+   当时的失败是名字不存在，工具报 `SYMBOL_NOT_FOUND` 是正确行为。
+
+---
+
+## 7.2 有效性实测：索引 vs 无索引基线（2026-10-31，真机真库）
+
+上面 §7.1 只看「用了几次」。这一节回答另一半：**用起来到底准不准**。脚本
+`scripts/verify-index-effectiveness.cjs`（`npm run` 之外的单跑脚本，需要 app 在跑 + 会话 id）：
+
+```
+DY_SESSION=<会话 id> DY_SSH_HOST=<远端主机> DY_SAMPLE=20 node scripts/verify-index-effectiveness.cjs
+```
+
+口径（不挑好答的）：
+
+1. **走真 app 的真链路**：连本机网关（`ws://127.0.0.1:17330` + `gateway-token.txt`），只传
+   `sessionId` 让 Main 自己解析会话根 —— 与工具调用同一条路；不手拼 `workspaceRoot`；
+2. **题目从被测仓库机械抽样**：标识符题 = 345 个定义点里等距抽 20 个符号名；
+   自然语言题 = 21 条中文注释里等距抽 10 条；
+3. **每题都有 ground truth**（符号/注释所在文件），算 hit@1 / hit@5 / MRR；
+4. **基线与索引打同一个分**：`ssh grep -rc | sort -rn | head -5`（无索引时 agent 的真实替代品）。
+
+被测对象：`dieyuntools` 会话 worktree（239 文件 / 7204 片段 / **0 向量**：这台机器的
+`embeddingEnabled=false`，语义通道根本不存在）。建库 1.1s，建结构索引 1.1s。
+
+| 族 | 题 | 索引 hit@1 | 索引 hit@5 | 索引 MRR | 索引 p50 | grep hit@1 | grep hit@5 | grep MRR |
+|---|---|---|---|---|---|---|---|---|
+| 标识符（找定义） | 20 | 45% | 90% | **0.63** | 102ms | 75% | 95% | **0.84** |
+| 自然语言（注释原文） | 10 | 90% | 100% | 0.95 | 114ms | 100% | 100% | 1.00 |
+| 自然语言（去虚词改写） | 9 | 78% | 100% | **0.87** | 115ms | 0% | 0% | **0.00** |
+
+读法：
+
+- **「按名字找定义」索引比 grep 差**（0.63 vs 0.84）：索引按**命中词数**排序（`index/search.rs`
+  分词子串，无 FTS 倒排），把「某文件里用了一次」的块也能排到前面；grep 按**出现次数**排，
+  定义点天然分数高。这是排序口径差，不是覆盖率差（hit@5 90% vs 95%）。
+- **「记得原话」grep 满分**（1.00），索引 0.95 —— 精确子串本来就是 grep 的主场。
+- **「换个说法问同一件事」是索引唯一不可替代的收益**：去掉虚词后子串断开，grep 归零，
+  索引仍有 0.87。注意这**不是语义**：它靠分词后逐词 `LIKE`，所以只能说「词袋子串」，
+  真要跨同义词/概念还得配 embedding（当前这台机器没配）。
+- **延迟**：索引 102-115ms vs grep 169ms；但 grep 那一侧含一次 ssh 往返，比较对 grep 不利，
+  只能说明「索引不比 grep 慢」，不能当优势写。
+
+结构索引（同一仓库）：
+
+| 能力 | 结果 |
+|---|---|
+| `graph.status` | indexed，135 文件 / 2632 符号 / 20311 调用边 |
+| `graph.symbol_search`（名 → 文件，前 3） | **19/20 命中** |
+| `fs.read_symbol`（名 + filePath） | **20/20 成功**，路径全对 |
+| `graph.callers`（3 个有真实调用者的符号） | 4 / 3 / 4 条调用点，符号正确定位 |
+
+→ **§7.1 那个「`read_symbol` 成功率 33.3%」的怀疑可以结案了**：本次抽的 20 个**真实存在**的符号
+全部一次成功。当时的失败是「模型报了一个不存在的名字」，工具回 `SYMBOL_NOT_FOUND` 是正确行为，
+不是索引不可用。
+
+**由此得到两条待办（不是本轮做）**：
+
+1. **标识符查询应该先看符号表**：`codebase.search` 命中单一标识符时，用同库 `graph_symbols`
+   的定义点（`rel_path` + `start_line`）把结果顶到前面。两条通道本来就是一份 `index.sqlite`，
+   这是收敛到单一来源，不是加一层。
+2. **配 embedding 才有语义**：不配的时候 `vectorSearch=false`，上面 0.87 只是分词子串的运气；
+   概念类提问（「哪里处理退款审批流」这种不问原话的）只能靠向量。
+
+### 7.3 第 1 条已落地：定义点通道（同一份库里的 `graph_symbols`）
+
+`index/search.rs` 新增**通道 0**：查询是单一标识符（`_parse_ts` / `useEffect` / `Store.save`）时，
+先把 `graph_symbols` 里 `name` / `qualified_name` 精确命中的定义行 JOIN 回覆盖它的 chunk，
+按名次融进同一套 RRF。**没有新权重、没有新配置、没有新表**：定义点是结构索引早就写好的事实，
+只是以前没人拿它排序。
+
+同一批题、同一个库、间隔 30 分钟两次实测（`scripts/verify-index-effectiveness.cjs`，`DY_SAMPLE=20`）：
+
+| 族 | 指标 | 改造前 | 改造后 | grep 基线 |
+|---|---|---|---|---|
+| 标识符 | hit@1 | 45% | **95%** | 75% |
+| 标识符 | hit@5 | 90% | 95% | 95% |
+| 标识符 | MRR | 0.63 | **0.95** | 0.84 |
+| 标识符 | p50 | 102ms | 121ms | 169ms |
+| 自然语言（原文） | MRR | 0.95 | 0.95 | 1.00 |
+| 自然语言（改写） | MRR | 0.87 | 0.87 | 0.00 |
+
+另外两族一分不差，符合预期：定义点通道只对「这个名字定义在哪」有意义。
+
+**前提**：结构索引建过（`graph_symbols` 有这张工作区的行）。没建时这一路为空、行为与改造前
+完全一致（有回归测试 `missing_graph_tables_is_not_an_error`）。这条前提要记住：
+`codebase.search` 的「找定义」质量现在取决于结构索引建没建，而结构索引仍是按需构建（§R5）。
+
+回归测试三条（`crates/dieyun-core/src/index/search.rs`）：
+`definition_site_ranks_above_usage`（改造前必失败）、`multi_term_query_does_not_use_definition_channel`、
+`missing_graph_tables_is_not_an_error`。
+
+**本地工作区同样生效**（不走 app，直连 `target/release/dieyun-core.exe serve-stdio`，
+脚本 `scripts/verify-index-definition-ranking-local.py`；把 `src/gateway` + `src/remote`
+（61 文件 / 759 片段 / 568 符号）拷到临时目录当被测仓库，机械抽 15 个定义点当题）：
+
+| | hit@1 | hit@5 | MRR |
+|---|---|---|---|
+| 索引 | 15/15 | 15/15 | 1.00 |
+| grep | 14/15 | 15/15 | 0.97 |
+
+（这个子集里每个名字基本只定义一次，属于偏容易的样本，只用来确认「本地这条路径也把定义顶到最前」，
+不当成难度基准。）
+
+### 7.4 第 2 条没做成，但查清了原因（2026-10-31）
+
+这台机器**其实配了 embedding**（`text-embedding-qwen3-embedding-4b`，2560 维，
+`http://192.168.31.62:5018/v1`），关着的是设置 →「代码索引语义检索」这个 opt-in 开关
+（`indexSemanticSearch: false`，§R3 的设计）。试着按面板「建向量」的路径真开一次，结论是
+**当前端点不具备可用吞吐**：
+
+| 请求（输入 2 360 字符） | 耗时 |
+|---|---|
+| 1 条 | 53s |
+| 8 条 | 90s |
+| 32 条（批上限） | 131s |
+
+- 32 条一批 131s > core 的单请求 120s 超时 ⇒ 每批必超时，向量永远是 0（真机：跑了 15 分钟、
+  `vector_count = 0`）；
+- 即便放宽超时，7 204 片段 ≈ 226 批 ≈ 2 小时起步（服务端不并行），1 万片段要跑一晚上。
+
+所以第 2 条**不建议现在开**：开了只会让每个新会话的冷库从 1.1s 变成几小时，而且大概率一条向量
+都存不下来。要么换一个吞吐够的 embedding 服务（本机另配的 `zen-embedding-8b`
+在 `192.168.31.37:1234` 当前没在跑，无法对比），要么维持关键词通道 + 结构索引这条组合。
+量端点的方法论与「建向量前的 configure 顺序」修复见 `docs/VECTOR-SEARCH.md` §1.3。
 
 ---
 
