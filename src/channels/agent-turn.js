@@ -581,4 +581,4 @@ function createChannelTurnRunner(deps) {
   return { runTurn };
 }
 
-module.exports = { createChannelTurnRunner, channelSessionTitle, channelTriggerMeta, prepareAttachments };
+module.exports = { createChannelTurnRunner, channelSessionTitle, prepareAttachments };

@@ -27,4 +27,4 @@ function isBrowserPermissionAllowed(permission, details) {
   return BROWSER_PERMISSION_ALLOW.has(String(permission || ''));
 }
 
-module.exports = { BROWSER_PERMISSION_ALLOW, isBrowserPermissionAllowed };
+module.exports = { isBrowserPermissionAllowed };

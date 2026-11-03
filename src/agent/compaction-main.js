@@ -412,7 +412,5 @@ function createMainCompactionAgent(userData, coreBridge = null) {
 module.exports = {
   createMainCompactionAgent,
   getEffectiveInputBudget,
-  applyToolSchemaDeduction,
-  resolveReserveTokens,
-  TOOLS_SCHEMA_DEDUCT_MAX_RATIO
+  applyToolSchemaDeduction
 };

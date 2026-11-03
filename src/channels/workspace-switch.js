@@ -170,4 +170,4 @@ function createChannelWorkspaceSwitcher(deps) {
   return { switchWorkspace, listCandidates, matchCandidate, baseNameOf, normalizePathKey };
 }
 
-module.exports = { createChannelWorkspaceSwitcher, DEFAULT_SENTINEL, baseNameOf, normalizePathKey };
+module.exports = { createChannelWorkspaceSwitcher, baseNameOf, normalizePathKey };

@@ -351,7 +351,6 @@ module.exports = {
   parseModelRoute,
   resolveApiConfigForRoute,
   resolveDefaultApiConfig,
-  resolveExplicitDefaultModel,
   resolveSupplierApiConfig,
   pickSupplierModelId,
   isSupplierModelEnabled,
@@ -360,6 +359,5 @@ module.exports = {
   asConfig,
   requestOptionsFrom,
   mergedRequestOptions,
-  listSuppliers,
-  listCustomModels
+  listSuppliers
 };

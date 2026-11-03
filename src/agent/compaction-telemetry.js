@@ -263,9 +263,4 @@ module.exports = {
   compactionTelemetryRow,
   summarizeCompactionTelemetry,
   clearCompactionTelemetry,
-  compactionTelemetryPath,
-  TRIGGER_AUTO,
-  TRIGGER_FORCE,
-  RESULT_COMPACTED,
-  RESULT_FAILED
-};
+  compactionTelemetryPath};

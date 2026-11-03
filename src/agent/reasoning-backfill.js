@@ -73,17 +73,6 @@ function normalizeAssistantReasoning(message, hasTools, echoReasoning) {
 }
 
 /**
- * 该 assistant 消息是否会被改写（补 reasoning_content 或剥离账本 `reasoning`）。
- * @param {any} message
- * @param {boolean} hasTools
- * @param {boolean} [echoReasoning]
- * @returns {boolean}
- */
-function needsReasoningBackfill(message, hasTools, echoReasoning) {
-  return normalizeAssistantReasoning(message, hasTools, echoReasoning) !== message;
-}
-
-/**
  * 给 assistant 消息补思考回传并剥离账本 `reasoning`。无变化时返回**原数组**（保持引用不变）。
  * @param {any[]} messages
  * @param {boolean} hasTools
@@ -103,8 +92,5 @@ function backfillReasoningContent(messages, hasTools, echoReasoning) {
 
 module.exports = {
   REASONING_PLACEHOLDER,
-  BOOK_REASONING_FIELD,
-  normalizeAssistantReasoning,
-  needsReasoningBackfill,
   backfillReasoningContent
 };
