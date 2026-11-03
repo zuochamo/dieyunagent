@@ -1171,24 +1171,33 @@ fn insert_chunk(
         return Ok(None);
     }
     let content = truncate_chars(slice, CHUNK_CONTENT_MAX_CHARS);
-    conn.execute(
-        "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![root_hash, rel_path, start_line, end_line, content, mtime],
-    )
-    .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
+    // 每个分片一条 INSERT：走 `prepare_cached`，同一轮建库只编译一次语句
+    // （全量建库是几万条，逐条 prepare + finalize 的解析开销不小）
+    {
+        let mut stmt = conn
+            .prepare_cached(
+                "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
+        stmt.execute(params![root_hash, rel_path, start_line, end_line, content, mtime])
+            .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
+    }
     Ok(Some((conn.last_insert_rowid(), content.to_string())))
 }
 
 /// `chunk_vectors` 写入的唯一入口：缓存命中与真算命中走同一条 SQL，
 /// 免得两条路径的 upsert 语义（dims 覆盖）出现偏差。
 fn write_chunk_vector(conn: &Connection, chunk_id: i64, vec: &[f32]) -> Result<(), CoreError> {
-    conn.execute(
-        "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, ?2, ?3)
-         ON CONFLICT(chunk_id) DO UPDATE SET dims = excluded.dims, vector = excluded.vector",
-        params![chunk_id, vec.len() as i64, embedding::vector_to_blob(vec)],
-    )
-    .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
+    // 与 insert_chunk 同理：每个分片一次，语句只编译一次
+    let mut stmt = conn
+        .prepare_cached(
+            "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chunk_id) DO UPDATE SET dims = excluded.dims, vector = excluded.vector",
+        )
+        .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
+    stmt.execute(params![chunk_id, vec.len() as i64, embedding::vector_to_blob(vec)])
+        .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;
     Ok(())
 }
 

@@ -123,7 +123,7 @@ pub struct ApplyResult {
     pub pinned_user_count: usize,
 }
 
-pub fn prepare(params: PrepareParams) -> Result<PrepareResult, crate::error::CoreError> {
+pub fn prepare(params: &PrepareParams) -> Result<PrepareResult, crate::error::CoreError> {
     let budget = params.token_budget.max(8192);
     let trigger = (budget as f64 * params.trigger_ratio.clamp(0.3, 0.95)) as usize;
     let est = estimate_messages_tokens(&params.messages);
@@ -376,10 +376,9 @@ pub async fn maybe_compact(
     let llm_override = params.llm.clone();
     let model_override = params.model.clone();
     let mut round_count = params.prepare.compaction_round_count;
-    let source_messages = params.prepare.messages.clone();
-    let cumulative = params.prepare.cumulative_summary.clone();
-    let prompts = params.prepare.prompts.clone();
-    let prep = prepare(params.prepare)?;
+    // `prepare` 只读 messages（内部只克隆真正要折叠的原子的消息），所以这里借它而不是
+    // 每轮把整段对话深拷贝一份 —— 这条路径每个 LLM 轮次都会走到。
+    let prep = prepare(&params.prepare)?;
     let tokens_before = prep.tokens_before.unwrap_or(0);
 
     let Some(need) = prep.need_llm else {
@@ -388,14 +387,14 @@ pub async fn maybe_compact(
         round_count += 1;
         return Ok(MaybeCompactResult {
             compacted: false,
-            messages: source_messages,
+            messages: params.prepare.messages,
             tokens_before,
             tokens_after: prep.tokens_after.unwrap_or(tokens_before),
             summary: None,
             folded_transcript: String::new(),
             pinned_user_count: 0,
             compaction_round_count: round_count,
-            cumulative_summary: cumulative,
+            cumulative_summary: params.prepare.cumulative_summary,
             llm_usage: None,
             llm_model: None,
             compaction_skipped: None,
@@ -421,14 +420,14 @@ pub async fn maybe_compact(
             round_count = POST_COMPACTION_ROUND_COUNT;
             return Ok(MaybeCompactResult {
                 compacted: false,
-                messages: source_messages,
+                messages: params.prepare.messages,
                 tokens_before,
                 tokens_after: prep.tokens_after.unwrap_or(tokens_before),
                 summary: None,
                 folded_transcript: String::new(),
                 pinned_user_count: 0,
                 compaction_round_count: round_count,
-                cumulative_summary: cumulative,
+                cumulative_summary: params.prepare.cumulative_summary,
                 llm_usage: None,
                 llm_model: None,
                 compaction_skipped: Some("llm_error".into()),
@@ -439,10 +438,10 @@ pub async fn maybe_compact(
     let raw = llm_resp.content;
     let summary_json = llm::parse_compaction_json(&raw);
     let applied = apply(ApplyParams {
-        messages: source_messages,
+        messages: params.prepare.messages,
         summary_json: summary_json.clone(),
         folded_indices: need.folded_indices,
-        prompts,
+        prompts: params.prepare.prompts,
     });
     // 折叠正文的唯一来源是 prepare 计算出的 `need.folded_transcript`（apply 只重组 messages）。
     let folded = need.folded_transcript;
@@ -486,7 +485,7 @@ mod tests {
 
     #[test]
     fn prepare_skips_small_context() {
-        let r = prepare(PrepareParams {
+        let r = prepare(&PrepareParams {
             messages: vec![json!({"role":"user","content":"hi"})],
             token_budget: 96_000,
             trigger_ratio: 0.72,
@@ -503,7 +502,7 @@ mod tests {
     #[test]
     fn prepare_requests_llm_for_few_huge_messages() {
         let huge = "x".repeat(80_000);
-        let r = prepare(PrepareParams {
+        let r = prepare(&PrepareParams {
             messages: vec![
                 json!({"role":"user","content": huge}),
                 json!({"role":"assistant","content": huge}),
@@ -589,7 +588,7 @@ mod tests {
                 "content": format!("atom-{i} {big}")
             }));
         }
-        let r = prepare(PrepareParams {
+        let r = prepare(&PrepareParams {
             messages,
             token_budget: 8192,
             trigger_ratio: 0.85,
@@ -619,7 +618,7 @@ mod tests {
     #[test]
     fn cooldown_blocks_compaction_right_after_a_round() {
         let huge = "x".repeat(80_000);
-        let r = prepare(PrepareParams {
+        let r = prepare(&PrepareParams {
             messages: vec![
                 json!({"role":"user","content": huge}),
                 json!({"role":"assistant","content": huge}),
@@ -639,7 +638,7 @@ mod tests {
             "cooldown must suppress compaction after a recent round"
         );
         // force 必须能穿透冷却（上下文溢出兜底路径依赖它）
-        let forced = prepare(PrepareParams {
+        let forced = prepare(&PrepareParams {
             messages: vec![
                 json!({"role":"user","content": huge}),
                 json!({"role":"assistant","content": huge}),

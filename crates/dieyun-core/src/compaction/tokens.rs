@@ -72,10 +72,8 @@ pub fn estimate_text_tokens(text: &str) -> usize {
 pub fn estimate_messages_tokens(messages: &[Value]) -> usize {
     messages
         .iter()
-        .map(|m| {
-            let content = m.get("content").cloned().unwrap_or(Value::Null);
-            estimate_tokens(&content) + 6
-        })
+        // 借 `content` 而不是整份 clone：每条消息的内容可能很长，而这里只需要长度估算。
+        .map(|m| m.get("content").map_or(0, estimate_tokens) + 6)
         .sum()
 }
 
