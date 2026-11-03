@@ -6,6 +6,7 @@ const {
   lightAgentsMdContent,
   extractCodebasePathsFromBlock,
   formatCodebaseBlock,
+  fetchAgentsMdBlock,
   prepSystemPrompt
 } = require('../src/agent/system-prompt-prep');
 
@@ -424,12 +425,57 @@ async function runPrepMcpFull() {
   assert(packed.stable.includes('环境变量：FOO'), 'MCP env hint');
 }
 
+// —— AGENTS.md 两层链：仓库根（宽泛）+ .dieyun（具体） ——
+//
+// 守的语义：
+//   1. 只有仓库根 AGENTS.md 时也要注入（它是 Cursor / Claude Code 生态的既有文件，
+//      以前只有归纳器读它、从不注入，等于用户的约定对模型不可见）；
+//   2. 两层都在时，宽泛层在前、具体层在后；
+//   3. 两份内容相同时只渲染一份。
+async function runAgentsChain() {
+  const rel = '.dieyun/AGENTS.md';
+  const snapshot = { workspaceInfo: { workspacePath: 'D:/proj', kind: 'local' } };
+  const mk = (files) => async (method, params) => {
+    assert(method === 'fs.read_file', `unexpected rpc ${method}`);
+    const body = files[params.filePath];
+    if (body == null) throw new Error('ENOENT');
+    return { data: body, encoding: 'utf8' };
+  };
+
+  const onlyRepo = await fetchAgentsMdBlock(
+    snapshot,
+    mk({ 'AGENTS.md': '# 仓库约定\n- 用 pnpm\n- 提交前跑 npm test' }),
+    null
+  );
+  assert(onlyRepo.includes('【仓库约定 · AGENTS.md】'), '仓库根 AGENTS.md 必须注入');
+  assert(onlyRepo.includes('用 pnpm'), '仓库根内容要可见');
+  assert(!onlyRepo.includes('【项目地图 · AGENTS.md】'), '没有 dieyun 地图就不造一个');
+
+  const both = await fetchAgentsMdBlock(
+    snapshot,
+    mk({
+      'AGENTS.md': '# 仓库约定\n- 用 pnpm',
+      [rel]: '# AGENTS.md\n<!-- dieyun:section:overview status=stable -->\n## 概览\nmap-here'
+    }),
+    null
+  );
+  assert(both.includes('【仓库约定 · AGENTS.md】'), '两层并存时都有');
+  assert(both.includes('map-here'), 'dieyun 地图内容在');
+  assert(both.indexOf('【仓库约定') < both.indexOf('【项目地图'), '宽泛层在前、具体层在后');
+
+  const same = '# 同一份\n- x';
+  const dedup = await fetchAgentsMdBlock(snapshot, mk({ 'AGENTS.md': same, [rel]: same }), null);
+  assert(!dedup.includes('【仓库约定'), '内容相同时折叠成一份');
+  assert(dedup.includes('【项目地图'), '折叠后保留具体层');
+}
+
 runPrep()
   .then(() => runPrepKnowledge())
   .then(() => runPrepGraph())
   .then(() => runRepoMapInjection())
   .then(() => runPrepSkipAutoGraph())
   .then(() => runPrepMcpFull())
+  .then(() => runAgentsChain())
   .then(() => {
     console.log('test-system-prompt-prep.cjs ok');
   })
