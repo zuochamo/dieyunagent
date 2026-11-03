@@ -65,7 +65,9 @@ function planDraftFromStructured(input, opts = {}) {
       workspace: src.workspace,
       deliver: {
         type: 'session',
-        sessionId: opts.sessionId || ''
+        // 目标型不投递到发起对话的会话：它每轮要写「用户轮次 + 事实块」，
+        // 塞进聊天会淹没真人对话。ensurePlanSession 会给它建专用会话（带 [计划] 标题）。
+        sessionId: ''
       },
       enabled: true
     });
