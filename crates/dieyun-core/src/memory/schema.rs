@@ -300,36 +300,69 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
     )
     .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
 
-    // 写入探针：唯一一处「索引到底建全了没有」的判定，也是唯一一处修复。
+    // 会话正文的检索索引（`memory.messages_search` / 工具 `session_recall`）。
     //
-    // 这里曾经有一条「`COUNT(*) FROM long_memories_fts` 与源表不一致就 rebuild」的守卫，
-    // 它是**死代码**：`long_memories_fts` 是 external content 表（`content='long_memories'`），
-    // 它的 count(*) 走的就是源表扫描，索引空着也是同一个数 —— 于是「老库首次建 FTS，索引空、
-    // 源表 1694 行」这个真实场景永远触发不了 rebuild。删掉它，判定只留探针一份。
+    // 与 `long_memories_fts` 完全同构：external content + 三触发器 + trigram，
+    // 只索引正文（role / 会话 / 工作区信息从 `messages`、`sessions` JOIN 得，
+    // 复制进索引只会多一处要维护的一致性）。
+    //
+    // 为什么值得建：`messages` 是唯一存储了「人和模型实际说过什么」的地方，
+    // 没有它，跨会话的「上次这事怎么聊的」只能靠模型翻 UI 或用户自己贴。
+    conn.execute_batch(
+        r#"
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        content,
+        content='messages', content_rowid='id',
+        tokenize='trigram'
+      );
+      CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+        INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+      END;
+    "#,
+    )
+    .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
+
+    // 写入探针：唯一一处「索引到底建全了没有」的判定，也是唯一一处修复。
+    // 两张 FTS 表共用同一份判定与修复实现（`ensure_fts_ready`），不再各写一套。
+    //
+    // 这里曾经有一条「`COUNT(*) FROM <fts>` 与源表不一致就 rebuild」的守卫，
+    // 它是**死代码**：external content 表（`content='<源表>'`）的 count(*) 走的就是源表扫描，
+    // 索引空着也是同一个数 —— 于是「老库首次建 FTS，索引空、源表 1694 行」这个真实场景
+    // 永远触发不了 rebuild。删掉它，判定只留探针一份。
     //
     // 探针失败的含义（FTS5 只报一句笼统的 `database disk image is malformed`，别被它骗了）：
     // 触发器的 delete 路径找不到这篇 doc —— 最常见就是「索引根本没建」。此时 INSERT 仍然成功，
-    // 读也正常，只有 UPDATE / DELETE 报错，所以表面症状是「记忆写不进去」，而对话账本照旧。
-    //
-    // 用同值 UPDATE 当探针：它同时走 delete + insert 两条触发器路径，是这条链路上最脆的一步。
-    if !long_memory_write_probe(conn) {
-        let rebuilt = conn
-            .execute(
-                "INSERT INTO long_memories_fts(long_memories_fts) VALUES('rebuild')",
-                [],
-            )
-            .is_ok();
-        if !rebuilt || !long_memory_write_probe(conn) {
-            eprintln!(
-                "[dieyun:memory] FTS 索引重建后写入仍失败：long_memories 的写入路径可能已被其它损坏阻塞"
-            );
-        }
-    }
+    // 读也正常，只有 UPDATE / DELETE 报错，所以表面症状是「写不进去」，而其它表照旧。
+    ensure_fts_ready(conn, "long_memories", "long_memories_fts");
+    ensure_fts_ready(conn, "messages", "messages_fts");
 
     Ok(())
 }
 
-/// 「long_memories 这条写入路径还能不能写」的探针：能否写都要把连接留在 autocommit。
+/// 探查一张 FTS 源表的写入路径，坏了就 `rebuild` 一次再探。
+///
+/// 表名都是本模块里的字面量常量（SQLite 不支持标识符参数化），不来自外部输入。
+fn ensure_fts_ready(conn: &Connection, source_table: &str, fts_table: &str) {
+    if fts_write_probe(conn, source_table) {
+        return;
+    }
+    let rebuild = format!("INSERT INTO {fts_table}({fts_table}) VALUES('rebuild')");
+    let rebuilt = conn.execute(&rebuild, []).is_ok();
+    if !rebuilt || !fts_write_probe(conn, source_table) {
+        eprintln!(
+            "[dieyun:memory] FTS 索引重建后写入仍失败：{source_table} 的写入路径可能已被其它损坏阻塞"
+        );
+    }
+}
+
+/// 「这张源表的写入路径还能不能写」的探针：能否写都要把连接留在 autocommit。
 ///
 /// 用 rusqlite 的 [`rusqlite::Transaction`] 而不是手写
 /// `SAVEPOINT …; UPDATE …; ROLLBACK TO …; RELEASE …` 批次：批次里中间那句报错时
@@ -337,17 +370,16 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
 /// 每条写入都进这个永不提交的事务，进程一退全部丢失（历史事故：WAL 里 7611 帧、
 /// 只有 10 个 commit 标记，09:49–10:12 的整段对话随重启蒸发）。
 /// Transaction 的 Drop 一定会回滚，语句报错也逃不掉。
-fn long_memory_write_probe(conn: &Connection) -> bool {
+fn fts_write_probe(conn: &Connection, source_table: &str) -> bool {
     let tx = match conn.unchecked_transaction() {
         Ok(tx) => tx,
         Err(_) => return false,
     };
-    let writable = tx
-        .execute(
-            "UPDATE long_memories SET status = status WHERE id = (SELECT MIN(id) FROM long_memories)",
-            [],
-        )
-        .is_ok();
+    // 同值 UPDATE：命中一行就必然走 AFTER UPDATE 触发器的 delete + insert 两条路径。
+    let probe = format!(
+        "UPDATE {source_table} SET content = content WHERE id = (SELECT MIN(id) FROM {source_table})"
+    );
+    let writable = tx.execute(&probe, []).is_ok();
     // 探针只回答「能不能写」：无论成败都回滚，不留数据变更，也不留事务。
     tx.rollback().is_ok() && writable
 }

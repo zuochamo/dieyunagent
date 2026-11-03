@@ -53,6 +53,21 @@ pub fn has_indexable_term(query: &str) -> bool {
         .any(|p| p.chars().count() >= MIN_TRIGRAM_CHARS)
 }
 
+/// 首个命中片段在 `content` 里的**字符**下标，用于围绕命中处截取摘录。
+///
+/// 与 `match_query` / `has_indexable_term` 共用同一份切分规则：摘录要围绕「真正被检索的
+/// 词」展开，切分规则差一点就会把摘录截在毫不相关的位置上。找不到时返回 `None`，
+/// 调用方退回头部截断（不是错误：子串可能被词法切分改写过）。
+pub fn first_hit_index(content: &str, query: &str) -> Option<usize> {
+    let haystack = content.to_lowercase();
+    terms(query)
+        .iter()
+        .filter_map(|t| haystack.find(&t.to_lowercase()))
+        .filter_map(|byte_idx| content.get(..byte_idx))
+        .map(|prefix| prefix.chars().count())
+        .min()
+}
+
 /// 自然语言 / 代码混合文本 → 纯文本片段（已去掉 FTS5 语法字符）。
 fn terms(query: &str) -> Vec<String> {
     query
@@ -113,5 +128,21 @@ mod tests {
         assert!(has_indexable_term("ANN"));
         assert!(has_indexable_term("代码库"));
         assert!(has_indexable_term("索引 parseConfig"));
+    }
+
+    #[test]
+    fn first_hit_index_points_at_the_matched_term() {
+        let content = "先读 README，然后改 parseConfig 里的分支";
+        let idx = first_hit_index(content, "parseConfig").expect("应命中");
+        assert_eq!(content.chars().nth(idx), Some('p'));
+    }
+
+    #[test]
+    fn first_hit_index_is_case_insensitive_and_byte_safe() {
+        // 小写化后字节偏移与原文一致才允许换算成字符下标
+        let content = "Line one\nparSECONFIG here";
+        assert_eq!(first_hit_index(content, "parseconfig"), Some(9));
+        assert_eq!(first_hit_index("完全无关", "parseConfig"), None);
+        assert_eq!(first_hit_index("任意内容", ""), None);
     }
 }

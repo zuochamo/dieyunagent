@@ -1366,6 +1366,41 @@ const MEMORY_FORGET_TOOL = {
   }
 };
 
+// —— 会话检索工具：翻「以前聊过什么」 ——
+//
+// 记忆工具读的是**归纳后的结论**（长期记忆 / 项目记忆），这个读的是**原始对话**：
+// 别的会话里人和模型实际说过什么，以及被压缩摘要吞掉的那段原文。
+//
+// 为什么只给一个工具而不是一套：记忆库是 distilled 的，会话是 raw 的，raw 侧只需要
+// 「按字面找」——没有事件流、没有父子 trace，多给几个入口只会变成查不到东西的 schema。
+const SESSION_RECALL_TOOL = {
+  type: 'function',
+  function: {
+    name: 'session_recall',
+    description:
+      '检索既往会话的原始对话，成员按字面匹配返回带会话 id 的摘录。' +
+      '用于「上次这个报错我们怎么处理的」「之前定过什么方案」这类归纳记忆里没有的细节。' +
+      '默认只搜当前工作空间；folded=true 时连被压缩摘要吞掉的原文一起搜。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '要查的关键词或短语，字面匹配（不必写成句子）' },
+        scope: {
+          type: 'string',
+          enum: ['workspace', 'session'],
+          description: 'workspace = 当前工作空间内所有会话；session = 只看当前会话（默认 workspace）'
+        },
+        folded: {
+          type: 'boolean',
+          description: '是否同时检索压缩归档里被折叠的原文（默认 false）'
+        },
+        limit: { type: 'number', description: '返回条数上限（默认 12，最多 20）' }
+      },
+      required: ['query']
+    }
+  }
+};
+
 const MEMORY_TOOLS = [MEMORY_RECALL_TOOL, MEMORY_FORGET_TOOL];
 
 const PLAN_TOOLS = [
@@ -1374,13 +1409,37 @@ const PLAN_TOOLS = [
     function: {
       name: 'plan_create',
       description:
-        '创建定时计划（写入 plans.json，RRULE 调度）。能确定时间规则时请直接给出 rrule 或 onceAt（确定、不再额外解析）；只有拿到的是自然语言、无法确定时间规则时才省略它们，交由解析器推断。用户说「每天 X 点…发到当前对话」时，计划会投递到当前会话。',
+        '创建计划（写入 plans.json）。两种形态二选一：' +
+        '①定时（RRULE）：能确定时间规则就直接给 rrule 或 onceAt（确定、不再额外解析），只有拿到的是自然语言、无法确定时间规则时才省略它们交解析器推断；' +
+        '②目标型（给 goal）：没有时间规则、"做到某某条件成立为止"的长任务用它 —— 计划会一轮轮自动续跑，每轮由模型跑 goal 检查、直到申请完成或预算用完。' +
+        '用户说「每天 X 点…发到当前对话」时，计划会投递到当前会话。',
       parameters: {
         type: 'object',
         properties: {
           name: {
             type: 'string',
             description: '计划名称（简短中文）'
+          },
+          goal: {
+            type: 'object',
+            description:
+              '目标型计划（"一直做到 X 成立"）。给了它就不要再给 rrule/onceAt。' +
+              '检查命令决定「做没做完」能不能被机器核对，所以要先和用户确认一条**现在会失败、做完会通过**的命令；' +
+              '确实没有可执行的检查（例如主观目标）就传空数组 checks: []，那是未验证模式：照样能跑，但完成申请不会被代码核对。' +
+              '预算（轮次/时长）不在这里设：沿用默认值，用户可在「定时任务 → 目标」里改。',
+            properties: {
+              checks: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  '每项一条检查命令（原样执行，退出码 0 = 通过），如 "npm test"、"cargo build"。别写解释性文字，也别把多条命令拼成一段'
+              },
+              cwd: {
+                type: 'string',
+                description: '检查命令的工作目录（可选，留空 = 计划运行的工作空间）'
+              }
+            },
+            required: ['checks']
           },
           rrule: {
             type: 'string',
@@ -1394,7 +1453,8 @@ const PLAN_TOOLS = [
           },
           prompt: {
             type: 'string',
-            description: '到点后交给 AI 执行的任务说明（完整、可执行）'
+            description:
+              '计划要完成的任务说明（完整、可执行）：定时型写「到点做什么」；目标型写「什么状态算达成」，它是每一轮交接班的依据'
           },
           description: {
             type: 'string',
@@ -1471,6 +1531,64 @@ const PLAN_TOOLS = [
           id: { type: 'string', description: '计划 id（先用 plan_list 取）' }
         },
         required: ['id']
+      }
+    }
+  }
+];
+
+/**
+ * 目标型计划（plans trigger=goal）专用工具：**只在计划轮次里**给模型（见 plan-agent-runner）。
+ *
+ * 为什么它们必须是工具、不能是调度器的固定步骤：**节奏是语义判断** —— 什么时候跑哪条检查、
+ * 跑几次，取决于模型刚改了什么、哪条检查便宜。写成「每轮无条件跑一条命令」既会吃掉整晚预算，
+ * 也把「怎么验证」硬编码成了代码策略。代码只留两件事：跑命令、核对主张与事实。
+ */
+const GOAL_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'goal_check',
+      description:
+        '在目标型计划的一轮里跑一次检查命令，并把结果作为「事实」记到计划上（退出码、超时、被沙箱/审批拒绝、输出尾部）。' +
+        '什么时候跑、跑哪条由你决定：目标声明了检查就按声明跑（用 check_id）；没声明时自己给一条能失败的命令。' +
+        '事实是 goal_finish 的唯一依据 —— 没有通过的事实，完成申请会被打回。',
+      parameters: {
+        type: 'object',
+        properties: {
+          check_id: {
+            type: 'string',
+            description: '已声明检查的 id（与 command 二选一；给了 id 就用它的命令，命令由计划持有）'
+          },
+          command: {
+            type: 'string',
+            description: '要执行的检查命令（退出码 0 = 通过）；check_id 缺省时必填'
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'goal_finish',
+      description:
+        '为目标型计划的这一轮申请收尾。complete = 目标已达成：代码会核对事实（最近一次检查必须通过；' +
+        '声明了检查时每条的最新结果都要通过），对不上就被打回并回灌失败事实；' +
+        'blocked = 有具体卡点做不下去、需要人处理。不确定就先 goal_check 再取一次事实，别提前宣布完成。',
+      parameters: {
+        type: 'object',
+        properties: {
+          outcome: {
+            type: 'string',
+            enum: ['complete', 'blocked'],
+            description: 'complete = 目标达成；blocked = 卡住需要人处理'
+          },
+          note: {
+            type: 'string',
+            description: '一句话：完成时指向哪条检查/证据；阻塞时写确切卡点（人早上据此接手）'
+          }
+        },
+        required: ['outcome']
       }
     }
   }
@@ -2167,6 +2285,7 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   GRAPH_TOOLS,
   [AGENTS_MD_PROPOSE_TOOL, SKILL_CREATE_TOOL, SKILL_DELETE_TOOL],
   MEMORY_TOOLS,
+  [SESSION_RECALL_TOOL],
   PLAN_TOOLS,
   [MCP_TOOL_SCHEMA_TOOL, MCP_MANAGE_TOOL, CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL],
   [COMPUTER_TOOL],
@@ -2227,9 +2346,8 @@ module.exports = {
   SKILL_CREATE_TOOL,
   SKILL_DELETE_TOOL,
   MEMORY_TOOLS,
-  MEMORY_RECALL_TOOL,
-  MEMORY_FORGET_TOOL,
   PLAN_TOOLS,
+  GOAL_TOOLS,
   MCP_TOOL_SCHEMA_TOOL,
   MCP_MANAGE_TOOL,
   SSH_TOOL,
@@ -2242,7 +2360,6 @@ module.exports = {
   SESSION_WORKSPACE_TOOL,
   COMPUTER_TOOL,
   CAMERA_TOOL,
-  PEER_TOOLS,
   ALL_STATIC_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
   CHANNEL_RUNTIME_TOOL_NAMES,

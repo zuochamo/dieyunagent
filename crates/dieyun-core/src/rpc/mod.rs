@@ -341,6 +341,50 @@ impl ServiceSnapshot {
                     .clamp(1, 50);
                 self.memory.keyword_search_long_memories(query, limit)
             }
+            "memory.messages_search" => {
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let workspace = params
+                    .get("workspacePath")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty());
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty());
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(20)
+                    .clamp(1, 100);
+                let snippet_chars = params
+                    .get("snippetChars")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(240);
+                self.memory
+                    .search_messages(query, workspace, session_id, limit, snippet_chars)
+            }
+            "memory.compaction_folded" => {
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let workspace = params
+                    .get("workspacePath")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty());
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty());
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(10)
+                    .clamp(1, 50);
+                let snippet_chars = params
+                    .get("snippetChars")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(600);
+                self.memory
+                    .search_compaction_folded(query, workspace, session_id, limit, snippet_chars)
+            }
             "memory.long_vector_status" => self.memory.long_memory_vector_status(),
             "memory.long_status_set" => {
                 let memory_id = params
@@ -419,18 +463,6 @@ impl ServiceSnapshot {
             }
             // ---- compaction：纯 CPU，无 IO ----
             "compaction.estimate" => Ok(compaction::estimate(params)),
-            "compaction.prepare" => {
-                let p: compaction::PrepareParams = serde_json::from_value(params.clone())
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let r = compaction::prepare(p)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "compaction.apply" => {
-                let p: compaction::ApplyParams = serde_json::from_value(params.clone())
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let r = compaction::apply(p);
-                Ok(serde_json::to_value(r)?)
-            }
             // ---- agent：运行账本 / trace ----
             "agent.run_upsert" => self.memory.upsert_agent_run(params),
             "agent.plan_save" => {
@@ -829,15 +861,6 @@ impl AppState {
                 )?;
                 Ok(r)
             }
-            "planner.run.state" => {
-                let run_id = params
-                    .get("runId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?;
-                let guard = self.inner.read().await;
-                let r = guard.planner.state(run_id)?;
-                Ok(r)
-            }
             "planner.run.cancel" => {
                 let run_id = params
                     .get("runId")
@@ -1122,80 +1145,6 @@ impl AppState {
                 let r = index.search(&workspace_root, query, limit).await?;
                 Ok(serde_json::to_value(r)?)
             }
-            "codebase.index_remote" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?
-                    .to_string();
-                let force = params
-                    .get("force")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let phase = params
-                    .get("phase")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("full")
-                    .to_string();
-                let vectors = params
-                    .get("vectors")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let index = self.snapshot().await.index;
-                let ws = crate::index::resolve_workspace(&workspace_root)?;
-                if !ws.is_remote {
-                    return Err(CoreError::rpc(
-                        "LOCAL_INDEX_REQUIRED",
-                        "本地工作空间请使用 codebase.index",
-                    ));
-                }
-                if vectors && !index.vectors_available() {
-                    return Err(CoreError::rpc(
-                        "EMBEDDING_NOT_CONFIGURED",
-                        "未配置 Embedding 端点（模型 / base_url），无法生成向量；可先只建片段，或在设置里配好 embedding 后重试",
-                    ));
-                }
-                match phase.as_str() {
-                    "begin" => {
-                        index.index_remote_begin(&ws, force, vectors).await?;
-                        let st = {
-                            let index = index.clone();
-                            let workspace_root = workspace_root.clone();
-                            run_blocking(move || index.status(&workspace_root)).await?
-                        };
-                        Ok(serde_json::to_value(st)?)
-                    }
-                    "push" => {
-                        let files: Vec<crate::index::RemoteFileInput> = params
-                            .get("files")
-                            .map(|v| serde_json::from_value(v.clone()))
-                            .transpose()
-                            .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
-                            .unwrap_or_default();
-                        let count = files.len();
-                        {
-                            let index = index.clone();
-                            let ws = ws.clone();
-                            run_blocking(move || index.index_remote_push(&ws, &files)).await?
-                        };
-                        Ok(serde_json::json!({ "ok": true, "pushed": count }))
-                    }
-                    "finish" => {
-                        let r = index.index_remote_finish(&ws).await?;
-                        Ok(serde_json::to_value(r)?)
-                    }
-                    _ => {
-                        let files: Vec<crate::index::RemoteFileInput> = params
-                            .get("files")
-                            .map(|v| serde_json::from_value(v.clone()))
-                            .transpose()
-                            .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
-                            .unwrap_or_default();
-                        let r = index.index_remote(&workspace_root, files, force, vectors).await?;
-                        Ok(serde_json::to_value(r)?)
-                    }
-                }
-            }
             "graph.index" => {
                 let workspace_root = params
                     .get("workspaceRoot")
@@ -1213,72 +1162,6 @@ impl AppState {
                     let workspace_root = workspace_root.clone();
                     run_blocking(move || graph.index_workspace(&workspace_root, force, scope)).await?
                 };
-                let st = {
-                    let graph = graph.clone();
-                    let workspace_root = workspace_root.clone();
-                    run_blocking(move || graph.status(&workspace_root)).await?
-                };
-                Ok(serde_json::to_value(st)?)
-            }
-            "graph.index_remote" => {
-                let workspace_root = params
-                    .get("workspaceRoot")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?
-                    .to_string();
-                let force = params
-                    .get("force")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let phase = params
-                    .get("phase")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let files: Vec<crate::index::RemoteFileInput> = serde_json::from_value(
-                    params
-                        .get("files")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!([])),
-                )
-                .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let graph = self.snapshot().await.graph;
-                let scope = graph_scope_from_params(&params);
-                match phase.as_str() {
-                    "begin" => {
-                        let r = {
-                            let graph = graph.clone();
-                            let workspace_root = workspace_root.clone();
-                            run_blocking(move || graph.index_remote_begin(&workspace_root)).await?
-                        };
-                        return Ok(serde_json::to_value(r)?);
-                    }
-                    "push" => {
-                        let pushed = {
-                            let graph = graph.clone();
-                            let workspace_root = workspace_root.clone();
-                            run_blocking(move || {
-                                graph.index_remote_push(&workspace_root, &files)
-                            })
-                            .await?
-                        };
-                        return Ok(serde_json::json!({ "ok": true, "pushed": pushed }));
-                    }
-                    "finish" => {
-                        let graph = graph.clone();
-                        let workspace_root = workspace_root.clone();
-                        run_blocking(move || graph.index_remote_finish(&workspace_root, force, scope))
-                            .await?;
-                    }
-                    _ => {
-                        let graph = graph.clone();
-                        let workspace_root = workspace_root.clone();
-                        run_blocking(move || {
-                            graph.index_remote(&workspace_root, files, force, scope)
-                        })
-                        .await?;
-                    }
-                }
                 let st = {
                     let graph = graph.clone();
                     let workspace_root = workspace_root.clone();
