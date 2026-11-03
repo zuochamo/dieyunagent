@@ -683,7 +683,10 @@ async function pickLocalWorkspace() {
  */
 async function applySessionWorkspaceFromTool(args) {
   const raw = String((args && args.workspace) || '').trim();
-  const isDefault = raw.toLowerCase() === 'default' || raw === '默认' || raw === '默认工作空间';
+  // 「回默认」的判据只有 schema 声明的那一个哨兵值（tool-catalog: 传 "default" 回到默认工作空间）。
+  // 以前还认「默认」「默认工作空间」两个中文串 —— 那是拿词表去补模型没读 schema 的情况，
+  // 同一份词表在频道侧 `channels/workspace-switch.js` 也有一份，两边会各自漂移。
+  const isDefault = raw.toLowerCase() === 'default';
   if (!raw) {
     const current =
       (typeof window !== 'undefined' && window.activeViewSessionWorkspacePath) || '默认工作空间';

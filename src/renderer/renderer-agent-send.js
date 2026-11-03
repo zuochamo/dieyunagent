@@ -53,11 +53,12 @@ async function gateSendMessage(text, options) {
     rejectAgentServiceTask(agentServiceRequestId, runSessionId, '当前会话已有任务在执行');
     return null;
   }
-  // 协议续跑：仅当已有 continue checkpoint 时，短命令「继续/continue/resume」触发 resume（非意图词表路由）
-  const trimmedCmd = String(text || '').trim().toLowerCase();
-  const protocolContinue =
-    (trimmedCmd === '继续' || trimmedCmd === 'continue' || trimmedCmd === 'resume');
-  if (protocolContinue) {
+  // 续跑由**状态 + 显式动作**决定，不由用户打了什么字决定（AGENTS 原则 3）。
+  // 触发入口只有一个：`requestResumeInterruptedTurn`（思考区「继续」/ Composer 空提交 /
+  // 频道显式续跑），它把结论以 `resumeInterrupted` 传进来。以前这里靠
+  // `text === '继续' || 'continue' || 'resume'` 三个精确词，等于让词表决定「是否 resume」。
+  const wantsResume = options.resumeInterrupted === true;
+  if (wantsResume) {
     const pendingContinue =
       typeof getAgentContinueState === 'function' ? getAgentContinueState(runSessionId) : null;
     if (pendingContinue && pendingContinue.sessionId === runSessionId) {
@@ -65,7 +66,7 @@ async function gateSendMessage(text, options) {
       return null;
     }
   }
-  if (typeof clearAgentContinueState === 'function') {
+  if (!wantsResume && typeof clearAgentContinueState === 'function') {
     clearAgentContinueState(runSessionId);
   }
   let allowPlannerResume = false;
@@ -74,12 +75,13 @@ async function gateSendMessage(text, options) {
     rejectAgentServiceTask(agentServiceRequestId, runSessionId, '发送过程中已切换会话');
     return null;
   }
-  if (protocolContinue) {
-    // 无 tool-loop continue state 时，尝试恢复 planner 断点
+  if (wantsResume) {
+    // 没有 tool-loop continue 状态时，恢复 planner 断点（断点本身是 Rust 里的 running 记录）
     if (!getPendingResumeCheckpoint(runSessionId)) {
       await tryDetectResumeCheckpoint(runSessionId);
     }
     allowPlannerResume = !!getPendingResumeCheckpoint(runSessionId);
+    if (!allowPlannerResume) return null; // 没有任何断点：不发起空跑
   } else {
     // 新消息视为新任务：清断点
     clearPendingResumeCheckpoint(runSessionId);

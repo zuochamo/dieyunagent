@@ -17,6 +17,7 @@ const {
 } = require('./skill-frontmatter');
 const { zhDescriptionForSkillKey } = require('./bundled-i18n-zh');
 const { verifySkillContent } = require('./install-integrity');
+const { resolveSkillDomain, SKILL_DOMAINS } = require('./taxonomy');
 
 function defaultSkillRoots() {
   const home = os.homedir();
@@ -79,6 +80,14 @@ async function tryAddSkill(dir, seen, out, bundledRoots) {
     folderName ||
     '其他';
   const blurb = formatBilingualBlurb(meta, body, 220);
+  // 分类是数据：frontmatter 的 `domain:`/`category:` → 预装精确表 → 默认页签。
+  // 唯一实现在 skills/taxonomy.js，Renderer 只渲染这个字段（不再自己猜）。
+  const domain = resolveSkillDomain({
+    skillKey: meta.skillKey,
+    id: skillId,
+    domain: meta.domain,
+    category
+  });
   out.push({
     id: skillId,
     dir: id,
@@ -89,6 +98,7 @@ async function tryAddSkill(dir, seen, out, bundledRoots) {
     descriptionZh: pickDescriptionZh(meta),
     preview: blurb,
     category,
+    domain,
     // 「内置」= 落在预装种子分类目录内（与可删性同源）。skillKey 只用于 id 与召回，不再是内置判据。
     builtin: bundledRoots.some((root) => isSeededSkillDir(dir, root)),
     // 安装基线比对结果：ok = 与安装时一致；changed = 本地被改过；untracked = 非市场安装（手写/预装）。
@@ -166,7 +176,7 @@ async function scanSkills(opts = {}) {
     item.undeletableReason = verdict.reason;
   }
   out.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN'));
-  return { roots, skills: out };
+  return { roots, skills: out, domains: SKILL_DOMAINS };
 }
 
 function assertReadableSkillPath(skillPath, allowedRoots) {

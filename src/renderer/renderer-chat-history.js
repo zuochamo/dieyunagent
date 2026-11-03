@@ -712,11 +712,23 @@ async function drainSwitchSessionQueue() {
   }
 }
 
-/** 会话标题用：剥离落库 meta 前缀，正文为空时回退到 meta.inputText。 */
+/**
+ * 会话标题用：剥离落库 meta 前缀，正文为空时回退到 meta.inputText。
+ *
+ * 计划/定时触发那一轮的抬头（`[计划 · 名字]` + `<时间> · 定时触发`）是本仓自己拼的
+ * （`src/plans/plan-run-turn.js`），同一事实在 meta 的 `trigger` 里——所以**优先读 meta**：
+ * 有计划名就拿计划名当标题，不再靠「哪一行含『定时触发』」猜抬头
+ * （那会把用户正文里恰好提到这几个词的句子也跳过）。
+ */
 function stripMessageMetaForTitle(raw) {
   const s = String(raw || '').trim();
   const { content, meta } = unpackMessageMeta(s);
   if (meta) {
+    const planName =
+      meta && meta.trigger && typeof meta.trigger === 'object'
+        ? String(meta.trigger.planName || '').trim()
+        : '';
+    if (planName) return planName;
     const body = String(content || '').trim();
     if (body) return body;
     return meta.inputText != null ? String(meta.inputText).trim() : '';
@@ -741,8 +753,9 @@ function titleFromPreview(preview) {
   if (!text) return '';
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   for (const line of lines) {
-    if (/^\[计划 ·.+\]$/.test(line)) continue;
-    if (line.includes('定时触发')) continue;
+    // 只跳本仓自己的抬头格式（精确首尾），不做词面猜测
+    if (/^\[计划 · .+\]$/.test(line)) continue;
+    if (line.endsWith(' · 定时触发') || line.endsWith(' · 目标续跑')) continue;
     const normalized = line.replace(/\s+/g, ' ');
     const sentence = normalized.match(/^[^。！？.!?\n]+[。！？.!?]?/)?.[0] || normalized;
     const slice = (sentence.trim() || normalized).slice(0, 48);

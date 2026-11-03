@@ -95,6 +95,9 @@ function toolErrorText(tool) {
 /** 这一次工具调用算不算失败：传输层 `error` / 结果对象的 `ok === false` 或 `error` / host_exec 非 0 退出码 */
 function toolFailed(tool, name) {
   if (toolErrorText(tool)) return true;
+  // 已映射成界面条目的 trace 会带上结构化的 failed 标志（`live-loop-trace.mapLoopToolToUi`）；
+  // 它本身也是从 result/error 推出来的，跟下面的判断同源，读它比回读 summary 文案可靠。
+  if (tool && tool.failed === true) return true;
   const r = toolResult(tool);
   if (r) {
     if (r.ok === false) return true;
@@ -113,10 +116,19 @@ function isWritingTool(tool, name) {
   return shared.MUTATING_TOOL_NAMES.has(name);
 }
 
-/** 这次调用是否属于「验证」类（host_exec 按命令内容细分，其余按工具名） */
+/**
+ * 名义上是「验证」的工具（按**工具身份**，不看名字里的子串）。
+ *
+ * `host_exec` 由模型自己在入参里声明 `verify`（见 `hostExecLooksValidation`）；
+ * `browser_expect` 不在此列 —— 它的结论单独按 `failed` 计数读（`readExpectation`），
+ * 混进来会被判成一条「验证命令」的退出码。
+ */
+const VALIDATION_TOOL_NAMES = Object.freeze(new Set(['goal_check']));
+
+/** 这次调用是否属于「验证」类（host_exec 看模型声明，其余按工具身份） */
 function isValidationTool(tool, name) {
-  if (name === 'host_exec') return shared.hostExecLooksValidation(toolCommand(tool));
-  return /diagnostics|test|lint|check/i.test(name);
+  if (name === 'host_exec') return shared.hostExecLooksValidation(toolArgs(tool));
+  return VALIDATION_TOOL_NAMES.has(name);
 }
 
 function eachTool(trace, fn) {
@@ -138,6 +150,12 @@ function validationKey(tool, name) {
   if (name !== 'host_exec') return name;
   const cmd = toolCommand(tool).replace(/\s+/g, ' ');
   return cmd ? `host_exec:${cmd}` : name;
+}
+
+/** 提示里怎么称呼这条验证（host_exec 报命令本身，否则报工具名）。 */
+function validationLabel(tool, name) {
+  if (name !== 'host_exec') return name;
+  return toolCommand(tool).replace(/\s+/g, ' ').slice(0, 120) || name;
 }
 
 /**
@@ -212,7 +230,11 @@ function collectEvidence(trace) {
     // 同一验证命令只留最后一次结果：修完重跑通过不该被判成没做完，
     // 而「先跑通、后面另一条腿挂了」也不能被前面那次通过压住。
     if (isValidationTool(tool, name)) {
-      validations.set(validationKey(tool, name), { name, failed, exitCode: structuredExitCode(tool) });
+      validations.set(validationKey(tool, name), {
+        label: validationLabel(tool, name),
+        failed,
+        exitCode: structuredExitCode(tool)
+      });
     }
     if (name === 'browser_expect') expectation = readExpectation(tool);
   });
@@ -222,7 +244,7 @@ function collectEvidence(trace) {
     writeTools,
     filePaths,
     hasWriteSignal: writeTools.length > 0,
-    failedValidations: rows.filter((r) => r.failed).map((r) => ({ name: r.name, exitCode: r.exitCode })),
+    failedValidations: rows.filter((r) => r.failed).map((r) => ({ label: r.label, exitCode: r.exitCode })),
     passedValidation: rows.filter((r) => !r.failed).length,
     browserToolUsed,
     expectation
@@ -317,10 +339,11 @@ function evaluateReadiness(evidence, ctx = {}) {
   // 因此这里只认「最后一次验证结果」，不再用「有任何通过」去抵消失败。
   if (e.failedValidations.length > 0) {
     const first = e.failedValidations[0];
-    const detail = first && first.exitCode != null ? `（${first.name} exit ${first.exitCode}）` : '';
+    const detail =
+      first && first.exitCode != null ? `（${first.label} exit ${first.exitCode}）` : first && first.label ? `（${first.label}）` : '';
     return failResult(
       'validation_failed',
-      `检测到测试、构建、lint 或静态检查失败${detail}。请先修复失败项；如果失败与本任务无关，请明确说明。`,
+      `检测到验证命令失败${detail}。请先修复失败项；如果失败与本任务无关，请明确说明。`,
       { diagnostics, browser }
     );
   }

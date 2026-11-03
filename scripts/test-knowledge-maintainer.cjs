@@ -131,20 +131,23 @@ async function main() {
     assert.strictEqual(parsed.memories[1].kind, undefined);
   });
 
-  check('parse: scope 只留 project / global（自由文本归一）', () => {
+  check('parse: scope 只认枚举 global / project（不猜自由文本）', () => {
     const parsed = km.parseKnowledgeJson(
       JSON.stringify({
         memories: [
-          { content: '项目约定：提交前跑 npm test', scope: '本项目' },
-          { content: '用户偏好中文回复，少用客套话', scope: '长期' },
-          { content: 'camera 模块导出统一走 runtime 配置', scope: 'Workspace' },
-          { content: '不要提交 dist 目录', scope: 'GLOBAL' }
+          { content: '项目约定：提交前跑 npm test', scope: 'project' },
+          { content: '用户偏好中文回复，少用客套话', scope: 'global' },
+          { content: 'camera 模块导出统一走 runtime 配置', scope: 'PROJECT' },
+          // 自由文本一律落 global（不再用中英文词表把它改写成 project）：
+          // 落 global 只影响「进不进 .dieyun/memory.md」，条目仍会进库，不会丢。
+          { content: '本项目约定：提交前跑 npm test', scope: '本项目' },
+          { content: '不要提交 dist 目录', scope: 'workspace' }
         ]
       })
     );
     assert.deepStrictEqual(
       parsed.memories.map((m) => m.scope),
-      ['project', 'global', 'project', 'global']
+      ['project', 'global', 'project', 'global', 'global']
     );
   });
 
@@ -164,6 +167,54 @@ async function main() {
     assert.ok(signals.changes.includes('docs/x.md'), signals.changes);
     assert.strictEqual(signals.writeCount, 2);
     assert.ok(!signals.changes.includes('npm test'), '命令不算文件变更');
+  });
+
+  check('signals: 工具成败看结构化结果，不看 summary 里的 error/失败 字样', () => {
+    const limits = require('../src/agent/agent-limits').AGENT_LIMITS_DEFAULTS;
+    const signals = km.collectKnowledgeSignals(
+      {
+        trace: [
+          // 成功的命令，输出里恰好带上 error 字样（比如 grep 命中一行 error）→ 仍是证据
+          {
+            tools: [
+              {
+                name: 'host_exec',
+                argsBrief: 'rg error src/',
+                summary: 'src/a.js:3: throw new Error("x")',
+                result: { ok: true, code: 0 }
+              }
+            ]
+          },
+          // 真失败的命令：结构化退出码 1 → 不进证据行
+          {
+            tools: [
+              {
+                name: 'host_exec',
+                argsBrief: 'npm test',
+                summary: '2 failed',
+                result: { ok: false, code: 1 }
+              }
+            ]
+          },
+          // 写文件失败：result.ok === false → 不算一次写入
+          {
+            tools: [
+              {
+                name: 'fs_edit',
+                toolArgs: { filePath: 'a.ts' },
+                summary: '写入成功',
+                result: { ok: false, error: 'EACCES' }
+              }
+            ]
+          }
+        ]
+      },
+      limits
+    );
+    assert.ok(signals.execLines.includes('rg error src/'), signals.execLines);
+    assert.ok(!signals.execLines.includes('npm test'), signals.execLines);
+    assert.strictEqual(signals.writeCount, 0);
+    assert.ok(!signals.changes.includes('a.ts'), signals.changes);
   });
 
   check('prompt: 未启用 AGENTS 时要求 agents_updates 为空', () => {

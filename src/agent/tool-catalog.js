@@ -68,6 +68,12 @@ const HOST_TOOLS = [
             description: 'true 时后台启动，不等待进程结束（GUI/守护进程必用）'
           },
           timeoutMs: { type: 'number', description: '可选超时（毫秒，上限 600000），仅 detached=false 时有效' },
+          verify: {
+            type: 'boolean',
+            description:
+              '这条命令是不是在验证改动（测试 / 类型检查 / lint / 构建 / 冒烟脚本 / 编译）。请**显式给出 true 或 false**：' +
+              '收尾「本轮做完了没」的验收提示靠它判断你验过没有 —— 代码不再按命令名猜（`make verify`、`npm run smoke` 这类自有脚本猜不出来）'
+          },
           waitMs: {
             type: 'number',
             description:

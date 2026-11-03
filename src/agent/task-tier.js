@@ -38,18 +38,24 @@ function isTaskTierFeatureEnabled() {
   }
 }
 
-/** 结构信号：路径 / 选区 / @Codebase / 产物 — 不用意图词表，不另打分级 LLM */
+/**
+ * 结构信号：路径 / 选区 / 产物 / @Codebase — 不用意图词表，不另打分级 LLM。
+ *
+ * 「trivial」的判据只有一条：用户已经把目标限定到 **1~2 个具体文件**（路径提示 / 编辑器选区 /
+ * 产物），且没有 `@Codebase` 这种「整个仓库范围」的信号。以前还有一条
+ * `userText.trim().length <= 240` 的**字数**门槛：字数既不说明改动范围，也会让「附了一个文件
+ * + 一段长需求」被判成小改而跳过自动 codebase 检索（docs/AGENT-STRATEGY.md §4.1 的结构信号
+ * 清单里本来也没有字数）。
+ */
 function inferTaskTierFromStructure(input = {}) {
-  const userText = String(input.userText || '');
   const suggestedFiles = uniquePaths([
     ...(input.pathHints || []),
     input.editorPath,
     input.artifactPath
   ]);
   const codebaseMention = !!input.codebaseMention;
-  const short = userText.trim().length > 0 && userText.trim().length <= 240;
   const scoped = suggestedFiles.length > 0 && suggestedFiles.length <= 2;
-  if (scoped && short && !codebaseMention) {
+  if (scoped && !codebaseMention) {
     return {
       taskTier: 'trivial',
       reason: '路径或编辑器选区已限定，按小 diff 处理',

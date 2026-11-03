@@ -480,7 +480,7 @@ async function tryDetectResumeCheckpoint(sessionId) {
       );
       showAgentToast(
         '可恢复',
-        '检测到中断任务；发送「继续」可从中断点恢复，发送其他内容将按新任务执行。',
+        '检测到中断任务：点思考区「继续」或留空直接回车即可从中断点恢复，输入其他内容按新任务执行。',
         { variant: 'info', duration: 6000 }
       );
     }

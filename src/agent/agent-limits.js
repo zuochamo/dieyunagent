@@ -57,6 +57,10 @@ const AGENT_LIMITS_DEFAULTS = {
   // 计划上保留多少条检查事实（运行态有界；更早的事实仍在计划会话的 trace 里）。
   // 故意不进 AGENT_LIMITS_SCHEMA：这是内部保留预算，不是护栏旋钮。
   goalEvidenceKeep: 20,
+  // 已按完成收尾的目标型计划保留几条：更早的自动清掉，否则卡片与 plans.json 无界增长。
+  // **只清 `complete`，`blocked` 永不自动清**（那是还没人看的问题，删掉等于把问题藏了）。
+  // 同样不进 SCHEMA：这是保留预算，不是用户要调的护栏。
+  goalCompletedKeep: 5,
   // 内网 agent 互通（src/peer）：把这些数字集中在这里，是为了让「两个 agent 互相撩爆 token」
   // 这类失控只有一处可调，而不是散在发现/服务/协调器三层各写一个上限。
   // hops = 一条跨机消息链上已经过手的 agent 数；达到上限即**不再自动跑一轮**，只投递。
@@ -292,6 +296,17 @@ const AGENT_LIMITS_DEFAULTS = {
   // 不要再加 skillBodyMax / skillFullCount 这类「给前 N 个技能全文」的旋钮 ——
   // 全文常驻注入正是渐进披露要消灭的形态，所以它从未实现，也就不该留配置（留着等于撒谎）。
   skillTotalCount: 5,
+
+  // —— 召回命中阈值（技能召回 / 工具召回）——
+  // 两条链以前各在调用方写一份常数（skills 0.28/0.35，tools 0.18/0），互相不知道对方多少，
+  // 调一个漏一个。值是**召回质量**参数（不是用户可调护栏），所以只在这里声明、
+  // 不进 AGENT_LIMITS_SCHEMA（设置页不展开）。
+  // 为什么技能更严格：技能注入的是「你可以做什么」的强提示，误召回会把模型带偏；
+  // 工具召回宽松些（关键词阈值 0 = 关键词命中即算），选错工具最多多一次调用。
+  skillRecallSemanticMin: 0.28,
+  skillRecallKeywordMin: 0.35,
+  toolRecallSemanticMin: 0.18,
+  toolRecallKeywordMin: 0,
 
   // —— 请求快照（审计）参数 ——
   // 定位：让人事后能回答「这一轮模型到底看到了什么、为什么历史变短了」。

@@ -68,6 +68,10 @@ assert(
   'short but valid synthesized reply is usable'
 );
 assert(
+  synthesizedReplyIsUsable('已完成。') === true,
+  'very short but complete synthesized reply is usable (no length gate)'
+);
+assert(
   needsAssistantReplySynthesis('已改 login 表单：补了 CDP 输入，截图失败不再整轮失败。', toolTrace) === false,
   'non-empty reply does not trip synthesis'
 );

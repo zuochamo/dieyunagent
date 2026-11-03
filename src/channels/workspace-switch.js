@@ -116,7 +116,10 @@ function createChannelWorkspaceSwitcher(deps) {
     }
 
     const defaultPath = channel.workspacePath ? String(channel.workspacePath) : '';
-    if (wanted.toLowerCase() === DEFAULT_SENTINEL || wanted === '默认' || wanted === '默认工作空间') {
+    // 「回默认」只认工具 schema 声明的哨兵值（`tool-catalog.js`：传 "default" 回到默认工作空间）。
+    // 以前这里还认「默认」「默认工作空间」两个中文串 —— 等于让一张词表替模型决定参数含义，
+    // 与桌面侧 `renderer-workspace-ssh.js` 各存一份、各自漂移。参数含义只有 schema 一处。
+    if (wanted.toLowerCase() === DEFAULT_SENTINEL) {
       deps.store.setConversationWorkspace(channelId, conversationKey, '');
       if (!defaultPath) {
         // 频道没设默认目录：解绑，回到 ~/.dieyun/workspace（会话行写 NULL，不写空串）
@@ -142,6 +145,7 @@ function createChannelWorkspaceSwitcher(deps) {
         ok: false,
         message:
           `找不到工作空间「${wanted}」。只能切到本机已经用过的项目（先在桌面打开一次就会出现在这里）；` +
+          `要回到频道默认工作空间，请传 workspace="${DEFAULT_SENTINEL}"。` +
           `现有候选：${candidateText(candidates)}`,
         candidates
       };

@@ -27,6 +27,24 @@ describe('task-tier', () => {
     expect(unscoped.taskTier).toBe('normal');
   });
 
+  it('tier does not depend on message length', () => {
+    const longRequest = '把这块状态机的重试与退避全部梳理一遍，'.repeat(40);
+    const scopedLong = inferTaskTierFromStructure({
+      userText: longRequest,
+      pathHints: ['src/agent/task-tier.js'],
+      codebaseMention: false
+    });
+    // 长需求 + 一个具体文件：仍然是「已限定范围」，字数不参与判定
+    expect(scopedLong.taskTier).toBe('trivial');
+    const emptyText = inferTaskTierFromStructure({
+      userText: '',
+      pathHints: ['src/agent/task-tier.js']
+    });
+    expect(emptyText.taskTier).toBe('trivial');
+    // 没有路径提示时，再短也是 normal
+    expect(inferTaskTierFromStructure({ userText: '改一下', pathHints: [] }).taskTier).toBe('normal');
+  });
+
   it('skips auto codebase only when trivial and ready/files', () => {
     const scoped = inferTaskTierFromStructure({
       userText: 'x',

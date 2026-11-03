@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const { getAgentLimits } = require('../agent/agent-limits');
 const { createEmbeddingClient } = require('../codebase/embedding-client');
 const {
   hashText,
@@ -18,9 +19,8 @@ const INDEX_FILE = 'tool-vector-index.json';
 const TOOL_EMBED_TEXT_MAX = 2000;
 const QUERY_EMBED_TEXT_MAX = 1200;
 const DEFAULT_LIMIT = 10;
-/** 本召回特有的命中阈值，与 skills 不同，故留在调用方。 */
-const SEMANTIC_MIN = 0.18;
-const KEYWORD_MIN = 0;
+// 命中阈值只有一处来源：`agent-limits.js` 的 `toolRecallSemanticMin` / `toolRecallKeywordMin`
+// （调用时读取，所以改配置立即生效）。这里不再存一份自己的常数。
 
 function toolIndexPath(userData) {
   return path.join(userData, INDEX_FILE);
@@ -258,6 +258,7 @@ async function recallAgentTools(input) {
     candidates
   });
   const entries = (index.entries || []).filter((entry) => idSet.has(entry.id));
+  const limits = getAgentLimits();
   const keywordRows = rankByKeyword(entries, q, idSet, Math.max(max, 12));
   let rows = [];
   const queryTokens = q ? tokenize(q) : null;
@@ -282,8 +283,8 @@ async function recallAgentTools(input) {
         keywordRows,
         queryVec,
         max,
-        minSemantic: SEMANTIC_MIN,
-        minKeyword: KEYWORD_MIN,
+        minSemantic: limits.toolRecallSemanticMin,
+        minKeyword: limits.toolRecallKeywordMin,
         allowedSet: idSet
       });
       if (!rows.length) rows = keywordRows.slice(0, max);

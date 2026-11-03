@@ -33,7 +33,28 @@ describe('collectEvidence：只吃结构字段', () => {
       ])
     );
     expect(ev.failedValidations).toHaveLength(1);
-    expect(ev.failedValidations[0]).toEqual({ name: 'host_exec', exitCode: 1 });
+    expect(ev.failedValidations[0]).toEqual({ label: 'npm test', exitCode: 1 });
+  });
+
+  test('host_exec 的 verify 声明由模型给：自有脚本也算验证，显式 false 也不算', () => {
+    const ev = readiness.collectEvidence(
+      traceOf([
+        // 自有脚本名猜不出来（旧正则不认），靠模型声明 verify=true
+        {
+          name: 'host_exec',
+          toolArgs: { command: 'make verify', verify: true },
+          result: { code: 2 }
+        },
+        // 模型明确说这不是验证：即使命令名像测试也不计入
+        {
+          name: 'host_exec',
+          toolArgs: { command: 'npm test -- --listTests', verify: false },
+          result: { code: 1 }
+        }
+      ])
+    );
+    expect(ev.failedValidations).toHaveLength(1);
+    expect(ev.failedValidations[0]).toEqual({ label: 'make verify', exitCode: 2 });
   });
 
   test('result.code = 0 的验证命令计入通过，不是失败', () => {

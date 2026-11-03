@@ -1990,42 +1990,79 @@ fn map_long_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     }))
 }
 
+/// `kind` 的判据只有两处，且**先模型、后凭据形状**：
+///
+/// 1. 写入方给的 `kind`（归纳器 schema、`memory_long_add` 入参）是权威 —— 模型看得懂
+///    「这条是隐私还是工程事实」，代码看不懂；
+/// 2. 唯一的代码否决权是凭据形状（`password=` / `sk-…` / `AKIA…` / PEM 头 / URL 里带口令）：
+///    命中就把 `normal` 升级成 `secret`。这是 fail-safe —— 模型漏标一次，密钥就会在下一轮
+///    被自动注入；反向（把一条正常记忆多标一次 secret）只是少注入一条，代价不对称。
+///
+/// 这里**不再**按话题词猜 `private`（旧的 `邮箱/手机号/身份证/数据库/host/内网` 会把
+/// 「连库走 5432」「内网是 10.0.0.0/8」这类工程事实判成 private，而 private 的下游是
+/// 「永不自动注入 + 永不写 .dieyun/memory.md」—— 知识静默消失，用户还看不到原因）。
+/// 敏感与否由模型的 `kind` 决定。
 fn detect_memory_kind(content: &str, requested: Option<&str>) -> String {
-    if let Some(raw) = requested.map(str::trim).filter(|s| !s.is_empty()) {
-        let lower = raw.to_lowercase();
-        if ["normal", "private", "secret"].contains(&lower.as_str()) {
-            return lower;
-        }
-    }
-    if looks_secret(content) {
+    let requested_kind = requested
+        .map(str::trim)
+        .map(str::to_lowercase)
+        .filter(|s| ["normal", "private", "secret"].contains(&s.as_str()));
+    if looks_like_credential(content) {
         return "secret".into();
     }
-    if looks_private(content) {
-        return "private".into();
+    requested_kind.unwrap_or_else(|| "normal".into())
+}
+
+/// 凭据**形状**（不是话题词表）：赋值形态 + 已知密钥前缀 + PEM 头 + URL 内联口令。
+/// 判的是「这串字符本身长什么样」，与内容在讲哪件事无关，因此不误伤工程记忆。
+fn looks_like_credential(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if lower.contains("-----begin") && lower.contains("private key") {
+        return true;
     }
-    "normal".into()
+    if lower.contains("sk-") && lower.len() > 15 {
+        return true;
+    }
+    if lower.contains("akia") || lower.contains("ghp_") || lower.contains("xoxb-") {
+        return true;
+    }
+    if has_inline_url_userinfo(&lower) {
+        return true;
+    }
+    // 赋值形态：`password=…` / `api_key: …` / `密码：…`（只认「键 + 分隔符」，不认裸词）。
+    const CREDENTIAL_KEYS: [&str; 8] = [
+        "password", "passwd", "api_key", "apikey", "secret_key", "token", "密码", "密钥",
+    ];
+    CREDENTIAL_KEYS.iter().any(|key| {
+        lower
+            .find(key)
+            .map(|idx| {
+                lower[idx + key.len()..]
+                    .trim_start_matches([' ', '\t', '"', '\''])
+                    .chars()
+                    .next()
+                    .map(|c| c == '=' || c == ':' || c == '：')
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    })
 }
 
-fn looks_secret(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("api_key")
-        || lower.contains("apikey")
-        || lower.contains("password")
-        || lower.contains("secret")
-        || lower.contains("密码")
-        || lower.contains("密钥")
-        || (lower.contains("sk-") && lower.len() > 15)
-}
-
-fn looks_private(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("手机号")
-        || lower.contains("身份证")
-        || lower.contains("邮箱")
-        || lower.contains("database")
-        || lower.contains("数据库")
-        || lower.contains("host")
-        || lower.contains("内网")
+/// `scheme://user:pass@host` 形态：连接串里带口令，肉眼就是密钥。
+/// 只认 authority 段内的 `@`，不会因为正文里同时出现网址和邮箱就误判。
+fn has_inline_url_userinfo(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority = &rest[scheme_end + 3..];
+        let authority_end = authority
+            .find(|c: char| c == '/' || c.is_whitespace())
+            .unwrap_or(authority.len());
+        if authority[..authority_end].contains('@') && authority[..authority_end].contains(':') {
+            return true;
+        }
+        rest = &authority[authority_end..];
+    }
+    false
 }
 
 fn normalize_memory_status(status: &str) -> String {
@@ -2176,16 +2213,28 @@ pub(crate) fn strip_message_meta(content: &str) -> &str {
     s
 }
 
+/// 计划 / 定时触发那一轮的正文抬头是**本仓自己拼的**（`src/plans/plan-run-turn.js`）：
+/// 第一行 `[计划 · 名字]`、第二行 `<时间> · 定时触发|目标续跑`。
+/// 同一事实还有结构载体：meta 里的 `trigger{kind,planName,at}`。所以标题**先读 meta**——
+/// 有 trigger 就直接用 planName，不再从正文里猜「哪一行像抬头」（旧写法
+/// `contains('·') && contains("定时触发")` 会把用户正文里恰好提到这两个词的句子当抬头跳过）。
 pub(crate) fn title_from_user_content(content: &str) -> Option<String> {
     let text = strip_message_meta(content);
     if text.is_empty() {
         return None;
     }
+    if let Some(name) = message_meta_trigger_plan_name(content) {
+        // 计划轮：标题就是计划名（比「第一句正文」更有信息量），正文抬头整段跳过
+        if let Some(t) = first_line_title(&name) {
+            return Some(t);
+        }
+    }
+    // 无 meta 的历史行：只跳**本仓自己的抬头格式**（精确首尾），不做词面猜测
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if line.starts_with("[计划 ·") && line.ends_with(']') {
+        if line.starts_with("[计划 · ") && line.ends_with(']') {
             continue;
         }
-        if line.contains('·') && line.contains("定时触发") {
+        if line.ends_with(" · 定时触发") || line.ends_with(" · 目标续跑") {
             continue;
         }
         if let Some(t) = first_line_title(line) {
@@ -2193,6 +2242,26 @@ pub(crate) fn title_from_user_content(content: &str) -> Option<String> {
         }
     }
     first_line_title(text)
+}
+
+/// 从 `【叠云meta】{json}` 里取 `trigger.planName`（只有计划/定时触发轮才有 trigger）。
+/// 取不到就返回 None —— 不猜、不回落成正文解析。
+fn message_meta_trigger_plan_name(content: &str) -> Option<String> {
+    let rest = content.trim().strip_prefix(MESSAGE_META_PREFIX)?;
+    let json_line = rest.lines().next().unwrap_or("").trim();
+    if json_line.is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(json_line).ok()?;
+    let trigger = value.get("trigger")?;
+    if trigger.is_null() {
+        return None;
+    }
+    let name = trigger.get("planName").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 pub(crate) fn first_line_title(content: &str) -> Option<String> {
@@ -2294,6 +2363,56 @@ mod tests {
             Some("写一个俄罗斯方块")
         );
         assert!(title_needs_repair(Some("【叠云meta】{\"inputText\":\"x\"")));
+    }
+
+    /// `kind` 只由「模型给的 kind」与「凭据形状」决定，不再按话题词猜 private。
+    /// 旧词表会把工程事实判成 private，而 private 的下游是「永不注入 + 永不写记忆文件」。
+    #[test]
+    fn memory_kind_trusts_model_then_credential_shape() {
+        // 工程事实 → normal（旧词表里 `数据库`/`内网`/`host`/`邮箱` 会把它们判成 private）
+        assert_eq!(
+            detect_memory_kind("连库走 5432，内网是 10.0.0.0/8", None),
+            "normal"
+        );
+        assert_eq!(detect_memory_kind("报警发到 ops@example.com", None), "normal");
+        assert_eq!(detect_memory_kind("host 名是 build-01", None), "normal");
+
+        // 凭据形状：即使模型标了 normal 也升级为 secret（代价不对称，宁可少注入一条）
+        assert_eq!(detect_memory_kind("password=hunter2", None), "secret");
+        assert_eq!(detect_memory_kind("密码：hunter2", Some("normal")), "secret");
+        assert_eq!(
+            detect_memory_kind("DATABASE_URL=postgres://u:p@db.internal:5432/app", None),
+            "secret"
+        );
+        assert_eq!(detect_memory_kind("key 是 sk-abcdefghijklmnop", None), "secret");
+
+        // 隐私与否由模型判断：合法 kind 原样采纳，非法值退回 normal
+        assert_eq!(
+            detect_memory_kind("用户手机号我不要存", Some("private")),
+            "private"
+        );
+        assert_eq!(detect_memory_kind("提交前跑 npm test", Some("PROJECT")), "normal");
+    }
+
+    /// 计划轮标题读 meta 的 `trigger.planName`，不再靠正文里的中文抬头猜。
+    #[test]
+    fn plan_turn_title_comes_from_meta_trigger() {
+        let packed = "【叠云meta】{\"trigger\":{\"kind\":\"schedule\",\"planId\":\"p1\",\"planName\":\"每日构建巡检\",\"at\":\"2026-11-03T02:00:00.000Z\"}}\n[计划 · 每日构建巡检]\n2026/11/3 10:00:00 · 定时触发\n\n检查夜间构建";
+        assert_eq!(
+            title_from_user_content(packed).as_deref(),
+            Some("每日构建巡检")
+        );
+
+        // 没有 meta 的历史行：抬头按本仓自己的格式精确跳过，落到正文第一句
+        let legacy = "[计划 · 每日构建巡检]\n2026/11/3 10:00:00 · 定时触发\n\n检查夜间构建";
+        assert_eq!(title_from_user_content(legacy).as_deref(), Some("检查夜间构建"));
+
+        // 用户正文里恰好出现「·」和「定时触发」不该被当成抬头跳过（旧写法会）
+        let user_text = "每天 9:00 · 定时触发 这条计划为什么没跑";
+        assert_eq!(
+            title_from_user_content(user_text).as_deref(),
+            Some("每天 9:00 · 定时触发 这条计划为什么没跑")
+        );
     }
 
     /// 落库 meta 只该存引用：base64 / data URL 进不了库（append_message 是唯一写库口）。

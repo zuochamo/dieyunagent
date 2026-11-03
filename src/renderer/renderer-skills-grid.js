@@ -10,187 +10,34 @@ var DEFAULT_ENABLED_SKILL_IDS = ['builtin:weather'];
 var DEFAULT_ENABLED_SKILL_PREFIXES = ['builtin:minimax:', 'builtin:curated:'];
 var SKILLS_TAB_TITLES = { list: '技能', mcp: 'MCP', automation: '定时' };
 
-/** 技能列表功能分类（「全部」单独一项；内置/预装技能按规则打散到下列分类） */
-var SKILLS_TAXONOMY = [
-  {
-    id: 'dev',
-    label: '开发工具',
-    keywords: [
-      'frontend',
-      'fullstack',
-      'full-stack',
-      'android',
-      'mobile',
-      'graphics',
-      'shader',
-      'react',
-      'flutter',
-      'ios',
-      '开发',
-      '程序',
-      'code',
-      'debug',
-      'git',
-      'tmux',
-      'test-runner',
-      'security-auditor',
-      'architecture',
-      'supabase',
-      'postgres',
-      'opencode',
-      'session-logs',
-      '1password',
-      'api',
-      'web'
-    ]
-  },
-  {
-    id: 'office',
-    label: '办公协同',
-    keywords: [
-      'document',
-      'docx',
-      'pdf',
-      'xlsx',
-      'pptx',
-      'productivity',
-      '办公',
-      '文档',
-      '表格',
-      '幻灯片',
-      'feishu',
-      '飞书',
-      '协同',
-      'excel',
-      '封皮',
-      '打印',
-      '提取',
-      'drive',
-      'cron-reminder',
-      'screenshot',
-      'send-file',
-      'perm'
-    ]
-  },
-  {
-    id: 'life',
-    label: '生活服务',
-    keywords: ['weather', '生活', '天气', '出行', '健康', '便民', 'weather-china']
-  },
-  {
-    id: 'content',
-    label: '内容创作',
-    keywords: [
-      'creative',
-      'music',
-      'gif',
-      '写作',
-      'seo',
-      'blog',
-      'social',
-      '内容',
-      '文案',
-      '视频',
-      '设计',
-      'media',
-      'humanizer',
-      'copywriting',
-      'frontend-design',
-      'ui-ux',
-      'ffmpeg',
-      'vision',
-      'generate-image',
-      'search-image',
-      'content-strategy'
-    ]
-  },
-  {
-    id: 'efficiency',
-    label: '效率工具',
-    keywords: [
-      'toolkit',
-      'automation',
-      'multimodal',
-      '效率',
-      '自动化',
-      '助手',
-      'agent',
-      'vetter',
-      'search-engine',
-      'baidu-search',
-      'find-skills',
-      'skill-creator',
-      'memory',
-      'news-aggregator',
-      'self-improving',
-      'executing-plans',
-      'writing-plans',
-      'clawdefender',
-      'websearch',
-      'deepresearch',
-      'open-link',
-      'browser-agent',
-      'controller'
-    ]
-  },
-  {
-    id: 'business',
-    label: '商业运营',
-    keywords: [
-      'market',
-      '商业',
-      '运营',
-      '营销',
-      '销售',
-      '投资',
-      '理财',
-      '增长',
-      'stock',
-      'backtest',
-      'interview-designer',
-      'content-strategy'
-    ]
-  },
-  {
-    id: 'edu',
-    label: '教育学习',
-    keywords: [
-      '教育',
-      '学习',
-      'research',
-      'academic',
-      '论文',
-      '课程',
-      '培训',
-      '考试',
-      'aminer',
-      'ontology',
-      'brainstorming',
-      'first-principles',
-      'paper-writer'
-    ]
-  },
-  {
-    id: 'user',
-    label: '用户添加',
-    keywords: ['用户添加', 'builtin:user:', 'user:']
-  }
-];
+/**
+ * 技能功能分类（页签）的**唯一来源是 Main**：`src/skills/taxonomy.js` 随扫描结果下发
+ * （`skillsCatalog.domains` + 每个技能的 `domain`）。分类是数据 —— frontmatter 的 `domain:`
+ * 或预装精确 id 表 —— Renderer 只负责渲染，不再用 150 个关键词 + 9 条正则去猜。
+ */
+var SKILLS_DOMAIN_DEFAULT = 'efficiency';
 
-var SKILLS_TAXONOMY_DEFAULT = 'efficiency';
-var SKILLS_TAXONOMY_REMOVED = new Set(['minimax', 'curated', 'dieyun']);
+function skillsDomains() {
+  var list = skillsCatalog && Array.isArray(skillsCatalog.domains) ? skillsCatalog.domains : [];
+  return list.filter(function (d) {
+    return d && d.id;
+  });
+}
 
-/** MCP 列表分组（与技能页相同的 Tab 风格） */
+
+/** MCP 列表分组（与技能页相同的 Tab 风格）；两个 id 必须与 `resolveMcpCategory` 的返回值一致 */
 var MCP_TAXONOMY = [
-  { id: 'dev', label: '开发工具' },
   { id: 'efficiency', label: '效率工具' },
   { id: 'user', label: '用户添加' }
 ];
 
+// 「定时」页的分类页签：**唯一来源**（renderer-automation.js 的 resolveAutomationCategory
+// 产出的每个 id 都必须在这里有一项，否则那种计划在界面上根本点不到）。
 var AUTOMATION_TAXONOMY = [
   { id: 'periodic', label: '周期' },
   { id: 'interval', label: '按间隔' },
   { id: 'once', label: '单次' },
+  { id: 'idle', label: '空闲时' },
   { id: 'goal', label: '目标' },
   { id: 'disabled', label: '已停用' }
 ];
@@ -267,101 +114,43 @@ function bindGridPagination(prefix, getPageIndex, setPageIndex, onRefresh) {
   }
 }
 
-function findTaxonomyById(catId) {
+function findDomainById(catId) {
+  const list = skillsDomains();
   return (
-    SKILLS_TAXONOMY.find((c) => c.id === catId) ||
-    SKILLS_TAXONOMY.find((c) => c.id === SKILLS_TAXONOMY_DEFAULT)
+    list.find((c) => c.id === catId) ||
+    list.find((c) => c.id === SKILLS_DOMAIN_DEFAULT) ||
+    { id: SKILLS_DOMAIN_DEFAULT, label: '效率工具' }
   );
 }
 
 function skillSearchHaystack(skill) {
-  const cat = String(skill.category || '');
-  const skipMetaCategory = cat.includes('用户预装') || cat.includes('预装精选');
-  return [skill.id, skill.name, skill.description, skill.preview, skipMetaCategory ? '' : cat]
+  return [skill.id, skill.name, skill.description, skill.preview, skill.category]
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
 }
 
-/** 按技能 id/名称优先匹配（避免「用户预装」等元数据干扰关键词） */
-function matchSkillTaxonomyByRules(skill) {
-  const id = String(skill.id || '').toLowerCase();
-  const name = String(skill.name || '').toLowerCase();
-  const blob = `${id} ${name}`;
-
-  if (id === 'builtin:weather' || /weather/.test(blob)) return 'life';
-  if (id.includes('builtin:user:') || String(skill.category || '').includes('用户添加')) return 'user';
-
-  if (/minimax:(minimax-docx|minimax-pdf|minimax-xlsx|pptx-generator)/.test(id)) return 'office';
-  if (/minimax:(frontend-dev|fullstack-dev|android-native-dev)/.test(id)) return 'dev';
-  if (/minimax:(minimax-music-gen|vision-analysis)/.test(id)) return 'content';
-  if (/minimax:minimax-multimodal-toolkit/.test(id)) return 'efficiency';
-
-  if (/curated:(weather-china|baidu-search)/.test(id)) return id.includes('weather') ? 'life' : 'efficiency';
-  if (/curated:(skill-vetter|multi-search-engine|skill-creator)/.test(id)) return 'efficiency';
-
-  if (/feishu|excel|xlsx|docx|pdf|pptx|封皮|打印|提取|drive|cron-reminder|screenshot|send-file|perm/.test(blob)) {
-    return 'office';
-  }
-  if (
-    /git|debug|test-runner|tmux|code-|security-auditor|architecture|supabase|postgres|opencode|session-logs|1password/.test(
-      blob
-    )
-  ) {
-    return 'dev';
-  }
-  if (
-    /blog|seo|copywriting|social|video|ffmpeg|frontend-design|humanizer|autoglm|generate-image|search-image|ui-ux/.test(
-      blob
-    )
-  ) {
-    return 'content';
-  }
-  if (/stock|market|backtest|interview/.test(blob)) return 'business';
-  if (/aminer|research-paper|ontology|brainstorming|first-principles|paper-writer|deepresearch/.test(blob)) {
-    return 'edu';
-  }
-  if (
-    /vetter|search-engine|find-skills|skill-creator|memory|automation|news|self-improving|executing-plans|writing-plans|clawdefender|agent-self|websearch|open-link|browser-agent|controller/.test(
-      blob
-    )
-  ) {
-    return 'efficiency';
-  }
-
-  return null;
+/** 技能的页签 id：分类由 Main 的 `skills/taxonomy.js` 决定，这里只读不算。 */
+function skillDomainId(skill) {
+  const d = String((skill && skill.domain) || '');
+  return skillsDomains().some((c) => c.id === d) ? d : SKILLS_DOMAIN_DEFAULT;
 }
 
-function resolveSkillTaxonomy(skill) {
-  const ruled = matchSkillTaxonomyByRules(skill);
-  if (ruled) return findTaxonomyById(ruled);
-
-  const hay = skillSearchHaystack(skill);
-  for (const cat of SKILLS_TAXONOMY) {
-    if (cat.keywords.some((kw) => hay.includes(String(kw).toLowerCase()))) {
-      return cat;
-    }
-  }
-  return findTaxonomyById(SKILLS_TAXONOMY_DEFAULT);
+function skillDomainLabel(skill) {
+  return findDomainById(skillDomainId(skill)).label;
 }
+
 
 function normalizeSkillsCategoryFilter() {
-  if (skillsCategoryFilter !== 'all' && SKILLS_TAXONOMY_REMOVED.has(skillsCategoryFilter)) {
-    skillsCategoryFilter = 'all';
-  }
   if (
     skillsCategoryFilter !== 'all' &&
-    !SKILLS_TAXONOMY.some((c) => c.id === skillsCategoryFilter)
+    !skillsDomains().some((c) => c.id === skillsCategoryFilter)
   ) {
     skillsCategoryFilter = 'all';
   }
 }
 
-function getSkillTaxonomyLabel(skill) {
-  return resolveSkillTaxonomy(skill).label;
-}
-
-var skillsCatalog = { skills: [], roots: [] };
+var skillsCatalog = { skills: [], roots: [], domains: [] };
 var skillsCategoryFilter = 'all';
 var skillsSearchQuery = '';
 var skillsPageIndex = 0;
@@ -371,10 +160,13 @@ var mcpCategoryFilter = 'all';
 var mcpSearchQuery = '';
 var mcpPageIndex = 0;
 
+/**
+ * MCP 分组只看**结构**：预装（registry 里登记的）→ 效率工具，用户自己加的 → 用户添加。
+ * 以前这里还有一条 `/playwright|github|context7/` 的名称词表把这三个塞进「开发工具」，
+ * 但那三个 npx 模板 2026-11 已从 `src/mcp/registry.js` 移除，词表永远匹配不到任何东西。
+ */
 function resolveMcpCategory(server) {
   if (!server || server.builtin === false) return 'user';
-  const blob = `${server.id || ''} ${server.name || ''} ${server.description || ''}`.toLowerCase();
-  if (/playwright|github|context7/.test(blob)) return 'dev';
   return 'efficiency';
 }
 
@@ -562,7 +354,7 @@ function getSortedVisibleSkills() {
   const q = skillsSearchQuery.trim().toLowerCase();
   let skills = (skillsCatalog.skills || []).filter((sk) => !isSkillHidden(hidden, sk));
   if (skillsCategoryFilter !== 'all') {
-    skills = skills.filter((sk) => resolveSkillTaxonomy(sk).id === skillsCategoryFilter);
+    skills = skills.filter((sk) => skillDomainId(sk) === skillsCategoryFilter);
   }
   if (q) {
     skills = skills.filter((sk) => {
@@ -595,7 +387,7 @@ function countSkillsInTaxonomy(taxonomyId) {
   return (skillsCatalog.skills || []).filter((sk) => {
     if (isSkillHidden(hidden, sk)) return false;
     if (taxonomyId === 'all') return true;
-    return resolveSkillTaxonomy(sk).id === taxonomyId;
+    return skillDomainId(sk) === taxonomyId;
   }).length;
 }
 
@@ -622,7 +414,7 @@ function renderSkillsCategoryTabs() {
   };
 
   mkTab('all', '全部');
-  for (const cat of SKILLS_TAXONOMY) {
+  for (const cat of skillsDomains()) {
     mkTab(cat.id, cat.label);
   }
 }

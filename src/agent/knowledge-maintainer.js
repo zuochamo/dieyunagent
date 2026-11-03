@@ -36,6 +36,10 @@ const { chatCompletionJson } = require('../llm-proxy');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
 const { getAgentLimits } = require('./agent-limits');
 const shared = require('./guardrails-shared');
+// 「这次工具调用算不算失败」的单一来源（传输层 error / result.ok === false / host_exec 非 0 退出码）。
+// 这里以前自带一份 `/失败|error/i.test(tool.summary)`：那是从**给人看的摘要文案**里猜成败，
+// 工具输出里本来就常出现 error/失败 字样（比如 grep 命中一行 `error`），会把成功调用记成失败。
+const { toolFailed } = require('./completion-readiness');
 // AGENTS.md 的体积上限只有一个来源：`agents-md.js` 的 `MAX_FILE_CHARS`（剪裁/校验都用它）。
 const { MAX_FILE_CHARS: AGENTS_MD_FILE_MAX_CHARS } = require('../agents-md');
 const { executeAgentsMdProposeMain } = require('./propose-tools-main');
@@ -283,11 +287,10 @@ function collectKnowledgeSignals(input, limits = {}) {
       const toolName = String((norm && norm.name) || tool.name || '')
         .trim()
         .toLowerCase();
-      const failed = !!tool.failed || /失败|error/i.test(String(tool.summary || ''));
+      const failed = toolFailed(tool, toolName);
       if (toolName === 'host_exec') {
-        const s = String(tool.summary || '');
-        if (/失败|error|exit\s*[1-9]/i.test(s)) continue;
-        execLines.push(`- ${tool.argsBrief || 'host_exec'} → ${compactPlain(s, 140)}`);
+        // 只收成功的命令当「这一轮跑过什么」的证据；失败与否看结构化退出码，不看输出里写没写 error
+        if (!failed) execLines.push(`- ${tool.argsBrief || 'host_exec'} → ${compactPlain(String(tool.summary || ''), 140)}`);
       }
       // 「哪些工具算写文件」只看 guardrails-shared 的单一来源，这里不写第二份工具名正则
       if (shared.FILE_WRITE_TOOL_NAMES.has(toolName) && !failed) {
@@ -342,20 +345,26 @@ function shouldRunKnowledgeMaintenance({ signals, limits = {} }) {
 }
 
 /**
- * 记忆 scope 只允许两个值：`project` / `global`。
+ * 记忆 scope 只允许两个值：`project` / `global` —— 这里的枚举就是**唯一来源**
+ * （`UNIFIED_KNOWLEDGE_SCHEMA` 里已经写死同样的两值，提示词另有 `PROJECT_MEMORY_FILE_RULE`
+ * 说明怎么选，所以「选哪个」是模型的判断，不是代码的判断）。
  *
- * 模型给的中文与别名一律归一：自由文本 scope（`本项目`、`workspace`、`长期`…）写进库里
- * 就是永远召不回的孤儿 scope —— 项目记忆按 `memory.project_scope` 匹配，用户级按
- * `scope='global'` 读，两者都不认第三种写法。归一在这里做一次，写入侧不再猜。
+ * 本函数只做**结构校验**：不在枚举里的一律落 `global`，不再用中英文词表去猜
+ * （曾经的 `/project|workspace|repo|项目|工程|仓库/` 会把模型的自由文本 scope 强行改写成
+ * project —— 那是拿词表推翻模型已经做出的判断，且把它推进「写仓库文件」这条泄露边界：
+ * kind=secret 的项目条目会被 `filterEntriesForFile` 丢弃，等于静默丢记忆）。
+ * 落 global 不会丢：条目仍进 SQLite，只是不再进 `.dieyun/memory.md`。
  */
+const MEMORY_SCOPES = Object.freeze(['global', 'project']);
+/** 记忆 kind 的枚举（同样只是校验，判断归模型；Rust 侧 `detect_memory_kind` 只做兜底）。 */
+const MEMORY_KINDS = Object.freeze(['normal', 'private', 'secret']);
+
 function normalizeMemoryScope(raw) {
   const v = String(raw || '')
     .trim()
     .toLowerCase()
-    .slice(0, 80);
-  if (!v) return 'global';
-  if (/project|workspace|repo|项目|工程|仓库/.test(v)) return 'project';
-  return 'global';
+    .slice(0, 40);
+  return MEMORY_SCOPES.includes(v) ? v : 'global';
 }
 
 function parseKnowledgeJson(text) {
@@ -376,7 +385,7 @@ function parseKnowledgeJson(text) {
   const memories = rawMemories
     .map((item) => ({
       content: compactPlain(item.content || item.memory || item.text || '', 420),
-      kind: ['normal', 'private', 'secret'].includes(String(item.kind || '').toLowerCase())
+      kind: MEMORY_KINDS.includes(String(item.kind || '').toLowerCase())
         ? String(item.kind).toLowerCase()
         : undefined,
       importance: Math.min(5, Math.max(1, Number(item.importance) || 3)),

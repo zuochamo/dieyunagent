@@ -3,6 +3,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { scanSkills, readSkillContent } = require('./scanner');
+const { getAgentLimits } = require('../agent/agent-limits');
 const { createEmbeddingClient } = require('../codebase/embedding-client');
 const {
   hashText,
@@ -19,9 +20,8 @@ const INDEX_FILE = 'skill-vector-index.json';
 const SKILL_EMBED_TEXT_MAX = 6000;
 const QUERY_EMBED_TEXT_MAX = 1200;
 const DEFAULT_LIMIT = 8;
-/** 本召回特有的命中阈值，比 tool 更严格以避免技能误召回。 */
-const SEMANTIC_MIN = 0.28;
-const KEYWORD_MIN = 0.35;
+// 命中阈值只有一处来源：`agent-limits.js` 的 `skillRecallSemanticMin` / `skillRecallKeywordMin`
+// （调用时读取，所以改配置立即生效）。这里不再存一份自己的常数。
 
 function compactText(text, max = 600) {
   const s = String(text || '').replace(/\s+/g, ' ').trim();
@@ -169,6 +169,7 @@ async function recallSkills({
   const q = String(query || '').trim();
   const max = Math.min(12, Math.max(1, Number(limit) || DEFAULT_LIMIT));
   if (!q) return { mode: 'empty', skills: [] };
+  const limits = getAgentLimits();
   const enabledSet = Array.isArray(enabledIds) && enabledIds.length ? new Set(enabledIds.map(String)) : null;
   const { index, vector } = await ensureSkillIndex({ userData, workspacePath, embeddingConfig });
   const entries = index.entries || [];
@@ -184,8 +185,8 @@ async function recallSkills({
         keywordRows,
         queryVec,
         max,
-        minSemantic: SEMANTIC_MIN,
-        minKeyword: KEYWORD_MIN,
+        minSemantic: limits.skillRecallSemanticMin,
+        minKeyword: limits.skillRecallKeywordMin,
         allowedSet: enabledSet
       });
     } catch {

@@ -1,4 +1,4 @@
-/* global chatForm, chatInput, composerSendBtn, isCurrentSessionSending, sendMessage, stopAgentRun, refreshContextProgress, updateComposerMentionMenu, appendBubble, finishSessionActiveRun, syncComposerForActiveSession, currentSessionId, renderAttachmentChips, trySubmitComposerWhileBusy, initComposerQueueUI, isUserAbortError, isEditingComposerQueueItem, commitEditComposerQueueItem, isSessionSwitchInFlight, showAgentToast, clearSessionComposerDraft */
+/* global chatForm, chatInput, composerSendBtn, isCurrentSessionSending, sendMessage, stopAgentRun, refreshContextProgress, updateComposerMentionMenu, appendBubble, finishSessionActiveRun, syncComposerForActiveSession, currentSessionId, renderAttachmentChips, trySubmitComposerWhileBusy, initComposerQueueUI, isUserAbortError, isEditingComposerQueueItem, commitEditComposerQueueItem, isSessionSwitchInFlight, showAgentToast, clearSessionComposerDraft, requestResumeInterruptedTurn */
 'use strict';
 
 function isComposerUserAbortError(err) {
@@ -58,7 +58,12 @@ function initComposerFormUI() {
 
       const text = chatInput.value.trim();
       const pendingAttachments = getPendingAttachments();
-      if (!text && !pendingAttachments.length) return;
+      if (!text && !pendingAttachments.length) {
+        // 空提交 = 「继续上次被打断的任务」。续跑只看状态（continue 状态 / planner 断点），
+        // 不看用户打了什么字 —— 「继续/continue/resume」三个精确词表已删除。
+        if (typeof requestResumeInterruptedTurn === 'function' && requestResumeInterruptedTurn()) return;
+        return;
+      }
 
       if (isCurrentSessionSending()) {
         const attachments = clearComposerPendingAndRefresh(pendingAttachments.slice());

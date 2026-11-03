@@ -159,6 +159,20 @@ describe('channels/workspace-switch', () => {
     expect(store.getConversation(channel.id, 'single:u1').workspacePath).toBe('');
   });
 
+  it('「默认」不是哨兵：只认 schema 声明的 default，其它值按候选匹配并在失败时提示', async () => {
+    seedConversation('F:\\dieyuntools');
+    const res = await switcher.switchWorkspace({
+      channel,
+      conversationKey: 'single:u1',
+      sessionId: 'sess-1',
+      workspace: '默认工作空间'
+    });
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain('workspace="default"');
+    expect(boundPaths()).toEqual([]);
+    expect(store.getConversation(channel.id, 'single:u1').workspacePath).toBe('F:\\dieyuntools');
+  });
+
   it('频道没设默认目录时，切回默认=解绑（会话行写 NULL，不写空串）', async () => {
     const bare = store.createChannel({ name: '无默认', botId: 'bot-9', secret: 'sec-9' });
     store.setConversationSession(bare.id, 'single:u2', 'sess-2');

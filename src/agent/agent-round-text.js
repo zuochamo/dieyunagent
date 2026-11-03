@@ -21,12 +21,17 @@ function needsAssistantReplySynthesis(reply, trace) {
   return false;
 }
 
-/** 汇总轮产出：非空且无 tool_call 标记即可采用，不再套工具轮次长度启发式 */
+/**
+ * 汇总轮产出：非空且无 tool_call 标记即可采用。
+ *
+ * 这里**没有长度门槛**：以前是 `t.length >= 8`，会把「已完成。」「修好了。」这种短但完整的
+ * 汇总判成不可用、再退回占位文案 —— 判据是「有没有正文」，不是「正文够不够长」。
+ */
 function synthesizedReplyIsUsable(text) {
   const t = String(text || '').trim();
   if (!t || t === '(空响应)') return false;
   if (replyHasToolCallMarkup(t)) return false;
-  return t.length >= 8;
+  return true;
 }
 
 const TURN_REASONING_FALLBACK_LABEL = '（以下为模型思考，本轮未成文）';

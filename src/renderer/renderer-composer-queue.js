@@ -1,4 +1,4 @@
-/* global document, $, currentSessionId, isSessionSending, isCurrentSessionSending, sendMessage, cloneAttachmentSnapshot, renderAttachmentChips, chatInput, showAgentToast, getAgentContinueState, resumeAgentToolLoop, messages, messagesOwnerSessionId, ensureChatScrollAfterLayout, shouldAutoFlushComposerQueue, getPendingAttachments, focusChatInput, refreshContextProgress, activateComposerAgentModeForSession, activateComposerModelForSession, isSessionSwitchInFlight, stopAgentRun, holdComposerQueueFlush, releaseComposerQueueFlush */
+/* global document, $, currentSessionId, isSessionSending, isCurrentSessionSending, sendMessage, cloneAttachmentSnapshot, renderAttachmentChips, chatInput, showAgentToast, getAgentContinueState, messages, messagesOwnerSessionId, ensureChatScrollAfterLayout, shouldAutoFlushComposerQueue, getPendingAttachments, focusChatInput, refreshContextProgress, activateComposerAgentModeForSession, activateComposerModelForSession, isSessionSwitchInFlight, stopAgentRun, holdComposerQueueFlush, releaseComposerQueueFlush */
 'use strict';
 
 /**
@@ -870,16 +870,9 @@ async function trySubmitComposerWhileBusy(text, attachments) {
     commitEditComposerQueueItem();
     return true;
   }
-  const trimmed = String(text || '').trim().toLowerCase();
-  if (trimmed === '继续' || trimmed === 'continue' || trimmed === 'resume') {
-    const pendingContinue =
-      typeof getAgentContinueState === 'function' ? getAgentContinueState(currentSessionId) : null;
-    if (pendingContinue && pendingContinue.sessionId === currentSessionId) {
-      if (chatInput) chatInput.value = '';
-      await resumeAgentToolLoop();
-      return true;
-    }
-  }
+  // 续跑不在这里判：一个 run 正在跑的时候本来就续不了（`resumeAgentToolLoop` 会直接返回），
+  // 而「这条消息是不是『继续』」也不该由词表决定 —— 空提交的续跑入口在
+  // `requestResumeInterruptedTurn`（Composer 表单 / 思考区「继续」）。
   if (!String(text || '').trim() && !(attachments || []).length) return true;
   enqueueComposerMessage(text, attachments);
   return true;

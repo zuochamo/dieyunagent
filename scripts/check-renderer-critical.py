@@ -14,7 +14,7 @@ CRITICAL = [
     "chatCompletionWithToolsViaRust",
     "fetchChatCompletion",
     "cloneAttachmentSnapshot",
-    "resolveSkillTaxonomy",
+    "skillDomainId",
     "normalizeSkillsCategoryFilter",
     "loadEnabledSkillIds",
     "isSkillEnabled",

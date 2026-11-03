@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, AgentRoundText, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow */
 'use strict';
 
 /** 工具行的稳定签名（不含思考正文） */
@@ -473,10 +473,14 @@ function thinkingRoundSummaryParts(entry, index, trace) {
 
   if (phase === '汇总') {
     const t = String(entry.thought || entry.fullThought || '').trim();
-    if (/正在生成|生成中/.test(t)) {
+    // 汇总这一步「生成中 / 成功 / 失败」三句文案是**单一来源**（`agent-round-text.js` 的
+    // SYNTHESIS_START / SYNTHESIS_DONE / SYNTHESIS_FAILED，由 agent-synthesis 写进 trace）。
+    // 这里按值相等认状态，不再用 /正在生成|生成中/、/未完成|失败/ 去猜模型写出来的文字。
+    const roundText = typeof AgentRoundText !== 'undefined' && AgentRoundText ? AgentRoundText : {};
+    if (t && t === roundText.SYNTHESIS_START) {
       return { primary: preview || '汇总 · 生成中…', suffix: '', combined: preview || '汇总 · 生成中…' };
     }
-    if (/未完成|失败/.test(t)) {
+    if (t && t === roundText.SYNTHESIS_FAILED) {
       return { primary: preview || '汇总 · 未完成', suffix: '', combined: preview || '汇总 · 未完成' };
     }
     const primary = preview || '汇总 · 已完成';

@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, getModelRuntimeValues, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, getModelRuntimeValues, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview, resumeAgentToolLoop, getPendingResumeCheckpoint, sendMessage */
 'use strict';
 
 var agentApi = window.diecloud || {};
@@ -156,4 +156,41 @@ function setAgentContinueState(state) {
 function cleanupSessionContinueState(sessionId) {
   if (!sessionId) return;
   agentContinueStates.delete(String(sessionId));
+}
+
+/** planner 断点续跑时，写进对话里的那句用户话（**展示用的固定文案**，不是路由判据）。 */
+const RESUME_TURN_LABEL = '继续上次任务';
+
+/**
+ * 「继续上次被打断的任务」的**唯一触发入口**（AGENTS 原则 3：续跑不看用户打了什么字）。
+ *
+ * 三个入口共用：思考区那颗「继续」、Composer 空提交、以及 External 频道/手机端的显式续跑。
+ * 判据全是状态：这个会话有没有 tool-loop continue 状态、有没有 planner 断点
+ * （`tryDetectResumeCheckpoint` 从 Rust 的 checkpoint 表里探到的 running 行）。
+ * 都没有就返回 false —— 调用方当普通输入处理。
+ *
+ * @returns {boolean} 是否已接管（接管 = 已发起续跑，调用方不要再走普通发送）
+ */
+function requestResumeInterruptedTurn(sessionId) {
+  const sid = String(sessionId || (typeof currentSessionId !== 'undefined' ? currentSessionId : '') || '');
+  if (!sid) return false;
+  const continueState = getAgentContinueState(sid);
+  if (continueState && String(continueState.sessionId || '') === sid) {
+    void resumeAgentToolLoop();
+    return true;
+  }
+  if (
+    typeof getPendingResumeCheckpoint === 'function' &&
+    getPendingResumeCheckpoint(sid) &&
+    typeof sendMessage === 'function'
+  ) {
+    // planner 断点：走一次带 resumeInterrupted 的发送，由 gateSendMessage 消费断点
+    void sendMessage(RESUME_TURN_LABEL, { resumeInterrupted: true }).catch((err) => {
+      if (typeof showAgentToast === 'function') {
+        showAgentToast('无法继续', String((err && err.message) || err), { variant: 'warn' });
+      }
+    });
+    return true;
+  }
+  return false;
 }

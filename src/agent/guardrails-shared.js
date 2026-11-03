@@ -441,6 +441,7 @@ function fsEditArgsPresent(args) {
 const HOST_EXEC_FILE_WRITE_RE =
   /(?:^|[\s;&|])(?:set-content|add-content|out-file|new-item|copy-item|move-item|remove-item|ren(?:ame)?|del|erase|mkdir|rmdir|md|rd|touch|tee|cp|mv|rm|git\s+(?:apply|commit|merge|rebase|checkout|switch|restore|reset|clean)|patch)\b|(?:>|>>)|\b(?:writefile|appendfile|unlink|rename|mkdir|rmdir|rmSync|writeFileSync|appendFileSync)\b|(?:^|[\s;&|])sed\s+-[^-\s]*i/i;
 
+/** 未声明 `verify` 时的兜底词表（**不是**主判据：自有脚本猜不出来，见 `hostExecLooksValidation`）。 */
 const HOST_EXEC_VALIDATION_RE =
   /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|check|lint|typecheck|build)\b|\b(?:cargo|go)\s+(?:test|check|build)\b|\b(?:pytest|ruff|mypy|tsc|eslint|vitest|jest)\b|workspace\.diagnostics/i;
 
@@ -548,7 +549,17 @@ function hostExecLooksFileWriting(commandOrArgs) {
   return !!cmd && HOST_EXEC_FILE_WRITE_RE.test(cmd);
 }
 
+/**
+ * 这条 host_exec 是否属于「验证」（测试 / 类型检查 / lint / 构建 / 冒烟）。
+ *
+ * 判断归模型：`host_exec` 的 `verify` 布尔参数就是模型自己声明的结论（显式 true/false 都算数）。
+ * 下面的正则只是**模型没声明时**的兜底 —— 它帮不上自有脚本（`make verify`、`npm run smoke`、
+ * `cargo clippy` 都猜不出来），所以不能当主判据，也不该继续往词表里塞命令名。
+ */
 function hostExecLooksValidation(commandOrArgs) {
+  const declared =
+    commandOrArgs && typeof commandOrArgs === 'object' ? commandOrArgs.verify : undefined;
+  if (typeof declared === 'boolean') return declared;
   const cmd =
     typeof commandOrArgs === 'string'
       ? commandOrArgs
