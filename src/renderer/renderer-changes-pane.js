@@ -1120,13 +1120,21 @@ function syncSessionChangesListInPlace(list, rows) {
   const existingRows = list.querySelectorAll('.artifacts-file-item[data-change-path]');
   if (existingRows.length !== rows.length) return false;
 
+  // 行元素与路径只取一次：findChangesListRow 每次都要重扫 DOM 并重算归一化路径，
+  // 两趟循环就是 2n 次全表扫描（写文件期间这个方法每帧都会跑）。
+  const candidates = [];
+  for (const el of existingRows) {
+    candidates.push({ el, p: el.getAttribute('data-change-path') || el.title || '' });
+  }
+  const matched = [];
   for (const art of rows) {
-    if (!findChangesListRow(list, art.path)) return false;
+    const target = workspaceArtifactPath(art.path);
+    const hit = candidates.find((c) => pathsMatchArtifact(c.p, target));
+    if (!hit) return false;
+    matched.push([art, hit.el]);
   }
 
-  for (const art of rows) {
-    const row = findChangesListRow(list, art.path);
-    if (!row) continue;
+  for (const [art, row] of matched) {
     if (art.diff) updateChangesListRowBadge(row, art.diff);
     row.classList.remove('is-writing', 'is-write-done');
   }

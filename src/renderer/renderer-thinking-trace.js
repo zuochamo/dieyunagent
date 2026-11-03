@@ -54,16 +54,30 @@ function patchThinkingTrace(
     return true;
   }
 
+  // 先把现有节点按 key 建索引再逐轮对账：原来每轮都 `body.querySelector` 全子树，
+  // 轮次多时是「轮次 × 子树节点」；现在两遍 querySelectorAll + O(1) 查找，收尾复用同一索引。
+  const stepByKey = new Map();
+  body.querySelectorAll('.msg-thinking-step[data-step-key]').forEach((node) => {
+    const key = node.dataset.stepKey || '';
+    if (!stepByKey.has(key)) stepByKey.set(key, node);
+  });
+  const orphanDetailsByKey = new Map();
+  body.querySelectorAll(':scope > details[data-step-key]').forEach((node) => {
+    const key = node.dataset.stepKey || '';
+    if (!orphanDetailsByKey.has(key)) orphanDetailsByKey.set(key, node);
+  });
+
   for (let i = 0; i < trace.length; i++) {
     const entry = trace[i];
     const domKey = thinkingStepDomKey(entry, i);
     seen.add(domKey);
-    let wrap = body.querySelector(`.msg-thinking-step[data-step-key="${domKey}"]`);
+    let wrap = stepByKey.get(domKey) || null;
     let details = wrap
       ? wrap.querySelector('details.msg-thinking-round-details')
-      : body.querySelector(`:scope > details[data-step-key="${domKey}"]`);
+      : orphanDetailsByKey.get(domKey) || null;
     if (details && !wrap) {
       details.remove();
+      orphanDetailsByKey.delete(domKey);
       details = null;
     }
     const opts = {
@@ -79,6 +93,8 @@ function patchThinkingTrace(
     if (!details) {
       wrap = mountThinkingRoundDetails(entry, i, trace, opts);
       body.appendChild(wrap);
+      // 登记回索引：同一 key 若在本轮之后再出现，行为与「实时查询 DOM」一致。
+      stepByKey.set(domKey, wrap);
       if (streaming && typeof startThinkingTransitionPin === 'function') {
         startThinkingTransitionPin();
       }
@@ -87,9 +103,12 @@ function patchThinkingTrace(
     }
   }
 
-  body.querySelectorAll('.msg-thinking-step[data-step-key], :scope > details[data-step-key]').forEach((node) => {
-    if (!seen.has(node.dataset.stepKey || '')) node.remove();
-  });
+  for (const [key, node] of stepByKey) {
+    if (!seen.has(key)) node.remove();
+  }
+  for (const [key, node] of orphanDetailsByKey) {
+    if (!seen.has(key)) node.remove();
+  }
   if (streaming) {
     if (typeof scheduleStreamingChatFollow === 'function') scheduleStreamingChatFollow();
     else if (typeof followChatStreamGrowth === 'function') followChatStreamGrowth();
@@ -534,10 +553,14 @@ function buildToolTraceFallbackReply(trace) {
   return lines.join('\n');
 }
 
-var SYNTHESIS_TRACE_PHASE = '汇总';
-var SYNTHESIS_TRACE_START = '正在生成最终答复…';
-var SYNTHESIS_TRACE_DONE = '已完成';
-var SYNTHESIS_TRACE_FAILED = '汇总未完成，见下方答复';
+// 汇总步骤的 phase 名与文案：单一来源 agent-round-text（Main 的 agent-synthesis 用同一组常量）
+if (typeof AgentRoundText === 'undefined' || !AgentRoundText.SYNTHESIS_PHASE) {
+  throw new Error('agent-bundle 必须先于 renderer-thinking-trace.js 加载（缺 AgentRoundText）');
+}
+var SYNTHESIS_TRACE_PHASE = AgentRoundText.SYNTHESIS_PHASE;
+var SYNTHESIS_TRACE_START = AgentRoundText.SYNTHESIS_START;
+var SYNTHESIS_TRACE_DONE = AgentRoundText.SYNTHESIS_DONE;
+var SYNTHESIS_TRACE_FAILED = AgentRoundText.SYNTHESIS_FAILED;
 
 function cloneTraceEntryForUi(entry) {
   return {
@@ -586,10 +609,6 @@ function upsertSynthesisTraceRound(trace, { streaming, failed }) {
   return next;
 }
 
-function countTraceTools(trace) {
-  return (trace || []).reduce((n, e) => n + (e.tools || []).length, 0);
-}
-
 /**
  * 汇总（synthesis）请求体的唯一实现在 Main：`src/agent/agent-synthesis.js`
  * （由 rust-loop-runner 在空回复时调用，见 AGENTS.md「空回复才 synthesis，Renderer 只展示」）。
@@ -597,25 +616,15 @@ function countTraceTools(trace) {
  * 且无任何调用点 —— 已删除，避免改一处漏一处。
  */
 
-/** 工具轮结束后仅空回复/残留 tool XML 才补汇总；有正文即交付 */
+/** 工具轮结束后仅空回复/残留 tool XML 才补汇总；有正文即交付（判定单一来源 AgentRoundText） */
 function needsAssistantReplySynthesis(reply, trace) {
   const text = stripAssistantVisibleToolCallMarkup(String(reply || '').trim());
-  if (typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.needsAssistantReplySynthesis === 'function') {
-    return AgentRoundText.needsAssistantReplySynthesis(text, trace);
-  }
-  const toolCount = countTraceTools(trace);
-  if (toolCount < 1) return false;
-  if (!text || text === '(空响应)') return true;
-  if (/<(?:tool_call|tool_calls|invoke|function=|\uff5cDSML\uff5c|｜DSML｜)/i.test(text)) return true;
-  return false;
+  return AgentRoundText.needsAssistantReplySynthesis(text, trace);
 }
 
 function synthesizedReplyIsUsable(text) {
   const t = stripAssistantVisibleToolCallMarkup(String(text || '').trim());
-  if (typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.synthesizedReplyIsUsable === 'function') {
-    return AgentRoundText.synthesizedReplyIsUsable(t);
-  }
-  return !!(t && t !== '(空响应)' && t.length >= 8 && !/<(?:tool_call|tool_calls|invoke|function=)/i.test(t));
+  return AgentRoundText.synthesizedReplyIsUsable(t);
 }
 
 function stripAssistantVisibleToolCallMarkup(text) {
@@ -655,16 +664,10 @@ function stripAssistantVisibleToolCallMarkup(text) {
 function normalizeAssistantReplyForStorage(reply, trace) {
   const text = stripAssistantVisibleToolCallMarkup(String(reply || '').trim());
   const toolFallback = buildToolTraceFallbackReply(trace);
-  if (typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.pickNormalizedAssistantReply === 'function') {
-    return AgentRoundText.pickNormalizedAssistantReply(text, trace, {
-      reasoningFallback: AgentRoundText.reasoningTextFromTrace(trace),
-      toolFallback
-    });
-  }
-  // bundle 未重建（AgentRoundText 缺失）时的退化路径：只做工具事实兜底，不把思考当正文。
-  if (text && text !== '(空响应)' && !needsAssistantReplySynthesis(text, trace)) return text;
-  if (toolFallback) return toolFallback;
-  return '（模型未生成文字答复。）';
+  return AgentRoundText.pickNormalizedAssistantReply(text, trace, {
+    reasoningFallback: AgentRoundText.reasoningTextFromTrace(trace),
+    toolFallback
+  });
 }
 
 function splitPersistedAssistantTrace(raw, opts) {

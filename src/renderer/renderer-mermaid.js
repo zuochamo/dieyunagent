@@ -16,6 +16,29 @@ const MERMAID_BASE_OPTIONS = {
   flowchart: { htmlLabels: false, curve: 'basis' }
 };
 
+/**
+ * 节点形状「补引号」用的 7 条正则：原来在逐行循环里为每种形状各 new 一次
+ * （一张 100 行的图就是 700 次正则编译），挪到模块级只编译一次。
+ * 都是 /g 正则且只用于 `String.replace`（每次从 lastIndex 0 开始），可安全复用。
+ */
+const MERMAID_SHAPE_REWRITES = [
+  { open: '((', close: '))' },
+  { open: '[[', close: ']]' },
+  { open: '{{', close: '}}' },
+  { open: '[(', close: ')]' },
+  { open: '[', close: ']' },
+  { open: '(', close: ')' },
+  { open: '{', close: '}' }
+].map(({ open, close }) => {
+  const escOpen = open.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escClose = close.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return {
+    open,
+    close,
+    re: new RegExp(`\\b([A-Za-z_][\\w-]*)\\s*${escOpen}([^\\n]*?)${escClose}`, 'g')
+  };
+});
+
 function initMermaidRender() {
   if (mermaidReady) return !!window.mermaid;
   if (!window.mermaid) {
@@ -156,23 +179,8 @@ function sanitizeMermaidCode(raw) {
       return `${a}"${inner}"${b}`;
     });
 
-    // 节点形状：按括号配对给中文/特殊字符标签加引号
-    const shapeOpeners = [
-      { open: '((', close: '))' },
-      { open: '[[', close: ']]' },
-      { open: '{{', close: '}}' },
-      { open: '[(', close: ')]' },
-      { open: '[', close: ']' },
-      { open: '(', close: ')' },
-      { open: '{', close: '}' }
-    ];
-    for (const { open, close } of shapeOpeners) {
-      const escOpen = open.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const escClose = close.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const re = new RegExp(
-        `\\b([A-Za-z_][\\w-]*)\\s*${escOpen}([^\\n]*?)${escClose}`,
-        'g'
-      );
+    // 节点形状：按括号配对给中文/特殊字符标签加引号（正则已模块级编译一次）
+    for (const { open, close, re } of MERMAID_SHAPE_REWRITES) {
       line = line.replace(re, (full, id, label) => {
         const trimmed = String(label || '').trim();
         if (!trimmed) return full;

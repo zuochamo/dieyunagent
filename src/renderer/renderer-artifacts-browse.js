@@ -482,19 +482,82 @@ function getContextFilePathsForAgent(sessionId) {
   return out.slice(0, 12);
 }
 
+/**
+ * 产物行合并：同一文件的不同写法（相对 / 绝对 / 大小写 / 反斜杠）并成一行。
+ *
+ * 匹配规则就是 `pathsMatch` 的三条（见 renderer-path-utils.js）：归一化后相等、
+ * 或一方是另一方「/ 边界后缀」。原来每来一行都对着整张表逐对重算归一化（O(n²) 次
+ * 字符串处理）；这里按「相等 / 更短后缀 / 更长后缀」三种情形各建一份索引，逐对扫描
+ * 变成按路径段数查表。命中仍取**最先插入**的那一条，与顺序扫描的语义一致；
+ * `pathsMatch` 不可用时退回原来的顺序扫描（行为不变）。
+ */
 function mergeArtifactRows() {
   const map = new Map();
+  /** 归一化路径 -> 该路径首次插入的行键与插入序号 */
+  const byNorm = new Map();
+  /** 某个后缀 -> 以它为 / 边界后缀的已有行里插入最早的那条 */
+  const bySuffix = new Map();
+  const canIndex = typeof pathsMatch === 'function' && typeof normWritePath === 'function';
+  let seq = 0;
+
+  function normOf(p) {
+    const n = normWritePath(applyWorkspaceArtifactPath(p));
+    return n == null ? '' : String(n);
+  }
+
+  /** 'a/b/c' -> ['b/c', 'c']（不含自身） */
+  function properSuffixes(n) {
+    const out = [];
+    let i = n.indexOf('/');
+    while (i !== -1) {
+      out.push(n.slice(i + 1));
+      i = n.indexOf('/', i + 1);
+    }
+    return out;
+  }
+
+  function remember(key, norm) {
+    const entry = { key, seq: seq++ };
+    if (!byNorm.has(norm)) byNorm.set(norm, entry);
+    for (const suffix of properSuffixes(norm)) {
+      const prev = bySuffix.get(suffix);
+      if (!prev || entry.seq < prev.seq) bySuffix.set(suffix, entry);
+    }
+  }
+
+  /** 第一个匹配到的已有行键（与顺序扫描同语义），没有则返回 null */
+  function findKey(path) {
+    if (!canIndex) {
+      for (const key of map.keys()) {
+        if (artifactPathsMatch(key, path)) return key;
+      }
+      return null;
+    }
+    const np = normOf(path);
+    // 归一化后为空不参与匹配（pathsMatch 对空串一律返回 false）
+    if (!np) return null;
+    let best = byNorm.get(np) || null;
+    for (const suffix of properSuffixes(np)) {
+      const hit = byNorm.get(suffix);
+      if (hit && (!best || hit.seq < best.seq)) best = hit;
+    }
+    const longer = bySuffix.get(np);
+    if (longer && (!best || longer.seq < best.seq)) best = longer;
+    return best ? best.key : null;
+  }
+
   function upsert(art, source) {
     if (!art || !art.path) return;
     const path = applyWorkspaceArtifactPath(art.path);
     const next = { ...art, path, source };
-    for (const [key, existing] of map) {
-      if (artifactPathsMatch(key, path)) {
-        if (Number(next.ts || 0) >= Number(existing.ts || 0)) map.set(key, next);
-        return;
-      }
+    const key = findKey(path);
+    if (key != null) {
+      const existing = map.get(key);
+      if (existing && Number(next.ts || 0) >= Number(existing.ts || 0)) map.set(key, next);
+      return;
     }
     map.set(path, next);
+    if (canIndex) remember(path, normOf(path));
   }
   for (const art of sessionArtifacts) upsert(art, 'trace');
   for (const art of workspaceArtifacts) upsert(art, 'workspace');
