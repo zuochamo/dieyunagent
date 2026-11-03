@@ -27,6 +27,7 @@ const {
 const { PlansStore } = require('../../src/plans/store');
 const { PlansScheduler } = require('../../src/plans/scheduler');
 const { buildPlanRunUserText } = require('../../src/plans/plan-run-turn');
+const { validateToolArgs } = require('../../src/agent/tool-validate');
 
 const LIMITS = {
   goalMaxAttempts: 3,
@@ -415,5 +416,45 @@ describe('scheduler: 目标型只由轮询触发', () => {
     await s._idleTick();
     expect(ran).toEqual(['b']);
     s.clearAll();
+  });
+});
+
+describe('对话里建目标型计划：参数契约', () => {
+  it('plan_create + goal → 放行', () => {
+    const v = validateToolArgs('plan_create', {
+      prompt: '把测试跑绿',
+      goal: { checks: ['npm test'] }
+    });
+    expect(v.ok).toBe(true);
+  });
+
+  it('goal 缺 checks / 缺 prompt / 同时给 rrule → 拒绝（别留一个猜出来的长任务）', () => {
+    expect(validateToolArgs('plan_create', { prompt: 'x', goal: { cwd: '/w' } }).ok).toBe(false);
+    expect(validateToolArgs('plan_create', { goal: { checks: [] } }).ok).toBe(false);
+    expect(
+      validateToolArgs('plan_create', {
+        prompt: 'x',
+        rrule: 'FREQ=DAILY',
+        goal: { checks: [] }
+      }).ok
+    ).toBe(false);
+  });
+
+  it('定时型（不带 goal）不受影响', () => {
+    expect(validateToolArgs('plan_create', { prompt: 'x', rrule: 'FREQ=DAILY' }).ok).toBe(true);
+  });
+
+  it('goal_check 需要 command 或 check_id', () => {
+    expect(validateToolArgs('goal_check', {}).ok).toBe(false);
+    expect(validateToolArgs('goal_check', { check_id: 'c1' }).ok).toBe(true);
+    expect(validateToolArgs('goal_check', { command: 'npm test' }).ok).toBe(true);
+  });
+
+  it('goal_finish 只认 complete / blocked', () => {
+    expect(validateToolArgs('goal_finish', { outcome: 'complete' }).ok).toBe(true);
+    expect(validateToolArgs('goal_finish', { outcome: 'blocked' }).ok).toBe(true);
+    const bad = validateToolArgs('goal_finish', { outcome: 'done' });
+    expect(bad.ok).toBe(false);
+    expect(bad.error).toContain('complete');
   });
 });
