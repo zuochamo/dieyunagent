@@ -156,6 +156,7 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/agent-run-events.md`](docs/agent-run-events.md) | AgentRunEvent 契约 |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 设计原理 |
 | [`docs/MEMORY.md`](docs/MEMORY.md) | 记忆系统分层与注入规则 |
+| [`docs/MEMORY-VS-DSH.md`](docs/MEMORY-VS-DSH.md) | 与 DSH 记忆设计对照：抄了什么、明确不抄什么及反证条件（**改记忆系统前先读**，别把否过的方案搬回来） |
 | [`docs/SQLITE-ACCESS.md`](docs/SQLITE-ACCESS.md) | SQLite 访问模型：写入连接 / 读池 / 长任务三条通道与在途预算（**改 core 库访问前先读**） |
 | [`docs/VECTOR-SEARCH.md`](docs/VECTOR-SEARCH.md) | 向量检索：int8 量化全量扫描的误差界 / 内存上限 / **换 ANN 的触发条件**（改向量检索前先读） |
 | [`docs/INDEX-VALUE-REVIEW.md`](docs/INDEX-VALUE-REVIEW.md) | 代码索引 / 结构索引：实测成本与使用率 / 能力定级 / **删 trigram、向量 opt-in、调用图按需** 的整改清单（改 `index/` 或 `graph/` 前先读） |
@@ -166,11 +167,9 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/REQUEST-SNAPSHOT.md`](docs/REQUEST-SNAPSHOT.md) | 请求快照：模型看到了什么 / 为什么折叠 / 预留策略（**已实施**） |
 | [`docs/TOOL-GATE.md`](docs/TOOL-GATE.md) | 工具关卡：一次工具调用的唯一流程与关卡清单（**已实施**） |
 | [`docs/SANDBOX.md`](docs/SANDBOX.md) | 沙箱：三档能力边界 / ask-once 审批 / 未做的内核强制（**策略层已实施**） |
-| [`docs/GOAL-RUN-PLAN.md`](docs/GOAL-RUN-PLAN.md) | 目标型长任务：跑到「真的完成」（**已实施 P0**；续跑决策 / 可执行验收 / 崩溃重入队） |
 | [`docs/PEER-MESH-PLAN.md`](docs/PEER-MESH-PLAN.md) | 内网 agent 互通：按机器确认的信任清单 / UDP 发现 / 会话即通道 / 跳数与小时预算 / 建议式租约（**已实施 P0 + P1 授权**） |
 | [`docs/MULTI-AGENT-WORKTREE-ISOLATION-PLAN.md`](docs/MULTI-AGENT-WORKTREE-ISOLATION-PLAN.md) | 多 agent 并行时 workspace 资源隔离（**SSH 会话已实施**：每会话一个远端 worktree；含 flock 设计） |
 | [`docs/SSH-MODULE-REVIEW.md`](docs/SSH-MODULE-REVIEW.md) | SSH 模块全面审查：架构 / 整洁 / 完成度 + 与 Rust 核心的三个脆弱点（**改 src/ssh 或 src/remote 前先读**） |
-| [`docs/UMD-CLEANUP-PLAN.md`](docs/UMD-CLEANUP-PLAN.md) | UMD 清理计划 |
 | [`docs/CHANNEL-WECOM.md`](docs/CHANNEL-WECOM.md) | 内置频道（企业微信智能机器人）：设置页 / 长连接协议帧 / 在 Main 后台跑一轮 / 附件与主动推送（**已实施**） |
 
 ---
