@@ -112,6 +112,8 @@ function createLiveLoopTraceTracker(
 ) {
   const subagentId = meta.subagentId || '';
   const rounds = [];
+  /** 未落地的 `llm_delta`（同一帧只留最新一份，content 是累计全文）。 */
+  const pendingDelta = [];
   let llmRound = 0;
   let liveContent = '';
   let flushTimer = null;
@@ -129,7 +131,29 @@ function createLiveLoopTraceTracker(
     return row;
   }
 
+  /**
+   * 把挂起的 `llm_delta` 落到卡片行上，**每帧只做一次**。
+   *
+   * `llm_delta` 的 content 是累计全文，逐 token 归一化就是 O(累计长度²) 的正则扫描；
+   * 而真正被消费的只有「发帧那一刻的最新值」。所以这里推迟到发帧前统一归一化，
+   * 结果与「每个 token 都归一化、只发最后一帧」逐字节一致。
+   */
+  function flushPendingDelta() {
+    if (!pendingDelta.length) return;
+    const batch = pendingDelta.splice(0, pendingDelta.length);
+    for (const item of batch) {
+      const contentOnly = stripToolCallMarkup(item.content);
+      const thoughtSource = item.reasoning || (item.contentIsReasoning ? contentOnly || item.content : '');
+      item.row.thought = thoughtSource.slice(0, LIVE_THOUGHT_CHARS) || '生成中…';
+      item.row.fullThought = thoughtSource;
+      item.row.placeholder = !thoughtSource;
+      // 只有真正的正文才进回答区；单通道模型的 content 属于思考，不泄漏。
+      liveContent = item.reasoning || !item.contentIsReasoning ? contentOnly.slice(0, 800) : '';
+    }
+  }
+
   function toUiEntries() {
+    flushPendingDelta();
     return [buildIsolatedCard(meta, rounds, subagentId)];
   }
 
@@ -170,6 +194,8 @@ function createLiveLoopTraceTracker(
   function handlePhase(name, data) {
     // 结构事件立即推；纯流式增量（llm_delta）合并节流（见 LIVE_TRACE_MIN_INTERVAL_MS）。
     const immediate = LIVE_TRACE_IMMEDIATE_PHASES.has(name);
+    // 结构事件会读上一次的 thought（如 need_delegate 清占位），先把未落地的增量落地。
+    if (name !== 'llm_delta') flushPendingDelta();
     if (name === 'start') {
       const startRow = getRound(1);
       startRow.thought = '启动…';
@@ -188,18 +214,15 @@ function createLiveLoopTraceTracker(
     }
     if (name === 'llm_delta') {
       llmRound = data && data.round != null ? Number(data.round) : llmRound;
-      const reasoning = String((data && data.reasoning) || '');
-      const rawContent = String((data && data.content) || '');
-      const contentOnly = stripToolCallMarkup(rawContent);
-      // content 的通道身份由入口盖章（llm-channel.classifyDelta），此处不再用 `a || b` 猜。
-      const contentIsReasoning = (data && data.contentChannel) === 'reasoning';
-      const thoughtSource = reasoning || (contentIsReasoning ? contentOnly || rawContent : '');
-      const row = getRound(eventRoundNo(data));
-      row.thought = thoughtSource.slice(0, LIVE_THOUGHT_CHARS) || '生成中…';
-      row.fullThought = thoughtSource;
-      row.placeholder = !thoughtSource;
-      // 只有真正的正文才进回答区；单通道模型的 content 属于思考，不泄漏。
-      liveContent = reasoning || !contentIsReasoning ? contentOnly.slice(0, 800) : '';
+      // 累计全文的归一化推迟到发帧时（见 flushPendingDelta）：同一帧内只保留最新一份。
+      pendingDelta.length = 0;
+      pendingDelta.push({
+        row: getRound(eventRoundNo(data)),
+        content: String((data && data.content) || ''),
+        reasoning: String((data && data.reasoning) || ''),
+        // content 的通道身份由入口盖章（llm-channel.classifyDelta），此处不再用 `a || b` 猜。
+        contentIsReasoning: (data && data.contentChannel) === 'reasoning'
+      });
       sync(immediate);
       return;
     }
@@ -533,18 +556,10 @@ function mapLoopTraceToUi(trace, meta = {}) {
 module.exports = {
   LIVE_THOUGHT_CHARS,
   LIVE_TRACE_MIN_INTERVAL_MS,
-  SUBAGENT_KIND_LABELS,
-  loopTraceBaseLabel,
-  subagentKindLabel,
   subagentCardTitle,
   createSubagentNamer,
-  mapPendingDelegateTool,
   createLiveLoopTraceTracker,
-  compactLoopToolDiff,
-  summarizeLoopTool,
-  summarizeHostExecInline,
   mapLoopToolToUi,
-  mergeTraceTools,
   buildIsolatedCard,
   mergeIsolatedCards,
   mapLoopTraceToUi

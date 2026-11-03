@@ -480,8 +480,8 @@ function assistantTextFromMessage(message, helpers) {
   // 与新一轮追加的提示叠成两段（见 guardrails-shared.stripReadinessNotes 注释）。
   const cleaned = stripReadinessNotes(text);
   if (cleaned) return cleaned;
-  // 整条只有提示：不能把提示本身当历史上行，回退到与渲染层一致的占位。
-  return text.includes('完成验收') ? '（模型未生成文字答复。）' : text;
+  // 整条只有提示：不能把提示本身当历史上行，回退到与渲染层一致的占位（单一来源 agent-round-text）。
+  return text.includes('完成验收') ? roundText.TURN_EMPTY_REPLY_TEXT : text;
 }
 
 /**
@@ -605,22 +605,26 @@ function truncateContent(content, maxChars, opts) {
 }
 
 /**
- * 兜底上限：唯一来源是 `agent-limits.js`，这里只做键映射（含 toolResultMaxChars）。
+ * 兜底上限：来源只有 `agent-limits.js`。这里**不再各写一份字面量**（曾两边漂移成两套预算）。
+ * 键名写错时直接抛：静默拿到 `undefined` 会让整条预算失效，而现象只是「上下文忽然变短」。
  */
-function completionCapDefault(key, fallback) {
+function completionCapDefault(key) {
   const n = Number(AGENT_LIMITS_DEFAULTS[key]);
-  return Number.isFinite(n) ? n : fallback;
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`agent-limits 缺少上限键 ${key}（session-context 的默认预算从这里取）`);
+  }
+  return n;
 }
 
 const DEFAULT_COMPLETION_CAPS = {
-  historyMaxChars: completionCapDefault('completionHistoryMaxChars', 96000),
-  messageMaxChars: completionCapDefault('completionMessageMaxChars', 8000),
-  lastUserMaxChars: completionCapDefault('completionLastUserMaxChars', 24000),
-  turnRideMaxChars: completionCapDefault('completionTurnRideMaxChars', 32000),
-  requestMaxChars: completionCapDefault('llmRequestMaxChars', 800000),
-  recentTurns: completionCapDefault('completionRecentTurns', 24),
-  foldedMaxChars: completionCapDefault('completionFoldedMaxChars', 12000),
-  toolResultMaxChars: completionCapDefault('toolResultMaxJson', 14000)
+  historyMaxChars: completionCapDefault('completionHistoryMaxChars'),
+  messageMaxChars: completionCapDefault('completionMessageMaxChars'),
+  lastUserMaxChars: completionCapDefault('completionLastUserMaxChars'),
+  turnRideMaxChars: completionCapDefault('completionTurnRideMaxChars'),
+  requestMaxChars: completionCapDefault('llmRequestMaxChars'),
+  recentTurns: completionCapDefault('completionRecentTurns'),
+  foldedMaxChars: completionCapDefault('completionFoldedMaxChars'),
+  toolResultMaxChars: completionCapDefault('toolResultMaxJson')
 };
 
 function resolveCompletionCaps(opts) {
@@ -861,17 +865,26 @@ function trimMessagesToCharBudget(messages, opts) {
     return null;
   })();
   let droppedByRequestCap = 0;
-  while (out.length > systems.length + 1 && messagesCharLen(out) > caps.requestMaxChars) {
-    const dropAt = out.findIndex(
-      (m, i) => i >= systems.length && i < out.length - 1 && m !== protectedTaskMsg
-    );
-    if (dropAt < 0) break;
+  // 预算核算只做一遍：逐条算一次长度，之后按 running total 递减。
+  // （原来每丢一条就 `messagesCharLen(out)` 全量重算一次，且每条都重新 JSON.stringify 工具入参，
+  //   丢 n 条就是 O(n²) 次序列化；这里把同样四个数字算成一次。）
+  const charLens = out.map(
+    (m) => contentCharLen(m && m.content) + JSON.stringify(m && m.tool_calls ? m.tool_calls : '').length
+  );
+  let outChars = charLens.reduce((sum, n) => sum + n, 0);
+  // 每轮丢的都是「最老的可丢消息」，位置只会往后走：用游标替代每轮的 findIndex。
+  let dropCursor = systems.length;
+  while (out.length > systems.length + 1 && outChars > caps.requestMaxChars) {
+    while (dropCursor < out.length && out[dropCursor] === protectedTaskMsg) dropCursor += 1;
+    const dropAt = dropCursor;
+    if (dropAt >= out.length - 1) break;
     out.splice(dropAt, 1);
+    outChars -= charLens.splice(dropAt, 1)[0];
     droppedByRequestCap += 1;
   }
-  if (messagesCharLen(out) > caps.requestMaxChars && out.length) {
+  if (outChars > caps.requestMaxChars && out.length) {
     const last = out[out.length - 1];
-    const room = Math.max(4000, caps.requestMaxChars - messagesCharLen(out.slice(0, -1)) - 80);
+    const room = Math.max(4000, caps.requestMaxChars - (outChars - charLens[charLens.length - 1]) - 80);
     out[out.length - 1] = {
       ...last,
       content: truncateLastUserKeepingTask(last.content, {
@@ -949,11 +962,9 @@ module.exports = {
   SESSION_HISTORY_HEADER,
   TURN_RIDE_HEADER,
   MESSAGE_META_PREFIX,
-  ATTACHMENT_META_KEYS,
   META_STRING_MAX,
   packMessageMeta,
   unpackMessageMeta,
-  slimAttachmentForPersist,
   slimAttachmentsForPersist,
   joinPromptChunks,
   packSystemPrompt,
@@ -979,6 +990,5 @@ module.exports = {
   selectHistoryMessagesForSession,
   cloneHistoryMessages,
   buildCurrentTaskText,
-  isWeakAssistantReply,
-  WEAK_ASSISTANT_REPLIES
+  isWeakAssistantReply
 };
