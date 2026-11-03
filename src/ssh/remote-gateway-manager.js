@@ -304,11 +304,29 @@ function createRemoteGatewayManager(opts = {}) {
     return (bytes / 1024 / 1024).toFixed(1);
   }
 
+  /**
+   * 远端 HOME：同一连接内不会变，按 sshManager 缓存一次（连上就带出）。
+   * 一次 ensure 里这条路径原本要问 2~4 次，每次都是一趟 SSH 往返。
+   */
+  const remoteHomeCache = new WeakMap();
+
   async function getRemoteHome(sshManager) {
-    const r = await sshManager.exec('echo $HOME', null, 5000, { loginShell: false });
-    const home = String(r.stdout || '').trim();
-    if (!home) throw Object.assign(new Error('无法解析远程 HOME 目录'), { code: 'REMOTE_HOME_UNKNOWN' });
-    return home;
+    const cached = remoteHomeCache.get(sshManager);
+    if (cached) return cached;
+    const pending = (async () => {
+      const r = await sshManager.exec('echo $HOME', null, 5000, { loginShell: false });
+      const home = String(r.stdout || '').trim();
+      if (!home) throw Object.assign(new Error('无法解析远程 HOME 目录'), { code: 'REMOTE_HOME_UNKNOWN' });
+      return home;
+    })();
+    remoteHomeCache.set(sshManager, pending);
+    try {
+      return await pending;
+    } catch (e) {
+      // 失败的结论不缓存：换一次探测（重连后）仍要能重新解析
+      remoteHomeCache.delete(sshManager);
+      throw e;
+    }
   }
 
   function readLocalManifest(packRoot) {

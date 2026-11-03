@@ -27,6 +27,9 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/remote/index-root.js',
   // index-root 用它解析 ssh URI / 归一 POSIX 根（远端只认这一份口径）
   'src/workspace/target.js',
+  // 等待超时的唯一实现：host-control / lsp-client / navigate-service 都在打包闭包里，
+  // 漏了它远端会在加载期 `Cannot find module '../timeout'`（同 2026-10-18 spawn-args 事故形态）。
+  'src/timeout.js',
   'src/core-bridge.js',
   'src/core-rpc-timeouts.js',
   'src/gateway/path-policy.js',
@@ -150,12 +153,34 @@ async function walkPackFiles(packRoot) {
 }
 
 /**
+ * 内容 hash 的进程内缓存。
+ *
+ * pack 由打包脚本产出、注入期只读；94MB 逐文件 sha256 要几百毫秒，而每次 ensure
+ * （每个会话激活）都要问一次「远端是不是这一份」。命中判据是「文件清单 + 大小 + mtime」
+ * 的指纹——只做 50 次 lstat，内容有任何变化指纹必变，不必整包重读。
+ */
+let packContentHashCache = null;
+
+/** 文件清单的 lstat 指纹：rel + size + mtime，与内容一一对应。 */
+async function packStatFingerprint(files) {
+  const fsp = require('fs/promises');
+  const rows = [];
+  for (const f of files) {
+    const st = await fsp.stat(f.abs);
+    rows.push(`${f.rel}\0${st.size}\0${st.mtimeMs}`);
+  }
+  return crypto.createHash('sha256').update(rows.join('\n')).digest('hex');
+}
+
+/**
  * 部署包内容 hash：对最终注入目录的全部文件逐个 sha256 后再汇总。
  * 在注入期对最终 pack 目录现场计算（lite 包直用 / 缓存装配目录都统一覆盖），
  * 不落 manifest —— manifest 只在打包期生成，装配进缓存目录的 Node 不经过它。
  */
 async function computePackContentHash(packRoot) {
   const files = await walkPackFiles(packRoot);
+  const cacheKey = `${String(packRoot)}\0${await packStatFingerprint(files)}`;
+  if (packContentHashCache && packContentHashCache.key === cacheKey) return packContentHashCache.hash;
   const hash = crypto.createHash('sha256');
   for (const f of files) {
     const fileHash = crypto.createHash('sha256');
@@ -170,7 +195,9 @@ async function computePackContentHash(packRoot) {
     hash.update(fileHash.digest('hex'));
     hash.update('\n');
   }
-  return hash.digest('hex');
+  const hex = hash.digest('hex');
+  packContentHashCache = { key: cacheKey, hash: hex };
+  return hex;
 }
 
 /**

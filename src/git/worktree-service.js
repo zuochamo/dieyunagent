@@ -685,6 +685,13 @@ async function enforceWorktreeCleanupPolicy(repoPath, opts = {}) {
     pruned = { ok: false, error: (e && e.message) || String(e) };
   }
 
+  // 一条都没删掉时磁盘没变化（pruneRunBranches 只删分支、不碰目录），
+  // 不必再扫一遍整棵 worktree 目录树（getDirectorySizeBytes 是同步 statSync 全树，
+  // 空跑一次就是白等）。真有删除时才重扫，保证报出去的字节数是磁盘实况。
+  if (!removed.length) {
+    return { ok: true, removed, blocked, pruned, protectedRunIds: [...protectedRunIds], ...listed };
+  }
+
   const after = await listManagedWorktreeRuns(repoPath);
   return {
     ok: true,
@@ -1102,17 +1109,14 @@ module.exports = {
   isGitRepo,
   gitExec,
   normalizeChangeKind,
-  isNewKind,
   listWorktrees,
   createAgentWorktree,
   commitWorktreeChanges,
   removeAgentWorktree,
   cleanupRunWorktrees,
   pruneRunBranches,
-  getDirectorySizeBytes,
   listManagedWorktreeRuns,
   enforceWorktreeCleanupPolicy,
-  listWorktreeChanges,
   listWorktreeChangesVsBase,
   previewRunWorktreeChanges,
   applyRunWorktreeChanges,

@@ -272,16 +272,19 @@ async function getScmFileDiff(git, params) {
   }
 
   const staged = group === 'staged';
-  const patchOut = await git.textOrEmpty(
-    staged ? ['diff', '--cached', '--no-color', '--', rel] : ['diff', '--no-color', '--', rel]
-  );
-  const statOut = await git.textOrEmpty(
-    staged ? ['diff', '--numstat', '--cached', '--', rel] : ['diff', '--numstat', '--', rel]
-  );
+  // 这四次读互不依赖：一次并发发出。SSH 工作区下每次都是一趟往返（原来 4 趟串行），
+  // 本地也省掉 3 次进程启动的串行等待；取到的值与逐个 await 完全一致。
+  const [patchOut, statOut, before, after] = await Promise.all([
+    git.textOrEmpty(
+      staged ? ['diff', '--cached', '--no-color', '--', rel] : ['diff', '--no-color', '--', rel]
+    ),
+    git.textOrEmpty(
+      staged ? ['diff', '--numstat', '--cached', '--', rel] : ['diff', '--numstat', '--', rel]
+    ),
+    staged ? readGitBlob(git, `HEAD:${rel}`) : readGitBlob(git, `:${rel}`),
+    staged ? readGitBlob(git, `:${rel}`) : readWorktreeSafe(git, rel)
+  ]);
   const stat = parseNumstat(statOut).get(rel) || { added: 0, removed: 0 };
-
-  const before = staged ? await readGitBlob(git, `HEAD:${rel}`) : await readGitBlob(git, `:${rel}`);
-  const after = staged ? await readGitBlob(git, `:${rel}`) : await readWorktreeSafe(git, rel);
 
   const beforeClipped = clipText(before.text);
   const afterClipped = clipText(after.text);
@@ -713,7 +716,6 @@ async function getScmCommitDiff(git, params) {
 }
 
 module.exports = {
-  SCM_GROUP_IDS,
   scmStatusLabel,
   normalizeNumstatPath,
   parseNumstat,
