@@ -24,10 +24,6 @@ const { isGraphSourcePath } = require('../index/source-files');
 /** 已有 daemon 在跑时的退出码：调用方据此判断「复用现成的」，不是失败 */
 const AGENT_ALREADY_RUNNING_EXIT = 42;
 
-function summarizeLineDiff(beforeText, afterText) {
-  return computeLineDiffStats(beforeText, afterText);
-}
-
 function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
   const root = path.resolve(String(workspaceRoot || '/'));
   /**
@@ -245,7 +241,7 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
       return {
         ok: true,
         path: safe,
-        diff: enc === 'utf8' ? summarizeLineDiff(beforeText, data) : null,
+        diff: enc === 'utf8' ? computeLineDiffStats(beforeText, data) : null,
         remote: true
       };
     },
@@ -272,21 +268,24 @@ function createRemoteGatewayHandlers(workspaceRoot, opts = {}) {
     'fs.list_dir': async ({ dirPath }) => {
       const safe = resolvePath(dirPath || root);
       const names = await fsp.readdir(safe, { withFileTypes: true });
+      // 与本地 Gateway 的 fs.list_dir 同一做法：逐条 stat 不必串行，分批并发（上限 32）
       const out = [];
-      for (const ent of names) {
-        const full = path.join(safe, ent.name);
-        let st;
-        try {
-          st = await fsp.stat(full);
-        } catch {
-          continue;
-        }
-        out.push({
-          name: ent.name,
-          isDirectory: st.isDirectory(),
-          size: st.size,
-          mtimeMs: st.mtimeMs
-        });
+      const STAT_CONCURRENCY = 32;
+      for (let i = 0; i < names.length; i += STAT_CONCURRENCY) {
+        const rows = await Promise.all(
+          names.slice(i, i + STAT_CONCURRENCY).map(async (ent) => {
+            const full = path.join(safe, ent.name);
+            const st = await fsp.stat(full).catch(() => null);
+            if (!st) return null;
+            return {
+              name: ent.name,
+              isDirectory: st.isDirectory(),
+              size: st.size,
+              mtimeMs: st.mtimeMs
+            };
+          })
+        );
+        for (const row of rows) if (row) out.push(row);
       }
       return out;
     },
@@ -701,6 +700,5 @@ class MinimalRemoteGatewayHost {
 
 module.exports = {
   MinimalRemoteGatewayHost,
-  AGENT_ALREADY_RUNNING_EXIT,
   createRemoteGatewayHandlers
 };

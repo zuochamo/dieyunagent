@@ -54,7 +54,8 @@ async function runEditFile(raw, ops) {
   }
   const applied = applyEditFromArgs(before, args);
   if (!applied.ok) return { ...applied, ...(ops.extra || {}) };
-  const written = await ops.writeUtf8(args.filePath, applied.text);
+  // 把刚读到的原文交给写入侧用于撤销快照：同一次 edit 不再整读一遍同一个文件
+  const written = await ops.writeUtf8(args.filePath, applied.text, { undoBeforeText: before });
   return {
     ...written,
     replacements: applied.replacements,

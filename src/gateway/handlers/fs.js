@@ -481,7 +481,14 @@ function createFsHandlers(d) {
       };
     },
 
-    'fs.write_file': async ({ filePath, data, encoding, undoSessionId, undoTurnId }) => {
+    'fs.write_file': async ({
+      filePath,
+      data,
+      encoding,
+      undoSessionId,
+      undoTurnId,
+      undoBeforeText
+    }) => {
       assertHostEnabled(ctx);
       if (!perms.fsWrite) {
         const e = new Error('文件写入未授权');
@@ -504,14 +511,17 @@ function createFsHandlers(d) {
         // 远程（SSH）写入：**刻意不过本机沙箱档位**。路径是远端 POSIX 路径，本机既没有这些根
         // 也无法解析，硬判只会造出假越界（`C:\home\...`）。写权限由 SSH 凭据本身授予，
         // 这是文档化的边界（docs/SANDBOX.md「远程工作区」一节），不是漏检。
-        let beforeText = null;
-        try {
-          if (enc === 'utf8') {
-            const prev = await remote.readFile(filePath, 'utf8');
-            beforeText = prev.data;
+        // 调用方（fs.edit_file）刚读过同一文件时直接复用，省掉一次整读。
+        let beforeText = typeof undoBeforeText === 'string' ? undoBeforeText : null;
+        if (beforeText == null) {
+          try {
+            if (enc === 'utf8') {
+              const prev = await remote.readFile(filePath, 'utf8');
+              beforeText = prev.data;
+            }
+          } catch {
+            beforeText = null;
           }
-        } catch {
-          beforeText = null;
         }
         const r = await remote.writeFile(filePath, data, encoding);
         // SFTP 写入远端看不见 → 必须补一条通知，否则远端索引停在旧内容，
@@ -553,13 +563,15 @@ function createFsHandlers(d) {
       await assertSandboxWritable(resolved, 'fs.write_file');
       const safe = assertAllowedPath(resolved, writeRootsForCall());
       const buf = enc === 'base64' ? Buffer.from(String(data), 'base64') : Buffer.from(String(data), 'utf8');
-      let beforeText = null;
-      try {
-        if (enc === 'utf8' && fsSync.existsSync(safe)) {
-          beforeText = await fs.readFile(safe, 'utf8');
+      let beforeText = typeof undoBeforeText === 'string' ? undoBeforeText : null;
+      if (beforeText == null) {
+        try {
+          if (enc === 'utf8' && fsSync.existsSync(safe)) {
+            beforeText = await fs.readFile(safe, 'utf8');
+          }
+        } catch {
+          beforeText = null;
         }
-      } catch {
-        beforeText = null;
       }
       await fs.mkdir(path.dirname(safe), { recursive: true });
       await fs.writeFile(safe, buf);
@@ -618,13 +630,17 @@ function createFsHandlers(d) {
             encoding: 'utf8',
             maxBytes
           }),
-        writeUtf8: (filePath, data) =>
+        writeUtf8: (filePath, data, writeOpts) =>
           handlers['fs.write_file']({
             filePath,
             data,
             encoding: 'utf8',
             undoSessionId,
-            undoTurnId
+            undoTurnId,
+            // runEditFile 已经把原文读进来了：写入侧不必为撤销再整读一遍
+            ...(writeOpts && typeof writeOpts.undoBeforeText === 'string'
+              ? { undoBeforeText: writeOpts.undoBeforeText }
+              : {})
           })
       });
     },
@@ -678,21 +694,24 @@ function createFsHandlers(d) {
       // 目录确实为空：Rust 已给出权威答案，直接用，不必再走 Node 兜底。
       if (Array.isArray(rustList)) return rustList;
       const names = await fs.readdir(safe, { withFileTypes: true });
+      // 逐条 stat 一次往返，但不必串行：分批并发（批次上限 32，避免几千条目打爆线程池）
       const out = [];
-      for (const ent of names) {
-        const full = path.join(safe, ent.name);
-        let st;
-        try {
-          st = await fs.stat(full);
-        } catch {
-          continue;
-        }
-        out.push({
-          name: ent.name,
-          isDirectory: st.isDirectory(),
-          size: st.size,
-          mtimeMs: st.mtimeMs
-        });
+      const STAT_CONCURRENCY = 32;
+      for (let i = 0; i < names.length; i += STAT_CONCURRENCY) {
+        const rows = await Promise.all(
+          names.slice(i, i + STAT_CONCURRENCY).map(async (ent) => {
+            const full = path.join(safe, ent.name);
+            const st = await fs.stat(full).catch(() => null);
+            if (!st) return null;
+            return {
+              name: ent.name,
+              isDirectory: st.isDirectory(),
+              size: st.size,
+              mtimeMs: st.mtimeMs
+            };
+          })
+        );
+        for (const row of rows) if (row) out.push(row);
       }
       return out;
     },

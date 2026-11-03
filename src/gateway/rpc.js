@@ -1,7 +1,6 @@
 'use strict';
 
 const fs = require('fs/promises');
-const fsSync = require('fs');
 const path = require('path');
 const {
   runShell,
@@ -54,7 +53,7 @@ const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 const { createExtractedHandlers } = require('./handlers');
 const { resolveCoreRpcTimeoutMs } = require('../core-rpc-timeouts');
 const { buildLlmHeadersFromConfig } = require('../agent/llm-request');
-const { computeLineDiffStats } = require('./line-diff-stats');
+const { prepareLineDiff } = require('./line-diff-stats');
 
 function assertHostEnabled(ctx) {
   if (!ctx.permissions.hostControl) {
@@ -67,27 +66,19 @@ function assertHostEnabled(ctx) {
 const DIFF_FULL_TEXT_CAP = AGENT_LIMITS_DEFAULTS.diffFullTextCap;
 
 function summarizeLineDiff(beforeText, afterText) {
-  const before = beforeText == null ? [] : String(beforeText).split(/\r?\n/);
-  const after = String(afterText || '').split(/\r?\n/);
-  let start = 0;
-  while (start < before.length && start < after.length && before[start] === after[start]) {
-    start++;
-  }
-  let beforeEnd = before.length - 1;
-  let afterEnd = after.length - 1;
-  while (beforeEnd >= start && afterEnd >= start && before[beforeEnd] === after[afterEnd]) {
-    beforeEnd--;
-    afterEnd--;
-  }
-  const beforeSnippet = before.slice(Math.max(0, start), beforeEnd + 1).join('\n');
-  const afterSnippet = after.slice(Math.max(0, start), afterEnd + 1).join('\n');
+  // 切分与公共前后缀裁剪各只做一次：片段窗口与 +/- 徽标共用同一份结果
+  const { before, after, start, beforeEnd, afterEnd, added, removed } = prepareLineDiff(
+    beforeText,
+    afterText
+  );
+  const beforeSnippet = before.slice(start, beforeEnd + 1).join('\n');
+  const afterSnippet = after.slice(start, afterEnd + 1).join('\n');
   const beforeFull = beforeText == null ? '' : String(beforeText);
   const afterFull = String(afterText || '');
   const includeFullText =
     beforeFull.length <= DIFF_FULL_TEXT_CAP && afterFull.length <= DIFF_FULL_TEXT_CAP;
   // added/removed 走真实逐行 LCS（与 diff 图形同一口径）；
   // 掐头去尾只用于截取变更片段，未变更的中间行不再计入删除
-  const { added, removed } = computeLineDiffStats(beforeText, afterText);
   return {
     added,
     removed,
@@ -616,7 +607,7 @@ function createRpcHandlers(ctx) {
     );
   }
 
-  /** 远程工作区：仅允许项目内 dieyun-core；不回落本机 index_remote */
+  /** 远程工作区：仅允许项目内 dieyun-core；不回落本机建库 */
   async function assertRemoteIndexCore(ctxInfo) {
     return waitRemoteIndexCoreReady(ctxInfo, {
       timeoutMs: REMOTE_INDEX_START_TIMEOUT_MS,
@@ -733,14 +724,19 @@ function createRpcHandlers(ctx) {
       const undoCwd = cwdForCall() || defaultCwd;
       const resolved = normalizeFilePathInput(relPath, undoCwd);
       const safe = assertAllowedPath(resolved, writable);
-      if (!fsSync.existsSync(safe)) {
+      // 走异步 fs：这里在 captureUndoCheckpointSnapshot 里按 8 路并发跑，
+      // 同步读会把整批「假并发」压回主线程串行，一次回滚审查要卡住界面。
+      let st;
+      try {
+        st = await fs.stat(safe);
+      } catch {
+        // 不存在（existsSync 为 false）时原实现直接给 before:null
         return { before: null, encoding: enc, remote: false };
       }
-      const st = fsSync.statSync(safe);
       if (!st.isFile()) {
         return { before: null, encoding: enc, remote: false };
       }
-      const buf = fsSync.readFileSync(safe);
+      const buf = await fs.readFile(safe);
       if (buf.length > WORKTREE_SNAPSHOT_MAX_BYTES) {
         return {
           before: meta && meta.before != null ? String(meta.before) : null,
@@ -852,10 +848,13 @@ function createRpcHandlers(ctx) {
       } else {
         const resolved = normalizeFilePathInput(item.path, undoCwd);
         const safe = assertAllowedPath(resolved, writeRootsForCall());
-        if (fsSync.existsSync(safe)) {
+        try {
           const st = await fs.stat(safe);
           if (st.isDirectory()) await fs.rm(safe, { recursive: true, force: true });
           else await fs.unlink(safe);
+        } catch (err) {
+          // 已经不在了：撤回目标不存在不算失败（原来 existsSync 为 false 时同样静默返回）
+          if (!err || err.code !== 'ENOENT') throw err;
         }
       }
       return;

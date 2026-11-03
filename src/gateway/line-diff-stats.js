@@ -22,14 +22,18 @@ function lcsLineCount(aLines, bLines) {
 }
 
 /**
- * 真实逐行差异统计（绿加红减口径）。
- * 先掐掉公共前后缀；剩余中间块在 LCS 上限内按最长公共子序列精确计数，
- * 两处插入点之间未变更的行不会被误记为删除。超上限（超大文件）退回
- * 块级行数——删除量会被高估，但不会卡死主进程。
+ * 切分为行数组。
+ * `null` 表示「文件原本不存在」（0 行），空串仍算 1 行 —— 调用方按行数报「新建」时依赖这个区别。
  */
-function computeLineDiffStats(beforeText, afterText) {
-  const before = beforeText == null ? [] : String(beforeText).split(/\r?\n/);
-  const after = String(afterText || '').split(/\r?\n/);
+function diffLineArrays(beforeText, afterText) {
+  return {
+    before: beforeText == null ? [] : String(beforeText).split(/\r?\n/),
+    after: String(afterText || '').split(/\r?\n/)
+  };
+}
+
+/** 掐掉公共前后缀：未变更的行不进入 LCS，窗口只留真正变化的中段。 */
+function trimDiffWindow(before, after) {
   let start = 0;
   while (start < before.length && start < after.length && before[start] === after[start]) start++;
   let beforeEnd = before.length - 1;
@@ -38,8 +42,13 @@ function computeLineDiffStats(beforeText, afterText) {
     beforeEnd--;
     afterEnd--;
   }
-  const beforeMid = before.slice(start, beforeEnd + 1);
-  const afterMid = after.slice(start, afterEnd + 1);
+  return { start, beforeEnd, afterEnd };
+}
+
+/** 窗口内真实逐行差异；超上限（超大文件）退回块级行数，删除量会被高估但不会卡死主进程。 */
+function statsInWindow(before, after, window) {
+  const beforeMid = before.slice(window.start, window.beforeEnd + 1);
+  const afterMid = after.slice(window.start, window.afterEnd + 1);
   if (
     beforeMid.length + afterMid.length > LINE_DIFF_MAX_LINE_SUM ||
     beforeMid.length * afterMid.length > LINE_DIFF_MAX_LINE_PRODUCT
@@ -50,4 +59,28 @@ function computeLineDiffStats(beforeText, afterText) {
   return { added: afterMid.length - lcs, removed: beforeMid.length - lcs };
 }
 
-module.exports = { computeLineDiffStats };
+/**
+ * 一次切分 + 一次裁剪，同时给出片段窗口与 +/- 计数。
+ *
+ * 徽标计数（`computeLineDiffStats`）与「变更片段」摘要（`rpc.js:summarizeLineDiff`）
+ * 原本各自把两个文本切分、裁一遍再算 —— 同一份活干两次。这里做成单一来源：
+ * 调用方拿 `before/after/start/beforeEnd/afterEnd` 切片段，拿 `added/removed` 当徽标。
+ */
+function prepareLineDiff(beforeText, afterText) {
+  const { before, after } = diffLineArrays(beforeText, afterText);
+  const window = trimDiffWindow(before, after);
+  const { added, removed } = statsInWindow(before, after, window);
+  return { before, after, ...window, added, removed };
+}
+
+/**
+ * 真实逐行差异统计（绿加红减口径）。
+ * 先掐掉公共前后缀；剩余中间块在 LCS 上限内按最长公共子序列精确计数，
+ * 两处插入点之间未变更的行不会被误记为删除。
+ */
+function computeLineDiffStats(beforeText, afterText) {
+  const { added, removed } = prepareLineDiff(beforeText, afterText);
+  return { added, removed };
+}
+
+module.exports = { computeLineDiffStats, prepareLineDiff };

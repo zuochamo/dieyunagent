@@ -4,53 +4,12 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
 const { bufferLooksBinary } = require('../git/git-target');
-
-const IGNORE_DIRS = new Set([
-  'node_modules',
-  '.git',
-  'dist',
-  'build',
-  'out',
-  '.dieyun',
-  'coverage',
-  '__pycache__',
-  '.venv',
-  'venv',
-  '.next',
-  '.nuxt',
-  'target',
-  'vendor',
-  'win-unpacked'
-]);
-
-const IGNORE_EXT = new Set([
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.gif',
-  '.webp',
-  '.ico',
-  '.bmp',
-  '.zip',
-  '.7z',
-  '.rar',
-  '.gz',
-  '.exe',
-  '.dll',
-  '.so',
-  '.wasm',
-  '.pdf',
-  '.woff',
-  '.woff2',
-  '.ttf',
-  '.mp4',
-  '.mp3',
-  '.sqlite',
-  '.db',
-  '.pyc',
-  '.class',
-  '.jar'
-]);
+// 忽略口径的唯一来源：`index/source-files.js`（与 Rust `index/walker.rs` 的 IGNORE_DIRS /
+// IGNORE_EXT 对齐，并由 `test/unit/ignore-rules-parity.test.cjs` 机器校验）。
+// 本文件此前自带一份 IGNORE_DIRS + IGNORE_EXT：目录表逐字相同，扩展名表却只有一半
+// （缺 .docx/.xlsx/.pptx/.tar/.dylib/.apk …），于是 grep/glob 会把办公文档当文本返回，
+// 而同一份工作区的索引进不去 —— 两套口径对不上时，用户看到的就是「搜得到、索引里没有」。
+const { IGNORED_DIRS, BINARY_EXT } = require('../index/source-files');
 
 const DEFAULT_GREP_LIMIT = 50;
 const MAX_GREP_LIMIT = 200;
@@ -141,12 +100,12 @@ function matchGlob(relPath, pattern) {
 }
 
 function shouldSkipDir(name) {
-  return IGNORE_DIRS.has(String(name || '')) || String(name || '').startsWith('.');
+  return IGNORED_DIRS.has(String(name || '')) || String(name || '').startsWith('.');
 }
 
 function shouldSkipFile(filePath) {
   const ext = path.extname(filePath).toLowerCase();
-  return IGNORE_EXT.has(ext);
+  return BINARY_EXT.has(ext);
 }
 
 /** 单次遍历累积的 gitignore 规则上限，防御超大 ignore 文件 */
@@ -478,6 +437,19 @@ function lineNumberForOffset(starts, offset) {
   return lo + 1;
 }
 
+/**
+ * 多行模式的 `/g` 副本：同一轮检索里 `needle` 是同一个对象，只编译一次。
+ * 每次进文件前必须把 `lastIndex` 归零（与原「每文件新建一个正则」等价）。
+ */
+let multilineNeedleCache = null;
+
+function multilineRegExpFor(needle) {
+  if (multilineNeedleCache && multilineNeedleCache.needle === needle) return multilineNeedleCache.re;
+  const re = new RegExp(needle.source, needle.flags.includes('g') ? needle.flags : `${needle.flags}g`);
+  multilineNeedleCache = { needle, re };
+  return re;
+}
+
 /** 扫单个文件；返回 { entries, total }，不可读/二进制的返回 null */
 async function scanOneFileForGrep(root, rel, needle, opts) {
   const abs = path.join(root, rel);
@@ -504,10 +476,8 @@ async function scanOneFileForGrep(root, rel, needle, opts) {
   if (opts.multiline) {
     // 跨行匹配：整文件跑正则，再把字符下标换算成行号
     const starts = buildLineStarts(text);
-    const re = new RegExp(
-      needle.source,
-      needle.flags.includes('g') ? needle.flags : `${needle.flags}g`
-    );
+    const re = multilineRegExpFor(needle);
+    re.lastIndex = 0;
     let m;
     while ((m = re.exec(text)) !== null) {
       total += 1;
@@ -883,19 +853,10 @@ async function globWorkspace(root, opts = {}) {
 }
 
 module.exports = {
-  globToRegExp,
-  matchGlob,
   grepWorkspace,
   globWorkspace,
   walkFiles,
   probeOversizeFiles,
-  parseGitignoreLines,
-  isGitIgnored,
   TYPE_EXT,
-  DEFAULT_GREP_LIMIT,
-  DEFAULT_GLOB_LIMIT,
-  MAX_GREP_LIMIT,
-  MAX_GLOB_LIMIT,
-  MAX_GREP_CONTEXT,
   MAX_FILE_BYTES
 };
