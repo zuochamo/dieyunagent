@@ -58,7 +58,11 @@ function createHostHandlers(d) {
     });
     const blocked = await sandbox.guard(decision, {
       tool: 'host_exec',
-      sessionId: sessionId || getActiveCallSessionId()
+      sessionId: sessionId || getActiveCallSessionId(),
+      // 批准记忆的粒度是「会话 × 类别 × 目录」，目录只能来自判定结果。
+      // 不传 path 会让 `ask()` 拿到 `scopeOf(undefined)='-'`，退化成类别级 ——
+      // 即「批准过 D:\a 就等于批准过 D:\b」，一次批准打穿整个档位。
+      path: (decision && decision.path) || ''
     });
     if (blocked) {
       const e = new Error(blocked.error);

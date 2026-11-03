@@ -75,6 +75,26 @@ async function main() {
       assert(fs.readFileSync(path.join(ws, 'in.txt'), 'utf8') === 'x', 'file content written');
     }
 
+    // 2b) 临时目录：workspace-write 档下两条判定链必须给出同一个答案
+    //     （`assertSandboxWritable` 走 `_collectWritableRoots`、handler 走 `sandboxContext`；
+    //      临时目录曾经只在前者里，于是文件工具放行、shell 却弹窗）
+    {
+      const tmpFile = path.join(os.tmpdir(), `dieyun-sbx-tmp-${process.pid}.txt`);
+      const beforeFs = asks.length;
+      const fsRes = await rpc(gateway, 'fs.write_file', { filePath: tmpFile, data: 't' });
+      assert(fsRes.ok, `temp write ok: ${fsRes.ok ? '' : fsRes.error && fsRes.error.message}`);
+      assert(asks.length === beforeFs, `temp write must not ask in workspace-write, got ${asks.length - beforeFs} asks`);
+
+      const beforeShell = asks.length;
+      const shRes = await rpc(gateway, 'host.exec', { command: `echo t2 > "${tmpFile}"`, cwd: ws });
+      assert(shRes.ok, `temp shell write ok: ${shRes.ok ? '' : shRes.error && shRes.error.message}`);
+      assert(
+        asks.length === beforeShell,
+        `shell 写临时目录也不该问（旧实现只放行 fs 通道），got ${asks.length - beforeShell} asks`
+      );
+      fs.rmSync(tmpFile, { force: true });
+    }
+
     // 3) 工作区外写：问一次 → 允许 → 成功；再一次同类 → 不再问
     {
       const res1 = await rpc(gateway, 'fs.write_file', { filePath: outsideFile, data: 'a' });
@@ -118,6 +138,15 @@ async function main() {
       const res = await rpc(gateway, 'fs.write_file', { filePath: path.join(ws, 'ro.txt'), data: 'x' });
       assert(asks.length === before + 1, 'read-only asks even inside workspace');
       assert(res.ok, 'approved read-only write proceeds');
+
+      // 临时目录也不算内部根：read-only 档下同样要问
+      // （临时目录里的项目不该因为落在 %TEMP% 就整片免问）
+      const tmpRo = path.join(os.tmpdir(), `dieyun-sbx-ro-${process.pid}.txt`);
+      const beforeRo = asks.length;
+      const roRes = await rpc(gateway, 'fs.write_file', { filePath: tmpRo, data: 'x' });
+      assert(asks.length === beforeRo + 1, 'read-only asks for temp writes too');
+      assert(roRes.ok, 'approved read-only temp write proceeds');
+      fs.rmSync(tmpRo, { force: true });
 
       // read-only 的可写根只能列到具体子目录：`~/.dieyun` 这个父目录包着默认工作区
       // （~/.dieyun/workspace），放行它等于 read-only 在默认工作区里完全失效。
@@ -172,6 +201,38 @@ async function main() {
       assert(asks.length === before + 1, 'out-of-workspace shell write asks once');
       assert(res.ok, 'approved shell write runs');
       assert(fs.existsSync(marker), 'approved shell write produced the file');
+    }
+
+    // 7c) host.exec 的批准粒度是「会话 × 类别 × 目录」：换目录必须重新问。
+    //     曾退化：shell 判定不传 path → `scopeOf(undefined)='-'` → 类别级批准，
+    //     批准过 dirA 就等于批准过 dirB（一次批准打穿整个档位）。
+    {
+      gateway.setPermissions({ sandboxMode: 'workspace-write' });
+      gateway.sandboxApprovals.clearAll();
+      gateway.setSandboxApprovalChannel(async (payload) => {
+        asks.push(payload);
+        return true;
+      });
+      const dirA = path.join(os.homedir(), `.dieyun-sbx-a-${process.pid}-${Date.now()}`);
+      const dirB = path.join(os.homedir(), `.dieyun-sbx-b-${process.pid}-${Date.now()}`);
+      fs.mkdirSync(dirA, { recursive: true });
+      fs.mkdirSync(dirB, { recursive: true });
+      const before = asks.length;
+      await rpc(gateway, 'host.exec', { command: `echo hi > "${path.join(dirA, 'a.txt')}"`, cwd: ws });
+      assert(asks.length === before + 1, `dirA shell write asks once, got ${asks.length - before}`);
+      await rpc(gateway, 'host.exec', { command: `echo hi > "${path.join(dirA, 'b.txt')}"`, cwd: ws });
+      assert(asks.length === before + 1, `same-dir shell write must not ask again, got ${asks.length - before}`);
+      const resB = await rpc(gateway, 'host.exec', {
+        command: `echo hi > "${path.join(dirB, 'c.txt')}"`,
+        cwd: ws
+      });
+      assert(
+        asks.length === before + 2,
+        `换个目录必须重新问（类别级退化会让它免问），got ${asks.length - before} asks`
+      );
+      assert(resB.ok, 'approved second dir runs');
+      fs.rmSync(dirA, { recursive: true, force: true });
+      fs.rmSync(dirB, { recursive: true, force: true });
     }
 
     // 7b) host.exec 里的引号必须原样到达 cmd.exe（带空格路径不许被转义成 \"）

@@ -447,24 +447,31 @@ class LocalGateway {
     return false;
   }
 
+  /**
+   * 各档位的可写根：**唯一组装点**。
+   *
+   * 同一个路径有两条判定链 —— `assertSandboxWritable` / `permissions.sandbox_state`
+   * （用 `_collectWritableRoots()`）与 handler 里的 `decideFsWrite/decideShellCommand`
+   * （用 `sandboxContext()` 的 internalRoots / workspaceRoots）。两条链各拼一份清单就会打架：
+   * 临时目录曾只出现在前者，于是同一份 `%TEMP%` 下的写在文件工具里放行、在 shell 里弹窗。
+   * 现在档位语义只写一次，两条链都从这里取：
+   * - danger-full-access：整盘（历史 unrestrictedPaths 语义）
+   * - workspace-write：内部目录 + 临时目录 + 工作区
+   * - read-only：只有内部目录（工作区与临时目录的写都要问 —— 临时目录里的项目不该整片免问）
+   */
+  writableRootsForMode() {
+    const mode = this.getSandboxMode();
+    if (mode === 'danger-full-access') return { internal: localVolumeRoots(), workspace: [] };
+    const internal = this._internalWriteRoots();
+    if (mode === 'workspace-write') {
+      return { internal: [...internal, systemTempDir()], workspace: this._workspaceWriteRoots() };
+    }
+    return { internal, workspace: [] };
+  }
+
   _collectWritableRoots() {
-    // 沙箱档位唯一决定「能写哪儿」：
-    // - danger-full-access：整盘可写（历史 unrestrictedPaths 语义）
-    // - workspace-write：本机内部目录 + 工作区 + 临时目录（用户主目录不再默认开写）
-    // - read-only：只有本机内部目录 + 临时目录（账本/日志/缓存还得能写，否则 Agent 无法记账）
-    const sandboxMode = this.getSandboxMode();
-    if (sandboxMode === 'danger-full-access') {
-      // 卷根本身已覆盖内部目录与工作区，不必再拼（拼了反而让「整盘」这个事实不直观）
-      return uniqueResolvedRoots(localVolumeRoots());
-    }
-    if (sandboxMode === 'workspace-write') {
-      return uniqueResolvedRoots([
-        ...this._internalWriteRoots(),
-        ...this._workspaceWriteRoots(),
-        systemTempDir()
-      ]);
-    }
-    return uniqueResolvedRoots([...this._internalWriteRoots(), systemTempDir()]);
+    const { internal, workspace } = this.writableRootsForMode();
+    return uniqueResolvedRoots([...internal, ...workspace]);
   }
 
   /**
@@ -506,10 +513,13 @@ class LocalGateway {
 
   /** 沙箱判定上下文（窗口/工具层共用一份，避免各处自己拼 roots）。 */
   sandboxContext(opts = {}) {
+    // 工作区根始终给（相对路径的基准、审批记忆里的目录都靠它），
+    // 是否「可写」由 mode 决定，见 `writableRootsForMode()`。
+    const { internal } = this.writableRootsForMode();
     return {
       mode: this.getSandboxMode(),
       workspaceRoots: this._workspaceWriteRoots(),
-      internalRoots: this._internalWriteRoots(),
+      internalRoots: internal,
       cwd: opts.cwd
     };
   }
@@ -776,6 +786,13 @@ class LocalGateway {
       allowedReadRoots: this._collectReadRoots(),
       writableRoots: this._collectWritableRoots(),
       permissions: this.permissions,
+      /**
+       * 会话工作空间绑定的不变式：**写会话行 = 同时更新进程内上下文**。
+       * 放在这里（而不是各调用方）是因为 `memory.session_workspace_set` 是会话行的唯一写入口：
+       * 只写库的话，下一次 hydrate 之前 Gateway 处理 RPC（工具/索引/读写）仍按旧上下文解析路径。
+       */
+      setSessionWorkspaceContext: (sessionId, workspacePath) =>
+        this.setSessionWorkspaceContext(sessionId, workspacePath),
       /** 沙箱判定的唯一注入面：mode + roots + 审批。handler 不再自己拼白名单。 */
       sandbox: {
         context: (opts) => this.sandboxContext(opts),
@@ -1262,4 +1279,4 @@ class LocalGateway {
   }
 }
 
-module.exports = { LocalGateway, DEFAULT_PORT };
+module.exports = { LocalGateway };

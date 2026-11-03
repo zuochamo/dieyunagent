@@ -309,10 +309,6 @@ function normalizeSandboxMode(value) {
   return SANDBOX_MODES.includes(v) ? v : DEFAULT_SANDBOX_MODE;
 }
 
-function sandboxModeMeta(mode) {
-  return SANDBOX_MODE_META[normalizeSandboxMode(mode)];
-}
-
 /** 判定分类。`allow` 直接放行；`ask` 需要用户批一次；`deny` 恒拒。 */
 const SANDBOX_CATEGORIES = Object.freeze({
   READ: 'read',
@@ -479,6 +475,9 @@ function decideShellCommand(command, opts = {}) {
       category: SANDBOX_CATEGORIES.WRITE,
       reason: `当前档位「${meta.label}」不写文件；这条命令会落盘。`,
       mode,
+      // 结构化「这次批准记在哪个位置」：审批记忆按会话 × 类别 × 目录记，
+      // 不从 `detail` 文本里解析路径（那是给人看的，格式随时会变）。
+      path: outside[0] || absPaths[0] || '',
       detail: (outside[0] || paths[0] || cmd).slice(0, 200)
     };
   }
@@ -489,6 +488,7 @@ function decideShellCommand(command, opts = {}) {
       category: SANDBOX_CATEGORIES.WRITE,
       reason: `这条命令会写工作区之外的路径；当前档位「${meta.label}」需要你同意一次。`,
       mode,
+      path: outside[0],
       detail: outside.slice(0, 5).join(', ')
     };
   }
@@ -651,15 +651,10 @@ module.exports = {
   SANDBOX_DENY_LIST,
   DENY_COMMAND_WORDS,
   matchDangerousCommand,
-  commandWords,
   commandMayWrite,
   runsScriptInterpreter,
-  INTERPRETER_BASENAMES,
   stripShellQuotedSegments,
   normalizeSandboxMode,
-  sandboxModeMeta,
-  isUnder,
-  isUnderAny,
   extractPathTokens,
   decideShellCommand,
   decideFsWrite,
