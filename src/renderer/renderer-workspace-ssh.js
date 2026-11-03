@@ -548,6 +548,7 @@ async function loadSshProfileIntoForm(ws) {
   const keyPath = $('ssh-connect-key-path');
   const keyPass = $('ssh-connect-key-passphrase');
   const hint = $('ssh-connect-encrypt-hint');
+  const credsReset = $('ssh-connect-credentials-reset');
   if (pass) pass.value = '';
   if (keyPass) keyPass.value = '';
 
@@ -568,7 +569,14 @@ async function loadSshProfileIntoForm(ws) {
     if (remember) remember.checked = !!profile.remember;
     if (keyPath) keyPath.value = profile.authType === 'key' ? profile.privateKeyPath || '' : '';
     if (hint) {
-      if (profile.remember && !profile.canEncrypt) {
+      if (profile.storeCorrupt) {
+        // 文件坏了：已保存的凭据读不出来。必须明说，否则用户以为「这台机器没记住」，
+        // 随手勾上记住再保存 —— 保存已被 store 拦下（SECRET_STORE_CORRUPT），但提示要提前给。
+        hint.textContent =
+          '已保存的登录信息读不出来（SSH 凭据文件损坏），请重新填写；' +
+          '现在保存会被拦下，以免覆盖其余主机';
+        hint.hidden = false;
+      } else if (profile.remember && !profile.canEncrypt) {
         hint.textContent = '当前系统无法加密存储凭据，记住登录可能不可用';
         hint.hidden = false;
       } else if (profile.remember && profile.hasSecret) {
@@ -581,11 +589,43 @@ async function loadSshProfileIntoForm(ws) {
         hint.hidden = true;
       }
     }
+    if (credsReset) credsReset.hidden = !profile.storeCorrupt;
   } else {
     if (remember) remember.checked = false;
     if (keyPath) keyPath.value = '';
     if (hint) hint.hidden = true;
+    if (credsReset) credsReset.hidden = true;
   }
+}
+
+/**
+ * 备份坏掉的 `ssh-profiles.json` 并按空态重建，然后重读面板（选择「记住登录」后重新填写即可）。
+ *
+ * 不直接删文件：里面可能有还能人工救回的密文，改名备份是不可逆损失最小的做法。
+ */
+async function resetSshCredentialsStore() {
+  if (!wsApi.sshCredentialsReset) return;
+  if (
+    !window.confirm(
+      '把无法解析的 SSH 凭据文件改名备份，并按空态重建？重建后需要重新填写各主机的登录信息。'
+    )
+  ) {
+    return;
+  }
+  try {
+    const result = await wsApi.sshCredentialsReset();
+    showAgentToast(
+      'SSH 凭据文件已重建',
+      result && result.moved
+        ? `原文件已备份为 ${result.backupPath}，请重新填写登录信息`
+        : '凭据文件本来就不存在，已按空态重建',
+      { variant: 'info' }
+    );
+  } catch (err) {
+    showAgentToast('重建失败', (err && err.message) || String(err), { variant: 'error' });
+  }
+  const ws = wsApi.getWorkspace ? await wsApi.getWorkspace().catch(() => null) : null;
+  await loadSshProfileIntoForm(ws);
 }
 
 /**
@@ -1184,6 +1224,12 @@ function initWorkspacePicker() {
   const connectCancel = $('ssh-connect-cancel');
   if (connectClose) connectClose.addEventListener('click', () => closeSshConnectModal({ clearProgress: true }));
   if (connectCancel) connectCancel.addEventListener('click', () => closeSshConnectModal({ clearProgress: true }));
+  const connectCredsReset = $('ssh-connect-credentials-reset');
+  if (connectCredsReset) {
+    connectCredsReset.addEventListener('click', () => {
+      resetSshCredentialsStore().catch(() => {});
+    });
+  }
 
   const dirClose = $('ssh-remote-dir-close');
   const dirCancel = $('ssh-remote-dir-cancel');

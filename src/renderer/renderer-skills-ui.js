@@ -649,6 +649,58 @@ async function deleteMcpItem(server) {
   }
 }
 
+/**
+ * 「MCP 凭据文件坏了」的显式提示。
+ *
+ * `mcp-secrets.json` 解析不出来时，之前的表现是「静默当空」：列表里每个服务都像没配过，
+ * 用户照着再填一次，保存就把整份文件重写成只剩这一条 —— 其余服务的 token 与环境变量
+ * 一起消失，而且没有任何提示。所以这里必须把损坏摆到列表上方，并给一个显式的
+ * 「备份并重建」（坏文件改名保留，可能还能人工救回；重建后按空态重新填写）。
+ *
+ * 与 SSH 面板同一个语义，两处文案各自贴合场景，判定都来自 `secret-store` 的 health。
+ */
+async function refreshMcpCredentialsWarning() {
+  const box = $('mcp-credentials-warning');
+  const text = $('mcp-credentials-warning-text');
+  if (!box || !skillsApi.mcpCredentialsHealth) return;
+  let health = null;
+  try {
+    health = await skillsApi.mcpCredentialsHealth();
+  } catch {
+    health = null;
+  }
+  const corrupt = !!(health && health.corrupt);
+  box.hidden = !corrupt;
+  if (!corrupt) return;
+  if (text) {
+    text.textContent =
+      'MCP 凭据文件无法解析，已保存的 Token / 环境变量现在读不出来（保存会被拦截，避免覆盖）。' +
+      '请点「备份并重建」后重新填写：坏文件会改名保留，可以人工找回。';
+  }
+}
+
+/** 备份坏掉的 mcp-secrets.json 并按空态重建，然后刷新列表与提示。 */
+async function resetMcpCredentialsStore() {
+  if (!skillsApi.mcpCredentialsReset) return;
+  if (!window.confirm('把无法解析的凭据文件改名备份，并按空态重建？重建后需要重新填写 Token / 环境变量。')) {
+    return;
+  }
+  try {
+    const result = await skillsApi.mcpCredentialsReset();
+    showAgentToast(
+      '凭据文件已重建',
+      result && result.moved
+        ? `原文件已备份为 ${result.backupPath}，请重新填写 Token / 环境变量`
+        : '凭据文件本来就不存在，已按空态重建',
+      { variant: 'info' }
+    );
+  } catch (err) {
+    showAgentToast('重建失败', (err && err.message) || String(err), { variant: 'error' });
+  }
+  await refreshMcpCredentialsWarning();
+  await renderMcpList();
+}
+
 async function renderMcpList() {
   const grid = $('skills-mcp-grid');
   if (!grid) return;
@@ -657,6 +709,9 @@ async function renderMcpList() {
     updateGridPagination('mcp', 0, 0, 0);
     return;
   }
+  // 先亮出「凭据文件坏了」：这种状态下列表看起来像「一个都没配过」，用户照着再填一次，
+  // 保存就会把整份 mcp-secrets.json 重写成只剩这一条。
+  refreshMcpCredentialsWarning().catch(() => {});
   if (!mcpServersCache.length) {
     grid.innerHTML = '<div class="skills-empty">加载中…</div>';
   }
@@ -875,6 +930,9 @@ function initSkillsUI() {
   });
   $('mcp-config-check-update')?.addEventListener('click', () => {
     checkMcpUpdateForCurrent().catch(() => {});
+  });
+  $('mcp-credentials-warning-reset')?.addEventListener('click', () => {
+    resetMcpCredentialsStore().catch(() => {});
   });
 
   // Agent 的 mcp_manage request_credential：直接打开该服务的配置弹窗，由人亲手填 Key。

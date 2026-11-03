@@ -29,6 +29,7 @@ function registerSkillsMcpIpc(ctx) {
     mcpManager,
     getSkillCatalog,
     listMcpServersForUi,
+    ensureMcpCredentialsStore,
     deleteMcpServer,
     addMcpServer,
     setMcpServerEnabled,
@@ -127,6 +128,20 @@ function registerSkillsMcpIpc(ctx) {
   });
 
   ipcMain.handle('mcp:list', () => listMcpServersForUi(getUserDataPath()));
+
+  /**
+   * 凭据文件健康度：`{ corrupt, message, filePath }`。
+   * 设置页据此显示「凭据文件损坏，请重新填写」——以前这里读坏文件只是静默当空，
+   * 下一步任意一次保存就把其余服务的 token 一起抹掉了。
+   */
+  ipcMain.handle('mcp:credentials-health', () =>
+    ensureMcpCredentialsStore(getUserDataPath()).readStoreHealth()
+  );
+
+  /** 备份坏的 `mcp-secrets.json` 并按空态重建（设置页「备份并重建」）。 */
+  ipcMain.handle('mcp:credentials-reset', () =>
+    ensureMcpCredentialsStore(getUserDataPath()).resetStore()
+  );
 
   ipcMain.handle('mcp:set-enabled', async (_evt, payload) => {
     const userData = getUserDataPath();

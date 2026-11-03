@@ -1,8 +1,6 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-const { atomicWriteFileSync } = require('../fs-atomic');
+const { createSecretStore } = require('../secret-store');
 const { parseWorkspaceInput, buildSshUri } = require('../workspace/target');
 
 /**
@@ -13,17 +11,14 @@ const { parseWorkspaceInput, buildSshUri } = require('../workspace/target');
  * （见 issue/2026-10-30-agent-channel-and-workspace-binding.md）。
  *
  * 安全：Secret 只以 safeStorage 密文落盘（`secretEnc`，base64）；文件本身按 0600 写。
- * 与 `ssh/credentials-store.js` 同一套判定：能加密才允许保存，否则明确报错而不是明文兜底。
+ * 加解密与落盘权限的唯一实现在 `src/secret-store.js`（MCP / SSH 凭据同一份）：
+ * 能加密才允许保存，否则明确报错而不是明文兜底。
  *
  * 会话映射（企微联系人 → Agent 会话）跟频道一起存：外部入口的「一对一关系」是频道自己的
  * 状态，散落到别的文件只会多一处真相。上限 500 条按最近活跃裁剪，避免长跑后无限增长。
  */
 
 const CONVERSATION_LIMIT = 500;
-
-function storePath(userDataPath) {
-  return path.join(userDataPath, 'channels.json');
-}
 
 function emptyState() {
   return { version: 1, channels: [] };
@@ -58,60 +53,33 @@ function newChannelId() {
 function createChannelStore(deps) {
   const userDataPath = String(deps.userDataPath || '');
   const log = typeof deps.log === 'function' ? deps.log : () => {};
-  const file = storePath(userDataPath);
+  // 加解密与 0600 落盘唯一实现：`src/secret-store.js`
+  const box = createSecretStore({
+    userDataPath,
+    fileName: 'channels.json',
+    safeStorage: deps.safeStorage,
+    log,
+    label: 'channels',
+    encryptUnavailableMessage: '当前系统无法加密存储凭据，无法保存频道 Secret',
+    // 坏文件必须抛（不能当空）：下一次保存会用「只有一条频道」的状态覆盖整份文件，
+    // 用户所有频道与会话映射一起没。
+    onCorrupt: 'throw',
+    corruptCode: 'CHANNEL_STORE_CORRUPT'
+  });
+  const file = box.filePath;
 
-  function canEncrypt() {
-    const ss = deps.safeStorage;
-    return !!(ss && typeof ss.isEncryptionAvailable === 'function' && ss.isEncryptionAvailable());
-  }
-
-  function encryptSecret(text) {
-    const s = String(text || '');
-    if (!s) return '';
-    const ss = deps.safeStorage;
-    if (!canEncrypt() || !ss) {
-      const e = new Error('当前系统无法加密存储凭据，无法保存频道 Secret');
-      e.code = 'CREDENTIALS_ENCRYPT_UNAVAILABLE';
-      throw e;
-    }
-    return ss.encryptString(s).toString('base64');
-  }
-
-  function decryptSecret(enc) {
-    if (!enc) return '';
-    const ss = deps.safeStorage;
-    if (!canEncrypt() || !ss) return '';
-    try {
-      return ss.decryptString(Buffer.from(String(enc), 'base64'));
-    } catch (e) {
-      log(`[channels] Secret 无法解密（safeStorage 密钥与写入时不一致）：${e && e.message}`);
-      return '';
-    }
-  }
+  const canEncrypt = box.canEncrypt;
+  const encryptSecret = box.encryptSecret;
+  const decryptSecret = box.decryptSecret;
 
   /**
-   * 读配置。**解析失败绝不静默当空**：以前这里 catch 后返回空态，随后的任意一次保存
-   * 就会用「只有一条频道」的状态覆盖掉整个 channels.json（用户所有频道与会话映射一起没）。
-   * 文件不存在才算空；解析失败抛 CHANNEL_STORE_CORRUPT，让 UI 明确告诉用户文件坏了。
+   * 读配置。**解析失败绝不静默当空**（见 `secret-store.js` 的 `onCorrupt: 'throw'`）。
+   * 文件不存在才算空态；结构不对同样报 CHANNEL_STORE_CORRUPT，让 UI 明确告诉用户文件坏了。
    */
   function readState() {
-    let text;
-    try {
-      text = fs.readFileSync(file, 'utf8');
-    } catch (e) {
-      if (e && e.code === 'ENOENT') return emptyState();
-      throw e;
-    }
-    let raw;
-    try {
-      raw = JSON.parse(text);
-    } catch (e) {
-      const err = new Error(`频道配置文件解析失败（${file}）：${(e && e.message) || e}`);
-      err.code = 'CHANNEL_STORE_CORRUPT';
-      log(`[channels] ${err.message}`);
-      throw err;
-    }
-    if (!raw || !Array.isArray(raw.channels)) {
+    const raw = box.readJson();
+    if (!raw) return emptyState();
+    if (!Array.isArray(raw.channels)) {
       const err = new Error(`频道配置文件结构不对（${file}）：缺少 channels 数组`);
       err.code = 'CHANNEL_STORE_CORRUPT';
       log(`[channels] ${err.message}`);
@@ -121,16 +89,10 @@ function createChannelStore(deps) {
   }
 
   function writeState(state) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
     const payload = { version: 1, channels: state.channels.map(publicRecordOfStorage) };
     // 只存密文，但文件仍按 0600 落盘（与 ssh-profiles.json 同理：同机其他用户不该看到
     // 你有哪几条频道、绑定哪个目录）
-    atomicWriteFileSync(file, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });
-    try {
-      fs.chmodSync(file, 0o600);
-    } catch {
-      // Windows 上 chmod 语义有限，忽略
-    }
+    box.writeJson(payload);
   }
 
   /** 落盘形态：去掉运行时字段，只留配置 */

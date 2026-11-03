@@ -5351,50 +5351,7 @@ body.modal-config-open #help-overlay:not([hidden]) {
   display: none;
 }
 
-/* ---------- 仲裁 / 恢复检查点 ---------- */
-.agent-arbitration-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 530;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: rgba(0, 0, 0, 0.55);
-}
-
-.agent-arbitration-overlay[hidden] {
-  display: none;
-}
-
-.agent-arbitration-dialog {
-  width: min(440px, calc(100vw - 48px));
-  padding: 20px 22px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 0;
-  box-shadow: var(--shadow);
-}
-
-.agent-arbitration-dialog h2 {
-  margin: 0 0 10px;
-  font-size: 16px;
-}
-
-.agent-arbitration-desc {
-  margin: 0 0 16px;
-  font-size: 13px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
-.agent-arbitration-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: flex-end;
-}
-
+/* ---------- 恢复检查点 ---------- */
 .agent-resume-banner {
   display: flex;
   align-items: center;
@@ -6611,6 +6568,32 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   justify-content: flex-end;
   gap: 12px;
   margin-top: 4px;
+}
+/* 凭据文件损坏提示（MCP 列表上方 / SSH 面板）：这是「数据读不出来」的告警，
+   不是普通 hint，所以用 warn 配色 + 常驻，直到用户备份重建。 */
+.settings-warning {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--warn, #b45309);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(180, 83, 9, 0.08);
+}
+.settings-warning[hidden] {
+  display: none;
+}
+.settings-warning-text {
+  flex: 1;
+  min-width: 0;
+}
+.ssh-credentials-reset {
+  align-self: flex-start;
+  font-size: 12px;
 }
 .save-hint {
   font-size: 12px;

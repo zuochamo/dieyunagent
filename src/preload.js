@@ -56,6 +56,8 @@ contextBridge.exposeInMainWorld('diecloud', {
   sshBrowse: (remotePath) => ipcRenderer.invoke('ssh:browse', { path: remotePath }),
   sshHome: () => ipcRenderer.invoke('ssh:home'),
   sshGetProfile: (payload) => ipcRenderer.invoke('ssh:get-profile', payload),
+  /** 凭据文件坏了（`ssh:get-profile` 返回 storeCorrupt）时，面板据此备份重建 */
+  sshCredentialsReset: () => ipcRenderer.invoke('ssh:credentials-reset'),
   sshAutoReconnect: () => ipcRenderer.invoke('ssh:auto-reconnect'),
   sshRemoteGatewayStatus: () => ipcRenderer.invoke('ssh:remote-gateway-status'),
   getMonacoVsUrl: () => ipcRenderer.invoke('bundled-assets:monaco-vs-url'),
@@ -159,6 +161,9 @@ contextBridge.exposeInMainWorld('diecloud', {
   deleteSkill: (payload) => ipcRenderer.invoke('skills:delete', payload),
 
   listMcpServers: () => ipcRenderer.invoke('mcp:list'),
+  /** `{ corrupt, message, filePath }`：MCP 凭据文件坏了要显式提示，不能当「没配过」 */
+  mcpCredentialsHealth: () => ipcRenderer.invoke('mcp:credentials-health'),
+  mcpCredentialsReset: () => ipcRenderer.invoke('mcp:credentials-reset'),
   setMcpEnabled: (payload) => ipcRenderer.invoke('mcp:set-enabled', payload),
   addMcpServer: (payload) => ipcRenderer.invoke('mcp:add', payload),
   deleteMcpServer: (payload) => ipcRenderer.invoke('mcp:delete', payload),
@@ -429,7 +434,6 @@ contextBridge.exposeInMainWorld('diecloud', {
   agentCheckpointDelete: (runId) => ipcRenderer.invoke('agent:checkpoint-delete', { runId }),
   agentCheckpointList: (limit) => ipcRenderer.invoke('agent:checkpoint-list', { limit }),
   agentTrace: (runId) => ipcRenderer.invoke('agent:trace', { runId }),
-  agentArbitrate: (runId, decision) => ipcRenderer.invoke('agent:arbitrate', { runId, decision }),
   agentRustLoopPing: () => ipcRenderer.invoke('agent:rust-loop-ping'),
   agentPrepSystemPrompt: (payload) => ipcRenderer.invoke('agent:prep-system-prompt', payload || {}),
   // 记忆归纳：触发与执行都在 Main（src/agent/knowledge-maintainer.js）。
@@ -562,19 +566,6 @@ contextBridge.exposeInMainWorld('diecloud', {
     ipcRenderer.on('agent:planner-phase', handler);
     return () => ipcRenderer.removeListener('agent:planner-phase', handler);
   },
-  onAgentPlannerArbitrate: (cb) => {
-    const handler = (_evt, payload) => {
-      try {
-        cb(payload);
-      } catch {
-        // ignore
-      }
-    };
-    ipcRenderer.on('agent:planner-arbitrate', handler);
-    return () => ipcRenderer.removeListener('agent:planner-arbitrate', handler);
-  },
-  agentPlannerArbitrateResult: (payload) =>
-    ipcRenderer.invoke('agent:planner-arbitrate-result', payload || {}),
   onAgentMainToolDelegate: (cb) => {
     const handler = (_evt, payload) => {
       try {

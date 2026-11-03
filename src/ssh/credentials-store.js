@@ -1,62 +1,36 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
+const { createSecretStore } = require('../secret-store');
 
 /**
  * @param {{ safeStorage?: import('electron').SafeStorage, userDataPath: string }} deps
  */
 function createSshCredentialsStore(deps) {
-  const userDataPath = deps.userDataPath;
-  const storePath = path.join(userDataPath, 'ssh-profiles.json');
+  // 加解密与 0600 落盘唯一实现：`src/secret-store.js`
+  const box = createSecretStore({
+    userDataPath: deps.userDataPath,
+    fileName: 'ssh-profiles.json',
+    safeStorage: deps.safeStorage,
+    label: 'ssh-profiles.json',
+    encryptUnavailableMessage: '当前系统无法加密存储凭据，无法保存记住的登录信息',
+    // 坏文件当空：SSH 登录信息可重填，且这里没有「保存即整份覆盖」以外的用途。
+    onCorrupt: 'empty'
+  });
 
-  function canEncrypt() {
-    const ss = deps.safeStorage;
-    return !!(ss && typeof ss.isEncryptionAvailable === 'function' && ss.isEncryptionAvailable());
-  }
+  const canEncrypt = box.canEncrypt;
+  const encryptSecret = box.encryptSecret;
+  const decryptSecret = box.decryptSecret;
 
   function profileKey(host, port, username) {
     return `${String(host || '').trim()}:${Number(port) || 22}:${String(username || '').trim()}`;
   }
 
   function readStore() {
-    try {
-      return JSON.parse(fs.readFileSync(storePath, 'utf8'));
-    } catch {
-      return {};
-    }
+    return box.readJson() || {};
   }
 
   function writeStore(data) {
-    fs.mkdirSync(path.dirname(storePath), { recursive: true });
-    // 只存密文，但文件仍按 0600 落盘：别人的可读副本 + 本机 safeStorage 一旦换机器/换用户
-    // 就解不开，而 0644（umask 默认）会把「谁登录过哪台机器、用哪个密钥」白送给同机其他用户。
-    fs.writeFileSync(storePath, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
-    try {
-      // mode 只对新建文件生效：已存在的文件（历史版本建的 0644）要显式收紧
-      fs.chmodSync(storePath, 0o600);
-    } catch {
-      // Windows 上 chmod 语义有限，忽略
-    }
-  }
-
-  function encryptSecret(text) {
-    const s = String(text || '');
-    if (!s) return '';
-    const ss = deps.safeStorage;
-    if (!canEncrypt() || !ss) return '';
-    return ss.encryptString(s).toString('base64');
-  }
-
-  function decryptSecret(enc) {
-    if (!enc) return '';
-    const ss = deps.safeStorage;
-    if (!canEncrypt() || !ss) return '';
-    try {
-      return ss.decryptString(Buffer.from(String(enc), 'base64'));
-    } catch {
-      return '';
-    }
+    box.writeJson(data);
   }
 
   function getProfile(host, port, username) {
@@ -159,6 +133,23 @@ function createSshCredentialsStore(deps) {
     writeStore(store);
   }
 
+  /**
+   * 凭据文件健康度。`corrupt: true` 时连接面板显示「文件损坏，请重新填写」，
+   * 并且 `saveProfile` 会以 `SECRET_STORE_CORRUPT` 拒绝写入 —— 坏文件被当成空再保存一次，
+   * 就会把用户其余主机的登录信息静默抹掉。
+   *
+   * 先读一次再报：损坏态是「读到坏文件」才成立的，光看状态位会漏掉一个从未被读过的坏文件。
+   */
+  function readStoreHealth() {
+    readStore();
+    return box.getHealth();
+  }
+
+  /** 备份坏文件并重建（连接面板「备份并重建」按钮）。 */
+  function resetStore() {
+    return box.resetCorruptFile();
+  }
+
   return {
     canEncrypt,
     profileKey,
@@ -166,7 +157,9 @@ function createSshCredentialsStore(deps) {
     loadConnectSecrets,
     findSavedProfileForHost,
     saveProfile,
-    clearProfile
+    clearProfile,
+    readStoreHealth,
+    resetStore
   };
 }
 

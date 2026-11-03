@@ -1,7 +1,6 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
+const { createSecretStore } = require('../secret-store');
 
 /** 解密失败去重：读取凭据是高频路径（列表 / 弹窗 / 建会话都读），同一个坏值只喊一次 */
 const warnedUndecryptable = new Set();
@@ -25,44 +24,29 @@ function warnUndecryptable(serverId, keys, encryptionAvailable) {
  * @param {{ safeStorage?: import('electron').SafeStorage, userDataPath: string }} deps
  */
 function createMcpCredentialsStore(deps) {
-  const storePath = path.join(deps.userDataPath || '', 'mcp-secrets.json');
+  // 加解密与 0600 落盘的唯一实现：`src/secret-store.js`
+  // （此前本文件自己写了一份，且**漏了 0600** —— 同机其他用户能读 mcp-secrets.json）。
+  const box = createSecretStore({
+    userDataPath: deps.userDataPath || '',
+    fileName: 'mcp-secrets.json',
+    safeStorage: deps.safeStorage,
+    label: 'mcp-secrets.json',
+    encryptUnavailableMessage: '当前系统无法加密存储 MCP 凭据',
+    // 读到坏文件当空：MCP 凭据是「可重填」的运行时配置，读取路径在 Agent 轮内高频命中，
+    // 抛错会把一次工具调用直接打断。（频道配置相反，见 channels/store.js 的 'throw'。）
+    onCorrupt: 'empty'
+  });
 
-  function canEncrypt() {
-    const ss = deps.safeStorage;
-    return !!(ss && typeof ss.isEncryptionAvailable === 'function' && ss.isEncryptionAvailable());
-  }
+  const canEncrypt = box.canEncrypt;
+  const encryptSecret = box.encryptSecret;
+  const decryptSecret = box.decryptSecret;
 
   function readStore() {
-    try {
-      const raw = JSON.parse(fs.readFileSync(storePath, 'utf8'));
-      return raw && typeof raw === 'object' ? raw : {};
-    } catch {
-      return {};
-    }
+    return box.readJson() || {};
   }
 
   function writeStore(data) {
-    fs.mkdirSync(path.dirname(storePath), { recursive: true });
-    fs.writeFileSync(storePath, JSON.stringify(data, null, 2), 'utf8');
-  }
-
-  function encryptSecret(text) {
-    const s = String(text || '');
-    if (!s) return '';
-    const ss = deps.safeStorage;
-    if (!canEncrypt() || !ss) return '';
-    return ss.encryptString(s).toString('base64');
-  }
-
-  function decryptSecret(enc) {
-    if (!enc) return '';
-    const ss = deps.safeStorage;
-    if (!canEncrypt() || !ss) return '';
-    try {
-      return ss.decryptString(Buffer.from(String(enc), 'base64'));
-    } catch {
-      return '';
-    }
+    box.writeJson(data);
   }
 
   function getRow(serverId) {
@@ -184,12 +168,31 @@ function createMcpCredentialsStore(deps) {
     writeStore(store);
   }
 
+  /**
+   * 凭据文件健康度。`corrupt: true` 时设置页显示「文件损坏，请重新填写」，
+   * 并且 `saveSecrets` 会以 `SECRET_STORE_CORRUPT` 拒绝写入 —— 坏文件被当成空再保存一次，
+   * 就会把用户其余服务的 token 静默抹掉。
+   *
+   * 先读一次再报：损坏态是「读到坏文件」才成立的，光看状态位会漏掉一个从未被读过的坏文件。
+   */
+  function readStoreHealth() {
+    readStore();
+    return box.getHealth();
+  }
+
+  /** 备份坏文件并重建（设置页「备份并重建」按钮）。 */
+  function resetStore() {
+    return box.resetCorruptFile();
+  }
+
   return {
     canEncrypt,
     getSecretMeta,
     loadSecrets,
     saveSecrets,
-    clearSecrets
+    clearSecrets,
+    readStoreHealth,
+    resetStore
   };
 }
 
