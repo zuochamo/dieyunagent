@@ -418,8 +418,12 @@ async function applyMemoryItems(ctx, items, opts = {}) {
   let merged = 0;
   let skipped = 0;
   for (const item of (items || []).slice(0, max)) {
-    // scope 已在 parseKnowledgeJson 归一成 project / global；高价值条目仍归项目级
-    const useProject = !!wsPath && (item.scope === 'project' || Number(item.importance) >= 4);
+    // 落点只由 scope 决定（scope 已在 parseKnowledgeJson 归一成 project / global），
+    // importance 只是排序权重，不参与选通道。
+    // 曾写成 `|| importance >= 4`：于是「scope=global 的密钥条」被抢进项目文件，
+    // 又被 filterEntriesForFile 按「文件会进版本库」丢弃 —— 库里和文件里都没有，
+    // 静默丢记忆且只记一次 skipped。泄露边界是不变式，重要性不能改写它。
+    const useProject = !!wsPath && item.scope === 'project';
     try {
       // 项目记忆写文件（唯一真相）；用户级记忆写 SQLite（写入侧策略在 Rust 的
       // memory.long_add 唯一实现：近重复合并 / 低价值闸）。这里只按事实计数。
@@ -1397,10 +1401,7 @@ module.exports = {
   shouldRunKnowledgeMaintenance,
   parseKnowledgeJson,
   normalizeMemoryScope,
-  toolPathOf,
   buildRunFacts,
-  formatMemoryRowsForPrompt,
-  defaultKnowledgeSettings,
   normalizeKnowledgeSettings,
   readKnowledgeSettings,
   writeKnowledgeSettings,

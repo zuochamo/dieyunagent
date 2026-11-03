@@ -324,6 +324,43 @@ async function main() {
     assert.strictEqual(files.get('.dieyun/memory.md'), before, '重复条目不再写文件');
   });
 
+  await checkAsync('run: scope=global 的 secret 不被 importance 抢进文件（落库、绝不进 memory.md）', async () => {
+    const userData = tempUserData();
+    const reply = JSON.stringify({
+      memories: [
+        { content: '数据库口令是 hunter2', kind: 'secret', importance: 5, scope: 'global' },
+        { content: 'camera 模块导出统一走 runtime 配置', kind: 'normal', importance: 5, scope: 'global' }
+      ],
+      archive_memory_ids: [],
+      agents_updates: []
+    });
+    const { ctx, calls } = fakeCtx({ userData, llmReply: reply });
+    const files = new Map();
+    const inner = ctx.invokeRpc;
+    ctx.invokeRpc = async (method, params) => {
+      if (method === 'fs.read_file') return { data: files.get(String(params.filePath)) || '', encoding: 'utf8' };
+      if (method === 'fs.write_file') {
+        files.set(String(params.filePath), String(params.data));
+        calls.push({ method, params });
+        return { ok: true };
+      }
+      return inner(method, params);
+    };
+    const res = await km.runTaskMaintenance(ctx, TASK_PAYLOAD);
+    assert.strictEqual(res.ok, true);
+    const longAdd = calls.filter((c) => c.method === 'memory.long_add');
+    assert.strictEqual(longAdd.length, 2, 'scope=global 一律落库，importance 不改变落点');
+    assert.ok(
+      longAdd.some((c) => String(c.params.content).includes('hunter2')),
+      'secret 条目必须落库（否则模型看不到、用户也不知道它丢了）'
+    );
+    const text = files.get('.dieyun/memory.md') || '';
+    assert.ok(!text.includes('hunter2'), 'secret 条目绝不进文件（会进版本库）');
+    assert.ok(!text.includes('runtime 配置'), 'importance=5 的 global 条目也不该改道进文件');
+    assert.strictEqual(res.memorySaved, 2);
+    assert.strictEqual(res.memorySkipped, 0);
+  });
+
   await checkAsync('run: 项目记忆落项目根（worktree 会话不写进临时 worktree）', async () => {
     const userData = tempUserData();
     const reply = JSON.stringify({
