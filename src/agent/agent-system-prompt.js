@@ -85,7 +85,9 @@ function formatSystemTimeChunk(nowInput) {
 
 function formatAgentHomeChunk(agentHome) {
   const homeHint =
-    '【技能/计划】技能在 ~/.dieyun/skills；定时计划用 plan_create / plan_list / plan_delete。';
+    '【技能/计划】技能在 ~/.dieyun/skills；计划用 plan_create / plan_list / plan_run / plan_cancel / plan_delete。' +
+    '计划有两个形态：定时（给 rrule/onceAt，到点跑一次）与目标型（给 goal.checks，一轮轮跑到目标达成）——' +
+    '「做到 X 成立为止」这类长任务用后者，先和用户确认一条现在会失败、做完会通过的命令。';
   if (agentHome && agentHome.dieyunSkills) {
     return `${homeHint}\n技能根目录：${agentHome.dieyunSkills}`;
   }
