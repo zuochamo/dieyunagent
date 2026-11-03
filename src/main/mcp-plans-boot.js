@@ -626,8 +626,10 @@ function createPlansCreateFromText(deps) {
     if (!text.trim()) throw new Error('请提供计划描述');
     const plan = await parse(deps.userData, text, {
       skillIds: payload && payload.skillIds ? payload.skillIds : [],
-      // 结构化优先：给了 rrule / onceAt 就直接落盘，不再调模型解析
+      // 结构化优先：给了 rrule / onceAt / goal 就直接落盘，不再调模型解析
       structured: payload && payload.structured ? payload.structured : undefined,
+      // 发起这次创建的会话（定时计划默认投递回来；目标型由 parser 改投专用会话）
+      sessionId: payload && payload.sessionId ? payload.sessionId : undefined,
       // 模型配置解析用的路由（缺失时 parse 内部走兜底）
       route: payload && payload.modelRoute ? payload.modelRoute : undefined,
       model: payload && payload.model ? payload.model : undefined

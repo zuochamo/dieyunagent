@@ -107,4 +107,13 @@ describe('parsePlanFromText', () => {
     expect(plan.trigger).toBe('goal');
     expect(plan.goal.checks.map((c) => c.command)).toEqual(['npm test']);
   });
+
+  it('目标型不绑定发起对话的会话（每轮记录进它自己的专用会话）', async () => {
+    const plan = await parsePlanFromText('/definitely/missing/userdata', '做到全绿', {
+      structured: { prompt: '把检查跑绿', goal: { checks: ['npm test'] } },
+      sessionId: 'sess-1'
+    });
+    // 塞进聊天会淹没真人对话；ensurePlanSession 会为它建 [计划] 专用会话
+    expect(plan.deliver).toEqual({ type: 'session', sessionId: '' });
+  });
 });

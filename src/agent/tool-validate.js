@@ -889,6 +889,37 @@ function validateToolArgs(name, args, opts) {
       }
       return { ok: true };
     }
+    case 'plan_create': {
+      // 目标型计划的参数契约：形状错了就别建 —— 一个「猜出来的」无人值守长任务比报错贵得多。
+      if (a.goal && typeof a.goal === 'object') {
+        if (!Array.isArray(a.goal.checks)) {
+          return {
+            ok: false,
+            error: '目标型计划需要 goal.checks：每项一条检查命令；确实没有可执行检查就传空数组 []',
+            errorCode: 'MISSING_ARG',
+            retryable: false
+          };
+        }
+        if (!String(a.prompt || '').trim()) {
+          return {
+            ok: false,
+            error: '目标型计划需要 prompt：写清「什么状态算达成」，每一轮交接班都靠它',
+            errorCode: 'MISSING_ARG',
+            retryable: false
+          };
+        }
+        const hasSchedule = String(a.rrule || '').trim() || String(a.onceAt || '').trim();
+        if (hasSchedule) {
+          return {
+            ok: false,
+            error: '目标型（goal）与定时（rrule / onceAt）二选一：请只给其中一种',
+            errorCode: 'INVALID_ARG',
+            retryable: false
+          };
+        }
+      }
+      return { ok: true };
+    }
     case 'goal_check': {
       // 目标型计划的一轮里跑一条检查命令。命令可以来自声明清单（check_id）或模型当场给。
       const command = String(a.command || '').trim();

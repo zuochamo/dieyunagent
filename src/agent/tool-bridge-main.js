@@ -705,7 +705,9 @@ function createMainToolBridge(deps) {
           },
           // 计划绑定本次运行的路由：定时执行（无 Renderer）据此自洽解析模型配置
           modelRoute: ctx && ctx.modelRoute ? ctx.modelRoute : undefined,
-          model: ctx && ctx.model ? ctx.model : undefined
+          model: ctx && ctx.model ? ctx.model : undefined,
+          // 定时型默认投递到「发起这次对话的会话」；目标型在 parser 里改投专用会话
+          sessionId: ctx && ctx.sessionId ? ctx.sessionId : undefined
         });
         const goalChecksDeclared =
           r.plan.trigger === 'goal' && r.plan.goal && Array.isArray(r.plan.goal.checks)
