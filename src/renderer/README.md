@@ -1,6 +1,6 @@
 # Renderer 模块索引（dieyunagent）
 
-> Agent 改 UI 时先查此表，避免全目录 grep。完整架构见 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#8-渲染进程-ui-模块)。脚本加载顺序见 [`index.html`](index.html)。
+> Agent 改 UI 时先查此表，避免全目录 grep。完整架构见 [`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md#8-渲染进程-ui-模块)。脚本加载顺序见 [`index.html`](index.html)。
 
 **原则**：Renderer 只做展示与 IPC；Agent 循环在 Main + `dieyun-core`，勿把业务状态机堆进 renderer。
 
@@ -141,4 +141,4 @@ npm run check:renderer
 npm run test:renderer    # check + bundle 语法
 ```
 
-改动映射见 [`docs/CODEMAP.json`](../docs/CODEMAP.json) → `renderer-all`。
+改动映射见 [`docs/CODEMAP.json`](../../docs/CODEMAP.json) → `renderer-all`。

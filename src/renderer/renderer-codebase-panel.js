@@ -1,5 +1,4 @@
-/* global window, document, $, gwState, gatewayCall, settings, saveSettings, currentSessionId,
-   resolveSessionWorkspacePathForRpc, resolveSessionWorkspacePathSync,
+/* global window, document, $, gatewayCall, settings, saveSettings, currentSessionId,
    resolveWorkspaceRootForIndexPanels, describeVectorSync, indexPanelRpcParams */
 'use strict';
 
@@ -19,32 +18,17 @@ function formatCodebaseIndexedAt(ts) {
   }
 }
 
-function resolveCodebaseWorkspaceRoot() {
-  const sid =
-    typeof currentSessionId !== 'undefined' && currentSessionId
-      ? String(currentSessionId)
-      : '';
-  if (typeof resolveSessionWorkspacePathForRpc === 'function') {
-    const p = resolveSessionWorkspacePathForRpc(sid || null);
-    if (p) return String(p).trim();
-  }
-  if (typeof resolveSessionWorkspacePathSync === 'function' && sid) {
-    const p = resolveSessionWorkspacePathSync(sid);
-    if (p) return String(p).trim();
-  }
-  if (typeof window !== 'undefined' && window.activeViewSessionWorkspacePath) {
-    return String(window.activeViewSessionWorkspacePath).trim();
-  }
-  return gwState && gwState.workspacePath ? String(gwState.workspacePath).trim() : '';
-}
-
+/**
+ * 索引面板工作区解析的唯一实现在 `renderer-gateway.js:resolveWorkspaceRootForIndexPanels`
+ * （含「视图路径属于哪个会话」的守卫，会话工作空间漂移的根因修复就在那里）。
+ * 本文件以前另有一份四级回落的本地副本，那份副本没跟着修，面板会解析到上一个会话的工作区。
+ */
 async function resolveCodebaseWorkspaceRootAsync() {
-  if (typeof resolveWorkspaceRootForIndexPanels === 'function') {
-    return resolveWorkspaceRootForIndexPanels(
-      typeof currentSessionId !== 'undefined' ? currentSessionId : null
-    );
+  const resolveRoot = typeof window !== 'undefined' ? window.resolveWorkspaceRootForIndexPanels : null;
+  if (typeof resolveRoot !== 'function') {
+    throw new Error('renderer-gateway.js 必须先于面板的解析调用加载');
   }
-  return resolveCodebaseWorkspaceRoot();
+  return resolveRoot(typeof currentSessionId !== 'undefined' ? currentSessionId : null);
 }
 
 function isCodebasePaneActive() {

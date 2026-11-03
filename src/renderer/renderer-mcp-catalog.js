@@ -1,10 +1,11 @@
 'use strict';
 
-/* global window, document, $, escapeHtml, showMcpListView, renderMcpList, SKILLS_GRID_PAGE_SIZE */
+/* global window, document, $, escapeHtml, showMcpListView, renderMcpList */
 
 const mcpCatalogApi = window.diecloud || {};
-const MCP_CATALOG_PAGE_SIZE =
-  typeof window.SKILLS_GRID_PAGE_SIZE === 'number' ? window.SKILLS_GRID_PAGE_SIZE : 15;
+// 页大小唯一来源 renderer-skills-ui.js 导出的 window.SKILLS_GRID_PAGE_SIZE（本文件在其后加载）。
+// 这里以前还有一层 `? … : 15` 兜底：它永不触发（加载顺序保证已赋值），只是把 15 又抄了一遍。
+const MCP_CATALOG_PAGE_SIZE = window.SKILLS_GRID_PAGE_SIZE;
 
 let mcpCatalogEntries = [];
 let mcpCatalogSearchQuery = '';

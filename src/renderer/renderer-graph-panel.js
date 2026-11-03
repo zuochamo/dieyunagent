@@ -1,6 +1,5 @@
-/* global window, document, $, gwState, gatewayCall, settings, saveSettings, openSidePanel, closeSettingsModal,
-   currentSessionId, resolveSessionWorkspacePathForRpc, resolveSessionWorkspacePathSync,
-   resolveWorkspaceRootForIndexPanels, indexPanelRpcParams */
+/* global window, document, $, gatewayCall, settings, saveSettings, openSidePanel, closeSettingsModal,
+   currentSessionId, resolveWorkspaceRootForIndexPanels, indexPanelRpcParams */
 'use strict';
 
 let graphPanelPollTimer = null;
@@ -19,32 +18,17 @@ function formatGraphPanelIndexedAt(ts) {
   }
 }
 
-function resolveGraphPanelWorkspaceRoot() {
-  const sid =
-    typeof currentSessionId !== 'undefined' && currentSessionId
-      ? String(currentSessionId)
-      : '';
-  if (typeof resolveSessionWorkspacePathForRpc === 'function') {
-    const p = resolveSessionWorkspacePathForRpc(sid || null);
-    if (p) return String(p).trim();
-  }
-  if (typeof resolveSessionWorkspacePathSync === 'function' && sid) {
-    const p = resolveSessionWorkspacePathSync(sid);
-    if (p) return String(p).trim();
-  }
-  if (typeof window !== 'undefined' && window.activeViewSessionWorkspacePath) {
-    return String(window.activeViewSessionWorkspacePath).trim();
-  }
-  return gwState && gwState.workspacePath ? String(gwState.workspacePath).trim() : '';
-}
-
+/**
+ * 与 `renderer-codebase-panel.js` 同一条解析：唯一实现是
+ * `renderer-gateway.js:resolveWorkspaceRootForIndexPanels`（含会话/视图归属守卫）。
+ * 这里原有的四级回落副本已删除 —— 守卫修复只进了 gateway，副本永远跟不上。
+ */
 async function resolveGraphPanelWorkspaceRootAsync() {
-  if (typeof resolveWorkspaceRootForIndexPanels === 'function') {
-    return resolveWorkspaceRootForIndexPanels(
-      typeof currentSessionId !== 'undefined' ? currentSessionId : null
-    );
+  const resolveRoot = typeof window !== 'undefined' ? window.resolveWorkspaceRootForIndexPanels : null;
+  if (typeof resolveRoot !== 'function') {
+    throw new Error('renderer-gateway.js 必须先于面板的解析调用加载');
   }
-  return resolveGraphPanelWorkspaceRoot();
+  return resolveRoot(typeof currentSessionId !== 'undefined' ? currentSessionId : null);
 }
 
 function setGraphPanelText(id, text) {

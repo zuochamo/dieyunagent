@@ -1,38 +1,34 @@
 /* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview, sanitizeOutboundImageUrl */
 'use strict';
 
-function resolveEndpoint(baseUrl) {
-  // 端点拼接单一来源：llm-request（经 agent-bundle 注册为 window.LlmRequest，与 Main 同一份实现）。
-  // 模块缺失时降级为等价内联实现：发请求的路径不能因为一次加载顺序问题直接崩。
-  const llmApi = typeof window !== 'undefined' ? window.LlmRequest : null;
-  if (llmApi && typeof llmApi.resolveLlmEndpoint === 'function') {
-    return llmApi.resolveLlmEndpoint(baseUrl, 'chat');
+/**
+ * 端点拼接与请求头装配的单一来源：`agent/llm-request.js`（经 agent-bundle 注册为
+ * `window.LlmRequest`，与 Main 同一份实现），与 `renderer-model-settings.js` 的调用方式一致。
+ *
+ * 这里以前各留了一份内联兜底（三条端点规则 + `Content-Type + Bearer`）。兜底是**加法**：
+ * 它让「自定义头 / authMode 静默失效」看起来像正常请求，只在 console 留一行警告。
+ * bundle 未加载属于装配错误，直接抛 —— 与 `agent-guardrails.js` / 模型设置页同一立场。
+ */
+function requireLlmRequestApi() {
+  const api = typeof window !== 'undefined' ? window.LlmRequest : null;
+  if (!api || typeof api.resolveLlmEndpoint !== 'function') {
+    throw new Error('agent-bundle 未加载：llm-request 不可用（端点拼接 / 请求头装配的唯一来源）');
   }
-  const trimmed = String(baseUrl || '').replace(/\/+$/, '');
-  if (/\/chat\/completions(?:\?|$)/i.test(trimmed)) return trimmed;
-  if (/\/v\d+$/i.test(trimmed)) return `${trimmed}/chat/completions`;
-  return `${trimmed}/v1/chat/completions`;
+  return api;
+}
+
+function resolveEndpoint(baseUrl) {
+  return requireLlmRequestApi().resolveLlmEndpoint(baseUrl, 'chat');
 }
 
 /**
- * 请求头装配单一来源：llm-request（经 agent-bundle 注册为 window.LlmRequest）。
- * 非流式与流式两处调用点共用本函数，不再各自内联「Content-Type + Bearer」降级。
- * 降级仅在 bundle 加载异常时触达，并显式告警——避免静默发错鉴权头
- * （与 renderer-model-settings.js「不再自行拼 Authorization」同一立场）。
+ * 请求头装配：非流式与流式两处调用点共用本函数。
  */
 function buildRendererLlmHeaders(apiConfig, apiBaseUrl, apiKey) {
-  const llmApi = typeof window !== 'undefined' ? window.LlmRequest : null;
-  if (llmApi && typeof llmApi.buildLlmHeadersFromConfig === 'function') {
-    return llmApi.buildLlmHeadersFromConfig(
-      { ...(apiConfig || {}), baseUrl: apiBaseUrl, apiKey },
-      { sessionId: currentSessionId }
-    );
-  }
-  console.warn('[llm] window.LlmRequest 未加载，请求头降级为默认（自定义头 / authMode 将失效）');
-  return {
-    'Content-Type': 'application/json',
-    ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
-  };
+  return requireLlmRequestApi().buildLlmHeadersFromConfig(
+    { ...(apiConfig || {}), baseUrl: apiBaseUrl, apiKey },
+    { sessionId: currentSessionId }
+  );
 }
 
 function describeApiHost(baseUrl) {

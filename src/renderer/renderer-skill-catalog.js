@@ -1,10 +1,10 @@
 'use strict';
 
-/* global window, document, $, escapeHtml, refreshSkillsCatalog, SKILLS_GRID_PAGE_SIZE */
+/* global window, document, $, escapeHtml, refreshSkillsCatalog */
 
 const skillCatalogApi = window.diecloud || {};
-const SKILL_CATALOG_PAGE_SIZE =
-  typeof window.SKILLS_GRID_PAGE_SIZE === 'number' ? window.SKILLS_GRID_PAGE_SIZE : 15;
+// 页大小唯一来源 window.SKILLS_GRID_PAGE_SIZE（renderer-skills-ui.js 在本文件之前加载）。
+const SKILL_CATALOG_PAGE_SIZE = window.SKILLS_GRID_PAGE_SIZE;
 
 let skillCatalogEntries = [];
 let skillCatalogSearchQuery = '';
