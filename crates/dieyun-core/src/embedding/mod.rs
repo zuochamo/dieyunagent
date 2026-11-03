@@ -118,6 +118,13 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
+/// 向量召回的相似度下限：余弦相似度低于它（含等于）的命中直接丢弃。
+///
+/// **唯一来源**：代码索引的向量池扫描（`index/vector_pool.rs`）与长记忆的语义召回
+/// （`memory/mod.rs`）都用这一个数。此前两处各写一份 `0.05`，改一处漏一处就会出现
+/// 「代码索引收紧了、记忆召回还放得很松」，而且从现象上只能看出「召回变多变少」。
+pub const MIN_SIMILARITY: f64 = 0.05;
+
 pub async fn embed_texts(cfg: &EmbeddingConfig, inputs: &[String]) -> Result<Vec<Vec<f32>>, CoreError> {
     if !cfg.enabled() {
         return Err(CoreError::rpc(

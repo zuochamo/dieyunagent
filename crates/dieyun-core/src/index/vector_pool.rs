@@ -24,7 +24,8 @@ use crate::embedding::blob_to_vector;
 use crate::error::CoreError;
 
 /// 低于此相似度的向量命中直接丢弃（与 SQL 路径保持一致）。
-pub(crate) const MIN_SIMILARITY: f64 = 0.05;
+/// **数字的唯一来源是 `crate::embedding::MIN_SIMILARITY`**（长记忆的语义召回用同一个数）。
+pub(crate) use crate::embedding::MIN_SIMILARITY;
 
 /// 向量池的内存上限；超出按最久未用淘汰。
 pub(crate) const VECTOR_POOL_MAX_BYTES: usize = 3 * 1024 * 1024 * 1024;

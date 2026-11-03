@@ -1281,14 +1281,19 @@ impl MemoryStore {
                 .map_err(CoreError::from)
         })?;
         let mut indexed = 0i64;
-        for (id, content) in rows {
-            let text = content
-                .chars()
-                .take(MEMORY_EMBED_TEXT_MAX)
-                .collect::<String>();
-            let vectors =
-                embedding::embed_texts(&embedding, &[text]).await?;
-            let vector = vectors.into_iter().next().unwrap_or_default();
+        // 一批一个请求：原来每条记忆单独发一次 embedding HTTP（100 条 = 100 次串行往返）。
+        // 分批与并发上限都在 embedding::embed_batches 里（进程级闸门单一来源）。
+        let pending: Vec<(i64, String)> = rows
+            .into_iter()
+            .map(|(id, content)| {
+                let text = content
+                    .chars()
+                    .take(MEMORY_EMBED_TEXT_MAX)
+                    .collect::<String>();
+                (id, text)
+            })
+            .collect();
+        for (id, vector) in embedding::embed_batches(&embedding, &pending).await? {
             if vector.is_empty() {
                 continue;
             }
@@ -1450,6 +1455,208 @@ impl MemoryStore {
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
+    }
+
+    /// 会话正文的跨会话检索（工具 `session_recall` 的单一后端）。
+    ///
+    /// 索引是 `messages_fts`（trigram，见 `schema.rs`），查询串由 `crate::fts` 生成 ——
+    /// 与长期记忆检索同一条词法链路，不另写分词。中文双字词（`索引`）没有可命中的
+    /// trigram，自动退 `LIKE` 子串扫描（`messages` 行数由会话量决定，扫描有界）。
+    ///
+    /// workspace / session 过滤在 Rust 里做：`projects::project_path_key` 是路径身份的
+    /// **唯一**归一化实现，再在 SQL 里写一份 `LOWER(REPLACE(...))` 就是第二套口径；
+    /// 而 FTS 命中集通常很小，多取几倍候选再过滤，比维护两套归一化便宜。
+    pub fn search_messages(
+        &self,
+        query: &str,
+        workspace_path: Option<&str>,
+        session_id: Option<&str>,
+        limit: i64,
+        snippet_chars: i64,
+    ) -> Result<Value, CoreError> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(json!({ "ok": true, "mode": "none", "results": [] }));
+        }
+        let lim = limit.clamp(1, 100);
+        let snippet_chars = snippet_chars.clamp(60, 2000) as usize;
+        // 过滤发生在取回之后，所以先放大候选；上限防止一次 LIKE 扫描把整库拉进内存。
+        let candidate = (lim * 4).min(400);
+        let use_fts = crate::fts::has_indexable_term(q);
+        let (sql, first_param) = if use_fts {
+            let Some(match_q) = crate::fts::match_query(q) else {
+                return Ok(json!({ "ok": true, "mode": "none", "results": [] }));
+            };
+            (
+                "SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title, s.workspace_path,
+                        bm25(messages_fts) AS rank
+                 FROM messages_fts
+                 JOIN messages m ON m.id = messages_fts.rowid
+                 LEFT JOIN sessions s ON s.id = m.session_id
+                 WHERE messages_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2"
+                    .to_string(),
+                match_q,
+            )
+        } else {
+            (
+                "SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title, s.workspace_path,
+                        -1.0 AS rank
+                 FROM messages m
+                 LEFT JOIN sessions s ON s.id = m.session_id
+                 WHERE m.content LIKE ?1 ESCAPE '\\'
+                 ORDER BY m.id DESC
+                 LIMIT ?2"
+                    .to_string(),
+                like_pattern(q),
+            )
+        };
+
+        let want_ws = workspace_path
+            .map(projects::project_path_key)
+            .filter(|s| !s.is_empty());
+        let want_sid = session_id.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+
+        let rows = self.read(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![first_param, candidate], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, f64>(7)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?;
+
+        let mut results = Vec::new();
+        for (id, sid, role, content, created_at, title, ws, rank) in rows {
+            if let Some(want) = &want_sid {
+                if &sid != want {
+                    continue;
+                }
+            }
+            if let Some(want) = &want_ws {
+                let row_key = ws.as_deref().map(projects::project_path_key);
+                if row_key.as_deref() != Some(want.as_str()) {
+                    continue;
+                }
+            }
+            results.push(json!({
+                "id": id,
+                "sessionId": sid,
+                "title": title,
+                "role": role,
+                "snippet": snippet_around(&content, q, snippet_chars),
+                "createdAt": created_at,
+                "workspacePath": ws,
+                "score": if use_fts { round_score(-rank) } else { 0.0 },
+            }));
+            if results.len() >= lim as usize {
+                break;
+            }
+        }
+        Ok(json!({
+            "ok": true,
+            "mode": if use_fts { "fts" } else { "like" },
+            "results": results,
+        }))
+    }
+
+    /// 压缩归档里被折叠的原文（`compaction_archives.folded_text`）的检索。
+    ///
+    /// 这段正文是**压缩掉的历史原文**：它已经不在活跃对话里，也不再参与下一轮投影，
+    /// 但它是「当时到底聊了什么」的最后一份材料，所以给它一个读的出口，
+    /// 而不是让它只躺在库里。
+    ///
+    /// 不建 FTS 索引：每会话每轮压缩至多一行，行数由压缩轮次封顶，在 Rust 里做子串匹配
+    /// 足够；另建一份 trigram 影子表只会多一处要维护的一致性（与 `long_memories` 不同，
+    /// 那里是几百上千行、且要参与每轮召回）。
+    pub fn search_compaction_folded(
+        &self,
+        query: &str,
+        workspace_path: Option<&str>,
+        session_id: Option<&str>,
+        limit: i64,
+        snippet_chars: i64,
+    ) -> Result<Value, CoreError> {
+        let lim = limit.clamp(1, 50);
+        let snippet_chars = snippet_chars.clamp(60, 4000) as usize;
+        let needle = query.trim().to_lowercase();
+        let want_ws = workspace_path
+            .map(projects::project_path_key)
+            .filter(|s| !s.is_empty());
+        let want_sid = session_id.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+
+        let rows = self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, workspace_path, folded_text, created_at
+                 FROM compaction_archives
+                 WHERE folded_text IS NOT NULL AND length(folded_text) > 0
+                 ORDER BY created_at DESC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![(lim * 8).min(400)], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?;
+
+        let mut results = Vec::new();
+        for (id, sid, ws, folded, created_at) in rows {
+            if let Some(want) = &want_sid {
+                if sid.as_deref() != Some(want.as_str()) {
+                    continue;
+                }
+            }
+            if let Some(want) = &want_ws {
+                let row_key = ws.as_deref().map(projects::project_path_key);
+                if row_key.as_deref() != Some(want.as_str()) {
+                    continue;
+                }
+            }
+            // 空 query = 「这条会话压缩过什么」：只列清单，不带正文。
+            let matched = needle.is_empty() || folded.to_lowercase().contains(&needle);
+            if !matched {
+                continue;
+            }
+            results.push(json!({
+                "id": id,
+                "sessionId": sid,
+                "workspacePath": ws,
+                "snippet": if needle.is_empty() {
+                    String::new()
+                } else {
+                    snippet_around(&folded, query.trim(), snippet_chars)
+                },
+                "chars": folded.chars().count(),
+                "createdAt": created_at,
+            }));
+            if results.len() >= lim as usize {
+                break;
+            }
+        }
+        Ok(json!({
+            "ok": true,
+            "mode": if needle.is_empty() { "recent" } else { "substring" },
+            "results": results,
+        }))
     }
 
     pub async fn recall_long_memories(
@@ -1737,7 +1944,8 @@ impl MemoryStore {
                     continue;
                 };
                 let score = embedding::cosine_similarity(query_vec, &vec);
-                if score <= 0.05 {
+                // 与代码索引的向量池共用同一个下限（`embedding::MIN_SIMILARITY`），不各写一份
+                if score <= embedding::MIN_SIMILARITY {
                     continue;
                 }
                 scored.push((
@@ -2018,6 +2226,33 @@ fn freshness_score(now: i64, created_at: i64) -> f64 {
     let age_ms = (now - created_at).max(0) as f64;
     let max_age = 180.0 * 24.0 * 60.0 * 60.0 * 1000.0;
     (1.0 - (age_ms / max_age).min(1.0)).max(0.0)
+}
+
+/// 围绕命中处截取摘录：模型要看到的是「哪一句」，不是整段历史。
+///
+/// 命中点前留四分之一上下文，其余给后半段；找不到命中片段时退回头部截断
+/// （词法切分可能已经把查询改写成了子串，那不算错误）。
+fn snippet_around(content: &str, query: &str, max_chars: usize) -> String {
+    let total = content.chars().count();
+    if total <= max_chars {
+        return content.to_string();
+    }
+    let hit = crate::fts::first_hit_index(content, query).unwrap_or(0);
+    let lead = max_chars / 4;
+    let mut start = hit.saturating_sub(lead);
+    let mut end = start + max_chars;
+    if end > total {
+        end = total;
+        start = end.saturating_sub(max_chars);
+    }
+    let mut out: String = content.chars().skip(start).take(end - start).collect();
+    if start > 0 {
+        out.insert(0, '…');
+    }
+    if end < total {
+        out.push('…');
+    }
+    out
 }
 
 /// `LIKE` 子串扫描的匹配模式：`%片段%`，转义用户输入里的 `%` / `_` / `\`。
@@ -3004,6 +3239,173 @@ mod tests {
             "删掉的记忆不该再被召回"
         );
         let _ = std::fs::remove_file(db);
+    }
+
+    /// 跨会话检索：默认按 workspace 圈定，且「中文双字词」走 LIKE 分支也要能命中。
+    #[test]
+    fn messages_search_matches_across_sessions_within_workspace() {
+        let db = std::env::temp_dir().join(format!("dieyun-msg-search-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+        let a = store
+            .create_session(Some("登录问题"), Some("E:/ws/alpha"))
+            .unwrap();
+        let b = store
+            .create_session(Some("报表问题"), Some("E:/ws/beta"))
+            .unwrap();
+        store
+            .append_message(
+                &a.id,
+                "user",
+                "登录接口偶发 500，日志里是 pool timeout",
+                None,
+            )
+            .unwrap();
+        store
+            .append_message(
+                &a.id,
+                "assistant",
+                "连接池上限只有 5，调大到 20 后压力测试通过",
+                None,
+            )
+            .unwrap();
+        store
+            .append_message(&b.id, "user", "导出报表总是乱码", None)
+            .unwrap();
+
+        // trigram 分支：标识符 / 长词
+        let hit = store.search_messages("timeout", None, None, 10, 200).unwrap();
+        assert_eq!(hit.get("mode").and_then(|v| v.as_str()), Some("fts"), "{hit}");
+        assert_eq!(json_strings(&hit, "results", "sessionId"), vec![a.id.clone()]);
+
+        // 中文双字词没有可命中的 trigram → 退 LIKE，结果不能因此丢
+        let cjk = store.search_messages("登录", None, None, 10, 200).unwrap();
+        assert_eq!(cjk.get("mode").and_then(|v| v.as_str()), Some("like"), "{cjk}");
+        assert_eq!(
+            json_strings(&cjk, "results", "sessionId"),
+            vec![a.id.clone()],
+            "{cjk}"
+        );
+
+        // workspace 圈定：beta 里查不到 alpha 的内容
+        let beta = store
+            .search_messages("timeout", Some("E:/ws/beta"), None, 10, 200)
+            .unwrap();
+        assert!(json_strings(&beta, "results", "sessionId").is_empty(), "{beta}");
+        // 大小写 / 反斜杠 / 尾斜杠归一后仍算同一个 workspace（path_key 单一来源）
+        let alpha = store
+            .search_messages("timeout", Some("e:\\ws\\alpha\\"), None, 10, 200)
+            .unwrap();
+        assert_eq!(
+            json_strings(&alpha, "results", "sessionId"),
+            vec![a.id.clone()],
+            "{alpha}"
+        );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 影子表要跟着账本走：改 / 删消息后检索必须同步 —— 这是触发器存在的唯一理由。
+    #[test]
+    fn messages_fts_index_follows_update_and_delete() {
+        let db = std::env::temp_dir().join(format!("dieyun-msg-fts-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+        let s = store.create_session(Some("t"), Some("E:/ws/a")).unwrap();
+        store
+            .append_message(&s.id, "user", "第一条：索引可以搜到 alpha", None)
+            .unwrap();
+        assert_eq!(
+            json_strings(
+                &store.search_messages("alpha", None, None, 10, 200).unwrap(),
+                "results",
+                "sessionId"
+            ),
+            vec![s.id.clone()]
+        );
+
+        store
+            .test_conn()
+            .execute(
+                "UPDATE messages SET content = '第一条：索引可以搜到 beta' WHERE session_id = ?1",
+                params![s.id],
+            )
+            .expect("update");
+        assert!(
+            json_strings(
+                &store.search_messages("alpha", None, None, 10, 200).unwrap(),
+                "results",
+                "sessionId"
+            )
+            .is_empty(),
+            "旧正文的 trigram 必须随 UPDATE 触发器消失"
+        );
+        assert_eq!(
+            json_strings(
+                &store.search_messages("beta", None, None, 10, 200).unwrap(),
+                "results",
+                "sessionId"
+            ),
+            vec![s.id.clone()]
+        );
+
+        store
+            .test_conn()
+            .execute("DELETE FROM messages WHERE session_id = ?1", params![s.id])
+            .expect("delete");
+        assert!(json_strings(
+            &store.search_messages("beta", None, None, 10, 200).unwrap(),
+            "results",
+            "sessionId"
+        )
+        .is_empty());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 压缩归档的 `folded_text` 要有读的出口：它是被压缩掉的历史原文的最后一份材料。
+    #[test]
+    fn compaction_folded_search_reads_folded_text() {
+        let db = std::env::temp_dir().join(format!("dieyun-folded-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+        let s = store
+            .create_session(Some("长任务"), Some("E:/ws/a"))
+            .unwrap();
+        store
+            .test_conn()
+            .execute(
+                "INSERT INTO compaction_archives
+                 (session_id, workspace_path, tokens_before, tokens_after, summary_text, folded_text, created_at)
+                 VALUES (?1, 'E:/ws/a', 9000, 1200, '摘要', '折叠掉的原文：pgbouncer 的 pool_mode 要设 transaction', 1)",
+                params![s.id],
+            )
+            .expect("seed archive");
+
+        let hit = store
+            .search_compaction_folded("pgbouncer", Some("E:/ws/a"), None, 10, 400)
+            .unwrap();
+        let snippets = json_strings(&hit, "results", "snippet");
+        assert_eq!(snippets.len(), 1, "{hit}");
+        assert!(snippets[0].contains("pool_mode"), "{hit}");
+
+        // 空 query = 「这条会话压缩过什么」（只列清单，不带正文）
+        let listed = store
+            .search_compaction_folded("", None, Some(&s.id), 10, 400)
+            .unwrap();
+        assert_eq!(listed.get("mode").and_then(|v| v.as_str()), Some("recent"));
+        assert_eq!(
+            json_strings(&listed, "results", "sessionId"),
+            vec![s.id.clone()]
+        );
+        // 别的 workspace 看不到
+        assert!(json_strings(
+            &store
+                .search_compaction_folded("pgbouncer", Some("E:/ws/beta"), None, 10, 400)
+                .unwrap(),
+            "results",
+            "snippet"
+        )
+        .is_empty());
+        let _ = std::fs::remove_file(&db);
     }
 
     fn json_strings(v: &Value, list_key: &str, field: &str) -> Vec<String> {
