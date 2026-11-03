@@ -1012,29 +1012,6 @@ async function runPrettierFileScan(opts) {
   ];
 }
 
-/**
- * Remote (SSH) TS diagnostics via tsc on the remote host.
- *
- * 返回形状与 `runRemoteTscBatch` 对齐（`ok` + `diagnostics`），不再只回数组：
- * 只有数组时「tsc 没跑起来」与「没有类型错误」无法区分。
- */
-async function runRemoteTscFallback(opts) {
-  const projectRoot = String(opts.projectRoot || '').replace(/\\/g, '/');
-  const absPath = String(opts.absPath || '').replace(/\\/g, '/');
-  const r = await runRemoteTscBatch({
-    exec: opts.exec,
-    projectRoot,
-    absPaths: [absPath],
-    timeoutMs: opts.timeoutMs,
-    minSeverity: opts.minSeverity,
-    maxPerFile: opts.maxPerFile
-  });
-  if (!r.ok) {
-    return { ok: false, engine: 'tsc', diagnostics: [], error: r.error, detail: r.detail, exitCode: r.exitCode };
-  }
-  return { ok: true, engine: 'tsc', diagnostics: r.byFile.get(absPath) || [] };
-}
-
 async function runRemoteTscBatch(opts) {
   const projectRoot = String(opts.projectRoot || '').replace(/\\/g, '/');
   const absPaths = [...new Set((opts.absPaths || []).map((p) => String(p || '').replace(/\\/g, '/')))].filter(
@@ -1058,11 +1035,18 @@ async function runRemoteTscBatch(opts) {
     );
   }
 
+  // 路径归一化 / basename 后缀只算一次：原来这两句落在「文件 × 诊断」的双重循环里，
+  // 200 个文件 × 300 条诊断就是 6 万次重复字符串处理。匹配规则与顺序均不变。
+  const normalized = all.map((d) => ({ diag: d, file: String(d.file || '').replace(/\\/g, '/') }));
   for (const absPath of absPaths) {
-    const matched = all.filter((d) => {
-      const f = String(d.file || '').replace(/\\/g, '/');
-      return pathsMatch(f, absPath, projectRoot) || f === absPath || f.endsWith(`/${path.posix.basename(absPath)}`);
-    });
+    const suffix = `/${path.posix.basename(absPath)}`;
+    const matched = [];
+    for (const row of normalized) {
+      const f = row.file;
+      if (pathsMatch(f, absPath, projectRoot) || f === absPath || f.endsWith(suffix)) {
+        matched.push(row.diag);
+      }
+    }
     byFile.set(
       absPath,
       limitDiags(
@@ -1448,11 +1432,6 @@ async function runRemotePrettierProjectScan(opts) {
 module.exports = {
   pyrightProjectArgs,
   hasOwnPyrightConfig,
-  parseTscOutput,
-  parsePyrightTextOutput,
-  parsePyrightJsonOutput,
-  parseEslintJsonOutput,
-  parseRuffJsonOutput,
   runTscFallback,
   runPyrightFallback,
   runEslintFileScan,
@@ -1465,7 +1444,6 @@ module.exports = {
   runEslintProjectScan,
   runRuffProjectScan,
   runPrettierProjectScan,
-  runRemoteTscFallback,
   runRemoteTscBatch,
   runRemoteEslintBatch,
   runRemoteRuffBatch,

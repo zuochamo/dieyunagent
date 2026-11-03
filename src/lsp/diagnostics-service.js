@@ -1626,10 +1626,15 @@ function createLspDiagnosticsService(opts) {
     const bucket = getWorkspaceBucket(workspaceRoot);
     if (pathMap.size === 0) {
       for (const raw of bucket.values()) {
-        const entry = buildItemView(raw);
-        if (hasRelevantDiagnostics(entry.diagnostics, minSeverity)) {
-          addPath(entry.file);
-        }
+        // 这里只要问「有没有达阈值的诊断」：合并视图（union + 去重 + 排序）是纯浪费 ——
+        // 合并不新增也不过滤任何一条，逐层判与合并后判等价。
+        const layers = Object.values(raw.byEngine || {});
+        const relevant = layers.some(
+          (layer) =>
+            Array.isArray(layer && layer.diagnostics) &&
+            hasRelevantDiagnostics(layer.diagnostics, minSeverity)
+        );
+        if (relevant) addPath(raw.file);
       }
     }
 
@@ -2350,8 +2355,5 @@ module.exports = {
   LSP_SETTINGS_DEFAULTS,
   loadLspSettings,
   saveLspSettings,
-  lspSettingsPath,
-  resolveFileAbs,
-  isUnderRoot,
   DEFAULT_RESOLVE_TIMEOUT_MS
 };
