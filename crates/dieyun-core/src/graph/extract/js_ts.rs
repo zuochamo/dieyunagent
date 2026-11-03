@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::graph::types::ParsedImport;
@@ -92,7 +93,7 @@ fn extract_quoted(text: &str) -> Option<String> {
 pub fn resolve_relative_import(
     from_rel: &str,
     spec: &str,
-    known_files: &[String],
+    known_files: &HashSet<String>,
 ) -> Option<String> {
     if !(spec.starts_with("./") || spec.starts_with("../")) {
         return None;
@@ -120,11 +121,11 @@ fn normalize_rel_path(raw: &str) -> String {
     stack.join("/")
 }
 
-fn resolve_with_extensions(base: &str, known_files: &[String]) -> Option<String> {
+fn resolve_with_extensions(base: &str, known_files: &HashSet<String>) -> Option<String> {
     let base_norm = base.replace('\\', "/");
     let candidates = extension_candidates(&base_norm);
     for cand in candidates {
-        if known_files.iter().any(|f| f == &cand) {
+        if known_files.contains(&cand) {
             return Some(cand);
         }
     }
@@ -170,10 +171,12 @@ import './side-effect';
 
     #[test]
     fn resolves_relative_paths() {
-        let known = vec![
+        let known: HashSet<String> = [
             "src/core-bridge.js".to_string(),
             "src/util/index.ts".to_string(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let hit = resolve_relative_import("src/main-entry.js", "./core-bridge", &known);
         assert_eq!(hit.as_deref(), Some("src/core-bridge.js"));
     }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::graph::types::{ParsedCall, ParsedImport, ParsedSymbol};
@@ -83,7 +84,7 @@ pub fn extract_calls(source: &str) -> Vec<ParsedCall> {
     out
 }
 
-pub fn resolve_python_import(from_rel: &str, spec: &str, known_files: &[String]) -> Option<String> {
+pub fn resolve_python_import(from_rel: &str, spec: &str, known_files: &HashSet<String>) -> Option<String> {
     if spec.starts_with('.') {
         return resolve_relative_python(from_rel, spec, known_files);
     }
@@ -279,7 +280,7 @@ fn scan_call_targets(line: &str) -> Vec<String> {
     out
 }
 
-fn resolve_relative_python(from_rel: &str, spec: &str, known_files: &[String]) -> Option<String> {
+fn resolve_relative_python(from_rel: &str, spec: &str, known_files: &HashSet<String>) -> Option<String> {
     let from_path = Path::new(from_rel);
     let mut base_dir = from_path.parent().unwrap_or_else(|| Path::new(""));
     let mut rest = spec;
@@ -307,7 +308,7 @@ fn resolve_relative_python(from_rel: &str, spec: &str, known_files: &[String]) -
     pick_python_file(&file_base, known_files)
 }
 
-fn module_to_file(spec: &str, known_files: &[String]) -> Option<String> {
+fn module_to_file(spec: &str, known_files: &HashSet<String>) -> Option<String> {
     let pathish = spec.replace('.', "/");
     if let Some(hit) = pick_python_file(&pathish, known_files) {
         return Some(hit);
@@ -323,11 +324,11 @@ fn module_to_file(spec: &str, known_files: &[String]) -> Option<String> {
         .cloned()
 }
 
-fn pick_python_file(base: &str, known_files: &[String]) -> Option<String> {
+fn pick_python_file(base: &str, known_files: &HashSet<String>) -> Option<String> {
     let base = base.replace('\\', "/");
     let candidates = [format!("{base}.py"), format!("{base}/__init__.py")];
     for cand in candidates {
-        if known_files.iter().any(|f| f == &cand) {
+        if known_files.contains(&cand) {
             return Some(cand);
         }
     }
@@ -360,11 +361,13 @@ from foo.bar import baz
 
     #[test]
     fn resolves_python_relative_import() {
-        let known = vec![
+        let known: HashSet<String> = [
             "pkg/helper.py".to_string(),
             "pkg/util.py".to_string(),
             "lib/foo.py".to_string(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let hit = resolve_python_import("pkg/main.py", ".helper", &known);
         assert_eq!(hit.as_deref(), Some("pkg/helper.py"));
         let up = resolve_python_import("pkg/sub/mod.py", "..util", &known);

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::graph::types::{ParsedCall, ParsedImport, ParsedSymbol};
@@ -89,7 +90,7 @@ pub fn extract_calls(source: &str) -> Vec<ParsedCall> {
     out
 }
 
-pub fn resolve_rust_import(from_rel: &str, spec: &str, known_files: &[String]) -> Option<String> {
+pub fn resolve_rust_import(from_rel: &str, spec: &str, known_files: &HashSet<String>) -> Option<String> {
     let spec = spec.trim();
     if spec.is_empty() || is_external_spec(spec) {
         return None;
@@ -330,7 +331,7 @@ fn scan_call_targets(line: &str) -> Vec<String> {
     out
 }
 
-fn resolve_mod_path(from_rel: &str, name: &str, known_files: &[String]) -> Option<String> {
+fn resolve_mod_path(from_rel: &str, name: &str, known_files: &HashSet<String>) -> Option<String> {
     let from = Path::new(from_rel);
     let parent = from
         .parent()
@@ -345,7 +346,7 @@ fn resolve_mod_path(from_rel: &str, name: &str, known_files: &[String]) -> Optio
     pick_rust_file(&base, known_files)
 }
 
-fn resolve_relative_use(from_rel: &str, spec: &str, known_files: &[String]) -> Option<String> {
+fn resolve_relative_use(from_rel: &str, spec: &str, known_files: &HashSet<String>) -> Option<String> {
     let from = Path::new(from_rel);
     let mut base_dir = from.parent().unwrap_or_else(|| Path::new(""));
     let mut rest = spec;
@@ -369,11 +370,11 @@ fn resolve_relative_use(from_rel: &str, spec: &str, known_files: &[String]) -> O
     pick_rust_file(&full, known_files)
 }
 
-fn pick_rust_file(base: &str, known_files: &[String]) -> Option<String> {
+fn pick_rust_file(base: &str, known_files: &HashSet<String>) -> Option<String> {
     let base = base.replace('\\', "/").trim_end_matches(".rs").to_string();
     let candidates = [format!("{base}.rs"), format!("{base}/mod.rs")];
     for cand in candidates {
-        if known_files.iter().any(|f| f == &cand) {
+        if known_files.contains(&cand) {
             return Some(cand);
         }
     }
@@ -410,10 +411,12 @@ mod extract;
 
     #[test]
     fn resolves_crate_and_mod_paths() {
-        let known = vec![
+        let known: HashSet<String> = [
             "src/graph/query.rs".to_string(),
             "src/graph/extract/mod.rs".to_string(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let hit = resolve_rust_import("src/graph/mod.rs", "crate::graph::query", &known);
         assert_eq!(hit.as_deref(), Some("src/graph/query.rs"));
         let mod_hit = resolve_rust_import("src/graph/mod.rs", "mod:extract", &known);

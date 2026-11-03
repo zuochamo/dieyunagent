@@ -16,6 +16,9 @@ struct EdgeRow {
     external: bool,
 }
 
+/// 仓库地图只报前几条循环依赖（再多也塞不进注入预算）
+const MAX_REPO_MAP_CYCLES: usize = 6;
+
 pub fn module_deps(
     conn: &Connection,
     root_hash: &str,
@@ -36,7 +39,7 @@ pub fn module_deps(
         });
     }
 
-    let circular = find_import_cycles(&rows);
+    let circular = find_import_cycles(&rows, usize::MAX);
     let start = path.map(normalize_path_key).filter(|p| !p.is_empty());
 
     let dependencies = if let Some(ref from) = start {
@@ -418,48 +421,59 @@ fn collect_import_dependencies(rows: &[EdgeRow], start: &str, depth: u32) -> Vec
     out
 }
 
-fn find_import_cycles(rows: &[EdgeRow]) -> Vec<Vec<String>> {
-    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+/// 找导入环，最多记录 `limit` 个（`repo_map` 只要前几条，`module_deps` 要全量）。
+///
+/// 邻接表、访问集合与栈都借用 `rows` 里的 `&str`：原来每条边 clone 两个 String、
+/// 每个节点入栈再 clone 一次，大仓库几十万次分配；枚举顺序与结果完全一致。
+fn find_import_cycles(rows: &[EdgeRow], limit: usize) -> Vec<Vec<String>> {
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
     for row in rows {
         if let Some(ref to) = row.to_path {
-            adj.entry(row.from_path.clone())
+            adj.entry(row.from_path.as_str())
                 .or_default()
-                .push(to.clone());
+                .push(to.as_str());
         }
     }
-    let mut cycles = Vec::new();
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut stack = Vec::new();
-    fn dfs(
-        node: &str,
-        adj: &HashMap<String, Vec<String>>,
-        visiting: &mut HashSet<String>,
-        visited: &mut HashSet<String>,
-        stack: &mut Vec<String>,
+    let mut cycles: Vec<Vec<String>> = Vec::new();
+    let mut visiting: HashSet<&str> = HashSet::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut stack: Vec<&str> = Vec::new();
+    fn dfs<'a>(
+        node: &'a str,
+        adj: &HashMap<&'a str, Vec<&'a str>>,
+        visiting: &mut HashSet<&'a str>,
+        visited: &mut HashSet<&'a str>,
+        stack: &mut Vec<&'a str>,
         cycles: &mut Vec<Vec<String>>,
+        limit: usize,
     ) {
+        if cycles.len() >= limit {
+            return;
+        }
         if visited.contains(node) {
             return;
         }
         if visiting.contains(node) {
-            if let Some(pos) = stack.iter().position(|n| n == node) {
-                let mut cycle = stack[pos..].to_vec();
+            if let Some(pos) = stack.iter().position(|n| *n == node) {
+                let mut cycle: Vec<String> = stack[pos..].iter().map(|n| (*n).to_string()).collect();
                 cycle.push(node.to_string());
                 cycles.push(cycle);
             }
             return;
         }
-        visiting.insert(node.to_string());
-        stack.push(node.to_string());
+        visiting.insert(node);
+        stack.push(node);
         if let Some(nexts) = adj.get(node) {
             for next in nexts {
-                dfs(next, adj, visiting, visited, stack, cycles);
+                dfs(next, adj, visiting, visited, stack, cycles, limit);
+                if cycles.len() >= limit {
+                    break;
+                }
             }
         }
         stack.pop();
         visiting.remove(node);
-        visited.insert(node.to_string());
+        visited.insert(node);
     }
     for node in adj.keys() {
         dfs(
@@ -469,6 +483,7 @@ fn find_import_cycles(rows: &[EdgeRow]) -> Vec<Vec<String>> {
             &mut visited,
             &mut stack,
             &mut cycles,
+            limit,
         );
     }
     cycles
@@ -605,8 +620,8 @@ pub fn repo_map(
 
     let circular = {
         let rows = load_import_edges(conn, root_hash)?;
-        let mut cycles = find_import_cycles(&rows);
-        cycles.truncate(6);
+        // 只要前 6 条：原来先枚举全部环再 truncate，大仓库会先攒下成千上万条再丢掉
+        let mut cycles = find_import_cycles(&rows, MAX_REPO_MAP_CYCLES);
         for c in &mut cycles {
             if c.len() > 8 {
                 c.truncate(8);
@@ -835,6 +850,45 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "{SYMBOLS} 符号 × {CALLS} 调用的仓库地图耗时 {elapsed:?}，\
              说明引用数统计又退化成了 O(符号数 × 调用数)"
+        );
+    }
+
+    fn edge(from: &str, to: Option<&str>) -> EdgeRow {
+        EdgeRow {
+            from_path: from.to_string(),
+            to_path: to.map(|t| t.to_string()),
+            spec: String::new(),
+            line: 1,
+            external: false,
+        }
+    }
+
+    /// 环检测：成环必须报出来，且首尾同名；上限生效（repo_map 只要前几条）。
+    #[test]
+    fn find_import_cycles_reports_cycles_and_honors_limit() {
+        // 两个不相交的环：a <-> b 与 c -> d -> c
+        let rows = vec![
+            edge("a.js", Some("b.js")),
+            edge("b.js", Some("a.js")),
+            edge("c.js", Some("d.js")),
+            edge("d.js", Some("c.js")),
+            edge("e.js", Some("a.js")), // 只有入边，不成环
+            edge("f.js", None),         // 外部/未解析，不参与
+        ];
+
+        let all = find_import_cycles(&rows, usize::MAX);
+        assert!(all.len() >= 2, "两个环都应报出来，实际 {:?}", all);
+        for cycle in &all {
+            assert!(cycle.len() >= 2, "环至少两个节点：{:?}", cycle);
+            assert_eq!(cycle.first(), cycle.last(), "环必须首尾同名：{:?}", cycle);
+        }
+
+        let limited = find_import_cycles(&rows, 1);
+        assert_eq!(limited.len(), 1, "limit=1 时只报一条");
+
+        assert!(
+            find_import_cycles(&[], usize::MAX).is_empty(),
+            "空图不应报环"
         );
     }
 }
