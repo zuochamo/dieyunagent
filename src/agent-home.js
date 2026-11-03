@@ -76,10 +76,6 @@ function globalSkillsDir() {
   return path.join(agentsHome(), 'skills');
 }
 
-function globalMemoryDir() {
-  return path.join(agentsHome(), 'memory');
-}
-
 function userDataSkillsDir(userData) {
   return path.join(userData, 'skills', 'user');
 }
@@ -329,11 +325,8 @@ function describeAgentHome(userData, workspacePath) {
 }
 
 module.exports = {
-  AGENT_DIR_NAME,
   SEEDED_SKILL_CATEGORIES,
   seededSkillRoots,
-  isSeededSkillRoot,
-  matchSkillRoot,
   isSeededSkillDir,
   evaluateSkillDeletable,
   dieyunHome,
@@ -342,14 +335,11 @@ module.exports = {
   dieyunSkillsDir,
   dieyunMemoryDir,
   dieyunDefaultWorkspaceDir,
-  agentsHome,
   globalSkillsDir,
-  globalMemoryDir,
   userDataSkillsDir,
   workspaceSkillsDir,
   ensureAgentHomeDirs,
   getScanRoots,
-  isSkillRootAccessible,
   filterAccessibleSkillRoots,
   createUserSkill,
   deleteUserSkill,

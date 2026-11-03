@@ -372,7 +372,6 @@ async function collectWriteSmellHints(input) {
 module.exports = {
   CONTENT_WRITE_TOOLS,
   twinKey,
-  baseName,
   dirName,
   relDirOf,
   relDirGlobPattern,
@@ -380,7 +379,6 @@ module.exports = {
   scanSwallowedExceptions,
   scanPlaintextSecret,
   extractConstantAssignments,
-  createWriteSmellTracker,
   resetWriteSmellTrackers,
   collectWriteSmellHints
 };

@@ -140,4 +140,4 @@ async function webFetch(url, opts = {}) {
   return result;
 }
 
-module.exports = { webFetch, clampMaxChars, DEFAULT_MAX_CHARS };
+module.exports = { webFetch, clampMaxChars };

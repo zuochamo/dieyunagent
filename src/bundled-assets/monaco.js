@@ -43,6 +43,5 @@ function getMonacoVsUrl(opts = {}) {
 module.exports = {
   MONACO_RESOURCE_DIR,
   MONACO_MARKER_REL,
-  resolveMonacoRoot,
   getMonacoVsUrl
 };

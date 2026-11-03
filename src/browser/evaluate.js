@@ -246,9 +246,6 @@ function normalizeEvaluateResult(raw) {
 }
 
 module.exports = {
-  EVALUATE_RESULT_MAX_CHARS,
-  EVALUATE_RESULT_MIN_CHARS,
-  EVALUATE_SAFE_DEPTH,
   buildEvaluateScript,
   buildExpressionProbeScript,
   normalizeEvaluateResult

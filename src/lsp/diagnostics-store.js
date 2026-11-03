@@ -123,13 +123,11 @@ function snapshotBucket(bucket) {
 }
 
 module.exports = {
-  ENGINE_KEYS,
   mergeDiagnosticsLayers,
   buildItemView,
   upsertEngineLayer,
   clearEngineLayer,
   removeFileFromBucket,
   snapshotBucket,
-  diagSignature,
   normalizeStoreFileKey
 };

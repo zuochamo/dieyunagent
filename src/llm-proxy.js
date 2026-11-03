@@ -518,11 +518,6 @@ function readAll(stream, opts = {}) {
 
 module.exports = {
   CONNECT_TIMEOUT_MS,
-  STREAM_FIRST_TOKEN_TIMEOUT_MS,
-  STREAM_IDLE_TIMEOUT_MS,
-  STREAM_TOTAL_TIMEOUT_MS,
-  BODY_IDLE_TIMEOUT_MS,
   chatCompletionJson,
-  streamChatSse,
-  sseChunkHasDataLine
+  streamChatSse
 };

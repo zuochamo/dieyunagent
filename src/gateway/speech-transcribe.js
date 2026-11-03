@@ -169,7 +169,6 @@ async function probeTranscription(opts) {
 
 module.exports = {
   transcribeWhisper,
-  resolveTranscriptionUrl,
   probeTranscription,
   buildSilentWav,
   MAX_AUDIO_BYTES

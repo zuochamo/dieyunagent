@@ -59,16 +59,6 @@ function unwrapDuckDuckGo(href) {
   }
 }
 
-function hostOfSafe(url) {
-  const safe = safeUrlOrNull(url);
-  if (!safe) return '';
-  try {
-    return new URL(safe).hostname.toLowerCase();
-  } catch {
-    return '';
-  }
-}
-
 function normalizeQuery(query, site) {
   const q = String(query || '').trim();
   const s = String(site || '').trim();
@@ -99,7 +89,6 @@ module.exports = {
   unwrapBing,
   unwrapGoogle,
   unwrapDuckDuckGo,
-  hostOfSafe,
   normalizeQuery,
   clampPage,
   makeResult

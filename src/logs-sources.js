@@ -268,10 +268,7 @@ function fetchAllLogs(userData, opts = {}) {
 }
 
 module.exports = {
-  LOG_RETENTION_DAYS,
-  listLogSources,
   readLogTail,
   fetchAllLogs,
-  cleanLogs,
-  clearAllLogs
+  cleanLogs
 };

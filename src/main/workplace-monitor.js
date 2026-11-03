@@ -460,4 +460,4 @@ function createWorkplaceMonitor(deps) {
   };
 }
 
-module.exports = { createWorkplaceMonitor, isValidPublicIpv4, readCpuPercent };
+module.exports = { createWorkplaceMonitor, isValidPublicIpv4 };

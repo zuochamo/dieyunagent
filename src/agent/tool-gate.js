@@ -301,7 +301,6 @@ module.exports = {
   createToolCall,
   isToolCall,
   runToolGateStage,
-  callContext,
   formatArgsBrief,
   wrapStructuredError,
   /**

@@ -725,10 +725,7 @@ module.exports = {
   // 注入投递口与它的失败契约（错误构造函数导出给单测：不触碰 koffi/SendInput）
   sendInputs,
   droppedInputError,
-  getVirtualScreenMetrics,
   moveMouseToPhysical,
-  mouseButtonDown,
-  mouseButtonUp,
   dragMouse,
   clickMouseButton,
   scrollWheel,

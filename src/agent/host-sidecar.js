@@ -74,8 +74,6 @@ function workspaceRelativeSpillPath(runKey, fileName) {
 }
 
 module.exports = {
-  TOOL_OUTPUT_REL,
-  TERMINALS_REL,
   isVirtualWorkspacePath,
   hostSidecarRoots,
   resolveHostSidecarLocalPath,

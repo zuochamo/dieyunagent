@@ -175,8 +175,6 @@ async function readGitStatus(git, opts = {}) {
 }
 
 module.exports = {
-  CONFLICT_XY,
-  UNTRACKED_MODE_ARGS,
   parseBranchHeader,
   parsePorcelainZ,
   parsePorcelainStatus,

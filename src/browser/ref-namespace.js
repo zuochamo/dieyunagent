@@ -114,11 +114,6 @@ function refSnapshotId(raw) {
   return parsed ? parsed.snapshotId : null;
 }
 
-function refSeq(raw) {
-  const parsed = parseRef(raw);
-  return parsed ? parsed.seq : null;
-}
-
 function malformedFailure(raw) {
   const shown = raw == null ? '' : String(raw);
   return {
@@ -254,15 +249,11 @@ const REF_PARAM_DESCRIPTION =
 const REF_PARAM_SCHEMA = Object.freeze({ type: 'string', description: REF_PARAM_DESCRIPTION });
 
 module.exports = {
-  SNAPSHOT_ID_PATTERN,
   REF_PREFIX,
   REF_ORIGIN_SEPARATOR,
   REF_PATTERN,
   REF_RE,
-  SNAPSHOT_ID_RE,
   REF_FAILURE,
-  REF_FAILURE_CODES,
-  REF_FAILURE_FIX,
   refLifecycleNote,
   REF_FORMAT_HINT,
   REF_PARAM_DESCRIPTION,
@@ -274,7 +265,6 @@ module.exports = {
   parseRef,
   isRef,
   refSnapshotId,
-  refSeq,
   checkRefOrigin,
   refSelector,
   isRefFailureError,

@@ -44,8 +44,6 @@ function writeAgentsMdPrefs(userDataPath, prefs) {
 }
 
 module.exports = {
-  PREFS_FILE,
-  defaultAgentsMdPrefs,
   readAgentsMdPrefs,
   writeAgentsMdPrefs
 };

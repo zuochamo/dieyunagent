@@ -392,10 +392,5 @@ module.exports = {
   resolveTextApiConfig,
   DEFAULTS,
   MAX_TOKENS_DEFAULT,
-  clampMaxTokens,
-  clampContextWindow,
-  clampContextReserve,
-  clampTriggerRatio,
-  clampAgentToolCallLimit,
   clampAgentMaxRounds
 };

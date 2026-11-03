@@ -14,8 +14,6 @@ function workspaceIndexDbPath(workspaceRoot) {
 }
 
 module.exports = {
-  DIEYUN_DIR_NAME,
-  INDEX_DB_NAME,
   workspaceDieyunDir,
   workspaceIndexDbPath
 };

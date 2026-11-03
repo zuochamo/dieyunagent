@@ -84,7 +84,6 @@ function encodeMcpToolName(serverId, toolName) {
 }
 
 module.exports = {
-  MCP_TOOL_NAME_MAX,
   MCP_BUILTIN_TOOL_NAMES,
   isMcpServerToolName,
   simpleHash,

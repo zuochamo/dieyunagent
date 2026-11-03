@@ -105,4 +105,4 @@ function createTrayNotify(deps) {
   };
 }
 
-module.exports = { createTrayNotify, APP_USER_MODEL_ID };
+module.exports = { createTrayNotify };

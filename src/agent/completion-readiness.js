@@ -548,12 +548,8 @@ async function evaluateTurnReadiness(opts = {}) {
 }
 
 module.exports = {
-  MAX_DIAG_FILES,
   collectEvidence,
   evaluateReadiness,
-  collectDiagnostics,
-  collectBrowser,
   evaluateTurnReadiness,
-  structuredExitCode,
   toolFailed
 };

@@ -73,16 +73,4 @@ function msUntilNextRun(plan, now = new Date()) {
   }
 }
 
-function formatPlanSchedule(plan) {
-  if (plan.onceAt) {
-    try {
-      return `单次 · ${new Date(plan.onceAt).toLocaleString('zh-CN')}`;
-    } catch {
-      return `单次 · ${plan.onceAt}`;
-    }
-  }
-  if (plan.rrule) return plan.rrule;
-  return '未设置';
-}
-
-module.exports = { msUntilNextRun, formatPlanSchedule };
+module.exports = { msUntilNextRun };

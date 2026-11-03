@@ -352,7 +352,6 @@ function visionCameraText(width, height) {
 }
 
 module.exports = {
-  VISION_IMAGE_DIR,
   MAX_IMAGE_TOKENS,
   visionTokensForSize,
   storeVisionImage,

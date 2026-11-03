@@ -208,7 +208,6 @@ module.exports = {
   displayPhysicalSize,
   displayPhysicalOrigin,
   fullView,
-  normalizeView,
   viewPointToScreenPhysical,
   screenPhysicalToViewPoint,
   viewRectToPhysicalRect,

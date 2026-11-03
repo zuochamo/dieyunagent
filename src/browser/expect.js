@@ -219,7 +219,6 @@ function shapeExpectResult(raw, opts = {}) {
 }
 
 module.exports = {
-  ASSERTION_KINDS,
   MAX_ASSERTIONS,
   normalizeAssertions,
   buildExpectScript,

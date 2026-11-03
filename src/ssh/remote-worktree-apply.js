@@ -218,8 +218,6 @@ async function applyRemoteWorktree(sshManager, opts) {
 }
 
 module.exports = {
-  AGENT_GIT_NAME,
-  AGENT_GIT_EMAIL,
   parsePorcelainLine,
   buildPreviewScript,
   parsePreview,

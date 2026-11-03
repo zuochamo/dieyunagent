@@ -165,7 +165,6 @@ function summarizeConsoleEntries(entries) {
 module.exports = {
   DEFAULT_MAX_ENTRIES,
   PAGE_ERROR_MARKER,
-  UNHANDLED_REJECTION_MARKER,
   normalizeLevel,
   buildConsoleErrorHookScript,
   classifyConsoleEntry,

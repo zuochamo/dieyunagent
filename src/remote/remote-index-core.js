@@ -474,6 +474,5 @@ module.exports = {
   createRemoteIndexCoreHandlers,
   buildCoreConfigurePayload,
   INDEX_RPC_METHODS,
-  selectStaleCoreHolders,
-  readProcInfo
+  selectStaleCoreHolders
 };

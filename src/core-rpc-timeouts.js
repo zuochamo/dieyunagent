@@ -25,8 +25,7 @@ function resolveCoreRpcTimeoutMs(method, timeoutMs) {
   const m = String(method || '');
   if (
     m === 'codebase.index' ||
-    m === 'graph.index' ||
-    m === 'graph.index_remote'
+    m === 'graph.index'
   ) {
     return INDEX_TIMEOUT_MS;
   }

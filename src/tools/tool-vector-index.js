@@ -333,6 +333,5 @@ async function recallAgentTools(input) {
 module.exports = {
   recallAgentTools,
   applyServerFloor,
-  diversifyByServer,
-  toolIndexPath
+  diversifyByServer
 };

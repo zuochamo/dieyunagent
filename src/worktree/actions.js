@@ -174,6 +174,5 @@ function resolveRemoteSessionWorktree(ctx, payload) {
 module.exports = {
   createWorktreeActions,
   resolveWorktreeRepoContext,
-  resolveRemoteSessionWorktree,
-  worktreeContextFailure
+  resolveRemoteSessionWorktree
 };

@@ -164,10 +164,5 @@ function createTurnUndoStore(userDataPath) {
 }
 
 module.exports = {
-  STORE_VERSION,
-  createTurnUndoStore,
-  serializeSessionState,
-  deserializeSessionState,
-  safeSessionFileName,
-  undoSessionsDir
+  createTurnUndoStore
 };

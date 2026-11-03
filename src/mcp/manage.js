@@ -280,7 +280,5 @@ function createMcpManager(deps) {
 module.exports = {
   createMcpManager,
   MCP_MANAGE_ACTIONS,
-  MCP_PACKAGE_ACTIONS,
-  toStoreRequest,
-  summarizeServers
+  toStoreRequest
 };

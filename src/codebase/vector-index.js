@@ -169,8 +169,6 @@ function rankBySemantic({
 
 module.exports = {
   CJK_RE,
-  ID_RE,
-  KEYWORD_WEIGHT,
   hashText,
   embeddingSignature,
   vectorToBase64,

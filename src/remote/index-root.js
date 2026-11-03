@@ -92,6 +92,5 @@ function resolveIndexRoot({ explicitRoot, scopeRoot, label, scopeLabel } = {}) {
 
 module.exports = {
   normalizeIndexRoot,
-  indexRootMismatchError,
   resolveIndexRoot
 };

@@ -78,13 +78,8 @@ function normalizeTask(input) {
 }
 
 module.exports = {
-  TASK_STATUSES,
-  EXCEPTION_POLICIES,
-  AGENT_TYPES,
   DEFAULT_MAX_RETRIES,
   DEFAULT_TIMEOUT_MS,
   newId,
-  normalizeWorkerId,
-  normalizeAgentType,
   normalizeTask
 };

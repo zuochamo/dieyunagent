@@ -127,6 +127,5 @@ function registerLlmIpc(ipcMain) {
 }
 
 module.exports = {
-  registerLlmIpc,
-  abortStream
+  registerLlmIpc
 };

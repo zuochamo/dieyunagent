@@ -191,7 +191,6 @@ module.exports = {
   CODE_KEYWORDS,
   identifierAt,
   firstIdentifier,
-  stripCodeNoise,
   inferBlockEnd,
   DEFLIKE_RE,
   DEF_KEYWORD_BRE,

@@ -267,9 +267,7 @@ module.exports = {
   getServerSpec,
   buildInitializeOptions,
   resolveTsServerPath,
-  resolvePyrightLangserverPath,
   isTypescriptProjectConfigPath,
   shouldOpenOnTypescriptLanguageServer,
-  lspConfigPath,
   pythonStubDir
 };

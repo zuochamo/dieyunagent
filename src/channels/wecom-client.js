@@ -552,11 +552,7 @@ module.exports = {
   conversationKeyOf,
   frames,
   newStreamId,
-  newReqId,
-  WECOM_WS_URL,
   HEARTBEAT_MS,
-  RECONNECT_DELAY_MS,
   DEAD_CONNECTION_MS,
-  PUSH_ACK_TIMEOUT_MS,
   REPLY_STREAM_PREFIX
 };

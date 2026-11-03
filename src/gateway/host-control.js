@@ -198,10 +198,6 @@ function registerProcessHandle(info = {}) {
   return record;
 }
 
-function forgetProcessHandle(id) {
-  return processHandles.delete(String(id || ''));
-}
-
 function publicProcessRecord(rec) {
   const alive = !rec.exited && (rec.child ? rec.child.exitCode == null : isPidAlive(rec.pid));
   return {
@@ -1258,7 +1254,6 @@ module.exports = {
   runShellDetached,
   killActiveShellChildren,
   registerProcessHandle,
-  forgetProcessHandle,
   listProcessHandles,
   takeSettledReports,
   killProcessHandle,

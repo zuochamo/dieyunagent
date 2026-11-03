@@ -303,4 +303,4 @@ async function webSearch(query, engineOrOpts, legacyOpts) {
   return payload;
 }
 
-module.exports = { webSearch, MAX_FETCH_TOP, TOTAL_PAGE_CHARS };
+module.exports = { webSearch};

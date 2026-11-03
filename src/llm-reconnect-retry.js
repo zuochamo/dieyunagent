@@ -305,7 +305,5 @@ module.exports = {
   sleepMs,
   raceAbortable,
   resolveRetryWaitMs,
-  LLM_RECONNECT_MAX_WAIT_MS,
-  LLM_RECONNECT_MAX_RETRIES,
-  LLM_RECONNECT_MAX_DELAY_MS
+  LLM_RECONNECT_MAX_RETRIES
 };

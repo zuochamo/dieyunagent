@@ -260,8 +260,6 @@ module.exports = {
   DEFAULT_MAX_ENTRIES,
   TIMELINE_BINDING,
   TIMELINE_CHANNEL,
-  RECORDER_FLAG,
-  PAGE_EVENT_TYPES,
   buildTimelineRecorderScript,
   createTimelineJournal,
   summarizeTimeline

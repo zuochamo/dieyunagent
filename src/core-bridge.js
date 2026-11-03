@@ -466,6 +466,5 @@ function createCoreBridge(opts) {
 }
 
 module.exports = {
-  createCoreBridge,
-  parseCompactionLlmLogLine
+  createCoreBridge
 };

@@ -411,25 +411,6 @@ function resetSshConfigCache() {
   cache = { key: '', blocks: [], files: [] };
 }
 
-/**
- * 配置里出现过的 Host 别名（供 UI 提示/未来下拉；不含 `*` 这类通配块）。
- * @param {Array<any>} blocks
- * @returns {string[]}
- */
-function listHostAliases(blocks) {
-  const out = [];
-  const seen = new Set();
-  for (const b of blocks || []) {
-    for (const p of b.patterns || []) {
-      if (p.negate || /[*?]/.test(p.text)) continue;
-      if (seen.has(p.text)) continue;
-      seen.add(p.text);
-      out.push(p.text);
-    }
-  }
-  return out;
-}
-
 module.exports = {
   parseSshConfigText,
   parseProxyJump,
@@ -437,11 +418,8 @@ module.exports = {
   globMatch,
   resolveHostConfig,
   loadSshConfig,
-  loadSshConfigWithFiles,
   getSshConfigBlocks,
   resetSshConfigCache,
-  listHostAliases,
   splitArgs,
-  stripComment,
-  expandHome
+  stripComment
 };

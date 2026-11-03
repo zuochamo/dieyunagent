@@ -141,8 +141,6 @@ module.exports = {
   CONTEXT_WINDOW_MAX,
   MODEL_RUNTIME_DEFAULTS,
   MODEL_RUNTIME_SCHEMA,
-  MODEL_RUNTIME_SCHEMA_BY_KEY,
-  MODEL_RUNTIME_RANGES,
   clampModelRuntimeValue,
   formatModelRuntimeValue
 };

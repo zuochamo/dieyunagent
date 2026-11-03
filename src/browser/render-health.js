@@ -190,9 +190,6 @@ function renderHealthWarning(health) {
 }
 
 module.exports = {
-  PIXEL_DARK_RATIO,
-  PIXEL_DARK_BRIGHTNESS,
-  MAX_INTERACTIVE_SCAN,
   HEALTH_REASON,
   BLANK_WARNING,
   DARK_UNVERIFIED_WARNING,

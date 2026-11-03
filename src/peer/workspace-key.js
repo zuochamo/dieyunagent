@@ -140,7 +140,6 @@ function workspaceInfoFor(workspacePath) {
 module.exports = {
   normalizeRemoteUrl,
   readGitRemoteUrl,
-  resolveGitDir,
   workspaceKeyFor,
   workspaceInfoFor
 };

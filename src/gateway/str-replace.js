@@ -6,10 +6,6 @@
  * Exact match first, then CRLF/LF, then light fuzzy (quotes/dashes/trailing space).
  */
 
-function countLiteralOccurrences(haystack, needle) {
-  return findExactSpans(haystack, needle).length;
-}
-
 function findExactSpans(haystack, needle) {
   const spans = [];
   if (!needle) return spans;
@@ -21,23 +17,6 @@ function findExactSpans(haystack, needle) {
     from = i + needle.length;
   }
   return spans;
-}
-
-function withAltNewlines(s) {
-  if (!s) return null;
-  if (s.includes('\r\n')) return s.replace(/\r\n/g, '\n');
-  if (s.includes('\n')) return s.replace(/\n/g, '\r\n');
-  return null;
-}
-
-function alignNewlines(src, like) {
-  if (like.includes('\r\n') && src.includes('\n') && !src.includes('\r\n')) {
-    return src.replace(/\n/g, '\r\n');
-  }
-  if (!like.includes('\r\n') && src.includes('\r\n')) {
-    return src.replace(/\r\n/g, '\n');
-  }
-  return src;
 }
 
 function isReplaceAllFlag(v) {
@@ -293,7 +272,4 @@ module.exports = {
   collectFileEdits,
   normalizeEditArgs,
   normalizeForFuzzyMatch,
-  countLiteralOccurrences,
-  alignNewlines,
-  withAltNewlines
 };

@@ -257,12 +257,9 @@ async function pruneAttachmentImages(opts = {}) {
 }
 
 module.exports = {
-  IMAGE_EXT,
-  RESIZABLE_EXT,
   MAX_FILES_PER_PASS,
   resolveRetentionLimits,
   isImageName,
   isResizableName,
-  encodeDownsampled,
   pruneAttachmentImages
 };

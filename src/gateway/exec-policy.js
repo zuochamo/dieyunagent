@@ -54,9 +54,7 @@ function validateShellCommand(command) {
 
 module.exports = {
   validateShellCommand,
-  countChainOperators,
   stripShellQuotedSegments,
   /** 兼容旧引用：内容即沙箱高危词表（同一份对象，不是副本） */
-  BLOCKED_PATTERNS: SANDBOX_DENY_LIST,
-  MAX_CHAIN_OPS
+  BLOCKED_PATTERNS: SANDBOX_DENY_LIST
 };

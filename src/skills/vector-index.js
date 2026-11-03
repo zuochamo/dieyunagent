@@ -218,7 +218,5 @@ async function recallSkills({
 }
 
 module.exports = {
-  ensureSkillIndex,
-  recallSkills,
-  skillIndexPath
+  recallSkills
 };

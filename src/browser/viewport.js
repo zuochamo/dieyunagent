@@ -101,9 +101,6 @@ module.exports = {
   VIEWPORT_MIN,
   VIEWPORT_MAX,
   VIEWPORT_DEFAULT,
-  DSF_MIN,
-  DSF_MAX,
-  EMULATE_PERMISSIONS,
   normalizeViewport,
   normalizeEmulation
 };

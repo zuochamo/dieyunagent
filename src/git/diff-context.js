@@ -197,6 +197,5 @@ async function getWorkspaceGitChangedAbsPaths(repoPath, opts = {}) {
 module.exports = {
   getWorkspaceGitDiffContext,
   getWorkspaceGitChangedAbsPaths,
-  MAX_DIFF_CHARS,
   MAX_FILES
 };

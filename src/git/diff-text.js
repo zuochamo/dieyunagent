@@ -37,4 +37,4 @@ function synthesizeNewFilePatch(relPath, text, opts) {
   ].join('\n');
 }
 
-module.exports = { synthesizeNewFilePatch, NEW_FILE_BODY_MAX_CHARS };
+module.exports = { synthesizeNewFilePatch };

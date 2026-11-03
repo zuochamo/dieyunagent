@@ -40,6 +40,5 @@ function workspaceStoreKey(workspaceRoot) {
 module.exports = {
   remoteAgentInfoKey,
   remoteIndexCacheKey,
-  normalizeCacheWorkspaceRoot,
   workspaceStoreKey
 };

@@ -45,7 +45,5 @@ function configure() {
 }
 
 module.exports = {
-  configure,
-  USER_DATA_DIR,
-  LEGACY_USER_DATA_DIR
+  configure
 };

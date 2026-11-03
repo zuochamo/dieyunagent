@@ -248,8 +248,5 @@ function createActivityStats(deps) {
 
 module.exports = {
   createActivityStats,
-  normalizeModelUsageKey,
-  normalizeModelUsageMap,
-  currentStatsMonthKey,
-  UNKNOWN_MODEL_USAGE_KEY
+  normalizeModelUsageKey
 };

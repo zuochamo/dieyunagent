@@ -167,8 +167,6 @@ function classifyDelta(delta, policy) {
 
 module.exports = {
   REASONING_KEY_CANDIDATES,
-  CHANNEL_REASONING,
-  CHANNEL_ANSWER,
   DEFAULT_CHANNEL_POLICY,
   CHANNEL_POLICY_BY_MODEL,
   normalizeChannelPolicy,

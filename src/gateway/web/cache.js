@@ -59,4 +59,4 @@ function clearWebCaches() {
   fetchCache.clear();
 }
 
-module.exports = { createCache, searchCache, fetchCache, clearWebCaches };
+module.exports = { searchCache, fetchCache, clearWebCaches };

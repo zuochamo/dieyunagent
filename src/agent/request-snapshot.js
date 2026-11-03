@@ -328,7 +328,6 @@ module.exports = {
   SNAPSHOT_SOURCES,
   SNAPSHOT_REASONS,
   SNAPSHOT_APPEND_RPC,
-  SNAPSHOT_LIMIT_KEYS,
   buildRequestSnapshotPayload,
   createRequestSnapshotWriter,
   resolveSnapshotLimits,

@@ -126,10 +126,6 @@ function subnetBroadcastAddresses() {
 }
 
 module.exports = {
-  ipv4Parts,
-  isReservedIpv4,
-  ipv4Score,
-  lanAddresses,
   lanHosts,
   subnetBroadcastAddresses
 };

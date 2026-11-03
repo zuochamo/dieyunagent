@@ -182,4 +182,4 @@ function createAutoLaunch(deps) {
   };
 }
 
-module.exports = { createAutoLaunch, LOGIN_LAUNCH_ARGS };
+module.exports = { createAutoLaunch };

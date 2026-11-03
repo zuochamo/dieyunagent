@@ -68,7 +68,6 @@ function getBuiltinMcpById(id) {
 }
 
 module.exports = {
-  BUILTIN_MCP_SERVERS,
   listBuiltinMcpServers,
   getBuiltinMcpById
 };

@@ -700,8 +700,6 @@ function buildClearAnnotationScript() {
 }
 
 module.exports = {
-  FRAME_MAX_DEPTH,
-  FRAME_MAX_COUNT,
   FRAME_HELPERS,
   normalizeFrameSpec,
   isMainFrameSpec,

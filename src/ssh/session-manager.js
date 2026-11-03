@@ -1072,7 +1072,5 @@ function createSshSessionManager(opts = {}) {
 
 module.exports = {
   createSshSessionManager,
-  sftpEntryIsDirectory,
-  mapSftpDirEntries,
-  formatSftpBrowseError
+  sftpEntryIsDirectory
 };

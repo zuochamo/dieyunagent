@@ -74,6 +74,5 @@ module.exports = {
   MAX_RESULTS,
   resolveEngine,
   buildSearchUrl,
-  parseSearchResults,
-  dedupeResults
+  parseSearchResults
 };

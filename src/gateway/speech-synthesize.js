@@ -249,6 +249,5 @@ module.exports = {
   audioMimeType,
   sniffAudioFormat,
   MAX_TTS_CHARS,
-  DEFAULT_TTS_FORMAT,
-  AUDIO_MIME_BY_FORMAT
+  DEFAULT_TTS_FORMAT
 };

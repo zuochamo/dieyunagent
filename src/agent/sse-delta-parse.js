@@ -232,7 +232,6 @@ function buildToolCallAccumulator() {
 
 module.exports = {
   extractDeltaReasoning,
-  repairDeltaTextFields,
   upstreamStreamErrorMessage,
   emitParsedSseJson,
   processSseLineTrimmed,

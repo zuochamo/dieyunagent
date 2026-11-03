@@ -85,7 +85,6 @@ function formatBilingualBlurb(meta, body, maxLen) {
 
 module.exports = {
   parseFrontmatter,
-  pickDescriptionEn,
   pickDescriptionZh,
   formatBilingualBlurb
 };

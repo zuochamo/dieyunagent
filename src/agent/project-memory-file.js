@@ -149,9 +149,6 @@ function filterEntriesForFile(items) {
 
 module.exports = {
   PROJECT_MEMORY_REL_PATH,
-  FILE_HEADER,
-  ENTRY_MAX_CHARS,
-  FILE_MAX_ENTRIES,
   parseProjectMemoryEntries,
   mergeProjectMemoryEntries,
   renderProjectMemoryFile,

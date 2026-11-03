@@ -86,10 +86,8 @@ async function verifySkillContent(skillDir, rawSkillMd) {
 }
 
 module.exports = {
-  INSTALL_MARKER,
   markerPath,
   sha256Text,
-  readInstallMarker,
   writeInstallMarker,
   verifySkillContent
 };

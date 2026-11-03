@@ -227,7 +227,5 @@ function createTerminalSession(opts = {}) {
 
 module.exports = {
   createTerminalSession,
-  resolveSafeCwd,
-  resolveWindowsShell,
   createOutputStreamDecoder
 };

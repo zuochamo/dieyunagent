@@ -289,4 +289,4 @@ function createPeerStore(userDataPath) {
   };
 }
 
-module.exports = { createPeerStore, TRUST_STATUSES };
+module.exports = { createPeerStore };

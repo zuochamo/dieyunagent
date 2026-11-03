@@ -54,7 +54,6 @@ function capDelegateResults(results, maxChars) {
 }
 
 module.exports = {
-  DEFAULT_TOOL_RESULT_MAX,
   tailAwarePreview,
   capToolResultValue,
   capDelegateResults

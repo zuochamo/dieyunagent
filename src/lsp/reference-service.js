@@ -173,6 +173,5 @@ async function resolveSymbolCallers(opts) {
 
 module.exports = {
   resolveSymbolCallers,
-  findNameColumn,
   DEFAULT_RESOLVE_TIMEOUT_MS
 };

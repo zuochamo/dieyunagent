@@ -805,7 +805,6 @@ class LspClient {
 
 module.exports = {
   LspClient,
-  normalizeDiagnostic,
   filterByMinSeverity,
   severityRank
 };

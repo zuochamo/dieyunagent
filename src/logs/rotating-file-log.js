@@ -229,7 +229,6 @@ function bindExitFlush() {
 }
 
 module.exports = {
-  createRotatingLog,
   getRotatingLog,
   flushLog,
   closeLog,

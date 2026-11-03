@@ -2,7 +2,7 @@
 
 const { newId } = require('./task-schema');
 
-/** @typedef {'task_assign'|'task_result'|'review'|'clarify'|'error'|'cancel'|'heartbeat'|'plan'|'arbitrate'} MsgType */
+/** @typedef {'task_assign'|'task_result'|'review'|'clarify'|'error'|'cancel'|'heartbeat'|'plan'} MsgType */
 
 /**
  * @param {object} input

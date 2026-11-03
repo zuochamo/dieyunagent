@@ -145,7 +145,6 @@ function captureLlmRaw(entry = {}) {
 }
 
 module.exports = {
-  MAX_CAPTURE_CHARS,
   llmRawTapEnabled,
   llmRawTapFile,
   captureLlmRaw,

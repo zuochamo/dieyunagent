@@ -233,9 +233,5 @@ async function fetchOpenAiModelList(baseUrl, apiKey, opts = {}) {
 }
 
 module.exports = {
-  fetchOpenAiModelList,
-  resolveModelsUrl,
-  resolveChatCompletionsUrl,
-  probeModelAvailable,
-  isListedModelCandidate
+  fetchOpenAiModelList
 };

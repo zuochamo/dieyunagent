@@ -78,4 +78,4 @@ function launchUpdateBootstrap(opts) {
   return PROGRESS_FILE;
 }
 
-module.exports = { launchUpdateBootstrap, PROGRESS_FILE };
+module.exports = { launchUpdateBootstrap };

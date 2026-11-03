@@ -40,8 +40,6 @@ const ENDPOINT_SPECS = {
   transcriptions: { path: 'audio/transcriptions', direct: /\/audio\/transcriptions$/i }
 };
 
-const LLM_ENDPOINT_KINDS = Object.keys(ENDPOINT_SPECS);
-
 /**
  * baseUrl + 端点类型 → 完整 URL。
  *
@@ -93,8 +91,6 @@ const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 /** `{{name}}` 占位符：供应商配置里引用运行时变量（会话 id / run id / 模型名） */
 const PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
-
-const AUTH_MODES = ['bearer', 'x-api-key', 'none'];
 
 /**
  * 把 `Key: Value` 多行文本解析成键值对。
@@ -298,8 +294,6 @@ function buildLlmHeadersFromConfig(config, vars) {
 }
 
 module.exports = {
-  LLM_ENDPOINT_KINDS,
-  AUTH_MODES,
   RESERVED_HEADERS,
   resolveLlmEndpoint,
   parseHeaderLines,

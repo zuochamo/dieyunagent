@@ -124,7 +124,6 @@ function resolveAttachmentsDir(localGateway) {
 }
 
 module.exports = {
-  DIEYUN_ATTACHMENTS,
   resolveAttachmentsDir,
   stageAttachment,
   stageAttachmentFiles: async (opts, filePaths) => {

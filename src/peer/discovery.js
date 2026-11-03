@@ -292,4 +292,4 @@ function createPeerDiscovery(opts) {
   };
 }
 
-module.exports = { createPeerDiscovery, PACKET_ANNOUNCE, PACKET_HERE };
+module.exports = { createPeerDiscovery};

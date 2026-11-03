@@ -624,8 +624,5 @@ function createTurnUndoService(opts = {}) {
 }
 
 module.exports = {
-  createTurnUndoService,
-  MAX_STACK: 5,
-  normalizeUndoWorkspaceRoot,
-  normalizeUndoRunWorkspaceRoot
+  createTurnUndoService
 };

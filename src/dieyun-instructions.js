@@ -8,7 +8,6 @@ const FILENAME = 'dieyun.md';
 const MAX_CHARS = 12000;
 /** 助手身份唯一来源：其它 prompt / UI 文案一律引用这里，勿再各写一份自称。 */
 const ASSISTANT_IDENTITY = '叠云 Agent（小芸）';
-const USER_RULES_SECTION = '## 身份与称呼';
 
 function bundledTemplatePath() {
   return path.join(__dirname, '..', 'assets', FILENAME);
@@ -107,7 +106,6 @@ module.exports = {
   FILENAME,
   MAX_CHARS,
   ASSISTANT_IDENTITY,
-  USER_RULES_SECTION,
   bundledTemplatePath,
   dieyunMdPath,
   ensureDieyunMdInHome,

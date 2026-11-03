@@ -40,4 +40,4 @@ function zhDescriptionForSkillKey(skillKey) {
   return ZH_BY_SKILL_KEY[bare] || '';
 }
 
-module.exports = { ZH_BY_SKILL_KEY, zhDescriptionForSkillKey };
+module.exports = { zhDescriptionForSkillKey };

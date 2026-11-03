@@ -209,6 +209,5 @@ module.exports = {
   findWorkspacePyProjectRoot,
   findWorkspaceEslintProjectRoot,
   findWorkspaceRuffProjectRoot,
-  findWorkspacePrettierProjectRoot,
-  isInsideRoot
+  findWorkspacePrettierProjectRoot
 };

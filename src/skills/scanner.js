@@ -206,4 +206,4 @@ async function readSkillContent(skillPath) {
   };
 }
 
-module.exports = { defaultSkillRoots, scanSkills, readSkillContent, assertReadableSkillPath };
+module.exports = { scanSkills, readSkillContent, assertReadableSkillPath };

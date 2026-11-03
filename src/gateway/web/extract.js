@@ -178,4 +178,4 @@ function extractMainContent(html, opts = {}) {
   return { title, text: out, truncated, mode, matched, length: out.length };
 }
 
-module.exports = { extractMainContent, blockTextOf, parseHtml, stripNoise, pickContainer };
+module.exports = { extractMainContent, blockTextOf, parseHtml};

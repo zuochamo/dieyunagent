@@ -153,9 +153,6 @@ function createLocalScanIo() {
 module.exports = {
   ARTIFACT_SKIP_DIRS,
   DEFAULT_ARTIFACT_SCAN_LIMIT,
-  MAX_ARTIFACT_SCAN_LIMIT,
-  DEFAULT_ARTIFACT_SCAN_MAX_DEPTH,
-  MAX_ARTIFACT_SCAN_VISITED,
   scanRecentArtifactFiles,
   createLocalScanIo
 };

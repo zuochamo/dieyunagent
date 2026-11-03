@@ -47,11 +47,6 @@ const CLAIM_KIND = Object.freeze({
   TASK: 'task'
 });
 
-const CLAIM_ACTIONS = Object.freeze({
-  ACQUIRE: 'acquire',
-  RELEASE: 'release'
-});
-
 const MAX_ID_LEN = 96;
 const MAX_NAME_LEN = 64;
 const MAX_WORKSPACE_NAME_LEN = 160;
@@ -268,17 +263,9 @@ function parseFrame(raw) {
 }
 
 module.exports = {
-  PROTO_VERSION,
   FRAME,
   ENVELOPE_TYPE,
-  ENVELOPE_TYPES,
   CLAIM_KIND,
-  CLAIM_ACTIONS,
-  MAX_ID_LEN,
-  MAX_NAME_LEN,
-  MAX_CLAIM_KEY_LEN,
-  newMessageId,
-  normalizeWorkspace,
   normalizeClaim,
   normalizeClaims,
   normalizeEnvelope,

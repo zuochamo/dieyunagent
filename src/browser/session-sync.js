@@ -174,8 +174,6 @@ async function removeCookiesFromElectron(targets, opts = {}) {
 module.exports = {
   BROWSER_SESSION_PARTITION,
   browserPartitionForSession,
-  sanitizeSessionPartitionId,
-  electronBrowserSession,
   exportCookiesForPlaywright,
   syncElectronCookiesToPlaywrightContext,
   importCookiesToElectron,

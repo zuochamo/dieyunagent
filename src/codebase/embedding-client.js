@@ -198,6 +198,5 @@ module.exports = {
   createEmbeddingClient,
   vectorToBlob,
   blobToVector,
-  cosineSimilarity,
-  EMBEDDING_DIMENSIONS_DEFAULT
+  cosineSimilarity
 };

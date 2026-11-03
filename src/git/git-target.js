@@ -273,6 +273,5 @@ module.exports = {
   normalizeGitText,
   bufferLooksBinary,
   encodeWorktreeContent,
-  TARGET_READ_MAX_BYTES,
   WORKTREE_SNAPSHOT_MAX_BYTES
 };

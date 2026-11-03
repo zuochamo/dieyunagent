@@ -187,6 +187,5 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
 }
 
 module.exports = {
-  AGENTS_MD_TOOL_SECTIONS,
   executeAgentsMdProposeMain
 };

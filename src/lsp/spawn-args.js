@@ -30,4 +30,4 @@ function buildCmdLine(command, args) {
   return [command, ...(args || [])].map(quoteCmdArg).join(' ');
 }
 
-module.exports = { quoteCmdArg, buildCmdLine, CMD_UNSAFE_RE };
+module.exports = { quoteCmdArg, buildCmdLine };

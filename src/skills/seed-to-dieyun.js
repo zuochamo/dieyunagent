@@ -68,13 +68,6 @@ async function migrateAppDataSkills(userData) {
   return { migrated: copied };
 }
 
-function isUnderDieyunHome(targetPath) {
-  if (!targetPath) return false;
-  const home = path.resolve(dieyunHome());
-  const resolved = path.resolve(String(targetPath));
-  return resolved === home || resolved.startsWith(home + path.sep);
-}
-
 async function migrateWorkspaceSkills(workspacePath) {
   const src = workspaceSkillsDir(workspacePath);
   if (!src) return { migrated: 0, skipped: true };
@@ -98,6 +91,5 @@ async function migrateWorkspaceSkills(workspacePath) {
 
 module.exports = {
   migrateAppDataSkills,
-  migrateWorkspaceSkills,
-  isUnderDieyunHome
+  migrateWorkspaceSkills
 };

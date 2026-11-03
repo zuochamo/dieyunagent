@@ -169,6 +169,5 @@ module.exports = {
   createRendererFreezeReporter,
   collectRendererProcessMetrics,
   formatRendererFreezeReport,
-  RENDERER_FREEZE_PREFIX,
-  RENDERER_FREEZE_PAYLOAD_LIMIT
+  RENDERER_FREEZE_PREFIX
 };

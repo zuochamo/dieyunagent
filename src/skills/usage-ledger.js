@@ -115,9 +115,6 @@ function usageFor(usage, skillPath) {
 }
 
 module.exports = {
-  USAGE_FILE,
-  skillUsagePath,
-  isSkillEntryPath,
   recordSkillRead,
   readSkillUsage,
   usageFor

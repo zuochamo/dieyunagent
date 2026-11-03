@@ -309,10 +309,4 @@ function activeTransport() {
 module.exports = {
   request,
   activeTransport,
-  decodeBody,
-  normalizeCharset,
-  MAX_BODY_BYTES,
-  DEFAULT_TIMEOUT_MS,
-  MAX_REDIRECTS,
-  USER_AGENT
-};
+  DEFAULT_TIMEOUT_MS};

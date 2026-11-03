@@ -210,10 +210,6 @@ function sshGatewayKey(target) {
   return `${tk}|${normalizeRemotePath(target.remotePath || '/')}`;
 }
 
-function isRemoteWorkspaceKind(kind) {
-  return kind === 'ssh';
-}
-
 module.exports = {
   normalizeRemotePath,
   buildSshUri,
@@ -228,6 +224,5 @@ module.exports = {
   sshTargetKey,
   sshGatewayKey,
   isRemoteWorkspacePath,
-  isForeignPosixPath,
-  isRemoteWorkspaceKind
+  isForeignPosixPath
 };
