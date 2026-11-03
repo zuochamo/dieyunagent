@@ -1,6 +1,8 @@
 'use strict';
 
 const { TOOL_NAME_ALIASES } = require('./agent/guardrails-shared');
+// 工具名的唯一目录（schema 广告位）：参数名判定表从它派生，不再手抄一份
+const { ALL_STATIC_TOOLS } = require('./agent/tool-catalog');
 
 /**
  * 部分 OpenAI 兼容模型（如 mimo）把 tool call 写在 content 的 XML 里，
@@ -19,57 +21,21 @@ const TOOL_CALL_CLOSE_RE = /<\/tool[\s_]+call>/gi;
 const DSML_TAG_PREFIX = /<\uff5cDSML\uff5c/gi;
 const DSML_TAG_CLOSE_PREFIX = /<\/\uff5cDSML\uff5c/gi;
 
-/** parameter name 等于工具名时视为「工具参数块」 */
+/**
+ * 「参数名等于工具名」的判定表：**从工具目录派生**，不再手抄一份。
+ *
+ * 曾经是手抄的 49 项 Set，和 `tool-catalog` 漂移到缺 32 个工具
+ * （`subagent` / `plan_*` / `memory_*` / `session_*` / `peer_*` / `ssh` / `worktree` …）：
+ * 弱模型把这些调用写成 content 里的参数块时，参数名被当普通实参吞掉 —— 工具明明存在却调不到。
+ *
+ * 唯一的手写补充是 `browser_fill` / `browser_double_click` / `browser_right_click`：
+ * 执行端仍接受、但没进 schema 广告位的历史工具名（见 `delegate-tool-gateway.js`、`tool-validate.js`）。
+ * `exec` 这类历史名不用列 —— `TOOL_NAME_ALIASES` 已把它们归一成 `host_exec`。
+ */
+const UNLISTED_EXECUTABLE_TOOLS = ['browser_fill', 'browser_double_click', 'browser_right_click'];
 const TOOL_PARAM_NAMES = new Set([
-  'host_exec',
-  'exec',
-  'fs_read_file',
-  'fs_write_file',
-  'fs_edit',
-  'fs_list_dir',
-  'grep',
-  'glob',
-  'read_symbol',
-  'lsp',
-  'web_fetch',
-  'web_search',
-  'browser_navigate',
-  'browser_reload',
-  'browser_back',
-  'browser_forward',
-  'browser_snapshot',
-  'browser_click',
-  'browser_type',
-  'browser_fill',
-  'browser_select_option',
-  'browser_hover',
-  'browser_drag',
-  'browser_double_click',
-  'browser_right_click',
-  'browser_scroll',
-  'browser_press_key',
-  'browser_screenshot',
-  'browser_viewport',
-  'browser_pdf',
-  'browser_evaluate',
-  'browser_wait_for',
-  'browser_observe',
-  'browser_upload_file',
-  'browser_import_storage',
-  'browser_export_storage',
-  'browser_cookies',
-  'browser_dialog',
-  'browser_route',
-  'browser_emulate',
-  'browser_har_export',
-  'browser_a11y_snapshot',
-  'browser_network',
-  'browser_console',
-  'browser_expect',
-  'browser_visual_diff',
-  'browser_status',
-  'browser_close',
-  'computer'
+  ...ALL_STATIC_TOOLS.map((t) => String((t && t.function && t.function.name) || '').trim()).filter(Boolean),
+  ...UNLISTED_EXECUTABLE_TOOLS
 ]);
 
 function genToolCallId(index) {
@@ -78,7 +44,11 @@ function genToolCallId(index) {
 
 /** 统一 mimo / DeepSeek DSML 各变体标签，便于分段与剥除 */
 function normalizeToolCallMarkup(text) {
-  return String(text || '')
+  const raw = String(text || '');
+  // 快路径：下面 8 条替换的匹配式全部以 `<` 起头，没有尖括号就不可能有标记。
+  // 纯文本回复（占绝大多数）因此完全跳过这 8 次全文正则。
+  if (raw.indexOf('<') < 0) return raw;
+  return raw
     .replace(DSML_TAG_PREFIX, '<')
     .replace(DSML_TAG_CLOSE_PREFIX, '</')
     .replace(/<tool[\s_]+calls>/gi, '<tool_calls>')
@@ -299,8 +269,8 @@ function parseInvokeToolCallBlock(block) {
   return null;
 }
 
-function extractInvokeToolCalls(text) {
-  const normalized = normalizeToolCallMarkup(text);
+/** 入参必须是**已归一化**文本（见 normalizeToolCallMarkup）：本文件内一次归一化、多处复用。 */
+function extractInvokeToolCalls(normalized) {
   if (!/<invoke\s+name="/i.test(normalized) && !/<tool_calls>/i.test(normalized)) {
     return [];
   }
@@ -327,8 +297,8 @@ function extractInvokeToolCalls(text) {
   return toolCalls;
 }
 
-function splitToolCallSegments(text) {
-  const normalized = normalizeToolCallMarkup(text);
+/** 入参必须是**已归一化**文本（见 normalizeToolCallMarkup）。 */
+function splitToolCallSegments(normalized) {
   const segments = [];
   const re = /<tool_call>/gi;
   let match;
@@ -357,8 +327,8 @@ function splitToolCallSegments(text) {
   return segments.filter((s) => /<tool_call>/i.test(s) || /<function=/i.test(s) || /<parameter\s+name="/i.test(s));
 }
 
-function extractToolCallsFromContent(content) {
-  const text = normalizeToolCallMarkup(content);
+/** 入参必须是**已归一化**文本（见 normalizeToolCallMarkup）；对外入口见 extractToolCallsFromContent。 */
+function extractToolCallsFromNormalized(text) {
   if (!text) return [];
 
   const invokeCalls = extractInvokeToolCalls(text);
@@ -398,8 +368,13 @@ function extractToolCallsFromContent(content) {
   return toolCalls;
 }
 
-function stripToolCallMarkup(content) {
-  const text = normalizeToolCallMarkup(content);
+function extractToolCallsFromContent(content) {
+  return extractToolCallsFromNormalized(normalizeToolCallMarkup(content));
+}
+
+/** 入参必须是**已归一化**文本（见 normalizeToolCallMarkup）；对外入口见 stripToolCallMarkup。 */
+function stripToolCallMarkupFromNormalized(text) {
+  if (!text) return '';
   return text
     .replace(/<tool_calls>[\s\S]*?(?=<tool_calls>|$)/gi, '')
     .replace(/<\/tool_calls>/gi, '')
@@ -418,8 +393,12 @@ function stripToolCallMarkup(content) {
     .trim();
 }
 
-function hasToolCallMarkupHint(text) {
-  const normalized = normalizeToolCallMarkup(text);
+function stripToolCallMarkup(content) {
+  return stripToolCallMarkupFromNormalized(normalizeToolCallMarkup(content));
+}
+
+/** 入参必须是**已归一化**文本（见 normalizeToolCallMarkup）。 */
+function hasToolCallMarkupHint(normalized) {
   if (!normalized) return false;
   return (
     /<tool_call>/i.test(normalized) ||
@@ -430,29 +409,38 @@ function hasToolCallMarkupHint(text) {
   );
 }
 
-function hasIncompleteToolCallMarkup(content) {
-  const text = normalizeToolCallMarkup(content);
-  if (!text) return false;
-  if (hasToolCallMarkupHint(text)) {
-    return extractToolCallsFromContent(text).length === 0;
+/** 入参必须是**已归一化**文本（见 normalizeToolCallMarkup）。 */
+function hasIncompleteToolCallMarkupFromNormalized(normalized) {
+  if (!normalized) return false;
+  if (hasToolCallMarkupHint(normalized)) {
+    return extractToolCallsFromNormalized(normalized).length === 0;
   }
   return false;
 }
 
+function hasIncompleteToolCallMarkup(content) {
+  return hasIncompleteToolCallMarkupFromNormalized(normalizeToolCallMarkup(content));
+}
+
 function enrichLlmToolCalls(llmResp) {
   const base = llmResp || {};
-  let content = base.content != null ? String(base.content) : '';
+  const rawContent = base.content != null ? String(base.content) : '';
+  // 归一化只做一次：下面「抽工具 → 判残缺 → 剥标记」三步共用同一份文本。
+  const normalizedContent = normalizeToolCallMarkup(rawContent);
+  // 无工具调用时 content 原样返回（不归一化），与逐函数各自归一化的旧行为一致。
+  let content = rawContent;
   let toolCalls = Array.isArray(base.toolCalls) ? base.toolCalls.slice() : [];
   const incomingCount = toolCalls.length;
 
   toolCalls = filterCompleteFunctionToolCalls(toolCalls);
   if (!toolCalls.length) {
-    toolCalls = filterCompleteFunctionToolCalls(extractToolCallsFromContent(content));
+    toolCalls = filterCompleteFunctionToolCalls(extractToolCallsFromNormalized(normalizedContent));
   }
 
-  const incompleteToolMarkup = !toolCalls.length && hasIncompleteToolCallMarkup(content);
+  const incompleteToolMarkup =
+    !toolCalls.length && hasIncompleteToolCallMarkupFromNormalized(normalizedContent);
   if (toolCalls.length) {
-    content = stripToolCallMarkup(content);
+    content = stripToolCallMarkupFromNormalized(normalizedContent);
   }
 
   return {
@@ -533,12 +521,8 @@ module.exports = {
   enrichLlmToolCalls,
   extractToolCallsFromContent,
   stripToolCallMarkup,
-  normalizeToolCallMarkup,
   hasIncompleteToolCallMarkup,
   normalizeToolName,
-  parseNamedParameterToolCallBlock,
-  parseInvokeToolCallBlock,
-  extractInvokeToolCalls,
   parseCompleteJsonArgs,
   normalizeCompleteToolCallArgumentsJson,
   filterCompleteFunctionToolCalls
