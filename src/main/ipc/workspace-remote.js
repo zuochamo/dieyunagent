@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const { createSshActions } = require('../../ssh/actions');
+const { bindSessionWorkspace } = require('../../agent/session-workspace-bind');
 
 /**
  * Workspace and SSH IPC (live getters — do not capture stale nulls).
@@ -43,13 +44,10 @@ function registerWorkspaceRemoteIpc(ctx) {
       !!p && !/^ssh:/i.test(String(p)) && !fs.existsSync(String(p));
     const clearMissingWorkspace = async () => {
       clearedMissingWorkspace = true;
-      localGateway.setSessionWorkspaceContext(sid, null);
-      // 只清运行时上下文还不够：DB 行里的旧路径下次启动又会被 session_get 带回来
+      // 只清运行时上下文还不够：DB 行里的旧路径下次启动又会被 session_get 带回来。
+      // 两处的写入由 bindSessionWorkspace 一处负责（'' = 解绑 → 会话行写 NULL）。
       try {
-        await localGateway.invokeRpc('memory.session_workspace_set', {
-          sessionId: sid,
-          workspacePath: null
-        });
+        await bindSessionWorkspace(localGateway, sid, '');
       } catch (e) {
         log.info('session_workspace_set null:', e && e.message);
       }
@@ -223,16 +221,28 @@ function registerWorkspaceRemoteIpc(ctx) {
   ipcMain.handle('ssh:get-profile', (_evt, { host, port, username } = {}) => {
     const sshCredentialsStore = getSshCredentialsStore();
     if (!sshCredentialsStore) {
-      return { authType: 'password', remember: false, canEncrypt: false };
+      return { authType: 'password', remember: false, canEncrypt: false, storeCorrupt: false };
     }
+    // 健康度要先读一次才算数（损坏态只在「读到坏文件」时成立）
+    const health = sshCredentialsStore.readStoreHealth();
     const profile = sshCredentialsStore.getProfile(host, port, username);
     return {
       authType: profile?.authType || 'password',
       privateKeyPath: profile?.privateKeyPath || '',
       remember: !!(profile && profile.remember),
       hasSecret: !!(profile && profile.hasSecret),
-      canEncrypt: sshCredentialsStore.canEncrypt()
+      canEncrypt: sshCredentialsStore.canEncrypt(),
+      // 文件坏了：面板要明说「已保存的凭据读不出来，请重新填写」，而不是装作没有凭据
+      storeCorrupt: !!health.corrupt,
+      storeCorruptMessage: health.message || ''
     };
+  });
+
+  /** 备份坏的 `ssh-profiles.json` 并按空态重建（连接面板「备份并重建」）。 */
+  ipcMain.handle('ssh:credentials-reset', () => {
+    const sshCredentialsStore = getSshCredentialsStore();
+    if (!sshCredentialsStore) return { moved: false, backupPath: '' };
+    return sshCredentialsStore.resetStore();
   });
 
   ipcMain.handle('ssh:auto-reconnect', async () => {

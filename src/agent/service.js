@@ -1,6 +1,7 @@
 'use strict';
 
 const { agentRunEventFromServicePayload } = require('./run-events');
+const { bindSessionWorkspace } = require('./session-workspace-bind');
 
 const { EventEmitter } = require('events');
 const { dieyunDefaultWorkspaceDir } = require('../agent-home');
@@ -253,15 +254,14 @@ class AgentService extends EventEmitter {
       sessionId = row.id;
       // 显式声明的绑定是该渠道的固定工作空间，要能纠正存量会话（含历史上被桌面拽偏的）。
       // 隐式「跟随桌面」不覆盖已有绑定，否则桌面切目录会把正在用的外部会话拽走。
+      // 绑定一律走 `bindSessionWorkspace`（会话行 + 进程内上下文两处都写的唯一实现）：
+      // 只写会话行会让下一次 hydrate 之前的工具/索引仍按旧上下文解析路径。
       if (declaredWorkspacePath && !sameWorkspacePath(row.workspacePath, declaredWorkspacePath)) {
-        await this._rpc('memory.session_workspace_set', {
-          sessionId,
-          workspacePath: declaredWorkspacePath
-        });
+        await bindSessionWorkspace(this._ensureGateway(), sessionId, declaredWorkspacePath);
       } else if (!declaredWorkspacePath && !row.workspacePath && workspacePath) {
         // 「跟随桌面」且会话还没绑定：把提交这一刻的桌面工作空间钉到会话上。
         // 之后桌面再切目录不会把这个会话拽走 —— 这正是问题 2 里看到的那种翻转。
-        await this._rpc('memory.session_workspace_set', { sessionId, workspacePath });
+        await bindSessionWorkspace(this._ensureGateway(), sessionId, workspacePath);
       }
     } else {
       const created = await this._rpc('memory.session_create', {

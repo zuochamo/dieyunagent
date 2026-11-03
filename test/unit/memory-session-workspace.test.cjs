@@ -80,6 +80,39 @@ describe('memory.session_workspace_set — 同一道关卡', () => {
     await handlers['memory.session_workspace_set']({ sessionId: 's1', workspacePath: null });
     assert.equal(calls[0].params.workspacePath, null);
   });
+
+  /**
+   * 绑定不变式：写会话行 = 同时更新进程内上下文。
+   * 曾散在各调用方（只写库 / 只写内存各来一遍），结果是「库里有、Gateway 仍按旧路径解析」。
+   */
+  it('写会话行同时更新进程内上下文（同一入口，别人不再各写一遍）', async () => {
+    const contexts = [];
+    const handlers = createMemoryHandlers({
+      requireRustCore: async () => ({ ok: true }),
+      ctx: {
+        setSessionWorkspaceContext: (sid, ws) => contexts.push({ sid, ws })
+      }
+    });
+    await handlers['memory.session_workspace_set']({ sessionId: 's1', workspacePath: 'sub/dir' });
+    assert.equal(contexts.length, 1, '会话行写完必须同步进程内上下文');
+    assert.equal(contexts[0].sid, 's1');
+    assert.match(String(contexts[0].ws), /sub[\\/]dir$/, '上下文收到的是归一后的绝对路径');
+
+    await handlers['memory.session_workspace_set']({ sessionId: 's1', workspacePath: null });
+    assert.equal(contexts[1].ws, '', '空串 = 解绑（上下文删除该会话的目标）');
+  });
+
+  it('Rust 落库失败时不改上下文（不留半份绑定）', async () => {
+    const contexts = [];
+    const handlers = createMemoryHandlers({
+      requireRustCore: async () => {
+        throw new Error('core down');
+      },
+      ctx: { setSessionWorkspaceContext: (sid, ws) => contexts.push({ sid, ws }) }
+    });
+    await assert.rejects(() => handlers['memory.session_workspace_set']({ sessionId: 's1', workspacePath: 'sub/dir' }));
+    assert.equal(contexts.length, 0);
+  });
 });
 
 describe('memory.handoff_* — 交接只认项目身份（仓库根）', () => {

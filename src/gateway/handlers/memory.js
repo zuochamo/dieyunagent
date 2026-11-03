@@ -81,7 +81,7 @@ function handoffWithProjectWorkspace(row) {
  *   requireRustCore: (method: string, params?: object, timeoutMs?: number) => Promise<unknown>
  * }} deps
  */
-function createMemoryHandlers({ requireRustCore }) {
+function createMemoryHandlers({ requireRustCore, ctx }) {
   return {
     'memory.touch_session': async ({ sessionId, title }) => {
       const sid = String(sessionId);
@@ -145,11 +145,21 @@ function createMemoryHandlers({ requireRustCore }) {
     'memory.session_get': async ({ sessionId }) =>
       requireRustCore('memory.session_get', { sessionId: String(sessionId || '') }),
 
-    'memory.session_workspace_set': async ({ sessionId, workspacePath }) =>
-      requireRustCore('memory.session_workspace_set', {
-        sessionId: String(sessionId || ''),
-        workspacePath: normalizeSessionWorkspacePath(workspacePath)
-      }),
+    'memory.session_workspace_set': async ({ sessionId, workspacePath }) => {
+      const sid = String(sessionId || '');
+      const next = normalizeSessionWorkspacePath(workspacePath);
+      const res = await requireRustCore('memory.session_workspace_set', {
+        sessionId: sid,
+        workspacePath: next
+      });
+      // 会话行 + 进程内上下文必须同时变：只写库时，下一次 hydrate 之前 Gateway 处理 RPC
+      // （工具 / 索引 / 读写）仍按旧上下文解析路径；只写内存则在进程重启后回到未绑定。
+      // 这里是「写会话工作空间」的唯一入口，所以不变式落在这里，调用方不再各写一遍。
+      if (ctx && typeof ctx.setSessionWorkspaceContext === 'function') {
+        ctx.setSessionWorkspaceContext(sid, next || '');
+      }
+      return res;
+    },
 
     'memory.session_delete': async ({ sessionId }) =>
       requireRustCore('memory.session_delete', { sessionId: String(sessionId) }),
@@ -308,6 +318,35 @@ function createMemoryHandlers({ requireRustCore }) {
       }),
 
     'memory.long_vector_status': async () => requireRustCore('memory.long_vector_status', {}),
+
+    // 会话正文的跨会话检索（工具 `session_recall` 的后端）。查询串、路径归一与
+    // workspace 圈定全在 Rust 侧（`crates/dieyun-core/src/memory/`），这里只转发。
+    'memory.messages_search': async ({ query, workspacePath, sessionId, limit, snippetChars }) =>
+      requireRustCore(
+        'memory.messages_search',
+        {
+          query: String(query || ''),
+          workspacePath: workspacePath ? String(workspacePath) : undefined,
+          sessionId: sessionId ? String(sessionId) : undefined,
+          limit: Math.min(100, Math.max(1, Number(limit) || 20)),
+          snippetChars: Math.min(2000, Math.max(60, Number(snippetChars) || 240))
+        },
+        120000
+      ),
+
+    // 压缩归档里被折叠的原文：`compaction_archives.folded_text`。
+    'memory.compaction_folded': async ({ query, workspacePath, sessionId, limit, snippetChars }) =>
+      requireRustCore(
+        'memory.compaction_folded',
+        {
+          query: String(query || ''),
+          workspacePath: workspacePath ? String(workspacePath) : undefined,
+          sessionId: sessionId ? String(sessionId) : undefined,
+          limit: Math.min(50, Math.max(1, Number(limit) || 10)),
+          snippetChars: Math.min(4000, Math.max(60, Number(snippetChars) || 600))
+        },
+        120000
+      ),
 
     'memory.long_reindex': async ({ limit }) =>
       requireRustCore('memory.long_reindex', { limit }, 600000),

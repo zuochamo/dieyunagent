@@ -47,7 +47,10 @@ describe('会话 worktree 编排', () => {
 
     assert.equal(out.remotePath, WT);
     assert.equal(out.host, 'h', 'SSH 端点信息不能被改掉');
-    assert.deepEqual(gw.state.contexts, [{ sid: SID, ws: `ssh://u@h${WT}` }]);
+    assert.deepEqual(gw.state.contexts, [], '本模块不直写进程内上下文（唯一入口是 memory.session_workspace_set）');
+    // 落库与进程内上下文只走一个入口（session-workspace-bind → memory.session_workspace_set），
+    // 「两处都写」的不变式在 Gateway handler 里，不在这里再直写一次
+    // （见 test/unit/memory-session-workspace.test.cjs 的同名用例）。
     // 新建成功还会顺手扫一次过期 worktree（读的是会话表），回收规则本身在
     // session-worktree-prune.test.cjs 里验；这里只锁定「落库」这一条
     assert.deepEqual(
@@ -65,7 +68,11 @@ describe('会话 worktree 编排', () => {
     const ssh = fakeSsh('WT_REUSED\n');
     const out = await ensureSessionWorktree({ localGateway: gw, sshManager: ssh, sessionId: SID, target: sshTarget(REPO) });
     assert.equal(out.remotePath, WT);
-    assert.equal(gw.state.contexts.length, 1);
+    assert.equal(
+      gw.state.rpc.filter((c) => c.method === 'memory.session_workspace_set').length,
+      1,
+      '复用后仍要把会话绑到这份 worktree（一次）'
+    );
   });
 
   it('会话已指向 worktree：仍会校验存在性，但不再写库', async () => {
@@ -75,7 +82,7 @@ describe('会话 worktree 编排', () => {
     assert.equal(out.remotePath, WT);
     // 脚本收到的是仓库根（已从 worktree 路径反推），不会套娃
     assert.ok(ssh.state.scripts[0].includes(`REPO='${REPO}'`));
-    assert.equal(gw.state.contexts.length, 0, '路径没变就不该重写上下文');
+    assert.equal(gw.state.contexts.length, 0, '本模块不直写进程内上下文（唯一入口是 memory.session_workspace_set）');
     assert.equal(gw.state.rpc.length, 0);
   });
 

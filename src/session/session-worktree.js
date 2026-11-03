@@ -1,6 +1,7 @@
 'use strict';
 
 const { buildSshUri, normalizeRemotePath } = require('../workspace/target');
+const { bindSessionWorkspace } = require('../agent/session-workspace-bind');
 const {
   ensureRemoteWorktree,
   remoteWorktreePath,
@@ -191,16 +192,13 @@ async function ensureSessionWorktree(deps) {
   if (normalizeRemotePath(target.remotePath) === effective.remotePath) return effective;
 
   const workspacePath = buildSshUri(effective);
-  if (localGateway && typeof localGateway.setSessionWorkspaceContext === 'function') {
-    localGateway.setSessionWorkspaceContext(sid, workspacePath);
-  }
-  // 落库：渲染端读 session_get 解析会话工作区，重启后也要回到同一份 worktree
-  if (localGateway && typeof localGateway.invokeRpc === 'function') {
-    try {
-      await localGateway.invokeRpc('memory.session_workspace_set', { sessionId: sid, workspacePath });
-    } catch (err) {
-      log(`session worktree 持久化失败: ${err && err.message ? err.message : err}`);
-    }
+  // 落库 + 进程内上下文：走 `bindSessionWorkspace` 这一唯一实现。
+  // 渲染端读 session_get 解析会话工作区，重启后也要回到同一份 worktree；
+  // 只写一边会出现「Gateway 仍按旧上下文解析路径」或「重启后又回到未绑定」。
+  try {
+    await bindSessionWorkspace(localGateway, sid, workspacePath);
+  } catch (err) {
+    log(`session worktree 持久化失败: ${err && err.message ? err.message : err}`);
   }
   log(`session worktree: ${res.reused ? '复用' : '新建'} ${effective.remotePath}`);
   return effective;
