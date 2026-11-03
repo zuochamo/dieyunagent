@@ -80,7 +80,7 @@ const hookDenySensitivePath = {
 | 关卡清单与顺序 | `require('src/agent/tool-gate').listHookIds()` → `['before:validate-args', 'before:repeat-guard', 'after:telemetry', 'after:spill-output']` |
 | 某工具最近成功率 / 错误码 | `tool-telemetry.jsonl`（`recordToolTelemetry`，after 关卡里的 telemetry 是唯一出口） |
 | 工具为什么被拦 | 返回信封里的 `errorCode`：`MISSING_ARG` / `BLOCKED` / `USE_FS_EDIT` / `REPEAT_BLOCK` … |
-| 大输出去哪了 | 结果里的 `outputFile`（`tool-output-spill.js`，阈值 `SPILL_CHAR_THRESHOLD = 8192`） |
+| 大输出去哪了 | 结果里的 `outputFile`（`tool-output-spill.js`；阈值唯一来源 `agent-limits.js:toolSpillCharThreshold`，且必须小于 `toolResultMaxJson`，否则那一段会被静默截断且无文件可回读） |
 | 这一轮模型看到的「工具结果」原文 | `memory.request_snapshot_*`（见 [`REQUEST-SNAPSHOT.md`](./REQUEST-SNAPSHOT.md)） |
 
 ---

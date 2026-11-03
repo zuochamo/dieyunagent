@@ -3,7 +3,7 @@
 > 解决的问题：**「这一轮模型到底看到了什么、为什么历史变短了、这轮为什么没压缩」只能靠读代码猜。**
 > 现在这些都有留底，可以一条 RPC 查回来。
 >
-> 相关：实施方案 [`REQUEST-SNAPSHOT-PLAN.md`](./REQUEST-SNAPSHOT-PLAN.md) · 表结构 `crates/dieyun-core/src/memory/schema.rs` · 装配 `src/agent/request-snapshot.js`
+> 相关：表结构 `crates/dieyun-core/src/memory/schema.rs` · 装配 `src/agent/request-snapshot.js`
 
 ---
 

@@ -311,10 +311,12 @@ node %TEMP%\dieyun-fulltest\probe-functions.cjs
 
 ## 附录 B：证据文件
 
+> 2026-11-03 文档清理：`docs/test-artifacts-2026-10-28/` 下的原始证据已删除（一次性测试残留），如需重跑见 `scripts/` 与下方 `%TEMP%` 可复现命令。
+
 | 文件 | 内容 |
 |---|---|
-| `docs/test-artifacts-2026-10-28/probe-results.json` | 24 项功能探针的期望值 / 实测值 / 证据（入库归档） |
-| `docs/test-artifacts-2026-10-28/npm-test.log` | `npm test` 完整日志（39 项选中 + ALL OK，入库归档） |
+| `docs/test-artifacts-2026-10-28/probe-results.json`（**已删除**） | 24 项功能探针的期望值 / 实测值 / 证据（入库归档） |
+| `docs/test-artifacts-2026-10-28/npm-test.log`（**已删除**） | `npm test` 完整日志（39 项选中 + ALL OK，入库归档） |
 | `%TEMP%\dieyun-fulltest\cargo-test.log` | `cargo test -p dieyun-core` 完整日志（154 项） |
 | `%TEMP%\dieyun-fulltest\probe-functions.cjs` | 探针脚本（可重跑；如需长期保留可移入 `scripts/`） |
 

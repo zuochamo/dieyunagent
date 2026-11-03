@@ -245,7 +245,7 @@ flowchart TD
 
 **检查点**：`~/.dieyun/agent-checkpoints/{runId}.json`（`src/agent/subagent-store.js`），可恢复 Planner 流水线状态。
 
-**仲裁（Rust Planner 路径）**：Main 经 `agent:planner-arbitrate` 请求 Renderer 弹窗 → `agent:planner-arbitrate-result` 回传决策 → `agentCoordinator.arbitrate()`。
+**仲裁（Rust Planner 路径）**：Planner 产出 `need_arbitration` 阶段时，Main 没有仲裁回调（`opts.onArbitration` 未接线），直接按 `retry` 续跑；Renderer 侧不再有仲裁弹窗与 IPC 通道。
 
 ### 4.3 主进程协调器与 Rust sidecar
 

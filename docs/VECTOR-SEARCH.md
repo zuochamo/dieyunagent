@@ -12,7 +12,7 @@
 | 记忆语义召回（`memory.long_recall` 第一级） | `long_memory_vectors` | 每次查询从 SQLite 读 BLOB、反序列化 | Rust 内全量余弦（f32，量远小于代码块） |
 | 远端索引（SSH / WSL） | 远端库 | 远端进程内同样走 `VectorPool` | 同上 |
 
-三者共用同一套「余弦 + 阈值」口径（`MIN_SIMILARITY = 0.05`），没有第二套打分公式。
+三者共用同一套「余弦 + 阈值」口径（`MIN_SIMILARITY = 0.05`，唯一来源 `crates/dieyun-core/src/embedding/mod.rs`：代码索引向量池与长记忆语义召回都读它），没有第二套打分公式。
 
 > 代码索引的**词法通道**现在只有一条：子串 `LIKE`（按命中词数排序）。trigram FTS 已于 `SCHEMA_VERSION 4` 删除（体积/使用率判据见 `docs/INDEX-VALUE-REVIEW.md` R2）；`memory` 的 `long_memories_fts` 仍用 trigram，两者互不影响。
 

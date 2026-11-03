@@ -2,14 +2,14 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-10-31T00:11:14.127Z
+生成时间：2026-11-03T00:24:46.528Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 188 |
+| 总计 | 185 |
 | Gateway only | 106 |
-| Rust only | 27 |
-| Both | 55 |
+| Rust only | 22 |
+| Both | 57 |
 
 ## 按命名空间
 
@@ -82,24 +82,21 @@
 | `browser.visual_diff` | gateway | gateway/handlers/browser.js | — |
 | `browser.wait_for` | gateway | gateway/handlers/browser.js | — |
 
-### codebase (5)
+### codebase (4)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `codebase.index` | both | gateway/handlers/codebase.js | yes |
 | `codebase.index.start` | both | gateway/handlers/codebase.js | yes |
-| `codebase.index_remote` | rust | — | yes |
 | `codebase.search` | both | gateway/handlers/codebase.js | yes |
 | `codebase.status` | both | gateway/handlers/codebase.js | yes |
 
-### compaction (4)
+### compaction (2)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
-| `compaction.apply` | rust | — | yes |
 | `compaction.estimate` | rust | — | yes |
 | `compaction.maybe_compact` | rust | — | yes |
-| `compaction.prepare` | rust | — | yes |
 
 ### computer (1)
 
@@ -128,7 +125,7 @@
 | `fs.stat` | gateway | gateway/handlers/fs.js | — |
 | `fs.write_file` | gateway | gateway/handlers/fs.js | — |
 
-### graph (13)
+### graph (12)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -137,7 +134,6 @@
 | `graph.impact` | both | gateway/handlers/graph.js | yes |
 | `graph.index` | both | gateway/handlers/graph.js, gateway/rpc.js | yes |
 | `graph.index.start` | both | gateway/handlers/graph.js, gateway/rpc.js | yes |
-| `graph.index_remote` | rust | — | yes |
 | `graph.ingest_lsp_callers` | rust | — | yes |
 | `graph.lsp_enrich` | gateway | gateway/handlers/graph.js | — |
 | `graph.lsp_resolve` | gateway | gateway/handlers/graph.js | — |
@@ -176,11 +172,12 @@
 | `lsp.settings_get` | gateway | gateway/handlers/lsp-workspace.js | — |
 | `lsp.settings_set` | gateway | gateway/handlers/lsp-workspace.js | — |
 
-### memory (45)
+### memory (47)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `memory.compaction_archive` | both | gateway/handlers/memory.js | yes |
+| `memory.compaction_folded` | both | gateway/handlers/memory.js | yes |
 | `memory.compaction_recent` | both | gateway/handlers/memory.js | yes |
 | `memory.consolidation_job_create` | both | gateway/handlers/memory.js | yes |
 | `memory.consolidation_job_finish` | both | gateway/handlers/memory.js | yes |
@@ -204,6 +201,7 @@
 | `memory.messages_delete_turn` | both | gateway/handlers/memory.js | yes |
 | `memory.messages_older` | both | gateway/handlers/memory.js | yes |
 | `memory.messages_recent` | both | gateway/handlers/memory.js | yes |
+| `memory.messages_search` | both | gateway/handlers/memory.js | yes |
 | `memory.ping` | rust | — | yes |
 | `memory.project_add` | gateway | gateway/handlers/memory.js | — |
 | `memory.project_alias_add` | both | gateway/handlers/memory.js | yes |
@@ -233,7 +231,7 @@
 | `permissions.get` | gateway | gateway/handlers/permissions.js | — |
 | `permissions.sandbox_state` | gateway | gateway/handlers/permissions.js | — |
 
-### planner (6)
+### planner (5)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -241,7 +239,6 @@
 | `planner.run.cancel` | rust | — | yes |
 | `planner.run.continue` | rust | — | yes |
 | `planner.run.start` | rust | — | yes |
-| `planner.run.state` | rust | — | yes |
 | `planner.run.worker_loop` | rust | — | yes |
 
 ### rpc (1)

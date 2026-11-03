@@ -1,8 +1,7 @@
 # 叠云 Agent 架构手册
 
 > **产品名**：叠云 Agent（npm 包名 `dieyunagent`）
-> **文档类型**：架构说明 · 可打印版源稿
-> **建议打印**：在浏览器中打开 [`ARCHITECTURE.print.html`](./ARCHITECTURE.print.html)，等待图表渲染完成后，选择 A4、双面、页边距「默认」或「窄」进行打印或导出 PDF。
+> **文档类型**：架构说明
 > **关联文档**：[`DESIGN.md`](./DESIGN.md)（设计原理）· [`AGENT-STRATEGY.md`](./AGENT-STRATEGY.md)（Agent 策略分层 · 开放设计）· [`MEMORY.md`](./MEMORY.md)（记忆）· [`DEVELOPMENT.md`](./DEVELOPMENT.md)（开发发版）
 
 ---
@@ -527,7 +526,7 @@ flowchart TB
 - **启用状态**：`localStorage` `diecloud.skills.enabled.v1` 等。
 - **技能本质**：主要是 system prompt 知识；部分解锁工具（如天气）。
 - **预装 MCP**：`src/mcp/registry.js`。目前只预装 `mcp-postgres`（`bundledServer`，npm 包 + 平台二进制随安装包分发，`ELECTRON_RUN_AS_NODE` 启动，密钥走环境变量）。叠云 Open API 四件套（`mcp-daizhang` / `mcp-tools` / `mcp-index` / `mcp-pixel`）与 6 个第三方 npx 模板自 2026-11 起**不再预装**，改为用户按需接入（设置页「新增远端」或 Agent 工具 `mcp_manage`）；原先支撑四件套的 `src/mcp/servers/dieyun-open-api/` 与 `src/mcp/open-api-deploy-env.js` 已随之下线（预装只剩 manifest 产物一种形态）。
-- **插件通道已下线**：曾有的 `src/plugins/`（宿主 + 工具注入 + 生命周期钩子）与内置目录、`plugins.*` RPC、设置页已整体删除。第三方工具只有 MCP 一条路；`onAgentTurnEnd` / `onPlanRan` 两个事件钩子在真实的钩子作者出现之前不保留抽象——需要时按当时的实际需求重做，而不是先揣测一个进程外钩子协议。历史结论见 `docs/PLUGIN-REMOVAL.md`。
+- **插件通道已下线**：曾有的 `src/plugins/`（宿主 + 工具注入 + 生命周期钩子）与内置目录、`plugins.*` RPC、设置页已整体删除。第三方工具只有 MCP 一条路；`onAgentTurnEnd` / `onPlanRan` 两个事件钩子在真实的钩子作者出现之前不保留抽象——需要时按当时的实际需求重做，而不是先揣测一个进程外钩子协议。
 
 
 
@@ -563,7 +562,7 @@ flowchart TB
 | 都不来 | 命令链还在前台跑 | 由各自的 timeout 兜底 → `SSH_EXEC_TIMEOUT` / `SHELL_TIMEOUT` |
 
 少了这一层，后台命令就会「命令已生效却报超时」：命令早就结束了，却要等到 timeout 才把「已启动」
-报成失败（见 [`issue/issue-host-exec-background-timeout.md`](../issue/issue-host-exec-background-timeout.md)）。
+报成失败（原始排查记录已随 `issue/` 归档清理，结论已并入本节）。
 
 两条配套契约（本机 `runShell` / `spawnDetachedProcess` 共用）：
 
@@ -760,7 +759,7 @@ flowchart TB
 - 检索融合：向量（余弦）/ 子串（`LIKE`，见下）两路**按名次**做 RRF（`k=60`），不拼分数 —— 余弦与子串命中量纲不同，加权求和必须配不可验证的魔数。`score` 字段是「相对本次头名」的归一化值（头名恒 1.0），只用于展示排序信心。同分候选按 chunk id 兜底排序，保证同一查询两次调用顺序一致（融合结果来自 HashMap 迭代）。
 - **本地 trigram FTS 通道已删除**（`SCHEMA_VERSION = 4`，迁移只做 `DROP TRIGGER` ×3 + `DROP TABLE chunks_fts`）：它占索引库 40%（426 MB / 1056 MB）却与 `grep` 工具功能重叠、且新鲜度落后一轮增量。评测与判据见 `docs/INDEX-VALUE-REVIEW.md`（R2）。
 - 词法召回取而代之的是**子串通道**（唯一词法来源）：查询按空白与标点切词（去掉 1 字词，上限 12 个），每个词对 `content` 与 `rel_path` 各跑一次 `LIKE '%term%' ESCAPE '\'`，按「命中词数」降序、chunk id 兜底排序；命中行号由首个命中位置回填。中文 2 字、3 字、标识符子串（`parse_config`）走同一条路 —— **没有分词下限、也没有扫描窗口**。代价是单次全表扫（本仓 10,846 chunk ≈ 20 ms，74k chunk 外推 ≈ 140 ms）。
-- 向量通道是**建库时显式 opt-in**：`codebase.index.start` / `codebase.index` / `codebase.index_remote` 的 `vectors` 参数（缺省 `false`），出口是面板「建向量」按钮与 CLI `--vectors`；查询侧不变（`vector_count > 0` 且签名匹配就自动用）。`vectors` 描述的是**本次请求**：不带它不会删掉已有向量（清空只发生在 `force` 全量重建与 embedding 签名变更），元数据（`vector_count` / `embedding_model` / `embedding_dims`）始终描述库里真实存在的向量；要向量但端点没配时返回 `EMBEDDING_NOT_CONFIGURED` 而不是静默只建片段。`codebase-incremental-scheduler` 对「已建过向量」的工作区增量时带 `vectors: true`（否则增量删掉的旧 chunk 会把向量一起带走，覆盖率单向下滑）。生命周期细则见 `docs/VECTOR-SEARCH.md` §1.1。
+- 向量通道是**建库时显式 opt-in**：`codebase.index.start` / `codebase.index` 的 `vectors` 参数（缺省 `false`），出口是面板「建向量」按钮与 CLI `--vectors`；查询侧不变（`vector_count > 0` 且签名匹配就自动用）。`vectors` 描述的是**本次请求**：不带它不会删掉已有向量（清空只发生在 `force` 全量重建与 embedding 签名变更），元数据（`vector_count` / `embedding_model` / `embedding_dims`）始终描述库里真实存在的向量；要向量但端点没配时返回 `EMBEDDING_NOT_CONFIGURED` 而不是静默只建片段。`codebase-incremental-scheduler` 对「已建过向量」的工作区增量时带 `vectors: true`（否则增量删掉的旧 chunk 会把向量一起带走，覆盖率单向下滑）。生命周期细则见 `docs/VECTOR-SEARCH.md` §1.1。
 
 ### 15.2 代码图谱
 

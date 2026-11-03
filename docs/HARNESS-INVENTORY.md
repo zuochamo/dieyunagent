@@ -126,7 +126,7 @@
 | `planner-tool-filters.js:36-45` | `SHELL_TOOL_NAMES` | 11 | Shell 模式白名单（同上） |
 | `planner-tool-filters.js:63` | `READONLY_MCP_SERVER_IDS` | 1 | 只读阶段放行的 MCP 服务（服务端契约拒写；`mcp-postgres`）。前缀经 `mcp/tool-name.js` 生成，不在此复写编码格式 |
 | `llm-tool-call-fallback.js:20-35` | `TOOL_NAME_ALIASES` | 14 | 解析模型输出里的工具名 |
-| `llm-tool-call-fallback.js:38-89` | `TOOL_PARAM_NAMES` | 50 | 各工具参数名候选表 |
+| `llm-tool-call-fallback.js:37-40` | `TOOL_PARAM_NAMES` | 派生 | 由 `tool-catalog.ALL_STATIC_TOOLS` 派生（外加 3 个执行端仍认的历史名），不再手抄 |
 | `browser/url-policy.js:10-17` | `LOCAL_FILE_EXTENSIONS` | 65 | 本地文件扩展名白名单 |
 | `browser/url-policy.js:210` | `REMOTE_PREVIEW_HOSTS` | 4 | localhost/127.0.0.1/0.0.0.0/::1 |
 | `renderer/renderer-skills-grid.js:17-181` | `SKILLS_TAXONOMY[].keywords` | 8 组 / **127** 词 | 技能 UI 分类 |
@@ -304,12 +304,12 @@
 | `agent/context-signals.js` | `formatCodebaseBlock` | 【相关代码 · 自动检索】 |
 | `agent/system-prompt-prep.js:82` | `formatRecentChanges` | 【本会话变更文件】 |
 | `agent/system-prompt-prep.js:309` | `fetchOpenFilesBlock` | 【当前关注文件 · 会话上下文】 |
-| `agent/system-prompt-prep.js:370` | `fetchAgentsMdBlock` | 项目地图（→ `agents-md.js`） |
+| `agent/system-prompt-prep.js:402` | `fetchAgentsMdBlock` | 【仓库约定 · AGENTS.md】→【项目地图 · AGENTS.md】（两层链，宽泛在前） |
 | `agent/system-prompt-prep.js:471` | `isInjectableMemoryRow` | `kind=secret/private` 不进自动注入 |
 | `agent/system-prompt-prep.js:476` | `formatMemoryLines` | 记忆行 |
 | `agent/system-prompt-prep.js:488` | `fetchProjectMemoryBlock` | 【项目记忆】 |
 | `agent/system-prompt-prep.js:523` | `fetchGlobalMemoryBlock` | 【长期记忆】 |
-| `agent/system-prompt-prep.js:578` | `fetchSessionHandoffBlock` | 【上个会话交接】 |
+| `agent/system-prompt-prep.js:629` | `fetchSessionHandoffBlock` | 【上个会话交接】（`<handoff>` 定界 + `<` 转义，旧会话内容不受信任） |
 | `agent/system-prompt-prep.js:604` | `formatAgentStateBlock` | ## 工作记忆快照 / ## 最近步骤 |
 | `agent/system-prompt-prep.js:643` | `fetchWorkMemoryBlock` | 【工作记忆模板】 |
 | `agent/system-prompt-prep.js:670` | `fetchSkillsBlock` | 【相关技能 · 索引】 |

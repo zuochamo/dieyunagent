@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generatedAt": "2026-10-31T00:11:14.127Z",
+  "generatedAt": "2026-11-03T00:24:46.528Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 188,
+    "total": 185,
     "gatewayOnly": 106,
-    "rustOnly": 27,
-    "both": 55
+    "rustOnly": 22,
+    "both": 57
   },
   "methods": [
     {
@@ -474,14 +474,6 @@
       ]
     },
     {
-      "method": "codebase.index_remote",
-      "layer": "rust",
-      "gateway": [],
-      "rust": [
-        "dieyun-core/rpc/mod.rs"
-      ]
-    },
-    {
       "method": "codebase.search",
       "layer": "both",
       "gateway": [
@@ -502,14 +494,6 @@
       ]
     },
     {
-      "method": "compaction.apply",
-      "layer": "rust",
-      "gateway": [],
-      "rust": [
-        "dieyun-core/rpc/mod.rs"
-      ]
-    },
-    {
       "method": "compaction.estimate",
       "layer": "rust",
       "gateway": [],
@@ -519,14 +503,6 @@
     },
     {
       "method": "compaction.maybe_compact",
-      "layer": "rust",
-      "gateway": [],
-      "rust": [
-        "dieyun-core/rpc/mod.rs"
-      ]
-    },
-    {
-      "method": "compaction.prepare",
       "layer": "rust",
       "gateway": [],
       "rust": [
@@ -681,14 +657,6 @@
         "gateway/handlers/graph.js",
         "gateway/rpc.js"
       ],
-      "rust": [
-        "dieyun-core/rpc/mod.rs"
-      ]
-    },
-    {
-      "method": "graph.index_remote",
-      "layer": "rust",
-      "gateway": [],
       "rust": [
         "dieyun-core/rpc/mod.rs"
       ]
@@ -880,6 +848,16 @@
     },
     {
       "method": "memory.compaction_archive",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.compaction_folded",
       "layer": "both",
       "gateway": [
         "gateway/handlers/memory.js"
@@ -1104,6 +1082,16 @@
     },
     {
       "method": "memory.messages_recent",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.messages_search",
       "layer": "both",
       "gateway": [
         "gateway/handlers/memory.js"
@@ -1348,14 +1336,6 @@
     },
     {
       "method": "planner.run.start",
-      "layer": "rust",
-      "gateway": [],
-      "rust": [
-        "dieyun-core/rpc/mod.rs"
-      ]
-    },
-    {
-      "method": "planner.run.state",
       "layer": "rust",
       "gateway": [],
       "rust": [

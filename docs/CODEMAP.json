@@ -293,7 +293,9 @@
         "长期记忆写入侧策略（近重复合并 / 归纳低价值闸，add_long_memory_deduped）",
         "会话溯源（long_memories.session_id）与软归档遗忘",
         "账本自愈（孤儿 project scope / 悬空归纳作业，reconcile_memory_ledger）",
-        "项目身份（projects / project_paths：scope = project:<id>，路径别名与 git origin）"
+        "项目身份（projects / project_paths：scope = project:<id>，路径别名与 git origin）",
+        "会话正文检索（messages_fts 影子表 + messages_search：跨会话按 workspace 圈定）",
+        "压缩归档原文的读出口（compaction_archives.folded_text → compaction_folded）"
       ],
       "tests": [
         "test:local-gateway-smoke",
@@ -302,6 +304,7 @@
       ],
       "docs": [
         "docs/MEMORY.md",
+        "docs/MEMORY-VS-DSH.md",
         "docs/REQUEST-SNAPSHOT.md",
         "docs/SQLITE-ACCESS.md"
       ]
@@ -576,7 +579,8 @@
     {
       "prefix": "src/agent/system-prompt-prep.js",
       "tests": [
-        "test:system-prompt-prep"
+        "test:system-prompt-prep",
+        "test:session-handoff"
       ]
     },
     {
@@ -1363,6 +1367,12 @@
       "tests": [
         "test:project-memory-file",
         "test:knowledge-maintainer"
+      ]
+    },
+    {
+      "prefix": "src/agent/session-handoff.js",
+      "tests": [
+        "test:session-handoff"
       ]
     },
     {
