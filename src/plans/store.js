@@ -402,6 +402,33 @@ class PlansStore {
     return p.nextRunAt;
   }
 
+  /**
+   * 目标型：已完成记录有界保留 —— 只清「按完成收尾」的最早若干条。
+   *
+   * 为什么必须清：一张收尾卡最多带 20 条检查事实（每条尾巴可达数 KB），
+   * 而卡片一旦收尾就永远停在「已停用」里 —— 不设上限，plans.json 会无界增长。
+   * 为什么只清 `complete`：`blocked` 是「夜里卡住了、还没人看」，删掉等于把问题藏起来；
+   * 未收尾（outcome=null）与仍在启用的也一律不碰。
+   *
+   * @param {number} [keep] 保留条数（默认 agent-limits.goalCompletedKeep）
+   * @returns {string[]} 被清掉的计划 id（供调用方记日志）
+   */
+  pruneFinishedGoals(keep) {
+    const raw = Number(keep);
+    const cap = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : AGENT_LIMITS_DEFAULTS.goalCompletedKeep;
+    const done = this.plans.filter(
+      (p) => p && p.trigger === 'goal' && p.outcome === 'complete' && p.enabled === false
+    );
+    if (done.length <= cap) return [];
+    // updatedAt 在 setOutcome 里刷新，等价于「收尾时刻」：升序排，清最早的
+    done.sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
+    const dropIds = done.slice(0, done.length - cap).map((p) => p.id);
+    const drop = new Set(dropIds);
+    this.plans = this.plans.filter((p) => !drop.has(p.id));
+    this._save();
+    return dropIds;
+  }
+
   /** 目标型：清空运行态（用户重新启用 / 从零开始时用），保留 goal/budget 配置 */
   clearGoalRuntime(id) {
     const p = this.plans.find((x) => x.id === id);

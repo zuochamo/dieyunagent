@@ -459,7 +459,15 @@ function bootPlansRuntime(deps) {
       // 都直接停用，不留一条会在凌晨自己又跑起来的尾巴。
       if (isGoal) {
         if (goalNextDelayMs != null) plansStore.scheduleNextAttempt(plan.id, goalNextDelayMs);
-        else if (goalStop) plansStore.setEnabled(plan.id, false);
+        else if (goalStop) {
+          plansStore.setEnabled(plan.id, false);
+          // 已按完成收尾的记录有界保留：更早的自动清掉，否则卡片与 plans.json 无界增长。
+          // 只清 `complete`；`blocked` / 预算用完 / 人手停 都留着 —— 那些是还没收口的问题。
+          if (goalStop === 'done') {
+            const dropped = plansStore.pruneFinishedGoals();
+            if (dropped.length) log.info(`已清理较早的已完成目标型计划 ${dropped.length} 条`);
+          }
+        }
       }
       // 终态之前先把攒着的 trace 推完，否则最后几轮进度会被终态事件吃掉
       flushTrace();

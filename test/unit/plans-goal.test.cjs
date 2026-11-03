@@ -28,6 +28,7 @@ const { PlansStore } = require('../../src/plans/store');
 const { PlansScheduler } = require('../../src/plans/scheduler');
 const { buildPlanRunUserText } = require('../../src/plans/plan-run-turn');
 const { validateToolArgs } = require('../../src/agent/tool-validate');
+const { AGENT_LIMITS_DEFAULTS } = require('../../src/agent/agent-limits');
 
 const LIMITS = {
   goalMaxAttempts: 3,
@@ -360,6 +361,58 @@ describe('store: 目标型运行态', () => {
     expect(s.get(p.id).lastRunOk).toBe(false);
     s.updateRunResult(p.id, { ok: true, outcome: 'complete' });
     expect(s.get(p.id).lastRunOk).toBe(true);
+  });
+});
+
+describe('store: 已完成目标型有界保留', () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /** 造一条「按完成收尾并已停用」的目标型计划（updatedAt 由 setOutcome 刷新成收尾时刻） */
+  async function finished(s, id) {
+    const p = s.upsert(goalPlan({ id, name: id }));
+    s.beginAttempt(p.id);
+    s.setOutcome(p.id, 'complete');
+    s.setEnabled(p.id, false);
+    await sleep(2);
+    return p.id;
+  }
+
+  it('只留最近 N 条已完成，更早的自动清掉', async () => {
+    const s = makeStore();
+    for (let i = 1; i <= 7; i += 1) await finished(s, `g${i}`);
+    const dropped = s.pruneFinishedGoals(5);
+    expect(dropped).toEqual(['g1', 'g2']);
+    expect(s.list().map((p) => p.id)).toEqual(['g3', 'g4', 'g5', 'g6', 'g7']);
+  });
+
+  it('blocked / 未收尾 / 仍在启用的一律不清（keep=0 也不清）', async () => {
+    const s = makeStore();
+    const done = await finished(s, 'done1');
+    const blocked = s.upsert(goalPlan({ id: 'blocked1' }));
+    s.setOutcome(blocked.id, 'blocked');
+    s.setEnabled(blocked.id, false);
+    const running = s.upsert(goalPlan({ id: 'running1' }));
+    s.beginAttempt(running.id);
+    const plain = s.upsert({
+      id: 'sched1',
+      name: '定时',
+      prompt: '每天汇报',
+      enabled: false,
+      rrule: 'FREQ=DAILY'
+    });
+
+    const dropped = s.pruneFinishedGoals(0);
+    expect(dropped).toEqual([done]);
+    expect(s.list().map((p) => p.id).sort()).toEqual(['blocked1', 'running1', 'sched1']);
+    expect(s.get(plain.id)).toBeTruthy();
+  });
+
+  it('默认保留条数取自 agent-limits，不在 store 里另写一个数字', async () => {
+    const s = makeStore();
+    const keep = AGENT_LIMITS_DEFAULTS.goalCompletedKeep;
+    for (let i = 0; i <= keep; i += 1) await finished(s, `g${i}`);
+    expect(s.pruneFinishedGoals().length).toBe(1);
+    expect(s.list().length).toBe(keep);
   });
 });
 

@@ -37,15 +37,18 @@ let automationPlansLoaded = false;
 // 想删掉它得先把 automation 挪到 skills-ui 之后（见 docs/REDUNDANCY-REVIEW-2026-11-03.md）。
 const AUTOMATION_PAGE_SIZE =
   typeof window.SKILLS_GRID_PAGE_SIZE === 'number' ? window.SKILLS_GRID_PAGE_SIZE : 15;
-const AUTOMATION_TAXONOMY_LIST = Array.isArray(window.AUTOMATION_TAXONOMY)
-  ? window.AUTOMATION_TAXONOMY
-  : [
-      { id: 'periodic', label: '周期' },
-      { id: 'interval', label: '按间隔' },
-      { id: 'once', label: '单次' },
-      { id: 'idle', label: '空闲时' },
-      { id: 'disabled', label: '已停用' }
-    ];
+
+/**
+ * 分类页签的唯一来源是 `renderer-skills-grid.js` 的 `AUTOMATION_TAXONOMY`。
+ *
+ * 本文件加载在那份定义之前，所以**只能在渲染时读**：早先在这里 `const` 一份拷贝，
+ * 取值时 `window.AUTOMATION_TAXONOMY` 还没定义，程序就静默用了那份拷贝 ——
+ * 于是「目标」页签从来没有出现过（目标型计划只能在「全部」里翻）。
+ * 别再把清单抄一份回来：漏一个 id，那种计划就等于没有入口。
+ */
+function automationTaxonomy() {
+  return Array.isArray(window.AUTOMATION_TAXONOMY) ? window.AUTOMATION_TAXONOMY : [];
+}
 
 function setAutomationHint(msg) {
   const el = $('automation-hint');
@@ -128,7 +131,16 @@ function automationPlanHint(plan) {
     : '';
   const wsNote = wsName ? ` · 工作空间 ${wsName}` : '';
   if (plan.lastRunAt) {
-    const status = plan.lastRunOk ? '上次成功' : '上次失败';
+    // 目标型里「这一轮收尾了没」≠「跑得成不成功」：正常的中间轮次也永远是「未收尾」，
+    // 一律印成「上次失败」会把一条正在推进的长任务读成连环报错。
+    const isGoal = plan.trigger === 'goal';
+    const status = isGoal
+      ? plan.lastRunOk
+        ? '上轮已收尾'
+        : '上轮未收尾'
+      : plan.lastRunOk
+        ? '上次成功'
+        : '上次失败';
     const when = new Date(plan.lastRunAt).toLocaleString('zh-CN');
     const summary = plan.lastRunSummary ? ` · ${String(plan.lastRunSummary).slice(0, 36)}` : '';
     return `${status} ${when}${summary}${sessionNote}${wsNote}`;
@@ -202,7 +214,7 @@ function renderAutomationCategoryTabs() {
   renderTabs(
     document.getElementById('automation-category-tabs') || $('automation-category-tabs'),
     automationCategoryFilter,
-    AUTOMATION_TAXONOMY_LIST,
+    automationTaxonomy(),
     countAutomationInCategory,
     (id) => {
       automationCategoryFilter = id;

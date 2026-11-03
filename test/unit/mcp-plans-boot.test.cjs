@@ -327,6 +327,10 @@ describe('目标型计划（trigger=goal）运行闭环', () => {
         state.plan.enabled = enabled !== false;
         state.calls.push(['setEnabled', enabled]);
       },
+      pruneFinishedGoals: () => {
+        state.calls.push(['pruneFinishedGoals']);
+        return [];
+      },
       clearGoalRuntime: () => {}
     };
     return store;
@@ -443,6 +447,8 @@ describe('目标型计划（trigger=goal）运行闭环', () => {
     const assistant = appends.filter((p) => p.role === 'assistant').map((p) => String(p.content));
     // 事实块：退出码与「改了几次文件」都写给人看，结论措辞归模型
     expect(assistant.some((c) => c.includes('exit 0') && c.includes('改动工作区的工具调用：3 次'))).toBe(true);
+    // 完成的记录有界保留：收尾后清一次更早的已完成目标型（blocked 不清）
+    expect(store.state.calls.some((c) => c[0] === 'pruneFinishedGoals')).toBe(true);
   });
 
   it('模型报阻塞 → 停用，不再排下一轮', async () => {
@@ -458,6 +464,8 @@ describe('目标型计划（trigger=goal）运行闭环', () => {
 
     expect(store.state.plan.enabled).toBe(false);
     expect(store.state.calls.some((c) => c[0] === 'scheduleNextAttempt')).toBe(false);
+    // 阻塞是「还没人看的问题」：不自动清理，留着等复盘
+    expect(store.state.calls.some((c) => c[0] === 'pruneFinishedGoals')).toBe(false);
   });
 
   it('轮次预算用完且未收尾 → 停用（不算完成）', async () => {
