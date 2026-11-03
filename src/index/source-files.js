@@ -16,7 +16,15 @@ const path = require('path');
  * 这种极难查的错位。
  */
 
-/** 永不扫描的目录（与 `walker.rs` 的 `IGNORE_DIRS` 对齐）。 */
+/**
+ * 永不扫描的目录。
+ *
+ * = Rust `walker.rs:IGNORE_DIRS`（两边共同的那 10 条）**∪ 隐藏目录**。
+ * Rust 侧不列 `.git` / `.dieyun` / `.venv` / `.next` / `.nuxt`：`ignore` crate 默认跳过隐藏项，
+ * 那边再列一遍只会两份漂移。Node 侧（watcher 的相对路径判定、rg / glob 的自遍历）没有这个
+ * 默认行为，所以必须自己列。`test/unit/ignore-rules-parity.test.cjs` 校验
+ * 「非隐藏项与 Rust 完全一致，隐藏项只许多不许少」。
+ */
 const IGNORED_DIRS = new Set([
   'node_modules',
   '.git',
@@ -35,7 +43,10 @@ const IGNORED_DIRS = new Set([
   'win-unpacked'
 ]);
 
-/** 明确的二进制扩展名（与 `walker.rs` 的 `IGNORE_EXT` 对齐）：连触发都免了。 */
+/**
+ * 明确的二进制扩展名（与 `walker.rs:IGNORE_EXT` 逐条对齐，同样由 parity 测校验）：
+ * 连触发都免了。
+ */
 const BINARY_EXT = new Set([
   '.png',
   '.jpg',
@@ -46,6 +57,7 @@ const BINARY_EXT = new Set([
   '.bmp',
   '.svg',
   '.psd',
+  '.ai',
   '.zip',
   '.7z',
   '.rar',
@@ -61,6 +73,7 @@ const BINARY_EXT = new Set([
   '.bin',
   '.o',
   '.obj',
+  '.a',
   '.lib',
   '.wasm',
   '.pdf',
@@ -161,9 +174,9 @@ function isUnderWorkspaceRoot(filePath, workspaceRoot) {
 }
 
 module.exports = {
+  GRAPH_SOURCE_EXT,
   IGNORED_DIRS,
   BINARY_EXT,
-  GRAPH_SOURCE_EXT,
   isIgnoredRelPath,
   isCodebaseSourcePath,
   isGraphSourcePath,
