@@ -1484,7 +1484,8 @@ const PLAN_TOOLS = [
     type: 'function',
     function: {
       name: 'plan_list',
-      description: '列出所有已保存的定时计划',
+      description:
+        '列出所有已保存的计划（定时 / 目标型）。目标型计划额外给出：跑了几轮、声明的检查、最后一条检查事实、是否已收尾（outcome）。',
       parameters: { type: 'object', properties: {} }
     }
   },
@@ -1492,7 +1493,9 @@ const PLAN_TOOLS = [
     type: 'function',
     function: {
       name: 'plan_delete',
-      description: '删除指定 id 的定时计划',
+      description:
+        '删除指定 id 的计划（含目标型）。注意它连运行记录一起删；目标型只是「别再跑了、但保留已跑事实」时，' +
+        '让用户在「定时任务 → 目标」面板里停用，或用 plan_cancel 先中止当前这一轮',
       parameters: {
         type: 'object',
         properties: {
