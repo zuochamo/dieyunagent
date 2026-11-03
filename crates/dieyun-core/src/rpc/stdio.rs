@@ -107,8 +107,3 @@ async fn handle_request(state: &AppState, req: RpcRequest) -> RpcResponse {
     }
 }
 
-/// 同步 stdin 模式（便于单元测试与非 tokio 宿主）
-pub fn serve_stdio_sync(state: AppState) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(serve_stdio(state))
-}

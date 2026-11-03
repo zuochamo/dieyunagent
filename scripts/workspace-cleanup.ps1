@@ -15,7 +15,11 @@ $removePaths = @(
   '.playwright-mcp',
   'logs_llm',
   'build/dieyun-core-linux',
-  'deploy/dieyun-online-users-dashboard.zip'
+  'deploy/dieyun-online-users-dashboard.zip',
+  # 会话遗留的调试 workspace（DB 快照 / 一次性脚本 / 截图）与根目录调试日志，
+  # 与 .gitignore 的 `_tmp/`、`debug.log` 同一套定义
+  '_tmp',
+  'debug.log'
 )
 
 if ($Deep) {
