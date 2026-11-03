@@ -23,8 +23,8 @@ const { ensurePlanSession } = require('../plans/plan-session');
 const { beginPlanRunTurn, endPlanRunTurn, assistantReplyText, interruptedRunResult } = require(
   '../plans/plan-run-turn'
 );
-// 目标型计划（trigger=goal）的判定与验收：唯一来源，本文件只负责接线
-const { runGoalVerify, decideContinuation, buildGoalAuditReport } = require('../plans/goal-run');
+// 目标型计划（trigger=goal）的事实与续跑判定：唯一来源是 plans/goal-run，本文件只负责接线
+const { decideContinuation, renderEvidenceBlock } = require('../plans/goal-run');
 const { deliverPlanResult } = require('../plans/deliver');
 const { parsePlanFromText } = require('../plans/parser');
 const { AGENT_RUN_EVENT_TYPES, createAgentRunEvent } = require('../agent/run-events');
@@ -362,46 +362,13 @@ function bootPlansRuntime(deps) {
       const isGoal = boundPlan.trigger === 'goal';
       /** 本次运行的工作空间：计划绑定优先，否则当前工作空间 */
       const planWorkspacePath = resolvePlanWorkspacePath(boundPlan);
-      /** 验收命令的工作目录：计划显式指定优先，否则用计划运行的工作区 */
-      const verifyCwd = (boundPlan.goal && boundPlan.goal.cwd) || planWorkspacePath || undefined;
-      /** 目标型收尾判定结果（非目标型恒为 null） */
+      /** 目标型的收尾结论（非目标型恒为 null）：由 goal_finish 核对事实后写在计划上 */
       let goalStop = null;
-      let goalVerify = null;
-      let goalBudget = null;
       let goalNextDelayMs = null;
 
-      // 目标型第一步：开工基线（尺子自检）。
-      // 只在「还没跑过任何一轮」「还没量过」时做一次：命令若在未动工时就已经通过，
-      // 它无法区分「干没干完」，此时继续跑一整晚毫无意义 —— 直接停并说明原因。
-      if (isGoal && !boundPlan.baseline && (Number(boundPlan.attempt) || 0) === 0) {
-        if (gw && typeof gw.invokeRpc === 'function') {
-          const b = await runGoalVerify({
-            gateway: gw,
-            plan: boundPlan,
-            limits,
-            cwd: verifyCwd,
-            sessionId: sessionId || undefined,
-            runId,
-            log: (m) => log.warn(m)
-          });
-          plansStore.setBaseline(plan.id, {
-            red: !b.ok,
-            exitCode: b.exitCode,
-            tail: b.tail,
-            note: b.note
-          });
-          if (b.ok) {
-            goalStop = 'baseline-green';
-            goalVerify = { ...b, ok: true, note: 'baseline-green' };
-            plansStore.updateVerify(plan.id, goalVerify);
-            log.warn(`目标型验收命令在未动工时已通过，已终止: ${plan.name}`);
-          }
-        } else {
-          log.warn('Gateway 未就绪，跳过验收基线自检');
-        }
-      }
-
-      if (isGoal && !goalStop) plansStore.beginAttempt(plan.id);
+      // 目标型：开一轮。检查命令什么时候跑、跑哪条由模型在轮内决定（goal_check），
+      // 这里不再有「开工基线自检」「每轮无条件跑一条命令」这类固定步骤 —— 节奏是语义判断。
+      if (isGoal) plansStore.beginAttempt(plan.id);
 
       let result;
       const planCtx = {
@@ -426,64 +393,55 @@ function bootPlansRuntime(deps) {
         },
         log: (m) => log.info(m)
       };
-      if (goalStop) {
-        // 基线就红了（尺子无效）：这一轮不执行 agent，只落一条「为什么没跑」的说明
-        result = {
-          ok: false,
-          error: '验收命令在尚未动工时就已经通过，无法判定完成，已停止',
-          summary: '验收基线未通过（尺子无效）'
-        };
-      } else {
-        try {
-          result = await run(planCtx, boundPlan);
-        } catch (e) {
-          result = { ok: false, error: (e && e.message) || String(e) };
-        } finally {
-          runningPlans.delete(plan.id);
-        }
+      try {
+        result = await run(planCtx, boundPlan);
+      } catch (e) {
+        result = { ok: false, error: (e && e.message) || String(e) };
+      } finally {
+        runningPlans.delete(plan.id);
       }
       if (!result || typeof result !== 'object') {
         result = { ok: false, error: '计划执行未返回结果' };
       }
 
-      // 目标型：跑完命令再判定（判定权在 Main，不在模型；模型自称完成不算）
-      if (isGoal && !goalStop) {
-        goalVerify = await runGoalVerify({
-          gateway: gw,
-          plan: plansStore.get(plan.id) || boundPlan,
-          limits,
-          cwd: verifyCwd,
-          sessionId: sessionId || undefined,
-          runId,
-          log: (m) => log.warn(m)
-        });
-        plansStore.updateVerify(plan.id, goalVerify);
+      // 目标型收尾：**不再跑验收命令** —— 事实已由模型在轮内用 goal_check 落了，
+      // 这里只按事实与预算决定「还有下一轮吗」。收尾提议权在模型，判定权在代码：
+      // 模型申请完成时 goal_finish 已核对「最近一次检查是否通过」，对不上当场打回。
+      if (isGoal) {
         const fresh = plansStore.get(plan.id) || boundPlan;
-        const decision = decideContinuation({ plan: fresh, verify: goalVerify, limits, now: Date.now() });
-        goalBudget = decision.budget;
-        if (decision.cont) {
-          goalNextDelayMs = decision.delayMs;
+        // 「这一轮算不算成功」的唯一依据：模型申请完成且事实核对通过
+        result.outcome = fresh.outcome || null;
+        if (result.aborted) {
+          // 人手停的：停用，别让轮询立刻把它又拉起来（重启这轮不是用户的意思）
+          goalStop = 'stopped';
         } else {
-          goalStop = decision.stop;
+          // 这一轮**根本没跑起来**（模型/网关报错）才退避：崩一次不该立刻再撞同一堵墙
+          const decision = decideContinuation({
+            plan: fresh,
+            limits,
+            now: Date.now(),
+            interrupted: !result.ok && !!result.error
+          });
+          goalNextDelayMs = decision.cont ? decision.delayMs : null;
+          if (!decision.cont) goalStop = decision.stop;
+          log.info(
+            `目标型第 ${fresh.attempt} 轮收尾: ${plan.name} / ${fresh.outcome || '未收尾'}` +
+              (decision.cont ? ` → ${Math.round(decision.delayMs / 1000)}s 后续跑` : ` → 停止(${decision.stop})`)
+          );
         }
-        log.info(
-          `目标型验收: ${plan.name} / ${goalVerify.note}${goalVerify.exitCode == null ? '' : ` (exit ${goalVerify.exitCode})`}` +
-            (decision.cont ? ` → ${Math.round(decision.delayMs / 1000)}s 后续跑` : ` → 停止(${decision.stop})`)
-        );
       }
-      // 目标型的「这一轮是否成功」= 验收是否通过：交给 updateRunResult 统一落 lastRunOk
-      if (goalVerify) result.verify = goalVerify;
 
       // assistant 轮次必须在终态事件之前落库：Renderer 收到 DONE/STOPPED/ERROR 就会重载该会话，
       // 消息先在库里，重载才能立刻看到这一轮（含 traceRunId —— 思考过程靠它挂回气泡）
       let replyText = assistantReplyText(result);
-      if (isGoal && goalStop && goalStop !== 'done') {
-        // 停下来时附「未完成报告」：预算耗尽不是完成，措辞上必须能与「做完了」区分开
-        replyText = `${replyText}\n\n${buildGoalAuditReport({
+      if (isGoal) {
+        // 目标型的每一轮都附「事实块」：只陈述事实（轮次、检查退出码、输出尾巴、改了几次文件），
+        // 不写「完成/未完成」结论 —— 那句话由模型写，事实由代码给，二者不能互相顶替。
+        replyText = `${replyText}\n\n${renderEvidenceBlock({
           plan: plansStore.get(plan.id) || boundPlan,
-          verify: goalVerify,
-          stop: goalStop,
-          budget: goalBudget
+          limits,
+          upcoming: false,
+          writes: Number.isFinite(Number(result.mutatingToolCalls)) ? result.mutatingToolCalls : undefined
         })}`;
       }
       if (sessionId) {
@@ -497,7 +455,7 @@ function bootPlansRuntime(deps) {
       // 边界收束：assistant 轮次已落库（或已确认落不了），运行态不再需要重启恢复。
       // 残留只可能来自「进程被杀」，那时这里根本不会执行 —— 由启动恢复接管。
       plansStore.endRun(plan.id);
-      // 目标型收尾：只有「还要继续」才排下一轮；任何停止（完成/预算/阻塞/尺子无效）
+      // 目标型收尾：只有「还要继续」才排下一轮；任何停止（完成/阻塞/预算用完）
       // 都直接停用，不留一条会在凌晨自己又跑起来的尾巴。
       if (isGoal) {
         if (goalNextDelayMs != null) plansStore.scheduleNextAttempt(plan.id, goalNextDelayMs);
@@ -570,15 +528,15 @@ function bootPlansRuntime(deps) {
       await finishPlanRun(plan, result).catch((e) =>
         log.warn('计划中断收尾失败:', (e && e.message) || String(e))
       );
-      // 目标型：崩溃时这一轮没有被验收过，恢复的语义是「再排一轮」而不是「重跑同一轮」。
-      // 仍然受 attempt / 墙钟预算约束，且带退避——崩溃本身不构成「无限重试」的理由。
+      // 目标型：崩溃时这一轮没有被收尾过，恢复的语义是「再排一轮」而不是「重跑同一轮」。
+      // 仍然受 attempt / 墙钟预算约束，且带退避 —— 崩溃本身不构成「无限重试」的理由。
       if (plan.trigger === 'goal' && plan.enabled) {
         try {
           const decision = decideContinuation({
             plan: plansStore.get(plan.id) || plan,
-            verify: { ok: false, note: 'interrupted' },
             limits: agentLimits(),
-            now: Date.now()
+            now: Date.now(),
+            interrupted: true
           });
           if (decision.cont) {
             plansStore.scheduleNextAttempt(plan.id, decision.delayMs);

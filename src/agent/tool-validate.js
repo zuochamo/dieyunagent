@@ -9,7 +9,6 @@ const { MODIFIER_NAMES } = require('../computer/win32-input');
 // 动作枚举的单一来源（性质声明在 computer/actions.js，任何新增动作只改那一处）。
 const {
   COMPUTER_ACTIONS_TEXT,
-  CLICK_ACTIONS,
   MODIFIER_ACTIONS,
   REGION_ACTIONS,
   actionMeta
@@ -890,6 +889,32 @@ function validateToolArgs(name, args, opts) {
       }
       return { ok: true };
     }
+    case 'goal_check': {
+      // 目标型计划的一轮里跑一条检查命令。命令可以来自声明清单（check_id）或模型当场给。
+      const command = String(a.command || '').trim();
+      const checkId = String(a.check_id || a.checkId || '').trim();
+      if (!command && !checkId) {
+        return {
+          ok: false,
+          error: 'goal_check 需要 command（要跑的检查命令）或 check_id（已声明的检查）',
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      return { ok: true };
+    }
+    case 'goal_finish': {
+      const outcome = String(a.outcome || '').trim();
+      if (outcome !== 'complete' && outcome !== 'blocked') {
+        return {
+          ok: false,
+          error: `goal_finish 的 outcome 必须是 complete 或 blocked（收到「${outcome || '空'}」）`,
+          errorCode: 'INVALID_ARG',
+          retryable: false
+        };
+      }
+      return { ok: true };
+    }
     case 'mcp_tool_schema': {
       // 两种模式二选一：agentName 查已知道具的完整 schema，query 在全部已启用服务里检索。
       const agentName = String(a.agentName || '').trim();
@@ -1011,6 +1036,5 @@ module.exports = {
   validateToolArgs,
   validateComputerArgs,
   validateMcpInputArgs,
-  isHttpUrl,
   applyPatchUnsupported
 };

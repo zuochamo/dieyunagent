@@ -1,7 +1,8 @@
 'use strict';
 
 const { ensurePlanSession } = require('./plan-session');
-const { resolveGoalBudget } = require('./goal-run');
+// 目标型的事实块与预算收敛：唯一来源是 goal-run（本文件不另写措辞/不另算预算）
+const { renderEvidenceBlock } = require('./goal-run');
 const { packMessageMeta, unpackMessageMeta } = require('../agent/session-context');
 // 空交付文案 / 「思考回退不落库」闸门的单一来源，勿在此另造一句
 const roundText = require('../agent/agent-round-text');
@@ -32,37 +33,17 @@ function planSessionTitle(plan) {
 }
 
 /**
- * 目标型计划的「交接班」段落（唯一来源）：轮次、预算、上一轮验收证据。
+ * 目标型计划的「交接班」段落（唯一来源）：轮次、预算、已经落盘的检查事实。
  *
- * 这是对抗「开局失忆」和「提前宣布完成」的主要手段：新的一轮 context 是空的，
- * 靠这段文本把「已经试过什么、还差什么、上轮怎么红的」交回来。
+ * 这是对抗「开局失忆」和「自称完成」的主要手段：新的一轮 context 是空的，
+ * 靠这段文本把「已经试过什么、上一条检查怎么红的」交回来。事实块由 goal-run 渲染，
+ * 这里只负责把它放到交接班文本里 —— 不在这一层另写一份措辞。
  *
  * @param {object} plan
  * @param {object} [limits] agent-limits（缺省用默认值）
  */
 function buildGoalRoundBlock(plan, limits) {
-  const budget = resolveGoalBudget(plan, limits);
-  const done = Math.max(0, Math.floor(Number(plan && plan.attempt) || 0));
-  const head = [`目标型第 ${done + 1}/${budget.maxAttempts} 轮`];
-  const startedAt = plan && plan.attemptStartedAt ? Date.parse(plan.attemptStartedAt) : NaN;
-  if (Number.isFinite(startedAt)) {
-    const usedMin = Math.max(0, Math.round((Date.now() - startedAt) / 60000));
-    head.push(`已跑 ${usedMin} 分钟 / 预算 ${Math.round(budget.maxWallMs / 60000)} 分钟`);
-  }
-  const lines = [head.join('（') + (head.length > 1 ? '）' : '')];
-
-  const verify = plan && plan.lastVerify;
-  if (verify) {
-    const why = verify.note === 'timeout' ? '超时' : verify.note === 'fail' ? '未通过' : String(verify.note || '');
-    lines.push(
-      '',
-      `上一轮验收${why ? `「${why}」` : ''}${verify.exitCode == null ? '' : `（exit ${verify.exitCode}）`}` +
-        (verify.at ? ` @ ${verify.at}` : '') +
-        '：'
-    );
-    if (verify.tail) lines.push('```', verify.tail, '```');
-  }
-  return lines.join('\n');
+  return renderEvidenceBlock({ plan, limits, upcoming: true });
 }
 
 /**
@@ -79,8 +60,12 @@ function buildPlanRunUserText(plan, at, limits) {
     ? `\n\n执行 TODO：\n${todos.map((t, i) => `${i + 1}. ${t}`).join('\n')}`
     : '';
   const goalBlock = isGoal ? `\n\n${buildGoalRoundBlock(plan, limits)}` : '';
+  // 目标型的收尾入口只讲一次：跑检查 → 留事实 → 申请收尾。文案写在工具 schema 里，
+  // 这里只说「本轮该做什么」，不重复工具用法（避免两处描述漂移）。
   const goalTail = isGoal
-    ? '\n\n要求：本轮只推进一个尚未完成的 TODO；改完必须留下可复跑的验证路径（验收由外部命令判定，不要自称完成）。'
+    ? '\n\n要求：先看上面的事实块再决定本轮做什么，只推进尚未完成的部分；' +
+      '改完用 goal_check 跑检查留下事实，确认目标已达成再调用 goal_finish（outcome=complete）；' +
+      '真正卡住就用 goal_finish（outcome=blocked）说明确切卡点。'
     : '';
   return (
     `[计划 · ${(plan && plan.name) || '未命名计划'}]\n` +
@@ -230,11 +215,9 @@ async function endPlanRunTurn(gateway, sessionId, plan, result, opts = {}) {
 }
 
 module.exports = {
-  PLAN_MODE_LABEL,
   packAssistantMeta,
   stripAssistantMeta,
   stripUserMeta,
-  planSessionTitle,
   buildGoalRoundBlock,
   buildPlanRunUserText,
   buildPlanRunTrigger,

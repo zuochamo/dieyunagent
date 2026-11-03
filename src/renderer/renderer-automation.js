@@ -32,6 +32,9 @@ let automationPageIndex = 0;
 let automationFetchSeq = 0;
 let automationPlansLoaded = false;
 
+// 页大小唯一来源 window.SKILLS_GRID_PAGE_SIZE（renderer-skills-ui.js 导出）。
+// 注意：本文件在当前加载序里**早于** skills-ui，所以这里的 `: 15` 是活兜底而非死代码 ——
+// 想删掉它得先把 automation 挪到 skills-ui 之后（见 docs/REDUNDANCY-REVIEW-2026-11-03.md）。
 const AUTOMATION_PAGE_SIZE =
   typeof window.SKILLS_GRID_PAGE_SIZE === 'number' ? window.SKILLS_GRID_PAGE_SIZE : 15;
 const AUTOMATION_TAXONOMY_LIST = Array.isArray(window.AUTOMATION_TAXONOMY)
@@ -78,19 +81,29 @@ function automationRunCountLabel(plan) {
 }
 
 /**
- * 目标型计划的一句话进度：轮次 + 上次验收结论。
+ * 目标型计划的一句话进度：轮次 + 最近一条检查事实 + 收尾结论。
  * 轮次默认值不在这里兜底（数字唯一来源是 agent-limits）：用户没填上限就只显示已跑轮数。
+ * 这里只做展示：真正的判定与措辞在 plans/goal-run，不在 Renderer 再判一次。
  */
 function automationGoalSummary(plan) {
   const budget = (plan && plan.budget) || {};
   const attempt = Math.max(0, Math.floor(Number(plan && plan.attempt) || 0));
   const maxAttempts = Number(budget.maxAttempts) > 0 ? Math.floor(Number(budget.maxAttempts)) : null;
   const round = maxAttempts ? `第 ${attempt}/${maxAttempts} 轮` : `已跑 ${attempt} 轮`;
-  const v = plan && plan.lastVerify;
-  let last = '尚未验收';
-  if (v) last = `上次验收${v.ok ? '通过' : '未通过'}${v.exitCode == null ? '' : ` (exit ${v.exitCode})`}`;
-  else if (plan && plan.baseline && plan.baseline.red) last = '基线已确认会红';
-  return `目标 · ${round} · ${last}`;
+  const outcome =
+    plan && plan.outcome === 'complete' ? '已按完成收尾' : plan && plan.outcome === 'blocked' ? '已报阻塞' : '';
+  if (outcome) return `目标 · ${round} · ${outcome}`;
+  const evidence = plan && Array.isArray(plan.evidence) ? plan.evidence : [];
+  const last = evidence.length ? evidence[evidence.length - 1] : null;
+  const noChecks = !(plan && plan.goal && Array.isArray(plan.goal.checks) && plan.goal.checks.length);
+  let tail = '尚未检查';
+  if (last) {
+    const code = last.exitCode == null ? String(last.note || '') : `exit ${last.exitCode}`;
+    tail = `上次检查${last.ok ? '通过' : '未通过'}（${code}）`;
+  } else if (noChecks) {
+    tail = '未验证模式';
+  }
+  return `目标 · ${round} · ${tail}`;
 }
 
 function automationPlanDesc(plan) {
@@ -149,7 +162,9 @@ function automationSearchHaystack(plan) {
     plan.rrule,
     plan.onceAt,
     plan.workspace,
-    plan.goal && plan.goal.verify,
+    plan.goal && Array.isArray(plan.goal.checks)
+      ? plan.goal.checks.map((c) => (c && c.command) || '').join(' ')
+      : '',
     plan.lastRunSummary,
     scheduleLabelPlan(plan)
   ]
@@ -419,7 +434,7 @@ function applyAutomationScheduleToForm(plan) {
 }
 
 /**
- * 目标型计划 → 表单（验收命令 / 预算 / 工作目录）。
+ * 目标型计划 → 表单（检查命令 / 预算 / 工作目录）。
  * 与 collectAutomationForm 成对：只写不回填或只读不写，都会「保存了但界面显示不对」。
  */
 function fillAutomationGoalForm(plan) {
@@ -429,7 +444,9 @@ function fillAutomationGoalForm(plan) {
   const cwdEl = $('automation-goal-cwd');
   const attemptsEl = $('automation-goal-attempts');
   const wallEl = $('automation-goal-wall-min');
-  if (verifyEl) verifyEl.value = goal.verify || '';
+  const checks = Array.isArray(goal.checks) ? goal.checks : [];
+  // 一条命令一行：与 collectAutomationForm 的拆分规则互为逆运算
+  if (verifyEl) verifyEl.value = checks.map((c) => (c && c.command) || '').filter(Boolean).join('\n');
   if (cwdEl) cwdEl.value = goal.cwd || '';
   // 0 = 用户没填（用默认值），界面就留空，避免把默认数字写死在输入框里
   if (attemptsEl) attemptsEl.value = Number(budget.maxAttempts) > 0 ? String(budget.maxAttempts) : '';
@@ -1022,10 +1039,16 @@ function collectAutomationForm() {
     rrule: sched.rrule,
     onceAt: sched.onceAt,
     trigger: sched.trigger || 'schedule',
-    // 目标型的验收面与预算：命令只从这一个结构化字段进库（不解析提示词）
+    // 目标型的验收面与预算：命令只从这一个结构化字段进库（不解析提示词、不猜技术栈）。
+    // 一条命令一行 → checks[]，逐行原样保留（命令必须按字面执行，不能像 TODO 那样剥列表符号）；
+    // 留空 = 未验证模式（能跑，但完成申请不被代码核对）。
     goal: isGoal
       ? {
-          verify: ($('automation-goal-verify')?.value || '').trim(),
+          checks: String($('automation-goal-verify')?.value || '')
+            .split(/\r?\n/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((command) => ({ command })),
           cwd: ($('automation-goal-cwd')?.value || '').trim()
         }
       : undefined,

@@ -14,6 +14,7 @@ const { createToolCall } = require('./tool-gate');
 const { isMutatingAgentTool, MUTATING_TOOLS } = require('./tool-classify');
 const { sniffVisionImageMime } = require('./guardrails-shared');
 const { getAgentLimits } = require('./agent-limits');
+const { withTimeout } = require('../timeout');
 const {
   collectWriteSmellHints,
   relDirOf,
@@ -27,6 +28,14 @@ const { deleteUserSkill } = require('../agent-home');
 // mcp_tool_schema(query) 也用它 —— 两处若各写一套排序，检索结果会互相打架。
 const { recallAgentTools } = require('../tools/tool-vector-index');
 const { slimMcpInputSchema } = require('./tool-catalog');
+// 目标型计划的两个收尾工具（goal_check / goal_finish）：事实与核对全在 plans/goal-run，
+// 本文件只做「取上下文 → 调它 → 把事实回给模型」，不在这里判完成。
+const {
+  goalChecks,
+  runGoalCheck,
+  judgeGoalFinish,
+  factLine
+} = require('../plans/goal-run');
 // 「是不是 MCP 服务注册的工具」唯一判定：mcp_manage / mcp_tool_schema 同前缀但不是远端工具
 const { isMcpServerToolName } = require('../mcp/tool-name');
 const { loadModelSettings, getEmbeddingConfig } = require('../model-settings');
@@ -220,23 +229,6 @@ function createMainToolBridge(deps) {
     ? createPhoneCameraSource({ getBridge: deps.getMobileBridge })
     : null;
 
-  /** 有界等待：超时或失败一律 resolve(null)，交由调用方降级。 */
-  function withTimeout(promise, ms) {
-    const wait = Number(ms);
-    if (!Number.isFinite(wait) || wait <= 0) return Promise.resolve(promise);
-    return new Promise((resolve) => {
-      let done = false;
-      const settle = (v) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        resolve(v);
-      };
-      const timer = setTimeout(() => settle(null), wait);
-      Promise.resolve(promise).then(settle, () => settle(null));
-    });
-  }
-
   /**
    * 取写入文件所在目录的直接子项文件名（只要名字，不做 stat）。
    * 走 Gateway 的 glob RPC，因此本地 / SSH 远程工作区都成立；
@@ -252,7 +244,8 @@ function createMainToolBridge(deps) {
     try {
       res = await withTimeout(
         delegateAgentToolViaGateway(gateway, 'glob', { pattern }, ctx),
-        getAgentLimits(userDataPath, ctx.contextTierId).writeSmellScanTimeoutMs
+        getAgentLimits(userDataPath, ctx.contextTierId).writeSmellScanTimeoutMs,
+        { mode: 'null' }
       );
     } catch {
       return null;
@@ -694,9 +687,10 @@ function createMainToolBridge(deps) {
             ? `\n\nTODO：\n${a.todos.map((t, i) => `${i + 1}. ${String(t || '').trim()}`).join('\n')}`
             : '';
         const r = await plansCreateFromText({
-          text: `${a.description || a.text || ''}${todoText}`,
+          // text 只服务「缺结构化信息时的 LLM 解析」与空描述校验：prompt 就是任务的完整说明，可作兜底
+          text: `${a.description || a.text || a.prompt || ''}${todoText}`,
           skillIds: a.skillIds || [],
-          // 结构化优先：模型直接给出 rrule/onceAt 时免 LLM 解析
+          // 结构化优先：模型直接给出 rrule/onceAt/goal 时免 LLM 解析
           structured: {
             name: a.name,
             rrule: a.rrule,
@@ -704,6 +698,8 @@ function createMainToolBridge(deps) {
             prompt: a.prompt,
             todos: a.todos,
             skillIds: a.skillIds,
+            // 目标型：{ checks: [...], cwd } —— 检查清单是它唯一的验收面（不解析提示词）
+            goal: a.goal,
             // 计划工作空间：不填 = 跟随执行时当前工作空间
             workspace: a.workspace
           },
@@ -711,10 +707,22 @@ function createMainToolBridge(deps) {
           modelRoute: ctx && ctx.modelRoute ? ctx.modelRoute : undefined,
           model: ctx && ctx.model ? ctx.model : undefined
         });
+        const goalChecksDeclared =
+          r.plan.trigger === 'goal' && r.plan.goal && Array.isArray(r.plan.goal.checks)
+            ? r.plan.goal.checks.map((c) => c && c.command).filter(Boolean)
+            : [];
         return {
           ok: true,
           plan: r.plan,
-          message: `已创建计划「${r.plan.name}」`
+          message:
+            r.plan.trigger === 'goal'
+              ? `已创建目标型计划「${r.plan.name}」：` +
+                (goalChecksDeclared.length
+                  ? `验收检查 ${goalChecksDeclared.map((c) => `「${c}」`).join('、')}。`
+                  : '未声明检查（未验证模式：完成申请不会被代码核对）。') +
+                '它会在后台一轮轮自动跑，跑到申请完成或预算用完为止 —— 别在这里等结果，' +
+                '需要看进度或停掉时用 plan_list / plan_run / plan_delete。'
+              : `已创建计划「${r.plan.name}」`
         };
       }
       case 'plan_list': {
@@ -725,9 +733,28 @@ function createMainToolBridge(deps) {
             id: p.id,
             name: p.name,
             enabled: p.enabled,
+            trigger: p.trigger || 'schedule',
             rrule: p.rrule,
             onceAt: p.onceAt,
             todos: Array.isArray(p.todos) ? p.todos : [],
+            // 目标型：报状态时要说得清「跑了几轮、声明的检查是什么、最后一条事实、怎么收的尾」
+            goal:
+              p.trigger === 'goal'
+                ? {
+                    checks: (p.goal && Array.isArray(p.goal.checks) ? p.goal.checks : []).map((c) => c && c.command),
+                    cwd: (p.goal && p.goal.cwd) || ''
+                  }
+                : undefined,
+            attempt: Number(p.attempt) || 0,
+            outcome: p.outcome || null,
+            lastCheck: Array.isArray(p.evidence) && p.evidence.length
+              ? {
+                  command: p.evidence[p.evidence.length - 1].command,
+                  ok: !!p.evidence[p.evidence.length - 1].ok,
+                  exitCode: p.evidence[p.evidence.length - 1].exitCode,
+                  at: p.evidence[p.evidence.length - 1].at
+                }
+              : null,
             // 计划绑定的模型与路由（只存路由不存 key）：便于判断到点会用哪个模型执行
             model: p.model || '',
             modelRoute: p.modelRoute || '',
@@ -773,6 +800,106 @@ function createMainToolBridge(deps) {
           note: '已触发一次执行：跑完的结果会出现在该计划绑定的会话里，不要在这里等'
         };
       }
+      case 'goal_check': {
+        if (!plansStore) return { ok: false, error: '计划 API 不可用', errorCode: 'PLANS_UNAVAILABLE' };
+        if (!gateway) return { ok: false, error: 'Gateway 未就绪', errorCode: 'GATEWAY_UNAVAILABLE' };
+        const planId = String((ctx && ctx.planId) || '').trim();
+        if (!planId) {
+          return {
+            ok: false,
+            error: '当前不在目标型计划轮次里，没有可记录检查事实的计划',
+            errorCode: 'NO_GOAL_PLAN',
+            retryable: false
+          };
+        }
+        const goalPlan = plansStore.get(planId);
+        if (!goalPlan) return { ok: false, error: `没有这个计划：${planId}`, errorCode: 'PLAN_NOT_FOUND' };
+        const goalLimits = getAgentLimits(userDataPath, ctx.contextTierId);
+        const wantId = String(a.check_id || a.checkId || '').trim();
+        const declared = goalChecks(goalPlan);
+        const picked = wantId
+          ? declared.find((c) => c.id === wantId || c.command === wantId) || null
+          : null;
+        if (wantId && !picked) {
+          return {
+            ok: false,
+            error: `没有这条声明检查：${wantId}`,
+            errorCode: 'CHECK_NOT_FOUND',
+            retryable: false,
+            suggestedFix: declared.length
+              ? `可用的 check_id：${declared.map((c) => c.id).join(' / ')}；也可以直接给 command`
+              : '这个计划没有声明检查，直接给 command 一条能失败的命令'
+          };
+        }
+        const goalFact = await runGoalCheck({
+          gateway,
+          plan: goalPlan,
+          command: picked ? picked.command : a.command,
+          checkId: picked ? picked.id : '',
+          cwd: (goalPlan.goal && goalPlan.goal.cwd) || '',
+          limits: goalLimits,
+          sessionId: ctx.sessionId,
+          runId: ctx.runId,
+          round: goalPlan.attempt
+        });
+        plansStore.pushEvidence(planId, goalFact, goalLimits.goalEvidenceKeep);
+        return {
+          ok: true,
+          passed: goalFact.ok,
+          exitCode: goalFact.exitCode,
+          note: goalFact.note,
+          round: goalFact.round,
+          fact: factLine(goalFact),
+          tail: goalFact.tail,
+          hint: goalFact.ok
+            ? '这条检查通过并已记为事实；要收尾就调用 goal_finish(outcome=complete)'
+            : '这条检查没通过，事实已记录：先修再重跑，别现在申请完成'
+        };
+      }
+      case 'goal_finish': {
+        if (!plansStore) return { ok: false, error: '计划 API 不可用', errorCode: 'PLANS_UNAVAILABLE' };
+        const finishPlanId = String((ctx && ctx.planId) || '').trim();
+        if (!finishPlanId) {
+          return {
+            ok: false,
+            error: '当前不在目标型计划轮次里，没有可收尾的计划',
+            errorCode: 'NO_GOAL_PLAN',
+            retryable: false
+          };
+        }
+        const finishPlan = plansStore.get(finishPlanId);
+        if (!finishPlan) return { ok: false, error: `没有这个计划：${finishPlanId}`, errorCode: 'PLAN_NOT_FOUND' };
+        const outcome = String(a.outcome || '').trim() === 'blocked' ? 'blocked' : 'complete';
+        // 只核对「主张与事实是否一致」：不够通过就打回并把事实回灌，判断继续归模型
+        const verdict = judgeGoalFinish({ plan: finishPlan, outcome });
+        plansStore.recordClaim(finishPlanId, {
+          outcome,
+          round: finishPlan.attempt,
+          accepted: verdict.accept,
+          note: String(a.note || '')
+        });
+        if (!verdict.accept) {
+          return {
+            ok: true,
+            accepted: false,
+            outcome,
+            reason: verdict.reason,
+            facts: verdict.facts,
+            hint: '这次收尾申请没有事实支撑（已记录）：继续推进，用 goal_check 取新的事实再申请'
+          };
+        }
+        plansStore.setOutcome(finishPlanId, outcome);
+        return {
+          ok: true,
+          accepted: true,
+          outcome,
+          facts: verdict.facts,
+          hint:
+            outcome === 'complete'
+              ? '已按完成收尾：本轮结束后不再续跑。把结论、证据出处与遗留项写给用户。'
+              : '已记为阻塞：本轮结束后不再续跑。把确切卡点与需要人做什么写给用户。'
+        };
+      }
       case 'plan_cancel': {
         const cancelPlanRun = typeof deps.cancelPlanRun === 'function' ? deps.cancelPlanRun : null;
         if (!cancelPlanRun) return { ok: false, error: '计划调度未就绪', errorCode: 'PLANS_UNAVAILABLE' };
@@ -787,6 +914,76 @@ function createMainToolBridge(deps) {
       //
       // 自动注入每轮只带 8+5 条，此前模型想不起别的只能认。这里把检索与纠错交回模型；
       // 写入策略（低价值闸 / 近重复）仍然只在 memory.long_add 一处，工具不绕过它。
+      case 'session_recall': {
+        if (!gateway) return { error: 'Gateway 未就绪', errorCode: 'GATEWAY_UNAVAILABLE' };
+        const query = String(a.query || '').trim();
+        if (!query) return { error: 'query 必填' };
+        const sessionLimits = getAgentLimits(userDataPath, ctx.contextTierId);
+        const wantScope = String(a.scope || 'workspace') === 'session' ? 'session' : 'workspace';
+        const limit = Math.min(20, Math.max(1, Number(a.limit) || sessionLimits.sessionRecallLimit));
+        const wsRoot = ctx.workspacePath || ctx.worktreePath || '';
+        if (wantScope === 'workspace' && !wsRoot) {
+          return {
+            ok: true,
+            total: 0,
+            results: [],
+            note: '当前会话没有绑定工作空间，无法跨会话检索；可改用 scope=session 只看本会话'
+          };
+        }
+        // 路径归一与工作空间圈定都在 Rust 侧（`memory::search_messages` 复用
+        // `project_path_key`），这里不写第二份比较口径。
+        const searchArgs = {
+          query,
+          workspacePath: wantScope === 'workspace' ? wsRoot : undefined,
+          sessionId: wantScope === 'session' ? ctx.sessionId || undefined : undefined,
+          limit,
+          snippetChars: sessionLimits.sessionRecallSnippetChars
+        };
+        const messages = await gateway.invokeRpc('memory.messages_search', searchArgs);
+        let folded = null;
+        if (a.folded) {
+          folded = await gateway.invokeRpc('memory.compaction_folded', {
+            ...searchArgs,
+            limit: Math.min(limit, sessionLimits.sessionRecallFoldedLimit),
+            snippetChars: sessionLimits.sessionRecallSnippetChars * 3
+          });
+        }
+        const msgRows = Array.isArray(messages && messages.results) ? messages.results : [];
+        const foldedRows = Array.isArray(folded && folded.results) ? folded.results : [];
+        if (!msgRows.length && !foldedRows.length) {
+          return {
+            ok: true,
+            total: 0,
+            results: [],
+            note: '没找到匹配的既往对话（也可能那段对话在别的工作空间里，或关键词太具体）'
+          };
+        }
+        return {
+          ok: true,
+          mode: (messages && messages.mode) || 'none',
+          total: msgRows.length + foldedRows.length,
+          results: [
+            ...msgRows.map((r) => ({
+              kind: 'message',
+              sessionId: r.sessionId || null,
+              title: r.title || null,
+              role: r.role || '',
+              createdAt: r.createdAt || 0,
+              snippet: String(r.snippet || '')
+            })),
+            ...foldedRows.map((r) => ({
+              kind: 'folded',
+              sessionId: r.sessionId || null,
+              createdAt: r.createdAt || 0,
+              chars: r.chars || 0,
+              snippet: String(r.snippet || '')
+            }))
+          ],
+          note:
+            'kind=message 是账本里的原话摘录；kind=folded 是被压缩摘要吞掉的原文片段。' +
+            '两者都只是摘录，需要完整上下文就带上 sessionId 问用户是否要继续那次会话'
+        };
+      }
       case 'memory_recall': {
         if (!gateway) return { error: 'Gateway 未就绪', errorCode: 'GATEWAY_UNAVAILABLE' };
         const query = String(a.query || '').trim();

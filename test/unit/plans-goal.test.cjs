@@ -1,10 +1,12 @@
 'use strict';
 
 /**
- * 目标型计划（plans trigger=goal）：判定表 / 验收执行 / store 运行态 / 调度触发。
+ * 目标型计划（plans trigger=goal）：事实 / 核对 / 续跑判定 / store 运行态 / 交接班文本。
  *
- * 这里断言的都不是「某技术栈怎么验」，而是通用契约：
- *   命令退出码 0 = 通过；未通过且预算未尽 = 再来一轮；任何停止都不许写成「完成」。
+ * 这一版断言的**不是**「某技术栈怎么验」，而是通用契约：
+ *   1. 检查命令退出码 0 = 通过，其它一律是「没通过」的事实（含超时 / 被沙箱拒绝）；
+ *   2. 代码只核对「主张与事实是否一致」，不判断「检查够不够证明目标达成」；
+ *   3. 预算用完与新事实一样只是事实 —— 既不会写成「完成」，也不会自动续跑。
  */
 
 const fs = require('fs');
@@ -14,10 +16,13 @@ const path = require('path');
 const {
   decideContinuation,
   resolveGoalBudget,
-  runGoalVerify,
+  runGoalCheck,
   tailEvidence,
-  buildGoalAuditReport,
-  goalVerifyCommand
+  judgeGoalFinish,
+  goalChecks,
+  isUnverified,
+  renderEvidenceBlock,
+  latestFactFor
 } = require('../../src/plans/goal-run');
 const { PlansStore } = require('../../src/plans/store');
 const { PlansScheduler } = require('../../src/plans/scheduler');
@@ -27,9 +32,9 @@ const LIMITS = {
   goalMaxAttempts: 3,
   goalMaxWallMs: 60 * 60 * 1000,
   goalRetryBackoffMs: 60000,
-  goalRetryBackoffMaxMs: 300000,
-  goalVerifyTimeoutMs: 120000,
-  goalVerifyTailChars: 40
+  goalCheckTimeoutMs: 120000,
+  goalEvidenceTailChars: 40,
+  goalEvidenceKeep: 3
 };
 
 function makeStore() {
@@ -40,353 +45,338 @@ function makeStore() {
 function goalPlan(extra = {}) {
   return {
     id: 'g1',
-    name: '跑绿色的验收',
+    name: '跑绿色的检查',
     enabled: true,
     trigger: 'goal',
-    prompt: '把验收命令跑绿',
-    goal: { verify: 'npm test', cwd: '' },
+    prompt: '把检查跑绿',
+    goal: { checks: [{ id: 'c1', command: 'npm test' }], cwd: '' },
     budget: { maxAttempts: 0, maxWallMs: 0 },
     attempt: 0,
     attemptStartedAt: null,
     nextRunAt: null,
-    lastVerify: null,
-    baseline: null,
+    outcome: null,
+    evidence: [],
+    claims: [],
     ...extra
   };
 }
 
-describe('goal-run: 续跑判定表', () => {
-  it('验收通过 → 完成（不再续跑）', () => {
-    const d = decideContinuation({
-      plan: goalPlan({ attempt: 1 }),
-      verify: { ok: true, note: 'pass' },
+/** 一条事实（等价于 goal_check 落库后的形状） */
+function fact(over = {}) {
+  return {
+    at: new Date().toISOString(),
+    round: 1,
+    checkId: 'c1',
+    command: 'npm test',
+    ok: true,
+    exitCode: 0,
+    note: 'pass',
+    tail: '',
+    ...over
+  };
+}
+
+describe('goal-run: 检查命令只产生事实', () => {
+  it('退出码 0 = 通过', async () => {
+    const r = await runGoalCheck({
+      gateway: { invokeRpc: async () => ({ code: 0, stdout: 'all green' }) },
+      plan: goalPlan(),
+      command: 'npm test',
       limits: LIMITS
     });
+    expect(r.ok).toBe(true);
+    expect(r.exitCode).toBe(0);
+    expect(r.note).toBe('pass');
+    expect(r.tail).toContain('all green');
+  });
+
+  it('非 0 退出码 = 未通过（不是错误、不是异常）', async () => {
+    const r = await runGoalCheck({
+      gateway: { invokeRpc: async () => ({ code: 2, stdout: 'boom' }) },
+      plan: goalPlan(),
+      command: 'npm test',
+      limits: LIMITS
+    });
+    expect(r.ok).toBe(false);
+    expect(r.exitCode).toBe(2);
+    expect(r.note).toBe('fail');
+  });
+
+  it('超时：记 note=timeout，并顺手结束被转到后台的进程', async () => {
+    const calls = [];
+    const r = await runGoalCheck({
+      gateway: {
+        invokeRpc: async (method, params) => {
+          calls.push([method, params]);
+          if (method === 'host.exec') return { code: null, timedOut: true, stillRunning: true, handle: 'h1' };
+          return { ok: true };
+        }
+      },
+      plan: goalPlan(),
+      command: 'npm test',
+      limits: LIMITS
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note).toBe('timeout');
+    expect(calls.some(([m, p]) => m === 'host.proc_kill' && p.id === 'h1')).toBe(true);
+  });
+
+  it('沙箱拒绝（无人可批）也只是一种事实：note=blocked', async () => {
+    const r = await runGoalCheck({
+      gateway: {
+        invokeRpc: async () => {
+          const e = new Error('sandbox denied');
+          e.code = 'SANDBOX_DENIED';
+          throw e;
+        }
+      },
+      plan: goalPlan(),
+      command: 'npm test',
+      limits: LIMITS
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note).toBe('blocked');
+    expect(r.exitCode).toBe(null);
+  });
+
+  it('没有命令 / 没有 Gateway：不抛错，返回可读的 note', async () => {
+    const noCmd = await runGoalCheck({ gateway: { invokeRpc: async () => ({}) }, command: '  ' });
+    expect(noCmd.note).toBe('missing');
+    const noGw = await runGoalCheck({ gateway: null, command: 'npm test' });
+    expect(noGw.note).toBe('error');
+    expect(noGw.tail).toContain('Gateway');
+  });
+
+  it('证据尾巴只留限定长度的尾部', () => {
+    const tail = tailEvidence('a'.repeat(100), '', 40);
+    expect(tail.length).toBe(40);
+    expect(tail).toBe('a'.repeat(40));
+  });
+});
+
+describe('goal-run: 完成申请只核对事实', () => {
+  it('声明的检查还没跑过 → 拒绝，并给出原因', () => {
+    const v = judgeGoalFinish({ plan: goalPlan(), outcome: 'complete' });
+    expect(v.accept).toBe(false);
+    expect(v.reason).toContain('goal_check');
+  });
+
+  it('声明检查最新一次通过 → 接受', () => {
+    const v = judgeGoalFinish({
+      plan: goalPlan({ evidence: [fact()] }),
+      outcome: 'complete'
+    });
+    expect(v.accept).toBe(true);
+    expect(v.outcome).toBe('complete');
+    expect(v.facts.lastOk).toBe(true);
+  });
+
+  it('声明了两条、只跑通一条 → 拒绝（指出没通过的那条）', () => {
+    const plan = goalPlan({
+      goal: { checks: [{ id: 'c1', command: 'npm test' }, { id: 'c2', command: 'npm run lint' }], cwd: '' },
+      evidence: [fact(), fact({ checkId: 'c2', command: 'npm run lint', ok: false, exitCode: 3, note: 'fail' })]
+    });
+    const v = judgeGoalFinish({ plan, outcome: 'complete' });
+    expect(v.accept).toBe(false);
+    expect(v.reason).toContain('npm run lint');
+    expect(v.reason).toContain('exit 3');
+  });
+
+  it('越新的失败压过越早的通过：最近一次没过就不许收尾', () => {
+    const plan = goalPlan({
+      evidence: [fact(), fact({ ok: false, exitCode: 1, note: 'fail' })]
+    });
+    expect(judgeGoalFinish({ plan, outcome: 'complete' }).accept).toBe(false);
+  });
+
+  it('声明检查都绿了，但刚跑的另一条命令报红 → 也不许收尾', () => {
+    const plan = goalPlan({
+      evidence: [
+        fact(),
+        fact({ checkId: '', command: 'npm run smoke', ok: false, exitCode: 7, note: 'fail' })
+      ]
+    });
+    const v = judgeGoalFinish({ plan, outcome: 'complete' });
+    expect(v.accept).toBe(false);
+    expect(v.reason).toContain('npm run smoke');
+  });
+
+  it('未声明检查（未验证模式）：可以收尾，但事实里标注 unverified', () => {
+    const v = judgeGoalFinish({ plan: goalPlan({ goal: { checks: [], cwd: '' } }), outcome: 'complete' });
+    expect(v.accept).toBe(true);
+    expect(v.facts.unverified).toBe(true);
+  });
+
+  it('阻塞申请一律接受：卡点归模型判断，代码只留痕', () => {
+    const v = judgeGoalFinish({ plan: goalPlan(), outcome: 'blocked' });
+    expect(v.accept).toBe(true);
+    expect(v.outcome).toBe('blocked');
+  });
+
+  it('按 checkId 或同一条命令都能取到最新事实', () => {
+    const evidence = [fact({ checkId: '', command: 'npm test', ok: false, exitCode: 1 })];
+    expect(latestFactFor(evidence, { id: 'c1', command: 'npm test' }).ok).toBe(false);
+    expect(latestFactFor(evidence, { id: 'zzz', command: 'other' })).toBe(null);
+  });
+
+  it('goalChecks / isUnverified 只认结构化字段', () => {
+    expect(goalChecks(goalPlan()).length).toBe(1);
+    expect(isUnverified(goalPlan({ goal: { checks: [], cwd: '' } }))).toBe(true);
+  });
+});
+
+describe('goal-run: 续跑判定表', () => {
+  it('已按完成收尾 → 停（不再续跑）', () => {
+    const d = decideContinuation({ plan: goalPlan({ attempt: 1, outcome: 'complete' }), limits: LIMITS });
     expect(d.cont).toBe(false);
     expect(d.stop).toBe('done');
   });
 
-  it('无人可批的阻塞 → 立刻停，不算失败重试', () => {
-    const d = decideContinuation({
-      plan: goalPlan({ attempt: 1 }),
-      verify: { ok: false, note: 'blocked-approval' },
-      limits: LIMITS
-    });
+  it('模型报阻塞 → 停', () => {
+    const d = decideContinuation({ plan: goalPlan({ attempt: 1, outcome: 'blocked' }), limits: LIMITS });
     expect(d.cont).toBe(false);
     expect(d.stop).toBe('blocked');
   });
 
-  it('没有验收命令 → 停（无尺子不许无人值守跑）', () => {
-    const d = decideContinuation({
-      plan: goalPlan({ attempt: 1 }),
-      verify: { ok: false, note: 'no-verify' },
-      limits: LIMITS
-    });
-    expect(d.cont).toBe(false);
-    expect(d.stop).toBe('no-verify');
-  });
-
-  it('轮次用完 → 停，且是「未完成」不是「完成」', () => {
-    const d = decideContinuation({
-      plan: goalPlan({ attempt: 3 }),
-      verify: { ok: false, note: 'fail' },
-      limits: LIMITS
-    });
+  it('轮次用完 → 停（未收尾就是未完成，措辞交给模型）', () => {
+    const d = decideContinuation({ plan: goalPlan({ attempt: 3 }), limits: LIMITS });
     expect(d.cont).toBe(false);
     expect(d.stop).toBe('attempts');
   });
 
   it('墙钟用完 → 停（即便轮次还有剩）', () => {
     const startedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    const d = decideContinuation({
-      plan: goalPlan({ attempt: 1, attemptStartedAt: startedAt }),
-      verify: { ok: false, note: 'fail' },
-      limits: LIMITS
-    });
+    const d = decideContinuation({ plan: goalPlan({ attempt: 1, attemptStartedAt: startedAt }), limits: LIMITS });
     expect(d.cont).toBe(false);
     expect(d.stop).toBe('budget');
   });
 
-  it('失败后退避按轮次指数增长并封顶', () => {
-    const at = (attempt) =>
-      decideContinuation({
-        plan: goalPlan({ attempt, attemptStartedAt: new Date().toISOString() }),
-        verify: { ok: false, note: 'fail' },
-        limits: LIMITS
-      }).delayMs;
-    expect(at(1)).toBe(60000);
-    expect(at(2)).toBe(120000);
-    // 3 轮已到 maxAttempts，这里只看 2→4 的翻倍与封顶：把 3 轮预算放开
-    const wide = { ...LIMITS, goalMaxAttempts: 8 };
-    const delay = (attempt) =>
-      decideContinuation({
-        plan: goalPlan({ attempt, attemptStartedAt: new Date().toISOString() }),
-        verify: { ok: false, note: 'fail' },
-        limits: wide
-      }).delayMs;
-    expect(delay(3)).toBe(240000);
-    expect(delay(4)).toBe(300000); // 480000 → 封顶 300000
+  it('没跑完、预算还有 → 立刻接下一轮（正常轮次不额外等待）', () => {
+    const d = decideContinuation({ plan: goalPlan({ attempt: 1 }), limits: LIMITS });
+    expect(d.cont).toBe(true);
+    expect(d.delayMs).toBe(0);
   });
 
-  it('表单填的预算被 clamp 在 agent-limits 上限内', () => {
-    const b = resolveGoalBudget({ budget: { maxAttempts: 9999, maxWallMs: 999 * 60 * 60 * 1000 } }, LIMITS);
-    expect(b.maxAttempts).toBeLessThanOrEqual(48);
-    expect(b.maxWallMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
+  it('崩溃恢复才退避：那是唯一「代码比模型知道得多」的情形', () => {
+    const d = decideContinuation({ plan: goalPlan({ attempt: 1 }), limits: LIMITS, interrupted: true });
+    expect(d.cont).toBe(true);
+    expect(d.delayMs).toBe(LIMITS.goalRetryBackoffMs);
   });
 
-  it('未填预算 → 用默认值（0 不等于「跑 0 轮」）', () => {
-    const b = resolveGoalBudget({ budget: { maxAttempts: 0, maxWallMs: 0 } }, LIMITS);
-    expect(b.maxAttempts).toBe(3);
-    expect(b.maxWallMs).toBe(60 * 60 * 1000);
+  it('预算默认值与上限收敛在一处', () => {
+    const b = resolveGoalBudget({ budget: { maxAttempts: 999, maxWallMs: 0 } }, LIMITS);
+    expect(b.maxAttempts).toBe(48); // schema 上限
+    expect(b.maxWallMs).toBe(LIMITS.goalMaxWallMs);
+    expect(resolveGoalBudget({}, LIMITS).maxAttempts).toBe(LIMITS.goalMaxAttempts);
   });
 });
 
-describe('goal-run: 验收命令执行', () => {
-  function fakeGateway(handler) {
-    const calls = [];
-    return {
-      calls,
-      invokeRpc: async (method, params) => {
-        calls.push({ method, params });
-        return handler(method, params);
-      }
-    };
-  }
-
-  it('退出码 0 = 通过；只传 timeoutMs，不传 waitMs/keepOnTimeout', async () => {
-    const gw = fakeGateway(() => ({ code: 0, stdout: 'ok' }));
-    const r = await runGoalVerify({ gateway: gw, plan: goalPlan(), limits: LIMITS, cwd: 'C:/w' });
-    expect(r.ok).toBe(true);
-    expect(r.note).toBe('pass');
-    const call = gw.calls[0];
-    expect(call.method).toBe('host.exec');
-    expect(call.params.command).toBe('npm test');
-    expect(call.params.timeoutMs).toBe(120000);
-    expect(call.params.waitMs).toBeUndefined();
-    expect(call.params.keepOnTimeout).toBeUndefined();
-  });
-
-  it('非 0 退出码 = 未通过，并把输出尾巴留作证据', async () => {
-    const gw = fakeGateway(() => ({ code: 2, stdout: 'x'.repeat(100), stderr: 'ERR 3 tests failed' }));
-    const r = await runGoalVerify({ gateway: gw, plan: goalPlan(), limits: LIMITS });
-    expect(r.ok).toBe(false);
-    expect(r.exitCode).toBe(2);
-    expect(r.note).toBe('fail');
-    expect(r.tail).toContain('ERR 3 tests failed');
-    expect(r.tail.length).toBeLessThanOrEqual(40);
-  });
-
-  it('超时被转后台 → 判未通过并顺手结束进程（不留孤儿构建）', async () => {
-    const gw = fakeGateway((method) =>
-      method === 'host.exec'
-        ? { code: null, timedOut: true, stillRunning: true, handle: 'proc-9' }
-        : { ok: true }
-    );
-    const r = await runGoalVerify({ gateway: gw, plan: goalPlan(), limits: LIMITS });
-    expect(r.ok).toBe(false);
-    expect(r.note).toBe('timeout');
-    const kill = gw.calls.find((c) => c.method === 'host.proc_kill');
-    expect(kill && kill.params.id).toBe('proc-9');
-  });
-
-  it('沙箱拒绝 / 审批超时 → blocked-approval（不是「失败重试」）', async () => {
-    for (const code of ['SANDBOX_DENIED', 'SANDBOX_APPROVAL_TIMEOUT', 'APPROVAL_TIMEOUT']) {
-      const gw = fakeGateway(() => {
-        const e = new Error('blocked');
-        e.code = code;
-        throw e;
-      });
-      const r = await runGoalVerify({ gateway: gw, plan: goalPlan(), limits: LIMITS });
-      expect(r.note).toBe('blocked-approval');
-      expect(r.ok).toBe(false);
-    }
-  });
-
-  it('命令超时（SHELL_TIMEOUT）→ note=timeout，仍可在下一轮重试', async () => {
-    const gw = fakeGateway(() => {
-      const e = new Error('shell timeout after 120000ms');
-      e.code = 'SHELL_TIMEOUT';
-      e.timedOut = true;
-      throw e;
+describe('goal-run: 事实块只陈述事实', () => {
+  it('列出轮次预算、声明检查与最近事实（含退出码）', () => {
+    const text = renderEvidenceBlock({
+      plan: goalPlan({
+        attempt: 2,
+        attemptStartedAt: new Date(Date.now() - 60000).toISOString(),
+        budget: { maxAttempts: 5, maxWallMs: 60 * 60 * 1000 },
+        evidence: [fact({ round: 1 }), fact({ round: 2, ok: false, exitCode: 1, note: 'fail', tail: 'ERR boom' })]
+      }),
+      limits: LIMITS,
+      upcoming: true
     });
-    const r = await runGoalVerify({ gateway: gw, plan: goalPlan(), limits: LIMITS });
-    expect(r.note).toBe('timeout');
-    expect(r.ok).toBe(false);
-  });
-
-  it('没填验收命令 → no-verify，且不去执行任何命令', async () => {
-    const gw = fakeGateway(() => ({ code: 0 }));
-    const r = await runGoalVerify({
-      gateway: gw,
-      plan: goalPlan({ goal: { verify: '   ' } }),
-      limits: LIMITS
-    });
-    expect(r.note).toBe('no-verify');
-    expect(gw.calls.length).toBe(0);
-  });
-
-  it('验收命令只从结构化字段来（不解析提示词里的文字）', () => {
-    const plan = goalPlan({ prompt: '验收：npm run build', goal: { verify: '' } });
-    expect(goalVerifyCommand(plan)).toBe('');
-  });
-
-  it('证据尾巴超长时只留尾部', () => {
-    expect(tailEvidence('a'.repeat(200), '', 10)).toBe('a'.repeat(10));
-    expect(tailEvidence('', 'last-line', 10)).toBe('last-line');
-  });
-});
-
-describe('goal-run: 停止时的措辞', () => {
-  it('预算/轮次耗尽写「未完成」，不出现「已完成」', () => {
-    const text = buildGoalAuditReport({
-      plan: goalPlan({ attempt: 3 }),
-      verify: { ok: false, exitCode: 2, note: 'fail', tail: 'boom' },
-      stop: 'attempts',
-      budget: { maxAttempts: 3, maxWallMs: 60 * 60 * 1000 }
-    });
-    expect(text).toContain('目标未完成');
-    expect(text).toContain('boom');
+    expect(text).toContain('目标第 3/5 轮');
+    expect(text).toContain('npm test');
+    expect(text).toContain('exit 1');
+    expect(text).toContain('ERR boom');
+    // 结论性措辞不属于事实块：谁来做完没做完的判断是模型与人
     expect(text).not.toContain('已完成');
   });
+
+  it('未声明检查时明说「未验证」', () => {
+    const text = renderEvidenceBlock({ plan: goalPlan({ goal: { checks: [], cwd: '' } }), limits: LIMITS });
+    expect(text).toContain('未验证');
+  });
+
+  it('带上「本轮改了几次文件」这条事实（0 次是最好的线索）', () => {
+    const text = renderEvidenceBlock({ plan: goalPlan(), limits: LIMITS, writes: 0 });
+    expect(text).toContain('改动工作区的工具调用：0 次');
+  });
 });
 
-describe('PlansStore: 目标型字段与运行态', () => {
-  it('trigger=goal 必须带验收命令', () => {
-    const store = makeStore();
-    expect(() => store.upsert(goalPlan({ goal: { verify: '' } }))).toThrowError(/验收命令/);
-    const saved = store.upsert(goalPlan());
-    expect(saved.trigger).toBe('goal');
+describe('store: 目标型运行态', () => {
+  it('开一轮就 +1，并清掉上一轮的收尾结论', () => {
+    const s = makeStore();
+    const p = s.upsert(goalPlan());
+    s.setOutcome(p.id, 'complete');
+    const after = s.beginAttempt(p.id);
+    expect(after.attempt).toBe(1);
+    expect(after.outcome).toBe(null);
+    expect(after.attemptStartedAt).toBeTruthy();
   });
 
-  it('表单保存不清掉轮次/基线/证据（只有专用方法能改）', () => {
-    const store = makeStore();
-    store.upsert(goalPlan());
-    store.beginAttempt('g1');
-    store.setBaseline('g1', { red: true, exitCode: 1, note: 'fail', tail: 'baseline red' });
-    store.updateVerify('g1', { ok: false, exitCode: 1, note: 'fail', tail: 'boom' });
-    const again = store.upsert({ ...store.get('g1'), name: '改名', prompt: '换个说法' });
-    expect(again.name).toBe('改名');
-    expect(again.attempt).toBe(1);
-    expect(again.baseline && again.baseline.red).toBe(true);
-    expect(again.lastVerify && again.lastVerify.note).toBe('fail');
+  it('检查事实按保留条数有界，最新在最前可见', () => {
+    const s = makeStore();
+    const p = s.upsert(goalPlan());
+    for (let i = 0; i < 5; i += 1) s.pushEvidence(p.id, fact({ round: i + 1 }), 3);
+    const fresh = s.get(p.id);
+    expect(fresh.evidence.length).toBe(3);
+    expect(fresh.evidence[fresh.evidence.length - 1].round).toBe(5);
   });
 
-  it('beginAttempt 只在首轮记墙钟起点；scheduleNextAttempt 写未来时间（不启定时器）', () => {
-    const store = makeStore();
-    store.upsert(goalPlan());
-    const a1 = store.beginAttempt('g1');
-    expect(a1.attempt).toBe(1);
-    expect(a1.attemptStartedAt).toBeTruthy();
-    expect(a1.nextRunAt).toBeNull();
-    const startedAt = a1.attemptStartedAt;
-    const a2 = store.beginAttempt('g1');
-    expect(a2.attempt).toBe(2);
-    expect(a2.attemptStartedAt).toBe(startedAt);
-    const nextRunAt = store.scheduleNextAttempt('g1', 60000);
-    expect(Date.parse(nextRunAt) - Date.now()).toBeGreaterThan(50000);
+  it('主张（含被拒绝的）也留痕，便于早上复盘', () => {
+    const s = makeStore();
+    const p = s.upsert(goalPlan());
+    s.recordClaim(p.id, { outcome: 'complete', round: 1, accepted: false, note: '我先说做完了' });
+    const fresh = s.get(p.id);
+    expect(fresh.claims.length).toBe(1);
+    expect(fresh.claims[0].accepted).toBe(false);
   });
 
-  it('lastRunOk 对目标型按「验收是否通过」记，且成功后不被自动停用', () => {
-    const store = makeStore();
-    store.upsert(goalPlan());
-    store.updateRunResult('g1', { ok: true, verify: { ok: false } });
-    expect(store.get('g1').lastRunOk).toBe(false);
-    expect(store.get('g1').enabled).toBe(true);
-    store.updateRunResult('g1', { ok: true, verify: { ok: true } });
-    expect(store.get('g1').lastRunOk).toBe(true);
-    // 停用由 decideContinuation 驱动，不走 once/idle 的「成功即停用」
-    expect(store.get('g1').enabled).toBe(true);
-  });
-
-  it('clearGoalRuntime 清运行态但保留配置', () => {
-    const store = makeStore();
-    store.upsert(goalPlan());
-    store.beginAttempt('g1');
-    store.updateVerify('g1', { ok: false, exitCode: 1, note: 'fail' });
-    const cleared = store.clearGoalRuntime('g1');
+  it('重新启用会清空轮次/事实/主张，但保留检查与预算配置', () => {
+    const s = makeStore();
+    const p = s.upsert(goalPlan({ budget: { maxAttempts: 4, maxWallMs: 0 } }));
+    s.beginAttempt(p.id);
+    s.pushEvidence(p.id, fact());
+    s.setOutcome(p.id, 'blocked');
+    const cleared = s.clearGoalRuntime(p.id);
     expect(cleared.attempt).toBe(0);
-    expect(cleared.lastVerify).toBeNull();
-    expect(cleared.goal.verify).toBe('npm test');
+    expect(cleared.evidence).toEqual([]);
+    expect(cleared.claims).toEqual([]);
+    expect(cleared.outcome).toBe(null);
+    expect(cleared.goal.checks.length).toBe(1);
+    expect(cleared.budget.maxAttempts).toBe(4);
+  });
+
+  it('目标型不强制填检查命令（未验证模式照样能跑）', () => {
+    const s = makeStore();
+    const p = s.upsert(goalPlan({ goal: { checks: [], cwd: '' } }));
+    expect(p.goal.checks).toEqual([]);
+  });
+
+  it('「这一轮成功」的定义是 outcome=complete，不是模型写了正文', () => {
+    const s = makeStore();
+    const p = s.upsert(goalPlan());
+    s.updateRunResult(p.id, { ok: true, outcome: null });
+    expect(s.get(p.id).lastRunOk).toBe(false);
+    s.updateRunResult(p.id, { ok: true, outcome: 'complete' });
+    expect(s.get(p.id).lastRunOk).toBe(true);
   });
 });
 
-describe('PlansScheduler: 目标型按 nextRunAt 触发', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  function makeScheduler(plan, runs) {
-    return new PlansScheduler({
-      getPlans: () => [plan],
-      runPlan: async (p) => {
-        runs.push({ id: p.id, at: Date.now() });
-      }
-    });
-  }
-
-  it('目标型不走 setTimeout，由轮询按 nextRunAt 触发', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 9, 27, 23, 0, 0));
-    const runs = [];
-    const plan = goalPlan();
-    const sched = makeScheduler(plan, runs);
-    sched.reload();
-    expect(sched.timers.size).toBe(0);
-    await sched._idleTick();
-    expect(runs.length).toBe(1);
-  });
-
-  it('nextRunAt 未到不触发，到点后触发', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 9, 27, 23, 0, 0));
-    const runs = [];
-    const plan = goalPlan({ nextRunAt: new Date(2026, 9, 27, 23, 2, 0).toISOString() });
-    const sched = makeScheduler(plan, runs);
-    await sched._idleTick();
-    expect(runs.length).toBe(0);
-    vi.setSystemTime(new Date(2026, 9, 27, 23, 2, 1));
-    await sched._idleTick();
-    expect(runs.length).toBe(1);
-  });
-
-  it('停用的目标型不触发', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 9, 27, 23, 0, 0));
-    const runs = [];
-    const sched = makeScheduler(goalPlan({ enabled: false }), runs);
-    await sched._idleTick();
-    expect(runs.length).toBe(0);
-  });
-
-  it('目标型不受「静默阈值」影响（夜里没人操作也要能连续推进）', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 9, 27, 23, 0, 0));
-    const runs = [];
-    const sched = new PlansScheduler({
-      getPlans: () => [goalPlan()],
-      runPlan: async () => runs.push(Date.now()),
-      idleQuietMs: 5 * 60 * 1000,
-      isBusy: () => false
-    });
-    await sched._idleTick();
-    expect(runs.length).toBe(1);
-  });
-});
-
-describe('交接班文本：新一轮要看见上轮怎么红的', () => {
-  it('目标型轮次文本带轮次、预算与上轮证据尾巴', () => {
+describe('plan-run-turn: 目标型交接班文本', () => {
+  it('带事实块与两个工具的指引', () => {
     const text = buildPlanRunUserText(
       goalPlan({
         attempt: 2,
         attemptStartedAt: new Date(Date.now() - 60000).toISOString(),
-        lastVerify: { ok: false, exitCode: 1, note: 'fail', at: new Date().toISOString(), tail: 'ERR boom' },
-        budget: { maxAttempts: 5, maxWallMs: 60 * 60 * 1000 }
+        budget: { maxAttempts: 5, maxWallMs: 60 * 60 * 1000 },
+        evidence: [fact({ round: 2, ok: false, exitCode: 1, note: 'fail', tail: 'ERR boom' })]
       })
     );
-    expect(text).toContain('目标型第 3/5 轮');
-    expect(text).toContain('上一轮验收');
+    expect(text).toContain('目标第 3/5 轮');
     expect(text).toContain('ERR boom');
     expect(text).toContain('目标续跑');
+    expect(text).toContain('goal_check');
+    expect(text).toContain('goal_finish');
   });
 
   it('非目标型（定时）文本不变形', () => {
@@ -398,7 +388,32 @@ describe('交接班文本：新一轮要看见上轮怎么红的', () => {
       rrule: 'FREQ=DAILY;BYHOUR=9'
     });
     expect(text).toContain('定时触发');
-    expect(text).not.toContain('目标型第');
+    expect(text).not.toContain('目标第');
+    expect(text).not.toContain('goal_check');
     expect(text).toContain('执行 TODO');
+  });
+});
+
+describe('scheduler: 目标型只由轮询触发', () => {
+  it('nextRunAt 未到不跑，到了就跑（不新增计时器）', async () => {
+    const ran = [];
+    const plans = [
+      goalPlan({ id: 'a', nextRunAt: new Date(Date.now() + 60000).toISOString() }),
+      goalPlan({ id: 'b', nextRunAt: new Date(Date.now() - 1000).toISOString() })
+    ];
+    const s = new PlansScheduler({
+      getPlans: () => plans,
+      runPlan: async (p) => {
+        ran.push(p.id);
+      },
+      isBusy: () => false,
+      idlePollMs: 10,
+      idleQuietMs: 0
+    });
+    s.reload();
+    expect(s.timers.size).toBe(0);
+    await s._idleTick();
+    expect(ran).toEqual(['b']);
+    s.clearAll();
   });
 });

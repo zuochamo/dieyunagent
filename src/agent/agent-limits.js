@@ -42,18 +42,21 @@ const AGENT_LIMITS_DEFAULTS = {
   // 「忙」的唯一来源是 rust-loop-runner 的活跃 agent loop 计数（聊天/规划/定时任务全走它）。
   plansIdlePollMs: 60 * 1000,
   plansIdleQuietMs: 5 * 60 * 1000,
-  // 目标型计划（plans trigger=goal）：跑到「验收命令退出码为 0」为止的预算与退避。
-  // 「要不要再来一轮」只由 Main 的 decideContinuation 依据落盘证据判定；这里只提供默认值
-  // 与 clamp 上限（表单里填的数不能突破上限，防一晚烧穿预算）。
+  // 目标型计划（plans trigger=goal）：预算在代码，节奏在模型。
+  // 决定「再做一轮」只看客观事实：目标已被验收证据判定通过、或预算/轮次用完。
+  // 这里只提供默认值与 clamp 上限（表单里填的数不能突破上限，防一晚烧穿预算）。
   goalMaxAttempts: 12,
   goalMaxWallMs: 8 * 60 * 60 * 1000,
+  // 只有「异常/崩溃恢复」才退避：正常跑完一轮立刻接下一轮（节奏由模型决定）。
   goalRetryBackoffMs: 60 * 1000,
-  goalRetryBackoffMaxMs: 15 * 60 * 1000,
-  // 验收命令超时。**必须 ≤ src/exec-limits.js 的 EXEC_TIMEOUT_MAX_MS（600s）**，
+  // 检查命令超时。**必须 ≤ src/exec-limits.js 的 EXEC_TIMEOUT_MAX_MS（600s）**，
   // 否则合法的重编译会被 host.exec 的硬上限截断、误判为失败（本机与远端共用这份契约）。
-  goalVerifyTimeoutMs: 5 * 60 * 1000,
-  // 验收失败时注入下一轮的证据尾部字符数（只给尾巴）。
-  goalVerifyTailChars: 4000,
+  goalCheckTimeoutMs: 5 * 60 * 1000,
+  // 一条检查结果注入下一轮的证据尾部字符数（只给尾巴）。
+  goalEvidenceTailChars: 4000,
+  // 计划上保留多少条检查事实（运行态有界；更早的事实仍在计划会话的 trace 里）。
+  // 故意不进 AGENT_LIMITS_SCHEMA：这是内部保留预算，不是护栏旋钮。
+  goalEvidenceKeep: 20,
   // 内网 agent 互通（src/peer）：把这些数字集中在这里，是为了让「两个 agent 互相撩爆 token」
   // 这类失控只有一处可调，而不是散在发现/服务/协调器三层各写一个上限。
   // hops = 一条跨机消息链上已经过手的 agent 数；达到上限即**不再自动跑一轮**，只投递。
@@ -84,6 +87,16 @@ const AGENT_LIMITS_DEFAULTS = {
   // 这里原来还有一个 ctxAgentToolCallLimit（默认 150）与它抢同一笔预算，
   // 而 resolveLoopToolCallLimit 先取 settings、于是那个旋钮**永远不生效** —— 已删除。
   toolResultMaxJson: 14000,
+  /**
+   * 工具输出「落盘换预览」的字符阈值（`tool-output-spill.js` 的唯一数字）。
+   *
+   * 和上面的 `toolResultMaxJson` 是两件事：这里是**无损**卸载（全文写 `.dieyun/tool-output/`，
+   * 上下文只留预览 + outputFile），那里是**有损**截断（超了直接切）。
+   * 因此有一条不变式：**本值必须小于 `toolResultMaxJson`** —— 否则
+   * 「超过截断上限、又没到大输出阈值」的那一段会被静默切掉且没有文件可回读。
+   * 由 `scripts/test-tool-harness.cjs` 断言。
+   */
+  toolSpillCharThreshold: 8192,
   // 单次工具执行的「无进展看门狗」：超过该时长仍未 settle，判定工具卡住，按 TOOL_STALLED
   // 失败返回并让循环继续（原调用不终止）。**必须大于 host_exec 的硬上限 600s**
   // （src/exec-limits.js: EXEC_TIMEOUT_MAX_MS），否则合法的编译/渲染会被误杀。
@@ -244,6 +257,11 @@ const AGENT_LIMITS_DEFAULTS = {
   // 13500 = 实测覆盖「三段全量」所需的 13258 + 余量（13000 仍差 258 字符，约一条命令）。
   // 注意：这是「最多给多少」的上限，小项目文件小就只占实际体量，不会白烧。
   agentsMdMaxChars: 13500,
+  // 仓库根 `AGENTS.md` 的注入预算：这是「宽泛层」，与 `.dieyun/AGENTS.md`（具体层、
+  // 分段 + path-glob 条件段）各自独立，两层谁也挤不掉谁。
+  // 没有这一层时，用户从 Cursor / Claude Code 迁过来、仓库里早就写好的 AGENTS.md 约定
+  // 对模型完全不可见 —— 归纳器会读它，但从不注入。
+  agentsMdRepoMaxChars: 4000,
   dieyunMdMaxChars: 6000,
   codebaseMentionLimit: 16,
   filePreviewMaxBytes: 48000,
@@ -261,6 +279,15 @@ const AGENT_LIMITS_DEFAULTS = {
   memoryToolRecallLimit: 8,
   memoryToolForgetMaxIds: 6,
   toolRecallLimit: 10,
+  // 会话检索（工具 `session_recall`）：跨会话翻「以前聊过什么」的条数与摘录长度。
+  // 摘录而不是全文：命中可能落在任何一轮里，整段历史塞回上下文等于用检索换爆预算。
+  sessionRecallLimit: 12,
+  sessionRecallSnippetChars: 240,
+  sessionRecallFoldedLimit: 6,
+  // 会话交接里「原文快照」的预算：事实部分由存储投影（确定性），模型只写判断。
+  // 与注入侧 HANDOFF_BLOCK_MAX_CHARS(4000) 的关系：快照在后、判断在前，
+  // 触顶时先丢原文尾部，不丢结论。
+  handoffSnapshotMaxChars: 2400,
   // 技能索引条数上限：注入的只是「名称 + 路径 + 简介」，全文由模型自己 fs_read_file 读。
   // 不要再加 skillBodyMax / skillFullCount 这类「给前 N 个技能全文」的旋钮 ——
   // 全文常驻注入正是渐进披露要消灭的形态，所以它从未实现，也就不该留配置（留着等于撒谎）。
@@ -596,7 +623,7 @@ const AGENT_LIMITS_SCHEMA = [
       {
         key: 'goalMaxWallMs',
         label: '续跑墙钟预算',
-        hint: '从首轮开始计算的总时长预算；用完即停并写审计报告（预算耗尽 ≠ 完成）',
+        hint: '从首轮开始计算的总时长预算；用完即停，并把已跑轮次与检查事实留在计划里',
         type: 'number',
         min: 30 * 60 * 1000,
         max: 24 * 60 * 60 * 1000,
@@ -606,8 +633,8 @@ const AGENT_LIMITS_SCHEMA = [
       },
       {
         key: 'goalRetryBackoffMs',
-        label: '续跑退避基数',
-        hint: '上一轮未通过验收后，隔多久再开下一轮；按轮次指数增长',
+        label: '异常恢复退避',
+        hint: '只在崩溃/执行异常后隔多久重排下一轮；正常跑完一轮立刻接下一轮',
         type: 'number',
         min: 5000,
         max: 600000,
@@ -616,20 +643,9 @@ const AGENT_LIMITS_SCHEMA = [
         unit: 'ms'
       },
       {
-        key: 'goalRetryBackoffMaxMs',
-        label: '续跑退避上限',
-        hint: '指数退避的封顶值，避免轮次多了以后间隔长到天亮',
-        type: 'number',
-        min: 60000,
-        max: 3600000,
-        step: 60000,
-        format: 'ms',
-        unit: 'ms'
-      },
-      {
-        key: 'goalVerifyTimeoutMs',
-        label: '验收命令超时',
-        hint: '跑验收命令的等待时长；必须 ≤ host.exec 硬上限 600s，否则合法构建会被截断误判',
+        key: 'goalCheckTimeoutMs',
+        label: '检查命令超时',
+        hint: '模型调用 goal_check 时等待的时长；必须 ≤ host.exec 硬上限 600s，否则合法构建会被截断误判',
         type: 'number',
         min: 10000,
         max: 600000,
@@ -638,9 +654,9 @@ const AGENT_LIMITS_SCHEMA = [
         unit: 'ms'
       },
       {
-        key: 'goalVerifyTailChars',
-        label: '验收证据尾部字符',
-        hint: '验收失败时只把输出的尾巴注入下一轮，避免整份日志灌进上下文',
+        key: 'goalEvidenceTailChars',
+        label: '检查证据尾部字符',
+        hint: '检查未通过时只把输出的尾巴注入下一轮，避免整份日志灌进上下文',
         type: 'number',
         min: 400,
         max: 20000,

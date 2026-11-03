@@ -12,6 +12,10 @@ const { buildCompletionMessagesFromHistory } = require('../agent/session-context
 const { clearToolHarnessSessionsForSession } = require('../agent/tool-harness');
 const { buildPlanRunUserText, stripAssistantMeta, stripUserMeta } = require('./plan-run-turn');
 const { buildMainAgentTools } = require('../agent/main-agent-tools');
+// 目标型计划专用的两个工具（goal_check / goal_finish）：schema 的唯一来源是 tool-catalog
+const { GOAL_TOOLS } = require('../agent/tool-catalog');
+// 「这个工具会不会改工作区」的唯一判定（收尾事实里的改动次数用它统计）
+const { isMutatingAgentTool } = require('../agent/tool-classify');
 const { buildLoopCompactionHandler } = require('../agent/compaction-loop');
 const { isAbortError } = require('../llm-reconnect-retry');
 const { appendPlanLog } = require('./plan-log');
@@ -153,6 +157,9 @@ async function runPlanAgentLoop(ctx, plan) {
   const history = await loadSessionMessages(gateway, sessionId, 120);
   const messages = buildPlanCompletionMessages(history, sysContent);
   const tools = await buildMainAgentTools(mcpRuntime);
+  // 目标型计划多给两个工具：跑检查（留事实）与申请收尾（代码核对事实）。
+  // 只在这一条路径上加 —— 聊天/频道/其它计划拿不到它们，避免「在聊天里对着空气申请完成」。
+  if (boundPlan.trigger === 'goal') tools.push(...GOAL_TOOLS);
   const toolBridge = createToolBridge(webContents || null);
   const tokenBudget = getEffectiveInputBudget(runSettings, llmModel);
   // 整体继承 llm：逐字段重建会丢掉 headers / authMode / userAgent（压缩也复用这份 apiCfg）
@@ -160,6 +167,18 @@ async function runPlanAgentLoop(ctx, plan) {
 
   let loopResult = null;
   let aborted = false;
+  // 目标型：本轮「改动工作区」的工具调用次数。收尾时作为事实给人看 ——
+  // 「一次改动都没有、检查却全绿」是「这条检查分不出做没做完」的唯一机械线索。
+  let mutatingToolCalls = 0;
+  // 工具调用的固定上下文（planId 让 goal_check / goal_finish 知道该给哪个计划留事实）
+  const toolCtx = {
+    workspacePath: workspacePath || undefined,
+    sessionId,
+    model: llmModel,
+    modelRoute: boundPlan.modelRoute || undefined,
+    contextTierId,
+    planId: boundPlan.trigger === 'goal' ? boundPlan.id : undefined
+  };
   try {
     loopResult = await runRustAgentLoop({
       coreBridge,
@@ -195,13 +214,11 @@ async function runPlanAgentLoop(ctx, plan) {
       // 「有工具轮但没写正文」交给汇总轮，而不是自己拼一句占位文案。
       // 汇总只在此开关打开时发生，且是**追加**一轮无工具 LLM，不改变有正文的行为。
       turnEndSynthesis: true,
-      delegateTool: async (name, args) =>
-        toolBridge.executeAgentTool(name, args, {
-          workspacePath: workspacePath || undefined,
-          sessionId,
-          model: llmModel,
-          modelRoute: boundPlan.modelRoute || undefined
-        })
+      delegateTool: async (name, args) => {
+        const result = await toolBridge.executeAgentTool(name, args, toolCtx);
+        if (isMutatingAgentTool(name) && result && result.ok !== false) mutatingToolCalls += 1;
+        return result;
+      }
     });
   } catch (err) {
     if (!isAbortError(err)) throw err;
@@ -221,7 +238,8 @@ async function runPlanAgentLoop(ctx, plan) {
       content: '',
       trace: [],
       modelLabel: llmModel || 'Auto',
-      modelId: llmModel
+      modelId: llmModel,
+      mutatingToolCalls
     };
   }
 
@@ -279,7 +297,9 @@ async function runPlanAgentLoop(ctx, plan) {
     content: reply,
     trace,
     modelLabel: llmModel,
-    modelId: llmModel
+    modelId: llmModel,
+    // 目标型收尾事实：「本轮改动工作区的工具调用次数」（其它计划忽略）
+    mutatingToolCalls
   };
 }
 

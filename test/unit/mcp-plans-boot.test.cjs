@@ -302,16 +302,22 @@ describe('目标型计划（trigger=goal）运行闭环', () => {
       beginAttempt: () => {
         state.plan.attempt = (Number(state.plan.attempt) || 0) + 1;
         state.plan.nextRunAt = null;
+        state.plan.outcome = null;
         state.plan.attemptStartedAt = state.plan.attemptStartedAt || new Date().toISOString();
         state.calls.push(['beginAttempt']);
       },
-      setBaseline: (id, b) => {
-        state.plan.baseline = b;
-        state.calls.push(['setBaseline', b]);
+      pushEvidence: (id, fact) => {
+        state.plan.evidence = (state.plan.evidence || []).concat(fact);
+        state.calls.push(['pushEvidence', fact]);
       },
-      updateVerify: (id, v) => {
-        state.plan.lastVerify = v;
-        state.calls.push(['updateVerify', v]);
+      recordClaim: (id, claim) => {
+        state.plan.claims = (state.plan.claims || []).concat(claim);
+        state.calls.push(['recordClaim', claim]);
+      },
+      setOutcome: (id, outcome) => {
+        state.plan.outcome = outcome;
+        state.calls.push(['setOutcome', outcome]);
+        return { ...state.plan };
       },
       scheduleNextAttempt: (id, delayMs) => {
         state.plan.nextRunAt = new Date(Date.now() + delayMs).toISOString();
@@ -385,110 +391,118 @@ describe('目标型计划（trigger=goal）运行闭环', () => {
       name: '目标',
       enabled: true,
       trigger: 'goal',
-      prompt: '把验收跑绿',
-      goal: { verify: 'npm test', cwd: '' },
+      prompt: '把检查跑绿',
+      goal: { checks: [{ id: 'c1', command: 'npm test' }], cwd: '' },
       budget: { maxAttempts: 0, maxWallMs: 0 },
       attempt: 0,
       attemptStartedAt: null,
       nextRunAt: null,
-      baseline: null,
-      lastVerify: null,
+      outcome: null,
+      evidence: [],
+      claims: [],
       deliver: { type: 'session', sessionId: 's1' },
       ...extra
     };
   }
 
-  it('开工基线就绿（尺子无效）→ 不进入 agent 轮次，直接停用并说明', async () => {
+  it('这一轮没申请收尾 → 立刻接下一轮（正常轮次不额外退避）', async () => {
     const appends = [];
     const store = makeGoalStore(goalPlan());
-    const agentRun = vi.fn(async () => ({ ok: true }));
-    const gw = makeGoalGateway([{ code: 0, stdout: 'all green' }], appends);
-    const boot = makeBoot(store, gw, agentRun);
-
-    await boot.plansScheduler.opts.runPlan(store.list()[0]);
-
-    expect(agentRun).not.toHaveBeenCalled();
-    expect(store.state.plan.baseline.red).toBe(false);
-    expect(store.state.plan.enabled).toBe(false);
-    const assistant = appends.filter((p) => p.role === 'assistant').map((p) => String(p.content));
-    expect(assistant.some((c) => c.includes('目标未完成'))).toBe(true);
-  });
-
-  it('基线红 → 跑一轮 → 验收仍红 → 排下一轮（带退避）', async () => {
-    const appends = [];
-    const store = makeGoalStore(goalPlan());
-    const agentRun = vi.fn(async () => ({ ok: true, summary: '改了点东西' }));
-    const gw = makeGoalGateway(
-      [
-        { code: 1, stdout: 'FAIL baseline' },
-        { code: 1, stdout: 'FAIL still' }
-      ],
-      appends
-    );
+    const agentRun = vi.fn(async () => ({ ok: true, summary: '改了点东西', mutatingToolCalls: 2 }));
+    const gw = makeGoalGateway([{ code: 0, stdout: 'ok' }], appends);
     const boot = makeBoot(store, gw, agentRun);
 
     await boot.plansScheduler.opts.runPlan(store.list()[0]);
 
     expect(agentRun).toHaveBeenCalledTimes(1);
-    expect(store.state.plan.baseline.red).toBe(true);
     expect(store.state.plan.attempt).toBe(1);
-    expect(store.state.plan.lastVerify.ok).toBe(false);
     expect(store.state.plan.enabled).toBe(true);
     const scheduled = store.state.calls.filter((c) => c[0] === 'scheduleNextAttempt');
     expect(scheduled.length).toBe(1);
-    expect(scheduled[0][1]).toBe(60000);
-    // 验收只会通过 host.exec 跑，且不带 keepOnTimeout（避免留孤儿进程）
-    expect(gw.execCalls.every((c) => c.keepOnTimeout === undefined)).toBe(true);
+    expect(scheduled[0][1]).toBe(0);
+    // 收尾不再由 Main 无条件跑验收命令：事实只从模型调用 goal_check 来
+    expect(gw.execCalls.length).toBe(0);
   });
 
-  it('基线红 → 跑一轮 → 验收转绿 → 完成并停用', async () => {
+  it('模型申请完成且事实核对通过 → 停用，正文带事实块', async () => {
     const appends = [];
     const store = makeGoalStore(goalPlan());
-    const agentRun = vi.fn(async () => ({ ok: true }));
-    const gw = makeGoalGateway([{ code: 1, stdout: 'FAIL' }, { code: 0, stdout: 'ok' }], appends);
+    const agentRun = vi.fn(async () => {
+      store.pushEvidence('g', { command: 'npm test', checkId: 'c1', ok: true, exitCode: 0, note: 'pass', round: 1 });
+      store.setOutcome('g', 'complete');
+      return { ok: true, summary: 'done', mutatingToolCalls: 3 };
+    });
+    const gw = makeGoalGateway([], appends);
     const boot = makeBoot(store, gw, agentRun);
 
     await boot.plansScheduler.opts.runPlan(store.list()[0]);
 
-    expect(store.state.plan.lastVerify.ok).toBe(true);
+    expect(store.state.plan.outcome).toBe('complete');
     expect(store.state.plan.enabled).toBe(false);
     expect(store.state.calls.some((c) => c[0] === 'scheduleNextAttempt')).toBe(false);
     const assistant = appends.filter((p) => p.role === 'assistant').map((p) => String(p.content));
-    expect(assistant.some((c) => c.includes('目标未完成'))).toBe(false);
+    // 事实块：退出码与「改了几次文件」都写给人看，结论措辞归模型
+    expect(assistant.some((c) => c.includes('exit 0') && c.includes('改动工作区的工具调用：3 次'))).toBe(true);
   });
 
-  it('验收被沙箱拒绝（夜间无人可批）→ 停用，不排下一轮', async () => {
+  it('模型报阻塞 → 停用，不再排下一轮', async () => {
     const appends = [];
     const store = makeGoalStore(goalPlan());
-    const agentRun = vi.fn(async () => ({ ok: true }));
-    const gw = makeGoalGateway([{ code: 1, stdout: 'FAIL' }], appends);
-    const realInvoke = gw.invokeRpc;
-    let execSeen = 0;
-    gw.invokeRpc = async (method, params) => {
-      if (method === 'host.exec') {
-        execSeen += 1;
-        // 基线那次正常返回红，验收那次被沙箱拒
-        if (execSeen === 2) {
-          const e = new Error('sandbox denied');
-          e.code = 'SANDBOX_DENIED';
-          throw e;
-        }
-      }
-      return realInvoke(method, params);
-    };
-    const boot = makeBoot(store, gw, agentRun);
+    const agentRun = vi.fn(async () => {
+      store.setOutcome('g', 'blocked');
+      return { ok: true, summary: '卡住了' };
+    });
+    const boot = makeBoot(store, makeGoalGateway([], appends), agentRun);
 
     await boot.plansScheduler.opts.runPlan(store.list()[0]);
 
-    expect(store.state.plan.lastVerify.note).toBe('blocked-approval');
     expect(store.state.plan.enabled).toBe(false);
     expect(store.state.calls.some((c) => c[0] === 'scheduleNextAttempt')).toBe(false);
   });
 
-  it('崩溃后恢复：补回执并排下一轮（轮次不重跑）', async () => {
+  it('轮次预算用完且未收尾 → 停用（不算完成）', async () => {
+    const appends = [];
+    const store = makeGoalStore(goalPlan({ budget: { maxAttempts: 1, maxWallMs: 0 } }));
+    const agentRun = vi.fn(async () => ({ ok: true, summary: '还没做完' }));
+    const boot = makeBoot(store, makeGoalGateway([], appends), agentRun);
+
+    await boot.plansScheduler.opts.runPlan(store.list()[0]);
+
+    expect(store.state.plan.enabled).toBe(false);
+    expect(store.state.calls.some((c) => c[0] === 'scheduleNextAttempt')).toBe(false);
+    expect(store.state.plan.outcome).toBe(null);
+  });
+
+  it('用户从界面停止 → 停用，不排下一轮（轮询不能把它拉起来）', async () => {
+    const appends = [];
+    const store = makeGoalStore(goalPlan());
+    const agentRun = vi.fn(async () => ({ ok: false, aborted: true, error: '已停止' }));
+    const boot = makeBoot(store, makeGoalGateway([], appends), agentRun);
+
+    await boot.plansScheduler.opts.runPlan(store.list()[0]);
+
+    expect(store.state.plan.enabled).toBe(false);
+    expect(store.state.calls.some((c) => c[0] === 'scheduleNextAttempt')).toBe(false);
+  });
+
+  it('这一轮根本没跑起来（模型/网关报错）→ 退避后再试，而不是立刻重撞', async () => {
+    const appends = [];
+    const store = makeGoalStore(goalPlan());
+    const agentRun = vi.fn(async () => ({ ok: false, error: '未配置 API Key' }));
+    const boot = makeBoot(store, makeGoalGateway([], appends), agentRun);
+
+    await boot.plansScheduler.opts.runPlan(store.list()[0]);
+
+    const scheduled = store.state.calls.filter((c) => c[0] === 'scheduleNextAttempt');
+    expect(scheduled.length).toBe(1);
+    expect(scheduled[0][1]).toBe(60000);
+    expect(store.state.plan.enabled).toBe(true);
+  });
+
+  it('崩溃后恢复：补回执并排下一轮（带退避，轮次不重跑）', async () => {
     const appends = [];
     const store = makeGoalStore(goalPlan({ attempt: 1, attemptStartedAt: new Date().toISOString() }));
-    const gw = makeGoalGateway([{ code: 1, stdout: 'FAIL' }], appends);
+    const gw = makeGoalGateway([], appends);
     const boot = makeBoot(store, gw, vi.fn());
     // 模拟「用户轮次已落库、随后进程被杀」
     boot.plansStore.beginRun('g', { runId: 'plan-g-1', sessionId: 's1' });

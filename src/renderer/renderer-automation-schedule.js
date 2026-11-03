@@ -240,7 +240,7 @@
       return out;
     }
 
-    // 目标型（trigger=goal）：没有调度语义，跑到验收命令通过为止；表单只负责选中「目标」页签
+    // 目标型（trigger=goal）：没有调度语义，跑到模型申请收尾或预算用完为止；表单只负责选中「目标」页签
     if (p.trigger === 'goal') {
       out.tab = 'goal';
       out.exact = true;
@@ -307,7 +307,7 @@
       return { rrule: '', onceAt: '', trigger: 'idle' };
     }
     if (s.tab === 'goal') {
-      // 目标型没有调度字符串：验收命令与预算在 collectAutomationForm 里单独收集
+      // 目标型没有调度字符串：检查清单与预算在 collectAutomationForm 里单独收集
       return { rrule: '', onceAt: '', trigger: 'goal' };
     }
     if (s.tab === 'once') {

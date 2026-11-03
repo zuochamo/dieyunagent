@@ -914,9 +914,9 @@
             </div>
             <div class="automation-schedule-panel" data-schedule-panel="goal">
               <label class="field">
-                <span class="field-label">验收命令</span>
-                <textarea id="automation-goal-verify" rows="2" placeholder="例如 npm test / cargo build / 项目自带的检查脚本；退出码 0 = 通过"></textarea>
-                <span class="field-hint">每轮结束后自动跑一次，只有退出码为 0 才算完成。开工前会先跑一次：若此刻就已通过，说明这条命令量不出「活干没干」，计划会直接停下。</span>
+                <span class="field-label">验收检查（每行一条命令）</span>
+                <textarea id="automation-goal-verify" rows="3" placeholder="例如：npm test&#10;留空 = 未验证模式：照样能跑，但完成申请不会被代码核对，事实块会标注「未验证」"></textarea>
+                <span class="field-hint">由模型在轮内决定什么时候跑、跑哪条（goal_check），退出码 0 = 通过；检查通过的事实是完成申请的唯一依据。留空则不核对。</span>
               </label>
               <div class="field-row">
                 <label class="field">
@@ -932,7 +932,7 @@
                 <span class="field-label">命令工作目录（可选）</span>
                 <input type="text" id="automation-goal-cwd" placeholder="留空则用计划运行的工作区" />
               </label>
-              <p class="settings-page-desc">没通过就自动再来一轮（轮次越靠后退避越久），通过即完成并停用；轮次或时长用完会停下并写「未完成」报告。需要应用保持运行。</p>
+              <p class="settings-page-desc">每轮把检查事实写回计划（退出码、输出尾巴、本轮改了几次文件），模型据此决定下一轮做什么；没做完就自动接下一轮，直到申请完成、报阻塞、或轮次/时长预算用完。需要应用保持运行。</p>
             </div>
             <!-- 次数属于「多久跑一次」的一部分：紧跟频率控件，且只在有周期语义的页签显示 -->
             <div class="field field-inline automation-schedule-extras" id="automation-run-count-wrap" hidden>
@@ -1049,6 +1049,7 @@
                 <span>使用 ssh-agent 免密登录（不填密码与私钥时默认尝试）</span>
               </label>
               <span class="save-hint" id="ssh-connect-encrypt-hint" hidden></span>
+              <button type="button" class="ghost-btn ssh-credentials-reset" id="ssh-connect-credentials-reset" hidden>备份损坏的凭据文件并重建</button>
               <span class="save-hint ssh-connect-error" id="ssh-connect-error" hidden></span>
               <div class="ssh-host-key-confirm" id="ssh-host-key-confirm" hidden>
                 <p class="field-hint ssh-host-key-hint" id="ssh-host-key-hint">首次连接此主机，请核对指纹后再继续。确认后会保存该指纹；若服务器密钥日后变更，将阻止连接。</p>
@@ -1629,6 +1630,10 @@
                       <input type="search" class="skills-search" id="mcp-search" placeholder="搜索 MCP 名称、简介、命令…" autocomplete="off" />
                       <nav class="skills-category-tabs" id="mcp-category-tabs" aria-label="MCP 分类"></nav>
                     </div>
+                    <div class="settings-warning" id="mcp-credentials-warning" hidden>
+                      <span class="settings-warning-text" id="mcp-credentials-warning-text"></span>
+                      <button type="button" class="ghost-btn" id="mcp-credentials-warning-reset">备份并重建</button>
+                    </div>
                     <div class="skills-grid-wrap"><div class="skills-grid" id="skills-mcp-grid"><div class="skills-empty">加载中…</div></div></div>
                     <div class="skills-pagination" id="mcp-pagination" hidden>
                       <button type="button" class="ghost-btn" id="mcp-page-prev" disabled>上一页</button>
@@ -2081,18 +2086,6 @@
           <button type="submit" class="primary-btn">保存</button>
         </footer>
       </form>
-    </div>
-
-    <div class="agent-arbitration-overlay" id="agent-arbitration-overlay" hidden>
-      <div class="agent-arbitration-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-arbitration-title">
-        <h2 id="agent-arbitration-title">任务仲裁</h2>
-        <p class="agent-arbitration-desc" id="agent-arbitration-desc"></p>
-        <div class="agent-arbitration-actions">
-          <button type="button" class="ghost-btn" data-arb="fail">标记失败</button>
-          <button type="button" class="ghost-btn" data-arb="accept_partial">接受部分结果</button>
-          <button type="button" class="primary-btn" data-arb="retry">重试</button>
-        </div>
-      </div>
     </div>
 
     <div class="worktree-apply-overlay" id="worktree-apply-overlay" hidden>

@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { msUntilNextRun } = require('./rrule-next');
+// 运行态保留条数等数字的唯一来源（AGENTS.md §6：数字上限只改 agent-limits）
+const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 
 const FILE_NAME = 'plans.json';
 
@@ -68,13 +70,25 @@ function normalizeIso(v) {
 }
 
 /**
- * 目标型验收面：**只存结构化字段**，不解析自然语言（禁意图关键词硬编码）。
- * `verify` 是一条用户填的可执行命令，语义只有一条通用契约：退出码 0 = 通过。
+ * 目标型验收面：**只存结构化命令**，不解析自然语言（禁意图关键词硬编码）。
+ *
+ * v2：验收不再是「调度器每轮无条件跑的一条命令」，而是模型随时可调的检查清单（`goal_check`）。
+ * 每条命令的语义只有一条通用契约：退出码 0 = 通过。代码不分类、不分档、不按技术栈分支。
  */
 function normalizeGoal(raw) {
   const g = raw && typeof raw === 'object' ? raw : {};
+  const checks = Array.isArray(g.checks)
+    ? g.checks
+        .map((c) => {
+          const item = typeof c === 'string' ? { command: c } : c || {};
+          const command = String(item.command || '').trim().slice(0, 2000);
+          if (!command) return null;
+          return { id: String(item.id || '').trim() || command.slice(0, 40), command };
+        })
+        .filter(Boolean)
+    : [];
   return {
-    verify: String(g.verify || '').trim().slice(0, 2000),
+    checks,
     cwd: String(g.cwd || '').trim()
   };
 }
@@ -92,21 +106,40 @@ function normalizeBudget(raw) {
   };
 }
 
-/** 验收证据（lastVerify / baseline 同构）：只保留可判定的字段 */
-function normalizeVerify(raw) {
+/**
+ * 一条检查事实（`goal.evidence` 的元素）：**只放机器可判定的字段**，
+ * 措辞与判断留给模型和人 —— 代码不允许在这里写「完成/未完成」这类结论。
+ */
+function normalizeEvidence(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  const note = String(raw.note || '').trim().slice(0, 40);
   const at = normalizeIso(raw.at);
-  if (!note && !at) return null;
+  const command = String(raw.command || '').trim().slice(0, 2000);
+  if (!command && !at) return null;
   const exitCodeNum = Number(raw.exitCode);
   return {
-    ok: raw.ok === true,
-    // 基线用 red 表达「活没干时尺子是不是红的」
-    red: raw.red === true,
-    exitCode: Number.isFinite(exitCodeNum) ? exitCodeNum : null,
     at: at || new Date().toISOString(),
-    tail: String(raw.tail || '').slice(0, 8000),
-    note
+    round: Math.max(0, Math.floor(Number(raw.round) || 0)),
+    checkId: String(raw.checkId || '').trim(),
+    command,
+    ok: raw.ok === true,
+    exitCode: Number.isFinite(exitCodeNum) ? exitCodeNum : null,
+    note: String(raw.note || '').trim().slice(0, 40),
+    tail: String(raw.tail || '').slice(0, 8000)
+  };
+}
+
+/** 一次「完成/阻塞」主张（`goal.claims` 的元素）：模型说的，代码原样留痕供复盘 */
+function normalizeClaim(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const at = normalizeIso(raw.at);
+  const outcome = raw.outcome === 'complete' || raw.outcome === 'blocked' ? raw.outcome : '';
+  if (!at || !outcome) return null;
+  return {
+    at,
+    outcome,
+    round: Math.max(0, Math.floor(Number(raw.round) || 0)),
+    accepted: raw.accepted === true,
+    note: String(raw.note || '').trim().slice(0, 1000)
   };
 }
 
@@ -123,7 +156,8 @@ function normalizePlan(raw) {
     // 触发方式：
     //   schedule：按 rrule/onceAt 定时
     //   idle：无活跃 Agent 运行且静默达标后触发，跑一次即停用
-    //   goal：目标型 —— 每轮结束后跑 goal.verify，未通过且预算未尽则自动续跑（见 goal-run.js）
+    //   goal：目标型 —— 模型在轮内自行调用 goal_check 留证据、调 goal_finish 申请收尾；
+    //         代码只核对事实与预算（见 goal-run.js），不判断「目标达成没有」
     trigger: normalizeTrigger(p.trigger),
     rrule: String(p.rrule || '').trim(),
     onceAt: p.onceAt ? String(p.onceAt).trim() : '',
@@ -154,8 +188,10 @@ function normalizePlan(raw) {
     attempt: Math.max(0, Math.floor(Number(p.attempt) || 0)),
     attemptStartedAt: normalizeIso(p.attemptStartedAt),
     nextRunAt: normalizeIso(p.nextRunAt),
-    lastVerify: normalizeVerify(p.lastVerify),
-    baseline: normalizeVerify(p.baseline),
+    // 模型给出的「完成/阻塞」主张（代码核对过事实后才会置位，见 goal-run.judgeGoalFinish）
+    outcome: p.outcome === 'complete' || p.outcome === 'blocked' ? p.outcome : null,
+    evidence: Array.isArray(p.evidence) ? p.evidence.map(normalizeEvidence).filter(Boolean) : [],
+    claims: Array.isArray(p.claims) ? p.claims.map(normalizeClaim).filter(Boolean) : [],
     createdAt: p.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastRunAt: p.lastRunAt || null,
@@ -201,14 +237,10 @@ class PlansStore {
 
   upsert(patch) {
     const plan = normalizePlan(patch);
-    if (plan.trigger === 'goal') {
-      // 目标型没有定时语义，但必须有可执行的验收面：没有尺子就不该无人值守跑
-      if (!plan.goal.verify) {
-        const err = new Error('目标型计划必须填验收命令（goal.verify）');
-        err.code = 'INVALID_GOAL_VERIFY';
-        throw err;
-      }
-    } else if (plan.trigger !== 'idle' && !plan.rrule && !plan.onceAt) {
+    // 目标型不需要 rrule/onceAt；也**不强制**填检查命令 —— 没有检查就是「未验证模式」：
+    // 照样能跑（覆盖没法机器验收的主观目标），但完成申请不会被代码核对通过，
+    // 且事实块会明说「未验证」。要不要给检查由人/模型决定，代码不替它判断。
+    if (plan.trigger !== 'idle' && plan.trigger !== 'goal' && !plan.rrule && !plan.onceAt) {
       const err = new Error('rrule 或 onceAt 至少填一项（空闲/目标触发计划除外）');
       err.code = 'INVALID_SCHEDULE';
       throw err;
@@ -223,14 +255,15 @@ class PlansStore {
     if (prev) {
       plan.createdAt = prev.createdAt;
       if (!patch.dtstart) plan.dtstart = prev.dtstart;
-      // 运行态不是表单字段：UI 保存不应清掉正在运行的边界标记与轮次证据，
-      // 只由 beginRun/endRun/beginAttempt/setBaseline/updateVerify/scheduleNextAttempt 维护
+      // 运行态不是表单字段：UI 保存不应清掉正在运行的边界标记、轮次与检查事实，
+      // 只由 beginRun/endRun/beginAttempt/pushEvidence/recordClaim/setOutcome/scheduleNextAttempt 维护
       if (!patch || !('runState' in patch)) plan.runState = prev.runState;
       plan.attempt = prev.attempt;
       plan.attemptStartedAt = prev.attemptStartedAt;
       plan.nextRunAt = prev.nextRunAt;
-      plan.lastVerify = prev.lastVerify;
-      plan.baseline = prev.baseline;
+      plan.outcome = prev.outcome;
+      plan.evidence = prev.evidence;
+      plan.claims = prev.claims;
       this.plans[idx] = plan;
     } else {
       this.plans.push(plan);
@@ -253,15 +286,18 @@ class PlansStore {
     const p = this.plans.find((x) => x.id === id);
     if (!p) return;
     p.lastRunAt = new Date().toISOString();
-    // 目标型：这一轮「成功」的定义是验收通过，不是模型说完了
+    // 目标型：这一轮「成功」= 模型申请完成且代码核对过事实通过（outcome=complete），
+    // 不是「模型写了正文」。result 带 outcome 字段就按它判（goal 轮次恒带，null = 未收尾）。
     p.lastRunOk =
-      result && result.verify ? !!result.verify.ok : !!(result && result.ok);
+      result && 'outcome' in result
+        ? result.outcome === 'complete'
+        : !!(result && result.ok);
     p.lastRunSummary = result
       ? result.summary || result.error || ''
       : '';
     p.updatedAt = p.lastRunAt;
     // onceAt 与 idle 都是「一次性」语义：成功跑完即停用，重新启用 = 重新排队
-    // 目标型（goal）不在这里收尾：它由 updateVerify + decideContinuation 决定，见 goal-run.js
+    // 目标型（goal）不在这里收尾：它由 setOutcome + decideContinuation 决定，见 goal-run.js
     if ((p.onceAt || p.trigger === 'idle') && p.lastRunOk) {
       p.enabled = false;
     } else if (p.trigger === 'schedule' && COUNT_LIMIT_RE.test(String(p.rrule || ''))) {
@@ -287,7 +323,7 @@ class PlansStore {
   }
 
   /**
-   * 目标型：一轮开始。轮次 +1、清掉待跑时间；首轮记下墙钟预算起点。
+   * 目标型：一轮开始。轮次 +1、清掉待跑时间与上一轮的主张；首轮记下墙钟预算起点。
    * 与 runState 同处维护，进程被杀的场景下靠它和 runState 一起恢复。
    *
    * @returns {object|null} 更新后的计划快照
@@ -297,6 +333,7 @@ class PlansStore {
     if (!p) return null;
     p.attempt = Math.max(0, Math.floor(Number(p.attempt) || 0)) + 1;
     p.nextRunAt = null;
+    p.outcome = null;
     if (!p.attemptStartedAt) p.attemptStartedAt = new Date().toISOString();
     p.updatedAt = new Date().toISOString();
     this._save();
@@ -304,26 +341,51 @@ class PlansStore {
   }
 
   /**
-   * 目标型：开工基线（尺子自检）。只在 attempt===0 时写一次。
-   * `red === false` 表示「活还没干，命令就已经通过了」——尺子无效。
+   * 目标型：落一条检查事实（`goal_check` 的唯一写入口）。
+   *
+   * 只放机器可判定的字段；判定不在这里做。保留条数由 `agent-limits.goalEvidenceKeep`
+   * 约束（运行态有界，更早的事实仍在计划会话的 trace 里）。
+   *
+   * @param {string} id
+   * @param {object} raw 一条证据（goal-run.runGoalCheck 的产物）
+   * @param {number} [keep] 保留条数上限（缺省取 agent-limits）
+   * @returns {{ fact: object|null, evidence: object[] }}
    */
-  setBaseline(id, raw) {
+  pushEvidence(id, raw, keep) {
     const p = this.plans.find((x) => x.id === id);
-    if (!p) return null;
-    p.baseline = normalizeVerify({ ...raw, at: (raw && raw.at) || new Date().toISOString() });
-    p.updatedAt = new Date().toISOString();
+    if (!p) return { fact: null, evidence: [] };
+    const fact = normalizeEvidence({ ...raw, at: (raw && raw.at) || new Date().toISOString() });
+    if (!fact) return { fact: null, evidence: p.evidence };
+    const cap = Number.isFinite(keep) && keep > 0 ? Math.floor(keep) : AGENT_LIMITS_DEFAULTS.goalEvidenceKeep;
+    p.evidence = (Array.isArray(p.evidence) ? p.evidence.concat(fact) : [fact]).slice(-cap);
+    p.updatedAt = fact.at;
     this._save();
-    return p.baseline;
+    return { fact, evidence: p.evidence };
   }
 
-  /** 目标型：落一条验收证据（收尾判定的唯一输入） */
-  updateVerify(id, raw) {
+  /**
+   * 目标型：记录模型的一次「完成/阻塞」主张（含被代码拒绝的那些）。
+   * 主张是模型的判断，事实是代码的记录 —— 两者都留痕，人早上复盘才有依据。
+   */
+  recordClaim(id, raw) {
     const p = this.plans.find((x) => x.id === id);
     if (!p) return null;
-    p.lastVerify = normalizeVerify({ ...raw, at: (raw && raw.at) || new Date().toISOString() });
+    const claim = normalizeClaim({ ...raw, at: (raw && raw.at) || new Date().toISOString() });
+    if (!claim) return null;
+    p.claims = (Array.isArray(p.claims) ? p.claims.concat(claim) : [claim]).slice(-10);
+    p.updatedAt = claim.at;
+    this._save();
+    return claim;
+  }
+
+  /** 目标型：写下本轮收尾结论（`complete` / `blocked`）；由 goal_finish 核对事实后调用 */
+  setOutcome(id, outcome) {
+    const p = this.plans.find((x) => x.id === id);
+    if (!p) return null;
+    p.outcome = outcome === 'complete' || outcome === 'blocked' ? outcome : null;
     p.updatedAt = new Date().toISOString();
     this._save();
-    return p.lastVerify;
+    return { ...p };
   }
 
   /**
@@ -347,8 +409,9 @@ class PlansStore {
     p.attempt = 0;
     p.attemptStartedAt = null;
     p.nextRunAt = null;
-    p.lastVerify = null;
-    p.baseline = null;
+    p.outcome = null;
+    p.evidence = [];
+    p.claims = [];
     p.updatedAt = new Date().toISOString();
     this._save();
     return { ...p };
