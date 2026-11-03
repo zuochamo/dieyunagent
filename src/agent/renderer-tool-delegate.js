@@ -70,40 +70,6 @@ function failRendererToolDelegate(requestId, error) {
   return true;
 }
 
-/** @type {Map<string, { resolve: Function, reject: Function, timer: NodeJS.Timeout }>} */
-const pendingArbitration = new Map();
-
-function requestPlannerArbitration(webContents, payload, timeoutMs = 300000) {
-  if (!webContents || webContents.isDestroyed()) {
-    return Promise.resolve({ action: 'retry', note: 'auto-no-renderer' });
-  }
-  const requestId = `arb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pendingArbitration.delete(requestId);
-      resolve({ action: 'retry', note: 'timeout-auto-retry' });
-    }, timeoutMs);
-    pendingArbitration.set(requestId, {
-      resolve: (r) => {
-        clearTimeout(timer);
-        resolve(r);
-      },
-      reject: (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-      timer
-    });
-    try {
-      webContents.send('agent:planner-arbitrate', { requestId, ...(payload || {}) });
-    } catch (e) {
-      clearTimeout(timer);
-      pendingArbitration.delete(requestId);
-      reject(e);
-    }
-  });
-}
-
 /** @type {Map<string, { resolve: Function, timer: NodeJS.Timeout }>} */
 const pendingApproval = new Map();
 
@@ -175,26 +141,12 @@ function registerRendererToolDelegateIpc(ipcMain) {
     const requestId = String(payload.requestId || '');
     return { ok: completeSandboxApproval(requestId, payload.decision) };
   });
-  ipcMain.handle('agent:planner-arbitrate-result', (_evt, payload = {}) => {
-    const requestId = String(payload.requestId || '');
-    const entry = pendingArbitration.get(requestId);
-    if (!entry) return { ok: false };
-    pendingArbitration.delete(requestId);
-    if (payload.error) {
-      entry.reject(payload.error);
-    } else {
-      entry.resolve(payload.decision || { action: 'fail' });
-    }
-    return { ok: true };
-  });
 }
 
 module.exports = {
   RENDERER_ONLY_TOOLS,
   isRendererOnlyTool,
   requestToolFromRenderer,
-  requestPlannerArbitration,
   requestSandboxApproval,
-  completeSandboxApproval,
   registerRendererToolDelegateIpc
 };

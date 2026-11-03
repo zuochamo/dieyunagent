@@ -1,7 +1,7 @@
 'use strict';
 // @ts-check
 
-/** @typedef {'run_start'|'prep'|'trace'|'stream'|'tool'|'round_limit'|'arbitration'|'done'|'error'|'stopped'} AgentRunEventType */
+/** @typedef {'run_start'|'prep'|'trace'|'stream'|'tool'|'round_limit'|'done'|'error'|'stopped'} AgentRunEventType */
 
 const AGENT_RUN_EVENT_TYPES = Object.freeze({
   RUN_START: 'run_start',
@@ -10,7 +10,6 @@ const AGENT_RUN_EVENT_TYPES = Object.freeze({
   STREAM: 'stream',
   TOOL: 'tool',
   ROUND_LIMIT: 'round_limit',
-  ARBITRATION: 'arbitration',
   DONE: 'done',
   ERROR: 'error',
   STOPPED: 'stopped'
@@ -26,7 +25,6 @@ const AGENT_RUN_EVENT_TYPE_DOCS = Object.freeze({
   stream: { description: '助手正文流式增量', producer: 'Rust loop', consumer: 'Renderer bubble, Mobile streamContent' },
   tool: { description: '工具调用轮次', producer: 'Rust loop', consumer: 'Renderer tool cards' },
   round_limit: { description: '达到轮次上限', producer: 'Guardrails', consumer: 'Renderer, Mobile' },
-  arbitration: { description: '多 Agent 仲裁', producer: 'Planner', consumer: 'Renderer' },
   done: { description: '正常完成', producer: 'Rust loop / Renderer', consumer: 'Renderer, Mobile task.completed' },
   error: { description: '失败', producer: 'Rust loop / Main', consumer: 'Renderer, Mobile task.failed' },
   stopped: { description: '用户停止', producer: 'Main', consumer: 'Renderer, Mobile task.stopped' }

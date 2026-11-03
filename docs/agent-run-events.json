@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-10-28T11:40:17.954Z",
+  "generatedAt": "2026-11-03T00:24:46.761Z",
   "source": "src/agent/run-events.js",
   "eventTypes": [
     {
@@ -38,12 +38,6 @@
       "description": "达到轮次上限",
       "producer": "Guardrails",
       "consumer": "Renderer, Mobile"
-    },
-    {
-      "type": "arbitration",
-      "description": "多 Agent 仲裁",
-      "producer": "Planner",
-      "consumer": "Renderer"
     },
     {
       "type": "done",

@@ -85,10 +85,6 @@ function createPlannerMainBridge(deps) {
     trace(runId) {
       return coordinator ? coordinator.getTrace(runId) : { ok: false };
     },
-    arbitrate(runId, decision) {
-      if (!coordinator) return { ok: false };
-      return coordinator.arbitrate(runId, decision || {});
-    },
     checkpointSave(runId, data) {
       try {
         return subagentStore.saveCheckpoint(dieyunHome(), runId, data || {});

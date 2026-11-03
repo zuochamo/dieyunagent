@@ -296,37 +296,6 @@ class AgentRunCoordinator {
     return { ok: true };
   }
 
-  /**
-   * 仲裁：retry | fail | accept_partial
-   */
-  arbitrate(runId, decision) {
-    const run = this._getRun(runId);
-    const pending = run.pendingArbitration;
-    if (!pending) return { ok: false, error: '无待仲裁项' };
-
-    const task = run.tasks.get(pending.taskId);
-    if (!task) return { ok: false, error: '任务不存在' };
-
-    const action = decision && decision.action ? String(decision.action) : 'fail';
-    this._log(run, 'arbitration', { taskId: task.taskId, action, note: decision.note });
-
-    run.pendingArbitration = null;
-
-    if (action === 'retry') {
-      this._scheduleRetry(run, task, pending.reason || 'arbitrated_retry');
-      return { ok: true, action: 'retry' };
-    }
-    if (action === 'accept_partial') {
-      task.status = 'completed';
-      task.result = decision.result || { partial: true, note: decision.note || '' };
-      return { ok: true, action: 'accept_partial' };
-    }
-
-    task.status = 'failed';
-    task.lastError = pending.reason || 'arbitrated_fail';
-    return { ok: true, action: 'fail' };
-  }
-
   getTrace(runId) {
     const run = this.runs.get(runId);
     if (!run) return { ok: false, error: 'not_found' };

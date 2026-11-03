@@ -2,7 +2,7 @@
 
 > 源文件：[`src/agent/run-events.js`](../src/agent/run-events.js)。更新后运行 `npm run generate:agent-events`。
 
-生成时间：2026-10-28T11:40:17.954Z
+生成时间：2026-11-03T00:24:46.761Z
 
 ## 事件类型
 
@@ -14,7 +14,6 @@
 | `stream` | 助手正文流式增量 | Rust loop | Renderer bubble, Mobile streamContent |
 | `tool` | 工具调用轮次 | Rust loop | Renderer tool cards |
 | `round_limit` | 达到轮次上限 | Guardrails | Renderer, Mobile |
-| `arbitration` | 多 Agent 仲裁 | Planner | Renderer |
 | `done` | 正常完成 | Rust loop / Renderer | Renderer, Mobile task.completed |
 | `error` | 失败 | Rust loop / Main | Renderer, Mobile task.failed |
 | `stopped` | 用户停止 | Main | Renderer, Mobile task.stopped |

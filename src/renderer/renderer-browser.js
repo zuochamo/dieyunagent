@@ -107,8 +107,7 @@ var BLOCKING_OVERLAY_SELECTOR = [
   '.worktree-apply-overlay', // Worktree 变更应用 / AGENTS.md 预览
   '.skill-detail-overlay', // 技能详情 / 新建 / MCP 添加
   '.execute-overlay', // 定时任务
-  '.defined-model-editor-overlay', // 模型编辑器
-  '.agent-arbitration-overlay'
+  '.defined-model-editor-overlay' // 模型编辑器
 ].join(',');
 
 function isBlockingOverlayOpen() {
