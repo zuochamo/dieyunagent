@@ -64,6 +64,7 @@
     "test:system-prompt-prep": "node scripts/test-system-prompt-prep.cjs",
     "test:knowledge-maintainer": "node scripts/test-knowledge-maintainer.cjs",
     "test:project-memory-file": "node scripts/test-project-memory-file.cjs",
+    "test:session-handoff": "node scripts/test-session-handoff.cjs",
     "test:llm-tool-call-fallback": "node scripts/test-llm-tool-call-fallback.cjs",
     "test:monitor-outbox": "node scripts/test-monitor-outbox.cjs",
     "test:planner-parallel": "node scripts/test-planner-parallel.cjs",
