@@ -7,10 +7,13 @@ const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
 const roundText = require('./agent-round-text');
 
-const SYNTHESIS_PHASE = '汇总';
-const SYNTHESIS_START = '正在生成最终答复…';
-const SYNTHESIS_DONE = '已完成';
-const SYNTHESIS_FAILED = '汇总未完成，见下方答复';
+// 汇总步骤的 phase 名与展示文案：单一来源 agent-round-text（Renderer 展示同一个常量）
+const {
+  SYNTHESIS_PHASE,
+  SYNTHESIS_START,
+  SYNTHESIS_DONE,
+  SYNTHESIS_FAILED
+} = roundText;
 
 function resolveChatUrl(baseUrl) {
   // 端点拼接单一来源 llm-request.js；此处只保留「必填」语义

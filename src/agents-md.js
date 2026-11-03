@@ -11,11 +11,10 @@ const DRAFT_FILENAME = 'agents-draft.md';
 const MAX_INJECT_CHARS = 8000;
 const MAX_FILE_CHARS = 24000;
 const NEAR_LIMIT_CHARS = Math.floor(MAX_FILE_CHARS * 0.9);
-// 维护记录是审计不是知识：注入时只取最近 5 条（CHANGELOG_INJECT_ROWS），
+// 维护记录是审计不是知识：注入时只取最近 5 条（CHANGELOG_MAX_ROWS），
 // 存 50 行纯属白占磁盘上限 —— 实测某项目 20 行吃 3248 字符，直接把 gotchas 挤没了。
 const CHANGELOG_MAX_ROWS = 5;
 const CHANGELOG_TRIM_FALLBACK_ROWS = 3;
-const CHANGELOG_INJECT_ROWS = 5;
 // 超限裁剪时每个 section 的保底长度：marker + 标题 + 省略提示。
 // **低于这个值就不再裁** —— marker 必须活着，否则该段后续更新会被静默 skip。
 const SECTION_MIN_KEEP = 260;
@@ -234,17 +233,6 @@ function trimChangelogRows(body, maxRows) {
   const table = kept.join('\n');
   const rebuilt = preamble ? `${preamble}\n${table}` : table;
   return { body: rebuilt.trim(), trimmed: true, dropped };
-}
-
-/** 注入上下文时只保留最近若干条维护记录 */
-function trimChangelogForInject(body, maxRows = CHANGELOG_INJECT_ROWS) {
-  const { preamble, rows } = parseChangelogTable(body);
-  if (rows.length <= maxRows) return String(body || '').trim();
-  const dropped = rows.length - maxRows;
-  const kept = rows.slice(-maxRows);
-  const omitRow = `| … | … | （更早 ${dropped} 条已轮转删除，只保留最近 ${maxRows} 条） |`;
-  const table = [omitRow, ...kept].join('\n');
-  return preamble ? `${preamble}\n${table}`.trim() : table;
 }
 
 function rebuildAgentsMdDocument(text, sections, bodies, statuses) {
@@ -585,15 +573,11 @@ function normalizeMeta(raw) {
 }
 
 module.exports = {
-  DIEYUN_DIR,
   FILENAME,
-  META_FILENAME,
-  DRAFT_FILENAME,
   MAX_INJECT_CHARS,
   MAX_FILE_CHARS,
   NEAR_LIMIT_CHARS,
   CHANGELOG_MAX_ROWS,
-  CHANGELOG_INJECT_ROWS,
   EDITABLE_SECTION_IDS,
   agentsRelativePath,
   agentsMetaRelativePath,
@@ -608,8 +592,6 @@ module.exports = {
   matchesAnyPathGlob,
   selectSectionsByPath,
   parseChangelogTable,
-  trimChangelogRows,
-  trimChangelogForInject,
   changelogStub,
   ensureChangelogSection,
   clipTextByLines,

@@ -1,4 +1,4 @@
-/* global window, GuardrailsShared, tracePrefs */
+/* global window, GuardrailsShared, tracePrefs, AgentRoundText */
 'use strict';
 
 /**
@@ -18,6 +18,19 @@
 const shared = typeof GuardrailsShared !== 'undefined' ? GuardrailsShared : null;
 if (!shared) {
   throw new Error('guardrails-shared.js must load before agent-guardrails.js');
+}
+
+/**
+ * 交付占位文案的唯一来源是 `agent-round-text.TURN_EMPTY_REPLY_TEXT`（经 agent-bundle 注册）。
+ * 取用放在调用点而不是模块顶层：本文件在单测里会被单独注入沙箱，顶层硬依赖会连带
+ * 把「只渲染提示」的用例也拖崩；真正需要占位时才要求来源存在。
+ */
+function turnEmptyReplyText() {
+  const api = typeof AgentRoundText !== 'undefined' ? AgentRoundText : null;
+  if (!api || !api.TURN_EMPTY_REPLY_TEXT) {
+    throw new Error('agent-bundle must load before agent-guardrails.js');
+  }
+  return api.TURN_EMPTY_REPLY_TEXT;
 }
 
 /**
@@ -42,7 +55,7 @@ function applyReadinessNote(reply, readiness) {
     shared && typeof shared.stripReadinessNotes === 'function'
       ? shared.stripReadinessNotes(reply)
       : String(reply || '');
-  const body = String(cleaned || '').trim() || '（模型未生成文字答复。）';
+  const body = String(cleaned || '').trim() || turnEmptyReplyText();
   return `${body}\n\n---\n\n> ⚠️ **完成验收**：${readiness.note}`;
 }
 

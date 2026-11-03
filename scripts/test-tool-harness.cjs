@@ -11,7 +11,7 @@ const {
   repeatToolBlockMessage,
   normalizeAgentToolName
 } = require('../src/agent/tool-guardrails');
-const { spillToolOutputIfLarge } = require('../src/agent/tool-output-spill');
+const { spillToolOutputIfLarge, SPILL_CHAR_THRESHOLD } = require('../src/agent/tool-output-spill');
 const { resolveFsReadMaxBytes } = require('../src/agent/delegate-tool-gateway');
 const { resolveHostSidecarLocalPath } = require('../src/agent/host-sidecar');
 const { ToolHarnessSession, classifyFailure } = require('../src/agent/tool-harness');
@@ -230,6 +230,33 @@ async function main() {
     { runId: 'test', userDataPath: os.tmpdir(), spillSeq: 1 }
   );
   assert(big.outputFile && big.preview && !big.stdout, 'spill host_exec');
+
+  /**
+   * 落盘阈值与上下文截断上限是两个数、一条不变式：
+   * 落盘是**无损**卸载（全文进 outputFile + 预览进上下文），截断是**有损**切掉。
+   * 若落盘阈值 ≥ 截断上限，「超过上限但没到大输出」的那一段会被静默切掉、没有文件可回读。
+   * 数字只允许有一个来源：`agent-limits.js:toolSpillCharThreshold`。
+   */
+  assert(
+    SPILL_CHAR_THRESHOLD === AGENT_LIMITS_DEFAULTS.toolSpillCharThreshold,
+    '落盘阈值必须从 agent-limits 读（toolSpillCharThreshold），不另写一份'
+  );
+  assert(
+    SPILL_CHAR_THRESHOLD < AGENT_LIMITS_DEFAULTS.toolResultMaxJson,
+    `落盘阈值(${SPILL_CHAR_THRESHOLD}) 必须小于截断上限(${AGENT_LIMITS_DEFAULTS.toolResultMaxJson})`
+  );
+  const belowThreshold = spillToolOutputIfLarge(
+    'host_exec',
+    { code: 0, stdout: 'z'.repeat(SPILL_CHAR_THRESHOLD - 1) },
+    { runId: 'threshold', userDataPath: os.tmpdir(), spillSeq: 1 }
+  );
+  assert(!belowThreshold.outputFile, '恰好不到阈值不落盘（不为省一点字符制造文件）');
+  const overThreshold = spillToolOutputIfLarge(
+    'host_exec',
+    { code: 0, stdout: 'z'.repeat(SPILL_CHAR_THRESHOLD + 1) },
+    { runId: 'threshold', userDataPath: os.tmpdir(), spillSeq: 1 }
+  );
+  assert(overThreshold.outputFile, '越过阈值才落盘');
 
   const sshUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'dieyun-spill-'));
   const sshSpill = spillToolOutputIfLarge(

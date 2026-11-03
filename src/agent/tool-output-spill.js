@@ -10,7 +10,10 @@ const {
 // 「是不是 MCP 服务注册的工具」唯一判定（mcp_manage / mcp_tool_schema 例外）
 const { isMcpServerToolName } = require('../mcp/tool-name');
 
-const SPILL_CHAR_THRESHOLD = 8192;
+const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
+
+/** 数字的唯一来源是 `agent-limits.js`（含「必须小于 toolResultMaxJson」这条不变式） */
+const SPILL_CHAR_THRESHOLD = AGENT_LIMITS_DEFAULTS.toolSpillCharThreshold;
 const PREVIEW_LINES = 40;
 
 function resolveSpillRoot(workspacePath, userDataPath) {
@@ -141,7 +144,5 @@ function spillToolOutputIfLarge(name, payload, opts = {}) {
 module.exports = {
   SPILL_CHAR_THRESHOLD,
   spillToolOutputIfLarge,
-  resolveSpillRoot,
-  tailLines,
-  headLines
+  resolveSpillRoot
 };

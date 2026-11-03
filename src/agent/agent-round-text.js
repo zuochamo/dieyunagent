@@ -31,7 +31,19 @@ function synthesizedReplyIsUsable(text) {
 
 const TURN_REASONING_FALLBACK_LABEL = '（以下为模型思考，本轮未成文）';
 const TURN_EMPTY_REPLY_TEXT = '（模型未生成文字答复。）';
+
+/**
+ * 汇总（synthesis）步骤的 phase 名与三句展示文案的**唯一来源**。
+ *
+ * 以前 Main（`agent-synthesis.js`）与 Renderer（`renderer-thinking-trace.js`）各写一份，
+ * 改一处文案另一处不改就会出现「同一轮汇总在两侧说法不同」。它们只描述「汇总这一步」，
+ * 与「汇总要不要跑」的判定无关，所以落在交付文本模块而不是 agent-synthesis（后者需要
+ * llm-proxy 等出网依赖，进不了 renderer bundle）。
+ */
 const SYNTHESIS_PHASE = '汇总';
+const SYNTHESIS_START = '正在生成最终答复…';
+const SYNTHESIS_DONE = '已完成';
+const SYNTHESIS_FAILED = '汇总未完成，见下方答复';
 /**
  * 非模型思考的 trace phase：程序动作，不进 `messages.reasoning`。
  * - 汇总：交给汇总 LLM 的合成轮，不是本轮思考；
@@ -136,6 +148,10 @@ function pickNormalizedAssistantReply(reply, trace, fallbacks) {
 const api = {
   TURN_REASONING_FALLBACK_LABEL,
   TURN_EMPTY_REPLY_TEXT,
+  SYNTHESIS_PHASE,
+  SYNTHESIS_START,
+  SYNTHESIS_DONE,
+  SYNTHESIS_FAILED,
   countTraceTools,
   needsAssistantReplySynthesis,
   synthesizedReplyIsUsable,

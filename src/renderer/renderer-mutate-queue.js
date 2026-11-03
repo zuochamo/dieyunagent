@@ -14,8 +14,21 @@
  * 语义：超时只**开闸放行后续**，不终止原调用（取消由 delegate-batch 的 abort 契约负责）。
  */
 
-/** 必须大于 host_exec 的硬上限 600s，否则会误判正常长命令。 */
-const RENDERER_MUTATE_STALL_MS = 12 * 60 * 1000;
+/**
+ * 停滞开闸阈值只有一个来源：agent-bundle 注册的 `agent-limits`（`window.getAgentLimit`）。
+ * 这里以前另抄了一份 `12 * 60 * 1000`，改设置页对渲染层队列毫无影响。
+ */
+function resolveMutateStallMs(override) {
+  const explicit = Number(override);
+  const api = typeof window !== 'undefined' ? window : null;
+  const ms = Number(
+    explicit > 0 ? explicit : api && typeof api.getAgentLimit === 'function' ? api.getAgentLimit('toolStallMs') : 0
+  );
+  if (!(ms > 0)) {
+    throw new Error('agent-limits 未加载：renderer-mutate-queue 需要 window.getAgentLimit');
+  }
+  return Math.max(1000, ms);
+}
 
 /** @type {Map<string, { gate: {promise: Promise<void>, resolve: Function}, tail: Promise<void>, pending: number, holders: Set<string>, active: object|null }>} */
 const mutateQueues = new Map();
@@ -53,7 +66,7 @@ function runExclusive(fn, workspaceKey, holderId, opts = {}) {
   const key = normalizeWorkspaceMutateKey(workspaceKey);
   const q = getMutateQueue(key);
   const holder = holderId != null && String(holderId).trim() ? String(holderId).trim() : '';
-  const stallMs = Math.max(1000, Number(opts.stallMs) || RENDERER_MUTATE_STALL_MS);
+  const stallMs = resolveMutateStallMs(opts.stallMs);
 
   const prev = q.gate;
   const mine = createMutateGate();

@@ -8,10 +8,6 @@ const { sftpEntryIsDirectory } = require('../ssh/session-manager');
 const { computeLineDiffStats } = require('./line-diff-stats');
 const { scanRecentArtifactFiles } = require('./artifact-scan');
 
-function summarizeLineDiff(beforeText, afterText) {
-  return computeLineDiffStats(beforeText, afterText);
-}
-
 /**
  * @param {ReturnType<import('../ssh/session-manager').createSshSessionManager>} ssh
  * @param {import('../workspace/target').SshWorkspaceTarget} target
@@ -83,7 +79,7 @@ function createRemoteFsAdapter(ssh, target, opts = {}) {
     if (dir && dir !== '/') await ssh.sftpMkdirp(dir);
     await ssh.sftpWriteFile(safe, buf);
     let diff = null;
-    if (enc === 'utf8' && beforeKnown) diff = summarizeLineDiff(beforeText, data);
+    if (enc === 'utf8' && beforeKnown) diff = computeLineDiffStats(beforeText, data);
     return { ok: true, path: safe, diff, remote: true };
   }
 

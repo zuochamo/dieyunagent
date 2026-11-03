@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { isVirtualWorkspacePath, hostSidecarRoots, TERMINALS_REL } = require('./host-sidecar');
+const { isVirtualWorkspacePath, hostSidecarRoots } = require('./host-sidecar');
 const { getRotatingLog, closeLog } = require('../logs/rotating-file-log');
 
 /**
@@ -44,21 +44,8 @@ function resetTerminalLogTarget(workspacePath, userDataPath) {
   return resolveTerminalLogPath(workspacePath, userDataPath);
 }
 
-function terminalLogHint(workspacePath, userDataPath) {
-  const rel = isVirtualWorkspacePath(workspacePath)
-    ? `${TERMINALS_REL}/integrated.log`
-    : (() => {
-        const p = resolveTerminalLogPath(workspacePath, userDataPath);
-        return workspacePath && p.startsWith(String(workspacePath))
-          ? p.slice(String(workspacePath).length).replace(/^[/\\]+/, '')
-          : p;
-      })();
-  return `集成终端输出同步至 ${rel}；host_exec 失败时可 fs_read_file 读取该日志排查。`;
-}
-
 module.exports = {
   appendTerminalLog,
   resetTerminalLogTarget,
-  resolveTerminalLogPath,
-  terminalLogHint
+  resolveTerminalLogPath
 };

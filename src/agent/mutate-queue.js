@@ -21,9 +21,28 @@
  * 刻意不做：不做全局并发上限、不做优先级、不持久化队列状态。
  */
 
-/** 超过这个时间仍未 settle 就开闸。必须大于 host_exec 的硬上限 600s，否则会误判正常长命令。 */
-const DEFAULT_STALL_MS = 12 * 60 * 1000;
+/**
+ * 停滞开闸阈值只有一个来源：`agent-limits` 的 `toolStallMs`（它必须大于 host_exec 的
+ * 600s 硬上限，否则会误判正常长命令）。这里以前另抄了一份 `12 * 60 * 1000`，
+ * 于是「改设置页的停滞阈值」对写类队列毫无影响 —— 数字只在这里读，不再自留字面量。
+ */
+const { getAgentLimit } = require('./agent-limits');
+
 const MIN_STALL_MS = 1000;
+
+/**
+ * @param {number|undefined} override 调用点显式覆盖（测试用）
+ * @returns {number}
+ */
+function resolveStallMs(override) {
+  const explicit = Number(override);
+  const ms = explicit > 0 ? explicit : Number(getAgentLimit('toolStallMs'));
+  if (!(ms > 0)) {
+    // 阈值来源缺失属于装配错误：静默退到 1s 会把写类工具的串行化搞坏（比排队卡死更难查）
+    throw new Error('agent-limits.toolStallMs 缺失：写类队列需要单一来源的停滞阈值');
+  }
+  return Math.max(MIN_STALL_MS, ms);
+}
 
 /** 日志出口由 Main 注入（electron-log）；未注入时静默，避免模块级 console 噪音。 */
 let logHook = () => {};
@@ -73,7 +92,7 @@ function runExclusive(fn, workspaceKey, holderId, opts = {}) {
   const key = normalizeWorkspaceMutateKey(workspaceKey);
   const q = getMutateQueue(key);
   const holder = holderId != null && String(holderId).trim() ? String(holderId).trim() : '';
-  const stallMs = Math.max(MIN_STALL_MS, Number(opts.stallMs) || DEFAULT_STALL_MS);
+  const stallMs = resolveStallMs(opts.stallMs);
 
   const prev = q.gate;
   const mine = createGate();
@@ -171,7 +190,7 @@ function getWorkspaceMutateSnapshot(workspaceKey) {
 }
 
 module.exports = {
-  DEFAULT_STALL_MS,
+  resolveStallMs,
   normalizeWorkspaceMutateKey,
   getMutateQueue,
   runExclusive,
