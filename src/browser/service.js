@@ -18,6 +18,7 @@ const { diffBitmaps, clampRatio, DEFAULT_RATIO_THRESHOLD } = require('./visual-d
 const { buildContentSignalsScript, classifyBitmapRenderHealth } = require('./render-health');
 const { createBrowserSessionScope } = require('./session-scope');
 const { mintSnapshotId, normalizeSnapshotId, isRefFailureError, enrichRefFailure } = require('./ref-namespace');
+const { withTimeout } = require('../timeout');
 const {
   ENGINE_AUTO,
   ENGINE_BROWSERVIEW,
@@ -50,27 +51,6 @@ function resolveOutputPath(filePath, ext, prefix) {
   const raw = String(filePath || '').trim();
   if (raw) return ensureExtension(path.resolve(raw), ext);
   return path.join(defaultDownloadDir(), `${prefix}-${Date.now()}.${ext}`);
-}
-
-/** 给不支持的底层调用加超时，避免页面内死循环拖死整个 Agent 轮次。 */
-function withTimeout(promise, timeoutMs, label) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      const err = new Error(`${label}超时（${timeoutMs}ms）`);
-      err.code = 'EVALUATE_TIMEOUT';
-      reject(err);
-    }, timeoutMs);
-    Promise.resolve(promise).then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      }
-    );
-  });
 }
 
 /**
@@ -497,7 +477,7 @@ function createBrowserService(deps) {
     const raw = await withTimeout(
       getRunner(engine).expect(assertions, { frame: args.frame, sessionId: args.sessionId }),
       timeoutMs,
-      '断言执行'
+      { message: `断言执行超时（${timeoutMs}ms）`, code: 'EVALUATE_TIMEOUT' }
     );
     if (raw && raw.ok === false && raw.errorCode) {
       return applyTarget(
@@ -1000,7 +980,7 @@ function createBrowserService(deps) {
       await withTimeout(
         getRunner(target.engine).evaluateScript(runnerArgs(target.engine, args)),
         timeoutMs,
-        '脚本执行'
+        { message: `脚本执行超时（${timeoutMs}ms）`, code: 'EVALUATE_TIMEOUT' }
       ),
       target
     );

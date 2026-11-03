@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { readJsonFile } = require('./json-file');
 
 /** 叠云内网内置默认（无 deploy.json 时生效；文件与环境变量可覆盖） */
 const BUILTIN_DEFAULTS = Object.freeze({
@@ -28,19 +29,6 @@ function deepMerge(base, patch) {
   return out;
 }
 
-function readJsonFile(filePath) {
-  try {
-    if (filePath && fs.existsSync(filePath)) {
-      // 记事本 / 部分编辑器会写入 UTF-8 BOM，直接 JSON.parse 会抛错并静默丢失整份配置
-      const raw = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
-      return JSON.parse(raw);
-    }
-  } catch {
-    // ignore
-  }
-  return null;
-}
-
 function findRepoRoot(startDir) {
   let dir = startDir || process.cwd();
   for (let i = 0; i < 8; i++) {
@@ -59,30 +47,6 @@ function deployConfigPaths(repoRoot) {
     local: root ? path.join(root, 'deploy.local.json') : null,
     example: root ? path.join(root, 'deploy.defaults.example.json') : null
   };
-}
-
-/**
- * 为「合并写回」而读取 deploy.local.json。
- * 解析失败时抛错而不是退化成空对象：否则写回会把文件里其它段落整体清空（数据丢失）。
- * @param {string} localPath
- * @returns {Record<string, unknown>}
- */
-function readDeployLocalJson(localPath) {
-  if (!localPath || !fs.existsSync(localPath)) return {};
-  const raw = String(fs.readFileSync(localPath, 'utf8')).replace(/^\uFEFF/, '');
-  if (!raw.trim()) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch (err) {
-    const e = new Error(
-      `deploy.local.json 不是合法 JSON，已中止写入以免覆盖原有配置（${localPath}）：${
-        err && err.message ? err.message : err
-      }`
-    );
-    e.code = 'DEPLOY_LOCAL_PARSE_FAILED';
-    throw e;
-  }
 }
 
 /**
@@ -126,16 +90,7 @@ function getDeployConfig(opts = {}) {
   return cachedConfig;
 }
 
-function resetDeployConfigCache() {
-  cachedConfig = null;
-  cachedRepoRoot = null;
-}
-
 module.exports = {
   BUILTIN_DEFAULTS,
-  getDeployConfig,
-  deployConfigPaths,
-  readDeployLocalJson,
-  resetDeployConfigCache,
-  findRepoRoot
+  getDeployConfig
 };

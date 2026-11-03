@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { assertSafeUrl } = require('../gateway/web/url-safety');
+const { readJsonFile, writeJsonFile } = require('../json-file');
 const { compareSemver } = require('./package-store');
 const { listBuiltinMcpServers } = require('./registry');
 
@@ -23,19 +24,6 @@ const MAX_INSTALL_SEARCH_PAGES = 30;
  * 原先 30s 会把搜索请求固定打断，而失败按源静默吞掉，UI 只剩「没有匹配的 MCP」。
  */
 const CATALOG_FETCH_TIMEOUT_MS = 60000;
-
-function readJsonFile(filePath, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-
-function writeJsonFile(filePath, data) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
-}
 
 function simpleHash(text) {
   let h = 2166136261;
@@ -779,7 +767,4 @@ class McpCatalog {
 }
 
 module.exports = {
-  McpCatalog,
-  DEFAULT_REGISTRY_URL,
-  registryNameToMcpId
-};
+  McpCatalog};

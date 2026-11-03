@@ -5,6 +5,7 @@ const path = require('path');
 const { fileURLToPath, pathToFileURL } = require('url');
 const { getLanguageIdForPath, getServerKeyForLanguage } = require('./language-registry');
 const { firstIdentifier, identifierAt, CODE_KEYWORDS } = require('../gateway/symbol-text');
+const { withTimeout } = require('../timeout');
 
 const DEFAULT_NAV_TIMEOUT_MS = 20000;
 const MAX_LOCATIONS = 80;
@@ -117,22 +118,6 @@ async function detectWorkspaceServerKeys(workspaceRoot) {
   return keys;
 }
 
-function withTimeout(promise, ms) {
-  const wait = Number(ms);
-  if (!Number.isFinite(wait) || wait <= 0) return Promise.resolve(promise).catch(() => null);
-  return new Promise((resolve) => {
-    let done = false;
-    const settle = (v) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve(v);
-    };
-    const timer = setTimeout(() => settle(null), wait);
-    Promise.resolve(promise).then(settle, () => settle(null));
-  });
-}
-
 /** workspace/symbol：跨 server 合并，不因单个 server 失败而整体失败 */
 async function queryWorkspaceSymbols(opts) {
   const query = String(opts.query || '').trim();
@@ -173,13 +158,16 @@ async function queryWorkspaceSymbols(opts) {
   for (const serverKey of servers.slice(0, MAX_SERVERS_PER_SYMBOL_QUERY)) {
     const client = await withTimeout(
       Promise.resolve(opts.getClient(workspaceRoot, serverKey)),
-      timeoutMs
+      timeoutMs,
+      { mode: 'null' }
     );
     if (!client) {
       errors.push(`${serverKey}: 未启动`);
       continue;
     }
-    const raw = await withTimeout(client.getWorkspaceSymbols({ query, timeoutMs }), timeoutMs);
+    const raw = await withTimeout(client.getWorkspaceSymbols({ query, timeoutMs }), timeoutMs, {
+      mode: 'null'
+    });
     if (raw == null) {
       errors.push(`${serverKey}: 超时或无结果`);
       continue;
@@ -425,12 +413,6 @@ module.exports = {
   queryLspPosition,
   resolveCharacter0,
   normalizeLocations,
-  normalizeSymbols,
-  symbolKindName,
-  detectWorkspaceServerKeys,
   hoverToText,
-  DEFAULT_NAV_TIMEOUT_MS,
-  MAX_LOCATIONS,
-  MAX_SYMBOLS,
   MAX_SERVERS_PER_SYMBOL_QUERY
 };

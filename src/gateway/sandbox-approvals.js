@@ -19,6 +19,7 @@
  */
 
 const { SANDBOX_CATEGORIES } = require('./sandbox-policy');
+const { withTimeout } = require('../timeout');
 
 /** 批准记忆的存活上限：防止进程长跑时几个月的旧批准还在生效。 */
 const GRANT_TTL_MS = 2 * 60 * 60 * 1000;
@@ -172,7 +173,11 @@ function createSandboxApprovals(deps = {}) {
 
     let answer;
     try {
-      answer = await withTimeout(Promise.resolve(request(payload)), timeoutMs);
+      answer = await withTimeout(Promise.resolve(request(payload)), timeoutMs, {
+        message: '等待确认超时',
+        // 给上层区分"超时"和"通道炸了"用
+        code: 'APPROVAL_TIMEOUT'
+      });
     } catch (e) {
       const expired = !!(e && e.code === 'APPROVAL_TIMEOUT');
       recordAudit({ kind: expired ? 'ask-timeout' : 'ask-error', requestId, sessionId, category, error: String(e && e.message) });
@@ -238,27 +243,6 @@ function createSandboxApprovals(deps = {}) {
     return out;
   }
 
-  function withTimeout(promise, ms) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const err = new Error('等待确认超时');
-        // @ts-ignore 给上层区分"超时"和"通道炸了"用
-        err.code = 'APPROVAL_TIMEOUT';
-        reject(err);
-      }, ms);
-      promise.then(
-        (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        (e) => {
-          clearTimeout(timer);
-          reject(e);
-        }
-      );
-    });
-  }
-
   return {
     ask,
     setRequest,
@@ -275,4 +259,4 @@ function createSandboxApprovals(deps = {}) {
   };
 }
 
-module.exports = { createSandboxApprovals, grantKey, scopeOf, sessionKey, isVolumeRoot, GRANT_TTL_MS, APPROVAL_TIMEOUT_MS };
+module.exports = { createSandboxApprovals, sessionKey};

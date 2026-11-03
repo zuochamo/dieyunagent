@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { assertSafeUrl } = require('../gateway/web/url-safety');
+const { readJsonFile, writeJsonFile } = require('../json-file');
 const {
   dieyunSkillsDir,
   ensureAgentHomeDirs,
@@ -22,19 +23,6 @@ const LOAD_MORE_BATCH = INITIAL_LOAD_LIMIT;
 const MAX_SEARCH_LIMIT = 200;
 const BROWSE_DEFAULT_QUERY = 'skill';
 const MARKET_ID_FILE = '.dieyun-market-id';
-
-function readJsonFile(filePath, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-
-function writeJsonFile(filePath, data) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
-}
 
 function parseSkillCatalogId(rawId) {
   const id = String(rawId || '').trim();
@@ -396,8 +384,5 @@ class SkillCatalog {
 
 module.exports = {
   SkillCatalog,
-  SKILLS_SH_BASE,
-  parseSkillCatalogId,
-  listInstalledCatalogIds,
-  MARKET_ID_FILE
+  listInstalledCatalogIds
 };

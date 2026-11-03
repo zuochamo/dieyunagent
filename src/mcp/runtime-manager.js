@@ -11,6 +11,7 @@ const { transportKind } = require('./server-config');
 const { validateMcpInputArgs } = require('../agent/tool-validate');
 // 工具名编码的单一来源（Renderer 的只读白名单要按同一前缀判定，故不能再放在本文件里）
 const { encodeMcpToolName, simpleHash } = require('./tool-name');
+const { withTimeout } = require('../timeout');
 
 const CONNECT_TIMEOUT_MS = 60000;
 const CALL_TIMEOUT_MS = 120000;
@@ -104,15 +105,6 @@ function formatMcpCallResult(result) {
   const images = extractMcpImages(result);
   if (images) out.visionImages = images;
   return out;
-}
-
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`${label} 超时（${ms / 1000}s）`)), ms);
-    })
-  ]);
 }
 
 function buildAuthHeaderValue(headerName, token) {
@@ -219,7 +211,7 @@ class McpSession {
     this.connecting = withTimeout(
       this._connectInner(generation),
       CONNECT_TIMEOUT_MS,
-      `MCP「${this.server.id}」连接`
+      { message: `MCP「${this.server.id}」连接 超时（${CONNECT_TIMEOUT_MS / 1000}s）` }
     );
     try {
       await this.connecting;
@@ -383,7 +375,7 @@ class McpSession {
     const result = await withTimeout(
       this.client.callTool({ name, arguments: args || {} }),
       CALL_TIMEOUT_MS,
-      `MCP 工具「${name}」`
+      { message: `MCP 工具「${name}」 超时（${CALL_TIMEOUT_MS / 1000}s）` }
     );
     return formatMcpCallResult(result);
   }
