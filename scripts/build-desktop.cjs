@@ -27,6 +27,8 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+const { applyMirrorEnv } = require('./mirrors.cjs');
+
 const ROOT = path.join(__dirname, '..');
 
 /** 平台 → 允许的 target（第二个是 electron-builder 用的名字，大小写敏感） */
@@ -53,8 +55,18 @@ const CORE_STEPS = {
 /** 打进安装包的资源包（纯 JS / 按当前平台取二进制） */
 const RESOURCE_STEPS = ['pack:remote-gateway', 'pack:mcp-bundled'];
 
-/** 打包后的产物校验。Linux 首版默认跳过：verify 脚本按 Windows 包内布局断言 */
+/** 打包后的产物校验（两端同一套脚本，按当前平台取 <dist>/<platform>-unpacked） */
 const VERIFY_STEPS = ['verify:asar', 'verify:remote-pack', 'verify:mcp-bundled'];
+
+/**
+ * 打包前的测试门禁。
+ *
+ * 跑 `npm test`（= scripts/test-agent-smoke.cjs：先 check:contracts，再按 git diff 选测）。
+ * 不在这里固定 `test:agent --all` 的原因：那 43 项里有 sandbox-real / browser-smoke 等
+ * 依赖本机环境的套件，做成每次打包的硬闸门就会「平时常红」→ 大家一律 `--no-tests`，
+ * 门禁等于没有。要发布级全量，显式跑 `npm run test:agent-full`（或 .agents/skills/full-test）。
+ */
+const TEST_STEPS = ['test'];
 
 function printHelp() {
   console.log(`
@@ -64,8 +76,10 @@ function printHelp() {
   --platform <win|linux>        目标平台，默认 win
   --target <nsis|dir|deb|appimage>
                                 打包目标，默认 win→nsis、linux→deb
-  --verify                      打包后跑产物校验（Linux 默认关闭）
-  --no-verify                   跳过产物校验（Windows 默认开启）
+  --verify                      打包后跑产物校验（两端默认开启）
+  --no-verify                   跳过产物校验（排障用）
+  --tests                       打包前跑测试门禁（Windows 默认开启）
+  --no-tests                    跳过测试门禁（排障用；发布不要用）
   --help, -h                    显示本帮助
 `);
 }
@@ -75,6 +89,7 @@ function parseArgs(argv) {
     platform: 'win',
     target: '',
     verify: null,
+    tests: null,
     help: false
   };
   for (let i = 2; i < argv.length; i++) {
@@ -87,6 +102,10 @@ function parseArgs(argv) {
       opts.verify = true;
     } else if (a === '--no-verify') {
       opts.verify = false;
+    } else if (a === '--tests') {
+      opts.tests = true;
+    } else if (a === '--no-tests') {
+      opts.tests = false;
     } else if (a === '--help' || a === '-h') {
       opts.help = true;
     } else {
@@ -103,7 +122,11 @@ function parseArgs(argv) {
         `${Object.keys(PLATFORM_TARGETS[opts.platform]).join(' / ')}）`
     );
   }
-  if (opts.verify === null) opts.verify = opts.platform === 'win';
+  if (opts.verify === null) opts.verify = true;
+  // 测试门禁默认只在 Windows 侧跑：发布链（build-installer.bat）从 PC 包开始，
+  // 源是同一份；而 Linux 包在远端构建，源码包里**不含 .git**（pack-deb-remote 的
+  // SRC_EXCLUDES），`npm test` 的 diff 选测会退化成最小集 —— 在那里跑只是假绿。
+  if (opts.tests === null) opts.tests = opts.platform === 'win';
   return opts;
 }
 
@@ -235,12 +258,42 @@ function assertBuildArtifacts(platform) {
   }
 }
 
+/**
+ * 签名状态的诚实播报。
+ *
+ * electron-builder 的 `• signing with signtool.exe` 是**开工前的无条件日志**
+ * （app-builder-lib/out/codeSign/windowsCodeSign.js），没有证书时它只在 debug 级打一句
+ * skipped —— 日志看着像签了，产物其实是 NotSigned（2026-11 实测：Get-AuthenticodeSignature
+ * 返回 NotSigned）。这里把真实判定打出来，别让发版日志自欺。
+ */
+function reportSigningState(opts) {
+  if (opts.platform !== 'win') return;
+  const winOptions = require(path.join(ROOT, 'package.json')).build.win || {};
+  const signtoolOptions = winOptions.signtoolOptions || {};
+  const configured = Boolean(
+    process.env.CSC_LINK ||
+      process.env.CSC_KEY_PASSWORD ||
+      winOptions.certificateFile ||
+      winOptions.certificateSubjectName ||
+      signtoolOptions.certificateFile
+  );
+  console.log(
+    configured
+      ? '[build-desktop] 代码签名：检测到证书配置，产物请用 signtool verify 复核'
+      : '[build-desktop] 代码签名：未配置证书（CSC_LINK / certificateFile）→ 产物未签名，' +
+          'SmartScreen 会拦；electron-builder 的 "signing with signtool.exe" 不代表签上了'
+  );
+}
+
 function main() {
   const opts = parseArgs(process.argv);
   if (opts.help) {
     printHelp();
     return;
   }
+  // 内网镜像走环境变量（唯一来源 scripts/mirrors.cjs）：
+  // electron-builder 及其「下载 Electron 运行时」子进程都读 ELECTRON_MIRROR。
+  applyMirrorEnv();
   if (opts.platform === 'linux') assertLinuxHost();
 
   // electron-builder 直接用 node 跑它的 JS 入口：
@@ -251,7 +304,8 @@ function main() {
   }
 
   console.log(
-    `[build-desktop] 平台=${opts.platform} 目标=${opts.target} 校验=${opts.verify ? 'on' : 'off'}`
+    `[build-desktop] 平台=${opts.platform} 目标=${opts.target} ` +
+      `校验=${opts.verify ? 'on' : 'off'} 测试=${opts.tests ? 'on' : 'off'}`
   );
 
   for (const step of COMMON_STEPS) runNpm(`npm run ${step}`, ['run', step]);
@@ -260,8 +314,19 @@ function main() {
 
   assertBuildArtifacts(opts.platform);
 
+  // 门禁卡在 pack 之后、packaging 之前：
+  //   ① 有用例要读 build/dieyun-core 等打包输入，先有产物才不会误报；
+  //   ② packaging 最贵（2-3 分钟），失败要卡在它前面。
+  if (opts.tests) {
+    for (const step of TEST_STEPS) runNpm(`npm run ${step}`, ['run', step]);
+  } else {
+    console.log('\n[build-desktop] 已跳过测试门禁（--tests 打开；发布链默认在 Windows 侧跑）');
+  }
+
   const ebArgs = electronBuilderArgs(opts);
   run(`electron-builder ${ebArgs.join(' ')}`, process.execPath, [ebEntry, ...ebArgs]);
+
+  reportSigningState(opts);
 
   if (opts.verify) {
     for (const step of VERIFY_STEPS) runNpm(`npm run ${step}`, ['run', step]);
@@ -281,4 +346,11 @@ if (require.main === module) {
   }
 }
 
-module.exports = { main, parseArgs, electronBuilderArgs, assertBuildArtifacts, PLATFORM_TARGETS };
+module.exports = {
+  main,
+  parseArgs,
+  electronBuilderArgs,
+  assertBuildArtifacts,
+  reportSigningState,
+  PLATFORM_TARGETS
+};

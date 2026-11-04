@@ -6,6 +6,7 @@ require('./win-utf8-console.cjs');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { applyMirrorEnv } = require('./mirrors.cjs');
 
 const root = path.join(__dirname, '..');
 const electronPkg = path.join(root, 'node_modules', 'electron', 'package.json');
@@ -22,7 +23,8 @@ function needInstall() {
 
 if (needInstall()) {
   console.log('[dieyunagent/bootstrap] dependencies missing, running npm install...');
-  execSync('npm install', { stdio: 'inherit', cwd: root, env: process.env });
+  // Electron 二进制的镜像走环境变量（scripts/mirrors.cjs），不依赖 .npmrc 的自定义键
+  execSync('npm install', { stdio: 'inherit', cwd: root, env: applyMirrorEnv() });
   console.log('[dieyunagent/bootstrap] dependencies installed.');
 } else {
   console.log('[dieyunagent/bootstrap] dependencies found, skipping npm install.');

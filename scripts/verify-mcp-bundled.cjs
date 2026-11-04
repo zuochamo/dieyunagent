@@ -14,12 +14,12 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { getBuildDistRoot } = require('./build-dist-root.cjs');
-const { BUNDLED_MCP_IDS, launcherHidesConsole } = require('./pack-mcp-bundled.cjs');
+const { getPackagedAppDir } = require('./build-dist-root.cjs');
+const { BUNDLED_MCP_IDS, launcherHidesConsole, needsConsolePatch } = require('./pack-mcp-bundled.cjs');
 const { getBuiltinMcpById } = require('../src/mcp/registry');
 const { getMcpNpmPackageMeta } = require('../src/mcp/package-store');
 
-const BUNDLED_ROOT = path.join(getBuildDistRoot(), 'win-unpacked', 'resources', 'mcp', 'bundled');
+const BUNDLED_ROOT = path.join(getPackagedAppDir(), 'resources', 'mcp', 'bundled');
 
 function sha256File(filePath) {
   const hash = crypto.createHash('sha256');
@@ -83,7 +83,9 @@ function main() {
 
     // 补丁也是产物的一部分：漏了它，客户端每次连接这个 MCP 都会弹一个控制台窗口
     // （缘由见 pack-mcp-bundled.cjs 的 patchLauncherHideConsole）。
-    if (!launcherHidesConsole(entry)) {
+    // 但控制台弹窗只是 Windows 的问题——判据也用同一个 needsConsolePatch()，
+    // 否则 Linux 包会被按 Windows 的产物约束判失败（2026-11-04 实测踩到）。
+    if (needsConsolePatch() && !launcherHidesConsole(entry)) {
       fail(
         `安装包内的启动入口未打「起原生二进制补 windowsHide」补丁: ${manifest.entry}`,
         '该状态下客户端每连接一次都会弹一个控制台窗口；重新执行 npm run pack:mcp-bundled 后再打包'

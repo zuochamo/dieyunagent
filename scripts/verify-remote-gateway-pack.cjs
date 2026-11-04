@@ -3,10 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 
-const { getBuildDistRoot } = require('./build-dist-root.cjs');
+const { getPackagedAppDir } = require('./build-dist-root.cjs');
 const { inspectRemotePack, REMOTE_PACK_CORE_REL } = require('../src/remote/remote-pack-layout.js');
 const root = path.join(__dirname, '..');
-const packRoot = path.join(getBuildDistRoot(), 'win-unpacked', 'resources', 'remote-gateway-pack');
+const packRoot = path.join(getPackagedAppDir(), 'resources', 'remote-gateway-pack');
 const corePath = path.join(packRoot, REMOTE_PACK_CORE_REL);
 const manifestPath = path.join(packRoot, 'manifest.json');
 const MIN_BYTES = 500 * 1024;
@@ -14,7 +14,7 @@ const MIN_BYTES = 500 * 1024;
 function main() {
   if (!fs.existsSync(packRoot)) {
     console.error('[verify-remote-pack] missing:', packRoot);
-    console.error('  请先完成 electron-builder 打包（dist/win-unpacked）');
+    console.error(`  请先完成 electron-builder 打包（${getPackagedAppDir()}）`);
     process.exit(1);
   }
 

@@ -98,13 +98,14 @@ build-installer.bat 0.0.29
 - 构建 Windows NSIS 安装包
 - 构建 Ubuntu deb（`npm run pack:deb:remote`，跨机打到 Linux 构建机；没配 `dieyun-linux-build.local.json` / `DIEYUN_LINUX_CORE_SSH` 或加 `-SkipDeb` 时跳过）
 - 构建 Android APK
-- 发布到 `Y:\client-electron\updates-published`（deb 不在此列）
-- 上传到腾讯 COS（deb 不在此列）
+- 发布到 `Y:\client-electron\updates-published`（PC + Android + Ubuntu deb，deb 与 `latest-linux.yml` 成对）
+- 上传到腾讯 COS（同上，deb 与 `latest-linux.yml` 成对）
 
 发布前确认：
 
 | 项目 | 要求 |
 |------|------|
+| 构建机 Node | **≥ 22.12**（`electron@44` 的 `@electron/get` / `@electron/rebuild` / `node-abi` 要求；`pack-deb-remote` 会按 nvm 里最高版本选 node 并在低于 22.12 时当场失败）。2026-11-04 已把 `192.168.31.62` 升到 v22.23.4（`npm ci` 不再刷 EBADENGINE） |
 | Y: | `Y:\client-electron\updates-published` 已映射且可写 |
 | Android | `ANDROID_HOME` 可用，且手机端需要参与发布 |
 | COS | `COS_SECRET_ID`、`COS_SECRET_KEY` 已设置 |
@@ -124,10 +125,20 @@ npm run sync:updates   # 可选：同步到 updates-published/ 供本机静态�
 | `dieyunagent-Setup-<version>.exe` | NSIS 安装包 |
 | `dieyunagent-Setup-<version>.exe.blockmap` | 增量更新 blockmap |
 | `latest.yml` | 桌面端更新清单 |
+| `dieyunagent_<version>_amd64.deb` | Ubuntu 安装包（跨机打包拉回） |
+| `latest-linux.yml` | Ubuntu 更新清单（与 deb 成对，缺它 Linux 端不会更新） |
 | `mobile/mobile-latest.json` | 手机端更新清单 |
 | `mobile/dieyun-mobile-<version>.apk` | 手机端安装包 |
 
 客户端内置更新源与 `package.json` → `build.publish.url` 一致，默认 **`http://192.168.31.62:3099/`**（`UPDATE_URL` 可覆盖）。
+
+打包后校验（`verify:asar` / `verify:remote-pack` / `verify:mcp-bundled`）**Windows 与 Linux 都跑**，
+由 `scripts/build-desktop.cjs` 默认开启；校验对象按当前平台取 `<dist>/win-unpacked` 或 `<dist>/linux-unpacked`
+（唯一来源 `scripts/build-dist-root.cjs:getPackagedAppDir`），排障才用 `--no-verify`。
+
+打包**前**还有一道测试门禁：`build-desktop.cjs` 在 electron-builder 之前跑 `npm test`
+（`check:contracts` + 按 git diff 选测）。默认只在 Windows 侧生效——发布链从 PC 包开始，源是同一份，
+而远端构建的源码包不含 `.git`，diff 选测会退化成最小集，在那边跑只是假绿。排障才用 `--no-tests`。
 
 #### 离线预装的 MCP（内网可用性）
 

@@ -54,6 +54,24 @@ copy /Y "%SRC%\latest.yml" "%DST%\"
 if errorlevel 1 goto :copy_fail
 echo   OK latest.yml
 
+rem Linux(Ubuntu) 自动更新：deb 与 latest-linux.yml 必须成对发布。
+rem yml 只在同名 deb 存在时才拷（顺序 deb 先、yml 后），避免更新源里出现
+rem 「yml 指向没打出来的安装包」——那会让 Ubuntu 端下载直接 404。
+set "DEB=dieyunagent_%VER%_amd64.deb"
+if exist "%SRC%\%DEB%" (
+  copy /Y "%SRC%\%DEB%" "%DST%\"
+  if errorlevel 1 goto :copy_fail
+  echo   OK %DEB%
+  if exist "%SRC%\latest-linux.yml" (
+    copy /Y "%SRC%\latest-linux.yml" "%DST%\"
+    if errorlevel 1 goto :copy_fail
+    echo   OK latest-linux.yml
+  )
+) else (
+  echo [WARN] 本次没有 Linux 安装包（未配构建机或 -SkipDeb）：发布后更新源不再提供 deb / latest-linux.yml
+  echo        Ubuntu 端将收不到更新，需要重打 deb 后再发布一次。
+)
+
 if exist "%MOBILE_SRC%\mobile-latest.json" (
   copy /Y "%MOBILE_SRC%\mobile-latest.json" "%DST%\"
   if errorlevel 1 goto :copy_fail

@@ -429,5 +429,6 @@ module.exports = {
   packLooksComplete,
   patchLauncherHideConsole,
   launcherHidesConsole,
+  needsConsolePatch,
   readJson
 };

@@ -88,7 +88,10 @@ const SRC_EXCLUDES = [
 /** 命中了就不许上传的**凭据类**文件名（`--exclude` 之外再校验一次清单，防止将来加漏） */
 const SECRET_NAME_PATTERNS = [
   /^\.env(\..*)?$/,
-  /^deploy(\..*)?\.json$/,
+  // 只认真正会装凭据的三份 deploy 配置。`deploy.defaults.example.json` 是随仓库提交的
+  // 内置默认说明（无 key，只有内网地址），笼统的 `^deploy(\..*)?\.json$` 会把它当凭据拦下，
+  // 导致 pack:deb:remote 每次都在上传前中止（源码包里出现「凭据文件」）。
+  /^deploy(\.local|\.packaged)?\.json$/,
   /^dieyun-linux-build\.local\.json$/,
   /^signing\.properties$/,
   /^local\.properties$/,
@@ -136,10 +139,12 @@ function assertNoSecretsInSources(tgzPath) {
   }
 }
 
-/** 内网构建镜像 —— 单一来源，改这里即可 */
-const NPM_REGISTRY = 'https://registry.npmmirror.com';
-const ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/';
-const EB_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/';
+/** 内网构建镜像 —— 单一来源 scripts/mirrors.cjs（远程会话里 export 给远端 npm/electron） */
+const {
+  NPM_REGISTRY,
+  ELECTRON_MIRROR_URL: ELECTRON_MIRROR,
+  ELECTRON_BUILDER_BINARIES_MIRROR_URL: EB_BINARIES_MIRROR
+} = require('./mirrors.cjs');
 
 function readLocalConfig() {
   try {
@@ -228,13 +233,35 @@ function resolveRemoteDir(opts) {
   return { home, dir };
 }
 
+/**
+ * 远端 node 的选取（预检与正式构建共用同一段）。
+ *
+ * 构建机上 nvm 同时装着多个版本（20 / 22 …），而 `~/.nvm/versions/node/*\/bin` 的
+ * glob 顺序是**字典序**：v20 排在 v22 前面只靠运气，将来出现 v9 就会反过来。
+ * 所以显式 `sort -V | tail -1` 取最高版本；electron 44 的工具链（@electron/get、
+ * @electron/rebuild、node-abi）要求 node ≥ 22.12，低于它一律当场失败，不要打完包才发现。
+ */
+const REMOTE_NODE_SNIPPET = [
+  'if [ -d "$HOME/.nvm/versions/node" ]; then',
+  '  _nvm_bin=$(ls -1d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)',
+  '  [ -n "$_nvm_bin" ] && export PATH="$_nvm_bin:$PATH"',
+  'fi'
+].join('\n');
+
+const REMOTE_NODE_VERSION_GATE = [
+  `node -e 'const [maj, min] = process.versions.node.split(".").map(Number);`,
+  `if (maj < 22 || (maj === 22 && min < 12)) {`,
+  `  console.error("远端 Node " + process.versions.node + " 太旧：electron 44 工具链要求 >= 22.12"`,
+  `    + "（构建机上 nvm install 22 后重试）");`,
+  `  process.exit(1);`,
+  `}'`
+].join(' ');
+
 /** 远端环境预检：早失败，别等到编译半小时后才报缺 node */
 function preflight(opts) {
   const script = `
 set -e
-if ! command -v node >/dev/null 2>&1; then
-  for d in "$HOME"/.nvm/versions/node/*/bin; do [ -x "$d/node" ] && export PATH="$d:$PATH"; done
-fi
+${REMOTE_NODE_SNIPPET}
 command -v node >/dev/null || { echo "MISSING_NODE"; exit 11; }
 # cargo / zig 不在非登录 shell 的默认 PATH 里，显式加上（与 remoteBuildScript 一致）
 export PATH="$HOME/.cargo/bin:$HOME/.dieyun/zig:$PATH"
@@ -333,11 +360,10 @@ function remoteBuildScript(opts, remote) {
   const q = shellQuote;
   const lines = [
     'set -e',
-    // node：优先 PATH，其次 nvm 目录（不硬编码版本号）
-    'if ! command -v node >/dev/null 2>&1; then',
-    '  for d in "$HOME"/.nvm/versions/node/*/bin; do [ -x "$d/node" ] && export PATH="$d:$PATH"; done',
-    'fi',
+    // node：取构建机上 nvm 里的最高版本（见 REMOTE_NODE_SNIPPET）
+    REMOTE_NODE_SNIPPET,
     'command -v node >/dev/null || { echo "远端缺少 node"; exit 11; }',
+    REMOTE_NODE_VERSION_GATE,
     'export PATH="$HOME/.cargo/bin:$HOME/.dieyun/zig:$PATH"',
     // 走内网镜像，用环境变量而不是 npm config set：不改动构建机的全局 ~/.npmrc
     `export npm_config_registry=${q(NPM_REGISTRY)}`,
@@ -422,8 +448,25 @@ function pullArtifacts(opts, remote) {
     );
   }
 
+  // 更新源元数据必须跟安装包一起拉回：客户端 electron-updater 在 Linux 上只认
+  // latest-linux.yml（version + files[].url/sha512/size）。以前这里只拉 *.deb，
+  // 元数据留在构建机上，发布到更新源后就一直 404 —— 表现为「Ubuntu 不能自动更新」。
+  const metaListing = sshCapture(
+    opts,
+    `cd ${shellQuote(path.posix.join(remote.dir, 'pkg'))} && ls -1 dist/latest-linux.yml 2>/dev/null || true`
+  );
+  const metas = metaListing.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (metas.length === 0) {
+    console.warn(
+      '[deb:remote] 警告：远端没有 latest-linux.yml，本次拉回的安装包缺少自动更新元数据'
+    );
+  }
+
   const saved = [];
-  for (const name of names) {
+  for (const name of [...names, ...metas]) {
     const base = path.basename(name);
     const localPath = path.join(OUT_DIR, base);
     console.log(`[deb:remote] 拉回 ${base} …`);

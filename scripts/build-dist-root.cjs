@@ -16,6 +16,24 @@ function getBuildDistRoot() {
   return path.join(ROOT, DEFAULT_REL);
 }
 
+/**
+ * electron-builder 解包目录（`<dist>/win-unpacked`、`<dist>/linux-unpacked`）。
+ * 打包后校验脚本的唯一来源：校验对象是「本机这一轮刚打出来的包」，
+ * 所以按当前进程平台取，不在各处硬编码 win-unpacked。
+ */
+const PACKAGED_APP_DIRNAME = {
+  win32: 'win-unpacked',
+  linux: 'linux-unpacked'
+};
+
+function getPackagedAppDir() {
+  const dirname = PACKAGED_APP_DIRNAME[process.platform];
+  if (!dirname) {
+    throw new Error(`未支持在该平台上校验打包产物: ${process.platform}（仅 win32 / linux）`);
+  }
+  return path.join(getBuildDistRoot(), dirname);
+}
+
 function getBuildDistRel() {
   if (fs.existsSync(MARKER)) {
     const rel = fs.readFileSync(MARKER, 'utf8').trim();
@@ -43,6 +61,7 @@ module.exports = {
   DEFAULT_REL,
   ALT_REL,
   getBuildDistRoot,
+  getPackagedAppDir,
   getBuildDistRel,
   setBuildDistRel,
   clearBuildDistMarker

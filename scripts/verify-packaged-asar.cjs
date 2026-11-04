@@ -6,9 +6,9 @@ const os = require('os');
 const { spawnSync } = require('child_process');
 const asar = require('@electron/asar');
 
-const { getBuildDistRoot } = require('./build-dist-root.cjs');
+const { getPackagedAppDir } = require('./build-dist-root.cjs');
 const root = path.join(__dirname, '..');
-const appAsar = path.join(getBuildDistRoot(), 'win-unpacked', 'resources', 'app.asar');
+const appAsar = path.join(getPackagedAppDir(), 'resources', 'app.asar');
 const outDir = path.join(os.tmpdir(), `dieyun-asar-verify-${Date.now()}`);
 
 function walk(dir, out = []) {
@@ -75,8 +75,7 @@ function main() {
   // src/bundled-assets/monaco.js（运行时定位与打包校验同一份）。
   const { MONACO_RESOURCE_DIR, MONACO_MARKER_REL } = require('../src/bundled-assets/monaco');
   const monacoMarker = path.join(
-    getBuildDistRoot(),
-    'win-unpacked',
+    getPackagedAppDir(),
     'resources',
     MONACO_RESOURCE_DIR,
     MONACO_MARKER_REL

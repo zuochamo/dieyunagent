@@ -1,7 +1,8 @@
 {
   "name": "dieyunagent",
-  "version": "0.1.65",
+  "version": "0.1.71",
   "description": "叠云 agent",
+  "desktopName": "dieyunagent.desktop",
   "homepage": "http://192.168.31.62:3099/",
   "main": "src/main.js",
   "scripts": {
@@ -170,6 +171,15 @@
       "icon": "assets/icon.ico",
       "executableName": "dieyunagent",
       "signAndEditExecutable": false,
+      "extraResources": [
+        {
+          "from": "build/dieyun-core",
+          "to": "dieyun-core",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ],
       "target": [
         {
           "target": "nsis",
@@ -183,6 +193,7 @@
       "icon": "assets/icons/linux",
       "executableName": "dieyunagent",
       "category": "Development",
+      "syncDesktopName": true,
       "target": [
         {
           "target": "deb",
@@ -199,46 +210,8 @@
       ],
       "extraResources": [
         {
-          "from": "skills/bundled/weather",
-          "to": "skills/bundled/weather",
-          "filter": [
-            "**/*"
-          ]
-        },
-        {
-          "from": "build/remote-gateway-pack",
-          "to": "remote-gateway-pack",
-          "filter": [
-            "**/*"
-          ]
-        },
-        {
-          "from": "node_modules/monaco-editor",
-          "to": "monaco-editor",
-          "filter": [
-            "min/**",
-            "!**/*.map",
-            "LICENSE",
-            "package.json"
-          ]
-        },
-        {
-          "from": "build/remote-gateway-pack/node_modules",
-          "to": "remote-gateway-pack/node_modules",
-          "filter": [
-            "**/*"
-          ]
-        },
-        {
           "from": "build/dieyun-core-linux",
           "to": "dieyun-core",
-          "filter": [
-            "**/*"
-          ]
-        },
-        {
-          "from": "build/mcp-bundled",
-          "to": "mcp/bundled",
           "filter": [
             "**/*"
           ]
@@ -315,13 +288,6 @@
       {
         "from": "build/remote-gateway-pack/node_modules",
         "to": "remote-gateway-pack/node_modules",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "build/dieyun-core",
-        "to": "dieyun-core",
         "filter": [
           "**/*"
         ]
