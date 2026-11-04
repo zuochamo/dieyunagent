@@ -190,6 +190,21 @@ function manualInstallCommand(debPath) {
 }
 
 /**
+ * 停掉一个 user 单元。**超时后必须停**：`systemd-run --user` 起的单元归用户管理器管，
+ * 杀掉本地那个 `systemd-run` 客户端并不会让它结束 —— 真机实测（192.168.31.62 / Ubuntu 26.04）
+ * 超时返回后单元仍 active、`pkexec` 和 `polkit-agent-helper` 还挂着，等于把一次没人点的
+ * 密码窗和半截 dpkg 留在用户桌面上。
+ *
+ * @param {string} unit
+ * @param {(cmd: string, args: string[], opts?: object) => Promise<{ status: number|null, stderr: string, error?: Error }>} [run]
+ */
+async function stopUserUnit(unit, run) {
+  if (!unit) return;
+  const exec = run || runCommand;
+  await exec('systemctl', ['--user', 'stop', unit], { timeoutMs: 15000 });
+}
+
+/**
  * 在干净进程树里安装 deb，并等它结束（异步：不阻塞主进程）。
  *
  * @param {{
@@ -215,16 +230,16 @@ async function installDebInCleanTree(opts) {
       error: '没有可用的 systemd 用户实例（systemd-run）'
     };
   }
-  const args = buildSystemdRunArgs({
-    unit: opts.unit || defaultUnitName('dieyunagent-deb-install'),
-    command
-  });
+  const unit = opts.unit || defaultUnitName('dieyunagent-deb-install');
+  const args = buildSystemdRunArgs({ unit, command });
   const res =
     (await run(systemdRunPath, args, {
       // 期间 polkit 会弹密码窗，等人输入；超时上限只是防止无人值守时一直挂着
       timeoutMs: Number(opts.timeoutMs) || 5 * 60 * 1000
     })) || {};
   const exitCode = typeof res.status === 'number' ? res.status : null;
+  // 超时/异常：把单元收掉，别把它留在用户桌面上（见 stopUserUnit 的实测记录）
+  if (!res.status && res.error) await stopUserUnit(unit, run);
   // 尾巴 2000 字符够看清原因，也不至于让 UI 里那条失败提示变成一屏 dpkg 日志
   const stderr = String(res.stderr || '').trim().slice(-2000);
   return {
@@ -275,6 +290,7 @@ module.exports = {
   buildSystemdRunArgs,
   resolveSystemdRun,
   manualInstallCommand,
+  stopUserUnit,
   installDebInCleanTree,
   relaunchInCleanTree
 };

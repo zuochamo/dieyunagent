@@ -126,6 +126,44 @@ async function main() {
   });
   assert.strictEqual(timeoutSeen.timeoutMs, 1234, '超时预算透传给执行器（默认 5 分钟太长会一直挂）');
 
+  // 超时后必须把用户单元停掉：systemd-run 的单元归用户管理器管，杀掉本地客户端不会让它
+  // 结束（真机上表现为「密码窗挂着、单元还 active、dpkg 还挂着」）。
+  const calls = [];
+  const timedOut = await installDebInCleanTree({
+    debPath: '/d.deb',
+    systemdRunPath: '/usr/bin/systemd-run',
+    unit: 'dieyunagent-deb-install-test',
+    timeoutMs: 50,
+    run: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'systemctl') return { status: 0, stderr: '' };
+      return { status: null, stderr: 'Running as unit: x.service', error: new Error('命令超时（50ms）') };
+    }
+  });
+  assert.strictEqual(timedOut.ok, false, '超时 -> not ok');
+  assert(/超时/.test(timedOut.error || ''), '超时原因如实带出');
+  assert.deepStrictEqual(
+    calls.map((c) => [c.cmd, ...c.args]),
+    [
+      ['/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect', '--unit=dieyunagent-deb-install-test', '--', '/bin/bash', '-c', calls[0].args[calls[0].args.length - 1]],
+      ['systemctl', '--user', 'stop', 'dieyunagent-deb-install-test']
+    ],
+    '超时后要停单元（systemctl --user stop <unit>）'
+  );
+
+  // 正常退出码失败时不要去 stop（单元已经自己结束了）
+  calls.length = 0;
+  await installDebInCleanTree({
+    debPath: '/d.deb',
+    systemdRunPath: '/usr/bin/systemd-run',
+    unit: 'dieyunagent-deb-install-test2',
+    run: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { status: 100, stderr: 'dpkg: error' };
+    }
+  });
+  assert.strictEqual(calls.length, 1, '非超时失败不该再发 systemctl stop');
+
   const noSystemd = await installDebInCleanTree({
     debPath: '/d.deb',
     systemdRunPath: null,
