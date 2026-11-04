@@ -171,7 +171,6 @@ function cleanupSessionScopedComposerState(sessionId) {
     chatInput.value = '';
   }
   if (typeof cleanupSessionContinueState === 'function') cleanupSessionContinueState(sid);
-  if (typeof cleanupSessionComposerAgentMode === 'function') cleanupSessionComposerAgentMode(sid);
   if (typeof cleanupSessionComposerModelPick === 'function') cleanupSessionComposerModelPick(sid);
   if (typeof clearSessionCompactionSnapshot === 'function') clearSessionCompactionSnapshot(sid);
 }

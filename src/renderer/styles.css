@@ -1820,6 +1820,8 @@ body.composer-resizing {
   font-size: 13px;
   padding: 9px 16px;
   border-radius: 0;
+  /* 按钮文字永不断行：flex 行里被挤压时宁可把旁边的提示挤到下一行，也不要竖排成「保/存/并/连/接」 */
+  white-space: nowrap;
   transition: transform var(--motion-fast) var(--motion-ease-standard), background var(--motion-fast) var(--motion-ease-standard), opacity var(--motion-fast) var(--motion-ease-standard);
 }
 .primary-btn {
@@ -4311,83 +4313,6 @@ table.msg-md-table tbody tr:last-child td {
   flex-shrink: 0;
 }
 
-.composer-agent-mode-wrap {
-  position: relative;
-  flex-shrink: 0;
-}
-
-.composer-foot .composer-agent-mode-trigger {
-  display: inline-flex;
-  align-items: center;
-  height: 28px;
-  padding: 0 2px;
-  border: none;
-  background: transparent;
-  color: var(--text-mute);
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 0;
-  cursor: pointer;
-  transition: color var(--motion-fast) var(--motion-ease-standard);
-}
-
-.composer-foot .composer-agent-mode-trigger:hover,
-.composer-foot .composer-agent-mode-trigger[aria-expanded='true'] {
-  color: var(--text);
-  background: transparent;
-}
-
-.composer-agent-mode-label {
-  line-height: 1;
-}
-
-.composer-agent-mode-menu {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 6px);
-  z-index: 200;
-  min-width: 132px;
-  border: 1px solid var(--border);
-  border-radius: 0;
-  background: var(--bg-elev);
-  box-shadow: var(--shadow);
-  padding: 4px;
-}
-
-.composer-agent-mode-menu[hidden] {
-  display: none;
-}
-
-.composer-agent-mode-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  padding: 7px 10px;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text);
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.composer-agent-mode-item:hover {
-  background: rgba(128, 128, 128, 0.1);
-}
-
-.composer-agent-mode-item-check {
-  visibility: hidden;
-  font-size: 12px;
-  color: var(--text-mute);
-}
-
-.composer-agent-mode-item.active .composer-agent-mode-item-check {
-  visibility: visible;
-}
-
 .composer-foot .composer-model-trigger {
   display: inline-flex;
   align-items: center;
@@ -5673,6 +5598,98 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   border-top: 1px solid var(--border);
 }
 
+/* ---- 快捷键页（data-settings="shortcuts"）：一行一条「名称 / 说明 → 键位」。
+ * 键位按钮本身就是录入入口：点一下进入「按下新按键…」，由 renderer-shortcuts.js 收键。
+ * 本页一律直角：不做圆角按钮。 */
+.shortcut-list {
+  display: flex;
+  flex-direction: column;
+  max-width: 760px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.shortcut-row:last-child {
+  border-bottom: none;
+}
+
+.shortcut-row.is-recording {
+  background: var(--bg-elev);
+}
+
+.shortcut-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.shortcut-name {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.shortcut-desc {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.shortcut-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.shortcut-badge {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.shortcut-combo {
+  min-width: 136px;
+  padding: 5px 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.shortcut-combo:hover {
+  border-color: var(--accent);
+}
+
+.shortcut-combo.is-recording {
+  border-color: var(--accent);
+  color: var(--accent-2);
+}
+
+.shortcut-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.shortcut-empty {
+  padding: 12px 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 .settings-subsection-title {
   margin: 0 0 8px;
   font-size: 14px;
@@ -6289,6 +6306,50 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   max-width: 560px;
 }
 
+/* ---------- 共享记忆（扩展 → 共享记忆） ---------- */
+/* 这一页字段都短（主机/端口/库名/账号/口令），单列会让整页变成一条窄长条：
+   自适应网格（宽屏 3 列、窄屏 1 列），并把输入区宽度上限放到 900px（超宽屏不至于拉成条），
+   提示文字换行而不是挤压按钮。窗口本身是最大化的，这里只调页面内部的排版。 */
+.settings-page[data-settings='shared-memory'] .settings-runtime-section {
+  max-width: none;
+}
+
+.settings-page[data-settings='shared-memory'] .channels-form {
+  max-width: 980px;
+  /* 固定三列（主机/端口/数据库 → 账号/口令），不用 auto-fit：五个字段 auto-fit 会排成 4+1，很别扭 */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  column-gap: 18px;
+}
+
+@media (max-width: 980px) {
+  .settings-page[data-settings='shared-memory'] .channels-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .settings-page[data-settings='shared-memory'] .channels-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.settings-page[data-settings='shared-memory'] .channels-form-foot {
+  max-width: 980px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.settings-page[data-settings='shared-memory'] .channels-form-foot .save-hint {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.settings-page[data-settings='shared-memory'] .channels-toolbar {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
 .channels-push-row {
   display: flex;
   align-items: center;
@@ -6893,6 +6954,11 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 .settings-overlay.settings-mode-model .settings-dialog {
   grid-template-columns: 196px 1fr;
 }
+
+/* 注：**不要**给某个设置页单独改 `.settings-dialog` 的宽度。
+   设置窗口默认就是最大化的（`openSettingsShell` → `setDialogMaximized`），
+   在 `.dialog-maximized` 之后再加一条宽度规则会盖掉 `width:100%`，
+   结果就是「满高但只有一小条宽」的破版 —— 页内宽度靠各自的 max-width 控制。 */
 
 #settings-nav-model {
   display: none;
@@ -10943,6 +11009,267 @@ audio.artifacts-media-preview-el {
  * 卡片 = 与思考区同一套 rounds 渲染（fillIsolatedCardBody），差别只在容器：
  * 这里不限高、不裁剪，全部轮次直接铺开，所以不再有「卡片内滚动」。
  * ------------------------------------------------------------- */
+/* -------------------------------------------------------------
+ * 「目标」页（renderer-goal-panel.js）
+ * 只画事实与状态：进度条用字符格，不引入图表库；颜色只区分「证据通过 / 未通过」。
+ * ------------------------------------------------------------- */
+.goal-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 16px;
+}
+.goal-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.goal-objective {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg);
+  word-break: break-word;
+}
+.goal-progress-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.goal-progress-bar {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 1px;
+  color: var(--accent);
+}
+.goal-panel-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.goal-panel-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.goal-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  padding-top: 10px;
+}
+.goal-section-title {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--fg-muted);
+}
+.goal-todo-list,
+.goal-check-list,
+.goal-fact-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.goal-todo {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.goal-todo.is-done {
+  color: var(--fg-muted);
+  text-decoration: line-through;
+}
+.goal-check-list code,
+.goal-fact-cmd {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+.goal-fact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  line-height: 1.45;
+  color: var(--fg-muted);
+}
+.goal-fact-mark {
+  font-size: 11px;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+}
+.goal-fact.is-ok .goal-fact-mark {
+  color: #3fb950;
+}
+.goal-fact.is-fail .goal-fact-mark {
+  color: #d29922;
+}
+.goal-fact-round {
+  font-size: 11px;
+  opacity: 0.75;
+}
+.goal-tail {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+/* 每条声明检查一行：状态 + 命令 + 「跑过几次 / 最近 exit」 */
+.goal-check {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  line-height: 1.45;
+  color: var(--fg-muted);
+}
+.goal-check-mark {
+  font-size: 11px;
+}
+.goal-check-meta {
+  font-size: 11px;
+  opacity: 0.75;
+}
+.goal-check.is-ok code {
+  color: var(--fg);
+}
+
+/*
+ * 目标条：贴在气泡区上方的一行（目标 · 第几轮 · 最近一条事实）。
+ * 放在 `.agent-chat-column` 里而不是 `.chat-viewport` 里：视口内是滚动容器 +
+ * absolute 的 `.chat-nav` 刻度，塞进去要么随内容滚走、要么压住刻度。
+ */
+.goal-bar {
+  flex: 0 0 auto;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+/* 面板与展开区都带 display，必须自己声明 [hidden]（本仓没有全局兜底规则） */
+.goal-bar[hidden],
+.goal-bar-facts[hidden] {
+  display: none;
+}
+.goal-bar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+}
+.goal-bar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* 整行都可点展开，但只有悬停时给一点底色，免得看起来像纯文字 */
+.goal-bar-toggle:hover .goal-bar-objective {
+  color: var(--fg);
+}
+.goal-bar-toggle:hover .goal-bar-caret {
+  opacity: 1;
+}
+.goal-bar-mark {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+.goal-bar-objective {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.goal-bar-round {
+  flex: 0 0 auto;
+  font-size: 11px;
+  opacity: 0.8;
+}
+/* 轮次与「最近一条事实」之间要有可见分隔：两串短文字挨在一起会读成一句话 */
+.goal-bar-round::after {
+  content: '·';
+  margin: 0 6px;
+  opacity: 0.5;
+}
+.goal-bar-fact {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  opacity: 0.8;
+}
+.goal-bar-fact[data-state='ok'] {
+  color: #3fb950;
+}
+.goal-bar-fact[data-state='fail'] {
+  color: #d29922;
+}
+.goal-bar-caret {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.goal-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.goal-bar-action {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+.goal-bar[data-state='complete'] .goal-bar-mark {
+  color: #3fb950;
+}
+.goal-bar[data-state='paused'] .goal-bar-mark,
+.goal-bar[data-state='stalled'] .goal-bar-mark,
+.goal-bar[data-state='blocked'] .goal-bar-mark {
+  color: #d29922;
+}
+.goal-bar-facts {
+  max-height: 40vh;
+  overflow: auto;
+  padding: 6px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+.goal-bar-facts .goal-section:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
 .subagent-panel-body {
   flex: 1;
   min-height: 0;

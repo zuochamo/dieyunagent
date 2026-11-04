@@ -94,6 +94,26 @@
         <section class="tab-panel tab-panel-agent active" data-panel="agent">
           <div class="agent-main" id="agent-main">
           <div class="agent-chat-column">
+          <!-- 目标条：本会话有目标时贴在气泡区上方一行（目标是什么 · 第几轮 · 最近一条检查事实）。
+               点击展开就地看全部检查事实与清单；按钮只有「继续 / 停止」。
+               数据来自 `agent:session-goal-panel` 的同一份视图（`renderer-goal-panel.js` 渲染），
+               这里只是壳子，不在这里判断目标状态。 -->
+          <div class="goal-bar" id="goal-bar" hidden>
+            <div class="goal-bar-head">
+              <button type="button" class="goal-bar-toggle" id="goal-bar-toggle" aria-expanded="false" title="展开 / 收起目标与检查事实">
+                <span class="goal-bar-mark" id="goal-bar-mark">◎</span>
+                <span class="goal-bar-objective" id="goal-bar-objective"></span>
+                <span class="goal-bar-round" id="goal-bar-round"></span>
+                <span class="goal-bar-fact" id="goal-bar-fact"></span>
+                <span class="goal-bar-caret" id="goal-bar-caret">▾</span>
+              </button>
+              <span class="goal-bar-actions">
+                <button type="button" class="ghost-btn goal-bar-action" id="goal-bar-continue" title="继续推进（重置轮次预算）" hidden>继续</button>
+                <button type="button" class="ghost-btn goal-bar-action" id="goal-bar-stop" title="停止当前一轮（目标转「已暂停」，不再自动续跑）" hidden>停止</button>
+              </span>
+            </div>
+            <div class="goal-bar-facts agent-scroll" id="goal-bar-facts" hidden></div>
+          </div>
           <div class="chat-viewport">
           <div class="chat agent-scroll" id="chat-list">
           </div>
@@ -180,7 +200,7 @@
                         <path d="M8.5 12.5 14 7a3 3 0 0 1 4.25 4.25l-7 7a4.5 4.5 0 1 1-6.36-6.36l7.4-7.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
                       </svg>
                     </button>
-                    <button type="button" class="icon-btn composer-tool-icon-btn" id="btn-composer-voice" title="语音输入（Whisper 批量转写，Ctrl+M）" aria-label="语音输入">
+                    <button type="button" class="icon-btn composer-tool-icon-btn" id="btn-composer-voice" title="语音输入（Whisper 批量转写，Ctrl+M）" data-shortcut-label="voice.toggle" data-shortcut-title-tpl="语音输入（Whisper 批量转写，%s）" aria-label="语音输入">
                       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
                         <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z" fill="none" stroke="currentColor" stroke-width="1.6" />
                         <path d="M19 11a7 7 0 0 1-14 0M12 18v3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
@@ -228,33 +248,6 @@
                         </div>
                         <div class="composer-model-section-title" id="composer-custom-title" data-i18n="custom_models">自定义模型</div>
                         <div class="composer-model-list" id="composer-custom-list"></div>
-                      </div>
-                    </div>
-                    <div class="composer-agent-mode-wrap" id="composer-agent-mode-wrap">
-                      <button
-                        type="button"
-                        class="composer-agent-mode-trigger"
-                        id="composer-agent-mode-trigger"
-                        title="运行模式"
-                        aria-haspopup="menu"
-                        aria-expanded="false"
-                        aria-controls="composer-agent-mode-menu"
-                      >
-                        <span class="composer-agent-mode-label" id="composer-agent-mode-label">Agent</span>
-                      </button>
-                      <div class="composer-agent-mode-menu" id="composer-agent-mode-menu" role="menu" hidden>
-                        <button type="button" class="composer-agent-mode-item active" data-agent-mode="agent" role="menuitem">
-                          <span class="composer-agent-mode-item-label">Agent</span>
-                          <span class="composer-agent-mode-item-check" aria-hidden="true">✓</span>
-                        </button>
-                        <button type="button" class="composer-agent-mode-item" data-agent-mode="plan" role="menuitem">
-                          <span class="composer-agent-mode-item-label">Plan</span>
-                          <span class="composer-agent-mode-item-check" aria-hidden="true">✓</span>
-                        </button>
-                        <button type="button" class="composer-agent-mode-item" data-agent-mode="explore" role="menuitem">
-                          <span class="composer-agent-mode-item-label">Explore</span>
-                          <span class="composer-agent-mode-item-check" aria-hidden="true">✓</span>
-                        </button>
                       </div>
                     </div>
                     <span class="composer-meta" id="composer-workspace" title="">未设置工作空间</span>
@@ -335,6 +328,13 @@
                     <circle class="composer-context-ring-fg" id="composer-context-ring-fg" cx="18" cy="18" r="15.5" fill="none" stroke-width="3" stroke-dasharray="97.4 97.4" stroke-dashoffset="97.4" transform="rotate(-90 18 18)" />
                   </svg>
                 </button>
+                <button type="button" class="side-panel-rail-btn goal-rail-btn" data-side-tab="goal" title="目标" aria-label="目标">
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                    <circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                    <circle cx="12" cy="12" r="4.4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                    <circle cx="12" cy="12" r="1.4" fill="currentColor"/>
+                  </svg>
+                </button>
                 <button type="button" class="side-panel-rail-btn" data-side-tab="subagents" title="子代理" aria-label="子代理">
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                     <circle cx="6" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
@@ -349,7 +349,6 @@
                     <line class="codebase-rail-col" x1="16" y1="5" x2="16" y2="19" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
                     <line class="codebase-rail-row" x1="5" y1="9" x2="19" y2="9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
                     <line class="codebase-rail-row" x1="5" y1="15" x2="19" y2="15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-                    <circle class="graph-rail-node" cx="18" cy="5" r="1.8" fill="currentColor"/>
                   </svg>
                 </button>
               </nav>
@@ -593,6 +592,21 @@
                         <p class="context-model-usage-empty">暂无模型调用</p>
                       </div>
                     </section>
+                  </div>
+                </div>
+                <div class="side-panel-pane" data-side-pane="goal" hidden>
+                  <div class="side-panel-pane-head">
+                    <div class="side-panel-pane-head-main">
+                      <span class="side-panel-pane-title">目标</span>
+                      <span class="side-panel-pane-meta" id="goal-panel-meta">本会话暂无目标</span>
+                    </div>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="goal-panel-continue" title="继续推进（重置轮次预算）" hidden>继续</button>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="goal-panel-stop" title="停止当前一轮（目标转「已暂停」，不再自动续跑）" hidden>停止</button>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="goal-panel-refresh" title="刷新目标状态">刷新</button>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="goal-panel-clear" title="清除本会话目标（不影响对话记录）" hidden>清除</button>
+                  </div>
+                  <div class="goal-panel-body agent-scroll" id="goal-panel-body">
+                    <p class="artifacts-empty">还没有目标。需要多轮推进时，Agent 会自己开一个（goal_start）；也可以直接说清「做到什么算完成」。</p>
                   </div>
                 </div>
                 <div class="side-panel-pane" data-side-pane="subagents" hidden>
@@ -1224,10 +1238,12 @@
           <button type="button" class="settings-nav-item" data-settings-tab="sandbox" data-i18n="settings_sandbox">沙箱</button>
           <button type="button" class="settings-nav-item" data-settings-tab="agent-knowledge" data-i18n="settings_agent_knowledge">知识</button>
           <button type="button" class="settings-nav-item" data-settings-tab="channels" data-i18n="settings_channels">频道</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="shortcuts" data-i18n="settings_shortcuts">快捷键</button>
           <div class="settings-nav-group-label" data-i18n="settings_extensions">扩展</div>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="mcp" data-i18n="settings_mcp">MCP</button>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="list" data-i18n="settings_skills_list">技能</button>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="automation" data-i18n="settings_automation">定时</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="shared-memory" data-i18n="settings_shared_memory">共享记忆</button>
         </aside>
         <div class="settings-main">
           <header class="settings-main-head">
@@ -1344,6 +1360,19 @@
                 </div>
               </div>
             </div>
+            <div class="settings-page" data-settings="shortcuts">
+              <p class="settings-page-desc">
+                改完立即生效，随其它设置一起保存在本机。点键位按钮后按下新的组合键即可；必须带
+                <strong>Ctrl / Alt / Shift</strong> 之一（F1–F24 可单按），Esc 取消录入。
+                录音面板里按 Esc 取消录音、转写中按 Esc 中断，这两下不占用可配置键位。
+              </p>
+              <div class="shortcut-list" id="shortcut-list">
+                <div class="shortcut-empty">打开本页后自动加载…</div>
+              </div>
+              <div class="shortcut-actions">
+                <span class="save-hint" id="shortcut-save-hint"></span>
+              </div>
+            </div>
             <div class="settings-page" data-settings="worktrees">
               <div class="settings-runtime-section">
                 <h3 class="settings-subsection-title">自动清理</h3>
@@ -1453,6 +1482,62 @@
                   <input type="text" class="channels-select" id="channels-push-target" placeholder="chatid 或 single:userid" autocomplete="off" />
                   <button type="button" class="ghost-btn" id="channels-push-btn">发送测试推送</button>
                 </div>
+              </section>
+            </div>
+            <div class="settings-page" data-settings="shared-memory">
+              <section class="settings-runtime-section channels-section">
+                <h3 class="settings-subsection-title">跨机共享记忆</h3>
+                <p class="settings-page-desc">
+                  把本机归纳出的记忆条目同步到局域网里的一个 PostgreSQL 库，其他机器按需召回；反过来，它们的沉淀也会以<strong>【共享记忆】</strong>进本机 system prompt。只同步记忆条目——<strong>不上传对话</strong>，<code>secret</code>/<code>private</code> 永不出本机。
+                </p>
+                <p class="channels-footnote">
+                  默认开启。检查不到数据库时共享记忆自动停用（本地记忆与对话不受影响），下次启动或点「重新检测」再试。
+                </p>
+                <div class="channels-toolbar">
+                  <span class="save-hint" id="shared-memory-status">检测中…</span>
+                  <button type="button" class="ghost-btn" id="shared-memory-refresh">重新检测</button>
+                  <button type="button" class="ghost-btn" id="shared-memory-consolidate">立即提炼</button>
+                </div>
+                <p class="channels-footnote" id="shared-memory-detail"></p>
+              </section>
+
+              <section class="settings-runtime-section channels-section">
+                <h3 class="settings-subsection-title">服务器</h3>
+                <label class="check-row">
+                  <input type="checkbox" id="shared-memory-enabled" checked />
+                  <span>启用共享记忆</span>
+                </label>
+                <div class="channels-form">
+                  <label class="field">
+                    <span class="field-label">主机</span>
+                    <input type="text" id="shared-memory-host" placeholder="192.168.31.62" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">端口</span>
+                    <input type="text" id="shared-memory-port" placeholder="5432" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">数据库</span>
+                    <input type="text" id="shared-memory-database" placeholder="dieyun_memory" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">账号</span>
+                    <input type="text" id="shared-memory-user" placeholder="role_mem" autocomplete="off" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">口令</span>
+                    <input type="password" id="shared-memory-password" placeholder="数据库口令（加密保存在本机）" autocomplete="off" />
+                    <span class="channels-footnote" id="shared-memory-password-hint" hidden>已保存过口令，留空表示不修改</span>
+                  </label>
+                </div>
+                <div class="channels-form-foot">
+                  <button type="button" class="ghost-btn" id="shared-memory-save">保存并连接</button>
+                  <button type="button" class="ghost-btn" id="shared-memory-test">测试连接</button>
+                  <span class="save-hint" id="shared-memory-hint"></span>
+                </div>
+                <p class="channels-footnote">
+                  建表与探活由 Main 负责：首次连上会自动建 <code>shared_memory</code> 等表；装了 pgvector 就走向量召回，没装就用文本相似度（同一套阈值）。
+                </p>
               </section>
             </div>
             <div class="settings-page" data-settings="perms">
@@ -1724,7 +1809,7 @@
                 </section>
                 <section class="help-usage-section">
                   <h3>对话与 Composer</h3>
-                  <p>输入框下方可选<strong>工作空间</strong>（本地文件夹或远程 SSH）、<strong>模型</strong>（Auto 或指定模型）、<strong>Agent / Plan</strong> 模式。支持粘贴或拖入图片作为附件；点麦克风图标或按 <code>Ctrl+M</code> 可语音输入（录完批量转写为文字）。输入 <code>@Codebase</code> 可对工作区做语义检索。工作区面板「上下文」图标为圆环，指示当前上下文用量估算。</p>
+                  <p>输入框下方可选<strong>工作空间</strong>（本地文件夹或远程 SSH）、<strong>模型</strong>（Auto 或指定模型）、<strong>Agent / Plan</strong> 模式。支持粘贴或拖入图片作为附件；点麦克风图标或按 <code data-shortcut-label="voice.toggle">Ctrl+M</code> 可语音输入（录完批量转写为文字；键位可在「基础设置 → 快捷键」里改）。输入 <code>@Codebase</code> 可对工作区做语义检索。工作区面板「上下文」图标为圆环，指示当前上下文用量估算。</p>
                   <p><strong>运行中继续说话</strong>：Agent 跑着时按 Enter 把消息排进队列，发送键临时变成停止；队列里的消息可逐条发送、编辑或清空。</p>
                   <p><strong>路径权限图标</strong>（输入框右侧的锁）：点一下等价于在「设置 → 沙箱」切到「完全放开」，或退回上一档；两处是同一个旋钮。</p>
                   <p><strong>Agent 模式</strong>：单 Agent 直接调用工具完成任务，改动写入当前工作区（非 Plan 隔离时）。</p>
@@ -1995,8 +2080,8 @@
           <label class="field">
             <span class="field-label">模型类型</span>
             <div class="model-modality-tags" id="defined-model-editor-modality-tags" role="radiogroup" aria-label="模型类型">
-              <button type="button" class="model-modality-tag" data-modality="text" aria-pressed="true">文本</button>
-              <button type="button" class="model-modality-tag" data-modality="vision" aria-pressed="false">全模态</button>
+              <button type="button" class="model-modality-tag" data-modality="text" aria-pressed="false">文本</button>
+              <button type="button" class="model-modality-tag is-active" data-modality="vision" aria-pressed="true">全模态</button>
               <button type="button" class="model-modality-tag" data-modality="speech" aria-pressed="false">语音转写</button>
               <button type="button" class="model-modality-tag" data-modality="tts" aria-pressed="false">语音合成</button>
             </div>
@@ -2189,6 +2274,7 @@
     <script src="./renderer-codebase-panel.js"></script>
     <script src="./renderer-graph-panel.js"></script>
     <script src="./renderer-index-panel.js"></script>
+    <script src="./renderer-goal-panel.js"></script>
     <script src="./renderer-worktrees-settings.js"></script>
     <!-- gateway + workspace panels -->
     <script src="./renderer-gateway.js"></script>
@@ -2253,12 +2339,14 @@
     <script src="./renderer-help.js"></script>
     <script src="./renderer-update.js"></script>
     <script src="./renderer-settings-shell.js"></script>
+    <script src="./renderer-shortcuts.js"></script>
     <script src="./renderer-skills-grid.js"></script>
     <script src="./renderer-skills-ui.js"></script>
     <script src="./renderer-skill-catalog.js"></script>
     <script src="./renderer-mcp-catalog.js"></script>
     <script src="./renderer-workspace-ssh.js"></script>
     <script src="./renderer-channels.js"></script>
+    <script src="./renderer-shared-memory.js"></script>
     <!-- composer + agent execution（agent-limits-runtime 依赖 composer 的 sessionComposerModelPicks，须在其后） -->
     <script src="./renderer-composer-mention.js"></script>
     <script src="./renderer-composer.js"></script>

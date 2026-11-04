@@ -476,7 +476,6 @@ function formatAgentContinueHint(continueState, canClick) {
   }
 
   const info = continueState?.limitInfo || {};
-  const mode = info.mode || 'Agent';
   const used = Number(info.toolCallsUsed);
   const maxTools = Number(info.maxToolCalls);
   const maxRounds = Number(info.maxRounds);
@@ -490,7 +489,7 @@ function formatAgentContinueHint(continueState, canClick) {
     details.push(`最多 ${maxRounds} 轮`);
   }
   const action = canClick ? '点击「继续」从断点恢复。' : '可在输入框发送「继续」。';
-  return `${mode} 本段预算用完${details.length ? `（${details.join('，')}）` : ''}，${action}`;
+  return `本段预算用完${details.length ? `（${details.join('，')}）` : ''}，${action}`;
 }
 
 function buildTraceFileChangeSummary(trace) {

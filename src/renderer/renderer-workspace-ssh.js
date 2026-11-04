@@ -259,67 +259,130 @@ function updateSshPanelInfo(ws, st) {
   if (metaEl) metaEl.textContent = metaText;
 }
 
-async function refreshWorkspaceMenuItems() {
+/**
+ * SSH 面板的唯一刷新入口（点侧栏页 / 开工作空间菜单 / 连接流程 / 「刷新」按钮都走这里）。
+ *
+ * 三条口径，对应「点一下卡一下、状态过一会儿才出来」：
+ * 1. 本地就能拿到的三行（连接状态 / 主机 / 远程目录）先画，不等任何远端往返；
+ * 2. 需要远端的三块（索引 Agent / agent.log / 会话副本）各自发起、谁也不挡谁 ——
+ *    以前是一条 await 链，谁慢谁把后面全拖住；
+ * 3. 同一时刻只跑一轮：正在跑时被再叫到，只记一个「跑完再来一次」。远端 exec 在一条
+ *    连接内是串行的，一次点击排两份 tail + 两份 git status 只会让面板更晚出来。
+ */
+function refreshWorkspaceMenuItems() {
+  if (refreshWorkspaceMenuItems._running) {
+    refreshWorkspaceMenuItems._again = true;
+    return refreshWorkspaceMenuItems._running;
+  }
+  const p = refreshWorkspaceMenuItemsOnce().finally(() => {
+    refreshWorkspaceMenuItems._running = null;
+    if (refreshWorkspaceMenuItems._again) {
+      refreshWorkspaceMenuItems._again = false;
+      refreshWorkspaceMenuItems().catch(() => {});
+    }
+  });
+  refreshWorkspaceMenuItems._running = p;
+  return p;
+}
+
+async function refreshWorkspaceMenuItemsOnce() {
   const menu = $('composer-workspace-menu');
   if (!menu) return;
-  let ws = null;
-  let st = { connected: false };
-  try {
-    if (wsApi.getWorkspace) ws = await wsApi.getWorkspace();
-  } catch {
-    // ignore
-  }
-  try {
-    if (wsApi.sshStatus) st = await wsApi.sshStatus();
-  } catch {
-    // ignore
-  }
-  const isSsh = ws && ws.kind === 'ssh';
+  const [wsRes, stRes] = await Promise.allSettled([
+    wsApi.getWorkspace ? wsApi.getWorkspace() : null,
+    wsApi.sshStatus ? wsApi.sshStatus() : null
+  ]);
+  const ws = wsRes.status === 'fulfilled' ? wsRes.value : null;
+  const st = (stRes.status === 'fulfilled' && stRes.value) || { connected: false };
+  const isSsh = !!(ws && ws.kind === 'ssh');
   const sshLinked = !!(st.connected && isSsh);
   const showReconnect = isSsh && !st.connected;
   updateSshPanelVisibility(ws);
   const el = (action) => document.querySelector(`[data-ws-action="${action}"]`);
   if (el('ssh-reconnect')) el('ssh-reconnect').hidden = !showReconnect;
   updateSshPanelInfo(ws, st);
-  if (isSsh) {
-    await refreshRemoteGatewayMenuStatus(true, sshLinked);
-    refreshSshPanelAgentLog(sshLinked).catch(() => {});
-  } else {
-    await refreshRemoteGatewayMenuStatus(false, false);
-    refreshSshPanelAgentLog(false).catch(() => {});
-  }
-  refreshSessionWorktreePanel(sshLinked).catch(() => {});
+  // 远端三块互不等待：任何一块慢（甚至超时）都不能让另外两块跟着空白
+  await Promise.allSettled([
+    refreshRemoteGatewayMenuStatus(isSsh, sshLinked),
+    refreshSshPanelAgentLog(sshLinked),
+    refreshSessionWorktreePanel(sshLinked)
+  ]);
 }
+
+/** 「会话副本」区块的上一次结果：同一会话重开面板时先给旧值，别先抹成 '—' 再等远端 */
+const sessionWorktreePanelState = { sid: '', busy: false, again: false };
 
 /**
  * 「会话副本」区块：这个会话在远端有自己的 worktree，改动要手动应用回主目录。
- * 只在 SSH 已连接时查（预览 = 远端跑一次 git status）。
+ *
+ * 预览是一趟**远端 git status**（连接内 exec 串行），所以三个门都要把住：
+ * 面板没显示就不发；同一时刻只发一条；只有换会话才把旧值清掉 ——
+ * 原来每次刷新都先把「位置 / 未应用」抹成 '—' 再等远端，看起来就是「没刷出来」。
  */
 async function refreshSessionWorktreePanel(sshLinked) {
   const applyBtn = document.querySelector('[data-ws-action="worktree-apply"]');
   const pathEl = $('ssh-panel-wt-path');
   const pendingEl = $('ssh-panel-wt-pending');
-  if (applyBtn) applyBtn.hidden = true;
-  if (pathEl) pathEl.textContent = '—';
-  if (pendingEl) pendingEl.textContent = '—';
-  if (!sshLinked || !wsApi.worktreeRemotePreview) return;
-  let r = null;
+  const pane = document.querySelector('.side-panel-pane[data-side-pane="ssh"]');
+  if (!pane || pane.hidden) return;
+  const sid =
+    typeof currentSessionId !== 'undefined' && currentSessionId ? String(currentSessionId) : '';
+  const clear = () => {
+    if (applyBtn) applyBtn.hidden = true;
+    if (pathEl) {
+      pathEl.textContent = '—';
+      pathEl.title = '';
+    }
+    if (pendingEl) pendingEl.textContent = '—';
+  };
+  if (sessionWorktreePanelState.sid !== sid) {
+    sessionWorktreePanelState.sid = sid;
+    clear();
+  }
+  if (!sshLinked || !wsApi.worktreeRemotePreview) {
+    clear();
+    return;
+  }
+  if (sessionWorktreePanelState.busy) {
+    // 在途的那趟是别的会话/别的时刻发的：跑完再按当前状态重来一次，别把它的结果写进来
+    sessionWorktreePanelState.again = true;
+    return;
+  }
+  sessionWorktreePanelState.busy = true;
+  if (pendingEl && (!pendingEl.textContent || pendingEl.textContent === '—')) {
+    pendingEl.textContent = '读取中…';
+  }
   try {
-    r = await wsApi.worktreeRemotePreview({});
-  } catch {
-    return;
+    let r = null;
+    try {
+      r = await wsApi.worktreeRemotePreview({});
+    } catch {
+      if (pendingEl && pendingEl.textContent === '读取中…') pendingEl.textContent = '读取失败';
+      return;
+    }
+    // 期间切了会话：这份结果属于上一条会话，写进去等于把别人的副本显示成当前会话的
+    if (sessionWorktreePanelState.sid !== sid) return;
+    if (!r || !r.ok) {
+      // 读不出来就等于「不知道还有没有未应用的改动」：把动作收起来，别留一个前提无法验证的按钮
+      if (applyBtn) applyBtn.hidden = true;
+      if (pathEl && r && r.code !== 'not_session_worktree') pathEl.textContent = r.error || '—';
+      if (pendingEl && pendingEl.textContent === '读取中…') pendingEl.textContent = '—';
+      return;
+    }
+    if (pathEl) {
+      const parts = String(r.wtPath || '').split('/').filter(Boolean);
+      pathEl.textContent = parts.slice(-2).join('/') || '—';
+      pathEl.title = r.wtPath || '';
+    }
+    if (pendingEl) pendingEl.textContent = r.files.length ? `${r.files.length} 个文件` : '无';
+    if (applyBtn) applyBtn.hidden = r.files.length === 0;
+  } finally {
+    sessionWorktreePanelState.busy = false;
+    if (sessionWorktreePanelState.again) {
+      sessionWorktreePanelState.again = false;
+      refreshSessionWorktreePanel(sshLinked).catch(() => {});
+    }
   }
-  if (!r || !r.ok) {
-    if (pathEl && r && r.code !== 'not_session_worktree') pathEl.textContent = r.error || '—';
-    return;
-  }
-  if (pathEl) {
-    const parts = String(r.wtPath || '').split('/').filter(Boolean);
-    pathEl.textContent = parts.slice(-2).join('/') || '—';
-    pathEl.title = r.wtPath || '';
-  }
-  if (pendingEl) pendingEl.textContent = r.files.length ? `${r.files.length} 个文件` : '无';
-  if (applyBtn) applyBtn.hidden = r.files.length === 0;
 }
 
 /** 应用会话副本改动到远端主目录（提交到副本分支 → 合并；冲突自动回滚主目录） */
@@ -495,6 +558,11 @@ async function refreshSshPanelAgentLog(sshLinked) {
   }
   if (refreshSshPanelAgentLog._busy) return;
   refreshSshPanelAgentLog._busy = true;
+  // 一趟 SSH 往返（远端 tail）才有内容：先把「在读」写出来，别让这块一直是空的
+  if (!logEl.textContent) {
+    logEl.textContent = '读取中…';
+    logEl.hidden = false;
+  }
   try {
     const r = await wsApi.sshRemoteAgentLog({ lines: 40 });
     if (!r || !r.ok) {

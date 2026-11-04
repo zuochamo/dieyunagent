@@ -4,7 +4,7 @@
 
 **原则**：Renderer 只做展示与 IPC；Agent 循环在 Main + `dieyun-core`，勿把业务状态机堆进 renderer。
 
-**弹窗约定**：所有 modal / overlay 弹窗（`*-overlay`、lightbox、`showTextPrompt`）**只能由关闭按钮（× / 取消）或 Esc 关闭** —— 禁止给遮罩绑「点击空白处关闭」的 click 监听（误触会丢半截表单）。移动端抽屉同理：只由左侧「×」/ 面板内关闭按钮关闭，`*-backdrop` 仅用于挡住下层点击。下拉菜单（`renderer-select-menu.js`、Composer 的模型/模式菜单、工作区菜单）不属于弹窗，保持「点外部 / Esc 关闭」。
+**弹窗约定**：所有 modal / overlay 弹窗（`*-overlay`、lightbox、`showTextPrompt`）**只能由关闭按钮（× / 取消）或 Esc 关闭** —— 禁止给遮罩绑「点击空白处关闭」的 click 监听（误触会丢半截表单）。移动端抽屉同理：只由左侧「×」/ 面板内关闭按钮关闭，`*-backdrop` 仅用于挡住下层点击。下拉菜单（`renderer-select-menu.js`、Composer 的模型菜单、工作区菜单）不属于弹窗，保持「点外部 / Esc 关闭」。
 
 ## 核心链路（Agent / 聊天）
 
@@ -47,11 +47,12 @@
 | `renderer-artifacts-panel.js` | 侧栏「产物」页：会话产物桶（带 diff）+ 会话时间窗内 `artifact.list_files` 扫描结果（脚本 / 截图 / 插件落盘的 docx、xlsx、png、html） | 产物页 |
 | `renderer-chat-history.js` | 会话列表、切换、加载消息 | 侧栏会话 |
 | `renderer-chat-state.js` | 当前会话 run 状态 | 进行中任务标记 |
-| `renderer-composer.js` | 输入框、发送、Agent/Plan 模式切换 | Composer 行为 |
+| `renderer-composer.js` | 输入框、发送、模型选择 | Composer 行为 |
 | `renderer-attachments.js` | 附件（粘贴 / 拖入 / 选择）与**通用图片全屏查看** `openImageLightbox()`（composer 预览与回答里的截图共用同一份，不另造大图查看器） | 附件与看图 |
-| `renderer-composer-form.js` | 表单控件、快捷键 | 输入区细节 |
+| `renderer-composer-form.js` | 表单控件 | 输入区细节 |
 | `renderer-composer-queue.js` | 排队发送、立即发送 | 多消息队列 |
 | `renderer-composer-voice.js` | 语音输入 | 麦克风 / 转写 |
+| `renderer-shortcuts.js` | **快捷键唯一来源**：键位表（默认组合 + 说明）、`matchesShortcut(ev, id)` 匹配口径、设置页「基础设置 → 快捷键」（点键位后按新键、冲突检查）；覆盖项存 `settings.shortcuts` | 改键位 / 新增全局快捷键 |
 | `renderer-tool-defs.js` | 从 `tool-catalog` 组装工具列表 + 插件 UI | 工具列表注入 |
 | `../agent/tool-catalog.js` | 静态工具 schema 唯一目录 | 改工具描述/参数 |
 | `renderer-tool-results.js` | 工具结果卡片 | 工具输出 UI |
@@ -87,6 +88,7 @@
 | `renderer-codebase-panel.js` | 代码片段索引：状态 / 重建 / 建向量（面板已并入「索引」页签） |
 | `renderer-graph-panel.js` | 结构索引：状态 / 重建 / 符号命中渲染（面板已并入「索引」页签） |
 | `renderer-index-panel.js` | 「索引」面板外壳（`data-side-tab="index"`）：一个搜索框同查片段+符号、两个索引的 shown/hidden 扇出、rail busy 合成 |
+| `renderer-goal-panel.js` | 会话目标的两个面：气泡区上方**目标条**（`#goal-bar`：目标 · 第几轮 · 最近一条事实，点开就地展开检查事实与清单）与侧栏**「目标」页**（`data-side-tab="goal"`）。视图由 Main 的 `goals/session-goal.js#toPanelView` 成形，这里只画；同一份视图、同一次取数、同一个轮询（可见 / 有目标时才跑） |
 | `renderer-problems.js` | LSP 诊断 |
 
 ## 设置 / 模型 / 技能
@@ -102,6 +104,8 @@
 | `renderer-permissions.js` | 权限开关 |
 | `renderer-agents-md.js` | 项目 AGENTS.md 维护 |
 | `renderer-dieyun-md.js` | dieyun.md 编辑 |
+| `renderer-channels.js` | 设置 →「频道」：企业微信智能机器人凭据 / 长连接状态 / 工作空间绑定（配置与运行时在 `src/channels/`，这里只读 `channels:*` IPC） |
+| `renderer-shared-memory.js` | 设置 → 扩展 →「共享记忆」：PostgreSQL 连接（测试连接 / 保存即重连）、探活原因、召回条数与阈值展示（数据层在 `src/memory-shared/`） |
 
 ## 基础设施
 

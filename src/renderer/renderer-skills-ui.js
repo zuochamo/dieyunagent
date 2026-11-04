@@ -846,8 +846,14 @@ function updateWorkspaceLabel(ws) {
     el.classList.toggle('composer-workspace-ssh', ws.kind === 'ssh');
     el.classList.toggle('composer-workspace-disconnected', ws.kind === 'ssh' && !ws.sshConnected);
   } else {
-    el.textContent = '默认 ~/.dieyun/workspace';
-    el.title = '未单独选择工作空间；文件工具默认写入用户主目录下的 .dieyun/workspace';
+    // 会话本身没绑定工作空间时，文件工具写的是「本机 agent 的默认工作空间」：桌面端就是
+    // `~/.dieyun/workspace`，无窗口模式下由启动参数 / 环境文件决定 —— 所以由环境先把事实放在
+    // `window.appDefaultWorkspacePath`（见 src/headless/desktop-ui.js 的 preload 替身），
+    // 这里不再硬编码一个在服务器上不成立的路径。
+    const defaultWsPath =
+      (typeof window !== 'undefined' && window.appDefaultWorkspacePath) || '~/.dieyun/workspace';
+    el.textContent = '默认 ' + defaultWsPath;
+    el.title = '未单独选择工作空间；文件工具默认写入 ' + defaultWsPath;
     el.classList.remove('composer-workspace-ssh', 'composer-workspace-disconnected');
   }
   if (typeof touchAgentsMdForWorkspace === 'function' && ws && ws.workspacePath) {

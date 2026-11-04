@@ -1,4 +1,4 @@
-/* global window, DieyunNamespaces, gwState, gatewayCall, connectGateway, reconnectGateway, currentSessionId, setCurrentSessionId, messages, sessionActiveRuns, appendBubble, appendUserTurn, renderChatFromMessages, renderAssistantBubbleContent, initChatRenderUI, initChatHistoryUI, loadChatFromGateway, refreshHistoryList, healActiveSessionFromHistory, showChatLoadError, isCurrentSessionSending, syncComposerForActiveSession, updateSessionRunProgress, dispatchAgentRunEvent, getComposerAgentMode, resolveComposerModelForSend, sendMessage, runAgentCompletion, resumeAgentToolLoop, initAgentLoopUI, fetchChatCompletion, chatCompletionWithToolsViaRust, buildAgentTools, buildCompletionMessages, buildSessionChatHistoryBlock, executeAgentTool, renderChangesPane, initSidePanel, setSidePanelTab, preloadMonacoEditor, ensureDefaultWorkspaceEditor, initComposerFormUI */
+/* global window, DieyunNamespaces, gwState, gatewayCall, connectGateway, reconnectGateway, currentSessionId, setCurrentSessionId, messages, sessionActiveRuns, appendBubble, appendUserTurn, renderChatFromMessages, renderAssistantBubbleContent, initChatRenderUI, initChatHistoryUI, loadChatFromGateway, refreshHistoryList, healActiveSessionFromHistory, showChatLoadError, isCurrentSessionSending, syncComposerForActiveSession, updateSessionRunProgress, dispatchAgentRunEvent, resolveComposerModelForSend, sendMessage, runAgentCompletion, resumeAgentToolLoop, initAgentLoopUI, fetchChatCompletion, chatCompletionWithToolsViaRust, buildAgentTools, buildCompletionMessages, buildSessionChatHistoryBlock, executeAgentTool, renderChangesPane, initSidePanel, setSidePanelTab, preloadMonacoEditor, ensureDefaultWorkspaceEditor, initComposerFormUI */
 'use strict';
 
 (function registerRendererNamespaces() {
@@ -72,11 +72,10 @@
   register(
     'DieyunComposer',
     {
-      getComposerAgentMode,
       resolveComposerModelForSend,
       initComposerFormUI
     },
-    { compat: ['getComposerAgentMode', 'resolveComposerModelForSend', 'initComposerFormUI'] }
+    { compat: ['resolveComposerModelForSend', 'initComposerFormUI'] }
   );
 
   register(

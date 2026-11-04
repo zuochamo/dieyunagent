@@ -152,9 +152,22 @@ function setSupplierEditorModelContextTier(modelId, tierId) {
   }
 }
 
+/**
+ * 编辑器里某行模型的模态：已声明用声明值，**未声明（刚检测到 / 新加的行）默认「全模态」**。
+ *
+ * 兜底不能直接用 `normalizeModalitySetting` 的 text：那一处兜底读的是历史设置
+ * （与 Main 侧同判据，纯文本模型被当能识图会 400）。这里是「新建」场景，
+ * 默认给全模态，用户加完模型不用再逐个点标签。
+ */
+function editorModelModality(declaredValue) {
+  const mc = window.ModelCapabilities;
+  if (declaredValue) return mc?.normalizeModalitySetting(declaredValue) || 'text';
+  return mc?.DEFAULT_MODALITY || 'vision';
+}
+
 function getSupplierEditorModelModality(modelId) {
   const id = String(modelId || '');
-  return window.ModelCapabilities?.normalizeModalitySetting(supplierEditorModelModalities[id]) || 'text';
+  return editorModelModality(supplierEditorModelModalities[id]);
 }
 
 function setSupplierEditorModelModality(modelId, modality) {
@@ -589,8 +602,7 @@ async function detectSupplierModelsForEditor() {
       const id = String(m.id || '');
       if (!id) continue;
       supplierEditorEnabledModels[id] = prev[id] !== undefined ? prev[id] !== false : true;
-      supplierEditorModelModalities[id] =
-        window.ModelCapabilities?.normalizeModalitySetting(prevModalities[id]) || 'text';
+      supplierEditorModelModalities[id] = editorModelModality(prevModalities[id]);
       if (prevTiers[id]) {
         supplierEditorContextTierByModel[id] = normalizeContextTierId(prevTiers[id]);
       }
@@ -757,7 +769,8 @@ function openDefinedModelEditor(id) {
     name: '',
     baseUrl: settings.baseUrl || '',
     apiKey: '',
-    modalitySetting: 'text',
+    // 新加的模型默认「全模态」（ModelCapabilities.DEFAULT_MODALITY），不是文本
+    modalitySetting: window.ModelCapabilities?.DEFAULT_MODALITY || 'vision',
     contextTier: ''
   };
   $('defined-model-editor-title').textContent = id ? '编辑模型' : '添加模型';

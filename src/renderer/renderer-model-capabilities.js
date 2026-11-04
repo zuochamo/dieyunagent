@@ -17,6 +17,18 @@
 
   const MODALITY_OPTIONS = ['text', 'vision', 'speech', 'tts'];
 
+  /**
+   * 「新增模型 / 新增供应商」的默认模态：全模态（vision）。
+   *
+   * 与 `normalizeModalitySetting` 的兜底（text）**刻意分开**，别合并：
+   *   - 那一处兜底读的是**历史设置**——从没标注过模态的老供应商模型按 text 算，
+   *     与 Main 侧 `model-runtime-by-tier.declaredModality` 同判据；改成 vision 会让
+   *     纯文本模型也被当成能识图，浏览器截图 / 图片附件注进去直接 400。
+   *   - 这一处是**创建**：用户加完模型不该再逐个点标签，默认给全模态，
+   *     默认不限制识图能力。
+   */
+  const DEFAULT_MODALITY = 'vision';
+
   /** 不能当对话模型用的模态（与 Main 侧 model-api-config.js#isNonChatModality 同判据）。 */
   const NON_CHAT_MODALITIES = new Set(['speech', 'tts']);
 
@@ -276,6 +288,7 @@
   window.ModelCapabilities = {
     MODALITY_LABELS,
     MODALITY_OPTIONS,
+    DEFAULT_MODALITY,
     isNonChatModality,
     normalizeModalitySetting,
     effectiveCustomModelKind,

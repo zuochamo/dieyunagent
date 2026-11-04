@@ -1,5 +1,18 @@
-/* global isSessionSwitchInFlight, loopApi, currentSessionId, cleanupStaleSessionRun, resolveComposerModelForSend, attachmentNeedsVision, getCustomModelApiConfig, appendBubble, isCurrentSessionSending, stopTtsPlayback, getAgentContinueState, resumeAgentToolLoop, clearAgentContinueState, closeStaleAgentRunForSession, getPendingResumeCheckpoint, tryDetectResumeCheckpoint, clearPendingResumeCheckpoint, cloneAttachmentSnapshot, getPendingAttachments, appendUserTurn, setComposerSendingState, isImageAttachment, revokeAttachmentPreview, renderAttachmentChips, processAttachmentsForSend, syncComposerForActiveSession, focusChatInput, invalidateSessionMessageCache, packUserMessageMeta, messages, setMessagesOwnerSessionId, getMessagesOwnerSessionId, messagesBelongToSession, getSessionMessageCache, selectHistoryMessagesForSession, cloneHistoryMessages, renderChatFromMessages, gwState, resolveSessionWorkspacePath, bindCurrentSessionWorkspace, gatewayCall, sessionListTitle, refreshHistoryList, createTraceRunId, getComposerAgentMode, resetActiveRunContextUiState, beginComposerUsageAttribution, sessionActiveRuns, refreshContextProgress, throwIfAgentAborted, waitForAgentAbortable, isRemoteSessionWorkspacePath, syncSessionRemoteLease, finishSessionActiveRun, finalizeAssistantBubble, initAgentPrepSteps, renderAssistantBubbleContent, scrollChatToBottom, agentPrepStepStart, beginTurnUndo, agentPrepStepDone, agentPrepStepSkip, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, buildSystemMessage, buildAgentTools, buildExploreTools, buildExploreCoordinatorTools, setSessionContextEstimate, estimateToolsTokens, modelSupportsMultimodal, extractPreparedImageParts, composerModeLabel, formatModelFooterLabel, resolveUserMsgCreatedAt, canMutateViewMessages, settings, buildCompletionMessages, unwrapSystemPromptPack, joinPromptChunks, getMaxOutputTokens, buildSessionChatHistoryBlock, runAgentCompletion, pauseAgentForToolLimit, completeAgentRunAfterSuccess, finishAgentPrepPhase, isUserAbortError, resolveStoppedDisplayTrace, resolveFailedDisplayTrace, normalizeStoppedTrace, getLastAgentDisplayedTrace, buildFallbackTurnMeta, finalizeUndoForUserTurn, buildStoppedFooterMeta, persistStoppedAssistant, finalizeUserTurnFooter, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, formatAgentApiError, persistFailedAssistantTurn, scheduleWorktreePolicyCleanup, autoCloseBrowserAfterAgentRun, isTaskTierFeatureEnabled, inferTaskTierFromStructure, extractPathHintsFromText, textHasCodebaseMention, getAgentLimits, fetchChatCompletion, pauseComposerQueueAfterUserStop, setLastMemoryInjectionAudit */
+/* global isSessionSwitchInFlight, loopApi, currentSessionId, cleanupStaleSessionRun, resolveComposerModelForSend, attachmentNeedsVision, getCustomModelApiConfig, appendBubble, isCurrentSessionSending, stopTtsPlayback, getAgentContinueState, resumeAgentToolLoop, clearAgentContinueState, closeStaleAgentRunForSession, getPendingResumeCheckpoint, tryDetectResumeCheckpoint, clearPendingResumeCheckpoint, cloneAttachmentSnapshot, getPendingAttachments, appendUserTurn, setComposerSendingState, isImageAttachment, revokeAttachmentPreview, renderAttachmentChips, processAttachmentsForSend, syncComposerForActiveSession, focusChatInput, invalidateSessionMessageCache, packUserMessageMeta, messages, setMessagesOwnerSessionId, getMessagesOwnerSessionId, messagesBelongToSession, getSessionMessageCache, selectHistoryMessagesForSession, cloneHistoryMessages, renderChatFromMessages, gwState, resolveSessionWorkspacePath, bindCurrentSessionWorkspace, gatewayCall, sessionListTitle, refreshHistoryList, createTraceRunId, resetActiveRunContextUiState, beginComposerUsageAttribution, sessionActiveRuns, refreshContextProgress, throwIfAgentAborted, waitForAgentAbortable, isRemoteSessionWorkspacePath, syncSessionRemoteLease, finishSessionActiveRun, finalizeAssistantBubble, initAgentPrepSteps, renderAssistantBubbleContent, scrollChatToBottom, agentPrepStepStart, beginTurnUndo, agentPrepStepDone, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, buildSystemMessage, buildAgentTools, setSessionContextEstimate, estimateToolsTokens, modelSupportsMultimodal, extractPreparedImageParts, formatModelFooterLabel, resolveUserMsgCreatedAt, canMutateViewMessages, settings, buildCompletionMessages, unwrapSystemPromptPack, joinPromptChunks, getMaxOutputTokens, buildSessionChatHistoryBlock, runAgentCompletion, pauseAgentForToolLimit, completeAgentRunAfterSuccess, finishAgentPrepPhase, isUserAbortError, resolveStoppedDisplayTrace, resolveFailedDisplayTrace, normalizeStoppedTrace, getLastAgentDisplayedTrace, buildFallbackTurnMeta, finalizeUndoForUserTurn, buildStoppedFooterMeta, persistStoppedAssistant, finalizeUserTurnFooter, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, formatAgentApiError, persistFailedAssistantTurn, scheduleWorktreePolicyCleanup, autoCloseBrowserAfterAgentRun, isTaskTierFeatureEnabled, inferTaskTierFromStructure, extractPathHintsFromText, textHasCodebaseMention, getAgentLimits, fetchChatCompletion, pauseComposerQueueAfterUserStop, setLastMemoryInjectionAudit, sessionGoalPanelView, routePeerSessionSend, peerLinkForSession */
 'use strict';
+
+/**
+ * 会话目标续跑轮的合成消息：**不是**用户说的话。
+ *
+ * 为什么需要它：一轮请求必须以 user 角色收尾，而「目标还没收尾」不能靠伪造一句用户话来驱动
+ * （AGENTS 原则 5 明令禁止假用户续跑）。这条合成消息走的是既有段续机制
+ * （`SEGMENT_CONTINUE_USER_MSG` 同款）：`isSyntheticLoopUserContent` 认得出它的前缀，
+ * 于是【当前任务】仍然是用户原本那句话，模型看到的是「系统说目标还没完」而不是「用户又催了一遍」。
+ *
+ * 它只进当轮请求的历史副本：不写 `messages`、不落库、不出用户气泡。
+ */
+const GOAL_TURN_USER_MSG =
+  '[系统] 目标尚未收尾，继续推进（轮次、待办与检查事实见 system 里的目标块），不要向用户请示是否继续。';
 
 function rejectAgentServiceTask(requestId, sessionId, error) {
   if (requestId && loopApi.agentServiceTaskRejected) {
@@ -130,6 +143,34 @@ async function prepareSendUserTurn(state, text, options) {
   const { fromQueue, runSessionId, agentServiceRequestId } = state;
 
   isolateViewMessagesForSend(runSessionId);
+
+  // —— 目标续跑轮（`goalTurn`）：这一轮没有用户输入 ——
+  // 不 appendUserTurn（没有用户气泡）、不写用户消息、不落库、不动 Composer 附件。
+  // 驱动这一轮的是 system 里的目标事实块（Main 每轮注入），加一条 `[系统]` 合成消息
+  // 让请求以 user 角色收尾 —— 两者都不是「用户说了什么」。
+  if (options.goalTurn === true) {
+    state.userTurnResult = null;
+    state.userTurn = null;
+    state.turnWithdrawMeta = { inputText: '', attachments: [] };
+    state.userMsgIndex = -1;
+    state.userLocalMsgId = null;
+    state.agentServiceDone = false;
+    state.displayText = '';
+    state.fullText = '';
+    state.userContent = '';
+    state.prepared = { content: '', hasImages: false, textForStorage: '' };
+    state.userGatewayPersist = null;
+    // 召回 / 档位判定用目标本身当查询词（目标块也来自同一份目标，不会出现两套说法）
+    state.recallQuery = String(options.recallQuery || '');
+    // 没有 agentServiceRequestId 的轮次没有可回报的任务：收尾回调保持空转
+    state.notifyAgentServiceDone = () => {};
+    const history =
+      typeof cloneHistoryMessages === 'function' ? cloneHistoryMessages(messages) : messages.slice();
+    history.push({ role: 'user', content: GOAL_TURN_USER_MSG });
+    state.historyMessages = history;
+    if (String(currentSessionId || '') !== runSessionId) return 'abort';
+    return 'ok';
+  }
 
   const attachmentSnapshot = Array.isArray(options.attachments)
     ? cloneAttachmentSnapshot(options.attachments)
@@ -289,12 +330,6 @@ function installSendRunShell(state) {
   state.agentRunId = createTraceRunId();
   state.runAbortController = new AbortController();
 
-  const runMode =
-    typeof getComposerAgentMode === 'function' ? getComposerAgentMode(runSessionId) : 'agent';
-  state.agentRunMode = runMode;
-  state.execUsesPlanner = runMode === 'plan';
-  state.execExplore = runMode === 'explore';
-
   resetActiveRunContextUiState(runSessionId);
   beginComposerUsageAttribution(runSessionId);
   // 新一轮开始：上一轮的朗读（可能在合成中，也可能正在播）到此为止 ——
@@ -310,8 +345,7 @@ function installSendRunShell(state) {
     abortController: state.runAbortController,
     gatewayRunId: null,
     workspacePath: null,
-    undoTurnId: null,
-    agentRunMode: runMode
+    undoTurnId: null
   });
 
   state.placeholder = appendBubble('assistant', '', {
@@ -399,7 +433,6 @@ async function executeSendPrepAndRun(state) {
     runSessionId,
     runAbortController,
     placeholder,
-    execUsesPlanner,
     prepared,
     fullText,
     agentServiceRequestId,
@@ -412,6 +445,9 @@ async function executeSendPrepAndRun(state) {
     historyMessages
   } = state;
   const turnWithdrawMeta = state.turnWithdrawMeta;
+  // 召回 / 档位判定的查询词：普通轮就是用户输入；目标续跑轮没有用户输入，
+  // 用目标原文（Main 传下来的同一份 objective），否则记忆/索引召回会对着空串乱猜。
+  const recallQuery = String(state.recallQuery || fullText || '');
 
   state.ensureUserLocalMsgId = async function ensureUserLocalMsgId() {
     if (state.userLocalMsgId || !userGatewayPersist) return state.userLocalMsgId;
@@ -435,8 +471,6 @@ async function executeSendPrepAndRun(state) {
 
   if (typeof initAgentPrepSteps === 'function') {
     initAgentPrepSteps(runSessionId, {
-      skipUndo: state.execExplore,
-      skipUndoReason: state.execExplore ? 'Explore 只读模式，已跳过' : undefined,
       isRemote: isRemoteSessionWorkspacePath(runWorkspacePath),
       requestId: agentServiceRequestId || null
     });
@@ -454,31 +488,24 @@ async function executeSendPrepAndRun(state) {
 
   throwIfAgentAborted(runAbortController.signal);
 
-  let undoTurnId = null;
-  if (!state.execExplore) {
-    if (typeof agentPrepStepStart === 'function') agentPrepStepStart(runSessionId, 'undo');
-    undoTurnId = await waitForAgentAbortable(
-      beginTurnUndo({
-        sessionId: runSessionId,
-        workspacePath: runWorkspacePath,
-        mode: execUsesPlanner ? 'plan' : 'agent',
-        userMsgIndex
-      }),
-      runAbortController.signal
-    );
-    if (typeof agentPrepStepDone === 'function') agentPrepStepDone(runSessionId, 'undo');
-    if (undoTurnId) {
-      turnWithdrawMeta.undoTurnId = undoTurnId;
-      const liveRun = sessionActiveRuns.get(runSessionId);
-      if (liveRun) liveRun.undoTurnId = undoTurnId;
-    }
-  } else if (typeof agentPrepStepSkip === 'function') {
-    agentPrepStepSkip(runSessionId, 'undo', 'Explore 只读模式，已跳过');
+  if (typeof agentPrepStepStart === 'function') agentPrepStepStart(runSessionId, 'undo');
+  const undoTurnId = await waitForAgentAbortable(
+    beginTurnUndo({
+      sessionId: runSessionId,
+      workspacePath: runWorkspacePath,
+      userMsgIndex
+    }),
+    runAbortController.signal
+  );
+  if (typeof agentPrepStepDone === 'function') agentPrepStepDone(runSessionId, 'undo');
+  if (undoTurnId) {
+    turnWithdrawMeta.undoTurnId = undoTurnId;
+    const liveRun = sessionActiveRuns.get(runSessionId);
+    if (liveRun) liveRun.undoTurnId = undoTurnId;
   }
 
   emitAgentRunEvent(runSessionId, AGENT_RUN_EVENT_TYPES.RUN_START, {
-    requestId: agentServiceRequestId || null,
-    mode: execUsesPlanner ? 'plan' : state.execExplore ? 'explore' : 'agent'
+    requestId: agentServiceRequestId || null
   });
   refreshHistoryList().catch(() => {});
 
@@ -517,13 +544,15 @@ async function executeSendPrepAndRun(state) {
   let taskTier =
     taskTierEnabled && typeof inferTaskTierFromStructure === 'function'
       ? inferTaskTierFromStructure({
-          userText: fullText,
+          userText: recallQuery,
           pathHints:
-            typeof extractPathHintsFromText === 'function' ? extractPathHintsFromText(fullText) : [],
+            typeof extractPathHintsFromText === 'function'
+              ? extractPathHintsFromText(recallQuery)
+              : [],
           editorPath: editorCtx && editorCtx.activeFilePath,
           artifactPath: selectedArtifact || '',
           codebaseMention:
-            typeof textHasCodebaseMention === 'function' && textHasCodebaseMention(fullText)
+            typeof textHasCodebaseMention === 'function' && textHasCodebaseMention(recallQuery)
         })
       : null;
   const prepOpts = {
@@ -535,7 +564,7 @@ async function executeSendPrepAndRun(state) {
   };
   // 执行序与 UI 清单一致：索引/记忆/技能 → 再组装工具（勿先 ✓ tools）
   const sysPack = unwrapSystemPromptPack(
-    await waitForAgentAbortable(buildSystemMessage(fullText, prepOpts), runAbortController.signal)
+    await waitForAgentAbortable(buildSystemMessage(recallQuery, prepOpts), runAbortController.signal)
   );
   const sysStable = sysPack.stable;
   const turnRide = sysPack.turnRide;
@@ -546,7 +575,7 @@ async function executeSendPrepAndRun(state) {
   }
   throwIfAgentAborted(runAbortController.signal);
   const agentTools = await waitForAgentAbortable(
-    buildAgentTools(fullText, {
+    buildAgentTools(recallQuery, {
       model: modelPick.model,
       route: modelPick.route,
       prepSessionId: runSessionId,
@@ -554,22 +583,11 @@ async function executeSendPrepAndRun(state) {
     }),
     runAbortController.signal
   );
-  // Explore 只读模式：白名单过滤，写/执行类工具不进 schema（模型物理上无法调用）。
-  // Explore 模式自身是「协调者」，额外拿到 subagent（可派只读研究子 Agent）；
-  // 研究子 Agent 只拿 buildExploreTools（白名单无 subagent），深度恒为 1。
-  // 过滤器意外缺失时降级为空集（宁可不给工具，也不给写工具），保证只读硬约束。
-  const effectiveAgentTools = state.execExplore
-    ? typeof buildExploreCoordinatorTools === 'function'
-      ? buildExploreCoordinatorTools(agentTools)
-      : typeof buildExploreTools === 'function'
-        ? buildExploreTools(agentTools)
-        : []
-    : agentTools;
   throwIfAgentAborted(runAbortController.signal);
   setSessionContextEstimate(runSessionId, {
     system: sysContent,
     toolsTokenEst:
-      typeof estimateToolsTokens === 'function' ? estimateToolsTokens(effectiveAgentTools) : 0
+      typeof estimateToolsTokens === 'function' ? estimateToolsTokens(agentTools) : 0
   });
   refreshContextProgress();
   const { model: composerModel, route, apiConfig: resolvedComposerApiConfig } = modelPick;
@@ -592,8 +610,6 @@ async function executeSendPrepAndRun(state) {
     };
   }
   state.turnMeta = {
-    modeLabel:
-      execUsesPlanner || state.execExplore ? composerModeLabel(runSessionId) : 'Agent',
     modelLabel: formatModelFooterLabel(composerModel, route),
     modelId: composerModel,
     ts: resolveUserMsgCreatedAt(userMsgIndex),
@@ -646,8 +662,7 @@ async function executeSendPrepAndRun(state) {
     runSessionId,
     placeholder,
     payload,
-    agentTools: effectiveAgentTools,
-    agentMode: state.agentRunMode || 'agent',
+    agentTools,
     agentServiceRequestId,
     turnMeta: state.turnMeta,
     userMsgIndex,
@@ -677,7 +692,7 @@ async function executeSendPrepAndRun(state) {
     : String(buildSessionChatHistoryBlock({ messages: historyMessages }) || '');
   state.agentRunFrame.chatHistoryBlock = chatHistoryBlock;
   throwIfAgentAborted(runAbortController.signal);
-  const run = await runAgentCompletion(payload, effectiveAgentTools, placeholder, {
+  const run = await runAgentCompletion(payload, agentTools, placeholder, {
     signal: runAbortController.signal,
     apiConfig,
     sessionId: runSessionId,
@@ -687,15 +702,12 @@ async function executeSendPrepAndRun(state) {
     hasImages: effectivePrepared.hasImages,
     sysContent: sysStable,
     chatHistoryBlock,
-    forcePlanner: execUsesPlanner,
     allowPlannerResume,
     runId: agentRunId,
     turnRide,
     bookPrefixMessages,
     ensureUserLocalMsgId: state.ensureUserLocalMsgId,
     taskTier,
-    // 完成验收的判定在 Main；「本轮是不是 explore（只读）」这个事实只有 Renderer 知道
-    agentMode: state.agentRunMode || 'agent',
     contextAudit
   });
   if (!run.done) {
@@ -704,6 +716,8 @@ async function executeSendPrepAndRun(state) {
   }
 
   await completeAgentRunAfterSuccess(run, state.agentRunFrame);
+  // 目标还没收尾：本轮正文已交付，接着开下一轮（判定在 Main，这里只照做）
+  if (run.result?.goalContinue) state.goalContinue = true;
 }
 
 async function handleSendAgentError(state, err) {
@@ -857,7 +871,12 @@ async function sendMessage(text, options = {}) {
   // 绑定对端的会话 = 「与那台内网 agent 的通道」：在这里打字就是发给它，不跑本机模型。
   // 只接管**人手动发送**；由 agent-service / peer 回调触发的回合必须继续走本机循环，
   // 否则「对方来信 → 本机跑一轮 → 又把原话发回去」会互相弹皮球（路由判据在 renderer-peer.js）。
-  if (typeof routePeerSessionSend === 'function' && (await routePeerSessionSend(text, options))) {
+  // 目标续跑轮（goalTurn）没有用户输入、也不是发给对端的话：直接走本机循环。
+  if (
+    options.goalTurn !== true &&
+    typeof routePeerSessionSend === 'function' &&
+    (await routePeerSessionSend(text, options))
+  ) {
     return true;
   }
   const gate = await gateSendMessage(text, options);
@@ -882,9 +901,9 @@ async function sendMessage(text, options = {}) {
     userGatewayPersist: null,
     agentRunId: null,
     runAbortController: null,
-    execUsesPlanner: false,
-    execExplore: false,
-    agentRunMode: 'agent',
+    recallQuery: null,
+    goalContinue: false,
+
     placeholder: null,
     historyMessages: null,
     runWorkspacePath: null,
@@ -907,5 +926,62 @@ async function sendMessage(text, options = {}) {
     return true;
   } finally {
     finalizeSendAgentRun(state);
+    // 目标没烧尾：本轮已收尾落地（气泡 / 运行态 / 队列都释放了），再开下一轮。
+    // 放 finally 是因为开新轮要过发送闸门，而闸门会拒绝「本会话还在跑」。
+    if (state.goalContinue) kickGoalTurn(state.runSessionId);
   }
 }
+
+/**
+ * 目标续跑：一轮结束后的下一轮（**没有用户输入**的一轮）。
+ *
+ * 判定在 Main（`decideContinuation`）：这里不看目标状态、不算预算，只执行「再来一轮」。
+ * 只有当前视图就是该会话时才接着跑 —— 用户切走了就不该在背后继续烧 token；
+ * 目标保持 active，回来发一句话就继续推进。
+ *
+ * @param {{ sessionId?: string, recallQuery?: string }} options
+ * @returns {Promise<boolean>} 是否真的开了这一轮
+ */
+async function startGoalTurn(options = {}) {
+  const sessionId = String(options.sessionId || currentSessionId || '');
+  if (!sessionId) return false;
+  if (sessionId !== String(currentSessionId || '')) return false;
+  // 与对端 agent 绑定的会话（会话即通道）不自动开轮：那里的每一轮都可能被投递给对方，
+  // 「代码自己决定再跑一轮」会变成替人向对方连发消息。人发了才跑。
+  if (typeof peerLinkForSession === 'function' && peerLinkForSession(sessionId)) return false;
+  if (typeof isCurrentSessionSending === 'function' && isCurrentSessionSending()) {
+    return false;
+  }
+  // 召回查询词用目标原文：Renderer 不自己造一份目标文案，取的就是「目标」面板那一条视图。
+  // 这份视图顺带做**执行时复核**：判定发生在上一轮结束时，真正开轮可能已经晚了一拍
+  // （用户刚按停止 → 目标转 paused；或目标已被收尾/清掉）。没有可推进的目标就不开轮，
+  // 只读状态与 objective，仍然不碰预算 —— 续跑该不该发生仍由 Main 判。
+  let recallQuery = String(options.recallQuery || '');
+  if (typeof sessionGoalPanelView === 'function') {
+    try {
+      const view = await sessionGoalPanelView(sessionId);
+      if (!view || view.outcome || String(view.status || '') !== 'active') return false;
+      if (!recallQuery) recallQuery = String(view.objective || '');
+    } catch {
+      recallQuery = '';
+    }
+  }
+  try {
+    return await sendMessage('', { ...options, sessionId, goalTurn: true, recallQuery });
+  } catch (err) {
+    console.warn(err);
+    return false;
+  }
+}
+
+/** 让出当前栈再开下一轮：本轮的气泡 / 运行态 / 队列先落地 */
+function kickGoalTurn(sessionId) {
+  setTimeout(() => {
+    void startGoalTurn({ sessionId });
+  }, 0);
+}
+
+// 目标面板的「继续」走这个入口。显式挂到 window 而不是依赖「顶层函数声明恰好成了全局」——
+// 后者只在脚本原位 concat 时成立，换个打包方式就会静默失效（点了没反应）。
+window.startGoalTurn = startGoalTurn;
+window.kickGoalTurn = kickGoalTurn;

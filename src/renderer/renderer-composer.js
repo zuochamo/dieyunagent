@@ -9,162 +9,9 @@ const COMPOSER_BUILTIN_ENABLED_KEY = 'diecloud.composer.builtin.enabled.v1';
 const BUILTIN_DETECT_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const COMPOSER_MODEL_CACHE_TTL_MS = BUILTIN_DETECT_INTERVAL_MS;
 const COMPOSER_MODEL_CACHE_ENDPOINT_KEY = 'diecloud.composer.builtin.cache.endpoint.v1';
-const COMPOSER_AGENT_MODE_KEY = 'dieyun.composer.agentMode.v1';
-const COMPOSER_AGENT_MODE_BY_SESSION_KEY = 'dieyun.composer.agentModeBySession.v1';
 
 /** @type {Map<string, { autoMode: boolean, selection: string }>} */
 const sessionComposerModelPicks = new Map();
-
-/** @type {Map<string, 'agent' | 'plan' | 'explore'>} */
-const sessionComposerAgentModes = new Map();
-let composerAgentMode = 'agent';
-let composerAgentModeMenuOpen = false;
-
-function normalizeComposerAgentMode(mode) {
-  return mode === 'plan' || mode === 'explore' ? mode : 'agent';
-}
-
-function composerAgentModeLabel(mode) {
-  if (mode === 'plan') return 'Plan';
-  if (mode === 'explore') return 'Explore';
-  return 'Agent';
-}
-
-function setComposerAgentModeMenuOpen(open) {
-  composerAgentModeMenuOpen = !!open;
-  const menu = $('composer-agent-mode-menu');
-  const trigger = $('composer-agent-mode-trigger');
-  if (menu) menu.hidden = !composerAgentModeMenuOpen;
-  if (trigger) trigger.setAttribute('aria-expanded', composerAgentModeMenuOpen ? 'true' : 'false');
-}
-
-function readSessionComposerModesFromStorage() {
-  try {
-    const raw = window.localStorage.getItem(COMPOSER_AGENT_MODE_BY_SESSION_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function persistSessionComposerModes() {
-  try {
-    const obj = {};
-    for (const [sid, mode] of sessionComposerAgentModes.entries()) {
-      obj[sid] = normalizeComposerAgentMode(mode);
-    }
-    window.localStorage.setItem(COMPOSER_AGENT_MODE_BY_SESSION_KEY, JSON.stringify(obj));
-  } catch {
-    // ignore
-  }
-}
-
-function loadComposerAgentModeForSession(sessionId) {
-  const sid = String(sessionId || currentSessionId || '').trim();
-  if (!sid) return 'agent';
-  if (sessionComposerAgentModes.has(sid)) {
-    return normalizeComposerAgentMode(sessionComposerAgentModes.get(sid));
-  }
-  const stored = readSessionComposerModesFromStorage();
-  const mode = normalizeComposerAgentMode(stored[sid]);
-  sessionComposerAgentModes.set(sid, mode);
-  return mode;
-}
-
-function loadComposerAgentMode() {
-  try {
-    const raw = window.localStorage.getItem(COMPOSER_AGENT_MODE_KEY);
-    return normalizeComposerAgentMode(raw);
-  } catch {
-    return 'agent';
-  }
-}
-
-function saveComposerAgentMode(mode, sessionId) {
-  const sid = String(sessionId || currentSessionId || '').trim();
-  const next = normalizeComposerAgentMode(mode);
-  composerAgentMode = next;
-  if (sid) {
-    sessionComposerAgentModes.set(sid, next);
-    persistSessionComposerModes();
-  } else {
-    try {
-      window.localStorage.setItem(COMPOSER_AGENT_MODE_KEY, next);
-    } catch {
-      // ignore
-    }
-  }
-  syncComposerAgentModeUI();
-}
-
-function getComposerAgentMode(sessionId) {
-  if (sessionId != null && String(sessionId).trim()) {
-    return loadComposerAgentModeForSession(String(sessionId).trim());
-  }
-  return normalizeComposerAgentMode(composerAgentMode);
-}
-
-function activateComposerAgentModeForSession(sessionId) {
-  composerAgentMode = loadComposerAgentModeForSession(sessionId);
-  syncComposerAgentModeUI();
-}
-
-function cleanupSessionComposerAgentMode(sessionId) {
-  const sid = String(sessionId || '').trim();
-  if (!sid) return;
-  sessionComposerAgentModes.delete(sid);
-  persistSessionComposerModes();
-}
-
-function syncComposerAgentModeUI() {
-  const mode = getComposerAgentMode();
-  const label = $('composer-agent-mode-label');
-  if (label) label.textContent = composerAgentModeLabel(mode);
-  const menu = $('composer-agent-mode-menu');
-  if (menu) {
-    for (const item of menu.querySelectorAll('[data-agent-mode]')) {
-      const active = item.getAttribute('data-agent-mode') === mode;
-      item.classList.toggle('active', active);
-    }
-  }
-}
-
-function initComposerAgentMode() {
-  composerAgentMode = loadComposerAgentMode();
-  if (currentSessionId) {
-    composerAgentMode = loadComposerAgentModeForSession(currentSessionId);
-  }
-  syncComposerAgentModeUI();
-  const wrap = $('composer-agent-mode-wrap');
-  const trigger = $('composer-agent-mode-trigger');
-  const menu = $('composer-agent-mode-menu');
-  if (!wrap || !trigger || !menu) return;
-
-  trigger.addEventListener('click', (e) => {
-    e.stopPropagation();
-    setComposerAgentModeMenuOpen(!composerAgentModeMenuOpen);
-  });
-
-  menu.addEventListener('click', (e) => {
-    const item = e.target.closest('[data-agent-mode]');
-    if (!item) return;
-    const mode = item.getAttribute('data-agent-mode');
-    if (mode !== 'agent' && mode !== 'plan' && mode !== 'explore') return;
-    saveComposerAgentMode(mode);
-    setComposerAgentModeMenuOpen(false);
-  });
-
-  document.addEventListener('click', (e) => {
-    if (!composerAgentModeMenuOpen) return;
-    if (!wrap.contains(e.target)) setComposerAgentModeMenuOpen(false);
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && composerAgentModeMenuOpen) setComposerAgentModeMenuOpen(false);
-  });
-}
 
 const composerModelState = {
   menuOpen: false,
@@ -1120,7 +967,6 @@ function initComposerModelPicker() {
 
 function initComposerToolbar() {
   initComposerModelPicker();
-  initComposerAgentMode();
   initComposerPasteAndDrop();
   initComposerMentionMenu();
   initWorkspacePicker();
@@ -1136,9 +982,6 @@ function initComposerToolbar() {
   }
 }
 
-window.saveComposerAgentMode = saveComposerAgentMode;
-window.activateComposerAgentModeForSession = activateComposerAgentModeForSession;
-window.cleanupSessionComposerAgentMode = cleanupSessionComposerAgentMode;
 window.activateComposerModelForSession = activateComposerModelForSession;
 window.cleanupSessionComposerModelPick = cleanupSessionComposerModelPick;
 window.loadComposerModelPickForSession = loadComposerModelPickForSession;

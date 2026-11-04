@@ -1,4 +1,4 @@
-/* global $, gatewayCall, getComposerAgentMode, CTX_LIMITS */
+/* global $, gatewayCall, CTX_LIMITS */
 'use strict';
 
 const dieyunApi = window.diecloud || {};

@@ -1,4 +1,4 @@
-/* global document, $, chatInput, composerBox, composerSendBtn, gwState, gatewayCall, resolveComposerModelForSend, insertComposerQuotedText, refreshContextProgress, updateComposerMentionMenu, showAgentToast, isCurrentSessionSending, settings, arrayBufferToBase64, getSpeechApiConfig */
+/* global document, $, chatInput, composerBox, composerSendBtn, gwState, gatewayCall, resolveComposerModelForSend, insertComposerQuotedText, refreshContextProgress, updateComposerMentionMenu, showAgentToast, isCurrentSessionSending, settings, arrayBufferToBase64, getSpeechApiConfig, matchesShortcut */
 'use strict';
 
 const VOICE_MAX_MS = 120000;
@@ -8,6 +8,8 @@ const SPEECH_LANGUAGE_KEY = 'dieyun.speech.language';
 
 let voiceRecording = false;
 let voiceTranscribing = false;
+// 每次取消都递增：转写是异步的，取消后回来的结果必须被丢弃，不能再插进输入框。
+let voiceGen = 0;
 let mediaStream = null;
 let mediaRecorder = null;
 let voiceChunks = [];
@@ -143,9 +145,9 @@ function startWaveform(stream) {
 }
 
 function setVoiceControlsDisabled(disabled) {
-  const { btn, cancel, confirm } = voiceUi();
+  const { btn, confirm } = voiceUi();
   if (btn) btn.disabled = !!disabled && !voiceRecording;
-  if (cancel) cancel.disabled = !!disabled;
+  // 「取消」永不置灰：转写请求可能长时间不返回，这是用户唯一的出口（Esc 走同一条路）。
   if (confirm) confirm.disabled = !!disabled;
 }
 
@@ -207,7 +209,7 @@ async function startVoiceRecording() {
   voiceRecording = true;
   voiceStartedAt = Date.now();
   setVoicePanelVisible(true);
-  setVoiceStatus('正在录音… 完成后点击「转写」');
+  setVoiceStatus('正在录音… 完成后点击「转写」（Esc 取消）');
   setVoiceControlsDisabled(false);
   updateVoiceTimer();
   voiceTimerId = setInterval(() => {
@@ -222,6 +224,7 @@ async function startVoiceRecording() {
 }
 
 function cancelVoiceRecording() {
+  voiceGen += 1;
   voiceRecording = false;
   voiceTranscribing = false;
   cleanupVoiceStream();
@@ -282,15 +285,18 @@ async function transcribeVoiceBlob(blob) {
 
 async function finishVoiceRecording() {
   if (!voiceRecording || voiceTranscribing) return;
+  const gen = voiceGen;
   voiceTranscribing = true;
   voiceRecording = false;
   setVoiceControlsDisabled(true);
-  setVoiceStatus('正在转写…');
+  setVoiceStatus('正在转写…（Esc 取消）');
 
   try {
     const blob = await stopVoiceBlob();
+    if (gen !== voiceGen) return;
     if (!blob.size) throw new Error('录音为空');
     const result = await transcribeVoiceBlob(blob);
+    if (gen !== voiceGen) return;
     const text = String(result?.text || '').trim();
     if (!text) throw new Error('转写结果为空');
     if (typeof insertComposerQuotedText === 'function') {
@@ -304,13 +310,17 @@ async function finishVoiceRecording() {
     setVoicePanelVisible(false);
     setVoiceStatus('');
   } catch (err) {
+    if (gen !== voiceGen) return;
     showAgentToast('语音转写失败', err?.message || String(err), { variant: 'error' });
     setVoicePanelVisible(false);
     setVoiceStatus('');
   } finally {
-    voiceTranscribing = false;
-    voiceRecording = false;
-    setVoiceControlsDisabled(false);
+    // 已被取消（或被新一轮录音接管）：状态归新的一轮所有，这里不能回写。
+    if (gen === voiceGen) {
+      voiceTranscribing = false;
+      voiceRecording = false;
+      setVoiceControlsDisabled(false);
+    }
   }
 }
 
@@ -338,13 +348,19 @@ function initComposerVoice() {
   }
 
   document.addEventListener('keydown', (ev) => {
-    if (!(ev.ctrlKey || ev.metaKey) || ev.key.toLowerCase() !== 'm') return;
-    const tag = String(document.activeElement?.tagName || '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea') {
-      // 仍允许在输入框聚焦时用 Ctrl+M 开录音
+    // 录音/转写面板自己的快捷键：Esc 退出（与面板上的「取消」同一条路径，转写中也能中断）。
+    if (ev.key === 'Escape' && (voiceRecording || voiceTranscribing)) {
+      if (ev.repeat) return;
+      ev.preventDefault();
+      cancelVoiceRecording();
+      return;
     }
-    if (ev.repeat) return;
+    if (typeof matchesShortcut !== 'function' || !matchesShortcut(ev, 'voice.toggle')) return;
+    // 按住不放会连发 repeat 事件：**先**吃掉默认行为再判 repeat。
+    // 只在首键 preventDefault 的话，后续 repeat 会漏到浏览器进程，命中原生快捷键
+    // （Ctrl+M = 默认应用菜单的「最小化」），这也是「按久一点窗口就最小化」的原因。
     ev.preventDefault();
+    if (ev.repeat) return;
     toggleVoiceRecording();
   });
 }

@@ -1174,20 +1174,31 @@ textarea {
   color: var(--danger);
 }
 
+/* 宽屏（桌面浏览器 / headless --web / 平板横屏）：
+   以前这里把整页锁成 430px 的「手机框」，在桌面上看就是一条窄缝。
+   现在撑满窗口、内容列居中限宽：手机上（<760px）完全不受影响。 */
 @media (min-width: 760px) {
   body {
-    display: grid;
-    place-items: center;
-    background: #090b10;
+    display: block;
+    background: var(--bg);
   }
 
   .app {
-    width: min(430px, 100vw);
-    min-height: min(820px, 100dvh);
-    height: min(820px, 100dvh);
-    border: 0;
-    border-radius: var(--radius-xl);
-    overflow: hidden;
-    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+    width: 100%;
+    max-width: none;
+    min-height: 100dvh;
+    height: 100dvh;
+    /* 圆角留给手机框；宽屏是整页铺满，`.app` 基础规则本来就没有 border-radius，
+       这里不要再写 `border-radius: 0`（那是「直角兜底」，会破坏全站统一圆角约定）。 */
+    box-shadow: none;
+  }
+
+  /* 顶栏 / 消息列 / 输入区对齐同一条中轴，避免长行难以阅读 */
+  .topbar,
+  .chat,
+  .composer {
+    width: 100%;
+    max-width: 920px;
+    margin-inline: auto;
   }
 }

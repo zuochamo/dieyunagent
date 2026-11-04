@@ -1,4 +1,4 @@
-/* global window, document, $, uiText, gwState, closeConnectModal, isConnectModalOpen, openHelpModal, closeHelpModal, openSettingsSkillsPage, isHelpModalOpen, isSettingsModalOpen, isPeerTrustPromptOpen, dismissPeerTrustPrompt, setDialogMaximized, resetDialogMaximize, renderSuppliersList */
+/* global window, document, $, uiText, gwState, closeConnectModal, isConnectModalOpen, openHelpModal, closeHelpModal, openSettingsSkillsPage, isHelpModalOpen, isSettingsModalOpen, isPeerTrustPromptOpen, dismissPeerTrustPrompt, setDialogMaximized, resetDialogMaximize, renderSuppliersList, matchesShortcut, renderShortcutsSettingsPage, syncShortcutLabels */
 'use strict';
 
 const panels = document.querySelectorAll('.tab-panel');
@@ -9,7 +9,9 @@ const SETTINGS_TITLE_KEYS = {
   perms: ['settings_perms', '权限'],
   sandbox: ['settings_sandbox', '沙箱'],
   'agent-knowledge': ['settings_agent_knowledge', '知识'],
-  channels: ['settings_channels', '频道']
+  channels: ['settings_channels', '频道'],
+  'shared-memory': ['settings_shared_memory', '共享记忆'],
+  shortcuts: ['settings_shortcuts', '快捷键']
 };
 const MODEL_TAB_TITLE_KEYS = {
   defined: ['model_defined', '定义模型'],
@@ -17,6 +19,27 @@ const MODEL_TAB_TITLE_KEYS = {
   builtin: ['model_builtin', '供应商']
 };
 const EXECUTE_TAB_TITLES = { anchor: '锚点设置', tasks: '定时任务', api: 'API设置' };
+
+// 设置面板里这几个页面各自绑了一个全局快捷键；键位本身在 renderer-shortcuts.js 的
+// SHORTCUT_DEFS 里（基础设置 → 快捷键可改），这里只声明「按下去要做什么」。
+const SETTINGS_SHORTCUT_ACTIONS = [
+  ['settings.open', () => openSettingsModal('settings')],
+  [
+    'skills.open',
+    () => {
+      if (isSettingsSkillsPageOpen()) closeSettingsSkillsPage();
+      else openSettingsSkillsPage();
+    }
+  ],
+  [
+    'automation.open',
+    () => {
+      if (isExecuteModalOpen()) closeExecuteModal();
+      else openExecuteModal('anchor');
+    }
+  ],
+  ['help.open', () => openHelpModal('usage')]
+];
 
 function titleFromMap(map, key, fallback) {
   const pair = map[key];
@@ -145,6 +168,13 @@ function switchSettingsTab(tab) {
   }
   if (tab === 'channels' && typeof window.onChannelsSettingsTabShown === 'function') {
     window.onChannelsSettingsTabShown();
+  }
+  if (tab === 'shared-memory' && typeof window.onSharedMemorySettingsTabShown === 'function') {
+    window.onSharedMemorySettingsTabShown();
+  }
+  if (tab === 'shortcuts') {
+    if (typeof renderShortcutsSettingsPage === 'function') renderShortcutsSettingsPage();
+    if (typeof syncShortcutLabels === 'function') syncShortcutLabels();
   }
 }
 
@@ -285,22 +315,14 @@ function initSettingsShell() {
       else if (isSettingsSkillsPageOpen()) closeSettingsSkillsPage();
       else closeAllMenus();
     }
-    if (e.altKey && !e.ctrlKey && !e.metaKey) {
-      const k = e.key.toLowerCase();
-      if (k === 's') {
+    // 全局快捷键统一走「基础设置 → 快捷键」的键位表（renderer-shortcuts.js），
+    // 这里不再写死 Alt+S / Alt+K / Alt+E / Alt+H —— 用户改了键位就要立刻生效。
+    if (typeof matchesShortcut === 'function') {
+      for (const [shortcutId, run] of SETTINGS_SHORTCUT_ACTIONS) {
+        if (!matchesShortcut(e, shortcutId)) continue;
         e.preventDefault();
-        openSettingsModal('settings');
-      } else if (k === 'k') {
-        e.preventDefault();
-        if (isSettingsSkillsPageOpen()) closeSettingsSkillsPage();
-        else openSettingsSkillsPage();
-      } else if (k === 'e') {
-        e.preventDefault();
-        if (isExecuteModalOpen()) closeExecuteModal();
-        else openExecuteModal('anchor');
-      } else if (k === 'h') {
-        e.preventDefault();
-        openHelpModal('usage');
+        run();
+        break;
       }
     }
   });

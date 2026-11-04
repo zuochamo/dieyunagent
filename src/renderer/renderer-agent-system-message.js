@@ -1,4 +1,4 @@
-/* global loopApi, settings, currentSessionId, gwState, gatewayCall, createAgentAbortError, buildDieyunMdSystemBlock, assembleSystemPrompt, getContextFilePathsForAgent, getSessionChangeRowsForAgent, waitRemoteCoreForPrep, recordAgentPrepTrace, throwIfAgentAborted, getComposerAgentMode, CTX_LIMITS, getEffectiveInputBudget, skipAutoCodebaseForTaskTier, isTaskTierFeatureEnabled, shouldInjectCodeContext, shouldAutoCodebaseSearch, textHasCodebaseMention, loadEnabledSkillIds, hasAgentContinueCheckpoint, sessionActiveRuns, DieyunToolCatalog */
+/* global loopApi, settings, currentSessionId, gwState, gatewayCall, createAgentAbortError, buildDieyunMdSystemBlock, assembleSystemPrompt, getContextFilePathsForAgent, getSessionChangeRowsForAgent, waitRemoteCoreForPrep, recordAgentPrepTrace, throwIfAgentAborted, CTX_LIMITS, getEffectiveInputBudget, skipAutoCodebaseForTaskTier, isTaskTierFeatureEnabled, shouldInjectCodeContext, shouldAutoCodebaseSearch, textHasCodebaseMention, loadEnabledSkillIds, hasAgentContinueCheckpoint, sessionActiveRuns, DieyunToolCatalog */
 'use strict';
 
 const systemMessageCache = new Map();
@@ -38,10 +38,6 @@ function buildSystemMessageCacheKey(sessionId, userQuery, workspacePath, opts = 
     })
       ? 'mcp'
       : 'nomcp';
-  const modeFlag =
-    typeof getComposerAgentMode === 'function'
-      ? getComposerAgentMode(String(sessionId || '') || undefined)
-      : 'agent';
   // 交接是一次性信号：本轮系统提示里有没有【上个会话交接】必须进键。
   // 不进键的话，命中缓存会跳过 consumePendingSessionHandoff（交接漏注入），
   // 或者把已注入过交接的 packed 再喂一次（交接重复）。探测只读，消费仍归 body。
@@ -51,7 +47,7 @@ function buildSystemMessageCacheKey(sessionId, userQuery, workspacePath, opts = 
     window.peekPendingSessionHandoff(String(sessionId || ''))
       ? 'handoff'
       : 'nohandoff';
-  return `${String(sessionId || '_default')}|${String(workspacePath || '_none')}|${budget}|${mcpFlag}|${modeFlag}|${handoffFlag}|${normalizeSystemCacheQuery(userQuery)}`;
+  return `${String(sessionId || '_default')}|${String(workspacePath || '_none')}|${budget}|${mcpFlag}|${handoffFlag}|${normalizeSystemCacheQuery(userQuery)}`;
 }
 
 function invalidateSystemMessageCache(sessionId) {
@@ -356,10 +352,6 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
     // ignore
   }
 
-  const composerMode =
-    typeof getComposerAgentMode === 'function'
-      ? getComposerAgentMode(sessionId || undefined)
-      : '';
   const includeEditor = !(
     sessionId &&
     typeof currentSessionId !== 'undefined' &&
@@ -393,7 +385,6 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
     workspaceInfo,
     languagePrompt,
     userSystem: settings.system || '',
-    composerMode,
     taskTier: opts.taskTier,
     injectCode,
     allowCodebase,
@@ -440,7 +431,6 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
     return assembleSystemPrompt({
       languagePrompt,
       userSystem: snapshot.userSystem,
-      composerMode,
       taskTier: opts.taskTier,
       workspaceInfo,
       stableDataChunks: extraStable,

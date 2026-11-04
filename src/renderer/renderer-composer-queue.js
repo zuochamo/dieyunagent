@@ -1,4 +1,4 @@
-/* global document, $, currentSessionId, isSessionSending, isCurrentSessionSending, sendMessage, cloneAttachmentSnapshot, renderAttachmentChips, chatInput, showAgentToast, getAgentContinueState, messages, messagesOwnerSessionId, ensureChatScrollAfterLayout, shouldAutoFlushComposerQueue, getPendingAttachments, focusChatInput, refreshContextProgress, activateComposerAgentModeForSession, activateComposerModelForSession, isSessionSwitchInFlight, stopAgentRun, holdComposerQueueFlush, releaseComposerQueueFlush */
+/* global document, $, currentSessionId, isSessionSending, isCurrentSessionSending, sendMessage, cloneAttachmentSnapshot, renderAttachmentChips, chatInput, showAgentToast, getAgentContinueState, messages, messagesOwnerSessionId, ensureChatScrollAfterLayout, shouldAutoFlushComposerQueue, getPendingAttachments, focusChatInput, refreshContextProgress, activateComposerModelForSession, isSessionSwitchInFlight, stopAgentRun, holdComposerQueueFlush, releaseComposerQueueFlush */
 'use strict';
 
 /**
@@ -695,9 +695,6 @@ function onComposerSessionActivated(sessionId) {
   if (composerQueueEditing && composerQueueEditing.sessionId !== sid) {
     // 切走：丢弃编辑槽（输入区已是新会话内容，勿 restore 旧草稿到新会话）
     composerQueueEditing = null;
-  }
-  if (typeof activateComposerAgentModeForSession === 'function') {
-    activateComposerAgentModeForSession(sid);
   }
   if (typeof activateComposerModelForSession === 'function') {
     activateComposerModelForSession(sid);

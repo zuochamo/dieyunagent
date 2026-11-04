@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, loopApi, cancelActiveAgentBackendsForSession, finishAgentPrepPhase, renderAssistantBubbleContent, showAgentToast, messages, composerModeLabel, formatModelFooterLabel, getTextModelId, settings */
+/* global sessionActiveRuns, currentSessionId, loopApi, cancelActiveAgentBackendsForSession, finishAgentPrepPhase, renderAssistantBubbleContent, showAgentToast, messages, formatModelFooterLabel, getTextModelId, settings, pauseSessionGoal */
 'use strict';
 
 function stopAgentRun(sessionId) {
@@ -38,6 +38,12 @@ function stopAgentRun(sessionId) {
   if (typeof showAgentToast === 'function') {
     showAgentToast('正在停止', '已发送停止信号', { variant: 'info' });
   }
+  // 用户在跑动中按停止 = 这个会话的目标也别再自动续跑：
+  // 只暂停（`status:'paused'`），事实与清单都留着，点「继续」就接着推进。
+  // 放在这里而不是目标面板里，是因为对话区那颗停止才是主入口。
+  if (live && typeof pauseSessionGoal === 'function') {
+    void pauseSessionGoal(sid);
+  }
 }
 
 function createAgentAbortError() {
@@ -59,7 +65,6 @@ function resolveUserMsgCreatedAt(userMsgIndex) {
 function buildFallbackTurnMeta(userMsgIndex, turnWithdrawMeta) {
   const existingMeta = userMsgIndex >= 0 ? messages[userMsgIndex]?.meta : null;
   return {
-    modeLabel: composerModeLabel(),
     modelLabel: formatModelFooterLabel(getTextModelId(settings)),
     modelId: getTextModelId(settings),
     ts: resolveUserMsgCreatedAt(userMsgIndex),

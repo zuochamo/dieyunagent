@@ -1,25 +1,5 @@
-/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal, buildExploreTools */
+/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal */
 const toolDefsApi = window.diecloud || {};
-
-// Explore / Shell / Build 工具白名单与采集函数的唯一来源是
-// src/agent/planner-tool-filters.js：Main 侧直接 require，Renderer 侧经
-// agent-bundle-entry.js 的 compat 镜像为全局（buildExploreTools 等）。
-// 此处不再自抄白名单——白名单里「不得加入 subagent」的不变式只维护一处。
-
-/**
- * 协调者工具集 = Explore 只读白名单 + subagent（可再派只读研究子 Agent）。
- * 只有「协调者」拿这个集合：Agent 主循环、Explore 模式、Plan 的 explore 阶段。
- * 研究子 Agent 只拿 buildExploreTools —— 白名单里没有 subagent，
- * 因此「子 Agent 不能再派」是工具层面的物理约束，不需要运行期判断。
- *
- * 白名单来源缺失（agent-bundle 未产出或未加载）时降级为空集，与调用点
- * renderer-agent-send.js 的降级策略一致：宁可不给工具，也不给写工具。
- */
-function buildExploreCoordinatorTools(allTools) {
-  if (typeof buildExploreTools !== 'function') return [];
-  const base = buildExploreTools(allTools);
-  return SUBAGENT_TOOL ? base.concat([SUBAGENT_TOOL]) : base;
-}
 
 const _tc = typeof DieyunToolCatalog !== 'undefined' ? DieyunToolCatalog : {};
 const HOST_TOOLS = _tc.HOST_TOOLS || [];
@@ -40,6 +20,10 @@ const SKILL_CREATE_TOOL = _tc.SKILL_CREATE_TOOL;
 // 删除技能：schema 单一来源同上，删除判定在 src/agent-home.js#deleteUserSkill。
 const SKILL_DELETE_TOOL = _tc.SKILL_DELETE_TOOL || null;
 const PLAN_TOOLS = _tc.PLAN_TOOLS || [];
+// 会话级目标：goal_start 常驻（模型可自主开目标），推进期工具按会话是否有目标动态给（见下方 buildAgentTools）。
+const GOAL_START_TOOL = _tc.GOAL_START_TOOL || null;
+const GOAL_TOOLS = Array.isArray(_tc.GOAL_TOOLS) ? _tc.GOAL_TOOLS : [];
+const GOAL_UPDATE_TOOL = _tc.GOAL_UPDATE_TOOL || null;
 const MCP_TOOL_SCHEMA_TOOL = _tc.MCP_TOOL_SCHEMA_TOOL;
 // 装/改/启停 MCP 服务：schema 单一来源同 tool-catalog，执行在 Main（mcp/manage.js）。
 // 只给桌面聊天路径（计划/频道那档静态工具集刻意不含它 —— 后台轮次不该改用户配置）。
@@ -218,6 +202,14 @@ async function buildAgentTools(userQuery = '', opts = {}) {
     if (await shouldExposeGraphTools()) pushGraphTools(tools);
   }
   tools.push(...PLAN_TOOLS);
+  // 会话级目标（goal_start / goal_check / goal_finish / goal_update）**常驻**：
+  // 要不要把任务当成「做到 X 成立为止」是模型自己的判断；而且一轮之内可能「先开目标、
+  // 接着跑检查、再收尾」—— 按「本会话已有目标」条件暴露会让同一轮里开出来的目标无法当场推进
+  // （工具表在轮次开始时定好，轮内不再变）。没有目标时这四件工具给结构化错误（NO_SESSION_GOAL），
+  // 那比「工具不存在」更准确。
+  if (GOAL_START_TOOL) tools.push(GOAL_START_TOOL);
+  tools.push(...GOAL_TOOLS);
+  if (GOAL_UPDATE_TOOL) tools.push(GOAL_UPDATE_TOOL);
   tools.push(CLARIFY_TOOL);
   // MCP 服务管理（装/改/启停）：不需要 MCP 已启用 —— 它的用途正是「还没有服务时把服务接进来」，
   // 所以不放在 line 下方 hasMcpOptional 的条件里。

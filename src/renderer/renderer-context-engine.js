@@ -1,4 +1,4 @@
-/* global gatewayCall, gwState, settings, getComposerAgentMode, compactPlainText, getContextFilePathsForAgent, getSessionChangeRowsForAgent, getAgentLimits, withSessionRpcScope, currentSessionId, getMergedContextFilePaths, resolveSessionWorkspacePath, resolveSessionWorkspacePathSync, extractPathHintsFromText */
+/* global gatewayCall, gwState, settings, compactPlainText, getContextFilePathsForAgent, getSessionChangeRowsForAgent, getAgentLimits, withSessionRpcScope, currentSessionId, getMergedContextFilePaths, resolveSessionWorkspacePath, resolveSessionWorkspacePathSync, extractPathHintsFromText */
 'use strict';
 
 /**
@@ -481,9 +481,6 @@ function shouldFetchWorkspaceDiagnostics(userQuery, workspaceInfo, opts = {}) {
   }
   if (opts.force) return true;
 
-  if (typeof getComposerAgentMode === 'function' && getComposerAgentMode(opts.sessionId) === 'plan') {
-    return false;
-  }
   const viewSid =
     typeof currentSessionId !== 'undefined' && currentSessionId
       ? String(currentSessionId)

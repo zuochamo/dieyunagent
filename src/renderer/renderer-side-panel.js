@@ -1,4 +1,4 @@
-/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden, motionMs, requestAnimationFrame, cancelAnimationFrame */
+/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden, onGoalPanelShown, onGoalPanelHidden, motionMs, requestAnimationFrame, cancelAnimationFrame */
 'use strict';
 
 const SIDE_PANEL_TAB_KEY = 'diecloud.ui.sidePanelTab.v1';
@@ -64,6 +64,7 @@ function loadSavedSideTab() {
     t === 'files' ||
     t === 'artifacts' ||
     t === 'context' ||
+    t === 'goal' ||
     t === 'subagents' ||
     t === 'index' ||
     t === 'ssh'
@@ -154,6 +155,9 @@ function setSidePanelTab(tab, opts) {
   }
   if (next === 'subagents' && typeof onSubagentsPanelShown === 'function') onSubagentsPanelShown();
   else if (typeof onSubagentsPanelHidden === 'function') onSubagentsPanelHidden();
+  // 「目标」页：首刷 + 轮询启停的唯一入口（目标由模型在轮内改，见 renderer-goal-panel.js）
+  if (next === 'goal' && typeof onGoalPanelShown === 'function') onGoalPanelShown();
+  else if (typeof onGoalPanelHidden === 'function') onGoalPanelHidden();
   // 代码片段索引与结构索引合并在同一个「索引」页签里（见 renderer-index-panel.js）
   if (next === 'index' && typeof onIndexPanelShown === 'function') onIndexPanelShown();
   else if (typeof onIndexPanelHidden === 'function') onIndexPanelHidden();
@@ -184,6 +188,7 @@ function finishPanelClose(panel, resizer) {
   if (typeof onGraphPanelHidden === 'function') onGraphPanelHidden();
   if (typeof onContextPanelHidden === 'function') onContextPanelHidden();
   if (typeof onSubagentsPanelHidden === 'function') onSubagentsPanelHidden();
+  if (typeof onGoalPanelHidden === 'function') onGoalPanelHidden();
   if (typeof onProductsPanelHidden === 'function') onProductsPanelHidden();
 }
 

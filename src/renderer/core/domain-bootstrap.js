@@ -1,4 +1,4 @@
-/* global window, DieyunBootstrap, DieyunNamespaces, api, currentSessionId, initPermissionsUI, initSettingsShell, initHelpUI, initUpdateUI, initSkillsUI, initSkillCatalogUI, initComposerToolbar, initDefinedModelEditors, initMcpCatalogUI, initAutomationUI, initChannelsSettings, initCodebasePanel, initGraphPanel, initIndexPanel, initWorktreesSettings, initTerminalPane, initBrowserPanel, initPaneResizers, initSelectionToComposerDrag, applySessionWorkspace, setGatewayMeta, maybeEnforceWorktreeCleanupPolicy */
+/* global window, DieyunBootstrap, DieyunNamespaces, api, currentSessionId, initPermissionsUI, initSettingsShell, initHelpUI, initUpdateUI, initSkillsUI, initSkillCatalogUI, initComposerToolbar, initDefinedModelEditors, initMcpCatalogUI, initAutomationUI, initChannelsSettings, initCodebasePanel, initGraphPanel, initIndexPanel, initGoalPanel, initWorktreesSettings, initTerminalPane, initBrowserPanel, initPaneResizers, initSelectionToComposerDrag, applySessionWorkspace, setGatewayMeta, maybeEnforceWorktreeCleanupPolicy */
 'use strict';
 
 (function registerDomainInits() {
@@ -56,9 +56,11 @@
       if (typeof initCodebasePanel === 'function') initCodebasePanel();
       if (typeof initGraphPanel === 'function') initGraphPanel();
       if (typeof initIndexPanel === 'function') initIndexPanel();
+      if (typeof initGoalPanel === 'function') initGoalPanel();
       if (typeof initWorktreesSettings === 'function') initWorktreesSettings();
       if (typeof initMcpCatalogUI === 'function') initMcpCatalogUI();
       if (typeof initChannelsSettings === 'function') initChannelsSettings();
+      if (typeof initShortcuts === 'function') initShortcuts();
       if (typeof initAutomationUI === 'function') initAutomationUI();
     }
   });

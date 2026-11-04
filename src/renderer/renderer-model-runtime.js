@@ -51,7 +51,10 @@ var DEFAULTS = {
   // 代码索引要不要带向量（语义检索）：默认关，打开后每次建库都带 vectors:true
   indexSemanticSearch: false,
   // 自动朗读每条新回复（手动点气泡下的「朗读」不受此开关影响）
-  ttsAutoRead: false
+  ttsAutoRead: false,
+  // 自定义快捷键（id → 组合键）：只存与默认不同的项，缺省回落 SHORTCUT_DEFS 的默认键位。
+  // 键位定义与匹配的唯一来源是 src/renderer/renderer-shortcuts.js。
+  shortcuts: {}
 };
 
 /**
@@ -397,6 +400,13 @@ function normalizeSettings(raw) {
   s.agentMaxRounds = getAgentMaxRoundsSetting(s);
   s.graphAutoIncremental = s.graphAutoIncremental !== false;
   s.ttsAutoRead = s.ttsAutoRead === true;
+  // 快捷键覆盖表只收「id → 非空字符串」，脏值直接丢；键位定义与匹配见 renderer-shortcuts.js
+  const rawShortcuts = raw && raw.shortcuts && typeof raw.shortcuts === 'object' ? raw.shortcuts : {};
+  s.shortcuts = {};
+  for (const [shortcutId, combo] of Object.entries(rawShortcuts)) {
+    const text = typeof combo === 'string' ? combo.trim() : '';
+    if (shortcutId && text) s.shortcuts[shortcutId] = text;
+  }
   s.codebaseAutoIncremental = s.codebaseAutoIncremental === true;
   // 语义检索意图：缺省/脏值一律 false（别把「未设置」变成「每次建库都调 embedding」）
   s.indexSemanticSearch = s.indexSemanticSearch === true;
@@ -682,6 +692,10 @@ function refreshBuiltinModelsAfterSettingsChange() {
     refreshComposerBuiltinModels();
     return;
   }
+  // 启动早期（磁盘配置回填时）renderer-composer.js 可能还没求值到，`composerModelState` 是
+  // 那个脚本里的 const —— 这时读它就是 ReferenceError（新装/新浏览器首次打开必踩）。
+  // 模型列表本来就由 composer 自己渲染，等它加载完再来一遍即可，这里直接跳过。
+  if (typeof composerModelState === 'undefined') return;
   composerModelState.builtinModels = [];
   composerModelState.builtinError = '';
   composerModelState.builtinMeta = null;

@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, getAgentContinueState, clearAgentContinueState, setComposerSendingState, runAgentCompletion, completeAgentRunAfterSuccess, resolveRunPlaceholder, renderAssistantBubbleContent, finalizeAssistantBubble, finalizeUserTurnFooter, finalizeUndoForUserTurn, isUserAbortError, formatAgentApiError, buildStoppedFooterMeta, finishSessionActiveRun, syncComposerForActiveSession, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, showAgentToast, createAgentAbortError, pauseComposerQueueAfterUserStop, resolveFailedDisplayTrace, persistFailedAssistantTurn, persistStoppedAssistant, resolveStoppedDisplayTrace, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, isCurrentSessionSending, dismissAgentContinueRows */
+/* global sessionActiveRuns, currentSessionId, getAgentContinueState, clearAgentContinueState, setComposerSendingState, runAgentCompletion, completeAgentRunAfterSuccess, resolveRunPlaceholder, renderAssistantBubbleContent, finalizeAssistantBubble, finalizeUserTurnFooter, finalizeUndoForUserTurn, isUserAbortError, formatAgentApiError, buildStoppedFooterMeta, finishSessionActiveRun, syncComposerForActiveSession, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, showAgentToast, createAgentAbortError, pauseComposerQueueAfterUserStop, resolveFailedDisplayTrace, persistFailedAssistantTurn, persistStoppedAssistant, resolveStoppedDisplayTrace, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, isCurrentSessionSending, dismissAgentContinueRows, kickGoalTurn */
 'use strict';
 
 async function resumeAgentToolLoop() {
@@ -31,8 +31,7 @@ async function resumeAgentToolLoop() {
     abortController: new AbortController(),
     gatewayRunId: null,
     workspacePath: resumeWorkspace,
-    undoTurnId: fc.undoTurnId || fc.turnMeta?.undoTurnId || null,
-    agentRunMode: state.runOpts && state.runOpts.forcePlanner ? 'plan' : 'agent'
+    undoTurnId: fc.undoTurnId || fc.turnMeta?.undoTurnId || null
   });
   const resumeAbortController = sessionActiveRuns.get(runSessionId).abortController;
   refreshHistoryList().catch(() => {});
@@ -71,6 +70,10 @@ async function resumeAgentToolLoop() {
       return;
     }
     await completeAgentRunAfterSuccess(run, fc);
+    // 目标未收尾：本轮已交付，接着开下一轮（判定在 Main，这里只照做）
+    if (run.result?.goalContinue && typeof kickGoalTurn === 'function') {
+      kickGoalTurn(runSessionId);
+    }
   } catch (err) {
     if (err.name === 'AbortError' || isUserAbortError(err)) {
       if (typeof pauseComposerQueueAfterUserStop === 'function') {
