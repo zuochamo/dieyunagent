@@ -21,6 +21,8 @@ const { WebSocketServer, WebSocket } = require('ws');
 
 const COOKIE_NAME = 'dieyun_web';
 const SHIM_PATH = '/app/__desktop-shim.js';
+// 浏览器标签图标：桌面页与手机端页都不带（Electron 窗口用不到），这里用仓库里那一份图标统一供给
+const FAVICON_PATH = '/favicon.ico';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -50,6 +52,8 @@ function mountOf(pathname) {
   if (pathname === '/llm-usage-stats.js') return 'src-file';
   // 桌面端 LLM 请求由主进程代发；浏览器里没有主进程，用同源转发顶上（顺便避开模型端点的 CORS）
   if (pathname === '/llm') return 'llm';
+  // 标签图标：两个界面都在根路径要 /favicon.ico（渲染层与手机端页都不带图标链接）
+  if (pathname === FAVICON_PATH) return 'icon';
   return '';
 }
 
@@ -337,6 +341,29 @@ function createDesktopUi(opts) {
     return parseCookies(req.headers.cookie)[COOKIE_NAME] === want;
   }
 
+  /**
+   * 标签图标：用仓库里那一份（`assets/icon.png`，打包时 `assets/` 整棵进载荷）。
+   * 浏览器按内容嗅探，PNG 放在 `/favicon.ico` 上也能正常显示，所以不需要多备一份 ico。
+   */
+  function sendFavicon(res) {
+    const candidates = [
+      { file: path.join(packageRoot, 'assets', 'icon.png'), type: 'image/png' },
+      { file: path.join(packageRoot, 'assets', 'icon.ico'), type: 'image/x-icon' }
+    ];
+    for (const c of candidates) {
+      try {
+        if (fs.existsSync(c.file) && fs.statSync(c.file).isFile()) {
+          send(res, 200, { 'Content-Type': c.type, 'Cache-Control': 'public, max-age=86400' }, fs.readFileSync(c.file));
+          return;
+        }
+      } catch {
+        // 换下一个候选
+      }
+    }
+    // 真没有图标就安静回 204（别刷 404）
+    send(res, 204, { 'Cache-Control': 'public, max-age=86400' }, '');
+  }
+
   function resolveFile(root, relPath) {
     const decoded = decodeURIComponent(relPath);
     if (decoded.includes('\0')) return null;
@@ -418,6 +445,11 @@ function createDesktopUi(opts) {
       handleLlmProxy(req, res, url);
       return true;
     }
+    // 图标不算敏感、也不带任何机器信息：不要求 token（否则首次打开时 cookie 还没到，标签就没图）
+    if (url.pathname === FAVICON_PATH) {
+      sendFavicon(res);
+      return true;
+    }
     if (!tokenAccepted(req, url)) {
       send(res, 401, { 'Content-Type': 'text/plain; charset=utf-8' }, '需要 token：<本页地址>?token=<mobile-bridge-token.txt 内容>');
       return true;
@@ -474,8 +506,16 @@ function createDesktopUi(opts) {
     const ext = path.extname(filePath).toLowerCase();
     const type = MIME[ext] || 'application/octet-stream';
     if (isIndex && ext === '.html') {
-      // 第一行就注入替身，保证渲染层的任何脚本都能看到 window.diecloud
-      const html = fs.readFileSync(filePath, 'utf8').replace(/<head([^>]*)>/i, `<head$1>\n    <script src="${SHIM_PATH}"></script>`);
+      // 第一行就注入替身，保证渲染层的任何脚本都能看到 window.diecloud；
+      // 标签图标也在这里补上（渲染层原本没有 <link rel="icon">，那是 Electron 窗口不需要的东西）
+      const html = fs
+        .readFileSync(filePath, 'utf8')
+        .replace(
+          /<head([^>]*)>/i,
+          `<head$1>\n    <link rel="icon" type="image/png" href="${FAVICON_PATH}" />` +
+            `\n    <link rel="apple-touch-icon" href="${FAVICON_PATH}" />` +
+            `\n    <script src="${SHIM_PATH}"></script>`
+        );
       send(res, 200, { 'Content-Type': type, 'Cache-Control': 'no-store', ...setCookie }, html);
       return true;
     }
@@ -543,4 +583,4 @@ function createDesktopUi(opts) {
   return { handleHttp, handleUpgrade };
 }
 
-module.exports = { createDesktopUi, buildShim, mountOf, COOKIE_NAME, SHIM_PATH };
+module.exports = { createDesktopUi, buildShim, mountOf, COOKIE_NAME, SHIM_PATH, FAVICON_PATH };

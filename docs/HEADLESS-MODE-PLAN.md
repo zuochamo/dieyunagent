@@ -255,10 +255,12 @@ headless 的工具表 = `buildMainAgentTools()`（`PLAN_RUNTIME_TOOL_NAMES` + MC
 2. **企业微信频道**（`--channels`）：`bootChannelsRuntime` 只需 `safeStorage`（用 §5.6 替身）+ gateway/core/mcp；频道一轮本来就跑在 Main，与窗口无关。
 3. **`POST /api/task`**：给 CI 用最小 HTTP 入口。
 4. **桌面界面当网页**（`--web` 自带 `/app/`，2026-11-04 实施）：`src/renderer` 本身就是浏览器页面
-   （`contextIsolation: true` + `nodeIntegration: false`，RPC 自己连 Gateway WS），所以只加两件东西就够——
-   `src/headless/desktop-ui.js`（`window.diecloud` 的浏览器替身 + 静态服务 + `/gateway` 同源 WS 代理）
-   和 `MobileBridge` 的 upgrade 路由（原先 `path: '/ws'` 会把其它路径的 upgrade 直接 400 掉）。
-   **没有第二个前端、也没有第二套 Agent 装配**；手机端页面继续保留（宽屏下只拉宽消息列）。
+   （`contextIsolation: true` + `nodeIntegration: false`，RPC 自己连 Gateway WS），所以只加三件东西就够——
+   `src/headless/desktop-ui.js`（`window.diecloud` 的浏览器替身 + 静态服务 + `/gateway` 同源 WS 代理 +
+   `/llm` 同源 LLM 转发）、`src/headless/desktop-turn.js`（把「渲染层驱动的那一轮」在服务器上用同一份
+   `runRustAgentLoop` 跑起来，phase 事件回推页面），以及 `MobileBridge` 的 upgrade 路由
+   （原先 `path: '/ws'` 会把其它路径的 upgrade 直接 400 掉）。
+   **没有第二个前端、也没有第二套 Agent 装配/循环**；手机端页面继续保留（宽屏下只拉宽消息列）。
 
 ---
 

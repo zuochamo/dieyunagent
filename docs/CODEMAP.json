@@ -548,6 +548,7 @@
       "owns": [
         "无界面入口（终端 REPL / 一次性 run / 浏览器 Web / self-test）",
         "Main 侧跑一轮的唯一实现（频道 / 定时计划 / headless 共用）",
+        "浏览器里的桌面界面（`--web` 的 `/app/`）：preload 替身 + 静态服务 + `/gateway` 与 `/llm` 同源转发，轮次仍由同一份 runRustAgentLoop 在服务器上跑",
         "safeStorage 的纯 Node 替身（DIEYUN_SECRET_KEY_FILE + AES-256-GCM）",
         "Linux 分发（tgz + deb：内置 node + core + 纯 JS 依赖闭包；权限位可控的 tar、打包期冷启动闸门）、systemd 单元，以及**内网 apt 源**（Packages/Packages.gz/Release + 索引自检；更新由 apt 承担，不做自更新客户端）"
       ],

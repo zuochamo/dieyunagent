@@ -329,6 +329,11 @@ Agent 权限**，所以：
 - 计划/子 Agent 的 `agentPlannerRun` 与子 Agent 过程卡片（IPC 专用；主聊天轮不受影响）；
 - 依赖 Electron 的 `browser_*` / `computer_*` 工具（与 §6 的不可用清单一致）。
 
+标签图标：渲染层与手机端页都没有 `<link rel="icon">`（Electron 窗口用不到），所以由服务端
+统一供给 —— `/favicon.ico` 读载荷里的 `assets/icon.png`（同一张图给两个界面），**不需要 token**
+（首次打开时 cookie 还没到，要 token 就会是空标签）。桌面页另在注入时补
+`<link rel="icon" type="image/png" href="/favicon.ico">`。
+
 渲染层 `<script>` 用到的三个浏览器包（mermaid / mammoth / xlsx）不 `require`、因此不在 Node 依赖闭包里，
 打包时按 `src/renderer/index.html` 现扒进载荷的 `web-vendor/`（见 `scripts/pack-headless.cjs`）。
 

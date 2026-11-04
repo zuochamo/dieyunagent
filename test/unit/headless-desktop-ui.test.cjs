@@ -24,7 +24,8 @@ function fakeRes() {
       this.headers = headers || {};
     },
     end(body) {
-      this.body = body == null ? '' : String(body);
+      // 保留 Buffer 原样：图标那类二进制响应用字符串一比就失真了
+      this.body = body == null ? '' : Buffer.isBuffer(body) ? body : String(body);
     }
   };
   return res;
@@ -57,9 +58,21 @@ describe('headless 桌面界面（/app/）', () => {  it('只接管 /app 与 /no
     expect(mountOf('/app/')).toBe('renderer');
     expect(mountOf('/app/index.html')).toBe('renderer');
     expect(mountOf('/node_modules/mermaid/dist/mermaid.min.js')).toBe('node_modules');
+    expect(mountOf('/favicon.ico')).toBe('icon');
     expect(mountOf('/')).toBe('');
     expect(mountOf('/ws')).toBe('');
     expect(mountOf('/api/info')).toBe('');
+  });
+
+  it('标签图标：/favicon.ico 给真图且不要 token（否则首次打开时标签是空的）', () => {
+    const ui = makeUi();
+    const res = fakeRes();
+    expect(ui.handleHttp(fakeReq('/favicon.ico'), res)).toBe(true);
+    expect(res.status).toBe(200);
+    expect(res.headers['Content-Type']).toBe('image/png');
+    // 真是一张 PNG（PNG 魔数），不是空 204
+    expect(Buffer.isBuffer(res.body)).toBe(true);
+    expect(res.body.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
   });
 
   it('没有 token 一律 401（静态资源也不给）', () => {
@@ -78,6 +91,8 @@ describe('headless 桌面界面（/app/）', () => {  it('只接管 /app 与 /no
     expect(res.status).toBe(200);
     expect(res.headers['Set-Cookie']).toContain('dieyun_web=tok-123');
     expect(res.body).toContain(`<script src="${SHIM_PATH}"></script>`);
+    // 标签图标：渲染层原本没有 <link rel="icon">（Electron 窗口不需要）
+    expect(res.body).toContain('<link rel="icon" type="image/png" href="/favicon.ico"');
     // 注入必须在渲染层自己的脚本之前（否则 window.diecloud 还不存在）
     expect(res.body.indexOf(SHIM_PATH)).toBeLessThan(res.body.indexOf('renderer-theme-bootstrap.js'));
   });
