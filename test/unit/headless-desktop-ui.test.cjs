@@ -155,8 +155,10 @@ describe('headless 桌面界面（/app/）', () => {  it('只接管 /app 与 /no
     expect(typeof api.llmChatCompletion).toBe('function');
     expect(typeof api.streamChatViaMain).toBe('function');
     expect(typeof api.getModelSettingsFromMain).toBe('function');
+    // 工具集闸门靠它：缺了就只有记忆/计划类工具，模型会回答「没有能写文件的工具」
+    expect(typeof api.getPermissions).toBe('function');
     expect(api.onStatus).toBe(undefined);
-    expect(api.getPermissions).toBe(undefined);
+    expect(api.setWindowZoom).toBe(undefined);
   });
 
   it('非安全上下文（明文 http 的 192.168.x.x）缺的 API 要补回来', async () => {

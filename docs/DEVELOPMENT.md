@@ -98,6 +98,7 @@ build-installer.bat 0.0.29
 - 构建 Windows NSIS 安装包
 - 构建 Ubuntu deb（`npm run pack:deb:remote`，跨机打到 Linux 构建机；没配 `dieyun-linux-build.local.json` / `DIEYUN_LINUX_CORE_SSH` 或加 `-SkipDeb` 时跳过）
 - 构建 Android APK
+- 构建无界面服务器包（`npm run build:headless` = `pack:dieyun-core:linux` → `pack:deb:headless` → 结构自检 → `publish:headless-apt` 更新内网 apt 源 → 索引自检；产物落 `dist/`，源目录落 `release/headless-apt/`，**不进 COS / Y: / 桌面更新通道**）
 - 发布到 `Y:\client-electron\updates-published`（PC + Android + Ubuntu deb，deb 与 `latest-linux.yml` 成对）
 - 上传到腾讯 COS（同上，deb 与 `latest-linux.yml` 成对）
 
@@ -129,6 +130,8 @@ npm run sync:updates   # 可选：同步到 updates-published/ 供本机静态�
 | `latest-linux.yml` | Ubuntu 更新清单（与 deb 成对，缺它 Linux 端不会更新） |
 | `mobile/mobile-latest.json` | 手机端更新清单 |
 | `mobile/dieyun-mobile-<version>.apk` | 手机端安装包 |
+| `dieyun-headless_<version>_amd64.deb` | **无界面（服务器）** Debian 包：`npm run build:headless` 产出；同时被收进内网 apt 源 `release/headless-apt/pool/`（服务器侧 `apt upgrade` 即更新，见 `docs/HEADLESS.md` §8） |
+| `dieyun-headless-<version>-linux-x64.tgz` | 同上，非 Debian 发行版用的 tarball |
 
 客户端内置更新源与 `package.json` → `build.publish.url` 一致，默认 **`http://192.168.31.62:3099/`**（`UPDATE_URL` 可覆盖）。
 
@@ -178,6 +181,36 @@ node scripts\upload-updates-cos.mjs
 ```bash
 npm run sync:updates
 npm run serve:updates
+```
+
+#### Ubuntu deb 自动更新：安装在「干净进程树」里提权
+
+`electron-updater` 的 `DebUpdater` 是在**本进程内**用 `pkexec` 提权调 `dpkg -i`。Linux 上
+只要本进程带 `NoNewPrivs=1`，内核就不再认 setuid 位 → `pkexec` 退 127、只打一行
+`pkexec must be setuid root`，`sudo` 同样失效；而 NNP 是线程级、**设了不能撤**，子进程还会继承。
+
+现场（dieyun17 / Ubuntu 26.04，2026-11-04）：0.1.72 已下载 155MB、装不上，日志反复
+`自动更新错误: Command pkexec exited with code 127`，之后每 20 分钟一句「更新安装包已下载，
+跳过本次检查」。同机对照：这次安装（12:05:58）的 `pkexec` 是**成功**的（`auth.log` 有
+`pam_unix(polkit-1:session): session opened for user root`），失败的是安装成功后
+`isForceRunAfter` 自重启回来的那份实例 —— 它整棵树带 `NoNewPrivs: 1`。
+
+所以 `src/main/linux-deb-install.js` 换了提权所在的进程树：由 `systemd-run --user`（用户实例
+fork 出来的进程 NNP=0）执行 `pkexec → dpkg`，装完也用同样方式重启应用（晚 3 秒起，否则抢不到
+旧实例的 Electron 单实例锁，装完反而没应用）。只有 `.deb` 走这条路——AppImage 是覆盖文件、
+不需要 root。没有 systemd 用户实例时退回老路径，但 `NoNewPrivs=1` 会直接给出失败原因与
+`sudo dpkg -i <包>`，不再去撞一次必定失败的 pkexec；Linux 上 `autoInstallOnAppQuit` 也关掉了，
+免得「退出时再装一次」又落回进程内 pkexec（见 `src/main/app-updater.js` 的 `installOnLinux`）。
+
+> 顺带：`chrome-sandbox` 的 SUID 位与本故障**无关**（同机 A/B：0755 与 4755 两种模式主进程
+> 都是 `NoNewPrivs: 0`）。renderer 跑 `--no-sandbox` 是 `src/main/window-tray.js` 里
+> `webPreferences.sandbox: false` 决定的，不是 deb postinst。
+
+排查同类问题时先看这两处：
+
+```bash
+grep NoNewPrivs /proc/$(pgrep -f 'Agent/dieyunagent$' | head -1)/status   # 1 => 进程内提权必然失效
+ls -l /run/user/$(id -u)/systemd/private                                  # 用户实例总线（干净树的来源）
 ```
 
 ---

@@ -22,7 +22,7 @@
         "Chat bubbles",
         "thinking trace UI",
         "answer bubble markdown rendering (renderer-answer-md.js)",
-      "answer media rendering (images / audio / video; renderer-answer-figures.js)",
+        "answer media rendering (images / audio / video; renderer-answer-figures.js)",
         "subagent detail panel",
         "mobile trace push",
         "message navigation rail"
@@ -297,7 +297,8 @@
         "账本自愈（孤儿 project scope / 悬空归纳作业，reconcile_memory_ledger）",
         "项目身份（projects / project_paths：scope = project:<id>，路径别名与 git origin）",
         "会话正文检索（messages_fts 影子表 + messages_search：跨会话按 workspace 圈定）",
-        "压缩归档原文的读出口（compaction_archives.folded_text → compaction_folded）"
+        "压缩归档原文的读出口（compaction_archives.folded_text → compaction_folded）",
+        "会话目标对象存储（session_goals：目标 JSON 由 Node 侧解释，Rust 只当 KV，删会话 CASCADE）"
       ],
       "tests": [
         "test:local-gateway-smoke",
@@ -309,6 +310,52 @@
         "docs/MEMORY-VS-DSH.md",
         "docs/REQUEST-SNAPSHOT.md",
         "docs/SQLITE-ACCESS.md"
+      ]
+    },
+    {
+      "id": "shared-memory",
+      "paths": [
+        "src/memory-shared/",
+        "src/main/ipc/shared-memory.js",
+        "src/renderer/renderer-shared-memory.js"
+      ],
+      "owns": [
+        "跨机记忆条目共享（内网 PostgreSQL dieyun_memory.shared_memory；只同步条目，不上传对话）",
+        "配置与口令（shared-memory.json，密码走 src/secret-store.js 密文，默认开启）",
+        "一条召回 SQL（向量距离与 trigram 相似度 COALESCE 合流；无 pgvector 时退化表达式而非第二套语义）",
+        "幂等上传（content_hash 去重 + kind 门复用 project-memory-file.js#isShareableKind）",
+        "提炼独占权（pg_try_advisory_lock + memory_consolidations 跨机冷却，无 master/slave）",
+        "可用性判定（enabled && configured && available；连不上即关闭，不改用户开关）",
+        "扩展页签「共享记忆」（设置 → 扩展）"
+      ],
+      "tests": [
+        "test:unit",
+        "check:renderer"
+      ],
+      "docs": [
+        "docs/SHARED-MEMORY.md",
+        "docs/MEMORY.md"
+      ]
+    },
+    {
+      "id": "session-goal",
+      "paths": [
+        "src/goals/session-goal.js",
+        "src/renderer/renderer-goal-panel.js"
+      ],
+      "owns": [
+        "会话级目标对象（一个会话一个目标：objective + 声明检查 + 推进清单 + 事实 + 主张）",
+        "目标存取与串行读改写（session_goals 表；预算与轮次自增）",
+        "一轮结束后的续跑判定（judgeAfterTurn → decideContinuation；预算尽落 stalled，收尾不改状态）",
+        "停止 / 继续的状态迁移（pauseGoal / resumeGoal：继续重置轮次预算但保留事实与清单）",
+        "目标 UI 的视图投影（toPanelView：进度 / 按检查聚合的事实 / 预算，Renderer 不再二次解释）",
+        "气泡区「目标条」+ 侧栏「目标」页（renderer-goal-panel.js：同一份视图、同一次取数、同一个轮询）"
+      ],
+      "tests": [
+        "test:unit"
+      ],
+      "docs": [
+        "docs/SESSION-GOAL-PLAN.md"
       ]
     },
     {
@@ -485,6 +532,33 @@
       "docs": [
         "docs/MEMORY.md"
       ]
+    },
+    {
+      "id": "headless",
+      "paths": [
+        "src/headless/",
+        "src/agent/main-turn-runner.js",
+        "scripts/pack-headless.cjs",
+        "scripts/lib/node-linux-runtime.cjs",
+        "deploy/systemd/dieyun-headless.service",
+        "scripts/lib/tar-writer.cjs",
+        "scripts/lib/deb-archive.cjs",
+        "scripts/publish-headless-apt.cjs"
+      ],
+      "owns": [
+        "无界面入口（终端 REPL / 一次性 run / 浏览器 Web / self-test）",
+        "Main 侧跑一轮的唯一实现（频道 / 定时计划 / headless 共用）",
+        "safeStorage 的纯 Node 替身（DIEYUN_SECRET_KEY_FILE + AES-256-GCM）",
+        "Linux 分发（tgz + deb：内置 node + core + 纯 JS 依赖闭包；权限位可控的 tar、打包期冷启动闸门）、systemd 单元，以及**内网 apt 源**（Packages/Packages.gz/Release + 索引自检；更新由 apt 承担，不做自更新客户端）"
+      ],
+      "tests": [
+        "test:headless",
+        "test:unit"
+      ],
+      "docs": [
+        "docs/HEADLESS-MODE-PLAN.md",
+        "docs/HEADLESS.md"
+      ]
     }
   ],
   "pathRules": [
@@ -638,6 +712,13 @@
       ]
     },
     {
+      "prefix": "src/renderer/renderer-shortcuts.js",
+      "tests": [
+        "test:shortcuts",
+        "check:renderer"
+      ]
+    },
+    {
       "prefix": "src/main/ipc/attachments.js",
       "tests": [
         "test:unit"
@@ -732,6 +813,25 @@
     {
       "prefix": "src/channels/",
       "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/memory-shared/",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/main/ipc/shared-memory.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-shared-memory.js",
+      "tests": [
+        "check:renderer",
         "test:unit"
       ]
     },
@@ -1093,6 +1193,20 @@
       ]
     },
     {
+      "prefix": "src/headless/",
+      "tests": [
+        "test:unit",
+        "test:headless"
+      ]
+    },
+    {
+      "prefix": "src/agent/main-turn-runner.js",
+      "tests": [
+        "test:unit",
+        "test:headless"
+      ]
+    },
+    {
       "prefix": "src/monitor/",
       "tests": [
         "test:monitor-outbox"
@@ -1222,7 +1336,14 @@
     {
       "prefix": "src/main/app-updater.js",
       "tests": [
-        "test:app-updater-feeds"
+        "test:app-updater-feeds",
+        "test:linux-deb-install"
+      ]
+    },
+    {
+      "prefix": "src/main/linux-deb-install.js",
+      "tests": [
+        "test:linux-deb-install"
       ]
     },
     {
@@ -1520,6 +1641,24 @@
       "tests": [
         "test:agent-limits"
       ]
+    },
+    {
+      "prefix": "scripts/pack-headless.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "scripts/lib/tar-writer.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "scripts/lib/node-linux-runtime.cjs",
+      "tests": [
+        "test:unit"
+      ]
     }
   ],
   "suites": {
@@ -1539,9 +1678,11 @@
       "test:sandbox-gateway",
       "test:mcp-store",
       "test:app-updater-feeds",
+      "test:linux-deb-install",
       "test:ssh-reconnect-targets",
       "test:workspace-remote-runtime",
       "test:main-shell",
+      "test:shortcuts",
       "test:session-remote-transport",
       "test:agent-run-events",
       "test:guardrails-sync",
@@ -1566,6 +1707,7 @@
       "test:delegate-batch",
       "test:mobile",
       "test:mobile-camera",
+      "test:headless",
       "test:peer",
       "test:write-smell-hints",
       "test:worktree",
@@ -1584,9 +1726,11 @@
       "test:sandbox-gateway",
       "test:mcp-store",
       "test:app-updater-feeds",
+      "test:linux-deb-install",
       "test:ssh-reconnect-targets",
       "test:workspace-remote-runtime",
       "test:main-shell",
+      "test:shortcuts",
       "test:session-remote-transport",
       "test:agent-run-events",
       "test:guardrails-sync",
@@ -1611,6 +1755,7 @@
       "test:delegate-batch",
       "test:mobile",
       "test:mobile-camera",
+      "test:headless",
       "test:peer",
       "test:write-smell-hints",
       "test:worktree",

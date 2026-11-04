@@ -227,6 +227,7 @@
 | `gateway/exec-policy.js` | `errorCode`（EMPTY/TOO_LONG/BLOCKED/CHAIN_LIMIT） | 4 |
 | `browser/url-policy.js` | `errorCode`（INVALID_URL/PATH_NOT_ALLOWED/FILE_NOT_FOUND） | 3 |
 | `agent/guardrails-shared.js:32-34` | `GRAPH_OPERATIONS` | 7 |
+| `goals/session-goal.js:29` | `STATUSES`（会话目标：进行中 / 暂停 / 预算用尽 / 阻塞；收尾另存 `outcome`） | 4 |
 
 ---
 
@@ -267,7 +268,7 @@
 
 | 文件:行号 | 构造器 | 内容 | 模型可见 |
 |---|---|---|---|
-| `agent-system-prompt.js:8-52` | `buildCoreAgentRules()` | **【Agent 准则】15 条 + plan/explore 2 条 + subagent 块**（≈2500 字符） | ✅ 稳定块 |
+| `agent-system-prompt.js:8-46` | `buildCoreAgentRules()` | **【Agent 准则】15 条 + subagent + peer 块**（≈2300 字符） | ✅ 稳定块 |
 | `agent-system-prompt.js:54-69` | `formatSystemTimeChunk()` | 【系统时间】 | ✅ 轮次块 |
 | `agent-system-prompt.js:70-78` | `formatAgentHomeChunk()` | 【技能/计划】 | ✅ 稳定块 |
 | `agent-system-prompt.js:79-106` | `formatWorkspaceChunk()` | 【当前工作空间】/【默认工作目录】 | ✅ 稳定块 |
@@ -295,7 +296,7 @@
 | `:43` | 写代码“能改”原则；同常量单源 |
 | `:44` | 结构化文件 parse→dump，勿正则替换；勿静默吞异常 |
 | `:45` | 完成校验：声称已改须有写操作 |
-| `:46-48` | plan / explore / subagent 模式规则 |
+| `:46-48` | subagent / peer 块（无模式分支：Composer 模式选择器已删除） |
 
 ### B2. 上下文注入块构造器（≈16 个）
 
@@ -323,6 +324,8 @@
 | `renderer/renderer-agents-md.js` | `formatAgentsMdBlock` | 纯转发 Main `formatAgentsMdSystemBlock`（IPC `agents-md:format-block`），不再自带文案 |
 | `agent/task-tier.js:79-86` | `formatTaskTierSystemBlock` | 【任务分级】 |
 | `automation/skill-prompt.js:13-38` | `buildTaskSkillsSystem` | 【定时任务关联技能】 |
+| `plans/goal-run.js` | `renderSessionGoalBlock`（经 `system-prompt-prep.js#fetchSessionGoalBlock` 注入，排在 `turnHost` 最前） | 会话目标块：目标 / 清单 / 最近事实 / 第几轮 / 预算余量；无目标时返回空串（普通会话零注入） |
+| `plans/goal-run.js` | `renderEvidenceBlock` | 计划目标的事实块（与上面同一份措辞来源） |
 
 ### B3. 子 Agent / 独立子调用 prompt（≈14 个）
 

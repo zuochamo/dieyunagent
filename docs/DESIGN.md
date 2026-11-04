@@ -275,6 +275,28 @@ flowchart TD
 
 `sessionActiveRuns`：用户切换到别的历史对话时，原会话 Agent 仍在跑；回到该会话时恢复占位气泡与 trace。
 
+### 4.5 会话目标：把「一轮结束」从「模型不调工具了」升级为「目标收尾了」
+
+循环哲学没有变：**tool_calls = 继续，没有工具的文字 = 这一轮结束**。变的是「结束之后要不要接着来一轮」。
+
+| 层 | 责任 |
+| --- | --- |
+| 目标对象 | `src/goals/session-goal.js`（唯一读写点，存 `session_goals` KV，会话删则级联清） |
+| 语义 | `src/plans/goal-run.js`（与计划目标共用：事实、`judgeGoalFinish` 核对、`decideContinuation` 判定、注入块措辞） |
+| 谁来判 | Main：一次 `agent:rust-loop-run` 的返回 = 一轮结束，在 `judgeAfterTurn` 里判**一次**，结论挂 `result.goal` |
+| 谁来跑 | Renderer：只读 `goal.cont` 一个布尔，`startGoalTurn` 开下一轮（不判预算、不算事实） |
+| 给模型看 | `system-prompt-prep.js` 每轮注入目标块（目标 / 清单 / 最近事实 / 第几轮 / 还剩什么） |
+| 给人看 | 气泡区上方的**目标条** + 侧栏**「目标」页**（`renderer-goal-panel.js`，同一份视图、同一次取数） |
+
+**关键取舍**：
+
+- 续跑是**开新的一轮**而不是「接着这一轮跑」：目标块要重新注入、system prompt 要重算、轮次 / undo / 压缩边界要是真的。
+- 下一轮**不伪造用户消息**：请求尾补一条 `[系统] 目标尚未收尾…`（与「段续」同一机制，进 `isSyntheticLoopUserContent` 白名单），所以【当前任务】仍是用户原本那句话，气泡里也不会多出一条用户发言。
+- 「完成」只有一种证明方式：`goal_check` 的退出码。`goal_finish(complete)` 会被 `judgeGoalFinish` 拿事实核对，不通过就打回并把失败尾部回灌给模型；没有声明检查的目标是「未验证模式」，代码不替它宣布完成。
+- 预算只有一个来源：`agent-limits` 的 `goalMaxAttempts` / `goalMaxWallMs`。用尽 → 状态落 `stalled`，注入块与 UI 都说「预算已尽，等你决定」，**不包装成完成**。
+- 人永远优先：用户按停止 → 目标转 `paused`，之后的轮次不再自动续跑；面板 / 目标条上的「继续」才恢复（重置轮次预算，事实与清单全留）。
+- 边界：只驱动**当前正在看的会话**（否则等于在后台烧 token）；与对端 agent 绑定的会话（会话即通道）不自动开轮 —— 那里每一轮都可能被投递给对方。
+
 ---
 
 ## 5. 记忆系统
@@ -551,7 +573,7 @@ npm run pack:deb:remote  # 仅 Ubuntu deb：跨机打到 Linux 构建机，产�
 
 1. **工具并行度**：单 Agent 路径已并行只读工具；Planner 写工具仍偏保守。
 2. **流式最终答案**：思考过程流式，最终 assistant 正文有时仍等整包 JSON。
-3. **Planner 触发**：Composer Plan 模式 vs Agent 模式。
+3. **Planner 触发**：原为 Composer「Plan 模式」。模式选择器与 Explore 模式已删除（Composer 不再有模式概念），长任务职责已由**会话目标**接走（见 §4.5，P2a–P2c 已实施：目标对象 / 工具 / 每轮注入 / 续跑接线 / 目标条 + 目标页）；planner 引擎侧代码已无 UI 入口，待随重构删除（P3）。
 4. **renderer 单体**：Agent/Planner 编排已在 Rust+Main；UI 与 Gateway 客户端仍集中。
 5. **检查点恢复**：Planner 检查点由 Node 写入（`~/.dieyun/agent-checkpoints/`），Rust `resumeCheckpoint` 跳过已完成子任务并保留 `results`；RPC 测试见 `test-rust-planner-pipeline`。
 6. **DEVELOPMENT.md 部分段落过时**：以代码与本文为准。

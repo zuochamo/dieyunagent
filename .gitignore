@@ -10,6 +10,17 @@ build/dieyun-core/
 build/dieyun-core-linux/
 build/.cache/
 build/remote-gateway-pack/
+build/headless-pack/
+# headless 打包中间产物（deb rootfs 里有整套 node 与源树，单次 ~200MB）
+build/headless-deb/
+# apt 源自检副本（内含 50MB+ 的 .deb）
+build/apt-*/
+build/tmp-*
+build/testlog/
+# UI 截图（本地核对用，勿进版本库）
+build/desktop-ui*.png
+# Python 工具在 scripts/ 下留的字节码缓存
+__pycache__/
 build/mcp-bundled/
 # 仓库内 .dieyun/ 全是本机运行时数据（索引 / 附件副本 / worktree 缓存 / 终端记录 / 备份），
 # 一条目录规则就够，不再逐个文件列（历史上逐条列过，漏一条就会被 `git add -A` 收进来）

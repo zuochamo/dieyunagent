@@ -41,7 +41,11 @@ node .agents/skills/full-test/scripts/run-batch.cjs check:js lint:agent check:co
 - 批 A：`test:phase5-handlers test:session-remote-transport test:agent-run-events test:guardrails-sync test:sandbox-smoke test:sandbox-policy test:sandbox-gateway test:tool-gate test:write-smell-hints test:session-context test:agent-system-prompt test:system-prompt-prep`
 - 批 B：`test:monitor-outbox test:planner-parallel test:mcp-store test:app-updater-feeds test:ssh-reconnect-targets test:main-shell test:reviewer-json test:fs-edit test:delegate-batch test:dieyun-core-pack test:tool-bridge-delegate test:llm-reconnect-retry`
 - 批 C：`test:mobile test:composer-queue test:task-tier test:agent-limits test:worktree test:scm test:llm-tool-call-fallback test:agent-round-text test:llm-channel test:request-snapshot test:remote-pack test:sandbox-real`
-- 批 D（sidecar/Rust 链路）：`test:local-gateway-smoke test:workspace-remote-runtime test:core-bridge test:rust-loop-runner test:rust-planner-pipeline test:rust-agent-loop-smoke test:rust-planner-smoke test:lsp`
+- 批 D（sidecar/Rust 链路 + 新模块）：`test:local-gateway-smoke test:workspace-remote-runtime test:core-bridge test:rust-loop-runner test:rust-planner-pipeline test:rust-agent-loop-smoke test:rust-planner-smoke test:lsp test:peer test:browser-smoke test:headless test:linux-deb-install`
+
+批 C 自 2026-11-04 起补入：`test:mobile-camera test:session-handoff test:knowledge-maintainer test:project-memory-file`；批 A 补入 `test:tool-harness`；批 B 补入 `test:shortcuts`；静态批补入 `verify:rpc-catalog`。
+
+无界面 / 分发链路另有一档（产物已存在时可直接验，2026-11-04 实测三项全过）：`verify:headless-pack verify:headless-deb verify:headless-apt`（读 `dist/*.tgz|*.deb` 与 `release/headless-apt/pool`；无产物时先 `npm run build:headless`）。
 
 默认跳过并单独注明：`test:rust-agent-loop`（需真实 LLM 配置）、聚合命令（`test:agent` / `test:agent-full`，与子套件重复）、build 验证类（`verify:asar` `verify:remote-pack` `verify:bundled-skills`，依赖打包产物）、`test:renderer`（即 check:renderer，已在静态批次覆盖）。
 
@@ -78,7 +82,7 @@ node .agents/skills/full-test/scripts/run-batch.cjs [--timeout MS] suite1 suite2
 2. 历史项 test:local-gateway-smoke 白名单 FAIL（`关闭开关后白名单未收窄`）已于 2026-09-21、2026-10-24 连续两轮 PASS，按规则移出基线；若该签名再现，重新立案排查。
 3. **test:lsp 在 Electron 宿主下必假 FAIL**：签名 = `Error: npx child keeps default env`（scripts/test-lsp.cjs:116，断言 `childEnvForCommand('npx').ELECTRON_RUN_AS_NODE == null`）。根因是宿主（DSH / 任何以 `ELECTRON_RUN_AS_NODE=1` 启动的 shell）把该变量注入 `process.env`，被测函数对非 `process.execPath` 命令**原样返回 process.env**，断言因此不成立。排除法：同一命令加 `Remove-Item Env:ELECTRON_RUN_AS_NODE` 后 `test-lsp.cjs ok` → 环境问题非回归。
 4. 环境前提备忘：宿主全局 gitconfig 已于 2026-10-24 配好 user.name/email（此前缺失曾致 test:scm 场景 5 失败）。test:scm 已改为临时仓库自配身份（scripts/test-scm-service.cjs），不依赖宿主配置，换了机器也稳；其他新建临时 git 仓库做提交的测试若报 GIT_IDENTITY_MISSING，同法自配。
-5. **test:unit 的 `lsp-watch-batch.test.cjs › 排空时按单批上限切片`（2026-11-03 立案，待修，非环境）**：签名 = `Error: Test timed out in 5000ms`（用例内 `waitUntil(..., 8000)` > vitest 默认 5000，所以报超时而非断言失败），伴随 `Test Files 1 failed | 176 passed`、`Tests 1 failed | 1741 passed`。根因：`src/lsp/diagnostics-service.js` 把 drain 汇总行改成 `withDiagnostics > 0 || failed ? log : logDebug`，而测试只注入 `log`（空批次心跳走 `logDebug`）→ 汇总行永远进不了 `logs`。功能本身正常（30 个假文件 866ms 排空完）。修法：测试改为收集 `logDebug` 并给用例显式超时，或撤回降级。**签名一致时按已知问题记，但它是真实待修项，别当环境噪声放过。**
+5. **（已失效，2026-11-04 复测全绿）test:unit 的 `lsp-watch-batch.test.cjs › 排空时按单批上限切片`（2026-11-03 立案）**：提交 6a0b156「watch 空批次心跳降级到 debug 通道」之后 test:unit 全绿（196 files / 1890 passed / 2 skipped），按规则移出基线，签名再现再重新立案。以下为当时记录：签名 = `Error: Test timed out in 5000ms`（用例内 `waitUntil(..., 8000)` > vitest 默认 5000，所以报超时而非断言失败），伴随 `Test Files 1 failed | 176 passed`、`Tests 1 failed | 1741 passed`。根因：`src/lsp/diagnostics-service.js` 把 drain 汇总行改成 `withDiagnostics > 0 || failed ? log : logDebug`，而测试只注入 `log`（空批次心跳走 `logDebug`）→ 汇总行永远进不了 `logs`。功能本身正常（30 个假文件 866ms 排空完）。修法：测试改为收集 `logDebug` 并给用例显式超时，或撤回降级。**签名一致时按已知问题记，但它是真实待修项，别当环境噪声放过。**
 6. **verify:index-timing-local 的 C 断言（2026-11-03 立案，既有口径缺陷）**：签名 = 仅 `✗ C 同库重建应全部复用（新算 0）`，C 行 `复用 N / 新算 N`，其余 7 条断言全过，端点调用数不增加。根因：`index/mod.rs` 的 `vectors_embedded = COALESCE(?10, workspaces.vectors_embedded)` 只在有 miss 时写值，同库 force 重建全部命中缓存时写 `None` → 保留上一轮数字。core 自己的单测用新库（旧值本就 0）测不出。判定时别误判为「真在重算」。另：`verify:asar` 报 `renderer bundle is older than index.html` 时先 `npm run build:renderer`（产物过期，非回归）；`verify:remote-pack` 报 `缺少 X` 时同理先重跑打包。
 
 ## 报告格式

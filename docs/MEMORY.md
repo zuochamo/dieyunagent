@@ -17,6 +17,7 @@
 | **请求快照**（旁路事实） | SQLite `request_snapshots` | Node `request-snapshot.js`（唯一装配点） | 排查工具；不参与任何流程 |
 | **长期记忆（用户级）** | SQLite `long_memories`，`scope='global'`（带向量索引） | **Main 归纳器**（`src/agent/knowledge-maintainer.js`） | 每轮 system prompt（召回 5 条）+ `memory_recall` 工具 |
 | **项目记忆** | **文件** `<workspace>/.dieyun/memory.md`（人可读、可手改、随仓库走） | 同上（归纳器合并写入）+ 用户手改 + Agent `fs_edit` | 每轮 system prompt（按字符预算读文件头部）+ `memory_recall` 工具 |
+| **共享记忆（跨机）** | 内网 PostgreSQL `dieyun_memory.shared_memory`（扩展 → 共享记忆，默认开） | 各机器的归纳器**镜像上传**用户级新条目（只上传条目，不上传对话） | 每轮 system prompt 的【共享记忆】块（按需召回，跨机共享） |
 | **轮内记忆工具** | 读：上面两处；写：软归档 | Agent 在对话中调用（`memory_recall` / `memory_forget`） | 本轮工具结果 |
 | **会话检索（原始对话）** | SQLite `messages` + `messages_fts`（trigram）与 `compaction_archives.folded_text` | 账本既有写入者（用户发送 / Agent 完成） | 工具 `session_recall`（按需，不参与自动注入） |
 | **会话交接** | SQLite `session_handoffs` | 用户点「生成交接」→ Main `session-handoff.js` | 新会话「继续上次」时注入 |
@@ -291,6 +292,7 @@ scope = 'project:' + projects.id
 | 4 | `AGENTS.md`（两层链） | 宽泛层 `<workspace>/AGENTS.md`（仓库通用约定，`agentsMdRepoMaxChars`=4000，按行裁剪）→ 具体层 `<workspace>/.dieyun/AGENTS.md`（分段 + path-glob 条件段，`agentsMdMaxChars`=13500）。两层**各自独立预算**，内容相同则折叠成一份 |
 | 5 | **【项目记忆】** | `fs.read_file` 读 `<workspace>/.dieyun/memory.md`，按 `projectMemoryFileMaxChars`(2400) 取文件头部（最新在前）；文件条目无 id |
 | 6 | **【长期记忆（用户级）】** | `memory.long_recall`（`scope='global'`，limit `globalMemoryLimit`=5；无 query 时用 `long_recent`） |
+| 6.5 | **【共享记忆 · 局域网其他机器沉淀】** | 内网 PostgreSQL 共享库（`deps.sharedMemory.recall`，limit `sharedMemoryRecallLimit`=5；见 [SHARED-MEMORY.md](./SHARED-MEMORY.md)）。排在长期记忆**之后**：他人结论不该盖过本机事实 |
 | 7 | **【上个会话交接】** | `memory.handoff_get`（结构信号 `continueFromSessionId`） |
 | 8 | **工作记忆快照** | `agent.state_get`（`shouldInjectWorkMemory` 结构判定） |
 | 9 | 相关代码 / Codebase / 打开文件 | 索引与结构信号 |
@@ -365,6 +367,7 @@ kind === 'secret' || kind === 'private' → 不进自动 system prompt
 |------|------|
 | `project` | `{ mode: 'file', entries }`（文件条目数；无 id） |
 | `global` | `{ mode: semantic/keyword/recent, ids: [], excluded }`（`excluded` = 被 `kind` 挡掉的条数） |
+| `shared` | 跨机共享库：`{ mode: semantic/keyword, ids: [], excluded }`（不可用时不出现） |
 | `sessionHandoff` / `workMemory` | `{ from }` / `{ runId }` |
 
 去向**复用既有管道**：`contextAudit` → `request_snapshots.context_audit_json`（只写第 0 轮）+ 上下文面板「本轮注入记忆」。
@@ -373,6 +376,17 @@ kind === 'secret' || kind === 'private' → 不进自动 system prompt
 ### 5.5 不进 system 的清单
 
 其他会话的消息；已压缩掉的完整 tool 原文；`~/.dieyun/memory/` 笔记；未启用技能的记忆文件；`kind=secret/private` 的长期记忆。
+
+### 5.6 共享记忆（跨机）
+
+同一局域网的多台机器可以共用一个 PostgreSQL 记忆库（设置 → 扩展 → **共享记忆**，默认开启）：
+
+- **只同步记忆条目**，不上传对话；只上传**用户级**新条目，`kind=secret/private` 永不出本机（判定与写项目记忆共用 `isShareableKind`）。
+- 召回是**一条 SQL**：`ORDER BY COALESCE(向量距离, 1 - trigram 相似度)` —— 没向量 / 维度不匹配的行自然落到文本分，阈值与本地记忆同一套（**逐行按该行自己的通道取**，不按批级 `mode`）。
+- 注入块 `【共享记忆 · 局域网其他机器沉淀】` 只在有用户 query 时出现，排在【长期记忆】之后。
+- 连不上 PostgreSQL（或没填口令）= 该能力关闭；**不改用户的开关**、不重试、不阻塞对话。
+
+完整设计（表结构 / 提炼锁 / 为什么不回到旧「蜂群」形态）见 [SHARED-MEMORY.md](./SHARED-MEMORY.md)。
 
 ---
 
@@ -615,6 +629,7 @@ flowchart LR
 | 让 Agent 检索既往对话 | 已由 `session_recall` 提供（后端 `memory.messages_search` / `memory.compaction_folded`）。**不要再加一套索引**：新表就复用 `schema.rs::ensure_fts_ready` + `fts.rs::match_query`，路径比较复用 `projects::project_path_key` |
 | 人工查看/清理记忆 | 项目记忆直接改 `.dieyun/memory.md`；用户级记忆用上下文面板「本会话沉淀…」→「忘掉这些」，或 `memory.session_memories` + `session_memories_forget` |
 | 压缩策略 | `src/compaction-prompts.js` + Rust `compaction/`（数字走 `agent-limits`） |
+| 共享记忆（跨机） | `src/memory-shared/`（`settings` 配置与口令 / `pg` 连接与建表 / `service` 召回与提炼锁）+ `src/agent/knowledge-maintainer.js#runSharedMemoryConsolidation`（提炼 prompt）+ `system-prompt-prep.js#fetchSharedMemoryBlock`（注入）+ 设置页 `renderer-shared-memory.js`；详见 [SHARED-MEMORY.md](./SHARED-MEMORY.md) |
 
 ---
 
@@ -641,6 +656,8 @@ scripts/test-knowledge-maintainer.cjs   # 归纳器 smoke（门闩/设置/scope 
 scripts/test-project-memory-file.cjs    # 项目记忆文件层（解析/去重/预算/secret 过滤）
 scripts/test-system-prompt-prep.cjs     # 注入块与 memoryAudit
 scripts/test-session-handoff.cjs        # 交接：快照确定性投影 / 判断在前 / `<handoff>` 定界与转义
+src/memory-shared/                      # 共享记忆（跨机）：schema.sql / settings / pg / service
+test/unit/shared-memory.test.cjs        # 共享记忆纯函数（召回 SQL / 去重 / kind 门 / 口令语义）+ 真机 smoke（env 门）
 ```
 
 ---
@@ -653,6 +670,7 @@ scripts/test-session-handoff.cjs        # 交接：快照确定性投影 / 判�
 | [DESIGN.md](./DESIGN.md) | 全架构 |
 | [REQUEST-SNAPSHOT.md](./REQUEST-SNAPSHOT.md) | 「模型看到了什么」的留底 |
 | [MEMORY-VS-DSH.md](./MEMORY-VS-DSH.md) | 与 DSH 记忆设计的对照：抄了什么、明确不抄什么、反证条件 |
+| [SHARED-MEMORY.md](./SHARED-MEMORY.md) | 共享记忆（跨机 PostgreSQL）：数据模型 / 召回 SQL / 上传边界 / 提炼锁 / 可用性判定 |
 | [AGENT-DEV.md](./AGENT-DEV.md) | Agent 一页速查 |
 | [CODEMAP.json](./CODEMAP.json) | 模块 → 测试映射（记忆相关改动按此跑 smoke） |
 
