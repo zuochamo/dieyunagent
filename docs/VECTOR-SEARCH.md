@@ -23,6 +23,7 @@
 1. **只有显式 `vectors: true` 才写向量**：面板「建向量」（增量补齐）、CLI `--vectors`、显式传参的 RPC 调用方，以及**已经建过向量的工作区的保存增量**（`codebase-incremental-scheduler` 仅在 `vectorCount > 0` 时才跑，带 `vectors: true` 沿用同一意图 —— 它按文件删旧 chunk 会连向量一起删，不跟着补就等于让覆盖率单向下滑；`embeddingEnabled === false` 时退回不带向量，避免每次保存都撞 `EMBEDDING_NOT_CONFIGURED`）。`@Codebase` 与 prep 首次建库**不**带向量（见 `INDEX-VALUE-REVIEW.md` §8 的取舍）。
 2. **`vectors: false` 不删已有向量**（`INDEX-VALUE-REVIEW.md` R3 补丁）：删过一次就会「用户建了几分钟的向量，一次重建片段/一次保存全没了」，语义通道无声消失。清空只发生在两种地方 —— `force` 全量重建（chunk id 全换）与 embedding 签名变更（维度不兼容）。
 3. **元数据描述真实存在的向量**：`workspace.vector_count` 查库实数，`embedding_model/dims` 在「本次没建但库里还有」时沿用旧签名。`codebase.search` 只有在「端点可用 **且** `vector_count > 0` **且** 签名与当前设置一致」时才挂向量通道，否则静默走子串（`vectorSearch: false`，面板会显示原因）。
+   这条对**崩溃残留**同样成立：`force` 重建是「先删老 chunks（连带向量）再重切」，进程在 embedding 阶段被杀就会留下「chunk 有、向量几乎没」而元数据还是满值。`index/mod.rs::status_with_conn` 因此有两道核对 —— 进程内首次读到某工作区时按库实数对一次账（`meta_checked`，每工作区每进程一次，不进热路径），以及 SQLite 旗标 `indexing != 0` 或「声称有向量却 `EXISTS` 不到」时的探针；核对结果经 `StatusRepair` 写回元数据，向量归零时连签名一起清空（否则面板会说「与当前设置一致」，`can_vector` 也会先过签名这一关）。用例：`status_reports_real_vector_count_after_interrupted_force_rebuild`、`status_clears_vector_signature_when_vectors_are_gone`。
 
 覆盖度是**可观测**的：`vectorCount < chunkCount` 说明增量改过的文件只有 chunk 没向量（那部分只能靠子串召回），面板「向量一致性」会显示「仅覆盖 N/M 段」，点「建向量」补齐（`load_chunks_missing_vectors` 只补缺的，不重算全部）。
 

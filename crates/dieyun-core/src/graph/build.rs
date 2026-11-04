@@ -689,7 +689,7 @@ fn load_import_targets(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn clear_workspace_graph(conn: &Connection, root_hash: &str) -> Result<(), CoreError> {
+pub(crate) fn clear_workspace_graph(conn: &Connection, root_hash: &str) -> Result<(), CoreError> {
     conn.execute(
         "DELETE FROM graph_calls WHERE root_hash = ?1",
         params![root_hash],

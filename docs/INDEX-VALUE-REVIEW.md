@@ -169,6 +169,8 @@
 
 > 索引库是派生产物，**删库可无痛重建**——这是本次整改里唯一「删错了也能恢复」的一类改动，风险最低。
 
+> **派生也会派生垃圾（2026-11-04 补）**：`workspaces` 行会随项目目录一起「变成孤儿」——目录删了、行还在，而 `status` / `search` 第一步就是 `resolve_workspace`，路径不存在直接返回 `INVALID_WORKSPACE`，**根本走不到那一行**去清它（实测一条已删项目留了 53,538 段区段）。所以 `IndexService::from_config` 在起动时调 `prune_missing_workspaces()`：**本地根目录确实消失（卷根还在）**就删掉它的 `chunks` / `chunk_vectors` / `graph_*` / `workspaces` 行；候选集取 `workspaces` 与 `graph_workspaces` 的**并集**（只建过图谱、索引后被重置的仓库只在后者留痕，实测 9 个这样的孤儿挂着 5,100 条调用边）；两类一律跳过 —— 远端工作区（`ssh://` 的 key 不是本地路径，本地看不看得见与它的数据无关）与**整卷离线**（移动盘没插、`F:\` 本身不存在）。后者的「看不见」是暂时的，删了等于让用户插回盘后白重建几小时向量。用例：`prune_missing_workspaces_drops_rows_of_deleted_dirs_only`、`prune_keeps_remote_keys_and_offline_volumes`。
+
 ### R3 向量通道改为显式 opt-in
 
 | 项 | 内容 |

@@ -653,6 +653,20 @@ fn repair_stale_indexing_flag(conn: &Connection, root_hash: &str) {
     );
 }
 
+/// 清掉某工作区的**全部**图谱行（含 `graph_workspaces` 那行本身）。
+///
+/// 给「根目录已消失的工作区」清理用（`IndexService::prune_missing_workspaces`）：
+/// chunks 与图谱必须一起清，只清一半就会让 `graph_*` 查询拿到没有 chunk 支撑的符号。
+pub(crate) fn clear_workspace_rows(conn: &Connection, root_hash: &str) -> Result<(), CoreError> {
+    build::clear_workspace_graph(conn, root_hash)?;
+    conn.execute(
+        "DELETE FROM graph_workspaces WHERE root_hash = ?1",
+        params![root_hash],
+    )
+    .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

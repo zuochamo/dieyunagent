@@ -76,6 +76,13 @@ pub struct IndexService {
     db: Arc<SqliteHandle>,
     embedding: EmbeddingConfig,
     indexing: Arc<Mutex<HashSet<String>>>,
+    /// 本进程已经拿库实数核对过元数据的 root_hash：每个工作区只核一次。
+    ///
+    /// 为什么需要：`indexing` 旗标只能证明「这次崩了」，证明不了「上一进程崩过、旗标已被
+    /// 前面某次 status 清掉、元数据却还是旧的」—— 那正是本仓 2026-11-04 的现场（元数据
+    /// 10,846 段向量、库里只剩 1 条）。核对成本是一次 COUNT，按工作区、按进程各一次，
+    /// 不进热路径。
+    meta_checked: Arc<Mutex<HashSet<String>>>,
     progress: Arc<Mutex<HashMap<String, ProgressSnapshot>>>,
     remote_ingest: remote::RemoteIngestHandle,
     /// root_hash -> 常驻内存 chunk 向量池
@@ -92,6 +99,7 @@ impl IndexService {
             db,
             embedding,
             indexing: Arc::new(Mutex::new(HashSet::new())),
+            meta_checked: Arc::new(Mutex::new(HashSet::new())),
             progress: Arc::new(Mutex::new(HashMap::new())),
             remote_ingest: remote::RemoteIngestHandle::default(),
             vector_pools: PoolCache::new(),
@@ -271,6 +279,18 @@ impl IndexService {
         }
     }
 
+    /// 本进程第一次看到该工作区时返回 `true`（之后恒为 `false`）。
+    ///
+    /// 用途只有一处：`status` 首次读到某个工作区时，用库实数和元数据对一次账
+    /// （见 [`meta_checked`](Self::meta_checked) 字段说明）。建库收尾会自己写对元数据，
+    /// 所以「一次」就够；拿不到锁时按「已核对」处理，宁可少修一次也不要拖慢读。
+    fn take_meta_check(&self, root_hash: &str) -> bool {
+        match self.meta_checked.lock() {
+            Ok(mut guard) => guard.insert(root_hash.to_string()),
+            Err(_) => false,
+        }
+    }
+
     fn progress_for(&self, root_hash: &str) -> Option<ProgressSnapshot> {
         self.progress
             .lock()
@@ -280,9 +300,77 @@ impl IndexService {
 
     pub fn from_config(config: &AppConfig, db: Arc<SqliteHandle>) -> Self {
         // 向量复用缓存落在 data_dir（不写进项目：它是纯派生缓存，每个 worktree 一份毫无意义）
-        Self::new(db, config.embedding.clone()).with_vector_cache(Some(
+        let svc = Self::new(db, config.embedding.clone()).with_vector_cache(Some(
             config.data_dir.join(vector_cache::CACHE_FILE_NAME),
-        ))
+        ));
+        // 起动时对一次账：根目录已经不在的工作区，索引行留着既占库体又让「库里有什么」
+        // 的统计失真（实测某条已删项目留了 53,538 段区段）。构造期做，不和在跑的建库抢锁。
+        let removed = svc.prune_missing_workspaces();
+        if !removed.is_empty() {
+            eprintln!(
+                "[index] 清掉 {} 个根目录已消失的工作区：{}",
+                removed.len(),
+                removed.join(", ")
+            );
+        }
+        svc
+    }
+
+    /// 清掉「本地根目录已经不存在」的工作区的索引行（chunks / 向量 / 图谱 / workspaces 行）。
+    ///
+    /// 为什么不能靠读路径顺手清：`status`、`search` 这些入口第一步都是 `resolve_workspace`，
+    /// 路径不存在就直接 `INVALID_WORKSPACE` 返回，**根本走不到那一行**，于是被删掉的项目
+    /// 会永远躺在库里（`D:\opencode\wechat` 实测留了 53,538 段）。
+    ///
+    /// 宁可不删的两条边界：
+    /// - 远端工作区（`ssh://...` 的 key 不是本地路径）：本地看不看得见与它的数据无关；
+    /// - 整卷离线（移动盘没插，`F:\` 本身不存在）：那是暂时的，删掉等于让用户插回盘后
+    ///   白重建一次向量（几小时）。
+    ///
+    /// 返回被清掉的工作区路径，供调用方记日志。
+    pub fn prune_missing_workspaces(&self) -> Vec<String> {
+        let Ok(conn) = self.open_dedicated() else {
+            return Vec::new();
+        };
+        // 两处都会留「目录已消失」的行：索引行在 `workspaces`，图谱行在 `graph_workspaces`
+        // （只建过图谱、索引后来被重置的仓库只在后者留痕）。按 root_hash 取并集。
+        let rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT root_hash, root_path FROM workspaces
+                 UNION
+                 SELECT root_hash, root_path FROM graph_workspaces",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .and_then(|it| it.collect())
+            })
+            .unwrap_or_default();
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut removed = Vec::new();
+        for (root_hash, root_path) in rows {
+            if !seen.insert(root_hash.clone())
+                || workspace::is_remote_workspace_key(&root_path)
+                || !local_root_vanished(Path::new(&root_path))
+            {
+                continue;
+            }
+            if delete_all_chunks(&conn, &root_hash).is_err() {
+                continue;
+            }
+            let _ = crate::graph::clear_workspace_rows(&conn, &root_hash);
+            if conn
+                .execute(
+                    "DELETE FROM workspaces WHERE root_hash = ?1",
+                    params![root_hash],
+                )
+                .is_ok()
+            {
+                self.clear_progress(&root_hash);
+                removed.push(root_path);
+            }
+        }
+        removed
     }
 
     /// embedding 端点是否可用（`model` 与 `base_url` 都配了且没被禁用）。
@@ -332,14 +420,17 @@ impl IndexService {
         };
         let _ = conn.busy_timeout(std::time::Duration::ZERO);
         let _ = conn.execute(
-            "UPDATE workspaces SET indexing = 0, file_count = ?2, chunk_count = ?3,
-             indexed_at = CASE WHEN indexed_at = 0 THEN ?4 ELSE indexed_at END
+            "UPDATE workspaces SET indexing = 0, file_count = ?2, chunk_count = ?3, indexed_at = ?4,
+             vector_count = ?5, embedding_model = ?6, embedding_dims = ?7
              WHERE root_hash = ?1",
             params![
                 ws.root_hash,
                 repair.file_count,
                 repair.chunk_count,
-                repair.indexed_at
+                repair.indexed_at,
+                repair.vector_count,
+                repair.embedding_model,
+                repair.embedding_dims
             ],
         );
     }
@@ -416,7 +507,10 @@ impl IndexService {
                 let mut db_flag = db_indexing;
                 let mut file_count = fc;
                 let mut chunk_count = cc;
+                let mut vector_count = vc;
                 let mut indexed_at = ia;
+                let mut embedding_model = em.clone();
+                let mut embedding_dims = ed;
                 let mut repair = None;
                 if !live_indexing {
                     let need_clear_flag = db_flag != 0;
@@ -432,9 +526,29 @@ impl IndexService {
                         )
                         // 查询失败按「有数据」保守处理，别把好索引误判成空
                         .unwrap_or(1);
+                    // 向量侧同款探针：`force` 全量重建会先把老 `chunks`（连带 `chunk_vectors`）
+                    // 删掉再重切。进程若在 embedding 阶段被杀，留下的是「chunk 有、向量几乎没
+                    // 有」，而元数据还是上一轮的满值 —— 面板报几千条向量，检索侧却只能靠签名
+                    // 拒绝它。`docs/VECTOR-SEARCH.md` §1.1 规则 3 要求元数据描述**真实存在**的
+                    // 向量。探针同样用 EXISTS（`chunk_vectors.chunk_id` 是主键，命中即返回）。
+                    let has_vectors: i64 = conn
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM chunk_vectors WHERE chunk_id IN
+                                 (SELECT id FROM chunks WHERE root_hash = ?1))",
+                            params![ws.root_hash],
+                            |r| r.get(0),
+                        )
+                        // 查不到按「有向量」保守处理，别把好索引误判成空
+                        .unwrap_or(1);
+                    let vector_meta_lies = vector_count > 0 && has_vectors == 0;
+                    // 旗标只能证明「这次崩了」，证明不了「上一进程崩过、旗标已被前面某次
+                    // status 清掉、元数据还是旧的」。本进程第一次看到这个工作区时核一次账。
+                    let first_sight = self.take_meta_check(&ws.root_hash);
                     let meta_looks_broken = indexed_at == 0
                         || (chunk_count == 0 && file_count == 0)
-                        || (chunk_count > 0 && has_rows == 0);
+                        || (chunk_count > 0 && has_rows == 0)
+                        || vector_meta_lies
+                        || first_sight;
                     if need_clear_flag || meta_looks_broken {
                         let real_chunks: i64 = conn
                             .query_row(
@@ -443,8 +557,8 @@ impl IndexService {
                                 |r| r.get(0),
                             )
                             .unwrap_or(0);
-                        if real_chunks > 0 && (chunk_count == 0 || file_count == 0 || indexed_at == 0)
-                        {
+                        if real_chunks > 0 {
+                            // 数与库不符就按库说话：半途被杀的重建会让 chunk 数变了、元数据没跟上
                             chunk_count = real_chunks;
                             if file_count == 0 {
                                 file_count = conn
@@ -461,34 +575,55 @@ impl IndexService {
                                     .map(|d| d.as_secs() as i64)
                                     .unwrap_or(0);
                             }
-                        } else if real_chunks == 0 && chunk_count > 0 {
+                        } else if chunk_count > 0 {
                             // 内容真的没了：如实归零（indexed_at=0 → indexed=false，上层会提示重建）
                             chunk_count = 0;
                             file_count = 0;
                             indexed_at = 0;
                         }
-                        // 读路径不写库：只把「欠一次修」交回调用方
-                        repair = Some(StatusRepair {
-                            file_count,
-                            chunk_count,
-                            indexed_at,
-                        });
+                        // 向量计数取库实数；一条都没有就把签名一起归零 —— `can_vector` 与面板的
+                        // 「向量一致性」都以「库里真有向量」为前提，留着旧签名只会把假数据说圆
+                        if let Ok(real_vectors) = count_vectors(conn, &ws.root_hash) {
+                            vector_count = real_vectors;
+                            if real_vectors == 0 {
+                                embedding_model = None;
+                                embedding_dims = 0;
+                            }
+                        }
+                        // 读路径不写库：只把「欠一次修」交回调用方。健康工作区的首次核对
+                        // 算出来的值与元数据一样，不必写（写一次就多一轮 WAL）。
+                        let changed = file_count != fc
+                            || chunk_count != cc
+                            || indexed_at != ia
+                            || vector_count != vc
+                            || embedding_model != em
+                            || embedding_dims != ed;
+                        if changed || need_clear_flag {
+                            repair = Some(StatusRepair {
+                                file_count,
+                                chunk_count,
+                                indexed_at,
+                                vector_count,
+                                embedding_model: embedding_model.clone(),
+                                embedding_dims,
+                            });
+                        }
                         db_flag = 0;
                     }
                 }
-                let embedding_stale = vc > 0
+                let embedding_stale = vector_count > 0
                     && !current_signature.is_empty()
-                    && em.as_deref().unwrap_or("") != current_signature;
+                    && embedding_model.as_deref().unwrap_or("") != current_signature;
                 let mut st = StatusResult {
                     ok: true,
                     indexed: indexed_at > 0,
                     file_count,
                     chunk_count,
-                    vector_count: vc,
+                    vector_count,
                     indexed_at,
                     indexing: live_indexing || db_flag != 0,
-                    embedding_model: em,
-                    embedding_dims: ed,
+                    embedding_model,
+                    embedding_dims,
                     embedding_enabled,
                     embedding_stale,
                     vectors_reused: reused,
@@ -1112,6 +1247,11 @@ struct StatusRepair {
     file_count: i64,
     chunk_count: i64,
     indexed_at: i64,
+    /// 库里真实的向量条数（`chunk_vectors` 实数，不是上一轮写下的元数据）
+    vector_count: i64,
+    /// 向量为 0 时清空签名：留着旧签名会让面板/检索都以为「库里有那个模型的向量」
+    embedding_model: Option<String>,
+    embedding_dims: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1207,6 +1347,34 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// 本地根目录「确实没了」，而不是「整卷暂时不在」。
+///
+/// 判据：根目录不存在，但它所在的**卷根**还在 —— 目录被删或被改名；连卷根都找不着，
+/// 说明盘没插（移动硬盘 / 网络盘），这种情况保守跳过：插回盘后索引仍然有效。
+fn local_root_vanished(path: &Path) -> bool {
+    if path.exists() {
+        return false;
+    }
+    volume_root(path).map(|v| v.exists()).unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn volume_root(path: &Path) -> Option<PathBuf> {
+    match path.components().next()? {
+        std::path::Component::Prefix(prefix) => {
+            let mut s = prefix.as_os_str().to_os_string();
+            s.push("\\");
+            Some(PathBuf::from(s))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn volume_root(_path: &Path) -> Option<PathBuf> {
+    Some(PathBuf::from("/"))
 }
 
 fn delete_all_chunks(conn: &Connection, root_hash: &str) -> Result<(), CoreError> {
@@ -1703,6 +1871,8 @@ mod tests {
         let root = dir.path().to_string_lossy().to_string();
         let ws = resolve_workspace(&root).unwrap();
 
+        // 元数据与库一致（10 段 / 10 条向量都是库里真有的行）：本条只验证「签名/维度取库里
+        // 实际写入的值」与「与当前设置比一致性」，不验证计数（那是下面两条用例的事）。
         handle
             .with_conn(|conn| {
                 conn.execute(
@@ -1712,6 +1882,20 @@ mod tests {
                     params![ws.root_hash, &root],
                 )
                 .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                for i in 0..10 {
+                    conn.execute(
+                        "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                         VALUES (?1, ?2, 1, 2, ?3, 0)",
+                        params![ws.root_hash, "src/a.rs", format!("fn f{i}() {{}}")],
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                    let chunk_id = conn.last_insert_rowid();
+                    conn.execute(
+                        "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, 768, ?2)",
+                        params![chunk_id, vec![0u8; 768 * 4]],
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                }
                 Ok(())
             })
             .expect("seed workspace");
@@ -1739,6 +1923,300 @@ mod tests {
             .expect("update model");
         let st2 = svc.status(&root).expect("status");
         assert!(!st2.embedding_stale, "一致时不应提示重建");
+    }
+
+    /// `force` 重建在 embedding 阶段被杀：chunks 已经是新内容、向量几乎全丢，而元数据还停在
+    /// 上一轮的满值（本机 2026-11-04 现场：元数据 10,846 段向量，库里只剩 1 条）。
+    ///
+    /// status 必须按**库实数**报，否则面板、「向量一致性」提示、`can_vector` 的判断全都在用
+    /// 假数字 —— 这正是 `docs/VECTOR-SEARCH.md` §1.1 规则 3 要求的那件事。
+    #[test]
+    fn status_reports_real_vector_count_after_interrupted_force_rebuild() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("idx.sqlite");
+        let handle = crate::codebase_db::handle(db);
+        let mut cfg = EmbeddingConfig::default();
+        cfg.model = "test-model".into();
+        cfg.base_url = "http://127.0.0.1:1".into();
+        cfg.dimensions = 8;
+        let svc = IndexService::new(Arc::clone(&handle), cfg);
+        let root = dir.path().to_string_lossy().to_string();
+        let ws = resolve_workspace(&root).unwrap();
+
+        handle
+            .with_conn(|conn| {
+                // 元数据：上一轮的满值（42 段 / 42 条向量，签名与当前设置一致）
+                conn.execute(
+                    "INSERT INTO workspaces (root_hash, root_path, indexing, chunk_count, file_count,
+                                             indexed_at, vector_count, embedding_model, embedding_dims)
+                     VALUES (?1, ?2, 0, 42, 7, 1700000000, 42, 'test-model@8', 8)",
+                    params![ws.root_hash, &root],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                // 库里实际：重切后 3 段，向量只活下来 1 条
+                for i in 0..3 {
+                    conn.execute(
+                        "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                         VALUES (?1, ?2, 1, 2, ?3, 0)",
+                        params![ws.root_hash, format!("src/f{i}.rs"), format!("fn f{i}() {{}}")],
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                }
+                conn.execute(
+                    "INSERT INTO chunk_vectors (chunk_id, dims, vector)
+                     SELECT id, 8, ?2 FROM chunks WHERE root_hash = ?1 LIMIT 1",
+                    params![ws.root_hash, vec![0u8; 8 * 4]],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                Ok(())
+            })
+            .expect("seed half-built index");
+
+        let st = svc.status(&root).expect("status");
+        assert_eq!(st.chunk_count, 3, "chunk 数应按库实数，不能报上一轮的 42");
+        assert_eq!(st.vector_count, 1, "向量数应按库实数，不能报上一轮的 42");
+
+        // 元数据被就地修好，下一次 status（另一个进程也会）看到的就是真值
+        let (cc, vc): (i64, i64) = handle
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT chunk_count, vector_count FROM workspaces WHERE root_hash = ?1",
+                    params![ws.root_hash],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))
+            })
+            .expect("read repaired meta");
+        assert_eq!((cc, vc), (3, 1), "维修应把元数据写成库实数");
+    }
+
+    /// 向量一条不剩（重建在 embedding 开头就死了）：计数归零，**签名也要一起清掉**。
+    /// 留着旧签名会让面板说「与当前设置一致」、`can_vector` 也会先过签名这一关。
+    #[test]
+    fn status_clears_vector_signature_when_vectors_are_gone() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("idx.sqlite");
+        let handle = crate::codebase_db::handle(db);
+        let mut cfg = EmbeddingConfig::default();
+        cfg.model = "test-model".into();
+        cfg.base_url = "http://127.0.0.1:1".into();
+        cfg.dimensions = 8;
+        let svc = IndexService::new(Arc::clone(&handle), cfg);
+        let root = dir.path().to_string_lossy().to_string();
+        let ws = resolve_workspace(&root).unwrap();
+
+        handle
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO workspaces (root_hash, root_path, indexing, chunk_count, file_count,
+                                             indexed_at, vector_count, embedding_model, embedding_dims)
+                     VALUES (?1, ?2, 0, 2, 1, 1700000000, 42, 'test-model@8', 8)",
+                    params![ws.root_hash, &root],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                for i in 0..2 {
+                    conn.execute(
+                        "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                         VALUES (?1, ?2, 1, 2, ?3, 0)",
+                        params![ws.root_hash, format!("src/g{i}.rs"), format!("fn g{i}() {{}}")],
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                }
+                Ok(())
+            })
+            .expect("seed workspace without vectors");
+
+        let st = svc.status(&root).expect("status");
+        assert_eq!(st.vector_count, 0, "库里没有向量就不能报 42");
+        assert_eq!(st.embedding_model, None, "向量为 0 时签名必须清空");
+        assert_eq!(st.embedding_dims, 0);
+        assert!(!st.embedding_stale, "没有向量就谈不上「与当前设置不一致」");
+    }
+
+    /// 根目录被删掉的工作区要**自动**清干净：chunks / 向量 / 图谱 / workspaces 行全删，
+    /// 而目录还在的邻居一行都不许动。
+    #[test]
+    fn prune_missing_workspaces_drops_rows_of_deleted_dirs_only() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("idx.sqlite");
+        let handle = crate::codebase_db::handle(db);
+        let svc = IndexService::new(Arc::clone(&handle), EmbeddingConfig::default());
+
+        let alive = dir.path().join("alive");
+        let gone = dir.path().join("gone");
+        let graph_only = dir.path().join("graph-only");
+        std::fs::create_dir_all(&alive).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        std::fs::create_dir_all(&graph_only).unwrap();
+        let alive_key = resolve_workspace(&alive.to_string_lossy()).unwrap();
+        let gone_key = resolve_workspace(&gone.to_string_lossy()).unwrap();
+        let graph_only_key = resolve_workspace(&graph_only.to_string_lossy()).unwrap();
+
+        for (ws, path) in [(&alive_key, &alive_key.key), (&gone_key, &gone_key.key)] {
+            handle
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT INTO workspaces (root_hash, root_path, indexing, chunk_count,
+                                                 file_count, indexed_at, vector_count,
+                                                 embedding_model, embedding_dims)
+                         VALUES (?1, ?2, 0, 2, 1, 1700000000, 2, 'test-model@4', 4)",
+                        params![ws.root_hash, path],
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                    for i in 0..2 {
+                        conn.execute(
+                            "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                             VALUES (?1, 'a.rs', 1, 2, ?2, 0)",
+                            params![ws.root_hash, format!("fn f{i}() {{}}")],
+                        )
+                        .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                        let chunk_id = conn.last_insert_rowid();
+                        conn.execute(
+                            "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, 4, ?2)",
+                            params![chunk_id, vec![0u8; 16]],
+                        )
+                        .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                    }
+                    conn.execute(
+                        "INSERT INTO graph_workspaces (root_hash, root_path) VALUES (?1, ?2)",
+                        params![ws.root_hash, path],
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                    Ok(())
+                })
+                .expect("seed workspaces");
+        }
+
+        // 只在图谱表留痕的孤儿（建过图谱、索引后被重置的仓库就是这个形状）
+        handle
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO graph_workspaces (root_hash, root_path) VALUES (?1, ?2)",
+                    params![graph_only_key.root_hash, &graph_only_key.key],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                conn.execute(
+                    "INSERT INTO graph_symbols (root_hash, rel_path, kind, name, qualified_name,
+                                                start_line, end_line, mtime)
+                     VALUES (?1, 'a.rs', 'function', 'f', 'f', 1, 2, 0)",
+                    params![graph_only_key.root_hash],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                Ok(())
+            })
+            .expect("seed graph-only orphan");
+
+        // 目录消失（删掉后不清空 workspaces / graph_workspaces 行）
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::remove_dir_all(&graph_only).unwrap();
+
+        let mut removed = svc.prune_missing_workspaces();
+        removed.sort();
+        let mut expected = vec![gone_key.key.clone(), graph_only_key.key.clone()];
+        expected.sort();
+        assert_eq!(removed, expected, "只该清掉目录已消失的那些");
+
+        handle
+            .with_conn(|conn| {
+                // (工作区, workspaces, chunks, chunk_vectors, graph_workspaces) 期望行数
+                let cases = [
+                    (&gone_key, (0i64, 0i64, 0i64, 0i64)),
+                    (&graph_only_key, (0, 0, 0, 0)),
+                    (&alive_key, (1, 2, 2, 1)),
+                ];
+                for (ws, expected) in cases {
+                    let sqls = [
+                        "SELECT COUNT(*) FROM workspaces WHERE root_hash = ?1",
+                        "SELECT COUNT(*) FROM chunks WHERE root_hash = ?1",
+                        "SELECT COUNT(*) FROM chunk_vectors WHERE chunk_id IN
+                             (SELECT id FROM chunks WHERE root_hash = ?1)",
+                        "SELECT COUNT(*) FROM graph_workspaces WHERE root_hash = ?1",
+                    ];
+                    for (sql, want) in sqls.into_iter().zip([
+                        expected.0, expected.1, expected.2, expected.3,
+                    ]) {
+                        let n: i64 = conn
+                            .query_row(sql, params![ws.root_hash], |r| r.get(0))
+                            .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                        assert_eq!(n, want, "{sql} 对 {}", ws.key);
+                    }
+                }
+                // 图谱符号也要跟着清（只删 graph_workspaces 会留下无主的符号/调用边）
+                let symbols: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM graph_symbols WHERE root_hash = ?1",
+                        params![graph_only_key.root_hash],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                assert_eq!(symbols, 0, "孤儿工作区的图谱符号必须一起清掉");
+                Ok(())
+            })
+            .expect("verify pruned rows");
+    }
+
+    /// 远端工作区与「整卷离线」的工作区不许清：前者本地看不看得见与数据无关，
+    /// 后者是暂时的（插回移动盘后索引仍然有效）。
+    #[test]
+    fn prune_keeps_remote_keys_and_offline_volumes() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("idx.sqlite");
+        let handle = crate::codebase_db::handle(db);
+        let svc = IndexService::new(Arc::clone(&handle), EmbeddingConfig::default());
+
+        let remote_key = "ssh://dev@192.168.1.10/home/dev/project";
+        let remote_hash = workspace::hash_workspace_key_str(remote_key);
+        handle
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO workspaces (root_hash, root_path, indexed_at) VALUES (?1, ?2, 1700000000)",
+                    params![remote_hash, remote_key],
+                )
+                .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                Ok(())
+            })
+            .expect("seed remote workspace");
+
+        // 找一个本机不存在的卷，构造「盘没插」形态的路径；机器上所有盘符都在时跳过这段
+        let offline = ('D'..='Z')
+            .map(|c| format!("{c}:\\"))
+            .find(|root| !Path::new(root).exists())
+            .map(|root| format!("{root}nope\\project"));
+        if let Some(offline) = offline {
+            assert!(
+                !local_root_vanished(Path::new(&offline)),
+                "整卷离线时不能判成「目录已消失」：{offline}"
+            );
+            let hash = crate::config::hash_workspace_root(Path::new(&offline));
+            handle
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT INTO workspaces (root_hash, root_path, indexed_at) VALUES (?1, ?2, 1700000000)",
+                        params![hash, offline],
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                    Ok(())
+                })
+                .expect("seed offline workspace");
+        }
+
+        assert!(
+            svc.prune_missing_workspaces().is_empty(),
+            "远端 key 与离线卷都不该被清"
+        );
+        handle
+            .with_conn(|conn| {
+                let n: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM workspaces",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CoreError::rpc("TEST_SEED", e.to_string()))?;
+                assert!(n >= 1, "远端工作区必须还在");
+                Ok(())
+            })
+            .expect("verify kept rows");
     }
 
     #[test]
