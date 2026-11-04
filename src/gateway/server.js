@@ -82,6 +82,7 @@ function uniqueResolvedRoots(roots) {
  * @property {string} readableDir 只读文件白名单根之一
  * @property {string[]} [extraReadRoots] 开发态等额外根
  * @property {(msg: string) => void} [log]
+ * @property {(msg: string) => void} [logDebug] 低噪心跳日志（如 LSP 空批次）；不给就不打，主日志只留「有产出/失败」的行
  * @property {import('./permissions-store').DEFAULTS & object} [permissions]
  * @property {ReturnType<import('../browser/service').createBrowserService> | null} [browser]
  * @property {ReturnType<import('../ssh/session-manager').createSshSessionManager> | null} [ssh]
@@ -97,6 +98,7 @@ class LocalGateway {
     this.readableDir = opts.readableDir;
     this.extraReadRoots = opts.extraReadRoots || [];
     this.log = opts.log || (() => {});
+    this.logDebug = opts.logDebug || (() => {});
     /** @type {import('../workspace/target').WorkspaceTarget | null} */
     this.workspaceTarget = null;
     this.workspaceRoot = null;
@@ -148,6 +150,7 @@ class LocalGateway {
     this.lspDiagnostics = createLspDiagnosticsService({
       userDataPath: this.userDataPath,
       log: (msg) => this.log(`[lsp] ${msg}`),
+      logDebug: (msg) => this.logDebug(`[lsp] ${msg}`),
       onStoreUpdated: (workspaceRoot) => this._broadcastDiagnosticsStoreUpdated(workspaceRoot)
     });
     this.graphIncremental = createGraphIncrementalScheduler({

@@ -261,7 +261,7 @@ class LspClient {
       this.diagnosticsByUri.set(key, diags);
       // 只在真有诊断时打一行：批量诊断时「diag 0 条」占了绝大多数（实测一轮 855 个
       // .py 有 700+ 条空诊断），逐条落盘会把 main.log 冲爆并拖慢主进程。
-      // 汇总口径看 diagnostics-service 的 `[diagnostics] watch batch`。
+      // 汇总口径看 diagnostics-service 的 `[diagnostics] watch batch`（有诊断/失败进 info，空批次进 debug）。
       if (diags.length) this.log(`[lsp] diag ${diags.length} 条 ← ${key}`);
       const waiter = this.waiters.get(key);
       if (waiter && typeof waiter.onDiagnostics === 'function') {
@@ -768,7 +768,7 @@ class LspClient {
       }
     });
     // 不再逐文件打 didOpen 日志：批量 watch 场景一轮几百个文件，每文件一行是纯噪音，
-    // 汇总口径见 diagnostics-service 的 `[diagnostics] watch batch files=N`。
+    // 汇总口径见 diagnostics-service 的 `[diagnostics] watch batch files=N`（空批次已降级到 debug）。
 
     try {
       const diags = await diagPromise;

@@ -231,11 +231,18 @@ function hasRelevantDiagnostics(diagnostics, minSeverity) {
 }
 
 /**
- * @param {{ userDataPath: string, log?: (msg: string) => void }} opts
+ * @param {{ userDataPath: string, log?: (msg: string) => void, logDebug?: (msg: string) => void }} opts
  */
 function createLspDiagnosticsService(opts) {
   const userDataPath = opts.userDataPath;
   const log = opts.log || (() => {});
+  /**
+   * 低噪通道：watch 的「空批次」心跳（files=N withDiagnostics=0）走这里。
+   *
+   * 远端工作空间每 25s 一轮，全打 info 实测把主日志淹掉（3 天 830 条里 754 条是 0 诊断）；
+   * 但这条又是「watch 跑过了却没出诊断」的唯一证据，不能直接删，所以降级到 debug。
+   */
+  const logDebug = typeof opts.logDebug === 'function' ? opts.logDebug : () => {};
   /** @type {(workspaceRoot: string, filePath?: string) => void} */
   let onStoreUpdated = typeof opts.onStoreUpdated === 'function' ? opts.onStoreUpdated : null;
 
@@ -1184,10 +1191,12 @@ function createLspDiagnosticsService(opts) {
       // 误清会让 schedule 再起一个 drain，两个 drain 同时对同一连接分批 didOpen。
       if (live && live === bucket) live.draining = false;
       if (total > 0 || failed) {
-        log(
+        const line =
           `[diagnostics] watch batch ${root} files=${total} batches=${batches} withDiagnostics=${withDiagnostics}` +
-            (failed ? ` failed=${failed}` : '')
-        );
+          (failed ? ` failed=${failed}` : '');
+        // 有产出或失败 = 主日志（排查入口）；纯心跳降级到 debug，别把 25s 一轮的轮询写满 main.log
+        if (withDiagnostics > 0 || failed) log(line);
+        else logDebug(line);
       }
       // 排空过程中又来了新事件（dirty 又有货）→ 补一次，避免丢事件
       if (live && live === bucket && live.dirty.size && !live.queueTimer) {
