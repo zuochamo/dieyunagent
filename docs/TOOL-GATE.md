@@ -82,6 +82,13 @@ const hookDenySensitivePath = {
 | 工具为什么被拦 | 返回信封里的 `errorCode`：`MISSING_ARG` / `BLOCKED` / `USE_FS_EDIT` / `REPEAT_BLOCK` … |
 | 大输出去哪了 | 结果里的 `outputFile`（`tool-output-spill.js`；阈值唯一来源 `agent-limits.js:toolSpillCharThreshold`，且必须小于 `toolResultMaxJson`，否则那一段会被静默截断且无文件可回读） |
 | 这一轮模型看到的「工具结果」原文 | `memory.request_snapshot_*`（见 [`REQUEST-SNAPSHOT.md`](./REQUEST-SNAPSHOT.md)） |
+| 某工具卡在写类串行队列 | `main.log` 的 `MUTATE_QUEUE_STALL`（含 `tool` / `workspace` / `runningMs`；阈值 `agent-limits.toolStallMs`，到点强开闸、原调用不终止） |
+
+**串行队列只放「写这个工作空间」的工具**：谁进队列由 `guardrails-shared.MUTATING_TOOL_NAMES` 决定。
+`plan_run` / `plan_cancel` 刻意不在里面 —— 它们是调度器动作，不写工作空间；而 `plan_run` 一旦占着槽位
+等整段嵌套运行，嵌套运行自己的 `fs_edit` / `fs_write_file` 又在等同一个槽位，就互锁
+（2026-11-04：`MUTATE_QUEUE_STALL ... tool=plan_run runningMs=720009`，12 分钟后强开才跑完，
+期间发起方对话轮一直「思考中…」）。「同一计划不能同时跑两轮」由 `PlansScheduler.running` 挡。
 
 ---
 

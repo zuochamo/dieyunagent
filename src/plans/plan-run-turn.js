@@ -60,6 +60,9 @@ function buildPlanRunUserText(plan, at, limits) {
     ? `\n\n执行 TODO：\n${todos.map((t, i) => `${i + 1}. ${t}`).join('\n')}`
     : '';
   const goalBlock = isGoal ? `\n\n${buildGoalRoundBlock(plan, limits)}` : '';
+  // 目标的「是什么」单独一行：事实块只讲轮次与检查事实，不重复目标本身。
+  const objective = isGoal && plan.goal ? String(plan.goal.objective || '').trim() : '';
+  const objectiveLine = objective ? `\n目标：${objective}` : '';
   // 目标型的收尾入口只讲一次：跑检查 → 留事实 → 申请收尾。文案写在工具 schema 里，
   // 这里只说「本轮该做什么」，不重复工具用法（避免两处描述漂移）。
   const goalTail = isGoal
@@ -70,6 +73,7 @@ function buildPlanRunUserText(plan, at, limits) {
   return (
     `[计划 · ${(plan && plan.name) || '未命名计划'}]\n` +
     `${when} · ${isGoal ? '目标续跑' : '定时触发'}` +
+    objectiveLine +
     goalBlock +
     `\n\n${(plan && plan.prompt) || ''}` +
     todoBlock +

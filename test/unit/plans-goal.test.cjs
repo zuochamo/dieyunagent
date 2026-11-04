@@ -446,6 +446,23 @@ describe('plan-run-turn: 目标型交接班文本', () => {
     expect(text).not.toContain('goal_check');
     expect(text).toContain('执行 TODO');
   });
+
+  it('目标原文进交接班文本（每轮都得知道「什么算达成」）', () => {
+    const text = buildPlanRunUserText({
+      ...goalPlan({}),
+      goal: {
+        objective: 'python check_greet.py 退出码为 0',
+        checks: [{ id: 'c1', command: 'python check_greet.py' }],
+        cwd: ''
+      }
+    });
+    expect(text).toContain('目标：python check_greet.py 退出码为 0');
+  });
+
+  it('没有 objective 的老计划不印空行', () => {
+    const text = buildPlanRunUserText(goalPlan({}));
+    expect(text).not.toContain('目标：');
+  });
 });
 
 describe('scheduler: 目标型只由轮询触发', () => {
@@ -473,22 +490,29 @@ describe('scheduler: 目标型只由轮询触发', () => {
 });
 
 describe('对话里建目标型计划：参数契约', () => {
-  it('plan_create + goal → 放行', () => {
+  it('plan_create + goal(objective + checks) → 放行', () => {
     const v = validateToolArgs('plan_create', {
       prompt: '把测试跑绿',
-      goal: { checks: ['npm test'] }
+      goal: { objective: 'npm test 退出码为 0', checks: ['npm test'] }
     });
     expect(v.ok).toBe(true);
   });
 
-  it('goal 缺 checks / 缺 prompt / 同时给 rrule → 拒绝（别留一个猜出来的长任务）', () => {
-    expect(validateToolArgs('plan_create', { prompt: 'x', goal: { cwd: '/w' } }).ok).toBe(false);
-    expect(validateToolArgs('plan_create', { goal: { checks: [] } }).ok).toBe(false);
+  it('goal 缺 objective / 缺 checks / 缺 prompt / 同时给 rrule → 拒绝（别留一个猜出来的长任务）', () => {
+    // objective 必填：没有它，面板里「目标」正文是空的，每轮交接班也没有「什么算达成」
+    //（与 goal_start 的 objective 同一契约）
+    const noObjective = validateToolArgs('plan_create', { prompt: 'x', goal: { checks: [] } });
+    expect(noObjective.ok).toBe(false);
+    expect(noObjective.error).toContain('objective');
+    expect(
+      validateToolArgs('plan_create', { prompt: 'x', goal: { objective: '做到 x', cwd: '/w' } }).ok
+    ).toBe(false);
+    expect(validateToolArgs('plan_create', { goal: { objective: 'x', checks: [] } }).ok).toBe(false);
     expect(
       validateToolArgs('plan_create', {
         prompt: 'x',
         rrule: 'FREQ=DAILY',
-        goal: { checks: [] }
+        goal: { objective: 'x', checks: [] }
       }).ok
     ).toBe(false);
   });

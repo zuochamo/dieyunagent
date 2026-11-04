@@ -48,14 +48,19 @@ function planDraftFromStructured(input, opts = {}) {
 
   // 目标型（trigger=goal）：调用方给了**结构化**检查清单就能确定性落盘。
   // 不需要 rrule/onceAt；也**不从自然语言里抠命令**（本模块不做关键词解析）。
-  // 字段名只有 `goal.checks`（与 store#normalizeGoal 同一形状）；空数组 = 未验证模式，也是合法目标。
+  // 字段名只有 `goal.objective / goal.checks`（与 store#normalizeGoal 同一形状）；
+  // 空 checks = 未验证模式，也是合法目标。
   const goalSrc = src.goal && typeof src.goal === 'object' ? src.goal : null;
   if (goalSrc && Array.isArray(goalSrc.checks) && prompt) {
     return normalizePlan({
       id: newId(),
       name: src.name,
       trigger: 'goal',
-      goal: { checks: goalSrc.checks, cwd: String(goalSrc.cwd || '').trim() },
+      goal: {
+        objective: String(goalSrc.objective || '').trim(),
+        checks: goalSrc.checks,
+        cwd: String(goalSrc.cwd || '').trim()
+      },
       budget: src.budget && typeof src.budget === 'object' ? src.budget : undefined,
       tz: 'Asia/Shanghai',
       dtstart: new Date().toISOString(),

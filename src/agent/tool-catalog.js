@@ -1431,10 +1431,16 @@ const PLAN_TOOLS = [
             type: 'object',
             description:
               '目标型计划（"一直做到 X 成立"）。给了它就不要再给 rrule/onceAt。' +
+              'objective 是「什么状态算达成」那一句，它会进每一轮的交接班文本；' +
               '检查命令决定「做没做完」能不能被机器核对，所以要先和用户确认一条**现在会失败、做完会通过**的命令；' +
               '确实没有可执行的检查（例如主观目标）就传空数组 checks: []，那是未验证模式：照样能跑，但完成申请不会被代码核对。' +
               '预算（轮次/时长）不在这里设：沿用默认值，用户可在「定时任务 → 目标」里改。',
             properties: {
+              objective: {
+                type: 'string',
+                description:
+                  '一句话说清「什么状态算达成」（每轮交接班的第一行就是它）。和 goal_start 的 objective 同一个含义，别写成检查命令'
+              },
               checks: {
                 type: 'array',
                 items: { type: 'string' },
@@ -1446,7 +1452,7 @@ const PLAN_TOOLS = [
                 description: '检查命令的工作目录（可选，留空 = 计划运行的工作空间）'
               }
             },
-            required: ['checks']
+            required: ['objective', 'checks']
           },
           rrule: {
             type: 'string',

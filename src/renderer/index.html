@@ -935,6 +935,11 @@
             </div>
             <div class="automation-schedule-panel" data-schedule-panel="goal">
               <label class="field">
+                <span class="field-label">目标（什么状态算达成）</span>
+                <textarea id="automation-goal-objective" rows="2" placeholder="例如：工作区里 greet.py 的 python check_greet.py 退出码为 0，全部用例通过"></textarea>
+                <span class="field-hint">每轮交接班的第一行就是它：模型据此判断这一步该做什么。检查命令只是「做没做完」的机器判据，替代不了这句话。</span>
+              </label>
+              <label class="field">
                 <span class="field-label">验收检查（每行一条命令）</span>
                 <textarea id="automation-goal-verify" rows="3" placeholder="例如：npm test&#10;留空 = 未验证模式：照样能跑，但完成申请不会被代码核对，事实块会标注「未验证」"></textarea>
                 <span class="field-hint">由模型在轮内决定什么时候跑、跑哪条（goal_check），退出码 0 = 通过；检查通过的事实是完成申请的唯一依据。留空则不核对。</span>

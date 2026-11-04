@@ -110,9 +110,13 @@ function automationGoalSummary(plan) {
 }
 
 function automationPlanDesc(plan) {
-  const prompt = String(plan.prompt || '').trim();
-  if (prompt) {
-    return prompt.length > 72 ? `${prompt.slice(0, 72)}…` : prompt;
+  // 目标型卡片的正文是「目标」本身（objective）；没有 objective 的老计划继续退到 prompt，
+  // 免得升级后所有目标卡片都只剩一行状态。
+  const objective =
+    plan && plan.trigger === 'goal' && plan.goal ? String(plan.goal.objective || '').trim() : '';
+  const text = objective || String(plan.prompt || '').trim();
+  if (text) {
+    return text.length > 72 ? `${text.slice(0, 72)}…` : text;
   }
   return scheduleLabelPlan(plan);
 }
@@ -174,6 +178,7 @@ function automationSearchHaystack(plan) {
     plan.rrule,
     plan.onceAt,
     plan.workspace,
+    plan.goal && plan.goal.objective,
     plan.goal && Array.isArray(plan.goal.checks)
       ? plan.goal.checks.map((c) => (c && c.command) || '').join(' ')
       : '',
@@ -452,11 +457,13 @@ function applyAutomationScheduleToForm(plan) {
 function fillAutomationGoalForm(plan) {
   const goal = (plan && plan.goal) || {};
   const budget = (plan && plan.budget) || {};
+  const objectiveEl = $('automation-goal-objective');
   const verifyEl = $('automation-goal-verify');
   const cwdEl = $('automation-goal-cwd');
   const attemptsEl = $('automation-goal-attempts');
   const wallEl = $('automation-goal-wall-min');
   const checks = Array.isArray(goal.checks) ? goal.checks : [];
+  if (objectiveEl) objectiveEl.value = goal.objective || '';
   // 一条命令一行：与 collectAutomationForm 的拆分规则互为逆运算
   if (verifyEl) verifyEl.value = checks.map((c) => (c && c.command) || '').filter(Boolean).join('\n');
   if (cwdEl) cwdEl.value = goal.cwd || '';
@@ -1056,6 +1063,7 @@ function collectAutomationForm() {
     // 留空 = 未验证模式（能跑，但完成申请不被代码核对）。
     goal: isGoal
       ? {
+          objective: String($('automation-goal-objective')?.value || '').trim(),
           checks: String($('automation-goal-verify')?.value || '')
             .split(/\r?\n/)
             .map((s) => s.trim())

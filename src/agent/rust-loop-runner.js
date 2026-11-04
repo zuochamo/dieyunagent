@@ -1054,6 +1054,11 @@ async function runRustAgentLoop(opts) {
         const delegates = Array.isArray(phase.delegates) ? phase.delegates : [];
         onPhase('delegate_start', { runId: phase.runId, delegates });
         runStall.note('delegate');
+        // 工具段是唯一能长时间没有回音的地方（其余段都有超时）。先记「谁在跑」：
+        // trace 只写**已完成**的工具，挂住的那个名字在库里看不见，RUN_STALL 又只报 stage=delegate。
+        runLog(
+          `工具执行: ${delegates.map((d) => (d && d.name) || 'tool').join(', ') || '（空）'}`
+        );
         const results = capDelegateResults(
           await executeDelegateBatch(delegates, delegateTool, onPhase, phase.runId, signal),
           (getAgentLimits(opts.userData, opts.contextTierId) || {}).toolResultMaxJson

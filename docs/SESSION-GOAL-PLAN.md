@@ -223,6 +223,11 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 
 两套触发、一套语义。会话目标**不进** `plans.json`，也不出现在「自动化」列表里（那里只放定时任务）。
 
+两条入口的**目标形状完全同构**（`goal-run.normalizeGoal`）：`objective`（一句话说清什么算达成，两边都必填）+
+`checks`（可执行命令）+ `cwd`。计划侧一度只落 `checks/cwd`，于是「自动化 → 目标」卡片里目标正文空着、
+每轮交接班也没有「什么算达成」；现在 `plan_create` 的 `goal.objective` 与 `goal_start` 同一条契约。
+`cwd` 只属于计划（会话目标用会话绑定的工作空间）。
+
 ## 8. 改动清单
 
 | 文件 | 改动 |

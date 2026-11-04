@@ -55,12 +55,14 @@ describe('planDraftFromStructured', () => {
     const plan = planDraftFromStructured({
       name: '把测试跑绿',
       prompt: '修复失败的测试直到全绿',
-      goal: { checks: ['npm test', 'npm run lint'], cwd: 'E:\\proj' }
+      goal: { objective: 'npm test 退出码为 0', checks: ['npm test', 'npm run lint'], cwd: 'E:\\proj' }
     });
     expect(plan.trigger).toBe('goal');
     expect(plan.rrule).toBe('');
     expect(plan.goal.checks.map((c) => c.command)).toEqual(['npm test', 'npm run lint']);
     expect(plan.goal.cwd).toBe('E:\\proj');
+    // objective 与检查命令一样是目标的一部分：少了它，每轮交接班没有「什么算达成」
+    expect(plan.goal.objective).toBe('npm test 退出码为 0');
     expect(plan.enabled).toBe(true);
   });
 

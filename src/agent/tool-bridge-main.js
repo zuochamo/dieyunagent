@@ -882,6 +882,7 @@ function createMainToolBridge(deps) {
             goal:
               p.trigger === 'goal'
                 ? {
+                    objective: (p.goal && p.goal.objective) || '',
                     checks: (p.goal && Array.isArray(p.goal.checks) ? p.goal.checks : []).map((c) => c && c.command),
                     cwd: (p.goal && p.goal.cwd) || ''
                   }
@@ -919,26 +920,31 @@ function createMainToolBridge(deps) {
         if (!id) return { ok: false, error: 'plan_run 需要 id', errorCode: 'MISSING_ARG' };
         const plan = plansStore.get(id);
         if (!plan) return { ok: false, error: `没有这个计划：${id}`, errorCode: 'PLAN_NOT_FOUND' };
-        let result;
-        try {
-          result = await scheduler.runNow(id);
-        } catch (err) {
-          result = { ok: false, error: String((err && err.message) || err) };
-          if (typeof deps.finishPlanRun === 'function') {
-            deps.finishPlanRun(plan, result).catch(() => {});
-          }
-        }
-        try {
-          scheduler.reload();
-        } catch {
-          // ignore
-        }
+        // 触发即返回：`runNow` 是一整段嵌套运行（多轮 LLM + 工具），await 它等于把这次对话轮
+        // 挂在另一个 run 上 —— 那边任何一个工具卡住，这边就一直显示「思考中…」直到看门狗收尾
+        // （2026-11-04：目标型计划里一个工具挂住，对话轮一起冻住，只剩 RUN_STALL 可看）。
+        // 结果本来就落在计划绑定的会话，返回说明也写着「不要在这里等」，所以这里只负责触发。
+        Promise.resolve()
+          .then(() => scheduler.runNow(id))
+          .catch((err) => {
+            const failed = { ok: false, error: String((err && err.message) || err) };
+            if (typeof deps.finishPlanRun === 'function') {
+              deps.finishPlanRun(plan, failed).catch(() => {});
+            }
+          })
+          .finally(() => {
+            try {
+              scheduler.reload();
+            } catch {
+              // ignore
+            }
+          });
         return {
-          ok: !!(result && result.ok !== false),
+          ok: true,
+          triggered: true,
           planId: id,
           name: plan.name,
-          result,
-          note: '已触发一次执行：跑完的结果会出现在该计划绑定的会话里，不要在这里等'
+          note: '已触发一次执行：结果会出现在该计划绑定的会话里，不要在这里等；要看跑没跑完就 plan_list 查该计划状态'
         };
       }
       case 'goal_start': {

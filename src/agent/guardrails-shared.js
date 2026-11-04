@@ -60,9 +60,13 @@ const MUTATING_TOOL_NAMES = Object.freeze(
     'skill_delete',
     'plan_create',
     'plan_delete',
-    // 立即执行 / 中止计划：动的是正在跑的后台轮次，必须串行
-    'plan_run',
-    'plan_cancel',
+    // `plan_run` / `plan_cancel` 刻意**不在**这里：
+    //   - 「同一个计划不能同时跑两轮」由 `PlansScheduler.running` 自己挡（`runNow` 会抛「计划正在执行」），
+    //     队列再加一层不是新的保证；
+    //   - 而塞进 workspace 串行队列会**死锁**：`plan_run` 占着槽位等整段嵌套运行，
+    //     嵌套运行自己的 `fs_edit` / `fs_write_file` 又要同一个槽位
+    //     （2026-11-04 现场：`MUTATE_QUEUE_STALL ... tool=plan_run runningMs=720009`，
+    //      12 分钟强开闸后才跑完；期间发起方对话轮一直「思考中…」）。
     // mcp_manage 改的是 MCP 服务配置并重建会话（进程级副作用），与 skill_create 同类
     'mcp_manage',
     // ssh 会改连接/端口转发状态，甚至把工作空间切到远端：同一时刻只能有一个在跑

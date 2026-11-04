@@ -892,6 +892,15 @@ function validateToolArgs(name, args, opts) {
     case 'plan_create': {
       // 目标型计划的参数契约：形状错了就别建 —— 一个「猜出来的」无人值守长任务比报错贵得多。
       if (a.goal && typeof a.goal === 'object') {
+        if (!String(a.goal.objective || '').trim()) {
+          return {
+            ok: false,
+            error:
+              '目标型计划需要 goal.objective：一句话说清「什么状态算达成」（与 goal_start 的 objective 同义；空目标在面板里是空的，每轮也没法交接）',
+            errorCode: 'MISSING_ARG',
+            retryable: false
+          };
+        }
         if (!Array.isArray(a.goal.checks)) {
           return {
             ok: false,
