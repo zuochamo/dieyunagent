@@ -346,3 +346,4 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 | Renderer 多一个自动开轮入口 | 它只读 `goal.cont` 布尔并就照做；`attempt/预算/事实/判定` 一律不落 Renderer（注释 + 回归测试锁住边界） |
 | 与 completion-readiness 重复提示 | readiness 保持「只提示、不挡交付、不续跑」；目标体系管「围绕目标的推进」，两者不互斥 |
 | 会话目标与计划目标事实互串 | `resolveGoalTarget` 单一入口：`ctx.planId` 优先，其次 `ctx.sessionId`；两者都有时计划优先并留日志 |
+| `invokeRpc` 当裸函数传给 session-goal（deps 契约就是 `{ invokeRpc: Function }`） | `LocalGateway` 构造时 `this.invokeRpc = this.invokeRpc.bind(this)`：原型方法脱离实例就丢 `this`，一调就炸在 `this.handlers`（历史症状：`goal_start` 全挂、`goal_check` 被 `loadGoal` 的 try/catch 静默成 `NO_SESSION_GOAL`）。`npm run test:local-gateway-smoke` 有「detached invokeRpc」用例锁住 |

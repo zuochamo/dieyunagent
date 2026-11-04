@@ -119,9 +119,14 @@
           </div>
           <button type="button" class="chat-scroll-bottom" id="chat-scroll-bottom" hidden title="滑到底部" aria-label="滑到底部"></button>
           <div class="chat-nav is-empty" id="chat-nav" aria-hidden="true" aria-label="消息导航"></div>
-          </div>
+          <!-- 思考中钉住当前提问的浮条：必须留在 `.chat-viewport` 里。
+               它是 absolute + top:10px，锚的定位上下文必须是「滚动视口」——
+               判定显隐用的也是 `#chat-list` 的 rect（renderer-chat-scroll.js#updateLastTurnFloat）。
+               放到 `.agent-chat-column` 里的话，一旦列顶多了目标条（`.goal-bar`），
+               10px 就落在目标条那一行上，两串文字直接叠在一起。 -->
           <div class="thinking-live-float" id="last-turn-float" hidden>
             <div class="thinking-live-float-user" id="last-turn-float-user"></div>
+          </div>
           </div>
           <div class="composer-box" id="composer-box">
                 <!-- 会话绑定对端（内网 Agent 互通）：放在输入框正上方常显。

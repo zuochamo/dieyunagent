@@ -164,6 +164,20 @@ function createMemoryHandlers({ requireRustCore, ctx }) {
     'memory.session_delete': async ({ sessionId }) =>
       requireRustCore('memory.session_delete', { sessionId: String(sessionId) }),
 
+    // —— 会话级目标对象：Rust 侧只是 KV（`session_goals` 表），语义全在
+    // `src/goals/session-goal.js`（归一 / 单目标 / 事实 / 收尾核对）。
+    // 缺了这两条，`goal_start` 会拿到 `UNKNOWN_METHOD`（2026-11-04 现场：
+    // 右侧「目标」页签永远「本会话暂无目标」，模型连试三次都写不进去）。
+    'memory.session_goal_get': async ({ sessionId }) =>
+      requireRustCore('memory.session_goal_get', { sessionId: String(sessionId || '') }),
+
+    // goalJson：null/缺省 = 删除，字符串 = 覆盖（序列化在 Node 侧，Rust 不解析目标）
+    'memory.session_goal_put': async ({ sessionId, goalJson }) =>
+      requireRustCore('memory.session_goal_put', {
+        sessionId: String(sessionId || ''),
+        goalJson: goalJson == null ? null : String(goalJson)
+      }),
+
     // —— 会话交接：按 session_id 精确读写（不参与语义召回，与 long_memories 分层）——
     'memory.handoff_save': async ({ sessionId, title, payload }) => {
       if (!payload || typeof payload !== 'string' || !payload.trim()) {

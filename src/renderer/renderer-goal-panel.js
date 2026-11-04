@@ -257,9 +257,10 @@ function renderGoalPanel(view, note) {
     meta.textContent = `${goalStatusLabel(view)} · ${round}`;
   }
   if (clearBtn) clearBtn.hidden = false;
+  // `is-tail`：输出尾部是唯一「可以长、也可以占满剩余高度」的段（见 styles.css .goal-section.is-tail）
   const tail =
     view.lastFact && view.lastFact.tail
-      ? `<div class="goal-section">
+      ? `<div class="goal-section is-tail">
           <div class="goal-section-title">最近一次输出尾部</div>
           <pre class="goal-tail agent-scroll">${escapeGoalText(view.lastFact.tail)}</pre>
         </div>`

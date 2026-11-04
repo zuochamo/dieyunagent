@@ -140,6 +140,13 @@ const CONSOLIDATION_MIN_IMPORTANCE: i64 = 3;
 /// 真实归纳是秒到分钟级，超过 30 分钟还 pending 只可能是进程已经退出。
 const STALE_CONSOLIDATION_JOB_MS: i64 = 30 * 60 * 1000;
 
+/// `agent_runs` 里 `running` 行的存活判据：`running` 且 `updated_at` 早于 now - 该值 → 判 stopped。
+/// agent loop 每 2.5s 会 upsert 一次同源快照（含 `state_snapshot`），2 分钟没有任何更新的
+/// running 行不可能是活的 —— 只可能是进程被 kill / 重启，Rust 没机会写终态。
+/// 留 2 分钟余量而不是 0：同一个库理论上可能被两个 core 进程看到（headless 共用 userData），
+/// 判据必须是「陈旧」而不是「不是本进程起的」。
+const STALE_AGENT_RUN_MS: i64 = 2 * 60 * 1000;
+
 #[derive(Clone)]
 pub struct MemoryStore {
     db_path: PathBuf,
@@ -2857,7 +2864,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_heals_orphan_scope_and_dangling_jobs() {
+    fn reconcile_heals_orphan_scope_dangling_jobs_and_stale_runs() {
         // 两条都是「进程没跑完」留下的脏数据：孤儿 scope='project' 永远召回不到，
         // 悬空 pending 作业让账本永远显示「还在跑」。自愈必须幂等且不动新鲜作业。
         let db = std::env::temp_dir().join(format!("dieyun-mem-reconcile-{}.sqlite", now_ms()));
@@ -2917,10 +2924,55 @@ mod tests {
             .unwrap();
         assert_eq!(fresh_status, "pending", "新鲜作业不能被自愈判死");
 
+        // 僵尸运行行：进程被 kill / 重启时 `agent_runs.status` 永远停在 running，
+        // 既骗 `get_latest_agent_state`，又永远进不了「已结束」修剪。
+        store.touch_session("s-reconcile-run", None).unwrap();
+        let now = now_ms();
+        for (id, updated, summary) in [
+            ("run-stale", now - 60 * 60 * 1000, "运行中"),
+            ("run-fresh", now, "运行中"),
+        ] {
+            store
+                .test_conn()
+                .execute(
+                    "INSERT INTO agent_runs (id, session_id, status, summary, created_at, updated_at)
+                     VALUES (?1, 's-reconcile-run', 'running', ?3, ?2, ?2)",
+                    params![id, updated, summary],
+                )
+                .unwrap();
+        }
+        let res_runs = store.reconcile_memory_ledger(now).unwrap();
+        assert_eq!(res_runs.get("staleRuns").and_then(|v| v.as_i64()), Some(1));
+        let stale_run: (String, String) = store
+            .test_conn()
+            .query_row(
+                "SELECT status, COALESCE(summary, '') FROM agent_runs WHERE id = 'run-stale'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stale_run.0, "stopped");
+        assert!(
+            stale_run.1.contains("未收尾"),
+            "僵尸行要留下人话解释（占位的「运行中」必须被覆盖）：{}",
+            stale_run.1
+        );
+        let fresh_run: (String, String) = store
+            .test_conn()
+            .query_row(
+                "SELECT status, COALESCE(summary, '') FROM agent_runs WHERE id = 'run-fresh'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fresh_run.0, "running", "刚写过状态的运行不能被自愈判死");
+        assert_eq!(fresh_run.1, "运行中", "活着的运行摘要不被动");
+
         // 幂等：再跑一次什么都不改
         let again = store.reconcile_memory_ledger(now_ms()).unwrap();
         assert_eq!(again.get("orphanScopes").and_then(|v| v.as_i64()), Some(0));
         assert_eq!(again.get("staleJobs").and_then(|v| v.as_i64()), Some(0));
+        assert_eq!(again.get("staleRuns").and_then(|v| v.as_i64()), Some(0));
         let _ = std::fs::remove_file(db);
     }
 

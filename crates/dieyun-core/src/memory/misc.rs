@@ -102,9 +102,9 @@ impl MemoryStore {
         Ok(json!({ "ok": true, "deleted": deleted, "messageId": ids }))
     }
 
-    /// 账本自愈（**唯一**实现，幂等）：孤儿项目 scope + 悬空归纳作业。
+    /// 账本自愈（**唯一**实现，幂等）：孤儿项目 scope + 悬空归纳作业 + 僵尸运行行。
     ///
-    /// 这两条都是「进程没跑完就没人结账」的遗留数据，不修就会一直骗人：
+    /// 这三条都是「进程没跑完就没人结账」的遗留数据，不修就会一直骗人：
     ///
     /// 1. `scope = 'project'`（字面量）是旧版本按路径算 scope 失败时的产物：
     ///    召回永远算不出这个 scope，于是这些记忆既不能被注入也不会衰减（看着是 active，
@@ -112,8 +112,15 @@ impl MemoryStore {
     /// 2. `pending` 归纳作业：作业账本只由 Main 的归纳器结账，进程退出就没人管。
     ///    超过阈值的 pending 一律判 failed（不是「正在跑」，是「已经死了」）。
     ///    阈值取 30 分钟：真实归纳单次是秒到分钟级，超过阈值的 pending 不可能是活的。
+    /// 3. `running` 运行行：`agent_runs.status` 由 Rust 循环在跑完时写终态，进程被 kill /
+    ///    重启就永远停在 running。它会被 `get_latest_agent_state` 当成「这个会话上次还在跑」
+    ///    带进上下文，而 `prune_finished_agent_runs` 只删**已结束**的行 —— 僵尸行只涨不消。
+    ///    阈值取 2 分钟（循环每 2.5s 会刷新 `updated_at`，见 `STALE_AGENT_RUN_MS`）。
+    ///    `summary` 直接覆盖而不是 `COALESCE`：没跑完的 run 只可能带着启动时写的占位
+    ///    （「运行中」），把它留着等于让账本自己跟自己打架（status=stopped 却写运行中）。
     pub fn reconcile_memory_ledger(&self, now: i64) -> Result<Value, CoreError> {
         let stale_job_before = now - super::STALE_CONSOLIDATION_JOB_MS;
+        let stale_run_before = now - super::STALE_AGENT_RUN_MS;
         // 先把能认领的历史 scope 重挂到 project:<id>，再清真正认领不了的孤儿
         // （顺序不能反：先归档就会把可认领的行一起埋掉）。
         let rewritten = self
@@ -134,10 +141,18 @@ impl MemoryStore {
                  WHERE status = 'pending' AND COALESCE(started_at, 0) < ?2",
                 params![now, stale_job_before],
             )?;
+            let stale_runs = conn.execute(
+                "UPDATE agent_runs
+                 SET status = 'stopped', updated_at = ?1,
+                     summary = '进程重启/被杀时该运行未收尾（启动自愈判为停止）'
+                 WHERE status = 'running' AND updated_at < ?2",
+                params![now, stale_run_before],
+            )?;
             Ok(json!({
                 "ok": true,
                 "orphanScopes": orphan_scopes,
                 "staleJobs": stale_jobs,
+                "staleRuns": stale_runs,
                 "rescopedMemories": rewritten
             }))
         })

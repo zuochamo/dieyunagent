@@ -27,6 +27,7 @@ const {
 const { renderSessionGoalBlock, normalizeGoal } = require('../../src/plans/goal-run');
 const { validateToolArgs } = require('../../src/agent/tool-validate');
 const { createMainToolBridge } = require('../../src/agent/tool-bridge-main');
+const { createMemoryHandlers } = require('../../src/gateway/handlers/memory');
 
 const LIMITS = {
   goalMaxAttempts: 4,
@@ -373,5 +374,44 @@ describe('工具端到端：goal_start / goal_check / goal_finish 打在会话�
 
     const goal = await loadGoal({ invokeRpc: gateway.invokeRpc, sessionId: 'sess-update' });
     expect(toPanelView({ goal, limits: LIMITS }).todosDone).toBe(1);
+  });
+});
+
+/**
+ * 事故（2026-11-04 现场）：`memory.session_goal_get / put` 只有 Rust 侧实现，
+ * Gateway handler 包里没有 → `goal_start` 一律 `UNKNOWN_METHOD`，
+ * 右侧「目标」页签永远「本会话暂无目标」，而错误被 `loadGoal` 的 try/catch 吞掉。
+ * 这两条 RPC 是会话目标的唯一通道，注册缺失必须在单测里就断掉。
+ */
+describe('会话目标的两个 RPC 必须在 Gateway 注册', () => {
+  function gatewayHandlers() {
+    const calls = [];
+    const handlers = createMemoryHandlers({
+      requireRustCore: async (method, params) => {
+        calls.push({ method, params });
+        return method.endsWith('_get') ? { goalJson: null } : { ok: true };
+      }
+    });
+    return { handlers, calls };
+  }
+
+  test('get / put 都存在，参数名与 Rust 契约一致（sessionId / goalJson）', async () => {
+    const { handlers, calls } = gatewayHandlers();
+    expect(typeof handlers['memory.session_goal_get']).toBe('function');
+    expect(typeof handlers['memory.session_goal_put']).toBe('function');
+
+    await handlers['memory.session_goal_get']({ sessionId: 's1' });
+    await handlers['memory.session_goal_put']({ sessionId: 's1', goalJson: '{"objective":"x"}' });
+    // null = 删除（Rust 侧只当 KV，不解析目标）
+    await handlers['memory.session_goal_put']({ sessionId: 's1', goalJson: null });
+
+    expect(calls.map((c) => c.method)).toEqual([
+      'memory.session_goal_get',
+      'memory.session_goal_put',
+      'memory.session_goal_put'
+    ]);
+    expect(calls[0].params).toEqual({ sessionId: 's1' });
+    expect(calls[1].params).toEqual({ sessionId: 's1', goalJson: '{"objective":"x"}' });
+    expect(calls[2].params.goalJson).toBeNull();
   });
 });

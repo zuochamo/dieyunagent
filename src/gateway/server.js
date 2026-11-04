@@ -200,6 +200,12 @@ class LocalGateway {
       },
       log: (msg) => this.log(msg)
     });
+    // `invokeRpc` 在大量调用点都是**当普通函数传**下去的（deps 契约就写成
+    // `{ invokeRpc: Function }`：会话目标、计划、频道、headless 都这么拿）。原型方法脱离
+    // 实例就丢了 `this`，一调用就炸在 `this.handlers` 上
+    //（`Cannot read properties of undefined (reading 'handlers')`）。
+    // 在这里绑死一次：既让那份契约成立，也不必在每个传参点各包一层箭头函数。
+    this.invokeRpc = this.invokeRpc.bind(this);
   }
 
   setSshConnectionPool(pool) {

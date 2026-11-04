@@ -370,6 +370,31 @@ async function testUnrestrictedPathsToggle() {
   }
 }
 
+/**
+ * `invokeRpc` 会被**当普通函数**传下去：会话目标 / 计划 / 频道 / headless 的 deps 契约
+ * 就写成 `{ invokeRpc: Function }`。脱离实例调用必须照常工作，否则 goal_start 这类
+ * 工具会炸在 `this.handlers` 上（历史 bug：Cannot read properties of undefined）。
+ */
+async function testDetachedInvokeRpc() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dieyun-smoke-detached-'));
+  const ws = path.join(tmp, 'proj');
+  fs.mkdirSync(ws, { recursive: true });
+  fs.writeFileSync(path.join(ws, 'marker.txt'), 'x', 'utf8');
+  const { gateway, stop } = createTestLocalGateway(ws);
+  try {
+    const { invokeRpc } = gateway;
+    if (typeof invokeRpc !== 'function') throw new Error('invokeRpc 不是函数');
+    const r = await invokeRpc('fs.read_file', { filePath: 'marker.txt', runWorkspaceRoot: ws });
+    if (!fileText(r).includes('x')) {
+      throw new Error(`detached invokeRpc got: ${fileText(r).slice(0, 40)}`);
+    }
+    console.log('ok detached invokeRpc');
+  } finally {
+    await stop();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await testRunWorkspaceRootSwitch();
   await testConcurrentRunWorkspaceRoot();
@@ -378,6 +403,7 @@ async function main() {
   await testRpcSessionIdContext();
   await testCompactionPerSession();
   await testCompactionTimeoutSoftSkip();
+  await testDetachedInvokeRpc();
   testToolSchemaBudgetDeduction();
   testCredentialsRejectEmptyEncrypt();
   await testDefaultWorkspaceAlwaysInRoots();
