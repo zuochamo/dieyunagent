@@ -28,6 +28,7 @@ const PACKET_HERE = 'here';
  * @param {object} opts
  * @param {string} opts.peerId
  * @param {string} opts.name
+ * @param {string} [opts.role]            工作身份（自称的角色），只用于显示
  * @param {number} opts.port              本机 peer 服务端口（宣告给对端连接用）
  * @param {string} [opts.workspaceKey]
  * @param {number} opts.discoveryPort
@@ -45,7 +46,7 @@ function createPeerDiscovery(opts) {
 
   const emitter = new EventEmitter();
 
-  /** @type {Map<string, { peerId: string, name: string, host: string, port: number, workspaceKey: string, source: 'lan'|'static', at: number }>} */
+  /** @type {Map<string, { peerId: string, name: string, role: string, host: string, port: number, workspaceKey: string, source: 'lan'|'static', at: number }>} */
   const peers = new Map();
 
   let socket = null;
@@ -80,6 +81,7 @@ function createPeerDiscovery(opts) {
         v: 1,
         peerId: String(o.peerId || ''),
         name: String(o.name || ''),
+        role: String(o.role || ''),
         port: Number(o.port) || 0,
         ws: String(o.workspaceKey || ''),
         host: os.hostname()
@@ -130,6 +132,8 @@ function createPeerDiscovery(opts) {
     upsert({
       peerId,
       name: String(packet.name || '').slice(0, 64),
+      // 工作身份随宣告一起带出来：面板不用等第一次握手就能显示「自称：X」
+      role: String(packet.role || '').slice(0, 32),
       host: rinfo && rinfo.address ? rinfo.address : '',
       port,
       workspaceKey: String(packet.ws || '').slice(0, 96),
@@ -151,6 +155,7 @@ function createPeerDiscovery(opts) {
       upsert({
         peerId: `static:${host}:${port}`,
         name: String((item && item.name) || `${host}:${port}`).slice(0, 64),
+        role: '',
         host,
         port,
         workspaceKey: '',

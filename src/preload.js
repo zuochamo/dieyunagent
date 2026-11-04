@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('diecloud', {
   peerStatus: () => ipcRenderer.invoke('peer:status'),
   peerRefresh: () => ipcRenderer.invoke('peer:refresh'),
   peerSetName: (name) => ipcRenderer.invoke('peer:set-name', { name }),
+  peerSetRole: (role) => ipcRenderer.invoke('peer:set-role', { role }),
   peerSetEnabled: (enabled) => ipcRenderer.invoke('peer:set-enabled', { enabled: !!enabled }),
   peerSetAutoTurn: (enabled) => ipcRenderer.invoke('peer:set-auto-turn', { enabled: !!enabled }),
   // 授权：首次来信 → 允许 / 拒绝；撤销回到「不认识」（取代 P0 的配对码）
@@ -35,6 +36,11 @@ contextBridge.exposeInMainWorld('diecloud', {
   peerLinkSession: (sessionId, peerId) => ipcRenderer.invoke('peer:link-session', { sessionId, peerId }),
   peerUnlinkSession: (sessionId) => ipcRenderer.invoke('peer:unlink-session', { sessionId }),
   peerClaim: (payload) => ipcRenderer.invoke('peer:claim', payload || {}),
+  peerRooms: () => ipcRenderer.invoke('peer:rooms'),
+  peerRoomCreate: (payload) => ipcRenderer.invoke('peer:room-create', payload || {}),
+  peerRoomClose: (roomId) => ipcRenderer.invoke('peer:room-close', { roomId }),
+  peerRoomSend: (payload) => ipcRenderer.invoke('peer:room-send', payload || {}),
+  peerRoomTimeline: (payload) => ipcRenderer.invoke('peer:room-timeline', payload || {}),
   onPeerEvent: (cb) => {
     const handler = (_evt, payload) => {
       try {

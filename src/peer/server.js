@@ -26,6 +26,7 @@ const MAX_FRAME_BYTES = 1024 * 1024;
  * @param {object} opts
  * @param {string} opts.peerId
  * @param {() => string} opts.getName
+ * @param {() => string} [opts.getRole]
  * @param {() => { key: string, name: string, path: string }} opts.getWorkspace
  * @param {(peerId: string) => boolean} [opts.isTrusted]
  * @param {() => object[]} [opts.getClaims]
@@ -131,6 +132,8 @@ function createPeerServer(opts) {
         peer = {
           peerId,
           name: String(frame.name || '').slice(0, 64),
+          // 工作身份（自称的角色）：与 name 同源，只在握手时采信一次
+          role: String(frame.role || '').slice(0, 32),
           workspace: frame.workspace && typeof frame.workspace === 'object' ? frame.workspace : {},
           port: Number(frame.port) || 0,
           // remoteAddress 在双栈 socket 上形如 ::ffff:192.168.31.37，回连前必须去掉前缀
@@ -145,6 +148,7 @@ function createPeerServer(opts) {
           createHelloOk({
             peerId: String(o.peerId || ''),
             name: String(o.getName ? o.getName() : ''),
+            role: String(o.getRole ? o.getRole() : ''),
             workspace: o.getWorkspace ? o.getWorkspace() : {},
             // 租约快照属于「我在改什么」，只给信任过的机器看
             claims: peerIdTrusted && o.getClaims ? o.getClaims() : [],
@@ -180,7 +184,12 @@ function createPeerServer(opts) {
       }
 
       // 信封里的 from 一律以握手身份为准：不允许一个连接替别人发言。
-      const envWithFrom = { ...env, from: { ...env.from, peerId: peer.peerId, name: env.from.name || peer.name } };
+      // `role` 同样覆盖（而不是采信信封）：自称的工作身份只有握手时说的那次算数，
+      // 否则每条消息都能换一个身份，界面上的「对方自称」就没有意义了。
+      const envWithFrom = {
+        ...env,
+        from: { ...env.from, peerId: peer.peerId, name: peer.name || env.from.name, role: peer.role || '' }
+      };
       Promise.resolve()
         .then(() => (o.onEnvelope ? o.onEnvelope(peer, envWithFrom) : { ok: false, error: 'NO_HANDLER' }))
         .then((result) => {

@@ -8373,7 +8373,11 @@ body.pane-resizing .artifacts-file-list {
   padding: 8px 0;
   border-right: 1px solid var(--border);
   background: var(--bg-elev, var(--chat-pane-bg));
+  /* 12 个页签在矮窗口里会超出面板高度：允许竖排滚动，别把最后几个页签挤没 */
+  overflow-y: auto;
+  scrollbar-width: none;
 }
+.side-panel-rail::-webkit-scrollbar { width: 0; }
 
 .side-panel-rail-btn {
   width: 32px;
@@ -11528,6 +11532,219 @@ audio.artifacts-media-preview-el {
 .peer-badge-unknown { border-style: dashed; }
 .peer-claim { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim); }
 .peer-empty { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+
+/* ---- Bot 侧栏页签：上下两层（上 = 已允许互通的内网 agent，下 = 房间）----
+   房间是「一次任务一个」的视图，第 2–3 步才接数据；现在是占位，见 docs/BOT-ROOM-PLAN.md */
+.bot-layer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* 上层只占内容高度（最多 30%）：peer 少的时候不该白占半屏，房间区要拿剩下的。
+   列表条目多时靠 max-height 收住 + 自己滚动。 */
+.bot-layer-peers {
+  flex: 0 1 auto;
+  max-height: 30%;
+  min-height: 0;
+  overflow: hidden;
+}
+.bot-layer-peers .peer-bar {
+  padding: 4px 10px 5px;
+  font-size: 11px;
+}
+.bot-layer-peers .peer-list {
+  padding: 4px 8px 6px;
+  gap: 4px;
+}
+/* Bot 页签里一行只留「谁 + 状态」：地址、徽标细节都收小，行高比「连接」页更紧 */
+.bot-layer-peers .peer-row-item {
+  padding: 5px 8px;
+  gap: 2px 8px;
+}
+.bot-layer-peers .peer-name { font-size: 12px; }
+.bot-layer-peers .peer-addr { display: none; }
+.bot-layer-peers .peer-badge,
+.bot-layer-peers .peer-role-chip,
+.bot-layer-peers .peer-claim { font-size: 10px; padding: 0 5px; }
+.bot-layer-peers .peer-row-actions .ghost-btn {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+/* 下层吃掉剩余空间：房间是主战场（时间线 + 派活），不能比列表矮 */
+.bot-layer-room {
+  flex: 1 1 auto;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+}
+.bot-room-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.bot-room-title { font-size: 12px; font-weight: 600; }
+.bot-room-meta { font-size: 11px; color: var(--text-muted, #888); }
+.bot-room-body { flex: 1; min-height: 0; overflow: auto; padding: 10px; }
+.bot-room-empty-title { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+.bot-room-empty-hint { font-size: 12px; color: var(--text-mute); line-height: 1.6; }
+/* 建房间表单：标题 + 成员勾选（只列已确认的 agent） */
+.bot-room-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.bot-room-form input[type='text'] {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.bot-room-members {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 132px;
+  overflow: auto;
+}
+.bot-room-member {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.bot-room-member-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-room-member-off {
+  font-size: 11px;
+  color: var(--text-mute);
+  border: 1px solid var(--border);
+  padding: 0 4px;
+}
+.bot-room-form-actions { display: flex; gap: 6px; }
+/* 房间条目 */
+.bot-room-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.bot-room-item:hover { border-color: var(--text-mute); }
+.bot-room-item + .bot-room-item { margin-top: 6px; }
+.bot-room-item-closed { opacity: 0.6; }
+.bot-room-item-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.bot-room-item-title { font-size: 12px; font-weight: 600; }
+.bot-room-item-state { font-size: 11px; color: var(--text-mute); flex-shrink: 0; }
+.bot-room-item-members {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-room-item-actions { display: flex; gap: 6px; }
+/* 工作身份徽标：一律写成「自称：X」——它是对方自己报的，不是验证过的 */
+.peer-role-chip {
+  font-size: 11px;
+  color: var(--text-mute);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+/* 房间详情：头部 + 时间线 + 发所有人（时间线是取来的聚合视图，见 BOT-ROOM-PLAN.md §4） */
+.bot-room-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.bot-room-detail-head .bot-room-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-room-msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 40px;
+}
+.bot-room-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--border);
+}
+.bot-room-msg-mine { border-left-color: var(--text-mute); }
+.bot-room-msg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-mute);
+}
+.bot-room-msg-who { font-weight: 600; color: var(--text-dim); }
+.bot-room-msg-body {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.bot-room-send {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.bot-room-send textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 44px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: inherit;
+}
+.bot-room-send .ghost-btn { align-self: flex-end; }
+/* 已结束房间的说明行：告诉人「结束之后的消息不在这里」，别让人以为答复丢了 */
+.bot-room-note {
+  font-size: 11px;
+  color: var(--text-mute);
+  line-height: 1.5;
+  padding-top: 6px;
+  margin-top: 6px;
+  border-top: 1px dashed var(--border);
+  flex-shrink: 0;
+}
+.peer-hint-lead { padding: 10px 16px 0; }
 /* 会话绑定对端提示：在输入框上方（.composer-box 第一个子元素），随会话切换刷新 */
 .peer-session-row {
   display: flex;

@@ -107,6 +107,7 @@ function createPeerClient(opts) {
       text: i.text,
       fromPeerId: String(o.getPeerId ? o.getPeerId() : ''),
       fromName: String(o.getName ? o.getName() : ''),
+      fromRole: String(o.getRole ? o.getRole() : ''),
       fromSessionId: i.fromSessionId,
       toPeerId: '',
       toSessionId: i.toSessionId,
@@ -114,7 +115,8 @@ function createPeerClient(opts) {
       hops: i.hops,
       claim: i.claim,
       decision: i.decision,
-      note: i.note
+      note: i.note,
+      roomId: i.roomId
     });
 
     return new Promise((resolve) => {
@@ -153,6 +155,7 @@ function createPeerClient(opts) {
               createHello({
                 peerId: String(o.getPeerId ? o.getPeerId() : ''),
                 name: String(o.getName ? o.getName() : ''),
+                role: String(o.getRole ? o.getRole() : ''),
                 workspace: o.getWorkspace ? o.getWorkspace() : {},
                 claims: o.getClaims ? o.getClaims() : [],
                 // 让对端知道「往哪个端口回连我」：UDP 被防火墙挡住时，这是唯一的反向通路
@@ -176,6 +179,8 @@ function createPeerClient(opts) {
           peer = {
             peerId: String(frame.peerId || ''),
             name: String(frame.name || ''),
+            // 工作身份：对端握手时自己声明的，只用于显示（界面标「对方自称」）
+            role: String(frame.role || ''),
             workspace: frame.workspace || {},
             claims: Array.isArray(frame.claims) ? frame.claims : [],
             // 对方是否已确认我这台机器：false = 它那边刚弹了（或等着弹）确认，这条会被拦下

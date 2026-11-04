@@ -36,6 +36,16 @@ function main() {
     assert.strictEqual(store.identity().name, '前端 机器', '名称应折叠空白');
     assert.strictEqual(createPeerStore(root).identity().name, '前端 机器', '名称应持久化');
 
+    // —— 工作身份（自称的角色）：持久化 / 折叠空白 / 有长度上限 / 可清空 ——
+    assert.strictEqual(store.identity().role, '', '默认没有身份');
+    store.setRole('  发票   模块 ');
+    assert.strictEqual(store.identity().role, '发票 模块', '身份应折叠空白');
+    assert.strictEqual(createPeerStore(root).identity().role, '发票 模块', '身份应持久化');
+    store.setRole('x'.repeat(80));
+    assert.strictEqual(store.identity().role.length, 32, '身份长度上限 32');
+    store.setRole('   ');
+    assert.strictEqual(store.identity().role, '', '空白 = 清掉身份');
+
     // —— 信任清单（取代配对码）：allow / deny / 撤销，按 peerId 记住 ——
     assert.deepStrictEqual(store.trustEntries(), [], '初始没有任何信任记录');
     assert.strictEqual(store.trustStatus('peer_cccccccccccccccccc'), '', '没记录 → 空状态（= 需要确认）');
@@ -109,6 +119,64 @@ function main() {
       '非 true 一律当关（不做真值猜测）'
     );
     assert.deepStrictEqual(createPeerStore(root).setSettings({}), { enabled: true, autoTurn: false }, '缺省沿用落盘值');
+
+    // —— 房间（一次任务一个）：建 / 关 / 有界保留 ——
+    assert.deepStrictEqual(store.rooms(), [], '初始没有房间');
+    assert.strictEqual(store.roomById('r-nope'), null, '查不到的房间返回 null 而不是抛');
+
+    const roomA = store.createRoom({
+      roomId: 'r-test-a',
+      title: '  修发票   模块 ',
+      projectKey: 'abc123',
+      members: ['peer_aaaaaaaaaaaaaaaaaa', 'peer_bbbbbbbbbbbbbbbbbb', 'peer_aaaaaaaaaaaaaaaaaa'],
+      createdAt: 1000
+    });
+    assert.strictEqual(roomA.title, '修发票 模块', '标题折叠空白');
+    assert.deepStrictEqual(roomA.members, ['peer_aaaaaaaaaaaaaaaaaa', 'peer_bbbbbbbbbbbbbbbbbb'], '成员去重');
+    assert.strictEqual(roomA.status, 'open');
+    assert.strictEqual(roomA.closedAt, 0);
+    assert.ok(fs.existsSync(store.files.rooms), 'rooms.json 应落盘');
+
+    const reread = createPeerStore(root).rooms();
+    assert.strictEqual(reread.length, 1, '房间应持久化');
+    assert.strictEqual(reread[0].members.length, 2);
+    assert.strictEqual(reread[0].projectKey, 'abc123');
+
+    // 关房间：只改状态与时间，不删记录（历史仍可回看），且幂等
+    const closed = store.closeRoom('r-test-a');
+    assert.strictEqual(closed.status, 'closed');
+    const closedAt = closed.closedAt;
+    assert.ok(closedAt > 0, '要记结束时间');
+    assert.strictEqual(store.closeRoom('r-test-a').closedAt, closedAt, '重复关不该刷新时间');
+    assert.strictEqual(store.closeRoom('r-nope'), null, '关不存在的房间返回 null');
+    assert.strictEqual(createPeerStore(root).roomById('r-test-a').status, 'closed', '结束状态应持久化');
+
+    // 有界保留：只丢最老的**已关闭**房间，打开中的永不丢
+    store.createRoom({ roomId: 'r-test-b', members: ['peer_aaaaaaaaaaaaaaaaaa'], createdAt: 2000 });
+    store.createRoom({ roomId: 'r-test-c', members: ['peer_aaaaaaaaaaaaaaaaaa'], createdAt: 3000 });
+    store.closeRoom('r-test-c');
+    const pruned = store.pruneRooms(2).map((r) => r.roomId);
+    assert.deepStrictEqual(pruned, ['r-test-c', 'r-test-b'], '应丢掉最老的已关闭房间，保留打开中的');
+    assert.deepStrictEqual(
+      createPeerStore(root).rooms().map((r) => r.roomId),
+      ['r-test-c', 'r-test-b'],
+      '裁剪结果应落盘'
+    );
+    assert.strictEqual(store.pruneRooms(0).length, 2, 'keep<=0 视为不裁剪');
+
+    // 脏条目跳过（不修补）：缺 roomId / 状态非法的直接不进清单
+    fs.writeFileSync(
+      store.files.rooms,
+      JSON.stringify({
+        rooms: [
+          { roomId: 'r-ok', title: '好房间', status: 'open', members: ['peer_aaaaaaaaaaaaaaaaaa'] },
+          { roomId: '', title: '没 id', status: 'open', members: [] },
+          { roomId: 'r-bad', title: '坏状态', status: 'whatever', members: [] }
+        ]
+      }),
+      'utf8'
+    );
+    assert.deepStrictEqual(createPeerStore(root).rooms().map((r) => r.roomId), ['r-ok'], '坏条目应被跳过');
 
     // —— 项目身份 key ——
     assert.strictEqual(workspaceKeyFor(''), '', '空路径应返回空 key');

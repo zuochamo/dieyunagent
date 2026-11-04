@@ -59,6 +59,15 @@ function registerPeerIpc(ctx) {
     })
   );
 
+  // 工作身份（自称的角色）：只影响别的机器看到的「自称」，不参与授权
+  ipcMain.handle(
+    'peer:set-role',
+    wrap(async (pc, { role }) => {
+      const identity = pc.setRole(role);
+      return { ok: true, identity, status: pc.status() };
+    })
+  );
+
   ipcMain.handle(
     'peer:set-enabled',
     wrap(async (pc, { enabled }) => {
@@ -110,8 +119,8 @@ function registerPeerIpc(ctx) {
 
   ipcMain.handle(
     'peer:send',
-    wrap(async (pc, { peer, host, port, text, expectReply, timeoutMs }) => {
-      const r = await pc.sendToPeer({ peer, host, port, text, expectReply, timeoutMs });
+    wrap(async (pc, { peer, host, port, text, expectReply, timeoutMs, roomId }) => {
+      const r = await pc.sendToPeer({ peer, host, port, text, expectReply, timeoutMs, roomId });
       return r.ok ? { ok: true, ...r } : { ok: false, error: r.error || 'PEER_SEND_FAILED' };
     })
   );
@@ -150,6 +159,48 @@ function registerPeerIpc(ctx) {
     wrap(async (pc, { action, kind, key, note, sessionId }) => {
       const r = await pc.claim({ action, kind, key, note, sessionId });
       return r.ok ? { ok: true, ...r } : { ok: false, error: r.error || 'CLAIM_FAILED', holders: r.holders || [] };
+    })
+  );
+
+  // 房间（agent 聊天室）：一次任务一个。校验（成员是否已确认 / 上限 / 是否已结束）全在协调器。
+  ipcMain.handle(
+    'peer:rooms',
+    wrap(async (pc) => ({ ok: true, rooms: pc.rooms() }))
+  );
+
+  ipcMain.handle(
+    'peer:room-create',
+    wrap(async (pc, { title, members }) => {
+      const r = pc.createRoom({ title, members });
+      return r.ok ? { ok: true, room: r.room, rooms: pc.rooms() } : { ok: false, error: r.error || 'ROOM_CREATE_FAILED' };
+    })
+  );
+
+  ipcMain.handle(
+    'peer:room-close',
+    wrap(async (pc, { roomId }) => {
+      const r = pc.closeRoom(roomId);
+      return r.ok ? { ok: true, room: r.room, rooms: pc.rooms() } : { ok: false, error: r.error || 'ROOM_CLOSE_FAILED' };
+    })
+  );
+
+  // 「发所有人」：逐台扇出，逐台结果原样回来（部分成功就是部分成功）
+  ipcMain.handle(
+    'peer:room-send',
+    wrap(async (pc, { roomId, text }) => {
+      const r = await pc.sendToRoom({ roomId, text });
+      return r.ok
+        ? { ok: true, delivered: r.delivered, failed: r.failed, partial: !!r.partial }
+        : { ok: false, error: r.error || 'PEER_SEND_FAILED', delivered: r.delivered || [], failed: r.failed || [] };
+    })
+  );
+
+  ipcMain.handle(
+    'peer:room-timeline',
+    wrap(async (pc, { roomId, limit }) => {
+      const r = await pc.roomTimeline({ roomId, limit });
+      if (!r) return { ok: false, error: 'ROOM_NOT_FOUND' };
+      return { ok: true, room: r.room, messages: r.messages };
     })
   );
 }

@@ -83,6 +83,17 @@ const AGENT_LIMITS_DEFAULTS = {
   /** 文件 / 任务租约的存活时间与「收集对端应答」的等待窗口 */
   peerClaimTtlMs: 15 * 60 * 1000,
   peerClaimWaitMs: 1500,
+  /**
+   * 房间（agent 聊天室）成员上限与同时开启的房间数。
+   *
+   * 成员上限按「扇出成本 ~N²」定，**不是**按发现上限（`peerMaxPeers` = 64）：
+   * 一个房间里超过 8 台，消息量与追问就没人读得完，token 也会一起爆。
+   * 房间数上限按「房间 = 一次任务」定：4 个并行任务已经是很满的内存与注意力预算。
+   */
+  peerRoomMaxMembers: 8,
+  peerRoomMaxActiveRooms: 4,
+  /** 房间记录的有界保留（先丢最老的已关闭房间；打开中的永不丢） */
+  peerRoomKeepMax: 64,
   artifactsUiFlushMs: 80,
   lspSyncDebounceMs: 500,
   monacoMaxChars: 200000,

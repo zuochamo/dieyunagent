@@ -340,6 +340,16 @@
                     <circle cx="12" cy="12" r="1.4" fill="currentColor"/>
                   </svg>
                 </button>
+                <button type="button" class="side-panel-rail-btn" data-side-tab="bot" title="Bot · 内网 Agent" aria-label="Bot · 内网 Agent">
+                  <!-- 房间就是一个对话：气泡 + 三个点（机器人脑袋像素太小、跟「子代理」的节点图也不够区分） -->
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                    <rect x="2.9" y="3.8" width="18.2" height="11.6" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                    <path d="M7.6 15.4v3.6l4.2-3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+                    <circle cx="8" cy="9.6" r="1.15" fill="currentColor"/>
+                    <circle cx="12" cy="9.6" r="1.15" fill="currentColor"/>
+                    <circle cx="16" cy="9.6" r="1.15" fill="currentColor"/>
+                  </svg>
+                </button>
                 <button type="button" class="side-panel-rail-btn" data-side-tab="subagents" title="子代理" aria-label="子代理">
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                     <circle cx="6" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
@@ -612,6 +622,48 @@
                   </div>
                   <div class="goal-panel-body agent-scroll" id="goal-panel-body">
                     <p class="artifacts-empty">还没有目标。需要多轮推进时，Agent 会自己开一个（goal_start）；也可以直接说清「做到什么算完成」。</p>
+                  </div>
+                </div>
+                <!-- Bot 面板：两层。上层 = 已允许互通的内网 agent（数据与「连接 → Agent 互通」同源，
+                     渲染唯一入口仍是 renderer-peer.js 的 renderPeerList）；下层 = 房间（一次任务一个）。
+                     房间时间线与派任务是 BOT-ROOM-PLAN.md 的第 2–3 步，现在这里是占位。 -->
+                <div class="side-panel-pane" data-side-pane="bot" hidden>
+                  <div class="side-panel-pane-head">
+                    <div class="side-panel-pane-head-main">
+                      <span class="side-panel-pane-title">Bot</span>
+                      <span class="side-panel-pane-meta" id="bot-panel-meta">内网 Agent</span>
+                    </div>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="bot-panel-settings" title="名称 / 启用开关 / 手工对端 / 信任管理">设置</button>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="peer-refresh" data-i18n="refresh" title="刷新在线状态">刷新</button>
+                  </div>
+                  <div class="bot-layer bot-layer-peers">
+                    <div class="peer-bar">
+                      <span class="peer-dot" id="peer-dot"></span>
+                      <span class="peer-bar-text" id="peer-status" data-i18n="connect_reading">正在读取连接信息…</span>
+                    </div>
+                    <div class="peer-list" id="peer-list"></div>
+                  </div>
+                  <div class="bot-layer bot-layer-room">
+                    <div class="bot-room-head">
+                      <span class="bot-room-title">房间</span>
+                      <span class="bot-room-meta" id="bot-room-meta">一次任务一个</span>
+                      <button type="button" class="ghost-btn side-panel-pane-action" id="bot-room-new" title="把几个 agent 拉进一个房间">新建</button>
+                    </div>
+                    <!-- 建房间 = 起一个「这次要干什么」+ 勾几台已确认的 agent。
+                         成员合法性 / 人数上限 / 房间数上限都在 Main 判，这里只收集表单。 -->
+                    <div class="bot-room-form" id="bot-room-form" hidden>
+                      <input type="text" id="bot-room-title" spellcheck="false" placeholder="这次要干什么（例如：修发票模块）" />
+                      <div class="bot-room-members" id="bot-room-members"></div>
+                      <div class="bot-room-form-actions">
+                        <button type="button" class="ghost-btn" id="bot-room-create">建房间</button>
+                        <button type="button" class="ghost-btn" id="bot-room-cancel">取消</button>
+                      </div>
+                    </div>
+                    <div class="bot-room-body agent-scroll" id="bot-room-body">
+                      <div class="bot-room-empty">
+                        <div class="bot-room-empty-title">读取房间清单…</div>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div class="side-panel-pane" data-side-pane="subagents" hidden>
@@ -1184,17 +1236,22 @@
           </div>
 
           <div class="settings-main-body connect-pane peer-body" id="connect-pane-peer" role="tabpanel" aria-labelledby="connect-tab-peer" hidden>
-            <div class="peer-bar">
-              <span class="peer-dot" id="peer-dot"></span>
-              <span class="peer-bar-text" id="peer-status" data-i18n="connect_reading">正在读取连接信息…</span>
-              <button type="button" class="ghost-btn peer-bar-btn" id="peer-refresh" data-i18n="refresh">刷新</button>
+            <!-- 这一页只做「设置」：列表与对话在右侧侧栏的 Bot 页签（BOT-ROOM-PLAN.md §3 ①）。
+                 同一份 peer 数据两处渲染必然漂移，所以这里既没有 #peer-list，也没有状态条。 -->
+            <div class="peer-hint peer-hint-lead">
+              <div>谁在线、谁已经允许互通、和谁在聊，都在右侧侧栏的「Bot」页签里。这里只管名称与开关。</div>
             </div>
-            <div class="peer-list" id="peer-list"></div>
             <div class="peer-foot">
               <div class="field field-inline peer-name-row">
                 <span class="field-label" data-i18n="peer_name_label">名称</span>
                 <input type="text" id="peer-name" spellcheck="false" placeholder="其他 agent 看到的名字" data-i18n-placeholder="peer_name_placeholder" />
                 <button type="button" class="ghost-btn" id="peer-save-name" data-i18n="peer_save_name">保存</button>
+              </div>
+              <!-- 工作身份：别的机器看到的是「自称」，只做展示，不参与授权（BOT-ROOM-PLAN.md §8） -->
+              <div class="field field-inline peer-name-row">
+                <span class="field-label" data-i18n="peer_role_label">身份</span>
+                <input type="text" id="peer-role" spellcheck="false" maxlength="32" placeholder="比如 发票模块 / 前端" data-i18n-placeholder="peer_role_placeholder" />
+                <button type="button" class="ghost-btn" id="peer-save-role" data-i18n="peer_save_name">保存</button>
               </div>
               <div class="peer-foot-row">
                 <label class="peer-toggle"><input type="checkbox" id="peer-enabled" /> <span data-i18n="peer_enable">启用内网互通</span></label>

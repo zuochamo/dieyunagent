@@ -1,4 +1,4 @@
-/* global document, window, $, showAgentToast, gatewayCall, currentSessionId, switchSession, loadChatFromGateway, refreshHistoryList, openConnectModal, closeConnectModal, isConnectModalOpen, activeConnectTabId, uiText */
+/* global document, window, $, showAgentToast, gatewayCall, currentSessionId, switchSession, loadChatFromGateway, refreshHistoryList, openConnectModal, closeConnectModal, isConnectModalOpen, activeConnectTabId, uiText, isSidePanelOpen, getSidePanelTab */
 'use strict';
 
 /**
@@ -90,6 +90,7 @@ function peerRowsFor(status) {
     byId.set(p.peerId, {
       peerId: p.peerId,
       name: p.name || p.peerId,
+      role: String(p.role || ''),
       host: String(p.host || ''),
       port: Number(p.port) || 0,
       lastSeenAt: Number(p.lastSeenAt) || 0,
@@ -109,6 +110,7 @@ function peerRowsFor(status) {
       byId.set(req.peerId, {
         peerId: req.peerId,
         name: req.name || req.peerId,
+        role: '',
         host: String(req.host || ''),
         port: 0,
         lastSeenAt: Number(req.at) || 0,
@@ -128,6 +130,7 @@ function peerRowsFor(status) {
       byId.set(item.peerId, {
         peerId: item.peerId,
         name: item.name || item.peerId,
+        role: '',
         host: '',
         port: 0,
         lastSeenAt: Number(item.at) || 0,
@@ -163,7 +166,7 @@ function renderPeerList(status) {
     // 关着的时候要指路，否则一片空白用户不知道下一步点哪
     host.innerHTML = status && status.enabled
       ? `<div class="peer-empty">${peerEscape(peerText('peer_empty_online', '没有发现其他在线 Agent。确认对方也开着叠云、在同一内网。'))}</div>`
-      : `<div class="peer-empty">${peerEscape(peerText('peer_empty_disabled', '内网互通已关闭。勾选下面的「启用内网互通」，同项目的同事才能找到你。'))}</div>`;
+      : `<div class="peer-empty">${peerEscape(peerText('peer_empty_disabled', '内网互通已关闭。点右上角「设置」勾选「启用内网互通」，同项目的同事才能找到你。'))}</div>`;
     return;
   }
   host.innerHTML = rows
@@ -221,10 +224,15 @@ function renderPeerList(status) {
       const cls = ['peer-row-item'];
       if (!detail) cls.push('peer-row-slim');
       if (row.pending) cls.push('peer-row-pending');
+      // 工作身份：一律标成「自称」——它是对方自己说的，不是我们验证过的东西
+      const roleChip = String(row.role || '').trim()
+        ? `<span class="peer-role-chip">${peerEscape(peerText('peer_role_chip', '自称：%s', String(row.role).trim()))}</span>`
+        : '';
       return (
         `<div class="${cls.join(' ')}" data-peer-id="${id}">` +
         `<div class="peer-row-main">` +
         `<span class="peer-name">${peerEscape(row.name)}</span>${badges.join('')}` +
+        (roleChip ? roleChip : '') +
         (addr ? `<span class="peer-addr">${peerEscape(addr)}</span>` : '') +
         `</div>` +
         detail +
@@ -233,6 +241,285 @@ function renderPeerList(status) {
       );
     })
     .join('');
+}
+
+/**
+ * 面板是否正被看着：Bot 侧栏页签打开着，或「连接 → Agent 互通」开着。
+ * 事件驱动刷新只在看得见时做（看不见时刷新纯属白烧 IO）。
+ */
+function peerPanelVisible() {
+  if (isConnectModalOpen() && activeConnectTabId() === 'peer') return true;
+  return (
+    typeof isSidePanelOpen === 'function' &&
+    isSidePanelOpen() &&
+    typeof getSidePanelTab === 'function' &&
+    getSidePanelTab() === 'bot'
+  );
+}
+
+// ---- 房间（agent 聊天室）：一次任务一个 -------------------------------------
+//
+// 只画「有哪些房间、几个人、开着还是结束」+ 建/关两个动作。
+// 房间时间线与「发所有人」在第 3 步（见 docs/BOT-ROOM-PLAN.md §7）；
+// 这里**不判**谁能进房间、能不能发 —— 那是 Main 的 coordinator.js。
+
+/** 最近一次 status（建房间的表单要用它填成员勾选框，不另存一份状态） */
+let peerLastStatus = null;
+/** 当前打开的房间（空 = 显示房间清单）；时间线是取来的，不在本地攒 */
+let botRoomOpenId = '';
+let botRoomTimeline = null;
+
+function renderRoomPanel(status) {
+  const host = $('bot-room-body');
+  if (!host) return;
+  const rooms = Array.isArray(status && status.rooms) ? status.rooms : [];
+  const open = rooms.filter((r) => r && r.status === 'open');
+  const meta = $('bot-room-meta');
+  if (meta) {
+    meta.textContent = rooms.length
+      ? peerText('bot_room_meta', '进行中 %d · 共 %d 个', open.length, rooms.length)
+      : peerText('bot_room_meta_idle', '一次任务一个');
+  }
+  // 打开着某个房间时画它的对话；刷新列表不打断（时间线走自己的一次取数）
+  if (botRoomOpenId) {
+    // 输入框有焦点就不重绘：peer 事件很频繁，重绘会把光标、还没发出去的话一起冲掉
+    const typing = $('bot-room-input');
+    if (!(typing && document.activeElement === typing)) renderRoomDetail();
+    return;
+  }
+  if (!rooms.length) {
+    host.innerHTML =
+      `<div class="bot-room-empty">` +
+      `<div class="bot-room-empty-title">${peerEscape(peerText('bot_room_empty', '还没有房间'))}</div>` +
+      `<div class="bot-room-empty-hint">${peerEscape(
+        peerText('bot_room_empty_hint', '房间 = 一次任务：把几个 agent 拉进来一起干，干完就结束。')
+      )}</div>` +
+      `</div>`;
+    return;
+  }
+  host.innerHTML = rooms
+    .map((room) => {
+      const roomId = peerEscape(room.roomId);
+      const members = Array.isArray(room.members) ? room.members : [];
+      const names = members.map((id) => peerNameForId(id)).join('、') || '-';
+      const isOpen = room.status === 'open';
+      return (
+        `<div class="bot-room-item${isOpen ? '' : ' bot-room-item-closed'}" data-room-id="${roomId}">` +
+        `<div class="bot-room-item-main">` +
+        `<span class="bot-room-item-title">${peerEscape(room.title)}</span>` +
+        `<span class="bot-room-item-state">${peerEscape(
+          isOpen ? peerText('bot_room_state_open', '进行中') : peerText('bot_room_state_closed', '已结束')
+        )}</span>` +
+        `</div>` +
+        `<div class="bot-room-item-members" title="${peerEscape(names)}">${peerEscape(
+          peerText('bot_room_members', '%d 台 · %s', members.length, names)
+        )}</div>` +
+        (isOpen
+          ? `<div class="bot-room-item-actions">` +
+            `<button type="button" class="ghost-btn bot-room-close-btn" data-room-id="${roomId}">${peerEscape(
+              peerText('bot_room_close', '结束')
+            )}</button>` +
+            `</div>`
+          : '') +
+        `</div>`
+      );
+    })
+    .join('');
+}
+
+/** 建房间时的成员勾选：只列**已确认**（allow）的 agent；离线的也能勾，只是发不过去。 */
+function renderRoomMemberPicker(status) {
+  const host = $('bot-room-members');
+  if (!host) return;
+  const rows = peerRowsFor(status).filter((r) => r && r.trust === 'allow');
+  if (!rows.length) {
+    host.innerHTML = `<div class="bot-room-empty-hint">${peerEscape(
+      peerText('bot_room_no_member', '还没有已确认的 agent。先在上面那一层点「允许」。')
+    )}</div>`;
+    return;
+  }
+  host.innerHTML = rows
+    .map((row) => {
+      const id = peerEscape(row.peerId);
+      const offline = row.online ? '' : `<span class="bot-room-member-off">${peerEscape(peerText('peer_badge_offline', '离线'))}</span>`;
+      const role = String(row.role || '').trim()
+        ? `<span class="peer-role-chip">${peerEscape(peerText('peer_role_chip', '自称：%s', String(row.role).trim()))}</span>`
+        : '';
+      return (
+        `<label class="bot-room-member">` +
+        `<input type="checkbox" value="${id}" />` +
+        `<span class="bot-room-member-name">${peerEscape(row.name)}</span>${role}${offline}` +
+        `</label>`
+      );
+    })
+    .join('');
+}
+
+// ---- 房间详情：时间线 + 「发所有人」 -----------------------------------------
+//
+// 时间线是**算出来的**：每个成员各有一条「与 X 的对话」，房间存活期间那些会话里的消息
+// 就是这个房间的对话（Main 侧 `roomTimeline`，见 docs/BOT-ROOM-PLAN.md §4）。
+// 这里只画，不在 Renderer 攒消息、也不判谁该不该收到。
+
+async function openRoomDetail(roomId) {
+  botRoomOpenId = String(roomId || '');
+  botRoomTimeline = null;
+  // 进房间就把「新建」表单收起来：两个动作挤在一起容易误触
+  const form = $('bot-room-form');
+  if (form) form.hidden = true;
+  renderRoomPanel(peerLastStatus || {});
+  await loadRoomTimeline();
+}
+
+function closeRoomDetail() {
+  botRoomOpenId = '';
+  botRoomTimeline = null;
+  // 回到清单要**重新取数**：返回按钮按下时房间状态可能已经变了（别拿旧缓存画）
+  refreshPeerPanel().catch(() => {});
+}
+
+async function loadRoomTimeline() {
+  if (!botRoomOpenId) return;
+  // 输入框有焦点就别重绘：peer 事件会频繁刷新，重绘会冲掉光标和没发出去的那句话
+  const typing = $('bot-room-input');
+  if (typing && document.activeElement === typing) return;
+  const host = $('bot-room-body');
+  if (host) {
+    host.innerHTML = `<div class="bot-room-empty"><div class="bot-room-empty-title">${peerEscape(
+      peerText('bot_room_loading', '读取房间对话…')
+    )}</div></div>`;
+  }
+  try {
+    const res = await peerApi.peerRoomTimeline({ roomId: botRoomOpenId, limit: 120 });
+    if (!res || !res.ok) {
+      // 房间被清理 / 换了机器：别留一个"看着还能发"的空壳，退回清单
+      if (res && res.error === 'ROOM_NOT_FOUND') {
+        botRoomOpenId = '';
+        botRoomTimeline = null;
+        if (typeof showAgentToast === 'function') {
+          showAgentToast(
+            peerText('bot_room_err_notfound', '没有这个房间'),
+            peerText('bot_room_gone_hint', '它可能已经被清理掉了'),
+            { variant: 'warn' }
+          );
+        }
+        await refreshPeerPanel().catch(() => {});
+        return;
+      }
+      throw new Error((res && res.error) || 'ROOM_TIMELINE_FAILED');
+    }
+    botRoomTimeline = { room: res.room || null, messages: Array.isArray(res.messages) ? res.messages : [] };
+  } catch (e) {
+    botRoomTimeline = { room: null, messages: [], error: String((e && e.message) || e) };
+  }
+  renderRoomDetail();
+}
+
+function renderRoomDetail() {
+  const host = $('bot-room-body');
+  if (!host) return;
+  const data = botRoomTimeline || { messages: [] };
+  const rooms = Array.isArray(peerLastStatus && peerLastStatus.rooms) ? peerLastStatus.rooms : [];
+  const room = data.room || rooms.find((r) => r.roomId === botRoomOpenId) || null;
+  const messages = Array.isArray(data.messages) ? data.messages : [];
+  // 只有真拿到房间、且状态是 open 才允许发：拿不到房间就别画一个「能发」的空壳
+  const isOpen = !!room && room.status === 'open';
+  const id = peerEscape(botRoomOpenId);
+  const rows = messages
+    .map((m) => {
+      const mine = String(m.role || '') === 'user';
+      const base = mine ? peerText('bot_room_me', '我') : m.peerName || m.peerId || peerText('peer_inbound_default', '内网 Agent');
+      // 「自称」两个字不能省：这是对方自己报的身份，不是我们验证过的
+      const who = !mine && String(m.peerRole || '').trim() ? `${base}${peerText('bot_room_role_suffix', '（自称：%s）', String(m.peerRole).trim())}` : base;
+      const at = Number(m.at) || 0;
+      const body = String(m.content || '').slice(0, 2000);
+      return (
+        `<div class="bot-room-msg${mine ? ' bot-room-msg-mine' : ''}">` +
+        `<div class="bot-room-msg-head">` +
+        `<span class="bot-room-msg-who">${peerEscape(who)}</span>` +
+        (at ? `<span class="bot-room-msg-time">${peerEscape(peerFormatAge(Date.now() - at))}</span>` : '') +
+        `</div>` +
+        `<div class="bot-room-msg-body">${peerEscape(body)}</div>` +
+        `</div>`
+      );
+    })
+    .join('');
+  host.innerHTML =
+    `<div class="bot-room-detail-head">` +
+    `<button type="button" class="ghost-btn bot-room-back-btn" title="回到房间清单">${peerEscape(
+      peerText('bot_room_back', '← 返回')
+    )}</button>` +
+    `<span class="bot-room-item-title">${peerEscape(room ? room.title : peerText('bot_room_title_fallback', '房间'))}</span>` +
+    `<span class="bot-room-item-state">${peerEscape(
+      isOpen ? peerText('bot_room_state_open', '进行中') : peerText('bot_room_state_closed', '已结束')
+    )}</span>` +
+    (isOpen
+      ? `<button type="button" class="ghost-btn bot-room-close-btn" data-room-id="${id}">${peerEscape(
+          peerText('bot_room_close', '结束')
+        )}</button>`
+      : '') +
+    `</div>` +
+    `<div class="bot-room-msgs">` +
+    (rows ||
+      `<div class="bot-room-empty-hint">${peerEscape(peerText('bot_room_no_msg', '这里还没有消息。发一句话给房间里的人试试。'))}</div>`) +
+    `</div>` +
+    (room && !isOpen
+      ? `<div class="bot-room-note">${peerEscape(
+          peerText('bot_room_closed_note', '房间结束之后进来的消息不在这个房间里（各条对话里还在）。')
+        )}</div>`
+      : '') +
+    (isOpen
+      ? `<div class="bot-room-send">` +
+        `<textarea id="bot-room-input" rows="2" spellcheck="false" placeholder="${peerEscape(
+          peerText('bot_room_send_placeholder', '对房间里所有 agent 说一句…')
+        )}"></textarea>` +
+        `<button type="button" class="ghost-btn" id="bot-room-send-btn">${peerEscape(
+          peerText('bot_room_send_all', '发所有人')
+        )}</button>` +
+        `</div>`
+      : '');
+}
+
+async function sendRoomBroadcast() {
+  const input = $('bot-room-input');
+  const text = String((input && input.value) || '').trim();
+  if (!text || !botRoomOpenId) return;
+  const btn = $('bot-room-send-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await peerApi.peerRoomSend({ roomId: botRoomOpenId, text });
+    if (!res || !res.ok) {
+      const code = String((res && res.error) || '');
+      const why =
+        code === 'ROOM_CLOSED'
+          ? peerText('bot_room_err_closed', '这个房间已经结束了')
+          : code === 'ROOM_NOT_FOUND'
+            ? peerText('bot_room_err_notfound', '没有这个房间')
+            : peerText('bot_room_err_send', '一条都没送达：%s', code || '未知错误');
+      throw new Error(why);
+    }
+    if (input) {
+      input.value = '';
+      // 主动失焦：不然「有焦点就不重绘」的守卫会让刚发出去的那句迟迟不出现
+      input.blur();
+    }
+    const delivered = Array.isArray(res.delivered) ? res.delivered : [];
+    const failed = Array.isArray(res.failed) ? res.failed : [];
+    if (typeof showAgentToast === 'function') {
+      const title = peerText('bot_room_sent', '已发给 %d 台', delivered.length);
+      const hint = failed.length
+        ? peerText('bot_room_sent_partial', '%s 没送达（房间不会自动重试）', failed.map((f) => f.name).join('、'))
+        : '';
+      showAgentToast(title, hint, { variant: failed.length ? 'warn' : 'success' });
+    }
+    await loadRoomTimeline();
+  } catch (e) {
+    if (typeof showAgentToast === 'function') {
+      showAgentToast(peerText('bot_room_err_send_title', '发送失败'), String((e && e.message) || e), { variant: 'error' });
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function refreshPeerPanel() {
@@ -257,8 +544,11 @@ async function refreshPeerPanel() {
     }
     const status = res.status || {};
     peerApplyStatus(status);
+    peerLastStatus = status;
     const nameInput = $('peer-name');
     if (nameInput) nameInput.value = status.name || '';
+    const roleInput = $('peer-role');
+    if (roleInput) roleInput.value = status.role || '';
     const enabledBox = $('peer-enabled');
     if (enabledBox) enabledBox.checked = !!status.enabled;
     const autoBox = $('peer-auto-turn');
@@ -273,6 +563,7 @@ async function refreshPeerPanel() {
         : peerText('peer_status_off', '已关闭（不监听、不宣告）');
     }
     renderPeerList(status);
+    renderRoomPanel(status);
     renderPeerSessionRow();
   } catch (e) {
     if (statusEl) statusEl.textContent = peerText('peer_load_failed', '读取失败：%s', (e && e.message) || e);
@@ -547,6 +838,117 @@ async function sendPeerSessionText(text, sessionIdOverride) {
 
 function bindPeerUi() {
   // 开关（菜单图标、关闭按钮、点背景关闭）都在「连接」外壳里，这里只绑标签页自己的控件。
+  // Bot 侧栏页签的「设置」= 打开「连接 → Agent 互通」（那一页只管名称与开关，列表在这边）。
+  $('bot-panel-settings')?.addEventListener('click', () => openPeerModal());
+
+  // ---- 房间：建 / 关（成员与上限由 Main 校验，这里只收集表单） ----
+  $('bot-room-new')?.addEventListener('click', () => {
+    const form = $('bot-room-form');
+    if (!form) return;
+    form.hidden = !form.hidden;
+    if (form.hidden) return;
+    renderRoomMemberPicker(peerLastStatus || {});
+    const input = $('bot-room-title');
+    if (input) input.focus();
+  });
+  $('bot-room-cancel')?.addEventListener('click', () => {
+    const form = $('bot-room-form');
+    if (form) form.hidden = true;
+  });
+  $('bot-room-create')?.addEventListener('click', async () => {
+    const picked = Array.from(document.querySelectorAll('#bot-room-members input[type="checkbox"]:checked')).map(
+      (el) => String(el.value || '')
+    );
+    if (!picked.length) {
+      if (typeof showAgentToast === 'function') {
+        showAgentToast(
+          peerText('bot_room_need_member', '先勾几台 agent'),
+          peerText('bot_room_need_member_hint', '房间至少要有两个 agent 才有意义'),
+          { variant: 'warn' }
+        );
+      }
+      return;
+    }
+    const title = String(($('bot-room-title') || {}).value || '').trim();
+    try {
+      const res = await peerApi.peerRoomCreate({ title, members: picked });
+      if (!res || !res.ok) {
+        const code = String((res && res.error) || '');
+        const why =
+          code === 'ROOM_LIMIT'
+            ? peerText('bot_room_err_limit', '同时进行的房间太多了，先结束一个')
+            : code === 'ROOM_TOO_MANY_MEMBERS'
+              ? peerText('bot_room_err_too_many', '房间人数超过上限')
+              : code === 'PEER_NOT_TRUSTED'
+                ? peerText('bot_room_err_untrusted', '有一台机器还没确认过互通')
+                : peerText('bot_room_err_create', '建房间失败：%s', code || '未知错误');
+        throw new Error(why);
+      }
+      const form = $('bot-room-form');
+      if (form) form.hidden = true;
+      // 新建完成回到清单：否则人还停在旧房间的详情里，看不到刚建的那个
+      botRoomOpenId = '';
+      botRoomTimeline = null;
+      await refreshPeerPanel();
+      if (typeof showAgentToast === 'function') {
+        showAgentToast(
+          peerText('bot_room_created', '房间建好了'),
+          peerText('bot_room_created_hint', '下一步：在房间里分配任务、结束时点「结束」'),
+          { variant: 'success' }
+        );
+      }
+    } catch (e) {
+      if (typeof showAgentToast === 'function') {
+        showAgentToast(peerText('bot_room_err_title', '建房间失败'), String((e && e.message) || e), { variant: 'error' });
+      }
+    }
+  });
+  // 房间区每次重绘，用一次事件委托覆盖：进房间 / 返回 / 结束 / 发所有人
+  $('bot-room-body')?.addEventListener('click', async (e) => {
+    const target = /** @type {HTMLElement | null} */ (e.target);
+    if (!target || !target.closest) return;
+
+    if (target.closest('.bot-room-back-btn')) {
+      closeRoomDetail();
+      return;
+    }
+    if (target.closest('#bot-room-send-btn')) {
+      await sendRoomBroadcast();
+      return;
+    }
+
+    const closeBtn = target.closest('.bot-room-close-btn');
+    if (closeBtn) {
+      const roomId = closeBtn.getAttribute('data-room-id') || '';
+      if (!roomId) return;
+      try {
+        const res = await peerApi.peerRoomClose(roomId);
+        if (!res || !res.ok) throw new Error((res && res.error) || 'ROOM_CLOSE_FAILED');
+        await refreshPeerPanel();
+        if (botRoomOpenId === roomId) await loadRoomTimeline();
+        if (typeof showAgentToast === 'function') {
+          showAgentToast(
+            peerText('bot_room_closed', '房间已结束'),
+            peerText('bot_room_closed_hint', '会话和历史都还在，只是不再以这个房间的名义继续'),
+            { variant: 'success' }
+          );
+        }
+      } catch (err) {
+        if (typeof showAgentToast === 'function') {
+          showAgentToast(peerText('bot_room_err_close', '结束房间失败'), String((err && err.message) || err), { variant: 'error' });
+        }
+      }
+      return;
+    }
+
+    // 点房间条目 → 看房间对话（清单里点空白处不做事）
+    const item = target.closest('.bot-room-item');
+    if (item) {
+      const roomId = item.getAttribute('data-room-id') || '';
+      if (roomId) await openRoomDetail(roomId);
+    }
+  });
+
   $('peer-refresh')?.addEventListener('click', () => {
     (peerApi.peerRefresh ? peerApi.peerRefresh() : Promise.resolve())
       .catch(() => {})
@@ -562,6 +964,27 @@ function bindPeerUi() {
         showAgentToast(
           peerText('peer_toast_name_saved', '已保存'),
           peerText('peer_toast_name_saved_hint', '其他 agent 会看到「%s」', value),
+          { variant: 'success' }
+        );
+      }
+    } catch (e) {
+      if (typeof showAgentToast === 'function') {
+        showAgentToast(peerText('peer_toast_save_failed', '保存失败'), String((e && e.message) || e), { variant: 'error' });
+      }
+    }
+  });
+  $('peer-save-role')?.addEventListener('click', async () => {
+    // 允许存空：清掉身份就是回到「只显示名字」
+    const value = String(($('peer-role') || {}).value || '').trim();
+    try {
+      await peerApi.peerSetRole(value);
+      await refreshPeerPanel();
+      if (typeof showAgentToast === 'function') {
+        showAgentToast(
+          peerText('peer_toast_name_saved', '已保存'),
+          value
+            ? peerText('peer_toast_role_saved_hint', '别的机器会看到「自称：%s」（只是自称，不决定权限）', value)
+            : peerText('peer_toast_role_cleared', '已清掉身份，只显示名字'),
           { variant: 'success' }
         );
       }
@@ -681,11 +1104,23 @@ function bindPeerUi() {
       if (kind === 'trust-request') {
         // 首次来信：无论面板开没开都要让人看见，否则消息就被无声拦掉了
         enqueuePeerTrustRequest(event);
-        if (isConnectModalOpen() && activeConnectTabId() === 'peer') refreshPeerPanel().catch(() => {});
+        if (peerPanelVisible()) refreshPeerPanel().catch(() => {});
         return;
       }
-      const visible = isConnectModalOpen() && activeConnectTabId() === 'peer';
-      if (visible && (kind === 'peers-changed' || kind === 'started' || kind === 'claims-changed' || kind === 'trust-changed')) {
+      // 房间在开着的时候，来信 / 回复 / 广播都要立刻反映到房间时间线上
+      if (botRoomOpenId && (kind === 'inbound' || kind === 'reply-stored' || kind === 'room-sent')) {
+        loadRoomTimeline().catch(() => {});
+      }
+      if (
+        peerPanelVisible() &&
+        (kind === 'peers-changed' ||
+          kind === 'started' ||
+          kind === 'claims-changed' ||
+          kind === 'trust-changed' ||
+          kind === 'room-created' ||
+          kind === 'room-closed' ||
+          kind === 'room-sent')
+      ) {
         refreshPeerPanel().catch(() => {});
       }
     });

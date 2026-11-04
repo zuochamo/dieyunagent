@@ -45,6 +45,8 @@ function mkTmp(prefix) {
 function mkRpc() {
   const calls = [];
   const sessions = new Map();
+  /** @type {Map<string, Array<{ role: string, content: string, createdAt: number }>>} */
+  const history = new Map();
   let seq = 0;
   function newSession(id) {
     sessions.set(id, { id });
@@ -54,6 +56,9 @@ function mkRpc() {
     calls,
     messages() {
       return calls.filter((c) => c.method === 'memory.message_append');
+    },
+    historyOf(sessionId) {
+      return history.get(String(sessionId)) || [];
     },
     hasSession(id) {
       return sessions.has(String(id));
@@ -81,7 +86,22 @@ function mkRpc() {
           e.code = 'SESSION_NOT_FOUND';
           throw e;
         }
+        const list = history.get(sessionId) || [];
+        list.push({
+          role: String((params && params.role) || ''),
+          content: String((params && params.content) || ''),
+          createdAt: Date.now()
+        });
+        history.set(sessionId, list);
         return { ok: true };
+      }
+      if (method === 'memory.messages_recent') {
+        // 与真 core 同形：camelCase + 按时间倒序（房间时间线自己再排序）
+        const limit = Math.max(1, Number((params && params.limit) || 50));
+        return (history.get(sessionId) || [])
+          .slice(-limit)
+          .reverse()
+          .map((m, idx) => ({ id: idx + 1, sessionId, role: m.role, content: m.content, reasoning: null, createdAt: m.createdAt }));
       }
       return { ok: true };
     }
@@ -108,6 +128,9 @@ async function main() {
   const events = [];
   // B 侧的小时预算可中途改（验证「预算用尽只投递不跑」）
   let budgetOverrideB = null;
+  /** 扇出用的第二台（在本段里建，finally 里停） */
+  let D = null;
+  let dirD = '';
 
   const A = createPeerCoordinator({
     userDataPath: dirA,
@@ -135,11 +158,15 @@ async function main() {
   });
 
   try {
+    // 工作身份在 start 之前设：握手时随 hello 发出去（started 之后再设会触发一次重启）
+    A.setRole('发票模块');
+    B.setRole('前端');
     const statusA = await A.start();
     const statusB = await B.start();
     check('A 已监听', statusA.port > 0, `port=${statusA.port}`);
     check('B 已监听', statusB.port > 0, `port=${statusB.port}`);
     check('身份稳定（重启不变）', A.status().peerId === statusA.peerId);
+    check('工作身份存住并随状态暴露', A.status().role === '发票模块' && B.status().role === '前端', JSON.stringify([A.status().role, B.status().role]));
     check('默认就自动跑一轮', A.status().autoTurn === true, JSON.stringify(A.status().autoTurn));
     // 下面几段验的是「信任 / 跳数 / 预算」这些门，先显式关掉自动跑，免得默认开把断言搅在一起
     A.setAutoTurn(false);
@@ -379,9 +406,319 @@ async function main() {
     });
     check('撤销后再来信重新进入待确认', afterClear.ok === false && afterClear.error === 'NOT_TRUSTED', JSON.stringify(afterClear));
     check('待确认里重新出现这台机器', B.status().pendingTrust.some((p) => p.peerId === strangerId), JSON.stringify(B.status().pendingTrust));
+
+    // —— 13. 房间（一次任务一个）：成员必须已确认 / 结束后不许再发 / 接收侧只投递不跑 ——
+    check(
+      '房间默认上限：成员 8 / 并行 4',
+      AGENT_LIMITS_DEFAULTS.peerRoomMaxMembers === 8 && AGENT_LIMITS_DEFAULTS.peerRoomMaxActiveRooms === 4,
+      `${AGENT_LIMITS_DEFAULTS.peerRoomMaxMembers} / ${AGENT_LIMITS_DEFAULTS.peerRoomMaxActiveRooms}`
+    );
+    check('初始没有房间', A.rooms().length === 0, JSON.stringify(A.rooms()));
+
+    const noMemberRoom = A.createRoom({ title: '空房间', members: [] });
+    check('没有成员的房间被拒', noMemberRoom.ok === false && noMemberRoom.error === 'ROOM_NO_MEMBERS', JSON.stringify(noMemberRoom));
+    const notFoundRoom = A.createRoom({ title: '不存在的成员', members: ['某台不存在的机器'] });
+    check(
+      '拉不认识的机器进房间 → PEER_NOT_FOUND',
+      notFoundRoom.ok === false && notFoundRoom.error === 'PEER_NOT_FOUND',
+      JSON.stringify(notFoundRoom)
+    );
+    const untrustedRoom = A.createRoom({ title: '没确认的机器', members: [strangerId] });
+    check(
+      '拉没确认的机器进房间 → PEER_NOT_TRUSTED',
+      untrustedRoom.ok === false && untrustedRoom.error === 'PEER_NOT_TRUSTED',
+      JSON.stringify(untrustedRoom)
+    );
+
+    const createdRoom = A.createRoom({ title: '修发票模块', members: [statusB.peerId] });
+    check('建房间成功且是开着的', createdRoom.ok === true && createdRoom.room.status === 'open', JSON.stringify(createdRoom));
+    const roomId = createdRoom.ok ? createdRoom.room.roomId : '';
+    check('房间成员 = 已确认的那台', createdRoom.ok && createdRoom.room.members.join() === statusB.peerId, JSON.stringify(createdRoom.room && createdRoom.room.members));
+    check('房间进 A 的清单', A.rooms().some((r) => r.roomId === roomId), JSON.stringify(A.rooms().map((r) => r.roomId)));
+    check('建房间发了 room-created 事件', events.some((e) => e.side === 'A' && e.kind === 'room-created'));
+
+    const roomSent = await A.sendToPeer({ peer: statusB.peerId, text: '房间里的第一句话', roomId });
+    check('以房间名义发给成员 → 送达', roomSent.ok === true, JSON.stringify(roomSent));
+    const outsiderSend = await A.sendToPeer({ peer: strangerId, text: '想蹭这个房间', roomId });
+    check(
+      '不认识的机器先被 PEER_NOT_FOUND 挡下（早于房间校验）',
+      outsiderSend.ok === false && outsiderSend.error === 'PEER_NOT_FOUND',
+      JSON.stringify(outsiderSend)
+    );
+    // 直连 host+port 时拿不到 peerId ⇒ 无法确认是不是成员，宁可不许借房间发
+    const directRoomSend = await A.sendToPeer({ host: '127.0.0.1', port: statusB.port, text: '直连但以房间名义发', roomId });
+    check(
+      '直连（无法确认成员）不许借房间发 → PEER_NOT_IN_ROOM',
+      directRoomSend.ok === false && directRoomSend.error === 'PEER_NOT_IN_ROOM',
+      JSON.stringify(directRoomSend)
+    );
+    const ghostRoomSend = await A.sendToPeer({ peer: statusB.peerId, text: '不存在的房间', roomId: 'r-nope' });
+    check(
+      '不存在的房间 → ROOM_NOT_FOUND',
+      ghostRoomSend.ok === false && ghostRoomSend.error === 'ROOM_NOT_FOUND',
+      JSON.stringify(ghostRoomSend)
+    );
+
+    // 并行房间上限（房间 = 一次任务，同时进行太多就没意义了）
+    const maxActiveRooms = AGENT_LIMITS_DEFAULTS.peerRoomMaxActiveRooms;
+    for (let i = 1; i < maxActiveRooms; i += 1) A.createRoom({ title: `并行任务 ${i}`, members: [statusB.peerId] });
+    check(
+      '并行房间数达到上限',
+      A.rooms().filter((r) => r.status === 'open').length === maxActiveRooms,
+      JSON.stringify(A.rooms().map((r) => r.status))
+    );
+    const overLimit = A.createRoom({ title: '再多一个', members: [statusB.peerId] });
+    check('超过并行上限 → ROOM_LIMIT', overLimit.ok === false && overLimit.error === 'ROOM_LIMIT', JSON.stringify(overLimit));
+
+    // 结束房间：幂等；结束后不许再以它名义发；单独发不受影响（房间只是标签）
+    const closedRoom = A.closeRoom(roomId);
+    check('结束房间成功', closedRoom.ok === true && closedRoom.room.status === 'closed', JSON.stringify(closedRoom));
+    check('重复结束是幂等的', A.closeRoom(roomId).ok === true);
+    const closedSend = await A.sendToPeer({ peer: statusB.peerId, text: '房间结束后还想发', roomId });
+    check(
+      '已结束的房间不许再发 → ROOM_CLOSED',
+      closedSend.ok === false && closedSend.error === 'ROOM_CLOSED',
+      JSON.stringify(closedSend)
+    );
+    const noRoomSend = await A.sendToPeer({ peer: statusB.peerId, text: '不带房间照样能发' });
+    check('不带房间仍可单独发', noRoomSend.ok === true, JSON.stringify(noRoomSend));
+    check('结束房间发了 room-closed 事件', events.some((e) => e.side === 'A' && e.kind === 'room-closed'));
+
+    // 接收侧：**本机也有这个房间且已结束**时只投递不跑（房间是本机视图，查不到就按普通来信处理）。
+    // 用独立客户端注入 roomId：发送方的房间校验不该影响这条断言。
+    const dirC = mkTmp('rooms');
+    try {
+      fs.mkdirSync(path.join(dirC, 'peer'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dirC, 'peer', 'rooms.json'),
+        JSON.stringify({
+          rooms: [
+            { roomId: 'r-closed-test', title: '已经结束的任务', status: 'closed', members: [statusA.peerId], createdAt: 1, closedAt: 2 },
+            // 「别人的房间」：成员里没有 A。A 硬写这个 id 也不该拿到房间标签（成员校验）
+            { roomId: 'r-other-room', title: '别人的任务', status: 'open', members: ['peer_0123456789abcdef01'], createdAt: 1, closedAt: 0 }
+          ]
+        }),
+        'utf8'
+      );
+      const rpcC = mkRpc();
+      const submittedC = [];
+      const C = createPeerCoordinator({
+        userDataPath: dirC,
+        getWorkspace: () => ({ workspacePath }),
+        rpc: rpcC.rpc,
+        submitTask: async (task) => {
+          submittedC.push(task);
+          return { requestId: `reqC_${submittedC.length}`, sessionId: task.sessionId };
+        },
+        limits: limitsFor(18370, 18343),
+        onEvent: (e) => events.push({ side: 'C', ...e }),
+        log: () => {}
+      });
+      const statusC = await C.start();
+      C.setAutoTurn(true);
+      await C.trustPeer(statusA.peerId, 'allow');
+      const asA = createPeerClient({
+        getPeerId: () => statusA.peerId,
+        getName: () => 'A',
+        getWorkspace: () => A.status().workspace,
+        getClaims: () => [],
+        getPort: () => statusA.port,
+        connectTimeoutMs: 3000,
+        log: () => {}
+      });
+      const toClosedRoom = await asA.send({
+        host: '127.0.0.1',
+        port: statusC.port,
+        type: ENVELOPE_TYPE.MESSAGE,
+        text: '这个房间已经结束了',
+        roomId: 'r-closed-test'
+      });
+      check('已结束房间的来信仍然投递（不丢内容）', toClosedRoom.ok === true, JSON.stringify(toClosedRoom));
+      check('已结束房间的来信不自动跑一轮', submittedC.length === 0, `submitted=${submittedC.length}`);
+      check(
+        'skip 原因记为 room_closed',
+        events.some((e) => e.side === 'C' && e.kind === 'inbound-stored' && e.reason === 'room_closed'),
+        JSON.stringify(events.filter((e) => e.side === 'C' && e.kind === 'inbound-stored'))
+      );
+      const storedAtC = rpcC.messages().map((m) => String(m.params && m.params.content)).join('\n');
+      check('已结束房间的来信仍落会话', /这个房间已经结束了/.test(storedAtC), storedAtC.slice(0, 120));
+      check('来信抬头带上房间名', /房间「已经结束的任务」/.test(storedAtC), storedAtC.slice(0, 120));
+
+      // 非成员硬写 roomId：不许借别人的房间名贴标签（房间标签只对成员生效）
+      const toOtherRoom = await asA.send({
+        host: '127.0.0.1',
+        port: statusC.port,
+        type: ENVELOPE_TYPE.MESSAGE,
+        text: '我不是这个房间的人',
+        roomId: 'r-other-room'
+      });
+      check('非成员带 roomId 仍能投递（不因此拒收）', toOtherRoom.ok === true, JSON.stringify(toOtherRoom));
+      // 这条会走自动跑（房间标签对非成员无效 ⇒ 不存在「别人的房间已结束」这种拦法）
+      const spoofTask = submittedC.map((t) => String((t && t.text) || '')).join('\n');
+      check('非成员拿不到房间标签', /我不是这个房间的人/.test(spoofTask) && !/房间「别人的任务」/.test(spoofTask), spoofTask.slice(0, 200));
+      check('非成员不会被误判成「房间已结束」而跳过一轮', submittedC.length === 1, `submitted=${submittedC.length}`);
+
+      // —— 身份防伪：信封里自报的 role 一律不采信，只认握手时说的那一次 ——
+      C.setAutoTurn(false);
+      const { WebSocket } = require('ws');
+      const spoofed = await new Promise((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${statusC.port}/peer`, { handshakeTimeout: 3000 });
+        let settled = false;
+        const finish = (v) => {
+          if (settled) return;
+          settled = true;
+          try {
+            ws.close();
+          } catch {
+            // ignore
+          }
+          resolve(v);
+        };
+        const timer = setTimeout(() => finish({ ok: false, error: 'timeout' }), 5000);
+        ws.on('open', () => {
+          ws.send(
+            JSON.stringify({
+              t: 'hello',
+              v: 1,
+              peerId: statusA.peerId,
+              name: '冒充 A',
+              role: '握手声明：发票模块',
+              workspace: {},
+              claims: [],
+              port: 0
+            })
+          );
+        });
+        ws.on('message', (raw) => {
+          let frame = null;
+          try {
+            frame = JSON.parse(String(raw));
+          } catch {
+            return;
+          }
+          if (frame && frame.t === 'hello_ok') {
+            ws.send(
+              JSON.stringify({
+                t: 'msg',
+                env: {
+                  id: 'env-spoof-1',
+                  type: ENVELOPE_TYPE.MESSAGE,
+                  text: '带着伪造身份的信',
+                  createdAt: Date.now(),
+                  // 信封里硬写一个假身份：服务端必须无视它
+                  from: { peerId: statusA.peerId, name: '冒充 A', role: '伪造的身份：财务总监' }
+                }
+              })
+            );
+          }
+          if (frame && frame.t === 'ack') {
+            clearTimeout(timer);
+            finish({ ok: frame.ok === true, error: frame.error });
+          }
+        });
+        ws.on('error', () => finish({ ok: false, error: 'ws_error' }));
+      });
+      check('手写帧仍能投递（对照组）', spoofed.ok === true, JSON.stringify(spoofed));
+      const storedSpoof = rpcC.messages().map((m) => String(m.params && m.params.content)).join('\n');
+      check('自报 role 不采信：抬头用的是握手时的身份', /自称：握手声明：发票模块/.test(storedSpoof), storedSpoof.slice(-160));
+      check('伪造的假身份没进正文', !/财务总监/.test(storedSpoof), storedSpoof.slice(-160));
+      C.stop();
+    } finally {
+      fs.rmSync(dirC, { recursive: true, force: true });
+    }
+    // —— 14. 扇出（发所有人）+ 房间时间线 ——
+    // 清场：先把上一步的开着的房间都结束，扇出单独验
+    for (const r of A.rooms().filter((x) => x.status === 'open')) A.closeRoom(r.roomId);
+    // B 也改成只投递：开着自动跑时正文会交给 Agent 跑一轮（落库在那条链路里），这里要看落库
+    B.setAutoTurn(false);
+
+    dirD = mkTmp('d');
+    const rpcD = mkRpc();
+    const submittedD = [];
+    D = createPeerCoordinator({
+      userDataPath: dirD,
+      getWorkspace: () => ({ workspacePath }),
+      rpc: rpcD.rpc,
+      submitTask: async (task) => {
+        submittedD.push(task);
+        return { requestId: `reqD_${submittedD.length}`, sessionId: task.sessionId };
+      },
+      limits: limitsFor(18380, 18344),
+      onEvent: (e) => events.push({ side: 'D', ...e }),
+      log: () => {}
+    });
+    const statusD = await D.start();
+    D.setAutoTurn(false);
+    // A 先按 host+port 敲一次门：D 会拦下（未确认），但 A 通过握手学到了它，之后才能按 peerId 找
+    const intro = await A.sendToPeer({ host: '127.0.0.1', port: statusD.port, text: '打招呼（会被 D 拦下）' });
+    check('D 未确认时 A→D 被拦（NOT_TRUSTED）', intro.ok === false && intro.error === 'NOT_TRUSTED', JSON.stringify(intro));
+    await A.trustPeer(statusD.peerId, 'allow');
+    await D.trustPeer(statusA.peerId, 'allow');
+
+    // 已确认、但从没上线的机器：成员合法性通过，发送时才失败（这就是「部分成功」的现场）
+    const offlineId = 'peer_ffffffffffffffffff';
+    await A.trustPeer(offlineId, 'allow');
+
+    const fanRoom = A.createRoom({ title: '扇出测试', members: [statusB.peerId, statusD.peerId, offlineId] });
+    check('三成员房间建好', fanRoom.ok === true && fanRoom.room.members.length === 3, JSON.stringify(fanRoom));
+    const fanRoomId = fanRoom.ok ? fanRoom.room.roomId : '';
+
+    const broadcast = await A.sendToRoom({ roomId: fanRoomId, text: '房间广播：各自改自己那块' });
+    check('扇出：两台在线的都送达', broadcast.ok === true && broadcast.delivered.length === 2, JSON.stringify(broadcast.delivered));
+    check('扇出：离线那台记为失败且不重试', broadcast.partial === true && broadcast.failed.length === 1, JSON.stringify(broadcast.failed));
+    check(
+      '扇出：B 收到',
+      rpcB.messages().some((m) => /房间广播/.test(String(m.params && m.params.content))),
+      'B 没收到'
+    );
+    check(
+      '来信抬头带上对方的自称身份',
+      rpcB
+        .messages()
+        .some((m) => /房间广播/.test(String(m.params && m.params.content)) && /自称：发票模块/.test(String(m.params && m.params.content))),
+      String((rpcB.messages().slice(-1)[0] || {}).params?.content || '').slice(0, 200)
+    );
+    check(
+      '扇出：D 收到（只投递，不自动跑）',
+      rpcD.messages().some((m) => /房间广播/.test(String(m.params && m.params.content))) && submittedD.length === 0,
+      `submitted=${submittedD.length}`
+    );
+    check('扇出记了 room-sent 事件', events.some((e) => e.side === 'A' && e.kind === 'room-sent' && e.roomId === fanRoomId));
+
+    const timeline = await A.roomTimeline({ roomId: fanRoomId });
+    check('房间时间线能取到', !!timeline && Array.isArray(timeline.messages), JSON.stringify(timeline && timeline.messages.length));
+    const timelineText = ((timeline && timeline.messages) || []).map((m) => m.content).join('\n');
+    check('时间线包含刚广播的内容', /房间广播/.test(timelineText), timelineText.slice(0, 120));
+    check('时间线不混进房间建立之前的消息', !/信封归一在 wire\.js/.test(timelineText), timelineText.slice(0, 200));
+    check('时间线按时间正序', ((timeline && timeline.messages) || []).every((m, i, arr) => i === 0 || arr[i - 1].at <= m.at));
+
+    A.closeRoom(fanRoomId);
+    const afterClose = await A.roomTimeline({ roomId: fanRoomId });
+    check('结束后时间线仍可读（历史不删）', !!afterClose && afterClose.messages.length > 0, JSON.stringify(afterClose && afterClose.messages.length));
+    const closedBroadcast = await A.sendToRoom({ roomId: fanRoomId, text: '结束后再广播' });
+    check(
+      '已结束房间不许广播 → ROOM_CLOSED',
+      closedBroadcast.ok === false && closedBroadcast.error === 'ROOM_CLOSED',
+      JSON.stringify(closedBroadcast)
+    );
+    const ghostBroadcast = await A.sendToRoom({ roomId: 'r-nope', text: '没有这个房间' });
+    check(
+      '不存在的房间广播 → ROOM_NOT_FOUND',
+      ghostBroadcast.ok === false && ghostBroadcast.error === 'ROOM_NOT_FOUND',
+      JSON.stringify(ghostBroadcast)
+    );
+    check('不存在的房间取时间线 → null', (await A.roomTimeline({ roomId: 'r-nope' })) === null);
   } finally {
+    if (D) D.stop();
     A.stop();
     B.stop();
+    if (dirD) {
+      try {
+        fs.rmSync(dirD, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
     try {
       fs.rmSync(dirA, { recursive: true, force: true });
       fs.rmSync(dirB, { recursive: true, force: true });

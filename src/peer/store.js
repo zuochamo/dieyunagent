@@ -24,8 +24,10 @@ const TRUST_FILE = 'trusted-peers.json';
 const LINKS_FILE = 'session-links.json';
 const PEERS_FILE = 'static-peers.json';
 const SETTINGS_FILE = 'settings.json';
+const ROOMS_FILE = 'rooms.json';
 
 const TRUST_STATUSES = ['allow', 'deny'];
+const ROOM_STATUSES = ['open', 'closed'];
 
 function readJson(filePath, fallback) {
   try {
@@ -62,13 +64,15 @@ function createPeerStore(userDataPath) {
     trust: dir ? path.join(dir, TRUST_FILE) : '',
     links: dir ? path.join(dir, LINKS_FILE) : '',
     peers: dir ? path.join(dir, PEERS_FILE) : '',
-    settings: dir ? path.join(dir, SETTINGS_FILE) : ''
+    settings: dir ? path.join(dir, SETTINGS_FILE) : '',
+    rooms: dir ? path.join(dir, ROOMS_FILE) : ''
   };
 
-  /** @type {{ peerId: string, name: string, createdAt: number }} */
+  /** @type {{ peerId: string, name: string, role: string, createdAt: number }} */
   let identityCache = null;
   let trustCache = null;
   let linksCache = null;
+  let roomsCache = null;
 
   function defaultName() {
     const envName = process.env.DIEYUN_PEER_NAME;
@@ -77,7 +81,12 @@ function createPeerStore(userDataPath) {
     return normalizeName(host, 'agent');
   }
 
-  /** 本机身份：`peerId` 一旦生成就不再变（改了等于换了一个 agent）。 */
+  /**
+   * 本机身份：`peerId` 一旦生成就不再变（改了等于换了一个 agent）。
+   *
+   * `role` 是**工作身份**（"发票模块" / "前端" 这类一行自称）：跟着 name 一起随握手广播，
+   * 只影响界面显示与来信抬头，**不参与授权**（授权只认 peerId 的信任清单）。
+   */
   function identity() {
     if (identityCache) return identityCache;
     const raw = files.identity ? readJson(files.identity, {}) : {};
@@ -88,9 +97,10 @@ function createPeerStore(userDataPath) {
     identityCache = {
       peerId,
       name: normalizeName(raw.name, defaultName()),
+      role: normalizeName(raw.role, '').slice(0, 32),
       createdAt: Number(raw.createdAt) || Date.now()
     };
-    if (!raw.peerId || raw.peerId !== peerId || !raw.name) {
+    if (!raw.peerId || raw.peerId !== peerId || !raw.name || raw.role == null) {
       if (files.identity) writeJson(files.identity, identityCache);
     }
     return identityCache;
@@ -99,6 +109,15 @@ function createPeerStore(userDataPath) {
   function setName(value) {
     const id = identity();
     const next = { ...id, name: normalizeName(value, id.name) };
+    identityCache = next;
+    if (files.identity) writeJson(files.identity, next);
+    return next;
+  }
+
+  /** 设工作身份。空串 = 清掉（界面回到只显示名字）。 */
+  function setRole(value) {
+    const id = identity();
+    const next = { ...id, role: normalizeName(value, '').slice(0, 32) };
     identityCache = next;
     if (files.identity) writeJson(files.identity, next);
     return next;
@@ -221,6 +240,126 @@ function createPeerStore(userDataPath) {
       .map(([k]) => k);
   }
 
+  // ---- 房间（agent 聊天室） -------------------------------------------------
+  //
+  // 房间 = 一次任务的**本机视图**：谁跟我一起干这件事，成员是 peerId 列表。
+  //
+  // 为什么房间不进 Rust 的库、消息也不写 `meta.roomId`：
+  // 每个成员本来就有一条「与 X 的对话」会话（`links`），房间时间线可以由
+  // 「成员会话 + 房间存活时间窗」聚合出来，不需要给消息加字段、也不动 core 的表结构。
+  // 于是房间就是 peer 目录下的一个文件，跟信任清单一起随机器走。
+
+  /** 读全部房间（新的在前）。坏条目直接跳过，不修补。 */
+  function rooms() {
+    if (roomsCache) return roomsCache;
+    const raw = files.rooms ? readJson(files.rooms, {}) : {};
+    const list = Array.isArray(raw.rooms) ? raw.rooms : [];
+    /** @type {Array<{ roomId: string, title: string, projectKey: string, members: string[], status: 'open'|'closed', createdAt: number, closedAt: number }>} */
+    const out = [];
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      const roomId = String(item.roomId || '').trim();
+      const status = String(item.status || '').trim();
+      if (!roomId || !ROOM_STATUSES.includes(status)) continue;
+      const members = [];
+      for (const m of Array.isArray(item.members) ? item.members : []) {
+        const id = String(m || '').trim();
+        if (id && !members.includes(id)) members.push(id);
+      }
+      out.push({
+        roomId,
+        title: normalizeName(item.title, '未命名任务'),
+        projectKey: String(item.projectKey || '').trim(),
+        members,
+        status: /** @type {'open'|'closed'} */ (status),
+        createdAt: Number(item.createdAt) || 0,
+        closedAt: Number(item.closedAt) || 0
+      });
+    }
+    out.sort((a, b) => b.createdAt - a.createdAt);
+    roomsCache = out;
+    return roomsCache;
+  }
+
+  function flushRooms() {
+    if (files.rooms) writeJson(files.rooms, { rooms: rooms() });
+    return rooms();
+  }
+
+  /** @param {string} roomId */
+  function roomById(roomId) {
+    const id = String(roomId || '').trim();
+    if (!id) return null;
+    return rooms().find((r) => r.roomId === id) || null;
+  }
+
+  /**
+   * 新建一个「开着的」房间。`roomId` 由调用方生成（协调器掌握 id 规则），store 只管存取。
+   * @param {{ roomId?: string, title?: string, projectKey?: string, members?: string[], createdAt?: number }} input
+   */
+  function createRoom(input) {
+    const src = input || {};
+    const roomId = String(src.roomId || '').trim();
+    if (!roomId) return null;
+    const members = [];
+    for (const m of Array.isArray(src.members) ? src.members : []) {
+      const id = String(m || '').trim();
+      if (id && !members.includes(id)) members.push(id);
+    }
+    /** @type {{ roomId: string, title: string, projectKey: string, members: string[], status: 'open'|'closed', createdAt: number, closedAt: number }} */
+    const room = {
+      roomId,
+      title: normalizeName(src.title, '未命名任务'),
+      projectKey: String(src.projectKey || '').trim(),
+      members,
+      status: 'open',
+      createdAt: Number(src.createdAt) || Date.now(),
+      closedAt: 0
+    };
+    const list = rooms();
+    const idx = list.findIndex((r) => r.roomId === roomId);
+    if (idx >= 0) list[idx] = room;
+    else list.unshift(room);
+    flushRooms();
+    return room;
+  }
+
+  /** 关房间：只改状态与时间，**不删会话、不删消息**（历史仍可回看）。幂等。 */
+  function closeRoom(roomId) {
+    const room = roomById(roomId);
+    if (!room) return null;
+    if (room.status === 'open') {
+      room.status = 'closed';
+      room.closedAt = Date.now();
+      flushRooms();
+    }
+    return room;
+  }
+
+  /**
+   * 有界保留：只在超出 `keep` 时丢**最老的已关闭**房间。
+   * 打开中的房间永不丢（宁可超一点，也不删用户还在用的）。
+   * @param {number} keep
+   */
+  function pruneRooms(keep) {
+    const max = Number(keep) > 0 ? Math.trunc(Number(keep)) : 0;
+    const list = rooms();
+    if (!max || list.length <= max) return list;
+    const kept = list.slice();
+    while (kept.length > max) {
+      let idx = -1;
+      for (let i = 0; i < kept.length; i += 1) {
+        if (kept[i].status !== 'closed') continue;
+        if (idx < 0 || kept[i].createdAt < kept[idx].createdAt) idx = i;
+      }
+      if (idx < 0) break;
+      kept.splice(idx, 1);
+    }
+    roomsCache = kept;
+    flushRooms();
+    return kept;
+  }
+
   function staticPeers() {
     const raw = files.peers ? readJson(files.peers, {}) : {};
     const list = Array.isArray(raw.peers) ? raw.peers : [];
@@ -273,6 +412,7 @@ function createPeerStore(userDataPath) {
     files,
     identity,
     setName,
+    setRole,
     trustEntries,
     trustStatus,
     isTrusted,
@@ -282,6 +422,11 @@ function createPeerStore(userDataPath) {
     unlinkSession,
     peerForSession,
     sessionsForPeer,
+    rooms,
+    roomById,
+    createRoom,
+    closeRoom,
+    pruneRooms,
     staticPeers,
     setStaticPeers,
     settings,

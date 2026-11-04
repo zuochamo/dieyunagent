@@ -1,4 +1,4 @@
-/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden, onGoalPanelShown, onGoalPanelHidden, motionMs, requestAnimationFrame, cancelAnimationFrame */
+/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden, onGoalPanelShown, onGoalPanelHidden, refreshPeerPanel, motionMs, requestAnimationFrame, cancelAnimationFrame */
 'use strict';
 
 const SIDE_PANEL_TAB_KEY = 'diecloud.ui.sidePanelTab.v1';
@@ -67,6 +67,7 @@ function loadSavedSideTab() {
     t === 'goal' ||
     t === 'subagents' ||
     t === 'index' ||
+    t === 'bot' ||
     t === 'ssh'
   )
     return t;
@@ -161,6 +162,9 @@ function setSidePanelTab(tab, opts) {
   // 代码片段索引与结构索引合并在同一个「索引」页签里（见 renderer-index-panel.js）
   if (next === 'index' && typeof onIndexPanelShown === 'function') onIndexPanelShown();
   else if (typeof onIndexPanelHidden === 'function') onIndexPanelHidden();
+  // 「Bot」页：内网 Agent 列表 + 房间（见 docs/BOT-ROOM-PLAN.md）。
+  // 首刷入口在这里；后续靠 peer:event 推送刷新，不轮询（peer 是事件驱动的）。
+  if (next === 'bot' && typeof refreshPeerPanel === 'function') refreshPeerPanel().catch(() => {});
 
   // 离开浏览器页时必须收起 BrowserView，否则会盖住侧栏按钮导致无法切换
   // （页签切换会改变原生视图可用高度，边界交给同一条过渡期同步链）

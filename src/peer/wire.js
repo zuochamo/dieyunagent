@@ -50,6 +50,8 @@ const CLAIM_KIND = Object.freeze({
 const MAX_ID_LEN = 96;
 const MAX_NAME_LEN = 64;
 const MAX_WORKSPACE_NAME_LEN = 160;
+/** 工作身份（角色）长度上限：一行说明，不是小作文 */
+const MAX_ROLE_LEN = 32;
 const MAX_CLAIM_KEY_LEN = 512;
 const MAX_CLAIM_NOTE_LEN = 400;
 
@@ -93,7 +95,10 @@ function normalizeWorkspace(raw) {
 /**
  * 握手：**不带任何共享密钥**（P1 起取消配对码）。谁能给我发消息由本机信任清单决定，
  * 见 `coordinator.handleMessage`；握手阶段只交换身份、workspace 与租约快照。
- * @param {{ peerId: string, name?: string, workspace?: object, claims?: object[], port?: number }} input
+ *
+ * `role` 是**工作身份**（"发票模块 / 前端"这类自称），与 `name` 同源、同级别：
+ * 都是对端自己在握手时声明的，所以界面必须按「对方自称」显示，**不参与任何授权判定**。
+ * @param {{ peerId: string, name?: string, role?: string, workspace?: object, claims?: object[], port?: number }} input
  */
 function createHello(input) {
   const src = input || /** @type {any} */ ({});
@@ -102,6 +107,7 @@ function createHello(input) {
     v: PROTO_VERSION,
     peerId: str(src.peerId, MAX_ID_LEN),
     name: str(src.name, MAX_NAME_LEN),
+    role: str(src.role, MAX_ROLE_LEN),
     workspace: normalizeWorkspace(src.workspace),
     claims: normalizeClaims(src.claims),
     port: intOr(src.port, 0),
@@ -112,7 +118,7 @@ function createHello(input) {
 /**
  * 握手回执。`trusted` 告诉对端「我这边是否已经允许你」：未确认时对端 UI 显示
  * 「等你确认」，而不是把 `NOT_TRUSTED` 当成网络故障去重试。
- * @param {{ peerId: string, name?: string, workspace?: object, claims?: object[], trusted?: boolean }} input
+ * @param {{ peerId: string, name?: string, role?: string, workspace?: object, claims?: object[], trusted?: boolean }} input
  */
 function createHelloOk(input) {
   const src = input || /** @type {any} */ ({});
@@ -121,6 +127,7 @@ function createHelloOk(input) {
     v: PROTO_VERSION,
     peerId: str(src.peerId, MAX_ID_LEN),
     name: str(src.name, MAX_NAME_LEN),
+    role: str(src.role, MAX_ROLE_LEN),
     workspace: normalizeWorkspace(src.workspace),
     claims: normalizeClaims(src.claims),
     trusted: src.trusted === true,
@@ -175,12 +182,13 @@ function normalizeClaims(raw, maxTtlMs) {
  * @param {{ maxTextChars?: number, maxTtlMs?: number, now?: number }} [opts]
  * @returns {null | {
  *   id: string, type: string, text: string, hops: number, createdAt: number,
- *   from: { peerId: string, name: string, sessionId: string },
+ *   from: { peerId: string, name: string, role: string, sessionId: string },
  *   to: { peerId: string, sessionId: string },
  *   inReplyTo: string | null,
  *   claim: ReturnType<typeof normalizeClaim> | null,
  *   decision: 'grant' | 'deny' | null,
- *   note: string
+ *   note: string,
+ *   roomId: string
  * }}
  */
 function normalizeEnvelope(raw, opts = {}) {
@@ -210,6 +218,9 @@ function normalizeEnvelope(raw, opts = {}) {
     from: {
       peerId: fromPeerId,
       name: str(from.name, MAX_NAME_LEN),
+      // 角色这里只是「信封里写了什么」；投递前由 `server.js` 用**握手得到的身份**覆盖，
+      // 与 peerId / name 同一口径（见 docs/BOT-ROOM-PLAN.md §8）
+      role: str(from.role, MAX_ROLE_LEN),
       sessionId: str(from.sessionId, MAX_ID_LEN)
     },
     to: {
@@ -219,7 +230,10 @@ function normalizeEnvelope(raw, opts = {}) {
     inReplyTo: env.inReplyTo ? str(env.inReplyTo, MAX_ID_LEN) : null,
     claim: env.claim ? normalizeClaim(env.claim, opts.maxTtlMs) : null,
     decision,
-    note: str(env.note, MAX_CLAIM_NOTE_LEN)
+    note: str(env.note, MAX_CLAIM_NOTE_LEN),
+    // 房间标记：只是「这条消息属于我本机哪个房间」的标签，不参与授权。
+    // 对端没有同名房间时按普通来信处理（房间是本机视图，见 docs/BOT-ROOM-PLAN.md §4）。
+    roomId: str(env.roomId, MAX_ID_LEN)
   };
 }
 
@@ -238,6 +252,7 @@ function createEnvelope(input) {
     from: {
       peerId: str(src.fromPeerId, MAX_ID_LEN),
       name: str(src.fromName, MAX_NAME_LEN),
+      role: str(src.fromRole, MAX_ROLE_LEN),
       sessionId: str(src.fromSessionId, MAX_ID_LEN)
     },
     to: {
@@ -247,7 +262,8 @@ function createEnvelope(input) {
     inReplyTo: src.inReplyTo ? str(src.inReplyTo, MAX_ID_LEN) : null,
     claim: src.claim || null,
     decision: src.decision === 'grant' || src.decision === 'deny' ? src.decision : null,
-    note: str(src.note, MAX_CLAIM_NOTE_LEN)
+    note: str(src.note, MAX_CLAIM_NOTE_LEN),
+    roomId: str(src.roomId, MAX_ID_LEN)
   };
 }
 
@@ -266,6 +282,7 @@ module.exports = {
   FRAME,
   ENVELOPE_TYPE,
   CLAIM_KIND,
+  MAX_ROLE_LEN,
   normalizeClaim,
   normalizeClaims,
   normalizeEnvelope,
