@@ -24,7 +24,7 @@
  * - 单张超过上限直接丢弃；同一路径重复入队按幂等处理，不重复注入也不吃额度；
  * - 注入后立即释放；run 结束时 rust-loop-runner 会兜底清理。
  *
- * 张数与体积上限的唯一来源是 agent-limits（由调用方解析后传入，缺省时退回默认值）。
+ * 张数、体积与长边上限的唯一来源是 agent-limits（由调用方解析后传入，缺省时退回默认值）。
  */
 
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
@@ -88,7 +88,11 @@ function resolveVisionLimits(limits) {
         AGENT_LIMITS_DEFAULTS.cameraShotsPerRound
       )
     },
-    maxBase64Chars: toPositiveInt(l.visionMaxBase64Chars, MAX_BASE64_CHARS)
+    maxBase64Chars: toPositiveInt(l.visionMaxBase64Chars, MAX_BASE64_CHARS),
+    // 长边上限：图片在进缓冲**之前**就要按它缩小（见 tool-bridge-main 的 fitVisionShotToBudget）。
+    // 与「超限就整张丢弃」的区别：超体积的图既不是模型能用的输入，也会被上游按图片不合规
+    // 整轮 400 打回；缩放后仍能看清版式，细节由只读副本兜底。
+    maxEdge: toPositiveInt(l.visionShotMaxEdge, AGENT_LIMITS_DEFAULTS.visionShotMaxEdge)
   };
 }
 

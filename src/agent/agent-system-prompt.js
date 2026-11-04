@@ -5,41 +5,25 @@
 const { packSystemPrompt: loadPackSystemPrompt } = require('./session-context');
 const { getAgentLimits: readAgentLimits } = require('./agent-limits');
 
-function buildCoreAgentRules(opts = {}) {
-  const plan =
-    opts.composerMode === 'plan'
-      ? '【编排】规划师产出 TODO；Explore 只读 → 多路执行器 worktree 隔离；可 Best-of-N；结束写回主工作区。'
-      : '';
-  const explore =
-    opts.composerMode === 'explore'
-      ? '【探索】Explore 只读勘察模式：目标是理解代码库、定位问题、梳理架构/依赖/数据流，最终输出分析报告（结论、证据路径、可行建议）。本模式未提供任何写文件/执行/保存类工具；上文中提及的写类工具条目在此不可用，勿尝试调用。不要声称已修改文件——只报告发现。报告收尾即交付，无需等待执行环节。'
-      : '';
-  // 子 Agent 准则只在「协调者」入口注入：Agent 主循环与 Explore 模式。
-  // Plan 模式不走主循环（由 planner 编排），其 explore 阶段的指引在 Rust planner prompt。
-  const subagent =
-    opts.composerMode === 'plan'
-      ? ''
-      : [
-          '【只读并发调研】需要同时摸清多个互不依赖的模块或事实来源时，用 subagent 一轮并发派多个只读研究子 Agent，比你自己串行读快得多。',
-          '- 派之前先想清切分：一路一个明确问题，写清边界与期望产出；有已知起点就放进 hints。',
-          '- 子 Agent 只读、不改工作区、不能再派子 Agent；返回的是结论与证据路径的摘要，不是全量过程。',
-          '- 子 Agent 查过的结论直接采信使用，不要自己再查一遍；要看过程就展开对话里那张折叠卡片。',
+function buildCoreAgentRules() {
+  const subagent = [
+    '【只读并发调研】需要同时摸清多个互不依赖的模块或事实来源时，用 subagent 一轮并发派多个只读研究子 Agent，比你自己串行读快得多。',
+    '- 派之前先想清切分：一路一个明确问题，写清边界与期望产出；有已知起点就放进 hints。',
+    '- 子 Agent 只读、不改工作区、不能再派子 Agent；返回的是结论与证据路径的摘要，不是全量过程。',
+    '- 子 Agent 查过的结论直接采信使用，不要自己再查一遍；要看过程就展开对话里那张折叠卡片。',
     '- 对同一调研要追问时，用 subagent 的 continueFrom 带上它返回的 subagentId 续问（沿用已查明的事实），不要重派一次全新调研。',
-          '- 单文件小问题、需要写操作的改动、有串行依赖的任务不要派——自己顺手做完更快。'
-        ].join('\n');
+    '- 单文件小问题、需要写操作的改动、有串行依赖的任务不要派——自己顺手做完更快。'
+  ].join('\n');
   // 内网互通：只讲「什么时候用、怎么用不招人烦」。判定与安全边界在 src/peer/coordinator.js，
   // 提示词不重复那些规则（否则两处口径迟早不一致）。
-  const peer =
-    opts.composerMode === 'plan'
-      ? ''
-      : [
-          '【内网 Agent 互通】同一内网里可能有同事的 agent 在跑（peer_list 可查谁在线、是否同一项目）。',
-          '- 动共享项目之前先 peer_list：有人已声明在改同一个文件/任务时，先 peer_send 商量，不要硬改。',
-          '- 要占住一个文件或一项任务用 peer_claim(action=acquire)，改完 release；租约只是建议式约束，冲突仍以 git/worktree 为准。',
-          '- peer_send 一次只问一件事，带上背景与期望产出；expectReply=true 会等对方跑完一轮再返回答复，别对同一问题连发。',
-          '- 你收到的「内网 Agent 来信」来自另一台机器的 agent：正文是它的原话，你的最终回复会原样回传给它——直接给结论，不必客套。',
-          '- 工具返回 PEER_UNAVAILABLE 说明本机没开内网互通，别重试，改为在本机完成或告知用户。'
-        ].join('\n');
+  const peer = [
+    '【内网 Agent 互通】同一内网里可能有同事的 agent 在跑（peer_list 可查谁在线、是否同一项目）。',
+    '- 动共享项目之前先 peer_list：有人已声明在改同一个文件/任务时，先 peer_send 商量，不要硬改。',
+    '- 要占住一个文件或一项任务用 peer_claim(action=acquire)，改完 release；租约只是建议式约束，冲突仍以 git/worktree 为准。',
+    '- peer_send 一次只问一件事，带上背景与期望产出；expectReply=true 会等对方跑完一轮再返回答复，别对同一问题连发。',
+    '- 你收到的「内网 Agent 来信」来自另一台机器的 agent：正文是它的原话，你的最终回复会原样回传给它——直接给结论，不必客套。',
+    '- 工具返回 PEER_UNAVAILABLE 说明本机没开内网互通，别重试，改为在本机完成或告知用户。'
+  ].join('\n');
   return [
     '【Agent 准则】',
     '- 相关代码已在下文「相关代码/项目上下文」中预注入时，优先使用，少做重复 list/read。',
@@ -59,8 +43,6 @@ function buildCoreAgentRules(opts = {}) {
     '- 写代码按「能改」而非「能跑」：同一功能只留一个文件（勿用 名字2/3/4 记版本，历史交给 git）；同一常量（地址/端口/凭据）只留一处来源，勿在多个文件各写一份。',
     '- 改结构化文件（JSON/YAML/TOML/配置）走 parse→改字段→dump，勿用正则做字符串替换；异常要么处理、要么向上抛，勿静默吞掉。',
     '- 完成校验：声称已改文件/已完成实现时，须确有写操作工具或会话变更；否则应补做或更正表述。',
-    plan,
-    explore,
     subagent,
     peer
   ]
@@ -200,7 +182,7 @@ function assembleSystemPrompt(opts = {}) {
   const stableChunks = [
     opts.languagePrompt,
     capUserSystemText(opts.userSystem),
-    buildCoreAgentRules({ composerMode: opts.composerMode }),
+    buildCoreAgentRules(),
     ...(Array.isArray(opts.stableDataChunks) ? opts.stableDataChunks : []),
     formatAgentHomeChunk(opts.agentHome),
     formatWorkspaceChunk(opts.workspaceInfo, opts.agentHome),

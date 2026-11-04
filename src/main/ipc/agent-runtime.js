@@ -23,6 +23,9 @@ const {
 /** 压缩归档（旁路记录）的写入上限：它在发请求之前 await，不能让它拖住整轮。 */
 const COMPACTION_ARCHIVE_TIMEOUT_MS = 2000;
 
+// 会话目标（按轮计数）：唯一读写点，见 src/goals/session-goal.js
+const sessionGoalStore = require('../../goals/session-goal');
+
 /**
  * Agent rust-loop / planner / coordinator / AgentService IPC.
  * @param {object} ctx
@@ -133,6 +136,8 @@ function registerAgentRuntimeIpc(ctx) {
       gateway,
       userData: live.userData,
       snapshot,
+      // 共享记忆（跨机）：扩展未配置 / 连不上时 active 为 false，块自动缺席（fail-open）
+      sharedMemory: typeof ctx.getSharedMemory === 'function' ? ctx.getSharedMemory() : null,
       listMcpServers: (userDataPath) =>
         typeof listMcpServersForUi === 'function' ? listMcpServersForUi(userDataPath) : []
     });
@@ -196,6 +201,24 @@ function registerAgentRuntimeIpc(ctx) {
       modelRoute: payload.modelRoute || undefined,
       browserVision: payload.browserVision === true
     };
+    // 会话目标：Renderer 主循环跑一轮 = 目标推进一轮（预算按「轮」计，见 agent-limits）。
+    // 只给「进行中」的目标计数；写失败一律吞掉 —— 目标计数坏掉不该让本轮跑不起来。
+    // 子 Agent / 频道 / 计划各有自己的执行路径，不经过这个 IPC，因此不会被重复计一次。
+    if (ctx.sessionId && live.localGateway && typeof live.localGateway.invokeRpc === 'function') {
+      try {
+        await sessionGoalStore.patchGoal({
+          invokeRpc: live.localGateway.invokeRpc,
+          sessionId: ctx.sessionId,
+          mutate: (goal) => {
+            if (!goal || goal.outcome || goal.status !== 'active') return undefined;
+            sessionGoalStore.advanceAttempt(goal);
+            return goal;
+          }
+        });
+      } catch {
+        // 目标只是背景：计数失败不影响本轮执行
+      }
+    }
     const { resolveContextTierIdForNode } = require('../../agent/agent-limits');
     if (!ctx.contextTierId && ctx.model) {
       ctx.contextTierId = resolveContextTierIdForNode(live.userData, ctx.model);
@@ -482,7 +505,6 @@ function registerAgentRuntimeIpc(ctx) {
         result.readiness = await evaluateTurnReadiness({
           gateway: live.localGateway,
           trace: result.trace,
-          mode: payload.agentMode || 'agent',
           sessionId: payload.sessionId || null,
           workspacePath,
           userDataPath: live.userData,
@@ -490,6 +512,22 @@ function registerAgentRuntimeIpc(ctx) {
         });
       } catch {
         result.readiness = null;
+      }
+      // 会话目标：一次 rust-loop-run 的返回 = 一轮结束，这是唯一的续跑判定时点。
+      // 判定是纯函数（`decideContinuation`，与计划目标共用），这里只把结论交给 Renderer：
+      // Renderer 读两个布尔值去机械地再开一轮，**不持有目标状态、不碰预算**。
+      // 无目标 / 已收尾 / 已暂停 → 整个字段省略（Renderer 当作「不续跑」）。
+      if (ctx.sessionId && live.localGateway && typeof live.localGateway.invokeRpc === 'function') {
+        try {
+          const { getAgentLimits } = require('../../agent/agent-limits');
+          result.goal = await sessionGoalStore.judgeAfterTurn({
+            invokeRpc: live.localGateway.invokeRpc,
+            sessionId: ctx.sessionId,
+            limits: getAgentLimits(live.userData)
+          });
+        } catch {
+          result.goal = null;
+        }
       }
       runFinishedOk = true;
       // 记忆归纳触发：事实（trace / plan / review / 正文）都在 Main，装配后入队即可；
@@ -861,6 +899,45 @@ function registerAgentRuntimeIpc(ctx) {
     return { ok: true };
   });
 
+  /**
+   * 会话目标面板：读视图 / 清除目标 / 继续（重置预算）。
+   *
+   * 只透出三件事，且语义全在 Main 侧：`clear` 删除、`resume` 回到 active 并重置轮次、
+   * 其余读视图。**不在这里做目标判断** —— 进度、预算、事实尾巴全在
+   * `goals/session-goal.js#toPanelView`，Renderer 拿到的是可以直接画的数字与字符串。
+   */
+  ipcMain.handle('agent:session-goal-panel', async (_evt, payload = {}) => {
+    const sessionId = String(payload.sessionId || '').trim();
+    const gatewayNow = live.localGateway;
+    if (!sessionId || !gatewayNow || typeof gatewayNow.invokeRpc !== 'function') {
+      return { ok: false, goal: null, error: 'session_or_gateway_unavailable' };
+    }
+    try {
+      if (payload.action === 'clear') {
+        await sessionGoalStore.saveGoal({ invokeRpc: gatewayNow.invokeRpc, sessionId, goal: null });
+        return { ok: true, goal: null };
+      }
+      if (payload.action === 'resume') {
+        // 「继续」= 重新给一份轮次预算：attempt 归零、墙钟重新起算，事实与清单保留
+        await sessionGoalStore.resumeGoal({ invokeRpc: gatewayNow.invokeRpc, sessionId });
+        return { ok: true, resumed: true };
+      }
+      if (payload.action === 'pause') {
+        // 用户按停止：只关掉「自动续跑」这一个开关，事实与清单全留
+        await sessionGoalStore.pauseGoal({ invokeRpc: gatewayNow.invokeRpc, sessionId });
+        return { ok: true, paused: true };
+      }
+      const goal = await sessionGoalStore.loadGoal({ invokeRpc: gatewayNow.invokeRpc, sessionId });
+      const { getAgentLimits } = require('../../agent/agent-limits');
+      return {
+        ok: true,
+        goal: sessionGoalStore.toPanelView({ goal, limits: getAgentLimits(live.userData) })
+      };
+    } catch (err) {
+      return { ok: false, goal: null, error: String((err && err.message) || err) };
+    }
+  });
+
   ipcMain.handle('agent:run-start', (_evt, meta) => {
     if (!live.agentCoordinator) return { ok: false, error: 'coordinator_unavailable' };
     return { ok: true, ...live.agentCoordinator.startRun(meta || {}) };
@@ -992,7 +1069,9 @@ function registerAgentRuntimeIpc(ctx) {
             return '';
           }
         },
-        notify: notifyKnowledge
+        notify: notifyKnowledge,
+        // 共享记忆（跨机）：归纳器写完本地记忆后镜像上传，并在每次归纳收尾尝试一次提炼
+        getSharedMemory: () => (typeof ctx.getSharedMemory === 'function' ? ctx.getSharedMemory() : null)
       });
       // 三个 `runRustAgentLoop` 调用点（对话 / 计划模式 / 定时计划）跑完都经
       // `afterAgentRun` 进这里 —— 触发不再依赖 Renderer 的收尾路径。
@@ -1033,12 +1112,17 @@ function registerAgentRuntimeIpc(ctx) {
 /**
  * 最后一条 user 消息的文本（归纳语料里的「用户任务」）。
  * 多模态消息按 text 片段拼接，图片不参与归纳。
+ *
+ * **跳过合成消息**（`[系统] …` 这类，如目标续跑轮的驱动消息）：它们不是用户说的话，
+ * 拿它当「用户任务」会把归纳的输入变成一句系统提示。
  */
 function lastUserTextOf(messages) {
+  const { isSyntheticLoopUserContent } = require('../../agent/session-context');
   const list = Array.isArray(messages) ? messages : [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
     const m = list[i];
     if (!m || m.role !== 'user') continue;
+    if (isSyntheticLoopUserContent(m.content)) continue;
     const c = m.content;
     if (typeof c === 'string') return c;
     if (Array.isArray(c)) {

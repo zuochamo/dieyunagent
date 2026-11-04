@@ -298,6 +298,7 @@ function isSyntheticLoopUserContent(content) {
   if (isHistoryBackgroundUserContent(content)) return true;
   if (t.startsWith('【完成验收】')) return true;
   if (!t.startsWith('[系统] ')) return false;
+  if (t.startsWith('[系统] 目标尚未收尾')) return true;
   return (
     t.startsWith('[系统] 本段工具轮次已达上限') ||
     t.startsWith('[系统] 上一轮回复像中间检查过程') ||

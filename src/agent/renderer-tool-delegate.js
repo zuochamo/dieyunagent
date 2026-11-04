@@ -20,7 +20,11 @@ function isRendererOnlyTool(name) {
  */
 function requestToolFromRenderer(webContents, name, args, timeoutMs = 120000, opts = {}) {
   if (!webContents || webContents.isDestroyed()) {
-    return Promise.reject(new Error('Renderer 不可用，无法执行 UI 工具'));
+    // 带 errorCode：「没有界面可以问」（headless / 窗口已销毁）与「工具自己失败」必须能区分，
+    // 否则手机端 / Web 端只能把一句中文原样贴给用户。
+    const e = new Error('Renderer 不可用，无法执行 UI 工具');
+    e.code = 'RENDERER_UNAVAILABLE';
+    return Promise.reject(e);
   }
   const requestId = `td-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   return new Promise((resolve, reject) => {

@@ -242,12 +242,17 @@ const REJECTED_IMAGE_PLACEHOLDER =
 
 /**
  * 上游把「图片不合规」当整轮错误打回时的文案特征。
- * 各中转措辞不一（unsupported image / invalid image / unsupported media type），
+ * 各中转措辞不一（unsupported image / invalid image / unsupported media type / image data rejected），
  * 但只要 HTTP 400 / 415 命中这些词，就属于「丢图重发即可继续」的一类；
  * 其它 400（参数错、额度、审核…）照旧上抛，不做自愈。
+ *
+ * `image data rejected` / `replace the image` 来自实测的一条中转文案：
+ * `{"code":11135,"msg":"Please start a new conversation, replace the image, and try again."}`
+ * —— 措辞里既没有 unsupported 也没有 invalid image，过去整轮直接失败（见
+ * fitVisionShotToBudget 的注释：图太大就根本不该发出去，这是第二道兜底）。
  */
 const IMAGE_REJECT_ERROR_RE =
-  /unsupported image|invalid image|unsupported media type|unsupported media|image format/i;
+  /unsupported image|invalid image|unsupported media type|unsupported media|image format|image data rejected|replace the image|image (?:is )?too large|image size|image dimensions/i;
 
 /** 是否为「图片被上游拒绝」类错误（HTTP 400/415 + 图片文案）。 */
 function isLlmImageRejectedError(err) {

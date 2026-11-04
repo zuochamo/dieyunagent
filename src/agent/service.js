@@ -32,8 +32,14 @@ class AgentService extends EventEmitter {
     this.gateway = opts.gateway || null;
     this.userDataPath = opts.userDataPath || null;
     this.log = typeof opts.log === 'function' ? opts.log : () => {};
-    this.desktopExecutor = null;
-    this.desktopCanceller = null;
+    /**
+     * 「谁跑这一轮」的唯一注入点。两种实现：
+     * - 桌面：把 task 转发给 Renderer（Renderer 拥有编辑器上下文与工具表）；
+     * - 无窗口（`src/headless`）：在 Main 侧就地跑一轮（`agent/main-turn-runner`）。
+     * 没注入 = 没有执行者，`submitTask` 明确报错，绝不静默丢弃任务。
+     */
+    this.executor = null;
+    this.canceller = null;
     this.activeRequests = new Map();
   }
 
@@ -41,12 +47,12 @@ class AgentService extends EventEmitter {
     this.gateway = gateway || null;
   }
 
-  setDesktopExecutor(fn) {
-    this.desktopExecutor = typeof fn === 'function' ? fn : null;
+  setExecutor(fn) {
+    this.executor = typeof fn === 'function' ? fn : null;
   }
 
-  setDesktopCanceller(fn) {
-    this.desktopCanceller = typeof fn === 'function' ? fn : null;
+  setCanceller(fn) {
+    this.canceller = typeof fn === 'function' ? fn : null;
   }
 
   _ensureGateway() {
@@ -228,9 +234,9 @@ class AgentService extends EventEmitter {
       e.code = 'INVALID_TEXT';
       throw e;
     }
-    if (!this.desktopExecutor) {
-      const e = new Error('桌面执行器未连接');
-      e.code = 'DESKTOP_EXECUTOR_UNAVAILABLE';
+    if (!this.executor) {
+      const e = new Error('任务执行器未连接');
+      e.code = 'EXECUTOR_UNAVAILABLE';
       throw e;
     }
 
@@ -297,7 +303,7 @@ class AgentService extends EventEmitter {
       sessionId,
       preview: eventPreview(text)
     });
-    this.desktopExecutor(task);
+    this.executor(task);
     return { ok: true, requestId, sessionId };
   }
 
@@ -401,8 +407,8 @@ class AgentService extends EventEmitter {
       ? this.activeRequests.get(requestId)
       : [...this.activeRequests.values()].find((r) => r.sessionId === sessionId);
     if (!entry) return { ok: false, error: '任务未运行' };
-    if (!this.desktopCanceller) return { ok: false, error: '桌面取消器未连接' };
-    this.desktopCanceller({
+    if (!this.canceller) return { ok: false, error: '任务执行器未连接' };
+    this.canceller({
       requestId: entry.requestId,
       sessionId: entry.sessionId,
       reason: input.reason || '手机端停止'

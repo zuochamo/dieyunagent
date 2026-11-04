@@ -228,6 +228,12 @@ function createWindowTray(deps) {
   }
 
   function createWindow() {
+    // 无边框窗口没有任何菜单 UI，但 Electron 在不调用 setApplicationMenu 时会装一份
+    // **默认应用菜单**，它的 accelerator（Ctrl+M 最小化、Ctrl+W 关窗、Ctrl+R 重载…）
+    // 是浏览器进程级的原生快捷键：渲染端只有在 keydown 里 preventDefault 才能压住，
+    // 一旦漏掉（按键重复 repeat、焦点不在页面等）就会命中。本应用的最小化/关闭都走
+    // titlebar 的 IPC，没有代码依赖这些 accelerator —— 直接摘掉整份菜单是唯一来源。
+    Menu.setApplicationMenu(null);
     const iconPath = resolveAppIconPath();
     mainWindow = new BrowserWindow({
       width: 1475,

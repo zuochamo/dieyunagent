@@ -11,14 +11,13 @@ const { encodeMcpToolName, mcpToolNamePrefix } = require('../../src/mcp/tool-nam
 const { getBuiltinMcpById } = require('../../src/mcp/registry');
 const { isWriteTool } = require('../../src/agent/guardrails-shared');
 const { isMutatingAgentTool } = require('../../src/agent/tool-classify');
-const { buildCoreAgentRules } = require('../../src/agent/agent-system-prompt');
 const { SUBAGENT_TOOL } = require('../../src/agent/tool-catalog');
 
 function tool(name) {
   return { type: 'function', function: { name, description: name, parameters: { type: 'object' } } };
 }
 
-describe('explore mode', () => {
+describe('只读工具白名单（研究子 Agent 的工具集）', () => {
   it('buildExploreTools keeps only read-only tools and drops writes/exec/mcp', () => {
     const all = [
       'fs_read_file',
@@ -55,10 +54,10 @@ describe('explore mode', () => {
     }
   });
 
-  // 不变式：Explore 白名单同时是「研究子 Agent 的工具集」。
+  // 不变式：这张白名单就是「研究子 Agent 的工具集」（subagent-runner 直接用它）。
   // 一旦 subagent 混进白名单，子 Agent 就能再派子 Agent，深度不再为 1。
-  // 需要 subagent 的是协调者（Agent 主循环 / Explore 模式 / Plan explore 阶段），
-  // 它们各自在自己的工具集上显式追加，而不是改这张表。
+  // 需要 subagent 的是协调者（Agent 主循环），它在自己的工具集上显式追加，
+  // 而不是改这张表。
   it('buildExploreTools 永不包含 subagent —— 深度恒为 1 的结构性保证', () => {
     const all = [
       'fs_read_file',
@@ -85,36 +84,6 @@ describe('explore mode', () => {
   it('buildExploreTools tolerates null/undefined tool lists', () => {
     expect(buildExploreTools(null)).toEqual([]);
     expect(buildExploreTools(undefined)).toEqual([]);
-  });
-
-  it('injects explore rules only for explore composerMode', () => {
-    const rules = buildCoreAgentRules({ composerMode: 'explore' });
-    const text = Array.isArray(rules) ? rules.join('\n') : String(rules);
-    expect(text).toContain('【探索】');
-    expect(text).not.toContain('【编排】');
-
-    const planRules = buildCoreAgentRules({ composerMode: 'plan' });
-    const planText = Array.isArray(planRules) ? planRules.join('\n') : String(planRules);
-    expect(planText).toContain('【编排】');
-    expect(planText).not.toContain('【探索】');
-
-    const agentRules = buildCoreAgentRules({ composerMode: 'agent' });
-    const agentText = Array.isArray(agentRules) ? agentRules.join('\n') : String(agentRules);
-    expect(agentText).not.toContain('【探索】');
-    expect(agentText).not.toContain('【编排】');
-  });
-
-  // subagent 准则只注入「协调者」入口：Agent 主循环与 Explore 模式。
-  // Plan 模式不走主循环（planner 编排），其 explore 阶段的指引在 Rust planner prompt，
-  // 因此这里不能注入，避免同一份指引出现两处、并给出与真实工具集不符的承诺。
-  it('subagent 准则只注入 agent / explore，不注入 plan', () => {
-    const textOf = (mode) => {
-      const rules = buildCoreAgentRules({ composerMode: mode });
-      return Array.isArray(rules) ? rules.join('\n') : String(rules);
-    };
-    expect(textOf('agent')).toContain('【只读并发调研】');
-    expect(textOf('explore')).toContain('【只读并发调研】');
-    expect(textOf('plan')).not.toContain('【只读并发调研】');
   });
 });
 

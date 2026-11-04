@@ -46,7 +46,7 @@ NAMESPACE_CRITICAL = [
     ("DieyunGateway", "connectGateway"),
     ("DieyunChat", "appendBubble"),
     ("DieyunChat", "renderChatFromMessages"),
-    ("DieyunComposer", "getComposerAgentMode"),
+    ("DieyunComposer", "resolveComposerModelForSend"),
     ("DieyunAgent", "sendMessage"),
     ("DieyunAgent", "runAgentCompletion"),
     ("DieyunAgent", "buildAgentTools"),

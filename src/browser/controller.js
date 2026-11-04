@@ -1,6 +1,6 @@
 'use strict';
 
-const { BrowserView, app, nativeImage } = require('electron');
+const { requireElectron, electronOrNull } = require('./electron-host');
 const fs = require('fs');
 const path = require('path');
 const {
@@ -364,6 +364,7 @@ function createBrowserViewController(deps) {
 
   function safeDownloadDir() {
     try {
+      const app = electronOrNull()?.app;
       return app && typeof app.getPath === 'function' ? app.getPath('downloads') : process.cwd();
     } catch {
       return process.cwd();
@@ -883,7 +884,7 @@ function createBrowserViewController(deps) {
         }
         view = null;
       }
-      view = new BrowserView({
+      view = new (requireElectron().BrowserView)({
         webPreferences: {
           partition: partitionForView(),
           contextIsolation: true,
@@ -2789,7 +2790,7 @@ function createBrowserViewController(deps) {
           captureBeyondViewport: true,
           clip: { x: 0, y: 0, width, height, scale: 1 }
         });
-        return nativeImage.createFromBuffer(Buffer.from(data, 'base64'));
+        return requireElectron().nativeImage.createFromBuffer(Buffer.from(data, 'base64'));
       } catch (e) {
         log('browser fullPage CDP fallback to viewport: ' + (e && e.message ? e.message : String(e)));
         return wc.capturePage();

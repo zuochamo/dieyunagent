@@ -1,6 +1,6 @@
 'use strict';
 
-const { session } = require('electron');
+const { requireElectron } = require('./electron-host');
 
 const BROWSER_SESSION_PARTITION = 'persist:dieyun-browser';
 
@@ -15,7 +15,7 @@ function browserPartitionForSession(sessionId) {
 }
 
 function electronBrowserSession(sessionId) {
-  return session.fromPartition(browserPartitionForSession(sessionId));
+  return requireElectron().session.fromPartition(browserPartitionForSession(sessionId));
 }
 
 function mapSameSiteForPlaywright(sameSite) {

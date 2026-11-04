@@ -48,6 +48,8 @@ function bootChannelsRuntime(deps) {
     getCompactionAgent: deps.getCompactionAgent,
     createToolBridge: deps.createToolBridge,
     listMcpServers: deps.listMcpServers,
+    // 共享记忆（跨机）：频道跑一轮也用同一个实例（扩展开着才非 null）
+    getSharedMemory: deps.getSharedMemory,
     notifySessionsChanged: deps.notifySessionsChanged,
     log
   });

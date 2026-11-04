@@ -236,7 +236,7 @@ describe('task.submit 的工作空间参数（Main / agent-service）', () => {
       }
     };
     const svc = new AgentService({ gateway });
-    svc.setDesktopExecutor(() => {});
+    svc.setExecutor(() => {});
     return { svc, calls };
   }
 

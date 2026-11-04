@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const { createSshActions } = require('../../ssh/actions');
+const { remoteLogDisplayPath } = require('../../ssh/remote-gateway-manager');
 const { bindSessionWorkspace } = require('../../agent/session-workspace-bind');
 
 /**
@@ -165,21 +166,22 @@ function registerWorkspaceRemoteIpc(ctx) {
     const { shellQuoteSingle } = require('../../ssh/remote-path');
     try {
       sshSessionManager.assertConnected();
-      const homeR = await sshSessionManager.exec('echo $HOME', null, 5000, { loginShell: false });
-      const home = String(homeR.stdout || '').trim();
       // 日志按项目分开（remote-gateway-manager: remoteLogDir/remoteLogPathFor）：
-      // 以当前槽位回报的 remoteLogPath 为准，别再用共享的 current/agent.log
+      // 以当前槽位回报的 remoteLogPath 为准；没有槽位时也用同一个展示路径函数，
+      // 别再手写一份 `current/agent.log`（那份早就不存在，问不到的地方各写一套必然漂移）
       const rgStatus = getActiveRemoteGatewayStatus();
-      const rel = rgStatus && rgStatus.remoteLogPath ? String(rgStatus.remoteLogPath) : '';
-      const logPath = rel.startsWith('~/')
-        ? `${home}/${rel.slice(2)}`
-        : rel || `${home}/.dieyun/remote-agent/current/agent.log`;
+      const rel = (rgStatus && rgStatus.remoteLogPath) || remoteLogDisplayPath();
+      // `~` 在远端展开：以前是先 `echo $HOME` 再 tail，两次往返。连接内的 exec 是串行的，
+      // 面板每开一次就等于自己排了两次队（还有一半是白问的 HOME），所以合成一趟。
+      const logRef = rel.startsWith('~/')
+        ? `"$HOME"/${shellQuoteSingle(rel.slice(2))}`
+        : shellQuoteSingle(rel);
       const n = Math.min(200, Math.max(10, Number(lines) || 80));
       const r = await sshSessionManager.execScript(
-        `test -f ${shellQuoteSingle(logPath)} && tail -n ${n} ${shellQuoteSingle(logPath)} || echo "(无 agent.log)"`,
+        `LOG=${logRef}\nif test -f "$LOG"; then tail -n ${n} "$LOG"; else echo "(无 agent.log)"; fi`,
         10000
       );
-      return { ok: true, log: String(r.stdout || ''), path: logPath };
+      return { ok: true, log: String(r.stdout || ''), path: rel };
     } catch (e) {
       return { ok: false, error: e.message || String(e) };
     }

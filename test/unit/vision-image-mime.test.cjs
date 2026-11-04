@@ -210,6 +210,31 @@ describe('上游「unsupported image」400 的识别与修复', () => {
     expect(isLlmImageRejectedError(null)).toBe(false);
   });
 
+  /**
+   * 实测中转文案（上游 code 11135）：措辞里没有 unsupported/invalid image，
+   * 过去被当成「普通 400」上抛 —— 整轮对话因为一张太大的整页截图直接失败。
+   */
+  it('识别「image data rejected / replace the image」的 400', () => {
+    const err = new Error(
+      'HTTP 400 {"error":{"code":400,"gateway_hint":"image data rejected by upstream; ' +
+        'use a real/valid image, may need a new conversation","message":"upstream unavailable: ' +
+        'upstream 400: {\\"code\\":11135,\\"msg\\":\\"Please start a new conversation, replace the image, ' +
+        'and try again.\\"}","extError":{"code":"invalid_request_error"}}}'
+    );
+    err.statusCode = 400;
+    expect(isLlmImageRejectedError(err)).toBe(true);
+    // 定位不到下标 → 调用方按「整轮丢图」重发（rust-loop-runner 的 dropAll 分支）
+    expect(parseRejectedImageMessageIndices(err.message)).toEqual([]);
+  });
+
+  it('与图片无关的 400 不做自愈', () => {
+    expect(
+      isLlmImageRejectedError(new Error('HTTP 400 invalid_request_error: max_tokens too large'))
+    ).toBe(false);
+    expect(isLlmImageRejectedError(new Error('HTTP 400 content blocked by moderation'))).toBe(false);
+    expect(isLlmImageRejectedError(new Error('HTTP 402 insufficient quota'))).toBe(false);
+  });
+
   it('解析被拒下标：方括号与点号写法都认，解析不到返回空数组', () => {
     expect(parseRejectedImageMessageIndices(providerError(27).message)).toEqual([27]);
     expect(parseRejectedImageMessageIndices('.messages[3].content[1]: invalid image')).toEqual([3]);

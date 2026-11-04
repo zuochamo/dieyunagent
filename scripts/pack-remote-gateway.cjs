@@ -3,15 +3,13 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const https = require('https');
 const { execSync } = require('child_process');
-const { createWriteStream } = require('fs');
 
 const ROOT = path.join(__dirname, '..');
 const OUT = path.join(ROOT, 'build', 'remote-gateway-pack');
 const CACHE_DIR = path.join(ROOT, 'build', '.cache');
-const NODE_VERSION = process.env.DIEYUN_REMOTE_NODE_VERSION || 'v20.18.2';
 const NODE_PLATFORM = 'linux-x64';
+const { ensureBundledNodeLinux, resolveNodeVersion } = require('./lib/node-linux-runtime.cjs');
 const {
   REMOTE_GATEWAY_SOURCE_PATHS,
   REMOTE_PACK_CORE_REL,
@@ -23,124 +21,20 @@ const {
   compareNeed,
   glibcRequirementOf
 } = require('./pack-dieyun-core-linux-lib.cjs');
-const NODE_MIRRORS = [
-  process.env.DIEYUN_NODE_MIRROR,
-  'https://npmmirror.com/mirrors/node',
-  'https://nodejs.org/dist'
-].filter(Boolean);
 
 const COPY_PATHS = REMOTE_GATEWAY_SOURCE_PATHS;
+const NODE_VERSION = resolveNodeVersion();
 
-function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    https
-      .get(url, (res) => {
-        if (res.statusCode === 302 || res.statusCode === 301) {
-          const loc = res.headers.location;
-          if (!loc) {
-            reject(new Error('redirect without location'));
-            return;
-          }
-          res.resume();
-          downloadFile(loc, dest).then(resolve).catch(reject);
-          return;
-        }
-        if (res.statusCode !== 200) {
-          reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-          return;
-        }
-        res.pipe(file);
-        file.on('finish', () => file.close(() => resolve()));
-      })
-      .on('error', (err) => {
-        try {
-          file.close();
-        } catch {
-          // ignore
-        }
-        reject(err);
-      });
-  });
-}
-
-async function downloadFileWithRetry(url, dest, attempts = 3) {
-  let lastErr;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      if (fs.existsSync(dest)) fs.unlinkSync(dest);
-      await downloadFile(url, dest);
-      const st = fs.statSync(dest);
-      if (!st.size || st.size < 10 * 1024 * 1024) {
-        throw new Error(`download too small (${st.size} bytes)`);
-      }
-      return;
-    } catch (e) {
-      lastErr = e;
-      console.warn(`Download attempt ${i + 1}/${attempts} failed:`, e.message || e);
-      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
-    }
-  }
-  throw lastErr;
-}
-
-async function ensureCachedTarball(tarball) {
-  await fsp.mkdir(CACHE_DIR, { recursive: true });
-  const tarPath = path.join(CACHE_DIR, tarball);
-  if (fs.existsSync(tarPath)) {
-    const st = fs.statSync(tarPath);
-    if (st.size >= 10 * 1024 * 1024) {
-      console.log('Using cached tarball:', tarPath);
-      return tarPath;
-    }
-  }
-  let lastErr;
-  for (const base of NODE_MIRRORS) {
-    const url = `${base.replace(/\/$/, '')}/${NODE_VERSION}/${tarball}`;
-    console.log('Downloading', url);
-    try {
-      await downloadFileWithRetry(url, tarPath, 2);
-      return tarPath;
-    } catch (e) {
-      lastErr = e;
-      console.warn('Mirror failed:', base, e.message || e);
-    }
-  }
-  throw lastErr || new Error('All Node mirrors failed');
-}
-
+/** 内置 node（与 pack-headless 共用同一份下载/解压实现，见 scripts/lib/node-linux-runtime.cjs） */
 async function ensureBundledNode(outDir) {
-  const binDir = path.join(outDir, 'bin');
-  const nodeDest = path.join(binDir, 'node');
-  if (fs.existsSync(nodeDest)) {
-    const st = fs.statSync(nodeDest);
-    if (st.size >= 50 * 1024 * 1024) {
-      console.log('Bundled node exists:', nodeDest);
-      return NODE_VERSION;
-    }
-  }
-  await fsp.mkdir(binDir, { recursive: true });
-  const tarball = `node-${NODE_VERSION}-${NODE_PLATFORM}.tar.gz`;
-  const tarPath = await ensureCachedTarball(tarball);
-  const tmpDir = path.join(CACHE_DIR, '.extract-node');
-  const extractDir = path.join(tmpDir, 'extract');
-  await fsp.rm(tmpDir, { recursive: true, force: true });
-  await fsp.mkdir(extractDir, { recursive: true });
-  // 用相对路径解压：GNU tar 会把 `E:\...` 里的盘符冒号解析成远程主机
-  execSync(
-    `tar -xzf ${JSON.stringify(path.basename(tarPath))} -C ${JSON.stringify(
-      path.relative(CACHE_DIR, extractDir).replace(/\\/g, '/')
-    )} ${`node-${NODE_VERSION}-${NODE_PLATFORM}/bin/node`}`,
-    { stdio: 'inherit', cwd: CACHE_DIR }
-  );
-  const extractedNode = path.join(extractDir, `node-${NODE_VERSION}-${NODE_PLATFORM}`, 'bin', 'node');
-  if (!fs.existsSync(extractedNode)) {
-    throw new Error('Node binary not found after extract: ' + extractedNode);
-  }
-  await fsp.copyFile(extractedNode, nodeDest);
-  await fsp.rm(tmpDir, { recursive: true, force: true });
-  console.log('Bundled node:', nodeDest);
-  return NODE_VERSION;
+  const { version } = await ensureBundledNodeLinux({
+    outDir,
+    version: NODE_VERSION,
+    platform: NODE_PLATFORM,
+    cacheDir: CACHE_DIR,
+    log: (m) => console.log(m)
+  });
+  return version;
 }
 
 function pkgNeedsInstall(outDir, pkgJson) {

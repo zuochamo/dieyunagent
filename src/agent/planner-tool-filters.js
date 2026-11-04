@@ -67,7 +67,7 @@ const SHELL_TOOL_NAMES = new Set([
  *
  * 前缀由 mcp/tool-name.js 的 mcpToolNamePrefix 生成 —— 编码格式不在本文件复写，
  * 免得上游改编码时这里静默失效。名单里的 id 必须真实存在于 mcp/registry.js：
- * 由 test/unit/explore-mode.test.cjs 锁定（改 id 漏改这里会测试失败，而不是静默失去能力）。
+ * 由 test/unit/readonly-tool-whitelist.test.cjs 锁定（改 id 漏改这里会测试失败，而不是静默失去能力）。
  *
  * 已知边界：工具名超 64 字符时编码器退化为 `mcp_<serverId 前 24 位>_<hash>`，前缀不再成立，
  * 这类工具**不放行**（失败关闭：宁可少给一个只读工具，也不按弱前缀误放行别的服务的工具）。

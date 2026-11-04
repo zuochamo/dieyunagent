@@ -23,6 +23,12 @@ contextBridge.exposeInMainWorld('diecloud', {
   channelsSetEnabled: (id, enabled) => ipcRenderer.invoke('channels:set-enabled', { id, enabled: !!enabled }),
   channelsTest: (payload) => ipcRenderer.invoke('channels:test', payload || {}),
   channelsTestPush: (payload) => ipcRenderer.invoke('channels:test-push', payload || {}),
+  // 共享记忆（跨机 PostgreSQL，扩展页签）：服务器/口令在 Main 的密文文件里，Renderer 只看状态
+  sharedMemoryStatus: () => ipcRenderer.invoke('shared-memory:status'),
+  sharedMemorySave: (patch) => ipcRenderer.invoke('shared-memory:save', patch || {}),
+  sharedMemoryTest: (patch) => ipcRenderer.invoke('shared-memory:test', patch || {}),
+  sharedMemoryProbe: () => ipcRenderer.invoke('shared-memory:probe'),
+  sharedMemoryConsolidate: () => ipcRenderer.invoke('shared-memory:consolidate'),
   peerSend: (payload) => ipcRenderer.invoke('peer:send', payload || {}),
   peerSendSession: (payload) => ipcRenderer.invoke('peer:send-session', payload || {}),
   peerOpenSession: (peer) => ipcRenderer.invoke('peer:open-session', { peer }),
@@ -285,6 +291,9 @@ contextBridge.exposeInMainWorld('diecloud', {
   getModelSettingsFromMain: () => ipcRenderer.invoke('model:get-settings'),
   syncAgentLimits: (limits) => ipcRenderer.invoke('agent:sync-limits', limits),
   getAgentLimitsFromMain: () => ipcRenderer.invoke('agent:get-limits'),
+  // 会话目标面板：视图（进度 / 事实 / 预算）在 Main 侧成形（src/goals/session-goal.js#toPanelView），
+  // Renderer 只显示；action:'clear' 删除本会话目标。
+  sessionGoalPanel: (payload) => ipcRenderer.invoke('agent:session-goal-panel', payload),
   syncRuntimeByTier: (byTier) => ipcRenderer.invoke('model:sync-runtime-by-tier', byTier),
   getRuntimeByTierFromMain: () => ipcRenderer.invoke('model:get-runtime-by-tier'),
   fetchBuiltinModels: (payload) => ipcRenderer.invoke('models:fetch-list', payload),

@@ -82,4 +82,30 @@ function savePermissions(filePath, perms) {
   return next;
 }
 
-module.exports = { DEFAULTS, loadPermissions, savePermissions, normalizePermissions };
+/**
+ * 剔掉派生值 `unrestrictedPaths`：它只是 `sandboxMode` 的视图，留着会在归一里
+ * 把档位又顶回完全放开（表现为「切了档位没生效」）。
+ */
+function stripDerivedPermissions(perms) {
+  const { unrestrictedPaths: _derived, ...base } = normalizePermissions(perms);
+  return base;
+}
+
+/**
+ * 「把某个档位作用到一份权限上」的唯一实现（**不落盘**）。
+ *
+ * 落盘的 `savePermissions` 与「只本次进程生效」的覆盖（headless `--sandbox`）共用同一条
+ * 归一规则：`unrestrictedPaths` 必须先剔掉，否则旧配置里的 `true` 会把新档位顶回去。
+ */
+function withSandboxMode(perms, mode) {
+  return normalizePermissions({ ...stripDerivedPermissions(perms), sandboxMode: mode });
+}
+
+module.exports = {
+  DEFAULTS,
+  loadPermissions,
+  savePermissions,
+  normalizePermissions,
+  stripDerivedPermissions,
+  withSandboxMode
+};

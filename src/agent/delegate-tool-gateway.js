@@ -51,6 +51,12 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
     const base = wt || ws;
     if (!base || /^ssh:\/\//i.test(String(base))) return fp;
     const sep = base.includes('\\') ? '\\' : '/';
+    // POSIX 宿主上 `/var/lib/x` 就是**绝对路径**，不能再拼一次工作区。
+    // 之前无条件 `base + '/' + fp去头斜杠`，在 Linux/macOS 上把绝对路径拼成了
+    // `/ws/var/lib/x` 这种幻觉路径（真机 headless 首跑就炸在 fs_list_dir：
+    // `/var/lib/dieyun-agent/.dieyun/workspace/var/lib/dieyun-agent/.dieyun/workspace`）。
+    // Windows 侧保持原语义：`/src/main.js` 是模型常写的「工作区相对」，去掉头斜杠再拼。
+    if (sep === '/' && fp.startsWith('/')) return fp;
     return `${base.replace(/[\\/]+$/, '')}${sep}${fp.replace(/^\.?[\\/]/, '')}`;
   }
 

@@ -128,6 +128,19 @@ function formatProjectMemoryBlock(text, opts = {}) {
 }
 
 /**
+ * 「这条记忆能不能离开本机」——**唯一判定**。
+ *
+ * 两个落地物都要过这一关，而它们的后果一样：`.dieyun/memory.md` 会进版本库，
+ * 共享记忆库是局域网里所有机器共读。所以 secret / private 既不能写文件、也不能上传，
+ * 判定只写一份（`filterEntriesForFile` 与 `memory-shared` 的上传路径共用）。
+ * @param {string} kind
+ */
+function isShareableKind(kind) {
+  const k = String(kind || 'normal').toLowerCase();
+  return k !== 'secret' && k !== 'private';
+}
+
+/**
  * 归纳器产出的条目 → 文件条目。
  * secret / private 直接丢弃：本文件会进版本库，写进去就是泄露。
  */
@@ -138,7 +151,7 @@ function filterEntriesForFile(items) {
     const kind = String((item && item.kind) || 'normal').toLowerCase();
     const content = normalizeText(item && item.content).slice(0, ENTRY_MAX_CHARS);
     if (!content) continue;
-    if (kind === 'secret' || kind === 'private') {
+    if (!isShareableKind(kind)) {
       dropped += 1;
       continue;
     }
@@ -154,5 +167,6 @@ module.exports = {
   renderProjectMemoryFile,
   formatProjectMemoryBlock,
   filterEntriesForFile,
+  isShareableKind,
   entryKey
 };

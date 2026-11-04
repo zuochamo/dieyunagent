@@ -7,7 +7,13 @@ const { WebSocketServer } = require('ws');
 const { createRpcHandlers } = require('./rpc');
 const { createTurnUndoService } = require('../undo/turn-undo-service');
 const { createLspDiagnosticsService } = require('../lsp/diagnostics-service');
-const { loadPermissions, savePermissions, normalizePermissions } = require('./permissions-store');
+const {
+  loadPermissions,
+  savePermissions,
+  normalizePermissions,
+  stripDerivedPermissions,
+  withSandboxMode
+} = require('./permissions-store');
 const {
   normalizeSandboxMode,
   sandboxErrorFor,
@@ -84,6 +90,7 @@ function uniqueResolvedRoots(roots) {
  * @property {(msg: string) => void} [log]
  * @property {(msg: string) => void} [logDebug] 低噪心跳日志（如 LSP 空批次）；不给就不打，主日志只留「有产出/失败」的行
  * @property {import('./permissions-store').DEFAULTS & object} [permissions]
+ * @property {string} [sandboxModeOverride] 只本次进程生效的沙箱档位（不落盘；headless `--sandbox` 用）
  * @property {ReturnType<import('../browser/service').createBrowserService> | null} [browser]
  * @property {ReturnType<import('../ssh/session-manager').createSshSessionManager> | null} [ssh]
  * @property {(sessionId?: string) => { url: string, token: string } | null} [getRemoteAgentInfo]
@@ -112,7 +119,12 @@ class LocalGateway {
     this.portForwardManager = null;
     this.permissionsPath = path.join(this.userDataPath, 'host-permissions.json');
     this.workspacePathFile = path.join(this.userDataPath, 'workspace.json');
-    this.permissions = normalizePermissions(opts.permissions || loadPermissions(this.permissionsPath));
+    const storedPermissions = opts.permissions || loadPermissions(this.permissionsPath);
+    // `sandboxModeOverride`：只本次进程生效的档位覆盖（headless `--sandbox`），**不落盘**。
+    // 走同一个归一入口，行为与设置页改档一致，只是不写 host-permissions.json。
+    this.permissions = opts.sandboxModeOverride
+      ? withSandboxMode(storedPermissions, opts.sandboxModeOverride)
+      : normalizePermissions(storedPermissions);
     /**
      * ask-once 审批：越界操作问用户一次，本会话内同类直接放行。
      * `opts.requestSandboxApproval` 由 Main 注入（走 Renderer 弹窗）；没有注入时 fail-closed。
@@ -842,9 +854,14 @@ class LocalGateway {
     // 归一在 store 里做（`unrestrictedPaths` ⇄ `sandboxMode`）。这里必须先剔掉**已存储的派生值**：
     // 否则「完全放开」时落盘的 `unrestrictedPaths: true` 会在下次只改档位时被当成用户新指令，
     // 把档位又顶回完全放开（表现为「切了档位没生效」）。
-    const { unrestrictedPaths: _derived, ...base } = this.permissions;
+    const incoming = next && typeof next === 'object' ? next : {};
+    const merged = { ...stripDerivedPermissions(this.permissions), ...incoming };
     const before = this.getSandboxMode();
-    this.permissions = savePermissions(this.permissionsPath, { ...base, ...next });
+    this.permissions = savePermissions(
+      this.permissionsPath,
+      // `unrestrictedPaths: true` 是明确的用户动作，优先于档位；否则按档位归一。
+      incoming.unrestrictedPaths === true ? merged : withSandboxMode(merged, incoming.sandboxMode)
+    );
     // 档位收紧（含切到 read-only）时作废已有批准：否则"我刚切到只读"之后旧批准照样放行，
     // 用户看到的是一个不生效的安全开关。
     const after = this.getSandboxMode();
