@@ -327,6 +327,24 @@ impl ServiceSnapshot {
                     .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
                 self.memory.clear_session(session_id)
             }
+            // ---- memory：会话级目标对象（语义在 Node 的 plans/goal-run.js，这里只存取） ----
+            "memory.session_goal_get" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let goal = self.memory.get_session_goal(session_id)?;
+                Ok(json!({ "goalJson": goal }))
+            }
+            "memory.session_goal_put" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                // null / 缺省 = 删除；字符串 = 覆盖。调用方（Node）负责序列化。
+                let goal_json = params.get("goalJson").and_then(|v| v.as_str());
+                self.memory.put_session_goal(session_id, goal_json)
+            }
             // ---- memory：长期记忆（向量 / embedding 部分不在这里） ----
             "memory.long_recent" => {
                 let limit = params

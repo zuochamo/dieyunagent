@@ -70,6 +70,91 @@ function isUnverified(plan) {
   return goalChecks(plan).length === 0;
 }
 
+/**
+ * 目标形状的**唯一归一化点**（计划目标与会话目标共用）。
+ *
+ * 为什么在这里而不是各存储里：目标是同一类对象，两处各写一份 normalize，
+ * 迟早出现「会话目标有 objective、计划目标没有」这种静默分叉。
+ *
+ * @param {object} raw
+ * @returns {{ objective: string, checks: Array<{id: string, command: string}>, todos: Array<{text: string, done: boolean}>, cwd: string }}
+ */
+function normalizeGoal(raw) {
+  const g = raw && typeof raw === 'object' ? raw : {};
+  const checks = Array.isArray(g.checks)
+    ? g.checks
+        .map((c) => {
+          const item = typeof c === 'string' ? { command: c } : c || {};
+          const command = String(item.command || '').trim().slice(0, GOAL_CHECK_MAX_CHARS);
+          if (!command) return null;
+          return { id: String(item.id || '').trim() || command.slice(0, 40), command };
+        })
+        .filter(Boolean)
+    : [];
+  // 推进清单：只给人和 UI 看的语义项，不参与任何自动判定（完成与否仍由检查事实说话）
+  const todos = Array.isArray(g.todos)
+    ? g.todos
+        .map((t) => {
+          const item = typeof t === 'string' ? { text: t } : t || {};
+          const text = String(item.text || '').trim().slice(0, 200);
+          if (!text) return null;
+          return { text, done: item.done === true };
+        })
+        .filter(Boolean)
+        .slice(0, 50)
+    : [];
+  return {
+    objective: String(g.objective || '').trim().slice(0, 400),
+    checks,
+    todos,
+    cwd: String(g.cwd || '').trim()
+  };
+}
+
+/**
+ * 一条检查事实（`goal.evidence` 的元素）：**只放机器可判定的字段**，
+ * 措辞与判断留给模型和人 —— 代码不允许在这里写「完成/未完成」这类结论。
+ */
+function normalizeEvidence(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const at = normalizeIso(raw.at);
+  const command = String(raw.command || '').trim().slice(0, GOAL_CHECK_MAX_CHARS);
+  if (!command && !at) return null;
+  const exitCodeNum = Number(raw.exitCode);
+  return {
+    at: at || new Date().toISOString(),
+    round: Math.max(0, Math.floor(Number(raw.round) || 0)),
+    checkId: String(raw.checkId || '').trim(),
+    command,
+    ok: raw.ok === true,
+    exitCode: Number.isFinite(exitCodeNum) ? exitCodeNum : null,
+    note: String(raw.note || '').trim().slice(0, 40),
+    tail: String(raw.tail || '').slice(0, 8000)
+  };
+}
+
+/** 一次「完成/阻塞」主张（`goal.claims` 的元素）：模型说的，代码原样留痕供复盘 */
+function normalizeClaim(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const at = normalizeIso(raw.at);
+  const outcome = raw.outcome === 'complete' || raw.outcome === 'blocked' ? raw.outcome : '';
+  if (!at || !outcome) return null;
+  return {
+    at,
+    outcome,
+    round: Math.max(0, Math.floor(Number(raw.round) || 0)),
+    accepted: raw.accepted === true,
+    note: String(raw.note || '').trim().slice(0, 1000)
+  };
+}
+
+function normalizeIso(v) {
+  if (!v) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  return Number.isFinite(Date.parse(s)) ? s : null;
+}
+
 /** 证据尾巴：stdout 优先，其次 stderr，按字符上限裁剪（上限 = agent-limits.goalEvidenceTailChars） */
 function tailEvidence(stdout, stderr, maxChars) {
   const out = String(stdout || '').trim();
@@ -158,24 +243,31 @@ async function runGoalCheck(opts = {}) {
 }
 
 /**
- * 取某条声明检查的**最新**事实。
+ * 某条声明检查的**全部**事实（按落盘顺序）。匹配判据只有这一份：
+ * `checkId` 相等 → 同一条命令；都不匹配 = 这条检查还没有事实。
  *
- * 匹配顺序：checkId 相等 → 同一条命令。都不匹配 = 这条检查还没有事实。
+ * @param {object[]} evidence
+ * @param {{ id?: string, command: string }} check
+ */
+function factsForCheck(evidence, check) {
+  const list = Array.isArray(evidence) ? evidence : [];
+  const id = String((check && check.id) || '').trim();
+  const command = String((check && check.command) || '').trim();
+  return list.filter(
+    (f) => f && ((id && f.checkId === id) || (command && f.command === command))
+  );
+}
+
+/**
+ * 取某条声明检查的**最新**事实（= 它的事实里最后落盘那条）。
+ * 与 `factsForCheck` 同一判据，所以「面板显示跑过几次」与「收尾核对看哪条」永远一致。
  *
  * @param {object[]} evidence
  * @param {{ id?: string, command: string }} check
  */
 function latestFactFor(evidence, check) {
-  const list = Array.isArray(evidence) ? evidence : [];
-  const id = String((check && check.id) || '').trim();
-  const command = String((check && check.command) || '').trim();
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    const f = list[i];
-    if (!f) continue;
-    if (id && f.checkId === id) return f;
-    if (command && f.command === command) return f;
-  }
-  return null;
+  const facts = factsForCheck(evidence, check);
+  return facts.length ? facts[facts.length - 1] : null;
 }
 
 /**
@@ -334,16 +426,89 @@ function renderEvidenceBlock(input = {}) {
   return lines.join('\n');
 }
 
+/**
+ * 预算：只存用户选择（0/空 = 用 agent-limits 默认值），clamp 在 `resolveGoalBudget`。
+ * 与目标形状一起放在这里，避免「计划有一份预算归一化、会话目标又有一份」。
+ */
+function normalizeBudget(raw) {
+  const b = raw && typeof raw === 'object' ? raw : {};
+  const num = (v) => {
+    const n = Math.floor(Number(v));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  return { maxAttempts: num(b.maxAttempts), maxWallMs: num(b.maxWallMs) };
+}
+
+/**
+ * 每轮注入的目标块（**唯一渲染点**，会话目标用）。
+ *
+ * 措辞纪律与 `renderEvidenceBlock` 一致：只陈述事实与当前状态，
+ * 不写「已完成 / 未完成」的判断，也不替模型决定要不要继续。
+ *
+ * @param {{ goal?: object|null, limits?: object, maxChars?: number }} input
+ * @returns {string} 无目标时返回空串（普通会话的 prompt 一个字节都不变）
+ */
+function renderSessionGoalBlock(input = {}) {
+  const goal = input.goal;
+  if (!goal || !goal.goal || !goal.goal.objective) return '';
+  const limits = input.limits || AGENT_LIMITS_DEFAULTS;
+  const g = goal.goal;
+  const status = String(goal.status || 'active');
+  const outcome = goal.outcome === 'complete' || goal.outcome === 'blocked' ? goal.outcome : null;
+
+  const lines = [`【当前目标】${g.objective}`];
+
+  // 状态先行：模型要能一眼看出「现在还需不需要推进」
+  if (outcome === 'complete') {
+    lines.push('状态：已收尾（complete，代码已核对通过检查事实）');
+  } else if (outcome === 'blocked' || status === 'blocked') {
+    lines.push('状态：已阻塞（blocked）—— 有具体卡点等用户处理，不要重复尝试');
+  } else if (status === 'stalled') {
+    lines.push('状态：预算已用尽（未收尾）—— 停在这里，向用户说明跑了多少轮、最后一条检查结果，不要假装完成');
+  } else if (status === 'paused') {
+    lines.push('状态：已暂停（用户停止）—— 用户恢复前不要自动推进');
+  }
+
+  if (Array.isArray(g.todos) && g.todos.length) {
+    const done = g.todos.filter((t) => t.done).length;
+    const pending = g.todos.filter((t) => !t.done).map((t) => t.text);
+    lines.push(`进度：${done}/${g.todos.length} 项已完成`);
+    if (pending.length) lines.push(`未完成：${pending.slice(0, 12).join('、')}`);
+  }
+
+  lines.push(renderEvidenceBlock({ plan: goal, limits, upcoming: false }));
+
+  if (!outcome && status === 'active') {
+    lines.push(
+      '未收尾就继续推进：自己决定下一步做什么，不要停下来问用户「要不要继续」；',
+      '要不要收尾由 goal_check 的事实说话（没有通过的事实，goal_finish(complete) 会被打回）。'
+    );
+  } else if (outcome === 'complete') {
+    lines.push('目标已收尾：没有新需求就不要重复推进；用户提新需求时按新需求做。');
+  }
+
+  const text = lines.filter(Boolean).join('\n');
+  const max = Number.isFinite(input.maxChars) && input.maxChars > 0 ? input.maxChars : 4000;
+  return text.length > max ? `${text.slice(0, max)}\n……（目标块已截断）` : text;
+}
+
 module.exports = {
   GOAL_CHECK_MAX_CHARS,
   resolveGoalBudget,
+  normalizeGoal,
+  normalizeEvidence,
+  normalizeClaim,
+  normalizeBudget,
+  normalizeIso,
   goalChecks,
   isUnverified,
   tailEvidence,
   runGoalCheck,
   latestFactFor,
+  factsForCheck,
   judgeGoalFinish,
   decideContinuation,
   factLine,
-  renderEvidenceBlock
+  renderEvidenceBlock,
+  renderSessionGoalBlock
 };

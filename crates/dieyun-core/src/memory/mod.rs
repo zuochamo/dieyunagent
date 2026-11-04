@@ -1,4 +1,5 @@
 mod agent;
+mod goal;
 mod misc;
 mod projects;
 mod schema;

@@ -920,6 +920,33 @@ function validateToolArgs(name, args, opts) {
       }
       return { ok: true };
     }
+    case 'goal_start': {
+      // 会话级目标：objective 是唯一硬要求（检查清单可空 = 未验证模式）
+      const objective = String(a.objective || '').trim();
+      if (!objective) {
+        return {
+          ok: false,
+          error: 'goal_start 需要 objective：一句话说清「什么状态算达成」（空目标既推进不了也验收不了）',
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      return { ok: true };
+    }
+    case 'goal_update': {
+      // 整体替换语义：三个字段至少给一个，否则这次调用什么也不会发生（多半是模型想错了）
+      const hasAny =
+        String(a.objective || '').trim() || Array.isArray(a.todos) || Array.isArray(a.checks);
+      if (!hasAny) {
+        return {
+          ok: false,
+          error: 'goal_update 需要 objective / checks / todos 至少一项（给什么就整体替换什么）',
+          errorCode: 'MISSING_ARG',
+          retryable: false
+        };
+      }
+      return { ok: true };
+    }
     case 'goal_check': {
       // 目标型计划的一轮里跑一条检查命令。命令可以来自声明清单（check_id）或模型当场给。
       const command = String(a.command || '').trim();

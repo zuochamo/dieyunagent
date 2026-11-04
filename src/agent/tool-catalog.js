@@ -1547,11 +1547,112 @@ const PLAN_TOOLS = [
 ];
 
 /**
- * 目标型计划（plans trigger=goal）专用工具：**只在计划轮次里**给模型（见 plan-agent-runner）。
+ * 会话级目标：**模型可以自己开目标**（用户不必先学会一句咒语），也可以在推进中补检查与清单。
+ *
+ * 为什么必须是工具而不是代码判断：要不要把一件事当成「做到 X 成立为止」，是语义判断 ——
+ * 猜关键词（“帮我实现”“直到通过”）必然误判；写成「每轮无条件跑一条命令」又会烧掉整晚预算。
+ * 入口交给模型，代码只负责三件客观的事：跑命令取事实、核对主张与事实是否一致、按预算停。
+ *
+ * 单会话单目标：已有进行中的目标时 `goal_start` 会返回它（让模型接着推进，而不是每轮重开）。
+ */
+const GOAL_START_TOOL = {
+  type: 'function',
+  function: {
+    name: 'goal_start',
+    description:
+      '给**当前会话**建一个目标对象：说明「什么状态算达成」。此后每一轮都会自动带着目标与检查事实继续推进，' +
+      '直到 goal_finish 收尾或预算用尽 —— 中途不需要用户点「继续」。\n' +
+      '什么时候该建：任务需要多轮推进（改代码 / 查证 / 修一条失败链），且有一条能机器判定的检查（如 npm test）。' +
+      '一次就能答完的问题不要建。\n' +
+      '目标 = 验收面：objective（一句话说清达成状态）+ checks（可执行命令，退出码 0 = 通过）+ todos（给人看进度的清单，不参与自动判定）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        objective: {
+          type: 'string',
+          description: '一句话说清「什么状态算达成」，人和你都能据此判断下一步'
+        },
+        checks: {
+          type: 'array',
+          description: '可机器验收的命令（可空 = 未验证模式：能跑，但完成申请不会被代码核对）',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: '短 id（缺省取命令前 40 字符）' },
+              command: { type: 'string', description: '可执行命令，退出码 0 = 通过' }
+            },
+            required: ['command']
+          }
+        },
+        todos: {
+          type: 'array',
+          description: '推进清单（显示在侧栏「目标」页，也注入到每轮背景；不参与自动判定，随时可用 goal_update 更新）',
+          items: {
+            type: 'object',
+            properties: {
+              text: { type: 'string', description: '一项具体要做的事' },
+              done: { type: 'boolean', description: '做完了就置 true' }
+            },
+            required: ['text']
+          }
+        }
+      },
+      required: ['objective']
+    }
+  }
+};
+
+/** 推进清单 / 目标修订：整体替换（一次调用即最新真相，不做逐项增删工具） */
+const GOAL_UPDATE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'goal_update',
+    description:
+      '更新当前会话目标的 objective / checks / todos（**给什么就整体替换什么**，没给的字段保留）。' +
+      '用途：每完成一项就把对应 todo 置 done（用户在侧栏看得到进度）、发现新的验收命令就补进 checks。' +
+      '不要用它改 outcome —— 收尾只有 goal_finish 一条路。',
+    parameters: {
+      type: 'object',
+      properties: {
+        objective: { type: 'string', description: '修订目标（含义变了才改；只改措辞就别动）' },
+        checks: {
+          type: 'array',
+          description: '整体替换检查清单',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              command: { type: 'string', description: '可执行命令，退出码 0 = 通过' }
+            },
+            required: ['command']
+          }
+        },
+        todos: {
+          type: 'array',
+          description: '整体替换推进清单（建议每次把已完成项一起带上，done=true）',
+          items: {
+            type: 'object',
+            properties: {
+              text: { type: 'string' },
+              done: { type: 'boolean' }
+            },
+            required: ['text']
+          }
+        }
+      }
+    }
+  }
+};
+
+/**
+ * 目标推进期的两个工具（`goal_check` / `goal_finish`）。
  *
  * 为什么它们必须是工具、不能是调度器的固定步骤：**节奏是语义判断** —— 什么时候跑哪条检查、
- * 跑几次，取决于模型刚改了什么、哪条检查便宜。写成「每轮无条件跑一条命令」既会吃掉整晚预算，
- * 也把「怎么验证」硬编码成了代码策略。代码只留两件事：跑命令、核对主张与事实。
+ * 跑几次，取决于模型刚改了什么、哪条检查便宜。代码只留两件事：跑命令、核对主张与事实。
+ *
+ * 计划轮（`plan-agent-runner`）与会话轮（Renderer 主循环）共用这两个 schema，
+ * 执行都在 `tool-bridge-main`，目标解析见那里的 `resolveGoalTarget`。
+ * `goal_update`（改清单）只给会话目标：计划目标的验收面在「自动化」里改。
  */
 const GOAL_TOOLS = [
   {
@@ -1559,7 +1660,7 @@ const GOAL_TOOLS = [
     function: {
       name: 'goal_check',
       description:
-        '在目标型计划的一轮里跑一次检查命令，并把结果作为「事实」记到计划上（退出码、超时、被沙箱/审批拒绝、输出尾部）。' +
+        '跑一次检查命令，并把结果作为「事实」记到目标上（退出码、超时、被沙箱/审批拒绝、输出尾部）。' +
         '什么时候跑、跑哪条由你决定：目标声明了检查就按声明跑（用 check_id）；没声明时自己给一条能失败的命令。' +
         '事实是 goal_finish 的唯一依据 —— 没有通过的事实，完成申请会被打回。',
       parameters: {
@@ -1567,7 +1668,7 @@ const GOAL_TOOLS = [
         properties: {
           check_id: {
             type: 'string',
-            description: '已声明检查的 id（与 command 二选一；给了 id 就用它的命令，命令由计划持有）'
+            description: '已声明检查的 id（与 command 二选一；给了 id 就用它的命令，命令由目标持有）'
           },
           command: {
             type: 'string',
@@ -1582,7 +1683,7 @@ const GOAL_TOOLS = [
     function: {
       name: 'goal_finish',
       description:
-        '为目标型计划的这一轮申请收尾。complete = 目标已达成：代码会核对事实（最近一次检查必须通过；' +
+        '为目标的一轮申请收尾。complete = 目标已达成：代码会核对事实（最近一次检查必须通过；' +
         '声明了检查时每条的最新结果都要通过），对不上就被打回并回灌失败事实；' +
         'blocked = 有具体卡点做不下去、需要人处理。不确定就先 goal_check 再取一次事实，别提前宣布完成。',
       parameters: {
@@ -1595,7 +1696,7 @@ const GOAL_TOOLS = [
           },
           note: {
             type: 'string',
-            description: '一句话：完成时指向哪条检查/证据；阻塞时写确切卡点（人早上据此接手）'
+            description: '一句话：完成时指向哪条检查/证据；阻塞时写确切卡点（人据此接手）'
           }
         },
         required: ['outcome']
@@ -2357,6 +2458,8 @@ module.exports = {
   SKILL_DELETE_TOOL,
   MEMORY_TOOLS,
   PLAN_TOOLS,
+  GOAL_START_TOOL,
+  GOAL_UPDATE_TOOL,
   GOAL_TOOLS,
   MCP_TOOL_SCHEMA_TOOL,
   MCP_MANAGE_TOOL,

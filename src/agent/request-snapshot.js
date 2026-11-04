@@ -38,7 +38,9 @@ const SNAPSHOT_SOURCES = Object.freeze({
   SUBAGENT: 'subagent',
   PLANNER: 'planner',
   PLAN: 'plan',
-  CHANNEL: 'channel'
+  CHANNEL: 'channel',
+  // 无界面入口（终端 / Web / cron）：同样在 Main 跑一轮，来源必须能与桌面聊天区分开
+  HEADLESS: 'headless'
 });
 
 /** 写入原因：一轮里可能发多次（溢出重发 / 图片被拒重发），必须能区分。 */

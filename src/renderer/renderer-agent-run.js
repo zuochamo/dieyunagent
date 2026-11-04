@@ -187,8 +187,15 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
     }
 
     // 撞上用尽（轮次 / 工具段）就交回用户：「继续」= 再给同样额度。
-    // 单轮内不再自动续跑；无人值守的连续推进归目标型计划（src/plans/goal-run.js）。
-    if (result && result.hitRoundLimit) {
+    // 单轮内不再自动续跑；无人值守的连续推进归目标型长任务。
+    //
+    // 会话目标（`goal.cont`，判定在 Main 的 `decideContinuation`）语义不同：这一轮是**正常结束**的，
+    // 只是目标还没收尾，所以要「再开一轮」而不是「续这一段」。两件事必须分开：
+    //   - hitRoundLimit 且没有目标在推 → 段内额度用尽，停车等用户点「继续」；
+    //   - 目标还没收尾 → 本轮正文照常交付，交付完再开一轮（新轮才有新系统提示与新预算）。
+    // Renderer 只读布尔值，不出现 attempt / maxAttempts / stop 这些概念。
+    const goalContinue = !!(result && result.goal && result.goal.cont);
+    if (result && result.hitRoundLimit && !goalContinue) {
       if (baseTrace.length && Array.isArray(result.trace)) {
         result = { ...result, trace: mergeTraceSegments(baseTrace, result.trace) };
       }
@@ -199,6 +206,7 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
     if (baseTrace.length && Array.isArray(result?.trace)) {
       result = { ...result, trace: mergeTraceSegments(baseTrace, result.trace) };
     }
+    if (goalContinue) result = { ...result, goalContinue: true };
     return { done: true, result };
   } finally {
     if (typeof clearAgentExecutionContext === 'function') clearAgentExecutionContext(runSessionId);

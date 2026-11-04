@@ -4,6 +4,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { msUntilNextRun } = require('./rrule-next');
+// 目标形状 / 预算 / 事实 / 主张的归一化：唯一来源是 goal-run.js（计划目标与会话目标共用）
+const {
+  normalizeGoal,
+  normalizeEvidence,
+  normalizeClaim,
+  normalizeBudget,
+  normalizeIso
+} = require('./goal-run');
 // 运行态保留条数等数字的唯一来源（AGENTS.md §6：数字上限只改 agent-limits）
 const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 
@@ -62,86 +70,8 @@ function normalizeTrigger(v) {
   return 'schedule';
 }
 
-function normalizeIso(v) {
-  if (!v) return null;
-  const s = String(v).trim();
-  if (!s) return null;
-  return Number.isFinite(Date.parse(s)) ? s : null;
-}
-
-/**
- * 目标型验收面：**只存结构化命令**，不解析自然语言（禁意图关键词硬编码）。
- *
- * v2：验收不再是「调度器每轮无条件跑的一条命令」，而是模型随时可调的检查清单（`goal_check`）。
- * 每条命令的语义只有一条通用契约：退出码 0 = 通过。代码不分类、不分档、不按技术栈分支。
- */
-function normalizeGoal(raw) {
-  const g = raw && typeof raw === 'object' ? raw : {};
-  const checks = Array.isArray(g.checks)
-    ? g.checks
-        .map((c) => {
-          const item = typeof c === 'string' ? { command: c } : c || {};
-          const command = String(item.command || '').trim().slice(0, 2000);
-          if (!command) return null;
-          return { id: String(item.id || '').trim() || command.slice(0, 40), command };
-        })
-        .filter(Boolean)
-    : [];
-  return {
-    checks,
-    cwd: String(g.cwd || '').trim()
-  };
-}
-
-/** 预算：只存用户选择（0/空 = 用 agent-limits 默认值），clamp 在 goal-run.resolveGoalBudget */
-function normalizeBudget(raw) {
-  const b = raw && typeof raw === 'object' ? raw : {};
-  const num = (v) => {
-    const n = Math.floor(Number(v));
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  };
-  return {
-    maxAttempts: num(b.maxAttempts),
-    maxWallMs: num(b.maxWallMs)
-  };
-}
-
-/**
- * 一条检查事实（`goal.evidence` 的元素）：**只放机器可判定的字段**，
- * 措辞与判断留给模型和人 —— 代码不允许在这里写「完成/未完成」这类结论。
- */
-function normalizeEvidence(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const at = normalizeIso(raw.at);
-  const command = String(raw.command || '').trim().slice(0, 2000);
-  if (!command && !at) return null;
-  const exitCodeNum = Number(raw.exitCode);
-  return {
-    at: at || new Date().toISOString(),
-    round: Math.max(0, Math.floor(Number(raw.round) || 0)),
-    checkId: String(raw.checkId || '').trim(),
-    command,
-    ok: raw.ok === true,
-    exitCode: Number.isFinite(exitCodeNum) ? exitCodeNum : null,
-    note: String(raw.note || '').trim().slice(0, 40),
-    tail: String(raw.tail || '').slice(0, 8000)
-  };
-}
-
-/** 一次「完成/阻塞」主张（`goal.claims` 的元素）：模型说的，代码原样留痕供复盘 */
-function normalizeClaim(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const at = normalizeIso(raw.at);
-  const outcome = raw.outcome === 'complete' || raw.outcome === 'blocked' ? raw.outcome : '';
-  if (!at || !outcome) return null;
-  return {
-    at,
-    outcome,
-    round: Math.max(0, Math.floor(Number(raw.round) || 0)),
-    accepted: raw.accepted === true,
-    note: String(raw.note || '').trim().slice(0, 1000)
-  };
-}
+// 目标形状 / 预算 / 事实 / 主张的归一化**只有一处**：plans/goal-run.js。
+// 会话目标（src/goals/session-goal.js）与计划目标存的是同一类对象，各自再写一份必然分叉。
 
 function normalizePlan(raw) {
   const p = raw && typeof raw === 'object' ? raw : {};
@@ -372,7 +302,10 @@ class PlansStore {
     if (!p) return null;
     const claim = normalizeClaim({ ...raw, at: (raw && raw.at) || new Date().toISOString() });
     if (!claim) return null;
-    p.claims = (Array.isArray(p.claims) ? p.claims.concat(claim) : [claim]).slice(-10);
+    // 与 evidence 同一个保留上限（agent-limits.goalEvidenceKeep）：两处各写一个数字就是两份真相
+    p.claims = (Array.isArray(p.claims) ? p.claims.concat(claim) : [claim]).slice(
+      -AGENT_LIMITS_DEFAULTS.goalEvidenceKeep
+    );
     p.updatedAt = claim.at;
     this._save();
     return claim;

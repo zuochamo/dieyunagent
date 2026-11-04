@@ -1,6 +1,9 @@
 'use strict';
 
 const { assembleSystemPrompt } = require('./agent-system-prompt');
+// 会话目标：事实与措辞的单一来源（goal-run），存储的单一来源（goals/session-goal）
+const { renderSessionGoalBlock } = require('../plans/goal-run');
+const { loadGoal: loadSessionGoal } = require('../goals/session-goal');
 const { skipAutoCodebaseForTaskTier } = require('./task-tier');
 const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const { getEnvHintNames } = require('../mcp/env-hints');
@@ -51,6 +54,10 @@ const DEFAULT_LIMITS = {
   GRAPH_REPO_MAP_MAX_CHARS: AGENT_LIMITS_DEFAULTS.graphRepoMapMaxChars,
   PROJECT_MEMORY_FILE_MAX_CHARS: AGENT_LIMITS_DEFAULTS.projectMemoryFileMaxChars,
   GLOBAL_MEMORY_LIMIT: AGENT_LIMITS_DEFAULTS.globalMemoryLimit,
+  SHARED_MEMORY_LIMIT: AGENT_LIMITS_DEFAULTS.sharedMemoryRecallLimit,
+  SHARED_MEMORY_MIN_SEMANTIC: AGENT_LIMITS_DEFAULTS.sharedMemoryMinScoreSemantic,
+  SHARED_MEMORY_MIN_KEYWORD: AGENT_LIMITS_DEFAULTS.sharedMemoryMinScoreKeyword,
+  SHARED_MEMORY_BLOCK_MAX_CHARS: AGENT_LIMITS_DEFAULTS.sharedMemoryBlockMaxChars,
   SKILL_TOTAL_COUNT: AGENT_LIMITS_DEFAULTS.skillTotalCount
 };
 
@@ -66,7 +73,14 @@ function ctxLimitsFromUserData(userDataPath) {
     CODEBASE_SNIPPET_MAX: L.codebaseSnippetMax || DEFAULT_LIMITS.CODEBASE_SNIPPET_MAX,
     CODEBASE_AUTO_LIMIT: L.codebaseAutoLimit || DEFAULT_LIMITS.CODEBASE_AUTO_LIMIT,
     OPEN_FILES_MAX: L.openFilesMax || DEFAULT_LIMITS.OPEN_FILES_MAX,
-    FILE_PREVIEW_MAX_CHARS: L.filePreviewMaxChars || DEFAULT_LIMITS.FILE_PREVIEW_MAX_CHARS
+    FILE_PREVIEW_MAX_CHARS: L.filePreviewMaxChars || DEFAULT_LIMITS.FILE_PREVIEW_MAX_CHARS,
+    SHARED_MEMORY_LIMIT: L.sharedMemoryRecallLimit || DEFAULT_LIMITS.SHARED_MEMORY_LIMIT,
+    SHARED_MEMORY_MIN_SEMANTIC:
+      L.sharedMemoryMinScoreSemantic || DEFAULT_LIMITS.SHARED_MEMORY_MIN_SEMANTIC,
+    SHARED_MEMORY_MIN_KEYWORD:
+      L.sharedMemoryMinScoreKeyword || DEFAULT_LIMITS.SHARED_MEMORY_MIN_KEYWORD,
+    SHARED_MEMORY_BLOCK_MAX_CHARS:
+      L.sharedMemoryBlockMaxChars || DEFAULT_LIMITS.SHARED_MEMORY_BLOCK_MAX_CHARS
   };
 }
 
@@ -545,8 +559,8 @@ function formatMemoryLines(rows, maxLen) {
  * 回答不了「为什么模型没记住 X」。所以每个记忆块把自己写进了 audit。
  *
  * @typedef {{mode?: string, ids?: number[], excluded?: number, scope?: string}} MemoryBlockAudit
- * @typedef {{project?: MemoryBlockAudit, global?: MemoryBlockAudit, handoff?: {from: string},
- *            workMemory?: {runId?: string}}} MemoryInjectionAudit
+ * @typedef {{project?: MemoryBlockAudit, global?: MemoryBlockAudit, shared?: MemoryBlockAudit,
+ *            handoff?: {from: string}, workMemory?: {runId?: string}}} MemoryInjectionAudit
  */
 
 /**
@@ -673,6 +687,71 @@ async function fetchGlobalMemoryBlock(snapshot, invokeRpc, lim, audit) {
 const HANDOFF_BLOCK_MAX_CHARS = 4000;
 
 /**
+ * 【共享记忆】注入块 —— 同一局域网里**其他机器**沉淀的记忆条目（PostgreSQL 共享库）。
+ *
+ * 与本地记忆的分工：本机的项目记忆是文件、用户级记忆在 SQLite；这个块只放「别的机器学到的」，
+ * 所以必须带来源提示，避免模型把别的项目的结论当成本项目的既定事实。
+ *
+ * 注入克制：只在有用户 query 时召回（没有 query 就是新一轮，不该拿别人的记忆填背景），
+ * 过同一套阈值（语义 0.32 / 关键词 0.12），`kind` 过滤与本地记忆共用 `isInjectableMemoryRow`。
+ * 服务不可达 / 未配置 → 返回空串（块装配走 `Promise.all`，缺一块不影响发送）。
+ *
+ * 数据层见 `src/memory-shared/service.js`（本函数只负责「取、筛、排版」）。
+ */
+async function fetchSharedMemoryBlock(snapshot, deps, lim, audit) {
+  const sm = deps && deps.sharedMemory;
+  if (!sm || typeof sm.recall !== 'function') return '';
+  const q = String((snapshot && snapshot.userQuery) || '').trim();
+  if (!q) return '';
+  if (typeof sm.active === 'function' && !sm.active()) return '';
+  const limit = Number(lim.SHARED_MEMORY_LIMIT);
+  let res = null;
+  try {
+    res = await withTimeout(sm.recall(q, { limit }), 4000, { message: 'shared memory recall 超时' });
+  } catch {
+    return '';
+  }
+  const rows = res && Array.isArray(res.results) ? res.results : [];
+  const mode = String((res && res.mode) || 'none');
+  /**
+   * 阈值必须**逐行按各自通道**取：同一批里可能既有向量行（`1 - 余弦距离`）又有 trigram 兜底行
+   * （`similarity()`），两者量纲不同、分布也不同。拿批级 `mode` 一刀切会让兜底行永远过不了
+   * 语义阈值（0.32），等于「有向量就再也用不上文本兜底」—— 与本模块的 COALESCE 设计相违。
+   */
+  const semThreshold = Number(lim.SHARED_MEMORY_MIN_SEMANTIC);
+  const kwThreshold = Number(lim.SHARED_MEMORY_MIN_KEYWORD);
+  const scored = rows.filter((r) => {
+    const t = r && r.mode === 'semantic' ? semThreshold : kwThreshold;
+    if (!(Number.isFinite(t) && t > 0)) return true;
+    return (Number(r && r.score) || 0) >= t;
+  });
+  const filtered = scored.filter(isInjectableMemoryRow);
+  recordMemoryAudit(audit, 'shared', {
+    mode,
+    ids: filtered.map((r) => Number(r.id)).filter((n) => Number.isFinite(n)),
+    excluded: Math.max(0, rows.length - filtered.length)
+  });
+  if (!filtered.length) return '';
+  // 块长上限的唯一来源是 agent-limits（`sharedMemoryBlockMaxChars`），这里不再写第二份缺省
+  const maxChars = Number(lim.SHARED_MEMORY_BLOCK_MAX_CHARS);
+  const lines = [];
+  let used = 0;
+  for (const r of filtered) {
+    const line = `- ${compactPlainText(r.content || '', 300)}`;
+    if (used + line.length + 1 > maxChars) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  if (!lines.length) return '';
+  const modeLabel = mode === 'semantic' ? '语义召回' : '关键词召回';
+  return [
+    `【共享记忆 · 局域网其他机器沉淀 · ${modeLabel} · 非本会话、非本机项目记忆】`,
+    '这些条目来自同网段的其他机器（共同的结论/踩过的坑）。与用户最新输入或本机项目记忆冲突时，以本机和用户输入为准。',
+    lines.join('\n')
+  ].join('\n');
+}
+
+/**
  * 【上个会话交接】注入块。
  *
  * 触发是**结构信号**：snapshot.continueFromSessionId 由 Renderer「继续上次」显式带上
@@ -767,6 +846,32 @@ function formatSettledJobsBlock(jobs, now) {
   }
   lines.push('  它们都已经结束，不要再等或轮询；要复核全部句柄用 host_proc action=list includeFinished=true。');
   return lines.join('\n');
+}
+
+/**
+ * 会话目标的每轮注入块（**唯一注入点**）。
+ *
+ * 会话有目标时，模型每轮都要看到：目标是什么、还剩什么、最近的事实是什么 ——
+ * 否则「目标未收尾就继续推进」只是句空话。事实与措辞全在 `plans/goal-run.js`
+ * （`renderSessionGoalBlock`），这里只负责取与放。
+ *
+ * 无目标 / 取不到时返回空串：普通会话的 prompt 一个字节都不变。
+ *
+ * @param {object} snapshot prep 快照
+ * @param {(method: string, params?: object) => Promise<any>} invokeRpc
+ * @param {object} [limits] agent-limits（预算展示用）
+ * @returns {Promise<string>}
+ */
+async function fetchSessionGoalBlock(snapshot, invokeRpc, limits) {
+  const sessionId = String(snapshot.sessionId || '').trim();
+  if (!sessionId) return '';
+  try {
+    const goal = await loadSessionGoal({ invokeRpc, sessionId });
+    if (!goal) return '';
+    return renderSessionGoalBlock({ goal, limits: limits || AGENT_LIMITS_DEFAULTS });
+  } catch {
+    return ''; // 目标注入是上下文增益：取不到不阻塞本轮
+  }
 }
 
 /**
@@ -1026,13 +1131,15 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     snapshot.allowCodebase != null
       ? !!snapshot.allowCodebase
       : injectCode || autoCodebase || textHasCodebaseMention(userQuery);
-  let taskTierEnabled;
+  // agent-limits 只取一次：taskTier 开关与「目标块的轮次/墙钟预算」读的必须是同一份，
+  // 否则 prompt 里写的「第 3/12 轮」和真正刹车的用户档位会不一致。
+  let agentLimits = null;
   try {
-    const agentLimits = deps.userDataPath ? getAgentLimits(deps.userDataPath) : getAgentLimits();
-    taskTierEnabled = agentLimits && agentLimits.taskTierEnabled;
+    agentLimits = deps.userDataPath ? getAgentLimits(deps.userDataPath) : getAgentLimits();
   } catch {
-    taskTierEnabled = undefined;
+    agentLimits = null;
   }
+  const taskTierEnabled = agentLimits && agentLimits.taskTierEnabled;
   const skipAuto = skipAutoCodebaseForTaskTier(snapshot.taskTier, taskTierEnabled);
   const snap = {
     ...snapshot,
@@ -1091,27 +1198,35 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   /** @type {MemoryInjectionAudit} */
   const memoryAudit = {};
   const [
+    sessionGoalBlock,
     handoffBlock,
     repoMapBlock,
     projectMemoryBlock,
     globalMemoryBlock,
+    sharedMemoryBlock,
     compactionBlock,
     workMemoryBlock,
     skillsBlock
   ] = await Promise.all([
+    fetchSessionGoalBlock(snapshot, invokeRpc, agentLimits || AGENT_LIMITS_DEFAULTS),
     fetchSessionHandoffBlock(snapshot, invokeRpc, memoryAudit),
     fetchGraphRepoMapBlock(snap, invokeRpc, lim),
     injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim, memoryAudit) : Promise.resolve(''),
     fetchGlobalMemoryBlock(snap, invokeRpc, lim, memoryAudit),
+    fetchSharedMemoryBlock(snap, deps, lim, memoryAudit),
     fetchCompactionBlock(snap, invokeRpc),
     fetchWorkMemoryBlock(snap, invokeRpc, memoryAudit),
     fetchSkillsBlock(snap, deps, lim)
   ]);
   for (const block of [
+    // 会话目标排最前：它是「这一轮为什么继续」的总纲，其余块都是背景
+    sessionGoalBlock,
     handoffBlock,
     repoMapBlock,
     projectMemoryBlock,
     globalMemoryBlock,
+    // 共享记忆紧跟本机记忆：同属「沉淀」，但优先级在本机之后（他人结论不该盖过本机事实）
+    sharedMemoryBlock,
     compactionBlock,
     workMemoryBlock,
     skillsBlock
@@ -1139,7 +1254,6 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   const packed = assembleSystemPrompt({
     languagePrompt: snapshot.languagePrompt,
     userSystem: snapshot.userSystem,
-    composerMode: snapshot.composerMode,
     taskTier: snapshot.taskTier,
     agentHome,
     workspaceInfo: snapshot.workspaceInfo,
@@ -1188,6 +1302,7 @@ module.exports = {
   fetchOpenFilesBlock,
   fetchAgentsMdBlock,
   fetchSessionHandoffBlock,
+  fetchSharedMemoryBlock,
   isInjectableMemoryRow,
   formatSettledJobsBlock,
   prepSystemPrompt,

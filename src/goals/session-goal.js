@@ -1,0 +1,374 @@
+'use strict';
+
+// @ts-check
+/**
+ * 会话级目标对象（`session_goals` 表）：**唯一读写点**。
+ *
+ * 分工与 `plans/goal-run.js` 一致：
+ *   - 形状归一化 / 事实 / 核对 / 续跑判定 / 事实块 —— 全在 goal-run.js（单一来源）；
+ *   - 本文只负责「按会话存取」：读 → 改 → 写、单会话单目标、预算与轮次自增、给 UI 的投影。
+ *
+ * 刻意不做的事：
+ *   - 不用 `plans.json`（那是调度器配置）：会话目标跟着会话生灭，`session_goals` 有
+ *     `ON DELETE CASCADE`，删会话即清；也不进任何定时器。
+ *   - 不在 Rust 侧解析目标：Rust 只当 KV（`memory.session_goal_get / put`）。
+ *   - 不判断「目标达成没有」：那是 `judgeGoalFinish` + 事实的事。
+ */
+
+const {
+  normalizeGoal,
+  normalizeEvidence,
+  normalizeClaim,
+  normalizeBudget,
+  normalizeIso,
+  resolveGoalBudget,
+  goalChecks,
+  latestFactFor,
+  factsForCheck,
+  decideContinuation
+} = require('../plans/goal-run');
+const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
+
+const STATUSES = ['active', 'paused', 'stalled', 'blocked'];
+
+/** 单会话串行化：读-改-写之间不允许插进另一次写（同进程内只有 Main 会写目标） */
+const chains = new Map();
+
+function withLock(sessionId, fn) {
+  const key = String(sessionId || '');
+  const prev = chains.get(key) || Promise.resolve();
+  const next = prev.then(fn, fn);
+  // 链尾失败不能污染后续调用；只保留顺序
+  chains.set(
+    key,
+    next.then(
+      () => {},
+      () => {}
+    )
+  );
+  return next;
+}
+
+function toIso(v) {
+  return normalizeIso(v) || new Date().toISOString();
+}
+
+/**
+ * 目标对象归一化（存前 / 读后都走这里，保证磁盘上的东西和内存里的一致）。
+ * @param {object} raw
+ */
+function normalizeSessionGoal(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const status = STATUSES.includes(String(r.status)) ? String(r.status) : 'active';
+  const outcome = r.outcome === 'complete' || r.outcome === 'blocked' ? r.outcome : null;
+  return {
+    goal: normalizeGoal(r.goal),
+    budget: normalizeBudget(r.budget),
+    evidence: (Array.isArray(r.evidence) ? r.evidence : []).map(normalizeEvidence).filter(Boolean),
+    claims: (Array.isArray(r.claims) ? r.claims : []).map(normalizeClaim).filter(Boolean),
+    outcome,
+    status,
+    attempt: Math.max(0, Math.floor(Number(r.attempt) || 0)),
+    attemptStartedAt: normalizeIso(r.attemptStartedAt),
+    startedAt: toIso(r.startedAt),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+/**
+ * 读会话目标。损坏的 JSON 当「没有目标」处理并留一行日志 ——
+ * 一个坏 blob 不该让整轮 prompt 组装失败。
+ */
+async function loadGoal(opts = {}) {
+  const invokeRpc = opts.invokeRpc;
+  const sessionId = String(opts.sessionId || '');
+  if (!invokeRpc || !sessionId) return null;
+  let res;
+  try {
+    res = await invokeRpc('memory.session_goal_get', { sessionId });
+  } catch (e) {
+    if (opts.log) opts.log(`读会话目标失败: ${(e && e.message) || String(e)}`);
+    return null;
+  }
+  const raw = res && (res.goalJson != null ? res.goalJson : res.goal_json);
+  if (!raw) return null;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const goal = normalizeSessionGoal(parsed);
+    // 没有 objective 的目标没有意义（也注入不出东西）：当作没有
+    return goal.goal.objective ? goal : null;
+  } catch (e) {
+    if (opts.log) opts.log(`会话目标 JSON 损坏（按无目标处理）: ${(e && e.message) || String(e)}`);
+    return null;
+  }
+}
+
+/** 写会话目标（整体覆盖）。`goal = null` 表示删除。 */
+async function saveGoal(opts = {}) {
+  const invokeRpc = opts.invokeRpc;
+  const sessionId = String(opts.sessionId || '');
+  if (!invokeRpc || !sessionId) return { ok: false, error: '缺少 invokeRpc / sessionId' };
+  const goal = opts.goal ? normalizeSessionGoal(opts.goal) : null;
+  await invokeRpc('memory.session_goal_put', {
+    sessionId,
+    goalJson: goal ? JSON.stringify(goal) : null
+  });
+  return { ok: true, goal };
+}
+
+/**
+ * 读-改-写（串行）。`mutate` 拿到当前目标（可能 null），返回新目标或 null。
+ * 返回改后的目标，便于调用方直接用最新事实回话给模型。
+ */
+async function patchGoal(opts = {}) {
+  const invokeRpc = opts.invokeRpc;
+  const sessionId = String(opts.sessionId || '');
+  const mutate = opts.mutate;
+  if (!invokeRpc || !sessionId || typeof mutate !== 'function') {
+    return { ok: false, error: '缺少 invokeRpc / sessionId / mutate' };
+  }
+  return withLock(sessionId, async () => {
+    const current = await loadGoal({ invokeRpc, sessionId, log: opts.log });
+    const draft = await mutate(current);
+    if (draft === undefined) return { ok: true, goal: current, unchanged: true };
+    const saved = await saveGoal({ invokeRpc, sessionId, goal: draft });
+    return saved;
+  });
+}
+
+/**
+ * 开一个新目标。
+ *
+ * 单会话单目标：已有「还在跑」的目标（`active` 且未收尾）→ 拒绝并把现有目标回给模型，
+ * 让它接着推进而不是每轮重开。已完成 / 已阻塞 / 已暂停 / 预算尽 → 允许覆盖（那是新目标）。
+ */
+async function startGoal(opts = {}) {
+  const draft = opts.draft || {};
+  return patchGoal({
+    invokeRpc: opts.invokeRpc,
+    sessionId: opts.sessionId,
+    log: opts.log,
+    mutate: (current) => {
+      if (current && current.status === 'active' && !current.outcome) {
+        return undefined;
+      }
+      const goal = normalizeSessionGoal({
+        goal: {
+          objective: draft.objective,
+          checks: draft.checks,
+          todos: draft.todos,
+          cwd: draft.cwd
+        },
+        budget: draft.budget,
+        evidence: [],
+        claims: [],
+        outcome: null,
+        status: 'active',
+        attempt: 0,
+        attemptStartedAt: null,
+        startedAt: new Date().toISOString()
+      });
+      if (!goal.goal.objective) return undefined;
+      return goal;
+    }
+  });
+}
+
+/** 已有目标且仍在推进（未收尾、未停）—— 这是「单会话单目标」的判据 */
+function isActiveGoal(goal) {
+  return !!(goal && goal.status === 'active' && !goal.outcome);
+}
+
+/** 起一轮：attempt+1，第一次自动续跑时记下墙钟起点 */
+function advanceAttempt(goal) {
+  if (!goal) return goal;
+  goal.attempt = Math.max(0, Math.floor(Number(goal.attempt) || 0)) + 1;
+  if (!goal.attemptStartedAt) goal.attemptStartedAt = new Date().toISOString();
+  return goal;
+}
+
+/** 追加一条检查事实（保留条数 = agent-limits.goalEvidenceKeep，与计划目标一致） */
+function pushEvidence(goal, fact, keep) {
+  if (!goal || !fact) return goal;
+  const max =
+    Number.isFinite(Number(keep)) && Number(keep) > 0
+      ? Math.floor(Number(keep))
+      : AGENT_LIMITS_DEFAULTS.goalEvidenceKeep;
+  const list = Array.isArray(goal.evidence) ? goal.evidence.slice() : [];
+  list.push(normalizeEvidence(fact));
+  goal.evidence = list.filter(Boolean).slice(-max);
+  return goal;
+}
+
+/** 记一条主张（留痕；是否接受由 judgeGoalFinish 决定） */
+function recordClaim(goal, claim) {
+  if (!goal || !claim) return goal;
+  const list = Array.isArray(goal.claims) ? goal.claims.slice() : [];
+  // 时间戳由这里补：调用方（工具桥）只关心 outcome / round / accepted / note
+  list.push(normalizeClaim({ at: new Date().toISOString(), ...claim }));
+  // 与 evidence 同一个保留上限：两处都写 20 会变成第二份真相
+  goal.claims = list.filter(Boolean).slice(-AGENT_LIMITS_DEFAULTS.goalEvidenceKeep);
+  return goal;
+}
+
+/**
+ * 一轮结束后的续跑判定（**会话目标的唯一判定点**）。
+ *
+ * 为什么只在这里判：一次 `agent:rust-loop-run` 的返回 = 一轮结束，这是唯一
+ * 「知道这一轮干了什么」的时点。定时器只知道到点了，调度器不知道目标推进到哪。
+ *
+ * 判定本身是纯函数 `decideContinuation`（与计划目标共用）；本文只负责
+ * 「判完把状态落盘」（预算用尽 → `stalled`，否则状态不动）。
+ *
+ * `attempt` 的自增**不在这里**：那在一轮开始时（`agent:rust-loop-run` 入口的
+ * `advanceAttempt`）做，一次一轮，人驱动的轮与自动续跑的轮口径一致。
+ *
+ * @param {{ invokeRpc: Function, sessionId: string, limits?: object, log?: Function }} opts
+ * @returns {Promise<null | {active: boolean, cont: boolean, stop: string|null, attempt: number, max: number}>}
+ *   无目标 / 已收尾 / 已暂停 → null（Renderer 拿不到这个字段就不续跑）
+ */
+async function judgeAfterTurn(opts = {}) {
+  const goal = await loadGoal(opts);
+  if (!isActiveGoal(goal)) return null;
+  // 墙钟起点退化为目标创建时间：`attemptStartedAt` 由第一轮自增时写入，若那次写盘失败，
+  // 判定不能连墙钟都没有 —— 否则「轮次计数坏掉」就只剩无限续跑一种可能。
+  const plan =
+    goal.attemptStartedAt || !goal.startedAt
+      ? goal
+      : { ...goal, attemptStartedAt: goal.startedAt };
+  const decision = decideContinuation({ plan, limits: opts.limits });
+  const budget = decision.budget || {};
+  const attempt = Math.max(0, Math.floor(Number(goal.attempt) || 0));
+  const max = Math.max(0, Math.floor(Number(budget.maxAttempts) || 0));
+  if (decision.cont) return { active: true, cont: true, stop: null, attempt, max };
+  // 预算用尽 = 还没收尾但不再往下跑：状态落成 stalled，注入块与面板都据此说「预算已尽」。
+  // 收尾（complete/blocked）不改状态：outcome 才是收尾的表达，status 只表达「停/续」。
+  if (decision.stop === 'attempts' || decision.stop === 'budget') {
+    try {
+      await patchGoal({
+        invokeRpc: opts.invokeRpc,
+        sessionId: opts.sessionId,
+        log: opts.log,
+        mutate: (g) => {
+          if (!isActiveGoal(g)) return undefined;
+          g.status = 'stalled';
+          return g;
+        }
+      });
+    } catch {
+      // 状态落盘失败不影响本轮交付：下一轮还会再判一次
+    }
+  }
+  return { active: true, cont: false, stop: decision.stop || 'stop', attempt, max };
+}
+
+/** 暂停（用户按停止 / 面板停）：只影响「自动推进」，事实与清单全部保留 */
+async function pauseGoal(opts = {}) {
+  return patchGoal({
+    invokeRpc: opts.invokeRpc,
+    sessionId: opts.sessionId,
+    log: opts.log,
+    mutate: (g) => {
+      if (!isActiveGoal(g)) return undefined;
+      g.status = 'paused';
+      return g;
+    }
+  });
+}
+
+/**
+ * 继续（面板 / 预算用尽后的人工续跑）：回到 active 并**重置轮次预算**。
+ * 事实与清单不动 —— 已跑过的检查结果仍是下一轮的依据。
+ */
+async function resumeGoal(opts = {}) {
+  return patchGoal({
+    invokeRpc: opts.invokeRpc,
+    sessionId: opts.sessionId,
+    log: opts.log,
+    mutate: (g) => {
+      if (!g || g.outcome) return undefined;
+      g.status = 'active';
+      g.attempt = 0;
+      g.attemptStartedAt = new Date().toISOString();
+      return g;
+    }
+  });
+}
+
+/**
+ * 给侧栏「目标」页的投影：**UI 需要的都在这里成型**，面板不再自己算进度/截断事实。
+ *
+ * @param {{ goal?: object|null, limits?: object, evidenceShown?: number }} input
+ */
+function toPanelView(input = {}) {
+  const goal = input.goal;
+  if (!goal || !goal.goal || !goal.goal.objective) return null;
+  const budget = resolveGoalBudget(goal, input.limits);
+  const todos = Array.isArray(goal.goal.todos) ? goal.goal.todos : [];
+  const done = todos.filter((t) => t.done).length;
+  const evidence = Array.isArray(goal.evidence) ? goal.evidence : [];
+  const shown = Number.isFinite(input.evidenceShown) ? Math.max(1, Math.floor(input.evidenceShown)) : 10;
+  const last = evidence.length ? evidence[evidence.length - 1] : null;
+  return {
+    objective: goal.goal.objective,
+    status: goal.status,
+    outcome: goal.outcome || null,
+    attempt: goal.attempt,
+    maxAttempts: budget.maxAttempts,
+    maxWallMs: budget.maxWallMs,
+    startedAt: goal.startedAt,
+    attemptStartedAt: goal.attemptStartedAt,
+    updatedAt: goal.updatedAt,
+    unverified: goalChecks(goal).length === 0,
+    // 按**声明的检查**聚合事实：每条检查的最新结果 + 跑过几次。
+    // 面板与「目标条」都只要这一份投影 —— 谁还想要「原始事实流水」就直接看 evidence。
+    // `note` 一并带出去：`ok:false` 里有「跑过没通过」和「根本没跑成（沙箱拒绝/超时）」两种，
+    // 只给布尔值的话 UI 只能都画成 ❌，那是把「没执行」说成了「失败」。
+    checks: goalChecks(goal).map((c) => {
+      const fact = latestFactFor(evidence, c);
+      return {
+        id: c.id,
+        command: c.command,
+        runs: factsForCheck(evidence, c).length,
+        ok: fact ? fact.ok === true : null,
+        note: fact ? String(fact.note || '') : '',
+        exitCode: fact ? fact.exitCode : null,
+        at: fact ? fact.at : null,
+        round: fact ? fact.round : 0
+      };
+    }),
+    todos: todos.map((t) => ({ text: t.text, done: t.done })),
+    todosDone: done,
+    todosTotal: todos.length,
+    // 没有清单时的进度只有两种可判定的取值：收尾了 = 1，否则 0（不编造百分比）
+    progress: todos.length ? done / todos.length : goal.outcome === 'complete' ? 1 : 0,
+    evidence: evidence.slice(-shown).map((f) => ({
+      at: f.at,
+      round: f.round,
+      command: f.command,
+      ok: f.ok,
+      exitCode: f.exitCode,
+      note: f.note
+    })),
+    lastFact: last
+      ? { command: last.command, ok: last.ok, exitCode: last.exitCode, at: last.at, tail: last.tail }
+      : null
+  };
+}
+
+module.exports = {
+  STATUSES,
+  normalizeSessionGoal,
+  loadGoal,
+  saveGoal,
+  patchGoal,
+  startGoal,
+  isActiveGoal,
+  advanceAttempt,
+  pushEvidence,
+  recordClaim,
+  judgeAfterTurn,
+  pauseGoal,
+  resumeGoal,
+  toPanelView
+};

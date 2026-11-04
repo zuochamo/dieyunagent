@@ -528,7 +528,6 @@ async function collectBrowser(gateway, evidence, opts = {}) {
  * @param {{
  *   gateway?: object|null,
  *   trace?: object[],
- *   mode?: string,
  *   sessionId?: string|null,
  *   workspacePath?: string|null,
  *   userDataPath?: string|null,
@@ -541,11 +540,6 @@ async function evaluateTurnReadiness(opts = {}) {
     evidence = collectEvidence(opts.trace);
   } catch {
     evidence = collectEvidence([]);
-  }
-
-  // Explore 是只读模式：既没有写入可验收，也不该被页面运行时错误追着提示
-  if (String(opts.mode || 'agent') === 'explore') {
-    return passResult({ diagnostics: null, browser: null }, true);
   }
 
   // 两段证据互不依赖（一个查 LSP、一个查浏览器账本），并行采：

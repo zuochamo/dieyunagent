@@ -191,6 +191,16 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
       );
       CREATE INDEX IF NOT EXISTS idx_compaction_archives_session
         ON compaction_archives(session_id, created_at);
+      -- 会话级目标对象：一个会话最多一条（PK 即约束），删会话级联清除。
+      -- goal_json 是**不透明 JSON**：Rust 只当 KV，语义（归一化 / 事实核对 / 续跑判定）
+      -- 全在 Node 的 src/plans/goal-run.js —— 不允许在 Rust 再解析一份。
+      -- 也不进 sessions_list 投影：目标只在开会话 / 起轮时按 sessionId 精确取。
+      CREATE TABLE IF NOT EXISTS session_goals (
+        session_id TEXT PRIMARY KEY,
+        goal_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
     "#,
     )
     .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;

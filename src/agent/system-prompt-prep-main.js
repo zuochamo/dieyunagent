@@ -16,7 +16,8 @@ const path = require('path');
  *   gateway: any,
  *   userData: string,
  *   snapshot: object,
- *   listMcpServers?: (userData: string) => any[]
+ *   listMcpServers?: (userData: string) => any[],
+ *   sharedMemory?: any
  * }} opts
  */
 function buildPrepSystemPromptDeps(opts) {
@@ -45,6 +46,9 @@ function buildPrepSystemPromptDeps(opts) {
       userDataPath: userData,
       listMcpServers: () =>
         typeof opts.listMcpServers === 'function' ? opts.listMcpServers(userData) : [],
+      // 共享记忆（跨机）没有实例时（headless 未装配 / 扩展未配置）这里就是 undefined，
+      // prep 侧看到没有就不再召回 —— 不加开关、不做分支判断。
+      sharedMemory: opts.sharedMemory || null,
       skills: {
         scan: () => scanSkills({ userData, workspacePath: wsPath }),
         recall: async ({ query, enabledIds, limit }) => {

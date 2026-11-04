@@ -11,12 +11,16 @@ function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assert failed');
 }
 
-const planRules = buildCoreAgentRules({ composerMode: 'plan' });
-assert(planRules.includes('【Agent 准则】'), 'core rules header');
-assert(planRules.includes('无 tool_calls 的文字回复即本轮结束'), 'loop end rule');
-assert(planRules.includes('规划师产出 TODO'), 'plan mode orchestration');
+// 规则不再有模式分支：plan/explore 两段随模式选择器一起删除，
+// 只剩「主循环准则」+ subagent + peer 三块（plan/explore 相关断言一并删除）。
+const rules = buildCoreAgentRules();
+assert(rules.includes('【Agent 准则】'), 'core rules header');
+assert(rules.includes('无 tool_calls 的文字回复即本轮结束'), 'loop end rule');
+assert(!rules.includes('【编排】'), 'no plan-mode orchestration rule');
+assert(!rules.includes('【探索】'), 'no explore-mode rule');
+assert(rules.includes('【只读并发调研】'), 'subagent rules always present');
 
-const agentRules = buildCoreAgentRules({ composerMode: 'agent' });
+const agentRules = rules;
 assert(agentRules.includes('若给出新需求则只做该需求'), 'new task still wins when it replaces the goal');
 assert(agentRules.includes('未改目标时根据压缩摘要'), 'same-session work continues from fold');
 assert(agentRules.includes('不要因历史已折叠而提问'), 'folded history is not a clarify trigger');
@@ -32,7 +36,6 @@ assert(timeChunk.includes('ISO 2026-09-09'), 'frozen system time');
 const packed = assembleSystemPrompt({
   languagePrompt: '用中文回答。',
   userSystem: '用户补充规则',
-  composerMode: 'agent',
   taskTier: { taskTier: 'trivial', reason: '单文件', suggestedFiles: ['a.ts'] },
   agentHome: { dieyunSkills: '/home/u/.dieyun/skills', dieyunWorkspace: '/home/u/.dieyun' },
   workspaceInfo: { workspacePath: 'D:/proj', kind: 'local' },

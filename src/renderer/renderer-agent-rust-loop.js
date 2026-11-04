@@ -1057,9 +1057,6 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             : undefined,
         // 请求快照用：Renderer 拼 prompt 时算出的折叠/裁剪事实（Main 无法重算）。
         contextAudit: options.contextAudit || null,
-        // 运行模式（agent / explore / plan）随请求交给 Main：完成验收的判定在 Main，
-        // 而「只读 explore 不该被运行时错误追着提示」只有 Renderer 知道。
-        agentMode: options.agentMode || undefined,
         undoTurnId:
           options.undoTurnId ||
           (typeof getUndoTurnIdForSession === 'function' && options.sessionId
@@ -1121,7 +1118,11 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       ? { ...body, messages: buildSegmentContinueMessages(loopMessages, finalContent) }
       : body;
 
+    // 以 IPC 结果为底、只覆盖渲染端加工过的字段：Main 挂在 result 上的结论字段
+    // （goal / readiness …）必须原样透传给下游。逐字段重建会让下游读到 undefined，
+    // 静默走「没有目标 / 没有验收结论」的分支 —— 会话目标自动续跑就是这么失效的。
     return {
+      ...(done && typeof done === 'object' ? done : null),
       runId: runId || coreRunId || null,
       content: finalContent || '(空响应)',
       trace: resultTrace,

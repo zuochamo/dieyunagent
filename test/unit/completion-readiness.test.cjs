@@ -282,14 +282,6 @@ describe('evaluateTurnReadiness：采集与降级', () => {
 
   const writeTrace = traceOf([editTool('src/a.js')]);
 
-  test('explore 只读：连证据都不采（不查诊断/浏览器）', async () => {
-    const gateway = fakeGateway({});
-    const r = await readiness.evaluateTurnReadiness({ gateway, trace: writeTrace, mode: 'explore' });
-    expect(r.ok).toBe(true);
-    expect(r.skipped).toBe(true);
-    expect(gateway.calls).toHaveLength(0);
-  });
-
   test('静态诊断走 workspace.diagnostics，浏览器证据走 browser.console/network', async () => {
     const gateway = fakeGateway({
       'workspace.diagnostics': { ok: true, items: [{ file: 'src/a.js', diagnostics: [] }] },
