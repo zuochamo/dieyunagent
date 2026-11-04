@@ -126,9 +126,12 @@ async function runPlanAgentLoop(ctx, plan) {
     strict: true
   });
   if (!llm.apiKey || !llm.baseUrl) {
+    // 路由与裸模型名都算「绑定过模型」：只说 route 的话，route 为空、模型名却在的计划
+    // 会被误报成「未配置 API Key」，用户根本看不出是模型名在这一端点上不存在。
+    const bound = String(plan.modelRoute || plan.model || '').trim();
     throw new Error(
-      plan.modelRoute
-        ? `计划绑定的模型不可用（${plan.modelRoute}），请在「模型设置」检查该模型/供应商是否仍启用`
+      bound
+        ? `计划绑定的模型不可用（${bound}），请在「模型设置」检查该模型/供应商是否仍启用`
         : '未配置 API Key，请在模型设置中填写'
     );
   }

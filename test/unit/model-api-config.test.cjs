@@ -292,6 +292,34 @@ describe('resolveApiConfigForRoute', () => {
       resolveDefaultApiConfig(settings)
     );
   });
+
+  it('裸模型名：端点是「谁启用了它」，不是默认端点', () => {
+    // 回归：计划里只留下模型名（supplier 的 deepseek-v4.1-flash）、route 为空，
+    // 旧实现拿默认端点（官方）的 key 发这个名字 → 上游 400。
+    const settings = settingsWith({
+      textModel: 'official-flash',
+      modelSuppliers: [
+        {
+          id: 's-lan',
+          baseUrl: 'https://lan/v1',
+          apiKey: 'sk-lan',
+          enabledModels: { 'lan-model': true }
+        }
+      ],
+      customModels: [
+        { id: 'c1', name: 'official-flash', kind: 'text', baseUrl: 'https://official', apiKey: 'sk-off' }
+      ]
+    });
+    expect(resolveApiConfigForRoute(settings, 'lan-model', { strict: true })).toEqual({
+      baseUrl: 'https://lan/v1',
+      apiKey: 'sk-lan',
+      model: 'lan-model'
+    });
+    // 自定义模型名优先于同名供应商模型（用户点名的那份配置）
+    expect(resolveApiConfigForRoute(settings, 'official-flash').baseUrl).toBe('https://official');
+    // 谁也提供不了这个名字：strict 下不猜（由调用方明确报错）
+    expect(isUsableApiConfig(resolveApiConfigForRoute(settings, 'ghost', { strict: true }))).toBe(false);
+  });
 });
 
 describe('pickSupplierModelId / 供应商默认模型名', () => {

@@ -142,27 +142,42 @@ function resolveTtsApiConfig(settings) {
 /**
  * Main 侧取文本模型配置的唯一入口（定时计划、无 Renderer 会话的一切调用方）。
  *
- * - 有 route（`custom:<id>` / `builtin:<sid>:<model>` / `auto-*`）：按路由解析；
- *   strict=true 时路由失效（模型/供应商已被删）直接返回不可用配置，调用方据此明确报错，
- *   避免静默换 key 跑到别的模型上。
- * - 无 route：走「可用供应商 → 文本自定义模型 → 顶层 legacy → builtin」兜底。
+ * **端点与模型名必须出自同一次解析** —— 这是本函数唯一的职责。
+ * 两个独立入参（route / model）各选一半，就会出现「A 端点的 key 发 B 端点的模型名」，
+ * 上游直接 400（`The supported API model names are ..., but you passed ...`）。
+ * 所以：
+ *   - 有 route（`custom:<id>` / `builtin:<sid>:<model>` / `auto-*`）：route 就是模型身份
+ *     （`builtin:` 自带 modelId），`model` **不覆盖**它；
+ *   - 无 route 但点名了模型：把这个名字当「裸模型名」解析端点（谁提供了它就用谁，
+ *     见 `resolveApiConfigForRoute` 的 plain 分支），名字原样发出；
+ *   - 都没有：走「可用供应商 → 文本自定义模型 → 顶层 legacy → builtin」兜底。
+ * strict=true 时指定的 route / 点名的模型解析不到端点就返回不可用配置，调用方据此明确报错，
+ * 避免静默换 key 跑到别的模型上。
  *
  * @param {object} settings loadModelSettings() 结果
  * @param {{ route?: string, model?: string, strict?: boolean }} [opts]
  */
 function resolveTextApiConfig(settings, opts = {}) {
   const s = settings && typeof settings === 'object' ? settings : {};
-  const route = String(opts.route || '').trim();
+  // Renderer 的 `default` 是「跟随默认」的记号，与空 route 同义（不是模型名）
+  const routeText = String(opts.route || '').trim();
+  const route = routeText === 'default' ? '' : routeText;
+  const model = String(opts.model || '').trim();
+  const strict = opts.strict === true;
   const cfg = route
-    ? resolveApiConfigForRoute(s, route, { strict: opts.strict === true })
-    : resolveDefaultApiConfig(s);
+    ? resolveApiConfigForRoute(s, route, { strict })
+    : model
+      ? resolveApiConfigForRoute(s, model, { strict })
+      : resolveDefaultApiConfig(s);
   // 整体继承解析结果：逐字段重建会丢掉 headers / authMode / userAgent，
   // 于是「供应商配了自定义头，定时计划/后台调用却依然 400」。
   return {
     ...cfg,
     baseUrl: cfg.baseUrl,
     apiKey: cfg.apiKey,
-    model: String(opts.model || cfg.model || s.textModel || '').trim()
+    // 有 route 时模型名只能来自 route（含 `builtin:` 的 modelId）；
+    // 无 route 时用点名的名字，没点名才回落到解析出来的默认模型。
+    model: String(route ? cfg.model : model || cfg.model || s.textModel || '').trim()
   };
 }
 

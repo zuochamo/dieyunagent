@@ -333,11 +333,22 @@ function resolveApiConfigForRoute(settings, route, opts = {}) {
     return strict ? cfg : resolveDefaultApiConfig(s);
   }
 
-  // plain：裸模型名（没有 custom: / builtin: 前缀的路由记号）
+  // plain：裸模型名（没有 custom: / builtin: 前缀的路由记号）。
+  // 模型名只说明「要哪个模型」，端点得靠「谁启用了它」这个事实去找 ——
+  // 否则调用方给了个名字、我们却拿默认端点的 key 去发，上游必回 400。
   const byName = listCustomModels(s).find((m) => String(m.name || '') === parsed.name);
   if (byName) {
     const options = mergedRequestOptions(byName, s);
     return asConfig(byName.baseUrl || s.baseUrl, byName.apiKey || s.apiKey, byName.name, options);
+  }
+  const host = listSuppliers(s).find(
+    (row) =>
+      isUsableApiConfig(asConfig(row.baseUrl, row.apiKey)) &&
+      supplierModelIds(row).includes(parsed.name) &&
+      isSupplierModelEnabled(row, parsed.name)
+  );
+  if (host) {
+    return asConfig(host.baseUrl, host.apiKey, parsed.name, requestOptionsFrom(host));
   }
   if (strict) {
     // 记号不是任何模型名，顶层 legacy 才是它的真实配置
