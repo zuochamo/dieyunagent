@@ -298,17 +298,35 @@ Agent 权限**，所以：
 
 桌面界面不是另写的前端：Electron 窗口本来就是浏览器页面（`contextIsolation: true` +
 `nodeIntegration: false`），渲染层的 RPC 本来就是自己连 Gateway 的 WebSocket
-（`renderer-gateway.js` 里 `new WebSocket(info.url)`）。headless 只是补了两件事：
+（`renderer-gateway.js` 里 `new WebSocket(info.url)`）。headless 只是补了四件事：
 
 1. `src/headless/desktop-ui.js` 给 `window.diecloud` 一个**浏览器替身**（preload 的 12 个接口里，
-   `getGatewayInfo` / `getWorkspace` 是真的，其余退化成无害空实现）；
+   `getGatewayInfo` / `getWorkspace` / `getPermissions` / `getModelSettingsFromMain` 是真的，
+   其余退化成无害空实现，没实现的保持 `undefined` 让渲染层走自己的降级分支）；
 2. `MobileBridge` 把 `/gateway` 的 WebSocket 升级**同源代理**到本机 Gateway（127.0.0.1:…），
-   帧原样转发 —— 所以 Gateway token 仍由 Gateway 自己校验（错的 token 依旧 `AUTH_FAILED`）。
+   帧原样转发 —— 所以 Gateway token 仍由 Gateway 自己校验（错的 token 依旧 `AUTH_FAILED`）；
+3. **聊天轮**：桌面窗口里这一轮是 `Renderer → preload IPC → Main`（Main 用 `runRustAgentLoop`
+   驱动 Rust `agent.loop.*`，工具在 Main 执行）。浏览器里没有 Main，所以
+   `src/headless/desktop-turn.js` 在服务器上用**同一份** `runRustAgentLoop` + 同一份
+   `createMainToolBridge()` 把这一轮等价地跑一遍：渲染层把 messages / tools / apiConfig 送上来，
+   phase 事件按 `cancelToken` 推回页面（`agentRustLoopRun` / `agentRustLoopCancel` /
+   `onAgentRustLoopPhase` 三个替身接口，走同源 `/ws`）。**没有第二条循环实现**；
+   页面关掉/刷新 = 会话断开，服务器会中止它发起的那一轮；
+4. **LLM 请求**：桌面端由 Main 代发；浏览器里走同源 `POST /llm`（上游地址在
+   `x-dieyun-upstream` 请求头里，服务端转发并原样流式回传）。这么做不是因为架构偏好：
+   模型端点通常不返回 CORS 头（实测内网 gunicorn 端点只有 `Allow`，没有
+   `Access-Control-Allow-Origin`），浏览器跨源 POST 会被直接拦掉。`/llm` 同样要 token。
+
+注入进页面的东西（都在 token 之后才下发，与「拿到 token 就等于拿到这台机器的 Agent」同一个
+信任边界）：Gateway token（仍由 Gateway 校验）、模型配置（含 API key，渲染层要用它拼请求头）、
+权限档位快照（决定给模型哪些工具）。**权限档位只读**：浏览器里改档位不会写回服务器，
+请用桌面端或 `permissions` 配置改。
 
 浏览器里拿不到的能力（点了不会崩，但给不出结果）：
 
 - 原生文件选择框、拖拽文件的真实路径（`getPathForFile` 返回 null）；
 - 「连接」页里的 SSH / 远端 Gateway 面板、终端停止按钮；
+- 计划/子 Agent 的 `agentPlannerRun` 与子 Agent 过程卡片（IPC 专用；主聊天轮不受影响）；
 - 依赖 Electron 的 `browser_*` / `computer_*` 工具（与 §6 的不可用清单一致）。
 
 渲染层 `<script>` 用到的三个浏览器包（mermaid / mammoth / xlsx）不 `require`、因此不在 Node 依赖闭包里，
@@ -338,6 +356,7 @@ Agent 权限**，所以：
 | 与桌面共用同一个 `DIEYUN_USER_DATA` | 不要。桌面用 `%APPDATA%/dieyunagent`，服务器给独立目录（`/var/lib/dieyun-agent`） |
 | `run` 返回空但退出码 0 之外的怪状态 | `run` 无正文时退出码为 2；`--json` 下看 `{"type":"done"}` 里 `content` 与 `aborted` |
 | 想要桌面窗口 | 这个包**不含 Electron**。另装桌面版 deb；两者可并存，但数据目录要分开 |
+| 桌面端自动更新卡住，或屏幕上一直有个密码窗 | 安装走 `systemd-run --user` → `pkexec` → `dpkg`，polkit 会在**桌面会话**弹授权窗等人工输入。没人点就等满 5 分钟超时，随后自动 `systemctl --user stop` 掉该单元（不会留半截 dpkg）。手工补救：`sudo dpkg -i <deb>`（真机实测记录见 `src/main/linux-deb-install.js` 顶部） |
 
 日志都走 stderr（`--json` 时 stdout 只有事件），排障优先看 `--log-level debug`。
 
