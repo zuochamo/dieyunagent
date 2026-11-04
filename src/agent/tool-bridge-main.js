@@ -106,6 +106,10 @@ function sanitizeToolResultForApi(name, result) {
       height: result.height,
       ...(result.visionImage ? { visionImage: result.visionImage } : {}),
       ...(result.visionTokens ? { visionTokens: result.visionTokens } : {}),
+      // 界面可渲染的图片凭证（见 record-browser-screenshot 关卡说明）；白名单字段，必须显式透传
+      ...(Array.isArray(result.imagePaths) && result.imagePaths.length
+        ? { imagePaths: result.imagePaths }
+        : {}),
       base64Omitted: true,
       base64Length: String(result.base64).length,
       // 只陈述事实：是否真进了视觉通道由 after 关卡判定后改写本字段，
@@ -150,6 +154,9 @@ function sanitizeToolResultForApi(name, result) {
       saveError: result.saveError,
       ...(result.visionImage ? { visionImage: result.visionImage } : {}),
       ...(result.visionTokens ? { visionTokens: result.visionTokens } : {}),
+      ...(Array.isArray(result.imagePaths) && result.imagePaths.length
+        ? { imagePaths: result.imagePaths }
+        : {}),
       base64Omitted: true,
       base64Length: String(result.base64).length,
       note: result.note || 'Screenshot captured; PNG kept out of this tool payload'
@@ -1301,6 +1308,8 @@ function createMainToolBridge(deps) {
       ok: true,
       visionInjected: true,
       mime,
+      // 与 record-browser-screenshot 同一契约：这就是「这张图在界面上可以渲染」的凭证
+      ...(path ? { imagePaths: [path] } : {}),
       base64Omitted: true,
       base64Length: base64.length,
       note: '图片已作为视觉输入附在下一轮消息中，请直接据此作答，无需重复读取。'
@@ -1424,6 +1433,8 @@ function createMainToolBridge(deps) {
       visionInjected: queued > 0,
       visionImagesProvided: images.length,
       visionImagesDropped: images.length - queued,
+      // 界面可渲染的图片凭证（与 record-browser-screenshot 同一契约）：只列真的留下来副本的那些
+      ...(handles.length ? { imagePaths: handles.map((h) => h.path) } : {}),
       note: [rest.note, suffix].filter(Boolean).join(' ')
     };
   }
@@ -1526,7 +1537,11 @@ function createMainToolBridge(deps) {
                 ...(handle
                   ? {
                       ...(handle.id ? { visionImage: handle.id } : {}),
-                      ...(handle.tokens > 0 ? { visionTokens: handle.tokens } : {})
+                      ...(handle.tokens > 0 ? { visionTokens: handle.tokens } : {}),
+                      // UI 侧「这张图能在界面上渲染」的唯一字段（渲染进程只认它，不解析文案里的路径）。
+                      // 只在结果本身没有落盘路径时补：browser_screenshot 自带 path / savePath，
+                      // 再写一遍就是同一事实的第二个表示。
+                      ...(!c.result.path && !c.result.savePath ? { imagePaths: [handle.path] } : {})
                     }
                   : {}),
                 note: queued

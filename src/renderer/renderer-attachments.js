@@ -356,7 +356,7 @@ async function handleComposerDrop(e) {
 let composerPasteCaptureBound = false;
 
 function initComposerPasteAndDrop() {
-  bindComposerImageLightbox();
+  bindImageLightbox();
   if (!composerPasteCaptureBound) {
     composerPasteCaptureBound = true;
     document.addEventListener(
@@ -390,41 +390,105 @@ function initComposerPasteAndDrop() {
   });
 }
 
-function closeComposerImageLightbox() {
-  const overlay = $('composer-image-lightbox');
-  const img = $('composer-image-lightbox-img');
+/**
+ * 通用图片全屏查看（**单一来源**：composer 附件预览与回答里的截图共用这一份）。
+ *
+ * 只是「给一个 URL，放大看」：不读盘、不管权限 —— 谁调谁负责拿到 URL
+ * （回答里的图拿的是已有的 blob URL，不重复读盘）。
+ */
+let imageLightboxAction = null;
+let imageLightboxOnClose = null;
+
+function closeImageLightbox() {
+  const overlay = $('image-lightbox');
+  const img = $('image-lightbox-img');
+  const bar = $('image-lightbox-bar');
+  const nameEl = $('image-lightbox-name');
+  const actionBtn = $('image-lightbox-action');
   if (overlay) overlay.hidden = true;
   if (img) {
     img.removeAttribute('src');
     img.alt = '';
   }
+  if (nameEl) {
+    nameEl.textContent = '';
+    nameEl.hidden = true;
+  }
+  if (actionBtn) {
+    actionBtn.textContent = '';
+    actionBtn.hidden = true;
+  }
+  if (bar) bar.hidden = true;
+  imageLightboxAction = null;
+  const onClose = imageLightboxOnClose;
+  imageLightboxOnClose = null;
+  if (typeof onClose === 'function') onClose();
 }
 
-function openComposerImageLightbox(src, alt) {
-  const overlay = $('composer-image-lightbox');
-  const img = $('composer-image-lightbox-img');
+/**
+ * @param {string} src 可直接塞进 img.src 的地址（blob: / data: / file 预览地址）
+ * @param {string} [alt]
+ * @param {{ name?: string, actionLabel?: string, onAction?: () => void, onClose?: () => void }} [opts]
+ *   `name`：底部文件名；`actionLabel` + `onAction`：底部次要动作（如「在产物面板打开」）
+ */
+function openImageLightbox(src, alt, opts) {
+  const overlay = $('image-lightbox');
+  const img = $('image-lightbox-img');
   if (!overlay || !img || !src) return;
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const bar = $('image-lightbox-bar');
+  const nameEl = $('image-lightbox-name');
+  const actionBtn = $('image-lightbox-action');
+  const label = String(o.name || '').trim();
+  imageLightboxAction = typeof o.onAction === 'function' ? o.onAction : null;
+  imageLightboxOnClose = typeof o.onClose === 'function' ? o.onClose : null;
   img.src = src;
-  img.alt = alt || '';
+  img.alt = alt || label;
+  if (nameEl) {
+    nameEl.textContent = label;
+    nameEl.hidden = !label;
+  }
+  const showAction = !!imageLightboxAction && !!o.actionLabel;
+  if (actionBtn) {
+    actionBtn.textContent = showAction ? String(o.actionLabel) : '';
+    actionBtn.hidden = !showAction;
+  }
+  if (bar) bar.hidden = !label && !showAction;
   overlay.hidden = false;
 }
 
-let composerImageLightboxBound = false;
+let imageLightboxBound = false;
 
-function bindComposerImageLightbox() {
-  if (composerImageLightboxBound) return;
-  composerImageLightboxBound = true;
-  const closeBtn = $('composer-image-lightbox-close');
+function bindImageLightbox() {
+  if (imageLightboxBound) return;
+  imageLightboxBound = true;
+  const closeBtn = $('image-lightbox-close');
   if (closeBtn) {
     closeBtn.addEventListener('click', (e) => {
       e.preventDefault();
-      closeComposerImageLightbox();
+      closeImageLightbox();
+    });
+  }
+  const overlay = $('image-lightbox');
+  if (overlay) {
+    // 点空白处关（图片本身不关，避免看大图时误触）
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeImageLightbox();
+    });
+  }
+  const actionBtn = $('image-lightbox-action');
+  if (actionBtn) {
+    actionBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const run = imageLightboxAction;
+      closeImageLightbox();
+      if (typeof run === 'function') run();
     });
   }
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    const box = $('composer-image-lightbox');
-    if (box && !box.hidden) closeComposerImageLightbox();
+    const box = $('image-lightbox');
+    if (box && !box.hidden) closeImageLightbox();
   });
 }
 
@@ -458,7 +522,7 @@ function renderAttachmentChips() {
       img.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        openComposerImageLightbox(att.previewUrl, att.originalName || '');
+        openImageLightbox(att.previewUrl, att.originalName || '', { name: att.originalName || '' });
       });
       chip.appendChild(img);
     }

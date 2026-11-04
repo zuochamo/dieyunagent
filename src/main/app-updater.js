@@ -175,8 +175,37 @@ function createAppUpdater(deps) {
     );
   }
 
+  /**
+   * Linux（deb/rpm）的安装交给 electron-updater 自己：DebUpdater 会用 sudo/pkexec 调
+   * dpkg -i 安装并重启应用（见 electron-updater/out/DebUpdater.js）。
+   * Windows 那套引导脚本依赖 powershell.exe / explorer.exe，在 Linux 上必然失败，
+   * 所以按平台分流，而不是让它先抛错再兜底。
+   */
+  function installOnLinux() {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+      return true;
+    } catch (err) {
+      log.error('Linux 更新安装失败:', err && (err.message || err));
+      sendUpdateUiState({
+        phase: 'error',
+        message: (err && (err.message || String(err))) || '更新安装失败'
+      });
+      return false;
+    }
+  }
+
   function installPendingUpdate() {
     if (!pendingUpdateInfo) return false;
+    if (process.platform === 'linux') {
+      sendUpdateUiState({
+        phase: 'installing',
+        version: pendingUpdateInfo.version || null,
+        message: '正在启动安装程序…',
+        percent: null
+      });
+      return installOnLinux();
+    }
     const installerPath = getPendingInstallerPath();
     if (!installerPath) {
       sendUpdateUiState({ phase: 'error', message: '找不到已下载的安装包' });

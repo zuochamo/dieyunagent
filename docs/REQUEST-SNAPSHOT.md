@@ -75,6 +75,25 @@ JSON.parse(full.messagesJson)   // ← 就是当时发出去的 messages 数组
 `messagesOut` 恒比 `messagesIn` 多一条，和快照行的 `messageCount` 也对不上，
 排查"到底丢了几条"会被这一条常数差带偏。
 
+### Q2.1「这轮索引内容进上下文了吗？」
+
+`contextAudit.index` —— prep 侧产出的**注入事实**，用来补上工具遥测看不见的那一半
+（自动注入走 RPC，不进 `tool-telemetry.jsonl`）：
+
+```jsonc
+{
+  "index": {
+    "allow": true,        // 这轮是否放行碰索引（allowCodebase）
+    "code": "auto",       // "auto" 自动检索 | "explicit" @Codebase | null 没注入
+    "repoMap": true       // 【仓库结构图】是否进了上下文
+  }
+}
+```
+
+统计信息页的「注入 · 仓库结构图 / 注入 · 相关代码」两行就是对它的聚合
+（RPC `memory.request_snapshot_index_audit`，口径见 `docs/INDEX-VALUE-REVIEW.md` §7.1.1）。
+**没有 `index` 字段的行是本次改造前的历史行**，聚合时与「明确没注入」分开计数。
+
 ### Q3「这轮为什么没压缩 / 压了多少？」
 
 看 `compacted` / `tokensBefore` / `tokensAfter` / `tokenBudget` / `triggerRatio` / `compactionRoundCount` / `compactionArchiveId`：

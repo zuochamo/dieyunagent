@@ -19,12 +19,31 @@ const EMBED_TEXT_MAX_CHARS: usize = 6000;
 /// 改成闸门后仍然是「进程级单一来源」（多个索引库同时建也只共享这 N 个名额），
 /// 但单次建库能用满它。**保守取 4**：端点普遍按 RPM/TPM 限流，而这里没有 429 退避层
 /// （那是加速掩盖问题；真被限流时应当报 `EMBEDDING_API`，见 docs/VECTOR-SEARCH.md）。
+///
+/// **批量路径另有一道少 1 个名额的小闸门**（见 `embed_batch_inflight`）：交互式单条查询
+/// （`memory.long_recall` 的查询向量）不能被后台建库饿死。
 pub const EMBED_CONCURRENCY: usize = 4;
 
 static EMBED_INFLIGHT: OnceLock<Semaphore> = OnceLock::new();
 
 fn embed_inflight() -> &'static Semaphore {
     EMBED_INFLIGHT.get_or_init(|| Semaphore::new(EMBED_CONCURRENCY))
+}
+
+/// 批量路径的并发名额（比全进程闸门少 1）。
+///
+/// 为什么需要它：闸门是 FIFO 公平的，而建库一次会往里面排几百个批次请求 ——
+/// 用户的 `memory.long_recall` 只能排在它们后面。实测（2026-11-02 13:43–15:19，
+/// `E:\dieyunagent` 反复增量建库期间）core 侧单次 recall 耗时 131s~438s，
+/// 宿主侧 120s 超时 10 次。留出一个常驻名额后，交互查询最多排在 3 个批次请求之后，
+/// 等待从「几分钟」降到「几个请求的时间」。
+///
+/// 口径仍是本文件：总量上限没变（还是 `EMBED_CONCURRENCY` 个真正在飞的 HTTP），
+/// 只是把「谁能占满」改成「批量不许占满」。
+static EMBED_BATCH_INFLIGHT: OnceLock<Semaphore> = OnceLock::new();
+
+fn embed_batch_inflight() -> &'static Semaphore {
+    EMBED_BATCH_INFLIGHT.get_or_init(|| Semaphore::new(EMBED_CONCURRENCY.saturating_sub(1).max(1)))
 }
 
 /// 向量后端配置。**只支持远程 OpenAI 兼容 /embeddings 端点**：
@@ -191,6 +210,12 @@ async fn embed_batch(
     cfg: &EmbeddingConfig,
     batch: Vec<(i64, String)>,
 ) -> Result<Vec<(i64, Vec<f32>)>, CoreError> {
+    // 批量席位先占、再进全进程闸门：这样建库永远占不满全部名额，
+    // 交互式单条查询（memory.long_recall 的查询向量）不会被几百个批次请求堵在后面。
+    let _batch_permit = embed_batch_inflight()
+        .acquire()
+        .await
+        .map_err(|_| CoreError::rpc("EMBEDDING_HTTP", "embedding 批量闸门已关闭"))?;
     let texts: Vec<String> = batch
         .iter()
         .map(|(_, text)| truncate_embed_text(text))
@@ -327,5 +352,17 @@ mod tests {
         let text = "汉".repeat(EMBED_TEXT_MAX_CHARS + 1);
         let cut = truncate_embed_text(&text);
         assert_eq!(cut.chars().count(), EMBED_TEXT_MAX_CHARS);
+    }
+
+    /// 批量席位必须比全进程闸门少 1：少掉的那个是留给交互式单条查询（memory.long_recall）
+    /// 的常驻名额，否则建库期间查询向量会排在几百个批次请求后面（实测 131s~438s）。
+    #[test]
+    fn batch_gate_reserves_one_slot_for_interactive_queries() {
+        assert!(EMBED_CONCURRENCY > 1);
+        assert_eq!(
+            embed_batch_inflight().available_permits(),
+            EMBED_CONCURRENCY - 1
+        );
+        assert_eq!(embed_inflight().available_permits(), EMBED_CONCURRENCY);
     }
 }

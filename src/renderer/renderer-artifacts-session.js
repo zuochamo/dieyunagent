@@ -339,7 +339,10 @@ function isDeleteToolName(name) {
 function toolArtifactPath(tool) {
   if (!tool) return '';
   if (typeof artifactPathFromTool === 'function') {
-    return artifactPathFromTool(tool);
+    // 写/删工具的路径归属在 artifactPathFromTool；它对**读类工具**（fs_read_file 看图的场景）
+    // 按设计返回空 —— 这里必须继续往 args 走，否则「聊天里展示过的图片」这条来源永远拿不到路径。
+    const viaEditTool = artifactPathFromTool(tool);
+    if (viaEditTool) return viaEditTool;
   }
   const args =
     typeof window.resolveToolArgsFromTrace === 'function'

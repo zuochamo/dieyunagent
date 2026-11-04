@@ -6,7 +6,7 @@
          漏了它 Chromium 会报 Media load rejected by URL safety check
          （表现为 NotSupportedError: no supported source found）。 -->
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; media-src 'self' blob: data:; connect-src *;" />
+          content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; media-src 'self' blob: data: dieyun-media:; connect-src *;" />
     <title>叠云 Agent</title>
     <script src="./renderer-theme-bootstrap.js"></script>
     <link rel="stylesheet" href="./styles.css" />
@@ -104,6 +104,13 @@
             <div class="thinking-live-float-user" id="last-turn-float-user"></div>
           </div>
           <div class="composer-box" id="composer-box">
+                <!-- 会话绑定对端（内网 Agent 互通）：放在输入框正上方常显。
+                     只有当这个会话是「与某台 agent 的对话」时才出现 —— 在这种会话里打字
+                     不跑本机模型、直接发给对方，提示必须贴着输入框，藏在面板里等于没有。 -->
+                <div class="peer-session-row" id="peer-session-row" hidden>
+                  <span id="peer-session-info"></span>
+                  <button type="button" class="ghost-btn peer-session-unlink" id="peer-session-unlink" data-i18n="peer_unlink">解除绑定</button>
+                </div>
                 <div class="boot-chat-progress is-idle" id="boot-chat-progress" aria-busy="false" aria-label="正在加载对话" title="拖动调整输入框高度">
                   <div class="boot-chat-progress-track">
                     <div class="boot-chat-progress-fill" id="boot-chat-progress-fill"></div>
@@ -1158,10 +1165,6 @@
               <span class="peer-bar-text" id="peer-status" data-i18n="connect_reading">正在读取连接信息…</span>
               <button type="button" class="ghost-btn peer-bar-btn" id="peer-refresh" data-i18n="refresh">刷新</button>
             </div>
-            <div class="peer-session-row" id="peer-session-row" hidden>
-              <span id="peer-session-info"></span>
-              <button type="button" class="ghost-btn peer-session-unlink" id="peer-session-unlink" data-i18n="peer_unlink">解除绑定</button>
-            </div>
             <div class="peer-list" id="peer-list"></div>
             <div class="peer-foot">
               <div class="field field-inline peer-name-row">
@@ -1779,6 +1782,14 @@
                   <p><strong>自动增量更新</strong>（默认开）：保存源文件或打开工作区后，在后台增量更新索引；需先对工作区完成一次「重建」。关闭后仅手动重建时更新。</p>
                 </section>
                 <section class="help-usage-section">
+                  <h3>索引使用率怎么看</h3>
+                  <p>设置 → 帮助 →「统计信息」里的「索引使用率」有<strong>两半</strong>：<strong>上面两行是工具调用</strong>（<code>codebase_search</code> / <code>graph</code> / <code>read_symbol</code>，进工具遥测）；<strong>下面两行是自动注入</strong>——每轮准备上下文时把「仓库结构图」与「相关代码」塞给模型，走 RPC，<strong>不进工具遥测</strong>。</p>
+                  <p><strong>为什么必须一起看：</strong>索引只在「用户不知道文件在哪」时才比 grep 强。会话里你往往直接给了路径，grep 就够，所以工具调用占比天然很低；而自动注入是另一条通道，模型上下文里已经有骨架就不必再调工具。<strong>只看上面两行，会把「一直在注入、所以不必额外调工具」误读成「索引没人用」</strong>，进而砍掉一个正在工作的功能。</p>
+                  <p><strong>实测参考：</strong>2026-11-03 本机 4 天窗口里工具调用占 <code>0.6%</code>（<code>read_symbol</code> 45 + <code>graph</code> 1），同期「仓库结构图」注入 <code>833/1771</code> 轮（<code>47%</code>）。索引一直在用，只是不进遥测。</p>
+                  <p><strong>注入行的分母</strong>是「带索引审计的轮次」：这项事实从本次改版起才记录，历史轮次没有，所以升级后可能先显示「还没有带索引审计的请求快照」，跑几轮才出数。core 未就绪时显示「读不到请求快照」，不会画成 0。</p>
+                  <p><strong>什么时候才算真有问题：</strong>要同时满足「向量通道可用（设置 → 模型设置 → 向量索引已启用且吞吐够）」+「工具调用与注入占比长期都接近 0」才说明触发链路或能力坏了；只凭调用占比下结论就是同一种误读。判定口径与历次整改记录见仓库 <code>docs/INDEX-VALUE-REVIEW.md</code> §7。</p>
+                </section>
+                <section class="help-usage-section">
                   <h3>主题</h3>
                   <p>切换浅色 / 深色主题，调节字体大小（90%～150%）、窗口透明度（50%～100%）与色温（偏冷 / 中性 / 偏暖），均保存在本机。</p>
                   <p>可单独设置思考 trace 的展示偏好：推理摘要、思考标题，以及 Shell / 编辑工具结果的默认展开状态；也可关掉「显示完成验收提示」（每轮结束时按证据提示「做完了没」，只提示、不自动续跑）。</p>
@@ -1878,10 +1889,10 @@
                 </section>
                 <section class="help-tool-harness" aria-labelledby="help-index-usage-title">
                   <div class="model-usage-head">
-                    <h3 id="help-index-usage-title">索引使用率（全部遥测记录）</h3>
+                    <h3 id="help-index-usage-title">索引使用率（工具调用 + 自动注入）</h3>
                     <span id="help-index-usage-window" class="help-index-window"></span>
                   </div>
-                  <p class="settings-page-desc">Agent 主动调用代码索引 / 结构索引的比例。索引只在「用户不知道文件在哪」时才比 grep 强，占比长期接近 0 说明触发链路或能力本身有问题；库状态见侧栏「索引」面板。</p>
+                  <p class="settings-page-desc">Agent 主动调用代码索引 / 结构索引的比例。上面两行是<b>工具调用</b>，下面两行是 prep 的<b>自动注入</b>（不进遥测）——两个口径要一起看，说明见帮助 →「使用说明 → 索引使用率怎么看」。库状态见侧栏「索引」面板。</p>
                   <div class="help-index-usage-rows" id="help-index-usage-rows">
                     <p class="model-usage-empty">打开本页后加载</p>
                   </div>
@@ -1931,6 +1942,13 @@
                 <h3 class="help-about-name">叠云 Agent</h3>
                 <p class="help-about-version" id="help-about-version">版本加载中…</p>
                 <p class="help-about-desc">本地 AI 助手 · 叠云 Agent</p>
+                <!-- 应用内唯一的「检查更新」入口 + 状态行（渲染在 renderer-update.js，唯一来源）。
+                     托盘菜单在 Ubuntu/GNOME 上默认看不到图标，没有这块就等于没有入口；
+                     状态行覆盖检查中 / 下载中 / 已就绪 / 安装中 / 失败，失败不再静默。 -->
+                <div class="help-about-update">
+                  <button type="button" class="ghost-btn" id="help-update-check">检查更新</button>
+                  <span class="help-about-update-state" id="help-update-state">未检查</span>
+                </div>
                 <p class="field-hint">日志保存在本机用户目录，包含应用主进程与 Gateway 等记录。</p>
               </div>
             </div>
@@ -2138,9 +2156,14 @@
       </div>
     </div>
 
-    <div class="composer-image-lightbox" id="composer-image-lightbox" hidden>
-      <button type="button" class="composer-image-lightbox-close" id="composer-image-lightbox-close" aria-label="关闭">×</button>
-      <img id="composer-image-lightbox-img" alt="" />
+    <!-- 通用图片全屏查看（composer 附件预览 / 回答里的图共用，逻辑在 renderer-attachments.js） -->
+    <div class="image-lightbox" id="image-lightbox" hidden>
+      <button type="button" class="image-lightbox-close" id="image-lightbox-close" aria-label="关闭">×</button>
+      <img id="image-lightbox-img" alt="" />
+      <div class="image-lightbox-bar" id="image-lightbox-bar" hidden>
+        <span class="image-lightbox-name" id="image-lightbox-name"></span>
+        <button type="button" class="image-lightbox-action" id="image-lightbox-action" hidden></button>
+      </div>
     </div>
     <div class="agent-toast-stack" id="agent-toast-stack" aria-live="polite" aria-relevant="additions"></div>
 
@@ -2183,6 +2206,8 @@
     <script src="./renderer-artifacts-browse.js"></script>
     <script src="./renderer-artifact-diff-view.js"></script>
     <script src="./renderer-artifacts.js"></script>
+    <!-- 正式回答里的媒体（截图 / 模型产图 / 音频 / 视频）：占位绑定 + 本轮媒体条，读取与释放复用产物面板 -->
+    <script src="./renderer-answer-figures.js"></script>
     <!-- 文件面板标签：打开列表 / 持久编辑区 / 每标签未保存状态（唯一来源） -->
     <script src="./renderer-artifacts-tabs.js"></script>
     <!-- Agent 写入跟随：编辑区实时预览的唯一入口（零 RPC 增量写入） -->

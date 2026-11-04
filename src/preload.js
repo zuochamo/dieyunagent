@@ -134,6 +134,8 @@ contextBridge.exposeInMainWorld('diecloud', {
   stageFiles: (paths) => ipcRenderer.invoke('files:stage', paths),
   stageBase64: (payload) => ipcRenderer.invoke('files:stage-base64', payload),
   readClipboardImage: () => ipcRenderer.invoke('clipboard:read-image'),
+  /** 用系统播放器打开（媒体播不了时的兜底）；路径由 Main 经 Gateway 校验解析 */
+  openLocalPath: (filePath) => ipcRenderer.invoke('media:open-path', { filePath: String(filePath || '') }),
 
   // Electron 32 起渲染层 File.path 被移除，拖拽文件取真实路径只能走 webUtils。
   getPathForFile: (file) => {

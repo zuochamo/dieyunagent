@@ -294,6 +294,12 @@ impl ServiceSnapshot {
                     .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "id 必填"))?;
                 self.memory.request_snapshot_get(id)
             }
+            // 「索引内容有没有进上下文」全窗口聚合：口径在 memory::snapshot::count_index_injections
+            // 的 doc 注释里（工具遥测看不见自动注入，统计页不能只拿调用占比评估索引）。
+            "memory.request_snapshot_index_audit" => {
+                let since = params.get("since").and_then(|v| v.as_i64());
+                self.memory.count_index_injections(since)
+            }
             "memory.session_archive" => {
                 let session_id = params
                     .get("sessionId")

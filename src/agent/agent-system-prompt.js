@@ -51,6 +51,7 @@ function buildCoreAgentRules(opts = {}) {
     '- 无 tool_calls 的文字回复即本轮结束；还要检查就继续调用工具，不要空转描述下一步。',
     '- 解释架构/流程/状态机时，可用 ```mermaid 代码块（客户端 Mermaid 11 自动渲染成 SVG）。',
     '- Mermaid 写法：首行 flowchart TB/LR 或 sequenceDiagram；节点 ID 用英文；中文/括号/斜杠标签务必双引号如 Main["主进程"]、subgraph S1["Gateway (RPC)"]；边文案 -->|"步骤"|；每回复最多 1 个 mermaid 块；勿用 HTML/<br/>/style/classDef；节点 ≤15、嵌套 subgraph ≤2；语法不确定时用 Markdown 列表兜底。',
+    '- 交付里要把文件本身一起给用户看（截图、生成的图、音频、视频）时，用 Markdown 嵌入工作区相对路径：`![说明](out/demo.mp4)` —— 客户端把图片渲染成可点击放大的图、把音视频渲染成可播放/可拖进度的播放器，用户不必自己去翻文件；`https://` 外链不会内联。',
     '- 项目地图：`.dieyun/AGENTS.md` 概览若已出现在本轮上下文则优先用；否则用 fs_read_file。长期记录用 agents_md_propose 或 fs_edit。',
     '- 会话记忆：用户追问「刚才说了什么/继续上文/你已经给过方案」时，以 messages 中本会话 assistant 回复与【本会话近期对话】为准；勿把【项目记忆】【长期记忆】【工作记忆模板】当成同一会话内刚才的回答。',
     '- 任务优先级：【当前任务】若给出新需求则只做该需求；未改目标时根据压缩摘要、折叠历史与近轮原文继续未完成工作。摘要不得覆盖与当前任务冲突的新指令。',

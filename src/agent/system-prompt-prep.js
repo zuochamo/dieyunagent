@@ -550,6 +550,20 @@ function formatMemoryLines(rows, maxLen) {
  */
 
 /**
+ * 「索引内容到底有没有进上下文」—— 与工具遥测互补的那一半事实。
+ *
+ * 遥测只记 `codebase_search` / `graph` / `read_symbol` 的**主动调用**，而 prep 的自动注入
+ * 走 RPC、根本不进遥测。缺了这份事实，统计页只能拿「工具调用占比」评估索引，于是把
+ * 「正在注入、所以不需要额外调工具」读成「没人用」——2026-11-03 的真实读数就是
+ * 工具调用 0.6%，同期 `repo_map` 注入 833/1771 轮（docs/INDEX-VALUE-REVIEW.md §7.5）。
+ *
+ * 事实产生在这里（Main 是唯一知道「哪个块真的进了 turnHost」的人），落点沿用已有的
+ * `memoryAudit` 通道：Renderer → contextAudit → `request_snapshots.context_audit_json.index`。
+ *
+ * @typedef {{allow: boolean, code: 'explicit'|'auto'|null, repoMap: boolean}} IndexInjectionAudit
+ */
+
+/**
  * @param {MemoryInjectionAudit | null | undefined} audit
  * @param {string} key
  * @param {MemoryBlockAudit & {from?: string, runId?: string}} data
@@ -1032,6 +1046,9 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   // 后台任务补报排在最前：先解释「上一轮启动的那条跑完了没」，再谈代码与记忆
   const settledJobsBlock = await fetchSettledJobsBlock(snap, invokeRpc);
   if (settledJobsBlock) turnHost.push(settledJobsBlock);
+  // 索引注入事实（见下方 indexAudit）：这两个变量是「真的进了上下文」的唯一凭据，
+  // 不能事后再从 turnHost 里找标题猜 —— 空命中块和「没注入」是两件不同的事。
+  let codeBlockInjected = false;
   if (allowCodebase) {
     const codebaseBlock = await fetchCodebaseBlock(
       {
@@ -1051,6 +1068,7 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
       }
     } else if (codebaseBlock) {
       turnHost.push(codebaseBlock);
+      codeBlockInjected = true;
     }
   }
   if (injectCode) {
@@ -1072,7 +1090,15 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   const injectKnowledge = !!String(userQuery || '').trim();
   /** @type {MemoryInjectionAudit} */
   const memoryAudit = {};
-  const knowledgeBlocks = await Promise.all([
+  const [
+    handoffBlock,
+    repoMapBlock,
+    projectMemoryBlock,
+    globalMemoryBlock,
+    compactionBlock,
+    workMemoryBlock,
+    skillsBlock
+  ] = await Promise.all([
     fetchSessionHandoffBlock(snapshot, invokeRpc, memoryAudit),
     fetchGraphRepoMapBlock(snap, invokeRpc, lim),
     injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim, memoryAudit) : Promise.resolve(''),
@@ -1081,7 +1107,15 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     fetchWorkMemoryBlock(snap, invokeRpc, memoryAudit),
     fetchSkillsBlock(snap, deps, lim)
   ]);
-  for (const block of knowledgeBlocks) {
+  for (const block of [
+    handoffBlock,
+    repoMapBlock,
+    projectMemoryBlock,
+    globalMemoryBlock,
+    compactionBlock,
+    workMemoryBlock,
+    skillsBlock
+  ]) {
     if (block) turnHost.push(block);
   }
   const mcpBlock = await fetchMcpBlock(snapshot, deps);
@@ -1122,7 +1156,18 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   });
   // 注入事实随 prompt 一起返回：Renderer 把它塞进 contextAudit → request_snapshots，
   // 上下文面板据此显示「本轮注入了哪几条」。
-  return Object.keys(memoryAudit).length ? { ...packed, memoryAudit } : packed;
+  /** 本轮索引注入事实，见 `IndexInjectionAudit`。@type {IndexInjectionAudit} */
+  const indexAudit = {
+    allow: allowCodebase,
+    // `explicit` = 用户点了 `@Codebase`（limit/标签都不同），`auto` = 结构信号放行的自动检索
+    code: codeBlockInjected ? (textHasCodebaseMention(userQuery) ? 'explicit' : 'auto') : null,
+    repoMap: !!repoMapBlock
+  };
+  return {
+    ...packed,
+    ...(Object.keys(memoryAudit).length ? { memoryAudit } : {}),
+    indexAudit
+  };
 }
 
 function resolveAgentHome(userDataPath, workspacePath) {

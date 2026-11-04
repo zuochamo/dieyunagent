@@ -158,6 +158,21 @@ async function runPlannerPipelineViaMain(params, options = {}) {
   }
 }
 
+/**
+ * 把工具结果里的「界面可渲染图片凭证」搬到 trace 条目上。
+ *
+ * 唯一字段是 `imagePaths`（Main 侧 record-browser-screenshot / absorb-mcp-vision 写入，
+ * 见 tool-bridge-main；渲染进程不解析 note 文案里的路径）。base64 一律不搬。
+ * 账本 result 超过 toolResultMaxJson 被 tailAwarePreview 顶替时这里拿不到，属预期：
+ * 那种情况下界面按「没有图」处理，而不是去猜。
+ */
+function liftToolImagePaths(tool, result) {
+  const list = result && typeof result === 'object' ? result.imagePaths : null;
+  if (!Array.isArray(list) || !list.length) return;
+  const paths = list.filter((p) => typeof p === 'string' && p.trim()).slice(0, 8);
+  if (paths.length) tool.imagePaths = paths;
+}
+
 function mapRustAgentTrace(rustTrace, prefixTrace) {
   const out = Array.isArray(prefixTrace) ? prefixTrace.slice() : [];
   if (!Array.isArray(rustTrace)) return out;
@@ -189,6 +204,7 @@ function mapRustAgentTrace(rustTrace, prefixTrace) {
         errorCode: t.result && t.result.errorCode ? t.result.errorCode : undefined,
         toolArgs: args
       };
+      liftToolImagePaths(tool, t.result);
       // 账本 result 未超上限时保留完整 diff；超限被 tailAwarePreview 顶替时由
       // mergeTraceEditDiffsFromLive 从实时 trace 回填，保证思考结束后 diff 卡不消失
       if (
@@ -880,6 +896,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
                 }
                 if (result.errorCode) tool.errorCode = result.errorCode;
                 if (result.suggestedFix) tool.suggestedFix = result.suggestedFix;
+                liftToolImagePaths(tool, result);
                 if (
                   (normEv.name === 'fs_write_file' || normEv.name === 'fs_edit') &&
                   result.diff &&

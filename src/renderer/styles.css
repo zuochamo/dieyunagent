@@ -2153,8 +2153,12 @@ body.composer-resizing {
   display: block;
   pointer-events: none;
 }
+/* 回答区**占满消息列**（stretch + max-width），不要 fit-content。
+   否则气泡宽度 = 内容里最长那一行的宽度：短回答、或只带一段 base64/长行代码的回答，
+   会整块塌成那行的宽度、贴在最左边（长回答因为 max-content 已超过 88% 才「看起来正常」），
+   同一条 UI 出现两种观感。 */
 .msg.assistant {
-  align-self: flex-start;
+  align-self: stretch;
   background: transparent;
   border: none;
   padding: 4px 0;
@@ -2937,6 +2941,114 @@ h3.msg-md-h {
   text-decoration: underline;
   cursor: pointer;
 }
+/* 回答里的图片：Markdown ![]() 与「本轮图」共用同一套卡片（renderer-answer-figures.js）。
+   限高而不限宽：整屏截图很高，靠 max-height + contain 保持观感一致 */
+.answer-figure {
+  margin: 0.6em 0;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  overflow: hidden;
+  background: rgba(127, 127, 127, 0.08);
+}
+.answer-figure.is-clickable {
+  cursor: zoom-in;
+}
+.answer-figure.is-clickable:hover,
+.answer-figure.is-clickable:focus-visible {
+  border-color: var(--accent);
+}
+.answer-figure-img {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  margin: 0 auto;
+}
+/* 音视频与图片同一套卡片，但播放器自带控件：不裁切、不受图片的限高约束 */
+.answer-figure-media {
+  display: inline-block;
+  vertical-align: top;
+  padding: 0.4em;
+}
+.answer-media-el {
+  display: block;
+  max-width: 100%;
+  border-radius: 0;
+  background: #000;
+}
+video.answer-media-el {
+  max-height: 360px;
+}
+audio.answer-media-el {
+  width: min(360px, 78vw);
+  background: transparent;
+}
+.answer-media-fallback {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.4em 0.2em;
+  font-size: 0.9em;
+  color: var(--text-dim);
+}
+.answer-media-fallback-btn {
+  font: inherit;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0.2em 0.5em;
+  cursor: pointer;
+}
+.answer-media-fallback-btn:hover {
+  border-color: var(--accent);
+}
+.answer-figure-cap {
+  display: block;
+  padding: 0.3em 0.6em;
+  font-size: 0.85em;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+/* 正文内的图与段落同流；「本轮图」是正文下方横向排的一条 */
+.msg-md-figure {
+  display: inline-block;
+  vertical-align: top;
+}
+.msg-answer-figures {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5em;
+  margin: 0.6em 0 0.2em;
+}
+.msg-answer-figures .answer-figure {
+  margin: 0;
+  max-width: min(320px, 100%);
+  flex: 0 0 auto;
+}
+.msg-answer-figures .answer-figure-img {
+  max-height: 200px;
+}
+.msg-answer-figures .answer-figure-media {
+  max-width: min(320px, 100%);
+}
+.msg-answer-figures .answer-figure-media video.answer-media-el {
+  max-height: 200px;
+}
+.msg-answer-figures-more {
+  align-self: center;
+  font: inherit;
+  font-size: 0.9em;
+  color: var(--accent);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 0;
+  padding: 0.3em 0.6em;
+  cursor: pointer;
+}
 /* 表格：横向滚动收在气泡内（超宽表格不撑破布局、不产生整屏横向滚动） */
 .msg-md-table-wrap {
   margin: 0.6em 0;
@@ -3211,6 +3323,14 @@ table.msg-md-table tbody tr:last-child td {
   color: var(--text-mute);
   font-style: normal;
   font-size: 12px;
+}
+/* 「已发给对端，等回复」这类状态注记：不是消息（不落库），随下一次 chat 重绘自然消失 */
+.msg-peer-note {
+  align-self: flex-start;
+  padding: 2px 0;
+  color: var(--text-mute);
+  font-size: 12px;
+  line-height: 1.5;
 }
 .msg-continue-row {
   margin-top: 8px;
@@ -3600,7 +3720,7 @@ table.msg-md-table tbody tr:last-child td {
   font-size: 14px;
   line-height: 1;
 }
-.composer-image-lightbox {
+.image-lightbox {
   position: fixed;
   inset: 0;
   z-index: 12000;
@@ -3612,19 +3732,63 @@ table.msg-md-table tbody tr:last-child td {
   box-sizing: border-box;
   cursor: zoom-out;
 }
-.composer-image-lightbox[hidden] {
+.image-lightbox[hidden] {
   display: none !important;
 }
-.composer-image-lightbox img {
-  max-width: min(92vw, 1200px);
-  max-height: 90vh;
+.image-lightbox img {
+  max-width: 94vw;
+  max-height: 88vh;
   object-fit: contain;
   border: 1px solid var(--border);
   background: var(--bg-elev);
   box-shadow: var(--shadow);
   cursor: default;
 }
-.composer-image-lightbox-close {
+.image-lightbox-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 90vw;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: default;
+}
+.image-lightbox-bar[hidden] {
+  display: none !important;
+}
+.image-lightbox-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.image-lightbox-name[hidden] {
+  display: none !important;
+}
+.image-lightbox-action {
+  border: 1px solid var(--border);
+  border-radius: 0;
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.image-lightbox-action:hover {
+  color: var(--accent, inherit);
+  border-color: currentColor;
+}
+.image-lightbox-action[hidden] {
+  display: none !important;
+}
+.image-lightbox-close {
   position: absolute;
   top: 12px;
   right: 14px;
@@ -7791,6 +7955,32 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   margin: 0;
 }
 
+/* 帮助 → 关于：更新入口 + 状态行（renderer-update.js 渲染，阶段见 #help-update-state[data-phase]） */
+.help-about-update {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.help-about-update-state {
+  min-width: 0;
+  color: var(--text-mute);
+  overflow-wrap: anywhere;
+}
+
+.help-about-update-state[data-phase='ready'] {
+  color: var(--accent);
+}
+
+.help-about-update-state[data-phase='error'] {
+  color: #d9534f;
+}
+
 .automation-tile .skill-tile-desc {
   -webkit-line-clamp: 2;
 }
@@ -10026,6 +10216,32 @@ body.pane-resizing .artifacts-file-list {
   object-fit: contain;
   border-radius: 4px;
 }
+/* 音视频预览：播放器自己带控件，容器只负责居中 + 限高（进度条可拖，字节由 dieyun-media:// 按需取） */
+.artifacts-media-preview-body {
+  padding: 12px;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.artifacts-media-preview-el {
+  display: block;
+  max-width: 100%;
+  border-radius: 0;
+  background: #000;
+}
+
+video.artifacts-media-preview-el {
+  max-height: min(72vh, 960px);
+  width: auto;
+  height: auto;
+}
+
+audio.artifacts-media-preview-el {
+  width: min(560px, 100%);
+  background: transparent;
+}
 .artifacts-office-preview-body table {
   border-collapse: collapse;
   width: 100%;
@@ -10966,12 +11182,13 @@ body.pane-resizing .artifacts-file-list {
 .peer-badge-unknown { border-style: dashed; }
 .peer-claim { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim); }
 .peer-empty { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+/* 会话绑定对端提示：在输入框上方（.composer-box 第一个子元素），随会话切换刷新 */
 .peer-session-row {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   align-items: center;
-  margin: 10px 16px 0;
+  margin: 0 16px 8px;
   padding: 8px 12px;
   border: 1px dashed var(--border);
   font-size: 12px;

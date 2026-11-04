@@ -126,7 +126,8 @@ const HOST_TOOLS = [
       name: 'fs_read_file',
       description:
         '读取工作空间、~/.dieyun/workspace 或白名单目录内的文件；文本默认 utf8。改已有文件前先读，再用 fs_edit。' +
-        '想重新看某张图片（例如历史消息里 [附件图 …] 标注的路径）时设 encoding=base64：图片会作为视觉输入附到下一轮，不会返回 base64 文本。',
+        '想重新看某张图片（例如历史消息里 [附件图 …] 标注的路径）时设 encoding=base64：图片会作为视觉输入附到下一轮，不会返回 base64 文本。' +
+        '要让用户在回答里看到某张图（包括你用脚本生成、落盘的图），也用它读一次：能识图时这张图会一并显示在正式回答里，不用让用户自己去翻文件。',
       parameters: {
         type: 'object',
         properties: {

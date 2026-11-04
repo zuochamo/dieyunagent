@@ -36,17 +36,19 @@
 | `renderer-chat-nav.js` | 消息导航刻度带（右缘：每条消息一根刻度 / 当前视口高亮 / 悬停摘要 / 点击跳转） | 聊天区右缘导航 |
 | `renderer-thinking-trace-dom.js` | 思考区 DOM / 轮次块（折叠思考，旁白+工具在折叠外） | 思考过程 |
 | `renderer-thinking-trace.js` | 流式 patch / 合成回退 | 思考区更新 |
-| `renderer-answer-md.js` | 回答区 Markdown 渲染（无依赖）：顶层围栏扫描 / GFM 表格 / 标题 / 列表 / 行内语法 / 链接点击走 `host.open_url`。单一来源，`renderer-mermaid.js` 复用它挑 mermaid 块 | 正式回复排版 |
+| `renderer-answer-md.js` | 回答区 Markdown 渲染（无依赖）：顶层围栏扫描 / GFM 表格 / 标题 / 列表 / 行内语法 / 媒体占位（图 / 音频 / 视频）/ 链接点击走 `host.open_url`。单一来源，`renderer-mermaid.js` 复用它挑 mermaid 块 | 正式回复排版 |
+| `renderer-answer-figures.js` | 正式回答里的媒体：正文 `![]()` 占位绑定 + 本轮媒体条（`tool.imagePaths` / 落盘的 path / base64 读图三个结构信号）。**图片**读盘转 blob，点图走通用灯箱全屏看（`openImageLightbox`）；**音频 / 视频**不读字节，`<video>/<audio>` 直接挂可 seek 的 `dieyun-media://` URL（Main 按 Range 分块取，见 `src/main/media-protocol.js`），播不了降级「用系统播放器打开」。读取与释放复用产物面板（`loadArtifactImageObjectUrl` / `openArtifactTab`） | 回答里的截图 / 音视频 |
 | `renderer-subagent-panel.js` | 右侧面板「子代理」页：本次运行的子 Agent 全文思考（复用思考区卡片渲染原语） | 子代理详情 |
 | `renderer-artifacts-session.js` | 会话产物桶 / UI batch | 产物会话态 |
 | `renderer-artifacts-browse.js` | 工作区浏览路径 | 产物目录 |
 | `renderer-artifact-diff-view.js` | 产物 diff 静态渲染 / 读盘 | 变更 diff 预览 |
-| `renderer-artifacts.js` | 产物列表绘制 / 打开 | 产物面板 |
+| `renderer-artifacts.js` | 产物列表绘制 / 打开；图片 / Office / 音视频只读预览（音视频走 `artifactMediaUrlForCurrentSession` 造 `dieyun-media://` URL，不读字节） | 产物面板 |
 | `renderer-artifacts-tabs.js` | 文件面板多标签 + 长驻编辑区（标签状态 / 未保存标记 / 文本域与 Monaco 二选一） | 文件面板多标签 |
 | `renderer-artifacts-panel.js` | 侧栏「产物」页：会话产物桶（带 diff）+ 会话时间窗内 `artifact.list_files` 扫描结果（脚本 / 截图 / 插件落盘的 docx、xlsx、png、html） | 产物页 |
 | `renderer-chat-history.js` | 会话列表、切换、加载消息 | 侧栏会话 |
 | `renderer-chat-state.js` | 当前会话 run 状态 | 进行中任务标记 |
 | `renderer-composer.js` | 输入框、发送、Agent/Plan 模式切换 | Composer 行为 |
+| `renderer-attachments.js` | 附件（粘贴 / 拖入 / 选择）与**通用图片全屏查看** `openImageLightbox()`（composer 预览与回答里的截图共用同一份，不另造大图查看器） | 附件与看图 |
 | `renderer-composer-form.js` | 表单控件、快捷键 | 输入区细节 |
 | `renderer-composer-queue.js` | 排队发送、立即发送 | 多消息队列 |
 | `renderer-composer-voice.js` | 语音输入 | 麦克风 / 转写 |
@@ -111,7 +113,7 @@
 | `renderer-window.js` | 窗口控制 |
 | `renderer-connect.js` | 「连接」对话框外壳：手机连接 / Agent 互通 两个标签页（只切页与按需刷新，不做业务判定） |
 | `renderer-mobile.js` | 手机桥接 UI（二维码等），渲染在「连接 → 手机连接」标签页 |
-| `renderer-peer.js` | 内网 Agent 互通面板 + 会话即对端通道，渲染在「连接 → Agent 互通」标签页 |
+| `renderer-peer.js` | 内网 Agent 互通面板 + 会话即对端通道，渲染在「连接 → Agent 互通」标签页；会话绑定提示行（`#peer-session-row`）在输入框上方常显，发出 / 未送达的注记（`.msg-peer-note`）落在对话里 |
 | `core/bootstrap.js` | 命名空间引导 | 
 
 ## 动效（唯一来源）

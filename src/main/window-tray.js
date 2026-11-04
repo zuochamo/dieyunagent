@@ -396,7 +396,9 @@ function createWindowTray(deps) {
     if (!win) return;
     try {
       if (win.webContents.isLoadingMainFrame()) return;
-      log.warn(`强制重绘主窗口表面（${reason}）`);
+      // 这是每次 window-show 都走的既定兜底（不是异常）：warn 留给真问题，
+      // GPU 崩溃那条路径自己有 child-process-gone 的 error 日志。
+      log.info(`强制重绘主窗口表面（${reason}）`);
       win.webContents.invalidate();
     } catch (err) {
       log.error('主窗口重绘失败', err);

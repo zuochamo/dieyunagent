@@ -210,6 +210,48 @@ function summarizeTelemetry(userDataPath, limit = 200) {
 }
 
 /**
+ * 「索引内容被自动塞进上下文的次数」—— 与上面「工具调用占比」互补的**另一半口径**。
+ *
+ * 为什么必须两个数字一起看：工具遥测只记**主动调用**（`codebase_search` / `graph` /
+ * `read_symbol`），而 `repo_map`（【仓库结构图】）与【相关代码】是 prep 的**自动注入**，
+ * 走 RPC、根本不进遥测。只看调用占比，会把「一直在注入、所以不必再调工具」读成
+ * 「模型不用索引」——2026-11-03 实机就是这个形态：调用 0.6%，同期注入 833/1771 轮。
+ * 详见 `docs/INDEX-VALUE-REVIEW.md` §7.5。
+ *
+ * 事实来源只有一个：`request_snapshots.context_audit_json.index`
+ * （写入方 `src/agent/system-prompt-prep.js:IndexInjectionAudit`，聚合方
+ * `crates/dieyun-core/src/memory/snapshot.rs:count_index_injections`）。
+ * 这里只做**展示口径**（占比、空值），不重新判定「什么算注入」。
+ *
+ * @param {object | null} raw RPC `memory.request_snapshot_index_audit` 的返回
+ */
+function describeIndexInjections(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const rounds = Number(raw.rounds) || 0;
+  const shareOf = (n) => (rounds ? round1((Number(n) / rounds) * 100) : 0);
+  const asCount = (v) => Number(v) || 0;
+  const asTs = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const repoMap = asCount(raw.repoMap);
+  const codeAuto = asCount(raw.codeAuto);
+  const codeExplicit = asCount(raw.codeExplicit);
+  const code = codeAuto + codeExplicit;
+  return {
+    // 有索引审计事实的轮次 = 两个占比的分母
+    rounds,
+    // 窗口内全部快照（含改造前没有索引审计的历史行）：用来说明「不是没数据，是旧数据没这项」
+    total: asCount(raw.total),
+    since: asTs(raw.since),
+    until: asTs(raw.until),
+    repoMap,
+    repoMapShare: shareOf(repoMap),
+    code,
+    codeAuto,
+    codeExplicit,
+    codeShare: shareOf(code)
+  };
+}
+
+/**
  * 清空工具调用遥测（统计信息页「清空」按钮的一路）。
  * 走闸门截断而不是直接删文件：删文件会让正在跑的工具轮次在下次写入时重建它，
  * 而闸门截断能一并排掉尚未落盘的缓冲，避免清空后旧数据回灌。
@@ -224,6 +266,7 @@ module.exports = {
   recordToolTelemetry,
   summarizeTelemetry,
   summarizeIndexUsage,
+  describeIndexInjections,
   clearToolTelemetry,
   telemetryPath,
   INDEX_TOOL_GROUPS

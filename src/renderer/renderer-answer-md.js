@@ -1,4 +1,4 @@
-/* global window, document, escapeHtml, gatewayCall */
+/* global window, document, escapeHtml, gatewayCall, answerFigurePlaceholderHtml, isRenderableAnswerMediaPath */
 'use strict';
 
 /**
@@ -132,16 +132,31 @@ function matchAnswerTable(lines, i) {
 }
 
 /**
- * 行内语法：先转义，再把 `` `code` `` 抽成占位符（避免代码里的 `*` / `|` 被当成语法）。
+ * 行内语法：先转义，再把 `` `code` `` / Markdown 图片抽成占位符（避免代码或图片说明里的
+ * `*` / `|` 被当成语法）。
  * @param {string} raw
  */
 function renderAnswerInline(raw) {
   const codes = [];
-  let t = escapeHtml(String(raw == null ? '' : raw)).replace(/[\u0001]/g, '');
+  const figures = [];
+  let t = escapeHtml(String(raw == null ? '' : raw)).replace(/[\u0001\u0002]/g, '');
   t = t.replace(/`([^`\n]+)`/g, (_, code) => {
     codes.push(code);
     return `\u0001${codes.length - 1}\u0001`;
   });
+  // Markdown 媒体 `![alt](path)`：必须**先于**链接处理，否则 `![a](https://…)` 会先被当成
+  // 链接、只在前面留一个孤零零的「!」。这里只落占位（图 / 音频 / 视频），读盘与填内容归
+  // renderer-answer-figures.js 的 `bindAnswerMarkdownMedia()`（与链接绑定同一套 bind 机制）；
+  // 不可渲染的引用（外链 / data: / 非媒体扩展名）保留原始字面文本，与旧行为一致。
+  if (typeof answerFigurePlaceholderHtml === 'function') {
+    t = t.replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, (whole, alt, src) => {
+      const fig = answerFigurePlaceholderHtml(alt.trim(), src.trim());
+      // 不能渲染时也先收进占位表：否则后面的链接规则会把 `![a](https://…)` 拆成
+      // 「孤零零的 ! + 一个链接」，比原样显示更乱。
+      figures.push(fig || whole);
+      return `\u0002${figures.length - 1}\u0002`;
+    });
+  }
   t = t
     .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
     .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
@@ -152,7 +167,8 @@ function renderAnswerInline(raw) {
       (_, label, url) =>
         `<a class="msg-md-link" role="link" tabindex="0" data-url="${url}" title="${url}">${label}</a>`
     );
-  return t.replace(/\u0001(\d+)\u0001/g, (_, idx) => `<code>${codes[Number(idx)]}</code>`);
+  t = t.replace(/\u0001(\d+)\u0001/g, (_, idx) => `<code>${codes[Number(idx)]}</code>`);
+  return t.replace(/\u0002(\d+)\u0002/g, (_, idx) => figures[Number(idx)] || '');
 }
 
 function renderAnswerFenceHtml(block) {
@@ -332,6 +348,13 @@ function hasAnswerMarkdown(text) {
   if (/\*\*[^*\n]+\*\*/.test(body)) return true;
   if (/`[^`\n]+`/.test(body)) return true;
   if (/\[[^\]\n]+\]\((?:https?:\/\/)[^)\s]+\)/.test(body)) return true;
+  // 媒体引用也算结构信号：能渲染的图/音视频要走富文本通道才会变成播放器（走纯文本只会露源码）
+  if (typeof isRenderableAnswerMediaPath === 'function') {
+    for (const m of body.match(/!\[[^\]\n]*\]\(([^)\n]+)\)/g) || []) {
+      const src = /\(([^)\n]+)\)$/.exec(m);
+      if (src && isRenderableAnswerMediaPath(src[1].trim())) return true;
+    }
+  }
   return false;
 }
 

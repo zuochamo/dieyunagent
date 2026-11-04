@@ -411,6 +411,7 @@ async function renderChatFromMessagesYielding(opts = {}) {
   let painted = false;
   try {
     clearDeferredThinkingJobs();
+    if (typeof revokeAnswerFigureBlobs === 'function') revokeAnswerFigureBlobs(chatList);
     chatList.innerHTML = '';
     clearArtifacts();
     if (!messages.length) {
@@ -467,6 +468,7 @@ function renderChatFromMessages(opts = {}) {
   const hiddenToken = beginHiddenChatRender(!forceScroll);
   beginChatHistoryArtifactsBatch();
   try {
+    if (typeof revokeAnswerFigureBlobs === 'function') revokeAnswerFigureBlobs(chatList);
     chatList.innerHTML = '';
     clearArtifacts();
     if (!messages.length) {

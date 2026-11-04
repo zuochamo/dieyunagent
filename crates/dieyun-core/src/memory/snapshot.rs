@@ -282,6 +282,80 @@ fn parse_json_column(raw: Option<String>) -> Value {
     }
 }
 
+/// 「索引内容有没有真的进上下文」聚合 —— 与工具遥测互补的那一半。
+///
+/// 为什么必须由快照来回答：`codebase_search` / `graph` / `read_symbol` 的**主动调用**
+/// 进工具遥测，而 prep 的**自动注入**（`repo_map` / `【相关代码】`）走 RPC、不进遥测。
+/// 只用调用占比评估索引，会把「一直在注入所以不必调工具」读成「没人用」
+/// （2026-11-03 实机：调用 0.6%，同期注入 833/1771 轮，见 docs/INDEX-VALUE-REVIEW.md §7.5）。
+///
+/// 口径只有一处：`context_audit_json.index`（`IndexInjectionAudit`，由
+/// `src/agent/system-prompt-prep.js` 产生）。**没有这个字段的行**（本次改造前的历史行，
+/// 以及不经 Renderer 拼装的频道轮次）与「明确没注入」分开计数：`rounds` 只数有审计事实的，
+/// `total` 记窗口内全部 —— 否则旧数据会被读成「一直没注入」。
+pub fn count_index_injections(conn: &Connection, since: Option<i64>) -> Result<Value, CoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT created_at, context_audit_json FROM request_snapshots
+          WHERE (?1 IS NULL OR created_at >= ?1)
+          ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![since], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    })?;
+
+    let mut total: i64 = 0;
+    let mut rounds: i64 = 0;
+    let mut allowed: i64 = 0;
+    let mut repo_map: i64 = 0;
+    let mut code_auto: i64 = 0;
+    let mut code_explicit: i64 = 0;
+    let mut first: Option<i64> = None;
+    let mut last: Option<i64> = None;
+
+    for row in rows {
+        let (created_at, audit) = row?;
+        total += 1;
+        first.get_or_insert(created_at);
+        last = Some(created_at);
+        let index = audit
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| v.get("index").cloned())
+            .unwrap_or(Value::Null);
+        if !index.is_object() {
+            continue;
+        }
+        rounds += 1;
+        if index.get("allow").and_then(|v| v.as_bool()) == Some(true) {
+            allowed += 1;
+        }
+        if index.get("repoMap").and_then(|v| v.as_bool()) == Some(true) {
+            repo_map += 1;
+        }
+        match index.get("code").and_then(|v| v.as_str()) {
+            Some("explicit") => code_explicit += 1,
+            Some("auto") => code_auto += 1,
+            _ => {}
+        }
+    }
+
+    Ok(json!({
+        // 窗口内全部快照（含改造前没有索引审计的行）
+        "total": total,
+        // 有索引审计事实的轮次：注入比例的分母
+        "rounds": rounds,
+        "allowed": allowed,
+        "repoMap": repo_map,
+        "codeAuto": code_auto,
+        "codeExplicit": code_explicit,
+        "since": first,
+        "until": last,
+    }))
+}
+
 impl MemoryStore {
     pub fn save_request_snapshot(&self, input: RequestSnapshotInput) -> Result<Value, CoreError> {
         self.with_conn(|conn| insert_request_snapshot(conn, &input))
@@ -298,6 +372,10 @@ impl MemoryStore {
     pub fn request_snapshot_get(&self, id: i64) -> Result<Value, CoreError> {
         let row = self.with_conn(|conn| get_request_snapshot(conn, id))?;
         Ok(row.unwrap_or(Value::Null))
+    }
+
+    pub fn count_index_injections(&self, since: Option<i64>) -> Result<Value, CoreError> {
+        self.with_conn(|conn| count_index_injections(conn, since))
     }
 }
 
@@ -413,5 +491,48 @@ mod tests {
             )
             .unwrap();
         assert_eq!(b, 5);
+    }
+
+    fn audited(session: &str, code: Option<&str>, repo_map: bool) -> RequestSnapshotInput {
+        let mut i = input(session, false);
+        i.context_audit_json = Some(
+            json!({"index": {"allow": true, "code": code, "repoMap": repo_map}}).to_string(),
+        );
+        i
+    }
+
+    /// 注入比例的分母只能是「有索引审计事实的轮次」：改造前的历史行（只有 memory 审计、
+    /// 或连审计都没有）如果算进去，会被读成「那些轮次明确没注入」。
+    #[test]
+    fn count_index_injections_counts_only_audited_rounds() {
+        let conn = conn();
+        let mut legacy = input("s1", false);
+        legacy.context_audit_json = Some(r#"{"memory":{"project":{"mode":"file"}}}"#.to_string());
+        insert_request_snapshot(&conn, &legacy).expect("legacy");
+        insert_request_snapshot(&conn, &input("s1", false)).expect("bare");
+        insert_request_snapshot(&conn, &audited("s1", None, true)).expect("repo only");
+        insert_request_snapshot(&conn, &audited("s1", Some("auto"), false)).expect("auto code");
+        insert_request_snapshot(&conn, &audited("s1", Some("explicit"), true)).expect("explicit");
+
+        let s = count_index_injections(&conn, None).expect("count");
+        assert_eq!(s["total"], json!(5), "窗口内全部快照");
+        assert_eq!(s["rounds"], json!(3), "只数有索引审计事实的轮次");
+        assert_eq!(s["allowed"], json!(3));
+        assert_eq!(s["repoMap"], json!(2));
+        assert_eq!(s["codeAuto"], json!(1));
+        assert_eq!(s["codeExplicit"], json!(1));
+        assert!(s["since"].as_i64().is_some());
+        assert!(s["until"].as_i64().is_some());
+    }
+
+    #[test]
+    fn count_index_injections_honours_since() {
+        let conn = conn();
+        insert_request_snapshot(&conn, &audited("s1", Some("auto"), false)).expect("a");
+        let s = count_index_injections(&conn, Some(now_ms() + 1)).expect("count");
+        assert_eq!(s["total"], json!(0));
+        assert_eq!(s["rounds"], json!(0));
+        assert!(s["since"].is_null(), "空窗口不给时间戳，UI 才不会画出一个假窗口");
+        assert!(s["until"].is_null());
     }
 }

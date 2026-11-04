@@ -17,6 +17,8 @@ const peerApi = window.diecloud || {};
 
 /** @type {Record<string, string>} sessionId → peerId */
 let peerLinksCache = {};
+/** @type {Record<string, string>} peerId → 显示名（只用于文案；查不到就显示 peerId） */
+let peerNamesCache = {};
 let peerEventBound = false;
 
 function peerLinkForSession(sessionId) {
@@ -25,10 +27,25 @@ function peerLinkForSession(sessionId) {
   return String(peerLinksCache[sid] || '');
 }
 
-/** 只缓存发送路径要用的绑定关系；面板显示每次都回源，避免「UI 与 Main 各存一份状态」。 */
+function peerNameForId(peerId) {
+  const id = String(peerId || '');
+  if (!id) return '';
+  return String(peerNamesCache[id] || id);
+}
+
+/** 只缓存发送路径与提示行要用的绑定关系；面板列表每次都回源，避免「UI 与 Main 各存一份状态」。 */
 function peerApplyStatus(status) {
   if (!status || typeof status !== 'object') return;
   if (status.links && typeof status.links === 'object') peerLinksCache = { ...status.links };
+  /** @type {Record<string, string>} */
+  const names = {};
+  for (const p of Array.isArray(status.peers) ? status.peers : []) {
+    if (p && p.peerId && p.name) names[String(p.peerId)] = String(p.name);
+  }
+  for (const item of Array.isArray(status.trusted) ? status.trusted : []) {
+    if (item && item.peerId && item.name && !names[String(item.peerId)]) names[String(item.peerId)] = String(item.name);
+  }
+  peerNamesCache = { ...peerNamesCache, ...names };
 }
 
 function peerEscape(text) {
@@ -256,7 +273,7 @@ async function refreshPeerPanel() {
         : peerText('peer_status_off', '已关闭（不监听、不宣告）');
     }
     renderPeerList(status);
-    renderPeerSessionRow(status);
+    renderPeerSessionRow();
   } catch (e) {
     if (statusEl) statusEl.textContent = peerText('peer_load_failed', '读取失败：%s', (e && e.message) || e);
   }
@@ -372,8 +389,13 @@ async function clearPeerTrust(peerId) {
   }
 }
 
-/** 当前会话是否绑定了对端 —— 必须让人看得见、也解得开（否则这个会话永远发不出去）。 */
-function renderPeerSessionRow(status) {
+/**
+ * 当前会话是否绑定了对端 —— 必须让人看得见、也解得开（否则这个会话永远发不出去）。
+ *
+ * 提示行挂在输入框上方（`#peer-session-row` 在 composer-box 里），不依赖面板是否打开：
+ * 判据只读缓存（`peerLinksCache`），所以切会话、绑定变化、发送后都能就地刷新。
+ */
+function renderPeerSessionRow() {
   const row = $('peer-session-row');
   const info = $('peer-session-info');
   if (!row || !info) return;
@@ -383,14 +405,30 @@ function renderPeerSessionRow(status) {
     row.hidden = true;
     return;
   }
-  const peers = Array.isArray(status && status.peers) ? status.peers : [];
-  const found = peers.find((p) => p.peerId === peerId);
   info.textContent = peerText(
     'peer_session_bound',
     '当前会话已绑定对端：%s（在这里发的内容会直接发给它）',
-    (found && found.name) || peerId
+    peerNameForId(peerId)
   );
   row.hidden = false;
+}
+
+/**
+ * 会话里的一条「对端通道状态」注记（发出去了 / 没送达）。
+ *
+ * 为什么不是落库的一条消息：它不是会话内容 —— 对方回复进来时 chat 会整块重绘，注记自然消失。
+ * 没有这条，绑定会话里打字的表现就是「我说了，它不理我」：既没有思考区，也没有回答。
+ */
+function peerShowNote(text) {
+  const list = $('chat-list');
+  const body = String(text || '');
+  if (!list || !body) return;
+  for (const old of list.querySelectorAll(':scope > .msg-peer-note')) old.remove();
+  const note = document.createElement('div');
+  note.className = 'msg-peer-note';
+  note.textContent = body;
+  list.appendChild(note);
+  if (typeof scrollChatToBottom === 'function') scrollChatToBottom({ force: true });
 }
 
 /** 打开「连接」对话框并停在 Agent 互通标签页（外壳与标签切换在 renderer-connect.js）。 */
@@ -415,10 +453,12 @@ async function openPeerChat(peerId) {
     }
   }
   if (sessionId && typeof switchSession === 'function') {
+    // 先记住绑定再切会话：切会话会触发输入框上方的绑定提示刷新，缓存晚了就闪一条「未绑定」
+    peerLinksCache[sessionId] = String(peerId);
     await switchSession(sessionId);
   }
   if (sessionId) {
-    peerLinksCache[sessionId] = String(peerId);
+    renderPeerSessionRow();
     if (typeof showAgentToast === 'function') {
       showAgentToast(
         peerText('peer_toast_opened', '已打开对话'),
@@ -472,6 +512,8 @@ async function sendPeerSessionText(text, sessionIdOverride) {
       if (typeof showAgentToast === 'function') {
         showAgentToast(peerText('peer_toast_undelivered', '未送达'), why, { variant: 'error' });
       }
+      // toast 会消失，注记留在正文里：否则「发了没反应」的现场就永久丢失了
+      peerShowNote(peerText('peer_note_undelivered', '未送达：%s', why));
       return true;
     }
     if (sessionId === String(currentSessionId || '')) {
@@ -481,6 +523,8 @@ async function sendPeerSessionText(text, sessionIdOverride) {
       } catch {
         // 重绘失败不影响已送达的消息
       }
+      // 重绘之后再加注记：它属于「这会话已发出、等回复」的现状，不是会话内容
+      peerShowNote(peerText('peer_sent_waiting', '已发给 %s，等对方回复…', peerNameForId(peerLinkForSession(sessionId))));
     }
     if (typeof refreshHistoryList === 'function') refreshHistoryList().catch(() => {});
     return true;
@@ -613,6 +657,8 @@ function bindPeerUi() {
       const kind = event && event.kind ? String(event.kind) : '';
       if (kind === 'links-changed' && event.links) {
         peerLinksCache = { ...event.links };
+        // 绑定刚从无到有（或被解绑）：输入框上方的提示行要跟着变，不能等面板打开才刷
+        renderPeerSessionRow();
         return;
       }
       if (kind === 'inbound') {
@@ -655,6 +701,8 @@ function peerBoot() {
     .then((res) => {
       if (!res || !res.ok) return;
       peerApplyStatus(res.status);
+      // 启动时可能已经停在一个对端会话上：提示行不能等到打开面板才出现
+      renderPeerSessionRow();
       // 面板没开时被拦下的来信，启动后仍要让人看见
       const pending = res.status && Array.isArray(res.status.pendingTrust) ? res.status.pendingTrust : [];
       for (const item of pending) {

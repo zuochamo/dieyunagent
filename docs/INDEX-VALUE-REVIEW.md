@@ -283,8 +283,8 @@ R3 把向量从「配置项」改成「请求参数」后，`run_index` 里那�
 ### 7.1 现在有地方看了：统计信息页「索引使用率」
 
 复核判据要能执行，数字就得随手可见，否则又变成「凭感觉砍功能」。统计信息页新增
-**「索引使用率（全部遥测记录）」**，口径定义只有一处：
-`src/agent/tool-telemetry.js:INDEX_TOOL_GROUPS`
+**「索引使用率」**，口径定义只有两处常量/函数，都在 `src/agent/tool-telemetry.js`：
+`INDEX_TOOL_GROUPS`（哪些工具算索引工具）与 `describeIndexInjections`（注入那一半怎么算）。
 
 | 分组 | 工具 | 为什么这么分组 |
 |---|---|---|
@@ -314,6 +314,24 @@ R3 把向量从「配置项」改成「请求参数」后，`run_index` 里那�
    4 秒内连打 5 次 —— 形态更像「模型猜符号名」而不是「结构索引不可用」。
    **已按 §7.2 实测结案**：抽 20 个真实存在的符号，`read_symbol` 20/20 成功、路径全对；
    当时的失败是名字不存在，工具报 `SYMBOL_NOT_FOUND` 是正确行为。
+
+#### 7.1.1 「只有一半口径」这件事本身是个缺陷（2026-11-03 补上）
+
+上面那个面板只统计**工具调用**。但 prep 的**自动注入**（`repo_map` 的【仓库结构图】、
+【相关代码】）走 RPC、**不进工具遥测**，于是「一直在注入、所以不必额外调工具」会被读成
+「索引没人用」——面板自己那句「占比长期接近 0 说明触发链路或能力本身有问题」正好把人
+引向「砍功能」。§7.5 就是这次误判的实测记录。
+
+修法（不是加开关，是把缺掉的事实补上）：
+
+| 项 | 落点 |
+|---|---|
+| 事实产生 | `src/agent/system-prompt-prep.js` → `indexAudit = { allow, code: 'explicit'\|'auto'\|null, repoMap }`（Main 是唯一知道「哪个块真的进了 turnHost」的人） |
+| 事实搬运 | `src/renderer/renderer-agent-send.js`：`contextAudit.index` → `request_snapshots.context_audit_json.index` |
+| 聚合 | `crates/dieyun-core/src/memory/snapshot.rs:count_index_injections` + RPC `memory.request_snapshot_index_audit`（**只数带 `index` 审计的轮次**，改造前的历史行另记 `total`，否则旧数据会被读成「一直没注入」） |
+| 展示 | `src/agent/tool-telemetry.js:describeIndexInjections`（占比/空值口径唯一来源）→ `src/renderer/renderer-help.js`：面板下半区两行「注入 · 仓库结构图 / 注入 · 相关代码」 |
+| 契约 | 聚合窗口用**工具遥测窗口的起点**（`since`），两个口径同一段时间；core 未就绪时返回 `null` → UI 写「不可用」，不画成 0 |
+
 
 ---
 
@@ -438,6 +456,41 @@ DY_SESSION=<会话 id> DY_SSH_HOST=<远端主机> DY_SAMPLE=20 node scripts/veri
 都存不下来。要么换一个吞吐够的 embedding 服务（本机另配的 `zen-embedding-8b`
 在 `192.168.31.37:1234` 当前没在跑，无法对比），要么维持关键词通道 + 结构索引这条组合。
 量端点的方法论与「建向量前的 configure 顺序」修复见 `docs/VECTOR-SEARCH.md` §1.3。
+
+---
+
+### 7.5 2026-11-03 复核：0.1% / 0.6% 不是「索引没用」，是两个真缺陷
+
+窗口：`tool-telemetry.jsonl`（10-30 08:43 ~ 11-03 20:11，**8112 次工具调用**）+
+`request_snapshots`（同窗 **1771 轮**）。面板当时显示：代码索引 0.1%（6 次，成功 83.3%）、
+结构索引 0.6%（`read_symbol` 45 + `graph` 1，成功 58.7%）。
+
+**第一条：结构索引一直在用，只是不进遥测。** 同窗口【仓库结构图】注入 **833 轮 = 47%**
+（【项目地图】1226、【本轮上下文】1507）。也就是说 R8 的接线**已经生效**：索引内容每两轮
+进一次上下文。工具只调用 46 次不等于没人用 —— 上下文里已经有骨架，就不必再调工具。
+所以 §7 第 1 条判据（<1% 就删通道）在这个读水下**依然不能执行**，先决条件还差向量通道。
+
+**第二条：`read_symbol` 的成功率被两件事拉低，其中一件确实是故障。**
+
+| 现象 | 证据 | 判定 |
+|---|---|---|
+| SSH + `filePath+line` 先打远程 LSP，**空等 20.0 秒**再回落结构索引 | 10-31 19:35:02 = **20012ms**、11-01 20:29:23 = **20017ms**（另一次 45072ms），三次都 `ok=true` 所以不计入错误 | **真缺陷**：`REMOTE_READ_SYMBOL_LSP_TIMEOUT_MS` 就是 20000。已修（见下） |
+| 18 个 `SYMBOL_NOT_FOUND` 里 6 个是同一会话 **2 秒内连打**（10-31 14:09:44–45），另有两对连击 | 与 §7.1/§7.2 结论一致 | 模型在猜名字，工具报错正确；58.7% 被这个连击会话放大，不能当「结构索引不可用」 |
+| `INVALID_WORKSPACE` ×2 都落在 11-02 21:56:29 / 21:56:33（1ms / 4ms 即失败），46 秒后同样的 `codebase_search` 成功（65ms） | 工作区在那一刻解析不出来（SSH / worktree 绑定窗口） | 不是索引坏，但它把两个通道的成功率都拉低 |
+
+正向读数：`codebase_search` 6 次里 4 次集中在 11-02 21:57 那 5 分钟，5/6 成功、49–212ms ——
+**真被想起来用的时候是能用的**，与 §7.1「0 次」不是同一件事。
+
+对 `read_symbol` 的修法（减法，不是加兜底）：
+
+1. **给了 `name` 就不打远程 LSP**：结构索引按名返回的候选自带 `startLine/endLine`
+   （§7.2 实测 20/20），`locateSymbolForRead` 末尾「取包含该行且范围最小者」照样成立，
+   远程 LSP 只是同一条结论的更慢路径；
+2. **超时 20000 → 3000ms**：只剩「按行定位且没给名字」这一条结构索引替代不了的路，
+   3 秒答不出来就等于不可用，再等 17 秒买不到任何东西。
+
+回归护栏：`test/unit/read-symbol-remote-lsp.test.cjs`（给 name 时断言不出现 `lsp.query`；
+只给 filePath+line 时断言仍走 LSP 且超时预算 ≤5s）。
 
 ---
 

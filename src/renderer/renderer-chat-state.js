@@ -1,4 +1,4 @@
-/* global window, document, $, setComposerSendingState, updateLastTurnFloat, flushComposerQueue, updateComposerQueueUi, getAgentContinueState, currentSessionId, isSessionSwitchInFlight, isComposerQueuePaused, getComposerQueueEditing, renderAttachmentChips, refreshContextProgress, revokeAttachmentPreview */
+/* global window, document, $, setComposerSendingState, updateLastTurnFloat, flushComposerQueue, updateComposerQueueUi, getAgentContinueState, currentSessionId, isSessionSwitchInFlight, isComposerQueuePaused, getComposerQueueEditing, renderAttachmentChips, refreshContextProgress, revokeAttachmentPreview, renderPeerSessionRow */
 'use strict';
 
 const SESSION_STORAGE_KEY = 'diecloud.active.session.v1';
@@ -303,6 +303,8 @@ function syncComposerForActiveSession() {
   // 能否发送由 sendMessage 入口 gateSendMessage 的 isSessionSwitchInFlight 单点判定。
   if (typeof updateComposerQueueUi === 'function') updateComposerQueueUi();
   updateLastTurnFloat();
+  // 输入框上方的「本会话已绑定对端」提示：随会话同步刷新（单一来源在 renderer-peer.js）
+  if (typeof renderPeerSessionRow === 'function') renderPeerSessionRow();
   const sid = String(currentSessionId || '');
   if (
     !switching &&

@@ -31,8 +31,14 @@ const TOOLS_CACHE_MS = 60000;
 const RECONNECT_BACKOFF_BASE_MS = 30000;
 const RECONNECT_BACKOFF_MAX_MS = 120000;
 
-/** 同一服务「同一错误」的日志节流窗口：期间只记一条，并在下一条里补报被静默的次数 */
-const CONNECT_FAILURE_LOG_INTERVAL_MS = 10 * 60 * 1000;
+/**
+ * 同一服务「同一错误」的日志节流窗口：期间只记一条，并在下一条里补报被静默的次数。
+ *
+ * 1 小时：宿主常态不开的可选服务（unreal 的 UnrealEditor、blender）会一直失败，
+ * 10 分钟一条实测仍把 main.log 刷出「MCP 连接失败」长尾；错误文本一变就立刻打，
+ * 所以真正「新发生的问题」不会被这条节流藏住。
+ */
+const CONNECT_FAILURE_LOG_INTERVAL_MS = 60 * 60 * 1000;
 
 /** @param {number} failures 连续失败次数（从 1 起） */
 function reconnectBackoffMs(failures) {

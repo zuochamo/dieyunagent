@@ -16,6 +16,10 @@ const path = require('node:path');
 
 const MD_SRC = path.join(__dirname, '..', '..', 'src', 'renderer', 'renderer-answer-md.js');
 const MERMAID_SRC = path.join(__dirname, '..', '..', 'src', 'renderer', 'renderer-mermaid.js');
+const FIGURES_SRC = path.join(__dirname, '..', '..', 'src', 'renderer', 'renderer-answer-figures.js');
+/** 与 renderer-artifacts.js:IMAGE_ARTIFACT_RE / MEDIA_ARTIFACT_RE 同口径（渲染器里它们是全局 var） */
+const IMAGE_ARTIFACT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|heic|tiff?|ico|avif)$/i;
+const MEDIA_ARTIFACT_RE = /\.(mp4|m4v|webm|ogv|mov|mkv|mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i;
 
 /** 与 renderer-utils.js:escapeHtml 同实现（渲染器里它是全局，单测里注入） */
 function escapeHtml(s) {
@@ -72,20 +76,43 @@ function makeElement(tag) {
   return el;
 }
 
-function loadMarkdown() {
+/** 回答里的媒体（`renderer-answer-figures.js`）也按真实源码装载：不要在测试里另写一份判定 */
+function loadFigures() {
+  const source = fs.readFileSync(FIGURES_SRC, 'utf8');
+  const factory = new Function(
+    'window',
+    'document',
+    'IMAGE_ARTIFACT_RE',
+    'MEDIA_ARTIFACT_RE',
+    `${source}
+     return { isRenderableAnswerMediaPath, answerFigurePlaceholderHtml, traceToolMediaPaths, answerMediaPathsForTrace };`
+  );
+  return factory({}, { createElement: makeElement }, IMAGE_ARTIFACT_RE, MEDIA_ARTIFACT_RE);
+}
+
+function loadMarkdown(figures) {
   const source = fs.readFileSync(MD_SRC, 'utf8');
   const factory = new Function(
     'window',
     'document',
     'escapeHtml',
     'gatewayCall',
+    'answerFigurePlaceholderHtml',
+    'isRenderableAnswerMediaPath',
     `${source}
      return { scanAnswerBlocks, hasAnswerMarkdown, renderAnswerMarkdownToHtml, renderAnswerInline, bindAnswerMarkdownLinks };`
   );
-  return factory({}, { createElement: makeElement }, escapeHtml, () => Promise.resolve());
+  return factory(
+    {},
+    { createElement: makeElement },
+    escapeHtml,
+    () => Promise.resolve(),
+    figures.answerFigurePlaceholderHtml,
+    figures.isRenderableAnswerMediaPath
+  );
 }
 
-function loadMermaid(md, warnLog) {
+function loadMermaid(md, warnLog, bindAnswerMarkdownMedia) {
   const source = fs.readFileSync(MERMAID_SRC, 'utf8');
   const factory = new Function(
     'window',
@@ -95,6 +122,7 @@ function loadMermaid(md, warnLog) {
     'hasAnswerMarkdown',
     'renderAnswerMarkdownToHtml',
     'bindAnswerMarkdownLinks',
+    'bindAnswerMarkdownMedia',
     `${source}
      return { splitAnswerMermaidSegments, renderAssistantAnswerContent, appendMermaidFallback };`
   );
@@ -105,13 +133,16 @@ function loadMermaid(md, warnLog) {
     md.scanAnswerBlocks,
     md.hasAnswerMarkdown,
     md.renderAnswerMarkdownToHtml,
-    md.bindAnswerMarkdownLinks
+    md.bindAnswerMarkdownLinks,
+    bindAnswerMarkdownMedia
   );
 }
 
-const md = loadMarkdown();
+const figures = loadFigures();
+const md = loadMarkdown(figures);
 const warnLog = [];
-const mermaid = loadMermaid(md, warnLog);
+const imageBindCalls = [];
+const mermaid = loadMermaid(md, warnLog, (root) => imageBindCalls.push(root));
 
 function segmentsMermaidCount(text) {
   return mermaid.splitAnswerMermaidSegments(text).filter((s) => s.type === 'mermaid').length;
@@ -236,4 +267,52 @@ test('Mermaid 失败：友好提示 + 原文，完整错误进控制台', () => 
   assert.equal(wrap.children[2].textContent, code, '原文必须保留');
   assert.equal(warnLog.length, 1, '完整错误要进控制台');
   assert.ok(warnLog[0].some((a) => a instanceof Error));
+});
+
+test('Markdown 图片：可渲染的本地图片落成占位（读盘归 bind pass）', () => {
+  const html = md.renderAnswerMarkdownToHtml('![登录页](out/shot.png)');
+  assert.match(html, /<span class="answer-figure msg-md-figure" data-answer-figure-src="out\/shot\.png">/);
+  assert.match(html, /<img class="answer-figure-img" alt="登录页" decoding="async">/);
+  assert.match(html, /<span class="answer-figure-cap">登录页<\/span>/);
+  assert.ok(!/<img[^>]*\ssrc=/.test(html), '占位阶段不写 src（blob 由 bind 后填）');
+  assert.ok(!/<figure/i.test(html), '不能用 figure：图片可能落在段落里，<p> 内嵌 <figure> 非法');
+});
+
+test('Markdown 图片：外链 / 非图片扩展名保留字面文本', () => {
+  const remote = md.renderAnswerMarkdownToHtml('![a](https://example.com/a.png)');
+  assert.ok(!remote.includes('<figure'), '外链图不内联');
+  assert.ok(remote.includes('![a](https://example.com/a.png)'), '原文按字面显示');
+
+  const notImage = md.renderAnswerMarkdownToHtml('![b](notes.txt)');
+  assert.ok(!notImage.includes('<figure'));
+  assert.ok(notImage.includes('![b](notes.txt)'));
+});
+
+test('Markdown 图片：说明文字不参与行内语法，占位符不可被正文伪造', () => {
+  const html = md.renderAnswerMarkdownToHtml('![**图**](a.png)');
+  assert.match(html, /alt="\*\*图\*\*"/);
+  assert.ok(!html.includes('<strong>'), '图片说明里的 ** 不应变成粗体');
+
+  // 正文里自带占位控制字符（\u0002）时不能顶替成图
+  const forged = md.renderAnswerMarkdownToHtml('正文\u00020\u0002后文');
+  assert.ok(!forged.includes('<figure'));
+});
+
+test('Markdown 图片：代码围栏里的图片语法仍是代码', () => {
+  const html = md.renderAnswerMarkdownToHtml('```md\n![a](a.png)\n```');
+  assert.ok(!html.includes('<figure'));
+  assert.match(html, /!\[a\]\(a\.png\)/);
+});
+
+test('hasAnswerMarkdown：可渲染的图片引用算结构化信号', () => {
+  assert.equal(md.hasAnswerMarkdown('![](out/shot.png)'), true);
+  assert.equal(md.hasAnswerMarkdown('![](https://example.com/a.png)'), false);
+  assert.equal(md.hasAnswerMarkdown('![](notes.txt)'), false);
+});
+
+test('正文入口：含图片的回复会触发图片 bind pass', () => {
+  imageBindCalls.length = 0;
+  const rich = makeElement('div');
+  assert.equal(mermaid.renderAssistantAnswerContent(rich, '先看图：\n\n![结果](out/shot.png)'), true);
+  assert.equal(imageBindCalls.length, 1, '每个 Markdown 文本段都要过 bindAnswerMarkdownMedia');
 });

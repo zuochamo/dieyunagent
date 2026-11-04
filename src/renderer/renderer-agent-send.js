@@ -618,7 +618,10 @@ async function executeSendPrepAndRun(state) {
   const contextAudit = {
     taskTier: taskTier || null,
     // 本轮注入的记忆条目（id + 召回模式 + 按 kind 隐去数）：随请求落 request_snapshots
-    memory: sysPack.memoryAudit || null
+    memory: sysPack.memoryAudit || null,
+    // 本轮索引内容有没有真的进上下文（code / repoMap）：工具遥测只记主动调用，
+    // 注入走的 RPC 不进遥测，缺这一项统计页就会把「一直在注入」误读成「没人用」
+    index: sysPack.indexAudit || null
   };
   const payload = {
     model: composerModel,

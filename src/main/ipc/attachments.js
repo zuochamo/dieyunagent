@@ -1,6 +1,7 @@
 'use strict';
 
-const { nativeImage } = require('electron');
+const { nativeImage, shell } = require('electron');
+const fs = require('fs');
 const { stageAttachment, stageAttachmentFiles } = require('../../attachment-store');
 const { pruneAttachmentImages } = require('../../attachment-retention');
 const { getAgentLimits } = require('../../agent/agent-limits');
@@ -55,6 +56,38 @@ function registerAttachmentsIpc(ctx) {
     });
     scheduleAttachmentRetention();
     return staged;
+  });
+
+  /**
+   * 用系统播放器打开（浏览器播不了的编码、超大文件的兜底）。
+   *
+   * 路径校验**不在 Main 重写**：先让 Gateway 解析路径（读权限、工作区根、sidecar 映射都在它那儿），
+   * 拿回它认可的绝对路径，再确认本机确实存在 —— 远端工作区的路径本机不存在，明确拒绝而不是
+   * 悄悄什么都不发生。
+   */
+  ipcMain.handle('media:open-path', async (_evt, payload) => {
+    const filePath = String((payload && payload.filePath) || '').trim();
+    if (!filePath) return { ok: false, error: '路径为空' };
+    try {
+      const gateway = getLocalGateway();
+      if (!gateway || typeof gateway.invokeRpc !== 'function') {
+        return { ok: false, error: 'Gateway 未就绪' };
+      }
+      const probe = await gateway.invokeRpc(
+        'artifact.read_file',
+        { filePath, encoding: 'base64', maxBytes: 1 },
+        { timeoutMs: 8000 }
+      );
+      const resolved = String((probe && probe.path) || '').trim();
+      if (!resolved) return { ok: false, error: '无法解析文件路径' };
+      if (!fs.existsSync(resolved)) {
+        return { ok: false, error: '本机找不到该文件（远端工作区的文件请先下载到本地）' };
+      }
+      const err = await shell.openPath(resolved);
+      return err ? { ok: false, error: String(err) } : { ok: true, path: resolved };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err || '打开失败') };
+    }
   });
 
   ipcMain.handle('clipboard:read-image', async () => {

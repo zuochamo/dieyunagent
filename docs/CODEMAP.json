@@ -13,6 +13,7 @@
         "src/renderer/renderer-thinking-trace-dom.js",
         "src/renderer/renderer-thinking-trace.js",
         "src/renderer/renderer-answer-md.js",
+        "src/renderer/renderer-answer-figures.js",
         "src/renderer/renderer-mermaid.js",
         "src/renderer/renderer-subagent-panel.js",
         "src/agent/agent-round-text.js"
@@ -21,6 +22,7 @@
         "Chat bubbles",
         "thinking trace UI",
         "answer bubble markdown rendering (renderer-answer-md.js)",
+      "answer media rendering (images / audio / video; renderer-answer-figures.js)",
         "subagent detail panel",
         "mobile trace push",
         "message navigation rail"
@@ -642,6 +644,12 @@
       ]
     },
     {
+      "prefix": "src/main/media-protocol.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
       "prefix": "src/agent/delegate-batch.js",
       "tests": [
         "test:delegate-batch"
@@ -1001,6 +1009,13 @@
     },
     {
       "prefix": "src/renderer/renderer-answer-md.js",
+      "tests": [
+        "test:unit",
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-answer-figures.js",
       "tests": [
         "test:unit",
         "check:renderer"

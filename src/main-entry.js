@@ -78,6 +78,7 @@ const { registerRendererToolDelegateIpc, requestSandboxApproval } = require('./a
 const { createMainCompactionAgent } = require('./agent/compaction-main');
 const { killActiveShellChildren } = require('./gateway/host-control');
 const { registerEarlyMainIpc, registerMainIpc, registerLateMainIpc } = require('./main/register-ipc');
+const { registerMediaScheme, attachMediaProtocol } = require('./main/media-protocol');
 const { registerAgentRuntimeIpc } = require('./main/ipc/agent-runtime');
 const { registerChannelIpc } = require('./main/ipc/channels');
 const { bootChannelsRuntime } = require('./channels/boot');
@@ -318,6 +319,9 @@ const earlyIpcCtx = {
 };
 registerEarlyMainIpc(earlyIpcCtx);
 
+// 媒体协议必须在 app ready 之前注册（Electron 硬性要求）；真正的请求处理在 whenReady 里挂。
+registerMediaScheme();
+
 const activityStats = createActivityStats({
   getUserDataPath: () => app.getPath('userData'),
   log,
@@ -476,6 +480,9 @@ app.whenReady().then(async () => {
     extraReadRoots.push(process.cwd());
   }
   const gatewayLog = createGatewayFileLogger(readableDir, (m) => log.info(m));
+  // Gateway 的低噪心跳（LSP watch 空批次等）：只进 electron-log 的 debug（file level=info 时被过滤），
+  // 不写 gateway.log —— 否则换个文件继续当噪声。
+  const gatewayLogDebug = (m) => log.debug(m);
   terminalPool = createTerminalPool({ log: (m) => log.info(m), maxEntries: 8 });
   ({
     remoteGatewayPool,
@@ -490,6 +497,7 @@ app.whenReady().then(async () => {
     readableDir,
     extraReadRoots,
     gatewayLog,
+    gatewayLogDebug,
     appVersion: app.getVersion(),
     appRoot: app.getAppPath(),
     safeStorage,
@@ -968,6 +976,13 @@ app.whenReady().then(async () => {
     notifySkillsCatalogChanged,
     isWorkplaceMonitorEnabled: () => workplaceMonitor.isWorkplaceMonitorEnabled(),
     applyWorkplaceMonitorEnabled: (enabled) => workplaceMonitor.applyWorkplaceMonitorEnabled(enabled)
+  });
+
+  // 媒体直出协议：字节仍由 Gateway（artifact.read_file）按 Range 分块提供，
+  // 这里只负责把 Range 请求翻译成分块读。见 src/main/media-protocol.js
+  attachMediaProtocol({
+    getLocalGateway: () => localGateway,
+    log: (m) => log.info(m)
   });
 
   if (!windowTray.getMainWindow()) {

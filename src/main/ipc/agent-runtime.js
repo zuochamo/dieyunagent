@@ -9,7 +9,7 @@ const {
 } = require('../../agent/live-loop-trace');
 const { createMainPlannerRunner } = require('../../agent/planner-runner-main');
 const { maybeGenerateSessionTitle } = require('../../agent/session-title');
-const { summarizeTelemetry } = require('../../agent/tool-telemetry');
+const { summarizeTelemetry, describeIndexInjections } = require('../../agent/tool-telemetry');
 const { evaluateTurnReadiness } = require('../../agent/completion-readiness');
 const { summarizeCompactionTelemetry } = require('../../agent/compaction-telemetry');
 const {
@@ -601,8 +601,33 @@ function registerAgentRuntimeIpc(ctx) {
   });
 
   ipcMain.handle('agent:tool-telemetry-summary', async () => {
-    return summarizeTelemetry(live.userData);
+    const summary = summarizeTelemetry(live.userData);
+    // 「索引内容被自动塞进上下文的次数」：与工具调用占比同一窗口（用遥测窗口的起点），
+    // 事实来自 request_snapshots，口径见 tool-telemetry.js:describeIndexInjections。
+    // core 未就绪时留 null —— UI 显示「不可用」，绝不把「读不到」画成 0。
+    summary.indexInjections = await readIndexInjections(live, summary.indexUsage.since);
+    return summary;
   });
+
+  /**
+   * 读索引注入聚合。RPC 只有一处（`memory.request_snapshot_index_audit`），
+   * 这里只负责「core 没起来 / 调用失败 → null」这一层降级，不做二次统计。
+   * @param {object} live
+   * @param {number | null} since
+   */
+  async function readIndexInjections(live, since) {
+    if (!live.coreBridge || !live.coreBridge.isReady()) return null;
+    try {
+      const raw = await live.coreBridge.invoke(
+        'memory.request_snapshot_index_audit',
+        { since: Number.isFinite(since) ? since : undefined },
+        10000
+      );
+      return describeIndexInjections(raw);
+    } catch {
+      return null;
+    }
+  }
 
   ipcMain.handle('agent:compaction-telemetry-summary', async (_evt, { sessionId } = {}) => {
     // limit 传 undefined 走默认窗口；sessionId 为空时维持全局口径（兼容既有调用方）

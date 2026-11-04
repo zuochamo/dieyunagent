@@ -48,7 +48,10 @@ function createSshReconnect(deps) {
     getSessionRemoteTransport,
     invalidateRemoteAgentClient,
     ensureRemoteGatewayForCurrentWorkspace,
-    getActiveRemoteGatewayInfo,
+    // 远端状态只取可跨进程投影：本函数产出的对象会进 `gateway:ssh-reconnected` 广播，
+    // 而 `getActiveRemoteGatewayInfo()` 带 `openChannel` 函数，过 IPC 会抛
+    // `An object could not be cloned`（投影的单一来源见 remote-gateway.js:getActiveRemoteGatewayWireInfo）。
+    getActiveRemoteGatewayWireInfo,
     broadcastToRenderers
   } = deps;
 
@@ -117,7 +120,7 @@ function createSshReconnect(deps) {
     }
     broadcastToRenderers('gateway:ssh-reconnected', {
       workspace: localGateway ? localGateway.getWorkspace() : null,
-      remoteGateway: getActiveRemoteGatewayInfo()
+      remoteGateway: getActiveRemoteGatewayWireInfo()
     });
   }
 
@@ -251,7 +254,7 @@ function createSshReconnect(deps) {
       return { ok: false, reason: 'not_remote_workspace', steps };
     }
 
-    const prevInfo = getActiveRemoteGatewayInfo();
+    const prevInfo = getActiveRemoteGatewayWireInfo();
     if (prevInfo) {
       try {
         invalidateRemoteAgentClient(prevInfo);
@@ -277,7 +280,7 @@ function createSshReconnect(deps) {
           };
         }
         if (r.reconnected) steps.push('ssh_reconnected');
-        const infoAfter = getActiveRemoteGatewayInfo();
+        const infoAfter = getActiveRemoteGatewayWireInfo();
         if (infoAfter) {
           try {
             await localGateway.syncRemoteIndexCoreConfig();

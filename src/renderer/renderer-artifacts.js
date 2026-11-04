@@ -639,6 +639,52 @@ function loadArtifactContent(filePath, viewEl, opts) {
 
 var OFFICE_ARTIFACT_READ_MAX_BYTES = 16 * 1024 * 1024;
 var IMAGE_ARTIFACT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|heic|tiff?|ico|avif)$/i;
+/**
+ * 音视频：与 Main 侧 `src/main/media-protocol.js:MEDIA_MIME` 同一份扩展名知识
+ * （跨进程无法共享模块，与 IMAGE_ARTIFACT_RE 的既有做法一致）。
+ */
+var MEDIA_ARTIFACT_RE = /\.(mp4|m4v|webm|ogv|mov|mkv|mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i;
+
+/** 'video' | 'audio' | '' —— 决定产物面板里给 <video> 还是 <audio> */
+function mediaArtifactKind(filePath) {
+  const p = String(filePath || '').toLowerCase();
+  if (!MEDIA_ARTIFACT_RE.test(p)) return '';
+  return /\.(mp4|m4v|webm|ogv|mov|mkv)$/.test(p) ? 'video' : 'audio';
+}
+
+/**
+ * 可 seek 的媒体 URL（`dieyun-media://`，协议实现见 `src/main/media-protocol.js`）。
+ *
+ * **不读字节**：媒体元素自己去要 Range，Main 再把每一段翻译成 Gateway 的
+ * `artifact.read_file`（offset/maxBytes）—— 几十上百 MB 的视频也因此能拖进度、不炸内存。
+ *
+ * 带上与 RPC 同一套工作区上下文：`s` = 会话 id，`w` = 该会话的工作区路径，
+ * 否则多工作区 / 远端会话会读到别的目录去。
+ */
+function artifactMediaUrl(filePath, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const parts = ['p=' + encodeURIComponent(String(filePath || '').trim())];
+  if (o.sessionId) parts.push('s=' + encodeURIComponent(String(o.sessionId)));
+  if (o.workspacePath) parts.push('w=' + encodeURIComponent(String(o.workspacePath)));
+  return 'dieyun-media://file?' + parts.join('&');
+}
+
+/** 当前会话上下文下的媒体 URL（会话 id / 工作区路径都取既有单一来源） */
+function artifactMediaUrlForCurrentSession(filePath) {
+  const sid = typeof resolveArtifactSessionId === 'function' ? resolveArtifactSessionId() : '';
+  let workspacePath = '';
+  if (sid && typeof resolveSessionWorkspacePathForRpc === 'function') {
+    try {
+      workspacePath = resolveSessionWorkspacePathForRpc(sid) || '';
+    } catch {
+      workspacePath = '';
+    }
+  }
+  if (!workspacePath && typeof window !== 'undefined' && window.activeViewSessionWorkspacePath) {
+    workspacePath = String(window.activeViewSessionWorkspacePath);
+  }
+  return artifactMediaUrl(filePath, { sessionId: sid, workspacePath });
+}
 
 function officeArtifactKind(filePath) {
   const ext = String(filePath || '')
@@ -716,6 +762,41 @@ async function readArtifactFileBase64(filePath, maxBytes) {
     }
     throw err;
   }
+}
+
+/**
+ * 图片字节 → blob URL 的**唯一实现**（产物面板预览、回答里的图共用）。
+ * 调用方负责把 URL 写进 `data-artifact-blob-url` 并 revoke（见 revokeArtifactMediaBlobUrls）。
+ */
+function imageObjectUrlFromBase64(base64, filePath) {
+  const bytes = base64ToUint8Array(base64);
+  if (!bytes.length) return '';
+  return URL.createObjectURL(new Blob([bytes], { type: guessImageArtifactMime(filePath) }));
+}
+
+/** 聊天里内联图片的读取上限：超过就不内联（只留「在面板打开」），避免每张 4K 截图都整张读进渲染进程 */
+var CHAT_IMAGE_INLINE_MAX_BYTES = 3 * 1024 * 1024;
+
+/**
+ * 图片产物 → blob URL（聊天内图片的唯一读取入口）。
+ *
+ * 路径解析与读权限全部复用 `readArtifactFileBase64` / Gateway（含 SSH 远端与
+ * `.dieyun/tool-output/vision/...` 这类宿主机虚拟路径），渲染进程不碰白名单。
+ *
+ * @param {string} filePath
+ * @param {{ maxBytes?: number }} [opts]
+ * @returns {Promise<string|null>} 读不到 / 太大 / 不是图片时返回 null
+ */
+async function loadArtifactImageObjectUrl(filePath, opts) {
+  const fp = String(filePath || '').trim();
+  if (!fp || !IMAGE_ARTIFACT_RE.test(fp)) return null;
+  const maxBytes =
+    opts && Number(opts.maxBytes) > 0
+      ? Math.floor(Number(opts.maxBytes))
+      : CHAT_IMAGE_INLINE_MAX_BYTES;
+  const r = await readArtifactFileBase64(fp, maxBytes);
+  if (!r || r.truncated === true) return null;
+  return imageObjectUrlFromBase64(r.data, fp) || null;
 }
 
 async function renderOfficeArtifactPreview(viewEl, displayPath, readPath, kind, loadGen) {
@@ -826,9 +907,7 @@ async function renderImageArtifactPreview(viewEl, displayPath, readPath, loadGen
   if (r && r.truncated) {
     body.innerHTML = '<div class="artifacts-empty">图片过大，无法在应用内预览</div>';
   } else {
-    const bytes = base64ToUint8Array(r && r.data);
-    const mime = guessImageArtifactMime(readPath);
-    const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    const url = imageObjectUrlFromBase64(r && r.data, readPath);
     shell.dataset.artifactBlobUrl = url;
     const img = document.createElement('img');
     img.className = 'artifacts-image-preview-img';
@@ -845,6 +924,81 @@ async function renderImageArtifactPreview(viewEl, displayPath, readPath, loadGen
     });
     body.appendChild(img);
   }
+
+  shell.appendChild(body);
+  viewEl.appendChild(shell);
+}
+
+/**
+ * 用系统播放器打开（媒体在应用内播不了 / 文件过大时的兜底）。
+ *
+ * 路径校验不在渲染进程也不在 Main 重写：Main 的 `media:open-path` 会先让 Gateway
+ * 解析并校验路径，再调系统默认程序。桥不在（手机端）时返回 false，调用方自己降级。
+ * @returns {boolean} 是否已经把请求发出去了
+ */
+function openLocalPathInSystemPlayer(filePath) {
+  const p = String(filePath || '').trim();
+  if (!p) return false;
+  const api = typeof window !== 'undefined' ? window.diecloud : null;
+  if (!api || typeof api.openLocalPath !== 'function') return false;
+  void api
+    .openLocalPath(p)
+    .then((r) => {
+      if (r && r.ok === false && typeof showAgentToast === 'function') {
+        showAgentToast('打不开这个文件', String(r.error || ''), { variant: 'error' });
+      }
+    })
+    .catch(() => {
+      /* 用户取消 / 桥异常：不吵 */
+    });
+  return true;
+}
+
+/**
+ * 音视频预览：不读字节，给媒体元素一个可 seek 的 `dieyun-media://` 源。
+ * 播不了（编码不支持 / 文件读不到）时降级成「用系统播放器打开」，不留一个死播放器。
+ */
+function renderMediaArtifactPreview(viewEl, displayPath, readPath, kind) {
+  viewEl.innerHTML = '';
+  const shell = document.createElement('div');
+  shell.className = 'artifacts-office-preview artifacts-media-preview';
+
+  const head = document.createElement('div');
+  head.className = 'artifacts-editor-head';
+  const pathEl = document.createElement('span');
+  pathEl.className = 'artifacts-editor-path';
+  pathEl.textContent = displayPath;
+  pathEl.title = displayPath;
+  const hint = document.createElement('span');
+  hint.className = 'artifacts-office-preview-hint';
+  hint.textContent = kind === 'video' ? '视频只读预览' : '音频只读预览';
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = 'ghost-btn';
+  openBtn.textContent = '用系统播放器打开';
+  openBtn.addEventListener('click', () => openLocalPathInSystemPlayer(readPath));
+  head.append(pathEl, hint, openBtn);
+  shell.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'artifacts-office-preview-body artifacts-media-preview-body';
+
+  const el = document.createElement(kind === 'video' ? 'video' : 'audio');
+  el.className = 'artifacts-media-preview-el';
+  el.controls = true;
+  el.preload = 'metadata';
+  if (kind === 'video') el.playsInline = true;
+  el.src = artifactMediaUrlForCurrentSession(readPath);
+  el.addEventListener('error', () => {
+    const existing = body.querySelector('.artifacts-empty');
+    if (existing) return;
+    el.remove();
+    const empty = document.createElement('div');
+    empty.className = 'artifacts-empty';
+    empty.textContent = '应用内播不了这个文件（编码不支持或文件读不到），可用系统播放器打开';
+    body.appendChild(empty);
+  });
+  body.appendChild(el);
 
   shell.appendChild(body);
   viewEl.appendChild(shell);
@@ -1086,6 +1240,21 @@ async function loadArtifactContentAsync(filePath, viewEl, loadGen, opts) {
         return;
       }
       const readPath = resolvedRead.path;
+      const mediaKind = mediaArtifactKind(readPath);
+      if (mediaKind) {
+        if (typeof disposeMonacoArtifactEditor === 'function') {
+          await disposeMonacoArtifactEditor();
+        }
+        if (gen !== artifactContentLoadGen) return;
+        renderMediaArtifactPreview(viewEl, readPath, readPath, mediaKind);
+        if (gen === artifactContentLoadGen) {
+          if (typeof syncArtifactTabAfterLoad === 'function') {
+            syncArtifactTabAfterLoad(filePath, { kind: 'media', readPath: readPath });
+          }
+          rememberSelectedArtifactContentMtime(readPath);
+        }
+        return;
+      }
       if (imageArtifactKind(readPath)) {
         if (typeof disposeMonacoArtifactEditor === 'function') {
           await disposeMonacoArtifactEditor();
@@ -1190,6 +1359,13 @@ function initArtifactsBtn() {
 
 window.pruneInvalidSessionArtifacts = pruneInvalidSessionArtifacts;
 window.resetPlanTraceArtifactLog = resetPlanTraceArtifactLog;
+window.loadArtifactImageObjectUrl = loadArtifactImageObjectUrl;
+window.imageObjectUrlFromBase64 = imageObjectUrlFromBase64;
+// 媒体（音视频）：可 seek 的 dieyun-media:// URL + 系统播放器兜底，见 src/main/media-protocol.js
+window.mediaArtifactKind = mediaArtifactKind;
+window.artifactMediaUrl = artifactMediaUrl;
+window.artifactMediaUrlForCurrentSession = artifactMediaUrlForCurrentSession;
+window.openLocalPathInSystemPlayer = openLocalPathInSystemPlayer;
 
 window.findLastRoundChange = findLastRoundChange;
 window.getLastRoundFileChanges = getLastRoundFileChanges;

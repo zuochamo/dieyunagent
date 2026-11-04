@@ -1,4 +1,4 @@
-/* global window, document, nudgeChatFollowSettle, scanAnswerBlocks, hasAnswerMarkdown, renderAnswerMarkdownToHtml, bindAnswerMarkdownLinks */
+/* global window, document, nudgeChatFollowSettle, scanAnswerBlocks, hasAnswerMarkdown, renderAnswerMarkdownToHtml, bindAnswerMarkdownLinks, bindAnswerMarkdownMedia */
 'use strict';
 
 let mermaidReady = false;
@@ -225,6 +225,8 @@ function appendTextSegment(container, text) {
     el.className = 'msg-answer-md';
     el.innerHTML = renderAnswerMarkdownToHtml(chunk);
     if (typeof bindAnswerMarkdownLinks === 'function') bindAnswerMarkdownLinks(el);
+    // 媒体占位 → 填内容（第二个 bind pass，与链接同一套；见 renderer-answer-figures.js）
+    if (typeof bindAnswerMarkdownMedia === 'function') bindAnswerMarkdownMedia(el);
   } else {
     el.className = 'msg-answer-text';
     el.textContent = chunk;

@@ -17,6 +17,7 @@ const path = require('node:path');
 const {
   summarizeIndexUsage,
   summarizeTelemetry,
+  describeIndexInjections,
   INDEX_TOOL_GROUPS,
   telemetryPath
 } = require('../../src/agent/tool-telemetry');
@@ -116,5 +117,62 @@ describe('summarizeTelemetry 把使用率挂在同一份摘要上', () => {
     assert.equal(s.indexUsage.total, 0);
     assert.equal(s.indexUsage.groups.length, INDEX_TOOL_GROUPS.length);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+/**
+ * 注入那一半的口径。存在的理由是实测误判：2026-11-03 面板显示工具调用 0.6%，
+ * 而同一窗口 `repo_map` 注入 833/1771 轮 —— 只看调用就会把「在用」读成「没用」。
+ */
+describe('索引注入口径（与工具调用互补的那一半）', () => {
+  it('占比的分母是有审计事实的轮次，历史行只进 total', () => {
+    const d = describeIndexInjections({
+      total: 3200,
+      rounds: 1771,
+      allowed: 1600,
+      repoMap: 833,
+      codeAuto: 0,
+      codeExplicit: 0,
+      since: 1_700_000_000_000,
+      until: 1_700_300_000_000
+    });
+    assert.ok(d, '有数据时不能返回 null');
+    assert.equal(d.rounds, 1771, '分母只数带 index 审计的轮次');
+    assert.equal(d.total, 3200, '窗口内全部快照另记，用来说明旧行没这项事实');
+    assert.equal(d.repoMapShare, 47, '833/1771 ≈ 47.0%');
+    assert.equal(d.code, 0);
+    assert.equal(d.codeShare, 0);
+  });
+
+  it('相关代码把自动检索与 @Codebase 拆开，但合成一行占比', () => {
+    const d = describeIndexInjections({
+      total: 200,
+      rounds: 200,
+      allowed: 200,
+      repoMap: 0,
+      codeAuto: 6,
+      codeExplicit: 2,
+      since: 1,
+      until: 2
+    });
+    assert.equal(d.code, 8);
+    assert.equal(d.codeAuto, 6);
+    assert.equal(d.codeExplicit, 2);
+    assert.equal(d.codeShare, 4);
+    assert.equal(d.repoMapShare, 0);
+  });
+
+  it('读不到（null / 非对象）返回 null —— UI 才会写「不可用」而不是 0', () => {
+    assert.equal(describeIndexInjections(null), null);
+    assert.equal(describeIndexInjections(undefined), null);
+    assert.equal(describeIndexInjections('nope'), null);
+  });
+
+  it('没有任何审计轮次时占比是 0，不是 NaN', () => {
+    const d = describeIndexInjections({ total: 12, rounds: 0, repoMap: 0, codeAuto: 0, codeExplicit: 0 });
+    assert.ok(d);
+    assert.equal(d.repoMapShare, 0);
+    assert.equal(d.codeShare, 0);
+    assert.equal(d.since, null);
   });
 });

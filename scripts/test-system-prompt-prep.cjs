@@ -350,11 +350,17 @@ async function runRepoMapInjection() {
     `repo_map 必须被 ${maxChars} 字符预算截断，实际 ${packed.turnRide.length}`
   );
   assert(packed.turnRide.includes('…'), '超长骨架要留截断标记');
+  // 注入事实：统计页「注入 · 仓库结构图」那一行的唯一数据来源。
+  // 没有这份事实，工具遥测（只记主动调用）会把「一直在注入」读成「没人用」。
+  assert(packed.indexAudit, '必须回传 indexAudit');
+  assert(packed.indexAudit.allow === true, 'allowCodebase 要如实记录');
+  assert(packed.indexAudit.repoMap === true, 'repo_map 真进了上下文 → repoMap=true');
+  assert(packed.indexAudit.code === null, '这轮没检索代码（indexOk 未置）→ code=null');
 }
 
 async function runPrepSkipAutoGraph() {
   const calls = [];
-  await prepSystemPrompt(
+  const packed = await prepSystemPrompt(
     {
       userQuery: '请看 src/login.js',
       graphIndexOk: true,
@@ -386,6 +392,9 @@ async function runPrepSkipAutoGraph() {
   );
   assert(!calls.includes('graph.repo_map'), 'trivial scoped task skips repo_map');
   assert(!calls.includes('graph.lsp_enrich'), 'trivial scoped task skips lsp_enrich');
+  // 「放行了但没注入」必须如实记成 false，否则统计页会把没注入的轮次算进注入率
+  assert(packed.indexAudit && packed.indexAudit.allow === false, 'allow=false 要如实记录');
+  assert(packed.indexAudit.repoMap === false, 'skipAuto 时 repoMap=false');
 }
 
 async function runPrepMcpFull() {

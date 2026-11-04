@@ -8,8 +8,15 @@ const { ABSOLUTE_READ_MAX_BYTES } = require('../fs-read-limits');
 const { isRemoteAgentUsable } = require('../remote-agent-client');
 const { recordSkillRead } = require('../../skills/usage-ledger');
 
-/** 远程 read_symbol 走 LSP 时的超时（远程 LSP 可能冷启动，超时即回落结构索引） */
-const REMOTE_READ_SYMBOL_LSP_TIMEOUT_MS = 20000;
+/**
+ * 远程 read_symbol 走 LSP 时的超时。
+ *
+ * 曾经是 20000ms：每次冷启动都等满 20 秒才回落结构索引，而结构索引 50–100ms 就能答
+ * （遥测里 20012ms / 20017ms 的「成功」调用就是这段空等，见 docs/INDEX-VALUE-REVIEW.md §7.5）。
+ * 远程 LSP 只在「按行定位、没给符号名」时才有结构索引替代不了的作用（见 locateSymbolForRead），
+ * 这种场景 3 秒答不出来就等于不可用 —— 再等 17 秒买不到任何东西。
+ */
+const REMOTE_READ_SYMBOL_LSP_TIMEOUT_MS = 3000;
 /** 通知远端索引「文件变了」的 RPC 预算：只做调度，很快；超时也不影响这次写 */
 const REMOTE_INDEX_NOTIFY_TIMEOUT_MS = 8000;
 
@@ -105,9 +112,11 @@ function createFsHandlers(d) {
       }
     }
 
-    // 远程 LSP：只在「按键行定位」时尝试——结构索引按名搜，无法定位包含某行的最内层符号。
-    // 其余场景直接走结构索引，避免为常见查询付远程 LSP 冷启动的代价。
-    if (isSsh && wantLine > 0 && relHint && getRemoteAgentInfo && getRemoteAgentClient) {
+    // 远程 LSP：只在「按键行定位且没给符号名」时尝试 —— 这是结构索引唯一替代不了的场景：
+    // 按名搜不到「包含第 N 行的最内层符号」。只要给了 `name`，结构索引返回的候选自带
+    // startLine/endLine（实测 20/20 命中，见 docs/INDEX-VALUE-REVIEW.md §7.2），
+    // 下面 wantLine 的「取包含该行且范围最小者」照样成立，LSP 只是同一条结论的更慢路径。
+    if (isSsh && !symName && wantLine > 0 && relHint && getRemoteAgentInfo && getRemoteAgentClient) {
       try {
         const info = getRemoteAgentInfo();
         if (isRemoteAgentUsable(info)) {

@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText, shouldShowTraceTitle */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText, shouldShowTraceTitle, attachAnswerFigures, revokeAnswerFigureBlobs */
 'use strict';
 
 function patchThinkingTrace(
@@ -377,6 +377,9 @@ function renderAssistantBubbleContent(
   }
 
   delete div.dataset.thinkingTraceSig;
+
+  // 正文整块重绘前先回收回答图 blob，否则每次重绘都漏一个 blob（见 renderer-answer-figures.js）
+  if (typeof revokeAnswerFigureBlobs === 'function') revokeAnswerFigureBlobs(div);
   div.replaceChildren();
   if (hasTrace) {
     renderThinkingTrace(div, effectiveTrace, patchOpts);
@@ -414,6 +417,9 @@ function renderAssistantBubbleContent(
         answer.textContent = content;
       }
     }
+    // 本轮产图（截图 / 模型生成的图）：正文下方一条，数据只来自 trace 的结构信号，
+    // 不解析任何文案；模型在正文里显式写的 ![]() 由图内的 bindAnswerMarkdownImages 负责。
+    if (typeof attachAnswerFigures === 'function') attachAnswerFigures(div, effectiveTrace);
     if (hitRoundLimit) {
       appendAgentContinueRow(div);
     }
