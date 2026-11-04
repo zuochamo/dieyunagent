@@ -356,7 +356,24 @@ const AGENT_LIMITS_DEFAULTS = {
   knowledgeTimeoutMs: 65000,
   knowledgePeriodicTimeoutMs: 90000,
   knowledgeMaxTokens: 2800,
-  knowledgePeriodicMaxTokens: 3500
+  knowledgePeriodicMaxTokens: 3500,
+
+  // —— 共享记忆（跨机 PostgreSQL，扩展页签「共享记忆」）——
+  // 定位：**机制预算**，不进 AGENT_LIMITS_SCHEMA（设置页不展开；服务器/口令在扩展页签里）。
+  // 唯一读者：`src/memory-shared/service.js`（数据层）与 `src/agent/system-prompt-prep.js`（注入）。
+  /** 每轮注入的共享记忆条数上限 */
+  sharedMemoryRecallLimit: 5,
+  /** 召回阈值：与本地记忆同一套口径（语义 0.32 / 关键词 0.12），低于阈值不进 system */
+  sharedMemoryMinScoreSemantic: 0.32,
+  sharedMemoryMinScoreKeyword: 0.12,
+  /** 单条上传正文上限（本地一条记忆本来就短，超长的不是记忆是文档） */
+  sharedMemoryEntryMaxChars: 600,
+  /** 注入块字符上限（与【长期记忆】同量级，宁可少注入） */
+  sharedMemoryBlockMaxChars: 1600,
+  /** 一次提炼提交给模型的候选条数 */
+  sharedMemoryConsolidateBatch: 40,
+  /** 两次提炼的最小间隔（跨机口径：台账时间戳，不靠本机内存） */
+  sharedMemoryConsolidateIntervalMs: 6 * 60 * 60 * 1000
 };
 
 /** @type {AgentLimitSchemaGroup[]} */

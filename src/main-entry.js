@@ -14,6 +14,7 @@ const {
   clipboard
 } = require('electron');
 const path = require('path');
+const os = require('os');
 const { getDeployConfig } = require('./deploy-config');
 const {
   getMonitorServerCandidates,
@@ -71,7 +72,10 @@ const { createSshReconnect } = require('./ssh/reconnect');
 const { getSshConfigBlocks } = require('./ssh/ssh-config');
 const { createSshActions } = require('./ssh/actions');
 const { createWorktreeActions } = require('./worktree/actions');
-const { loadModelSettings, saveModelSettings } = require('./model-settings');
+const { loadModelSettings, saveModelSettings, getEmbeddingConfig } = require('./model-settings');
+// 共享记忆（跨机 PostgreSQL）：数据层唯一实现，扩展页签「共享记忆」
+const { createSharedMemoryService } = require('./memory-shared/service');
+const { createEmbeddingClient } = require('./codebase/embedding-client');
 const { createMainToolBridge } = require('./agent/tool-bridge-main');
 const { clearToolHarnessSessionsForSession } = require('./agent/tool-harness');
 const { registerRendererToolDelegateIpc, requestSandboxApproval } = require('./agent/renderer-tool-delegate');
@@ -80,6 +84,7 @@ const { killActiveShellChildren } = require('./gateway/host-control');
 const { registerEarlyMainIpc, registerMainIpc, registerLateMainIpc } = require('./main/register-ipc');
 const { registerMediaScheme, attachMediaProtocol } = require('./main/media-protocol');
 const { registerAgentRuntimeIpc } = require('./main/ipc/agent-runtime');
+const { registerSharedMemoryIpc } = require('./main/ipc/shared-memory');
 const { registerChannelIpc } = require('./main/ipc/channels');
 const { bootChannelsRuntime } = require('./channels/boot');
 const { registerCompactionIpc } = require('./main/ipc/compaction');
@@ -600,10 +605,10 @@ app.whenReady().then(async () => {
     userDataPath: userData,
     log: (m) => log.info(m)
   });
-  agentService.setDesktopExecutor((task) => {
+  agentService.setExecutor((task) => {
     windowTray.sendRendererAgentService('agent-service:submit-task', task);
   });
-  agentService.setDesktopCanceller((payload) => {
+  agentService.setCanceller((payload) => {
     windowTray.sendRendererAgentService('agent-service:cancel-task', payload);
   });
   agentService.on('event', (event) => {
@@ -623,7 +628,8 @@ app.whenReady().then(async () => {
     log: (m) => log.info(m)
   });
   try {
-    mobileBridge.start();
+    // `start()` 是 async（listen 失败会 reject）：不 await 的话端口被占会变成未处理拒绝
+    await mobileBridge.start();
   } catch (e) {
     log.error('手机端桥接启动失败:', e);
   }
@@ -733,6 +739,10 @@ app.whenReady().then(async () => {
 
   // 频道（企业微信等外部入口）：自己的会话、自己的工作空间，在 Main 后台跑一轮，
   // 与桌面当前会话无关（见 issue/2026-10-30-agent-channel-and-workspace-binding.md）。
+  // 共享记忆（跨机）实例在下面创建；这里用 getter，频道跑轮次时早已就绪。
+  // **必须提前声明**：`const` 在赋值前是 TDZ，getter 一旦在启动早期被调用就是
+  // ReferenceError（不是「还没好」），用 `let` + null 起始把这一格变成「暂不可用」。
+  let sharedMemory = null;
   const channelsBoot = bootChannelsRuntime({
     userData,
     safeStorage,
@@ -742,6 +752,8 @@ app.whenReady().then(async () => {
     getCompactionAgent: () => ensureMainCompactionAgent(),
     createToolBridge: (webContents) => createRustLoopToolBridge(webContents),
     listMcpServers: mcpStore.listMcpServersForUi,
+    // 共享记忆（跨机）实例在下面创建；这里用 getter，频道跑轮次时早已就绪
+    getSharedMemory: () => sharedMemory,
     // 频道在 Main 后台写会话账本，桌面历史列表得知道有新会话（只刷新列表，不切当前会话）
     notifySessionsChanged: (payload) => broadcastToRenderers('channels:sessions-changed', payload),
     log
@@ -915,6 +927,32 @@ app.whenReady().then(async () => {
     loadModelSettings
   });
 
+  // 共享记忆（跨机 PostgreSQL，扩展页签「共享记忆」）：
+  // 数据层唯一实现 `src/memory-shared/service.js`；默认开启，口令由用户在扩展页签里填。
+  // 探活失败 = 本轮及以后按关闭处理（不重试、不阻塞对话），设置页显示原因。
+  sharedMemory = createSharedMemoryService({
+    userDataPath: userData,
+    safeStorage,
+    nodeId: os.hostname(),
+    hostname: os.hostname(),
+    clientVersion: app.getVersion(),
+    limits: () => getAgentLimits(userData),
+    // 向量复用「设置 → 模型 → 向量索引」里那个端点：没配就没有向量，召回自动落到文本排名
+    embedding: () => {
+      try {
+        const settings = loadModelSettings(userData);
+        return createEmbeddingClient(getEmbeddingConfig(settings));
+      } catch {
+        return null;
+      }
+    },
+    log: {
+      info: (msg) => log.info(msg),
+      warn: (msg) => log.warn(msg)
+    }
+  });
+  void sharedMemory.probe();
+
   registerAgentRuntimeIpc({
     ipcMain,
     rustLoopCancels,
@@ -927,6 +965,7 @@ app.whenReady().then(async () => {
     getSubagentStore: () => subagentStore,
     getAgentService: () => agentService,
     getWorktreeService: () => worktreeService,
+    getSharedMemory: () => sharedMemory,
     ensureMainCompactionAgent,
     createRustLoopToolBridge,
     resolveAgentRunWorkspacePath,
@@ -938,6 +977,16 @@ app.whenReady().then(async () => {
     canSendToWebContents,
     killActiveShellChildren,
     clearToolHarnessSessionsForSession
+  });
+
+  // 扩展页签「共享记忆」：设置读写 / 测试连接 / 探活 / 立即提炼。
+  // 归纳器实例从 `getActiveKnowledgeMaintainer()` 取（同一个实例，避免第二套队列与定时器）。
+  registerSharedMemoryIpc({
+    ipcMain,
+    getSharedMemory: () => sharedMemory,
+    getKnowledgeMaintainer: () =>
+      require('./agent/knowledge-maintainer').getActiveKnowledgeMaintainer(),
+    log
   });
 
   registerChannelIpc({

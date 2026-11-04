@@ -426,6 +426,8 @@ async function applyMemoryItems(ctx, items, opts = {}) {
   let saved = 0;
   let merged = 0;
   let skipped = 0;
+  /** 本轮真正落进用户级库的条目 → 归纳结束后镜像到共享库（跨机） */
+  const shareable = [];
   for (const item of (items || []).slice(0, max)) {
     // 落点只由 scope 决定（scope 已在 parseKnowledgeJson 归一成 project / global），
     // importance 只是排序权重，不参与选通道。
@@ -456,11 +458,44 @@ async function applyMemoryItems(ctx, items, opts = {}) {
       if (res && res.skipped) skipped += 1;
       else if (res && res.duplicate) merged += 1;
       else saved += 1;
+      // 上传的是「这轮新写进库的正文」，与本地库同一条：不额外记 id，靠 content_hash 幂等
+      if (!(res && res.skipped)) {
+        shareable.push({ content: item.content, kind: item.kind, importance: item.importance, source });
+      }
     } catch (err) {
       console.warn('[dieyun:memory] memory add failed:', err && (err.message || err));
     }
   }
-  return { saved, merged, skipped };
+  const shared = await mirrorShareable(ctx, shareable);
+  return { saved, merged, skipped, shared };
+}
+
+/**
+ * 把本机新写入的用户级记忆**镜像**到共享库（跨机）。
+ *
+ * 三条边界：
+ * 1. 只上传「能离开本机」的条目 —— 判定复用 `project-memory-file.js#isShareableKind`
+ *    （与写 `.dieyun/memory.md` 同一口径：secret / private 永不出本机）；
+ * 2. 只上传用户级（global）记忆：项目记忆的真相是仓库文件，跨机共享会变成「别人的项目结论」；
+ * 3. 失败只记日志：共享库挂掉不该影响本地记忆与归纳结果（fail-open）。
+ */
+async function mirrorShareable(ctx, items) {
+  const list = Array.isArray(items) ? items : [];
+  const sm = ctx.sharedMemory;
+  if (!list.length) return { ok: true, uploaded: 0, skipped: 0 };
+  if (!sm || typeof sm.mirrorItems !== 'function' || !sm.active()) {
+    return { ok: false, reason: 'inactive', uploaded: 0, skipped: list.length };
+  }
+  const kept = list.filter((it) => projectMemoryFile.isShareableKind(it.kind));
+  const dropped = list.length - kept.length;
+  if (!kept.length) return { ok: true, uploaded: 0, skipped: dropped };
+  try {
+    const res = await sm.mirrorItems(kept, { scope: 'global' });
+    return { ...res, skipped: (Number(res && res.skipped) || 0) + dropped };
+  } catch (err) {
+    console.warn('[dieyun:memory] shared memory upload failed:', err && (err.message || err));
+    return { ok: false, error: err && (err.message || String(err)), uploaded: 0, skipped: dropped };
+  }
 }
 
 async function applyArchiveMemoryIds(ctx, ids, knownMemoryIds) {
@@ -774,6 +809,104 @@ function extractContent(raw) {
 }
 
 // ---------------------------------------------------------------------------
+// 共享记忆（跨机 PostgreSQL）的提炼
+// ---------------------------------------------------------------------------
+
+/**
+ * 提炼用的提示词。输出格式**复用归纳器同一套 JSON**（`memories` / `archive_memory_ids`），
+ * 因此解析不用第二份：`parseKnowledgeJson` 就是唯一实现。
+ *
+ * 为什么提炼放在这里而不是 `src/memory-shared`：记忆提炼本来就只有这一个实现
+ * （模型调用、端点与请求头也在这个模块的 `resolveLlmCall`/`callLlm`）。数据层只管
+ * 「谁抢到锁、候选是谁、结果怎么落库」，不重复写 prompt 与 LLM 传输。
+ */
+const SHARED_CONSOLIDATE_SYSTEM = [
+  '你是局域网共享记忆库的整理员。多台机器的 Agent 会把各自的记忆条目上传到这里。',
+  '你的任务：把下面这批条目里**重复 / 近重复 / 过度琐碎**的合并，其余保持原样。',
+  '规则：',
+  '1. 不编造原文没有的信息；合并后的一句话要能独立看懂（不依赖别的条目）。',
+  '2. 只合并确实同义的条目；不确定就不要合并 —— 少合并远好于错合并。',
+  '3. 保留具体的路径、命令、约定、版本号；删掉「已解决」「已完成」这类一次性过程信息。',
+  '4. 被合并掉的原始条目 id 全部列进 archive_memory_ids；没有被合并的条目不要出现在里面。',
+  '只输出 JSON，不要 Markdown 包裹或额外说明。格式：',
+  '{"memories":[{"content":"合并后的知识点（一行，<=200 字）","kind":"normal","scope":"global","importance":1-5}],',
+  ' "archive_memory_ids":[1,2,3]}',
+  '如果这批条目里没有任何值得合并的内容，输出 {"memories":[],"archive_memory_ids":[]}。'
+].join('\n');
+
+/**
+ * 共享记忆提炼：抢锁 → 取候选 → 模型合并 → 落库 → 记录台账。
+ *
+ * 抢不到锁（别的机器正在提炼）或还在冷却期就**直接返回**，不排队、不重试 ——
+ * 这是唯一需要的调度，不再有 master/slave 模式与「现在就提炼」的授权密码。
+ */
+async function runSharedMemoryConsolidation(ctx, trigger) {
+  const sm = ctx.sharedMemory;
+  if (!sm || typeof sm.claimConsolidation !== 'function' || !sm.active()) {
+    return { ok: false, reason: 'inactive' };
+  }
+  const limits = ctx.limits() || {};
+  const claim = await sm.claimConsolidation(trigger || 'scheduled', {
+    // 冷却期的缺省值只在 agent-limits 里有一份，这里不再写死 6 小时
+    minIntervalMs: Number(limits.sharedMemoryConsolidateIntervalMs)
+  });
+  if (!claim) return { ok: false, reason: 'locked_or_cooldown' };
+
+  let scanned = 0;
+  let model = '';
+  try {
+    const rows = await sm.listConsolidationCandidates(claim);
+    scanned = rows.length;
+    // 少于 3 条没有合并意义（本次仍记台账，冷却期从这里起算）
+    if (rows.length < 3) {
+      await sm.releaseConsolidation(claim, { scanned });
+      return { ok: true, scanned, merged: 0, created: 0 };
+    }
+    const llm = resolveLlmCall(ctx, {}, limits);
+    if (!llm) throw new Error('未配置可用的文本模型');
+    model = llm.model;
+    const lines = rows.map(
+      (r) =>
+        `- id=${r.id} · 重要度${Number(r.importance).toFixed(2)} · 被召回${r.accessCount}次 · ${compactPlain(r.content, 400)}`
+    );
+    const body = {
+      model: llm.model,
+      temperature: 0.2,
+      max_tokens: Number(limits.knowledgeMaxTokens) || 2800,
+      messages: [
+        { role: 'system', content: SHARED_CONSOLIDATE_SYSTEM },
+        {
+          role: 'user',
+          content: `以下是共享记忆库里的 ${rows.length} 条条目（来自局域网多台机器）：\n\n${lines.join('\n')}`
+        }
+      ]
+    };
+    const text = extractContent(await callLlm(llm, body, ctx.fetchChatCompletion));
+    const parsed = parseKnowledgeJson(text);
+    // 只允许归档「本次候选里出现过的 id」：模型编不出库里没有的行
+    const known = new Set(rows.map((r) => String(r.id)));
+    const mergedIds = (parsed.archive_memory_ids || []).filter((id) => known.has(String(id)));
+    const created = (parsed.memories || []).filter((m) => m && m.content);
+    const applied = await sm.applyConsolidation(claim, { mergedIds, created });
+    // 落库失败必须走失败分支：否则台账会记成「按时完成、无错误」（finished_at 有值、error 为空），
+    // 跨机冷却把这一轮当成成功，设置页也会显示成「这批没有可合并的」。
+    if (!applied.ok) throw new Error(applied.error || '共享记忆落库失败');
+    await sm.releaseConsolidation(claim, {
+      scanned,
+      merged: applied.marked,
+      created: applied.inserted,
+      model
+    });
+    return { ok: true, scanned, merged: applied.marked, created: applied.inserted };
+  } catch (err) {
+    const msg = (err && (err.message || String(err))) || 'unknown';
+    await sm.releaseConsolidation(claim, { scanned, model, error: msg });
+    console.warn('[dieyun:memory] shared memory consolidation failed:', msg);
+    return { ok: false, error: msg };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 两种运行形态
 // ---------------------------------------------------------------------------
 
@@ -862,6 +995,9 @@ async function runTaskMaintenance(ctx, payload = {}) {
     const agentsRes = await applyAgentsUpdates(ctx, parsed.agents_updates, workspacePath, sourceLabel);
     agentsApplied = agentsRes.applied;
     await finishJob(ctx, job, 'completed');
+    // 共享记忆提炼：抢到锁就整理一次（冷却期在库里判，跨机口径），失败不影响本次归纳
+    // `void` + `.catch`：这是 fire-and-forget，没人 await，漏 catch 就是未处理拒绝
+    void runSharedMemoryConsolidation(ctx, 'after_task_maintenance').catch(() => {});
     return {
       ok: true,
       memorySaved: memory.saved,
@@ -983,6 +1119,8 @@ async function runPeriodicMaintenance(ctx, opts = {}) {
     await finishJob(ctx, job, 'completed');
     const summary = `记忆+${memory.saved} 合并${memory.merged} 弃${memory.skipped} 归档${archived} AGENTS${agentsRes.applied}`;
     ctx.updateSettings({ lastRunAt: Date.now(), lastRunOk: true, lastRunSummary: summary });
+    // 定时归纳是「跨机提炼」最自然的心跳：抢到锁的机器整理一次共享库
+    void runSharedMemoryConsolidation(ctx, 'after_periodic_maintenance').catch(() => {});
     return {
       ok: true,
       memorySaved: memory.saved,
@@ -1114,6 +1252,14 @@ function createKnowledgeMaintainer(deps) {
         return typeof deps.getAgentBusy === 'function' ? !!deps.getAgentBusy() : false;
       } catch {
         return false;
+      }
+    },
+    /** 共享记忆（跨机）实例；未装配（headless / 扩展关闭）时为 null —— 调用方据此跳过 */
+    get sharedMemory() {
+      try {
+        return typeof deps.getSharedMemory === 'function' ? deps.getSharedMemory() : null;
+      } catch {
+        return null;
       }
     }
   };
@@ -1352,6 +1498,8 @@ function createKnowledgeMaintainer(deps) {
     runPeriodic,
     startSchedule,
     stopSchedule,
+    /** 设置页「立即提炼」：抢锁后整理一次共享记忆（抢不到就返回 locked_or_cooldown） */
+    consolidateSharedMemory: (trigger) => runSharedMemoryConsolidation(ctx, trigger || 'manual'),
     getSettings: () => ctx.getSettings(),
     updateSettings: (patch) => {
       const next = ctx.updateSettings(patch || {});
@@ -1370,6 +1518,15 @@ let activeMaintainer = null;
 /** 由 `main/ipc/agent-runtime.js` 在创建实例后注册；测试可传 null 注销。 */
 function registerKnowledgeMaintainer(maintainer) {
   activeMaintainer = maintainer && typeof maintainer.afterRun === 'function' ? maintainer : null;
+  return activeMaintainer;
+}
+
+/**
+ * 当前生效的归纳器实例（可能为 null）。
+ * 唯一用途：不经过 `agent-runtime` 闭包的调用方（如扩展页签的「立即提炼」IPC）拿同一个实例 ——
+ * 再 `createKnowledgeMaintainer()` 一份就会有两套队列与定时器。
+ */
+function getActiveKnowledgeMaintainer() {
   return activeMaintainer;
 }
 
@@ -1416,8 +1573,11 @@ module.exports = {
   writeKnowledgeSettings,
   runTaskMaintenance,
   runPeriodicMaintenance,
+  runSharedMemoryConsolidation,
+  mirrorShareable,
   createKnowledgeMaintainer,
   registerKnowledgeMaintainer,
+  getActiveKnowledgeMaintainer,
   afterAgentRun,
   resolveKnowledgePlanOutcome
 };
