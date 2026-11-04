@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -29,6 +29,12 @@ const SNIPPET_LINE_MAX_CHARS: usize = 400;
 /// 只用**名次**融合，不用分数：子串命中数是整数计数、余弦相似度固定在 [-1,1]，
 /// 两者相加必须给每个信号配一个魔数权重，而那组权重没有任何可验证的依据。
 /// 按名次融合天然尺度无关：换模型、换语料规模都不需要重新调参。
+///
+/// **但名次会丢掉一个量级信号**：某条命中到底覆盖了查询的多少。实测（150 文件 / 54 题，
+/// 见 `E:\_vec-ab\VECTOR-AB-REPORT.md` §五）里，查询本身就是源码原句时，纯子串通道
+/// hit@1 = 100%，融合后掉到 83%（原句族）与 67%（去虚词族）：向量通道把正确第一名挤到 2–4。
+/// 所以见 [`strong_evidence`]：**强证据不进投票，直接排在融合结果之前**。
+/// 这不是给某一路配权重（那正是上面禁止的东西），而是「可验证的字面事实优先于名次投票」。
 const RRF_K: f64 = 60.0;
 
 /// 向量侧参与融合的名次上限：`limit * 8 + 256`，够覆盖最终 top-limit 且不把
@@ -106,6 +112,8 @@ pub fn search(
 
     let mut rows: HashMap<i64, ChunkRow> = HashMap::new();
     let mut lists: Vec<RankedIds> = Vec::new();
+    // 强证据：可验证的字面事实，永远排在融合结果之前（见 strong_evidence 的说明）。
+    let mut strong: Vec<i64> = Vec::new();
 
     // 通道 1：词法 = 子串扫描（路径 + 正文，`LIKE '%term%'`）。
     //
@@ -121,13 +129,16 @@ pub fn search(
     if let Some(name) = identifier_query(q, &terms) {
         let defs = definition_hits(conn, root_hash, name, limit, &mut rows)?;
         if !defs.is_empty() {
+            // 符号定义点就是「这个名字在这里被定义」的字面事实，连同名次一起进强证据。
+            strong.extend(defs.iter().copied());
             lists.push(defs);
         }
     }
     if !terms.is_empty() {
-        let substring = substring_hits(conn, root_hash, &terms, limit, &mut rows)?;
-        if !substring.is_empty() {
-            lists.push(substring);
+        let lex = substring_hits(conn, root_hash, &terms, limit, &mut rows)?;
+        if !lex.ids.is_empty() {
+            strong.extend(lex.full_coverage.iter().copied());
+            lists.push(lex.ids);
         }
     }
 
@@ -142,9 +153,14 @@ pub fn search(
     }
 
     let fused = fuse(&lists);
+    let strong: HashSet<i64> = strong.into_iter().collect();
+    let bonus = strong_evidence_bonus(lists.len());
     let mut ranked: Vec<(f64, ChunkRow)> = fused
         .into_iter()
-        .filter_map(|(id, score)| rows.remove(&id).map(|row| (score, row)))
+        .filter_map(|(id, score)| {
+            let b = if strong.contains(&id) { bonus } else { 0.0 };
+            rows.remove(&id).map(|row| (score + b, row))
+        })
         .collect();
     // 名次融合会出现**完全同分**（两路名次互换，例如词法 3 + 向量 1 与词法 1 + 向量 3），
     // 而融合结果来自 HashMap 迭代：只按分数排序时，同分候选的先后每次运行都不同 ——
@@ -193,6 +209,19 @@ fn fuse(lists: &[RankedIds]) -> HashMap<i64, f64> {
         }
     }
     fused
+}
+
+/// 强证据的固定加成：等于「所有通道的票都投给同一个候选」的上界 `n / (K+1)`。
+///
+/// 为什么取上界而不是某个体验值：任何**非**强证据候选的融合分都不可能超过它（每路最多贡献
+/// `1/(K+1)`），而强证据候选自身的融合分 `> 0`，于是「强证据全部排在融合结果之前」严格成立，
+/// 既不需要按语料规模调参，也不给某一路配权重；强证据之间仍按各自的融合分决先后
+/// （符号定义点因为多一路投票，天然排在只是「读到了整句」的前面）。
+///
+/// 刻度影响：存在强证据时，归一化后强证据落在 (0.5, 1]、融合结果落在 (0, 0.5]。
+/// `score` 本来就是「按本次头名归一化」的展示值，见 `SearchHit::score`。
+fn strong_evidence_bonus(list_count: usize) -> f64 {
+    list_count as f64 / (RRF_K + 1.0)
 }
 
 /// 通道 2：内存池全量精确余弦，取相似度最高的若干条。
@@ -383,15 +412,26 @@ fn definition_hits(
 /// 排序用**命中词数**（`hits`：有几个查询词出现在该 chunk 里），同分按 chunk id：
 /// 这是唯一一个「不需要给每路信号配魔数权重」又能表达相关性的信号。
 /// 候选上限 `SUBSTRING_CANDIDATES_MAX` 只截长尾：`hits` 降序保证截掉的都是命中更少的。
+/// 词法通道的召回结果。
+struct LexicalHits {
+    /// 按名次排好的 chunk id（`hits` 降序，同分按 id）。
+    ids: RankedIds,
+    /// `ids` 里**查询词元全部命中**（覆盖度 100%）的那些：强证据，见 [`strong_evidence_bonus`]。
+    full_coverage: Vec<i64>,
+}
+
 fn substring_hits(
     conn: &Connection,
     root_hash: &str,
     terms: &[String],
     limit: usize,
     rows: &mut HashMap<i64, ChunkRow>,
-) -> Result<RankedIds, CoreError> {
+) -> Result<LexicalHits, CoreError> {
     if terms.is_empty() {
-        return Ok(Vec::new());
+        return Ok(LexicalHits {
+            ids: Vec::new(),
+            full_coverage: Vec::new(),
+        });
     }
     let candidates = (limit * LEXICAL_CANDIDATES_FACTOR)
         .max(LEXICAL_CANDIDATES_MIN)
@@ -431,18 +471,26 @@ fn substring_hits(
             let mut chunk = map_chunk(row)?;
             // 子串命中也知道命中行：取最早出现的位置，让 snippet 从命中行开始展开
             chunk.hit_line = first_hit_line(&chunk.content, chunk.start_line, terms);
-            Ok(chunk)
+            // 第 6 列是 hits（命中词数），用于判「覆盖度 100%」——强证据的唯一依据
+            let hits: i64 = row.get(5)?;
+            Ok((chunk, hits))
         })
         .map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
     let mut ids = Vec::new();
+    let mut full_coverage = Vec::new();
+    let all_terms = terms.len() as i64;
     // 行映射失败必须显式报错：静默 flatten 掉会让「查询语法写错」表现成「没有命中」
     for row in mapped {
-        let row = row.map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
-        let id = row.id;
-        rows.entry(id).or_insert(row);
+        let (chunk, hits) = row.map_err(|e| CoreError::rpc("SEARCH_FAILED", e.to_string()))?;
+        let id = chunk.id;
+        rows.entry(id).or_insert(chunk);
+        // `hits` 的上限就是词元数（每个词元最多算 1）
+        if hits == all_terms {
+            full_coverage.push(id);
+        }
         ids.push(id);
     }
-    Ok(ids)
+    Ok(LexicalHits { ids, full_coverage })
 }
 
 /// 命中行：内容里最早出现的任一查询词所在行（行号是相对文件的绝对行号）。
@@ -696,6 +744,82 @@ mod tests {
         let (conn, _pool) = fixture();
         let res = search(&conn, "rh", "配置", Some(3), None, None).unwrap();
         assert_eq!(paths(&res), vec!["src/semantic.rs"], "中文 2 字应命中");
+    }
+
+    /// 「查询就是源码里的原句」时，字面全命中的块必须排第一，不能被向量名次挤下去。
+    ///
+    /// 复现的是 §五 实测里的 B 族（原句）/ C1 族（去虚词）：纯子串 hit@1 = 100%，融合后 83% / 67%。
+    /// 关键在 `src/literal.rs` 与查询向量**完全不相似**（相似度 0，低于阈值 → 根本不进向量通道），
+    /// 而 `src/near.rs` 只命中一个词却被向量顶到第一名 —— 旧实现把后者排在了前面。
+    fn literal_fixture() -> (Connection, VectorPool) {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (root_hash, root_path, chunk_count) VALUES ('rh', '/tmp', 3)",
+            [],
+        )
+        .unwrap();
+        for (rel, content, vec) in [
+            // 全命中（两个词都有），但语义上与查询向量正交
+            ("src/literal.rs", "// 配置与索引的唯一来源", [0.0f32, 0.0, 1.0]),
+            // 只命中一个词，但正是查询向量最像的那条
+            ("src/near.rs", "// 只有配置", [1.0, 0.0, 0.0]),
+            ("src/other.rs", "// 无关内容", [0.9, 0.1, 0.0]),
+        ] {
+            conn.execute(
+                "INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+                 VALUES ('rh', ?1, 1, 1, ?2, 0)",
+                params![rel, content],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, 3, ?2)",
+                params![id, vector_to_blob(&vec)],
+            )
+            .unwrap();
+        }
+        let pool = VectorPool::load(&conn, "rh").unwrap().expect("pool");
+        (conn, pool)
+    }
+
+    #[test]
+    fn full_coverage_literal_hit_outranks_vector_only_hit() {
+        let (conn, pool) = literal_fixture();
+        let q = [1.0f32, 0.0, 0.0];
+        // 只有词法：全命中的块第一（这是基线）
+        let lexical = search(&conn, "rh", "配置 索引", Some(3), None, None).unwrap();
+        assert_eq!(paths(&lexical).first().map(String::as_str), Some("src/literal.rs"));
+
+        // 加上向量：旧实现会让 src/near.rs（向量第一 + 词法第二）反超，这里必须仍是 literal 第一
+        let hybrid = search(&conn, "rh", "配置 索引", Some(3), Some(&q), Some(&pool)).unwrap();
+        assert!(hybrid.vector_search);
+        assert_eq!(
+            paths(&hybrid).first().map(String::as_str),
+            Some("src/literal.rs"),
+            "词元全命中的字面事实不该被向量名次投票推翻：{:?}",
+            paths(&hybrid)
+        );
+        // 强证据之间仍按融合分排序，融合结果排在强证据之后：单调不增
+        for pair in hybrid.results.windows(2) {
+            assert!(pair[0].score >= pair[1].score);
+        }
+    }
+
+    /// 改写问法（没有一个块覆盖全部词元）时，向量仍然决定名次 —— C2 的价值不能被这次改动带走。
+    #[test]
+    fn vector_still_decides_when_no_literal_evidence() {
+        let (conn, pool) = literal_fixture();
+        let q = [1.0f32, 0.0, 0.0];
+        // 「读取方式」在任何块里都不出现 → 无强证据，只剩向量通道
+        let res = search(&conn, "rh", "读取配置的方式", Some(3), Some(&q), Some(&pool)).unwrap();
+        assert!(res.vector_search);
+        assert_eq!(
+            paths(&res).first().map(String::as_str),
+            Some("src/near.rs"),
+            "无字面强证据时向量第一名应当排第一：{:?}",
+            paths(&res)
+        );
     }
 
     /// 命中词数决定名次：同时命中两个查询词的 chunk 必须排在只命中一个的前面。
