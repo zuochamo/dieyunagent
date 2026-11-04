@@ -1,10 +1,13 @@
 !macro WriteDieyunProgress PERCENT MSG
   InitPluginsDir
   FileOpen $R8 "$TEMP\dieyun-update-progress.json" w
-  ; Unicode NSIS FileWrite 输出 UTF-16 LE；先写 BOM 供 PowerShell 正确识别
+  ; NSIS 的 FileWrite 按系统 ANSI 代码页写字节，配合上面的 UTF-16 BOM 就成了
+  ; 「BOM 说有 UTF-16、内容是 GBK」，读端按 UTF-16 解码全是乱码、JSON 解析失败，
+  ; 于是安装向导这几个阶段百分比从来没显示过。必须用 FileWriteUTF16LE 写真正的
+  ; UTF-16 LE（它自己不带 BOM，故 BOM 显式写两字节）。
   FileWriteByte $R8 255
   FileWriteByte $R8 254
-  FileWrite $R8 "{$\"percent$\": ${PERCENT}, $\"message$\": $\"${MSG}$\"}"
+  FileWriteUTF16LE $R8 "{$\"percent$\": ${PERCENT}, $\"message$\": $\"${MSG}$\"}"
   FileClose $R8
 !macroend
 

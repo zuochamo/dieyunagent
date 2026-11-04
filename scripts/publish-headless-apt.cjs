@@ -27,7 +27,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 const {
   indexDebDir,
@@ -200,9 +200,12 @@ function verifyIndex(poolDir) {
   if (!problems.length) {
     let hasScan = true;
     try {
-      execSync('dpkg-scanpackages --help', { stdio: 'ignore' });
+      // 用 execFileSync 而不是 execSync：Windows 上 execSync 走 cmd.exe，命令不存在时退出码是 1、
+      // 和「命令存在但报用法」分不开（发布机就是 Windows，build:headless 会卡在这一步）。
+      // 不经 shell 起进程，命令不存在一律是 ENOENT。
+      execFileSync('dpkg-scanpackages', ['--help'], { stdio: 'ignore' });
     } catch (err) {
-      if ((err && err.status) === 127 || (err && err.code === 'ENOENT')) hasScan = false;
+      if ((err && err.code === 'ENOENT') || (err && err.status) === 127) hasScan = false;
       // 其它非零退出（--help 的用法提示）说明命令存在
     }
     if (hasScan) {
