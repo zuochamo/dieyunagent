@@ -1,0 +1,546 @@
+/**
+ * 把 Electron 渲染层（`src/renderer`）当**普通网页**提供 —— 无窗口模式下的「桌面界面」。
+ *
+ * 为什么这不是「另写一个前端」：桌面窗口本来就是浏览器页面
+ * （`contextIsolation: true` + `nodeIntegration: false`），渲染层只通过 `window.diecloud`
+ * 这层 preload 拿本机能力，RPC 本来就是自己连 Gateway 的 WebSocket
+ * （`renderer-gateway.js` 里 `new WebSocket(info.url)`）。所以浏览器里跑它只缺两样：
+ *
+ *   1. `window.diecloud` 的替身（12 个接口，真正有意义的只有 getGatewayInfo / getWorkspace）；
+ *   2. 浏览器能连到 Gateway 的 WS —— Gateway 只听 127.0.0.1，所以这里同源代理 `/gateway`。
+ *
+ * 手机端页面（`src/mobile/public`）按 430px 设计，宽屏下只能拉宽；桌面界面本来就为宽屏写。
+ *
+ * 安全边界：`/app/*`、`/node_modules/*`、`/gateway` 都要求**手机端同一个 token**
+ * （`?token=` 换成 cookie 之后才允许加载静态资源）—— 否则局域网里谁都能开这个页面、
+ * 顺手拿到 Gateway token 去指挥 Agent。
+ */
+const fs = require('fs');
+const path = require('path');
+const { WebSocketServer, WebSocket } = require('ws');
+
+const COOKIE_NAME = 'dieyun_web';
+const SHIM_PATH = '/app/__desktop-shim.js';
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.wasm': 'application/wasm'
+};
+
+/** 只放行这些根：渲染层本体、它 `<script>` 里的 node_modules 资源、以及 LLM 同源转发 */
+function mountOf(pathname) {
+  if (pathname === '/app' || pathname.startsWith('/app/')) return 'renderer';
+  if (pathname.startsWith('/node_modules/')) return 'node_modules';
+  // 渲染层还 `<script src="../llm-usage-stats.js">`（在主进程与渲染层之间共用的一份）
+  if (pathname === '/llm-usage-stats.js') return 'src-file';
+  // 桌面端 LLM 请求由主进程代发；浏览器里没有主进程，用同源转发顶上（顺便避开模型端点的 CORS）
+  if (pathname === '/llm') return 'llm';
+  return '';
+}
+
+function parseCookies(header) {
+  const out = {};
+  String(header || '')
+    .split(';')
+    .forEach((part) => {
+      const i = part.indexOf('=');
+      if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+    });
+  return out;
+}
+
+/**
+ * preload 替身。
+ *
+ * 两条硬约束（2026-11-04 真机踩到过）：
+ * 1. **形状必须和 preload 一致**：preload 里 164 个接口是 `ipcRenderer.invoke` → **Promise**。
+ *    给同步值会让调用点 `api.getWorkspace().then(...)` 直接 TypeError（渲染层启动即挂）。
+ * 2. **没有的能力必须「不存在」而不是「假的」**：渲染层用 `if (api.llmChatCompletion)` 做能力探测，
+ *    Proxy 冒充成函数会让它走 Electron 专用通道并拿到 null；不暴露则它自己退回浏览器直连 LLM 的分支。
+ *    所以这里只暴露真正能回答的四个，其它访问返回 undefined（并在控制台点一次名，方便定位）。
+ */
+function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSettings, rustCoreReady, permissions }) {
+  return `/* 由 dieyun-headless 生成：Electron preload 的浏览器替身。
+   桌面窗口的能力来自 preload.js（IPC → Main）；浏览器里换成同源 Gateway WS 代理 + 同源 LLM 转发，
+   只给「能如实回答」的接口，其余保持 undefined —— 渲染层会按能力缺失走自己的降级分支。 */
+(function () {
+  // 同源代理地址由页面自己推导：反代 / HTTPS 下自动变 wss://，不信 Host 头
+  const FALLBACK_URL = ${JSON.stringify(gatewayUrl)};
+  const GATEWAY_URL =
+    typeof location !== 'undefined' && location.host
+      ? (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/gateway'
+      : FALLBACK_URL;
+  const GATEWAY_TOKEN = ${JSON.stringify(gatewayToken)};
+  const WORKSPACE = ${JSON.stringify(String(workspacePath || ''))} || null;
+  const MODEL_SETTINGS = ${JSON.stringify(modelSettings || null)};
+  const LLM_PROXY = '/llm';
+  // 与手机端同一个 token；用它连同源 /ws，请服务器在 Main 侧跑这一轮
+  const WS_TOKEN = ${JSON.stringify(String(webToken || ''))};
+  const RUST_CORE_READY = ${rustCoreReady === false ? 'false' : 'true'};
+  // 权限档位（沙箱）由服务端注入：渲染层靠它决定给模型哪些工具（getPermissions → 工具集闸门）。
+  // 浏览器里没有写入通道，所以只读；改档位请在服务器上用桌面端或配置文件。
+  const PERMISSIONS = ${JSON.stringify(permissions || {})};
+
+  /**
+   * 桌面窗口里这一轮是 Main 跑的（preload 的 agentRustLoopRun → IPC）。浏览器里没有 IPC，
+   * 就开到同源 /ws（与手机端同一套线协议），由服务器用**同一份** runRustAgentLoop 跑，
+   * phase 事件以 event 帧推回来，渲染层看到的事件形状与 Electron 完全一致。
+   */
+  let agentWs = null;
+  let agentWsReady = null;
+  const agentPending = new Map();
+  const phaseSubs = new Set();
+  function connectAgentWs() {
+    if (agentWs && agentWs.readyState <= 1) return agentWsReady;
+    agentWsReady = new Promise((resolve, reject) => {
+      const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      const ws = new WebSocket(proto + location.host + '/ws');
+      agentWs = ws;
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token: WS_TOKEN, id: 'auth' }));
+      ws.onmessage = (ev) => {
+        let msg = null;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (!msg) return;
+        if (msg.type === 'auth_ok') {
+          resolve(ws);
+          return;
+        }
+        if (msg.type === 'error' && (msg.error === 'AUTH_FAILED' || msg.error === 'BAD_JSON')) {
+          reject(new Error('后端拒绝了 Web 会话：' + msg.error));
+          return;
+        }
+        if (msg.type === 'result') {
+          const box = agentPending.get(String(msg.id || ''));
+          if (!box) return;
+          agentPending.delete(String(msg.id || ''));
+          if (msg.ok) box.resolve(msg.data);
+          else box.reject(new Error((msg.error && (msg.error.message || msg.error.code)) || '本轮执行失败'));
+          return;
+        }
+        if (msg.type === 'event' && msg.event) {
+          phaseSubs.forEach((cb) => {
+            try {
+              cb(msg.event);
+            } catch (e) {
+              console.warn('[dieyun-headless] phase 订阅抛错：', e && e.message);
+            }
+          });
+        }
+      };
+      ws.onclose = () => {
+        agentWs = null;
+        agentWsReady = null;
+        const err = new Error('与后端的连接已断开');
+        agentPending.forEach((box) => box.reject(err));
+        agentPending.clear();
+      };
+      ws.onerror = () => reject(new Error('无法连接 /ws'));
+    });
+    return agentWsReady;
+  }
+  function agentCall(method, params) {
+    return connectAgentWs().then(
+      (ws) =>
+        new Promise((resolve, reject) => {
+          const id = 'c-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+          agentPending.set(id, { resolve, reject });
+          ws.send(JSON.stringify({ type: 'call', id, method, params: params || {} }));
+        })
+    );
+  }
+
+  /** 桌面端 LLM 请求由 Main 代发；这里代发到同源 /llm，由服务端转发到上游（顺带绕开模型端点的 CORS） */
+  async function postLlm(url, headers, body, onControl) {
+    const ctrl = new AbortController();
+    if (onControl) onControl({ abort: () => ctrl.abort() });
+    const h = Object.assign({}, headers, { 'x-dieyun-upstream': String(url || '') });
+    delete h['Host'];
+    delete h['host'];
+    const resp = await fetch(LLM_PROXY, { method: 'POST', headers: h, body: body, signal: ctrl.signal });
+    if (!resp.ok) {
+      const text = await resp.text();
+      const err = new Error('HTTP ' + resp.status + ' ' + resp.statusText + '\\n' + String(text).slice(0, 400));
+      err.statusCode = resp.status;
+      throw err;
+    }
+    return resp;
+  }
+
+  const real = {
+    // preload: ipcRenderer.invoke('gateway:get-info') → Promise
+    // 「rustCore.enabled」是渲染层判断「循环能不能跑」的依据（isDieyunCoreReady），如实上报
+    getGatewayInfo: async () => ({
+      url: GATEWAY_URL,
+      token: GATEWAY_TOKEN,
+      rustCore: RUST_CORE_READY ? { enabled: true } : null,
+      permissions: PERMISSIONS,
+      workspace: WORKSPACE || undefined
+    }),
+    // preload: ipcRenderer.invoke('permissions:get') → 与 gateway.getPermissions() 同一份
+    getPermissions: async () => PERMISSIONS,
+    // preload: ipcRenderer.invoke('workspace:get') → Promise，返回的是 gateway.getWorkspace() 的形状
+    // （{kind, workspacePath, displayPath, sshConnected}），不是裸字符串
+    getWorkspace: async () =>
+      WORKSPACE ? { kind: 'local', workspacePath: WORKSPACE, displayPath: WORKSPACE, sshConnected: false } : null,
+    // preload 里这个是**同步**的（webUtils.getPathForFile），浏览器拿不到真实路径
+    getPathForFile: () => null,
+    // preload: ipcRenderer.send('renderer:freeze-beat') —— 单向，无返回值
+    rendererFreezeBeat: () => {},
+    // 模型配置（端点 / 模型 / key）由服务端从 model-settings.json 读出来注入；渲染层靠它选模型
+    getModelSettingsFromMain: async () => MODEL_SETTINGS,
+    // 浏览器里改模型设置只落在 localStorage，不回写服务器（没有写入通道，也不该悄悄写）
+    syncModelSettings: async () => {},
+    // 流式聊天：等价于主进程的 streamChatViaMain
+    streamChatViaMain: async ({ url, headers, body, onRaw, onControl }) => {
+      const resp = await postLlm(url, headers, body, onControl);
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (typeof onRaw === 'function') onRaw(decoder.decode(value || new Uint8Array(), { stream: true }));
+      }
+    },
+    // 非流式单次请求：等价于主进程的 llmChatCompletion
+    llmChatCompletion: async ({ url, headers, body, onControl }) => {
+      const resp = await postLlm(url, headers, body, onControl);
+      return resp.json();
+    },
+    // 主循环（等价于主进程的 agent:rust-loop-run）：服务器用同一份 runRustAgentLoop 跑，
+    // 工具在服务器执行，phase 事件按 cancelToken 推给本页
+    agentRustLoopRun: async (payload) => agentCall('desktop.loop_run', { payload }),
+    agentRustLoopCancel: async ({ cancelToken }) => agentCall('desktop.loop_cancel', { cancelToken }),
+    // preload: ipcRenderer.on('agent:rust-loop-phase') → 返回取消订阅函数
+    onAgentRustLoopPhase: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      // 句柄是每轮局部变量（cancelToken），订阅本身是全局一条流：各订阅自己按 token 过滤
+      const wrapped = (ev) => cb(ev);
+      phaseSubs.add(wrapped);
+      return () => phaseSubs.delete(wrapped);
+    },
+    // 用量统计在 Main 侧汇总；浏览器里没有那份账本，本地累加没有意义也不影响展示
+    addTokens: () => {}
+  };
+  // 环境事实：会话没绑定工作空间时文件工具实际写入哪里（渲染层的 composer 标签要如实显示）
+  if (WORKSPACE) window.appDefaultWorkspacePath = WORKSPACE;
+  const warned = new Set();
+  const proxy = new Proxy(real, {
+    has: (t, k) => typeof k === 'string' && Object.prototype.hasOwnProperty.call(real, k),
+    get: (t, k) => {
+      if (typeof k !== 'string' || Object.prototype.hasOwnProperty.call(real, k)) return t[k];
+      // 只点名一次，避免刷屏；能力探测（if (api.x)）读到的就是 undefined
+      if (k !== 'then' && k !== 'toJSON' && !warned.has(k)) {
+        warned.add(k);
+        console.warn('[dieyun-headless] 浏览器里没有 window.diecloud.' + k + '（Electron 主进程能力，界面会走降级分支）');
+      }
+      return undefined;
+    }
+  });
+  Object.defineProperty(window, 'diecloud', { value: proxy, writable: false, configurable: true });
+
+  // 明文 HTTP 的 192.168.x.x 不是「安全上下文」（只有 localhost 才豁免），所以
+  // crypto.randomUUID 与 navigator.clipboard 都不存在 —— 渲染层用它们生成请求 id / 复制。
+  // 这两个都只是「API 在非安全上下文被藏起来」，用同样语义补回来即可，不需要 HTTPS。
+  try {
+    const c = window.crypto || (window.crypto = {});
+    if (typeof c.randomUUID !== 'function') {
+      const buf = new Uint8Array(16);
+      const randomUUID = () => {
+        if (typeof c.getRandomValues === 'function') c.getRandomValues(buf);
+        else for (let i = 0; i < 16; i += 1) buf[i] = Math.floor(Math.random() * 256);
+        buf[6] = (buf[6] & 0x0f) | 0x40;
+        buf[8] = (buf[8] & 0x3f) | 0x80;
+        const h = Array.prototype.map.call(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+        return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+      };
+      Object.defineProperty(c, 'randomUUID', { value: randomUUID, configurable: true, writable: true });
+      console.info('[dieyun-headless] 已补 crypto.randomUUID（非安全上下文里浏览器不提供）');
+    }
+  } catch (e) {
+    console.warn('[dieyun-headless] crypto.randomUUID 补丁失败：', e && e.message);
+  }
+
+  if (!navigator.clipboard) {
+    const writeText = async (text) => {
+      const ta = document.createElement('textarea');
+      ta.value = String(text == null ? '' : text);
+      ta.setAttribute('readonly', 'readonly');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        if (!document.execCommand('copy')) throw new Error('execCommand copy 被拒绝');
+      } finally {
+        ta.remove();
+      }
+    };
+    try {
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText: writeText, readText: async () => '' },
+        configurable: true
+      });
+      console.info('[dieyun-headless] 已补 navigator.clipboard（非安全上下文里浏览器不提供）');
+    } catch (e) {
+      console.warn('[dieyun-headless] navigator.clipboard 补丁失败：', e && e.message);
+    }
+  }
+})();
+`;
+}
+
+/**
+ * @param {{
+ *   packageRoot: string,          // 包根（含 src/renderer 与 node_modules）
+ *   rendererDir?: string,         // 默认 <packageRoot>/src/renderer
+ *   getGatewayInfo: () => {url:string, token:string, port:number},
+ *   getWebToken: () => string,    // 与手机端共用的访问 token
+ *   getWorkspace?: () => string,  // 注入给 getWorkspace()，桌面端是主进程持有的当前工作空间
+ *   getModelSettings?: () => object|null,  // 注入给 getModelSettingsFromMain()（含端点/模型/key）
+ *   log?: (msg: string) => void
+ * }} opts
+ */
+function createDesktopUi(opts) {
+  const packageRoot = opts.packageRoot;
+  const rendererDir = opts.rendererDir || path.join(packageRoot, 'src', 'renderer');
+  const log = typeof opts.log === 'function' ? opts.log : () => {};
+  const gatewayInfo = opts.getGatewayInfo;
+  const webToken = opts.getWebToken;
+  /** 收到 /gateway 的 upgrade 才 handleUpgrade；不需要挂到 server 上（路由在 MobileBridge） */
+  const upgradeWss = new WebSocketServer({ noServer: true });
+
+  function tokenAccepted(req, url) {
+    const want = String(webToken() || '');
+    if (!want) return false;
+    const fromQuery = url.searchParams.get('token') || '';
+    if (fromQuery && fromQuery === want) return true;
+    return parseCookies(req.headers.cookie)[COOKIE_NAME] === want;
+  }
+
+  function resolveFile(root, relPath) {
+    const decoded = decodeURIComponent(relPath);
+    if (decoded.includes('\0')) return null;
+    const abs = path.resolve(root, '.' + path.posix.normalize('/' + decoded));
+    const rootAbs = path.resolve(root);
+    if (abs !== rootAbs && !abs.startsWith(rootAbs + path.sep)) return null;
+    return abs;
+  }
+
+  function send(res, status, headers, body) {
+    res.writeHead(status, headers);
+    res.end(body);
+  }
+
+  /**
+   * 同源 LLM 转发：桌面端这条请求是 Main 代发的（preload 的 streamChatViaMain / llmChatCompletion），
+   * 浏览器里没有 Main，就直接转发到上游。作用有两个：
+   *  - 模型端点通常不返回 CORS 头（实测本机的 gunicorn 端点没有 `Access-Control-Allow-Origin`），
+   *    浏览器跨源 POST 会被直接拦掉；
+   *  - 前端不用为「另一台机器上的模型服务」改配置，同源即可。
+   * 仍然要求 token（否则就是一个局域网开放代理）；上游地址由请求头 `x-dieyun-upstream` 指定。
+   */
+  function handleLlmProxy(req, res, url) {
+    if (!tokenAccepted(req, url)) {
+      send(res, 401, { 'Content-Type': 'text/plain; charset=utf-8' }, '需要 token');
+      return;
+    }
+    if (req.method !== 'POST') {
+      send(res, 405, { 'Content-Type': 'text/plain; charset=utf-8', Allow: 'POST' }, '只接受 POST');
+      return;
+    }
+    let target;
+    try {
+      target = new URL(String(req.headers['x-dieyun-upstream'] || ''));
+    } catch {
+      send(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, '缺少或非法的 x-dieyun-upstream');
+      return;
+    }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      send(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, '只支持 http/https 上游');
+      return;
+    }
+    const headers = Object.assign({}, req.headers);
+    // 不把本服务的 cookie / 来源信息带给上游，也不要 hop-by-hop 头
+    delete headers['x-dieyun-upstream'];
+    delete headers.cookie;
+    delete headers.host;
+    delete headers.origin;
+    delete headers.referer;
+    delete headers.connection;
+    delete headers['content-length'];
+    const mod = target.protocol === 'https:' ? require('https') : require('http');
+    const upstream = mod.request(
+      target,
+      { method: 'POST', headers: Object.assign(headers, { host: target.host }) },
+      (upRes) => {
+        res.writeHead(upRes.statusCode || 502, upRes.headers);
+        upRes.pipe(res);
+      }
+    );
+    upstream.on('error', (e) => {
+      log(`LLM 转发失败 ${target.origin}${target.pathname}: ${e && e.message}`);
+      if (!res.headersSent) send(res, 502, { 'Content-Type': 'text/plain; charset=utf-8' }, '上游请求失败: ' + (e && e.message));
+      else res.end();
+    });
+    req.pipe(upstream);
+  }
+
+  /** 返回 true 表示「这个请求归我处理」 */
+  function handleHttp(req, res) {
+    let url;
+    try {
+      url = new URL(req.url || '/', 'http://localhost');
+    } catch {
+      return false;
+    }
+    if (!mountOf(url.pathname)) return false;
+    if (url.pathname === '/llm') {
+      handleLlmProxy(req, res, url);
+      return true;
+    }
+    if (!tokenAccepted(req, url)) {
+      send(res, 401, { 'Content-Type': 'text/plain; charset=utf-8' }, '需要 token：<本页地址>?token=<mobile-bridge-token.txt 内容>');
+      return true;
+    }
+
+    const isIndex = url.pathname === '/app' || url.pathname === '/app/' || url.pathname === '/app/index.html';
+    const setCookie = { 'Set-Cookie': `${COOKIE_NAME}=${encodeURIComponent(String(webToken()))}; Path=/; SameSite=Lax; HttpOnly` };
+
+    if (url.pathname === SHIM_PATH) {
+      const info = gatewayInfo();
+      const body = buildShim({
+        // 同源代理：浏览器连 /gateway，由本服务转发到 127.0.0.1 的 Gateway
+        gatewayUrl: `ws://${req.headers.host || '127.0.0.1'}/gateway`,
+        gatewayToken: info && info.token ? info.token : '',
+        webToken: String(webToken() || ''),
+        workspacePath: typeof opts.getWorkspace === 'function' ? opts.getWorkspace() : '',
+        modelSettings: typeof opts.getModelSettings === 'function' ? opts.getModelSettings() : null,
+        rustCoreReady: typeof opts.getRustCoreReady === 'function' ? opts.getRustCoreReady() !== false : true,
+        permissions: typeof opts.getPermissions === 'function' ? opts.getPermissions() : {}
+      });
+      send(res, 200, { 'Content-Type': MIME['.js'], 'Cache-Control': 'no-store', ...setCookie }, body);
+      return true;
+    }
+
+    const mount = mountOf(url.pathname);
+    let sliced = '';
+    let roots;
+    if (mount === 'node_modules') {
+      // 先找包内 node_modules，再找打包时额外带的 web-vendor（渲染层的 <script> 用到的浏览器包
+      // 不在 Node 依赖闭包里，会被裁剪掉，见 scripts/pack-headless.cjs 的 vendorWebScripts）
+      sliced = url.pathname.slice('/node_modules'.length);
+      roots = [path.join(packageRoot, 'node_modules'), path.join(packageRoot, 'web-vendor', 'node_modules')];
+    } else if (mount === 'src-file') {
+      sliced = url.pathname;
+      roots = [path.join(packageRoot, 'src')];
+    } else {
+      sliced = url.pathname.slice('/app'.length);
+      roots = [rendererDir];
+    }
+    // `/app` 与 `/app/` 都给 index.html；否则照路径取文件
+    const relPath = !sliced || sliced === '/' ? '/index.html' : sliced;
+    let filePath = null;
+    for (const root of roots) {
+      const candidate = resolveFile(root, relPath);
+      if (candidate && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        filePath = candidate;
+        break;
+      }
+    }
+    if (!filePath) {
+      send(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'not found: ' + relPath);
+      return true;
+    }
+    const ext = path.extname(filePath).toLowerCase();
+    const type = MIME[ext] || 'application/octet-stream';
+    if (isIndex && ext === '.html') {
+      // 第一行就注入替身，保证渲染层的任何脚本都能看到 window.diecloud
+      const html = fs.readFileSync(filePath, 'utf8').replace(/<head([^>]*)>/i, `<head$1>\n    <script src="${SHIM_PATH}"></script>`);
+      send(res, 200, { 'Content-Type': type, 'Cache-Control': 'no-store', ...setCookie }, html);
+      return true;
+    }
+    send(res, 200, { 'Content-Type': type, 'Cache-Control': 'no-cache', ...setCookie }, fs.readFileSync(filePath));
+    return true;
+  }
+
+  /**
+   * 同源 WS 代理：`/gateway` → `ws://127.0.0.1:<gateway.port>`（帧原样转发，鉴权仍由 Gateway 自己判）。
+   * 由 MobileBridge 的 upgrade 路由调用，返回 true 表示「这个 upgrade 归我」。
+   */
+  function handleUpgrade(req, socket, head) {
+    let url;
+    try {
+      url = new URL(req.url || '/', 'http://localhost');
+    } catch {
+      return false;
+    }
+    if (url.pathname !== '/gateway') return false;
+    if (!tokenAccepted(req, url)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return true;
+    }
+    upgradeWss.handleUpgrade(req, socket, head, (client) => {
+      const info = gatewayInfo() || {};
+      const upstream = new WebSocket(`ws://127.0.0.1:${Number(info.port) || 0}`);
+      const pending = [];
+      const shutdown = () => {
+        try {
+          client.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          upstream.close();
+        } catch {
+          /* ignore */
+        }
+      };
+      client.on('message', (data, isBinary) => {
+        if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
+        else pending.push([data, isBinary]);
+      });
+      upstream.on('open', () => {
+        while (pending.length) {
+          const [data, isBinary] = pending.shift();
+          upstream.send(data, { binary: isBinary });
+        }
+      });
+      upstream.on('message', (data, isBinary) => {
+        if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
+      });
+      client.on('close', shutdown);
+      upstream.on('close', shutdown);
+      client.on('error', shutdown);
+      upstream.on('error', (e) => {
+        log('desktop-ui gateway proxy error: ' + (e && e.message));
+        shutdown();
+      });
+    });
+    return true;
+  }
+
+  return { handleHttp, handleUpgrade };
+}
+
+module.exports = { createDesktopUi, buildShim, mountOf, COOKIE_NAME, SHIM_PATH };

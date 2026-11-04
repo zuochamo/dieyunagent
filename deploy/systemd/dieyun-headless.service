@@ -1,0 +1,63 @@
+# systemd：叠云 Agent 无界面常驻服务（浏览器 UI + 定时计划）
+#
+# 安装（需 sudo，路径按本机修改）：
+#   sudo cp deploy/systemd/dieyun-headless.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dieyun-headless
+#
+# 查看：
+#   sudo systemctl status dieyun-headless
+#   journalctl -u dieyun-headless -f        # 启动后会打印 http://127.0.0.1:17331/#token=…
+#
+# 前置条件（详见 docs/HEADLESS.md）：
+#   1. tarball 解到 /opt/dieyun-headless
+#   2. /etc/dieyun/headless.env：DIEYUN_USER_DATA / DIEYUN_SECRET_KEY_FILE，
+#      以及可按需覆盖的 DIEYUN_WEB_HOST / DIEYUN_WEB_PORT / DIEYUN_WORKSPACE / DIEYUN_LOG_LEVEL
+#   3. /var/lib/dieyun-agent/model-settings.json 属于 dieyun 用户（模型与 API Key）
+#   4. 工作空间目录（默认 /srv/agent-workspace）属于 dieyun 用户
+#
+# 一个 DIEYUN_USER_DATA 只跑一个进程：重复启动会在日志里看到「Gateway 端口已被占用」告警。
+
+[Unit]
+Description=dieyun agent (headless: terminal / run / web)
+Documentation=file:/opt/dieyun-headless/HEADLESS.md
+After=network-online.target
+Wants=network-online.target
+# 数据目录没准备好就别反复 crash-loop（首次部署先跑 §3 的初始化）
+ConditionPathExists=/etc/dieyun/headless.env
+
+[Service]
+Type=simple
+User=dieyun
+Group=dieyun
+WorkingDirectory=/opt/dieyun-headless
+# 监听地址 / 端口 / 工作空间 / 日志级别：**默认值写在这里，/etc/dieyun/headless.env 可覆盖**
+# （Environment= 先赋默认，EnvironmentFile= 在后，所以文件里的值一定赢）
+# 端口必须可配：一台机器上常有别的服务占着 17331（例如 remote-agent 网关 run-cli.js --port 17331）。
+Environment=DIEYUN_WEB_HOST=127.0.0.1
+Environment=DIEYUN_WEB_PORT=17331
+Environment=DIEYUN_WORKSPACE=/srv/agent-workspace
+Environment=DIEYUN_LOG_LEVEL=info
+# 只监听回环：对外访问请用 SSH 端口转发或反代 + TLS（token 是唯一的应用层认证）
+Environment=DIEYUN_MOBILE_HOST=127.0.0.1
+Environment=HOME=/var/lib/dieyun-agent
+EnvironmentFile=/etc/dieyun/headless.env
+
+# 跨平台打包可能丢可执行位：每次启动补一次（`+` 前缀 = 以 root 权限执行，幂等）
+ExecStartPre=+/bin/chmod +x /opt/dieyun-headless/bin/dieyun-headless /opt/dieyun-headless/build/dieyun-core/dieyun-core
+
+ExecStart=/opt/dieyun-headless/bin/dieyun-headless serve --web --host ${DIEYUN_WEB_HOST} --port ${DIEYUN_WEB_PORT} --workspace ${DIEYUN_WORKSPACE} --plans --log-level ${DIEYUN_LOG_LEVEL}
+# 优雅退出：main.js 收到 SIGTERM 后会按 mobile → gateway → core → mcp 顺序收尾
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=3
+
+# 基本收紧。注意：Agent 要在工作区内写文件，所以不要加 ProtectSystem=strict；
+# 若要进一步收紧，用 ReadWritePaths=/srv/agent-workspace 显式放行。
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

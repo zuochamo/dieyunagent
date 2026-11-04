@@ -52,6 +52,10 @@ class MobileBridge {
     this.token = '';
     this.server = null;
     this.wss = null;
+    /** @type {null | ((req: import('http').IncomingMessage, res: import('http').ServerResponse) => boolean)} */
+    this.extraHttp = null;
+    /** @type {null | ((req: import('http').IncomingMessage, socket: import('stream').Duplex, head: Buffer) => boolean)} */
+    this.upgradeHook = null;
     this.clients = new Set();
     /**
      * 服务端发起的「请求 / 响应」（与手机的 `call` 方向相反）：id → 等待中的调用。
@@ -79,7 +83,12 @@ class MobileBridge {
   }
 
   getInfo() {
-    const urls = lanHosts().map((ip) => `http://${ip}:${this.port}/#token=${this.token}`);
+    // 绑在回环上就不该报局域网地址：那个 URL 从别的机器根本连不上。
+    // 真机踩过：headless 用 DIEYUN_MOBILE_HOST=127.0.0.1 起服务，日志却打印
+    // `http://192.168.31.14:17340/#token=…`，运维照着点必然失败（远程要走 ssh -L 转发）。
+    const loopbackOnly = ['127.0.0.1', 'localhost', '::1'].includes(String(this.host || '').trim());
+    const hosts = loopbackOnly ? ['127.0.0.1'] : lanHosts();
+    const urls = hosts.map((ip) => `http://${ip}:${this.port}/#token=${this.token}`);
     return {
       host: this.host,
       port: this.port,
@@ -88,23 +97,59 @@ class MobileBridge {
     };
   }
 
+  /**
+   * 起 HTTP/WS 服务。返回的 promise 在 listen 成功时 resolve、失败时 reject。
+   *
+   * 为什么要返回 promise：端口被占 / 地址不可绑时，无窗口模式**没有别的出口** ——
+   * 以前只往日志写一行，调用方照旧打印一个点不开的 URL，systemd 看到进程还在跑。
+   */
   start() {
-    if (this.server) return;
+    if (this.server) return Promise.resolve(this.getInfo());
     this._ensureToken();
     this.server = http.createServer((req, res) => this._handleHttp(req, res));
-    this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
+    // noServer + 自己路由：以前 `path: '/ws'` 会让其它路径的 upgrade 被 ws 直接 400 掉，
+    // 无窗口模式下 `/gateway`（桌面界面的同源 WS 代理）就永远轮不到。
+    this.wss = new WebSocketServer({ noServer: true });
     this.wss.on('connection', (ws) => this._handleWs(ws));
-    this.server.on('error', (err) => {
-      this.log('mobile bridge error: ' + (err && err.message));
-    });
-    this.server.listen(this.port, this.host, () => {
-      const urls = this.getInfo().urls;
-      this.log(`mobile bridge listening :${this.port}`);
-      if (urls.length) this.log(`mobile bridge url: ${urls[0]}`);
+    this.server.on('upgrade', (req, socket, head) => this._handleUpgrade(req, socket, head));
+    return new Promise((resolve, reject) => {
+      const onListenError = (err) => {
+        this.log('mobile bridge error: ' + (err && err.message));
+        reject(err);
+      };
+      this.server.once('error', onListenError);
+      this.server.listen(this.port, this.host, () => {
+        this.server.removeListener('error', onListenError);
+        // listen 之后的错误只记日志：连接级失败不该拖垮整个服务
+        this.server.on('error', (err) => this.log('mobile bridge error: ' + (err && err.message)));
+        const urls = this.getInfo().urls;
+        this.log(`mobile bridge listening :${this.port}`);
+        if (urls.length) this.log(`mobile bridge url: ${urls[0]}`);
+        resolve(this.getInfo());
+      });
     });
   }
 
+  /** upgrade 路由：`/ws` 归手机端；其它路径先问外挂钩子（桌面界面的 `/gateway`） */
+  _handleUpgrade(req, socket, head) {
+    let pathname = '';
+    try {
+      pathname = new URL(req.url || '/', 'http://localhost').pathname;
+    } catch {
+      pathname = '';
+    }
+    if (pathname === '/ws') {
+      this.wss.handleUpgrade(req, socket, head, (ws) => this.wss.emit('connection', ws, req));
+      return;
+    }
+    if (typeof this.upgradeHook === 'function' && this.upgradeHook(req, socket, head) === true) return;
+    socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+  }
+
   _handleHttp(req, res) {
+    // 无窗口模式下桌面界面（src/renderer）也由这个端口提供；桌面端不装这个钩子，行为不变
+    if (typeof this.extraHttp === 'function' && this.extraHttp(req, res)) return;
     const url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
     if (url.pathname === '/api/info') {
       const body = JSON.stringify({ ok: true, mode: 'lan', port: this.port });
@@ -218,6 +263,8 @@ class MobileBridge {
       clearTimeout(authTimer);
       this.clients.delete(ws);
       this.clientCaps.delete(ws);
+      // 页面关掉/刷新：它发起的那一轮不能留在后台继续跑（与点「停止」等价）
+      if (this.desktopTurn) this.desktopTurn.cancelForSocket(ws);
       // 这台手机断线/关页面时，等它回话的请求必须立刻失败：
       // 否则 Agent 会一直挂到超时，把「手机没了」误读成「手机很慢」。
       this._rejectPendingOf(ws);
@@ -318,7 +365,15 @@ class MobileBridge {
       else if (method === 'speech.transcribe') data = await this.agentService.transcribeSpeech(params);
       else if (method === 'speech.synthesize') data = await this.agentService.synthesizeSpeech(params);
       else if (method === 'service.info') data = this.agentService.info();
-      else throw new Error('未知方法: ' + method);
+      // 浏览器里的桌面界面（/app/）：渲染层驱动的聊天轮，循环仍在 Main 侧跑（见 headless/desktop-turn.js）
+      else if (method.startsWith('desktop.') && this.desktopTurn) {
+        data = await this.desktopTurn.handleCall(
+          method,
+          params,
+          (frame) => this._send(ws, { type: 'event', event: frame }),
+          ws
+        );
+      } else throw new Error('未知方法: ' + method);
       this._send(ws, { type: 'result', id, ok: true, data });
     } catch (e) {
       this._send(ws, {

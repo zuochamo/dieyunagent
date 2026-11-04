@@ -45,7 +45,7 @@ async function testBridgeRoundTrip() {
     userDataPath,
     log: () => {}
   });
-  bridge.start();
+  await bridge.start();
   await sleep(150);
   const token = bridge.token;
   assert(token, 'bridge token');

@@ -1,0 +1,454 @@
+# 无界面运行（HEADLESS）
+
+> 让同一个叠云 Agent 在 **Linux 服务器**上跑：没有窗口、没有 Electron 渲染进程。
+> 三种用法：**浏览器 Web UI**（常驻）、**一次性命令**（cron / CI）、**终端 REPL**。
+> 方案与取舍见 [`docs/HEADLESS-MODE-PLAN.md`](HEADLESS-MODE-PLAN.md)。
+
+---
+
+## 1. 它是什么
+
+同一个 Agent，同一套能力来源：模型、系统提示、工具、压缩、账本、记忆归纳都在 Node / Rust 侧，
+UI 只是入口之一。因此服务器上不需要「另装一个 Agent」，只需要一个**没有窗口的入口**：
+
+```
+bin/dieyun-headless serve --web   →  浏览器 http://127.0.0.1:17331/#token=…
+bin/dieyun-headless run "…"       →  stdout（可 --json 出事件流）
+bin/dieyun-headless repl          →  终端里连续对话
+```
+
+它与**桌面版**可以共存，但**不要共用同一个数据目录**（见 §7 排障最后一条）。
+
+---
+
+## 2. 安装
+
+两种外壳，**同一份 payload**（装完都是 `/opt/dieyun-headless`，用法完全一样）：
+
+| 产物 | 适合 | 装法 |
+|---|---|---|
+| `dieyun-headless_<ver>_amd64.deb` | Debian / Ubuntu（**推荐**：自动建用户与目录、自动装 systemd 单元、`apt` 管升级） | `sudo apt install ./dieyun-headless_<ver>_amd64.deb` |
+| `dieyun-headless-<ver>-linux-x64.tgz` | 其他发行版（CentOS / RHEL / 麒麟 / 统信…只要 glibc ≥ 2.28） | 手工解包（见下） |
+
+> deb **不含 Electron / Chromium**：它给的是终端、一次性命令与浏览器 Web 三种用法。
+> 要那台机器上还有桌面窗口，另外装桌面版 deb（两者可并存，但**别共用数据目录**）。
+
+构建机产出：
+
+```bash
+npm run pack:dieyun-core:linux     # 产 build/dieyun-core-linux/dieyun-core
+npm run pack:mcp-bundled           # 可选：离线预装 MCP 产物
+npm run build:headless             # core → tgz/deb → 结构自检 → 内网 apt 源 → 索引自检（发版用这条）
+npm run pack:deb:headless          # 只重打包（已确认 core 是最新时）
+npm run verify:headless-pack       # 断言 tgz 内清单（src / core / node_modules / 文档）
+npm run verify:headless-deb        # 断言 deb 的 ar/control/data 结构
+npm run publish:headless-apt       # dist/*.deb → release/headless-apt/pool + Packages/Release
+npm run verify:headless-apt        # 断言索引里的 Size/SHA256 与磁盘一致
+```
+
+`npm run build:all`（桌面 NSIS + Ubuntu deb）末尾已接上 `build:headless`，所以一次发版会顺带
+产出这两个包**并把内网 apt 源刷新到最新**——但不进 COS / Y: / 桌面自动更新通道（服务器怎么升级见 §8）。
+
+### 2.1 deb（推荐）
+
+```bash
+sudo apt install ./dieyun-headless_0.1.72_amd64.deb
+# postinst 已经做了：建 dieyun 系统用户、/var/lib/dieyun-agent、/srv/agent-workspace、
+#                     /etc/dieyun/headless.env（从 .example 复制）、/etc/dieyun/secret.key（仅首次）
+sudoedit /etc/dieyun/headless.env          # 确认 DIEYUN_USER_DATA / DIEYUN_SECRET_KEY_FILE
+scp 你的 model-settings.json 服务器:/tmp/  # 模型与 API Key（见 §3.2）
+sudo -u dieyun cp /tmp/model-settings.json /var/lib/dieyun-agent/model-settings.json
+sudo systemctl enable --now dieyun-headless
+```
+
+`/usr/bin/dieyun-headless` 是入口（等价于 `/opt/dieyun-headless/bin/dieyun-headless`）。
+卸载 `sudo apt remove dieyun-headless` **不会删** `/var/lib/dieyun-agent` 与 `/etc/dieyun`。
+
+### 2.2 tarball（其他发行版）
+
+```bash
+sudo useradd --system --create-home --home-dir /var/lib/dieyun-agent dieyun || true
+sudo mkdir -p /opt/dieyun-headless /etc/dieyun
+sudo tar -xzf dieyun-headless-*.tgz -C /opt/dieyun-headless
+sudo chown -R root:root /opt/dieyun-headless
+```
+
+包内已带正确的权限位（`bin/node`、`bin/dieyun-headless`、`build/dieyun-core/dieyun-core` 是 0755）。
+只有当你用**不保留权限**的工具（某些图形解压器）解包时，才需要补一次：
+
+```bash
+sudo chmod +x /opt/dieyun-headless/bin/dieyun-headless \
+              /opt/dieyun-headless/bin/node \
+              /opt/dieyun-headless/build/dieyun-core/dieyun-core
+```
+
+之后按 §3 建环境文件与 systemd 单元（tarball 不替你建）。
+
+**依赖**：包里已带 node（`--no-node` 打的包则需系统 node ≥ 20）。系统只需 `libc`（见 §7 GLIBC）。
+
+---
+
+## 3. 配置
+
+### 3.1 环境文件 `/etc/dieyun/headless.env`
+
+```bash
+# 数据目录（与桌面同一个解析规则；务必独立于桌面那台的目录）
+DIEYUN_USER_DATA=/var/lib/dieyun-agent
+
+# 凭据加密密钥（MCP / SSH / 频道 Secret 用；缺失时这些凭据不可写，不会回退明文）
+DIEYUN_SECRET_KEY_FILE=/etc/dieyun/secret.key
+
+# 浏览器界面监听地址 / 端口（默认 127.0.0.1:17331；端口被占就改，见 §7）
+# DIEYUN_WEB_HOST=127.0.0.1
+# DIEYUN_WEB_PORT=17331
+
+# Agent 默认工作空间（默认 /srv/agent-workspace；改这里，别改 unit）
+# DIEYUN_WORKSPACE=/srv/agent-workspace
+
+# 日志级别：error | warn | info | debug
+# DIEYUN_LOG_LEVEL=info
+
+# 可选：显式指定 core（默认按 <包根>/build/dieyun-core/dieyun-core 探测）
+# DIEYUN_CORE_BIN=/opt/dieyun-headless/build/dieyun-core/dieyun-core
+
+# 可选：本地 Gateway 端口（一个数据目录只跑一个进程，见 §7）
+# DIECLOUD_GATEWAY_PORT=17330
+```
+
+`DIEYUN_WEB_HOST` / `DIEYUN_WEB_PORT` / `DIEYUN_WORKSPACE` / `DIEYUN_LOG_LEVEL` 由 systemd 单元以
+`${VAR}` 展开传给命令行（默认值写在 unit 的 `Environment=` 里，`EnvironmentFile=` 在后所以文件里的值优先）。
+**改这些不要动 `/usr/lib/systemd/system/dieyun-headless.service`** —— 那是包的文件，升级会被覆盖。
+
+> deb 安装的机器上，**手工跑 CLI 也会读这份文件**（`/usr/bin/dieyun-headless` → 包内启动器会补齐未设置的变量，
+> 已显式 export 的仍然优先）。所以 `sudo -u dieyun dieyun-headless run "…"` 和 systemd 服务看到的是同一个
+> 数据目录、同一个工作空间 —— 否则会出现「服务里配好了 Key，命令行却说未配置」这种自相矛盾。
+> tarball 安装没有这个文件，按 §9 自己 `export`。
+>
+> 顺带一条等价关系：`DIEYUN_WORKSPACE=/x` 与 `--workspace /x` 同义（命令行参数优先）。
+
+生成密钥（**deb 安装时已自动生成**；tarball 或要换密钥时才手工做）：
+
+```bash
+sudo /opt/dieyun-headless/bin/dieyun-headless gen-key --out /etc/dieyun/secret.key
+sudo chown root:dieyun /etc/dieyun/secret.key && sudo chmod 0640 /etc/dieyun/secret.key
+```
+
+> 密钥与 Electron `safeStorage` 的密文**互不通用**：桌面写过的 MCP/SSH 凭据在服务器上解不开，
+> 需要在服务器侧重填一次（模型 API Key 不受影响，它本来就是明文，见 §3.2）。
+> 换密钥等于作废已有 MCP/SSH/频道凭据。权限要能被服务用户读到（`root:dieyun 0640` 或 `dieyun:dieyun 0600`）。
+
+### 3.2 模型 / 供应商
+
+模型配置读 `<DIEYUN_USER_DATA>/model-settings.json`（与桌面同一份格式，**API Key 为明文**）：
+
+```bash
+# 从桌面复制（推荐，供应商与模型列表一起带过去）
+scp ~/.config/dieyunagent/model-settings.json server:/tmp/model-settings.json
+sudo -u dieyun cp /tmp/model-settings.json /var/lib/dieyun-agent/model-settings.json
+```
+
+注意目录归属（`dieyun` 用户必须可读写这个文件与整个 `DIEYUN_USER_DATA`）。
+
+### 3.3 工作空间
+
+默认 `~/.dieyun/workspace`；生产建议显式指定（unit 默认 `/srv/agent-workspace`）：
+
+```bash
+sudo mkdir -p /srv/agent-workspace && sudo chown dieyun:dieyun /srv/agent-workspace
+```
+
+放在别的盘（例如 `/run/media/<别人>/…`）完全可以，但 `dieyun` 用户需要**整条路径的通行权**，
+否则启动就报 `EACCES: permission denied, mkdir '<工作空间>'`：
+
+```bash
+sudo install -d -o dieyun -g dieyun -m 0775 /run/media/dieyunx/disk/harness/agent/workspace
+# 祖先目录只给通行权（x），不要给读权限 —— 能进目录不等于能看目录内容
+for d in /run/media/dieyunx /run/media/dieyunx/disk /run/media/dieyunx/disk/harness; do
+  sudo setfacl -m u:dieyun:x "$d"
+done
+sudo -u dieyun sh -c 'cd <工作空间> && touch .w && rm .w && echo 可写'
+```
+
+---
+
+## 4. 命令与参数
+
+```
+dieyun-headless serve [选项]          常驻；配 --web 提供浏览器界面
+dieyun-headless repl [选项]           交互终端（一个会话内连续对话）
+dieyun-headless run "<任务>" [选项]   跑一轮就退出（退出码反映成败，适合 cron/CI）
+dieyun-headless self-test [选项]      无网络自检：起 Gateway + core，建会话并走一次工具桥
+dieyun-headless gen-key --out <文件>  生成凭据加密密钥（0600）
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--workspace <目录>` | `~/.dieyun/workspace` | 默认工作空间；新会话创建时绑定 |
+| `--user-data <目录>` | 按平台规则（`DIEYUN_USER_DATA` 覆盖） | 与桌面同一套目录解析 |
+| `--session <id>` | 每次新建 | 续用已有会话 |
+| `--web` / `--host` / `--port` | 关 / `127.0.0.1` / `17331` | 浏览器界面；**默认只听回环** |
+| `--sandbox <档位>` | 读 `host-permissions.json`（缺省 `workspace-write`） | `read-only` / `workspace-write` / `danger-full-access` |
+| `--model <名>` / `--route <供应商>` | 模型设置里的默认文本模型 | 显式覆盖，不做静默兜底 |
+| `--plans` | 关 | 同时启动定时/目标型计划调度器 |
+| `--json` | 关 | `run` 输出 NDJSON 事件（stdout 只放事件，日志走 stderr） |
+| `--log-level` | `info` | `error` / `warn` / `info` / `debug` |
+| `-v` / `--version` | — | 打印版本并退出（升级后确认服务器上跑的是哪一版） |
+
+**退出码**：`0` 成功 · `2` 本轮失败或无交付 · `3` 配置缺失（无 API Key / core 未就绪）。
+
+自检（装完先跑这个，不联网）：
+
+```bash
+sudo -u dieyun env $(cat /etc/dieyun/headless.env | xargs) \
+  /opt/dieyun-headless/bin/dieyun-headless self-test --workspace /srv/agent-workspace
+# 期望输出：self-test: OK / core=ready / sandbox=… / session=…
+```
+
+---
+
+## 5. 常驻服务（systemd）
+
+deb 装好即有单元（`/lib/systemd/system/dieyun-headless.service`，与仓库里 `deploy/systemd/dieyun-headless.service` 同一份）：
+
+```bash
+sudo systemctl enable --now dieyun-headless
+sudo systemctl status dieyun-headless
+journalctl -u dieyun-headless -f
+```
+
+tarball 安装要自己放单元：
+
+```bash
+sudo cp /opt/dieyun-headless/deploy/dieyun-headless.service /etc/systemd/system/ 2>/dev/null \
+  || sudo cp <仓库>/deploy/systemd/dieyun-headless.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now dieyun-headless
+```
+
+打开界面：`journalctl -u dieyun-headless | grep 'Web 界面'` 打出 `http://127.0.0.1:17331/#token=…`，
+远程访问请用 SSH 端口转发：
+
+```bash
+ssh -N -L 17331:127.0.0.1:17331 dieyun@server
+# 本地浏览器打开 http://127.0.0.1:17331/#token=…
+```
+
+要在反代后对外提供，请加 TLS 与访问控制（Basic Auth / mTLS / IP 白名单）——**token 是唯一的应用层认证**。
+
+单元里的两个细节（不是冗余）：
+
+- `ExecStartPre=+chmod +x …`：兜住「用会丢权限的工具解包」这一种情况，幂等。
+- `DIEYUN_MOBILE_HOST=127.0.0.1`：即便包内默认已是回环，也不让 unit 被改成 `0.0.0.0` 后静默对外。
+
+---
+
+## 6. 能力边界与安全
+
+**可用工具**（与定时计划 / 频道同一档）：`host_exec`、`fs_read_file`、`fs_edit`、`fs_write_file`、
+`fs_list_dir`、`web_fetch`、`web_search`，加已启用的 MCP 工具。
+
+**不可用**（启动日志里会如实打印一行）：`browser_*`（需内嵌浏览器）、`computer_*`（需桌面截图/输入）、
+`camera_look`（需手机端）、`agent_clarify` / `session_new` / `session_set_workspace`（Renderer-only）。
+
+安全要点：
+
+- **审批没有接收方**：桌面弹出的「越界写是否允许」在无窗口时无处可问，系统按 fail-closed 一律拒绝
+  （返回给模型一条明确错误）。要放开只能提升档位（`--sandbox danger-full-access`），请只在你信任的工作区这么做。
+- **别把工作空间设成 `/`**：`workspace-write` 允许工作区内任意写；范围给大了等于没有沙箱。
+- **凭据独立**：服务器上的 MCP/SSH 凭据需要重填（见 §3.1 密钥说明）。
+- **Web 端默认只听 127.0.0.1**；`--host 0.0.0.0` 会在日志里警告。
+
+### 6.1 让内网直连（可选）
+
+默认只绑回环。要在局域网里用浏览器直接开，就改 `/etc/dieyun/headless.env` 再重启服务：
+
+```bash
+DIEYUN_WEB_HOST=0.0.0.0     # 等价于 --host 0.0.0.0
+sudo systemctl restart dieyun-headless
+# 日志会打印 Web 界面：http://0.0.0.0:17340/#token=…，实际用服务器 IP 打开
+```
+
+暴露的是「一台能读写工作区、能执行命令的 Agent」，所以**认证边界要说清楚**（2026-11-04 实测）：
+
+| 请求 | 是否需要 token |
+|---|---|
+| `GET /`、`/app.js`、`/styles.css`、`/api/info`、`/api/version` | 不需要（静态资源与端口号，不带任何数据） |
+| WebSocket `/ws`（真正指挥 Agent 的通道） | **必须**先发 `{type:"auth",token:"…"}`：错的 token 立刻 `AUTH_FAILED` 并断开，15 秒不发就关连接 |
+| `GET /app/…`（桌面界面，见 §6.2） | **必须**：`?token=…` 换 cookie，之后静态资源带 cookie 即可 |
+| WebSocket `/gateway`（桌面界面的同源 RPC 通道） | **必须**：同上的 token（cookie 或查询串），否则 401 握手失败 |
+
+token 在 `<DIEYUN_USER_DATA>/mobile-bridge-token.txt`（就是 `#token=` 后面那段）。**拿到 token 等于拿到这台机器的
+Agent 权限**，所以：
+
+- 只在自己信任的网段开，最好再用防火墙圈来源：
+  `sudo ufw allow from 192.168.31.0/24 to any port 17340 proto tcp`；
+- 跨网段 / 出差在外，用 SSH 转发（`ssh -L 17340:127.0.0.1:17340 user@host`）或反代 + TLS，
+  别把 `0.0.0.0` + 明文 token 直接挂到公网；
+- 用完想收回去：`DIEYUN_WEB_HOST=127.0.0.1` + 重启。
+
+### 6.2 两种 Web 界面：手机端 `/` 与桌面端 `/app/`
+
+同一个端口同时提供两个界面，都走同一个 token：
+
+| 地址 | 是什么 | 适合 |
+|---|---|---|
+| `http://<host>:17340/#token=…` | **手机端页面**（`src/mobile/public`）：按 430px 设计，宽屏下只是把消息列拉宽居中 | 手机、平板、随手发一条 |
+| `http://<host>:17340/app/?token=…` | **桌面界面**（`src/renderer`，就是 Electron 窗口里那一套）：顶栏 / 会话列表 / 设置 / 工具卡片都是宽屏布局 | 桌面上长期用 |
+
+桌面界面不是另写的前端：Electron 窗口本来就是浏览器页面（`contextIsolation: true` +
+`nodeIntegration: false`），渲染层的 RPC 本来就是自己连 Gateway 的 WebSocket
+（`renderer-gateway.js` 里 `new WebSocket(info.url)`）。headless 只是补了两件事：
+
+1. `src/headless/desktop-ui.js` 给 `window.diecloud` 一个**浏览器替身**（preload 的 12 个接口里，
+   `getGatewayInfo` / `getWorkspace` 是真的，其余退化成无害空实现）；
+2. `MobileBridge` 把 `/gateway` 的 WebSocket 升级**同源代理**到本机 Gateway（127.0.0.1:…），
+   帧原样转发 —— 所以 Gateway token 仍由 Gateway 自己校验（错的 token 依旧 `AUTH_FAILED`）。
+
+浏览器里拿不到的能力（点了不会崩，但给不出结果）：
+
+- 原生文件选择框、拖拽文件的真实路径（`getPathForFile` 返回 null）；
+- 「连接」页里的 SSH / 远端 Gateway 面板、终端停止按钮；
+- 依赖 Electron 的 `browser_*` / `computer_*` 工具（与 §6 的不可用清单一致）。
+
+渲染层 `<script>` 用到的三个浏览器包（mermaid / mammoth / xlsx）不 `require`、因此不在 Node 依赖闭包里，
+打包时按 `src/renderer/index.html` 现扒进载荷的 `web-vendor/`（见 `scripts/pack-headless.cjs`）。
+
+---
+
+## 7. 排障
+
+| 现象 | 原因与处理 |
+|---|---|
+| `dieyun-core 未就绪`（退出码 3） | core 不在探测路径。确认 `<包根>/build/dieyun-core/dieyun-core` 存在且**可执行**（`chmod +x`），或设 `DIEYUN_CORE_BIN` |
+| `Permission denied` 启动即失败 | 可执行位丢了（多见于用不保留权限的工具解包）：`chmod +x bin/dieyun-headless bin/node build/dieyun-core/dieyun-core`；deb 安装的包由 unit 的 `ExecStartPre` 兜住 |
+| `apt install` 报 `unmet dependencies` | 包里只 `Depends: libc6 (>= 2.28)`。用 `sudo apt install ./dieyun-headless_<ver>_amd64.deb`（带路径，apt 才会自动补依赖），不要用 `dpkg -i` 直接装 |
+| `dpkg -l dieyun-headless` 有包但 `systemctl` 找不到单元 | `sudo systemctl daemon-reload` 一次（postinst 在无 systemd 的容器里会跳过这一步） |
+| `GLIBC_2.xx not found` | 目标机 libc 太老。看包内 `manifest.json` 的 `glibcFloor`；core 用 zig 目标构建（`CORE_GLIBC_TARGET=2.17`），若 node 成为地板就换更老的 node 大版本或升级系统 |
+| `未配置 API Key`（退出码 3） | `model-settings.json` 缺失或不属于 `dieyun` 用户；见 §3.2。注意手工跑 CLI 时数据目录要和服务一致（deb 安装的包已自动读 `/etc/dieyun/headless.env`；tarball 自己 `export DIEYUN_USER_DATA`） |
+| `Cannot find module 'xxx'` / 启动即 `MODULE_NOT_FOUND` | 包是按「入口 require 图」裁剪的。打包期有冷启动闸门（干净目录里跑入口 `--help`），正常打不出来；若手工改过 payload，用 `npm run pack:deb:headless` 重打 |
+| MCP 工具报 `MCP_CREDENTIAL_UI_UNAVAILABLE` / 凭据缺失 | 无窗口时无法弹窗填凭据：先在桌面端填好 → 服务器上重填（密钥不同，不能直接拷密文） |
+| MCP / SSH 凭据保存失败（日志提示未配置 `DIEYUN_SECRET_KEY_FILE`） | 密钥文件缺失或无读权限；`ls -l /etc/dieyun/secret.key` 应为 `root:dieyun 0640`（或 `dieyun:dieyun 0600`） |
+| `web_search` / `web_fetch` 报 `fetch failed` | 服务器在代理后：headless 用 Node 自带 fetch，**不读系统代理**。用 `NODE_USE_ENV_PROXY=1` + `HTTPS_PROXY`（Node 支持该能力时生效），或在直连出口上跑 |
+| 同一数据目录起两个进程 | SQLite 并发由 core 兜住，但会各起一份索引监听；启动日志会告警「Gateway 端口已被占用」。**约定：一个 `DIEYUN_USER_DATA` 只跑一个 headless 进程** |
+| 服务起不来，日志 `listen EADDRINUSE ... 17331` | Web 端口被别的进程占了（服务器上很常见：`remote/run-cli.js` 的 remote-agent 网关按工作区各占 17331、17332…）。在 `/etc/dieyun/headless.env` 里设 `DIEYUN_WEB_PORT=17340`，再 `sudo systemctl restart dieyun-headless` |
+| 启动报 `EACCES: permission denied, mkdir '<工作空间>'` | `dieyun` 用户对工作空间或其**祖先目录**没有通行权。见 §3.3 的 `setfacl -m u:dieyun:x`（工作空间本身要 `rwx`） |
+| 服务在跑时手工跑 `self-test` 报 `EADDRINUSE :17330` | 本地 Gateway 端口被在跑实例占着（自检本身仍会 `OK`，但日志刺眼）。加 `DIECLOUD_GATEWAY_PORT=17399`（必要时再给个临时 `DIEYUN_USER_DATA`） |
+| 日志里的 `mobile bridge url` 打不开 | 绑的是回环就只回环可达（日志也会照实打印 `http://127.0.0.1:...`）。远程访问用 `ssh -L 17340:127.0.0.1:17340 server`，再在浏览器打开带 `#token=` 的地址 |
+| 与桌面共用同一个 `DIEYUN_USER_DATA` | 不要。桌面用 `%APPDATA%/dieyunagent`，服务器给独立目录（`/var/lib/dieyun-agent`） |
+| `run` 返回空但退出码 0 之外的怪状态 | `run` 无正文时退出码为 2；`--json` 下看 `{"type":"done"}` 里 `content` 与 `aborted` |
+| 想要桌面窗口 | 这个包**不含 Electron**。另装桌面版 deb；两者可并存，但数据目录要分开 |
+
+日志都走 stderr（`--json` 时 stdout 只有事件），排障优先看 `--log-level debug`。
+
+---
+
+## 8. 升级与回滚
+
+headless 的更新**走 apt**，不自建更新客户端：服务器上已有 apt / `unattended-upgrades` /
+`apt-daily.timer`，给它们一个源，就有「自动更新 + 哈希校验 + 依赖解析 + 指定版本回滚」。
+
+发版时 `npm run build:all` 末尾的 `build:headless` 会顺带：
+
+1. 打 `dist/dieyun-headless_<ver>_amd64.deb` 与 `.tgz`；
+2. 把 deb 追加进 `release/headless-apt/pool/`，并重算 `Packages` / `Packages.gz` / `Release`；
+3. 自检索引（Size / SHA256 必须与磁盘一致，否则 apt 在客户端报 `Hash Sum mismatch`）。
+
+两个包**只落本地**，不进 COS / Y: / 桌面更新通道（`dieyunagent_*` 那套不受影响）。
+
+### 8.1 内网 apt 源（推荐，配一次就一直 `apt upgrade`）
+
+```bash
+npm run publish:headless-apt          # dist/*.deb → release/headless-apt/pool/（+ 索引与自检）
+# 把 release/headless-apt/pool 通过 nginx / 内网 Web 暴露为只读静态目录，例如
+#   location /dieyun { alias /srv/apt/dieyun/pool; autoindex on; }
+```
+
+```bash
+# 服务器：一次配置
+echo 'deb [trusted=yes] http://apt.internal/dieyun ./' | sudo tee /etc/apt/sources.list.d/dieyun-headless.list
+sudo apt update
+
+# 之后：装 / 升 / 降都是一条命令
+sudo apt install dieyun-headless                    # 升级到源里最新
+sudo apt install dieyun-headless=0.1.71 --allow-downgrades   # 回滚到指定版本（降级必须带这个参数）
+sudo apt upgrade                                    # 跟其它包一起升
+```
+
+**全自动更新**（不改本仓一行代码，全靠系统能力）：
+
+```bash
+sudo apt install unattended-upgrades
+# /etc/apt/apt.conf.d/20auto-upgrades：
+#   APT::Periodic::Update-Package-Lists "1";
+#   APT::Periodic::Unattended-Upgrade "1";
+# 只想自动装 dieyun-headless：/etc/apt/apt.conf.d/50unattended-upgrades 的
+#   Unattended-Upgrade::Origins-Pattern 里只留 "origin=dieyun";
+```
+
+装完 deb 会自动重启服务（`postinst` 里 `systemctl try-restart`），所以自动升级不会出现「装了新版还在跑旧进程」。
+
+> 公开网络请把 `[trusted=yes]` 换成 GPG 签名源（`reprepro` / `apt-ftparchive` + `InRelease`），
+> 否则等于关掉包完整性校验。
+> 目录已挂载（NFS / SMB / 移动硬盘）时也可以直接 `deb [trusted=yes] file:/mnt/dieyun-apt ./`。
+
+**手工装单个 deb**（没配源时）：`sudo apt install ./dieyun-headless_<ver>_amd64.deb`，覆盖安装即升级，
+`/var/lib/dieyun-agent` 与 `/etc/dieyun` 不动（`headless.env`、`secret.key` 都是「不存在才创建」）。
+
+### 8.2 tarball（版本目录 + 软链切换，可秒级回滚）
+
+```bash
+sudo tar -xzf dieyun-headless-<new>.tgz -C /opt/dieyun-headless-<new>
+sudo ln -sfn /opt/dieyun-headless-<new> /opt/dieyun-headless
+sudo systemctl restart dieyun-headless
+```
+
+回滚就是把软链指回旧目录再重启（非 Debian 系发行版没有 apt 时走这条）。
+
+### 8.3 升级后的验收
+
+```bash
+dieyun-headless --version        # 一眼确认跑的是哪一版
+dieyun-headless self-test        # 无网络自检：Gateway + core 起得来、本地 RPC 通
+systemctl status dieyun-headless --no-pager
+```
+
+### 8.4 回滚注意
+
+- **降级不一定兼容**：core 会向前迁移数据结构，旧版本可能读不了新库。升级前备份：
+
+  ```bash
+  sudo systemctl stop dieyun-headless
+  sudo tar -czf /var/backups/dieyun-agent-$(date +%F).tgz -C /var/lib dieyun-agent /etc/dieyun
+  sudo systemctl start dieyun-headless
+  ```
+
+- apt 源回滚 = `apt install dieyun-headless=<旧版本> --allow-downgrades`（不带 `--allow-downgrades`，
+  apt 会以「降级软件包同时使用了 -y 选项」拒绝；旧 deb 一直留在源里）；tarball 回滚 = 软链指回旧目录。
+- 先跑 `self-test` 再放开业务，比看日志更快定位「core 没起来」这类问题。
+
+---
+
+## 9. 从源码直接跑（不想打包时）
+
+```bash
+npm ci && npm run pack:dieyun-core      # 或 cargo build -p dieyun-core
+DIEYUN_CORE_BIN=$PWD/target/debug/dieyun-core npm run headless -- repl --workspace /srv/repo
+npm run headless -- serve --web --port 17331
+npm run headless -- self-test
+```
+
+这条路径和打包里的是**同一个入口**（`src/headless/main.js`），只是 node 与依赖由仓库提供。
+
+---
+
+## 10. 与 `remote/run-cli.js` 的区别（别合并）
+
+| | `remote/run-cli.js`（远端 Agent daemon） | `dieyun-headless` |
+|---|---|---|
+| 谁用它 | 桌面 IDE 伸到服务器的「远端手」，由 SSH 拉起 | 服务器自己拥有模型与循环 |
+| 有没有 LLM | **没有**，只执行工具 RPC | 有，自己调模型、自己跑循环 |
+| 通信 | unix socket（`direct-streamlocal`） | 本地 Gateway + 浏览器 WS |
+| 身份 | 单次会话的工具执行端 | 常驻 Agent 服务 |
+
+两者信任模型不同：合并会把两套生命周期搅在一起，出问题时无法判断「是谁在跑这一轮」。
