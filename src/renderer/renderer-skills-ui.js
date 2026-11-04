@@ -859,9 +859,6 @@ function updateWorkspaceLabel(ws) {
   if (typeof touchAgentsMdForWorkspace === 'function' && ws && ws.workspacePath) {
     touchAgentsMdForWorkspace(ws.workspacePath);
   }
-  if (typeof refreshWorkspaceMutateHint === 'function') {
-    refreshWorkspaceMutateHint(ws && ws.workspacePath ? ws.workspacePath : null, currentSessionId);
-  }
 }
 
 async function initWorkspaceUI() {

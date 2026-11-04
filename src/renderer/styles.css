@@ -4462,16 +4462,6 @@ table.msg-md-table tbody tr:last-child td {
   opacity: 0.65;
 }
 
-.composer-workspace-shared-write {
-  color: var(--warn, #d97706);
-}
-
-.composer-workspace-shared-write::after {
-  content: ' · 并行写入';
-  font-size: 11px;
-  opacity: 0.9;
-}
-
 .composer-meta.composer-workspace-disconnected::after {
   content: ' · 未连接';
   font-size: 11px;

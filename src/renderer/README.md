@@ -67,7 +67,6 @@
 |------|------|
 | `renderer-gateway.js` | `gatewayCall(method, params)` |
 | `renderer-workspace-ssh.js` | SSH 工作区 UI |
-| `renderer-workspace-busy.js` | 工作区忙状态遮罩 |
 | `renderer-session-view-state.js` | 视图 ↔ 会话绑定 |
 
 ## 侧栏与编辑器

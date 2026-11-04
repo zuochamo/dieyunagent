@@ -826,9 +826,6 @@ async function refreshHistoryList(opts = {}) {
         return;
       }
       renderHistorySessionRows(sessions);
-      if (typeof refreshWorkspaceMutateHint === 'function') {
-        refreshWorkspaceMutateHint(window.activeViewSessionWorkspacePath, currentSessionId);
-      }
     } catch (err) {
       console.warn('历史对话加载失败:', err);
       if (softFail && historyListHasRows()) {

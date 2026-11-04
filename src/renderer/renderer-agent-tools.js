@@ -84,9 +84,6 @@ async function executeAgentTool(name, args, sessionId) {
   }
   const invoke = async () => executeAgentToolInner(norm.name, norm.args, sid || sessionId);
   if (isMutatingAgentTool(norm.name)) {
-    if (typeof maybeNotifySharedWorkspaceWrite === 'function') {
-      maybeNotifySharedWorkspaceWrite(workspaceKey, sid);
-    }
     const result = await runExclusiveAgentTool(async () => {
       const inner = await invoke();
       // 写入类工具已落盘：full 刷新才会重新 list_dir，让新文件出现在工作面板
@@ -94,9 +91,6 @@ async function executeAgentTool(name, args, sessionId) {
       else if (typeof scheduleArtifactsUiFlush === 'function') scheduleArtifactsUiFlush();
       return inner;
     }, workspaceKey, sid, norm.name);
-    if (typeof refreshWorkspaceMutateHint === 'function') {
-      refreshWorkspaceMutateHint(workspaceKey, sid);
-    }
     return result;
   }
   return invoke();
