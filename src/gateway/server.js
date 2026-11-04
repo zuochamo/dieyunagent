@@ -892,6 +892,23 @@ class LocalGateway {
     this.sandboxApprovals.setRequest(fn);
   }
 
+  /**
+   * 迟到的审批决定（用户离开超过 2 分钟才点「允许」）。
+   *
+   * 不重放工具调用：那条调用早已以「超时拒绝」结束，重放 `rm` 跑两次会出事。
+   * 这里只把批准记进本会话的 grant，Agent 下一轮再发同一条命令时直接放行。
+   * @param {string} requestId
+   * @param {{ granted?: boolean }} [decision]
+   */
+  applyLateSandboxApproval(requestId, decision) {
+    const granted = !!(decision && decision.granted === true);
+    try {
+      return this.sandboxApprovals.resolveLater(requestId, granted);
+    } catch (e) {
+      return { ok: false, reason: e && e.message ? e.message : String(e) };
+    }
+  }
+
   /** @param {string} [sessionId] 传入会话 id 时返回该会话的工作区视图（终端等随会话走的视图用） */
   getWorkspace(sessionId) {
     return this._workspaceView(this.getWorkspaceTarget(sessionId));

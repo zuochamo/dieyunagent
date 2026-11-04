@@ -16,6 +16,11 @@
  *
  * 责任边界：本模块**不做判定**（判定在 `sandbox-policy.js`），只负责
  * 「问一次 → 记住 → 下次直接放行」，以及在没有人可以问的时候**拒绝**（fail-closed）。
+ *
+ * 批准可以**晚于工具调用到达**（`resolveLater`）：人离开座位超过 2 分钟，`ask()` 早已
+ * 超时返回、那次工具调用也早已失败，但此刻才点下的「允许」不该白点 —— 它记的是
+ * 「本会话在这个位置允许这类操作」，不是「重试刚才那条命令」。所以迟到的批准只落
+ * grant，不重放工具调用；Agent 下一轮再发同一条命令时由 grant 命中直接放行。
  */
 
 const { SANDBOX_CATEGORIES } = require('./sandbox-policy');
@@ -88,9 +93,26 @@ function createSandboxApprovals(deps = {}) {
   let seq = 0;
   const audit = [];
 
+  /**
+   * 待批请求登记：`requestId → 批准所需的上下文`。
+   *
+   * 和 `grants` 同寿命（`grantTtlMs`）而不是和「等人点按钮」（`timeoutMs`）同寿命：
+   * 用户 20 分钟后回来点「允许」时，这里还得答得出「他批的是哪个会话、哪个类别、哪个目录」，
+   * 否则那个按钮只能落到一个类别级授权（等于批准过 `/tmp` 就批过主目录）。
+   * @type {Map<string, { sessionId: string, category: string, scope: string, path: string,
+   *                       mode: string, tool: string, at: number }>}
+   */
+  const requests = new Map();
+
   function recordAudit(entry) {
     audit.push({ at: now(), ...entry });
     if (audit.length > 200) audit.shift();
+  }
+
+  /** 懒清：只在有审批动作时清一次，不起定时器。 */
+  function pruneRequests() {
+    const t = now();
+    for (const [id, r] of requests) if (t - r.at > grantTtlMs) requests.delete(id);
   }
 
   /**
@@ -157,6 +179,20 @@ function createSandboxApprovals(deps = {}) {
     }
 
     const requestId = `sbx-${++seq}-${now().toString(36)}`;
+    const absPath = String(ctx.path || '');
+
+    // 先登记再发问：即使这次 ask() 超时返回，迟到的按钮仍然找得到「批的是什么」。
+    pruneRequests();
+    requests.set(requestId, {
+      sessionId: sessionKey(sessionId),
+      category,
+      scope,
+      path: absPath,
+      mode: String(decision.mode || ''),
+      tool: String(ctx.tool || ''),
+      at: now()
+    });
+
     const payload = {
       requestId,
       mode: decision.mode,
@@ -164,6 +200,8 @@ function createSandboxApprovals(deps = {}) {
       reason: decision.reason || '',
       detail: decision.detail || '',
       tool: ctx.tool || '',
+      /** 迟到的批准要靠它算授权粒度（没有它只能退化成类别级，等于把档位打穿） */
+      path: absPath,
       sessionId: sessionId || undefined
     };
 
@@ -204,6 +242,53 @@ function createSandboxApprovals(deps = {}) {
     return { granted: true, remembered: false, reason: '用户同意' };
   }
 
+  /**
+   * 迟到的决定：`ask()` 已经超时返回（甚至那次工具调用早已失败）之后，用户才点的按钮。
+   *
+   * 只做一件事 —— **把批准记进 grant**，不重放、不重试任何工具调用：
+   * - 记的是「本会话在这个位置允许这类操作」，所以下一次同类操作直接放行；
+   * - 已经过期的请求返回 `ok:false + expired`，界面据此告诉用户「这次得重新执行」，
+   *   而不是像以前那样点了没反应。
+   *
+   * @returns {{ ok: boolean, granted?: boolean, expired?: boolean, reason?: string,
+   *             sessionId?: string, category?: string, scope?: string, mode?: string, tool?: string }}
+   */
+  function resolveLater(requestId, granted) {
+    const id = String(requestId || '');
+    const rec = requests.get(id);
+    const expiredReason = '该确认已过期（超过有效时间），请重新让 Agent 执行';
+    if (!rec) return { ok: false, expired: true, reason: expiredReason };
+    if (now() - rec.at > grantTtlMs) {
+      requests.delete(id);
+      return { ok: false, expired: true, reason: expiredReason };
+    }
+
+    const base = {
+      sessionId: rec.sessionId,
+      category: rec.category,
+      scope: rec.scope,
+      mode: rec.mode,
+      tool: rec.tool
+    };
+
+    if (!granted) {
+      recordAudit({ kind: 'decline-late', requestId: id, sessionId: rec.sessionId, category: rec.category, scope: rec.scope });
+      log(`SANDBOX_DECLINED_LATE request=${id} category=${rec.category} session=${rec.sessionId || '-'}`);
+      return { ok: true, granted: false, reason: '用户拒绝（本次执行已结束）', ...base };
+    }
+
+    grants.set(grantKey(rec.sessionId, rec.category, rec.scope), {
+      sessionId: rec.sessionId,
+      category: rec.category,
+      scope: rec.scope,
+      at: now()
+    });
+    if (rec.scope !== '-' && rec.path) rememberPath(rec.sessionId, rec.path);
+    recordAudit({ kind: 'grant-late', requestId: id, sessionId: rec.sessionId, category: rec.category, scope: rec.scope });
+    log(`SANDBOX_GRANT_LATE request=${id} category=${rec.category} session=${rec.sessionId || '-'} scope=${rec.scope}`);
+    return { ok: true, granted: true, reason: '已记住本会话对该位置的授权', ...base };
+  }
+
   /** 显式批准（UI 回包路径之外的管理入口 / 测试用）。 */
   function grant(sessionId, category, scope) {
     const s = String(scope || '-');
@@ -219,11 +304,13 @@ function createSandboxApprovals(deps = {}) {
     const sid = sessionKey(sessionId);
     for (const [key, g] of grants) if (g.sessionId === sid) grants.delete(key);
     for (const [key, g] of pathGrants) if (g.sessionId === sid) pathGrants.delete(key);
+    for (const [key, r] of requests) if (r.sessionId === sid) requests.delete(key);
   }
 
   function clearAll() {
     grants.clear();
     pathGrants.clear();
+    requests.clear();
     for (const [, p] of pending) {
       try {
         clearTimeout(p.timer);
@@ -245,6 +332,7 @@ function createSandboxApprovals(deps = {}) {
 
   return {
     ask,
+    resolveLater,
     setRequest,
     rememberPath,
     grantedPathsFor,

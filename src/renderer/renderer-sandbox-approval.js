@@ -1,4 +1,4 @@
-/* global window, document, $ */
+/* global window, document, $, showAgentToast */
 'use strict';
 
 /**
@@ -29,20 +29,57 @@ function sandboxApprovalHost() {
   return document.getElementById('sandbox-approval-host');
 }
 
-function closeSandboxApprovalCard(requestId, decision) {
+/**
+ * 回包 + 反馈。
+ *
+ * 关键：Main 那边可能**已经超时**（人离开超过 2 分钟）。以前这里发完包就不管，Main 返回
+ * `false`，界面上什么都不显示 —— 用户看到的就是「点了允许没反应」。现在把 Main 的结论
+ * 显式告诉用户：批准记住了（下次同类直接放行）、还是已过期（这次得重新执行）。
+ */
+async function closeSandboxApprovalCard(requestId, decision) {
   const host = sandboxApprovalHost();
   const card = host && host.querySelector(`[data-sandbox-request="${requestId}"]`);
   if (card) card.remove();
   if (host && !host.querySelector('.sandbox-approval-card')) host.classList.remove('show');
+
   const api = window.diecloud || {};
-  if (api.sandboxApprovalResult) {
-    void api.sandboxApprovalResult({ requestId, decision });
+  if (!api.sandboxApprovalResult) return;
+
+  let res;
+  try {
+    res = await api.sandboxApprovalResult({ requestId, decision });
+  } catch (e) {
+    if (typeof showAgentToast === 'function') {
+      showAgentToast('确认失败', `回包没送到：${(e && e.message) || e}`, { variant: 'error' });
+    }
+    return;
   }
+
+  if (typeof showAgentToast !== 'function') return;
+  if (!res || res.delivered === 'live') return;
+
+  if (res.delivered === 'late' && res.granted) {
+    showAgentToast('已记住这次批准', '本次执行已经结束，所以这一步不会再跑；下次同类操作在这个位置会直接放行。', {
+      variant: 'success',
+      duration: 6000
+    });
+    return;
+  }
+  if (res.delivered === 'late' && res.ok) {
+    showAgentToast('已拒绝', '本次执行已经结束；下次同类操作仍会重新问你。', { variant: 'warn', duration: 6000 });
+    return;
+  }
+  showAgentToast(
+    '这条确认已过期',
+    res.reason || '超过有效时间了，请让 Agent 重新执行一次（下次点快一点就行）。',
+    { variant: 'warn', duration: 6000 }
+  );
 }
 
 /**
- * Main 侧已超时作废：只摘卡片，**不回包**（那头已经 resolve 了，再发也没人接）。
- * 不摘的话卡片会一直挂着，用户事后点「允许」看起来像点了没反应。
+ * 从界面摘掉一张卡片（会话切换 / 清空时用）。
+ *
+ * 不再因为「Main 侧超时」而调用：超时后卡片要留着，用户回来点「允许」仍然能把批准记下来。
  */
 function dismissSandboxApprovalCard(requestId) {
   const host = sandboxApprovalHost();
@@ -86,7 +123,9 @@ function buildSandboxApprovalCard(payload) {
 
   const note = document.createElement('div');
   note.className = 'sandbox-approval-note';
-  note.textContent = `允许后，本会话内对该位置的同类「${SANDBOX_CATEGORY_LABEL[category] || category}」操作不再询问；拒绝则本次操作不执行。`;
+  note.textContent =
+    `允许后，本会话内对该位置的同类「${SANDBOX_CATEGORY_LABEL[category] || category}」操作不再询问；拒绝则本次操作不执行。` +
+    '如果你回来得晚（超过 2 分钟），这次执行已经结束 —— 但点「允许」仍会记住本会话对该位置的授权。';
   card.appendChild(note);
 
   const actions = document.createElement('div');
@@ -131,9 +170,7 @@ function showSandboxApproval(payload) {
 
 function initSandboxApprovalUI() {
   const api = window.diecloud || {};
-  if (api.onSandboxApprovalExpired) {
-    api.onSandboxApprovalExpired((payload) => dismissSandboxApprovalCard(String((payload && payload.requestId) || '')));
-  }
+  // 不再订阅「已超时作废」：超时后卡片要留在界面上，让用户还能点「允许」把授权记下来。
   if (!api.onSandboxApproval) return;
   api.onSandboxApproval((payload) => showSandboxApproval(payload));
 }

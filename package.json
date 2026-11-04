@@ -53,6 +53,7 @@
     "test:sandbox-smoke": "node scripts/test-sandbox-smoke.cjs",
     "test:sandbox-policy": "node scripts/test-sandbox-policy.cjs",
     "test:sandbox-gateway": "node scripts/test-sandbox-gateway.cjs",
+    "test:sandbox-approvals-late": "node scripts/test-sandbox-approvals-late.cjs",
     "test:sandbox-real": "node scripts/test-sandbox-real-project.cjs",
     "test:tool-gate": "node scripts/test-tool-gate.cjs",
     "test:tool-harness": "node scripts/test-tool-harness.cjs",

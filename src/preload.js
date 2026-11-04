@@ -605,19 +605,11 @@ contextBridge.exposeInMainWorld('diecloud', {
     ipcRenderer.on('agent:sandbox-approval', handler);
     return () => ipcRenderer.removeListener('agent:sandbox-approval', handler);
   },
+  /**
+   * 回包。返回值 `{ ok, delivered: 'live'|'late'|'none', expired?, granted?, reason? }`：
+   * `late` = 那次工具调用已超时结束，但批准被记进了本会话（界面要提示用户）。
+   */
   sandboxApprovalResult: (payload) => ipcRenderer.invoke('agent:sandbox-approval-result', payload || {}),
-  /** Main 侧已超时作废这条请求：界面要把卡片摘掉（此时再回包也不会生效）。 */
-  onSandboxApprovalExpired: (cb) => {
-    const handler = (_evt, payload) => {
-      try {
-        cb(payload);
-      } catch {
-        // ignore
-      }
-    };
-    ipcRenderer.on('agent:sandbox-approval-expired', handler);
-    return () => ipcRenderer.removeListener('agent:sandbox-approval-expired', handler);
-  },
 
   compactionMaybeCompact: (payload) => ipcRenderer.invoke('compaction:maybe-compact', payload || {}),
   compactionEstimateTokens: (payload) => ipcRenderer.invoke('compaction:estimate-tokens', payload || {}),

@@ -78,10 +78,24 @@ function failRendererToolDelegate(requestId, error) {
 const pendingApproval = new Map();
 
 /**
+ * 迟到的决定去哪儿：由 Main 注入 `gateway.applyLateSandboxApproval`。
+ * 没注入时迟到按钮只能报「已过期」，绝不静默 —— 静默正是以前那个 bug。
+ */
+let lateApprovalHandler = null;
+
+function setLateSandboxApprovalHandler(fn) {
+  lateApprovalHandler = typeof fn === 'function' ? fn : null;
+}
+
+/**
  * 沙箱越界审批：Main → Renderer 弹一次窗，等用户点「允许 / 拒绝」。
  *
  * 与工具委托的区别：这里**没人回话就等于拒绝**（超时 deny）——
  * 默认放行会让整个档位形同虚设。
+ *
+ * 超时**不再作废界面上的卡片**：人可能离开 20 分钟，回来点「允许」仍然有意义
+ * （批准记的是「本会话在这个位置允许这类操作」，不是「重试刚才那条命令」）。
+ * 那次工具调用本身确实已经失败，所以迟到的批准只落 grant，由 `lateApprovalHandler` 收口。
  *
  * @param {import('electron').WebContents | null | undefined} webContents
  * @param {object} payload
@@ -94,16 +108,8 @@ function requestSandboxApproval(webContents, payload, timeoutMs = 120000) {
   const requestId = String((payload && payload.requestId) || `sbx-${Date.now()}`);
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
+      // 只结束「等回包」这件事，卡片留在界面上让用户还能点（点了会走迟到路径）。
       pendingApproval.delete(requestId);
-      // 告诉界面这张卡片已经作废：否则它会一直挂在角上，
-      // 用户事后再点「允许」只会让 completeSandboxApproval 返回 false，看起来像"点了没反应"。
-      try {
-        if (webContents && !webContents.isDestroyed()) {
-          webContents.send('agent:sandbox-approval-expired', { requestId });
-        }
-      } catch {
-        // ignore
-      }
       resolve({ granted: false, expired: true, reason: '等待确认超时，默认拒绝' });
     }, timeoutMs);
     pendingApproval.set(requestId, {
@@ -123,12 +129,40 @@ function requestSandboxApproval(webContents, payload, timeoutMs = 120000) {
   });
 }
 
+/**
+ * 界面回包。返回 `delivered`：
+ * - `live`：还在等回包的那次工具调用，直接把决定交给它；
+ * - `late`：那次调用早已超时结束，把批准记进本会话的 grant（`granted` 表示是否记住）；
+ * - `none`：没有可落 grant 的通道，只能告诉用户已过期（**绝不静默返回 false**）。
+ *
+ * @param {string} requestId
+ * @param {{ granted?: boolean, reason?: string }} [decision]
+ * @returns {{ ok: boolean, delivered: 'live'|'late'|'none', expired?: boolean, granted?: boolean, reason?: string }}
+ */
 function completeSandboxApproval(requestId, decision) {
-  const entry = pendingApproval.get(String(requestId || ''));
-  if (!entry) return false;
-  pendingApproval.delete(String(requestId));
-  entry.resolve(decision || { granted: false, reason: '空回包' });
-  return true;
+  const id = String(requestId || '');
+  const entry = pendingApproval.get(id);
+  if (entry) {
+    pendingApproval.delete(id);
+    entry.resolve(decision || { granted: false, reason: '空回包' });
+    return { ok: true, delivered: 'live', granted: !!(decision && decision.granted === true) };
+  }
+  if (!lateApprovalHandler) {
+    return {
+      ok: false,
+      delivered: 'none',
+      expired: true,
+      reason: '该确认已过期，且当前没有可记录的审批通道，请重新让 Agent 执行'
+    };
+  }
+  const r = lateApprovalHandler(id, decision || {}) || {};
+  return {
+    ok: r.ok !== false,
+    delivered: 'late',
+    expired: r.expired === true,
+    granted: r.granted === true,
+    reason: r.reason || ''
+  };
 }
 
 function registerRendererToolDelegateIpc(ipcMain) {
@@ -143,7 +177,9 @@ function registerRendererToolDelegateIpc(ipcMain) {
   });
   ipcMain.handle('agent:sandbox-approval-result', (_evt, payload = {}) => {
     const requestId = String(payload.requestId || '');
-    return { ok: completeSandboxApproval(requestId, payload.decision) };
+    // 结果原样回给界面：`delivered:'late'` 时界面要告诉用户「批准已记住 / 已过期」，
+    // 不能再像以前那样返回一个 false 让按钮变成哑的。
+    return completeSandboxApproval(requestId, payload.decision);
   });
 }
 
@@ -152,5 +188,7 @@ module.exports = {
   isRendererOnlyTool,
   requestToolFromRenderer,
   requestSandboxApproval,
+  completeSandboxApproval,
+  setLateSandboxApprovalHandler,
   registerRendererToolDelegateIpc
 };

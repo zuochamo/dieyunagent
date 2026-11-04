@@ -78,7 +78,11 @@ const { createSharedMemoryService } = require('./memory-shared/service');
 const { createEmbeddingClient } = require('./codebase/embedding-client');
 const { createMainToolBridge } = require('./agent/tool-bridge-main');
 const { clearToolHarnessSessionsForSession } = require('./agent/tool-harness');
-const { registerRendererToolDelegateIpc, requestSandboxApproval } = require('./agent/renderer-tool-delegate');
+const {
+  registerRendererToolDelegateIpc,
+  requestSandboxApproval,
+  setLateSandboxApprovalHandler
+} = require('./agent/renderer-tool-delegate');
 const { createMainCompactionAgent } = require('./agent/compaction-main');
 const { killActiveShellChildren } = require('./gateway/host-control');
 const { registerEarlyMainIpc, registerMainIpc, registerLateMainIpc } = require('./main/register-ipc');
@@ -517,6 +521,12 @@ app.whenReady().then(async () => {
   if (localGateway && typeof localGateway.setSandboxApprovalChannel === 'function') {
     localGateway.setSandboxApprovalChannel((payload) =>
       requestSandboxApproval(windowTray ? windowTray.getMainWindow() : null, payload)
+    );
+  }
+  // 迟到的批准（用户离开超过 2 分钟才点「允许」）：不重放工具调用，只把批准记进本会话的 grant。
+  if (localGateway && typeof localGateway.applyLateSandboxApproval === 'function') {
+    setLateSandboxApprovalHandler((requestId, decision) =>
+      localGateway.applyLateSandboxApproval(requestId, decision)
     );
   }
   if (isRustCoreEnabled()) {

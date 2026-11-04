@@ -755,7 +755,15 @@
       "tests": [
         "test:sandbox-policy",
         "test:sandbox-gateway",
+        "test:sandbox-approvals-late",
         "test:sandbox-real"
+      ]
+    },
+    {
+      "prefix": "src/agent/renderer-tool-delegate.js",
+      "tests": [
+        "test:sandbox-approvals-late",
+        "test:tool-bridge-delegate"
       ]
     },
     {
@@ -1676,6 +1684,7 @@
       "test:local-gateway-smoke",
       "test:sandbox-policy",
       "test:sandbox-gateway",
+      "test:sandbox-approvals-late",
       "test:mcp-store",
       "test:app-updater-feeds",
       "test:linux-deb-install",
@@ -1724,6 +1733,7 @@
       "test:local-gateway-smoke",
       "test:sandbox-policy",
       "test:sandbox-gateway",
+      "test:sandbox-approvals-late",
       "test:mcp-store",
       "test:app-updater-feeds",
       "test:linux-deb-install",

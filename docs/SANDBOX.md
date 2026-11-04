@@ -91,8 +91,19 @@
 | 问了没回（超时 120s） | `SANDBOX_APPROVAL_TIMEOUT` | 无人应答，别重试 |
 | Gateway 没注入沙箱对象 | `SANDBOX_UNAVAILABLE` | 配置故障，别重试（**不再静默放行**） |
 
-审批卡片在超时后会被 Main 主动摘掉（`agent:sandbox-approval-expired`）；
-不摘的话卡片一直挂着，用户事后点「允许」只会得到"点了没反应"。
+审批卡片**超时后不再被摘掉**，人回来点「允许」也照样算数 —— 但那条工具调用本身已经
+以拒绝结束了，所以迟到批准**只落 grant、不重放工具调用**（重放 `rm` 会跑两次）：
+
+| 回包时机 | `delivered` | 效果 |
+|---|---|---|
+| 工具调用还在等（≤120s） | `live` | 决定直接交给这次调用 |
+| 调用已超时结束，但请求仍在寿命内（≈2h） | `late` | 批准记进本会话「该会话 × 类别 × 目录」的 grant；界面提示「下次同类直接放行」 |
+| 请求已过寿命 | `late`+`expired` | 界面提示「已过期，请重新执行」，**不再静默无反应** |
+
+实现：`sandbox-approvals.js` 的 `requests` 与 `grants` 同寿命；`resolveLater(requestId, granted)`
+是迟到决定的唯一入口；Main 用 `gateway.applyLateSandboxApproval` 注入给
+`renderer-tool-delegate.setLateSandboxApprovalHandler`，Renderer 只负责解释 `delivered`。
+回归：`npm run test:sandbox-approvals-late`。
 
 ---
 
