@@ -22,7 +22,7 @@ const {
   normalizeBudget,
   normalizeIso,
   resolveGoalBudget,
-  goalChecks,
+  goalCheckProgress,
   latestFactFor,
   factsForCheck,
   decideContinuation
@@ -298,6 +298,15 @@ async function resumeGoal(opts = {}) {
 /**
  * 给侧栏「目标」页的投影：**UI 需要的都在这里成型**，面板不再自己算进度/截断事实。
  *
+ * 进度的来源有优先级（`progressFrom` 一并给出去，Renderer 只按它选文案、不自己判）：
+ *   1. `checks` —— 有声明检查：进度 = 最新结果通过的检查数 / 声明检查数。**客观**，来自代码记录的
+ *      事实，与 `judgeGoalFinish` 用的是同一个算法（`goalCheckProgress`）。
+ *   2. `todos`  —— 没有声明检查（未验证模式）：退回清单勾选比例。这是**模型自述**，只能当参考。
+ *   3. `outcome`—— 两样都没有：只有两种可判定取值，收尾 1 / 否则 0（不编造百分比）。
+ *
+ * 为什么不继续只按 todos 算：勾选完全由模型一次性写全（完工才回来勾），进度条会永远
+ * 停在 0 然后跳到满格，等于没信息；而 `evidence` 是代码写的，逐轮自然往前走。
+ *
  * @param {{ goal?: object|null, limits?: object, evidenceShown?: number }} input
  */
 function toPanelView(input = {}) {
@@ -309,6 +318,16 @@ function toPanelView(input = {}) {
   const evidence = Array.isArray(goal.evidence) ? goal.evidence : [];
   const shown = Number.isFinite(input.evidenceShown) ? Math.max(1, Math.floor(input.evidenceShown)) : 10;
   const last = evidence.length ? evidence[evidence.length - 1] : null;
+  const checkProgress = goalCheckProgress(goal);
+  const progressFrom = checkProgress.total ? 'checks' : todos.length ? 'todos' : 'outcome';
+  const progress =
+    progressFrom === 'checks'
+      ? checkProgress.passed / checkProgress.total
+      : progressFrom === 'todos'
+        ? done / todos.length
+        : goal.outcome === 'complete'
+          ? 1
+          : 0;
   return {
     objective: goal.goal.objective,
     status: goal.status,
@@ -319,12 +338,12 @@ function toPanelView(input = {}) {
     startedAt: goal.startedAt,
     attemptStartedAt: goal.attemptStartedAt,
     updatedAt: goal.updatedAt,
-    unverified: goalChecks(goal).length === 0,
+    unverified: checkProgress.total === 0,
     // 按**声明的检查**聚合事实：每条检查的最新结果 + 跑过几次。
     // 面板与「目标条」都只要这一份投影 —— 谁还想要「原始事实流水」就直接看 evidence。
     // `note` 一并带出去：`ok:false` 里有「跑过没通过」和「根本没跑成（沙箱拒绝/超时）」两种，
     // 只给布尔值的话 UI 只能都画成 ❌，那是把「没执行」说成了「失败」。
-    checks: goalChecks(goal).map((c) => {
+    checks: checkProgress.checks.map((c) => {
       const fact = latestFactFor(evidence, c);
       return {
         id: c.id,
@@ -340,8 +359,12 @@ function toPanelView(input = {}) {
     todos: todos.map((t) => ({ text: t.text, done: t.done })),
     todosDone: done,
     todosTotal: todos.length,
-    // 没有清单时的进度只有两种可判定的取值：收尾了 = 1，否则 0（不编造百分比）
-    progress: todos.length ? done / todos.length : goal.outcome === 'complete' ? 1 : 0,
+    checksPassed: checkProgress.passed,
+    checksTotal: checkProgress.total,
+    /** 进度条比例（来源见上方优先级）；Renderer 只管画，不再自己算 */
+    progress,
+    /** 进度来源：checks（客观验收）/ todos（模型自述清单）/ outcome（收尾 0 或 1） */
+    progressFrom,
     evidence: evidence.slice(-shown).map((f) => ({
       at: f.at,
       round: f.round,

@@ -174,21 +174,45 @@ describe('goals/session-goal：事实、轮次与面板视图', () => {
     expect(goal.evidence[goal.evidence.length - 1].ok).toBe(true);
   });
 
-  test('面板视图：进度按清单算，没有清单就只有 0/1', () => {
+  test('面板视图：进度优先按验收算（客观），没检查才退回清单，两样都没有才 0/1', () => {
+    // 1) 有声明检查：进度 = 最新通过的检查数 / 声明数（与 judgeGoalFinish 同一算法 goalCheckProgress）
+    const withChecks = normalizeSessionGoal({
+      goal: {
+        objective: '让测试全绿',
+        checks: [{ command: 'npm test' }, { command: 'npm run lint' }],
+        todos: [{ text: 'a', done: true }, { text: 'b' }]
+      },
+      evidence: [{ round: 1, command: 'npm test', ok: true, exitCode: 0 }]
+    });
+    const checksView = toPanelView({ goal: withChecks, limits: LIMITS });
+    expect(checksView.progressFrom).toBe('checks');
+    expect(checksView.checksPassed).toBe(1);
+    expect(checksView.checksTotal).toBe(2);
+    expect(checksView.progress).toBeCloseTo(0.5, 6);
+    expect(checksView.unverified).toBe(false);
+    // 清单勾选是模型自述，不参与进度计算（但照样投影给 UI）
+    expect(checksView.todosDone).toBe(1);
+
+    // 2) 没有声明检查（未验证模式）：退回清单勾选比例
     const withTodos = normalizeSessionGoal({
       goal: { objective: '推进', todos: [{ text: 'a', done: true }, { text: 'b' }] }
     });
     const view = toPanelView({ goal: withTodos, limits: LIMITS, evidenceShown: 5 });
+    expect(view.progressFrom).toBe('todos');
     expect(view.todosDone).toBe(1);
     expect(view.todosTotal).toBe(2);
+    expect(view.checksTotal).toBe(0);
     expect(view.progress).toBeCloseTo(0.5, 6);
     expect(view.maxAttempts).toBe(LIMITS.goalMaxAttempts);
     expect(view.unverified).toBe(true);
 
-    const noTodos = normalizeSessionGoal({ goal: { objective: '没清单' } });
-    expect(toPanelView({ goal: noTodos, limits: LIMITS }).progress).toBe(0);
-    noTodos.outcome = 'complete';
-    expect(toPanelView({ goal: noTodos, limits: LIMITS }).progress).toBe(1);
+    // 3) 既没检查也没清单：只有「收尾了/没」两种可判定取值（不编造百分比）
+    const bare = normalizeSessionGoal({ goal: { objective: '没清单' } });
+    const bareView = toPanelView({ goal: bare, limits: LIMITS });
+    expect(bareView.progressFrom).toBe('outcome');
+    expect(bareView.progress).toBe(0);
+    bare.outcome = 'complete';
+    expect(toPanelView({ goal: bare, limits: LIMITS }).progress).toBe(1);
 
     expect(toPanelView({ goal: null, limits: LIMITS })).toBeNull();
   });
@@ -251,7 +275,9 @@ describe('会话目标的每轮注入块', () => {
     pushEvidence(goal, { command: 'npm test', ok: false, exitCode: 1, round: 1, note: 'fail' }, 3);
     const text = renderSessionGoalBlock({ goal, limits: LIMITS });
     expect(text).toContain('【当前目标】让 npm test 全绿');
-    expect(text).toContain('进度：1/2 项已完成');
+    expect(text).toContain('清单：1/2 项已完成');
+    // 验收进度与面板同一算法：声明了 1 条、还没通过
+    expect(text).toContain('验收：0/1 条声明的检查最新结果通过');
     expect(text).toContain('未完成：改实现');
     expect(text).toContain('第 1/4 轮');
     expect(text).toContain('exit 1');

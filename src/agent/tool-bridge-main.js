@@ -342,7 +342,11 @@ function createMainToolBridge(deps) {
       return {
         error: {
           ok: false,
-          error: '当前会话还没有目标：需要多轮推进时先调用 goal_start 建一个（一次能答完就不用建）',
+          // 这里**不能**再写「一次能答完就不用建」：模型走到这一步时已经决定要跑验收命令，
+          // 是触发意图最强的时刻；同一轮内 goal_start → goal_check → goal_finish 是既有能力。
+          error:
+            '当前会话还没有目标。先 goal_start 建一个（objective 一句话说清什么算达成；没有验收命令时 checks 可留空），' +
+            '本回合内就可以直接接着 goal_check 跑检查、goal_finish 收尾。',
           errorCode: 'NO_SESSION_GOAL',
           retryable: false
         }

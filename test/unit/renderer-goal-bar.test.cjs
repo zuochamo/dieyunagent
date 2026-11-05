@@ -125,7 +125,11 @@ function sampleView(extra = {}) {
     todos: [{ text: '改实现', done: true }, { text: '补测试', done: false }],
     todosDone: 1,
     todosTotal: 2,
-    progress: 0.5,
+    // 4 条声明检查里 1 条通过 → 进度条按验收算（清单勾选只作参考）
+    checksPassed: 1,
+    checksTotal: 4,
+    progress: 0.25,
+    progressFrom: 'checks',
     evidence: [
       { at: '2026-01-01T00:00:00.000Z', round: 2, command: 'npm test', ok: false, exitCode: 1, note: '' },
       { at: '2026-01-01T00:00:00.000Z', round: 3, command: 'npm test', ok: true, exitCode: 0, note: '' }
@@ -230,6 +234,38 @@ test('面板：没有目标时是空态文案，有目标时给出轮次与状�
   assert.equal(mod.els.get('goal-panel-clear').hidden, false);
   assert.match(mod.els.get('goal-panel-body').innerHTML, /验收命令（退出码 0 = 通过）/);
   assert.match(mod.els.get('goal-panel-body').innerHTML, /跑过 2 次/);
+});
+
+test('进度条文案跟着来源走：验收（客观）→ 清单（模型自述）→ 状态词', () => {
+  const mod = loadModule();
+  // 有声明检查：说的是「验收通过几条」，不是勾了几项清单
+  mod.renderGoalPanel(sampleView(), '');
+  let html = mod.els.get('goal-panel-body').innerHTML;
+  assert.match(html, /验收通过 1\/4/);
+  assert.doesNotMatch(html, /清单 1\/2 项/);
+
+  // 没有声明检查（未验证模式）：退回清单勾选比例
+  mod.renderGoalPanel(sampleView({ checks: [], checksPassed: 0, checksTotal: 0, progressFrom: 'todos', progress: 0.5 }), '');
+  html = mod.els.get('goal-panel-body').innerHTML;
+  assert.match(html, /清单 1\/2 项/);
+  assert.match(html, /未声明检查（未验证模式/);
+
+  // 两样都没有：只说状态词，不编造百分比
+  mod.renderGoalPanel(sampleView({ checks: [], todos: [], todosDone: 0, todosTotal: 0, progressFrom: 'outcome', progress: 0 }), '');
+  html = mod.els.get('goal-panel-body').innerHTML;
+  assert.match(html, /进行中/);
+  assert.doesNotMatch(html, /验收通过/);
+
+  // 最近一条事实是红的：声明检查可能全绿，但 goal_finish 仍会被打回 —— 文案必须说出这个事实，
+  // 否则界面就成了「进度 100% + 收尾被打回」的自相矛盾
+  mod.renderGoalPanel(
+    sampleView({
+      lastFact: { command: 'npm run e2e', ok: false, exitCode: 2, at: '2026-01-01T00:00:00.000Z', tail: '' }
+    }),
+    ''
+  );
+  html = mod.els.get('goal-panel-body').innerHTML;
+  assert.match(html, /验收通过 1\/4 · 最近一次检查未通过/);
 });
 
 test('取视图失败不影响面板渲染，也不把失败当「没有目标」传播给目标条', async () => {

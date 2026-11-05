@@ -271,6 +271,28 @@ function latestFactFor(evidence, check) {
 }
 
 /**
+ * 验收进度（**唯一算法**）：按声明的检查聚合事实，数「最新结果通过」的条数。
+ *
+ * 三处共用同一份：面板/目标条的进度条（`goals/session-goal#toPanelView`）、每轮注入块
+ * （`renderSessionGoalBlock`）、收尾核对（`judgeGoalFinish`）。分开算必然漂 ——
+ * 面板说「2/3 通过」而收尾被打回说「还有 1 条没过」，就是同一件事的两个答案。
+ *
+ * 只数事实、不下结论：`passed` 是「这一条最近一次跑通了」，不是「目标达成了」。
+ *
+ * @param {object} plan 目标对象（会话目标 / 计划目标同构）
+ * @returns {{ checks: object[], total: number, passed: number, pending: object[] }}
+ */
+function goalCheckProgress(plan) {
+  const checks = goalChecks(plan);
+  const evidence = Array.isArray(plan && plan.evidence) ? plan.evidence : [];
+  const pending = checks.filter((c) => {
+    const f = latestFactFor(evidence, c);
+    return !f || !f.ok;
+  });
+  return { checks, total: checks.length, passed: checks.length - pending.length, pending };
+}
+
+/**
  * 核对模型提出的收尾主张与已落盘事实是否一致 —— **只判客观事实**。
  *
  * - `complete`：最近一条检查事实必须通过；声明了检查时，每条声明检查的最新事实也必须通过；
@@ -285,7 +307,8 @@ function latestFactFor(evidence, check) {
 function judgeGoalFinish(input = {}) {
   const { plan } = input;
   const outcome = input.outcome === 'blocked' ? 'blocked' : 'complete';
-  const checks = goalChecks(plan);
+  const progress = goalCheckProgress(plan);
+  const checks = progress.checks;
   const evidence = Array.isArray(plan && plan.evidence) ? plan.evidence : [];
   const last = evidence.length ? evidence[evidence.length - 1] : null;
   const facts = {
@@ -293,6 +316,7 @@ function judgeGoalFinish(input = {}) {
     lastOk: !!(last && last.ok),
     lastExitCode: last ? last.exitCode : null,
     declaredChecks: checks.length,
+    checksPassed: progress.passed,
     unverified: checks.length === 0
   };
 
@@ -308,10 +332,7 @@ function judgeGoalFinish(input = {}) {
     };
   }
 
-  const pending = checks.filter((c) => {
-    const f = latestFactFor(evidence, c);
-    return !f || !f.ok;
-  });
+  const pending = progress.pending;
   if (pending.length) {
     const detail = pending
       .map((c) => {
@@ -472,8 +493,19 @@ function renderSessionGoalBlock(input = {}) {
   if (Array.isArray(g.todos) && g.todos.length) {
     const done = g.todos.filter((t) => t.done).length;
     const pending = g.todos.filter((t) => !t.done).map((t) => t.text);
-    lines.push(`进度：${done}/${g.todos.length} 项已完成`);
+    // 措辞刻意叫「清单」而不是「进度」：面板上的进度条走的是**验收**（声明检查通过几条），
+    // 清单是模型自报的计划。两件事同名会让模型以为勾满清单就等于可以收尾。
+    lines.push(`清单：${done}/${g.todos.length} 项已完成`);
     if (pending.length) lines.push(`未完成：${pending.slice(0, 12).join('、')}`);
+  }
+  const checkProgress = goalCheckProgress(goal);
+  if (checkProgress.total) {
+    lines.push(
+      `验收：${checkProgress.passed}/${checkProgress.total} 条声明的检查最新结果通过` +
+        (checkProgress.pending.length
+          ? `（未通过：${checkProgress.pending.map((c) => String(c.command).slice(0, 80)).join('、')}）`
+          : '')
+    );
   }
 
   lines.push(renderEvidenceBlock({ plan: goal, limits, upcoming: false }));
@@ -506,6 +538,7 @@ module.exports = {
   runGoalCheck,
   latestFactFor,
   factsForCheck,
+  goalCheckProgress,
   judgeGoalFinish,
   decideContinuation,
   factLine,

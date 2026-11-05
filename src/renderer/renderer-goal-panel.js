@@ -57,11 +57,35 @@ function goalStatusLabel(view) {
   return '进行中';
 }
 
-/** 进度条：有清单按清单算，没清单就只有「收尾了/没」两种可判定取值（不编造百分比） */
+/** 进度条：比例由 Main 的 `toPanelView.progress` 给（验收 → 清单 → 收尾 0/1），这里只画 */
 function goalProgressBar(view, cells = 12) {
   const ratio = Math.max(0, Math.min(1, Number(view && view.progress) || 0));
   const filled = Math.round(ratio * cells);
   return '▓'.repeat(filled) + '░'.repeat(Math.max(0, cells - filled));
+}
+
+/**
+ * 进度条右侧那半句：**文案跟着来源走**，不自己判比例（来源由 `toPanelView.progressFrom` 定）。
+ *
+ * - `checks`：`验收通过 2/3` —— 客观，来自代码记录的事实；
+ * - `todos`：`清单 4/6 项` —— 模型自述的计划，只作参考；
+ * - `outcome`：没有检查也没有清单，只能给状态词（收尾了/进行中），不编造百分比。
+ *
+ * 「最近一次检查未通过」这条后缀不是重复：`judgeGoalFinish` 除「每条声明检查最新结果都要通过」外，
+ * 还要求**最近一条事实**是绿的（模型临时跑的另一条命令刚报红时不许收尾）。少了这句，
+ * 会出现「进度 3/3 通过 + 收尾被打回」的自相矛盾。
+ */
+function goalProgressText(view) {
+  if (!view) return '';
+  const lastRed = !!(view.lastFact && view.lastFact.ok === false);
+  const suffix = lastRed ? ' · 最近一次检查未通过' : '';
+  if (view.progressFrom === 'checks' && Number(view.checksTotal) > 0) {
+    return `验收通过 ${Number(view.checksPassed) || 0}/${Number(view.checksTotal)}${suffix}`;
+  }
+  if (Number(view.todosTotal) > 0) {
+    return `清单 ${Number(view.todosDone) || 0}/${Number(view.todosTotal)} 项${suffix}`;
+  }
+  return goalStatusLabel(view);
 }
 
 /**
@@ -269,9 +293,7 @@ function renderGoalPanel(view, note) {
     <div class="goal-objective">${escapeGoalText(view.objective)}</div>
     <div class="goal-progress-line">
       <span class="goal-progress-bar">${goalProgressBar(view)}</span>
-      <span class="goal-progress-text">${
-        view.todosTotal ? `${view.todosDone}/${view.todosTotal} 项` : goalStatusLabel(view)
-      }</span>
+      <span class="goal-progress-text">${escapeGoalText(goalProgressText(view))}</span>
     </div>
     ${note ? `<p class="goal-panel-note">${escapeGoalText(note)}</p>` : ''}
     ${goalTodoHtml(view)}

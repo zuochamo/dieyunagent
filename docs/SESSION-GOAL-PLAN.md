@@ -191,7 +191,7 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 ┌ 目标 ──────────────────────────  第 3/12 轮 · 进行中 ┐
 │ 实现 X 并让 npm test 通过                            │
 │                                                      │
-│ 进度 ▓▓▓▓▓▓░░░░  2/5                                │
+│ 验收 ▓▓▓▓▓░░░░░░  1/3 通过                          │
 │  ✅ 拆解模块与接口                                   │
 │  ✅ 写实现                                           │
 │  ⬜ 补测试          ← 当前轮在做                       │
@@ -209,6 +209,8 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 - **数据**：`gatewayCall('memory.session_goal_get', { sessionId })`；随 `AGENT_RUN_EVENT_TYPES.TRACE` 节流刷新（不新增推送通道、不新增事件类型）。
 - **无目标时**：整页显示一行「本会话还没有目标 —— 需要多轮推进时，助手会自己建一个」（不隐藏页签，避免布局跳动）。
 - **所有会话共用一页**，跟着 `currentSessionId` 切；切会话时重新拉取（与「变更」页同一套切换钩子）。
+- **进度条口径（2026-11-05 改）**：有声明检查 → 进度 = **最新结果通过的检查数 / 声明检查数**（与 `judgeGoalFinish` 共用 `goalCheckProgress`，客观、来自代码记录的事实）；没有声明检查（未验证模式）→ 退回 `todos` 勾选比例（**模型自述，只作参考**）；两样都没有 → 只有收尾 0/1。视图里一并给出 `progressFrom`（`checks` / `todos` / `outcome`），Renderer 只按它选文案，不自己算。
+  为什么改：原先只按 `todos` 算，而勾选完全由模型决定 —— 它习惯「干完再一次性写全」，于是进度条永远停在 0 然后跳到满格，等于没信息（2026-11-05 现场：6/6 全勾、`attempt=0`、只跑过 1 次检查）。`evidence` 是代码写的，逐轮自然往前走。
 - 不做编辑：目标的增删改属于模型（`goal_start` / `goal_update`），人来这里是为了**看进度**与**停/继续**。
 - 看板入口复用现有面板：`openSidePanel({ tab: 'goal' })`，`loadSavedSideTab()` 白名单加一个 `'goal'`。
 
@@ -347,3 +349,34 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 | 与 completion-readiness 重复提示 | readiness 保持「只提示、不挡交付、不续跑」；目标体系管「围绕目标的推进」，两者不互斥 |
 | 会话目标与计划目标事实互串 | `resolveGoalTarget` 单一入口：`ctx.planId` 优先，其次 `ctx.sessionId`；两者都有时计划优先并留日志 |
 | `invokeRpc` 当裸函数传给 session-goal（deps 契约就是 `{ invokeRpc: Function }`） | `LocalGateway` 构造时 `this.invokeRpc = this.invokeRpc.bind(this)`：原型方法脱离实例就丢 `this`，一调就炸在 `this.handlers`（历史症状：`goal_start` 全挂、`goal_check` 被 `loadGoal` 的 try/catch 静默成 `NO_SESSION_GOAL`）。`npm run test:local-gateway-smoke` 有「detached invokeRpc」用例锁住 |
+
+## 14. 触发率基线与复测口径（2026-11-05）
+
+**为什么要记**：「目标能不能用」与「模型愿不愿意用」是两件事。2026-11-05 的观察是「模型不积极」，但基线显示**可用窗口只有约 1 天**——`goal_start` 直到 2026-11-04 19:57 才第一次成功，之前全是 `UNKNOWN_METHOD`（RPC 未注册）与 `EXCEPTION`（detached `invokeRpc`，见 §13 最后一行）。
+
+**基线**（数据源：`%APPDATA%/dieyunagent/tool-telemetry.jsonl(.1)` + `diecloud-memory.sqlite`，窗口 2026-10-21 → 11-05）
+
+| 指标 | 基线值 |
+|---|---|
+| 工具调用总数 | 25,068 |
+| `goal_start` 成功 / 失败 | 3 / 11（EXCEPTION 5、UNKNOWN_METHOD 6，全部在修复前） |
+| `goal_check` / `goal_finish` | 8 / 4（`goal_finish` 被打回 0 次） |
+| `NO_SESSION_GOAL` 错误 | 1（命中 §3 那处劝退文案） |
+| 写/执行类调用 ≥3 的会话（「多步工作」代理） | 106 |
+| 其中出现过 `goal_*` 的会话 | 4（≈3.8%） |
+| `session_goals` 行数 | 2（都声明了检查；`stalled` 0；收尾申请 1 次、打回 0 次） |
+
+**复测一条命令**：`npm run stats:goal-trigger`（= `node scripts/goal-trigger-stats.cjs`，只读；
+`--since YYYY-MM-DD` 限窗口、`--json` 出机读、`--verbose` 列触发过的会话）。它算的就是下面四个数，
+算法与数据源都写在脚本头部注释里 —— **不要再手搓查询**，否则两次复测的口径会漂。
+注意：脚本读的是实时遥测文件，统计时正在跑的会话也会计入，数字会随当下活动小幅上涨。
+
+**复测口径**（两周后用同样两份数据源再取一次）：
+
+1. 触发率 =「写/执行类调用 ≥3 的会话中出现 `goal_*` 的比例」，看是否高于 3.8%。
+2. 误开率 =「工具调用 ≤1 的会话中出现 `goal_start` 的比例」，**不应上升**。
+3. 收尾质量 = 目标对象的 `claims[].accepted === false` 次数 / 总申请次数（**不是** `goal_finish` 调用数：打回是 `ok:true` 的正常业务结果；基线会话 0/1、计划 0/1）。上升要先排除「事实不绿硬申完成」。
+4. 预算烧毁率 = `session_goals` 里 `status=stalled` 占比（基线 0/2）。
+5. **反证条件**：触发率仍 <20% 且 request snapshot 显示「读到了工具却不调用」→ 不是措辞问题，转「无目标时注入结构事实（工作区是否存在可跑验收命令）」；该改动会破坏「无目标零注入」，先重新确认取舍再动。
+
+**2026-11-05 措辞改动（本节的对照组）**：`goal_start` 描述补上「可途中补开 + 同轮内可接着 check/finish + `checks` 留空的未验证模式」；`NO_SESSION_GOAL` 错误去掉「一次能答完就不用建」并指路同轮收尾；`agent-system-prompt.js` 加一行「多步任务默认先 goal_start」判据（唯一一句 system prompt 提示，不复制工具契约）。

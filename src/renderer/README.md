@@ -87,7 +87,7 @@
 | `renderer-codebase-panel.js` | 代码片段索引：状态 / 重建 / 建向量（面板已并入「索引」页签） |
 | `renderer-graph-panel.js` | 结构索引：状态 / 重建 / 符号命中渲染（面板已并入「索引」页签） |
 | `renderer-index-panel.js` | 「索引」面板外壳（`data-side-tab="index"`）：一个搜索框同查片段+符号、两个索引的 shown/hidden 扇出、rail busy 合成 |
-| `renderer-goal-panel.js` | 会话目标的两个面：气泡区上方**目标条**（`#goal-bar`：目标 · 第几轮 · 最近一条事实，点开就地展开检查事实与清单）与侧栏**「目标」页**（`data-side-tab="goal"`）。视图由 Main 的 `goals/session-goal.js#toPanelView` 成形，这里只画；同一份视图、同一次取数、同一个轮询（可见 / 有目标时才跑） |
+| `renderer-goal-panel.js` | 会话目标的两个面：气泡区上方**目标条**（`#goal-bar`：目标 · 第几轮 · 最近一条事实，点开就地展开检查事实与清单）与侧栏**「目标」页**（`data-side-tab="goal"`）。视图由 Main 的 `goals/session-goal.js#toPanelView` 成形，这里只画；同一份视图、同一次取数、同一个轮询（可见 / 有目标时才跑）。进度条按视图的 `progressFrom` 选文案（`checks` = 验收通过数/声明检查数，客观；`todos` = 清单勾选，模型自述；`outcome` = 收尾 0/1），不自己判比例 |
 | `renderer-problems.js` | LSP 诊断 |
 
 ## 设置 / 模型 / 技能
