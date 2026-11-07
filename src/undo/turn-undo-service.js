@@ -15,8 +15,165 @@ const MAX_STACK = 5;
 // 合并保住的语义：恢复点仍在，只是最老的那几个粒度变粗（宁可粗，不可悄悄消失）。
 const MAX_BATCHES_PER_TURN = 32;
 
+/**
+ * 单会话内容预算（字符数；ASCII 约等于字节，中文按 3 倍字节算）。
+ *
+ * 只限条数不限大小是不够的：`MAX_BATCHES_PER_TURN × MAX_STACK` 只封住「多少个恢复点」，
+ * 每个恢复点里放多少原文完全不受控。实测一个会话因此堆到 252MB（171.7MB 重复原文），
+ * 落盘时在主线程上 `JSON.stringify` + 写盘要 0.4~0.9s（issue/2026-11-07-smoothness-investigation.md）。
+ *
+ * 32M 字符 ≈ 32MB ASCII / 96MB 纯中文：正常回合（几十个文件、几批 checkpoint）连零头都用不到，
+ * 撞到它的只有「大文件 + 几十批 checkpoint」的病态回合。超了按 `enforceContentBudget` 的顺序丢内容。
+ */
+const UNDO_CONTENT_BUDGET_CHARS = 32 * 1024 * 1024;
+
+/**
+ * 条目浅拷贝即可：`before` 是不可变字符串，其余字段都是原始值。
+ *
+ * 这里曾经是 `JSON.parse(JSON.stringify(files))` —— 它把同一份原文按 batch 复制成成百份
+ * 独立字符串：实测同一个会话里 10858 个条目共 171.7MB「重复内容」全在主进程堆里。
+ * 浅拷贝后同一份内容在内存里只有一份，落盘再由 store 按内容哈希去重。
+ */
 function cloneFilesMap(files) {
-  return JSON.parse(JSON.stringify(files || {}));
+  const out = {};
+  for (const [key, meta] of Object.entries(files || {})) {
+    out[key] = meta && typeof meta === 'object' ? { ...meta } : meta;
+  }
+  return out;
+}
+
+/** 一份内容集合的字符数（按内容去重：同一份原文被多批引用只算一次） */
+function filesContentChars(files, seen) {
+  let n = 0;
+  for (const meta of Object.values(files || {})) {
+    const text = meta && typeof meta.before === 'string' ? meta.before : '';
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    n += text.length;
+  }
+  return n;
+}
+
+/** 收集一份内容集合里出现过的原文字符串 */
+function filesContents(files, into = new Set()) {
+  for (const meta of Object.values(files || {})) {
+    const text = meta && typeof meta.before === 'string' ? meta.before : '';
+    if (text) into.add(text);
+  }
+  return into;
+}
+
+function sessionContentChars(st) {
+  const seen = new Set();
+  let total = 0;
+  for (const record of st.records.values()) {
+    total += filesContentChars(record.files, seen);
+    for (const batch of record.batches || []) {
+      if (batch && !batch.contentDropped) total += filesContentChars(batch.files, seen);
+    }
+  }
+  return total;
+}
+
+/** 一个回合引用到的全部内容（record.files + 它的 checkpoint；同一回合内重复只算一次） */
+function recordContents(record) {
+  const seen = new Set();
+  filesContentChars(record.files, seen); // 只为收集 set
+  for (const batch of record.batches || []) {
+    if (batch && !batch.contentDropped) filesContentChars(batch.files, seen);
+  }
+  return seen;
+}
+
+/**
+ * 每个内容被多少个**回合**引用：`1` = 只有这一个回合在用，丢掉它就真的能省下内存。
+ *
+ * 只按「条数」裁剪是不够的，只按「字符数」裁也会踩坑：内容被更晚的回合共用时，
+ * 丢老回合的副本省不下任何东西（内存里本来就是同一个字符串、盘上也是同一个内容块），
+ * 纯属白丢功能。所以裁剪前先问一句「丢了到底省不省」。
+ */
+function contentOwnerCount(records) {
+  const counts = new Map();
+  for (const record of records) {
+    for (const text of recordContents(record)) counts.set(text, (counts.get(text) || 0) + 1);
+  }
+  return counts;
+}
+
+function exclusiveChars(record, owners) {
+  let n = 0;
+  for (const text of recordContents(record)) {
+    if (owners.get(text) === 1) n += text.length;
+  }
+  return n;
+}
+
+/**
+ * 内容预算裁决（就地裁剪内存态，落盘自然跟着变小）。
+ *
+ * 顺序按「越难用到越先丢」，且**每一步都先验证「丢了能省下」**，省不下就跳过：
+ * 1. 最老的回合先丢：先丢它的所有 checkpoint 内容（batch 只留 id/round，回滚时明确报「已丢弃」），
+ *    还不够再丢它的 `record.files`（该回合整轮撤回同样明确报错）；
+ * 2. 最老回合的内容若被更新的回合共用（省不下），跳过它；
+ * 3. 最后才动**最新一轮**，且只丢它最老的 checkpoint 内容 —— `record.files` 永不丢：
+ *    能整轮撤回的就是它（`canRollback` 只认栈顶），宁可超预算也不让主能力失效。
+ */
+function enforceContentBudget(st, budget = UNDO_CONTENT_BUDGET_CHARS) {
+  let total = sessionContentChars(st);
+  if (total <= budget) return { droppedBatches: 0, droppedRecords: 0 };
+  let droppedBatches = 0;
+  let droppedRecords = 0;
+  const records = [...st.records.values()]; // Map 插入序 = 时间序
+  // 最新一轮 = 最后一个记录：回合跑完后 activeTurnId 会清空，但栈顶仍是它
+  const newest = records.length ? records[records.length - 1] : null;
+
+  for (const record of records) {
+    if (total <= budget) break;
+    if (record === newest) break;
+    if (!recordContents(record).size) continue;
+    if (exclusiveChars(record, contentOwnerCount(records)) <= 0) continue; // 丢了也省不下
+    let changed = false;
+    for (const batch of record.batches || []) {
+      if (!batch || batch.contentDropped || !batch.files) continue;
+      if (!Object.keys(batch.files).length) continue;
+      batch.files = {};
+      batch.contentDropped = true;
+      droppedBatches += 1;
+      changed = true;
+    }
+    if (changed) total = sessionContentChars(st);
+    if (total <= budget) break;
+    if (Object.keys(record.files || {}).length) {
+      record.files = {};
+      record.contentDropped = true;
+      droppedRecords += 1;
+      total = sessionContentChars(st);
+    }
+  }
+
+  // 极端的单回合长任务：上面动不了（最新一轮受保护），只能从它最老的 checkpoint 开始放，
+  // 且同样只在「丢了真能省下」时才丢（内容是 record.files 或兄弟 checkpoint 还要用的同一份就跳过）
+  if (total > budget && newest) {
+    for (const batch of newest.batches || []) {
+      if (total <= budget) break;
+      if (!batch || batch.contentDropped || !batch.files) continue;
+      const own = filesContents(batch.files);
+      if (!own.size) continue;
+      const others = filesContents(newest.files);
+      for (const other of newest.batches || []) {
+        if (other === batch || other.contentDropped) continue;
+        filesContents(other.files, others);
+      }
+      let gain = 0;
+      for (const text of own) if (!others.has(text)) gain += text.length;
+      if (gain <= 0) continue;
+      batch.files = {};
+      batch.contentDropped = true;
+      droppedBatches += 1;
+      total = sessionContentChars(st);
+    }
+  }
+  return { droppedBatches, droppedRecords };
 }
 
 function isRemoteUndoKind(kind) {
@@ -91,12 +248,23 @@ function createTurnUndoService(opts = {}) {
   const sessions = new Map();
   const store = opts.userDataPath ? createTurnUndoStore(opts.userDataPath) : null;
 
+  /**
+   * 落盘：**不再有同步写**。
+   *
+   * 过去 `immediate` 走 `fsSync.writeFileSync` + `renameSync` 写整份 250MB JSON，
+   * 主线程直接被占 0.4~0.9s（Gateway / IPC 全排队 = 用户看到的「卡半秒」）。
+   * 现在元数据只有 ~1MB 级、内容块独立且去重，写盘一律异步 + 每会话串行。
+   */
   function persistSession(sessionId, opts = {}) {
     if (!store) return;
     const st = sessions.get(String(sessionId || '').trim());
     if (!st) return;
+    enforceContentBudget(st);
     if (opts.immediate) {
-      store.writeSessionSync(sessionId, st);
+      store.writeSessionNow(sessionId, st).catch((e) => {
+        // 撤回快照写不进去要留痕：静默失败会让用户在想回退时才发现没有记录
+        console.warn('[undo] 快照落盘失败', e && (e.message || e));
+      });
       return;
     }
     store.scheduleSave(sessionId, st);
@@ -381,6 +549,10 @@ function createTurnUndoService(opts = {}) {
       // 超长回合里最老的几个 checkpoint 会被合并，只剩合并后的那个 id
       return { ok: false, error: '该检查点已被合并（单轮最多 32 个），请用整轮撤回或较新的检查点' };
     }
+    if (batch.contentDropped) {
+      // 内容按体积预算丢弃过：宁可明说不可用，也不能拿空内容去「恢复」成删文件
+      return { ok: false, error: '该检查点的内容已按体积预算丢弃，请用整轮撤回或较新的检查点' };
+    }
 
     const batchFiles = batch.files || {};
     const allPaths = new Set([...Object.keys(record.files), ...Object.keys(batchFiles)]);
@@ -566,6 +738,11 @@ function createTurnUndoService(opts = {}) {
       };
     }
 
+    if (record.contentDropped) {
+      // 内容按体积预算丢弃过：restore 里再给 null 就等于「把文件删掉」，必须明确拒绝
+      return { ok: false, error: '该回合的改前内容已按体积预算丢弃，无法整轮撤回' };
+    }
+
     const restoreRoot = record.workspaceRoot || null;
     const restore = rollbackRestorePaths(record)
       .filter((relPath) => record.files[relPath])
@@ -624,5 +801,8 @@ function createTurnUndoService(opts = {}) {
 }
 
 module.exports = {
-  createTurnUndoService
+  createTurnUndoService,
+  // 预算策略的单一来源（测试与诊断直接读这两个符号，不另抄一份数字）
+  UNDO_CONTENT_BUDGET_CHARS,
+  enforceContentBudget
 };
