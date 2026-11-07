@@ -129,7 +129,9 @@
     "postinstall": "electron-builder install-app-deps",
     "build:headless": "npm run pack:dieyun-core:linux && npm run pack:deb:headless && npm run verify:headless-deb && npm run verify:headless-pack && npm run publish:headless-apt && npm run verify:headless-apt",
     "publish:headless-apt": "node scripts/publish-headless-apt.cjs",
-    "verify:headless-apt": "node scripts/publish-headless-apt.cjs --verify release/headless-apt/pool"
+    "verify:headless-apt": "node scripts/publish-headless-apt.cjs --verify release/headless-apt/pool",
+    "test:headless-desktop-ui": "node scripts/test-headless-desktop-ui.cjs",
+    "test:headless-desktop-turn": "node scripts/test-headless-desktop-turn.cjs"
   },
   "author": {
     "name": "PixelOffice",

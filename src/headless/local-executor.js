@@ -99,7 +99,9 @@ function createLocalExecutor(deps) {
           trace.handlePhase(phase, data);
           scheduleFlush();
         },
-        listMcpServers: deps.listMcpServers
+        listMcpServers: deps.listMcpServers,
+        // 共享记忆（跨机）：`runMainTurn` 读这个装配召回块；未配置/连不上时块自动缺席
+        getSharedMemory: deps.getSharedMemory
       });
       if (timer) clearTimeout(timer);
       // 终态前先把攒着的 trace 推完，否则最后几轮进度会被终态事件吃掉

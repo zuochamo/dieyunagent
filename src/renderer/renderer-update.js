@@ -182,7 +182,9 @@ function aboutUpdateLabel(state) {
   if (phase === 'ready') return `${ver ? `v${ver} ` : ''}已下载，可以安装并重启`;
   if (phase === 'installing') return '正在启动安装程序…（可能要求输入管理员密码）';
   if (phase === 'error') return `失败：${String((state && state.message) || '未知错误')}`;
-  if (phase === 'idle') return '已是最新版本';
+  // idle 默认「已是最新版本」；服务器版（headless 走 apt）会把真实结论放在 message 里
+  // —— 例如「发现新版本 0.1.76（当前 0.1.75）；升级：sudo apt install dieyun-headless」
+  if (phase === 'idle') return String((state && state.message) || '已是最新版本');
   return '未检查';
 }
 

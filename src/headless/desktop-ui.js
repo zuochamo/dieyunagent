@@ -79,6 +79,10 @@ function parseCookies(header) {
  *    所以这里只暴露真正能回答的四个，其它访问返回 undefined（并在控制台点一次名，方便定位）。
  */
 function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSettings, rustCoreReady, permissions }) {
+  // 注意：下面是**模板字符串**。里面的注释/文案不能出现反引号，也不能出现美元加花括号
+  // （会提前闭合模板或当成插值），否则生成的脚本语法错误 → `/app/` 直接 404。
+  // 这个坑踩过两次（2026-11-05）；`scripts/test-headless-desktop-ui.cjs` 会把生成物丢给
+  // new Function 解析，改完务必跑它。
   return `/* 由 dieyun-headless 生成：Electron preload 的浏览器替身。
    桌面窗口的能力来自 preload.js（IPC → Main）；浏览器里换成同源 Gateway WS 代理 + 同源 LLM 转发，
    只给「能如实回答」的接口，其余保持 undefined —— 渲染层会按能力缺失走自己的降级分支。 */
@@ -90,15 +94,17 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
       ? (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/gateway'
       : FALLBACK_URL;
   const GATEWAY_TOKEN = ${JSON.stringify(gatewayToken)};
-  const WORKSPACE = ${JSON.stringify(String(workspacePath || ''))} || null;
+  const WORKSPACE_INIT = ${JSON.stringify(String(workspacePath || ''))} || null;
+  // 可变：浏览器里点「工作空间 → 本地」会走 desktop.set_workspace 真的换掉服务端工作区根，
+  // 换完这一页的默认路径也要跟着变（否则「默认工作空间」标签还是旧目录）。
+  let WORKSPACE = WORKSPACE_INIT;
   const MODEL_SETTINGS = ${JSON.stringify(modelSettings || null)};
   const LLM_PROXY = '/llm';
   // 与手机端同一个 token；用它连同源 /ws，请服务器在 Main 侧跑这一轮
   const WS_TOKEN = ${JSON.stringify(String(webToken || ''))};
   const RUST_CORE_READY = ${rustCoreReady === false ? 'false' : 'true'};
-  // 权限档位（沙箱）由服务端注入：渲染层靠它决定给模型哪些工具（getPermissions → 工具集闸门）。
-  // 浏览器里没有写入通道，所以只读；改档位请在服务器上用桌面端或配置文件。
-  const PERMISSIONS = ${JSON.stringify(permissions || {})};
+  // 权限档位（沙箱）：服务端注入初始值，之后可经 desktop.set_permissions 修改（唯一真源在 Gateway）。
+  let PERMISSIONS = ${JSON.stringify(permissions || {})};
 
   /**
    * 桌面窗口里这一轮是 Main 跑的（preload 的 agentRustLoopRun → IPC）。浏览器里没有 IPC，
@@ -189,6 +195,41 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
     return resp;
   }
 
+  /**
+   * 工作区根的本地镜像：getWorkspace() 与渲染层的「默认工作空间」都读它。
+   * 唯一写入点是服务端 desktop.set_workspace 的返回（服务端是唯一真源）。
+   * @param {object|null} ws
+   */
+  function applyWorkspace(ws) {
+    const p = ws && ws.kind === 'local' && ws.workspacePath ? String(ws.workspacePath) : '';
+    WORKSPACE = p || null;
+    try {
+      // 环境事实：会话没绑定工作空间时文件工具实际写哪里（composer 标签要如实显示）
+      window.appDefaultWorkspacePath = WORKSPACE || undefined;
+    } catch (e) {
+      console.warn('[dieyun-headless] 更新默认工作空间失败：', e && e.message);
+    }
+    return ws;
+  }
+
+  /**
+   * 「检查更新」的状态与订阅。桌面端由 Main 推 app:update-state；浏览器里由本 shim 推，
+   * 渲染层看到的状态形状一样。初值不带 phase —— 没检查过就说「未检查」，别替它编一个「已是最新」。
+   */
+  const updateSubs = new Set();
+  let updateState = { phase: '', message: '' };
+  function pushUpdateState(next) {
+    updateState = Object.assign({}, next || {}, { at: Date.now() });
+    updateSubs.forEach((cb) => {
+      try {
+        cb(updateState);
+      } catch (e) {
+        console.warn('[dieyun-headless] 更新状态订阅抛错：', e && e.message);
+      }
+    });
+    return updateState;
+  }
+
   const real = {
     // preload: ipcRenderer.invoke('gateway:get-info') → Promise
     // 「rustCore.enabled」是渲染层判断「循环能不能跑」的依据（isDieyunCoreReady），如实上报
@@ -199,12 +240,68 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
       permissions: PERMISSIONS,
       workspace: WORKSPACE || undefined
     }),
-    // preload: ipcRenderer.invoke('permissions:get') → 与 gateway.getPermissions() 同一份
-    getPermissions: async () => PERMISSIONS,
+    // preload: ipcRenderer.invoke('permissions:get') → 与 gateway.getPermissions() 同一份。
+    // 读服务端现价（改了档位后别的页/别的入口立刻一致），断线时退回上次已知值。
+    getPermissions: async () => {
+      try {
+        PERMISSIONS = await agentCall('desktop.get_permissions');
+      } catch (e) {
+        console.warn('[dieyun-headless] 读取权限失败，沿用上次值：', e && e.message);
+      }
+      return PERMISSIONS;
+    },
+    // preload: ipcRenderer.invoke('permissions:set', perms) —— 归一/落盘/作废旧批准都在 Gateway 里
+    setPermissions: async (perms) => {
+      PERMISSIONS = await agentCall('desktop.set_permissions', { permissions: perms || {} });
+      return PERMISSIONS;
+    },
     // preload: ipcRenderer.invoke('workspace:get') → Promise，返回的是 gateway.getWorkspace() 的形状
     // （{kind, workspacePath, displayPath, sshConnected}），不是裸字符串
     getWorkspace: async () =>
       WORKSPACE ? { kind: 'local', workspacePath: WORKSPACE, displayPath: WORKSPACE, sshConnected: false } : null,
+    // preload: ipcRenderer.invoke('workspace:set-local', { path }) —— 浏览器里经同源 /ws 让服务端
+    // 改 Gateway 的工作区根（与桌面端同一条流程，路径存在性由服务端校验），返回生效后的形状
+    setLocalWorkspace: async (pathValue) => applyWorkspace(await agentCall('desktop.set_workspace', { path: pathValue || '' })),
+    // preload: ipcRenderer.invoke('workspace:set', p)。桌面端本地/SSH 都认；浏览器版只有本地通道
+    // （从网页连 SSH 需要服务端出站，未实现），非本地输入交服务端归一后按本地处理
+    setWorkspace: async (p) => applyWorkspace(await agentCall('desktop.set_workspace', { path: p || '' })),
+    // 浏览器版没有系统目录框：给渲染层一个**服务端**目录浏览（只列子目录），
+    // 让它把「切换工作空间」做成列表选择而不是手填路径。桌面端走 pickFolder，不需要这个。
+    browseServerDir: async (p) => agentCall('desktop.list_dirs', { path: p || '' }),
+    // preload: ipcRenderer.invoke('agent:prep-system-prompt', snapshot) —— 系统提示装配
+    // （AGENTS.md / 记忆 / 技能 / MCP / 共享记忆召回）只能有一份，在服务端 system-prompt-prep-main。
+    // 没有它渲染层会退到本地兜底装配，浏览器里的会话会少一大截上下文。
+    agentPrepSystemPrompt: async (snapshot) => agentCall('desktop.prep_system_prompt', { snapshot: snapshot || {} }),
+    // 设置 → 扩展 →「共享记忆」：与桌面 IPC 同一份动作实现（src/memory-shared/actions.js）
+    sharedMemoryStatus: async () => agentCall('desktop.shm_status', {}),
+    sharedMemorySave: async (patch) => agentCall('desktop.shm_save', { patch: patch || {} }),
+    sharedMemoryTest: async (patch) => agentCall('desktop.shm_test', { patch: patch || {} }),
+    sharedMemoryProbe: async () => agentCall('desktop.shm_probe', {}),
+    sharedMemoryConsolidate: async () => agentCall('desktop.shm_consolidate', {}),
+    // 帮助 → 关于 →「检查更新」：服务器版不自建更新客户端，升级走 apt（docs/HEADLESS.md §8）。
+    // 服务端跑只读的 apt-get -s（不需要 root），把结论按桌面端同一套 phase 推给渲染层，
+    // 所以「关于」页那行文字与按钮行为跟桌面一致，只是结论来自 apt 而不是 electron-updater。
+    checkForUpdates: async () => {
+      pushUpdateState({ phase: 'checking', message: '正在检查更新…' });
+      try {
+        const r = await agentCall('desktop.check_update', {});
+        if (!r || r.ok === false) {
+          pushUpdateState({ phase: 'error', message: (r && r.error) || '检查失败' });
+          return { pending: false };
+        }
+        pushUpdateState({ phase: 'idle', message: r.message || '已是最新版本' });
+        return { pending: false };
+      } catch (e) {
+        pushUpdateState({ phase: 'error', message: '检查更新失败：' + ((e && e.message) || e) });
+        return { pending: false };
+      }
+    },
+    getUpdateState: async () => updateState,
+    onAppUpdateState: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      updateSubs.add(cb);
+      return () => updateSubs.delete(cb);
+    },
     // preload 里这个是**同步**的（webUtils.getPathForFile），浏览器拿不到真实路径
     getPathForFile: () => null,
     // preload: ipcRenderer.send('renderer:freeze-beat') —— 单向，无返回值
@@ -245,7 +342,7 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
     addTokens: () => {}
   };
   // 环境事实：会话没绑定工作空间时文件工具实际写入哪里（渲染层的 composer 标签要如实显示）
-  if (WORKSPACE) window.appDefaultWorkspacePath = WORKSPACE;
+  applyWorkspace(WORKSPACE ? { kind: 'local', workspacePath: WORKSPACE } : null);
   const warned = new Set();
   const proxy = new Proxy(real, {
     has: (t, k) => typeof k === 'string' && Object.prototype.hasOwnProperty.call(real, k),

@@ -170,6 +170,30 @@ done
 sudo -u dieyun sh -c 'cd <工作空间> && touch .w && rm .w && echo 可写'
 ```
 
+#### 在浏览器界面里换工作空间
+
+`/app/` 那个界面里点「工作空间 → 本地」可以切：浏览器里没有原生目录框，改为弹**服务端目录浏览**
+（`desktop.list_dirs`，只列子目录、可逐级进/退，路径框里也能直接敲绝对路径或 `~`），
+选好点「使用此目录」即生效 —— 服务端会先证明「存在、是目录、服务账号读得动」再把 Gateway
+的工作区根换掉，页面上的目录标签立刻跟着变。
+
+生效范围要说清：**只对当前运行的进程生效**。`workspace.json` 会被改写，但下次启动时
+`boot` 仍用 `--workspace` / `DIEYUN_WORKSPACE` 显式覆盖 —— 要长期生效，改 unit / env 文件后重启。
+换目录后旧会话若已绑定原目录，仍按原目录跑（绑定写在会话行上）；新会话落到新目录。
+
+目标目录要对 `dieyun` **可读**（列目录要 `r`+`x`），路径上的祖先目录只需 `x`（通行权）。
+只给 `x` 的目录 `stat` 会成功、一列就 `EACCES` —— 服务端会当场拒绝并说清是谁没权限，
+不会让你换过去之后才在文件树/索引上撞一堆权限错误：
+
+```bash
+# 目标目录：可读（agent 还要能写就别加 w 之外的门，按需给 rwx）
+sudo setfacl -m u:dieyun:rx /run/media/dieyunx/dieyunserver/harness/dieyunagent/some-project
+# 祖先目录：只给通行权 x，不给读
+for d in /run/media/dieyunx /run/media/dieyunx/dieyunserver /run/media/dieyunx/dieyunserver/harness; do
+  sudo setfacl -m u:dieyun:x "$d"
+done
+```
+
 ---
 
 ## 4. 命令与参数
@@ -300,9 +324,10 @@ Agent 权限**，所以：
 `nodeIntegration: false`），渲染层的 RPC 本来就是自己连 Gateway 的 WebSocket
 （`renderer-gateway.js` 里 `new WebSocket(info.url)`）。headless 只是补了四件事：
 
-1. `src/headless/desktop-ui.js` 给 `window.diecloud` 一个**浏览器替身**（preload 的 12 个接口里，
-   `getGatewayInfo` / `getWorkspace` / `getPermissions` / `getModelSettingsFromMain` 是真的，
-   其余退化成无害空实现，没实现的保持 `undefined` 让渲染层走自己的降级分支）；
+1. `src/headless/desktop-ui.js` 给 `window.diecloud` 一个**浏览器替身**（preload 的接口里，
+   `getGatewayInfo` / `getWorkspace` / `setLocalWorkspace` / `setWorkspace` / `browseServerDir` /
+   `getPermissions` / `setPermissions` / `getModelSettingsFromMain` 是真的，其余退化成无害空实现，
+   没实现的保持 `undefined` 让渲染层走自己的降级分支）；
 2. `MobileBridge` 把 `/gateway` 的 WebSocket 升级**同源代理**到本机 Gateway（127.0.0.1:…），
    帧原样转发 —— 所以 Gateway token 仍由 Gateway 自己校验（错的 token 依旧 `AUTH_FAILED`）；
 3. **聊天轮**：桌面窗口里这一轮是 `Renderer → preload IPC → Main`（Main 用 `runRustAgentLoop`
@@ -319,8 +344,33 @@ Agent 权限**，所以：
 
 注入进页面的东西（都在 token 之后才下发，与「拿到 token 就等于拿到这台机器的 Agent」同一个
 信任边界）：Gateway token（仍由 Gateway 校验）、模型配置（含 API key，渲染层要用它拼请求头）、
-权限档位快照（决定给模型哪些工具）。**权限档位只读**：浏览器里改档位不会写回服务器，
-请用桌面端或 `permissions` 配置改。
+权限档位快照（决定给模型哪些工具）。
+
+页面里**能改**的两样服务端状态（都走 `/ws` 转发到 Gateway，单一真源不搬家）：
+
+| 页面动作 | `/ws` 方法 | 作用 |
+|---|---|---|
+| 工作空间 → 本地 | `desktop.list_dirs` + `desktop.set_workspace` | 改 Gateway 工作区根（服务端校验「存在/是目录/读得动」），仅本次运行生效 |
+| 输入区「路径权限」开关 / 设置 → 权限 | `desktop.get_permissions` + `desktop.set_permissions` | 改沙箱档位（`read-only` / `workspace-write` / `danger-full-access`），**落盘**到 `host-permissions.json`，并在服务日志留一行 `浏览器版改路径权限：a -> b` |
+| 设置 → 扩展 → 共享记忆 | `desktop.shm_status` / `shm_save` / `shm_test` / `shm_probe` / `shm_consolidate` | 与桌面 IPC **同一份动作实现**（`src/memory-shared/actions.js`）：保存后当场探活、可试连、可手动提炼 |
+| 每一轮的系统提示装配 | `desktop.prep_system_prompt` | 走 `agent/system-prompt-prep-main.js`（与桌面 IPC / 频道 / 计划同一份）：AGENTS.md / 记忆 / 技能 / MCP / **共享记忆召回**都在这里面 |
+| 帮助 → 关于 →「检查更新」 | `desktop.check_update` | 跑只读的 `apt-get -s install --only-upgrade dieyun-headless`（不需要 root），把「已是最新 / 发现新版本 x」按同一套 phase 推给界面；真装仍要 `sudo apt install dieyun-headless` |
+
+> 最后一条别省：浏览器的渲染层在没有 `agentPrepSystemPrompt` 时会退到 `assembleSystemPrompt`
+> 的本地兜底（只有用户自写提示 + 工作区信息），会话会比桌面端少一大截上下文，共享记忆也召回不进来。
+
+#### 共享记忆（跨机 PostgreSQL）
+
+服务器侧按 `docs/SHARED-MEMORY.md` §9 准备一次（建库 + 建 `role_mem` + 装 `vector`/`pg_trgm`），
+然后在这个页面的「设置 → 扩展 → 共享记忆」里填口令 → 点「测试连接」→ 保存。保存的密码进
+`<DIEYUN_USER_DATA>/shared-memory.json`，由 `src/secret-store.js` 加密、`0600`，页面永不回显。
+
+headless 的加密密钥来自 `DIEYUN_SECRET_KEY_FILE`（32 字节或 64 位 hex、`0600`）。**没配就存不了口令**
+（按既有语义拒绝保存、绝不回退明文）——启动日志会有一行提醒。探活失败按「本轮及以后关闭」处理：
+不重试、不阻塞对话，设置页显示原因。
+
+> 「路径权限 = 完全放开」等于关掉沙箱，这是安全开关：谁能打开这个页面谁就能改。改完记得看日志；
+> 启动参数 `--sandbox` 仍是**本次运行**的覆盖（不落盘），unit 里写了它就以它为准。
 
 浏览器里拿不到的能力（点了不会崩，但给不出结果）：
 
@@ -346,6 +396,7 @@ Agent 权限**，所以：
 | `dieyun-core 未就绪`（退出码 3） | core 不在探测路径。确认 `<包根>/build/dieyun-core/dieyun-core` 存在且**可执行**（`chmod +x`），或设 `DIEYUN_CORE_BIN` |
 | `Permission denied` 启动即失败 | 可执行位丢了（多见于用不保留权限的工具解包）：`chmod +x bin/dieyun-headless bin/node build/dieyun-core/dieyun-core`；deb 安装的包由 unit 的 `ExecStartPre` 兜住 |
 | `apt install` 报 `unmet dependencies` | 包里只 `Depends: libc6 (>= 2.28)`。用 `sudo apt install ./dieyun-headless_<ver>_amd64.deb`（带路径，apt 才会自动补依赖），不要用 `dpkg -i` 直接装 |
+| 同版本重装后代码没变（`/opt/dieyun-headless` 还是旧的） | `apt install --reinstall ./xxx.deb` 对**同版本**的本地 deb 会静默跳过（既不 Unpacking 也不 Setting up）。同版本重装用 `sudo dpkg -i <deb>`，或者干脆发新版本号 |
 | `dpkg -l dieyun-headless` 有包但 `systemctl` 找不到单元 | `sudo systemctl daemon-reload` 一次（postinst 在无 systemd 的容器里会跳过这一步） |
 | `GLIBC_2.xx not found` | 目标机 libc 太老。看包内 `manifest.json` 的 `glibcFloor`；core 用 zig 目标构建（`CORE_GLIBC_TARGET=2.17`），若 node 成为地板就换更老的 node 大版本或升级系统 |
 | `未配置 API Key`（退出码 3） | `model-settings.json` 缺失或不属于 `dieyun` 用户；见 §3.2。注意手工跑 CLI 时数据目录要和服务一致（deb 安装的包已自动读 `/etc/dieyun/headless.env`；tarball 自己 `export DIEYUN_USER_DATA`） |
@@ -371,6 +422,12 @@ Agent 权限**，所以：
 
 headless 的更新**走 apt**，不自建更新客户端：服务器上已有 apt / `unattended-upgrades` /
 `apt-daily.timer`，给它们一个源，就有「自动更新 + 哈希校验 + 依赖解析 + 指定版本回滚」。
+
+网页「帮助 → 关于」那颗「检查更新」按钮**也是 apt 语义**：服务端跑一次
+`apt-get -s install --only-upgrade dieyun-headless`（只读模拟，服务账号 `dieyun` 就能跑），
+结果按桌面端同一套 phase 回报——「已是最新版本（0.1.75，按上次 apt update 的索引）」或
+「发现新版本 0.1.76；服务器版升级：sudo apt install dieyun-headless」。它**不会**替你装：
+真装要 root，这条链不给服务进程 sudo。
 
 发版时 `npm run build:all` 末尾的 `build:headless` 会顺带：
 

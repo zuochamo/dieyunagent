@@ -828,7 +828,8 @@
     {
       "prefix": "src/memory-shared/",
       "tests": [
-        "test:unit"
+        "test:unit",
+        "test:headless-desktop-turn"
       ]
     },
     {
@@ -1205,7 +1206,9 @@
       "prefix": "src/headless/",
       "tests": [
         "test:unit",
-        "test:headless"
+        "test:headless",
+        "test:headless-desktop-turn",
+        "test:headless-desktop-ui"
       ]
     },
     {
@@ -1724,7 +1727,9 @@
       "test:scm",
       "lint:agent",
       "check:js",
-      "check:renderer"
+      "check:renderer",
+      "test:headless-desktop-turn",
+      "test:headless-desktop-ui"
     ],
     "agent-full": [
       "test:agent-limits",
@@ -1775,7 +1780,9 @@
       "test:rust-planner-smoke",
       "test:rust-agent-loop-smoke",
       "check:js",
-      "check:renderer"
+      "check:renderer",
+      "test:headless-desktop-turn",
+      "test:headless-desktop-ui"
     ]
   }
 }

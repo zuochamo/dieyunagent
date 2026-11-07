@@ -20,6 +20,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const { resolveUserDataDir } = require('../app-paths');
@@ -37,6 +38,10 @@ const { AgentService } = require('../agent/service');
 const { MobileBridge } = require('../mobile/bridge');
 const { createSecretStorage } = require('./secret-storage');
 const { createLocalExecutor } = require('./local-executor');
+const { createSharedMemoryService } = require('../memory-shared/service');
+const { getAgentLimits } = require('../agent/agent-limits');
+const { loadModelSettings, getEmbeddingConfig } = require('../model-settings');
+const { createEmbeddingClient } = require('../codebase/embedding-client');
 
 /** 无窗口时必然没有的能力：启动日志里如实打一行，而不是加一个开关表 */
 const UNAVAILABLE_CAPABILITIES = [
@@ -199,6 +204,30 @@ let desktopUi = null;
       getMobileBridge: () => mobileBridge
     });
 
+  // 共享记忆（跨机 PostgreSQL）：数据层唯一实现 `src/memory-shared/service.js`，
+  // 与桌面端（`src/main-entry.js`）同一份装配参数。默认开启，口令由「设置 → 扩展 → 共享记忆」填；
+  // 探活失败 = 本轮及以后按关闭处理（fail-open：不重试、不阻塞对话）。
+  // 桌面端有 `safeStorage`，headless 用 `src/headless/secret-storage.js`（同一形状，
+  // 缺 `DIEYUN_SECRET_KEY_FILE` 时 `isEncryptionAvailable() === false`，按既有语义拒绝保存、不落明文）。
+  const sharedMemory = createSharedMemoryService({
+    userDataPath: userData,
+    safeStorage: secretStorage,
+    nodeId: os.hostname(),
+    hostname: os.hostname(),
+    clientVersion: String((require('../../package.json') || {}).version || ''),
+    limits: () => getAgentLimits(userData),
+    // 向量复用「设置 → 模型 → 向量索引」的端点：没配就没有向量，召回自动落到文本排名
+    embedding: () => {
+      try {
+        return createEmbeddingClient(getEmbeddingConfig(loadModelSettings(userData)));
+      } catch {
+        return null;
+      }
+    },
+    log: { info: (msg) => log.info(msg), warn: (msg) => log.warn(msg) }
+  });
+  void sharedMemory.probe();
+
   const agentService = new AgentService({
     gateway,
     userDataPath: userData,
@@ -217,6 +246,8 @@ let desktopUi = null;
     route: opts.route || '',
     runSource: 'headless',
     listMcpServers: mcpStore.listMcpServersForUi,
+    // 频道 / 定时计划 / headless 的轮次与桌面走同一份装配（`main-turn-runner` 读这个）
+    getSharedMemory: () => sharedMemory,
     log
   });
   agentService.setExecutor(executor.executor);
@@ -271,7 +302,11 @@ let desktopUi = null;
       createToolBridge,
       getCompactionAgent: () => compactionAgent,
       userData,
-      loadModelSettings: require('../model-settings').loadModelSettings,
+      // 浏览器里那一轮也要和桌面同一份装配：共享记忆召回、AGENTS.md / 记忆 / 技能 / MCP 块
+      getSharedMemory: () => sharedMemory,
+      listMcpServers: mcpStore.listMcpServersForUi,
+      getKnowledgeMaintainer: () => require('../agent/knowledge-maintainer').getActiveKnowledgeMaintainer(),
+      loadModelSettings,
       log: (m) => log.info(m)
     });
     try {
@@ -299,7 +334,12 @@ let desktopUi = null;
         packageRoot: path.join(__dirname, '..', '..'),
         getGatewayInfo: () => gateway.getInfo(),
         getWebToken: () => info.token,
-        getWorkspace: () => workspacePath,
+        // 取 **Gateway 当前**的工作区根而不是启动参数：浏览器版可以点「工作空间 → 本地」换目录
+        // （`desktop.set_workspace`），换完刷新页面必须看到新目录，否则页面显示和实际写入分叉。
+        getWorkspace: () => {
+          const ws = gateway.getWorkspace();
+          return ws && ws.kind === 'local' ? ws.workspacePath || '' : '';
+        },
         // 模型配置的唯一来源仍是 model-settings.json（与 Main 同一份读写规则）
         getModelSettings: () => require('../model-settings').loadModelSettings(userData),
         getPermissions: () => gateway.getPermissions(),
@@ -347,6 +387,14 @@ let desktopUi = null;
     if (mcpRuntime && typeof mcpRuntime.shutdown === 'function') {
       await mcpRuntime.shutdown().catch(() => {});
     }
+    // 连接池要显式关，否则 --web 重启时旧 socket 会挂着等超时
+    if (sharedMemory && typeof sharedMemory.dispose === 'function') {
+      try {
+        sharedMemory.dispose();
+      } catch {
+        // ignore
+      }
+    }
     if (coreBridge) {
       await coreBridge.stop().catch(() => {});
       coreBridge = null;
@@ -364,6 +412,7 @@ let desktopUi = null;
     mcpManager,
     mcpStore,
     secretStorage,
+    sharedMemory,
     compactionAgent,
     agentService,
     executor,
