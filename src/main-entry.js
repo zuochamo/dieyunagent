@@ -904,7 +904,6 @@ app.whenReady().then(async () => {
       finishPlanRun,
       cancelPlanRun,
       userDataPath: userData,
-      browserService,
       peerCoordinator,
       // 手机摄像头（camera_look）：工具层只要「现在连着哪台手机」，不自己管桥。
       getMobileBridge: () => mobileBridge,

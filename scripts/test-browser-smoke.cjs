@@ -377,6 +377,19 @@ async function main() {
   await bvStage.stageViewport({ reset: true });
   assert(bvStage.status().viewport === null, 'browserview stage reset clears viewport');
 
+  // 面板可见性只有一个写者（Renderer 的 syncBrowserBounds）与一个字段名（open）：
+  // 原生 BrowserView 画在所有 DOM 之上，Main 侧「顺手开一下」会拿上一次的旧矩形贴到当前可见的
+  // 页签上（曾把 Bot 页整块盖住、且点不动）。
+  const bvPanel = createBrowserViewController({ getMainWindow: () => null, log: () => {} });
+  bvPanel.setPanelState({ visible: true });
+  assert(bvPanel.status().panelOpen === false, 'setPanelState ignores the legacy "visible" alias');
+  bvPanel.setPanelState({ open: true });
+  assert(bvPanel.status().panelOpen === false, 'open without bounds does not paint (stale rect would hit another pane)');
+  bvPanel.setPanelState({ open: true, bounds: { x: 10, y: 20, width: 300, height: 200 } });
+  assert(bvPanel.status().panelOpen === true, 'open with bounds is the only way to show the view');
+  bvPanel.setPanelState({ open: false });
+  assert(bvPanel.status().panelOpen === false, 'close does not need bounds');
+
   const { createPlaywrightRunner } = require('../src/browser/playwright-runner');
   const pwStage = createPlaywrightRunner({ log: () => {} });
   assert(pwStage.status().viewport === null, 'playwright viewport starts unset');

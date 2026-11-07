@@ -28,6 +28,7 @@
 | 工具 schema / 执行 | `src/agent/tool-catalog.js`（schema）、`src/agent/tool-bridge-main.js`（执行）、`src/gateway/fs-edit-file.js`（edit 实现） | 在 Renderer 再写一份 schema 或 `gatewayCall` 执行 host 工具 |
 | Planner / 多 Agent | `crates/dieyun-core/src/planner/`、`src/agent/rust-planner-runner.js` | `planner-orchestrator.js`（已删除） |
 | Gateway / 记忆 / fs RPC | `src/gateway/`、`crates/dieyun-core/src/rpc/`、`crates/dieyun-core/src/memory/` | preload 绕过 Gateway |
+| 浏览器面板可见性 / 原生视图边界（BrowserView 盖住别的页签） | `src/renderer/renderer-browser.js#syncBrowserBounds`（**唯一写者**：页签是否可见 + `#browser-viewport` 矩形一起传）、`src/browser/controller.js#setPanelState`（只认 `open`+`bounds`，没 bounds 不开） | 在 Main / 工具层自己 `setPanelState({open:true})` —— 只有上一次的旧矩形，原生视图会贴到当前可见的任何页签上；要画面可见用 `requestAutoOpenPanel()` 请 Renderer 开页签 |
 | 联网搜索 / 网页抓取 | `src/gateway/web/`（`engines/` 一个引擎一个 parser；出网走 `transport.js`） | 另写一份 SERP 解析、fetch 或 SSRF 校验 |
 | 手机端 UI / 桥接 | `src/mobile/public/`、`src/mobile/bridge.js`、`src/agent/service.js` | 复制整套 PC Renderer |
 | 模型 / 语音设置 | `src/model-settings.js`、`src/renderer/renderer-model-settings.js` | 散落硬编码 API URL |

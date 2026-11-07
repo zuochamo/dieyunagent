@@ -276,7 +276,6 @@ function runExclusiveMain(fn, workspaceKey, meta) {
  * @param {Function} [deps.plansCreateFromText]
  * @param {Function} [deps.createUserSkill]
  * @param {Function} [deps.onSkillsChanged]
- * @param {object} [deps.browserService]
  * @param {string} [deps.userDataPath]
  */
 function createMainToolBridge(deps) {
@@ -288,7 +287,6 @@ function createMainToolBridge(deps) {
   const plansCreateFromText = deps.plansCreateFromText || null;
   const createUserSkill = deps.createUserSkill || null;
   const onSkillsChanged = deps.onSkillsChanged || null;
-  const browserService = deps.browserService || null;
   const userDataPath = deps.userDataPath || '';
   // 内网 agent 互通（src/peer）：Main 创建的协调器；未启用时三个 peer_* 工具退化为结构化错误，
   // 不做「静默无此工具」——模型需要知道「这个能力没开」而不是「能力不存在」。
@@ -440,22 +438,8 @@ function createMainToolBridge(deps) {
     return { ...result, warnings: [...prev, ...hints] };
   }
 
-  async function ensureBrowserReady(name) {
-    if (!name.startsWith('browser_') || name === 'browser_close' || name === 'browser_status') {
-      return;
-    }
-    if (browserService && typeof browserService.setPanelState === 'function') {
-      try {
-        await browserService.setPanelState({ visible: true, openedByAgent: true });
-      } catch {
-        // ignore
-      }
-    }
-  }
-
   async function executeGatewayTool(name, args, ctx) {
     if (!gateway) throw new Error('Gateway 未就绪');
-    await ensureBrowserReady(name);
     return delegateAgentToolViaGateway(gateway, name, args, ctx);
   }
 

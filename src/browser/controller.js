@@ -2933,10 +2933,21 @@ function createBrowserViewController(deps) {
     return { ok: true, engine: 'browserview', viewport: null, reset: true };
   }
 
+  /**
+   * 面板可见性 + 原生视图边界的**唯一写者是 Renderer**（`renderer-browser.js#syncBrowserBounds`：
+   * 只有它同时知道「浏览器页签是否可见」与 `#browser-viewport` 的真实矩形，两端一起传）。
+   *
+   * 别处（尤其 Main 侧的工具层）不许自己把 `open` 置 true：这里只有上一次的旧 `bounds`，
+   * 原生视图画在所有 DOM 之上，会被按旧矩形贴到**当前可见的任何页签**上 —— 表现为
+   * 「切到 Bot / 目标 / 文件页后，面板里冒出一块浏览器画面，且点不动」。
+   * 需要画面可见的操作用 `requestAutoOpenPanel()` 请 Renderer 开页签，再由它回传边界。
+   */
   function setPanelState(state = {}) {
-    const nextOpen = state.open !== undefined ? state.open : state.visible;
-    if (nextOpen !== undefined) panelOpen = !!nextOpen;
-    if (state.bounds && typeof state.bounds === 'object') {
+    // 「打开」必须与「此刻的矩形」同一次下发（Renderer 的唯一调用形状）：只给 open:true
+    // 而没有 bounds 的调用一律不开 —— 手上只有上一次的旧矩形，开了必然贴到别的页签上。
+    const hasBounds = !!(state.bounds && typeof state.bounds === 'object');
+    if (state.open !== undefined && (!state.open || hasBounds)) panelOpen = !!state.open;
+    if (hasBounds) {
       bounds = {
         x: Number(state.bounds.x) || 0,
         y: Number(state.bounds.y) || 0,
