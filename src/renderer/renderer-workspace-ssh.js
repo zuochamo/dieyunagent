@@ -3,9 +3,31 @@
 
 const wsApi = window.diecloud || {};
 
+/**
+ * 切换本地工作空间要 preload 的 `setLocalWorkspace`（写服务端工作区根 + 会话绑定）。
+ *
+ * 两个界面形态的差别只在「怎么拿到目录」：
+ *  - 桌面窗口：`pickFolder` 弹系统目录框；
+ *  - 浏览器版（headless 的 `/app/`）：没有原生目录框，改让用户填服务器上的绝对路径，
+ *    服务端 `desktop.set_workspace` 会校验「存在且是目录」。
+ *
+ * 完全没有 `setLocalWorkspace` 的宿主必须说清「为什么不行」：以前 `pickLocalWorkspace`
+ * 直接 `return`，用户点了「本地」什么都不会发生，看起来像界面坏了（2026-11-05 现场）。
+ */
+function localWorkspaceSwitchHint() {
+  return '这个界面不能切换工作空间：没有可用的切换通道（请用桌面客户端，或改服务端 --workspace / DIEYUN_WORKSPACE 后重启）';
+}
+
+/** 能否切换工作空间：有写通道即可，拿目录的方式按宿主能力挑 */
+function canSwitchLocalWorkspace() {
+  return !!wsApi.setLocalWorkspace;
+}
+
 const workspaceMenuState = {
   open: false,
   remoteDirPath: '/',
+  /** 目录选择浮层的用途：'ssh' = 选远端目录（连上 SSH 后绑）；'local' = 选本机/服务器上的工作区 */
+  dirPickerMode: 'ssh',
   skipDirPickerAfterConnect: false,
   pendingSshPayload: null,
   deployProgressUnsub: null,
@@ -708,7 +730,7 @@ async function resetSshCredentialsStore() {
  * @returns {Promise<{ ok: boolean, workspacePath?: string, error?: string }>}
  */
 async function applyLocalWorkspacePath(dir) {
-  if (!wsApi.setLocalWorkspace) return { ok: false, error: '工作空间切换不可用（preload 未就绪）' };
+  if (!wsApi.setLocalWorkspace) return { ok: false, error: localWorkspaceSwitchHint() };
   if (
     typeof window.currentSessionHasActiveRemoteRun === 'function' &&
     window.currentSessionHasActiveRemoteRun()
@@ -731,12 +753,38 @@ async function applyLocalWorkspacePath(dir) {
   return { ok: true, workspacePath: bound || '' };
 }
 
+/**
+ * 让用户挑一个目录，然后切过去。三条路按宿主能力选，只有一种目录交互：
+ *  - 桌面窗口：`pickFolder` 弹系统目录框；
+ *  - 浏览器版（headless `/app/`）：没有原生框，用**服务端目录浏览**（`browseServerDir`）
+ *    打开下面那个目录选择浮层，从列表里点进去选；
+ *  - 两者都没有：如实说不能切。
+ */
 async function pickLocalWorkspace() {
-  if (!wsApi.pickFolder || !wsApi.setLocalWorkspace) return;
-  const folder = await wsApi.pickFolder();
-  if (!folder) return;
-  const res = await applyLocalWorkspacePath(folder);
-  if (!res.ok && res.error) showAgentToast('无法切换', res.error, { variant: 'warn' });
+  if (!canSwitchLocalWorkspace()) {
+    // 静默 return 会让「点本地没反应」变成一条查不出原因的故障报告
+    showAgentToast('无法切换工作空间', localWorkspaceSwitchHint(), { variant: 'warn' });
+    return;
+  }
+  if (typeof wsApi.pickFolder === 'function') {
+    const folder = await wsApi.pickFolder();
+    if (!folder) return;
+    const res = await applyLocalWorkspacePath(folder);
+    if (!res.ok && res.error) showAgentToast('无法切换', res.error, { variant: 'warn' });
+    return;
+  }
+  if (typeof wsApi.browseServerDir === 'function') {
+    let start = '';
+    try {
+      const ws = wsApi.getWorkspace ? await wsApi.getWorkspace() : null;
+      start = (ws && ws.workspacePath) || '';
+    } catch {
+      start = '';
+    }
+    await openDirPicker('local', start || '/');
+    return;
+  }
+  showAgentToast('无法切换工作空间', localWorkspaceSwitchHint(), { variant: 'warn' });
 }
 
 /**
@@ -929,7 +977,13 @@ function showSshResolvedHint(resolved) {
 async function submitSshConnect(e, opts = {}) {
   if (e) e.preventDefault();
   if (!wsApi.sshConnect) {
-    setSshError('ssh-connect-error', 'SSH 服务未就绪，请重启应用');
+    // 「请重启应用」会把浏览器版的人引去重启一个根本没有 SSH 通道的进程
+    setSshError(
+      'ssh-connect-error',
+      canSwitchLocalWorkspace()
+        ? 'SSH 服务未就绪，请重启应用'
+        : '这个界面不能连 SSH：浏览器版没有主进程通道，请用桌面客户端'
+    );
     return;
   }
   setSshError('ssh-connect-error', '');
@@ -1043,39 +1097,61 @@ const SSH_REMOTE_DIR_FILE_ICON =
   '<path d="M14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>' +
   '</svg>';
 
+/**
+ * 目录选择浮层的取数口：远端（SSH）用 `sshBrowse`，浏览器版的本地目录用 `browseServerDir`。
+ * 两者形状不同（远端带文件、本地只列子目录），下面统一成 `{name, path, isDirectory}`。
+ * @returns {((p: string) => Promise<any>) | null}
+ */
+function dirPickerLister() {
+  if (workspaceMenuState.dirPickerMode === 'local') return wsApi.browseServerDir || null;
+  return wsApi.sshBrowse || null;
+}
+
 async function renderRemoteDirList(remotePath, opts = {}) {
   const listEl = $('ssh-remote-dir-list');
   const pathEl = $('ssh-remote-dir-path');
-  if (!listEl || !wsApi.sshBrowse) return;
+  const lister = dirPickerLister();
+  if (!listEl || !lister) return;
+  const isLocal = workspaceMenuState.dirPickerMode === 'local';
   workspaceMenuState.remoteDirPath = remotePath || '/';
   if (pathEl) {
     if ('value' in pathEl) pathEl.value = workspaceMenuState.remoteDirPath;
     else pathEl.textContent = workspaceMenuState.remoteDirPath;
   }
+  const titleEl = $('ssh-remote-dir-title');
+  if (titleEl) titleEl.textContent = isLocal ? '选择工作空间目录' : '选择远程工作目录';
   listEl.innerHTML = '<div class="artifacts-empty">加载中…</div>';
   setSshError('ssh-remote-dir-error', '');
   try {
-    const r = await wsApi.sshBrowse(workspaceMenuState.remoteDirPath);
+    const r = await lister(workspaceMenuState.remoteDirPath);
     const entries = (r && r.entries) || [];
+    const parent = (r && r.parent) || '';
     listEl.innerHTML = '';
-    if (workspaceMenuState.remoteDirPath !== '/') {
+    if (isLocal ? !!parent : workspaceMenuState.remoteDirPath !== '/') {
       const up = document.createElement('button');
       up.type = 'button';
       up.className = 'ssh-remote-dir-item ssh-remote-dir-up';
       up.innerHTML = SSH_REMOTE_DIR_UP_ICON;
       up.addEventListener('click', () => {
-        renderRemoteDirList(parentRemotePath(workspaceMenuState.remoteDirPath)).catch(() => {});
+        const next = isLocal ? parent : parentRemotePath(workspaceMenuState.remoteDirPath);
+        renderRemoteDirList(next).catch(() => {});
       });
       listEl.appendChild(up);
     }
     if (!entries.length) {
       const empty = document.createElement('div');
       empty.className = 'artifacts-empty';
-      empty.textContent = '空目录';
+      empty.textContent = '没有子目录';
       listEl.appendChild(empty);
       return;
     }
-    for (const ent of entries) {
+    for (const raw of entries) {
+      // 本地列表只给 {name, path}（服务端已滤掉文件），远端给 {name, isDirectory}
+      const ent = {
+        name: raw.name,
+        isDirectory: isLocal ? true : !!raw.isDirectory,
+        path: raw.path || ''
+      };
       const row = document.createElement('button');
       row.type = 'button';
       row.className = 'ssh-remote-dir-item';
@@ -1087,12 +1163,15 @@ async function renderRemoteDirList(remotePath, opts = {}) {
         '</span><span class="ssh-remote-dir-name">' +
         escapeHtml(ent.name) +
         '</span>';
+      const enter = () => {
+        const next = ent.path
+          ? ent.path
+          : ((workspaceMenuState.remoteDirPath.replace(/\/+$/, '') || '') + '/' + ent.name).replace(/\/+/g, '/');
+        renderRemoteDirList(next).catch(() => {});
+      };
       row.addEventListener('click', () => {
-        if (ent.isDirectory) {
-          const base = workspaceMenuState.remoteDirPath.replace(/\/+$/, '') || '';
-          const next = (base + '/' + ent.name).replace(/\/+/g, '/');
-          renderRemoteDirList(next).catch(() => {});
-        } else {
+        if (ent.isDirectory) enter();
+        else {
           for (const item of listEl.querySelectorAll('.ssh-remote-dir-item')) {
             item.classList.remove('active');
           }
@@ -1100,17 +1179,13 @@ async function renderRemoteDirList(remotePath, opts = {}) {
         }
       });
       row.addEventListener('dblclick', () => {
-        if (ent.isDirectory) {
-          const base = workspaceMenuState.remoteDirPath.replace(/\/+$/, '') || '';
-          const next = (base + '/' + ent.name).replace(/\/+/g, '/');
-          renderRemoteDirList(next).catch(() => {});
-        }
+        if (ent.isDirectory) enter();
       });
       listEl.appendChild(row);
     }
   } catch (err) {
     const atRoot = workspaceMenuState.remoteDirPath === '/';
-    if (atRoot && !opts.skipHomeFallback) {
+    if (!isLocal && atRoot && !opts.skipHomeFallback) {
       const home = await resolveSshPickerStartPath('/');
       if (home && home !== '/') {
         await renderRemoteDirList(home, { skipHomeFallback: true });
@@ -1135,22 +1210,50 @@ async function renderRemoteDirList(remotePath, opts = {}) {
   }
 }
 
-async function openRemoteDirPicker(startPath) {
+/**
+ * 打开目录选择浮层。
+ * @param {'ssh'|'local'} mode
+ * @param {string} startPath
+ */
+async function openDirPicker(mode, startPath) {
+  workspaceMenuState.dirPickerMode = mode === 'local' ? 'local' : 'ssh';
   workspaceMenuState.remoteDirPath = startPath || '/';
   showOverlay('ssh-remote-dir-overlay', true);
   await renderRemoteDirList(workspaceMenuState.remoteDirPath);
 }
 
+async function openRemoteDirPicker(startPath) {
+  return openDirPicker('ssh', startPath || '/');
+}
+
 function closeRemoteDirPicker(opts = {}) {
   showOverlay('ssh-remote-dir-overlay', false);
   setSshError('ssh-remote-dir-error', '');
+  // 浮层关掉就回到默认用途：下次打开远端目录选择时不会带着上一次的 local 模式
+  workspaceMenuState.dirPickerMode = 'ssh';
   if (opts.clearProgress) endSshDeployProgressWatch(0);
 }
 
 async function confirmRemoteDir() {
+  const selectBtn = $('ssh-remote-dir-select');
+  if (workspaceMenuState.dirPickerMode === 'local') {
+    setSshError('ssh-remote-dir-error', '');
+    if (selectBtn) selectBtn.disabled = true;
+    try {
+      const res = await applyLocalWorkspacePath(workspaceMenuState.remoteDirPath);
+      if (!res.ok) {
+        setSshError('ssh-remote-dir-error', res.error || '切换失败');
+        return;
+      }
+      closeRemoteDirPicker();
+      showAgentToast('工作空间已切换', res.workspacePath || '', { variant: 'info' });
+    } finally {
+      if (selectBtn) selectBtn.disabled = false;
+    }
+    return;
+  }
   if (!wsApi.setSshRemotePath) return;
   setSshError('ssh-remote-dir-error', '');
-  const selectBtn = $('ssh-remote-dir-select');
   if (selectBtn) selectBtn.disabled = true;
   try {
     await bindSshRemotePath(workspaceMenuState.remoteDirPath);
@@ -1201,6 +1304,17 @@ function initWorkspacePicker() {
   const btn = $('btn-pick-workspace');
   const menu = $('composer-workspace-menu');
   if (!btn || !menu) return;
+
+  // 没有切换能力（浏览器版）就把两个本地入口置灰并写明原因：能力在启动时就定了，
+  // 不必等用户点一下才发现不行。
+  if (!wsApi.setLocalWorkspace) {
+    for (const action of ['local', 'clear']) {
+      const item = menu.querySelector(`[data-ws-action="${action}"]`);
+      if (!item) continue;
+      item.disabled = true;
+      item.title = localWorkspaceSwitchHint();
+    }
+  }
 
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1316,7 +1430,9 @@ function initWorkspacePicker() {
       if (e.key !== 'Enter') return;
       e.preventDefault();
       const next = String(dirPath.value || '').trim() || '/';
-      renderRemoteDirList(next.startsWith('/') ? next : `/${next}`).catch(() => {});
+      // 本地模式允许 ~ / 绝对路径原样进去；远端模式沿用「补上前导 /」的旧行为
+      const asIs = workspaceMenuState.dirPickerMode === 'local' && (next.startsWith('/') || next.startsWith('~'));
+      renderRemoteDirList(asIs ? next : next.startsWith('/') ? next : `/${next}`).catch(() => {});
     });
   }
 
