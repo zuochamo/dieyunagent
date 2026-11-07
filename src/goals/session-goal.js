@@ -71,7 +71,10 @@ function normalizeSessionGoal(raw) {
     attempt: Math.max(0, Math.floor(Number(r.attempt) || 0)),
     attemptStartedAt: normalizeIso(r.attemptStartedAt),
     startedAt: toIso(r.startedAt),
-    updatedAt: new Date().toISOString()
+    // `updatedAt` 是「上次落盘的时间」：读路径必须还原存储值，不能每次都写成 now。
+    // 写成 now 的后果不是少一个字段，而是这个字段永远等于「刚刚」——任何
+    // 「这条目标多久没动了 / 收尾之后对话又继续了没有」都判不出来。
+    updatedAt: normalizeIso(r.updatedAt) || new Date().toISOString()
   };
 }
 
@@ -103,17 +106,58 @@ async function loadGoal(opts = {}) {
   }
 }
 
+/**
+ * 把目标压进**落盘预算**（唯一写入口的保证，见 `agent-limits.goalBlobMaxChars`）。
+ *
+ * 为什么必须有这一步：事实保留预算（20 条 × 每条 4000 字符尾巴）满额 JSON 实测 83k 字符，
+ * 而 `dieyun-core` 的 `SESSION_GOAL_MAX_CHARS` 是 64000。写满之后每次 `session_goal_put`
+ * 都被拒 —— `goal_check` 的命令已经跑完、事实却落不了库，`goal_finish` 也写不进去，
+ * 目标就此卡死，界面上只看到「检查跑过了但面板不动」。
+ *
+ * 裁剪顺序即「先丢最没用的」：先削最早那些事实的输出尾巴（面板/注入块只有最新一条会印尾巴），
+ * 再丢最早的事实（至少留一条：收尾核对要看最新那条），最后丢最早的主张（至少留一条）。
+ *
+ * @param {object} goal 已归一化的目标（原地裁剪）
+ * @param {number} [maxChars]
+ * @returns {object} 同一个对象
+ */
+function fitGoalToBudget(goal, maxChars) {
+  const raw = Number(maxChars);
+  const budget =
+    Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : Number(AGENT_LIMITS_DEFAULTS.goalBlobMaxChars);
+  const size = () => JSON.stringify(goal).length;
+  if (!(budget > 0) || size() <= budget) return goal;
+  for (let i = 0; i < goal.evidence.length && size() > budget; i += 1) {
+    if (goal.evidence[i].tail) goal.evidence[i].tail = '';
+  }
+  while (size() > budget && goal.evidence.length > 1) goal.evidence.shift();
+  while (size() > budget && goal.claims.length > 1) goal.claims.shift();
+  if (size() > budget) {
+    // 单条事实就撑爆预算（例如 objective + 一条 2000 字符命令）：宁可报错也不写一条
+    // 会被 Rust 拒掉的账 —— 后者只会让模型以为「写成功了」。
+    const e = new Error('目标超出存储上限（goalBlobMaxChars）');
+    e.code = 'GOAL_TOO_LARGE';
+    throw e;
+  }
+  return goal;
+}
+
 /** 写会话目标（整体覆盖）。`goal = null` 表示删除。 */
 async function saveGoal(opts = {}) {
   const invokeRpc = opts.invokeRpc;
   const sessionId = String(opts.sessionId || '');
   if (!invokeRpc || !sessionId) return { ok: false, error: '缺少 invokeRpc / sessionId' };
   const goal = opts.goal ? normalizeSessionGoal(opts.goal) : null;
+  // 落盘这一刻的时间戳（读路径只还原、不重写，见 normalizeSessionGoal）
+  if (goal) goal.updatedAt = new Date().toISOString();
+  // 预算在这里落地：库里的硬上限（Rust 64000）与这里的保留预算（20 × 4000 尾巴）
+  // 本来会打架，裁剪只做一次，就在唯一的写入口。
+  const fitted = goal ? fitGoalToBudget(goal, opts.maxChars) : null;
   await invokeRpc('memory.session_goal_put', {
     sessionId,
-    goalJson: goal ? JSON.stringify(goal) : null
+    goalJson: fitted ? JSON.stringify(fitted) : null
   });
-  return { ok: true, goal };
+  return { ok: true, goal: fitted };
 }
 
 /**
@@ -140,17 +184,33 @@ async function patchGoal(opts = {}) {
  * 开一个新目标。
  *
  * 单会话单目标：已有「还在跑」的目标（`active` 且未收尾）→ 拒绝并把现有目标回给模型，
- * 让它接着推进而不是每轮重开。已完成 / 已阻塞 / 已暂停 / 预算尽 → 允许覆盖（那是新目标）。
+ * 让它接着推进而不是每轮重开。已完成 / 已阻塞 / 已暂停 / 预算尽 → 允许覆盖（那是新目标），
+ * 但**覆盖必须留下回执**：旧目标的清单与事实随覆盖一起消失，`replaced` 让模型能就这件事说一句话，
+ * 而不是账本悄悄归零（2026-11-07 审计）。
  */
 async function startGoal(opts = {}) {
   const draft = opts.draft || {};
-  return patchGoal({
+  /** 覆盖掉的旧目标摘要（没有旧目标 / 旧目标仍在跑 → null） */
+  let replaced = null;
+  const res = await patchGoal({
     invokeRpc: opts.invokeRpc,
     sessionId: opts.sessionId,
     log: opts.log,
     mutate: (current) => {
       if (current && current.status === 'active' && !current.outcome) {
         return undefined;
+      }
+      if (current && current.goal && current.goal.objective) {
+        const todos = Array.isArray(current.goal.todos) ? current.goal.todos : [];
+        replaced = {
+          objective: current.goal.objective,
+          status: current.status,
+          outcome: current.outcome || null,
+          attempt: current.attempt,
+          evidenceCount: Array.isArray(current.evidence) ? current.evidence.length : 0,
+          todosDone: todos.filter((t) => t.done).length,
+          todosTotal: todos.length
+        };
       }
       const goal = normalizeSessionGoal({
         goal: {
@@ -172,6 +232,7 @@ async function startGoal(opts = {}) {
       return goal;
     }
   });
+  return replaced ? { ...res, replaced } : res;
 }
 
 /** 已有目标且仍在推进（未收尾、未停）—— 这是「单会话单目标」的判据 */
@@ -296,6 +357,25 @@ async function resumeGoal(opts = {}) {
 }
 
 /**
+ * 收尾时间：已收尾目标的「结账那一刻」。
+ *
+ * 取自**被接受的那条 claim**（就是 `judgeGoalFinish` 放行的那次申请），所以它与
+ * 「谁同意它收尾」是同一个事实；老数据没有 claim 时退回最后一条检查事实，再退回
+ * `updatedAt` —— 只为给面板一个说得出口的时间点，不参与任何判定。
+ */
+function goalClosedAt(goal) {
+  if (!goal || !goal.outcome) return null;
+  const claims = Array.isArray(goal.claims) ? goal.claims : [];
+  for (let i = claims.length - 1; i >= 0; i -= 1) {
+    const c = claims[i];
+    if (c && c.accepted === true && c.outcome === goal.outcome) return c.at;
+  }
+  const evidence = Array.isArray(goal.evidence) ? goal.evidence : [];
+  if (evidence.length) return evidence[evidence.length - 1].at;
+  return normalizeIso(goal.updatedAt) || null;
+}
+
+/**
  * 给侧栏「目标」页的投影：**UI 需要的都在这里成型**，面板不再自己算进度/截断事实。
  *
  * 进度的来源有优先级（`progressFrom` 一并给出去，Renderer 只按它选文案、不自己判）：
@@ -304,14 +384,27 @@ async function resumeGoal(opts = {}) {
  *   2. `todos`  —— 没有声明检查（未验证模式）：退回清单勾选比例。这是**模型自述**，只能当参考。
  *   3. `outcome`—— 两样都没有：只有两种可判定取值，收尾 1 / 否则 0（不编造百分比）。
  *
- * 为什么不继续只按 todos 算：勾选完全由模型一次性写全（完工才回来勾），进度条会永远
+ * 为什么不再继续只按 todos 算：勾选完全由模型一次性写全（完工才回来勾），进度条会永远
  * 停在 0 然后跳到满格，等于没信息；而 `evidence` 是代码写的，逐轮自然往前走。
  *
- * @param {{ goal?: object|null, limits?: object, evidenceShown?: number }} input
+ * `completedAt` / `superseded` 解决的是另一件事：**收尾的目标不是当前在做的事**。
+ * 一条 11-06 收尾、11-07 又聊了半天别的东西的目标，如果还按「一个目标」原样画，
+ * 面板上就会出现「已完成 · 第 1/12 轮 · 验收通过 1/1」，与窗口里的对话完全对不上。
+ * 判据只有一条，且不猜语义：收尾之后**这个会话又有人说了话**（`lastUserMessageAt` 由
+ * Main 从消息表取，Renderer 不参与判断）。
+ *
+ * @param {{ goal?: object|null, limits?: object, evidenceShown?: number, lastUserMessageAt?: string|null }} input
  */
 function toPanelView(input = {}) {
   const goal = input.goal;
   if (!goal || !goal.goal || !goal.goal.objective) return null;
+  const completedAt = goalClosedAt(goal);
+  const lastUserAt = normalizeIso(input.lastUserMessageAt);
+  const superseded = !!(
+    completedAt &&
+    lastUserAt &&
+    Date.parse(lastUserAt) > Date.parse(completedAt)
+  );
   const budget = resolveGoalBudget(goal, input.limits);
   const todos = Array.isArray(goal.goal.todos) ? goal.goal.todos : [];
   const done = todos.filter((t) => t.done).length;
@@ -332,6 +425,10 @@ function toPanelView(input = {}) {
     objective: goal.goal.objective,
     status: goal.status,
     outcome: goal.outcome || null,
+    /** 收尾时间（未收尾为 null）——面板据此说「这是哪一晚做完的那件事」 */
+    completedAt,
+    /** 已收尾，且此后该会话又有人说话：这是历史目标，不是当前在做的事 */
+    superseded,
     attempt: goal.attempt,
     maxAttempts: budget.maxAttempts,
     maxWallMs: budget.maxWallMs,
@@ -384,6 +481,7 @@ module.exports = {
   normalizeSessionGoal,
   loadGoal,
   saveGoal,
+  fitGoalToBudget,
   patchGoal,
   startGoal,
   isActiveGoal,

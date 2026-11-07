@@ -293,12 +293,27 @@ function isHistoryBackgroundUserContent(content) {
   return false;
 }
 
+/**
+ * 「目标续跑轮」那条合成消息的开头（正文在 `renderer-agent-send.GOAL_TURN_USER_MSG`，
+ * 由 Renderer 拼进当轮请求，不落库、不出用户气泡）。
+ *
+ * 为什么归口在这里：它是**代码说的话**，不是用户说的话 ——
+ *   1. `isSyntheticLoopUserContent` 用它把这类消息排除出「用户任务」；
+ *   2. Main 用它区分「自动续跑的一轮」与「人驱动的一轮」（目标轮次预算只该管前者，
+ *      否则用户每聊一句就烧掉一轮预算，长任务会被聊天次数烧光）。
+ */
+const GOAL_CONTINUE_USER_PREFIX = '[系统] 目标尚未收尾';
+
+function isGoalContinueUserContent(content) {
+  return userContentToText(content).trim().startsWith(GOAL_CONTINUE_USER_PREFIX);
+}
+
 function isSyntheticLoopUserContent(content) {
   const t = userContentToText(content).trim();
   if (isHistoryBackgroundUserContent(content)) return true;
   if (t.startsWith('【完成验收】')) return true;
   if (!t.startsWith('[系统] ')) return false;
-  if (t.startsWith('[系统] 目标尚未收尾')) return true;
+  if (isGoalContinueUserContent(content)) return true;
   return (
     t.startsWith('[系统] 本段工具轮次已达上限') ||
     t.startsWith('[系统] 上一轮回复像中间检查过程') ||
@@ -977,6 +992,8 @@ module.exports = {
   formatCompactionArchiveBlock,
   mergeCompactionBlockIntoTurnRide,
   isSyntheticLoopUserContent,
+  GOAL_CONTINUE_USER_PREFIX,
+  isGoalContinueUserContent,
   extractBookPrefixMessages,
   extractInTurnLoopTail,
   applyTurnRideToCompletionMessages,

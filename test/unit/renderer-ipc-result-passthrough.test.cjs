@@ -63,4 +63,15 @@ describe('Main → Renderer 结果透传', () => {
       'Renderer 完成提示读 `result.readiness`'
     );
   });
+
+  it('目标轮次只由「自动续跑轮」累计：人驱动的一轮不烧预算', () => {
+    // 判据必须是结构信号（请求末尾那条合成消息），不是「用户说了什么」
+    assert.match(runtimeSrc, /isAutoGoalTurnPayload\s*\(/, 'Main 必须能识别自动续跑轮');
+    assert.match(runtimeSrc, /isGoalContinueUserContent/, '分类复用 session-context 的同一份判据');
+    assert.match(
+      runtimeSrc,
+      /autoGoalTurn\s*&&\s*ctx\.sessionId/,
+      'advanceAttempt 必须被 autoGoalTurn 挡住：否则用户聊一句就烧掉一轮目标预算'
+    );
+  });
 });

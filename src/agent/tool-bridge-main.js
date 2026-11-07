@@ -338,6 +338,21 @@ function createMainToolBridge(deps) {
       };
     }
     const goal = await sessionGoalStore.loadGoal({ invokeRpc: gateway.invokeRpc, sessionId });
+    if (goal && goal.outcome) {
+      // 已收尾的目标是「结过账的账本」：往上写清单 / 补跑检查 / 再次收尾，都会让面板出现
+      // 「已完成」配一条新 objective 的怪状态（2026-11-07 现场：面板说已完成，实际在做别的事）。
+      // 一个断言点管住 goal_check / goal_update / goal_finish 三条路。
+      return {
+        error: {
+          ok: false,
+          error:
+            `这个目标已经收尾（${goal.outcome}）：不再接受 goal_check / goal_update / goal_finish。` +
+            '要做新的事情先 goal_start 开一个新目标（已收尾的这条不会被复用）。',
+          errorCode: 'GOAL_CLOSED',
+          retryable: false
+        }
+      };
+    }
     if (!goal) {
       return {
         error: {
@@ -1006,7 +1021,15 @@ function createMainToolBridge(deps) {
           objective: startedGoal.goal.objective,
           checks: startedGoal.goal.checks.map((c) => c.command),
           todos: startedGoal.goal.todos,
+          // 覆盖掉了一条没在跑的旧目标（已收尾 / 已暂停 / 预算尽）：旧账已随覆盖清掉。
+          // 不拦（换个目标是正常诉求），但必须让模型看得见，否则账本静默归零。
+          replaced: started.replaced || null,
           hint:
+            (started.replaced
+              ? `已替换上一条未在推进的目标「${String(started.replaced.objective).slice(0, 60)}」` +
+                `（${started.replaced.outcome || started.replaced.status}，${Number(started.replaced.attempt) || 0} 轮，` +
+                `${Number(started.replaced.evidenceCount) || 0} 条检查事实）：它的清单与事实已随替换清掉，必要时跟用户说一句。`
+              : '') +
             '目标已建立。每轮结束会自动带着目标与检查事实再来一轮，直到 goal_finish 收尾或预算用尽。' +
             '推进中随时 goal_check 留事实、goal_update 更新清单。'
         };

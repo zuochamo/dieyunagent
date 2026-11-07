@@ -300,3 +300,30 @@ test('取数中途又来一拍不会丢：取完补一拍（切会话正是撞�
   assert.equal(calls, 2);
   assert.equal(mod.els.get('goal-bar').hidden, false);
 });
+
+/**
+ * 2026-11-07 现场：面板头写着「已完成 · 第 1/12 轮 · 验收通过 1/1」，而窗口里早就在做别的需求。
+ * 收尾的目标不许再报轮次（那数字是预算，读起来像「还在跑」）；收尾之后又有人说话，
+ * 就只是**历史目标**——条不挂，面板说清「之后对话已继续」。
+ */
+test('收尾的目标不再报轮次；之后又有人说话就按「历史目标」画', () => {
+  const mod = loadModule();
+  const closed = { outcome: 'complete', completedAt: '2026-11-06T14:11:58.000Z', superseded: false };
+
+  mod.renderGoalPanel(sampleView(closed), '');
+  assert.match(mod.els.get('goal-panel-meta').textContent, /^已完成 · 收尾于 \d\d-\d\d \d\d:\d\d$/);
+  assert.doesNotMatch(mod.els.get('goal-panel-meta').textContent, /轮/);
+  mod.renderGoalBar(sampleView(closed));
+  assert.equal(mod.els.get('goal-bar').hidden, false);
+  assert.match(mod.els.get('goal-bar-round').textContent, /^已完成 · 收尾于/);
+  assert.doesNotMatch(mod.els.get('goal-bar-round').textContent, /轮/);
+
+  mod.renderGoalPanel(sampleView({ ...closed, superseded: true }), '');
+  const meta = mod.els.get('goal-panel-meta').textContent;
+  assert.match(meta, /^历史目标 · 已完成 · 收尾于/);
+  assert.match(meta, /之后对话已继续/);
+  // 历史目标不挂条：气泡上方不该再出现一条「你在做这件事」
+  mod.renderGoalBar(sampleView({ ...closed, superseded: true }));
+  assert.equal(mod.els.get('goal-bar').hidden, true);
+  assert.equal(mod.els.get('goal-bar-facts').hidden, true);
+});

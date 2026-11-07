@@ -121,6 +121,10 @@ goal: { active: true, cont: true, stop: null, attempt: 3, max: 12 }   // 无目�
 轮次计数不在这里：它在**一轮开始时**（`agent:rust-loop-run` 入口的 `advanceAttempt`），一次轮次只计一次；
 判定只用现成的 `attempt` 与墙钟（`attemptStartedAt`，缺失时退化为 `startedAt`）。
 
+**只有自动续跑轮计数**（`isAutoGoalTurnPayload`：请求末尾那条 `[系统] 目标尚未收尾…`）。
+预算是用来兜住「无人值守烧 token」的，人驱动的一轮不该扣：否则用户每聊一句就烧掉一轮，
+长任务会被聊天次数烧光（2026-11-05 现场：EP04 财务片 `attempt 12` stalled、清单还 7/14，其实是用户聊了 12 句）。
+
 ### 执行（Renderer 只照做，不持有目标状态）
 
 ```js
@@ -161,9 +165,25 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 |---|---|
 | 用户点「停止」 | 现有 abort 中断本轮；同时 `session-goal.patch {status:'paused'}`（否则下条消息又被自动续跑，属于「代码比人更坚持」） |
 | 用户中途发新消息 | 就是普通一轮（人驱动的轮不计 `attempt`，墙钟照走）；目标照旧注入，模型自己决定继续还是 `goal_finish` |
-| 用户换了个目标 | 模型调 `goal_start` → 覆盖旧目标（单目标约束天然成立） |
+| 用户换了个目标 | 模型调 `goal_start` → 覆盖旧目标（单目标约束天然成立），工具结果带 `replaced` 回执（旧账已清）；注入块在已收尾时明说「这条不会被复用，新长任务先 `goal_start`」 |
 | `attempts` / 墙钟用尽 | `status:'stalled'`，停自动续跑，注入块明说「预算已尽，等你决定」；UI 出现「继续」= 重置预算（一次 `session_goal_put`） |
-| `outcome=complete` | 停；目标留作历史，注入块转为「已收尾 + 事实摘要」 |
+| `outcome=complete` | 停；目标留作历史，注入块转为「已收尾 + 事实摘要」；`goal_check / goal_update / goal_finish` 一律 `GOAL_CLOSED`（账本已结，要做事先开新目标） |
+
+### 已收尾的目标：为什么面板要说「历史目标」
+
+会话只有一个目标，但**一次会话里可以有好几件事**。用户在一件事收尾之后继续聊别的需求时，`session_goals` 里那条
+目标不会自己消失，面板若照原样画「已完成 · 第 1/12 轮 · 验收通过 1/1」，读起来就是「还在跑这件事」
+（2026-11-07 现场：目标 11-06 22:11 收尾，之后整晚都在做别的，面板一直挂着旧的）。
+
+两处修，各自只有一处判定：
+
+- **注入块**（`goal-run.renderSessionGoalBlock`）：已收尾分支补一句「新需求本身是多轮长任务就先 `goal_start` 开新目标」，
+  让模型在源头换账本；
+- **面板视图**（`session-goal.toPanelView`）：`completedAt` 取**被接受的那条 claim** 的时间（= 结账时刻），
+  `lastUserMessageAt` 由 Main 从消息表取（只读最近 5 条、跳过 `[系统] …` 合成消息），
+  `lastUserMessageAt > completedAt` ⟹ `superseded`。Renderer 只按这两个字段换措辞：
+  收尾的目标**不再报轮次**（那是预算，只对还在推进的目标有意义），`superseded` 时面板标「历史目标 · 已收尾（之后对话已继续）」、
+  气泡上方**不挂目标条**。
 
 ### 为什么不在别处续跑
 
@@ -243,9 +263,9 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 | `src/agent/tool-catalog.js` | `GOAL_START_TOOL`、`GOAL_UPDATE_TOOL`；`goal_check/goal_finish` 描述改为「会话目标或计划目标」 |
 | `src/agent/tool-bridge-main.js` | 目标解析 `resolveGoalTarget(ctx)`；`goal_start`/`goal_update` 实现；`goal_check`/`goal_finish` 落到解析结果 |
 | `src/agent/system-prompt-prep.js` | `fetchSessionGoalBlock` → `turnHost`（唯一注入点） |
-| `src/main/ipc/agent-runtime.js` | `agent:rust-loop-run` 收尾附 `goal:{active,cont,stop,...}`；`agent:goal-set`（UI 继续/暂停） |
+| `src/main/ipc/agent-runtime.js` | `agent:rust-loop-run` 收尾附 `goal:{active,cont,stop,...}`；`agent:session-goal-panel`（读视图 / `action:'pause'` 暂停 / `action:'resume'` 继续 / `action:'clear'` 清除） |
 | `src/renderer/renderer-agent-run.js` | `:191` 与 `goal.cont` 合流 |
-| `src/renderer/renderer-agent-send.js`、`renderer-agent-resume.js` | `:667` / `:68` 的 `if (!run.done)` 分支加 `goalContinue` 路径；新增 `startGoalTurn`（`sendMessage` 的 `goalTurn:true` 内部入口：无用户气泡、无用户轮次）；停止时 `agent:goal-set {status:'paused'}` |
+| `src/renderer/renderer-agent-send.js`、`renderer-agent-resume.js` | `:667` / `:68` 的 `if (!run.done)` 分支加 `goalContinue` 路径；新增 `startGoalTurn`（`sendMessage` 的 `goalTurn:true` 内部入口：无用户气泡、无用户轮次）；停止时 `agent:session-goal-panel {action:'pause'}` |
 | `src/renderer/renderer-chat-live-run.js` | 目标条跟着事件走的那一拍：`scheduleGoalUiRefresh()`（与子代理面板同处） |
 | `src/renderer/index.html` | ① rail 按钮 `data-side-tab="goal"` + `data-side-pane="goal"` 一块 DOM（两侧必须成对，`check-renderer-index-panel.cjs` 会卡数量不一致）；② 目标条 `#goal-bar`（`.agent-chat-column` 第一个子元素） |
 | **`src/renderer/renderer-goal-panel.js`（新）** | 目标的两个面（气泡上方目标条 + 侧栏「目标」页）：objective / 进度条 / 按检查聚合的验收命令 / todos / 事实列表 / 停止·继续；两个面共用一次取数与一个轮询 |
@@ -279,7 +299,7 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 - RPC：`memory.session_goal_get` / `memory.session_goal_put`（`null` = 删除）。
 - 归一化不是新写的：`normalizeGoal/normalizeEvidence/normalizeClaim/normalizeBudget/normalizeIso` 从 `plans/store.js` **搬进** `plans/goal-run.js`，计划目标与会话目标共用一份（`store.js` 反向 require）。
 - 每轮注入：`system-prompt-prep.js#fetchSessionGoalBlock` → `goal-run.renderSessionGoalBlock`（措辞单一来源），排在 `turnHost` 最前。无目标时返回空串，普通会话 prompt 零变化。
-- 轮次计数：`agent:rust-loop-run` 入口对「进行中」的目标 `advanceAttempt`（Renderer 一轮 = 目标一轮；子 Agent / 频道 / 计划不走这条 IPC，不会重复计数）。
+- 轮次计数：`agent:rust-loop-run` 入口对「进行中」的目标 `advanceAttempt`，**只对自动续跑轮**（人驱动的一轮不扣预算）；子 Agent / 频道 / 计划不走这条 IPC，不会重复计数。
 - 工具面：`goal_start` / `goal_check` / `goal_finish` / `goal_update` **常驻**。曾按「本会话已有目标」条件暴露，但工具表在轮次开始时定死、轮内不再变 —— 同一轮里刚 `goal_start` 出来的目标会当场没有 `goal_check`/`goal_finish` 可用，等于「能开不能收」。没有目标时这四件工具回结构化错误（`NO_SESSION_GOAL`），比「工具不存在」更准确。
 - 面板：`data-side-tab="goal"` + `renderer-goal-panel.js`；视图在 Main 成形（`session-goal.toPanelView`），Renderer 只画；可见时 2s 轮询、不可见即停（不新增事件类型）。
 - 工具面的作用域：先在**桌面聊天**路径给齐（`renderer-tool-defs.js`）。频道 / headless 走各自的 Main 侧工具集，这一版没给 —— 它们的会话不经过 Renderer，也没有面板可看，先不给比给了看不见更诚实；P2b 收续跑时一并评估。
@@ -293,12 +313,14 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 
 落地后的实际形状（同样按减法收敛过）：
 - **判定**：`session-goal.judgeAfterTurn({invokeRpc,sessionId,limits})` → `{active,cont,stop,attempt,max}`；内部就是 `decideContinuation({plan,limits})`，无目标 / 已收尾 / 已暂停直接返回 `null`。`agent:rust-loop-run` 在 `readiness` 之后调它一次，把结果挂到 `result.goal`。判定失败一律返回 `null`（不续跑），不会因为目标子系统出问题就卡住交付。
-- **轮次计数仍在轮次开始时**（P2a 的 `advanceAttempt`），不是判定时自增 —— 一次轮次只计一次，人发的轮与自动续跑的轮口径一致，也就不存在「判定时 +1 与开始时 +1」两份计数。代价是轮次写盘失败时次数会停在原地，所以判定里给墙钟加了退化起点：`attemptStartedAt` 缺失时用 `startedAt`，最坏也能在 `goalMaxWallMs` 到点时停下。
+- **轮次计数仍在轮次开始时**（P2a 的 `advanceAttempt`），不是判定时自增 —— 一次轮次只计一次，也就不存在「判定时 +1 与开始时 +1」两份计数。**只对自动续跑轮计数**（`isAutoGoalTurnPayload` 认请求末尾那条合成消息），人驱动的一轮不扣预算。代价是轮次写盘失败时次数会停在原地，所以判定里给墙钟加了退化起点：`attemptStartedAt` 缺失时用 `startedAt`，最坏也能在 `goalMaxWallMs` 到点时停下。
 - **合流**：`renderer-agent-run.js` 里 `hitRoundLimit` 与 `goal.cont` 是两件事 —— 前者是「这一段额度用尽」（车停着等用户点继续），后者是「这一轮正常结束、目标还没完」。只有前者且没有目标在推时才返回 `needContinue`；有目标在推时本轮正文照常交付，再 `goalContinue:true` 交给消费点开下一轮。
 - **执行**：`startGoalTurn` = 走同一条 `sendMessage` 装配 + `goalTurn:true`：不建用户气泡、不写用户消息、不落库、不动附件；请求尾补一条 `[系统] 目标尚未收尾…`（与段续 `SEGMENT_CONTINUE_USER_MSG` 同一机制，加进 `isSyntheticLoopUserContent` 白名单），于是【当前任务】仍是用户原本那句话。驱动下一轮的始终是 system 里的目标块。召回查询词用目标原文（面板视图同一份），不是空串。
 - **谁来触发**：`sendMessage` 的 `finally`（本轮运行态、气泡、队列都释放之后）与 `renderer-agent-resume.js` 的续跑路径，各自 `kickGoalTurn` 一次；都只在**当前视图就是该会话**时真开轮，切走了就停（目标保持 active，回来发一句话继续推进）。与对端 agent 绑定的会话（会话即通道）也不自动开轮：那里每一轮都可能被投递给对方，代码自己决定再跑一轮 = 替人向对方连发消息。
 - **停止 / 继续**：对话区那颗停止（`renderer-agent-abort.js`）在真的有运行时可停时顺带 `pause` 目标 —— 否则「用户按了停止，下一条消息结束又自动续跑」就是代码比人更坚持。面板的「继续」走 `agent:session-goal-panel {action:'resume'}`：`status→active`、`attempt→0`、墙钟重起算，**事实与清单全留**（它们是下一轮的判断依据）。
-- **预算用尽**：判定给 `stop:'attempts' | 'budget'` 时把状态落成 `stalled`，注入块与面板都说「预算已尽，等你决定」，不再自动续跑。
+- **预算用尽**：判定给 `stop:'attempts' | 'budget'` 时把状态落成 `stalled`，注入块与面板都说「预算已尽，等你决定」，不再自动续跑；注入块同时说明「预算只管无人值守续跑，用户明确要求继续时照做，重置预算由面板的『继续』」。 
+- **落盘预算**（2026-11-07 审计）：事实保留预算（20 条 × 4000 字符尾巴）满额 JSON 约 83k 字符，而 `dieyun-core` 的 `SESSION_GOAL_MAX_CHARS` 是 64000 —— 写满后每次 `session_goal_put` 都被拒（命令跑过了、事实落不了库、`goal_finish` 也写不进去，目标静默卡死）。现在由**唯一写入口** `saveGoal` 按 `agent-limits.goalBlobMaxChars`（56000）裁剪：先削最旧事实的尾巴，再丢最旧的事实 / 主张（各至少留一条）；单条就撑爆则直接报 `GOAL_TOO_LARGE`，不写一条会被库拒的账。
+- **覆盖旧目标要留回执**：`startGoal` 覆盖一条「没在跑」的目标（已收尾 / 已暂停 / 预算尽）时返回 `replaced`（旧 objective、状态、轮次、事实条数），`goal_start` 把它写进工具结果 —— 旧账随覆盖清掉这件事必须让模型看得见。
 - **留给 P2c 的两项**（目标条、事实分组）已在 P2c 做完，见下。**仍未做**：频道 / headless 会话的目标工具面 —— 它们不经过 Renderer，也没有面板可看。
 
 **P2c：目标条 + 收尾 ——已实施**

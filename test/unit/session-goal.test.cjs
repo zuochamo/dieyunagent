@@ -21,6 +21,7 @@ const {
   isActiveGoal,
   advanceAttempt,
   pushEvidence,
+  fitGoalToBudget,
   toPanelView,
   normalizeSessionGoal
 } = require('../../src/goals/session-goal');
@@ -28,6 +29,7 @@ const { renderSessionGoalBlock, normalizeGoal } = require('../../src/plans/goal-
 const { validateToolArgs } = require('../../src/agent/tool-validate');
 const { createMainToolBridge } = require('../../src/agent/tool-bridge-main');
 const { createMemoryHandlers } = require('../../src/gateway/handlers/memory');
+const { AGENT_LIMITS_DEFAULTS } = require('../../src/agent/agent-limits');
 
 const LIMITS = {
   goalMaxAttempts: 4,
@@ -316,6 +318,22 @@ describe('目标形状归一化：计划与会话共用一份', () => {
     ]);
     expect(g.cwd).toBe('');
   });
+
+  test('没写 id 的检查编号会去重：同脚本不同参数不再共用同一个 id', () => {
+    // 同一个脚本只差参数：前 40 字完全相同（所以才需要去重）
+    const a = 'py -3.12 tools\\ue5\\outdoor_final_verify.py --seg 1';
+    const b = 'py -3.12 tools\\ue5\\outdoor_final_verify.py --seg 2';
+    expect(a.slice(0, 40)).toBe(b.slice(0, 40));
+
+    const g = normalizeGoal({
+      checks: [{ command: a }, { command: b }, { id: 'explicit', command: 'npm test' }]
+    });
+    expect(g.checks.map((c) => c.id)).toEqual([a.slice(0, 40), `${a.slice(0, 40)}#2`, 'explicit']);
+    expect(new Set(g.checks.map((c) => c.id)).size).toBe(3);
+
+    // id 由命令列表唯一决定：读路径每次都会重算，不能漂移
+    expect(normalizeGoal(g).checks.map((c) => c.id)).toEqual(g.checks.map((c) => c.id));
+  });
 });
 
 describe('目标工具的入参校验', () => {
@@ -400,6 +418,210 @@ describe('工具端到端：goal_start / goal_check / goal_finish 打在会话�
 
     const goal = await loadGoal({ invokeRpc: gateway.invokeRpc, sessionId: 'sess-update' });
     expect(toPanelView({ goal, limits: LIMITS }).todosDone).toBe(1);
+  });
+});
+
+/**
+ * 2026-11-07 现场：会话里的目标在 11-06 22:11 就收尾了，之后又聊了一整晚别的需求，
+ * 面板还挂着「已完成 · 第 1/12 轮 · 验收通过 1/1」，与窗口里的对话完全对不上。
+ *
+ * 两条固化：
+ *   1. 收尾的目标要能被认出「这是历史」—— 收尾时间来自接受的那条 claim，收尾之后
+ *      会话又有人说话就是 `superseded`；
+ *   2. 模型要被明确告知「新长任务先 goal_start 开新的」，否则它会以为旧目标就是当前的事。
+ */
+describe('已收尾的目标：历史标记与「新长任务另开一条」', () => {
+  test('completedAt 取接受的那条 claim；其后有人说话即 superseded', () => {
+    const goal = normalizeSessionGoal({
+      goal: { objective: '拆头发', checks: [{ id: 'assets', command: 'py check_assets.py' }] },
+      evidence: [
+        { at: '2026-11-06T14:11:54.000Z', command: 'py check_assets.py', checkId: 'assets', ok: true, exitCode: 0 }
+      ],
+      claims: [
+        { at: '2026-11-06T14:11:43.000Z', outcome: 'complete', accepted: false },
+        { at: '2026-11-06T14:11:58.000Z', outcome: 'complete', accepted: true }
+      ],
+      outcome: 'complete',
+      startedAt: '2026-11-06T13:53:44.000Z'
+    });
+
+    // 结账时刻 = 被接受那次申请，不是最后一条事实、也不是打回的那次
+    expect(toPanelView({ goal, limits: LIMITS }).completedAt).toBe('2026-11-06T14:11:58.000Z');
+
+    const before = toPanelView({ goal, limits: LIMITS, lastUserMessageAt: '2026-11-06T13:55:00.000Z' });
+    expect(before.superseded).toBe(false);
+
+    const after = toPanelView({ goal, limits: LIMITS, lastUserMessageAt: '2026-11-07T00:03:37.000Z' });
+    expect(after.superseded).toBe(true);
+    expect(after.outcome).toBe('complete');
+
+    // 进行中的目标没有「收尾时间」，也不可能是历史目标（哪怕对话在往前走）
+    const running = normalizeSessionGoal({ goal: { objective: '还在做' } });
+    const runningView = toPanelView({ goal: running, limits: LIMITS, lastUserMessageAt: '2030-01-01T00:00:00.000Z' });
+    expect(runningView.completedAt).toBeNull();
+    expect(runningView.superseded).toBe(false);
+  });
+
+  test('注入块：已收尾时必须说清「新长任务先 goal_start」', () => {
+    const done = {
+      ...normalizeSessionGoal({ goal: { objective: '让 npm test 全绿', checks: [{ command: 'npm test' }] } }),
+      outcome: 'complete'
+    };
+    const text = renderSessionGoalBlock({ goal: done, limits: LIMITS });
+    expect(text).toContain('已收尾');
+    expect(text).toContain('goal_start');
+    expect(text).toContain('不会被复用');
+  });
+
+  test('已收尾的目标不再接受 goal_check / goal_update / goal_finish，但可以开新目标', async () => {
+    const gateway = makeFakeGateway({ execResults: [{ code: 0, stdout: 'ok' }] });
+    const bridge = bridgeFor(gateway);
+    const ctx = { sessionId: 'sess-closed' };
+
+    await bridge.executeAgentTool('goal_start', { objective: '让测试全绿', checks: [{ command: 'npm test' }] }, ctx);
+    await bridge.executeAgentTool('goal_check', { command: 'npm test' }, ctx);
+    const fin = await bridge.executeAgentTool('goal_finish', { outcome: 'complete' }, ctx);
+    expect(fin.accepted).toBe(true);
+
+    const check = await bridge.executeAgentTool('goal_check', { command: 'npm test' }, ctx);
+    expect(check.ok).toBe(false);
+    expect(check.errorCode).toBe('GOAL_CLOSED');
+    const upd = await bridge.executeAgentTool('goal_update', { todos: [{ text: 'x' }] }, ctx);
+    expect(upd.errorCode).toBe('GOAL_CLOSED');
+    const again = await bridge.executeAgentTool('goal_finish', { outcome: 'complete' }, ctx);
+    expect(again.errorCode).toBe('GOAL_CLOSED');
+
+    // 收尾过 = 允许覆盖：新目标从头开始，旧账不混进来
+    const next = await bridge.executeAgentTool('goal_start', { objective: '另一件事' }, ctx);
+    expect(next.created).toBe(true);
+    const stored = await loadGoal({ invokeRpc: gateway.invokeRpc, sessionId: 'sess-closed' });
+    expect(stored.goal.objective).toBe('另一件事');
+    expect(stored.outcome).toBeNull();
+    expect(stored.evidence).toHaveLength(0);
+  });
+
+  test('updatedAt 是落盘时间：读回来不会被改成「刚刚」', async () => {
+    const gateway = makeFakeGateway();
+    const args = { invokeRpc: gateway.invokeRpc, sessionId: 'sess-updated' };
+    const started = await startGoal({ ...args, draft: { objective: '一件事' } });
+    const firstUpdated = started.goal.updatedAt;
+    expect((await loadGoal(args)).updatedAt).toBe(firstUpdated);
+
+    await new Promise((r) => setTimeout(r, 5));
+    await patchGoal({
+      ...args,
+      mutate: (g) => {
+        g.goal.todos = [{ text: 'a', done: true }];
+        return g;
+      }
+    });
+    expect((await loadGoal(args)).updatedAt).not.toBe(firstUpdated);
+  });
+});
+
+/**
+ * 事故（2026-11-07 审计）：事实保留预算是 20 条 × 每条 4000 字符尾巴，满额 JSON 实测 83k 字符，
+ * 而 `dieyun-core` 的 `SESSION_GOAL_MAX_CHARS` 是 64000 —— 写满之后每次写盘都被拒：
+ * 检查命令跑完了，事实落不了库，`goal_finish` 也写不进去，目标静默卡死。
+ */
+describe('落盘预算：写入口保证不超过库的上限', () => {
+  test('超预算时先削最旧事实的尾巴，最新一条一定保得住', async () => {
+    const gateway = makeFakeGateway();
+    const args = { invokeRpc: gateway.invokeRpc, sessionId: 'sess-budget' };
+    const tail = 'x'.repeat(AGENT_LIMITS_DEFAULTS.goalEvidenceTailChars);
+    const goal = normalizeSessionGoal({
+      goal: { objective: '长时间构建', checks: [{ id: 'build', command: 'npm run build' }] }
+    });
+    for (let i = 1; i <= AGENT_LIMITS_DEFAULTS.goalEvidenceKeep; i += 1) {
+      pushEvidence(
+        goal,
+        { command: 'npm run build', checkId: 'build', ok: false, exitCode: 1, round: i, tail },
+        AGENT_LIMITS_DEFAULTS.goalEvidenceKeep
+      );
+    }
+    // 裁剪前确实超预算（否则这条测试没测到东西）
+    expect(JSON.stringify(goal).length).toBeGreaterThan(AGENT_LIMITS_DEFAULTS.goalBlobMaxChars);
+
+    await saveGoal({ ...args, goal });
+
+    const stored = JSON.parse(gateway.blobs.get('sess-budget'));
+    expect(JSON.stringify(stored).length).toBeLessThanOrEqual(AGENT_LIMITS_DEFAULTS.goalBlobMaxChars);
+    // 事实条数没有被牺牲（先削尾巴）：判据仍能按检查聚合
+    expect(stored.evidence).toHaveLength(AGENT_LIMITS_DEFAULTS.goalEvidenceKeep);
+    expect(stored.evidence[stored.evidence.length - 1].round).toBe(AGENT_LIMITS_DEFAULTS.goalEvidenceKeep);
+    expect(stored.evidence[0].tail).toBe('');
+  });
+
+  test('压到极限还放不下就报错，不写一条会被库拒掉的账', () => {
+    const goal = normalizeSessionGoal({ goal: { objective: '一件事' } });
+    expect(() => fitGoalToBudget(goal, 10)).toThrow(/超出存储上限/);
+  });
+
+  test('预算更紧时先丢最旧的事实，但绝不留空账本', () => {
+    const goal = normalizeSessionGoal({ goal: { objective: '一件事' } });
+    for (let i = 1; i <= 5; i += 1) pushEvidence(goal, { command: 'npm test', round: i, ok: true }, 20);
+    const tight = Math.floor(JSON.stringify(goal).length / 2);
+    fitGoalToBudget(goal, tight);
+    expect(JSON.stringify(goal).length).toBeLessThanOrEqual(tight);
+    expect(goal.evidence.length).toBeGreaterThanOrEqual(1);
+    expect(goal.evidence[goal.evidence.length - 1].round).toBe(5);
+  });
+});
+
+/**
+ * 审计项：覆盖一条「没在跑」的目标（已收尾 / 已暂停 / 预算尽）会连旧账一起清掉，
+ * 原来是静默的 —— 模型和用户都看不到「上一件事的事实没了」。
+ */
+describe('覆盖旧目标要留下回执', () => {
+  test('stalled 的旧目标被覆盖：replaced 里带明细；首次开目标与「仍在跑」都没有回执', async () => {
+    const gateway = makeFakeGateway();
+    const args = { invokeRpc: gateway.invokeRpc, sessionId: 'sess-replace' };
+
+    await startGoal({ ...args, draft: { objective: '第一件事', checks: [{ command: 'npm test' }] } });
+    await patchGoal({
+      ...args,
+      mutate: (g) => {
+        pushEvidence(g, { command: 'npm test', ok: false, exitCode: 1, round: 3 }, 20);
+        g.status = 'stalled';
+        return g;
+      }
+    });
+
+    const next = await startGoal({ ...args, draft: { objective: '第二件事' } });
+    expect(next.replaced).toMatchObject({
+      objective: '第一件事',
+      status: 'stalled',
+      attempt: 0,
+      evidenceCount: 1
+    });
+    expect(next.goal.goal.objective).toBe('第二件事');
+    expect(next.goal.evidence).toHaveLength(0);
+
+    // 还在跑的目标：返回现有目标，不是覆盖，也就没有「旧账被清」这回事
+    const again = await startGoal({ ...args, draft: { objective: '第三件事' } });
+    expect(again.unchanged).toBe(true);
+    expect(again.replaced).toBeUndefined();
+
+    // 全新的会话：没有旧目标
+    const fresh = await startGoal({ invokeRpc: gateway.invokeRpc, sessionId: 'sess-fresh', draft: { objective: 'x' } });
+    expect(fresh.replaced).toBeUndefined();
+  });
+
+  test('goal_start 把「旧账已清」写进工具结果，模型能就此说一句话', async () => {
+    const gateway = makeFakeGateway({ execResults: [{ code: 0, stdout: 'ok' }] });
+    const bridge = bridgeFor(gateway);
+    const ctx = { sessionId: 'sess-tool-replace' };
+
+    await bridge.executeAgentTool('goal_start', { objective: '第一件事' }, ctx);
+    await bridge.executeAgentTool('goal_check', { command: 'npm test' }, ctx);
+    // 模拟预算用尽：直接改状态（judgeAfterTurn 的落盘路径在 session-goal-continue.test.cjs 里已覆盖）
+    const stored = await loadGoal({ invokeRpc: gateway.invokeRpc, sessionId: 'sess-tool-replace' });
+    await saveGoal({ invokeRpc: gateway.invokeRpc, sessionId: 'sess-tool-replace', goal: { ...stored, status: 'stalled' } });
+
+    const next = await bridge.executeAgentTool('goal_start', { objective: '第二件事' }, ctx);
+    expect(next.created).toBe(true);
+    expect(next.replaced).toMatchObject({ objective: '第一件事', status: 'stalled', evidenceCount: 1 });
+    expect(next.hint).toContain('已替换上一条未在推进的目标');
   });
 });
 

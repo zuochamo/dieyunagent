@@ -71,6 +71,34 @@ function isUnverified(plan) {
 }
 
 /**
+ * 检查编号：没写 id 的用「命令前 40 字」，**撞了就补 `#2`/`#3`**（原地赋值）。
+ *
+ * 为什么必须去重：`goal_check({check_id})` 与面板「按检查聚合事实」都靠 id 认人。
+ * 同一个脚本只差参数的两条检查（`…verify.py --seg 1` / `…verify.py --seg 2`）前 40 字
+ * 完全相同，编号一样时模型点名第二条会被认成第一条：跑了另一条命令，事实也记到它名下。
+ *
+ * 去重结果**只由命令列表决定**（同输入同输出），所以读路径重算 id 不会漂移；
+ * 历史数据里那些重复 id 的记录本来就靠 `factsForCheck` 的命令兜底匹配，不受影响。
+ *
+ * @param {Array<{id: string, command: string}>} checks
+ */
+function assignCheckIds(checks) {
+  const seen = new Set();
+  for (const c of checks) {
+    const base = c.id || String(c.command || '').slice(0, 40);
+    let id = base;
+    let n = 1;
+    while (seen.has(id)) {
+      n += 1;
+      id = `${base}#${n}`;
+    }
+    seen.add(id);
+    c.id = id;
+  }
+  return checks;
+}
+
+/**
  * 目标形状的**唯一归一化点**（计划目标与会话目标共用）。
  *
  * 为什么在这里而不是各存储里：目标是同一类对象，两处各写一份 normalize，
@@ -87,10 +115,12 @@ function normalizeGoal(raw) {
           const item = typeof c === 'string' ? { command: c } : c || {};
           const command = String(item.command || '').trim().slice(0, GOAL_CHECK_MAX_CHARS);
           if (!command) return null;
-          return { id: String(item.id || '').trim() || command.slice(0, 40), command };
+          // 没给 id 的检查先留空，交下面统一编号（见 assignCheckIds）
+          return { id: String(item.id || '').trim(), command };
         })
         .filter(Boolean)
     : [];
+  assignCheckIds(checks);
   // 推进清单：只给人和 UI 看的语义项，不参与任何自动判定（完成与否仍由检查事实说话）
   const todos = Array.isArray(g.todos)
     ? g.todos
@@ -485,7 +515,10 @@ function renderSessionGoalBlock(input = {}) {
   } else if (outcome === 'blocked' || status === 'blocked') {
     lines.push('状态：已阻塞（blocked）—— 有具体卡点等用户处理，不要重复尝试');
   } else if (status === 'stalled') {
-    lines.push('状态：预算已用尽（未收尾）—— 停在这里，向用户说明跑了多少轮、最后一条检查结果，不要假装完成');
+    lines.push(
+      '状态：自动推进的预算已用尽（未收尾）—— 不要再自己接着跑，向用户说明跑了多少轮、最后一条检查结果，不要假装完成；',
+      '预算只管「无人值守自动续跑」：用户明确要求继续时照做（新进展用 goal_check 记事实），要不要重置预算由用户在面板点「继续」。'
+    );
   } else if (status === 'paused') {
     lines.push('状态：已暂停（用户停止）—— 用户恢复前不要自动推进');
   }
@@ -515,8 +548,18 @@ function renderSessionGoalBlock(input = {}) {
       '未收尾就继续推进：自己决定下一步做什么，不要停下来问用户「要不要继续」；',
       '要不要收尾由 goal_check 的事实说话（没有通过的事实，goal_finish(complete) 会被打回）。'
     );
-  } else if (outcome === 'complete') {
-    lines.push('目标已收尾：没有新需求就不要重复推进；用户提新需求时按新需求做。');
+  } else if (outcome) {
+    if (outcome === 'complete') {
+      lines.push('目标已收尾：没有新需求就不要重复推进；用户提新需求时按新需求做。');
+    }
+    // 收尾的目标不会被自动复用（`session-goal.startGoal` 只保护「进行中」那一条），
+    // 但模型默认会把旧目标当成「当前正在做的这件事」：新需求被当成旧目标的延续，
+    // 面板就长期挂着一条早已收尾的目标（2026-11-07 现场：窗口里已经在聊白板展示，
+    // 目标条还是前一晚收尾的「头发拆 5 层」）。这里只说清「新长任务要另开一条」。
+    lines.push(
+      '这条已收尾的目标不会被复用：用户这次的需求如果本身又是多轮长任务（要跑不止一轮，',
+      '或要一条能证明做完了的命令），先 goal_start 开一个新目标再做，不要在这条旧目标上接着推。'
+    );
   }
 
   const text = lines.filter(Boolean).join('\n');

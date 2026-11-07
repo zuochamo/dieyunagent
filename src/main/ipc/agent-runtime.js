@@ -201,10 +201,22 @@ function registerAgentRuntimeIpc(ctx) {
       modelRoute: payload.modelRoute || undefined,
       browserVision: payload.browserVision === true
     };
-    // 会话目标：Renderer 主循环跑一轮 = 目标推进一轮（预算按「轮」计，见 agent-limits）。
+    const autoGoalTurn = isAutoGoalTurnPayload(payload);
+    // 会话目标：**只有自动续跑的一轮**才算目标推进一轮（预算按「轮」计，见 agent-limits）。
+    //
+    // 为什么排除人驱动的轮：预算是用来兜住「无人值守烧 token」的。挂着 `agent:rust-loop-run`
+    // 入口对每一轮都 +1，等于「用户聊一句烧一轮」——2026-11-05 现场那条 EP04 财务片会话
+    // attempt 12 / 状态 stalled、清单还 7/14，实际是用户聊了 12 句，任务并没跑完。
+    // 判据是结构信号（请求末尾那条 `[系统] 目标尚未收尾…`），不看用户说了什么。
+    //
     // 只给「进行中」的目标计数；写失败一律吞掉 —— 目标计数坏掉不该让本轮跑不起来。
     // 子 Agent / 频道 / 计划各有自己的执行路径，不经过这个 IPC，因此不会被重复计一次。
-    if (ctx.sessionId && live.localGateway && typeof live.localGateway.invokeRpc === 'function') {
+    if (
+      autoGoalTurn &&
+      ctx.sessionId &&
+      live.localGateway &&
+      typeof live.localGateway.invokeRpc === 'function'
+    ) {
       try {
         await sessionGoalStore.patchGoal({
           invokeRpc: live.localGateway.invokeRpc,
@@ -929,9 +941,17 @@ function registerAgentRuntimeIpc(ctx) {
       }
       const goal = await sessionGoalStore.loadGoal({ invokeRpc: gatewayNow.invokeRpc, sessionId });
       const { getAgentLimits } = require('../../agent/agent-limits');
+      // 「这条目标之后对话又继续了没有」：只有已收尾的目标才需要问一句，其余情况一次都不读消息。
+      // 判定本身在 `toPanelView`（单一来源），这里只提供事实。
+      const lastUserMessageAt =
+        goal && goal.outcome ? await readLastUserMessageAt(gatewayNow, sessionId) : null;
       return {
         ok: true,
-        goal: sessionGoalStore.toPanelView({ goal, limits: getAgentLimits(live.userData) })
+        goal: sessionGoalStore.toPanelView({
+          goal,
+          limits: getAgentLimits(live.userData),
+          lastUserMessageAt
+        })
       };
     } catch (err) {
       return { ok: false, goal: null, error: String((err && err.message) || err) };
@@ -1107,6 +1127,54 @@ function registerAgentRuntimeIpc(ctx) {
   ipcMain.handle('agent:knowledge-settings-set', async (_evt, patch = {}) =>
     ensureKnowledgeMaintainer().updateSettings(patch || {})
   );
+}
+
+/**
+ * 这一轮是不是「目标自动续跑轮」。
+ *
+ * Renderer 在续跑轮的请求末尾补一条 `[系统] 目标尚未收尾…`（不写库、不出用户气泡、
+ * 分类归 `session-context.isGoalContinueUserContent`），所以它在请求里是**结构信号**，
+ * 不需要新加一个 IPC 字段（那条字段还得从 Renderer 一路穿到 Main，多一处可能漏的地方）。
+ */
+function isAutoGoalTurnPayload(payload = {}) {
+  const { isGoalContinueUserContent } = require('../../agent/session-context');
+  const list = Array.isArray(payload.messages)
+    ? payload.messages
+    : Array.isArray(payload.startParams && payload.startParams.messages)
+      ? payload.startParams.messages
+      : [];
+  const last = list.length ? list[list.length - 1] : null;
+  return !!(last && last.role === 'user' && isGoalContinueUserContent(last.content));
+}
+
+/**
+ * 该会话最后一条**真人**用户消息的时间（ISO），供「历史目标」标注用。
+ *
+ * 为什么不是「最后一条消息」：目标续跑轮会写一条 `[系统] …` 的合成 user 消息
+ * （见 `session-context.isSyntheticLoopUserContent`），把那条当成「用户又说话了」
+ * 会把还在推进的目标误标成历史目标。
+ *
+ * 取不到（Gateway 未热 / 没有消息 / RPC 失败）一律 `null`：目标展示不该因为
+ * 这句话读不到而失败。
+ */
+async function readLastUserMessageAt(gateway, sessionId) {
+  const { isSyntheticLoopUserContent } = require('../../agent/session-context');
+  try {
+    // 取 5 条就够：最新那条通常是助手回复，往前一两条必是发起它的用户消息。
+    // 不取更多是因为 `memory.messages_recent` 带回完整正文，而面板是 2s 一次心跳。
+    const rows = await gateway.invokeRpc('memory.messages_recent', { sessionId, limit: 5 });
+    const list = Array.isArray(rows) ? rows : Array.isArray(rows && rows.messages) ? rows.messages : [];
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const m = list[i];
+      if (!m || m.role !== 'user') continue;
+      if (isSyntheticLoopUserContent(m.content)) continue;
+      const at = Number(m.createdAt);
+      if (Number.isFinite(at) && at > 0) return new Date(at).toISOString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**

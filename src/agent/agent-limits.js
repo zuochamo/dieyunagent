@@ -61,6 +61,12 @@ const AGENT_LIMITS_DEFAULTS = {
   // **只清 `complete`，`blocked` 永不自动清**（那是还没人看的问题，删掉等于把问题藏了）。
   // 同样不进 SCHEMA：这是保留预算，不是用户要调的护栏。
   goalCompletedKeep: 5,
+  // 会话目标 JSON 的**落盘预算**（字符）。必须 < dieyun-core 的 `SESSION_GOAL_MAX_CHARS`（64000），
+  // 否则两个上限互相打架：`goalEvidenceKeep × goalEvidenceTailChars`（20 × 4000）满额约 83k 字符，
+  // 写满后每次 `session_goal_put` 都被 Rust 拒掉 —— 命令跑过了、事实落不了库、目标再也收不了尾。
+  // 因此写入口（`session-goal.saveGoal`）按这个预算裁剪：先削最旧事实的输出尾巴，再丢最旧的事实/主张。
+  // 不进 SCHEMA：这是与存储契约绑定的内部值，不是用户要调的护栏。
+  goalBlobMaxChars: 56000,
   // 内网 agent 互通（src/peer）：把这些数字集中在这里，是为了让「两个 agent 互相撩爆 token」
   // 这类失控只有一处可调，而不是散在发现/服务/协调器三层各写一个上限。
   // hops = 一条跨机消息链上已经过手的 agent 数；达到上限即**不再自动跑一轮**，只投递。

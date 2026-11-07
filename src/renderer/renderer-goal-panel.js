@@ -57,6 +57,42 @@ function goalStatusLabel(view) {
   return '进行中';
 }
 
+/** 收尾时间：只服务「哪一晚做完的」这一件事，格式短到不挤占面板头 */
+function goalTimeText(iso) {
+  if (!iso) return '';
+  const t = Date.parse(String(iso));
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 已收尾（完成 / 阻塞）—— 这两种状态的目标不再「推进」，措辞与轮次都要跟着变 */
+function goalIsClosed(view) {
+  return !!view && (view.outcome === 'complete' || view.outcome === 'blocked');
+}
+
+/**
+ * 面板头一行、目标条轮次位的那句话（两个面共用同一句，别再各写一份）。
+ *
+ * 收尾过的目标不再报「第 N/M 轮」：那个数字是**预算用掉多少**，只对还在推进的目标有意义；
+ * 挂到已收尾的目标上读起来就是「还在跑」，这正是「面板和对话对不上」的一半来源
+ * （另一半是清单没勾却已完成，见 `toPanelView.progressFrom` 的口径）。收尾之后用户又说了话
+ * （`superseded`，判据在 Main），前缀「历史目标」并说明之后对话已继续。
+ */
+function goalStateText(view) {
+  if (!view) return '';
+  const label = goalStatusLabel(view);
+  const when = goalTimeText(view.completedAt);
+  const closedTail = when ? ` · 收尾于 ${when}` : '';
+  if (goalIsClosed(view)) {
+    return view.superseded
+      ? `历史目标 · ${label}${closedTail}（之后对话已继续）`
+      : `${label}${closedTail}`;
+  }
+  return `${label} · 第 ${Number(view.attempt) || 0}/${Number(view.maxAttempts) || 0} 轮`;
+}
+
 /** 进度条：比例由 Main 的 `toPanelView.progress` 给（验收 → 清单 → 收尾 0/1），这里只画 */
 function goalProgressBar(view, cells = 12) {
   const ratio = Math.max(0, Math.min(1, Number(view && view.progress) || 0));
@@ -276,10 +312,7 @@ function renderGoalPanel(view, note) {
     )}</p>`;
     return;
   }
-  if (meta) {
-    const round = `第 ${Number(view.attempt) || 0}/${Number(view.maxAttempts) || 0} 轮`;
-    meta.textContent = `${goalStatusLabel(view)} · ${round}`;
-  }
+  if (meta) meta.textContent = goalStateText(view);
   if (clearBtn) clearBtn.hidden = false;
   // `is-tail`：输出尾部是唯一「可以长、也可以占满剩余高度」的段（见 styles.css .goal-section.is-tail）
   const tail =
@@ -306,19 +339,29 @@ function renderGoalPanel(view, note) {
   </div>`);
 }
 
+/** 收起目标条（没有目标 / 目标已是历史）：连同展开区与 aria 一起复位 */
+function hideGoalBar() {
+  const bar = goalPanelEl('goal-bar');
+  if (!bar) return;
+  bar.hidden = true;
+  const facts = goalPanelEl('goal-bar-facts');
+  if (facts) facts.hidden = true;
+  const toggle = goalPanelEl('goal-bar-toggle');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+}
+
 /**
  * 气泡区上方的目标条。与面板同源同一次取数，只是更短：
  * `◎ 目标… · 第 3/12 轮 · npm test → exit 1`，点开就地看检查事实。
+ *
+ * 历史目标（已收尾 + 之后对话又继续）**不挂条**：它不在这条对话的当前上下文里，
+ * 挂在气泡上方等于天天告诉人「你在做这件事」。要看那条目标的账，去侧栏「目标」页。
  */
 function renderGoalBar(view) {
   const bar = goalPanelEl('goal-bar');
   if (!bar) return;
-  if (!view) {
-    bar.hidden = true;
-    if (goalPanelEl('goal-bar-facts')) goalPanelEl('goal-bar-facts').hidden = true;
-    if (goalPanelEl('goal-bar-toggle')) {
-      goalPanelEl('goal-bar-toggle').setAttribute('aria-expanded', 'false');
-    }
+  if (!view || view.superseded) {
+    hideGoalBar();
     return;
   }
   const sessionId = currentGoalSessionId();
@@ -332,9 +375,11 @@ function renderGoalBar(view) {
   const round = goalPanelEl('goal-bar-round');
   if (round) {
     const label = goalStatusLabel(view);
-    round.textContent = `第 ${Number(view.attempt) || 0}/${Number(view.maxAttempts) || 0} 轮${
-      label && label !== '进行中' ? ` · ${label}` : ''
-    }`;
+    round.textContent = goalIsClosed(view)
+      ? goalStateText(view)
+      : `第 ${Number(view.attempt) || 0}/${Number(view.maxAttempts) || 0} 轮${
+          label && label !== '进行中' ? ` · ${label}` : ''
+        }`;
   }
   const fact = goalPanelEl('goal-bar-fact');
   if (fact) {
