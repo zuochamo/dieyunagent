@@ -353,9 +353,14 @@ const AGENT_LIMITS_DEFAULTS = {
   // 故意不进 AGENT_LIMITS_SCHEMA（设置页不展示），唯一来源仍是这里。
   // 三层预算（DEFAULTS → schema → tier 覆盖）都不参与 tier 缩放：审计留底不该随任务档位变。
   // 体量账：单行 messages 20–120KB，40 轮 ≈ 3.2MB/会话；超预算先降 keepPerSession。
+  // **但每会话窗口只有「乘数里的那个 40」**：库体积 = 每会话行数 × 用过多少会话。
+  // 2026-11-09 实测 `diecloud-memory.sqlite` 1.17GB，其中 request_snapshots 占 1034MB
+  // （4818 行 / 157 个会话 / ≈220KB 一行），就是缺一个跨会话总闸。下面这条是那个总闸：
+  // 超过就按最旧优先跨会话裁（裁剪在 `crates/dieyun-core/src/memory/snapshot.rs` 的同一次写入里做）。
   requestSnapshotEnabled: true,
   requestSnapshotKeepPerSession: 40,
   requestSnapshotKeepCompacted: 200,
+  requestSnapshotMaxTotalRows: 1500,
   requestSnapshotMaxMessagesChars: 400000,
   requestSnapshotSystemMaxChars: 64000,
   requestSnapshotToolsMaxChars: 96000,

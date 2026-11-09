@@ -142,7 +142,38 @@ async function main() {
       .catch((err) => err);
     assert.ok(rejected, '缺 sessionId 必须报错');
 
-    console.log('[request-snapshot] OK rows=%d prunedLast=%d', after.length, lastPruned);
+    // 6) 全库上限：`keepPerSession × 会话数` 会线性涨，跨会话要有总闸（按最旧优先裁）
+    for (let i = 0; i < 4; i += 1) {
+      await bridge.invoke(
+        'memory.request_snapshot_append',
+        row({ sessionId: 'snap-cap-a', round: i, keepPerSession: 40, keepCompacted: 200, keepTotalRows: 1000 }),
+        RPC_TIMEOUT_MS
+      );
+    }
+    let capPruned = 0;
+    for (let i = 0; i < 4; i += 1) {
+      const res = await bridge.invoke(
+        'memory.request_snapshot_append',
+        row({ sessionId: 'snap-cap-b', round: i, keepPerSession: 40, keepCompacted: 200, keepTotalRows: 6 }),
+        RPC_TIMEOUT_MS
+      );
+      capPruned = res.pruned || 0;
+    }
+    assert.ok(capPruned > 0, '超过 keepTotalRows 后必须跨会话裁剪');
+    const capA = await bridge.invoke(
+      'memory.request_snapshot_recent',
+      { sessionId: 'snap-cap-a', limit: 200 },
+      RPC_TIMEOUT_MS
+    );
+    const capB = await bridge.invoke(
+      'memory.request_snapshot_recent',
+      { sessionId: 'snap-cap-b', limit: 200 },
+      RPC_TIMEOUT_MS
+    );
+    assert.equal(capB.length, 4, `全库窗 6 ⇒ 最新的会话保住自己 4 行，实际 ${capB.length}`);
+    assert.ok(capA.length < 4, `全库上限必须裁掉最旧会话的行，snap-cap-a 实际剩 ${capA.length}`);
+
+    console.log('[request-snapshot] OK rows=%d prunedLast=%d capA=%d', after.length, lastPruned, capA.length);
   } finally {
     try {
       await bridge.stop();

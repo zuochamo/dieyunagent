@@ -54,6 +54,7 @@ const SNAPSHOT_LIMIT_KEYS = Object.freeze([
   'requestSnapshotEnabled',
   'requestSnapshotKeepPerSession',
   'requestSnapshotKeepCompacted',
+  'requestSnapshotMaxTotalRows',
   'requestSnapshotMaxMessagesChars',
   'requestSnapshotSystemMaxChars',
   'requestSnapshotToolsMaxChars'
@@ -221,7 +222,9 @@ function buildRequestSnapshotPayload(desc) {
     reason: d.reason || SNAPSHOT_REASONS.INITIAL,
     contextAuditJson: contextAudit ? safeJson(contextAudit) : null,
     keepPerSession: positiveIntOrUndefined(limits.requestSnapshotKeepPerSession),
-    keepCompacted: positiveIntOrUndefined(limits.requestSnapshotKeepCompacted)
+    keepCompacted: positiveIntOrUndefined(limits.requestSnapshotKeepCompacted),
+    // 全库总闸：每会话窗口 × 会话数会线性涨，这一条是唯一的跨会话上限
+    keepTotalRows: positiveIntOrUndefined(limits.requestSnapshotMaxTotalRows)
   };
   return payload;
 }

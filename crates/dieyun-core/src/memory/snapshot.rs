@@ -22,6 +22,9 @@ use crate::error::CoreError;
 /// 这里的常量只负责「调用方没传」时不至于删光或无限增长。
 const FALLBACK_KEEP_PER_SESSION: i64 = 40;
 const FALLBACK_KEEP_COMPACTED: i64 = 200;
+/// 全库总行数兜底（真实数字是 `agent-limits.requestSnapshotMaxTotalRows`）：
+/// 只有每会话窗口的话，库体积随会话数线性涨。
+const FALLBACK_KEEP_TOTAL_ROWS: i64 = 1500;
 /// 单次查询返回上限，防 UI 误传大数字拖住 sidecar。
 const MAX_RECENT_LIMIT: i64 = 200;
 
@@ -59,6 +62,9 @@ pub struct RequestSnapshotInput {
     /// 保留策略（数字由 Node 的 agent-limits 提供；缺省走本模块兜底常量）。
     pub keep_per_session: Option<i64>,
     pub keep_compacted: Option<i64>,
+    /// **全库**上限：`keep_per_session × 会话数` 会线性涨（现场 2026-11-09：
+    /// 4818 行 / 157 个会话 / 1034 MB），所以还要一个跨会话的总闸。
+    pub keep_total_rows: Option<i64>,
 }
 
 /// 落一行快照，并在同一连接内做保留裁剪。返回 `{ ok, id, pruned }`。
@@ -123,48 +129,70 @@ pub fn insert_request_snapshot(
         session_id,
         input.keep_per_session.unwrap_or(FALLBACK_KEEP_PER_SESSION),
         input.keep_compacted.unwrap_or(FALLBACK_KEEP_COMPACTED),
+        input.keep_total_rows.unwrap_or(FALLBACK_KEEP_TOTAL_ROWS),
     )?;
     Ok(json!({ "ok": true, "id": id, "pruned": pruned, "createdAt": now }))
 }
 
-/// 保留裁剪：压缩过的行按 `keep_compacted` 单独保留（排查重点不能被最近 N 轮挤掉），
-/// 其余按 `keep_per_session` 保留。两段都按 `id DESC` 取，避免依赖时间戳（同毫秒可重复）。
+/// 保留裁剪：两层窗口，都在同一条写入连接、同一个事务里完成。
+///
+/// 1. **每会话**：压缩过的行按 `keep_compacted` 单独保留（排查重点不能被最近 N 轮挤掉），
+///    其余按 `keep_per_session` 保留。两段都按 `id DESC` 取，避免依赖时间戳（同毫秒可重复）。
+/// 2. **全库**：跨会话按最旧优先裁到 `keep_total_rows`。只有第 1 层的话，库体积随
+///    「用过多少个会话」线性涨 —— 现场 157 个会话 × 40 行 ≈ 1034 MB，占了记忆库的 86%。
+///
+/// 第 2 层用「取第 N+1 新的 id，再按 id 范围删」：一次索引定位 + 一次范围删，
+/// 代价与「删掉多少行」成正比，不必扫全表、也不必对 payload 求 SUM。
 pub fn prune_request_snapshots(
     conn: &Connection,
     session_id: &str,
     keep_per_session: i64,
     keep_compacted: i64,
+    keep_total_rows: i64,
 ) -> Result<usize, CoreError> {
     // 至少要留 1 行：调用方传 0/负数（配置手改、口径错）时把整个会话删空，
     // 会让「刚写进去的那行为什么没了」变成一个无法解释的谜。
-    let keep_per_session = keep_per_session.max(1);
-    let keep_compacted = keep_compacted.max(0);
+    //
+    // 全库上限是**硬天花板**：两个窗口不能互相矛盾（全库窗比会话窗还小的话，会话窗那 N 轮
+    // 根本装不下），所以把会话/压缩两个窗口都夹到全库窗以内，而不是反过来抬全库窗 ——
+    // 抬全库窗会让「调小全库上限」这个动作静默失效。
+    let keep_total_rows = keep_total_rows.max(1);
+    let keep_per_session = keep_per_session.max(1).min(keep_total_rows);
+    let keep_compacted = keep_compacted.max(0).min(keep_total_rows);
     let total: i64 = conn.query_row(
         "SELECT COUNT(*) FROM request_snapshots WHERE session_id = ?1",
         params![session_id],
         |row| row.get(0),
     )?;
-    // 快路径：总行数没超过「最近 N 轮」窗口时，一定没有可删的（压缩行只会被额外保留）。
-    if total <= keep_per_session {
-        return Ok(0);
+    let mut removed = 0usize;
+    // 快路径：本会话行数没超过「最近 N 轮」窗口时，第 1 层一定没有可删的（压缩行只会被额外保留）。
+    if total > keep_per_session {
+        removed += conn.execute(
+            "DELETE FROM request_snapshots
+              WHERE session_id = ?1
+                AND id NOT IN (
+                  SELECT id FROM (
+                    SELECT id FROM request_snapshots
+                     WHERE session_id = ?1 AND compacted = 1
+                     ORDER BY id DESC LIMIT ?2
+                  )
+                  UNION
+                  SELECT id FROM (
+                    SELECT id FROM request_snapshots
+                     WHERE session_id = ?1
+                     ORDER BY id DESC LIMIT ?3
+                  )
+                )",
+            params![session_id, keep_compacted, keep_per_session],
+        )?;
     }
-    let removed = conn.execute(
+    // 第 2 层：全库最旧优先。总行数没超上限时子查询返回 NULL，`id <= NULL` 不成立 ⇒ 一行不删。
+    removed += conn.execute(
         "DELETE FROM request_snapshots
-          WHERE session_id = ?1
-            AND id NOT IN (
-              SELECT id FROM (
-                SELECT id FROM request_snapshots
-                 WHERE session_id = ?1 AND compacted = 1
-                 ORDER BY id DESC LIMIT ?2
-              )
-              UNION
-              SELECT id FROM (
-                SELECT id FROM request_snapshots
-                 WHERE session_id = ?1
-                 ORDER BY id DESC LIMIT ?3
-              )
-            )",
-        params![session_id, keep_compacted, keep_per_session],
+          WHERE id <= (
+            SELECT id FROM request_snapshots ORDER BY id DESC LIMIT 1 OFFSET ?1
+          )",
+        params![keep_total_rows],
     )?;
     Ok(removed)
 }
@@ -452,7 +480,7 @@ mod tests {
         for _ in 0..10 {
             insert_request_snapshot(&conn, &input("s1", false)).expect("row");
         }
-        let pruned = prune_request_snapshots(&conn, "s1", 3, 200).expect("prune");
+        let pruned = prune_request_snapshots(&conn, "s1", 3, 200, 1500).expect("prune");
         assert_eq!(pruned, 7, "11 条里留 3 条最近 + 1 条压缩 = 4");
         let left: i64 = conn
             .query_row(
@@ -482,7 +510,7 @@ mod tests {
         for _ in 0..5 {
             insert_request_snapshot(&conn, &input("b", false)).expect("b");
         }
-        prune_request_snapshots(&conn, "a", 1, 1).expect("prune");
+        prune_request_snapshots(&conn, "a", 1, 1, 1500).expect("prune");
         let b: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM request_snapshots WHERE session_id = 'b'",
@@ -493,8 +521,45 @@ mod tests {
         assert_eq!(b, 5);
     }
 
-    fn audited(session: &str, code: Option<&str>, repo_map: bool) -> RequestSnapshotInput {
-        let mut i = input(session, false);
+    /// 全库上限：跨会话按最旧优先裁，刚写进来的那一行永远保留。
+    ///
+    /// 只有每会话窗口时，库体积 = 40 行 × 会话数（现场 157 个会话 ≈ 1034 MB），
+    /// 这条闸门是唯一的跨会话上限。
+    #[test]
+    fn prune_global_cap_keeps_newest_rows_across_sessions() {
+        let conn = conn();
+        for i in 0..6 {
+            insert_request_snapshot(&conn, &input(&format!("s{i}"), false)).expect("row");
+        }
+        // 每会话都远未超窗口（1 行），所以删掉的全是全库闸门裁的
+        let pruned = prune_request_snapshots(&conn, "s5", 40, 200, 3).expect("prune");
+        assert_eq!(pruned, 3, "6 条里只留最新 3 条");
+        let left: Vec<String> = conn
+            .prepare("SELECT session_id FROM request_snapshots ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, vec!["s3", "s4", "s5"], "留最新三条，最旧三条被裁");
+    }
+
+    /// 全库窗比会话窗还小时：全库窗是硬天花板，两个窗口一起收紧（而不是让全库上限静默失效）。
+    #[test]
+    fn prune_global_cap_below_session_window_tightens_both() {
+        let conn = conn();
+        for _ in 0..5 {
+            insert_request_snapshot(&conn, &input("s1", false)).expect("row");
+        }
+        let pruned = prune_request_snapshots(&conn, "s1", 40, 200, 2).expect("prune");
+        assert_eq!(pruned, 3, "全库窗 2 ⇒ 会话窗也收到 2，5 条里删 3");
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM request_snapshots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 2);
+    }
+
+    fn audited(session: &str, code: Option<&str>, repo_map: bool) -> RequestSnapshotInput {        let mut i = input(session, false);
         i.context_audit_json = Some(
             json!({"index": {"allow": true, "code": code, "repoMap": repo_map}}).to_string(),
         );

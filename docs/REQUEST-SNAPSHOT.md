@@ -139,16 +139,26 @@ JSON.parse(full.messagesJson)   // ← 就是当时发出去的 messages 数组
 | `requestSnapshotEnabled` | `true` | 总开关；关掉即完全停写（代码无需回退） |
 | `requestSnapshotKeepPerSession` | `40` | 每会话保留最近 40 轮 |
 | `requestSnapshotKeepCompacted` | `200` | **压缩过的行**按此上限单独保留（排查重点，不被最近 N 轮挤掉） |
+| `requestSnapshotMaxTotalRows` | `1500` | **全库**总行数上限，超过按最旧优先跨会话裁（跨会话按 `id` 取第 N+1 新的 id 再范围删，一次索引定位，不扫表） |
 | `requestSnapshotMaxMessagesChars` | `400000` | 单行 messages 上限，超则存信封 |
 | `requestSnapshotSystemMaxChars` | `64000` | system 全文落库上限 |
 | `requestSnapshotToolsMaxChars` | `96000` | tools 全文落库上限 |
 
-- 裁剪在**写入同一次调用里**完成（Rust `prune_request_snapshots`），没有后台任务。
+- 裁剪在**写入同一次调用里**完成（Rust `prune_request_snapshots`），没有后台任务。两层窗口：
+  先按会话（`KeepPerSession` / `KeepCompacted`），再按全库（`MaxTotalRows`）。
+- **为什么必须有全库那一层**：每会话窗口只是乘数里的一个因子，库体积 = 每会话行数 × 用过多少会话。
+  2026-11-09 实测：`request_snapshots` 占 1034MB / 全库 1197MB（4818 行、157 个会话、≈220KB/行），
+  全是只有每会话上限时的线性增长。
 - 保留条数**必须是 ≥1 的整数**：`0` / 负数一律回落到默认值（JS 侧 `positiveIntOrUndefined`，
   Rust 侧 `keep_per_session.max(1)`）。传 0 会把该会话的行连同刚写的那行一起删光 ——
-  "刚写进去就没了"是没法解释的现象，所以宁可夹住。
+  "刚写进去就没了"是没法解释的现象，所以宁可夹住。全库窗口还会被抬到 ≥ 每会话窗口
+  （否则"刚写完就把它自己的最近 N 轮裁掉"）。
 - 体量：单行 20–120KB（system/tools 每行都存全文，不去重），40 轮 ≈ 3.2MB/会话。
   超预算先降 `KeepPerSession`（结构不动）。
+- 删行不等于缩文件：本库 `auto_vacuum = INCREMENTAL`（见 `crates/dieyun-core/src/sqlite.rs`），
+  已释放的页要 `PRAGMA incremental_vacuum` 才真正归还。**存量清理**（2026-11-09 实测 1200.6MB →
+  541.1MB，删 3318 行）就是「停应用 → 按上限删一次 → `incremental_vacuum` 循环到 freelist 为 0 →
+  `wal_checkpoint(TRUNCATE)`」，日常由写入时的裁剪维持，不需要再手动跑。
 - 与 `messages` 同库同权限：**敏感级等同对话记录**（system 里可能含注入的代码片段、AGENTS.md 内容）。不能接受就把开关关掉。
 
 ---
