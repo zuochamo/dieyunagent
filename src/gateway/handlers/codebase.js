@@ -100,33 +100,45 @@ function createCodebaseHandlers(d) {
       return { ok: true, ...rest };
     },
 
+    // 同步版（老 daemon 兼容路径）：**不再把构建跑在 core 的 RPC 通道里**。
+    //
+    // 以前这里直接 `invokeIndexCore('codebase.index', …, 600s)`：core 的 RPC 是单线程的，
+    // 一次全量构建会把同一个 core 上的 `codebase.status`(15s) / `codebase.search`(120s) /
+    // `index.configure`(45s) 全部堵到超时（2026-11-09 真机现场：daemon 日志
+    // `RPC_TIMEOUT codebase.search id=983 timeoutMs=120000`、configure 45061ms 超时）。
+    // 现在统一走「后台起任务 + 客户端等它 settle」——构建在 core 里是异步任务，
+    // 期间 status/search 照常秒回；`.start` 不支持时 `startCodebaseIndexForContext`
+    // 内部会自己退回同步调用（那条老路径的墙钟仍受 INDEX_JOB_WALL_MS 约束）。
     'codebase.index': async ({ workspaceRoot, force, vectors }) => {
       const ctxInfo = resolveCodebaseContext(workspaceRoot);
-      // 老 daemon 没有 index.start 时走这条同步路径；向量同样听持久意图
+      // 向量同样听持久意图
       const wantVectors = typeof resolveIndexVectors === 'function' ? resolveIndexVectors(vectors) : !!vectors;
-      if (ctxInfo.kind === 'remote') {
-        // 与 start 路径同一条规则：建向量前必须把当前 embedding 端点配置推给这条连接上的
-        // core。以前只有 start 路径推，于是「换模型后走同步路径重建」必然拿旧模型名去请求
-        // （真机现场：服务端已下线的 qwen3 回 `EMBEDDING_API: Model not allowed`）。
-        if (wantVectors && typeof syncRemoteIndexCoreConfig === 'function') {
-          try {
-            await syncRemoteIndexCoreConfig();
-          } catch {
-            // 推不动只是这条路建不出向量，不能让整个调用挂在这里（配置错误由 core 报）
-          }
+      if (ctxInfo.kind === 'remote' && wantVectors && typeof syncRemoteIndexCoreConfig === 'function') {
+        // 与 start 路径同一条规则：建向量前把当前 embedding 配置推给这条连接上的 core
+        // （以前只有 start 路径推，换模型后走同步路径重建必然拿旧模型名去请求）
+        try {
+          await syncRemoteIndexCoreConfig();
+        } catch {
+          // 推不动只是这条路建不出向量，不能让整个调用挂在这里（配置错误由 core 报）
         }
-        return invokeIndexCore(
-          ctxInfo,
-          'codebase.index',
-          { force: force !== false, vectors: wantVectors },
-          600000
-        );
       }
-      return requireRustCore(
-        'codebase.index',
-        { workspaceRoot: ctxInfo.rootKey, force: force !== false, vectors: wantVectors },
-        600000
-      );
+      const started = await startCodebaseIndexForContext(ctxInfo, {
+        force: force !== false,
+        // 同步版的语义是「现在就建」，不是「已经就绪就跳过」
+        skipIfReady: false,
+        vectors: wantVectors
+      });
+      const job = started && started.job;
+      if (job && job.promise) {
+        // 等构建结束（不占 core 的 RPC：期间它只是被 status 轮询）
+        await job.promise.catch(() => {});
+      }
+      const st = await invokeIndexCore(ctxInfo, 'codebase.status', {}, 45000).catch(() => null);
+      if (!st) {
+        return { ok: false, error: '索引状态读取失败', started: !!(started && started.started) };
+      }
+      // 注意顺序：`...st` 里有 core 自己的 ok，必须让「有 lastError 就算失败」压在它上面
+      return { ...st, ok: !st.lastError, alreadyRunning: false };
     },
 
     'codebase.search': async ({ workspaceRoot, query, limit }) => {

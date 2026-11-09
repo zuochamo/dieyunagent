@@ -1676,7 +1676,15 @@ function createRpcHandlers(ctx) {
     const existing = jobsMap.get(rootKey);
     if (existing && !existing.settled) {
       const st = await fetchIndexStatus(ctxInfo, kind);
-      return { started: false, alreadyRunning: true, job: existing, ...st };
+      // core 自己都说「没在索引」⇒ 内存里那条记录是残留（进程内不会自己清），丢掉它继续起新的。
+      // 否则一次卡死的构建会把「重建」挡到进程重启为止（2026-11-09 真机踩到：
+      // `alreadyRunning: true` 但 core 早就停了、索引是空的）。
+      if (st && st.indexing === false) {
+        existing.settled = true;
+        jobsMap.delete(rootKey);
+      } else {
+        return { started: false, alreadyRunning: true, job: existing, ...st };
+      }
     }
 
     const force = !!opts.force;

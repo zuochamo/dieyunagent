@@ -5,6 +5,12 @@ const { ensureSessionWorktree } = require('./session-worktree');
 const { remoteWorktreePath, repoRemotePathOf } = require('../ssh/remote-worktree');
 
 /**
+ * 视图侧「后台确保」的去重时间上限：同 (会话, 目标路径) 在这段时间内只发一次。
+ * 超过就允许再发 —— 远端 exec 单条最长可等 10 分钟，卡住的 ensure 不该永久占住 key。
+ */
+const VIEW_ENSURE_DEDUPE_MS = 60 * 1000;
+
+/**
  * @param {{
  *   localGateway: import('../gateway/server').LocalGateway | null,
  *   sshPool: ReturnType<import('../ssh/connection-pool').createSshConnectionPool> | null,
@@ -21,8 +27,7 @@ function createSessionRemoteTransport(deps) {
   /** @type {Map<string, { target: object, refCount: number }>} */
   const sessionLeases = new Map();
   /** 视图侧后台确保的在飞表（key = 会话|目标路径）：只挡重复，见 ensureRemoteGatewayInBackground */
-  const viewEnsureInFlight = new Map();
-  /** @type {import('../workspace/target').WorkspaceTarget | null} */
+  const viewEnsureInFlight = new Map();  /** @type {import('../workspace/target').WorkspaceTarget | null} */
   let activeViewTarget = null;
 
   function isRemoteTarget(target) {
@@ -295,6 +300,10 @@ function createSessionRemoteTransport(deps) {
    * 会话就会把同一份 worktree 检查重复堆在链上（实测队列深度涨到 5）。这里只挡重复，不改变
    * 语义 —— 每个 (会话, 目标路径) 同时最多一条在飞，落地后立刻从表里摘掉（失败也只记日志）。
    *
+   * 去重有**时间上限**（{@link VIEW_ENSURE_DEDUPE_MS}）：远端 exec 单条最长可等 10 分钟，
+   * 一条卡住的 ensure 若永久占着 key，这个会话的后台确保就再也不发了（远端 agent 起不来 →
+   * 工具静默退到 SFTP）。超龄后允许再发一条，代价最多是重复一次幂等检查。
+   *
    * @param {object} target
    * @param {string} sessionId
    */
@@ -302,7 +311,7 @@ function createSessionRemoteTransport(deps) {
     if (!target || !deps.remoteGatewayPool) return null;
     const key = `${String(sessionId || '').trim()}|${normalizeRemotePath(target.remotePath || '/')}`;
     const prev = viewEnsureInFlight.get(key);
-    if (prev) return prev;
+    if (prev && Date.now() - prev.at < VIEW_ENSURE_DEDUPE_MS) return prev.promise;
     let promise = null;
     promise = ensureRemoteGatewayForTarget(target, sessionId)
       .catch((e) => {
@@ -312,9 +321,11 @@ function createSessionRemoteTransport(deps) {
         return null;
       })
       .finally(() => {
-        if (viewEnsureInFlight.get(key) === promise) viewEnsureInFlight.delete(key);
+        if (viewEnsureInFlight.get(key) && viewEnsureInFlight.get(key).promise === promise) {
+          viewEnsureInFlight.delete(key);
+        }
       });
-    viewEnsureInFlight.set(key, promise);
+    viewEnsureInFlight.set(key, { promise, at: Date.now() });
     return promise;
   }
 

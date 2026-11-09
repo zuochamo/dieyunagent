@@ -523,6 +523,69 @@ async function testLeaseReturnsEffectiveWorktreeWorkspace() {
   console.log('ok lease returns effective worktree workspace');
 }
 
+/**
+ * 视图侧「后台确保」的去重：连续两次切到同一会话（第一次 ensure 还在飞）时只发一次。
+ *
+ * 为什么要锁这条：那两件活（worktree 检查 / agent 槽位）都排进每连接串行 exec 链，
+ * 快速连点会把同一份检查重复堆上去（实测队列深度涨到 5）。去重本身有 60s 上限
+ * （卡死的 ensure 不该永久占住 key），这里验的是「在飞时不重复发」。
+ */
+async function testViewEnsureIsDedupedWhileInFlight() {
+  const target = { kind: 'ssh', host: 'h1', port: 22, username: 'u', remotePath: '/proj' };
+  let ensureCalls = 0;
+  let releaseEnsure = null;
+
+  const transport = createSessionRemoteTransport({
+    localGateway: {
+      activeSessionId: 'sess-a',
+      getSessionWorkspaceTarget: () => target,
+      getEffectiveWorkspaceTarget: () => target
+    },
+    sshPool: {
+      acquire: () => {},
+      release: () => {},
+      isConnected: () => true,
+      getManagerForTarget: () => ({ status: () => ({ connected: true }) }),
+      getConnectedManager: () => ({ status: () => ({ connected: true }) })
+    },
+    remoteGatewayPool: {
+      getInfoForTarget: () => null,
+      ensureForTarget: async () => {
+        ensureCalls += 1;
+        await new Promise((resolve) => {
+          releaseEnsure = resolve;
+        });
+        return null;
+      },
+      releaseForTarget: () => {}
+    },
+    sshFacade: null,
+    sshCredentialsStore: null,
+    tryAutoReconnectSsh: null,
+    buildRemoteGatewayPackContext: async () => ({}),
+    invalidateRemoteAgentClient: () => {}
+  });
+
+  await transport.applySessionRemoteTransport('sess-a');
+  await new Promise((r) => setTimeout(r, 30));
+  await transport.applySessionRemoteTransport('sess-a');
+  await new Promise((r) => setTimeout(r, 30));
+
+  if (ensureCalls !== 1) {
+    throw new Error(`在飞的 ensure 不该重复发，ensure 调用次数=${ensureCalls}`);
+  }
+  if (typeof releaseEnsure === 'function') releaseEnsure();
+  await new Promise((r) => setTimeout(r, 30));
+  // 落地之后再切一次：允许重新发（表里已摘掉）
+  await transport.applySessionRemoteTransport('sess-a');
+  await new Promise((r) => setTimeout(r, 30));
+  if (ensureCalls !== 2) {
+    throw new Error(`落地后应允许再发一次，ensure 调用次数=${ensureCalls}`);
+  }
+  if (typeof releaseEnsure === 'function') releaseEnsure();
+  console.log('ok view ensure is deduped while in flight');
+}
+
 async function main() {
   testRemoteAgentInfoScopedToSession();
   await testRemoteLeaseKeepsTransportOnLocalSwitch();
@@ -534,6 +597,7 @@ async function main() {
   await testLeaseHoldIsIdempotentAndDropForce();
   await testForeignRepoGatewayEnsureDoesNotHijackOtherSession();
   await testLeaseReturnsEffectiveWorktreeWorkspace();
+  await testViewEnsureIsDedupedWhileInFlight();
   console.log('\nsession-remote-transport: ALL OK');
 }
 
