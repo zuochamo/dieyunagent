@@ -363,12 +363,23 @@ class RemoteIndexCoreHost {
    */
   async applyConfigure(opts = {}) {
     return this._runExclusive(async () => {
-      this.configureOpts = opts;
+      // 载荷里**没带** embedding 时保留上一次的：`_ensureStarted` 用的是
+      // `this.configureOpts || {}`，一旦被空值覆盖，core 会以「没有 embedding 模型」的状态
+      // 起来 —— 建向量永远停在 embedding 阶段（真机现场：换模型后 core 重启，
+      // 状态 `embeddingModel=null`、`vectorCount=0`、DB 不再增长）。
+      // 显式带 `disabled: true` 仍然照办：那是「关掉语义」的意图，不是缺省。
+      const incoming = opts && typeof opts === 'object' ? opts : {};
+      const merged = { ...(this.configureOpts || {}), ...incoming };
+      const hasIncomingEmbedding = !!(incoming.embedding && typeof incoming.embedding === 'object');
+      if (!hasIncomingEmbedding && this.configureOpts && this.configureOpts.embedding) {
+        merged.embedding = this.configureOpts.embedding;
+      }
+      this.configureOpts = merged;
       if (!this.hasBinary()) {
         return { ok: false, reason: 'binary_missing' };
       }
       await this._ensureStarted();
-      return this._configureBridge(opts);
+      return this._configureBridge(merged);
     });
   }
 

@@ -14,7 +14,9 @@ function createCodebaseHandlers(d) {
     codebaseHasSearchableIndex,
     codebaseIncremental,
     // 「这次建库要不要带向量」的唯一判定（读持久意图 indexSemanticSearch）
-    resolveIndexVectors
+    resolveIndexVectors,
+    // 把当前 embedding 配置推给远端那条连接上的 core（rpc.js 的同一份实现）
+    syncRemoteIndexCoreConfig
   } = d;
 
   /**
@@ -103,6 +105,16 @@ function createCodebaseHandlers(d) {
       // 老 daemon 没有 index.start 时走这条同步路径；向量同样听持久意图
       const wantVectors = typeof resolveIndexVectors === 'function' ? resolveIndexVectors(vectors) : !!vectors;
       if (ctxInfo.kind === 'remote') {
+        // 与 start 路径同一条规则：建向量前必须把当前 embedding 端点配置推给这条连接上的
+        // core。以前只有 start 路径推，于是「换模型后走同步路径重建」必然拿旧模型名去请求
+        // （真机现场：服务端已下线的 qwen3 回 `EMBEDDING_API: Model not allowed`）。
+        if (wantVectors && typeof syncRemoteIndexCoreConfig === 'function') {
+          try {
+            await syncRemoteIndexCoreConfig();
+          } catch {
+            // 推不动只是这条路建不出向量，不能让整个调用挂在这里（配置错误由 core 报）
+          }
+        }
         return invokeIndexCore(
           ctxInfo,
           'codebase.index',

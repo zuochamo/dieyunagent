@@ -325,6 +325,13 @@ class LocalGateway {
       })
       .finally(() => {
         this._rustCoreConfigureInFlight = null;
+        // 本地 core 配置完，顺手把同一份 embedding 推给**远端** core：
+        // 远端 daemon / 每个工作区的 core 都是长命进程，以前只有「core 没就绪」或
+        // 「建向量前」才推配置，于是换 embedding 模型后远端一直拿着旧模型名
+        // （真机现场：服务端下线的 qwen3 → `EMBEDDING_API: Model not allowed`，
+        // 而远端 core 的 RPC 单线程被旧 build 占着时连补救都推不进去）。
+        // 幂等一句话，失败只记日志，不阻塞本地配置。
+        void this.syncRemoteIndexCoreConfig();
       });
     return this._rustCoreConfigureInFlight;
   }
