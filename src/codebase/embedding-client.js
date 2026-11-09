@@ -2,6 +2,7 @@
 
 const { runInEmbeddingQueue } = require('./embedding-queue');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('../agent/llm-request');
+const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 const crypto = require('crypto');
 
 const EMBEDDING_DIMENSIONS_MIN = 64;
@@ -23,6 +24,55 @@ const QUERY_CACHE_MAX = 64;
 const QUERY_CACHE_TTL_MS = 120000;
 /** @type {Map<string, { at: number, vector: number[] }>} */
 const queryEmbedCache = new Map();
+
+/** 后台（批量文档）embedding 请求的墙钟上限，与 Rust 侧 `EMBED_REQUEST_TIMEOUT_MS` 成对。 */
+const EMBED_REQUEST_TIMEOUT_MS = 120000;
+
+/** 「一次交互查询最多能等多久 embedding 往返」——数字唯一来源是 agent-limits。 */
+function interactiveEmbedBudgetMs() {
+  const n = Number(AGENT_LIMITS_DEFAULTS.interactiveEmbedBudgetMs);
+  return Number.isFinite(n) && n > 0 ? n : 10000;
+}
+
+/**
+ * 最近一次往返的 `(端点键, 毫秒, 记录时刻)`：交互闸门据此判断「现在还值得发吗」。
+ *
+ * 为什么交互侧要有这道闸门（而不是只靠调用方的 withTimeout）：
+ * 调用方超时只掐**等待者**，那个 40s 的 HTTP 还在飞、还在端点队列里。
+ * 本轮放弃、下轮再排一条 ⇒ 队列永不排空，同一队列里的其他交互查询（`codebase.search`
+ * 的查询向量）一起超时。所以「值不值得发」必须在发请求之前判断。
+ *
+ * 与 Rust 侧 `crates/dieyun-core/src/embedding/mod.rs` 同一套语义（两个进程各自量自己的
+ * 端点往返）：换端点/模型（键变了）就重新量；**超时也算量到**（端点慢的证据），
+ * 但 401 / 解析失败不算 —— 一次快速失败既不能证明变快也不能证明变慢。
+ * 测量有有效期（{@link GATE_TTL_MS}）：过期允许再探一次，否则端点修好了也一直被关着。
+ */
+const GATE_TTL_MS = 5 * 60 * 1000;
+let lastRoundtrip = { key: '', ms: 0, at: 0 };
+
+function recordRoundtrip(key, ms, budgetMs) {
+  lastRoundtrip = { key, ms, at: Date.now() };
+  if (ms > budgetMs) {
+    console.warn(
+      `[dieyun:agent] embedding 端点往返 ${ms}ms > 交互预算 ${budgetMs}ms：交互查询跳过语义通道，后台写入照旧`
+    );
+  }
+}
+
+function isGateClosed(endpointKey, budgetMs) {
+  if (lastRoundtrip.key !== endpointKey) return 0;
+  if (lastRoundtrip.ms <= budgetMs) return 0;
+  if (Date.now() - lastRoundtrip.at >= GATE_TTL_MS) return 0;
+  return lastRoundtrip.ms;
+}
+
+function tooSlowError(ms, budgetMs) {
+  const err = new Error(
+    `embedding 端点最近一次往返 ${ms}ms，超过交互预算 ${budgetMs}ms：本次跳过语义通道（关键词/子串照常可用）`
+  );
+  err.code = 'EMBEDDING_TOO_SLOW';
+  return err;
+}
 
 function queryCacheKey(url, model, dimensions, text) {
   const digest = crypto.createHash('sha1').update(String(text)).digest('hex');
@@ -65,7 +115,10 @@ function isDirectEmbedUrl(baseUrl) {
  * 打包体积都不值得，语义检索改为用户在「设置 → 模型 → 向量索引」里配一个
  * 外部 embedding 端点。没配就 `enabled() === false`，召回退化为纯关键词。
  *
- * @param {{ baseUrl?: string, apiKey?: string, model?: string, dimensions?: number, disabled?: boolean }} config
+ * @param {{ baseUrl?: string, apiKey?: string, model?: string, dimensions?: number, disabled?: boolean,
+ *   interactiveBudgetMs?: number }} config
+ *   `interactiveBudgetMs` 只给测试 / 特殊调用方覆盖交互预算（默认取 agent-limits 的
+ *   `interactiveEmbedBudgetMs`），不是用户开关。
  */
 function createEmbeddingClient(config) {
   const model = String(config?.model || '').trim();
@@ -75,6 +128,10 @@ function createEmbeddingClient(config) {
     EMBEDDING_DIMENSIONS_MAX,
     Math.max(EMBEDDING_DIMENSIONS_MIN, Number(config?.dimensions) || EMBEDDING_DIMENSIONS_DEFAULT)
   );
+  const overrideBudget = Number(config?.interactiveBudgetMs);
+  const budgetMs =
+    Number.isFinite(overrideBudget) && overrideBudget > 0 ? overrideBudget : interactiveEmbedBudgetMs();
+  const endpointKey = `${url}|${model}|${dimensions}`;
 
   function enabled() {
     return config?.disabled !== true && !!model && !!url;
@@ -82,9 +139,12 @@ function createEmbeddingClient(config) {
 
   /**
    * @param {string | string[]} input
+   * @param {{ interactive?: boolean }} [opts] `interactive`：查询向量（每轮召回 / 代码检索）。
+   *   端点已知比交互预算慢时**不发请求**，直接抛 `EMBEDDING_TOO_SLOW`，由调用方走关键词/子串通道。
+   *   批量文档（建库、镜像、重建向量）不要传 —— 它们等得起，且算出来的向量是长期资产。
    * @returns {Promise<number[][]>}
    */
-  async function embed(input) {
+  async function embed(input, opts = {}) {
     if (!enabled()) {
       throw new Error('未配置 Embedding 模型');
     }
@@ -94,6 +154,11 @@ function createEmbeddingClient(config) {
     if (single) {
       const cached = readQueryCache(cacheKey);
       if (cached) return [cached];
+    }
+    // 命中缓存就不必打端点，所以闸门放在缓存之后：缓存的向量一秒都不用等
+    if (opts.interactive) {
+      const closedMs = isGateClosed(endpointKey, budgetMs);
+      if (closedMs) throw tooSlowError(closedMs, budgetMs);
     }
     const out = await runInEmbeddingQueue(async () => {
       const texts = Array.isArray(input) ? input : [input];
@@ -113,13 +178,39 @@ function createEmbeddingClient(config) {
 
       // 请求头单一来源 llm-request.js（嵌入端点同样可能要求自定义头 / User-Agent）
       const headers = buildLlmHeadersFromConfig({ ...config, apiKey });
+      const startedAt = Date.now();
+      // 端点可能「TCP 通但永不返回」：客户端的墙钟上限必须存在，否则这条请求会一直挂着，
+      // 而闸门只在成功时更新 ⇒ 每轮召回都重新挂一次（Rust 侧同款：remote.rs 的
+      // EMBED_REQUEST_TIMEOUT_MS）。交互查询用交互预算当硬上限，后台批量沿用 120s。
+      const timeoutMs = opts.interactive ? budgetMs : EMBED_REQUEST_TIMEOUT_MS;
+      const timeoutSignal =
+        typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+          ? AbortSignal.timeout(timeoutMs)
+          : undefined;
+      const timeoutError = () => {
+        const elapsed = Date.now() - startedAt;
+        // 超时也是「量到端点有多慢」的证据：记下来闸门才会关，下一轮直接走关键词通道
+        if (single) recordRoundtrip(endpointKey, elapsed, budgetMs);
+        const err = new Error(
+          `embedding 端点 ${timeoutMs}ms 内没有响应：本次跳过语义通道（关键词/子串照常可用）`
+        );
+        err.code = 'EMBEDDING_TOO_SLOW';
+        return err;
+      };
       const res = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        ...(timeoutSignal ? { signal: timeoutSignal } : {})
+      }).catch((e) => {
+        if (e && (e.name === 'AbortError' || e.name === 'TimeoutError')) throw timeoutError();
+        throw e;
       });
 
-      const raw = await res.text();
+      const raw = await res.text().catch((e) => {
+        if (e && (e.name === 'AbortError' || e.name === 'TimeoutError')) throw timeoutError();
+        throw e;
+      });
       let json;
       try {
         json = JSON.parse(raw);
@@ -142,7 +233,7 @@ function createEmbeddingClient(config) {
       if (!rows.length && Array.isArray(json.embedding)) rows.push({ embedding: json.embedding, index: 0 });
       if (!rows.length && Array.isArray(json.vector)) rows.push({ embedding: json.vector, index: 0 });
       rows.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-      return rows.map((row) => {
+      const vectors = rows.map((row) => {
         const vec = row.embedding;
         if (!Array.isArray(vec) || !vec.length) {
           throw new Error('Embedding 向量为空');
@@ -152,14 +243,30 @@ function createEmbeddingClient(config) {
         }
         return vec;
       });
+      // 计时口径是这一次 HTTP 往返（不含串行队列排队）：队排多长取决于别的任务，
+      // 端点本身快不快才是「交互查询值不值得发」的判据。
+      //
+      // 只记**单条**请求：批量文档一次塞几十条，耗时天然长几倍，拿它判交互查询会
+      // 让一次后台建库把健康端点误判成慢端点。
+      if (single) recordRoundtrip(endpointKey, Date.now() - startedAt, budgetMs);
+      return vectors;
     });
     if (single && out && out[0]) writeQueryCache(cacheKey, out[0]);
     return out;
   }
 
+  /**
+   * 查询向量专用入口（每轮召回 / 代码检索 / 工具召回）：端点已知比交互预算慢时不发请求。
+   * 与 `embed(input)` 是**同一份实现**，只多一道闸门 —— 别在调用点复制判断。
+   */
+  async function embedInteractive(input) {
+    return embed(input, { interactive: true });
+  }
+
   return {
     enabled,
     embed,
+    embedInteractive,
     model,
     dimensions,
     url

@@ -141,6 +141,17 @@ const AGENT_LIMITS_DEFAULTS = {
   writeSmellScanTimeoutMs: 1500,
   codebaseSnippetMax: 2400,
   codebaseAutoLimit: 12,
+  // 「一次交互查询最多能等多久 embedding 往返」。超过它就**不发请求**，直接走关键词/子串通道。
+  //
+  // 为什么需要这个数：端点一慢（自建 4B 模型实测 34–44s/请求且服务端串行），
+  // 每轮召回都发一个注定被调用方放弃的请求 —— 被放弃的 HTTP 仍在端点队列里排队，
+  // 下一轮再排一条，队列永不排空，同一队列里的 codebase.search 跟着一起超时。
+  // 现场见 docs/VECTOR-SEARCH.md §1.4（`agent:prep-system-prompt` 因 codebase.search 超时整轮失败）。
+  //
+  // **不是旋钮**：它不是「调大就能多等」的性能参数 —— 调大只会让每轮等更久，
+  // 端点本身的往返时间不会变。Rust 侧 `crates/dieyun-core/src/embedding/mod.rs`
+  // 的 `INTERACTIVE_EMBED_BUDGET_MS` 与本值成对（跨语言没法共享常量，同 SLOW_RPC_LOG_MS 先例）。
+  interactiveEmbedBudgetMs: 10000,
   openFilesMax: 12,
   filePreviewMaxChars: 4000,
   fsReadDefaultMaxBytes: 65536,

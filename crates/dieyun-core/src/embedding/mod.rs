@@ -1,6 +1,7 @@
 mod remote;
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use tokio::sync::Semaphore;
 
@@ -44,6 +45,71 @@ static EMBED_BATCH_INFLIGHT: OnceLock<Semaphore> = OnceLock::new();
 
 fn embed_batch_inflight() -> &'static Semaphore {
     EMBED_BATCH_INFLIGHT.get_or_init(|| Semaphore::new(EMBED_CONCURRENCY.saturating_sub(1).max(1)))
+}
+
+/// 交互式查询（每轮系统提示的记忆召回、`codebase.search` 的查询向量）能接受的
+/// **一次 embedding 往返**上限。数字与 Node 侧 `src/agent/agent-limits.js`
+/// (`interactiveEmbedBudgetMs`，prep 的召回预算同量级) 成对，跨语言没法共享常量，
+/// 同 `rpc::SLOW_RPC_LOG_MS` 的先例 —— 改一处必须改另一处。
+///
+/// 为什么需要这个数：端点一慢（自建 4B 模型实测 **34–44s/请求，且服务端完全串行**），
+/// 「每轮召回打一个注定被放弃的请求」就不只是白等 —— 调用方 after 10s 放弃等待，
+/// 但那次 HTTP 仍在端点队列里排队，下一轮再排一条，队列永不排空，最后**所有**交互查询
+/// 一起饿死（现场：`codebase.search 超时` 把整轮发送打挂）。
+///
+/// 所以交互查询要在**发请求之前**判断值不值得发，而不是靠调用方的 withTimeout 掐等待者。
+pub const INTERACTIVE_EMBED_BUDGET_MS: u64 = 10_000;
+
+/// 最近一次成功往返的 `(端点+模型键, 毫秒, 记录时刻)`：交互闸门据此判断「现在还值得发吗」。
+///
+/// 记什么：**成功**（端点是快的）与**超时**（端点是慢的，有证据）。别的失败（连接被拒 / 401 /
+/// 解析失败）不记 —— 一次快速失败既不能证明端点变快了，也不能证明它变慢了。
+///
+/// 为什么要记超时：以前只记成功，于是「端点 TCP 通但永不返回」这种情况永远关不上闸门 ——
+/// 每轮召回都重新发一次、等满客户端超时（真机现场：`memory.long_recall` 连续两次
+/// 120008ms 超时，整轮 prep 被打挂）。
+///
+/// 关闸有时间上限（[`EMBED_GATE_TTL_MS`]）：测量过期就允许再探一次，否则端点恢复后
+/// 语义通道会一直关到进程重启。
+static LAST_ROUNDTRIP: Mutex<Option<(String, u64, Instant)>> = Mutex::new(None);
+
+/// 关闸测量的有效期：过期后允许一次探测（探成功就重新开闸）。
+const EMBED_GATE_TTL_MS: u64 = 5 * 60 * 1000;
+
+fn record_roundtrip(cfg: &EmbeddingConfig, ms: u64) {
+    let key = cfg.cache_key();
+    if let Ok(mut guard) = LAST_ROUNDTRIP.lock() {
+        *guard = Some((key, ms, Instant::now()));
+    }
+    if ms > INTERACTIVE_EMBED_BUDGET_MS {
+        // 一行一次（每次真跑满了才会打），足够回答「为什么这几轮召回没走语义通道」
+        eprintln!(
+            "[embed] 端点往返 {ms}ms > 交互预算 {budget}ms：交互查询自本轮起跳过语义通道，后台写入照旧",
+            budget = INTERACTIVE_EMBED_BUDGET_MS
+        );
+    }
+}
+
+/// 端点已知比交互预算慢时返回实测值。换了端点/模型（`cache_key` 变了）或测量过期就重新量。
+fn slow_roundtrip_ms(cfg: &EmbeddingConfig) -> Option<u64> {
+    let guard = LAST_ROUNDTRIP.lock().ok()?;
+    let (key, ms, at) = guard.as_ref()?;
+    if *key != cfg.cache_key() || *ms <= INTERACTIVE_EMBED_BUDGET_MS {
+        return None;
+    }
+    if at.elapsed().as_millis() as u64 >= EMBED_GATE_TTL_MS {
+        return None;
+    }
+    Some(*ms)
+}
+
+/// 这个错误码表示「端点太慢，本次**没有发**请求」——调用方应当走既有的关键词 / 子串通道。
+const EMBEDDING_TOO_SLOW: &str = "EMBEDDING_TOO_SLOW";
+
+pub fn is_too_slow(err: &CoreError) -> bool {
+    // 端点没在预算内回话（超时）与「预判太慢直接不发」对调用方是同一件事：
+    // 语义通道这次拿不到，关键词/子串照常可用。
+    matches!(err, CoreError::Rpc { code, .. } if *code == EMBEDDING_TOO_SLOW || *code == remote::EMBEDDING_TIMEOUT_CODE)
 }
 
 /// 向量后端配置。**只支持远程 OpenAI 兼容 /embeddings 端点**：
@@ -145,6 +211,17 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 pub const MIN_SIMILARITY: f64 = 0.05;
 
 pub async fn embed_texts(cfg: &EmbeddingConfig, inputs: &[String]) -> Result<Vec<Vec<f32>>, CoreError> {
+    embed_texts_with_timeout(cfg, inputs, remote::EMBED_REQUEST_TIMEOUT_MS).await
+}
+
+/// 一次真正的远端往返（唯一实现）。`timeout_ms` 由调用方决定：
+/// 后台路径用 [`remote::EMBED_REQUEST_TIMEOUT_MS`]（等得起），交互路径用
+/// [`INTERACTIVE_EMBED_BUDGET_MS`]（预算是硬上限，不是只用来「预判要不要发」）。
+async fn embed_texts_with_timeout(
+    cfg: &EmbeddingConfig,
+    inputs: &[String],
+    timeout_ms: u64,
+) -> Result<Vec<Vec<f32>>, CoreError> {
     if !cfg.enabled() {
         return Err(CoreError::rpc(
             "EMBEDDING_DISABLED",
@@ -163,7 +240,45 @@ pub async fn embed_texts(cfg: &EmbeddingConfig, inputs: &[String]) -> Result<Vec
         .acquire()
         .await
         .map_err(|_| CoreError::rpc("EMBEDDING_HTTP", "embedding 并发闸门已关闭"))?;
-    remote::embed_remote(cfg, &prepared).await
+    let started = Instant::now();
+    let out = remote::embed_remote(cfg, &prepared, timeout_ms).await;
+    // 成功与超时都算「量到了端点有多快」：超时是端点慢的**证据**，不记就会每轮重发、每次等满超时。
+    let worth_recording =
+        counts_as_query_latency(prepared.len()) && (out.is_ok() || matches!(&out, Err(e) if remote::is_timeout_error(e)));
+    if worth_recording {
+        record_roundtrip(cfg, started.elapsed().as_millis() as u64);
+    }
+    out
+}
+
+/// 这次往返能不能当「查询延迟」用：**只有单条请求**够格。
+///
+/// 批量请求（建库、归纳补齐向量）一次塞几十条，耗时天然长几倍。拿批量耗时判
+/// 「交互查询值不值得发」，会让一次后台建库把健康端点误判成慢端点，白白关掉语义召回。
+fn counts_as_query_latency(inputs: usize) -> bool {
+    inputs == 1
+}
+
+/// 交互式查询专用入口：端点最近一次往返已超过 [`INTERACTIVE_EMBED_BUDGET_MS`] 时
+/// **不发请求**，直接回 [`EMBEDDING_TOO_SLOW`]（`is_too_slow` 判定），
+/// 让调用方走它本来就有的关键词 / 子串通道。
+///
+/// 后台路径（建库、归纳写入、手工重建向量）继续用 [`embed_texts`] —— 它们等得起，
+/// 而且它们的向量是「以后每轮召回/检索都要用」的资产，不能被这个闸门挡掉。
+pub async fn embed_texts_interactive(
+    cfg: &EmbeddingConfig,
+    inputs: &[String],
+) -> Result<Vec<Vec<f32>>, CoreError> {
+    if let Some(ms) = slow_roundtrip_ms(cfg) {
+        return Err(CoreError::rpc(
+            EMBEDDING_TOO_SLOW,
+            format!(
+                "embedding 端点最近一次往返 {ms}ms，超过交互预算 {budget}ms：本次跳过语义通道（关键词/子串照常可用）",
+                budget = INTERACTIVE_EMBED_BUDGET_MS
+            ),
+        ));
+    }
+    embed_texts_with_timeout(cfg, inputs, INTERACTIVE_EMBED_BUDGET_MS).await
 }
 
 pub async fn embed_batches(
@@ -364,5 +479,87 @@ mod tests {
             EMBED_CONCURRENCY - 1
         );
         assert_eq!(embed_inflight().available_permits(), EMBED_CONCURRENCY);
+    }
+
+    fn cfg_of(base_url: &str, model: &str) -> EmbeddingConfig {
+        EmbeddingConfig {
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// 闸门状态是进程级静态量：断言它的用例必须串行，否则彼此把对方的测量覆盖掉。
+    /// （曾经并行跑时 `interactive_gate_*` 偶发拿到 None，是这个原因，不是逻辑错。）
+    static GATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 交互闸门的三条不变量：没量过要放行（第一条必须有机会量出速度）、
+    /// 恰好等于预算不算慢（预算是「能接受」的上限）、换了端点必须重新量。
+    #[test]
+    fn interactive_gate_opens_until_measured_and_trips_above_budget() {
+        let _guard = GATE_TEST_LOCK.lock();
+        let a = cfg_of("http://gate-test-a.local/v1", "gate-model");
+        assert_eq!(slow_roundtrip_ms(&a), None, "没量过 → 允许");
+        record_roundtrip(&a, INTERACTIVE_EMBED_BUDGET_MS);
+        assert_eq!(slow_roundtrip_ms(&a), None, "等于预算不算慢");
+        record_roundtrip(&a, INTERACTIVE_EMBED_BUDGET_MS + 1);
+        assert_eq!(
+            slow_roundtrip_ms(&a),
+            Some(INTERACTIVE_EMBED_BUDGET_MS + 1),
+            "超过预算 → 交互查询不再发请求"
+        );
+        let b = cfg_of("http://gate-test-b.local/v1", "gate-model");
+        assert_eq!(slow_roundtrip_ms(&b), None, "换端点要重新量，不能被连坐");
+    }
+
+    /// 关闸不能是永久的：测量过期要能再探一次，否则端点恢复后语义通道一直关到进程重启
+    /// （现场：端点挂死 → 关闸 → 用户把服务修好，召回却再也不走语义）。
+    #[test]
+    fn gate_reopens_after_ttl() {
+        let _guard = GATE_TEST_LOCK.lock();
+        let a = cfg_of("http://gate-ttl.local/v1", "ttl-model");
+        record_roundtrip(&a, INTERACTIVE_EMBED_BUDGET_MS + 1);
+        assert!(slow_roundtrip_ms(&a).is_some(), "刚测到慢 → 关闸");
+        if let Ok(mut guard) = LAST_ROUNDTRIP.lock() {
+            let key = a.cache_key();
+            *guard = Some((
+                key,
+                INTERACTIVE_EMBED_BUDGET_MS + 1,
+                Instant::now() - std::time::Duration::from_millis(EMBED_GATE_TTL_MS + 1),
+            ));
+        }
+        assert_eq!(slow_roundtrip_ms(&a), None, "测量过期 → 允许再探一次");
+    }
+
+    #[test]
+    fn too_slow_predicate_only_matches_the_gate_code() {
+        assert!(is_too_slow(&CoreError::rpc(
+            EMBEDDING_TOO_SLOW,
+            "x".to_string()
+        )));
+        // 端点没在预算内回话 = 语义通道这次拿不到，和「预判太慢不发」对调用方是同一件事
+        assert!(is_too_slow(&CoreError::rpc(
+            remote::EMBEDDING_TIMEOUT_CODE,
+            "x".to_string()
+        )));
+        // 端点报了错（401/解析失败）不算「太慢」：不能据此关闸，也不能静默降级
+        assert!(!is_too_slow(&CoreError::rpc(
+            "EMBEDDING_API",
+            "x".to_string()
+        )));
+        assert!(!is_too_slow(&CoreError::rpc(
+            "EMBEDDING_HTTP",
+            "x".to_string()
+        )));
+    }
+
+    /// 只有单条请求的往返能当「查询延迟」：批量耗时天然长几倍，拿它判慢会把
+    /// 健康端点误伤（一次后台建库就能把语义召回关掉）。
+    #[test]
+    fn only_single_input_roundtrips_count_as_query_latency() {
+        assert!(counts_as_query_latency(1));
+        assert!(!counts_as_query_latency(0));
+        assert!(!counts_as_query_latency(2));
+        assert!(!counts_as_query_latency(EMBED_BATCH_MAX_INPUTS));
     }
 }

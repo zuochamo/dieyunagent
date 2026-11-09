@@ -28,9 +28,24 @@ fn is_direct_embed_url(base_url: &str) -> bool {
         .ends_with("/embed")
 }
 
+/// 后台 embedding 请求的墙钟上限（建库 / 归纳写入 / 手工重建向量都等得起）。
+///
+/// **交互式查询不用这个数**：它必须受 `INTERACTIVE_EMBED_BUDGET_MS` 约束，否则端点挂死时
+/// 每轮召回要等满 120s（真机现场：`memory.long_recall` 连续两次 120008ms 超时）。
+pub const EMBED_REQUEST_TIMEOUT_MS: u64 = 120_000;
+
+/// `reqwest` 的「超时」单独一个码：调用方据此判定「端点没回」而不是「端点报错」，
+/// 交互闸门也只在超时（有证据证明它慢）时关闸，401 / 解析失败不关。
+pub const EMBEDDING_TIMEOUT_CODE: &str = "EMBEDDING_TIMEOUT";
+
+pub fn is_timeout_error(err: &CoreError) -> bool {
+    matches!(err, CoreError::Rpc { code, .. } if *code == EMBEDDING_TIMEOUT_CODE)
+}
+
 pub async fn embed_remote(
     cfg: &EmbeddingConfig,
     inputs: &[String],
+    timeout_ms: u64,
 ) -> Result<Vec<Vec<f32>>, CoreError> {
     if inputs.is_empty() {
         return Ok(Vec::new());
@@ -59,7 +74,7 @@ pub async fn embed_remote(
     };
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
         .build()
         .map_err(|e| CoreError::rpc("EMBEDDING_HTTP", e.to_string()))?;
 
@@ -67,17 +82,28 @@ pub async fn embed_remote(
     let mut req = client.post(&url);
     req = crate::config::apply_llm_headers(req, &cfg.headers, &cfg.api_key, &cfg.auth_mode);
 
-    let resp = req
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| CoreError::rpc("EMBEDDING_HTTP", e.to_string()))?;
+    let resp = req.json(&body).send().await.map_err(|e| {
+        if e.is_timeout() {
+            CoreError::rpc(
+                EMBEDDING_TIMEOUT_CODE,
+                format!("端点 {timeout_ms}ms 内没有响应：{e}"),
+            )
+        } else {
+            CoreError::rpc("EMBEDDING_HTTP", e.to_string())
+        }
+    })?;
 
     let status = resp.status();
-    let raw = resp
-        .text()
-        .await
-        .map_err(|e| CoreError::rpc("EMBEDDING_HTTP", e.to_string()))?;
+    let raw = resp.text().await.map_err(|e| {
+        if e.is_timeout() {
+            CoreError::rpc(
+                EMBEDDING_TIMEOUT_CODE,
+                format!("端点 {timeout_ms}ms 内没有返回完响应体：{e}"),
+            )
+        } else {
+            CoreError::rpc("EMBEDDING_HTTP", e.to_string())
+        }
+    })?;
 
     // 错误体可能是任意 UTF-8（反代的 502 页面、中文报错）：按**字符**截断。
     // 按字节切会在多字节字符中间切断，直接 panic（`&raw[..200]` 曾如此）。
