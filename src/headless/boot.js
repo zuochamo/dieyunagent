@@ -28,6 +28,7 @@ const { LocalGateway } = require('../gateway/server');
 const { createCoreBridge } = require('../core-bridge');
 const { resolveDieyunCoreBinary, isRustCoreEnabled } = require('../core-bridge-path');
 const { ensureAgentHomeDirs, dieyunDefaultWorkspaceDir } = require('../agent-home');
+const { scheduleDefaultWorkspaceGc } = require('../default-workspace-gc');
 const { ensureDieyunMdInHome } = require('../dieyun-instructions');
 const { createMcpStore } = require('../mcp/store');
 const { createMcpManager } = require('../mcp/manage');
@@ -164,6 +165,9 @@ async function bootHeadless(opts) {
   } catch (err) {
     log.warn(`dieyun.md 初始化失败：${(err && err.message) || err}`);
   }
+  // 默认工作区回收：与桌面同一份语义（src/default-workspace-gc.js）。headless 常年不退出，
+  // 更是这一趟周期回收的主要受益者。
+  scheduleDefaultWorkspaceGc({ log, limits: getAgentLimits(userData, 'default') });
 
   // MCP：凭据走 secret-storage 替身；没有界面，凭据缺失时工具层会明确报「需要重新填写」
   const mcpStore = createMcpStore({ safeStorage: secretStorage });

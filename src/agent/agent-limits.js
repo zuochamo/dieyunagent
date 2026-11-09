@@ -228,6 +228,17 @@ const AGENT_LIMITS_DEFAULTS = {
   // window.CJK_CHARS_PER_TOKEN 后直接消费（这两个键不在 module.exports 中）。
   charsPerToken: 3.2,
   cjkCharsPerToken: 1.5,
+  // 默认工作区（~/.dieyun/workspace）回收，唯一实现 src/default-workspace-gc.js。
+  // 这个目录是「未选工作空间时的落脚点」，所有落盘产物都进它，没有任何会话负责清理 ——
+  // 不设上限就单调增长（实测一台开发机半年 7896 个文件 / 717 MB）。
+  // 只管这一个兜底目录；用户自选的工作空间永远不动。
+  // 保留天数 / 容量上限是**用户可调**的（进 SCHEMA）；后三个是机制预算，故意不进设置页：
+  // 宽限期是安全垫（多实例/长会话可能还在用，删了就是事故），其余两个是单趟与调度预算。
+  defaultWorkspaceRetentionDays: 30,
+  defaultWorkspaceMaxMb: 1024,
+  defaultWorkspaceGraceHours: 24,
+  defaultWorkspaceGcMaxEntries: 4000,
+  defaultWorkspaceGcIntervalMs: 6 * 60 * 60 * 1000,
   // 附件图片保留：超过容量后从最旧的图片开始原地降采样（不改名、不删除，历史引用不悬空）
   attachmentRetentionMaxMb: 500,
   attachmentDownsampleMaxPx: 1600,
@@ -1117,6 +1128,35 @@ const AGENT_LIMITS_SCHEMA = [
         max: 1024,
         step: 20,
         unit: 'KB'
+      }
+    ]
+  },
+  {
+    group: '默认工作区回收',
+    groupId: 'workspace-gc',
+    items: [
+      {
+        key: 'defaultWorkspaceRetentionDays',
+        label: '默认工作区保留天数',
+        hint:
+          '没有会话负责清理的兜底目录 ~/.dieyun/workspace：超过该天数没动过的条目会被回收；' +
+          '含工程标记（.git / package.json 等）或最近 24 小时动过的条目永不自动删除',
+        type: 'number',
+        min: 1,
+        max: 365,
+        step: 1,
+        unit: '天'
+      },
+      {
+        key: 'defaultWorkspaceMaxMb',
+        label: '默认工作区容量上限',
+        hint: '超过该容量后按最旧优先继续回收；只作用于 ~/.dieyun/workspace，不碰自选工作空间',
+        type: 'number',
+        min: 50,
+        max: 20480,
+        step: 50,
+        format: 'mb',
+        unit: 'MB'
       }
     ]
   }

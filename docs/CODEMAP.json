@@ -534,6 +534,25 @@
       ]
     },
     {
+      "id": "default-workspace-gc",
+      "paths": [
+        "src/default-workspace-gc.js"
+      ],
+      "owns": [
+        "默认工作区 ~/.dieyun/workspace 的回收策略（唯一实现）：到期条目删除 + 容量上限按最旧优先补齐",
+        "两条硬边界：工程标记（.git / package.json / Cargo.toml / …）与宽限期内的条目永不自动删除",
+        "只作用于兜底目录；用户自选的工作空间永远不动",
+        "装配：桌面 src/main-entry.js 与 headless src/headless/boot.js 各调一次 scheduleDefaultWorkspaceGc"
+      ],
+      "tests": [
+        "test:default-workspace-gc",
+        "test:agent-limits"
+      ],
+      "docs": [
+        "docs/AGENT-DEV.md"
+      ]
+    },
+    {
       "id": "headless",
       "paths": [
         "src/headless/",
@@ -702,6 +721,19 @@
     },
     {
       "prefix": "src/attachment-retention.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/default-workspace-gc.js",
+      "tests": [
+        "test:default-workspace-gc",
+        "test:agent-limits"
+      ]
+    },
+    {
+      "prefix": "src/agent-home.js",
       "tests": [
         "test:unit"
       ]
@@ -1682,6 +1714,7 @@
     ],
     "agent": [
       "test:agent-limits",
+      "test:default-workspace-gc",
       "test:task-tier",
       "test:unit",
       "test:core-bridge",
@@ -1733,6 +1766,7 @@
     ],
     "agent-full": [
       "test:agent-limits",
+      "test:default-workspace-gc",
       "test:task-tier",
       "test:unit",
       "test:core-bridge",

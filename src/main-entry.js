@@ -24,6 +24,7 @@ const net = require('net');
 const { usageToActivityPatch } = require('./llm-usage-stats');
 const { setLlmUsageRecorder } = require('./agent/llm-usage-recorder');
 const { ensureAgentHomeDirs, createUserSkill, dieyunHome } = require('./agent-home');
+const { scheduleDefaultWorkspaceGc } = require('./default-workspace-gc');
 const { migrateAppDataSkills, migrateWorkspaceSkills } = require('./skills/seed-to-dieyun');
 const { LocalGateway } = require('./gateway/server');
 const { createCoreBridge } = require('./core-bridge');
@@ -688,6 +689,9 @@ app.whenReady().then(async () => {
       log.warn('dieyun.md 初始化失败:', e.message);
     }
     log.info('Agent 目录已就绪:', home.dieyunHome);
+    // 默认工作区回收：未选工作空间时所有产物都落 ~/.dieyun/workspace，没有任何会话负责清理，
+    // 不回收就单调增长。语义全在 src/default-workspace-gc.js（headless 那边同一份）。
+    scheduleDefaultWorkspaceGc({ log, limits: getAgentLimits(userData, 'default') });
     if (home.agentsSkillsMigration && home.agentsSkillsMigration.copied > 0) {
       log.info(
         `已从 ~/.agents/skills 合并 ${home.agentsSkillsMigration.copied} 个技能到 ~/.dieyun/skills`

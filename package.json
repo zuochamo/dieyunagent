@@ -42,6 +42,7 @@
     "test:agent": "node scripts/test-agent-smoke.cjs --all",
     "test:agent-full": "node scripts/test-agent-smoke.cjs --full",
     "test:agent-limits": "node scripts/test-agent-limits.cjs",
+    "test:default-workspace-gc": "node scripts/test-default-workspace-gc.cjs",
     "test:task-tier": "vitest run test/unit/task-tier.test.cjs",
     "test:unit": "vitest run",
     "stats:goal-trigger": "node scripts/goal-trigger-stats.cjs",

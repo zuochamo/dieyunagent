@@ -74,6 +74,7 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - `src/agent/guardrails-shared.js` — 工具拦截常量/逻辑（Main + Renderer 共用）。无只读探索/同文件重读硬拦。
 - `src/agent/tool-guardrails.js` — Main 薄封装
 - `src/agent/completion-readiness.js` — **完成验收的唯一来源**（Main）：证据 = 循环账本 trace + Gateway `workspace.diagnostics` + 浏览器运行时事实；只提示、不自动续跑、不挡交付
+- `src/default-workspace-gc.js` — **默认工作区（`~/.dieyun/workspace`）回收的唯一来源**：到期回收 + 容量上限按最旧优先补刀；两条硬边界（工程标记 / 宽限期内的条目永不自动删）；只作用于兜底目录，**不碰自选工作空间**。数字在 `agent-limits.js` 的 `defaultWorkspace*`，装配在 `src/main-entry.js` 与 `src/headless/boot.js` 各一行
 - `src/renderer/agent-guardrails.js` — 只渲染验收提示（`applyReadinessNote`，不判定）
 - `src/renderer/renderer-agent-reviewer.js` — 可选 LLM Reviewer（默认关；独立模型 + 文件 diff）
 
@@ -109,6 +110,7 @@ GitHub Actions：`.github/workflows/ci.yml`（contracts + lint + smoke + cargo t
 | `crates/.../planner/` | `npm run test:rust-planner-smoke` |
 | `src/agent/`（limits/护栏） | `npm run test:agent-limits` + `npm run test:task-tier` |
 | `src/agent/write-smell-hints.js` | `npm run test:write-smell-hints` |
+| `src/default-workspace-gc.js` | `npm run test:default-workspace-gc` |
 | `src/agent/agent-system-prompt.js` | `npm run test:agent-system-prompt` |
 | `src/agent/system-prompt-prep.js` | `npm run test:system-prompt-prep` |
 | 纯逻辑单测（Vitest） | `npm run test:unit` |
