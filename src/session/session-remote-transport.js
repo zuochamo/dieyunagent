@@ -20,6 +20,8 @@ const { remoteWorktreePath, repoRemotePathOf } = require('../ssh/remote-worktree
 function createSessionRemoteTransport(deps) {
   /** @type {Map<string, { target: object, refCount: number }>} */
   const sessionLeases = new Map();
+  /** 视图侧后台确保的在飞表（key = 会话|目标路径）：只挡重复，见 ensureRemoteGatewayInBackground */
+  const viewEnsureInFlight = new Map();
   /** @type {import('../workspace/target').WorkspaceTarget | null} */
   let activeViewTarget = null;
 
@@ -287,6 +289,36 @@ function createSessionRemoteTransport(deps) {
   }
 
   /**
+   * 视图切换用的「后台确保」：worktree 检查与 agent 槽位仍在后台建，但**同一份目标只发一次**。
+   *
+   * 为什么需要这一层：那两件活都要排进 `session-manager` 的每连接串行 exec 链，快速连点几个
+   * 会话就会把同一份 worktree 检查重复堆在链上（实测队列深度涨到 5）。这里只挡重复，不改变
+   * 语义 —— 每个 (会话, 目标路径) 同时最多一条在飞，落地后立刻从表里摘掉（失败也只记日志）。
+   *
+   * @param {object} target
+   * @param {string} sessionId
+   */
+  function ensureRemoteGatewayInBackground(target, sessionId) {
+    if (!target || !deps.remoteGatewayPool) return null;
+    const key = `${String(sessionId || '').trim()}|${normalizeRemotePath(target.remotePath || '/')}`;
+    const prev = viewEnsureInFlight.get(key);
+    if (prev) return prev;
+    let promise = null;
+    promise = ensureRemoteGatewayForTarget(target, sessionId)
+      .catch((e) => {
+        // 后台失败不影响视图；下一次切换或真正开跑时还会再试
+        const log = deps.log || (() => {});
+        log('session ssh remote gateway: ' + (e && e.message ? e.message : String(e)));
+        return null;
+      })
+      .finally(() => {
+        if (viewEnsureInFlight.get(key) === promise) viewEnsureInFlight.delete(key);
+      });
+    viewEnsureInFlight.set(key, promise);
+    return promise;
+  }
+
+  /**
    * Drop the view-level SSH pool hold. Do not stop Remote Agent or the TCP
    * session: conversation switches should keep the connection in the background
    * until explicit disconnect / idle eviction / app quit.
@@ -349,21 +381,25 @@ function createSessionRemoteTransport(deps) {
     }
 
     if (target.kind === 'ssh') {
+      // 视图切换只做「这条会话属于哪条连接」这一件事，**不等任何远端命令**。
+      //
+      // 以前这里 await 了两件远端活：worktree 幂等检查（`git rev-parse` + `test -d`）与 agent
+      // 槽位部署。两者都走 `session-manager` 的每连接串行 exec 链，于是「另一个会话正在跑一个
+      // 长 host_exec」时，切换要排在那条命令后面 —— 真机实测：一次切换 57.3s，其中 56.4s 全在
+      // 等一条 60s 的远端命令（`[perf] sh-exec wait=56450ms`，改后同场景 31–44ms）。
+      //
+      // 现在：连接与引用照旧（断开/回收仍靠它），worktree 与 agent 槽位仍按需建立，但在**后台**
+      // 建 —— `ensureRemoteGatewayForTarget` 内部照旧先落到本会话 worktree（`withSessionWorktree`），
+      // 最终状态不变，只是不把界面卡在串行链上。真正要用远端的入口（`setSessionRemoteLease`
+      // 开跑前、RPC 自愈 `healRemoteAgentTransport`）仍会 await，那里等得起。
       await releaseInactiveViewTransport(prevTarget, nextTarget);
       const needsAcquire = !sameViewTransport(prevTarget, nextTarget);
       const ok = await ensureSshForTarget(target, { acquire: needsAcquire });
+      activeViewTarget = nextTarget;
       if (!ok) {
-        activeViewTarget = nextTarget;
         return { ok: false, kind: 'ssh', reason: 'not_connected' };
       }
-      // 连上之后才知道该会话跑在哪份 worktree 上；pool 槽位 / 端口 / agent 全按它分
-      const effective = await withSessionWorktree(sid, target);
-      try {
-        await ensureRemoteGatewayForTarget(effective, sid);
-      } catch (e) {
-        log('session ssh remote gateway: ' + (e && e.message ? e.message : String(e)));
-      }
-      activeViewTarget = snapshotTarget(effective);
+      void ensureRemoteGatewayInBackground(target, sid);
       return { ok: true, kind: 'ssh', connected: true };
     }
 

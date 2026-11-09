@@ -151,6 +151,18 @@ async function testKeepSshViewOnLocalSwitchWithoutLease() {
   // 复用与否只由 manager 的幂等路径（含活体探测）判定；transport 不再自己看
   // isActiveForTarget 抄一份判断。这里能验的是：切回来必须落在**同一个槽位**
   // （同一 effective workspace），而不是又开一个。
+  //
+  // 切换不再 await 远端（远端活改在后台发起，见 session-remote-transport.js 的注释：
+  // 等它会被同连接的串行 exec 链堵住，实测排过 56.4s），且同一目标在飞时只发一次。
+  // 所以这两处要等后台落地再断言。
+  const waitForEnsures = async (n) => {
+    for (let i = 0; i < 200 && ensured.length < n; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  };
+  await waitForEnsures(1);
+  await transport.applySessionRemoteTransport('sess-a');
+  await waitForEnsures(2);
   if (ensured.length !== 2) {
     throw new Error(`switch back should reuse the same slot, ensure count=${ensured.length}`);
   }
