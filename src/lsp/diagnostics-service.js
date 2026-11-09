@@ -974,7 +974,9 @@ function createLspDiagnosticsService(opts) {
       }
     }
     if (bucket.pollTimer) {
-      clearInterval(bucket.pollTimer);
+      // ssh 轮询是「跑完再排下一次」的 setTimeout（不叠），本地没有轮询定时器
+      clearTimeout(bucket.pollTimer);
+      bucket.pollTimer = null;
     }
     if (bucket.queueTimer) {
       clearTimeout(bucket.queueTimer);
@@ -1010,7 +1012,8 @@ function createLspDiagnosticsService(opts) {
     if (!root) return { ok: false, error: 'workspaceRoot 必填' };
 
     const wantSsh = opts.mode === 'ssh' && typeof opts.sshExec === 'function';
-    const existing = watchState.get(workspaceStoreKey(root));
+    const wk = workspaceStoreKey(root);
+    const existing = watchState.get(wk);
     if (existing) {
       if (wantSsh && existing.pollTimer && existing.mode === 'ssh') {
         existing.sshExec = opts.sshExec;
@@ -1027,11 +1030,23 @@ function createLspDiagnosticsService(opts) {
     bucket.sshExec = typeof opts.sshExec === 'function' ? opts.sshExec : null;
 
     if (bucket.mode === 'ssh' && bucket.sshExec) {
-      const poll = () => {
-        void pollSshDirtyFiles(root, bucket.sshExec).catch(() => {});
+      // 一次只跑一个：远端 exec 是**每连接串行**的，用 setInterval 时上一轮还没回来就又排一条，
+      // 长命令期间实测堆到 7–9 条、单条 wait 75s（`[perf] sh-exec wait=75702ms cmd=…git diff --name-only…`），
+      // 把同一条连接上的切换、工具、诊断自己一起拖住。改成「跑完再排下一次」：节奏最差退化为
+      // 20s(exec 上限) + 25s(间隔)，但永远不会叠。
+      const schedule = (delayMs) => {
+        bucket.pollTimer = setTimeout(async () => {
+          try {
+            await pollSshDirtyFiles(root, bucket.sshExec);
+          } catch {
+            // 本轮失败不影响下一轮
+          }
+          // 期间可能已被 stop（watchState 里已不是这个 bucket）或重建：不再续期
+          if (watchState.get(wk) === bucket && bucket.pollTimer) schedule(SSH_DIRTY_POLL_MS);
+        }, delayMs);
+        if (typeof bucket.pollTimer.unref === 'function') bucket.pollTimer.unref();
       };
-      poll();
-      bucket.pollTimer = setInterval(poll, SSH_DIRTY_POLL_MS);
+      schedule(0);
       log(`[diagnostics] ssh dirty poll started ${root}`);
       return { ok: true, workspaceRoot: root, mode: 'ssh_poll' };
     }

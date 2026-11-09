@@ -83,4 +83,35 @@ describe('SSH watch 根路径', () => {
     service.stopWorkspaceDiagnosticsWatch(local);
     expect(service.getWatchStatus(local).active).toBe(false);
   });
+
+  it('远端 exec 没回来时不排下一轮（不叠在串行 exec 链上）', async () => {
+    vi.useFakeTimers();
+    try {
+      const root = '/home/u/slow';
+      let calls = 0;
+      let release = null;
+      const sshExec = () => {
+        calls += 1;
+        return new Promise((resolve) => {
+          release = () => resolve({ stdout: '' });
+        });
+      };
+
+      service.startWorkspaceDiagnosticsWatch(root, { mode: 'ssh', sshExec });
+      await vi.advanceTimersByTimeAsync(1); // 首轮立刻开跑，卡在这个永不返回的 exec 上
+      expect(calls).toBe(1);
+
+      // 四倍轮询间隔过去：旧实现（setInterval）这里会排到 5 条，全堆在同一条串行 exec 链上
+      await vi.advanceTimersByTimeAsync(25_000 * 4);
+      expect(calls).toBe(1);
+
+      release(); // 这一轮回来了才允许排下一轮
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(calls).toBe(2);
+
+      service.stopWorkspaceDiagnosticsWatch(root);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
