@@ -192,7 +192,7 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/CHANNEL-WECOM.md`](docs/CHANNEL-WECOM.md) | 内置频道（企业微信智能机器人）：设置页 / 长连接协议帧 / 在 Main 后台跑一轮 / 附件与主动推送（**已实施**） |
 | [`docs/SHARED-MEMORY.md`](docs/SHARED-MEMORY.md) | 共享记忆（跨机 PostgreSQL，设置 → 扩展）：只同步记忆条目 / 一条召回 SQL（向量 + trigram 兜底）/ advisory lock 提炼 / 连不上即关闭（**已实施**） |
 | [`docs/ALIVE.md`](docs/ALIVE.md) | 生命感（设置 → 拟态 → 生命）：心跳/四相位/张力/阈值漂移/自发唤醒/决策权在模型 + 感官（抽屉 / 眼睛 / 嘴与耳）；**它不会死、没有损耗、不隔离记忆** —— 与原 `--alive` 设计的差别、隔离度审计与负向清单一文说清（**已实施**） |
-| [`docs/ALIVE-VISIBILITY-PLAN.md`](docs/ALIVE-VISIBILITY-PLAN.md) | 生命感的「看得见」三件事：每日 token 额度（成本护栏）/ 体征历史曲线（`history.jsonl`）/ 侧栏「生命」页签与动静徽标（**设计稿，待实施**） |
+| [`docs/ALIVE-VISIBILITY-PLAN.md`](docs/ALIVE-VISIBILITY-PLAN.md) | 生命感的「看得见」三件事：每日 token 额度（成本护栏）/ 体征历史曲线（`history.jsonl`）/ 侧栏「生命」页签与动静徽标（**已实施**） |
 | [`docs/HEADLESS-MODE-PLAN.md`](docs/HEADLESS-MODE-PLAN.md) | 无界面运行（终端 REPL / 一次性 run / 浏览器 Web）：headless 装配、`main-turn-runner` 单一来源、safeStorage 替身、退出码与单实例边界、tgz + deb 分发与冷启动闸门（**P0–P5 已实施**） |
 | [`docs/HEADLESS.md`](docs/HEADLESS.md) | 无界面运行**安装与运维手册**：deb / tarball 安装、env 文件 / 密钥 / model-settings、参数与退出码、systemd、安全、排障表、升级回滚 |
 

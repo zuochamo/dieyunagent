@@ -350,6 +350,13 @@
                     <circle cx="16" cy="9.6" r="1.15" fill="currentColor"/>
                   </svg>
                 </button>
+                <button type="button" class="side-panel-rail-btn" data-side-tab="alive" title="生命 · 它在你不看时做了什么" aria-label="生命">
+                  <!-- 心跳：一条基线 + 一个尖峰；右上角小点是"最近一小时它有动静" -->
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                    <path d="M2.6 13.2h4.2l2.2-5.4 3.1 10 2.4-6.2h2.1l1.5 1.6h1.9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+                  </svg>
+                  <span class="side-panel-rail-badge" id="alive-rail-badge" hidden></span>
+                </button>
                 <button type="button" class="side-panel-rail-btn" data-side-tab="subagents" title="子代理" aria-label="子代理">
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                     <circle cx="6" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
@@ -624,6 +631,34 @@
                     <p class="artifacts-empty">还没有目标。需要多轮推进时，Agent 会自己开一个（goal_start）；也可以直接说清「做到什么算完成」。</p>
                   </div>
                 </div>
+                <!-- 生命面板：它在你**不看的时候**做了什么。
+                     数据与「设置 → 拟态 → 生命」同一份（alive:status / decisions / history / note），
+                     渲染也同一份函数（renderer-alive.js 的 renderAliveStatus / aliveEventLines / mountAliveTrend），
+                     这里只是一个壳 —— 别在这里再写第二套格式。 -->
+                <div class="side-panel-pane" data-side-pane="alive" hidden>
+                  <div class="side-panel-pane-head">
+                    <div class="side-panel-pane-head-main">
+                      <span class="side-panel-pane-title">生命</span>
+                      <span class="side-panel-pane-meta" id="alive-pane-status">读取中…</span>
+                    </div>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="alive-pane-refresh" title="刷新体征、曲线与事件">刷新</button>
+                    <button type="button" class="ghost-btn side-panel-pane-action" id="alive-pane-settings" title="打开「设置 → 拟态 → 生命」（开关 / 感官 / 设备）">设置</button>
+                  </div>
+                  <div class="agent-scroll alive-pane-body">
+                    <p class="channels-footnote" id="alive-pane-detail"></p>
+                    <p class="channels-footnote" id="alive-pane-budget"></p>
+                    <p class="channels-footnote" id="alive-pane-fatigue"></p>
+                    <p class="channels-footnote" id="alive-pane-session"></p>
+                    <p class="channels-footnote" id="alive-pane-loops"></p>
+                    <div class="alive-trend" id="alive-pane-trend">还没有足够的样本（心跳跑满两跳后才会有曲线）</div>
+                    <p class="channels-footnote" id="alive-pane-trend-note"></p>
+                    <h3 class="settings-subsection-title">最近发生了什么</h3>
+                    <pre class="channels-footnote alive-pane-events" id="alive-pane-events">还没有事件。</pre>
+                    <h3 class="settings-subsection-title">抽屉（note.md）</h3>
+                    <pre class="channels-footnote alive-pane-events" id="alive-pane-note">（还没有写东西）</pre>
+                  </div>
+                </div>
+
                 <!-- Bot 面板：两层。上层 = 已允许互通的内网 agent（数据与「连接 → Agent 互通」同源，
                      渲染唯一入口仍是 renderer-peer.js 的 renderPeerList）；下层 = 房间（一次任务一个）。
                      房间时间线与派任务是 BOT-ROOM-PLAN.md 的第 2–3 步，现在这里是占位。 -->

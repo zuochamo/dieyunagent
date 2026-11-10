@@ -9,7 +9,7 @@
 | 入口 | 设置 → 生命（一个总开关） |
 | 数字来源 | `src/agent/agent-limits.js` 的 `alive*` 段（唯一一处，不进设置页） |
 | 状态 | `<userData>/alive/state.json` + `events.jsonl` + `settings.json` |
-| 验收 | `npm run test:alive`（45 项，注入时钟模拟 30 天，不挂机） |
+| 验收 | `npm run test:alive`（52 项，注入时钟模拟 30 天，不挂机） |
 
 ---
 
@@ -125,10 +125,17 @@ alive_decide { decision: ACT | DEFER | REFUSE, intent, loopId?, loops? }
 | 有 | 没有 |
 |---|---|
 | 总开关（开 = 起心跳；关 = **停表**，体征保留） | 暂停 / 恢复 / 回滚 / 快照 / 克隆 |
-| 只读体征：相位、张力/阈值、疲劳、未闭合条数、今日唤醒、决策计数 | 死期 / 剩余天数 / 倒计时（没有死亡，也就不该有） |
-| 决策日志：`时间 · 决定 · 哪条未闭合项` | 「为什么」那一列（`intent` 本机私有） |
+| 只读体征：相位、张力/阈值、疲劳、未闭合条数、今日唤醒、决策计数、**今日 token / 额度** | 死期 / 剩余天数 / 倒计时（没有死亡，也就不该有） |
+| **体征趋势曲线**（最近 7 天：张力 + 疲劳 + 相位底色；数据在 `alive/history.jsonl`） | 导出 / 编辑历史 / 手动打点 |
+| 决策与感官日志：`时间 · 事件 · 细节` | 「为什么」那一列（`intent` 本机私有） |
 | 「重新开始」（清空体征，重开时重新出生） | `λ / ε / W / fuse` 任何性格参数旋钮 |
 | 可疑顺从提示（醒了多次却一次没拒绝） | 人格化皮肤（名字 / 头像 / 语气 / 情绪标签） |
+| **成本护栏**：每日 token 额度用完就停到明天（数字在 `agent-limits`，页面只读） | 额度旋钮 / 退避表 / 分时段配额 |
+
+**侧栏还有一个「生命」页**（`data-side-tab="alive"`）：与这一页**同一份渲染、同一份 IPC**，
+只是不必打开设置就能看到"它在你不看时做了什么"（概览 / 曲线 / 事件 / 抽屉预览），
+rail 上还有一个"最近一小时有动静"的小点（判据无状态，不存"已读"）。
+理由与实现见 `docs/ALIVE-VISIBILITY-PLAN.md`。
 
 开关语义要说死：**关掉不是暂停**。体征留着，重新打开会接着上一次的心跳继续走；
 想从零开始用「重新开始」。
@@ -274,6 +281,8 @@ alive_decide { decision: ACT | DEFER | REFUSE, intent, loopId?, loops? }
 | G 唤醒回执 | `WAKE` 带 load；`WAKE_END` 带 tokens / durationMs 且进 `status.lastWakeTokens`；没调 `alive_decide` 记 `WAKE_NO_DECISION` |
 | G 决策语义 | 空手 REFUSE 不计拒绝（只有真关掉一条未闭合项才算）；`intents` / `decisions` 保留条数与「可疑顺从」阈值都来自 agent-limits（且真的生效） |
 | G 抽屉读写 | `alive_read_note` 没有路径参数（只能读自己那一个文件）；写进去的能读回来 |
+| G 额度 | 达到 `aliveDailyTokenBudget` 就不醒（`token-day-cap`）、`<=0` 不限、跨天由 `rollDay` 清零、`tokenToday` 恒等于当日 `WAKE_END.tokens` 之和、超额度只记一条事件 |
+| G 曲线 | 每跳一条采样、窗口过滤、坏行跳过、读侧抽样 ≤ points 且含首尾、超行数上限裁一半 |
 | H 感官自检 | 缺件说得出来（红字文案非空）；齐件才 `ok`；设备名"设置 → 环境变量"优先级；`SPEAK`/`LISTEN` 许可三态；录音失败分类；发声记账与跨天重置 |
 | F 运行 | 30 天模拟：至少一次 `trigger=internal` 唤醒、多种相位、有决策记录、事件文件有界 |
 | 其它 | 状态文件原子写/坏文件留证；`onLlmUsage` 旁听不抢主槽；关掉再打开不丢体征；**启用即建 `alive/workspace`**；设置新增字段不冲掉感官开关 |

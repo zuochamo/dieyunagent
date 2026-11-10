@@ -1,4 +1,4 @@
-/* global window, document, $, isSettingsPageOpen, switchSettingsTab */
+/* global window, document, $, isSettingsPageOpen, switchSettingsTab, openSettingsModal */
 'use strict';
 
 /**
@@ -28,6 +28,7 @@ const aliveUi = {
   saving: false,
   devicesLoading: false,
   pollTimer: null,
+  badgeTimer: null,
   pollTick: 0,
   devicesLoaded: false
 };
@@ -343,10 +344,8 @@ function renderAliveCapabilities(status) {
 }
 
 function renderAliveNote(text) {
-  const el = $('alive-note');
-  if (!el) return;
   const body = String(text || '').trim();
-  el.textContent = body || '（还没有写东西）';
+  aliveWriteText(['alive-note', 'alive-pane-note'], body || '（还没有写东西）', null);
 }
 
 async function refreshAliveNote() {
@@ -452,6 +451,125 @@ async function setAliveSense(name, enabled) {
   }
 }
 
+/**
+ * 同一段文字写到**两个壳**里：设置页（`alive-*`）与侧栏「生命」页（`alive-pane-*`）。
+ *
+ * 为什么要同一个函数：两处各写一份格式，一周后必然漂移（"设置页说 3 次、侧栏说 2 次"）。
+ * 某个壳没打开时对应 id 不存在，跳过即可。
+ */
+function aliveWriteText(ids, text, kind) {
+  const body = String(text || '');
+  for (const id of ids) {
+    const el = $(id);
+    if (!el) continue;
+    el.textContent = body;
+    el.classList.remove('warn', 'ok');
+    if (!body) continue;
+    if (kind === 'bad') el.classList.add('warn');
+    else if (kind === 'ok') el.classList.add('ok');
+  }
+}
+
+/** 一行摘要（相位 / 心跳 / 上次心跳时间） */
+function aliveStatusHead(st) {
+  if (!st || (!st.exists && !st.enabled)) return '未启用（打开上面的开关才会开始跳动）';
+  if (!st.exists) return '已启用，尚未产生第一次心跳';
+  const phase = ALIVE_PHASE_TEXT[st.phase] || st.phase;
+  const runningText = st.running ? '跳动中' : '已停表';
+  const lastTick = aliveFmtTime(st.lastTickAt);
+  return (
+    `${runningText} · 相位 ${phase}（已 ${aliveFmtDuration(Date.now() - Number(st.phaseEnteredAt || Date.now()))}）` +
+    ` · 第 ${st.tickCount} 次心跳${lastTick ? `（上次 ${lastTick}）` : ''}`
+  );
+}
+
+/** 体征数字行（张力 / 疲劳 / 未闭合 / 今日唤醒 / 决策计数 / 成本） */
+function aliveStatusDetail(st) {
+  if (!st || !st.exists) return '';
+  const lastWakeTokens = Number(st.lastWakeTokens || 0);
+  const lastWakeMs = Number(st.lastWakeDurationMs || 0);
+  const lastWakeText = lastWakeTokens || lastWakeMs
+    ? ` · 上次醒来 ${lastWakeTokens ? `${aliveFmtTokens(lastWakeTokens)} token` : ''}${lastWakeTokens && lastWakeMs ? ' / ' : ''}${lastWakeMs ? `${(lastWakeMs / 1000).toFixed(1)}s` : ''}`
+    : '';
+  return (
+    `张力 ${Number(st.tension || 0).toFixed(1)} / 阈值 ${Number(st.wakeThreshold || 0).toFixed(1)}` +
+    ` · 疲劳 ${Number(st.fatigue || 0).toFixed(1)}` +
+    ` · 未闭合 ${Number(st.loops || 0)} 条` +
+    ` · 今日唤醒 ${Number(st.wakeCountToday || 0)}/${Number(st.wakeMaxPerDay || 0)}` +
+    ` · 做 ${Number(st.actCount || 0)} / 放下 ${Number(st.deferCount || 0)} / 拒 ${Number(st.refuseCount || 0)}` +
+    ` · 今日 token ${aliveFmtTokens(st.tokenToday)}/${Number(st.dailyTokenBudget) > 0 ? aliveFmtTokens(st.dailyTokenBudget) : '不限'}` +
+    ` · 累计 ${aliveFmtTokens(st.totalTokens)}` +
+    lastWakeText
+  );
+}
+
+/** 额度解释（到线 / 接近 / 正常时为空） */
+function aliveBudgetNote(st) {
+  if (!st || !st.exists) return { text: '', kind: null };
+  const budget = Number(st.dailyTokenBudget) || 0;
+  const usedToday = Number(st.tokenToday) || 0;
+  if (budget > 0 && usedToday >= budget) {
+    return {
+      text:
+        `今日 token 额度已用完（${aliveFmtTokens(usedToday)}/${aliveFmtTokens(budget)}）：它今天不会再自发醒来，` +
+        '0 点自动重置。要放宽就改 `agent-limits.js` 的 `aliveDailyTokenBudget`（不在设置页开放旋钮）。',
+      kind: 'bad'
+    };
+  }
+  if (budget > 0 && usedToday >= budget * 0.8) {
+    return {
+      text: `今日 token 已用 ${aliveFmtTokens(usedToday)}/${aliveFmtTokens(budget)}：快到额度了，用完后它会停到明天。`,
+      kind: null
+    };
+  }
+  return { text: '', kind: null };
+}
+
+/** 疲劳解释（到线 / 接近 / 正常时为空） */
+function aliveFatigueNote(st) {
+  if (!st || !st.exists) return { text: '', kind: null };
+  const fatigue = Number(st.fatigue || 0);
+  const fatigueHigh = Number(st.fatigueHigh || 0);
+  const settle = Number(st.fatigueSettlePerHour || 0);
+  if (fatigueHigh > 0 && fatigue >= fatigueHigh) {
+    return {
+      text:
+        `疲劳 ${fatigue.toFixed(1)} 已到顶线（≥${fatigueHigh}：进「压缩」相位，暂停自发唤醒）。` +
+        `它只按**自己唤醒轮**用掉的 token 累加，静息每小时回落 ${settle.toFixed(0)}；` +
+        '你和它聊天不再算它的疲劳。',
+      kind: 'bad'
+    };
+  }
+  if (fatigueHigh > 0 && fatigue >= fatigueHigh * 0.8) {
+    return {
+      text: `疲劳 ${fatigue.toFixed(1)} 接近顶线 ${fatigueHigh}：再醒几次就会进压缩相位（停一会儿再醒）。`,
+      kind: null
+    };
+  }
+  return { text: '', kind: null };
+}
+
+/** 唤醒落点说明（有会话时为空） */
+function aliveSessionNote(st) {
+  if (!st || !st.exists) {
+    return st && st.enabled && !st.sessionId
+      ? '还没有绑定的会话：第一次唤醒时会自建一个专属会话（标题「生命体征（后台心跳）」），不占用你的对话线。'
+      : '';
+  }
+  return st.sessionId
+    ? ''
+    : '还没有绑定的会话：第一次唤醒时会自建一个专属会话（标题「生命体征（后台心跳）」），不占用你的对话线。';
+}
+
+const ALIVE_STATUS_IDS = {
+  head: ['alive-status', 'alive-pane-status'],
+  detail: ['alive-detail', 'alive-pane-detail'],
+  budget: ['alive-budget-note', 'alive-pane-budget'],
+  fatigue: ['alive-fatigue-note', 'alive-pane-fatigue'],
+  session: ['alive-session-note', 'alive-pane-session'],
+  loops: ['alive-loops', 'alive-pane-loops']
+};
+
 function renderAliveStatus(status) {
   const st = status && typeof status === 'object' ? status : null;
   const enabledEl = $('alive-enabled');
@@ -461,126 +579,27 @@ function renderAliveStatus(status) {
   renderAliveSenses(st);
   renderAliveCapabilities(st);
 
-  const statusEl = $('alive-status');
-  const detailEl = $('alive-detail');
-  const loopsEl = $('alive-loops');
-
-  if (!st || (!st.exists && !st.enabled)) {
-    if (statusEl) statusEl.textContent = '未启用（打开上面的开关才会开始跳动）';
-    if (detailEl) detailEl.textContent = '';
-    if (loopsEl) loopsEl.textContent = '';
-    aliveNoteText('alive-fatigue-note', '', null);
-    aliveNoteText('alive-budget-note', '', null);
-    aliveNoteText('alive-session-note', '', null);
-    return;
-  }
-  if (!st.exists) {
-    if (statusEl) statusEl.textContent = '已启用，尚未产生第一次心跳';
-    if (detailEl) detailEl.textContent = '';
-    if (loopsEl) loopsEl.textContent = '';
-    aliveNoteText('alive-fatigue-note', '', null);
-    aliveNoteText('alive-budget-note', '', null);
-    aliveNoteText(
-      'alive-session-note',
-      st.sessionId
-        ? ''
-        : '还没有绑定的会话：第一次唤醒时会自建一个专属会话（标题「生命体征（后台心跳）」），不占用你的对话线。',
-      null
-    );
-    return;
-  }
-  if (statusEl) {
-    const phase = ALIVE_PHASE_TEXT[st.phase] || st.phase;
-    const runningText = st.running ? '跳动中' : '已停表';
-    const lastTick = aliveFmtTime(st.lastTickAt);
-    statusEl.textContent =
-      `${runningText} · 相位 ${phase}（已 ${aliveFmtDuration(Date.now() - Number(st.phaseEnteredAt || Date.now()))}）` +
-      ` · 第 ${st.tickCount} 次心跳${lastTick ? `（上次 ${lastTick}）` : ''}`;
-  }
-  if (detailEl) {
-    const lastWakeTokens = Number(st.lastWakeTokens || 0);
-    const lastWakeMs = Number(st.lastWakeDurationMs || 0);
-    const lastWakeText = lastWakeTokens || lastWakeMs
-      ? ` · 上次醒来 ${lastWakeTokens ? `${aliveFmtTokens(lastWakeTokens)} token` : ''}${lastWakeTokens && lastWakeMs ? ' / ' : ''}${lastWakeMs ? `${(lastWakeMs / 1000).toFixed(1)}s` : ''}`
-      : '';
-    detailEl.textContent =
-      `张力 ${Number(st.tension || 0).toFixed(1)} / 阈值 ${Number(st.wakeThreshold || 0).toFixed(1)}` +
-      ` · 疲劳 ${Number(st.fatigue || 0).toFixed(1)}` +
-      ` · 未闭合 ${Number(st.loops || 0)} 条` +
-      ` · 今日唤醒 ${Number(st.wakeCountToday || 0)}/${Number(st.wakeMaxPerDay || 0)}` +
-      ` · 做 ${Number(st.actCount || 0)} / 放下 ${Number(st.deferCount || 0)} / 拒 ${Number(st.refuseCount || 0)}` +
-      ` · 今日 token ${aliveFmtTokens(st.tokenToday)}/${Number(st.dailyTokenBudget) > 0 ? aliveFmtTokens(st.dailyTokenBudget) : '不限'}` +
-      ` · 累计 ${aliveFmtTokens(st.totalTokens)}` +
-      lastWakeText;
-  }
-
-  // 额度用完要给出可读结论（否则用户只看到"它不动了"）
-  const budget = Number(st.dailyTokenBudget) || 0;
-  const usedToday = Number(st.tokenToday) || 0;
-  if (budget > 0 && usedToday >= budget) {
-    aliveNoteText(
-      'alive-budget-note',
-      `今日 token 额度已用完（${aliveFmtTokens(usedToday)}/${aliveFmtTokens(budget)}）：它今天不会再自发醒来，` +
-        '0 点自动重置。要放宽就改 `agent-limits.js` 的 `aliveDailyTokenBudget`（不在设置页开放旋钮）。',
-      'bad'
-    );
-  } else if (budget > 0 && usedToday >= budget * 0.8) {
-    aliveNoteText(
-      'alive-budget-note',
-      `今日 token 已用 ${aliveFmtTokens(usedToday)}/${aliveFmtTokens(budget)}：快到额度了，用完后它会停到明天。`,
-      null
-    );
-  } else {
-    aliveNoteText('alive-budget-note', '', null);
-  }
-
-  // 疲劳的解释线：到线就说清「为什么它现在不怎么醒」，而不是让用户对着两个数字猜
-  const fatigue = Number(st.fatigue || 0);
-  const fatigueHigh = Number(st.fatigueHigh || 0);
-  const settle = Number(st.fatigueSettlePerHour || 0);
-  if (fatigueHigh > 0 && fatigue >= fatigueHigh) {
-    aliveNoteText(
-      'alive-fatigue-note',
-      `疲劳 ${fatigue.toFixed(1)} 已到顶线（≥${fatigueHigh}：进「压缩」相位，暂停自发唤醒）。` +
-        `它只按**自己唤醒轮**用掉的 token 累加，静息每小时回落 ${settle.toFixed(0)}；` +
-        `你和它聊天不再算它的疲劳。`,
-      'bad'
-    );
-  } else if (fatigue >= fatigueHigh * 0.8 && fatigueHigh > 0) {
-    aliveNoteText(
-      'alive-fatigue-note',
-      `疲劳 ${fatigue.toFixed(1)} 接近顶线 ${fatigueHigh}：再醒几次就会进压缩相位（停一会儿再醒）。`,
-      null
-    );
-  } else {
-    aliveNoteText('alive-fatigue-note', '', null);
-  }
-
-  // 唤醒落点：空 sessionId 不代表"没地方说话"（首次唤醒会自建会话），但要说清楚
-  aliveNoteText(
-    'alive-session-note',
-    st.sessionId
-      ? ''
-      : '还没有绑定的会话：第一次唤醒时会自建一个专属会话（标题「生命体征（后台心跳）」），不占用你的对话线。',
+  aliveWriteText(ALIVE_STATUS_IDS.head, aliveStatusHead(st), null);
+  aliveWriteText(ALIVE_STATUS_IDS.detail, aliveStatusDetail(st), null);
+  const budget = aliveBudgetNote(st);
+  aliveWriteText(ALIVE_STATUS_IDS.budget, budget.text, budget.kind);
+  const fatigue = aliveFatigueNote(st);
+  aliveWriteText(ALIVE_STATUS_IDS.fatigue, fatigue.text, fatigue.kind);
+  aliveWriteText(ALIVE_STATUS_IDS.session, aliveSessionNote(st), null);
+  aliveWriteText(
+    ALIVE_STATUS_IDS.loops,
+    st && st.exists && st.suspiciousObedience
+      ? '注意：今天醒了多次却一次都没拒绝 —— 从不拒绝的不是活的，是排期表。'
+      : '',
     null
   );
-
-  if (loopsEl) {
-    loopsEl.textContent = st.suspiciousObedience
-      ? '注意：今天醒了多次却一次都没拒绝 —— 从不拒绝的不是活的，是排期表。'
-      : '';
-  }
 }
 
-function renderAliveDecisions(events) {
-  const box = $('alive-decisions');
-  if (!box) return;
+/** 事件行（设置页与侧栏页共用同一份拼装） */
+function aliveEventLines(events) {
   const list = Array.isArray(events) ? events.slice() : [];
-  if (!list.length) {
-    box.textContent = '还没有事件。';
-    return;
-  }
-  const lines = list
+  if (!list.length) return '还没有事件。';
+  return list
     .slice(-40)
     .reverse()
     .map((evt) => {
@@ -620,8 +639,12 @@ function renderAliveDecisions(events) {
         );
       }
       return parts.filter(Boolean).join(' · ');
-    });
-  box.textContent = lines.join('\n');
+    })
+    .join('\n');
+}
+
+function renderAliveDecisions(events) {
+  aliveWriteText(['alive-decisions', 'alive-pane-events'], aliveEventLines(events), null);
 }
 
 async function refreshAliveStatus() {
@@ -665,22 +688,30 @@ async function refreshAliveHistory() {
   try {
     const res = await api.aliveHistory({ points: 240 });
     if (!res || !res.ok) return;
+    // 同一个曲线挂到两个壳（设置页 / 侧栏页）；哪个在就画哪个
     mountAliveTrend($('alive-trend'), res);
+    mountAliveTrend($('alive-pane-trend'), res);
     if (Array.isArray(res.samples) && res.samples.length >= 2) {
       const first = res.samples[0];
       const last = res.samples[res.samples.length - 1];
-      aliveNoteText(
-        'alive-trend-note',
+      const summary =
         `窗口 ${aliveFmtDuration(Number(last.ts) - Number(first.ts))}（共 ${Number(res.total) || res.samples.length} 个采样）：` +
-          `张力 ${Number(first.tension || 0).toFixed(1)} → ${Number(last.tension || 0).toFixed(1)}` +
-          ` · 疲劳 ${Number(first.fatigue || 0).toFixed(1)} → ${Number(last.fatigue || 0).toFixed(1)}` +
-          '（悬浮曲线看某一刻）',
-        null
-      );
+        `张力 ${Number(first.tension || 0).toFixed(1)} → ${Number(last.tension || 0).toFixed(1)}` +
+        ` · 疲劳 ${Number(first.fatigue || 0).toFixed(1)} → ${Number(last.fatigue || 0).toFixed(1)}` +
+        '（悬浮曲线看某一刻）';
+      aliveWriteText(['alive-trend-note', 'alive-pane-trend-note'], summary, null);
     }
   } catch {
     // 曲线读失败只影响这一块
   }
+}
+
+/** 侧栏「生命」页是否可见（与设置页那个壳共用同一份轮询） */
+function aliveSidePaneVisible() {
+  const pane = document.querySelector('.side-panel-pane[data-side-pane="alive"]');
+  if (!pane || pane.hidden) return false;
+  const panel = document.getElementById('artifacts-panel');
+  return !!(panel && !panel.hidden);
 }
 
 /**
@@ -688,9 +719,10 @@ async function refreshAliveHistory() {
  *
  * 为什么需要：体征在 Main 里每 5 分钟变一次，而这一页原来只在「切页签 / 点刷新 / 拨开关」时渲染一次 ——
  * 用户会看到「疲劳 0.0」配着 state.json 里的 100（issue/2026-11-10 的 Bug 1 后半段）。
- * 页签不可见就停，别让后台页面空转。
+ * 页签不可见就停，别让后台页面空转。**两个壳（设置页 / 侧栏页）任一可见就继续**。
  */
 function alivePageVisible() {
+  if (aliveSidePaneVisible()) return true;
   if (typeof isSettingsPageOpen === 'function') return isSettingsPageOpen('alive');
   const el = document.querySelector('.settings-page[data-settings="alive"]');
   return !!(el && el.classList.contains('active'));
@@ -776,6 +808,50 @@ function onAliveSettingsTabShown() {
   startAlivePoll();
 }
 
+/* ───────────── 侧栏「生命」页 + 动静徽标（第三个「看得见」入口，见 docs/ALIVE-VISIBILITY-PLAN.md）───────────── */
+
+/** 侧栏页显示：首刷 + 启轮询（与设置页同一份渲染、同一份 IPC） */
+function onAlivePanelShown() {
+  refreshAliveStatus();
+  refreshAliveDecisions();
+  refreshAliveNote();
+  refreshAliveHistory();
+  startAlivePoll();
+}
+
+/** 侧栏页隐藏：设置页还开着就继续轮询，否则停（别让后台空转） */
+function onAlivePanelHidden() {
+  if (!alivePageVisible()) stopAlivePoll();
+}
+
+/**
+ * rail 上的"刚有动静"小点。
+ *
+ * 判据刻意**无状态**：最近 60 分钟内有 WAKE / DECISION / SPEAK / EYE 事件。
+ * 不引入"未读计数"（那要持久化 lastSeenTs 并同步到设置页，是典型的状态机加法）。
+ */
+async function refreshAliveBadge() {
+  const api = aliveApi();
+  if (!api || typeof api.aliveBadge !== 'function') return;
+  try {
+    const res = await api.aliveBadge();
+    const dot = $('alive-rail-badge');
+    if (!dot) return;
+    const on = !!(res && res.ok && res.recent);
+    dot.hidden = !on;
+    dot.title = on ? '最近一小时它有动静' : '';
+  } catch {
+    // 徽标失败只影响那个点
+  }
+}
+
+function startAliveBadgePoll() {
+  if (aliveUi.badgeTimer) return;
+  refreshAliveBadge();
+  // 30s：体征是 5 分钟尺度，够用且省（这条 IPC 只读 state.json + 事件尾部一行）
+  aliveUi.badgeTimer = setInterval(refreshAliveBadge, 30000);
+}
+
 function initAliveSettingsPage() {
   const toggle = $('alive-enabled');
   if (toggle) {
@@ -845,8 +921,40 @@ function initAliveSettingsPage() {
     });
   }
   // 设置弹窗被关掉时（页面不再可见）停掉轮询：没有统一的 close 钩子，就靠这一条
-  window.addEventListener('beforeunload', stopAlivePoll);
+  window.addEventListener('beforeunload', () => {
+    stopAlivePoll();
+    if (aliveUi.badgeTimer) {
+      clearInterval(aliveUi.badgeTimer);
+      aliveUi.badgeTimer = null;
+    }
+  });
+  // 主界面常驻的"刚有动静"小点
+  startAliveBadgePoll();
+  initAlivePane();
+}
+
+/** 侧栏「生命」页的两个按钮：刷新 / 跳到设置页（开关与感官在那边） */
+function initAlivePane() {
+  const refresh = $('alive-pane-refresh');
+  if (refresh) {
+    refresh.addEventListener('click', () => {
+      refreshAliveStatus();
+      refreshAliveDecisions();
+      refreshAliveNote();
+      refreshAliveHistory();
+      refreshAliveBadge();
+    });
+  }
+  const settings = $('alive-pane-settings');
+  if (settings) {
+    settings.addEventListener('click', () => {
+      if (typeof openSettingsModal === 'function') openSettingsModal('alive');
+      else if (typeof switchSettingsTab === 'function') switchSettingsTab('alive');
+    });
+  }
 }
 
 window.onAliveSettingsTabShown = onAliveSettingsTabShown;
+window.onAlivePanelShown = onAlivePanelShown;
+window.onAlivePanelHidden = onAlivePanelHidden;
 initAliveSettingsPage();

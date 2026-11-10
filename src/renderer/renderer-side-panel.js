@@ -1,4 +1,4 @@
-/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden, onGoalPanelShown, onGoalPanelHidden, refreshPeerPanel, motionMs, requestAnimationFrame, cancelAnimationFrame */
+/* global window, document, renderArtifactsList, isWorkspaceArtifactsCacheReady, renderChangesPane, patchChangesPane, syncBrowserBounds, ensureTerminalSession, clampBrowserPanelWidthToChatMin, maybeReloadSelectedArtifactContent, onSubagentsPanelShown, onSubagentsPanelHidden, onGoalPanelShown, onGoalPanelHidden, onAlivePanelShown, onAlivePanelHidden, refreshPeerPanel, motionMs, requestAnimationFrame, cancelAnimationFrame */
 'use strict';
 
 const SIDE_PANEL_TAB_KEY = 'diecloud.ui.sidePanelTab.v1';
@@ -68,6 +68,7 @@ function loadSavedSideTab() {
     t === 'subagents' ||
     t === 'index' ||
     t === 'bot' ||
+    t === 'alive' ||
     t === 'ssh'
   )
     return t;
@@ -156,6 +157,9 @@ function setSidePanelTab(tab, opts) {
   }
   if (next === 'subagents' && typeof onSubagentsPanelShown === 'function') onSubagentsPanelShown();
   else if (typeof onSubagentsPanelHidden === 'function') onSubagentsPanelHidden();
+  // 「生命」页：它在你不看时做了什么（与设置页同一份渲染与 IPC，见 renderer-alive.js）
+  if (next === 'alive' && typeof onAlivePanelShown === 'function') onAlivePanelShown();
+  else if (typeof onAlivePanelHidden === 'function') onAlivePanelHidden();
   // 「目标」页：首刷 + 轮询启停的唯一入口（目标由模型在轮内改，见 renderer-goal-panel.js）
   if (next === 'goal' && typeof onGoalPanelShown === 'function') onGoalPanelShown();
   else if (typeof onGoalPanelHidden === 'function') onGoalPanelHidden();
@@ -193,6 +197,7 @@ function finishPanelClose(panel, resizer) {
   if (typeof onContextPanelHidden === 'function') onContextPanelHidden();
   if (typeof onSubagentsPanelHidden === 'function') onSubagentsPanelHidden();
   if (typeof onGoalPanelHidden === 'function') onGoalPanelHidden();
+  if (typeof onAlivePanelHidden === 'function') onAlivePanelHidden();
   if (typeof onProductsPanelHidden === 'function') onProductsPanelHidden();
 }
 

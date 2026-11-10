@@ -6247,6 +6247,40 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   stroke: none;
 }
 
+/* 生命感：rail 上的「刚有动静」小点（无状态判据：最近一小时有事件） */
+.side-panel-rail-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent, #4c8dff);
+  box-shadow: 0 0 0 2px var(--panel-bg, rgba(0, 0, 0, 0.2));
+}
+
+.side-panel-rail-btn {
+  position: relative;
+}
+
+/* 生命感：侧栏「生命」页的滚动体（与目标页同一套内边距） */
+.alive-pane-body {
+  padding: 10px 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.alive-pane-events {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-mute);
+  max-height: 240px;
+  overflow: auto;
+}
+
 .channels-toolbar {
   display: flex;
   align-items: center;
