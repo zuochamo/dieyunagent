@@ -131,6 +131,9 @@ async function main() {
   /** 扇出用的第二台（在本段里建，finally 里停） */
   let D = null;
   let dirD = '';
+  /** 无人值守（autoTrust）那一台 */
+  let E = null;
+  let dirE = '';
 
   const A = createPeerCoordinator({
     userDataPath: dirA,
@@ -708,10 +711,59 @@ async function main() {
       JSON.stringify(ghostBroadcast)
     );
     check('不存在的房间取时间线 → null', (await A.roomTimeline({ roomId: 'r-nope' })) === null);
+
+    // —— 15. 无人值守机器（headless）：自动信任未表态的对端，但 deny 仍然优先 ——
+    dirE = mkTmp('e');
+    const rpcE = mkRpc();
+    const submittedE = [];
+    E = createPeerCoordinator({
+      userDataPath: dirE,
+      getWorkspace: () => ({ workspacePath }),
+      rpc: rpcE.rpc,
+      submitTask: async (task) => {
+        submittedE.push(task);
+        return { requestId: `reqE_${submittedE.length}`, sessionId: task.sessionId };
+      },
+      limits: limitsFor(18390, 18345),
+      log: () => {}
+    });
+    const statusE = await E.start();
+    E.setAutoTurn(false); // 只看投递，不跑一轮（跑一轮的行为第 6 段已验）
+    E.setAutoTrust(true);
+    const autoSent = await A.sendToPeer({ host: '127.0.0.1', port: statusE.port, text: 'autoTrust：未确认也应收下' });
+    check('autoTrust=true：未表态的对端也投递', autoSent.ok === true, JSON.stringify(autoSent));
+    check(
+      'autoTrust 真的落了会话',
+      rpcE.messages().some((m) => /autoTrust：未确认也应收下/.test(String(m.params && m.params.content))),
+      'E 没收到'
+    );
+    E.setAutoTrust(false);
+    const backToAsk = await A.sendToPeer({ host: '127.0.0.1', port: statusE.port, text: 'autoTrust 关掉后应回到待确认' });
+    check(
+      'autoTrust=false 回到「等确认」',
+      backToAsk.ok === false && backToAsk.error === 'NOT_TRUSTED',
+      JSON.stringify(backToAsk)
+    );
+    E.trustPeer(statusA.peerId, 'deny');
+    E.setAutoTrust(true);
+    const deniedByDeny = await A.sendToPeer({ host: '127.0.0.1', port: statusE.port, text: '明确 deny 应该仍然拦' });
+    check(
+      'autoTrust=true 也拦明确 deny 的对端',
+      deniedByDeny.ok === false && deniedByDeny.error === 'NOT_TRUSTED',
+      JSON.stringify(deniedByDeny)
+    );
   } finally {
+    if (E) E.stop();
     if (D) D.stop();
     A.stop();
     B.stop();
+    if (dirE) {
+      try {
+        fs.rmSync(dirE, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
     if (dirD) {
       try {
         fs.rmSync(dirD, { recursive: true, force: true });

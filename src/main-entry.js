@@ -56,8 +56,9 @@ const {
 const { AgentRunCoordinator } = require('./agent/coordinator');
 const { AgentService } = require('./agent/service');
 const { MobileBridge } = require('./mobile/bridge');
-// 内网 agent 互通（P2P）：身份/发现/WS 直连/会话投递/建议式租约，语义全在 src/peer/
-const { createPeerCoordinator } = require('./peer');
+// 内网 agent 互通（P2P）：身份/发现/WS 直连/会话投递/建议式租约，语义全在 src/peer/；
+// 装配（含回合回传接线）唯一实现 `src/peer/boot.js`，headless 调的是同一份。
+const { bootPeerRuntime } = require('./peer/boot');
 const { getAgentLimits } = require('./agent/agent-limits');
 const subagentStore = require('./agent/subagent-store');
 const worktreeService = require('./git/worktree-service');
@@ -249,7 +250,7 @@ let skillCatalog = null;
 let agentService = null;
 /** @type {import('./mobile/bridge').MobileBridge | null} */
 let mobileBridge = null;
-/** @type {ReturnType<typeof createPeerCoordinator> | null} */
+/** @type {ReturnType<import('./peer').createPeerCoordinator> | null} */
 let peerCoordinator = null;
 /** @type {ReturnType<createBrowserService> | null} */
 let browserService = null;
@@ -631,13 +632,8 @@ app.whenReady().then(async () => {
   agentService.on('event', (event) => {
     if (mobileBridge) mobileBridge.broadcast(event);
     windowTray.sendRendererAgentService('agent-service:event', event);
-    // 跨机回合的回传：进度攒正文（summary 只有 400 字），结束把完整正文回给对方。
-    if (peerCoordinator && event) {
-      if (event.type === 'task.progress') peerCoordinator.noteTurnProgress(event.requestId, event);
-      else if (event.type === 'task.completed' || event.type === 'task.failed' || event.type === 'task.stopped') {
-        void peerCoordinator.noteTurnCompleted(event.requestId, event);
-      }
-    }
+    // 跨机回合的回传订阅不在这里：它跟互通同生共死，唯一实现在 `src/peer/boot.js`
+    // （headless 那一侧装配的是同一份，否则「答复回不去」只会在其中一边出现）。
   });
   mobileBridge = new MobileBridge({
     agentService,
@@ -653,36 +649,27 @@ app.whenReady().then(async () => {
 
   // 内网 agent 互通：与手机桥同级（都是 Main 持有的一扇网络门），但方向相反 ——
   // 手机桥是「外部前端连进来」，peer 是「别的 agent 连进来 + 本机连出去」。
-  // 启动失败只关掉互通，不影响本地 agent。
-  try {
-    peerCoordinator = createPeerCoordinator({
-      userDataPath: userData,
-      getWorkspace: () => {
-        try {
-          const ws = localGateway.getWorkspace();
-          return { workspacePath: ws && ws.workspacePath ? String(ws.workspacePath) : '' };
-        } catch {
-          return { workspacePath: '' };
-        }
-      },
-      rpc: (method, params) => localGateway.invokeRpc(method, params),
-      submitTask: (task) => agentService.submitTask(task),
-      limits: () => getAgentLimits(userData),
-      onEvent: (event) => {
-        if (windowTray) windowTray.sendRendererEvent('peer:event', event);
-      },
-      log: (m) => log.info(m)
-    });
-    peerCoordinator
-      .start()
-      .then((s) => {
-        if (s && s.port) log.info(`内网 agent 互通已启动: ${s.name} @ :${s.port}`);
-      })
-      .catch((e) => log.warn('内网 agent 互通启动失败:', e && e.message));
-  } catch (e) {
-    log.error('内网 agent 互通初始化失败:', e);
-    peerCoordinator = null;
-  }
+  // 装配（含回合回传接线）的唯一实现在 `src/peer/boot.js`，headless 调的是同一份；
+  // 这里只提供依赖。启动失败只关掉互通，不影响本地 agent。
+  peerCoordinator = bootPeerRuntime({
+    userDataPath: userData,
+    getWorkspace: () => {
+      try {
+        const ws = localGateway.getWorkspace();
+        return { workspacePath: ws && ws.workspacePath ? String(ws.workspacePath) : '' };
+      } catch {
+        return { workspacePath: '' };
+      }
+    },
+    rpc: (method, params) => localGateway.invokeRpc(method, params),
+    submitTask: (task) => agentService.submitTask(task),
+    agentService,
+    limits: () => getAgentLimits(userData),
+    onEvent: (event) => {
+      if (windowTray) windowTray.sendRendererEvent('peer:event', event);
+    },
+    log
+  });
 
   try {
     const ws = localGateway.getWorkspace();

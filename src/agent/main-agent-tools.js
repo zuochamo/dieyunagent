@@ -6,14 +6,19 @@ const catalog = require('./tool-catalog');
  * Main 侧（无 Renderer）工具清单的唯一构造函数。
  *
  * 聊天路径的完整工具集在 Renderer（`renderer-tool-defs.js#buildAgentTools`，依赖编辑器态与
- * 权限快照），Main 侧跑一轮的调用方（定时计划、频道）只能用「静态工具 + MCP 工具」这一档：
- * 它们没有编辑器上下文，也不该替用户开新会话/弹澄清框。
+ * 权限快照），Main 侧跑一轮的调用方（定时计划、频道、headless、peer 来信触发的那一轮）只能用
+ * 「静态工具 + MCP 工具」这一档：它们没有编辑器上下文，也不该替用户开新会话/弹澄清框。
+ *
+ * 内网互通三件套（`PEER_TOOLS`）在这一档里：协调器本来就住在 Main（`src/peer/boot.js`），
+ * 这些轮次是**同一台机器上的 agent 在跑**，能不能看同事的 agent 不该取决于这一轮是谁发起的。
+ * 互通没启用时执行端返回 PEER_UNAVAILABLE 结构化错误，不是「工具不存在」。
  *
  * @param {import('../mcp/runtime-manager').McpRuntimeManager | null} mcpRuntime
  * @returns {Promise<Array<object>>} OpenAI 工具 schema 列表
  */
 async function buildMainAgentTools(mcpRuntime) {
   const tools = catalog.toolsByNames(catalog.PLAN_RUNTIME_TOOL_NAMES);
+  for (const t of catalog.PEER_TOOLS || []) tools.push(t);
   if (!mcpRuntime || typeof mcpRuntime.listAgentTools !== 'function') {
     return tools;
   }

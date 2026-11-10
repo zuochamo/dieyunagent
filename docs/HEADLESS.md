@@ -387,6 +387,46 @@ headless 的加密密钥来自 `DIEYUN_SECRET_KEY_FILE`（32 字节或 64 位 he
 渲染层 `<script>` 用到的三个浏览器包（mermaid / mammoth / xlsx）不 `require`、因此不在 Node 依赖闭包里，
 打包时按 `src/renderer/index.html` 现扒进载荷的 `web-vendor/`（见 `scripts/pack-headless.cjs`）。
 
+### 6.3 内网 agent 互通（默认开）
+
+服务器也是一台**能被呼叫、也能主动派活**的 agent：装配与桌面是同一份（`src/peer/boot.js`），
+「回复回传」那条线也在里面 —— 桌面与服务器不会一边能答一边答不回去。
+
+没有界面，所以两个「确认」只能落在文件上，全在 `<DIEYUN_USER_DATA>/peer/`：
+
+| 文件 | 作用 |
+|---|---|
+| `settings.json` | `{"enabled": true, "autoTurn": true, "autoTrust": true}`。`enabled` = 监听 + 在内网宣告自己；`autoTurn` = 收到**可信**对端来信后自动跑一轮（终态正文回传给对方）；`autoTrust` = 未表态的对端是否直接放行。服务端没有「确认对方」的按钮，所以**首次启动把它落成 `true`**（只补缺失字段，之后人改的值优先） |
+| `identity.json` | 本机 `peerId` / 名称 / 自称身份，首次启动自动生成。要做到「只放行指定机器」就把它们的 `peerId` 写进下面那份信任清单 |
+| `trusted-peers.json` | 信任清单：`{"peer_xxx": {"name": "DIEYUN10", "status": "allow", "at": 0}}`。`allow` 一律放行，**`deny` 连 `autoTrust` 也拦**（这是 server 上唯一必须手写的反向清单）；两端的 allow 都要有：对方也要确认你这台，否则你发给它的会被它拒 |
+| `static-peers.json` | 手工对端（跨网段、或 UDP 广播被防火墙拦时）：`{"peers": [{"host": "192.168.31.10", "port": 17930, "name": "DIEYUN10"}]}` |
+| `rooms.json` / `session-links.json` | 房间与「会话 ↔ 对端」绑定，由代码维护，别手改 |
+
+> **`autoTrust: true` 的代价要说清楚**（这是默认姿态，不是疏漏）：同网段内，凡是跑这套协议、
+> 能连到本机 peer 端口、且 peerId 没被明确 `deny` 的机器，都可以让这台服务器**跑一轮 agent**
+> （`autoTurn` 默认也开）。那一轮仍按服务端自己的沙箱档位执行（§6），沙箱边界没变，但「谁来触发」
+> 变成了整个内网。每个新放行的 `peerId` 会打一行 `[peer] autoTrust：放行未表态的对端 … (peer_xxx)`
+> 并留一条 `trust-auto` 事件 —— 事后要收回，就把那个 `peerId` 写进 `trusted-peers.json` 置 `deny`。
+> 想更严的三档（按顺序递进）：`autoTurn:false`（照收不烧 token）→ `autoTrust:false`（要人确认，
+> 服务器上没人点就等于只收不发）→ `enabled:false`（不监听、不宣告，完全静默）。
+> peer 端口默认绑 `0.0.0.0`；只在可信网段用的，用防火墙圈来源：`sudo ufw allow from 192.168.31.0/24 to any port 17350:17360 proto tcp`。
+
+- **端口**：WS 服务从 `peerPortBase`（默认 17350）起试 11 个端口，UDP 发现用 `peerDiscoveryPort`
+  （都在 `src/agent/agent-limits.js`）。要跨机就用 `static-peers.json` + 防火墙放行那一个口。
+- **工具**：`peer_list` / `peer_send` / `peer_claim` 在 Main 侧工具表里（计划 / 频道 / headless 同一档），
+  所以服务器上这些轮次都能派活；互通没启用时返回 `PEER_UNAVAILABLE` 而不是「工具不存在」。
+  桌面聊天路径的那一份由 `renderer-tool-defs.js` 注入，同一份 schema。
+- **面板**（`--web` 时的 `/app/`）：侧栏 `bot` 页签与「连接 → Agent 互通」都能用 ——
+  网页里没有 IPC，`window.diecloud` 的 `peer*` 由 `src/headless/desktop-ui.js` 经同源 `/ws`
+  转发到 `peer.<name>`，服务端落到 `src/peer/actions.js`（**桌面 IPC 调的是同一张动作表**），
+  事件以 `channel:'peer'` 的 event 帧推回、与聊天轮 phase 分流。加动作只改动作表 + preload。
+- **不放大权限**：对端来信触发的那一轮，仍然按**本机**沙箱档位跑（§6 的边界一样适用）；
+  互通只决定「要不要自动跑一轮」，不决定能干什么。授权默认值 `autoTrust` 只管「未表态的对端」，
+  明确 `deny` 在两种模式下都拦。
+- **想彻底关掉**：`settings.json` 写 `{"enabled": false}`（不监听、不宣告）；只想收不想自动烧 token，
+  写 `{"enabled": true, "autoTurn": false}`；只要指定几台能派活，就把它们的 `peerId` 写进
+  `trusted-peers.json` 置 `allow`，其余写 `deny`，再把 `autoTrust` 关掉。
+
 ---
 
 ## 7. 排障

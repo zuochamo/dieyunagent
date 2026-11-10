@@ -96,6 +96,8 @@ function createPeerCoordinator(deps) {
    * @type {Map<string, Array<{ peer: object, env: object, at: number }>>}
    */
   const pendingInbound = new Map();
+  /** `autoTrust` 下已经放行并记过日志的 peerId（每台只记一次，避免刷屏） */
+  const autoAllowed = new Set();
   let claimTimer = null;
 
   function limits() {
@@ -670,7 +672,23 @@ function createPeerCoordinator(deps) {
     const peerId = String((peer && peer.peerId) || '');
     const status = store.trustStatus(peerId);
     if (status === 'allow') return 'allow';
+    // deny 永远优先：自动信任只影响「还没表态的陌生对端」，不影响明确拒绝。
     if (status === 'deny') return 'deny';
+    // 无人值守的机器（headless / systemd 服务）没有「确认对方」的按钮：
+    // 这种情况下 `autoTrust` 打开，未表态的对端按放行处理 —— 否则每一台同事的 agent
+    // 都会被静默扣在「待确认」里，而现场既没人会点确认，也没人知道有这件事。
+    // 代价写清楚：这等于「同网段内，凡是跑这套协议、能连到我的人都可让我跑一轮」。
+    // 所以：① 明确 deny 仍拦；② 每个新放行的 peerId 留一条日志与 trust-auto 事件，
+    // 事后要收回就把它写进 trusted-peers.json 置 deny；③ 想更严就把 autoTurn 关掉。
+    if (store.settings().autoTrust) {
+      if (!autoAllowed.has(peerId)) {
+        autoAllowed.add(peerId);
+        const who = String((peer && peer.name) || '未命名');
+        log(`[peer] autoTrust：放行未表态的对端 ${who} (${peerId})`);
+        emit({ kind: 'trust-auto', peerId, name: who });
+      }
+      return 'allow';
+    }
     return 'ask';
   }
 
@@ -1042,6 +1060,8 @@ function createPeerCoordinator(deps) {
     return {
       enabled: started,
       autoTurn: settings.autoTurn,
+      // 授权默认值（未表态对端是否放行）：桌面 false（人确认），headless 首次启动落成 true
+      autoTrust: settings.autoTrust,
       peerId: id.peerId,
       name: id.name,
       // 本机工作身份（自称的角色）：显示用，别的机器看到的就是它
@@ -1155,6 +1175,15 @@ function createPeerCoordinator(deps) {
     return store.setSettings({ autoTurn: !!enabled });
   }
 
+  /**
+   * 授权默认值：`true` = 未表态的对端直接放行（无人值守的机器用，见 trustDecision 的注释）；
+   * `false` = 由人确认（桌面默认）。明确 deny 两种模式下都拦。
+   */
+  function setAutoTrust(enabled) {
+    autoAllowed.clear();
+    return store.setSettings({ autoTrust: !!enabled });
+  }
+
   function setName(name) {
     const next = store.setName(name);
     if (started && discovery) {
@@ -1222,6 +1251,7 @@ function createPeerCoordinator(deps) {
     setRole,
     setEnabled,
     setAutoTurn,
+    setAutoTrust,
     // 授权（取代共享配对码）：允许 / 拒绝 / 撤销
     trustPeer,
     untrustPeer,

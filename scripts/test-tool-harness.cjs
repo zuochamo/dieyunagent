@@ -34,11 +34,18 @@ async function main() {
       catalog.PLAN_RUNTIME_TOOL_NAMES.length,
     'plan runtime tools in catalog'
   );
-  // Main 侧（无 Renderer）一轮的工具集：静态工具 + MCP 工具，唯一构造入口
+  // Main 侧（无 Renderer）一轮的工具集：静态工具 + MCP 工具，唯一构造入口。
+  // 静态部分 = 计划运行时那一档 + 内网互通三件套：协调器住在 Main，计划 / 频道 / headless
+  // 都是「这台机器上的 agent 在跑」，能不能看见同事的 agent 不该取决于这一轮是谁发起的。
   const mainSideTools = await buildMainAgentTools(null);
+  const expectedMainNames = [...catalog.PLAN_RUNTIME_TOOL_NAMES, ...catalog.PEER_TOOLS.map((t) => t.function.name)];
   assert(
-    mainSideTools.length === catalog.PLAN_RUNTIME_TOOL_NAMES.length,
-    'main-side tools match PLAN_RUNTIME_TOOL_NAMES'
+    mainSideTools.length === expectedMainNames.length,
+    `main-side tools = PLAN_RUNTIME_TOOL_NAMES + PEER_TOOLS（实际 ${mainSideTools.length}，应为 ${expectedMainNames.length}）`
+  );
+  assert(
+    expectedMainNames.every((n) => mainSideTools.some((t) => t.function && t.function.name === n)),
+    'main-side tools 覆盖计划运行时与 peer 三件套'
   );
   assert(
     mainSideTools.some((t) => t.function && t.function.name === 'host_exec'),

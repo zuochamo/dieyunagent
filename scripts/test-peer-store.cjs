@@ -108,17 +108,51 @@ function main() {
     // —— 开关 ——
     assert.deepStrictEqual(
       store.settings(),
-      { enabled: true, autoTurn: true },
-      '默认开互通，且**默认就自动跑一轮**（互通 = 另一台机器上的我；显式关掉才退化成只投递）'
+      { enabled: true, autoTurn: true, autoTrust: false },
+      '默认开互通 + 默认自动跑一轮；但授权默认**要人确认**（autoTrust=false，无人值守入口才落成 true）'
     );
-    assert.deepStrictEqual(store.setSettings({ autoTurn: false }), { enabled: true, autoTurn: false });
-    assert.deepStrictEqual(createPeerStore(root).settings(), { enabled: true, autoTurn: false }, '开关应持久化');
+    assert.deepStrictEqual(store.setSettings({ autoTurn: false }), {
+      enabled: true,
+      autoTurn: false,
+      autoTrust: false
+    });
+    assert.deepStrictEqual(
+      createPeerStore(root).settings(),
+      { enabled: true, autoTurn: false, autoTrust: false },
+      '开关应持久化'
+    );
     assert.deepStrictEqual(
       createPeerStore(root).setSettings({ autoTurn: /** @type {any} */ ('yes') }),
-      { enabled: true, autoTurn: false },
+      { enabled: true, autoTurn: false, autoTrust: false },
       '非 true 一律当关（不做真值猜测）'
     );
-    assert.deepStrictEqual(createPeerStore(root).setSettings({}), { enabled: true, autoTurn: false }, '缺省沿用落盘值');
+    assert.deepStrictEqual(
+      createPeerStore(root).setSettings({}),
+      { enabled: true, autoTurn: false, autoTrust: false },
+      '缺省沿用落盘值'
+    );
+    // 无人值守入口只**补缺失**的字段：人已经写过的值一律不覆盖。
+    // 用一份全新的目录 —— 上面任何一次 setSettings 都会把 autoTrust 写进去，混在一起就测不出「缺失」语义。
+    const freshRoot = mkTmp('store-fresh');
+    try {
+      assert.deepStrictEqual(
+        createPeerStore(freshRoot).ensureSettings({ autoTrust: true }),
+        { enabled: true, autoTurn: true, autoTrust: true },
+        'ensureSettings 在字段缺失时落成给定值（headless 首次启动的形状）'
+      );
+      assert.deepStrictEqual(
+        createPeerStore(freshRoot).ensureSettings({ autoTrust: false }),
+        { enabled: true, autoTurn: true, autoTrust: true },
+        'ensureSettings 不覆盖已存在的值（人改成 true 后重启不被改回去）'
+      );
+      assert.deepStrictEqual(
+        createPeerStore(freshRoot).setSettings({ autoTrust: false }),
+        { enabled: true, autoTurn: true, autoTrust: false },
+        'autoTrust 可显式关回人工确认'
+      );
+    } finally {
+      fs.rmSync(freshRoot, { recursive: true, force: true });
+    }
 
     // —— 房间（一次任务一个）：建 / 关 / 有界保留 ——
     assert.deepStrictEqual(store.rooms(), [], '初始没有房间');

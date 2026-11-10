@@ -1,7 +1,11 @@
 # 内网 Agent 互通（peer mesh）
 
 > 状态：**已实施 P0 + P1 授权**（传输 + 自主互发 + 会话即通道 + presence + 建议式租约 + 按机器确认的信任清单）。
-> 代码入口 `src/peer/`；工具 `peer_list` / `peer_send` / `peer_claim`；UI：标题栏「连接」图标 → 「Agent 互通」标签页。
+> 代码入口 `src/peer/`（语义全在 `coordinator.js`，线协议 `wire.js`）；装配唯一来源 `src/peer/boot.js`，
+> 桌面（`main-entry.js`）与 headless 都调它 —— 网络门与「回合回传线」必须成对出现，各写一份必然漂移。
+> 工具 `peer_list` / `peer_send` / `peer_claim` 在**两条**工具表里都有：桌面聊天（`renderer-tool-defs.js`）与
+> Main 侧一档（`main-agent-tools.js`，计划 / 频道 / headless / peer 来信触发的那一轮）。
+> UI：标题栏「连接」图标 → 「Agent 互通」标签页；侧栏 `bot` 页签见 `BOT-ROOM-PLAN.md`。
 
 ## 1. 要解决的三件事
 
@@ -74,6 +78,16 @@
 - 未确认的机器**看不到租约快照**（`hello_ok.claims` 只发给已确认的机器）：我在改哪些文件不泄露给陌生人。
 - 没有加密、没有签名、没有证书；**信任模型是「同一内网 + 你点过一次允许」**。不要在不可信网络里开。
 - 收到信的 agent 与本地用户同等权限（它就是你自己的 agent 在跑）。所以：跳数与小时预算双重限流、来信带来源抬头、**自动跑一轮可关**（默认开，见 §8）。
+- **唯一例外：`autoTrust`（未表态的对端直接放行）**。桌面默认 `false`（由人点确认）；
+  **无人值守的机器**（headless / systemd 服务）没有确认界面，由 `src/peer/boot.js` 在首次启动
+  把 `autoTrust` 落成 `true`（只补缺失字段，人改过的值优先），并把授权姿态打进启动日志。
+  为什么删不掉：一条真机上必然发生的死路 —— 没有交互界面时，`ask` 分支等于把每台同事的 agent
+  静默扣在「待确认」里，现场既没人会点、也没人知道有这件事。所以「有没有人点确认」这件事必须
+  在**信任判定的唯一来源边上**表达一次，而不是靠文档让人手改 JSON。
+  边界没有松：明确 `deny` 两种模式下都拦；每个新放行的 `peerId` 留日志 + `trust-auto` 事件，
+  事后可据此补 `deny`；`autoTurn:false` / `enabled:false` 仍是可用的收紧档。
+  **反证条件**（出现才重新评估这个默认）：真实服务器上出现「被内网某台机器误触发/恶意触发跑一轮」
+  的案例，或运维反馈无法从日志判定谁在调用 —— 那就把默认翻回 `false` 并提供一次性 CLI 配对。
 
 ## 7. 会话即通道
 
@@ -92,7 +106,7 @@
 一封来信要自动开跑，必须同时满足：
 
 1. 设置里 `autoTurn` 打开（**默认开**：互通就是「另一台机器上的我」，来信直接跑；用户可显式关掉，退化成只投递到会话）；
-2. 发送方已在本机信任清单里（`allow`）；
+2. 发送方已在本机信任清单里（`allow`），**或者**本机 `autoTrust` 打开且没被明确 `deny`（无人值守机器的默认，见 §6 最后一条）；
 3. `hops < peerMaxHops`；
 4. 该对端最近 1 小时内自动轮数 `< peerTurnBudgetPerHour`；
 5. 信封 `id` 未见过（内存 LRU，防重放）。
@@ -133,9 +147,9 @@ IPC（`src/main/ipc/peer.js`）：`peer:status/refresh/set-name/set-enabled/set-
 
 自动（`npm run test:peer`）：
 
-- `scripts/test-peer-store.cjs`：身份持久化、信任清单（allow/deny/撤销/持久化/非法输入）、会话绑定、手工对端清洗、开关默认值、项目 key（含 worktree `commondir`）。
+- `scripts/test-peer-store.cjs`：身份持久化、信任清单（allow/deny/撤销/持久化/非法输入）、会话绑定、手工对端清洗、开关默认值（`autoTrust` 默认关 + `ensureSettings` 只补缺失字段）、项目 key（含 worktree `commondir`）。
 - `scripts/test-peer-tools.cjs`：三个工具在工具层的形状（`PEER_UNAVAILABLE` / `MISSING_ARG`+`diagnostics.peers` / `PEER_NOT_FOUND` 不可重试 / 连不通可重试 / 租约 acquire-list-release）。
-- `scripts/test-peer-mesh.cjs`：进程内两台实例回环互连 — 陌生来信被拦（`NOT_TRUSTED` + 待确认 + 不落会话不跑）、允许后补投、**默认就自动跑一轮（用例里显式关掉以单测各道门）**、打开后跑一轮、**回合结束回传完整正文**、跳数用尽只投递、**小时预算用尽只投递**、presence + 同项目 + 信任状态、**会话发信 → 对端跑一轮 → 答复落回同一会话**、**会话链接是缓存（库里没了就解绑重建，不返回死 id）**、租约冲突/广播/释放、线协议归一、陌生机器拿不到租约快照、拒绝后静默、撤销后重新确认。
+- `scripts/test-peer-mesh.cjs`：进程内两台实例回环互连 — 陌生来信被拦（`NOT_TRUSTED` + 待确认 + 不落会话不跑）、允许后补投、**默认就自动跑一轮（用例里显式关掉以单测各道门）**、打开后跑一轮、**回合结束回传完整正文**、跳数用尽只投递、**小时预算用尽只投递**、presence + 同项目 + 信任状态、**会话发信 → 对端跑一轮 → 答复落回同一会话**、**会话链接是缓存（库里没了就解绑重建，不返回死 id）**、租约冲突/广播/释放、线协议归一、陌生机器拿不到租约快照、拒绝后静默、撤销后重新确认、**`autoTrust` 三态（未表态也投递 / 关掉回到待确认 / 明确 deny 仍然拦）**。
 
 手工（两台真机，同一局域网）：
 

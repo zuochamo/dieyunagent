@@ -2526,6 +2526,7 @@ module.exports = {
   MCP_MANAGE_TOOL,
   SSH_TOOL,
   WORKTREE_TOOL,
+  PEER_TOOLS,
   isMcpServerToolName,
   MCP_BUILTIN_TOOL_NAMES,
   CLARIFY_TOOL,

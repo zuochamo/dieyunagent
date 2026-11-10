@@ -365,8 +365,10 @@ class MobileBridge {
       else if (method === 'speech.transcribe') data = await this.agentService.transcribeSpeech(params);
       else if (method === 'speech.synthesize') data = await this.agentService.synthesizeSpeech(params);
       else if (method === 'service.info') data = this.agentService.info();
-      // 浏览器里的桌面界面（/app/）：渲染层驱动的聊天轮，循环仍在 Main 侧跑（见 headless/desktop-turn.js）
-      else if (method.startsWith('desktop.') && this.desktopTurn) {
+      // 浏览器里的桌面界面（/app/）：渲染层驱动的聊天轮，循环仍在 Main 侧跑（见 headless/desktop-turn.js）。
+      // `peer.*` 也走这里 —— 内网 agent 互通的面板在网页里与桌面是同一套渲染层，
+      // 只是把 IPC 换成同源 /ws（动作实现同一份：src/peer/actions.js）。
+      else if ((method.startsWith('desktop.') || method.startsWith('peer.')) && this.desktopTurn) {
         data = await this.desktopTurn.handleCall(
           method,
           params,

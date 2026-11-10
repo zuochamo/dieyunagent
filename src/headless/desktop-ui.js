@@ -6,7 +6,8 @@
  * 这层 preload 拿本机能力，RPC 本来就是自己连 Gateway 的 WebSocket
  * （`renderer-gateway.js` 里 `new WebSocket(info.url)`）。所以浏览器里跑它只缺两样：
  *
- *   1. `window.diecloud` 的替身（12 个接口，真正有意义的只有 getGatewayInfo / getWorkspace）；
+ *   1. `window.diecloud` 的替身（只给「在这台服务器上能如实回答」的接口；
+ *      渲染层只探能力、不认来源，缺的接口它会走自己的降级分支）；
  *   2. 浏览器能连到 Gateway 的 WS —— Gateway 只听 127.0.0.1，所以这里同源代理 `/gateway`。
  *
  * 手机端页面（`src/mobile/public`）按 430px 设计，宽屏下只能拉宽；桌面界面本来就为宽屏写。
@@ -115,6 +116,8 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
   let agentWsReady = null;
   const agentPending = new Map();
   const phaseSubs = new Set();
+  /** 内网互通面板的订阅（事件帧带 channel='peer'，与聊天轮的 phase 分流） */
+  const peerSubs = new Set();
   function connectAgentWs() {
     if (agentWs && agentWs.readyState <= 1) return agentWsReady;
     agentWsReady = new Promise((resolve, reject) => {
@@ -147,11 +150,14 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
           return;
         }
         if (msg.type === 'event' && msg.event) {
-          phaseSubs.forEach((cb) => {
+          // 一条 event 帧流服务两种订阅：内网互通面板（channel='peer'）与聊天轮 phase。
+          // 按 channel 分流，别让 loop 的处理器收到面板事件（反之亦然）。
+          const subs = msg.event.channel === 'peer' ? peerSubs : phaseSubs;
+          subs.forEach((cb) => {
             try {
               cb(msg.event);
             } catch (e) {
-              console.warn('[dieyun-headless] phase 订阅抛错：', e && e.message);
+              console.warn('[dieyun-headless] 事件订阅抛错：', e && e.message);
             }
           });
         }
@@ -337,6 +343,39 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
       const wrapped = (ev) => cb(ev);
       phaseSubs.add(wrapped);
       return () => phaseSubs.delete(wrapped);
+    },
+    // —— 内网 agent 互通（preload 的同名接口）——
+    // 动作语义只有一份（src/peer/actions.js，桌面 IPC 也调它）；这里只把调用经同源 /ws
+    // 转到服务端 peer.<name>，事件经 channel='peer' 的 event 帧推回。面板代码零改动。
+    peerStatus: () => agentCall('peer.status', {}),
+    peerRefresh: () => agentCall('peer.refresh', {}),
+    peerSetName: (name) => agentCall('peer.set-name', { name }),
+    peerSetRole: (role) => agentCall('peer.set-role', { role }),
+    peerSetEnabled: (enabled) => agentCall('peer.set-enabled', { enabled: !!enabled }),
+    peerSetAutoTurn: (enabled) => agentCall('peer.set-auto-turn', { enabled: !!enabled }),
+    // 授权默认值（未表态对端是否放行）：服务器首启就是 true，网页里可改回人工确认
+    peerSetAutoTrust: (enabled) => agentCall('peer.set-auto-trust', { enabled: !!enabled }),
+    peerTrust: (peerId, decision) => agentCall('peer.trust', { peerId, decision }),
+    peerUntrust: (peerId) => agentCall('peer.untrust', { peerId }),
+    peerTrustList: () => agentCall('peer.trust-list', {}),
+    peerSetStaticPeers: (peers) => agentCall('peer.set-static-peers', { peers: peers || [] }),
+    peerSend: (payload) => agentCall('peer.send', payload || {}),
+    peerSendSession: (payload) => agentCall('peer.send-session', payload || {}),
+    peerOpenSession: (peer) => agentCall('peer.open-session', { peer }),
+    peerLinkSession: (sessionId, peerId) => agentCall('peer.link-session', { sessionId, peerId }),
+    peerUnlinkSession: (sessionId) => agentCall('peer.unlink-session', { sessionId }),
+    peerClaim: (payload) => agentCall('peer.claim', payload || {}),
+    peerRooms: () => agentCall('peer.rooms', {}),
+    peerRoomCreate: (payload) => agentCall('peer.room-create', payload || {}),
+    peerRoomClose: (roomId) => agentCall('peer.room-close', { roomId }),
+    peerRoomSend: (payload) => agentCall('peer.room-send', payload || {}),
+    peerRoomTimeline: (payload) => agentCall('peer.room-timeline', payload || {}),
+    // preload: ipcRenderer.on('peer:event') → 返回取消订阅函数
+    onPeerEvent: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const wrapped = (frame) => cb(frame && frame.event ? frame.event : frame);
+      peerSubs.add(wrapped);
+      return () => peerSubs.delete(wrapped);
     },
     // 用量统计在 Main 侧汇总；浏览器里没有那份账本，本地累加没有意义也不影响展示
     addTokens: () => {}

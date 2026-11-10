@@ -393,7 +393,12 @@ function createPeerStore(userDataPath) {
       enabled: raw.enabled !== false,
       // 默认开：对方来信直接在这台机器上跑一轮（互通即「另一台机器上的我」，用户要的是马上有回应）。
       // 只认字面 true/false：缺省或脏值都按默认开；显式关掉必须落成 false 才生效。
-      autoTurn: raw.autoTurn == null ? true : raw.autoTurn === true
+      autoTurn: raw.autoTurn == null ? true : raw.autoTurn === true,
+      // 默认**关**：信任清单是「由人确认」的清单（`docs/PEER-MESH-PLAN.md` §8），
+      // 缺省就该是「要人确认」。无人值守的机器（headless / systemd 服务）没有确认界面，
+      // 由入口在首次启动时把它落成 true（`src/peer/boot.js#bootPeerRuntime({unattended:true})`）——
+      // 那是**一台机器一次**的决定，写进这个文件，之后人改的值永远优先。
+      autoTrust: raw.autoTrust === true
     };
   }
 
@@ -401,10 +406,29 @@ function createPeerStore(userDataPath) {
     const next = { ...settings(), ...(patch && typeof patch === 'object' ? patch : {}) };
     const clean = {
       enabled: next.enabled !== false,
-      autoTurn: next.autoTurn == null ? true : next.autoTurn === true
+      autoTurn: next.autoTurn == null ? true : next.autoTurn === true,
+      autoTrust: next.autoTrust === true
     };
     if (files.settings) writeJson(files.settings, clean);
     return clean;
+  }
+
+  /**
+   * 只补齐**缺失**的字段，不覆盖已有值（含人手改过的）。
+   * 用途只有一个：无人值守入口首次启动把 `autoTrust` 落成 true —— 之后一切以文件为准。
+   */
+  function ensureSettings(defaults) {
+    const raw = files.settings ? readJson(files.settings, {}) : {};
+    let changed = false;
+    for (const key of Object.keys(defaults || {})) {
+      if (Object.prototype.hasOwnProperty.call(raw, key)) continue;
+      raw[key] = defaults[key];
+      changed = true;
+    }
+    // 落盘时写归一后的整份开关：运维打开这个文件要能一眼看到这台机器的授权姿态，
+    // 而不是只剩一个 `{"autoTrust": true}` 让人猜另外两项是什么。
+    if (changed) return setSettings({ ...settings(), ...raw });
+    return settings();
   }
 
   return {
@@ -430,7 +454,8 @@ function createPeerStore(userDataPath) {
     staticPeers,
     setStaticPeers,
     settings,
-    setSettings
+    setSettings,
+    ensureSettings
   };
 }
 

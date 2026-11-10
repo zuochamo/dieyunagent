@@ -11,6 +11,7 @@
  *                → MCP 运行时与目录
  *                → 工具桥（webContents=null）+ 压缩 Agent
  *                → AgentService + 本地执行器（Main 侧跑一轮）
+ *                → 可选：内网 agent 互通（`src/peer/boot.js`，与桌面同一份装配）
  *                → 可选：浏览器前端（MobileBridge）、定时计划调度器
  *
  * 与桌面**必须一致**的东西都在下面的依赖里取自同一份实现：
@@ -39,6 +40,7 @@ const { AgentService } = require('../agent/service');
 const { MobileBridge } = require('../mobile/bridge');
 const { createSecretStorage } = require('./secret-storage');
 const { createLocalExecutor } = require('./local-executor');
+const { bootPeerRuntime } = require('../peer/boot');
 const { createSharedMemoryService } = require('../memory-shared/service');
 const { getAgentLimits } = require('../agent/agent-limits');
 const { loadModelSettings, getEmbeddingConfig } = require('../model-settings');
@@ -191,6 +193,13 @@ async function bootHeadless(opts) {
 /** 浏览器里的桌面界面（Electron 渲染层 + preload 替身）；只在 --web 时装配 */
 let desktopUi = null;
   let plansBoot = null;
+  /**
+   * 内网 agent 互通：装配在 `src/peer/boot.js`（与桌面同一份），这里只持有引用。
+   * 必须在 `createToolBridge` 被**第一次调用之前**赋值 —— 工具桥在创建时取一次
+   * `deps.peerCoordinator`（`src/agent/tool-bridge-main.js`），拿到 null 就整轮没有 peer_*。
+   * 所以它在 AgentService 之后、任何一轮开始之前装配。
+   */
+  let peerCoordinator = null;
 
   const createToolBridge = () =>
     createMainToolBridge({
@@ -206,7 +215,8 @@ let desktopUi = null;
       finishPlanRun: (plan, result) => (plansBoot ? plansBoot.finishPlanRun(plan, result) : result),
       cancelPlanRun: (planId) => (plansBoot ? plansBoot.cancelPlanRun(planId) : { ok: false }),
       userDataPath: userData,
-      getMobileBridge: () => mobileBridge
+      getMobileBridge: () => mobileBridge,
+      peerCoordinator
     });
 
   // 共享记忆（跨机 PostgreSQL）：数据层唯一实现 `src/memory-shared/service.js`，
@@ -258,6 +268,32 @@ let desktopUi = null;
   agentService.setExecutor(executor.executor);
   agentService.setCanceller(executor.canceller);
 
+  // 内网 agent 互通：与桌面装配的是同一份（`src/peer/boot.js`）—— 服务器也是一台可以
+  // 被呼叫 / 主动派活的 agent，没有界面不该等于没有信道。开关不新增：仍是
+  // `<userData>/peer/settings.json` 的 enabled / autoTurn（默认都开），信任清单同目录
+  // `trusted-peers.json`（服务器上没有「设置」页，只能手工维护这两份文件，见 docs/HEADLESS.md）。
+  peerCoordinator = bootPeerRuntime({
+    userDataPath: userData,
+    // 服务器上没有「确认对方」的按钮：授权默认值由 unattended 落成 autoTrust=true
+    // （首次启动写进 peer/settings.json，之后人改的值优先；明确 deny 仍拦）。
+    unattended: true,
+    // 取 Gateway **当前**的工作空间：`session_set_workspace` 换过项目后，
+    // 「同项目」判定要跟着变，否则服务器会一直用启动时的目录去比。
+    getWorkspace: () => {
+      try {
+        const ws = gateway.getWorkspace();
+        return { workspacePath: ws && ws.workspacePath ? String(ws.workspacePath) : workspacePath };
+      } catch {
+        return { workspacePath };
+      }
+    },
+    rpc: (method, params) => gateway.invokeRpc(method, params),
+    submitTask: (task) => agentService.submitTask(task),
+    agentService,
+    limits: () => getAgentLimits(userData),
+    log
+  });
+
   gateway.setWorkspace(workspacePath);
   // 端口被占**不是**致命错误：本地 Gateway WS 只是桌面端 Renderer 的接口，headless 自己
   // 走 `invokeRpc` 不经过它。但被占通常意味着「同一个数据目录已经有另一个进程在用」，
@@ -307,11 +343,17 @@ let desktopUi = null;
       createToolBridge,
       getCompactionAgent: () => compactionAgent,
       userData,
+      // 内网互通面板在网页里同样可用：`peer.*` 走同一张动作表（src/peer/actions.js）
+      getPeerCoordinator: () => peerCoordinator,
       // 浏览器里那一轮也要和桌面同一份装配：共享记忆召回、AGENTS.md / 记忆 / 技能 / MCP 块
       getSharedMemory: () => sharedMemory,
       listMcpServers: mcpStore.listMcpServersForUi,
       getKnowledgeMaintainer: () => require('../agent/knowledge-maintainer').getActiveKnowledgeMaintainer(),
       loadModelSettings,
+      // 网页里保存模型设置 = 改服务器上的 model-settings.json；收尾时把语音设置推给手机端
+      // （与桌面 model:sync-settings 同一份实现 model-settings-apply.js）
+      getMobileBridge: () => mobileBridge,
+      getAgentService: () => agentService,
       log: (m) => log.info(m)
     });
     try {
@@ -354,6 +396,19 @@ let desktopUi = null;
       mobileBridge.extraHttp = desktopUi.handleHttp;
       mobileBridge.upgradeHook = desktopUi.handleUpgrade;
       log.info(`桌面界面（浏览器版）：http://${info.host}:${info.port}/app/?token=${info.token}`);
+      // 互通事件推送：桌面走 `peer:event` IPC，网页走同源 `/ws` 的 event 帧。
+      // 打上 `channel:'peer'` 分流 —— 聊天轮的 phase 事件与面板事件共用这一条流，
+      // 不标记的话面板事件会被 loop 的处理器当成 phase（反之亦然）。
+      if (peerCoordinator) {
+        peerCoordinator.on('event', (event) => {
+          if (!mobileBridge) return;
+          try {
+            mobileBridge.broadcast({ channel: 'peer', event });
+          } catch {
+            // 推送失败只影响面板刷新，不影响互通本身
+          }
+        });
+      }
     } catch (e) {
       // 桌面界面只是「附带提供一个界面」，起不来不该拖垮 headless 本体（手机端/CLI 照常可用）
       log.warn(`桌面界面未启用：${e && e.message}`);
@@ -383,6 +438,14 @@ let desktopUi = null;
         // ignore
       }
       mobileBridge = null;
+    }
+    if (peerCoordinator) {
+      try {
+        peerCoordinator.stop();
+      } catch {
+        // ignore
+      }
+      peerCoordinator = null;
     }
     try {
       gateway.stop();
@@ -423,6 +486,9 @@ let desktopUi = null;
     executor,
     get mobileBridge() {
       return mobileBridge;
+    },
+    get peer() {
+      return peerCoordinator;
     },
     get plans() {
       return plansBoot;

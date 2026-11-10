@@ -47,6 +47,9 @@ const DESKTOP_CAMERA_TOOL = _tc.DESKTOP_CAMERA_TOOL || null;
 const SSH_TOOL = _tc.SSH_TOOL || null;
 // Worktree 副本（开/清/写回）：schema 单一来源同上，执行在 Main（worktree/actions.js）。
 const WORKTREE_TOOL = _tc.WORKTREE_TOOL || null;
+// 内网 agent 互通（peer_list / peer_send / peer_claim）：schema 单一来源同上，
+// 执行在 Main 的 peer coordinator（Bot 面板读的是同一份语义）。
+const PEER_TOOLS = Array.isArray(_tc.PEER_TOOLS) ? _tc.PEER_TOOLS : [];
 const isWeakToolCallerModel = _tc.isWeakToolCallerModel || function () { return false; };
 const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return entry && entry.tool; };
 
@@ -205,7 +208,10 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   // Worktree 会写回主工作区（apply_run 落的是本机仓库里的文件），所以跟「文件写入」同一个闸：
   // 用户关掉写入后还能让 Agent 通过副本把文件塞进仓库，这个开关就等于没关。
   if (host.fsWrite && WORKTREE_TOOL) tools.push(WORKTREE_TOOL);
+  // 内网 agent 互通：常驻，与 host 权限开关无关（对端是同一内网里别人那台机器上的 agent）。
+  // 互通没启用时不靠「工具不存在」表达 —— 执行端返回 PEER_UNAVAILABLE 结构化错误，
   // 与 goal_* 同一取舍：模型能从错误里读到该去哪儿开，而不是以为自己没有这个能力。
+  tools.push(...PEER_TOOLS);
   if (gwState.authed) {
     tools.push(CODEBASE_TOOL);
     // 记忆读写都在 Gateway：召回（只读）与软归档（可恢复）跟 codebase 同条件暴露。
