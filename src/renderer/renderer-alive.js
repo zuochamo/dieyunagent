@@ -43,6 +43,7 @@ const ALIVE_EVENT_TEXT = {
   BIRTH: '出生',
   WAKE: '自发醒来',
   WAKE_END: '醒来结束',
+  WAKE_NO_DECISION: '醒来却没表态',
   WAKE_SKIPPED: '醒来跳过',
   WAKE_ERROR: '醒来失败',
   DECISION: '决策',
@@ -123,6 +124,14 @@ function aliveFmtTime(ts) {
   const d = new Date(n);
   const pad = (v) => String(v).padStart(2, '0');
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** token 数按人读的方式缩写（它花的是同一份账单，别让用户自己数零） */
+function aliveFmtTokens(n) {
+  const v = Math.max(0, Number(n) || 0);
+  if (v < 1000) return String(Math.round(v));
+  if (v < 1000000) return `${(v / 1000).toFixed(1)}k`;
+  return `${(v / 1000000).toFixed(2)}M`;
 }
 
 function aliveDecisionText(evt) {
@@ -361,12 +370,19 @@ function renderAliveStatus(status) {
       ` · 第 ${st.tickCount} 次心跳${lastTick ? `（上次 ${lastTick}）` : ''}`;
   }
   if (detailEl) {
+    const lastWakeTokens = Number(st.lastWakeTokens || 0);
+    const lastWakeMs = Number(st.lastWakeDurationMs || 0);
+    const lastWakeText = lastWakeTokens || lastWakeMs
+      ? ` · 上次醒来 ${lastWakeTokens ? `${aliveFmtTokens(lastWakeTokens)} token` : ''}${lastWakeTokens && lastWakeMs ? ' / ' : ''}${lastWakeMs ? `${(lastWakeMs / 1000).toFixed(1)}s` : ''}`
+      : '';
     detailEl.textContent =
       `张力 ${Number(st.tension || 0).toFixed(1)} / 阈值 ${Number(st.wakeThreshold || 0).toFixed(1)}` +
       ` · 疲劳 ${Number(st.fatigue || 0).toFixed(1)}` +
       ` · 未闭合 ${Number(st.loops || 0)} 条` +
       ` · 今日唤醒 ${Number(st.wakeCountToday || 0)}/${Number(st.wakeMaxPerDay || 0)}` +
-      ` · 做 ${Number(st.actCount || 0)} / 放下 ${Number(st.deferCount || 0)} / 拒 ${Number(st.refuseCount || 0)}`;
+      ` · 做 ${Number(st.actCount || 0)} / 放下 ${Number(st.deferCount || 0)} / 拒 ${Number(st.refuseCount || 0)}` +
+      ` · 累计唤醒 ${aliveFmtTokens(st.totalTokens)} token` +
+      lastWakeText;
   }
 
   // 疲劳的解释线：到线就说清「为什么它现在不怎么醒」，而不是让用户对着两个数字猜
@@ -428,7 +444,16 @@ function renderAliveDecisions(events) {
       } else if (kind === 'PHASE') {
         parts.push(`${ALIVE_PHASE_TEXT[evt.from] || evt.from} → ${ALIVE_PHASE_TEXT[evt.to] || evt.to}`);
       } else if (kind === 'WAKE') {
-        parts.push(`张力 ${evt.tension} / 阈值 ${evt.threshold}`);
+        const busy = Number(evt.load) >= 0.35 ? '（你正在用）' : '';
+        parts.push(`张力 ${evt.tension} / 阈值 ${evt.threshold}${busy}`);
+      } else if (kind === 'WAKE_END') {
+        parts.push(
+          [Number(evt.tokens) ? `${aliveFmtTokens(evt.tokens)} token` : '', Number(evt.durationMs) ? `${(Number(evt.durationMs) / 1000).toFixed(1)}s` : '']
+            .filter(Boolean)
+            .join(' / ') || '—'
+        );
+      } else if (kind === 'WAKE_NO_DECISION') {
+        parts.push('没调用 alive_decide，这一轮白醒了（张力继续累积）');
       } else if (kind === 'WAKE_SKIPPED') {
         parts.push(String(evt.reason || ''));
       } else if (kind === 'WAKE_ERROR') {

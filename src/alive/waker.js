@@ -19,7 +19,9 @@ function evaluate(opts) {
   const nowMs = opts.nowMs;
   if (!state) return { wake: false, reason: 'no-state' };
   if (state.tension < state.wakeThreshold) return { wake: false, reason: 'below-threshold' };
-  // 压缩相位（夜间重组）不打断：这让「醒来」有节律，而不是连续抽动
+  // 「压缩」相位不打断：它是高疲劳（`fatigue ≥ phaseFatigueHigh`）触发的那一档，
+  // 相当于累了就别再逼它动。**注意这不是昼夜节律** —— 相位只由 load 与 fatigue 决定，
+  // 代码里没有任何"夜间"输入（以前这里写成"夜间重组"，与实现不符）。
   if (state.phase === 'COMPRESS') return { wake: false, reason: 'compressing' };
   const since = nowMs - Number(state.lastWakeAt || 0);
   if (state.lastWakeAt && since < cfg.wakeMinIntervalMs) {

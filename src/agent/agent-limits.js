@@ -495,8 +495,16 @@ const AGENT_LIMITS_DEFAULTS = {
   alivePhaseLoadTokensHigh: 20000,
   alivePhaseFatigueHigh: 60,
   alivePhaseFatigueLow: 25,
-  /** 决策日志保留条数（state.events 只追加、按此裁剪；页面只显示最近 N 条） */
-  aliveHistoryMax: 200,
+  /**
+   * 决策日志保留条数（`state.decisions` / `state.intents` 各自的上限）。
+   *
+   * 以前这两处硬编码在 `decide.js`（20 / 200），而本文件里的 `aliveHistoryMax` 算了却没人用 ——
+   * 同一个口径两个来源，改一处就不生效。现在只有这一处。
+   */
+  aliveDecisionsKeep: 200,
+  aliveIntentsKeep: 20,
+  /** 「可疑顺从」告警的当日唤醒次数下限：醒了这么多次却一次没拒绝 = 排期表，不是活的 */
+  aliveSuspiciousWakeMin: 5,
   /** 唤醒轮默认只读（可读文件/检索记忆/写记忆与目标，不写盘、不执行命令） */
   aliveReadOnlyWake: true
 };

@@ -7,7 +7,12 @@
  * 不占预算、不会死、不衰减记忆、不产遗物、不绑定 incarnation、不隔离记忆。
  * 它只做四件事：按 300s 跳动、漂移体征、推进相位、在张力越线时**问模型要不要动**。
  *
- * 宿主无关：桌面主进程与 headless 都调 `createAliveRuntime`，只换 `turnRunner`。
+ * 宿主无关：它只要一个 `turnRunner`，理论上桌面与 headless 都能跑。
+ *
+ * **现状（2026-11-10）**：只有桌面装配了它（`src/main/alive-boot.js` ← `src/main-entry.js`）。
+ * headless **没有**装配 —— 服务器上没人看着，让它每 5 分钟自己决定醒不醒，等于把一份
+ * 无人监管的模型账单放进 systemd 里。要装配得先定"什么时段/什么负载下允许醒"，
+ * 那是另一次设计变更；在那之前别在这句注释里假装它已经跑在两处。
  */
 
 const vitals = require('./vitals');
@@ -60,6 +65,10 @@ function resolveAliveConfig(limits) {
     fatigueEps: Math.max(0, num(pick('aliveFatigueEps'), D.aliveFatigueEps)),
     voiceMaxPerDay: Math.max(0, num(pick('aliveVoiceMaxPerDay'), D.aliveVoiceMaxPerDay)),
     voiceMinIntervalMs: Math.max(0, num(pick('aliveVoiceMinIntervalMs'), D.aliveVoiceMinIntervalMs)),
+    /** 决策日志保留条数（`decide.js` 用；数字只在 agent-limits） */
+    decisionsKeep: Math.max(1, num(pick('aliveDecisionsKeep'), D.aliveDecisionsKeep)),
+    intentsKeep: Math.max(1, num(pick('aliveIntentsKeep'), D.aliveIntentsKeep)),
+    suspiciousWakeMin: Math.max(1, num(pick('aliveSuspiciousWakeMin'), D.aliveSuspiciousWakeMin)),
     phaseInertiaAlert: Math.max(1, num(pick('alivePhaseInertiaAlert'), D.alivePhaseInertiaAlert)),
     phaseInertiaLow: Math.max(1, num(pick('alivePhaseInertiaLow'), D.alivePhaseInertiaLow)),
     phaseInertiaSettle: Math.max(1, num(pick('alivePhaseInertiaSettle'), D.alivePhaseInertiaSettle)),
@@ -70,7 +79,6 @@ function resolveAliveConfig(limits) {
     phaseFatigueHigh: num(pick('alivePhaseFatigueHigh'), D.alivePhaseFatigueHigh),
     phaseFatigueLow: num(pick('alivePhaseFatigueLow'), D.alivePhaseFatigueLow),
     loadTokensHigh: Math.max(1, num(pick('alivePhaseLoadTokensHigh'), D.alivePhaseLoadTokensHigh)),
-    historyMax: Math.max(20, num(pick('aliveHistoryMax'), D.aliveHistoryMax)),
     readOnlyWake: pick('aliveReadOnlyWake') !== false
   };
   cfg.wakeThreshold = clamp(cfg.wakeThreshold, cfg.wakeThresholdMin, cfg.wakeThresholdMax);
@@ -108,6 +116,10 @@ function createAliveRuntime(opts) {
   let wakeInFlight = false;
   let unsubscribe = null;
   let pendingTokens = 0;
+  /** 当前这一轮唤醒自己烧掉的 token（与 `pendingTokens` 同源，只用于成本回执） */
+  let wakeTokens = 0;
+  /** 这一轮唤醒模型有没有通过 `alive_decide` 表态（false = 记一条 `WAKE_NO_DECISION`） */
+  let decisionThisWake = false;
   /**
    * 停机代次：stop()/reset() 各 +1。
    *
@@ -181,6 +193,10 @@ function createAliveRuntime(opts) {
     const gen = generation;
     wakeAbort = new AbortController();
     const nowMs = now();
+    /** 这一轮自己烧掉的 token（只数 `wakeInFlight` 期间的用量，与疲劳同一口径） */
+    wakeTokens = 0;
+    /** 这一轮有没有通过 `alive_decide` 表过态（没表态 = 观测缺口，记一条事件） */
+    decisionThisWake = false;
     let senses = { drawer: false, eyes: false, voice: false };
     try {
       senses = getSenses() || senses;
@@ -188,7 +204,6 @@ function createAliveRuntime(opts) {
       // 读不到能力就当没有
     }
     const stateBlock = decide.renderStateBlock(state, cfg, { nowMs, senses });
-    const before = Number(state.tickCount || 0);
     try {
       await turnRunner({ stateBlock, state, cfg, senses, signal: wakeAbort.signal });
     } catch (err) {
@@ -202,13 +217,21 @@ function createAliveRuntime(opts) {
       wakeAbort = null;
       // 期间被关掉/清空过：这一轮的结果作废，不写盘、不记事件（否则会把停表或清空覆盖掉）
       if (gen !== generation) return;
-      state.lastWakeFinishedAt = now();
-      state.lastWakeTick = before;
+      const durationMs = Math.max(0, now() - nowMs);
+      state.lastWakeTokens = wakeTokens;
+      state.lastWakeDurationMs = durationMs;
       pushEvent({
         kind: 'WAKE_END',
         phase: state.phase,
-        tension: Number(Number(state.tension).toFixed(1))
+        tension: Number(Number(state.tension).toFixed(1)),
+        // 成本可见：一次醒来花了多少 token / 多久（"心跳贵不贵"这个问题以前只能翻 state.json）
+        tokens: wakeTokens,
+        durationMs
       });
+      if (!decisionThisWake) {
+        // 只观测：模型没表态时这轮就白醒了（张力继续累积），但页面/日志要能看出这件事
+        pushEvent({ kind: 'WAKE_NO_DECISION', tokens: wakeTokens, durationMs });
+      }
       store.write(state);
     }
   }
@@ -241,7 +264,10 @@ function createAliveRuntime(opts) {
           trigger: 'internal',
           tension: Number(Number(st.tension).toFixed(1)),
           threshold: Number(Number(st.wakeThreshold).toFixed(1)),
-          phase: st.phase
+          phase: st.phase,
+          // 当时这台机器忙不忙：`load` 高 = 有人正在用（它是在你说话时醒的），
+          // 这条以前只影响相位标签，后果（抢 token / 延迟）完全看不见
+          load: Number(load.toFixed(2))
         });
         store.write(st);
         // 唤醒轮内部会再次写盘；先落一次「已唤醒」再跑，避免异常时丢掉这次唤醒
@@ -280,6 +306,7 @@ function createAliveRuntime(opts) {
         // 一次长对话就能把它钉在 100 并长期压进 COMPRESS 相位（见 issue/2026-11-10）。
         if (!wakeInFlight) return;
         pendingTokens += tokens;
+        wakeTokens += tokens;
       });
     }
     timer = setInterval(() => {
@@ -358,6 +385,8 @@ function createAliveRuntime(opts) {
     }
     const res = decide.applyDecision(state, args, { cfg, nowMs: now() });
     if (res.ok) {
+      // 这一轮"表过态了"：`WAKE_END` 之后才不会被记成 WAKE_NO_DECISION
+      decisionThisWake = true;
       pushEvent({
         kind: 'DECISION',
         decision: res.decision,
@@ -407,6 +436,9 @@ function createAliveRuntime(opts) {
       voiceCountToday: Number(st.voiceCountToday || 0),
       lastVoiceAt: Number(st.lastVoiceAt || 0),
       voiceMaxPerDay: cfg.voiceMaxPerDay,
+      /** 上一次醒来的成本（token / 耗时）：成本可见，别让"心跳贵不贵"只能猜 */
+      lastWakeTokens: Number(st.lastWakeTokens || 0),
+      lastWakeDurationMs: Number(st.lastWakeDurationMs || 0),
       loops: (st.loops || []).length,
       wakeCountToday: st.wakeCountToday,
       wakeMaxPerDay: cfg.wakeMaxPerDay,

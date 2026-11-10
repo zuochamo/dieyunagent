@@ -88,6 +88,28 @@ function appendNote(userData, text, opts) {
   }
 }
 
+/**
+ * 读回自己抽屉的工具。
+ *
+ * 为什么要有：抽屉如果只能写不能读，写进去的东西对它自己毫无作用 —— 那就不是「痕迹」，
+ * 只是一份给用户看的行为日志。读回仍然守着同一条边界：**只能读它自己那一个文件**，
+ * 模型给不了路径（没有参数），所以不扩大任何权限面。
+ */
+const ALIVE_READ_NOTE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'alive_read_note',
+    description:
+      '读回**你自己**的抽屉（note.md：你以前写下的那些行）。\n' +
+      '只能读这一个文件，不能读别的地方。想看「上次我在想什么」时再读；读它不算打扰任何人。',
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false
+    }
+  }
+};
+
 /** 暴露给模型的工具（只在后台心跳轮注入；与 `alive_decide` 一样走 preTool，不经工具桥） */
 const ALIVE_NOTE_TOOL = {
   type: 'function',
@@ -111,6 +133,7 @@ module.exports = {
   NOTE_MAX_CHARS,
   NOTE_ENTRY_MAX_CHARS,
   ALIVE_NOTE_TOOL,
+  ALIVE_READ_NOTE_TOOL,
   workspaceDir,
   noteFile,
   ensureWorkspace,

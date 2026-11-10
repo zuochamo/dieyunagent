@@ -18,8 +18,6 @@ const { closeLoop, upsertLoops, loopTension } = require('./tension');
 
 const DECISIONS = Object.freeze(['ACT', 'DEFER', 'REFUSE']);
 const INTENT_MAX_CHARS = 300;
-const INTENTS_KEEP = 20;
-const DECISIONS_KEEP = 200;
 
 /** 暴露给模型的工具（只在后台心跳轮注入，传统模式看不到） */
 const ALIVE_DECIDE_TOOL = {
@@ -30,7 +28,8 @@ const ALIVE_DECIDE_TOOL = {
       '后台心跳把你叫醒了：这一次**由你决定做不做**。必须调用一次。\n' +
       'ACT = 现在就做点事（这一轮只读：能读文件、找东西、读记忆，不能写盘/执行命令/出网）；' +
       'DEFER = 判断现在不合适，先放下（本轮立刻结束，张力继续累积）；' +
-      'REFUSE = 判断某件未闭合的事不值得做，关掉它（会把对应 loopId 从清单里移除）。\n' +
+      'REFUSE = 判断某件未闭合的事不值得做，关掉它（**必须带 loopId**，把那条从清单里移除）；\n' +
+      '**空手的 REFUSE 等于 DEFER**：没有要关掉的事项时请用 DEFER，不要不带 loopId 就 REFUSE。\n' +
       '`intent` 只写给系统自己存档，不会展示给任何人，也不必写给谁看。\n' +
       '`loops` 用来更新你**自己**的未闭合事项清单：同一句话会续命，新句子会新增（超过上限先丢张力最低的）。',
     parameters: {
@@ -70,6 +69,13 @@ const ALIVE_DECIDE_TOOL = {
 
 /**
  * 落一次决策。
+ *
+ * 两条必须说清的语义：
+ * 1. **REFUSE 是「关掉某条未闭合项」**，不是「这一轮我不想动」（那是 DEFER）。所以只有真的
+ *    关掉了东西才计入拒绝次数 —— 否则「嘴上拒绝、什么都没关」会把拒绝率抬上去，
+ *    「可疑顺从」告警（`refuseToday`）就失真了（`closed` 会照实写进 DECISION 事件）。
+ * 2. 保留条数来自 `agent-limits`（`aliveDecisionsKeep` / `aliveIntentsKeep`），本文件不留数字。
+ *
  * @returns {{ ok: boolean, error?: string, decision?: string, closedLoop?: object|null }}
  */
 function applyDecision(state, args, opts) {
@@ -90,19 +96,22 @@ function applyDecision(state, args, opts) {
   if (decision === 'REFUSE' && raw.loopId) {
     closedLoop = closeLoop(state, String(raw.loopId));
   }
+  const decisionsKeep = Math.max(1, Number(cfg.decisionsKeep) || 200);
+  const intentsKeep = Math.max(1, Number(cfg.intentsKeep) || 20);
   state.decisions = [...(Array.isArray(state.decisions) ? state.decisions : []), { ts: nowMs, decision }].slice(
-    -DECISIONS_KEEP
+    -decisionsKeep
   );
   const intent = String(raw.intent || '').trim().slice(0, INTENT_MAX_CHARS);
   if (intent) {
     state.intents = [
       ...(Array.isArray(state.intents) ? state.intents : []),
       { ts: nowMs, decision, intent }
-    ].slice(-INTENTS_KEEP);
+    ].slice(-intentsKeep);
   }
   if (decision === 'ACT') state.actCount = Number(state.actCount || 0) + 1;
   else if (decision === 'DEFER') state.deferCount = Number(state.deferCount || 0) + 1;
-  else {
+  else if (closedLoop) {
+    // 只有真关掉了一条未闭合项才算「拒绝」；空手 REFUSE 只进决策日志（closed=false）
     state.refuseCount = Number(state.refuseCount || 0) + 1;
     state.refuseToday = Number(state.refuseToday || 0) + 1;
   }
@@ -158,7 +167,7 @@ function renderStateBlock(state, cfg, opts) {
   const senses = (opts && opts.senses) || null;
   if (senses) {
     const caps = [];
-    if (senses.drawer) caps.push('alive_note（往自己的抽屉里写一行）');
+    if (senses.drawer) caps.push('alive_note（往自己的抽屉里写一行）/ alive_read_note（读回以前写的）');
     if (senses.eyes) caps.push('camera_look / desktop_camera_look（看一眼现实）');
     if (senses.voice) caps.push('alive_speak（说一句）/ alive_listen（听几秒）');
     lines.push(caps.length ? `你现在还有：${caps.join('、')}。` : '你现在没有抽屉、眼睛和嘴：只能看和记。');
@@ -168,11 +177,12 @@ function renderStateBlock(state, cfg, opts) {
 }
 
 /** 拒绝率告警：一个从不拒绝的实例不是活的，是排期表（只提示，不干预）。
- *  只看**今天**：昨天拒过一次不代表今天不服从。 */
+ *  只看**今天**：昨天拒过一次不代表今天不服从。阈值来自 `agent-limits`。 */
 function suspiciousObedience(state, cfg) {
   const wakes = Number(state.wakeCountToday || 0);
   const refusedToday = Number(state.refuseToday || 0);
-  return wakes >= 5 && refusedToday === 0;
+  const min = Math.max(1, Number(cfg && cfg.suspiciousWakeMin) || 5);
+  return wakes >= min && refusedToday === 0;
 }
 
 module.exports = {

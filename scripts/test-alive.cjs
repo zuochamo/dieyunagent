@@ -380,14 +380,17 @@ async function main() {
       limits,
       now: () => clock,
       rng: seededRng(20260101),
-      turnRunner: async ({ stateBlock }) => {
+      turnRunner: async ({ stateBlock, state }) => {
         wakeTurns += 1;
         assert.ok(stateBlock.startsWith(ALIVE_STATE_PREFIX), '唤醒轮必须拿到体征块');
-        // 模拟模型：走工具落决策（同一入口），一并声明一件未闭合的事
+        // 模拟模型：走工具落决策（同一入口），一并声明一件未闭合的事。
+        // REFUSE 必须指向一条真实存在的未闭合项（空手 REFUSE 不算拒绝，见 C1）。
+        const loopId = (state.loops && state.loops[0] && state.loops[0].id) || undefined;
+        const refuse = wakeTurns % 4 === 0 && !!loopId;
         const dec = rt.applyDecision({
-          decision: wakeTurns % 4 === 0 ? 'REFUSE' : 'ACT',
+          decision: refuse ? 'REFUSE' : 'ACT',
           intent: '模拟决策',
-          loops: [{ text: `待办 ${wakeTurns}` }]
+          ...(refuse ? { loopId } : { loops: [{ text: `待办 ${wakeTurns}` }] })
         });
         assert.strictEqual(dec.ok, true);
       }
@@ -986,6 +989,118 @@ async function main() {
     assert.strictEqual(voiceMod.clampListenSeconds(99), voiceMod.LISTEN_MAX_SECONDS);
     assert.strictEqual(voiceMod.clampListenSeconds(0), voiceMod.LISTEN_DEFAULT_SECONDS);
     assert.strictEqual(voiceMod.clampListenSeconds(7), 7);
+  });
+
+  // ───────────────── 回归：这一版补的三处设计遗漏（A/B/C）─────────────────
+  ok('A1 抽屉能读回来：读的仍是它自己那一个文件（没有路径参数）', () => {
+    assert.ok(noteMod.ALIVE_READ_NOTE_TOOL, '要有读回工具');
+    assert.strictEqual(noteMod.ALIVE_READ_NOTE_TOOL.function.name, 'alive_read_note');
+    assert.deepStrictEqual(
+      Object.keys(noteMod.ALIVE_READ_NOTE_TOOL.function.parameters.properties || {}),
+      [],
+      '读回不能有路径参数（否则就是扩大了边界）'
+    );
+    const root = mkTmp('readnote');
+    try {
+      noteMod.appendNote(root, '第一行', { nowMs: Date.UTC(2026, 0, 2, 3, 4) });
+      assert.ok(noteMod.readNote(root).includes('第一行'), '写进去的要能读回来');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  ok('C1 空手 REFUSE 不算拒绝（只有真关掉一条未闭合项才计数）', () => {
+    const cfg = testCfg();
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    tensionEngine.upsertLoops(state, [{ text: '待办' }], { cfg, nowMs: t0 });
+    const empty = decide.applyDecision(state, { decision: 'REFUSE' }, { cfg, nowMs: t0 });
+    assert.strictEqual(empty.ok, true);
+    assert.strictEqual(state.refuseCount, 0, '空手拒绝不该抬高拒绝率');
+    assert.strictEqual(state.refuseToday, 0);
+    const bound = decide.applyDecision(
+      state,
+      { decision: 'REFUSE', loopId: state.loops[0].id },
+      { cfg, nowMs: t0 }
+    );
+    assert.strictEqual(bound.closedLoop && bound.closedLoop.text, '待办', '要真的关掉');
+    assert.strictEqual(state.refuseCount, 1);
+    assert.strictEqual(state.refuseToday, 1);
+  });
+
+  ok('B1/B4 数字只有一处来源：保留条数与「可疑顺从」阈值都在 agent-limits', () => {
+    const cfg = testCfg();
+    assert.strictEqual(cfg.decisionsKeep, AGENT_LIMITS_DEFAULTS.aliveDecisionsKeep);
+    assert.strictEqual(cfg.intentsKeep, AGENT_LIMITS_DEFAULTS.aliveIntentsKeep);
+    assert.strictEqual(cfg.suspiciousWakeMin, AGENT_LIMITS_DEFAULTS.aliveSuspiciousWakeMin);
+    assert.strictEqual(cfg.historyMax, undefined, '死配置 aliveHistoryMax 应已删除');
+
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    state.wakeCountToday = AGENT_LIMITS_DEFAULTS.aliveSuspiciousWakeMin - 1;
+    state.refuseToday = 0;
+    assert.strictEqual(decide.suspiciousObedience(state, cfg), false, '没到线不告警');
+    state.wakeCountToday = AGENT_LIMITS_DEFAULTS.aliveSuspiciousWakeMin;
+    assert.strictEqual(decide.suspiciousObedience(state, cfg), true, '到线且今天没拒绝就告警');
+
+    // 保留条数确实生效（不是只写在配置里）
+    for (let i = 0; i < cfg.intentsKeep + 5; i += 1) {
+      decide.applyDecision(state, { decision: 'ACT', intent: `第 ${i} 次` }, { cfg, nowMs: t0 });
+    }
+    assert.strictEqual(state.intents.length, cfg.intentsKeep, 'intents 只留上限那么多');
+    assert.ok(state.decisions.length <= cfg.decisionsKeep, 'decisions 有界');
+  });
+
+  await okAsync('A2/A3/C2 唤醒回执：WAKE 带 load、WAKE_END 带 token、没表态记一条', async () => {
+    const root = mkTmp('wake-receipt');
+    const limits = Object.assign({}, AGENT_LIMITS_DEFAULTS, { aliveTickIntervalMs: TICK });
+    let clock = Date.UTC(2026, 0, 1);
+    let speakDecision = false;
+    const rt = createAliveRuntime({
+      userDataPath: root,
+      limits,
+      now: () => clock,
+      rng: seededRng(41),
+      turnRunner: async () => {
+        recordLlmUsage({ total_tokens: 30000 });
+        // 第一轮故意不表态（模拟模型忘了调 alive_decide），第二轮才调
+        if (speakDecision) rt.applyDecision({ decision: 'DEFER', intent: '模拟' });
+      }
+    });
+    rt.start();
+    try {
+      await rt.tickOnce();
+      // 第一轮：只在醒来时喂用量（load 高 = 有人正在用）
+      clock += TICK;
+      recordLlmUsage({ total_tokens: 40000 });
+      rt.getState().tension = 100;
+      await rt.tickOnce();
+      let events = rt.decisions(200);
+      const wake1 = events.find((e) => e.kind === 'WAKE');
+      assert.ok(wake1 && typeof wake1.load === 'number', 'WAKE 要带当时的 load（可看出是不是在你说话时醒的）');
+      assert.ok(wake1.load > 0, `load 应大于 0，实际 ${wake1 && wake1.load}`);
+      const end1 = events.find((e) => e.kind === 'WAKE_END');
+      assert.ok(end1 && end1.tokens > 0, `WAKE_END 要带这一轮烧掉的 token，实际 ${JSON.stringify(end1)}`);
+      assert.ok(end1.durationMs >= 0, 'WAKE_END 要带耗时');
+      assert.strictEqual(rt.status().lastWakeTokens, end1.tokens, '上次唤醒成本要进 status');
+      assert.ok(
+        events.some((e) => e.kind === 'WAKE_NO_DECISION'),
+        '没调 alive_decide 要记一条观测事件'
+      );
+
+      // 第二轮：模型表态了，就不该再有 WAKE_NO_DECISION
+      speakDecision = true;
+      const before = rt.decisions(200).filter((e) => e.kind === 'WAKE_NO_DECISION').length;
+      clock += 30 * 60 * 1000;
+      rt.getState().tension = 100;
+      await rt.tickOnce();
+      events = rt.decisions(200);
+      const after = events.filter((e) => e.kind === 'WAKE_NO_DECISION').length;
+      assert.strictEqual(after, before, '表过态的那一轮不该被记成没表态');
+    } finally {
+      rt.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   ok('设置：主动开口授权与设备名持久化，且不冲掉感官开关', () => {

@@ -9,7 +9,7 @@
 | 入口 | 设置 → 生命（一个总开关） |
 | 数字来源 | `src/agent/agent-limits.js` 的 `alive*` 段（唯一一处，不进设置页） |
 | 状态 | `<userData>/alive/state.json` + `events.jsonl` + `settings.json` |
-| 验收 | `npm run test:alive`（41 项，注入时钟模拟 30 天，不挂机） |
+| 验收 | `npm run test:alive`（45 项，注入时钟模拟 30 天，不挂机） |
 
 ---
 
@@ -42,10 +42,15 @@
 2) 消退     很久没被声明的未闭合项按 48h 时间常数淡掉（淡到 <1 直接清）
 3) 阈值     W += (μ·(基线 − 拒绝率) + ν·(疲劳/100 − 0.5))·Δt(小时)，夹在 40..80
 4) 相位     target(load, fatigue) → 连续 k 个 tick 才切换（ALERT/LOW/SETTLE/COMPRESS）
+            **相位只由 load 与 fatigue 决定，没有昼夜输入** —— COMPRESS 是"高疲劳压缩"，
+            不是"夜里重组"（代码里没有任何按小时/按星期判断的分支）
 5) 唤醒     T ≥ W ∧ 非 COMPRESS ∧ 距上次 ≥ 10min ∧ 今日 < 40 次
-            → 记 WAKE（trigger=internal），跑一轮「后台心跳轮」
+            → 记 WAKE（trigger=internal，带当时的 load），跑一轮「后台心跳轮」
 6) 落盘     state.json 原子写；事件追加进 events.jsonl
 ```
+
+> `load` 高（有人在用）**不阻止**唤醒：拟态的节律不该由"你正好在打字"决定。
+> 但这件事必须看得见 —— `WAKE.load` 记下当时忙不忙，页面把 `load ≥ 0.35` 的那次标成「（你正在用）」。
 
 ### 两个 token 口径（别混）
 
@@ -65,15 +70,21 @@
 |---|---|---|
 | `BIRTH` | 第一次出生 | phase / threshold |
 | `PHASE` | 相位真的切换 | from / to / load |
-| `WAKE` | 张力越线要醒 | tension / threshold / phase |
-| `WAKE_END` / `WAKE_SKIPPED` / `WAKE_ERROR` | 醒来那一轮的收尾 / 跳过 / 失败 | reason 或 message |
-| `DECISION` | 模型通过 `alive_decide` 表态 | decision / loopId（**没有 intent**） |
+| `WAKE` | 张力越线要醒 | tension / threshold / phase / **load**（当时这台机器忙不忙 = 是不是在你说话时醒的） |
+| `WAKE_END` | 醒来那一轮收尾 | phase / tension / **tokens**（这一轮烧了多少）/ **durationMs** |
+| `WAKE_NO_DECISION` | 醒来却没调 `alive_decide` | tokens / durationMs（这一轮白醒了，张力继续累积） |
+| `WAKE_SKIPPED` / `WAKE_ERROR` | 没跑 / 跑失败 | reason 或 message |
+| `DECISION` | 模型通过 `alive_decide` 表态 | decision / loopId / **closed**（这次 REFUSE 有没有真关掉一条） |
 | `SPEAK` / `LISTEN` | 每次动嘴/动耳（含被拒、含失败） | ok / chars / seconds / errorCode |
 | `EYE` | 每次睁眼（`camera_look` / `desktop_camera_look` 返回后） | ok / device / width×height / errorCode |
 
 **为什么不逐跳写 `TICK`**：心跳 288 次/天，`events.jsonl` 上限 2000 行（超了裁一半）→ 4 天就会把
 `WAKE` / `DECISION` 挤干净，决策日志直接不可读。心跳的账由 `state.json` 的 `tickCount` /
 `lastTickAt` 记，页面把这两项显示出来（"第 N 次心跳（上次 HH:MM）"），要审计对得上就够了。
+
+**成本也要能回答**：`WAKE_END.tokens` / `durationMs` 与 `state.lastWakeTokens` /
+`lastWakeDurationMs`、`state.totalTokens` 都在面板上（"累计唤醒 X token · 上次醒来 Y token / Z s"）。
+它花的是同一份账单，"心跳贵不贵"不该只能翻 state.json 才知道。
 
 **T 的回复中心会随静默时长上升**（`aliveTensionIdleRampPerHour`）：闲久了会"坐不住"，
 所以一个**没有任何未闭合事项的新实例也会在几小时后自己醒一次**。没有这一项，拟态就失效了
@@ -97,7 +108,9 @@ alive_decide { decision: ACT | DEFER | REFUSE, intent, loopId?, loops? }
 
 - **ACT**：继续这一轮，用普通（只读）工具做点事
 - **DEFER**：判断现在不合适，本轮结束，张力继续累积
-- **REFUSE**：决定某件未闭合的事不值得做，把它从清单里关掉（张力清零，决策有记录）
+- **REFUSE**：决定某件未闭合的事不值得做，把它从清单里关掉（张力清零，决策有记录）。
+  **必须带 `loopId`**；空手的 REFUSE 等于 DEFER，且**不计入拒绝次数**——否则"嘴上拒绝、
+  什么都没关"会把拒绝率抬上去，「可疑顺从」告警就失真了（`DECISION` 事件里的 `closed` 照实写）。
 
 `intent`（为什么）只写进 `state.intents`：**不进事件流、不进 IPC、不进页面**。
 设置页能看到"它拒绝了 4 次"，看不到那 4 个理由。理由一旦公开，它就会开始为观众活。
@@ -128,7 +141,7 @@ alive_decide { decision: ACT | DEFER | REFUSE, intent, loopId?, loops? }
 
 | 开关 | 默认 | 它能做什么 | 硬边界 | 还需要什么 |
 |---|---|---|---|---|
-| **抽屉** `senses.drawer` | **开** | `alive_note`：往自己的 `alive/workspace/note.md` 追加一行 | 只写自己目录、只追加、单条 ≤600 字、整体 ≤32KB（超了留尾部） | 无（目录在**启用那一刻**建好） |
+| **抽屉** `senses.drawer` | **开** | `alive_note`：往自己的 `alive/workspace/note.md` 追加一行；`alive_read_note`：**读回**（没有路径参数，只能读这一个文件） | 只读/只写自己目录、只追加、单条 ≤600 字、整体 ≤32KB（超了留尾部） | 无（目录在**启用那一刻**建好） |
 | **眼睛** `senses.eyes` | 关 | `camera_look` / `desktop_camera_look`：拍一张现实画面 | 不落盘；画面进视觉通道后即弃；**不留缩略图**（见下） | **还要在「设置 → 权限」把摄像头打开**（两道锁）；面板会显示"待授权" |
 | **嘴与耳** `senses.voice` | 关 | `alive_speak`：说一句（≤300 字）；`alive_listen`：听 1–15 秒 | 音频**不落盘**（临时文件用完即删）；没有"一直听着"的形态 | 语音槽位配置 + `ffmpeg`/`ffplay` + 麦克风设备（页面下拉选，`DIEYUN_MIC_DEVICE` 只作高级覆盖） |
 | **主动开口** `voiceSpontaneous` | 关 | 允许它在**没人说话时**出声 / 开麦 | 每日上限 `aliveVoiceMaxPerDay`、两次间隔 `aliveVoiceMinIntervalMs`；被拒也留 `SPEAK`/`LISTEN` 事件 | 勾了「嘴与耳」才有意义 |
@@ -203,6 +216,10 @@ alive_decide { decision: ACT | DEFER | REFUSE, intent, loopId?, loops? }
 - 它与你**共享记忆与模型配置**——这是拟态的前提，不是缺陷；
 - 唤醒轮**默认只读**（见上一节白名单）；
 - 它的判定全在 Main（`src/alive/runtime.js`），Renderer 只显示结果 —— 不在渲染层判生死、判续跑。
+- **headless 目前没有装配生命感**（`src/headless/boot.js` 里没有 `bootAliveRuntime`）。
+  `runtime.js` / `alive-boot.js` 是宿主无关的，复用同一份即可；但服务器上没人看着，让它每 5 分钟
+  自己决定醒不醒，等于把一份无人监管的模型账单放进 systemd —— 要装配得先定"什么时段 / 什么负载
+  下允许醒"，那是另一次设计变更。在那之前别在注释里假装它已经跑在两处。
 
 ---
 
@@ -235,6 +252,9 @@ alive_decide { decision: ACT | DEFER | REFUSE, intent, loopId?, loops? }
 13. ❌ 逐跳写 `TICK` 事件（288 条/天会把 `WAKE` / `DECISION` 挤出事件文件；心跳的账在 `state.json`）
 14. ❌ 把用户对话的 token 记进它的疲劳（那会把"它累了"变成"你在聊天"）
 15. ❌ 在 Renderer 里判"感官能不能用"（`describeVoiceCapability` / `capabilities` 是唯一来源）
+16. ❌ 把 REFUSE 当"这一轮不想动"用（那是 DEFER；空手 REFUSE 不算拒绝，别用它刷拒绝率）
+17. ❌ 用 `load` 拦唤醒（"你正在打字所以它不许醒"——那就不拟态了；要拦先用事件把它记清楚）
+18. ❌ 把相位说成昼夜节律（相位只有 load 与 fatigue 两个输入）
 
 ---
 
@@ -251,6 +271,9 @@ alive_decide { decision: ACT | DEFER | REFUSE, intent, loopId?, loops? }
 | H 嘴与耳 | 缺 ffmpeg / 缺设备名 / 缺语音配置 / 缺 ffplay 一律**明确报错**（`NO_FFMPEG`/`NO_MIC_DEVICE`/`NO_TTS_CONFIG`/`NO_FFPLAY`），不假装听见或说出 |
 | I 感官 | 默认只开抽屉；眼睛与嘴默认关；摄像头在只读轮里还需 `senses.eyes`（`SENSE_DISABLED`） |
 | G 疲劳口径 | 25k token 不再一步打满；**用户对话不推高疲劳**，只有唤醒轮的 token 才计 |
+| G 唤醒回执 | `WAKE` 带 load；`WAKE_END` 带 tokens / durationMs 且进 `status.lastWakeTokens`；没调 `alive_decide` 记 `WAKE_NO_DECISION` |
+| G 决策语义 | 空手 REFUSE 不计拒绝（只有真关掉一条未闭合项才算）；`intents` / `decisions` 保留条数与「可疑顺从」阈值都来自 agent-limits（且真的生效） |
+| G 抽屉读写 | `alive_read_note` 没有路径参数（只能读自己那一个文件）；写进去的能读回来 |
 | H 感官自检 | 缺件说得出来（红字文案非空）；齐件才 `ok`；设备名"设置 → 环境变量"优先级；`SPEAK`/`LISTEN` 许可三态；录音失败分类；发声记账与跨天重置 |
 | F 运行 | 30 天模拟：至少一次 `trigger=internal` 唤醒、多种相位、有决策记录、事件文件有界 |
 | 其它 | 状态文件原子写/坏文件留证；`onLlmUsage` 旁听不抢主槽；关掉再打开不丢体征；**启用即建 `alive/workspace`**；设置新增字段不冲掉感官开关 |

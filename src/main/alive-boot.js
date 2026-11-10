@@ -20,7 +20,7 @@ const { runMainTurn } = require('../agent/main-turn-runner');
 const { loadModelSettings, resolveSpeechApiConfig, resolveTtsApiConfig } = require('../model-settings');
 const { loadPermissions } = require('../gateway/permissions-store');
 const { ALIVE_DECIDE_TOOL } = require('../alive/decide');
-const { ALIVE_NOTE_TOOL, appendNote, readNote, ensureWorkspace } = require('../alive/note');
+const { ALIVE_NOTE_TOOL, ALIVE_READ_NOTE_TOOL, appendNote, readNote, ensureWorkspace } = require('../alive/note');
 const {
   ALIVE_SPEAK_TOOL,
   ALIVE_LISTEN_TOOL,
@@ -136,7 +136,7 @@ function bootAliveRuntime(deps) {
       const caps = senses || sensesNow();
       /** 只给它**真能用**的工具：关掉的能力不注入，省得它反复试、反复被拒 */
       const extraTools = [ALIVE_DECIDE_TOOL];
-      if (caps.drawer) extraTools.push(ALIVE_NOTE_TOOL);
+      if (caps.drawer) extraTools.push(ALIVE_NOTE_TOOL, ALIVE_READ_NOTE_TOOL);
       if (caps.voice) extraTools.push(ALIVE_SPEAK_TOOL, ALIVE_LISTEN_TOOL);
 
       /** 语音配置按需现取（模型设置改了不用重启） */
@@ -169,6 +169,12 @@ function bootAliveRuntime(deps) {
           if (!caps.drawer) return { ok: false, errorCode: 'SENSE_DISABLED', error: '抽屉是关着的' };
           const res = appendNote(userData, a.text, { nowMs: Date.now() });
           return res.ok ? { ok: true, wrote: true } : res;
+        }
+        if (name === 'alive_read_note') {
+          if (!caps.drawer) return { ok: false, errorCode: 'SENSE_DISABLED', error: '抽屉是关着的' };
+          // 只读它自己那一个文件：没有路径参数，模型指不了别处（边界与写入侧完全同一个）
+          const text = readNote(userData);
+          return { ok: true, text, chars: text.length };
         }
         if (name === 'alive_speak' || name === 'alive_listen') {
           const isSpeak = name === 'alive_speak';

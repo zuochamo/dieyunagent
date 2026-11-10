@@ -20,7 +20,11 @@ const ALIVE_DIR_NAME = 'alive';
 const STATE_FILE_NAME = 'state.json';
 const EVENTS_FILE_NAME = 'events.jsonl';
 const SETTINGS_FILE_NAME = 'settings.json';
-/** events.jsonl 的物理上限：超过就裁剪到一半（state.events 另有 aliveHistoryMax 限制） */
+/**
+ * events.jsonl 的**物理**上限：超过就裁剪到一半。
+ * 逻辑上限（`state.decisions` / `state.intents` 留多少条）在 `agent-limits`
+ * （`aliveDecisionsKeep` / `aliveIntentsKeep`），别在这里再写一份。
+ */
 const EVENTS_FILE_MAX_LINES = 2000;
 
 function aliveRootDir(userDataPath) {
