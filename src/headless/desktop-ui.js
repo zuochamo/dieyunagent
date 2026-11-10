@@ -314,8 +314,18 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
     rendererFreezeBeat: () => {},
     // 模型配置（端点 / 模型 / key）由服务端从 model-settings.json 读出来注入；渲染层靠它选模型
     getModelSettingsFromMain: async () => MODEL_SETTINGS,
-    // 浏览器里改模型设置只落在 localStorage，不回写服务器（没有写入通道，也不该悄悄写）
-    syncModelSettings: async () => {},
+    // preload: ipcRenderer.invoke('model:sync-settings', settings) —— 网页里保存模型设置
+    // 就是改服务器上那份 model-settings.json（收尾与桌面端同一份实现：落盘 + 推语音设置给
+    // 手机端 + 让 core 重读配置）。写失败时抛出去，别让界面以为存好了。
+    syncModelSettings: async (settings) => {
+      const res = await agentCall('desktop.save_model_settings', { settings: settings || {} });
+      if (res && res.ok === false) throw new Error('保存模型设置失败：写服务器上的 model-settings.json 出错（详见服务日志）');
+      return res;
+    },
+    // preload: ipcRenderer.invoke('models:fetch-list') —— 供应商「检测可用模型」。
+    // 检测要出网（GET /models + 逐个探测 chat/completions），浏览器直连会被模型端点的
+    // CORS 拦掉，所以交给同一台服务器跑（desktop.fetch_models），语义与桌面端同一份实现。
+    fetchBuiltinModels: async (payload) => agentCall('desktop.fetch_models', { payload: payload || {} }),
     // 流式聊天：等价于主进程的 streamChatViaMain
     streamChatViaMain: async ({ url, headers, body, onRaw, onControl }) => {
       const resp = await postLlm(url, headers, body, onControl);

@@ -39,7 +39,8 @@ for (const key of [
   'browseServerDir',
   'getPermissions',
   'setPermissions',
-  'agentRustLoopRun'
+  'agentRustLoopRun',
+  'fetchBuiltinModels'
 ]) {
   assert.ok(shim.includes(key), `shim 缺少 ${key}`);
 }
@@ -47,6 +48,10 @@ for (const key of [
 assert.ok(shim.includes("'desktop.set_workspace'"), 'shim 应调用 desktop.set_workspace');
 assert.ok(shim.includes("'desktop.list_dirs'"), 'shim 应调用 desktop.list_dirs');
 assert.ok(shim.includes("'desktop.set_permissions'"), 'shim 应调用 desktop.set_permissions');
+// 供应商「检测」出网必须由服务端做（浏览器会被模型端点的 CORS 拦掉）
+assert.ok(shim.includes("'desktop.fetch_models'"), 'shim 应调用 desktop.fetch_models');
+// 网页里保存模型设置 = 改服务器上的 model-settings.json（别再静默落 localStorage）
+assert.ok(shim.includes("'desktop.save_model_settings'"), 'shim 应调用 desktop.save_model_settings');
 assert.ok(shim.includes('applyWorkspace'), 'shim 应有工作区镜像的唯一写入点');
 
 // 3) 注入值要进得去（路径带空格/中文是常态，字符串化不能拼坏）

@@ -111,7 +111,7 @@ dieyun-headless self-test
 | **新增** `src/headless/cli-args.js` | 参数解析与 `--help`（唯一入口，别在别处再 parse `process.argv`） |
 | **新增** `src/headless/log.js` | 分级日志到 stderr，`[dieyun-headless]` 前缀（对齐 `docs/LOGGING.md`） |
 | **新增** `src/headless/secret-storage.js` | 实现 `{ isEncryptionAvailable, encryptString, decryptString }`（Electron `safeStorage` 的同形替身，见 §6.3） |
-| **新增** `src/headless/boot.js` | 装配（只调既有工厂，不复制逻辑）：`new LocalGateway({ userDataPath, readableDir, log, logDebug })` → `ensureAgentHomeDirs`/`ensureDieyunMdInHome` → `resolveDieyunCoreBinary()`/`isRustCoreEnabled()` + `createCoreBridge` + `setRustCore` → `createMcpStore({safeStorage})` → `bootMcpSkillCatalogs` → `createMcpManager({ ..., notifyCredentialRequest: null })` → `createMainToolBridge({ gateway, webContents:null, getMobileBridge: () => mobileBridge })` → `createMainCompactionAgent(userData, coreBridge)` → `new AgentService(...)` + `setExecutor(localExecutor)` → `localGateway.setWorkspace(workspace)`。所有可选依赖（browserService / peer / sshActions / worktreeActions）**不传**，工具层已有结构化降级 |
+| **新增** `src/headless/boot.js` | 装配（只调既有工厂，不复制逻辑）：`new LocalGateway({ userDataPath, readableDir, log, logDebug })` → `ensureAgentHomeDirs`/`ensureDieyunMdInHome` → `resolveDieyunCoreBinary()`/`isRustCoreEnabled()` + `createCoreBridge` + `setRustCore` → `createMcpStore({safeStorage})` → `bootMcpSkillCatalogs` → `createMcpManager({ ..., notifyCredentialRequest: null })` → `createMainToolBridge({ gateway, webContents:null, getMobileBridge: () => mobileBridge })` → `createMainCompactionAgent(userData, coreBridge)` → `new AgentService(...)` + `setExecutor(localExecutor)` → **内网 agent 互通 `bootPeerRuntime`（`src/peer/boot.js`，与桌面同一份装配，含回合回传接线）** → `localGateway.setWorkspace(workspace)`。所有可选依赖（browserService / sshActions / worktreeActions）**不传**，工具层已有结构化降级 |
 | **新增** `src/headless/local-executor.js` | `AgentService.executor` 的本地实现：`runMainTurn` 跑一轮，`createPlanRunTrace` 归约 phase → `progressTask({trace, streamContent})`，收尾 `completeTask({status})`；canceller = `AbortController.abort()` |
 | **新增** `src/headless/main.js` | 生命周期：`serve` / `repl` / `run <text>` / `self-test` / `gen-key`；SIGINT/SIGTERM 有序关闭（mobile → gateway → core → mcp）；退出码 `0/2/3`；NDJSON 事件流（`--json`） |
 | `package.json` | `"headless": "node src/headless/main.js"`、`"test:headless": "node scripts/test-headless-smoke.cjs"` |
@@ -204,7 +204,7 @@ stopTask()   ──▶ canceller({requestId}) ──▶ abort()
 
 headless 的工具表 = `buildMainAgentTools()`（`PLAN_RUNTIME_TOOL_NAMES` + MCP 工具）= 与定时计划/频道同一档：`host_exec`、`fs_read_file`、`fs_edit`、`fs_write_file`、`fs_list_dir`、`web_fetch`、`web_search` + MCP。
 
-没有的：`browser_*`（需 Electron 内嵌浏览器）、`computer_*`（需桌面截图/输入）、`camera_look`（需手机）、`agent_clarify` / `session_new` / `session_set_workspace`（Renderer-only，模型侧也拿不到这些 schema，不会误调）。启动日志固定打一行能力边界，而不是加开关。
+没有的：`browser_*`（需 Electron 内嵌浏览器）、`computer_*`（需桌面截图/输入）、`camera_look`（需手机）、`desktop_camera_look`（需本机摄像头与 ffmpeg）、`agent_clarify` / `session_new` / `session_set_workspace`（Renderer-only，模型侧也拿不到这些 schema，不会误调）。启动日志固定打一行能力边界，而不是加开关。
 
 ### 5.3 沙箱与审批
 

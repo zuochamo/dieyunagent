@@ -45,7 +45,6 @@ const {
   openDieyunMdInEditor,
   formatDieyunBlock
 } = require('./dieyun-instructions');
-const { fetchOpenAiModelList } = require('./openai-models');
 const { createMcpStore } = require('./mcp/store');
 const { createMcpManager } = require('./mcp/manage');
 const {
@@ -74,7 +73,7 @@ const { createSshReconnect } = require('./ssh/reconnect');
 const { getSshConfigBlocks } = require('./ssh/ssh-config');
 const { createSshActions } = require('./ssh/actions');
 const { createWorktreeActions } = require('./worktree/actions');
-const { loadModelSettings, saveModelSettings, getEmbeddingConfig } = require('./model-settings');
+const { loadModelSettings, getEmbeddingConfig } = require('./model-settings');
 // 共享记忆（跨机 PostgreSQL）：数据层唯一实现，扩展页签「共享记忆」
 const { createSharedMemoryService } = require('./memory-shared/service');
 const { createEmbeddingClient } = require('./codebase/embedding-client');
@@ -817,9 +816,7 @@ app.whenReady().then(async () => {
     getUserDataPath: () => userData,
     getActiveRemoteGatewayWireInfo: () => remoteGatewayRuntime.getActiveRemoteGatewayWireInfo(),
     resolveDieyunCoreBinary,
-    saveModelSettings,
     loadModelSettings,
-    fetchOpenAiModelList,
     ensurePlanSession,
     parsePlanFromText,
     finishPlanRun,

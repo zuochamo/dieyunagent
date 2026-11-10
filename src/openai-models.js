@@ -232,6 +232,41 @@ async function fetchOpenAiModelList(baseUrl, apiKey, opts = {}) {
   };
 }
 
+/**
+ * 设置页「检测」的**唯一语义实现**：`payload → 结果`。
+ *
+ * 两个执行者共用这一份：桌面端 `models:fetch-list`（Main IPC）与服务器版
+ * `desktop.fetch_models`（`src/headless/desktop-turn.js`）。渲染层只判 `res.ok`，
+ * 不区分是谁跑的 —— 所以形状必须固定在同一个地方，别在两处各包一层。
+ *
+ * payload 来自 `renderer-model-settings.js`：
+ *   `{ baseUrl, apiKey, validate, authMode, headers, userAgent }`
+ * 返回 `{ ok: true, models, modelsUrl, chatUrl, listed, validated, removed, probed }`
+ * 或 `{ ok: false, error, models: [] }`（失败不抛，界面要的是可读原因）。
+ *
+ * @param {{ baseUrl?: string, apiKey?: string, validate?: boolean, authMode?: string, headers?: object, userAgent?: string }} [payload]
+ */
+async function detectModelsFromPayload(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const baseUrl = p.baseUrl ? String(p.baseUrl).trim() : '';
+  const apiKey = p.apiKey ? String(p.apiKey).trim() : '';
+  const validate = p.validate !== false;
+  // 请求修饰随 payload 透传：检测请求必须与真实请求同一套头，
+  // 否则会出现「检测失败但聊天正常」或反之。
+  try {
+    const result = await fetchOpenAiModelList(baseUrl, apiKey, {
+      validate,
+      authMode: p.authMode ? String(p.authMode).trim() : '',
+      headers: p.headers && typeof p.headers === 'object' ? p.headers : undefined,
+      userAgent: p.userAgent ? String(p.userAgent).trim() : ''
+    });
+    return { ok: true, ...result };
+  } catch (err) {
+    return { ok: false, error: (err && (err.message || String(err))) || '拉取模型列表失败', models: [] };
+  }
+}
+
 module.exports = {
-  fetchOpenAiModelList
+  fetchOpenAiModelList,
+  detectModelsFromPayload
 };

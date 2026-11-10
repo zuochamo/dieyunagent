@@ -150,6 +150,14 @@ sudo -u dieyun cp /tmp/model-settings.json /var/lib/dieyun-agent/model-settings.
 
 注意目录归属（`dieyun` 用户必须可读写这个文件与整个 `DIEYUN_USER_DATA`）。
 
+网页端（`/app/`）的「模型设置」可以直接用：供应商「检测」由**服务器**出网（`desktop.fetch_models`），
+「保存」写的就是上面这份服务器上的 `model-settings.json`（`desktop.save_model_settings`，
+与桌面 `model:sync-settings` 同一份收尾：落盘 + 推语音设置给手机端 + 让 core 重读配置）。
+两处都与桌面端同一份实现、同一套自定义头。
+
+> 代价与「设置 → 权限」相同：能打开这个页面（拿到 token）的人就能改这台服务器的模型配置。
+> 这与「拿到 token 就等于拿到这台机器的 Agent」本就是同一个信任边界。
+
 ### 3.3 工作空间
 
 默认 `~/.dieyun/workspace`；生产建议显式指定（unit 默认 `/srv/agent-workspace`）：
@@ -273,7 +281,7 @@ ssh -N -L 17331:127.0.0.1:17331 dieyun@server
 `fs_list_dir`、`web_fetch`、`web_search`，加已启用的 MCP 工具。
 
 **不可用**（启动日志里会如实打印一行）：`browser_*`（需内嵌浏览器）、`computer_*`（需桌面截图/输入）、
-`camera_look`（需手机端）、`agent_clarify` / `session_new` / `session_set_workspace`（Renderer-only）。
+`camera_look`（需手机端）、`desktop_camera_look`（需本机摄像头与 ffmpeg）、`agent_clarify` / `session_new` / `session_set_workspace`（Renderer-only）。
 
 安全要点：
 
@@ -354,6 +362,8 @@ Agent 权限**，所以：
 | 输入区「路径权限」开关 / 设置 → 权限 | `desktop.get_permissions` + `desktop.set_permissions` | 改沙箱档位（`read-only` / `workspace-write` / `danger-full-access`），**落盘**到 `host-permissions.json`，并在服务日志留一行 `浏览器版改路径权限：a -> b` |
 | 设置 → 扩展 → 共享记忆 | `desktop.shm_status` / `shm_save` / `shm_test` / `shm_probe` / `shm_consolidate` | 与桌面 IPC **同一份动作实现**（`src/memory-shared/actions.js`）：保存后当场探活、可试连、可手动提炼 |
 | 每一轮的系统提示装配 | `desktop.prep_system_prompt` | 走 `agent/system-prompt-prep-main.js`（与桌面 IPC / 频道 / 计划同一份）：AGENTS.md / 记忆 / 技能 / MCP / **共享记忆召回**都在这里面 |
+| 设置 → 模型 → 供应商「检测」 | `desktop.fetch_models` | 出网由服务端做（浏览器直连会被模型端点的 CORS 拦掉）：`GET /models` + 逐个探测 `chat/completions`，payload→结果与桌面 `models:fetch-list` **同一份实现**（`src/openai-models.js#detectModelsFromPayload`） |
+| 设置 → 模型 → 保存 | `desktop.save_model_settings` | 写服务器上的 `<DIEYUN_USER_DATA>/model-settings.json`，并让 core 重读配置、把语音设置推给手机端；与桌面 `model:sync-settings` **同一份实现**（`src/model-settings-apply.js`） |
 | 帮助 → 关于 →「检查更新」 | `desktop.check_update` | 跑只读的 `apt-get -s install --only-upgrade dieyun-headless`（不需要 root），把「已是最新 / 发现新版本 x」按同一套 phase 推给界面；真装仍要 `sudo apt install dieyun-headless` |
 
 > 最后一条别省：浏览器的渲染层在没有 `agentPrepSystemPrompt` 时会退到 `assembleSystemPrompt`
@@ -445,6 +455,7 @@ headless 的加密密钥来自 `DIEYUN_SECRET_KEY_FILE`（32 字节或 64 位 he
 | MCP / SSH 凭据保存失败（日志提示未配置 `DIEYUN_SECRET_KEY_FILE`） | 密钥文件缺失或无读权限；`ls -l /etc/dieyun/secret.key` 应为 `root:dieyun 0640`（或 `dieyun:dieyun 0600`） |
 | `web_search` / `web_fetch` 报 `fetch failed` | 服务器在代理后：headless 用 Node 自带 fetch，**不读系统代理**。用 `NODE_USE_ENV_PROXY=1` + `HTTPS_PROXY`（Node 支持该能力时生效），或在直连出口上跑 |
 | 同一数据目录起两个进程 | SQLite 并发由 core 兜住，但会各起一份索引监听；启动日志会告警「Gateway 端口已被占用」。**约定：一个 `DIEYUN_USER_DATA` 只跑一个 headless 进程** |
+| 「检查更新」报**失败：升级了 0 个软件包…有 N 个软件包未被升级** | 这是 apt 的**本地化**总结句被当成了错误（2026-11-08 真机，zh_CN）：结论句 `already the newest version` 被翻译成中文，英文正则认不出。已在代码里修（跑 apt 固定 `LC_ALL=C`，并区分「没配源 / 没这个包 / 不是 dpkg 装的」）。另外那「N 个未被升级」通常是系统包被 apt phasing 延迟，与 dieyun 无关。装上新包后自查：`LC_ALL=C apt-get -s install --only-upgrade dieyun-headless` 应出现 `is already the newest version`；`apt-cache policy dieyun-headless` 版本表里只有 `/var/lib/dpkg/status` 就说明**没配源**（§8.1） |
 | 服务起不来，日志 `listen EADDRINUSE ... 17331` | Web 端口被别的进程占了（服务器上很常见：`remote/run-cli.js` 的 remote-agent 网关按工作区各占 17331、17332…）。在 `/etc/dieyun/headless.env` 里设 `DIEYUN_WEB_PORT=17340`，再 `sudo systemctl restart dieyun-headless` |
 | 启动报 `EACCES: permission denied, mkdir '<工作空间>'` | `dieyun` 用户对工作空间或其**祖先目录**没有通行权。见 §3.3 的 `setfacl -m u:dieyun:x`（工作空间本身要 `rwx`） |
 | 服务在跑时手工跑 `self-test` 报 `EADDRINUSE :17330` | 本地 Gateway 端口被在跑实例占着（自检本身仍会 `OK`，但日志刺眼）。加 `DIECLOUD_GATEWAY_PORT=17399`（必要时再给个临时 `DIEYUN_USER_DATA`） |
@@ -479,15 +490,25 @@ headless 的更新**走 apt**，不自建更新客户端：服务器上已有 ap
 
 ### 8.1 内网 apt 源（推荐，配一次就一直 `apt upgrade`）
 
+**新包已经自带**（0.1.76 起）：`postinst` 会写 `/etc/apt/sources.list.d/dieyun-headless.list`，
+指向**和普通消费版同一个站点**的子路径 —— 地址来源 `DIEYUN_APT_BASE` 或 `deploy.json` 的
+`updates.primaryUrl`，默认内网 `http://192.168.31.62:3099/apt/dieyun/pool/`。
+
+两条硬规则：① 文件已存在就**绝不覆盖**（你自己配的源优先，含指到别的镜像）；
+② 不改系统其它源。所以仓库侧只要在发版时把 apt 目录发到那个站点：
+
 ```bash
 npm run publish:headless-apt          # dist/*.deb → release/headless-apt/pool/（+ 索引与自检）
-# 把 release/headless-apt/pool 通过 nginx / 内网 Web 暴露为只读静态目录，例如
-#   location /dieyun { alias /srv/apt/dieyun/pool; autoindex on; }
+# 发到「和消费版同一个站点」的写法（Y: 就是 .62 上跑的 serve:updates 的目录）：
+node scripts/publish-headless-apt.cjs --out "Y:\client-electron\updates-published\apt\dieyun"
+#   站点根（latest.yml / Setup.exe 所在）就是 :3099 的 ROOT，apt 目录是它的子路径 apt/dieyun/pool/
 ```
+
+没有自带源的旧包 / 想手工配：
 
 ```bash
 # 服务器：一次配置
-echo 'deb [trusted=yes] http://apt.internal/dieyun ./' | sudo tee /etc/apt/sources.list.d/dieyun-headless.list
+echo 'deb [trusted=yes] http://192.168.31.62:3099/apt/dieyun/pool/ ./' | sudo tee /etc/apt/sources.list.d/dieyun-headless.list
 sudo apt update
 
 # 之后：装 / 升 / 降都是一条命令
@@ -495,6 +516,15 @@ sudo apt install dieyun-headless                    # 升级到源里最新
 sudo apt install dieyun-headless=0.1.71 --allow-downgrades   # 回滚到指定版本（降级必须带这个参数）
 sudo apt upgrade                                    # 跟其它包一起升
 ```
+
+> 换了站点也要跟着改：`DIEYUN_APT_BASE=http://<host>:<port>/apt/dieyun/pool/ npm run pack:deb:headless`
+> —— 地址是在**打包这一刻**写进 postinst 的，不是运行时读配置。
+
+> **没配源会怎样**：「关于 → 检查更新」会如实说「当前 x；但本机没有配置 dieyun 的 apt 源
+> （索引里只有已安装记录），所以查不到任何新版本」，而不是骗你说「已是最新」——
+> 后者只在真有源、确实没有更新版时才出现。用 `apt-cache policy dieyun-headless` 自查：
+> 版本表里只有 `/var/lib/dpkg/status` 就是没配源（0.1.76 起的包会自己写好源，装完跑一次
+> `sudo apt update` 即可）。
 
 **全自动更新**（不改本仓一行代码，全靠系统能力）：
 

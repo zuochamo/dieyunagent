@@ -417,8 +417,38 @@ DIEYUN_SECRET_KEY_FILE=/etc/dieyun/secret.key
 # DIECLOUD_GATEWAY_PORT=17330
 `;
 
-/** postinst / prerm / postrm 的共同前提：全部幂等，且绝不覆盖用户已有配置 */
-const DEB_POSTINST = `#!/bin/sh
+/** postinst / prerm / postrm 的共同前提：全部幂等，且绝不覆盖用户已有配置。
+ *  真正打包时用 `buildDebPostinst(resolveAptBase())`（把内网 apt 源一起编进去），
+ *  这里的无源版本只作为「没有部署配置时」的形状与默认值。 */
+const DEB_POSTINST = buildDebPostinst('');
+
+/**
+ * 生成 postinst。`aptBase` 非空时额外写一行内网 apt 源 ——
+ * **和普通消费版的更新源是同一个站点**（`deploy.json` 的 `updates.primaryUrl`，
+ * 内网 `http://192.168.31.62:3099/`，COS 是兜底），apt 仓库就放在该站点的 `apt/dieyun/pool/` 下：
+ * 发布用 `node scripts/publish-headless-apt.cjs --out <站点根>/apt/dieyun`。
+ *
+ * 为什么让包自己写源：装了服务器版却「永远查不到新版本」，是因为没人告诉他源在哪；
+ * 让运维每台机器手抄一行 `echo deb ...` 是把同一条信息重复 N 次，抄错就是静默不更新。
+ * 仍然守住两条：① 文件存在就**绝不覆盖**（用户自己配的源优先）；② 不改系统其它源。
+ *
+ * @param {string} aptBase 形如 `http://192.168.31.62:3099/apt/dieyun/`；空串 = 不写源
+ */
+function buildDebPostinst(aptBase) {
+  const base = String(aptBase || '').trim();
+  const aptBlock = base
+    ? `
+# —— 内网 apt 源（与普通消费版同一个站点的子路径）：装完就能 apt upgrade dieyun-headless ——
+# 只在文件不存在时写：你自己配过源就完全以你那份为准（含指到别的镜像）。
+DIEYUN_SRC=/etc/apt/sources.list.d/dieyun-headless.list
+if [ ! -f "$DIEYUN_SRC" ]; then
+  printf 'deb [trusted=yes] ${base} ./\\n' > "$DIEYUN_SRC"
+  chmod 0644 "$DIEYUN_SRC" 2>/dev/null || true
+  echo "dieyun-headless: 已写入 apt 源 ${base}（下一版起可直接 apt upgrade；现在请跑一次 apt-get update）"
+fi
+`
+    : '';
+  return `#!/bin/sh
 # 由 dieyun-headless 包生成：建用户/目录、补可执行位、首次生成密钥，均幂等
 set -e
 
@@ -456,7 +486,7 @@ if [ ! -f /etc/dieyun/secret.key ]; then
   chown root:dieyun /etc/dieyun/secret.key 2>/dev/null || true
   chmod 0640 /etc/dieyun/secret.key 2>/dev/null || true
 fi
-
+${aptBlock}
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload >/dev/null 2>&1 || true
   # 升级后必须让新版本真正跑起来：apt 只换热文件，老进程会一直跑旧代码。
@@ -465,6 +495,32 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
 fi
 exit 0
 `;
+}
+
+/**
+ * 包内要写的内网 apt 源地址：`DIEYUN_APT_BASE` 显式给，否则取
+ * `deploy.json` 的 `updates.primaryUrl` + `apt/dieyun/pool/`（与普通消费版同一个站点）。
+ *
+ * 末尾的 `pool/` 不是随意加的：`scripts/publish-headless-apt.cjs` 把 deb 与
+ * `Packages` / `Packages.gz` / `Release` 都放在 `<out>/pool/` 里（flat 仓库的根就是它），
+ * 索引里的 `Filename:` 也是裸文件名 —— 所以源地址必须指到 `pool/`。
+ * 两者都没有就返回空串 —— 那台机器装完只会有「没配源」的如实提示，不会被写进一个假地址。
+ */
+function resolveAptBase() {
+  const explicit = String(process.env.DIEYUN_APT_BASE || '').trim();
+  let base = explicit;
+  if (!base) {
+    try {
+      const { getDeployConfig } = require('../src/deploy-config');
+      const primary = String((getDeployConfig().updates || {}).primaryUrl || '').trim();
+      if (primary) base = `${primary.replace(/\/+$/, '')}/apt/dieyun/pool/`;
+    } catch {
+      // 读不到部署配置就当没有源，不编一个
+    }
+  }
+  if (!base) return '';
+  return base.endsWith('/') ? base : `${base}/`;
+}
 
 const DEB_PRERM = `#!/bin/sh
 # 只在「卸载」时停服务。**升级不停也不 disable**：apt upgrade 会先跑 prerm upgrade，
@@ -648,8 +704,16 @@ async function buildDeb({ manifest }) {
   await fsp.mkdir(DEB_CONTROL, { recursive: true });
   const control = buildControlText({ version, installedKb, libcMin });
   await fsp.writeFile(path.join(DEB_CONTROL, 'control'), control, 'utf8');
+  // 源地址在打包这一刻定下来：`DIEYUN_APT_BASE` > deploy.json 的 updates.primaryUrl + apt/dieyun/
+  const aptBase = resolveAptBase();
+  const postinstBody = buildDebPostinst(aptBase);
+  console.log(
+    aptBase
+      ? `[headless-pack] 包内 apt 源：${aptBase}（装完即可 apt upgrade；文件已存在则不动）`
+      : '[headless-pack] 包内不写 apt 源（没有 DIEYUN_APT_BASE / deploy.json updates.primaryUrl）'
+  );
   for (const [name, body] of [
-    ['postinst', DEB_POSTINST],
+    ['postinst', postinstBody],
     ['prerm', DEB_PRERM],
     ['postrm', DEB_POSTRM]
   ]) {
@@ -1004,7 +1068,7 @@ async function main() {
 }
 
 // 导出 control 脚本模板：包装机的 `dpkg-deb` 缺失时，单测是这些「升级/卸载语义」的唯一闸门
-module.exports = { DEB_POSTINST, DEB_PRERM, DEB_POSTRM, buildControlText };
+module.exports = { DEB_POSTINST, buildDebPostinst, resolveAptBase, DEB_PRERM, DEB_POSTRM, buildControlText };
 
 if (require.main === module) {
   main().catch((err) => {
