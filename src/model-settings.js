@@ -303,15 +303,15 @@ function normalize(raw) {
     .map(normalizeEmbeddingEntry)
     .filter((m) => m.name && m.baseUrl);
 
+  // active 是单选语义（同一时刻只跑一个向量模型），但「全都不启用」是合法状态：
+  // 用户可能只是先把配置存着、暂不跑语义检索。以前这里"没有 active 就自动点亮第一个"，
+  // 结果是「添了模型不想用」也做不到 —— 每次保存都被重新点亮。缺省不启用，交给用户勾选。
   let activeSeen = false;
   s.embeddingModels = s.embeddingModels.map((m) => {
     const active = m.active && !activeSeen;
     if (active) activeSeen = true;
     return { ...m, active };
   });
-  if (!activeSeen && s.embeddingModels.length) {
-    s.embeddingModels = s.embeddingModels.map((m, index) => ({ ...m, active: index === 0 }));
-  }
 
   const activeEmbedding = s.embeddingModels.find((m) => m.active) || null;
   s.embeddingEnabled = !!activeEmbedding;

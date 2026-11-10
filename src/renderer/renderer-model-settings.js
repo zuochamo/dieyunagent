@@ -320,8 +320,9 @@ function renderEmbeddingModelsList() {
   if (!models.some((m) => m.active)) {
     const hint = document.createElement('div');
     hint.className = 'defined-model-empty';
-    hint.textContent =
-      '未配置向量模型：语义检索关闭，召回只用关键词匹配。添加一个外部向量模型（OpenAI 兼容 /embeddings 端点）即可启用。';
+    hint.textContent = models.length
+      ? '当前没有任何向量模型处于启用状态：语义检索关闭，召回只用关键词匹配。点「编辑」勾选「设为当前向量模型」即可启用。'
+      : '未配置向量模型：语义检索关闭，召回只用关键词匹配。添加一个外部向量模型（OpenAI 兼容 /embeddings 端点）即可启用。';
     list.appendChild(hint);
   }
   list.querySelectorAll('[data-edit-embedding]').forEach((btn) => {

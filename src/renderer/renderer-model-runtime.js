@@ -512,15 +512,13 @@ function normalizeSettings(raw) {
   s.embeddingModels = s.embeddingModels.filter(
     (m) => !(m.id === 'embedding-default' && m.name === 'text-embedding-v4')
   );
+  // active 单选，但「全都不启用」合法（只留配置、暂不跑语义检索）：不再自动点亮第一个。
   let activeSeen = false;
   s.embeddingModels = s.embeddingModels.map((m) => {
     const active = m.active && !activeSeen;
     if (active) activeSeen = true;
     return { ...m, active };
   });
-  if (!activeSeen && s.embeddingModels.length) {
-    s.embeddingModels = s.embeddingModels.map((m, index) => ({ ...m, active: index === 0 }));
-  }
   const activeEmbedding = s.embeddingModels.find((m) => m.active) || null;
   s.embeddingEnabled = !!activeEmbedding;
   if (!activeEmbedding) {
