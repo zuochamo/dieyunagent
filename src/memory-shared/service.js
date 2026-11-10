@@ -149,8 +149,11 @@ function buildUpsertQuery(hasVector, row, extra = {}) {
  *   hostname?: string,
  *   clientVersion?: string,
  *   limits?: () => object,
- *   embedding?: () => { embed: (input: string|string[]) => Promise<number[][]>, model: string,
- *                        dimensions: number, enabled: () => boolean } | null
+ *   embedding?: () => { embed: (input: string|string[]) => Promise<number[][]>,
+ *                        embedInteractive: (input: string) => Promise<number[][]>,
+ *                        model: string, dimensions: number, enabled: () => boolean } | null
+ *     `embed` 用于上传/提炼的**批量**向量；`embedInteractive` 用于召回时的**查询**向量
+ *     （端点比交互预算慢时它不发请求，直接抛 code=EMBEDDING_TOO_SLOW → 走 trigram 文本排名）。
  * }} deps
  */
 function createSharedMemoryService(deps) {
@@ -428,10 +431,14 @@ function createSharedMemoryService(deps) {
     const embedder = state.hasVector ? embeddingFor() : null;
     if (embedder) {
       try {
-        const out = await embedder.embed(q);
+        // 查询向量走交互闸门：端点比交互预算慢时不发请求，直接落到下面的 trigram 文本排名。
+        // 慢的那次由 embedding 客户端自己记一行日志，这里不重复刷屏。
+        const out = await embedder.embedInteractive(q);
         if (Array.isArray(out) && out[0] && out[0].length) vec = out[0];
       } catch (err) {
-        warn(`[dieyun:shared-memory] 查询向量失败（改走文本排名）：${(err && err.message) || err}`);
+        if (!err || err.code !== 'EMBEDDING_TOO_SLOW') {
+          warn(`[dieyun:shared-memory] 查询向量失败（改走文本排名）：${(err && err.message) || err}`);
+        }
       }
     }
 

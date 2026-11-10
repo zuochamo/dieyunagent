@@ -200,6 +200,24 @@ pub struct CompactionArchiveInput {
     pub folded_text: Option<String>,
 }
 
+/// 批量写入的一条（`memory.long_add_many`）。字段口径与单条 `memory.long_add`
+/// 完全一致，只是 `expiresAt` 不在批量里（归纳器的条目从不带过期时间）。
+///
+/// `content` 给默认值：缺字段 / 空串都归成「空条目」，由批量入口记一条 `skipped`，
+/// 而不是让**整批**因为一条脏数据 INVALID_PARAMS 掉光。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LongMemoryInput {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub importance: Option<i64>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
 impl MemoryStore {
     pub fn open(db_path: PathBuf, embedding: EmbeddingConfig) -> Result<Self, CoreError> {
         // 调优 / 建表 / 外键全部归口 `SqliteHandle`：memory 库需要 `foreign_keys = ON`
@@ -885,13 +903,7 @@ impl MemoryStore {
         }
         let now = now_ms();
         let kind = detect_memory_kind(normalized, kind);
-        let scope = scope
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("global")
-            .chars()
-            .take(120)
-            .collect::<String>();
+        let scope = normalize_memory_scope(scope);
         let importance = normalize_importance(importance);
         let session_id = session_id
             .map(str::trim)
@@ -1002,6 +1014,10 @@ impl MemoryStore {
     /// - 近重复抑制：同 scope 内余弦 ≥ 阈值视为「同一件事的另一种说法」，只更新既有行
     ///   （importance 取大、updated_at 刷新、来源会话 COALESCE 补齐），不再新增一行。
     ///   复用既有 embedding 与语义检索，不另造一套文本相似度。
+    ///
+    /// 单条入口。批量写入（归纳器一次 8 条）走
+    /// [`add_long_memories_deduped`](Self::add_long_memories_deduped)：同一套政策，
+    /// 区别只在「向量是一次批量算出来的」。
     pub async fn add_long_memory_deduped(
         &self,
         content: &str,
@@ -1017,49 +1033,143 @@ impl MemoryStore {
         if normalized.is_empty() {
             return Err(CoreError::rpc("INVALID_CONTENT", "content 必填"));
         }
-        let imp = normalize_importance(importance);
-        if source.contains("consolidation") && imp < CONSOLIDATION_MIN_IMPORTANCE {
-            return Ok(json!({
-                "ok": true,
-                "skipped": "low_importance",
-                "importance": imp,
-                "vector": json!({ "ok": true, "indexed": false, "reason": "skipped" }),
-            }));
+        if is_low_value_consolidation(source, importance) {
+            return Ok(low_value_json(importance));
         }
-        let scope_value = scope
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("global")
-            .chars()
-            .take(120)
-            .collect::<String>();
-        let (vector, duplicate) = self.embed_for_write(normalized, &scope_value).await?;
-        if let Some((dup_id, similarity)) = duplicate {
-            let now = now_ms();
-            self.with_conn(|conn| {
-                conn.execute(
-                    "UPDATE long_memories
-                     SET updated_at = ?1,
-                         importance = MAX(COALESCE(importance, 3), ?2),
-                         session_id = COALESCE(session_id, ?4)
-                     WHERE id = ?3",
-                    params![now, imp, dup_id, session_id],
-                )?;
-                Ok(())
-            })?;
-            return Ok(json!({
-                "ok": true,
-                "localMemoryId": dup_id,
-                "duplicate": "near",
-                "similarity": round_score(similarity),
-                "vector": json!({ "ok": true, "indexed": false, "reason": "duplicate" }),
-            }));
-        }
-        let ins = self.add_long_memory(
+        let scope_value = normalize_memory_scope(scope);
+        let vector = self.embed_for_write(normalized).await?;
+        self.apply_long_memory_deduped(
+            &vector,
             normalized,
             source,
             kind,
-            scope,
+            scope_value.as_str(),
+            importance,
+            expires_at,
+            metadata,
+            session_id,
+        )
+    }
+
+    /// 一次写多条（同一 source / scope / 会话）—— **一次** embedding 请求算完全部向量。
+    ///
+    /// 为什么不是循环调 `long_add`：端点串行时每条要付一次完整往返（自建 4B 模型实测
+    /// 34–44s/条），一次归纳 8 条 = 5.5 分钟**独占**端点，期间每轮召回与代码检索全部排队
+    /// 超时（现场：`codebase.search 超时` 打挂整轮发送）。批量化后同样 8 条只要 1 次往返，
+    /// 批大小上限仍是 `embedding::plan_embed_batches` 那一份。
+    ///
+    /// 逐条结果按入参顺序返回（`results[i]` 对应 `items[i]`），计数由调用方自己算 ——
+    /// 这里不编造「保存了 N 条」的第二个真相。
+    ///
+    /// 失败语义与单条入口一致：embedding 不通就让整批报错（宁可这轮一条都不写，
+    /// 也不写进判定不了近重复、以后检索只能靠子串的行）。代价是单次失败的影响面从
+    /// 1 条变 N 条 —— 因为一次归纳就是一组同源条目，重跑一次归纳即可。
+    pub async fn add_long_memories_deduped(
+        &self,
+        items: &[LongMemoryInput],
+        source: &str,
+        scope: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<Value, CoreError> {
+        let scope_value = normalize_memory_scope(scope);
+        // 先按「不需要向量」的闸门挑出要写哪几条，其余直接给结论（不占 embedding 预算）
+        let mut results: Vec<Value> = Vec::with_capacity(items.len());
+        let mut pending: Vec<(i64, String)> = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            let content = item.content.trim();
+            if content.is_empty() {
+                results.push(skipped_json("empty_content"));
+                continue;
+            }
+            if is_low_value_consolidation(source, item.importance) {
+                results.push(low_value_json(item.importance));
+                continue;
+            }
+            results.push(Value::Null);
+            pending.push((
+                i as i64,
+                content.chars().take(MEMORY_EMBED_TEXT_MAX).collect(),
+            ));
+        }
+
+        let embedding = self.embedding();
+        let mut vectors: std::collections::HashMap<i64, Vec<f32>> =
+            std::collections::HashMap::new();
+        if embedding.enabled() && !pending.is_empty() {
+            for (idx, vector) in embedding::embed_batches(&embedding, &pending).await? {
+                if !vector.is_empty() {
+                    vectors.insert(idx, vector);
+                }
+            }
+        }
+
+        for (i, item) in items.iter().enumerate() {
+            if !results[i].is_null() {
+                continue;
+            }
+            let vector = vectors.remove(&(i as i64)).unwrap_or_default();
+            results[i] = self.apply_long_memory_deduped(
+                &vector,
+                item.content.trim(),
+                source,
+                item.kind.as_deref(),
+                scope_value.as_str(),
+                item.importance,
+                None,
+                item.metadata.as_ref(),
+                session_id,
+            )?;
+        }
+        Ok(json!({ "ok": true, "results": results }))
+    }
+
+    /// 写入落库本体（**唯一实现**）：近重复抑制 → 插入 → 写入即索引。
+    ///
+    /// 单条与批量入口都走这里，两者差别只在「向量是怎么算出来的」。
+    /// `vector` 为空表示没有向量能力（未配置端点 / 本次 embedding 失败）：
+    /// 此时跳过近重复判定，不另造一套文本相似度。
+    #[allow(clippy::too_many_arguments)]
+    fn apply_long_memory_deduped(
+        &self,
+        vector: &[f32],
+        content: &str,
+        source: &str,
+        kind: Option<&str>,
+        scope: &str,
+        importance: Option<i64>,
+        expires_at: Option<i64>,
+        metadata: Option<&Value>,
+        session_id: Option<&str>,
+    ) -> Result<Value, CoreError> {
+        let imp = normalize_importance(importance);
+        if !vector.is_empty() {
+            if let Some((dup_id, similarity)) = self.near_duplicate(scope, vector)? {
+                let now = now_ms();
+                self.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE long_memories
+                         SET updated_at = ?1,
+                             importance = MAX(COALESCE(importance, 3), ?2),
+                             session_id = COALESCE(session_id, ?4)
+                         WHERE id = ?3",
+                        params![now, imp, dup_id, session_id],
+                    )?;
+                    Ok(())
+                })?;
+                return Ok(json!({
+                    "ok": true,
+                    "localMemoryId": dup_id,
+                    "duplicate": "near",
+                    "similarity": round_score(similarity),
+                    "vector": json!({ "ok": true, "indexed": false, "reason": "duplicate" }),
+                }));
+            }
+        }
+        let ins = self.add_long_memory(
+            content,
+            source,
+            kind,
+            Some(scope),
             importance,
             expires_at,
             metadata,
@@ -1069,7 +1179,7 @@ impl MemoryStore {
             .get("localMemoryId")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        let vector_res = self.store_long_memory_vector(memory_id, &vector)?;
+        let vector_res = self.store_long_memory_vector(memory_id, vector)?;
         Ok(json!({
             "ok": true,
             "localMemoryId": memory_id,
@@ -1078,31 +1188,32 @@ impl MemoryStore {
         }))
     }
 
-    /// 写入前的 embedding + 近重复查询（一次向量往返，供插入与「写入即索引」共用）。
-    async fn embed_for_write(
-        &self,
-        content: &str,
-        scope: &str,
-    ) -> Result<(Vec<f32>, Option<(i64, f64)>), CoreError> {
+    /// 写入前的 embedding（**不含**近重复判定：判定在 `apply_long_memory_deduped` 里，
+    /// 批量路径要先批量算完向量再逐条判定）。
+    async fn embed_for_write(&self, content: &str) -> Result<Vec<f32>, CoreError> {
         let embedding = self.embedding();
         if !embedding.enabled() {
-            // 没有向量能力就不判定近重复（不另造文本相似度第二套）
-            return Ok((Vec::new(), None));
+            return Ok(Vec::new());
         }
         let text = content
             .chars()
             .take(MEMORY_EMBED_TEXT_MAX)
             .collect::<String>();
-        let vector = embedding::embed_texts(&embedding, &[text])
+        Ok(embedding::embed_texts(&embedding, &[text])
             .await?
             .into_iter()
             .next()
-            .unwrap_or_default();
-        if vector.is_empty() {
-            return Ok((Vec::new(), None));
-        }
-        let hits = self.semantic_search_long(scope, &vector, 1)?;
-        let dup = hits.first().and_then(|hit| {
+            .unwrap_or_default())
+    }
+
+    /// 同 scope 内最近的一条近重复（余弦 ≥ [`NEAR_DUP_COSINE`]）。
+    fn near_duplicate(
+        &self,
+        scope: &str,
+        vector: &[f32],
+    ) -> Result<Option<(i64, f64)>, CoreError> {
+        let hits = self.semantic_search_long(scope, vector, 1)?;
+        Ok(hits.first().and_then(|hit| {
             let id = hit.get("id").and_then(|v| v.as_i64())?;
             let score = hit.get("score").and_then(|v| v.as_f64())?;
             if score >= NEAR_DUP_COSINE {
@@ -1110,8 +1221,7 @@ impl MemoryStore {
             } else {
                 None
             }
-        });
-        Ok((vector, dup))
+        }))
     }
 
     pub fn recent_long_memories(
@@ -1697,18 +1807,32 @@ impl MemoryStore {
         }
         if self.embedding().enabled() {
             let embedding = self.embedding();
-            let vectors = embedding::embed_texts(&embedding, &[q.to_string()]).await?;
-            let query_vec = vectors.into_iter().next().unwrap_or_default();
-            if !query_vec.is_empty() {
-                let semantic = self.semantic_search_long(scope_str, &query_vec, limit)?;
-                if !semantic.is_empty() {
-                    self.bump_memory_usage(&semantic)?;
-                    return Ok(json!({
-                        "ok": true,
-                        "mode": "semantic",
-                        "results": semantic,
-                        "vectorSearch": true,
-                    }));
+            // 召回是**每轮**都要走的读路径：用预算感知入口。端点比交互预算慢时它根本
+            // 不发请求（见 `embedding::embed_texts_interactive`），这里直接落到下面的
+            // 关键词通道 —— 否则每轮都往那个串行端点排一个注定被放弃的 40s 请求，
+            // 队列永不排空，把同一队列里的 `codebase.search` 一起拖死。
+            match embedding::embed_texts_interactive(&embedding, &[q.to_string()]).await {
+                Ok(vectors) => {
+                    let query_vec = vectors.into_iter().next().unwrap_or_default();
+                    if !query_vec.is_empty() {
+                        let semantic = self.semantic_search_long(scope_str, &query_vec, limit)?;
+                        if !semantic.is_empty() {
+                            self.bump_memory_usage(&semantic)?;
+                            return Ok(json!({
+                                "ok": true,
+                                "mode": "semantic",
+                                "results": semantic,
+                                "vectorSearch": true,
+                            }));
+                        }
+                    }
+                }
+                Err(err) => {
+                    // 语义通道不可用不是召回失败：关键词/FTS 是既有兜底（DB 侧毫秒级）。
+                    // 「太慢」由 embedding 模块自己记一次日志，这里不重复刷屏。
+                    if !embedding::is_too_slow(&err) {
+                        eprintln!("[memory] 语义召回跳过（embedding 不可用）：{err}");
+                    }
                 }
             }
         }
@@ -2084,6 +2208,42 @@ fn normalize_memory_status(status: &str) -> String {
 
 fn normalize_importance(value: Option<i64>) -> i64 {
     value.unwrap_or(3).clamp(1, 5)
+}
+
+/// 写入 scope 的归一（**唯一**实现）：空 / 缺省 = 用户级 `global`，过长截到 120 字符。
+/// 单条写入、批量写入、写入前的近重复判定必须用同一份口径，否则「同一个 scope」
+/// 在不同路径上会变成两个字符串，近重复抑制就失效。
+fn normalize_memory_scope(scope: Option<&str>) -> String {
+    scope
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(GLOBAL_MEMORY_SCOPE)
+        .chars()
+        .take(120)
+        .collect::<String>()
+}
+
+/// 低价值闸（归纳器写入政策的一部分）：自动归纳出来的低 importance 条目不落库。
+/// 单条与批量入口共用这一份判定。
+fn is_low_value_consolidation(source: &str, importance: Option<i64>) -> bool {
+    source.contains("consolidation") && normalize_importance(importance) < CONSOLIDATION_MIN_IMPORTANCE
+}
+
+fn low_value_json(importance: Option<i64>) -> Value {
+    json!({
+        "ok": true,
+        "skipped": "low_importance",
+        "importance": normalize_importance(importance),
+        "vector": json!({ "ok": true, "indexed": false, "reason": "skipped" }),
+    })
+}
+
+fn skipped_json(reason: &str) -> Value {
+    json!({
+        "ok": true,
+        "skipped": reason,
+        "vector": json!({ "ok": true, "indexed": false, "reason": "skipped" }),
+    })
 }
 
 fn maybe_set_title_from_user_message(
@@ -2801,6 +2961,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dup.get("duplicate"), Some(&Value::Bool(true)));
+        assert_eq!(store.recent_long_memories(10, Some("global")).unwrap().len(), 2);
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// 批量写入（归纳器一次 8 条）：逐条结果按入参顺序返回，政策与单条完全一致。
+    ///
+    /// 存在的理由是把「8 次端点往返」压成「1 次」—— 端点串行时一条 34–44s，
+    /// 8 条就是几分钟独占端点，期间所有交互查询排队超时。
+    #[tokio::test]
+    async fn batch_write_keeps_input_order_and_shares_single_write_policy() {
+        let db = std::env::temp_dir().join(format!("dieyun-mem-batch-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+
+        let items = vec![
+            LongMemoryInput {
+                content: "第一条事实：Samba 挂载 -13 先查账号".into(),
+                importance: Some(3),
+                ..Default::default()
+            },
+            LongMemoryInput {
+                content: "   ".into(),
+                ..Default::default()
+            },
+            LongMemoryInput {
+                // 自动归纳 + importance 2 → 低价值闸拦下（与单条入口同一个判定）
+                content: "顺手打开了个网页".into(),
+                importance: Some(2),
+                ..Default::default()
+            },
+            LongMemoryInput {
+                content: "第二条事实：testparm -s 看共享段".into(),
+                importance: Some(4),
+                ..Default::default()
+            },
+        ];
+        let out = store
+            .add_long_memories_deduped(&items, "auto_consolidation", Some("global"), Some("sess-b"))
+            .await
+            .unwrap();
+        let results = out.get("results").and_then(|v| v.as_array()).expect("results");
+        assert_eq!(results.len(), 4, "逐条结果必须与入参一一对应");
+
+        assert!(results[0].get("localMemoryId").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+        assert_eq!(results[1].get("skipped").and_then(|v| v.as_str()), Some("empty_content"));
+        assert_eq!(
+            results[2].get("skipped").and_then(|v| v.as_str()),
+            Some("low_importance")
+        );
+        assert!(results[3].get("localMemoryId").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+
+        // 只有过了闸的两条真的落库（顺序也按入参）
+        let rows = store.recent_long_memories(10, Some("global")).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .any(|r| r.to_string().contains("Samba 挂载 -13")));
+        assert!(rows.iter().any(|r| r.to_string().contains("testparm -s")));
+
+        // 同内容再批量写一次：完全重复的正文仍只留一行（与单条路径同一份判定）
+        let again = store
+            .add_long_memories_deduped(&items, "auto_consolidation", Some("global"), None)
+            .await
+            .unwrap();
+        let again_rows = again.get("results").and_then(|v| v.as_array()).expect("results");
+        assert_eq!(
+            again_rows[0].get("duplicate"),
+            Some(&Value::Bool(true)),
+            "完全相同的正文复用既有行"
+        );
         assert_eq!(store.recent_long_memories(10, Some("global")).unwrap().len(), 2);
         let _ = std::fs::remove_file(db);
     }

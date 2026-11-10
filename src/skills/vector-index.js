@@ -176,10 +176,16 @@ async function recallSkills({
   const keywordRows = rankByKeyword(entries, q, enabledSet, Math.max(max, 12));
   let rows = [];
 
+  // mode 记的是**这次实际用的通道**，不是「库里有没有向量」：向量索引在、但查询向量
+  // 拿不到（端点慢到不值得等 / 端点报错）时，排序走的是关键词 —— 再报 semantic
+  // 会让注入块抬头写「语义召回 · xxx 模型」，模型与用户都看不出这轮其实是关键词。
+  let mode = vector ? 'semantic' : 'keyword';
+
   if (vector) {
     try {
       const client = createEmbeddingClient(embeddingConfig || {});
-      const [queryVec] = await client.embed(q.slice(0, QUERY_EMBED_TEXT_MAX));
+      // 查询向量走交互闸门：端点比交互预算慢时不发请求（EMBEDDING_TOO_SLOW），落到关键词
+      const [queryVec] = await client.embedInteractive(q.slice(0, QUERY_EMBED_TEXT_MAX));
       rows = rankBySemantic({
         entries,
         keywordRows,
@@ -191,13 +197,14 @@ async function recallSkills({
       });
     } catch {
       rows = keywordRows.slice(0, max);
+      mode = 'keyword';
     }
   } else {
     rows = keywordRows.slice(0, max);
   }
 
   return {
-    mode: vector ? 'semantic' : 'keyword',
+    mode,
     embeddingModel: index.embeddingModel || '',
     indexedAt: index.indexedAt || 0,
     total: entries.length,

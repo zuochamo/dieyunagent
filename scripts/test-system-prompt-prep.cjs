@@ -356,6 +356,53 @@ async function runRepoMapInjection() {
   assert(packed.indexAudit.code === null, '这轮没检索代码（indexOk 未置）→ code=null');
 }
 
+/**
+ * 代码召回失败 = 本轮少一块上下文，**不是**这一轮发不出去。
+ *
+ * 现场（2026-11-09）：SSH 工作区上 core 被 `memory.long_*` 占住 / 冷启动，
+ * prep 里 15s 的 `codebase.search` 超时 → 原来把失败串抛回 IPC
+ * `agent:prep-system-prompt` → 用户看到「调用失败：… codebase.search 超时」，那句话根本没发出去。
+ * 召回是增强项：失败只降级本次注入，原因进日志。
+ */
+async function runPrepCodebaseFailure() {
+  const calls = [];
+  const packed = await prepSystemPrompt(
+    {
+      userQuery: '@Codebase 登录逻辑在哪',
+      indexOk: true,
+      injectCode: false,
+      allowCodebase: true,
+      workspaceInfo: { workspacePath: 'D:/proj', kind: 'local' },
+      openFilePaths: []
+    },
+    {
+      invokeRpc: async (method) => {
+        calls.push(method);
+        if (method === 'codebase.search') throw new Error('codebase.search 超时');
+        if (method === 'fs.read_file') return { data: md, encoding: 'utf8' };
+        if (method === 'graph.repo_map') return { indexed: false };
+        if (method === 'graph.lsp_enrich') return { ok: true };
+        if (method === 'memory.project_recall' || method === 'memory.long_recall') {
+          return { mode: 'none', results: [] };
+        }
+        if (method === 'memory.compaction_recent' || method === 'agent.state_get') {
+          return method === 'agent.state_get' ? null : [];
+        }
+        throw new Error('unexpected ' + method);
+      },
+      getPermissions: () => ({}),
+      getAgentHome: () => ({})
+    }
+  );
+  assert(calls.includes('codebase.search'), '失败也要真去试过检索');
+  assert(!packed.turnRide.includes('【Codebase'), '失败的检索不许留下注入块');
+  assert(!packed.turnRide.includes('状态：失败'), '失败不该伪装成一条召回结果');
+  assert(
+    packed.indexAudit && packed.indexAudit.code === null,
+    '没注入就要如实记 code=null，别让统计页把它算成命中'
+  );
+}
+
 async function runPrepSkipAutoGraph() {
   const calls = [];
   const packed = await prepSystemPrompt(
@@ -480,6 +527,7 @@ runPrep()
   .then(() => runPrepKnowledge())
   .then(() => runPrepGraph())
   .then(() => runRepoMapInjection())
+  .then(() => runPrepCodebaseFailure())
   .then(() => runPrepSkipAutoGraph())
   .then(() => runPrepMcpFull())
   .then(() => runAgentsChain())

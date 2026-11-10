@@ -1211,11 +1211,17 @@ impl IndexService {
         if can_vector {
             let q = query.trim();
             if !q.is_empty() {
-                let vectors =
-                    embedding::embed_texts(&self.embedding, &[q.to_string()])
-                        .await?;
-                if let Some(vec) = vectors.into_iter().next() {
-                    query_vector = Some(vec);
+                // 查询向量走交互闸门：端点比交互预算慢时不发请求（`EMBEDDING_TOO_SLOW`），
+                // 直接按「这次没有向量通道」降级到子串检索 —— 向量通道本来就是可选增强，
+                // 不能让一次注定超时的 embedding 往返把整次检索（以及调用它的那轮对话）打挂。
+                match embedding::embed_texts_interactive(&self.embedding, &[q.to_string()]).await {
+                    Ok(vectors) => {
+                        if let Some(vec) = vectors.into_iter().next() {
+                            query_vector = Some(vec);
+                        }
+                    }
+                    Err(err) if embedding::is_too_slow(&err) => {}
+                    Err(err) => return Err(err),
                 }
             }
         }

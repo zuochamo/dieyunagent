@@ -132,7 +132,6 @@ PY
 语义检索就不该开（**关键词/子串通道仍然可用**，见 `INDEX-VALUE-REVIEW.md` §7.2）。
 
 #### 建向量前的 configure 顺序（已修）
-
 远端 daemon 每个工作区一份 core host（乙案：每会话一个 worktree）。新工作区的 host 冷启动时
 没有任何配置，而 `invokeIndexCore` 只看「core 已就绪」缓存、命中就跳过 `index.configure` ——
 于是面板「建向量」在**新会话**里必然回 `EMBEDDING_NOT_CONFIGURED`（真机实测；手动跑一次
@@ -141,6 +140,44 @@ PY
 修法在调用侧：`src/gateway/rpc.js:startIndexForContext` 在**这次要建向量**时先把配置推到这条
 连接上（`syncRemoteIndexCoreConfig()`，幂等、单一来源），再发 `codebase.index.start`。
 不是重试层：它修的是「配置下发与使用不同步」这个顺序问题。
+
+### 1.4 端点慢到「不值得等」时：交互闸门 + 归纳写入批量化（2026-11-09）
+
+现场症状：发一条消息直接失败 —— `调用失败：Error invoking remote method 'agent:prep-system-prompt':
+Error: codebase.search 超时`。查下来**不是索引坏了**，是端点把整条队列堵死了。
+
+实测（同一台 `text-embedding-qwen3-embedding-4b @ :5018`，2560 维）：
+
+| 测点 | 结果 |
+|---|---|
+| 端点 1 条输入 | **34.4s / 44.3s**（1 条也是这个量级：与 §1.3.1 的 53s 一致） |
+| 端点 3 条并发 | 32s / 76s / 120s → **服务端严格串行**，吞吐 ≈ 1 请求 / 38s |
+| 记忆库 COUNT / FTS trigram / 子串 LIKE | 0.7ms / 0.3–6.7ms / 1.0ms → DB 不是瓶颈 |
+| 向量全表读（1681 条 × 2560 维 = 15MB） | 147ms → 语义扫描也不是瓶颈 |
+
+死循环是怎么形成的（三处每轮都会打端点的地方，`EMBED_CONCURRENCY = 4` 在串行端点前等于 1）：
+
+1. `memory.long_recall`（prep 每轮，预算 10s）+ 技能召回 / 工具召回 / 共享记忆召回（Node 侧同一端点）
+   各发一条查询向量请求；调用方 10s 就放弃，但**超时只掐等待者**，那条 40s 的 HTTP 仍在端点队列里；
+2. `memory.long_add` 归纳器**逐条**写（一次最多 8 条 = 8 × 40s ≈ 5.5 分钟独占端点）；
+3. `codebase.search` 的查询向量排在上面两者后面 → prep 的 15s 必超 → 召回失败被当成致命错误
+   （已先修：召回失败只降级本次注入，不再打挂整轮发送）。
+
+两条修法（都不新增开关 / 配置项）：
+
+| 修法 | 落点 | 口径 |
+|---|---|---|
+| **交互闸门** | `crates/dieyun-core/src/embedding/mod.rs`（`embed_texts_interactive`）与 `src/codebase/embedding-client.js`（`embedInteractive`） | 记住**最近一次成功**往返（按 端点+模型 键，换端点即重新量）；超过预算（Rust `INTERACTIVE_EMBED_BUDGET_MS` / Node `agent-limits.interactiveEmbedBudgetMs`，两侧成对）就**不发请求**，回 `EMBEDDING_TOO_SLOW`，调用方走既有的关键词 / 子串通道 |
+| **归纳批量写** | `memory.long_add_many`（Rust `add_long_memories_deduped`）+ `knowledge-maintainer.applyMemoryItems` | 一次 `embed_batches` 算完 8 条向量（批大小仍是 `plan_embed_batches` 一份），再逐条走**同一套**写入政策（低价值闸 / 近重复 / 写入即索引）：请求数 8 → 1。core 还是旧版（没有这个方法，回 `UNKNOWN_METHOD`）时逐条退回 `memory.long_add` —— 语义一样，只是慢 |
+
+为什么闸门要放在**发请求之前**：调用方只能掐自己那条 await；被放弃的请求照样占端点。
+所以「值不值得发」必须在客户端判断 —— 这正是把「超时」从「白等一轮」变成「不再制造新积压」的唯一位置。
+
+后台路径（建库、`memory.long_add`、`memory.long_reindex`、共享记忆镜像）**不进**闸门：
+它们等得起，算出来的向量是以后每轮检索都要用的资产。交互侧只有查询向量进。
+
+> 端点本身的吞吐不归本仓（§1.3.1 已写清）：40s/请求的 4B 模型不适合交互，该换小模型 / 上 GPU。
+> 本节做的是「端点慢时别把自己拖死」，不是让慢端点变快。
 
 ## 2. `VectorPool` 的三个硬边界
 

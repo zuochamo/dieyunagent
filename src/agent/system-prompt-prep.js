@@ -97,10 +97,6 @@ function capText(text, max) {
   return `${s.slice(0, max)}\n\n…（已截断，原文 ${s.length} 字符）`;
 }
 
-function isCodebaseContextFailure(block) {
-  return typeof block === 'string' && /状态：失败/.test(block);
-}
-
 function formatRecentChanges(rows, max) {
   const list = Array.isArray(rows) ? rows.slice(0, max || DEFAULT_LIMITS.RECENT_CHANGE_MAX) : [];
   if (!list.length) return '';
@@ -313,8 +309,19 @@ async function fetchCodebaseBlock(snapshot, invokeRpc, lim) {
     );
     return formatCodebaseBlock(query, data, lim.CODEBASE_SNIPPET_MAX, label);
   } catch (e) {
+    // 代码召回是「顺手增强」，不是这轮对话的前置条件：检索超时（远端 core 冷启动 /
+    // core 被 memory 长召回占住）、索引未就绪、RPC 断线，一律按「这轮没有代码块」处理，
+    // 原因留给日志。**不能往上游抛** —— 这条 RPC 的调用方是 `agent:prep-system-prompt`，
+    // 抛出去等于「可选召回失败 → 用户那句话发不出去」。
+    //
+    // 「还没建库 / 正在首建 / 端点慢到不值得等」是**正常态**（每轮都会经过这里），
+    // 不打告警：否则正常状态会以每轮一行的频率淹没真正需要看的失败。
     const msg = e && e.message ? String(e.message) : String(e);
-    return `【相关代码】\n查询：${query}\n状态：失败，${msg}`;
+    const expected = ['INDEX_REQUIRED', 'INDEXING_IN_PROGRESS', 'EMBEDDING_TOO_SLOW'];
+    if (!expected.includes(e && e.code)) {
+      console.warn('[dieyun:agent] codebase.search 召回失败，本轮不注入代码块:', msg);
+    }
+    return '';
   }
 }
 
@@ -1165,15 +1172,7 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
       invokeRpc,
       lim
     );
-    if (isCodebaseContextFailure(codebaseBlock)) {
-      const line = String(codebaseBlock)
-        .split(/\r?\n/)
-        .find((l) => /状态：失败/.test(l));
-      const detail = line || '代码库检索失败';
-      if (!/INDEX_REQUIRED|INDEXING_IN_PROGRESS|尚未索引|构建中/i.test(detail)) {
-        throw new Error(detail.replace(/^.*状态：失败[，,]?/, '').trim() || detail);
-      }
-    } else if (codebaseBlock) {
+    if (codebaseBlock) {
       turnHost.push(codebaseBlock);
       codeBlockInjected = true;
     }

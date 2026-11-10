@@ -58,6 +58,11 @@ function fakeCtx({ userData, llmReply, execPrefs } = {}) {
       calls.push({ method, params });
       if (method === 'memory.consolidation_job_create') return { jobId: 'job-1' };
       if (method === 'memory.long_recent') return [];
+      // 用户级记忆走批量写入（一次 embedding 请求写多条），逐条结果按入参顺序返回
+      if (method === 'memory.long_add_many') {
+        const items = Array.isArray(params && params.items) ? params.items : [];
+        return { ok: true, results: items.map(() => ({ ok: true, localMemoryId: 1 })) };
+      }
       if (method === 'memory.sessions_with_messages') return [{ id: 's-test' }];
       if (method === 'memory.messages_recent') return [{ role: 'user', content: '整理一下项目约定' }];
       if (method === 'memory.project_scope') return { scope: 'project:/ws/project' };
@@ -267,8 +272,13 @@ async function main() {
     assert.strictEqual(res.memorySaved, 2);
     assert.strictEqual(calls.filter((c) => c.method === 'memory.project_add').length, 0, '项目记忆不再写库');
     assert.ok(String(files.get('.dieyun/memory.md')).includes('runtime 配置'), '项目记忆写进文件');
-    const longAdd = calls.filter((c) => c.method === 'memory.long_add');
-    assert.strictEqual(longAdd.length, 1);
+    const longAdd = calls.filter((c) => c.method === 'memory.long_add_many');
+    assert.strictEqual(longAdd.length, 1, '用户级条目一次批量写完（不再逐条 long_add）');
+    assert.strictEqual(longAdd[0].params.items.length, 1, '只有 global 条目进库');
+    assert.ok(
+      String(longAdd[0].params.items[0].content).includes('用户偏好中文回复'),
+      '进库的是那条 global 条目'
+    );
     // 溯源：写入必须带上"哪个会话沉淀的"，否则「本会话沉淀了什么/忘掉」无法回答
     const expectedSession = String(TASK_PAYLOAD.sessionId || '');
     assert.ok(expectedSession, '任务语料自带 sessionId');
@@ -298,8 +308,11 @@ async function main() {
         return { ok: true };
       }
       const res = await inner(method, params);
-      // 全局条目的写入侧策略在 Rust（低价值闸）；项目条目由文件去重判定
-      if (method === 'memory.long_add') return { ...res, skipped: 'low_importance' };
+      // 全局条目的写入侧策略在 Rust（低价值闸）：批量接口把逐条结论放在 results 里
+      if (method === 'memory.long_add_many') {
+        const items = Array.isArray(params && params.items) ? params.items : [];
+        return { ok: true, results: items.map(() => ({ ok: true, skipped: 'low_importance' })) };
+      }
       return res;
     };
     const res = await km.runTaskMaintenance(ctx, TASK_PAYLOAD);
@@ -399,10 +412,12 @@ async function main() {
     };
     const res = await km.runTaskMaintenance(ctx, TASK_PAYLOAD);
     assert.strictEqual(res.ok, true);
-    const longAdd = calls.filter((c) => c.method === 'memory.long_add');
-    assert.strictEqual(longAdd.length, 2, 'scope=global 一律落库，importance 不改变落点');
+    const longAdd = calls.filter((c) => c.method === 'memory.long_add_many');
+    assert.strictEqual(longAdd.length, 1, '一次批量写入（不再逐条 long_add）');
+    const written = Array.isArray(longAdd[0].params.items) ? longAdd[0].params.items : [];
+    assert.strictEqual(written.length, 2, 'scope=global 一律落库，importance 不改变落点');
     assert.ok(
-      longAdd.some((c) => String(c.params.content).includes('hunter2')),
+      written.some((it) => String(it && it.content).includes('hunter2')),
       'secret 条目必须落库（否则模型看不到、用户也不知道它丢了）'
     );
     const text = files.get('.dieyun/memory.md') || '';
@@ -410,6 +425,35 @@ async function main() {
     assert.ok(!text.includes('runtime 配置'), 'importance=5 的 global 条目也不该改道进文件');
     assert.strictEqual(res.memorySaved, 2);
     assert.strictEqual(res.memorySkipped, 0);
+  });
+
+  await checkAsync('run: 旧 core 没有 long_add_many 时退回逐条写入（版本兼容）', async () => {
+    const userData = tempUserData();
+    const reply = JSON.stringify({
+      memories: [
+        { content: '用户偏好中文回复', kind: 'normal', importance: 3, scope: 'global' },
+        { content: '提交前跑 npm test', kind: 'normal', importance: 4, scope: 'global' }
+      ],
+      archive_memory_ids: [],
+      agents_updates: []
+    });
+    const { ctx, calls } = fakeCtx({ userData, llmReply: reply });
+    const inner = ctx.invokeRpc;
+    ctx.invokeRpc = async (method, params) => {
+      if (method === 'memory.long_add_many') {
+        // 应用没跟着重编 core 时的真实回包：UNKNOWN_METHOD
+        calls.push({ method, params });
+        const e = new Error('未知 RPC: memory.long_add_many');
+        e.code = 'UNKNOWN_METHOD';
+        throw e;
+      }
+      return inner(method, params);
+    };
+    const res = await km.runTaskMaintenance(ctx, TASK_PAYLOAD);
+    assert.strictEqual(res.ok, true);
+    const singles = calls.filter((c) => c.method === 'memory.long_add');
+    assert.strictEqual(singles.length, 2, '每个用户级条目退回一次单条写入');
+    assert.strictEqual(res.memorySaved, 2, '退回路径的计数与批量路径一致');
   });
 
   await checkAsync('run: 项目记忆落项目根（worktree 会话不写进临时 worktree）', async () => {

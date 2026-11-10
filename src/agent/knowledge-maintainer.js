@@ -416,6 +416,57 @@ function formatMemoryRowsForPrompt(rows, label) {
   return `【${label}】\n${lines.join('\n')}`;
 }
 
+/**
+ * 写用户级记忆：一次批量（`memory.long_add_many`），逐条结果按入参顺序返回。
+ *
+ * 为什么要批量：逐条 `memory.long_add` 等于每条付一次 embedding 端点往返，端点串行时
+ * 一次归纳（最多 8 条）就独占它几分钟，把同队列里的每轮召回与代码检索全拖到超时
+ * （见 docs/VECTOR-SEARCH.md §1.4）。
+ *
+ * 唯一的例外是**版本兼容**：core 还是旧的（应用没跟着重编）时没有这个方法，会回
+ * `UNKNOWN_METHOD` —— 这时退回逐条写入，语义完全一样（同一套 Rust 写入政策），
+ * 只是慢。这不是重试层：换的是「调哪个方法」，不是「同一件事再试一次」。
+ *
+ * `null` 表示那条没写成功（调用失败），由调用方决定怎么计数。
+ */
+async function writeGlobalMemories(ctx, items, opts) {
+  const source = opts.source || 'auto_consolidation';
+  const sessionId = opts.sessionId || undefined;
+  const metadata = opts.metadata;
+  const payload = items.map((item) => ({
+    content: item.content,
+    kind: item.kind,
+    importance: item.importance,
+    metadata
+  }));
+  try {
+    const res = await ctx.invokeRpc('memory.long_add_many', {
+      items: payload,
+      source,
+      // 走到这里的只可能是用户级：项目级已经进文件，库里不再有第二种 scope 写法
+      scope: 'global',
+      sessionId
+    });
+    const results = Array.isArray(res && res.results) ? res.results : [];
+    return payload.map((_, i) => results[i] || null);
+  } catch (err) {
+    if (!err || err.code !== 'UNKNOWN_METHOD') throw err;
+    console.warn('[dieyun:memory] dieyun-core 还不支持 memory.long_add_many（旧版核心），本次逐条写入');
+    const out = [];
+    for (const item of payload) {
+      try {
+        out.push(
+          await ctx.invokeRpc('memory.long_add', { ...item, source, scope: 'global', sessionId })
+        );
+      } catch (e) {
+        console.warn('[dieyun:memory] memory add failed:', e && (e.message || e));
+        out.push(null);
+      }
+    }
+    return out;
+  }
+}
+
 async function applyMemoryItems(ctx, items, opts = {}) {
   const wsPath = String(opts.workspacePath || '').trim();
   const source = opts.source || 'auto_consolidation';
@@ -428,6 +479,8 @@ async function applyMemoryItems(ctx, items, opts = {}) {
   let skipped = 0;
   /** 本轮真正落进用户级库的条目 → 归纳结束后镜像到共享库（跨机） */
   const shareable = [];
+  /** 用户级条目：攒起来一次写（见下方 memory.long_add_many 的理由） */
+  const globalItems = [];
   for (const item of (items || []).slice(0, max)) {
     // 落点只由 scope 决定（scope 已在 parseKnowledgeJson 归一成 project / global），
     // importance 只是排序权重，不参与选通道。
@@ -435,36 +488,42 @@ async function applyMemoryItems(ctx, items, opts = {}) {
     // 又被 filterEntriesForFile 按「文件会进版本库」丢弃 —— 库里和文件里都没有，
     // 静默丢记忆且只记一次 skipped。泄露边界是不变式，重要性不能改写它。
     const useProject = !!wsPath && item.scope === 'project';
+    if (!useProject) {
+      globalItems.push(item);
+      continue;
+    }
     try {
-      // 项目记忆写文件（唯一真相）；用户级记忆写 SQLite（写入侧策略在 Rust 的
-      // memory.long_add 唯一实现：近重复合并 / 低价值闸）。这里只按事实计数。
-      if (useProject) {
-        const fileRes = await appendProjectMemoryToFile(ctx, [item], wsPath);
-        if (fileRes.added) saved += 1;
-        else if (fileRes.duplicate) merged += 1;
-        else skipped += 1;
-        continue;
-      }
-      const res = await ctx.invokeRpc('memory.long_add', {
-        content: item.content,
-        source,
-        kind: item.kind,
-        // 走到这里的只可能是用户级：项目级已经进文件，库里不再有第二种 scope 写法
-        scope: 'global',
-        importance: item.importance,
-        sessionId: sessionId || undefined,
-        metadata
-      });
-      if (res && res.skipped) skipped += 1;
-      else if (res && res.duplicate) merged += 1;
-      else saved += 1;
-      // 上传的是「这轮新写进库的正文」，与本地库同一条：不额外记 id，靠 content_hash 幂等
-      if (!(res && res.skipped)) {
-        shareable.push({ content: item.content, kind: item.kind, importance: item.importance, source });
-      }
+      // 项目记忆写文件（唯一真相）。用户级记忆走下面的一次批量写入。
+      const fileRes = await appendProjectMemoryToFile(ctx, [item], wsPath);
+      if (fileRes.added) saved += 1;
+      else if (fileRes.duplicate) merged += 1;
+      else skipped += 1;
     } catch (err) {
       console.warn('[dieyun:memory] memory add failed:', err && (err.message || err));
     }
+  }
+  // 用户级记忆一次写完（原因见 docs/VECTOR-SEARCH.md §1.4 + writeGlobalMemories）。
+  if (globalItems.length) {
+    let results = [];
+    try {
+      results = await writeGlobalMemories(ctx, globalItems, { source, sessionId, metadata });
+    } catch (err) {
+      console.warn('[dieyun:memory] memory add failed:', err && (err.message || err));
+      results = [];
+    }
+    globalItems.forEach((item, i) => {
+      const out = results[i];
+      // 没有对应结论就不计数（等价于「这条没写成」）—— 不能默认算进 saved，
+      // 否则批量接口少回一条就会在统计里变成「凭空多写了一条」。
+      if (!out) return;
+      if (out.skipped) skipped += 1;
+      else if (out.duplicate) merged += 1;
+      else saved += 1;
+      // 上传的是「这轮新写进库的正文」，与本地库同一条：不额外记 id，靠 content_hash 幂等
+      if (!out.skipped) {
+        shareable.push({ content: item.content, kind: item.kind, importance: item.importance, source });
+      }
+    });
   }
   const shared = await mirrorShareable(ctx, shareable);
   return { saved, merged, skipped, shared };

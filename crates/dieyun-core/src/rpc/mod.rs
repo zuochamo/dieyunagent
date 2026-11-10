@@ -1046,6 +1046,31 @@ impl AppState {
                     )
                     .await
             }
+            // 归纳器一次写多条：**一次** embedding 请求算完全部向量，再逐条走
+            // `memory.long_add` 那一套写入政策（低价值闸 / 近重复 / 写入即索引）。
+            // 逐条调 long_add 等于每条付一次端点往返 —— 端点串行时一次归纳就独占几分钟。
+            "memory.long_add_many" => {
+                let items: Vec<memory::LongMemoryInput> = params
+                    .get("items")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", format!("items 非法: {e}")))?
+                    .unwrap_or_default();
+                if items.is_empty() {
+                    return Ok(serde_json::json!({ "ok": true, "results": [] }));
+                }
+                let source = params
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("user");
+                let scope = params.get("scope").and_then(|v| v.as_str());
+                let session_id = params.get("sessionId").and_then(|v| v.as_str());
+                let memory = self.snapshot().await.memory;
+                memory
+                    .add_long_memories_deduped(&items, source, scope, session_id)
+                    .await
+            }
             "memory.project_resolve" => {
                 let path = params
                     .get("path")

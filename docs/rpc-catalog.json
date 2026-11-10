@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-04T11:52:08.317Z",
+  "generatedAt": "2026-11-09T02:23:03.960Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 188,
+    "total": 189,
     "gatewayOnly": 106,
     "rustOnly": 23,
-    "both": 59
+    "both": 60
   },
   "methods": [
     {
@@ -928,6 +928,16 @@
     },
     {
       "method": "memory.long_add",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/memory.js"
+      ],
+      "rust": [
+        "dieyun-core/rpc/mod.rs"
+      ]
+    },
+    {
+      "method": "memory.long_add_many",
       "layer": "both",
       "gateway": [
         "gateway/handlers/memory.js"

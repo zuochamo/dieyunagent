@@ -269,7 +269,12 @@ async function recallAgentTools(input) {
     return tokens ? keywordScore(queryTokens, tokens) : 0;
   };
 
+  // mode 记**实际用的通道**：向量索引在、但查询向量拿不到（端点慢到不值得等 / 端点报错）
+  // 时排序走的是关键词，再报 semantic 会让调用方以为这轮用过向量。
+  let recallMode = 'keyword';
+
   if (!q) {
+    recallMode = 'fallback';
     rows = diversifyByServer(
       entries.map((entry) => ({ entry, score: 0.01, semanticScore: 0, keywordScore: 0 })),
       max
@@ -277,7 +282,8 @@ async function recallAgentTools(input) {
   } else if (vector) {
     try {
       const client = createEmbeddingClient(input.embeddingConfig || {});
-      const [queryVec] = await client.embed(q.slice(0, QUERY_EMBED_TEXT_MAX));
+      // 查询向量走交互闸门：端点比交互预算慢时不发请求（EMBEDDING_TOO_SLOW），落到关键词
+      const [queryVec] = await client.embedInteractive(q.slice(0, QUERY_EMBED_TEXT_MAX));
       rows = rankBySemantic({
         entries,
         keywordRows,
@@ -288,6 +294,7 @@ async function recallAgentTools(input) {
         allowedSet: idSet
       });
       if (!rows.length) rows = keywordRows.slice(0, max);
+      else recallMode = 'semantic';
     } catch {
       rows = keywordRows.slice(0, max);
     }
@@ -313,8 +320,9 @@ async function recallAgentTools(input) {
     }
   }
 
+  // mode 见上：`recallMode` 是实际用过的通道
   return {
-    mode: !q ? 'fallback' : vector ? 'semantic' : 'keyword',
+    mode: recallMode,
     embeddingModel: index.embeddingModel || '',
     indexedAt: index.indexedAt || 0,
     total: entries.length,

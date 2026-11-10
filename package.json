@@ -67,6 +67,7 @@
     "test:session-context": "node scripts/test-session-context.cjs",
     "test:agent-system-prompt": "node scripts/test-agent-system-prompt.cjs",
     "test:system-prompt-prep": "node scripts/test-system-prompt-prep.cjs",
+    "test:embedding-budget": "node scripts/test-embedding-budget.cjs",
     "test:knowledge-maintainer": "node scripts/test-knowledge-maintainer.cjs",
     "test:project-memory-file": "node scripts/test-project-memory-file.cjs",
     "test:session-handoff": "node scripts/test-session-handoff.cjs",

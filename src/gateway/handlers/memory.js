@@ -295,6 +295,35 @@ function createMemoryHandlers({ requireRustCore, ctx }) {
       return rustAdd;
     },
 
+    /**
+     * 一次写多条用户级记忆（归纳器的唯一写入口）。
+     *
+     * 与 `memory.long_add` 走**同一套**写入政策（Rust 侧 `apply_long_memory_deduped`），
+     * 区别只在「向量是一次批量算出来的」：端点串行时每条一次往返，一次归纳 8 条
+     * 就独占端点几分钟，同队列里的每轮召回/检索全部超时。
+     */
+    'memory.long_add_many': async ({ items, source, scope, sessionId }) => {
+      const list = Array.isArray(items) ? items : [];
+      if (!list.length) return { ok: true, results: [] };
+      return requireRustCore(
+        'memory.long_add_many',
+        {
+          items: list.map((item) => ({
+            content: String((item && item.content) || ''),
+            kind: item && item.kind,
+            importance: item && item.importance,
+            metadata: item && item.metadata
+          })),
+          source: source ? String(source) : 'user',
+          scope: scope ? String(scope) : undefined,
+          sessionId: sessionId ? String(sessionId) : undefined
+        },
+        // 批量写入要算 embedding：按端点实际吞吐给足（与 long_add 同一口径）。
+        // 注意这是**后台**写入，不受交互预算闸门约束。
+        300000
+      );
+    },
+
     /** 会话维度：这个会话沉淀了哪些记忆（id/kind/importance 都在，供 UI 直接展示） */
     'memory.session_memories': async ({ sessionId, limit }) =>
       requireRustCore('memory.long_by_session', {

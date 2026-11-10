@@ -2,14 +2,14 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-11-04T11:52:08.317Z
+生成时间：2026-11-09T02:23:03.960Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 188 |
+| 总计 | 189 |
 | Gateway only | 106 |
 | Rust only | 23 |
-| Both | 59 |
+| Both | 60 |
 
 ## 按命名空间
 
@@ -172,7 +172,7 @@
 | `lsp.settings_get` | gateway | gateway/handlers/lsp-workspace.js | — |
 | `lsp.settings_set` | gateway | gateway/handlers/lsp-workspace.js | — |
 
-### memory (50)
+### memory (51)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -185,6 +185,7 @@
 | `memory.handoff_latest` | both | gateway/handlers/memory.js | yes |
 | `memory.handoff_save` | both | gateway/handlers/memory.js | yes |
 | `memory.long_add` | both | gateway/handlers/memory.js | yes |
+| `memory.long_add_many` | both | gateway/handlers/memory.js | yes |
 | `memory.long_by_session` | rust | — | yes |
 | `memory.long_decay` | both | gateway/handlers/memory.js | yes |
 | `memory.long_forget_session` | rust | — | yes |
