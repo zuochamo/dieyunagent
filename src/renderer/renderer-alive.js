@@ -134,6 +134,132 @@ function aliveFmtTokens(n) {
   return `${(v / 1000000).toFixed(2)}M`;
 }
 
+/* ───────────── 趋势曲线（内联 SVG，不引图表库）───────────── */
+
+const ALIVE_TREND_W = 100;
+const ALIVE_TREND_H = 34;
+const ALIVE_TREND_PAD = 2;
+
+/** 采样序号 → 横坐标（首尾贴边，中间等距） */
+function aliveTrendX(index, count) {
+  if (count <= 1) return ALIVE_TREND_PAD;
+  return ALIVE_TREND_PAD + (index * (ALIVE_TREND_W - ALIVE_TREND_PAD * 2)) / (count - 1);
+}
+
+/** 0–100 的体征值 → 纵坐标（上高下低） */
+function aliveTrendY(value) {
+  const v = Math.max(0, Math.min(100, Number(value) || 0));
+  return ALIVE_TREND_H - ALIVE_TREND_PAD - (v / 100) * (ALIVE_TREND_H - ALIVE_TREND_PAD * 2);
+}
+
+function aliveTrendPath(samples, key) {
+  return samples
+    .map((s, i) => `${i === 0 ? 'M' : 'L'}${aliveTrendX(i, samples.length).toFixed(2)},${aliveTrendY(s[key]).toFixed(2)}`)
+    .join(' ');
+}
+
+/** 相位色带：连续同相位的采样合成一段 rect（背景里一眼看出它什么时候在压缩） */
+function aliveTrendBands(samples) {
+  const bands = [];
+  for (let i = 0; i < samples.length; i += 1) {
+    const phase = String(samples[i].phase || '');
+    const last = bands[bands.length - 1];
+    if (last && last.phase === phase) {
+      last.to = i;
+      continue;
+    }
+    bands.push({ phase, from: i, to: i });
+  }
+  return bands.map((b) => {
+    const x1 = aliveTrendX(b.from, samples.length);
+    const x2 = aliveTrendX(Math.min(samples.length - 1, b.to + 1), samples.length);
+    const w = Math.max(0.3, x2 - x1);
+    const label = ALIVE_PHASE_TEXT[b.phase] || b.phase || '—';
+    return (
+      `<rect class="alive-trend-band alive-phase-${String(b.phase || '').toLowerCase()}"` +
+      ` x="${x1.toFixed(2)}" y="0" width="${w.toFixed(2)}" height="${ALIVE_TREND_H}">` +
+      `<title>${label}</title></rect>`
+    );
+  });
+}
+
+/**
+ * 把 `alive:history` 的采样画成一条曲线（张力 + 疲劳 + 相位色带）。
+ *
+ * 为什么手写 SVG 而不引图表库：只需要两条折线和几段底色，库的体积与升级成本都不值；
+ * renderer 里已有 `<svg>` 的写法（rail 图标、气泡折线）。
+ */
+function buildAliveTrendSvg(payload) {
+  const samples = Array.isArray(payload && payload.samples) ? payload.samples : [];
+  if (samples.length < 2) return '';
+  return (
+    `<svg class="alive-trend-svg" viewBox="0 0 ${ALIVE_TREND_W} ${ALIVE_TREND_H}"` +
+    ` preserveAspectRatio="none" role="img" aria-label="体征趋势">` +
+    aliveTrendBands(samples).join('') +
+    `<path class="alive-trend-line alive-trend-tension" d="${aliveTrendPath(samples, 'tension')}" />` +
+    `<path class="alive-trend-line alive-trend-fatigue" d="${aliveTrendPath(samples, 'fatigue')}" />` +
+    `<circle class="alive-trend-dot alive-trend-tension" cx="${aliveTrendX(samples.length - 1, samples.length).toFixed(2)}" cy="${aliveTrendY(samples[samples.length - 1].tension).toFixed(2)}" r="1.1" />` +
+    `<circle class="alive-trend-dot alive-trend-fatigue" cx="${aliveTrendX(samples.length - 1, samples.length).toFixed(2)}" cy="${aliveTrendY(samples[samples.length - 1].fatigue).toFixed(2)}" r="1.1" />` +
+    `</svg>`
+  );
+}
+
+/** 悬浮读数：把指针位置换算成采样序号，把那一刻的四个数写进一行文字 */
+function aliveTrendPointAt(svg, clientX) {
+  const samples = svg && svg.__aliveSamples;
+  if (!Array.isArray(samples) || !samples.length) return null;
+  const rect = svg.getBoundingClientRect();
+  if (!rect.width) return null;
+  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  // 注意 preserveAspectRatio=none：横向拉伸是线性的，直接按比例取序号即可
+  const idx = Math.round(ratio * (samples.length - 1));
+  return samples[idx] || null;
+}
+
+function mountAliveTrend(container, payload) {
+  if (!container) return;
+  const samples = Array.isArray(payload && payload.samples) ? payload.samples : [];
+  if (samples.length < 2) {
+    container.textContent = '还没有足够的样本（心跳跑满两跳后才会有曲线）';
+    container.classList.add('alive-trend-empty');
+    return;
+  }
+  container.classList.remove('alive-trend-empty');
+  container.innerHTML = buildAliveTrendSvg(payload);
+  const svg = container.querySelector('svg');
+  if (!svg) return;
+  svg.__aliveSamples = samples;
+  if (!svg.dataset.bound) {
+    svg.dataset.bound = '1';
+    svg.addEventListener('pointermove', (ev) => {
+      const s = aliveTrendPointAt(svg, ev.clientX);
+      if (!s) return;
+      aliveNoteText(
+        'alive-trend-note',
+        `${aliveFmtTime(s.ts)} · ${ALIVE_PHASE_TEXT[s.phase] || s.phase || '—'}` +
+          ` · 张力 ${Number(s.tension || 0).toFixed(1)}` +
+          ` · 疲劳 ${Number(s.fatigue || 0).toFixed(1)}` +
+          ` · 今日 token ${aliveFmtTokens(s.tokenToday)}`,
+        null
+      );
+    });
+    svg.addEventListener('pointerleave', () => {
+      const samples2 = svg.__aliveSamples || [];
+      const first = samples2[0];
+      const last = samples2[samples2.length - 1];
+      if (!first || !last) return;
+      const max = (key) => samples2.reduce((m, s) => Math.max(m, Number(s[key]) || 0), 0);
+      aliveNoteText(
+        'alive-trend-note',
+        `窗口 ${aliveFmtDuration(Number(last.ts) - Number(first.ts))}：` +
+          `张力 ${Number(first.tension || 0).toFixed(1)} → ${Number(last.tension || 0).toFixed(1)}（峰 ${max('tension').toFixed(1)}）` +
+          ` · 疲劳 ${Number(first.fatigue || 0).toFixed(1)} → ${Number(last.fatigue || 0).toFixed(1)}（峰 ${max('fatigue').toFixed(1)}）`,
+        null
+      );
+    });
+  }
+}
+
 function aliveDecisionText(evt) {
   const decision = String((evt && evt.decision) || '');
   if (decision === 'ACT') return '做（ACT）';
@@ -344,6 +470,7 @@ function renderAliveStatus(status) {
     if (detailEl) detailEl.textContent = '';
     if (loopsEl) loopsEl.textContent = '';
     aliveNoteText('alive-fatigue-note', '', null);
+    aliveNoteText('alive-budget-note', '', null);
     aliveNoteText('alive-session-note', '', null);
     return;
   }
@@ -352,6 +479,7 @@ function renderAliveStatus(status) {
     if (detailEl) detailEl.textContent = '';
     if (loopsEl) loopsEl.textContent = '';
     aliveNoteText('alive-fatigue-note', '', null);
+    aliveNoteText('alive-budget-note', '', null);
     aliveNoteText(
       'alive-session-note',
       st.sessionId
@@ -381,8 +509,29 @@ function renderAliveStatus(status) {
       ` · 未闭合 ${Number(st.loops || 0)} 条` +
       ` · 今日唤醒 ${Number(st.wakeCountToday || 0)}/${Number(st.wakeMaxPerDay || 0)}` +
       ` · 做 ${Number(st.actCount || 0)} / 放下 ${Number(st.deferCount || 0)} / 拒 ${Number(st.refuseCount || 0)}` +
-      ` · 累计唤醒 ${aliveFmtTokens(st.totalTokens)} token` +
+      ` · 今日 token ${aliveFmtTokens(st.tokenToday)}/${Number(st.dailyTokenBudget) > 0 ? aliveFmtTokens(st.dailyTokenBudget) : '不限'}` +
+      ` · 累计 ${aliveFmtTokens(st.totalTokens)}` +
       lastWakeText;
+  }
+
+  // 额度用完要给出可读结论（否则用户只看到"它不动了"）
+  const budget = Number(st.dailyTokenBudget) || 0;
+  const usedToday = Number(st.tokenToday) || 0;
+  if (budget > 0 && usedToday >= budget) {
+    aliveNoteText(
+      'alive-budget-note',
+      `今日 token 额度已用完（${aliveFmtTokens(usedToday)}/${aliveFmtTokens(budget)}）：它今天不会再自发醒来，` +
+        '0 点自动重置。要放宽就改 `agent-limits.js` 的 `aliveDailyTokenBudget`（不在设置页开放旋钮）。',
+      'bad'
+    );
+  } else if (budget > 0 && usedToday >= budget * 0.8) {
+    aliveNoteText(
+      'alive-budget-note',
+      `今日 token 已用 ${aliveFmtTokens(usedToday)}/${aliveFmtTokens(budget)}：快到额度了，用完后它会停到明天。`,
+      null
+    );
+  } else {
+    aliveNoteText('alive-budget-note', '', null);
   }
 
   // 疲劳的解释线：到线就说清「为什么它现在不怎么醒」，而不是让用户对着两个数字猜
@@ -509,6 +658,31 @@ async function refreshAliveDecisions() {
   }
 }
 
+/** 体征曲线：窗口内抽样后的采样点（数据来自 `alive:history`，写侧只追加） */
+async function refreshAliveHistory() {
+  const api = aliveApi();
+  if (!api || typeof api.aliveHistory !== 'function') return;
+  try {
+    const res = await api.aliveHistory({ points: 240 });
+    if (!res || !res.ok) return;
+    mountAliveTrend($('alive-trend'), res);
+    if (Array.isArray(res.samples) && res.samples.length >= 2) {
+      const first = res.samples[0];
+      const last = res.samples[res.samples.length - 1];
+      aliveNoteText(
+        'alive-trend-note',
+        `窗口 ${aliveFmtDuration(Number(last.ts) - Number(first.ts))}（共 ${Number(res.total) || res.samples.length} 个采样）：` +
+          `张力 ${Number(first.tension || 0).toFixed(1)} → ${Number(last.tension || 0).toFixed(1)}` +
+          ` · 疲劳 ${Number(first.fatigue || 0).toFixed(1)} → ${Number(last.fatigue || 0).toFixed(1)}` +
+          '（悬浮曲线看某一刻）',
+        null
+      );
+    }
+  } catch {
+    // 曲线读失败只影响这一块
+  }
+}
+
 /**
  * 页签可见时才轮询。
  *
@@ -542,6 +716,7 @@ function startAlivePoll() {
     if (aliveUi.pollTick % ALIVE_DECISIONS_EVERY === 1) {
       refreshAliveDecisions();
       refreshAliveNote();
+      refreshAliveHistory();
     }
   }, ALIVE_POLL_MS);
 }
@@ -596,6 +771,7 @@ function onAliveSettingsTabShown() {
     .then(() => {
       refreshAliveDecisions();
       refreshAliveNote();
+      refreshAliveHistory();
     });
   startAlivePoll();
 }
@@ -657,6 +833,7 @@ function initAliveSettingsPage() {
         refreshAliveStatus().then(() => {
           refreshAliveDecisions();
           refreshAliveNote();
+          refreshAliveHistory();
         });
       });
     });
