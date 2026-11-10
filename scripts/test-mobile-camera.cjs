@@ -372,7 +372,7 @@ function testHalfWiringGuard() {
   assert(/const isCameraShot = c\.name === 'camera_look'/.test(bridgeMain), 'camera shots skip the disk copy');
   assert(/isCameraShot\s*\? visionCameraText/.test(bridgeMain), 'camera shots get the no-copy note');
   assert(
-    /\(c\.name === 'computer' \|\| c\.name === 'camera_look'\) && c\.result && c\.result\.base64/.test(bridgeMain),
+    /\(c\.name === 'computer' \|\| CAMERA_TOOL_NAMES\.includes\(c\.name\)\)\s*&&\s*c\.result\s*&&\s*c\.result\.base64/.test(bridgeMain),
     'text-only models are told they cannot see the photo'
   );
 
