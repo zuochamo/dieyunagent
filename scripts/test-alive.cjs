@@ -1129,6 +1129,176 @@ async function main() {
     }
   });
 
+  // ───────────────── 回归：看得见（额度 / 历史），见 docs/ALIVE-VISIBILITY-PLAN.md ─────────────────
+  ok('① 额度：达到日额度就不再醒，<=0 表示不限', () => {
+    const cfg = testCfg();
+    assert.ok(cfg.dailyTokenBudget > 0, '默认要有一条额度');
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    state.tension = state.wakeThreshold + 10;
+    state.wakeCountToday = 0;
+    assert.strictEqual(waker.evaluate({ state, cfg, nowMs: t0 }).wake, true, '没超额度时应能醒');
+
+    state.tokenToday = cfg.dailyTokenBudget;
+    const blocked = waker.evaluate({ state, cfg, nowMs: t0 });
+    assert.strictEqual(blocked.wake, false);
+    assert.strictEqual(blocked.reason, 'token-day-cap', '超额度要给可读理由');
+
+    // 显式关掉护栏（<=0）= 不限
+    const unlimited = Object.assign({}, cfg, { dailyTokenBudget: 0 });
+    assert.strictEqual(waker.evaluate({ state, cfg: unlimited, nowMs: t0 }).wake, true);
+  });
+
+  ok('① 额度：跨天由 rollDay 清零（与其它今日计数同一处）', () => {
+    const cfg = testCfg({ aliveTensionEps: 0, aliveFatigueEps: 0, aliveTensionIdleRampPerHour: 0 });
+    // dayKey 是**本地日期**：用 UTC 零点（= 本地 08:00）避开时区把两天并成一天
+    const t0 = Date.UTC(2026, 0, 1, 0, 0, 0);
+    const state = vitals.createInitialState(cfg, t0);
+    state.tokenToday = 12345;
+    state.wakeCountToday = 3;
+    vitals.stepVitals(state, { nowMs: t0 + TICK, tokens: 0, loopTension: 0, cfg, rng: seededRng(5) });
+    assert.strictEqual(state.tokenToday, 12345, '同一天不清零');
+    const nextDay = Date.UTC(2026, 0, 2, 0, 0, 0);
+    vitals.stepVitals(state, { nowMs: nextDay, tokens: 0, loopTension: 0, cfg, rng: seededRng(6) });
+    assert.strictEqual(state.tokenToday, 0, '跨天应清零');
+    assert.strictEqual(state.wakeCountToday, 0);
+  });
+
+  await okAsync('① 记账：tokenToday = 当日 WAKE_END.tokens 之和（同一个数）', async () => {
+    const root = mkTmp('tokenledger');
+    const limits = Object.assign({}, AGENT_LIMITS_DEFAULTS, { aliveTickIntervalMs: TICK });
+    let clock = Date.UTC(2026, 0, 1, 9, 0, 0);
+    const rt = createAliveRuntime({
+      userDataPath: root,
+      limits,
+      now: () => clock,
+      rng: seededRng(51),
+      turnRunner: async () => {
+        recordLlmUsage({ total_tokens: 25000 });
+        rt.applyDecision({ decision: 'DEFER', intent: '模拟' });
+      }
+    });
+    rt.start();
+    try {
+      await rt.tickOnce();
+      clock += TICK;
+      rt.getState().tension = 100;
+      await rt.tickOnce();
+      const events = rt.decisions(200);
+      const ends = events.filter((e) => e.kind === 'WAKE_END');
+      assert.strictEqual(ends.length, 1, '应醒一次');
+      const sum = ends.reduce((n, e) => n + (Number(e.tokens) || 0), 0);
+      assert.ok(sum > 0, 'WAKE_END 应带 token');
+      assert.strictEqual(rt.status().tokenToday, sum, 'tokenToday 必须等于当日 WAKE_END.tokens 之和');
+      assert.strictEqual(rt.status().dailyTokenBudget, limits.aliveDailyTokenBudget);
+    } finally {
+      rt.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await okAsync('① 超额度时只记一条 WAKE_SKIPPED（不逐跳刷屏）', async () => {
+    const root = mkTmp('tokencap');
+    const limits = Object.assign({}, AGENT_LIMITS_DEFAULTS, {
+      aliveTickIntervalMs: TICK,
+      aliveDailyTokenBudget: 1 // 立刻用光
+    });
+    let clock = Date.UTC(2026, 0, 1, 9, 0, 0);
+    const rt = createAliveRuntime({ userDataPath: root, limits, now: () => clock, rng: seededRng(52) });
+    rt.start();
+    try {
+      await rt.tickOnce();
+      rt.getState().tokenToday = 999; // 已超额
+      for (let i = 0; i < 6; i += 1) {
+        clock += TICK;
+        rt.getState().tension = 100; // 每跳都「想醒」
+        await rt.tickOnce();
+      }
+      const skipped = rt.decisions(200).filter((e) => e.kind === 'WAKE_SKIPPED' && e.reason === 'token-day-cap');
+      assert.strictEqual(skipped.length, 1, `同一上限每天只记一条，实际 ${skipped.length}`);
+      assert.ok(skipped[0].tokenToday >= 999 && skipped[0].budget > 0, '要带 tokenToday / budget 供对账');
+      assert.strictEqual(rt.decisions(200).filter((e) => e.kind === 'WAKE').length, 0, '超额度不该醒');
+    } finally {
+      rt.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  ok('② 历史：逐跳一条、窗口过滤、坏行跳过、读侧抽样有界', () => {
+    const root = mkTmp('history');
+    try {
+      const store = createAliveStore(root);
+      const base = Date.UTC(2026, 0, 1);
+      // 100 条，间隔 5 分钟
+      for (let i = 0; i < 100; i += 1) {
+        store.appendSample(
+          { ts: base + i * TICK, phase: 'LOW', tension: i, fatigue: 100 - i, tokenToday: 0, wakeCountToday: 0 },
+          { maxLines: 4000 }
+        );
+      }
+      const last = base + 99 * TICK;
+      const all = store.readSamples({ points: 240, windowMs: 24 * 3600 * 1000, nowMs: last });
+      assert.strictEqual(all.total, 100, '窗口内应有 100 条');
+      assert.strictEqual(all.samples.length, 100, '点数少于上限时原样返回');
+      assert.ok(
+        all.samples.every((s, i) => i === 0 || Number(s.ts) >= Number(all.samples[i - 1].ts)),
+        'ts 必须递增'
+      );
+
+      const thinned = store.readSamples({ points: 10, windowMs: 24 * 3600 * 1000, nowMs: last });
+      assert.ok(thinned.samples.length <= 10, `抽样后不该超过 points，实际 ${thinned.samples.length}`);
+      assert.strictEqual(thinned.samples[0].ts, base, '抽样要含首');
+      assert.strictEqual(thinned.samples[thinned.samples.length - 1].ts, last, '抽样要含尾');
+
+      // 窗口只留最近 30 分钟（≈ 7 条）
+      const narrow = store.readSamples({ points: 240, windowMs: 30 * 60 * 1000, nowMs: last });
+      assert.ok(narrow.total <= 7 && narrow.total > 0, `窗口过滤应生效，实际 ${narrow.total}`);
+
+      // 坏行跳过：不因为一行坏 JSON 让整条曲线空掉
+      fs.appendFileSync(store.historyFile, '{ not json\n', 'utf8');
+      const afterBad = store.readSamples({ points: 240, windowMs: 24 * 3600 * 1000, nowMs: last + TICK });
+      assert.ok(afterBad.total >= 100, '坏行应被跳过而不是整份读不出来');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  ok('② 历史：超过行数上限裁一半（与事件流同一套裁剪）', () => {
+    const root = mkTmp('historytrim');
+    try {
+      const store = createAliveStore(root);
+      const base = Date.UTC(2026, 0, 1);
+      for (let i = 0; i < 60; i += 1) {
+        store.appendSample({ ts: base + i * 1000, phase: 'LOW', tension: 1, fatigue: 1 }, { maxLines: 20 });
+      }
+      const lines = fs.readFileSync(store.historyFile, 'utf8').split('\n').filter(Boolean).length;
+      assert.ok(lines <= 40, `裁剪后应有界（裁一半 → ≤40），实际 ${lines}`);
+      assert.ok(lines >= 1, '不该裁空');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await okAsync('② 心跳会写采样：跑两跳后 history() 能读到', async () => {
+    const root = mkTmp('historytick');
+    const limits = Object.assign({}, AGENT_LIMITS_DEFAULTS, { aliveTickIntervalMs: TICK });
+    let clock = Date.UTC(2026, 0, 1, 9, 0, 0);
+    const rt = createAliveRuntime({ userDataPath: root, limits, now: () => clock, rng: seededRng(53) });
+    rt.start();
+    try {
+      await rt.tickOnce();
+      clock += TICK;
+      await rt.tickOnce();
+      const h = rt.history({ points: 240 });
+      assert.ok(h.samples.length >= 2, `每跳一条采样，实际 ${h.samples.length}`);
+      assert.strictEqual(h.samples[h.samples.length - 1].phase, rt.status().phase, '采样里的相位要与状态一致');
+      assert.ok(typeof h.samples[0].ts === 'number' && h.windowMs > 0);
+    } finally {
+      rt.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   process.stdout.write(`\n[test-alive] ${checks - failures}/${checks} 通过\n`);
   if (failures) {
     process.stdout.write(`[test-alive] ${failures} 项失败\n`);

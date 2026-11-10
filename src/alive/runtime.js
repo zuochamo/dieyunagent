@@ -65,6 +65,11 @@ function resolveAliveConfig(limits) {
     fatigueEps: Math.max(0, num(pick('aliveFatigueEps'), D.aliveFatigueEps)),
     voiceMaxPerDay: Math.max(0, num(pick('aliveVoiceMaxPerDay'), D.aliveVoiceMaxPerDay)),
     voiceMinIntervalMs: Math.max(0, num(pick('aliveVoiceMinIntervalMs'), D.aliveVoiceMinIntervalMs)),
+    /** 每日 token 额度（成本护栏；`<=0` = 不限） */
+    dailyTokenBudget: Math.max(0, num(pick('aliveDailyTokenBudget'), D.aliveDailyTokenBudget)),
+    /** 体征历史的物理行数上限与默认窗口（`history.jsonl`） */
+    historyMaxLines: Math.max(50, num(pick('aliveHistoryMaxLines'), D.aliveHistoryMaxLines)),
+    historyWindowMs: Math.max(60 * 1000, num(pick('aliveHistoryWindowMs'), D.aliveHistoryWindowMs)),
     /** 决策日志保留条数（`decide.js` 用；数字只在 agent-limits） */
     decisionsKeep: Math.max(1, num(pick('aliveDecisionsKeep'), D.aliveDecisionsKeep)),
     intentsKeep: Math.max(1, num(pick('aliveIntentsKeep'), D.aliveIntentsKeep)),
@@ -85,9 +90,20 @@ function resolveAliveConfig(limits) {
   return cfg;
 }
 
+/** 一条体征采样（`history.jsonl` 的一行）：面板曲线的唯一数据形状 */
+function sampleOf(state, nowMs) {
+  return {
+    ts: Number(nowMs) || Date.now(),
+    phase: String(state.phase || ''),
+    tension: Number(Number(state.tension || 0).toFixed(2)),
+    fatigue: Number(Number(state.fatigue || 0).toFixed(2)),
+    tokenToday: Number(state.tokenToday || 0),
+    wakeCountToday: Number(state.wakeCountToday || 0)
+  };
+}
+
 /** usage → token 数（形状归一还在 `llm-usage-stats`，这里只兜住缺字段） */
-function usageTokens(usage) {
-  if (!usage || typeof usage !== 'object') return 0;
+function usageTokens(usage) {  if (!usage || typeof usage !== 'object') return 0;
   const total = Number(usage.total_tokens != null ? usage.total_tokens : usage.totalTokens);
   if (Number.isFinite(total) && total > 0) return total;
   const prompt = Number(usage.prompt_tokens != null ? usage.prompt_tokens : usage.input_tokens) || 0;
@@ -120,6 +136,8 @@ function createAliveRuntime(opts) {
   let wakeTokens = 0;
   /** 这一轮唤醒模型有没有通过 `alive_decide` 表态（false = 记一条 `WAKE_NO_DECISION`） */
   let decisionThisWake = false;
+  /** 上一次记过「被上限拦住」的键（`dayKey:reason`）：同一上限每天只记一条事件 */
+  let lastCapKey = '';
   /**
    * 停机代次：stop()/reset() 各 +1。
    *
@@ -220,6 +238,8 @@ function createAliveRuntime(opts) {
       const durationMs = Math.max(0, now() - nowMs);
       state.lastWakeTokens = wakeTokens;
       state.lastWakeDurationMs = durationMs;
+      // 成本护栏的记账与 WAKE_END.tokens 是**同一个数**（不另算一遍）；跨天由 tick 的 rollDay 归零
+      state.tokenToday = Number(state.tokenToday || 0) + wakeTokens;
       pushEvent({
         kind: 'WAKE_END',
         phase: state.phase,
@@ -273,8 +293,31 @@ function createAliveRuntime(opts) {
         // 唤醒轮内部会再次写盘；先落一次「已唤醒」再跑，避免异常时丢掉这次唤醒
         await runWakeTurn();
       } else {
+        // 只有**被上限拦住**才记事件（'below-threshold' 是常态，记下来就变成逐跳写 TICK 了；
+        // 'cooldown' / 'compressing' 从 lastWakeAt 与相位上本来就看得出来）。
+        // 同一类型的上限每天只记一次：否则超额度后每跳一行，把决策日志挤干净。
+        const capKey = decision.reason === 'token-day-cap' || decision.reason === 'daily-cap'
+          ? `${st.dayKey}:${decision.reason}`
+          : '';
+        if (capKey && capKey !== lastCapKey) {
+          lastCapKey = capKey;
+          const evt = {
+            kind: 'WAKE_SKIPPED',
+            reason: decision.reason,
+            tension: Number(Number(st.tension).toFixed(1)),
+            threshold: Number(Number(st.wakeThreshold).toFixed(1))
+          };
+          if (decision.reason === 'token-day-cap') {
+            evt.tokenToday = Number(st.tokenToday || 0);
+            evt.budget = cfg.dailyTokenBudget;
+          }
+          pushEvent(evt);
+        }
         store.write(st);
       }
+      // 体征采样（`history.jsonl`）：每跳一条，供面板画曲线。
+      // 心跳本身不调模型，一行 ~90 字节；裁剪与事件流共用同一套 trimJsonl。
+      store.appendSample(sampleOf(st, nowMs), { maxLines: cfg.historyMaxLines });
       return {
         skipped: null,
         wake: decision.wake,
@@ -428,6 +471,9 @@ function createAliveRuntime(opts) {
       tension: st.tension,
       wakeThreshold: st.wakeThreshold,
       fatigue: st.fatigue,
+      /** 今日唤醒轮花掉的 token 与额度（成本护栏的可读回执） */
+      tokenToday: Number(st.tokenToday || 0),
+      dailyTokenBudget: cfg.dailyTokenBudget,
       /** 疲劳的解释线：到这里就进压缩相位（页面据此给出可读解释，而不是两个矛盾的数字） */
       fatigueHigh: cfg.phaseFatigueHigh,
       /** 静息回落速度（每小时）：解释"为什么等一会儿就能再醒" */
@@ -455,6 +501,19 @@ function createAliveRuntime(opts) {
 
   function decisions(limit) {
     return store.readEvents(limit || 30);
+  }
+
+  /**
+   * 体征历史（面板曲线）。
+   *
+   * 数据来源只有 `history.jsonl`（每跳一条、只追加），抽样在**读侧**做：
+   * 面板要 ~240 个点，而文件里可能有几千行 —— 把降采样放读侧，写侧就能保持纯 append。
+   */
+  function history(opts) {
+    const o = opts || {};
+    const windowMs = Math.max(60 * 1000, Number(o.windowMs) || cfg.historyWindowMs);
+    const res = store.readSamples({ windowMs, points: o.points, nowMs: now() });
+    return { samples: res.samples, total: res.total, windowMs };
   }
 
   /** 彻底重置（设置页「清除体征状态」：等同让它重新出生，历史事件一并清空） */
@@ -494,6 +553,7 @@ function createAliveRuntime(opts) {
     senses,
     status,
     decisions,
+    history,
     getState: () => state,
     getTickIntervalMs: () => cfg.tickIntervalMs,
     isRunning: () => !!timer

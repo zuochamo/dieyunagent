@@ -70,6 +70,8 @@ function createInitialState(cfg, nowMs) {
     /** 当日主动出声/收音次数与上一次时间（频率上限用；跨天重置次数） */
     voiceCountToday: 0,
     lastVoiceAt: 0,
+    /** 当日唤醒轮自己烧掉的 token（成本护栏用；跨天重置） */
+    tokenToday: 0,
     /** 上一次唤醒的成本回执（由 runtime 写：token 与耗时）。页面对账用，不参与漂移 */
     lastWakeTokens: 0,
     lastWakeDurationMs: 0,
@@ -88,6 +90,7 @@ function rollDay(state, nowMs) {
   state.wakeCountToday = 0;
   state.refuseToday = 0;
   state.voiceCountToday = 0;
+  state.tokenToday = 0;
   return true;
 }
 

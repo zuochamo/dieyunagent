@@ -32,10 +32,53 @@ function registerAliveIpc(ctx) {
 
   ipcMain.handle('alive:status', () => withRuntime((alive) => ({ ok: true, status: alive.status() })));
 
+  /** 决策与感官事件（页面只读；`intent` 不在其中） */
   ipcMain.handle('alive:decisions', (_evt, payload = {}) =>
     withRuntime((alive) => {
       const limit = Math.min(200, Math.max(1, Number(payload && payload.limit) || 30));
       return { ok: true, events: alive.runtime.decisions(limit) };
+    })
+  );
+
+  /** 体征历史（曲线）：窗口内等距抽样后的采样点 + 总行数 */
+  ipcMain.handle('alive:history', (_evt, payload = {}) =>
+    withRuntime((alive) => {
+      const p = payload && typeof payload === 'object' ? payload : {};
+      const windowMs = Number(p.windowMs) || 0;
+      const points = Math.min(2000, Math.max(2, Number(p.points) || 240));
+      return { ok: true, ...alive.runtime.history({ windowMs, points }) };
+    })
+  );
+
+  /**
+   * 主界面徽标用的极轻查询：只读 state.json + 事件流尾部一行。
+   *
+   * 为什么不复用 `alive:status`：status 会读模型设置与权限文件（为了感官自检），
+   * 那是"打开设置页时才需要"的重量；徽标是常驻 30s 轮询，必须便宜。
+   */
+  ipcMain.handle('alive:badge', () =>
+    withRuntime((alive) => {
+      const st = alive.runtime.status();
+      if (!st || st.exists === false) return { ok: true, enabled: false, recent: false };
+      const events = alive.runtime.decisions(5);
+      const last = events.length ? events[events.length - 1] : null;
+      const lastTs = Number((last && last.ts) || 0);
+      const notable = new Set(['WAKE', 'DECISION', 'SPEAK', 'EYE']);
+      const recentAt = events
+        .filter((e) => e && notable.has(String(e.kind)))
+        .map((e) => Number(e.ts) || 0)
+        .sort((a, b) => b - a)[0] || 0;
+      return {
+        ok: true,
+        enabled: st.enabled === true,
+        running: st.running === true,
+        phase: st.phase || '',
+        wakeCountToday: Number(st.wakeCountToday) || 0,
+        recent: !!recentAt && Date.now() - recentAt <= 60 * 60 * 1000,
+        recentAt,
+        lastKind: last ? String(last.kind || '') : '',
+        lastTs
+      };
     })
   );
 

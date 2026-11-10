@@ -450,6 +450,22 @@ const AGENT_LIMITS_DEFAULTS = {
   /** 两次自发唤醒的最小间隔与每日上限（防抖 + 防烧钱） */
   aliveWakeMinIntervalMs: 10 * 60 * 1000,
   aliveWakeMaxPerDay: 40,
+  /**
+   * 每日 token 额度（**成本护栏**，`<=0` = 不限）。
+   *
+   * 为什么「次数上限」之外还要这个：一次醒来烧多少，跟次数没有固定换算 —— 一次唤醒轮
+   * 可能 8k（只做一次决策），也可能 200k（全量系统提示 + 工具 + 回看历史）。用次数表达
+   * 钱必然失真，所以另给一条**只管钱**的机械上限：超了就不醒，理由写 `token-day-cap`。
+   *
+   * 标定：一次唤醒轮 ≈ 40k（与 `aliveFatiguePerKToken` 同一口径）→ 40 万 ≈ 10 次。
+   * 次数上限（40/天）远高于此，**额度会先触发，这是刻意的**：次数防抖、额度防烧钱。
+   * 不做退避 / 动态降频 / 分时段配额 —— 那些是拿节律换预算，且会自己长出一套策略层。
+   */
+  aliveDailyTokenBudget: 400000,
+  /** 体征历史（`alive/history.jsonl`）的物理行数上限：超了裁一半，约 14 天的拍数（~350KB） */
+  aliveHistoryMaxLines: 4000,
+  /** 体征历史的默认观察窗口（面板曲线的横轴） */
+  aliveHistoryWindowMs: 7 * 24 * 60 * 60 * 1000,
   /** 张力：均值回复中心 / 增益 / 感觉剥夺保护 ε / 上限 */
   aliveTensionMean: 20,
   aliveTensionGainPerHour: 0.35,

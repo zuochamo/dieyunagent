@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('diecloud', {
   // 生命感（设置 → 生命）：只有一个开关 + 只读体征 + 决策日志；判定全在 Main
   aliveStatus: () => ipcRenderer.invoke('alive:status'),
   aliveDecisions: (payload) => ipcRenderer.invoke('alive:decisions', payload || {}),
+  aliveHistory: (payload) => ipcRenderer.invoke('alive:history', payload || {}),
+  aliveBadge: () => ipcRenderer.invoke('alive:badge'),
   aliveSetEnabled: (payload) => ipcRenderer.invoke('alive:set-enabled', payload || {}),
   aliveReset: () => ipcRenderer.invoke('alive:reset'),
   aliveSetSense: (payload) => ipcRenderer.invoke('alive:set-sense', payload || {}),

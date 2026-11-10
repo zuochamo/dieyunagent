@@ -19,6 +19,7 @@ const path = require('path');
 const ALIVE_DIR_NAME = 'alive';
 const STATE_FILE_NAME = 'state.json';
 const EVENTS_FILE_NAME = 'events.jsonl';
+const HISTORY_FILE_NAME = 'history.jsonl';
 const SETTINGS_FILE_NAME = 'settings.json';
 /**
  * events.jsonl 的**物理**上限：超过就裁剪到一半。
@@ -39,6 +40,7 @@ function createAliveStore(userDataPath) {
   const dir = aliveRootDir(userDataPath);
   const stateFile = path.join(dir, STATE_FILE_NAME);
   const eventsFile = path.join(dir, EVENTS_FILE_NAME);
+  const historyFile = path.join(dir, HISTORY_FILE_NAME);
 
   function ensureDir() {
     fs.mkdirSync(dir, { recursive: true });
@@ -81,7 +83,7 @@ function createAliveStore(userDataPath) {
 
   /** 彻底清空（设置页「关闭生命」= 停表；这是运维动作，不是「让它睡一会」） */
   function clear() {
-    for (const f of [stateFile, eventsFile]) {
+    for (const f of [stateFile, eventsFile, historyFile]) {
       try {
         fs.unlinkSync(f);
       } catch {
@@ -137,6 +139,25 @@ function createAliveStore(userDataPath) {
     return normalized;
   }
 
+  /**
+   * JSONL 的裁剪：超过 `maxLines` 就**留后半**（一次裁一半，不给每行都触发一次重写）。
+   *
+   * 事件流与体征历史用的是同一个实现 —— 两份裁剪逻辑迟早会在「裁多少 / 裁完写什么」上分叉。
+   */
+  function trimJsonl(file, maxLines) {
+    try {
+      const raw = fs.readFileSync(file, 'utf8');
+      const lines = raw.split('\n').filter((l) => l.trim());
+      if (lines.length <= maxLines) return;
+      const kept = lines.slice(Math.floor(lines.length / 2));
+      const tmp = `${file}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, `${kept.join('\n')}\n`, 'utf8');
+      fs.renameSync(tmp, file);
+    } catch {
+      // ignore
+    }
+  }
+
   function appendEvent(evt) {
     ensureDir();
     try {
@@ -144,21 +165,59 @@ function createAliveStore(userDataPath) {
     } catch {
       // 事件落盘失败不能打断心跳
     }
-    trimEventsFile();
+    trimJsonl(eventsFile, EVENTS_FILE_MAX_LINES);
   }
 
-  function trimEventsFile() {
+  /**
+   * 追加一条体征采样（`history.jsonl`，只追加）。
+   *
+   * 为什么每跳一条、不在写侧按时间桶合并：append-only 文件里"改最后一行"要么整份重写、
+   * 要么维护偏移量 —— 两者都比多存几十 KB 贵。降采样放在**读侧**（面板只要 ~240 个点）。
+   */
+  function appendSample(sample, opts) {
+    ensureDir();
     try {
-      const raw = fs.readFileSync(eventsFile, 'utf8');
-      const lines = raw.split('\n').filter((l) => l.trim());
-      if (lines.length <= EVENTS_FILE_MAX_LINES) return;
-      const kept = lines.slice(Math.floor(lines.length / 2));
-      const tmp = `${eventsFile}.tmp-${process.pid}`;
-      fs.writeFileSync(tmp, `${kept.join('\n')}\n`, 'utf8');
-      fs.renameSync(tmp, eventsFile);
+      fs.appendFileSync(historyFile, `${JSON.stringify(sample)}\n`, 'utf8');
     } catch {
-      // ignore
+      return false;
     }
+    trimJsonl(historyFile, Math.max(50, Number(opts && opts.maxLines) || 4000));
+    return true;
+  }
+
+  /**
+   * 读体征历史：窗口内、按 `points` 等距抽样（含首尾），坏行跳过。
+   * @returns {{ samples: object[], total: number }}
+   */
+  function readSamples(opts) {
+    const o = opts || {};
+    const windowMs = Math.max(60 * 1000, Number(o.windowMs) || 7 * 24 * 3600 * 1000);
+    const points = Math.max(2, Math.min(2000, Number(o.points) || 240));
+    const from = Number(o.nowMs) - windowMs;
+    let raw = '';
+    try {
+      raw = fs.readFileSync(historyFile, 'utf8');
+    } catch {
+      return { samples: [], total: 0 };
+    }
+    const rows = [];
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const v = JSON.parse(line);
+        if (v && Number(v.ts) >= from) rows.push(v);
+      } catch {
+        // 坏行跳过：一行坏 JSON 不该让整条曲线空掉
+      }
+    }
+    rows.sort((a, b) => Number(a.ts) - Number(b.ts));
+    const total = rows.length;
+    if (total <= points) return { samples: rows, total };
+    const out = [];
+    for (let i = 0; i < points; i += 1) {
+      out.push(rows[Math.round((i * (total - 1)) / (points - 1))]);
+    }
+    return { samples: out, total };
   }
 
   /** 最近 N 条事件（从文件尾部读，不整份加载） */
@@ -186,6 +245,7 @@ function createAliveStore(userDataPath) {
     dir,
     stateFile,
     eventsFile,
+    historyFile,
     settingsFile,
     ensureDir,
     exists,
@@ -194,6 +254,8 @@ function createAliveStore(userDataPath) {
     clear,
     appendEvent,
     readEvents,
+    appendSample,
+    readSamples,
     readSettings,
     writeSettings
   };
