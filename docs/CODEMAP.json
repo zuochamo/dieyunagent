@@ -144,6 +144,7 @@
         "compaction-main",
         "model-runtime-by-tier（编码参数按档 → Main 生效值的唯一入口）",
         "request-snapshot",
+        "desktop-camera-source（本机摄像头取帧：ffmpeg 单一出口）",
         "rust runners"
       ],
       "tests": [
@@ -152,6 +153,7 @@
         "test:unit",
         "test:tool-harness",
         "test:tool-gate",
+        "test:desktop-camera",
         "test:local-gateway-smoke",
         "test:planner-parallel",
         "test:rust-loop-runner",
@@ -407,7 +409,9 @@
         "来信落会话 + 跳数与小时预算约束下的自动跑一轮",
         "会话 ↔ 对端绑定（在这个会话里打字就是发给它）",
         "建议式文件/任务租约（advisory，不阻止写入）",
-        "peer_list / peer_send / peer_claim 三个工具"
+        "peer_list / peer_send / peer_claim 三个工具（桌面聊天与 Main 侧一档都注入）",
+        "装配唯一来源 src/peer/boot.js：网络门 + 回合回传线，桌面与 headless 共用",
+        "动作唯一来源 src/peer/actions.js：桌面 IPC 与 headless 网页 /ws 共用"
       ],
       "tests": [
         "test:peer",
@@ -415,7 +419,8 @@
         "check:renderer"
       ],
       "docs": [
-        "docs/PEER-MESH-PLAN.md"
+        "docs/PEER-MESH-PLAN.md",
+        "docs/BOT-ROOM-PLAN.md"
       ]
     },
     {
@@ -556,6 +561,7 @@
       "id": "headless",
       "paths": [
         "src/headless/",
+        "src/model-settings-apply.js",
         "src/agent/main-turn-runner.js",
         "scripts/pack-headless.cjs",
         "scripts/lib/node-linux-runtime.cjs",
@@ -568,6 +574,7 @@
         "无界面入口（终端 REPL / 一次性 run / 浏览器 Web / self-test）",
         "Main 侧跑一轮的唯一实现（频道 / 定时计划 / headless 共用）",
         "浏览器里的桌面界面（`--web` 的 `/app/`）：preload 替身 + 静态服务 + `/gateway` 与 `/llm` 同源转发，轮次仍由同一份 runRustAgentLoop 在服务器上跑",
+        "网页端的模型设置写入（`desktop.fetch_models` / `desktop.save_model_settings`）：检测出网、落盘 model-settings.json，与桌面 IPC 同一份实现（openai-models / model-settings-apply）",
         "safeStorage 的纯 Node 替身（DIEYUN_SECRET_KEY_FILE + AES-256-GCM）",
         "Linux 分发（tgz + deb：内置 node + core + 纯 JS 依赖闭包；权限位可控的 tar、打包期冷启动闸门）、systemd 单元，以及**内网 apt 源**（Packages/Packages.gz/Release + 索引自检；更新由 apt 承担，不做自更新客户端）"
       ],
@@ -579,9 +586,73 @@
         "docs/HEADLESS-MODE-PLAN.md",
         "docs/HEADLESS.md"
       ]
+    },
+    {
+      "id": "alive",
+      "paths": [
+        "src/alive/store.js",
+        "src/alive/vitals.js",
+        "src/alive/tension.js",
+        "src/alive/waker.js",
+        "src/alive/decide.js",
+        "src/alive/runtime.js",
+        "src/main/alive-boot.js",
+        "src/main/ipc/alive.js",
+        "src/renderer/renderer-alive.js",
+        "src/alive/note.js",
+        "src/alive/voice.js"
+      ],
+      "owns": [
+        "生命感运行时（心跳/四相位/张力/阈值漂移/自发唤醒）",
+        "决策权在模型（alive_decide）",
+        "感官：抽屉（alive_note）/ 眼睛（camera_look）/ 嘴与耳（alive_speak、alive_listen）",
+        "设置 → 拟态 → 生命（总开关 + 感官开关 + 只读体征 + 决策日志）"
+      ],
+      "tests": [
+        "test:alive",
+        "test:tool-gate",
+        "test:session-context"
+      ],
+      "docs": [
+        "docs/ALIVE.md"
+      ]
     }
   ],
   "pathRules": [
+    {
+      "prefix": "src/alive/",
+      "tests": [
+        "test:alive",
+        "test:agent-limits"
+      ]
+    },
+    {
+      "prefix": "src/main/alive-boot.js",
+      "tests": [
+        "test:alive",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/main/ipc/alive.js",
+      "tests": [
+        "test:alive",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-alive.js",
+      "tests": [
+        "check:renderer",
+        "test:alive"
+      ]
+    },
+    {
+      "prefix": "scripts/test-alive.cjs",
+      "tests": [
+        "test:alive"
+      ]
+    },
     {
       "prefix": "crates/dieyun-core/src/agent/",
       "tests": [
@@ -617,7 +688,8 @@
     {
       "prefix": "crates/dieyun-core/src/embedding/",
       "tests": [
-        "cargo:test"
+        "cargo:test",
+        "test:embedding-budget"
       ]
     },
     {
@@ -1703,6 +1775,12 @@
       "tests": [
         "test:unit"
       ]
+    },
+    {
+      "prefix": "src/codebase/embedding-client.js",
+      "tests": [
+        "test:embedding-budget"
+      ]
     }
   ],
   "suites": {
@@ -1710,7 +1788,8 @@
       "test:agent-limits",
       "test:task-tier",
       "test:unit",
-      "test:local-gateway-smoke"
+      "test:local-gateway-smoke",
+      "test:alive"
     ],
     "agent": [
       "test:agent-limits",
@@ -1744,6 +1823,7 @@
       "test:request-snapshot",
       "test:agent-system-prompt",
       "test:system-prompt-prep",
+      "test:embedding-budget",
       "test:knowledge-maintainer",
       "test:llm-tool-call-fallback",
       "test:monitor-outbox",
@@ -1762,7 +1842,8 @@
       "check:js",
       "check:renderer",
       "test:headless-desktop-turn",
-      "test:headless-desktop-ui"
+      "test:headless-desktop-ui",
+      "test:alive"
     ],
     "agent-full": [
       "test:agent-limits",
@@ -1816,7 +1897,8 @@
       "check:js",
       "check:renderer",
       "test:headless-desktop-turn",
-      "test:headless-desktop-ui"
+      "test:headless-desktop-ui",
+      "test:alive"
     ]
   }
 }

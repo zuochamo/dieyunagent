@@ -12,7 +12,7 @@
 
 | # | 结论 | 证据强度 | 影响面 |
 |---|------|----------|--------|
-| 1 | **Main 主线程在同步序列化并落盘 250MB 级的 undo 快照**（`turn-undo-store.writeSessionSync`）。一次 0.4–0.9s，400ms 去抖 ⇒ agent 改文件的整段时间里主线程基本被占满 | [确定] 文件账 + 本机实测 | 所有经主进程的 RPC/IPC：流式事件转发、窗口、工作区、产物、终端 |
+| 1 | **Main 主线程在同步序列化并落盘 250MB 级的 undo 快照**（`turn-undo-store.writeSessionSync`）。一次 0.4–0.9s，400ms 去抖 ⇒ agent 改文件的整段时间里主线程基本被占满 —— **已修复，见 §七（落盘 400–900ms → 14ms，单会话 305MB → 4.4MB）** | [确定] 文件账 + 本机实测 | 所有经主进程的 RPC/IPC：流式事件转发、窗口、工作区、产物、终端 |
 | 2 | **Renderer 有 0.5–3.0s 的长任务**（56 条 freeze 落盘，90 个样本，中位数 1252ms），并伴随 DOM 3.3k→42.6k、渲染进程内存 181→897MB | [实测存在·归因待钉死] | 点哪都「钝一下」的直接感受 |
 | 3 | **core 读池饥饿 + core 整体停顿**：38 条 `RPC_SLOW`，KV 级读（`session_goal_get`）排到 2.1–3.6s，`core.ping` 出现 7.7s | [确定] 日志 | 切会话 / 目标条 / 历史列表「点了没反应」 |
 | 4 | 附带：`undo-sessions/` 17.0GB 无任何保留策略；渲染进程 11-04/11-05 被 kill 24 次 | [确定] | 磁盘、稳定性 |
@@ -114,7 +114,7 @@ attribution: "self"/"unknown"（探针不带面包屑，归因无效）
 
 ## 四、整改建议（减法优先）
 
-### P0 — 先把主线程上的 250MB 同步写拿掉（收益最大、根因明确）
+### P0 — 先把主线程上的 250MB 同步写拿掉（收益最大、根因明确）✅ 已实施，见 §七
 
 1. **`persistSession` 不要整份同步写**：把落盘从主线程挪走（`fs/promises` 写 + 只写变化的那一份；或一个专门的写线程）。这是 IO 位置错误，不是"兜底"。
 2. **`loadSessionSync` → async**：`sessionState()` 首次加载不再 `readFileSync` + `JSON.parse` 250MB。
@@ -164,3 +164,58 @@ node _tmp\memdb-probe.cjs "$env:APPDATA\dieyunagent\diecloud-memory.sqlite"
 
 - renderer 那 90 个长任务**具体**落在哪个函数：没有面包屑，也没跑过 DevTools Performance。上面的三个嫌疑是静态阅读排序，不是结论。
 - 主线程 0.4–0.9s 的推算基于同尺寸合成 payload 的线性外推；真实内容转义更多、且叠加 Defender 扫描，只会更慢，不会更快。要精确数字，需在主进程加一个 event-loop delay 采样（`perf_hooks.monitorEventLoopDelay`，节流落盘），跑一天即可，也能顺带证明"卡顿时刻主进程是否真的被占住"。
+
+---
+
+## 七、已实施：undo 快照（P0-1 ~ P0-3）
+
+### 7.1 改了什么
+
+| 文件 | 改动 |
+|------|------|
+| `src/undo/turn-undo-store.js` | 落盘格式改为**元数据 + 内容块**：`before` 按 sha256 前 16 字节去重后单独落 `undo-sessions/<sid>.blobs/<ref>`，元数据只留 32 hex 引用；写盘全走 `fs/promises` 且每会话串行；写完元数据顺手删掉没人引用的块（不再有孤儿）；删会话时连块目录一起删 |
+| `src/undo/turn-undo-service.js` | `cloneFilesMap` 由 `JSON.parse(JSON.stringify())` 改**条目浅拷贝**（`before` 是不可变字符串，深拷贝只是白复制：实测一个会话 171.7MB 重复原文）；`persistSession` 去掉同步写；新增**内容预算** `UNDO_CONTENT_BUDGET_CHARS = 32M 字符` 与 `enforceContentBudget`；`planRollback` / `planRollbackBatch` 对「内容已丢弃」明确报错 |
+| `src/renderer/renderer-chat-history.js` | `purgeSessionRecords` 补上 `clearSessionUndo(sid)` —— 删会话时连带删撤回快照（这是 17GB 死账的另一个来源） |
+| `test/unit/turn-undo-store.test.cjs` | 新增 8 条单测：去重/元数据不含原文/读回一字不差/孤儿块回收/v1 兼容升级/预算只丢「真能省下」的内容/最新一轮受保护 |
+
+### 7.2 为什么是这个改法（为什么不是「加大去抖」「改异步就行」）
+
+- **只改异步没用**：`JSON.stringify(250MB)` 本身就是 ~170ms 的主线程 CPU，异步 IO 只是把 226ms 的写盘挪走。
+- **只加去抖/降频没用**：那是拿功能换时间（checkpoint 变稀），下次会话更长时又顶回来。
+- 真正的根因是**一份数据被存了上百遍**：每个 checkpoint 把整个跟踪集深拷贝一次，同一份源码在内存里 10858 份、在盘上一条 250MB 的单体 JSON。所以改法是让「内容」在内存和盘上都只存在一份，元数据退化成引用表。
+
+### 7.3 实测前后（拿线上那份真实会话文件跑，`_tmp/undo-migrate-bench.cjs`）
+
+```
+原始单体文件            304.7 MB
+老格式读取(读+parse)     1017 ms
+→ 迁移首次写(写块+元数据)  508 ms     一次性
+→ 稳态写(内容没变)          14 ms     ← 原来每次 400~900ms
+元数据                    1.24 MB
+内容块                    155 个 / 3.13 MB
+磁盘合计                  4.37 MB     （69.7x）
+新格式读取                 19 ms      ← 原来 1017ms
+内容一致性                 逐字节相同（contentMatch: true）
+```
+
+### 7.4 语义变化与边界（都要知道）
+
+- **内容预算**：单会话内容超 32M 字符时，按「最老回合 → 更新回合」淘汰；**最新一轮的 `record.files` 永不丢**（能整轮撤回的就是它）。被淘汰的 checkpoint/回合不会静默变成「恢复成删文件」，而是明确报「内容已按体积预算丢弃」。
+- **只丢真能省下的**：内容若被更新的回合共用（内存里本来就是同一个字符串、盘上是同一个块），丢老回合一份省不下任何东西，直接跳过不丢。
+- **崩溃窗口**：`immediate` 写从「同步落盘」变成「立刻异步落盘」，进程被强杀时最多丢最后一次 checkpoint（撤回能力是会话内功能，可接受）。
+- **迁移时机**：老格式文件在会话被写入时自动升级成新格式，不会主动扫盘重写。
+
+### 7.5 验证
+
+```
+npx vitest run          → 201 files / 1938 tests 全通过（含新增 8 条）
+npm test                → unit + local-gateway-smoke ALL OK
+npm run check:renderer  → OK（globals / critical / namespace 全过）
+npx tsc -p tsconfig.check.json → 0 error
+```
+
+### 7.6 存量清理（已执行）
+
+按「保留最近 30 天」清了一档：删掉 231 个 30 天前的会话快照，`undo-sessions/` **16.82GB → 4.35GB**（回收 12.5GB）。
+剩下的 158 个文件里，还在用的会话会在下次写入时自动升级成新格式（单会话从数百 MB 降到 MB 级），不再打开的旧文件可以随时按同样方式再清。
+

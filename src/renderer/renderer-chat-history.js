@@ -1034,6 +1034,9 @@ async function purgeSessionRecords(sessionId) {
   }
   if (typeof cleanupSessionViewState === 'function') cleanupSessionViewState(sid);
   if (typeof cleanupSessionArtifacts === 'function') cleanupSessionArtifacts(sid);
+  // 撤回快照是整份落盘（undo-sessions/<sid>.json + 内容块目录）：会话删了还留着就是死账，
+  // 实测本机攒到 17GB / 389 个文件（issue/2026-11-07-smoothness-investigation.md）。
+  if (typeof clearSessionUndo === 'function') clearSessionUndo(sid);
   if (window.diecloud?.terminalStop) {
     await window.diecloud.terminalStop({ sessionId: sid }).catch(() => {});
   }

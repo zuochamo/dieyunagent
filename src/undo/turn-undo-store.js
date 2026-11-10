@@ -486,9 +486,5 @@ function createTurnUndoStore(userDataPath) {
 }
 
 module.exports = {
-  createTurnUndoStore,
-  contentRef,
-  REF_HEX_LEN,
-  STORE_VERSION,
-  SAVE_DEBOUNCE_MS
+  createTurnUndoStore
 };

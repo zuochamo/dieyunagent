@@ -44,6 +44,7 @@ node .agents/skills/full-test/scripts/run-batch.cjs check:js lint:agent check:co
 - 批 D（sidecar/Rust 链路 + 新模块）：`test:local-gateway-smoke test:workspace-remote-runtime test:core-bridge test:rust-loop-runner test:rust-planner-pipeline test:rust-agent-loop-smoke test:rust-planner-smoke test:lsp test:peer test:browser-smoke test:headless test:linux-deb-install`
 
 批 C 自 2026-11-04 起补入：`test:mobile-camera test:session-handoff test:knowledge-maintainer test:project-memory-file`；批 A 补入 `test:tool-harness`；批 B 补入 `test:shortcuts`；静态批补入 `verify:rpc-catalog`。
+2026-11-10 复核实测新增的可执行套件（共 84 个 npm 脚本，已全量跑过一遍，建议按同批位置归入）：批 A 加 `test:sandbox-approvals-late test:default-workspace-gc test:embedding-budget test:request-snapshot`；批 B 加 `test:llm-reconnect-retry`；批 C 加 `test:desktop-camera test:alive test:peer-mesh test:peer-tools test:headless-desktop-ui test:headless-desktop-turn`；批 D（产物校验）建议直接用：`verify:asar verify:headless-pack verify:headless-deb verify:headless-apt verify:mcp-bundled verify:bundled-skills verify:remote-pack`（0.1.78 产物实测全过）。
 
 无界面 / 分发链路另有一档（产物已存在时可直接验，2026-11-04 实测三项全过）：`verify:headless-pack verify:headless-deb verify:headless-apt`（读 `dist/*.tgz|*.deb` 与 `release/headless-apt/pool`；无产物时先 `npm run build:headless`）。
 
@@ -84,7 +85,7 @@ node .agents/skills/full-test/scripts/run-batch.cjs [--timeout MS] suite1 suite2
 4. 环境前提备忘：宿主全局 gitconfig 已于 2026-10-24 配好 user.name/email（此前缺失曾致 test:scm 场景 5 失败）。test:scm 已改为临时仓库自配身份（scripts/test-scm-service.cjs），不依赖宿主配置，换了机器也稳；其他新建临时 git 仓库做提交的测试若报 GIT_IDENTITY_MISSING，同法自配。
 5. **（已失效，2026-11-04 复测全绿）test:unit 的 `lsp-watch-batch.test.cjs › 排空时按单批上限切片`（2026-11-03 立案）**：提交 6a0b156「watch 空批次心跳降级到 debug 通道」之后 test:unit 全绿（196 files / 1890 passed / 2 skipped），按规则移出基线，签名再现再重新立案。以下为当时记录：签名 = `Error: Test timed out in 5000ms`（用例内 `waitUntil(..., 8000)` > vitest 默认 5000，所以报超时而非断言失败），伴随 `Test Files 1 failed | 176 passed`、`Tests 1 failed | 1741 passed`。根因：`src/lsp/diagnostics-service.js` 把 drain 汇总行改成 `withDiagnostics > 0 || failed ? log : logDebug`，而测试只注入 `log`（空批次心跳走 `logDebug`）→ 汇总行永远进不了 `logs`。功能本身正常（30 个假文件 866ms 排空完）。修法：测试改为收集 `logDebug` 并给用例显式超时，或撤回降级。**签名一致时按已知问题记，但它是真实待修项，别当环境噪声放过。**
 6. **verify:index-timing-local 的 C 断言（2026-11-03 立案，既有口径缺陷）**：签名 = 仅 `✗ C 同库重建应全部复用（新算 0）`，C 行 `复用 N / 新算 N`，其余 7 条断言全过，端点调用数不增加。根因：`index/mod.rs` 的 `vectors_embedded = COALESCE(?10, workspaces.vectors_embedded)` 只在有 miss 时写值，同库 force 重建全部命中缓存时写 `None` → 保留上一轮数字。core 自己的单测用新库（旧值本就 0）测不出。判定时别误判为「真在重算」。另：`verify:asar` 报 `renderer bundle is older than index.html` 时先 `npm run build:renderer`（产物过期，非回归）；`verify:remote-pack` 报 `缺少 X` 时同理先重跑打包。
-7. **缺少远端即必 FAIL 的两项验收器（2026-11-05 立案）**：`verify:remote-agent-socket` / `verify:remote-agent-fs` 签名 = `需要 DY_SSH_HOST 与 DY_WS_BASE`（exit 2，本机无可用远端时必现）。这是环境前提而非回归：要么按变量接一台真远端再跑，要么在报告里注明「未覆盖」，不要当新 FAIL 排查。同类：`verify:index-timing-ssh` 需真远端。
+7. **缺少远端 / 会话上下文即必 FAIL 的验收器（2026-11-05 立案，2026-11-10 补 index-effectiveness）**：`verify:remote-agent-socket` / `verify:remote-agent-fs` 签名 = `需要 DY_SSH_HOST 与 DY_WS_BASE`（exit 2，本机无可用远端时必现）。`verify:index-effectiveness` 签名 = `✗ 需要 DY_SESSION=<会话 id>`（作用域只认会话，脚本不拼 workspaceRoot，exit 1）。这些都是环境前提而非回归：要么按变量接一台真远端 / 传 DY_SESSION 再跑，要么在报告里注明「未覆盖」，不要当新 FAIL 排查。同类：`verify:index-timing-ssh` 需真远端（exit 2）。
    附 2026-11-05 全量复核：第 3 项（test:lsp 宿主注入 `ELECTRON_RUN_AS_NODE`）与第 6 项（index-timing C 断言）签名与上述完全一致，均确认仍在；第 2、5 项无再现。
 
 ## 报告格式
