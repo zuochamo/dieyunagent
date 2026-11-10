@@ -29,6 +29,12 @@ const DEFAULTS = {
    */
   camera: false,
   /**
+   * 本机摄像头（`desktop_camera_look`：抓本机 UVC 摄像头的一帧，如外接的 OBSBOT Tiny 2）。
+   * **默认关** —— 与手机摄像头同一条理由：拍的是现实世界（你本人、房间、桌上有什么），
+   * 一旦进上下文就收不回来，必须由用户显式打开一次。关掉即整个工具不再注入。
+   */
+  desktopCamera: false,
+  /**
    * 沙箱档位（唯一旋钮）：`read-only` | `workspace-write` | `danger-full-access`。
    * 语义与判定在 `sandbox-policy.js`；落盘白名单的唯一组装点是
    * gateway/server.js `_collectReadRoots/_collectWritableRoots`（远程侧同源

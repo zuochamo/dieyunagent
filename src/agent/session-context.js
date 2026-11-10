@@ -304,6 +304,19 @@ function isHistoryBackgroundUserContent(content) {
  */
 const GOAL_CONTINUE_USER_PREFIX = '[系统] 目标尚未收尾';
 
+/**
+ * 「生命体征」合成消息的开头（`src/alive/decide.js#renderStateBlock` 生成正文）。
+ *
+ * 与「目标续跑」同款：它是**代码说的话**，不是用户说的话 ——
+ * 后台心跳唤醒时把体征块递给模型，它落进账本也只是留痕，不能被当成「用户又提了新任务」。
+ * 前缀归口在这里（单一来源），因为判定「什么算用户任务」的规则只有这一处。
+ */
+const ALIVE_STATE_PREFIX = '[系统] 生命体征';
+
+function isAliveStateUserContent(content) {
+  return userContentToText(content).trim().startsWith(ALIVE_STATE_PREFIX);
+}
+
 function isGoalContinueUserContent(content) {
   return userContentToText(content).trim().startsWith(GOAL_CONTINUE_USER_PREFIX);
 }
@@ -314,6 +327,7 @@ function isSyntheticLoopUserContent(content) {
   if (t.startsWith('【完成验收】')) return true;
   if (!t.startsWith('[系统] ')) return false;
   if (isGoalContinueUserContent(content)) return true;
+  if (isAliveStateUserContent(content)) return true;
   return (
     t.startsWith('[系统] 本段工具轮次已达上限') ||
     t.startsWith('[系统] 上一轮回复像中间检查过程') ||
@@ -329,6 +343,15 @@ function lastRealUserIndex(messages) {
     if (m && m.role === 'user' && !isSyntheticLoopUserContent(m.content)) idx = i;
   }
   return idx;
+}
+
+/** 最后一条 user 消息（**不区分**合成与否）：只有在本轮输入本身就是合成消息时才会用到 */
+function lastUserIndex(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i] && list[i].role === 'user') return i;
+  }
+  return -1;
 }
 
 /** Session-book prefix: system + real user/assistant through the current-task user. */
@@ -942,7 +965,15 @@ function buildCompletionMessagesFromHistory(
       ? helpers.unpackUserContent
       : (raw) => String(raw || '');
 
-  const lastReal = lastRealUserIndex(list);
+  /**
+   * 「当前任务」是最后一条**真实**用户消息；但有一类会话里一条真实用户消息都没有 ——
+   * 后台心跳轮（`src/alive`）的输入是合成的体征块，这个会话从头到尾只有合成消息。
+   * 此时若仍按"没有真实用户"处理，本轮输入就会被当成历史背景：当前任务包装与
+   * turn-ride（压缩档、临时上下文）全都落不到它身上，模型拿到的形态是错的。
+   * 所以退化成"最后一条 user 就是本轮输入"（其余取舍不变，只是不再要求它必须"真实"）。
+   */
+  const lastRealIdx = lastRealUserIndex(list);
+  const lastReal = lastRealIdx >= 0 ? lastRealIdx : lastUserIndex(list);
   const out = [];
   if (sysContent) out.push({ role: 'system', content: sysContent });
   for (let i = 0; i < list.length; i++) {
@@ -993,6 +1024,8 @@ module.exports = {
   mergeCompactionBlockIntoTurnRide,
   isSyntheticLoopUserContent,
   GOAL_CONTINUE_USER_PREFIX,
+  ALIVE_STATE_PREFIX,
+  isAliveStateUserContent,
   isGoalContinueUserContent,
   extractBookPrefixMessages,
   extractInTurnLoopTail,

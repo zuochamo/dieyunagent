@@ -40,6 +40,9 @@ const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
 const COMPUTER_TOOL = _tc.COMPUTER_TOOL || null;
 // 手机摄像头（拍一张现实画面）：schema 单一来源同上，注入受 camera 权限开关控制（默认关）。
 const CAMERA_TOOL = _tc.CAMERA_TOOL || null;
+// 本机摄像头（电脑上接的 UVC，如 OBSBOT Tiny 2）：schema 单一来源同上，
+// 注入受 desktopCamera 权限开关控制（默认关，理由同手机摄像头）。
+const DESKTOP_CAMERA_TOOL = _tc.DESKTOP_CAMERA_TOOL || null;
 // SSH 远程主机（连/断/端口转发/切远端工作空间）：schema 单一来源同上，执行在 Main（ssh/actions.js）。
 const SSH_TOOL = _tc.SSH_TOOL || null;
 // Worktree 副本（开/清/写回）：schema 单一来源同上，执行在 Main（worktree/actions.js）。
@@ -49,15 +52,16 @@ const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return ent
 
 async function getHostToolFlags() {
   if (!gwState.authed || !toolDefsApi.getPermissions) {
-    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false, camera: false };
+    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false, camera: false, desktopCamera: false };
   }
   try {
     const p = await toolDefsApi.getPermissions();
     const webFetch = p?.webFetch !== false;
     const browser = p?.browserAutomation !== false;
     const osControl = p?.osControl === true;
-    // 摄像头拍的是现实世界，默认关：只有用户显式打开才注入 camera_look。
+    // 摄像头拍的是现实世界，默认关：只有用户显式打开才注入 camera_look / desktop_camera_look。
     const camera = p?.camera === true;
+    const desktopCamera = p?.desktopCamera === true;
     if (!p || !p.hostControl) {
       return {
         openUrl: false,
@@ -68,6 +72,7 @@ async function getHostToolFlags() {
         browser: false,
         osControl: false,
         camera: false,
+        desktopCamera: false,
         hostControl: false
       };
     }
@@ -80,10 +85,11 @@ async function getHostToolFlags() {
       webFetch,
       browser,
       osControl,
-      camera
+      camera,
+      desktopCamera
     };
   } catch {
-    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false, camera: false };
+    return { openUrl: false, exec: false, fsRead: false, fsWrite: false, webFetch: false, browser: false, osControl: false, camera: false, desktopCamera: false };
   }
 }
 
@@ -190,11 +196,16 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   if (host.camera && CAMERA_TOOL) {
     tools.push(CAMERA_TOOL);
   }
+  // 本机摄像头：同上（电脑上那台固定机位），同样不按 weakModel 收窄。
+  if (host.desktopCamera && DESKTOP_CAMERA_TOOL) {
+    tools.push(DESKTOP_CAMERA_TOOL);
+  }
   // SSH 远端：与 host 权限开关无关（连接参数/凭据由用户在界面上给），常驻。
   if (SSH_TOOL) tools.push(SSH_TOOL);
   // Worktree 会写回主工作区（apply_run 落的是本机仓库里的文件），所以跟「文件写入」同一个闸：
   // 用户关掉写入后还能让 Agent 通过副本把文件塞进仓库，这个开关就等于没关。
   if (host.fsWrite && WORKTREE_TOOL) tools.push(WORKTREE_TOOL);
+  // 与 goal_* 同一取舍：模型能从错误里读到该去哪儿开，而不是以为自己没有这个能力。
   if (gwState.authed) {
     tools.push(CODEBASE_TOOL);
     // 记忆读写都在 Gateway：召回（只读）与软归档（可恢复）跟 codebase 同条件暴露。

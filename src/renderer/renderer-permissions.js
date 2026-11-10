@@ -43,6 +43,9 @@ async function syncPermissionsToMain() {
     // 这里用 `=== true` 而非 `!== false`，缺省复选框时也不会把默认关的东西打开
     camera: $('perm-camera')?.checked === true,
 
+    // 本机摄像头（desktop_camera_look）：同样默认关、同样用 `=== true` 判
+    desktopCamera: $('perm-desktop-camera')?.checked === true,
+
     // 读/写文件、Shell、联网抓取、浏览器自动化为系统内置能力，恒开、UI 不提供开关；
     // 显式回写 true，纠正历史持久化里的关闭值
     fsRead: true,
@@ -149,6 +152,8 @@ async function loadPermissionsUI() {
 
     if ($('perm-camera')) $('perm-camera').checked = p.camera === true;
 
+    if ($('perm-desktop-camera')) $('perm-desktop-camera').checked = p.desktopCamera === true;
+
     renderSandboxModeUI(p.sandboxMode, p.unrestrictedPaths === true);
 
   } catch {
@@ -209,7 +214,9 @@ function bindPermissionCheckboxes() {
 
     'perm-os-control',
 
-    'perm-camera'
+    'perm-camera',
+
+    'perm-desktop-camera'
 
   ].forEach((id) => {
 

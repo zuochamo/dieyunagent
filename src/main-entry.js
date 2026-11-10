@@ -90,6 +90,9 @@ const { registerEarlyMainIpc, registerMainIpc, registerLateMainIpc } = require('
 const { registerMediaScheme, attachMediaProtocol } = require('./main/media-protocol');
 const { registerAgentRuntimeIpc } = require('./main/ipc/agent-runtime');
 const { registerSharedMemoryIpc } = require('./main/ipc/shared-memory');
+// 生命感（设置 → 生命）：装配唯一来源 `src/main/alive-boot.js`（headless 用同一份）
+const { bootAliveRuntime } = require('./main/alive-boot');
+const { registerAliveIpc } = require('./main/ipc/alive');
 const { registerChannelIpc } = require('./main/ipc/channels');
 const { bootChannelsRuntime } = require('./channels/boot');
 const { registerCompactionIpc } = require('./main/ipc/compaction');
@@ -213,6 +216,9 @@ const CONFIG = loadAppConfig({ deployCfg });
 
 /** @type {import('./gateway/server').LocalGateway | null} */
 let localGateway = null;
+/** 生命感运行时（设置 → 生命；开关关掉时也存在，只是不起心跳） */
+/** @type {any} */
+let aliveRuntime = null;
 /** @type {ReturnType<createCoreBridge> | null} */
 let coreBridge = null;
 /** @type {Map<string, { runId: string | null, aborted: boolean }>} */
@@ -1009,6 +1015,30 @@ app.whenReady().then(async () => {
     log: (msg) => log.info(msg)
   });
 
+  // 生命感（设置 → 生命）：一个心跳、一套体征；唤醒轮与用户轮走同一份 runner。
+  // 装配只有一份（`src/main/alive-boot.js`），headless 用同一份，只是宿主不同。
+  aliveRuntime = bootAliveRuntime({
+    userData,
+    getGateway: () => localGateway,
+    getCoreBridge: () => coreBridge,
+    getMcpRuntime: () => mcpRuntime,
+    getCompactionAgent: () => ensureMainCompactionAgent(),
+    // 后台心跳没有 Renderer：Renderer-only 工具会 fail-fast（与 headless 一致）
+    createToolBridge: () => createRustLoopToolBridge(null),
+    listMcpServers: mcpStore.listMcpServersForUi,
+    // 「正在听一段」必须当场可见（托盘/系统通知）：麦克风被占用 15 秒不能悄悄发生
+    notifyTray: (title, body) => {
+      try {
+        trayNotify.notifyUpdateTray(title, body);
+      } catch {
+        // 通知失败不影响感官
+      }
+    },
+    log: (msg) => log.info(msg)
+  });
+  registerAliveIpc({ ipcMain, getAlive: () => aliveRuntime, log });
+  // 开关持久在 `<userData>/alive/settings.json`：按上次的意图起停（默认关 = 不起心跳）
+  if (aliveRuntime.enabled()) aliveRuntime.setEnabled(true);
   registerLateMainIpc({
     ipcMain,
     clipboard,
@@ -1087,6 +1117,15 @@ app.on('before-quit', () => {
   app.isQuitting = true;
   if (windowTray) windowTray.destroyTray();
   activityStats.dispose();
+  // 生命感：停表并落一次盘（关窗口 ≠ 退出；这里才是进程退出，体征留着）
+  if (aliveRuntime) {
+    try {
+      aliveRuntime.stop();
+    } catch {
+      // 退出路径不因关闭失败而卡住
+    }
+    aliveRuntime = null;
+  }
   log.info('应用退出');
   // 频道长连接先断：它是外部系统的连接，不能等 Gateway/core 停完再断，
   // 否则退出瞬间的来电消息会写进一个正在关闭的会话。

@@ -83,6 +83,51 @@ const FILE_WRITE_TOOL_NAMES = Object.freeze(
 );
 
 /**
+ * 只读作用域的白名单（`src/alive` 后台心跳轮专用）。
+ *
+ * 为什么是**白名单**而不是「拦掉写类工具」：黑名单永远漏 —— 出网（`web_fetch`）、
+ * 跨机发消息（`peer_send`）、删记忆（`memory_forget`）、起子 loop（`subagent`，
+ * 子 loop 的工具上下文不继承 readOnly）、跑计划（`plan_run`）、`goal_check`（内部会执行命令）
+ * 都不是 `isWriteTool` 认为的"写"，但它们全都能产生真实副作用。
+ *
+ * 所以这条规则是：**清单外一律拒绝**。加一个工具进这份清单 = 明确表态
+ * "心跳轮可以用它"，而不是"忘了把它加进黑名单"。
+ */
+const ALIVE_READ_ONLY_TOOL_NAMES = Object.freeze(
+  new Set([
+    // 读文件 / 找东西
+    'fs_read_file',
+    'fs_list_dir',
+    'grep',
+    'glob',
+    'read_symbol',
+    'codebase_search',
+    'graph',
+    'lsp',
+    // 读记忆（不删）
+    'memory_recall',
+    'session_recall',
+    // 只读地看一眼计划（不建、不跑）
+    'plan_list',
+    // 「眼睛」：看一眼现实（受 `senses.eyes` + 设置→权限 两道锁，见 ALIVE_SENSE_TOOLS）
+    'camera_look',
+    'desktop_camera_look'
+  ])
+);
+
+/**
+ * 「感官」工具 → 需要的感受开关。
+ *
+ * 心跳轮拿到的是**只读**作用域，但"只读"不等于"看不见"：摄像头能看到现实世界，
+ * 它比写盘更需要一道显式授权。所以这类工具除了在白名单里，还要 `senses` 逐项打开
+ * （默认全关，页面上的三个开关就是它）。
+ */
+const ALIVE_SENSE_TOOLS = Object.freeze({
+  camera_look: 'eyes',
+  desktop_camera_look: 'eyes'
+});
+
+/**
  * 单次调用可能**合法运行很久**的工具（工具级 stall 看门狗要给更长窗口）。
  *
  * `subagent` 是一次完整的子 loop run（一轮调研常常十几分钟），用通用 stall 窗口会误杀。
@@ -635,11 +680,14 @@ function createGuardrailApi(getLimits) {
  * 上一轮开着、这一轮用户关掉（或历史里留着同名调用）时，模型仍可能发出这个名字。
  * 摄像头拍的是现实世界，用户关掉就是关掉，执行前必须在同一处再确认一次。
  */
-const PERMISSION_GATED_TOOLS = Object.freeze({ camera_look: 'camera' });
+const PERMISSION_GATED_TOOLS = Object.freeze({
+  camera_look: 'camera',
+  desktop_camera_look: 'desktopCamera'
+});
 
 /** 能力未授权时的拦截文案（模型据此换策略，不要反复试）。 */
 function permissionGateBlockMessage(name, key) {
-  const label = key === 'camera' ? '手机摄像头' : key;
+  const label = key === 'camera' ? '手机摄像头' : key === 'desktopCamera' ? '本机摄像头' : key;
   return (
     `工具 ${name} 没有执行：用户没有打开「${label}」权限（默认关）。` +
     '这不是故障，重试也不会成功。请改用其它方式（文字问用户、computer 看屏幕、browser_snapshot），' +
@@ -680,6 +728,8 @@ const SHARED_EXPORTS = {
   isWriteTool,
   MUTATING_TOOL_NAMES,
   FILE_WRITE_TOOL_NAMES,
+  ALIVE_READ_ONLY_TOOL_NAMES,
+  ALIVE_SENSE_TOOLS,
   LONG_RUNNING_TOOL_NAMES,
   isLongRunningAgentTool,
   FILE_PATH_KEYED_WRITE_TOOL_NAMES,

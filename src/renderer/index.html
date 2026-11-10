@@ -1311,6 +1311,8 @@
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="list" data-i18n="settings_skills_list">技能</button>
           <button type="button" class="settings-nav-item" data-settings-action="skills" data-skills-tab="automation" data-i18n="settings_automation">定时</button>
           <button type="button" class="settings-nav-item" data-settings-tab="shared-memory" data-i18n="settings_shared_memory">共享记忆</button>
+          <div class="settings-nav-group-label" data-i18n="settings_mimicry">拟态</div>
+          <button type="button" class="settings-nav-item" data-settings-tab="alive" data-i18n="settings_alive">生命</button>
         </aside>
         <div class="settings-main">
           <header class="settings-main-head">
@@ -1607,6 +1609,83 @@
                 </p>
               </section>
             </div>
+            <div class="settings-page" data-settings="alive">
+              <h3 class="settings-subsection-title">生命感</h3>
+              <p class="settings-page-desc">
+                让 agent 在两次对话之间仍有内部状态：常驻心跳、四个相位、张力越线时会自己醒，
+                醒来后由模型自己决定做不做（也可以拒绝）。它不是另一个助手，不接管你的对话，也不是产品功能。
+              </p>
+              <label class="check-row">
+                <input type="checkbox" id="alive-enabled" />
+                <span>启用生命感</span>
+              </label>
+              <p class="settings-page-desc check-row-hint">
+                关掉 = 停表（体征保留，重新打开会接着走），不是清空。心跳间隔 300 秒，唤醒轮默认只读。
+              </p>
+              <section class="settings-runtime-section channels-section">
+                <div class="channels-toolbar">
+                  <span class="save-hint" id="alive-status">读取中…</span>
+                  <button type="button" class="ghost-btn" id="alive-refresh">刷新</button>
+                  <button type="button" class="ghost-btn" id="alive-reset">重新开始</button>
+                </div>
+                <p class="channels-footnote" id="alive-detail"></p>
+                <p class="channels-footnote" id="alive-fatigue-note"></p>
+                <p class="channels-footnote" id="alive-session-note"></p>
+                <p class="channels-footnote" id="alive-loops"></p>
+              </section>
+              <h3 class="settings-subsection-title">感官</h3>
+              <label class="check-row">
+                <input type="checkbox" id="alive-sense-drawer" />
+                <span>抽屉：允许它往自己的 note.md 写一行</span>
+              </label>
+              <p class="settings-page-desc check-row-hint">
+                只写它自己的目录（<code>&lt;userData&gt;/alive/workspace/note.md</code>），碰不到你的文件。
+                你在这里能看到它写了什么，但它不知道你在读 —— 这条很关键。
+              </p>
+              <label class="check-row">
+                <input type="checkbox" id="alive-sense-eyes" />
+                <span>眼睛：允许它看一眼现实</span>
+              </label>
+              <p class="settings-page-desc check-row-hint">
+                拍一张现实画面（手机摄像头或本机 UVC）。<b>还需要在「设置 → 权限」里把对应摄像头打开</b> —— 两道锁都开才看得见，画面不落盘。
+              </p>
+              <p class="channels-footnote" id="alive-eyes-cap"></p>
+              <div class="channels-push-row">
+                <select class="channels-select" id="alive-camera-device" aria-label="它用哪颗摄像头看"></select>
+                <button type="button" class="ghost-btn" id="alive-devices-refresh">刷新设备</button>
+                <button type="button" class="ghost-btn" id="alive-open-permissions">去开摄像头权限</button>
+              </div>
+              <label class="check-row">
+                <input type="checkbox" id="alive-sense-voice" />
+                <span>嘴与耳：允许它说一句、听几秒</span>
+              </label>
+              <p class="settings-page-desc check-row-hint">
+                说：合成语音直接播放，不落盘；听：最多 15 秒，转成文字后立刻删音频。
+                需要「设置 → 模型 → 语音」配好，并且本机有 ffmpeg/ffplay。
+              </p>
+              <p class="channels-footnote" id="alive-voice-cap"></p>
+              <div class="channels-push-row">
+                <select class="channels-select" id="alive-mic-device" aria-label="它用哪只麦克风听"></select>
+                <button type="button" class="ghost-btn" id="alive-voice-refresh">刷新设备</button>
+              </div>
+              <label class="check-row">
+                <input type="checkbox" id="alive-sense-voice-spontaneous" />
+                <span>允许它主动开口（没人说话时也能出声/收音，默认关）</span>
+              </label>
+              <p class="settings-page-desc check-row-hint" id="alive-voice-quota"></p>
+              <section class="settings-runtime-section channels-section">
+                <h3 class="settings-subsection-title">抽屉（note.md）</h3>
+                <pre class="channels-footnote" id="alive-note" style="white-space: pre-wrap">（还没有写东西）</pre>
+              </section>
+              <section class="settings-runtime-section channels-section">
+                <h3 class="settings-subsection-title">决策日志</h3>
+                <pre class="channels-footnote" id="alive-decisions" style="white-space: pre-wrap">还没有事件。</pre>
+                <p class="channels-footnote">
+                  这里只有「做了什么决定」，没有「为什么」—— 理由留在它自己那里，不展示、不外传。
+                </p>
+              </section>
+              <span class="save-hint" id="alive-hint"></span>
+            </div>
             <div class="settings-page" data-settings="perms">
               <h3 class="settings-subsection-title">本机权限</h3>
               <div class="theme-auto-launch-options">
@@ -1623,6 +1702,8 @@
               <p class="settings-page-desc check-row-hint os-control-hint">Agent 可截屏并操作鼠标键盘；鼠标键盘动作首次使用会请求确认。</p>
               <label class="check-row"><input type="checkbox" id="perm-camera" /><span>启用手机摄像头</span></label>
               <p class="settings-page-desc check-row-hint camera-hint">让 Agent 通过手机摄像头看一眼现实世界（桌上的东西、你本人、现场），一次一张、不常开；每次拍摄手机上都会显示提示。默认关。</p>
+              <label class="check-row"><input type="checkbox" id="perm-desktop-camera" /><span>启用本机摄像头</span></label>
+              <p class="settings-page-desc check-row-hint desktop-camera-hint">让 Agent 抓这台电脑上接的摄像头（外接 UVC，如 OBSBOT Tiny 2）的一帧画面，一次一张、不落盘；需要本机有 ffmpeg。默认关。</p>
               <label class="check-row"><input type="checkbox" id="perm-lsp-diagnostics" checked /><span>启用 LSP 诊断注入</span></label>
               <p class="settings-page-desc check-row-hint lsp-diagnostics-hint">改完源码后把语言服务器报的错（类型、语法、未定义符号）自动带回给 Agent，让它自己发现编译不过的地方；关掉后只能靠跑命令暴露错误。</p>
               <label class="check-row"><input type="checkbox" id="perm-workplace-monitor" checked /><span>工位监控上报</span></label>
@@ -2413,6 +2494,7 @@
     <script src="./renderer-workspace-ssh.js"></script>
     <script src="./renderer-channels.js"></script>
     <script src="./renderer-shared-memory.js"></script>
+    <script src="./renderer-alive.js"></script>
     <!-- composer + agent execution（agent-limits-runtime 依赖 composer 的 sessionComposerModelPicks，须在其后） -->
     <script src="./renderer-composer-mention.js"></script>
     <script src="./renderer-composer.js"></script>

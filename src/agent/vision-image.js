@@ -332,21 +332,25 @@ function visionOmitText(reason, handle) {
 }
 
 /**
- * 手机摄像头那一张的「进视觉通道」文案（**没有**落盘副本）。
+ * 摄像头那一张的「进视觉通道」文案（**没有**落盘副本）。
  *
  * 为什么与 `visionHandleText` 分开：现实画面（你本人、房间、桌上的东西）默认**不留副本** ——
  * 屏幕截图留副本是为了「用 fs_read_file 再看局部」，而现实画面要看就再拍一张，
  * 落盘只会让摄像头变成一台没人要求的录音笔。所以这里的文案不给路径，只给「再拍」的退路。
  *
+ * 手机与本机摄像头共用这一段（`subject` 只换称呼）：两者的契约完全一样
+ * （一次一张、不落盘、要细节就再拍），各写一份只会让措辞慢慢分叉。
+ *
  * @param {number} width
  * @param {number} height
+ * @param {string} [subject] 「手机摄像头」/「本机摄像头」
  * @returns {string}
  */
-function visionCameraText(width, height) {
+function visionCameraText(width, height, subject = '手机摄像头') {
   const dims = width > 0 && height > 0 ? `（${width}×${height}）` : '';
   return (
-    `这张手机照片${dims}会作为图片输入附在下一轮，请直接据此回答。` +
-    '现实画面不落盘、也没有可读副本：需要更清楚或换个角度，就再拍一张（改 focus 或请用户调整），' +
+    `这张${subject}照片${dims}会作为图片输入附在下一轮，请直接据此回答。` +
+    '现实画面不落盘、也没有可读副本：需要更清楚或换个角度，就再拍一张（或请用户调整机位），' +
     '不要凭记忆补细节。'
   );
 }

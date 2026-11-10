@@ -25,7 +25,13 @@
  * - **不吞错误**：抛错由调用方归一成信封后**才**进 after 关卡，观察者只需处理一种形状。
  */
 
-const { normalizeAgentToolName, PERMISSION_GATED_TOOLS, permissionGateBlockMessage } = require('./guardrails-shared');
+const {
+  normalizeAgentToolName,
+  PERMISSION_GATED_TOOLS,
+  permissionGateBlockMessage,
+  ALIVE_READ_ONLY_TOOL_NAMES,
+  ALIVE_SENSE_TOOLS
+} = require('./guardrails-shared');
 const {
   shouldBlockRepeatToolCall,
   recordToolCallFingerprint,
@@ -117,7 +123,11 @@ function callContext(call) {
     model: ctx.model || '',
     contextTierId: ctx.contextTierId || 'default',
     workspacePath: ctx.workspacePath || '',
-    userDataPath: ctx.userDataPath || ''
+    userDataPath: ctx.userDataPath || '',
+    /** 只读作用域（后台心跳轮）：决定「改动类工具能不能用」，不改变其它判定 */
+    readOnly: ctx.readOnly === true,
+    /** 感官开关（`senses.eyes` 等）：只读作用域里还要逐项授权（摄像头 = 看现实） */
+    senses: ctx.senses && typeof ctx.senses === 'object' ? ctx.senses : null
   };
 }
 
@@ -195,8 +205,51 @@ function permissionSnapshot(call) {
   }
 }
 
-const hookRepeatGuard = {
-  id: 'repeat-guard',
+/**
+ * 只读作用域：后台心跳轮（`src/alive`）**只能调用白名单里的工具**。
+ *
+ * 为什么是一个**关卡**而不是在调用点拿 if 判：能不能用某个工具是「这次调用能不能发生」
+ * 的问题，归口就在 tool-gate；调用点（`main-turn-runner`）只声明自己处在什么作用域。
+ *
+ * 为什么用白名单（`ALIVE_READ_ONLY_TOOL_NAMES`）而不是拦掉写类工具：黑名单漏得太狠 ——
+ * `web_fetch`（出网）、`peer_send`（跨机派活）、`memory_forget`（不可逆删记忆）、
+ * `subagent`（子 loop 不继承 readOnly）、`plan_run`、`goal_check`（内部执行命令）
+ * 都不是 `isWriteTool` 眼里的"写"，但全都有真实副作用。清单外一律拒绝。
+ */
+const hookReadOnlyScope = {
+  id: 'read-only-scope',
+  stage: 'before',
+  run(call) {
+    const ctx = callContext(call);
+    if (!ctx.readOnly) return;
+    if (!ALIVE_READ_ONLY_TOOL_NAMES.has(call.name)) {
+      recordTelemetry(call, false, 'READ_ONLY_SCOPE', 0);
+      call.block = wrapStructuredError({
+        retryable: false,
+        errorCode: 'READ_ONLY_SCOPE',
+        error:
+          `工具 ${call.name} 没有执行：这一轮是后台心跳唤起的**只读轮**，只允许读文件 / 找东西 / 读记忆。` +
+          '写盘、执行命令、出网、跨机发消息、起子任务、跑计划都属于清单外，重试也不会成功。' +
+          '需要动手时等用户在场的一轮再做，或者把那件事记进未闭合事项（alive_decide.loops）。'
+      });
+      return;
+    }
+    // 感官类（摄像头）即便在白名单里，也要对应的开关打开 —— 默认全关
+    const sense = ALIVE_SENSE_TOOLS[call.name];
+    if (sense && !(ctx.senses && ctx.senses[sense] === true)) {
+      recordTelemetry(call, false, 'SENSE_DISABLED', 0);
+      call.block = wrapStructuredError({
+        retryable: false,
+        errorCode: 'SENSE_DISABLED',
+        error:
+          `工具 ${call.name} 没有执行：这个感官是关着的（${sense}）。` +
+          '这不是故障，重试也不会成功——要看得等用户在「设置 → 拟态 → 生命」里打开。'
+      });
+    }
+  }
+};
+
+const hookRepeatGuard = {  id: 'repeat-guard',
   stage: 'before',
   run(call) {
     const c = callContext(call);
@@ -268,6 +321,7 @@ const hookSpillOutput = {
 const DEFAULT_TOOL_GATE_HOOKS = Object.freeze([
   hookValidateArgs,
   hookToolPermission,
+  hookReadOnlyScope,
   hookRepeatGuard,
   hookTelemetry,
   hookSpillOutput

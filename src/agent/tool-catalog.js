@@ -2270,6 +2270,37 @@ const CAMERA_TOOL = {
 };
 
 /**
+ * 本机摄像头（桌面 UVC：OBSBOT Tiny 2、普通 USB 摄像头等）。
+ *
+ * 与 `camera_look` 的分工：那颗是**手机**（随身、能拿起来对着别处），这颗是**电脑上那台**
+ * （固定机位、分辨率稳定、不用手机在旁边）。两者都是「一次一张、不常开」，
+ * 抓帧实现见 `agent/desktop-camera-source.js`。
+ *
+ * 为什么单独成一个工具而不是给 camera_look 加 source 参数：设备在哪、失败怎么修、
+ * 额度怎么计都是两套（手机要连、本机要 ffmpeg），合在一个工具里模型会把
+ * 「手机没连上」和「没装 ffmpeg」混成同一句话。
+ */
+const DESKTOP_CAMERA_TOOL = {
+  type: 'function',
+  function: {
+    name: 'desktop_camera_look',
+    description:
+      '用这台电脑上接的摄像头（如 OBSBOT Tiny 2 等 USB 摄像头）抓一张现实画面，图片会作为视觉输入附到下一轮。' +
+      '和 camera_look 的区别：那颗是手机（得用户把手机连上来、能拿起来对着别处），这颗是电脑上固定那台（不用手机）。' +
+      '适合「看一眼我桌上」「我现在什么状态」「这个实物长什么样」；屏幕里的东西仍然用 computer / browser 截图。' +
+      '一次只抓一张，不常开、不做视频流。必须如实对待结果：ok=false 时你**没有**拿到任何画面，不要编造看到的内容；' +
+      'DESKTOP_CAMERA_NO_DEVICE = 没找到摄像头（让用户确认插好/没被禁用）；' +
+      'DESKTOP_CAMERA_NO_FFMPEG = 本机没有 ffmpeg（让用户装，或改用 camera_look / computer）；' +
+      'DESKTOP_CAMERA_BUSY / TIMEOUT = 摄像头被别的程序占着（可以再试一次，别连拍）。' +
+      '画面是「刚才那一刻」，不要拿上一次的画面推断现在。',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  }
+};
+
+/**
  * SSH：连服务器 / 端口转发 / 把工作空间切到远端。
  *
  * 为什么 Agent 需要它：远端能力原先只挂在设置页的连接面板上（`ssh:connect` 等 6 个 IPC），
@@ -2430,6 +2461,7 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   [MCP_TOOL_SCHEMA_TOOL, MCP_MANAGE_TOOL, CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL],
   [COMPUTER_TOOL],
   [CAMERA_TOOL],
+  [DESKTOP_CAMERA_TOOL],
   [SSH_TOOL],
   [WORKTREE_TOOL],
   PEER_TOOLS
@@ -2502,6 +2534,7 @@ module.exports = {
   SESSION_WORKSPACE_TOOL,
   COMPUTER_TOOL,
   CAMERA_TOOL,
+  DESKTOP_CAMERA_TOOL,
   ALL_STATIC_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
   CHANNEL_RUNTIME_TOOL_NAMES,

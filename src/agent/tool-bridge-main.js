@@ -3,6 +3,8 @@
 const { delegateAgentToolViaGateway } = require('./delegate-tool-gateway');
 // 手机摄像头（camera_look）的唯一出口：协议参数、结果校验、失败文案都在那边。
 const { createPhoneCameraSource } = require('../mobile/camera-source');
+// 本机摄像头（desktop_camera_look）的唯一出口：ffmpeg 抓帧、设备挑选、失败文案都在那边。
+const { createDesktopCameraSource } = require('./desktop-camera-source');
 const {
   PROJECT_MEMORY_REL_PATH,
   parseProjectMemoryEntries
@@ -204,6 +206,22 @@ function sanitizeToolResultForApi(name, result) {
       note: result.note || '手机已拍好一张照片；图片本体不随工具结果返回'
     };
   }
+  if (name === 'desktop_camera_look' && result.base64) {
+    // 本机摄像头同一条契约：像素走视觉缓冲，结果只留事实（哪台设备、多大、什么时候）。
+    return {
+      ok: result.ok,
+      device: result.device,
+      mime: result.mime,
+      width: result.width,
+      height: result.height,
+      capturedAt: result.capturedAt,
+      ...(result.visionImage ? { visionImage: result.visionImage } : {}),
+      ...(result.visionTokens ? { visionTokens: result.visionTokens } : {}),
+      base64Omitted: true,
+      base64Length: String(result.base64).length,
+      note: result.note || '本机摄像头已抓好一张照片；图片本体不随工具结果返回'
+    };
+  }
   if (name === 'browser_screenshot' && result.base64) {
     return {
       ok: result.ok,
@@ -301,6 +319,13 @@ function createMainToolBridge(deps) {
   const cameraSource = typeof deps.getMobileBridge === 'function'
     ? createPhoneCameraSource({ getBridge: deps.getMobileBridge })
     : null;
+  // 本机摄像头：不需要外部桥（ffmpeg + 本机 UVC），所以总是装得上；
+  // 没有 ffmpeg / 没有设备时由来源自己回结构化错误，而不是「工具不存在」。
+  // `deps.desktopCameraSource` 供 smoke 测试注入桩（不插摄像头也能验证工具分支）。
+  const desktopCameraSource =
+    deps.desktopCameraSource && typeof deps.desktopCameraSource.capture === 'function'
+      ? deps.desktopCameraSource
+      : createDesktopCameraSource();
 
   /**
    * 目标解析（**唯一入口**）：目标型计划轮（`ctx.planId`）优先，否则当前会话的会话目标。
@@ -535,6 +560,16 @@ function createMainToolBridge(deps) {
           focus: a.focus,
           maxEdge: cameraLimits.cameraShotMaxEdge,
           timeoutMs: cameraLimits.cameraCaptureTimeoutMs
+        });
+      }
+      case 'desktop_camera_look': {
+        const cameraLimits = getAgentLimits(userDataPath, ctx.contextTierId);
+        return desktopCameraSource.capture({
+          maxEdge: cameraLimits.desktopCameraShotMaxEdge,
+          timeoutMs: cameraLimits.desktopCameraCaptureTimeoutMs,
+          // 用户在「设置 → 拟态 → 生命」里选的摄像头（心跳轮经 toolScope.senses 带下来）；
+          // 没选就仍按 DIEYUN_DESKTOP_CAMERA → 第一台非虚拟摄像头的既有规则
+          device: (ctx.senses && ctx.senses.cameraDevice) || undefined
         });
       }
       case 'mcp_tool_schema': {
@@ -1777,7 +1812,11 @@ function createMainToolBridge(deps) {
       contextTierId: ctx.contextTierId,
       taskTier: ctx.taskTier || null,
       workspacePath: ctx.workspacePath || ctx.worktreePath,
-      userDataPath
+      userDataPath,
+      /** 只读作用域（`src/alive` 的后台心跳轮）：关卡据此拦掉改动类工具 */
+      readOnly: ctx.readOnly === true,
+      /** 感官开关（`senses.eyes` / `senses.voice` …）：只读轮里还要逐项授权 */
+      senses: ctx.senses && typeof ctx.senses === 'object' ? ctx.senses : null
     };
     const harness = getToolHarnessSession(harnessCtx);
     const visionEnabled = ctx && ctx.browserVision === true;
@@ -1808,8 +1847,14 @@ function createMainToolBridge(deps) {
             if (!ctx.runId) return;
             if (!visionEnabled) {
               // 文本模型：截图/照片照常剥离，但要明说「看不到」，否则模型以为画面已入眼
-              // （camera_look 同样处理：拍了照却没进视觉通道时，模型最容易编造看到的内容）
-              if ((c.name === 'computer' || c.name === 'camera_look') && c.result && c.result.base64) {
+              // （camera_look / desktop_camera_look 同样处理：拍了照却没进视觉通道时，
+              // 模型最容易编造看到的内容）
+              const CAMERA_TOOL_NAMES = ['camera_look', 'desktop_camera_look'];
+              if (
+                (c.name === 'computer' || CAMERA_TOOL_NAMES.includes(c.name)) &&
+                c.result &&
+                c.result.base64
+              ) {
                 c.result = {
                   ...c.result,
                   note:
@@ -1823,9 +1868,12 @@ function createMainToolBridge(deps) {
             // 过去这里忽略返回值，而工具结果默认还写着「将作为视觉输入附到下一轮」——
             // 4K 整屏 PNG 顶穿单张上限被整张丢弃，模型却一直在等一张永不到来的图。
             const shot = extractShot(c.name, c.result);
-            // 手机照片**不落盘**：现实画面（人、房间、桌上的东西）留副本等于把手机变成
+            // 摄像头照片**不落盘**：现实画面（人、房间、桌上的东西）留副本等于把摄像头变成
             // 一台没人要求的录音笔，而「再看细节」的正当解法是再拍一张。
-            const isCameraShot = c.name === 'camera_look';
+            // 手机与本机（desktop_camera_look）是同一契约，只有称呼不同。
+            const isDesktopCameraShot = c.name === 'desktop_camera_look';
+            const isCameraShot = c.name === 'camera_look' || isDesktopCameraShot;
+            const cameraSubject = isDesktopCameraShot ? '本机摄像头' : '手机摄像头';
             // 整页截图可能到 2656×11460：注入前先按视觉预算（长边 + 单张体积）缩小，
             // 否则这张图会以「图片不合规」把整轮请求打成上游 400（见 fitVisionShotToBudget）。
             const fitted = shot && !isCameraShot ? fitVisionShotToBudget(shot, visionLimits) : null;
@@ -1871,7 +1919,7 @@ function createMainToolBridge(deps) {
                   : {}),
                 note: queued
                   ? isCameraShot
-                    ? visionCameraText(shot.width, shot.height)
+                    ? visionCameraText(shot.width, shot.height, cameraSubject)
                     : visionHandleText(
                         handle,
                         '这张图会作为图片输入附在下一轮；不要重复截同一屏。' + shrinkHint

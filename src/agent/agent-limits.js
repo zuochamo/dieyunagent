@@ -200,6 +200,15 @@ const AGENT_LIMITS_DEFAULTS = {
   cameraCaptureTimeoutMs: 20000,
   cameraShotMaxEdge: 1280,
   cameraShotsPerRound: 2,
+  // 本机摄像头（desktop_camera_look：ffmpeg 抓一台 UVC 摄像头的一帧）。
+  // desktopCameraCaptureTimeoutMs：唤醒相机 + 出帧的等待上限。比手机端短，是因为
+  //   ffmpeg 挂住通常意味着「设备被别的程序独占」，硬等只会白占一轮。
+  // desktopCameraShotMaxEdge：交给 ffmpeg 的 scale 长边（1280 与手机端同口径：
+  //   看清桌面上有什么够了，再细就让模型再拍一张，不做磁盘副本）。
+  // desktopCameraShotsPerRound：每轮在途张数，独立于手机/浏览器截图。
+  desktopCameraCaptureTimeoutMs: 15000,
+  desktopCameraShotMaxEdge: 1280,
+  desktopCameraShotsPerRound: 2,
   // 工具产出图片的只读副本保留张数（内容寻址去重后按 mtime 留最新 N 张）。
   // 为什么要留副本：base64 注入完即丢，模型想再看局部细节只能重拍，而当时那一帧可能已过；
   // 为什么要有上限：电脑控制一次任务能产生几十张整屏图，不留上限就是无底占盘。
@@ -417,7 +426,79 @@ const AGENT_LIMITS_DEFAULTS = {
   /** 一次提炼提交给模型的候选条数 */
   sharedMemoryConsolidateBatch: 40,
   /** 两次提炼的最小间隔（跨机口径：台账时间戳，不靠本机内存） */
-  sharedMemoryConsolidateIntervalMs: 6 * 60 * 60 * 1000
+  sharedMemoryConsolidateIntervalMs: 6 * 60 * 60 * 1000,
+
+  // —— 生命感（设置 → 生命；`src/alive/`）——
+  // 定位：**拟态**。它让 agent 在两次对话之间仍有内部状态、会自己醒、会拒绝，
+  // 但**没有**必死 / 预算 / 记忆不可逆衰减 / 遗物 —— 那些是 `--alive` 原设计的承重墙，
+  // 已明确不做（见 docs/ALIVE.md「这不是生命，是生命感」）。
+  // 为什么不进 AGENT_LIMITS_SCHEMA：生命体征不该是用户旋钮（性格是轨迹，不是配置），
+  // 这里只是**数字的唯一来源**；越界由 `src/alive/runtime.js#resolveAliveConfig` 夹取。
+  /** 心跳间隔（唯一 tick 源；演示时可临时调小，页面会标「演示中」） */
+  aliveTickIntervalMs: 300000,
+  /** 唤醒阈值初值 / 夹取区间 */
+  aliveWakeThreshold: 60,
+  aliveWakeThresholdMin: 40,
+  aliveWakeThresholdMax: 80,
+  /** 阈值漂移速率（每小时）：拒绝率项 / 疲劳项。一天最多漂 ~7 */
+  aliveWakeThresholdMuPerHour: 0.3,
+  aliveWakeThresholdNuPerHour: 0.2,
+  /** 拒绝率基线：长期低于它 → 阈值升高（更挑）；高于它 → 降低（更容易被推动） */
+  aliveWakeRefusalBaseline: 0.2,
+  /** 拒绝率滑动窗口 */
+  aliveWakeRefusalWindowMs: 24 * 60 * 60 * 1000,
+  /** 两次自发唤醒的最小间隔与每日上限（防抖 + 防烧钱） */
+  aliveWakeMinIntervalMs: 10 * 60 * 1000,
+  aliveWakeMaxPerDay: 40,
+  /** 张力：均值回复中心 / 增益 / 感觉剥夺保护 ε / 上限 */
+  aliveTensionMean: 20,
+  aliveTensionGainPerHour: 0.35,
+  aliveTensionRestorePerHour: 0.35,
+  aliveTensionEps: 0.8,
+  aliveTensionMax: 100,
+  /**
+   * 「闲得发慌」：静默愈久，张力的回复中心越高 —— 这是它**自发醒来**的主要来源。
+   * 没有这一项，一个没有任何未闭合事项的新实例会永远停在 20，从不清醒（拟态就失效了）。
+   * 不是记忆衰减、不是损耗，只是「空久了会不舒服」。
+   */
+  aliveTensionIdleRampPerHour: 6,
+  aliveTensionIdleGraceHours: 1,
+  aliveTensionIdleMax: 45,
+  /** 未闭合项：单条基准张力 / 上限条数 / 自然消退时间常数（小时） */
+  aliveLoopTensionUnit: 25,
+  aliveLoopMax: 12,
+  aliveLoopStaleHours: 48,
+  /**
+   * 疲劳：每千 token 涨多少 / 静息每小时回落 / 感觉剥夺保护 ε。
+   *
+   * **口径**：token 只数**唤醒轮自己**用掉的（`runtime.js` 只在 `wakeInFlight` 期间收用量），
+   * 用户在对话里烧的 token 不算它累 —— 否则「疲劳」测的就不是它，而是「你有没有在聊天」。
+   * 标定：一次唤醒轮（全量系统提示 + 工具）约 40k token ≈ 20 疲劳 ≈ 1 小时静息；
+   * 连续醒 5 次就会进压缩相位（`alivePhaseFatigueHigh`），这是刻意的节律。
+   * 原来取 4（=25k token 打满）是按「每跳几百 token」的想象标定的，一次真实唤醒就会钉死。
+   */
+  aliveFatiguePerKToken: 0.5,
+  aliveFatigueSettlePerHour: 20,
+  aliveFatigueEps: 0.5,
+  /** 主动出声/收音：每日上限与最小间隔（默认关着，见 `alive/settings.json` 的 voiceSpontaneous） */
+  aliveVoiceMaxPerDay: 8,
+  aliveVoiceMinIntervalMs: 30 * 60 * 1000,
+  /** 相位惯性（连续 k 个 tick 满足条件才切换）与相位门限 */
+  alivePhaseInertiaAlert: 3,
+  alivePhaseInertiaLow: 5,
+  alivePhaseInertiaSettle: 5,
+  alivePhaseInertiaCompress: 5,
+  alivePhaseLoadWindowMs: 5 * 60 * 1000,
+  alivePhaseLoadHigh: 0.35,
+  alivePhaseLoadLow: 0.15,
+  /** 负载归一：滑窗内多少 token 算「满负荷」（同时段有人聊天就会逼近 1） */
+  alivePhaseLoadTokensHigh: 20000,
+  alivePhaseFatigueHigh: 60,
+  alivePhaseFatigueLow: 25,
+  /** 决策日志保留条数（state.events 只追加、按此裁剪；页面只显示最近 N 条） */
+  aliveHistoryMax: 200,
+  /** 唤醒轮默认只读（可读文件/检索记忆/写记忆与目标，不写盘、不执行命令） */
+  aliveReadOnlyWake: true
 };
 
 /** @type {AgentLimitSchemaGroup[]} */

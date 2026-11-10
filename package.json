@@ -76,6 +76,7 @@
     "test:mobile": "node scripts/test-mobile-smoke.cjs",
     "test:headless": "node scripts/test-headless-smoke.cjs",
     "test:mobile-camera": "node scripts/test-mobile-camera.cjs",
+    "test:desktop-camera": "node scripts/test-desktop-camera.cjs",
     "test:peer": "node scripts/test-peer-store.cjs && node scripts/test-peer-tools.cjs && node scripts/test-peer-mesh.cjs",
     "test:peer-mesh": "node scripts/test-peer-mesh.cjs",
     "test:peer-tools": "node scripts/test-peer-tools.cjs",
@@ -132,7 +133,8 @@
     "publish:headless-apt": "node scripts/publish-headless-apt.cjs",
     "verify:headless-apt": "node scripts/publish-headless-apt.cjs --verify release/headless-apt/pool",
     "test:headless-desktop-ui": "node scripts/test-headless-desktop-ui.cjs",
-    "test:headless-desktop-turn": "node scripts/test-headless-desktop-turn.cjs"
+    "test:headless-desktop-turn": "node scripts/test-headless-desktop-turn.cjs",
+    "test:alive": "node scripts/test-alive.cjs"
   },
   "author": {
     "name": "PixelOffice",

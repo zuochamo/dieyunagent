@@ -139,6 +139,8 @@ function resolveTurnModel({ userData, route, model, strict }) {
  * @param {object|null} [ctx.triggerMeta] 落进用户轮次 meta 的归因（频道 / headless）
  * @param {Array<object>} [ctx.extraTools] 额外工具 schema（调用方专用，如换工作空间）
  * @param {(name: string, args: object) => Promise<any>|null} [ctx.preTool] 调用方先接手的工具
+ * @param {(name: string, args: object, result: any) => Promise<any>|null} [ctx.postTool]
+ *   host 工具返回之后的观察点（只留痕/可改写结果；抛错不影响结果）。生命感用它给「睁眼」记账。
  * @param {string} [ctx.runSource] 请求快照里的来源标记
  * @param {AbortSignal|null} [ctx.signal]
  * @param {string} [ctx.sessionTitle] 轮末写进会话行的标题（频道用「[企业微信] 名称」；不给则不动）
@@ -164,6 +166,22 @@ async function runMainTurn(ctx) {
   }
 
   const workspacePath = String(ctx.workspacePath || '');
+  /**
+   * 后台心跳唤醒的一轮（`src/alive`）：**不产出面向用户的内容**，也不往长期记忆里沉淀。
+   * 与用户轮唯一的语义差别就在这里 —— 其余（系统提示、工具、压缩、交付闸门）走同一份实现，
+   * 所以不需要第二个 runMainTurn。
+   */
+  const internal = ctx.internal === true;
+  /**
+   * 只读作用域：后台心跳轮默认不碰磁盘与本机进程（`tool-gate` 的 read-only-scope 关卡据此拦）。
+   * 普通对话不设这个字段，行为零变化。
+   */
+  const readOnlyScope = !!(ctx.toolScope && ctx.toolScope.readOnly === true);
+  /** 感官开关（只读轮里的逐项授权，如摄像头）；普通对话不传 */
+  const sensesScope =
+    ctx.toolScope && ctx.toolScope.senses && typeof ctx.toolScope.senses === 'object'
+      ? ctx.toolScope.senses
+      : null;
   const userText = String(ctx.userText || '').trim();
   const ledgerText = String(ctx.ledgerText || userText).trim();
   if (!ledgerText) throw userError('消息内容为空', 'EMPTY_TEXT');
@@ -289,14 +307,27 @@ async function runMainTurn(ctx) {
           const handled = await ctx.preTool(name, args);
           if (handled) return handled;
         }
-        return ctx.toolBridge.executeAgentTool(name, args, {
+        const toolResult = await ctx.toolBridge.executeAgentTool(name, args, {
           workspacePath: resolveWorkspacePath() || undefined,
           sessionId,
           model: llmModel,
           // 工具侧的 agent-limits 按档位取（goalCheckTimeoutMs / visionShotsPerRound …）：
           // 不传就落到 default 档，与本次运行的模型档位不一致（桌面路径一直有传）
-          contextTierId
+          contextTierId,
+          ...(readOnlyScope ? { readOnly: true } : null),
+          ...(sensesScope ? { senses: sensesScope } : null)
         });
+        // 调用后的观察点（目前只有生命感用它给「睁眼」留痕）：**只观察，不改结果**，
+        // 它自己抛错也不能把这轮工具结果弄丢。
+        if (typeof ctx.postTool === 'function') {
+          try {
+            const patched = await ctx.postTool(name, args, toolResult);
+            if (patched) return patched;
+          } catch {
+            // 观察者失败不影响工具结果
+          }
+        }
+        return toolResult;
       }
     });
   } catch (err) {
@@ -319,7 +350,7 @@ async function runMainTurn(ctx) {
 
   const reply = String((loopResult && loopResult.content) || '').trim();
   const trace = (loopResult && loopResult.trace) || [];
-  if (!reply) {
+  if (!reply && !internal) {
     const toolCount = trace.reduce((n, r) => n + ((r && r.tools) || []).length, 0);
     // 最常见失败（上游拒绝 / 额度用尽 / 只调工具没写正文），且文案不含内部细节：
     // 标成 userSafe 才能让对方知道「为什么没回话」，而不是一句通用失败。
@@ -331,13 +362,16 @@ async function runMainTurn(ctx) {
     );
   }
 
-  // 落库与桌面聊天同一闸门：带标签的思考引用只用于展示，写进账本换占位
+  // 落库与桌面聊天同一闸门：带标签的思考引用只用于展示，写进账本换占位。
+  // 后台心跳轮允许没有正文（只做了一次决策/一次工具调用），空正文不落一条空消息。
   const body = roundText.persistableTurnText(reply);
-  await gateway.invokeRpc('memory.message_append', {
-    sessionId,
-    role: 'assistant',
-    content: packMessageMeta(body, { trigger: ctx.triggerMeta || null }, { role: 'assistant' })
-  });
+  if (body) {
+    await gateway.invokeRpc('memory.message_append', {
+      sessionId,
+      role: 'assistant',
+      content: packMessageMeta(body, { trigger: ctx.triggerMeta || null }, { role: 'assistant' })
+    });
+  }
   // 标题：频道侧按「渠道 + 会话」给稳定标题（如「企业微信 · 张三」）；不给就保持库里原值
   // （`memory.touch_session` 的 title 是可选的，旧 agent-turn 一直在传，搬家时漏了）
   await gateway.invokeRpc('memory.touch_session', {
@@ -345,26 +379,29 @@ async function runMainTurn(ctx) {
     ...(String(ctx.sessionTitle || '').trim() ? { title: String(ctx.sessionTitle).trim() } : {})
   });
 
-  // 记忆归纳：Main 侧跑出来的轮次同样沉淀（与定时计划同一入口）
+  // 记忆归纳：Main 侧跑出来的轮次同样沉淀（与定时计划同一入口）。
+  // **后台心跳轮除外**：体征块不是用户说的话，把它提炼成长期记忆等于给主记忆灌噪声。
   try {
-    const { afterAgentRun } = require('./knowledge-maintainer');
-    afterAgentRun({
-      result: {
-        content: reply,
-        trace,
-        runId: loopResult && loopResult.runId,
-        plan: null,
-        review: null,
-        readiness: loopResult && loopResult.readiness
-      },
-      opts: {
-        sessionId,
-        workspacePath,
-        model: llmModel,
-        apiConfig: apiCfg,
-        userText: ledgerText
-      }
-    });
+    if (!internal) {
+      const { afterAgentRun } = require('./knowledge-maintainer');
+      afterAgentRun({
+        result: {
+          content: reply,
+          trace,
+          runId: loopResult && loopResult.runId,
+          plan: null,
+          review: null,
+          readiness: loopResult && loopResult.readiness
+        },
+        opts: {
+          sessionId,
+          workspacePath,
+          model: llmModel,
+          apiConfig: apiCfg,
+          userText: ledgerText
+        }
+      });
+    }
   } catch {
     // 归纳失败不影响回复
   }

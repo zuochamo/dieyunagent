@@ -17,6 +17,9 @@
  * - `camera`：`camera_look` 让**手机**拍的一张现实世界照片（前置看人 / 后置看桌面）。
  *   它与屏幕截图的区别是「一次一张、不常开」：手机端每次拍摄都有可见提示，
  *   额度也单独计（`cameraShotsPerRound`），不和浏览器截图抢额度。
+ * - `desktopCamera`：`desktop_camera_look` 抓的**本机**摄像头一帧（OBSBOT Tiny 2 这类
+ *   接在电脑上的 UVC 摄像头）。同样一次一张、同样不落盘，额度单独计
+ *   （`desktopCameraShotsPerRound`）—— 手机和本机是两台不同的眼睛，谁也挤不掉谁。
  *
  * 约束（与 dieyun-core 的 strip_inline_images_from_messages 同源策略一致）：
  * - 只暂存、不写入 Rust 消息账本，也不进 checkpoint，避免 base64 长期驻留与重复发送；
@@ -35,13 +38,15 @@ const SOURCE_ATTACHMENT = 'attachment';
 const SOURCE_MCP = 'mcp';
 const SOURCE_COMPUTER = 'computer';
 const SOURCE_CAMERA = 'camera';
+const SOURCE_DESKTOP_CAMERA = 'desktopCamera';
 /** 来源白名单：不在其中的一律归到 browser（保持历史语义），不让调用方字符串决定配额。 */
 const KNOWN_SOURCES = Object.freeze([
   SOURCE_BROWSER,
   SOURCE_ATTACHMENT,
   SOURCE_MCP,
   SOURCE_COMPUTER,
-  SOURCE_CAMERA
+  SOURCE_CAMERA,
+  SOURCE_DESKTOP_CAMERA
 ]);
 
 /** 兼容旧调用方的常量（现由 agent-limits 单一来源，此处仅做再导出） */
@@ -86,6 +91,12 @@ function resolveVisionLimits(limits) {
       [SOURCE_CAMERA]: toPositiveInt(
         l.cameraShotsPerRound,
         AGENT_LIMITS_DEFAULTS.cameraShotsPerRound
+      ),
+      // 本机摄像头：与手机摄像头同口径、但**独立**计。两台眼睛各自一次一张，
+      // 手机拍一张不该把「看一眼本机机位」的额度吃掉。
+      [SOURCE_DESKTOP_CAMERA]: toPositiveInt(
+        l.desktopCameraShotsPerRound,
+        AGENT_LIMITS_DEFAULTS.desktopCameraShotsPerRound
       )
     },
     maxBase64Chars: toPositiveInt(l.visionMaxBase64Chars, MAX_BASE64_CHARS),
@@ -119,6 +130,12 @@ function extractShot(toolName, result) {
     mime = result.mime || 'image/jpeg';
     width = result.width;
     height = result.height;
+  } else if (toolName === 'desktop_camera_look' && typeof result.base64 === 'string') {
+    // 本机摄像头：ffmpeg 出的是 MJPEG 单帧，同样按 JPEG 声明。
+    base64 = result.base64;
+    mime = result.mime || 'image/jpeg';
+    width = result.width;
+    height = result.height;
   } else if (
     toolName === 'browser_observe' &&
     result.screenshot &&
@@ -137,7 +154,9 @@ function extractShot(toolName, result) {
       ? SOURCE_COMPUTER
       : toolName === 'camera_look'
         ? SOURCE_CAMERA
-        : SOURCE_BROWSER;
+        : toolName === 'desktop_camera_look'
+          ? SOURCE_DESKTOP_CAMERA
+          : SOURCE_BROWSER;
   return { source, tool: toolName, mime, base64, width, height };
 }
 
@@ -275,6 +294,13 @@ function buildVisionMessage(images) {
         '看不清就说看不清并再拍一张，不要凭想象补细节。'
     );
   }
+  const desktopCamera = list.filter((s) => s.source === SOURCE_DESKTOP_CAMERA);
+  if (desktopCamera.length) {
+    lines.push(
+      `以下是这台电脑上接的摄像头刚抓的画面（${desktopCamera.length} 张）。请据此回答「你看到了什么」类问题；` +
+        '它是固定机位，看不到的角度就如实说看不到，不要凭想象补细节。'
+    );
+  }
   return {
     role: 'user',
     content: [
@@ -293,6 +319,7 @@ module.exports = {
   SOURCE_MCP,
   SOURCE_COMPUTER,
   SOURCE_CAMERA,
+  SOURCE_DESKTOP_CAMERA,
   MAX_SHOTS_PER_RUN,
   MAX_BASE64_CHARS,
   resolveVisionLimits,

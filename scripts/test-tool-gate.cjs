@@ -33,7 +33,7 @@ async function main() {
   assert(TOOL_GATE_STAGES.join(',') === 'before,after', 'stages are before/after');
   assert(
     listHookIds().join(',') ===
-      'before:validate-args,before:tool-permission,before:repeat-guard,after:telemetry,after:spill-output',
+      'before:validate-args,before:tool-permission,before:read-only-scope,before:repeat-guard,after:telemetry,after:spill-output',
     `默认关卡顺序固定，实际 ${listHookIds().join(',')}`
   );
   assert(
@@ -143,6 +143,76 @@ async function main() {
     );
     assert(failed.ok === false && failed.errorCode === 'TODO', 'failure envelope preserved');
     assert(!failed.outputFile, 'failure envelope is never spilled');
+  }
+
+  // 6b) 只读作用域（`src/alive` 的后台心跳轮）：白名单外一律拒，含那些"不是写但有副作用"的工具
+  {
+    const roHarness = new ToolHarnessSession({ runId: 'gate-ro', userDataPath, readOnly: true });
+    const deny = async (name, args) => {
+      const out = await roHarness.execute(
+        createToolCall({ name, args, harness: roHarness }),
+        async () => ({ ok: true })
+      );
+      return out;
+    };
+    const blocked = await deny('fs_write_file', { filePath: 'a.js', content: 'x' });
+    assert(
+      blocked && blocked.ok === false && blocked.errorCode === 'READ_ONLY_SCOPE',
+      `只读轮应拦下写入，实际 ${JSON.stringify(blocked && blocked.errorCode)}`
+    );
+    for (const [name, args] of [
+      ['host_exec', { command: 'echo hi' }],
+      ['web_fetch', { url: 'https://example.com' }],
+      ['peer_send', { peer: 'x', message: 'hi' }],
+      ['memory_forget', { memoryIds: [1] }],
+      ['subagent', { task: 'do it' }],
+      ['plan_run', { planId: 'p1' }],
+      ['goal_check', { planId: 'p1', check_id: 'c1' }],
+      ['browser_navigate', { url: 'https://example.com' }]
+    ]) {
+      const out = await deny(name, args);
+      assert(
+        out && out.ok === false && out.errorCode === 'READ_ONLY_SCOPE',
+        `${name} 不该在心跳轮里可用（实际 ${JSON.stringify(out && out.errorCode)}）`
+      );
+    }
+    const allowed = await roHarness.execute(
+      createToolCall({ name: 'fs_read_file', args: { filePath: 'a.js' }, harness: roHarness }),
+      async () => ({ ok: true, content: 'x' })
+    );
+    assert(allowed && allowed.ok === true, '只读轮应放行读取');
+    const recall = await roHarness.execute(
+      createToolCall({ name: 'memory_recall', args: { query: 'x' }, harness: roHarness }),
+      async () => ({ ok: true })
+    );
+    assert(recall && recall.ok === true, '只读轮应放行记忆检索');
+
+    // 感官（摄像头）：在白名单里，但还要 senses.eyes 才放行
+    const blind = await deny('camera_look', {});
+    assert(
+      blind && blind.ok === false && blind.errorCode === 'SENSE_DISABLED',
+      `摄像头默认应被感官开关挡住，实际 ${JSON.stringify(blind && blind.errorCode)}`
+    );
+    const seeing = new ToolHarnessSession({
+      runId: 'gate-eyes',
+      userDataPath,
+      readOnly: true,
+      senses: { eyes: true }
+    });
+    const looked = await seeing.execute(
+      createToolCall({ name: 'camera_look', args: {}, harness: seeing }),
+      async () => ({ ok: true, saw: 'x' })
+    );
+    assert(looked && looked.ok === true, '打开 eyes 后摄像头应放行');
+
+    const rwHarness = new ToolHarnessSession({ runId: 'gate-rw', userDataPath });
+    const rwCall = createToolCall({
+      name: 'fs_write_file',
+      args: { filePath: 'a.js', content: 'x' },
+      harness: rwHarness
+    });
+    await runToolGateStage('before', rwCall);
+    assert(rwCall.block === null, '普通会话不受只读作用域影响');
   }
 
   // 7) 单独跑某阶段的入口（外层关卡复用同一套顺序机制）

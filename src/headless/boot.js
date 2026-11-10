@@ -49,6 +49,7 @@ const UNAVAILABLE_CAPABILITIES = [
   'browser_*（需 Electron 内嵌浏览器）',
   'computer_*（需桌面截图 / 输入）',
   'camera_look（需手机端连接）',
+  'desktop_camera_look（需本机摄像头与 ffmpeg）',
   'agent_clarify / session_new / session_set_workspace（Renderer-only）'
 ];
 

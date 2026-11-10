@@ -11,6 +11,7 @@ const SETTINGS_TITLE_KEYS = {
   'agent-knowledge': ['settings_agent_knowledge', '知识'],
   channels: ['settings_channels', '频道'],
   'shared-memory': ['settings_shared_memory', '共享记忆'],
+  alive: ['settings_alive', '生命'],
   shortcuts: ['settings_shortcuts', '快捷键']
 };
 const MODEL_TAB_TITLE_KEYS = {
@@ -171,6 +172,9 @@ function switchSettingsTab(tab) {
   }
   if (tab === 'shared-memory' && typeof window.onSharedMemorySettingsTabShown === 'function') {
     window.onSharedMemorySettingsTabShown();
+  }
+  if (tab === 'alive' && typeof window.onAliveSettingsTabShown === 'function') {
+    window.onAliveSettingsTabShown();
   }
   if (tab === 'shortcuts') {
     if (typeof renderShortcutsSettingsPage === 'function') renderShortcutsSettingsPage();

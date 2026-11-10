@@ -6178,6 +6178,15 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   line-height: 1.5;
 }
 
+/* 生命感：感官「勾着但不可用」要说出来（红字）。与 `.save-hint.warn` 同一套语义 */
+.channels-footnote.warn {
+  color: var(--danger);
+}
+
+.channels-footnote.ok {
+  color: var(--ok);
+}
+
 .channels-toolbar {
   display: flex;
   align-items: center;
