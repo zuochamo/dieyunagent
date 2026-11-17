@@ -1170,45 +1170,49 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   };
 
   const turnHost = [];
-  // 后台任务补报排在最前：先解释「上一轮启动的那条跑完了没」，再谈代码与记忆
-  const settledJobsBlock = await fetchSettledJobsBlock(snap, invokeRpc);
-  if (settledJobsBlock) turnHost.push(settledJobsBlock);
-  // 索引注入事实（见下方 indexAudit）：这两个变量是「真的进了上下文」的唯一凭据，
-  // 不能事后再从 turnHost 里找标题猜 —— 空命中块和「没注入」是两件不同的事。
-  let codeBlockInjected = false;
-  if (allowCodebase) {
-    const codebaseBlock = await fetchCodebaseBlock(
-      {
-        ...snap,
-        forceCodebase: false
-      },
-      invokeRpc,
-      lim
-    );
-    if (codebaseBlock) {
-      turnHost.push(codebaseBlock);
-      codeBlockInjected = true;
-    }
-  }
-  if (injectCode) {
-    const gitBlock = await fetchGitDiffBlock(snap, invokeRpc);
-    if (gitBlock) turnHost.push(gitBlock);
-    const changes = formatRecentChanges(snapshot.changeRows, lim.RECENT_CHANGE_MAX);
-    if (changes) turnHost.push(changes);
-    const skip = extractCodebasePathsFromBlock(
-      turnHost.find((c) => String(c).includes('【相关代码】') || String(c).includes('【Codebase')) || ''
-    );
-    const openBlock = await fetchOpenFilesBlock(snap, invokeRpc, lim, skip);
-    if (openBlock) turnHost.push(openBlock);
-  }
-
-  const agentsBlock = await fetchAgentsMdBlock(snap, invokeRpc, deps.userDataPath);
-  if (agentsBlock) turnHost.push(agentsBlock);
-
   kickGraphLspEnrich(snap, invokeRpc);
   const injectKnowledge = !!String(userQuery || '').trim();
   /** @type {MemoryInjectionAudit} */
   const memoryAudit = {};
+
+  // ── 召回全部并行 ────────────────────────────────────────────────────────────
+  // 这些块**互相不依赖**，只是拼进 prompt 的先后有序。原先它们是三段串行 await
+  // （代码链 → AGENTS.md → 记忆/技能九件套），最坏情况把各自的 RPC 往返直接相加；
+  // 一条语义召回撞上 embedding 抖动（实测一次 2.2s）就会把首字延迟整体推后。
+  // 现在只保留真实依赖：`open` 要等 `codebase`（已检索到的文件不重复读），其余同时发。
+  // **装配顺序不变** —— 顺序在这一层只是 push 次序，与「什么时候取」无关。
+  const codeChain = (async () => {
+    const [codebaseBlock, gitBlock] = await Promise.all([
+      allowCodebase
+        ? fetchCodebaseBlock({ ...snap, forceCodebase: false }, invokeRpc, lim)
+        : Promise.resolve(''),
+      injectCode ? fetchGitDiffBlock(snap, invokeRpc) : Promise.resolve('')
+    ]);
+    const changes = injectCode ? formatRecentChanges(snapshot.changeRows, lim.RECENT_CHANGE_MAX) : '';
+    // skip 的语义是「codebase 块里已经给过的文件」：直接取那一块，不再从 turnHost 里按标题反查
+    const openBlock = injectCode
+      ? await fetchOpenFilesBlock(snap, invokeRpc, lim, extractCodebasePathsFromBlock(codebaseBlock || ''))
+      : '';
+    return { codebaseBlock, gitBlock, changes, openBlock };
+  })();
+
+  const [settledJobsBlock, code, agentsBlock, mcpBlock, memoryBlocks] = await Promise.all([
+    fetchSettledJobsBlock(snap, invokeRpc),
+    codeChain,
+    fetchAgentsMdBlock(snap, invokeRpc, deps.userDataPath),
+    fetchMcpBlock(snapshot, deps),
+    Promise.all([
+      fetchSessionGoalBlock(snapshot, invokeRpc, agentLimits || AGENT_LIMITS_DEFAULTS),
+      fetchSessionHandoffBlock(snapshot, invokeRpc, memoryAudit),
+      fetchGraphRepoMapBlock(snap, invokeRpc, lim),
+      injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim, memoryAudit) : Promise.resolve(''),
+      fetchGlobalMemoryBlock(snap, invokeRpc, lim, memoryAudit),
+      fetchSharedMemoryBlock(snap, deps, lim, memoryAudit),
+      fetchCompactionBlock(snap, invokeRpc),
+      fetchWorkMemoryBlock(snap, invokeRpc, memoryAudit),
+      fetchSkillsBlock(snap, deps, lim)
+    ])
+  ]);
   const [
     sessionGoalBlock,
     handoffBlock,
@@ -1219,17 +1223,16 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     compactionBlock,
     workMemoryBlock,
     skillsBlock
-  ] = await Promise.all([
-    fetchSessionGoalBlock(snapshot, invokeRpc, agentLimits || AGENT_LIMITS_DEFAULTS),
-    fetchSessionHandoffBlock(snapshot, invokeRpc, memoryAudit),
-    fetchGraphRepoMapBlock(snap, invokeRpc, lim),
-    injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim, memoryAudit) : Promise.resolve(''),
-    fetchGlobalMemoryBlock(snap, invokeRpc, lim, memoryAudit),
-    fetchSharedMemoryBlock(snap, deps, lim, memoryAudit),
-    fetchCompactionBlock(snap, invokeRpc),
-    fetchWorkMemoryBlock(snap, invokeRpc, memoryAudit),
-    fetchSkillsBlock(snap, deps, lim)
-  ]);
+  ] = memoryBlocks;
+
+  // 后台任务补报排在最前：先解释「上一轮启动的那条跑完了没」，再谈代码与记忆
+  if (settledJobsBlock) turnHost.push(settledJobsBlock);
+  // 索引注入事实（见下方 indexAudit）：这个布尔是「真的进了上下文」的唯一凭据，
+  // 不能事后再从 turnHost 里找标题猜 —— 空命中块和「没注入」是两件不同的事。
+  const codeBlockInjected = !!code.codebaseBlock;
+  for (const block of [code.codebaseBlock, code.gitBlock, code.changes, code.openBlock, agentsBlock]) {
+    if (block) turnHost.push(block);
+  }
   for (const block of [
     // 会话目标排最前：它是「这一轮为什么继续」的总纲，其余块都是背景
     sessionGoalBlock,
@@ -1245,8 +1248,6 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   ]) {
     if (block) turnHost.push(block);
   }
-  const mcpBlock = await fetchMcpBlock(snapshot, deps);
-
   let permissions = deps.permissions;
   if (permissions == null && typeof deps.getPermissions === 'function') {
     try {

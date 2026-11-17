@@ -14,6 +14,15 @@ function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assert failed');
 }
 
+/** 断言 a 出现在 b 之前（两块都得在），用于钉住 prompt 块的装配次序。 */
+function assertBefore(text, a, b, msg) {
+  const ia = text.indexOf(a);
+  const ib = text.indexOf(b);
+  assert(ia >= 0, `${msg}：缺块 ${a}`);
+  assert(ib >= 0, `${msg}：缺块 ${b}`);
+  assert(ia < ib, `${msg}：${a} 应在 ${b} 之前`);
+}
+
 assert(
   shouldInjectCodeContext('请看 src/foo.js', {}) === true,
   'path hint injects code context'
@@ -151,6 +160,11 @@ async function runPrep() {
   assert(packed.turnRide.includes('【编辑器上下文'), 'renderer editor chunk preserved');
   assert(calls.includes('codebase.search'), 'searched codebase');
   assert(calls.includes('workspace.git_diff'), 'fetched git diff');
+  // 装配顺序：召回改并行后，push 次序必须原样（顺序只表达「谁先被模型读到」）
+  assertBefore(packed.turnRide, '【Codebase 检索】', '【未提交 diff】', 'codebase 在 git 之前');
+  assertBefore(packed.turnRide, '【未提交 diff】', '【本会话变更文件】', 'git 在变更文件之前');
+  assertBefore(packed.turnRide, '【本会话变更文件】', '【当前关注文件', '变更文件在打开文件之前');
+  assertBefore(packed.turnRide, '【当前关注文件', '【项目地图 · AGENTS.md】', 'AGENTS.md 在代码块之后');
 }
 
 async function runPrepKnowledge() {
@@ -254,6 +268,11 @@ async function runPrepKnowledge() {
     'memoryAudit records global ids'
   );
   assert(packed.memoryAudit.workMemory && 'runId' in packed.memoryAudit.workMemory, 'work memory audit');
+  // 装配顺序（九件套并行取、按序拼）：本机项目记忆 → 用户级长期记忆 → 压缩 → 工作记忆 → 技能
+  assertBefore(packed.turnRide, '【项目记忆', '【长期记忆', '项目记忆在长期记忆之前');
+  assertBefore(packed.turnRide, '【长期记忆', '此前已改过路由', '长期记忆在压缩块之前');
+  assertBefore(packed.turnRide, '此前已改过路由', '【工作记忆模板】', '压缩块在工作记忆之前');
+  assertBefore(packed.turnRide, '【工作记忆模板】', '【相关技能 · 索引', '工作记忆在技能目录之前');
 }
 
 async function runPrepGraph() {
@@ -523,6 +542,76 @@ async function runAgentsChain() {
   assert(dedup.includes('【项目地图'), '折叠后保留具体层');
 }
 
+// —— 召回并行（首字延迟）——
+//
+// 守的语义：代码链 / AGENTS.md / MCP / 记忆九件套**互相不依赖**，取的时候必须同时在飞；
+// 唯一真实依赖是 `open` 要等 `codebase`（已检索到的文件不重复读）。
+// 判据用「调用区间是否重叠」而不是墙钟阈值：重叠由调用结构决定，不受机器负载影响；
+// 串行实现下 codebase/git 与 memory.* 的区间永远不可能相交。
+async function runPrepConcurrency() {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const intervals = [];
+  const timedRpc = (fn) => async (method, params) => {
+    const t0 = Date.now();
+    try {
+      await sleep(40);
+      return await fn(method, params);
+    } finally {
+      intervals.push({ method, t0, t1: Date.now() });
+    }
+  };
+  const started = Date.now();
+  const packed = await prepSystemPrompt(
+    {
+      userQuery: '继续改登录',
+      sessionId: 'sess-concurrency',
+      injectCode: true,
+      allowCodebase: true,
+      languagePrompt: '',
+      userSystem: '',
+      workspaceInfo: { workspacePath: 'D:/proj', kind: 'local' },
+      openFilePaths: ['src/a.js'],
+      hasContinueCheckpoint: true,
+      changeRows: [{ path: 'src/a.js', diff: { added: 1, removed: 0 } }]
+    },
+    {
+      invokeRpc: timedRpc(async (method) => {
+        if (method === 'codebase.search') {
+          return { results: [{ path: 'src/a.js', startLine: 1, endLine: 2, snippet: 'x' }] };
+        }
+        if (method === 'workspace.git_diff') return { ok: true, text: '【未提交 diff】\ndiff --git a/src/a.js' };
+        if (method === 'fs.read_file') return { data: 'body', encoding: 'utf8' };
+        if (method === 'graph.repo_map' || method === 'graph.lsp_enrich') return { indexed: false };
+        if (method === 'memory.long_recall') {
+          return { mode: 'keyword', results: [{ id: 1, kind: 'normal', score: 0.5, content: '偏好中文' }] };
+        }
+        if (method === 'memory.compaction_recent') return [];
+        if (method === 'agent.state_get') {
+          return { summary: '正在改登录', status: 'paused', stateSnapshot: { taskStage: 'editing' } };
+        }
+        throw new Error('unexpected ' + method);
+      }),
+      getPermissions: () => ({ fsRead: true }),
+      getAgentHome: () => ({ dieyunSkills: '/tmp/skills' }),
+      listMcpServers: async () => []
+    }
+  );
+  const elapsed = Date.now() - started;
+  const CODE = new Set(['codebase.search', 'workspace.git_diff']);
+  const MEMORY = new Set(['memory.long_recall', 'memory.compaction_recent', 'agent.state_get']);
+  const overlapped = intervals.some(
+    (a) =>
+      CODE.has(a.method) &&
+      intervals.some((b) => MEMORY.has(b.method) && a.t0 < b.t1 && b.t0 < a.t1)
+  );
+  assert(overlapped, '代码召回与记忆召回必须同时在飞（串行 = 首字延迟相加）');
+  const serialSum = intervals.reduce((n, s) => n + (s.t1 - s.t0), 0);
+  assert(elapsed < serialSum, `并行后总耗时 ${elapsed}ms 应显著小于串行相加 ${serialSum}ms`);
+  assert(packed.turnRide.includes('src/a.js'), '并行不影响代码块注入');
+  assert(packed.turnRide.includes('【工作记忆模板】'), '并行不影响记忆块注入');
+  console.log(`[prep-concurrency] ${elapsed}ms 并行 vs ${serialSum}ms 串行相加`);
+}
+
 runPrep()
   .then(() => runPrepKnowledge())
   .then(() => runPrepGraph())
@@ -531,6 +620,7 @@ runPrep()
   .then(() => runPrepSkipAutoGraph())
   .then(() => runPrepMcpFull())
   .then(() => runAgentsChain())
+  .then(() => runPrepConcurrency())
   .then(() => {
     console.log('test-system-prompt-prep.cjs ok');
   })
