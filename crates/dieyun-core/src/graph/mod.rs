@@ -1,4 +1,8 @@
+mod queries;
+mod status;
 mod build;
+mod incremental;
+mod cleanup;
 pub use build::GraphScope;
 mod extract;
 mod lsp_ingest;
@@ -16,25 +20,13 @@ use rusqlite::{params, Connection};
 
 use crate::error::CoreError;
 use crate::graph::build::{run_build_with_progress, run_remote_build};
-use crate::graph::lsp_ingest::ingest_lsp_callers;
-use crate::graph::query::{callees, callers, impact, module_deps, repo_map, symbol_search};
 use crate::graph::types::{
     CallGraphResult, GraphStartIndexResult, GraphStatusResult, ImpactResult, ModuleDepsResult,
     RepoMapResult, SymbolSearchResult,
 };
 use crate::index::{resolve_workspace, RemoteFileInput, WorkspaceRef};
 use crate::sqlite::SqliteHandle;
-
-#[derive(Debug, Clone, Default)]
-struct GraphProgressSnapshot {
-    phase: String,
-    files_done: i64,
-    files_total: i64,
-    edge_count: i64,
-    symbol_count: i64,
-    call_count: i64,
-    last_error: Option<String>,
-}
+use status::{repair_stale_indexing_flag, GraphProgressSnapshot};
 
 #[derive(Clone)]
 pub struct GraphService {
@@ -90,166 +82,6 @@ impl GraphService {
             }
         }
         self.db.read(|conn| f(conn, st.indexed))
-    }
-
-    /// 状态快照：读池上纯读；第二个返回值表示「库里有脏旗标需要修」。
-    fn status_snapshot(&self, ws: &WorkspaceRef) -> Result<(GraphStatusResult, bool), CoreError> {
-        self.db.read(|conn| self.status_with_conn(conn, ws))
-    }
-
-    fn set_progress(
-        &self,
-        root_hash: &str,
-        phase: &str,
-        files_done: i64,
-        files_total: i64,
-        edge_count: i64,
-        symbol_count: i64,
-        call_count: i64,
-    ) {
-        if let Ok(mut guard) = self.progress.lock() {
-            let entry = guard.entry(root_hash.to_string()).or_default();
-            entry.phase = phase.to_string();
-            entry.files_done = files_done;
-            entry.files_total = files_total;
-            entry.edge_count = edge_count;
-            entry.symbol_count = symbol_count;
-            entry.call_count = call_count;
-            entry.last_error = None;
-        }
-    }
-
-    fn set_progress_error(&self, root_hash: &str, err: &str) {
-        if let Ok(mut guard) = self.progress.lock() {
-            let entry = guard.entry(root_hash.to_string()).or_default();
-            entry.phase = "error".into();
-            entry.last_error = Some(err.to_string());
-        }
-    }
-
-    fn clear_progress(&self, root_hash: &str) {
-        if let Ok(mut guard) = self.progress.lock() {
-            guard.remove(root_hash);
-        }
-    }
-
-    fn apply_live_progress(&self, root_hash: &str, st: &mut GraphStatusResult) {
-        if let Ok(guard) = self.progress.lock() {
-            if let Some(p) = guard.get(root_hash) {
-                if !p.phase.is_empty() {
-                    st.phase = Some(p.phase.clone());
-                }
-                if p.files_total > 0 || p.files_done > 0 {
-                    st.files_done = Some(p.files_done);
-                    st.files_total = Some(p.files_total);
-                }
-                if p.edge_count > st.edge_count {
-                    st.edge_count = p.edge_count;
-                }
-                if p.symbol_count > st.symbol_count {
-                    st.symbol_count = p.symbol_count;
-                }
-                if p.call_count > st.call_count {
-                    st.call_count = p.call_count;
-                }
-                if let Some(err) = p.last_error.clone() {
-                    st.last_error = Some(err);
-                }
-            }
-        }
-    }
-
-    pub fn status(&self, workspace_root: &str) -> Result<GraphStatusResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        let (st, stale_flag) = self.status_snapshot(&ws)?;
-        if stale_flag {
-            // 修复不在读路径上做：独立连接 + `busy_timeout(0)`，抢不到写锁就下次再修
-            if let Ok(conn) = self.open_dedicated() {
-                repair_stale_indexing_flag(&conn, &ws.root_hash);
-            }
-        }
-        Ok(st)
-    }
-
-    /// `status` 的实现本体：连接由调用方提供。
-    ///
-    /// **纯读**：库里的脏旗标（`indexing = 1` 却没人真在跑，通常是崩溃残留）只发现、
-    /// 不在这里写，第二个返回值交给调用方用独立连接补写（见
-    /// [`read_conn`](Self::read_conn) / [`status`](Self::status)）。
-    fn status_with_conn(
-        &self,
-        conn: &Connection,
-        ws: &WorkspaceRef,
-    ) -> Result<(GraphStatusResult, bool), CoreError> {
-        let live_indexing = self
-            .building
-            .lock()
-            .map(|g| g.contains(&ws.root_hash))
-            .unwrap_or(false);
-
-        let row: Option<(i64, i64, i64, i64, i64, i64)> = conn
-            .query_row(
-                "SELECT file_count, edge_count, symbol_count, call_count, indexed_at, indexing
-                 FROM graph_workspaces WHERE root_hash = ?1",
-                params![ws.root_hash],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )
-            .ok();
-
-        Ok(match row {
-            None => {
-                let mut st = GraphStatusResult {
-                    ok: true,
-                    indexed: false,
-                    file_count: 0,
-                    edge_count: 0,
-                    symbol_count: 0,
-                    call_count: 0,
-                    indexed_at: 0,
-                    indexing: live_indexing,
-                    phase: None,
-                    files_done: None,
-                    files_total: None,
-                    last_error: None,
-                };
-                self.apply_live_progress(&ws.root_hash, &mut st);
-                (st, false)
-            }
-            Some((fc, ec, sc, cc, ia, db_indexing)) => {
-                let mut db_flag = db_indexing;
-                let stale_flag = !live_indexing && db_flag != 0;
-                if stale_flag {
-                    // 读路径不写库：交给调用方用独立连接补（见 status / read_conn）
-                    db_flag = 0;
-                }
-                let mut st = GraphStatusResult {
-                    ok: true,
-                    // indexed = 结构建库已落盘（含无可解析符号的空仓）
-                    indexed: ia > 0,
-                    file_count: fc,
-                    edge_count: ec,
-                    symbol_count: sc,
-                    call_count: cc,
-                    indexed_at: ia,
-                    indexing: live_indexing || db_flag != 0,
-                    phase: None,
-                    files_done: None,
-                    files_total: None,
-                    last_error: None,
-                };
-                self.apply_live_progress(&ws.root_hash, &mut st);
-                (st, stale_flag)
-            }
-        })
     }
 
     /// 后台启动结构索引（立即返回）
@@ -386,6 +218,7 @@ impl GraphService {
                 edge_count: 0,
                 symbol_count: 0,
                 call_count: 0,
+                calls_built: false,
                 indexed_at: 0,
                 indexing: true,
                 phase: Some("walking".into()),
@@ -546,111 +379,6 @@ impl GraphService {
         self.index_remote(workspace_root, files, force, scope)
     }
 
-    pub fn module_deps(
-        &self,
-        workspace_root: &str,
-        path: Option<&str>,
-        depth: Option<u32>,
-    ) -> Result<ModuleDepsResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        self.read_dedicated(&ws, |conn, indexed| {
-            module_deps(conn, &ws.root_hash, path, depth.unwrap_or(1), indexed)
-        })
-    }
-
-    pub fn repo_map(
-        &self,
-        workspace_root: &str,
-        limit: Option<u32>,
-    ) -> Result<RepoMapResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        self.read_dedicated(&ws, |conn, indexed| {
-            repo_map(conn, &ws.root_hash, limit.unwrap_or(32), indexed)
-        })
-    }
-
-    pub fn symbol_search(
-        &self,
-        workspace_root: &str,
-        query: &str,
-        kind: Option<&str>,
-        limit: Option<u32>,
-    ) -> Result<SymbolSearchResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        self.read_dedicated(&ws, |conn, indexed| {
-            symbol_search(
-                conn,
-                &ws.root_hash,
-                query,
-                kind,
-                limit.unwrap_or(20),
-                indexed,
-            )
-        })
-    }
-
-    pub fn callers(
-        &self,
-        workspace_root: &str,
-        symbol_id: Option<i64>,
-        path: Option<&str>,
-        name: Option<&str>,
-    ) -> Result<CallGraphResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        self.read_dedicated(&ws, |conn, indexed| {
-            callers(conn, &ws.root_hash, symbol_id, path, name, indexed)
-        })
-    }
-
-    pub fn callees(
-        &self,
-        workspace_root: &str,
-        symbol_id: Option<i64>,
-        path: Option<&str>,
-        name: Option<&str>,
-    ) -> Result<CallGraphResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        self.read_dedicated(&ws, |conn, indexed| {
-            callees(conn, &ws.root_hash, symbol_id, path, name, indexed)
-        })
-    }
-
-    pub fn impact(
-        &self,
-        workspace_root: &str,
-        path: &str,
-        depth: Option<u32>,
-    ) -> Result<ImpactResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        self.read_dedicated(&ws, |conn, indexed| {
-            impact(conn, &ws.root_hash, path, depth.unwrap_or(4), indexed)
-        })
-    }
-
-    pub fn ingest_lsp_callers(
-        &self,
-        workspace_root: &str,
-        callee_symbol_id: i64,
-        callee_name: &str,
-        sites: Vec<LspCallSiteIn>,
-    ) -> Result<IngestLspResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        self.with_conn(|conn| {
-            ingest_lsp_callers(conn, &ws.root_hash, callee_symbol_id, callee_name, &sites)
-        })
-    }
-}
-
-/// 修掉崩溃 / 异常退出残留的 `graph_workspaces.indexing = 1`。
-///
-/// best-effort：`busy_timeout(0)`，抢不到写锁就放弃（下次读再修）。
-/// 维修绝不能把读请求拖进等锁 —— 那正是 `codebase.status` 45s 超时的来源。
-fn repair_stale_indexing_flag(conn: &Connection, root_hash: &str) {
-    let _ = conn.busy_timeout(std::time::Duration::ZERO);
-    let _ = conn.execute(
-        "UPDATE graph_workspaces SET indexing = 0 WHERE root_hash = ?1",
-        params![root_hash],
-    );
 }
 
 /// 清掉某工作区的**全部**图谱行（含 `graph_workspaces` 那行本身）。
@@ -658,7 +386,7 @@ fn repair_stale_indexing_flag(conn: &Connection, root_hash: &str) {
 /// 给「根目录已消失的工作区」清理用（`IndexService::prune_missing_workspaces`）：
 /// chunks 与图谱必须一起清，只清一半就会让 `graph_*` 查询拿到没有 chunk 支撑的符号。
 pub(crate) fn clear_workspace_rows(conn: &Connection, root_hash: &str) -> Result<(), CoreError> {
-    build::clear_workspace_graph(conn, root_hash)?;
+    cleanup::clear_workspace_graph(conn, root_hash)?;
     conn.execute(
         "DELETE FROM graph_workspaces WHERE root_hash = ?1",
         params![root_hash],
@@ -1210,5 +938,49 @@ mod tests {
         );
         assert!(sites.call_graph_built, "建过之后字段要翻成 true");
         assert!(sites.note.is_none(), "建过就不再给「未建」提示");
+    }
+
+    /// 回归（A8）：建过调用图之后，**普通保存引起的增量（结构态）不许把调用边吃掉**。
+    ///
+    /// 旧实现按「这一轮传进来的 scope」决定要不要抽调用边：用户改一个文件 → 保存触发的
+    /// 增量是结构态 → `clear_file_graph` 把该文件的出边删掉，`index_file` 又直接返回不重建；
+    /// 而「未变文件要不要重解析」只看全局 `call_count == 0`（此时 > 0）—— 于是**编辑过的
+    /// 文件永久丢调用边**，只有 force 全量重建能回来，且全程没有日志。
+    ///
+    /// 现在建库范围是黏性的（`graph_workspaces.calls_built`）：建过调用图的工作区，增量也按
+    /// WithCalls 维护它。
+    #[test]
+    fn structural_incremental_keeps_call_edges_of_edited_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.js"), "export function helper() { return 1; }\n").unwrap();
+        fs::write(
+            dir.path().join("b.js"),
+            "import { helper } from './a.js';\nexport function caller() { return helper(); }\n",
+        )
+        .unwrap();
+        let svc = test_graph(dir.path().join("g.db"));
+        let root = dir.path().canonicalize().unwrap();
+        let key = root.to_string_lossy().to_string();
+
+        // 1) 全量建库并建调用图
+        let st1 = svc.index_workspace(&key, true, GraphScope::WithCalls).unwrap();
+        assert!(st1.call_count > 0, "前提：这一轮真的建出了调用边");
+
+        // 2) 改 b.js（mtime 变化），然后用**保存路径的默认 scope**（Structural）跑增量
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(
+            dir.path().join("b.js"),
+            "import { helper } from './a.js';\nexport function caller() { return helper() + 1; }\n",
+        )
+        .unwrap();
+        let st2 = svc.index_workspace(&key, false, GraphScope::Structural).unwrap();
+        assert!(st2.indexed);
+
+        // 3) 那个文件刚被改过，它的调用边必须还在（而不是等下一次 force 才回来）
+        let sites = svc.callers(&key, None, None, Some("helper")).unwrap();
+        assert!(
+            sites.sites.iter().any(|s| s.caller_path == "b.js"),
+            "编辑过的文件不该丢调用边（旧实现只 continue 不重建，边会永久消失）"
+        );
     }
 }

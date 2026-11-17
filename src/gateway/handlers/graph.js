@@ -18,7 +18,9 @@ function createGraphHandlers(d) {
   async function ensureCallGraph(ctxInfo, st, autoIndex) {
     if (autoIndex === false) return false;
     if (!st || !st.indexed) return false;
-    if (Number(st.callCount) > 0) return false;
+    // 「建过调用图没有」只看 core 报的 callsBuilt（建库范围，黏性）；
+    // `callCount > 0` 是代理判据：建过但一个边都没解析出来时会被误判成没建，白跑一轮。
+    if (st.callsBuilt === true || Number(st.callCount) > 0) return false;
     await startGraphIndexForContext(ctxInfo, { force: false, skipIfReady: false, calls: true });
     return true;
   }

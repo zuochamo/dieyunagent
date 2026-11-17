@@ -1426,7 +1426,9 @@ function createRpcHandlers(ctx) {
     if (graphNeedsRebuild(st, opts)) return true;
     if (!st.symbolCount && !st.edgeCount) return true;
     if (opts.requireEdges && !st.edgeCount) return true;
-    if (opts.requireCalls && !st.callCount) return true;
+    // requireCalls 问的是「建过调用图没有」→ 用 core 的 callsBuilt（黏性建库范围），
+    // `callCount` 只是当前边数，建过但零边时会被误判成「没建」。
+    if (opts.requireCalls && !st.callsBuilt && !st.callCount) return true;
     return false;
   }
 

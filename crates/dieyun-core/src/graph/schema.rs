@@ -37,6 +37,9 @@ pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
             edge_count INTEGER DEFAULT 0,
             symbol_count INTEGER DEFAULT 0,
             call_count INTEGER DEFAULT 0,
+            -- 这个工作区**建过调用图没有**（建库范围）。黏性：一旦为 1，之后的增量也按
+            -- WithCalls 维护它 —— 否则一次保存的增量（结构态）会把该文件的出边删掉却不重建。
+            calls_built INTEGER NOT NULL DEFAULT 0,
             indexed_at INTEGER DEFAULT 0,
             indexing INTEGER DEFAULT 0
         );
@@ -95,6 +98,15 @@ pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
         "INTEGER DEFAULT 0",
     )?;
     ensure_column(conn, "graph_workspaces", "call_count", "INTEGER DEFAULT 0")?;
+    // 建库范围（是否建过调用边）。旧库补列时默认 0 —— `query.rs` 的可见性判定会把
+    // 「calls_built = 0 但 call_count > 0」（老库已建过边）也算成「建过」，避免升级后
+    // 模型突然被告知「调用图未建」。
+    ensure_column(
+        conn,
+        "graph_workspaces",
+        "calls_built",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 

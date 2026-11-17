@@ -132,17 +132,19 @@ pub fn symbol_search(
     })
 }
 
-/// 这个工作区建过调用边没有。
+/// 这个工作区建过调用图没有。
 ///
-/// 调用边只在 `calls:true` 的建库范围内抽取（`build.rs`），而默认的结构索引**一份都没有** ——
-/// 所以 `sites: []` 必须先分清是「真没人调用」还是「没建过」。这是唯一判据。
+/// 判据是 `graph_workspaces.calls_built`（建库范围，黏性）——**不是** `call_count > 0`：
+/// 后者是「当前库里有多少条边」，一个刚建好调用图、但还没解析出任何边的仓会被误判成
+/// 「没建过」；反过来，边被误清空时它又会把「建过」说成「没建过」。
+/// 旧库没有这一列时为 0，此时退回 `call_count > 0`（升级前建过边的库不该突然被告知「未建」）。
 fn call_graph_built(conn: &Connection, root_hash: &str) -> bool {
     conn.query_row(
-        "SELECT call_count FROM graph_workspaces WHERE root_hash = ?1",
+        "SELECT calls_built, call_count FROM graph_workspaces WHERE root_hash = ?1",
         params![root_hash],
-        |row| row.get::<_, i64>(0),
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     )
-    .map(|n| n > 0)
+    .map(|(built, calls)| built != 0 || calls > 0)
     .unwrap_or(false)
 }
 

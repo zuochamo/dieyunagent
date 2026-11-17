@@ -32,6 +32,12 @@ pub struct GraphStatusResult {
     pub edge_count: i64,
     pub symbol_count: i64,
     pub call_count: i64,
+    /// 这个工作区**建过调用图没有**（`graph_workspaces.calls_built`，黏性）。
+    ///
+    /// 与 `call_count` 分开报：后者是「当前有多少条边」。用 `call_count > 0` 判「建过没有」
+    /// 会两头出错 —— 建了调用图但一个边都没解析出来时误判成「没建」，边被误清时又判成
+    /// 「没建」。宿主据此决定「要不要再跑一次 calls 建库」，判错的代价是白跑一轮。
+    pub calls_built: bool,
     pub indexed_at: i64,
     pub indexing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

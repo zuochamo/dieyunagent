@@ -3,6 +3,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection};
 
+use super::cleanup::{clear_file_graph, clear_workspace_graph, purge_removed_files, purge_stale_files};
 use crate::error::CoreError;
 use crate::graph::extract::files::{collect_graph_files, is_graph_path};
 use crate::graph::extract::go::{
@@ -106,9 +107,16 @@ pub fn run_build_with_progress(
     let mut symbol_count = count_symbols(conn, root_hash)?;
     let mut call_count = count_calls(conn, root_hash)?;
     let mut files_done = 0i64;
-    // 上次只建了结构（没有调用边）而这次要调用图：mtime 没变也必须重解析，
-    // 否则「按需建调用图」永远抽不出任何东西（增量只处理变过的文件）。
-    let calls_missing = scope.with_calls() && !force && call_count == 0;
+    // 建库范围是**黏性**的：一旦这个工作区建过调用图，之后的增量也按 WithCalls 维护它。
+    //
+    // 旧实现只看「这一轮传进来的 scope」：用户改一个文件 → 保存触发的增量是结构态 →
+    // `clear_file_graph` 把该文件的**出边删掉**，`index_file` 又因 `!with_calls()` 直接返回
+    // 不重建；而「未变文件要不要重解析」只看全局 `call_count == 0`（此时 > 0）→ 该文件永远
+    // 不再被重解析。结果是**编辑过的文件永久丢调用边**，只有 force 全量重建能回来。
+    let plan = super::incremental::plan(conn, root_hash, force, scope)?;
+    let effective_scope = plan.scope;
+    // 「要不要连未变文件一起重解析」= 范围升级轮（结构态 → 调用态）。
+    let calls_missing = plan.reparse_unchanged;
 
     for rel in &rel_files {
         let abs = root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -150,7 +158,7 @@ pub fn run_build_with_progress(
             _ => continue,
         };
 
-        let (ic, sc, cc) = index_file(conn, root_hash, rel, &text, mtime, &rel_set, scope)?;
+        let (ic, sc, cc) = index_file(conn, root_hash, rel, &text, mtime, &rel_set, effective_scope)?;
         import_count += ic;
         symbol_count += sc;
         call_count += cc;
@@ -177,7 +185,7 @@ pub fn run_build_with_progress(
     }
 
     // 所有文件都入库后再回填「名字唯一」的解析目标（消除文件处理顺序的影响）
-    if scope.with_calls() {
+    if effective_scope.with_calls() {
         backfill_unique_callees(conn, root_hash)?;
     }
 
@@ -198,7 +206,7 @@ pub fn run_build_with_progress(
     conn.execute(
         "UPDATE graph_workspaces
          SET file_count = ?2, edge_count = ?3, symbol_count = ?4, call_count = ?5,
-             indexed_at = ?6, indexing = 0
+             calls_built = ?6, indexed_at = ?7, indexing = 0
          WHERE root_hash = ?1",
         params![
             root_hash,
@@ -206,6 +214,7 @@ pub fn run_build_with_progress(
             import_count,
             symbol_count,
             call_count,
+            i64::from(effective_scope.with_calls()),
             indexed_at
         ],
     )
@@ -270,8 +279,11 @@ pub fn run_remote_build(
     let mut import_count = count_imports(conn, root_hash)?;
     let mut symbol_count = count_symbols(conn, root_hash)?;
     let mut call_count = count_calls(conn, root_hash)?;
-    // 与本地建库同一条规则：要调用图但没有调用边 → 未变文件也要重解析
-    let calls_missing = scope.with_calls() && !force && call_count == 0;
+    // 与本地建库同一条规则（见 `run_build_with_progress` 的注释）：建库范围是黏性的，
+    // 建过调用图的工作区增量也按 WithCalls 维护；只有「结构态 → 调用态」这一轮才回填未变文件。
+    let plan = super::incremental::plan(conn, root_hash, force, scope)?;
+    let effective_scope = plan.scope;
+    let calls_missing = plan.reparse_unchanged;
 
     // rel_path 归一化一次建表：原来每个文件都 `files.iter().find(...replace('\\',"/"))`，
     // 16k 文件就是 2.5 亿次字符串替换 + 全表比对。同名保留**第一个**（与 find 同语义）。
@@ -300,7 +312,7 @@ pub fn run_remote_build(
             call_count -= dc;
         }
 
-        let (ic, sc, cc) = index_file(conn, root_hash, rel, &file.content, mtime, &rel_set, scope)?;
+        let (ic, sc, cc) = index_file(conn, root_hash, rel, &file.content, mtime, &rel_set, effective_scope)?;
         import_count += ic;
         symbol_count += sc;
         call_count += cc;
@@ -325,7 +337,7 @@ pub fn run_remote_build(
     conn.execute(
         "UPDATE graph_workspaces
          SET file_count = ?2, edge_count = ?3, symbol_count = ?4, call_count = ?5,
-             indexed_at = ?6, indexing = 0
+             calls_built = ?6, indexed_at = ?7, indexing = 0
          WHERE root_hash = ?1",
         params![
             root_hash,
@@ -333,6 +345,7 @@ pub fn run_remote_build(
             import_count,
             symbol_count,
             call_count,
+            i64::from(effective_scope.with_calls()),
             indexed_at
         ],
     )
@@ -689,112 +702,7 @@ fn load_import_targets(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-pub(crate) fn clear_workspace_graph(conn: &Connection, root_hash: &str) -> Result<(), CoreError> {
-    conn.execute(
-        "DELETE FROM graph_calls WHERE root_hash = ?1",
-        params![root_hash],
-    )
-    .ok();
-    conn.execute(
-        "DELETE FROM graph_symbols WHERE root_hash = ?1",
-        params![root_hash],
-    )
-    .ok();
-    conn.execute(
-        "DELETE FROM graph_imports WHERE root_hash = ?1",
-        params![root_hash],
-    )
-    .ok();
-    conn.execute(
-        "DELETE FROM graph_file_mtime WHERE root_hash = ?1",
-        params![root_hash],
-    )
-    .ok();
-    Ok(())
-}
-
-/// 清掉某文件的图谱行，返回 `(imports, symbols, calls)` 各删掉多少行。
-///
-/// 增量建库要在循环里维护「已入库行数」的进度；原来每删一个文件都重跑三条
-/// `COUNT(*)`（全表扫描 × 文件数），这里直接报告删除行数，减一下即可。
-fn clear_file_graph(
-    conn: &Connection,
-    root_hash: &str,
-    rel: &str,
-) -> Result<(i64, i64, i64), CoreError> {
-    let symbol_ids: Vec<i64> = {
-        let mut stmt = conn
-            .prepare("SELECT id FROM graph_symbols WHERE root_hash = ?1 AND rel_path = ?2")
-            .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
-        let rows = stmt
-            .query_map(params![root_hash, rel], |r| r.get(0))
-            .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
-    let mut calls_deleted = 0i64;
-    for id in symbol_ids {
-        if let Ok(n) = conn.execute(
-            "DELETE FROM graph_calls WHERE caller_symbol_id = ?1",
-            params![id],
-        ) {
-            calls_deleted += n as i64;
-        }
-        // 指向本文件符号的调用边来自**别的文件**：那些文件的源码没变，调用点也还在，
-        // 只是解析目标要重新算。整行删掉等于把它们的调用关系一段段吃掉 —— 增量重建
-        // （未改文件直接跳过）不会把这些行再插回来，图谱会随每次编辑变稀疏。
-        // 所以这里只**撤销解析**，保留调用点按名字匹配。
-        conn.execute(
-            "UPDATE graph_calls SET callee_symbol_id = NULL, confidence = 0.8
-             WHERE root_hash = ?1 AND callee_symbol_id = ?2 AND caller_path <> ?3",
-            params![root_hash, id, rel],
-        )
-        .ok();
-    }
-    let symbols_deleted = conn
-        .execute(
-            "DELETE FROM graph_symbols WHERE root_hash = ?1 AND rel_path = ?2",
-            params![root_hash, rel],
-        )
-        .map(|n| n as i64)
-        .unwrap_or(0);
-    let imports_deleted = conn
-        .execute(
-            "DELETE FROM graph_imports WHERE root_hash = ?1 AND from_path = ?2",
-            params![root_hash, rel],
-        )
-        .map(|n| n as i64)
-        .unwrap_or(0);
-    conn.execute(
-        "DELETE FROM graph_file_mtime WHERE root_hash = ?1 AND rel_path = ?2",
-        params![root_hash, rel],
-    )
-    .ok();
-    Ok((imports_deleted, symbols_deleted, calls_deleted))
-}
-
-fn purge_removed_files(
-    conn: &Connection,
-    root_hash: &str,
-    keep: &HashSet<String>,
-) -> Result<(), CoreError> {
-    let existing = load_indexed_files(conn, root_hash)?;
-    for rel in existing {
-        if !keep.contains(&rel) {
-            clear_file_graph(conn, root_hash, &rel)?;
-        }
-    }
-    Ok(())
-}
-
-fn purge_stale_files(
-    conn: &Connection,
-    root_hash: &str,
-    keep: &HashSet<String>,
-) -> Result<(), CoreError> {
-    purge_removed_files(conn, root_hash, keep)
-}
-
-fn load_indexed_files(conn: &Connection, root_hash: &str) -> Result<Vec<String>, CoreError> {
+pub(crate) fn load_indexed_files(conn: &Connection, root_hash: &str) -> Result<Vec<String>, CoreError> {
     let mut stmt = conn
         .prepare("SELECT rel_path FROM graph_file_mtime WHERE root_hash = ?1")
         .map_err(|e| CoreError::rpc("GRAPH_QUERY_FAILED", e.to_string()))?;
