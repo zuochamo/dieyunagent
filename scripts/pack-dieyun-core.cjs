@@ -39,6 +39,52 @@ function packLooksComplete() {
   }
 }
 
+/**
+ * crates/dieyun-core 与其工作区清单里最新的一个 mtime。
+ *
+ * 为什么需要它：`packLooksComplete()` 只看「产物在不在、版本号对不对」，看不出
+ * 「代码改了但没重打」——2026-11-17 就栽在这上面：改了 `agent/llm.rs` 却因为 dev 报
+ * 「sidecar OK」直接启动，跑的还是旧二进制，白查了一轮。产物比源码新才算新鲜。
+ */
+function newestCoreSourceMtime() {
+  const targets = [
+    path.join(ROOT, 'crates', 'dieyun-core', 'src'),
+    path.join(ROOT, 'crates', 'dieyun-core', 'Cargo.toml'),
+    path.join(ROOT, 'Cargo.toml'),
+    path.join(ROOT, 'Cargo.lock')
+  ];
+  let newest = 0;
+  const walk = (p) => {
+    let st;
+    try {
+      st = fs.statSync(p);
+    } catch {
+      return;
+    }
+    if (st.isDirectory()) {
+      for (const name of fs.readdirSync(p)) walk(path.join(p, name));
+      return;
+    }
+    if (st.mtimeMs > newest) newest = st.mtimeMs;
+  };
+  for (const t of targets) walk(t);
+  return newest;
+}
+
+/**
+ * 产物是否**最新**（不只是「存在」）：`packLooksComplete()` + 产物不比源码旧。
+ * `ensure-dieyun-core.cjs` 用它决定要不要重打。
+ */
+function packIsFresh() {
+  if (!packLooksComplete()) return false;
+  const dest = path.join(OUT, EXE_NAME);
+  try {
+    return fs.statSync(dest).mtimeMs >= newestCoreSourceMtime();
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   const skipBuild = process.env.DIEYUN_SKIP_CARGO_BUILD === '1';
   const dest = path.join(OUT, EXE_NAME);
@@ -55,7 +101,17 @@ async function main() {
   }
 
   await fsp.mkdir(OUT, { recursive: true });
-  await fsp.copyFile(RELEASE_BIN, dest);
+  try {
+    await fsp.copyFile(RELEASE_BIN, dest);
+  } catch (e) {
+    // Windows 上正在运行的 sidecar 会锁住这个文件：别让用户对着 EBUSY 发愣
+    if (e && (e.code === 'EBUSY' || e.code === 'EPERM' || e.code === 'EACCES')) {
+      throw new Error(
+        `${dest} 正被运行中的进程占用 —— 先退出叠云 Agent（Ctrl+C / 关窗口），再重跑本命令`
+      );
+    }
+    throw e;
+  }
 
   const st = fs.statSync(dest);
   if (st.size < MIN_BYTES) {
@@ -85,5 +141,7 @@ module.exports = {
   OUT,
   EXE_NAME,
   packLooksComplete,
+  packIsFresh,
+  newestCoreSourceMtime,
   readCoreVersion
 };
