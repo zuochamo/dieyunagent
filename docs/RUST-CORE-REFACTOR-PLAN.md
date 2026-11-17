@@ -248,23 +248,24 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 
 **验收**：`npm run verify:rpc-catalog` + `npm run check:js` + `cargo test -p dieyun-core --lib` + `npm run test:rust-agent-loop-smoke` + `npm run check:shared-constants`。
 
-### P2 · 巨石拆分（5–8 人日，纯移动，风险中）· **index 已拆完（2026-11-18），loop_run / graph 未开始**
+### P2 · 巨石拆分（5–8 人日，纯移动，风险中）· **已完成 2026-11-18**
 
 > 只搬不改行为；每搬一块，`cargo test` 必须全绿且 diff 只含移动。
 
 | 目标 | 拆成 | 附带收益 |
 |---|---|---|
-| `rpc/mod.rs` **1454 → 304** | `rpc/registry.rs`、`handlers/{memory,graph,agent,codebase,fs,system,async_core,async_data}.rs` | 每方法一个 handler（**86/86 完成**）；单测从 1 个涨到「表 parity + 可达性 + 8 条 handler」 |
-| ✅ `index/mod.rs` **2249 → 1093**（生产代码 ~490，其余是测试） | `index/{status,vectors,build,repair}.rs`（新增 965 行，纯移动） | **A11 已修**（见下）+ **chunking 整段事务改分批提交**（见下） |
-| ⏳ `loop_run.rs` 1481→~800 | `loop_run/{ledger,delivery,trace,fold}.rs` | 交付四态只留一处入口，A3 这类漏用从结构上消失 |
-| ⏳ `graph/mod.rs` + `build.rs` | `graph/{status,build,incremental,cleanup}.rs` | 把「删符号连带删边」收成一份（A8） |
+| ✅ `rpc/mod.rs` **1454 → 304** | `rpc/registry.rs`、`handlers/{memory,graph,agent,codebase,fs,system,async_core,async_data}.rs` | 每方法一个 handler（**86/86 完成**）；单测从 1 个涨到「表 parity + 可达性 + 8 条 handler」 |
+| ✅ `index/mod.rs` **2249 → 1093** | `index/{status,vectors,build,repair}.rs` | **A11 已修** + **chunking 整段事务改分批提交** |
+| ✅ `agent/loop_run.rs` **1637 → loop_run/{mod,ledger,trace,delivery,fold}.rs** | ledger 470 / delivery 73 / fold 46 / trace 45 | 交付四态只剩 `delivery::delivered_content` 一处入口（结构事实，不是约定） |
+| ✅ `graph`：`mod.rs` **1121 → 906** + `build.rs` 909 → 820 | `graph/{status,queries,cleanup,incremental}.rs` | **A8 已修**（建库范围黏性落库）；「删符号连带删边」收进 `cleanup.rs` 一份 |
 
-**index 这一块的落地细节**
-- 搬家方式：脚本按 `impl IndexService` 的方法边界切块（doc 注释随方法走），每个目标文件只带自己的 `use` 前奏；搬完立刻 `cargo test`，编译器/测试指出漏掉的 import 与需要放宽到 `pub(crate)` 的方法。**全程零逻辑改动**，唯一的可见性变化是跨子模块互调的方法从私有变成 `pub(crate)`。
-- **A11（真 bug）**：增量索引遇到「路径还在、但已不可索引」（超限 / 含 NUL）过去只 `continue` —— `purge_stale_chunk_paths` 认为它还在，这里又不重建，于是库里永远留着这份文件**上一次**的正文，`codebase.search` 照旧返回给模型。现在：永久不可索引 → **清掉旧 chunk**；暂时读不到（锁 / 权限）→ 保留并在下一轮重试；两者都计数并打一行诊断。回归用例 `incremental_index_purges_chunks_of_now_unindexable_files`（变异验证：去掉那行删除即红）。
-- **chunking 整段事务**：原来 walk + 切块整段包在一个写事务里（分钟级），同库另一条写连接（graph 建库）抢不到锁就 15s 后报 `database is locked`（面板表现为「建图谱失败而索引正常」）。现在每 128 个文件提交一次，把持锁时长压到「一批的切块耗时」；索引幂等，分批提交不需要「全成或全不成」。
+**三块共用的搬家纪律**（都在本批验证过）：脚本按 `impl` 的方法边界切块（doc 注释随方法走），每块带自己的 `use` 前奏；搬完立刻 `cargo test`，由编译器/测试指出漏掉的 import 与要放宽到 `pub(crate)` 的方法。唯一的可见性变化就是跨子模块互调的方法从私有变 `pub(crate)`。
 
-**验收**：`cargo test` 239 全绿 + `npm run test:rust-agent-loop-smoke` + `test:rust-planner-smoke`；`rpc/mod.rs` 的测试数从 1 涨到「每 handler ≥1」。
+**本批顺手修掉的两个真 bug**
+- **A11**（index）：增量索引遇到「路径还在、但已不可索引」（超限 / 含 NUL）过去只 `continue` —— 库里永远留着这份文件**上一次**的正文，`codebase.search` 照旧返回给模型。现在永久不可索引 → 清旧 chunk；暂时读不到 → 保留重试。用例 `incremental_index_purges_chunks_of_now_unindexable_files`（变异验证）。
+- **A8**（graph）：建过调用图之后，普通保存触发的**结构态**增量把该文件的出边删掉却不重建，而「未变文件要不要重解析」只看全局 `call_count == 0` —— 于是**编辑过的文件永久丢调用边**，只有 force 能回来。现在建库范围落库并黏性（`calls_built`），只有「结构态 → 调用态」这一轮才回填未变文件；`call_graph_built` / `callsBuilt` 也改读这一列（Node 两处 `callCount > 0` 的代理推断同步去掉）。用例 `structural_incremental_keeps_call_edges_of_edited_files`（变异验证）。
+
+**验收**：`cargo test` 239 → **269 全绿**、零 warning；`npm test`、vitest（225 文件 / 2208 条）、`verify:rpc-catalog` 通过。
 
 ### P3 · 单一来源收敛（6–10 人日，风险中）
 

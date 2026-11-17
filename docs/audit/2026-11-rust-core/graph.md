@@ -1,6 +1,7 @@
 # graph 审计
 
 > **2026-11-17 P0 已修**：F1 的**信号部分**（`CallGraphResult.callGraphBuilt` + `note`，并写进模型可见的 `graph` 工具描述，用例扩在 `call_graph_is_built_on_demand_and_backfills_unchanged_files`）。F1 的根因（Node 三处 `callCount > 0` 代理推断）与 F2（增量吞掉调用边）仍开，归 P3。
+> **2026-11-18 P2 已修**：F2 = **A8**（结构增量重建吞掉调用边）—— 建库范围落库并黏性（`graph_workspaces.calls_built` + 旧库补列），只有「结构态 → 调用态」这一轮才回填未变文件；`call_graph_built` / `graph.status.callsBuilt` 改读这一列；Node 两处 `callCount > 0` 代理推断（`handlers/graph.js#ensureCallGraph`、`rpc.js#graphNeedsFullIndex`）同步去掉。用例 `structural_incremental_keeps_call_edges_of_edited_files` + `graph/incremental.rs` 的 3 条判定，均做过变异验证。同批把 `graph` 拆成 `{status,queries,cleanup,incremental}.rs`，「删符号连带删边」收进 `cleanup.rs` 一份。F3–F11 仍开。
 
 审计范围：`crates/dieyun-core/src/graph/{mod,build,query,schema,types,lsp_ingest}.rs`、`graph/extract/{mod,symbols,js_ts,go,python,rust_lang}.rs`、`treesitter/{chunk,extract}.rs`（`lang.rs` 只作为证据引用）。
 已交叉核对 Node 侧契约：`src/gateway/handlers/graph.js`、`src/gateway/rpc.js`、`src/agent/delegate-tool-gateway.js`、`src/graph/graph-incremental-scheduler.js`、`src/renderer/renderer-graph-panel.js`、`src/lsp/reference-service.js`。
