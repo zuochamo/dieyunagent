@@ -167,9 +167,43 @@ const SUBAGENT_TOOL = {
 };
 
 
+/**
+ * 子 Agent 运行态查询（只读，零新增状态）。
+ *
+ * 为什么需要它：`subagent` 的追问（`continueFrom`）只在 runner 的 followups 里留最近
+ * `subagentFollowupRetention` 份，且**只在本轮运行内存活、不落盘**。长时间一轮里派过
+ * 好几批调研之后，模型只剩「凭记忆猜 subagentId」这一条路，猜错就是
+ * `SUBAGENT_FOLLOWUP_NOT_FOUND`，而错误文案又把它推去「重新派发」= 整块工作重做。
+ *
+ * 所以这里只做一件事：把 runner 里**已经存在**的账本（issued / active / followups）
+ * 原样读给模型看，让「我还能追问哪个、它原来问的是什么」变成可查的事实而非记忆。
+ * 不派发、不取消、不新增任何状态机 —— 它不是 DSH 那种 steer/inbox 双向通道，
+ * 那需要子 loop 中途收信，与「tool_calls = 继续」的循环哲学冲突（见 AGENTS.md §5）。
+ *
+ * 同 `SUBAGENT_TOOL`：只注入协调者（Agent 主循环 / Plan 的 explore 阶段）；
+ * 研究子 Agent 的白名单不含它，worker 的 COORDINATOR_ONLY 清单显式剔除它。
+ */
+const SUBAGENT_STATUS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'subagent_status',
+    description:
+      '查看本次运行派出过的子 Agent：哪些还能用 continueFrom 追问（附它们的 subagentId 与原任务），' +
+      '以及已派几个、正在跑几个、上限多少。' +
+      '追问（continueFrom）之前先调它拿准 id —— 凭记忆猜 id 会得到 SUBAGENT_FOLLOWUP_NOT_FOUND。' +
+      '只读：不派发、不改工作区、不取消任何子 Agent。',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
+  }
+};
+
 module.exports = {
   CLARIFY_TOOL,
   SESSION_TOOL,
   SESSION_WORKSPACE_TOOL,
-  SUBAGENT_TOOL
+  SUBAGENT_TOOL,
+  SUBAGENT_STATUS_TOOL
 };

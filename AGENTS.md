@@ -182,6 +182,7 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 设计原理 |
 | [`docs/MEMORY.md`](docs/MEMORY.md) | 记忆系统分层与注入规则 |
 | [`docs/MEMORY-VS-DSH.md`](docs/MEMORY-VS-DSH.md) | 与 DSH 记忆设计对照：抄了什么、明确不抄什么及反证条件（**改记忆系统前先读**，别把否过的方案搬回来） |
+| [`docs/MULTI-AGENT-VS-DSH.md`](docs/MULTI-AGENT-VS-DSH.md) | 与 DSH 子 Agent 设计对照：两条路线的差别、抄了什么（`subagent_status`）、明确不抄什么（独立子会话 / steer / 每子 agent 模型 / provider 注册表）及反证条件（**改 planner 或 subagent-runner 前先读**） |
 | [`docs/SQLITE-ACCESS.md`](docs/SQLITE-ACCESS.md) | SQLite 访问模型：写入连接 / 读池 / 长任务三条通道与在途预算（**改 core 库访问前先读**） |
 | [`docs/VECTOR-SEARCH.md`](docs/VECTOR-SEARCH.md) | 向量检索：int8 量化全量扫描的误差界 / 内存上限 / **换 ANN 的触发条件**（改向量检索前先读） |
 | [`docs/INDEX-VALUE-REVIEW.md`](docs/INDEX-VALUE-REVIEW.md) | 代码索引 / 结构索引：实测成本与使用率 / 能力定级 / **删 trigram、向量 opt-in、调用图按需** 的整改清单（改 `index/` 或 `graph/` 前先读） |

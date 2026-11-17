@@ -18,7 +18,7 @@ const { resolveAgentLoopSpec, getAgentLimits } = require('./agent-limits');
 const { settleAllAbortable } = require('./parallel-batch');
 const { createPlannerMainBridge } = require('./planner-main-bridge');
 const { buildExploreTools, buildShellTools, buildBuildTools } = require('./planner-tool-filters');
-const { SUBAGENT_TOOL } = require('./tool-catalog');
+const { SUBAGENT_TOOL, SUBAGENT_STATUS_TOOL } = require('./tool-catalog');
 const { createSubagentRunner } = require('./subagent-runner');
 const { runRustAgentLoop, resolveChatUrl } = require('./rust-loop-runner');
 const { buildLlmHeadersFromConfig } = require('./llm-request');
@@ -445,7 +445,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     // allowSubagent 只对「协调者」开放（当前仅 Plan 的 explore 阶段）。
     // 子 Agent 循环不会再传它，因此不会出现嵌套派发。
     const coordinatorTools =
-      opts.allowSubagent && SUBAGENT_TOOL ? tools.concat([SUBAGENT_TOOL]) : tools;
+      opts.allowSubagent && SUBAGENT_TOOL
+        ? tools.concat([SUBAGENT_TOOL, SUBAGENT_STATUS_TOOL].filter(Boolean))
+        : tools;
     const body = {
       model: spec.model || startParams.model,
       messages: spec.messages || [],
@@ -524,6 +526,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           // 不落回普通工具委托 —— 否则「子 Agent」会被当成一个不存在的网关工具。
           if (opts.allowSubagent && name === subagentRunner.toolName) {
             return subagentRunner.run(args, { ...toolCtx, subagentDepth: 1 });
+          }
+          if (opts.allowSubagent && name === subagentRunner.statusToolName) {
+            return subagentRunner.status();
           }
           return toolBridge.executeAgentTool(name, args, toolCtx);
         }

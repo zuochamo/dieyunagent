@@ -20,12 +20,13 @@
 const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const { buildTraceFactsDigest } = require('./agent-synthesis');
 const { buildExploreTools } = require('./planner-tool-filters');
-const { SUBAGENT_TOOL } = require('./tool-catalog');
+const { SUBAGENT_TOOL, SUBAGENT_STATUS_TOOL } = require('./tool-catalog');
 const { createSubagentNamer } = require('./live-loop-trace');
 const { isAbortError, createAbortError } = require('../llm-reconnect-retry');
 
 /** 工具名常量：schema 单一来源在 tool-catalog.js */
 const SUBAGENT_TOOL_NAME = SUBAGENT_TOOL.function.name;
+const SUBAGENT_STATUS_TOOL_NAME = SUBAGENT_STATUS_TOOL.function.name;
 
 /** 子 Agent 护栏键：与 agent-limits 的 schema 分组一一对应（此处只声明「哪些键属于本 runner」）。 */
 const SUBAGENT_LIMIT_KEYS = [
@@ -35,7 +36,10 @@ const SUBAGENT_LIMIT_KEYS = [
   'subagentMaxRounds',
   'subagentMaxToolCalls',
   'subagentSummaryMaxChars',
-  'subagentFollowupRetention'
+  'subagentFollowupRetention',
+  // 注入尺寸（status 里每条原任务的截断位数）：与 subagentCardLabelMaxChars 同类，
+  // 属「展示格式」而非用户可调护栏，故意不进 SCHEMA。
+  'subagentStatusTaskMaxChars'
 ];
 
 /**
@@ -212,7 +216,11 @@ function createSubagentRunner(deps) {
   // 白名单本身已不含 subagent，这里的 filter 是纵深防御 —— 万一有人把 subagent
   // 加进白名单，也不会让递归在这里被打开（同时 planner-tool-filters.js 有反向注释）。
   const childTools = buildExploreTools(allTools).filter(
-    (t) => t && t.function && t.function.name !== SUBAGENT_TOOL_NAME
+    (t) =>
+      t &&
+      t.function &&
+      t.function.name !== SUBAGENT_TOOL_NAME &&
+      t.function.name !== SUBAGENT_STATUS_TOOL_NAME
   );
 
   let issued = 0;
@@ -288,8 +296,12 @@ function createSubagentRunner(deps) {
     const continueFrom = String((rawArgs && rawArgs.continueFrom) || '').trim();
     const prior = continueFrom ? followups.get(continueFrom) : null;
     if (continueFrom && !prior) {
+      // 把「现在能续哪些」直接摆在错误里：否则模型只能去重派整块调研（白烧一整轮）。
+      const available = [...followups.keys()];
       return {
-        error: `continueFrom=${continueFrom} 没有可续用的子 Agent（不在本次运行内或已被留存上限淘汰）；请不带 continueFrom 重新派发`,
+        error:
+          `continueFrom=${continueFrom} 没有可续用的子 Agent（不在本次运行内或已被留存上限淘汰）；` +
+          `当前可续用的：${available.length ? available.join('、') : '（无）'}`,
         errorCode: 'SUBAGENT_FOLLOWUP_NOT_FOUND'
       };
     }
@@ -364,9 +376,48 @@ function createSubagentRunner(deps) {
     }
   }
 
+  /**
+   * 运行态（只读投影，零新增账本）：把本 runner 已有的 `issued` / `active` / `waiters` /
+   * `followups` 如实交出去。
+   *
+   * 只投影、不推导：不猜「子 Agent 现在在干什么」，也不返回摘要正文 ——
+   * 模型要的是「哪个还能追问、它原来问的是什么」，其余它自己在上一批结果里已经有。
+   * @returns {{ ok: true, dispatched: number, active: number, queued: number,
+   *   limits: { perRun: number, concurrent: number, maxDepth: number },
+   *   continuable: Array<{ subagentId: string, task: string }> }}
+   */
+  function status() {
+    const cap =
+      Number(limits.subagentStatusTaskMaxChars) > 0
+        ? Math.floor(Number(limits.subagentStatusTaskMaxChars))
+        : FALLBACK_LIMITS.subagentStatusTaskMaxChars;
+    const continuable = [];
+    for (const [subagentId, entry] of followups) {
+      const task = String((entry && entry.task) || '');
+      continuable.push({
+        subagentId,
+        task: task.length > cap ? `${task.slice(0, cap)}…` : task
+      });
+    }
+    return {
+      ok: true,
+      dispatched: issued,
+      active,
+      queued: waiters.length,
+      limits: {
+        perRun: limits.subagentMaxPerRun,
+        concurrent: limits.subagentMaxConcurrent,
+        maxDepth: limits.subagentMaxDepth
+      },
+      continuable
+    };
+  }
+
   return {
     run,
+    status,
     toolName: SUBAGENT_TOOL_NAME,
+    statusToolName: SUBAGENT_STATUS_TOOL_NAME,
     /** 子 Agent 实际可用的只读工具名（测试/诊断用） */
     childToolNames: () => childTools.map((t) => t && t.function && t.function.name).filter(Boolean),
     limits,
@@ -382,5 +433,6 @@ module.exports = {
   buildSubagentPrompt,
   buildFollowupPrompt,
   SUBAGENT_TOOL_NAME,
+  SUBAGENT_STATUS_TOOL_NAME,
   FALLBACK_LIMITS
 };

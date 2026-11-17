@@ -39,7 +39,13 @@ const {
 } = require('./catalog/memory');
 const { PLAN_TOOLS, GOAL_START_TOOL, GOAL_UPDATE_TOOL, GOAL_TOOLS } = require('./catalog/plan');
 const { MCP_TOOL_SCHEMA_TOOL, MCP_MANAGE_TOOL } = require('./catalog/mcp');
-const { CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL } = require('./catalog/session');
+const {
+  CLARIFY_TOOL,
+  SESSION_TOOL,
+  SESSION_WORKSPACE_TOOL,
+  SUBAGENT_TOOL,
+  SUBAGENT_STATUS_TOOL
+} = require('./catalog/session');
 const { COMPUTER_TOOL, CAMERA_TOOL, DESKTOP_CAMERA_TOOL, DESKTOP_CAMERA_PTZ_TOOL } = require('./catalog/computer');
 const { PEER_TOOLS } = require('./catalog/peer');
 const { SSH_TOOL, WORKTREE_TOOL } = require('./catalog/remote');
@@ -92,6 +98,7 @@ module.exports = {
   CLARIFY_TOOL,
   SESSION_TOOL,
   SUBAGENT_TOOL,
+  SUBAGENT_STATUS_TOOL,
   SESSION_WORKSPACE_TOOL,
   COMPUTER_TOOL,
   CAMERA_TOOL,

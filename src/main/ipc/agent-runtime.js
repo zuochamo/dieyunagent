@@ -586,6 +586,10 @@ function registerAgentRuntimeIpc(ctx) {
           if (name === subagentRunner.toolName) {
             return subagentRunner.run(args, ctx);
           }
+          // 运行态查询（只读投影）：与派发共用同一个 runner 实例，否则查的是空账本。
+          if (name === subagentRunner.statusToolName) {
+            return subagentRunner.status();
+          }
           return toolBridge.executeAgentTool(name, args, ctx);
         }
       });

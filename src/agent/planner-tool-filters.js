@@ -116,13 +116,15 @@ function buildShellTools(allTools) {
  * 主工作区（不经过「变更」面板审查），`session_new` 还能凭空开新会话。
  * 它们属于协调者（Agent 主循环 / Plan 的 explore 阶段）的职责。
  *
- * 另一类是 `subagent`：深度恒为 1，worker 拿到它也只会得到「未知工具」，白烧一次调用。
+ * 另一类是 `subagent` / `subagent_status`：深度恒为 1，worker 拿到它们也只会得到
+ * 「未知工具」（status 查的还是父 runner 的账本，对执行器没有意义），白烧一次调用。
  *
  * 这份清单与 `MUTATING_TOOL_NAMES` 不是一回事：后者判「要不要串行」，这里判「谁有资格」。
  */
 const COORDINATOR_ONLY_TOOL_NAMES = Object.freeze(
   new Set([
     'subagent',
+    'subagent_status',
     'worktree',
     'plan_create',
     'plan_delete',

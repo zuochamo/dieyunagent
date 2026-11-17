@@ -12,6 +12,7 @@ function buildCoreAgentRules() {
     '- 子 Agent 只读、不改工作区、不能再派子 Agent；返回的是结论与证据路径的摘要，不是全量过程。',
     '- 子 Agent 查过的结论直接采信使用，不要自己再查一遍；要看过程就展开对话里那张折叠卡片。',
     '- 对同一调研要追问时，用 subagent 的 continueFrom 带上它返回的 subagentId 续问（沿用已查明的事实），不要重派一次全新调研。',
+    '- 记不准 subagentId 时先调 subagent_status（列出本轮还能追问的子 Agent 与原任务），不要靠回忆猜 id，更不要为此重派一次。',
     '- 单文件小问题、需要写操作的改动、有串行依赖的任务不要派——自己顺手做完更快。'
   ].join('\n');
   // 内网互通：只讲「什么时候用、怎么用不招人烦」。判定与安全边界在 src/peer/coordinator.js，

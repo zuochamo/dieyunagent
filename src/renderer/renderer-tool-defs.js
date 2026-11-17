@@ -36,6 +36,7 @@ const SESSION_TOOL = _tc.SESSION_TOOL || null;
 const SESSION_WORKSPACE_TOOL = _tc.SESSION_WORKSPACE_TOOL || null;
 // 只读并发调研子 Agent：schema 单一来源在 src/agent/tool-catalog.js（Main 执行）。
 const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
+const SUBAGENT_STATUS_TOOL = _tc.SUBAGENT_STATUS_TOOL;
 // OS 级电脑控制（截屏 + 鼠标键盘）：schema 单一来源同上，注入受 osControl 开关控制。
 const COMPUTER_TOOL = _tc.COMPUTER_TOOL || null;
 // 手机摄像头（拍一张现实画面）：schema 单一来源同上，注入受 camera 权限开关控制（默认关）。
@@ -241,8 +242,10 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   // 建会话 / 换工作空间：与「新对话」按钮同一条渲染器流程，不依赖 host 权限开关。
   if (SESSION_TOOL) tools.push(SESSION_TOOL);
   if (SESSION_WORKSPACE_TOOL) tools.push(SESSION_WORKSPACE_TOOL);
-  // Agent 主循环是协调者：可派只读研究子 Agent（深度恒为 1）。
+  // Agent 主循环是协调者：可派只读研究子 Agent（深度恒为 1），并可查本轮的
+  // 子 Agent 账本（哪些还能 continueFrom 追问 —— 追问的 id 不能靠记忆猜）。
   if (SUBAGENT_TOOL) tools.push(SUBAGENT_TOOL);
+  if (SUBAGENT_STATUS_TOOL) tools.push(SUBAGENT_STATUS_TOOL);
 
   const optionalEntries = [];
 

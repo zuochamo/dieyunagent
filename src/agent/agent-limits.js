@@ -294,6 +294,9 @@ const AGENT_LIMITS_DEFAULTS = {
   // 追问留存：同一 run 内可被 continueFrom 续用的已完成子 Agent 上下文份数（LRU）。
   // 只在 runner 生命周期内保留，不落盘；0 = 关闭追问。
   subagentFollowupRetention: 8,
+  // `subagent_status` 回给模型的「原任务」截断位数。和 subagentCardLabelMaxChars 同类：
+  // 注入尺寸 / 展示格式，不是用户可调护栏，故意不进 SCHEMA。8 份 x 200 字 = 约 1.6KB 上限。
+  subagentStatusTaskMaxChars: 200,
 
   // —— planner 并行执行器（**写入**子 Agent）——
   // 与上面「只读调研子 Agent」是两件事：调研子 Agent 共享主工作区、只读；

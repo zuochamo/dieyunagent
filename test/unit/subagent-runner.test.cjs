@@ -244,6 +244,72 @@ describe('subagent runner', () => {
     expect(noLabel.subagentId).toBe('sa-explore-2');
   });
 
+  // `subagent_status`：把 runner **已有的**账本（issued / active / waiters / followups）
+  // 只读投影给模型。存在的唯一理由：追问要的 subagentId 只活在本轮内存 LRU 里，
+  // 模型不能靠回忆猜（猜错就 SUBAGENT_FOLLOWUP_NOT_FOUND，然后整块调研重做）。
+  // 因此这里守三件事：不新增状态、只给事实、子 Agent（深度 1）永远拿不到它。
+  it('projects the existing ledger through status()', () => {
+    const runner = makeRunner({ subagentMaxConcurrent: 2, subagentMaxPerRun: 5 });
+    expect(runner.statusToolName).toBe('subagent_status');
+    const empty = runner.status();
+    expect(empty.ok).toBe(true);
+    expect(empty.dispatched).toBe(0);
+    expect(empty.active).toBe(0);
+    expect(empty.queued).toBe(0);
+    expect(empty.continuable).toEqual([]);
+    expect(empty.limits).toMatchObject({
+      perRun: 5,
+      concurrent: 2,
+      maxDepth: LIMITS.subagentMaxDepth
+    });
+  });
+
+  it('lists continuable subagents by id + original task, and truncates the task', async () => {
+    const loop = async (req) => ({
+      content: 'ok',
+      messages: [...req.messages, { role: 'assistant', content: 'ok' }]
+    });
+    const runner = makeRunner(
+      { subagentFollowupRetention: 8, subagentStatusTaskMaxChars: 6 },
+      loop
+    );
+    const a = await runner.run({ task: '鉴权入口在哪个模块' }, {});
+    const b = await runner.run({ task: '短问题' }, {});
+    const st = runner.status();
+    expect(st.dispatched).toBe(2);
+    expect(st.active).toBe(0);
+    expect(st.continuable.map((c) => c.subagentId)).toEqual([a.subagentId, b.subagentId]);
+    // 事实原样投影（截断只截长的，短的不动）
+    expect(st.continuable[1].task).toBe('短问题');
+    expect(st.continuable[0].task).toBe('鉴权入口在哪…');
+  });
+
+  // 回归：错误文案以前只说「请不带 continueFrom 重新派发」——那等于让模型重派整块调研。
+  // 现在把「当前可续用的 id」摆在错误里，模型能自己改参数自救。
+  it('names the available ids when continueFrom is unknown', async () => {
+    const loop = async (req) => ({
+      content: 'ok',
+      messages: [...req.messages, { role: 'assistant', content: 'ok' }]
+    });
+    const runner = makeRunner({ subagentFollowupRetention: 8 }, loop);
+    const a = await runner.run({ task: '查鉴权入口' }, {});
+    const miss = await runner.run({ task: 'x', continueFrom: 'ghost' }, {});
+    expect(miss.errorCode).toBe('SUBAGENT_FOLLOWUP_NOT_FOUND');
+    expect(miss.error).toContain('ghost');
+    expect(miss.error).toContain(a.subagentId);
+  });
+
+  it('never hands subagent_status to a child agent (depth stays 1)', () => {
+    const runner = createSubagentRunner({
+      allTools: [tool('grep'), tool('subagent'), tool('subagent_status')],
+      limits: LIMITS,
+      runChildLoop: async () => ({ content: 'ok' })
+    });
+    expect(runner.childToolNames()).toContain('grep');
+    expect(runner.childToolNames()).not.toContain('subagent');
+    expect(runner.childToolNames()).not.toContain('subagent_status');
+  });
+
   it('builds a read-only, conclusion-first prompt including hints', () => {
     const prompt = buildSubagentPrompt('定位鉴权入口', ['src/auth', '  ', 'src/gateway']);
     expect(prompt).toContain('只读');
