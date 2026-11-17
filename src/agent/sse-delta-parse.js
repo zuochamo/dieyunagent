@@ -4,10 +4,9 @@
 /**
  * SSE 增量解析的**唯一来源**（Main 与 Renderer 共用）。
  *
- * 为什么单独成模块：解析器本身是纯函数，但 `src/llm-stream-utils.js` 顶部
- * `require('./llm-proxy')`（Node http/https）——Renderer 无法直接 require 它。
+ * 为什么单独成模块：解析器本身是纯函数，而实际发请求、读流的实现已经在 core
+ * （`crates/dieyun-core/src/agent/llm.rs`）—— Node 侧不再有 http 客户端可以顺带带进来。
  * 于是把纯解析层抽到这里：
- *   - Main：`src/llm-stream-utils.js` 直接 require，仍由它提供 `streamChatCompletionMain`；
  *   - Renderer：经 `src/renderer/agent/agent-bundle-entry.js` 注册为 `window.SseDeltaParse`，
  *     `renderer-agent-llm.js` 消费同一份实现（同源复用先例：`llm-request` / `llm-channel`）。
  *

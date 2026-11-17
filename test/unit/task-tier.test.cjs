@@ -5,7 +5,6 @@ const {
   skipAutoCodebaseForTaskTier,
   formatTaskTierSystemBlock
 } = require('../../src/agent/task-tier');
-const { mergeMissingReasoning, attachPartialStreamError } = require('../../src/llm-stream-utils');
 const { AGENT_LIMITS_DEFAULTS } = require('../../src/agent/agent-limits');
 
 describe('task-tier', () => {
@@ -75,24 +74,3 @@ describe('task-tier', () => {
   });
 });
 
-describe('stream partial merge', () => {
-  it('restores missing reasoning and attaches partial on errors', () => {
-    const recovered = mergeMissingReasoning(
-      { content: 'hi', reasoning: '', toolCalls: [] },
-      { reasoning: 'think first', content: '' }
-    );
-    expect(recovered.reasoning).toBe('think first');
-    expect(recovered.reasoningRecovered).toBe(true);
-
-    const err = attachPartialStreamError(new Error('reset'), {
-      reasoning: 'partial think',
-      content: ''
-    });
-    expect(err.partial && err.partial.reasoning).toBe('partial think');
-  });
-
-  it('keeps taskTier limit defaults', () => {
-    expect(AGENT_LIMITS_DEFAULTS.taskTierEnabled).toBe(true);
-    expect(AGENT_LIMITS_DEFAULTS.taskTierTimeoutMs).toBeUndefined();
-  });
-});

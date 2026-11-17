@@ -1091,7 +1091,7 @@
       ]
     },
     {
-      "prefix": "src/llm-stream-utils.js",
+      "prefix": "src/agent/sse-delta-parse.js",
       "tests": [
         "test:llm-tool-call-fallback",
         "test:task-tier",

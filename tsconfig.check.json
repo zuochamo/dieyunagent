@@ -19,7 +19,6 @@
     "src/agent/write-smell-hints.js",
     "src/agent/agent-system-prompt.js",
     "src/agent/run-events.js",
-    "src/llm-stream-utils.js",
     "src/main/mcp-plans-boot.js"
   ]
 }
