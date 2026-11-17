@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
                         llm: Default::default(),
                         ..Default::default()
                     })
-                    .ok();
+                    ?;
             }
             std::fs::create_dir_all(&config.data_dir)?;
             serve_stdio(new_state(config)).await
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
                     llm: Default::default(),
                     ..Default::default()
                 })
-                .ok();
+                ?;
             std::fs::create_dir_all(&config.data_dir)?;
             let db = dieyun_core::codebase_db::handle(config.codebase_db_path());
             let svc = IndexService::from_config(&config, db);
@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
                     llm: Default::default(),
                     ..Default::default()
                 })
-                .ok();
+                ?;
             std::fs::create_dir_all(&config.data_dir)?;
             let db = dieyun_core::codebase_db::handle(config.codebase_db_path());
             let svc = IndexService::from_config(&config, db);

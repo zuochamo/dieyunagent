@@ -205,66 +205,33 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
     )
     .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
 
-    let _ = conn.execute(
-        "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN workspace_path TEXT", []);
+    ensure_column(conn, "sessions", "archived", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "sessions", "workspace_path", "TEXT")?;
     // 会话标题的来源（heuristic = 首条用户消息切片，ai = 模型总结，user = 用户改名）。
     // 存在的理由只有一个：AI 标题**每会话只生成一次** —— 没有这一列就只能在
     // 「是不是首轮」「标题像不像模型写的」上猜，猜错的代价是每次开话题都重新调一次模型。
-    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN title_source TEXT", []);
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN scope TEXT DEFAULT 'global'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN kind TEXT DEFAULT 'normal'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN importance INTEGER DEFAULT 3",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN status TEXT DEFAULT 'active'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN updated_at INTEGER",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN last_used_at INTEGER",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN access_count INTEGER DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN expires_at INTEGER",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE long_memories ADD COLUMN metadata_json TEXT",
-        [],
-    );
+    ensure_column(conn, "sessions", "title_source", "TEXT")?;
+    ensure_column(conn, "long_memories", "scope", "TEXT DEFAULT 'global'")?;
+    ensure_column(conn, "long_memories", "kind", "TEXT DEFAULT 'normal'")?;
+    ensure_column(conn, "long_memories", "importance", "INTEGER DEFAULT 3")?;
+    ensure_column(conn, "long_memories", "status", "TEXT DEFAULT 'active'")?;
+    ensure_column(conn, "long_memories", "updated_at", "INTEGER")?;
+    ensure_column(conn, "long_memories", "last_used_at", "INTEGER")?;
+    ensure_column(conn, "long_memories", "access_count", "INTEGER DEFAULT 0")?;
+    ensure_column(conn, "long_memories", "expires_at", "INTEGER")?;
+    ensure_column(conn, "long_memories", "metadata_json", "TEXT")?;
     // 写入溯源：这条记忆是哪个会话沉淀下来的。
     // 存在的理由只有一个 —— 「这个会话沉淀了什么 / 把这个会话写的都忘掉」必须可查，
     // metadata_json 里的 sessionId 是 JSON，做过滤要么 LIKE 猜串要么开 JSON1，
     // 两者都不如一个带索引的一等列。旧行为 NULL（不影响召回与注入）。
-    let _ = conn.execute("ALTER TABLE long_memories ADD COLUMN session_id TEXT", []);
-    let _ = conn.execute(
-        "ALTER TABLE compaction_archives ADD COLUMN folded_text TEXT",
-        [],
-    );
+    ensure_column(conn, "long_memories", "session_id", "TEXT")?;
+    ensure_column(conn, "compaction_archives", "folded_text", "TEXT")?;
     // 旧库补列：真思考与 content 分列存储（老数据为 NULL，回传时降级为占位）。
-    let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT", []);
+    ensure_column(conn, "messages", "reasoning", "TEXT")?;
     // 旧库删列：`trace_text` 是「思考拼成的纯文本」——两个生产者（Renderer / Main）、读者为零，
     // 已按思考通道隔离 §3.7 D4 整体废除。best-effort：SQLite < 3.35 时语法失败也无妨，
     // 那只是老库留一个空列，而读写两侧都已不再碰它。
-    let _ = conn.execute("ALTER TABLE agent_traces DROP COLUMN trace_text", []);
+    drop_column_if_exists(conn, "agent_traces", "trace_text")?;
 
     conn.execute_batch(
         r#"
@@ -539,5 +506,72 @@ mod tests {
         );
         drop(dedicated);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// 补一列，**只吞「列已存在」**。
+///
+/// 旧实现把这几条 ALTER 全写成 `let _ = conn.execute(..)`：迁移真失败（只读库 / 磁盘满 /
+/// BUSY / 列被索引引用）时 `init_schema` 仍返回 Ok、`memory.ping` 也 still ok —— 失败被
+/// 推迟到后续某次业务写入才以 `no such column` 出现，那时已经离现场很远。
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<(), CoreError> {
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        // 唯一可判定为「无害」的错误：这一列已经在了（重复执行迁移的正常路径）。
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(CoreError::rpc(
+            "DB_SCHEMA_FAILED",
+            format!("补列 {table}.{column} 失败：{e}"),
+        )),
+    }
+}
+
+/// 删一列，只吞「本来就没有这一列」（重复执行迁移的正常路径）。
+fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> Result<(), CoreError> {
+    let sql = format!("ALTER TABLE {table} DROP COLUMN {column}");
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("no such column") => Ok(()),
+        Err(e) => Err(CoreError::rpc(
+            "DB_SCHEMA_FAILED",
+            format!("删列 {table}.{column} 失败：{e}"),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod migration_swallow_tests {
+    use super::{drop_column_if_exists, ensure_column};
+    use rusqlite::Connection;
+
+    /// 回归（P4）：补列失败必须上抛 —— **只有**「列已存在」可以吞。
+    ///
+    /// 旧实现整段 `let _ = conn.execute(..)`：迁移真失败时 `init_schema` 仍返回 Ok，
+    /// 失败被推迟到后续某次业务写入才以 `no such column` 出现。
+    #[test]
+    fn ensure_column_propagates_real_failures() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)", []).unwrap();
+
+        ensure_column(&conn, "t", "b", "INTEGER").unwrap();
+        // 重复补同一列：重复执行迁移的正常路径，无害
+        ensure_column(&conn, "t", "b", "INTEGER").unwrap();
+        // 真失败（表都不存在）必须报出来
+        let err = ensure_column(&conn, "no_such_table", "c", "INTEGER").unwrap_err();
+        assert!(format!("{err}").contains("补列"), "{err}");
+    }
+
+    #[test]
+    fn drop_column_swallows_only_the_missing_column_case() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER)", []).unwrap();
+
+        drop_column_if_exists(&conn, "t", "b").unwrap();
+        // 已经删过（重复执行迁移）：无害
+        drop_column_if_exists(&conn, "t", "b").unwrap();
+        // 表不存在是真失败
+        let err = drop_column_if_exists(&conn, "no_such_table", "b").unwrap_err();
+        assert!(format!("{err}").contains("删列"), "{err}");
     }
 }

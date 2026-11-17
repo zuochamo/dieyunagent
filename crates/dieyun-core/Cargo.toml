@@ -28,6 +28,11 @@ ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, fea
 tokenizers = { version = "0.23", optional = true, default-features = false, features = ["fancy-regex"] }
 # 遍历后的「是否文本」内容嗅探是逐文件 IO：并行跑，串行只负责 readdir。
 rayon = "1"
+# 只为一个能力引进来：`FutureExt::catch_unwind` —— async handler 里的 panic 必须变成
+# 一条 `RPC_PANIC` 错误帧，而不是让宿主的 request 永远等不到响应（`stdio.rs` 里那条
+# future 一炸，整条请求就没人 settle）。它本来就在依赖树里（Cargo.lock 已有 0.3.34），
+# 这里只是把传递依赖显式化成直接依赖，不新增编译单元。
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

@@ -279,14 +279,19 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 5. **外键二选一**：要么 `codebase_db` 开 `foreign_keys` 并删手工级联，要么删掉 schema 里的 `FOREIGN KEY ... CASCADE` 声明（一条没有约束力的注释最危险）。
 6. **A13 token 估值**：把 `reasoning_content` 计入；`tokens_before/after` 必须同口径，不同口径不相减。
 
-### P4 · 生命周期与错误处理（6–8 人日，风险中高）
+### P4 · 生命周期与错误处理（6–8 人日，风险中高）· **4 / 6 已落地（2026-11-18），剩下的见下**
 
-- **折叠出临界区** + per-run 锁（A14 的 F9 项）；`finish_run` 一次加锁，poison 明确恢复。
-- **`results` 必填**、`agent.run.tools` 契约违约直接报错（B 级 F8）。
-- **分派 panic 兜底**：`AssertUnwindSafe(...).catch_unwind()` → `RPC_PANIC` 错误帧（`blocking.rs` 已为阻塞池做过同样取舍，这里缺一份）。
-- **`.ok()` / `let _ =` 清账**：迁移、清理、写回三类路径一律 `?` 上抛；只允许吞「可判定为无害」的错误（duplicate column 之类），并写明理由。
-- **`core.configure` 原子化**：候选 config 先在锁外建 store，成功后再一次换 `config + memory`（A「半应用」）。
-- **A17 折叠幂等**：判据只认自己写出的完整标记形状，或把档位写进结构化字段。
+| 项 | 状态 | 落点 / 证据 |
+|---|---|---|
+| `finish_run` 一次加锁 + poison 恢复 | ✅ P0 已做 | `loop_run/trace.rs`（`runs.remove().map(..messages)` 一个临界区 + `into_inner()`） |
+| **`agent.run.tools` 的 `results` 必填** | ✅ | `handlers/async_core.rs`：缺字段直接 `INVALID_PARAMS`（旧实现静默当空数组 → 整批工具被记成「未返回结果」却以成功继续）。用例 `agent_run_tools_requires_results` |
+| **分派 panic 兜底** | ✅ | `rpc/mod.rs`：`guard_panic()` 把 async handler 的 panic 变成 `RPC_PANIC` 错误帧（阻塞池那条本来就有 `BLOCKING_JOIN_FAILED`）。用例 2 条。为它把 `futures-util` 从传递依赖显式化（`FutureExt::catch_unwind`，不新增编译单元） |
+| **`core.configure` 原子化** | ✅ | `handlers/async_core.rs`：候选 config 在**锁外**算 + 新 MemoryStore 先建成功、再一次写锁整体替换。用例 `configure_failure_leaves_the_live_config_untouched`（data_dir 指向一个已存在的文件 → 失败后现有配置一个字节没动） |
+| **吞错清账（高价值子集）** | ✅ 部分 | memory schema 的 **16 条 ALTER 吞错**全部换成 `ensure_column` / `drop_column_if_exists`（只吞「列已存在 / 本就没有」，其余上抛 `DB_SCHEMA_FAILED`）；`main.rs` 三处 `apply_configure(..).ok()` 改 `?`。用例 `migration_swallow_tests` 2 条。**剩余约 100 处 `let _ =` / `.ok()` 未清**（多数在测试与「删临时文件」这类确实无害的位置），属机械清账，见下 |
+| **A17 折叠幂等** | ✅ 收尾批已做 | `applied_level` 只认 `clip()` 写出的完整形状 |
+| ⏳ **折叠搬出全局临界区 + per-run 锁** | **未做（本批唯一剩余的大项）** | 现状：`need_llm` 持 `runs` 全局锁做整段 messages 的 O(n) 折叠，一个 run 触发折叠会卡住所有 run。方案：`HashMap<String, Arc<Mutex<RunState>>>` —— 取 run 只在 map 锁下克隆 Arc，真正的活（含折叠）在 per-run 锁里干；纪律：**永远先放 map 锁再拿 run 锁**，避免锁序反转 |
+
+**验收**：`cargo test` 274 → **280 全绿**、零 warning；`npm test`、`verify:rpc-catalog`、`check:js` 通过。
 
 ### P5 · 「做不到」显式化 + 观测（3–5 人日）
 

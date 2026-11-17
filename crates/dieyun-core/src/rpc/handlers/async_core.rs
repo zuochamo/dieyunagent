@@ -171,40 +171,52 @@ pub(crate) fn core_configure<'a>(state: &'a AppState, params: &'a Value) -> BoxF
     Box::pin(async move {
         let p: ConfigureParams = serde_json::from_value(params.clone())
             .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-        // 不要在写锁上重开记忆库：写锁等待会把 status 等读请求全部堵住（tokio RwLock
-        // writer-prefer），表现为「1 个 txt 也索引超时」。
-        let reopen_cfg = {
+
+        // **候选配置在锁外算**：`apply_configure` 是逐字段改的（工作区路径要解析、目录要建），
+        // 中途失败时旧实现已经把前半段写进 `guard.config` —— core 就停在「配置指向新库、
+        // MemoryStore 还挂在旧库」的半应用状态：`ping` 报到新路径，写入却落旧库，
+        // 而且没有任何返回值告诉宿主「这次只生效了一半」。现在失败则整份配置不动。
+        let (old_mem_path, candidate) = {
+            let inner = state.inner.read().await;
+            let mut candidate = inner.config.clone();
+            candidate.apply_configure(&p).map_err(CoreError::Other)?;
+            (inner.memory.db_path().to_path_buf(), candidate)
+        };
+
+        // 要换库时**先把新 store 建出来**（阻塞池），建成功才换 —— 建失败不会留下半个状态。
+        let new_store = if same_path(&old_mem_path, &candidate.memory_db_path()) {
+            None
+        } else {
+            let cfg = candidate.clone();
+            Some(
+                crate::blocking::run_blocking(move || {
+                    memory::MemoryStore::from_config(&cfg).map_err(|e| {
+                        CoreError::rpc("MEMORY_REOPEN_FAILED", format!("换库失败：{e}"))
+                    })
+                })
+                .await?,
+            )
+        };
+
+        // 一次写锁完成全部替换（不要分两次持锁：中间那一瞬就是半应用）。
+        {
             let mut guard = state.inner.write().await;
-            let old_mem_path = guard.memory.db_path().to_path_buf();
-            guard.config.apply_configure(&p).map_err(CoreError::Other)?;
-            let new_mem_path = guard.config.memory_db_path();
+            let new_db_path = candidate.codebase_db_path();
             // 库文件没换就沿用原句柄：连接、页缓存、建表结果都不必重来。
-            let new_db_path = guard.config.codebase_db_path();
             let codebase_db = if same_path(guard.codebase_db.path(), &new_db_path) {
                 Arc::clone(&guard.codebase_db)
             } else {
                 crate::codebase_db::handle(new_db_path)
             };
-            guard.codebase_db = Arc::clone(&codebase_db);
-            guard.index =
-                IndexService::from_config(&guard.config, Arc::clone(&codebase_db));
-            guard.graph = GraphService::new(codebase_db);
-            if same_path(&old_mem_path, &new_mem_path) {
-                let embedding = guard.config.embedding.clone();
-                guard.memory.set_embedding(embedding);
-                None
+            if let Some(store) = new_store {
+                guard.memory = store;
             } else {
-                Some(guard.config.clone())
+                guard.memory.set_embedding(candidate.embedding.clone());
             }
-        };
-        if let Some(cfg) = reopen_cfg {
-            let store = tokio::task::spawn_blocking(move || {
-                memory::MemoryStore::from_config(&cfg)
-            })
-            .await
-            .map_err(|e| CoreError::rpc("MEMORY_REOPEN_JOIN", e.to_string()))??;
-            let mut guard = state.inner.write().await;
-            guard.memory = store;
+            guard.index = IndexService::from_config(&candidate, Arc::clone(&codebase_db));
+            guard.graph = GraphService::new(Arc::clone(&codebase_db));
+            guard.codebase_db = codebase_db;
+            guard.config = candidate;
         }
         Ok(serde_json::json!({ "ok": true }))
     })
@@ -279,13 +291,20 @@ pub(crate) fn agent_run_tools<'a>(state: &'a AppState, params: &'a Value) -> Box
             .and_then(|v| v.as_str())
             .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?
             .to_string();
-        let results: Vec<crate::agent::ToolResultInput> = params
-            .get("results")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
-            .unwrap_or_default();
+        // `results` **必填**。旧实现缺字段时静默当空数组：整批工具被记成「未返回结果」、
+        // 这一轮却以成功继续 —— 模型被告知工具跑过了但没结果，日志里只剩一条可疑记录。
+        // 宿主侧契约是「有几个 delegate 就回几条」（`executeDelegateBatch` 按 id 一一对应），
+        // 所以缺字段只可能是调用方写错，直接报出来。
+        let results: Vec<crate::agent::ToolResultInput> = {
+            let raw = params.get("results").ok_or_else(|| {
+                CoreError::rpc(
+                    "INVALID_PARAMS",
+                    "results 必填：每个 delegate 都要回一条（漏传会被记成「未返回结果」并以成功继续）",
+                )
+            })?;
+            serde_json::from_value(raw.clone())
+                .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
+        };
         let spec = drive_spec(&params)?;
         let llm_cfg = drive_llm_config(&params, state).await?;
         let (cfg, index, agent) = {
