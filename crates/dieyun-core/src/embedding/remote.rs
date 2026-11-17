@@ -119,7 +119,10 @@ pub async fn embed_remote(
     }
 
     let vectors = parse_embedding_vectors(&json)?;
-    let expected = cfg.dimensions as usize;
+    // 校验「实际生效维度」而不是配置字段：判定用 `effective_dimensions()`，与落库
+    // （向量长度）/ 索引元数据（签名）同一口径。这里的 provider 只可能是远端，两者数值
+    // 相同，但**口径**必须只有一处 —— 将来远端也允许回落本地时，这一行不用再改一遍。
+    let expected = cfg.effective_dimensions() as usize;
     if expected > 0 {
         for vec in &vectors {
             if vec.len() != expected {

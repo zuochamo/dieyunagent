@@ -44,6 +44,22 @@ pub(crate) fn long_mem_alive_sql(alias: &str) -> String {
 ///
 /// **别把 `misc.rs` 的衰减 UPDATE 并进来**：那条筛的是「已过期、该归档」的行，
 /// 与本函数的「还看得见」正好相反。
+/// 语义召回那条 SQL（作用域不同，绑定的参数个数不同，所以单独成形以便测试）。
+///
+/// 关键点：可见性谓词必须走 [`long_mem_visible_sql`] —— 以前这条分支手写
+/// `m.status = 'active'`，于是**过期记忆照样能被语义召回**，而关键词分支不会；
+/// 同一个问题问两次得到两套记忆，是记忆系统最不该有的行为。
+fn semantic_long_sql(scope: &str) -> String {
+    format!(
+        "SELECT m.id, m.content, m.source, m.created_at, m.scope, m.kind, m.importance, m.status, v.vector, v.dimensions
+         FROM long_memories m
+         JOIN long_memory_vectors v ON v.memory_id = m.id
+         WHERE {} AND {} AND v.model = ?1",
+        long_mem_visible_sql("m", 2),
+        long_memory_scope_filter("m.scope", scope, 3)
+    )
+}
+
 pub(crate) fn long_mem_visible_sql(alias: &str, now_index: i32) -> String {
     let col = if alias.is_empty() {
         "expires_at".to_string()
@@ -170,6 +186,41 @@ pub(crate) fn like_pattern(query: &str) -> String {
 /// 对外暴露的分数保留 3 位小数（展示 / 断言用，不参与排序）。
 pub(crate) fn round_score(score: f64) -> f64 {
     (score * 1000.0).round() / 1000.0
+}
+
+/// 一条长记忆作为**检索命中**时的 JSON 形状（关键词分支与语义分支共用）。
+///
+/// 以前这两条分支各拼一遍 `json!`：字段顺序不同、`created_at` 一处写成 `created_at`
+/// 一处跟着 camelCase 走，加一个字段要改两处，漏一处就是「同一个东西两个形状」。
+/// 完整行（带 `updated_at` / `last_used_at` / `access_count`）仍由
+/// `longmem::map_long_memory_row` 出，那是列表接口的形状，不是命中形状。
+fn long_mem_hit_json(
+    id: i64,
+    content: String,
+    source: Option<String>,
+    scope: Option<String>,
+    kind: Option<String>,
+    importance: i64,
+    status: String,
+    created_at: i64,
+    score: f64,
+    vector_search: bool,
+) -> serde_json::Value {
+    let mut hit = json!({
+        "id": id,
+        "content": content,
+        "source": source,
+        "scope": scope,
+        "kind": kind,
+        "importance": importance,
+        "status": status,
+        "created_at": created_at,
+        "score": round_score(score),
+    });
+    if vector_search {
+        hit["vectorSearch"] = json!(true);
+    }
+    hit
 }
 
 impl MemoryStore {
@@ -315,17 +366,18 @@ impl MemoryStore {
             .into_iter()
             .map(|(score, row)| {
                 let (id, content, source, scope, kind, importance, status, created_at) = row;
-                json!({
-                    "id": id,
-                    "content": content,
-                    "source": source,
-                    "scope": scope,
-                    "kind": kind,
-                    "importance": importance,
-                    "status": status,
-                    "created_at": created_at,
-                    "score": round_score(score),
-                })
+                long_mem_hit_json(
+                    id,
+                    content,
+                    source,
+                    scope,
+                    kind,
+                    importance,
+                    status,
+                    created_at,
+                    score,
+                    false,
+                )
             })
             .collect();
         Ok(json!({
@@ -581,18 +633,18 @@ impl MemoryStore {
             .into_iter()
             .map(|(score, row)| {
                 let (id, content, source, scope, kind, importance, status, created_at) = row;
-                json!({
-                    "id": id,
-                    "content": content,
-                    "source": source,
-                    "createdAt": created_at,
-                    "scope": scope,
-                    "kind": kind,
-                    "importance": importance,
-                    "status": status,
-                    "score": round_score(score),
-                    "vectorSearch": false,
-                })
+                long_mem_hit_json(
+                    id,
+                    content,
+                    source,
+                    scope,
+                    kind,
+                    importance,
+                    status,
+                    created_at,
+                    score,
+                    false,
+                )
             })
             .collect())
     }
@@ -608,24 +660,17 @@ impl MemoryStore {
         if sig.is_empty() {
             return Ok(Vec::new());
         }
-        let sql = format!(
-            "SELECT m.id, m.content, m.source, m.created_at, m.scope, m.kind, m.importance, m.status, v.vector, v.dimensions
-             FROM long_memories m
-             JOIN long_memory_vectors v ON v.memory_id = m.id
-             WHERE m.status = 'active' AND {} AND v.model = ?1",
-            long_memory_scope_filter("m.scope", scope, 2)
-        );
+        let sql = semantic_long_sql(scope);
         // 语义召回是纯读（全量余弦在 Rust 侧算），同样走读池
         self.read(|conn| {
             let mut scored: Vec<(f64, Value)> = Vec::new();
             let mut stmt = conn.prepare(&sql)?;
             let rows: Vec<LongMemSemanticRow> = if is_global_memory_scope(scope) {
-                stmt.query_map(params![sig], map_long_mem_semantic_row)?
+                stmt.query_map(params![sig, now_ms()], map_long_mem_semantic_row)?
                     .collect::<Result<Vec<_>, _>>()?
             } else {
-                // SQL 里 ?1 是 v.model（模型签名）、?2 是 m.scope：原来绑反了，项目记忆的语义召回恒为空
-                // （两个都是 TEXT，不报错，只是查不到）。global 分支没有 ?2，所以只有项目作用域受影响。
-                stmt.query_map(params![sig, scope], map_long_mem_semantic_row)?
+                // ?1 = v.model（模型签名）、?2 = 「现在」（可见性谓词用）、?3 = m.scope。
+                stmt.query_map(params![sig, now_ms(), scope], map_long_mem_semantic_row)?
                     .collect::<Result<Vec<_>, _>>()?
             };
             for (id, content, source, created_at, scope, kind, importance, status, blob, dims) in rows {
@@ -639,18 +684,18 @@ impl MemoryStore {
                 }
                 scored.push((
                     score,
-                    json!({
-                        "id": id,
-                        "content": content,
-                        "source": source,
-                        "createdAt": created_at,
-                        "scope": scope,
-                        "kind": kind,
-                        "importance": importance,
-                        "status": status,
-                        "score": score,
-                        "vectorSearch": true,
-                    }),
+                    long_mem_hit_json(
+                        id,
+                        content,
+                        source,
+                        scope,
+                        kind,
+                        importance,
+                        status,
+                        created_at,
+                        score,
+                        true,
+                    ),
                 ));
             }
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -660,5 +705,45 @@ impl MemoryStore {
                 .map(|(_, v)| v)
                 .collect())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归（P3）：语义召回必须和关键词召回**同一个可见性谓词**。
+    ///
+    /// 旧实现手写 `m.status = 'active'`：过期记忆照样能被语义召回（关键词分支用的是
+    /// `long_mem_visible_sql`），同一个问题问两次得到两套记忆。
+    #[test]
+    fn semantic_branch_uses_the_shared_visibility_predicate() {
+        let global = semantic_long_sql(GLOBAL_MEMORY_SCOPE);
+        assert!(
+            global.contains("expires_at"),
+            "语义分支必须用过期判定（long_mem_visible_sql）：{global}"
+        );
+        assert!(
+            !global.contains("m.status = 'active'"),
+            "别退回硬编码单一状态：{global}"
+        );
+        // 绑定顺序：?1 模型签名 / ?2「现在」/ ?3 scope（可见性谓词占用了 ?2）
+        assert!(global.contains("?2"), "{global}");
+        let project = semantic_long_sql("project:abc");
+        assert!(project.contains("m.scope = ?3"), "作用域必须绑 ?3：{project}");
+    }
+
+    /// 回归（P3）：长记忆的「命中」形状只有一份（关键词 / 语义两条分支共用）。
+    #[test]
+    fn hit_projection_has_one_shape() {
+        let kw =
+            long_mem_hit_json(1, "c".into(), None, None, None, 3, "active".into(), 42, 0.5, false);
+        let sem =
+            long_mem_hit_json(1, "c".into(), None, None, None, 3, "active".into(), 42, 0.5, true);
+        assert_eq!(kw["created_at"], 42, "统一用 created_at（与完整行一致）");
+        assert!(kw.get("createdAt").is_none(), "不许两种命名并存");
+        assert!(kw.get("vectorSearch").is_none());
+        assert_eq!(sem["vectorSearch"], true);
+        assert_eq!(kw["score"], sem["score"], "分数同样四舍五入");
     }
 }
