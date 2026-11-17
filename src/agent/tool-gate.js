@@ -37,7 +37,12 @@ const {
   isAliveWakeToolAllowed,
   isAliveYieldTool
 } = require('./guardrails-shared');
-const { decideFsWrite, decideShellCommand } = require('../gateway/sandbox-policy');
+const {
+  decideFsWrite,
+  decideShellCommand,
+  // 「在根下吗」只有这一份实现（与沙箱判定同源，含 Windows 大小写归一）
+  isUnder
+} = require('../gateway/sandbox-policy');
 const {
   shouldBlockRepeatToolCall,
   recordToolCallFingerprint,
@@ -304,16 +309,33 @@ const hookReadOnlyScope = {
     }
     if (effective === 'read') return;
     // —— 以下是放开档的三道闸门 ——
-    const root = path.resolve(ctx.wakeRoot || ctx.workspacePath || process.cwd());
     const budget = ctx.wakeBudget;
     const blockWith = (errorCode, error) => {
       recordTelemetry(call, false, errorCode, 0);
       call.block = wrapStructuredError({ retryable: false, errorCode, error });
     };
+    /**
+     * 可写/可执行的根：**只认显式声明**（`ctx.wakeRoot`，缺省用会话工作空间）。
+     *
+     * 空 = 这一轮没有可动的根 → **直接拒**（fail-closed）。绝不回退到 `process.cwd()`：
+     * 那等于把「应用安装目录」当成可写根，闸门会静默放宽到一个谁也没选过的地方。
+     */
+    const rootRaw = String(ctx.wakeRoot || ctx.workspacePath || '').trim();
+    if (!rootRaw) {
+      blockWith(
+        'WAKE_NO_ROOT',
+        `${call.name} 没有执行：这一轮没有声明可动的根目录（wakeRoot / 工作空间都为空）。` +
+          '后台轮不会替你猜一个目录 —— 需要动手时等用户在场的一轮，或先把工作空间绑好。'
+      );
+      return;
+    }
+    const root = path.resolve(rootRaw);
     if (ALIVE_WAKE_WRITE_TOOL_NAMES.has(call.name)) {
       const target = path.resolve(root, String((call.args && call.args.filePath) || ''));
-      const rel = path.relative(root, target);
-      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+      // 根内判定用 `sandbox-policy.isUnder`（唯一实现）：自己写 `rel.startsWith('..')` 会把
+      // 根内合法文件名 `..eslintrc` / `..cache` 判成越界，也不处理 Windows 大小写。
+      // `target === root` 仍然拒：那是「往目录本身写」，下游必然失败。
+      if (target === root || !isUnder(target, root, process.platform === 'win32')) {
         blockWith(
           'WAKE_PATH_OUTSIDE',
           `${call.name} 没有执行：这一轮它只被允许在「${root}」里动文件，目标是「${(call.args && call.args.filePath) || '(空)'}」。` +
@@ -356,8 +378,7 @@ const hookReadOnlyScope = {
       }
       const cwdRaw = String((call.args && call.args.cwd) || '').trim();
       const cwd = cwdRaw ? path.resolve(root, cwdRaw) : root;
-      const cwdRel = path.relative(root, cwd);
-      if (cwdRel.startsWith('..') || path.isAbsolute(cwdRel)) {
+      if (!isUnder(cwd, root, process.platform === 'win32')) {
         blockWith('WAKE_PATH_OUTSIDE', `host_exec 没有执行：cwd 必须在「${root}」之下。`);
         return;
       }

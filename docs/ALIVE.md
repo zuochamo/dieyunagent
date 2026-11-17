@@ -411,6 +411,9 @@ plan_list / peer_list` 却没发下去（**允许了没给**，它的"读"只剩
 1. **一个根目录**：`alive/settings.json#wakeWorkspace`。留空 = 它自己的抽屉
    `<userData>/alive/workspace`（**最保守**：放手让它做事 ≠ 放手让它改你的项目；
    要改项目得显式填那个目录）。任何越界写/越界 `cwd` → `WAKE_PATH_OUTSIDE`。
+   这个默认值由 `alive-boot.js#wakeScopeNow` 解析（唯一来源）；**关卡只认它收到的根** ——
+   收不到就 `WAKE_NO_ROOT` 直拒，**不回退 `process.cwd()`**（那等于把应用安装目录当可写根）。
+   「在根下吗」与沙箱判定共用 `sandbox-policy.isUnder` 一份实现（含 Windows 大小写归一）。
    页面上这个框可以手打，也可以点「选择…」走系统目录框（复用既有的 `dialog:pick-folder`，
    与「频道 → 默认工作空间」同一个通道）；选中即写入并保存，不用再按别的按钮。
 2. **每轮次数上限**：`aliveWakeWriteMaxPerWake`（6）/ `aliveWakeExecMaxPerWake`（3），

@@ -764,6 +764,10 @@ module.exports = {
   stripShellQuotedSegments,
   normalizeSandboxMode,
   extractPathTokens,
+  // 「目标是否落在某个根下」的唯一实现：`tool-gate` 的心跳轮作用域也用这一份，
+  // 免得各写一遍 `path.relative` 前缀比较（Windows 大小写 / `..eslintrc` 都会栽）。
+  isUnder,
+  isUnderAny,
   decideShellCommand,
   decideFsWrite,
   decideOsControlAction,

@@ -147,6 +147,19 @@ async function main() {
       await gate(outside);
       assert(outside.block && outside.block.errorCode === 'WAKE_PATH_OUTSIDE', '根目录外必须拒');
 
+      // 根内合法文件名不能因为以 `..` 开头被误判越界（`path.relative` 前缀比较的老坑）
+      const dotted = make('fs_write_file', { filePath: path.join(root, '..eslintrc'), content: 'x' }, { wakePower: 'write', wakeBudget: budget });
+      await gate(dotted);
+      assert(!dotted.block, `根内以 .. 开头的合法文件名应当放行：${dotted.block && dotted.block.errorCode}`);
+
+      // 没有声明可动的根时**必须 fail-closed**：绝不回退到 process.cwd()（应用安装目录）
+      const noRoot = make('fs_write_file', { filePath: path.join(root, 'c.txt'), content: 'x' }, { wakePower: 'write', wakeBudget: budget, wakeRoot: '' });
+      await gate(noRoot);
+      assert(noRoot.block && noRoot.block.errorCode === 'WAKE_NO_ROOT', '没有根目录必须拒（不许用 cwd 兜底）');
+      const noRootExec = make('host_exec', { command: 'echo hi' }, { wakePower: 'exec', wakeBudget: budget, wakeRoot: '' });
+      await gate(noRootExec);
+      assert(noRootExec.block && noRootExec.block.errorCode === 'WAKE_NO_ROOT', 'exec 档同样不许用 cwd 兜底');
+
       budget.writes = 2;
       const overBudget = make('fs_write_file', { filePath: path.join(root, 'b.txt'), content: 'y' }, { wakePower: 'write', wakeBudget: budget });
       await gate(overBudget);
