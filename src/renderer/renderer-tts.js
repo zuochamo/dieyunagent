@@ -1,4 +1,4 @@
-/* global window, document, settings, currentSessionId, gatewayCall, showAgentToast, base64ToUint8Array, uiText, syncTtsAutoReadControl, chatList */
+/* global window, document, settings, currentSessionId, gatewayCall, showAgentToast, base64ToUint8Array, uiText, syncTtsAutoReadControl, beginChatReadingFollow, endChatReadingFollow, followChatReadingRange */
 'use strict';
 
 /**
@@ -98,6 +98,8 @@ function teardownTtsPlayer() {
   if (btn) setTtsBtnState(btn, false);
   // 高亮跟着一起收（否则停了声音还留着「正在念这句」的记号）
   clearTtsReadingMark();
+  // 视野跟随也一起收：迟到的 range 不再动用户的视口
+  if (typeof endChatReadingFollow === 'function') endChatReadingFollow();
   ttsReadMap = null;
   ttsReadChunks = [];
   ttsReadChunkIndex = -1;
@@ -419,23 +421,6 @@ function ttsRangesForSpan(map, start, end) {
   return out;
 }
 
-/** 念到看不见的位置时把这一句带进视野（本来就看得到就不动，不抢用户的滚动）。 */
-function ttsScrollRangeIntoView(range) {
-  const host = typeof chatList !== 'undefined' ? chatList : null;
-  if (!host || typeof host.getBoundingClientRect !== 'function') return;
-  if (!range || typeof range.getBoundingClientRect !== 'function') return;
-  const rect = range.getBoundingClientRect();
-  if (!rect.height && !rect.width) return;
-  const box = host.getBoundingClientRect();
-  if (rect.top >= box.top + 8 && rect.bottom <= box.bottom - 8) return;
-  const delta = rect.top - box.top - box.height / 2 + rect.height / 2;
-  try {
-    host.scrollTo({ top: Math.max(0, host.scrollTop + delta), behavior: 'smooth' });
-  } catch {
-    // ignore：老滚动容器 / 元素已失效
-  }
-}
-
 /**
  * 把高亮落在「正在念的这一句」上；没有映射或不支持 Highlight API 时清掉（朗读不受影响）。
  * @param {{ start: number, end: number }|null} span
@@ -448,7 +433,9 @@ function markTtsReadingSpan(span) {
     return;
   }
   CSS.highlights.set(TTS_HIGHLIGHT_NAME, new window.Highlight(...ranges));
-  ttsScrollRangeIntoView(ranges[0]);
+  // 视野跟随只交出「正在念的这一句」：起不起滚、什么时候彻底让位，判定唯一来源是
+  // `renderer-chat-scroll.js#followChatReadingRange`（这里不自己算几何，否则就是第二套口径）
+  if (typeof followChatReadingRange === 'function') followChatReadingRange(ranges[0]);
 }
 
 function clearTtsReadingMark() {
@@ -604,6 +591,8 @@ async function playTtsText(text, btn, bubble) {
   // （对不上就宁可不高亮 —— 错位高亮比没有高亮更难发现）
   const map = bubble ? ttsTextMapOf(ttsAnswerElOf(bubble)) : null;
   ttsReadMap = map && map.text === content ? map : null;
+  // 视野跟随从这一拍开始判「起点在不在视野里」：不在就整段都不跟（不把视口从用户眼前搬走）
+  if (typeof beginChatReadingFollow === 'function') beginChatReadingFollow();
   if (map && !ttsReadMap) {
     // 不静默降级：正文与朗读文本对不上就标不出位置，留一句可排查的日志（朗读照常）
     console.warn('[tts] 逐句高亮不可用：朗读文本与正文 DOM 不一致，本次只朗读、不标位置');

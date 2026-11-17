@@ -826,3 +826,23 @@ describe('playTtsText', () => {
     expect(btn2.classList.contains('is-speaking')).toBe(false);
   });
 });
+
+describe('视野跟随（朗读不许自己抢滚动）', () => {
+  const src = () => fs.readFileSync(SRC, 'utf8');
+
+  it('本文件不写视口：滚动判定只归 renderer-chat-scroll.js', () => {
+    // 旧实现在这里自己量 rect + scrollTo，于是每念一句就把用户滚走的视口拽回去一次。
+    // 这条断言守的是「不出现第二个写 scrollTop 的地方」，不是某种写法。
+    const text = src();
+    expect(text).not.toMatch(/scrollTop\s*=[^=]/);
+    expect(text).not.toMatch(/\.scrollTo\s*\(/);
+    expect(text).not.toMatch(/scrollIntoView\s*\(/);
+  });
+
+  it('高亮推进只把 range 交给唯一实现，并在一段朗读的首尾开合跟随', () => {
+    const text = src();
+    expect(text).toMatch(/followChatReadingRange\(ranges\[0\]\)/);
+    expect(text).toMatch(/beginChatReadingFollow\(\)/);
+    expect(text).toMatch(/endChatReadingFollow\(\)/);
+  });
+});

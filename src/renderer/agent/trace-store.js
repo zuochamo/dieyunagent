@@ -66,14 +66,19 @@ async function saveAgentRunState({ runId, sessionId, userMessageId, assistantMes
  * `liveNote`（「上游 Ns 无数据」）是运行中的瞬时状态；存下来会在下次打开会话时
  * 显示成过期的等待提示，所以所有 trace 落库前统一剥离，只留真正的思考/工具内容。
  */
-function stripTraceUiOnlyFields(trace) {
-  return (trace || []).map((entry) => {
-    if (!entry || typeof entry !== 'object' || entry.liveNote == null) return entry;
-    const next = { ...entry };
-    delete next.liveNote;
-    return next;
-  });
-}
+/**
+ * 落库前的 trace 瘦身：只去掉**纯展示用**的字段（`liveNote` = 流式期间的临时旁注）。
+ *
+ * 唯一实现在 `agent-round-text.stripTraceUiOnlyFields`（Main 侧的心跳 / 频道 / headless 轮次
+ * 也写同一张 `agent_traces`，两边必须同一套瘦身规则）。bundle 在本文件之前加载，
+ * 所以顶层取一次就够；万一 bundle 没就绪，退化成"原样存"（只多一个展示字段，不影响回放）。
+ */
+const stripTraceUiOnlyFields =
+  typeof window !== 'undefined' &&
+  window.AgentRoundText &&
+  typeof window.AgentRoundText.stripTraceUiOnlyFields === 'function'
+    ? window.AgentRoundText.stripTraceUiOnlyFields
+    : (trace) => (Array.isArray(trace) ? trace : []);
 
 /**
  * @param {object} p

@@ -17,6 +17,8 @@ const peerApi = window.diecloud || {};
 
 /** @type {Record<string, string>} sessionId → peerId */
 let peerLinksCache = {};
+/** @type {Set<string>} 「通道自己的对话」的会话 id（**不含**只是调用过 peer_send 的本机任务会话） */
+let peerChatIds = new Set();
 /** @type {Record<string, string>} peerId → 显示名（只用于文案；查不到就显示 peerId） */
 let peerNamesCache = {};
 let peerEventBound = false;
@@ -33,10 +35,29 @@ function peerNameForId(peerId) {
   return String(peerNamesCache[id] || id);
 }
 
+/**
+ * 这条会话是不是「与某台 agent 的对话」。
+ *
+ * 历史列表据此把对端会话**单独归一层**（不是某个项目的对话），行上也就有了 bot 图标与
+ * 对端名字——在左边看来它们才算「看得见」（原来它们按 `workspacePath: null` 落进
+ * 折叠的「未绑定工作区」，或被视图工作区绑走后藏进别人的项目文件夹里）。
+ *
+ * 判据是 Main 的 `chatSessions`（通道新建 / 用户点「发消息」打开的会话），**不是** `links`：
+ * `links` 里还有「本机任务会话里调过一次 peer_send」的那一类，按它归堆会把用户正在干的
+ * 项目对话从项目文件夹里搬走（见 `src/peer/store.js#chatSessions`）。
+ */
+function sessionIsPeerChat(sessionId) {
+  const sid = String(sessionId || '');
+  return !!sid && peerChatIds.has(sid);
+}
+
 /** 只缓存发送路径与提示行要用的绑定关系；面板列表每次都回源，避免「UI 与 Main 各存一份状态」。 */
 function peerApplyStatus(status) {
   if (!status || typeof status !== 'object') return;
   if (status.links && typeof status.links === 'object') peerLinksCache = { ...status.links };
+  if (Array.isArray(status.chatSessions)) {
+    peerChatIds = new Set(status.chatSessions.map((id) => String(id || '')).filter(Boolean));
+  }
   /** @type {Record<string, string>} */
   const names = {};
   for (const p of Array.isArray(status.peers) ? status.peers : []) {
@@ -736,6 +757,11 @@ async function openPeerChat(peerId) {
   const res = await peerApi.peerOpenSession(peerId);
   if (!res || !res.ok) throw new Error((res && res.error) || 'PEER_OPEN_FAILED');
   const sessionId = String(res.sessionId || '');
+  if (sessionId) {
+    // 用户主动打开了这条会话 = 它就是「与这台对端的对话」：立刻按 bot 对话显示
+    // （Main 随后推的 links-changed 会带同一份 chatSessions 兜底）
+    peerChatIds.add(sessionId);
+  }
   if (sessionId && typeof refreshHistoryList === 'function') {
     try {
       await refreshHistoryList();
@@ -1080,8 +1106,14 @@ function bindPeerUi() {
       const kind = event && event.kind ? String(event.kind) : '';
       if (kind === 'links-changed' && event.links) {
         peerLinksCache = { ...event.links };
+        if (Array.isArray(event.chatSessions)) {
+          peerChatIds = new Set(event.chatSessions.map((id) => String(id || '')).filter(Boolean));
+        }
         // 绑定刚从无到有（或被解绑）：输入框上方的提示行要跟着变，不能等面板打开才刷
         renderPeerSessionRow();
+        // 历史列表按 links/chatSessions 决定「哪条会话是 bot 对话」（单独一层 + bot 图标）：
+        // 新会话第一次来信就在这里出现，不刷列表的话它对用户仍然等于不存在
+        if (typeof refreshHistoryList === 'function') refreshHistoryList().catch(() => {});
         return;
       }
       if (kind === 'inbound') {
@@ -1138,6 +1170,9 @@ function peerBoot() {
       peerApplyStatus(res.status);
       // 启动时可能已经停在一个对端会话上：提示行不能等到打开面板才出现
       renderPeerSessionRow();
+      // 历史列表要按这份 links 才知道哪几条是对端会话：首刷可能已经跑完了（那时缓存还空），
+      // 所以拿到状态后补刷一次，否则要等到下一次切换会话才「认出来」
+      if (typeof refreshHistoryList === 'function') refreshHistoryList().catch(() => {});
       // 面板没开时被拦下的来信，启动后仍要让人看见
       const pending = res.status && Array.isArray(res.status.pendingTrust) ? res.status.pendingTrust : [];
       for (const item of pending) {
@@ -1154,6 +1189,7 @@ if (typeof document !== 'undefined') {
 
 if (typeof window !== 'undefined') {
   window.peerLinkForSession = peerLinkForSession;
+  window.sessionIsPeerChat = sessionIsPeerChat;
   window.openPeerModal = openPeerModal;
   window.refreshPeerPanel = refreshPeerPanel;
   window.isPeerTrustPromptOpen = isPeerTrustPromptOpen;

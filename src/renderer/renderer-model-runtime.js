@@ -941,3 +941,44 @@ function resetModelRuntimeValues(opts = {}) {
   );
   return values;
 }
+
+/**
+ * 可选模型路由（**唯一一份枚举**）：供应商已启用模型 + 文本类自定义模型。
+ *
+ * 谁在用：定时计划编辑器（计划绑哪个模型跑）与生命感设置页（唤醒轮用哪个模型）。
+ * 以后再有「给某个后台任务挑模型」的地方也该用它 —— 抄一份就必然会与 Composer 的
+ * 模态判断分叉（语音模型不接受 chat 请求，选进后台任务必然失败）。
+ */
+function listSelectableModelRoutes() {
+  const out = [];
+  const seen = new Set();
+  // 判据只有一份：`ModelCapabilities.isNonChatModality`（与 Composer 同一处，勿在这里再列一遍模态名）。
+  const isNonChat = (kind) => window.ModelCapabilities?.isNonChatModality?.(kind) === true;
+  const modalityOf = (supplier, modelId) =>
+    typeof window !== 'undefined' && window.ModelCapabilities
+      ? window.ModelCapabilities.getSupplierModelModality(supplier, modelId)
+      : 'text';
+  try {
+    const builtins =
+      typeof builtinModelsFromSavedSuppliers === 'function' ? builtinModelsFromSavedSuppliers() : [];
+    for (const m of builtins) {
+      const supplier = typeof getSupplierById === 'function' ? getSupplierById(m.supplierId) : null;
+      if (!supplier || !isSupplierModelEnabled(supplier, m.id)) continue;
+      if (isNonChat(modalityOf(supplier, m.id))) continue;
+      const route = m.routeKey || `builtin:${m.supplierId}:${m.id}`;
+      if (seen.has(route)) continue;
+      seen.add(route);
+      out.push({ key: route, route, model: m.id, label: `${m.supplierName || '供应商'} · ${m.id}` });
+    }
+  } catch {
+    // ignore：模型列表不可用时只留「跟随默认」
+  }
+  for (const m of (settings && settings.customModels) || []) {
+    if (!m || !m.id || !m.name || isNonChat(m.kind)) continue;
+    const route = `custom:${m.id}`;
+    if (seen.has(route)) continue;
+    seen.add(route);
+    out.push({ key: route, route, model: m.name, label: `自定义 · ${m.name}` });
+  }
+  return out;
+}

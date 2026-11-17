@@ -35,6 +35,16 @@
   --text-primary: #e8e8e8;
 }
 
+/* ---------- 生命感：四个相位的配色（单一来源）----------
+   趋势色条与相位图例（`.alive-phase-*`）引用这一份，想换相位色只改这里；
+   两个主题共用（--ok 会跟着主题走）。rail 上那个心跳图标不参与（2026-11-13：与其它图标同色）。 */
+:root {
+  --alive-phase-alert: #4c8dff;
+  --alive-phase-low: #9aa0aa;
+  --alive-phase-settle: var(--ok, #16a34a);
+  --alive-phase-compress: #e0a33a;
+}
+
 /* ---------- 字体（单一来源）----------
    界面/正文文本与等宽文本各只有一套栈：其它地方一律引用 --font-ui / --font-mono，
    不要再就地写一串字体名（移动端、更新窗口在各自 CSS 里声明同名变量，值保持一致）。 */
@@ -417,8 +427,12 @@ body {
 }
 
 .app {
+  /* 侧栏宽度是布局不变量：.sidebar 是 overflow:hidden，侧栏里弹出的浮层一旦宽过它，
+     左边就会被裁掉（2026-11 顶部「+」的新对话菜单就是这样把整行「新对话」裁没的）。
+     浮层要限制自己时引用这个变量，别再各自写死像素。 */
+  --sidebar-w: 232px;
   display: grid;
-  grid-template-columns: 232px 1fr;
+  grid-template-columns: var(--sidebar-w) 1fr;
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -1087,8 +1101,12 @@ body {
   top: calc(100% + 4px);
   right: 0;
   z-index: 200;
+  /* 宽度由内容长（副标题 nowrap，所以会长到 260px），但侧栏只有 --sidebar-w 宽，
+     超出部分被 .sidebar 的 overflow:hidden 裁掉：左边被裁的正好是各项文字的开头
+     （「新对话」整行不见、只剩「…次（交接）」的尾巴），看起来像"弹出了个不认识的东西"。
+     所以上限只能是侧栏可用宽度（减侧栏左右 padding 20px），不能撑出侧栏。 */
   min-width: 188px;
-  max-width: 260px;
+  max-width: min(260px, calc(var(--sidebar-w) - 20px));
   padding: 4px 0;
   border: 1px solid var(--border);
   border-radius: 0;
@@ -1167,6 +1185,68 @@ body {
 }
 .chat-loading-placeholder {
   padding: 24px 8px;
+}
+/* 聊天区顶部「更早历史」那一行：加载更早 / 正在加载 / 重新加载 / 已到会话开头。
+   显不显示由 chatHistoryEdgeMode 决定（没有更多历史时不出现），这里只管样子。 */
+.chat-history-edge {
+  align-self: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 24px;
+}
+.chat-history-edge-btn {
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.chat-history-edge-btn:hover:not([disabled]) {
+  background: rgba(128, 128, 128, 0.12);
+  color: var(--text);
+}
+.chat-history-edge-btn:focus-visible {
+  outline: 1px solid var(--border-subtle);
+  outline-offset: 2px;
+}
+.chat-history-edge-btn[disabled] {
+  opacity: 0.7;
+  cursor: default;
+}
+.chat-history-edge[data-mode='error'] .chat-history-edge-btn {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+/* 等待时的转圈：让「正在加载」先有动静，再看正文有没有接上 */
+.chat-history-edge-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: dsh-chat-history-edge-spin 700ms linear infinite;
+}
+@keyframes dsh-chat-history-edge-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-history-edge-spinner {
+    animation: none;
+  }
+}
+.chat-history-edge-label {
+  color: var(--text-mute);
+  font-size: 12px;
 }
 .history-folder-group {
   display: flex;
@@ -1285,7 +1365,7 @@ body {
   flex-direction: row;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 6px 22px;
+  padding: 6px 8px 6px 6px;
   border: none;
   background: transparent;
   color: var(--text-dim);
@@ -1296,6 +1376,20 @@ body {
 }
 .history-row.active .history-item-main {
   color: var(--text);
+}
+/* 会话类型图标（定时任务 = 时钟 / 心跳 = 心跳线）：槽位恒定，空着也占位，
+   否则同一分组里「有图标 / 没图标」会让标题起始位置参差（title 始终与文件夹名对齐）。 */
+.history-item-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: inherit;
+}
+.history-item-icon svg {
+  display: block;
 }
 .history-item-title {
   flex: 1;
@@ -1468,6 +1562,28 @@ body {
 }
 .chat-nav.is-empty {
   visibility: hidden;
+}
+/*
+ * 刻度带的内部结构：`scroller`（定高 = 轨道高度）里放 `track`（高度 = 整列长度）。
+ * 装得下时整列在轨道里居中（= 以前的样子）；装不下时改成贴底，这条细轨自己滚（滚到最底 = 最新一条）。
+ * 贴底之后「往上翻一页」= 在整列上方长出刻度，已有刻度离底的距离不变 —— 一根都不会动。
+ */
+.chat-nav-scroller {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  pointer-events: none;
+}
+.chat-nav-scroller::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.chat-nav-track {
+  position: relative;
+  width: 100%;
 }
 .chat-nav-tick {
   position: absolute;
@@ -6145,6 +6261,11 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   max-width: none;
 }
 
+/* 生命感：这一页只有文字行与曲线，420px 上限会把「体征」那一行断在词中间，与上方说明文字也不齐 */
+.settings-page[data-settings='alive'] .settings-runtime-section {
+  max-width: none;
+}
+
 .channels-section {
   display: flex;
   flex-direction: column;
@@ -6206,32 +6327,43 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   height: 54px;
 }
 
+/* 相位色条（底部一条细带，不再铺满整幅）：细条要实一点才看得出颜色分段 */
 .alive-trend-band {
-  opacity: 0.16;
+  opacity: 0.55;
+  shape-rendering: crispEdges;
 }
 
-/* 四个相位的底色：压缩用琥珀，一眼看出"它什么时候累了" */
+/* 四个相位的色条：压缩用琥珀，一眼看出"它什么时候累了"（色号在 :root 的 --alive-phase-*） */
 .alive-phase-alert {
-  fill: var(--accent, #4c8dff);
+  fill: var(--alive-phase-alert);
 }
 
 .alive-phase-low {
-  fill: var(--text-mute);
+  fill: var(--alive-phase-low);
 }
 
 .alive-phase-settle {
-  fill: var(--ok);
+  fill: var(--alive-phase-settle);
 }
 
 .alive-phase-compress {
-  fill: #e0a33a;
+  fill: var(--alive-phase-compress);
 }
 
 .alive-trend-line {
   fill: none;
-  stroke-width: 0.6;
+  stroke-width: 0.9;
   stroke-linejoin: round;
   stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* 50 参考线：淡虚线，压在曲线下面（两条线都贴底时才分得清高度；比张力线更轻） */
+.alive-trend-grid {
+  stroke: var(--text-mute);
+  stroke-width: 0.6;
+  stroke-dasharray: 2 3;
+  opacity: 0.28;
   vector-effect: non-scaling-stroke;
 }
 
@@ -6243,42 +6375,191 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   stroke: #e0a33a;
 }
 
+/* 末端读数点：零长度线段 + 圆头 + non-scaling-stroke（见 renderer-alive.js#aliveTrendEndDot） */
 .alive-trend-dot {
-  stroke: none;
+  fill: none;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
 }
 
-/* 生命感：rail 上的「刚有动静」小点（无状态判据：最近一小时有事件） */
-.side-panel-rail-badge {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent, #4c8dff);
-  box-shadow: 0 0 0 2px var(--panel-bg, rgba(0, 0, 0, 0.2));
+/* 内联图例：颜色含义不能只写在脚注里（脚注随后会被窗口摘要替换掉） */
+.alive-trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 14px;
+  margin: 2px 0 6px;
+  font-size: 12px;
+  color: var(--text-mute);
 }
+
+.alive-trend-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.alive-legend-line {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent, #4c8dff);
+}
+
+.alive-legend-line.fatigue {
+  background: #e0a33a;
+}
+
+.alive-legend-strip {
+  width: 14px;
+  height: 5px;
+  border-radius: 1.5px;
+  background: linear-gradient(
+    90deg,
+    var(--alive-phase-low) 0 25%,
+    var(--alive-phase-alert) 25% 50%,
+    var(--alive-phase-settle) 50% 75%,
+    var(--alive-phase-compress) 75% 100%
+  );
+  opacity: 0.75;
+}
+
+/*
+ * 生命感：rail 心跳图标**就是个普通图标** —— 不动画、不单独上色（2026-11-13 按用户两次要求收敛：
+ * 先"不要动画了"，再"颜色 和其他图标一样"）。
+ *
+ * 原本这里有一条跑高光的同形路径 + 相位色；两种都拿掉了：真实使用中，侧栏图标里只有它在动/在变色，
+ * 就是抢注意力，还让这排图标看起来不像一排。相位这件事只在悬停文字里说（`renderAliveRailPhase`），
+ * 趋势页里那张曲线本来就写着相位。所以这一块**没有 CSS** —— 相位色只剩趋势图在用，
+ * 色号仍只有上面 `:root` 那一处来源。
+ */
 
 .side-panel-rail-btn {
   position: relative;
 }
 
-/* 生命感：侧栏「生命」页的滚动体（与目标页同一套内边距） */
+/*
+ * 生命感：侧栏「生命」页 = 两段式（体征/趋势 → 记录区）。
+ *
+ * 高度分配就是这一块的全部设计：体征**按内容长**（不收缩），记录区吃掉余量。
+ * 之前每块各自 `max-height: 240px` + 整页滚动，结果是内容一多就变成两截小窗口，
+ * 下半屏留一片空地。记录区里的「事件 / 抽屉」不再是两块并排占高，而是**同一个位置的
+ * 两个横向标签** —— 谁被选中谁占满这块高度（切换只换可见性，见 `applyAliveTab`）。
+ *
+ * 现在只有两种退化：面板够高 → 记录区把余量吃完（页面不滚）；面板太矮 → 整段滚动，
+ * 而不是把某一块切成半行字（`flex-shrink: 0` + 外层 `overflow: auto` 就是干这个的）。
+ */
 .alive-pane-body {
-  padding: 10px 12px 16px;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 10px 12px 12px;
+  overflow: auto;
 }
 
-.alive-pane-events {
+.alive-pane-vitals {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* 空的行不占位（`alive-pane-session` 之类平时是空的，留着 gap 会白吐一截） */
+.alive-pane-vitals > :empty {
+  display: none;
+}
+
+.alive-pane-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+/* 事件流 / 抽屉：同一块记录区的两组横向标签（后者不再单独占一块高度） */
+.alive-pane-feed {
+  flex: 1 0 auto;
+  min-height: 60px;
+}
+
+.alive-pane-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.alive-pane-tab {
+  margin: 0 0 -1px;
+  padding: 3px 9px 4px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-mute);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--motion-ease-standard),
+    border-color var(--motion-fast) var(--motion-ease-standard);
+}
+
+.alive-pane-tab:hover {
+  color: var(--text-dim);
+}
+
+.alive-pane-tab.active {
+  color: var(--text);
+  /* 不用 `--accent`（亮色主题下它本身就是浅灰，下划线等于看不见）：选中就是"字变亮 + 一道实线" */
+  border-bottom-color: var(--text-dim);
+}
+
+.alive-pane-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.alive-pane-section-meta {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-mute);
+  white-space: nowrap;
+}
+
+.alive-pane-list {
+  flex: 1 1 auto;
+  min-height: 0;
   margin: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  overflow: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-size: 12px;
   line-height: 1.55;
   color: var(--text-mute);
-  max-height: 240px;
-  overflow: auto;
+}
+
+/* 设置 → 拟态 → 日志：标签下面的面板（「事件」/「抽屉」）。display 必须是 flex 时
+   仍要让 `hidden` 生效 —— 不然切走的那一页会在下面接着铺出来。 */
+.alive-log-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.alive-log-pane[hidden] {
+  display: none;
 }
 
 .channels-toolbar {
@@ -8610,6 +8891,9 @@ body.pane-resizing .artifacts-file-list {
 .side-panel-pane-title {
   font-size: 13px;
   font-weight: 600;
+  /* 标题永不断行（曾经被一行长 meta 挤成「生 / 命」两行），挤的是 meta */
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .side-panel-pane-head-main {
@@ -8623,6 +8907,11 @@ body.pane-resizing .artifacts-file-list {
 .side-panel-pane-meta {
   font-size: 11px;
   color: var(--text-muted, #888);
+  /* 侧栏只有 350px：meta 一行装不下就省略，别把标题和按钮挤走 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .side-panel-pane-action {
@@ -10793,6 +11082,20 @@ audio.artifacts-media-preview-el {
   padding: 0 6px;
   font-size: 11px;
 }
+/* 设备仿真视口标记：agent 用 browser_viewport 设下的覆盖会跨导航存活，
+   面板比它小时页面右侧被裁且没有滚动条 —— 这个标记让人一眼看出原因并一键还原。 */
+.browser-viewport-chip {
+  width: auto;
+  min-width: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+  white-space: nowrap;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.browser-viewport-chip[hidden] {
+  display: none;
+}
 .browser-back-chat-btn {
   flex-shrink: 0;
   height: 28px;
@@ -11270,6 +11573,46 @@ audio.artifacts-media-preview-el {
  * 放在 `.agent-chat-column` 里而不是 `.chat-viewport` 里：视口内是滚动容器 +
  * absolute 的 `.chat-nav` 刻度，塞进去要么随内容滚走、要么压住刻度。
  */
+/**
+ * 「它说…」条：生命感主动出声时，那句话在主窗口留一行。
+ * 与目标条同一个位置（`.agent-chat-column` 顶部），因为它同样是「这一栏的状态」，不是消息。
+ * 只展示：不进会话账本、不进模型上下文。
+ */
+.alive-speech-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 5px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 12px;
+  color: var(--fg);
+}
+/* 带 display:flex 的元素必须自己声明 [hidden]（本仓没有全局兜底规则） */
+.alive-speech-bar[hidden] {
+  display: none;
+}
+.alive-speech-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alive-speech-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.alive-speech-action {
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
 .goal-bar {
   flex: 0 0 auto;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);

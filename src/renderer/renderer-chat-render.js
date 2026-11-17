@@ -1,4 +1,4 @@
-﻿/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat, refreshGoalPanel */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, renderChatHistoryEdge, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, layoutChatNav, chatUserScrollSeq, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat, refreshGoalPanel */
 'use strict';
 
 
@@ -398,6 +398,144 @@ function endChatHistoryArtifactsBatch() {
   refreshChangesPaneAfterRender();
 }
 
+/**
+ * 只把「更早的一页」画上去，不重画整段对话 —— 往上翻一页之所以丝滑，全靠这一步。
+ *
+ * 整屏重渲染的代价是：先隐藏整块、清空、把每条消息（Markdown / 图 / mermaid / 朗读条）
+ * 重新建一遍，最后再补滚动位置 —— 用户看到的就是「闪一下 + 跳一下」。这里只渲染新增的
+ * 那几条，插到原来第一条消息前面：已有节点一个都不动，不需要隐藏。
+ *
+ * 位置不在这里算：插完之后由 `holdChatScrollAfterPrepend` 按「插入前的位置 + 长出来的高度」
+ * 连钉几帧（图和 mermaid 会随后继续长高），这一份逻辑只负责 DOM。
+ * 渲染仍走 `appendRenderedMessageAtIndex`（气泡的唯一画法），所以不会和整屏渲染长歪。
+ * @param {string} sessionId 当前会话
+ * @param {number} olderCount 刚拼进 `messages` 开头的新条数
+ * @returns {{ anchor: Element, portTopBefore: number, inserted: Element[] } | null} 成功时交出锚点
+ *   （第一条旧消息）、它插入前在滚动区里的相对位置，以及刚插进去的那些节点；null 表示退回整屏重渲染
+ */
+function prependOlderMessagesIncrementally(sessionId, olderCount) {
+  if (!chatList || !(olderCount > 0)) return null;
+  const anchor = chatList.querySelector(':scope > .msg-turn, :scope > .msg, :scope > .msg-trigger');
+  // 一条已有消息都没有（空会话 / 占位符）：没有可比对的锚点，交给整屏重渲染
+  if (!anchor) return null;
+  // 锚点在「滚动区」里的相对位置：插入之后要让它待回同一个地方
+  const portTopBefore = anchor.getBoundingClientRect().top - chatList.getBoundingClientRect().top;
+  // 新行先从尾部画出来（appendRenderedMessageAtIndex 只往列表末尾追加），随后再整体搬到锚点前面
+  const tailBefore = chatList.lastElementChild;
+  beginChatHistoryArtifactsBatch();
+  try {
+    for (let i = 0; i < olderCount; i++) {
+      appendRenderedMessageAtIndex(i, {
+        forceScroll: false,
+        skipScroll: true,
+        sessionAtRender: sessionId,
+        deferTrace: false
+      });
+    }
+  } catch (e) {
+    // 中途画不出来就撤销这一批：别把半截内容留在列表尾部，交给整屏重渲染
+    let stray = tailBefore ? tailBefore.nextSibling : chatList.firstChild;
+    while (stray) {
+      const next = stray.nextSibling;
+      stray.remove();
+      stray = next;
+    }
+    console.warn('增量插入失败，退回整屏重渲染:', e);
+    return null;
+  } finally {
+    endChatHistoryArtifactsBatch();
+  }
+  let node = tailBefore ? tailBefore.nextSibling : chatList.firstChild;
+  if (!node) return null;
+  const inserted = [];
+  while (node) {
+    const next = node.nextSibling;
+    chatList.insertBefore(node, anchor);
+    inserted.push(node);
+    node = next;
+  }
+  // 刻度带：内容变长了，位置与高亮要立刻按新布局重量一次（刻度本身不重建，见 renderer-chat-nav.js）
+  if (typeof layoutChatNav === 'function') layoutChatNav();
+  return { anchor, portTopBefore, inserted };
+}
+
+/**
+ * 往上插了一页之后，把阅读位置按住 —— 只纠偏，不设绝对位置。
+ *
+ * 为什么不是算一次就完：聊天区关掉了浏览器自带的 scroll anchoring（`overflow-anchor: none`，
+ * 流式高度震荡要用），而新插进来的图 / mermaid / 迟到的思考区（`hydrateAssistantTraceFromStore`）
+ * 会在随后几百毫秒里继续长高 —— 长在视野上方就会把内容顶下去。
+ *
+ * 所以这一小段时间里只做一件事：**看锚点相对滚动区的位置有没有漂**，漂多少就补多少。
+ * 漂移是相对量，量出来是 0 就什么都不写 —— 绝不会像"算一个绝对目标"那样把视野钉到某个位置上去。
+ *
+ * 谁动了滚动，只认 `chatUserScrollSeq`（用户滚动的唯一来源）：
+ *   - **用户自己滚的** → 认下他的位置，目标跟着挪，绝不拽回；
+ *   - **别人动的**（例如别处一次 `restoreSessionScrollPosition` 把位置还原成 0）→ 按漂移纠回来。
+ * 纠完顺手把「记着的阅读位置」也同步一次，免得后面的还原又照着旧位置把视野拉走。
+ * @param {{ anchor?: Element | null, portTopBefore?: number,
+ *   inserted?: Element[] }} base 锚点、它在滚动区里的原始位置、刚插入的节点
+ */
+function holdChatScrollAfterPrepend(base) {
+  const anchor = base && base.anchor;
+  if (!chatList || !anchor || !Number.isFinite(base.portTopBefore)) return;
+  const inPort = () => anchor.getBoundingClientRect().top - chatList.getBoundingClientRect().top;
+  let want = base.portTopBefore;
+  let applied = chatList.scrollTop;
+  let userSeq = typeof chatUserScrollSeq === 'number' ? chatUserScrollSeq : 0;
+  const correct = () => {
+    if (!chatList || !anchor.isConnected) return;
+    const current = chatList.scrollTop;
+    if (Math.abs(current - applied) >= 1) {
+      if ((typeof chatUserScrollSeq === 'number' ? chatUserScrollSeq : 0) !== userSeq) {
+        // 用户自己滚的：目标跟着挪（下面的漂移随后就是 0，等于什么都不写）
+        want -= current - applied;
+        userSeq = chatUserScrollSeq;
+      }
+      applied = current;
+    }
+    const drift = inPort() - want;
+    if (Math.abs(drift) >= 1) {
+      chatList.scrollTop += drift;
+      applied = chatList.scrollTop;
+      if (typeof captureSessionScrollPosition === 'function') {
+        captureSessionScrollPosition(currentSessionId, { force: true });
+      }
+    }
+  };
+  correct();
+  // 约 1.2s（60fps）：够覆盖思考区补水、mermaid 落位这几拍，之后就不再多管
+  let framesLeft = 72;
+  const tick = () => {
+    correct();
+    framesLeft -= 1;
+    if (framesLeft > 0 && typeof requestAnimationFrame === 'function') requestAnimationFrame(tick);
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tick);
+  // 事件驱动的另一条线：刚插进去的那几条用 ResizeObserver 盯着 —— 异步长高的回调发生在
+  // **绘制之前**，比每帧采样更不容易漏拍；这段时间过了就撤掉观察。
+  const inserted = Array.isArray(base.inserted) ? base.inserted : [];
+  if (typeof ResizeObserver === 'function' && inserted.length) {
+    let observer = null;
+    try {
+      observer = new ResizeObserver(() => {
+        correct();
+      });
+      for (const el of inserted) observer.observe(el);
+    } catch {
+      observer = null;
+    }
+    if (observer && typeof setTimeout === 'function') {
+      setTimeout(() => {
+        if (observer) {
+          observer.disconnect();
+          observer = null;
+        }
+      }, 1500);
+    }
+  }
+}
+
 async function renderChatFromMessagesYielding(opts = {}) {
   const switchGen = opts.switchGen;
   const forceScroll = opts.forceScroll !== false;
@@ -423,6 +561,9 @@ async function renderChatFromMessagesYielding(opts = {}) {
       painted = true;
       return true;
     }
+
+    const historyEdge = typeof renderChatHistoryEdge === 'function' ? renderChatHistoryEdge() : null;
+    if (historyEdge) chatList.append(historyEdge);
 
     for (let i = 0; i < messages.length; i++) {
       if (shouldAbortChatRender(switchGen)) return false;
@@ -479,6 +620,8 @@ function renderChatFromMessages(opts = {}) {
       focusChatInput();
       return;
     }
+    const historyEdge = typeof renderChatHistoryEdge === 'function' ? renderChatHistoryEdge() : null;
+    if (historyEdge) chatList.append(historyEdge);
     for (let i = 0; i < messages.length; i++) {
       appendRenderedMessageAtIndex(i, { forceScroll, skipScroll: !forceScroll, sessionAtRender: sessionId });
     }

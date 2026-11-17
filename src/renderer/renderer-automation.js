@@ -898,40 +898,13 @@ async function populateAutomationSkillSelect(selectedId) {
   ctl.setValue(items.some((it) => it.key === prev) ? prev : '');
 }
 
-/** 可选模型路由（与对话 Composer 同一套枚举来源）：供应商已启用模型 + 文本类自定义模型。 */
+/**
+ * 可选模型路由。**唯一实现已收敛到 `listSelectableModelRoutes()`**（renderer-model-runtime.js）：
+ * 生命感设置页要挑"唤醒轮用哪个模型"，两处各抄一份枚举必然与 Composer 的模态判断分叉。
+ * 这里只保留旧名，避免这条链路上的调用点一起改。
+ */
 function listAutomationModelOptions() {
-  const out = [];
-  const seen = new Set();
-  // 语音模型（转写 speech / 合成 tts）不接受 chat 请求，选进计划必然失败。
-  // 判据只有一份：`ModelCapabilities.isNonChatModality`（与 Composer 同一处，勿在这里再列一遍模态名）。
-  const isNonChat = (kind) => window.ModelCapabilities?.isNonChatModality?.(kind) === true;
-  const modalityOf = (supplier, modelId) =>
-    typeof window !== 'undefined' && window.ModelCapabilities
-      ? window.ModelCapabilities.getSupplierModelModality(supplier, modelId)
-      : 'text';
-  try {
-    const builtins =
-      typeof builtinModelsFromSavedSuppliers === 'function' ? builtinModelsFromSavedSuppliers() : [];
-    for (const m of builtins) {
-      const supplier = typeof getSupplierById === 'function' ? getSupplierById(m.supplierId) : null;
-      if (!supplier || !isSupplierModelEnabled(supplier, m.id)) continue;
-      if (isNonChat(modalityOf(supplier, m.id))) continue;
-      const route = m.routeKey || `builtin:${m.supplierId}:${m.id}`;
-      if (seen.has(route)) continue;
-      seen.add(route);
-      out.push({ key: route, route, model: m.id, label: `${m.supplierName || '供应商'} · ${m.id}` });
-    }
-  } catch {
-    // ignore：模型列表不可用时只留「跟随默认」
-  }
-  for (const m of (settings && settings.customModels) || []) {
-    if (!m || !m.id || !m.name || isNonChat(m.kind)) continue;
-    const route = `custom:${m.id}`;
-    if (seen.has(route)) continue;
-    seen.add(route);
-    out.push({ key: route, route, model: m.name, label: `自定义 · ${m.name}` });
-  }
-  return out;
+  return typeof listSelectableModelRoutes === 'function' ? listSelectableModelRoutes() : [];
 }
 
 /**

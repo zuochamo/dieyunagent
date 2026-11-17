@@ -211,8 +211,30 @@ function browserDisplayUrl(rawUrl) {
   return alias.display + u.slice(alias.tunnel.length);
 }
 
+/**
+ * 设备仿真视口标记（agent 的 browser_viewport 设下的覆盖是引擎级状态，会跨导航/跨标签存活）。
+ * 面板比仿真视口小时，页面仍按仿真尺寸排版、被原生视图裁掉右侧，且**不会**出现滚动条
+ * （页面认为它没溢出）—— 人看到的就是「右边被切了、又拖不动」。所以这个状态必须可见、
+ * 且一键可还原：唯一数据来源是 controller 一直下发的 `state.viewport`。
+ */
+function syncBrowserViewportChip(viewport) {
+  var chip = document.getElementById('browser-viewport-chip');
+  if (!chip) return;
+  var on = !!(viewport && Number(viewport.width) > 0 && Number(viewport.height) > 0);
+  chip.hidden = !on;
+  if (!on) return;
+  var w = Math.round(Number(viewport.width));
+  var h = Math.round(Number(viewport.height));
+  chip.textContent = '视口 ' + w + '×' + h;
+  chip.title =
+    '页面正按设备仿真视口 ' + w + '×' + h +
+    ' 渲染：面板比它小就会被裁掉、也没有滚动条。点一下还原为面板尺寸。';
+}
+
 function updateBrowserChrome(state) {
   if (!state) return;
+  // 只有「状态流」带 viewport 字段（导航结果没带）：没带就别去动标记，否则一次手动导航会把标记抹掉
+  if (state.viewport !== undefined) syncBrowserViewportChip(state.viewport);
   var urlInput = document.getElementById('browser-url-input');
   var badge = document.getElementById('browser-status-badge');
   var displayUrl = browserDisplayUrl(state.url);
@@ -540,8 +562,24 @@ function initBrowserPanel() {
             headedToggle.setAttribute('aria-pressed', 'true');
             headedToggle.title = 'Playwright 可见窗口已开启';
           }
+          syncBrowserViewportChip(st && st.browserview && st.browserview.viewport);
         })
         .catch(function () {});
+    }
+    var viewportChip = document.getElementById('browser-viewport-chip');
+    if (viewportChip) {
+      viewportChip.addEventListener('click', function () {
+        openBrowserPanel({ manual: true });
+        // 还原走既有 RPC（service.setViewport 会把 reset 镜像到另一个引擎），不另造通道
+        gatewayCall('browser.viewport', { reset: true })
+          .then(function () {
+            syncBrowserViewportChip(null);
+            showAgentToast('已还原视口', '页面回到面板尺寸渲染');
+          })
+          .catch(function (err) {
+            showAgentToast('还原视口失败', err.message || String(err), { variant: 'error' });
+          });
+      });
     }
 
     if (browserApi.onBrowserAutoOpen) {

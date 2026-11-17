@@ -12,6 +12,8 @@ const SETTINGS_TITLE_KEYS = {
   channels: ['settings_channels', '频道'],
   'shared-memory': ['settings_shared_memory', '共享记忆'],
   alive: ['settings_alive', '生命'],
+  'alive-setup': ['settings_alive_setup', '设定'],
+  'alive-log': ['settings_alive_log', '日志'],
   shortcuts: ['settings_shortcuts', '快捷键']
 };
 const MODEL_TAB_TITLE_KEYS = {
@@ -173,7 +175,8 @@ function switchSettingsTab(tab) {
   if (tab === 'shared-memory' && typeof window.onSharedMemorySettingsTabShown === 'function') {
     window.onSharedMemorySettingsTabShown();
   }
-  if (tab === 'alive' && typeof window.onAliveSettingsTabShown === 'function') {
+  // 「生命」「设定」「日志」是同一份数据的三个面（同一个 IPC、同一套渲染）：三个页签都算"这一页被打开"
+  if ((tab === 'alive' || tab === 'alive-setup' || tab === 'alive-log') && typeof window.onAliveSettingsTabShown === 'function') {
     window.onAliveSettingsTabShown();
   }
   if (tab === 'shortcuts') {

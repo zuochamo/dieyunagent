@@ -1,15 +1,34 @@
 /* global unpackUserMessageContent */
 'use strict';
 
-/** Initial fetch when cache miss; scroll-up page size. */
+/** 首屏只露最近这么多条。 */
 const CHAT_INITIAL_LOAD_LIMIT = 32;
-const CHAT_LOAD_MORE_LIMIT = 100;
+/**
+ * 往上翻一页取多少条 —— 刻意小：一页就该是「再读一小段」，不是把剩下的全塞进来
+ * （本机会话普遍一两百条，100 条一页等于一次点完，看不出渐进）。
+ */
+const CHAT_LOAD_MORE_LIMIT = 30;
+/**
+ * 对齐「轮次开头」时每次往前问多少条（与一页的宽度无关：宽一点才能一次就问到位够的区间）。
+ */
+const CHAT_TURN_ALIGN_FETCH = 100;
+/**
+ * 窗口头对齐到「轮次开头」时，为了补到那条用户消息最多再多拉多少条。
+ * 一轮里塞满几百条工具消息时不能无限往前拉 —— 拉满就接受这个不齐的头。
+ */
+const CHAT_TURN_ALIGN_MAX_ROWS = 500;
 const MAX_CACHED_SESSIONS = 16;
 
 /** @type {Map<string, { messages: object[], hasMore: boolean }>} */
 const sessionMessageCache = new Map();
 /** Sessions whose cache must not be used (background append / completion). */
 const sessionMessageCacheStale = new Set();
+/**
+ * 「视图可能比库少」的会话：跑动中沿用了缓存快照，而库里已经多了东西
+ * （对端来信 / 回复在这期间落库）。只当标记用 —— 本轮结束时补一次真回源，
+ * 这里不塞合并逻辑（见 `renderer-chat-history.js#resolveChatLoadMode`）。
+ */
+const sessionCacheDiverged = new Set();
 /** @type {string[]} LRU order (newest access at end) */
 const sessionCacheAccess = [];
 
@@ -55,7 +74,10 @@ function gatewayRowsToMessages(rows) {
       meta: packedMeta || undefined,
       // 账本真思考（与 content 分列）：重建历史时只作上行回传真值来源，不并进 content。
       reasoning: typeof r.reasoning === 'string' && r.reasoning.trim() ? r.reasoning : undefined,
-      created_at: r.created_at
+      // `memory.messages_*` 的返回是 Rust `MessageRow`（serde camelCase）→ 字段名是 `createdAt`。
+      // 这里写 `r.created_at` 会永远读到 undefined，界面上每一轮的时间就退化成「渲染那一刻」
+      // （回放会话时全变成同一个时间），触发条的 `ts` 也一起退化成 `Date.now()`。
+      created_at: r.createdAt || r.created_at
     });
   }
   return out;
@@ -117,6 +139,24 @@ function clearSessionMessageCacheStale(sessionId) {
   if (sid) sessionMessageCacheStale.delete(sid);
 }
 
+/** 记下「这次没回源，视图可能比库少」：下一次机会必须真回源，别再拿缓存顶上。 */
+function markSessionCacheDiverged(sessionId) {
+  const sid = String(sessionId || '').trim();
+  if (!sid) return false;
+  sessionCacheDiverged.add(sid);
+  return true;
+}
+
+function isSessionCacheDiverged(sessionId) {
+  const sid = String(sessionId || '').trim();
+  return sid ? sessionCacheDiverged.has(sid) : false;
+}
+
+function clearSessionCacheDiverged(sessionId) {
+  const sid = String(sessionId || '').trim();
+  if (sid) sessionCacheDiverged.delete(sid);
+}
+
 function applyMessagesFromCache(sessionId, targetMessages) {
   const cached = getSessionMessageCache(sessionId);
   if (!cached) return false;
@@ -127,6 +167,8 @@ function applyMessagesFromCache(sessionId, targetMessages) {
 
 window.CHAT_INITIAL_LOAD_LIMIT = CHAT_INITIAL_LOAD_LIMIT;
 window.CHAT_LOAD_MORE_LIMIT = CHAT_LOAD_MORE_LIMIT;
+window.CHAT_TURN_ALIGN_FETCH = CHAT_TURN_ALIGN_FETCH;
+window.CHAT_TURN_ALIGN_MAX_ROWS = CHAT_TURN_ALIGN_MAX_ROWS;
 window.gatewayRowsToMessages = gatewayRowsToMessages;
 window.saveSessionMessageCache = saveSessionMessageCache;
 window.getSessionMessageCache = getSessionMessageCache;
@@ -135,4 +177,7 @@ window.setSessionCacheHasMore = setSessionCacheHasMore;
 window.invalidateSessionMessageCache = invalidateSessionMessageCache;
 window.isSessionMessageCacheStale = isSessionMessageCacheStale;
 window.clearSessionMessageCacheStale = clearSessionMessageCacheStale;
+window.markSessionCacheDiverged = markSessionCacheDiverged;
+window.isSessionCacheDiverged = isSessionCacheDiverged;
+window.clearSessionCacheDiverged = clearSessionCacheDiverged;
 window.applyMessagesFromCache = applyMessagesFromCache;

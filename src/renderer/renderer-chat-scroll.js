@@ -12,6 +12,12 @@ var chatRenderHiddenDepth = 0;
 var chatRenderPrevVisibility = '';
 var chatRenderFadeTimer = null;
 var chatUserScrollIntent = false;
+/**
+ * 用户「自己动了滚动」的序号：唯一判定点 `markChatUserScrollIntent` 每次 +1。
+ * 朗读跟随只认这个序号 —— 程序自己滚出来的 scroll 事件不算用户接管，
+ * 也不去数第二遍 wheel / touch / key（另写一份判定就会有第二套口径）。
+ */
+var chatUserScrollSeq = 0;
 /** 收尾跟底窗口：观察最新气泡，捕获 mermaid / 图片解码等异步落位带来的高度变化 */
 var chatFollowSettleObserver = null;
 var chatFollowSettleAnchorEl = null;
@@ -185,6 +191,17 @@ function captureSessionScrollPosition(sessionId, opts = {}) {
     distanceFromBottom: atBottom ? 0 : Math.max(0, distanceFromBottom),
     atBottom
   });
+}
+
+/**
+ * 丢掉某个会话记着的阅读位置。
+ *
+ * 窗口被重置回首屏那一段时用它：旧位置指向的是一段已经不在窗口里的内容，
+ * 留着只会让下次进来跳到中间，而不是落在这段窗口的底部。
+ */
+function clearSessionScrollPosition(sessionId) {
+  const key = String(sessionId || '');
+  if (key) sessionScrollPositions.delete(key);
 }
 
 function scheduleSessionScrollSave(sessionId) {
@@ -433,6 +450,7 @@ function nudgeChatFollowSettle() {
 
 function markChatUserScrollIntent() {
   chatUserScrollIntent = true;
+  chatUserScrollSeq += 1;
 }
 
 function updateChatAutoFollowFromScroll() {
@@ -482,6 +500,74 @@ function bindChatUserScrollIntent(el) {
       markChatUserScrollIntent();
     }
   });
+}
+
+/** 朗读视野跟随的三个状态：idle（没在朗读）/ undecided（还没判起点）/ follow / off（已让位） */
+var chatReadingFollowMode = 'idle';
+/** 本次朗读开始时的用户滚动序号（`chatUserScrollSeq` 一变就是用户接管了） */
+var chatReadingFollowSeq = 0;
+
+/** 一段朗读开始：重新判「起点在不在视野里」（`playTtsText` 与本函数成对）。 */
+function beginChatReadingFollow() {
+  chatReadingFollowMode = 'undecided';
+  chatReadingFollowSeq = chatUserScrollSeq;
+}
+
+/** 一段朗读结束：回到 idle，之后迟到的 range 不再动视口。 */
+function endChatReadingFollow() {
+  chatReadingFollowMode = 'idle';
+}
+
+/**
+ * 朗读（TTS）念到哪一句时的视野跟随：把**正在念的这一句**带进视野，判定只有这一处
+ * （`renderer-tts.js` 只交出 range，不自己算几何）。三条边界：
+ *
+ * 1. **起点必须在视野里。** 起点在视野外（典型：自动朗读一条长回复，而视口停在这条回复的
+ *    末尾）说明用户在看别处 —— 整段一次都不跟随。否则第一块合成回来那一拍，
+ *    视口会从用户眼前被搬到回复开头。
+ * 2. **用户接管就永久让位。** `chatUserScrollSeq` 一变（wheel / 触摸 / 键盘 / 拖滚动条，
+ *    唯一来源 `markChatUserScrollIntent`），这一段朗读不再碰视口：用户滚到哪就停在哪。
+ *    朗读自己滚出来的 scroll 事件不改变这个序号（那是程序在滚，不是用户在滚）。
+ * 3. **只往下带、不回拽。** 念到视野上方时立刻收摊（用户已经看下面去了），否则每念一句
+ *    都会把视口抢回正在念的位置 —— 这正是「下滑内容时朗读抢视野」的成因。
+ *
+ * 为什么不让调用方每次自己判断「这一句可不可见」：可见与否不是用户意图，状态必须在整段
+ * 朗读里连续（一次判断会得出「看不见就居中」，那就又变回每句抢一次）。
+ *
+ * @param {Range|null} range 正在念的这一句在 DOM 上的范围
+ */
+function followChatReadingRange(range) {
+  if (chatReadingFollowMode !== 'undecided' && chatReadingFollowMode !== 'follow') return;
+  const host = chatList || document.getElementById('chat-list');
+  if (!host || typeof host.getBoundingClientRect !== 'function') return;
+  if (!range || typeof range.getBoundingClientRect !== 'function') return;
+  if (chatUserScrollSeq !== chatReadingFollowSeq) {
+    chatReadingFollowMode = 'off';
+    return;
+  }
+  const rect = range.getBoundingClientRect();
+  if (!rect.height && !rect.width) return;
+  const box = host.getBoundingClientRect();
+  // 半句露在边缘就算「看得见」：跟随的边界取松，宁可不动也不要把视口挪一格
+  const above = rect.bottom <= box.top + 8;
+  const below = rect.top >= box.bottom - 8;
+  const inView = !above && !below;
+  if (chatReadingFollowMode === 'undecided') {
+    chatReadingFollowMode = inView ? 'follow' : 'off';
+    return;
+  }
+  if (inView) return;
+  if (above) {
+    // 念到视野上方：用户已经看下面去了，这一段从此不再碰视口
+    chatReadingFollowMode = 'off';
+    return;
+  }
+  const delta = rect.top - box.top - box.height / 2 + rect.height / 2;
+  try {
+    host.scrollTo({ top: Math.max(0, host.scrollTop + delta), behavior: 'smooth' });
+  } catch {
+    // ignore：老滚动容器 / 元素已失效
+  }
 }
 
 function initChatScrollFollow() {
