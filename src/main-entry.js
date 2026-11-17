@@ -77,6 +77,7 @@ const { loadModelSettings, getEmbeddingConfig } = require('./model-settings');
 // 共享记忆（跨机 PostgreSQL）：数据层唯一实现，扩展页签「共享记忆」
 const { createSharedMemoryService } = require('./memory-shared/service');
 const { createEmbeddingClient, setEmbeddingCoreBridge } = require('./codebase/embedding-client');
+const { setLlmCompleteBridge } = require('./agent/llm-complete');
 const { createMainToolBridge } = require('./agent/tool-bridge-main');
 const { clearToolHarnessSessionsForSession } = require('./agent/tool-harness');
 const {
@@ -548,6 +549,7 @@ app.whenReady().then(async () => {
         localGateway.setRustCore(coreBridge);
         // 向量通道的桥：客户端只负责把文本递进 core（后端由 Rust 决定）
         setEmbeddingCoreBridge(coreBridge);
+    setLlmCompleteBridge(coreBridge);
         log.info(`dieyun-core 已启动: ${bin}`);
       } catch (e) {
         log.warn('dieyun-core 启动失败，Agent/Plan 将不可用（无 JS 回退）:', e && e.message ? e.message : e);

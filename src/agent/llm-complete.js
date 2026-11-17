@@ -1,0 +1,73 @@
+'use strict';
+
+/**
+ * 通用一次 LLM 调用的**唯一宿主入口**（RPC `llm.complete`）。
+ *
+ * 为什么要有它：Node 侧曾有第二份 HTTP 客户端（`llm-proxy.js` 的 `chatCompletionJson` /
+ * `streamChatCompletionMain`）供标题 / 汇总 / 评审 / 计划 / 记忆提炼使用，与 core 的
+ * `agent/llm.rs` 各维护一份端点、请求头、超时、SSE 解析、错误分类 —— 改一处漏一处就漂移
+ * （历史上出现过「对话正常、压缩一跑就 400」）。
+ *
+ * 现在这些辅助任务一律走这里：**请求的发出、流式解析、usage、抓包都在 core**，
+ * 宿主只负责「决定问什么」（拼 body、选模型）与「失败怎么降级」。
+ *
+ * 端点与请求头仍然只由 `src/agent/llm-request.js` 给（Rust 不推导端点）。
+ */
+
+const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
+
+/** @type {{ invoke: Function } | null} */
+let coreBridge = null;
+
+/** 装配：入口处调一次即可（与 `setEmbeddingCoreBridge` 同一手法）。 */
+function setLlmCompleteBridge(bridge) {
+  coreBridge = bridge && typeof bridge.invoke === 'function' ? bridge : null;
+}
+
+function currentLlmCompleteBridge() {
+  return coreBridge;
+}
+
+/**
+ * 发一次调用并等结果。
+ *
+ * @param {object} opts
+ * @param {object} opts.llm `{ baseUrl, apiKey, model?, headers?, authMode? }`
+ * @param {object} opts.body OpenAI 形态的请求体（含 `model` / `messages`）
+ * @param {boolean} [opts.stream] 是否流式；流式时**必须**给 `runId` 才能收到增量事件
+ * @param {string} [opts.runId] 给了就把增量推到事件通道（`agent.delta`）
+ * @param {boolean} [opts.includeRaw] 调试抓包：把响应原文一并回传
+ * @param {{ invoke: Function }} [opts.coreBridge] 覆盖装配里的桥（测试用）
+ * @returns {Promise<{content:string, reasoning:?string, toolCalls:object[], finishReason:?string,
+ *                    usage:?object, model:?string, raw:?string}>}
+ */
+async function completeOnce(opts) {
+  const bridge = (opts && opts.coreBridge) || coreBridge;
+  if (!bridge || typeof bridge.invoke !== 'function') {
+    throw new Error('llm.complete 需要 core 桥（先 setLlmCompleteBridge）');
+  }
+  const llm = (opts && opts.llm) || {};
+  const body = (opts && opts.body) || {};
+  const model = String(body.model || llm.model || '');
+  const url = resolveLlmEndpoint(llm && llm.baseUrl);
+  const headers = buildLlmHeadersFromConfig(llm);
+  return bridge.invoke(
+    'llm.complete',
+    {
+      url,
+      body,
+      stream: !!(opts && opts.stream),
+      includeRaw: !!(opts && opts.includeRaw),
+      runId: (opts && opts.runId) || '',
+      // 端点与鉴权原样交给 core：这里只搬运宿主已经算好的头
+      llm: { ...llm, model, headers }
+    },
+    (opts && opts.timeoutMs) || undefined
+  );
+}
+
+module.exports = {
+  setLlmCompleteBridge,
+  currentLlmCompleteBridge,
+  completeOnce
+};

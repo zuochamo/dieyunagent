@@ -20,8 +20,8 @@
  * 请求装配（端点 / 请求头）一律走 `llm-request.js`，这里不拼 URL、不写 Authorization。
  */
 
-const { chatCompletionJson } = require('../llm-proxy');
-const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
+const { completeOnce, currentLlmCompleteBridge } = require('./llm-complete');
+const { resolveLlmEndpoint } = require('./llm-request');
 const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 const { extractLastUserMessageText } = require('./agent-synthesis');
 const { unpackMessageMeta } = require('./session-context');
@@ -164,7 +164,6 @@ async function maybeGenerateSessionTitle(opts = {}) {
 
   const url = resolveLlmEndpoint(baseUrl, 'chat');
   if (!url) return null;
-  const headers = buildLlmHeadersFromConfig(llm);
 
   const child = new AbortController();
   const parent = opts.signal || null;
@@ -198,10 +197,13 @@ async function maybeGenerateSessionTitle(opts = {}) {
     const raw =
       typeof opts.fetchTitleOnce === 'function'
         ? await opts.fetchTitleOnce({ body, signal: child.signal })
-        : await chatCompletionJson(url, {
-            headers,
-            body: JSON.stringify(body),
-            signal: child.signal
+        : // 请求由 core 发（`llm.complete`）：标题生成不再自己打 HTTP，
+          // 端点/请求头/超时/SSE/usage 只有 core 那一份实现。
+          await completeOnce({
+            coreBridge: opts.coreBridge || currentLlmCompleteBridge(),
+            llm,
+            body,
+            runId: ''
           });
     const title = cleanGeneratedTitle(extractCompletionContent(raw), maxChars);
     if (!title) return null;

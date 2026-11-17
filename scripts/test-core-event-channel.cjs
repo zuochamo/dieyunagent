@@ -125,6 +125,15 @@ function main() {
           if (!hostCalls.some((c) => c.method === 'round.prepare')) {
             throw new Error(`没收到 round.prepare：${JSON.stringify(hostCalls)}`);
           }
+          // 通用一次调用（辅助任务的唯一入口）
+          const once = replies[4] && replies[4].result;
+          if (!once) throw new Error(`llm.complete 没有结果：${JSON.stringify(replies[4])}`);
+          if (once.content !== 'nihao') {
+            throw new Error(`llm.complete 正文不对：${JSON.stringify(once.content)}`);
+          }
+          if (!once.usage || once.usage.prompt_tokens !== 77) {
+            throw new Error(`llm.complete 没带 usage：${JSON.stringify(once.usage)}`);
+          }
         }
 
         child.stdout.on('data', (chunk) => {
@@ -172,12 +181,26 @@ function main() {
                 continue;
               }
               if (msg.id === 2) {
+                // 通用一次调用：Node 侧辅助任务（标题 / 汇总 / 评审…）走的就是这条
+                send({
+                  id: 4,
+                  method: 'llm.complete',
+                  params: {
+                    url: `http://127.0.0.1:${port}/v1/chat/completions`,
+                    body: { model: 'fake', messages: [{ role: 'user', content: 'hi' }] },
+                    // 假上游只会吐 SSE，所以这里按流式发（一次性调用也支持 stream）
+                    stream: true
+                  }
+                });
+                continue;
+              }
+              if (msg.id === 4) {
                 setTimeout(() => {
                   try {
                     check();
                     cleanup();
                     console.log(
-                      `core-event-channel: OK（${events.length} 事件 / ${hostCalls.length} 反向调用 / done）`
+                      `core-event-channel: OK（${events.length} 事件 / ${hostCalls.length} 反向调用 / done + llm.complete）`
                     );
                     resolve();
                   } catch (err) {

@@ -45,6 +45,7 @@ const { createSharedMemoryService } = require('../memory-shared/service');
 const { getAgentLimits } = require('../agent/agent-limits');
 const { loadModelSettings, getEmbeddingConfig } = require('../model-settings');
 const { createEmbeddingClient, setEmbeddingCoreBridge } = require('../codebase/embedding-client');
+const { setLlmCompleteBridge } = require('../agent/llm-complete');
 
 /** 无窗口时必然没有的能力：启动日志里如实打一行，而不是加一个开关表 */
 const UNAVAILABLE_CAPABILITIES = [
@@ -153,6 +154,7 @@ async function bootHeadless(opts) {
       gateway.setRustCore(coreBridge);
       // 无界面入口同样要接上向量桥（否则 headless 的召回 / 建库始终没有向量通道）
       setEmbeddingCoreBridge(coreBridge);
+    setLlmCompleteBridge(coreBridge);
       log.info(`dieyun-core 已启动：${bin}`);
     }
   }

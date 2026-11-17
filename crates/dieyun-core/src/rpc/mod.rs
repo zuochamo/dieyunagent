@@ -1078,6 +1078,67 @@ impl AppState {
                 agent.cancel(run_id)?;
                 Ok(json!({ "ok": true }))
             }
+            // ---- 通用一次调用：Node 侧所有辅助任务（标题 / 汇总 / 评审 / 计划 / 记忆提炼）
+            // 都走这里，不再自己打 HTTP。请求头与端点仍由宿主给（`llm-request.js` 是唯一来源），
+            // Rust 只负责发、解析流、抓包、回传 usage。
+            // 传了 `runId` 就把增量推事件通道（流式调用方要用），不传就纯一次性。
+            "llm.complete" => {
+                let url = params
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "url 必填"))?
+                    .to_string();
+                let body = params
+                    .get("body")
+                    .cloned()
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "body 必填"))?;
+                let stream = params.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+                let include_raw = params
+                    .get("includeRaw")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let run_id = params
+                    .get("runId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let llm_cfg = drive_llm_config(&params, self).await?;
+                let outcome = crate::agent::llm::chat_completion(
+                    &llm_cfg,
+                    &url,
+                    &llm_cfg.headers.clone(),
+                    body,
+                    stream,
+                    include_raw,
+                    |d| {
+                        if !run_id.is_empty() {
+                            crate::rpc::events::emit_delta(
+                                &run_id,
+                                None,
+                                d.content.as_deref(),
+                                d.reasoning.as_deref(),
+                            );
+                        }
+                    },
+                )
+                .await?;
+                let tool_calls: Vec<Value> = outcome
+                    .tool_calls
+                    .iter()
+                    .map(|call| {
+                        json!({ "id": call.id, "name": call.name, "arguments": call.arguments })
+                    })
+                    .collect();
+                Ok(json!({
+                    "content": outcome.content,
+                    "reasoning": outcome.reasoning,
+                    "toolCalls": tool_calls,
+                    "finishReason": outcome.finish_reason,
+                    "usage": outcome.usage,
+                    "model": outcome.model,
+                    "raw": if include_raw { outcome.raw } else { None },
+                }))
+            }
             // 反向通道自检：宿主必须先实现 `core.echo`（原样回传），这条才通。
             // 与 `core.ping` 同级：只用于诊断「宿主有没有接上反向调用」。
             "core.host_probe" => {

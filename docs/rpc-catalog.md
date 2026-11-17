@@ -2,13 +2,13 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-11-17T08:57:15.404Z
+生成时间：2026-11-17T09:23:21.280Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 191 |
+| 总计 | 192 |
 | Gateway only | 106 |
-| Rust only | 24 |
+| Rust only | 25 |
 | Both | 61 |
 
 ## 按命名空间
@@ -166,6 +166,12 @@
 |--------|-------|----------------|------|
 | `index.remote_sync_configure` | gateway | gateway/handlers/index-remote.js | — |
 | `index.remote_wait_ready` | gateway | gateway/handlers/index-remote.js | — |
+
+### llm (1)
+
+| Method | Layer | Gateway source | Rust |
+|--------|-------|----------------|------|
+| `llm.complete` | rust | — | yes |
 
 ### lsp (6)
 
