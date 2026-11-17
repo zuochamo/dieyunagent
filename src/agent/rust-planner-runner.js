@@ -15,7 +15,7 @@ const {
   extractUsageStats
 } = require('../llm-usage-stats');
 const { loadModelSettings } = require('../model-settings');
-const { resolveAgentLoopSpec } = require('./agent-limits');
+const { resolveAgentLoopSpec, getAgentLimits } = require('./agent-limits');
 const { settleAllAbortable } = require('./parallel-batch');
 const { createPlannerMainBridge } = require('./planner-main-bridge');
 const { buildExploreTools, buildShellTools, buildBuildTools } = require('./planner-tool-filters');
@@ -229,6 +229,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         {
           phase: 'Sub · 只读调研',
           worker: 'explore',
+          label: meta.label || '',
           subagentId: meta.subagentId,
           subagentKind: meta.subagentKind,
           subagentIndex: meta.subagentIndex
@@ -282,6 +283,13 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     maxWaitMs: loopSpec.llmReconnectMaxWaitMs
   };
   const loopMaxToolCalls = loopSpec.maxToolCalls;
+  // 并行执行器上限：数字单一来源在 agent-limits（同时是 worktree 数 / LLM 并发流数）。
+  const workerLimitCfg = Number(
+    (getAgentLimits(deps.userData, payload.contextTierId) || {}).plannerMaxParallelWorkers
+  );
+  const workerCap = Number.isFinite(workerLimitCfg) && workerLimitCfg > 0
+    ? Math.floor(workerLimitCfg)
+    : 1;
 
   const startParams = {
     model: payload.model || settings.textModel,
@@ -458,7 +466,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           model: body.model,
           messages: body.messages,
           tools: coordinatorTools,
-          workspaceRoot: workspacePath,
+          // 这一轮真正写的是 worktree（执行器各一份副本）：账本、快照、索引通知都要对齐，
+          // 否则记录会指向主工作区，事后按 runId 复盘时看不出改的是哪份副本。
+          workspaceRoot: worktreePath || workspacePath,
           maxToolCalls:
             Number(spec.maxToolCalls) > 0 ? Number(spec.maxToolCalls) : loopMaxToolCalls,
           maxRounds: clampModelRuntimeValue(
@@ -546,6 +556,15 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       const wt = await agentBridge.worktreeCreate(coordinatorRunId, worktreeRole);
       wtPath = wt?.ok ? wt.path : null;
     }
+    // **隔离闸（失败关闭）**：多路执行器同时跑时，缺 worktree 就等于两路同时写主工作区。
+    // 探测阶段已经确认过能建（见 runWorkerBatch），走到这里还失败说明是环境问题
+    //（非 git、磁盘、git 锁），宁可整批失败也不允许无隔离地并发写入。
+    if (opts.parallelBatch && !wtPath) {
+      throw new Error(
+        `并行执行器 ${worktreeRole} 没有拿到 worktree（工作区不是 git 仓库或创建失败）：` +
+          '已拒绝让多路执行器同时写主工作区。请改用 git 工作区，或在设置里关掉「多 Agent 并行执行」'
+      );
+    }
     const outputs = [];
     let priorSummary = '';
     let hitRoundLimit = false;
@@ -578,15 +597,17 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         await agentBridge.taskRunning(coordinatorRunId, taskId);
       }
 
-      // 每个子任务 = 一张子 Agent 卡片（写入/命令/调研），标题「类型 + 序号」。
+      // 每个子任务 = 一张子 Agent 卡片（写入/命令/调研），标题「类型 + 序号 · 子任务标题」。
       // id / 序号 / 类型一次分配（共享 namer），并发执行器也不会撞 id；
       // 占位卡也走 buildIsolatedCard，保证与实时/收尾卡片同形、标题一致。
+      // `label` 取子任务 title：多路并发时，用户要靠它分清「#2 在改什么」（序号只负责区分）。
       const named = subagentNamer.next(task.agentType || 'build');
       const subagentId = named.subagentId;
       const cardMeta = {
         worker,
         taskId: task.id,
         subagentId,
+        label: String(task.title || '').trim(),
         parallel: parallelRun,
         ...named
       };
@@ -656,10 +677,28 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     return { outputs, hitRoundLimit, partial, worker };
   }
 
+  /**
+   * 这一批最多同时跑几路执行器。
+   *
+   * 两个条件都要满足：① 用户没把上限设成 1；② **隔离能力可用**（工作区是 git 仓库，
+   * 能给每一路建出 worktree）。探测方式：先给第一路建一次 —— `createAgentWorktree` 是幂等的
+   * （目录已存在则返回 `reused:true`），所以真跑时不会重复建，探测本身不浪费用。
+   * 建不出来就退成串行（limit=1，此时 `parallelBatch=false`，允许在主工作区里一路一路做）。
+   */
+  async function resolveParallelWorkerLimit(jobs) {
+    if (!(jobs.length > 1)) return 1;
+    if (!agentBridge.worktreeCreate || !coordinatorRunId) return 1;
+    const first = jobs[0] || {};
+    const probe = await agentBridge.worktreeCreate(coordinatorRunId, first.worker || 'A');
+    if (!probe || !probe.ok) return 1;
+    return Math.max(1, Math.min(workerCap, jobs.length));
+  }
+
   async function runWorkerBatch(workerJobs, isRetry) {
     const jobs = workerJobs || [];
-    const parallelBatch = jobs.length > 1;
     throwIfAborted(signal);
+    const parallelLimit = await resolveParallelWorkerLimit(jobs);
+    const parallelBatch = jobs.length > 1 && parallelLimit > 1;
     const settled = await settleAllAbortable(
       jobs,
       (job) => {
@@ -668,6 +707,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       },
       {
         signal,
+        limit: parallelLimit,
         createAbortWaiter,
         createAbortError,
         onAbort: cancelActiveWorkerLoops

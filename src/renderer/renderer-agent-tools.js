@@ -76,7 +76,9 @@ async function executeAgentTool(name, args, sessionId) {
       : { name, args };
   const ctx = getAgentExecutionContext(sessionId) || {};
   const sid = String(ctx.sessionId || sessionId || '').trim();
-  const workspaceKey = ctx.workspacePath || ctx.worktreePath || sid;
+  // 队列键口径与 Main 一致（`tool-bridge-main.js`）：worktree 优先 —— 带 worktreePath 的运行
+  // 真正写的是副本，键取主工作区会让多路并行退化成排队。
+  const workspaceKey = ctx.worktreePath || ctx.workspacePath || sid;
   // 记录本会话已进入浏览器任务：用于按需注册 browser_* 专用工具（见 renderer-tool-defs.js）。
   // 依据是「确实发生过的工具调用」这一结构信号，不涉及意图关键词判断。
   if (String(norm.name || '').startsWith('browser_') && typeof noteBrowserToolUse === 'function') {

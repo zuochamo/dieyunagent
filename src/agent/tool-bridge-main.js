@@ -453,8 +453,14 @@ function createMainToolBridge(deps) {
       if (mainResult != null) return mainResult;
       return executeGatewayTool(toolName, args, ctx);
     };
+    // 队列键 = **这一轮真正写的地方**：worktree 优先。
+    //
+    // 顺序不能写反：planner 的并行 worker 会同时带上 workspacePath（主工作区，供沙箱/索引用）
+    // 与 worktreePath（自己的副本）。键取主工作区 → 所有 worker 挤在同一把锁上，
+    // 「并行」退化成排队（还查不出来：日志里每个工具都成功，只是慢）。
+    // 单循环运行没有 worktreePath，行为不变。
     return isMutatingAgentTool(toolName)
-      ? runExclusiveMain(invoke, ctx.workspacePath || ctx.worktreePath || ctx.sessionId, {
+      ? runExclusiveMain(invoke, ctx.worktreePath || ctx.workspacePath || ctx.sessionId, {
           tool: toolName,
           sessionId: ctx.sessionId
         })

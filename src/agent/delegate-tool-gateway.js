@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { normalizeAgentToolName } = require('./tool-guardrails');
 const { fsEditArgsPresent } = require('./guardrails-shared');
 const { applyPatchUnsupported } = require('./tool-validate');
@@ -7,6 +9,94 @@ const { applyPatchUnsupported } = require('./tool-validate');
 const { isLocalPathRef, isLocalFlag } = require('../gateway/host-local');
 // 护栏数字单一来源（AGENTS.md §5）：fs 读取字节上限只改 agent-limits。
 const { AGENT_LIMITS_DEFAULTS, getAgentLimits } = require('./agent-limits');
+
+/** p 是否等于 root 或位于 root 之下（两者都按本机绝对路径解析后的语义比较）。 */
+function isSameOrUnder(root, p) {
+  const rel = path.relative(root, p);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * planner 并行 worker 的**写作用域**（唯一来源）。
+ *
+ * 为什么必须有它：worker 各拿一个 git worktree，但 system prompt 开头是父级的
+ * `sys_content` —— 里面写着主工作区路径，模型十有八九用绝对路径。裸放行两条后果：
+ * ① 改动写回主工作区，worktree 隔离形同虚设（并行 worker 互相覆盖）；
+ * ② 收尾「变更」面板看不到任何东西（它读的是 worktree 相对基线的 diff），
+ *    用户以为任务没做，其实文件被写到了另一处。
+ *
+ * 语义（**写收口、读跟随**）：worktree 存在时，
+ * - 写：落在 worktree 内 → 原样；落在主工作区内 → **重映射**到 worktree 的同名相对路径
+ *   （模型写绝对路径也能正确隔离）；两者之外 → 拒绝（结构化错误 `WORKER_SCOPE_DENIED`，
+ *   不静默放行、也不静默改名）。
+ * - 读：副本里有对应文件就读副本（否则「写完再读回」看到的是旧内容，模型会无限重试），
+ *   副本里没有（node_modules / 构建产物 / 未跟踪文件）就读主工作区那一份；工作区之外的
+ *   读取不拦 —— 能不能读由宿主权限与沙箱管，与普通轮同口径，读也不会破坏隔离。
+ *
+ * 没有 worktreePath 的运行（普通对话 / Plan 的只读勘察 / 远端 SSH 会话）返回 null，
+ * 调用点行为零变化。
+ */
+function createWorkerWriteScope(workspacePath, worktreePath) {
+  const ws = String(workspacePath || '').trim();
+  const wt = String(worktreePath || '').trim();
+  // 远端（ssh://）工作区没有 worktree 概念；拿本机 `path.resolve` 解析远端 POSIX 路径
+  // 会得到 `E:\srv\x` 这种假路径（docs/SANDBOX.md §1.1），直接不启用作用域。
+  if (!wt || !ws || /^ssh:\/\//i.test(wt) || /^ssh:\/\//i.test(ws)) return null;
+  const wsRoot = path.resolve(ws);
+  const wtRoot = path.resolve(wt);
+  if (wtRoot === wsRoot) return null;
+
+  /**
+   * @param {string} target 已经过 resolvePath 的路径（相对路径此时已落在 worktree 上）
+   * @returns {{ path: string } | { denied: { error: string, errorCode: string, retryable: boolean } }}
+   */
+  function map(target) {
+    let s = String(target == null ? '' : target);
+    if (!s) return { path: target };
+    if (isLocalPathRef(s)) s = s.replace(/^local:[\\/]*/i, '');
+    if (!path.isAbsolute(s)) return { path: target }; // 非绝对：resolvePath 已按 worktree 拼过
+    const abs = path.resolve(s);
+    if (isSameOrUnder(wtRoot, abs)) return { path: abs };
+    if (isSameOrUnder(wsRoot, abs)) {
+      return { path: path.join(wtRoot, path.relative(wsRoot, abs)) };
+    }
+    return {
+      denied: {
+        error:
+          `本轮是 worktree 里的执行器，只能写 ${wtRoot} 之内（主工作区 ${wsRoot} 下的路径会自动映射到副本）。` +
+          `${abs} 落在这两处之外，未执行。`,
+        errorCode: 'WORKER_SCOPE_DENIED',
+        retryable: false
+      }
+    };
+  }
+
+  /**
+   * 读目标：**写完必须能读回来**。
+   *
+   * 写已被映射到副本，如果读还指着主工作区，模型「写文件 → 读一遍确认」会看到旧内容，
+   * 于是判定写入失败、再写一遍、再读…… 表现是无限重试。
+   * 规则：目标在副本里有对应文件就读副本；没有（node_modules、构建产物、未跟踪文件）
+   * 就读主工作区那一份 —— worktree 只是 git 快照，这些天然不存在于副本里。
+   * 工作区之外的读取不拦（是否可读由宿主权限/沙箱管，与普通轮同口径）。
+   *
+   * @param {string} target 已经过 resolvePath 的路径
+   * @param {(p: string) => boolean} exists
+   */
+  function mapRead(target, exists) {
+    let s = String(target == null ? '' : target);
+    if (!s) return target;
+    if (isLocalPathRef(s)) s = s.replace(/^local:[\\/]*/i, '');
+    if (!path.isAbsolute(s)) return target;
+    const abs = path.resolve(s);
+    if (isSameOrUnder(wtRoot, abs)) return abs;
+    if (!isSameOrUnder(wsRoot, abs)) return abs;
+    const counterpart = path.join(wtRoot, path.relative(wsRoot, abs));
+    return exists(counterpart) ? counterpart : abs;
+  }
+
+  return { root: wtRoot, map, mapRead };
+}
 
 function resolveFsReadMaxBytes(args, ctx) {
   const explicit = Number(args && args.maxBytes);
@@ -73,6 +163,51 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
     return w;
   }
 
+  // 写目标的作用域（worktree 优先、越界拒绝）：只对有 worktreePath 的运行生效。
+  const writeScope = createWorkerWriteScope(ws, wt);
+
+  /**
+   * 写目标的路径解析：先按既有规则解析（相对 → worktree），再过写作用域。
+   * @returns {{ path?: string } | { denied: object }}
+   */
+  function resolveWriteTarget(p) {
+    const resolved = resolvePath(p);
+    if (!writeScope) return { path: resolved };
+    return writeScope.map(resolved);
+  }
+
+  /**
+   * 读目标的路径解析：相对路径本就落在 worktree；绝对路径「副本里有就读副本」。
+   * @param {string} p
+   */
+  function resolveReadTarget(p) {
+    const resolved = resolvePath(p);
+    if (!writeScope) return resolved;
+    return writeScope.mapRead(resolved, (candidate) => {
+      try {
+        return fs.existsSync(candidate);
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** `host_exec` 的 cwd：绝对/相对都收口到副本（相对 cwd 不处理就会被 Gateway 按主工作区解析）。 */
+  function resolveExecCwdScoped(explicit) {
+    if (!explicit) return { path: resolveExecCwd(null) };
+    const s = String(explicit);
+    if (!writeScope) return { path: resolveExecCwd(s) };
+    const isAbs = /^[a-zA-Z]:[\\/]/.test(s) || path.isAbsolute(s);
+    const base = isAbs ? s : path.join(writeScope.root, s.replace(/^\.?[\\/]/, ''));
+    return writeScope.map(resolvePath(base));
+  }
+
+  /** 浏览器工具的落盘参数（screenshot / pdf / har_export / visual_diff）：空值保持 undefined。 */
+  function writeFileArg(p) {
+    if (p == null || String(p).trim() === '') return { path: undefined };
+    return resolveWriteTarget(p);
+  }
+
   function browserRpc(method, params) {
     return gateway.invokeRpc(method, withRunWorkspace(params || {}));
   }
@@ -118,12 +253,15 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       if (a.clickCount != null) params.clickCount = a.clickCount;
       return gateway.invokeRpc('computer.action', withRunWorkspace(params));
     }
-    case 'host_exec':
+    case 'host_exec': {
+      // cwd 是命令的写落地：绝对路径要按写作用域收口（否则 `cd` 到主工作区就绕过了 worktree）
+      const cwdTarget = resolveExecCwdScoped(a.cwd);
+      if (cwdTarget.denied) return cwdTarget.denied;
       return gateway.invokeRpc(
         'host.exec',
         withRunWorkspace({
           command: a.command,
-          cwd: resolveExecCwd(a.cwd),
+          cwd: cwdTarget.path,
           // local:true = 在叠云这台机器上跑（SSH 会话里默认是远端主机）
           ...(isLocalFlag(a.local) ? { local: true } : {}),
           detached: !!a.detached,
@@ -134,6 +272,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
           sessionId: ctx.sessionId || undefined
         })
       );
+    }
     case 'host_proc': {
       const action = a.action === 'kill' ? 'kill' : a.action === 'output' ? 'output' : 'list';
       // local:true = 看/管本机那张句柄表（SSH 会话里起过本机后台进程时用）
@@ -171,32 +310,37 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       return gateway.invokeRpc(
         'fs.read_file',
         withRunWorkspace({
-          filePath: resolvePath(a.filePath),
+          filePath: resolveReadTarget(a.filePath),
           encoding: a.encoding || 'utf8',
           offset: a.offset,
           maxBytes: resolveFsReadMaxBytes(a, ctx)
         })
       );
-    case 'fs_write_file':
+    case 'fs_write_file': {
       if (a.content == null || typeof a.content !== 'string') {
         return { error: 'fs_write_file 缺少有效 content（字符串）' };
       }
+      const target = resolveWriteTarget(a.filePath);
+      if (target.denied) return target.denied;
       return gateway.invokeRpc(
         'fs.write_file',
         withRunWorkspace({
-          filePath: resolvePath(a.filePath),
+          filePath: target.path,
           data: a.content,
           undoSessionId: ctx.sessionId || undefined,
           undoTurnId: ctx.undoTurnId || undefined
         })
       );
+    }
     case 'fs_edit': {
       const { hasLegacy, hasEdits, oldString, newString } = fsEditArgsPresent(a);
       if (!hasLegacy && !hasEdits) {
         return { error: 'fs_edit 缺少 oldString 或 edits' };
       }
+      const target = resolveWriteTarget(a.filePath || a.path);
+      if (target.denied) return target.denied;
       const payload = withRunWorkspace({
-        filePath: resolvePath(a.filePath || a.path),
+        filePath: target.path,
         replaceAll: a.replaceAll === true || a.replace_all === true,
         undoSessionId: ctx.sessionId || undefined,
         undoTurnId: ctx.undoTurnId || undefined
@@ -211,7 +355,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
     case 'fs_list_dir':
       return gateway.invokeRpc(
         'fs.list_dir',
-        withRunWorkspace({ dirPath: resolvePath(a.dirPath) })
+        withRunWorkspace({ dirPath: resolveReadTarget(a.dirPath) })
       );
     case 'grep':
       return gateway.invokeRpc(
@@ -219,7 +363,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         withRunWorkspace({
           pattern: a.pattern,
           glob: a.glob,
-          path: a.path,
+          path: a.path ? resolveReadTarget(a.path) : a.path,
           regex: a.regex === true,
           caseInsensitive: a.caseInsensitive === true || a.case_insensitive === true,
           context: a.context,
@@ -236,7 +380,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       return gateway.invokeRpc(
         'fs.read_symbol',
         withRunWorkspace({
-          filePath: fp ? resolvePath(fp) : undefined,
+          filePath: fp ? resolveReadTarget(fp) : undefined,
           name: a.name || a.symbol || a.query || a.symbolName,
           line: a.line,
           maxLines: a.maxLines || a.max_lines
@@ -261,7 +405,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         character: a.character != null ? a.character : a.column != null ? a.column : a.col,
         query: a.query != null ? a.query : a.symbol || a.name
       };
-      if (fp != null && String(fp).trim()) params.filePath = resolvePath(fp);
+      if (fp != null && String(fp).trim()) params.filePath = resolveReadTarget(fp);
       return gateway.invokeRpc('lsp.query', withRunWorkspace(params));
     }
     case 'web_fetch':
@@ -519,16 +663,19 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         engine: a.engine,
         ...frameArgs(a)
       });
-    case 'browser_screenshot':
+    case 'browser_screenshot': {
+      const out = writeFileArg(a.filePath);
+      if (out.denied) return out.denied;
       return browserRpc('browser.screenshot', {
         ref: a.ref,
         selector: a.selector,
         fullPage: a.fullPage,
-        filePath: a.filePath ? resolvePath(a.filePath) : undefined,
+        filePath: out.path,
         engine: a.engine,
         frame: a.frame,
         annotate: a.annotate
       });
+    }
     case 'browser_viewport':
       return browserRpc('browser.viewport', {
         width: a.width,
@@ -581,10 +728,12 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         engine: a.engine,
         frame: a.frame
       });
-    case 'browser_visual_diff':
+    case 'browser_visual_diff': {
+      const out = writeFileArg(a.filePath);
+      if (out.denied) return out.denied;
       return browserRpc('browser.visual_diff', {
         baselinePath: a.baselinePath ? resolvePath(a.baselinePath) : undefined,
-        filePath: a.filePath ? resolvePath(a.filePath) : undefined,
+        filePath: out.path,
         ref: a.ref,
         selector: a.selector,
         threshold: a.threshold,
@@ -592,6 +741,7 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         reset: a.reset,
         engine: a.engine
       });
+    }
     case 'browser_expect':
       return browserRpc('browser.expect', {
         assertions: a.assertions,
@@ -599,14 +749,17 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         engine: a.engine,
         frame: a.frame
       });
-    case 'browser_pdf':
+    case 'browser_pdf': {
+      const out = writeFileArg(a.filePath);
+      if (out.denied) return out.denied;
       return browserRpc('browser.pdf', {
-        filePath: a.filePath ? resolvePath(a.filePath) : undefined,
+        filePath: out.path,
         format: a.format,
         landscape: a.landscape,
         printBackground: a.printBackground,
         engine: a.engine
       });
+    }
     case 'browser_export_storage':
       // 会话分区由 withRunWorkspace 注入当前 run 的 sessionId，无需模型传参
       return browserRpc('browser.export_storage', {
@@ -659,11 +812,14 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         permissions: a.permissions,
         engine: a.engine
       });
-    case 'browser_har_export':
+    case 'browser_har_export': {
+      const out = writeFileArg(a.filePath);
+      if (out.denied) return out.denied;
       return browserRpc('browser.har_export', {
-        filePath: a.filePath ? resolvePath(a.filePath) : undefined,
+        filePath: out.path,
         engine: a.engine
       });
+    }
     case 'browser_observe':
       return browserRpc('browser.observe', {
         interactive: a.interactive !== false,
@@ -692,5 +848,6 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
 
 module.exports = {
   delegateAgentToolViaGateway,
-  resolveFsReadMaxBytes
+  resolveFsReadMaxBytes,
+  createWorkerWriteScope
 };

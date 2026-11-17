@@ -541,6 +541,15 @@ async function executeSendPrepAndRun(state) {
       : typeof getAgentLimits === 'function'
         ? getAgentLimits().taskTierEnabled !== false
         : true;
+  /**
+   * 多 Agent 并行执行（planner 管线）的**唯一入口**：用户在设置里显式打开才走。
+   * 之前这个布尔（`forcePlanner`）在整条链上只有读、没有任何写点，于是 planner
+   * （并行执行器 + worktree 隔离 + 变更合并）成了只有"断点续跑"才可能碰到的死代码。
+   * 这里只读一个开关值，不做"任务看起来复杂就自动走"的判断：planner 是重流程，
+   * 猜错一次就是多等几分钟 + 凭空多出一堆待合并的 worktree。
+   */
+  const plannerMultiAgent =
+    typeof getAgentLimits === 'function' && getAgentLimits().plannerMultiAgentEnabled === true;
   let taskTier =
     taskTierEnabled && typeof inferTaskTierFromStructure === 'function'
       ? inferTaskTierFromStructure({
@@ -703,6 +712,8 @@ async function executeSendPrepAndRun(state) {
     sysContent: sysStable,
     chatHistoryBlock,
     allowPlannerResume,
+    // 设置里开了「多 Agent 并行执行」→ 这一轮走 planner 管线（拆解 → 多路执行器 → 验收 → 合并）
+    forcePlanner: plannerMultiAgent,
     runId: agentRunId,
     turnRide,
     bookPrefixMessages,

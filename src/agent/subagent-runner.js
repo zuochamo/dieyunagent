@@ -296,7 +296,10 @@ function createSubagentRunner(deps) {
     const named = namer.next('explore');
     const index = named.subagentIndex;
     issued += 1;
-    const label = String((rawArgs && rawArgs.label) || '').trim() || `调研 ${index}`;
+    // label 只认**派发方显式给的**名字：没有就留空，卡片标题退回「类型 + #序号」。
+    // 以前这里默认拼「调研 N」，于是卡片会显示成「调研子 Agent #1 · 调研 1」—— 序号说两遍，
+    // 反而挤掉了真正有用的信息（这次在查什么）。
+    const label = String((rawArgs && rawArgs.label) || '').trim();
     const subagentId = named.subagentId;
     const meta = {
       label,
@@ -352,7 +355,10 @@ function createSubagentRunner(deps) {
       if (isAbortError(err)) throw err;
       const message = err && err.message ? err.message : String(err);
       if (typeof deps.onSubagentEnd === 'function') deps.onSubagentEnd(meta, { content: '', error: message });
-      return { error: `子 Agent「${label}」失败：${message}`, errorCode: 'SUBAGENT_FAILED' };
+      return {
+        error: `子 Agent「${label || subagentId}」失败：${message}`,
+        errorCode: 'SUBAGENT_FAILED'
+      };
     } finally {
       release();
     }

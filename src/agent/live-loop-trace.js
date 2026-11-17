@@ -59,15 +59,21 @@ function subagentKindLabel(kind) {
 }
 
 /**
- * 子 Agent 卡片标题 = **类型 + 序号**（如「写入子 Agent #3」「调研子 Agent #1」）。
- * 序号由 createSubagentNamer 在单次运行内单调分配，保证同一轮里唯一。
+ * 子 Agent 卡片标题 = **类型 + 序号 + 干什么**（如「写入子 Agent #3 · 审查工具层改动」）。
+ * 序号由 createSubagentNamer 在单次运行内单调分配，保证同一轮里唯一；
+ * `label` 是派发方给这次派发起的短名（planner 用子任务 title，主循环 subagent 用模型传的
+ * label）。**序号负责区分，label 负责可读** —— 只有序号时，用户看到一列「写入子 Agent #1/#2/#3」
+ * 完全分不清谁在改什么，只能一个个点开。
  * 没有序号（非子 Agent 的隔离卡片、老调用点）时退回 loopTraceBaseLabel。
  */
 function subagentCardTitle(meta) {
   const m = meta || {};
   const n = Number(m.subagentIndex) || 0;
   if (n <= 0) return loopTraceBaseLabel(m);
-  return `${subagentKindLabel(m.subagentKind || m.worker)}子 Agent #${n}`;
+  const base = `${subagentKindLabel(m.subagentKind || m.worker)}子 Agent #${n}`;
+  const label = String(m.label || '').trim();
+  if (!label) return base;
+  return `${base} · ${label}`;
 }
 
 /**

@@ -297,6 +297,17 @@ const AGENT_LIMITS_DEFAULTS = {
   // 只在 runner 生命周期内保留，不落盘；0 = 关闭追问。
   subagentFollowupRetention: 8,
 
+  // —— planner 并行执行器（**写入**子 Agent）——
+  // 与上面「只读调研子 Agent」是两件事：调研子 Agent 共享主工作区、只读；
+  // 执行器各拿一个 git worktree，改完统一进「变更」面板逐文件合并。
+  // 这个数字同时是「同时开几个 worktree + 几条 LLM 并发流 + 几条写类串行队列」，
+  // 所以必须在这里单点收口：按 provider 限流/额度放宽它，才是真的放宽并发。
+  plannerMaxParallelWorkers: 3,
+  // 多 Agent 并行的总开关（用户在设置页显式打开才走 planner 管线）。
+  // 不做「按任务大小自动判断」：planner 是「拆解 → 并行 → 验收 → 合并」的重流程，
+  // 猜错一次的代价（多等几分钟 + 凭空多出一堆 worktree 待合并）远高于手动开一次。
+  plannerMultiAgentEnabled: false,
+
   // —— 注入块尺寸上限（system prompt 各数据块）——
   // 唯一来源。Main 的 src/agent/system-prompt-prep.js 与 Renderer 的
   // renderer-context-engine.js 都从这里读，不再各自维护字面量。
@@ -774,9 +785,25 @@ const AGENT_LIMITS_SCHEMA = [
     ]
   },
   {
-    group: '子 Agent（只读并发调研）',
+    group: '子 Agent（并发调研 / 并行写入）',
     groupId: 'subagent',
     items: [
+      {
+        key: 'plannerMultiAgentEnabled',
+        label: '多 Agent 并行执行',
+        hint: '打开后改代码类任务走「规划 → 多路执行器（各一个 git worktree）并行 → 验收 → 变更面板逐文件合并」；需 git 工作区，关掉仍是单条循环',
+        type: 'boolean'
+      },
+      {
+        key: 'plannerMaxParallelWorkers',
+        label: '并行执行器上限',
+        hint: '每个执行器 = 一个 git worktree + 一条 LLM 并发流；调大前先确认 provider 额度',
+        type: 'number',
+        min: 1,
+        max: 6,
+        step: 1,
+        unit: '路'
+      },
       {
         key: 'subagentMaxDepth',
         label: '子 Agent 最大深度',
