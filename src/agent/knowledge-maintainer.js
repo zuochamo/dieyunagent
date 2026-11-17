@@ -32,7 +32,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { chatCompletionJson } = require('../llm-proxy');
+const { completeOnce, currentLlmCompleteBridge } = require('./llm-complete');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
 const { getAgentLimits } = require('./agent-limits');
 const shared = require('./guardrails-shared');
@@ -835,11 +835,11 @@ function resolveLlmCall(ctx, payload, limits) {
 }
 
 /**
- * 一次归纳请求。`fetch` 默认是 Main 的 `chatCompletionJson`；
+ * 一次归纳请求。`fetch` 是测试注入点；不注入就走 core 的 `llm.complete`；
+ * 端点/请求头/超时/解析/usage 都只有 core 那一份实现。
  * 测试可注入替身（与 session-title 的 `opts.fetchTitleOnce` 同一手法）。
  */
-async function callLlm(llm, body, fetch) {
-  const doFetch = typeof fetch === 'function' ? fetch : chatCompletionJson;
+async function callLlm(llm, body, fetch, coreBridge) {
   const child = new AbortController();
   const timer = setTimeout(() => {
     try {
@@ -849,9 +849,20 @@ async function callLlm(llm, body, fetch) {
     }
   }, llm.timeoutMs);
   try {
-    return await doFetch(llm.url, {
-      headers: llm.headers,
-      body: JSON.stringify(body),
+    if (typeof fetch === 'function') {
+      return await fetch(llm.url, {
+        headers: llm.headers,
+        body: JSON.stringify(body),
+        signal: child.signal
+      });
+    }
+    // 默认传输：core 的 `llm.complete`（端点/请求头/超时/解析/usage 只有 core 那一份）
+    return await completeOnce({
+      coreBridge: coreBridge || currentLlmCompleteBridge(),
+      url: llm.url,
+      llm,
+      body,
+      timeoutMs: llm.timeoutMs,
       signal: child.signal
     });
   } finally {
@@ -940,7 +951,7 @@ async function runSharedMemoryConsolidation(ctx, trigger) {
         }
       ]
     };
-    const text = extractContent(await callLlm(llm, body, ctx.fetchChatCompletion));
+    const text = extractContent(await callLlm(llm, body, ctx.fetchChatCompletion, ctx.coreBridge));
     const parsed = parseKnowledgeJson(text);
     // 只允许归档「本次候选里出现过的 id」：模型编不出库里没有的行
     const known = new Set(rows.map((r) => String(r.id)));
@@ -1034,7 +1045,7 @@ async function runTaskMaintenance(ctx, payload = {}) {
         }
       ]
     };
-    text = extractContent(await callLlm(llm, body, ctx.fetchChatCompletion));
+    text = extractContent(await callLlm(llm, body, ctx.fetchChatCompletion, ctx.coreBridge));
   } catch (err) {
     await finishJob(ctx, job, 'failed', err && (err.message || err));
     return { ok: false, reason: 'llm_failed' };
@@ -1157,7 +1168,7 @@ async function runPeriodicMaintenance(ctx, opts = {}) {
         }
       ]
     };
-    text = extractContent(await callLlm(llm, body, ctx.fetchChatCompletion));
+    text = extractContent(await callLlm(llm, body, ctx.fetchChatCompletion, ctx.coreBridge));
   } catch (err) {
     await finishJob(ctx, job, 'failed', err && (err.message || err));
     ctx.updateSettings({ lastRunAt: Date.now(), lastRunOk: false, lastRunSummary: '模型调用失败' });
@@ -1296,7 +1307,7 @@ function createKnowledgeMaintainer(deps) {
     },
     sessionId: '',
     invokeRpc,
-    /** 测试注入点：默认走 llm-proxy 的 chatCompletionJson */
+    /** 测试注入点：默认走 core 的 llm.complete */
     fetchChatCompletion: typeof deps.fetchChatCompletion === 'function' ? deps.fetchChatCompletion : null,
     limits: () => getAgentLimits(deps.getUserDataPath()),
     readAgentsMdPrefs: () => require('./agents-md-prefs').readAgentsMdPrefs(deps.getUserDataPath()),
