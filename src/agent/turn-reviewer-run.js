@@ -17,7 +17,7 @@
  *   3. 超时 60s（`REVIEWER_TIMEOUT_MS`）即放弃，验收不该拖住收尾。
  */
 
-const { chatCompletionJson } = require('../llm-proxy');
+const { completeOnce, currentLlmCompleteBridge } = require('./llm-complete');
 // 响应体 → 正文：与标题生成同一个解析口径（`session-title.js` 已导出，别再写一份）
 const { extractCompletionContent } = require('./session-title');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
@@ -54,7 +54,9 @@ function buildReviewerRequest(config, opts = {}) {
   };
   // JSON 模式只是「尽量」：不少兼容端点不认 response_format，调用侧会退回普通模式重发一次。
   if (opts.jsonMode !== false) body.response_format = { type: 'json_object' };
-  return { url, headers, body };
+  // `llm` 一起带出去：请求由 core 发，端点/鉴权原样交给它（不在这里再算一次头）
+  const llm = { ...(config.apiConfig || {}), model: config.model, headers };
+  return { url, headers, body, llm };
 }
 
 function isJsonModeUnsupported(err) {
@@ -64,18 +66,20 @@ function isJsonModeUnsupported(err) {
 
 /**
  * 带超时的一次请求：返回模型输出的原始文本。
- * `fetchReviewerOnce` 只给测试注入（不注入就走 `chatCompletionJson`）。
+ * `fetchReviewerOnce` 只给测试注入（不注入就走 core 的 `llm.complete`）。
  */
-async function fetchOnce(request, { signal, fetchReviewerOnce }) {
+async function fetchOnce(request, { signal, fetchReviewerOnce, coreBridge }) {
   if (typeof fetchReviewerOnce === 'function') {
     return fetchReviewerOnce({ url: request.url, headers: request.headers, body: request.body, signal });
   }
-  const raw = await chatCompletionJson(request.url, {
-    headers: request.headers,
-    body: JSON.stringify(request.body),
-    signal
+  // 请求由 core 发：评审也走同一份端点/请求头/超时/解析实现（Node 不再有第二份 HTTP 客户端）
+  const result = await completeOnce({
+    coreBridge: coreBridge || currentLlmCompleteBridge(),
+    url: request.url,
+    llm: request.llm,
+    body: request.body
   });
-  return extractCompletionContent(raw);
+  return extractCompletionContent(result);
 }
 
 /**
@@ -144,7 +148,11 @@ async function runTurnReviewer(opts = {}) {
     }
   }, REVIEWER_TIMEOUT_MS);
 
-  const callOpts = { signal: child.signal, fetchReviewerOnce: opts.fetchReviewerOnce };
+  const callOpts = {
+    signal: child.signal,
+    fetchReviewerOnce: opts.fetchReviewerOnce,
+    coreBridge: opts.coreBridge
+  };
   let raw = '';
   try {
     try {

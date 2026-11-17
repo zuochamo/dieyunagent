@@ -37,6 +37,7 @@ function currentLlmCompleteBridge() {
  * @param {boolean} [opts.stream] 是否流式；流式时**必须**给 `runId` 才能收到增量事件
  * @param {string} [opts.runId] 给了就把增量推到事件通道（`agent.delta`）
  * @param {boolean} [opts.includeRaw] 调试抓包：把响应原文一并回传
+ * @param {string} [opts.url] 已解析好的端点（调用方已经用 `llm-request.js` 算过就传它，避免二次推导）
  * @param {{ invoke: Function }} [opts.coreBridge] 覆盖装配里的桥（测试用）
  * @returns {Promise<{content:string, reasoning:?string, toolCalls:object[], finishReason:?string,
  *                    usage:?object, model:?string, raw:?string}>}
@@ -49,7 +50,7 @@ async function completeOnce(opts) {
   const llm = (opts && opts.llm) || {};
   const body = (opts && opts.body) || {};
   const model = String(body.model || llm.model || '');
-  const url = resolveLlmEndpoint(llm && llm.baseUrl);
+  const url = String((opts && opts.url) || '').trim() || resolveLlmEndpoint(llm && llm.baseUrl);
   const headers = buildLlmHeadersFromConfig(llm);
   return bridge.invoke(
     'llm.complete',
