@@ -28,15 +28,47 @@ pub(crate) const MIN_BUDGET_TOKENS: usize = fold::MIN_BUDGET_TOKENS;
 
 use serde_json::{json, Value};
 
+use crate::error::CoreError;
+
 /// 只回答「这段 messages 值多少 token」。
 ///
 /// 只有一个消费方：UI 的上下文圆环（`{ messages }` 进、`{ tokens }` 出）。
 /// 触发判定不走这里——那是 [`fold`] 内部的事，且优先用服务端 usage。
-pub fn estimate(params: &Value) -> Value {
+///
+/// **形状不对要报错，不要回 `tokens: 0`**：0 与「上下文真的是空的」不可区分 —— 圆环显示
+/// 「空上下文」、任何「接近上限才提醒」的 UI 判断都不触发，而调用方完全不知道自己传错了。
+/// （同一份 `messages` 参数在 `compaction.fold` 里就是硬报 `INVALID_PARAMS`，口径要对齐。）
+pub fn estimate(params: &Value) -> Result<Value, CoreError> {
     let messages = params
         .get("messages")
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    json!({ "tokens": estimate_messages_tokens(&messages) })
+        .ok_or_else(|| {
+            CoreError::rpc("INVALID_PARAMS", "messages 必填且必须是数组（估算只看消息列表）")
+        })?;
+    Ok(json!({ "tokens": estimate_messages_tokens(messages) }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 回归（A19）：形状错误的入参必须报错，不能回 `tokens: 0`。
+    ///
+    /// 0 与「上下文真的是空的」不可区分 —— 圆环显示「空上下文」，任何「接近上限才提醒」
+    /// 的 UI 判断都不触发，而调用方完全不知道自己传错了。
+    #[test]
+    fn estimate_rejects_malformed_messages() {
+        for bad in [
+            json!({}),
+            json!({ "messages": null }),
+            json!({ "messages": "oops" }),
+        ] {
+            let err = estimate(&bad).expect_err("形状不对就该报错");
+            assert!(format!("{err}").contains("messages"), "{err}");
+        }
+        // 空数组是合法的「空上下文」：这里的 0 是真值
+        let out = estimate(&json!({ "messages": [] })).unwrap();
+        assert_eq!(out["tokens"], 0);
+    }
 }

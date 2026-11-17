@@ -8,7 +8,9 @@ use crate::rpc::ServiceSnapshot;
 
 /// `compaction.estimate`：只回答「这段 messages 值多少 token」（UI 上下文圆环）。
 pub(crate) fn estimate(_snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
-    Ok(compaction::estimate(params))
+    // 形状错误（messages 缺失 / 不是数组）由 `compaction::estimate` 硬报 INVALID_PARAMS，
+    // 不再回 `tokens: 0` —— 那与「上下文真空」不可区分。
+    compaction::estimate(params)
 }
 
 /// `compaction.fold`：确定性的就地折叠（无网络、无超时，所以落在阻塞池）。

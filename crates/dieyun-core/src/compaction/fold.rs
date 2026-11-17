@@ -50,6 +50,11 @@ pub struct FoldResult {
     pub triggered: bool,
     pub messages: Vec<Value>,
     pub tokens_before: usize,
+    /// 同一份 messages 在**折叠前**的本地估值（与 `tokens_after` 同口径）。
+    ///
+    /// 为什么需要它：`tokens_before` 在有服务端 usage 时是**真实值**，而 `tokens_after`
+    /// 永远是估值 —— 两者直接相减等于拿两把尺子量，节省量系统性虚报。要报「省了多少」用这一对。
+    pub tokens_before_estimated: usize,
     pub tokens_after: usize,
     /// 触发口径：`usage` = 服务端 usage；`estimate` = 字符比估值。
     pub trigger_source: &'static str,
@@ -113,6 +118,7 @@ pub fn fold(params: FoldParams) -> FoldResult {
             triggered: false,
             messages: params.messages,
             tokens_before: used,
+            tokens_before_estimated: estimated,
             tokens_after: used,
             trigger_source,
             level: 0,
@@ -178,6 +184,7 @@ pub fn fold(params: FoldParams) -> FoldResult {
         triggered: true,
         messages,
         tokens_before: used,
+        tokens_before_estimated: estimated,
         tokens_after: after,
         trigger_source,
         level,
@@ -337,13 +344,34 @@ fn part_text(part: &Value) -> Option<String> {
 }
 
 /// 从文本里读出「已折叠到第几档」；没有折叠标记时为 `None`。
+/// 从文本里读出「已折叠到第几档」；没有折叠标记时为 `None`。
+///
+/// **只认我们自己写出的完整形状**（`clip()` 生成的那一段：
+/// `…［已折叠 <n> 字符 fold:L<档>；需要原文请…］…`），不再全文 `find("fold:L")`。
+///
+/// 为什么必须收紧：折叠是**唯一**的压缩机制（LLM 摘要已删），而旧实现只要正文里出现过
+/// `fold:L<数字>` 就判「已折到该档」—— 模型读过 `fold.rs` / `docs/CONTEXT-FOLD.md`，或者
+/// 任何一份引用了折叠标记的日志 / 审计报告进了上下文，那条消息就永久既不裁也不再推进档位，
+/// 估值只增不减，最后只能靠上游 400 收场。
 fn applied_level(text: &str) -> Option<u8> {
-    let at = text.find(LEVEL_TAG)?;
-    let digits: String = text[at + LEVEL_TAG.len()..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().ok()
+    // 逐段校验 `clip()` 写出的**完整形状**（`［已折叠 <n> 字符 fold:L<档>；`），
+    // 不做「出现即算」——正文里提到这串字（模型读过 fold.rs / 文档 / 日志）不是折叠证据。
+    for (at, _) in text.match_indices(FOLD_MARK) {
+        let rest = &text[at + FOLD_MARK.len()..];
+        let Some(rest) = rest.strip_prefix(' ') else { continue };
+        let Some((removed, rest)) = rest.split_once(' ') else { continue };
+        if removed.is_empty() || !removed.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Some(rest) = rest.strip_prefix("字符 ") else { continue };
+        let Some(rest) = rest.strip_prefix(LEVEL_TAG) else { continue };
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(level) = digits.parse::<u8>() else { continue };
+        if rest[digits.len()..].starts_with('；') {
+            return Some(level);
+        }
+    }
+    None
 }
 
 fn char_len(s: &str) -> usize {
@@ -610,5 +638,26 @@ mod tests {
             assert_eq!(applied_level(&marked), Some(lv));
         }
         assert_eq!(applied_level("普通文本"), None);
+    }
+
+    /// 回归（A17）：正文里**提到** `fold:L` 不等于「已经折过」。
+    ///
+    /// 折叠是唯一的压缩机制。旧实现全文 `find("fold:L")`：模型读过 `fold.rs` /
+    /// `docs/CONTEXT-FOLD.md`、或者任何一份引用了折叠标记的日志 / 审计报告进了上下文，
+    /// 那条消息就被当成「已折到 L9」—— 从此既不裁也不再推进档位，估值只增不减。
+    #[test]
+    fn text_mentioning_the_marker_is_still_folded() {
+        // 看起来像标记、但不是我们写出的完整形状
+        assert_eq!(applied_level("文档里写着 fold:L9 这一档，别删。"), None);
+        assert_eq!(applied_level("［已折叠］但没写档位，后面才提 fold:L3"), None);
+
+        // 真正的工具输出里提到标记 → 仍然必须被折叠
+        let doc = format!("fold.rs 里写着 fold:L9 这一档。{}", "x".repeat(20_000));
+        let messages = history(&doc);
+        let before: usize = messages.iter().map(|m| m.to_string().len()).sum();
+        let r = fold(params(messages));
+        assert!(r.compacted, "提到标记的正文仍要折叠");
+        let after: usize = r.messages.iter().map(|m| m.to_string().len()).sum();
+        assert!(after < before, "该消息必须真的被裁短：{after} !< {before}");
     }
 }

@@ -469,3 +469,61 @@ pub(crate) fn long_memories_after(snap: &ServiceSnapshot, params: &Value) -> Res
     // 迁移纪律：搬一个方法 = 表里加 `blocking: Some(handler)` + 删掉这里的臂；
     // `registry.rs` 的 parity 测试会拦「双份实现」与「两边都没有」。
     // ---- agent：运行账本 / trace ----
+
+// ---- 下面是「没有 await 的 memory 方法」：以前写成 async 壳，真正的 rusqlite 全压在
+// async worker 上（并发时连 core.ping 都要排队）。A14 把它们搬回阻塞池。----
+
+/// `memory.project_resolve`
+pub(crate) fn project_resolve(snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "path 必填"))?;
+    let git_origin = params.get("gitOrigin").and_then(|v| v.as_str());
+    let memory = &snap.memory;
+    memory.resolve_project(path, git_origin)
+}
+
+/// `memory.project_list`
+pub(crate) fn project_list(snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let memory = &snap.memory;
+    memory.list_projects(limit)
+}
+
+/// `memory.project_alias_add`
+pub(crate) fn project_alias_add(snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
+    let project_id = params
+        .get("projectId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "projectId 必填"))?;
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "path 必填"))?;
+    let memory = &snap.memory;
+    memory.add_project_alias(project_id, path)
+}
+
+/// `memory.long_by_session`
+pub(crate) fn long_by_session(snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+    let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+    let memory = &snap.memory;
+    let rows = memory.long_memories_by_session(session_id, limit)?;
+    Ok(json!({ "results": rows }))
+}
+
+/// `memory.long_forget_session`
+pub(crate) fn long_forget_session(snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+    let memory = &snap.memory;
+    let archived = memory.archive_long_memories_by_session(session_id)?;
+    Ok(json!({ "archived": archived }))
+}

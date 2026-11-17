@@ -110,16 +110,26 @@ impl PlannerRunManager {
         if let Some(cp) = &params.resume_checkpoint {
             if let Some(data) = cp.get("data").or_else(|| Some(cp)) {
                 if let Some(p) = data.get("plan") {
-                    if let Ok(parsed) = serde_json::from_value::<Plan>(p.clone()) {
-                        plan = Some(finalize_plan(parsed, params.best_of_n));
-                        explore_skipped = true;
-                        let (ids, outputs) = parse_completed_outputs(
-                            data.get("completedOutputs")
-                                .or_else(|| data.get("completed_outputs")),
-                        );
-                        resume_completed_ids = ids;
-                        restored_results = outputs;
-                    }
+                    // 检查点解析失败**必须报出来**：旧实现 `if let Ok(...)` 把它和「没有检查点」
+                    // 混为一谈 —— 计划丢了、`completedOutputs` 也一起丢，于是把已经做完的子任务
+                    // 从头再跑一遍（还重写一遍 worktree），界面上看不出任何异常。
+                    let parsed = serde_json::from_value::<Plan>(p.clone()).map_err(|e| {
+                        CoreError::rpc(
+                            "INVALID_PARAMS",
+                            format!(
+                                "恢复检查点失败：plan 无法解析（{e}）。\
+                                 不会静默重跑已完成的工作 —— 请丢弃该检查点后重新规划。"
+                            ),
+                        )
+                    })?;
+                    plan = Some(finalize_plan(parsed, params.best_of_n));
+                    explore_skipped = true;
+                    let (ids, outputs) = parse_completed_outputs(
+                        data.get("completedOutputs")
+                            .or_else(|| data.get("completed_outputs")),
+                    );
+                    resume_completed_ids = ids;
+                    restored_results = outputs;
                 }
                 if let Some(notes) = data
                     .get("exploreNotes")
@@ -1207,6 +1217,36 @@ mod tests {
     /// `agent-limits.plannerBestOfN` 是**上限**：模型写多少都不能超过它，关掉就是关掉。
     ///
     /// 旧实现 `max(cfg, model)` 让「关掉 best-of-N」变成一句模型话术就能推翻的设置。
+    /// 回归（A18）：检查点里的 `plan` 解析不了时必须**报错**，不许静默重跑。
+    ///
+    /// 旧实现 `if let Ok(parsed) = …` 把「解析失败」和「没有检查点」混成一条路：计划丢了、
+    /// `completedOutputs` 也一起丢，于是已经做完的子任务从头再跑一遍（还重写 worktree），
+    /// 界面上看不出任何异常。
+    #[test]
+    fn unparsable_checkpoint_fails_loudly_instead_of_rerunning() {
+        let mgr = PlannerRunManager::default();
+        let cp = json!({
+            "plan": { "planSummary": "坏掉的检查点", "subtasks": "不是数组" },
+            "completedOutputs": [{ "id": "A1", "worker": "A", "output": "already done" }]
+        });
+        let err = mgr
+            .start(PlannerStartParams {
+                model: "test".into(),
+                sys_content: "sys".into(),
+                user_text: "resume".into(),
+                resume_checkpoint: Some(cp),
+                ..sample_params()
+            })
+            .expect_err("计划不可解析时不许当成「没有检查点」继续");
+        match err {
+            CoreError::Rpc { code, message } => {
+                assert_eq!(code, "INVALID_PARAMS");
+                assert!(message.contains("检查点"), "{message}");
+            }
+            other => panic!("应回 INVALID_PARAMS，实际 {other:?}"),
+        }
+    }
+
     #[test]
     fn finalize_plan_never_raises_best_of_n_above_the_host_cap() {
         let plan_with = |n: u32| Plan {

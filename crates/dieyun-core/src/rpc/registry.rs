@@ -123,9 +123,9 @@ pub(crate) static METHODS: &[MethodSpec] = &[
     MethodSpec { name: "memory.handoff_take", budget: Budget::None, imp: Impl::Blocking(handlers::memory::handoff_take) },
     MethodSpec { name: "memory.long_add", budget: Budget::None, imp: Impl::Async(handlers::async_data::memory_long_add) },
     MethodSpec { name: "memory.long_add_many", budget: Budget::None, imp: Impl::Async(handlers::async_data::memory_long_add_many) },
-    MethodSpec { name: "memory.long_by_session", budget: Budget::None, imp: Impl::Async(handlers::async_data::memory_long_by_session) },
+    MethodSpec { name: "memory.long_by_session", budget: Budget::None, imp: Impl::Blocking(handlers::memory::long_by_session) },
     MethodSpec { name: "memory.long_decay", budget: Budget::None, imp: Impl::Blocking(handlers::memory::long_decay) },
-    MethodSpec { name: "memory.long_forget_session", budget: Budget::None, imp: Impl::Async(handlers::async_data::memory_long_forget_session) },
+    MethodSpec { name: "memory.long_forget_session", budget: Budget::None, imp: Impl::Blocking(handlers::memory::long_forget_session) },
     MethodSpec { name: "memory.long_keyword_search", budget: Budget::None, imp: Impl::Blocking(handlers::memory::long_keyword_search) },
     MethodSpec { name: "memory.long_memories_after", budget: Budget::None, imp: Impl::Blocking(handlers::memory::long_memories_after) },
     MethodSpec { name: "memory.long_recall", budget: Budget::None, imp: Impl::Async(handlers::async_data::memory_long_recall) },
@@ -140,9 +140,9 @@ pub(crate) static METHODS: &[MethodSpec] = &[
     MethodSpec { name: "memory.messages_recent", budget: Budget::None, imp: Impl::Blocking(handlers::memory::messages_recent) },
     MethodSpec { name: "memory.messages_search", budget: Budget::None, imp: Impl::Blocking(handlers::memory::messages_search) },
     MethodSpec { name: "memory.ping", budget: Budget::None, imp: Impl::Blocking(handlers::memory::ping) },
-    MethodSpec { name: "memory.project_alias_add", budget: Budget::None, imp: Impl::Async(handlers::async_data::memory_project_alias_add) },
-    MethodSpec { name: "memory.project_list", budget: Budget::None, imp: Impl::Async(handlers::async_data::memory_project_list) },
-    MethodSpec { name: "memory.project_resolve", budget: Budget::None, imp: Impl::Async(handlers::async_data::memory_project_resolve) },
+    MethodSpec { name: "memory.project_alias_add", budget: Budget::None, imp: Impl::Blocking(handlers::memory::project_alias_add) },
+    MethodSpec { name: "memory.project_list", budget: Budget::None, imp: Impl::Blocking(handlers::memory::project_list) },
+    MethodSpec { name: "memory.project_resolve", budget: Budget::None, imp: Impl::Blocking(handlers::memory::project_resolve) },
     MethodSpec { name: "memory.request_snapshot_append", budget: Budget::None, imp: Impl::Blocking(handlers::memory::request_snapshot_append) },
     MethodSpec { name: "memory.request_snapshot_get", budget: Budget::None, imp: Impl::Blocking(handlers::memory::request_snapshot_get) },
     MethodSpec { name: "memory.request_snapshot_index_audit", budget: Budget::None, imp: Impl::Blocking(handlers::memory::request_snapshot_index_audit) },
@@ -215,6 +215,35 @@ mod tests {
                 !body.contains(&format!("\"{}\"", spec.name)),
                 "{} 还以字符串形式出现在 dispatch 里 —— 方法名只该在方法表里",
                 spec.name
+            );
+        }
+    }
+
+    /// 回归（A14）：「体内只有 rusqlite、没有任何 `.await`」的方法必须留在**阻塞池**。
+    ///
+    /// 它们以前写成 `async fn` 壳（只是为了拿 `state.snapshot()`），真正的 SQLite 全压在
+    /// async worker 上 —— 并发时连 `core.ping` 都要排队，面板显示「core 卡死」。
+    /// 反面对照：`memory.long_recall` / `long_add*` / `long_reindex` 要等 embedding，必须是 Async。
+    #[test]
+    fn sqlite_only_methods_stay_in_the_blocking_pool() {
+        for name in [
+            "memory.project_resolve",
+            "memory.project_list",
+            "memory.project_alias_add",
+            "memory.long_by_session",
+            "memory.long_forget_session",
+        ] {
+            let spec = find(name).unwrap_or_else(|| panic!("表里没有 {name}"));
+            assert!(
+                matches!(spec.imp, Impl::Blocking(_)),
+                "{name} 体内只有 SQLite，必须在阻塞池里跑"
+            );
+        }
+        for name in ["memory.long_recall", "memory.long_add", "memory.long_reindex"] {
+            let spec = find(name).unwrap_or_else(|| panic!("表里没有 {name}"));
+            assert!(
+                matches!(spec.imp, Impl::Async(_)),
+                "{name} 要等 embedding，必须留在 async 链"
             );
         }
     }

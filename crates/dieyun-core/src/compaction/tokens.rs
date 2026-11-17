@@ -74,7 +74,16 @@ pub fn estimate_messages_tokens(messages: &[Value]) -> usize {
     messages
         .iter()
         // 借 `content` 而不是整份 clone：每条消息的内容可能很长，而这里只需要长度估算。
-        .map(|m| m.get("content").map_or(0, estimate_tokens) + 6)
+        //
+        // `reasoning_content` 必须一起算：推理模型每轮都把思考随 assistant 消息**原样回传**
+        // （见 `agent/loop_run.rs`，不回传会被上游 400），那份体积同样进 prompt。只数
+        // `content` 会系统性低估 —— 真实 prompt 已越过折叠触发线，估值却还没到，于是「该折
+        // 不折」直接撞上游 400 / 截断；而 `tokens_before - tokens_after` 还会虚报节省量。
+        .map(|m| {
+            let content = m.get("content").map_or(0, estimate_tokens);
+            let reasoning = m.get("reasoning_content").map_or(0, estimate_tokens);
+            content + reasoning + 6
+        })
         .sum()
 }
 
@@ -177,5 +186,26 @@ mod tests {
         assert_eq!(estimate_text_tokens("😀😀"), 1);
         assert_eq!(estimate_text_tokens("中😀"), 1);
         assert_eq!(estimate_text_tokens("𝕏"), 1);
+    }
+
+    /// 回归（A13）：`reasoning_content` 同样进 prompt，必须计入估值。
+    ///
+    /// 推理模型每轮把思考随 assistant 消息**原样回传**（不回传会被上游 400，见
+    /// `agent/loop_run.rs`），那份体积真实占预算。旧实现只数 `content`：真实 prompt 已越过
+    /// 折叠触发线、估值却还没到 —— 该折不折，最后撞上游 400 / 截断；同时
+    /// `tokens_before - tokens_after` 也把省下的量算多了。
+    #[test]
+    fn reasoning_content_counts_toward_the_estimate() {
+        let reasoning = "思".repeat(3000);
+        let with_reasoning = estimate_messages_tokens(&[json!({
+            "role": "assistant",
+            "content": "hi",
+            "reasoning_content": reasoning,
+        })]);
+        let without = estimate_messages_tokens(&[json!({"role": "assistant", "content": "hi"})]);
+        assert!(
+            with_reasoning > without + 1000,
+            "思考体积必须计入估值：{with_reasoning} 应远大于 {without}"
+        );
     }
 }

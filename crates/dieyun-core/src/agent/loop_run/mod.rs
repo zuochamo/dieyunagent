@@ -210,6 +210,8 @@ pub struct LoopResponse {
 pub struct FoldFact {
     pub level: u8,
     pub tokens_before: usize,
+    /// 折叠前的本地估值（与 `tokens_after` 同口径；见 `compaction::FoldResult`）。
+    pub tokens_before_estimated: usize,
     pub tokens_after: usize,
     pub trigger_source: String,
     pub folded_tool_results: usize,

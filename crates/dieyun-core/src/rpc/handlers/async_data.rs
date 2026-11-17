@@ -6,7 +6,7 @@
 //!
 //! 它们要等 embedding 或后台任务起停，因此必须留在 async 世界。
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::blocking::run_blocking;
 use crate::memory;
@@ -91,71 +91,6 @@ pub(crate) fn memory_long_add_many<'a>(state: &'a AppState, params: &'a Value) -
         memory
             .add_long_memories_deduped(&items, source, scope, session_id)
             .await
-    })
-}
-
-/// `memory.project_resolve`
-pub(crate) fn memory_project_resolve<'a>(state: &'a AppState, params: &'a Value) -> BoxFuture<'a> {
-    Box::pin(async move {
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "path 必填"))?;
-        let git_origin = params.get("gitOrigin").and_then(|v| v.as_str());
-        let memory = state.snapshot().await.memory;
-        memory.resolve_project(path, git_origin)
-    })
-}
-
-/// `memory.project_list`
-pub(crate) fn memory_project_list<'a>(state: &'a AppState, params: &'a Value) -> BoxFuture<'a> {
-    Box::pin(async move {
-        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-        let memory = state.snapshot().await.memory;
-        memory.list_projects(limit)
-    })
-}
-
-/// `memory.project_alias_add`
-pub(crate) fn memory_project_alias_add<'a>(state: &'a AppState, params: &'a Value) -> BoxFuture<'a> {
-    Box::pin(async move {
-        let project_id = params
-            .get("projectId")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "projectId 必填"))?;
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "path 必填"))?;
-        let memory = state.snapshot().await.memory;
-        memory.add_project_alias(project_id, path)
-    })
-}
-
-/// `memory.long_by_session`
-pub(crate) fn memory_long_by_session<'a>(state: &'a AppState, params: &'a Value) -> BoxFuture<'a> {
-    Box::pin(async move {
-        let session_id = params
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-        let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
-        let memory = state.snapshot().await.memory;
-        let rows = memory.long_memories_by_session(session_id, limit)?;
-        Ok(json!({ "results": rows }))
-    })
-}
-
-/// `memory.long_forget_session`
-pub(crate) fn memory_long_forget_session<'a>(state: &'a AppState, params: &'a Value) -> BoxFuture<'a> {
-    Box::pin(async move {
-        let session_id = params
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
-        let memory = state.snapshot().await.memory;
-        let archived = memory.archive_long_memories_by_session(session_id)?;
-        Ok(json!({ "archived": archived }))
     })
 }
 

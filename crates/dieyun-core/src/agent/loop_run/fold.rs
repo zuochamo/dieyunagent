@@ -43,6 +43,7 @@ pub(crate) fn fold_state(state: &mut RunState, force: bool) {
         state.pending_fold = Some(FoldFact {
             level: result.level,
             tokens_before: result.tokens_before,
+            tokens_before_estimated: result.tokens_before_estimated,
             tokens_after: result.tokens_after,
             trigger_source: result.trigger_source.to_string(),
             folded_tool_results: result.folded_tool_results,

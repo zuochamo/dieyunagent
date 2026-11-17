@@ -97,8 +97,11 @@ function compactionTelemetryRow(input = {}) {
 
   const tokensBefore = Number(payload.tokensBefore) || 0;
   const tokensAfter = Number(payload.tokensAfter) || 0;
-  // 节省量只在成功且有真实前后值时才有意义
-  const savedTokens = compacted && tokensBefore > tokensAfter ? tokensBefore - tokensAfter : 0;
+  // 「省了多少」必须用**同一把尺子**：`tokensBefore` 在有服务端 usage 时是真实值，
+  // 而 `tokensAfter` 永远是本地估值 —— 直接相减会系统性虚报。core 另报一份折叠前的
+  // 本地估值（`tokensBeforeEstimated`），有它就先用它。
+  const tokensBeforeSameBasis = Number(payload.tokensBeforeEstimated) || tokensBefore;
+  const savedTokens = compacted && tokensBeforeSameBasis > tokensAfter ? tokensBeforeSameBasis - tokensAfter : 0;
   const ms = Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
   const scopeId = normalizeTelemetrySessionId(sessionId);
 
