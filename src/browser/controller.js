@@ -472,6 +472,7 @@ function createBrowserViewController(deps) {
         bounds,
         hasView: hasLiveView(),
         renderHealth: lastRenderHealth,
+        viewport: viewportOverride,
         activeTabId: tabState.activeTabId,
         tabs: tabState.tabs
       });
@@ -979,15 +980,6 @@ function createBrowserViewController(deps) {
     }
     applyBounds();
     return view;
-  }
-
-  function hideForOverlay() {
-    if (!hasLiveView()) return;
-    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-  }
-
-  function restoreAfterOverlay() {
-    applyBounds();
   }
 
   async function navigate(url, opts = {}) {
@@ -3093,8 +3085,6 @@ function createBrowserViewController(deps) {
     setPanelState,
     status,
     close,
-    hideForOverlay,
-    restoreAfterOverlay,
     onWindowResize,
     requestAutoOpenPanel,
     activateSession,

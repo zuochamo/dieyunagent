@@ -37,6 +37,30 @@ const MCP_MANAGE_ACTIONS = Object.freeze([
 const MCP_PACKAGE_ACTIONS = Object.freeze(['check_update', 'install_package', 'upgrade_package', 'repair_env']);
 
 /**
+ * transport 的**唯一来源**：schema enum、参数校验（`tool-validate`）、store 落库（`toStoreRequest`）
+ * 三处都从这里取，任何一处另抄一份都会分叉。
+ *
+ * - `MCP_TRANSPORT_KINDS`：规范取值，schema enum 与落库结果都用它；
+ * - `MCP_REMOTE_TRANSPORTS`：入参**别名**（模型常写 `remote` / `http`），只在这里被认，
+ *   落库永远归一成 `transportKind: 'remote'` + `remoteTransport: 'streamable-http'`；
+ * - 空 url 不算「有 url」（`url: ''` 是没填，不是远端服务）。
+ */
+const MCP_TRANSPORT_KINDS = Object.freeze(['stdio', 'streamable-http']);
+const MCP_REMOTE_TRANSPORTS = Object.freeze(['remote', 'streamable-http', 'http']);
+
+/**
+ * 这次变更算不算「远端服务」。
+ * @param {any} transport 模型给的 transport（可省略）
+ * @param {any} url 模型给的 url（仅在没有 transport 时用于判定）
+ * @returns {boolean}
+ */
+function isRemoteTransport(transport, url) {
+  const t = String(transport == null ? '' : transport).trim();
+  if (t) return MCP_REMOTE_TRANSPORTS.includes(t);
+  return String(url == null ? '' : url).trim() !== '';
+}
+
+/**
  * 把 Agent 工具参数（面向模型的扁平形状）翻译成 store 的 payload。
  * 纯函数，便于单测；`transport` 省略时按「有 url 就是远端」判定。
  * @param {any} request
@@ -60,7 +84,7 @@ function toStoreRequest(request) {
     return { action, payload: { repairKind: a.repairKind == null ? '' : String(a.repairKind).trim() } };
   }
 
-  const remote = a.transport === 'remote' || a.transport === 'streamable-http' || (!a.transport && a.url != null);
+  const remote = isRemoteTransport(a.transport, a.url);
   const payload = { id };
   if (a.name != null) payload.name = String(a.name).trim();
   if (a.description != null) payload.description = String(a.description).trim();
@@ -280,5 +304,8 @@ function createMcpManager(deps) {
 module.exports = {
   createMcpManager,
   MCP_MANAGE_ACTIONS,
+  MCP_TRANSPORT_KINDS,
+  MCP_REMOTE_TRANSPORTS,
+  isRemoteTransport,
   toStoreRequest
 };

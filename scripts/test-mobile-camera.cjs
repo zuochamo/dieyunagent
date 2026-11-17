@@ -366,7 +366,9 @@ function testHalfWiringGuard() {
 
   // 电脑端：工具执行 + 结果净化 + 手机桥注入
   const bridgeMain = read('src/agent/tool-bridge-main.js');
-  assert(/case 'camera_look'/.test(bridgeMain), 'tool-bridge handles camera_look');
+  // 执行体在 main-tools/camera.js（2026-11 从桥里的 switch 拆出），装配在 main-tools/index.js
+  assert(/camera_look: async \(a, ctx\) =>/.test(read('src/agent/main-tools/camera.js')), 'tool-bridge handles camera_look');
+  assert(/createCameraHandlers\(shared\)/.test(read('src/agent/main-tools/index.js')), 'camera handlers are registered');
   assert(/name === 'camera_look' && result\.base64/.test(bridgeMain), 'camera base64 stripped from tool payload');
   assert(/createPhoneCameraSource/.test(bridgeMain), 'tool-bridge builds the camera source');
   assert(/const isCameraShot = c\.name === 'camera_look'/.test(bridgeMain), 'camera shots skip the disk copy');

@@ -1007,6 +1007,8 @@ app.whenReady().then(async () => {
     getCoreBridge: () => coreBridge,
     getMcpRuntime: () => mcpRuntime,
     getCompactionAgent: () => ensureMainCompactionAgent(),
+    /** 未收尾的目标型计划：唤醒轮的事实块里要报「有什么没收口」（只读，不跑计划） */
+    getPlansStore: () => plansStore,
     // 后台心跳没有 Renderer：Renderer-only 工具会 fail-fast（与 headless 一致）
     createToolBridge: () => createRustLoopToolBridge(null),
     listMcpServers: mcpStore.listMcpServersForUi,
@@ -1120,6 +1122,16 @@ app.on('before-quit', () => {
       // 退出路径不因关闭失败而卡住
     }
     channelRuntime = null;
+  }
+  // 共享记忆（跨机 PostgreSQL）：连接池必须显式放掉 —— 进程退出不会替你 close socket，
+  // 服务端会一直挂着这些会话（headless 的退出链同样是显式 dispose，见 headless/boot.js）。
+  if (sharedMemory) {
+    try {
+      sharedMemory.dispose();
+    } catch {
+      // 退出路径不因关闭失败而卡住
+    }
+    sharedMemory = null;
   }
   if (localGateway) {
     localGateway.stop();

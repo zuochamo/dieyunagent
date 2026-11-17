@@ -376,10 +376,12 @@ function testHalfWiringGuard() {
 
   // Main：执行分支 + 结果净化 + 来源装配 + 不落盘
   const bridgeMain = read('src/agent/tool-bridge-main.js');
-  assert(/case 'desktop_camera_look'/.test(bridgeMain), 'tool-bridge handles desktop_camera_look');
+  // 执行体在 main-tools/camera.js（2026-11 从桥里的 switch 拆出）
+  const cameraHandlers = read('src/agent/main-tools/camera.js');
+  assert(/desktop_camera_look: async \(a, ctx\) =>/.test(cameraHandlers), 'tool-bridge handles desktop_camera_look');
   assert(/name === 'desktop_camera_look' && result\.base64/.test(bridgeMain), 'base64 stripped from tool payload');
   assert(/createDesktopCameraSource/.test(bridgeMain), 'tool-bridge builds the desktop camera source');
-  assert(/desktopCameraShotMaxEdge/.test(bridgeMain), 'limits come from agent-limits');
+  assert(/desktopCameraShotMaxEdge/.test(cameraHandlers), 'limits come from agent-limits');
   assert(/desktop_camera_look/.test(bridgeMain.replace(/\s+/g, ' ')), 'desktop tool named in the vision hooks');
 
   // 渲染进程：只在权限打开时注入

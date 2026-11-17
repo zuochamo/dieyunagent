@@ -1,6 +1,6 @@
 {
   "name": "dieyunagent",
-  "version": "0.1.78",
+  "version": "0.1.80",
   "description": "叠云 agent",
   "desktopName": "dieyunagent.desktop",
   "homepage": "http://192.168.31.62:3099/",
@@ -59,6 +59,7 @@
     "test:sandbox-real": "node scripts/test-sandbox-real-project.cjs",
     "test:tool-gate": "node scripts/test-tool-gate.cjs",
     "test:tool-harness": "node scripts/test-tool-harness.cjs",
+    "test:tool-bridge-handlers": "node scripts/test-tool-bridge-handlers.cjs",
     "test:lsp": "node scripts/test-lsp.cjs",
     "test:write-smell-hints": "node scripts/test-write-smell-hints.cjs",
     "test:worktree": "node scripts/test-worktree-baseline.cjs",

@@ -50,7 +50,6 @@
         "src/agent/agent-system-prompt.js",
         "src/agent/system-prompt-prep.js",
         "src/renderer/renderer-agent-system-message.js",
-        "src/renderer/renderer-agent-reviewer.js",
         "src/renderer/renderer-composer-mention.js",
         "src/renderer/renderer-agent-continue.js",
         "src/renderer/renderer-agent-llm.js",
@@ -606,7 +605,7 @@
         "生命感运行时（心跳/四相位/张力/阈值漂移/自发唤醒）",
         "决策权在模型（alive_decide）",
         "感官：抽屉（alive_note）/ 眼睛（camera_look）/ 嘴与耳（alive_speak、alive_listen）",
-        "设置 → 拟态 → 生命（总开关 + 感官开关 + 只读体征 + 决策日志）"
+        "设置 → 拟态 → 生命（总开关 + 感官开关 + 只读体征）/ 拟态 → 设定（一个文本框，原文进心跳轮状态块）/ 拟态 → 日志（事件流，原「决策日志」）"
       ],
       "tests": [
         "test:alive",
@@ -888,6 +887,18 @@
       ]
     },
     {
+      "prefix": "src/remote/ssh-screen.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/gateway/host-local.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
       "prefix": "src/gateway/permissions-store.js",
       "tests": [
         "test:sandbox-gateway",
@@ -921,6 +932,21 @@
         "test:tool-harness",
         "check:renderer",
         "test:mobile-camera"
+      ]
+    },
+    {
+      "prefix": "src/agent/catalog/",
+      "tests": [
+        "test:tool-harness",
+        "check:renderer",
+        "test:mobile-camera"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-model-capability.js",
+      "tests": [
+        "test:tool-harness",
+        "check:renderer"
       ]
     },
     {
@@ -1099,7 +1125,8 @@
       "prefix": "src/agent/tool-harness.js",
       "tests": [
         "test:tool-gate",
-        "test:tool-harness"
+        "test:tool-harness",
+        "test:tool-bridge-handlers"
       ]
     },
     {
@@ -1108,7 +1135,9 @@
         "test:tool-bridge-delegate",
         "test:tool-gate",
         "test:guardrails-sync",
-        "test:mobile-camera"
+        "test:mobile-camera",
+        "test:tool-bridge-handlers",
+        "test:fs-edit"
       ]
     },
     {
@@ -1121,13 +1150,6 @@
       "prefix": "src/agent/reviewer-json.js",
       "tests": [
         "test:reviewer-json"
-      ]
-    },
-    {
-      "prefix": "src/renderer/renderer-agent-reviewer.js",
-      "tests": [
-        "test:reviewer-json",
-        "check:renderer"
       ]
     },
     {
@@ -1332,6 +1354,13 @@
       "prefix": "src/mcp/",
       "tests": [
         "test:mcp-store"
+      ]
+    },
+    {
+      "prefix": "src/mcp/schema-slim.js",
+      "tests": [
+        "test:tool-harness",
+        "test:unit"
       ]
     },
     {
@@ -1668,6 +1697,13 @@
       ]
     },
     {
+      "prefix": "src/agent/turn-reviewer.js",
+      "tests": [
+        "test:unit",
+        "check:renderer"
+      ]
+    },
+    {
       "prefix": "src/exec-settlement.js",
       "tests": [
         "test:unit",
@@ -1781,6 +1817,31 @@
       "tests": [
         "test:embedding-budget"
       ]
+    },
+    {
+      "prefix": "src/agent/main-tools/",
+      "tests": [
+        "test:tool-bridge-handlers",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "test/unit/turn-reviewer.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/turn-reviewer-run.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "test/unit/turn-reviewer-run.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
     }
   ],
   "suites": {
@@ -1815,6 +1876,7 @@
       "verify:rpc-catalog",
       "verify:agent-events",
       "test:tool-harness",
+      "test:tool-bridge-handlers",
       "test:tool-gate",
       "test:lsp",
       "test:agent-round-text",
@@ -1869,6 +1931,7 @@
       "verify:rpc-catalog",
       "verify:agent-events",
       "test:tool-harness",
+      "test:tool-bridge-handlers",
       "test:tool-gate",
       "test:lsp",
       "test:agent-round-text",

@@ -1108,14 +1108,6 @@ function createBrowserService(deps) {
     return { ok: true };
   }
 
-  function hideForOverlay() {
-    viewCtrl.hideForOverlay();
-  }
-
-  function restoreAfterOverlay() {
-    viewCtrl.restoreAfterOverlay();
-  }
-
   function onWindowResize() {
     viewCtrl.onWindowResize();
   }
@@ -1163,8 +1155,6 @@ function createBrowserService(deps) {
     setPanelState,
     status,
     close,
-    hideForOverlay,
-    restoreAfterOverlay,
     onWindowResize,
     /**
      * 切换「可见 BrowserView 承载哪个会话」。只影响视图与 playwright 的默认会话，

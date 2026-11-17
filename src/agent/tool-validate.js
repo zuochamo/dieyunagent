@@ -1,7 +1,7 @@
 'use strict';
 
 const { validateShellCommand } = require('../gateway/exec-policy');
-const { GRAPH_LEGACY_OPS, GRAPH_OPERATIONS, fsEditArgsPresent } = require('./guardrails-shared');
+const { GRAPH_OPERATIONS, fsEditArgsPresent } = require('./guardrails-shared');
 // 数字护栏单一来源（AGENTS.md §6）：computer 输入长度上限只改 agent-limits。
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 // 修饰键/键名的单一来源是注入层（VK 表在那里），这里只引用不复制。
@@ -16,9 +16,28 @@ const {
 // 「是不是 MCP 服务注册的工具」唯一判定（mcp_manage / mcp_tool_schema 例外）
 const { isMcpServerToolName } = require('../mcp/tool-name');
 // mcp_manage 的动作清单唯一来源（与 schema enum / apply() 分派同源，不在这里另抄一份）
-const { MCP_MANAGE_ACTIONS } = require('../mcp/manage');
+const { MCP_MANAGE_ACTIONS, isRemoteTransport } = require('../mcp/manage');
+// 动作清单的唯一来源是 schema（`tool-catalog.js` 的 `parameters.properties.action.enum`）：
+// 在这里另抄一份数组的后果是「schema 有、校验过、执行不了」或「能执行但模型不知道」。
+const { getToolByName } = require('./tool-catalog');
 
-const MCP_MANAGE_REMOTE_TRANSPORTS = ['remote', 'streamable-http', 'http'];
+/**
+ * 取某个工具的 `action` 枚举（catalog 是唯一来源）。
+ * 空数组 = catalog 里这个工具没有 action 枚举 —— 调用方据此判「清单缺失」而不是放行。
+ * @param {string} toolName
+ * @returns {string[]}
+ */
+function toolActionEnum(toolName) {
+  const def = getToolByName(toolName);
+  const enumList =
+    def &&
+    def.function &&
+    def.function.parameters &&
+    def.function.parameters.properties &&
+    def.function.parameters.properties.action &&
+    def.function.parameters.properties.action.enum;
+  return Array.isArray(enumList) ? enumList : [];
+}
 
 /** 校验 [x, y] 坐标：二元数值数组（像素坐标，允许小数/越界由执行端钳制）。 */
 function computerPointOk(v) {
@@ -371,16 +390,17 @@ function validateMcpInputArgs(name, args, schema) {
 }
 
 /**
+ * 校验一次工具调用的参数。
+ *
+ * **入参必须是已归一的 name/args**：归一（别名、legacy graph op 展开、字段搬运）的唯一入口是
+ * `guardrails-shared.normalizeAgentToolName`，由 `tool-gate.js#createToolCall` 在进关卡前调用一次。
+ * 这里不再做第二遍归一 —— 两遍归一的后果是「绕过 gate 的调用走另一套语义」，而不是更安全。
+ *
  * @returns {{ ok: true } | { ok: false, error: string, errorCode: string, retryable: false, suggestedFix?: string }}
  */
 function validateToolArgs(name, args, opts) {
-  let n = String(name || '').trim();
-  let a = args && typeof args === 'object' ? args : {};
-  const legacyGraphOp = GRAPH_LEGACY_OPS[n.toLowerCase()] || GRAPH_LEGACY_OPS[n];
-  if (legacyGraphOp) {
-    n = 'graph';
-    a = { ...a, operation: a.operation || a.op || legacyGraphOp };
-  }
+  const n = String(name || '').trim();
+  const a = args && typeof args === 'object' ? args : {};
 
   if (!n) {
     return { ok: false, error: '工具名为空', errorCode: 'INVALID_NAME', retryable: false };
@@ -412,7 +432,7 @@ function validateToolArgs(name, args, opts) {
     }
     case 'worktree': {
       const action = String(a.action || 'list').trim();
-      const allowed = ['list', 'create', 'remove', 'list_runs', 'preview_run', 'apply_run', 'cleanup_run', 'prune'];
+      const allowed = toolActionEnum('worktree');
       if (!allowed.includes(action)) {
         return {
           ok: false,
@@ -443,7 +463,7 @@ function validateToolArgs(name, args, opts) {
       // 只挡「明显缺东西」与「模型不该自己决定的」两件事；连接细节（别名/凭据/指纹）由
       // src/ssh/actions.js + connect-payload 统一处理。
       const action = String(a.action || 'status').trim();
-      const allowed = ['list', 'status', 'connect', 'disconnect', 'port_forward', 'use_workspace', 'browse', 'home'];
+      const allowed = toolActionEnum('ssh');
       if (!allowed.includes(action)) {
         return {
           ok: false,
@@ -848,8 +868,9 @@ function validateToolArgs(name, args, opts) {
       }
       if (action === 'add' || action === 'update') {
         const transport = String(a.transport || '').trim();
-        const remote =
-          MCP_MANAGE_REMOTE_TRANSPORTS.includes(transport) || (!transport && !!String(a.url || '').trim());
+        // 「算不算远端」的唯一判定在 mcp/manage.js（`toStoreRequest` 落库时用的是同一份），
+        // 别名（remote / http）在那里被认成远端 —— 否则就是「过校验却按 stdio 落库」。
+        const remote = isRemoteTransport(transport, a.url);
         if (action === 'add') {
           if (remote && !String(a.url || '').trim()) {
             return {

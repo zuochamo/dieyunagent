@@ -35,11 +35,12 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - `src/agent/agent-system-prompt.js` — 给模型看的准则/工作区/权限文案（`assembleSystemPrompt`）
 - `src/agent/system-prompt-prep.js` — Main 召回开文件 / codebase / AGENTS.md overview / 图谱（结构信号）/ 记忆 / 技能索引 / MCP
 - `src/agent/rust-loop-runner.js` — Node ↔ Rust bridge（LLM / compact / sidecar cancel 分缝）
-- `src/agent/tool-catalog.js` — 工具 schema 唯一目录（Renderer / plan-tools 共用）；MCP `mcp_*` 带精简 inputSchema，勿再广告空 `{}`
+- `src/agent/tool-catalog.js` — 工具 schema 的**入口**（barrel）：按域拆在 `src/agent/catalog/*.js`（host / browser / code / memory / plan / mcp / session / computer / peer / remote + params + groups），导出名与装配顺序不变。加工具只改对应域文件；**动作清单只写在 schema `enum`**，校验从它派生（`tool-validate.js#toolActionEnum`）；MCP `mcp_*` 带精简 inputSchema（`src/mcp/schema-slim.js`），勿再广告空 `{}`
 - `src/agent/session-context.js` — 会话账本投影；近 N 条原文 + 更早折叠条，再加字符硬顶；循环里 last-user 之后的 tool/assistant 也截断
 - `src/agent/tool-result-cap.js` — 工具结果写入 loop 前截断（`toolResultMaxJson`）
 - `src/agent/delegate-tool-gateway.js` — Agent `fs_read_file` 省略 maxBytes 时用 `fsReadDefaultMaxBytes`
-- `src/agent/tool-bridge-main.js` — Main 执行；`RENDERER_ONLY_TOOLS`（`agent_clarify` / `session_new`）只反委托给 Renderer，Main 不执行
+- `src/agent/tool-bridge-main.js` — Main 执行的**装配与关卡**：注册表查不到就走 Gateway 委托（`delegate-tool-gateway`），`RENDERER_ONLY_TOOLS`（`agent_clarify` / `session_new`）只反委托给 Renderer；出站净化 `sanitizeToolResultForApi` 也在这里（after 关卡顺序：截图暂存 → 净化 → 写味提示）
+- `src/agent/main-tools/` — 「只有 Main 能执行」的 24 个工具的执行体，一个域一个文件（camera / mcp / remote / skills / plans / goals / memory / peer），注册表在 `index.js`。加一个这类工具 = 加一个 handler + 注册一行；直测 `npm run test:tool-bridge-handlers`
 - `src/agent/browser-vision.js` — 运行期视觉缓冲（按 runId / 来源限流，注入后清空，不进账本）
 - `src/agent/vision-image.js` — 工具图片的**可寻址凭证**：内容寻址落盘副本（`tool-output/vision/`，按 `visionImageKeepFiles` 裁剪）+ 视觉 token 口径（`visionTokensForSize`，DeepSeek 公开格网算法，≤1024）+ 成功/失败两句模型可见文案（唯一来源）。图入不进视觉通道都要在工具结果里留 `visionImage` / `visionTokens` / 只读副本路径
 - `src/renderer/renderer-agent-tools.js` — Renderer 侧的 UI 工具执行体；`session_new` 复用 `createNewSession`（与「新对话」按钮同一条流程），勿另写一遍建会话 + 绑工作空间
@@ -74,6 +75,7 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - `src/agent/guardrails-shared.js` — 工具拦截常量/逻辑（Main + Renderer 共用）。无只读探索/同文件重读硬拦。
 - `src/agent/tool-guardrails.js` — Main 薄封装
 - `src/agent/completion-readiness.js` — **完成验收的唯一来源**（Main）：证据 = 循环账本 trace + Gateway `workspace.diagnostics` + 浏览器运行时事实；只提示、不自动续跑、不挡交付
+- `src/agent/turn-reviewer.js` + `src/agent/turn-reviewer-run.js` — 一轮收尾的**独立 Reviewer 验收**： 提示词 / 输入装配 / 结论整形 / 与证据判定的合并（`mergeReviewerIntoReadiness`）在纯函数侧， 请求与超时在 `-run`（Main，读 `model-settings.json` 的 `reviewer*`）。**Renderer 侧没有 Reviewer 代码**： 它只渲染 `readiness.note`。没有文件 diff 不跑；任何失败都跳过验收（不挡交付）
 - `src/default-workspace-gc.js` — **默认工作区（`~/.dieyun/workspace`）回收的唯一来源**：到期回收 + 容量上限按最旧优先补刀；两条硬边界（工程标记 / 宽限期内的条目永不自动删）；只作用于兜底目录，**不碰自选工作空间**。数字在 `agent-limits.js` 的 `defaultWorkspace*`，装配在 `src/main-entry.js` 与 `src/headless/boot.js` 各一行
 - `src/renderer/agent-guardrails.js` — 只渲染验收提示（`applyReadinessNote`，不判定）
 - `src/renderer/renderer-agent-reviewer.js` — 可选 LLM Reviewer（默认关；独立模型 + 文件 diff）

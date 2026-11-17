@@ -1,4 +1,4 @@
-/* global window, document, $, currentSessionId, sessionActiveRuns, showAgentToast, renderChangesPane, getSessionChangeRowsForAgent, capturePlanApplyForUndo, reportKnowledgePlanOutcome, dispatchAgentRunEvent, createAgentRunEvent, AGENT_RUN_EVENT_TYPES, maybeEnforceWorktreeCleanupPolicy, openSidePanel, setSidePanelTab, DieyunNamespaces */
+/* global window, document, $, currentSessionId, sessionActiveRuns, showAgentToast, renderChangesPane, getSessionChangeRowsForAgent, capturePlanApplyForUndo, reportKnowledgePlanOutcome, maybeEnforceWorktreeCleanupPolicy, openSidePanel, setSidePanelTab, DieyunNamespaces */
 'use strict';
 
 const worktreeLoopApi = window.diecloud || {};
@@ -168,66 +168,6 @@ function finalizePlanWorktreeTracking(runId, sessionId, undoTurnId) {
   if (typeof window.invalidateWorktreeReviewCache === 'function') {
     window.invalidateWorktreeReviewCache();
   }
-}
-
-function openArbitrationDialog(pending) {
-  return new Promise((resolve) => {
-    const overlay = $('agent-arbitration-overlay');
-    const desc = $('agent-arbitration-desc');
-    if (!overlay || !desc) {
-      resolve({ action: 'retry' });
-      return;
-    }
-    desc.textContent = `任务 ${pending?.taskId || ''}：${pending?.reason || '需要人工决策'}`;
-    overlay.hidden = false;
-    if (typeof dispatchAgentRunEvent === 'function' && typeof createAgentRunEvent === 'function') {
-      dispatchAgentRunEvent(
-        currentSessionId,
-        createAgentRunEvent(AGENT_RUN_EVENT_TYPES.ARBITRATION, {
-          sessionId: currentSessionId,
-          phase: 'arbitration',
-          summary: desc.textContent,
-          meta: { taskId: pending?.taskId || null, reason: pending?.reason || '' }
-        })
-      );
-    }
-
-    const onPick = (action) => {
-      overlay.hidden = true;
-      for (const btn of overlay.querySelectorAll('[data-arb]')) {
-        btn.removeEventListener('click', btn._arbHandler);
-      }
-      resolve({ action, note: 'user arbitration' });
-    };
-
-    for (const btn of overlay.querySelectorAll('[data-arb]')) {
-      btn._arbHandler = () => onPick(btn.getAttribute('data-arb'));
-      btn.addEventListener('click', btn._arbHandler);
-    }
-  });
-}
-
-if (typeof window !== 'undefined' && window.diecloud && window.diecloud.onAgentPlannerArbitrate) {
-  window.diecloud.onAgentPlannerArbitrate(async (payload) => {
-    const requestId = payload && payload.requestId;
-    const runId = payload && payload.runId;
-    try {
-      const decision = await openArbitrationDialog(payload && payload.pending);
-      if (window.diecloud.agentArbitrate && runId) {
-        await window.diecloud.agentArbitrate(runId, decision);
-      }
-      if (window.diecloud.agentPlannerArbitrateResult) {
-        await window.diecloud.agentPlannerArbitrateResult({ requestId, decision });
-      }
-    } catch (e) {
-      if (window.diecloud.agentPlannerArbitrateResult) {
-        await window.diecloud.agentPlannerArbitrateResult({
-          requestId,
-          error: e && e.message ? e.message : String(e)
-        });
-      }
-    }
-  });
 }
 
 function kindLabelWorktree(kind) {

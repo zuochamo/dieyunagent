@@ -15,6 +15,7 @@ const { spillToolOutputIfLarge, SPILL_CHAR_THRESHOLD } = require('../src/agent/t
 const { resolveFsReadMaxBytes } = require('../src/agent/delegate-tool-gateway');
 const { resolveHostSidecarLocalPath } = require('../src/agent/host-sidecar');
 const { ToolHarnessSession, classifyFailure } = require('../src/agent/tool-harness');
+const { toStoreRequest } = require('../src/mcp/manage');
 const { createMainToolBridge } = require('../src/agent/tool-bridge-main');
 const catalog = require('../src/agent/tool-catalog');
 const { buildMainAgentTools } = require('../src/agent/main-agent-tools');
@@ -154,10 +155,44 @@ async function main() {
 
   const vGraph = validateToolArgs('graph', { operation: 'find_symbol', query: 'x' });
   assert(vGraph.ok, 'graph find_symbol valid');
-  const vGraphLegacy = validateToolArgs('graph_callers', { name: 'bar' });
-  assert(vGraphLegacy.ok, 'legacy graph_callers validates as graph');
+  // 归一只在 guardrails-shared 一处（tool-gate.js#createToolCall 进关卡前调一次），
+  // 校验吃的是归一后的 name/args —— 所以这里按真实链路归一后再校验。
+  const graphCallersNorm = normalizeAgentToolName('graph_callers', { name: 'bar' });
+  assert(
+    graphCallersNorm.name === 'graph' && graphCallersNorm.args.operation === 'callers',
+    'legacy graph_callers normalizes to graph.callers'
+  );
+  const vGraphLegacy = validateToolArgs(graphCallersNorm.name, graphCallersNorm.args);
+  assert(vGraphLegacy.ok, 'normalized graph_callers validates as graph');
   const vGraphBad = validateToolArgs('graph', { operation: 'nope' });
   assert(!vGraphBad.ok && vGraphBad.errorCode === 'MISSING_ARG', 'graph bad operation');
+
+  // 动作清单的唯一来源是 catalog 的 `action.enum`：校验的白名单由它派生
+  // （`tool-validate.js#toolActionEnum`）。另抄一份数组 = 「schema 有、执行不了」或「能执行、模型不知道」。
+  const sshEnum = catalog.getToolByName('ssh').function.parameters.properties.action.enum;
+  const vSshBad = validateToolArgs('ssh', { action: 'nope' });
+  assert(
+    !vSshBad.ok && vSshBad.errorCode === 'INVALID_ARG' && vSshBad.error.includes(sshEnum.join(' / ')),
+    'ssh action whitelist is derived from catalog enum'
+  );
+  const vWorktreeBad = validateToolArgs('worktree', { action: 'nope' });
+  assert(
+    !vWorktreeBad.ok && vWorktreeBad.errorCode === 'INVALID_ARG',
+    'worktree action whitelist rejects unknown action'
+  );
+
+  // mcp transport：「算不算远端」只有 mcp/manage.js 一份（别名 remote / http 都归一到 remote）。
+  // 这里锁住那个旧分叉 —— 别名过得了校验，却被当成 stdio 落库。
+  const remoteByAlias = toStoreRequest({
+    action: 'add',
+    id: 'demo',
+    name: 'Demo',
+    transport: 'http',
+    url: 'http://192.168.31.62:3011/api/open-api/mcp'
+  });
+  assert(remoteByAlias.payload.transportKind === 'remote', 'transport alias http resolves to remote');
+  const stdioByDefault = toStoreRequest({ action: 'add', id: 'demo2', name: 'Local', command: 'npx' });
+  assert(!stdioByDefault.payload.transportKind, 'no url and no transport stays stdio');
 
   const vAmd = validateToolArgs('agents_md_propose', { section: 'gotchas', content: '- x' });
 

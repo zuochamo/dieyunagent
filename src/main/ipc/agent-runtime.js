@@ -525,6 +525,30 @@ function registerAgentRuntimeIpc(ctx) {
       } catch {
         result.readiness = null;
       }
+      // 独立 Reviewer（**可选**的第二证据源）：提示词 / 输入装配 / 结论整形 / 合流全在
+      // `agent/turn-reviewer*.js`。以前这段在 Renderer，于是「一轮做完没」有两处判定；
+      // 现在收尾时在这里一次定稿，Renderer 只渲染 readiness.note。
+      // 任何失败（未启用 / 没 diff / 端点错 / 超时）都只是「跳过验收」，不挡交付。
+      try {
+        const { runTurnReviewer } = require('../../agent/turn-reviewer-run');
+        const { mergeReviewerIntoReadiness } = require('../../agent/turn-reviewer');
+        const readinessEvidence = (result.readiness && result.readiness.evidence) || null;
+        const verdict = await runTurnReviewer({
+          settings: typeof loadModelSettings === 'function' ? loadModelSettings(live.userData) : null,
+          facts: {
+            userTask: runUserText(payload),
+            trace: result.trace || [],
+            diagnostics: (readinessEvidence && readinessEvidence.diagnostics) || null,
+            browser: (readinessEvidence && readinessEvidence.browser) || null,
+            planSummary: (result.plan && result.plan.planSummary) || ''
+          },
+          signal: abortController.signal,
+          log: (msg) => log.info(msg)
+        });
+        result.readiness = mergeReviewerIntoReadiness(result.readiness, verdict);
+      } catch {
+        // 验收不是交付闸门：这里出意外就当没跑过 Reviewer。
+      }
       // 会话目标：一次 rust-loop-run 的返回 = 一轮结束，这是唯一的续跑判定时点。
       // 判定是纯函数（`decideContinuation`，与计划目标共用），这里只把结论交给 Renderer：
       // Renderer 读两个布尔值去机械地再开一轮，**不持有目标状态、不碰预算**。
@@ -1039,9 +1063,6 @@ function registerAgentRuntimeIpc(ctx) {
     live.subagentStore.listCheckpoints(live.dieyunHome(), limit || 20)
   );
   ipcMain.handle('agent:trace', (_evt, { runId }) => live.agentCoordinator.getTrace(runId));
-  ipcMain.handle('agent:arbitrate', (_evt, { runId, decision }) =>
-    live.agentCoordinator.arbitrate(runId, decision || {})
-  );
   ipcMain.on('agent-service:task-accepted', (_evt, payload) => {
     if (live.agentService) live.agentService.acceptTask(payload || {});
   });

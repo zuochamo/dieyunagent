@@ -19,19 +19,25 @@
  *
  * 约束（刻意不做的事）：
  * - **不新增判定逻辑**：每个关卡都是既有单一来源的调用点（`tool-validate` / `tool-guardrails` /
- *   `tool-telemetry` / `tool-output-spill` / `guardrails-shared` 的 `sanitizeToolResultForApi`）。
+ *   `tool-telemetry` / `tool-output-spill`）。出站净化（`sanitizeToolResultForApi`）不在本文件，
+ *   它由调用方作为 after 关卡传入（`tool-bridge-main.js:1944` 的 `sanitize-result`），
+ *   顺序必须晚于 `record-browser-screenshot` —— 否则 base64 先被剥掉，图永远进不了视觉通道。
  * - **不做全局可变注册表**：关卡清单是模块级冻结数组 + 每次调用的 `extraAfterHooks`，
  *   所以测试可以并行、也不存在"谁先 require 谁先跑"的顺序耦合。
  * - **不吞错误**：抛错由调用方归一成信封后**才**进 after 关卡，观察者只需处理一种形状。
  */
 
+const path = require('path');
 const {
   normalizeAgentToolName,
   PERMISSION_GATED_TOOLS,
   permissionGateBlockMessage,
-  ALIVE_READ_ONLY_TOOL_NAMES,
-  ALIVE_SENSE_TOOLS
+  ALIVE_SENSE_TOOLS,
+  ALIVE_WAKE_WRITE_TOOL_NAMES,
+  isAliveWakeToolAllowed,
+  isAliveYieldTool
 } = require('./guardrails-shared');
+const { decideFsWrite, decideShellCommand } = require('../gateway/sandbox-policy');
 const {
   shouldBlockRepeatToolCall,
   recordToolCallFingerprint,
@@ -127,7 +133,16 @@ function callContext(call) {
     /** 只读作用域（后台心跳轮）：决定「改动类工具能不能用」，不改变其它判定 */
     readOnly: ctx.readOnly === true,
     /** 感官开关（`senses.eyes` 等）：只读作用域里还要逐项授权（摄像头 = 看现实） */
-    senses: ctx.senses && typeof ctx.senses === 'object' ? ctx.senses : null
+    senses: ctx.senses && typeof ctx.senses === 'object' ? ctx.senses : null,
+    /**
+     * 心跳轮的权力档（`read`/`write`/`exec`）：null = 不是心跳轮（普通对话照旧）。
+     * 这是「能不能改/能不能跑」的唯一判定输入，见 `hookWakePowerScope`。
+     */
+    wakePower: ctx.wakePower ? String(ctx.wakePower) : '',
+    /** 心跳轮允许动的根目录（空 = 取 workspacePath）；越界写/执行一律拒 */
+    wakeRoot: ctx.wakeRoot ? String(ctx.wakeRoot) : '',
+    /** 这一轮的写/执行预算（跨调用累计，由关卡自增；`agent-limits.aliveWake*MaxPerWake` 定上限） */
+    wakeBudget: ctx.wakeBudget && typeof ctx.wakeBudget === 'object' ? ctx.wakeBudget : null
   };
 }
 
@@ -221,15 +236,26 @@ const hookReadOnlyScope = {
   stage: 'before',
   run(call) {
     const ctx = callContext(call);
-    if (!ctx.readOnly) return;
-    if (!ALIVE_READ_ONLY_TOOL_NAMES.has(call.name)) {
+    const power = ctx.wakePower;
+    if (!ctx.readOnly && !power) return;
+    /**
+     * 心跳轮的三档权力（`read` 默认 / `write` / `exec`）。
+     *
+     * 老调用方只给了 `readOnly` 布尔（没有 `wakePower`）→ 按 `read` 处理，行为与以前完全一致。
+     * 放开档不是"少拦一点"，而是**换成另一套更窄的许可**：清单内的工具 + 只能动一个根 +
+     * 每轮次数上限 + 需要人当场同意的操作直接拒（后台不排队等审批）。
+     */
+    const effective = power || 'read';
+    if (!isAliveWakeToolAllowed(effective, call.name)) {
       recordTelemetry(call, false, 'READ_ONLY_SCOPE', 0);
       call.block = wrapStructuredError({
         retryable: false,
         errorCode: 'READ_ONLY_SCOPE',
         error:
-          `工具 ${call.name} 没有执行：这一轮是后台心跳唤起的**只读轮**，只允许读文件 / 找东西 / 读记忆。` +
-          '写盘、执行命令、出网、跨机发消息、起子任务、跑计划都属于清单外，重试也不会成功。' +
+          `工具 ${call.name} 没有执行：这一轮是后台心跳唤起的（当前权力：${effective}）。` +
+          (effective === 'read'
+            ? '只读轮只允许读文件 / 找东西 / 读记忆。写盘、执行命令、出网、跨机发消息、起子任务、跑计划都属于清单外，重试也不会成功。'
+            : `「${effective}」档也没有这个工具：改文件只放开 fs_write_file / fs_edit，跑命令只放开 host_exec，出网只放开 web_search / web_fetch，占屏/键鼠只放开 browser_* 与 computer（且要没人正在跑任务）。跨机发消息、起子任务、跑计划一律不放。`) +
           '需要动手时等用户在场的一轮再做，或者把那件事记进未闭合事项（alive_decide.loops）。'
       });
       return;
@@ -245,6 +271,123 @@ const hookReadOnlyScope = {
           `工具 ${call.name} 没有执行：这个感官是关着的（${sense}）。` +
           '这不是故障，重试也不会成功——要看得等用户在「设置 → 拟态 → 生命」里打开。'
       });
+      return;
+    }
+    /**
+     * **避让**：会占屏 / 抢键鼠的工具（`browser_*` / `computer`），只要还有**别的** agent 轮在跑就不动。
+     *
+     * 判据是 `getActiveAgentLoopCount()`（`rust-loop-runner` 里「系统忙不忙」的唯一来源）：
+     * 这一轮自己算一条，`> 1` 就是别人在跑（用户在对话、计划在跑、频道任务、另一个远端会话）。
+     * 为什么不是"等它做完再试"：后台轮没有排队语义，等 = 挂住整轮；所以直接拒，让它下一轮再决定。
+     * 懒 require：`rust-loop-runner` 会反过来用到本模块与关卡，加载期引入会固化顺序。
+     */
+    if (isAliveYieldTool(call.name)) {
+      let busy = 0;
+      try {
+        const { getActiveAgentLoopCount } = require('./rust-loop-runner');
+        busy = Number(getActiveAgentLoopCount()) || 0;
+      } catch {
+        busy = 0;
+      }
+      if (busy > 1) {
+        recordTelemetry(call, false, 'WAKE_YIELD', 0);
+        call.block = wrapStructuredError({
+          retryable: false,
+          errorCode: 'WAKE_YIELD',
+          error:
+            `工具 ${call.name} 没有执行：这台机器上还有别的任务在跑（${busy} 个轮次），` +
+            '现在动浏览器或键鼠会跟它抢同一块屏幕、同一套鼠标键盘。' +
+            '不是你做错了，也不是故障 —— 等那件事做完，下一轮醒来再试；着急就把这件事记进未闭合事项。'
+        });
+        return;
+      }
+    }
+    if (effective === 'read') return;
+    // —— 以下是放开档的三道闸门 ——
+    const root = path.resolve(ctx.wakeRoot || ctx.workspacePath || process.cwd());
+    const budget = ctx.wakeBudget;
+    const blockWith = (errorCode, error) => {
+      recordTelemetry(call, false, errorCode, 0);
+      call.block = wrapStructuredError({ retryable: false, errorCode, error });
+    };
+    if (ALIVE_WAKE_WRITE_TOOL_NAMES.has(call.name)) {
+      const target = path.resolve(root, String((call.args && call.args.filePath) || ''));
+      const rel = path.relative(root, target);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        blockWith(
+          'WAKE_PATH_OUTSIDE',
+          `${call.name} 没有执行：这一轮它只被允许在「${root}」里动文件，目标是「${(call.args && call.args.filePath) || '(空)'}」。` +
+            '越界不是故障，重试也不会成功——要改别处请让用户在对话里那一轮做。'
+        );
+        return;
+      }
+      // 沙箱策略仍然是最初的判定者：需要人同意的（工作区外/档位不允许）在后台直接拒
+      const decision = decideFsWrite(target, { mode: 'workspace-write', workspaceRoots: [root] });
+      if (decision.action === 'deny') {
+        blockWith('WAKE_POLICY_DENIED', `${call.name} 没有执行：${decision.reason}`);
+        return;
+      }
+      if (decision.action === 'ask') {
+        blockWith(
+          'WAKE_NEEDS_APPROVAL',
+          `${call.name} 没有执行：这一步需要用户当场同意（${decision.reason}）。后台不排队等审批，重试也不会成功。`
+        );
+        return;
+      }
+      if (budget && Number(budget.writes) >= Number(budget.maxWrites)) {
+        blockWith(
+          'WAKE_BUDGET',
+          `这一轮的改文件次数用完了（上限 ${budget.maxWrites} 次）。剩下的留到下次醒来，或者先收口再继续。`
+        );
+        return;
+      }
+      if (budget) budget.writes = Number(budget.writes) + 1;
+      return;
+    }
+    if (call.name === 'host_exec') {
+      const command = String((call.args && call.args.command) || '');
+      // 后台轮不启动「脱离进程」：没人收尾、没人看输出，等于偷偷留一个常驻任务
+      if (call.args && call.args.detached === true) {
+        blockWith(
+          'WAKE_POLICY_DENIED',
+          'host_exec 没有执行：心跳轮不允许 detached=true（会在你不在时留下一个没人收尾的常驻进程）。'
+        );
+        return;
+      }
+      const cwdRaw = String((call.args && call.args.cwd) || '').trim();
+      const cwd = cwdRaw ? path.resolve(root, cwdRaw) : root;
+      const cwdRel = path.relative(root, cwd);
+      if (cwdRel.startsWith('..') || path.isAbsolute(cwdRel)) {
+        blockWith('WAKE_PATH_OUTSIDE', `host_exec 没有执行：cwd 必须在「${root}」之下。`);
+        return;
+      }
+      const decision = decideShellCommand(command, { mode: 'workspace-write', workspaceRoots: [root], cwd });
+      if (decision.action === 'deny') {
+        blockWith('WAKE_POLICY_DENIED', `host_exec 没有执行：${decision.reason}`);
+        return;
+      }
+      if (decision.action === 'ask') {
+        blockWith(
+          'WAKE_NEEDS_APPROVAL',
+          `host_exec 没有执行：这条命令需要用户当场同意（${decision.reason}）。后台不排队等审批，重试也不会成功。`
+        );
+        return;
+      }
+      if (budget && Number(budget.execs) >= Number(budget.maxExecs)) {
+        blockWith(
+          'WAKE_BUDGET',
+          `这一轮的命令次数用完了（上限 ${budget.maxExecs} 条）。剩下的留到下次醒来。`
+        );
+        return;
+      }
+      // 命令超时按这一档的上限夹住（`aliveWakeExecTimeoutSec`）：它自己写 10 分钟也不行
+      if (budget && Number(budget.timeoutMs) > 0 && call.args && typeof call.args === 'object') {
+        const want = Number(call.args.timeoutMs);
+        if (!Number.isFinite(want) || want <= 0 || want > Number(budget.timeoutMs)) {
+          call.args.timeoutMs = Number(budget.timeoutMs);
+        }
+      }
+      if (budget) budget.execs = Number(budget.execs) + 1;
     }
   }
 };

@@ -54,6 +54,12 @@ function classifyFailure(name, result, thrownErr) {
     if (result.retryable === true) {
       return { retryable: true, errorCode: result.errorCode || 'TRANSIENT', error: err, diagnostics };
     }
+    // 有声明用声明 —— 与抛错分支同一条规则。少了这一条，handler 里写清楚的
+    // `MCP_UNAVAILABLE` / `GATEWAY_UNAVAILABLE` / `PLANS_UNAVAILABLE` / `CAMERA_UNAVAILABLE`
+    // 会被下面的消息启发式压成 TOOL_ERROR/POLICY，模型就看不出「能力没开」和「调用出错」的区别。
+    if (result.errorCode) {
+      return { retryable: false, errorCode: String(result.errorCode), error: err, diagnostics };
+    }
     if (/超时|timeout|ECONN|503|502|429|暂时|not ready|display surface|not available for capture/i.test(err)) {
       return { retryable: true, errorCode: 'TRANSIENT', error: err, diagnostics };
     }
