@@ -1,3 +1,5 @@
+use super::heuristic;
+use super::heuristic::take_ident;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -72,22 +74,15 @@ pub fn extract_symbols(source: &str) -> Vec<ParsedSymbol> {
     out
 }
 
+/// 本语言的注释标记（实现只有 `heuristic::strip_comment` 那一份，这里只是默认参数）。
+const COMMENT: heuristic::LineComment = heuristic::LineComment::DoubleSlash;
+
+fn strip_comment(line: &str) -> String {
+    heuristic::strip_comment(line, COMMENT)
+}
+
 pub fn extract_calls(source: &str) -> Vec<ParsedCall> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (idx, line) in source.lines().enumerate() {
-        let line_no = (idx + 1) as i64;
-        for callee in scan_call_targets(&strip_comment(line)) {
-            let key = format!("{callee}@{line_no}");
-            if seen.insert(key) {
-                out.push(ParsedCall {
-                    callee,
-                    line: line_no,
-                });
-            }
-        }
-    }
-    out
+    heuristic::extract_calls(source, &CALL_SKIP, heuristic::LineComment::DoubleSlash)
 }
 
 pub fn resolve_rust_import(from_rel: &str, spec: &str, known_files: &HashSet<String>) -> Option<String> {
@@ -219,23 +214,7 @@ fn parse_trait(line: &str) -> Option<String> {
     take_ident(rest)
 }
 
-fn take_ident(text: &str) -> Option<String> {
-    let mut out = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else {
-            break;
-        }
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-const CALL_SKIP: &[&str] = &[
+pub(crate) const CALL_SKIP: &[&str] = &[
     "if",
     "for",
     "while",
@@ -287,50 +266,6 @@ const CALL_SKIP: &[&str] = &[
     "writeln",
 ];
 
-fn scan_call_targets(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            let ident = &line[start..i];
-            let mut j = i;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'(' && !CALL_SKIP.contains(&ident) {
-                out.push(ident.to_string());
-            }
-            continue;
-        }
-        if bytes[i] == b'.' {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            if start < i {
-                let method = &line[start..i];
-                let mut j = i;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'(' && !CALL_SKIP.contains(&method) {
-                    out.push(method.to_string());
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
-
 fn resolve_mod_path(from_rel: &str, name: &str, known_files: &HashSet<String>) -> Option<String> {
     let from = Path::new(from_rel);
     let parent = from
@@ -379,14 +314,6 @@ fn pick_rust_file(base: &str, known_files: &HashSet<String>) -> Option<String> {
         }
     }
     None
-}
-
-fn strip_comment(line: &str) -> String {
-    if let Some(pos) = line.find("//") {
-        line[..pos].to_string()
-    } else {
-        line.to_string()
-    }
 }
 
 #[cfg(test)]

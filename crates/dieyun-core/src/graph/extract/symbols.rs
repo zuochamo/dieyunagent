@@ -1,6 +1,8 @@
+use super::heuristic;
+use super::heuristic::take_ident;
 use crate::graph::types::{ParsedCall, ParsedSymbol};
 
-const CALL_SKIP: &[&str] = &[
+pub(crate) const CALL_SKIP: &[&str] = &[
     "if",
     "for",
     "while",
@@ -73,21 +75,7 @@ pub fn extract_symbols(source: &str) -> Vec<ParsedSymbol> {
 }
 
 pub fn extract_calls(source: &str) -> Vec<ParsedCall> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (idx, line) in source.lines().enumerate() {
-        let line_no = (idx + 1) as i64;
-        for callee in scan_call_targets(line) {
-            let key = format!("{callee}@{line_no}");
-            if seen.insert(key) {
-                out.push(ParsedCall {
-                    callee,
-                    line: line_no,
-                });
-            }
-        }
-    }
-    out
+    heuristic::extract_calls(source, &CALL_SKIP, heuristic::LineComment::DoubleSlash)
 }
 
 fn parse_function_decl(line: &str) -> Option<String> {
@@ -124,70 +112,6 @@ fn parse_const_fn(line: &str) -> Option<String> {
         return Some(name);
     }
     None
-}
-
-fn take_ident(text: &str) -> Option<String> {
-    let mut out = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
-            out.push(ch);
-        } else {
-            break;
-        }
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-fn scan_call_targets(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$' {
-            let start = i;
-            i += 1;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
-            {
-                i += 1;
-            }
-            let ident = &line[start..i];
-            let mut j = i;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'(' && !CALL_SKIP.contains(&ident) {
-                out.push(ident.to_string());
-            }
-            continue;
-        }
-        if bytes[i] == b'.' {
-            i += 1;
-            let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
-            {
-                i += 1;
-            }
-            if start < i {
-                let method = &line[start..i];
-                let mut j = i;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'(' && !CALL_SKIP.contains(&method) {
-                    out.push(method.to_string());
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    out
 }
 
 #[cfg(test)]

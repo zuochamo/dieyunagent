@@ -4,7 +4,7 @@ mod build;
 mod incremental;
 mod cleanup;
 pub use build::GraphScope;
-mod extract;
+pub(crate) mod extract;
 mod lsp_ingest;
 mod query;
 mod schema;

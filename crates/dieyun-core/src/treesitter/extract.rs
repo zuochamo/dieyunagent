@@ -1,3 +1,4 @@
+use crate::graph::extract::heuristic::is_ident;
 use crate::graph::types::{ParsedCall, ParsedImport, ParsedSymbol};
 use crate::treesitter::lang::{parse_source, SourceLang};
 
@@ -348,15 +349,6 @@ fn leaf_callee_name(node: tree_sitter::Node, src: &[u8]) -> String {
     }
 }
 
-fn is_ident(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
-            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        }
-        _ => false,
-    }
-}
 
 fn extract_quoted_module(text: &str) -> Option<String> {
     let bytes = text.as_bytes();

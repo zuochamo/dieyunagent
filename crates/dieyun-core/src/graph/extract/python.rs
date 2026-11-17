@@ -1,3 +1,5 @@
+use super::heuristic;
+use super::heuristic::take_ident;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -65,23 +67,15 @@ pub fn extract_symbols(source: &str) -> Vec<ParsedSymbol> {
     out
 }
 
+/// 本语言的注释标记（实现只有 `heuristic::strip_comment` 那一份，这里只是默认参数）。
+const COMMENT: heuristic::LineComment = heuristic::LineComment::Hash;
+
+fn strip_comment(line: &str) -> String {
+    heuristic::strip_comment(line, COMMENT)
+}
+
 pub fn extract_calls(source: &str) -> Vec<ParsedCall> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (idx, line) in source.lines().enumerate() {
-        let line_no = (idx + 1) as i64;
-        let trimmed = strip_comment(line);
-        for callee in scan_call_targets(&trimmed) {
-            let key = format!("{callee}@{line_no}");
-            if seen.insert(key) {
-                out.push(ParsedCall {
-                    callee,
-                    line: line_no,
-                });
-            }
-        }
-    }
-    out
+    heuristic::extract_calls(source, &CALL_SKIP, heuristic::LineComment::Hash)
 }
 
 pub fn resolve_python_import(from_rel: &str, spec: &str, known_files: &HashSet<String>) -> Option<String> {
@@ -93,42 +87,6 @@ pub fn resolve_python_import(from_rel: &str, spec: &str, known_files: &HashSet<S
 
 pub fn is_relative_spec(spec: &str) -> bool {
     spec.starts_with('.')
-}
-
-fn strip_comment(line: &str) -> String {
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escaped = false;
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let ch = bytes[i] as char;
-        if escaped {
-            escaped = false;
-            i += 1;
-            continue;
-        }
-        if ch == '\\' && (in_single || in_double) {
-            escaped = true;
-            i += 1;
-            continue;
-        }
-        if ch == '\'' && !in_double {
-            in_single = !in_single;
-            i += 1;
-            continue;
-        }
-        if ch == '"' && !in_single {
-            in_double = !in_double;
-            i += 1;
-            continue;
-        }
-        if ch == '#' && !in_single && !in_double {
-            return line[..i].to_string();
-        }
-        i += 1;
-    }
-    line.to_string()
 }
 
 fn parse_from_import(line: &str) -> Option<String> {
@@ -168,23 +126,7 @@ fn parse_class(line: &str) -> Option<String> {
     take_ident(rest)
 }
 
-fn take_ident(text: &str) -> Option<String> {
-    let mut out = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else {
-            break;
-        }
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-const CALL_SKIP: &[&str] = &[
+pub(crate) const CALL_SKIP: &[&str] = &[
     "if",
     "for",
     "while",
@@ -235,50 +177,6 @@ const CALL_SKIP: &[&str] = &[
     "classmethod",
     "property",
 ];
-
-fn scan_call_targets(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = line.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            let ident = &line[start..i];
-            let mut j = i;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'(' && !CALL_SKIP.contains(&ident) {
-                out.push(ident.to_string());
-            }
-            continue;
-        }
-        if bytes[i] == b'.' {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            if start < i {
-                let method = &line[start..i];
-                let mut j = i;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'(' && !CALL_SKIP.contains(&method) {
-                    out.push(method.to_string());
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
 
 fn resolve_relative_python(from_rel: &str, spec: &str, known_files: &HashSet<String>) -> Option<String> {
     let from_path = Path::new(from_rel);
