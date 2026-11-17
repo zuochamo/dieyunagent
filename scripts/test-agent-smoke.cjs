@@ -26,6 +26,7 @@ const REQUIRES_CORE = new Set([
   'test:rust-agent-loop-smoke',
   'test:rust-planner-pipeline',
   'test:rust-planner-smoke',
+  'test:planner-e2e',
   'test:dieyun-core-pack'
 ]);
 

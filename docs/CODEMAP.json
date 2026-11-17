@@ -753,13 +753,16 @@
     {
       "prefix": "src/agent/parallel-batch.js",
       "tests": [
-        "test:planner-parallel"
+        "test:planner-parallel",
+        "test:planner-workers"
       ]
     },
     {
       "prefix": "src/agent/rust-planner-runner.js",
       "tests": [
         "test:planner-parallel",
+        "test:planner-workers",
+        "test:planner-e2e",
         "test:rust-planner-smoke"
       ]
     },
@@ -843,7 +846,8 @@
     {
       "prefix": "src/agent/delegate-tool-gateway.js",
       "tests": [
-        "test:tool-harness"
+        "test:tool-harness",
+        "test:planner-workers"
       ]
     },
     {
@@ -1133,6 +1137,7 @@
       "prefix": "src/agent/tool-bridge-main.js",
       "tests": [
         "test:tool-bridge-delegate",
+        "test:planner-workers",
         "test:tool-gate",
         "test:guardrails-sync",
         "test:mobile-camera",
@@ -1890,6 +1895,8 @@
       "test:llm-tool-call-fallback",
       "test:monitor-outbox",
       "test:planner-parallel",
+      "test:planner-workers",
+      "test:planner-e2e",
       "test:rust-loop-runner",
       "test:fs-edit",
       "test:delegate-batch",
@@ -1944,6 +1951,8 @@
       "test:llm-tool-call-fallback",
       "test:monitor-outbox",
       "test:planner-parallel",
+      "test:planner-workers",
+      "test:planner-e2e",
       "test:rust-loop-runner",
       "test:fs-edit",
       "test:delegate-batch",

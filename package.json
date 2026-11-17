@@ -75,6 +75,8 @@
     "test:llm-tool-call-fallback": "node scripts/test-llm-tool-call-fallback.cjs",
     "test:monitor-outbox": "node scripts/test-monitor-outbox.cjs",
     "test:planner-parallel": "node scripts/test-planner-parallel.cjs",
+    "test:planner-workers": "node scripts/test-planner-workers.cjs",
+    "test:planner-e2e": "node scripts/test-planner-e2e.cjs",
     "test:mobile": "node scripts/test-mobile-smoke.cjs",
     "test:headless": "node scripts/test-headless-smoke.cjs",
     "test:mobile-camera": "node scripts/test-mobile-camera.cjs",
