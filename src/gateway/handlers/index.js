@@ -5,6 +5,7 @@ const { createAgentHandlers } = require('./agent');
 const { createMemoryHandlers } = require('./memory');
 const { createWebHandlers } = require('./web');
 const { createSpeechHandlers } = require('./speech');
+const { createModelHandlers } = require('./model');
 const { createIndexRemoteHandlers } = require('./index-remote');
 const { createArtifactHandlers } = require('./artifact');
 const { createCodebaseHandlers } = require('./codebase');
@@ -29,6 +30,7 @@ function createExtractedHandlers(deps) {
     ...createAgentHandlers(deps),
     ...createWebHandlers(deps),
     ...createSpeechHandlers(deps),
+    ...createModelHandlers(deps),
     ...createIndexRemoteHandlers(deps),
     ...createArtifactHandlers(deps),
     ...createCodebaseHandlers(deps),

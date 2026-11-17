@@ -454,14 +454,6 @@ function llmRequestApi() {
   return (typeof window !== 'undefined' && window.LlmRequest) || null;
 }
 
-let warnedLlmRequestMissing = false;
-/** 只在首次降级时提示一次：bundle 未随源码更新是「看不出任何原因」的典型故障 */
-function warnLlmRequestMissingOnce() {
-  if (warnedLlmRequestMissing) return;
-  warnedLlmRequestMissing = true;
-  console.warn('[model-settings] llm-request 不可用（agent-bundle 未加载或过期），请求头/端点已退化为惰性默认值');
-}
-
 /** 降级解析（仅 llm-request 不可用时使用；规则与其一致：每行 `名称: 值`） */
 function parseHeaderLinesFallback(text) {
   const out = {};
@@ -539,23 +531,6 @@ function renderProbeHeaders(headers, modelName) {
     if (rendered) out[name] = rendered;
   }
   return out;
-}
-
-/**
- * 装配请求头。唯一来源是 llm-request（含 authMode / 自定义头 / User-Agent）。
- *
- * llm-request 不可用时只给惰性默认头，**不再自行拼 Authorization**：
- * 自拼的 Bearer 与真实请求的鉴权方式可能不一致（如 authMode=x-api-key 时探针发 Bearer），
- * 那正是「测试通过但真实请求 400」的来源。宁可让探针明确失败并提示，也不给假结果。
- */
-function buildHeadersFromConfigLoose(config, vars) {
-  const api = llmRequestApi();
-  const cfg = config && typeof config === 'object' ? config : {};
-  if (api && typeof api.buildLlmHeadersFromConfig === 'function') {
-    return api.buildLlmHeadersFromConfig(cfg, vars);
-  }
-  warnLlmRequestMissingOnce();
-  return { 'Content-Type': 'application/json' };
 }
 
 function collectSupplierEditorConfig() {
@@ -799,11 +774,6 @@ function closeDefinedModelEditor() {
   editingDefinedModelId = null;
 }
 
-function resolveChatCompletionsEndpointForTest(baseUrl) {
-  // 端点拼接单一来源 llm-request（与 Main 侧同一份实现）
-  return window.LlmRequest.resolveLlmEndpoint(baseUrl, 'chat');
-}
-
 function collectDefinedModelEditorConfig() {
   const contextTier = String(ensureDefinedModelEditorContextTierMenu()?.getValue() || '').trim();
   return {
@@ -893,21 +863,19 @@ async function testDefinedModelFromEditor() {
       setDefinedModelTestStatus(`测试通过：合成 ${res?.format || '音频'}，约 ${kb} KB`, true);
       return;
     }
-    const url = resolveChatCompletionsEndpointForTest(cfg.baseUrl);
-    // 测试连接必须与真实请求用同一套头，否则会出现「测试通过但聊天 400」
-    const headers = buildHeadersFromConfigLoose(cfg, { sessionId: currentSessionId });
-    const body = {
+    // 请求由 Main 发（`model.probe`）：端点与请求头仍只有 `agent/llm-request.js` 一份实现，
+    // 且渲染层不再需要 `connect-src *` —— 探针打的是用户随手填的地址，无法枚举成白名单，
+    // 所以「谁发 HTTP」决定了 CSP 是能写成 'self' 还是只能写 *。
+    const res = await gatewayCall('model.probe', {
+      kind: 'chat',
       model: cfg.name,
-      messages: [{ role: 'user', content: '叠云模型连接测试。请只回复 OK。' }],
-      temperature: 0,
-      max_tokens: 16
-    };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body)
+      baseUrl: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      headers: cfg.headers,
+      userAgent: cfg.userAgent,
+      sessionId: currentSessionId
     });
-    const raw = await res.text();
+    const raw = String((res && res.text) || '');
     let json = null;
     try {
       json = raw ? JSON.parse(raw) : null;
@@ -1015,15 +983,6 @@ function closeEmbeddingModelEditor() {
   });
 }
 
-function resolveEmbeddingEndpointForTest(baseUrl) {
-  // 端点拼接单一来源 llm-request（含 /embed 直连写法）
-  return window.LlmRequest.resolveLlmEndpoint(baseUrl, 'embeddings');
-}
-
-function isDirectEmbedEndpoint(baseUrl) {
-  return /\/embed$/i.test(String(baseUrl || '').trim().replace(/\/+$/, ''));
-}
-
 function collectEmbeddingEditorConfig() {
   return {
     name: $('embedding-model-editor-name').value.trim(),
@@ -1062,28 +1021,18 @@ async function testEmbeddingModelFromEditor() {
     setEmbeddingTestStatus('请先填写模型名称和接口地址', false);
     return;
   }
-  const url = resolveEmbeddingEndpointForTest(cfg.baseUrl);
-  const headers = buildHeadersFromConfigLoose(cfg);
-  const body = isDirectEmbedEndpoint(cfg.baseUrl)
-    ? {
-        texts: ['叠云向量模型测试'],
-        model: cfg.name,
-        dimensions: cfg.dimensions
-      }
-    : {
-        model: cfg.name,
-        input: '叠云向量模型测试',
-        dimensions: cfg.dimensions
-      };
   if (btn) btn.disabled = true;
   setEmbeddingTestStatus('测试中…');
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body)
+    const res = await gatewayCall('model.probe', {
+      kind: 'embedding',
+      model: cfg.name,
+      baseUrl: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      dimensions: cfg.dimensions,
+      sessionId: currentSessionId
     });
-    const raw = await res.text();
+    const raw = String((res && res.text) || '');
     let json = null;
     try {
       json = raw ? JSON.parse(raw) : null;

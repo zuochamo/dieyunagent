@@ -4,11 +4,12 @@
 
 **原则**：Renderer 只做展示与 IPC；Agent 循环在 Main + `dieyun-core`，勿把业务状态机堆进 renderer。
 
-**三条防回流规矩**（2026-11 全仓混乱度审查后定，见 [`docs/MODULE-CHAOS-REVIEW.md`](../../docs/MODULE-CHAOS-REVIEW.md) §四）：
+**四条防回流规矩**（2026-11 全仓混乱度审查后定，见 [`docs/MODULE-CHAOS-REVIEW.md`](../../docs/MODULE-CHAOS-REVIEW.md) §四；第 4 条为 2026-11-17 CSP 审计后补）：
 
 1. **不准新增 `window.X` 顶层函数做新逻辑**：新逻辑写进 `src/agent/`（经 `scripts/build-agent-bundle.cjs` 打包成 `agent-bundle.js`）或收进已有的 `renderer-*.js` 单一来源文件；渲染层只保留「取数 + 画 DOM」。（现状：约 470 个 `window.X` 导出、123 个 `<script>` 顺序拼接，函数声明本身就是全局，加得越多越拆不动。）
 2. **会话/运行态只许一个写者**：`sessionActiveRuns`（`renderer-chat-state.js`）的写入只允许出现在 `renderer-chat-live-run.js` / `renderer-agent-send.js` 这两个「run 的开始与收尾」处；其它模块一律只读（`get` / `has`）。曾经 20 多个文件直接 `set/delete`，结果状态怎么变的没人说得清。
 3. **账本类 RPC 只许一处**：`agent.trace_save` / `agent.run_upsert` / `agent.plan_save` 只能出现在 `src/renderer/agent/trace-store.js`。别在气泡或收尾流程里另发一次——那会把「一轮的账本」写两次。
+4. **渲染层不发 HTTP，也不许 eval**：`index.html` 的 CSP 是 `connect-src 'self'` + `script-src 'self'`（2026-11-17 收窄，此前是 `connect-src *` + `unsafe-eval`）。要发请求就加 Gateway RPC（如设置页「测试」按钮走 `model.probe`），**不要**为此放宽 CSP —— 那条放宽意味着渲染层多了一条没人知道的出网通路。改 CSP 必跑 `npm run test:renderer-csp`（真 Chromium 验 mermaid / xlsx / mammoth / Monaco 与各项拦截）。
 
 **文案与数字格式（唯一来源）**：时间 / 字节 / 进度条文案只在 `renderer-utils.js` 实现 —— `fmtClock`（`14:35`）、`fmtMonthDayClock`（`03-14 14:35`）、`fmtRelShort`（`刚刚/5m/3d`，会话列表）、`fmtRelAgo`（`刚刚/5 分钟前/2 天前`，git 历史与产物）、`fmtDateTime`（本地完整时间）、`fmtBar`（`████▒▒ 40%`）、`fmtBytes`（`1.2 KB`）。**不要在面板里再写一份** `new Date(...).toLocaleTimeString()` 之类的取整逻辑：同一句「5 分钟前」曾经有四种口径。
 
@@ -151,6 +152,7 @@
 ```bash
 npm run check:renderer
 npm run test:renderer    # check + bundle 语法
+npm run test:renderer-csp  # 改了 CSP / 加了渲染层请求 / 动了 vendor 库之后必跑
 ```
 
 改动映射见 [`docs/CODEMAP.json`](../../docs/CODEMAP.json) → `renderer-all`。

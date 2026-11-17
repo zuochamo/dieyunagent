@@ -4,9 +4,21 @@
     <meta charset="UTF-8" />
     <!-- media-src blob: 是「朗读」播放音频的必需品：Blob URL 不是 'self'，
          漏了它 Chromium 会报 Media load rejected by URL safety check
-         （表现为 NotSupportedError: no supported source found）。 -->
+         （表现为 NotSupportedError: no supported source found）。
+
+         每一项放宽都有代价，写清是谁需要它（2026-11-17 审计，用真 Chromium 验过，
+         见 scripts/test-renderer-csp.cjs；改这里先跑 `npm run test:renderer-csp`）：
+         - style-src 'unsafe-inline'：mermaid 渲染时注入 <style>；Monaco 主题同理。
+         - script-src 只有 'self'：原先的 'unsafe-eval' / 'wasm-unsafe-eval' 已删 ——
+           渲染层没有 eval / new Function，三个 vendor 库（mermaid / xlsx / mammoth）里
+           仅有的 `new Function` 都在「能力探测 + 跨源 worker 兜底」的 guard 里
+           （bluebird 的 canEvaluate 在浏览器恒 false；Monaco loader 先探测再退回 importScripts），
+           CSP 下自然不执行；也完全没用 WebAssembly。
+         - connect-src 'self'：渲染层自己不发任何 HTTP —— LLM / 向量 / Gateway / 探针全部在
+           Main（设置页「测试」按钮走 RPC `model.probe`）。这条就是「Renderer 不写 HTTP」的
+           体检点：谁在这里加了 fetch，UI 会立刻坏掉而不是悄悄多一条出网通路。 -->
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; media-src 'self' blob: data: dieyun-media:; connect-src *;" />
+          content="default-src 'self'; script-src 'self'; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; media-src 'self' blob: data: dieyun-media:; connect-src 'self';" />
     <title>叠云 Agent</title>
     <script src="./renderer-theme-bootstrap.js"></script>
     <link rel="stylesheet" href="./styles.css" />

@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-11-17T09:23:21.280Z
+生成时间：2026-11-17T11:51:10.021Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 192 |
-| Gateway only | 106 |
+| 总计 | 193 |
+| Gateway only | 107 |
 | Rust only | 25 |
 | Both | 61 |
 
@@ -240,6 +240,12 @@
 | `memory.sessions_list` | both | gateway/handlers/memory.js | yes |
 | `memory.sessions_with_messages` | both | gateway/handlers/memory.js | yes |
 | `memory.touch_session` | both | gateway/handlers/memory.js | yes |
+
+### model (1)
+
+| Method | Layer | Gateway source | Rust |
+|--------|-------|----------------|------|
+| `model.probe` | gateway | gateway/handlers/model.js | — |
 
 ### permissions (2)
 

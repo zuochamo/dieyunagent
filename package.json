@@ -38,6 +38,7 @@
     "check:contracts": "node scripts/check-repo-contracts.cjs",
     "check:js": "tsc -p tsconfig.check.json --noEmit --pretty false",
     "test:renderer": "npm run check:renderer",
+    "test:renderer-csp": "node scripts/test-renderer-csp.cjs",
     "test": "node scripts/test-agent-smoke.cjs",
     "test:agent": "node scripts/test-agent-smoke.cjs --all",
     "test:agent-full": "node scripts/test-agent-smoke.cjs --full",

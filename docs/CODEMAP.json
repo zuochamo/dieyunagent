@@ -1887,6 +1887,33 @@
       "tests": [
         "check:renderer"
       ]
+    },
+    {
+      "prefix": "src/renderer/index.html",
+      "tests": [
+        "check:renderer",
+        "test:renderer-csp"
+      ]
+    },
+    {
+      "prefix": "scripts/test-renderer-csp.cjs",
+      "tests": [
+        "test:renderer-csp"
+      ]
+    },
+    {
+      "prefix": "src/gateway/handlers/model.js",
+      "tests": [
+        "test:unit",
+        "test:local-gateway-smoke",
+        "verify:rpc-catalog"
+      ]
+    },
+    {
+      "prefix": "test/unit/model-probe.test.cjs",
+      "tests": [
+        "test:unit"
+      ]
     }
   ],
   "suites": {
