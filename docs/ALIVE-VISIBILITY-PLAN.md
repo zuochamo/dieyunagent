@@ -10,7 +10,7 @@
 |---|---|---|
 | ① 只有"醒几次"上限 | `aliveWakeMaxPerDay: 40` 防抖，但**一次醒轮能烧四万字**，日账单无上界 | `state.tokenToday` + `aliveDailyTokenBudget`，在 `waker` 里做一条机械门限 |
 | ② 只有当前值 | 面板只有"现在"的张力/疲劳；`events.jsonl` 刻意不记每跳（会挤掉决策） | 新文件 `alive/history.jsonl`（append-only，按窗口裁剪），面板画 sparkline |
-| ③ 只能进设置页翻 | 它醒过、说过、看过的事只在「设置 → 拟态 → 生命」的日志里 | 侧栏一个「生命」页签（与 `goal` / `bot` 同构）+ 一个无状态的动静徽标 |
+| ③ 只能进设置页翻 | 它醒过、说过、看过的事只在「设置 → 拟态 → 生命」的日志里 | 侧栏一个「生命」页签（与 `goal` / `bot` 同构）+ rail 上一个心跳图标（原先是徽标小点；中间做过律动与相位色，2026-11-13 都删了，现在与其它图标同色、不动） |
 
 ---
 
@@ -108,7 +108,9 @@ if (cfg.dailyTokenBudget > 0 && Number(state.tokenToday || 0) >= cfg.dailyTokenB
 
 - 手写内联 SVG（renderer 已有 `<svg>` 先例，不引图表库）：
   - 两条折线：张力（一条）、疲劳（一条），各自按 0–100 归一到同一坐标系。
-  - 背景色带：按 `phase` 分段上色（四个相位四档灰/蓝/绿/琥珀），一眼看出"它什么时候在压缩"。
+  - 底部相位色条：按 `phase` 分段上色（四个相位四档灰/蓝/绿/琥珀），一眼看出"它什么时候在压缩"。
+    （原先是铺满整幅的底色，太抢眼；末端读数点也踩过坑 —— `preserveAspectRatio="none"` 下的
+    `<circle>` 会被横向拉成一根长条，现在是「零长度线段 + 圆头 + non-scaling-stroke」。）
   - 悬浮/点击某点 → 顶部一行文字：`14:46 · 警觉 · 张力 21.4 · 疲劳 12.0`（不弹框）。
 - 空数据时显示「还没有足够的样本（跑满一跳后才会有）」。
 
@@ -139,30 +141,48 @@ if (cfg.dailyTokenBudget > 0 && Number(state.tokenToday || 0) >= cfg.dailyTokenB
 | 概览 | `alive:status`（已有） | 相位 / 张力·阈值 / 疲劳 / 今日唤醒 / 今日 token / 上次醒来成本 |
 | 趋势 | `alive:history`（新增） | 与设置页**同一个** `renderAliveTrend()` |
 | 最近事件 | `alive:decisions`（已有） | 与设置页**同一个** `renderAliveEventLines()`（把现在设置页里的行拼装抽成函数导出） |
-| 抽屉只读预览 | `alive:note`（已有） | 与设置页同一个 `renderAliveNote()` |
+| 抽屉只读预览 | `alive:note`（已有） | 与设置页同一个 `renderAliveNote()`；与事件流是记录区里的**两组横向标签**（2026-11-15 从「生命」页搬进「日志」页，两处壳同一套标签语义，见 `applyAliveTab`） |
 
 即：`renderer-alive.js` 变成「渲染函数库 + 两个壳」—— 设置页那套 DOM id 不动，侧栏页复用函数。
 **不复制**任何状态机或判定（该页仍然只读）。
 
-### 徽标（无状态判据）
+### 版面：两段式（别再把每块都封 240px）
 
-- 条件：**最近 60 分钟内有 `WAKE` / `DECISION` / `SPEAK` / `EYE` 事件** → rail 上显示一个小点。
-- **不引入"已读"**：那需要持久化 `lastSeenTs` 并同步到设置页，是典型的状态机加法。
-  "刚有动静"比"有 3 条未读"更诚实，也更便宜。
+侧栏这块只有一个设计点：**高度怎么分**。
+
+| 段 | 高度 | 理由 |
+|---|---|---|
+| 体征 + 趋势 | 按内容长，不收缩 | 它是"现在"，行数稳定 |
+| 记录区（事件 / 抽屉 两组横向标签） | `flex: 1 0 auto`（吃掉余量） | 它是"刚发生"，行数会爆；给固定上限就变成两截小窗口。抽屉原来单独占一块 40% 高，于是事件流被挤成半截窗口，且同一份"它写过什么"有了两个入口 |
+
+两条退化都要保住：面板够高 → 事件流把余量填满（不留空地）；面板太矮 → **整段滚动**，
+而不是把某一块切成半行字（所以外层 `overflow: auto` + 子项 `flex-shrink: 0`）。
+之前每块各写 `max-height: 240px` 让整页滚，用户看到的是"上面一截小窗口、下面一大片空地"。
+
+### rail 图标：就是普通图标（「律动」与「相位色」都已删，2026-11-13）
+
+- **不动画**（用户："这个心跳图标 不要动画了"）、**不单独上色**（用户："颜色 和其他图标一样"）。
+  真实使用中，一排侧栏图标里只有它在动 / 在变色，既抢注意力，也让这排图标看起来不像一排。
+- 现在的表现：一条静止的心跳线，颜色随 `currentColor`（与其它图标同一份），停表也不变色；
+  相位名只写进工具提示（`renderAliveRailPhase`）。趋势与相位在「生命」页里看。
+- **同时删掉的东西**（别再加回来）：跑高光的同形路径、`@keyframes alive-rail-beat`、
+  `data-alive-live`（有动静跑快一倍）、`data-alive-phase` + `--alive-beat`（相位色）、
+  `alive:badge` 的 `recent`/`recentAt`。它们只为那两个效果存在，效果删了就没有消费者。
+- **仍然不引入"已读"**：那需要持久化 `lastSeenTs` 并同步到设置页，是典型的状态机加法。
 
 ### IPC（两个新增，都很轻）
 
 | 通道 | 返回 | 为什么不复用 `alive:status` |
 |---|---|---|
 | `alive:history {windowMs, points}` | `{ ok, samples, windowMs, total }` | status 是"现在"，曲线是"过去"，大小差一个量级 |
-| `alive:badge` | `{ ok, enabled, running, phase, wakeCountToday, recent, lastKind, lastTs }` | 主界面常驻轮询，不能每 30s 读一次模型设置 / 权限文件（status 会读） |
+| `alive:badge` | `{ ok, enabled, running, phase, wakeCountToday, lastKind, lastTs, lastVoiceText/At, lastWakeText/At }` | 主界面常驻轮询，不能每 30s 读一次模型设置 / 权限文件（status 会读） |
 
 `alive:badge` 只读 `state.json` + `events.jsonl` 尾部一行，不 spawn 任何东西。
 
 ### 刷新节奏
 
 - 侧栏「生命」页可见时：5s（复用设置页那套 poll，页面不可见即停）。
-- 主界面徽标：30s（体征漂移是 5 分钟尺度，30s 足够，别让渲染层空转）。
+- 主界面徽标（相位色，以及「它说…」/「它醒来写了…」那行）：30s（体征漂移是 5 分钟尺度，30s 足够，别让渲染层空转）。
 - headless 网页端**不映射**这两个 IPC：服务器没有装配生命感（见 `docs/ALIVE.md` §7）。
 
 ---
@@ -174,7 +194,7 @@ if (cfg.dailyTokenBudget > 0 && Number(state.tokenToday || 0) >= cfg.dailyTokenB
 | 1 | 额度：`tokenToday` + `rollDay` 重置 + `waker` 门限 + 记账 + 事件字段 | `vitals` / `waker` / `runtime` / `agent-limits` | 超预算不醒（`token-day-cap`）、跨天清零、`WAKE_END.tokens` 与 `tokenToday` 同源 |
 | 2 | 历史：`history.jsonl` + 共用裁剪 + `runtime.history()` + `alive:history` | `store` / `runtime` / `ipc/alive` / `preload` | 逐跳一条、窗口裁剪有界、读侧抽样 ≤ points、坏行跳过 |
 | 3 | 面板：设置页「趋势」区块 + SVG sparkline + 相位色带 | `renderer-alive` / `index.html` / `styles.css` | `check:renderer`（DOM id / rail-pane 一致） |
-| 4 | 外化：侧栏「生命」页签 + 徽标（`alive:badge`）+ 渲染函数共用 | `index.html` / `renderer-side-panel` / `renderer-alive` / `ipc` / `preload` | rail/pane 一致；设置页与侧栏事件格式**同一函数**产出 |
+| 4 | 外化：侧栏「生命」页签 + rail 心跳图标（`alive:badge`）+ 渲染函数共用 | `index.html` / `renderer-side-panel` / `renderer-alive` / `ipc` / `preload` | rail/pane 一致；设置页与侧栏事件格式**同一函数**产出 |
 
 ## 6. 验收（新增断言，挂在 `npm run test:alive` 与 `check:renderer`）
 
@@ -182,7 +202,7 @@ if (cfg.dailyTokenBudget > 0 && Number(state.tokenToday || 0) >= cfg.dailyTokenB
   跨天 `rollDay` 归零；`tokenToday` 等于当日 `WAKE_END.tokens` 之和。
 - 历史：`appendSample` 逐跳一条；超过 `aliveHistoryMaxLines` 裁一半；`history({points:240})`
   返回 ≤240 个点且 ts 递增；坏行不炸。
-- 徽标：`recent` 只看 60 分钟窗口（给两条事件造边界：59 分钟前 true、61 分钟前 false）。
+- rail 图标：**与其它图标一致**（无 `@keyframes`、无 `data-alive-live`、无 `data-alive-phase`/`--alive-beat`）。
 - 渲染：`check:renderer` 的 rail/pane 计数 + 新 DOM id 引用全部存在。
 
 ## 7. 负向清单（往回加这些 = 这次白做）

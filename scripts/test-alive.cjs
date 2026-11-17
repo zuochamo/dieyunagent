@@ -26,6 +26,8 @@ const decide = require('../src/alive/decide');
 const { createAliveStore } = require('../src/alive/store');
 const noteMod = require('../src/alive/note');
 const voiceMod = require('../src/alive/voice');
+const recapMod = require('../src/alive/recap');
+const eyesMod = require('../src/alive/eyes');
 const {
   createAliveRuntime,
   resolveAliveConfig,
@@ -298,6 +300,382 @@ async function main() {
     }
     assert.ok(block.includes('alive_decide'), '要告诉模型决策入口');
     assert.ok(isSyntheticLoopUserContent(block), '体征块必须被认成合成消息（不能被当成用户任务）');
+  });
+
+  ok('拿当前处境召回记忆：查询由事实拼成，召回结果进事实块（带 id 可对账）', () => {
+    const cfg = testCfg();
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    const recap = {
+      sessions: [{ title: '小规模销售收入日报', agoText: '5 分钟前', tail: '已推送 errcode:0' }],
+      plans: [
+        { name: 'EP04 巡检', objective: 'G1–G4 全过', attempt: 2, check: 'npm test', lastOk: false, tail: '' }
+      ],
+      lastHuman: null
+    };
+    const query = recapMod.buildRecallQuery(recap, ['抽屉：写了 first-light.txt'], 400);
+    assert.ok(query.includes('小规模销售收入日报'), '会话标题要在查询里');
+    assert.ok(query.includes('errcode:0'), '会话尾句要在查询里');
+    assert.ok(query.includes('EP04 巡检'), '未收尾计划也要在查询里');
+    assert.ok(query.includes('first-light.txt'), '它自己抽屉里那句也要在查询里');
+    assert.strictEqual(recapMod.buildRecallQuery(recap, null, 10).length, 10, '按字数截断（embedding 成本）');
+    assert.strictEqual(recapMod.buildRecallQuery(null, null, 400), '', '什么事实都没有就不该发查询');
+
+    const block = decide.renderStateBlock(state, cfg, {
+      nowMs: t0,
+      load: 0,
+      memory: [{ id: 1774, kind: 'normal', text: '对话过长需要开新会话时先写交接' }]
+    });
+    assert.ok(block.includes('你记得的'), '召回的记忆要进事实块');
+    assert.ok(block.includes('#1774'), '要带记忆 id（出问题能对账）');
+  });
+
+  ok('体征块：「有没有人在场」只说 load 这个事实，不替它下「没人」的结论', () => {
+    const cfg = testCfg();
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    const quiet = decide.renderStateBlock(state, cfg, { nowMs: t0, load: 0 });
+    // 只报事实：没有对话活动。**不能**再宣布「没有人在等你回话」——
+    // 它这一轮手里有摄像头/屏幕照片，屋里有没有人该由它看见。
+    assert.ok(quiet.includes('没有对话活动'), '空闲时该报「没有对话活动」这个事实');
+    assert.ok(!quiet.includes('没有人在等你回话'), '代码不能再替它断言"没人在"');
+    assert.ok(quiet.includes('你自己看'), '屋里有没有人交给它自己看');
+    assert.ok(quiet.includes('alive_speak'), '空闲时也允许它出声（说给在场的人听）');
+    const busy = decide.renderStateBlock(state, cfg, { nowMs: t0, load: 0.42 });
+    assert.ok(busy.includes('最近 5 分钟这台机器上有对话活动'), '有人在用就该说出来');
+    assert.ok(busy.includes('alive_speak'), '在场时允许它出声');
+    // 没有 load 这个事实（老调用方 / 测试）时按"没有对话活动"说，不瞎猜有人
+    const unknown = decide.renderStateBlock(state, cfg, { nowMs: t0 });
+    assert.ok(unknown.includes('没有对话活动'));
+    assert.ok(!unknown.includes('没有人在等你回话'));
+  });
+
+  ok('权力档：提示词只有一种说法（只读 / 可写 / 可跑，不会同时出现）', () => {
+    const cfg = testCfg();
+    const state = vitals.createInitialState(cfg, 0);
+    const mk = (power) =>
+      decide.renderStateBlock(state, cfg, { nowMs: 0, power, wakeRoot: 'D:\\alive-sandbox' });
+    const read = mk('read');
+    assert.ok(read.includes('这一轮是只读的'), 'read 档要说明只读');
+    assert.ok(!read.includes('你可以**改文件**'), 'read 档不能暗示能写');
+    const write = mk('write');
+    assert.ok(!write.includes('这一轮是只读的'), 'write 档不能再说"只读"（自相矛盾）');
+    assert.ok(write.includes('你可以**改文件**') && write.includes('D:\\alive-sandbox'), 'write 档要说清根目录');
+    assert.ok(!write.includes('也可以**跑命令**'), 'write 档不能暗示能跑命令');
+    assert.ok(!write.includes('也可以**联网**'), 'write 档不能暗示能出网（出网跟着 exec 档）');
+    const exec = mk('exec');
+    assert.ok(!exec.includes('这一轮是只读的'), 'exec 档不能再说"只读"');
+    assert.ok(exec.includes('也可以**跑命令**'), 'exec 档要说明能跑命令');
+    assert.ok(exec.includes('也可以**联网**'), 'exec 档要说明能联网（web_search / web_fetch）');
+    assert.ok(exec.includes('也可以**开浏览器**'), 'exec 档要说明能开浏览器 / 动键鼠');
+    assert.ok(exec.includes('WAKE_YIELD'), 'exec 档要说清"有人跑任务时会让路"，否则它会把拒当故障重试');
+    assert.ok(exec.includes('每轮最多 6 次') && exec.includes('每轮最多 3 条'), '两个次数上限都要写出来');
+  });
+
+  await okAsync('最近工作事实块：只报事实、按字数截断、取数失败就空着', async () => {    const cfg = testCfg();
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    const calls = [];
+    const invokeRpc = async (method, params) => {
+      calls.push(method);
+      // 形状必须与 RPC 真实返回一致：Rust `SessionRow` / `MessageRow` 都是 serde camelCase。
+      // （这份 fixture 原来写的是 `updated_at`，于是"字段名读错了"在测试里看不见 —— 真实环境
+      //   每条会话都被时间窗滤掉，事实块永远说"没有别的会话动静"。）
+      if (method === 'memory.sessions_list') {
+        return [
+          { id: 's-a', title: '在改浏览器面板', updatedAt: t0 - 12 * 60000 },
+          { id: 's-self', title: '生命体征（后台心跳）', updatedAt: t0 - 60000 },
+          { id: 's-old', title: '上周的会话', updatedAt: t0 - 100 * HOUR }
+        ];
+      }
+      return [
+        { role: 'user', content: '把那个面板的可见性问题修一下', createdAt: t0 - 13 * 60000 },
+        { role: 'assistant', content: '改完了，gate 之后不再盖住别的页签', createdAt: t0 - 12 * 60000 }
+      ];
+    };
+    const recap = await recapMod.collectRecap({
+      invokeRpc,
+      selfSessionId: 's-self',
+      nowMs: t0,
+      limits: { recapWindowHours: 24, recapSessions: 3, recapTailChars: 40 }
+    });
+    assert.strictEqual(recap.sessions.length, 1, '窗口外的会话与心跳会话自己都不能进');
+    assert.ok(recap.sessions[0].title.includes('浏览器'));
+    assert.ok(recap.sessions[0].tail.includes('gate'), '应带最后一句');
+    assert.ok(recap.lastHuman && recap.lastHuman.tail.includes('面板'), '要能说出"最后一次听到人说话"');
+    assert.ok(!calls.includes('memory.sessions_list') === false);
+
+    const block = decide.renderStateBlock(state, cfg, { nowMs: t0, recap });
+    assert.ok(block.includes('最近这台机器上'), '状态块要带最近工作');
+    assert.ok(block.includes('最后一次听到人说话'), '状态块要带人的最后一句');
+
+    // 取数失败：不抛、不编，只说"没有动静"
+    const broken = await recapMod.collectRecap({
+      invokeRpc: async () => {
+        throw new Error('rpc down');
+      },
+      nowMs: t0,
+      limits: {}
+    });
+    assert.deepStrictEqual(broken.sessions, []);
+    const quiet = decide.renderStateBlock(state, cfg, { nowMs: t0, recap: broken });
+    assert.ok(quiet.includes('没有别的会话动静'));
+    assert.ok(!quiet.includes('最后一次听到人说话'), '什么都取不到时不能编一句"人说话"');
+  });
+
+  await okAsync('最近工作事实块：meta 封套不是"合成消息"，机器触发的一轮也不算人说的话', async () => {
+    const t0 = Date.UTC(2026, 0, 1);
+    /** 与 `session-context.packMessageMeta` 落库形状一致 */
+    const pack = (text, meta) => `【叠云meta】${JSON.stringify(meta || {})}\n${text}`;
+    const makeInvoke = (userContent, assistantContent, userMeta) => async (method) => {
+      if (method === 'memory.sessions_list') return [{ id: 's-a', title: '某会话', updatedAt: t0 - 60000 }];
+      return [
+        { role: 'user', content: pack('[系统] 生命体征\n· 张力 40.1') },
+        { role: 'user', content: pack(userContent, { inputText: userContent, ...(userMeta || {}) }) },
+        { role: 'assistant', content: pack(assistantContent, { modelLabel: 'X', ts: t0 - 60000 }) }
+      ];
+    };
+
+    // 真人打字：正文里的 meta 封套不能把这条判成"合成"，尾句与"人说的话"都要取得到
+    const human = await recapMod.collectRecap({
+      invokeRpc: makeInvoke('帮我看看这个报错', '看过了，是端口占用'),
+      nowMs: t0,
+      limits: { recapWindowHours: 24, recapSessions: 3, recapTailChars: 40 }
+    });
+    assert.strictEqual(human.sessions.length, 1);
+    assert.ok(human.sessions[0].tail.includes('端口占用'), '尾句要取正文，不能把 meta 封套当内容');
+    assert.ok(!human.sessions[0].tail.includes('叠云meta'), '封套不能进事实块');
+    assert.ok(human.lastHuman && human.lastHuman.tail.includes('报错'), '真人打字必须被认出来');
+
+    // 定时触发的一轮（meta.trigger）：正文是人话，但这句不是人现在说的 → 不算"听到人说话"
+    const auto = await recapMod.collectRecap({
+      invokeRpc: makeInvoke('跑一下今天的日报', '日报已推送', { trigger: { kind: 'schedule' } }),
+      nowMs: t0,
+      limits: { recapWindowHours: 24, recapSessions: 3, recapTailChars: 40 }
+    });
+    assert.strictEqual(auto.lastHuman, null, '机器触发的一轮不能被当成"人在说话"');
+  });
+
+  await okAsync('醒来时先看一眼：默认不给图，缺锁就说缺哪个，取到图才成为这一轮的输入', async () => {
+    // 1) 没勾：什么都不取
+    const none = await eyesMod.captureWakeShots({ wants: {}, senses: {}, permissions: {} });
+    assert.deepStrictEqual(none.parts, []);
+    assert.deepStrictEqual(none.seen, []);
+
+    // 2) 勾了摄像头但感官关着 / 权限没开：明确说差什么，不给图
+    const noSense = await eyesMod.captureWakeShots({
+      wants: { camera: true },
+      senses: { eyes: false },
+      permissions: { desktopCamera: true }
+    });
+    assert.strictEqual(noSense.parts.length, 0);
+    assert.strictEqual(noSense.seen[0].errorCode, 'SENSE_DISABLED');
+    const noPerm = await eyesMod.captureWakeShots({
+      wants: { screen: true },
+      senses: { eyes: true },
+      permissions: { osControl: false }
+    });
+    assert.strictEqual(noPerm.seen[0].errorCode, 'PERMISSION_DENIED');
+
+    // 3) 齐件：两个 part（摄像头 + 屏幕），都是 data URL
+    const shots = await eyesMod.captureWakeShots({
+      wants: { camera: true, screen: true },
+      senses: { eyes: true },
+      permissions: { desktopCamera: true, osControl: true },
+      createSource: () => ({
+        capture: async () => ({ ok: true, base64: 'AAA', mime: 'image/jpeg', width: 640, height: 480, device: 'cam' })
+      }),
+      listDisplays: () => [{ index: 0, primary: true }],
+      grabDisplay: async () => ({ image: {} }),
+      encode: () => ({ mime: 'image/png', base64: 'BBB', width: 800, height: 600 })
+    });
+    assert.strictEqual(shots.parts.length, 2);
+    for (const p of shots.parts) {
+      assert.strictEqual(p.type, 'image_url');
+      assert.ok(String(p.image_url.url).startsWith('data:image/'), '必须是 data URL，且不落盘');
+    }
+    assert.ok(shots.seen.every((s) => s.ok === true));
+
+    // 4) 取不到时如实写进状态块（不许假装看过）
+    const cfg = testCfg();
+    const block = decide.renderStateBlock(vitals.createInitialState(cfg, 0), cfg, {
+      nowMs: 0,
+      look: [
+        { tool: 'wake_camera', ok: true, width: 640, height: 480 },
+        { tool: 'wake_screen', ok: false, errorCode: 'PERMISSION_DENIED' }
+      ]
+    });
+    assert.ok(block.includes('你醒来时先看了一眼'), '要告诉它这一轮看过');
+    assert.ok(block.includes('没看成'), '失败也要如实说');
+  });
+
+  ok('完成收口：ACT 带 done 关掉条目（做完 ≠ 拒绝），张力不再计它', () => {
+    const cfg = testCfg();
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    tensionEngine.upsertLoops(state, [{ text: '把这件事实收尾' }, { text: '另一件不值得做' }], { cfg, nowMs: t0 });
+    const list = state.loops.slice();
+    assert.strictEqual(list.length, 2);
+    const tensionBefore = tensionEngine.totalLoopTension(state.loops, t0, cfg);
+    const res = decide.applyDecision(
+      state,
+      { decision: 'ACT', done: [list[0].id], intent: '处理完了' },
+      { cfg, nowMs: t0 + 1000 }
+    );
+    assert.strictEqual(res.ok, true);
+    assert.deepStrictEqual(res.doneIds, [list[0].id]);
+    assert.strictEqual(state.loops.length, 1, '收口后清单少一条');
+    assert.ok(tensionEngine.totalLoopTension(state.loops, t0, cfg) < tensionBefore, '收口的那条不再计张力');
+    assert.strictEqual(state.actCount, 1);
+    assert.strictEqual(state.refuseCount, 0, '做完不是拒绝');
+    assert.strictEqual(state.refuseToday, 0);
+    // 不存在的 id：不抛、不虚增
+    const again = decide.applyDecision(state, { decision: 'DEFER', done: ['loop-nope'] }, { cfg, nowMs: t0 + 2000 });
+    assert.strictEqual(again.ok, true);
+    assert.deepStrictEqual(again.doneIds, []);
+    // 工具 schema 与提示词都要有这个动作（否则模型根本不知道能"做完"）
+    const schema = decide.ALIVE_DECIDE_TOOL.function.parameters.properties;
+    assert.ok(schema.done && schema.done.type === 'array', 'alive_decide 要有 done');
+    const block = decide.renderStateBlock(state, cfg, { nowMs: t0 });
+    assert.ok(block.includes('done'), '状态块要提到 done');
+    // 清单空着也要能自己开一条：以前只教了怎么关，它 7 次醒来清单都是 0 条
+    assert.ok(block.includes('loops'), '状态块要说明可以自己开一条未闭合事项');
+    // 「做完了」要对事实：这句必须在提示里（代码侧另有 DONE_NO_EVIDENCE 留痕）
+    assert.ok(block.includes('要对得上事实'), '状态块要写明做完要对得上事实');
+  });
+
+  await okAsync('它自己的记忆回到眼前：抽屉最后几行进状态块；说做完却没有事实依据要留痕', async () => {
+    const cfg = testCfg();
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    // 1) 抽屉内容进事实块（它自己的字），且排在"外面发生了什么"之前
+    const withNote = decide.renderStateBlock(state, cfg, {
+      nowMs: t0,
+      load: 0,
+      note: ['[2026-11-11 22:23] 第 5 次醒来第一次真动手：写了 first-light.txt，并核到了'],
+      recap: {
+        sessions: [{ title: '别的会话', agoText: '10 分钟前', tail: '日报推成功' }],
+        plans: [],
+        lastHuman: null
+      }
+    });
+    assert.ok(withNote.includes('你抽屉里最近写的'), '要带上它自己写过的话');
+    assert.ok(withNote.includes('first-light.txt'), '原话要原样出现');
+    assert.ok(
+      withNote.indexOf('你抽屉里最近写的') < withNote.indexOf('最近这台机器上'),
+      '先让它想起自己，再看外面'
+    );
+
+    // 2) 说「做完了」但这一轮从头到尾没有它自己的动作 → 记一条 DONE_NO_EVIDENCE（只留痕、不驳回）
+    //    对账在**轮末**做（这一轮用 done 关掉了条目、整轮又没有依据），所以这里跑真的唤醒轮。
+    const root = mkTmp('done-evidence');
+    let clock2 = t0;
+    /**
+     * 这一轮轮到它做什么：
+     * none / auto-eye（代码替它拍的输入）/ self-eye（它自己调的）/ action /
+     * action-late（先把条目 done 掉、再去跑命令核对 —— 真实里常见的顺序）
+     */
+    let mode = 'none';
+    const rt = createAliveRuntime({
+      userDataPath: root,
+      limits: Object.assign({}, AGENT_LIMITS_DEFAULTS, { aliveTickIntervalMs: TICK }),
+      now: () => clock2,
+      rng: seededRng(44),
+      turnRunner: async () => {
+        rt.applyDecision({ decision: 'ACT', loops: [{ text: '把这件事实收尾' }], intent: '开一条' });
+        const id = rt.getState().loops[0].id;
+        if (mode === 'action-late') {
+          // 先划掉、再验证：2026-11-14 实测里它真这么干（06:38 那轮），按"决定那一刻"判会冤枉它
+          rt.applyDecision({ decision: 'ACT', done: [id], intent: '我先关掉，再核一遍' });
+          rt.recordEvent({ kind: 'ACTION', tool: 'host_exec', ok: true, target: 'dir /b F:\\alive-sandbox' });
+          return { content: '核过了' };
+        }
+        if (mode === 'auto-eye') {
+          rt.recordEvent({ kind: 'EYE', tool: 'wake_camera', ok: true, auto: true, width: 1568, height: 882 });
+        } else if (mode === 'self-eye') {
+          rt.recordEvent({ kind: 'EYE', tool: 'desktop_camera_look', ok: true, width: 800, height: 600 });
+        } else if (mode === 'action') {
+          rt.recordEvent({ kind: 'ACTION', tool: 'fs_write_file', ok: true, target: 'D:\\alive-sandbox\\a.txt' });
+        }
+        rt.applyDecision({ decision: 'ACT', done: [id], intent: '我做完了' });
+        return { content: '做完了' };
+      }
+    });
+    try {
+      const warnCount = () => rt.decisions(50).filter((e) => e.kind === 'DONE_NO_EVIDENCE').length;
+
+      await rt.wakeNow();
+      assert.strictEqual(warnCount(), 1, '没有任何动作就声称做完，要留一条痕');
+      assert.strictEqual(rt.getState().loops.length, 0, '缺依据也要真收口 —— 代码没资格替它判断哪条算数');
+
+      // 自动睁眼（`auto: true`：醒来时先看一眼是这一轮的**输入**）不算依据。
+      // 2026-11-13 实测：以前 EYE 一律算依据，眼睛一开这条对账就再也没响过 —— 等于关着。
+      mode = 'auto-eye';
+      clock2 += TICK;
+      await rt.wakeNow();
+      assert.strictEqual(warnCount(), 2, '自动睁眼不该被当成"做完的证据"');
+
+      // 它**自己**调的睁眼算依据
+      mode = 'self-eye';
+      clock2 += TICK;
+      await rt.wakeNow();
+      assert.strictEqual(warnCount(), 2, '它自己调的睁眼算依据');
+
+      // 成功的 ACTION 更算
+      mode = 'action';
+      clock2 += TICK;
+      await rt.wakeNow();
+      assert.strictEqual(warnCount(), 2, '有依据的收口不该被记成缺依据');
+
+      // 先 `done` 后干活：整轮下来有依据，不该报缺依据（2026-11-14 修的时刻判定假警报）
+      mode = 'action-late';
+      clock2 += TICK;
+      await rt.wakeNow();
+      assert.strictEqual(warnCount(), 2, '按整轮判：先划掉、随后真跑了命令，不算缺依据');
+    } finally {
+      rt.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  ok('未收尾的目标型计划：进事实块；已收尾与非目标型不进', () => {
+    const cfg = testCfg();
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    const plans = [
+      {
+        trigger: 'goal',
+        outcome: null,
+        name: '把索引建完',
+        attempt: 3,
+        goal: { objective: '全仓向量建满', checks: [{ id: 'c1', command: 'npm run test:agent' }] },
+        lastRunOk: false,
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      },
+      { trigger: 'goal', outcome: 'complete', name: '已完成的目标', attempt: 1 },
+      { trigger: 'schedule', outcome: null, name: '定时开会', attempt: 9 }
+    ];
+    const plansOut = recapMod.collectOpenPlans({
+      listPlans: () => plans,
+      limits: { recapPlans: 3, recapTailChars: 40 }
+    });
+    assert.strictEqual(plansOut.length, 1, '只留未收尾的目标型计划');
+    assert.ok(plansOut[0].name.includes('索引'));
+    assert.strictEqual(plansOut[0].attempt, 3);
+    assert.ok(plansOut[0].check.includes('npm run test:agent'));
+    const block = decide.renderStateBlock(state, cfg, {
+      nowMs: t0,
+      recap: { sessions: [], plans: plansOut, lastHuman: null }
+    });
+    assert.ok(block.includes('未收尾的目标型计划'));
+    assert.ok(block.includes('上次检查没过'));
+    assert.ok(!block.includes('定时开会'), '非目标型计划不该出现');
+    // 存储不可用 / 没有入口：不抛、不编
+    assert.deepStrictEqual(
+      recapMod.collectOpenPlans({ listPlans: () => { throw new Error('x'); }, limits: { recapPlans: 3 } }),
+      []
+    );
+    assert.deepStrictEqual(recapMod.collectOpenPlans({ limits: { recapPlans: 3 } }), []);
   });
 
   ok('可疑顺从告警：唤醒 ≥5 且当天从未拒绝 → 告警', () => {
@@ -793,6 +1171,23 @@ async function main() {
       assert.strictEqual(alive.senses().micDevice, '麦克风 (USB)', '设备选择要跟着 senses 走');
       assert.strictEqual(alive.senses().cameraDevice, 'OBSBOT Tiny 2');
 
+      // 「设定」：一个自由文本框，走同一条 setOption；status 带回原文与字数上限
+      assert.strictEqual(alive.status().setup, '', '设定默认为空');
+      assert.strictEqual(alive.setOption('setup', '人生目标：把角落摸清。\n遇到人打个招呼。').ok, true);
+      assert.strictEqual(
+        alive.status().setup,
+        '人生目标：把角落摸清。\n遇到人打个招呼。',
+        '设定要能读回（页面回显靠它）'
+      );
+      assert.strictEqual(alive.status().setupMaxChars, AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars);
+      const huge = alive.setOption('setup', '字'.repeat(AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars + 10));
+      assert.strictEqual(huge.setup.length, AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars, '超上限即截断');
+      assert.deepStrictEqual(
+        alive.senses(),
+        { drawer: true, eyes: true, voice: false, micDevice: '麦克风 (USB)', cameraDevice: 'OBSBOT Tiny 2' },
+        '写设定不能冲掉感官与设备选择'
+      );
+
       assert.strictEqual(alive.note().text, '');
       fs.mkdirSync(path.dirname(noteMod.noteFile(root)), { recursive: true });
       fs.writeFileSync(noteMod.noteFile(root), '- [2026-11-10 07:00] 测试一行\n', 'utf8');
@@ -809,6 +1204,59 @@ async function main() {
       assert.strictEqual(alive.setEnabled(false).enabled, false);
       assert.strictEqual(alive.status().running, false, '关掉后应停表');
       alive.stop();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await okAsync('心跳会话被归档：另开一条并写回 settings（别把记录丢进侧栏看不见的地方）', async () => {
+    const { bootAliveRuntime } = require('../src/main/alive-boot');
+    const root = mkTmp('alive-session-archived');
+    const calls = [];
+    const rows = new Map([['s-old', { id: 's-old', title: '生命体征（后台心跳）', archived: true }]]);
+    /** 假的 memory RPC：会话表是唯一真相（`session_get` 必须如实回答 archived） */
+    const gateway = {
+      invokeRpc: async (method, params) => {
+        calls.push({ method, params });
+        if (method === 'memory.session_get') return rows.get(params.sessionId) || null;
+        if (method === 'memory.session_create') {
+          const row = { id: 's-new', title: params.title, archived: false };
+          rows.set(row.id, row);
+          return row;
+        }
+        throw new Error(`unexpected rpc: ${method}`);
+      }
+    };
+    try {
+      // 归档发生在装配之前：settings 里还指着那条已归档的会话
+      createAliveStore(root).writeSettings({ sessionId: 's-old' });
+      const alive = bootAliveRuntime({
+        userData: root,
+        getGateway: () => gateway,
+        getCoreBridge: () => null,
+        getMcpRuntime: () => null,
+        getCompactionAgent: () => null,
+        createToolBridge: () => ({ executeAgentTool: async () => ({ ok: true }) }),
+        log: () => {}
+      });
+      try {
+        assert.strictEqual(alive.status().sessionId, 's-old', '装配后先沿用 settings 里的会话');
+        // 跑一轮（后面的轮次会在 runMainTurn 里失败 —— 这一条只关心"换到哪条会话"）
+        await alive.wakeOnce().catch(() => {});
+        assert.ok(
+          calls.some((c) => c.method === 'memory.session_create'),
+          '绑定的会话已归档时应该另开一条'
+        );
+        assert.strictEqual(alive.status().sessionId, 's-new', '新会话 id 要写回 settings（否则每轮都新建）');
+        assert.strictEqual(
+          createAliveStore(root).readSettings().sessionId,
+          's-new',
+          '落盘必须在 settings.json 里'
+        );
+        assert.strictEqual(rows.get('s-old').archived, true, '归档是用户的决定，不该被偷偷改回去');
+      } finally {
+        alive.stop();
+      }
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -877,12 +1325,35 @@ async function main() {
     rt.start();
     try {
       await rt.tickOnce();
-      rt.recordEvent({ kind: 'SPEAK', ok: true, chars: 12 });
-      rt.noteVoice(clock);
+      rt.recordEvent({ kind: 'SPEAK', ok: true, chars: 12, text: '我在，桌上有杯水凉了' });
+      rt.noteVoice(clock, '我在，桌上有杯水凉了');
       const st1 = rt.status();
       assert.strictEqual(st1.voiceCountToday, 1, '应记一次');
       assert.strictEqual(st1.lastVoiceAt, clock, '应记下时间');
-      assert.ok(st1.voiceMaxPerDay > 0, '上限应来自 agent-limits');
+      assert.strictEqual(
+        st1.voiceMaxPerDay,
+        AGENT_LIMITS_DEFAULTS.aliveVoiceMaxPerDay,
+        '上限必须来自 agent-limits（本机只有这一个来源）'
+      );
+      assert.strictEqual(
+        st1.voiceMinIntervalMs,
+        AGENT_LIMITS_DEFAULTS.aliveVoiceMinIntervalMs,
+        '间隔也要由 status 带出：页面文案读它，别在 Renderer 里再抄一个数'
+      );
+      // 「它说了什么」必须留得下来：人可能不在/没听清，主窗口那条与日志都靠它
+      assert.strictEqual(st1.lastVoiceText, '我在，桌上有杯水凉了', '最近一句原话要进 status');
+      assert.ok(
+        rt.decisions(50).some((e) => e.kind === 'SPEAK' && String(e.text || '').includes('水凉了')),
+        '事件流也要带原话（日志逐条可回看）'
+      );
+      rt.noteVoice(clock, '  多行\n换行   也要压成一行  ');
+      assert.strictEqual(rt.status().lastVoiceText, '多行 换行 也要压成一行', '空白要压平，别把日志撑成多行');
+      rt.noteVoice(clock);
+      assert.strictEqual(
+        rt.status().lastVoiceText,
+        '多行 换行 也要压成一行',
+        '只听不说不该把上一句擦掉'
+      );
       assert.ok(
         rt.decisions(50).some((e) => e.kind === 'SPEAK'),
         '感官事件必须能从 runtime 出口查得到'
@@ -926,6 +1397,18 @@ async function main() {
       assert.strictEqual(ready.ok, true, `齐件时应 ok，实际问题：${ready.problems.map((p) => p.code).join('/')}`);
       assert.strictEqual(ready.hasFfplay, true);
       assert.strictEqual(ready.micDevice, '麦克风 (USB)');
+
+      // 内网 / 本机语音服务（FunASR SenseVoice 等）不要鉴权：有端点就是配好了。
+      // 把 apiKey 当配置的一部分会让"已经能转写"的机器亮红字（issue/2026-11-11）。
+      const keyless = voiceMod.describeVoiceCapability({
+        env: { DIEYUN_MIC_DEVICE: '麦克风 (USB)' },
+        ffmpegPath: ffmpeg,
+        speechConfig: { baseUrl: 'http://127.0.0.1:10095/v1', apiKey: '', model: 'SenseVoiceSmall' },
+        ttsConfig: { baseUrl: 'http://127.0.0.1:5018/v1', apiKey: '', model: 'tts-1' }
+      });
+      assert.strictEqual(keyless.hasSpeechConfig, true, '没有 apiKey 的转写端点也算配置');
+      assert.strictEqual(keyless.hasTtsConfig, true, '没有 apiKey 的合成端点也算配置');
+      assert.strictEqual(keyless.ok, true, `无 key 端点齐件时应 ok，实际：${keyless.problems.map((p) => p.code).join('/')}`);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -1103,6 +1586,95 @@ async function main() {
     }
   });
 
+  await okAsync('它醒来写了什么：正文压成一行进 state（主窗口「它醒来写了…」的唯一来源）', async () => {
+    const root = mkTmp('wake-text');
+    let clock = Date.UTC(2026, 0, 1);
+    const firstReply = '  这轮把 vision 稿的第二节核完。\n\n  顺带记一行：没人读的东西不算交付。  ';
+    let reply = firstReply;
+    const rt = createAliveRuntime({
+      userDataPath: root,
+      limits: Object.assign({}, AGENT_LIMITS_DEFAULTS, { aliveTickIntervalMs: TICK }),
+      now: () => clock,
+      rng: seededRng(45),
+      turnRunner: async () => {
+        rt.applyDecision({ decision: 'ACT', intent: '写完了' });
+        return { content: reply };
+      }
+    });
+    try {
+      await rt.wakeNow();
+      const expected = '这轮把 vision 稿的第二节核完。 顺带记一行：没人读的东西不算交付。';
+      assert.strictEqual(rt.status().lastWakeText, expected, '多行正文要压成一行再进 status');
+      assert.strictEqual(rt.status().lastWakeTextAt, clock, '要记住时间（主窗口那行用它判新旧）');
+
+      // 空正文（DEFER 那种"没写东西"的一轮）不覆盖上一行
+      reply = '';
+      clock += TICK;
+      await rt.wakeNow();
+      assert.strictEqual(rt.status().lastWakeText, expected, '没写东西的一轮不该把上一次擦掉');
+
+      // 上限来自 agent-limits，不是页面上写死的数
+      const max = Number(AGENT_LIMITS_DEFAULTS.aliveWakeTextMaxChars) || 0;
+      assert.ok(max > 0, 'aliveWakeTextMaxChars 要有值');
+      reply = `标题行\n${'x'.repeat(max + 80)}`;
+      clock += TICK;
+      await rt.wakeNow();
+      assert.strictEqual(rt.status().lastWakeText.length, max, `要按 ${max} 字截断`);
+
+      // 只留一行在 state：正文不进事件流（日志不是录音带，也不该成为搬运正文的通道）
+      assert.ok(
+        !rt.decisions(50).some((e) => e.text !== undefined && e.kind === 'WAKE_END'),
+        'WAKE_END 不该带本轮正文'
+      );
+    } finally {
+      rt.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await okAsync('手动唤醒：跳过张力门限、事件如实记 manual、在跑时不排队、额度用完就拒', async () => {
+    const root = mkTmp('wake-now');
+    const limits = Object.assign({}, AGENT_LIMITS_DEFAULTS, { aliveTickIntervalMs: TICK });
+    const clock = Date.UTC(2026, 0, 1);
+    let turns = 0;
+    const rt = createAliveRuntime({
+      userDataPath: root,
+      limits,
+      now: () => clock,
+      rng: seededRng(43),
+      turnRunner: async () => {
+        turns += 1;
+      }
+    });
+    try {
+      // 1) 没越线也能被人叫醒：确实跑了 turnRunner
+      const first = rt.wakeNow();
+      // 2) 一轮在跑时再按一次：直接拒（不排队、不叠加）
+      const second = await rt.wakeNow();
+      assert.strictEqual(second.ok, false);
+      assert.strictEqual(second.reason, 'already-running');
+      assert.ok((await first).ok, '第一次按要真的醒');
+      assert.strictEqual(turns, 1, '只跑了一轮');
+
+      const st = rt.getState();
+      assert.ok(st.tension < st.wakeThreshold, '手动唤醒不该伪造"张力已越线"');
+      const wake = rt.decisions(50).filter((e) => e.kind === 'WAKE').pop();
+      assert.ok(wake, '要记一条 WAKE 事件');
+      assert.strictEqual(wake.trigger, 'manual', '账本里不能把人的手写成它自己醒的');
+      assert.strictEqual(st.wakeCountToday, 1, '唤醒次数照样记账');
+
+      // 3) 今日 token 额度用完：手动也不放行（那是钱）
+      st.tokenToday = Number(rt.cfg.dailyTokenBudget) || 1;
+      const capped = await rt.wakeNow();
+      assert.strictEqual(capped.ok, false);
+      assert.strictEqual(capped.reason, 'token-day-cap');
+      assert.strictEqual(turns, 1, '额度用完不该再跑一轮');
+    } finally {
+      rt.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   ok('设置：主动开口授权与设备名持久化，且不冲掉感官开关', () => {
     const root = mkTmp('settings2');
     try {
@@ -1124,6 +1696,20 @@ async function main() {
         { v: true, m: '麦克风 (USB)', c: 'OBSBOT Tiny 2' }
       );
       assert.deepStrictEqual(again.senses, { drawer: true, eyes: false, voice: false }, '感官开关不该被冲掉');
+
+      // 新选项：醒来时先看一眼（默认关）+ 它自己的脑子（空 = 跟随机型设置）
+      assert.strictEqual(d.wakeLookCamera, false, '默认不自动拍');
+      assert.strictEqual(d.wakeLookScreen, false, '默认不自动截屏');
+      assert.strictEqual(d.modelRoute, '', '默认跟随模型设置');
+      const withNew = store.writeSettings({
+        wakeLookCamera: true,
+        wakeLookScreen: true,
+        modelRoute: 'custom:model-42'
+      });
+      assert.strictEqual(withNew.wakeLookCamera, true);
+      assert.strictEqual(withNew.wakeLookScreen, true);
+      assert.strictEqual(withNew.modelRoute, 'custom:model-42');
+      assert.strictEqual(store.readSettings().voiceSpontaneous, true, '写新选项不该冲掉旧值');
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -1293,6 +1879,97 @@ async function main() {
       assert.ok(h.samples.length >= 2, `每跳一条采样，实际 ${h.samples.length}`);
       assert.strictEqual(h.samples[h.samples.length - 1].phase, rt.status().phase, '采样里的相位要与状态一致');
       assert.ok(typeof h.samples[0].ts === 'number' && h.windowMs > 0);
+    } finally {
+      rt.stop();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // ───────────────────── H. 设定（拟态 → 设定：一段自由文本）─────────────────────
+  ok('设定：写进 settings.json 读得回来，超出字数上限就截断（读写两侧都夹）', () => {
+    const root = mkTmp('setup');
+    try {
+      const store = createAliveStore(root);
+      assert.strictEqual(store.readSettings().setup, '', '设定默认空（不内置一段性格：写什么就是什么）');
+      const saved = store.writeSettings({
+        setup: '  人生目标：把屋里没人管的角落摸清。\r\n遇到人就打个招呼。  '
+      });
+      assert.strictEqual(saved.setup, '人生目标：把屋里没人管的角落摸清。\n遇到人就打个招呼。', '换行统一、首尾空白去掉');
+      assert.strictEqual(store.readSettings().setup, saved.setup);
+      // 每轮都要付的 prompt 成本：一段几万字的设定不能反复进状态块
+      const huge = '字'.repeat(AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars + 500);
+      const capped = store.writeSettings({ setup: huge });
+      assert.strictEqual(capped.setup.length, AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars, '写入侧要截断');
+      // 手改文件（绕过写入路径）也不能把超长文本带进 prompt
+      const raw = JSON.parse(fs.readFileSync(store.settingsFile, 'utf8'));
+      raw.setup = '设'.repeat(AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars + 100);
+      fs.writeFileSync(store.settingsFile, JSON.stringify(raw), 'utf8');
+      assert.strictEqual(
+        store.readSettings().setup.length,
+        AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars,
+        '读取侧也要夹（settings.json 是人可以手改的文件）'
+      );
+      assert.strictEqual(store.readSettings().enabled, false, '写设定不能把别的开关写坏');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  ok('设定：按原文进状态块，排在事实之前（不拆字段、不加工）', () => {
+    const cfg = testCfg();
+    const t0 = Date.UTC(2026, 0, 1);
+    const state = vitals.createInitialState(cfg, t0);
+    tensionEngine.upsertLoops(state, [{ text: '把那份没写完的东西收尾' }], { cfg, nowMs: t0 });
+    const block = decide.renderStateBlock(state, cfg, {
+      nowMs: t0,
+      setup: '人生目标：把屋里没人管的角落摸清。\n遇到人就打个招呼，偶尔聊两句。'
+    });
+    assert.ok(block.startsWith(ALIVE_STATE_PREFIX), '仍以生命体征前缀开头（合成消息判定不能坏）');
+    assert.ok(isSyntheticLoopUserContent(block), '带设定后仍必须被认成合成消息');
+    assert.ok(block.includes('用户给你写的设定'), '设定要单独成节');
+    assert.ok(block.includes('遇到人就打个招呼'), '原文照贴（按行缩进）');
+    assert.ok(block.indexOf('人生目标：') < block.indexOf('未闭合事项'), '设定排在事实之前');
+    assert.ok(block.includes('DEFER 要说得出口'), '有设定时要说清"设定 → 这一小步"，否则它照样天天 DEFER');
+    assert.ok(!block.includes('用户还没给你写设定'), '有设定时不能再提示"还没写"');
+  });
+
+  ok('设定：没写时不替它编一份，只把「你现在缺的正是方向」说出来', () => {
+    const cfg = testCfg();
+    const state = vitals.createInitialState(cfg, 0);
+    const block = decide.renderStateBlock(state, cfg, { nowMs: 0 });
+    assert.ok(!block.includes('用户给你写的设定'), '没写设定就不该有这一节');
+    assert.ok(block.includes('用户还没给你写设定'), '要告诉它"现在缺的正是方向"（它老 DEFER 的原因）');
+  });
+
+  await okAsync('设定：唤醒轮的状态块里真的带上了，且改完下一轮就生效', async () => {
+    const root = mkTmp('setupwake');
+    const limits = Object.assign({}, AGENT_LIMITS_DEFAULTS, { aliveTickIntervalMs: TICK });
+    let clock = Date.UTC(2026, 0, 1, 9, 0, 0);
+    const blocks = [];
+    const rt = createAliveRuntime({
+      userDataPath: root,
+      limits,
+      now: () => clock,
+      rng: seededRng(61),
+      turnRunner: async ({ stateBlock }) => {
+        blocks.push(stateBlock);
+        rt.applyDecision({ decision: 'ACT', intent: '看一眼' });
+      }
+    });
+    try {
+      rt.store.writeSettings({ setup: '人生目标：把角落摸清。' });
+      await rt.wakeNow();
+      assert.strictEqual(blocks.length, 1);
+      assert.ok(blocks[0].includes('把角落摸清'), '设定要进唤醒轮状态块');
+      rt.store.writeSettings({ setup: '遇到人就打个招呼。' });
+      clock += HOUR;
+      await rt.wakeNow();
+      assert.ok(blocks[1].includes('遇到人就打个招呼'), '改完下一轮就生效（每次唤醒现读 settings.json）');
+      assert.ok(!blocks[1].includes('把角落摸清'), '旧设定不该再出现');
+      rt.store.writeSettings({ setup: '' });
+      clock += HOUR;
+      await rt.wakeNow();
+      assert.ok(blocks[2].includes('用户还没给你写设定'), '清空后退回"还没写"的说法');
     } finally {
       rt.stop();
       fs.rmSync(root, { recursive: true, force: true });

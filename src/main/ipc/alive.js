@@ -55,29 +55,34 @@ function registerAliveIpc(ctx) {
    *
    * 为什么不复用 `alive:status`：status 会读模型设置与权限文件（为了感官自检），
    * 那是"打开设置页时才需要"的重量；徽标是常驻 30s 轮询，必须便宜。
+   *
+   * 2026-11-13：多了 `lastWakeText`/`lastWakeTextAt`（没出声的那些唤醒轮写了什么），
+   * 少了 `recent`/`recentAt` —— 那两个只为 rail 图标的律动算的，动画去掉后没有消费者了。
    */
   ipcMain.handle('alive:badge', () =>
     withRuntime((alive) => {
       const st = alive.runtime.status();
-      if (!st || st.exists === false) return { ok: true, enabled: false, recent: false };
+      if (!st || st.exists === false) return { ok: true, enabled: false };
       const events = alive.runtime.decisions(5);
       const last = events.length ? events[events.length - 1] : null;
       const lastTs = Number((last && last.ts) || 0);
-      const notable = new Set(['WAKE', 'DECISION', 'SPEAK', 'EYE']);
-      const recentAt = events
-        .filter((e) => e && notable.has(String(e.kind)))
-        .map((e) => Number(e.ts) || 0)
-        .sort((a, b) => b - a)[0] || 0;
       return {
         ok: true,
         enabled: st.enabled === true,
         running: st.running === true,
         phase: st.phase || '',
         wakeCountToday: Number(st.wakeCountToday) || 0,
-        recent: !!recentAt && Date.now() - recentAt <= 60 * 60 * 1000,
-        recentAt,
         lastKind: last ? String(last.kind || '') : '',
-        lastTs
+        lastTs,
+        /** 它上一次**说了什么**（原话，来自 state.json）：主窗口那条「它说…」就用这两项 */
+        lastVoiceText: String(st.lastVoiceText || ''),
+        lastVoiceAt: Number(st.lastVoiceAt) || 0,
+        /**
+         * 它**这一轮醒来写下了什么**（正文压成一行）：没出声的那些唤醒轮，人只能从这一项看见。
+         * 主窗口那行在这一项比 `lastVoiceAt` 新时显示「它醒来写了…」（同一处渲染）。
+         */
+        lastWakeText: String(st.lastWakeText || ''),
+        lastWakeTextAt: Number(st.lastWakeTextAt) || 0
       };
     })
   );
@@ -86,6 +91,18 @@ function registerAliveIpc(ctx) {
     withRuntime((alive) => {
       const res = alive.setEnabled(payload && payload.enabled === true);
       return { ok: true, ...res, status: alive.status() };
+    })
+  );
+
+  /** 现在叫醒它一次（演示 / 排障）：跳过张力门限跑一轮，事件记 `trigger=manual` */
+  ipcMain.handle('alive:wake-once', () =>
+    withRuntime((alive) => {
+      if (typeof alive.wakeOnce !== 'function') return { ok: false, error: '这个版本没有手动唤醒入口' };
+      // 一轮十几秒到几十秒：把 promise 原样交出去，Renderer 自己决定怎么等
+      return Promise.resolve(alive.wakeOnce()).then(
+        (res) => ({ ok: !!(res && res.ok), ...(res || {}), status: alive.status() }),
+        (err) => ({ ok: false, error: (err && err.message) || String(err) })
+      );
     })
   );
 

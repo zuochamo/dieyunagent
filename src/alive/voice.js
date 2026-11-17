@@ -169,8 +169,12 @@ function describeVoiceCapability(opts = {}) {
   const ffplayPath = resolveFfplayPath(ffmpegPath);
   const speech = opts.speechConfig || {};
   const tts = opts.ttsConfig || {};
-  const hasSpeechConfig = !!(speech.baseUrl && speech.apiKey);
-  const hasTtsConfig = !!(tts.baseUrl && tts.apiKey && tts.model);
+  // 「有配置」= 有人指定了端点（转写还要模型名）。**apiKey 不是配置的一部分**：
+  // 内网 / 本机语音服务（FunASR SenseVoice、LM Studio 之类）普遍不要鉴权，
+  // 强制要 key 会把「已经配好的嘴与耳」判成坏的（issue/2026-11-11 红字告警），
+  // 而真正发请求的那一层（llm-request.buildLlmHeaders）本来就允许空 key。
+  const hasSpeechConfig = !!speech.baseUrl;
+  const hasTtsConfig = !!(tts.baseUrl && tts.model);
   const micDevice = resolveMicDevice(env, opts.micDevice);
   /** @type {Array<{code:string,text:string}>} */
   const problems = [];
@@ -301,7 +305,7 @@ async function listen(opts) {
     };
   }
   const cfg = opts.speechConfig || {};
-  if (!cfg.baseUrl || !cfg.apiKey) {
+  if (!cfg.baseUrl) {
     return {
       ok: false,
       errorCode: 'NO_SPEECH_CONFIG',
@@ -377,7 +381,7 @@ async function speak(opts) {
   const text = String(opts.text || '').trim().slice(0, SPEAK_MAX_CHARS);
   if (!text) return { ok: false, errorCode: 'EMPTY_TEXT', error: '要说的内容是空的' };
   const cfg = opts.ttsConfig || {};
-  if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) {
+  if (!cfg.baseUrl || !cfg.model) {
     return {
       ok: false,
       errorCode: 'NO_TTS_CONFIG',
@@ -420,7 +424,8 @@ async function speak(opts) {
     if (played.code !== 0 && played.timedOut) {
       return { ok: false, errorCode: 'PLAY_TIMEOUT', error: '播放超时（设备可能被占用）' };
     }
-    return { ok: true, chars: text.length };
+    // `text` 原样带回：调用方要把它记成"它说了什么"（人可能不在/没听清，得能回看）
+    return { ok: true, chars: text.length, text };
   } catch (err) {
     return { ok: false, errorCode: 'SPEAK_FAILED', error: `说不出来：${(err && err.message) || err}` };
   } finally {

@@ -65,6 +65,10 @@ function resolveAliveConfig(limits) {
     fatigueEps: Math.max(0, num(pick('aliveFatigueEps'), D.aliveFatigueEps)),
     voiceMaxPerDay: Math.max(0, num(pick('aliveVoiceMaxPerDay'), D.aliveVoiceMaxPerDay)),
     voiceMinIntervalMs: Math.max(0, num(pick('aliveVoiceMinIntervalMs'), D.aliveVoiceMinIntervalMs)),
+    /** 「它说了什么」留多少字（最近一条进 state、每条进事件流；展示用，不进对话账本） */
+    voiceTextMaxChars: Math.max(0, num(pick('aliveVoiceTextMaxChars'), D.aliveVoiceTextMaxChars)),
+    /** 「它这一轮醒来写下了什么」留多少字（最近一条进 state；展示用，不进对话账本） */
+    wakeTextMaxChars: Math.max(0, num(pick('aliveWakeTextMaxChars'), D.aliveWakeTextMaxChars)),
     /** 每日 token 额度（成本护栏；`<=0` = 不限） */
     dailyTokenBudget: Math.max(0, num(pick('aliveDailyTokenBudget'), D.aliveDailyTokenBudget)),
     /** 体征历史的物理行数上限与默认窗口（`history.jsonl`） */
@@ -84,6 +88,22 @@ function resolveAliveConfig(limits) {
     phaseFatigueHigh: num(pick('alivePhaseFatigueHigh'), D.alivePhaseFatigueHigh),
     phaseFatigueLow: num(pick('alivePhaseFatigueLow'), D.alivePhaseFatigueLow),
     loadTokensHigh: Math.max(1, num(pick('alivePhaseLoadTokensHigh'), D.alivePhaseLoadTokensHigh)),
+    /** 「最近工作」事实块的字数上限（`recap.js` 装配、`decide.js` 截断用同一组数） */
+    recapMaxChars: Math.max(0, num(pick('aliveRecapMaxChars'), D.aliveRecapMaxChars)),
+    recapPlans: Math.max(0, num(pick('aliveRecapPlans'), D.aliveRecapPlans)),
+    /** 事实块里带它自己抽屉的最后几行（它自己的记忆回到眼前） */
+    recapNoteLines: Math.max(0, num(pick('aliveRecapNoteLines'), D.aliveRecapNoteLines)),
+    /** 拿当前处境召回长期记忆：条数 / 查询串上限 / 超时（超时就当没召回到） */
+    recallBySituation: Math.max(0, num(pick('aliveRecallBySituation'), D.aliveRecallBySituation)),
+    recallQueryMaxChars: Math.max(0, num(pick('aliveRecallQueryMaxChars'), D.aliveRecallQueryMaxChars)),
+    recallTimeoutMs: Math.max(0, num(pick('aliveRecallTimeoutMs'), D.aliveRecallTimeoutMs)),
+    /**
+     * 唤醒轮权力档的默认值（`read`）与放开后的每轮次数上限。
+     * 实际档位在 `alive/settings.json#wakePower`；这里只提供默认值与护栏数字。
+     */
+    wakePowerDefault: String(pick('aliveWakePowerDefault') || D.aliveWakePowerDefault || 'read'),
+    wakeWriteMaxPerWake: Math.max(0, num(pick('aliveWakeWriteMaxPerWake'), D.aliveWakeWriteMaxPerWake)),
+    wakeExecMaxPerWake: Math.max(0, num(pick('aliveWakeExecMaxPerWake'), D.aliveWakeExecMaxPerWake)),
     readOnlyWake: pick('aliveReadOnlyWake') !== false
   };
   cfg.wakeThreshold = clamp(cfg.wakeThreshold, cfg.wakeThresholdMin, cfg.wakeThresholdMax);
@@ -100,6 +120,19 @@ function sampleOf(state, nowMs) {
     tokenToday: Number(state.tokenToday || 0),
     wakeCountToday: Number(state.wakeCountToday || 0)
   };
+}
+
+/**
+ * 压成一行并截断：**「说过什么」与「写下什么」共用这一处口径**。
+ *
+ * 正文/口述都可能是多段带缩进的文字，直接塞进主窗口那一行会把整页撑成日志；
+ * 展示只需要一句话，原样留全文是它自己会话库的事。
+ */
+function oneLine(text, maxChars) {
+  return String(text == null ? '' : text)
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, Math.max(0, Number(maxChars) || 0));
 }
 
 /** usage → token 数（形状归一还在 `llm-usage-stats`，这里只兜住缺字段） */
@@ -136,6 +169,17 @@ function createAliveRuntime(opts) {
   let wakeTokens = 0;
   /** 这一轮唤醒模型有没有通过 `alive_decide` 表态（false = 记一条 `WAKE_NO_DECISION`） */
   let decisionThisWake = false;
+  /**
+   * 这一轮有没有**对得上事实**的动作：成功的 `ACTION`，或**它自己调的**睁眼。
+   * 自动睁眼（`EYE` 带 `auto: true`）不算 —— 那是这一轮的输入，不是它做了什么。
+   *
+   * 对账在**轮末**（`runWakeTurn` 的 finally）做：这一轮用 `done` 关掉了条目，
+   * 而整轮下来没有上面这类事实 → 记一条 `DONE_NO_EVIDENCE`。只留痕、不驳回
+   * （可能这条昨天就验证过了，代码没有资格替它判断哪条算数）。
+   */
+  let evidenceThisWake = false;
+  /** 这一轮用 `done` 关掉了几条（轮末对账用；每轮开头清零） */
+  let doneThisWake = 0;
   /** 上一次记过「被上限拦住」的键（`dayKey:reason`）：同一上限每天只记一条事件 */
   let lastCapKey = '';
   /**
@@ -152,6 +196,8 @@ function createAliveRuntime(opts) {
   /** @type {Array<{ ts: number, tokens: number }>} */
   let samples = [];
   const turnRunner = typeof d.turnRunner === 'function' ? d.turnRunner : null;
+  /** 宿主提供的「这一轮的外部事实」装配（最近工作 + 醒来时先看一眼）；缺省 = 只有内部体征 */
+  const collectFacts = typeof d.collectFacts === 'function' ? d.collectFacts : null;
   /** 感官开关的取值入口（由宿主提供；缺省 = 全关，宁可不给能力） */
   const getSenses =
     typeof d.getSenses === 'function'
@@ -215,15 +261,73 @@ function createAliveRuntime(opts) {
     wakeTokens = 0;
     /** 这一轮有没有通过 `alive_decide` 表过态（没表态 = 观测缺口，记一条事件） */
     decisionThisWake = false;
+    /** 这一轮有没有**对得上事实**的动作（成功的 ACTION / 它自己调的睁眼；自动睁眼不算）：说"做完了"要靠它 */
+    evidenceThisWake = false;
+    /** 这一轮用 `done` 关掉了几条（**按整轮**对账：见 finally 里的 DONE_NO_EVIDENCE；`alive_decide` 只在唤醒轮注入，轮外没人能改它） */
+    doneThisWake = 0;
     let senses = { drawer: false, eyes: false, voice: false };
     try {
       senses = getSenses() || senses;
     } catch {
       // 读不到能力就当没有
     }
-    const stateBlock = decide.renderStateBlock(state, cfg, { nowMs, senses });
+    /**
+     * 「设定」（设置 → 拟态 → 设定）：用户随手写的一段话，**每次唤醒现读** ——
+     * 用户在设置页改完，下一轮就按新的走（与感官、模型路由同一套"现读"语义）。
+     * 字数上限在 `store.readSettings`（唯一读盘口）已经夹过，这里只取原文。
+     */
+    let setup = '';
     try {
-      await turnRunner({ stateBlock, state, cfg, senses, signal: wakeAbort.signal });
+      setup = String((store.readSettings() || {}).setup || '');
+    } catch {
+      // 读不到就当没写：设定缺了不挡唤醒
+    }
+    // `load`（最近 5 分钟这台机器上有没有对话活动）也递进去：它是「有没有人在场」的**结构事实**，
+    // 决定提示词里那句「没人在等你」成不成立（不再由代码替它假设没人）。
+    //
+    // `collectFacts`（宿主可选）：拿到「最近这台机器上在做什么」与「醒来时先看一眼」的画面。
+    // 画面必须在跑这一轮**之前**取（它是输入，不是它能选择去调的工具），所以装配点在宿主，
+    // 渲染仍只在 `decide.renderStateBlock` 一处。取事实失败一律按「什么也没有」继续，不挡唤醒。
+    let facts = null;
+    if (typeof collectFacts === 'function') {
+      try {
+        facts = await collectFacts({ nowMs, senses, state, cfg });
+      } catch (err) {
+        log(`[alive] 取事实失败：${(err && err.message) || err}`);
+        facts = null;
+      }
+    }
+    const stateBlock = decide.renderStateBlock(state, cfg, {
+      nowMs,
+      senses,
+      /** 用户写的那段设定：排在一切事实之前（先知道"我该在意什么"） */
+      setup,
+      load: computeLoad(nowMs),
+      recap: facts && facts.recap,
+      /** 它自己抽屉的最后几行：先想起上次到哪儿了，再看外面（目标的唯一原料） */
+      note: facts && Array.isArray(facts.note) ? facts.note : null,
+      /** 拿当前处境召回的长期记忆：不是默认注入那几条"偏好"，而是跟眼下这些事相关的 */
+      memory: facts && Array.isArray(facts.memory) ? facts.memory : null,
+      look: facts && facts.look,
+      /** 这一轮的权力档与允许动的根（`collectFacts` 从 `alive/settings.json` 现读） */
+      power: facts && facts.power,
+      wakeRoot: facts && facts.wakeRoot
+    });
+    /**
+     * 这一轮醒来的**正文**：`turnRunner` 返回的 `content`（`internal: true` 的那一轮不会自己推给界面，
+     * 正文只落进它自己的会话库）。这里只留压成一行的一份给主窗口看，见 `state.lastWakeText`。
+     */
+    let wakeText = '';
+    try {
+      const turn = await turnRunner({
+        stateBlock,
+        state,
+        cfg,
+        senses,
+        imageParts: (facts && Array.isArray(facts.imageParts) && facts.imageParts) || [],
+        signal: wakeAbort.signal
+      });
+      wakeText = String((turn && turn.content) || '');
     } catch (err) {
       pushEvent({
         kind: 'WAKE_ERROR',
@@ -238,6 +342,13 @@ function createAliveRuntime(opts) {
       const durationMs = Math.max(0, now() - nowMs);
       state.lastWakeTokens = wakeTokens;
       state.lastWakeDurationMs = durationMs;
+      // 这一轮醒来**写下了什么**（结论一行）：人回到主窗口才看得见它在你不看时做了什么。
+      // 与 `noteVoice` 同一套语义 —— 只展示，不进会话账本、不进模型上下文（那才是接管对话线）。
+      const wrote = oneLine(wakeText, cfg.wakeTextMaxChars);
+      if (wrote) {
+        state.lastWakeText = wrote;
+        state.lastWakeTextAt = now();
+      }
       // 成本护栏的记账与 WAKE_END.tokens 是**同一个数**（不另算一遍）；跨天由 tick 的 rollDay 归零
       state.tokenToday = Number(state.tokenToday || 0) + wakeTokens;
       pushEvent({
@@ -251,6 +362,17 @@ function createAliveRuntime(opts) {
       if (!decisionThisWake) {
         // 只观测：模型没表态时这轮就白醒了（张力继续累积），但页面/日志要能看出这件事
         pushEvent({ kind: 'WAKE_NO_DECISION', tokens: wakeTokens, durationMs });
+      }
+      /**
+       * 说「做完了」却对不上事实：**按整轮判**，不按「决定那一刻」判。
+       *
+       * 为什么改（2026-11-14 实测）：它常在轮初就先把条目 `done` 交掉、再去跑命令复核
+       * （06:38 那轮：`done` 在 06:38:55，4 个成功动作在 06:38:59–06:39:21）。按时刻判，
+       * 这种「先划掉、再验证」的正常顺序会被记成缺依据 —— 那是假警报，假警报一多这条对账就没人看了。
+       * 只留痕、不驳回：这条可能昨天就验证过了，代码没有资格替它判断哪条算数。
+       */
+      if (doneThisWake > 0 && !evidenceThisWake) {
+        pushEvent({ kind: 'DONE_NO_EVIDENCE', done: doneThisWake });
       }
       store.write(state);
     }
@@ -333,6 +455,39 @@ function createAliveRuntime(opts) {
     }
   }
 
+  /**
+   * 人按了一下「现在叫醒它一次」：**跳过张力门限**直接跑一轮（演示 / 排障入口）。
+   *
+   * 为什么留这条路：它只有「张力越线」一个门，而越线是几小时一次 ——
+   * 你要验证"嘴和眼配好了没有""它到底会不会开口"，没有这道手动门就只能等。
+   * 三条硬约定，缺一条就别加这个入口：
+   *   1. 事件**如实**记 `trigger: 'manual'`：账本里不能把人的手写成"它自己醒的"；
+   *   2. 不伪造体征：`markWoken` 只记这次唤醒（次数 / 时间），张力原样保留，不假装越线；
+   *   3. 每日 token 额度仍然拦（那是钱）；已经在跑就直接跳过，不排队。
+   */
+  async function wakeNow() {
+    const st = ensureState();
+    if (wakeInFlight) return { ok: false, reason: 'already-running' };
+    const budget = Number(cfg.dailyTokenBudget) || 0;
+    if (budget > 0 && Number(st.tokenToday || 0) >= budget) {
+      pushEvent({ kind: 'WAKE_SKIPPED', reason: 'token-day-cap' });
+      return { ok: false, reason: 'token-day-cap' };
+    }
+    const nowMs = now();
+    waker.markWoken(st, nowMs);
+    pushEvent({
+      kind: 'WAKE',
+      trigger: 'manual',
+      tension: Number(Number(st.tension).toFixed(1)),
+      threshold: Number(Number(st.wakeThreshold).toFixed(1)),
+      phase: st.phase,
+      load: Number(computeLoad(nowMs).toFixed(2))
+    });
+    store.write(st);
+    await runWakeTurn();
+    return { ok: true };
+  }
+
   function start() {
     if (timer) return false;
     ensureState();
@@ -400,15 +555,30 @@ function createAliveRuntime(opts) {
    */
   function recordEvent(evt) {
     if (!evt || !evt.kind) return false;
+    // 事实依据只认**它自己做的**两件事：成功动手（ACTION）与它自己调用的睁眼（EYE）。
+    // **自动睁眼不算**（`auto: true`，来自 `alive-boot#collectFacts` 的「醒来时先看一眼」）：
+    // 那是这一轮的**输入**，不是它做了什么 —— 把它算成依据等于每轮免检。
+    // 2026-11-13 实测的后果：眼睛一开，`DONE_NO_EVIDENCE` 就再也记不出来过，这条对账是关着的。
+    if (evt.ok === true && (evt.kind === 'ACTION' || (evt.kind === 'EYE' && evt.auto !== true))) {
+      evidenceThisWake = true;
+    }
     pushEvent(evt);
     return true;
   }
 
-  /** 主动出声/收音的记账（**成功之后**才调；跨天重置由 tick 的 `rollDay` 负责） */
-  function noteVoice(atMs) {
+  /**
+   * 主动出声/收音的记账（**成功之后**才调；跨天重置由 tick 的 `rollDay` 负责）。
+   *
+   * `text`（只有出声才有）= 它**实际说了什么**，原样留一份进 `state.lastVoiceText`：
+   * 人可能不在、可能没听清，可回看的文字是这条能力的下限。它只是**展示**用的事实，
+   * 不进你的会话账本、不进模型上下文（那是"接管对话线"，设计上不做）。
+   */
+  function noteVoice(atMs, text) {
     if (!state) return false;
     state.voiceCountToday = Number(state.voiceCountToday || 0) + 1;
     state.lastVoiceAt = Number.isFinite(Number(atMs)) ? Number(atMs) : now();
+    const said = oneLine(text, cfg.voiceTextMaxChars);
+    if (said) state.lastVoiceText = said;
     try {
       store.write(state);
     } catch {
@@ -434,8 +604,12 @@ function createAliveRuntime(opts) {
         kind: 'DECISION',
         decision: res.decision,
         loopId: args && args.loopId ? String(args.loopId) : null,
-        closed: !!res.closedLoop
+        closed: !!res.closedLoop,
+        /** 「做完收口」了几条（ACT + done）：与 REFUSE 的 closed 分开记，别混成"拒绝" */
+        done: Array.isArray(res.doneIds) && res.doneIds.length ? res.doneIds.length : 0
       });
+      // 说做完却没有事实依据：**只在轮末判**（见 `runWakeTurn` 的 finally），这里只记数
+      if (Array.isArray(res.doneIds) && res.doneIds.length) doneThisWake += res.doneIds.length;
       store.write(state);
     }
     return res;
@@ -481,10 +655,20 @@ function createAliveRuntime(opts) {
       /** 主动出声/收音：当日次数、上次时间与上限（页面对账用） */
       voiceCountToday: Number(st.voiceCountToday || 0),
       lastVoiceAt: Number(st.lastVoiceAt || 0),
+      /** 它**说过什么**（最近一条，展示用）：没在的人/没听清的人也能回看。不需要就是空串 */
+      lastVoiceText: String(st.lastVoiceText || ''),
       voiceMaxPerDay: cfg.voiceMaxPerDay,
+      /** 两次主动开口的最小间隔（页面文案也读它：别在 Renderer 再抄一个"30 分钟"） */
+      voiceMinIntervalMs: cfg.voiceMinIntervalMs,
       /** 上一次醒来的成本（token / 耗时）：成本可见，别让"心跳贵不贵"只能猜 */
       lastWakeTokens: Number(st.lastWakeTokens || 0),
       lastWakeDurationMs: Number(st.lastWakeDurationMs || 0),
+      /**
+       * 它**这一轮醒来写下了什么**（正文压成一行）与时间：唤醒轮不推给界面、也不进对话账本，
+       * 没有这一项的话，它一晚上写的几万字只有它自己看得到（主窗口那行据此显示「它醒来写了」）。
+       */
+      lastWakeText: String(st.lastWakeText || ''),
+      lastWakeTextAt: Number(st.lastWakeTextAt || 0),
       loops: (st.loops || []).length,
       wakeCountToday: st.wakeCountToday,
       wakeMaxPerDay: cfg.wakeMaxPerDay,
@@ -546,6 +730,7 @@ function createAliveRuntime(opts) {
     stop,
     reset,
     tickOnce,
+    wakeNow,
     applyDecision,
     recordEvent,
     noteVoice,

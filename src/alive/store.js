@@ -15,12 +15,41 @@
 
 const fs = require('fs');
 const path = require('path');
+const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 
 const ALIVE_DIR_NAME = 'alive';
 const STATE_FILE_NAME = 'state.json';
 const EVENTS_FILE_NAME = 'events.jsonl';
 const HISTORY_FILE_NAME = 'history.jsonl';
 const SETTINGS_FILE_NAME = 'settings.json';
+
+/**
+ * 唤醒轮的三档权力（**唯一枚举**）：`read` 只读 / `write` 可改文件 / `exec` 可跑命令。
+ *
+ * 为什么不是布尔 `readOnly`：放开写文件与放开跑命令是两种风险（一次改坏 vs 一条命令改坏一切），
+ * 用户需要能只放开前者。识别到的非法值一律退回 `read`（错在保守一侧）。
+ */
+const WAKE_POWERS = Object.freeze(['read', 'write', 'exec']);
+function normalizeWakePower(value) {
+  const s = String(value == null ? '' : value)
+    .trim()
+    .toLowerCase();
+  return WAKE_POWERS.includes(s) ? s : WAKE_POWERS[0];
+}
+
+/**
+ * 「设定」那一段文字的长度上限（`aliveSetupMaxChars`）。
+ *
+ * 为什么夹在**存储**这一层：它是这段文字进出磁盘的唯一门 —— 进（写入）夹一次，存下来的一定不会超；
+ * 出（读取）再夹一次，因为 `settings.json` 是人可以手改的文件，手改的东西不能直接进 prompt。
+ * 数字只在 `agent-limits`，这里不留第二份。
+ */
+function clipSetupText(value, max) {
+  const text = String(value == null ? '' : value).replace(/\r\n/gu, '\n').trim();
+  const cap = Math.max(0, Number(max) || 0);
+  if (!cap || text.length <= cap) return text;
+  return text.slice(0, cap).trimEnd();
+}
 /**
  * events.jsonl 的**物理**上限：超过就裁剪到一半。
  * 逻辑上限（`state.decisions` / `state.intents` 留多少条）在 `agent-limits`
@@ -111,7 +140,34 @@ function createAliveStore(userDataPath) {
         voiceSpontaneous: !!(raw && raw.voiceSpontaneous === true),
         /** 设备选择（空串 = 让探测器挑默认设备；环境变量仍作高级覆盖） */
         micDevice: raw && raw.micDevice ? String(raw.micDevice) : '',
-        cameraDevice: raw && raw.cameraDevice ? String(raw.cameraDevice) : ''
+        cameraDevice: raw && raw.cameraDevice ? String(raw.cameraDevice) : '',
+        /**
+         * 「醒来时先看一眼」（默认关）：摄像头一帧 / 屏幕一帧，作为**这一轮的输入**
+         * 交给模型（见 `src/alive/eyes.js`）。画面不落盘，且各自还要过权限那道锁。
+         */
+        wakeLookCamera: !!(raw && raw.wakeLookCamera === true),
+        wakeLookScreen: !!(raw && raw.wakeLookScreen === true),
+        /**
+         * 唤醒轮用哪个模型（`custom:<id>` / `builtin:<supplier>:<model>`；空 = 跟随机型设置里的默认文本模型）。
+         *
+         * 为什么不并进 model-settings：这是**这条命自己的脑子**（后台心跳跑在它自己身上），
+         * 和用户在对话里选哪个模型是两件事；放在这里也让"改完立刻生效"不需要动全局设置。
+         */
+        modelRoute: raw && raw.modelRoute ? String(raw.modelRoute).trim().slice(0, 160) : '',
+        /**
+         * 唤醒轮能做什么：`read`（默认，只读）/ `write`（可改文件）/ `exec`（可跑命令）。
+         * 放开后仍受三道闸门：只能动 `wakeWorkspace` 一个根、每轮次数上限、绝不等待审批。
+         */
+        wakePower: normalizeWakePower(raw && raw.wakePower),
+        /** 允许它动的根目录（空 = 它自己的抽屉 `alive/workspace`） */
+        wakeWorkspace: raw && raw.wakeWorkspace ? String(raw.wakeWorkspace).trim().slice(0, 500) : '',
+        /**
+         * 「设定」：用户随手写的那段话（目标、想做的事、遇到人要不要开口……整合在一块写）。
+         *
+         * 它**只**进后台心跳轮的状态块（`decide.renderStateBlock`），不进对话系统提示 ——
+         * 对话那边的规则是另一份单一来源，不能被一个设置页的文本框改写。
+         */
+        setup: clipSetupText(raw && raw.setup, AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars)
       };
     } catch {
       return d;
@@ -131,7 +187,13 @@ function createAliveStore(userDataPath) {
       },
       voiceSpontaneous: next.voiceSpontaneous === true,
       micDevice: next.micDevice ? String(next.micDevice) : '',
-      cameraDevice: next.cameraDevice ? String(next.cameraDevice) : ''
+      cameraDevice: next.cameraDevice ? String(next.cameraDevice) : '',
+      wakeLookCamera: next.wakeLookCamera === true,
+      wakeLookScreen: next.wakeLookScreen === true,
+      modelRoute: next.modelRoute ? String(next.modelRoute).trim().slice(0, 160) : '',
+      wakePower: normalizeWakePower(next.wakePower),
+      wakeWorkspace: next.wakeWorkspace ? String(next.wakeWorkspace).trim().slice(0, 500) : '',
+      setup: clipSetupText(next.setup, AGENT_LIMITS_DEFAULTS.aliveSetupMaxChars)
     };
     const tmp = `${settingsFile}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
@@ -289,8 +351,38 @@ function aliveSettingsDefaults() {
     voiceSpontaneous: false,
     /** 麦克风/摄像头设备名（空 = 探测后挑默认；`DIEYUN_MIC_DEVICE` / `DIEYUN_DESKTOP_CAMERA` 仍作高级覆盖） */
     micDevice: '',
-    cameraDevice: ''
+    cameraDevice: '',
+    /**
+     * 「醒来时先看一眼」：默认**关**。
+     *
+     * 为什么默认关：摄像头帧与屏幕截图都会被送进视觉模型（可能是外部 API），
+     * 自动抓 = 把你的房间/屏幕变成周期性上传。用户显式打开才发生，且各自还要过
+     * `permissions.desktopCamera` / `permissions.osControl` 那道锁（见 `src/alive/eyes.js`）。
+     */
+    wakeLookCamera: false,
+    wakeLookScreen: false,
+    /** 唤醒轮用的模型路由（空 = 跟随机型设置里的默认文本模型） */
+    modelRoute: '',
+    /** 唤醒轮能做什么（默认只读）；执行权是显式开关，见 `agent-limits.aliveWakePowerDefault` */
+    wakePower: 'read',
+    /** 允许它动的根目录（空 = `<userData>/alive/workspace`） */
+    wakeWorkspace: '',
+    /**
+     * 「设定」：一段自由文本（默认空）。
+     *
+     * 为什么默认空而不是内置一段：写什么就是什么（"性格是轨迹，不是配置"）。
+     * 值得一句提醒的是：**没有设定时它只能就着眼前的事判断，很容易一直 DEFER**
+     * （每轮醒来都是"空张力 + 空清单"）。
+     */
+    setup: ''
   };
 }
 
-module.exports = { createAliveStore, aliveRootDir, aliveSettingsDefaults, ALIVE_DIR_NAME };
+module.exports = {
+  createAliveStore,
+  aliveRootDir,
+  aliveSettingsDefaults,
+  ALIVE_DIR_NAME,
+  WAKE_POWERS,
+  normalizeWakePower
+};
