@@ -18,6 +18,7 @@ const {
 } = require('./context-signals');
 const { readAgentsMdPrefs } = require('./agents-md-prefs');
 const { withTimeout } = require('../timeout');
+const { SLOW_RPC_LOG_MS } = require('../core-rpc-timeouts');
 const {
   parseSections,
   formatAgentsMdSystemBlock,
@@ -1133,6 +1134,7 @@ async function fetchMcpBlock(snapshot, deps) {
  * Renderer still supplies editor selection and diagnostics as extra chunks.
  */
 async function prepSystemPrompt(snapshot = {}, deps = {}) {
+  const prepStartedAt = Date.now();
   const invokeRpc = deps.invokeRpc;
   if (typeof invokeRpc !== 'function') {
     throw new Error('prepSystemPrompt 需要 invokeRpc');
@@ -1181,19 +1183,27 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
   // 一条语义召回撞上 embedding 抖动（实测一次 2.2s）就会把首字延迟整体推后。
   // 现在只保留真实依赖：`open` 要等 `codebase`（已检索到的文件不重复读），其余同时发。
   // **装配顺序不变** —— 顺序在这一层只是 push 次序，与「什么时候取」无关。
+  /** 两条并行段的耗时（只在慢装配时才用得上，见函数末尾的 `[dieyun:prep]` 日志） */
+  let codeChainMs = 0;
+  let memoryBatchMs = 0;
   const codeChain = (async () => {
-    const [codebaseBlock, gitBlock] = await Promise.all([
-      allowCodebase
-        ? fetchCodebaseBlock({ ...snap, forceCodebase: false }, invokeRpc, lim)
-        : Promise.resolve(''),
-      injectCode ? fetchGitDiffBlock(snap, invokeRpc) : Promise.resolve('')
-    ]);
-    const changes = injectCode ? formatRecentChanges(snapshot.changeRows, lim.RECENT_CHANGE_MAX) : '';
-    // skip 的语义是「codebase 块里已经给过的文件」：直接取那一块，不再从 turnHost 里按标题反查
-    const openBlock = injectCode
-      ? await fetchOpenFilesBlock(snap, invokeRpc, lim, extractCodebasePathsFromBlock(codebaseBlock || ''))
-      : '';
-    return { codebaseBlock, gitBlock, changes, openBlock };
+    const codeStartedAt = Date.now();
+    try {
+      const [codebaseBlock, gitBlock] = await Promise.all([
+        allowCodebase
+          ? fetchCodebaseBlock({ ...snap, forceCodebase: false }, invokeRpc, lim)
+          : Promise.resolve(''),
+        injectCode ? fetchGitDiffBlock(snap, invokeRpc) : Promise.resolve('')
+      ]);
+      const changes = injectCode ? formatRecentChanges(snapshot.changeRows, lim.RECENT_CHANGE_MAX) : '';
+      // skip 的语义是「codebase 块里已经给过的文件」：直接取那一块，不再从 turnHost 里按标题反查
+      const openBlock = injectCode
+        ? await fetchOpenFilesBlock(snap, invokeRpc, lim, extractCodebasePathsFromBlock(codebaseBlock || ''))
+        : '';
+      return { codebaseBlock, gitBlock, changes, openBlock };
+    } finally {
+      codeChainMs = Date.now() - codeStartedAt;
+    }
   })();
 
   const [settledJobsBlock, code, agentsBlock, mcpBlock, memoryBlocks] = await Promise.all([
@@ -1201,17 +1211,24 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     codeChain,
     fetchAgentsMdBlock(snap, invokeRpc, deps.userDataPath),
     fetchMcpBlock(snapshot, deps),
-    Promise.all([
-      fetchSessionGoalBlock(snapshot, invokeRpc, agentLimits || AGENT_LIMITS_DEFAULTS),
-      fetchSessionHandoffBlock(snapshot, invokeRpc, memoryAudit),
-      fetchGraphRepoMapBlock(snap, invokeRpc, lim),
-      injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim, memoryAudit) : Promise.resolve(''),
-      fetchGlobalMemoryBlock(snap, invokeRpc, lim, memoryAudit),
-      fetchSharedMemoryBlock(snap, deps, lim, memoryAudit),
-      fetchCompactionBlock(snap, invokeRpc),
-      fetchWorkMemoryBlock(snap, invokeRpc, memoryAudit),
-      fetchSkillsBlock(snap, deps, lim)
-    ])
+    (async () => {
+      const memStartedAt = Date.now();
+      try {
+        return await Promise.all([
+          fetchSessionGoalBlock(snapshot, invokeRpc, agentLimits || AGENT_LIMITS_DEFAULTS),
+          fetchSessionHandoffBlock(snapshot, invokeRpc, memoryAudit),
+          fetchGraphRepoMapBlock(snap, invokeRpc, lim),
+          injectKnowledge ? fetchProjectMemoryBlock(snap, invokeRpc, lim, memoryAudit) : Promise.resolve(''),
+          fetchGlobalMemoryBlock(snap, invokeRpc, lim, memoryAudit),
+          fetchSharedMemoryBlock(snap, deps, lim, memoryAudit),
+          fetchCompactionBlock(snap, invokeRpc),
+          fetchWorkMemoryBlock(snap, invokeRpc, memoryAudit),
+          fetchSkillsBlock(snap, deps, lim)
+        ]);
+      } finally {
+        memoryBatchMs = Date.now() - memStartedAt;
+      }
+    })()
   ]);
   const [
     sessionGoalBlock,
@@ -1290,6 +1307,16 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     code: codeBlockInjected ? (textHasCodebaseMention(userQuery) ? 'explicit' : 'auto') : null,
     repoMap: !!repoMapBlock
   };
+  // 首字延迟里「宿主这一段」的可见性：阈值与 core 的 RPC_SLOW 同一份（SLOW_RPC_LOG_MS），
+  // 平时不吭声。有了它，「这一轮为什么慢」才分得清是 prep（本文件）还是 core / 上游模型
+  // （那条日志叫 agent.run.start）。代码链与记忆批是并行的，所以「其余」按最长那段算。
+  const prepMs = Date.now() - prepStartedAt;
+  if (prepMs >= SLOW_RPC_LOG_MS) {
+    const parallelMs = Math.max(codeChainMs, memoryBatchMs);
+    console.warn(
+      `[dieyun:prep] 装配 ${prepMs}ms（代码链 ${codeChainMs}ms / 记忆技能 ${memoryBatchMs}ms，并行取最长 ${parallelMs}ms / 其余 ${Math.max(0, prepMs - parallelMs)}ms）`
+    );
+  }
   return {
     ...packed,
     ...(Object.keys(memoryAudit).length ? { memoryAudit } : {}),
