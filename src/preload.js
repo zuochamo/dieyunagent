@@ -2,6 +2,19 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('diecloud', {
   getGatewayInfo: () => ipcRenderer.invoke('gateway:get-info'),
+  /**
+   * 本地 Gateway 的唯一 RPC 通道（Renderer 没有 WebSocket：Gateway 监听私有 socket /
+   * 命名管道，Chromium 连不了）。超时在 Main 侧执行一次。
+   * @param {{ method: string, params?: object, timeoutMs?: number }} req
+   */
+  gatewayRpc: (req) => ipcRenderer.invoke('gateway:rpc', req || {}),
+  /** Gateway 主动事件（如 `diagnostics.store_updated`）：Main 转一次，Renderer 只消费 */
+  onGatewayEvent: (handler) => {
+    if (typeof handler !== 'function') return () => {};
+    const wrapped = (_evt, payload) => handler(payload || {});
+    ipcRenderer.on('gateway:event', wrapped);
+    return () => ipcRenderer.removeListener('gateway:event', wrapped);
+  },
   getMobileInfo: () => ipcRenderer.invoke('mobile:get-info'),
 
   // 内网 agent 互通（src/peer）：语义全在 Main 的协调器，Renderer 只发命令与收事件。

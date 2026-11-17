@@ -33,6 +33,8 @@ assert.ok(shim.length > 2000, 'shim 不应为空');
 // 2) 渲染层用到的 preload 能力必须在
 for (const key of [
   'getGatewayInfo',
+  'gatewayRpc',
+  'onGatewayEvent',
   'getWorkspace',
   'setLocalWorkspace',
   'setWorkspace',

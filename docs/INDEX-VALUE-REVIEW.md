@@ -348,7 +348,8 @@ DY_SESSION=<会话 id> DY_SSH_HOST=<远端主机> DY_SAMPLE=20 node scripts/veri
 
 口径（不挑好答的）：
 
-1. **走真 app 的真链路**：连本机网关（`ws://127.0.0.1:17330` + `gateway-token.txt`），只传
+1. **走真 app 的真链路**：连本机网关（默认是 app 的私有端点：`<userData>/gateway.sock`，
+   显式设了 `DIECLOUD_GATEWAY_PORT` 才是 `ws://127.0.0.1:<port>` + `gateway-token.txt`），只传
    `sessionId` 让 Main 自己解析会话根 —— 与工具调用同一条路；不手拼 `workspaceRoot`；
 2. **题目从被测仓库机械抽样**：标识符题 = 345 个定义点里等距抽 20 个符号名；
    自然语言题 = 21 条中文注释里等距抽 10 条；

@@ -26,6 +26,7 @@ const path = require('path');
 
 const { resolveUserDataDir } = require('../app-paths');
 const { LocalGateway } = require('../gateway/server');
+const { describeLocalGatewayEndpoint } = require('../gateway/local-endpoint');
 const { createCoreBridge } = require('../core-bridge');
 const { resolveDieyunCoreBinary, isRustCoreEnabled } = require('../core-bridge-path');
 const { ensureAgentHomeDirs, dieyunDefaultWorkspaceDir } = require('../agent-home');
@@ -58,28 +59,14 @@ const UNAVAILABLE_CAPABILITIES = [
 ];
 
 /**
- * 端口是否已被监听（只看「有没有人在听」，不区分是谁）——启动告警用，不做鉴权/判定。
- * @param {string} host
- * @param {number} port
+ * 单实例提示：本地 Gateway 的私有端点（socket / 命名管道）是否已被另一个进程听走。
+ * 端口探测已经不需要了 —— 默认根本不占端口（见 `src/gateway/local-endpoint.js`）。
+ * @param {import('../gateway/local-endpoint').LocalGatewayEndpoint} endpoint
  * @returns {Promise<boolean>}
  */
-function isPortBusy(host, port, timeoutMs = 400) {
-  const net = require('net');
-  return new Promise((resolve) => {
-    const sock = net.connect({ host, port });
-    const done = (busy) => {
-      try {
-        sock.destroy();
-      } catch {
-        // ignore
-      }
-      resolve(busy);
-    };
-    sock.setTimeout(timeoutMs);
-    sock.once('connect', () => done(true));
-    sock.once('timeout', () => done(false));
-    sock.once('error', () => done(false));
-  });
+function isEndpointBusy(endpoint) {
+  const { isEndpointListening } = require('../gateway/local-endpoint');
+  return isEndpointListening(endpoint);
 }
 
 /**
@@ -300,14 +287,14 @@ let desktopUi = null;
   });
 
   gateway.setWorkspace(workspacePath);
-  // 端口被占**不是**致命错误：本地 Gateway WS 只是桌面端 Renderer 的接口，headless 自己
-  // 走 `invokeRpc` 不经过它。但被占通常意味着「同一个数据目录已经有另一个进程在用」，
-  // 这条告警比让它静默失败有用（不引入锁文件：那会是第二套「谁在跑」的真相）。
-  const portBusy = await isPortBusy('127.0.0.1', gateway.port);
-  if (portBusy) {
+  // 本地 Gateway 默认监听**私有**端点（POSIX socket / Windows 命名管道，见
+  // `src/gateway/local-endpoint.js`）：不占端口，也就没有端口冲突与 token 文件。
+  // 端点被占不是致命错误（headless 自己的调用走 `invokeRpc`，不经过监听），但通常意味着
+  // 「同一个数据目录已有另一个进程在用」，两个进程同时读写同一数据库会让索引重复监听。
+  if (await isEndpointBusy(gateway.endpoint)) {
     log.warn(
-      `本地 Gateway 端口 ${gateway.port} 已被占用：可能已有另一个叠云进程在使用同一数据目录（或桌面端正在运行）。` +
-        ' headless 自身不受影响，但两个进程同时读写同一数据库会让索引重复监听。'
+      `本地 Gateway 端点 ${describeLocalGatewayEndpoint(gateway.endpoint)} 已被占用：` +
+        '可能已有另一个叠云进程在使用同一数据目录（或桌面端正在运行）。headless 自身不受影响。'
     );
   }
   gateway.start();
@@ -384,7 +371,7 @@ let desktopUi = null;
       const { createDesktopUi } = require('./desktop-ui');
       desktopUi = createDesktopUi({
         packageRoot: path.join(__dirname, '..', '..'),
-        getGatewayInfo: () => gateway.getInfo(),
+        getGateway: () => gateway,
         getWebToken: () => info.token,
         // 取 **Gateway 当前**的工作区根而不是启动参数：浏览器版可以点「工作空间 → 本地」换目录
         // （`desktop.set_workspace`），换完刷新页面必须看到新目录，否则页面显示和实际写入分叉。

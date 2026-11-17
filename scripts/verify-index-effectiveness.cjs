@@ -5,8 +5,9 @@
  * 回答一个具体问题：「代码索引 / 结构索引到底有没有用？」——用可复现的口径，而不是感觉。
  *
  * 做法：
- *   1) 经本机网关（`ws://127.0.0.1:17330`，真 Main / 真远端 Agent）按**会话作用域**打 RPC，
- *      不手拼 workspaceRoot —— 这正是 app 的调用形状；
+ *   1) 经本机网关（默认是 app 的**私有端点**：POSIX `<userData>/gateway.sock`，Windows 命名管道；
+ *      真 Main / 真远端 Agent）按**会话作用域**打 RPC，不手拼 workspaceRoot ——
+ *      这正是 app 的调用形状；
  *   2) 题目从被测仓库**机械抽样**（不挑好答的）：标识符题 = 定义点里的符号名，
  *      自然语言题 = 仓库里的中文注释原文；
  *   3) 每题都有 ground truth（符号/注释所在文件），算 hit@1 / hit@5 / MRR，并与
@@ -17,8 +18,9 @@
  * 环境变量：
  *   DY_SESSION      必填，会话 id（作用域唯一来源；缺省则用 `runWorkspaceRoot` 意义不大，直接报错）
  *   DY_SSH_HOST     抽样与 grep 基线用的主机（缺省则跳过基线，只测索引自身）
- *   DY_WS_URL       默认 ws://127.0.0.1:17330
- *   DY_TOKEN_FILE   默认 %APPDATA%\dieyunagent\gateway-token.txt
+ *   DY_USER_DATA    网关数据目录（默认 Electron userData；私有 socket 名由它派生）
+ *   DY_WS_URL       显式网关地址（TCP 时它自己带端口；设了它就不再按端点推导）
+ *   DY_TOKEN_FILE   TCP 模式才用：默认 <userData>/gateway-token.txt
  *   DY_LIMIT        search limit（默认 5）
  *   DY_BUILD        1=允许首建索引/图（默认 1）
  *   DY_SAMPLE       每族抽样题数（默认 10 / 5）
@@ -28,14 +30,23 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const WebSocket = require('ws');
+const {
+  resolveLocalGatewayEndpoint,
+  createConnectionForEndpoint,
+  webSocketUrlForEndpoint,
+  describeLocalGatewayEndpoint
+} = require('../src/gateway/local-endpoint');
 
 const env = (k, d = '') => String(process.env[k] || d).trim();
 
-const WS_URL = env('DY_WS_URL', 'ws://127.0.0.1:17330');
-const TOKEN_FILE = env(
-  'DY_TOKEN_FILE',
-  path.join(process.env.APPDATA || os.homedir(), 'dieyunagent', 'gateway-token.txt')
+/** 与 app 同一份端点解析：本地 gateway 默认不在 TCP 端口上。 */
+const USER_DATA = env(
+  'DY_USER_DATA',
+  path.join(process.env.APPDATA || os.homedir(), 'dieyunagent')
 );
+const ENDPOINT = resolveLocalGatewayEndpoint({ userDataPath: USER_DATA });
+const WS_URL = env('DY_WS_URL', webSocketUrlForEndpoint(ENDPOINT));
+const TOKEN_FILE = env('DY_TOKEN_FILE', path.join(USER_DATA, 'gateway-token.txt'));
 const SESSION = env('DY_SESSION');
 const SSH_HOST = env('DY_SSH_HOST');
 const LIMIT = Number(env('DY_LIMIT', '5')) || 5;
@@ -50,20 +61,29 @@ function die(msg) {
   process.exit(1);
 }
 
-// ── 网关客户端（与本机 app 同一份 token / 同一套协议） ───────────────────────────
+// ── 网关客户端（与本机 app 同一份端点 / 同一套协议） ─────────────────────────────
+// 私有端点（socket / 命名管道）不需要 token；只有显式 TCP（`DIECLOUD_GATEWAY_PORT`）才要。
 function connectGateway() {
-  if (!fs.existsSync(TOKEN_FILE)) die(`找不到网关 token：${TOKEN_FILE}（app 没在跑？）`);
-  const token = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  const tcp = env('DY_WS_URL') === '' && ENDPOINT.transport === 'tcp';
+  let token = '';
+  if (tcp) {
+    if (!fs.existsSync(TOKEN_FILE)) die(`找不到网关 token：${TOKEN_FILE}（app 没在跑？）`);
+    token = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  }
+  const createConnection = env('DY_WS_URL') === '' ? createConnectionForEndpoint(ENDPOINT) : null;
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(WS_URL, createConnection ? { createConnection } : undefined);
     const pending = new Map();
     let seq = 0;
-    const timer = setTimeout(() => reject(new Error(`连接 ${WS_URL} 超时`)), 8000);
+    const timer = setTimeout(
+      () => reject(new Error(`连接 ${describeLocalGatewayEndpoint(ENDPOINT)} 超时（app 没在跑？）`)),
+      8000
+    );
     ws.on('error', (e) => {
       clearTimeout(timer);
       reject(e);
     });
-    // auth 必须在 open 后立刻发：服务端先等 auth，再接受 call
+    // auth 必须在 open 后立刻发：服务端先等 auth，再接受 call（私有端点会直接回 auth_ok）
     ws.on('open', () => {
       ws.send(JSON.stringify({ v: 1, type: 'auth', token }));
     });

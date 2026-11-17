@@ -118,7 +118,7 @@ flowchart TB
   IPC --> CoreBridge
   ToolBridge --> LocalGW
   ToolBridge --> MCP
-  GWClient -->|127.0.0.1:17330 + token| LocalGW
+  GWClient -->|IPC gatewayRpc| LocalGW
   LocalGW --> CoreBridge
   LocalGW --> MemRust
   Main -->|HTTP| LLM
@@ -174,16 +174,25 @@ flowchart LR
 
 ### 4.1 连接协议（v1）
 
-1. WebSocket 连接 `127.0.0.1:17330`（可用 `DIECLOUD_GATEWAY_PORT` 改端口）。
-2. 首包 `{ type: 'auth', token }`，token 存于 `%APPDATA%/dieyunagent/gateway-token.txt`。
-3. 之后 `{ type: 'call', id, method, params }` → `{ type: 'result', id, ok, data|error }`。
+渲染进程**不再连 WebSocket**：`gatewayCall(method, params)`（`renderer-gateway.js`）只调
+`window.diecloud.gatewayRpc` → Main IPC → `LocalGateway#invokeRpc`。理由：本地 Gateway 默认
+监听**私有端点**（POSIX `<userData>/gateway.sock`，Windows 命名管道），Chromium 连不了；
+而两者本来同进程，绕一圈本机端口只会换来「端口冲突 / 防火墙弹窗 / token 文件丢失」。
 
-渲染进程封装：`gatewayCall(method, params)`（`renderer-gateway.js`）。
+私有端点的鉴权边界 = **文件系统权限**（目录 0700 / socket 0600；Windows 用管道默认 ACL）。
+端点解析唯一来源：`src/gateway/local-endpoint.js`。线协议（外部进程/网页用）：
+
+1. 连到上述 socket / 命名管道（TCP 只在显式设 `DIECLOUD_GATEWAY_PORT` 时启用，那时才要 token）。
+2. 首包可选 `{ type: 'auth', token }`：私有端点直接回 `auth_ok`（能连上即已授权）。
+3. 之后 `{ type: 'call', id, method, params }` → `{ type: 'result', id, ok, data|error }`；
+   服务端主动推送 `{ type: 'event', event, data }`。
+4. 网页版（headless `--web`）由 `src/headless/desktop-ui.js` 在同源 `/gateway` 上做同一份翻译，
+   页面里的 `window.diecloud.gatewayRpc` 由 shim 提供，渲染层看到的是同一个接口。
 
 ```mermaid
 flowchart TB
   subgraph GW["本地 Gateway src/gateway/"]
-    Server["server.js WebSocket :17330"]
+    Server["server.js 私有端点监听 + invokeRpc"]
     RPC["rpc.js 方法分发"]
     Host["host-control.js 路径/命令"]
     PathPol["path-policy.js 白名单"]
@@ -192,7 +201,7 @@ flowchart TB
     ProjId["handlers/memory.js 项目身份"]
   end
 
-  WS[渲染进程 gatewayCall] -->|auth + call| Server
+  WS[渲染进程 gatewayCall] -->|IPC gatewayRpc| Server
   Server --> RPC
   RPC --> Host
   RPC --> Web

@@ -33,7 +33,8 @@ function fakeRes() {
 
 function makeUi() {  return createDesktopUi({
     packageRoot: PACKAGE_ROOT,
-    getGatewayInfo: () => ({ url: 'ws://127.0.0.1:17330', port: 17330, token: 'gw-token' }),
+    // Gateway 本体在服务进程里：/gateway 的 RPC 与事件都直接调它（不再转发到某个端口）
+    getGateway: () => ({ invokeRpc: async (method) => ({ method }), onEvent: () => () => {} }),
     getWebToken: () => TOKEN,
     log: () => {}
   });
@@ -116,21 +117,22 @@ describe('headless 桌面界面（/app/）', () => {  it('只接管 /app 与 /no
     }
   });
 
-  it('替身脚本带同源 /gateway 地址与 Gateway token', () => {
-    const shim = buildShim({ gatewayUrl: 'ws://example:17340/gateway', gatewayToken: 'gw-token', workspacePath: '/srv/ws' });
+  it('替身脚本带同源 /gateway 地址，且 RPC 走与 preload 同名的 gatewayRpc', () => {
+    const shim = buildShim({ gatewayUrl: 'ws://example:17340/gateway', workspacePath: '/srv/ws' });
     // 优先用页面地址推导（反代/HTTPS 自动 wss），Host 头只作兜底
     expect(shim).toContain("location.protocol === 'https:' ? 'wss://' : 'ws://'");
     expect(shim).toContain("+ '/gateway'");
     expect(shim).toContain('ws://example:17340/gateway');
-    expect(shim).toContain('gw-token');
     expect(shim).toContain('/srv/ws');
     expect(shim).toContain("Object.defineProperty(window, 'diecloud'");
+    // 渲染层只认这两个名字（桌面端由 preload 经 IPC 提供，形状必须一致）
+    expect(shim).toContain('gatewayRpc:');
+    expect(shim).toContain('onGatewayEvent:');
   });
 
   it('替身真跑一遍：getWorkspace/getGatewayInfo 返回 Promise，没实现的能力必须不存在', async () => {
     const shim = buildShim({
       gatewayUrl: 'ws://example:17340/gateway',
-      gatewayToken: 'gw-token',
       workspacePath: '/srv/ws',
       permissions: { hostControl: true, fsRead: true, fsWrite: true, shellExec: true }
     });
@@ -151,15 +153,20 @@ describe('headless 桌面界面（/app/）', () => {  it('只接管 /app 与 /no
     // 环境事实：默认工作空间（composer 标签如实显示）
     expect(sandbox.window.appDefaultWorkspacePath).toBe('/srv/ws');
     const info = await api.getGatewayInfo();
-    // rustCore.enabled 是渲染层 isDieyunCoreReady() 的判据：不报就会在点发送时抛「需要 sidecar」。
+    // rustCore.enabled 是渲染层 isDieyunCoreReady() 的判据：不报就会在点发送时抛「不可用」。
+    // transport 只用于状态显示；RPC 走同源 /gateway（浏览器没有 IPC）。
     // permissions 决定给模型哪些工具（浏览器里没有写入通道，所以是启动时的一份只读快照）。
     expect(info).toEqual({
-      url: 'ws://example:17340/gateway',
-      token: 'gw-token',
+      transport: 'web',
+      rpcReady: true,
       rustCore: { enabled: true },
       permissions: { hostControl: true, fsRead: true, fsWrite: true, shellExec: true },
       workspace: '/srv/ws'
     });
+    // RPC 通道：与 preload 同名同形状（{ ok, data } / { ok:false, error }）
+    expect(typeof api.gatewayRpc).toBe('function');
+    expect(typeof api.onGatewayEvent).toBe('function');
+    expect(typeof api.onGatewayEvent(() => {})).toBe('function');
 
     // webUtils 那个是同步的：浏览器里拿不到真实路径
     expect(api.getPathForFile()).toBe(null);
@@ -177,7 +184,7 @@ describe('headless 桌面界面（/app/）', () => {  it('只接管 /app 与 /no
   });
 
   it('非安全上下文（明文 http 的 192.168.x.x）缺的 API 要补回来', async () => {
-    const shim = buildShim({ gatewayUrl: 'ws://example:17340/gateway', gatewayToken: 'gw-token', workspacePath: '/srv/ws' });
+    const shim = buildShim({ gatewayUrl: 'ws://example:17340/gateway', workspacePath: '/srv/ws' });
     // 模拟浏览器在非安全上下文里：crypto 没有 randomUUID，navigator 没有 clipboard
     const sandbox = makeSandbox({ cryptoWithoutUuid: true });
     vm.runInNewContext(shim, sandbox);

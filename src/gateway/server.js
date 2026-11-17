@@ -1,9 +1,18 @@
 'use strict';
 
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
+const {
+  resolveLocalGatewayEndpoint,
+  describeLocalGatewayEndpoint,
+  isEndpointListening,
+  removeStaleUnixSocket,
+  prepareSocketDir,
+  restrictSocketFile
+} = require('./local-endpoint');
 const { createRpcHandlers } = require('./rpc');
 const { createTurnUndoService } = require('../undo/turn-undo-service');
 const { createLspDiagnosticsService } = require('../lsp/diagnostics-service');
@@ -49,8 +58,6 @@ const {
   projectWorkspacePath,
 } = require('../workspace/target');
 const { repoRemotePathOf } = require('../ssh/remote-worktree');
-
-const DEFAULT_PORT = 17330;
 
 /**
  * 本机所有卷根（「完全放开路径限制」开关用）：Windows 枚举实际存在的盘符，POSIX 只有 `/`。
@@ -137,13 +144,22 @@ class LocalGateway {
       log: (msg) => this.log(msg)
     });
 
-    this.port = Number(process.env.DIECLOUD_GATEWAY_PORT) || DEFAULT_PORT;
     this.tokenPath = path.join(this.userDataPath, 'gateway-token.txt');
 
+    /** 监听端点（唯一来源 `./local-endpoint`）：默认私有 socket / 命名管道，TCP 只在显式配端口时 */
+    this.endpoint = resolveLocalGatewayEndpoint({ userDataPath: this.userDataPath });
+    // 只有 TCP 才用得上端口与 token；私有 socket 的鉴权边界是文件系统权限
+    this.port = this.endpoint.transport === 'tcp' ? this.endpoint.port : 0;
+
+    /** @type {import('http').Server | null} */
+    this.server = null;
     /** @type {import('ws').WebSocketServer | null} */
     this.wss = null;
     /** @type {Set<import('ws').WebSocket>} */
     this.wsClients = new Set();
+    /** 进程内事件订阅（Main IPC 把它们转给 Renderer，见 `main/ipc/gateway-shell.js`） */
+    /** @type {Set<(payload: {event: string, data: object}) => void>} */
+    this.eventSinks = new Set();
     /** @type {ReturnType<createRpcHandlers> | null} */
     this.handlers = null;
     this.token = '';
@@ -674,31 +690,46 @@ class LocalGateway {
     this._activeWatchRoots = activeWatchRoots;
   }
 
-  _broadcastDiagnosticsStoreUpdated(workspaceRoot) {
-    if (!this.wsClients.size) return;
-    const payload = {
-      v: 1,
-      type: 'event',
-      event: 'diagnostics.store_updated',
-      data: {
-        workspaceRoot: workspaceRoot ? path.resolve(String(workspaceRoot)) : null,
-        projectScan:
-          this.lspDiagnostics && typeof this.lspDiagnostics.getProjectScanStatus === 'function'
-            ? this.lspDiagnostics.getProjectScanStatus(workspaceRoot)
-            : null
+  /**
+   * 进程内订阅 Gateway 事件（Main 用它把事件转给 Renderer：`gateway:event`）。
+   * Renderer 不再有 WebSocket 连接，所以事件不能再只靠 `wsClients` 广播。
+   * @param {(payload: { event: string, data: object }) => void} fn
+   * @returns {() => void} 取消订阅
+   */
+  onEvent(fn) {
+    if (typeof fn !== 'function') return () => {};
+    this.eventSinks.add(fn);
+    return () => this.eventSinks.delete(fn);
+  }
+
+  /** 事件唯一出口：WS 客户端（外部进程）与进程内订阅者各投一份。 */
+  _publishEvent(event, data) {
+    const payload = { event, data: data || {} };
+    if (this.wsClients.size) {
+      const frame = { v: 1, type: 'event', ...payload };
+      for (const ws of this.wsClients) this._send(ws, frame);
+    }
+    for (const sink of this.eventSinks) {
+      try {
+        sink(payload);
+      } catch (e) {
+        this.log('gateway event sink failed: ' + (e && e.message ? e.message : e));
       }
-    };
-    for (const ws of this.wsClients) {
-      this._send(ws, payload);
     }
   }
 
+  _broadcastDiagnosticsStoreUpdated(workspaceRoot) {
+    this._publishEvent('diagnostics.store_updated', {
+      workspaceRoot: workspaceRoot ? path.resolve(String(workspaceRoot)) : null,
+      projectScan:
+        this.lspDiagnostics && typeof this.lspDiagnostics.getProjectScanStatus === 'function'
+          ? this.lspDiagnostics.getProjectScanStatus(workspaceRoot)
+          : null
+    });
+  }
+
   broadcastEvent(event, data) {
-    if (!this.wsClients.size) return;
-    const payload = { v: 1, type: 'event', event, data: data || {} };
-    for (const ws of this.wsClients) {
-      this._send(ws, payload);
-    }
+    this._publishEvent(event, data);
   }
 
   getEffectiveWorkspaceTarget() {
@@ -1098,45 +1129,140 @@ class LocalGateway {
 
 
   getInfo() {
+    const ep = this.endpoint;
+    const tcp = ep.transport === 'tcp';
     return {
-      host: '127.0.0.1',
-      port: this.port,
-      url: `ws://127.0.0.1:${this.port}`,
-      token: this.token,
-      listening: !!this.wss,
+      transport: ep.transport,
+      path: ep.path || null,
+      host: ep.host || null,
+      port: ep.port || null,
+      url: tcp ? `ws://${ep.host}:${ep.port}` : null,
+      // Renderer 走 Main IPC：能不能应答只看 handlers 装没装好，与 socket 有没有在听无关
+      rpcReady: !!this.handlers,
+      listening: !!(this.server && this.server.listening),
+      // 私有 socket / 命名管道不要 token（权限边界是文件系统）；TCP 仍然要
+      token: tcp ? this.token : '',
       permissions: this.getPermissions(),
       workspace: this.getWorkspace()
     };
   }
 
   start() {
-    if (this.wss) return;
+    if (this.server || this.wss) return;
 
     fs.mkdirSync(this.readableDir, { recursive: true });
-    this._ensureToken();
 
     this._loadWorkspaceFromDisk();
     this._refreshHandlers();
     this._syncWorkspaceDiagnosticsWatch();
     this._syncWorkspaceIndexWatch();
 
-    this.wss = new WebSocketServer({ host: '127.0.0.1', port: this.port });
+    this._startListener();
+  }
 
-    this.wss.on('connection', (ws) => {
+  /**
+   * 起监听：私有端点（socket / 命名管道）或显式 TCP。
+   *
+   * 这里只处理「另一个**本机进程**要驱动同一个 Gateway」。桌面 Renderer 不经这里
+   * （Chromium 连不了 socket / 管道），它走 Main IPC → `invokeRpc`。
+   */
+  _startListener() {
+    const ep = this.endpoint;
+    const tcp = ep.transport === 'tcp';
+    const server = http.createServer((req, res) => {
+      // 只有 WebSocket 客户端会来；给普通 HTTP 一个明确回答，别让它挂到超时
+      res.writeHead(426, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('local gateway speaks WebSocket only');
+    });
+    const wss = new WebSocketServer({ noServer: true });
+    this.server = server;
+    this.wss = wss;
+
+    server.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    });
+    this._wireConnection(wss);
+
+    server.on('error', (err) => {
+      this.log(`gateway listener error (${describeLocalGatewayEndpoint(ep)}): ${err && err.message}`);
+      if (err && (err.code === 'EADDRINUSE' || err.code === 'EACCES')) {
+        // 已经有实例在听：本进程照常工作（IPC 路径不依赖监听），别把句柄留着装作在听
+        try {
+          server.close();
+        } catch {
+          // ignore
+        }
+        this.server = null;
+        this.wss = null;
+      }
+    });
+
+    if (tcp) {
+      this._ensureToken();
+      server.listen(ep.port, ep.host, () => {
+        this.log(`local gateway ${describeLocalGatewayEndpoint(ep)} (loopback + token)`);
+      });
+      return;
+    }
+
+    prepareSocketDir(ep);
+    if (ep.transport === 'unix') {
+      void this._listenUnix(server, ep);
+      return;
+    }
+    // Windows 命名管道：进程退出即消失，没有残留文件要清
+    server.listen(ep.path, () => {
+      this.log(`local gateway ${describeLocalGatewayEndpoint(ep)} (private pipe)`);
+    });
+  }
+
+  /**
+   * POSIX socket：先探测「有没有人在听」再决定删不删残留文件 ——
+   * 直接 `unlink` 会把另一个正在跑的实例的连接面拆掉，那是「抢占」不是「恢复」。
+   */
+  async _listenUnix(server, ep) {
+    if (await isEndpointListening(ep)) {
+      this.log(`gateway socket ${ep.path} 已被占用：另一个实例在听，本实例只提供 IPC 通道`);
+      try {
+        server.close();
+      } catch {
+        // ignore
+      }
+      this.server = null;
+      this.wss = null;
+      return;
+    }
+    if (removeStaleUnixSocket(ep)) this.log(`清掉上次残留的 gateway socket: ${ep.path}`);
+    server.listen(ep.path, () => {
+      restrictSocketFile(ep);
+      this.log(`local gateway ${describeLocalGatewayEndpoint(ep)} (private socket)`);
+    });
+  }
+
+  /**
+   * 一个 WS 连接的处理（TCP 与私有端点共用）。
+   * 私有端点：**能连上就已经过了权限边界**，不再要 token。
+   */
+  _wireConnection(wss) {
+    const requiresToken = this.endpoint.transport === 'tcp';
+    wss.on('connection', (ws) => {
       // 底层 socket 异常会 emit 'error'；无监听将变成 uncaught exception，故兜底记录
       ws.on('error', (err) => {
         this.log('gateway client ws error: ' + (err && err.message ? err.message : err));
       });
-      let authed = false;
-      const authTimer = setTimeout(() => {
-        if (!authed) {
-          try {
-            ws.close(4001, 'auth timeout');
-          } catch {
-            // ignore
-          }
-        }
-      }, 15000);
+      let authed = !requiresToken;
+      if (authed) this.wsClients.add(ws);
+      const authTimer = requiresToken
+        ? setTimeout(() => {
+            if (!authed) {
+              try {
+                ws.close(4001, 'auth timeout');
+              } catch {
+                // ignore
+              }
+            }
+          }, 15000)
+        : null;
 
       ws.on('message', async (raw) => {
         let msg;
@@ -1150,9 +1276,9 @@ class LocalGateway {
         const id = msg.id != null ? msg.id : null;
 
         if (msg.type === 'auth') {
-          if (msg.token === this.token) {
+          if (!requiresToken || msg.token === this.token) {
             authed = true;
-            clearTimeout(authTimer);
+            if (authTimer) clearTimeout(authTimer);
             this.wsClients.add(ws);
             this._send(ws, { v: 1, type: 'auth_ok', id });
           } else {
@@ -1249,24 +1375,10 @@ class LocalGateway {
       });
 
       ws.on('close', () => {
-        clearTimeout(authTimer);
+        if (authTimer) clearTimeout(authTimer);
         this.wsClients.delete(ws);
       });
     });
-
-    this.wss.on('error', (err) => {
-      this.log('gateway wss error: ' + err.message);
-      if (err && (err.code === 'EADDRINUSE' || err.code === 'EACCES')) {
-        try {
-          this.wss.close();
-        } catch {
-          // ignore
-        }
-        this.wss = null;
-      }
-    });
-
-    this.log(`local gateway ws://127.0.0.1:${this.port} (loopback)`);
   }
 
   /**
@@ -1339,7 +1451,18 @@ class LocalGateway {
       }
       this.wss = null;
     }
+    if (this.server) {
+      try {
+        this.server.close();
+      } catch {
+        // ignore
+      }
+      this.server = null;
+    }
+    // POSIX：socket 文件得自己删（进程退出不会带走它，下次启动会误判「有人在听」）
+    removeStaleUnixSocket(this.endpoint);
     this.wsClients.clear();
+    this.eventSinks.clear();
     if (this.indexWatcher) this.indexWatcher.stop();
     this.handlers = null;
     if (this.lspDiagnostics) {

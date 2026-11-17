@@ -6,6 +6,24 @@ function isDieyunCoreReady() {
 }
 
 /**
+ * 「这个客户端能不能跑 Agent」的唯一判据 + 唯一文案。
+ *
+ * Renderer 里**没有**第二套循环：core 未就绪（`DIEYUN_CORE=0` / sidecar 没打包）时不是
+ * 「换一条路跑」，而是明确不可用。所有入口（发送闸门 / 目标续跑 / 继续 / 计划）都问这一个
+ * 函数，别在各分支里各写一句 `!isDieyunCoreReady()` 的抛错。
+ */
+const AGENT_RUNTIME_UNAVAILABLE =
+  'Agent 不可用：dieyun-core 未就绪（`npm run pack:dieyun-core` 后重启；若设了 `DIEYUN_CORE=0` 请先取消）。';
+
+function requireAgentRuntime() {
+  if (isDieyunCoreReady()) return;
+  const err = new Error(AGENT_RUNTIME_UNAVAILABLE);
+  err.code = 'CORE_UNAVAILABLE';
+  err.userSafe = true;
+  throw err;
+}
+
+/**
  * 循环模型是否多模态：决定是否把浏览器截图作为 image_url 注入上下文。
  * 仅当所选模型支持识图时开启，避免给文本模型发送图片触发上游 400。
  */

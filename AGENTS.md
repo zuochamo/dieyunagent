@@ -29,6 +29,7 @@
 | 工具 schema / 执行 | `src/agent/tool-catalog.js`（schema）、`src/agent/tool-bridge-main.js`（执行）、`src/gateway/fs-edit-file.js`（edit 实现） | 在 Renderer 再写一份 schema 或 `gatewayCall` 执行 host 工具 |
 | Planner / 多 Agent | `crates/dieyun-core/src/planner/`、`src/agent/rust-planner-runner.js`（worker 批 / 并发闸）、开关 `agent-limits.plannerMultiAgentEnabled`（设置 →「子 Agent」）、worker 写作用域 `src/agent/delegate-tool-gateway.js#createWorkerWriteScope`（worktree 优先 / 越界拒绝 / 读 copy-on-read） | `planner-orchestrator.js`（已删除）；在 worker 里靠提示词保证隔离；另写一份「哪条路径归哪份副本」的映射 |
 | Gateway / 记忆 / fs RPC | `src/gateway/`、`crates/dieyun-core/src/rpc/`、`crates/dieyun-core/src/memory/` | preload 绕过 Gateway |
+| 本地 Gateway 传输 / 端点（Renderer 怎么到 Gateway） | `src/gateway/local-endpoint.js`（**端点唯一来源**：POSIX `<userData>/gateway.sock` / Windows 命名管道；TCP+token 只在显式 `DIECLOUD_GATEWAY_PORT` 时）、`src/gateway/server.js`（监听 + `invokeRpc` + `onEvent`）、`src/main/ipc/gateway-shell.js`（`gateway:rpc` / `gateway:event`）、`src/headless/desktop-ui.js`（网页替身：同源 `/gateway` 翻成同一份 `invokeRpc`） | 在 Renderer 里再写一个 WebSocket 客户端或 `new WebSocket(...)`（Chromium 连不了 socket/管道，桌面走 IPC；网页走同源 `/gateway`）；另写一份端口 / token 文件逻辑；为「gateway 连不上」加重连状态机（IPC 没有连接可重连，失败就是这次调用失败） |
 | 浏览器面板可见性 / 原生视图边界（BrowserView 盖住别的页签） | `src/renderer/renderer-browser.js#syncBrowserBounds`（**唯一写者**：页签是否可见 + `#browser-viewport` 矩形一起传）、`src/browser/controller.js#setPanelState`（只认 `open`+`bounds`，没 bounds 不开） | 在 Main / 工具层自己 `setPanelState({open:true})` —— 只有上一次的旧矩形，原生视图会贴到当前可见的任何页签上；要画面可见用 `requestAutoOpenPanel()` 请 Renderer 开页签 |
 | 联网搜索 / 网页抓取 | `src/gateway/web/`（`engines/` 一个引擎一个 parser；出网走 `transport.js`） | 另写一份 SERP 解析、fetch 或 SSRF 校验 |
 | 向量后端（本地推理优先 / 远端可选） | 判定唯一入口 `crates/dieyun-core/src/embedding/mod.rs::EmbeddingConfig::plan`（`auto`/`local`/`remote`）；本地推理 `embedding/local.rs`（`ort` + `load-dynamic`，模型与 onnxruntime 都按需下载：`DIEYUN_MODELS_DIR` / `DIEYUN_ORT_LIB`）；装配唯一入口 `src/agent/embedding-config.js`（远端端点 + 本地模型目录合成一份 payload，三处 `configure` 共用）；查询向量一律走 RPC `embedding.query`（`src/codebase/embedding-client.js` 只剩薄封装）。见 [`docs/LOCAL-EMBEDDING.md`](docs/LOCAL-EMBEDDING.md) | 在调用点各写一份「有没有向量通道 / 慢不慢」的判断（旧的 `interactiveEmbedBudgetMs` + `EMBEDDING_TOO_SLOW` + 并发闸门已整体删除）；让 Node 自己打 embedding 端点（文档向量与查询向量会分属两个后端，相似度静默变差）；把模型或 dylib 塞进安装包 |
@@ -70,7 +71,7 @@
 ```
 Renderer (src/renderer/)     UI、事件展示、gatewayCall 客户端（不执行 host 工具）
 Main (src/main-entry.js)     IPC、工具委托/执行、Worktree、MobileBridge（Electron 入口 src/main.js）；LLM 调用已移入 core
-Gateway (src/gateway/)       WebSocket RPC、工具、权限白名单
+Gateway (src/gateway/)       工具 RPC、权限白名单（Renderer 经 Main IPC 的 gateway:rpc 调 invokeRpc；私有 socket/命名管道只给本机其它进程）
 dieyun-core (Rust)           循环账本 agent.loop、LLM 客户端与流式（agent/llm.rs）、planner、memory、index、compaction（折叠）
 ```
 

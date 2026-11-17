@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, loopApi, settings, gwState, chatCompletionWithToolsViaRust, isDieyunCoreReady, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, getSessionAbortSignal, throwIfAgentAborted, waitForAgentAbortable, createAgentAbortError, renderAssistantBubbleContent, applyContextCompaction, noteContextCompaction, getEffectiveInputBudget, getAgentToolCallLimit, getAgentMaxRounds, pauseAgentForToolLimit, pauseAgentForNetworkDisconnect, shouldPauseForNetworkDisconnect, clearAgentContinueState, setAgentContinueState, showAgentToast, formatToolArgsBrief, summarizeToolResult, reprojectContinueLoopMessages, refreshTurnRideFromArchive, scheduleArtifactsUiRefresh, schedulePlanWorktreeChangesRefresh, renderChangesPane, trackArtifactsFromTrace, maybeSaveRunningTraceCheckpoint, setSessionLastTrace, setAgentExecutionContext, createTraceRunId, updateSessionRunProgress, mergeTraceSegments, getSessionChangeRowsForAgent */
+/* global sessionActiveRuns, currentSessionId, loopApi, settings, gwState, chatCompletionWithToolsViaRust, requireAgentRuntime, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, getSessionAbortSignal, throwIfAgentAborted, waitForAgentAbortable, createAgentAbortError, renderAssistantBubbleContent, applyContextCompaction, noteContextCompaction, getEffectiveInputBudget, getAgentToolCallLimit, getAgentMaxRounds, pauseAgentForToolLimit, pauseAgentForNetworkDisconnect, shouldPauseForNetworkDisconnect, clearAgentContinueState, setAgentContinueState, showAgentToast, formatToolArgsBrief, summarizeToolResult, reprojectContinueLoopMessages, refreshTurnRideFromArchive, scheduleArtifactsUiRefresh, schedulePlanWorktreeChangesRefresh, renderChangesPane, trackArtifactsFromTrace, maybeSaveRunningTraceCheckpoint, setSessionLastTrace, setAgentExecutionContext, createTraceRunId, updateSessionRunProgress, mergeTraceSegments, getSessionChangeRowsForAgent */
 'use strict';
 
 async function reprojectContinueFromBody(continueFrom, payload, runOpts, runSessionId) {
@@ -32,6 +32,9 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
   if (!runSessionId) {
     throw new Error('runAgentCompletion 需要 sessionId');
   }
+  // 这里是「跑一轮」的唯一入口（发送 / 继续 / 目标续跑都经过它）：能力不足就地拒绝，
+  // 不在下面各分支各写一份「需要 sidecar」。
+  if (typeof requireAgentRuntime === 'function') requireAgentRuntime();
   throwIfAgentAborted(runOpts.signal);
   const baseTrace = Array.isArray(runOpts.baseTrace) ? runOpts.baseTrace.slice() : [];
   setSessionLastTrace(runSessionId, baseTrace);
@@ -142,9 +145,6 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
       if (typeof runPlannerPipelineViaMain !== 'function') {
         throw new Error('Rust Planner IPC 不可用');
       }
-      if (typeof isDieyunCoreReady === 'function' && !isDieyunCoreReady()) {
-        throw new Error('Plan 模式需要 dieyun-core（请运行 npm run pack:dieyun-core 并重启）');
-      }
       if (typeof beginPlanWorktreeTracking === 'function') {
         beginPlanWorktreeTracking(null, runSessionId);
       }
@@ -168,9 +168,6 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
       );
     } else {
       throwIfAgentAborted(runOpts.signal);
-      if (typeof isDieyunCoreReady === 'function' && !isDieyunCoreReady()) {
-        throw new Error('需要 dieyun-core sidecar（npm run pack:dieyun-core）');
-      }
       if (typeof chatCompletionWithToolsViaRust !== 'function') {
         throw new Error('Rust agent loop IPC 不可用');
       }

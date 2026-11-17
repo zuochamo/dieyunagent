@@ -7,6 +7,10 @@
 > - 每条都带**当前工作树里的证据**（`文件:行`），不引用改造前快照。
 > - 每条都写清「**动什么算完**」，避免只做一半。
 > - 状态图例：`未动` / `半条` / `需决策` / `已完成`。
+>
+> **2026-11-17 更新**：§1（本地 IPC）与 §9（降级 loop）已施工完毕，见各自条目。
+> §9 那条要特别注意：**原始描述已经不准了** —— 降级 loop 早在 LLM 收口那几轮就没了，
+> 本轮补的是「缺 core 时明确不可用」这件小事。剩下 §2 / §3 / §5 / §6 / §7 / §8 仍未动。
 
 ---
 
@@ -30,15 +34,16 @@
 
 ---
 
-## 1. 本地 IPC 比远端还旧 · `未动`
+## 1. 本地 IPC 比远端还旧 · `已完成（2026-11-17）`
 
 | | |
 |---|---|
-| **现状证据** | 本地：`src/gateway/server.js:53` `DEFAULT_PORT = 17330`、`:141` `gateway-token.txt`、`:1123` `new WebSocketServer({ host:'127.0.0.1', port })`。远端：`src/remote/minimal-gateway-host.js:429-436` 注释明写「`socketPath` 指向用户私有的 AF_UNIX socket；没有 TCP 端口、没有 token —— 安全边界就是文件权限（目录 0700 / socket 0600）」 |
-| **为什么过时** | 两条链路方向相反：远端按 2026 的做法（本地 socket + 文件权限），本地反而是要占端口、惹防火墙、用 token 文件当门禁的 2015 做法。端口冲突 / 防火墙弹窗 / token 文件丢失都会变成用户可见故障 |
-| **动什么算完** | 本地默认走 **AF_UNIX socket（Linux/macOS）/ 命名管道（Windows）**，鉴权交给文件系统权限；TCP + token 只在「显式配置远程/调试」时保留。客户端连接处（`core-bridge` 之外的 gateway 客户端）同步改 |
-| **风险** | 需要一次兼容窗口：现有安装里 `gateway-token.txt` 与 17330 端口要先探测再迁移；Windows 命名管道权限模型与 AF_UNIX 不同（不要抄 UN*X 的 0600 语义） |
-| **优先级** | 高（用户可感知） |
+| **原证据** | 本地：`DEFAULT_PORT = 17330`、`gateway-token.txt`、`new WebSocketServer({ host:'127.0.0.1', port })`。远端：`src/remote/minimal-gateway-host.js:429-436` 早就写「`socketPath` 指向用户私有的 AF_UNIX socket；没有 TCP 端口、没有 token —— 安全边界就是文件权限（目录 0700 / socket 0600）」 |
+| **现在是什么样** | Renderer **不再持有 WebSocket**：`renderer-gateway.js:rawGatewayCall` 只调 `window.diecloud.gatewayRpc` → `main/ipc/gateway-shell.js`（`gateway:rpc`）→ `LocalGateway#invokeRpc`。本地监听默认是**私有端点**：POSIX `<userData>/gateway.sock`（目录 0700 / socket 0600）、Windows 命名管道 `\\.\pipe\dieyun-gateway-<userData 摘要>`；**不再写 `gateway-token.txt`**（TCP 模式下才写）。端点唯一来源 `src/gateway/local-endpoint.js`。TCP + token 只在显式 `DIECLOUD_GATEWAY_PORT` 时保留。网页版（headless `--web`）由 `headless/desktop-ui.js:bridgeGatewaySocket` 在同源 `/gateway` 上翻成同一份 `invokeRpc`，shim 给渲染层同一个 `gatewayRpc`/`onGatewayEvent`。 |
+| **与原计划的差异（为什么这么改）** | 原计划是「本地默认 socket，客户端连接处同步改」。实际取证发现真正的消费者是 **Renderer**，而它是 Chromium —— **连不了** socket / 命名管道；同时它与 Gateway 本来就同进程。所以正确解法是把这一跳换成 Main IPC（Renderer 一个 WebSocket 都不再持有），私有端点只留给「**另一个本机进程**想驱动同一个 Gateway」。TCP 现在唯一的仓内消费者是 `scripts/verify-index-effectiveness.cjs`（已改为默认连私有端点），因此它留在显式配置后面。 |
+| **证据（改动落点）** | `src/gateway/local-endpoint.js`；`src/gateway/server.js`（`_startListener` / `_listenUnix` / `_wireConnection` / `getInfo` / `onEvent` / `_publishEvent`）；`src/main/ipc/gateway-shell.js`（`gateway:rpc` + `gateway:event`）；`src/preload.js`（`gatewayRpc` / `onGatewayEvent`）；`src/renderer/renderer-gateway.js`；`src/headless/desktop-ui.js`；`src/headless/boot.js`（单实例提示改成端点探测） |
+| **风险 / 没做的** | 不需要兼容窗口：外部没有任何安装依赖 `gateway-token.txt`，旧文件留着不读（可手删）。Windows 管道权限沿用系统默认 ACL，**没有**额外 SDDL 收紧 —— 那是另一件事，需要单独验证。SSH 远端那套（`minimal-gateway-host`）本来就是这个模型。 |
+| **测试** | `test/unit/local-gateway-endpoint.test.cjs`（端点解析 / 残留 socket 清理 / 私有端点免 token 的 `auth+call` / 事件订阅）、`test/unit/gateway-ipc-bridge.test.cjs`（`gateway:rpc` 与 `gateway:event` 的契约）、`test/unit/headless-desktop-ui.test.cjs`、`scripts/test-headless-desktop-ui.cjs`、`npm run test:local-gateway-smoke`、`npm run test:headless` |
 
 ## 2. 日志被当 IPC 用 · `半条`
 
@@ -108,21 +113,23 @@
 | **动什么算完** | 一次逐字段对比，产出一张差异表；能合的合到 `tool-catalog.js`，不能合的写清理由 |
 | **优先级** | 先核查再谈（核查成本低，合并成本未知） |
 
-## 9. Renderer 保留了一整套降级 loop · `需决策`
+## 9. Renderer 保留了一整套降级 loop · `已完成（裁决：删；2026-11-17）`
 
 | | |
 |---|---|
-| **现状证据** | `renderer-agent-run.js:1` 的全局依赖里同时有 `chatCompletionWithToolsViaRust` 与 `isDieyunCoreReady`：`runAgentCompletion` 是**分派器** —— core 就绪走 Rust，未就绪（`DIEYUN_CORE=0` / sidecar 挂了）走旧渲染层 loop；`renderer-agent-send.js:712` 仍调用它。这就是 `renderer-agent-{loop,run,complete,continue,resume,compaction,prep,tools}.js` 至今没死的原因 |
-| **为什么算债** | 「有没有 core」的分叉在 Renderer 里，等于主链路有两份实现。本轮已把它的**传输**收口到 IPC → core（不再自己 fetch/SSE），但**控制流分叉仍在** |
-| **两条路，选一条** | ① **保留降级**：必须在文档与代码里写清「这是降级通道，不是主路径」，并给它一条 smoke（否则它会静默腐烂）；<br>② **删掉降级**：`DIEYUN_CORE=0` 时明确告知「不可用」，删掉的那 2000+ 行不再维护 |
-| **优先级** | 高（决定影响后面所有清理的范围） |
+| **重新取证的结果（重要）** | 这条的原始描述**已经过时**：降级 loop 的控制流早就不在了。`renderer-agent-run.js` 不再是分派器（core 未就绪直接抛），非 Rust 的 `chatCompletionWithTools` 全仓 **0 处**，`renderer-agent-llm.js` 的 `fetchChatCompletion` / `streamChatCompletion` 已收口到 Main → core（渲染层没有直连 HTTP、没有 SSE 解析）。所以「删掉 2000+ 行」这一步**不需要再做** —— `renderer-agent-{loop,run,complete,continue,resume,compaction,prep,tools}.js` 现在各自都有活：会话胶水、交付四态、prep、trace 落库。 |
+| **那一轮实际缺的是什么** | 「`DIEYUN_CORE=0` 时明确告知不可用」这件事没有单一来源：判据散在 planner / rust 两个分支里各抛一次错，文案各写一句，且都是**跑到一半**才炸（气泡已建、prep 已跑）。 |
+| **本轮落地** | ① 单一判据 + 单一文案：`renderer-agent-rust-loop.js:requireAgentRuntime()` / `AGENT_RUNTIME_UNAVAILABLE`；② `renderer-agent-run.js:runAgentCompletion` 顶部一处断言（发送 / 继续 / 目标续跑**都**经过它），删掉两个分支里重复的 `!isDieyunCoreReady()` 抛错；③ 发送闸门 `renderer-agent-send.js:gateSendMessage` 在动手前就拒绝并给一条用户可见提示（与「尚未配置可用模型」同一层，不再先建气泡再失败）。 |
+| **为什么没有「保留降级 + 补 smoke」这条路** | 保留降级 = 主链路两份实现（一份 Rust 循环 + 一份 Renderer 循环），且要长期养一条只为降级存在的 smoke。既然 core 已经是唯一循环实现，缺 core 就该是「不可用」，不是「换个地方跑」。 |
+| **证据** | `src/renderer/renderer-agent-rust-loop.js:requireAgentRuntime`、`src/renderer/renderer-agent-run.js`（函数顶部断言）、`src/renderer/renderer-agent-send.js:gateSendMessage`（能力闸门） |
+| **测试** | `npm run check:renderer`（globals/critical 仍认 `runAgentCompletion`/`gatewayCall`）；能力缺失路径靠人工核对：`DIEYUN_CORE=0` 启动后点发送应得到一条红色气泡提示且不建运行态 |
 
 ---
 
 ## 附录 A · 按「用户可感知度」排序的施工顺序建议
 
-1. **§1 本地 IPC 换 socket/pipe**（端口冲突、防火墙弹窗、token 文件丢失 → 用户直接感知）
-2. **§9 降级 loop：留还是删**（决定清理范围，越早越好）
+1. ~~**§1 本地 IPC 换 socket/pipe**~~ —— **已完成**（2026-11-17）：Renderer 改走 Main IPC，本地监听换私有端点
+2. ~~**§9 降级 loop：留还是删**~~ —— **已裁决：删**（2026-11-17）：loop 早已不存在，缺 core 现在明确告知不可用
 3. **§2 结构化事件**（排障成本）
 4. **§3 FTS5 bm25**（检索质量）
 5. **§7① 契约生成**（消灭手写对照表）

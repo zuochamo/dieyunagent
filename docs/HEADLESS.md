@@ -112,7 +112,8 @@ DIEYUN_SECRET_KEY_FILE=/etc/dieyun/secret.key
 # 可选：显式指定 core（默认按 <包根>/build/dieyun-core/dieyun-core 探测）
 # DIEYUN_CORE_BIN=/opt/dieyun-headless/build/dieyun-core/dieyun-core
 
-# 可选：本地 Gateway 端口（一个数据目录只跑一个进程，见 §7）
+# 可选：把本地 Gateway 从私有 socket 改成 TCP 回环端口（调试 / 外部工具需要时才设）
+# 默认不占端口：POSIX 用 <DIEYUN_USER_DATA>/gateway.sock，Windows 用命名管道
 # DIECLOUD_GATEWAY_PORT=17330
 ```
 
@@ -454,11 +455,11 @@ headless 的加密密钥来自 `DIEYUN_SECRET_KEY_FILE`（32 字节或 64 位 he
 | MCP 工具报 `MCP_CREDENTIAL_UI_UNAVAILABLE` / 凭据缺失 | 无窗口时无法弹窗填凭据：先在桌面端填好 → 服务器上重填（密钥不同，不能直接拷密文） |
 | MCP / SSH 凭据保存失败（日志提示未配置 `DIEYUN_SECRET_KEY_FILE`） | 密钥文件缺失或无读权限；`ls -l /etc/dieyun/secret.key` 应为 `root:dieyun 0640`（或 `dieyun:dieyun 0600`） |
 | `web_search` / `web_fetch` 报 `fetch failed` | 服务器在代理后：headless 用 Node 自带 fetch，**不读系统代理**。用 `NODE_USE_ENV_PROXY=1` + `HTTPS_PROXY`（Node 支持该能力时生效），或在直连出口上跑 |
-| 同一数据目录起两个进程 | SQLite 并发由 core 兜住，但会各起一份索引监听；启动日志会告警「Gateway 端口已被占用」。**约定：一个 `DIEYUN_USER_DATA` 只跑一个 headless 进程** |
+| 同一数据目录起两个进程 | SQLite 并发由 core 兜住，但会各起一份索引监听；启动日志会告警「Gateway 端点已被占用」。**约定：一个 `DIEYUN_USER_DATA` 只跑一个 headless 进程** |
 | 「检查更新」报**失败：升级了 0 个软件包…有 N 个软件包未被升级** | 这是 apt 的**本地化**总结句被当成了错误（2026-11-08 真机，zh_CN）：结论句 `already the newest version` 被翻译成中文，英文正则认不出。已在代码里修（跑 apt 固定 `LC_ALL=C`，并区分「没配源 / 没这个包 / 不是 dpkg 装的」）。另外那「N 个未被升级」通常是系统包被 apt phasing 延迟，与 dieyun 无关。装上新包后自查：`LC_ALL=C apt-get -s install --only-upgrade dieyun-headless` 应出现 `is already the newest version`；`apt-cache policy dieyun-headless` 版本表里只有 `/var/lib/dpkg/status` 就说明**没配源**（§8.1） |
 | 服务起不来，日志 `listen EADDRINUSE ... 17331` | Web 端口被别的进程占了（服务器上很常见：`remote/run-cli.js` 的 remote-agent 网关按工作区各占 17331、17332…）。在 `/etc/dieyun/headless.env` 里设 `DIEYUN_WEB_PORT=17340`，再 `sudo systemctl restart dieyun-headless` |
 | 启动报 `EACCES: permission denied, mkdir '<工作空间>'` | `dieyun` 用户对工作空间或其**祖先目录**没有通行权。见 §3.3 的 `setfacl -m u:dieyun:x`（工作空间本身要 `rwx`） |
-| 服务在跑时手工跑 `self-test` 报 `EADDRINUSE :17330` | 本地 Gateway 端口被在跑实例占着（自检本身仍会 `OK`，但日志刺眼）。加 `DIECLOUD_GATEWAY_PORT=17399`（必要时再给个临时 `DIEYUN_USER_DATA`） |
+| 服务在跑时手工跑 `self-test` 报 `EADDRINUSE` 或「端点已被占用」 | 本地 Gateway 的私有端点（`<DIEYUN_USER_DATA>/gateway.sock`）被在跑实例听走了（自检本身仍会 `OK`，但日志刺眼）。给自检一个临时 `DIEYUN_USER_DATA`；只有显式设了 `DIECLOUD_GATEWAY_PORT` 时才需要换端口 |
 | 日志里的 `mobile bridge url` 打不开 | 绑的是回环就只回环可达（日志也会照实打印 `http://127.0.0.1:...`）。远程访问用 `ssh -L 17340:127.0.0.1:17340 server`，再在浏览器打开带 `#token=` 的地址 |
 | 与桌面共用同一个 `DIEYUN_USER_DATA` | 不要。桌面用 `%APPDATA%/dieyunagent`，服务器给独立目录（`/var/lib/dieyun-agent`） |
 | `run` 返回空但退出码 0 之外的怪状态 | `run` 无正文时退出码为 2；`--json` 下看 `{"type":"done"}` 里 `content` 与 `aborted` |

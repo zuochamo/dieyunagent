@@ -3,18 +3,20 @@
  *
  * 为什么这不是「另写一个前端」：桌面窗口本来就是浏览器页面
  * （`contextIsolation: true` + `nodeIntegration: false`），渲染层只通过 `window.diecloud`
- * 这层 preload 拿本机能力，RPC 本来就是自己连 Gateway 的 WebSocket
- * （`renderer-gateway.js` 里 `new WebSocket(info.url)`）。所以浏览器里跑它只缺两样：
+ * 这层 preload 拿本机能力。所以浏览器里跑它只缺两样：
  *
  *   1. `window.diecloud` 的替身（只给「在这台服务器上能如实回答」的接口；
  *      渲染层只探能力、不认来源，缺的接口它会走自己的降级分支）；
- *   2. 浏览器能连到 Gateway 的 WS —— Gateway 只听 127.0.0.1，所以这里同源代理 `/gateway`。
+ *   2. 两个同源通道：`/gateway`（Gateway RPC，服务端同进程翻译成 `invokeRpc`）与
+ *      `/ws`（跑一轮 / 内网互通）。浏览器没有 IPC，这是它唯一能到的「本机能力」。
+ *
+ * 注意：渲染层本身**没有**传输分支 —— 桌面与网页都调 `window.diecloud.gatewayRpc`。
  *
  * 手机端页面（`src/mobile/public`）按 430px 设计，宽屏下只能拉宽；桌面界面本来就为宽屏写。
  *
  * 安全边界：`/app/*`、`/node_modules/*`、`/gateway` 都要求**手机端同一个 token**
  * （`?token=` 换成 cookie 之后才允许加载静态资源）—— 否则局域网里谁都能开这个页面、
- * 顺手拿到 Gateway token 去指挥 Agent。
+ * 顺手驱动这台机器上的 Agent。
  */
 const fs = require('fs');
 const path = require('path');
@@ -79,13 +81,13 @@ function parseCookies(header) {
  *    Proxy 冒充成函数会让它走 Electron 专用通道并拿到 null；不暴露则它自己退回浏览器直连 LLM 的分支。
  *    所以这里只暴露真正能回答的四个，其它访问返回 undefined（并在控制台点一次名，方便定位）。
  */
-function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSettings, rustCoreReady, permissions }) {
+function buildShim({ gatewayUrl, webToken, workspacePath, modelSettings, rustCoreReady, permissions }) {
   // 注意：下面是**模板字符串**。里面的注释/文案不能出现反引号，也不能出现美元加花括号
   // （会提前闭合模板或当成插值），否则生成的脚本语法错误 → `/app/` 直接 404。
   // 这个坑踩过两次（2026-11-05）；`scripts/test-headless-desktop-ui.cjs` 会把生成物丢给
   // new Function 解析，改完务必跑它。
   return `/* 由 dieyun-headless 生成：Electron preload 的浏览器替身。
-   桌面窗口的能力来自 preload.js（IPC → Main）；浏览器里换成同源 Gateway WS 代理 + 同源 LLM 转发，
+   桌面窗口的能力来自 preload.js（IPC → Main）；浏览器里换成同源 /gateway 与 /ws 代理 + 同源 LLM 转发，
    只给「能如实回答」的接口，其余保持 undefined —— 渲染层会按能力缺失走自己的降级分支。 */
 (function () {
   // 同源代理地址由页面自己推导：反代 / HTTPS 下自动变 wss://，不信 Host 头
@@ -94,7 +96,6 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
     typeof location !== 'undefined' && location.host
       ? (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/gateway'
       : FALLBACK_URL;
-  const GATEWAY_TOKEN = ${JSON.stringify(gatewayToken)};
   const WORKSPACE_INIT = ${JSON.stringify(String(workspacePath || ''))} || null;
   // 可变：浏览器里点「工作空间 → 本地」会走 desktop.set_workspace 真的换掉服务端工作区根，
   // 换完这一页的默认路径也要跟着变（否则「默认工作空间」标签还是旧目录）。
@@ -184,6 +185,82 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
     );
   }
 
+  /**
+   * 本地 Gateway RPC（替身版）。
+   *
+   * 桌面窗口里这是 preload 的 gatewayRpc → IPC → gateway.invokeRpc；浏览器里没有 IPC，
+   * 连同源 /gateway —— 服务端与 Gateway 同进程，收到帧后直接调同一份 invokeRpc。
+   * 线协议与私有 socket 上的 Gateway 完全一致（auth / call / result / event），
+   * 所以「同一个渲染层、同一条 RPC 语义」在两侧都成立。
+   */
+  const gatewayEventSubs = new Set();
+  let gatewayWs = null;
+  let gatewayWsReady = null;
+  const gatewayPending = new Map();
+  function connectGatewayWs() {
+    if (gatewayWs && gatewayWs.readyState <= 1) return gatewayWsReady;
+    gatewayWsReady = new Promise((resolve, reject) => {
+      const ws = new WebSocket(GATEWAY_URL);
+      gatewayWs = ws;
+      ws.onopen = () => ws.send(JSON.stringify({ v: 1, type: 'auth', token: '', id: 'auth' }));
+      ws.onmessage = (ev) => {
+        let msg = null;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (!msg) return;
+        if (msg.type === 'auth_ok') {
+          resolve(ws);
+          return;
+        }
+        if (msg.type === 'event') {
+          gatewayEventSubs.forEach((cb) => {
+            try {
+              cb({ event: msg.event, data: msg.data || {} });
+            } catch (e) {
+              console.warn('[dieyun-headless] gateway 事件订阅抛错：', e && e.message);
+            }
+          });
+          return;
+        }
+        if (msg.type === 'result') {
+          const key = String(msg.id || '');
+          const box = gatewayPending.get(key);
+          if (!box) return;
+          gatewayPending.delete(key);
+          box.resolve({ ok: !!msg.ok, data: msg.data, error: msg.error });
+        }
+      };
+      ws.onclose = () => {
+        gatewayWs = null;
+        gatewayWsReady = null;
+        const err = new Error('Gateway 通道已断开');
+        gatewayPending.forEach((box) => box.resolve({ ok: false, error: { code: 'GATEWAY_CLOSED', message: err.message } }));
+        gatewayPending.clear();
+      };
+      ws.onerror = () => reject(new Error('无法连接 /gateway'));
+    });
+    return gatewayWsReady;
+  }
+  function gatewayRpc(req) {
+    return connectGatewayWs().then(
+      (ws) =>
+        new Promise((resolve) => {
+          const id = 'g-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+          // 超时由服务端 invokeRpc 执行一次（与桌面端同一口径），这里只等回帧
+          gatewayPending.set(id, { resolve });
+          try {
+            ws.send(JSON.stringify({ v: 1, type: 'call', id, method: String(req.method || ''), params: req.params || {} }));
+          } catch (e) {
+            gatewayPending.delete(id);
+            resolve({ ok: false, error: { code: 'GATEWAY_SEND_FAILED', message: (e && e.message) || String(e) } });
+          }
+        })
+    );
+  }
+
   /** 桌面端 LLM 请求由 Main 代发；这里代发到同源 /llm，由服务端转发到上游（顺带绕开模型端点的 CORS） */
   async function postLlm(url, headers, body, onControl) {
     const ctrl = new AbortController();
@@ -255,14 +332,25 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
 
   const real = {
     // preload: ipcRenderer.invoke('gateway:get-info') → Promise
-    // 「rustCore.enabled」是渲染层判断「循环能不能跑」的依据（isDieyunCoreReady），如实上报
+    // 「rustCore.enabled」是渲染层判断「循环能不能跑」的依据（isDieyunCoreReady），如实上报。
+    // transport 只用于状态显示：这里叫 'web' —— 浏览器没有 IPC，通道是同源 /gateway。
     getGatewayInfo: async () => ({
-      url: GATEWAY_URL,
-      token: GATEWAY_TOKEN,
+      transport: 'web',
+      rpcReady: true,
       rustCore: RUST_CORE_READY ? { enabled: true } : null,
       permissions: PERMISSIONS,
       workspace: WORKSPACE || undefined
     }),
+    // preload: ipcRenderer.invoke('gateway:rpc') —— 本地 Gateway RPC 的唯一通道。
+    // 桌面端走 IPC → gateway.invokeRpc；浏览器里没有 IPC，走同源 /gateway（服务端同进程翻译成
+    // 同一份 invokeRpc）。返回形状与 Main 完全一致：{ ok, data } / { ok:false, error }。
+    gatewayRpc: (req) => gatewayRpc(req || {}),
+    // preload: ipcRenderer.on('gateway:event') → 返回取消订阅函数
+    onGatewayEvent: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      gatewayEventSubs.add(cb);
+      return () => gatewayEventSubs.delete(cb);
+    },
     // preload: ipcRenderer.invoke('permissions:get') → 与 gateway.getPermissions() 同一份。
     // 读服务端现价（改了档位后别的页/别的入口立刻一致），断线时退回上次已知值。
     getPermissions: async () => {
@@ -495,7 +583,7 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
  * @param {{
  *   packageRoot: string,          // 包根（含 src/renderer 与 node_modules）
  *   rendererDir?: string,         // 默认 <packageRoot>/src/renderer
- *   getGatewayInfo: () => {url:string, token:string, port:number},
+ *   getGateway: () => object|null,// LocalGateway 本体：/gateway 的 RPC 与事件都走它
  *   getWebToken: () => string,    // 与手机端共用的访问 token
  *   getWorkspace?: () => string,  // 注入给 getWorkspace()，桌面端是主进程持有的当前工作空间
  *   getModelSettings?: () => object|null,  // 注入给 getModelSettingsFromMain()（含端点/模型/key）
@@ -506,7 +594,6 @@ function createDesktopUi(opts) {
   const packageRoot = opts.packageRoot;
   const rendererDir = opts.rendererDir || path.join(packageRoot, 'src', 'renderer');
   const log = typeof opts.log === 'function' ? opts.log : () => {};
-  const gatewayInfo = opts.getGatewayInfo;
   const webToken = opts.getWebToken;
   /** 收到 /gateway 的 upgrade 才 handleUpgrade；不需要挂到 server 上（路由在 MobileBridge） */
   const upgradeWss = new WebSocketServer({ noServer: true });
@@ -637,11 +724,9 @@ function createDesktopUi(opts) {
     const setCookie = { 'Set-Cookie': `${COOKIE_NAME}=${encodeURIComponent(String(webToken()))}; Path=/; SameSite=Lax; HttpOnly` };
 
     if (url.pathname === SHIM_PATH) {
-      const info = gatewayInfo();
       const body = buildShim({
-        // 同源代理：浏览器连 /gateway，由本服务转发到 127.0.0.1 的 Gateway
+        // 同源代理：浏览器连 /gateway，由本服务在进程内翻译成 gateway.invokeRpc
         gatewayUrl: `ws://${req.headers.host || '127.0.0.1'}/gateway`,
-        gatewayToken: info && info.token ? info.token : '',
         webToken: String(webToken() || ''),
         workspacePath: typeof opts.getWorkspace === 'function' ? opts.getWorkspace() : '',
         modelSettings: typeof opts.getModelSettings === 'function' ? opts.getModelSettings() : null,
@@ -702,8 +787,15 @@ function createDesktopUi(opts) {
   }
 
   /**
-   * 同源 WS 代理：`/gateway` → `ws://127.0.0.1:<gateway.port>`（帧原样转发，鉴权仍由 Gateway 自己判）。
-   * 由 MobileBridge 的 upgrade 路由调用，返回 true 表示「这个 upgrade 归我」。
+   * 同源 `/gateway`：浏览器侧的 Gateway RPC 通道。
+   *
+   * 这里**不再转发**到 `ws://127.0.0.1:<port>` —— 本地 Gateway 默认监听私有 socket /
+   * 命名管道，而且它就在本进程里。浏览器发来的帧（auth / call）直接翻译成同一份
+   * `gateway.invokeRpc`，`event` 由 `gateway.onEvent` 推回去：
+   * 线协议与私有端点上那套完全一致，所以网页与桌面看到的是同一份语义。
+   *
+   * 鉴权在这一层（页面 token / cookie），与 `server.js` 的私有 socket 是同一个判断：
+   * 「能进这个页面的人」才配发 RPC。
    */
   function handleUpgrade(req, socket, head) {
     let url;
@@ -718,44 +810,91 @@ function createDesktopUi(opts) {
       socket.destroy();
       return true;
     }
-    upgradeWss.handleUpgrade(req, socket, head, (client) => {
-      const info = gatewayInfo() || {};
-      const upstream = new WebSocket(`ws://127.0.0.1:${Number(info.port) || 0}`);
-      const pending = [];
-      const shutdown = () => {
-        try {
-          client.close();
-        } catch {
-          /* ignore */
-        }
-        try {
-          upstream.close();
-        } catch {
-          /* ignore */
-        }
-      };
-      client.on('message', (data, isBinary) => {
-        if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
-        else pending.push([data, isBinary]);
-      });
-      upstream.on('open', () => {
-        while (pending.length) {
-          const [data, isBinary] = pending.shift();
-          upstream.send(data, { binary: isBinary });
-        }
-      });
-      upstream.on('message', (data, isBinary) => {
-        if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
-      });
-      client.on('close', shutdown);
-      upstream.on('close', shutdown);
-      client.on('error', shutdown);
-      upstream.on('error', (e) => {
-        log('desktop-ui gateway proxy error: ' + (e && e.message));
-        shutdown();
-      });
-    });
+    upgradeWss.handleUpgrade(req, socket, head, (client) => bridgeGatewaySocket(client));
     return true;
+  }
+
+  /** 把一个浏览器的 WS 连接接到本进程的 Gateway（调用与事件两条腿都在这里）。 */
+  function bridgeGatewaySocket(client) {
+    const gateway = typeof opts.getGateway === 'function' ? opts.getGateway() : null;
+    const send = (obj) => {
+      if (client.readyState !== WebSocket.OPEN) return;
+      try {
+        client.send(JSON.stringify(obj));
+      } catch {
+        /* ignore */
+      }
+    };
+    if (!gateway || typeof gateway.invokeRpc !== 'function') {
+      send({ v: 1, type: 'error', id: null, error: { code: 'GATEWAY_UNAVAILABLE', message: '本地 Gateway 未启动' } });
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    const unsubscribe =
+      typeof gateway.onEvent === 'function'
+        ? gateway.onEvent((payload) => send({ v: 1, type: 'event', event: payload.event, data: payload.data }))
+        : null;
+    // 页面 token 已经在 HTTP 层验过；auth 帧只用来对齐协议（客户端连上就发）
+    let authed = false;
+    client.on('message', async (raw) => {
+      let msg;
+      try {
+        msg = JSON.parse(String(raw));
+      } catch {
+        send({ v: 1, type: 'error', id: null, error: { code: 'BAD_JSON', message: 'invalid json' } });
+        return;
+      }
+      const id = msg && msg.id != null ? msg.id : null;
+      if (msg && msg.type === 'auth') {
+        authed = true;
+        send({ v: 1, type: 'auth_ok', id });
+        return;
+      }
+      if (!authed) {
+        send({ v: 1, type: 'error', id, error: { code: 'NOT_AUTHED', message: 'send auth first' } });
+        return;
+      }
+      if (msg && msg.type !== 'call') {
+        send({ v: 1, type: 'error', id, error: { code: 'UNKNOWN_TYPE', message: String(msg && msg.type) } });
+        return;
+      }
+      try {
+        const data = await gateway.invokeRpc(String(msg.method || ''), msg.params || {});
+        send({ v: 1, type: 'result', id, ok: true, data });
+      } catch (err) {
+        send({
+          v: 1,
+          type: 'result',
+          id,
+          ok: false,
+          error: {
+            code: (err && err.code) || 'EXEC_ERROR',
+            message: (err && err.message) || String(err),
+            ...(err && typeof err.retryable === 'boolean' ? { retryable: err.retryable } : {}),
+            ...(err && err.suggestedFix ? { suggestedFix: String(err.suggestedFix) } : {})
+          }
+        });
+      }
+    });
+    const shutdown = () => {
+      if (unsubscribe) unsubscribe();
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+    };
+    client.on('close', () => {
+      if (unsubscribe) unsubscribe();
+    });
+    client.on('error', (e) => {
+      log('desktop-ui gateway socket error: ' + (e && e.message));
+      shutdown();
+    });
   }
 
   return { handleHttp, handleUpgrade };

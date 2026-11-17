@@ -43,7 +43,7 @@ const USAGE = `dieyun-headless —— 无界面运行叠云 Agent（终端 / 一
   DIEYUN_USER_DATA        数据目录（优先于 --user-data）
   DIEYUN_SECRET_KEY_FILE  凭据加密密钥文件（MCP / SSH / 频道 Secret 需要；缺失时凭据不可写）
   DIEYUN_CORE_BIN         dieyun-core 可执行文件路径
-  DIECLOUD_GATEWAY_PORT   Gateway 本地端口（同一 userData 只允许一个实例）
+  DIECLOUD_GATEWAY_PORT   把本地 Gateway 从私有 socket 改成 TCP 回环端口（调试 / 外部工具才需要）
 `;
 
 function fail(message) {

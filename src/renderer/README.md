@@ -72,7 +72,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `renderer-gateway.js` | `gatewayCall(method, params)` |
+| `renderer-gateway.js` | `gatewayCall(method, params)` —— 唯一 RPC 出口，走 `window.diecloud.gatewayRpc`（桌面 = Main IPC，网页 = shim 的同源 `/gateway`）。**本层不再持有 WebSocket** |
 | `renderer-workspace-ssh.js` | SSH 工作区 UI |
 | `renderer-session-view-state.js` | 视图 ↔ 会话绑定 |
 

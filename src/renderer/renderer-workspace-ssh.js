@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, currentSessionId, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, refreshProductsPanelIfActive, bindCurrentSessionWorkspace, restartTerminalSession, showAgentToast, connectRemoteGatewayLocked, resetRemoteGatewayClient, refreshRemoteGatewayMeta, refreshHistoryList, showOverlay, parentRemotePath, showTextPrompt, setSidePanelTab, getSidePanelTab, consumePendingSshTabRequest */
+/* global window, document, $, escapeHtml, currentSessionId, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderArtifactsList, refreshProductsPanelIfActive, bindCurrentSessionWorkspace, restartTerminalSession, showAgentToast, resetRemoteGatewayClient, refreshRemoteGatewayMeta, refreshHistoryList, showOverlay, parentRemotePath, showTextPrompt, setSidePanelTab, getSidePanelTab, consumePendingSshTabRequest */
 'use strict';
 
 const wsApi = window.diecloud || {};

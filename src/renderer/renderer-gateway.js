@@ -1,20 +1,24 @@
-/* global WebSocket, crypto, $ */
+/* global $, uiText */
+/**
+ * Gateway RPC 客户端（唯一实现）。
+ *
+ * 传输只有一条：`window.diecloud.gatewayRpc` → Main IPC → `gateway.invokeRpc`。
+ * Renderer **不再持有 WebSocket** —— 本地 Gateway 默认监听私有 socket / 命名管道
+ * （见 `src/gateway/local-endpoint.js`），Chromium 连不了；IPC 也没有「连接」这个概念，
+ * 断了就是这次调用失败，不需要重连状态机。
+ *
+ * 网页替身（headless `--web` 的 `/app/`）由 `src/headless/desktop-ui.js` 的 shim 提供
+ * 同名 `gatewayRpc`（同源 WS → 服务进程内 `invokeRpc`）：渲染层两侧看到的是同一个接口。
+ */
 const gatewayApi = window.diecloud || {};
 
 const gwState = {
-  ws: null,
+  /** RPC 通道可用（Main 已装配 Gateway）。名字沿用历史：调用点判的是「能不能发 RPC」 */
   authed: false,
-  pending: new Map(),
-  port: null
-};
-
-/** 保留供状态清理；Renderer 工具 RPC 一律走 Local Gateway */
-const remoteGwState = {
-  ws: null,
-  authed: false,
-  pending: new Map(),
+  /** 端点形态（tcp / unix / pipe），只用于状态显示 */
+  transport: null,
   port: null,
-  active: false
+  rustCore: null
 };
 
 /** 对话记忆、权限等必须走本地 Gateway，不能经 SSH 远程隧道 */
@@ -26,7 +30,7 @@ function isLocalOnlyMethod(method) {
 }
 
 function isLocalGatewayReady() {
-  return !!(gwState.ws && gwState.ws.readyState === WebSocket.OPEN && gwState.authed);
+  return !!(gwState.authed && typeof gatewayApi.gatewayRpc === 'function');
 }
 
 function updateHelpStatsGatewayStatus() {
@@ -159,182 +163,54 @@ function gatewayCallTimeoutMs(method, overrideMs) {
   return DEFAULT_GATEWAY_RPC_TIMEOUT_MS;
 }
 
-function rawGatewayCall(state, method, params, options = {}) {
-  return new Promise((resolve, reject) => {
-    if (!state.ws || state.ws.readyState !== WebSocket.OPEN || !state.authed) {
-      reject(new Error('Gateway 未就绪'));
-      return;
-    }
-    const id = crypto.randomUUID();
-    const timeoutMs = gatewayCallTimeoutMs(method, options.timeoutMs);
-    let timer = null;
-    const settle = (fn, value) => {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      fn(value);
-    };
-    state.pending.set(id, {
-      resolve: (data) => settle(resolve, data),
-      reject: (err) => settle(reject, err)
-    });
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        const box = state.pending.get(id);
-        if (!box) return;
-        state.pending.delete(id);
-        box.reject(new Error(`Gateway RPC 超时: ${method} (${Math.round(timeoutMs / 1000)}s)`));
-      }, timeoutMs);
-    }
-    try {
-      state.ws.send(JSON.stringify({ v: 1, type: 'call', id, method, params }));
-    } catch (e) {
-      state.pending.delete(id);
-      if (timer) clearTimeout(timer);
-      reject(e);
-    }
-  });
+/**
+ * Main 已经把 code / retryable / suggestedFix 一起送回来（工具失败契约的一半），
+ * 这里不许退化成「只剩一条 message」：调用方靠 code 决定重开对话 / 重试 / 打住。
+ */
+function gatewayRpcError(info) {
+  const box = info && typeof info === 'object' ? info : {};
+  const err = new Error(box.message || 'RPC 失败');
+  if (box.code) err.code = String(box.code);
+  if (typeof box.retryable === 'boolean') err.retryable = box.retryable;
+  if (box.suggestedFix) err.suggestedFix = String(box.suggestedFix);
+  return err;
 }
 
-function handleGatewayMessage(state, ev) {
-  let msg;
+/**
+ * 唯一 RPC 出口。超时只在 Main 侧 `invokeRpc` 执行一次（同一份 `gatewayCallTimeoutMs` 口径），
+ * 这里不再叠定时器：两层超时只会让「到底谁先放弃」变得不可解释。
+ */
+async function rawGatewayCall(method, params, options = {}) {
+  if (typeof gatewayApi.gatewayRpc !== 'function') {
+    throw new Error('Gateway RPC 通道缺失（preload 未暴露 gatewayRpc）：请重启客户端或重建 renderer bundle');
+  }
+  const timeoutMs = gatewayCallTimeoutMs(method, options.timeoutMs);
+  let res;
   try {
-    msg = JSON.parse(ev.data);
-  } catch {
-    return;
+    res = await gatewayApi.gatewayRpc({
+      method,
+      params: params && typeof params === 'object' ? params : {},
+      timeoutMs
+    });
+  } catch (e) {
+    // IPC 层失败（Main 退出 / 通道被关）：没有「重连」可言，就是这次调用不可用
+    throw new Error(`本地 Agent 通道不可用：${(e && e.message) || e}`);
   }
-  if (msg.type !== 'result') return;
-  const id = msg.id;
-  const box = state.pending.get(id);
-  if (!box) return;
-  state.pending.delete(id);
-  if (msg.ok) box.resolve(msg.data);
-  else {
-    // 服务端刻意把 code / retryable / suggestedFix 一起送回来（见 gateway/server.js
-    // 「跨 WebSocket 传的时候不许只剩一条 message」），这里不能把它们丢掉：
-    // 调用方（发送路径、工具层）靠 code 决定「重开对话 / 重试 / 就此打住」。
-    const info = msg.error && typeof msg.error === 'object' ? msg.error : {};
-    const err = new Error(info.message || 'RPC 失败');
-    if (info.code) err.code = String(info.code);
-    if (typeof info.retryable === 'boolean') err.retryable = info.retryable;
-    if (info.suggestedFix) err.suggestedFix = String(info.suggestedFix);
-    box.reject(err);
-  }
+  if (res && res.ok) return res.data;
+  throw gatewayRpcError(res && res.error);
 }
 
-async function connectOneGateway(state, info, label) {
-  state.authed = false;
-  if (!info || !info.url || !info.token) return false;
-
-  const maxAttempts = 6;
-  let lastErr = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, 250 * attempt));
-      if (state === gwState && gatewayApi.getGatewayInfo) {
-        try {
-          const fresh = await gatewayApi.getGatewayInfo();
-          const localInfo = (fresh && fresh.local) || fresh;
-          if (localInfo && localInfo.url && localInfo.token) info = localInfo;
-        } catch {
-          // ignore refresh errors between retries
-        }
-      }
+/** Gateway 事件（原来靠 WebSocket 的 `type:'event'` 帧送来，现在由 Main 转发一次） */
+if (typeof gatewayApi.onGatewayEvent === 'function') {
+  gatewayApi.onGatewayEvent((payload) => {
+    const p = payload || {};
+    if (p.event !== 'diagnostics.store_updated') return;
+    if (typeof refreshWorkspaceProblemsPanel === 'function') {
+      void refreshWorkspaceProblemsPanel({
+        workspaceRoot: p.data && p.data.workspaceRoot ? p.data.workspaceRoot : null
+      });
     }
-    try {
-      await connectOneGatewayOnce(state, info, label);
-      return true;
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error(`${label} WebSocket 错误`);
-}
-
-function connectOneGatewayOnce(state, info, label) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(info.url);
-    state.ws = ws;
-    let settled = false;
-    const finish = (fn, value) => {
-      if (settled) return;
-      settled = true;
-      fn(value);
-    };
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ v: 1, type: 'auth', token: info.token }));
-    };
-
-    ws.onmessage = (ev) => {
-      let m;
-      try {
-        m = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      if (m.type === 'auth_ok') {
-        state.authed = true;
-        if (state === gwState) updateHelpStatsGatewayStatus();
-        finish(resolve);
-        return;
-      }
-      if (m.type === 'event' && m.event === 'diagnostics.store_updated') {
-        if (state === gwState && typeof refreshWorkspaceProblemsPanel === 'function') {
-          void refreshWorkspaceProblemsPanel({
-            workspaceRoot: m.data && m.data.workspaceRoot ? m.data.workspaceRoot : null
-          });
-        }
-        return;
-      }
-      handleGatewayMessage(state, ev);
-    };
-
-    ws.onerror = () => {
-      finish(reject, new Error(`${label} WebSocket 错误（端口 ${info.port || '?'} 无响应，请重启应用）`));
-    };
-
-    ws.onclose = (ev) => {
-      // 旧 socket 关闭时勿清掉重连后的新连接
-      if (state.ws && state.ws !== ws) return;
-      if (!state.authed && !settled) {
-        const hint =
-          ev && ev.code === 1006
-            ? `${label} 连接被拒绝（Gateway 可能未启动或端口 ${info.port || '?'} 被占用）`
-            : `${label} WebSocket 已关闭`;
-        finish(reject, new Error(hint));
-        return;
-      }
-      state.authed = false;
-      if (state.ws === ws) state.ws = null;
-      for (const [, box] of state.pending) {
-        box.reject(new Error(`${label} 已断开`));
-      }
-      state.pending.clear();
-      if (state === gwState) {
-        setGatewayMeta(typeof uiText === 'function' ? uiText('gateway_disconnected', 'Gateway 未连接') : 'Gateway 未连接');
-      }
-    };
   });
-}
-
-function closeGatewayState(state) {
-  const wasLocal = state === gwState;
-  state.authed = false;
-  if (state.ws) {
-    try {
-      state.ws.close();
-    } catch {
-      // ignore
-    }
-  }
-  state.ws = null;
-  for (const [, box] of state.pending) {
-    box.reject(new Error('Gateway 已断开'));
-  }
-  state.pending.clear();
-  if (wasLocal) updateHelpStatsGatewayStatus();
 }
 
 async function ensureLocalGatewayReady() {
@@ -346,74 +222,73 @@ async function connectLocalGatewayLocked() {
   return withGatewayConnectLock(() => connectLocalGatewayOnly());
 }
 
-async function connectRemoteGatewayLocked() {
-  return refreshRemoteGatewayMeta();
-}
-
 function gatewayCall(method, params, options) {
   let opts = {};
   if (options != null && typeof options === 'object') opts = options;
   else if (typeof options === 'number' && Number.isFinite(options) && options > 0) {
     opts = { timeoutMs: options };
   }
-  if (isLocalOnlyMethod(method)) {
-    return ensureLocalGatewayReady().then(() => rawGatewayCall(gwState, method, params, opts));
-  }
   if (!isLocalGatewayReady()) {
-    return ensureLocalGatewayReady().then(() => rawGatewayCall(gwState, method, params, opts));
+    return ensureLocalGatewayReady().then(() => rawGatewayCall(method, params, opts));
   }
-  return rawGatewayCall(gwState, method, params, opts);
+  return rawGatewayCall(method, params, opts);
 }
+
+/** `gateway:get-info` 的形状：网关在时是 `{...local, local, remote, rustCore}`，
+ *  网页替身直接给扁平的一份。挑出「本地那一份」，都没有就是 null（还没装配）。 */
+function pickLocalGatewayInfo(info) {
+  if (!info || typeof info !== 'object') return null;
+  if (info.local && typeof info.local === 'object') return info.local;
+  if (info.transport || info.url || info.permissions) return info;
+  return null;
+}
+
+const GATEWAY_INFO_MAX_ATTEMPTS = 5;
 
 async function connectLocalGatewayOnly() {
   if (!gatewayApi.getGatewayInfo) {
     setGatewayMeta('无接口');
     throw new Error('无接口');
   }
-  const info = await gatewayApi.getGatewayInfo();
-  const localInfo = (info && info.local) || info;
-  if (!localInfo || !localInfo.url || !localInfo.token) {
+  if (typeof gatewayApi.gatewayRpc !== 'function') {
+    setGatewayMeta('RPC 通道缺失');
+    throw new Error('Gateway RPC 通道缺失（preload 未暴露 gatewayRpc）');
+  }
+  // Main 在 whenReady 里装配 Gateway，窗口有可能先到：这是启动期的一次短等，
+  // 不是重连状态机（IPC 没有连接可重连，下面的每次调用自己就是一次尝试）。
+  let info = null;
+  let local = null;
+  for (let attempt = 0; attempt < GATEWAY_INFO_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 200 * attempt));
+    info = await gatewayApi.getGatewayInfo();
+    local = pickLocalGatewayInfo(info);
+    if (local) break;
+  }
+  if (!local) {
     setGatewayMeta('未启动');
     throw new Error('本地 Gateway 未启动');
   }
-  if (localInfo.listening === false) {
-    setGatewayMeta(`启动中 :${localInfo.port || ''}…`);
-    await new Promise((r) => setTimeout(r, 400));
-    const retry = await gatewayApi.getGatewayInfo();
-    const retryLocal = (retry && retry.local) || retry;
-    if (retryLocal && retryLocal.url && retryLocal.token) {
-      Object.assign(localInfo, retryLocal);
-    }
-  }
-  if (isLocalGatewayReady() && gwState.port === localInfo.port) {
-    setGatewayMeta(`已连接 :${localInfo.port}`);
-    return;
-  }
-  closeGatewayState(gwState);
-  await connectOneGateway(gwState, localInfo, '本地 Gateway');
-  gwState.port = localInfo.port;
+  gwState.authed = true;
+  gwState.transport = local.transport || 'ipc';
+  gwState.port = local.port || null;
   gwState.rustCore = info.rustCore || null;
-  setGatewayMeta(`已连接 :${localInfo.port}`);
-  await refreshRemoteGatewayMeta();
-}
-
-async function connectRemoteGatewayOnly() {
-  remoteGwState.active = false;
-  closeGatewayState(remoteGwState);
+  const label = gwState.port ? `已连接 :${gwState.port}` : '已连接';
+  setGatewayMeta(label);
+  updateHelpStatsGatewayStatus();
   await refreshRemoteGatewayMeta();
 }
 
 async function connectGateway() {
-  // 必须走连接锁：启动期 connectGateway 与其它路径的 ensureLocalGatewayReady 会并发进入，
-  // 两边都按 isLocalGatewayReady()（只认 OPEN）判定为「未连接」，后到的那个就会
-  // closeGatewayState 掉仍在 CONNECTING 的 socket —— 即
-  // 「WebSocket is closed before the connection is established」。
+  // 走连接锁：启动期 connectGateway 与 ensureLocalGatewayReady 会并发进入，
+  // 两边都按「还没连上」判定，后到的那个会把刚取到的端点信息覆盖成半份（端口被丢）。
   await connectLocalGatewayLocked();
 }
 
+/**
+ * 远端 Gateway 客户端已不存在（远端工具一律经 Local Gateway + `runWorkspaceRoot`）。
+ * 这里保留补位：真正要清的是「远端 core 就绪」的缓存，切换工作空间后要重新问一次。
+ */
 function resetRemoteGatewayClient() {
-  remoteGwState.active = false;
-  closeGatewayState(remoteGwState);
   if (typeof invalidateRemoteCoreReadyCache === 'function') invalidateRemoteCoreReadyCache();
 }
 

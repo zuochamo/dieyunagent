@@ -110,11 +110,18 @@ flowchart LR
 
 ### 3.1 连接协议（v1）
 
-1. 客户端 WebSocket 连 `127.0.0.1:17330`（可用环境变量 `DIECLOUD_GATEWAY_PORT` 改端口）。
-2. 首包发送 `{ type: 'auth', token }`，token 存在 `%APPDATA%/dieyunagent/gateway-token.txt`。
-3. 之后 `{ type: 'call', id, method, params }` → `{ type: 'result', id, ok, data|error }`。
+渲染进程不再自建连接：`gatewayCall(method, params)` 走 `window.diecloud.gatewayRpc` →
+Main IPC → `LocalGateway#invokeRpc`。本地 Gateway 默认监听**私有端点**
+（POSIX `<userData>/gateway.sock`，Windows 命名管道），鉴权边界是文件系统权限；
+TCP + token 只在显式设 `DIECLOUD_GATEWAY_PORT` 时保留（调试 / 外部工具）。端点唯一来源：
+`src/gateway/local-endpoint.js`。
 
-渲染进程封装：`gatewayCall(method, params)`（`renderer.js`）。
+端点上的线协议：
+
+1. 连 socket / 命名管道（或显式 TCP）。
+2. 首包可选 `{ type: 'auth', token }` —— 私有端点直接回 `auth_ok`（能连上即已授权）。
+3. 之后 `{ type: 'call', id, method, params }` → `{ type: 'result', id, ok, data|error }`；
+   服务端主动推 `{ type: 'event', event, data }`。
 
 ### 3.2 RPC 命名空间
 
