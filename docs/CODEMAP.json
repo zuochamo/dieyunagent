@@ -1875,6 +1875,18 @@
       "tests": [
         "test:unit"
       ]
+    },
+    {
+      "prefix": "src/renderer/",
+      "tests": [
+        "check:renderer"
+      ]
+    },
+    {
+      "prefix": "scripts/check-renderer-critical.py",
+      "tests": [
+        "check:renderer"
+      ]
     }
   ],
   "suites": {

@@ -61,6 +61,26 @@ BOOTSTRAP_DOMAINS = [
     "DieyunAgent",
 ]
 
+# agent-bundle-entry.js 注册的命名空间里，**渲染层真在吃它的全局**的那些。
+# 缺一个不会报构建错、也不会被下面的 all_defs 抓到（这些全局是 bundle 运行时挂上去的），
+# 只会在真跑起来时炸在第一处调用点 —— 2026-11-17 就是这样：删 SSE 注册时连带删掉了后面
+# 一百多行 register，点开历史会话报 `unpackMessageMeta is not defined`（DieyunSessionContext 没了）。
+CRITICAL_BUNDLE_NAMESPACES = [
+    "DieyunSessionContext",
+    "DieyunSessionTranscript",
+    "DieyunAgentSystemPrompt",
+    "DieyunContextSignals",
+    "DieyunRunEvents",
+    "DieyunGuardrailsShared",
+    "DieyunToolCatalog",
+    "DieyunPlannerToolFilters",
+    "DieyunAgentRoundText",
+    "DieyunReviewerJson",
+    "DieyunReasoningBackfill",
+]
+
+BUNDLE_ENTRY = DIR / "agent" / "agent-bundle-entry.js"
+
 
 def script_paths():
     html = HTML.read_text(encoding="utf-8")
@@ -138,13 +158,40 @@ def check_bootstrap():
     return missing
 
 
+def check_bundle_registration():
+    """agent-bundle-entry.js：require 了却没 register，或者关键命名空间整块没了。
+
+    这条栏杆的存在理由：bundle 层把 `compat` 名单镜像成 window.* 全局，删注册**不会**报错
+    （没人 require、没被 all_defs 扫到），只会在真跑起来时炸在第一处调用点。
+    """
+    if not BUNDLE_ENTRY.exists():
+        return ["missing agent/agent-bundle-entry.js"]
+    text = BUNDLE_ENTRY.read_text(encoding="utf-8")
+    missing = []
+    requires = re.findall(r"^const (\w+) = require\('([^']+)'\);", text, re.M)
+    reg_at = text.find("register(")
+    region = text[reg_at:] if reg_at >= 0 else ""
+    for name, module in requires:
+        if not re.search(rf"\b{re.escape(name)}\b", region):
+            missing.append(
+                f"agent-bundle-entry: require 了 {module}（{name}）但 register 没有引用它 —— "
+                f"该模块对应的 window.* 全局会静默消失"
+            )
+    for ns in CRITICAL_BUNDLE_NAMESPACES:
+        if not re.search(rf"register\(\s*['\"]{re.escape(ns)}['\"]", text):
+            missing.append(f"agent-bundle-entry: 缺少命名空间注册 {ns}")
+    return missing
+
+
 def main():
     defs = all_defs()
     missing = [name for name in CRITICAL if name not in defs]
     ns_missing = check_namespaces()
     boot_missing = check_bootstrap()
+    bundle_missing = check_bundle_registration()
     missing.extend(ns_missing)
     missing.extend(boot_missing)
+    missing.extend(bundle_missing)
     if missing:
         print("Missing critical symbols:")
         for m in missing:
@@ -153,6 +200,7 @@ def main():
     print(f"OK: {len(CRITICAL)} critical symbols present")
     print(f"OK: {len(NAMESPACE_CRITICAL)} namespace exports registered")
     print(f"OK: {len(BOOTSTRAP_DOMAINS)} bootstrap domains registered")
+    print(f"OK: {len(CRITICAL_BUNDLE_NAMESPACES)} critical agent-bundle namespaces registered")
     return 0
 
 

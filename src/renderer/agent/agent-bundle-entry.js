@@ -185,3 +185,113 @@ register('DieyunTokenEstimate', {
   compat: ['estimateTextTokens', 'estimateMessagesTokens', 'estimateToolsTokens', 'estimateFullContextUsage']
 });
 
+// 思考占位补全单一来源（Main 直接 require 同名模块）；Renderer 消费 window.ReasoningBackfill。
+register(
+  'DieyunReasoningBackfill',
+  { ...reasoningBackfill, ReasoningBackfill: reasoningBackfill },
+  { compat: ['ReasoningBackfill'] }
+);
+
+// 改造前 window.GuardrailsShared = 整个导出对象（键名与导出名不同名），此处显式补上。
+register('DieyunGuardrailsShared', { ...guardrailsShared, GuardrailsShared: guardrailsShared }, {
+  compat: ['GuardrailsShared']
+});
+
+register('DieyunToolCatalog', toolCatalog, { compat: ['DieyunToolCatalog'] });
+register('DieyunToolClassify', toolClassify, { compat: ['DieyunToolClassify'] });
+// Explore / Shell / Build 工具白名单的唯一来源（Main 侧由 planner / loop runner 直接 require）。
+// 渲染器勿再自抄一份：renderer-tool-defs.js 直接消费这里镜像出的兼容全局。
+register('DieyunPlannerToolFilters', plannerToolFilters, {
+  compat: [
+    'EXPLORE_TOOL_NAMES',
+    'SHELL_TOOL_NAMES',
+    'buildExploreTools',
+    'buildShellTools',
+    'buildBuildTools'
+  ]
+});
+// 改造前 window.AgentRoundText = 整个导出对象（键名与导出名不同名），此处显式补上。
+register('DieyunAgentRoundText', { ...agentRoundText, AgentRoundText: agentRoundText }, {
+  compat: ['AgentRoundText']
+});
+
+register('DieyunRunEvents', runEvents, {
+  compat: [
+    'AGENT_RUN_EVENT_TYPES',
+    'createAgentRunEvent',
+    'normalizeAgentRunEvent',
+    'agentRunEventFromTrace',
+    'applyAgentRunEventToLive',
+    'agentRunEventFromServicePayload'
+  ]
+});
+
+register('DieyunSessionTranscript', sessionTranscript, { compat: ['transcriptFromMessages'] });
+
+register('DieyunSessionContext', sessionContext, {
+  compat: [
+    'MESSAGE_META_PREFIX',
+    'packMessageMeta',
+    'unpackMessageMeta',
+    'slimAttachmentsForPersist',
+    'persistableAssistantText',
+    'messagesForTranscript',
+    'assistantTextFromMessage',
+    'buildSessionChatHistoryFromMessages',
+    'buildCompletionMessagesFromHistory',
+    'trimMessagesToCharBudget',
+    'selectHistoryMessagesForSession',
+    'cloneHistoryMessages',
+    'buildCurrentTaskText',
+    'SESSION_HISTORY_HEADER',
+    'TURN_RIDE_HEADER',
+    'COMPACTION_ARCHIVE_HEADER',
+    'FOLDED_HISTORY_HEADER',
+    'foldOlderCompletionMessages',
+    'formatCompactionArchiveBlock',
+    'mergeCompactionBlockIntoTurnRide',
+    'isSyntheticLoopUserContent',
+    'extractBookPrefixMessages',
+    'extractInTurnLoopTail',
+    'applyTurnRideToCompletionMessages',
+    'reprojectContinueLoopMessages',
+    'joinPromptChunks',
+    'packSystemPrompt',
+    'unwrapSystemPromptPack',
+    'attachTurnRideToUserContent',
+    'isWeakAssistantReply'
+  ]
+});
+
+register('DieyunAgentSystemPrompt', agentSystemPrompt, {
+  compat: ['buildCoreAgentRules', 'formatSystemTimeChunk', 'assembleSystemPrompt']
+});
+
+// 「消息结构信号 → 是否注入代码 / 是否自动检索」判定的唯一来源（src/agent/context-signals.js）。
+// Main 的 system-prompt-prep.js 直接 require；Renderer 的
+// renderer-editor-context.js / renderer-agent-system-message.js 消费这里的兼容全局，
+// 勿再自抄 textHasCodebaseMention / extractPathHintsFromText / formatCodebaseBlock。
+// 注：shouldInjectCodeContext 不进 compat —— Renderer 需先把 Monaco 状态适配成
+// snapshot.editor，故 renderer-context-engine.js 只保留 shouldInjectCodeContext 一层薄适配器。
+// `shouldAutoCodebaseSearch` 必须进 compat：Renderer 决定「这轮要不要碰代码索引」时
+// 用的是**同一个**判定（否则两侧漂移，索引又会在真实会话里 0 次被用到）。
+register('DieyunContextSignals', { ...contextSignals, ContextSignals: contextSignals }, {
+  compat: [
+    'ContextSignals',
+    'textHasCodebaseMention',
+    'extractPathHintsFromText',
+    'extractCodebasePathsFromBlock',
+    'formatCodebaseBlock',
+    'shouldAutoCodebaseSearch'
+  ]
+});
+
+register('DieyunReviewerJson', reviewerJson, {
+  compat: [
+    'closeTruncatedJson',
+    'extractReviewerJson',
+    'inferReviewerFromPartial',
+    'collectReviewerFileDiffs'
+  ]
+});
+
