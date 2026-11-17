@@ -94,6 +94,20 @@
         <section class="tab-panel tab-panel-agent active" data-panel="agent">
           <div class="agent-main" id="agent-main">
           <div class="agent-chat-column">
+          <!-- 它说 / 它醒来写了：生命感动起来的时候，那一句原文在这里留一行。
+               为什么放在主窗口：出声是说给在场的人听的，而人可能不在、可能没听清 —— 得能回看；
+               心跳轮不推给界面，它半夜写的东西本来没人看得见，所以同一行也显示「它醒来写了」。
+               只是展示：**不进会话账本、不进模型上下文**（它不接管你的对话线）。
+               数据来自 `alive:badge` 的 `lastVoiceText`/`lastVoiceAt` 与
+               `lastWakeText`/`lastWakeTextAt`（同一份 state.json），
+               渲染只有 `renderer-alive.js#renderAliveSpeech` 一处。 -->
+          <div class="alive-speech-bar" id="alive-speech-bar" hidden>
+            <span class="alive-speech-text" id="alive-speech-text"></span>
+            <span class="alive-speech-actions">
+              <button type="button" class="ghost-btn alive-speech-action" id="alive-speech-log" title="看它说过/做过的全部记录（设置 → 拟态 → 日志）">日志</button>
+              <button type="button" class="ghost-btn alive-speech-action" id="alive-speech-dismiss" title="收起这一条（下次它再动起来会重新出现）">✕</button>
+            </span>
+          </div>
           <!-- 目标条：本会话有目标时贴在气泡区上方一行（目标是什么 · 第几轮 · 最近一条检查事实）。
                点击展开就地看全部检查事实与清单；按钮只有「继续 / 停止」。
                数据来自 `agent:session-goal-panel` 的同一份视图（`renderer-goal-panel.js` 渲染），
@@ -350,12 +364,12 @@
                     <circle cx="16" cy="9.6" r="1.15" fill="currentColor"/>
                   </svg>
                 </button>
-                <button type="button" class="side-panel-rail-btn" data-side-tab="alive" title="生命 · 它在你不看时做了什么" aria-label="生命">
-                  <!-- 心跳：一条基线 + 一个尖峰；右上角小点是"最近一小时它有动静" -->
+                <button type="button" class="side-panel-rail-btn" id="alive-rail-btn" data-side-tab="alive" title="生命 · 它在你不看时做了什么" aria-label="生命">
+                  <!-- 心跳：一条基线 + 一个尖峰，**和其它 rail 图标完全一样**（同色、不动）。
+                       2026-11-13 按用户要求删掉了律动（动画）与相位色；相位只写在工具提示里。 -->
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                     <path d="M2.6 13.2h4.2l2.2-5.4 3.1 10 2.4-6.2h2.1l1.5 1.6h1.9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
                   </svg>
-                  <span class="side-panel-rail-badge" id="alive-rail-badge" hidden></span>
                 </button>
                 <button type="button" class="side-panel-rail-btn" data-side-tab="subagents" title="子代理" aria-label="子代理">
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
@@ -509,6 +523,7 @@
                     <input type="text" id="browser-url-input" class="browser-url-input" placeholder="https://… 或 index.html" spellcheck="false" autocomplete="off" />
                     <button type="button" class="browser-toolbar-btn browser-headed-toggle" id="browser-headed-toggle" title="Playwright 可见窗口（后备引擎）" aria-label="Playwright 可见窗口" aria-pressed="false">PW</button>
                     <span class="browser-status-badge" id="browser-status-badge">就绪</span>
+                    <button type="button" class="browser-toolbar-btn browser-viewport-chip" id="browser-viewport-chip" hidden>视口 —</button>
                   </div>
                   <div class="side-tabstrip" id="browser-tabstrip" hidden>
                     <div class="side-tabstrip-list" id="browser-tabstrip-list" role="tablist" aria-label="浏览器标签"></div>
@@ -644,18 +659,49 @@
                     <button type="button" class="ghost-btn side-panel-pane-action" id="alive-pane-refresh" title="刷新体征、曲线与事件">刷新</button>
                     <button type="button" class="ghost-btn side-panel-pane-action" id="alive-pane-settings" title="打开「设置 → 拟态 → 生命」（开关 / 感官 / 设备）">设置</button>
                   </div>
-                  <div class="agent-scroll alive-pane-body">
-                    <p class="channels-footnote" id="alive-pane-detail"></p>
-                    <p class="channels-footnote" id="alive-pane-budget"></p>
-                    <p class="channels-footnote" id="alive-pane-fatigue"></p>
-                    <p class="channels-footnote" id="alive-pane-session"></p>
-                    <p class="channels-footnote" id="alive-pane-loops"></p>
-                    <div class="alive-trend" id="alive-pane-trend">还没有足够的样本（心跳跑满两跳后才会有曲线）</div>
-                    <p class="channels-footnote" id="alive-pane-trend-note"></p>
-                    <h3 class="settings-subsection-title">最近发生了什么</h3>
-                    <pre class="channels-footnote alive-pane-events" id="alive-pane-events">还没有事件。</pre>
-                    <h3 class="settings-subsection-title">抽屉（note.md）</h3>
-                    <pre class="channels-footnote alive-pane-events" id="alive-pane-note">（还没有写东西）</pre>
+                  <!-- 两段式：体征/趋势（按内容长）→ 记录区（吃掉余量）。
+                       记录区里「事件」与「抽屉」是**同一个位置的两组横向标签**（后者原来单独占一块，
+                       于是面板里同一份"它写过什么"出现了两个入口，也把事件流挤成半截窗口）。
+                       标签壳归渲染层文案，切换只切可见性（renderer-alive.js#applyAliveTab）。 -->
+                  <div class="alive-pane-body">
+                    <div class="alive-pane-vitals">
+                      <p class="channels-footnote" id="alive-pane-detail"></p>
+                      <p class="channels-footnote" id="alive-pane-budget"></p>
+                      <p class="channels-footnote" id="alive-pane-fatigue"></p>
+                      <p class="channels-footnote" id="alive-pane-session"></p>
+                      <p class="channels-footnote" id="alive-pane-loops"></p>
+                      <p class="alive-trend-legend">
+                        <span><i class="alive-legend-line"></i>张力</span>
+                        <span><i class="alive-legend-line fatigue"></i>疲劳</span>
+                        <span><i class="alive-legend-strip"></i>相位</span>
+                      </p>
+                      <div class="alive-trend" id="alive-pane-trend">还没有足够的样本（心跳跑满两跳后才会有曲线）</div>
+                      <p class="channels-footnote" id="alive-pane-trend-note"></p>
+                    </div>
+                    <section class="alive-pane-section alive-pane-feed">
+                      <div class="alive-pane-section-head">
+                        <div class="alive-pane-tabs" role="tablist" aria-label="最近发生了什么 / 抽屉">
+                          <button
+                            type="button"
+                            class="alive-pane-tab active"
+                            data-alive-tab="events"
+                            role="tab"
+                            aria-selected="true"
+                          >事件</button>
+                          <button
+                            type="button"
+                            class="alive-pane-tab"
+                            data-alive-tab="note"
+                            role="tab"
+                            aria-selected="false"
+                          >抽屉</button>
+                        </div>
+                        <span class="alive-pane-section-meta" id="alive-pane-events-meta" data-alive-meta="events"></span>
+                        <span class="alive-pane-section-meta" id="alive-pane-note-meta" data-alive-meta="note" hidden></span>
+                      </div>
+                      <pre class="alive-pane-list" id="alive-pane-events" data-alive-pane="events" role="tabpanel">还没有事件。</pre>
+                      <pre class="alive-pane-list" id="alive-pane-note" data-alive-pane="note" role="tabpanel" hidden>（还没有写东西）</pre>
+                    </section>
                   </div>
                 </div>
 
@@ -1348,6 +1394,8 @@
           <button type="button" class="settings-nav-item" data-settings-tab="shared-memory" data-i18n="settings_shared_memory">共享记忆</button>
           <div class="settings-nav-group-label" data-i18n="settings_mimicry">拟态</div>
           <button type="button" class="settings-nav-item" data-settings-tab="alive" data-i18n="settings_alive">生命</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="alive-setup" data-i18n="settings_alive_setup">设定</button>
+          <button type="button" class="settings-nav-item" data-settings-tab="alive-log" data-i18n="settings_alive_log">日志</button>
         </aside>
         <div class="settings-main">
           <header class="settings-main-head">
@@ -1657,12 +1705,51 @@
               <p class="settings-page-desc check-row-hint">
                 关掉 = 停表（体征保留，重新打开会接着走），不是清空。心跳间隔 300 秒，唤醒轮默认只读。
               </p>
+              <h3 class="settings-subsection-title">它用哪个模型</h3>
+              <div class="channels-push-row">
+                <select class="channels-select" id="alive-model-route" aria-label="生命模式唤醒轮用哪个模型"></select>
+              </div>
+              <p class="settings-page-desc check-row-hint" id="alive-model-hint"></p>
+              <h3 class="settings-subsection-title">它醒来能做什么</h3>
+              <div class="channels-push-row">
+                <select class="channels-select" id="alive-wake-power" aria-label="生命模式唤醒轮的权力档"></select>
+              </div>
+              <p class="settings-page-desc check-row-hint" id="alive-wake-power-hint"></p>
+              <div class="field">
+                <span class="field-label">允许它动的根目录</span>
+                <!-- 与「频道 → 默认工作空间」同一套行内排版：输入框 + 选择目录（`pickFolder` 是既有通道） -->
+                <div class="channels-workspace-row">
+                  <input
+                    type="text"
+                    id="alive-wake-root"
+                    placeholder="留空 = 它自己的抽屉（alive/workspace）"
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <button
+                    type="button"
+                    class="ghost-btn"
+                    id="alive-wake-root-pick"
+                    title="选一个目录：选中即写成它的根目录并保存（不用手打路径）"
+                  >选择…</button>
+                </div>
+              </div>
+              <p class="settings-page-desc check-row-hint" id="alive-wake-root-hint"></p>
               <section class="settings-runtime-section channels-section">
+                <h3 class="settings-subsection-title">当前状态</h3>
+                <!-- 动作一行靠左；摘要另起一行 —— 摘要平时是一句长文案，塞进 .save-hint 里
+                     （opacity:0 + margin-left:auto）会看不见却照样占位，把两个按钮挤成两行。 -->
                 <div class="channels-toolbar">
-                  <span class="save-hint" id="alive-status">读取中…</span>
+                  <button
+                    type="button"
+                    class="ghost-btn"
+                    id="alive-wake-once"
+                    title="跳过张力门限，立刻跑一轮唤醒（调试 / 演示用；事件里会记 trigger=manual，不算它自己醒的）"
+                  >现在叫醒它一次</button>
                   <button type="button" class="ghost-btn" id="alive-refresh">刷新</button>
                   <button type="button" class="ghost-btn" id="alive-reset">重新开始</button>
                 </div>
+                <p class="channels-footnote" id="alive-status">读取中…</p>
                 <p class="channels-footnote" id="alive-detail"></p>
                 <p class="channels-footnote" id="alive-fatigue-note"></p>
                 <p class="channels-footnote" id="alive-budget-note"></p>
@@ -1671,8 +1758,13 @@
               </section>
               <section class="settings-runtime-section channels-section">
                 <h3 class="settings-subsection-title">趋势（最近 7 天）</h3>
+                <p class="alive-trend-legend">
+                  <span><i class="alive-legend-line"></i>张力</span>
+                  <span><i class="alive-legend-line fatigue"></i>疲劳</span>
+                  <span><i class="alive-legend-strip"></i>相位</span>
+                </p>
                 <div class="alive-trend" id="alive-trend">还没有足够的样本（心跳跑满两跳后才会有曲线）</div>
-                <p class="channels-footnote" id="alive-trend-note">蓝色 = 张力，橙色 = 疲劳；底色是相位（压缩 = 琥珀）。悬浮曲线看某一刻。</p>
+                <p class="channels-footnote" id="alive-trend-note">悬浮曲线看某一刻的读数。</p>
               </section>
               <h3 class="settings-subsection-title">感官</h3>
               <label class="check-row">
@@ -1714,18 +1806,78 @@
                 <span>允许它主动开口（没人说话时也能出声/收音，默认关）</span>
               </label>
               <p class="settings-page-desc check-row-hint" id="alive-voice-quota"></p>
-              <section class="settings-runtime-section channels-section">
-                <h3 class="settings-subsection-title">抽屉（note.md）</h3>
-                <pre class="channels-footnote" id="alive-note" style="white-space: pre-wrap">（还没有写东西）</pre>
-              </section>
-              <section class="settings-runtime-section channels-section">
-                <h3 class="settings-subsection-title">决策日志</h3>
+              <h3 class="settings-subsection-title">醒来时先看一眼</h3>
+              <p class="settings-page-desc">
+                它每次自己醒来时，先拿到一点外部事实：最近这台机器上在做什么（自动，只读记忆），
+                以及下面两项你允许它看的画面。画面直接作为那一轮的输入发给模型，<b>不落盘</b>；默认都关。
+              </p>
+              <label class="check-row">
+                <input type="checkbox" id="alive-wake-look-camera" />
+                <span>醒来时用本机摄像头拍一帧</span>
+              </label>
+              <p class="settings-page-desc check-row-hint" id="alive-wake-look-camera-hint"></p>
+              <label class="check-row">
+                <input type="checkbox" id="alive-wake-look-screen" />
+                <span>醒来时截一张屏幕</span>
+              </label>
+              <p class="settings-page-desc check-row-hint" id="alive-wake-look-screen-hint"></p>
+              <span class="save-hint" id="alive-hint"></span>
+            </div>
+            <!-- 设定：只放一个框。写什么由用户决定（人生目标 / 遇到人怎么反应 / 想聊什么…），
+                 整段原文进后台心跳轮的状态块；页面不解释、不拆字段、不加计数器。 -->
+            <div class="settings-page" data-settings="alive-setup">
+              <label class="field">
+                <textarea id="alive-setup" rows="12" spellcheck="false"></textarea>
+              </label>
+              <div class="channels-toolbar">
+                <button type="button" class="ghost-btn" id="alive-setup-save">保存</button>
+                <span class="save-hint" id="alive-setup-hint"></span>
+              </div>
+            </div>
+            <!-- 日志（原「决策日志」）：独立成页。它跟「生命」那页的设置项不是一回事 ——
+                 那边是旋钮，这边是它自己干过什么（只读、只追加），混在一起时一页太长且难找。
+                 页内两组横向标签：「事件」（它做了什么）/「抽屉」（它自己写下的那几行）。
+                 抽屉原来挂在「生命」页底部：同一份只读记录被拆在两个页签里，找起来更远。 -->
+            <div class="settings-page" data-settings="alive-log">
+              <h3 class="settings-subsection-title">日志</h3>
+              <div class="settings-segmented-tabs alive-log-tabs" role="tablist" aria-label="事件 / 抽屉">
+                <button
+                  type="button"
+                  class="settings-segmented-tab active"
+                  data-alive-tab="events"
+                  role="tab"
+                  aria-selected="true"
+                >事件</button>
+                <button
+                  type="button"
+                  class="settings-segmented-tab"
+                  data-alive-tab="note"
+                  role="tab"
+                  aria-selected="false"
+                >抽屉</button>
+              </div>
+              <div class="channels-toolbar">
+                <button type="button" class="ghost-btn" id="alive-log-refresh">刷新</button>
+                <span class="save-hint" id="alive-log-hint"></span>
+              </div>
+              <div class="alive-log-pane" data-alive-pane="events">
+                <p class="settings-page-desc">
+                  它每次醒来做了什么：醒了（WAKE）、看了什么（EYE）、说了/听了（SPEAK / LISTEN）、
+                  决定（ACT / DEFER / REFUSE）、动了手（ACTION）、这一轮花了多少 token。
+                  只管「做了什么」，不管「为什么」—— 理由留在它自己那里。
+                </p>
                 <pre class="channels-footnote" id="alive-decisions" style="white-space: pre-wrap">还没有事件。</pre>
                 <p class="channels-footnote">
-                  这里只有「做了什么决定」，没有「为什么」—— 理由留在它自己那里，不展示、不外传。
+                  滚动窗口有上限（`agent-limits.aliveDecisionsKeep` / 事件文件按行裁剪），老事件会被裁掉。
                 </p>
-              </section>
-              <span class="save-hint" id="alive-hint"></span>
+              </div>
+              <div class="alive-log-pane" data-alive-pane="note" hidden>
+                <p class="settings-page-desc">
+                  它愿意写才写的几行（<code>&lt;userData&gt;/alive/workspace/note.md</code>）。
+                  只读、只追加；它不知道你在读这里 —— 所以别把它当汇报。
+                </p>
+                <pre class="channels-footnote" id="alive-note" style="white-space: pre-wrap">（还没有写东西）</pre>
+              </div>
             </div>
             <div class="settings-page" data-settings="perms">
               <h3 class="settings-subsection-title">本机权限</h3>
@@ -2559,7 +2711,6 @@
     <script src="./renderer-agent-abort.js"></script>
     <script src="./renderer-agent-prep-remote.js"></script>
     <script src="./renderer-agent-system-message.js"></script>
-    <script src="./renderer-agent-reviewer.js"></script>
     <script src="./renderer-agent-run.js"></script>
     <script src="./renderer-agent-loop.js"></script>
     <script src="./renderer-agent-complete.js"></script>

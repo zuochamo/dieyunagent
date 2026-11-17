@@ -46,6 +46,13 @@ const DEFAULTS = {
   embeddingModel: '',
   embeddingDimensions: 1024,
   embeddingModels: [],
+  // 独立 Reviewer（一轮收尾的验收证据源之一）。配置随整份 settings 镜像进 Main，
+  // 因为跑 Reviewer 的请求在 Main（`agent/turn-reviewer-run.js`）—— Renderer 关着窗口也得能验收。
+  // 注意：apiKey 与其它供应商 key 一样明文落在 model-settings.json（本文件既有约定）。
+  reviewerEnabled: false,
+  reviewerModel: '',
+  reviewerBaseUrl: '',
+  reviewerApiKey: '',
   graphAutoIncremental: true,
   // 代码索引增量默认关：它要跑 chunk + FTS + embedding，属重活；且 R2/R3 之后
   // 没有向量的仓没有「新鲜度」要求（见 docs/INDEX-VALUE-REVIEW.md §R4）。
@@ -274,6 +281,12 @@ function normalize(raw) {
   s.agentToolCallLimit = clampAgentToolCallLimit(s.agentToolCallLimit);
   s.agentMaxRounds = clampAgentMaxRounds(s.agentMaxRounds);
   // 结构索引增量很便宜（只重解析改动文件），且 repo_map 依赖它的新鲜度 → 默认开。
+  // Reviewer 配置只用显式值：`reviewerEnabled` 必须真的是 true 才开（缺省/脏值一律关），
+  // 空 model 或空 baseUrl 在调用侧判成「没配」，这里只做类型归一。
+  s.reviewerEnabled = s.reviewerEnabled === true;
+  s.reviewerModel = String(s.reviewerModel || '').trim();
+  s.reviewerBaseUrl = String(s.reviewerBaseUrl || '').trim();
+  s.reviewerApiKey = String(s.reviewerApiKey || '').trim();
   s.graphAutoIncremental = s.graphAutoIncremental !== false;
   // 代码索引增量相反：只有显式开启才跑（旧的 `!== false` 会把「未设置」也变成 true）。
   s.codebaseAutoIncremental = s.codebaseAutoIncremental === true;

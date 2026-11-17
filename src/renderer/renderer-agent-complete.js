@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, messages, loopApi, settings, gwState, showAgentToast, finalizeAssistantBubble, settleAssistantBubbleAfterLoop, finalizeUserTurnFooter, renderAssistantBubbleContent, resolveRunPlaceholder, runAgentCompletion, getSessionAbortSignal, createAgentAbortError, throwIfAgentAborted, waitForAgentAbortable, isUserAbortError, formatAgentApiError, compactPlainText, compactTraceForReviewer, runReviewerValidation, applyReadinessNote, capturePlanApplyForUndo, handleWorktreeApplyAfterRun, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, markTurnWorktreeOnly, getCurrentUndoTurnId, finalizeUndoForUserTurn, saveAgentPlanState, saveAgentRunState, saveAssistantTraceRecord, persistStoppedAssistant, buildAgentStateSnapshot, stepsFromAgentPlan, trackArtifactsFromTrace, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, finishSessionActiveRun, syncComposerForActiveSession, noteComposerSessionUsage, reportTokensToMain, clearAgentContinueState, setAgentContinueState, setPlannerParallelWorkersActive, setAgentExecutionContext, invalidateSessionMessageCache, refreshHistoryList, scrollChat, collapseChatThinkingTraces, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, extractBookPrefixMessages, reprojectContinueLoopMessages, refreshTurnRideFromArchive, normalizeAssistantReplyForStorage, unpackAssistantMeta, splitPersistedAssistantTrace, humanizeModelId, formatModelFooterLabel, getTextModelId, buildStoppedFooterMeta, buildFallbackTurnMeta, resolveUserMsgCreatedAt, withdrawUserTurn, appendBubble, agentApi, captureTurnBatchCheckpoint, getPendingWorktreeApply, clearPendingResumeCheckpoint, tryDetectResumeCheckpoint, maybeSaveRunningTraceCheckpoint, createTraceRunId, getAgentToolCallLimit, getAgentMaxRounds, clearComposerQueuePause, getAgentLimits, AgentRoundText */
+/* global sessionActiveRuns, currentSessionId, messages, loopApi, settings, gwState, showAgentToast, finalizeAssistantBubble, settleAssistantBubbleAfterLoop, finalizeUserTurnFooter, renderAssistantBubbleContent, resolveRunPlaceholder, runAgentCompletion, getSessionAbortSignal, createAgentAbortError, throwIfAgentAborted, waitForAgentAbortable, isUserAbortError, formatAgentApiError, compactPlainText, applyReadinessNote, capturePlanApplyForUndo, handleWorktreeApplyAfterRun, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, markTurnWorktreeOnly, getCurrentUndoTurnId, finalizeUndoForUserTurn, saveAgentPlanState, saveAgentRunState, saveAssistantTraceRecord, persistStoppedAssistant, buildAgentStateSnapshot, stepsFromAgentPlan, trackArtifactsFromTrace, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, finishSessionActiveRun, syncComposerForActiveSession, noteComposerSessionUsage, reportTokensToMain, clearAgentContinueState, setAgentContinueState, setPlannerParallelWorkersActive, setAgentExecutionContext, invalidateSessionMessageCache, refreshHistoryList, scrollChat, collapseChatThinkingTraces, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, extractBookPrefixMessages, reprojectContinueLoopMessages, refreshTurnRideFromArchive, normalizeAssistantReplyForStorage, unpackAssistantMeta, splitPersistedAssistantTrace, humanizeModelId, formatModelFooterLabel, getTextModelId, buildStoppedFooterMeta, buildFallbackTurnMeta, resolveUserMsgCreatedAt, withdrawUserTurn, appendBubble, agentApi, captureTurnBatchCheckpoint, getPendingWorktreeApply, clearPendingResumeCheckpoint, tryDetectResumeCheckpoint, maybeSaveRunningTraceCheckpoint, createTraceRunId, getAgentToolCallLimit, getAgentMaxRounds, clearComposerQueuePause, getAgentLimits, AgentRoundText */
 'use strict';
 
 function buildAgentRunOptsForContinue(fc) {
@@ -209,10 +209,6 @@ async function completeAgentRunAfterSuccess(run, fc) {
       if (typeof window.patchChangesPane === 'function') window.patchChangesPane();
       else if (typeof renderChangesPane === 'function') renderChangesPane();
     }
-    const sessionChanges =
-      typeof getSessionChangeRowsForAgent === 'function'
-        ? getSessionChangeRowsForAgent(runSessionId)
-        : [];
     // 完成验收的判定在 Main（证据 = 循环账本 trace + Gateway 的静态诊断/浏览器证据）。
     // Renderer 只消费结论、渲染 note：不判定、不重采证据、不自动续跑。
     const readiness =
@@ -222,18 +218,9 @@ async function completeAgentRunAfterSuccess(run, fc) {
     if (readiness && readiness.ok === false) {
       finalReadiness = { ...readiness, shouldRetry: false, surfaceToUser: true };
     }
-    if (completionGatePassed && typeof runReviewerValidation === 'function') {
-      const reviewer = await runReviewerValidation(run, fc, {
-        sessionChanges,
-        diagnostics: (readiness && readiness.evidence && readiness.evidence.diagnostics) || null,
-        trace,
-        browser: (readiness && readiness.evidence && readiness.evidence.browser) || null
-      });
-      if (reviewer && !reviewer.ok) {
-        completionGatePassed = false;
-        finalReadiness = { ...reviewer, shouldRetry: false, surfaceToUser: true };
-      }
-    }
+    // 独立 Reviewer 的判定已在 Main 收尾时合流进 `run.result.readiness`（`turn-reviewer-run.js`
+    // + `mergeReviewerIntoReadiness`）：Renderer 不再发请求、不判「谁优先」，只按 readiness.ok 定终态。
+    if (readiness && readiness.ok === false) completionGatePassed = false;
     if (typeof applyReadinessNote === 'function') {
       reply = applyReadinessNote(reply, finalReadiness);
     }
