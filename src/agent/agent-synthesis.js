@@ -1,10 +1,8 @@
 'use strict';
 
-const { chatCompletionJson } = require('../llm-proxy');
-const { streamChatCompletionMain } = require('../llm-stream-utils');
+const { completeOnce, currentLlmCompleteBridge } = require('./llm-complete');
 const { isAbortError, createAbortError } = require('../llm-reconnect-retry');
 const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
-const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
 const roundText = require('./agent-round-text');
 
 // 汇总步骤的 phase 名与展示文案：单一来源 agent-round-text（Renderer 展示同一个常量）
@@ -15,12 +13,6 @@ const {
   SYNTHESIS_FAILED
 } = roundText;
 
-function resolveChatUrl(baseUrl) {
-  // 端点拼接单一来源 llm-request.js；此处只保留「必填」语义
-  const url = resolveLlmEndpoint(baseUrl, 'chat');
-  if (!url) throw new Error('LLM baseUrl 未配置');
-  return url;
-}
 
 function extractLastUserMessageText(messages) {
   for (let i = (messages || []).length - 1; i >= 0; i--) {
@@ -205,37 +197,33 @@ async function applyTurnEndSynthesis(opts) {
   }, timeoutMs);
 
   let live = '';
+  // 增量订阅：core 用 `agent.delta` 回传流式片段，用**汇总专用**的 runId 过滤，
+  // 免得和主循环的正文增量混在一起（两者都会进同一个事件通道）。
+  const synthRunId = `${done.runId || 'run'}-synthesis`;
+  let detachDeltas = () => {};
   try {
     let result;
     if (typeof opts.fetchSynthesisOnce === 'function') {
       result = await opts.fetchSynthesisOnce({ body: synthBody, signal: child.signal });
     } else {
-      const url = resolveChatUrl(llm.baseUrl);
-      const headers = buildLlmHeadersFromConfig(llm, { runId: done.runId });
-      try {
-        result = await streamChatCompletionMain(synthBody, {
-          url,
-          headers,
-          apiKey: llm.apiKey,
-          signal: child.signal,
-          onDelta: (delta) => {
-            live = String((delta && delta.content) || '').trim();
-            onPhase('synthesis_delta', { runId: done.runId, content: live });
-          }
+      // 请求由 core 发（`llm.complete`）：端点/请求头/SSE/usage 只有 core 那一份实现。
+      // 这里只留「问什么」（synthBody）与「失败怎么降级」。
+      if (opts.coreBridge && typeof opts.coreBridge.onCoreEvent === 'function') {
+        detachDeltas = opts.coreBridge.onCoreEvent((event) => {
+          if (!event || event.type !== 'agent.delta') return;
+          if (String(event.runId || '') !== synthRunId) return;
+          if (!event.content) return;
+          live = String(live + String(event.content)).trim();
+          onPhase('synthesis_delta', { runId: done.runId, content: live });
         });
-      } catch (streamErr) {
-        if (isAbortError(streamErr) || (streamErr && streamErr.name === 'AbortError')) {
-          throw streamErr;
-        }
-        const json = await chatCompletionJson(url, {
-          headers,
-          body: JSON.stringify({ ...synthBody, stream: false }),
-          signal: child.signal
-        });
-        const choice = json && json.choices && json.choices[0];
-        const msg = (choice && choice.message) || {};
-        result = { content: msg.content != null ? String(msg.content) : '' };
       }
+      result = await completeOnce({
+        coreBridge: opts.coreBridge || currentLlmCompleteBridge(),
+        llm,
+        body: synthBody,
+        stream: true,
+        runId: synthRunId
+      });
     }
     const synthesized = String((result && result.content) || live || '').trim();
     if (usableSynth(synthesized)) {
@@ -257,6 +245,7 @@ async function applyTurnEndSynthesis(opts) {
     }
     return { ...done, trace: failedTrace };
   } finally {
+    detachDeltas();
     clearTimeout(timer);
     if (signal && typeof signal.removeEventListener === 'function') {
       signal.removeEventListener('abort', onParentAbort);

@@ -706,6 +706,8 @@ async function runRustAgentLoop(opts) {
         onPhase,
         userData: opts.userData,
         model: model || startParams.model,
+        // 汇总的 LLM 请求也走 core（`llm.complete`）；coreBridge 用来订阅它自己的增量
+        coreBridge: bridge,
         fetchSynthesisOnce: opts.fetchSynthesisOnce
       });
     }
