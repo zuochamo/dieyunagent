@@ -18,22 +18,22 @@ pub(crate) fn clear_workspace_graph(conn: &Connection, root_hash: &str) -> Resul
         "DELETE FROM graph_calls WHERE root_hash = ?1",
         params![root_hash],
     )
-    .ok();
+    .map_err(|e| CoreError::rpc("GRAPH_CLEANUP_FAILED", e.to_string()))?;
     conn.execute(
         "DELETE FROM graph_symbols WHERE root_hash = ?1",
         params![root_hash],
     )
-    .ok();
+    .map_err(|e| CoreError::rpc("GRAPH_CLEANUP_FAILED", e.to_string()))?;
     conn.execute(
         "DELETE FROM graph_imports WHERE root_hash = ?1",
         params![root_hash],
     )
-    .ok();
+    .map_err(|e| CoreError::rpc("GRAPH_CLEANUP_FAILED", e.to_string()))?;
     conn.execute(
         "DELETE FROM graph_file_mtime WHERE root_hash = ?1",
         params![root_hash],
     )
-    .ok();
+    .map_err(|e| CoreError::rpc("GRAPH_CLEANUP_FAILED", e.to_string()))?;
     Ok(())
 }
 

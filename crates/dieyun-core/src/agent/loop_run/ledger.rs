@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -15,7 +16,8 @@ use super::delivery::{
 };
 use super::fold::{fold_force, fold_if_needed};
 use super::{
-    parse_tool_arguments, strip_inline_images_from_messages, take_if_cancelled, AgentLoopManager,
+    lock_run, parse_tool_arguments, run_handle, strip_inline_images_from_messages,
+    take_if_cancelled, AgentLoopManager,
     ContentChannel, ContentSource, DelegateTool, FoldFact, LlmResponseInput, LoopResponse, RunState,
     StartParams, ToolResultInput, TraceRound, TraceTool,
 };
@@ -59,7 +61,7 @@ impl AgentLoopManager {
         self.runs
             .lock()
             .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?
-            .insert(run_id.clone(), state);
+            .insert(run_id.clone(), Arc::new(Mutex::new(state)));
         Ok(self.need_llm(&run_id)?)
     }
 
@@ -74,13 +76,9 @@ impl AgentLoopManager {
         run_id: &str,
         indices: Option<&[usize]>,
     ) -> Result<(usize, Vec<Value>), CoreError> {
-        let mut runs = self
-            .runs
-            .lock()
-            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
-        let state = runs
-            .get_mut(run_id)
+        let handle = run_handle(&self.runs, run_id)
             .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
         let mut dropped = 0usize;
         match indices {
             Some(list) => {
@@ -105,20 +103,16 @@ impl AgentLoopManager {
     /// 只给「上下文溢出」这条路径用：正常触发由 `need_llm` 内部的 `fold_if_needed` 负责，
     /// 宿主不再自己折完把 messages 推回来。
     pub fn fold_now(&self, run_id: &str, force: bool) -> Result<Option<FoldFact>, CoreError> {
-        let mut runs = self
-            .runs
-            .lock()
-            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
-        if take_if_cancelled(&mut runs, run_id) {
+        if take_if_cancelled(&self.runs, run_id) {
             return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
         }
-        let state = runs
-            .get_mut(run_id)
+        let handle = run_handle(&self.runs, run_id)
             .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
         if force {
-            fold_force(state);
+            fold_force(&mut state);
         } else {
-            fold_if_needed(state);
+            fold_if_needed(&mut state);
         }
         Ok(state.pending_fold.take())
     }
@@ -130,13 +124,10 @@ impl AgentLoopManager {
     /// `agentCancelled` 永远是 true —— 取消信号本身无法被观测（传错 runId、run 已结束、
     /// core 刚重启，全都报「已取消」）。
     pub fn cancel(&self, run_id: &str) -> Result<bool, CoreError> {
-        let mut runs = self
-            .runs
-            .lock()
-            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
-        let Some(state) = runs.get_mut(run_id) else {
+        let Some(handle) = run_handle(&self.runs, run_id) else {
             return Ok(false);
         };
+        let mut state = lock_run(&handle)?;
         state.cancelled = true;
         // 取消后账本只剩「这个 run 已被取消」一个事实：transcript / 工具表 / 待执行工具
         // 都没有读者了（交付文本在取消那一刻之前已经交给宿主）。留着它们 = 长驻进程里
@@ -163,10 +154,7 @@ impl AgentLoopManager {
     /// 宿主据此给 UI / 视觉注入标轮次。轮次是账本事实，宿主不能自己数（一个 run 会被
     /// `agent.run.start` / `agent.run.tools` 分多次驱动，宿主侧的计数必然与账本分叉）。
     pub fn round_of(&self, run_id: &str) -> Option<u32> {
-        self.runs
-            .lock()
-            .ok()
-            .and_then(|runs| runs.get(run_id).map(|state| state.round))
+        run_handle(&self.runs, run_id).and_then(|h| h.lock().ok().map(|state| state.round))
     }
 
 
@@ -181,13 +169,9 @@ impl AgentLoopManager {
         run_id: &str,
         llm: LlmResponseInput,
     ) -> Result<LoopResponse, CoreError> {
-        let mut runs = self
-            .runs
-            .lock()
-            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
-        let state = runs
-            .get_mut(run_id)
+        let handle = run_handle(&self.runs, run_id)
             .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
 
         if state.cancelled {
             return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
@@ -208,10 +192,13 @@ impl AgentLoopManager {
             if llm.tool_calls.is_empty() {
                 let trace = state.trace.clone();
                 let content = delivered_content(llm.content.as_deref(), channel);
-                drop(runs);
+                drop(state);
                 return Ok(self.finish_run(run_id, trace, content, false));
             }
             let hint = format!("已达本段 {} 轮上限", state.max_rounds);
+            // 先把轮次取出来：`state` 现在是 `MutexGuard`，`state.trace.push(..)` 会经由
+            // DerefMut 借用整个 guard，字段不能再从同一次借用里单独借出来。
+            let current_round = state.round;
             // 正文口径只有 `delivered_content()` 一处：思考通道在这里必须是 None，
             // 否则思考会被写成 assistant 正文（下一轮再作为「我上一轮的回复」回灌模型）。
             let synthetic_text = push_assistant_text_only(
@@ -220,7 +207,7 @@ impl AgentLoopManager {
                 &hint,
             );
             state.trace.push(TraceRound {
-                round: state.round,
+                round: current_round,
                 thought: hint,
                 full_thought: llm_thought_raw(&llm),
                 content_source: ContentSource::Synthetic,
@@ -229,7 +216,7 @@ impl AgentLoopManager {
             });
             let trace = state.trace.clone();
             let content = delivered_content(llm.content.as_deref(), channel);
-            drop(runs);
+            drop(state);
             return Ok(self.finish_run(run_id, trace, content, true));
         }
 
@@ -306,7 +293,7 @@ impl AgentLoopManager {
                 });
                 let trace = state.trace.clone();
                 let content = delivered_content(llm.content.as_deref(), channel);
-                drop(runs);
+                drop(state);
                 return Ok(self.finish_run(run_id, trace, content, true));
             }
 
@@ -338,7 +325,7 @@ impl AgentLoopManager {
                         error: Some(format!("工具「{}」{TRUNCATED_TOOL_ERROR}", tc.name)),
                     })
                     .collect();
-                drop(runs);
+                drop(state);
                 return self.submit_tool_results(_config, _index, run_id, results);
             }
 
@@ -351,7 +338,7 @@ impl AgentLoopManager {
                     arguments: args.clone(),
                 })
                 .collect();
-            drop(runs);
+            drop(state);
             return Ok(LoopResponse {
                 phase: "need_delegate".into(),
                 run_id: run_id.to_string(),
@@ -376,7 +363,7 @@ impl AgentLoopManager {
         });
         let trace = state.trace.clone();
         let content = delivered_content(llm.content.as_deref(), channel);
-        drop(runs);
+        drop(state);
         Ok(self.finish_run(run_id, trace, content, false))
     }
 
@@ -389,20 +376,16 @@ impl AgentLoopManager {
         run_id: &str,
         results: Vec<ToolResultInput>,
     ) -> Result<LoopResponse, CoreError> {
-        let mut runs = self
-            .runs
-            .lock()
-            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
-        let state = runs
-            .get_mut(run_id)
+        let handle = run_handle(&self.runs, run_id)
             .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
 
         if state.cancelled {
             return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
         }
 
         if state.pending_delegate.is_empty() {
-            drop(runs);
+            drop(state);
             return self.need_llm(run_id);
         }
 
@@ -464,7 +447,7 @@ impl AgentLoopManager {
         }
 
         strip_inline_images_from_messages(&mut state.messages);
-        drop(runs);
+        drop(state);
         self.need_llm(run_id)
     }
 
@@ -476,18 +459,15 @@ impl AgentLoopManager {
 
 
     pub(crate) fn need_llm(&self, run_id: &str) -> Result<LoopResponse, CoreError> {
-        let mut runs = self
-            .runs
-            .lock()
-            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
-        if take_if_cancelled(&mut runs, run_id) {
+        if take_if_cancelled(&self.runs, run_id) {
             return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
         }
-        let state = runs
-            .get_mut(run_id)
+        let handle = run_handle(&self.runs, run_id)
             .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
         // 折叠在**发出请求之前**做，且只动自己的账本：transcript 的写者只有这一处。
-        fold_if_needed(state);
+        // 它跑在**本 run 自己的锁**上（不是全局 map 锁）—— 一个 run 折叠不会卡住别的 run。
+        fold_if_needed(&mut state);
         // 注意：**不要**在这里写 `stream`。要不要流式是传输层的事（`DriveSpec.stream` →
         // `agent::llm::chat_completion` 统一注入请求体）；这里硬写 `stream: false` 会让端点
         // 改回非流式，而 D Y/XHX 这类中转在非流式口径下会**丢掉 tool_calls**

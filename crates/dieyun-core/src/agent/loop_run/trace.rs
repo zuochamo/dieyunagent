@@ -21,10 +21,18 @@ impl AgentLoopManager {
         content: Option<String>,
         hit_limit: bool,
     ) -> LoopResponse {
-        let messages = match self.runs.lock() {
-            Ok(mut runs) => runs.remove(run_id).map(|state| state.messages),
-            Err(poisoned) => poisoned.into_inner().remove(run_id).map(|state| state.messages),
+        // 先在 map 锁下把句柄摘出来（只证明「这个 run 从账本上消失了」），放锁之后再读内容 ——
+        // 反过来的「持 map 锁读 run」就是锁序反转。
+        let handle = match self.runs.lock() {
+            Ok(mut runs) => runs.remove(run_id),
+            Err(poisoned) => poisoned.into_inner().remove(run_id),
         };
+        let messages = handle.and_then(|h| match h.lock() {
+            Ok(state) => Some(state.messages.clone()),
+            // poison：用 into_inner() 明确恢复，绝不把「拿不到 messages」静默成 None
+            // （Node 侧整段工具结果随之丢失）。
+            Err(poisoned) => Some(poisoned.into_inner().messages.clone()),
+        });
         self.build_done(run_id, trace, content, hit_limit, messages)
     }
 

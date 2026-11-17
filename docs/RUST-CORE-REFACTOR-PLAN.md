@@ -279,19 +279,23 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 5. **外键二选一**：要么 `codebase_db` 开 `foreign_keys` 并删手工级联，要么删掉 schema 里的 `FOREIGN KEY ... CASCADE` 声明（一条没有约束力的注释最危险）。
 6. **A13 token 估值**：把 `reasoning_content` 计入；`tokens_before/after` 必须同口径，不同口径不相减。
 
-### P4 · 生命周期与错误处理（6–8 人日，风险中高）· **4 / 6 已落地（2026-11-18），剩下的见下**
+### P4 · 生命周期与错误处理（6–8 人日，风险中高）· **已完成 2026-11-18**
 
 | 项 | 状态 | 落点 / 证据 |
 |---|---|---|
-| `finish_run` 一次加锁 + poison 恢复 | ✅ P0 已做 | `loop_run/trace.rs`（`runs.remove().map(..messages)` 一个临界区 + `into_inner()`） |
-| **`agent.run.tools` 的 `results` 必填** | ✅ | `handlers/async_core.rs`：缺字段直接 `INVALID_PARAMS`（旧实现静默当空数组 → 整批工具被记成「未返回结果」却以成功继续）。用例 `agent_run_tools_requires_results` |
-| **分派 panic 兜底** | ✅ | `rpc/mod.rs`：`guard_panic()` 把 async handler 的 panic 变成 `RPC_PANIC` 错误帧（阻塞池那条本来就有 `BLOCKING_JOIN_FAILED`）。用例 2 条。为它把 `futures-util` 从传递依赖显式化（`FutureExt::catch_unwind`，不新增编译单元） |
-| **`core.configure` 原子化** | ✅ | `handlers/async_core.rs`：候选 config 在**锁外**算 + 新 MemoryStore 先建成功、再一次写锁整体替换。用例 `configure_failure_leaves_the_live_config_untouched`（data_dir 指向一个已存在的文件 → 失败后现有配置一个字节没动） |
-| **吞错清账（高价值子集）** | ✅ 部分 | memory schema 的 **16 条 ALTER 吞错**全部换成 `ensure_column` / `drop_column_if_exists`（只吞「列已存在 / 本就没有」，其余上抛 `DB_SCHEMA_FAILED`）；`main.rs` 三处 `apply_configure(..).ok()` 改 `?`。用例 `migration_swallow_tests` 2 条。**剩余约 100 处 `let _ =` / `.ok()` 未清**（多数在测试与「删临时文件」这类确实无害的位置），属机械清账，见下 |
+| **折叠搬出全局临界区 + per-run 锁** | ✅ | `loop_run/mod.rs`：`runs: Arc<Mutex<HashMap<String, Arc<Mutex<RunState>>>>>` —— 外层 map 锁只保护「哪个 run 在哪」，O(n) 折叠跑在**本 run 自己的锁**上。纪律写进字段注释：**永远先放 map 锁再拿 run 锁**（`finish_run` 因此改成「先在 map 锁下摘句柄、放锁后再读 messages」）。用例 `one_runs_lock_does_not_block_other_runs`（握住 A 的锁 300ms，B 的账本操作必须 <150ms 返回；做过敏感性验证：让折叠侧也握 B 的锁 → 立即红） |
+| `finish_run` 一次加锁 + poison 恢复 | ✅ | `loop_run/trace.rs`（`into_inner()` 明确恢复，不把「拿不到 messages」静默成 None） |
+| **`agent.run.tools` 的 `results` 必填** | ✅ | `handlers/async_core.rs`：缺字段直接 `INVALID_PARAMS`。用例 `agent_run_tools_requires_results` |
+| **分派 panic 兜底** | ✅ | `rpc/mod.rs`：`guard_panic()` → `RPC_PANIC` 错误帧（阻塞池那条本来就有 `BLOCKING_JOIN_FAILED`）。为它把 `futures-util` 从传递依赖显式化（不新增编译单元） |
+| **`core.configure` 原子化** | ✅ | `handlers/async_core.rs`：候选 config 锁外算 + 新 MemoryStore 先建成功、再一次写锁整体替换。用例 `configure_failure_leaves_the_live_config_untouched` |
+| **吞错清账** | ✅ | memory schema **16 条 ALTER** → `ensure_column` / `drop_column_if_exists`（只吞「列已存在 / 本就没有」）；`graph/cleanup.rs` 的 **4 条 DELETE `.ok()`** 改上抛 `GRAPH_CLEANUP_FAILED`；`index/repair.rs` 的 `let _ = graph::clear_workspace_rows(..)` 改成「诊断 + 跳过 + 下次重试」；`main.rs` 三处 `apply_configure(..).ok()` 改 `?`；`memory/session.rs` 那处标题补写**保留吞错并写明理由**（读路径顺手修复，不影响本次展示）。用例 `migration_swallow_tests` 2 条 |
 | **A17 折叠幂等** | ✅ 收尾批已做 | `applied_level` 只认 `clip()` 写出的完整形状 |
-| ⏳ **折叠搬出全局临界区 + per-run 锁** | **未做（本批唯一剩余的大项）** | 现状：`need_llm` 持 `runs` 全局锁做整段 messages 的 O(n) 折叠，一个 run 触发折叠会卡住所有 run。方案：`HashMap<String, Arc<Mutex<RunState>>>` —— 取 run 只在 map 锁下克隆 Arc，真正的活（含折叠）在 per-run 锁里干；纪律：**永远先放 map 锁再拿 run 锁**，避免锁序反转 |
 
-**验收**：`cargo test` 274 → **280 全绿**、零 warning；`npm test`、`verify:rpc-catalog`、`check:js` 通过。
+> 剩下的 `let _ =` / `.ok()`（约 100 处）多数在测试与「删临时文件」「socket 写回」这类位置；
+> `agent/driver.rs` 里 9 处是 `tool.execute` 反向调用通道的 socket 写（该通道按设计未接），
+> 归 P6 死代码清除时一并处理。
+
+**验收**：`cargo test` 274 → **281 全绿**、零 warning；`npm test`、`verify:rpc-catalog`、`check:js` 通过。
 
 ### P5 · 「做不到」显式化 + 观测（3–5 人日）
 

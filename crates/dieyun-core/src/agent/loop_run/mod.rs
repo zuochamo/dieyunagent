@@ -7,6 +7,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::CoreError;
 use serde_json::{json, Value};
 
 /// 护栏数字的唯一来源是 Node：`agent-limits.js` 解析、模型设置 `agentToolCallLimit`
@@ -250,7 +252,17 @@ struct RunState {
 }
 
 pub struct AgentLoopManager {
-    runs: Arc<Mutex<HashMap<String, RunState>>>,
+    /// runId → **每个 run 自己的一把锁**。
+    ///
+    /// 外层 map 锁只保护「哪个 run 在哪」，绝不保护 run 的内容：旧实现用一个全局
+    /// `HashMap<String, RunState>`，于是 `need_llm` 里那段 O(n) 折叠（整份 messages 的
+    /// 字符串处理）是在**全局锁**上做的 —— 一个 run 触发折叠，排在他后面的所有 run
+    /// （并发 subagent、频道任务、planner worker 共用同一个 manager）全部卡住。
+    ///
+    /// 纪律：**永远先放 map 锁，再拿 run 锁**。任何路径都不许在持 map 锁时去拿 run 锁
+    /// （锁序反转 = 死锁）；需要「从账本摘下并读内容」时，先在 map 锁下 `remove` 拿到句柄，
+    /// 放锁之后再 `lock()` 读。
+    runs: Arc<Mutex<HashMap<String, Arc<Mutex<RunState>>>>>,
     next_id: AtomicU64,
 }
 
@@ -263,21 +275,59 @@ impl Default for AgentLoopManager {
     }
 }
 
+/// 取 run 的句柄：只在 map 锁下克隆一次 `Arc`，随即放锁 —— run 的内容由它自己那把锁保护。
+fn run_handle(runs: &Mutex<HashMap<String, Arc<Mutex<RunState>>>>, run_id: &str) -> Option<Arc<Mutex<RunState>>> {
+    runs.lock().ok()?.get(run_id).cloned()
+}
+
+fn lock_run(handle: &Arc<Mutex<RunState>>) -> Result<std::sync::MutexGuard<'_, RunState>, CoreError> {
+    handle
+        .lock()
+        .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))
+}
+
 /// 取消的 run 在被**观察到**的那一刻就离开账本。
 ///
 /// 为什么必须在这里删：`finish_run` 只在正常收尾时跑；「用户点停止」与「上游报错」
 /// 两条路径都不会走到它。core 是长驻进程，聊天 / planner worker / 频道共用同一个
 /// `AgentLoopManager`，不删就等于整段 transcript 永久驻留（真实会话可达数 MB），
 /// 而且该 runId 之后每次操作都只会回「已取消」而不会回「不存在」。
-fn take_if_cancelled(runs: &mut HashMap<String, RunState>, run_id: &str) -> bool {
-    if runs.get(run_id).map(|state| state.cancelled).unwrap_or(false) {
-        runs.remove(run_id);
-        return true;
+///
+/// 两次取锁（先 run 后 map）而不是嵌套：judge 在 run 锁下，摘除在 map 锁下，中间放锁。
+fn take_if_cancelled(runs: &Mutex<HashMap<String, Arc<Mutex<RunState>>>>, run_id: &str) -> bool {
+    let Some(handle) = run_handle(runs, run_id) else {
+        return false;
+    };
+    let cancelled = handle.lock().map(|s| s.cancelled).unwrap_or(true);
+    if !cancelled {
+        return false;
     }
-    false
+    // 摘除前再确认一次：这个 runId 可能刚被复用（同一 id 重新 start），别把新 run 摘掉。
+    let mut map = match runs.lock() {
+        Ok(m) => m,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match map.get(run_id) {
+        Some(current) if Arc::ptr_eq(current, &handle) => {
+            let still_cancelled = current.lock().map(|s| s.cancelled).unwrap_or(true);
+            if still_cancelled {
+                map.remove(run_id);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
 }
 
 impl AgentLoopManager {
+    /// 取某个 run 的句柄（map 锁只在这几行里持有）。测试用它把 run 的账本状态摆到指定位置，
+    /// 也用它验证「一个 run 的锁不挡别的 run」。生产路径直接用自由函数 `run_handle()`。
+    #[cfg(test)]
+    fn run_handle(&self, run_id: &str) -> Option<Arc<Mutex<RunState>>> {
+        run_handle(&self.runs, run_id)
+    }
 }
 
 #[cfg(test)]
@@ -481,6 +531,51 @@ mod tests {
         assert_eq!(r.phase, "need_llm");
         assert!(r.llm_body.is_some());
         assert!(!r.run_id.is_empty());
+    }
+
+    /// 回归（P4.1）：一个 run 的锁不许卡住别的 run。
+    ///
+    /// 旧实现是**一个全局** `HashMap<String, RunState>`，而 `need_llm` 里那段 O(n) 折叠
+    /// （整份 messages 的字符串处理）就在这把全局锁上跑 —— 一个 run 折叠时，排在他后面的
+    /// run（并发 subagent、频道任务、planner worker 共用同一个 manager）全部等锁，表现为
+    /// 「所有会话同时卡住一下」。
+    ///
+    /// 现在每个 run 一把锁，map 锁只在「取句柄」那几行里持有。断言方式是**计时**而不是等锁：
+    /// 另一个线程把 A 的 run 锁握 300ms，主线程做 B 的账本操作必须远早于它返回。
+    #[test]
+    fn one_runs_lock_does_not_block_other_runs() {
+        let mgr = AgentLoopManager::default();
+        let params = |text: &str| StartParams {
+            model: "test-model".into(),
+            messages: vec![json!({"role": "user", "content": text})],
+            tools: vec![],
+            workspace_root: None,
+            max_tool_calls: 150,
+            max_rounds: 96,
+            token_budget: 0,
+            trigger_ratio: 0.0,
+            run_id: None,
+        };
+        let a = mgr.start(params("run a")).unwrap();
+        let b = mgr.start(params("run b")).unwrap();
+
+        let handle_a = mgr.run_handle(&a.run_id).expect("run a live");
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                // 模拟「run A 正在折叠」：把 A 的 run 锁握 300ms（有界，不会把测试挂死）
+                let _guard = handle_a.lock().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50)); // 让上面先拿到锁
+            let started = std::time::Instant::now();
+            let round = mgr.round_of(&b.run_id);
+            let waited = started.elapsed();
+            assert_eq!(round, Some(0));
+            assert!(
+                waited < std::time::Duration::from_millis(150),
+                "B 的账本操作被 A 的锁挡了 {waited:?} —— per-run 锁可能被改回了一把全局锁"
+            );
+        });
     }
 
     #[tokio::test]
@@ -702,8 +797,10 @@ mod tests {
             })
             .unwrap();
         {
-            let mut runs = mgr.runs.lock().unwrap();
-            runs.get_mut(&start.run_id).unwrap().round = 1;
+            // guard 借的是那个 Arc：先把句柄绑出来，别在临时值上 lock。
+            let handle = mgr.run_handle(&start.run_id).expect("run still live");
+            let mut state = handle.lock().unwrap();
+            state.round = 1;
         }
         let done = mgr
             .continue_llm(
@@ -786,8 +883,10 @@ mod tests {
             })
             .unwrap();
         {
-            let mut runs = mgr.runs.lock().unwrap();
-            runs.get_mut(&start.run_id).unwrap().round = 1;
+            // guard 借的是那个 Arc：先把句柄绑出来，别在临时值上 lock。
+            let handle = mgr.run_handle(&start.run_id).expect("run still live");
+            let mut state = handle.lock().unwrap();
+            state.round = 1;
         }
         let done = mgr
             .continue_llm(
@@ -974,8 +1073,8 @@ mod tests {
             .unwrap();
         assert_eq!(phase.phase, "need_delegate");
 
-        let runs = mgr.runs.lock().unwrap();
-        let state = runs.get(&start.run_id).expect("run still live");
+        let handle = mgr.run_handle(&start.run_id).expect("run still live");
+        let state = handle.lock().unwrap();
         let assistant = state
             .messages
             .iter()
@@ -1014,8 +1113,8 @@ mod tests {
             .unwrap();
 
         {
-            let mut runs = mgr.runs.lock().unwrap();
-            if let Some(state) = runs.get_mut(&start.run_id) {
+            if let Some(handle) = mgr.run_handle(&start.run_id) {
+                let mut state = handle.lock().unwrap();
                 state.round = 1;
             }
         }

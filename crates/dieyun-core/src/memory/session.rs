@@ -136,6 +136,10 @@ impl MemoryStore {
                     row.preview = Some(plain.to_string());
                     if title_needs_repair(row.title.as_deref()) {
                         if let Some(t) = title_from_user_content(plain) {
+                            // **允许吞掉**（P4 清账时逐条判过）：这是列表读路径上的
+                            // 「顺手补一下标题」—— 补失败只影响下次列表是否再算一遍，
+                            // 本次展示用的是下面这两行内存里的值，数据不会不一致。
+                            // 不为它把整次 session.list 变成错误。
                             let _ = conn.execute(
                                 "UPDATE sessions SET title = ?1, title_source = ?2 WHERE id = ?3",
                                 params![t, TITLE_SOURCE_HEURISTIC, row.id],

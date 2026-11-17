@@ -55,7 +55,19 @@ impl IndexService {
             if delete_all_chunks(&conn, &root_hash).is_err() {
                 continue;
             }
-            let _ = crate::graph::clear_workspace_rows(&conn, &root_hash);
+            // 两处必须一起清：只清 chunks 不清图谱，`graph_*` 查询会拿到没有 chunk 支撑的符号；
+            // 只清一半还照样把 workspace 报成「已回收」，就是最坏的静默半应用。
+            //
+            // 失败**不静默**：打一行诊断并跳过这个工作区（行留在库里，下次启动重试）。不往上报
+            // 是因为唯一调用方是起动期的 `IndexService::from_config` —— 清理失败不该让 core
+            // 起不来，但也不能当它没发生。
+            if let Err(e) = crate::graph::clear_workspace_rows(&conn, &root_hash) {
+                eprintln!(
+                    "[index] 工作区 {} 的图谱清理失败，整条留到下次启动重试：{e}",
+                    root_path
+                );
+                continue;
+            }
             if conn
                 .execute(
                     "DELETE FROM workspaces WHERE root_hash = ?1",
