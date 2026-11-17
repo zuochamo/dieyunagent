@@ -120,6 +120,4 @@ pub struct PlannerContinueInput {
     pub partial_body: Option<Value>,
     #[serde(default)]
     pub worktree_ctx: Option<Value>,
-    #[serde(default)]
-    pub arbitration_action: Option<String>,
 }

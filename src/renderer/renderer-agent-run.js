@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, loopApi, settings, gwState, chatCompletionWithToolsViaRust, isDieyunCoreReady, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, getSessionAbortSignal, throwIfAgentAborted, waitForAgentAbortable, createAgentAbortError, renderAssistantBubbleContent, getPlannerBestOfN, applyContextCompaction, noteContextCompaction, getEffectiveInputBudget, getAgentToolCallLimit, getAgentMaxRounds, pauseAgentForToolLimit, pauseAgentForNetworkDisconnect, shouldPauseForNetworkDisconnect, clearAgentContinueState, setAgentContinueState, showAgentToast, formatToolArgsBrief, summarizeToolResult, reprojectContinueLoopMessages, refreshTurnRideFromArchive, scheduleArtifactsUiRefresh, schedulePlanWorktreeChangesRefresh, renderChangesPane, trackArtifactsFromTrace, maybeSaveRunningTraceCheckpoint, setSessionLastTrace, setAgentExecutionContext, createTraceRunId, updateSessionRunProgress, mergeTraceSegments, getSessionChangeRowsForAgent */
+/* global sessionActiveRuns, currentSessionId, loopApi, settings, gwState, chatCompletionWithToolsViaRust, isDieyunCoreReady, runPlannerPipelineViaMain, fetchChatCompletion, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, getSessionAbortSignal, throwIfAgentAborted, waitForAgentAbortable, createAgentAbortError, renderAssistantBubbleContent, applyContextCompaction, noteContextCompaction, getEffectiveInputBudget, getAgentToolCallLimit, getAgentMaxRounds, pauseAgentForToolLimit, pauseAgentForNetworkDisconnect, shouldPauseForNetworkDisconnect, clearAgentContinueState, setAgentContinueState, showAgentToast, formatToolArgsBrief, summarizeToolResult, reprojectContinueLoopMessages, refreshTurnRideFromArchive, scheduleArtifactsUiRefresh, schedulePlanWorktreeChangesRefresh, renderChangesPane, trackArtifactsFromTrace, maybeSaveRunningTraceCheckpoint, setSessionLastTrace, setAgentExecutionContext, createTraceRunId, updateSessionRunProgress, mergeTraceSegments, getSessionChangeRowsForAgent */
 'use strict';
 
 async function reprojectContinueFromBody(continueFrom, payload, runOpts, runSessionId) {
@@ -160,8 +160,7 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
             apiConfig: runOpts.apiConfig,
             model: payload?.model,
             contextTierId: runContextTierId,
-            resumeFromRunId: resumeCheckpoint?.runId || null,
-            plannerBestOfN: typeof getPlannerBestOfN === 'function' ? getPlannerBestOfN() : 0
+            resumeFromRunId: resumeCheckpoint?.runId || null
           },
           { signal: runOpts.signal, onProgress: progress, sessionId: runSessionId }
         ),

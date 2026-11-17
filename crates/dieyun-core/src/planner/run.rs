@@ -250,10 +250,6 @@ impl PlannerRunManager {
             }
             "review_llm" => self.handle_review_llm(run, input.content.unwrap_or_default()),
             "synthesize_llm" => self.handle_synthesize_llm(run, input.content.unwrap_or_default()),
-            "arbitration" => self.handle_arbitration(
-                run,
-                input.arbitration_action.unwrap_or_else(|| "fail".into()),
-            ),
             _ => Err(CoreError::rpc(
                 "INVALID_PARAMS",
                 format!("未知 step: {}", input.step),
@@ -812,21 +808,6 @@ impl PlannerRunManager {
         self.build_response(run)
     }
 
-    fn handle_arbitration(
-        &self,
-        run: &mut PlannerRunState,
-        action: String,
-    ) -> Result<Value, CoreError> {
-        if action == "retry" {
-            run.phase = InternalPhase::NeedRetryWorkers;
-            self.build_response(run)
-        } else {
-            run.phase = InternalPhase::NeedSynthesizeLlm;
-            push_trace(run, "汇总", "仲裁后生成最终答复…");
-            self.build_response(run)
-        }
-    }
-
     fn prepare_worker_jobs(
         &self,
         run: &mut PlannerRunState,
@@ -1375,7 +1356,6 @@ impl Default for PlannerContinueInput {
             partial_content: None,
             partial_body: None,
             worktree_ctx: None,
-            arbitration_action: None,
         }
     }
 }

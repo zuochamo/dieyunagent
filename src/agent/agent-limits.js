@@ -301,6 +301,13 @@ const AGENT_LIMITS_DEFAULTS = {
   // 这个数字同时是「同时开几个 worktree + 几条 LLM 并发流 + 几条写类串行队列」，
   // 所以必须在这里单点收口：按 provider 限流/额度放宽它，才是真的放宽并发。
   plannerMaxParallelWorkers: 3,
+  // best-of-N：同一 build 类子任务并行跑 N 份、再择优。0 = 关（默认）。
+  // 这是「护栏数字」而非「策略开关」，所以和并行度一样收在 agent-limits 里：
+  // 之前它只存在于 Renderer 的 localStorage（`dieyun.planner.bestOfN.v1`），仓库内
+  // **没有任何写入点** —— 等于一个永不生效的幽灵开关。现在唯一来源是本文件的
+  // 默认值 + SCHEMA（设置页可调），Renderer 只把它塞进 planner payload。
+  // 上限 3：N 份 = N 倍 token 与 N 倍 LLM 并发流，与 plannerMaxParallelWorkers 同源受限。
+  plannerBestOfN: 0,
   // 多 Agent 并行的总开关（用户在设置页显式打开才走 planner 管线）。
   // 不做「按任务大小自动判断」：planner 是「拆解 → 并行 → 验收 → 合并」的重流程，
   // 猜错一次的代价（多等几分钟 + 凭空多出一堆 worktree 待合并）远高于手动开一次。
@@ -799,6 +806,16 @@ const AGENT_LIMITS_SCHEMA = [
         type: 'number',
         min: 1,
         max: 6,
+        step: 1,
+        unit: '路'
+      },
+      {
+        key: 'plannerBestOfN',
+        label: 'best-of-N 路数',
+        hint: '同一 build 类子任务并行跑 N 份、由评审择优（0 = 关）。每多一路就是多一份 token 与一条 LLM 并发流',
+        type: 'number',
+        min: 0,
+        max: 3,
         step: 1,
         unit: '路'
       },

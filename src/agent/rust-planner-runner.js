@@ -3,7 +3,6 @@
 const { completeOnce, currentLlmCompleteBridge } = require('./llm-complete');
 const {
   runWithLlmReconnectRetry,
-  raceAbortable,
   createAbortError,
   throwIfAborted
 } = require('../llm-reconnect-retry');
@@ -87,9 +86,17 @@ function filterTools(allTools, agentType) {
   return buildBuildTools(allTools);
 }
 
-function plannerBestOfNFromPayload(payload, settings) {
+/**
+ * best-of-N 路数的**唯一来源**：`agent-limits.plannerBestOfN`（与 plannerMaxParallelWorkers 同源）。
+ *
+ * 以前这里是 `payload.plannerBestOfN ?? settings.plannerBestOfN`：前者由 Renderer 从
+ * localStorage（`dieyun.planner.bestOfN.v1`）读出，而那个键**全仓没有写入点**；后者从来
+ * 不是 settings 的字段。两条路都恒为 undefined → 恒 0，best-of-N 事实上一辈子不生效。
+ * 现在只读 agent-limits（按本轮 contextTierId 取档），Renderer 不再参与这个判定。
+ */
+function plannerBestOfNFromLimits(deps, payload) {
   const n = Number(
-    payload.plannerBestOfN != null ? payload.plannerBestOfN : settings.plannerBestOfN
+    (getAgentLimits(deps && deps.userData, payload && payload.contextTierId) || {}).plannerBestOfN
   );
   if (!Number.isFinite(n) || n < 2) return 0;
   return Math.min(3, Math.max(2, Math.floor(n)));
@@ -275,7 +282,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     resumeCheckpoint = deps.subagentStore.loadCheckpoint(deps.dieyunHome(), payload.resumeFromRunId);
   }
 
-  const enabledBestOfN = plannerBestOfNFromPayload(payload, settings);
+  const enabledBestOfN = plannerBestOfNFromLimits(deps, payload);
   // 与主链同层：Renderer 传入本轮 contextTierId，planner 子循环的首包 / 静默 / 重连
   // 参数才能落在与主对话相同的档位（原先缺省落 'default'）。
   const loopSpec = resolveAgentLoopSpec(settings, deps.userData, payload.contextTierId);
@@ -952,19 +959,6 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           'planner.run.continue',
           { runId, step: 'synthesize_llm', content },
           120000
-        );
-      } else if (p === 'need_arbitration') {
-        const decision =
-          typeof opts.onArbitration === 'function'
-            ? await raceAbortable(
-                opts.onArbitration({ runId: coordinatorRunId, pending: phase.pendingArbitration }),
-                signal
-              )
-            : { action: 'retry' };
-        phase = await bridge.invoke(
-          'planner.run.continue',
-          { runId, step: 'arbitration', arbitrationAction: decision?.action || 'fail' },
-          30000
         );
       } else {
         throw new Error(`未知 planner phase: ${p}`);
