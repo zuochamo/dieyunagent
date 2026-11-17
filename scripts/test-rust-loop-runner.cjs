@@ -1083,6 +1083,152 @@ async function testEventSubscriptionReleased() {
   assert(bridge.listenerCount === 0, 'run 结束必须退订');
 }
 
+/**
+ * `subagent` / `subagent_status` 走完整派发链路：core 要工具 → runner 执行 → 结果回填 → 下一轮。
+ *
+ * 这条钉的不是 runner 内部（单测已覆盖），而是**接线**：`agent-runtime.js` 的 delegateTool
+ * 必须按 `runner.toolName` / `runner.statusToolName` 分派到**同一个 runner 实例** ——
+ * 换成另一个实例，status 查到的就是空账本（这是最容易写错、单测又抓不到的一处）。
+ *
+ * 场景照模型真实用法走三轮：派一路调研 → 查账本拿 id → 用账本给的 id 续问。
+ * 续问成功（子循环拿到「同一调研的追问」提示词）才证明「账本里的 id 是真能用的」，
+ * 而不只是「返回了一个看起来像 id 的字符串」。
+ */
+async function testSubagentStatusWiredThroughDelegateBatch() {
+  const { createSubagentRunner } = require('../src/agent/subagent-runner');
+  const { SUBAGENT_TOOL, SUBAGENT_STATUS_TOOL } = require('../src/agent/tool-catalog');
+
+  const childRequests = [];
+  const runner = createSubagentRunner({
+    allTools: [SUBAGENT_TOOL, SUBAGENT_STATUS_TOOL].concat([
+      { type: 'function', function: { name: 'grep', parameters: { type: 'object' } } }
+    ]),
+    limits: {
+      subagentMaxDepth: 1,
+      subagentMaxConcurrent: 3,
+      subagentMaxPerRun: 8,
+      subagentMaxRounds: 4,
+      subagentMaxToolCalls: 8,
+      subagentSummaryMaxChars: 2400,
+      subagentFollowupRetention: 8,
+      subagentStatusTaskMaxChars: 200
+    },
+    runChildLoop: async (req) => {
+      childRequests.push(req);
+      // 真实登录账本：不像真的 core 一样带 messages，continueFrom 就永远用不了 ——
+      // 这里必须回填 messages，才能验证「status 给的 id 真能续问」。
+      return {
+        content: `第 ${childRequests.length} 次结论`,
+        messages: [...req.messages, { role: 'assistant', content: `第 ${childRequests.length} 次结论` }]
+      };
+    }
+  });
+
+  // 与 src/main/ipc/agent-runtime.js 的 delegateTool 同形：同一实例、两个入口
+  const delegateTool = async (name, args) => {
+    if (name === runner.toolName) return runner.run(args, {});
+    if (name === runner.statusToolName) return runner.status();
+    throw new Error(`unexpected tool ${name}`);
+  };
+
+  let round = 0;
+  let statusResult = null;
+  let submitResults = null;
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => {
+      round += 1;
+      return {
+        phase: 'need_tools',
+        runId: params.runId,
+        delegates: [{ id: 'c1', name: 'subagent', arguments: { task: '鉴权入口在哪个模块' } }]
+      };
+    },
+    'agent.run.tools': async (params) => {
+      round += 1;
+      if (round === 2) {
+        // 第 2 轮：模型查账本（这就是本轮新增的工具）
+        return {
+          phase: 'need_tools',
+          runId: params.runId,
+          delegates: [{ id: 'c2', name: 'subagent_status', arguments: {} }]
+        };
+      }
+      if (round === 3) {
+        // 第 3 轮：用账本里给的 id 续问（模拟模型解析上一轮结果）
+        statusResult = params.results.find((r) => r.id === 'c2').result;
+        // 显式报错而不是让 `[0].xxx` 抛 TypeError：账本没记账时这条信息比堆栈有用得多
+        const entry = (statusResult.continuable || [])[0];
+        if (!entry) {
+          throw new Error('subagent_status 没有列出任何可续用的子 Agent（runner 没记账本？）');
+        }
+        const id = entry.subagentId;
+        return {
+          phase: 'need_tools',
+          runId: params.runId,
+          delegates: [
+            { id: 'c3', name: 'subagent', arguments: { task: '谁调用了它', continueFrom: id } }
+          ]
+        };
+      }
+      submitResults = params;
+      return { phase: 'done', runId: params.runId, content: 'done', trace: [] };
+    }
+  });
+
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [{ role: 'user', content: '查一下鉴权' }], tools: [] },
+    loopSpec: loopSpec(),
+    delegateTool
+  });
+
+  assert(result.phase === 'done', '三轮派发后应正常收尾');
+  assert(round === 4, `共 4 次 RPC（start + 3 次 tools），实际 ${round}`);
+
+  // 第 1 轮：真的派了一个只读子 Agent
+  assert(childRequests.length === 2, `子循环应跑两次（首发 + 追问），实际 ${childRequests.length}`);
+  const firstSubmit = bridge.invokes.find((i) => i.method === 'agent.run.tools');
+  const firstResult = firstSubmit.params.results[0].result;
+  assert(firstResult.ok === true, 'subagent 返回 ok');
+  assert(/^sa-explore-\d+$/.test(String(firstResult.subagentId)), `id 形状，实际 ${firstResult.subagentId}`);
+
+  // 第 2 轮：status 投影出的正是同一个账本
+  assert(statusResult, '必须回填 status 结果');
+  assert(statusResult.ok === true, 'status 返回 ok');
+  assert(statusResult.dispatched === 1, `dispatched 应为 1，实际 ${statusResult.dispatched}`);
+  assert(statusResult.active === 0, '派发已结束，active 应为 0');
+  assert(
+    statusResult.continuable.length === 1 &&
+      statusResult.continuable[0].subagentId === firstResult.subagentId,
+    'status 列出的 id 必须就是第 1 轮返回的那个（同一 runner 实例）'
+  );
+  assert(
+    statusResult.continuable[0].task === '鉴权入口在哪个模块',
+    'status 要带原任务，模型才知道续哪个'
+  );
+  assert(
+    statusResult.limits && statusResult.limits.perRun === 8 && statusResult.limits.maxDepth === 1,
+    'status 带护栏数字（模型据此判断还能派几个）'
+  );
+
+  // 第 3 轮：账本给的 id 真能续问（子循环拿到「同一调研的追问」提示词，而不是重发原始任务）
+  assert(submitResults, '必须回填最后一轮工具结果');
+  const followupRequest = childRequests[1];
+  const followupMsg = followupRequest.messages[followupRequest.messages.length - 1];
+  assert(followupMsg && followupMsg.role === 'user', '追问轮最后一条是 user');
+  assert(String(followupMsg.content).includes('同一调研的追问'), '追问语义由 runner 拼装');
+  assert(String(followupMsg.content).includes('谁调用了它'), '追问内容透传');
+  assert(followupRequest.messages.length === 3, '追问沿用原上下文（原 user + 原 assistant + 追问）');
+  // 追问轮仍是只读工具集，且深度不变（拿不到 subagent / subagent_status）
+  const childToolNames = followupRequest.tools.map((t) => t.function.name);
+  assert(!childToolNames.includes('subagent'), '子 Agent 不能再派子 Agent');
+  assert(!childToolNames.includes('subagent_status'), '子 Agent 查不到父账本');
+  assert(childToolNames.includes('grep'), '子 Agent 仍有只读工具');
+
+  assertNoLegacyRpc(bridge);
+}
+
 async function run() {
   testApplyResolvedLoopSpec();
   testResolveChatUrl();
@@ -1092,6 +1238,7 @@ async function run() {
   await testStartContractAndDeltaAccumulation();
   await testDeltaWithoutRoundUsesLocalCounter();
   await testToolsAreExecutedAndBackfilled();
+  await testSubagentStatusWiredThroughDelegateBatch();
   await testContentChannelStampedFromCapabilityTable();
   await testFoldFactDrivesNodeSideEffects();
   await testFoldFactOnNeedToolsIsHandled();

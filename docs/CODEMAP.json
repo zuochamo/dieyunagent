@@ -794,6 +794,13 @@
       ]
     },
     {
+      "prefix": "src/agent/subagent-runner.js",
+      "tests": [
+        "test:unit",
+        "test:rust-loop-runner"
+      ]
+    },
+    {
       "prefix": "src/agent/browser-vision.js",
       "tests": [
         "test:rust-loop-runner",
