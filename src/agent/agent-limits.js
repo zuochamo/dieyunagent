@@ -150,12 +150,6 @@ const AGENT_LIMITS_DEFAULTS = {
   streamRoundMaxAttempts: 3,
   llmRetryBaseMs: 800,
   llmReconnectMaxWaitMs: 30 * 60 * 1000,
-  llmFirstTokenTimeoutMs: 180000,
-  // 流式「包间隔」容忍时长：开始出字后，静默超过该时长即 ETIMEDOUT idle 并交给重连层。
-  // 与首包超时同属看门狗（同值 180s），且都只认有效 SSE data 行（keep-alive 空包不续命）。
-  // 取 180s 是「不误杀」优先：一旦开始出字，正常包间隔是亚秒~几秒级，这里有几十倍余量；
-  // 若上游确实是断流，最多也让用户等 3 分钟而不是原来的 10 分钟。
-  llmStreamIdleTimeoutMs: 180000,
   synthesisTimeoutMs: 25000,
   synthesisReconnectMaxWaitMs: 8000,
   // 会话标题（历史列表里那行字）：每会话只生成一次的小请求。
@@ -1261,28 +1255,6 @@ const AGENT_LIMITS_SCHEMA = [
         unit: 'ms'
       },
       {
-        key: 'llmFirstTokenTimeoutMs',
-        label: '流式首包超时',
-        hint: 'headers 后无有效 SSE data 则超时重试；可用环境变量 LLM_FIRST_TOKEN_TIMEOUT_MS 覆盖进程默认',
-        type: 'number',
-        min: 30000,
-        max: 600000,
-        step: 10000,
-        format: 'ms',
-        unit: 'ms'
-      },
-      {
-        key: 'llmStreamIdleTimeoutMs',
-        label: '流式包间隔超时',
-        hint: '开始出字后，相邻两包之间超过该时长无有效 SSE data 即判定上游断流并自动重连（keep-alive 空包不算）；调小可更快发现断流',
-        type: 'number',
-        min: 30000,
-        max: 600000,
-        step: 10000,
-        format: 'ms',
-        unit: 'ms'
-      },
-      {
         key: 'synthesisTimeoutMs',
         label: '最终汇总超时',
         hint: '工具轮结束后补一轮用户向总结的最长等待；超时用已流出文本或思考区兜底，避免气泡停在「生成回答中」',
@@ -1711,27 +1683,6 @@ function resolveAgentMaxRounds(settings) {
   return clampModelRuntimeValue('agentMaxRounds', settings && settings.agentMaxRounds);
 }
 
-function resolveFirstTokenTimeoutMs(userDataPath, tierId) {
-  try {
-    const n = Number(getAgentLimit('llmFirstTokenTimeoutMs', userDataPath, tierId));
-    if (Number.isFinite(n) && n >= 10000) return n;
-  } catch {
-    // ignore
-  }
-  return undefined;
-}
-
-/** 流式包间隔容忍时长；未配置时返回 undefined（当前宿主侧已无 SSE 读取，数值仅留档）。 */
-function resolveStreamIdleTimeoutMs(userDataPath, tierId) {
-  try {
-    const n = Number(getAgentLimit('llmStreamIdleTimeoutMs', userDataPath, tierId));
-    if (Number.isFinite(n) && n >= 10000) return n;
-  } catch {
-    // ignore
-  }
-  return undefined;
-}
-
 /** Resolve loop tunables before run — do not hide defaults inside the loop body. */
 function resolveAgentLoopSpec(settings, userDataPath, tierId) {
   const limits = getAgentLimitsForNodeTier(userDataPath, tierId || 'default');
@@ -1741,8 +1692,6 @@ function resolveAgentLoopSpec(settings, userDataPath, tierId) {
   return {
     maxToolCalls: resolveLoopToolCallLimit(settings),
     maxRounds: resolveAgentMaxRounds(settings),
-    firstTokenTimeoutMs: resolveFirstTokenTimeoutMs(userDataPath, tierId),
-    streamIdleTimeoutMs: resolveStreamIdleTimeoutMs(userDataPath, tierId),
     llmMaxRetries: Number.isFinite(maxRetries) && maxRetries > 0 ? maxRetries : 3,
     llmRetryBaseMs: Number.isFinite(retryBaseMs) && retryBaseMs >= 200 ? retryBaseMs : 800,
     llmMaxRetryDelayMs: 60000,
@@ -1786,11 +1735,9 @@ const agentLimitsApi = {
   saveLimitsByTierToDisk,
   loadLimitsByTierFromDisk,
   resolveContextTierIdForNode,
+  resolveAgentLoopSpec,
   resolveLoopToolCallLimit,
   resolveAgentMaxRounds,
-  resolveFirstTokenTimeoutMs,
-  resolveStreamIdleTimeoutMs,
-  resolveAgentLoopSpec,
   isAgentLimitsByTierShape
 };
 

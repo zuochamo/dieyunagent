@@ -567,24 +567,6 @@ function dropRejectedChatImagesForApi(body, opts = {}) {
   return { dropped };
 }
 
-/**
- * 字符串版闸门（请求体已经是 JSON 串时用）。只在含图片 part 时解析，
- * 避免给每轮请求都加一次 parse/stringify 开销。解析失败原样返回。
- */
-function sanitizeChatRequestJsonForApi(rawJson) {
-  const raw = typeof rawJson === 'string' ? rawJson : '';
-  const hasImagePart =
-    raw.includes('"image_url"') || raw.includes('"input_image"') || /"type"\s*:\s*"image"/.test(raw);
-  if (!hasImagePart) return raw;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return raw;
-  }
-  return sanitizeChatBodyImagesForApi(parsed) ? JSON.stringify(parsed) : raw;
-}
-
 function isMutatingAgentToolName(name) {
   const n = String(name || '');
   if (MUTATING_TOOL_NAMES.has(n)) return true;
@@ -878,7 +860,6 @@ const SHARED_EXPORTS = {
   sniffVisionImageMime,
   sanitizeImageUrlForApi,
   sanitizeChatBodyImagesForApi,
-  sanitizeChatRequestJsonForApi,
   mapChatImages,
   // 图片 part 形状判定的单一来源：计费（token-estimate.js）与出站闸门共用同一套形状，
   // 否则会出现「闸门拦下了、账本还把 base64 当正文算」这种两边不认同一件事的漂移。

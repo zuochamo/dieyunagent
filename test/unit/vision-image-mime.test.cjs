@@ -14,7 +14,6 @@ const {
   sniffVisionImageMime,
   sanitizeImageUrlForApi,
   sanitizeChatBodyImagesForApi,
-  sanitizeChatRequestJsonForApi,
   isLlmImageRejectedError,
   parseRejectedImageMessageIndices,
   dropRejectedChatImagesForApi
@@ -157,35 +156,6 @@ describe('sanitizeChatBodyImagesForApi（Main 出站 body 闸门）', () => {
   });
 });
 
-describe('sanitizeChatRequestJsonForApi（出站 body 字符串闸门）', () => {
-  it('含图片 part 时解析清洗后重新序列化', () => {
-    const raw = JSON.stringify({
-      model: 'm',
-      messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl('image/bmp', bmp) } }] }]
-    });
-    const out = sanitizeChatRequestJsonForApi(raw);
-    expect(out).not.toBe(raw);
-    expect(JSON.parse(out).messages[0].content[0].type).toBe('text');
-  });
-
-  it('Anthropic 风格 image part 也能被识别并清洗', () => {
-    const raw = JSON.stringify({
-      model: 'm',
-      messages: [
-        { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/heic', data: 'AAAA' } }] }
-      ]
-    });
-    const parsed = JSON.parse(sanitizeChatRequestJsonForApi(raw));
-    expect(parsed.messages[0].content[0].type).toBe('text');
-  });
-
-  it('不含图片 part 时原样返回（同一字符串引用，避免无谓 parse/stringify）', () => {
-    const raw = JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }] });
-    expect(sanitizeChatRequestJsonForApi(raw)).toBe(raw);
-    expect(sanitizeChatRequestJsonForApi('')).toBe('');
-    expect(sanitizeChatRequestJsonForApi('not json {"image_url":1}')).toBe('not json {"image_url":1}');
-  });
-});
 
 describe('上游「unsupported image」400 的识别与修复', () => {
   const img = (url) => ({ type: 'image_url', image_url: { url } });

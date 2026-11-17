@@ -1091,14 +1091,6 @@
       ]
     },
     {
-      "prefix": "src/agent/sse-delta-parse.js",
-      "tests": [
-        "test:llm-tool-call-fallback",
-        "test:task-tier",
-        "test:unit"
-      ]
-    },
-    {
       "prefix": "src/llm-reconnect-retry.js",
       "tests": [
         "test:llm-reconnect-retry",
@@ -1137,14 +1129,6 @@
       "tests": [
         "test:llm-channel",
         "test:unit"
-      ]
-    },
-    {
-      "prefix": "src/agent/sse-delta-parse.js",
-      "tests": [
-        "test:unit",
-        "test:llm-tool-call-fallback",
-        "check:renderer"
       ]
     },
     {

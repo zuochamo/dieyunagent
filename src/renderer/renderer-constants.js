@@ -27,7 +27,7 @@ const MOBILE_TRACE_PUSH_INTERVAL_MS = 100;
 const MOBILE_TRACE_STREAM_INTERVAL_MS = 20;
 /**
  * 上游静默提示阈值：开始出字后静默超过该时长，思考区叠加一行「上游 Ns 无数据」。
- * 只是显示阈值（比 llmStreamIdleTimeoutMs 小得多，用于提前暴露静默），不参与任何判定。
+ * 只是显示阈值（远小于上游超时（core 侧超时自行兜底），用于提前暴露静默），不参与任何判定。
  */
 const STREAM_IDLE_HINT_MS = 30000;
 
