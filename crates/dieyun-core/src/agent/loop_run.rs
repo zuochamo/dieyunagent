@@ -801,11 +801,14 @@ impl AgentLoopManager {
         }
         // 折叠在**发出请求之前**做，且只动自己的账本：transcript 的写者只有这一处。
         fold_if_needed(state);
+        // 注意：**不要**在这里写 `stream`。要不要流式是传输层的事（`DriveSpec.stream` →
+        // `agent::llm::chat_completion` 统一注入请求体）；这里硬写 `stream: false` 会让端点
+        // 改回非流式，而 D Y/XHX 这类中转在非流式口径下会**丢掉 tool_calls**
+        // （2026-11-17 实测：整包回 `message` 里没有 tool_calls，表现为「模型什么都没说」）。
         let llm_body = json!({
             "model": state.model,
             "messages": state.messages,
-            "tools": state.tools,
-            "stream": false
+            "tools": state.tools
         });
         Ok(LoopResponse {
             phase: "need_llm".into(),

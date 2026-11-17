@@ -326,16 +326,13 @@ pub async fn chat_completion(
         .timeout(Duration::from_secs(timeout))
         .build()
         .map_err(|e| CoreError::rpc("LLM_HTTP", e.to_string()))?;
-    // `stream` 是**传输**语义：宿主只表达「这一轮要不要增量」，请求体里的 `stream` 字段由
-    // 唯一实现这里补上 —— 否则端点按默认（非流式）回整包，增量永远为 0，
-    // 下游还得靠整包兜底才不至于空回复（见下面 `whole` 那段）。
+    // `stream` 是**传输**语义：宿主/账本只表达「这一轮要不要增量」，请求体里的 `stream`
+    // 字段以这里为准 —— 唯一 HTTP 实现说了算，别处再写一次就会分叉（2026-11-17 的坑：
+    // `loop_run.next_body` 曾硬写 `stream: false`，端点于是回整包，中转在非流式口径下
+    // 直接丢掉 tool_calls，用户看到「模型什么都没说」）。
     let mut body = body;
-    if stream {
-        if let Some(obj) = body.as_object_mut() {
-            if obj.get("stream").and_then(|v| v.as_bool()).is_none() {
-                obj.insert("stream".to_string(), Value::Bool(true));
-            }
-        }
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("stream".to_string(), Value::Bool(stream));
     }
     let request = apply_llm_headers(client.post(url), headers, &cfg.api_key, &cfg.auth_mode)
         .json(&body);
@@ -757,7 +754,9 @@ mod tests {
             &cfg,
             &url,
             &std::collections::HashMap::new(),
-            json!({ "model": "m", "messages": [] }),
+            // 故意带一个 `stream: false`：传输层要按自己的口径覆盖它（这正是 2026-11-17 的坑 ——
+            // `next_body` 硬写 false，端点回整包，中转在非流式口径下丢 tool_calls）
+            json!({ "model": "m", "messages": [], "stream": false }),
             true,
             true,
             |_delta| {},
@@ -775,7 +774,7 @@ mod tests {
         let request = server.await.expect("server join");
         assert!(
             request.contains("\"stream\":true"),
-            "stream 由传输层补进请求体（宿主不重复表达）：{request}"
+            "传输层要覆盖请求体里的 stream:false（否则端点回整包、中转丢 tool_calls）：{request}"
         );
     }
 }
