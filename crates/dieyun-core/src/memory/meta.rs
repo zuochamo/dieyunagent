@@ -78,12 +78,16 @@ pub(crate) fn maybe_set_title_from_user_message(
         )
         .optional()?
         .flatten();
-    // 「要不要覆盖」只有一个判据：`title_needs_repair`（占位 / 脏值才值得覆盖）。
+    // 「要不要覆盖」的主判据是 `title_needs_repair`（占位 / 脏值才值得覆盖）。
     //
-    // 原先这里还叠了 `!= 新对话` / `!= 对话` / `!starts_with("[计划]")` 三条 —— 都是死条件：
-    // 前两条 `title_needs_repair` 已含；`[计划] xx` 本来就不是占位值，判据返回 false，
-    // 加不加都是「不覆盖」。留着只会让人以为计划标题有专门保护，其实没有。
-    if !title_needs_repair(existing.as_deref()) {
+    // 但 `[计划] xx` 是个**例外**：它是内部抬头，用户真说话之后应当被洗成正文标题。
+    // 旧实现靠守卫里的合取项 `!t.starts_with("[计划]")` 达到这个效果（不是死条件 ——
+    // 去掉它就让计划会话永远顶着内部抬头）。这里把它显式写出来，避免再被当成冗余删掉。
+    let existing_title = existing.as_deref();
+    let is_internal_header = existing_title
+        .map(|t| t.trim_start().starts_with("[计划]"))
+        .unwrap_or(false);
+    if !title_needs_repair(existing_title) && !is_internal_header {
         return Ok(());
     }
     let plain = strip_message_meta(content);

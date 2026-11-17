@@ -543,7 +543,15 @@ function registerAgentRuntimeIpc(ctx) {
             planSummary: (result.plan && result.plan.planSummary) || ''
           },
           signal: abortController.signal,
-          log: (msg) => log.info(msg)
+          // 这个文件没有注入 logger（只有 live.* 取值器）：走 console.warn，
+          // 别写一个未定义的 log.info —— 它只在错误分支求值，会静默抛 ReferenceError。
+          log: (msg) => {
+            try {
+              console.warn(msg);
+            } catch {
+              // ignore
+            }
+          }
         });
         result.readiness = mergeReviewerIntoReadiness(result.readiness, verdict);
       } catch {

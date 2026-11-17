@@ -596,7 +596,26 @@ async function main() {
 
     // 预算内不重编码（返回 null = 原图可直接用）；超预算才缩。
     const small = { base64: 'A'.repeat(64), mediaType: 'image/png', width: 320, height: 200 };
-    assert.strictEqual(fitVisionShotToBudget(small, { visionMaxEdge: 1600, visionMaxChars: 100000 }), null, '预算内不重编码');
+    // 注意 limit 名：`resolveVisionLimits` 只认 visionShotMaxEdge / visionMaxBase64Chars，
+    // 写错名字会让两个上限都回落默认值 —— 那样这条断言恒真，缩图分支等于零覆盖。
+    const visionLimits = { visionShotMaxEdge: 1600, visionMaxBase64Chars: 100000 };
+    assert.strictEqual(fitVisionShotToBudget(small, visionLimits), null, '预算内不重编码');
+    // 注意：null 有两种语义（预算内直通 / 缩不了交回原图），所以不能反着断言「必须缩图」；
+    // 夹具里是假 base64（解码必然失败），断言具体返回值只会变成恒真/恒假。
+  }
+
+  {
+    // 回归：注册表若用裸对象查表，模型发一个叫 `toString` / `constructor` 的「工具」时，
+    // 会直接执行 Object.prototype 上的函数并把 `[object Object]` 当工具结果返回。
+    const bridge = makeBridge({});
+    for (const evil of ['toString', 'constructor', 'valueOf', '__proto__']) {
+      const r = await bridge.executeAgentTool(evil, {}, ctx());
+      assert.ok(
+        r == null || typeof r === 'object' || typeof r === 'string',
+        `${evil}: 必须走正常失败/未知工具路径，不能返回函数`
+      );
+      assert.notStrictEqual(r, '[object Object]', `${evil} 不能被当成 handler 执行`);
+    }
   }
 
   // ─────────── 注册表完整性（拆 switch 后新增的结构不变量）───────────

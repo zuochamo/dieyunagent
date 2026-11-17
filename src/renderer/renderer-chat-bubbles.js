@@ -417,7 +417,8 @@ function buildMsgTurnFooter(meta, { canWithdraw, msgIndex, copyText }) {
   metaSpan.className = 'msg-turn-meta';
   const mode = meta.modeLabel || 'Agent';
   const model = meta.modelLabel || '—';
-  const time = fmtClock(meta.ts);
+  // 旧实现是 `Number(ts) || Date.now()`：缺失/非数值时显示「现在」而不是留空（别丢这个回退）。
+  const time = fmtClock(meta.ts) || fmtClock(Date.now());
   metaSpan.textContent = `${mode} · ${model} · ${time}`;
   footer.appendChild(metaSpan);
 

@@ -441,3 +441,37 @@ Reviewer 的 **HTTP 调用**仍在 Renderer，因为它的模型配置（`review
 **当前告警**：`dieyun-core` 6 条 warning（3 条为 test-only 助手在 lib 目标下「never used」的既有形态），没有新增功能性问题。
 
 **回归**：`cargo test -p dieyun-core` **215 passed** · `npm test`（按 diff 选测）· 其余 JS 套件不受影响（纯 Rust 侧改动）。
+
+---
+
+## 十六、自查（三份独立审查 + 自测）修掉的 bug
+
+提交后做了一轮针对性审查（工具层 commit / 渲染+记忆 commit / Reviewer commit，各一份独立报告），**修掉 11 处**，其中 4 处是「会出错但很安静」的那类：
+
+| # | 问题 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `main-tools` 注册表用裸对象查表 | 模型发 `toString` / `constructor` / `__proto__` 会命中 `Object.prototype` 并被当 handler 执行（旧 switch 会回「未知工具」） | 注册表改 `Object.create(null)` |
+| 2 | Reviewer 从账本取 diff 只认 `toolArgs` | Rust `TraceTool` 用 `args` → 改动文件恒为空 → **Reviewer 每轮都 skip**，且 reason 报成「用户没开」 | `reviewerToolPath` 兼认 `toolArgs`/`args`，diff 再兜 `result.diff` |
+| 3 | `agent-runtime.js` 写了 `log.info` | 该文件无 `log` → 只在错误分支抛 `ReferenceError` → 被 catch 吞掉，验收失败零日志 | 改 `console.warn` 包一层 try |
+| 4 | 语义召回 SQL 参数绑反（`?1`=模型签名、`?2`=scope，代码写成 `params![scope, sig]`） | 项目级记忆的**语义召回恒为空**（两个都是 TEXT，不报错）→ 只能靠关键词通道；`near_duplicate` 也找不到近重复 | 改 `params![sig, scope]` |
+| 5 | `maybe_set_title_from_user_message` 删 `[计划]` 条件时判成「死条件」 | 实际不是：旧代码里该合取项为假 → 会**覆盖**计划抬头。删掉后计划会话永远顶着 `[计划] xxx` | 显式恢复「内部抬头要被洗掉」，并改正注释 |
+| 6 | `renderer-agent-complete.js` 让**任何** readiness 不通过都翻交付闸门 | 与 `completion-readiness` 的定位（只提示、不挡交付）冲突：日常跑一个失败的验证命令就会把托盘翻成「任务未完成」 | 只在 `reason === 'reviewer_validation_failed'` 时翻 |
+| 7 | Reviewer 的格式修复请求又开 `response_format` | 走到修复恰恰常因端点不认它 → 修复必失败、兜底形同虚设 | 修复请求改 `jsonMode:false`；退回请求补 null 判 |
+| 8 | `fmtClock(meta.ts)` 丢了 `|| Date.now()` 回退 | 缺 ts / 非数值时页脚渲染成空（旧版显示「现在」） | 调用点补回退 |
+| 9 | `renderer-alive.js` 又内联了一份 `toLocaleTimeString` | 同 commit 刚立的规矩自己被破，下次收口必漏 | 改 `fmtClock(Date.now())` |
+| 10 | barrel 死导入 `SESSION_RECALL_TOOL`；`skills.js` 用 `deps.userDataPath` 而不用注入值 | 前者白加载；后者用 `{}` 构造 bridge 时 TypeError | 各改一行 |
+| 11 | 文档 4 处仍指向已删除的 `renderer-agent-reviewer.js`（README / AGENT-DEV / AGENT-STRATEGY / HARNESS-INVENTORY + 一份 plan） | 「索引里有个不存在的文件」，后人按图索骥会撞空 | 改指 `agent/turn-reviewer*.js` |
+
+**补了 2 条回归测试**（这两处 bug 之前都没有网）：账本形状的 trace 必须能推出改动文件；注册表不能被原型链键骗过。
+
+### 已知但**没修**的（要么是你工作区里的改动，要么需要单独设计）
+
+| 项 | 判断 |
+|---|---|
+| 心跳轮 `wakePower` 硬闸门（`tool-gate.js` 五类 `WAKE_*` 失败）、`computer`/`host_exec` 新增 `local`/`target` 参数与 13 处工具描述改写 | **是工作区既有改动**（alive 那批）随重构一起入库，不是本次重构引入；但提交说明里没交代，review 时容易被当成纯搬家放过 —— 已在此登记 |
+| `wakeRoot` 缺省时以 `process.cwd()` 为可写根 | 同上（既有）：心跳轮 `workspacePath` 为空时允许写的根会落到程序目录，属静默放宽，建议单独修 |
+| 语义召回通道没有过期判定（`m.status = 'active'`），词法通道有 | 既有不一致：已过期但未被衰减归档的记忆还能被语义注入。属「看得见吗」第二套集合，建议下一批收口 |
+| `touch_session` 由单条 upsert 改为「先 SELECT 再分支写」 | 跨进程理论上有 TOCTOU（同进程有写连接互斥锁）；标题字段、影响极小，已在代码里注明 |
+| Reviewer 从账本只能拿到**文件路径**，拿不到 diff 正文（`fs_edit` 的返回值里没有 diff） | 目前会让 Reviewer 在「改了哪些文件」这一层工作；要拿到 diff 需把会话改动账本从 Renderer 上报或在 Main 侧算 git diff —— 属独立设计 |
+
+**回归**：`cargo test -p dieyun-core` 215 · `test:unit` 2160 · `npm test` · `test-tool-bridge-handlers` · `check:renderer` · `build:renderer:dev` 全绿。

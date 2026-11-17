@@ -25,7 +25,7 @@ function createSkillsHandlers(shared) {
     agents_md_propose: async (a, ctx) => executeAgentsMdProposeMain(gateway, a, ctx, userDataPath),
     skill_create: async (a, ctx) => {
         if (!createUserSkill) return { error: '技能创建不可用' };
-        const created = await createUserSkill(deps.userDataPath, ctx.workspacePath || null, {
+        const created = await createUserSkill(userDataPath, ctx.workspacePath || null, {
           name: a.name,
           description: a.description,
           content: a.content

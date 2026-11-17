@@ -35,8 +35,7 @@ const {
   AGENTS_MD_PROPOSE_TOOL,
   SKILL_CREATE_TOOL,
   SKILL_DELETE_TOOL,
-  MEMORY_TOOLS,
-  SESSION_RECALL_TOOL
+  MEMORY_TOOLS
 } = require('./catalog/memory');
 const { PLAN_TOOLS, GOAL_START_TOOL, GOAL_UPDATE_TOOL, GOAL_TOOLS } = require('./catalog/plan');
 const { MCP_TOOL_SCHEMA_TOOL, MCP_MANAGE_TOOL } = require('./catalog/mcp');

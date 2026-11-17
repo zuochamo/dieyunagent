@@ -78,7 +78,6 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - `src/agent/turn-reviewer.js` + `src/agent/turn-reviewer-run.js` — 一轮收尾的**独立 Reviewer 验收**： 提示词 / 输入装配 / 结论整形 / 与证据判定的合并（`mergeReviewerIntoReadiness`）在纯函数侧， 请求与超时在 `-run`（Main，读 `model-settings.json` 的 `reviewer*`）。**Renderer 侧没有 Reviewer 代码**： 它只渲染 `readiness.note`。没有文件 diff 不跑；任何失败都跳过验收（不挡交付）
 - `src/default-workspace-gc.js` — **默认工作区（`~/.dieyun/workspace`）回收的唯一来源**：到期回收 + 容量上限按最旧优先补刀；两条硬边界（工程标记 / 宽限期内的条目永不自动删）；只作用于兜底目录，**不碰自选工作空间**。数字在 `agent-limits.js` 的 `defaultWorkspace*`，装配在 `src/main-entry.js` 与 `src/headless/boot.js` 各一行
 - `src/renderer/agent-guardrails.js` — 只渲染验收提示（`applyReadinessNote`，不判定）
-- `src/renderer/renderer-agent-reviewer.js` — 可选 LLM Reviewer（默认关；独立模型 + 文件 diff）
 
 ## 3. 开发命令
 

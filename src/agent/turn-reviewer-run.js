@@ -100,8 +100,14 @@ async function runTurnReviewer(opts = {}) {
         maxSnippetChars: REVIEWER_MAX_SNIPPET_CHARS
       });
   const config = resolveReviewerConfig(settings);
+  // 两种跳过原因必须分开：混成 `reviewer_disabled` 会让「配置开了但拿不到 diff」
+  // 这种真问题看起来像「用户没开」，排查时完全走偏。
   if (!config || !shouldRunReviewer({ settings, files })) {
-    return { ok: true, skipped: true, reason: 'reviewer_disabled' };
+    const reason = !config || config.enabled !== true ? 'reviewer_disabled' : 'reviewer_no_diff';
+    if (typeof opts.log === 'function' && reason === 'reviewer_no_diff') {
+      opts.log('[dieyun:reviewer] 跳过验收：本轮没有可用的文件 diff');
+    }
+    return { ok: true, skipped: true, reason };
   }
   const first = buildReviewerRequest(config, {
     maxTokens: 1600,
@@ -151,12 +157,19 @@ async function runTurnReviewer(opts = {}) {
         messages: first.body.messages,
         jsonMode: false
       });
+      if (!plain) throw err;
       raw = await fetchOnce(plain, callOpts);
     }
     let parsed = extractReviewerJson(raw);
     if (!parsed || typeof parsed !== 'object') {
       // 一次格式修复：只让它把原文改写成 JSON，不重新判断。
-      const repair = buildReviewerRequest(config, { maxTokens: 1200, messages: buildRepairMessages(raw), jsonMode: true });
+      // 修复请求**不再带 response_format**：走到这里往往正是因为端点不认它；
+      // 修复提示词本身已要求「只输出 JSON」，不需要协议层再强制一次。
+      const repair = buildReviewerRequest(config, {
+        maxTokens: 1200,
+        messages: buildRepairMessages(raw),
+        jsonMode: false
+      });
       const repairedRaw = repair ? await fetchOnce(repair, callOpts) : '';
       parsed = extractReviewerJson(repairedRaw);
     }

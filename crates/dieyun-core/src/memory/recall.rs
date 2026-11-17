@@ -627,7 +627,9 @@ impl MemoryStore {
                 stmt.query_map(params![sig], map_long_mem_semantic_row)?
                     .collect::<Result<Vec<_>, _>>()?
             } else {
-                stmt.query_map(params![scope, sig], map_long_mem_semantic_row)?
+                // SQL 里 ?1 是 v.model（模型签名）、?2 是 m.scope：原来绑反了，项目记忆的语义召回恒为空
+                // （两个都是 TEXT，不报错，只是查不到）。global 分支没有 ?2，所以只有项目作用域受影响。
+                stmt.query_map(params![sig, scope], map_long_mem_semantic_row)?
                     .collect::<Result<Vec<_>, _>>()?
             };
             for (id, content, source, created_at, scope, kind, importance, status, blob, dims) in rows {

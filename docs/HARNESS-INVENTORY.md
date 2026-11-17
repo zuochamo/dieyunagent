@@ -341,8 +341,8 @@
 | ~~`src/agent/compaction-rust-bridge.js`~~ | — | — | **已删除**：唯一消费者改为直接读 `compaction-prompts.js`，映射写在 `compaction-main.js` |
 | `src/agent/agent-synthesis.js:74-106` | 汇总助手 | system | 最终汇总 |
 | ~~`src/renderer/renderer-thinking-trace.js` 汇总助手~~ | — | — | **已删除**：Renderer 侧那份逐字重复且无调用点 |
-| `src/renderer/renderer-agent-reviewer.js:86-88` | 格式修复器 | system | 强制合法 JSON |
-| `src/renderer/renderer-agent-reviewer.js:186-194` | Reviewer | system/user | 独立验收（浏览器证据规则） |
+| `src/agent/turn-reviewer.js`（修复提示词） | 格式修复器 | system | 强制合法 JSON |
+| `src/agent/turn-reviewer.js`（主判定） | Reviewer | system/user | 独立验收（浏览器证据规则） |
 | ~~`src/renderer/renderer-agent-llm.js` 记忆归纳器~~ | — | — | **已删除**：与知识维护器重复的第二份归纳提示词 |
 | `src/agent/knowledge-maintainer.js` | 知识维护器（**Main 侧唯一实现，含触发**） | system | 两分支（fullPeriodic / 默认）；触发由 `afterAgentRun` 在三个 loop 调用点统一发起 |
 | `src/renderer/renderer-agents-md.js:635-637` | AGENTS 冷启动 | system | 初始化 section |

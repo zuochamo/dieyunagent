@@ -66,6 +66,46 @@ describe('Reviewer 请求装配（端点 / 请求头只认 llm-request）', () =
   });
 });
 
+describe('从循环账本取证据（Rust TraceTool 形状）', () => {
+  test('trace 里的 tool 是 {name,args,result}，也要能推出改动文件', async () => {
+    // 回归：只认 toolArgs 时，Main 侧账本（Rust TraceTool 用 `args`）永远推不出文件，
+    // 于是 Reviewer 每轮都 skip，reason 还报成 reviewer_disabled。
+    const fetchOnce = scriptedFetch(['{"accepted":true,"reason":"ok"}']);
+    const trace = [
+      {
+        round: 1,
+        phase: 'work',
+        tools: [
+          { name: 'fs_edit', args: { filePath: 'src/login.js' }, result: { ok: true } },
+          { name: 'fs_write_file', args: { filePath: 'src/theme.css' }, result: { ok: true } }
+        ]
+      }
+    ];
+    const r = await runTurnReviewer({
+      settings: SETTINGS,
+      facts: { userTask: '改登录页', trace },
+      fetchReviewerOnce: fetchOnce
+    });
+    assert.equal(r.skipped, undefined, '有改动文件就该真的去跑 Reviewer');
+    assert.equal(fetchOnce.calls.length, 1);
+    const sent = JSON.stringify(fetchOnce.calls[0].body);
+    assert.ok(sent.includes('src/login.js'), '账本里的文件路径要进 payload');
+    assert.ok(sent.includes('src/theme.css'));
+  });
+
+  test('没有改动文件时跳过理由要写清是 no_diff，而不是 disabled', async () => {
+    const fetchOnce = scriptedFetch([]);
+    const r = await runTurnReviewer({
+      settings: SETTINGS,
+      facts: { userTask: '闲聊', trace: [] },
+      fetchReviewerOnce: fetchOnce
+    });
+    assert.equal(r.skipped, true);
+    assert.equal(r.reason, 'reviewer_no_diff', '别把「拿不到 diff」伪装成「用户没开」');
+    assert.equal(fetchOnce.calls.length, 0);
+  });
+});
+
 describe('Reviewer 执行的跳过分支（都不发请求、都不抛）', () => {
   test('未启用 / 半套配置', async () => {
     const fetchOnce = scriptedFetch([]);

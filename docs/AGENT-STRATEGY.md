@@ -126,7 +126,7 @@ flowchart TD
 | `src/renderer/renderer-agent-send.js` | 发送前分类 |
 | `src/agent/completion-readiness.js` | 完成验收判定（证据在 Main） |
 | `src/renderer/agent-guardrails.js` | 只渲染验收提示（`applyReadinessNote`） |
-| `src/renderer/renderer-agent-reviewer.js` | 可选 files+diff Reviewer |
+| `src/agent/turn-reviewer.js` + `turn-reviewer-run.js` | 可选 files+diff Reviewer |
 | `test/unit/task-tier.test.cjs` | 分级与流式残片单测 |
 
 ---
@@ -138,7 +138,7 @@ flowchart TD
 | 重复工具止损 | `src/agent/tool-guardrails.js`（跑它的是 `src/agent/tool-gate.js` 的 `repeat-guard` 关卡） |
 | 工具执行拦截 | `src/agent/tool-harness.js` |
 | 完成验收 | `src/agent/completion-readiness.js` → `evaluateTurnReadiness`（渲染：`src/renderer/agent-guardrails.js` → `applyReadinessNote`） |
-| 可选 diff Reviewer | `src/renderer/renderer-agent-reviewer.js`（默认关） |
+| 可选 diff Reviewer | `src/agent/turn-reviewer-run.js`（默认关；判定在 `turn-reviewer.js`） |
 | Shell 安全 | `src/gateway/exec-policy.js` |
 | 工具能力白名单 | `src/agent/planner-tool-filters.js` |
 | 上下文硬顶 | `src/renderer/renderer-context-engine.js` → `CTX_LIMITS` |

@@ -62,7 +62,10 @@ function inferReviewerFromPartial(text) {
 }
 
 function reviewerToolPath(tool) {
-  const args = tool && typeof tool.toolArgs === 'object' && tool.toolArgs ? tool.toolArgs : {};
+  // 两种调用方：Renderer 的 UI trace 用 `toolArgs`，Rust 循环账本（`TraceTool`）用 `args`。
+  // 只认 toolArgs 会让「从账本取 diff」这条路径恒为空（Reviewer 永远拿不到变更文件）。
+  const raw = tool && (tool.toolArgs || tool.args);
+  const args = raw && typeof raw === 'object' ? raw : {};
   return String(
     args.filePath || args.path || args.file || tool?.filePath || tool?.path || ''
   ).trim();
@@ -102,6 +105,7 @@ function collectReviewerFileDiffs(sessionChanges, trace, opts = {}) {
       prev.removed = Number(d.removed) || prev.removed;
       prev.created = !!(d.created || prev.created);
       const snippet = compactReviewerDiffSnippet(d, maxSnippet);
+      void snippet;
       if (snippet && snippet.length >= String(prev.diff || '').length) prev.diff = snippet;
     }
     byPath.set(p, prev);
@@ -112,7 +116,9 @@ function collectReviewerFileDiffs(sessionChanges, trace, opts = {}) {
   for (const entry of Array.isArray(trace) ? trace : []) {
     for (const tool of entry.tools || []) {
       const p = reviewerToolPath(tool);
-      if (p) upsert(p, tool.diff);
+      // diff 正文：UI trace 有 `tool.diff`；账本里只在工具结果里出现（`result.diff`），
+      // 两个来源都试一遍，任一有内容就用。
+      if (p) upsert(p, tool.diff || (tool.result && (tool.result.diff || tool.result.unifiedDiff)));
     }
   }
   return [...byPath.values()].slice(0, maxFiles);

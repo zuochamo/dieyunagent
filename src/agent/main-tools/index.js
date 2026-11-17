@@ -21,7 +21,10 @@ const { createMemoryHandlers } = require('./memory');
 const { createPeerHandlers } = require('./peer');
 
 function createMainToolHandlers(shared) {
-  return {
+  // **原型为 null**：模型发一个叫 `toString` / `constructor` 的工具名时，
+  // 裸对象查表会命中 Object.prototype 上的函数并把它当 handler 执行
+  // （旧 switch 会落到 default → 网关回「未知工具」）。
+  return Object.assign(Object.create(null), {
   ...createCameraHandlers(shared),
   ...createMcpHandlers(shared),
   ...createRemoteHandlers(shared),
@@ -30,7 +33,7 @@ function createMainToolHandlers(shared) {
   ...createGoalsHandlers(shared),
   ...createMemoryHandlers(shared),
   ...createPeerHandlers(shared)
-  };
+  });
 }
 
 module.exports = { createMainToolHandlers };

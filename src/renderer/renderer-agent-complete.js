@@ -219,8 +219,14 @@ async function completeAgentRunAfterSuccess(run, fc) {
       finalReadiness = { ...readiness, shouldRetry: false, surfaceToUser: true };
     }
     // 独立 Reviewer 的判定已在 Main 收尾时合流进 `run.result.readiness`（`turn-reviewer-run.js`
-    // + `mergeReviewerIntoReadiness`）：Renderer 不再发请求、不判「谁优先」，只按 readiness.ok 定终态。
-    if (readiness && readiness.ok === false) completionGatePassed = false;
+    // + `mergeReviewerIntoReadiness`）：Renderer 不再发请求、不判「谁优先」。
+    //
+    // **只有 Reviewer 的否决才翻交付闸门**（托盘「任务未完成」/`completionStatus`）：证据判定
+    // （浏览器错误、验证命令非零退出…）按 `completion-readiness.js` 的定位只提示、不挡交付，
+    // 否则日常开发里「跑了个会失败的测试」就会把托盘翻成未完成。
+    if (readiness && readiness.ok === false && readiness.reason === 'reviewer_validation_failed') {
+      completionGatePassed = false;
+    }
     if (typeof applyReadinessNote === 'function') {
       reply = applyReadinessNote(reply, finalReadiness);
     }

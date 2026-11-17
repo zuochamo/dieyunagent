@@ -1608,7 +1608,7 @@ function initAliveSettingsPage() {
   if (logRefresh) {
     logRefresh.addEventListener('click', async () => {
       await Promise.all([refreshAliveDecisions(), refreshAliveNote()]);
-      aliveNoteText('alive-log-hint', `已刷新 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`, 'ok');
+      aliveNoteText('alive-log-hint', `已刷新 ${fmtClock(Date.now())}`, 'ok');
     });
   }
   // 「事件 / 抽屉」横向标签：一条委托监听覆盖两个壳（设置 → 日志、侧栏「生命」面板）

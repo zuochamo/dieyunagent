@@ -455,13 +455,18 @@ mod tests {
         assert_eq!(row.title.as_deref(), Some("帮我看看构建为什么挂了"), "真标题不被启发式覆盖");
         assert_eq!(row.title_source.as_deref(), Some(TITLE_SOURCE_HEURISTIC));
 
-        // 3) 语义标题（[计划] 前缀）不是占位值：新消息不改它
+        // 3) [计划] xx 是**内部抬头**：用户真说话后要洗成正文标题。
+        //    这是旧行为（旧守卫里 !starts_with("[计划]") 的作用），拆判据时不能当冗余删掉。
         force_title("[计划] 夜间构建巡检", TITLE_SOURCE_HEURISTIC);
         store
-            .append_message(&session.id, "user", "这轮正文不该改标题", None)
+            .append_message(&session.id, "user", "这轮正文要成为标题", None)
             .unwrap();
         let row = store.get_session(&session.id).unwrap().unwrap();
-        assert_eq!(row.title.as_deref(), Some("[计划] 夜间构建巡检"));
+        assert_eq!(
+            row.title.as_deref(),
+            Some("这轮正文要成为标题"),
+            "[计划] 抬头被下一条用户消息洗掉（旧行为）"
+        );
 
         let _ = std::fs::remove_file(&db);
     }

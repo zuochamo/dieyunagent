@@ -29,7 +29,6 @@
 | `../agent/agent-system-prompt.js` | 模型可见准则与权限/工作区文案 | 改 Agent 规则 |
 | `../agent/system-prompt-prep.js` | Main：codebase / 开文件 / AGENTS.md overview / 图谱(结构信号) / 记忆 / 技能索引 / MCP | 改召回装配 |
 | `renderer-agent-system-message.js` | 视图快照 + 编辑器/诊断 + 缓存 | 系统消息注入 |
-| `renderer-agent-reviewer.js` | 可选 LLM Reviewer 的**请求侧适配器**：默认关、须独立模型 + 文件 diff。提示词 / 输入装配 / 结论整形 / 与证据判定的合并都在 `../agent/turn-reviewer.js`（判定唯一来源）；这里只发请求 + 往 trace 插一条过程记录 | 终态 opt-in |
 | `renderer-composer-mention.js` | Composer @ 提及菜单 | @ 菜单 |
 | `renderer-agent-continue.js` | 续跑 / 取消 / 分段 | 停止与段续跑 |
 | `renderer-agent-llm.js` | LLM HTTP / SSE / 记忆整理 | 模型请求 |

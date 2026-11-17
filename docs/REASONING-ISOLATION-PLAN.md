@@ -147,7 +147,7 @@ Rust 收到的是已被 `normalizeLlmResponse` 压平的 `{content, reasoning}` 
 
 1. `src/renderer/renderer-agent-llm.js:871-980` + `:1032-1180`：Renderer 第二份 SSE 解析与推理通道。
    文件本身**是活的**（`fetchChatCompletion:624` / `streamChatCompletion:1178` 被
-   `renderer-knowledge-maintainer.js:447,784`、`renderer-agents-md.js:615`、`renderer-agent-reviewer.js:92-100`、
+   `renderer-knowledge-maintainer.js:447,784`、`renderer-agents-md.js:615`、`agent/turn-reviewer.js`（原 Renderer 侧，已回迁 Main）、
    `renderer-agent-loop.js:79` 调用），
    但**这些调用方只要 `content`**（知识维护 / reviewer / AGENTS 冷启动）→ 推理通道那段是
    重复实现 + 无真实消费者；
