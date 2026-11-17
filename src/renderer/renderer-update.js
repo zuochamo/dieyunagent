@@ -25,20 +25,6 @@ let updateNoticeTimer = null;
 /** @type {Record<string, unknown> | null} */
 let lastUpdateState = null;
 
-function formatUpdateBytes(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v <= 0) return '';
-  if (v < 1024) return `${v} B`;
-  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
-  return `${(v / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatUpdateProgressBar(percent, width = UPDATE_BAR_WIDTH) {
-  const p = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
-  const filled = Math.round((p / 100) * width);
-  return `${'█'.repeat(filled)}${'▒'.repeat(Math.max(0, width - filled))} ${p}%`;
-}
-
 function clearUpdateNoticeTimer() {
   if (updateNoticeTimer) {
     clearTimeout(updateNoticeTimer);
@@ -149,12 +135,12 @@ function setTitlebarUpdateProgress(state) {
   if (indeterminate) {
     bar = `${'▒'.repeat(UPDATE_BAR_WIDTH)} …`;
   } else {
-    bar = formatUpdateProgressBar(state.percent);
+    bar = fmtBar(state.percent);
   }
 
   let suffix = '';
   if (phase === 'downloading' && state.transferred && state.total) {
-    suffix = ` · ${formatUpdateBytes(state.transferred)} / ${formatUpdateBytes(state.total)}`;
+    suffix = ` · ${fmtBytes(state.transferred)} / ${fmtBytes(state.total)}`;
   } else if (phase === 'installing' && state.message) {
     suffix = ` · ${state.message}`;
   } else if (state.version && phase === 'downloading') {
@@ -175,7 +161,7 @@ function aboutUpdateLabel(state) {
   if (phase === 'downloading') {
     const size =
       state && state.transferred && state.total
-        ? `（${formatUpdateBytes(state.transferred)} / ${formatUpdateBytes(state.total)}）`
+        ? `（${fmtBytes(state.transferred)} / ${fmtBytes(state.total)}）`
         : '';
     return `正在下载${ver ? ` v${ver}` : ''}… ${pct == null ? '' : `${pct}%`}${size}`.trim();
   }

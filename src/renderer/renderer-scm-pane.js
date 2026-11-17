@@ -499,17 +499,6 @@ async function openScmDiff(entry, opts) {
  * 历史模式：提交时间线（泳道图）
  * ------------------------------------------------------------------ */
 
-function scmRelativeTime(unixSec) {
-  const t = Number(unixSec);
-  if (!t) return '';
-  const diff = Math.max(0, Date.now() / 1000 - t);
-  if (diff < 60) return '刚刚';
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
-  if (diff < 7 * 86400) return `${Math.floor(diff / 86400)} 天前`;
-  const d = new Date(t * 1000);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
 
 function setScmMode(mode) {
   if (mode !== 'changes' && mode !== 'history') return;
@@ -660,7 +649,7 @@ function scmCreateHistoryRow(commit) {
   meta.innerHTML =
     `<span class="scm-history-sha">${escapeHtml(commit.shortSha || '')}</span>` +
     scmRefBadges(commit) +
-    `<span class="scm-history-time">${escapeHtml(String(commit.author || ''))} · ${escapeHtml(scmRelativeTime(commit.time))}</span>`;
+    `<span class="scm-history-time">${escapeHtml(String(commit.author || ''))} · ${escapeHtml(fmtRelAgo(Number(commit.time) * 1000, { fallback: 'date' }))}</span>`;
 
   main.append(subject, meta);
   row.append(lane, main);

@@ -15,8 +15,10 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadRendererFmt } = require('./lib/load-renderer-fmt.cjs');
 
 const SRC = path.join(__dirname, '..', '..', 'src', 'renderer', 'renderer-artifacts-panel.js');
+// 相对时间文案的唯一来源在 renderer-utils.js（面板只调用，不再自带一份实现）
 
 function makeEl(tagName) {
   const el = {
@@ -85,6 +87,7 @@ function loadPanel(options = {}) {
     'artifactRpcParams',
     'joinArtifactPath',
     'extractRemotePathFromSshUri',
+    'fmtRelAgo',
     `var escapeHtml = function (s) { return String(s == null ? '' : s); };
      var flatFileIconSvg = function () { return '<svg></svg>'; };
      var formatArtifactDiffHtml = function (d) {
@@ -95,7 +98,7 @@ function loadPanel(options = {}) {
      return {
        extOf: productExtOf,
        groupOf: productGroupOf,
-       ageOf: formatProductAge,
+       ageOf: (ts, now) => fmtRelAgo(ts, { fallback: 'none', now }),
        displayPath: productDisplayPath,
        isSsh: productWorkspaceIsSsh,
        items: productsPanelItems,
@@ -123,7 +126,8 @@ function loadPanel(options = {}) {
     options.getBucket || (() => ({ sinceTs: options.sinceTs || 0 })),
     async (p) => p,
     options.joinArtifactPath || null,
-    options.extractRemotePath || null
+    options.extractRemotePath || null,
+    loadRendererFmt().fmtRelAgo
   );
   return { api, doc, els, windowSpy };
 }

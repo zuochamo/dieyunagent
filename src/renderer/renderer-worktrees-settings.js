@@ -29,24 +29,6 @@ function saveWorktreeCleanupSettings(next) {
   return out;
 }
 
-function formatWorktreeBytes(bytes) {
-  const n = Number(bytes) || 0;
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function formatWorktreeTime(ms) {
-  const t = Number(ms) || 0;
-  if (!t) return '—';
-  try {
-    return new Date(t).toLocaleString();
-  } catch {
-    return '—';
-  }
-}
-
 function protectedWorktreeRunIds() {
   const ids = [];
   if (typeof getPendingWorktreeApply === 'function') {
@@ -147,7 +129,7 @@ function renderWorktreeRunsList(payload) {
   const runs = payload.runs || [];
   if (summaryEl) {
     summaryEl.textContent = runs.length
-      ? `共 ${runs.length} 个 run · 合计 ${formatWorktreeBytes(payload.totalBytes || 0)}`
+      ? `共 ${runs.length} 个 run · 合计 ${fmtBytes(payload.totalBytes || 0)}`
       : '当前工作空间无遗留 worktree';
   }
 
@@ -179,7 +161,7 @@ function renderWorktreeRunsList(payload) {
     const meta = document.createElement('div');
     meta.className = 'worktrees-run-meta';
     const workerN = (run.workers || []).length;
-    meta.textContent = `${formatWorktreeBytes(run.bytes)} · ${workerN} 个执行器 · ${formatWorktreeTime(run.mtimeMs)}`;
+    meta.textContent = `${fmtBytes(run.bytes)} · ${workerN} 个执行器 · ${fmtDateTime(run.mtimeMs) || '—'}`;
 
     main.append(title, meta);
 
@@ -231,7 +213,7 @@ async function refreshWorktreesSettingsPanel(opts = {}) {
     if (payload.ok) {
       const runs = payload.runs || [];
       const summary = runs.length
-        ? `共 ${runs.length} 个 run · ${formatWorktreeBytes(payload.totalBytes || 0)}`
+        ? `共 ${runs.length} 个 run · ${fmtBytes(payload.totalBytes || 0)}`
         : '当前无遗留 worktree';
       setWorktreesSettingsHint('已刷新');
       if (fromUser) {

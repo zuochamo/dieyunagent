@@ -182,11 +182,133 @@ function describeVectorSync(info) {
   return '与当前设置一致';
 }
 
+/* ------------------------------------------------------------------ *
+ * 时间 / 字节 / 进度条：**界面文案的唯一来源**
+ *
+ * 这几类文案原先散在 8 个文件里各写一份（7 个「相对时间」、2 个进度条、2 个字节数），
+ * 同一句「5 分钟前」有四种取整口径，改一处忘七处。现在只在这里实现，调用点只挑口径：
+ *
+ *   fmtClock(ts)               14:35               气泡底部、体征事件行
+ *   fmtMonthDayClock(iso)      03-14 14:35         目标面板收尾时间
+ *   fmtRelShort(ts)            刚刚/5m/3h/2d/3/14  会话列表（宽度最紧）
+ *   fmtRelAgo(ts, opts)        刚刚/5 分钟前/…      git 历史、产物列表
+ *   fmtDateTime(ts)            本地完整时间         副本、设置页
+ *   fmtBar(pct, width)         ████▒▒▒▒▒▒▒▒ 40%     部署/更新进度
+ *   fmtBytes(n)                1.2 KB / 3.4 MB      下载量、副本占用
+ *
+ * 口径差异是**故意保留**的（列表要短、git 历史要「前」），但每一档只有一份实现。
+ * ------------------------------------------------------------------ */
+
+/** 两位补零（时间文案共用，避免每处再写一遍 padStart）。 */
+function fmtPad2(v) {
+  return String(v).padStart(2, '0');
+}
+
+/** 时钟 `14:35`；没有时间戳返回空串（调用点自己决定要不要兜底成「现在」）。 */
+function fmtClock(ts) {
+  const n = Number(ts || 0);
+  if (!n) return '';
+  const d = new Date(n);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${fmtPad2(d.getHours())}:${fmtPad2(d.getMinutes())}`;
+}
+
+/** 月日 + 时钟 `03-14 14:35`（只服务「哪一晚做完的」这一件事，短到不挤占面板头）。 */
+function fmtMonthDayClock(value) {
+  if (!value) return '';
+  const t = Date.parse(String(value));
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  return `${fmtPad2(d.getMonth() + 1)}-${fmtPad2(d.getDate())} ${fmtPad2(d.getHours())}:${fmtPad2(d.getMinutes())}`;
+}
+
+/** 短相对：`刚刚 / 5m / 3h / 2d / 3/14 / 2024/3/14`（会话列表用，宽度最紧）。 */
+function fmtRelShort(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const diff = Math.max(0, Date.now() - d.getTime());
+  const min = Math.round(diff / 60000);
+  if (min < 1) return typeof t === 'function' ? t('history_time_now') : '刚刚';
+  if (min < 60) return `${min}m`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `${day}d`;
+  const today = new Date();
+  if (d.getFullYear() === today.getFullYear()) {
+    return d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+  }
+  return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric' });
+}
+
+/**
+ * 长相对：`刚刚 / N 分钟前 / N 小时前 / N 天前`。
+ *
+ * @param {number} ts 毫秒时间戳
+ * @param {{fallback?: 'date'|'none', fallbackDays?: number, now?: number, empty?: string}} [opts]
+ *   `fallback:'date'`：超过 `fallbackDays`（默认 7）回落到 `YYYY-MM-DD`（git 历史用）；
+ *   `fallback:'none'`：一直按天累计（产物列表用）；
+ *   `now`：只给测试注入固定的「现在」；`empty`：没有时间戳时返回什么（默认空串）。
+ */
+function fmtRelAgo(ts, opts) {
+  const o = opts || {};
+  const value = Number(ts) || 0;
+  if (!value) return o.empty == null ? '' : String(o.empty);
+  const now = Number(o.now) || Date.now();
+  const diff = Math.max(0, now - value);
+  if (diff < 60 * 1000) return '刚刚';
+  const min = Math.floor(diff / 60000);
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const days = Math.floor(hr / 24);
+  const fallbackDays = o.fallbackDays == null ? 7 : Number(o.fallbackDays);
+  if (o.fallback === 'date' && days >= fallbackDays) {
+    const d = new Date(value);
+    return `${d.getFullYear()}-${fmtPad2(d.getMonth() + 1)}-${fmtPad2(d.getDate())}`;
+  }
+  return `${days} 天前`;
+}
+
+/** 本地完整时间（副本 / 设置页用）；没有时间戳返回空串，调用点自己补 `—`。 */
+function fmtDateTime(ts) {
+  const t = Number(ts) || 0;
+  if (!t) return '';
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString();
+}
+
+/** 文本进度条：`████▒▒▒▒▒▒▒▒ 40%`（宽度只影响填充字符数，百分比一律四舍五入并夹在 0-100）。 */
+function fmtBar(percent, width) {
+  const w = Math.max(1, Math.round(Number(width) || 14));
+  const p = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  const filled = Math.round((p / 100) * w);
+  return `${'█'.repeat(filled)}${'▒'.repeat(Math.max(0, w - filled))} ${p}%`;
+}
+
+/** 字节数：`1.2 KB` / `3.4 MB` / `1.20 GB`；非法或负数返回空串（调用点自己决定要不要显示）。 */
+function fmtBytes(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return '';
+  if (v < 1024) return `${Math.round(v)} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  if (v < 1024 * 1024 * 1024) return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 window.showTextPrompt = showTextPrompt;
 window.showOverlay = showOverlay;
 window.parentRemotePath = parentRemotePath;
 window.describeVectorSync = describeVectorSync;
 window.escapeHtml = escapeHtml;
+window.fmtClock = fmtClock;
+window.fmtMonthDayClock = fmtMonthDayClock;
+window.fmtRelShort = fmtRelShort;
+window.fmtRelAgo = fmtRelAgo;
+window.fmtDateTime = fmtDateTime;
+window.fmtBar = fmtBar;
+window.fmtBytes = fmtBytes;
 
 window.addEventListener('error', (event) => {
   const chat = document.getElementById('chat-list');

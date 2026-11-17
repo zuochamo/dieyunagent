@@ -84,11 +84,6 @@ function appendBubble(role, content, opts = {}) {
   return div;
 }
 
-function formatMsgFooterTime(ts) {
-  const d = new Date(Number(ts) || Date.now());
-  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-}
-
 function humanizeModelId(id) {
   return String(id || '')
     .split(/[-_.]+/)
@@ -422,7 +417,7 @@ function buildMsgTurnFooter(meta, { canWithdraw, msgIndex, copyText }) {
   metaSpan.className = 'msg-turn-meta';
   const mode = meta.modeLabel || 'Agent';
   const model = meta.modelLabel || '—';
-  const time = formatMsgFooterTime(meta.ts);
+  const time = fmtClock(meta.ts);
   metaSpan.textContent = `${mode} · ${model} · ${time}`;
   footer.appendChild(metaSpan);
 
@@ -493,17 +488,34 @@ function appendUserTurn(displayContent, opts = {}) {
  */
 const TRIGGER_NOTICE_TITLES = {
   schedule: '定时任务触发',
-  goal: '目标续跑触发'
+  goal: '目标续跑触发',
+  alive: '心跳触发'
 };
 
+/**
+ * kind → 图标（唯一一份）：触发条与侧栏会话行都从这里取，别处不再各拼一份 SVG。
+ * 侧栏用 [`triggerIconSvg`]（未登记的 kind 返回空串 = 不画图标），触发条用 [`TRIGGER_NOTICE_ICONS`]（回落 default）。
+ */
 const TRIGGER_NOTICE_ICONS = {
   schedule:
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   goal:
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>',
+  alive:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 3 12 2.5-6H21"/></svg>',
+  // 内网对端会话（与某台 agent 的对话）**不是触发**，但侧栏会话行图标只有这一份来源，
+  // 所以登记在这里；形状照抄侧栏 Bot 页签的图标（`index.html` 的 `data-side-tab="bot"`：
+  // 气泡 + 三个点），两处看起来是同一个东西。
+  peer:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.9" y="3.8" width="18.2" height="11.6" rx="3"/><path d="M7.6 15.4v3.6l4.2-3.6"/><circle cx="8" cy="9.6" r="1.1" fill="currentColor" stroke="none"/><circle cx="12" cy="9.6" r="1.1" fill="currentColor" stroke="none"/><circle cx="16" cy="9.6" r="1.1" fill="currentColor" stroke="none"/></svg>',
   default:
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>'
 };
+
+/** 触发归因图标（只认登记过的 kind）：侧栏等「有就画、没有就不画」的场景用。 */
+function triggerIconSvg(kind) {
+  return TRIGGER_NOTICE_ICONS[String(kind || '')] || '';
+}
 
 function triggerNoticeTitle(trigger) {
   const t = trigger || {};
@@ -548,7 +560,7 @@ function appendTriggerNotice(displayContent, opts = {}) {
   time.className = 'msg-trigger-time';
   const ts = Number(opts.ts) > 0 ? Number(opts.ts) : Date.now();
   time.dateTime = new Date(ts).toISOString();
-  time.textContent = formatMsgFooterTime(ts);
+  time.textContent = fmtClock(ts);
 
   const chevron = document.createElement('span');
   chevron.className = 'msg-trigger-chevron';

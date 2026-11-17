@@ -92,14 +92,6 @@ function productGroupOf(ext) {
   return 'other';
 }
 
-function formatProductAge(ts, now) {
-  const age = Math.max(0, now - (Number(ts) || 0));
-  if (age < 60 * 1000) return '刚刚';
-  if (age < 60 * 60 * 1000) return Math.floor(age / 60000) + ' 分钟前';
-  if (age < 24 * 60 * 60 * 1000) return Math.floor(age / 3600000) + ' 小时前';
-  return Math.floor(age / 86400000) + ' 天前';
-}
-
 /**
  * 绝对化：trace 里的路径可能是模型写的相对路径（`report.md`），扫描结果是绝对路径；
  * 两者不归一就会被当成两个文件各占一行。
@@ -342,7 +334,7 @@ function buildProductRow(item, now) {
     '</span><span class="products-item-gap"></span>' +
     diffHtml +
     '<span class="products-item-age">' +
-    escapeHtml(formatProductAge(item.ts, now)) +
+    escapeHtml(fmtRelAgo(item.ts, { fallback: 'none', now })) +
     '</span></span>' +
     '<span class="products-item-path' +
     (isSsh ? '' : ' is-clickable') +

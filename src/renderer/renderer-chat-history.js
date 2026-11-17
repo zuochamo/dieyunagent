@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, focusChatInput, loadChatFromGateway, refreshHistoryList, ensureLocalGatewayReady, clearAgentContinueState, loadComposerModelPickForSession, saveComposerModelPick, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, resolveSessionWorkspacePathSync, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, focusChatInput, loadChatFromGateway, refreshHistoryList, ensureLocalGatewayReady, clearAgentContinueState, loadComposerModelPickForSession, saveComposerModelPick, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, clearSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, markSessionCacheDiverged, isSessionCacheDiverged, clearSessionCacheDiverged, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, CHAT_TURN_ALIGN_FETCH, CHAT_TURN_ALIGN_MAX_ROWS, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, uiText, resolveSessionWorkspacePathSync, sessionIsPeerChat, peerLinkForSession, peerNameForId, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta, triggerIconSvg */
 'use strict';
 
 const historyApi = window.diecloud || {};
@@ -68,6 +68,23 @@ let pendingSwitchGen = null;
 let switchSessionRunnerActive = false;
 let sessionCreateInFlight = false;
 let loadingOlderChatMessages = false;
+/** 正在取更早历史的那个会话：`loadingOlderChatMessages` 是全局单飞，切了会话就不能拿它当本会话的状态。 */
+let loadingOlderSessionId = '';
+/**
+ * 更早历史加载失败的原因（sessionId → 错误文案）。
+ *
+ * 失败只由显式点击清空：自动加载在失败之后必须停手（否则每次贴顶滚动都会重试一次，
+ * 而界面上什么都看不出来），且失败绝不能显示成「已到会话开头」—— 那是两件事。
+ */
+const chatOlderLoadErrors = new Map();
+/**
+ * 「这个窗口确实取到了会话开头」的会话（只在真读过库、确认取尽时记）。
+ *
+ * 不能拿 `hasMore === false` 顶替：`hasMore` 存在会话消息缓存里，缓存被作废
+ * （后台追加 / 一轮跑完）时它会一起消失，而视图里那 100 条仍然是个尾部窗口 ——
+ * 那时候宣布「已到会话开头」就是假话。取不了页就干脆不显示这一行。
+ */
+const chatOlderExhaustedSessions = new Set();
 
 function isSessionSwitchInFlight() {
   return pendingSwitchTarget != null || switchSessionRunnerActive || sessionCreateInFlight;
@@ -174,6 +191,12 @@ async function healActiveSessionFromHistory() {
 
 const HISTORY_FOLDER_UI_KEY = 'dieyun.historyFolders.v1';
 
+/**
+ * 「Bot 对话」这一层的分组键：对端会话不是项目对话，单独一层（见 `groupSessionsByWorkspace`）。
+ * 用 `peer://` 前缀保证它与任何真实路径键（`historyWorkspaceKey` 产出的小写路径 / `ssh:`）不相撞。
+ */
+const PEER_HISTORY_GROUP_KEY = 'peer://sessions';
+
 function historyWorkspaceKey(path) {
   const p = String(path || '').trim();
   if (!p) return '';
@@ -200,14 +223,19 @@ function groupSessionsByWorkspace(sessions) {
   const groups = [];
   const index = new Map();
   for (const s of sessions || []) {
+    // 对端会话（与某台 agent 的对话）**不按工作区归堆**：它不是某个项目的对话，
+    // 建的时候 `workspacePath` 就是 null（见 `peer/coordinator.js#createSessionForPeer`），
+    // 按路径分组只会把它埋进折叠的「未绑定工作区」；被视图工作区绑走过的那些则会
+    // 藏进别人的项目文件夹里，长得像一次普通任务 —— 两种都等于「左侧看不到」。
+    const peer = typeof sessionIsPeerChat === 'function' && sessionIsPeerChat(s && s.id);
     // 按「项目」分组，不按会话副本：远端会话的 workspacePath 是它自己那份 worktree
     // （…/.dieyun/worktrees/sess-xxx/main）。按原值分组会让同一项目的每个会话
     // 各自变成一个名为 main 的文件夹；项目身份由 Main 侧给出（workspaceProjectPath）。
-    const path = String((s && (s.workspaceProjectPath || s.workspacePath)) || '').trim();
-    const key = historyWorkspaceKey(path);
+    const path = peer ? '' : String((s && (s.workspaceProjectPath || s.workspacePath)) || '').trim();
+    const key = peer ? PEER_HISTORY_GROUP_KEY : historyWorkspaceKey(path);
     let g = index.get(key);
     if (!g) {
-      g = { key, path, sessions: [] };
+      g = { key, path, peer, sessions: [] };
       index.set(key, g);
       groups.push(g);
     }
@@ -375,6 +403,39 @@ function syncHistoryRowActions(actions, thinking, isBackgroundRun) {
   actions.appendChild(del);
 }
 
+const historyRowIconCache = new WeakMap();
+
+/**
+ * 会话行前置图标：**只看结构信号** —— 首条 user 行 meta 的 `trigger.kind`
+ * （Rust `memory.sessions_list` 投影成 `triggerKind`），不扫标题、不猜正文。
+ *
+ * 图标本身复用触发条的同一份 kind → SVG（`renderer-chat-bubbles.js#triggerIconSvg`）：
+ * 侧栏一眼能分出「定时任务会话」「心跳会话」与「自己聊的会话」，且不会与触发条漂移。
+ * 槽位恒定存在（没人触发就空着），否则同组里有没有图标会让标题起始位置参差。
+ */
+function syncHistoryRowIcon(iconEl, triggerKind) {
+  if (!iconEl) return;
+  const svg = typeof triggerIconSvg === 'function' ? triggerIconSvg(triggerKind) : '';
+  if (historyRowIconCache.get(iconEl) === svg) return;
+  historyRowIconCache.set(iconEl, svg);
+  iconEl.innerHTML = svg;
+}
+
+/**
+ * 会话行标题：对端会话前面挂上「对方叫什么」。
+ *
+ * 标题本身会被 AI 总结覆盖（`sessions.title_source = 'ai'`，如「DIEYUN11来信问候」），
+ * 一台一台看还行，同一个「Bot 对话」层里并排就没法分辨是谁。名字来自 links 缓存
+ * （`peerNameForId`），不是从标题里抠的；标题里本来就带名字时不重复挂。
+ */
+function historyRowTitle(s, peerId) {
+  const base = sessionListTitle(s);
+  if (!peerId) return base;
+  const name = typeof peerNameForId === 'function' ? String(peerNameForId(peerId) || '') : '';
+  if (!name || name === peerId || base.includes(name)) return base;
+  return `${name} · ${base}`;
+}
+
 /** 就地更新一行历史（复用节点，不重建 DOM）。 */
 function updateHistorySessionRow(row, s) {
   const sid = String(s.id);
@@ -382,23 +443,40 @@ function updateHistorySessionRow(row, s) {
   const live = sessionActiveRuns.get(s.id);
   const thinking = !!(live && !live.finished);
   const isBackgroundRun = thinking && !active;
+  const peerId = typeof sessionIsPeerChat === 'function' && sessionIsPeerChat(sid)
+    ? String(typeof peerLinkForSession === 'function' ? peerLinkForSession(sid) : '')
+    : '';
 
-  row.className = `history-row${active ? ' active' : ''}${thinking ? ' thinking' : ''}${isBackgroundRun ? ' background-run' : ''}`;
+  row.className = `history-row${active ? ' active' : ''}${thinking ? ' thinking' : ''}${isBackgroundRun ? ' background-run' : ''}${peerId ? ' is-peer-session' : ''}`;
   row.dataset.sessionId = sid;
+  if (peerId) row.dataset.peerId = peerId;
+  else delete row.dataset.peerId;
   const rowWs = s && s.workspacePath != null ? String(s.workspacePath) : '';
   row.dataset.workspacePath = rowWs;
   if (typeof rememberSessionWorkspacePath === 'function') {
     rememberSessionWorkspacePath(s.id, rowWs);
   }
 
+  // 对端会话用 bot 图标（同 `triggerIconSvg` 的一份表）：一眼看出「这不是项目对话」
+  syncHistoryRowIcon(row.querySelector('.history-item-icon'), peerId ? 'peer' : s.triggerKind);
+  const mainEl = row.querySelector('.history-item-main');
+  if (mainEl) {
+    // 悬浮就能看到「这是跟谁在说话」——也保住了标题被 AI 改名后丢掉的身份
+    mainEl.title = peerId
+      ? (typeof uiText === 'function' ? uiText('history_peer_hover', '与 %s 的对话') : '与 %s 的对话').replace(
+          '%s',
+          typeof peerNameForId === 'function' ? peerNameForId(peerId) : peerId
+        )
+      : '';
+  }
   const titleEl = row.querySelector('.history-item-title');
   if (titleEl) {
-    const next = sessionListTitle(s);
+    const next = historyRowTitle(s, peerId);
     if (titleEl.textContent !== next) titleEl.textContent = next;
   }
   const metaEl = row.querySelector('.history-item-meta');
   if (metaEl) {
-    const next = formatHistoryTime(s.updatedAt);
+    const next = fmtRelShort(s.updatedAt);
     if (metaEl.textContent !== next) metaEl.textContent = next;
   }
   syncHistoryRowActions(row.querySelector('.history-actions'), thinking, isBackgroundRun);
@@ -413,10 +491,14 @@ function createHistorySessionRow(s) {
   const main = document.createElement('button');
   main.type = 'button';
   main.className = 'history-item-main';
+  const icon = document.createElement('span');
+  icon.className = 'history-item-icon';
+  icon.setAttribute('aria-hidden', 'true');
   const title = document.createElement('span');
   title.className = 'history-item-title';
   const meta = document.createElement('span');
   meta.className = 'history-item-meta';
+  main.appendChild(icon);
   main.appendChild(title);
   main.appendChild(meta);
 
@@ -477,12 +559,20 @@ function updateHistoryFolderGroupEl(wrap, group, expanded) {
   wrap.dataset.workspaceKey = encodeURIComponent(group.key);
   wrap.dataset.workspacePath = group.path || '';
   wrap.classList.toggle('is-collapsed', !expanded);
+  wrap.classList.toggle('history-folder-peer', !!group.peer);
+
+  const label = group.peer
+    ? typeof uiText === 'function'
+      ? uiText('history_folder_peer', 'Bot 对话')
+      : 'Bot 对话'
+    : historyWorkspaceLabel(group.path);
 
   const btn = wrap.querySelector('.history-folder-toggle');
   if (btn) {
     btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-    btn.title =
-      group.path || (typeof t === 'function' ? t('history_folder_unbound') : '未绑定工作区');
+    btn.title = group.peer
+      ? label
+      : group.path || (typeof t === 'function' ? t('history_folder_unbound') : '未绑定工作区');
     const icon = btn.querySelector('.history-folder-icon');
     if (icon) {
       const svg = typeof flatFolderIconSvg === 'function' ? flatFolderIconSvg(14) : '';
@@ -492,10 +582,7 @@ function updateHistoryFolderGroupEl(wrap, group, expanded) {
       }
     }
     const name = btn.querySelector('.history-folder-name');
-    if (name) {
-      const label = historyWorkspaceLabel(group.path);
-      if (name.textContent !== label) name.textContent = label;
-    }
+    if (name && name.textContent !== label) name.textContent = label;
   }
 
   const removeBtn = wrap.querySelector('.history-folder-remove');
@@ -508,6 +595,9 @@ function updateHistoryFolderGroupEl(wrap, group, expanded) {
   }
   const newBtn = wrap.querySelector('.history-folder-new');
   if (newBtn) {
+    // 「在此工作空间新建对话」在 Bot 这一层没有意义：对端会话由 Bot 面板开，
+    // 这里按下去只会得到一条没绑对端的普通新对话（看着像「跟 bot 新建对话」）
+    newBtn.hidden = !!group.peer;
     const newTitle =
       typeof t === 'function' ? t('new_chat_in_folder') : '在此工作空间新建对话';
     if (newBtn.title !== newTitle) newBtn.title = newTitle;
@@ -515,6 +605,20 @@ function updateHistoryFolderGroupEl(wrap, group, expanded) {
       newBtn.setAttribute('aria-label', newTitle);
     }
   }
+}
+
+/**
+ * 一层文件夹默认展开吗（用户自己的折叠/展开记录仍然优先，见 `isHistoryFolderExpanded`）。
+ *
+ * 「Bot 对话」默认展开：那层里的东西用户根本没地方去别处找 —— 收起来就等于没有
+ * （这正是它原来被埋进「未绑定工作区」时的问题）。
+ */
+function historyFolderDefaultOpen(group, groups, currentSid) {
+  if (!group) return false;
+  if (group.peer) return true;
+  if ((groups || []).length === 1) return true;
+  const sid = String(currentSid || '');
+  return (group.sessions || []).some((s) => s && String(s.id) === sid);
 }
 
 /**
@@ -559,11 +663,10 @@ function renderHistorySessionRows(sessions) {
       rowElsByGroup.set(encodedKey, new Map());
     }
 
-    const containsCurrent = group.sessions.some((s) => String(s.id) === currentSid);
     const expanded = isHistoryFolderExpanded(
       group.key,
       folderUi,
-      containsCurrent || groups.length === 1
+      historyFolderDefaultOpen(group, groups, currentSid)
     );
     updateHistoryFolderGroupEl(wrap, group, expanded);
 
@@ -639,12 +742,184 @@ async function renderLoadedSessionMessages(switchGen, sessionId, guarded) {
   return true;
 }
 
-async function maybeLoadOlderChatMessages() {
+/**
+ * 聊天区顶部那一行「更早历史」的唯一状态来源（按钮文案 / 失败重试 / 已到开头的判定）。
+ *
+ * `start` 需要两个事实同时成立：这个窗口**确实取到了会话开头**（`chatOlderExhaustedSessions`），
+ * 且窗口曾经填满过首页 —— 本来就只有几条的短对话从开头就全显示出来了，顶上不该多一行。
+ * @param {string} sessionId
+ * @returns {'loading' | 'error' | 'more' | 'start' | 'none'}
+ */
+function chatHistoryEdgeMode(sessionId) {
+  const sid = String(sessionId || '');
+  if (!sid || !gwState.authed) return 'none';
+  if (loadingOlderChatMessages && loadingOlderSessionId === sid) return 'loading';
+  if (chatOlderLoadErrors.has(sid)) return 'error';
+  if (getSessionCacheHasMore(sid)) return 'more';
+  if (chatOlderExhaustedSessions.has(sid) && messages.length >= CHAT_INITIAL_LOAD_LIMIT) return 'start';
+  return 'none';
+}
+
+/**
+ * 顶部那行「更早历史」：`more`/`error` 是可点的按钮，`loading` 是禁用的按钮，
+ * `start` 是一句静态说明，`none` 不生成节点。整屏重渲染时随 `chatList.innerHTML = ''`
+ * 一起重建；只有状态变化才走 `syncChatHistoryEdgeNode`（原地替换，不重渲染对话）。
+ * @returns {HTMLElement | null}
+ */
+function renderChatHistoryEdge() {
+  const mode = chatHistoryEdgeMode(currentSessionId);
+  if (mode === 'none') return null;
+  const row = document.createElement('div');
+  row.className = 'chat-history-edge';
+  row.dataset.mode = mode;
+  if (mode === 'start') {
+    const label = document.createElement('span');
+    label.className = 'chat-history-edge-label';
+    label.textContent = uiText('chat_history_start', '已到会话开头');
+    row.append(label);
+    return row;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'chat-history-edge-btn';
+  if (mode === 'loading') {
+    // 转圈比「文案换了」更早被看见：等待时先有动静，再谈位置
+    const spinner = document.createElement('span');
+    spinner.className = 'chat-history-edge-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    btn.append(spinner);
+  }
+  btn.append(
+    document.createTextNode(
+      mode === 'loading'
+        ? uiText('chat_history_loading_older', '正在加载…')
+        : mode === 'error'
+          ? uiText('chat_history_retry_older', '重新加载')
+          : uiText('chat_history_load_older', '加载更早')
+    )
+  );
+  btn.disabled = mode === 'loading';
+  if (mode === 'error') {
+    const reason = chatOlderLoadErrors.get(String(currentSessionId));
+    btn.title = reason
+      ? `${uiText('chat_history_load_failed', '历史加载失败，点此重试')}（${reason}）`
+      : uiText('chat_history_load_failed', '历史加载失败，点此重试');
+  }
+  btn.addEventListener('click', () => {
+    void retryOlderChatMessages().catch((e) => console.warn('加载更早消息失败:', e));
+  });
+  row.append(btn);
+  return row;
+}
+
+/** 状态变了就地换掉那一行（正在加载 → 重新加载 / 加载更早 / 已到会话开头），不重渲染整段对话。 */
+function syncChatHistoryEdgeNode() {
+  if (!chatList) return;
+  const existing = chatList.querySelector(':scope > .chat-history-edge');
+  const next = renderChatHistoryEdge();
+  if (existing) {
+    if (!next) {
+      existing.remove();
+      return;
+    }
+    // 内容没变就别换节点：换掉会让正在按「重新加载」的焦点丢失，也会扰动滚动锚点
+    if (existing.dataset.mode === next.dataset.mode && existing.textContent === next.textContent) return;
+    existing.replaceWith(next);
+    return;
+  }
+  if (next && messages.length && !chatList.querySelector('.chat-loading-placeholder')) {
+    chatList.prepend(next);
+  }
+}
+
+/**
+ * 把窗口头对齐到「轮次开头」—— 一页不能切在某一轮中间。
+ *
+ * 判据只有一条：窗口第一条必须是用户消息。界面上「一轮」就是一颗用户气泡带出的
+ * `.msg-turn`（`renderer-chat-bubbles.js`），而用户消息正是账本里那一轮的开口，所以
+ * 「头是 user 行」= 「头是轮次开头」，不需要另造一份轮次表。
+ *
+ * 往前取到的那一批**只从其中最近的一条用户消息开始接**（多出来的更早行一律不要），
+ * 这样补的那几条就是「这一轮的开头」，而不是顺手把一整批也塞进窗口。
+ * 取到的那批里一条用户消息都没有时才继续往前；一轮里塞满几百条工具消息时最多再多拉
+ * `CHAT_TURN_ALIGN_MAX_ROWS` 条，拉满就接受这个不齐的头。
+ * @param {string} sessionId
+ * @param {Array<object>} rows 已取到的这一页（旧 → 新）
+ * @param {object} [opts]
+ * @param {number} [opts.fetchSize] 每次往前问多少条（默认 `CHAT_TURN_ALIGN_FETCH`，与一页宽度无关）
+ * @param {boolean} [opts.exhausted] 这一页是否已经取到了会话开头
+ * @param {(beforeId: number, limit: number) => Promise<Array<object>>} [opts.fetch]
+ *   取更早一页的实现；缺省走 `memory.messages_older`，单测从这里注入
+ * @returns {Promise<{ rows: Array<object>, exhausted: boolean }>}
+ */
+async function alignRowsToTurnStart(sessionId, rows, opts = {}) {
+  const fetchSize = Math.max(1, Number(opts.fetchSize) || CHAT_TURN_ALIGN_FETCH);
+  const fetchOlder =
+    typeof opts.fetch === 'function'
+      ? opts.fetch
+      : (beforeId, limit) =>
+          gatewayCallHistoryWithTimeout('memory.messages_older', {
+            sessionId,
+            beforeId,
+            limit
+          });
+  let out = Array.isArray(rows) ? rows.slice() : [];
+  let exhausted = opts.exhausted === true;
+  let pulled = 0;
+  for (;;) {
+    if (exhausted || !out.length || out[0].role === 'user') break;
+    const headId = Number(out[0].id);
+    if (!Number.isFinite(headId)) break;
+    if (pulled + fetchSize > CHAT_TURN_ALIGN_MAX_ROWS) break;
+    const batch = await fetchOlder(headId, fetchSize);
+    if (!Array.isArray(batch) || !batch.length) {
+      exhausted = true;
+      break;
+    }
+    pulled += batch.length;
+    if (batch.length < fetchSize) exhausted = true;
+    // 这一批里最后一条用户消息 = 最近的轮次开头：从它开始接，比它更早的不要
+    let startIdx = -1;
+    for (let i = batch.length - 1; i >= 0; i -= 1) {
+      if (batch[i].role === 'user') {
+        startIdx = i;
+        break;
+      }
+    }
+    if (startIdx >= 0) {
+      out = batch.slice(startIdx).concat(out);
+      break;
+    }
+    out = batch.concat(out);
+  }
+  return { rows: out, exhausted };
+}
+
+/** 失败后的显式重试：清掉上次的失败标记，再走同一个分页入口（自动路径在失败态下不会自己重试）。 */
+async function retryOlderChatMessages() {
+  const sessionId = String(currentSessionId || '');
+  if (!sessionId) return;
+  chatOlderLoadErrors.delete(sessionId);
+  syncChatHistoryEdgeNode();
+  await maybeLoadOlderChatMessages({ force: true });
+  syncChatHistoryEdgeNode();
+}
+
+async function maybeLoadOlderChatMessages(opts = {}) {
   if (loadingOlderChatMessages || !chatList || !gwState.authed) return;
   const sessionId = String(currentSessionId || '');
-  if (!sessionId || chatList.scrollTop > 96) return;
-  if (chatList.scrollHeight <= chatList.clientHeight + 96) return;
-  if (!getSessionCacheHasMore(sessionId)) return;
+  if (!sessionId) return;
+  const force = opts.force === true;
+  // 自动路径只在「还有更早的」时才动手；显式重试不认这个标记 —— 它可能已经被缓存作废顺手抹掉，
+  // 认它就等于让「重新加载」变成一颗点了没反应的死按钮。
+  if (!force && !getSessionCacheHasMore(sessionId)) return;
+  // 顶部按钮是显式入口，不受滚动位置限制；自动路径只在贴顶且内容已超出视口时才取，
+  // 并且失败之后不再自己重试 —— 要么用户点「重新加载」，要么就停在那里。
+  if (!force) {
+    if (chatList.scrollTop > 96) return;
+    if (chatList.scrollHeight <= chatList.clientHeight + 96) return;
+    if (chatOlderLoadErrors.has(sessionId)) return;
+  }
   const oldest = messages[0];
   const beforeId =
     oldest?.id != null
@@ -655,38 +930,73 @@ async function maybeLoadOlderChatMessages() {
   if (!Number.isFinite(beforeId)) return;
 
   loadingOlderChatMessages = true;
-  const prevHeight = chatList.scrollHeight;
-  const prevTop = chatList.scrollTop;
+  loadingOlderSessionId = sessionId;
+  syncChatHistoryEdgeNode();
   try {
-    const rows = await gatewayCallHistoryWithTimeout('memory.messages_older', {
+    const page = await gatewayCallHistoryWithTimeout('memory.messages_older', {
       sessionId,
       beforeId,
       limit: CHAT_LOAD_MORE_LIMIT
     });
     if (sessionId !== String(currentSessionId || '')) return;
-    if (!rows || !rows.length) {
+    chatOlderLoadErrors.delete(sessionId);
+    if (!page || !page.length) {
       setSessionCacheHasMore(sessionId, false);
+      chatOlderExhaustedSessions.add(sessionId);
       return;
     }
-    const older = gatewayRowsToMessages(rows);
+    const aligned = await alignRowsToTurnStart(sessionId, page, {
+      fetchSize: CHAT_TURN_ALIGN_FETCH,
+      exhausted: page.length < CHAT_LOAD_MORE_LIMIT
+    });
+    if (sessionId !== String(currentSessionId || '')) return;
+    if (aligned.exhausted) chatOlderExhaustedSessions.add(sessionId);
+    else chatOlderExhaustedSessions.delete(sessionId);
+    const older = gatewayRowsToMessages(aligned.rows);
     if (!older.length) {
       setSessionCacheHasMore(sessionId, false);
+      chatOlderExhaustedSessions.add(sessionId);
       return;
     }
+    const hasMore = !aligned.exhausted;
     messages.unshift(...older);
-    const hasMore = rows.length >= CHAT_LOAD_MORE_LIMIT;
     setSessionCacheHasMore(sessionId, hasMore);
     saveSessionMessageCache(sessionId, messages, { hasMore });
-    if (typeof renderChatFromMessagesYielding === 'function') {
-      await renderChatFromMessagesYielding({ forceScroll: false, sessionId });
+    // 动 DOM 之前记下位置与高度：增量插入用锚点纠偏，整屏重渲染退路才用得上这两个数
+    const scrollBase = {
+      top: chatList.scrollTop,
+      height: chatList.scrollHeight
+    };
+    // 能只画新增的那几条就别整屏重画：整屏重渲染会「闪一下 + 跳一下」，增量插入不会
+    const prepended =
+      typeof prependOlderMessagesIncrementally === 'function'
+        ? prependOlderMessagesIncrementally(sessionId, older.length)
+        : null;
+    if (prepended) {
+      // 位置交给它一处负责：只按「锚点漂了多少」纠偏，绝不设绝对位置
+      if (typeof holdChatScrollAfterPrepend === 'function') {
+        holdChatScrollAfterPrepend({
+          anchor: prepended.anchor,
+          portTopBefore: prepended.portTopBefore,
+          inserted: prepended.inserted
+        });
+      }
     } else {
-      renderChatFromMessages({ forceScroll: false, sessionId });
+      if (typeof renderChatFromMessagesYielding === 'function') {
+        await renderChatFromMessagesYielding({ forceScroll: false, sessionId });
+      } else {
+        renderChatFromMessages({ forceScroll: false, sessionId });
+      }
+      // 整屏重渲染没有锚点可用：按插入前后的整体高度差把位置推回去
+      chatList.scrollTop = scrollBase.top + Math.max(0, chatList.scrollHeight - scrollBase.height);
     }
-    chatList.scrollTop = chatList.scrollHeight - prevHeight + prevTop;
   } catch (e) {
     console.warn('加载更早消息失败:', e);
+    chatOlderLoadErrors.set(sessionId, String((e && e.message) || e || ''));
   } finally {
     loadingOlderChatMessages = false;
+    loadingOlderSessionId = '';
+    syncChatHistoryEdgeNode();
   }
 }
 
@@ -756,6 +1066,11 @@ function titleFromPreview(preview) {
     // 只跳本仓自己的抬头格式（精确首尾），不做词面猜测
     if (/^\[计划 · .+\]$/.test(line)) continue;
     if (line.endsWith(' · 定时触发') || line.endsWith(' · 目标续跑')) continue;
+    // 内网对端来信的抬头也是本仓拼的（`src/peer/coordinator.js#inboundText` / `handleReply`）：
+    // 不跳的话，「Bot 对话」那一行的标题会是「【内网 Agent 来信 · DIEYUN11】」这种信头
+    if (/^【内网 Agent 来信 · .+】$/.test(line)) continue;
+    if (/^来源 peerId：/.test(line)) continue;
+    if (/^【.+ 的回复】$/.test(line)) continue;
     const normalized = line.replace(/\s+/g, ' ');
     const sentence = normalized.match(/^[^。！？.!?\n]+[。！？.!?]?/)?.[0] || normalized;
     const slice = (sentence.trim() || normalized).slice(0, 48);
@@ -774,25 +1089,6 @@ function sessionListTitle(s) {
   const preview = titleFromPreview(s && s.preview) || stripMessageMetaForTitle(s && s.preview);
   if (!preview) return '对话';
   return formatSessionTitleSlice(preview) || '对话';
-}
-
-function formatHistoryTime(ts) {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return '';
-  const now = Date.now();
-  const diff = Math.max(0, now - d.getTime());
-  const min = Math.round(diff / 60000);
-  if (min < 1) return typeof t === 'function' ? t('history_time_now') : '刚刚';
-  if (min < 60) return `${min}m`;
-  const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr}h`;
-  const day = Math.round(hr / 24);
-  if (day < 7) return `${day}d`;
-  const today = new Date();
-  if (d.getFullYear() === today.getFullYear()) {
-    return d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
-  }
-  return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric' });
 }
 
 async function refreshHistoryList(opts = {}) {
@@ -927,7 +1223,7 @@ function renderNewChatHandoffItem(latest) {
   item.hidden = !latest;
   if (!latest || !sub) return;
   const title = String(latest.title || '').trim();
-  const when = formatHistoryTime(Number(latest.createdAt) || 0);
+  const when = fmtRelShort(Number(latest.createdAt) || 0);
   const fromText = title
     ? (typeof t === 'function' ? t('continue_last_from').replace('%s', title) : `来自「${title}」`)
     : '';
@@ -1144,6 +1440,26 @@ function switchSession(sessionId) {
   });
 }
 
+/**
+ * 离开一个会话时，把它的窗口按需留在缓存里。
+ *
+ * 规矩只有一条 —— **还停在首屏那一段才留**。翻过更早历史的会话直接丢：切回来重新读最近
+ * 32 条，回到首屏的样子（阅读位置一起丢，否则下次进来会跳进一段已经不在窗口里的内容）。
+ * 没翻过的会话照旧进缓存，频繁来回切换不用回源。
+ * @param {string} sessionId 正在离开的会话
+ */
+function rememberSessionWindowOnLeave(sessionId) {
+  const sid = String(sessionId || '');
+  if (!sid || !messages.length) return;
+  if (typeof messagesBelongToSession === 'function' && !messagesBelongToSession(sid)) return;
+  if (messages.length > CHAT_INITIAL_LOAD_LIMIT) {
+    invalidateSessionMessageCache(sid);
+    if (typeof clearSessionScrollPosition === 'function') clearSessionScrollPosition(sid);
+    return;
+  }
+  saveSessionMessageCache(sid, messages, { hasMore: getSessionCacheHasMore(sid) });
+}
+
 async function performSwitchSession(sessionId, switchGen) {
   const target = String(sessionId);
   const prevSessionId = currentSessionId;
@@ -1159,16 +1475,10 @@ async function performSwitchSession(sessionId, switchGen) {
     }
 
     if (!sameSession) {
-      // 仅当全局 messages 确属离开的会话时才写入缓存，避免 A→B→C 把 A 的消息毒进 B 的 cache
-      if (
-        prevSessionId &&
-        messages.length &&
-        typeof messagesBelongToSession === 'function' &&
-        messagesBelongToSession(prevSessionId)
-      ) {
-        saveSessionMessageCache(prevSessionId, messages, {
-          hasMore: getSessionCacheHasMore(prevSessionId)
-        });
+      // 仅当全局 messages 确属离开的会话时才处理，避免 A→B→C 把 A 的消息毒进 B 的 cache
+      if (prevSessionId && messages.length && typeof messagesBelongToSession === 'function' &&
+        messagesBelongToSession(prevSessionId)) {
+        rememberSessionWindowOnLeave(prevSessionId);
       }
       if (typeof cleanupStaleSessionRun === 'function') cleanupStaleSessionRun(prevSessionId);
       if (typeof cancelArtifactContentLoads === 'function') cancelArtifactContentLoads();
@@ -1438,15 +1748,9 @@ async function createNewSession(workspacePath, opts = {}) {
     pendingSwitchTarget = null;
     pendingSwitchGen = null;
     if (currentSessionId) captureSessionScrollPosition(currentSessionId, { force: true });
-    if (
-      currentSessionId &&
-      messages.length &&
-      typeof messagesBelongToSession === 'function' &&
-      messagesBelongToSession(currentSessionId)
-    ) {
-      saveSessionMessageCache(currentSessionId, messages, {
-        hasMore: getSessionCacheHasMore(currentSessionId)
-      });
+    if (currentSessionId && messages.length && typeof messagesBelongToSession === 'function' &&
+      messagesBelongToSession(currentSessionId)) {
+      rememberSessionWindowOnLeave(currentSessionId);
     }
     if (typeof cancelArtifactContentLoads === 'function') cancelArtifactContentLoads();
     let inheritWs = '';
@@ -1535,28 +1839,48 @@ async function createNewSession(workspacePath, opts = {}) {
   }
 }
 
+/**
+ * 这次加载用「回源」还是「沿用缓存」——**唯一判据**（`loadChatFromGateway` 只照它执行）。
+ *
+ * 为什么需要 `cache-diverged` 这个中间态：跑动中不能用库里的行（库里没有刚推入的
+ * 这一步 user 行、也没有流式正文），所以调用方即使显式要求回源也只能先沿用缓存；
+ * 但那一瞬间库里**已经有**了对端来信 / 回复（`renderer-peer.js` 的 forced reload 就是为它来的）。
+ * 直接丢掉这个信号 = 「库里有、视图里没有」一直粘到下次切会话：
+ * 典型的现场是「我明明发了一句话，它却从对话里消失了」（2026-11-13）。
+ * 所以这里只记录「本轮结束后必须补一次真回源」（`isSessionCacheDiverged`）。
+ *
+ * @param {{ forceRefresh?: boolean, activeRun?: boolean, cacheStale?: boolean, cached?: boolean, diverged?: boolean }} input
+ * @returns {'fresh'|'cache'|'cache-diverged'}
+ */
+function resolveChatLoadMode(input) {
+  const i = input || {};
+  // 已经记过「上一轮欠一次回源」：这次必须真读库
+  if (i.cacheStale || i.diverged) return 'fresh';
+  if (!i.cached) return 'fresh';
+  if (i.activeRun) return i.forceRefresh ? 'cache-diverged' : 'cache';
+  return 'cache';
+}
+
 /** @returns {Promise<boolean>} */
 async function loadChatFromGateway(switchGen, targetSessionId, opts = {}) {
   if (!gwState.authed) return false;
   const sessionId = String(targetSessionId || currentSessionId);
   const guarded = switchGen != null;
-  let forceRefresh = !!(opts && opts.forceRefresh);
+  const forceRefresh = !!(opts && opts.forceRefresh);
   const live = sessionActiveRuns.get(sessionId);
   const activeRun = !!(live && !live.finished);
   const cacheStale =
     typeof isSessionMessageCacheStale === 'function' && isSessionMessageCacheStale(sessionId);
+  const diverged =
+    typeof isSessionCacheDiverged === 'function' && isSessionCacheDiverged(sessionId);
   let cached = getSessionMessageCache(sessionId);
-  if (cacheStale) {
-    forceRefresh = true;
-  } else if (activeRun && cached) {
-    // Keep locally saved turn (user msg) while run continues; live bubble reconciled after render.
-    forceRefresh = false;
-  } else if (activeRun && !cached) {
-    forceRefresh = true;
+  const mode = resolveChatLoadMode({ forceRefresh, activeRun, cacheStale, cached: !!cached, diverged });
+  if (mode === 'cache-diverged' && typeof markSessionCacheDiverged === 'function') {
+    markSessionCacheDiverged(sessionId);
   }
-  if (forceRefresh) cached = null;
+  if (mode === 'fresh') cached = null;
   try {
-    if (!forceRefresh && cached) {
+    if (mode !== 'fresh' && cached) {
       if (guarded && !isActiveSessionSwitch(switchGen)) return false;
       if (sessionId !== currentSessionId) return false;
       messages.length = 0;
@@ -1567,23 +1891,45 @@ async function loadChatFromGateway(switchGen, targetSessionId, opts = {}) {
       return renderLoadedSessionMessages(switchGen, sessionId, guarded);
     }
 
-    const rows = await gatewayCallHistoryWithTimeout('memory.messages_recent', {
+    const tailPage = await gatewayCallHistoryWithTimeout('memory.messages_recent', {
       sessionId,
       limit: CHAT_INITIAL_LOAD_LIMIT
     });
     if (guarded && !isActiveSessionSwitch(switchGen)) return false;
     if (sessionId !== currentSessionId) return false;
 
+    // 首屏也照样只露最近一段，但那段必须从某一轮的开头开始：头落在轮中间就往前补到用户消息。
+    // 补的那几次按「上翻一页」的宽度取（不是首屏的 32），否则对齐一轮长对话要来回问十几次。
+    if (tailPage != null && !Array.isArray(tailPage)) {
+      // 非空又不是数组：契约坏了，按加载失败处理（别静默当空对话）
+      throw new Error('memory.messages_recent 返回了非数组');
+    }
+    const tailRows = Array.isArray(tailPage) ? tailPage : [];
+    const aligned = await alignRowsToTurnStart(sessionId, tailRows, {
+      fetchSize: CHAT_TURN_ALIGN_FETCH,
+      exhausted: tailRows.length < CHAT_INITIAL_LOAD_LIMIT
+    });
+    if (guarded && !isActiveSessionSwitch(switchGen)) return false;
+    if (sessionId !== currentSessionId) return false;
+    if (aligned.exhausted) chatOlderExhaustedSessions.add(sessionId);
+    else chatOlderExhaustedSessions.delete(sessionId);
+
     messages.length = 0;
-    messages.push(...gatewayRowsToMessages(rows));
+    messages.push(...gatewayRowsToMessages(aligned.rows));
     if (typeof setMessagesOwnerSessionId === 'function') {
       setMessagesOwnerSessionId(sessionId);
     }
-    const hasMore = rows.length >= CHAT_INITIAL_LOAD_LIMIT;
+    const hasMore = !aligned.exhausted;
     saveSessionMessageCache(sessionId, messages, { hasMore });
     if (typeof clearSessionMessageCacheStale === 'function') {
       clearSessionMessageCacheStale(sessionId);
     }
+    // 这一次真的读了库：欠的那次回源已经还上
+    if (typeof clearSessionCacheDiverged === 'function') {
+      clearSessionCacheDiverged(sessionId);
+    }
+    // 整段重读了：上一次「加载更早」的失败已经过时，别让顶部一直挂着「重新加载」
+    chatOlderLoadErrors.delete(sessionId);
 
     return renderLoadedSessionMessages(switchGen, sessionId, guarded);
   } catch (err) {
@@ -1707,3 +2053,5 @@ window.loadChatFromGateway = loadChatFromGateway;
 window.healActiveSessionFromHistory = healActiveSessionFromHistory;
 window.showChatLoadError = showChatLoadError;
 window.maybeLoadOlderChatMessages = maybeLoadOlderChatMessages;
+window.renderChatHistoryEdge = renderChatHistoryEdge;
+window.retryOlderChatMessages = retryOlderChatMessages;

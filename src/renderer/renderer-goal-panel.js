@@ -57,16 +57,6 @@ function goalStatusLabel(view) {
   return '进行中';
 }
 
-/** 收尾时间：只服务「哪一晚做完的」这一件事，格式短到不挤占面板头 */
-function goalTimeText(iso) {
-  if (!iso) return '';
-  const t = Date.parse(String(iso));
-  if (!Number.isFinite(t)) return '';
-  const d = new Date(t);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 /** 已收尾（完成 / 阻塞）—— 这两种状态的目标不再「推进」，措辞与轮次都要跟着变 */
 function goalIsClosed(view) {
   return !!view && (view.outcome === 'complete' || view.outcome === 'blocked');
@@ -83,7 +73,7 @@ function goalIsClosed(view) {
 function goalStateText(view) {
   if (!view) return '';
   const label = goalStatusLabel(view);
-  const when = goalTimeText(view.completedAt);
+  const when = fmtMonthDayClock(view.completedAt);
   const closedTail = when ? ` · 收尾于 ${when}` : '';
   if (goalIsClosed(view)) {
     return view.superseded

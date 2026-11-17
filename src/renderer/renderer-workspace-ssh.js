@@ -34,14 +34,6 @@ const workspaceMenuState = {
   deployHideTimer: null
 };
 
-const DEPLOY_BAR_WIDTH = 14;
-
-function formatDeployProgressBar(percent, width = DEPLOY_BAR_WIDTH) {
-  const p = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
-  const filled = Math.round((p / 100) * width);
-  return `${'█'.repeat(filled)}${'▒'.repeat(Math.max(0, width - filled))} ${p}%`;
-}
-
 function clearSshDeployHideTimer() {
   if (workspaceMenuState.deployHideTimer) {
     clearTimeout(workspaceMenuState.deployHideTimer);
@@ -68,7 +60,7 @@ function setSshDeployProgress(payload) {
   }
 
   clearSshDeployHideTimer();
-  const bar = formatDeployProgressBar(payload.percent);
+  const bar = fmtBar(payload.percent);
   let hint = payload.message || '';
   if (payload.phase === 'upload' && payload.file) {
     hint = hint ? `${hint} · ${payload.file}` : payload.file;

@@ -17,6 +17,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadRendererFmt } = require('./lib/load-renderer-fmt.cjs');
 
 const DIR = path.join(__dirname, '..', '..', 'src', 'renderer');
 
@@ -90,6 +91,7 @@ function loadModule(overrides = {}) {
     'setInterval',
     'clearInterval',
     'setTimeout',
+    'fmtMonthDayClock',
     `${source}
      return { renderGoalBar, renderGoalPanel, toggleGoalBarFacts, refreshGoalPanel };`
   );
@@ -103,7 +105,9 @@ function loadModule(overrides = {}) {
     // 「取数中途又来一拍」的补拍就靠它，桩成 no-op 会把这个行为测成没发生。
     () => 1,
     () => {},
-    (fn, ms) => setTimeout(fn, ms)
+    (fn, ms) => setTimeout(fn, ms),
+    // 时间文案的唯一来源是 renderer-utils.js（面板不再自带一份实现），这里注入真的那一份
+    loadRendererFmt().fmtMonthDayClock
   );
   return { ...api, els, window };
 }

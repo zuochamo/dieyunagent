@@ -4,6 +4,14 @@
 
 **原则**：Renderer 只做展示与 IPC；Agent 循环在 Main + `dieyun-core`，勿把业务状态机堆进 renderer。
 
+**三条防回流规矩**（2026-11 全仓混乱度审查后定，见 [`docs/MODULE-CHAOS-REVIEW.md`](../../docs/MODULE-CHAOS-REVIEW.md) §四）：
+
+1. **不准新增 `window.X` 顶层函数做新逻辑**：新逻辑写进 `src/agent/`（经 `scripts/build-agent-bundle.cjs` 打包成 `agent-bundle.js`）或收进已有的 `renderer-*.js` 单一来源文件；渲染层只保留「取数 + 画 DOM」。（现状：约 470 个 `window.X` 导出、123 个 `<script>` 顺序拼接，函数声明本身就是全局，加得越多越拆不动。）
+2. **会话/运行态只许一个写者**：`sessionActiveRuns`（`renderer-chat-state.js`）的写入只允许出现在 `renderer-chat-live-run.js` / `renderer-agent-send.js` 这两个「run 的开始与收尾」处；其它模块一律只读（`get` / `has`）。曾经 20 多个文件直接 `set/delete`，结果状态怎么变的没人说得清。
+3. **账本类 RPC 只许一处**：`agent.trace_save` / `agent.run_upsert` / `agent.plan_save` 只能出现在 `src/renderer/agent/trace-store.js`。别在气泡或收尾流程里另发一次——那会把「一轮的账本」写两次。
+
+**文案与数字格式（唯一来源）**：时间 / 字节 / 进度条文案只在 `renderer-utils.js` 实现 —— `fmtClock`（`14:35`）、`fmtMonthDayClock`（`03-14 14:35`）、`fmtRelShort`（`刚刚/5m/3d`，会话列表）、`fmtRelAgo`（`刚刚/5 分钟前/2 天前`，git 历史与产物）、`fmtDateTime`（本地完整时间）、`fmtBar`（`████▒▒ 40%`）、`fmtBytes`（`1.2 KB`）。**不要在面板里再写一份** `new Date(...).toLocaleTimeString()` 之类的取整逻辑：同一句「5 分钟前」曾经有四种口径。
+
 **弹窗约定**：所有 modal / overlay 弹窗（`*-overlay`、lightbox、`showTextPrompt`）**只能由关闭按钮（× / 取消）或 Esc 关闭** —— 禁止给遮罩绑「点击空白处关闭」的 click 监听（误触会丢半截表单）。移动端抽屉同理：只由左侧「×」/ 面板内关闭按钮关闭，`*-backdrop` 仅用于挡住下层点击。下拉菜单（`renderer-select-menu.js`、Composer 的模型菜单、工作区菜单）不属于弹窗，保持「点外部 / Esc 关闭」。
 
 ## 核心链路（Agent / 聊天）
@@ -21,7 +29,7 @@
 | `../agent/agent-system-prompt.js` | 模型可见准则与权限/工作区文案 | 改 Agent 规则 |
 | `../agent/system-prompt-prep.js` | Main：codebase / 开文件 / AGENTS.md overview / 图谱(结构信号) / 记忆 / 技能索引 / MCP | 改召回装配 |
 | `renderer-agent-system-message.js` | 视图快照 + 编辑器/诊断 + 缓存 | 系统消息注入 |
-| `renderer-agent-reviewer.js` | 可选 LLM Reviewer：默认关；须独立模型 + 文件 diff | 终态 opt-in |
+| `renderer-agent-reviewer.js` | 可选 LLM Reviewer 的**请求侧适配器**：默认关、须独立模型 + 文件 diff。提示词 / 输入装配 / 结论整形 / 与证据判定的合并都在 `../agent/turn-reviewer.js`（判定唯一来源）；这里只发请求 + 往 trace 插一条过程记录 | 终态 opt-in |
 | `renderer-composer-mention.js` | Composer @ 提及菜单 | @ 菜单 |
 | `renderer-agent-continue.js` | 续跑 / 取消 / 分段 | 停止与段续跑 |
 | `renderer-agent-llm.js` | LLM HTTP / SSE / 记忆整理 | 模型请求 |
@@ -29,7 +37,7 @@
 | `renderer-agent-rust-loop.js` | Rust loop / planner IPC | 主循环 |
 | `renderer-agent-api.js` | Agent API 窗口导出 | compaction 进度桥 |
 | `renderer-agent-prep.js` | 准备阶段 checklist 状态 | 「准备中」步骤 UI |
-| `renderer-chat-scroll.js` | 会话滚动 / 跟随 | 切会话滚动 |
+| `renderer-chat-scroll.js` | 会话滚动 / 跟随（贴底策略 + 朗读念到哪一句的视野跟随 + 用户滚动意图） | 切会话滚动 |
 | `renderer-chat-live-run.js` | live run 气泡 / Agent 事件 | 执行中气泡 |
 | `renderer-chat-bubbles.js` | 气泡、页脚、附件、toast | 聊天气泡 |
 | `renderer-chat-render.js` | 历史渲染、流式钉底 | 会话重绘 |
@@ -45,7 +53,7 @@
 | `renderer-artifacts.js` | 产物列表绘制 / 打开；图片 / Office / 音视频只读预览（音视频走 `artifactMediaUrlForCurrentSession` 造 `dieyun-media://` URL，不读字节） | 产物面板 |
 | `renderer-artifacts-tabs.js` | 文件面板多标签 + 长驻编辑区（标签状态 / 未保存标记 / 文本域与 Monaco 二选一） | 文件面板多标签 |
 | `renderer-artifacts-panel.js` | 侧栏「产物」页：会话产物桶（带 diff）+ 会话时间窗内 `artifact.list_files` 扫描结果（脚本 / 截图 / 插件落盘的 docx、xlsx、png、html） | 产物页 |
-| `renderer-chat-history.js` | 会话列表、切换、加载消息 | 侧栏会话 |
+| `renderer-chat-history.js` | 会话列表、切换、加载消息；**更早历史分页的唯一来源**（首屏 32 条 / 每页 100 条、贴顶自动取、**页头按轮次开头对齐**：头不是用户消息就往前补，见 `alignRowsToTurnStart`、顶部「加载更早 / 重新加载 / 已到会话开头」那一行由 `chatHistoryEdgeMode` 判定） | 侧栏会话 / 更早历史 |
 | `renderer-chat-state.js` | 当前会话 run 状态 | 进行中任务标记 |
 | `renderer-composer.js` | 输入框、发送、模型选择 | Composer 行为 |
 | `renderer-attachments.js` | 附件（粘贴 / 拖入 / 选择）与**通用图片全屏查看** `openImageLightbox()`（composer 预览与回答里的截图共用同一份，不另造大图查看器） | 附件与看图 |
@@ -112,7 +120,7 @@
 |------|------|
 | `renderer-theme.js` / `renderer-theme-bootstrap.js` | 主题 |
 | `renderer-i18n.js` | 文案 |
-| `renderer-utils.js` | 通用工具函数 |
+| `renderer-utils.js` | 通用工具函数 + **文案格式唯一来源**（`fmtClock` / `fmtMonthDayClock` / `fmtRelShort` / `fmtRelAgo` / `fmtDateTime` / `fmtBar` / `fmtBytes`） |
 | `renderer-window.js` | 窗口控制 |
 | `renderer-connect.js` | 「连接」对话框外壳：手机连接 / Agent 互通 两个标签页（只切页与按需刷新，不做业务判定） |
 | `renderer-mobile.js` | 手机桥接 UI（二维码等），渲染在「连接 → 手机连接」标签页 |
