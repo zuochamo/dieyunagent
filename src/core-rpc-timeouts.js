@@ -33,11 +33,12 @@ const AGENT_RUN_TIMEOUT_MS = 660 * 1000;
 /**
  * 端到端耗时超过它就打 `RPC_SLOW <method> <ms>`。
  *
- * 与 Rust `dieyun_core::rpc::SLOW_RPC_LOG_MS` 同值（跨语言没法共享常量）：
+ * 与 Rust `dieyun_core::rpc::slow_rpc_log_ms()` 同源（`assets/agent-shared.json` 的
+ * `rpc.slowLogMs`，不再是「跨语言没法共享常量」的手抄值）：
  * 两边都记录才能分辨「core 内部慢」还是「RPC 堵在管道 / 守护进程 / SSH 里」——
  * `memory.long_recall` 那次 120s 超时就是缺了这组对照，只能靠猜。
  */
-const SLOW_RPC_LOG_MS = 2000;
+const SLOW_RPC_LOG_MS = require('./agent/shared-constants').rpc.slowLogMs;
 
 /**
  * @param {string} method

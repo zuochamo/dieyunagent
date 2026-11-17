@@ -73,8 +73,12 @@ const FOLD_TARGET_RATIO: f64 = 0.80;
 const DEFAULT_KEEP_TAIL_ATOMS: usize = 3;
 
 /// 预算地板：低于它的预算无意义（调用方给错也不至于把上下文折成空）。
-const MIN_BUDGET_TOKENS: usize = 4096;
-
+///
+/// 与 Node 的 `contextWindowFloorTokens`（8192，见 `assets/agent-shared.json`）不是同一个数：
+/// 那个是「窗口」地板的派生基准，这个是「别人递进来的预算」的兜底守卫。守卫必须**小于等于**
+/// 那个地板，否则 Node 算出的合法预算会被内核静默抬高 —— `shared.rs` 的测试钉着这条关系。
+pub(crate) const MIN_BUDGET_TOKENS: usize = 4096;
+///
 /// 折叠标记的公共前缀；`fold:L<n>` 记下已施加的档位，幂等与「加深一档」都靠它。
 ///
 /// 标记里刻意用 ASCII 的 `fold:L` 作为机器可读部分：中文全角标点在不同编辑器 / 输入法
@@ -95,8 +99,13 @@ pub fn fold(params: FoldParams) -> FoldResult {
         Some(n) if n > 0 => (n, "usage"),
         _ => (estimated, "estimate"),
     };
+    let numbers = &crate::shared::shared().compaction;
+    // 触发比夹取区间是跨语言常量：唯一来源 `assets/agent-shared.json`
+    // （Node 的 `getCompactionTriggerRatio` 用同一份 min/max）。
     let budget = params.token_budget.max(MIN_BUDGET_TOKENS);
-    let trigger = (budget as f64 * params.trigger_ratio.clamp(0.3, 0.95)) as usize;
+    let trigger =
+        (budget as f64 * params.trigger_ratio.clamp(numbers.trigger_ratio_min, numbers.trigger_ratio_max))
+            as usize;
 
     if !params.force && used < trigger {
         return FoldResult {
@@ -113,7 +122,10 @@ pub fn fold(params: FoldParams) -> FoldResult {
         };
     }
 
-    let keep_tail = params.keep_tail_atoms.unwrap_or(DEFAULT_KEEP_TAIL_ATOMS).max(1);
+    let keep_tail = params
+        .keep_tail_atoms
+        .unwrap_or(DEFAULT_KEEP_TAIL_ATOMS)
+        .max(1);
     let mut messages = params.messages;
     // 折叠边界与档位一起定好：折叠只会缩短较早的区域，边界因此始终有效。
     let tail_start = tail_start_index(&messages, keep_tail);

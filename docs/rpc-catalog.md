@@ -2,7 +2,7 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-11-17T11:51:10.021Z
+生成时间：2026-11-17T14:15:11.209Z
 
 | 统计 | 数量 |
 |------|------|

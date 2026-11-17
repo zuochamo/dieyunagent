@@ -30,6 +30,7 @@ pub mod index;
 pub mod memory;
 pub mod planner;
 pub mod rpc;
+pub mod shared;
 pub mod sqlite;
 pub mod treesitter;
 

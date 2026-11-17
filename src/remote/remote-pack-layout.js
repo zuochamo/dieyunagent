@@ -59,7 +59,12 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   // 注入 smoke 直接 `Cannot find module './spawn-args'`，整条远程 LSP 不可用。
   'src/lsp/spawn-args.js',
   'src/lsp/lsp-client.js',
-  'src/lsp/navigate-service.js'
+  'src/lsp/navigate-service.js',
+  // 跨语言常量：model-runtime-by-tier → shared-constants → assets/agent-shared.json。
+  // 漏掉任何一个，远端 daemon 加载期就 `Cannot find module`（同 2026-10-18 spawn-args 事故形态），
+  // 而且 hash 是按这份清单算的 —— 漏了它反而会被判「已存在、跳过上传」，修也修不掉。
+  'src/agent/shared-constants.js',
+  'assets/agent-shared.json'
 ];
 
 /** 内置 Linux Node 运行时：随安装包一起预装，远程不需要目标机装 Node。 */

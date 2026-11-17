@@ -119,6 +119,9 @@ const REQUIRED_ENTRIES = [
   'src/mobile/public/app.js',
   'src/mobile/bridge.js',
   'assets/dieyun.md',
+  // 跨语言常量的唯一来源（src/agent/shared-constants.js 会 require 它）。
+  // 漏了这一行：Linux 包启动即 require 失败，而 dev 环境完全看不出来。
+  'assets/agent-shared.json',
   CORE_REL,
   'node_modules/ws/package.json',
   'node_modules/@modelcontextprotocol/sdk/package.json'

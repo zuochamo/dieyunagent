@@ -3,9 +3,20 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const DEFAULT_READ_MAX_BYTES: u64 = 2 * 1024 * 1024;
-pub const ABSOLUTE_READ_MAX_BYTES: u64 = 16 * 1024 * 1024;
-pub const INDEX_FILE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 读上限三件套的唯一来源是 `assets/agent-shared.json`（Node 侧 `fs-read-limits.js` 读同一份）。
+/// 以前这里是三个手抄的 const，注释写着「与 Node 同值」—— 那种注释一旦漏改就是静默漂移。
+pub fn default_read_max_bytes() -> u64 {
+    crate::shared::shared().read_limits.default_max_bytes
+}
+
+pub fn absolute_read_max_bytes() -> u64 {
+    crate::shared::shared().read_limits.absolute_max_bytes
+}
+
+pub fn index_file_max_bytes() -> u64 {
+    crate::shared::shared().read_limits.index_file_max_bytes
+}
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,10 +207,11 @@ fn hex16(bytes: &[u8]) -> String {
 
 pub fn normalize_read_params(offset: Option<u64>, max_bytes: Option<u64>) -> (u64, u64) {
     let offset = offset.unwrap_or(0);
-    let mut max = max_bytes.unwrap_or(DEFAULT_READ_MAX_BYTES);
+    let default_max = default_read_max_bytes();
+    let mut max = max_bytes.unwrap_or(default_max);
     if max == 0 {
-        max = DEFAULT_READ_MAX_BYTES;
+        max = default_max;
     }
-    max = max.min(ABSOLUTE_READ_MAX_BYTES).max(1);
+    max = max.min(absolute_read_max_bytes()).max(1);
     (offset, max)
 }

@@ -621,6 +621,27 @@
   ],
   "pathRules": [
     {
+      "prefix": "assets/agent-shared.json",
+      "tests": [
+        "check:shared-constants",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/shared-constants.js",
+      "tests": [
+        "check:shared-constants",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/shared.rs",
+      "tests": [
+        "check:shared-constants",
+        "test:unit"
+      ]
+    },
+    {
       "prefix": "src/alive/",
       "tests": [
         "test:alive",
@@ -1921,6 +1942,7 @@
       "test:agent-limits",
       "test:task-tier",
       "test:unit",
+      "check:shared-constants",
       "test:local-gateway-smoke",
       "test:alive"
     ],
@@ -1929,6 +1951,7 @@
       "test:default-workspace-gc",
       "test:task-tier",
       "test:unit",
+      "check:shared-constants",
       "test:core-bridge",
       "test:local-gateway-smoke",
       "test:sandbox-policy",

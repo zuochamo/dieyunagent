@@ -1,3 +1,4 @@
+// @ts-check
 'use strict';
 
 /**
@@ -15,6 +16,17 @@
  */
 
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
+
+/**
+ * 方法名的类型来自 `types/core-rpc.d.ts`（由 `cargo` 侧方法表 + 分派臂生成）。
+ *
+ * 这样写的好处：哪天 core 把 `llm.complete` 改名或删掉，`npm run verify:rpc-catalog`
+ * 会先报 stale，`npm run check:js` 随后在这一行报错 —— 而不是等到运行期
+ * 回一条 `UNKNOWN_METHOD` 被 `catch {}` 吞掉（历史事故：`agent.loop.cancel`）。
+ *
+ * @type {import('../../types/core-rpc').CoreRpcMethod}
+ */
+const LLM_COMPLETE_METHOD = 'llm.complete';
 
 /** @type {{ invoke: Function } | null} */
 let coreBridge = null;
@@ -38,6 +50,8 @@ function currentLlmCompleteBridge() {
  * @param {string} [opts.runId] 给了就把增量推到事件通道（`agent.delta`）
  * @param {boolean} [opts.includeRaw] 调试抓包：把响应原文一并回传
  * @param {string} [opts.url] 已解析好的端点（调用方已经用 `llm-request.js` 算过就传它，避免二次推导）
+ * @param {number} [opts.timeoutMs] 覆盖这一条 RPC 的等待上限（缺省走 `core-rpc-timeouts.js` 的表）
+ * @param {AbortSignal} [opts.signal] 调用方取消：本端立刻返回，core 侧那次请求自己跑完就丢
  * @param {{ invoke: Function }} [opts.coreBridge] 覆盖装配里的桥（测试用）
  * @returns {Promise<{content:string, reasoning:?string, toolCalls:object[], finishReason:?string,
  *                    usage:?object, model:?string, raw:?string}>}
@@ -52,7 +66,7 @@ async function completeOnce(opts) {
   const model = String(body.model || llm.model || '');
   const url = String((opts && opts.url) || '').trim() || resolveLlmEndpoint(llm && llm.baseUrl);
   const pending = bridge.invoke(
-    'llm.complete',
+    LLM_COMPLETE_METHOD,
     {
       url,
       body,

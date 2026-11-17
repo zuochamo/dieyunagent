@@ -1,3 +1,4 @@
+// @ts-check
 'use strict';
 
 const { spawn } = require('child_process');
@@ -51,7 +52,7 @@ function createCoreBridge(opts) {
   let proc = null;
   let ready = false;
   let nextId = 1;
-  /** @type {Map<number, { resolve: Function, reject: Function, timer: NodeJS.Timeout, method: string, runId: string|null }>} */
+  /** @type {Map<number, { resolve: Function, reject: Function, timer: NodeJS.Timeout, method: string, runId: string|null, startedAt: number }>} */
   const pending = new Map();
   /** @type {Set<(event: object) => void>} core 主动推来的事件（流式增量等）订阅者 */
   const eventListeners = new Set();
@@ -116,7 +117,10 @@ function createCoreBridge(opts) {
     return s || null;
   }
 
+  /** @typedef {Error & { code?: string }} CodedError 带错误码的 Error（协议错误码 / errno） */
+  /** @returns {CodedError} */
   function createCoreAbortError(reason) {
+    /** @type {CodedError} */
     const err = new Error(reason || '已停止');
     err.name = 'AbortError';
     err.code = 'CORE_RPC_CANCELLED';
@@ -148,7 +152,8 @@ function createCoreBridge(opts) {
 
   /**
    * 协议级取消：立即 settle 匹配的 pending invoke，并向 core 发送 cancel。
-   * @param {{ runId?: string, ids?: number[], reason?: string }} [opts]
+   * @param {{ runId?: string, ids?: number[], reason?: string, methods?: string[] }} [opts]
+   *   `methods`：只 settle 这些方法名的在途调用（宿主停止时按方法过滤；不传=按 runId/ids 匹配）
    * @returns {{ abortedIds: number[], runId: string|null, runIds: string[] }}
    */
   function abortPending(opts = {}) {
@@ -274,6 +279,7 @@ function createCoreBridge(opts) {
         log(`[dieyun:core] RPC_SLOW ${entry.method} ${elapsedMs}ms (id=${id})`);
       }
       if (msg.error) {
+        /** @type {CodedError} */
         const err = new Error(msg.error.message || 'rust core error');
         err.code = msg.error.code || 'RUST_CORE_ERROR';
         entry.reject(err);
@@ -355,6 +361,7 @@ function createCoreBridge(opts) {
       ready = false;
       const child = proc;
       proc = null;
+      /** @type {CodedError} */
       const wrapped = new Error(coreDiedMessage((err && err.message) || 'dieyun-core 启动失败'));
       wrapped.code = err && err.code ? err.code : 'CORE_START_FAILED';
       rejectAll(wrapped);
@@ -433,6 +440,7 @@ function createCoreBridge(opts) {
         // 「core 请求超时」是判断「run 为什么不动」的第一线索，必须落盘。
         log(`[dieyun:core] RPC_TIMEOUT ${method} id=${id} timeoutMs=${timeout}`);
         bestEffortCancelForMethod(method, runId, id);
+        /** @type {CodedError} */
         const err = new Error(`dieyun-core 超时: ${method}`);
         err.code = 'CORE_RPC_TIMEOUT';
         reject(err);
@@ -446,7 +454,7 @@ function createCoreBridge(opts) {
         return;
       }
       try {
-        stdin.write(payload, (err) => {
+        stdin.write(payload, (/** @type {NodeJS.ErrnoException} */ err) => {
           if (err) {
             clearTimeout(timer);
             pending.delete(id);

@@ -1,0 +1,30 @@
+{
+  "note": "「摘录预算」的跨语言基线。规则只有一条：Rust 的预算按**字符**算，而且必须大于 Node 的展示预算 —— 否则 Rust 先截断、Node 再也补不回来。历史事故：Rust 的 `SNIPPET_MAX_CHARS = 3600` 实际是**字节**（≈1200 汉字），比 Node 的 2400 **字符**更早截断，与注释里「避免中文先被 Rust 截断」的意图正好相反 —— 命中词常被整段截掉。用例按「行数 × 每行字符」构造：Rust 侧先按 SNIPPET_MAX_LINES(80) 截行，再按字符预算截断，所以触发预算截断必须落在 80 行之内。",
+  "invariants": {
+    "rustBudgetMustExceedNodeMax": true,
+    "countingUnit": "chars"
+  },
+  "cases": [
+    {
+      "name": "cjk-under-node-budget",
+      "char": "中",
+      "lines": 20,
+      "perLine": 80,
+      "expectTruncated": false
+    },
+    {
+      "name": "cjk-over-rust-budget",
+      "char": "中",
+      "lines": 80,
+      "perLine": 80,
+      "expectTruncated": true
+    },
+    {
+      "name": "ascii-under-node-budget",
+      "char": "a",
+      "lines": 20,
+      "perLine": 80,
+      "expectTruncated": false
+    }
+  ]
+}

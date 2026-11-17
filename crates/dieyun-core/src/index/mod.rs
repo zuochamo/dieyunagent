@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
-use crate::config::{AppConfig, INDEX_FILE_MAX_BYTES};
+use crate::config::AppConfig;
 use crate::error::CoreError;
 use crate::sqlite::SqliteHandle;
 use vector_pool::{PoolCache, VectorPool};
@@ -969,7 +969,7 @@ impl IndexService {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                if !meta.is_file() || meta.len() > INDEX_FILE_MAX_BYTES {
+                if !meta.is_file() || meta.len() > crate::config::index_file_max_bytes() {
                     continue;
                 }
                 let rel = file.rel.replace('\\', "/");

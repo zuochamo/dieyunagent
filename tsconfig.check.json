@@ -1,4 +1,4 @@
-{
+﻿{
   "compilerOptions": {
     "allowJs": true,
     "checkJs": false,
@@ -13,6 +13,10 @@
     "lib": ["ES2022", "DOM"]
   },
   "files": [
+    "types/core-rpc.d.ts",
+    "src/agent/llm-complete.js",
+    "src/agent/rust-loop-runner.js",
+    "src/core-bridge.js",
     "src/agent/task-tier.js",
     "src/agent/agent-limits.js",
     "src/agent/guardrails-shared.js",

@@ -105,6 +105,7 @@ const PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
  * @returns {Array<[string, string]>}
  */
 function parseHeaderLines(text) {
+  /** @type {Array<[string, string]>} */
   const out = [];
   for (const line of String(text == null ? '' : text).split(/\r?\n/)) {
     const trimmed = line.trim();

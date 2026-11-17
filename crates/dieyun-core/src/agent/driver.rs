@@ -229,12 +229,14 @@ pub async fn drive(
 /// 状态码分辨不了；而这两种情况的处置完全不同（折叠 vs 摘图）。
 fn looks_like_context_overflow(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
-    t.contains("context length")
-        || t.contains("context_length")
-        || t.contains("prompt is too long")
-        || t.contains("too many tokens")
-        || t.contains("maximum context")
-        || t.contains("reduce the length")
+    // 词表唯一来源：`assets/agent-shared.json` 的 `contextOverflowPatterns`
+    // （Node 侧 `llm-reconnect-retry.js:isContextOverflowError` 读同一份）。
+    // 两份词表曾经漂移：措辞落在 Node 清单里时，内核连折都没折就把这一轮判成失败，
+    // 而 Node 又把 core 的硬失败降级成「正常完成」—— 用户看到的是一次空轮。
+    crate::shared::shared()
+        .context_overflow_patterns
+        .iter()
+        .any(|pattern| t.contains(pattern.as_str()))
 }
 
 /// 上游「这张图不支持」的常见措辞。
@@ -271,6 +273,28 @@ fn to_input(outcome: Outcome, content_channel: ContentChannel) -> LlmResponseInp
 mod tests {
     use super::*;
 
+    /// 与 Node 同一份 fixture（`test/fixtures/context-overflow-cases.json`）：
+    /// 两侧对每条上游错误文案的判定必须一致。
+    ///
+    /// 钉住的是「两份词表漂移」这条历史事故：措辞只落在 Node 清单里时，内核连折都没折
+    /// 就把这一轮判成失败，而 Node 又把 core 的硬失败降级成「正常完成」。
+    /// Node 侧的同一份断言在 `test/unit/cross-language-fixtures.test.cjs`。
+    #[test]
+    fn context_overflow_matches_the_shared_fixture() {
+        const FIXTURE: &str = include_str!("../../../../test/fixtures/context-overflow-cases.json");
+        let v: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture 必须是合法 JSON");
+        let cases = v["cases"].as_array().expect("cases");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let message = case["message"].as_str().expect("message");
+            let expected = case["overflow"].as_bool().expect("overflow");
+            assert_eq!(
+                looks_like_context_overflow(message),
+                expected,
+                "判定不一致：{message}"
+            );
+        }
+    }
     use crate::config::AppConfig;
     use crate::embedding::EmbeddingConfig;
     use serde_json::json;

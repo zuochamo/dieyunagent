@@ -9,7 +9,7 @@
 3. **禁用意图关键词硬编码**：勿用固定中英文词表 / 寒暄正则决定「是否注入上下文、切 AGENTS 章节、是否触发索引」等路由；优先结构信号（`@Codebase`、消息内路径、编辑器选区）、召回是否命中、或 `agent-limits` 配置。对用户查询做动态分词打分（FTS/向量）不属于本禁令。
 4. **分层边界**：Renderer 做 UI；**工具执行在 Main/Node**；Rust `dieyun-core` 做循环账本、**LLM 调用与流式（`agent/llm.rs`）**、planner、memory、index、compaction（折叠；transcript 唯一写者）。工具走 Gateway RPC。勿在 Rust 循环里堆「工头」协议，勿在 Renderer 写长期 Agent 状态机。
 5. **循环哲学（对齐 PI harness，不整仓替换）**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status` 状态机、假用户续跑、按只读步数/同文件读取/只计划逼写入。**交付四态**（`agent-round-text.resolveTurnDelivery` 单一来源）：有正文就交付；预算截断且只有思考 → 带标签思考引用（仅展示，落库换占位）；正常收尾无正文才 synthesis，且在 Node `rust-loop-runner`，Renderer 只展示。**思考永不顶正文**：只进 `messages.reasoning`（与 content 分列）。完成验收只提示、不自动续跑、不挡交付。
-6. **护栏单一来源**：数字上限只改 `src/agent/agent-limits.js`；工具拦截常量/逻辑在 `src/agent/guardrails-shared.js`；**工具调用的关卡顺序只在 `src/agent/tool-gate.js` 声明**（加检查只改清单，不改流程）。
+6. **护栏单一来源**：数字上限只改 `src/agent/agent-limits.js`；**Node 与 Rust 两侧都要用的数字/词表**（token 折算、预算地板、触发比夹取、读上限、慢请求阈值、上下文溢出词表）只改 `assets/agent-shared.json`（Node 经 `src/agent/shared-constants.js`、Rust 经 `crates/dieyun-core/src/shared.rs` 读同一份；`npm run check:shared-constants` 会验「每个键两侧都有人读」）；工具拦截常量/逻辑在 `src/agent/guardrails-shared.js`；**工具调用的关卡顺序只在 `src/agent/tool-gate.js` 声明**（加检查只改清单，不改流程）。
 7. **不提交**：密钥、`deploy.local.json`、`.env`、`dist/`、`release/`（除文档说明的备份策略）。
 8. **验证**：改完跑 `npm test`（按 diff 选测）或 `npm run test:agent`（全量 smoke）。
 
@@ -176,6 +176,7 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`examples/agent-sandbox/README.md`](examples/agent-sandbox/README.md) | Agent 自举沙盒 |
 | [`docs/ARCHITECTURE-DEBT.md`](docs/ARCHITECTURE-DEBT.md) | 架构技术债台账：哪几处仍然过时（本地 IPC / 日志当 IPC / 词法检索 / token 估算 / 快照体积 / JS 侧分期 / 降级 loop）、证据行号、动什么算完、优先级（**接手前先读，别以为都修完了**） |
 | [`docs/NODE-THINNING-PLAN.md`](docs/NODE-THINNING-PLAN.md) | 「让 Node 变薄」可排期清单：跨语言双写点清单（常量 / token 估算 / 工具校验 / RPC 契约）、语义上收 core 的边界、**判定留在 Node 别再搬**的负向清单、4 批排期与验收闸门（**改 `src/agent` 或想「把某段搬进 Rust」前先读**） |
+| [`docs/RUST-CORE-REFACTOR-PLAN.md`](docs/RUST-CORE-REFACTOR-PLAN.md) | Rust 侧重构施工图：74 条缺陷分级地图（A/B/C/D，带 `文件:行`）、补丁越打越多的 6 条机制原因、目标形态（RPC 注册表 / 出站投影 / 状态字段 / 结构化观测）、P0–P6 批次与三条长期闸门、**「要不要整体重写」的判断依据与前置条件**；取证详档在 `docs/audit/2026-11-rust-core/`（**改 `crates/dieyun-core` 前先读**） |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 完整架构手册 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 发版与 dieyun-core 测试 |
 | [`docs/LOGGING.md`](docs/LOGGING.md) | 结构化日志前缀 |

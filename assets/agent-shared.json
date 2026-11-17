@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "$comment": "跨语言常量的唯一来源。Node 侧经 src/agent/shared-constants.js 读取，Rust 侧经 crates/dieyun-core/src/shared.rs（include_str! 编译期嵌入）读取。改这里 = 两侧同时生效；每加一个键，必须两侧都有人读（scripts/check-shared-constants.cjs 会查），否则它只是又一份孤儿常量。",
+  "tokenEstimate": {
+    "charsPerToken": 3.2,
+    "cjkCharsPerToken": 1.5,
+    "imagePartEqChars": 6000
+  },
+  "compaction": {
+    "contextWindowFloorTokens": 8192,
+    "triggerRatioMin": 0.3,
+    "triggerRatioMax": 0.95
+  },
+  "readLimits": {
+    "defaultMaxBytes": 2097152,
+    "absoluteMaxBytes": 16777216,
+    "indexFileMaxBytes": 2097152
+  },
+  "rpc": {
+    "slowLogMs": 2000
+  },
+  "snippets": {
+    "codebaseSnippetMaxChars": 2400,
+    "rustBudgetChars": 4800
+  },
+  "contextOverflowPatterns": [
+    "context length",
+    "context_length",
+    "contextlength",
+    "maximum context",
+    "max context",
+    "maxcontext",
+    "prompt is too long",
+    "too many tokens",
+    "input length",
+    "exceeds the maximum length",
+    "reduce the length"
+  ]
+}

@@ -1,3 +1,4 @@
+// @ts-check
 'use strict';
 
 const { resolveFoldSpec, recordFoldTelemetry } = require('./compaction-main');
@@ -245,7 +246,7 @@ function getActiveAgentLoopCount() {
 const roundPrepareRuns = new WeakMap();
 
 /**
- * @param {{ onCoreCall?: Function }} bridge
+ * @param {CoreBridgeLike} bridge
  * @param {string} runId
  * @param {(params: { runId?: string, round?: number, messages?: object[] }) => object} handler
  * @returns {() => void} 退订（幂等；只在最后一个 run 退出时真正摘掉 bridge 上的方法）
@@ -345,9 +346,17 @@ function createRunStallWatchdog(opts = {}) {
  * - 宿主用 `executeDelegateBatch` 执行工具，再调 `agent.run.tools` 回填，直到 `done`；
  * - 流式增量由 core 经事件通道推来（`agent.delta`），宿主按 runId 过滤后转 `llm_delta`。
  *
+ * @typedef {object} CoreBridgeLike
+ * @property {Function} invoke
+ * @property {Function} [onCoreEvent]
+ * @property {Function} [abortPending]
+ * @property {Function} [onCoreCall] core → 宿主反向调用（按方法名注册，见 attachRoundPrepare）
+ */
+
+/**
  * @param {object} opts
- * @param {{ invoke: Function, onCoreEvent?: Function, abortPending?: Function }} opts.coreBridge
- * @param {{ baseUrl: string, apiKey: string, headers?: object, authMode?: string }} opts.llm
+ * @param {CoreBridgeLike} opts.coreBridge
+ * @param {{ baseUrl?: string, apiKey?: string, headers?: object, authMode?: string, sessionId?: string, model?: string }} [opts.llm]
  * @param {object} opts.startParams `agent.run.start` 的业务入参（model / messages / tools / …）
  * @param {(phase: string, data: object) => void} [opts.onPhase]
  * @param {{ aborted?: boolean }} [opts.signal]
@@ -356,6 +365,8 @@ function createRunStallWatchdog(opts = {}) {
  *   只用到 `archiveFold`（折叠已由 core 完成，Node 只写遥测与归档）
  * @param {boolean} [opts.useStream]
  * @param {object} [opts.settings]
+ * @param {object} [opts.foldSpec] 折叠预算（调用方已算好就传；缺省由 resolveFoldSpec 算）
+ * @param {(msg: string) => void} [opts.log] 日志出口（Main 注入 electron-log；缺省 console.warn）
  * @param {string} [opts.userData]
  * @param {string} [opts.contextTierId]
  * @param {{ maxToolCalls?: number }} [opts.loopSpec]
@@ -368,6 +379,7 @@ function createRunStallWatchdog(opts = {}) {
  */
 async function runRustAgentLoop(opts) {
   const bridge = opts.coreBridge;
+  /** @type {{ baseUrl?: string, apiKey?: string, headers?: object, authMode?: string, sessionId?: string }} */
   const llm = opts.llm || {};
   const signal = opts.signal || null;
   const useStream = opts.useStream !== false;
@@ -568,6 +580,7 @@ async function runRustAgentLoop(opts) {
 
   // 订阅必须在 `agent.run.start` **之前**：否则第一轮增量丢。
   /** 最近一轮的 usage（`agent.usage` 事件）：只为「空回复」诊断用，不参与任何判定 */
+  /** @type {any} */
   let lastUsage = null;
   const unsubscribeEvents =
     typeof bridge.onCoreEvent === 'function'

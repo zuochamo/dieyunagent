@@ -289,8 +289,8 @@ function inferContextTierFromModelName(modelId) {
   return 'default';
 }
 
-/** 上下文窗口下限（与 model-runtime-schema 的 min 对齐） */
-const CONTEXT_WINDOW_FLOOR = 8192;
+/** 上下文窗口下限（与 model-runtime-schema 的 min 对齐；数值来自 assets/agent-shared.json）。 */
+const CONTEXT_WINDOW_FLOOR = require('./shared-constants').compaction.contextWindowFloorTokens;
 
 /**
  * 输入预算地板。取窗口下限同值：畸形配置（模型自带 8k 窗口 + 档位 16k 输出/预留）

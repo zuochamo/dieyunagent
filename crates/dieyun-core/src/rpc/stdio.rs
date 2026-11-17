@@ -118,8 +118,8 @@ async fn handle_request(state: &AppState, req: RpcRequest) -> RpcResponse {
     let method = req.method.clone();
     let started = std::time::Instant::now();
     let dispatched = state.dispatch(&req.method, req.params);
-    // 预算只加在宿主轮询类方法上（见 `request_budget_ms` 的取舍说明）。
-    let result = match super::request_budget_ms(&method) {
+    // 预算只加在宿主轮询类方法上；档位与数值的唯一来源是 `registry.rs` 的方法表。
+    let result = match super::registry::find(&method).and_then(|spec| spec.budget.ms()) {
         Some(budget) => {
             match tokio::time::timeout(std::time::Duration::from_millis(budget), dispatched).await {
                 Ok(r) => r,
@@ -138,7 +138,7 @@ async fn handle_request(state: &AppState, req: RpcRequest) -> RpcResponse {
     // 有了这条「core 内部耗时」，与宿主侧同一请求的端到端耗时一减，就能定位是
     // 「core 真慢」还是「RPC 堵在传输/守护进程里」，不必再靠推理。
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    if elapsed_ms >= super::SLOW_RPC_LOG_MS {
+    if elapsed_ms >= super::slow_rpc_log_ms() {
         eprintln!("[rpc-slow] {method} {elapsed_ms}ms");
     }
     match result {

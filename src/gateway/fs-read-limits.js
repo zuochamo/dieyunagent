@@ -1,8 +1,12 @@
 'use strict';
 
-const DEFAULT_READ_MAX_BYTES = 2 * 1024 * 1024;
-const INDEX_FILE_MAX_BYTES = 2 * 1024 * 1024;
-const ABSOLUTE_READ_MAX_BYTES = 16 * 1024 * 1024;
+// 三个上限的唯一来源是 assets/agent-shared.json（Rust `config.rs` 的
+// default_read_max_bytes / absolute_read_max_bytes / index_file_max_bytes 读同一份）。
+const SHARED = require('../agent/shared-constants');
+
+const DEFAULT_READ_MAX_BYTES = SHARED.readLimits.defaultMaxBytes;
+const INDEX_FILE_MAX_BYTES = SHARED.readLimits.indexFileMaxBytes;
+const ABSOLUTE_READ_MAX_BYTES = SHARED.readLimits.absoluteMaxBytes;
 
 /**
  * @param {{ offset?: number, maxBytes?: number }} [opts]

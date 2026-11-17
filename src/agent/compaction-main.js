@@ -97,7 +97,11 @@ function applyToolSchemaDeduction(baseBudget, reserveTokens, toolsChars) {
 
 function getCompactionTriggerRatio(settings) {
   const r = Number(settings.compactionTriggerRatio);
-  if (Number.isFinite(r) && r > 0) return Math.min(0.95, Math.max(0.3, r));
+  // 夹取区间唯一来源 assets/agent-shared.json（Rust `compaction/fold.rs` 读同一份并 clamp）。
+  if (Number.isFinite(r) && r > 0) {
+    const { triggerRatioMin, triggerRatioMax } = require('./shared-constants').compaction;
+    return Math.min(triggerRatioMax, Math.max(triggerRatioMin, r));
+  }
   return MODEL_RUNTIME_DEFAULTS.compactionTriggerRatio;
 }
 

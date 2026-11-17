@@ -20,6 +20,8 @@ const {
   listContextTierIds
 } = require('./model-runtime-by-tier');
 const { clampModelRuntimeValue } = require('./model-runtime-schema');
+// 跨语言数值的唯一来源（Rust 读同一份 assets/agent-shared.json）。
+const SHARED = require('./shared-constants');
 
 /** @typedef {{ key: string, label: string, hint?: string, type: 'number'|'boolean', min?: number, max?: number, step?: number, unit?: string, format?: 'int'|'ms'|'min'|'mb'|'ratio' }} AgentLimitSchemaItem */
 /** @typedef {{ group: string, groupId: string, items: AgentLimitSchemaItem[] }} AgentLimitSchemaGroup */
@@ -139,7 +141,7 @@ const AGENT_LIMITS_DEFAULTS = {
   writeSmellHintMaxItems: 3,
   writeSmellHintMaxChars: 480,
   writeSmellScanTimeoutMs: 1500,
-  codebaseSnippetMax: 2400,
+  codebaseSnippetMax: SHARED.snippets.codebaseSnippetMaxChars,
   codebaseAutoLimit: 12,
   openFilesMax: 12,
   filePreviewMaxChars: 4000,
@@ -213,8 +215,9 @@ const AGENT_LIMITS_DEFAULTS = {
   // 注意：这是「账本折算系数」而非策略上限，故意不出现在设置页——
   // contentCharLen 没有 tier 上下文，只读全局默认值，做成可调项会「改了不生效」。
   // 两个计费口径都从本值换算：字符口径 session-context.contentCharLen、
-  // token 口径 token-estimate.IMAGE_PART_EQUIV_TOKENS（Rust 同值见 compaction/tokens.rs）。
-  visionPartEqChars: 6000,
+  // token 口径 token-estimate 的图片等效 token。**值在 assets/agent-shared.json**
+  // （Rust `compaction/tokens.rs` 读同一份，不再手抄）。
+  visionPartEqChars: SHARED.tokenEstimate.imagePartEqChars,
   // 电脑控制（computer 工具）输入参数上限。动作枚举/坐标形状等结构校验在
   // tool-validate，这里只放数字上限（AGENTS.md §6：数字护栏唯一来源）。
   computerTextMaxLen: 2000,
@@ -236,12 +239,12 @@ const AGENT_LIMITS_DEFAULTS = {
   // 提示词注入伪造窗口标题的成本也随条数可控。
   computerWindowListMax: 25,
   // 字符→token 折算系数（上下文账本 / 用量估算用）。与 visionPartEqChars 同为「折算系数」
-  // 而非策略上限，故意不上设置页。Rust 侧同值见
-  // crates/dieyun-core/src/compaction/tokens.rs::estimate_text_tokens。
+  // 而非策略上限，故意不上设置页。**值在 assets/agent-shared.json**：Rust
+  // `compaction/tokens.rs::estimate_text_tokens` 读同一份，手抄两份已经漂过一次。
   // renderer 侧经 agent-bundle-entry.js 的 compat 挂到 window.CHARS_PER_TOKEN /
   // window.CJK_CHARS_PER_TOKEN 后直接消费（这两个键不在 module.exports 中）。
-  charsPerToken: 3.2,
-  cjkCharsPerToken: 1.5,
+  charsPerToken: SHARED.tokenEstimate.charsPerToken,
+  cjkCharsPerToken: SHARED.tokenEstimate.cjkCharsPerToken,
   // 默认工作区（~/.dieyun/workspace）回收，唯一实现 src/default-workspace-gc.js。
   // 这个目录是「未选工作空间时的落脚点」，所有落盘产物都进它，没有任何会话负责清理 ——
   // 不设上限就单调增长（实测一台开发机半年 7896 个文件 / 717 MB）。
@@ -1543,6 +1546,17 @@ function syncLimitsToMainProcess() {
   w.diecloud.syncAgentLimits(limitsByTierModule().getAllLimitsByTier()).catch(() => {});
 }
 
+/**
+ * 读取适用档位的护栏数值表（扁平设置包，键名见 `AGENT_LIMITS_SCHEMA`）。
+ *
+ * 为什么不给每个键写类型：这是一张几百个键的异构设置表（数字 / 布尔 / 文本混排），
+ * 逐键声明只会制造另一份需要同步的清单。这里只承诺「是个按名字取值的包」——
+ * 调用点因此能安全地读任意键（拼错键名仍然是运行期 `undefined`，由 schema 兜底校验）。
+ *
+ * @param {string|object} [arg] userData 路径，或 `{ userData, contextTierId, ... }`
+ * @param {string} [tierIdArg] 上下文档（`ctx-128k` 等）；`arg` 为路径时用它
+ * @returns {Record<string, any>}
+ */
 function getAgentLimits(arg, tierIdArg) {
   if (isUserDataPath(arg)) {
     const tierId = tierIdArg || 'default';

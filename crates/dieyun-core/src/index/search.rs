@@ -12,8 +12,13 @@ use super::vector_pool::VectorPool;
 pub const SEARCH_LIMIT_MAX: u32 = 48;
 
 /// 单条命中的带行号正文上限。命中在 chunk 内的位置不确定，整块给出更省一次回读。
-/// 字节上限略高于 Node 侧 codebaseSnippetMax（2400 字符），避免中文先被 Rust 截断。
-const SNIPPET_MAX_CHARS: usize = 3600;
+///
+/// 数值唯一来源 `assets/agent-shared.json` 的 `snippets.rustBudgetChars`，且必须**大于**
+/// Node 的展示预算（`codebaseSnippetMaxChars`）—— 否则 Rust 先截断、Node 再也补不回来。
+/// 历史上这里是「3600 字节」≈1200 汉字，比 Node 的 2400 字符更早截断，与注释意图相反。
+fn snippet_max_chars() -> usize {
+    crate::shared::shared().snippets.rust_budget_chars
+}
 const SNIPPET_MAX_LINES: usize = 80;
 
 /// 命中行之前保留的上下文行数。片段以命中行为锚点向后展开，
@@ -551,6 +556,10 @@ fn snippet(content: &str, start_line: i64, hit_line: Option<i64>) -> String {
     let begin = hit_idx.saturating_sub(SNIPPET_PRE_LINES);
     let end = (begin + SNIPPET_MAX_LINES).min(total);
     let mut out = String::new();
+    // 预算按**字符**累计。旧实现用 `out.len() + piece.len()`（字节）与「字符」上限比较，
+    // 于是中文正文实际只有约 1/3 的预算 —— 命中词常被提前截掉，与注释的意图正好相反。
+    let budget_chars = snippet_max_chars();
+    let mut used_chars = 0usize;
     for i in begin..end {
         let no = start_line + i as i64;
         // 超长单行（压缩产物等）先逐行截断，否则首行就撑爆字符预算、整块只剩提示
@@ -562,10 +571,12 @@ fn snippet(content: &str, start_line: i64, hit_line: Option<i64>) -> String {
             raw.to_string()
         };
         let piece = format!("{no:>5}| {shown}\n");
-        if out.len() + piece.len() > SNIPPET_MAX_CHARS {
+        let piece_chars = piece.chars().count();
+        if used_chars + piece_chars > budget_chars {
             out.push_str("     …（本块后续内容已截断）\n");
             break;
         }
+        used_chars += piece_chars;
         out.push_str(&piece);
     }
     out.trim_end().to_string()
@@ -934,6 +945,38 @@ mod tests {
         assert!(!out.contains("120| line 21"), "不应从更早的位置开始: {out}");
     }
 
+    /// 与 Node 同一份 fixture（`test/fixtures/snippet-budget-cases.json`）：
+    /// 摘录预算按**字符**算，且不得早于 Node 的展示预算截断。
+    ///
+    /// 钉住的历史事故：`SNIPPET_MAX_CHARS = 3600` 实际按**字节**比较，中文正文只有约
+    /// 1/3 预算 —— 20 行 × 80 汉字（1600 字符 / 4800 字节）本该完整给出，却被提前截断。
+    /// Node 侧的同一份断言在 `test/unit/cross-language-fixtures.test.cjs`。
+    #[test]
+    fn snippet_budget_matches_the_shared_fixture() {
+        const FIXTURE: &str = include_str!("../../../../test/fixtures/snippet-budget-cases.json");
+        let v: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture 必须是合法 JSON");
+        let shared = crate::shared::shared();
+        assert!(
+            shared.snippets.rust_budget_chars > shared.snippets.codebase_snippet_max_chars,
+            "Rust 预算必须先于 Node 展示预算截断为假"
+        );
+        for case in v["cases"].as_array().expect("cases") {
+            let ch = case["char"].as_str().expect("char");
+            let lines = case["lines"].as_u64().expect("lines") as usize;
+            let per_line = case["perLine"].as_u64().expect("perLine") as usize;
+            let expect_truncated = case["expectTruncated"].as_bool().expect("expectTruncated");
+            let name = case["name"].as_str().unwrap_or("case");
+
+            let content = (0..lines)
+                .map(|_| ch.repeat(per_line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let out = snippet(&content, 1, Some(1));
+            let truncated = out.contains("内容已截断");
+            assert_eq!(truncated, expect_truncated, "用例 {name}");
+        }
+    }
+
     /// 超长单行（压缩产物等）必须先逐行截断，否则首行就吃光字符预算，整块只剩提示。
     #[test]
     fn snippet_truncates_very_long_line() {
@@ -943,9 +986,9 @@ mod tests {
         assert!(out.contains("    1| head"), "首行必须在片段内");
         assert!(out.contains('…'), "超长行应被截断");
         assert!(
-            out.len() < SNIPPET_MAX_CHARS + 200,
-            "片段不能被单行撑爆: {}",
-            out.len()
+            out.chars().count() < snippet_max_chars() + 200,
+            "片段不能被单行撑爆: {} 字符",
+            out.chars().count()
         );
     }
 
