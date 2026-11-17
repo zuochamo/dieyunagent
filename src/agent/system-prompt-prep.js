@@ -32,8 +32,7 @@ const { describeAgentHome } = require('../agent-home');
 const {
   PROJECT_MEMORY_REL_PATH,
   formatProjectMemoryBlock,
-  parseProjectMemoryEntries
-} = require('./project-memory-file');
+  parseProjectMemoryEntries, isShareableKind } = require('./project-memory-file');
 
 /**
  * 注入块的兜底上限。唯一来源是 `agent-limits.js`，这里只映射不重复字面量 ——
@@ -58,6 +57,8 @@ const DEFAULT_LIMITS = {
   SHARED_MEMORY_MIN_SEMANTIC: AGENT_LIMITS_DEFAULTS.sharedMemoryMinScoreSemantic,
   SHARED_MEMORY_MIN_KEYWORD: AGENT_LIMITS_DEFAULTS.sharedMemoryMinScoreKeyword,
   SHARED_MEMORY_BLOCK_MAX_CHARS: AGENT_LIMITS_DEFAULTS.sharedMemoryBlockMaxChars,
+  MEMORY_INJECT_MIN_SEMANTIC: AGENT_LIMITS_DEFAULTS.memoryInjectMinScoreSemantic,
+  MEMORY_INJECT_MIN_KEYWORD: AGENT_LIMITS_DEFAULTS.memoryInjectMinScoreKeyword,
   SKILL_TOTAL_COUNT: AGENT_LIMITS_DEFAULTS.skillTotalCount
 };
 
@@ -80,7 +81,11 @@ function ctxLimitsFromUserData(userDataPath) {
     SHARED_MEMORY_MIN_KEYWORD:
       L.sharedMemoryMinScoreKeyword || DEFAULT_LIMITS.SHARED_MEMORY_MIN_KEYWORD,
     SHARED_MEMORY_BLOCK_MAX_CHARS:
-      L.sharedMemoryBlockMaxChars || DEFAULT_LIMITS.SHARED_MEMORY_BLOCK_MAX_CHARS
+      L.sharedMemoryBlockMaxChars || DEFAULT_LIMITS.SHARED_MEMORY_BLOCK_MAX_CHARS,
+    MEMORY_INJECT_MIN_SEMANTIC:
+      L.memoryInjectMinScoreSemantic || DEFAULT_LIMITS.MEMORY_INJECT_MIN_SEMANTIC,
+    MEMORY_INJECT_MIN_KEYWORD:
+      L.memoryInjectMinScoreKeyword || DEFAULT_LIMITS.MEMORY_INJECT_MIN_KEYWORD
   };
 }
 
@@ -542,8 +547,10 @@ function kickGraphLspEnrich(snapshot, invokeRpc) {
  * @param {{kind?: string}} row
  */
 function isInjectableMemoryRow(row) {
-  const kind = String((row && row.kind) || '').toLowerCase();
-  return kind !== 'secret' && kind !== 'private';
+  // 判据与「能不能写进 .dieyun/memory.md」是同一件事（secret / private 两类除外），
+  // 所以直接用 project-memory-file.isShareableKind：两处各写一份的话，
+  // 将来加一类（比如需要脱敏的）必然只改一处，另一处就成了泄密口。
+  return isShareableKind(row && row.kind);
 }
 
 function formatMemoryLines(rows, maxLen) {
@@ -662,7 +669,13 @@ async function fetchGlobalMemoryBlock(snapshot, invokeRpc, lim, audit) {
           )
         };
     const rows = recall && Array.isArray(recall.results) ? recall.results : [];
-    const minScore = recall && recall.mode === 'semantic' ? 0.32 : recall && recall.mode === 'keyword' ? 0.12 : 0;
+    // 阈值只有一份（agent-limits.js 的 memoryInjectMinScore*）：语义 0.32 / 关键词 0.12。
+    const minScore =
+      recall && recall.mode === 'semantic'
+        ? lim.MEMORY_INJECT_MIN_SEMANTIC
+        : recall && recall.mode === 'keyword'
+          ? lim.MEMORY_INJECT_MIN_KEYWORD
+          : 0;
     const scored = minScore > 0 ? rows.filter((r) => (Number(r.score) || 0) >= minScore) : rows;
     const filtered = scored.filter(isInjectableMemoryRow);
     if (!filtered.length || (recall && recall.mode === 'none')) {

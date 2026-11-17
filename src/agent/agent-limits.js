@@ -336,6 +336,11 @@ const AGENT_LIMITS_DEFAULTS = {
   sessionRecallLimit: 12,
   sessionRecallSnippetChars: 240,
   sessionRecallFoldedLimit: 6,
+  // 长期记忆**注入**的相似度阈值（语义 / 关键词两档）。
+  // 与共享记忆的 `sharedMemoryMinScore*` 是同一套口径、不同数据源（本地库 / 跨机 PG），
+  // 所以两组分开命名；值以前硬编码在 `system-prompt-prep.js` 里，看不出同源也改不动。
+  memoryInjectMinScoreSemantic: 0.32,
+  memoryInjectMinScoreKeyword: 0.12,
   // 会话交接里「原文快照」的预算：事实部分由存储投影（确定性），模型只写判断。
   // 与注入侧 HANDOFF_BLOCK_MAX_CHARS(4000) 的关系：快照在后、判断在前，
   // 触顶时先丢原文尾部，不丢结论。
@@ -436,8 +441,14 @@ const AGENT_LIMITS_DEFAULTS = {
   // 这里只是**数字的唯一来源**；越界由 `src/alive/runtime.js#resolveAliveConfig` 夹取。
   /** 心跳间隔（唯一 tick 源；演示时可临时调小，页面会标「演示中」） */
   aliveTickIntervalMs: 300000,
-  /** 唤醒阈值初值 / 夹取区间 */
-  aliveWakeThreshold: 60,
+  /**
+   * 唤醒阈值初值 / 夹取区间。
+   *
+   * 取 40（= 下限）而不是 60：60 配上默认爬升，实测**静默 11.7 小时**才第一次自发醒
+   * （200 次蒙特卡洛，无未闭合项），远达不到页面文案说的「几小时」。40 + 下面的爬升
+   * 参数合起来约 **2.4 小时**第一次醒，起步就能被看见「它是活的」。
+   */
+  aliveWakeThreshold: 40,
   aliveWakeThresholdMin: 40,
   aliveWakeThresholdMax: 80,
   /** 阈值漂移速率（每小时）：拒绝率项 / 疲劳项。一天最多漂 ~7 */
@@ -449,7 +460,14 @@ const AGENT_LIMITS_DEFAULTS = {
   aliveWakeRefusalWindowMs: 24 * 60 * 60 * 1000,
   /** 两次自发唤醒的最小间隔与每日上限（防抖 + 防烧钱） */
   aliveWakeMinIntervalMs: 10 * 60 * 1000,
-  aliveWakeMaxPerDay: 40,
+  /**
+   * 两次自发唤醒的最小间隔与每日上限（防抖 + 防烧钱）。
+   *
+   * 2026-11-12 按用户要求：40 → **100 次/天**。理论上限仍是「1440 分钟 ÷ 最小间隔 10 分钟 = 144」，
+   * 但实际到不了 —— **疲劳**会先把它压住（每次唤醒 +20，静息 20/h，连续 3–5 次就进 COMPRESS
+   * 相位，那相位不唤醒）。所以真正决定"一天能醒几次"的是疲劳，这条只负责"别一小时内抖几十次"。
+   */
+  aliveWakeMaxPerDay: 100,
   /**
    * 每日 token 额度（**成本护栏**，`<=0` = 不限）。
    *
@@ -457,11 +475,18 @@ const AGENT_LIMITS_DEFAULTS = {
    * 可能 8k（只做一次决策），也可能 200k（全量系统提示 + 工具 + 回看历史）。用次数表达
    * 钱必然失真，所以另给一条**只管钱**的机械上限：超了就不醒，理由写 `token-day-cap`。
    *
-   * 标定：一次唤醒轮 ≈ 40k（与 `aliveFatiguePerKToken` 同一口径）→ 40 万 ≈ 10 次。
-   * 次数上限（40/天）远高于此，**额度会先触发，这是刻意的**：次数防抖、额度防烧钱。
+   * 标定：一次唤醒轮实测 2–7 万 token（`state.lastWakeTokens`：2026-11-12 观察 2 万–7.2 万）
+   * → **1 亿 ≈ 1400–5000 次唤醒/天**。
+   *
+   * 2026-11-12 按用户要求两连抬：40 万 → 100 万 → **1 亿**；唤醒次数上限也从 40 抬到 100。
+   * 抬到 1 亿的实际含义是**把「钱」这道闸基本打开**（100 次/天 × 最多 7 万 ≈ 700 万，占 7%），
+   * 所以真正栓住它的是另外两条，动它们才是动行为：
+   *   1. `aliveWakeMaxPerDay`（100 次/天）；
+   *   2. **疲劳**：每次唤醒 +20，静息每小时回落 20 → 连续醒 3–5 次就进 COMPRESS 相位，那相位不唤醒。
+   * 留着这条额度仍有意义：上游异常（比如一次请求叠了几十万 token）时它会被挡住，而不是烧一整晚。
    * 不做退避 / 动态降频 / 分时段配额 —— 那些是拿节律换预算，且会自己长出一套策略层。
    */
-  aliveDailyTokenBudget: 400000,
+  aliveDailyTokenBudget: 100000000,
   /** 体征历史（`alive/history.jsonl`）的物理行数上限：超了裁一半，约 14 天的拍数（~350KB） */
   aliveHistoryMaxLines: 4000,
   /** 体征历史的默认观察窗口（面板曲线的横轴） */
@@ -469,21 +494,72 @@ const AGENT_LIMITS_DEFAULTS = {
   /** 张力：均值回复中心 / 增益 / 感觉剥夺保护 ε / 上限 */
   aliveTensionMean: 20,
   aliveTensionGainPerHour: 0.35,
-  aliveTensionRestorePerHour: 0.35,
+  /**
+   * 张力追向回复中心的速度（每小时）：1/0.6 ≈ 1.7 小时的时间常数。
+   * 原来 0.35（时间常数 ~2.9h）让「闲得发慌」这条要一整天才爬到阈值，拟态看起来是死的。
+   */
+  aliveTensionRestorePerHour: 0.6,
   aliveTensionEps: 0.8,
   aliveTensionMax: 100,
   /**
    * 「闲得发慌」：静默愈久，张力的回复中心越高 —— 这是它**自发醒来**的主要来源。
    * 没有这一项，一个没有任何未闭合事项的新实例会永远停在 20，从不清醒（拟态就失效了）。
    * 不是记忆衰减、不是损耗，只是「空久了会不舒服」。
+   *
+   * 标定（200 次蒙特卡洛，无未闭合项，从出生算）：宽限 0.25h + 每小时 +20 时
+   * **中位 2.4 小时**第一次自发醒；原值（1h / +6）是 11.7 小时。
    */
-  aliveTensionIdleRampPerHour: 6,
-  aliveTensionIdleGraceHours: 1,
+  aliveTensionIdleRampPerHour: 20,
+  aliveTensionIdleGraceHours: 0.25,
   aliveTensionIdleMax: 45,
   /** 未闭合项：单条基准张力 / 上限条数 / 自然消退时间常数（小时） */
   aliveLoopTensionUnit: 25,
   aliveLoopMax: 12,
   aliveLoopStaleHours: 48,
+  /**
+   * 「醒来时它看到什么」——最近工作的**事实块**（`src/alive/recap.js`）。
+   *
+   * 为什么要它：状态块原来只有内部体征，它每次醒来面对「空张力 + 空清单」只能 DEFER。
+   * 有了"最近这台机器上发生过什么"，它才可能声明未闭合事项（loops），张力才由事项驱动。
+   * 窗口/条数/字数都给上限：这是每轮都要付的 prompt 成本，且会话数量会随时间无限长。
+   */
+  aliveRecapWindowHours: 24,
+  aliveRecapSessions: 3,
+  aliveRecapTailChars: 160,
+  /** 未收尾的**目标型计划**最多列几条（它要拿来声明未闭合事项；跑不动，只在只读轮里看） */
+  aliveRecapPlans: 3,
+  /** 整块文字的硬上限（超了按行截断并注明还有几条） */
+  aliveRecapMaxChars: 800,
+  /**
+   * 唤醒轮事实块里带**它自己抽屉**的最后几行（`alive/workspace/note.md`）。
+   *
+   * 为什么不是"随便加点上下文"：它写在抽屉里的字是它自己的记忆（原话：
+   * "让下次醒来的自己知道这次醒过"），而以前这份记忆只躺在硬盘上 —— 事实块只给它
+   * 别人的会话，不给它自己的昨天。**目标只能从"我记得上次到哪儿"里长出来**，
+   * 所以这几行是它唯一能自己总结出目标的原料。
+   */
+  aliveRecapNoteLines: 2,
+  /**
+   * 「跟你现在有关、你记得的」：唤醒轮拿**当前处境**（recap 的会话标题/尾句 + 计划 + 抽屉）
+   * 去 `memory.long_recall` 召回几条长期记忆塞进事实块。
+   *
+   * 为什么不是靠默认注入：默认注入拿的是**体征块**当查询，里面没有具体名词，语义召回只会
+   * 捞回泛泛的"用户偏好"（实测那几条 #1774/#1854）；而它要判断"现在有没有值得做的事"，
+   * 需要的恰恰是"这台机器上正在说的那些事"相关的记忆。
+   * 数字：条数 / 查询串字数上限 / 超时（召回慢就跳过，绝不挡唤醒）。
+   */
+  aliveRecallBySituation: 4,
+  aliveRecallQueryMaxChars: 400,
+  aliveRecallTimeoutMs: 4000,
+  /**
+   * 「设定」（设置 → 拟态 → 设定）：用户随手写的那一段话，留多少字。
+   *
+   * 为什么要有这个数：它是**每轮唤醒都要付的 prompt 成本**，而一段设定粘几万字很容易；
+   * 没有上限时，一次唤醒就为一段不会变的文字反复付钱。
+   * 2000 字 ≈ 几条"人生目标 / 遇到人怎么做 / 想聊什么"并列着写，够用且不至于淹没事实块。
+   * 裁的是**尾部**（截断事实写在渲染侧，不静默吞掉半句话）。
+   */
+  aliveSetupMaxChars: 2000,
   /**
    * 疲劳：每千 token 涨多少 / 静息每小时回落 / 感觉剥夺保护 ε。
    *
@@ -496,9 +572,33 @@ const AGENT_LIMITS_DEFAULTS = {
   aliveFatiguePerKToken: 0.5,
   aliveFatigueSettlePerHour: 20,
   aliveFatigueEps: 0.5,
-  /** 主动出声/收音：每日上限与最小间隔（默认关着，见 `alive/settings.json` 的 voiceSpontaneous） */
-  aliveVoiceMaxPerDay: 8,
-  aliveVoiceMinIntervalMs: 30 * 60 * 1000,
+  /**
+   * 主动出声/收音：每日上限与最小间隔（默认关着，见 `alive/settings.json` 的 voiceSpontaneous）。
+   *
+   * 2026-11-12 按用户要求放宽：单次间隔 30 → **20 分钟**、每日 8 → **100 次**。
+   * 它已经不再"没人就不许说"（`decide.js` 只报 load 事实），配上宽松额度才谈得上"像个活物"；
+   * 真正的成本护栏仍是唤醒轮自己的 `aliveDailyTokenBudget`（出声本身几乎不花 token）。
+   */
+  aliveVoiceMaxPerDay: 100,
+  aliveVoiceMinIntervalMs: 20 * 60 * 1000,
+  /**
+   * 它说过的话在「最近一条」(`state.lastVoiceText`) 与事件流 (`SPEAK.text`) 里保留多少字。
+   *
+   * 为什么要有这个数：它出声是**说给在场的人听的**，人可能不在、可能没听清 ——
+   * 所以"说了什么"必须留成可回看的文字（主窗口一条、拟态 → 日志逐条）。这是**展示**，
+   * 不写进你的会话账本、不进模型上下文（那才是"接管对话线"）。
+   * 只留最近一条/每条最多这么多字：日志不是录音带，用完就旧了。
+   */
+  aliveVoiceTextMaxChars: 300,
+  /**
+   * 它**这一轮醒来写下了什么**（心跳轮正文压成一行）在 `state.lastWakeText` 里留多少字。
+   *
+   * 为什么要有这个数：唤醒轮是 `internal: true`，正文只落进它自己的会话库 —— 它一晚上写了几万字，
+   * 人回到主窗口却什么也看不见，"它在你不看时做了什么"只能靠翻日志。
+   * 所以主窗口那行有两个来源：说过话显示「它说」，没说话显示「它醒来写了」。
+   * 与 `aliveVoiceTextMaxChars` 同一条口径：**只展示**，不进会话账本、不进模型上下文。
+   */
+  aliveWakeTextMaxChars: 200,
   /** 相位惯性（连续 k 个 tick 满足条件才切换）与相位门限 */
   alivePhaseInertiaAlert: 3,
   alivePhaseInertiaLow: 5,
@@ -522,7 +622,22 @@ const AGENT_LIMITS_DEFAULTS = {
   /** 「可疑顺从」告警的当日唤醒次数下限：醒了这么多次却一次没拒绝 = 排期表，不是活的 */
   aliveSuspiciousWakeMin: 5,
   /** 唤醒轮默认只读（可读文件/检索记忆/写记忆与目标，不写盘、不执行命令） */
-  aliveReadOnlyWake: true
+  aliveReadOnlyWake: true,
+  /**
+   * 唤醒轮的**权力档**（`read` / `write` / `exec`）与它的护栏。
+   *
+   * 默认 `read`：心跳轮只读（原设计的承重墙）。放开是**显式开关**
+   * （`alive/settings.json#wakePower`），放开之后仍然只有三道闸门：
+   *   1. 只能在 `wakeWorkspace` 这一个根目录下动（越界 = `WAKE_PATH_OUTSIDE`）；
+   *   2. 每轮写/执行次数有上限，跨轮不累计（默认一轮最多改 6 次、跑 3 条命令）；
+   *   3. **永不等待审批**：需要用户当场同意的操作直接拒（`WAKE_NEEDS_APPROVAL`）——
+   *      后台不该出现一个挂在那里等人的弹窗。
+   */
+  aliveWakePowerDefault: 'read',
+  aliveWakeWriteMaxPerWake: 6,
+  aliveWakeExecMaxPerWake: 3,
+  /** `host_exec` 在唤醒轮里的命令超时（秒）；超出由执行层杀掉 */
+  aliveWakeExecTimeoutSec: 120
 };
 
 /** @type {AgentLimitSchemaGroup[]} */

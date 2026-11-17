@@ -228,7 +228,7 @@ external content + 三个触发器（`messages_fts_ai/ad/au`）维护增删改�
 
 | 方法 | 作用 |
 |------|------|
-| `memory.sessions_list` / `sessions_with_messages` | 历史列表（后者用于归纳器取有内容的会话） |
+| `memory.sessions_list` / `sessions_with_messages` | 历史列表（后者用于归纳器取有内容的会话）。行里除标题/预览外还投影 `workspaceProjectPath`（项目身份）与 `triggerKind`（首条 user 行 meta 的 `trigger.kind`：`schedule` / `goal` / `alive` …，用于侧栏区分「定时任务会话 / 心跳会话」与用户自己聊的会话；不靠标题或正文猜） |
 | `memory.session_create` / `session_get` / `session_archive` / `session_delete` | 会话生命周期 |
 | `memory.session_workspace_set` | 绑定工作空间 |
 | `memory.touch_session` / `session_set_title` | 活跃时间 / 标题（§10） |
@@ -337,7 +337,9 @@ scope = 'project:' + projects.id
 | 索引 | `long_memories_fts`（FTS5 **external content** 表，`content='long_memories'`，`tokenize='trigram'`）；会话正文同一套形态：`messages_fts`（`content='messages'`） |
 | 一致性 | 三个触发器（`long_memories_fts_ai/ad/au`）维护增删改；老库首次建表后按行数差异 `rebuild` 一次 |
 | 排序 | `ORDER BY bm25(long_memories_fts)`，再叠加重要度 / 新鲜度 / `stale` 惩罚做同一查询内微调 |
+| 可见行 | `memory/recall.rs::long_mem_visible_sql(alias, now_index)`（唯一来源：`status IN ('active','stale')` + 未过期）。**`memory/misc.rs` 的衰减 UPDATE 不走它**：那条筛的是「已过期、该归档」的行，与「还看得见」正好相反 |
 | 查询串 | `crates/dieyun-core/src/fts.rs::match_query`（唯一来源，索引与记忆共用；逐片段加引号、`OR` 连接、剥掉 FTS5 语法字符） |
+| 可见行 | `memory/mod.rs::long_mem_visible_sql(alias, now_index)`（唯一来源：`status IN ('active','stale')` + 未过期；原先手抄 10 处 → 现在 1 处）。**`misc.rs` 的衰减 UPDATE 不走它**：那条筛的是「已过期、该归档」的行，与「还看得见」正好相反 |
 
 **分词器边界（写清楚，免得当 bug 排查）：** trigram 只能索引 **≥3 字符** 的片段，
 所以中文双字词（`索引`、`记忆`）在 `MATCH` 里必然查不到。这类查询由
@@ -350,8 +352,8 @@ scope = 'project:' + projects.id
 ### 5.3 `kind` 决定能否自动注入
 
 ```js
-// src/agent/system-prompt-prep.js::isInjectableMemoryRow
-kind === 'secret' || kind === 'private' → 不进自动 system prompt
+// 判据只有一份：src/agent/project-memory-file.js::isShareableKind
+kind === 'secret' || kind === 'private' → 既不进自动 system prompt，也不写 .dieyun/memory.md
 ```
 
 - 这两类记忆**仍然落库**（`long_memories` 里可见、可经 `long_status_set` 停用），归纳器语料也会带上它们（避免重复写入）。
@@ -677,3 +679,23 @@ test/unit/shared-memory.test.cjs        # 共享记忆纯函数（召回 SQL / �
 ---
 
 *对齐版本：**0.1.58**（记忆归纳迁移到 Main、项目 scope 归一化、召回 bump 使用计数、`kind` 注入过滤；**本轮**：项目记忆文件化、会话溯源与软遗忘、写入侧近重复/低价值闸、注入审计、账本自愈、轮内记忆工具）。上述行为变更时请同步 §3、§5、§6、§12。*
+
+---
+
+## 附：`memory/*.rs` 布局（2026-11-17 拆分后）
+
+`impl MemoryStore` 原先是一块 1900 行的单块，按职责拆成 6 个域文件（**纯机械搬运，语义未改**，`cargo test` 为唯一判据）：
+
+| 文件 | 承接 |
+|---|---|
+| `mod.rs` | 类型（`MemoryStore` / `SessionRow` / `MessageRow` / `LongMemoryInput` …）、共享调优常数、`now_ms` / `rand_suffix`、测试；`mod` 声明 + `pub(crate) use <域>::*;` 把搬出去的项重新导出 |
+| `store.rs` | 开库 / 连接池 / `with_conn` / `read` / embedding 配置 / `PrunePolicy` |
+| `session.rs` | 会话行（标题、工作空间、归档）、handoff、消息追加与读取、清会话 |
+| `longmem.rs` | 长记忆**写入侧**：精确/近重复去重、kind 与重要度归一、向量索引与重建 |
+| `recall.rs` | 长记忆**读侧**：FTS / 关键词 / 语义召回、可见性谓词、打分与分页 |
+| `archive.rs` | 压缩归档落库/回读 + 跨会话正文与折叠片检索 |
+| `meta.rs` | `【叠云meta】` 打包/清洗/剥离、标题启发式与「占位标题」判据 |
+| `misc.rs` | 维护：撤回一轮、账本自愈、归纳作业、衰减、剪枝任务 |
+
+约定：域文件之间用 `use super::*;` 拿对方的 `pub(crate)` 项（等价于拆分前「同处一个模块」的可见性）；
+对外（`rpc/`）只有 `pub fn` 可见，接口口径不变。**加一个方法先想清楚它属于哪个域** —— 别再往 `mod.rs` 里堆。
