@@ -248,16 +248,21 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 
 **验收**：`npm run verify:rpc-catalog` + `npm run check:js` + `cargo test -p dieyun-core --lib` + `npm run test:rust-agent-loop-smoke` + `npm run check:shared-constants`。
 
-### P2 · 巨石拆分（5–8 人日，纯移动，风险中）
+### P2 · 巨石拆分（5–8 人日，纯移动，风险中）· **index 已拆完（2026-11-18），loop_run / graph 未开始**
 
 > 只搬不改行为；每搬一块，`cargo test` 必须全绿且 diff 只含移动。
 
 | 目标 | 拆成 | 附带收益 |
 |---|---|---|
 | `rpc/mod.rs` **1454 → 304** | `rpc/registry.rs`、`handlers/{memory,graph,agent,codebase,fs,system,async_core,async_data}.rs` | 每方法一个 handler（**86/86 完成**）；单测从 1 个涨到「表 parity + 可达性 + 8 条 handler」 |
-| `index/mod.rs` 1935→~700 | `index/{build,status,vectors,repair}.rs` | 顺手把 A11、B「chunking 整段事务」修掉 |
-| `loop_run.rs` 1481→~800 | `loop_run/{ledger,delivery,trace,fold}.rs` | 交付四态只留一处入口，A3 这类漏用从结构上消失 |
-| `graph/mod.rs` + `build.rs` | `graph/{status,build,incremental,cleanup}.rs` | 把「删符号连带删边」收成一份 |
+| ✅ `index/mod.rs` **2249 → 1093**（生产代码 ~490，其余是测试） | `index/{status,vectors,build,repair}.rs`（新增 965 行，纯移动） | **A11 已修**（见下）+ **chunking 整段事务改分批提交**（见下） |
+| ⏳ `loop_run.rs` 1481→~800 | `loop_run/{ledger,delivery,trace,fold}.rs` | 交付四态只留一处入口，A3 这类漏用从结构上消失 |
+| ⏳ `graph/mod.rs` + `build.rs` | `graph/{status,build,incremental,cleanup}.rs` | 把「删符号连带删边」收成一份（A8） |
+
+**index 这一块的落地细节**
+- 搬家方式：脚本按 `impl IndexService` 的方法边界切块（doc 注释随方法走），每个目标文件只带自己的 `use` 前奏；搬完立刻 `cargo test`，编译器/测试指出漏掉的 import 与需要放宽到 `pub(crate)` 的方法。**全程零逻辑改动**，唯一的可见性变化是跨子模块互调的方法从私有变成 `pub(crate)`。
+- **A11（真 bug）**：增量索引遇到「路径还在、但已不可索引」（超限 / 含 NUL）过去只 `continue` —— `purge_stale_chunk_paths` 认为它还在，这里又不重建，于是库里永远留着这份文件**上一次**的正文，`codebase.search` 照旧返回给模型。现在：永久不可索引 → **清掉旧 chunk**；暂时读不到（锁 / 权限）→ 保留并在下一轮重试；两者都计数并打一行诊断。回归用例 `incremental_index_purges_chunks_of_now_unindexable_files`（变异验证：去掉那行删除即红）。
+- **chunking 整段事务**：原来 walk + 切块整段包在一个写事务里（分钟级），同库另一条写连接（graph 建库）抢不到锁就 15s 后报 `database is locked`（面板表现为「建图谱失败而索引正常」）。现在每 128 个文件提交一次，把持锁时长压到「一批的切块耗时」；索引幂等，分批提交不需要「全成或全不成」。
 
 **验收**：`cargo test` 239 全绿 + `npm run test:rust-agent-loop-smoke` + `test:rust-planner-smoke`；`rpc/mod.rs` 的测试数从 1 涨到「每 handler ≥1」。
 

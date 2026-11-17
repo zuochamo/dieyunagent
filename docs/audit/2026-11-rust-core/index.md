@@ -1,5 +1,7 @@
 # index 审计
 
+> **2026-11-18 P2 已修**：F2（增量索引对「路径还在但已不可索引」的文件永不清理旧 chunk → 永久不可索引的清旧 chunk、暂时读不到的保留重试，用例 `incremental_index_purges_chunks_of_now_unindexable_files`，已变异验证）、F10 的写事务部分（chunking 整段一个写事务 → 每 128 文件分批提交，避免与 graph 建库撞 `database is locked`）。同时把 `index/mod.rs` 拆成 `{status,vectors,build,repair}.rs`（纯移动）。F4/F5/F6/F7/F8/F9/F11 仍开。
+
 审计范围：`crates/dieyun-core/src/index/{mod,search,vector_cache,vector_pool,walker,schema,remote,workspace}.rs`、`crates/dieyun-core/src/codebase_db.rs`、`crates/dieyun-core/src/fts.rs`（全部读完）。只读分析，未改源码、未跑 cargo。
 
 ## 度量
