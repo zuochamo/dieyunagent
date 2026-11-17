@@ -36,7 +36,7 @@
 | 模型 / 语音设置 | `src/model-settings.js`、`src/renderer/renderer-model-settings.js` | 散落硬编码 API URL |
 | 快捷键（键位 / 新增全局键） | `src/renderer/renderer-shortcuts.js`（键位表 + `matchesShortcut` + 「基础设置 → 快捷键」页；覆盖项存 `settings.shortcuts`） | 在调用点写 `ev.key === 'm'`、`ev.altKey && k === 's'`（用户改键后静默失效） |
 | 朗读（语音合成 / TTS） | `src/gateway/speech-synthesize.js`（合成请求体 / 超时 / 长度上限的唯一来源）、`src/gateway/tts-cache.js`（按 text+voice+format+model+baseUrl 的字节上限 LRU）、`src/renderer/renderer-tts.js`（分句切块 + 边合成边播 + 停止/切歌语义 + 逐句高亮）、`src/renderer/renderer-chat-scroll.js#followChatReadingRange`（念到哪一句的**视野跟随**：起点必须在视野里 / 用户一滚就整段让位 / 只往下带不回拽；用户滚动序号 `chatUserScrollSeq` 的唯一来源是 `markChatUserScrollIntent`）、`src/model-settings.js:resolveTtsApiConfig`（无 Renderer 的调用方与手机端选模型）、`src/mobile/public/app.js`（手机端朗读） | 在 Renderer / 手机端各拼一份合成请求体或选模型逻辑；拿 `speech`（转写）槽位跑合成 —— 两种能力常不同时存在；**在朗读里自己写 `scrollTop` / `scrollTo`** —— 每念一句就会把用户滚走的视口拽回去一次（`renderer-tts.js` 只交出 Range） |
-| LLM 调用（请求 / 流式 / 事件） | `crates/dieyun-core/src/agent/llm.rs`（请求 + SSE 解析，唯一实现）、RPC `agent.llm.chat`、事件出口 `src/rpc/events.rs` + 宿主订阅 `src/core-bridge.js:onCoreEvent`；端点路径与鉴权仍只由 `src/agent/llm-request.js` 给（Rust 不推导）。见 [`docs/LLM-RPC.md`](docs/LLM-RPC.md) | 在 Node 侧再写一份 SSE 解析；把 core 的 stderr 当日志以外的用途（上一版的正则刮 `[compaction-llm]` 已删）；在这一层加重试/退避；让 `agent.delta` 承担「本轮结束」语义 |
+| LLM 调用（请求 / 流式 / 事件） | `crates/dieyun-core/src/agent/llm.rs`（请求 + SSE 解析，唯一实现）；主循环由 core 自己驱动（`agent.run.*`），辅助任务统一走 RPC `llm.complete`（宿主唯一入口 `src/agent/llm-complete.js`）；事件出口 `crates/dieyun-core/src/rpc/events.rs` + 宿主订阅 `src/core-bridge.js:onCoreEvent`；端点路径与鉴权仍只由 `src/agent/llm-request.js` 给（Rust 不推导）。见 [`docs/LLM-RPC.md`](docs/LLM-RPC.md) | 在 Node / Renderer 再写一份 HTTP 客户端或 SSE 解析（`llm-proxy.js` / `llm-stream-utils.js` 已删）；把 core 的 stderr 当事件源；在这一层加重试/退避；让 `agent.delta` 承担「本轮结束」语义 |
 | LLM 端点拼接 / 请求头 | `src/agent/llm-request.js`（端点与请求头唯一来源） | 在调用点内联 `Content-Type + Authorization` |
 | 打包 / 安装包 | `scripts/`、`build-installer.bat` | 任务无关不改 `electron-builder` 配置 |
 | 离线预装的 MCP 产物 | `scripts/pack-mcp-bundled.cjs`（版本唯一来源 `src/mcp/registry.js`） | 再写一份版本/校验和或另造预装机制 |
@@ -173,6 +173,7 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/AGENT-DEV.md`](docs/AGENT-DEV.md) | Agent 一页速查 |
 | [`src/renderer/README.md`](src/renderer/README.md) | Renderer 模块索引 |
 | [`examples/agent-sandbox/README.md`](examples/agent-sandbox/README.md) | Agent 自举沙盒 |
+| [`docs/ARCHITECTURE-DEBT.md`](docs/ARCHITECTURE-DEBT.md) | 架构技术债台账：哪几处仍然过时（本地 IPC / 日志当 IPC / 词法检索 / token 估算 / 快照体积 / JS 侧分期 / 降级 loop）、证据行号、动什么算完、优先级（**接手前先读，别以为都修完了**） |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 完整架构手册 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 发版与 dieyun-core 测试 |
 | [`docs/LOGGING.md`](docs/LOGGING.md) | 结构化日志前缀 |
@@ -188,8 +189,8 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`docs/LSP-DIAGNOSTICS.md`](docs/LSP-DIAGNOSTICS.md) | LSP 定位 / 诊断链路 |
 | [`docs/HARNESS-INVENTORY.md`](docs/HARNESS-INVENTORY.md) | harness 能力清单 |
 | [`docs/REASONING-ISOLATION-PLAN.md`](docs/REASONING-ISOLATION-PLAN.md) | 思考通道隔离（**已实施**，提交 1-5；仅余取证重放） |
-| [`docs/AGENT-RUN-MIGRATION.md`](docs/AGENT-RUN-MIGRATION.md) | 把轮次控制搬进 core 的施工图：`agent.run.*` 契约 / 反向调用协议（`round.prepare`・`tool.execute`）/ 施工顺序 / 负向清单（**未实施，接手前先读**） |
-| [`docs/LLM-RPC.md`](docs/LLM-RPC.md) | LLM 调用与 core→宿主事件通道：`agent.llm.chat` 契约 / `type:"event"` 分流规则 / 负向清单（**改 LLM 请求或流式前先读**） |
+| [`docs/AGENT-RUN-MIGRATION.md`](docs/AGENT-RUN-MIGRATION.md) | 把轮次控制搬进 core 的施工图与现状：`agent.run.*` 契约 / 反向调用协议（`round.prepare`・`tool.execute`）/ 施工顺序 / 负向清单（**第 1–6 步已实施**；`tool.execute` 反向调用按设计未接 —— 工具执行留在宿主） |
+| [`docs/LLM-RPC.md`](docs/LLM-RPC.md) | LLM 调用与 core→宿主事件通道：`llm.complete` 契约（含七处调用方）/ core 规范返回形状 / `type:"event"` 与 `type:"call"` 分流 / 负向清单（**改 LLM 请求或流式前先读**） |
 | [`docs/LOCAL-EMBEDDING.md`](docs/LOCAL-EMBEDDING.md) | 向量后端：本地推理优先（`ort` + 可选下载的模型/运行时）/ 远端可选 / provider 判定与签名口径 / **已删除的三层补偿**（改向量通道前先读） |
 | [`docs/CONTEXT-FOLD.md`](docs/CONTEXT-FOLD.md) | 上下文折叠（compaction）：就地截短旧工具输出 / 保 tool_call 骨架 / 幂等档位 / usage 触发；已删除的 LLM 摘要与负向清单（**改压缩前先读**） |
 | [`docs/REQUEST-SNAPSHOT.md`](docs/REQUEST-SNAPSHOT.md) | 请求快照：模型看到了什么 / 为什么折叠 / 预留策略（**已实施**） |
