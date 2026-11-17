@@ -567,6 +567,8 @@ async function runRustAgentLoop(opts) {
   };
 
   // 订阅必须在 `agent.run.start` **之前**：否则第一轮增量丢。
+  /** 最近一轮的 usage（`agent.usage` 事件）：只为「空回复」诊断用，不参与任何判定 */
+  let lastUsage = null;
   const unsubscribeEvents =
     typeof bridge.onCoreEvent === 'function'
       ? bridge.onCoreEvent((event) => {
@@ -574,6 +576,7 @@ async function runRustAgentLoop(opts) {
           if (String(event.runId || '') !== runId) return;
           // 每轮 usage：core 以事件回流（账本不带供应商口径），成本统计只认这里
           if (event.type === 'agent.usage') {
+            lastUsage = event.usage || null;
             if (event.usage) {
               try {
                 recordLlmUsage(event.usage, event.model || (startParams && startParams.model) || '');
@@ -676,7 +679,26 @@ async function runRustAgentLoop(opts) {
       });
       llmRound += 1;
 
-      if (!needTools) break;
+      if (!needTools) {
+        // 上游把工具调用吞掉时的**唯一可见信号**：这一轮既没有正文也没有思考，却有
+        // completion_tokens。客户端补救不了 —— 同一份请求换一个供应商就正常回 tool_calls
+        // （2026-11-17 实测：DY 中转的 deepseek-v4.1-flash 对任何「模型想调工具」的请求都回空
+        // message，纯文本请求正常）。所以只留一条可对照的日志，别让它表现成「模型什么都没说」。
+        // 判据里必须带 completion_tokens > 0：否则「这轮本来就没话」的收尾（中止 / 空 fixtures）
+        // 也会被误报成上游故障。
+        if (!String(deltaContent || '').trim() && !String(deltaReasoning || '').trim()) {
+          const completion = Number(
+            (lastUsage && (lastUsage.completion_tokens ?? lastUsage.completionTokens)) || 0
+          );
+          if (completion > 0) {
+            runLog(
+              `本轮上游返回空回复（无正文 / 无思考 / 无工具调用，completion_tokens=${completion}）` +
+                ' —— 常见于中转把 tool_calls 吞掉（DSML→tool_calls 翻译失败）'
+            );
+          }
+        }
+        break;
+      }
 
       onPhase('delegate_start', { runId, delegates });
       runStall.note('delegate');

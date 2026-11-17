@@ -338,6 +338,53 @@ async function testDeltaWithoutRoundUsesLocalCounter() {
 }
 
 /**
+ * 上游吞掉工具调用时：这一轮没有正文 / 思考 / tool_calls，但 usage 里有 completion_tokens。
+ * 这是「看起来模型什么都没说」的唯一线索（2026-11-17 真事：某中转对每个「模型想调工具」的
+ * 请求都回空 message，同一请求换供应商就正常）。钉子留在这里，别让这条日志被顺手删掉。
+ */
+async function testEmptyRoundLogsUpstreamSwallow() {
+  const logs = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params, _t, br) => {
+      br.emitEvent({
+        type: 'agent.usage',
+        runId: params.runId,
+        model: 'm',
+        usage: { prompt_tokens: 100, completion_tokens: 141 }
+      });
+      return { phase: 'done', runId: params.runId, content: '', trace: [] };
+    }
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [], tools: [] },
+    loopSpec: loopSpec(),
+    log: (m) => logs.push(String(m))
+  });
+  const hit = logs.find((l) => l.includes('上游返回空回复'));
+  assert(!!hit, `空回复必须留一条日志，实际日志：${logs.join(' | ')}`);
+  assert(hit.includes('completion_tokens=141'), `日志要带 token 数，实际：${hit}`);
+
+  // 对照：同样空正文，但没有 token 消耗 → 这是「本来就没话」，不该报上游故障
+  const quietLogs = [];
+  const quietBridge = createFakeBridge({
+    'agent.run.start': async (params) => ({ phase: 'done', runId: params.runId, content: '', trace: [] })
+  });
+  await runRustAgentLoop({
+    coreBridge: quietBridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [], tools: [] },
+    loopSpec: loopSpec(),
+    log: (m) => quietLogs.push(String(m))
+  });
+  assert(
+    !quietLogs.some((l) => l.includes('上游返回空回复')),
+    '没有 token 消耗的空轮不该报「上游吞了工具调用」'
+  );
+}
+
+/**
  * 工具轮也能带折叠事实：`need_tools` 响应上的 `compacted` 同样要走
  * phase / 遥测 / 归档（不能只在 done 上处理，否则工具轮之前的折叠全丢）。
  */
@@ -1242,6 +1289,7 @@ async function run() {
   await testContentChannelStampedFromCapabilityTable();
   await testFoldFactDrivesNodeSideEffects();
   await testFoldFactOnNeedToolsIsHandled();
+  await testEmptyRoundLogsUpstreamSwallow();
   await testRoundPrepareRegisteredBeforeStart();
   await testRoundPrepareInjectsPerRoundOnRequestCopy();
   await testVisionDisabledNoInjection();
