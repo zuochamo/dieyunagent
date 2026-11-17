@@ -234,10 +234,14 @@ describe('subagent runner', () => {
     expect(out.errorCode).toBe('SUBAGENT_NO_TOOLS');
   });
 
-  it('labels children and falls back to an index-based label', async () => {
+  it('label 只认派发方显式给的名字：没给就留空（卡片标题退回「类型 + 序号」）', async () => {
     const runner = makeRunner();
     expect((await runner.run({ task: 't', label: '鉴权入口' }, {})).label).toBe('鉴权入口');
-    expect((await runner.run({ task: 't' }, {})).label).toBe('调研 2');
+    // 曾经会默认拼「调研 N」，于是卡片显示成「调研子 Agent #1 · 调研 1」：序号说两遍，
+    // 反而挤掉了「这次在查什么」这一唯一有用信息。现在缺省留空，由标题退回序号形态。
+    const noLabel = await runner.run({ task: 't' }, {});
+    expect(noLabel.label).toBe('');
+    expect(noLabel.subagentId).toBe('sa-explore-2');
   });
 
   it('builds a read-only, conclusion-first prompt including hints', () => {

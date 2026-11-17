@@ -161,6 +161,19 @@ describe('live-loop-trace · 子 Agent 卡片标题（类型 + 序号）', () =>
     expect(subagentCardTitle({ worker: 'A', taskId: 't1' })).toBe('执行器 A · t1');
   });
 
+  it('有 label 时标题带上「在干什么」：多路并发时序号只负责区分，label 才可读', () => {
+    expect(subagentCardTitle({ subagentKind: 'build', subagentIndex: 2, label: '审查工具层改动' })).toBe(
+      '写入子 Agent #2 · 审查工具层改动'
+    );
+    expect(subagentCardTitle({ subagentKind: 'explore', subagentIndex: 1, label: '鉴权入口在哪' })).toBe(
+      '调研子 Agent #1 · 鉴权入口在哪'
+    );
+    // 空/空白 label 不产生悬空分隔符
+    expect(subagentCardTitle({ subagentKind: 'build', subagentIndex: 4, label: '   ' })).toBe(
+      '写入子 Agent #4'
+    );
+  });
+
   it('plan 模式写入子 Agent 也产出卡片，标题带类型与序号（含占位卡）', () => {
     const meta = { worker: 'A', taskId: 't1', subagentKind: 'build', subagentIndex: 2, parallel: true };
     const card = buildIsolatedCard(

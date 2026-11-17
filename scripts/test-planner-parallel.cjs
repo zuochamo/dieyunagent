@@ -26,6 +26,48 @@ async function run() {
   const secondStart = Math.max(starts[0].t, starts[1].t);
   assert(secondStart < firstEnd, 'worker loops overlap in time');
 
+  // 并发闸（agent-limits.plannerMaxParallelWorkers 的落地）：同时在跑的不超过 limit，
+  // 且**顺序与结果都不变** —— 取号池只是限制同时开工数，不是重排。
+  {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const order = [];
+    const limited = await settleAllAbortable(
+      ['a', 'b', 'c', 'd', 'e'],
+      async (id) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await sleep(30);
+        inFlight -= 1;
+        order.push(id);
+        return id;
+      },
+      { limit: 2 }
+    );
+    assert(limited.length === 5, 'limit 不丢任务');
+    assert(
+      limited.every((s, i) => s.status === 'fulfilled' && s.value === ['a', 'b', 'c', 'd', 'e'][i]),
+      'limit 不改变结果顺序'
+    );
+    assert(maxInFlight === 2, `同时在跑应为 2，实际 ${maxInFlight}`);
+    assert(order.length === 5, 'limit 下全部执行');
+
+    // limit=1 → 严格串行
+    let inFlight1 = 0;
+    let maxInFlight1 = 0;
+    await settleAllAbortable(
+      ['x', 'y', 'z'],
+      async () => {
+        inFlight1 += 1;
+        maxInFlight1 = Math.max(maxInFlight1, inFlight1);
+        await sleep(10);
+        inFlight1 -= 1;
+      },
+      { limit: 1 }
+    );
+    assert(maxInFlight1 === 1, `limit=1 必须串行，实际同时在跑 ${maxInFlight1}`);
+  }
+
   const ac = new AbortController();
   function createAbortWaiter(signal) {
     let onAbort;
