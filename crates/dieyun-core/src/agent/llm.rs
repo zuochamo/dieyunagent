@@ -326,6 +326,17 @@ pub async fn chat_completion(
         .timeout(Duration::from_secs(timeout))
         .build()
         .map_err(|e| CoreError::rpc("LLM_HTTP", e.to_string()))?;
+    // `stream` 是**传输**语义：宿主只表达「这一轮要不要增量」，请求体里的 `stream` 字段由
+    // 唯一实现这里补上 —— 否则端点按默认（非流式）回整包，增量永远为 0，
+    // 下游还得靠整包兜底才不至于空回复（见下面 `whole` 那段）。
+    let mut body = body;
+    if stream {
+        if let Some(obj) = body.as_object_mut() {
+            if obj.get("stream").and_then(|v| v.as_bool()).is_none() {
+                obj.insert("stream".to_string(), Value::Bool(true));
+            }
+        }
+    }
     let request = apply_llm_headers(client.post(url), headers, &cfg.api_key, &cfg.auth_mode)
         .json(&body);
     let response = request
@@ -365,6 +376,13 @@ pub async fn chat_completion(
     let mut response = response;
     let mut buffer = String::new();
     let mut raw = String::new();
+    // 整包兜底：端点**忽略 `stream: true`**（或压根不看这个字段）时会回一份完整 JSON
+    // （`content-type: application/json`，不是 SSE）。此时下面的循环一条 `data:` 都找不到，
+    // 若就这么收场，本轮会以「空回复」结束，而且 content / reasoning / tool_calls 三样一起丢
+    // ——2026-11-17 真事：中转回整包 `message.tool_calls`，客户端表现成「模型什么都没说」。
+    // 所以这里留一份原文，一行 SSE 都没见过就按非流式解析（与非流式分支同一条路径）。
+    let mut whole = String::new();
+    let mut saw_sse = false;
     while let Some(chunk) = response
         .chunk()
         .await
@@ -373,6 +391,9 @@ pub async fn chat_completion(
         let text = String::from_utf8_lossy(&chunk).to_string();
         if include_raw && raw.len() < RAW_CAP_BYTES {
             raw.push_str(&text);
+        }
+        if whole.len() < RAW_CAP_BYTES {
+            whole.push_str(&text);
         }
         buffer.push_str(&text);
         // 逐行消费；半行留在 buffer 里等下一块
@@ -383,6 +404,7 @@ pub async fn chat_completion(
                 // `event:` / 心跳 / 空行：不是数据行
                 continue;
             };
+            saw_sse = true;
             if let Some(delta) = acc.feed_sse_data(data) {
                 on_delta(&delta);
             }
@@ -393,9 +415,18 @@ pub async fn chat_completion(
     }
     if !buffer.trim().is_empty() {
         if let Some(data) = buffer.trim_start().strip_prefix("data:") {
+            saw_sse = true;
             if let Some(delta) = acc.feed_sse_data(data) {
                 on_delta(&delta);
             }
+        }
+    }
+    // 一条 SSE 数据行都没有 → 上游回的是整包（或错误页）。按非流式解析：正常就能拿到
+    // content / reasoning / tool_calls；不是 JSON 就报 LLM_PARSE，而不是静默当空回复。
+    if !saw_sse && !whole.trim().is_empty() {
+        acc.feed_body(&whole)?;
+        if include_raw {
+            raw = whole.clone();
         }
     }
     // 上游把错误当正常流回吐：必须变成失败，否则这轮以「空回复」收场。
@@ -663,5 +694,88 @@ mod tests {
             "缺省鉴权要按 auth_mode 拼：{request}"
         );
         assert!(request.contains("\"stream\":true"), "请求体要原样发出去：{request}");
+    }
+
+    /// 端点忽略 `stream: true`、直接回整包 JSON 时，必须按非流式解析。
+    ///
+    /// 2026-11-17 真事：两家中转（DY / XHX）对「模型想调工具」的请求都回整包
+    /// `message.tool_calls`（`content-type: application/json`），而客户端被告知 stream=true；
+    /// 老的 SSE 循环只认 `data:` 行，于是 content / reasoning / tool_calls 全部丢掉，
+    /// 用户看到的是「（模型未生成文字答复。）」。这条用例钉住兜底路径。
+    #[tokio::test]
+    async fn whole_json_body_while_streaming_is_parsed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let mut request = String::new();
+            loop {
+                let n = socket.read(&mut buf).await.expect("read");
+                if n == 0 {
+                    break;
+                }
+                request.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if request.contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = json!({
+                "model": "m",
+                "choices": [{
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "先看朝向再拍",
+                        "tool_calls": [{
+                            "id": "call_0",
+                            "type": "function",
+                            "function": { "name": "desktop_camera_look", "arguments": "{\"x\":1}" }
+                        }]
+                    }
+                }],
+                "usage": { "prompt_tokens": 12, "completion_tokens": 34 }
+            })
+            .to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(head.as_bytes()).await.expect("write");
+            socket.flush().await.ok();
+            request
+        });
+
+        let cfg = LlmConfig::default();
+        let url = format!("http://{addr}/v1/chat/completions");
+        let outcome = chat_completion(
+            &cfg,
+            &url,
+            &std::collections::HashMap::new(),
+            json!({ "model": "m", "messages": [] }),
+            true,
+            true,
+            |_delta| {},
+        )
+        .await
+        .expect("整包响应不该报错");
+
+        assert_eq!(outcome.content, "");
+        assert_eq!(outcome.reasoning.as_deref(), Some("先看朝向再拍"));
+        assert_eq!(outcome.tool_calls.len(), 1, "整包里的 tool_calls 必须解析出来");
+        assert_eq!(outcome.tool_calls[0].name, "desktop_camera_look");
+        assert_eq!(outcome.tool_calls[0].arguments, "{\"x\":1}");
+        assert_eq!(outcome.finish_reason.as_deref(), Some("tool_calls"));
+        assert!(outcome.raw.is_some(), "includeRaw 打开时要回传原文");
+        let request = server.await.expect("server join");
+        assert!(
+            request.contains("\"stream\":true"),
+            "stream 由传输层补进请求体（宿主不重复表达）：{request}"
+        );
     }
 }
