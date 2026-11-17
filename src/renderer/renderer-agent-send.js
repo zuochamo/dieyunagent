@@ -547,9 +547,17 @@ async function executeSendPrepAndRun(state) {
    * （并行执行器 + worktree 隔离 + 变更合并）成了只有"断点续跑"才可能碰到的死代码。
    * 这里只读一个开关值，不做"任务看起来复杂就自动走"的判断：planner 是重流程，
    * 猜错一次就是多等几分钟 + 凭空多出一堆待合并的 worktree。
+   *
+   * 两个结构性抑制（都不是猜意图，是入口本身的形状）：
+   * - `agentServiceRequestId` 非空 = 外部提交（手机 / 频道 / 内网对端 / 转接器）：改动要
+   *   有人在桌面「变更」面板点应用才落盘，无人值守入口点了也白等，还会先对外报"完成"；
+   * - 本轮带图片 = planner 管线的 user 消息只搬文本（图片进不了子 Agent），走了就静默丢图。
    */
   const plannerMultiAgent =
-    typeof getAgentLimits === 'function' && getAgentLimits().plannerMultiAgentEnabled === true;
+    typeof getAgentLimits === 'function' &&
+    getAgentLimits().plannerMultiAgentEnabled === true &&
+    !agentServiceRequestId &&
+    !(prepared && prepared.hasImages);
   let taskTier =
     taskTierEnabled && typeof inferTaskTierFromStructure === 'function'
       ? inferTaskTierFromStructure({

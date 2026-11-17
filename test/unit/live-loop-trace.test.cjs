@@ -174,6 +174,23 @@ describe('live-loop-trace · 子 Agent 卡片标题（类型 + 序号）', () =>
     );
   });
 
+  it('label 超长按 agent-limits 的位数截断（标题只换行不溢出，但不该被撑成一大段）', () => {
+    const long = '审查'.repeat(40);
+    const title = subagentCardTitle({ subagentKind: 'build', subagentIndex: 1, label: long });
+    expect(title.endsWith('…')).toBe(true);
+    // 「写入子 Agent #1 · 」+ 24 字 + 「…」
+    expect(title.length).toBeLessThanOrEqual('写入子 Agent #1 · '.length + 25);
+  });
+
+  it('收尾合并后标题不丢 label（条目带着 label，落库重放也一致）', () => {
+    const meta = { worker: 'A', subagentKind: 'build', subagentIndex: 2, label: '改 alpha' };
+    const live = buildIsolatedCard(meta, [{ round: 1, thought: '干活', tools: [] }], 'sa-build-2');
+    expect(live.label).toBe('改 alpha');
+    // 收尾时传入的是「条目」而不是原始 meta：label 必须随条目走
+    const merged = mergeIsolatedCards(live, buildIsolatedCard({ ...meta, label: '' }, [], 'sa-build-2'));
+    expect(merged.phase).toBe('写入子 Agent #2 · 改 alpha');
+  });
+
   it('plan 模式写入子 Agent 也产出卡片，标题带类型与序号（含占位卡）', () => {
     const meta = { worker: 'A', taskId: 't1', subagentKind: 'build', subagentIndex: 2, parallel: true };
     const card = buildIsolatedCard(

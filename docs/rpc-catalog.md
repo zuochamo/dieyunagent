@@ -2,28 +2,26 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-11-09T02:23:03.960Z
+生成时间：2026-11-17T08:57:15.404Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 189 |
+| 总计 | 191 |
 | Gateway only | 106 |
-| Rust only | 23 |
-| Both | 60 |
+| Rust only | 24 |
+| Both | 61 |
 
 ## 按命名空间
 
-### agent (12)
+### agent (10)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
-| `agent.loop.cancel` | rust | — | yes |
-| `agent.loop.continue` | rust | — | yes |
-| `agent.loop.set_messages` | rust | — | yes |
-| `agent.loop.start` | rust | — | yes |
-| `agent.loop.tool_results` | rust | — | yes |
 | `agent.ping` | rust | — | yes |
 | `agent.plan_save` | both | gateway/handlers/agent.js | yes |
+| `agent.run.cancel` | rust | — | yes |
+| `agent.run.start` | rust | — | yes |
+| `agent.run.tools` | rust | — | yes |
 | `agent.run_upsert` | both | gateway/handlers/agent.js | yes |
 | `agent.state_get` | both | gateway/handlers/agent.js | yes |
 | `agent.steps_save` | both | gateway/handlers/agent.js | yes |
@@ -96,7 +94,7 @@
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `compaction.estimate` | rust | — | yes |
-| `compaction.maybe_compact` | rust | — | yes |
+| `compaction.fold` | rust | — | yes |
 
 ### computer (1)
 
@@ -104,12 +102,20 @@
 |--------|-------|----------------|------|
 | `computer.action` | gateway | gateway/handlers/computer.js | — |
 
-### core (2)
+### core (3)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `core.configure` | rust | — | yes |
+| `core.host_probe` | rust | — | yes |
 | `core.ping` | rust | — | yes |
+
+### embedding (2)
+
+| Method | Layer | Gateway source | Rust |
+|--------|-------|----------------|------|
+| `embedding.query` | rust | — | yes |
+| `embedding.status` | rust | — | yes |
 
 ### fs (9)
 
@@ -172,7 +178,7 @@
 | `lsp.settings_get` | gateway | gateway/handlers/lsp-workspace.js | — |
 | `lsp.settings_set` | gateway | gateway/handlers/lsp-workspace.js | — |
 
-### memory (51)
+### memory (52)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -184,6 +190,7 @@
 | `memory.handoff_get` | both | gateway/handlers/memory.js | yes |
 | `memory.handoff_latest` | both | gateway/handlers/memory.js | yes |
 | `memory.handoff_save` | both | gateway/handlers/memory.js | yes |
+| `memory.handoff_take` | both | gateway/handlers/memory.js | yes |
 | `memory.long_add` | both | gateway/handlers/memory.js | yes |
 | `memory.long_add_many` | both | gateway/handlers/memory.js | yes |
 | `memory.long_by_session` | rust | — | yes |

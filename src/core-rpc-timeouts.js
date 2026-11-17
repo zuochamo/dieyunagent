@@ -3,8 +3,32 @@
 /** 本地 / 远程 dieyun-core RPC 共用超时（避免 core-bridge 与 gateway 漂移） */
 const DEFAULT_TIMEOUT_MS = 120000;
 const INDEX_TIMEOUT_MS = 600000;
-/** 与 dieyun-core compaction/llm.rs `LLM_HTTP_TIMEOUT_SECS`(75s，单次不重试) + 余量对齐 */
-const COMPACTION_MAYBE_COMPACT_TIMEOUT_MS = 90 * 1000;
+/**
+ * `compaction.fold` 是纯 CPU 的就地截短（毫秒级），没有网络往返。
+ * 30s 只是「别让一次卡死的折叠把发送拖成 120s 假死」的上限，不是 LLM 超时；
+ * 旧的 `compaction.maybe_compact` 因为要发一次 75s 的摘要请求，得单独占 90s。
+ */
+const COMPACTION_FOLD_TIMEOUT_MS = 30 * 1000;
+
+/**
+ * `agent.llm.chat`：一次 LLM 调用的整体预算。
+ *
+ * 它比默认 120s 宽得多，因为流式长回答本身就可能跑几分钟；上限对齐 Rust 侧
+ * `agent::llm::STREAM_TIMEOUT_SECS`（600s）再加余量 —— 两个数字必须成对改。
+ * 真正的「卡住了」由 runner 的首字/空闲超时先发现，这里只防「永远不返回」。
+ */
+const LLM_CHAT_TIMEOUT_MS = 660 * 1000;
+
+/**
+ * `agent.run.start` / `agent.run.tools`：**core 自己调 LLM** 的那两条驱动 RPC。
+ *
+ * 与 `agent.llm.chat` 同量级、同样对齐 Rust 侧 `agent::llm::STREAM_TIMEOUT_SECS`（600s）
+ * 再加余量 —— 四个数字必须成对改：这两条 RPC 跑的正是同一次 `llm::chat_completion`，
+ * 只是从「宿主经 RPC 发」变成「core 在自己循环里发」。
+ * 真正的「卡住了」由 runner 的 run-stall 看门狗（`runStallWarnMs` / `runStallAbortMs`）先发现，
+ * 这里只防「永远不返回」。
+ */
+const AGENT_RUN_TIMEOUT_MS = 660 * 1000;
 
 /**
  * 端到端耗时超过它就打 `RPC_SLOW <method> <ms>`。
@@ -30,7 +54,7 @@ function resolveCoreRpcTimeoutMs(method, timeoutMs) {
     return INDEX_TIMEOUT_MS;
   }
   if (m === 'codebase.index.start' || m === 'graph.index.start') return 60000;
-  // status 是纯读库，健康库上应毫秒级返回；45s 只会在真卡住时把调用拖成「假死」。
+  // status 是纯读库，健康库上应毫秒级返回；15s 只会在真卡住时把调用拖成「假死」。
   if (m === 'codebase.status' || m === 'graph.status') return 15000;
   if (
     m === 'graph.lsp_resolve' ||
@@ -39,14 +63,18 @@ function resolveCoreRpcTimeoutMs(method, timeoutMs) {
   ) {
     return 60000;
   }
-  if (m === 'compaction.maybe_compact') return COMPACTION_MAYBE_COMPACT_TIMEOUT_MS;
+  if (m === 'compaction.fold') return COMPACTION_FOLD_TIMEOUT_MS;
+  if (m === 'agent.llm.chat') return LLM_CHAT_TIMEOUT_MS;
+  if (m === 'agent.run.start' || m === 'agent.run.tools') return AGENT_RUN_TIMEOUT_MS;
   return DEFAULT_TIMEOUT_MS;
 }
 
 module.exports = {
   DEFAULT_TIMEOUT_MS,
   INDEX_TIMEOUT_MS,
-  COMPACTION_MAYBE_COMPACT_TIMEOUT_MS,
+  COMPACTION_FOLD_TIMEOUT_MS,
+  LLM_CHAT_TIMEOUT_MS,
+  AGENT_RUN_TIMEOUT_MS,
   SLOW_RPC_LOG_MS,
   resolveCoreRpcTimeoutMs
 };

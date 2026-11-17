@@ -144,6 +144,7 @@
         "model-runtime-by-tier（编码参数按档 → Main 生效值的唯一入口）",
         "request-snapshot",
         "desktop-camera-source（本机摄像头取帧：ffmpeg 单一出口）",
+        "desktop-camera-ptz（本机云台朝向：DirectShow COM / v4l2-ctl 单一出口，只报实测位置）",
         "rust runners"
       ],
       "tests": [
@@ -153,6 +154,7 @@
         "test:tool-harness",
         "test:tool-gate",
         "test:desktop-camera",
+        "test:desktop-camera-ptz",
         "test:local-gateway-smoke",
         "test:planner-parallel",
         "test:rust-loop-runner",
@@ -685,10 +687,26 @@
       ]
     },
     {
+      "prefix": "crates/dieyun-core/src/rpc/",
+      "tests": [
+        "cargo:test",
+        "test:core-event-channel",
+        "test:local-gateway-smoke"
+      ]
+    },
+    {
+      "prefix": "crates/dieyun-core/src/compaction/",
+      "tests": [
+        "cargo:test",
+        "test:unit",
+        "test:local-gateway-smoke"
+      ]
+    },
+    {
       "prefix": "crates/dieyun-core/src/embedding/",
       "tests": [
         "cargo:test",
-        "test:embedding-budget"
+        "test:unit"
       ]
     },
     {
@@ -715,7 +733,8 @@
     {
       "prefix": "src/agent/compaction-main.js",
       "tests": [
-        "test:session-context"
+        "test:unit",
+        "test:local-gateway-smoke"
       ]
     },
     {
@@ -779,6 +798,24 @@
       "tests": [
         "test:rust-loop-runner",
         "test:mobile-camera"
+      ]
+    },
+    {
+      "prefix": "src/agent/desktop-camera-source.js",
+      "tests": [
+        "test:desktop-camera"
+      ]
+    },
+    {
+      "prefix": "src/agent/desktop-camera-ptz.js",
+      "tests": [
+        "test:desktop-camera-ptz"
+      ]
+    },
+    {
+      "prefix": "src/agent/desktop-camera-ptz-win32.js",
+      "tests": [
+        "test:desktop-camera-ptz"
       ]
     },
     {
@@ -1820,7 +1857,7 @@
     {
       "prefix": "src/codebase/embedding-client.js",
       "tests": [
-        "test:embedding-budget"
+        "test:unit"
       ]
     },
     {
@@ -1890,7 +1927,6 @@
       "test:request-snapshot",
       "test:agent-system-prompt",
       "test:system-prompt-prep",
-      "test:embedding-budget",
       "test:knowledge-maintainer",
       "test:llm-tool-call-fallback",
       "test:monitor-outbox",
@@ -1902,6 +1938,7 @@
       "test:delegate-batch",
       "test:mobile",
       "test:mobile-camera",
+      "test:desktop-camera-ptz",
       "test:headless",
       "test:peer",
       "test:write-smell-hints",
@@ -1958,6 +1995,7 @@
       "test:delegate-batch",
       "test:mobile",
       "test:mobile-camera",
+      "test:desktop-camera-ptz",
       "test:headless",
       "test:peer",
       "test:write-smell-hints",

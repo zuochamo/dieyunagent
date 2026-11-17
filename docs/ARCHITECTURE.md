@@ -131,9 +131,9 @@ flowchart TB
 | 层 | 目录 | 职责 |
 |----|------|------|
 | **Renderer** | `src/renderer/` | 聊天气泡、输入、Plan 进度、Gateway 客户端、工具 UI 委托 |
-| **Main** | `src/main-entry.js`、`src/agent/` | 窗口/托盘、IPC、Worktree、LLM HTTP、Rust 桥、计划调度 |
+| **Main** | `src/main-entry.js`、`src/agent/` | 窗口/托盘、IPC、Worktree、Rust 桥、计划调度、工具执行（LLM HTTP 已在 core，见 [`LLM-RPC.md`](./LLM-RPC.md)） |
 | **Gateway** | `src/gateway/` | 工具 RPC、权限、路径白名单、桥接 Rust memory |
-| **Rust** | `crates/dieyun-core/` | Agent/Planner 状态机、SQLite 记忆、压缩、索引 |
+| **Rust** | `crates/dieyun-core/` | Agent/Planner 状态机、**LLM 客户端与流式解析**、上下文折叠（transcript 唯一写者）、SQLite 记忆、向量（本地优先）、索引 |
 
 ---
 
@@ -288,7 +288,7 @@ sequenceDiagram
 
 要点：
 
-- Rust **只负责循环状态机**；**LLM HTTP 在 Main**。
+- Rust 负责循环状态机**与 LLM 调用本身**（`agent/llm.rs`：请求 + SSE 解析 + 增量事件）；Main 只提供端点与请求头（`llm-request.js` 单一来源）、工具执行与 UI 事件。上下文折叠也已在循环内完成（`docs/CONTEXT-FOLD.md`）。
 - 工具全部 `need_delegate` → `tool-bridge-main.js`。
 - 压缩：`compaction-main.js` 在每轮 LLM 前可压缩 messages。
 - 无 silent 回退 JS loop；sidecar 不可用则报错。

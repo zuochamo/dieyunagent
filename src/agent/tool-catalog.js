@@ -40,7 +40,7 @@ const {
 const { PLAN_TOOLS, GOAL_START_TOOL, GOAL_UPDATE_TOOL, GOAL_TOOLS } = require('./catalog/plan');
 const { MCP_TOOL_SCHEMA_TOOL, MCP_MANAGE_TOOL } = require('./catalog/mcp');
 const { CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL } = require('./catalog/session');
-const { COMPUTER_TOOL, CAMERA_TOOL, DESKTOP_CAMERA_TOOL } = require('./catalog/computer');
+const { COMPUTER_TOOL, CAMERA_TOOL, DESKTOP_CAMERA_TOOL, DESKTOP_CAMERA_PTZ_TOOL } = require('./catalog/computer');
 const { PEER_TOOLS } = require('./catalog/peer');
 const { SSH_TOOL, WORKTREE_TOOL } = require('./catalog/remote');
 const {
@@ -96,6 +96,7 @@ module.exports = {
   COMPUTER_TOOL,
   CAMERA_TOOL,
   DESKTOP_CAMERA_TOOL,
+  DESKTOP_CAMERA_PTZ_TOOL,
   ALL_STATIC_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
   CHANNEL_RUNTIME_TOOL_NAMES,

@@ -1,4 +1,4 @@
-/* global window, document, gatewayCall, showAgentToast, openSidePanel, isSidePanelOpen, closeBrowserPanelSilently, clampNumber, loadPaneSizeVar, savePaneSizeVar, bindPaneDrag, isSending, syncBrowserBounds, syncPanelMotionBounds, motionMs, currentSessionId, sessionActiveRuns */
+/* global window, document, ResizeObserver, gatewayCall, showAgentToast, openSidePanel, isSidePanelOpen, closeBrowserPanelSilently, clampNumber, loadPaneSizeVar, savePaneSizeVar, bindPaneDrag, isSending, syncBrowserBounds, syncPanelMotionBounds, motionMs, currentSessionId, sessionActiveRuns */
 'use strict';
 
 const browserApi = window.diecloud || {};
@@ -162,6 +162,25 @@ function setupBlockingOverlayWatch() {
     childList: true,
     subtree: true
   });
+}
+
+/**
+ * 边界要跟着 `#browser-viewport` 的真实矩形走，而「矩形变了」并不只有下面那些显式触发点：
+ * 拖分隔条改 `--artifacts-panel-width` 时指针每次移动都让 viewport 变宽变位置
+ * （`body.pane-resizing` 期间连过渡都关掉了），而那条路径谁都不会通知 ——
+ * 原生视图就停在旧矩形上：面板里留出空白、页面被窗口边缘裁掉，看上去「页面没跟过来」。
+ *
+ * 所以这里盯元素自己的盒子：谁改了布局，边界就跟到哪，不用每个调用点都记得补一句。
+ * 只认尺寸变化（ResizeObserver 的语义）：面板开/关的 `transform: translateX`
+ * 不进布局盒，那段仍由 syncPanelMotionBounds 逐帧补（见 renderer-side-panel.js）。
+ */
+function setupViewportBoundsWatch() {
+  if (typeof ResizeObserver !== 'function') return;
+  var viewport = document.getElementById('browser-viewport');
+  if (!viewport) return;
+  new ResizeObserver(function () {
+    syncBrowserBounds();
+  }).observe(viewport);
 }
 
 function syncBrowserBounds() {
@@ -607,9 +626,9 @@ function initBrowserPanel() {
         }
       });
     }
-    window.addEventListener('resize', function () {
-      syncBrowserBounds();
-    });
+    // 窗口 resize / 拖分隔条 / 标签条出现——都只是「viewport 的盒子变了」的不同来源，
+    // 由这一条观察统一接住，不再逐个挂 window.resize 之类的监听
+    setupViewportBoundsWatch();
     setupBlockingOverlayWatch();
   } catch (e) {
     // ignore

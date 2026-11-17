@@ -20,7 +20,15 @@
 async function settleAllAbortable(jobs, runJob, opts = {}) {
   const list = Array.isArray(jobs) ? jobs : [];
   const rawLimit = Number(opts.limit);
-  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : Infinity;
+  // 缺省（没传 / NaN / Infinity）= 不限并发（历史行为）。
+  // 显式传了 ≤0 的值属调用方算错了：按**串行**处理（宁可慢，也不要在算错时放开成无限并发）。
+  const limit = Number.isNaN(rawLimit)
+    ? Infinity
+    : rawLimit === Infinity
+      ? Infinity
+      : rawLimit > 0
+        ? Math.floor(rawLimit)
+        : 1;
   /** @type {Array<{status:'fulfilled',value:any}|{status:'rejected',reason:any}>} */
   const settled = new Array(list.length);
 

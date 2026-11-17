@@ -322,7 +322,7 @@ async function fetchCodebaseBlock(snapshot, invokeRpc, lim) {
     // 「还没建库 / 正在首建 / 端点慢到不值得等」是**正常态**（每轮都会经过这里），
     // 不打告警：否则正常状态会以每轮一行的频率淹没真正需要看的失败。
     const msg = e && e.message ? String(e.message) : String(e);
-    const expected = ['INDEX_REQUIRED', 'INDEXING_IN_PROGRESS', 'EMBEDDING_TOO_SLOW'];
+    const expected = ['INDEX_REQUIRED', 'INDEXING_IN_PROGRESS', 'EMBEDDING_DISABLED'];
     if (!expected.includes(e && e.code)) {
       console.warn('[dieyun:agent] codebase.search 召回失败，本轮不注入代码块:', msg);
     }

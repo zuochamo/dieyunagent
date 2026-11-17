@@ -2937,6 +2937,7 @@ function createBrowserViewController(deps) {
   function setPanelState(state = {}) {
     // 「打开」必须与「此刻的矩形」同一次下发（Renderer 的唯一调用形状）：只给 open:true
     // 而没有 bounds 的调用一律不开 —— 手上只有上一次的旧矩形，开了必然贴到别的页签上。
+    const openBefore = panelOpen;
     const hasBounds = !!(state.bounds && typeof state.bounds === 'object');
     if (state.open !== undefined && (!state.open || hasBounds)) panelOpen = !!state.open;
     if (hasBounds) {
@@ -2948,8 +2949,13 @@ function createBrowserViewController(deps) {
       };
     }
     applyBounds();
-    if (panelOpen) scheduleRenderProbe('panel-open', 450);
-    emitState();
+    // 只有可见性变了才值得推状态流：拖分隔条时 Renderer 每帧都要重新贴一次边界，
+    // 每次推送都会连带那边的会话视图落盘（localStorage 同步写），是纯抖动的来源。
+    // 边界本身只用于「贴在哪」，status() 随时读得到，不需要广播。
+    if (panelOpen !== openBefore) {
+      if (panelOpen) scheduleRenderProbe('panel-open', 450);
+      emitState();
+    }
     return { ok: true, panelOpen };
   }
 

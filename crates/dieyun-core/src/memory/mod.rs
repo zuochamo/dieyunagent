@@ -155,10 +155,10 @@ fn rand_suffix() -> String {
     format!("{:x}", n)
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
-    // cargo fix 只按 lib 目标清 unused import，看不见 #[cfg(test)] 里的用法 ——
-    // 这里把测试真正用到的名字显式列出来（不要靠父模块的私有 use）。
+    // 测试模块真正用到的名字（不要靠父模块的私有 use）。
     use rusqlite::{params, Connection};
     use serde_json::json;
     use crate::error::CoreError;
@@ -531,6 +531,20 @@ mod tests {
         store.handoff_save(&a.id, "会话A", "更新后的交接").unwrap();
         let got2 = store.handoff_get(&a.id).unwrap().unwrap();
         assert_eq!(got2["payload"].as_str().unwrap(), "更新后的交接");
+
+        // 领走即删：交接是一次性资源，第二次领同一份必须空手
+        let taken = store.handoff_take(&a.id).unwrap().expect("第一次应领到");
+        assert_eq!(taken["payload"].as_str().unwrap(), "更新后的交接");
+        assert!(store.handoff_take(&a.id).unwrap().is_none(), "领过的交接不该再被领");
+        assert!(store.handoff_get(&a.id).unwrap().is_none(), "领走 = 删掉");
+        assert!(
+            store.handoff_latest(None).unwrap().is_some_and(|v| v["sessionId"] == b.id),
+            "领走 A 之后「最近一份」应该只剩 B"
+        );
+
+        // 会话删除要连带删掉它的交接：留着就是指向已消失会话的死账
+        store.clear_session(&b.id).unwrap();
+        assert!(store.handoff_latest(None).unwrap().is_none(), "B 删了，交接也该没了");
 
         let _ = std::fs::remove_file(&db);
     }

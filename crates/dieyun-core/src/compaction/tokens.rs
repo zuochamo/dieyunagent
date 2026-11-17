@@ -29,7 +29,7 @@ const IMAGE_PART_EQUIV_TOKENS: usize = 1875;
 /// OpenAI chat `image_url` / Responses `input_image` / Anthropic `image`(source)。
 ///
 /// 非对象（字符串 / 数组 / null）在 `Value::get` 下统一取不到 `type`，天然为 false。
-fn is_image_part(part: &Value) -> bool {
+pub(super) fn is_image_part(part: &Value) -> bool {
     matches!(
         part.get("type").and_then(|t| t.as_str()),
         Some("image_url") | Some("input_image") | Some("image")

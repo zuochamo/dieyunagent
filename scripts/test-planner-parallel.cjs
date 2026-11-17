@@ -66,6 +66,21 @@ async function run() {
       { limit: 1 }
     );
     assert(maxInFlight1 === 1, `limit=1 必须串行，实际同时在跑 ${maxInFlight1}`);
+
+    // limit 传了 ≤0 = 调用方算错了：按串行处理，绝不放开成无限并发
+    let inFlight0 = 0;
+    let maxInFlight0 = 0;
+    await settleAllAbortable(
+      ['p', 'q', 'r'],
+      async () => {
+        inFlight0 += 1;
+        maxInFlight0 = Math.max(maxInFlight0, inFlight0);
+        await sleep(5);
+        inFlight0 -= 1;
+      },
+      { limit: 0 }
+    );
+    assert(maxInFlight0 === 1, `limit=0 应退成串行，实际同时在跑 ${maxInFlight0}`);
   }
 
   const ac = new AbortController();

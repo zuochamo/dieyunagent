@@ -152,8 +152,58 @@ const DESKTOP_CAMERA_TOOL = {
   }
 };
 
+/**
+ * 本机云台（`desktop_camera_ptz`）：把**同一台**摄像头转过去 / 读它现在的朝向。
+ *
+ * 为什么单独成一个工具而不是给 `desktop_camera_look` 加 `pan` 参数：
+ * 抓帧与转云台是两条完全不同的失败路径（没 ffmpeg / 没电机 / 没 COM 接口 / macOS 没接入），
+ * 混在一个工具里模型会把「没装 ffmpeg」和「这台没云台」当成同一句错误；而且「转了」与
+ * 「看到了」在 trace 里分开，才看得清它是真的转过去了还是原地拍了一张。
+ *
+ * 为什么返回值里有 `before` / `after` / `settled` / `reached`：云台有惯性、有机械限位，
+ * 还会被 AI 追踪抢方向。写成功只代表指令下发成功，**转到哪了必须读回来**。
+ */
+const DESKTOP_CAMERA_PTZ_TOOL = {
+  type: 'function',
+  function: {
+    name: 'desktop_camera_ptz',
+    description:
+      '转动这台电脑上接的带云台的摄像头（如 OBSBOT Tiny 2），或读它现在的朝向。' +
+      '和 desktop_camera_look 分工：那颗拍照出画面，这颗只动朝向。想「转到那边看一眼」= 先调这个，' +
+      '再调 desktop_camera_look 拍一张（转完不拍，你什么都没看见）。' +
+      'action 取值：status = 只读当前水平和俯仰（不动）；move = 转到绝对角度；step = 在当前基础上转相对角度；' +
+      'center = 回中（水平 0°，俯仰 0°）。' +
+      '角度单位是度，上下限由设备自己给：第一次用先调 status 拿到 ranges（Tiny 2 实测水平 ±130°、俯仰 ±90°、' +
+      '变焦 0–100），超范围会回 DESKTOP_CAMERA_PTZ_OUT_OF_RANGE 并把真实范围告诉你，不要蛮力试。' +
+      '返回值里有 before / after（都是实测读数）、settled（结束时是否已停稳）、reached（是否到位）：' +
+      '**只能按 after 理解朝向**，不要按你下发的 target 理解。' +
+      '一次一动、不连拍：等上一次返回再决定下一步。' +
+      'DESKTOP_CAMERA_PTZ_NO_PTZ = 这台摄像头没有电机（普通 USB 摄像头就是这样）；' +
+      'DESKTOP_CAMERA_PTZ_UNSUPPORTED = 这个平台还没接入；' +
+      'DESKTOP_CAMERA_PTZ_BUSY / FAILED = 设备被占用或驱动报错，可以再试一次，别连试。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          // 枚举的单一来源就是这里：`tool-validate` 的 action 校验从 catalog 取（不另抄一份表）。
+          enum: ['status', 'move', 'step', 'center'],
+          description: 'status = 只读朝向 | move = 转到绝对角度 | step = 相对转一点 | center = 回中'
+        },
+        pan: { type: 'number', description: '水平角（度，正=向右）。action=move 时用。' },
+        tilt: { type: 'number', description: '俯仰角（度，负=向下）。action=move 时用。' },
+        zoom: { type: 'number', description: '变焦（设备刻度，Tiny 2 是 0–100）。action=move 时用。' },
+        pan_delta: { type: 'number', description: '水平相对转多少度（正=向右）。action=step 时用。' },
+        tilt_delta: { type: 'number', description: '俯仰相对转多少度（负=向下）。action=step 时用。' }
+      },
+      required: ['action']
+    }
+  }
+};
+
 module.exports = {
   COMPUTER_TOOL,
   CAMERA_TOOL,
-  DESKTOP_CAMERA_TOOL
+  DESKTOP_CAMERA_TOOL,
+  DESKTOP_CAMERA_PTZ_TOOL
 };

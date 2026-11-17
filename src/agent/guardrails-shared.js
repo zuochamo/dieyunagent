@@ -794,6 +794,14 @@ const PERMISSION_GATED_TOOLS = Object.freeze({
   camera_look: 'camera',
   desktop_camera_look: 'desktopCamera',
   /**
+   * 云台转向用**同一个**开关，不另开一个权限键：转的是同一台摄像头、同一间屋子，
+   * 只是把镜头的朝向改了 —— 「能拍到什么」与「能不让它拍」是同一件事。
+   * 多一个开关只会造出「能拍但不能转 1°」这种没有安全收益的状态，还要用户点两次同意。
+   * 真正的分寸在额度与文案上：一次一动、转完必须读回、生命感心跳轮**拿不到**这个工具
+   * （它不在 `ALIVE_READ_ONLY_TOOL_NAMES` 里 —— 移动物理姿态不是「看一眼」）。
+   */
+  desktop_camera_ptz: 'desktopCamera',
+  /**
    * 键鼠 / 截屏：`osControl` 本来就在 `rpc.js` 那道闸上（`computer` 的每个动作都要它）；
    * 收到这里是为了**在关卡层就说清楚**（同一份 `host-permissions.json`，不另写一套判定），
    * 而不是让模型跑到 RPC 才吃到一句通用错误。

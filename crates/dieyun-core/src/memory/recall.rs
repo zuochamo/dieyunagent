@@ -366,11 +366,10 @@ impl MemoryStore {
         }
         if self.embedding().enabled() {
             let embedding = self.embedding();
-            // 召回是**每轮**都要走的读路径：用预算感知入口。端点比交互预算慢时它根本
-            // 不发请求（见 `embedding::embed_texts_interactive`），这里直接落到下面的
-            // 关键词通道 —— 否则每轮都往那个串行端点排一个注定被放弃的 40s 请求，
-            // 队列永不排空，把同一队列里的 `codebase.search` 一起拖死。
-            match embedding::embed_texts_interactive(&embedding, &[q.to_string()]).await {
+            // 召回是**每轮**都要走的读路径。本地推理下这是一次毫秒级矩阵乘；远端端点下
+            // 失败（含超时）直接落到下面的关键词通道 —— 语义通道拿不到不等于召回失败。
+            // 旧的「预判端点太慢就不发」已随本地推理一起删除（见 embedding/mod.rs 头注释）。
+            match embedding::embed_texts(&embedding, &[q.to_string()]).await {
                 Ok(vectors) => {
                     let query_vec = vectors.into_iter().next().unwrap_or_default();
                     if !query_vec.is_empty() {
@@ -388,10 +387,7 @@ impl MemoryStore {
                 }
                 Err(err) => {
                     // 语义通道不可用不是召回失败：关键词/FTS 是既有兜底（DB 侧毫秒级）。
-                    // 「太慢」由 embedding 模块自己记一次日志，这里不重复刷屏。
-                    if !embedding::is_too_slow(&err) {
-                        eprintln!("[memory] 语义召回跳过（embedding 不可用）：{err}");
-                    }
+                    eprintln!("[memory] 语义召回跳过（embedding 不可用）：{err}");
                 }
             }
         }

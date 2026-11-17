@@ -11,6 +11,12 @@ use crate::error::CoreError;
  * 标题判据只有 `meta::title_needs_repair` 一处 —— 本文件不许再写第二套占位判断。
  */
 
+/// 交接行的列清单：`handoff_get` / `handoff_latest` / `handoff_take` 三处共用，
+/// 各自只拼自己的 `WHERE` / `ORDER BY`（列口径改一次就够）。
+const HANDOFF_SELECT: &str = "SELECT h.session_id, h.title, h.payload, h.created_at, s.workspace_path
+     FROM session_handoffs h
+     LEFT JOIN sessions s ON s.id = h.session_id";
+
 impl MemoryStore {
     pub fn touch_session(&self, session_id: &str, title: Option<&str>) -> Result<(), CoreError> {
         let now = now_ms();
@@ -200,23 +206,9 @@ impl MemoryStore {
     /// 交接**讲的**那个工作区，而不是用户当前视图的工作区。
     pub fn handoff_get(&self, session_id: &str) -> Result<Option<Value>, CoreError> {
         self.with_conn(|conn| {
+            let sql = format!("{HANDOFF_SELECT} WHERE h.session_id = ?1");
             Ok(conn
-                .query_row(
-                    "SELECT h.session_id, h.title, h.payload, h.created_at, s.workspace_path
-                     FROM session_handoffs h
-                     LEFT JOIN sessions s ON s.id = h.session_id
-                     WHERE h.session_id = ?1",
-                    params![session_id],
-                    |row| {
-                        Ok(json!({
-                            "sessionId": row.get::<_, String>(0)?,
-                            "title": row.get::<_, String>(1)?,
-                            "payload": row.get::<_, String>(2)?,
-                            "createdAt": row.get::<_, i64>(3)?,
-                            "workspacePath": row.get::<_, Option<String>>(4)?,
-                        }))
-                    },
-                )
+                .query_row(&sql, params![session_id], Self::handoff_value)
                 .optional()?)
         })
     }
@@ -228,25 +220,53 @@ impl MemoryStore {
         exclude_session_id: Option<&str>,
     ) -> Result<Option<Value>, CoreError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT h.session_id, h.title, h.payload, h.created_at, s.workspace_path
-                 FROM session_handoffs h
-                 LEFT JOIN sessions s ON s.id = h.session_id
-                 WHERE (?1 IS NULL OR h.session_id != ?1)
-                 ORDER BY h.created_at DESC LIMIT 1",
-            )?;
+            let sql = format!(
+                "{HANDOFF_SELECT} WHERE (?1 IS NULL OR h.session_id != ?1)
+                 ORDER BY h.created_at DESC LIMIT 1"
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query(params![exclude_session_id])?;
-            if let Some(row) = rows.next()? {
-                return Ok(Some(json!({
-                    "sessionId": row.get::<_, String>(0)?,
-                    "title": row.get::<_, String>(1)?,
-                    "payload": row.get::<_, String>(2)?,
-                    "createdAt": row.get::<_, i64>(3)?,
-                    "workspacePath": row.get::<_, Option<String>>(4)?,
-                })));
-            }
-            Ok(None)
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            Ok(Some(Self::handoff_value(row)?))
         })
+    }
+
+    /// 「领走」一份交接：读出来并删掉，**同一条语句序列**里完成。
+    ///
+    /// 交接是**一次性资源**：语义是「下一条会话接着上一条」，接上了就该没了。
+    /// 所以这里不做过期时间、不写「已读」标记、不加开关 —— 删掉就是唯一状态，
+    /// 「+」菜单的判据永远是「`handoff_latest` 还取得到吗」，两处不会漂移。
+    ///
+    /// 返回 `None` = 这份交接已经不在了（另一个窗口先领走），调用方不许再建会话。
+    /// 这条「领不到就别建」的语义就是防连点/多窗口重复建会话的**唯一闸门**。
+    pub fn handoff_take(&self, session_id: &str) -> Result<Option<Value>, CoreError> {
+        self.with_conn(|conn| {
+            let sql = format!("{HANDOFF_SELECT} WHERE h.session_id = ?1");
+            let row = conn
+                .query_row(&sql, params![session_id], Self::handoff_value)
+                .optional()?;
+            if row.is_none() {
+                return Ok(None);
+            }
+            conn.execute(
+                "DELETE FROM session_handoffs WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            Ok(row)
+        })
+    }
+
+    /// 三处读取（按 id / 最新 / 领走）共用的一份列清单与字段映射，别各写一遍。
+    fn handoff_value(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+        Ok(json!({
+            "sessionId": row.get::<_, String>(0)?,
+            "title": row.get::<_, String>(1)?,
+            "payload": row.get::<_, String>(2)?,
+            "createdAt": row.get::<_, i64>(3)?,
+            "workspacePath": row.get::<_, Option<String>>(4)?,
+        }))
     }
 
     pub fn create_session(
@@ -427,6 +447,12 @@ impl MemoryStore {
             )?;
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            // 会话删了，它的交接就没了来源（工作区要 JOIN sessions 才拿得到）：
+            // 留着只会让「+」菜单一直挂一份指向已消失会话的交接。
+            conn.execute(
+                "DELETE FROM session_handoffs WHERE session_id = ?1",
                 params![session_id],
             )?;
             conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;

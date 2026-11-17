@@ -844,16 +844,35 @@ async function setAliveSense(name, enabled) {
 }
 
 /**
+ * 用户当前选中的文字是否落在这个元素里。
+ *
+ * 为什么要问：事件流每 15s（5s 轮询 × 每 3 次刷一次）重写一次 `textContent`，
+ * 而重写会把用户正在拖着的那段选区直接打掉 —— 事件流现在可以拖选复制（见
+ * `styles.css` 的 `.alive-pane-list`），正在选的时候就不能刷。
+ */
+function aliveSelectionInside(el) {
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+  for (let i = 0; i < sel.rangeCount; i++) {
+    if (el.contains(sel.getRangeAt(i).commonAncestorContainer)) return true;
+  }
+  return false;
+}
+
+/**
  * 同一段文字写到**两个壳**里：设置页（`alive-*`）与侧栏「生命」页（`alive-pane-*`）。
  *
  * 为什么要同一个函数：两处各写一份格式，一周后必然漂移（"设置页说 3 次、侧栏说 2 次"）。
  * 某个壳没打开时对应 id 不存在，跳过即可。
+ *
+ * 正被用户选中的那一块这一轮跳过（`aliveSelectionInside`）：点走选区后下一轮就补上。
  */
 function aliveWriteText(ids, text, kind) {
   const body = String(text || '');
   for (const id of ids) {
     const el = $(id);
     if (!el) continue;
+    if (aliveSelectionInside(el)) continue;
     el.textContent = body;
     el.classList.remove('warn', 'ok');
     if (!body) continue;

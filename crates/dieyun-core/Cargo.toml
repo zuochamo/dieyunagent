@@ -18,6 +18,14 @@ clap = { version = "4", features = ["derive", "env"] }
 # 目录遍历的忽略规则引擎（.gitignore / .ignore / global gitignore）——与 ripgrep 同源，
 # 不再自己维护 IGNORE_DIRS 词表。见 src/index/walker.rs。
 ignore = "0.4"
+# 进程内向量推理（可选）。**刻意用 `load-dynamic`**：构建期不下载 onnxruntime、
+# 也不往产物目录里拷贝 dylib —— 「安装包别变胖」是 2026-08-27 删掉内置推理的直接原因
+# （commit 6386411），这里不能把那个代价重新引回来。运行时 dylib 与模型都由宿主
+# 按需提供（见 src/embedding/local.rs 的解析顺序）；找不到就退回远端端点。
+ndarray = { version = "0.17", optional = true }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["std", "load-dynamic", "ndarray", "api-20"] }
+# 只读模型自带的 tokenizer.json：分词口径与产出向量的那一侧完全一致，不自己实现 WordPiece。
+tokenizers = { version = "0.23", optional = true, default-features = false, features = ["fancy-regex"] }
 # 遍历后的「是否文本」内容嗅探是逐文件 IO：并行跑，串行只负责 readdir。
 rayon = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -34,5 +42,14 @@ tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
 tree-sitter-rust = "0.24.2"
 
+[features]
+# 默认开：桌面 sidecar 带着「能跑就跑本地」的能力，但**是否真的用本地**由运行时决定
+# （模型文件 + onnxruntime dylib 都在才启用）。远端 Linux core 打包时可用
+# `--no-default-features` 关掉，产物里就不含 ORT 依赖，glibc 下限也不受影响。
+default = ["local-embed"]
+local-embed = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+
 [dev-dependencies]
 tempfile = "3"
+# 只有测试用到：`agent::llm` 的端到端用例要起一个本地最小 HTTP 服务端（tokio::net）
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-thread", "time"] }

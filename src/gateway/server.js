@@ -34,6 +34,7 @@ const {
 const { dieyunMdPath } = require('../dieyun-instructions');
 const { getEmbeddingConfig, loadModelSettings } = require('../model-settings');
 const { buildLlmHeadersFromConfig } = require('../agent/llm-request');
+const { buildEmbeddingCoreConfig } = require('../agent/embedding-config');
 const { createGraphIncrementalScheduler } = require('../graph/graph-incremental-scheduler');
 const { createCodebaseIncrementalScheduler } = require('../index/codebase-incremental-scheduler');
 const { createWorkspaceIndexWatcher } = require('../index/workspace-index-watcher');
@@ -45,7 +46,7 @@ const {
   parseWorkspaceInput,
   isSameSshTarget,
   normalizeRemotePath,
-  stripWorktreeSuffix,
+  projectWorkspacePath,
 } = require('../workspace/target');
 const { repoRemotePathOf } = require('../ssh/remote-worktree');
 
@@ -298,22 +299,15 @@ class LocalGateway {
     if (!this.rustCore || typeof this.rustCore.configure !== 'function') return Promise.resolve();
     if (this._rustCoreConfigureInFlight) return this._rustCoreConfigureInFlight;
     const roots = this._collectReadRoots();
-    const embedding = getEmbeddingConfig(loadModelSettings(this.userDataPath));
     const modelSettings = loadModelSettings(this.userDataPath);
     this._rustCoreConfigureInFlight = this.rustCore
       .configure({
         data_dir: this.userDataPath,
         workspace_roots: roots,
-        embedding: {
-          disabled: !!embedding.disabled,
-          baseUrl: embedding.baseUrl || '',
-          apiKey: embedding.apiKey || '',
-          model: embedding.model || '',
-          dimensions: Number(embedding.dimensions) || 1024,
-          // 请求头由 llm-request 装配后交给 Rust 直接应用，Rust 不自行推导鉴权
-          headers: buildLlmHeadersFromConfig(embedding),
-          authMode: String(embedding.authMode || '').trim()
-        },
+        // 唯一装配点：远端端点 + 本地模型/运行时都在 src/agent/embedding-config.js 里合成。
+        // 此前这里是手拼字段，远端 core（gateway/rpc.js）与 remote-index-core 各有一份拷贝，
+        // 本地模型一上线就会「三处各说一套」。
+        embedding: buildEmbeddingCoreConfig(modelSettings, { userData: this.userDataPath }),
         llm: {
           baseUrl: modelSettings.baseUrl || '',
           apiKey: modelSettings.apiKey || '',
@@ -957,10 +951,12 @@ class LocalGateway {
     // 会话副本（worktree）是「写到哪儿」，不是「在哪个项目」。显示用项目路径，
     // 否则同一项目的每个会话都显示成 …/.dieyun/worktrees/sess-xxx/main。
     // 功能路径（workspacePath / ssh.remotePath）保持副本原值，别让显示污染路由。
+    // 用 `projectWorkspacePath`（项目身份口径，每一段副本都折）而不是 `stripWorktreeSuffix`
+    // （只认末尾形状）：分组用的是前者，显示跟它对齐才不会出现「分组叫 A、标题写 B」。
     const displayTarget = target
       ? target.kind === 'ssh'
-        ? { ...target, remotePath: stripWorktreeSuffix(normalizeRemotePath(target.remotePath)) }
-        : { ...target, path: stripWorktreeSuffix(target.path) }
+        ? { ...target, remotePath: projectWorkspacePath(normalizeRemotePath(target.remotePath)) }
+        : { ...target, path: projectWorkspacePath(target.path) }
       : target;
     const displayPath = formatWorkspaceDisplay(displayTarget, { connected });
     const workspacePath = workspacePathForSession(target);

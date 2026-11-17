@@ -1273,24 +1273,74 @@ async function openNewChatMenu() {
   }
 }
 
-/** 用一份交接新建会话，首轮自动注入【上个会话交接】 */
+/** 领走一份交接（`memory.handoff_take`：Rust 侧读出来即删）。
+ *  领不到返回 null —— 调用方**不许**再建会话；这条就是防连点 / 多窗口重复建空会话的唯一闸门。 */
+async function takeSessionHandoff(sessionId) {
+  try {
+    const row = await gatewayCall('memory.handoff_take', { sessionId });
+    return row && row.sessionId ? row : null;
+  } catch (e) {
+    console.warn('领取会话交接失败:', e);
+    return null;
+  }
+}
+
+/** 会话没建起来时的回滚：把刚领走的交接原样写回去（`handoff_save` 是覆盖写）。 */
+async function restoreSessionHandoff(taken) {
+  try {
+    await gatewayCall('memory.handoff_save', {
+      sessionId: String((taken && taken.sessionId) || ''),
+      title: String((taken && taken.title) || ''),
+      payload: String((taken && taken.payload) || '')
+    });
+  } catch (e) {
+    console.warn('交接放回失败:', e);
+  }
+}
+
+/**
+ * 用一份交接新建会话，首轮自动注入【上个会话交接】。
+ *
+ * 交接是**一次性资源**：先领走（`memory.handoff_take` 读出即删）再建会话，
+ * 领不到就什么都不做。领到但会话没建起来要把交接放回去，别把用户的交接吃掉。
+ * 点击必须有回声（toast）—— 只写 console 的失败在界面上等于「点了没反应」。
+ */
 async function continueFromHandoff(latest) {
   const fromId = String((latest && latest.sessionId) || '').trim();
   if (!fromId) return;
+  const taken = await takeSessionHandoff(fromId);
+  if (!taken) {
+    showAgentToast('这份交接已经不在了', '可能已被别的窗口领走；刷新后点「+」看还有没有可继续的交接。', {
+      variant: 'warn'
+    });
+    return;
+  }
   // 交接自带来源工作区（memory.handoff_* 已剥到仓库根）：跨项目「继续上次」必须挂到
   // 交接讲的仓库，而不是用户当前视图的工作区；没有记录才沿用当前视图。
-  const handoffWs = String((latest && latest.workspacePath) || '').trim();
-  await createNewSession(handoffWs || undefined);
+  const handoffWs = String(taken.workspacePath || '').trim();
+  const newSessionId = await createNewSession(handoffWs || undefined);
+  if (!newSessionId) {
+    await restoreSessionHandoff(taken);
+    showAgentToast('接手失败', '新会话没建起来，交接已放回；可再试一次或看主进程日志。', {
+      variant: 'warn'
+    });
+    return;
+  }
   // 模型也跟着交接走：交接可能来自别的会话，新会话要用**来源会话**的模型，而不是
   // 当前视图会话的模型（createNewSession 默认继承的是当前会话）。
   if (
-    currentSessionId &&
     typeof loadComposerModelPickForSession === 'function' &&
     typeof saveComposerModelPick === 'function'
   ) {
-    saveComposerModelPick(loadComposerModelPickForSession(fromId), currentSessionId);
+    saveComposerModelPick(loadComposerModelPickForSession(fromId), newSessionId);
   }
-  if (currentSessionId) setPendingSessionHandoff(currentSessionId, fromId);
+  setPendingSessionHandoff(newSessionId, fromId);
+  const fromTitle = String(taken.title || '').trim();
+  showAgentToast(
+    fromTitle ? `已接手「${fromTitle}」` : '已接手上一份交接',
+    '这一轮发出去的第一条会自动带上交接（一次性，用过即删）。',
+    { variant: 'info' }
+  );
 }
 
 /** 「继续上次」的取回入口（取最近交接 → 新建会话）；无交接时给出可执行提示 */
@@ -1511,8 +1561,6 @@ async function performSwitchSession(sessionId, switchGen) {
       currentSessionId = target;
       setCurrentSessionId(target);
       if (typeof onComposerSessionActivated === 'function') onComposerSessionActivated(target);
-      // 只清离开会话的压缩状态，勿清目标会话（可能仍在后台跑）
-      if (prevSessionId) resetCompactionStateSafe(prevSessionId);
       if (typeof setComposerPrepProgress === 'function') setComposerPrepProgress(28);
     }
 
@@ -1739,8 +1787,9 @@ async function settleSessionSidePanelAfterSwitch(sessionId, switchGen, opts = {}
  * @param {string|undefined|null} workspacePath undefined = 继承当前工作空间；null/'' = 不挂工作空间
  * @param {{ title?: string }} [opts]
  */
+/** 新建会话；**返回新会话 id，失败返回 null**（交接接手要靠它判断该不该把交接放回去） */
 async function createNewSession(workspacePath, opts = {}) {
-  if (!gwState.authed) return;
+  if (!gwState.authed) return null;
   sessionCreateInFlight = true;
   try {
     // 与 switchSession 共用代际，避免与进行中的历史切换交错
@@ -1827,13 +1876,14 @@ async function createNewSession(workspacePath, opts = {}) {
         knownWorkspacePath: keepWorkspace ? inheritWs : null
       });
     }
-    resetCompactionStateSafe();
     renderAttachmentChips();
     void refreshHistoryList();
     if (typeof syncComposerForActiveSession === 'function') syncComposerForActiveSession();
     focusChatInput();
+    return s.id;
   } catch (err) {
     console.warn(err);
+    return null;
   } finally {
     sessionCreateInFlight = false;
   }

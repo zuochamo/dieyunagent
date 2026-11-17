@@ -4,25 +4,21 @@ const { getEffectiveInputBudget } = require('../../agent/compaction-main');
 const { applyTierRuntime } = require('../../agent/model-runtime-by-tier');
 
 /**
+ * Renderer / 手机端触发的压缩 IPC。
+ *
+ * 语义全在 `compaction-main.js`（预算解析）与 Rust `compaction.fold`（折叠本身）。
+ * 这里只做参数归一：`tokenBudget` 缺省时才用磁盘 settings 算，别在调用点各算一份。
+ *
  * @param {object} ctx
  */
 function registerCompactionIpc(ctx) {
-  const {
-    ipcMain,
-    getUserDataPath,
-    getCoreBridge,
-    getMainCompactionAgent,
-    // 压缩实例的唯一创建入口（main-entry 单例）；本模块不再自建，避免出现第二个实例
-    ensureMainCompactionAgent,
-    loadModelSettings
-  } = ctx;
+  const { ipcMain, getUserDataPath, getCoreBridge, ensureMainCompactionAgent, loadModelSettings } = ctx;
 
   ipcMain.handle('compaction:maybe-compact', async (_evt, payload = {}) => {
     const agent = ensureMainCompactionAgent();
     const userData = getUserDataPath();
     const settings = loadModelSettings(userData);
-    const payloadModel =
-      payload.model || (payload.apiConfig && payload.apiConfig.model) || settings.textModel || '';
+    const payloadModel = payload.model || settings.textModel || '';
     const tokenBudget =
       Number(payload.tokenBudget) > 0
         ? Number(payload.tokenBudget)
@@ -36,18 +32,12 @@ function registerCompactionIpc(ctx) {
     return agent.maybeCompactMessages(Array.isArray(payload.messages) ? payload.messages : [], {
       tokenBudget,
       contextTierId: payload.contextTierId,
+      model: payloadModel,
       force: !!payload.force,
       toolsChars: payload.toolsChars,
       sessionId: payload.sessionId || null,
-      // 整体继承 payload.apiConfig：逐字段重建会丢掉 headers / authMode / userAgent
-      apiConfig: {
-        ...(payload.apiConfig || {}),
-        baseUrl: (payload.apiConfig && payload.apiConfig.baseUrl) || settings.baseUrl,
-        apiKey: (payload.apiConfig && payload.apiConfig.apiKey) || settings.apiKey,
-        model:
-          payload.model || (payload.apiConfig && payload.apiConfig.model) || settings.textModel || ''
-      },
-      model: payload.model || (payload.apiConfig && payload.apiConfig.model) || settings.textModel || ''
+      // 服务端 usage 由 Renderer 的上一轮响应带上；没有就是 null（Rust 回落到估值）
+      observedPromptTokens: payload.observedPromptTokens
     });
   });
 
@@ -62,14 +52,6 @@ function registerCompactionIpc(ctx) {
     } catch (e) {
       return { tokens: null, error: e.message || String(e) };
     }
-  });
-
-  ipcMain.handle('compaction:reset-state', async (_evt, { sessionId } = {}) => {
-    const mainCompactionAgent = getMainCompactionAgent();
-    if (mainCompactionAgent && mainCompactionAgent.resetCompactionState) {
-      mainCompactionAgent.resetCompactionState(sessionId || null);
-    }
-    return { ok: true };
   });
 }
 

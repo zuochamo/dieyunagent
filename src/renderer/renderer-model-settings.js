@@ -70,7 +70,6 @@ $('settings-form').addEventListener('submit', (e) => {
     system: cfg.system?.value ?? settings.system
   });
   saveSettings(settings);
-  resetCompactionInstances();
   applyFormValues(settings);
   renderDefinedModelsList();
   renderEmbeddingModelsList();

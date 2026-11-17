@@ -124,6 +124,8 @@ impl MemoryStore {
         self.db.read(f)
     }
 
+    /// 只给测试用（cfg(test) 之前漏了，于是 lib 构建每次都报 never used）。
+    #[cfg(test)]
     pub(crate) fn test_conn(&self) -> crate::sqlite::ReadConn<'_> {
         self.db.read_conn().expect("open test connection")
     }

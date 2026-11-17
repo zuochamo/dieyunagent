@@ -141,17 +141,6 @@ const AGENT_LIMITS_DEFAULTS = {
   writeSmellScanTimeoutMs: 1500,
   codebaseSnippetMax: 2400,
   codebaseAutoLimit: 12,
-  // 「一次交互查询最多能等多久 embedding 往返」。超过它就**不发请求**，直接走关键词/子串通道。
-  //
-  // 为什么需要这个数：端点一慢（自建 4B 模型实测 34–44s/请求且服务端串行），
-  // 每轮召回都发一个注定被调用方放弃的请求 —— 被放弃的 HTTP 仍在端点队列里排队，
-  // 下一轮再排一条，队列永不排空，同一队列里的 codebase.search 跟着一起超时。
-  // 现场见 docs/VECTOR-SEARCH.md §1.4（`agent:prep-system-prompt` 因 codebase.search 超时整轮失败）。
-  //
-  // **不是旋钮**：它不是「调大就能多等」的性能参数 —— 调大只会让每轮等更久，
-  // 端点本身的往返时间不会变。Rust 侧 `crates/dieyun-core/src/embedding/mod.rs`
-  // 的 `INTERACTIVE_EMBED_BUDGET_MS` 与本值成对（跨语言没法共享常量，同 SLOW_RPC_LOG_MS 先例）。
-  interactiveEmbedBudgetMs: 10000,
   openFilesMax: 12,
   filePreviewMaxChars: 4000,
   fsReadDefaultMaxBytes: 65536,
@@ -209,6 +198,17 @@ const AGENT_LIMITS_DEFAULTS = {
   desktopCameraCaptureTimeoutMs: 15000,
   desktopCameraShotMaxEdge: 1280,
   desktopCameraShotsPerRound: 2,
+  // 本机云台（desktop_camera_ptz：把有电机的摄像头转过去）。
+  // desktopCameraPtzSettleTimeoutMs：下发角度的等待上限。为什么必须等：写成功不等于转到 ——
+  //   云台有惯性（实测 2° 一下就到，130° 要一两秒），不等就拍会拍到半路模糊的一帧；
+  //   而上限不能再长：真要卡住（被挡、AI 追踪抢方向）时，一轮对话不该陪着等。
+  // desktopCameraPtzPollMs：等停稳时的读间隔。120ms 与固件自己 50ms 级别的位置刷新同量级：
+  //   再密只是多开几次 COM 会话，再疏就会把一个还没开始的动作误判成「已停稳」。
+  // desktopCameraPtzCommandTimeoutMs：linux 那条（v4l2-ctl）单条命令的上限；
+  //   Windows 的 COM 调用是同步的，没有超时概念（设备挂死时由用户中断整轮）。
+  desktopCameraPtzSettleTimeoutMs: 4000,
+  desktopCameraPtzPollMs: 120,
+  desktopCameraPtzCommandTimeoutMs: 5000,
   // 工具产出图片的只读副本保留张数（内容寻址去重后按 mtime 留最新 N 张）。
   // 为什么要留副本：base64 注入完即丢，模型想再看局部细节只能重拍，而当时那一帧可能已过；
   // 为什么要有上限：电脑控制一次任务能产生几十张整屏图，不留上限就是无底占盘。
@@ -293,6 +293,10 @@ const AGENT_LIMITS_DEFAULTS = {
   // 子 Agent 回注主上下文的摘要上限。过程 trace 不回注，只在折叠卡片里展开，
   // 否则 N 路调研会把主上下文顶爆（这是该功能最常见的失败模式）。
   subagentSummaryMaxChars: 2400,
+  // 子 Agent 卡片标题里 label 的截断位数。标题是 flex-wrap 的，超长只会把卡片撑高；
+  // 但 label 来自规划师生成的子任务 title，长度不受控，所以在单点（subagentCardTitle）截断。
+  // 与注入块尺寸同属「展示格式」，故意不进 SCHEMA（设置页不展示）。
+  subagentCardLabelMaxChars: 24,
   // 追问留存：同一 run 内可被 continueFrom 续用的已完成子 Agent 上下文份数（LRU）。
   // 只在 runner 生命周期内保留，不落盘；0 = 关闭追问。
   subagentFollowupRetention: 8,
@@ -791,7 +795,7 @@ const AGENT_LIMITS_SCHEMA = [
       {
         key: 'plannerMultiAgentEnabled',
         label: '多 Agent 并行执行',
-        hint: '打开后改代码类任务走「规划 → 多路执行器（各一个 git worktree）并行 → 验收 → 变更面板逐文件合并」；需 git 工作区，关掉仍是单条循环',
+        hint: '打开后改代码类任务走「规划 → 多路执行器（各一个 git worktree）并行 → 验收 → 变更面板逐文件合并」；需 git 工作区。按上下文档位生效：在哪个档位打开就只在那个档位（以及跟随它的会话）生效',
         type: 'boolean'
       },
       {

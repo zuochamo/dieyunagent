@@ -44,7 +44,7 @@ const { bootPeerRuntime } = require('../peer/boot');
 const { createSharedMemoryService } = require('../memory-shared/service');
 const { getAgentLimits } = require('../agent/agent-limits');
 const { loadModelSettings, getEmbeddingConfig } = require('../model-settings');
-const { createEmbeddingClient } = require('../codebase/embedding-client');
+const { createEmbeddingClient, setEmbeddingCoreBridge } = require('../codebase/embedding-client');
 
 /** 无窗口时必然没有的能力：启动日志里如实打一行，而不是加一个开关表 */
 const UNAVAILABLE_CAPABILITIES = [
@@ -52,6 +52,7 @@ const UNAVAILABLE_CAPABILITIES = [
   'computer_*（需桌面截图 / 输入）',
   'camera_look（需手机端连接）',
   'desktop_camera_look（需本机摄像头与 ffmpeg）',
+  'desktop_camera_ptz（需带云台的本机摄像头：DirectShow / v4l2-ctl）',
   'agent_clarify / session_new / session_set_workspace（Renderer-only）'
 ];
 
@@ -150,6 +151,8 @@ async function bootHeadless(opts) {
       });
       await coreBridge.start();
       gateway.setRustCore(coreBridge);
+      // 无界面入口同样要接上向量桥（否则 headless 的召回 / 建库始终没有向量通道）
+      setEmbeddingCoreBridge(coreBridge);
       log.info(`dieyun-core 已启动：${bin}`);
     }
   }

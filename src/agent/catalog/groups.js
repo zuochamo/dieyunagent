@@ -17,7 +17,7 @@ const {
 const { PLAN_TOOLS } = require('./plan');
 const { MCP_TOOL_SCHEMA_TOOL, MCP_MANAGE_TOOL } = require('./mcp');
 const { CLARIFY_TOOL, SESSION_TOOL, SESSION_WORKSPACE_TOOL, SUBAGENT_TOOL } = require('./session');
-const { COMPUTER_TOOL, CAMERA_TOOL, DESKTOP_CAMERA_TOOL } = require('./computer');
+const { COMPUTER_TOOL, CAMERA_TOOL, DESKTOP_CAMERA_TOOL, DESKTOP_CAMERA_PTZ_TOOL } = require('./computer');
 const { PEER_TOOLS } = require('./peer');
 const { SSH_TOOL, WORKTREE_TOOL } = require('./remote');
 
@@ -34,6 +34,7 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   [COMPUTER_TOOL],
   [CAMERA_TOOL],
   [DESKTOP_CAMERA_TOOL],
+  [DESKTOP_CAMERA_PTZ_TOOL],
   [SSH_TOOL],
   [WORKTREE_TOOL],
   PEER_TOOLS

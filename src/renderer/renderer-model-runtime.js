@@ -905,7 +905,6 @@ function setModelRuntimeValues(partial, opts = {}) {
   if (tierId === 'default') {
     mirrorDefaultTierToGlobalSettings(values);
   }
-  resetCompactionInstances();
   if (typeof refreshContextProgress === 'function') refreshContextProgress();
   window.dispatchEvent(
     new CustomEvent('dieyun:model-runtime-change', {
@@ -932,7 +931,6 @@ function resetModelRuntimeValues(opts = {}) {
   if (tierId === 'default') {
     mirrorDefaultTierToGlobalSettings(values);
   }
-  resetCompactionInstances();
   if (typeof refreshContextProgress === 'function') refreshContextProgress();
   window.dispatchEvent(
     new CustomEvent('dieyun:model-runtime-change', {

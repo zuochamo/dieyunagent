@@ -19,6 +19,9 @@ use crate::error::CoreError;
 /// 把同步 DB 段移出 async worker 的工作——那由 `blocking::run_blocking` 统一承担。
 pub async fn serve_stdio(state: AppState) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    // core → 宿主的事件通道（流式增量等）：与响应共用 stdout，但用 `type:"event"` 区分。
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<serde_json::Value>();
+    super::events::install(event_tx);
     let worker = std::thread::Builder::new()
         .name("dieyun-core-rpc".into())
         .spawn(move || {
@@ -31,11 +34,48 @@ pub async fn serve_stdio(state: AppState) -> anyhow::Result<()> {
             };
             rt.block_on(async move {
                 let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+                // 事件写者：独立任务，避免与响应抢锁时把流式增量憋在队列里
+                let event_stdout = Arc::clone(&stdout);
+                tokio::spawn(async move {
+                    while let Some(event) = event_rx.recv().await {
+                        // 反向调用走**自己的一种行**（`type:"call"`），宿主按 type 分流：
+                        // 包在 `type:"event"` 里宿主会当通知丢掉，永远等不到答复。
+                        let line = if event.get("type").and_then(|t| t.as_str()) == Some("host.call") {
+                            serde_json::json!({
+                                "type": "call",
+                                "id": event.get("id"),
+                                "method": event.get("method"),
+                                "params": event.get("params"),
+                            })
+                        } else {
+                            serde_json::json!({ "type": "event", "event": event })
+                        };
+                        if let Ok(text) = serde_json::to_string(&line) {
+                            let mut guard = event_stdout.lock().await;
+                            let _ = guard.write_all((text + "\n").as_bytes()).await;
+                            let _ = guard.flush().await;
+                        }
+                    }
+                });
                 while let Some(raw) = rx.recv().await {
                     let state = state.clone();
                     let stdout = stdout.clone();
                     tokio::spawn(async move {
-                        let response = match serde_json::from_str::<RpcRequest>(&raw) {
+                        // 宿主对反向调用的答复：`{"type":"reply","id":N,"result"|"error"}`。
+        // 它不是任何请求的响应，必须在解析成 RpcRequest 之前拦掉。
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if value.get("type").and_then(|t| t.as_str()) == Some("reply") {
+                if let Some(id) = value.get("id").and_then(|v| v.as_u64()) {
+                    super::calls::resolve_reply(
+                        id,
+                        value.get("result").cloned(),
+                        value.get("error").cloned(),
+                    );
+                }
+                return;
+            }
+        }
+        let response = match serde_json::from_str::<RpcRequest>(&raw) {
                             Ok(req) => handle_request(&state, req).await,
                             Err(err) => RpcResponse::err(
                                 serde_json::Value::Null,

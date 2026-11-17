@@ -436,7 +436,7 @@ function createSharedMemoryService(deps) {
         const out = await embedder.embedInteractive(q);
         if (Array.isArray(out) && out[0] && out[0].length) vec = out[0];
       } catch (err) {
-        if (!err || err.code !== 'EMBEDDING_TOO_SLOW') {
+        if (!err || err.code !== 'EMBEDDING_DISABLED') {
           warn(`[dieyun:shared-memory] 查询向量失败（改走文本排名）：${(err && err.message) || err}`);
         }
       }

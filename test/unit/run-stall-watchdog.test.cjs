@@ -10,7 +10,7 @@
  *   1. 有进展时绝不报警；
  *   2. 超过 warnMs → 报一次（不刷屏），再 check 不重复；
  *   3. note() 重置计时与 warn 状态（有进展就重新开始）；
- *   4. 超过 abortMs → 报一次 abort（调用方据此走既有 agent.loop.cancel）。
+ *   4. 超过 abortMs → 报一次 abort（调用方据此走 agent.run.cancel）。
  */
 const assert = require('node:assert/strict');
 const { createRunStallWatchdog } = require('../../src/agent/rust-loop-runner.js');
@@ -62,7 +62,7 @@ describe('run 级无进展看门狗', () => {
     assert.ok(abort, '应当报 abort');
     assert.equal(abort.level, 'abort');
     assert.match(abort.message, /RUN_STALL_ABORT/);
-    assert.match(abort.message, /agent\.loop\.cancel/);
+    assert.match(abort.message, /agent\.run\.cancel/);
     // 只报一次
     assert.equal(wd.check(t0 + 9000, 'run-4'), null);
   });

@@ -129,6 +129,22 @@ function listFileHolders(dbPath) {
  */
 function buildCoreConfigurePayload({ workspaceRoot, runtimeDataDir, indexDbPath, opts = {} }) {
   const embedding = (opts && opts.embedding) || { disabled: true };
+  // 原样透传（唯一装配点是 src/agent/embedding-config.js）：这里只做「字段存在性」归一，
+  // 不再逐字段重拼——逐字段重拼正是本地 provider 字段会被无声丢掉的原因。
+  const embeddingPayload = {
+    disabled: !!embedding.disabled,
+    provider: String(embedding.provider || ''),
+    baseUrl: embedding.baseUrl || '',
+    apiKey: embedding.apiKey || '',
+    model: embedding.model || '',
+    dimensions: Number(embedding.dimensions) || 1024,
+    headers: embedding.headers && typeof embedding.headers === 'object' ? embedding.headers : {},
+    authMode: String(embedding.authMode || '').trim()
+  };
+  if (embedding.localModelDir) embeddingPayload.localModelDir = String(embedding.localModelDir);
+  if (embedding.localRuntimeLib) {
+    embeddingPayload.localRuntimeLib = String(embedding.localRuntimeLib);
+  }
   return {
     // data_dir 只放记忆/账本库，必须与 spawn 时的 DIEYUN_DATA_DIR 一致（$HOME 下）。
     // 早前这里写的是 <workspace>/.dieyun，等于把记忆库塞回用户项目里，
@@ -136,15 +152,7 @@ function buildCoreConfigurePayload({ workspaceRoot, runtimeDataDir, indexDbPath,
     data_dir: runtimeDataDir,
     index_db_path: indexDbPath,
     workspace_roots: [workspaceRoot],
-    embedding: {
-      disabled: !!embedding.disabled,
-      baseUrl: embedding.baseUrl || '',
-      apiKey: embedding.apiKey || '',
-      model: embedding.model || '',
-      dimensions: Number(embedding.dimensions) || 1024,
-      headers: embedding.headers && typeof embedding.headers === 'object' ? embedding.headers : {},
-      authMode: String(embedding.authMode || '').trim()
-    }
+    embedding: embeddingPayload
   };
 }
 

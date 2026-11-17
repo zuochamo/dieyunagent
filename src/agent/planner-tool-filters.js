@@ -107,13 +107,49 @@ function buildShellTools(allTools) {
   });
 }
 
+/**
+ * **协调者专属**工具：执行器（worker）一律不给。
+ *
+ * 为什么必须剔：这些工具改的不是「代码」，而是**这个工作区本身能怎么被改**
+ * ——建/删副本、把副本写回主工作区、换工作空间、建会话、改 MCP/技能/SSH 配置。
+ * 执行器手里有它们，等于绕开 worktree 隔离：`worktree apply` 一句就能把东西直接写进
+ * 主工作区（不经过「变更」面板审查），`session_new` 还能凭空开新会话。
+ * 它们属于协调者（Agent 主循环 / Plan 的 explore 阶段）的职责。
+ *
+ * 另一类是 `subagent`：深度恒为 1，worker 拿到它也只会得到「未知工具」，白烧一次调用。
+ *
+ * 这份清单与 `MUTATING_TOOL_NAMES` 不是一回事：后者判「要不要串行」，这里判「谁有资格」。
+ */
+const COORDINATOR_ONLY_TOOL_NAMES = Object.freeze(
+  new Set([
+    'subagent',
+    'worktree',
+    'plan_create',
+    'plan_delete',
+    'plan_run',
+    'plan_cancel',
+    'mcp_manage',
+    'skill_create',
+    'skill_delete',
+    'ssh',
+    'agents_md_propose',
+    'session_new',
+    'session_set_workspace',
+    'agent_clarify'
+  ])
+);
+
 function buildBuildTools(allTools) {
-  return allTools || [];
+  return (allTools || []).filter((t) => {
+    const name = String(t?.function?.name || '');
+    return name && !COORDINATOR_ONLY_TOOL_NAMES.has(name);
+  });
 }
 
 module.exports = {
   EXPLORE_TOOL_NAMES,
   SHELL_TOOL_NAMES,
+  COORDINATOR_ONLY_TOOL_NAMES,
   READONLY_MCP_SERVER_IDS,
   READONLY_MCP_TOOL_PREFIXES,
   isReadOnlyMcpToolName,

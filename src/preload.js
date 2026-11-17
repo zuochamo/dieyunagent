@@ -638,19 +638,6 @@ contextBridge.exposeInMainWorld('diecloud', {
 
   compactionMaybeCompact: (payload) => ipcRenderer.invoke('compaction:maybe-compact', payload || {}),
   compactionEstimateTokens: (payload) => ipcRenderer.invoke('compaction:estimate-tokens', payload || {}),
-  compactionResetState: (sessionId) =>
-    ipcRenderer.invoke('compaction:reset-state', { sessionId: sessionId || null }),
-  onCompactionProgress: (cb) => {
-    const handler = (_evt, payload) => {
-      try {
-        cb(payload);
-      } catch {
-        // ignore
-      }
-    };
-    ipcRenderer.on('compaction:progress', handler);
-    return () => ipcRenderer.removeListener('compaction:progress', handler);
-  },
   onAgentServiceSubmitTask: (cb) => {
     const handler = (_evt, payload) => {
       try {

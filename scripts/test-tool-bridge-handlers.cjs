@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * 工具桥「执行体」直测：`tool-bridge-main.js#executeMainOnlyTool` 的 24 个 case。
+ * 工具桥「执行体」直测：`tool-bridge-main.js#executeMainOnlyTool` 的 25 个 case。
  *
  * 为什么要有这个文件：这些 case 原先一行测试都没有（`scripts/` 全仓 0 引用），
  * 而它们承载的恰恰是「模型参数 → 域实现（ssh/actions、worktree/actions、plansStore、
@@ -627,6 +627,7 @@ async function main() {
       'agents_md_propose',
       'camera_look',
       'desktop_camera_look',
+      'desktop_camera_ptz',
       'goal_check',
       'goal_finish',
       'goal_start',
@@ -649,7 +650,7 @@ async function main() {
       'ssh',
       'worktree'
     ].sort();
-    assert.deepStrictEqual(names, expected, 'Main 专属工具的注册表必须正好是这 24 个（多一个少一个都是事故）');
+    assert.deepStrictEqual(names, expected, 'Main 专属工具的注册表必须正好是这 25 个（多一个少一个都是事故）');
     // goal_* 不在 ALL_STATIC_TOOLS 里（那是「静态全局表」）：它由 renderer-tool-defs 常驻下发、
     // 目标型计划另给一份。所以这里按「静态表 ∪ 目标工具」判成员，仍然能抓到名字打错。
     const known = new Map();

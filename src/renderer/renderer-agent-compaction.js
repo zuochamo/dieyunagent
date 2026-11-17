@@ -62,24 +62,6 @@ async function estimateMessagesTokensViaMain(messages) {
   return estimateContextTokensFallback(msgs);
 }
 
-function resetCompactionStateSafe(sessionId) {
-  try {
-    const sid =
-      sessionId != null && String(sessionId).trim()
-        ? String(sessionId).trim()
-        : currentSessionId || null;
-    if (typeof window.diecloud?.compactionResetState === 'function') {
-      window.diecloud.compactionResetState(sid).catch(() => {});
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function resetCompactionInstances() {
-  resetCompactionStateSafe();
-}
-
 async function persistCompactionArchive(cr, opts = {}) {
   const sid =
     opts.sessionId != null && String(opts.sessionId).trim()
@@ -105,8 +87,13 @@ async function persistCompactionArchive(cr, opts = {}) {
       workspacePath,
       tokensBefore: cr.tokensBefore,
       tokensAfter: cr.tokensAfter,
-      summary: cr.summary || null,
-      foldedTranscript: cr.foldedTranscript || null
+      // 折叠不产出摘要文本（旧 LLM 摘要已删除）：归档只记「何时、省了多少」，
+      // 内容本身仍在 messages 里（只是被截短），不需要第二份副本。
+      summary:
+        cr.level != null
+          ? `折叠：${Number(cr.tokensBefore) || 0} → ${Number(cr.tokensAfter) || 0} token（L${cr.level}）`
+          : null,
+      foldedTranscript: null
     });
   } catch (e) {
     console.warn('compaction archive failed', e);
@@ -126,42 +113,9 @@ async function maybeCompactMessagesViaMain(messages, opts = {}) {
     toolsChars: Number(opts.toolsChars) || 0,
     sessionId: opts.sessionId || null,
     model: opts.model || '',
-    apiConfig: opts.apiConfig || {
-      baseUrl: settings?.baseUrl,
-      apiKey: settings?.apiKey
-    }
+    // 服务端 usage 优先（Renderer 上一轮响应带下来的）；没有就是 null，由 Rust 回落到估值
+    observedPromptTokens: opts.observedPromptTokens
   });
-}
-
-function shortenCompactionLlmMessage(raw) {
-  let s = String(raw || '').trim();
-  if (!s) return '模型请求失败';
-  const jsonIdx = s.indexOf('{');
-  if (jsonIdx > 24) s = s.slice(0, jsonIdx).trim().replace(/[:\s]+$/, '');
-  if (/504|gateway timeout|provider request timeout/i.test(s)) {
-    return '模型网关超时 (HTTP 504)';
-  }
-  if (/503|service unavailable/i.test(s)) return '模型服务暂不可用 (HTTP 503)';
-  if (/502|bad gateway/i.test(s)) return '模型网关错误 (HTTP 502)';
-  if (/429|rate limit|too many requests/i.test(s)) return '模型请求过于频繁 (HTTP 429)';
-  if (/timeout|timed?\s*out|超时/i.test(s)) return '模型请求超时';
-  return s.slice(0, 140);
-}
-
-function formatCompactionProgressNote(payload) {
-  if (!payload || typeof payload !== 'object') return '';
-  const kind = String(payload.kind || '');
-  const msg = shortenCompactionLlmMessage(payload.message || '');
-  if (kind === 'llm_retry') {
-    const waitSec = Math.max(1, Math.round(Number(payload.waitMs || 0) / 1000) || 1);
-    const attempt = Number(payload.attempt);
-    const attemptLabel = Number.isFinite(attempt) && attempt > 0 ? `第 ${attempt} 次` : '重试';
-    return `${msg}，${waitSec}s 后重试（${attemptLabel}）`;
-  }
-  if (kind === 'llm_skip') {
-    return `已跳过压缩：${msg}`;
-  }
-  return msg;
 }
 
 async function applyContextCompaction(body, opts = {}) {
@@ -183,19 +137,12 @@ async function applyContextCompaction(body, opts = {}) {
     const llmError = String(err && err.message ? err.message : err || 'compaction failed');
     return { compacted: false, skipped: 'error', llmError };
   }
-  if (cr.compactionSkipped === 'content_policy') {
-    showAgentToast(
-      '上下文压缩被供应商拦截',
-      '内容审核未通过，已跳过压缩继续请求。建议新开对话或换中转；若仍失败请缩短历史。',
-      { variant: 'warn' }
-    );
-    return { compacted: false, skipped: 'content_policy' };
-  }
-  if (cr.compactionSkipped === 'llm_error' || cr.llmError) {
+  if (cr.foldSkipped) {
+    // 折叠是纯本地 CPU 操作：唯一的失败形态是 core 侧 RPC 出错（不像旧 LLM 摘要会被审核拦截）
     return {
       compacted: false,
-      skipped: 'llm_error',
-      llmError: String(cr.llmError || 'compaction LLM failed')
+      skipped: cr.foldSkipped,
+      foldError: cr.foldError ? String(cr.foldError) : undefined
     };
   }
   if (cr.compacted) {
@@ -209,7 +156,7 @@ async function applyContextCompaction(body, opts = {}) {
     const detail =
       Number.isFinite(before) && Number.isFinite(after)
         ? `messages 约 ${Math.round(before).toLocaleString()} → ${Math.round(after).toLocaleString()} tokens；工具定义另计，圆环仍可能偏红`
-        : '较早对话已摘要归档，可继续当前任务';
+        : '较早的工具输出已折叠，可继续当前任务';
     showAgentToast('上下文已压缩', detail, { variant: 'info' });
     return { compacted: true, tokensBefore: cr.tokensBefore, tokensAfter: cr.tokensAfter };
   }

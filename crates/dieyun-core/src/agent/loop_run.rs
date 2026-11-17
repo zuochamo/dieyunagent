@@ -89,6 +89,19 @@ pub struct StartParams {
     /// 缺参直接报错，而不是在内核里回落到一份会静默分叉的默认值。
     pub max_tool_calls: u32,
     pub max_rounds: u32,
+    /// 折叠预算（token）。0 = 本 run 不折叠（老调用方 / 测试）。
+    /// 数值唯一来源是 Node compaction-main.resolveFoldSpec，内核不存默认值。
+    #[serde(default)]
+    pub token_budget: usize,
+    /// 折叠触发比（0.3~0.95）。同样只在 Node 算。
+    #[serde(default)]
+    pub trigger_ratio: f64,
+    /// 宿主指定的 runId（可选）：给了就用它。
+    ///
+    /// 宿主要在本轮**发请求之前**订阅增量事件（按 runId 过滤）；等 core 生成 id 再返回就晚了，
+    /// 第一轮的增量会丢。
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +154,9 @@ pub struct LlmResponseInput {
     pub finish_reason: Option<String>,
     #[serde(default)]
     pub content_channel: ContentChannel,
+    /// 服务端 usage（含 prompt_tokens）：折叠的触发口径优先用它，字符比只兜底。
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -198,6 +214,26 @@ pub struct LoopResponse {
     pub messages: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// 本轮之前是否折叠过（账本事实，Node 据此写遥测 / 归档 / toast）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compacted: Option<FoldFact>,
+}
+
+/// 一次折叠的账本事实（没折叠时整条为 None）。
+///
+/// 折叠**在循环内部**做（发出下一次请求之前），因为 transcript 归这层所有：
+/// 早先由 Node 每轮调 `compaction.fold` 再把 messages 用 `set_messages` 推回来，
+/// 等于同一份对话有两个写者。现在 Node 只读事实、写遥测。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoldFact {
+    pub level: u8,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub trigger_source: String,
+    pub folded_tool_results: usize,
+    pub folded_texts: usize,
+    pub folded_images: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -221,6 +257,13 @@ struct RunState {
     trace: Vec<TraceRound>,
     cancelled: bool,
     pending_delegate: Vec<(String, String, Value)>,
+    /// 折叠预算 / 触发比（0 表示本 run 不折叠）
+    token_budget: usize,
+    trigger_ratio: f64,
+    /// 上一轮服务端回报的 usage.prompt_tokens：折叠触发优先用它
+    observed_prompt_tokens: Option<usize>,
+    /// 下一次回给宿主的折叠事实（取走即清）
+    pending_fold: Option<FoldFact>,
 }
 
 pub struct AgentLoopManager {
@@ -287,6 +330,51 @@ fn llm_thought_raw(llm: &LlmResponseInput) -> Option<String> {
     }
 }
 
+/// 在发出下一次请求之前折叠自己的 messages。
+///
+/// 为什么在核心里做：transcript 归这层所有。早先由 Node 每轮调 compaction.fold、
+/// 再用 gent.loop.set_messages 把整段对话推回来 —— 同一份对话两个写者，谁都能改。
+///
+/// 预算 / 触发比来自 Node（0 = 本 run 不折）；已用 token 优先取上一轮服务端
+/// usage.prompt_tokens，拿不到才让折叠器回落到字符比估值。
+fn fold_if_needed(state: &mut RunState) {
+    fold_state(state, false);
+}
+
+/// 强制折叠一次：宿主在「上下文溢出」时用。那次失败已经证明估算不准，
+/// 不能再等触发线（与旧实现里 `force: true` 的语义一致）。
+fn fold_force(state: &mut RunState) {
+    fold_state(state, true);
+}
+
+fn fold_state(state: &mut RunState, force: bool) {
+    if state.token_budget == 0 || state.trigger_ratio <= 0.0 {
+        return;
+    }
+    // 借用转移而不是 clone：这段 messages 可能上百 KB，每轮复制一次不值得
+    let messages = std::mem::take(&mut state.messages);
+    let result = crate::compaction::fold(crate::compaction::FoldParams {
+        messages,
+        token_budget: state.token_budget,
+        trigger_ratio: state.trigger_ratio,
+        observed_prompt_tokens: state.observed_prompt_tokens,
+        force,
+        keep_tail_atoms: None,
+    });
+    state.messages = result.messages;
+    if result.compacted {
+        state.pending_fold = Some(FoldFact {
+            level: result.level,
+            tokens_before: result.tokens_before,
+            tokens_after: result.tokens_after,
+            trigger_source: result.trigger_source.to_string(),
+            folded_tool_results: result.folded_tool_results,
+            folded_texts: result.folded_texts,
+            folded_images: result.folded_images,
+        });
+    }
+}
+
 impl AgentLoopManager {
     pub fn start(&self, params: StartParams) -> Result<LoopResponse, CoreError> {
         if params.model.trim().is_empty() {
@@ -295,7 +383,13 @@ impl AgentLoopManager {
         if params.messages.is_empty() {
             return Err(CoreError::rpc("INVALID_PARAMS", "messages 不能为空"));
         }
-        let run_id = format!("run-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        // 宿主给了 id 就用它（见 `run_id` 字段的注释）；没给才自己生成。
+        let run_id = params
+            .run_id
+            .clone()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| format!("run-{}", self.next_id.fetch_add(1, Ordering::Relaxed)));
         let state = RunState {
             model: params.model,
             messages: params.messages,
@@ -308,12 +402,74 @@ impl AgentLoopManager {
             trace: Vec::new(),
             cancelled: false,
             pending_delegate: Vec::new(),
+            token_budget: params.token_budget,
+            trigger_ratio: params.trigger_ratio,
+            observed_prompt_tokens: None,
+            pending_fold: None,
         };
         self.runs
             .lock()
             .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?
             .insert(run_id.clone(), state);
         Ok(self.need_llm(&run_id)?)
+    }
+
+    /// 从账本里摘掉图片 part，返回（摘掉张数, 当前 messages）。
+    ///
+    /// 为什么要有这条：上游 400「图片不支持」时，Node 只能**请求**「把这几条消息里的图摘掉」，
+    /// 不能自己改写 transcript —— 那会让同一份对话出现第二个写者。返回 messages 只是给宿主
+    /// 拼本次重发请求用，落库的真相仍在 core。
+    pub fn drop_images(
+        &self,
+        run_id: &str,
+        indices: Option<&[usize]>,
+    ) -> Result<(usize, Vec<Value>), CoreError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
+        let state = runs
+            .get_mut(run_id)
+            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut dropped = 0usize;
+        match indices {
+            Some(list) => {
+                for idx in list {
+                    if let Some(msg) = state.messages.get_mut(*idx) {
+                        dropped += crate::compaction::strip_images_only(msg);
+                    }
+                }
+            }
+            None => {
+                for msg in state.messages.iter_mut() {
+                    dropped += crate::compaction::strip_images_only(msg);
+                }
+            }
+        }
+        Ok((dropped, state.messages.clone()))
+    }
+
+    /// 强制折叠一次，返回事实（没折成 / 本 run 不折叠时 None）。
+    ///
+    /// 只给「上下文溢出」这条路径用：正常触发由 `need_llm` 内部的 `fold_if_needed` 负责，
+    /// 宿主不再自己折完把 messages 推回来。
+    pub fn fold_now(&self, run_id: &str, force: bool) -> Result<Option<FoldFact>, CoreError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
+        let state = runs
+            .get_mut(run_id)
+            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        if state.cancelled {
+            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
+        }
+        if force {
+            fold_force(state);
+        } else {
+            fold_if_needed(state);
+        }
+        Ok(state.pending_fold.take())
     }
 
     pub fn cancel(&self, run_id: &str) -> Result<(), CoreError> {
@@ -327,23 +483,18 @@ impl AgentLoopManager {
         Ok(())
     }
 
-    pub fn set_messages(&self, run_id: &str, messages: Vec<Value>) -> Result<(), CoreError> {
-        if messages.is_empty() {
-            return Err(CoreError::rpc("INVALID_PARAMS", "messages 不能为空"));
-        }
-        let mut runs = self
-            .runs
+    /// 当前轮次（只读快照；run 已结束或不存在时返回 `None`）。
+    ///
+    /// 谁需要它：驱动器在每次发请求前把「第几轮」告诉宿主（`round.prepare` 的 `round`），
+    /// 宿主据此给 UI / 视觉注入标轮次。轮次是账本事实，宿主不能自己数（一个 run 会被
+    /// `agent.run.start` / `agent.run.tools` 分多次驱动，宿主侧的计数必然与账本分叉）。
+    pub fn round_of(&self, run_id: &str) -> Option<u32> {
+        self.runs
             .lock()
-            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
-        let state = runs
-            .get_mut(run_id)
-            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
-        if state.cancelled {
-            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
-        }
-        state.messages = messages;
-        Ok(())
+            .ok()
+            .and_then(|runs| runs.get(run_id).map(|state| state.round))
     }
+
 
     /// 纯内存账本推进：本函数不做任何 IO，**同步**即可（此前写成 `async` 是历史遗留，
     /// 会在多线程运行时下让 `std::sync::MutexGuard` 跨 await，违反 `Send`）。
@@ -369,6 +520,15 @@ impl AgentLoopManager {
         // 通道身份随本轮一起进来：`Reasoning` 表示 `content` 键里装的是思考
         // （单通道模型），账本据此把它记进思考，绝不进交付正文。
         let channel = llm.content_channel;
+        // 服务端 usage 是折叠触发的首选口径：有了它就不必靠字符比猜「用了多少」
+        if let Some(prompt) = llm
+            .usage
+            .as_ref()
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+        {
+            state.observed_prompt_tokens = Some(prompt as usize);
+        }
         if state.round >= state.max_rounds {
             if llm.tool_calls.is_empty() {
                 let trace = state.trace.clone();
@@ -518,6 +678,7 @@ impl AgentLoopManager {
                 hit_round_limit: None,
                 messages: None,
                 message: None,
+                compacted: None,
             });
         }
 
@@ -622,17 +783,24 @@ impl AgentLoopManager {
         self.need_llm(run_id)
     }
 
+    /// 取「下一次该发什么」（内含折叠）。驱动器在自愈（强制折叠 / 摘图）之后要靠它重新取 body。
+    pub fn next_body(&self, run_id: &str) -> Result<LoopResponse, CoreError> {
+        self.need_llm(run_id)
+    }
+
     fn need_llm(&self, run_id: &str) -> Result<LoopResponse, CoreError> {
-        let runs = self
+        let mut runs = self
             .runs
             .lock()
             .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
         let state = runs
-            .get(run_id)
+            .get_mut(run_id)
             .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
         if state.cancelled {
             return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
         }
+        // 折叠在**发出请求之前**做，且只动自己的账本：transcript 的写者只有这一处。
+        fold_if_needed(state);
         let llm_body = json!({
             "model": state.model,
             "messages": state.messages,
@@ -649,6 +817,7 @@ impl AgentLoopManager {
             hit_round_limit: None,
             messages: None,
             message: None,
+            compacted: state.pending_fold.take(),
         })
     }
 
@@ -688,6 +857,7 @@ impl AgentLoopManager {
             hit_round_limit: if hit_limit { Some(true) } else { None },
             messages,
             message: None,
+            compacted: None,
         }
     }
 }
@@ -701,6 +871,177 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
+    /// 摘图只动账本里的图片：文字保留、没指到的消息不动、不带下标才全摘。
+    ///
+    /// 这条钉住「transcript 唯一写者」的边界：上游拒图时宿主只能请 core 摘，
+    /// 不能自己覆盖 messages。
+    #[tokio::test]
+    async fn drop_images_only_strips_targeted_messages() {
+        let mgr = AgentLoopManager::default();
+        let img = |name: &str| {
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": name},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]
+            })
+        };
+        let start = mgr
+            .start(StartParams {
+                model: "m".into(),
+                messages: vec![
+                    img("first"),
+                    img("second"),
+                    json!({"role":"user","content":"plain"}),
+                ],
+                tools: vec![],
+                workspace_root: None,
+                max_tool_calls: 10,
+                max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
+            })
+            .unwrap();
+
+        let (dropped, messages) = mgr.drop_images(&start.run_id, Some(&[0])).unwrap();
+        assert_eq!(dropped, 1);
+        let first = messages[0]["content"].as_str().unwrap();
+        assert!(first.contains("first"), "用户文字必须保留：{first}");
+        assert!(first.contains("已摘除"), "图片应换成可读标记：{first}");
+        assert_eq!(
+            messages[1]["content"][1]["type"], "image_url",
+            "没指到的消息不该被动"
+        );
+
+        let (dropped_all, messages_all) = mgr.drop_images(&start.run_id, None).unwrap();
+        assert_eq!(dropped_all, 1, "只剩第二条还有图");
+        assert_eq!(messages_all[2]["content"], "plain");
+    }
+
+    /// 折叠发生在**循环内部**：越线后返回的 `llm_body` 里 content 已经变短，而账本事实
+    /// 随响应交给宿主（Node 只读事实、写遥测——不再自己折完再推回来）。
+    #[tokio::test]
+    async fn loop_folds_messages_before_next_llm_call() {
+        let dir = tempdir().unwrap();
+        let config = AppConfig::default();
+        let index = IndexService::new(
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
+            EmbeddingConfig::default(),
+        );
+        let mgr = AgentLoopManager::default();
+        // 长度只够「折叠得动」（L1 阈值 1600 字符），但不够触发首轮估算越线。
+        // 这样折叠只可能由服务端 usage 触发，正好验证「usage 优先」这条口径。
+        let big = "x".repeat(2_000);
+        let call = |id: &str| {
+            json!({"role":"assistant","content":"","tool_calls":[{"id":id,"type":"function",
+                   "function":{"name":"fs_read_file","arguments":"{\"filePath\":\"a.txt\"}"}}]})
+        };
+        let start = mgr
+            .start(StartParams {
+                model: "m".into(),
+                messages: vec![
+                    json!({"role":"user","content":"start"}),
+                    call("c1"),
+                    json!({"role":"tool","tool_call_id":"c1","content": big}),
+                    json!({"role":"user","content":"go on"}),
+                    call("c2"),
+                    json!({"role":"tool","tool_call_id":"c2","content":"ok"}),
+                    json!({"role":"user","content":"keep going"}),
+                ],
+                tools: vec![],
+                workspace_root: None,
+                max_tool_calls: 10,
+                max_rounds: 10,
+                token_budget: 4096,
+                trigger_ratio: 0.8,
+                run_id: None,
+            })
+            .unwrap();
+
+        // 第 1 轮：模型要工具（服务端说这轮用了 5000 token，越过 4096*0.8）
+        let delegated = mgr
+            .continue_llm(
+                &config,
+                &index,
+                &start.run_id,
+                LlmResponseInput {
+                    content: Some(String::new()),
+                    tool_calls: vec![ToolCallInput {
+                        id: "c3".into(),
+                        name: "fs_read_file".into(),
+                        arguments: json!({"filePath":"b.txt"}),
+                    }],
+                    usage: Some(json!({ "prompt_tokens": 5000 })),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(delegated.phase, "need_delegate");
+
+        // 第 2 轮之前：应当先折叠，再把（变短的）messages 交给宿主
+        let next = mgr
+            .submit_tool_results(
+                &config,
+                &index,
+                &start.run_id,
+                vec![ToolResultInput {
+                    id: "c3".into(),
+                    result: json!({"ok": true}),
+                    error: None,
+                }],
+            )
+            .unwrap();
+        assert_eq!(next.phase, "need_llm");
+        let fact = next.compacted.expect("越线时必须报折叠事实");
+        assert_eq!(fact.trigger_source, "usage", "有 usage 就不该用字符比估值");
+        assert!(fact.level >= 1);
+        assert!(fact.folded_tool_results >= 1);
+
+        let messages = next
+            .llm_body
+            .as_ref()
+            .and_then(|b| b.get("messages"))
+            .and_then(|m| m.as_array())
+            .cloned()
+            .expect("llm_body.messages");
+        let folded_tool = messages
+            .iter()
+            .find(|m| m.get("tool_call_id").and_then(|v| v.as_str()) == Some("c1"))
+            .expect("折叠不能删消息");
+        assert!(
+            folded_tool["content"].as_str().unwrap().len() < 2000,
+            "旧工具结果应被就地截短"
+        );
+        let kept_call = messages
+            .iter()
+            .find(|m| {
+                m.get("tool_calls")
+                    .and_then(|t| t.as_array())
+                    .map(|a| a.iter().any(|c| c["id"] == "c1"))
+                    .unwrap_or(false)
+            })
+            .expect("assistant tool_calls 必须保留");
+        assert_eq!(kept_call["tool_calls"][0]["function"]["name"], "fs_read_file");
+        assert_eq!(messages.len(), 9, "折叠不新增/不删除消息（7 + assistant + tool 结果）");
+
+        // 事实只交一次：下一轮没有新折叠就不能再报
+        let again = mgr
+            .continue_llm(
+                &config,
+                &index,
+                &start.run_id,
+                LlmResponseInput {
+                    content: Some("done".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(again.phase, "done");
+        assert!(again.compacted.is_none(), "没折叠就不该再报事实");
+    }
+
     #[test]
     fn start_returns_need_llm() {
         let mgr = AgentLoopManager::default();
@@ -712,6 +1053,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 150,
                 max_rounds: 96,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
         assert_eq!(r.phase, "need_llm");
@@ -736,6 +1080,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 10,
                 max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
 
@@ -778,6 +1125,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 10,
                 max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
 
@@ -825,6 +1175,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 10,
                 max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
 
@@ -923,6 +1276,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 10,
                 max_rounds: 1,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
         {
@@ -957,6 +1313,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 0,
                 max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
         let done2 = mgr
@@ -995,6 +1354,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 0,
                 max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
 
@@ -1052,6 +1414,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 150,
                 max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
 
@@ -1107,6 +1472,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 10,
                 max_rounds: 1,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
 
@@ -1157,6 +1525,9 @@ mod tests {
                 workspace_root: None,
                 max_tool_calls: 10,
                 max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
             })
             .unwrap();
 

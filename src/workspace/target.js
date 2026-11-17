@@ -154,6 +154,10 @@ function workspacePathForSession(target) {
  */
 const WORKTREE_TAIL_RE = /[\\/]\.dieyun[\\/]worktrees[\\/][^\\/]+(?:[\\/][^\\/]+)?$/i;
 
+/** 副本段的任意出现（不在末尾也认）：`…/.dieyun/worktrees/<id>[/<role>]…`
+ *  比 `WORKTREE_TAIL_RE` 宽一档，只给「这是哪个项目」用，别拿去量沙箱边界。 */
+const WORKTREE_SEGMENT_RE = /[\\/]\.dieyun[\\/]worktrees[\\/][^\\/]+(?:[\\/][^\\/]+)?/gi;
+
 /** @param {string} p @returns {string} 去掉 worktree 尾巴后的路径（没尾巴就原样返回） */
 function stripWorktreeSuffix(p) {
   const s = String(p || '');
@@ -166,15 +170,27 @@ function stripWorktreeSuffix(p) {
  * 会话工作区的「项目身份」： ssh URI 与本地路径都支持，形态与输入保持一致。
  * 同一项目的多个会话因此落在同一个分组里，而不是各自变成名为 `main` 的文件夹。
  *
- * 只剥尾巴、不做 path.resolve：远端会话存的是 POSIX 路径，在 Windows 上 resolve
- * 会把它变成 `E:\srv\...`。剥尾巴这个动作与平台、与是不是 URI 都无关。
+ * 与 `stripWorktreeSuffix` 的分工：那个答「这段路径的**末尾**是不是会话副本」（沙箱边界 /
+ * 建副本要用它的保守口径，不动中间段）；这里答「这是哪个**项目**」，所以**每一段**副本都要
+ * 折掉 —— 副本里再开副本（交接链留下的脏路径，2026-10-31「对话交接导致路径混乱」）只有
+ * 全折才能回到真正的仓库根：`repo/.dieyun/worktrees/s/main/Sub/.dieyun/worktrees/s2/main`
+ * → `repo/Sub`，而不是 `repo/.dieyun/worktrees/s/main/Sub`（那个目录在别人会话的副本里）。
+ *
+ * 只剥副本段、不做 path.resolve：远端会话存的是 POSIX 路径，在 Windows 上 resolve
+ * 会把它变成 `E:\srv\...`。剥段这个动作与平台、与是不是 URI 都无关。
  * @param {string} input ssh://user@host:port/path 或本地路径
  * @returns {string}
  */
 function projectWorkspacePath(input) {
   const raw = String(input || '').trim();
   if (!raw) return '';
-  return stripWorktreeSuffix(raw) || raw;
+  let out = raw;
+  for (;;) {
+    const next = out.replace(WORKTREE_SEGMENT_RE, '');
+    if (next === out) break;
+    out = next;
+  }
+  return out || raw;
 }
 
 function normalizeSshEndpoint(target) {

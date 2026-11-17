@@ -204,6 +204,21 @@ function createMemoryHandlers({ requireRustCore, ctx }) {
         })
       ),
 
+    // 领走一份交接：读出即删（Rust 侧同一条语句序列里完成）。返回 null = 已经不在了。
+    // 「用过就没了」这条语义只落在这里，菜单判据（handoff_latest）跟着自动变，
+    // 不另存「已消费」标记，也不加过期时间。
+    'memory.handoff_take': async ({ sessionId }) => {
+      const sid = String(sessionId || '').trim();
+      if (!sid) {
+        const e = new Error('sessionId 必填');
+        e.code = 'INVALID_PARAMS';
+        throw e;
+      }
+      return handoffWithProjectWorkspace(
+        await requireRustCore('memory.handoff_take', { sessionId: sid })
+      );
+    },
+
     'memory.message_append': async ({ sessionId, role, content, reasoning }) => {
       const sid = String(sessionId);
       const r = String(role);

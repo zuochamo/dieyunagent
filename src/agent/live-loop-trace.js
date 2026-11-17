@@ -8,6 +8,8 @@
  * 与主循环 subagent（main/ipc/agent-runtime.js）共用这里，避免两份实现漂移。
  */
 const { stripToolCallMarkup } = require('../llm-tool-call-fallback');
+// 卡片标题的 label 截断位数：数字单一来源（agent-limits），这里不自留字面量。
+const { getAgentLimits } = require('./agent-limits');
 
 const LIVE_THOUGHT_CHARS = 2000;
 
@@ -64,6 +66,7 @@ function subagentKindLabel(kind) {
  * `label` 是派发方给这次派发起的短名（planner 用子任务 title，主循环 subagent 用模型传的
  * label）。**序号负责区分，label 负责可读** —— 只有序号时，用户看到一列「写入子 Agent #1/#2/#3」
  * 完全分不清谁在改什么，只能一个个点开。
+ * 长度上限单点截断（标题是 flex-wrap 的，不截断只会把卡片撑高，不会溢出）。
  * 没有序号（非子 Agent 的隔离卡片、老调用点）时退回 loopTraceBaseLabel。
  */
 function subagentCardTitle(meta) {
@@ -71,9 +74,23 @@ function subagentCardTitle(meta) {
   const n = Number(m.subagentIndex) || 0;
   if (n <= 0) return loopTraceBaseLabel(m);
   const base = `${subagentKindLabel(m.subagentKind || m.worker)}子 Agent #${n}`;
-  const label = String(m.label || '').trim();
+  const label = clipCardLabel(m.label);
   if (!label) return base;
   return `${base} · ${label}`;
+}
+
+/** 卡片标题里的 label 截断：上限来源 agent-limits（数字只在那里改）。 */
+function clipCardLabel(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  let max = 0;
+  try {
+    max = Number(getAgentLimits().subagentCardLabelMaxChars) || 0;
+  } catch {
+    max = 0;
+  }
+  if (!(max > 0) || text.length <= max) return text;
+  return `${text.slice(0, max)}…`;
 }
 
 /**
@@ -515,9 +532,11 @@ function buildIsolatedCard(meta, rounds, subagentId) {
     subagentId: subagentId || m.subagentId || '',
     isolated: true,
     worker: m.worker || '',
-    // 类型 / 序号随卡片走，收尾合并后仍能拼出同一个标题
+    // 类型 / 序号 / 名字随卡片走：收尾合并（mergeIsolatedCards）与落库重放都只有**条目**，
+    // 不带 label 的话标题会在「跑完那一刻」从「写入子 Agent #1 · 改 alpha」退回「写入子 Agent #1」。
     subagentKind: String(m.subagentKind || m.worker || ''),
     subagentIndex: Number(m.subagentIndex) || 0,
+    label: String(m.label || '').trim(),
     parallel: !!m.parallel,
     rounds: list
   };

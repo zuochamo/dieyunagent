@@ -425,8 +425,10 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   async function cancelActiveWorkerLoops() {
     const ids = [...activeWorkerLoopIds];
     activeWorkerLoopIds.clear();
+    // worker 循环现在由 core 驱动（`agent.run.*`），取消也必须走 `agent.run.cancel`：
+    // 旧的 `agent.loop.cancel` 只清账本，不会停掉 core 里那次在途的 LLM 调用。
     await Promise.all(
-      ids.map((loopRunId) => bridge.invoke('agent.loop.cancel', { runId: loopRunId }).catch(() => {}))
+      ids.map((loopRunId) => bridge.invoke('agent.run.cancel', { runId: loopRunId }).catch(() => {}))
     );
   }
 
@@ -552,9 +554,14 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     const parallelRun = !!opts.parallelBatch || !!(job.tasks && job.tasks.length > 1);
     const worktreeRole = opts.worktreeRole || worker;
     let wtPath = null;
-    if (agentBridge.worktreeCreate && coordinatorRunId) {
+    let wtBaseSha = null;
+    // 探建阶段已确认「这个工作区建不出 worktree」时（`noIsolation`），整批统一走主工作区串行。
+    // 不允许同一批里 A 在副本、B 在主工作区 —— 半隔离比不隔离更难查：B 的改动会**绕过**
+    // 「变更」面板直接落盘（既不在预览里，也没法撤销）。
+    if (!opts.noIsolation && agentBridge.worktreeCreate && coordinatorRunId) {
       const wt = await agentBridge.worktreeCreate(coordinatorRunId, worktreeRole);
       wtPath = wt?.ok ? wt.path : null;
+      wtBaseSha = wt?.baseSha || null;
     }
     // **隔离闸（失败关闭）**：多路执行器同时跑时，缺 worktree 就等于两路同时写主工作区。
     // 探测阶段已经确认过能建（见 runWorkerBatch），走到这里还失败说明是环境问题
@@ -564,6 +571,14 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         `并行执行器 ${worktreeRole} 没有拿到 worktree（工作区不是 git 仓库或创建失败）：` +
           '已拒绝让多路执行器同时写主工作区。请改用 git 工作区，或在设置里关掉「多 Agent 并行执行」'
       );
+    }
+    // 重试：先把副本清回基线。否则上一次失败的半成品会留在副本里，被当成**这一次**的产出
+    // 合并进主工作区（重试没碰过的文件也会被带出去）。
+    if (isRetry && wtPath && agentBridge.worktreeReset) {
+      const reset = await agentBridge.worktreeReset(wtPath, wtBaseSha);
+      if (reset && reset.ok === false) {
+        throw new Error(`重试前重置 worktree 失败（${worktreeRole}）：${reset.error || '未知原因'}`);
+      }
     }
     const outputs = [];
     let priorSummary = '';
@@ -678,32 +693,38 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   }
 
   /**
-   * 这一批最多同时跑几路执行器。
+   * 这一批的执行方式：`{ limit, isolated }`。
    *
-   * 两个条件都要满足：① 用户没把上限设成 1；② **隔离能力可用**（工作区是 git 仓库，
+   * 两个条件都要满足才并发：① 用户没把上限设成 1；② **隔离能力可用**（工作区是 git 仓库，
    * 能给每一路建出 worktree）。探测方式：先给第一路建一次 —— `createAgentWorktree` 是幂等的
    * （目录已存在则返回 `reused:true`），所以真跑时不会重复建，探测本身不浪费用。
-   * 建不出来就退成串行（limit=1，此时 `parallelBatch=false`，允许在主工作区里一路一路做）。
+   *
+   * `isolated=false` 时整批**统一**退成「串行 + 主工作区」（limit=1 且各 job 不再尝试建副本）：
+   * 半隔离（A 有副本、B 没有）会让 B 的改动绕过「变更」面板直接落盘，比不隔离更难查。
    */
-  async function resolveParallelWorkerLimit(jobs) {
-    if (!(jobs.length > 1)) return 1;
-    if (!agentBridge.worktreeCreate || !coordinatorRunId) return 1;
+  async function resolveWorkerBatchPlan(jobs) {
+    if (!(jobs.length > 1)) return { limit: 1, isolated: true };
+    if (!agentBridge.worktreeCreate || !coordinatorRunId) return { limit: 1, isolated: false };
     const first = jobs[0] || {};
     const probe = await agentBridge.worktreeCreate(coordinatorRunId, first.worker || 'A');
-    if (!probe || !probe.ok) return 1;
-    return Math.max(1, Math.min(workerCap, jobs.length));
+    if (!probe || !probe.ok) return { limit: 1, isolated: false };
+    return { limit: Math.max(1, Math.min(workerCap, jobs.length)), isolated: true };
   }
 
   async function runWorkerBatch(workerJobs, isRetry) {
     const jobs = workerJobs || [];
     throwIfAborted(signal);
-    const parallelLimit = await resolveParallelWorkerLimit(jobs);
+    const plan = await resolveWorkerBatchPlan(jobs);
+    const parallelLimit = plan.limit;
     const parallelBatch = jobs.length > 1 && parallelLimit > 1;
     const settled = await settleAllAbortable(
       jobs,
       (job) => {
         throwIfAborted(signal);
-        return runWorkerJob(job, isRetry, { parallelBatch });
+        return runWorkerJob(job, isRetry, {
+          parallelBatch,
+          noIsolation: !plan.isolated
+        });
       },
       {
         signal,
@@ -714,17 +735,16 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       }
     );
     const results = [];
+    /** 先收齐整批结果再决定早退：撞轮次的那一路不该把同批其余路的失败吞掉
+     *  （吞掉 = core 的 review 看不到那些 task 的 error，可能直接放过一道没跑完的活）。 */
+    let hitRound = null;
     for (let i = 0; i < settled.length; i += 1) {
       const s = settled[i];
       const job = jobs[i] || {};
       if (s.status === 'fulfilled') {
         results.push(...s.value.outputs);
-        if (s.value.hitRoundLimit) {
-          return {
-            hitRoundLimit: true,
-            partial: s.value.partial,
-            workerResults: results
-          };
+        if (s.value.hitRoundLimit && !hitRound) {
+          hitRound = { partial: s.value.partial };
         }
         continue;
       }
@@ -751,6 +771,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           error: errorText
         });
       }
+    }
+    if (hitRound) {
+      return { hitRoundLimit: true, partial: hitRound.partial, workerResults: results };
     }
     return { hitRoundLimit: false, workerResults: results };
   }
@@ -948,12 +971,17 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       throw new Error(phase?.message || 'planner 未正常结束');
     }
 
-    if (coordinatorRunId && agentBridge.checkpointDelete) {
+    // 断点只在**真正跑完**时删除。撞轮次/工具预算（hitRoundLimit）的那一轮是「跑到一半停车」，
+    // 断点必须留着 —— 否则「继续」两条入口（tool-loop continue 状态 / planner 断点）都取不到
+    // 东西，Composer 空提交变成毫无反应，而这一轮又已经交付了正文。
+    if (coordinatorRunId && agentBridge.checkpointDelete && !phase.hitRoundLimit) {
       try {
         await Promise.resolve(agentBridge.checkpointDelete(coordinatorRunId));
       } catch {
         // ignore
       }
+    } else if (coordinatorRunId && phase.hitRoundLimit) {
+      await persistPlannerCheckpoint({ status: 'running', resumable: true, hitRoundLimit: true });
     }
 
     return {

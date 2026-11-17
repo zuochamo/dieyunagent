@@ -37,6 +37,8 @@ describe('stripWorktreeSuffix', () => {
   });
 
   it('嵌套更深的副本路径不剥（只认末尾形状，防止误伤真实目录）', () => {
+    // 这是「副本形状」这一层的保守口径（沙箱边界 / 建副本用）；「这是哪个项目」的问题
+    // 归 projectWorkspacePath（下面那组用例），它会把中间段也折掉。
     const deep = '/srv/proj/.dieyun/worktrees/sess-1a2b3c4d/main/sub';
     assert.equal(stripWorktreeSuffix(deep), deep);
   });
@@ -81,6 +83,32 @@ describe('projectWorkspacePath', () => {
     assert.equal(projectWorkspacePath(''), '');
     assert.equal(projectWorkspacePath(null), '');
     assert.equal(projectWorkspacePath(undefined), '');
+  });
+
+  it('副本里再开副本（交接链留下的脏路径）：每一段都折掉，回到真正的仓库根', () => {
+    // 2026-11-17 现场：交接的来源会话工作区是这样两层副本，只折末尾一段会得到
+    // `…/worktrees/sess-691b95cb/main/Dieyunkno` —— 一个落在**别人会话的副本里**的目录。
+    assert.equal(
+      projectWorkspacePath(
+        'ssh://u@h:22/srv/proj/.dieyun/worktrees/sess-11111111/main/Sub/.dieyun/worktrees/sess-22222222/main'
+      ),
+      'ssh://u@h:22/srv/proj/Sub'
+    );
+  });
+
+  it('折到没有副本段就停（幂等，不误伤普通目录）', () => {
+    const repo = projectWorkspacePath(
+      'ssh://u@h:22/srv/proj/.dieyun/worktrees/sess-11111111/main'
+    );
+    assert.equal(repo, 'ssh://u@h:22/srv/proj');
+    assert.equal(projectWorkspacePath(repo), repo);
+  });
+
+  it('Windows 本地嵌套副本同样折到仓库根', () => {
+    assert.equal(
+      projectWorkspacePath('E:\\work\\proj\\.dieyun\\worktrees\\sess-11111111\\main\\Sub'),
+      'E:\\work\\proj\\Sub'
+    );
   });
 
   it('与 buildSshUri 往返一致（远端会话落库/反推不会漂移）', () => {

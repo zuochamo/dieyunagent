@@ -390,6 +390,26 @@ async function main() {
   bvPanel.setPanelState({ open: false });
   assert(bvPanel.status().panelOpen === false, 'close does not need bounds');
 
+  // 边界只决定「贴在哪」，不是状态流的内容：拖分隔条时 Renderer 每帧都要重贴一次边界，
+  // 每次都推 browser:state 的话，那边每帧都会把会话视图落盘一次（localStorage 同步写）。
+  const statePushes = [];
+  const fakeWin = {
+    isDestroyed: () => false,
+    webContents: { send: (channel, payload) => statePushes.push({ channel, payload }) }
+  };
+  const bvState = createBrowserViewController({ getMainWindow: () => fakeWin, log: () => {} });
+  bvState.setPanelState({ open: true, bounds: { x: 0, y: 0, width: 300, height: 200 } });
+  const pushesAfterOpen = statePushes.length;
+  assert(pushesAfterOpen > 0, 'opening the panel publishes state once');
+  bvState.setPanelState({ open: true, bounds: { x: 4, y: 0, width: 320, height: 200 } });
+  assert(
+    statePushes.length === pushesAfterOpen,
+    'bounds-only updates do not republish state (drag would spam the renderer)'
+  );
+  assert(bvState.status().bounds.width === 320, 'bounds-only updates still move the native view');
+  bvState.setPanelState({ open: false });
+  assert(statePushes.length === pushesAfterOpen + 1, 'closing the panel republishes state once');
+
   const { createPlaywrightRunner } = require('../src/browser/playwright-runner');
   const pwStage = createPlaywrightRunner({ log: () => {} });
   assert(pwStage.status().viewport === null, 'playwright viewport starts unset');

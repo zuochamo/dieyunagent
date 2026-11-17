@@ -1,8 +1,6 @@
 'use strict';
 
 const { loadModelSettings } = require('../model-settings');
-const { buildLlmHeadersFromConfig } = require('./llm-request');
-const { mergedRequestOptions } = require('./model-api-config');
 const {
   resolveModelContextWindowFromSettings,
   computeEffectiveInputBudget,
@@ -11,17 +9,28 @@ const {
 } = require('./model-runtime-by-tier');
 const { MODEL_RUNTIME_DEFAULTS } = require('./model-runtime-presets');
 const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
-const { estimateTextTokens } = require('./token-estimate');
-const { COMPACTION } = require('../compaction-prompts');
-const { recordLlmUsage } = require('./llm-usage-recorder');
 const { recordCompactionTelemetry, compactionTelemetryRow } = require('./compaction-telemetry');
-const { buildEstimatedUsageObject, estimatePromptTokensFromMessages } = require('../llm-usage-stats');
+const { COMPACTION_FOLD_TIMEOUT_MS } = require('../core-rpc-timeouts');
 const {
   raceAbortable,
   isAbortError,
   throwIfAborted
 } = require('../llm-reconnect-retry');
-const { COMPACTION_MAYBE_COMPACT_TIMEOUT_MS } = require('../core-rpc-timeouts');
+
+/**
+ * 上下文压缩的 Main 侧入口。
+ *
+ * 判定与折叠**全在 Rust**（`crates/dieyun-core/src/compaction/fold.rs`）：确定性、
+ * 幂等、无 LLM。这里只做三件 Node 才能做的事：
+ * 1. 把「模型窗口 → 输入预算」算出来（settings / 档位 / 工具 schema 扣减都在 JS 侧）；
+ * 2. 把上一轮服务端回报的 `usage.prompt_tokens` 透传下去（真实用量优先于字符比估值）；
+ * 3. 记遥测。
+ *
+ * 已删除的整套旧机制（别再搬回来）：`compaction-prompts.js` 的摘要提示词、
+ * `resolveCompactionLlm` 的第二条 LLM 通道、冷却轮数 `COMPACTION_COOL_DOWN_ROUNDS`、
+ * `cumulativeSummary` 的跨轮累积与 `memory.compaction_recent` 水合。它们存在的唯一
+ * 理由是「让 LLM 摘要尽量不丢信息」——折叠把原始消息留在原位，不需要一层摘要替它保管。
+ */
 
 /** 模型自带窗口（settings.customModels[].contextWindow / 名字线索）优先，其次磁盘 settings。 */
 function resolveEffectiveContextWindow(settings, modelRouteOrId) {
@@ -68,8 +77,8 @@ function getEffectiveInputBudget(settings, modelRouteOrId) {
  * （messages + tools + system）会顶穿窗口 —— 而工具 schema 既不可折叠也不可压缩。
  *
  * 扣减上限为 base 的 25%：小窗口档本来就放不下完整工具目录，
- * 不能让预算直接塌到地板后变成「每轮误压却压不掉」。
- * 地板取 MIN_INPUT_BUDGET_TOKENS（= getEffectiveInputBudget 的地板），
+ * 不能让预算直接塌到地板后变成「每轮误折却折不掉」。
+ * 地板取 MIN_INPUT_BUDGET_TOKENS（= computeEffectiveInputBudget 的地板），
  * 两处必须同值，否则扣减后的预算会反超 base。
  */
 const TOOLS_SCHEMA_DEDUCT_MAX_RATIO = 0.25;
@@ -92,97 +101,6 @@ function getCompactionTriggerRatio(settings) {
   return MODEL_RUNTIME_DEFAULTS.compactionTriggerRatio;
 }
 
-/**
- * 冷却轮数：作为**必传参数**交给 Rust（Rust `prepare` 无默认值，缺参即报错）。
- * 这里是该值的唯一来源；一次压缩尝试（无论成功或失败）都会写入
- * POST_COMPACTION_ROUND_COUNT，使冷却真正生效。
- */
-const COMPACTION_COOL_DOWN_ROUNDS = 6;
-
-/**
- * 一次压缩尝试后写入的轮次计数，与 Rust `POST_COMPACTION_ROUND_COUNT` 对齐。
- * 必须 >0 且 < COMPACTION_COOL_DOWN_ROUNDS：否则后续几轮不会跳过压缩。
- */
-const POST_COMPACTION_ROUND_COUNT = 1;
-
-/**
- * Rust `compaction.maybe_compact` 的 prompts 参数（字段名 camelCase）。
- * 文案唯一来源是 `src/compaction-prompts.js`；这里只做字段映射，**不再放一份兜底文案**
- * （旧实现放在 compaction-rust-bridge.js，prefix 与主文案漂移成「历史背景」vs「自动压缩」）。
- * 若某字段缺失，由 Rust 侧 `CompactionPrompts::default()` 兜底。
- */
-function buildCompactionPrompts() {
-  const C = COMPACTION || {};
-  return {
-    system: C.SYSTEM || '',
-    user: C.USER || '',
-    incrementalSystem: C.INCREMENTAL_SYSTEM || C.SYSTEM || '',
-    incrementalUser: C.INCREMENTAL_USER || '',
-    compactPrefix: C.COMPACT_PREFIX || '',
-    compactSuffix: C.COMPACT_SUFFIX || ''
-  };
-}
-
-function resolveTextModel(settings) {
-  return (settings && settings.textModel) || '';
-}
-
-/** 压缩优先用当前会话 model（opts.model / apiConfig.model），textModel 仅作兜底 */
-function resolveCompactionLlm(settings, opts = {}) {
-  const apiConfig = opts.apiConfig || {};
-  const baseUrl = String(apiConfig.baseUrl || settings.baseUrl || '').trim();
-  const apiKey = String(apiConfig.apiKey || settings.apiKey || '').trim();
-  const sessionModel = String(opts.model || apiConfig.model || resolveTextModel(settings) || '').trim();
-  // 会话标识单一来源：优先 apiConfig 上随「本次运行 LLM 配置」一起带下来的那个
-  // （主链路 agent-runtime 就是这样装的 apiCfg.sessionId），opts.sessionId 只作旧调用点兜底。
-  // 归一化后写回 config，交给 llm-request.js 统一渲染 —— 压缩侧不再自己拼请求头。
-  const sessionId = String(apiConfig.sessionId || opts.sessionId || '').trim();
-  const config = {
-    ...apiConfig,
-    ...mergedRequestOptions(apiConfig, settings),
-    baseUrl,
-    apiKey,
-    model: sessionModel
-  };
-  if (sessionId) config.sessionId = sessionId;
-  return {
-    baseUrl,
-    apiKey,
-    textModel: sessionModel,
-    // 压缩与主链路必须带同一套请求头（单一来源 llm-request.js）。
-    // 少了这里就会出现「对话正常、压缩一跑就 400」——历史上最难定位的一类不一致。
-    // 请求修饰字段缺失时回落到 settings（顶层 legacy 配置同样可能自带自定义头）。
-    headers: buildLlmHeadersFromConfig(config),
-    authMode: String(config.authMode || apiConfig.authMode || '').trim()
-  };
-}
-
-/** 中转/供应商内容审核拒绝压缩摘要时，跳过 LLM 压缩而非阻断 Agent。 */
-function isCompactionPolicyError(err) {
-  const msg = String(err && err.message ? err.message : err || '');
-  const lower = msg.toLowerCase();
-  return (
-    lower.includes('content_policy') ||
-    lower.includes('content policy') ||
-    msg.includes('内容审核') ||
-    msg.includes('风险规则')
-  );
-}
-
-function compactionSkippedResult(messages, reason, llmError) {
-  return {
-    messages,
-    compacted: false,
-    tokensBefore: undefined,
-    tokensAfter: undefined,
-    summary: null,
-    foldedTranscript: '',
-    pinnedUserCount: 0,
-    compactionSkipped: reason || 'policy',
-    llmError: llmError ? String(llmError) : undefined
-  };
-}
-
 function requireCoreBridge(coreBridge) {
   if (!coreBridge || typeof coreBridge.isReady !== 'function' || !coreBridge.isReady()) {
     const e = new Error('dieyun-core 未就绪');
@@ -193,104 +111,30 @@ function requireCoreBridge(coreBridge) {
 }
 
 /**
- * Main / Renderer compaction — 全链路 Rust（含 LLM 摘要）
  * @param {string} userData
  * @param {{ invoke?: Function, isReady?: Function } | null} coreBridge
  */
 function createMainCompactionAgent(userData, coreBridge = null) {
-  /** @type {Map<string, { cumulativeSummary: string | null, compactionRoundCount: number, hydrated?: boolean }>} */
-  const sessionStates = new Map();
-
-  function getSessionState(sessionId) {
-    const id = sessionId != null ? String(sessionId).trim() : '';
-    if (!id) {
-      return { cumulativeSummary: null, compactionRoundCount: 0, hydrated: true };
-    }
-    if (!sessionStates.has(id)) {
-      sessionStates.set(id, { cumulativeSummary: null, compactionRoundCount: 0 });
-    }
-    return sessionStates.get(id);
-  }
-
   async function estimateMessagesTokens(messages) {
     const bridge = requireCoreBridge(coreBridge);
     const r = await bridge.invoke('compaction.estimate', { messages }, 10000);
     return Number(r && r.tokens) || 0;
   }
 
-  async function hydrateSessionState(bridge, st, sessionId) {
-    if (st.hydrated) return;
-    st.hydrated = true;
-    if (st.cumulativeSummary) return;
-    const sid = sessionId != null ? String(sessionId).trim() : '';
-    if (!sid) return;
-    try {
-      const rows = await bridge.invoke(
-        'memory.compaction_recent',
-        { sessionId: sid, limit: 1 },
-        8000
-      );
-      const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
-      const text = row && (row.summary_text || row.summaryText);
-      if (text && String(text).trim()) st.cumulativeSummary = String(text).trim();
-    } catch (_e) {
-      // archive read is best-effort; compaction still runs without cumulative summary
-    }
-  }
-
+  /**
+   * @param {any[]} messages
+   * @param {{ tokenBudget?: number, contextTierId?: string, model?: string, sessionId?: string,
+   *   toolsChars?: number, force?: boolean, observedPromptTokens?: number, signal?: AbortSignal }} [opts]
+   */
   async function maybeCompactMessages(messages, opts = {}) {
-    // 遥测口径：一次「压缩次数」= 一次真正发起过摘要 LLM 的尝试。未触发（未达触发线 /
-    // 仍在冷却 / 可折叠原子不足）与「未配置 LLM」的早退会被 compactionTelemetryRow 判为
-    // null 而不记录 —— 否则每轮 LLM 前的空转都会进窗口，把成功率稀释成没意义的数。
-    // 本函数是 loop / planner / plan / IPC / Renderer 五条路径的唯一汇聚点，遥测只此一处。
     const startedAt = Date.now();
     const bridge = requireCoreBridge(coreBridge);
-    // 按档位叠加「模型与段预算」：磁盘 settings 只有 default 档（Renderer 只镜像 default），
-    // 非 default 档的窗口 / 输出 / 预留 / 触发比必须在这一层生效，否则 16K、128K 档
-    // 在压缩侧仍按 default 档的 512K 算阈值。
+    // 按档位叠加「模型与段预算」：磁盘 settings 只有 default 档，非 default 档的窗口 /
+    // 输出 / 预留 / 触发比必须在这一层生效，否则 16K、128K 档仍按 default 档算阈值。
     const settings = applyTierRuntime(loadModelSettings(userData), userData, {
       tierId: opts.contextTierId,
       model: opts.model
     });
-    const llm = resolveCompactionLlm(settings, opts);
-    const st = getSessionState(opts.sessionId);
-    const signal = opts.signal || null;
-    /**
-     * 判定事实（预算 / 触发比 / 冷却计数）：请求快照要把它们落进行里，
-     * 否则「这轮为什么没压缩」在事后无法复盘（字段建了却永远 NULL）。
-     * 放在 finish 里统一附加，避免每个 return 分支各写一遍。
-     */
-    let budgetFacts = null;
-    const finish = (payload) => {
-      const row = budgetFacts ? { ...payload, ...budgetFacts, compactionRoundCount: st.compactionRoundCount } : payload;
-      recordCompactionTelemetry(
-        userData,
-        compactionTelemetryRow({
-          payload: row,
-          force: !!opts.force,
-          model: llm.textModel,
-          // 会话标识：面板按会话统计压缩次数/成功率，缺了它就只能算全机累计
-          sessionId: opts.sessionId,
-          startedAt
-        })
-      );
-      return row;
-    };
-    throwIfAborted(signal);
-    if (!llm.baseUrl) {
-      return finish({
-        messages,
-        compacted: false,
-        tokensBefore: undefined,
-        tokensAfter: undefined,
-        summary: null,
-        foldedTranscript: '',
-        pinnedUserCount: 0
-      });
-    }
-    await hydrateSessionState(bridge, st, opts.sessionId);
-    // opts.tokenBudget 是「基础输入预算」；工具 schema 超出预留的部分在这里统一扣，
-    // 调用方无需各自感知（IPC / loop / planner 都只传 base 与 toolsChars）。
     const baseBudget =
       Number(opts.tokenBudget) > 0
         ? Number(opts.tokenBudget)
@@ -301,116 +145,135 @@ function createMainCompactionAgent(userData, coreBridge = null) {
       opts.toolsChars
     );
     const triggerRatio = getCompactionTriggerRatio(settings);
-    budgetFacts = { tokenBudget, triggerRatio };
+    const observed = Number(opts.observedPromptTokens);
+
+    throwIfAborted(opts.signal || null);
     const result = await raceAbortable(
       bridge
         .invoke(
-          'compaction.maybe_compact',
+          'compaction.fold',
           {
             messages,
             tokenBudget,
             triggerRatio,
-            coolDownRounds: COMPACTION_COOL_DOWN_ROUNDS,
-            force: !!opts.force,
-            compactionRoundCount: st.compactionRoundCount,
-            cumulativeSummary: st.cumulativeSummary,
-            prompts: buildCompactionPrompts(),
-            model: llm.textModel,
-            llm,
-            runId: opts.runId || undefined
+            // 服务端 usage 是唯一「真值」：估算法（cjk/1.5 + other/3.2）只用于
+            // 拿不到 usage 的轮次（首轮 / 非兼容端点）。
+            observedPromptTokens: Number.isFinite(observed) && observed > 0 ? observed : null,
+            force: !!opts.force
           },
-          COMPACTION_MAYBE_COMPACT_TIMEOUT_MS
+          COMPACTION_FOLD_TIMEOUT_MS
         )
         .catch((err) => {
           if (isAbortError(err)) throw err;
-          if (isCompactionPolicyError(err)) {
-            return compactionSkippedResult(messages, 'content_policy');
-          }
-          console.warn('[compaction] skip after RPC error', err && err.message);
-          return compactionSkippedResult(
+          console.warn('[compaction] fold 失败', err && err.message);
+          return {
             messages,
-            'llm_error',
-            err && err.message ? err.message : err
-          );
+            compacted: false,
+            triggered: true,
+            foldSkipped: 'rpc_error',
+            foldError: String((err && err.message) || err || '')
+          };
         }),
-      signal
+      opts.signal || null
     );
-    throwIfAborted(signal);
-    if (result && result.compactionSkipped) {
-      const skippedRounds = Number(result.compactionRoundCount);
-      // 失败/异常同样要「进入冷却」而非递增：递增会让计数越过 COMPACTION_COOL_DOWN_ROUNDS
-      // 后再也回不去，于是每轮都重打一次注定失败的大请求。
-      st.compactionRoundCount = Number.isFinite(skippedRounds) && skippedRounds > 0
-        ? skippedRounds
-        : POST_COMPACTION_ROUND_COUNT;
-      return finish({
-        messages,
-        compacted: false,
-        tokensBefore: result.tokensBefore,
-        tokensAfter: result.tokensAfter,
-        summary: null,
-        foldedTranscript: '',
-        pinnedUserCount: 0,
-        compactionSkipped: result.compactionSkipped,
-        llmError: result.llmError || undefined
-      });
-    }
-    if (!result) {
-      st.compactionRoundCount = POST_COMPACTION_ROUND_COUNT;
-      return finish(compactionSkippedResult(messages, 'llm_error', 'compaction.maybe_compact 无响应'));
-    }
-    st.compactionRoundCount = Number(result.compactionRoundCount) || 0;
-    st.cumulativeSummary = result.cumulativeSummary != null ? result.cumulativeSummary : st.cumulativeSummary;
-    const modelForUsage = result.llmModel || llm.textModel || resolveTextModel(settings);
-    if (result.llmUsage) {
-      recordLlmUsage(result.llmUsage, modelForUsage);
-    } else if (result.compacted) {
-      const summaryText = String(
-        result.summary?.summary || result.foldedTranscript || JSON.stringify(result.summary || '')
-      );
-      const est = buildEstimatedUsageObject({
-        promptTokens: estimatePromptTokensFromMessages(messages) + 512,
-        completionTokens: Math.max(128, estimateTextTokens(summaryText))
-      });
-      if (est) recordLlmUsage(est, modelForUsage);
-    }
-    if (result.compacted && typeof opts.onCompacted === 'function') {
-      opts.onCompacted({
-        tokensBefore: result.tokensBefore,
-        tokensAfter: result.tokensAfter,
-        summary: result.summary?.summary || '',
-        foldedTranscript: result.foldedTranscript || ''
-      });
-    }
-    return finish({
-      messages: result.messages || messages,
-      compacted: !!result.compacted,
-      tokensBefore: result.tokensBefore,
-      tokensAfter: result.tokensAfter,
-      summary: result.summary,
-      foldedTranscript: result.foldedTranscript || '',
-      pinnedUserCount: result.pinnedUserCount,
-      compactionSkipped: result.compactionSkipped || undefined,
-      llmError: result.llmError || undefined
-    });
+    throwIfAborted(opts.signal || null);
+
+    const payload = {
+      messages: (result && result.messages) || messages,
+      compacted: !!(result && result.compacted),
+      triggered: !!(result && result.triggered),
+      tokensBefore: result && result.tokensBefore,
+      tokensAfter: result && result.tokensAfter,
+      triggerSource: result && result.triggerSource,
+      level: result && result.level,
+      foldedToolResults: result && result.foldedToolResults,
+      foldedTexts: result && result.foldedTexts,
+      foldedImages: result && result.foldedImages,
+      foldSkipped: result && result.foldSkipped,
+      foldError: result && result.foldError,
+      tokenBudget,
+      triggerRatio
+    };
+    recordCompactionTelemetry(
+      userData,
+      compactionTelemetryRow({
+        payload,
+        force: !!opts.force,
+        sessionId: opts.sessionId,
+        startedAt
+      })
+    );
+    return payload;
   }
 
   return {
     estimateTokens: estimateMessagesTokens,
     estimateMessagesTokens,
-    maybeCompactMessages,
-    resetCompactionState(sessionId) {
-      if (sessionId != null && String(sessionId).trim()) {
-        sessionStates.delete(String(sessionId).trim());
-        return;
-      }
-      sessionStates.clear();
-    }
+    maybeCompactMessages
   };
+}
+
+/**
+ * 循环内折叠的预算口径（与 `maybeCompactMessages` 用的是同一份计算）。
+ *
+ * 为什么要有它：折叠现在发生在 core 的循环里（`agent.loop.need_llm` 之前），Node 不再
+ * 每轮算一遍预算再把 messages 推回去。但「窗口→预算→扣工具 schema」这套口径仍然只有
+ * 这里一处实现，core 只是执行者。
+ *
+ * @param {{ userData?: string, model?: string, contextTierId?: string, toolsChars?: number }} input
+ * @returns {{ tokenBudget: number, triggerRatio: number }}
+ */
+function resolveFoldSpec(input = {}) {
+  const settings = applyTierRuntime(loadModelSettings(input.userData), input.userData, {
+    tierId: input.contextTierId,
+    model: input.model
+  });
+  const baseBudget = getEffectiveInputBudget(settings, input.model);
+  return {
+    tokenBudget: applyToolSchemaDeduction(
+      baseBudget,
+      resolveReserveTokens(settings),
+      input.toolsChars
+    ),
+    triggerRatio: getCompactionTriggerRatio(settings)
+  };
+}
+
+/**
+ * 记一条「循环内折叠」的遥测。
+ *
+ * 折叠事实由 core 给（`FoldFact`），这里只做映射——判定与折叠都不在 Node。
+ * @param {string} userData
+ * @param {object} fact core 回的折叠事实
+ * @param {{ force?: boolean, sessionId?: string, startedAt?: number }} [opts]
+ */
+function recordFoldTelemetry(userData, fact, opts = {}) {
+  if (!fact || !fact.level) return;
+  recordCompactionTelemetry(
+    userData,
+    compactionTelemetryRow({
+      payload: {
+        compacted: true,
+        triggered: true,
+        tokensBefore: fact.tokensBefore,
+        tokensAfter: fact.tokensAfter,
+        triggerSource: fact.triggerSource,
+        level: fact.level,
+        foldedToolResults: fact.foldedToolResults,
+        foldedTexts: fact.foldedTexts,
+        foldedImages: fact.foldedImages
+      },
+      force: !!opts.force,
+      sessionId: opts.sessionId,
+      startedAt: opts.startedAt || Date.now()
+    })
+  );
 }
 
 module.exports = {
   createMainCompactionAgent,
   getEffectiveInputBudget,
-  applyToolSchemaDeduction
+  applyToolSchemaDeduction,
+  resolveFoldSpec,
+  recordFoldTelemetry
 };

@@ -3,19 +3,5 @@
 
 if (typeof window !== 'undefined') {
   window.cleanupSessionContinueState = cleanupSessionContinueState;
-  window.formatCompactionProgressNote = formatCompactionProgressNote;
-  window.shortenCompactionLlmMessage = shortenCompactionLlmMessage;
-  if (agentApi.onCompactionProgress) {
-    agentApi.onCompactionProgress((payload) => {
-      const note = formatCompactionProgressNote(payload);
-      if (!note || typeof window === 'undefined') return;
-      try {
-        window.dispatchEvent(
-          new CustomEvent('dieyun:compaction-progress', { detail: { ...(payload || {}), note } })
-        );
-      } catch {
-        // ignore
-      }
-    });
-  }
+
 }

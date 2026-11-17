@@ -307,8 +307,35 @@ async function createAgentWorktreeInner(repoPath, opts) {
   return { ok: true, path: wtDir, branch, baseSha, reused: false };
 }
 
-/** 取 worktree 当前分支名（detached 或失败返回 null）。 */
-async function resolveWorktreeBranch(wtPath) {
+/**
+ * 把一个 Agent worktree **清回基线**（重试前用）。
+ *
+ * 为什么需要：`createAgentWorktree` 命中已存在目录时返回 `reused:true` 且**不重置内容**
+ * （resume 断点续跑正好需要保住半成品）。但 review 判定失败后的**重试**是「这个 worker
+ * 上一次没做对，再做一遍」——如果半成品还留在副本里，两件坏事同时发生：
+ * ① 重试没碰过的残留文件仍会被 `previewRunWorktreeChanges` 当成该 worker 的产出合并进主工作区；
+ * ② 同一处 `fs_edit` 的 oldString 已被自己改过，模型反复找不到锚点。
+ *
+ * 因此按「生成基线 sha（`createAgentWorktree` 已存）/ HEAD」硬重置 + 清掉未跟踪文件。
+ * @param {string} repoPath
+ * @param {string} wtPath
+ * @param {string} [baseSha] 该 worktree 创建时记录的基线提交
+ */
+async function resetAgentWorktree(repoPath, wtPath, baseSha) {
+  const resolved = wtPath ? path.resolve(wtPath) : '';
+  if (!resolved || !fs.existsSync(resolved)) return { ok: true, skipped: true };
+  if (!(await isGitRepo(resolved))) return { ok: false, error: 'worktree 不是 git 仓库' };
+  const target = String(baseSha || '').trim() || 'HEAD';
+  try {
+    await gitExec(resolved, ['reset', '--hard', target]);
+    await gitExec(resolved, ['clean', '-fd']);
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+  return { ok: true, resetTo: target };
+}
+
+/** 取 worktree 当前分支名（detached 或失败返回 null）。 */async function resolveWorktreeBranch(wtPath) {
   try {
     const name = (await gitExec(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
     return name && name !== 'HEAD' ? name : null;
@@ -1111,6 +1138,7 @@ module.exports = {
   normalizeChangeKind,
   listWorktrees,
   createAgentWorktree,
+  resetAgentWorktree,
   commitWorktreeChanges,
   removeAgentWorktree,
   cleanupRunWorktrees,

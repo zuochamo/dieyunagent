@@ -1896,7 +1896,7 @@
               <label class="check-row"><input type="checkbox" id="perm-camera" /><span>启用手机摄像头</span></label>
               <p class="settings-page-desc check-row-hint camera-hint">让 Agent 通过手机摄像头看一眼现实世界（桌上的东西、你本人、现场），一次一张、不常开；每次拍摄手机上都会显示提示。默认关。</p>
               <label class="check-row"><input type="checkbox" id="perm-desktop-camera" /><span>启用本机摄像头</span></label>
-              <p class="settings-page-desc check-row-hint desktop-camera-hint">让 Agent 抓这台电脑上接的摄像头（外接 UVC，如 OBSBOT Tiny 2）的一帧画面，一次一张、不落盘；需要本机有 ffmpeg。默认关。</p>
+              <p class="settings-page-desc check-row-hint desktop-camera-hint">让 Agent 抓这台电脑上接的摄像头（外接 UVC，如 OBSBOT Tiny 2）的一帧画面，一次一张、不落盘；需要本机有 ffmpeg。带云台的机型（Tiny 2 这类）还能被转过去 / 读当前朝向（Windows 走 DirectShow，Linux 走 v4l2-ctl），一次一动、每次都会读回真实位置。默认关。</p>
               <label class="check-row"><input type="checkbox" id="perm-lsp-diagnostics" checked /><span>启用 LSP 诊断注入</span></label>
               <p class="settings-page-desc check-row-hint lsp-diagnostics-hint">改完源码后把语言服务器报的错（类型、语法、未定义符号）自动带回给 Agent，让它自己发现编译不过的地方；关掉后只能靠跑命令暴露错误。</p>
               <label class="check-row"><input type="checkbox" id="perm-workplace-monitor" checked /><span>工位监控上报</span></label>

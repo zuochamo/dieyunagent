@@ -38,10 +38,6 @@ pub const EMBED_REQUEST_TIMEOUT_MS: u64 = 120_000;
 /// 交互闸门也只在超时（有证据证明它慢）时关闸，401 / 解析失败不关。
 pub const EMBEDDING_TIMEOUT_CODE: &str = "EMBEDDING_TIMEOUT";
 
-pub fn is_timeout_error(err: &CoreError) -> bool {
-    matches!(err, CoreError::Rpc { code, .. } if *code == EMBEDDING_TIMEOUT_CODE)
-}
-
 pub async fn embed_remote(
     cfg: &EmbeddingConfig,
     inputs: &[String],

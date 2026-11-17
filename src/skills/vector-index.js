@@ -184,7 +184,7 @@ async function recallSkills({
   if (vector) {
     try {
       const client = createEmbeddingClient(embeddingConfig || {});
-      // 查询向量走交互闸门：端点比交互预算慢时不发请求（EMBEDDING_TOO_SLOW），落到关键词
+      // 查询向量问 core（本地优先 / 远端可选）；失败即落到关键词通道
       const [queryVec] = await client.embedInteractive(q.slice(0, QUERY_EMBED_TEXT_MAX));
       rows = rankBySemantic({
         entries,

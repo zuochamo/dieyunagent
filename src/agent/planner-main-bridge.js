@@ -113,6 +113,15 @@ function createPlannerMainBridge(deps) {
         return { ok: false, error: e.message || String(e) };
       }
     },
+    async worktreeReset(wtPath, baseSha) {
+      const root = workspaceRootPath();
+      if (!root) return { ok: false, error: '未设置工作空间' };
+      try {
+        return await worktreeService.resetAgentWorktree(root, wtPath, baseSha);
+      } catch (e) {
+        return { ok: false, error: e.message || String(e) };
+      }
+    },
     async worktreeCleanupRun(runId) {
       const root = workspaceRootPath();
       if (!root) return { ok: false, error: '未设置工作空间' };

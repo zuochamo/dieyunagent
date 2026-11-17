@@ -5,19 +5,16 @@ const path = require('path');
 const { getRotatingLog, flushLog, truncateLog, DEFAULT_MAX_BYTES } = require('../logs/rotating-file-log');
 
 /**
- * 上下文压缩遥测（统计信息页「上下文压缩」板块的唯一数据来源）。
+ * 上下文折叠遥测（统计信息页「上下文压缩」板块的唯一数据来源）。
  *
- * 为什么单独一条流而不并进 `tool-telemetry.jsonl`：
- * 那个文件的每一行都是一次「工具调用」，`summarizeTelemetry` 的聚合口径
- * （total / successRate / byTool / REPEAT_BLOCK）全部建立在 `row.tool` 上。
- * 把压缩行混进去会让工具成功率的分母被污染，再靠 `kind` 字段在读取侧过滤
- * —— 那就是「同一份数据两套口径」，不如各自一条流、各自一个汇总函数干净。
+ * 为什么单独一条流而不并进 `tool-telemetry.jsonl`：那个文件每一行都是「一次工具调用」，
+ * `summarizeTelemetry` 的聚合口径（total / successRate / byTool / REPEAT_BLOCK）全部
+ * 建立在 `row.tool` 上。把折叠行混进去会污染工具成功率的分子分母。
  *
  * 记录时机（**唯一入口** `compaction-main.js: maybeCompactMessages`）：
- * 只在「真正发起过摘要 LLM 的一次压缩尝试」时写一行。未触发（未达触发线 /
- * 仍在冷却 / 可折叠原子不足）与「未配置 LLM」的早退在每轮 LLM 前都会发生，
- * 记下来只会让文件按轮次膨胀，且不构成一次压缩。分类口径见
- * `compactionTelemetryRow()`，它是该判定的唯一实现。
+ * 只在**真触发过**（越过触发线或 force）的那一次写一行。未到触发线的早退在每轮 LLM 前
+ * 都会发生，记下来只会让文件按轮次膨胀、把成功率稀释成没有意义的数。
+ * 判定口径见 `compactionTelemetryRow()`，它是该判定的唯一实现。
  */
 
 const COMPACTION_TELEMETRY_FILE = 'compaction-telemetry.jsonl';
@@ -26,31 +23,17 @@ const COMPACTION_TELEMETRY_FILE = 'compaction-telemetry.jsonl';
 const TRIGGER_AUTO = 'auto';
 const TRIGGER_FORCE = 'force';
 
-/** 结果：compacted = 摘要成功并改写 messages；failed = 发起过但没压成 */
+/** 结果：compacted = 真的折短了 messages；noop = 触发过但这次没有可折的内容 */
 const RESULT_COMPACTED = 'compacted';
-const RESULT_FAILED = 'failed';
+const RESULT_NOOP = 'noop';
 
-/** 失败明细（llmError）入库前的截断长度：够定位病因，又不至于把堆栈灌满日志。 */
+/** 跳过明细入库前的截断长度：够定位病因，又不至于把堆栈灌满日志。 */
 const DETAIL_MAX_CHARS = 200;
 
-/**
- * 失败原因码前缀。Rust `compaction/mod.rs` 把 `CoreError` 拼成 `{code}: {message}`，
- * 其中 code 回答「谁的锅」（`LLM_UPSTREAM_TIMEOUT` = 代理往上游写超时、
- * `LLM_REASONING_ONLY` = 模型只输出思考…）。这里只做**提取**，绝不重新判定 ——
- * 分类口径的唯一来源在 `crates/dieyun-core/src/compaction/llm.rs`，
- * 在 Node 侧再判一次就等于两份口径，早晚会漂移。
- */
-const REASON_CODE_RE = /^([A-Z][A-Z0-9_]{2,40})\s*:/;
-
-/**
- * 失败原因：优先用 Rust 给的分类码，取不到才回落到 `compactionSkipped`
- * （`content_policy` 这类由 Node 侧判定、不经过 LLM 调用的跳过原因）。
- * @param {string} skipped
- * @param {string} llmError
- */
-function failureReason(skipped, llmError) {
-  const matched = REASON_CODE_RE.exec(llmError);
-  return matched ? matched[1] : skipped || 'llm_error';
+/** 跳过原因：Rust 折叠器给的 `foldSkipped`，没有就是「没有可折的内容」。 */
+function skipReason(payload) {
+  const skipped = String((payload && payload.foldSkipped) || '').trim();
+  return skipped || 'no_foldable';
 }
 
 /** 汇总窗口内返回的失败原因种类上限 */
@@ -62,9 +45,7 @@ function compactionTelemetryPath(userDataPath) {
 
 /**
  * 会话键归一化：**写入与过滤必须共用这一个口径**。
- * 空值（少数没有会话上下文的调用路径）归一成空串，代表「无会话」这一组；
- * 它不会被算进任何具体对话，也不会因为某处传 `undefined`、某处传 `null`
- * 而被拆成两个互不相认的分组。
+ * 空值（少数没有会话上下文的调用路径）归一成空串，代表「无会话」这一组。
  * @param {unknown} sessionId
  */
 function normalizeTelemetrySessionId(sessionId) {
@@ -73,8 +54,7 @@ function normalizeTelemetrySessionId(sessionId) {
 
 /**
  * 会话过滤用的廉价子串：行是 `JSON.stringify` 的产物（无空格、值后必跟 `"`），
- * 所以这个串不会误配到 `abc` → `abcd` 这类前缀。先用它筛行、再 `JSON.parse`，
- * 避免为了看一个字段把整个窗口都解析一遍。
+ * 所以这个串不会误配到 `abc` → `abcd` 这类前缀。先用它筛行、再 `JSON.parse`。
  * @param {string} sessionId 已归一化且非空
  */
 function sessionNeedle(sessionId) {
@@ -82,9 +62,7 @@ function sessionNeedle(sessionId) {
 }
 
 /**
- * 每次压缩尝试记一行；`row` 为假值时静默跳过（调用点无需自判是否该记）。
- * 走统一落盘闸门批写，压缩虽低频，但这里图的是「轮转上限 + 退出前 flush」这两条
- * 与 tool-telemetry 同源的保证，而不是为了省 syscall。
+ * 每次折叠尝试记一行；`row` 为假值时静默跳过（调用点无需自判是否该记）。
  * @param {string} userDataPath
  * @param {object|null} row
  */
@@ -102,48 +80,44 @@ function recordCompactionTelemetry(userDataPath, row) {
 }
 
 /**
- * 一次压缩结果 → 遥测行；返回 `null` 表示「本轮没有发生压缩」，不记。
+ * 一次折叠结果 → 遥测行；返回 `null` 表示「这轮没发生折叠」，不记。
  *
- * 判据只有一条：**是否发起过摘要 LLM**。Rust `maybe_compact` 的四类返回里，
- * 成功（`compacted`）与失败（`compactionSkipped` / `llmError`）都发起过；
- * 未达触发线 / 冷却中 / 可折叠原子不足只走 `prepare` 早退，没调 LLM。
- * 未配置 baseUrl 的早退同样不是压缩，一并排除。
+ * 行里带 `sessionId` —— 面板要回答的是「**这段对话**压缩了几次」；没有会话标识就
+ * 只能统计全机累计，那是另一个问题。
  *
- * 行里带 `sessionId` —— 面板要回答的是「**这段对话**压缩了几下、成不成」，
- * 没有会话标识就只能统计全机累计，那是另一个问题。字段由写入点唯一提供，
- * 读取侧按它过滤（见 `summarizeCompactionTelemetry`）。
- *
- * @param {{ payload: object|null, force?: boolean, model?: string, sessionId?: string, startedAt?: number }} input
+ * @param {{ payload: object|null, force?: boolean, sessionId?: string, startedAt?: number }} input
  * @returns {object|null}
  */
 function compactionTelemetryRow(input = {}) {
-  const { payload, force, model, sessionId, startedAt } = input;
+  const { payload, force, sessionId, startedAt } = input;
   if (!payload || typeof payload !== 'object') return null;
+  // 只在真触发过时留痕：`triggered` 由 Rust 折叠器给（越过触发线或 force）
+  if (!payload.triggered) return null;
   const compacted = !!payload.compacted;
-  const skipped = String(payload.compactionSkipped || '');
-  const llmError = String(payload.llmError || '');
-  if (!compacted && !skipped && !llmError) return null;
 
   const tokensBefore = Number(payload.tokensBefore) || 0;
   const tokensAfter = Number(payload.tokensAfter) || 0;
-  // 节省量只在成功且有真实前后值时才有意义：失败返回的 tokensAfter 是 prepare 的预估，
-  // 拿它算「节省」会造出「失败却省了 token」这种假象。
+  // 节省量只在成功且有真实前后值时才有意义
   const savedTokens = compacted && tokensBefore > tokensAfter ? tokensBefore - tokensAfter : 0;
   const ms = Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
-
   const scopeId = normalizeTelemetrySessionId(sessionId);
 
   return {
     sessionId: scopeId || undefined,
     trigger: force ? TRIGGER_FORCE : TRIGGER_AUTO,
-    result: compacted ? RESULT_COMPACTED : RESULT_FAILED,
-    reason: compacted ? undefined : failureReason(skipped, llmError),
-    detail: compacted || !llmError ? undefined : llmError.slice(0, DETAIL_MAX_CHARS),
+    result: compacted ? RESULT_COMPACTED : RESULT_NOOP,
+    reason: compacted ? undefined : skipReason(payload),
+    detail: payload.foldError ? String(payload.foldError).slice(0, DETAIL_MAX_CHARS) : undefined,
     tokensBefore: tokensBefore || undefined,
     tokensAfter: tokensAfter || undefined,
     savedTokens: savedTokens || undefined,
-    ms,
-    model: model || undefined
+    // 触发口径（usage / estimate）与折叠档位：调预算与触发比时就靠这几列复盘
+    triggerSource: payload.triggerSource || undefined,
+    level: Number(payload.level) || undefined,
+    foldedToolResults: Number(payload.foldedToolResults) || undefined,
+    foldedTexts: Number(payload.foldedTexts) || undefined,
+    foldedImages: Number(payload.foldedImages) || undefined,
+    ms
   };
 }
 
@@ -152,13 +126,10 @@ function roundRate(numerator, denominator) {
 }
 
 /**
- * 汇总最近 `limit` 次压缩尝试。
+ * 汇总最近 `limit` 次折叠尝试。
  *
  * 「压缩次数」= 触发的尝试数（本文件的窗口行数）；成功率 = 成功 / 次数。
  * 未触发不入窗口，所以不存在「成功率被空转轮次稀释」的问题。
- *
- * 传 `sessionId` 时只统计该会话的记录（面板要的是「这段对话压了几次」）；
- * 不传则维持全局口径，供其它调用方使用。
  *
  * @param {string} userDataPath
  * @param {number} [limit]
@@ -185,8 +156,7 @@ function summarizeCompactionTelemetry(userDataPath, limit = 200, sessionId = '')
     flushLog(filePath);
     const raw = fs.readFileSync(filePath, 'utf8');
     const all = raw.trim().split('\n');
-    // 过滤必须发生在取窗口**之前**：先 slice 再筛的话，窗口会被其它会话的记录占满，
-    // 统计出来的是「本会话排在别人后面、剩下多少算多少」—— 会话越新数字越假。
+    // 过滤必须发生在取窗口**之前**：先 slice 再筛的话，窗口会被其它会话的记录占满
     const needle = scopeId ? sessionNeedle(scopeId) : '';
     const scoped = needle ? all.filter((line) => line.includes(needle)) : all;
     const lines = scoped.slice(-limit);
@@ -219,7 +189,7 @@ function summarizeCompactionTelemetry(userDataPath, limit = 200, sessionId = '')
         }
       } else {
         failed += 1;
-        const reason = String(row.reason || 'llm_error');
+        const reason = String(row.reason || 'no_foldable');
         reasonMap.set(reason, (reasonMap.get(reason) || 0) + 1);
       }
     }
@@ -249,7 +219,7 @@ function summarizeCompactionTelemetry(userDataPath, limit = 200, sessionId = '')
 }
 
 /**
- * 清空压缩遥测（统计信息页「清空」按钮的一路）。
+ * 清空折叠遥测（统计信息页「清空」按钮的一路）。
  * 与工具遥测同源：走闸门截断而非删文件，保证缓冲里的行不会在清空后回灌。
  * @param {string} userDataPath
  */
@@ -263,4 +233,5 @@ module.exports = {
   compactionTelemetryRow,
   summarizeCompactionTelemetry,
   clearCompactionTelemetry,
-  compactionTelemetryPath};
+  compactionTelemetryPath
+};

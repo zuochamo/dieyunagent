@@ -26,7 +26,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { buildSshUri, normalizeRemotePath, parseWorkspaceInput, isSameSshTarget, workspacePathForSession, sshTargetKey, isRemoteWorkspacePath } = require('../workspace/target');
 const { remoteAgentInfoKey, remoteIndexCacheKey } = require('../workspace/workspace-cache-keys');
 const { resolveIndexRoot } = require('../remote/index-root');
-const { resolveIndexVectorsIntent } = require('../model-settings');
+const { resolveIndexVectorsIntent, loadModelSettings } = require('../model-settings');
 const { isGraphSourcePath } = require('../index/source-files');
 const { normalizeReadParams, ABSOLUTE_READ_MAX_BYTES } = require('./fs-read-limits');
 const { runEditFile } = require('./fs-edit-file');
@@ -55,6 +55,7 @@ const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 const { createExtractedHandlers } = require('./handlers');
 const { resolveCoreRpcTimeoutMs } = require('../core-rpc-timeouts');
 const { buildLlmHeadersFromConfig } = require('../agent/llm-request');
+const { buildEmbeddingCoreConfig } = require('../agent/embedding-config');
 const { prepareLineDiff } = require('./line-diff-stats');
 
 function assertHostEnabled(ctx) {
@@ -712,23 +713,17 @@ function createRpcHandlers(ctx) {
   async function syncRemoteIndexCoreConfig() {
     const info = getRemoteAgentInfo();
     if (!info) return { ok: false, reason: 'no_remote_agent' };
-    const embedding = getActiveEmbeddingConfig();
     try {
       const client = getRemoteAgentClient(info);
       await client.call(
         'index.configure',
         {
-          // 与本地 _syncRustCoreConfig 同一份字段：缺 headers/authMode 时，远程嵌入请求
-          // 只能靠 apiKey 硬拼，自定义头（代理 / 会话头）在远端全部丢失。
-          embedding: {
-            disabled: !!embedding.disabled,
-            baseUrl: embedding.baseUrl || '',
-            apiKey: embedding.apiKey || '',
-            model: embedding.model || '',
-            dimensions: Number(embedding.dimensions) || 1024,
-            headers: buildLlmHeadersFromConfig(embedding),
-            authMode: String(embedding.authMode || '').trim()
-          }
+          // 唯一装配点（src/agent/embedding-config.js）。远端主机有没有本地模型由它自己判定，
+          // 所以这里显式 `allowLocal: false` —— 不能拿宿主机的模型目录替远端声明。
+          embedding: buildEmbeddingCoreConfig(loadModelSettings(ctx.userDataPath), {
+            userData: ctx.userDataPath,
+            allowLocal: false
+          })
         },
         45000
       );

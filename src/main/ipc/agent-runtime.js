@@ -154,6 +154,85 @@ function registerAgentRuntimeIpc(ctx) {
     return generateSessionHandoff({ userData: live.userData, gateway }, { sessionId });
   });
 
+  /**
+   * 一轮结束时的「事实收尾」：完成验收 + 独立 Reviewer + 会话目标判定。
+   *
+   * 对话循环（rust-loop-run）与 planner 管线（planner-run）**共用这一份**：引擎不同，
+   * 但「这一轮到底做完没」「目标要不要续跑」必须同一个判定。
+   * 以前这三段只写在 rust-loop-run 的收尾里，于是打开「多 Agent 并行执行」后，
+   * planner 轮拿到的 result 没有 readiness / goal —— 验收 note 不再出现、完成闸门恒开、
+   * 会话目标停在原地不再推进，而且全是静默的（没人会报错）。
+   *
+   * @param {object} result 本轮结果对象（就地补 readiness / goal）
+   * @param {{ payload: object, workspacePath?: string, turnStartedAt?: number, signal?: any }} opts
+   */
+  async function attachTurnFacts(result, opts = {}) {
+    if (!result || typeof result !== 'object') return result;
+    const { payload = {}, workspacePath, turnStartedAt, signal } = opts;
+    // 完成验收：证据采集与判定都在 Main（trace 是循环账本，诊断/浏览器证据走 Gateway），
+    // Renderer 只负责把 note 渲染进正文。判定失败不挡交付、不自动续跑；
+    // 验收本身出意外也**不能**把这一轮判成失败（采集内部已逐段降级，这里是最后一道）。
+    try {
+      result.readiness = await evaluateTurnReadiness({
+        gateway: live.localGateway,
+        trace: result.trace,
+        sessionId: payload.sessionId || null,
+        workspacePath,
+        userDataPath: live.userData,
+        startedAt: turnStartedAt
+      });
+    } catch {
+      result.readiness = null;
+    }
+    // 独立 Reviewer（**可选**的第二证据源）：提示词 / 输入装配 / 结论整形 / 合流全在
+    // `agent/turn-reviewer*.js`。任何失败（未启用 / 没 diff / 端点错 / 超时）都只是
+    // 「跳过验收」，不挡交付。
+    try {
+      const { runTurnReviewer } = require('../../agent/turn-reviewer-run');
+      const { mergeReviewerIntoReadiness } = require('../../agent/turn-reviewer');
+      const readinessEvidence = (result.readiness && result.readiness.evidence) || null;
+      const verdict = await runTurnReviewer({
+        settings: typeof loadModelSettings === 'function' ? loadModelSettings(live.userData) : null,
+        facts: {
+          userTask: runUserText(payload),
+          trace: result.trace || [],
+          diagnostics: (readinessEvidence && readinessEvidence.diagnostics) || null,
+          browser: (readinessEvidence && readinessEvidence.browser) || null,
+          planSummary: (result.plan && result.plan.planSummary) || ''
+        },
+        signal,
+        // 这个文件没有注入 logger（只有 live.* 取值器）：走 console.warn，
+        // 别写一个未定义的 log.info —— 它只在错误分支求值，会静默抛 ReferenceError。
+        log: (msg) => {
+          try {
+            console.warn(msg);
+          } catch {
+            // ignore
+          }
+        }
+      });
+      result.readiness = mergeReviewerIntoReadiness(result.readiness, verdict);
+    } catch {
+      // 验收不是交付闸门：这里出意外就当没跑过 Reviewer。
+    }
+    // 会话目标：一次运行的返回 = 一轮结束，这是唯一的续跑判定时点。
+    // 判定是纯函数（`decideContinuation`，与计划目标共用），这里只把结论交给 Renderer：
+    // Renderer 读两个布尔值去机械地再开一轮，**不持有目标状态、不碰预算**。
+    if (payload.sessionId && live.localGateway && typeof live.localGateway.invokeRpc === 'function') {
+      try {
+        const { getAgentLimits } = require('../../agent/agent-limits');
+        result.goal = await sessionGoalStore.judgeAfterTurn({
+          invokeRpc: live.localGateway.invokeRpc,
+          sessionId: payload.sessionId,
+          limits: getAgentLimits(live.userData)
+        });
+      } catch {
+        result.goal = null;
+      }
+    }
+    return result;
+  }
+
   ipcMain.handle('agent:rust-loop-run', async (evt, payload = {}) => {
     if (!live.coreBridge || !live.coreBridge.isReady()) {
       throw new Error('dieyun-core 未就绪');
@@ -510,69 +589,13 @@ function registerAgentRuntimeIpc(ctx) {
           return toolBridge.executeAgentTool(name, args, ctx);
         }
       });
-      // 完成验收：证据采集与判定都在 Main（trace 是循环账本，诊断/浏览器证据走 Gateway），
-      // Renderer 只负责把 note 渲染进正文。判定失败不挡交付、不自动续跑；
-      // 验收本身出意外也**不能**把这一轮判成失败（采集内部已逐段降级，这里是最后一道）。
-      try {
-        result.readiness = await evaluateTurnReadiness({
-          gateway: live.localGateway,
-          trace: result.trace,
-          sessionId: payload.sessionId || null,
-          workspacePath,
-          userDataPath: live.userData,
-          startedAt: turnStartedAt
-        });
-      } catch {
-        result.readiness = null;
-      }
-      // 独立 Reviewer（**可选**的第二证据源）：提示词 / 输入装配 / 结论整形 / 合流全在
-      // `agent/turn-reviewer*.js`。以前这段在 Renderer，于是「一轮做完没」有两处判定；
-      // 现在收尾时在这里一次定稿，Renderer 只渲染 readiness.note。
-      // 任何失败（未启用 / 没 diff / 端点错 / 超时）都只是「跳过验收」，不挡交付。
-      try {
-        const { runTurnReviewer } = require('../../agent/turn-reviewer-run');
-        const { mergeReviewerIntoReadiness } = require('../../agent/turn-reviewer');
-        const readinessEvidence = (result.readiness && result.readiness.evidence) || null;
-        const verdict = await runTurnReviewer({
-          settings: typeof loadModelSettings === 'function' ? loadModelSettings(live.userData) : null,
-          facts: {
-            userTask: runUserText(payload),
-            trace: result.trace || [],
-            diagnostics: (readinessEvidence && readinessEvidence.diagnostics) || null,
-            browser: (readinessEvidence && readinessEvidence.browser) || null,
-            planSummary: (result.plan && result.plan.planSummary) || ''
-          },
-          signal: abortController.signal,
-          // 这个文件没有注入 logger（只有 live.* 取值器）：走 console.warn，
-          // 别写一个未定义的 log.info —— 它只在错误分支求值，会静默抛 ReferenceError。
-          log: (msg) => {
-            try {
-              console.warn(msg);
-            } catch {
-              // ignore
-            }
-          }
-        });
-        result.readiness = mergeReviewerIntoReadiness(result.readiness, verdict);
-      } catch {
-        // 验收不是交付闸门：这里出意外就当没跑过 Reviewer。
-      }
-      // 会话目标：一次 rust-loop-run 的返回 = 一轮结束，这是唯一的续跑判定时点。
-      // 判定是纯函数（`decideContinuation`，与计划目标共用），这里只把结论交给 Renderer：
-      // Renderer 读两个布尔值去机械地再开一轮，**不持有目标状态、不碰预算**。
-      // 无目标 / 已收尾 / 已暂停 → 整个字段省略（Renderer 当作「不续跑」）。
-      if (ctx.sessionId && live.localGateway && typeof live.localGateway.invokeRpc === 'function') {
-        try {
-          const { getAgentLimits } = require('../../agent/agent-limits');
-          result.goal = await sessionGoalStore.judgeAfterTurn({
-            invokeRpc: live.localGateway.invokeRpc,
-            sessionId: ctx.sessionId,
-            limits: getAgentLimits(live.userData)
-          });
-        } catch {
-          result.goal = null;
-        }
-      }
+      // 完成验收 + 独立 Reviewer + 会话目标判定：与 planner 管线共用同一份（见 attachTurnFacts）。
+      await attachTurnFacts(result, {
+        payload,
+        workspacePath,
+        turnStartedAt,
+        signal: abortController.signal
+      });
       runFinishedOk = true;
       // 记忆归纳触发：事实（trace / plan / review / 正文）都在 Main，装配后入队即可；
       // 计划 worktree 未应用时先暂存，等 Renderer 报应用结果（或超时）再决定写不写。
@@ -786,6 +809,8 @@ function registerAgentRuntimeIpc(ctx) {
       return { aborted: true };
     }
     const abortController = new AbortController();
+    // planner 也走同一份「事实收尾」（attachTurnFacts）：验收靠这一轮起始时间算耗时证据。
+    const plannerTurnStartedAt = Date.now();
     const entry = {
       aborted: false,
       rustPlannerRunId: null,
@@ -857,6 +882,16 @@ function registerAgentRuntimeIpc(ctx) {
         }
       });
       plannerFinishedOk = true;
+      // 与对话轮共用同一份「事实收尾」：完成验收 / 独立 Reviewer / 会话目标判定不能因为
+      // 换了引擎（改走 planner 并行）就整条消失。中止的那一轮不算完成，跳过。
+      if (!plannerResult || !plannerResult.aborted) {
+        await attachTurnFacts(plannerResult, {
+          payload,
+          workspacePath: await resolveRunWorkspacePath(payload),
+          turnStartedAt: plannerTurnStartedAt,
+          signal: abortController.signal
+        });
+      }
       // 计划模式（planner 管线）也是「一轮任务」：不在这里触发，计划模式的产出永远不会
       // 进记忆（Renderer 的收尾路径只管对话）。worktree 未应用时由 Main 暂存等应用结果。
       try {

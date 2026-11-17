@@ -11,49 +11,11 @@ const {
  * @typedef {object} CoreBridgeOptions
  * @property {string} binaryPath
  * @property {(msg: string) => void} [log]
- * @property {(evt: { method: string, params?: object }) => void} [onNotify]
  */
 
 /**
- * 解析 dieyun-core stderr 中的压缩 LLM 进度行，供思考区展示。
- * @param {string} line
- * @returns {{ method: string, params: object } | null}
+ * dieyun-core stdio JSON-RPC 客户端（Main 进程 sidecar）。
  */
-function parseCompactionLlmLogLine(line) {
-  const t = String(line || '').trim();
-  if (!t.includes('[compaction-llm]')) return null;
-  const retry = t.match(
-    /\[compaction-llm\]\s*transient error,\s*retry in\s*(\d+)ms\s*\(attempt\s*(\d+)\):\s*(.*)$/i
-  );
-  if (retry) {
-    return {
-      method: 'compaction.progress',
-      params: {
-        kind: 'llm_retry',
-        waitMs: Number(retry[1]) || 0,
-        attempt: Number(retry[2]) || 0,
-        message: String(retry[3] || '').trim()
-      }
-    };
-  }
-  const skip = t.match(/\[compaction-llm\]\s*skip compaction after LLM failure:\s*(.*)$/i);
-  if (skip) {
-    return {
-      method: 'compaction.progress',
-      params: {
-        kind: 'llm_skip',
-        message: String(skip[1] || '').trim()
-      }
-    };
-  }
-  return {
-    method: 'compaction.progress',
-    params: {
-      kind: 'llm_log',
-      message: t.replace(/^.*\[compaction-llm\]\s*/i, '').trim() || t
-    }
-  };
-}
 
 /**
  * SIGTERM 后等 core 自行退出的上限，超过才 SIGKILL。
@@ -84,7 +46,6 @@ function createCoreBridge(opts) {
             /* ignore */
           }
         };
-  const onNotify = typeof opts.onNotify === 'function' ? opts.onNotify : null;
 
   /** @type {import('child_process').ChildProcess | null} */
   let proc = null;
@@ -92,6 +53,10 @@ function createCoreBridge(opts) {
   let nextId = 1;
   /** @type {Map<number, { resolve: Function, reject: Function, timer: NodeJS.Timeout, method: string, runId: string|null }>} */
   const pending = new Map();
+  /** @type {Set<(event: object) => void>} core 主动推来的事件（流式增量等）订阅者 */
+  const eventListeners = new Set();
+  /** core 反向调用（type:call）的 handler 表：method -> (params) => any */
+  const coreCallHandlers = new Map();
   let stdoutBuffer = '';
   let stderrBuffer = '';
   let stderrTail = '';
@@ -118,8 +83,30 @@ function createCoreBridge(opts) {
     if (tail) bits.push(tail);
     return bits.join('\n').replace(/`/g, "'");
   }
+  /** 注册一个反向调用 handler（core 主动调宿主）。返回取消注册函数。 */
+  function onCoreCall(method, handler) {
+    if (typeof handler !== 'function') return () => {};
+    coreCallHandlers.set(String(method), handler);
+    return () => {
+      coreCallHandlers.delete(String(method));
+    };
+  }
+
   function isReady() {
     return ready && proc && !proc.killed;
+  }
+
+  /**
+   * 订阅 core 主动推来的事件（流式增量等）。返回取消订阅函数。
+   *
+   * 事件带 `runId`，订阅方自行过滤：一个 core 进程服务整个宿主，事件是进程级的。
+   */
+  function onCoreEvent(listener) {
+    if (typeof listener !== 'function') return () => {};
+    eventListeners.add(listener);
+    return () => {
+      eventListeners.delete(listener);
+    };
   }
 
   function extractRunId(params) {
@@ -149,18 +136,13 @@ function createCoreBridge(opts) {
   }
 
   function bestEffortCancelForMethod(method, runId, requestId) {
-    if (String(method) === 'compaction.maybe_compact') {
-      const ids = Number.isFinite(Number(requestId)) ? [Number(requestId)] : [];
-      writeFireAndForget('rpc.cancel', { ids });
-      return;
-    }
     if (!runId) return;
     if (/^planner\.run\./.test(String(method))) {
       writeFireAndForget('planner.run.cancel', { runId });
       return;
     }
     if (/^agent\.loop\./.test(String(method))) {
-      writeFireAndForget('agent.loop.cancel', { runId });
+      writeFireAndForget('agent.run.cancel', { runId });
     }
   }
 
@@ -209,7 +191,7 @@ function createCoreBridge(opts) {
     if (runId && !methodSet) {
       runIdsTouched.add(runId);
       writeFireAndForget('rpc.cancel', { runId, ids: abortedIds });
-      writeFireAndForget('agent.loop.cancel', { runId });
+      writeFireAndForget('agent.run.cancel', { runId });
       writeFireAndForget('planner.run.cancel', { runId });
     } else if (abortedIds.length) {
       writeFireAndForget('rpc.cancel', { ids: abortedIds });
@@ -237,6 +219,45 @@ function createCoreBridge(opts) {
         msg = JSON.parse(line);
       } catch {
         log(`dieyun-core 无效 JSON: ${line.slice(0, 200)}`);
+        continue;
+      }
+      // core → 宿主的**反向调用**（`type:"call"`）：请求 + 答复，答复写回 stdin。
+      // 与事件同一条分流规则，只是这里要回话。
+      if (msg && msg.type === 'call') {
+        const callId = msg.id;
+        const method = String(msg.method || '');
+        const handler = coreCallHandlers.get(method);
+        const reply = (payload) => {
+          if (!proc || !proc.stdin || proc.stdin.destroyed) return;
+          try {
+            proc.stdin.write(`${JSON.stringify({ type: 'reply', id: callId, ...payload })}\n`);
+          } catch {
+            /* 宿主已退出：core 侧按超时收场 */
+          }
+        };
+        if (!handler) {
+          reply({ error: { code: 'HOST_CALL_UNSUPPORTED', message: `宿主未实现 ${method}` } });
+          continue;
+        }
+        Promise.resolve()
+          .then(() => handler(msg.params || {}))
+          .then((result) => reply({ result: result == null ? null : result }))
+          .catch((e) =>
+            reply({ error: { code: 'HOST_CALL_FAILED', message: String((e && e.message) || e) } })
+          );
+        continue;
+      }
+      // core → 宿主的事件（流式增量等）：带 `type:"event"`，不是任何请求的响应。
+      // 与响应共用 stdout，靠 `type` 分流；未订阅时静默丢弃（例如 `dieyun-core index`）。
+      if (msg && msg.type === 'event') {
+        const event = msg.event || {};
+        for (const listener of eventListeners) {
+          try {
+            listener(event);
+          } catch (e) {
+            log(`core event listener 抛错: ${e && e.message ? e.message : e}`);
+          }
+        }
         continue;
       }
       const id = Number(msg.id);
@@ -298,13 +319,6 @@ function createCoreBridge(opts) {
         stderrBuffer = stderrBuffer.slice(idx + 1);
         if (!line) continue;
         log(`dieyun-core: ${line}`);
-        if (!onNotify || !line.includes('[compaction-llm]')) continue;
-        try {
-          const evt = parseCompactionLlmLogLine(line);
-          if (evt) onNotify(evt);
-        } catch {
-          // ignore notify errors
-        }
       }
     });
     if (proc.stdin) {
@@ -461,7 +475,9 @@ function createCoreBridge(opts) {
     configure,
     invoke,
     abortPending,
-    isReady
+    isReady,
+    onCoreEvent,
+    onCoreCall
   };
 }
 

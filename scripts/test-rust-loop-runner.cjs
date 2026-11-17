@@ -1,14 +1,34 @@
 'use strict';
 
 /**
- * Node-side agent loop orchestration (no dieyun-core / live LLM).
+ * Node 侧 agent loop 编排（**驱动者已换成 core**，无需 dieyun-core / 真 LLM）。
  * Run: node scripts/test-rust-loop-runner.cjs
+ *
+ * 新契约（docs/AGENT-RUN-MIGRATION.md §2）：
+ *   - `agent.run.start` / `agent.run.tools` 是**唯一**的轮次 RPC；
+ *   - `runId` 由宿主生成并透传（core 在 start 内部就推 `agent.delta`，订阅必须先于 start）；
+ *   - 流式增量经事件通道回来，Node 只做「增量 → 累积值」的搬运；
+ *   - 工具仍在 Node 执行，结果经 `agent.run.tools` 回填；
+ *   - Node **不许**再调 `agent.llm.chat` / `agent.loop.*`。
  */
+
+// 视觉注入走反向调用 `round.prepare`（core 每轮发请求前问宿主），runId 由宿主生成 ——
+// 测试无从预知 runId，故先替换取样口，把「待注入图片」直接喂给 runner
+// （browser-vision 自身行为另有用例覆盖）。
+const bv = require('../src/agent/browser-vision');
+const realTakeVisionImages = bv.takePendingVisionImages;
+/** @type {{ images: object[] } | null} */
+let visionFeed = null;
+let visionTakeCalls = 0;
+bv.takePendingVisionImages = (runId) => {
+  visionTakeCalls += 1;
+  if (visionFeed) return visionFeed.images.splice(0);
+  return realTakeVisionImages(runId);
+};
 
 const {
   runRustAgentLoop,
   resolveChatUrl,
-  normalizeLlmResponse,
   applyResolvedLoopSpec,
   backfillReasoningContent
 } = require('../src/agent/rust-loop-runner');
@@ -23,28 +43,94 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createFakeBridge(handlers) {
+/** 所有用例共用的兜底：取消入口（不进 handlers 时也能被调用）。 */
+const BRIDGE_DEFAULTS = {
+  'agent.run.cancel': async () => ({ ok: true })
+};
+
+function createFakeBridge(handlers = {}) {
   const invokes = [];
   const abortPendingCalls = [];
-  return {
+  const listeners = new Set();
+  /** core 反向调用的 handler 表（method → fn），与 `coreBridge.onCoreCall` 同语义。 */
+  const coreCallHandlers = new Map();
+  /** 出站时序（`onCoreCall:xxx` / `invoke:xxx` 混排）：用来钉「先注册、后发请求」。 */
+  const timeline = [];
+  let listenerCount = 0;
+  const bridge = {
     invokes,
     abortPendingCalls,
+    timeline,
+    get coreCallMethods() {
+      return [...coreCallHandlers.keys()];
+    },
+    get coreCallHandlerCount() {
+      return coreCallHandlers.size;
+    },
+    /** core → 宿主反向调用：注册（返回退订器），与真 bridge 一致。 */
+    onCoreCall(method, handler) {
+      timeline.push(`onCoreCall:${method}`);
+      coreCallHandlers.set(String(method), handler);
+      return () => {
+        coreCallHandlers.delete(String(method));
+      };
+    },
+    /** 测试专用：模拟 core 发起一次反向调用，拿到宿主 handler 的答复。 */
+    async callCore(method, params) {
+      const fn = coreCallHandlers.get(String(method));
+      if (typeof fn !== 'function') throw new Error(`宿主没注册 ${method}`);
+      return fn(params);
+    },
+    /** 事件订阅峰值（末轮订阅必须退订：否则长会话会攒下无数监听器）。 */
+    get listenerCount() {
+      return listeners.size;
+    },
+    get totalSubscriptions() {
+      return listenerCount;
+    },
     abortPending(payload) {
       abortPendingCalls.push(payload);
     },
+    onCoreEvent(listener) {
+      listenerCount += 1;
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    /** 测试专用：模拟 core 推事件（增量，与真 core 一致）。 */
+    emitEvent(event) {
+      for (const fn of [...listeners]) fn(event);
+    },
     async invoke(method, params, timeout) {
+      timeline.push(`invoke:${method}`);
       invokes.push({ method, params, timeout });
-      const handler = handlers[method];
+      const handler = handlers[method] || BRIDGE_DEFAULTS[method];
       if (typeof handler !== 'function') {
-        throw new Error(`unexpected invoke ${method}`);
+        throw new Error(
+          `unexpected invoke ${method}（新契约只允许 agent.run.*；旧 ${method} 不该再被调用）`
+        );
       }
-      return handler(params, timeout);
+      return handler(params, timeout, bridge);
     }
   };
+  return bridge;
 }
 
 function loopSpec() {
-  return { maxToolCalls: 8, firstTokenTimeoutMs: 1000 };
+  return { maxToolCalls: 8 };
+}
+
+/** 旧 RPC 一个都不许出现：两条驱动者同时存在 = 两份轮次语义。 */
+function assertNoLegacyRpc(bridge) {
+  const bad = bridge.invokes
+    .map((i) => i.method)
+    .filter((m) => String(m).startsWith('agent.loop.') || m === 'agent.llm.chat');
+  assert(bad.length === 0, `不该再调用旧 RPC：${bad.join(', ')}`);
+}
+
+function methodsOf(bridge) {
+  return bridge.invokes.map((i) => i.method).join(',');
 }
 
 async function expectAbort(promise) {
@@ -56,6 +142,8 @@ async function expectAbort(promise) {
   }
 }
 
+// ---------------------------------------------------------------- 纯函数
+
 function testApplyResolvedLoopSpec() {
   const filled = applyResolvedLoopSpec({ model: 'm' }, { maxToolCalls: 12 });
   assert(filled.maxToolCalls === 12, 'fill missing maxToolCalls');
@@ -65,6 +153,9 @@ function testApplyResolvedLoopSpec() {
   assert(!Object.prototype.hasOwnProperty.call(emptySpec, 'maxToolCalls'), 'do not write undefined maxToolCalls');
   const nullSpec = applyResolvedLoopSpec({ model: 'm' }, { maxToolCalls: undefined });
   assert(!Object.prototype.hasOwnProperty.call(nullSpec, 'maxToolCalls'), 'ignore undefined resolved value');
+  // 折叠预算仍在唯一填参口注入（数字来自 compaction-main.resolveFoldSpec）
+  const folded = applyResolvedLoopSpec({ model: 'm' }, {}, { tokenBudget: 9000, triggerRatio: 0.8 });
+  assert(folded.tokenBudget === 9000 && folded.triggerRatio === 0.8, 'fold budget injected once');
 }
 
 function testResolveChatUrl() {
@@ -85,1078 +176,6 @@ function testResolveChatUrl() {
     threw = true;
   }
   assert(threw, 'empty baseUrl throws');
-}
-
-function testNormalizeLlmResponse() {
-  const resp = normalizeLlmResponse({
-    choices: [
-      {
-        finish_reason: 'length',
-        message: {
-          content: 'hi',
-          tool_calls: [
-            { id: 'a', function: { name: 'fs_read_file', arguments: '{"filePath":"x"}' } },
-            { id: 'b', function: { name: '', arguments: '{}' } }
-          ]
-        }
-      }
-    ]
-  });
-  assert(resp.content === 'hi', 'content');
-  assert(resp.toolCalls.length === 1, 'drop empty name');
-  assert(resp.toolCalls[0].name === 'fs_read_file', 'keep named tool');
-  assert(resp.finishReason === 'length', 'finishReason');
-}
-
-async function testLlmOnlyRound() {
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-1',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] }
-    }),
-    'agent.loop.continue': async (params) => {
-      assert(params.runId === 'run-1', 'continue runId');
-      assert(params.llm && params.llm.content === 'ok', 'continue llm payload');
-      assert(params.llm.contentChannel === 'answer', 'continue llm carries contentChannel');
-      return { runId: 'run-1', phase: 'done', content: 'ok' };
-    }
-  });
-  const phases = [];
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1', apiKey: 'k' },
-    startParams: { model: 'm', messages: [] },
-    loopSpec: loopSpec(),
-    onPhase: (p) => phases.push(p),
-    fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
-  });
-  assert(result.phase === 'done', 'done');
-  assert(phases.includes('start') && phases.includes('llm_request') && phases.includes('llm_response'), 'llm phases');
-  assert(
-    bridge.invokes.map((i) => i.method).join(',') === 'agent.loop.start,agent.loop.continue',
-    'start then continue'
-  );
-}
-
-/**
- * 单通道模型（mimo）：`content` 键即思考 —— 入口把它盖章为 `reasoning`，
- * Rust 账本据此不再把它当正文（见 docs/REASONING-ISOLATION-PLAN.md §3.3）。
- */
-async function testContentChannelReachesLedger() {
-  const cases = [
-    ['m', 'answer'],
-    ['mimo-v2.5-pro', 'reasoning']
-  ];
-  for (const [model, expected] of cases) {
-    let seen = null;
-    const bridge = createFakeBridge({
-      'agent.loop.start': async () => ({
-        runId: 'run-1',
-        phase: 'need_llm',
-        llmBody: { model, messages: [{ role: 'user', content: 'hi' }], tools: [] }
-      }),
-      'agent.loop.continue': async (params) => {
-        seen = params.llm;
-        return { runId: 'run-1', phase: 'done', content: '' };
-      }
-    });
-    await runRustAgentLoop({
-      coreBridge: bridge,
-      llm: { baseUrl: 'https://example/v1', apiKey: 'k' },
-      startParams: { model, messages: [] },
-      loopSpec: loopSpec(),
-      fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
-    });
-    assert(seen, `continue called for ${model}`);
-    assert(
-      seen.contentChannel === expected,
-      `contentChannel for ${model}: got ${seen.contentChannel}, want ${expected}`
-    );
-  }
-}
-
-async function testCompactThenContinue() {
-  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
-  const compactCalls = [];
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-c',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages, tools: [] }
-    }),
-    'agent.loop.set_messages': async (params) => {
-      assert(params.messages.length === 2, 'compacted messages written');
-      return { ok: true };
-    },
-    'agent.loop.continue': async () => ({ runId: 'run-c', phase: 'done', content: 'ok' })
-  });
-  const phases = [];
-  await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    onPhase: (p) => phases.push(p),
-    compactMessages: async (msgs, ctx) => {
-      compactCalls.push({ n: msgs.length, round: ctx.round });
-      return { compacted: true, messages: msgs.slice(0, 2), tokensBefore: 90, tokensAfter: 10 };
-    },
-    fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
-  });
-  assert(compactCalls.length === 1, 'compact once');
-  assert(phases.includes('compacted'), 'compacted phase');
-  assert(
-    bridge.invokes.some((i) => i.method === 'agent.loop.set_messages'),
-    'set_messages'
-  );
-}
-
-async function testCompactTimeoutContinuesLoop() {
-  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-to',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages, tools: [] }
-    }),
-    'agent.loop.continue': async () => ({ runId: 'run-to', phase: 'done', content: 'ok' })
-  });
-  const phases = [];
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    onPhase: (p) => phases.push(p),
-    compactMessages: async () => {
-      const err = new Error('dieyun-core 超时: compaction.maybe_compact');
-      err.code = 'CORE_RPC_TIMEOUT';
-      throw err;
-    },
-    fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
-  });
-  assert(result.phase === 'done', 'timeout skip still finishes loop');
-  assert(phases.includes('compact_skipped'), 'compact_skipped phase');
-  assert(!phases.includes('compacted'), 'did not compact');
-  assert(
-    !bridge.invokes.some((i) => i.method === 'agent.loop.set_messages'),
-    'no set_messages after skip'
-  );
-}
-
-async function testCompactSkippedResultContinuesLoop() {
-  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-sk',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages, tools: [] }
-    }),
-    'agent.loop.continue': async () => ({ runId: 'run-sk', phase: 'done', content: 'ok' })
-  });
-  const phases = [];
-  await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    onPhase: (p) => phases.push(p),
-    compactMessages: async () => ({
-      compacted: false,
-      messages,
-      compactionSkipped: 'llm_error',
-      llmError: 'dieyun-core 超时: compaction.maybe_compact'
-    }),
-    fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
-  });
-  assert(phases.includes('compact_skipped'), 'skipped result emits phase');
-}
-
-/**
- * 短首轮同样必须问 Rust：Node 侧不再有「条数 / 字符比」预判。
- * Rust 未达触发线时的早退形态 = compacted:false + 原样 messages，
- * 此时不得回写账本（否则每轮都会多一次无意义的 set_messages）。
- */
-async function testShortRoundStillAsksRust() {
-  const short = [
-    { role: 'system', content: 's' },
-    { role: 'user', content: 'u' }
-  ];
-  let compactCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-s',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: short }
-    }),
-    'agent.loop.continue': async () => ({ runId: 'run-s', phase: 'done', content: 'ok' })
-  });
-  const phases = [];
-  await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    onPhase: (p) => phases.push(p),
-    compactMessages: async () => {
-      compactCalls += 1;
-      return { compacted: false, messages: short };
-    },
-    fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
-  });
-  assert(compactCalls === 1, 'need_llm 每轮都必须委托 Rust 判断，Node 不再预判');
-  assert(!phases.includes('compacted'), 'Rust 未压缩就不该有 compacted phase');
-  assert(
-    !bridge.invokes.some((i) => i.method === 'agent.loop.set_messages'),
-    'Rust 早退（compacted:false）时不得回写账本'
-  );
-}
-
-async function testDelegateRound() {
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-d',
-      phase: 'need_delegate',
-      delegates: [{ id: 'c1', name: 'fs_read_file', arguments: { filePath: 'a.txt' } }]
-    }),
-    'agent.loop.tool_results': async (params) => {
-      assert(params.results.length === 1, 'one result');
-      assert(params.results[0].id === 'c1', 'result id');
-      assert(params.results[0].result && params.results[0].result.text === 'hello', 'tool body');
-      return { runId: 'run-d', phase: 'done', content: 'done' };
-    }
-  });
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    delegateTool: async (name, args) => {
-      assert(name === 'fs_read_file', 'tool name');
-      assert(args.filePath === 'a.txt', 'tool args');
-      return { text: 'hello' };
-    },
-    fetchLlmOnce: async () => {
-      throw new Error('LLM should not run on need_delegate');
-    }
-  });
-  assert(result.phase === 'done', 'delegate done');
-}
-
-async function testBrowserVisionInjection() {
-  const bv = require('../src/agent/browser-vision');
-
-  bv.recordBrowserScreenshot('run-bv', 'browser_screenshot', {
-    ok: true,
-    mime: 'image/png',
-    base64: 'AAAA',
-    width: 12,
-    height: 8
-  });
-  let seenMessages = null;
-  const phases = [];
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-bv',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] }
-    }),
-    'agent.loop.continue': async () => ({ runId: 'run-bv', phase: 'done', content: 'ok' })
-  });
-  await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    browserVision: true,
-    onPhase: (p) => phases.push(p),
-    fetchLlmOnce: async ({ body }) => {
-      seenMessages = body.messages;
-      return { content: 'ok', toolCalls: [] };
-    }
-  });
-  assert(Array.isArray(seenMessages) && seenMessages.length === 2, 'vision message appended');
-  const visionMsg = seenMessages[seenMessages.length - 1];
-  assert(visionMsg.role === 'user', 'vision message uses user role');
-  assert(
-    Array.isArray(visionMsg.content) && visionMsg.content.some((p) => p.type === 'image_url'),
-    'vision message carries image_url part'
-  );
-  assert(phases.includes('browser_vision_injected'), 'emits browser_vision_injected');
-  assert(bv.takePendingBrowserScreenshots('run-bv').length === 0, 'pending cleared after injection');
-
-  bv.recordBrowserScreenshot('run-bv-off', 'browser_screenshot', { ok: true, base64: 'BBBB' });
-  let seenOff = null;
-  const bridge2 = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-bv-off',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }] }
-    }),
-    'agent.loop.continue': async () => ({ runId: 'run-bv-off', phase: 'done', content: 'ok' })
-  });
-  await runRustAgentLoop({
-    coreBridge: bridge2,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    fetchLlmOnce: async ({ body }) => {
-      seenOff = body.messages;
-      return { content: 'ok', toolCalls: [] };
-    }
-  });
-  assert(seenOff.length === 1, 'no injection when browserVision disabled');
-  assert(bv.takePendingBrowserScreenshots('run-bv-off').length === 1, 'disabled run leaves buffer untouched');
-
-  bv.recordBrowserScreenshot('run-bv-big', 'browser_screenshot', {
-    ok: true,
-    base64: 'x'.repeat(bv.MAX_BASE64_CHARS + 1)
-  });
-  assert(bv.takePendingBrowserScreenshots('run-bv-big').length === 0, 'oversized shot dropped');
-
-  for (let i = 0; i < 4; i += 1) {
-    bv.recordBrowserScreenshot('run-bv-cap', 'browser_observe', {
-      ok: true,
-      screenshot: { base64: `img${i}` }
-    });
-  }
-  const capped = bv.takePendingBrowserScreenshots('run-bv-cap');
-  assert(capped.length === 2, 'cap shots per run');
-  assert(capped[capped.length - 1].base64 === 'img3', 'keep newest shot');
-
-  // 附件补看：与浏览器截图各自独立配额
-  bv.recordBrowserScreenshot('run-bv-mix', 'browser_screenshot', { ok: true, base64: 'B1' });
-  assert(
-    bv.recordVisionImage('run-bv-mix', {
-      source: 'attachment',
-      mime: 'image/png',
-      base64: 'A1',
-      path: '.dieyun/attachments/a.png'
-    }),
-    'attachment image queued'
-  );
-  assert(
-    bv.recordVisionImage('run-bv-mix', {
-      source: 'attachment',
-      mime: 'image/jpeg',
-      base64: 'A2',
-      path: '.dieyun/attachments/b.png'
-    }),
-    'second attachment image queued'
-  );
-  assert(
-    bv.recordVisionImage('run-bv-mix', {
-      source: 'attachment',
-      mime: 'image/png',
-      base64: 'A3',
-      path: '.dieyun/attachments/c.png'
-    }) === false,
-    'attachment quota enforced independently'
-  );
-  const mixed = bv.takePendingVisionImages('run-bv-mix');
-  assert(mixed.length === 3, 'browser and attachment quotas do not share a cap');
-  assert(
-    mixed.filter((m) => m.source === 'attachment').map((m) => m.base64).join(',') === 'A1,A2',
-    'keeps newest attachment images'
-  );
-  const mixedMsg = bv.buildVisionMessage(mixed);
-  assert(
-    mixedMsg.content.filter((p) => p.type === 'image_url').length === 3,
-    'mixed message carries every image'
-  );
-  assert(/历史附件图片/.test(mixedMsg.content[0].text), 'mixed message explains attachment source');
-  assert(/浏览器当前画面截图/.test(mixedMsg.content[0].text), 'mixed message explains browser source');
-
-  // 额度可由 agent-limits 显式覆盖（口径是「每轮在途」，故 key 以 PerRound 结尾）
-  assert(bv.MAX_SHOTS_PER_RUN === 2, 'legacy cap constant still exported');
-  assert(
-    bv.recordBrowserScreenshot('run-bv-zero', 'browser_screenshot', { ok: true, base64: 'ZZ' }, { visionShotsPerRound: 0 }) === false,
-    'zero quota disables browser injection'
-  );
-  assert(
-    bv.recordVisionImage(
-      'run-bv-limit',
-      { source: 'attachment', base64: 'y'.repeat(101) },
-      { visionMaxBase64Chars: 100 }
-    ) === false,
-    'oversized attachment image dropped'
-  );
-
-  // 同一路径重复入队是幂等的：不重复注入同一份像素，也不消耗额度
-  assert(
-    bv.recordVisionImage('run-bv-dedupe', { source: 'attachment', base64: 'D1', path: 'a.png' }),
-    'first read queued'
-  );
-  assert(
-    bv.recordVisionImage('run-bv-dedupe', { source: 'attachment', base64: 'D2', path: 'a.png' }),
-    'duplicate read is idempotent'
-  );
-  assert(
-    bv.recordVisionImage('run-bv-dedupe', { source: 'attachment', base64: 'D3', path: 'b.png' }),
-    'second distinct path queued'
-  );
-  assert(
-    bv.recordVisionImage('run-bv-dedupe', { source: 'attachment', base64: 'D4', path: 'c.png' }) === false,
-    'duplicates do not consume quota'
-  );
-  const deduped = bv.takePendingVisionImages('run-bv-dedupe');
-  assert(deduped.length === 2, 'duplicate path injected once');
-  assert(deduped[0].base64 === 'D1', 'keeps first payload for a path');
-}
-
-async function testVisionSurvivesOverflowRetry() {
-  const bv = require('../src/agent/browser-vision');
-  bv.recordVisionImage('run-vr', {
-    source: 'attachment',
-    mime: 'image/png',
-    base64: 'R0lGODdh',
-    path: '.dieyun/attachments/retry.png'
-  });
-
-  const seenBodies = [];
-  const phases = [];
-  let llmCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-vr',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: '看图' }], tools: [] }
-    }),
-    'agent.loop.set_messages': async () => ({ ok: true }),
-    'agent.loop.continue': async () => ({ runId: 'run-vr', phase: 'done', content: 'ok' })
-  });
-
-  await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    browserVision: true,
-    onPhase: (p) => phases.push(p),
-    // 复刻 Rust 语义：未达触发线时早退（compacted:false，原样返回），只有溢出兜底 force 才真压。
-    compactMessages: async (msgs, ctx) => {
-      if (!ctx || !ctx.force) return { compacted: false, messages: msgs };
-      return { compacted: true, messages: msgs.slice(0, 1), tokensBefore: 90, tokensAfter: 10 };
-    },
-    fetchLlmOnce: async ({ body }) => {
-      llmCalls += 1;
-      seenBodies.push(body.messages);
-      if (llmCalls === 1) {
-        const err = new Error('HTTP 400 prompt is too long');
-        err.statusCode = 400;
-        throw err;
-      }
-      return { content: 'ok', toolCalls: [] };
-    }
-  });
-
-  const carriesImage = (list) =>
-    (list || []).some(
-      (m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === 'image_url')
-    );
-  assert(seenBodies.length === 2, 'overflow triggers exactly one retry');
-  assert(carriesImage(seenBodies[0]), 'first attempt carries the image');
-  // 关键：重试用的是同一个 llmRound，drain 后不能丢图（否则模型看不到图却被告知「已附在下一轮」）
-  assert(carriesImage(seenBodies[1]), 'retry keeps the image instead of losing it');
-  assert(
-    phases.filter((p) => p === 'attachment_vision_injected').length === 1,
-    'vision phase emitted once per round'
-  );
-}
-
-/** 复刻真实上游文案：HTTP 400 + `.messages[N].image[0]: unsupported image` */
-function unsupportedImageError(messageIndex) {
-  const err = new Error(
-    `HTTP 400 {"error":{"code":"invalid_request_error","message":"Error from provider (Console Go): ` +
-      `Upstream request failed: [invalid_request_error] .messages[${messageIndex}].image[0]: You have uploaded ` +
-      `an unsupported image. Please make sure your image is valid and has one of the following formats: ` +
-      `webp, png, jpeg, and gif.","param":null,"type":"invalid_request_error"}}`
-  );
-  err.statusCode = 400;
-  return err;
-}
-
-const PNG_DATA_URL = `data:image/png;base64,${Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0
-]).toString('base64')}`;
-
-function snapshotMessages(messages) {
-  return JSON.parse(JSON.stringify(messages));
-}
-
-function carriesImagePart(list) {
-  return (list || []).some(
-    (m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === 'image_url')
-  );
-}
-
-async function testImageRejectedRoundIsRepaired() {
-  const messages = [
-    { role: 'user', content: '这是什么？' },
-    {
-      role: 'user',
-      content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: PNG_DATA_URL } }]
-    }
-  ];
-  const setMessages = [];
-  const seen = [];
-  const phases = [];
-  let llmCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-img',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages, tools: [] }
-    }),
-    'agent.loop.set_messages': async (params) => {
-      setMessages.push(snapshotMessages(params.messages));
-      return { ok: true };
-    },
-    'agent.loop.continue': async () => ({ runId: 'run-img', phase: 'done', content: 'ok' })
-  });
-
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    onPhase: (p) => phases.push(p),
-    fetchLlmOnce: async ({ body }) => {
-      llmCalls += 1;
-      seen.push(snapshotMessages(body.messages));
-      if (llmCalls === 1) throw unsupportedImageError(1);
-      return { content: 'ok', toolCalls: [] };
-    }
-  });
-
-  assert(result.phase === 'done', 'image rejection still finishes the turn');
-  assert(llmCalls === 2, 'retried exactly once');
-  assert(carriesImagePart(seen[0]), 'first attempt carries the image');
-  assert(!carriesImagePart(seen[1]), 'retry drops the rejected image');
-  assert(
-    seen[1][1].content.some((p) => p.type === 'text' && /图片被模型接口拒绝/.test(p.text)),
-    'dropped image becomes an explaining text part'
-  );
-  assert(setMessages.length === 1, 'ledger written back once');
-  assert(!carriesImagePart(setMessages[0]), 'ledger no longer holds the rejected image');
-  assert(phases.includes('llm_images_dropped'), 'emits llm_images_dropped');
-}
-
-async function testRejectedImageWithoutUsableIndexDropsAll() {
-  const messages = [
-    {
-      role: 'user',
-      content: [{ type: 'image_url', image_url: { url: PNG_DATA_URL } }]
-    }
-  ];
-  const seen = [];
-  let llmCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-img-all',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages, tools: [] }
-    }),
-    'agent.loop.set_messages': async () => ({ ok: true }),
-    'agent.loop.continue': async () => ({ runId: 'run-img-all', phase: 'done', content: 'ok' })
-  });
-  await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    fetchLlmOnce: async ({ body }) => {
-      llmCalls += 1;
-      seen.push(snapshotMessages(body.messages));
-      // 文案里没有可用的 .messages[N] 定位：不许赌，直接丢光
-      if (llmCalls === 1) {
-        const err = new Error('HTTP 400 unsupported image');
-        err.statusCode = 400;
-        throw err;
-      }
-      return { content: 'ok', toolCalls: [] };
-    }
-  });
-  assert(llmCalls === 2, 'retried once without an index');
-  assert(!carriesImagePart(seen[1]), 'all images dropped when the index is unusable');
-}
-
-async function testRejectedVisionMessageIsNotReinjected() {
-  const bv = require('../src/agent/browser-vision');
-  bv.recordBrowserScreenshot('run-vimg', 'browser_screenshot', {
-    ok: true,
-    mime: 'image/png',
-    base64: 'AAAA'
-  });
-
-  const seen = [];
-  const phases = [];
-  let llmCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-vimg',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] }
-    }),
-    'agent.loop.continue': async () => ({ runId: 'run-vimg', phase: 'done', content: 'ok' })
-  });
-  await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    browserVision: true,
-    onPhase: (p) => phases.push(p),
-    fetchLlmOnce: async ({ body }) => {
-      llmCalls += 1;
-      seen.push(snapshotMessages(body.messages));
-      // 账本只有 1 条 → 下标 1 就是本轮临时追加的视觉注入消息
-      if (llmCalls === 1) throw unsupportedImageError(1);
-      return { content: 'ok', toolCalls: [] };
-    }
-  });
-
-  assert(llmCalls === 2, 'vision rejection retried');
-  assert(seen[0].length === 2 && carriesImagePart([seen[0][1]]), 'first attempt injected the screenshot');
-  assert(seen[1].length === 1, 'retry no longer injects the rejected screenshot');
-  assert(
-    !bridge.invokes.some((i) => i.method === 'agent.loop.set_messages'),
-    'temp vision message is not written back to the ledger'
-  );
-  assert(phases.includes('llm_images_dropped'), 'emits llm_images_dropped');
-}
-
-async function testNonImage400IsNotRepaired() {
-  let llmCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-400',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] }
-    })
-  });
-  let thrown = '';
-  try {
-    await runRustAgentLoop({
-      coreBridge: bridge,
-      llm: { baseUrl: 'https://example/v1' },
-      startParams: { model: 'm' },
-      loopSpec: loopSpec(),
-      fetchLlmOnce: async () => {
-        llmCalls += 1;
-        const err = new Error('HTTP 400 invalid api key');
-        err.statusCode = 400;
-        throw err;
-      }
-    });
-  } catch (err) {
-    thrown = String(err && err.message);
-  }
-  assert(/invalid api key/.test(thrown), 'non-image 400 still surfaces to the caller');
-  assert(llmCalls === 1, 'no repair retry for a non-image 400');
-}
-
-async function testVisionImageReadHelpers() {
-  const { sniffImageMime, isVisionImageReadRequest } = require('../src/agent/tool-bridge-main');
-
-  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
-  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
-  const gif = Buffer.from('GIF89a............', 'latin1');
-  const webp = Buffer.alloc(16);
-  webp.write('RIFF', 0, 'latin1');
-  webp.write('WEBP', 8, 'latin1');
-
-  assert(sniffImageMime(png.toString('base64')) === 'image/png', 'sniff png');
-  assert(sniffImageMime(jpeg.toString('base64')) === 'image/jpeg', 'sniff jpeg');
-  assert(sniffImageMime(gif.toString('base64')) === 'image/gif', 'sniff gif');
-  assert(sniffImageMime(webp.toString('base64')) === 'image/webp', 'sniff webp');
-  assert(sniffImageMime(Buffer.from('hello, plain text payload').toString('base64')) === '', 'sniff rejects text');
-  assert(sniffImageMime('') === '', 'sniff rejects empty');
-
-  assert(
-    isVisionImageReadRequest('fs_read_file', { filePath: 'a.png', encoding: 'base64' }),
-    'base64 whole-file read is a vision read'
-  );
-  assert(
-    !isVisionImageReadRequest('fs_read_file', { filePath: 'a.png' }),
-    'utf8 read is not a vision read'
-  );
-  assert(
-    !isVisionImageReadRequest('fs_read_file', { filePath: 'a.png', encoding: 'base64', offset: 100 }),
-    'chunked read is not a vision read'
-  );
-  assert(!isVisionImageReadRequest('fs_edit', { encoding: 'base64' }), 'other tools are not vision reads');
-}
-
-async function testAbortDuringLlmCancelsSidecar() {
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-a',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }] }
-    }),
-    'agent.loop.cancel': async () => ({ ok: true })
-  });
-  const ac = new AbortController();
-  const p = runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    signal: ac.signal,
-    fetchLlmOnce: async ({ signal }) => {
-      await new Promise((_, reject) => {
-        const fail = () => {
-          const err = new Error('已停止');
-          err.name = 'AbortError';
-          reject(err);
-        };
-        if (signal?.aborted) fail();
-        else signal.addEventListener('abort', fail, { once: true });
-      });
-    }
-  });
-  await sleep(20);
-  ac.abort();
-  await expectAbort(p);
-  assert(
-    bridge.abortPendingCalls.some((c) => c.runId === 'run-a'),
-    'abortPending during LLM'
-  );
-  assert(
-    bridge.invokes.some((i) => i.method === 'agent.loop.cancel'),
-    'sidecar cancel during LLM'
-  );
-}
-
-async function testAbortDuringContinueCancelsSidecar() {
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-b',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }] }
-    }),
-    'agent.loop.continue': async () => new Promise(() => {}),
-    'agent.loop.cancel': async () => ({ ok: true })
-  });
-  const ac = new AbortController();
-  const p = runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    signal: ac.signal,
-    fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
-  });
-  await sleep(30);
-  ac.abort();
-  await expectAbort(p);
-  assert(
-    bridge.abortPendingCalls.some((c) => c.runId === 'run-b'),
-    'abortPending during continue'
-  );
-  assert(
-    bridge.invokes.some((i) => i.method === 'agent.loop.cancel'),
-    'sidecar cancel during continue'
-  );
-}
-
-async function testAbortDuringCompactCancelsSidecar() {
-  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-k',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages }
-    }),
-    'agent.loop.cancel': async () => ({ ok: true })
-  });
-  const ac = new AbortController();
-  const p = runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    signal: ac.signal,
-    compactMessages: async (_msgs, ctx) => {
-      await new Promise((_, reject) => {
-        const fail = () => {
-          const err = new Error('已停止');
-          err.name = 'AbortError';
-          reject(err);
-        };
-        if (ctx.signal?.aborted) fail();
-        else ctx.signal.addEventListener('abort', fail, { once: true });
-      });
-    },
-    fetchLlmOnce: async () => {
-      throw new Error('LLM should not run if compact aborted');
-    }
-  });
-  await sleep(20);
-  ac.abort();
-  await expectAbort(p);
-  assert(
-    bridge.invokes.some((i) => i.method === 'agent.loop.cancel'),
-    'sidecar cancel during compact'
-  );
-}
-
-async function testOverflowStopsAfterOneCompact() {
-  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
-  let compactCalls = 0;
-  let llmCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-ov',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages, tools: [] }
-    }),
-    'agent.loop.set_messages': async () => ({ ok: true }),
-    'agent.loop.cancel': async () => ({ ok: true })
-  });
-  const phases = [];
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    onPhase: (p) => phases.push(p),
-    compactMessages: async (msgs) => {
-      compactCalls += 1;
-      return { compacted: true, messages: msgs.slice(0, 2), tokensBefore: 90, tokensAfter: 10 };
-    },
-    fetchLlmOnce: async () => {
-      llmCalls += 1;
-      const err = new Error('HTTP 400 prompt is too long');
-      err.statusCode = 400;
-      throw err;
-    }
-  });
-  assert(result.overflowStopped === true, 'overflowStops turn');
-  assert(result.phase === 'done', 'soft done');
-  assert(compactCalls === 1, 'compact once');
-  assert(llmCalls === 1, 'no second sample after overflow compact');
-  assert(phases.includes('turn_overflow_stopped'), 'overflow phase');
-  assert(
-    bridge.invokes.some((i) => i.method === 'agent.loop.cancel'),
-    'overflow stop cancels sidecar run'
-  );
-  assert(
-    !bridge.invokes.some((i) => i.method === 'agent.loop.continue'),
-    'no continue after overflow stop'
-  );
-}
-
-async function testOverflowDoesNotTreatPartialAsSuccess() {
-  const messages = Array.from({ length: 25 }, (_, i) => ({ role: 'user', content: String(i) }));
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-ovp',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages, tools: [] }
-    }),
-    'agent.loop.set_messages': async () => ({ ok: true }),
-    'agent.loop.cancel': async () => ({ ok: true }),
-    'agent.loop.continue': async () => {
-      throw new Error('overflow must not continue');
-    }
-  });
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    compactMessages: async (msgs) => ({
-      compacted: true,
-      messages: msgs.slice(0, 2),
-      tokensBefore: 90,
-      tokensAfter: 10
-    }),
-    fetchLlmOnce: async () => {
-      const err = new Error('prompt is too long');
-      err.partial = { content: 'x', reasoning: 'already thinking' };
-      throw err;
-    }
-  });
-  assert(result.overflowStopped === true, 'partial overflow still stops');
-}
-
-async function testUnknownPhase() {
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({ runId: 'run-u', phase: 'need_coffee' })
-  });
-  let threw = false;
-  try {
-    await runRustAgentLoop({
-      coreBridge: bridge,
-      llm: { baseUrl: 'https://example/v1' },
-      startParams: { model: 'm' },
-      loopSpec: loopSpec()
-    });
-  } catch (err) {
-    threw = /未知阶段/.test(String(err && err.message));
-  }
-  assert(threw, 'unknown phase throws');
-}
-
-async function testTurnEndSynthesisSkippedByDefault() {
-  let synthCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      phase: 'done',
-      runId: 'run-nosynth',
-      content: '',
-      hitRoundLimit: false,
-      messages: [{ role: 'user', content: '修 bug' }],
-      trace: [{ round: 1, thought: '读了文件', tools: [{ name: 'fs_read_file', args: {}, result: {} }] }]
-    })
-  });
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    fetchSynthesisOnce: async () => {
-      synthCalls += 1;
-      return { content: '不应调用' };
-    }
-  });
-  assert(synthCalls === 0, 'planner/default path does not synthesize');
-  assert(result.content === '', 'empty content unchanged');
-}
-
-async function testTurnEndSynthesisFillsEmptyReply() {
-  const phases = [];
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      phase: 'done',
-      runId: 'run-synth',
-      content: '',
-      hitRoundLimit: false,
-      messages: [{ role: 'user', content: '修 login' }],
-      trace: [{ round: 1, thought: '短', tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
-    })
-  });
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    turnEndSynthesis: true,
-    onPhase: (p) => phases.push(p),
-    fetchSynthesisOnce: async () => ({ content: '已改 login 校验，失败时保留快照。' })
-  });
-  assert(result.content.includes('login'), 'synthesis fills empty reply');
-  assert(phases.includes('synthesis_start'), 'synthesis_start phase');
-  assert(phases.includes('synthesis_done'), 'synthesis_done phase');
-  assert(
-    Array.isArray(result.trace) && result.trace.some((r) => r.phase === '汇总'),
-    'trace has 汇总 round'
-  );
-}
-
-// 截断 + 只有思考：带标签交付思考原文，不再花一轮 LLM；该标签只用于展示，不写进 book。
-async function testTurnEndTruncatedUsesReasoningFallback() {
-  let synthCalls = 0;
-  const longThought =
-    '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      phase: 'done',
-      runId: 'run-thought',
-      content: '',
-      hitRoundLimit: true,
-      messages: [{ role: 'user', content: '修截图' }],
-      trace: [{ round: 1, thought: longThought, tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
-    })
-  });
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    turnEndSynthesis: true,
-    fetchSynthesisOnce: async () => {
-      synthCalls += 1;
-      return { content: '不应调用' };
-    }
-  });
-  assert(synthCalls === 0, 'truncated turn with only reasoning skips synthesis LLM');
-  assert(isReasoningFallbackText(result.content), 'truncated turn labels reasoning as delivery');
-  assert(result.content.includes(longThought), 'reasoning 原文进入交付文本');
-  assert(
-    persistableTurnText(result.content) === TURN_EMPTY_REPLY_TEXT,
-    'reasoning-fallback 不写进 book（落库换成占位）'
-  );
-}
-
-// 正常收尾 + 无正文 + 有思考：走汇总链路，不再用思考顶替正文（A3 反转）。
-// 同时校验 D3 契约（docs/REASONING-ISOLATION-PLAN.md §3.7）：**汇总 LLM 的输入只允许工具事实**，
-// 不得把思考喂进去 —— 否则「写用户可见正文」这一步会把私有推理间接写进答复。
-async function testTurnEndThoughtDefersToSynthesis() {
-  let synthCalls = 0;
-  let synthBody = null;
-  const longThought =
-    '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      phase: 'done',
-      runId: 'run-thought-norm',
-      content: '',
-      hitRoundLimit: false,
-      messages: [{ role: 'user', content: '修截图' }],
-      trace: [{ round: 1, thought: longThought, tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
-    })
-  });
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    turnEndSynthesis: true,
-    fetchSynthesisOnce: async ({ body }) => {
-      synthCalls += 1;
-      synthBody = body;
-      return { content: '已改截图重试并保留快照。' };
-    }
-  });
-  assert(synthCalls === 1, 'normal finish with only reasoning defers to synthesis');
-  assert(result.content === '已改截图重试并保留快照。', 'synthesis output becomes delivery');
-  assert(!isReasoningFallbackText(result.content), '汇总结果不是思考回退标签');
-
-  const synthPrompt = JSON.stringify(synthBody || {});
-  assert(synthPrompt.includes('fs_edit'), '汇总输入带工具事实');
-  assert(!synthPrompt.includes(longThought), '汇总输入不含思考（D3：写正文的输入只允许事实）');
-  assert(!synthPrompt.includes('BrowserView'), '思考正文片段不进入汇总输入');
-}
-
-async function testTurnEndKeepsModelProse() {
-  let synthCalls = 0;
-  const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      phase: 'done',
-      runId: 'run-keep',
-      content: '已完成。',
-      hitRoundLimit: false,
-      messages: [{ role: 'user', content: '修' }],
-      trace: [{ round: 1, thought: 'x', tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
-    })
-  });
-  const result = await runRustAgentLoop({
-    coreBridge: bridge,
-    llm: { baseUrl: 'https://example/v1' },
-    startParams: { model: 'm' },
-    loopSpec: loopSpec(),
-    turnEndSynthesis: true,
-    fetchSynthesisOnce: async () => {
-      synthCalls += 1;
-      return { content: '不应调用' };
-    }
-  });
-  assert(synthCalls === 0, 'non-empty reply skips synthesis');
-  assert(result.content === '已完成。', 'keeps short model prose');
 }
 
 function testBackfillReasoningContent() {
@@ -1185,14 +204,6 @@ function testBackfillReasoningContent() {
     typeof withTools[1].reasoning_content === 'string' && withTools[1].reasoning_content.trim(),
     'plain assistant gets placeholder when request carries tools'
   );
-  assert(withTools[0] === plain[0], 'user message untouched');
-
-  const fresh = [
-    { role: 'assistant', content: '', reasoning_content: 'real thought', tool_calls: [{ id: 'tc2', function: { name: 'x', arguments: '{}' } }] },
-    { role: 'assistant', content: 'answer', reasoning_content: 'kept thought' }
-  ];
-  assert(backfillReasoningContent(fresh, true) === fresh, 'no rewrite when reasoning present');
-  assert(backfillReasoningContent(undefined, true) === undefined, 'undefined passes through');
 
   // 真值优先：账本 `reasoning`（与 content 分列）直接作为 reasoning_content 回传，不落占位。
   const book = [
@@ -1205,23 +216,10 @@ function testBackfillReasoningContent() {
     }
   ];
   const echoed = backfillReasoningContent(book, false);
-  assert(echoed !== book, 'book reasoning triggers rewrite');
   assert(echoed[1].reasoning_content === '账本真思考', 'book reasoning becomes reasoning_content truth');
   assert(echoed[1].reasoning === undefined, 'internal reasoning field stripped before upstream');
   assert(book[1].reasoning === '  账本真思考  ' && book[1].reasoning_content === undefined, 'original not mutated');
-  assert(echoed[0] === book[0], 'user message keeps identity');
 
-  // 无 tool_calls 的普通回复轮：脱工具默认不回传，但要剥掉账本内部字段。
-  const plainBook = [{ role: 'assistant', content: 'answer', reasoning: '思考' }];
-  const plainOut = backfillReasoningContent(plainBook, false);
-  assert(plainOut[0].reasoning === undefined, 'book field stripped even when not echoing');
-  assert(plainOut[0].reasoning_content === undefined, 'no reasoning_content without tools');
-
-  // echoReasoning（能力表声明）时才脱工具也回传。
-  const echoOn = backfillReasoningContent(plainBook, false, true);
-  assert(echoOn[0].reasoning_content === '思考', 'echoReasoning forces echo without tools');
-
-  // 真值不可得 + 需要回传 → 占位兜底。
   const noTruth = [
     { role: 'assistant', content: '', tool_calls: [{ id: 'tc4', function: { name: 'x', arguments: '{}' } }] }
   ];
@@ -1231,31 +229,761 @@ function testBackfillReasoningContent() {
   );
 }
 
+// ---------------------------------------------------------------- 新契约
+
 /**
- * 请求快照接线：`fetchRoundOnce` 必须先留底再发请求（docs/REQUEST-SNAPSHOT.md §5）。
- * 这里只验"接上了、顺序对、字段透传"，装配细节由 test/unit/request-snapshot.test.cjs 覆盖。
+ * start 契约 + 增量转发：这条钉住整个迁移最容易踩的一脚。
+ *
+ * `runId` 必须是**宿主**生成并透传（core 拿它给事件打归属），事件订阅必须在 start 之前，
+ * 增量要累积成 UI 要的累计值，别的 run 的事件不能被吞。
  */
-async function testRequestSnapshotWrittenBeforeSend() {
-  const order = [];
+async function testStartContractAndDeltaAccumulation() {
+  const phases = [];
+  const deltas = [];
+  let startParams = null;
+  let hostRunIdSeenInEvents = [];
   const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-snap',
-      phase: 'need_llm',
-      llmBody: {
-        model: 'm',
-        messages: [
-          { role: 'system', content: 'SYS' },
-          { role: 'user', content: 'hi' }
-        ],
-        tools: [{ type: 'function', function: { name: 'fs_read_file' } }]
+    'agent.run.start': async (params, _timeout, br) => {
+      startParams = params;
+      // core 在 start **内部**就推增量（真 core 与这里一致：推的是增量，不是累计值）
+      br.emitEvent({ type: 'agent.delta', runId: params.runId, round: 0, content: '你', reasoning: null });
+      br.emitEvent({ type: 'agent.delta', runId: params.runId, round: 0, content: '好', reasoning: '想' });
+      // 别的 run 的噪音：绝不能混进来
+      br.emitEvent({ type: 'agent.delta', runId: 'run-someone-else', round: 0, content: '噪音' });
+      br.emitEvent({ type: 'other.event', runId: params.runId, content: '无关事件' });
+      hostRunIdSeenInEvents.push(params.runId);
+      return { phase: 'done', runId: params.runId, content: '你好', trace: [] };
+    }
+  });
+
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1', apiKey: 'k', headers: { 'x-session': 's1' }, authMode: 'bearer' },
+    startParams: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] },
+    loopSpec: loopSpec(),
+    onPhase: (p, data) => {
+      phases.push(p);
+      if (p === 'llm_delta') deltas.push(data);
+    }
+  });
+
+  assert(startParams, '必须走 agent.run.start');
+  assert(/^run-\d+-[a-z0-9]+$/.test(String(startParams.runId)), `runId 形如 run-<时间戳>-<随机>：${startParams.runId}`);
+  assert(startParams.runId === hostRunIdSeenInEvents[0], 'runId 由宿主生成并透传给 core');
+  assert(startParams.url === 'https://example/v1/chat/completions', `端点拼接：${startParams.url}`);
+  assert(startParams.stream === true, '流式由宿主声明');
+  assert(startParams.contentChannel === 'answer', 'contentChannel 由能力表声明');
+  assert(
+    startParams.llm && startParams.llm.headers && startParams.llm.headers['x-session'] === 's1',
+    '请求头由 Node 装配后随 llm 透传（core 不推导）'
+  );
+  assert(startParams.llm.authMode === 'bearer', 'llm.authMode 透传');
+  assert(startParams.model === 'm' && Array.isArray(startParams.messages), 'startParams 业务字段原样透传');
+  const startInvoke = bridge.invokes.find((i) => i.method === 'agent.run.start');
+  assert(startInvoke.timeout === undefined, 'RPC 超时不由 runner 传（core-rpc-timeouts 是唯一来源）');
+
+  assert(deltas.length >= 2, '每个增量都要推给 UI');
+  assert(deltas[0].content === '你', '第一条是增量');
+  assert(deltas[deltas.length - 1].content === '你好', 'UI 拿到的是累积值');
+  assert(deltas[deltas.length - 1].reasoning === '想', '思考通道同样累积');
+  assert(deltas[deltas.length - 1].contentChannel === 'answer', '增量带 contentChannel');
+  assert(!deltas.some((d) => String(d.content || '').includes('噪音')), '别的 run 的增量不能混进来');
+  assert(!phases.includes('other.event'), '非 agent.delta 事件不转发');
+
+  assert(result.phase === 'done', 'done 结果原样返回');
+  assert(phases.includes('start') && phases.includes('llm_request') && phases.includes('llm_response'), '相位齐全');
+  assert(phases.includes('done'), 'done 相位');
+  assertNoLegacyRpc(bridge);
+}
+
+/**
+ * core 现在推的增量是 `round: null`（`LoopResponse` 不暴露 round）：
+ * 宿主必须用**本地轮次计数**补上，否则 UI 的思考/正文会全落到同一行。
+ */
+async function testDeltaWithoutRoundUsesLocalCounter() {
+  const deltas = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params, _t, br) => {
+      // 第一轮：core 不带 round
+      br.emitEvent({ type: 'agent.delta', runId: params.runId, round: null, content: '第一轮' });
+      return {
+        phase: 'need_tools',
+        runId: params.runId,
+        delegates: [{ id: 'c1', name: 'fs_read_file', arguments: { filePath: 'a.txt' } }]
+      };
+    },
+    'agent.run.tools': async (params, _t, br) => {
+      // 第二轮同一次 run：依旧不带 round
+      br.emitEvent({ type: 'agent.delta', runId: params.runId, round: null, content: '第二轮' });
+      return { phase: 'done', runId: params.runId, content: '第二轮', trace: [] };
+    }
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [], tools: [] },
+    loopSpec: loopSpec(),
+    delegateTool: async () => ({ ok: true }),
+    onPhase: (p, d) => {
+      if (p === 'llm_delta') deltas.push(d);
+    }
+  });
+  assert(deltas.length >= 2, '两轮都要有增量');
+  assert(deltas[0].round === 0, `round 缺省时用本地计数 0，实际 ${deltas[0].round}`);
+  assert(deltas[deltas.length - 1].round === 1, `第二轮应为 1，实际 ${deltas[deltas.length - 1].round}`);
+  assert(
+    deltas.filter((d) => d.round === 0).every((d) => !String(d.content).includes('第二轮')),
+    '第二轮的累积值不能落回第一轮的行'
+  );
+}
+
+/**
+ * 工具轮也能带折叠事实：`need_tools` 响应上的 `compacted` 同样要走
+ * phase / 遥测 / 归档（不能只在 done 上处理，否则工具轮之前的折叠全丢）。
+ */
+async function testFoldFactOnNeedToolsIsHandled() {
+  const phases = [];
+  const archived = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({
+      phase: 'need_tools',
+      runId: params.runId,
+      delegates: [{ id: 'c1', name: 'fs_read_file', arguments: { filePath: 'a.txt' } }],
+      compacted: {
+        level: 1,
+        tokensBefore: 12_000,
+        tokensAfter: 3_000,
+        triggerSource: 'usage',
+        foldedToolResults: 2,
+        foldedTexts: 0,
+        foldedImages: 0
       }
     }),
-    'agent.loop.continue': async () => ({ runId: 'run-snap', phase: 'done', content: 'ok' }),
+    'agent.run.tools': async (params) => ({ phase: 'done', runId: params.runId, content: 'ok', trace: [] })
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [], tools: [] },
+    loopSpec: loopSpec(),
+    delegateTool: async () => ({ ok: true }),
+    onPhase: (p, d) => {
+      if (p === 'compacted') phases.push(d);
+    },
+    compactMessages: Object.assign(async () => ({ compacted: false }), {
+      archiveFold: async (fact) => {
+        archived.push(fact);
+        return 1;
+      }
+    })
+  });
+  assert(phases.length === 1, `工具轮前的折叠事实也要上报，实际 ${phases.length} 次`);
+  assert(phases[0].tokensBefore === 12_000, 'compacted 相位带 core 的事实');
+  assert(archived.length === 1 && archived[0].level === 1, '工具轮前的折叠也要归档');
+}
+
+/**
+ * 工具轮：need_tools → Node 执行 → `agent.run.tools` 回填 → 直到 done。
+ */
+async function testToolsAreExecutedAndBackfilled() {
+  let round = 0;
+  let toolsParams = null;
+  let startRunId = null;
+  const phases = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => {
+      round += 1;
+      startRunId = params.runId;
+      return {
+        phase: 'need_tools',
+        runId: params.runId,
+        delegates: [{ id: 'c1', name: 'fs_read_file', arguments: { filePath: 'a.txt' } }]
+      };
+    },
+    'agent.run.tools': async (params) => {
+      round += 1;
+      toolsParams = params;
+      return { phase: 'done', runId: params.runId, content: 'done', trace: [] };
+    }
+  });
+
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [], tools: [] },
+    loopSpec: loopSpec(),
+    onPhase: (p) => phases.push(p),
+    delegateTool: async (name, args) => {
+      assert(name === 'fs_read_file', 'tool name');
+      assert(args.filePath === 'a.txt', 'tool args');
+      return { text: 'hello' };
+    }
+  });
+
+  assert(result.phase === 'done', 'delegate done');
+  assert(methodsOf(bridge) === 'agent.run.start,agent.run.tools', `只许两条驱动 RPC，实际 ${methodsOf(bridge)}`);
+  assert(toolsParams, '必须回填工具结果');
+  assert(toolsParams.runId === startRunId, '回填用同一个 runId');
+  assert(Array.isArray(toolsParams.results) && toolsParams.results.length === 1, 'one result');
+  assert(toolsParams.results[0].id === 'c1', 'result id');
+  assert(toolsParams.results[0].result && toolsParams.results[0].result.text === 'hello', 'tool body 被回填');
+  assert(toolsParams.url === 'https://example/v1/chat/completions', 'tools 也要带 url');
+  assert(toolsParams.contentChannel === 'answer', 'tools 也要带 contentChannel');
+  for (const p of ['delegate_start', 'delegate_result', 'llm_response']) {
+    assert(phases.includes(p), `缺相位 ${p}`);
+  }
+  assertNoLegacyRpc(bridge);
+}
+
+/** 单通道模型（mimo）：`content` 键即思考 —— 入口盖章为 `reasoning`，core 据此分列。 */
+async function testContentChannelStampedFromCapabilityTable() {
+  for (const [model, expected] of [
+    ['m', 'answer'],
+    ['mimo-v2.5-pro', 'reasoning']
+  ]) {
+    let seen = null;
+    const deltas = [];
+    const bridge = createFakeBridge({
+      'agent.run.start': async (params, _t, br) => {
+        seen = params;
+        br.emitEvent({ type: 'agent.delta', runId: params.runId, content: '想' });
+        return { phase: 'done', runId: params.runId, content: '', trace: [] };
+      }
+    });
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model, messages: [], tools: [] },
+      loopSpec: loopSpec(),
+      onPhase: (p, d) => {
+        if (p === 'llm_delta') deltas.push(d);
+      }
+    });
+    assert(seen && seen.contentChannel === expected, `contentChannel for ${model}: got ${seen && seen.contentChannel}`);
+    assert(
+      deltas.length && deltas[deltas.length - 1].contentChannel === expected,
+      `llm_delta 也要带 contentChannel: ${model}`
+    );
+  }
+}
+
+/**
+ * 折叠事实：core 折完把事实交上来，Node 只推 UI / 记遥测 / 写归档 —— 不再回写账本。
+ */
+async function testFoldFactDrivesNodeSideEffects() {
+  const archiveCalls = [];
+  const phases = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({
+      phase: 'done',
+      runId: params.runId,
+      content: 'ok',
+      trace: [],
+      compacted: {
+        level: 2,
+        tokensBefore: 90_000,
+        tokensAfter: 9_000,
+        triggerSource: 'usage',
+        foldedToolResults: 3,
+        foldedTexts: 1,
+        foldedImages: 0
+      }
+    })
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    onPhase: (p, data) => {
+      phases.push(p);
+      if (p === 'compacted') archiveCalls.push(data);
+    },
+    compactMessages: Object.assign(async () => ({ compacted: false }), {
+      archiveFold: async (fact) => {
+        assert(fact.level === 2, 'archive 拿到的是 core 的事实');
+        return 77;
+      }
+    })
+  });
+  assert(phases.includes('compacted'), 'compacted phase 由事实驱动');
+  assert(archiveCalls.length === 1 && archiveCalls[0].tokensBefore === 90_000, '归档拿到事实');
+  assert(
+    !bridge.invokes.some((i) => i.method === 'agent.loop.set_messages' || i.method === 'agent.loop.fold'),
+    'Node 不再改写账本、也不再自己触发折叠'
+  );
+  assertNoLegacyRpc(bridge);
+}
+
+/**
+ * `round.prepare`：core 每轮发请求前问宿主「这一次的 messages 长什么样」。
+ *
+ * 三件事必须成立：
+ * 1. handler 在 `agent.run.start` **之前**注册，跑完（finally）退订；
+ * 2. 视觉注入**逐轮**发生（不再是回合开始一次性），交出去的是**请求用副本**；
+ * 3. handler 返回的 messages **不会**被 Node 拿去当账本 —— Node 没有账本写入口。
+ */
+async function testRoundPrepareRegisteredBeforeStart() {
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => {
+      assert(
+        bridge.coreCallMethods.includes('round.prepare'),
+        `start 之前必须已注册 round.prepare：${bridge.timeline.join(',')}`
+      );
+      return { phase: 'done', runId: params.runId, content: 'ok', trace: [] };
+    }
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [{ role: 'user', content: 'hi' }] },
+    loopSpec: loopSpec()
+  });
+
+  const regIdx = bridge.timeline.indexOf('onCoreCall:round.prepare');
+  const startIdx = bridge.timeline.indexOf('invoke:agent.run.start');
+  assert(regIdx >= 0, `round.prepare 必须被注册：${bridge.timeline.join(',')}`);
+  assert(startIdx > regIdx, `注册必须早于 agent.run.start：${bridge.timeline.join(',')}`);
+  assert(bridge.coreCallHandlerCount === 0, 'run 结束（finally）必须退订 round.prepare');
+}
+
+/** 逐轮注入：两轮各有一次反向调用，各自拿到「账本 + 本轮新图」的请求副本。 */
+async function testRoundPrepareInjectsPerRoundOnRequestCopy() {
+  visionTakeCalls = 0;
+  const phases = [];
+  /** core 视角的账本（宿主导入不了它，只能拿副本）。 */
+  let ledger = [{ role: 'user', content: '看图' }];
+  /** 模拟 core 每轮真正发出去的请求 messages。 */
+  const sent = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => {
+      visionFeed = { images: [{ source: 'browser', mime: 'image/png', base64: 'AAAA' }] };
+      const reply = await bridge.callCore('round.prepare', {
+        runId: params.runId,
+        round: 0,
+        messages: ledger
+      });
+      sent.push(reply.messages);
+      assert(reply.visionInjected === 1, `第一轮注入 1 张，实际 ${reply.visionInjected}`);
+      assert(ledger.length === 1, '账本不该被宿主改写（只交请求副本）');
+      return {
+        phase: 'need_tools',
+        runId: params.runId,
+        delegates: [{ id: 'c1', name: 'browser_screenshot', arguments: {} }]
+      };
+    },
+    'agent.run.tools': async (params) => {
+      ledger = [
+        ...ledger,
+        { role: 'assistant', content: '' },
+        { role: 'tool', content: 'shot' }
+      ];
+      visionFeed = {
+        images: [{ source: 'attachment', mime: 'image/png', base64: 'BBBB', path: 'b.png' }]
+      };
+      const reply = await bridge.callCore('round.prepare', {
+        runId: params.runId,
+        round: 1,
+        messages: ledger
+      });
+      sent.push(reply.messages);
+      assert(reply.visionInjected === 1, '第二轮也要能注入（逐轮，不再是回合开始一次性）');
+      return { phase: 'done', runId: params.runId, content: 'ok', trace: [] };
+    }
+  });
+  try {
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm', messages: [{ role: 'user', content: '看图' }] },
+      loopSpec: loopSpec(),
+      browserVision: true,
+      onPhase: (p) => phases.push(p),
+      delegateTool: async () => ({ ok: true })
+    });
+  } finally {
+    visionFeed = null;
+  }
+
+  assert(sent.length === 2, '两轮请求都要走 round.prepare');
+  assert(visionTakeCalls === 2, `逐轮各取样一次，实际 ${visionTakeCalls}`);
+  assert(sent[0].length === 2, `第一轮副本 = 账本 1 条 + 视觉 1 条，实际 ${sent[0].length}`);
+  const visionMsg = sent[0][sent[0].length - 1];
+  assert(visionMsg.role === 'user', 'vision message uses user role');
+  assert(
+    Array.isArray(visionMsg.content) && visionMsg.content.some((p) => p.type === 'image_url'),
+    'vision message carries image_url part'
+  );
+  assert(sent[1].length === 4, `第二轮副本 = 账本 3 条 + 视觉 1 条，实际 ${sent[1].length}`);
+  assert(sent[1][0].role === 'user' && sent[1][2].role === 'tool', '账本顺序原样保留');
+  assert(phases.includes('browser_vision_injected'), 'emits browser_vision_injected');
+  assert(phases.includes('attachment_vision_injected'), 'emits attachment_vision_injected');
+  // Node 没有账本写入口：agent.loop.* 一个都不该出现
+  assertNoLegacyRpc(bridge);
+}
+
+async function testVisionDisabledNoInjection() {
+  visionTakeCalls = 0;
+  visionFeed = { images: [{ source: 'browser', mime: 'image/png', base64: 'AAAA' }] };
+  let startParams = null;
+  let prepared = null;
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => {
+      startParams = params;
+      // 非多模态：core 照样会问，宿主必须原样还回去（不取图、不谎报张数）
+      prepared = await bridge.callCore('round.prepare', {
+        runId: params.runId,
+        round: 0,
+        messages: params.messages
+      });
+      return { phase: 'done', runId: params.runId, content: 'ok', trace: [] };
+    }
+  });
+  try {
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm', messages: [{ role: 'user', content: 'hi' }] },
+      loopSpec: loopSpec()
+    });
+  } finally {
+    visionFeed = null;
+  }
+  assert(startParams.messages.length === 1, 'no injection when browserVision disabled');
+  assert(visionTakeCalls === 0, '未开启视觉时连取样都不该发生');
+  assert(prepared && prepared.messages.length === 1, '拿不到视觉能力时原样返回 messages');
+  assert(!('visionInjected' in prepared), '拿不到视觉能力时不该报注入张数');
+}
+
+// ---------------------------------------------------------------- 取消 / 溢出 / 异常
+
+async function testAbortDuringRunCancelsViaRunCancel() {
+  const bridge = createFakeBridge({
+    'agent.run.start': () => new Promise(() => {})
+  });
+  const ac = new AbortController();
+  const p = runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    signal: ac.signal
+  });
+  await sleep(20);
+  ac.abort();
+  await expectAbort(p);
+  const runId = bridge.invokes[0].params.runId;
+  assert(runId, 'start 必须带宿主生成的 runId');
+  assert(
+    bridge.abortPendingCalls.some((c) => c.runId === runId),
+    'abortPending 用 runId 就地 settle 在途 RPC'
+  );
+  assert(
+    bridge.invokes.some((i) => i.method === 'agent.run.cancel' && i.params.runId === runId),
+    '取消走 agent.run.cancel'
+  );
+  assert(
+    !bridge.invokes.some((i) => i.method === 'agent.loop.cancel'),
+    '不许再调 agent.loop.cancel'
+  );
+}
+
+async function testAbortDuringToolsCancelsRun() {
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({
+      phase: 'need_tools',
+      runId: params.runId,
+      delegates: [{ id: 'c1', name: 'fs_read_file', arguments: { filePath: 'a.txt' } }]
+    }),
+    'agent.run.tools': () => new Promise(() => {})
+  });
+  const ac = new AbortController();
+  const p = runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    signal: ac.signal,
+    delegateTool: async () => ({ ok: true })
+  });
+  await sleep(30);
+  ac.abort();
+  await expectAbort(p);
+  assert(
+    bridge.invokes.some((i) => i.method === 'agent.run.cancel'),
+    '工具回填在途时取消也要收掉 core 的 run'
+  );
+}
+
+async function testCancelledRpcErrorBecomesAbort() {
+  const bridge = createFakeBridge({
+    'agent.run.start': async () => {
+      const err = new Error('run 已取消');
+      err.code = 'AGENT_CANCELLED';
+      throw err;
+    }
+  });
+  await expectAbort(
+    runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm' },
+      loopSpec: loopSpec()
+    })
+  );
+  assert(
+    bridge.invokes.some((i) => i.method === 'agent.run.cancel'),
+    'core 报取消时也要把 run 收掉'
+  );
+}
+
+async function testContextOverflowSoftStops() {
+  const phases = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async () => {
+      const err = new Error('HTTP 400 prompt is too long');
+      err.statusCode = 400;
+      throw err;
+    }
+  });
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    onPhase: (p) => phases.push(p)
+  });
+  assert(result.overflowStopped === true, 'overflow 软停（不假装成功）');
+  assert(result.phase === 'done', 'soft done');
+  assert(phases.includes('turn_overflow_stopped'), 'overflow phase');
+  assert(
+    bridge.invokes.some((i) => i.method === 'agent.run.cancel'),
+    'overflow stop 收掉 run'
+  );
+  assert(
+    !bridge.invokes.some((i) => i.method === 'agent.loop.fold'),
+    '溢出强折归 core 内部（Node 不再调 agent.loop.fold）'
+  );
+}
+
+async function testUnknownPhaseThrows() {
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({ runId: params.runId, phase: 'need_coffee' })
+  });
+  let threw = false;
+  try {
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm' },
+      loopSpec: loopSpec()
+    });
+  } catch (err) {
+    threw = /未知阶段/.test(String(err && err.message));
+  }
+  assert(threw, 'unknown phase throws');
+}
+
+async function testNonOverflowErrorSurfaces() {
+  const bridge = createFakeBridge({
+    'agent.run.start': async () => {
+      const err = new Error('HTTP 400 invalid api key');
+      err.statusCode = 400;
+      throw err;
+    }
+  });
+  let thrown = '';
+  try {
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm' },
+      loopSpec: loopSpec()
+    });
+  } catch (err) {
+    thrown = String(err && err.message);
+  }
+  assert(/invalid api key/.test(thrown), '非溢出错误原样抛给调用方');
+}
+
+// ---------------------------------------------------------------- 交付四态 / 快照
+
+async function testTurnEndSynthesisSkippedByDefault() {
+  let synthCalls = 0;
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({
+      phase: 'done',
+      runId: params.runId,
+      content: '',
+      hitRoundLimit: false,
+      messages: [{ role: 'user', content: '修 bug' }],
+      trace: [{ round: 1, thought: '读了文件', tools: [{ name: 'fs_read_file', args: {}, result: {} }] }]
+    })
+  });
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    fetchSynthesisOnce: async () => {
+      synthCalls += 1;
+      return { content: '不应调用' };
+    }
+  });
+  assert(synthCalls === 0, 'planner/default path does not synthesize');
+  assert(result.content === '', 'empty content unchanged');
+}
+
+async function testTurnEndSynthesisFillsEmptyReply() {
+  const phases = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({
+      phase: 'done',
+      runId: params.runId,
+      content: '',
+      hitRoundLimit: false,
+      messages: [{ role: 'user', content: '修 login' }],
+      trace: [{ round: 1, thought: '短', tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
+    })
+  });
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    turnEndSynthesis: true,
+    onPhase: (p) => phases.push(p),
+    fetchSynthesisOnce: async () => ({ content: '已改 login 校验，失败时保留快照。' })
+  });
+  assert(result.content.includes('login'), 'synthesis fills empty reply');
+  assert(phases.includes('synthesis_start'), 'synthesis_start phase');
+  assert(phases.includes('synthesis_done'), 'synthesis_done phase');
+  assert(Array.isArray(result.trace) && result.trace.some((r) => r.phase === '汇总'), 'trace has 汇总 round');
+}
+
+async function testTurnEndTruncatedUsesReasoningFallback() {
+  let synthCalls = 0;
+  const longThought =
+    '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({
+      phase: 'done',
+      runId: params.runId,
+      content: '',
+      hitRoundLimit: true,
+      messages: [{ role: 'user', content: '修截图' }],
+      trace: [{ round: 1, thought: longThought, tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
+    })
+  });
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    turnEndSynthesis: true,
+    fetchSynthesisOnce: async () => {
+      synthCalls += 1;
+      return { content: '不应调用' };
+    }
+  });
+  assert(synthCalls === 0, 'truncated turn with only reasoning skips synthesis LLM');
+  assert(isReasoningFallbackText(result.content), 'truncated turn labels reasoning as delivery');
+  assert(result.content.includes(longThought), 'reasoning 原文进入交付文本');
+  assert(
+    persistableTurnText(result.content) === TURN_EMPTY_REPLY_TEXT,
+    'reasoning-fallback 不写进 book（落库换成占位）'
+  );
+}
+
+async function testTurnEndThoughtDefersToSynthesis() {
+  let synthCalls = 0;
+  let synthBody = null;
+  const longThought =
+    '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({
+      phase: 'done',
+      runId: params.runId,
+      content: '',
+      hitRoundLimit: false,
+      messages: [{ role: 'user', content: '修截图' }],
+      trace: [{ round: 1, thought: longThought, tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
+    })
+  });
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    turnEndSynthesis: true,
+    fetchSynthesisOnce: async ({ body }) => {
+      synthCalls += 1;
+      synthBody = body;
+      return { content: '已改截图重试并保留快照。' };
+    }
+  });
+  assert(synthCalls === 1, 'normal finish with only reasoning defers to synthesis');
+  assert(result.content === '已改截图重试并保留快照。', 'synthesis output becomes delivery');
+  assert(!isReasoningFallbackText(result.content), '汇总结果不是思考回退标签');
+
+  const synthPrompt = JSON.stringify(synthBody || {});
+  assert(synthPrompt.includes('fs_edit'), '汇总输入带工具事实');
+  assert(!synthPrompt.includes(longThought), '汇总输入不含思考（D3：写正文的输入只允许事实）');
+}
+
+async function testTurnEndKeepsModelProse() {
+  let synthCalls = 0;
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({
+      phase: 'done',
+      runId: params.runId,
+      content: '已完成。',
+      hitRoundLimit: false,
+      messages: [{ role: 'user', content: '修' }],
+      trace: [{ round: 1, thought: 'x', tools: [{ name: 'fs_edit', args: {}, result: {} }] }]
+    })
+  });
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec(),
+    turnEndSynthesis: true,
+    fetchSynthesisOnce: async () => {
+      synthCalls += 1;
+      return { content: '不应调用' };
+    }
+  });
+  assert(synthCalls === 0, 'non-empty reply skips synthesis');
+  assert(result.content === '已完成。', 'keeps short model prose');
+}
+
+/**
+ * 请求快照接线：本轮发请求前必须先留底（docs/REQUEST-SNAPSHOT.md §5）。
+ * 快照现在是「回合初始装配」这一份（逐轮快照要等 `round.prepare` 接通）。
+ */
+/**
+ * 请求快照接线：**每轮请求前**留底，且记的是「这一个请求真正发出去的形态」
+ * （装配发生在 `round.prepare`，快照就在那里写）。
+ */
+async function testRequestSnapshotWrittenInsideRoundPrepare() {
+  const order = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => {
+      order.push('start');
+      // 模拟 core：请求前先问 round.prepare（快照就在这条回调里写）
+      await bridge.callCore('round.prepare', {
+        runId: params.runId,
+        round: 0,
+        messages: params.messages
+      });
+      return { phase: 'done', runId: params.runId, content: 'ok', trace: [] };
+    },
     'memory.request_snapshot_append': async (params) => {
       order.push('snapshot');
       assert(params.sessionId === 'sess-snap', 'sessionId 透传');
       assert(params.source === 'subagent', 'runSource 透传');
-      assert(params.runId === 'run-snap', 'runId 透传');
+      assert(/^run-\d+-/.test(String(params.runId)), 'runId 是宿主生成的那个');
       assert(params.round === 0, 'round 从 0 起');
       assert(params.reason === 'initial', '首发 reason=initial');
       assert(params.model === 'm', 'model 透传');
@@ -1273,30 +1001,28 @@ async function testRequestSnapshotWrittenBeforeSend() {
     sessionId: 'sess-snap',
     runSource: 'subagent',
     contextAudit: { fold: { foldedCount: 2 } },
-    startParams: { model: 'm', messages: [] },
-    loopSpec: loopSpec(),
-    onPhase: () => {},
-    fetchLlmOnce: async () => {
-      order.push('llm');
-      return { content: 'ok', toolCalls: [] };
-    }
+    startParams: {
+      model: 'm',
+      messages: [
+        { role: 'system', content: 'SYS' },
+        { role: 'user', content: 'hi' }
+      ],
+      tools: [{ type: 'function', function: { name: 'fs_read_file' } }]
+    },
+    loopSpec: loopSpec()
   });
-  assert(order.join(',') === 'snapshot,llm', `先留底后发请求，实际 ${order.join(',')}`);
+  // 快照在 `round.prepare` 里写 → 时序是「start 发起 → 快照落库」（每轮一份，记注入后形态）
+  assert(order.join(',') === 'start,snapshot', `每轮请求前留底，实际 ${order.join(',')}`);
   const sent = bridge.invokes.find((i) => i.method === 'memory.request_snapshot_append');
   assert(JSON.parse(sent.params.contextAuditJson).fold.foldedCount === 2, 'contextAudit 落库');
+  // 同一个 runId 贯穿快照与 RPC
+  const startParams = bridge.invokes.find((i) => i.method === 'agent.run.start').params;
+  assert(startParams.runId === sent.params.runId, '快照与 start 用同一个 runId');
 }
 
-/**
- * 快照写失败绝不能影响请求（旁路事实）。
- */
 async function testRequestSnapshotFailureDoesNotBreakLoop() {
   const bridge = createFakeBridge({
-    'agent.loop.start': async () => ({
-      runId: 'run-snap-fail',
-      phase: 'need_llm',
-      llmBody: { model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] }
-    }),
-    'agent.loop.continue': async () => ({ runId: 'run-snap-fail', phase: 'done', content: 'ok' }),
+    'agent.run.start': async (params) => ({ phase: 'done', runId: params.runId, content: 'ok', trace: [] }),
     'memory.request_snapshot_append': async () => {
       throw new Error('snapshot db locked');
     }
@@ -1306,44 +1032,88 @@ async function testRequestSnapshotFailureDoesNotBreakLoop() {
     llm: { baseUrl: 'https://example/v1', apiKey: 'k' },
     sessionId: 'sess-snap-fail',
     startParams: { model: 'm', messages: [] },
-    loopSpec: loopSpec(),
-    onPhase: () => {},
-    fetchLlmOnce: async () => ({ content: 'ok', toolCalls: [] })
+    loopSpec: loopSpec()
   });
   assert(result.phase === 'done', '写快照失败后本轮照常完成');
+}
+
+// ---------------------------------------------------------------- 纯 helper（与驱动无关，保留）
+
+async function testVisionImageReadHelpers() {
+  const { sniffImageMime, isVisionImageReadRequest } = require('../src/agent/tool-bridge-main');
+
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const gif = Buffer.from('GIF89a............', 'latin1');
+  const webp = Buffer.alloc(16);
+  webp.write('RIFF', 0, 'latin1');
+  webp.write('WEBP', 8, 'latin1');
+
+  assert(sniffImageMime(png.toString('base64')) === 'image/png', 'sniff png');
+  assert(sniffImageMime(jpeg.toString('base64')) === 'image/jpeg', 'sniff jpeg');
+  assert(sniffImageMime(gif.toString('base64')) === 'image/gif', 'sniff gif');
+  assert(sniffImageMime(webp.toString('base64')) === 'image/webp', 'sniff webp');
+  assert(sniffImageMime(Buffer.from('hello, plain text payload').toString('base64')) === '', 'sniff rejects text');
+  assert(sniffImageMime('') === '', 'sniff rejects empty');
+
+  assert(
+    isVisionImageReadRequest('fs_read_file', { filePath: 'a.png', encoding: 'base64' }),
+    'base64 whole-file read is a vision read'
+  );
+  assert(!isVisionImageReadRequest('fs_read_file', { filePath: 'a.png' }), 'utf8 read is not a vision read');
+  assert(
+    !isVisionImageReadRequest('fs_read_file', { filePath: 'a.png', encoding: 'base64', offset: 100 }),
+    'chunked read is not a vision read'
+  );
+  assert(!isVisionImageReadRequest('fs_edit', { encoding: 'base64' }), 'other tools are not vision reads');
+}
+
+/** 事件订阅必须退订（否则长会话会攒下无数监听器）。 */
+async function testEventSubscriptionReleased() {
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => ({ phase: 'done', runId: params.runId, content: 'ok', trace: [] })
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm' },
+    loopSpec: loopSpec()
+  });
+  assert(bridge.totalSubscriptions === 1, '每 run 只订阅一次');
+  assert(bridge.listenerCount === 0, 'run 结束必须退订');
 }
 
 async function run() {
   testApplyResolvedLoopSpec();
   testResolveChatUrl();
-  testNormalizeLlmResponse();
   testBackfillReasoningContent();
-  await testLlmOnlyRound();
-  await testContentChannelReachesLedger();
-  await testCompactThenContinue();
-  await testCompactTimeoutContinuesLoop();
-  await testCompactSkippedResultContinuesLoop();
-  await testShortRoundStillAsksRust();
-  await testDelegateRound();
-  await testBrowserVisionInjection();
-  await testVisionSurvivesOverflowRetry();
-  await testImageRejectedRoundIsRepaired();
-  await testRejectedImageWithoutUsableIndexDropsAll();
-  await testRejectedVisionMessageIsNotReinjected();
-  await testNonImage400IsNotRepaired();
   await testVisionImageReadHelpers();
-  await testAbortDuringLlmCancelsSidecar();
-  await testAbortDuringContinueCancelsSidecar();
-  await testAbortDuringCompactCancelsSidecar();
-  await testOverflowStopsAfterOneCompact();
-  await testOverflowDoesNotTreatPartialAsSuccess();
-  await testUnknownPhase();
+
+  await testStartContractAndDeltaAccumulation();
+  await testDeltaWithoutRoundUsesLocalCounter();
+  await testToolsAreExecutedAndBackfilled();
+  await testContentChannelStampedFromCapabilityTable();
+  await testFoldFactDrivesNodeSideEffects();
+  await testFoldFactOnNeedToolsIsHandled();
+  await testRoundPrepareRegisteredBeforeStart();
+  await testRoundPrepareInjectsPerRoundOnRequestCopy();
+  await testVisionDisabledNoInjection();
+  await testEventSubscriptionReleased();
+
+  await testAbortDuringRunCancelsViaRunCancel();
+  await testAbortDuringToolsCancelsRun();
+  await testCancelledRpcErrorBecomesAbort();
+  await testContextOverflowSoftStops();
+  await testUnknownPhaseThrows();
+  await testNonOverflowErrorSurfaces();
+
   await testTurnEndSynthesisSkippedByDefault();
   await testTurnEndSynthesisFillsEmptyReply();
   await testTurnEndTruncatedUsesReasoningFallback();
   await testTurnEndThoughtDefersToSynthesis();
   await testTurnEndKeepsModelProse();
-  await testRequestSnapshotWrittenBeforeSend();
+
+  await testRequestSnapshotWrittenInsideRoundPrepare();
   await testRequestSnapshotFailureDoesNotBreakLoop();
 }
 

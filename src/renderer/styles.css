@@ -6548,14 +6548,22 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   font-size: 12px;
   line-height: 1.55;
   color: var(--text-mute);
+  /* 事件流 / 抽屉是要抄走的东西：`body` 是窗口级 `user-select: none`（见 199 行），
+     这里必须显式开口，否则拖选根本起不来。设置页的「日志」两块同一份文字，
+     所以两条规则写在同一个地方、跟着 `user-select` 的口径走。 */
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* 设置 → 拟态 → 日志：标签下面的面板（「事件」/「抽屉」）。display 必须是 flex 时
-   仍要让 `hidden` 生效 —— 不然切走的那一页会在下面接着铺出来。 */
+   仍要让 `hidden` 生效 —— 不然切走的那一页会在下面接着铺出来。
+   与 `.alive-pane-list` 同一个口径：这两块文字要能拖选、能复制（`body` 是 `user-select: none`）。 */
 .alive-log-pane {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .alive-log-pane[hidden] {

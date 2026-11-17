@@ -1211,17 +1211,18 @@ impl IndexService {
         if can_vector {
             let q = query.trim();
             if !q.is_empty() {
-                // 查询向量走交互闸门：端点比交互预算慢时不发请求（`EMBEDDING_TOO_SLOW`），
-                // 直接按「这次没有向量通道」降级到子串检索 —— 向量通道本来就是可选增强，
-                // 不能让一次注定超时的 embedding 往返把整次检索（以及调用它的那轮对话）打挂。
-                match embedding::embed_texts_interactive(&self.embedding, &[q.to_string()]).await {
+                // 查询向量：本地推理是毫秒级矩阵乘；远端端点失败（含超时）时这次检索就没有
+                // 向量通道 —— 向量通道本来就是可选增强，降级到子串检索即可，别把整次检索
+                // （以及调用它的那轮对话）打挂。旧的「预判端点太慢就不发」已随本地推理删除。
+                match embedding::embed_texts(&self.embedding, &[q.to_string()]).await {
                     Ok(vectors) => {
                         if let Some(vec) = vectors.into_iter().next() {
                             query_vector = Some(vec);
                         }
                     }
-                    Err(err) if embedding::is_too_slow(&err) => {}
-                    Err(err) => return Err(err),
+                    Err(err) => {
+                        eprintln!("[index] 查询向量跳过（embedding 不可用）：{err}");
+                    }
                 }
             }
         }

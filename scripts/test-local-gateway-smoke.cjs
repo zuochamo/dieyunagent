@@ -85,42 +85,38 @@ async function testCompactionPerSession() {
     else throw e;
   }
   if (!threw) throw new Error('expected RUST_CORE_UNAVAILABLE without core');
-  agent.resetCompactionState('s1');
-  console.log('ok compaction session-scoped API');
+  // 折叠没有每会话状态可重置（旧 cumulativeSummary / 冷却计数已删除）
+  if (agent.resetCompactionState) throw new Error('per-session compaction state should be gone');
+  console.log('ok compaction agent surface (no per-session state)');
 }
 
-async function testCompactionTimeoutSoftSkip() {
-  const seenRounds = [];
+/**
+ * 折叠器 RPC 出错 → 软跳过（不阻断这一轮），且**没有**冷却计数这回事：
+ * 折叠是本地纯 CPU，下一次触发判定仍然只看预算与 usage。
+ */
+async function testCompactionRpcErrorSoftSkip() {
+  let calls = 0;
   const agent = createMainCompactionAgent(os.tmpdir(), {
     isReady: () => true,
-    async invoke(method, params) {
-      if (method === 'memory.compaction_recent') return [];
-      if (method === 'compaction.maybe_compact') {
-        seenRounds.push(Number(params && params.compactionRoundCount) || 0);
-      }
-      const err = new Error('dieyun-core 超时: compaction.maybe_compact');
+    async invoke(method) {
+      if (method === 'compaction.fold') calls += 1;
+      const err = new Error('dieyun-core 超时: compaction.fold');
       err.code = 'CORE_RPC_TIMEOUT';
       throw err;
     }
   });
   const runOnce = () =>
-    agent.maybeCompactMessages([{ role: 'user', content: 'hi' }], {
-      sessionId: 's-timeout',
-      apiConfig: { baseUrl: 'https://example/v1', apiKey: 'k' }
-    });
+    agent.maybeCompactMessages([{ role: 'user', content: 'hi' }], { sessionId: 's-fold-err' });
   const cr = await runOnce();
-  if (cr.compacted) throw new Error('timeout should not compact');
-  if (cr.compactionSkipped !== 'llm_error') throw new Error(`expected llm_error skip, got ${cr.compactionSkipped}`);
-  // 压缩失败必须「进入冷却」而非把计数往上加：加过头之后再也不会跳过压缩，
-  // 每轮都白等一次超时。连压三轮后计数应稳定停在 POST_COMPACTION_ROUND_COUNT(1)。
-  await runOnce();
-  await runOnce();
-  if (seenRounds.length !== 3) throw new Error(`expected 3 compaction invokes, got ${seenRounds.length}`);
-  if (seenRounds[1] !== 1 || seenRounds[2] !== 1) {
-    throw new Error(`failure must re-enter cooldown (expect 1), got [${seenRounds.join(', ')}]`);
+  if (cr.compacted) throw new Error('rpc error should not compact');
+  if (cr.foldSkipped !== 'rpc_error') {
+    throw new Error(`expected rpc_error skip, got ${cr.foldSkipped}`);
   }
-  console.log('ok compaction timeout soft-skip');
+  await runOnce();
+  if (calls !== 2) throw new Error(`每次调用都应重新问一次折叠器（期望 2，实际 ${calls}）`);
+  console.log('ok compaction rpc error soft-skip');
 }
+
 
 /**
  * 工具 schema 占用真实窗口却不进 messages：只有「超出系统预留」的部分才从输入预算扣，
@@ -402,7 +398,7 @@ async function main() {
   await testActiveSessionNoGlobalFallback();
   await testRpcSessionIdContext();
   await testCompactionPerSession();
-  await testCompactionTimeoutSoftSkip();
+  await testCompactionRpcErrorSoftSkip();
   await testDetachedInvokeRpc();
   testToolSchemaBudgetDeduction();
   testCredentialsRejectEmptyEncrypt();

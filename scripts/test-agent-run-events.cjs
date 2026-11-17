@@ -95,12 +95,13 @@ function testAgentServiceProgressTask() {
   assert(payload.runEvent && payload.runEvent.streamContent === 'live text', 'runEvent stream');
 }
 
-function testCompactionSessionScoped() {
+function testCompactionAgentSurface() {
+  // 折叠没有每会话状态（旧 cumulativeSummary / 冷却计数已删除）：只留估算与折叠两个入口
   const agent = createMainCompactionAgent(require('os').tmpdir(), null);
-  agent.resetCompactionState('session-a');
-  agent.resetCompactionState('session-b');
-  agent.resetCompactionState();
-  console.log('ok compaction session reset API');
+  if (typeof agent.maybeCompactMessages !== 'function') throw new Error('maybeCompactMessages missing');
+  if (typeof agent.estimateMessagesTokens !== 'function') throw new Error('estimateMessagesTokens missing');
+  if (agent.resetCompactionState) throw new Error('per-session state should be gone');
+  console.log('ok compaction agent surface');
 }
 
 function testRoundLimitFlagClearsOnResumeTrace() {
@@ -183,7 +184,7 @@ async function main() {
   testServicePayloadStreamContent();
   testMobileServiceEventMap();
   testAgentServiceProgressTask();
-  testCompactionSessionScoped();
+  testCompactionAgentSurface();
   console.log('test-agent-run-events.cjs ok');
 }
 

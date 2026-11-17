@@ -951,7 +951,6 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     else signal.addEventListener('abort', onAbort, { once: true });
   }
 
-  let onCompactionProgressUi = null;
   try {
     if (signal?.aborted) {
       const err = new Error('已停止');
@@ -965,41 +964,6 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       rustBootStepStart(steps, 'compact_preflight');
       return steps;
     });
-    onCompactionProgressUi = (ev) => {
-      const detail = (ev && ev.detail) || {};
-      const note = detail.note || formatCompactionProgressNote(detail);
-      if (!note) return;
-      const kind = String(detail.kind || '');
-      patchRustBootSteps((steps) => {
-        const pre = (steps || []).find((s) => s && s.id === 'compact_preflight' && s.status === 'active');
-        if (pre) {
-          if (kind === 'llm_skip') {
-            rustBootStepSkip(steps, 'compact_preflight', note);
-          } else if (typeof rustBootStepNote === 'function') {
-            rustBootStepNote(steps, 'compact_preflight', note);
-          } else {
-            pre.detail = String(note).slice(0, 160);
-          }
-          return steps;
-        }
-        if (kind === 'llm_skip') {
-          rustBootStepStart(steps, 'compact_loop');
-          rustBootStepSkip(steps, 'compact_loop', note);
-          return steps;
-        }
-        rustBootStepStart(steps, 'compact_loop');
-        if (typeof rustBootStepNote === 'function') rustBootStepNote(steps, 'compact_loop', note);
-        return steps;
-      });
-      if (!liveThoughtLooksEphemeral()) {
-        const live = displayedTrace[displayedTrace.length - 1];
-        freezeLiveWithTools((live && live.tools) || []);
-      }
-      pushPlaceholder(`压缩上下文：${note}`, []);
-    };
-    if (typeof window !== 'undefined') {
-      window.addEventListener('dieyun:compaction-progress', onCompactionProgressUi);
-    }
     const preflightResult = await applyContextCompaction(body, {
       signal,
       apiConfig,
@@ -1176,8 +1140,5 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     if (offPhase) offPhase();
     if (offSubagentTrace) offSubagentTrace();
     if (signal) signal.removeEventListener('abort', onAbort);
-    if (typeof window !== 'undefined' && onCompactionProgressUi) {
-      window.removeEventListener('dieyun:compaction-progress', onCompactionProgressUi);
-    }
   }
 }

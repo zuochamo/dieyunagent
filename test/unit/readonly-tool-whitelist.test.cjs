@@ -3,6 +3,8 @@
 const {
   buildExploreTools,
   buildShellTools,
+  buildBuildTools,
+  COORDINATOR_ONLY_TOOL_NAMES,
   READONLY_MCP_SERVER_IDS,
   READONLY_MCP_TOOL_PREFIXES,
   isReadOnlyMcpToolName
@@ -147,5 +149,39 @@ describe('只读 MCP 放行（Explore / Shell / 研究子 Agent）', () => {
     expect(long.length).toBeLessThanOrEqual(64);
     expect(long.startsWith('mcp_mcp-postgres__')).toBe(false);
     expect(isReadOnlyMcpToolName(long)).toBe(false);
+  });
+});
+
+describe('执行器（worker）工具集：协调者专属工具一律不给', () => {
+  const all = [
+    'fs_write_file',
+    'fs_read_file',
+    'host_exec',
+    'grep',
+    'subagent',
+    'worktree',
+    'plan_run',
+    'mcp_manage',
+    'skill_create',
+    'ssh',
+    'agents_md_propose',
+    'session_new',
+    'session_set_workspace',
+    'agent_clarify'
+  ].map(tool);
+
+  it('写代码能力保留，协调者专属能力被剔除（否则一句话就能绕过 worktree 隔离）', () => {
+    const names = buildBuildTools(all).map((t) => t.function.name);
+    expect(names).toEqual(['fs_write_file', 'fs_read_file', 'host_exec', 'grep']);
+    for (const name of COORDINATOR_ONLY_TOOL_NAMES) {
+      expect(names).not.toContain(name);
+    }
+  });
+
+  it('清单里每一项都不是「改代码」，而是改工作区本身/会话/配置', () => {
+    // 这条盯的是清单本身别被顺手塞进不该塞的东西（例如 fs_write_file）
+    for (const name of COORDINATOR_ONLY_TOOL_NAMES) {
+      expect(['fs_write_file', 'fs_edit', 'host_exec', 'grep', 'glob']).not.toContain(name);
+    }
   });
 });

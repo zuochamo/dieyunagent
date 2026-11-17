@@ -225,9 +225,59 @@ async function partWorktreeConflictAndApply() {
   console.log('ok 真 git：两路副本隔离 + 冲突必须逐项强制 + 只写回被选中的那一路');
 }
 
+/**
+ * ③ 重试前必须把副本清回基线：否则上一次失败的半成品会被当成「这一次」的产出合并。
+ *    （执行器 retry 走的就是 createAgentWorktree 的 reused 分支，目录不重置。）
+ */
+async function partRetryResetsWorktree() {
+  const root = tempDir('wt-retry');
+  const repo = path.join(root, 'repo');
+  fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.dieyun/\nnode_modules/\n');
+  fs.writeFileSync(path.join(repo, 'src', 'keep.js'), 'keep\n');
+  git(repo, 'init');
+  git(repo, 'add', '-A');
+  git(repo, '-c', 'user.email=test@dieyun.local', '-c', 'user.name=dieyun-test', 'commit', '-m', 'init');
+
+  const runId = 'run-retry-1';
+  const first = await worktreeService.createAgentWorktree(repo, { runId, roleId: 'A' });
+  assert(first && first.ok && first.baseSha, `worktree 创建失败: ${JSON.stringify(first)}`);
+
+  // 第一次尝试留下的半成品（含一个被改坏的文件）
+  fs.writeFileSync(path.join(first.path, 'src', 'half.js'), 'half\n');
+  fs.writeFileSync(path.join(first.path, 'src', 'keep.js'), 'BROKEN\n');
+  const dirty = await worktreeService.previewRunWorktreeChanges(repo, runId);
+  assert.strictEqual(dirty.changes.length, 2, `半成品应被看到 2 处，实际 ${dirty.changes.length}`);
+
+  // 重试：复用同一个目录（reused），必须显式重置
+  const second = await worktreeService.createAgentWorktree(repo, { runId, roleId: 'A' });
+  assert.strictEqual(second.reused, true, '重试应复用同一个 worktree 目录');
+  const reset = await worktreeService.resetAgentWorktree(repo, second.path, second.baseSha || first.baseSha);
+  assert(reset && reset.ok, `重置失败: ${JSON.stringify(reset)}`);
+
+  const afterReset = await worktreeService.previewRunWorktreeChanges(repo, runId);
+  assert.strictEqual(
+    afterReset.changes.length,
+    0,
+    `重置后不应再有残留变更，实际 ${JSON.stringify(afterReset.changes)}`
+  );
+  // 读回的内容要按 LF 归一后再比：git 在 Windows 上 checkout 会按 autocrlf 落成 CRLF
+  assert.strictEqual(
+    fs.readFileSync(path.join(second.path, 'src', 'keep.js'), 'utf8').replace(/\r\n/g, '\n'),
+    'keep\n',
+    '重置后副本内容应回到基线'
+  );
+  assert(!fs.existsSync(path.join(second.path, 'src', 'half.js')), '重置应清掉未跟踪的半成品文件');
+
+  await worktreeService.cleanupRunWorktrees(repo, runId).catch(() => {});
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log('ok 真 git：重试前重置副本（半成品不会混进本次产出）');
+}
+
 async function main() {
   await partQueueKeyPerWorktree();
   await partWorktreeConflictAndApply();
+  await partRetryResetsWorktree();
   console.log('test-planner-workers.cjs ok');
 }
 

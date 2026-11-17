@@ -43,6 +43,9 @@ const CAMERA_TOOL = _tc.CAMERA_TOOL || null;
 // 本机摄像头（电脑上接的 UVC，如 OBSBOT Tiny 2）：schema 单一来源同上，
 // 注入受 desktopCamera 权限开关控制（默认关，理由同手机摄像头）。
 const DESKTOP_CAMERA_TOOL = _tc.DESKTOP_CAMERA_TOOL || null;
+// 本机云台转向（desktop_camera_ptz）：schema 单一来源同上。与取帧**共用** desktopCamera 开关 ——
+// 转的是同一台摄像头，多一个开关只会造出「能拍但不能转 1°」这种没有安全收益的状态。
+const DESKTOP_CAMERA_PTZ_TOOL = _tc.DESKTOP_CAMERA_PTZ_TOOL || null;
 // SSH 远程主机（连/断/端口转发/切远端工作空间）：schema 单一来源同上，执行在 Main（ssh/actions.js）。
 const SSH_TOOL = _tc.SSH_TOOL || null;
 // Worktree 副本（开/清/写回）：schema 单一来源同上，执行在 Main（worktree/actions.js）。
@@ -202,6 +205,10 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   // 本机摄像头：同上（电脑上那台固定机位），同样不按 weakModel 收窄。
   if (host.desktopCamera && DESKTOP_CAMERA_TOOL) {
     tools.push(DESKTOP_CAMERA_TOOL);
+  }
+  // 本机云台：开关同上（同一台设备）。没有电机的机型执行端会回 NO_PTZ，不靠「工具不存在」表达。
+  if (host.desktopCamera && DESKTOP_CAMERA_PTZ_TOOL) {
+    tools.push(DESKTOP_CAMERA_PTZ_TOOL);
   }
   // SSH 远端：与 host 权限开关无关（连接参数/凭据由用户在界面上给），常驻。
   if (SSH_TOOL) tools.push(SSH_TOOL);

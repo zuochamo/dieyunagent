@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
 const {
   DEFAULT_TIMEOUT_MS,
   INDEX_TIMEOUT_MS,
-  COMPACTION_MAYBE_COMPACT_TIMEOUT_MS,
+  COMPACTION_FOLD_TIMEOUT_MS,
   SLOW_RPC_LOG_MS,
   resolveCoreRpcTimeoutMs
 } = require('../../src/core-rpc-timeouts');
@@ -44,7 +44,9 @@ describe('core RPC 超时与慢请求口径', () => {
   });
 
   it('压缩预算按 LLM 单次超时 + 余量给，且显式覆盖优先', () => {
-    assert.equal(resolveCoreRpcTimeoutMs('compaction.maybe_compact'), COMPACTION_MAYBE_COMPACT_TIMEOUT_MS);
+    assert.equal(resolveCoreRpcTimeoutMs('compaction.fold'), COMPACTION_FOLD_TIMEOUT_MS);
+    // 折叠是纯 CPU（毫秒级），预算必须远小于默认的 120s：它压在「发请求之前」的关键路径上
+    assert.ok(COMPACTION_FOLD_TIMEOUT_MS < DEFAULT_TIMEOUT_MS);
     assert.equal(resolveCoreRpcTimeoutMs('memory.long_recall', 5000), 5000);
   });
 });

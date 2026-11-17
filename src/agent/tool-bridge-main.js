@@ -7,6 +7,7 @@ const { createMainToolHandlers } = require('./main-tools');
 const { createPhoneCameraSource } = require('../mobile/camera-source');
 // 本机摄像头（desktop_camera_look）的唯一出口：ffmpeg 抓帧、设备挑选、失败文案都在那边。
 const { createDesktopCameraSource } = require('./desktop-camera-source');
+const { createDesktopCameraPtz } = require('./desktop-camera-ptz');
 const {
   PROJECT_MEMORY_REL_PATH,
   parseProjectMemoryEntries
@@ -328,6 +329,12 @@ function createMainToolBridge(deps) {
     deps.desktopCameraSource && typeof deps.desktopCameraSource.capture === 'function'
       ? deps.desktopCameraSource
       : createDesktopCameraSource();
+  // 本机云台：与取帧同一台设备，但走另一条通道（DirectShow COM / v4l2-ctl），见
+  // `desktop-camera-ptz.js`。`deps.desktopCameraPtz` 供 smoke 测试注入桩。
+  const desktopCameraPtz =
+    deps.desktopCameraPtz && typeof deps.desktopCameraPtz.apply === 'function'
+      ? deps.desktopCameraPtz
+      : createDesktopCameraPtz();
 
 
   /**
@@ -394,6 +401,7 @@ function createMainToolBridge(deps) {
   const mainToolHandlers = createMainToolHandlers({
     cameraSource,
     desktopCameraSource,
+    desktopCameraPtz,
     getAgentLimits,
     userDataPath,
     mcpRuntime,

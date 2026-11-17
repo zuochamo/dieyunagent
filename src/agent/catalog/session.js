@@ -146,7 +146,10 @@ const SUBAGENT_TOOL = {
           description:
             '这次调研要回答的单一问题，写清边界与期望产出（例如「X 模块的鉴权入口在哪、被谁调用」）。'
         },
-        label: { type: 'string', description: '简短标签，用于在界面上区分多路子 Agent' },
+        label: {
+          type: 'string',
+          description: '简短标签（可留空），用于在界面上区分多路子 Agent：写成这次派发在干什么'
+        },
         hints: {
           type: 'array',
           items: { type: 'string' },

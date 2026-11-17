@@ -16,6 +16,8 @@ use crate::planner::PlannerRunManager;
 use crate::sqlite::SqliteHandle;
 use serde_json::json;
 
+pub mod calls;
+pub mod events;
 pub mod stdio;
 
 /// 架构约束守卫：`AppState` 必须可跨线程共享，RPC 才能在多线程运行时上 `tokio::spawn`。
@@ -72,7 +74,9 @@ struct StateInner {
     index: IndexService,
     graph: GraphService,
     memory: memory::MemoryStore,
-    agent: AgentLoopManager,
+    /// 账本管理器包一层 `Arc`：`agent.run` 的驱动器要在**不持锁**的情况下跑完一整轮
+    /// （里面有一次 HTTP），持锁跑会把 `core.configure` 卡住整整一轮对话。
+    agent: Arc<AgentLoopManager>,
     planner: PlannerRunManager,
 }
 
@@ -200,6 +204,15 @@ impl ServiceSnapshot {
             "memory.handoff_latest" => {
                 let exclude = params.get("excludeSessionId").and_then(|v| v.as_str());
                 let row = self.memory.handoff_latest(exclude)?;
+                Ok(row.unwrap_or(Value::Null))
+            }
+            // 领走 = 读出来并删掉：交接是一次性资源，领到才允许建会话（见 handoff_take 注释）。
+            "memory.handoff_take" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "sessionId 必填"))?;
+                let row = self.memory.handoff_take(session_id)?;
                 Ok(row.unwrap_or(Value::Null))
             }
             "memory.message_append" => {
@@ -487,6 +500,29 @@ impl ServiceSnapshot {
             }
             // ---- compaction：纯 CPU，无 IO ----
             "compaction.estimate" => Ok(compaction::estimate(params)),
+            // ---- 向量后端：状态与解析结果的唯一出口（设置页据此说清「为什么走不了本地」）----
+            "embedding.status" => {
+                let e = &self.config.embedding;
+                let provider = e.plan();
+                let (local_ok, local_reason) = e.local_status();
+                Ok(json!({
+                    "provider": provider.label(),
+                    "signature": e.signature(),
+                    "dimensions": e.effective_dimensions(),
+                    "localCompiled": e.local_compiled(),
+                    "localReady": local_ok,
+                    "localReason": local_reason,
+                    "remoteConfigured": e.remote_configured(),
+                }))
+            }
+            // 折叠是确定性的就地截短：没有网络、没有超时，因此和 estimate 一样落在
+            // 阻塞池分支里（旧的 `compaction.maybe_compact` 因为要发 LLM 请求，只能放在
+            // async 分支并独占一条 90s 的宿主超时）。
+            "compaction.fold" => {
+                let p: compaction::FoldParams = serde_json::from_value(params.clone())
+                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
+                Ok(serde_json::to_value(compaction::fold(p))?)
+            }
             // ---- agent：运行账本 / trace ----
             "agent.run_upsert" => self.memory.upsert_agent_run(params),
             "agent.plan_save" => {
@@ -759,7 +795,7 @@ impl AppState {
                 index,
                 graph,
                 memory,
-                agent: AgentLoopManager::default(),
+                agent: Arc::new(AgentLoopManager::default()),
                 planner: PlannerRunManager::default(),
             })),
         }
@@ -894,73 +930,6 @@ impl AppState {
                 let r = guard.planner.cancel(run_id)?;
                 Ok(r)
             }
-            "agent.loop.start" => {
-                let p: crate::agent::StartParams = serde_json::from_value(params)
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                let guard = self.inner.read().await;
-                let r = guard.agent.start(p)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "agent.loop.continue" => {
-                let run_id = params
-                    .get("runId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?;
-                let llm: crate::agent::LlmResponseInput = params
-                    .get("llm")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
-                    .unwrap_or_default();
-                let guard = self.inner.read().await;
-                let r = guard.agent.continue_llm(&guard.config, &guard.index, run_id, llm)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "agent.loop.tool_results" => {
-                let run_id = params
-                    .get("runId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?;
-                let results: Vec<crate::agent::ToolResultInput> = params
-                    .get("results")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
-                    .unwrap_or_default();
-                let guard = self.inner.read().await;
-                let r =
-                    guard
-                        .agent
-                        .submit_tool_results(&guard.config, &guard.index, run_id, results)?;
-                Ok(serde_json::to_value(r)?)
-            }
-            "agent.loop.cancel" => {
-                let run_id = params
-                    .get("runId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?;
-                let guard = self.inner.read().await;
-                guard.agent.cancel(run_id)?;
-                Ok(serde_json::json!({ "ok": true }))
-            }
-            "agent.loop.set_messages" => {
-                let run_id = params
-                    .get("runId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?;
-                let messages: Vec<Value> = params
-                    .get("messages")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
-                    .unwrap_or_default();
-                let guard = self.inner.read().await;
-                guard.agent.set_messages(run_id, messages)?;
-                Ok(serde_json::json!({ "ok": true }))
-            }
             "core.configure" => {
                 let p: ConfigureParams = serde_json::from_value(params)
                     .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
@@ -1001,8 +970,129 @@ impl AppState {
                 }
                 Ok(serde_json::json!({ "ok": true }))
             }
-            "memory.long_recall" => {
-                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // 查询向量：Node / Renderer 不再自己打端点，一律问这里（后端由 embedding::plan 定）。
+            // 这是「本地优先」能真的兑现的前提：文档向量与查询向量必须出自同一个后端，
+            // 否则两边向量空间不同，相似度会静默变差（不报错）。
+            "embedding.query" => {
+                let texts: Vec<String> = params
+                    .get("texts")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if texts.is_empty() {
+                    return Ok(json!({ "vectors": [] }));
+                }
+                let cfg = self.snapshot().await.config.embedding;
+                let vectors = crate::embedding::embed_texts(&cfg, &texts).await?;
+                Ok(json!({ "vectors": vectors }))
+            }
+            // ---- agent.run：轮次控制归 core（见 docs/AGENT-RUN-MIGRATION.md）----
+            // 跑到「要工具」就返回，宿主执行完工具再调 `agent.run.tools` 继续。
+            "agent.run.start" => {
+                let start: crate::agent::StartParams = serde_json::from_value(params.clone())
+                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
+                let spec = drive_spec(&params)?;
+                let llm_cfg = drive_llm_config(&params, self).await?;
+                let (cfg, index, agent) = {
+                    let inner = self.inner.read().await;
+                    (inner.config.clone(), inner.index.clone(), Arc::clone(&inner.agent))
+                };
+                let first = agent.start(start)?;
+                let run_id = first.run_id.clone();
+                // 增量必须在这里推给宿主：`llm::emit_delta` 只在 `agent.llm.chat` 里被调过，
+                // 驱动器要自己接这条线，否则流式正文/思考到不了 UI（只有 done 的正文）。
+                // `round` 暂传 None：宿主侧按「round 为空就用本地轮次计数」兜住。
+                let emit = |d: &crate::agent::llm::Delta| {
+                    crate::rpc::events::emit_delta(
+                        &run_id,
+                        None,
+                        d.content.as_deref(),
+                        d.reasoning.as_deref(),
+                    );
+                };
+                finish_drive(
+                    crate::agent::driver::drive(
+                        &agent,
+                        &cfg,
+                        &index,
+                        &run_id,
+                        first,
+                        &spec,
+                        &llm_cfg,
+                        &emit,
+                    )
+                    .await,
+                )
+            }
+            "agent.run.tools" => {
+                let run_id = params
+                    .get("runId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?
+                    .to_string();
+                let results: Vec<crate::agent::ToolResultInput> = params
+                    .get("results")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?
+                    .unwrap_or_default();
+                let spec = drive_spec(&params)?;
+                let llm_cfg = drive_llm_config(&params, self).await?;
+                let (cfg, index, agent) = {
+                    let inner = self.inner.read().await;
+                    (inner.config.clone(), inner.index.clone(), Arc::clone(&inner.agent))
+                };
+                let emit = |d: &crate::agent::llm::Delta| {
+                    crate::rpc::events::emit_delta(
+                        &run_id,
+                        None,
+                        d.content.as_deref(),
+                        d.reasoning.as_deref(),
+                    );
+                };
+                finish_drive(
+                    crate::agent::driver::drive_with_results(
+                        &agent,
+                        &cfg,
+                        &index,
+                        &run_id,
+                        results,
+                        &spec,
+                        &llm_cfg,
+                        &emit,
+                    )
+                    .await,
+                )
+            }
+            "agent.run.cancel" => {
+                let run_id = params
+                    .get("runId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?;
+                let agent = Arc::clone(&self.inner.read().await.agent);
+                agent.cancel(run_id)?;
+                Ok(json!({ "ok": true }))
+            }
+            // 反向通道自检：宿主必须先实现 `core.echo`（原样回传），这条才通。
+            // 与 `core.ping` 同级：只用于诊断「宿主有没有接上反向调用」。
+            "core.host_probe" => {
+                let echo = params.get("echo").cloned().unwrap_or(serde_json::Value::Null);
+                let reply = crate::rpc::calls::call_host("core.echo", echo).await?;
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "reply": reply,
+                    "pending": crate::rpc::calls::pending_count(),
+                }))
+            }
+            // 一次 LLM 调用：请求在这里发、流式增量在这里解析、增量经事件通道推给宿主。
+            // 端点是宿主给的完整 url（`llm-request.js` 是端点约定与鉴权的唯一来源），
+            // 所以这里不拼路径、不推导鉴权。
+            "memory.long_recall" => {                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let scope = params.get("scope").and_then(|v| v.as_str()).map(|s| s.to_string());
                 let limit = params
                     .get("limit")
@@ -1125,14 +1215,6 @@ impl AppState {
                 let memory = self.snapshot().await.memory;
                 memory.reindex_long_memories(limit).await
             }
-            "compaction.maybe_compact" => {
-                let p: compaction::MaybeCompactParams = serde_json::from_value(params)
-                    .map_err(|e| CoreError::rpc("INVALID_PARAMS", e.to_string()))?;
-                // 勿在 LLM 重试期间持有 inner 读锁，否则停止后的 memory/agent 写会卡住
-                let llm = self.snapshot().await.config.llm;
-                let r = compaction::maybe_compact(&llm, p).await?;
-                Ok(serde_json::to_value(r)?)
-            }
             "codebase.index" => {
                 let workspace_root = params
                     .get("workspaceRoot")
@@ -1240,6 +1322,58 @@ pub struct RpcRequest {
     pub params: serde_json::Value,
 }
 
+// ---- `agent.run.*` 的装配与收口（驱动器在 `agent::driver`）----
+
+fn drive_spec(params: &Value) -> Result<crate::agent::driver::DriveSpec, CoreError> {
+    let url = params
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if url.is_empty() {
+        return Err(CoreError::rpc("INVALID_PARAMS", "url 必填"));
+    }
+    let content_channel = params
+        .get("contentChannel")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| CoreError::rpc("INVALID_PARAMS", format!("contentChannel 非法: {e}")))?
+        .unwrap_or_default();
+    Ok(crate::agent::driver::DriveSpec {
+        url,
+        stream: params.get("stream").and_then(|v| v.as_bool()).unwrap_or(true),
+        content_channel,
+        include_raw: params
+            .get("includeRaw")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+async fn drive_llm_config(params: &Value, state: &AppState) -> Result<crate::config::LlmConfig, CoreError> {
+    match params.get("llm").cloned() {
+        Some(value) => serde_json::from_value(value)
+            .map_err(|e| CoreError::rpc("INVALID_PARAMS", format!("llm 非法: {e}"))),
+        None => Ok(state.snapshot().await.config.llm),
+    }
+}
+
+/// 驱动器停点 → RPC 响应。`need_tools` 是「把执行权交回宿主」，不是错误。
+fn finish_drive(result: Result<crate::agent::driver::DriveStop, CoreError>) -> Result<Value, CoreError> {
+    match result? {
+        crate::agent::driver::DriveStop::NeedTools { response, delegates } => Ok(json!({
+            "phase": "need_tools",
+            "runId": response.run_id,
+            "delegates": delegates,
+            // 折叠事实必须一起回去：工具轮之前折过的那次，Node 的遥测/归档只能从这里拿
+            "compacted": response.compacted,
+        })),
+        crate::agent::driver::DriveStop::Done(response) => Ok(serde_json::to_value(response)?),
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct RpcResponse {
     pub id: serde_json::Value,
@@ -1282,7 +1416,7 @@ mod tests {
 
         assert_eq!(request_budget_ms("codebase.index"), None);
         assert_eq!(request_budget_ms("codebase.search"), None);
-        assert_eq!(request_budget_ms("agent.loop.start"), None);
+        assert_eq!(request_budget_ms("agent.run.start"), None);
         assert_eq!(request_budget_ms("compaction.auto"), None);
     }
 }
