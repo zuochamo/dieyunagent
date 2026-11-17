@@ -163,10 +163,14 @@ const BASE_TABLES: &str = "
     CREATE TABLE IF NOT EXISTS chunk_vectors (
         chunk_id INTEGER PRIMARY KEY,
         dims INTEGER NOT NULL,
-        vector BLOB NOT NULL,
-        FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+        vector BLOB NOT NULL
     );
 ";
+// 这里**不声明** `FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE`：
+// 索引库的库连接由 `SqliteHandle` 打开，`TuneOptions::foreign_keys` 默认 false
+// （`sqlite.rs`）—— 声明了也不生效，只会让人以为「删 chunk 会自动删向量」。
+// 级联在这儿是一份手写实现：`delete_chunks_for_path` / `delete_all_chunks`
+// （见 `index/build.rs` 的写库原语），删 chunk 时同步删 `chunk_vectors`。
 
 /// 全文倒排索引：v4 起已删除。
 ///
@@ -187,6 +191,30 @@ mod tests {
 
     fn table_exists_pub(conn: &Connection, name: &str) -> bool {
         table_exists(conn, name).unwrap()
+    }
+
+    /// 回归（P3）：索引库的建表语句里**不许**再出现外键声明（这个库不开 `foreign_keys`）。
+    ///
+    /// 级联的唯一实现是 `index/build.rs` 的写库原语（删 chunk 时同步删 `chunk_vectors`）。
+    #[test]
+    fn schema_declares_no_unenforced_foreign_keys() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!rows.is_empty());
+        for (name, sql) in rows {
+            assert!(
+                !sql.to_uppercase().contains("FOREIGN KEY"),
+                "{name} 仍在声明外键，但这个库不开 foreign_keys —— 级联请写进 build.rs 的原语"
+            );
+        }
     }
 
     fn insert_chunk(conn: &Connection, rel: &str, content: &str) -> i64 {

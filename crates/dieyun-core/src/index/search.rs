@@ -499,14 +499,13 @@ fn substring_hits(
 }
 
 /// 命中行：内容里最早出现的任一查询词所在行（行号是相对文件的绝对行号）。
+///
+/// 位置判定只有一份实现（`fts::first_hit_byte`，大小写不敏感）。这里此前自己写了一遍
+/// `content.find(term)`，与 `fts::first_hit_index`（摘录用）口径不同 —— 同一段正文的
+/// 「摘录围绕的位置」与「命中行」会指向不同地方。
 fn first_hit_line(content: &str, start_line: i64, terms: &[String]) -> Option<i64> {
-    let mut earliest: Option<usize> = None;
-    for term in terms {
-        if let Some(pos) = content.find(term.as_str()) {
-            earliest = Some(earliest.map_or(pos, |cur| cur.min(pos)));
-        }
-    }
-    earliest.map(|pos| start_line + content[..pos].matches('\n').count() as i64)
+    let byte = crate::fts::first_hit_byte(content, terms)?;
+    Some(start_line + content[..byte].matches('\n').count() as i64)
 }
 
 fn empty_result(q: &str, needs_index: bool, vector_search: bool) -> SearchResult {

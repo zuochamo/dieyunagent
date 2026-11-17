@@ -28,6 +28,10 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), CoreError> {
 }
 
 pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
+    // 这个库的表**不声明外键**：库连接由 `SqliteHandle` 打开，`TuneOptions::foreign_keys`
+    // 默认 false（`sqlite.rs`），声明了 `ON DELETE CASCADE` 也不生效 —— 一条没有约束力的
+    // 声明比没有更危险（读代码的人会以为删符号会自动带走边）。
+    // 级联的唯一实现是 [`super::cleanup`]（`clear_file_graph` / `clear_workspace_graph`）。
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS graph_workspaces (
@@ -77,8 +81,7 @@ pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
             callee_name TEXT NOT NULL,
             callee_symbol_id INTEGER,
             line INTEGER NOT NULL,
-            confidence REAL NOT NULL DEFAULT 0.8,
-            FOREIGN KEY(caller_symbol_id) REFERENCES graph_symbols(id) ON DELETE CASCADE
+            confidence REAL NOT NULL DEFAULT 0.8
         );
         CREATE INDEX IF NOT EXISTS idx_graph_imports_root ON graph_imports(root_hash);
         CREATE INDEX IF NOT EXISTS idx_graph_imports_from ON graph_imports(root_hash, from_path);
@@ -160,6 +163,32 @@ fn ensure_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归（P3）：这个库的建表语句里**不许**再出现外键声明。
+    ///
+    /// 库连接不开 `foreign_keys`（`sqlite.rs::TuneOptions` 默认 false），声明了也不生效 ——
+    /// 一条没有约束力的 `ON DELETE CASCADE` 比没有更危险：读代码的人会以为删符号会自动
+    /// 带走调用边。级联的唯一实现是 `super::cleanup`。
+    #[test]
+    fn schema_declares_no_unenforced_foreign_keys() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_graph_schema(&conn).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!rows.is_empty());
+        for (name, sql) in rows {
+            assert!(
+                !sql.to_uppercase().contains("FOREIGN KEY"),
+                "{name} 仍在声明外键，但这个库不开 foreign_keys —— 级联请写进 cleanup.rs"
+            );
+        }
+    }
 
     /// 老库迁移：符号向量表与两列在打开时被收掉，且不损伤其它结构图谱数据。
     #[test]

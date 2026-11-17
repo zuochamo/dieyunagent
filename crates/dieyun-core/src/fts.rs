@@ -58,14 +58,45 @@ pub fn has_indexable_term(query: &str) -> bool {
 /// 与 `match_query` / `has_indexable_term` 共用同一份切分规则：摘录要围绕「真正被检索的
 /// 词」展开，切分规则差一点就会把摘录截在毫不相关的位置上。找不到时返回 `None`，
 /// 调用方退回头部截断（不是错误：子串可能被词法切分改写过）。
+/// 首个命中词在 `content` 里的**字节**偏移（大小写不敏感）；找不到返回 `None`。
+///
+/// 这是「命中位置」的**唯一**实现：`fts::first_hit_index`（要字符下标，做摘录）与
+/// `index::search::first_hit_line`（要行号）都从它派生。此前两份各写一遍、口径还不一样
+/// （一份大小写不敏感、一份区分大小写），于是同一段正文的「摘要位置」与「命中行」会指向
+/// 不同的地方 —— 用户看到摘录里没有那个词，而行号却标着命中。
+pub fn first_hit_byte(content: &str, terms: &[String]) -> Option<usize> {
+    // 小写化可能**改变字节长度**（如 `İ` → 两个码点）。长度变了就不能拿小写串的下标当
+    // 原文下标用 —— 那种情况下退回区分大小写的匹配：宁可「没找到」，也不给一个错位置。
+    let lowered = content.to_lowercase();
+    let lower_usable = lowered.len() == content.len();
+    let mut best: Option<usize> = None;
+    for term in terms {
+        if term.is_empty() {
+            continue;
+        }
+        let hit = content.find(term.as_str()).or_else(|| {
+            if !lower_usable {
+                return None;
+            }
+            lowered
+                .find(&term.to_lowercase())
+                .filter(|pos| content.is_char_boundary(*pos))
+        });
+        if let Some(pos) = hit {
+            best = Some(best.map_or(pos, |cur| cur.min(pos)));
+        }
+    }
+    best
+}
+
+/// 首个命中片段的**字符**下标，用于围绕命中处截取摘录。
+///
+/// 与 `match_query` / `has_indexable_term` 共用同一份切分规则：摘录要围绕「真正被检索的
+/// 词」展开，切分规则差一点就会把摘录截在毫不相关的位置上。找不到时返回 `None`，
+/// 调用方退回头部截断（不是错误：子串可能被词法切分改写）。
 pub fn first_hit_index(content: &str, query: &str) -> Option<usize> {
-    let haystack = content.to_lowercase();
-    terms(query)
-        .iter()
-        .filter_map(|t| haystack.find(&t.to_lowercase()))
-        .filter_map(|byte_idx| content.get(..byte_idx))
-        .map(|prefix| prefix.chars().count())
-        .min()
+    let byte = first_hit_byte(content, &terms(query))?;
+    Some(content[..byte].chars().count())
 }
 
 /// 自然语言 / 代码混合文本 → 纯文本片段（已去掉 FTS5 语法字符）。
@@ -144,5 +175,29 @@ mod tests {
         assert_eq!(first_hit_index(content, "parseconfig"), Some(9));
         assert_eq!(first_hit_index("完全无关", "parseConfig"), None);
         assert_eq!(first_hit_index("任意内容", ""), None);
+    }
+
+    /// 回归（P3）：命中位置只有一份实现 —— 摘录用的字符下标与命中行用的字节偏移同源。
+    ///
+    /// 此前 `index::search::first_hit_line` 自己写了一遍 `content.find(term)`（区分大小写），
+    /// 与这里（不区分）口径不同：同一段正文会出现「摘录围绕的位置」和「命中行」对不上。
+    #[test]
+    fn hit_position_has_a_single_source() {
+        let content = "line1\nLINE2: Fatal Error here\nline3";
+        let terms = vec!["error".to_string()];
+
+        let byte = first_hit_byte(content, &terms).expect("应命中");
+        assert_eq!(&content[byte..byte + "Error".len()], "Error", "大小写不敏感");
+
+        // 字符下标由同一处派生
+        assert_eq!(
+            first_hit_index(content, "error"),
+            Some(content[..byte].chars().count())
+        );
+        // 行号也从它派生（这里落在第 2 行，1 基偏移由调用方加）
+        assert_eq!(content[..byte].matches('\n').count(), 1);
+
+        assert!(first_hit_byte(content, &["nope".to_string()]).is_none());
+        assert!(first_hit_index(content, "nope").is_none());
     }
 }

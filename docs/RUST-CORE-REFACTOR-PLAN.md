@@ -270,14 +270,18 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 
 **验收**：`cargo test` 239 → **269 全绿**、零 warning；`npm test`、vitest（225 文件 / 2208 条）、`verify:rpc-catalog` 通过。
 
-### P3 · 单一来源收敛（6–10 人日，风险中）
+### P3 · 单一来源收敛（6–10 人日，风险中）· **2 / 5 已落地（2026-11-18），第 6 条已在收尾批完成**
 
-1. **抽取器合并**：`extract/{symbols,go,python,rust_lang}.rs` 的四份 `take_ident`/`scan_call_targets`/`strip_comment` + `treesitter/extract.rs` 的第五份 `is_ident` → 一份 `extract/heuristic.rs`（按语言的 `CALL_SKIP` 表 + 引号感知的 `strip_comment`），并补「AST 与启发式对同一段源码产出相同 callee 集合」的对称性测试。
-2. **命中位置一份**：`search.rs:first_hit_line`（区分大小写）与 `fts.rs:first_hit_index`（不区分）合并；摘录预算改成字符（`chars().count()`）。
-3. **可见性/维度/形状三份收敛**：`long_mem_visible_sql` 用于语义分支；`effective_dimensions()` 全替换；一个域一个投影函数（长记忆 3 份 → 1 份、消息 2 份 → 1 份）。
-4. **schema 声明式迁移**：一份列清单生成 `CREATE TABLE` 与 `ALTER`（memory 16 条、graph 2 条、index 若干），`ensure_schema` 不再靠「表存在就早退」。
-5. **外键二选一**：要么 `codebase_db` 开 `foreign_keys` 并删手工级联，要么删掉 schema 里的 `FOREIGN KEY ... CASCADE` 声明（一条没有约束力的注释最危险）。
-6. **A13 token 估值**：把 `reasoning_content` 计入；`tokens_before/after` 必须同口径，不同口径不相减。
+| 项 | 状态 | 落点 / 证据 |
+|---|---|---|
+| ✅ **外键二选一** | 已做 | **选「删掉无约束力的声明」**（不是开 `foreign_keys`）：memory 库走 `SqliteHandle::new_with_foreign_keys`，它的 CASCADE 是真的；index / graph 的库连接按 `TuneOptions::foreign_keys=false` 打开，`graph_calls` 与 `chunk_vectors` 上的 `FOREIGN KEY … ON DELETE CASCADE` 从来没生效过 —— 删掉并在建表处写明「级联的唯一实现是 `graph/cleanup.rs` / `index/build.rs` 的写库原语」。顺手修掉第四处不一致：`memory/misc.rs` 的修剪线程以前 `open_tuned` + 手写 `pragma_update(foreign_keys, ON)` 且 `if …is_ok()` 放行（一次 pragma 失败就静默跳过整个修剪，孤儿 traces/plans 越攒越多），改用 `open_tuned_with(.., TuneOptions { foreign_keys: true })`（失败会 Err）。两条守卫用例 `schema_declares_no_unenforced_foreign_keys`（index / graph 各一条，扫 `sqlite_master` 的实际建表语句） |
+| ✅ **命中位置一份** | 已做 | `fts::first_hit_byte(content, terms)` 是唯一实现（大小写不敏感，返回字节偏移）；`fts::first_hit_index`（摘录要字符下标）与 `index::search::first_hit_line`（要行号）都从它派生。此前 search 自己写了一遍 `content.find(term)`（**区分**大小写），于是「摘录围绕的位置」与「命中行」会指向不同地方。用例 `hit_position_has_a_single_source`。摘录预算按字符在 P1 已改 |
+| ⏳ **可见性 / 维度 / 形状三份收敛** | 未做 | `long_mem_visible_sql` 用于语义分支；`effective_dimensions()` 全替换；长记忆投影 3→1、消息投影 2→1 |
+| ⏳ **五份抽取器合并** | 未做 | `extract/{symbols,go,python,rust_lang}.rs` 的 `take_ident`/`scan_call_targets`/`strip_comment` + `treesitter/extract.rs` 的 `is_ident` → `extract/heuristic.rs`；补 AST↔启发式对称性测试 |
+| ⏳ **schema 声明式迁移** | 未做 | 一份列清单生成 `CREATE TABLE` 与 `ALTER`（memory 16 条 / graph 2 条 / index 若干）；`ensure_schema` 不再靠「表存在就早退」 |
+| ✅ A13 token 估值 | 收尾批已做 | 见 §2.1 |
+
+**验收**：`cargo test` 281 → **284 全绿**、零 warning；`npm test`、`verify:rpc-catalog` 通过。
 
 ### P4 · 生命周期与错误处理（6–8 人日，风险中高）· **已完成 2026-11-18**
 

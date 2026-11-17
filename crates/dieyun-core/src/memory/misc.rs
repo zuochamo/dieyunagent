@@ -538,12 +538,18 @@ impl MemoryStore {
                 loop {
                     // 每轮独立开关连接：不长期持有库文件（Windows 下会挡住备份 / 删除），
                     // 且主连接常驻，关闭这条连接不会触发 WAL checkpoint 抖动。
-                    if let Ok(conn) = crate::sqlite::open_tuned(&db_path) {
-                        // open_tuned 有意不开 foreign_keys，而这里依赖 CASCADE 清子表，
-                        // 必须显式打开，否则删 run 会留下孤儿 traces / plans / steps。
-                        if conn.pragma_update(None, "foreign_keys", "ON").is_ok() {
-                            let _ = Self::prune_agent_history(&conn, &PrunePolicy::default());
-                        }
+                    // 每条轮询独立开一条连接：不长期持有库文件（Windows 下会挡住备份 / 删除）。
+                    // **必须带外键**：`prune_agent_history` 依赖 `ON DELETE CASCADE` 清子表，
+                    // 这里以前是 `open_tuned` + 手写 `pragma_update(foreign_keys, ON)` 并
+                    // `if …is_ok()` 放行 —— 打开成功与否没人验，一次失败的 pragma 就让整个
+                    // 修剪静默跳过（孤儿 traces / plans / steps 越攒越多，谁都看不出来）。
+                    // 现在把「这个库开外键」交给唯一的开关：`TuneOptions::foreign_keys`。
+                    let open = crate::sqlite::open_tuned_with(
+                        &db_path,
+                        crate::sqlite::TuneOptions { foreign_keys: true },
+                    );
+                    if let Ok(conn) = open {
+                        let _ = Self::prune_agent_history(&conn, &PrunePolicy::default());
                         // 顺手洗掉历史脏数据（meta 里的 base64）。洗完这个扫描恒为 0 行。
                         let _ = Self::purge_oversized_message_meta(&conn);
                     }
