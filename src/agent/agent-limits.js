@@ -1721,7 +1721,7 @@ function resolveFirstTokenTimeoutMs(userDataPath, tierId) {
   return undefined;
 }
 
-/** 流式包间隔容忍时长；未配置时返回 undefined，由 llm-proxy 的模块兜底值生效。 */
+/** 流式包间隔容忍时长；未配置时返回 undefined（当前宿主侧已无 SSE 读取，数值仅留档）。 */
 function resolveStreamIdleTimeoutMs(userDataPath, tierId) {
   try {
     const n = Number(getAgentLimit('llmStreamIdleTimeoutMs', userDataPath, tierId));

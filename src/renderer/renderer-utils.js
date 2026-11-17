@@ -95,7 +95,7 @@ function sanitizeOutboundImageUrl(url) {
   }
   // 拿不到共用闸门时必须「失败关闭」：带着未校验的图片出门，上游会以 HTTP 400
   // ".messages[N].image[0]: unsupported image" 打回整轮请求（含历史里重发的旧图）。
-  // 少一张图 vs 整轮对话不可用，前者可接受；Main 侧 llm-proxy 还有同一道闸兜底。
+  // 少一张图 vs 整轮对话不可用，前者可接受；Main 侧（llm-stream-bridge → guardrails-shared）还有同一道闸兜底。
   console.warn('[renderer] GuardrailsShared 未加载，出站图片一律省略（需重建 agent-bundle）');
   return '';
 }

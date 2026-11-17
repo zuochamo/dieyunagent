@@ -121,7 +121,6 @@ flowchart TD
 | `src/agent/task-tier.js` | 分级解析 / 结构推断 / 跳过自动 codebase |
 | `src/agent/agent-limits.js` | `taskTierEnabled` |
 | `src/agent/tool-harness.js` | run 级指纹止损 |
-| `src/llm-stream-utils.js` | `mergeMissingReasoning` / `attachPartialStreamError` |
 | `src/agent/rust-loop-runner.js` | 流式残片合并（重连耗尽直接用残片续走 `llm_response`） |
 | `src/renderer/renderer-agent-send.js` | 发送前分类 |
 | `src/agent/completion-readiness.js` | 完成验收判定（证据在 Main） |

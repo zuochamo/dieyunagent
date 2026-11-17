@@ -139,16 +139,6 @@ function enrichFetchError(err, apiBaseUrl, phase) {
   return out;
 }
 
-/**
- * 单次 fetch —— **不再自带退避重试**。
- * 瞬时重试/退避由外层 runRendererLlmReconnectRetry（单一来源 src/llm-reconnect-retry.js）
- * 统一负责；内层再退避会与其形成双层重试（且富化后的错误无法再被 isTransient 分类）。
- * 此处原样抛出，交由外层完成重试与 enrichFetchError 文案富化。
- */
-async function apiFetchOnce(url, init) {
-  return fetch(url, init);
-}
-
 function formatAgentApiError(err, fallbackBaseUrl) {
   if (!err) return '未知错误';
   const raw = String(err.message || err);
@@ -599,7 +589,21 @@ function emitAgentProgress(trace, onProgress, streamContent) {
   return snapshot;
 }
 
+/**
+ * 非流式一次调用。请求由 Main 递给 core（RPC `llm.complete`），渲染层**不发 HTTP、
+ * 不拼请求头之外的任何传输细节**：端点与请求头仍只由 `agent/llm-request.js` 给出，
+ * 这里只负责「问什么」与「失败怎么降级」。
+ *
+ * 返回：core 归一后的正文文本（与改造前同为字符串）。
+ *
+ * 瞬时重试/退避仍由外层 runRendererLlmReconnectRetry（单一来源 src/llm-reconnect-retry.js）
+ * 负责：core 不在传输层重试，这里也不再复制第二层退避。
+ */
 async function fetchChatCompletion({ model, messages, temperature, max_tokens, response_format, apiConfig, signal }) {
+  if (!agentApi.llmChatCompletion) {
+    // 装配错误就直说：这条通道只能由 Main → core 发，渲染层不再有直连兜底。
+    throw new Error('LLM 调用通道缺失（preload 未暴露 llmChatCompletion）：请重启客户端或重建 renderer bundle');
+  }
   const apiBaseUrl = (apiConfig && apiConfig.baseUrl) || settings.baseUrl;
   const apiKey = (apiConfig && apiConfig.apiKey) || settings.apiKey;
   const url = resolveEndpoint(apiBaseUrl);
@@ -618,37 +622,25 @@ async function fetchChatCompletion({ model, messages, temperature, max_tokens, r
 
   return runRendererLlmReconnectRetry(
     async () => {
-      let data;
-      if (agentApi.llmChatCompletion) {
-        const ctrl = { abort: null };
-        const reqPromise = agentApi.llmChatCompletion({
-          url,
-          headers,
-          body,
-          onControl: ({ abort }) => {
-            ctrl.abort = abort;
-          }
-        });
-        const unbind = bindSignalToMainAbort(signal, () => ctrl.abort);
-        try {
-          data = await reqPromise;
-        } finally {
-          unbind();
+      // 请求由 Main 递给 core；瞬时重试由外层 runRendererLlmReconnectRetry 统一负责。
+      const ctrl = { abort: null };
+      const reqPromise = agentApi.llmChatCompletion({
+        url,
+        headers,
+        body,
+        onControl: ({ abort }) => {
+          ctrl.abort = abort;
         }
-      } else {
-        // 单次请求；瞬时重试由外层 runRendererLlmReconnectRetry 统一负责。
-        const resp = await apiFetchOnce(url, { method: 'POST', headers, body, signal });
-        if (!resp.ok) {
-          const errText = await resp.text();
-          const err = new Error(`HTTP ${resp.status} ${resp.statusText}\n${errText.slice(0, 400)}`);
-          err.statusCode = resp.status;
-          throw err;
-        }
-        data = await resp.json();
+      });
+      const unbind = bindSignalToMainAbort(signal, () => ctrl.abort);
+      let result;
+      try {
+        result = await reqPromise;
+      } finally {
+        unbind();
       }
-      await reportTokensToMain(data, model);
-      const msg = data?.choices?.[0]?.message;
-      return (msg?.content || '').trim() || '(空响应)';
+      await reportTokensToMain(result, model);
+      return String((result && result.content) || '').trim() || '(空响应)';
     },
     { signal, apiBaseUrl, phase: '对话请求' }
   ).then((text) => {
@@ -657,51 +649,28 @@ async function fetchChatCompletion({ model, messages, temperature, max_tokens, r
   });
 }
 
-// ---- SSE 流式响应解析：复用 agent 层单一来源（window.SseDeltaParse） ----
-// 解析器（emitParsedSseJson / processSseTextChunk / flushSseBuffer / extractDeltaReasoning /
-// buildToolCallAccumulator）原先在此逐字重复了一份；现统一由 src/agent/sse-delta-parse.js 提供，
-// Main（llm-stream-utils）与 Renderer 共用同一实现。
-// 本文件只保留渲染器特有的**乱码修复**：主进程透传 SSE 文本时的单字节损坏，作为 opts.repairText 注入。
 
 /**
- * 取共享解析器。index.html 中 agent-bundle 先于本文件加载，故缺失只有一种可能：bundle 未重建。
+ * core 的工具调用形状 `{ id, name, arguments }`（arguments 是已拼回的 JSON 字符串）
+ * → 既有 OpenAI 形状，交给 normalizeToolCallsForApi 统一做 id 补齐与参数校验。
+ * 对外仍只有 `normalizeToolCallsForApi` 一个出口。
  */
-function resolveSseDeltaParse() {
-  const mod = typeof window !== 'undefined' ? window.SseDeltaParse : null;
-  if (!mod || typeof mod.processSseTextChunk !== 'function') {
-    throw new Error('SSE 解析模块缺失（window.SseDeltaParse）：请重新构建 renderer agent bundle');
-  }
-  return mod;
-}
-
-function countCjkChars(text) {
-  // CJK 字符类单一来源（window.DieyunTokenEstimate，见 src/agent/token-estimate.js）。
-  const mod = typeof window !== 'undefined' ? window.DieyunTokenEstimate : null;
-  return mod && typeof mod.countCjkChars === 'function' ? mod.countCjkChars(text) : 0;
-}
-
-function maybeRepairMojibakeText(value) {
-  const text = String(value || '');
-  if (!text) return text;
-  if (!/[ÃÂÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòôõöøùúûüýþÿ\u0080-\u009f]/.test(text)) {
-    return text;
-  }
-  try {
-    const bytes = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff;
-    const repaired = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    if (!repaired || repaired.includes('\uFFFD')) return text;
-    const originalCjk = countCjkChars(text);
-    const repairedCjk = countCjkChars(repaired);
-    if (repairedCjk > originalCjk || (originalCjk === 0 && repairedCjk > 0)) return repaired;
-  } catch {
-    // ignore
-  }
-  return text;
+function toOpenAiToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls)) return [];
+  return toolCalls.map((tc) => ({
+    id: tc && tc.id,
+    type: 'function',
+    function: { name: tc && tc.name, arguments: tc && tc.arguments }
+  }));
 }
 
 /**
- * 流式 chat completion — 单轮（主进程 HTTP + 渲染进程 SSE 解析）
+ * 流式 chat completion —— 单轮。
+ *
+ * 增量从哪来：core 解析 SSE 后经事件通道推 `agent.delta`，Main 按 runId 过滤再转发到本进程
+ * （`agentApi.streamChatViaMain` 的 `onDelta`）。渲染层**不再自己发请求、不再解析 SSE**：
+ * 传输与解析只有 `crates/dieyun-core/src/agent/llm.rs` 一份实现（原渲染层解析器与主进程
+ * `llm-stream-utils.js` 两份重复实现已删除）。
  */
 async function streamChatCompletionOnce(body, signal, onDelta) {
   // `_apiConfig` 承载完整模型配置（含自定义头 / authMode / userAgent）；
@@ -710,7 +679,12 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
   const apiBaseUrl = (apiConfig && apiConfig.baseUrl) || body._apiBaseUrl || settings.baseUrl;
   const apiKey = (apiConfig && apiConfig.apiKey) || body._apiKey || settings.apiKey;
 
-  let sendBody = { ...body };
+  if (!agentApi.streamChatViaMain) {
+    // 装配错误就直说：这条通道只能由 Main → core 发，渲染层没有直连兜底。
+    throw new Error('LLM 流式调用通道缺失（preload 未暴露 streamChatViaMain）：请求只能由 Main → core 发');
+  }
+
+  const sendBody = { ...body };
   delete sendBody._apiBaseUrl;
   delete sendBody._apiKey;
   delete sendBody._apiConfig;
@@ -724,105 +698,46 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
 
   const url = resolveEndpoint(apiBaseUrl);
   const headers = buildRendererLlmHeaders(apiConfig, apiBaseUrl, apiKey);
-  const payload = JSON.stringify(sendBody);
 
-  const sse = resolveSseDeltaParse();
-  // 渲染器特有：修复主进程透传 SSE 文本时的单字节乱码；Main 侧不传此钩子。
-  const sseOpts = { repairText: maybeRepairMojibakeText };
+  // 流式期间的本地累计只为给回调「到目前为止」的文本；最终值以 core 的结果为准。
+  let liveContent = '';
+  let liveReasoning = '';
 
-  let content = '';
-  let reasoning = '';
-  let usage = null;
-  /** 流里的上游错误载荷（主进程侧 llm-stream-utils 同判据，见 sse-delta-parse） */
-  let upstreamError = '';
-  const tcAcc = sse.buildToolCallAccumulator();
-  let sseBuffer = '';
-
-  const applyDelta = (delta) => {
-    if (!delta) return;
-    if (delta._upstreamError) upstreamError = String(delta._upstreamError);
-    if (delta.content) content += delta.content;
-    const reasoningChunk = sse.extractDeltaReasoning(delta);
-    if (reasoningChunk) reasoning += reasoningChunk;
-    if (delta._usage) usage = delta._usage;
-    tcAcc.apply(delta);
-    if (onDelta) onDelta({ content, reasoning, hasToolCalls: false });
-  };
-
-  const consumeRaw = (text) => {
-    const r = sse.processSseTextChunk(sseBuffer, text, applyDelta, sseOpts);
-    sseBuffer = r.buffer;
-    if (r.done) sseBuffer = '';
-  };
-
-  if (agentApi.streamChatViaMain) {
-    const ctrl = { abort: null };
-    const streamPromise = agentApi.streamChatViaMain({
-      url,
-      headers,
-      body: payload,
-      onRaw: consumeRaw,
-      onControl: ({ abort }) => {
-        ctrl.abort = abort;
-      }
-    });
-    const unbind = bindSignalToMainAbort(signal, () => ctrl.abort);
-    try {
-      await streamPromise;
-    } finally {
-      unbind();
+  const ctrl = { abort: null };
+  const streamPromise = agentApi.streamChatViaMain({
+    url,
+    headers,
+    body: JSON.stringify(sendBody),
+    onDelta: (delta) => {
+      if (!delta) return;
+      if (delta.content) liveContent += String(delta.content);
+      if (delta.reasoning) liveReasoning += String(delta.reasoning);
+      if (onDelta) onDelta({ content: liveContent, reasoning: liveReasoning, hasToolCalls: false });
+    },
+    onControl: ({ abort }) => {
+      ctrl.abort = abort;
     }
-  } else {
-    const resp = await apiFetchOnce(url, { method: 'POST', headers, body: payload, signal });
-    if (!resp.ok) {
-      const errText = await resp.text();
-      const err = new Error(`HTTP ${resp.status} ${resp.statusText}\n${errText.slice(0, 400)}`);
-      err.statusCode = resp.status;
-      throw err;
-    }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    try {
-      while (true) {
-        if (signal?.aborted) {
-          throw userAbortError();
-        }
-        let done;
-        let value;
-        try {
-          ({ done, value } = await reader.read());
-        } catch (err) {
-          if (signal?.aborted || err?.name === 'AbortError') {
-            throw userAbortError();
-          }
-          throw enrichFetchError(err, apiBaseUrl, '流式响应');
-        }
-        if (done) break;
-        consumeRaw(decoder.decode(value || new Uint8Array(), { stream: true }));
-      }
-    } finally {
-      try {
-        reader.cancel();
-      } catch {
-        // ignore
-      }
-    }
+  });
+  const unbind = bindSignalToMainAbort(signal, () => ctrl.abort);
+  let outcome;
+  try {
+    outcome = await streamPromise;
+  } finally {
+    unbind();
   }
 
   if (signal?.aborted) {
     throw userAbortError();
   }
 
-  sse.flushSseBuffer(sseBuffer, applyDelta, sseOpts);
-
-  // 与主进程 llm-stream-utils 同判据：上游把错误当正常流回吐时抛错，
-  // 绝不把「额度用尽 / 鉴权失败」当成一次空回复放过去。
-  if (upstreamError) {
-    throw new Error(`LLM 上游错误：${upstreamError}`);
-  }
-
-  const toolCalls = normalizeToolCallsForApi(tcAcc.flush());
-  const hasToolCalls = !!(toolCalls && toolCalls.length);
+  // 正文 / 思考 / 工具调用 / usage 都只有 core 那份解析器算得准。
+  // 上游把错误当正常流回吐（HTTP 200 + `{"error":...}`）也由 core 变成失败抛出，这里无需再判。
+  const result = (outcome && outcome.result) || {};
+  const content = String(result.content != null ? result.content : liveContent).trim();
+  const reasoning = String(result.reasoning != null ? result.reasoning : liveReasoning).trim();
+  const usage = result.usage || null;
+  const toolCalls = normalizeToolCallsForApi(toOpenAiToolCalls(result.toolCalls));
+  const hasToolCalls = toolCalls.length > 0;
   if (onDelta) onDelta({ content, reasoning, hasToolCalls });
 
   if (usage) {
@@ -833,8 +748,8 @@ async function streamChatCompletionOnce(body, signal, onDelta) {
   }
 
   return {
-    content: content.trim(),
-    reasoning: reasoning.trim(),
+    content,
+    reasoning,
     toolCalls,
     hasToolCalls,
     usage

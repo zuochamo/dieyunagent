@@ -323,7 +323,13 @@ contextBridge.exposeInMainWorld('diecloud', {
   getRuntimeByTierFromMain: () => ipcRenderer.invoke('model:get-runtime-by-tier'),
   fetchBuiltinModels: (payload) => ipcRenderer.invoke('models:fetch-list', payload),
 
-  streamChatViaMain: ({ url, headers, body, onRaw, onControl }) =>
+  /**
+   * 流式 chat completion：Main 只把 core 的增量转发过来（`{type:'delta', content, reasoning}`），
+   * 解析在 core（`crates/dieyun-core/src/agent/llm.rs`），渲染层不再收到 SSE 原文。
+   * resolve 形状：`{ ok: true, result }`，`result` 是 core 归一后的
+   * `{ content, reasoning, toolCalls, finishReason, usage, model }`。
+   */
+  streamChatViaMain: ({ url, headers, body, onDelta, onControl }) =>
     new Promise((resolve, reject) => {
       const streamId = `llm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const channel = `llm:stream:${streamId}`;
@@ -345,16 +351,16 @@ contextBridge.exposeInMainWorld('diecloud', {
       };
       const handler = (_e, evt) => {
         if (!evt || typeof evt !== 'object') return;
-        if (evt.type === 'raw') {
+        if (evt.type === 'delta') {
           try {
-            if (onRaw) onRaw(String(evt.text || ''));
+            if (onDelta) onDelta({ content: String(evt.content || ''), reasoning: String(evt.reasoning || '') });
           } catch (e) {
             finish(() => reject(e));
           }
           return;
         }
         if (evt.type === 'done') {
-          finish(() => resolve({ ok: true }));
+          finish(() => resolve({ ok: true, result: evt.result || null }));
           return;
         }
         if (evt.type === 'error') {
@@ -379,7 +385,7 @@ contextBridge.exposeInMainWorld('diecloud', {
             return;
           }
           if (result && result.ok) {
-            finish(() => resolve({ ok: true }));
+            finish(() => resolve({ ok: true, result: result.result || null }));
             return;
           }
           if (result && result.error) {
@@ -393,6 +399,11 @@ contextBridge.exposeInMainWorld('diecloud', {
 
   llmStreamAbort: (streamId) => ipcRenderer.invoke('llm:stream-abort', { streamId }),
 
+  /**
+   * 非流式一次调用。返回 core 归一后的
+   * `{ content, reasoning, toolCalls, finishReason, usage, model }`
+   * —— 不是上游原始 JSON：请求与解析都在 core，宿主侧只转发结果。
+   */
   llmChatCompletion: async ({ url, headers, body, requestId, onControl }) => {
     const id = requestId || `llm-json-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const abort = () => ipcRenderer.invoke('llm:chat-completion-abort', { requestId: id }).catch(() => {});
@@ -409,7 +420,7 @@ contextBridge.exposeInMainWorld('diecloud', {
       headers,
       body
     });
-    if (r && r.ok) return r.json;
+    if (r && r.ok) return r.result || null;
     if (r && r.aborted) {
       const err = new Error('已停止');
       err.name = 'AbortError';

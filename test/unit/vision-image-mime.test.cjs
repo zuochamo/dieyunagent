@@ -157,7 +157,7 @@ describe('sanitizeChatBodyImagesForApi（Main 出站 body 闸门）', () => {
   });
 });
 
-describe('sanitizeChatRequestJsonForApi（llm-proxy 字符串闸门）', () => {
+describe('sanitizeChatRequestJsonForApi（出站 body 字符串闸门）', () => {
   it('含图片 part 时解析清洗后重新序列化', () => {
     const raw = JSON.stringify({
       model: 'm',

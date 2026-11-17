@@ -202,6 +202,23 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
   }
 
   /**
+   * 浏览器里的流式接口按非流式发：拿不到 core 的增量（见下面 streamChatViaMain 的注释），
+   * 直接收 SSE 又会在 json() 处失败。只改 stream 标志，别的字段一律不动。
+   */
+  function withoutStreamFlag(body) {
+    let obj = null;
+    try {
+      obj = JSON.parse(String(body || '{}'));
+    } catch (e) {
+      return body;
+    }
+    if (!obj || typeof obj !== 'object') return body;
+    obj.stream = false;
+    delete obj.stream_options;
+    return JSON.stringify(obj);
+  }
+
+  /**
    * 工作区根的本地镜像：getWorkspace() 与渲染层的「默认工作空间」都读它。
    * 唯一写入点是服务端 desktop.set_workspace 的返回（服务端是唯一真源）。
    * @param {object|null} ws
@@ -326,21 +343,36 @@ function buildShim({ gatewayUrl, gatewayToken, webToken, workspacePath, modelSet
     // 检测要出网（GET /models + 逐个探测 chat/completions），浏览器直连会被模型端点的
     // CORS 拦掉，所以交给同一台服务器跑（desktop.fetch_models），语义与桌面端同一份实现。
     fetchBuiltinModels: async (payload) => agentCall('desktop.fetch_models', { payload: payload || {} }),
-    // 流式聊天：等价于主进程的 streamChatViaMain
-    streamChatViaMain: async ({ url, headers, body, onRaw, onControl }) => {
-      const resp = await postLlm(url, headers, body, onControl);
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (typeof onRaw === 'function') onRaw(decoder.decode(value || new Uint8Array(), { stream: true }));
-      }
-    },
-    // 非流式单次请求：等价于主进程的 llmChatCompletion
+    // LLM 两个接口。桌面端由 Main 递给 core（llm.complete）；浏览器里没有 Main，
+    // 走同源 /llm 转发到上游（绕开模型端点的 CORS）。返回值形状与 preload.js 一致：
+    // core 归一后的 { content, reasoning, usage, model }。
+    //
+    // 增量：core 才是唯一的 SSE 解析者（crates/dieyun-core/src/agent/llm.rs），浏览器里
+    // 拿不到 agent.delta，在这里再解析一份 SSE 就是第二份实现（docs/LLM-RPC.md 负向清单）。
+    // 所以流式接口在浏览器里退成「一次 delta」：请求按非流式发出，整段结果作为一条 delta
+    // 交给渲染层。形状与桌面一致，最终结果一致，只是不逐字到达；要逐字增量，得把这条
+    // 链路也移进 core，而不是在这里补一份解析。
     llmChatCompletion: async ({ url, headers, body, onControl }) => {
       const resp = await postLlm(url, headers, body, onControl);
-      return resp.json();
+      const json = await resp.json();
+      const choice = (json && Array.isArray(json.choices) && json.choices[0]) || {};
+      const msg = choice.message || {};
+      return {
+        content: String(msg.content || ''),
+        reasoning: String(msg.reasoning_content || msg.reasoning || ''),
+        usage: (json && json.usage) || null,
+        model: (json && json.model) || null
+      };
+    },
+    streamChatViaMain: async ({ url, headers, body, onDelta, onControl }) => {
+      const result = await real.llmChatCompletion({
+        url,
+        headers,
+        body: withoutStreamFlag(body),
+        onControl
+      });
+      if (onDelta) onDelta({ content: result.content, reasoning: result.reasoning });
+      return { ok: true, result };
     },
     // 主循环（等价于主进程的 agent:rust-loop-run）：服务器用同一份 runRustAgentLoop 跑，
     // 工具在服务器执行，phase 事件按 cancelToken 推给本页

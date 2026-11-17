@@ -186,8 +186,9 @@ register('DieyunTokenEstimate', {
   compat: ['estimateTextTokens', 'estimateMessagesTokens', 'estimateToolsTokens', 'estimateFullContextUsage']
 });
 
-// SSE delta 解析的唯一来源：Main（src/llm-stream-utils.js）与 Renderer（renderer-agent-llm.js）
-// 共用同一份实现；渲染器侧勿再自抄 emitParsedSseJson / processSseTextChunk / buildToolCallAccumulator。
+// SSE delta 解析（src/agent/sse-delta-parse.js）的**唯一实现**。Renderer 早已不再自己解析 SSE
+// （LLM 请求与流式都经 IPC 交给 core 的 agent/llm.rs），这里的注册只为兼容尚未清理的旧调用点；
+// 需要解析上游 SSE 时先问「该不该放进 core」，别在渲染层再抄一份。
 register('DieyunSseDeltaParse', { ...sseDeltaParse, SseDeltaParse: sseDeltaParse }, {
   compat: ['SseDeltaParse']
 });

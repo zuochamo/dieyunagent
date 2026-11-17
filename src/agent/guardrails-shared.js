@@ -568,7 +568,7 @@ function dropRejectedChatImagesForApi(body, opts = {}) {
 }
 
 /**
- * 字符串版闸门（llm-proxy 的 body 已是 JSON 串）。只在含图片 part 时解析，
+ * 字符串版闸门（请求体已经是 JSON 串时用）。只在含图片 part 时解析，
  * 避免给每轮请求都加一次 parse/stringify 开销。解析失败原样返回。
  */
 function sanitizeChatRequestJsonForApi(rawJson) {

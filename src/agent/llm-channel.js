@@ -20,7 +20,7 @@
  * 也能被 esbuild 打进 Renderer（src/renderer/agent/agent-bundle-entry.js）。
  */
 
-/** 上游可能承载思考的字段名，优先级顺序与 src/llm-stream-utils.js 的 extractDeltaReasoning 一致。 */
+/** 上游可能承载思考的字段名，优先级顺序与 src/agent/sse-delta-parse.js 的 extractDeltaReasoning 一致。 */
 const REASONING_KEY_CANDIDATES = Object.freeze(['reasoning_content', 'reasoning', 'thinking']);
 
 const CHANNEL_REASONING = 'reasoning';
@@ -122,7 +122,7 @@ function channelPolicyFromSettings(settings, model) {
 
 /**
  * 按策略从 delta 里取思考文本（第一个非空的候选键）。默认策略下与
- * src/llm-stream-utils.js 的 extractDeltaReasoning 逐项等价。
+ * src/agent/sse-delta-parse.js 的 extractDeltaReasoning 逐项等价。
  */
 function pickReasoningText(delta, policy) {
   const keys = [];
