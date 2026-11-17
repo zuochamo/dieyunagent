@@ -1,6 +1,6 @@
 'use strict';
 
-const { chatCompletionJson } = require('../llm-proxy');
+const { completeOnce, currentLlmCompleteBridge } = require('./llm-complete');
 const {
   runWithLlmReconnectRetry,
   raceAbortable,
@@ -141,7 +141,7 @@ function mapPlannerTraceEntryToUi(entry) {
   };
 }
 
-async function fetchChatCompletion(body, apiConfig, settings, signal, onUsage, reconnect) {
+async function fetchChatCompletion(body, apiConfig, settings, signal, onUsage, reconnect, coreBridge) {
   const cfg = apiConfig && typeof apiConfig === 'object' ? apiConfig : {};
   const baseUrl = cfg.baseUrl || settings.baseUrl;
   const apiKey = cfg.apiKey || settings.apiKey;
@@ -151,29 +151,31 @@ async function fetchChatCompletion(body, apiConfig, settings, signal, onUsage, r
     { ...cfg, baseUrl, apiKey },
     { model: body && body.model }
   );
+  // 传输走 core 的 `llm.complete`（端点/请求头/解析/usage 只有 core 那一份实现）。
+  // 重连重试仍留在这一层：它是「同一请求再试一次」的业务决定，不是传输实现。
   const json = await runWithLlmReconnectRetry(
     () =>
-      chatCompletionJson(url, {
-        headers,
-        body: JSON.stringify({ ...body, stream: false }),
+      completeOnce({
+        coreBridge: coreBridge || currentLlmCompleteBridge(),
+        url,
+        llm: { ...cfg, baseUrl, apiKey, headers },
+        body: { ...body, stream: false },
         signal
       }),
     { signal, ...(reconnect || {}) }
   );
-  const msg = json?.choices?.[0]?.message;
-  if (json?.usage) {
+  const content = json && json.content != null ? String(json.content) : '';
+  if (json && json.usage) {
     recordLlmUsage(json.usage, body?.model);
     if (typeof onUsage === 'function') onUsage(extractUsageStats(json.usage, body?.model));
   } else {
-    const est = estimateLlmRoundUsage(body, {
-      content: msg?.content != null ? String(msg.content) : ''
-    });
+    const est = estimateLlmRoundUsage(body, { content });
     if (est) {
       recordLlmUsage(est, body?.model);
       if (typeof onUsage === 'function') onUsage(extractUsageStats(est, body?.model));
     }
   }
-  return msg?.content != null ? String(msg.content) : '';
+  return content;
 }
 
 /**
@@ -797,7 +799,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           settings,
           signal,
           addPlannerUsage,
-          plannerReconnect
+          plannerReconnect,
+          bridge
         );
         const planContent = clampPlanContentBestOfN(content, enabledBestOfN);
         phase = await bridge.invoke(
@@ -912,7 +915,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           settings,
           signal,
           addPlannerUsage,
-          plannerReconnect
+          plannerReconnect,
+          bridge
         );
         phase = await bridge.invoke(
           'planner.run.continue',
@@ -926,7 +930,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           settings,
           signal,
           addPlannerUsage,
-          plannerReconnect
+          plannerReconnect,
+          bridge
         );
         phase = await bridge.invoke(
           'planner.run.continue',
@@ -940,7 +945,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           settings,
           signal,
           addPlannerUsage,
-          plannerReconnect
+          plannerReconnect,
+          bridge
         );
         phase = await bridge.invoke(
           'planner.run.continue',
