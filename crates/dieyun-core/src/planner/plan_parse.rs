@@ -363,32 +363,53 @@ pub fn build_fallback_plan(user_text: &str) -> Plan {
     }
 }
 
+/// 评审模型的输出解析。
+///
+/// **验收只有一个方向**：拿不到明确的 `true` 就不放行。旧实现把 `accepted` 缺省成
+/// `true`、解析失败也 `true`，于是「不合法输出」被当成验收通过，重试闸门整层失效：
+/// `{"accepted":"false","retry":[…]}`（字符串 `"false"`）→ `as_bool()` 得 None →
+/// accepted=true → 短路掉 retry，坏产出直接进汇总，UI 还显示「需重试」却什么都没重试。
 pub fn parse_review_content(content: &str) -> ReviewResult {
-    if let Some(parsed) = extract_json_block(content) {
-        let accepted = parsed
-            .get("accepted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let retry = parsed
-            .get("retry")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let notes = parsed
-            .get("notes")
-            .and_then(|v| v.as_str())
-            .unwrap_or(content)
-            .to_string();
-        return ReviewResult {
-            accepted,
-            retry,
-            notes,
-        };
-    }
+    let parsed = extract_json_block(content);
+    // 评审提示词允许把结论套在 `{"review":{…}}` 里（示例就是嵌套形状），两处都认。
+    let scope = parsed
+        .as_ref()
+        .and_then(|p| p.get("review").filter(|v| v.is_object()))
+        .or(parsed.as_ref());
+    let accepted = scope
+        .and_then(|p| p.get("accepted"))
+        .map(is_truthy)
+        .unwrap_or(false);
+    let retry = scope
+        .and_then(|p| p.get("retry"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let notes = scope
+        .and_then(|p| p.get("notes"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(content)
+        .to_string();
     ReviewResult {
-        accepted: true,
-        retry: vec![],
-        notes: content.to_string(),
+        accepted,
+        retry,
+        notes,
+    }
+}
+
+/// `accepted` 的取值归一：模型常把布尔写成字符串/数字。
+///
+/// 只认「明确通过」的一小组写法；其余（含 `"false"`、`"no"`、`0`、null）一律视为未通过 ——
+/// 宁可多问一次，也不要让坏产出静默通过。
+fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|f| f > 0.0).unwrap_or(false),
+        Value::String(s) => {
+            let t = s.trim().to_ascii_lowercase();
+            matches!(t.as_str(), "true" | "1" | "yes" | "pass" | "passed")
+        }
+        _ => false,
     }
 }
 
@@ -459,6 +480,31 @@ mod tests {
             collect_workers_from_plan(&subtasks),
             vec!["A".to_string(), "B".to_string()]
         );
+    }
+
+    /// 评审的「不通过」不能被静默读成「通过」。
+    ///
+    /// 钉住验收→重试闸门：模型把布尔写成字符串（非常常见）、把结论套进 `{"review":{…}}`、
+    /// 或者干脆没给 JSON —— 这三种以前都变成 `accepted: true`，retry 被整条丢弃。
+    #[test]
+    fn review_never_treats_unclear_output_as_accepted() {
+        let stringified = parse_review_content(
+            r#"{"accepted":"false","retry":[{"worker":"A","subtaskIds":["A1"],"reason":"测试没过"}]}"#,
+        );
+        assert!(!stringified.accepted, "字符串 \"false\" 不是通过");
+        assert_eq!(stringified.retry.len(), 1, "不通过时 retry 必须留着");
+
+        let nested = parse_review_content(r#"{"review":{"accepted":false}}"#);
+        assert!(!nested.accepted, "嵌套形状也要认");
+
+        let zero = parse_review_content(r#"{"accepted":0}"#);
+        assert!(!zero.accepted);
+
+        let prose = parse_review_content("我觉得这版还差点意思。");
+        assert!(!prose.accepted, "没有 JSON 就不是明确通过");
+
+        let ok = parse_review_content(r#"{"accepted":true,"retry":[]}"#);
+        assert!(ok.accepted);
     }
 
     #[test]

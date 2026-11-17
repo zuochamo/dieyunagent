@@ -132,6 +132,32 @@ pub fn symbol_search(
     })
 }
 
+/// 这个工作区建过调用边没有。
+///
+/// 调用边只在 `calls:true` 的建库范围内抽取（`build.rs`），而默认的结构索引**一份都没有** ——
+/// 所以 `sites: []` 必须先分清是「真没人调用」还是「没建过」。这是唯一判据。
+fn call_graph_built(conn: &Connection, root_hash: &str) -> bool {
+    conn.query_row(
+        "SELECT call_count FROM graph_workspaces WHERE root_hash = ?1",
+        params![root_hash],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+/// 「没建调用图」这句话只有一份写法，调用方直接透传给模型 / 面板。
+fn call_graph_note(built: bool) -> Option<String> {
+    if built {
+        return None;
+    }
+    Some(
+        "本工作区尚未建立调用图（默认只建结构索引）：本次结果不代表「没有调用方/被调用方」。\
+         需要调用关系请先执行 graph.index.start{calls:true} 建一次。"
+            .to_string(),
+    )
+}
+
 pub fn callers(
     conn: &Connection,
     root_hash: &str,
@@ -140,6 +166,7 @@ pub fn callers(
     name: Option<&str>,
     indexed: bool,
 ) -> Result<CallGraphResult, CoreError> {
+    let built = call_graph_built(conn, root_hash);
     let symbol = resolve_symbol(conn, root_hash, symbol_id, path, name)?;
     let Some(sym) = symbol.clone() else {
         // 符号已经不在库里（被改名 / 删除 / 还没索引到）：调用点本身可能还留在源码里。
@@ -164,6 +191,8 @@ pub fn callers(
         return Ok(CallGraphResult {
             ok: true,
             indexed,
+            call_graph_built: built,
+            note: call_graph_note(built),
             symbol: None,
             sites,
         });
@@ -188,6 +217,8 @@ pub fn callers(
     Ok(CallGraphResult {
         ok: true,
         indexed,
+        call_graph_built: built,
+        note: call_graph_note(built),
         symbol: Some(sym),
         sites,
     })
@@ -201,11 +232,14 @@ pub fn callees(
     name: Option<&str>,
     indexed: bool,
 ) -> Result<CallGraphResult, CoreError> {
+    let built = call_graph_built(conn, root_hash);
     let symbol = resolve_symbol(conn, root_hash, symbol_id, path, name)?;
     let Some(sym) = symbol.clone() else {
         return Ok(CallGraphResult {
             ok: true,
             indexed,
+            call_graph_built: built,
+            note: call_graph_note(built),
             symbol: None,
             sites: vec![],
         });
@@ -222,6 +256,8 @@ pub fn callees(
     Ok(CallGraphResult {
         ok: true,
         indexed,
+        call_graph_built: built,
+        note: call_graph_note(built),
         symbol: Some(sym),
         sites,
     })

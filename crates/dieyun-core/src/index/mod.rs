@@ -166,7 +166,7 @@ impl IndexService {
         let cache_key = self.embedding.cache_key();
         let hits = self
             .vector_cache_op(|cache| {
-                cache.get_many(&cache_key, &hashes, self.embedding.dimensions as usize)
+                cache.get_many(&cache_key, &hashes, self.embedding.effective_dimensions() as usize)
             })
             .filter(|h| !h.is_empty());
         let Some(hits) = hits else {
@@ -1149,7 +1149,7 @@ impl IndexService {
         let (embedding_model, embed_dims) = if vector_count == 0 {
             (None, 0i64)
         } else if use_vectors {
-            (Some(embed_sig), self.embedding.dimensions as i64)
+            (Some(embed_sig), self.embedding.effective_dimensions() as i64)
         } else {
             (prev_embed_model.clone(), prev_embed_dims)
         };

@@ -455,6 +455,17 @@ impl MemoryStore {
                 "DELETE FROM session_handoffs WHERE session_id = ?1",
                 params![session_id],
             )?;
+            // 这两张表存的都是「这次会话的正文」，却既没有外键也不参与任何级联：
+            // 不在这里删，它们会永久留在库里，而且 `memory.compaction_folded` 的检索
+            // 不 JOIN sessions —— 已删会话的折叠原文仍会被当成既往对话交给模型。
+            conn.execute(
+                "DELETE FROM compaction_archives WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            conn.execute(
+                "DELETE FROM request_snapshots WHERE session_id = ?1",
+                params![session_id],
+            )?;
             conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
             Ok(json!({ "ok": true }))
         })

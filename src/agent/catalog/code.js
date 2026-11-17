@@ -144,7 +144,7 @@ const GRAPH_TOOL = {
         operation: {
           type: 'string',
           description:
-            'find_symbol | module_deps | callers | callees | impact | lsp_callers'
+            'find_symbol | module_deps | callers | callees | impact | lsp_callers（callers/callees 的返回带 callGraphBuilt：false 表示该工作区还没建调用图，此时空列表不代表「没有调用方」）'
         },
         query: { type: 'string', description: 'find_symbol：符号名' },
         name: { type: 'string', description: 'callers / callees / lsp_callers：符号名' },

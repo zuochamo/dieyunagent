@@ -197,9 +197,15 @@ impl MemoryStore {
             }
         });
         self.with_conn(|conn| {
+            // 去重键**必须带 scope**：召回是按 scope 过滤的，把 project:A 的行当成 project:B
+            // 的同一件事，等于让 B 永远查不到这条事实（写入方还会看到 `duplicate: true`，
+            // 像是成功）。同一 scope 内的完全相同正文仍然只留一行。
             if let Ok(existing) = conn.query_row(
-                "SELECT id FROM long_memories WHERE content = ?1 AND status != 'deleted' LIMIT 1",
-                params![normalized],
+                "SELECT id FROM long_memories
+                 WHERE content = ?1 AND status != 'deleted'
+                   AND COALESCE(NULLIF(scope, ''), 'global') = ?2
+                 LIMIT 1",
+                params![normalized, scope],
                 |row| row.get::<_, i64>(0),
             ) {
                 conn.execute(
@@ -506,7 +512,10 @@ impl MemoryStore {
         }
         let embedding = self.embedding();
         let sig = embedding.signature();
-        let dims = embedding.dimensions;
+        // 维度只能取自**这份向量本身**：配置里的 `dimensions` 是「远端期望值」，
+        // 本地推理后端固定 768 —— 用配置值落库会让读侧 `blob_to_vector` 整行丢弃
+        // （长度对不上就返回 None），语义召回与近重复抑制会一起静默失效。
+        let dims = vector.len() as u32;
         let blob = embedding::vector_to_blob(vector);
         let now = now_ms();
         self.with_conn(|conn| {
@@ -535,7 +544,6 @@ impl MemoryStore {
             return Ok(json!({ "ok": false, "indexed": 0, "reason": "embedding_disabled" }));
         }
         let sig = embedding.signature();
-        let dims = embedding.dimensions;
         let now = now_ms();
         let rows = self.with_conn(|conn| -> Result<Vec<(i64, String)>, CoreError> {
             let sql = format!(
@@ -574,6 +582,7 @@ impl MemoryStore {
                 continue;
             }
             let blob = embedding::vector_to_blob(&vector);
+            let dims = vector.len() as u32;
             self.with_conn(|conn| {
                 conn.execute(
                     "INSERT INTO long_memory_vectors (memory_id, model, dimensions, vector, updated_at)

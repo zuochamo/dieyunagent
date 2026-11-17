@@ -841,7 +841,9 @@ impl AppState {
                 let mut planner_ok = false;
                 if !run_id.is_empty() {
                     let guard = self.inner.read().await;
-                    agent_ok = guard.agent.cancel(run_id).is_ok();
+                    // 真话：`cancel` 返回「是否真的找到并取消了」。旧实现它恒返回 Ok(())，
+                    // 于是这里恒 true —— 传错 runId、run 已结束、core 刚重启，全都报「已取消」。
+                    agent_ok = guard.agent.cancel(run_id)?;
                     planner_ok = guard.planner.cancel(run_id).is_ok();
                 }
                 Ok(serde_json::json!({
@@ -1075,8 +1077,9 @@ impl AppState {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "runId 必填"))?;
                 let agent = Arc::clone(&self.inner.read().await.agent);
-                agent.cancel(run_id)?;
-                Ok(json!({ "ok": true }))
+                // `cancelled` 是账本事实：run 不存在 / 已收尾时是 false，不再假装成功。
+                let cancelled = agent.cancel(run_id)?;
+                Ok(json!({ "ok": true, "cancelled": cancelled }))
             }
             // ---- 通用一次调用：Node 侧所有辅助任务（标题 / 汇总 / 评审 / 计划 / 记忆提炼）
             // 都走这里，不再自己打 HTTP。请求头与端点仍由宿主给（`llm-request.js` 是唯一来源），

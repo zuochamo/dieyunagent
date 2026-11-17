@@ -679,7 +679,7 @@ function registerAgentRuntimeIpc(ctx) {
         }
         if (rid && live.coreBridge && live.coreBridge.isReady()) {
           try {
-            await live.coreBridge.invoke('agent.loop.cancel', { runId: rid }, 10000);
+            await live.coreBridge.invoke('agent.run.cancel', { runId: rid }, 10000);
           } catch {
             // ignore
           }
@@ -768,7 +768,7 @@ function registerAgentRuntimeIpc(ctx) {
     }
     if (rid && live.coreBridge && live.coreBridge.isReady()) {
       try {
-        await live.coreBridge.invoke('agent.loop.cancel', { runId: rid }, 10000);
+        await live.coreBridge.invoke('agent.run.cancel', { runId: rid }, 10000);
       } catch {
         // ignore
       }

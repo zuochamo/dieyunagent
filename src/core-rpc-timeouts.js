@@ -11,7 +11,7 @@ const INDEX_TIMEOUT_MS = 600000;
 const COMPACTION_FOLD_TIMEOUT_MS = 30 * 1000;
 
 /**
- * `agent.llm.chat`：一次 LLM 调用的整体预算。
+ * `llm.complete`：一次 LLM 调用的整体预算。
  *
  * 它比默认 120s 宽得多，因为流式长回答本身就可能跑几分钟；上限对齐 Rust 侧
  * `agent::llm::STREAM_TIMEOUT_SECS`（600s）再加余量 —— 两个数字必须成对改。
@@ -22,7 +22,7 @@ const LLM_CHAT_TIMEOUT_MS = 660 * 1000;
 /**
  * `agent.run.start` / `agent.run.tools`：**core 自己调 LLM** 的那两条驱动 RPC。
  *
- * 与 `agent.llm.chat` 同量级、同样对齐 Rust 侧 `agent::llm::STREAM_TIMEOUT_SECS`（600s）
+ * 与 `llm.complete` 同量级、同样对齐 Rust 侧 `agent::llm::STREAM_TIMEOUT_SECS`（600s）
  * 再加余量 —— 四个数字必须成对改：这两条 RPC 跑的正是同一次 `llm::chat_completion`，
  * 只是从「宿主经 RPC 发」变成「core 在自己循环里发」。
  * 真正的「卡住了」由 runner 的 run-stall 看门狗（`runStallWarnMs` / `runStallAbortMs`）先发现，
@@ -64,7 +64,10 @@ function resolveCoreRpcTimeoutMs(method, timeoutMs) {
     return 60000;
   }
   if (m === 'compaction.fold') return COMPACTION_FOLD_TIMEOUT_MS;
-  if (m === 'agent.llm.chat') return LLM_CHAT_TIMEOUT_MS;
+  // `llm.complete` 是辅助任务（标题 / 汇总 / 评审 / 计划 / 记忆提炼）与 Renderer 流式对话
+  // 的唯一 LLM 入口。以前这里写的是已被删除的 `agent.llm.chat`，于是真正在跑的这条落到
+  // 默认 120s：core 侧按 600s 还在流，宿主 120s 就放弃 —— 长回答表现为「说到一半突然失败」。
+  if (m === 'llm.complete') return LLM_CHAT_TIMEOUT_MS;
   if (m === 'agent.run.start' || m === 'agent.run.tools') return AGENT_RUN_TIMEOUT_MS;
   return DEFAULT_TIMEOUT_MS;
 }

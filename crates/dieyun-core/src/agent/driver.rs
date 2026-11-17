@@ -48,6 +48,42 @@ pub struct DriveSpec {
     pub include_raw: bool,
 }
 
+/// run 生命周期的唯一收尾点：驱动器的**两条出口**（Ok / Err）都要把账本里的 run 删掉。
+///
+/// 为什么用 guard 而不是「在每个 return 前调一次 discard」：`?` 会静默绕过手写调用 ——
+/// 那正是「上游 4xx / 超时之后 run 永远留在账本里」的成因（长驻 core 里等于整段
+/// transcript 永久驻留）。
+///
+/// 唯一的例外是 `need_delegate`：账本要留着等宿主把工具结果交回来，此时先 `keep()`。
+struct RunLifetime<'a> {
+    manager: &'a AgentLoopManager,
+    run_id: String,
+    handed_back: bool,
+}
+
+impl<'a> RunLifetime<'a> {
+    fn new(manager: &'a AgentLoopManager, run_id: &str) -> Self {
+        Self {
+            manager,
+            run_id: run_id.to_string(),
+            handed_back: false,
+        }
+    }
+
+    /// 交回宿主继续驱动（`need_delegate`）：账本必须留着。
+    fn keep(&mut self) {
+        self.handed_back = true;
+    }
+}
+
+impl Drop for RunLifetime<'_> {
+    fn drop(&mut self) {
+        if !self.handed_back {
+            self.manager.discard(&self.run_id);
+        }
+    }
+}
+
 /// 收到工具结果之后继续驱动。
 ///
 /// `results` 为空表示「没有待执行工具」，等价于直接推进到下一次 LLM 调用。
@@ -61,7 +97,9 @@ pub async fn drive_with_results(
     llm_cfg: &LlmConfig,
     on_delta: &(dyn Fn(&Delta) + Sync),
 ) -> Result<DriveStop, CoreError> {
+    let mut lifetime = RunLifetime::new(manager, run_id);
     let first = manager.submit_tool_results(cfg, index, run_id, results)?;
+    lifetime.keep();
     drive(manager, cfg, index, run_id, first, spec, llm_cfg, on_delta).await
 }
 
@@ -79,10 +117,13 @@ pub async fn drive(
     // 自愈各一次：溢出折叠、拒图摘图。都用「本轮已试过」的标记，不是无限重试。
     let mut overflow_retried = false;
     let mut image_retried = false;
+    let mut lifetime = RunLifetime::new(manager, run_id);
     loop {
         match response.phase.as_str() {
             "need_delegate" => {
                 let delegates = response.delegates.clone().unwrap_or_default();
+                // 工具在宿主执行：账本要留到 `agent.run.tools` 把结果交回来。
+                lifetime.keep();
                 return Ok(DriveStop::NeedTools { response, delegates });
             }
             "done" => return Ok(DriveStop::Done(response)),
@@ -229,6 +270,7 @@ fn to_input(outcome: Outcome, content_channel: ContentChannel) -> LlmResponseInp
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::config::AppConfig;
     use crate::embedding::EmbeddingConfig;
     use serde_json::json;

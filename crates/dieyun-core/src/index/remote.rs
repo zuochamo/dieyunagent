@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::params;
@@ -83,7 +83,7 @@ impl IndexService {
             use_vectors,
             embed_sig: self.embedding.signature(),
             embed_dims: if use_vectors {
-                self.embedding.dimensions
+                self.embedding.effective_dimensions()
             } else {
                 0
             },

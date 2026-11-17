@@ -1603,6 +1603,175 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
+    /// 向量落库的 `dimensions` 必须来自**这份向量本身**，不能来自配置。
+    ///
+    /// 本地推理后端固定 768 维，而宿主无论 provider 都送远端 `dimensions`(1024)：
+    /// 用配置值落库会让读侧 `blob_to_vector` 因长度不符整行 `continue` —— 语义召回与
+    /// 近重复抑制一起静默失效（无日志、无报错，只表现为「召回变差」）。
+    #[test]
+    fn stored_vector_dimensions_come_from_the_vector_not_the_config() {
+        let db = std::env::temp_dir().join(format!("dieyun-mem-vecdims-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+        let added = store
+            .add_long_memory("向量维度必须跟着向量走", "user", None, Some("global"), None, None, None, None)
+            .unwrap();
+        let memory_id = added
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .or_else(|| {
+                store
+                    .with_conn(|conn| {
+                        conn.query_row(
+                            "SELECT id FROM long_memories ORDER BY id DESC LIMIT 1",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(CoreError::from)
+                    })
+                    .ok()
+            })
+            .expect("long memory id");
+
+        let vector = vec![0.25f32; 768];
+        store.store_long_memory_vector(memory_id, &vector).unwrap();
+
+        let (dims, blob): (u32, Vec<u8>) = store
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT dimensions, vector FROM long_memory_vectors WHERE memory_id = ?1",
+                    [memory_id],
+                    |row| Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .map_err(CoreError::from)
+            })
+            .unwrap();
+        assert_eq!(dims, 768, "列必须是向量长度，而不是配置里的 1024");
+        let back = crate::embedding::blob_to_vector(&blob, dims as usize)
+            .expect("读侧必须能按同一维度还原");
+        assert_eq!(back.len(), 768);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 同一句话写进两个 scope：两个 scope 各拥有一行。
+    ///
+    /// 去重键以前只有 `content`，于是 project:A 写过的正文让 project:B 的写入变成
+    /// `duplicate: true`（看着成功）却永远召回不到 —— 跨项目归纳撞这句「提交前跑测试」
+    /// 的概率最高。同一 scope 内仍然只留一行。
+    #[test]
+    fn exact_dedupe_is_scoped() {
+        let db = std::env::temp_dir().join(format!("dieyun-mem-scoped-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+        let write = |scope: &str| {
+            store
+                .add_long_memory(
+                    "提交前跑 npm test",
+                    "user",
+                    None,
+                    Some(scope),
+                    Some(3),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+        };
+
+        let a = write("project:/ws/a");
+        let b = write("project:/ws/b");
+        assert!(
+            b.get("duplicate").and_then(|v| v.as_bool()).is_none(),
+            "另一个 scope 不是重复：{b}"
+        );
+        assert_ne!(
+            a.get("localMemoryId").and_then(|v| v.as_i64()),
+            b.get("localMemoryId").and_then(|v| v.as_i64())
+        );
+        assert_eq!(
+            store
+                .recent_long_memories(10, Some("project:/ws/a"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .recent_long_memories(10, Some("project:/ws/b"))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let again = write("project:/ws/b");
+        assert_eq!(
+            again.get("duplicate").and_then(|v| v.as_bool()),
+            Some(true),
+            "同一 scope 内的完全相同正文仍然只留一行：{again}"
+        );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 删会话必须把它名下的**正文类**表一起收走。
+    ///
+    /// `compaction_archives` / `request_snapshots` 只有 `session_id` 列、没有外键、也不参与
+    /// 任何级联，而折叠原文的检索不 JOIN sessions —— 不删就等于「会话删了，它的原文还能被
+    /// 检索出来交给模型」，并且库只涨不消。
+    #[test]
+    fn clear_session_purges_archives_and_snapshots() {
+        let db = std::env::temp_dir().join(format!("dieyun-mem-clear-{}.sqlite", now_ms()));
+        let _ = std::fs::remove_file(&db);
+        let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+        let session = store.create_session(None, None).unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO compaction_archives
+                       (session_id, workspace_path, tokens_before, tokens_after, summary_text, summary_json, folded_text, created_at)
+                     VALUES (?1, 'E:/ws/gc', 10, 5, 's', NULL, 'pgbouncer pool_mode 要设 transaction', ?2)",
+                    rusqlite::params![session.id, now_ms()],
+                )?;
+                conn.execute(
+                    "INSERT INTO request_snapshots (session_id, created_at, messages_json)
+                     VALUES (?1, ?2, '[]')",
+                    rusqlite::params![session.id, now_ms()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let hits = |store: &MemoryStore| -> usize {
+            store
+                .search_compaction_folded("pgbouncer", Some("E:/ws/gc"), None, 10, 400)
+                .unwrap()
+                .get("results")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0)
+        };
+        assert_eq!(hits(&store), 1, "先确认存档可被检索");
+
+        store.clear_session(&session.id).unwrap();
+
+        assert_eq!(hits(&store), 0, "删会话后折叠原文不得还能被检索");
+        let left: (i64, i64) = store
+            .with_conn(|conn| {
+                let archives = conn.query_row(
+                    "SELECT COUNT(*) FROM compaction_archives WHERE session_id = ?1",
+                    rusqlite::params![session.id],
+                    |row| row.get(0),
+                )?;
+                let snapshots = conn.query_row(
+                    "SELECT COUNT(*) FROM request_snapshots WHERE session_id = ?1",
+                    rusqlite::params![session.id],
+                    |row| row.get(0),
+                )?;
+                Ok((archives, snapshots))
+            })
+            .unwrap();
+        assert_eq!(left, (0, 0), "删会话后正文类表不得留孤儿");
+        let _ = std::fs::remove_file(&db);
+    }
+
     fn json_strings(v: &Value, list_key: &str, field: &str) -> Vec<String> {
         v.get(list_key)
             .and_then(|x| x.as_array())

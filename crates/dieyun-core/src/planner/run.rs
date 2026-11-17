@@ -1064,8 +1064,13 @@ fn finalize_plan(mut plan: Plan, cfg_best_of_n: u32) -> Plan {
             st.title = st.instruction.chars().take(48).collect();
         }
     }
-    plan.best_of_n = plan.best_of_n.max(cfg_best_of_n.min(3)).min(3);
-    if plan.best_of_n <= 1 {
+    // best-of-N 路数的唯一来源是宿主 `agent-limits.plannerBestOfN`，且它是**上限**：
+    // 模型在计划里写多少都不能超过它，也写不出「关掉也照开」。旧实现用 `max(cfg, model)`，
+    // 于是设置里关掉（cfg=0）时模型一句话就能开 3 路 —— 成本 ×3，且没有任何一层能拦。
+    // Node 侧同口径见 `rust-planner-runner.js#clampPlanContentBestOfN`。
+    let cap = cfg_best_of_n.min(3);
+    plan.best_of_n = plan.best_of_n.min(cap);
+    if plan.best_of_n < 2 {
         plan.best_of_n = 0;
     }
     plan
@@ -1197,6 +1202,31 @@ mod tests {
         let out = finalize_plan(plan, 99);
         assert_eq!(out.best_of_n, 3);
         assert_eq!(out.subtasks[0].expected_output, "do");
+    }
+
+    /// `agent-limits.plannerBestOfN` 是**上限**：模型写多少都不能超过它，关掉就是关掉。
+    ///
+    /// 旧实现 `max(cfg, model)` 让「关掉 best-of-N」变成一句模型话术就能推翻的设置。
+    #[test]
+    fn finalize_plan_never_raises_best_of_n_above_the_host_cap() {
+        let plan_with = |n: u32| Plan {
+            plan_summary: "s".into(),
+            todos: vec![],
+            subtasks: vec![Subtask {
+                id: "A1".into(),
+                worker: "A".into(),
+                title: "t".into(),
+                instruction: "do".into(),
+                expected_output: String::new(),
+                agent_type: "build".into(),
+            }],
+            best_of_n: n,
+            fallback: false,
+        };
+        assert_eq!(finalize_plan(plan_with(3), 0).best_of_n, 0, "关掉时不得开");
+        assert_eq!(finalize_plan(plan_with(3), 2).best_of_n, 2, "上限 2 就是 2");
+        assert_eq!(finalize_plan(plan_with(0), 3).best_of_n, 0, "模型没要求就不开");
+        assert_eq!(finalize_plan(plan_with(5), 99).best_of_n, 3, "硬上限 3");
     }
 
     #[test]

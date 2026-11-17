@@ -95,6 +95,14 @@ pub struct CallSiteHit {
 pub struct CallGraphResult {
     pub ok: bool,
     pub indexed: bool,
+    /// 这个工作区**建过调用边没有**（`graph_workspaces.call_count > 0`）。
+    ///
+    /// 没有这个字段时，`sites: []` 同时表示「没人调用」与「调用图根本没建」—— 而调用边只在
+    /// `calls:true` 的建库范围内抽取，默认的结构索引一份都没有。模型只能按「没人调用」理解，
+    /// 于是据一个空结果改坏代码。`note` 是同一条事实的可读版（给人 / 给模型的一句话）。
+    pub call_graph_built: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub symbol: Option<SymbolHit>,
     pub sites: Vec<CallSiteHit>,
 }

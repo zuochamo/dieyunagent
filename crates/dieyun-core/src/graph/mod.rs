@@ -1192,6 +1192,13 @@ mod tests {
         assert_eq!(st1.call_count, 0, "默认不抽调用边");
         let none = svc.callers(&key, None, None, Some("helper")).unwrap();
         assert!(none.sites.is_empty(), "没有调用边就没有调用点");
+        // 空列表必须能自证是「没建过」而不是「没人调用」：否则模型据此断言「无调用方」。
+        assert!(!none.call_graph_built, "结构索引下调用图未建");
+        assert!(
+            none.note.as_deref().unwrap_or("").contains("尚未建立调用图"),
+            "未建时必须给一句可读原因：{:?}",
+            none.note
+        );
 
         // 按需补建（force=false，走增量）：未变文件也必须重新解析出调用边
         let st2 = svc.index_workspace(&key, false, GraphScope::WithCalls).unwrap();
@@ -1201,5 +1208,7 @@ mod tests {
             sites.sites.iter().any(|s| s.caller_path == "b.js"),
             "补建后应能查到 b.js 的调用点"
         );
+        assert!(sites.call_graph_built, "建过之后字段要翻成 true");
+        assert!(sites.note.is_none(), "建过就不再给「未建」提示");
     }
 }

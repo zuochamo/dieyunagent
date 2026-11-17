@@ -121,22 +121,43 @@ pub mod imp {
     /// **不做「交给系统加载器去猜」**：缺库时 `ort` 的加载路径会走系统 DLL 搜索
     /// （Windows 上表现为弹缺库对话框），无界面/无人值守环境直接卡死 —— 实测过一次
     /// 整跑测试挂 30 分钟、CPU 为 0。宁可返回一句「运行时未提供」。
-    fn ensure_runtime(dylib: Option<&Path>) -> Result<(), String> {
-        static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
+    ///
+    /// **只缓存成功**：core 是长驻进程，而模型与 dylib 是宿主按需下载的（安装包刻意不打包）。
+    /// 把失败也固化进进程级缓存，等于让「补装完之后仍然报不可用」成为终态 —— 用户只能重启
+    /// core，而设置页只会显示「onnxruntime 动态库不可用」。失败一律不缓存，下次探测重试。
+    pub(super) fn ensure_runtime(dylib: Option<&Path>) -> Result<(), String> {
+        static LOADED: OnceLock<()> = OnceLock::new();
+        ensure_runtime_cached(&LOADED, dylib, init_from)
+    }
+
+    /// 「只缓存成功」这条语义的唯一实现。
+    ///
+    /// `cache` / `load` 只是测试缝（用例必须能证伪「失败被固化」，又不能真去 dlopen
+    /// 一个假文件 —— 那会挂住整个测试进程）；运行时永远走上面那份。
+    pub(super) fn ensure_runtime_cached(
+        cache: &OnceLock<()>,
+        dylib: Option<&Path>,
+        load: impl Fn(&Path) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if cache.get().is_some() {
+            return Ok(());
+        }
         let dylib = dylib.map(Path::to_path_buf);
-        LOADED
-            .get_or_init(|| match dylib {
-                Some(path) if path.is_file() => init_from(&path),
-                Some(path) => Err(format!("指定的 onnxruntime 不存在：{}", path.display())),
-                None => match scan_for_runtime() {
-                    Some(path) => init_from(&path),
-                    None => Err(format!(
+        match dylib {
+            Some(path) if path.is_file() => load(&path)?,
+            Some(path) => return Err(format!("指定的 onnxruntime 不存在：{}", path.display())),
+            None => match scan_for_runtime() {
+                Some(path) => load(&path)?,
+                None => {
+                    return Err(format!(
                         "未找到 onnxruntime 动态库（{}）：请设置 DIEYUN_ORT_LIB，或放到 <userData>/models/onnxruntime/",
                         super::runtime_lib_name()
-                    )),
-                },
-            })
-            .clone()
+                    ));
+                }
+            },
+        }
+        let _ = cache.set(());
+        Ok(())
     }
 
     fn init_from(path: &Path) -> Result<(), String> {
@@ -480,6 +501,40 @@ mod tests {
             panic!("没有模型目录时不应 Ready");
         };
         assert!(reason.contains(LOCAL_MODEL_NAME), "原因里要带模型名: {reason}");
+    }
+
+    /// 「运行时不可用」不得被进程级缓存固化，而成功必须只加载一次。
+    ///
+    /// core 是长驻进程，模型与 dylib 是宿主按需下载的：把失败固化进缓存，用户补装完之后
+    /// 仍然只有「onnxruntime 动态库不可用」，必须重启整个 core 才能恢复。
+    /// 用例用注入的 loader（不真的 dlopen 假文件 —— 那会挂住测试进程）。
+    #[test]
+    fn runtime_failure_is_not_cached_but_success_is() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join(super::runtime_lib_name());
+        std::fs::write(&fake, b"placeholder").unwrap();
+
+        let cache: OnceLock<()> = OnceLock::new();
+        let attempts = Cell::new(0);
+        let failing = |_: &Path| {
+            attempts.set(attempts.get() + 1);
+            Err("加载失败".to_string())
+        };
+        assert!(imp::ensure_runtime_cached(&cache, Some(&fake), failing).is_err());
+        assert!(
+            imp::ensure_runtime_cached(&cache, Some(&fake), failing).is_err(),
+            "失败不得变成终态"
+        );
+        assert_eq!(attempts.get(), 2, "每次探测都要重新尝试");
+
+        let ok = |_: &Path| Ok(());
+        assert!(imp::ensure_runtime_cached(&cache, Some(&fake), ok).is_ok());
+        // 成功之后短路：不再 dlopen 第二次（那条路径没有幂等保证）
+        let must_not_run = |_: &Path| -> Result<(), String> {
+            panic!("成功之后不该再次加载");
+        };
+        assert!(imp::ensure_runtime_cached(&cache, Some(&fake), must_not_run).is_ok());
     }
 
     #[test]

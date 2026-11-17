@@ -296,18 +296,20 @@ const TRUNCATED_TOOL_ERROR: &str =
 /// When a segment hits the tool-call cap, persist text-only assistant output.
 /// Never append `tool_calls` without matching `tool` results — that breaks long-horizon continuation.
 ///
+/// `content` 必须是**已经过通道口径过滤**的正文（即 `delivered_content()` 的结果）：
+/// 思考通道的 `content` 只是思考的存放处，落进这里就成了「思考顶正文」。
+///
 /// `synthetic: true` 标明这段正文是**平台补的**（上限提示），不是模型原话。账本据此把
-/// 该轮记成 `ContentSource::Synthetic`。字段只活在账本里：发给上游前会经出站白名单
-/// `sanitizeMessagesForChatApi` 过滤，未知字段不会漏到 OpenAI 兼容接口。
+/// 该轮记成 `ContentSource::Synthetic`。字段只活在账本里（出站投影仍待收口，
+/// 见 `docs/RUST-CORE-REFACTOR-PLAN.md` R2），不要假设 Node 侧会替你剥掉它。
 /// 返回写入的文本，供调用方记账。
 fn push_assistant_text_only(
     messages: &mut Vec<Value>,
-    content: Option<&String>,
+    content: Option<&str>,
     fallback: &str,
 ) -> String {
     let text = content
         .filter(|c| !c.trim().is_empty())
-        .map(|c| c.as_str())
         .unwrap_or(fallback)
         .to_string();
     messages.push(json!({
@@ -373,6 +375,20 @@ fn fold_state(state: &mut RunState, force: bool) {
             folded_images: result.folded_images,
         });
     }
+}
+
+/// 取消的 run 在被**观察到**的那一刻就离开账本。
+///
+/// 为什么必须在这里删：`finish_run` 只在正常收尾时跑；「用户点停止」与「上游报错」
+/// 两条路径都不会走到它。core 是长驻进程，聊天 / planner worker / 频道共用同一个
+/// `AgentLoopManager`，不删就等于整段 transcript 永久驻留（真实会话可达数 MB），
+/// 而且该 runId 之后每次操作都只会回「已取消」而不会回「不存在」。
+fn take_if_cancelled(runs: &mut HashMap<String, RunState>, run_id: &str) -> bool {
+    if runs.get(run_id).map(|state| state.cancelled).unwrap_or(false) {
+        runs.remove(run_id);
+        return true;
+    }
+    false
 }
 
 impl AgentLoopManager {
@@ -458,12 +474,12 @@ impl AgentLoopManager {
             .runs
             .lock()
             .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
+        if take_if_cancelled(&mut runs, run_id) {
+            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
+        }
         let state = runs
             .get_mut(run_id)
             .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
-        if state.cancelled {
-            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
-        }
         if force {
             fold_force(state);
         } else {
@@ -472,15 +488,35 @@ impl AgentLoopManager {
         Ok(state.pending_fold.take())
     }
 
-    pub fn cancel(&self, run_id: &str) -> Result<(), CoreError> {
+    /// 取消一个 run：置位让在途路径在下一次账本操作时收手，并**立刻释放**大字段。
+    ///
+    /// 返回「是否真的找到并取消了」。旧实现恒返回 `Ok(())`，于是 `rpc.cancel` 的
+    /// `agentCancelled` 永远是 true —— 取消信号本身无法被观测（传错 runId、run 已结束、
+    /// core 刚重启，全都报「已取消」）。
+    pub fn cancel(&self, run_id: &str) -> Result<bool, CoreError> {
         let mut runs = self
             .runs
             .lock()
             .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
-        if let Some(state) = runs.get_mut(run_id) {
-            state.cancelled = true;
+        let Some(state) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        state.cancelled = true;
+        // 取消后账本只剩「这个 run 已被取消」一个事实：transcript / 工具表 / 待执行工具
+        // 都没有读者了（交付文本在取消那一刻之前已经交给宿主）。留着它们 = 长驻进程里
+        // 的永久内存。run 本身由 `take_if_cancelled` 在下一次观察时移除。
+        state.messages = Vec::new();
+        state.tools = Vec::new();
+        state.pending_delegate.clear();
+        Ok(true)
+    }
+
+    /// 把 run 从账本里移除。正常收尾由 `finish_run` 负责，其余出口（出错 / 取消）
+    /// 由本函数兜底 —— 驱动器用 guard 在两条出口都调它。
+    pub fn discard(&self, run_id: &str) {
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(run_id);
         }
-        Ok(())
     }
 
     /// 当前轮次（只读快照；run 已结束或不存在时返回 `None`）。
@@ -537,8 +573,13 @@ impl AgentLoopManager {
                 return Ok(self.finish_run(run_id, trace, content, false));
             }
             let hint = format!("已达本段 {} 轮上限", state.max_rounds);
-            let synthetic_text =
-                push_assistant_text_only(&mut state.messages, llm.content.as_ref(), &hint);
+            // 正文口径只有 `delivered_content()` 一处：思考通道在这里必须是 None，
+            // 否则思考会被写成 assistant 正文（下一轮再作为「我上一轮的回复」回灌模型）。
+            let synthetic_text = push_assistant_text_only(
+                &mut state.messages,
+                delivered_content(llm.content.as_deref(), channel).as_deref(),
+                &hint,
+            );
             state.trace.push(TraceRound {
                 round: state.round,
                 thought: hint,
@@ -610,8 +651,12 @@ impl AgentLoopManager {
 
             if state.tool_calls_used + llm.tool_calls.len() as u32 > state.max_tool_calls {
                 let hint = format!("已达本段 {} 次工具调用上限", state.max_tool_calls);
-                let synthetic_text =
-                    push_assistant_text_only(&mut state.messages, llm.content.as_ref(), &hint);
+                // 与轮次上限同一口径：思考通道的 content 不得落成 assistant 正文。
+                let synthetic_text = push_assistant_text_only(
+                    &mut state.messages,
+                    delivered_content(llm.content.as_deref(), channel).as_deref(),
+                    &hint,
+                );
                 state.trace.push(TraceRound {
                     round: round_no,
                     thought: hint,
@@ -793,12 +838,12 @@ impl AgentLoopManager {
             .runs
             .lock()
             .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?;
+        if take_if_cancelled(&mut runs, run_id) {
+            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
+        }
         let state = runs
             .get_mut(run_id)
             .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
-        if state.cancelled {
-            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
-        }
         // 折叠在**发出请求之前**做，且只动自己的账本：transcript 的写者只有这一处。
         fold_if_needed(state);
         // 注意：**不要**在这里写 `stream`。要不要流式是传输层的事（`DriveSpec.stream` →
@@ -824,6 +869,10 @@ impl AgentLoopManager {
         })
     }
 
+    /// 收尾并从账本移除：取 messages 与移除在**同一个**临界区里完成。
+    ///
+    /// 旧实现两次 `lock().ok()`：第一次失败（poison）→ messages 变成 `None`（Node 侧整段
+    /// 工具结果随之丢失）；第二次失败 → run 永不删除。poison 用 `into_inner()` 明确恢复。
     fn finish_run(
         &self,
         run_id: &str,
@@ -831,14 +880,10 @@ impl AgentLoopManager {
         content: Option<String>,
         hit_limit: bool,
     ) -> LoopResponse {
-        let messages = self
-            .runs
-            .lock()
-            .ok()
-            .and_then(|runs| runs.get(run_id).map(|s| s.messages.clone()));
-        if let Ok(mut runs) = self.runs.lock() {
-            runs.remove(run_id);
-        }
+        let messages = match self.runs.lock() {
+            Ok(mut runs) => runs.remove(run_id).map(|state| state.messages),
+            Err(poisoned) => poisoned.into_inner().remove(run_id).map(|state| state.messages),
+        };
         self.build_done(run_id, trace, content, hit_limit, messages)
     }
 
@@ -1338,6 +1383,121 @@ mod tests {
         assert_eq!(done2.content, None, "上限轮不得把思考当正文交付");
         let last2 = done2.trace.as_ref().and_then(|t| t.last()).expect("round");
         assert_eq!(last2.content_source, ContentSource::Synthetic);
+    }
+
+    /// 单通道模型（思考放在 `content` 键）撞上限时：**提示文本**可以落账本，**思考不行**。
+    ///
+    /// 钉住「思考永不顶正文」的第四条终态路径：上限分支曾经绕过 `delivered_content()`，
+    /// 把 `content` 原文既写成 assistant 正文（下一轮再作为「我上一轮的回复」回灌模型），
+    /// 又当成 `visibleContent` 显示成旁白。
+    #[tokio::test]
+    async fn single_channel_limit_never_stores_reasoning_as_answer() {
+        let dir = tempdir().unwrap();
+        let config = AppConfig::default();
+        let index = IndexService::new(
+            crate::codebase_db::handle(dir.path().join("idx.sqlite")),
+            EmbeddingConfig::default(),
+        );
+        let reasoning = "我在查 loop_run.rs 的四条终态路径，先把正文口径统一。";
+        let mgr = AgentLoopManager::default();
+        let start = mgr
+            .start(StartParams {
+                model: "test-model".into(),
+                messages: vec![json!({"role":"user","content":"run tools"})],
+                tools: vec![],
+                workspace_root: None,
+                max_tool_calls: 10,
+                max_rounds: 1,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
+            })
+            .unwrap();
+        {
+            let mut runs = mgr.runs.lock().unwrap();
+            runs.get_mut(&start.run_id).unwrap().round = 1;
+        }
+        let done = mgr
+            .continue_llm(
+                &config,
+                &index,
+                &start.run_id,
+                LlmResponseInput {
+                    content: Some(reasoning.into()),
+                    reasoning: None,
+                    content_channel: ContentChannel::Reasoning,
+                    tool_calls: vec![ToolCallInput {
+                        id: "tc1".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path":"a.txt"}),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(done.hit_round_limit, Some(true));
+        assert_eq!(done.content, None, "思考通道不是正文");
+        let last = done.trace.as_ref().and_then(|t| t.last()).expect("round");
+        let visible = last.visible_content.clone().unwrap_or_default();
+        assert!(visible.contains("已达本段"), "上限提示要落账本：{visible}");
+        assert!(
+            !visible.contains("四条终态路径"),
+            "思考不得成为可见正文：{visible}"
+        );
+        assert_eq!(
+            last.full_thought.as_deref(),
+            Some(reasoning),
+            "思考仍要留档（只进 full_thought）"
+        );
+        let messages = done.messages.expect("收尾要回传 messages");
+        let text = messages
+            .last()
+            .and_then(|m| m.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(text.contains("已达本段"), "落库的应是平台提示：{text}");
+        assert!(
+            !text.contains("四条终态路径"),
+            "思考不得写进 assistant 正文：{text}"
+        );
+    }
+
+    /// 取消必须做到两件事：**返回真实 bool**、**把 run 从账本里带走**。
+    ///
+    /// 钉住长驻进程的泄漏：`finish_run` 只在正常收尾时跑，「点停止」与「上游报错」都不经过
+    /// 它 —— 旧实现因此让整段 transcript 永久留在 `runs` 里，且该 runId 之后每次操作都回
+    /// 「已取消」（取消信号本身也因此无法被观测）。
+    #[tokio::test]
+    async fn cancel_reports_truth_and_drops_the_run() {
+        let mgr = AgentLoopManager::default();
+        let start = mgr
+            .start(StartParams {
+                model: "test-model".into(),
+                messages: vec![json!({"role":"user","content":"hi"})],
+                tools: vec![],
+                workspace_root: None,
+                max_tool_calls: 10,
+                max_rounds: 10,
+                token_budget: 0,
+                trigger_ratio: 0.0,
+                run_id: None,
+            })
+            .unwrap();
+        assert!(mgr.cancel(&start.run_id).unwrap(), "第一次要报真");
+        match mgr.next_body(&start.run_id) {
+            Err(CoreError::Rpc { code, .. }) => {
+                assert_eq!(code, "AGENT_CANCELLED", "在途路径下一次观察就收手")
+            }
+            other => panic!("应回 AGENT_CANCELLED，实际 {other:?}"),
+        }
+        assert!(
+            mgr.round_of(&start.run_id).is_none(),
+            "取消的 run 必须离开账本"
+        );
+        assert!(
+            !mgr.cancel(&start.run_id).unwrap(),
+            "已不在账本：不得再报「已取消」"
+        );
     }
 
     #[tokio::test]
