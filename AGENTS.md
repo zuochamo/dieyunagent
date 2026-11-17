@@ -175,6 +175,7 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 | [`src/renderer/README.md`](src/renderer/README.md) | Renderer 模块索引 |
 | [`examples/agent-sandbox/README.md`](examples/agent-sandbox/README.md) | Agent 自举沙盒 |
 | [`docs/ARCHITECTURE-DEBT.md`](docs/ARCHITECTURE-DEBT.md) | 架构技术债台账：哪几处仍然过时（本地 IPC / 日志当 IPC / 词法检索 / token 估算 / 快照体积 / JS 侧分期 / 降级 loop）、证据行号、动什么算完、优先级（**接手前先读，别以为都修完了**） |
+| [`docs/NODE-THINNING-PLAN.md`](docs/NODE-THINNING-PLAN.md) | 「让 Node 变薄」可排期清单：跨语言双写点清单（常量 / token 估算 / 工具校验 / RPC 契约）、语义上收 core 的边界、**判定留在 Node 别再搬**的负向清单、4 批排期与验收闸门（**改 `src/agent` 或想「把某段搬进 Rust」前先读**） |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 完整架构手册 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 发版与 dieyun-core 测试 |
 | [`docs/LOGGING.md`](docs/LOGGING.md) | 结构化日志前缀 |
