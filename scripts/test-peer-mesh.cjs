@@ -128,6 +128,8 @@ async function main() {
   const events = [];
   // B 侧的小时预算可中途改（验证「预算用尽只投递不跑」）
   let budgetOverrideB = null;
+  // A 侧的发送预算可中途改（验证「等答复不受连接超时约束」）
+  let limitsOverrideA = null;
   /** 扇出用的第二台（在本段里建，finally 里停） */
   let D = null;
   let dirD = '';
@@ -143,7 +145,7 @@ async function main() {
       submittedA.push(task);
       return { requestId: `reqA_${submittedA.length}`, sessionId: task.sessionId };
     },
-    limits: limitsFor(18350, 18341),
+    limits: () => ({ ...limitsFor(18350, 18341)(), ...(limitsOverrideA || {}) }),
     onEvent: (e) => events.push({ side: 'A', ...e }),
     log: () => {}
   });
@@ -236,6 +238,12 @@ async function main() {
     check('B 收到的正文带来源抬头', /内网 Agent 来信/.test(String(inboundTask.text || '')), String(inboundTask.text || '').slice(0, 80));
     check('B 收到的跳数为 1', /跳数：1/.test(String(inboundTask.text || '')));
     check('B 侧会话已建立', !!inboundTask.sessionId);
+    // 来信建出来的会话 = 「与 A 的对话」，历史列表要按 bot 对话归堆（不是项目对话）
+    check(
+      '来信建出来的会话被标成通道对话',
+      B.status().chatSessions.includes(String(inboundTask.sessionId)),
+      JSON.stringify(B.status().chatSessions)
+    );
 
     // —— 3. B 的回合结束要回传给 A（A 还没确认 B，回信会被拦；先让 A 也确认 B）——
     const reqB = `reqB_1`;
@@ -280,6 +288,12 @@ async function main() {
     );
     A.linkSession(sessLocal, seenB.peerId);
     check('会话绑定被记住', A.linkForSession(sessLocal) === seenB.peerId);
+    // 这条会话是本机自己的（只是被接管成通道）：**不能**因此从项目文件夹搬进「Bot 对话」
+    check(
+      '被接管的本机会话不算通道对话',
+      !A.status().chatSessions.includes(sessLocal),
+      JSON.stringify(A.status().chatSessions)
+    );
     const beforeChannel = submittedB.length;
     const viaSession = await A.sendFromSession(sessLocal, '从会话里发的问题');
     check('会话发信送达', viaSession.ok === true, JSON.stringify(viaSession));
@@ -303,8 +317,50 @@ async function main() {
     check('给回的会话确实在库里', rpcA.hasSession(reopened), String(reopened));
     check('死链接已解绑', A.linkForSession(sessLocal) === '', A.linkForSession(sessLocal));
     check('新会话已绑定到这台机器', A.linkForSession(reopened) === seenB.peerId);
+    check(
+      '「打开对话」给的会话算通道对话',
+      A.status().chatSessions.includes(String(reopened)),
+      JSON.stringify(A.status().chatSessions)
+    );
     const reopenedAgain = await A.openSessionForPeer(seenB.peerId, seenB.name);
     check('再打开复用同一个活会话', reopenedAgain === reopened, `${reopenedAgain} vs ${reopened}`);
+
+    // —— 6c. 等答复不受「连接超时」约束（回归：connectTimer 曾一直跑到 done()）——
+    // 现场版故障（2026-11-13）：对端一轮要 33–35s（它在跑 SSH / 读远端文件），本机 20s 就把
+    // 这次「等答复」报成 CONNECT_TIMEOUT → 归一成 PEER_UNREACHABLE → 模型以为防火墙挡住了端口，
+    // 还去重发一次，让对面白跑两轮。这里把连接超时压到 1.2s、答复拖到 1.8s 之后才回。
+    limitsOverrideA = { peerSendTimeoutMs: 1200 };
+    const beforeSlow = submittedB.length;
+    const slowPromise = A.sendToPeer({
+      host: '127.0.0.1',
+      port: statusB.port,
+      text: '慢一点答复：先说你在跑什么',
+      expectReply: true,
+      timeoutMs: 8000
+    });
+    for (let i = 0; i < 40 && submittedB.length === beforeSlow; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    check('expectReply 的来信被对端收到', submittedB.length === beforeSlow + 1, `submitted=${submittedB.length}`);
+    await new Promise((r) => setTimeout(r, 1800)); // 故意越过 1.2s 的连接超时线
+    const slowReq = `reqB_${submittedB.length}`;
+    B.noteTurnProgress(slowReq, { streamContent: '我在跑 SSH 实测，答复稍后到。' });
+    await B.noteTurnCompleted(slowReq, { summary: '（摘要不带正文）' });
+    const slowReply = await slowPromise;
+    check(
+      '答复比连接超时慢也照样等到（不被报成 CONNECT_TIMEOUT）',
+      slowReply.ok === true && /SSH 实测/.test(String(slowReply.reply || '')),
+      JSON.stringify(slowReply)
+    );
+    check('走的是答复到达分支而不是超时分支', slowReply.timeout !== true, JSON.stringify(slowReply));
+    // 连不上的仍照旧报 PEER_UNREACHABLE（这条护栏没被顺手改坏）
+    const deadPort = await A.sendToPeer({ host: '127.0.0.1', port: 9, text: '打给一个没人听的端口' });
+    check(
+      '真连不上仍然是 PEER_UNREACHABLE',
+      deadPort.ok === false && deadPort.error === 'PEER_UNREACHABLE',
+      JSON.stringify(deadPort)
+    );
+    limitsOverrideA = null;
 
     // —— 7. 建议式租约 ——
     const claimA = await A.claim({ action: 'acquire', kind: 'file', key: 'src/peer/wire.js', note: '正在改信封' });

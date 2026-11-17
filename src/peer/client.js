@@ -4,7 +4,8 @@
 /**
  * peer 客户端：**出站连接的唯一实现**。
  *
- * 一次请求 = 一次连接（握手 → 发信 → 收 ack →〔可选〕等回复 → 关闭）。
+ * 一次请求 = 一次连接（握手 → 发信 → 收 ack → 关闭）。「对方跑完一轮的答复」不在这条连接上：
+ * 对端回连我的服务端发 `reply` 信封，由协调器按 `inReplyTo` 关联（见 `send` 注释）。
  *
  * 为什么不做长连接池：内网里的 agent 都是「偶尔说一句话」，长连接要维护重连、半开探测、
  * 双方时钟与心跳，而每次握手只是一来一回的几百字节。真的需要持续态的东西（在场、租约）
@@ -13,7 +14,7 @@
 
 const http = require('http');
 const { WebSocket } = require('ws');
-const { FRAME, createHello, createEnvelope, normalizeEnvelope, parseFrame } = require('./wire');
+const { FRAME, createHello, createEnvelope, parseFrame } = require('./wire');
 
 /**
  * @param {object} opts
@@ -23,8 +24,6 @@ const { FRAME, createHello, createEnvelope, normalizeEnvelope, parseFrame } = re
  * @param {() => object[]} [opts.getClaims]
  * @param {() => number} [opts.getPort]
  * @param {number} [opts.connectTimeoutMs]
- * @param {number} [opts.maxTextChars]
- * @param {number} [opts.maxTtlMs]
  * @param {(msg: string) => void} [opts.log]
  */
 function createPeerClient(opts) {
@@ -79,11 +78,18 @@ function createPeerClient(opts) {
   /**
    * 发一条信封。
    *
+   * **一次请求 = 一次连接**：握手 → 发信封 → 收 ack → 关闭。「对方的答复」不在这条连接上：
+   * 对端跑完一轮是把 `reply` 信封回连到我的服务端（`server` → `coordinator#onEnvelope` →
+   * `handleReply`），所以「等答复」在协调器里按 `inReplyTo` 关联，不由这里收尾。
+   * 早先这里照着「同一条连接上等 reply 帧」写，而服务端从不发这种帧 —— 于是只能等到超时，
+   * 把「对方要跑 30 秒」误报成连接失败（2026-11-13 `peer_send` 的 20s 假警报）。
+   *
    * @param {object} input
    * @param {string} input.host
    * @param {number} input.port
    * @param {string} input.type
    * @param {string} [input.text]
+   * @param {string} [input.id]            指定信封 id（调用方要用它关联答复时给）
    * @param {string} [input.toSessionId]
    * @param {string} [input.fromSessionId]
    * @param {string} [input.inReplyTo]
@@ -91,9 +97,8 @@ function createPeerClient(opts) {
    * @param {object} [input.claim]
    * @param {string} [input.decision]
    * @param {string} [input.note]
-   * @param {boolean} [input.expectReply]  等对端跑完一轮再回
-   * @param {number} [input.replyTimeoutMs]
-   * @returns {Promise<{ ok: boolean, error?: string, data?: object, reply?: string|null, peer?: object }>}
+   * @param {string} [input.roomId]
+   * @returns {Promise<{ ok: boolean, error?: string, data?: object, envId?: string, peer?: object }>}
    */
   function send(input) {
     const i = input || /** @type {any} */ ({});
@@ -103,6 +108,7 @@ function createPeerClient(opts) {
       return Promise.resolve({ ok: false, error: 'BAD_TARGET' });
     }
     const env = createEnvelope({
+      id: i.id,
       type: i.type,
       text: i.text,
       fromPeerId: String(o.getPeerId ? o.getPeerId() : ''),
@@ -122,18 +128,18 @@ function createPeerClient(opts) {
     return new Promise((resolve) => {
       let settled = false;
       let ws = null;
-      let replyTimer = null;
+      let ackTimer = null;
       const done = (value) => {
         if (settled) return;
         settled = true;
         clearTimeout(connectTimer);
-        if (replyTimer) clearTimeout(replyTimer);
+        if (ackTimer) clearTimeout(ackTimer);
         try {
           if (ws) ws.close(1000, 'done');
         } catch {
           // ignore
         }
-        resolve(value);
+        resolve(value && Object.assign({}, value, { envId: env.id }));
       };
       const connectTimer = setTimeout(() => done({ ok: false, error: 'CONNECT_TIMEOUT' }), connectTimeoutMs);
 
@@ -192,10 +198,12 @@ function createPeerClient(opts) {
             done({ ok: false, error: `SEND_FAILED: ${err && err.message ? err.message : err}`, peer });
             return;
           }
-          if (i.expectReply) {
-            const wait = Math.max(5000, Number(i.replyTimeoutMs) || 120000);
-            replyTimer = setTimeout(() => done({ ok: true, data: null, reply: null, peer, timeout: true }), wait);
-          }
+          // 连接已经建立（TCP + 101 + hello_ok）：连接超时到此为止，换成「等回执」——
+          // 曾经这里不换，连接定时器一直跑到 done()，于是把「等对端跑一轮」的时间也算进
+          // 20s 连接预算，任何慢一点的对面轮次都被报成 CONNECT_TIMEOUT → PEER_UNREACHABLE。
+          clearTimeout(connectTimer);
+          // 连上了却没回执 = 这次投递失败（不是「连不上」）
+          ackTimer = setTimeout(() => done({ ok: false, error: 'ACK_TIMEOUT', peer }), connectTimeoutMs);
           return;
         }
         if (frame.t === FRAME.ACK) {
@@ -204,20 +212,8 @@ function createPeerClient(opts) {
             done({ ok: false, error: String(frame.error || 'PEER_REJECTED'), data: frame.data, peer });
             return;
           }
-          if (!i.expectReply) {
-            done({ ok: true, data: frame.data || null, peer });
-          }
+          done({ ok: true, data: frame.data || null, peer });
           return;
-        }
-        if (frame.t === FRAME.MSG) {
-          const inbound = normalizeEnvelope(frame.env, {
-            maxTextChars: o.maxTextChars,
-            maxTtlMs: o.maxTtlMs
-          });
-          if (!inbound) return;
-          if (inbound.type !== 'reply') return;
-          if (inbound.inReplyTo && inbound.inReplyTo !== env.id) return;
-          done({ ok: true, data: null, reply: inbound.text, peer });
         }
       });
 

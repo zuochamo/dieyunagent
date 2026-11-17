@@ -100,6 +100,19 @@
 - 「发消息」按钮：`peer:open-session` → 复用/新建「与 <名字> 的对话」→ 绑定 → 切过去。
 - 发送路由在 `renderer-agent-send.js` 的 `sendMessage` 最前面一行：命中 `routePeerSessionSend` 就直接发给对端（先 `memory.message_append` 落库，再由 Main 发出去，最后按会话重载），**不跑本机模型**。
 - 排除外部触发（`agentServiceRequestId` / `source=peer|agent-service|plan`）：否则「对方来信 → 本机跑一轮 → 又把原话发回去」会两边弹皮球。
+- **这些会话在左侧历史里长什么样**（2026-11-12 修）：对端会话不是项目对话，所以
+  `renderer-chat-history.js#groupSessionsByWorkspace` 把 `sessionIsPeerChat()` 命中的会话单独归到
+  「Bot 对话」一层，那一层**默认展开**；行上是 bot 图标（`TRIGGER_NOTICE_ICONS.peer`，形状同侧栏 Bot 页签）
+  \+ 对端名字（标题被 AI 总结改名后仍认得出）。之前它们 `workspacePath` 是 null → 落进折叠的
+  「未绑定工作区」，被视图工作区绑走过的那些则藏进别人的项目文件夹，两种情况在左侧都等于不存在。
+  判据是 **`chatSessions`**（`<userData>/peer/channel-sessions.json`）而**不是 `links`**：
+  `links` 里还混着「本机任务会话里调过一次 `peer_send` 就被接管」的那一类，按它归堆会把用户正在干活的
+  项目对话从项目文件夹里搬走。`chatSessions` 只在**通道新建会话**（`createSessionForPeer`）与
+  **用户点「发消息」打开**（`openSessionForPeer`）时打标，解绑时一并清掉；老版本留下的通道会话
+  会在下一次「发消息」时被认回来。
+  遗留：会话行上的 `workspacePath` 仍可能被「视图打开文件夹 / 连 SSH」写进去（入口是
+  `bindCurrentSessionWorkspace`）；它不影响上面这层归属，但会让该会话的本地轮次跑在那个目录 —— 未在本次修复范围。
+  同理，房间时间线仍按 `links` 聚合（会把被接管的本机会话也算进去），也没在这次动。
 
 ## 8. 自动跑一轮的门
 
@@ -113,6 +126,14 @@
 
 不满足时**只投递不跑**：把抬头 + 正文 `memory.message_append` 进会话，跳过原因记在事件里（`auto_turn_off` / `hops_exhausted` / `budget_exhausted`）。
 `task.completed.summary` 只有 400 字，所以正文由 `task.progress.streamContent` 累积（`noteTurnProgress`），回传时优先用它。
+
+**答复从哪条路回来（别在传输层等它）**：对端跑完一轮是**回连到我的服务端**发一个 `reply` 信封
+（`server` → `onEnvelope` → `handleReply`），出站那条连接只走到 `ack` 就关了。所以
+`peer_send(expectReply)` 的「等答复」在协调器里做：发送时自造信封 id 登记 `awaitingReplies`，
+答复回来按 `inReplyTo` 认领（预算只有 `peerReplyTimeoutMs` 一处，默认 120s）。
+传输层的 `connectTimeoutMs`（`peerSendTimeoutMs`）只管「连不上」与「连上没回执」（`ACK_TIMEOUT`），
+**绝不能**把它当成「等对方跑完一轮」的上限 —— 那样任何慢轮次都会被报成 `PEER_UNREACHABLE`，
+把人引去查防火墙（2026-11-13 的 `peer_send` 假警报，见 §12 用例）。
 
 > 已知代价：走 `AgentService.submitTask`（与手机端同一条路径，保证单一来源）会让 UI 切到那个会话。
 > P1 可加 `background` 标记让 Renderer 跳过 `openAgentServiceSession`。
@@ -149,7 +170,7 @@ IPC（`src/main/ipc/peer.js`）：`peer:status/refresh/set-name/set-enabled/set-
 
 - `scripts/test-peer-store.cjs`：身份持久化、信任清单（allow/deny/撤销/持久化/非法输入）、会话绑定、手工对端清洗、开关默认值（`autoTrust` 默认关 + `ensureSettings` 只补缺失字段）、项目 key（含 worktree `commondir`）。
 - `scripts/test-peer-tools.cjs`：三个工具在工具层的形状（`PEER_UNAVAILABLE` / `MISSING_ARG`+`diagnostics.peers` / `PEER_NOT_FOUND` 不可重试 / 连不通可重试 / 租约 acquire-list-release）。
-- `scripts/test-peer-mesh.cjs`：进程内两台实例回环互连 — 陌生来信被拦（`NOT_TRUSTED` + 待确认 + 不落会话不跑）、允许后补投、**默认就自动跑一轮（用例里显式关掉以单测各道门）**、打开后跑一轮、**回合结束回传完整正文**、跳数用尽只投递、**小时预算用尽只投递**、presence + 同项目 + 信任状态、**会话发信 → 对端跑一轮 → 答复落回同一会话**、**会话链接是缓存（库里没了就解绑重建，不返回死 id）**、租约冲突/广播/释放、线协议归一、陌生机器拿不到租约快照、拒绝后静默、撤销后重新确认、**`autoTrust` 三态（未表态也投递 / 关掉回到待确认 / 明确 deny 仍然拦）**。
+- `scripts/test-peer-mesh.cjs`：进程内两台实例回环互连 — 陌生来信被拦（`NOT_TRUSTED` + 待确认 + 不落会话不跑）、允许后补投、**默认就自动跑一轮（用例里显式关掉以单测各道门）**、打开后跑一轮、**回合结束回传完整正文**、**答复比连接超时慢也照样等到（`expectReply` 走 `inReplyTo` 关联，不是同连接傻等）、真连不上仍报 `PEER_UNREACHABLE`**、跳数用尽只投递、**小时预算用尽只投递**、presence + 同项目 + 信任状态、**会话发信 → 对端跑一轮 → 答复落回同一会话**、**会话链接是缓存（库里没了就解绑重建，不返回死 id）**、租约冲突/广播/释放、线协议归一、陌生机器拿不到租约快照、拒绝后静默、撤销后重新确认、**`autoTrust` 三态（未表态也投递 / 关掉回到待确认 / 明确 deny 仍然拦）**。
 
 手工（两台真机，同一局域网）：
 

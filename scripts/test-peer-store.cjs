@@ -95,6 +95,25 @@ function main() {
     assert.strictEqual(store.peerForSession('sess_1'), '', '解绑后应为空');
     assert.strictEqual(store.peerForSession(''), '', '空会话 id 不应崩');
 
+    // —— 「通道自己的对话」与「只是被接管的本机任务会话」分列 ——
+    // 历史列表只把前者归到「Bot 对话」：按 links 归堆会把正在干活的
+    // 项目会话从项目文件夹里搬走（2026-11-12 的现场事故）。
+    assert.deepStrictEqual(store.chatSessions(), [], '初始没有通道对话');
+    store.linkSession('sess_task', 'peer_aaaaaaaaaaaaaaaaaa');
+    assert.strictEqual(store.isChatSession('sess_task'), false, '只建绑定不等于通道对话');
+    store.markChatSession('sess_chat');
+    assert.strictEqual(store.isChatSession('sess_chat'), true);
+    assert.ok(fs.existsSync(store.files.chats), 'channel-sessions.json 应落盘');
+    assert.deepStrictEqual(createPeerStore(root).chatSessions(), ['sess_chat'], '通道对话应持久化');
+    store.markChatSession('sess_chat');
+    assert.deepStrictEqual(store.chatSessions(), ['sess_chat'], '重复标记不重复');
+    store.markChatSession('   ');
+    assert.deepStrictEqual(store.chatSessions(), ['sess_chat'], '空 id 不写入');
+    store.linkSession('sess_chat', 'peer_aaaaaaaaaaaaaaaaaa');
+    store.unlinkSession('sess_chat');
+    assert.strictEqual(store.isChatSession('sess_chat'), false, '解绑后不再是通道对话');
+    assert.deepStrictEqual(createPeerStore(root).chatSessions(), [], '解绑也要落盘');
+
     // —— 手工对端（端口必须合法，坏条目静默丢弃）——
     const cleaned = store.setStaticPeers([
       { host: ' 192.168.31.9 ', port: '17350', name: '同事A' },

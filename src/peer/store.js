@@ -22,6 +22,7 @@ const crypto = require('crypto');
 const IDENTITY_FILE = 'identity.json';
 const TRUST_FILE = 'trusted-peers.json';
 const LINKS_FILE = 'session-links.json';
+const CHATS_FILE = 'channel-sessions.json';
 const PEERS_FILE = 'static-peers.json';
 const SETTINGS_FILE = 'settings.json';
 const ROOMS_FILE = 'rooms.json';
@@ -63,6 +64,7 @@ function createPeerStore(userDataPath) {
     identity: dir ? path.join(dir, IDENTITY_FILE) : '',
     trust: dir ? path.join(dir, TRUST_FILE) : '',
     links: dir ? path.join(dir, LINKS_FILE) : '',
+    chats: dir ? path.join(dir, CHATS_FILE) : '',
     peers: dir ? path.join(dir, PEERS_FILE) : '',
     settings: dir ? path.join(dir, SETTINGS_FILE) : '',
     rooms: dir ? path.join(dir, ROOMS_FILE) : ''
@@ -72,6 +74,7 @@ function createPeerStore(userDataPath) {
   let identityCache = null;
   let trustCache = null;
   let linksCache = null;
+  let chatsCache = null;
   let roomsCache = null;
 
   function defaultName() {
@@ -223,7 +226,55 @@ function createPeerStore(userDataPath) {
       delete links[s];
       flushLinks();
     }
+    // 解绑 = 这条会话不再是通道：历史列表里也不该继续挂在「Bot 对话」那层
+    if (s && isChatSession(s)) {
+      const chats = chatSessions();
+      const at = chats.indexOf(s);
+      if (at >= 0) chats.splice(at, 1);
+      flushChats();
+    }
     return links;
+  }
+
+  /**
+   * 「哪些会话**是通道自己的对话**」——与 `links`（哪个会话绑了哪台对端）分列。
+   *
+   * 为什么必须分开：`links` 里其实混着两类会话 ——
+   *   ① 互通时由 peer 建的「与 <名字> 的对话」（`coordinator.js#createSessionForPeer`）；
+   *   ② 本来是本机任务会话，只是那个会话里的模型调过 `peer_send`，于是被接管成通道。
+   * 只有 ① 在用户眼里是「跟 bot 的对话」；② 如果也按 links 归堆，会把人正在干活的项目
+   * 对话从项目文件夹里搬走（历史列表见 `renderer-chat-history.js#groupSessionsByWorkspace`）。
+   * 判据只能是**创建/主动打开时的溯源**，不能事后从标题或路径猜。
+   */
+  function chatSessions() {
+    if (chatsCache) return chatsCache;
+    const raw = files.chats ? readJson(files.chats, {}) : {};
+    chatsCache = (Array.isArray(raw.sessions) ? raw.sessions : [])
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+    return chatsCache;
+  }
+
+  function flushChats() {
+    if (files.chats) writeJson(files.chats, { sessions: chatSessions() });
+    return chatSessions();
+  }
+
+  /** 标成「通道自己的对话」：只在**由 peer 建会话**或**用户点「发消息」打开**时调用。 */
+  function markChatSession(sessionId) {
+    const s = String(sessionId || '').trim();
+    if (!s) return chatSessions();
+    const chats = chatSessions();
+    if (!chats.includes(s)) {
+      chats.push(s);
+      flushChats();
+    }
+    return chats;
+  }
+
+  function isChatSession(sessionId) {
+    const s = String(sessionId || '').trim();
+    return !!s && chatSessions().includes(s);
   }
 
   function peerForSession(sessionId) {
@@ -446,6 +497,9 @@ function createPeerStore(userDataPath) {
     unlinkSession,
     peerForSession,
     sessionsForPeer,
+    chatSessions,
+    markChatSession,
+    isChatSession,
     rooms,
     roomById,
     createRoom,

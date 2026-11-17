@@ -10,11 +10,15 @@
 
 ## 1. 三档能力表
 
-| 档位 | 可写根 | 只读命令 | 写/装依赖 | 越界写 | 联网命令 | 高危命令 |
+| 档位 | 可写根 | 只读命令 | 写工作区内 | 写工作区外 / 装依赖到系统目录 | 联网命令 | 高危命令 |
 |---|---|---|---|---|---|---|
 | `read-only` | 内部目录* + `%TEMP%` | 放行 | **问一次** | **问一次** | **问一次** | 拒 |
-| `workspace-write`（默认） | 内部目录* + 工作区 + `%TEMP%` | 放行 | 工作区内放行 | **问一次** | 放行 | 拒 |
+| `workspace-write`（默认） | 内部目录* + 工作区 + `%TEMP%` | 放行 | 放行 | **问一次** | 放行 | 拒 |
 | `danger-full-access` | 本机所有卷根 | 放行 | 放行 | 放行 | 放行 | 拒 |
+
+「装依赖到系统目录」也是**按命令形态**判的（`npm i -g` / `pip --user` / `cargo|go|gem install` /
+`make install` / `apt|brew|choco install` 等）：这类命令文本里没有目标路径，但产物一定落在工作区外，
+所以 `workspace-write` 下**问一次**。`pip install`（venv 里） / `npm install`（项目里）不会问。
 
 \* 内部目录是**逐个子目录**列的，不是「`~/.dieyun` 这一棵」：
 `userDataPath`（DB / 日志 / 撤销栈）、`~/.dieyun/skills`、`~/.dieyun/memory`、`~/.dieyun/dieyun.md`。
@@ -58,6 +62,50 @@
 > "可疑操作先问一次"，不是"写不进去"。真要后者得等内核级强制（见 §5）。
 > 同理，`/E`、`/Y`、`/PID` 这类 Windows 开关不是 POSIX 绝对路径，别当路径解析
 > （以前 `robocopy src dist /E` 会被读成"要写 `C:\E`"）。
+
+### 1.1 远端（SSH 工作空间）也是同一条档位链
+
+档位管的是「哪台机器**由这次调用决定**」，不是「哪台机器跑着叠云」。会话工作空间在 SSH 远端时，
+**远端落盘与远端命令会按远端根判同一套三档**：
+
+| 档位 | 远端写（fs / 产物落盘） | 远端命令（host_exec） |
+|---|---|---|
+| `read-only` | 问一次 | 落盘类问一次，只读命令放行 |
+| `workspace-write` | 远端工作区 + 远端 `/tmp` 放行；`$HOME` 其它位置问一次 | 同上（按命令里出现的远端路径判） |
+| `danger-full-access` | 放行 | 放行 |
+
+实现上的三件事（改前必读）：
+
+- **判定仍是 `sandbox-policy.js` 一处**：`decideFsWrite` / `decideShellCommand` 多一个 `remote`
+  开关，只换两样东西 —— 路径按 POSIX 解析（`path.posix`，Windows 上 `path.resolve('/srv/x')`
+  会得到 `E:\srv\x` 这种假路径）与**大小写敏感**比较（Linux 上 `/srv/App` 与 `/srv/app` 是两个目录）。
+- **远端根由 `server.sandboxContext({remote:{workspaceRoot}})` 给**（可写根的唯一组装点仍在这里）：
+  远端工作区 + 远端 `/tmp`（对应本机的「工作区 + 系统临时目录」），`internalRoots` 为空
+  —— 远端没有「本机内部目录」这回事。作用域来自 `rpc.js:remoteSandboxScope()`。
+- **传输边界是外层兜底**：远端只开放 `remoteAllowedRoots`（工作区 / `$HOME` / `/tmp`）。
+  越界路径在 handler 解析远端绝对路径那一步就被 `ssh/remote-path.resolveRemotePath` 拒掉
+  （错误里列出实际开放的根），**不会先弹一次审批再失败** —— 那个位置问也写不进去。
+  也就是说顺序是「传输边界 → 档位判定 → 审批」，档位只在传输允许的范围内起作用。
+- **远端命令的写入目标靠文本分类**（`commandMayWrite` + `extractPathTokens`，与本地同一份）：
+  - 「会不会写」的名单包含动词（`rm/cp/mv/…`）、中介（`tar x`、`unzip`、`sed -i`、解释器、重定向）、
+    **建归档**（`tar czf` / `zip` / `7z a`）与 **`configure` / `make`**，以及**安装类**
+    （`npm i -g`、`pip --user`、`cargo/go/gem install`、`make install`、系统包管理器）。
+  - 「写到哪儿」除了按空白切的 token，还会在引号内与 `key=value` 里捞绝对路径
+    （`node -e "writeFileSync('/home/me/x')"`、`dd of=/home/me/blob` 都必须认出来，
+    否则「写到工作区外」会被判成「写在工作区内」而静默放行）。
+  - `~/x` 按**主目录**展开（远端取 SSH 会话的 `$HOME`、本机取 `os.homedir()`）：
+    不展开就会被当成「工作区里的相对路径」，于是「写到家目录」= 「写在工作区」。
+  - 安装类命令文本里没有路径，所以单独判：命中即 **ask**（`workspace-write` 也一样）——
+    这条就是本表「装到系统目录问一次」的实现。
+  - 仍然看不出来的只剩**脚本内部**的写盘（`bash build.sh`、`node scripts/x.js`、`make` 里自定义的
+    install 目标）：命令文本里没有任何线索，与本地 `read-only` 的诚实边界同一条。
+- 审批粒度分三级：会话 × 类别 × （路径父目录 / 机器）。远端（POSIX）目录的批准**不进本机写白名单**
+  （`/home/me` 在 Windows 上会被 resolve 成 `E:\home\me` 假根）；`computer` 的键鼠授权按
+  「哪台机器」区分（本机 / 某台远端主机），换主机要重新问。
+
+> 以前这里的立场是「远端路径本机解析不了，所以远端写不过档位，交给 SSH 凭据与白名单」。
+> 代价是 SSH 会话里 `read-only` 名存实亡（远端写 0 次询问直接落盘）。现在判定看得见远端，
+> 代价是需要把两套路径方言分清楚 —— 这就是上面第一条为什么必须用 `path.posix`。
 
 ---
 
@@ -149,10 +197,34 @@
   参数校验、沙箱只读集合、执行端分发全部派生。新增动作只改这一处，不会出现
   「schema 允许但校验拒绝」或「校验通过但沙箱没判」。
 - `SANDBOX_DENY_LIST` 是 shell 命令词表，与 computer 正交（它不走 shell，不进 `guardShell`）。
-- computer 控制的是**叠云所在机器**的屏幕；SSH 远程工作区下明确不支持
-  （`REMOTE_OS_CONTROL_UNSUPPORTED`，同 host.print_image 的立场）。
+- **`target` 决定看哪台机器**（两条正交的轴：会话工作空间在哪台机器 × 你要操作哪台机器）：
+  - `target=local`（缺省）：**叠云所在机器**的屏幕，与会话工作空间是不是 SSH 无关
+    （同 `browser_*` / `desktop_camera_look` / 生命感的「眼睛」—— 都是本机硬件）。
+    曾经按「工作空间是 SSH」直接拒绝（`REMOTE_OS_CONTROL_UNSUPPORTED`）是选错了信号：禁用工具
+    并不能防止模型误判，只会让「看一眼本机屏幕」彻底做不到。
+  - `target=remote`：**当前会话 SSH 工作空间那台主机**自己的桌面（`src/remote/ssh-screen.js`）。
+    走 `ssh.exec` 跑远端截图/注入命令，像素落远端临时文件后用**现成的远端文件通道**
+    （SFTP/RPC `remoteFs.readFile`）取回 —— 不占 `exec` 的 512KB 输出上限，也不另造传输。
+    能力**靠探测不靠猜**：先问一遍 OS / 图形会话 / 装了哪些工具，探到什么承诺什么；
+    缺工具就回「装哪个、怎么装」（X11: scrot|imagemagick + xdotool；Wayland: grim + ydotool；
+    macOS: screencapture + cliclick 且要在系统设置里给 SSH 会话「屏幕录制 / 辅助功能」权限）。
+    **「只能看不能动」不算故障**：缺注入工具时截图照常给，只有输入动作报
+    `REMOTE_SCREEN_INPUT_UNAVAILABLE`。远端 Windows 暂未接入（`REMOTE_SCREEN_OS_UNSUPPORTED`），
+    纯命令行服务器如实回 `REMOTE_SCREEN_NO_DISPLAY`，探测不全回 `REMOTE_SCREEN_PROBE_INCOMPLETE`
+    （三者别混成一个）；`list_windows` / `activate_window` 在远端没有通道，如实不支持。
+    截图中间产物只落远端 `/tmp`（传输允许根之一），读完即删，不往 `$HOME` / 工作区丢隐藏文件。
+  - 两台机器共用同一道档位判定与同一个总开关：远端输入动作同样按上一段「会改变系统状态」判
+    ask-once（审批在你面前发生；档位不区分远端/本机 —— 都是「往一台机器里注入输入」），
+    但**授权粒度按机器分开**（本机 / 某台远端主机，换主机重新问）。
+  - 坐标空间口径对两台机器一致：模型看到的那张图就是坐标空间，缩放发生在**本地**（按视觉预算
+    缩小后再注入，注入前换算回远端原生像素），所以「按看到的位置点」永远点得对。
+    `screenshot` 带 `region` 之后，后续输入动作 / 等待返回的**仍是同一块区域**
+    （与本地执行体同口径）；要回整屏就再截一次整屏。macOS Retina 上截图是物理像素、
+    注入工具与 `screencapture -R` 吃逻辑点，比例由探测脚本里的逻辑点宽度算出
+    （`pointWidth`），换算在注入与裁剪之前做。
 - 职责分层：`src/computer/service.js` 是纯执行体（Win32 注入 + desktopCapturer 截图 +
-  坐标换算），档位判定在 `sandbox-policy.js`、审批在 handler（`gateway/handlers/computer.js`），
+  坐标换算），`src/remote/ssh-screen.js` 是远端执行体（探测 + 命令拼装）；
+  档位判定在 `sandbox-policy.js`、审批在 handler（`gateway/handlers/computer.js`），
   与 host.exec 的三层同构。参数数字上限在 `agent-limits.js`（`computer*` 字段）。
 - **两条诚实契约**（模型只能靠工具结果判断现实）：
   1. 注入被系统丢弃 → `INPUT_DROPPED`。UIPI（管理员窗口）、锁屏、UAC 安全桌面下
@@ -226,7 +298,8 @@
 | 网络出口白名单 | 未做 | `workspace-write` 下联网默认放行（否则 `npm install` 全废）；`read-only` 下联网要问 |
 | Linux / macOS | 未做 | 判定逻辑与平台无关（已就绪），只缺各自的强制手段（bubblewrap / seatbelt） |
 | 脚本内部的写盘 | 不做（判定层做不到） | `node build.js` 会问一次，但允许之后脚本写哪儿就管不住了。见 §1 的诚实边界 |
-| SSH 远程工作区 | 部分 | **本机沙箱看不到远端路径**，所以远程写一律**问一次**（`decideShellCommand` 的 `remote` 分支，理由与路径无关）；远程 `fs_*` 写不由本机沙箱判定，由 SSH 凭据与 `remoteAllowedRoots` 白名单约束 —— 这是**有意的边界**，不是漏判 |
+| SSH 远程工作区 | **已做（档位 + 传输边界）** | 远端写与远端命令按**远端根**判同一套三档（见 §1.1）：`read-only` 问一次、`workspace-write` 只放远端工作区 + `/tmp`、`danger-full-access` 放行；再受 `remoteAllowedRoots`（工作区 / `$HOME` / `/tmp`）外层约束。审批弹窗出现在**你面前**（桌面端），不需要远端有人 |
+| SSH 会话里访问**本机**（反过来那半边） | **已做** | 会话工作空间是 SSH 时，`local:` 前缀的路径与 `host_exec local:true` 明确指「跑叠云这台机器」：走**本机**白名单 + 本机沙箱档位（与本地会话同一条链，`gateway/rpc.js:resolveFsTarget` 是唯一判定点）。不带前缀仍指远端 |
 | 让模型提前知道当前档位 | 未做 | 现在靠拒绝话术（`不要重试`）事后纠正；主动写进 system prompt 需在 Main 取 `getSandboxMode()`，留作后续 |
 
 **换句话说**：本档做到的是「不该做的事会被拦住并且有据可查」，不是「想做也做不到」。

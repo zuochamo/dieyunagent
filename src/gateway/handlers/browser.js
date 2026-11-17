@@ -1,6 +1,9 @@
 'use strict';
 
-const fs = require('fs');
+// 产物读写一律用 promises 版：这里全部是 async 函数，`require('fs')` 的同步签名
+// 配上 await 会抛 `cb argument must be a function` —— 而产物读取的错误被 try/catch 吞成
+// 「还没有基准」，于是视觉回归每次都重建基准、永不比较（曾经就这么静默着）。
+const fs = require('fs/promises');
 const path = require('path');
 const { ensureExtension, resolveOutputPath } = require('../../browser/service');
 const { defaultBaselineName, withEngineTag } = require('../../browser/visual-diff');
@@ -25,7 +28,8 @@ function createBrowserHandlers(d) {
     writable,
     writeRootsForCall,
     assertSandboxWritable,
-    getRemoteFs
+    getRemoteFs,
+    resolveFsTarget
   } = d;
 
   /**
@@ -36,6 +40,9 @@ function createBrowserHandlers(d) {
    * 拿本地白名单去校验远程路径必然越界，抛错还会连带把 base64 一起丢掉（模型既拿不到
    * 文件，视觉注入也一起废掉）。与 fs.* 写类工具同此 remote first。
    *
+   * `local:` 前缀（`resolveFsTarget`）指**本机**：SSH 会话里要把截图/PDF 存到本机磁盘时用，
+   * 否则那个路径会被当成远端路径，最终在另一台机器上落一个同名文件。
+   *
    * @param {string} target 调用方指定的落盘路径；为空 → 落到程序自选的产物目录
    * @param {string} content 产物内容
    * @param {'base64'|'utf8'} encoding
@@ -45,15 +52,24 @@ function createBrowserHandlers(d) {
    */
   async function writeArtifact(target, content, encoding, ext, prefix) {
     const buf = Buffer.from(content, encoding);
-    const remote = typeof getRemoteFs === 'function' ? getRemoteFs() : null;
+    const ref = target ? resolveFsTarget(target) : null;
+    // 没给路径时**仍然跟随会话**：SSH 会话的默认落点是远端工作区（老行为），
+    // 不能因为「没有 target 就没有 ref」而悄悄写成本机文件。
+    const remote = ref
+      ? ref.remote
+      : typeof getRemoteFs === 'function'
+        ? getRemoteFs()
+        : null;
     if (remote) {
       // 相对路径由 remoteFs 按远程工作区根解析；没给就用默认文件名落在远程 workspace
-      const name = target ? ensureExtension(target, ext) : `${prefix}-${Date.now()}.${ext}`;
+      const name = ref && ref.path ? ensureExtension(ref.path, ext) : `${prefix}-${Date.now()}.${ext}`;
+      // 远端落盘与 fs.write_file 同一条档位链（远端工作区内放行、区外问一次）
+      await assertSandboxWritable(remote.resolve(name, remote.root), 'browser_artifact', { remote: true });
       const written = await remote.writeFile(name, content, encoding);
       return { path: written.path, bytes: buf.length };
     }
     // 没给路径 → 落程序自选的产物目录（模型未指定路径，不存在越权面）。
-    if (!target) {
+    if (!ref || !ref.path) {
       const fallback = resolveOutputPath('', ext, prefix);
       await fs.mkdir(path.dirname(fallback), { recursive: true });
       await fs.writeFile(fallback, buf);
@@ -62,7 +78,10 @@ function createBrowserHandlers(d) {
     // 模型给了路径 → 与 fs.write_file 同一条链：先过沙箱档位（read-only 不落盘、工作区外问一次），
     // 再过写白名单（含刚被批准的目录）。以前这里用的是「读根 ∪ 写根」，
     // 而读根里含用户主目录 —— 于是 read-only 档仍能往主目录写产物，档位被整条绕过。
-    const rawPath = ensureExtension(normalizeFilePathInput(target, defaultCwd), ext);
+    const rawPath = ensureExtension(
+      normalizeFilePathInput(ref.path, ref.base || defaultCwd),
+      ext
+    );
     await assertSandboxWritable(rawPath, 'browser_artifact');
     const safe = assertAllowedPath(rawPath, writeRootsForCall());
     await fs.mkdir(path.dirname(safe), { recursive: true });
@@ -71,18 +90,19 @@ function createBrowserHandlers(d) {
   }
 
   /**
-   * 产物路径解析（读写共用，与 writeArtifact 同一套规则）：SSH 走远程根解析，本地过工作区白名单。
+   * 产物路径解析（读写共用，与 writeArtifact 同一套规则）：SSH 走远程根解析，本地过工作区白名单；
+   * `local:` 前缀指本机（SSH 会话里读/写本机上的视觉基准）。
    * 越界直接抛，不静默降级 —— 否则会把「读错地方」误判成「首次调用」，
    * 用当前截图把用户已有的基准覆盖掉。
    * @returns {{remote: object|null, path: string}}
    */
   function resolveArtifactPath(ref) {
-    const remote = typeof getRemoteFs === 'function' ? getRemoteFs() : null;
-    if (remote) return { remote, path: remote.resolve(ref, remote.root) };
+    const t = resolveFsTarget(ref);
+    if (t.remote) return { remote: t.remote, path: t.remote.resolve(t.path, t.remote.root) };
     return {
       remote: null,
       path: assertAllowedPath(
-        normalizeFilePathInput(ref, defaultCwd),
+        normalizeFilePathInput(t.path, t.base || defaultCwd),
         Array.from(new Set([...roots, ...writable]))
       )
     };
@@ -503,8 +523,25 @@ function createBrowserHandlers(d) {
 
     'browser.upload_file': async (params = {}) => {
       assertBrowserEnabled();
-      const filePath = params.filePath
-        ? assertAllowedPath(normalizeFilePathInput(params.filePath, defaultCwd), Array.from(new Set([...roots, ...writable])))
+      // 浏览器跑在本机，上传的只能是**本机**文件：SSH 会话里远端路径必须先落到本机，
+      // 所以这里不接受远端路径 —— 明说，而不是把它当相对路径拼成越界后报 PATH_NOT_ALLOWED。
+      const t = params.filePath ? resolveFsTarget(params.filePath) : null;
+      if (t && t.remote) {
+        const e = new Error(
+          `浏览器在本机，不能直接上传远端主机上的文件：${t.path}`
+        );
+        e.code = 'BROWSER_UPLOAD_LOCAL_ONLY';
+        e.retryable = false;
+        e.suggestedFix =
+          '本机文件用 local: 绝对路径（例 local:C:\\Users\\me\\a.pdf）—— 相对路径在 SSH 会话里有歧义，' +
+          '无法判断你要的是本机的还是远端的。要上传远端文件：先用 host_exec（local=true 时在本机）把它取到本机。';
+        throw e;
+      }
+      const filePath = t
+        ? assertAllowedPath(
+            normalizeFilePathInput(t.path, t.base || defaultCwd),
+            Array.from(new Set([...roots, ...writable]))
+          )
         : '';
       return browser.uploadFile({ ...params, filePath });
     },

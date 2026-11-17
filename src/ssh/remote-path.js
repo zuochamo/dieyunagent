@@ -44,8 +44,13 @@ function resolveRemotePath(input, remoteRoots, defaultCwd) {
     (r) => safe === r || (r === '/' ? safe.startsWith('/') : safe.startsWith(`${r}/`))
   );
   if (!allowed) {
-    const err = new Error('路径不在远程工作空间内');
+    const err = new Error('路径不在远端允许范围内');
     err.code = 'PATH_NOT_ALLOWED';
+    // 远端只开放这几个根（工作区 / $HOME / /tmp 之类）。把「哪些根」直接列出来，
+    // 比让模型猜「远程工作空间」到底指哪一棵有用得多；沙箱档位问的也是这些根之内的事。
+    err.path = safe;
+    err.roots = roots;
+    err.suggestedFix = `远端只开放这些根：${roots.join('、')}。把目标放到其中一个下面；不要原样重试。`;
     throw err;
   }
   return safe;

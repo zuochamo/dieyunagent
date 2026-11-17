@@ -118,18 +118,25 @@ function createSandboxApprovals(deps = {}) {
   /**
    * 记住「这个位置被批准过写」。批准的是目录（或卷根下的那一个文件）：
    * 同一目录下的后续写入不该再问，也不该再撞一次白名单。
+   *
+   * `remote` 单独标出来：远端（POSIX）目录**不进本机写白名单** —— 远端写根本不用那份清单，
+   * 而 `/home/me` 在 Windows 上会被 resolve 成 `E:\home\me`（假根），把远端授权变成
+   * 一条本机白名单等于凭空开了个口子。
    */
-  function rememberPath(sessionId, absPath) {
+  function rememberPath(sessionId, absPath, opts = {}) {
     if (!absPath) return;
     const root = scopeOf(absPath);
     if (!root || root === '-') return;
     const sid = sessionKey(sessionId);
     const key = `${sid}|${root.toLowerCase()}`;
     if (pathGrants.has(key)) return;
-    pathGrants.set(key, { sessionId: sid, root, at: now() });
+    pathGrants.set(key, { sessionId: sid, root, remote: opts.remote === true, at: now() });
   }
 
-  /** 该会话被批准过写的位置（给 `writeRootsForCall()` 并入白名单用）。 */
+  /**
+   * 该会话被批准过写的**本机**位置（给 `writeRootsForCall()` 并入白名单用）。
+   * 远端授权不在这里返回：它只对远端生效，进本机白名单只会污染可写根。
+   */
   function grantedPathsFor(sessionId) {
     const sid = sessionKey(sessionId);
     const out = [];
@@ -139,6 +146,7 @@ function createSandboxApprovals(deps = {}) {
         pathGrants.delete(key);
         continue;
       }
+      if (g.remote === true) continue;
       out.push(g.root);
     }
     return out;
@@ -162,12 +170,14 @@ function createSandboxApprovals(deps = {}) {
   async function ask(decision, ctx = {}) {
     const sessionId = String(ctx.sessionId || '').trim();
     const category = decision && decision.category ? decision.category : SANDBOX_CATEGORIES.WRITE;
-    const scope = scopeOf(ctx.path);
+    // 判定可以自带授权粒度（`decision.scope`）：os-control 没有路径，但「哪台机器的键鼠」
+    // 必须分开记 —— 否则同意过远端点一下，本机键鼠也跟着免问了。没有时按路径父目录记。
+    const scope = (decision && decision.scope) || scopeOf(ctx.path);
 
     if (grantedFor(sessionId, category, scope)) {
       // 记忆的是「这一类别在这一位置」的操作，具体路径仍要落进放行根，
       // 否则旧白名单（writeRootsForCall）会挡下用户刚刚批准过的写。卷根下的精确授权只放它自己。
-      if (scope !== '-') rememberPath(sessionId, ctx.path);
+      if (scope !== '-') rememberPath(sessionId, ctx.path, { remote: ctx.remote === true });
       recordAudit({ kind: 'grant-reuse', sessionId, category, scope, action: decision.action });
       return { granted: true, remembered: true, reason: '本会话此前已批准过同一位置的同类操作' };
     }
@@ -188,6 +198,7 @@ function createSandboxApprovals(deps = {}) {
       category,
       scope,
       path: absPath,
+      remote: ctx.remote === true,
       mode: String(decision.mode || ''),
       tool: String(ctx.tool || ''),
       at: now()
@@ -237,7 +248,7 @@ function createSandboxApprovals(deps = {}) {
     }
 
     grants.set(grantKey(sessionId, category, scope), { sessionId: sessionKey(sessionId), category, scope, at: now() });
-    if (scope !== '-') rememberPath(sessionId, ctx.path);
+    if (scope !== '-') rememberPath(sessionId, ctx.path, { remote: ctx.remote === true });
     log(`SANDBOX_GRANTED request=${requestId} category=${category} session=${sessionId || '-'} scope=${scope}`);
     return { granted: true, remembered: false, reason: '用户同意' };
   }
@@ -283,7 +294,7 @@ function createSandboxApprovals(deps = {}) {
       scope: rec.scope,
       at: now()
     });
-    if (rec.scope !== '-' && rec.path) rememberPath(rec.sessionId, rec.path);
+    if (rec.scope !== '-' && rec.path) rememberPath(rec.sessionId, rec.path, { remote: rec.remote === true });
     recordAudit({ kind: 'grant-late', requestId: id, sessionId: rec.sessionId, category: rec.category, scope: rec.scope });
     log(`SANDBOX_GRANT_LATE request=${id} category=${rec.category} session=${rec.sessionId || '-'} scope=${rec.scope}`);
     return { ok: true, granted: true, reason: '已记住本会话对该位置的授权', ...base };

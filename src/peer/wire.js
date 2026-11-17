@@ -283,6 +283,7 @@ module.exports = {
   ENVELOPE_TYPE,
   CLAIM_KIND,
   MAX_ROLE_LEN,
+  newMessageId,
   normalizeClaim,
   normalizeClaims,
   normalizeEnvelope,

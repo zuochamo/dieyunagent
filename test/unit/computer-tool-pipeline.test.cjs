@@ -136,6 +136,75 @@ describe('guardrails 分类', () => {
 });
 
 /**
+ * computer.action 的落点是「叠云运行的这台机器」的屏幕，与会话工作空间在哪台机器无关。
+ * 曾经按「这个会话是 SSH 工作区」直接拒绝（REMOTE_OS_CONTROL_UNSUPPORTED）：远端只该改变
+ * fs / shell / index 的去向，用「工作空间是不是远端」当信号等于两条正交的轴被混成一条，
+ * 结果 SSH 会话里「看一眼本机屏幕」彻底做不到。这三条锁住「不按工作区分叉」+「档位照旧拦」。
+ */
+describe('gateway computer.action（本机屏幕，与工作空间无关）', () => {
+  const { createComputerHandlers } = require('../../src/gateway/handlers/computer');
+
+  function makeHandlers({ remote = null, guardResult = null, mode = 'danger-full-access' } = {}) {
+    const calls = [];
+    const guardCalls = [];
+    const handlers = createComputerHandlers({
+      computer: {
+        action: (args) => {
+          calls.push(args);
+          return { ok: true, action: args.action, mime: 'image/png', base64: 'aGk=' };
+        }
+      },
+      assertOsControlEnabled: () => {},
+      sandbox: {
+        context: () => ({ mode }),
+        guard: async (decision, info) => {
+          guardCalls.push({ decision, info });
+          return guardResult;
+        }
+      },
+      getActiveCallSessionId: () => 's-active',
+      // 装配里所有 handler 共用同一个 deps 对象，所以这里仍然会传进来：
+      // 传了不等于「该禁用」，正是本次要锁的口径。
+      getRemoteFs: () => remote,
+      ctx: {}
+    });
+    return { handlers, calls, guardCalls };
+  }
+
+  it('SSH 工作区（getRemoteFs 有值）照常执行，不再报「不支持」', async () => {
+    const { handlers, calls, guardCalls } = makeHandlers({ remote: { transport: 'rpc' } });
+    const out = await handlers['computer.action']({ action: 'screenshot', sessionId: 's1' });
+    expect(out.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].sessionId).toBe('s1');
+    // 档位判定照样过一遍（不是「远端就跳过」）
+    expect(guardCalls).toHaveLength(1);
+    expect(guardCalls[0].decision.action).toBe('allow');
+  });
+
+  it('本地工作区与 SSH 工作区走同一条路（不按工作区分叉）', async () => {
+    const local = makeHandlers({ remote: null });
+    const ssh = makeHandlers({ remote: { transport: 'sftp' } });
+    const a = await local.handlers['computer.action']({ action: 'screenshot' });
+    const b = await ssh.handlers['computer.action']({ action: 'screenshot' });
+    expect(a).toEqual(b);
+    expect(local.calls[0]).toEqual(ssh.calls[0]);
+  });
+
+  it('沙箱拦下时抛原错误码且不执行动作（禁用工作区分支不影响审批）', async () => {
+    const { handlers, calls } = makeHandlers({
+      remote: { transport: 'rpc' },
+      mode: 'workspace-write',
+      guardResult: { error: '这次没有批准', errorCode: 'SANDBOX_APPROVAL_TIMEOUT', sandboxMode: 'workspace-write' }
+    });
+    await expect(handlers['computer.action']({ action: 'click', coordinate: [1, 2] })).rejects.toMatchObject({
+      code: 'SANDBOX_APPROVAL_TIMEOUT'
+    });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+/**
  * 真机回归：3240×2160 整屏 PNG 的 base64 是 4,720,372 字符，超过单张上限 4,194,304，
  * 于是被 browser-vision 整张丢弃 —— 模型只能反复说「下一轮就能看到画面」。
  * 修法是截图侧按长边上限缩放进预算；这里用「字节/像素」比例还原那张真机图。

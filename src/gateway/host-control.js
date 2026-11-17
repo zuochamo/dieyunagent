@@ -1261,6 +1261,8 @@ module.exports = {
   openExternalUrl,
   normalizeFilePathInput,
   printImage,
+  // 可打印的图片扩展名（printImage 的判定口径）：远端取回打印时先按同一份校验
+  IMAGE_EXTENSIONS,
   // 输出窗口/上限与远端（SSH）侧共用同一份，避免本地与远程读到不同的截断规则
   OUTPUT_BUFFER_MAX,
   OUTPUT_TAIL_DEFAULT,

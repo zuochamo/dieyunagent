@@ -20,6 +20,8 @@ const {
   SANDBOX_MODE_META,
   SANDBOX_MODES
 } = require('./sandbox-policy');
+// 远端 /tmp 这个根的唯一来源：远端沙箱上下文与远端传输边界（remoteAllowedRoots）共用同一个常量
+const { REMOTE_SHARED_TMP_ROOT } = require('./path-policy');
 const { createSandboxApprovals } = require('./sandbox-approvals');
 const {
   dieyunDefaultWorkspaceDir,
@@ -541,6 +543,23 @@ class LocalGateway {
 
   /** 沙箱判定上下文（窗口/工具层共用一份，避免各处自己拼 roots）。 */
   sandboxContext(opts = {}) {
+    // 远端（SSH）调用：**同一套档位语义，换方言与根**。
+    // 远端没有「本机内部目录」这回事，可写根按与本地对称的口径给：
+    //   远端工作区 + 远端 /tmp（对应本地的「工作区 + 系统临时目录」）。
+    // 于是 read-only 一律问、workspace-write 只放远端工作区（$HOME 其它位置要问）、
+    // danger-full-access 全放行 —— 与本机完全一致，不再靠「看不到远端所以问一次」兜。
+    if (opts.remote) {
+      const root = String(opts.remote.workspaceRoot || '/');
+      return {
+        mode: this.getSandboxMode(),
+        remote: true,
+        workspaceRoots: [root, REMOTE_SHARED_TMP_ROOT],
+        internalRoots: [],
+        cwd: opts.cwd || root,
+        // 远端主目录：`~/x` 这类写法要按它展开（否则会被当成工作区内的相对路径）
+        homeDir: String(opts.remote.homeDir || '')
+      };
+    }
     // 工作区根始终给（相对路径的基准、审批记忆里的目录都靠它），
     // 是否「可写」由 mode 决定，见 `writableRootsForMode()`。
     const { internal } = this.writableRootsForMode();
@@ -548,7 +567,8 @@ class LocalGateway {
       mode: this.getSandboxMode(),
       workspaceRoots: this._workspaceWriteRoots(),
       internalRoots: internal,
-      cwd: opts.cwd
+      cwd: opts.cwd,
+      homeDir: dieyunUserHome()
     };
   }
 
@@ -566,7 +586,10 @@ class LocalGateway {
       sessionId: opts.sessionId || this.activeSessionId || '',
       tool,
       /** 批准后把这个目录并入写白名单（否则旧 whitelist 会挡下刚被批准的写） */
-      path: opts.path || ''
+      path: opts.path || '',
+      // 「这次批的是哪台机器」必须传下去：远端（POSIX）目录的授权不进本机写白名单，
+      // 丢了这一位就会被 rememberPath 当成本机目录记进可写根（Windows 上还会变成 `E:\home\me`）
+      remote: opts.remote === true
     });
     if (!result.granted) {
       this.log(

@@ -37,7 +37,8 @@ const {
   ENVELOPE_TYPE,
   CLAIM_KIND,
   normalizeClaim,
-  normalizeClaims
+  normalizeClaims,
+  newMessageId
 } = require('./wire');
 
 const INBOUND_SEEN_MAX = 512;
@@ -98,6 +99,13 @@ function createPeerCoordinator(deps) {
   const pendingInbound = new Map();
   /** `autoTrust` 下已经放行并记过日志的 peerId（每台只记一次，避免刷屏） */
   const autoAllowed = new Set();
+  /**
+   * 正在等答复的出站信封：`信封 id → resolve`。
+   * 对端跑完一轮是把 `reply` 信封回连到我的服务端（`handleReply`），手上有 `inReplyTo`
+   * 指回这条信封 —— 所以「等答复」在这里按 id 关联，而不是在同一条出站连接上傻等。
+   * @type {Map<string, (text: string) => void>}
+   */
+  const awaitingReplies = new Map();
   let claimTimer = null;
 
   function limits() {
@@ -293,11 +301,19 @@ function createPeerCoordinator(deps) {
     return !!(row && row.id);
   }
 
+  /**
+   * 绑定变化的**唯一出口**：`links`（绑定关系，发送路由用）与 `chatSessions`
+   * （哪些会话是通道自己的对话，历史列表归堆用）永远一起送 —— 少送一份，界面就只更新一半。
+   */
+  function emitLinksChanged() {
+    emit({ kind: 'links-changed', links: store.links(), chatSessions: store.chatSessions() });
+  }
+
   /** 会话绑定：一个对端一个会话（同项目时便于把「谁说了什么」放在一起看）。 */
   async function ensureSessionForPeer(peerId, peerName, preferredSessionId) {
     let linksChanged = false;
     const flush = () => {
-      if (linksChanged) emit({ kind: 'links-changed', links: store.links() });
+      if (linksChanged) emitLinksChanged();
       linksChanged = false;
     };
     const preferred = String(preferredSessionId || '').trim();
@@ -328,6 +344,9 @@ function createPeerCoordinator(deps) {
     flush();
     const sessionId = await createSessionForPeer(peerName);
     store.linkSession(sessionId, peerId);
+    // 这条会话是**通道为这个对端新建的**：历史列表据此把它归到「Bot 对话」那层
+    // （`links` 只说明「绑了哪台」，被接管的本机任务会话也满足，不能当判据，见 store.chatSessions）
+    store.markChatSession(sessionId);
     linksChanged = true;
     flush();
     return sessionId;
@@ -628,6 +647,13 @@ function createPeerCoordinator(deps) {
     const sessionId = await ensureSessionForPeer(peer.peerId, peer.name, env.to.sessionId);
     const body = `【${peer.name || peer.peerId} 的回复】\n\n${env.text || ''}`;
     await appendInbound(sessionId, body);
+    // 有人在 `peer_send(expectReply)` 上等这条答复：按 inReplyTo 认领（会话里那份照旧留着）
+    const waitingFor = String(env.inReplyTo || '');
+    const settle = waitingFor ? awaitingReplies.get(waitingFor) : null;
+    if (settle) {
+      awaitingReplies.delete(waitingFor);
+      settle(String(env.text || ''));
+    }
     emit({ kind: 'reply-stored', peerId: peer.peerId, sessionId, text: env.text || '' });
     return { ok: true, data: { sessionId } };
   }
@@ -856,16 +882,33 @@ function createPeerCoordinator(deps) {
       if (!peerId || !room.members.includes(peerId)) return { ok: false, error: 'PEER_NOT_IN_ROOM' };
     }
 
+    // 「等答复」的语义在这里（不是在传输层）：先用一个自己生成的信封 id 登记等待，
+    // 对端的 `reply` 回来时靠 `inReplyTo` 认领（`handleReply`）。这样慢轮次只会等到
+    // `peerReplyTimeoutMs`（默认 120s），不会被连接超时误报成「连不上」。
+    const expectReply = !!i.expectReply;
+    const replyWaitMs = Math.max(5000, Number(i.timeoutMs) || limitInt('peerReplyTimeoutMs', 120000));
+    const envelopeId = expectReply ? newMessageId('pmsg') : undefined;
+    /** @type {Promise<string|null> | null} */
+    const replyPromise = expectReply
+      ? new Promise((resolve) => {
+          awaitingReplies.set(envelopeId, resolve);
+          // 没人认领就自己收摊，别让这张表随会话历史一起长
+          const sweep = setTimeout(() => {
+            if (awaitingReplies.delete(envelopeId)) resolve(null);
+          }, replyWaitMs + 1000);
+          if (sweep && typeof sweep.unref === 'function') sweep.unref();
+        })
+      : null;
+
     const result = await client.send({
       host,
       port,
+      id: envelopeId,
       type: i.type || ENVELOPE_TYPE.MESSAGE,
       text,
       fromSessionId: sessionId,
       toSessionId: '',
       hops: Number.isFinite(Number(i.hops)) ? Number(i.hops) + 1 : 1,
-      expectReply: !!i.expectReply,
-      replyTimeoutMs: Number(i.timeoutMs) || limitInt('peerReplyTimeoutMs', 120000),
       roomId
     });
     if (result.peer) registerPeerFromHandshake({ ...result.peer, host, port });
@@ -878,7 +921,18 @@ function createPeerCoordinator(deps) {
       sessionId,
       roomId: roomId || null
     });
-    return normalized;
+    if (!normalized.ok || !replyPromise) {
+      if (envelopeId) awaitingReplies.delete(envelopeId);
+      return normalized;
+    }
+    const reply = await Promise.race([
+      replyPromise,
+      new Promise((resolve) => setTimeout(() => resolve(null), replyWaitMs))
+    ]);
+    awaitingReplies.delete(envelopeId);
+    return reply == null
+      ? { ...normalized, reply: null, timeout: true }
+      : { ...normalized, reply, timeout: false };
   }
 
   /**
@@ -887,6 +941,8 @@ function createPeerCoordinator(deps) {
    * 为什么必须归一：socket 直接吐 `ECONNREFUSED` / `ETIMEDOUT` 这类平台串，调用方（工具层、
    * IPC、UI）只能靠猜；猜错就会把「对方刚关机」当成「参数写错了」而不重试。
    * 这里把「连不上 / 超时」统一成 `PEER_UNREACHABLE`，其余保持 `PEER_SEND_FAILED`。
+   * 例外：`ACK_TIMEOUT` 是「已经连上、也发了，只是没等到回执」，属于投递失败，
+   * 不能报成 unreachable —— 否则调用方会去查防火墙并盲目重试。
    */
   function normalizeSendResult(result, address) {
     if (!result || result.ok) return result;
@@ -895,7 +951,12 @@ function createPeerCoordinator(deps) {
       raw
     );
     // NOT_TRUSTED = 对方还没确认我（对方会弹一次确认）；不是网络问题，也不要重试轰炸
-    const code = raw === 'NOT_TRUSTED' ? 'NOT_TRUSTED' : unreachable ? 'PEER_UNREACHABLE' : raw || 'PEER_SEND_FAILED';
+    const code =
+      raw === 'NOT_TRUSTED' || raw === 'ACK_TIMEOUT'
+        ? raw
+        : unreachable
+          ? 'PEER_UNREACHABLE'
+          : raw || 'PEER_SEND_FAILED';
     return {
       ...result,
       ok: false,
@@ -1075,6 +1136,9 @@ function createPeerCoordinator(deps) {
       peers: peersList(),
       claims: allClaims(),
       links: store.links(),
+      // 哪些会话是**通道自己的对话**（与 links 分列，见 store.chatSessions）：
+      // 历史列表按它在左侧单开一层「Bot 对话」，被接管的本机任务会话不跟着搬家
+      chatSessions: store.chatSessions(),
       rooms: roomsList()
     };
   }
@@ -1093,8 +1157,6 @@ function createPeerCoordinator(deps) {
       getWorkspace: () => workspaceInfo(),
       getClaims: () => ownClaimList(),
       getPort: () => boundPort,
-      maxTextChars: limitInt('peerMaxMessageChars', 8000),
-      maxTtlMs: limitInt('peerClaimTtlMs', 900000),
       connectTimeoutMs: limitInt('peerSendTimeoutMs', 20000),
       log
     });
@@ -1227,18 +1289,25 @@ function createPeerCoordinator(deps) {
     links: () => store.links(),
     linkSession: (sessionId, peerId) => {
       const next = store.linkSession(sessionId, peerId);
-      emit({ kind: 'links-changed', links: next });
+      emitLinksChanged();
       return next;
     },
     unlinkSession: (sessionId) => {
       const next = store.unlinkSession(sessionId);
-      emit({ kind: 'links-changed', links: next });
+      emitLinksChanged();
       return next;
     },
     // 通讯
     sendToPeer,
     sendFromSession,
-    openSessionForPeer: (peerId, peerName) => ensureSessionForPeer(peerId, peerName, ''),
+    openSessionForPeer: async (peerId, peerName) => {
+      const sessionId = await ensureSessionForPeer(peerId, peerName, '');
+      // 点「发消息」= 用户把这条会话当**与这台对端的对话**打开：标进 chatSessions。
+      // 老版本留下的通道会话（当时没有这个字段）也正是在这一步被认回来的。
+      store.markChatSession(sessionId);
+      emitLinksChanged();
+      return sessionId;
+    },
     claim,
     // 房间（agent 聊天室）：一次任务一个，成员是 peerId
     rooms: roomsList,

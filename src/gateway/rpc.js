@@ -15,6 +15,8 @@ const {
 } = require('./host-control');
 const webTools = require('./web');
 const { assertAllowedPath } = require('./path-policy');
+// 「本机」（跑叠云这台机器）的显式标记：路径 `local:` 前缀，语义唯一来源见 host-local.js
+const { decideFsTarget } = require('./host-local');
 const { decideFsWrite } = require('./sandbox-policy');
 const { validateShellCommand } = require('./exec-policy');
 const { resolveBrowserNavigateUrl, parseRemotePreviewTarget } = require('../browser/url-policy');
@@ -330,16 +332,41 @@ function createRpcHandlers(ctx) {
   }
 
   /**
+   * 本次调用在 SSH 工作空间时：给出**远端判定作用域**（工作区根 + 传输允许根）。
+   *
+   * 只回答「哪台机器、哪些根」，档位语义仍只在 `sandbox-policy` 里。
+   * 传输允许根用的是远端 daemon 同一份 `remoteAllowedRoots`（工作区 / $HOME / /tmp）——
+   * 档位说「可以」也不能越过它，否则会出现「问了用户、用户同意、远端仍报 PATH_NOT_ALLOWED」。
+   */
+  function remoteSandboxScope() {
+    const target = resolveCallWorkspaceTarget();
+    if (!target || target.kind !== 'ssh') return null;
+    const sshCall = requireSshForCall();
+    const homeDir = typeof sshCall.getHomeDir === 'function' ? sshCall.getHomeDir() : '';
+    return {
+      workspaceRoot: normalizeRemotePath(target.remotePath || '/'),
+      allowedRoots: remoteAllowedRoots(target.remotePath, homeDir),
+      // 远端主目录：远端命令里的 `~/x` 要按它展开（否则会被当成工作区内的相对路径）
+      homeDir: String(homeDir || '')
+    };
+  }
+
+  /**
    * 沙箱档位对**文件写操作**的判定（工作区外 → 问一次；read-only → 一律问一次）。
    *
    * 放在这里的原因：`writeRootsForCall()` 是「能写哪儿」的唯一出口，档位判定必须紧挨着它，
    * 否则新加的写 handler 会只受白名单约束、绕过档位。撤销栈回滚（undo apply）刻意不经过这里：
    * 它是用户显式要求的回退，不该再被问一次。
    *
+   * `opts.remote` = 目标是**远端主机**上的路径：同一套档位语义，换 POSIX 方言与远端根
+   * （见 `server.js:sandboxContext` 的远端分支）。曾经远端写**完全不过档位**（理由是无法
+   * 解析远端路径），结果是 SSH 会话里「只读」档名存实亡 —— 现在不成立了。
+   *
    * @param {string} absPath
    * @param {string} tool
+   * @param {{ remote?: boolean }} [opts]
    */
-  async function assertSandboxWritable(absPath, tool) {
+  async function assertSandboxWritable(absPath, tool, opts = {}) {
     const sandbox = ctx.sandbox;
     if (!sandbox) {
       // fail-closed：沙箱没装配好时不能把"检查不到"当成"允许写"
@@ -348,11 +375,29 @@ function createRpcHandlers(ctx) {
       e.retryable = false;
       throw e;
     }
-    const decision = decideFsWrite(absPath, sandbox.context());
+    const remote = opts.remote === true;
+    let decision;
+    if (remote) {
+      const scope = remoteSandboxScope();
+      if (!scope) {
+        const e = new Error('SSH 未连接，无法校验远端写入');
+        e.code = 'SSH_NOT_CONNECTED';
+        e.retryable = false;
+        throw e;
+      }
+      // 只判档位。传输边界（工作区 / $HOME / /tmp）更早一步就把越界路径拒掉了
+      // （`resolveRemotePath` 在 handler 解析远端绝对路径时抛 PATH_NOT_ALLOWED），
+      // 所以这里不需要再判一次 —— 那个位置问也写不进去，问了就是浪费用户一次点击。
+      decision = decideFsWrite(absPath, sandbox.context({ remote: scope, cwd: scope.workspaceRoot }));
+    } else {
+      decision = decideFsWrite(absPath, sandbox.context());
+    }
     const blocked = await sandbox.guard(decision, {
       tool,
       sessionId: getActiveCallSessionId(),
-      path: absPath
+      path: absPath,
+      // 远端授权只对远端生效（不进本机写白名单）：见 sandbox-approvals#rememberPath
+      remote
     });
     if (!blocked) return;
     const e = new Error(blocked.error);
@@ -1233,6 +1278,23 @@ function createRpcHandlers(ctx) {
     return createRemoteFsAdapter(sshCall, targetDesc, opts);
   }
 
+  /**
+   * 文件类 RPC 的唯一「这批操作去哪台机器」判定（fs_* / host_print_image 都读它）。
+   *
+   * 本体是纯函数 `host-local.js:decideFsTarget`（可单测），这里只注入本次调用的环境：
+   * 远端适配器、本机默认工作区、会话工作区根。改判定只改那一处。
+   *
+   * @param {string} rawPath 模型给的原始路径（可带 `local:` 前缀）
+   * @returns {{ remote: object|null, path: string, base: string|null, explicitLocal: boolean }}
+   */
+  function resolveFsTarget(rawPath) {
+    return decideFsTarget(rawPath, {
+      remote: getRemoteFs(),
+      defaultCwd,
+      sessionCwd: cwdForCall()
+    });
+  }
+
   function resolveCodebaseContext(workspaceRoot) {
     const target = resolveCallWorkspaceTarget();
     if (target && target.kind === 'ssh') {
@@ -2021,6 +2083,7 @@ function createRpcHandlers(ctx) {
     runGraphLspEnrich,
     resolveGraphSymbolCallersAndIngest,
     getRemoteFs,
+    resolveFsTarget,
     resolveHostSidecarLocalPath,
     sidecarReadOpts,
     readSidecarFileAt,
@@ -2040,6 +2103,7 @@ function createRpcHandlers(ctx) {
     currentSshWorkspaceRoot,
     writeRootsForCall,
     assertSandboxWritable,
+    remoteSandboxScope,
     sandbox: ctx.sandbox || null,
     invokeRustCore,
     captureUndoWrite,

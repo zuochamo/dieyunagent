@@ -6,6 +6,9 @@ const path = require('path');
 const { DEFLIKE_RE, breEscape, firstIdentifier, inferBlockEnd } = require('../symbol-text');
 const { ABSOLUTE_READ_MAX_BYTES } = require('../fs-read-limits');
 const { isRemoteAgentUsable } = require('../remote-agent-client');
+// 「本机」路径语义（`local:` 前缀）的唯一来源：判定在 rpc.js:resolveFsTarget，
+// 这里只用它的解析/提示函数，不自己写 startsWith('local:')。
+const { splitLocalGlob, isLocalPathRef, annotateLocalPathMiss } = require('../host-local');
 const { recordSkillRead } = require('../../skills/usage-ledger');
 
 /**
@@ -47,6 +50,7 @@ function createFsHandlers(d) {
   const {
     perms,
     getRemoteFs,
+    resolveFsTarget,
     resolveHostSidecarLocalPath,
     sidecarReadOpts,
     readSidecarFileAt,
@@ -293,9 +297,15 @@ function createFsHandlers(d) {
       }
       const sidecar = resolveHostSidecarLocalPath(filePath, sidecarReadOpts());
       if (sidecar) return readSidecarFileAt(sidecar, encoding, { offset, maxBytes });
-      const remote = getRemoteFs();
-      if (remote) return remote.readFile(filePath, encoding, { offset, maxBytes });
-      const resolved = normalizeFilePathInput(filePath, cwdForCall());
+      const target = resolveFsTarget(filePath);
+      if (target.remote) {
+        try {
+          return await target.remote.readFile(target.path, encoding, { offset, maxBytes });
+        } catch (err) {
+          throw annotateLocalPathMiss(err, target.path);
+        }
+      }
+      const resolved = normalizeFilePathInput(target.path, target.base);
       const safe = assertAllowedPath(resolved, readRootsForCall());
       // 技能使用账本：这条读的是 SKILL.md 就记一笔（只记事实，不记内容）。
       // 记录点必须在「读成功」之后，且自己吞错 —— 账本是旁证，不许影响读取本身。
@@ -312,7 +322,9 @@ function createFsHandlers(d) {
         noteSkillRead();
         return rustRead;
       }
-      const textRead = await readAllowedTextFile(filePath, encoding, { offset, maxBytes });
+      // 传已解析的绝对路径：readAllowedTextFile 内部还会按 `cwdForCall()` 再解析一次，
+      // 而 SSH 会话里那是**远端**路径 —— 把 `local:…` 原样递进去会被拼成另一台机器上的位置。
+      const textRead = await readAllowedTextFile(safe, encoding, { offset, maxBytes });
       noteSkillRead();
       return textRead;
     },
@@ -340,6 +352,18 @@ function createFsHandlers(d) {
           '需要 name 或 line：只给 filePath 无法定位符号。读整个文件请用 fs_read_file（可配 offset/maxBytes）。'
         );
         e.code = 'MISSING_PARAM';
+        throw e;
+      }
+      // read_symbol 靠 LSP / 会话结构索引定位，本机文件不在会话索引里（SSH 会话尤其）：
+      // 直接说清楚，别让它带着 local: 前缀去查远端索引空手而归。
+      if (hasPath && isLocalPathRef(filePath)) {
+        const e = new Error(
+          'read_symbol 只覆盖会话工作空间的符号（LSP / 结构索引），不支持 local: 本机路径'
+        );
+        e.code = 'LOCAL_PATH_UNSUPPORTED';
+        e.retryable = false;
+        e.suggestedFix =
+          '读本机文件用 fs_read_file（路径可带 local: 前缀，配 offset/maxBytes 分块读），本机不进会话索引。';
         throw e;
       }
 
@@ -515,31 +539,39 @@ function createFsHandlers(d) {
         e.code = 'FS_WRITE_INVALID_DATA';
         throw e;
       }
-      const remote = getRemoteFs();
-      if (remote) {
-        // 远程（SSH）写入：**刻意不过本机沙箱档位**。路径是远端 POSIX 路径，本机既没有这些根
-        // 也无法解析，硬判只会造出假越界（`C:\home\...`）。写权限由 SSH 凭据本身授予，
-        // 这是文档化的边界（docs/SANDBOX.md「远程工作区」一节），不是漏检。
+      const target = resolveFsTarget(filePath);
+      if (target.remote) {
+        const remote = target.remote;
+        const remotePath = target.path;
+        // 远端写入与本地同一条档位链：路径按远端绝对路径判（工作区外要问、read-only 一律问），
+        // 再受远端传输允许根约束。曾经这里「刻意不过本机沙箱」—— 结果是 SSH 会话里只读档名存实亡。
+        const remoteAbs = remote.resolve(remotePath, remote.root);
+        await assertSandboxWritable(remoteAbs, 'fs.write_file', { remote: true });
         // 调用方（fs.edit_file）刚读过同一文件时直接复用，省掉一次整读。
         let beforeText = typeof undoBeforeText === 'string' ? undoBeforeText : null;
         if (beforeText == null) {
           try {
             if (enc === 'utf8') {
-              const prev = await remote.readFile(filePath, 'utf8');
+              const prev = await remote.readFile(remotePath, 'utf8');
               beforeText = prev.data;
             }
           } catch {
             beforeText = null;
           }
         }
-        const r = await remote.writeFile(filePath, data, encoding);
+        let r;
+        try {
+          r = await remote.writeFile(remotePath, data, encoding);
+        } catch (err) {
+          throw annotateLocalPathMiss(err, remotePath);
+        }
         // SFTP 写入远端看不见 → 必须补一条通知，否则远端索引停在旧内容，
         // 同一回合里 grep / 图谱都按旧代码答。走 RPC 时远端 handler 自己已经按
         // 同一份规则调度过了，再通知一遍只是多一次往返。
         if (remote.transport === 'sftp') {
           notifyRemoteIndexChange(
             { getRemoteAgentInfo, getRemoteAgentClient },
-            { filePath: r.path || filePath, encoding: enc, op: 'write' }
+            { filePath: r.path || remotePath, encoding: enc, op: 'write' }
           );
         }
         if (
@@ -551,7 +583,7 @@ function createFsHandlers(d) {
         ) {
           const remoteRoot = String(cwdForCall() || '').replace(/\\/g, '/').replace(/\/$/, '');
           void lspDiagnostics
-            .scheduleFileDiagnosticsRefresh(remoteRoot, r.path || filePath, {
+            .scheduleFileDiagnosticsRefresh(remoteRoot, r.path || remotePath, {
               immediate: true,
               mode: 'ssh',
               sshExec: (command, cwd, timeoutMs) => requireSshForCall().exec(command, cwd, timeoutMs)
@@ -561,16 +593,23 @@ function createFsHandlers(d) {
         captureUndoWrite({
           undoSessionId,
           undoTurnId,
-          filePath: r.path || filePath,
+          filePath: r.path || remotePath,
           beforeText,
           encoding: enc,
           remote: true
         });
         return r;
       }
-      const resolved = normalizeFilePathInput(filePath, cwdForCall());
+      const resolved = normalizeFilePathInput(target.path, target.base);
       await assertSandboxWritable(resolved, 'fs.write_file');
       const safe = assertAllowedPath(resolved, writeRootsForCall());
+      // 本机索引 / 图谱的根：显式本机写（SSH 会话里写本机文件）不属于会话工作空间，
+      // 塞 cwdForCall()（远端路径）给它只会 resolve 出一个假根。
+      const localIndexRoot = target.explicitLocal
+        ? null
+        : cwdForCall()
+          ? path.resolve(cwdForCall())
+          : null;
       const buf = enc === 'base64' ? Buffer.from(String(data), 'base64') : Buffer.from(String(data), 'utf8');
       let beforeText = typeof undoBeforeText === 'string' ? undoBeforeText : null;
       if (beforeText == null) {
@@ -585,7 +624,7 @@ function createFsHandlers(d) {
       await fs.mkdir(path.dirname(safe), { recursive: true });
       await fs.writeFile(safe, buf);
       if (lspDiagnostics) {
-        const workspaceRoot = cwdForCall() ? path.resolve(cwdForCall()) : null;
+        const workspaceRoot = localIndexRoot;
         if (
           workspaceRoot &&
           typeof lspDiagnostics.scheduleFileDiagnosticsRefresh === 'function'
@@ -609,12 +648,10 @@ function createFsHandlers(d) {
         remote: false
       });
       if (graphIncremental && enc === 'utf8') {
-        const graphRoot = cwdForCall() ? path.resolve(cwdForCall()) : null;
-        graphIncremental.notifyFileSaved(safe, graphRoot);
+        graphIncremental.notifyFileSaved(safe, localIndexRoot);
       }
       if (codebaseIncremental && enc === 'utf8') {
-        const codeRoot = cwdForCall() ? path.resolve(cwdForCall()) : null;
-        codebaseIncremental.notifyFileSaved(safe, codeRoot);
+        codebaseIncremental.notifyFileSaved(safe, localIndexRoot);
       }
       let diff = null;
       if (enc === 'utf8') {
@@ -661,9 +698,17 @@ function createFsHandlers(d) {
         e.code = 'FS_WRITE_DISABLED';
         throw e;
       }
-      const remote = getRemoteFs();
-      if (remote) return remote.mkdir(dirPath);
-      const resolved = normalizeFilePathInput(dirPath, cwdForCall());
+      const target = resolveFsTarget(dirPath);
+      if (target.remote) {
+        try {
+          const remoteAbs = target.remote.resolve(target.path, target.remote.root);
+          await assertSandboxWritable(remoteAbs, 'fs.mkdir', { remote: true });
+          return await target.remote.mkdir(target.path);
+        } catch (err) {
+          throw annotateLocalPathMiss(err, target.path);
+        }
+      }
+      const resolved = normalizeFilePathInput(target.path, target.base);
       await assertSandboxWritable(resolved, 'fs.mkdir');
       const safe = assertAllowedPath(resolved, writeRootsForCall());
       await fs.mkdir(safe, { recursive: true });
@@ -678,9 +723,15 @@ function createFsHandlers(d) {
       }
       const sidecar = resolveHostSidecarLocalPath(dirPath, sidecarReadOpts());
       if (sidecar) return listSidecarDirAt(sidecar);
-      const remote = getRemoteFs();
-      if (remote) return remote.listDir(dirPath);
-      const resolved = normalizeFilePathInput(dirPath, cwdForCall());
+      const target = resolveFsTarget(dirPath);
+      if (target.remote) {
+        try {
+          return await target.remote.listDir(target.path);
+        } catch (err) {
+          throw annotateLocalPathMiss(err, target.path);
+        }
+      }
+      const resolved = normalizeFilePathInput(target.path, target.base);
       const safe = assertAllowedPath(resolved, readRootsForCall());
       const rustList = await invokeRustCore('fs.list_dir', { dirPath: safe });
       if (Array.isArray(rustList) && rustList.length > 0) return rustList;
@@ -764,41 +815,45 @@ function createFsHandlers(d) {
         type: type || undefined,
         count: count === true
       };
-      const agentInfo = getRemoteAgentInfo();
-      if (isRemoteAgentUsable(agentInfo)) {
-        // 远端 Agent：rg-search 在远端跑（没装 rg 时它自己退 grep）。
-        // 不再叠「codebase.grep 降级 → SSH exec grep」两层：那会让一次真实失败
-        // 变成「查到了但结果不全」，比直接报错更难查。
-        return await getRemoteAgentClient(agentInfo).call('fs.grep', {
-          pattern: pat,
-          glob,
-          path: searchPath,
-          regex: regex === true,
-          caseInsensitive: ci,
-          ...ctxArgs,
-          maxResults
-        });
+      // 去哪台机器：`local:` 前缀明确指本机，其余跟随会话工作空间（见 rpc.js:resolveFsTarget）
+      const target = resolveFsTarget(searchPath);
+      if (target.remote) {
+        const agentInfo = getRemoteAgentInfo();
+        if (isRemoteAgentUsable(agentInfo)) {
+          // 远端 Agent：rg-search 在远端跑（没装 rg 时它自己退 grep）。
+          // 不再叠「codebase.grep 降级 → SSH exec grep」两层：那会让一次真实失败
+          // 变成「查到了但结果不全」，比直接报错更难查。
+          return await getRemoteAgentClient(agentInfo).call('fs.grep', {
+            pattern: pat,
+            glob,
+            path: target.path,
+            regex: regex === true,
+            caseInsensitive: ci,
+            ...ctxArgs,
+            maxResults
+          });
+        }
+        if (target.remote.transport === 'sftp') {
+          // 没装 Agent 的会话：本地没有工作区文件，只能靠 ssh exec 的 grep
+          const via = await grepViaRemoteExec(cwdForCall(), {
+            pattern: pat,
+            glob,
+            path: target.path,
+            regex: regex === true,
+            caseInsensitive: ci,
+            type: type || undefined,
+            multiline: multiline === true,
+            context,
+            beforeContext: ctxBefore,
+            afterContext: ctxAfter,
+            count: count === true,
+            maxResults
+          });
+          if (via) return via;
+        }
       }
-      const remote = getRemoteFs();
-      if (remote && remote.transport === 'sftp') {
-        // 没装 Agent 的会话：本地没有工作区文件，只能靠 ssh exec 的 grep
-        const via = await grepViaRemoteExec(cwdForCall(), {
-          pattern: pat,
-          glob,
-          path: searchPath,
-          regex: regex === true,
-          caseInsensitive: ci,
-          type: type || undefined,
-          multiline: multiline === true,
-          context,
-          beforeContext: ctxBefore,
-          afterContext: ctxAfter,
-          count: count === true,
-          maxResults
-        });
-        if (via) return via;
-      }
-      const root = cwdForCall();
+      // 本机搜索：显式 local: 时根就是它自己，否则是会话工作区
+      const root = target.explicitLocal ? target.path : cwdForCall();
       if (!root) {
         const e = new Error('未设置工作区');
         e.code = 'INVALID_WORKSPACE';
@@ -808,7 +863,7 @@ function createFsHandlers(d) {
       return grepWorkspace(root, {
         pattern: pat,
         glob,
-        path: searchPath,
+        path: target.explicitLocal ? undefined : target.path,
         regex: regex === true,
         caseInsensitive: ci,
         ...ctxArgs,
@@ -827,6 +882,13 @@ function createFsHandlers(d) {
         const e = new Error('pattern 必填');
         e.code = 'MISSING_PATTERN';
         throw e;
+      }
+      // 本机 glob：pattern 自带 `local:` 前缀（rg 的 -g 是相对 cwd 的，
+      // 整条绝对 pattern 丢进去永远匹配不到，所以 root 由前缀里的字面目录定）
+      const localGlob = splitLocalGlob(pat);
+      if (localGlob) {
+        assertAllowedPath(path.resolve(localGlob.root), readRootsForCall());
+        return globWorkspace(localGlob.root, { pattern: localGlob.pattern, maxResults });
       }
       const agentInfo = getRemoteAgentInfo();
       if (isRemoteAgentUsable(agentInfo)) {
@@ -854,9 +916,15 @@ function createFsHandlers(d) {
         e.code = 'FS_READ_DISABLED';
         throw e;
       }
-      const remote = getRemoteFs();
-      if (remote) return remote.stat(filePath);
-      const resolved = normalizeFilePathInput(filePath, cwdForCall());
+      const target = resolveFsTarget(filePath);
+      if (target.remote) {
+        try {
+          return await target.remote.stat(target.path);
+        } catch (err) {
+          throw annotateLocalPathMiss(err, target.path);
+        }
+      }
+      const resolved = normalizeFilePathInput(target.path, target.base);
       const safe = assertAllowedPath(resolved, readRootsForCall());
       const st = await fs.stat(safe);
       return {

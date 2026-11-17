@@ -43,8 +43,8 @@ describe('resolveRemotePath（单根）', () => {
   });
 
   it('工作空间外拒绝', () => {
-    expect(() => resolveRemotePath('/etc/passwd', WS)).toThrow(/不在远程工作空间内/);
-    expect(() => resolveRemotePath('../etc/passwd', WS)).toThrow(/不在远程工作空间内/);
+    expect(() => resolveRemotePath('/etc/passwd', WS)).toThrow(/不在远端允许范围内/);
+    expect(() => resolveRemotePath('../etc/passwd', WS)).toThrow(/不在远端允许范围内/);
   });
 });
 
@@ -61,9 +61,9 @@ describe('resolveRemotePath（多根宽松档）', () => {
   });
 
   it('两棵根之外仍拒绝，相对路径基准仍是工作空间根', () => {
-    expect(() => resolveRemotePath('/etc/passwd', roots)).toThrow(/不在远程工作空间内/);
-    expect(() => resolveRemotePath('/var/log/syslog', roots)).toThrow(/不在远程工作空间内/);
-    expect(() => resolveRemotePath('/home/other-user/x', roots)).toThrow(/不在远程工作空间内/);
+    expect(() => resolveRemotePath('/etc/passwd', roots)).toThrow(/不在远端允许范围内/);
+    expect(() => resolveRemotePath('/var/log/syslog', roots)).toThrow(/不在远端允许范围内/);
+    expect(() => resolveRemotePath('/home/other-user/x', roots)).toThrow(/不在远端允许范围内/);
     expect(resolveRemotePath('tmp/x', roots)).toBe('/srv/app/tmp/x');
   });
 
@@ -86,6 +86,6 @@ describe('远端根不接受「完全放开」开关（远端只认一份规则�
     // 老调用方若还传 unrestricted，也必须无效（不能靠调用方自律）
     expect(remoteAllowedRoots(WS, HOME, { unrestricted: true })).toEqual([WS, HOME, '/tmp']);
     const roots = remoteAllowedRoots(WS, HOME, { unrestricted: true });
-    expect(() => resolveRemotePath('/etc/passwd', roots)).toThrow(/不在远程工作空间内/);
+    expect(() => resolveRemotePath('/etc/passwd', roots)).toThrow(/不在远端允许范围内/);
   });
 });

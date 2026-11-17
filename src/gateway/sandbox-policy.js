@@ -280,7 +280,49 @@ const WRITE_COMMAND_RE =
  * 不判断意图：任何内联代码/脚本/包管理器脚本一律算「可能落盘」，该问就问。
  */
 const WRITE_TOOL_RE =
-  /(^|[\s;&|(])(sed\s+-i|tar\b[^\n]*\s-[a-zA-Z]*x|unzip\b|Expand-Archive\b|Remove-Item\b|ri\b|New-Item\b|taskkill\b|npm\s+run\b|npm\s+exec\b|pnpm\s+run\b|pnpm\s+dlx\b|yarn\s+run\b|npx\b|bunx\b|choco\s+install\b|winget\s+install\b|scoop\s+install\b|apt(-get)?\s+(install|remove|purge)\b|yum\s+(install|remove)\b|brew\s+(install|upgrade)\b|curl\b[^\n]*\s(-o|-O|--output)\b|wget\b[^\n]*\s(-O|--output-document)\b)([\s;&|)]|$)/i;
+  /(^|[\s;&|(])(sed\s+-i|tar\b[^\n]*\s-[a-zA-Z]*x|zip\b|7z\s+a\b|Compress-Archive\b|(\.\/)?configure\b|unzip\b|Expand-Archive\b|Remove-Item\b|ri\b|New-Item\b|taskkill\b|npm\s+run\b|npm\s+exec\b|pnpm\s+run\b|pnpm\s+dlx\b|yarn\s+run\b|npx\b|bunx\b|choco\s+install\b|winget\s+install\b|scoop\s+install\b|apt(-get)?\s+(install|remove|purge)\b|yum\s+(install|remove)\b|brew\s+(install|upgrade)\b|curl\b[^\n]*\s(-o|-O|--output)\b|wget\b[^\n]*\s(-O|--output-document)\b)([\s;&|)]|$)/i;
+
+/**
+ * 建归档同样落盘：`tar czf` / `tar -czf` / `tar --create`。
+ * 名单里原来只登记了「解包」（`tar -x`），于是 `tar czf ~/x.tgz .` 被当成只读命令 ——
+ * 一旦目标不在工作区（`~`、/home/…），就既不问也不拒地写出去。
+ */
+const WRITE_ARCHIVE_RE =
+  /(^|[\s;&|(])tar\b[^\n]*(\s--create\b|\s-[a-zA-Z]*c[a-zA-Z]*\b|\s[a-zA-Z]{0,6}c[a-zA-Z]{0,6}\b)/i;
+
+/**
+ * 「装到工作区之外」的安装类命令：命令文本里**没有**写入目标，但产物一定落在工作区外 ——
+ * npm 的 global prefix、pip 的 user site、cargo/go 的 bin、make install 的 prefix、
+ * 系统包管理器的目录。这条判据就是档位表里那句「写工作区之外、装到系统目录这类动作会先问你一次」
+ * 的实现（以前只实现了"写工作区外"，漏了"装到系统外"）。
+ */
+const SYSTEM_INSTALL_PATTERNS = Object.freeze([
+  {
+    re: /(^|[\s;&|(])(sudo\s+)?(npm|pnpm|yarn)\s+(i|install|add|link)\b[^\n]*\s(-g|--global)\b/i,
+    label: 'npm/pnpm/yarn 全局安装'
+  },
+  {
+    re: /(^|[\s;&|(])(sudo\s+)?(pip3?|python3?\s+-m\s+pip)\s+install\b[^\n]*\s--user\b/i,
+    label: 'pip --user 安装'
+  },
+  { re: /(^|[\s;&|(])(sudo\s+)?cargo\s+install\b/i, label: 'cargo install' },
+  { re: /(^|[\s;&|(])(sudo\s+)?go\s+install\b/i, label: 'go install' },
+  { re: /(^|[\s;&|(])(sudo\s+)?gem\s+install\b/i, label: 'gem install' },
+  { re: /(^|[\s;&|(])(sudo\s+)?make\s+(install|altinstall)\b/i, label: 'make install' },
+  { re: /(^|[\s;&|(])(sudo\s+)?dotnet\s+tool\s+install\b/i, label: 'dotnet tool install' },
+  { re: /(^|[\s;&|(])(sudo\s+)?composer\s+(global\s+)?require\b/i, label: 'composer require' },
+  {
+    re: /(^|[\s;&|(])(sudo\s+)?(apt|apt-get|dnf|yum|zypper|pacman|apk|brew|choco|winget|scoop|snap)\s+([-a-z]*\s+)*(install|add|-S|-i)\b/i,
+    label: '系统包管理器安装'
+  }
+]);
+
+/** 命中的安装类命令（返回可读的原因），没命中返回空串。 */
+function matchSystemInstall(command) {
+  const s = String(command || '');
+  for (const p of SYSTEM_INSTALL_PATTERNS) if (p.re.test(s)) return p.label;
+  return '';
+}
 
 /**
  * 重定向/落地写入的结构信号（Shell 层面，与上面动词互补）。
@@ -289,12 +331,15 @@ const WRITE_TOOL_RE =
 const WRITE_REDIRECT_RE =
   /(?:\d?>>?)(?!&)|Out-File|Set-Content|Add-Content|New-Item|Tee-Object|Export-Csv/i;
 
-/** 这条命令是否可能落盘（动词 / 中介 / 解释器 / 重定向任一命中）。 */
+/** 这条命令是否可能落盘（动词 / 中介 / 建归档 / 安装 / 解释器 / 重定向任一命中）。 */
 function commandMayWrite(cmd) {
   const s = String(cmd || '');
   return (
     WRITE_COMMAND_RE.test(s) ||
     WRITE_TOOL_RE.test(s) ||
+    WRITE_ARCHIVE_RE.test(s) ||
+    // 安装类（gem/composer/…）不在上面几张名单里，但它们一定往系统目录写
+    matchSystemInstall(s) !== '' ||
     runsScriptInterpreter(s) ||
     WRITE_REDIRECT_RE.test(s)
   );
@@ -319,27 +364,40 @@ const SANDBOX_CATEGORIES = Object.freeze({
   OS_CONTROL: 'os-control'
 });
 
-function normPath(p) {
-  return String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+/**
+ * 路径归一：只保留「分隔符统一 + 是否区分大小写」两件事。
+ *
+ * 远端（POSIX）必须区分大小写：`/srv/App` 与 `/srv/app` 在远端是**两个目录**，
+ * 按大小写不敏感比较会把「越界」判成「工作区内」（Linux 服务器上这是真实存在的两个路径）。
+ * 本机 Windows 反过来 —— 同一个目录大小写随便写，不忽略大小写会造出假越界。
+ */
+function normPath(p, caseInsensitive = process.platform === 'win32') {
+  const s = String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  return caseInsensitive ? s.toLowerCase() : s;
 }
 
-function isUnder(target, root) {
-  const t = normPath(target);
-  const r = normPath(root);
+function isUnder(target, root, caseInsensitive) {
+  const t = normPath(target, caseInsensitive);
+  const r = normPath(root, caseInsensitive);
   if (!t || !r) return false;
   if (t === r) return true;
-  return t.startsWith(r.endsWith('\\') ? r : `${r}\\`);
+  return t.startsWith(r.endsWith('/') ? r : `${r}/`);
 }
 
-/** 路径是否落在任一允许根下。 */
-function isUnderAny(target, roots) {
-  return (roots || []).some((r) => isUnder(target, r));
+/** 路径是否落在任一允许根下（方言由 `caseInsensitive` 决定，远端传 false）。 */
+function isUnderAny(target, roots, caseInsensitive) {
+  return (roots || []).some((r) => isUnder(target, r, caseInsensitive));
 }
 
 /**
  * 命令里出现的、看起来像路径的片段（绝对路径 / 卷根 / 带分隔符的相对路径）。
  * 不含分隔符的裸词（`package.json`、`dist`）视为工作区相对路径 —— cwd 已被限到工作区，
  * 所以它们天然落在工作区内，不需要也不应该猜测。
+ *
+ * 除了按空白切出的 token，还要在**引号内 / `key=value` 里**捞绝对路径：
+ * `node -e "writeFileSync('/home/me/x')"`、`dd of=/home/me/blob`、`--out=/srv/x`
+ * 这些写入目标按 token 切会变成 `of=/home/me/blob`（再被当相对路径拼进工作区），
+ * 于是「写到了工作区外」被判成「写在工作区内」—— 远端一旦静默放行就是真的写到服务器别处去了。
  */
 function extractPathTokens(command) {
   const out = [];
@@ -360,16 +418,31 @@ function extractPathTokens(command) {
     if (!cleaned || /^[-\/]/.test(cleaned) === false && cleaned.length < 2) continue;
     out.push(cleaned);
   }
+  // 引号里 / `key=value` 里的绝对路径（起点必须是「分隔符/等号/引号/括号/行首」之一，
+  // 这样 `https://host/path` 不会被误当成 `/host/path`）
+  const ABS_IN_TEXT_RE = /(?:^|[\s='"`([{;,])((?:\/|[a-zA-Z]:[\\/]|\\\\)[^\s'"`)\]};&|,]*)/g;
+  let a;
+  while ((a = ABS_IN_TEXT_RE.exec(cmdText))) {
+    // 只有一组捕获（前缀是非捕获组）：路径在 [1]
+    const p = String(a[1] || '').replace(/[>&|;,)]+$/, '');
+    if (!p || p.length < 2 || p.length > 400) continue;
+    if (/^\/[A-Za-z]{1,2}$/.test(p) || (windowsish && /^\/[A-Za-z]{1,4}$/.test(p))) continue;
+    if (!out.includes(p)) out.push(p);
+  }
   return out;
 }
 
 /**
  * 写入这些位置等于丢弃输出，不算越界（`echo x > /dev/null` 遍地都是）。
+ * 只读设备（zero/random）连读都不产生落盘，`dd if=/dev/zero of=./blob` 这类常见写法不该问一次。
  */
 const HARMLESS_WRITE_TARGETS = Object.freeze([
   '/dev/null',
   '/dev/stdout',
   '/dev/stderr',
+  '/dev/zero',
+  '/dev/urandom',
+  '/dev/random',
   'nul',
   '$null'
 ]);
@@ -382,10 +455,23 @@ function isHarmlessWriteTarget(token) {
 /**
  * 把命令里的路径片段落成绝对路径：相对路径按 `cwd`（默认工作区根）解析，
  * 因为 cwd 已经被限到工作区，`./dist/a.txt` 事实上就在工作区里。
+ *
+ * `~/x` 必须按**主目录**展开（`homeDir` 由调用方给：远端来自 ssh 会话、本机来自 os.homedir）。
+ * 不展开的话 `~/x.tgz` 会被当成「工作区里的相对路径」——于是"写到家目录"被判成"写在工作区"。
  */
-function resolveToken(token, base) {
+function resolveToken(token, base, remote = false, homeDir = '') {
   const raw = String(token || '');
   try {
+    if (/^~(?=$|[\\/])/.test(raw)) {
+      const rest = raw.replace(/^~[\\/]?/, '');
+      if (!homeDir) return raw; // 不知道主目录就不猜：比较时自然落在允许根之外
+      return remote ? path.posix.resolve(homeDir, rest) : path.resolve(homeDir, rest);
+    }
+    if (remote) {
+      // 远端是 POSIX：`path.resolve('/srv/x')` 在 Windows 上会得到 `E:\srv\x`（假路径）
+      if (raw.startsWith('/')) return path.posix.resolve(raw);
+      return path.posix.resolve(String(base || '/'), raw);
+    }
     if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('\\\\')) return path.win32.resolve(raw);
     if (raw.startsWith('/')) return path.resolve(raw);
     return path.resolve(base || process.cwd(), raw);
@@ -409,6 +495,12 @@ function decideShellCommand(command, opts = {}) {
   const internalRoots = opts.internalRoots || [];
   const allowedWriteRoots = [...workspaceRoots, ...internalRoots];
   const baseDir = opts.cwd || workspaceRoots[0] || process.cwd();
+  // 远端（SSH）命令的路径是 POSIX、且大小写敏感：方言跟着「哪台机器」走，不跟本机平台走。
+  const remote = opts.remote === true;
+  const caseInsensitive = remote ? false : process.platform === 'win32';
+  const where = remote ? '远端工作区' : '工作区';
+  // `~/…` 要按主目录展开（远端 ssh 会话的主目录 / 本机 os.homedir）
+  const homeDir = String(opts.homeDir || '');
 
   const denyHit = matchDangerousCommand(cmd);
   if (denyHit) {
@@ -451,22 +543,12 @@ function decideShellCommand(command, opts = {}) {
     };
   }
 
-  // 远程（SSH）命令：路径是远端路径，本机既没有这些根也无法解析 —— 按本地根判定只会造出
-  // `C:\home\...` 这种假越界和假 detail。这里据实说明"看不到远端"，让用户确认一次。
-  if (opts.remote) {
-    return {
-      action: 'ask',
-      category: SANDBOX_CATEGORIES.WRITE,
-      reason: '远程（SSH）命令会落盘；本机沙箱看不到远端路径，执行前确认一次。',
-      mode,
-      detail: cmd.slice(0, 200)
-    };
-  }
-
-  // 想写：先看写哪儿
+  // 想写：先看写哪儿（远端命令走同一套：路径按 POSIX 解析，根用远端工作区 + 远端 /tmp）
   const paths = extractPathTokens(cmd).filter((p) => !isHarmlessWriteTarget(p));
-  const absPaths = paths.map((p) => resolveToken(p, baseDir));
-  const outside = absPaths.filter((p) => !isUnderAny(p, allowedWriteRoots) && !/^[a-zA-Z]:\\?$/.test(p));
+  const absPaths = paths.map((p) => resolveToken(p, baseDir, remote, homeDir));
+  const outside = absPaths.filter(
+    (p) => !isUnderAny(p, allowedWriteRoots, caseInsensitive) && !/^[a-zA-Z]:\\?$/.test(p)
+  );
   const writesOutside = outside.length > 0;
 
   if (!meta.allowsWorkspaceWrite) {
@@ -486,17 +568,29 @@ function decideShellCommand(command, opts = {}) {
     return {
       action: 'ask',
       category: SANDBOX_CATEGORIES.WRITE,
-      reason: `这条命令会写工作区之外的路径；当前档位「${meta.label}」需要你同意一次。`,
+      reason: `这条命令会写${where}之外的路径；当前档位「${meta.label}」需要你同意一次。`,
       mode,
       path: outside[0],
       detail: outside.slice(0, 5).join(', ')
     };
   }
 
+  // 安装类命令：命令文本里没有目标路径（目标由工具自己决定），但一定写到工作区外。
+  const systemInstall = matchSystemInstall(cmd);
+  if (systemInstall) {
+    return {
+      action: 'ask',
+      category: SANDBOX_CATEGORIES.WRITE,
+      reason: `这条命令会装到${where}之外（${systemInstall}）；当前档位「${meta.label}」需要你同意一次。`,
+      mode,
+      detail: cmd.slice(0, 200)
+    };
+  }
+
   return {
     action: 'allow',
     category: SANDBOX_CATEGORIES.WRITE,
-    reason: '写操作落在工作区内，直接放行。',
+    reason: `写操作落在${where}内，直接放行。`,
     mode
   };
 }
@@ -506,8 +600,12 @@ function decideShellCommand(command, opts = {}) {
  *
  * 与 shell 的区别：路径是确定的，不需要从字符串里猜，所以「工作区外」判定是精确的。
  *
+ * 远端（`remote: true`）用的是**同一套档位语义**，只是换了方言与根：
+ * 路径按 POSIX 比较（大小写敏感），`workspaceRoots` 由调用方给成远端工作区 + 远端 /tmp
+ * —— 于是「read-only 一律问、workspace-write 只放工作区内、danger 全放行」在远端同样成立。
+ *
  * @param {string} absPath
- * @param {{ mode?: string, workspaceRoots?: string[], internalRoots?: string[] }} [opts]
+ * @param {{ mode?: string, workspaceRoots?: string[], internalRoots?: string[], remote?: boolean }} [opts]
  */
 function decideFsWrite(absPath, opts = {}) {
   const mode = normalizeSandboxMode(opts.mode);
@@ -515,6 +613,9 @@ function decideFsWrite(absPath, opts = {}) {
   const workspaceRoots = opts.workspaceRoots || [];
   const internalRoots = opts.internalRoots || [];
   const target = String(absPath || '');
+  const remote = opts.remote === true;
+  const caseInsensitive = remote ? false : process.platform === 'win32';
+  const where = remote ? '远端工作区' : '工作区';
 
   if (mode === 'danger-full-access') {
     return {
@@ -524,7 +625,7 @@ function decideFsWrite(absPath, opts = {}) {
       mode
     };
   }
-  if (isUnderAny(target, internalRoots)) {
+  if (isUnderAny(target, internalRoots, caseInsensitive)) {
     return {
       action: 'allow',
       category: SANDBOX_CATEGORIES.WRITE,
@@ -541,18 +642,18 @@ function decideFsWrite(absPath, opts = {}) {
       detail: target
     };
   }
-  if (isUnderAny(target, workspaceRoots)) {
+  if (isUnderAny(target, workspaceRoots, caseInsensitive)) {
     return {
       action: 'allow',
       category: SANDBOX_CATEGORIES.WRITE,
-      reason: '写入落在工作区内，直接放行。',
+      reason: `写入落在${where}内，直接放行。`,
       mode
     };
   }
   return {
     action: 'ask',
     category: SANDBOX_CATEGORIES.WRITE,
-    reason: `目标不在工作区内；当前档位「${meta.label}」需要你同意一次。`,
+    reason: `目标不在${where}内；当前档位「${meta.label}」需要你同意一次。`,
     mode,
     detail: target
   };
@@ -576,11 +677,11 @@ function decideFsWrite(absPath, opts = {}) {
  *   （permissions.osControl）本身就是用户同意，档位不再拦
  *   （否则 read-only 档连「看一眼」都做不到，开关形同虚设）；
  * - 其余动作改变系统状态 —— 非 danger-full-access 档问一次，
- *   审批记忆是「会话 × os-control 类别」（无路径，scope='-'）；
+ *   审批记忆是「会话 × os-control 类别 × 哪台机器」；
  * - SANDBOX_DENY_LIST 是 shell 命令词表，与本判定正交（computer 不走 shell）。
  *
  * @param {string} action computer 工具的 action 值
- * @param {{ mode?: string }} [opts]
+ * @param {{ mode?: string, remote?: boolean, hostKey?: string }} [opts]
  */
 function decideOsControlAction(action, opts = {}) {
   const mode = normalizeSandboxMode(opts.mode);
@@ -601,8 +702,14 @@ function decideOsControlAction(action, opts = {}) {
   return {
     action: 'ask',
     category: SANDBOX_CATEGORIES.OS_CONTROL,
-    reason: `当前档位「${meta.label}」下，操作本机鼠标/键盘需要你同意一次（本会话有效）。`,
+    reason: `当前档位「${meta.label}」下，操作${opts.remote ? '远端主机' : '本机'}鼠标/键盘需要你同意一次（本会话有效）。`,
     mode,
+    // 授权粒度必须**分机器**：os-control 没有路径，scope 缺省是类别级 '-'，
+    // 那样「同意过远端点一下」会连本机的键鼠一起放行（两台机器的信任不是一回事）。
+    // 远端再带上主机身份：连到另一台服务器时不该复用上一个主机的批准。
+    scope: opts.remote
+      ? `remote-host${opts.hostKey ? `:${String(opts.hostKey)}` : ''}`
+      : 'local-host',
     detail: `动作：${act}`
   };
 }
@@ -652,6 +759,7 @@ module.exports = {
   DENY_COMMAND_WORDS,
   matchDangerousCommand,
   commandMayWrite,
+  matchSystemInstall,
   runsScriptInterpreter,
   stripShellQuotedSegments,
   normalizeSandboxMode,

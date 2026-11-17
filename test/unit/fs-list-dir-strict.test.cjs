@@ -20,6 +20,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { createFsHandlers } = require('../../src/gateway/handlers/fs.js');
+// 「去哪台机器」的判定用生产那份纯函数（本地会话：无远端、基准是会话工作区根）
+const { decideFsTarget } = require('../../src/gateway/host-local.js');
 
 const ROOT = path.resolve(os.tmpdir(), 'dieyun-fs-list-dir-test');
 
@@ -28,6 +30,7 @@ function makeHandlers(invokeRustCore) {
   const handlers = createFsHandlers({
     perms: { hostControl: true, fsRead: true, fsWrite: true },
     getRemoteFs: () => null,
+    resolveFsTarget: (p) => decideFsTarget(p, { remote: null, defaultCwd: ROOT, sessionCwd: ROOT }),
     resolveHostSidecarLocalPath: () => null,
     sidecarReadOpts: () => ({}),
     readSidecarFileAt: async () => null,
