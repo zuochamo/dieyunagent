@@ -14,11 +14,20 @@ const catalog = require('./tool-catalog');
  * 互通没启用时执行端返回 PEER_UNAVAILABLE 结构化错误，不是「工具不存在」。
  *
  * @param {import('../mcp/runtime-manager').McpRuntimeManager | null} mcpRuntime
+ * @param {string[] | null} [names]
+ *   **显式清单**（心跳轮用）：给了就只发这些工具，且**不注入 MCP**。
+ *   名单由 `guardrails-shared.aliveWakeToolNames(power, senses)` 派生 —— 它同时是「能不能调用」
+ *   的那份白名单，所以模型看得见的 = 它调得动的。MCP 工具名是运行期才知道的（`mcp_<server>__<tool>`），
+ *   写不进按名字的白名单，一律进不去；注入只会让它每轮撞一次 `READ_ONLY_SCOPE`。
  * @returns {Promise<Array<object>>} OpenAI 工具 schema 列表
  */
-async function buildMainAgentTools(mcpRuntime) {
-  const tools = catalog.toolsByNames(catalog.PLAN_RUNTIME_TOOL_NAMES);
-  for (const t of catalog.PEER_TOOLS || []) tools.push(t);
+async function buildMainAgentTools(mcpRuntime, names) {
+  const explicit = Array.isArray(names) ? names.filter((n) => typeof n === 'string' && n.trim()) : null;
+  const tools = catalog.toolsByNames(explicit || catalog.PLAN_RUNTIME_TOOL_NAMES);
+  if (!explicit) {
+    for (const t of catalog.PEER_TOOLS || []) tools.push(t);
+  }
+  if (explicit) return tools;
   if (!mcpRuntime || typeof mcpRuntime.listAgentTools !== 'function') {
     return tools;
   }

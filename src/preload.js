@@ -37,10 +37,18 @@ contextBridge.exposeInMainWorld('diecloud', {
   aliveBadge: () => ipcRenderer.invoke('alive:badge'),
   aliveSetEnabled: (payload) => ipcRenderer.invoke('alive:set-enabled', payload || {}),
   aliveReset: () => ipcRenderer.invoke('alive:reset'),
+  aliveWakeOnce: () => ipcRenderer.invoke('alive:wake-once'),
   aliveSetSense: (payload) => ipcRenderer.invoke('alive:set-sense', payload || {}),
   aliveSetOption: (payload) => ipcRenderer.invoke('alive:set-option', payload || {}),
   aliveDevices: () => ipcRenderer.invoke('alive:devices'),
   aliveNote: () => ipcRenderer.invoke('alive:note'),
+  /** 后台心跳轮刚跑完（Main → 界面）：正开着它的会话就就地补上那一轮 */
+  onAliveRan: (handler) => {
+    if (typeof handler !== 'function') return () => {};
+    const wrapped = (_evt, payload) => handler(payload || {});
+    ipcRenderer.on('alive:ran', wrapped);
+    return () => ipcRenderer.removeListener('alive:ran', wrapped);
+  },
   peerSend: (payload) => ipcRenderer.invoke('peer:send', payload || {}),
   peerSendSession: (payload) => ipcRenderer.invoke('peer:send-session', payload || {}),
   peerOpenSession: (peer) => ipcRenderer.invoke('peer:open-session', { peer }),

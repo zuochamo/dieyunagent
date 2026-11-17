@@ -92,6 +92,11 @@ const FILE_WRITE_TOOL_NAMES = Object.freeze(
  *
  * 所以这条规则是：**清单外一律拒绝**。加一个工具进这份清单 = 明确表态
  * "心跳轮可以用它"，而不是"忘了把它加进黑名单"。
+ *
+ * **这份清单同时是心跳轮的「工具表」来源**（`aliveWakeToolNames`）：模型能不能看见某个工具，
+ * 与它能不能调用它，必须是同一份数据。两边各写一份已经出过两种病（2026-11-12 实测）：
+ * 清单写了 `grep / codebase_search / memory_recall / plan_list` 却没进工具表（允许了没给，
+ * 它只能整文件读）；反过来 `web_search` 在工具表里、清单里没有（每轮撞一次 `READ_ONLY_SCOPE`）。
  */
 const ALIVE_READ_ONLY_TOOL_NAMES = Object.freeze(
   new Set([
@@ -109,6 +114,8 @@ const ALIVE_READ_ONLY_TOOL_NAMES = Object.freeze(
     'session_recall',
     // 只读地看一眼计划（不建、不跑）
     'plan_list',
+    // 看一眼内网有谁在（只读；派活/领活是 `peer_send` / `peer_claim`，那两格永远不放）
+    'peer_list',
     // 「眼睛」：看一眼现实（受 `senses.eyes` + 设置→权限 两道锁，见 ALIVE_SENSE_TOOLS）
     'camera_look',
     'desktop_camera_look'
@@ -126,6 +133,109 @@ const ALIVE_SENSE_TOOLS = Object.freeze({
   camera_look: 'eyes',
   desktop_camera_look: 'eyes'
 });
+
+/**
+ * 心跳轮的**三档权力 → 可调用工具**（唯一清单；`src/alive/store.js#WAKE_POWERS` 是档位枚举）。
+ *
+ * 默认 `read` = 原来那份白名单。放开是显式开关（`alive/settings.json#wakePower`）：
+ *   - `write`：多两个改文件的工具（`fs_write_file` / `fs_edit`）；
+ *   - `exec`：再多 `host_exec`（跑命令）与 `web_search` / `web_fetch`（出网），
+ *     外加**会占用你屏幕和键鼠**的两类：`browser_*`（核心那批，见 `alivePlaybackToolNames`）
+ *     与 `computer` —— 它们还要过「有没有别的任务在跑」的避让闸（`WAKE_YIELD`，
+ *     判据是 `getActiveAgentLoopCount() > 1`：这一轮自己算一条，多出来就是别人）。
+ * 加工具只改这里；越界判定（根目录 / 次数 / 审批 / 避让）在 `tool-gate` 的 `read-only-scope` 关卡。
+ *
+ * **为什么出网跟着 `exec` 档走，而不是单独一格**：`exec` 档的 `host_exec` 本身就能出网 ——
+ * `sandbox-policy` 在 `workspace-write` 下对「不落盘的联网命令」（`curl` 无 `-o`、`Invoke-WebRequest`…）
+ * 判的是 allow。所以在这一档挡住 `web_*` 并不构成安全边界，只是把出网挤到另一条路上：
+ * 命令行拿回来的是**原始 HTML**（翻页、编码、反爬全得模型自己扛，token 更贵），
+ * 而且绕过了 `src/gateway/web/` 里唯一的 SSRF 校验（`url-safety.assertSafeUrl`）与引擎解析。
+ * 放开这两格 = 让这一档仅有的出网走正规通道；**跨机**（`peer_send`）、**子 loop**（`subagent`）、
+ * **计划**（`plan_run` / `goal_check`）仍然一律不放 —— 它们绕过 `wakeRoot` 与次数闸。
+ */
+const ALIVE_WAKE_POWER_TOOL_NAMES = Object.freeze({
+  read: ALIVE_READ_ONLY_TOOL_NAMES,
+  write: new Set([...ALIVE_READ_ONLY_TOOL_NAMES, 'fs_write_file', 'fs_edit']),
+  exec: new Set([
+    ...ALIVE_READ_ONLY_TOOL_NAMES,
+    'fs_write_file',
+    'fs_edit',
+    'host_exec',
+    'web_search',
+    'web_fetch'
+  ])
+});
+
+/** 唤醒轮里**要过路径闸门**的工具（目标必须落在 wakeWorkspace 之下；参数名是 filePath） */
+const ALIVE_WAKE_WRITE_TOOL_NAMES = Object.freeze(new Set(['fs_write_file', 'fs_edit']));
+
+/**
+ * `exec` 档额外放开的「会占屏 / 抢键鼠」工具：整个浏览器核心批 + `computer`。
+ *
+ * 为什么单独一张表而不是塞进 `ALIVE_WAKE_POWER_TOOL_NAMES.exec`：这 30 多个 schema 很占字数，
+ * 而它们只在 `exec` 档、且**另一件事没在跑**的时候才该出现；塞进静态 Set 会让"放行"与"发下去"
+ * 又分成两处判。名字直接取自 `tool-catalog`（`BROWSER_CORE_TOOLS` 是既有的核心/高级切分，
+ * 不另造名单）；懒 require 是为了不让 guardrails 在加载期依赖整套工具 schema。
+ */
+let alivePlaybackNamesCache = null;
+function alivePlaybackToolNames() {
+  if (!alivePlaybackNamesCache) {
+    const catalog = require('./tool-catalog');
+    const core = Array.isArray(catalog.BROWSER_CORE_TOOLS) ? catalog.BROWSER_CORE_TOOLS : [];
+    alivePlaybackNamesCache = core
+      .map((t) => (t && t.function && t.function.name) || '')
+      .filter(Boolean)
+      .concat('computer');
+  }
+  return alivePlaybackNamesCache;
+}
+
+/** 这些工具会占屏 / 抢键鼠：有别的任务在跑时必须让路（`WAKE_YIELD`） */
+const ALIVE_YIELD_TOOL_PREFIXES = Object.freeze(['browser_']);
+const ALIVE_YIELD_TOOL_NAMES = Object.freeze(new Set(['computer']));
+
+function isAliveYieldTool(name) {
+  const n = String(name || '');
+  return ALIVE_YIELD_TOOL_NAMES.has(n) || ALIVE_YIELD_TOOL_PREFIXES.some((p) => n.startsWith(p));
+}
+
+/**
+ * 这一档**能不能调用**这个工具（`tool-gate` 的白名单判据；工具表也从它派生，见下）。
+ * 判据只有两份：档位清单 + `exec` 档的占屏/键鼠批。
+ */
+function isAliveWakeToolAllowed(power, name) {
+  const tier = power || 'read';
+  if ((ALIVE_WAKE_POWER_TOOL_NAMES[tier] || ALIVE_WAKE_POWER_TOOL_NAMES.read).has(name)) return true;
+  if (tier !== 'exec') return false;
+  const playback = alivePlaybackToolNames();
+  return playback.includes(String(name || ''));
+}
+
+/**
+ * 心跳轮**这一轮真正发给模型的工具表**：该档清单 ∩ 开关开着的。
+ *
+ * 单一来源只有两份数据 —— 档位清单（`ALIVE_WAKE_POWER_TOOL_NAMES`，`exec` 档另加
+ * `alivePlaybackToolNames`）与开关表。以前工具表在 `main-agent-tools` 里按
+ * `PLAN_RUNTIME_TOOL_NAMES` 另拼一份，与清单互不知道，于是同一件事出现两种病：
+ * 清单里有但模型看不见（`grep` / `codebase_search` / `memory_recall` / `session_recall` /
+ * `plan_list` / `peer_list` 全都没发下去，它的"读"只剩整文件读），工具表里有但清单没有
+ * （`web_search` 每轮撞一次 `READ_ONLY_SCOPE`，白烧一轮）。
+ *
+ * `caps` 是开关表（缺省一律按关）：`eyes`（感官，摄像头）、`browserAutomation`、`osControl`（本机权限）。
+ * 关着的工具不注入：发一个注定被拒的工具，等于让它每轮试一次再失败。
+ */
+function aliveWakeToolNames(power, caps) {
+  const on = (key) => !!(caps && caps[key] === true);
+  const names = [...(ALIVE_WAKE_POWER_TOOL_NAMES[power] || ALIVE_WAKE_POWER_TOOL_NAMES.read)];
+  if (power === 'exec') names.push(...alivePlaybackToolNames());
+  return names.filter((name) => {
+    const sense = ALIVE_SENSE_TOOLS[name];
+    if (sense) return on(sense);
+    if (ALIVE_YIELD_TOOL_NAMES.has(name)) return on('osControl');
+    if (isAliveYieldTool(name)) return on('browserAutomation');
+    return true;
+  });
+}
 
 /**
  * 单次调用可能**合法运行很久**的工具（工具级 stall 看门狗要给更长窗口）。
@@ -682,12 +792,26 @@ function createGuardrailApi(getLimits) {
  */
 const PERMISSION_GATED_TOOLS = Object.freeze({
   camera_look: 'camera',
-  desktop_camera_look: 'desktopCamera'
+  desktop_camera_look: 'desktopCamera',
+  /**
+   * 键鼠 / 截屏：`osControl` 本来就在 `rpc.js` 那道闸上（`computer` 的每个动作都要它）；
+   * 收到这里是为了**在关卡层就说清楚**（同一份 `host-permissions.json`，不另写一套判定），
+   * 而不是让模型跑到 RPC 才吃到一句通用错误。
+   */
+  computer: 'osControl'
+});
+
+/** 权限键 → 给人看的名字（新增权限键时只改这里） */
+const PERMISSION_LABELS = Object.freeze({
+  camera: '手机摄像头',
+  desktopCamera: '本机摄像头',
+  osControl: '电脑控制（键鼠 / 截屏）',
+  browserAutomation: '浏览器自动化'
 });
 
 /** 能力未授权时的拦截文案（模型据此换策略，不要反复试）。 */
 function permissionGateBlockMessage(name, key) {
-  const label = key === 'camera' ? '手机摄像头' : key === 'desktopCamera' ? '本机摄像头' : key;
+  const label = PERMISSION_LABELS[key] || key;
   return (
     `工具 ${name} 没有执行：用户没有打开「${label}」权限（默认关）。` +
     '这不是故障，重试也不会成功。请改用其它方式（文字问用户、computer 看屏幕、browser_snapshot），' +
@@ -730,6 +854,12 @@ const SHARED_EXPORTS = {
   FILE_WRITE_TOOL_NAMES,
   ALIVE_READ_ONLY_TOOL_NAMES,
   ALIVE_SENSE_TOOLS,
+  ALIVE_WAKE_POWER_TOOL_NAMES,
+  ALIVE_WAKE_WRITE_TOOL_NAMES,
+  aliveWakeToolNames,
+  isAliveWakeToolAllowed,
+  isAliveYieldTool,
+  alivePlaybackToolNames,
   LONG_RUNNING_TOOL_NAMES,
   isLongRunningAgentTool,
   FILE_PATH_KEYED_WRITE_TOOL_NAMES,

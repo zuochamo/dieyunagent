@@ -22,6 +22,7 @@
  */
 
 const { loadModelSettings, resolveTextApiConfig } = require('../model-settings');
+const crypto = require('crypto');
 const { runRustAgentLoop } = require('./rust-loop-runner');
 const { resolveLoopToolCallLimit } = require('./agent-limits');
 const { applyTierRuntime, resolveContextTierIdFromSettings } = require('./model-runtime-by-tier');
@@ -34,6 +35,7 @@ const {
 } = require('./session-context');
 const { clearToolHarnessSessionsForSession } = require('./tool-harness');
 const { buildMainAgentTools } = require('./main-agent-tools');
+const { aliveWakeToolNames } = require('./guardrails-shared');
 const { buildLoopCompactionHandler } = require('./compaction-loop');
 const { buildPrepSystemPromptDeps } = require('./system-prompt-prep-main');
 const { isAbortError } = require('../llm-reconnect-retry');
@@ -182,6 +184,37 @@ async function runMainTurn(ctx) {
     ctx.toolScope && ctx.toolScope.senses && typeof ctx.toolScope.senses === 'object'
       ? ctx.toolScope.senses
       : null;
+  /**
+   * 心跳轮的权力档（`read`/`write`/`exec`）+ 允许动的根 + 这一轮的写/执行预算。
+   * 判定全在 `tool-gate` 的 `wake-power-scope` 关卡，这里只负责**原样传下去**。
+   */
+  const wakeScope =
+    ctx.toolScope && typeof ctx.toolScope.wakePower === 'string' && ctx.toolScope.wakePower
+      ? {
+          wakePower: String(ctx.toolScope.wakePower),
+          wakeRoot: String(ctx.toolScope.wakeRoot || ''),
+          wakeBudget: ctx.toolScope.wakeBudget && typeof ctx.toolScope.wakeBudget === 'object'
+            ? ctx.toolScope.wakeBudget
+            : null
+        }
+      : null;
+  /**
+   * 心跳轮的工具表：由**档位清单 + 开关表**派生（`aliveWakeToolNames` 是唯一来源，
+   * 与 gate 的白名单是同一份数据）—— 模型看得见的 = 它调得动的。
+   *
+   * 开关表 = 感官（`senses`：抽屉 / 眼睛 / 嘴耳）+ 本机能力（`caps`：浏览器自动化 / 电脑控制）。
+   *
+   * 其它 Main 侧调用方（计划 / 频道 / headless / peer 来信）不传 `toolScope` → null →
+   * 仍然是 `PLAN_RUNTIME + PEER_TOOLS + MCP` 那一档，行为零变化。
+   */
+  const capsScope =
+    ctx.toolScope && ctx.toolScope.caps && typeof ctx.toolScope.caps === 'object'
+      ? ctx.toolScope.caps
+      : null;
+  const wakeToolNames =
+    readOnlyScope || wakeScope
+      ? aliveWakeToolNames(wakeScope ? wakeScope.wakePower : 'read', { ...(sensesScope || {}), ...(capsScope || {}) })
+      : null;
   const userText = String(ctx.userText || '').trim();
   const ledgerText = String(ctx.ledgerText || userText).trim();
   if (!ledgerText) throw userError('消息内容为空', 'EMPTY_TEXT');
@@ -194,8 +227,9 @@ async function runMainTurn(ctx) {
     model: ctx.model
   });
 
-  // 先落用户轮次：历史读回来时它就是「当前任务」，多模态 part 由 prepared 顶替该条
-  await gateway.invokeRpc('memory.message_append', {
+  // 先落用户轮次：历史读回来时它就是「当前任务」，多模态 part 由 prepared 顶替该条。
+  // `localMsgId` 要留着：后面把这一轮的 trace 与 assistant 行对齐（回放时"思考区"靠它）。
+  const userIns = await gateway.invokeRpc('memory.message_append', {
     sessionId,
     role: 'user',
     content: packMessageMeta(
@@ -204,6 +238,7 @@ async function runMainTurn(ctx) {
       { role: 'user' }
     )
   });
+  const userMessageId = Number(userIns && userIns.localMsgId) || undefined;
 
   const snapshot = await buildTurnSnapshot({
     gateway,
@@ -253,7 +288,7 @@ async function runMainTurn(ctx) {
     turnRide
   );
 
-  const tools = [...(await buildMainAgentTools(ctx.mcpRuntime || null))];
+  const tools = [...(await buildMainAgentTools(ctx.mcpRuntime || null, wakeToolNames))];
   if (Array.isArray(ctx.extraTools) && ctx.extraTools.length) tools.push(...ctx.extraTools);
   /**
    * 一轮内工作空间可能被 `session_set_workspace` 改掉（频道 / headless 换项目）：
@@ -315,7 +350,8 @@ async function runMainTurn(ctx) {
           // 不传就落到 default 档，与本次运行的模型档位不一致（桌面路径一直有传）
           contextTierId,
           ...(readOnlyScope ? { readOnly: true } : null),
-          ...(sensesScope ? { senses: sensesScope } : null)
+          ...(sensesScope ? { senses: sensesScope } : null),
+          ...(wakeScope || null)
         });
         // 调用后的观察点（目前只有生命感用它给「睁眼」留痕）：**只观察，不改结果**，
         // 它自己抛错也不能把这轮工具结果弄丢。
@@ -364,13 +400,50 @@ async function runMainTurn(ctx) {
 
   // 落库与桌面聊天同一闸门：带标签的思考引用只用于展示，写进账本换占位。
   // 后台心跳轮允许没有正文（只做了一次决策/一次工具调用），空正文不落一条空消息。
+  //
+  // 思考与 trace 也要落（2026-11-12）：以前只有正文进账本、trace 从不存 ——
+  // 于是「它自己醒来」的那几轮在主窗口/会话里只有结论，**看不到思考过程**（桌面聊天有），
+  // 用户没法判断它为什么 DEFER。这里补三件事，全部复用桌面那条链的单一来源：
+  //   1. `messages.reasoning`：`agent-round-text.reasoningTextFromTrace`（与桌面同一份）；
+  //   2. assistant meta 的 `traceRunId`：Renderer 据此回放时去 `agent.trace_get` 补思考区；
+  //   3. `agent.trace_save`：结构化 trace 落 `agent_traces`（瘦身规则同一份）。
   const body = roundText.persistableTurnText(reply);
+  /**
+   * trace 的身份必须**全局唯一**：core 给循环发的 `runId` 是**进程内自增**（`run-1`、`run-2`…），
+   * 重启就从 `run-1` 重来。拿它当 `agent_traces` 的键，两次不同的轮次会撞在一起
+   * （`agent.trace_get` 按 runId 取最新一条 → 思考区可能显示成别人那一轮的内容）。
+   * 所以这里自己发一个，前缀与桌面链路（`createTraceRunId`）一致。
+   */
+  const traceRunId = trace.length ? `trace-${crypto.randomUUID()}` : '';
   if (body) {
-    await gateway.invokeRpc('memory.message_append', {
+    const reasoning = roundText.reasoningTextFromTrace(trace);
+    const ins = await gateway.invokeRpc('memory.message_append', {
       sessionId,
       role: 'assistant',
-      content: packMessageMeta(body, { trigger: ctx.triggerMeta || null }, { role: 'assistant' })
+      content: packMessageMeta(
+        body,
+        { trigger: ctx.triggerMeta || null, ...(traceRunId ? { traceRunId } : {}) },
+        { role: 'assistant' }
+      ),
+      ...(reasoning ? { reasoning } : {})
     });
+    if (traceRunId) {
+      try {
+        await gateway.invokeRpc('agent.trace_save', {
+          runId: traceRunId,
+          sessionId,
+          messageId: Number(ins && ins.localMsgId) || undefined,
+          userMessageId,
+          trace: roundText.stripTraceUiOnlyFields(trace),
+          traceFrom: 0,
+          phase: 'assistant',
+          status: aborted ? 'aborted' : 'completed'
+        });
+      } catch (err) {
+        // 思考区补不上不该让这一轮算失败：正文已经在账本里了
+        console.warn(`[turn] trace 落库失败（思考区会缺一段）：${(err && err.message) || err}`);
+      }
+    }
   }
   // 标题：频道侧按「渠道 + 会话」给稳定标题（如「企业微信 · 张三」）；不给就保持库里原值
   // （`memory.touch_session` 的 title 是可选的，旧 agent-turn 一直在传，搬家时漏了）

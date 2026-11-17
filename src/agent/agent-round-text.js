@@ -134,6 +134,23 @@ function persistableTurnText(reply) {
 }
 
 /**
+ * 落库前的 trace 瘦身：只去掉**纯展示用**的字段（`liveNote` = 流式期间的临时旁注）。
+ *
+ * 为什么要有单一实现：桌面聊天（Renderer 的 `agent/trace-store.js`）与 Main 侧轮次
+ * （心跳 / 频道 / headless 的 `main-turn-runner.js`）都要把同一份结构化 trace 写进
+ * `agent_traces`；两处各写一份 map，迟早一边漏字段、一边把展示字段也存进库。
+ * 唯一入口在这里，两侧都调它。
+ */
+function stripTraceUiOnlyFields(trace) {
+  return (Array.isArray(trace) ? trace : []).map((entry) => {
+    if (!entry || typeof entry !== 'object' || entry.liveNote == null) return entry;
+    const next = { ...entry };
+    delete next.liveNote;
+    return next;
+  });
+}
+
+/**
  * 交付/展示归一：正文优先，无正文时才显式回退（不再用长度启发式）。
  *
  * `fallbacks.reasoningFallback` / `fallbacks.toolFallback` 都是**已提取好的字符串**
@@ -167,6 +184,7 @@ const api = {
   isReasoningFallbackText,
   resolveTurnDelivery,
   persistableTurnText,
+  stripTraceUiOnlyFields,
   pickNormalizedAssistantReply
 };
 

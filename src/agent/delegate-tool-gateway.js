@@ -3,6 +3,8 @@
 const { normalizeAgentToolName } = require('./tool-guardrails');
 const { fsEditArgsPresent } = require('./guardrails-shared');
 const { applyPatchUnsupported } = require('./tool-validate');
+// `local:` 前缀 = 模型显式指「本机」（跑叠云这台机器）：路径语义唯一来源在 gateway/host-local
+const { isLocalPathRef, isLocalFlag } = require('../gateway/host-local');
 // 护栏数字单一来源（AGENTS.md §5）：fs 读取字节上限只改 agent-limits。
 const { AGENT_LIMITS_DEFAULTS, getAgentLimits } = require('./agent-limits');
 
@@ -47,6 +49,9 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
   function resolvePath(p) {
     if (p == null) return p;
     const fp = String(p);
+    // `local:` 是本机绝对路径的显式标记：绝不能当相对路径拼到工作空间上
+    //（SSH 会话里会拼出 `ssh://…/local:C:\…` 这种永远不存在的假路径）
+    if (isLocalPathRef(fp)) return fp;
     if (/^[a-zA-Z]:[\\/]/.test(fp) || fp.startsWith('\\\\')) return fp;
     const base = wt || ws;
     if (!base || /^ssh:\/\//i.test(String(base))) return fp;
@@ -98,10 +103,19 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         direction: a.direction,
         amount: a.amount,
         ms: a.ms,
-        display: a.display
+        display: a.display,
+        // 两台机器：缺省 local（叠云这台机器）；remote = 会话 SSH 主机的屏幕
+        target: a.target
       };
       if (Array.isArray(a.coordinate)) params.coordinate = a.coordinate;
       if (Array.isArray(a.to)) params.to = a.to;
+      // 这几个是工具描述里承诺过的参数，过去在这里被静默吞掉：
+      // schema 允许、模型传了、执行端永远收不到（区域裁剪 / 修饰键 / wait_until 条件 / 窗口句柄全失效）
+      if (Array.isArray(a.modifiers)) params.modifiers = a.modifiers;
+      if (Array.isArray(a.region)) params.region = a.region;
+      if (a.condition != null) params.condition = a.condition;
+      if (a.handle != null) params.handle = a.handle;
+      if (a.clickCount != null) params.clickCount = a.clickCount;
       return gateway.invokeRpc('computer.action', withRunWorkspace(params));
     }
     case 'host_exec':
@@ -110,6 +124,8 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         withRunWorkspace({
           command: a.command,
           cwd: resolveExecCwd(a.cwd),
+          // local:true = 在叠云这台机器上跑（SSH 会话里默认是远端主机）
+          ...(isLocalFlag(a.local) ? { local: true } : {}),
           detached: !!a.detached,
           timeoutMs: a.timeoutMs,
           waitMs: a.waitMs,
@@ -120,10 +136,12 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       );
     case 'host_proc': {
       const action = a.action === 'kill' ? 'kill' : a.action === 'output' ? 'output' : 'list';
+      // local:true = 看/管本机那张句柄表（SSH 会话里起过本机后台进程时用）
+      const localFlag = isLocalFlag(a.local) ? { local: true } : {};
       if (action === 'kill') {
         return gateway.invokeRpc(
           'host.proc_kill',
-          withRunWorkspace({ id: a.id, pid: a.pid, sessionId: ctx.sessionId || undefined })
+          withRunWorkspace({ id: a.id, pid: a.pid, sessionId: ctx.sessionId || undefined, ...localFlag })
         );
       }
       if (action === 'output') {
@@ -135,7 +153,8 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
             offset: a.offset,
             tailBytes: a.tailBytes,
             waitMs: a.waitMs,
-            sessionId: ctx.sessionId || undefined
+            sessionId: ctx.sessionId || undefined,
+            ...localFlag
           })
         );
       }
@@ -143,7 +162,8 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
         'host.proc_list',
         withRunWorkspace({
           includeFinished: a.includeFinished === true,
-          sessionId: ctx.sessionId || undefined
+          sessionId: ctx.sessionId || undefined,
+          ...localFlag
         })
       );
     }

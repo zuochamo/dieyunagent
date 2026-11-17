@@ -95,7 +95,13 @@ function formatWorkspaceChunk(workspaceInfo, agentHome) {
       // 远程宽松档由网关侧同一处给出（remote-path.remoteAllowedRoots）；
       // 提示不给绝对路径（HOME 由 ssh 层探测），避免被当成相对路径拼到工作空间下
       const remoteExtra =
-        '\n远程可读写范围：$HOME（含 .dieyun/workspace 兜底目录）与 /tmp；需要绝对路径时先 host_exec 执行 echo $HOME';
+        '\n远程可读写范围：$HOME（含 .dieyun/workspace 兜底目录）与 /tmp；需要绝对路径时先 host_exec 执行 echo $HOME' +
+        '\n只有 fs / shell / 索引走 SSH。电脑控制（computer）、浏览器、摄像头、看屏幕这些默认仍作用于本机' +
+        '（叠云运行的这台机器）—— 要看哪台机器的屏幕由 target 说清楚：缺省 target=local 是本机，' +
+        'target=remote 是这台 SSH 主机自己的桌面（远端有图形会话才看得到，缺工具会告诉你装什么）。' +
+        '\n要碰本机的文件或命令：路径加 local: 前缀（例 local:C:\\Users\\me\\AppData\\Roaming\\dieyunagent\\auth.json），' +
+        '或在 host_exec 上加 local=true；不带前缀的路径/命令一律指会话工作空间（远端主机）。' +
+        '本机路径必须是绝对路径（本机相对路径没有唯一基准），本机读写同样要过本机白名单与沙箱档位。';
       return `【当前工作空间 · SSH】\n${ws.displayPath || ws.workspacePath}\n${connHint}${remoteExtra}`;
     }
     const localExtra =
