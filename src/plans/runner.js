@@ -5,7 +5,7 @@ const { buildTaskSkillsSystem } = require('../automation/skill-prompt');
 const { ASSISTANT_IDENTITY, formatDieyunSystemBlock } = require('../dieyun-instructions');
 const { runPlanAgentLoop } = require('./plan-agent-runner');
 const { appendPlanLog } = require('./plan-log');
-const { chatCompletionJson } = require('../llm-proxy');
+const { completeOnce, currentLlmCompleteBridge } = require('../agent/llm-complete');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('../agent/llm-request');
 
 function resolveEndpoint(baseUrl) {
@@ -18,8 +18,8 @@ function resolveEndpoint(baseUrl) {
  *
  * - 模型配置经 resolveTextApiConfig 解析：按本次运行路由 → 供应商/自定义模型 → 兜底，
  *   不再直接读顶层 settings.apiKey（自定义模型 / 供应商场景下顶层往往为空）。
- * - 传输复用 src/llm-proxy.js#chatCompletionJson：带连接/空闲/总时长超时与 abort，
- *   勿在此另写裸 fetch。
+ * - 传输走 core 的 `llm.complete`（RPC）：端点/请求头/超时/解析都由 core 负责，
+ *   勿在此另写裸 fetch（也不许再出现第二份 SSE 解析）。
  *
  * @param {string} userData
  * @param {string} prompt
@@ -39,25 +39,24 @@ async function chatCompletion(userData, prompt, extraSystem, opts = {}) {
     { role: 'user', content: prompt }
   ];
 
-  const json = await chatCompletionJson(resolveEndpoint(cfg.baseUrl), {
-    headers: buildLlmHeadersFromConfig(cfg, { sessionId: opts.sessionId }),
-    body: JSON.stringify({
+  const url = resolveEndpoint(cfg.baseUrl);
+  // 请求由 core 发（`llm.complete`）：端点/请求头/超时/解析/usage 只有 core 那一份实现。
+  // 这里只负责「问什么」（system + user）和「怎么用结果」。
+  const result = await completeOnce({
+    coreBridge: opts.coreBridge || currentLlmCompleteBridge(),
+    url,
+    // 取消语义保留：abort 后立刻返回（core 侧那次请求跑完即弃）
+    signal: opts.signal || null,
+    llm: { ...cfg, headers: buildLlmHeadersFromConfig(cfg, { sessionId: opts.sessionId }) },
+    body: {
       model: cfg.model,
       messages,
       temperature: Number(settings.temperature) || 0.3,
       max_tokens: Number(settings.maxTokens) || MAX_TOKENS_DEFAULT
-    }),
-    signal: opts.signal || null
+    }
   });
 
-  return (
-    (json &&
-      json.choices &&
-      json.choices[0] &&
-      json.choices[0].message &&
-      json.choices[0].message.content) ||
-    ''
-  );
+  return String((result && result.content) || '');
 }
 
 /**

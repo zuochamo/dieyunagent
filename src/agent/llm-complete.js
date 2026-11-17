@@ -51,8 +51,7 @@ async function completeOnce(opts) {
   const body = (opts && opts.body) || {};
   const model = String(body.model || llm.model || '');
   const url = String((opts && opts.url) || '').trim() || resolveLlmEndpoint(llm && llm.baseUrl);
-  const headers = buildLlmHeadersFromConfig(llm);
-  return bridge.invoke(
+  const pending = bridge.invoke(
     'llm.complete',
     {
       url,
@@ -60,11 +59,33 @@ async function completeOnce(opts) {
       stream: !!(opts && opts.stream),
       includeRaw: !!(opts && opts.includeRaw),
       runId: (opts && opts.runId) || '',
-      // 端点与鉴权原样交给 core：这里只搬运宿主已经算好的头
-      llm: { ...llm, model, headers }
+      // 端点与鉴权原样交给 core：调用方给过 headers 就用它的，没给才在这里按同一份
+      // `llm-request.js` 算一次（鉴权头仍然只有一个来源）
+      llm: {
+        ...llm,
+        model,
+        headers: (llm && llm.headers) || buildLlmHeadersFromConfig(llm)
+      }
     },
     (opts && opts.timeoutMs) || undefined
   );
+  // 调用方的 abort 语义：立刻返回，core 侧那次请求自己跑完就丢。
+  // （没有 cancel RPC：一次性调用的结果已经没人要了，专门为它加一条取消协议是加法。）
+  const signal = opts && opts.signal;
+  if (!signal) return pending;
+  if (signal.aborted) throw abortError();
+  return Promise.race([
+    pending,
+    new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(abortError()), { once: true });
+    })
+  ]);
+}
+
+function abortError() {
+  const err = new Error('已取消');
+  err.name = 'AbortError';
+  return err;
 }
 
 module.exports = {
