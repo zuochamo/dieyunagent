@@ -41,6 +41,8 @@
     "src/agent/request-snapshot.js",
     "src/agent/tool-gate.js",
     "src/peer/client.js",
-    "src/peer/server.js"
+    "src/peer/server.js",
+    "src/goals/session-goal.js",
+    "src/peer/wire.js"
   ]
 }

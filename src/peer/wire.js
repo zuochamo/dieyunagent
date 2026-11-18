@@ -1,4 +1,4 @@
-// 类型债（暂缓）：本文件还有未修完的类型错，因此**没**列进 tsconfig.check.json。把 @ts-check 留在第 1 行会让人以为它在被检查 —— 宁可明说没开；清单见 docs/RUST-CORE-REFACTOR-PLAN.md「类型债」一节。
+// @ts-check
 'use strict';
 
 /**
@@ -40,6 +40,7 @@ const ENVELOPE_TYPE = Object.freeze({
   PRESENCE: 'presence'
 });
 
+/** @type {readonly string[]} */
 const ENVELOPE_TYPES = Object.freeze(Object.values(ENVELOPE_TYPE));
 
 const CLAIM_KIND = Object.freeze({

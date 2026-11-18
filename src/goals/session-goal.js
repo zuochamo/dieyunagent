@@ -1,4 +1,4 @@
-// 类型债（暂缓）：本文件还有未修完的类型错，因此**没**列进 tsconfig.check.json。把 @ts-check 留在第 1 行会让人以为它在被检查 —— 宁可明说没开；清单见 docs/RUST-CORE-REFACTOR-PLAN.md「类型债」一节。
+// @ts-check
 'use strict';
 
 /**
@@ -135,7 +135,9 @@ function fitGoalToBudget(goal, maxChars) {
   if (size() > budget) {
     // 单条事实就撑爆预算（例如 objective + 一条 2000 字符命令）：宁可报错也不写一条
     // 会被 Rust 拒掉的账 —— 后者只会让模型以为「写成功了」。
-    const e = new Error('目标超出存储上限（goalBlobMaxChars）');
+    const e = /** @type {Error & { code?: string }} */ (
+      new Error('目标超出存储上限（goalBlobMaxChars）')
+    );
     e.code = 'GOAL_TOO_LARGE';
     throw e;
   }
@@ -284,7 +286,8 @@ function recordClaim(goal, claim) {
  * `attempt` 的自增**不在这里**：那在一轮开始时（`agent:rust-loop-run` 入口的
  * `advanceAttempt`）做，一次一轮，人驱动的轮与自动续跑的轮口径一致。
  *
- * @param {{ invokeRpc: Function, sessionId: string, limits?: object, log?: Function }} opts
+ * @param {{ invokeRpc?: Function, sessionId?: string, limits?: object, log?: Function }} [opts]
+ *   （函数体对缺字段有守卫，所以给调用方留 = {} 的默认值形态；JSDoc 保留必填语义）
  * @returns {Promise<null | {active: boolean, cont: boolean, stop: string|null, attempt: number, max: number}>}
  *   无目标 / 已收尾 / 已暂停 → null（Renderer 拿不到这个字段就不续跑）
  */
