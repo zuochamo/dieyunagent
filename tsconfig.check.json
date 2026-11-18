@@ -37,6 +37,9 @@
     "src/peer/store.js",
     "src/peer/workspace-key.js",
     "src/plans/goal-run.js",
-    "src/plans/plan-run-events.js"
+    "src/plans/plan-run-events.js",
+    "src/agent/request-snapshot.js",
+    "src/agent/tool-gate.js",
+    "src/peer/client.js"
   ]
 }

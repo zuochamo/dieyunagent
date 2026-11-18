@@ -1,4 +1,4 @@
-// 类型债（暂缓）：本文件还有未修完的类型错，因此**没**列进 tsconfig.check.json。把 @ts-check 留在第 1 行会让人以为它在被检查 —— 宁可明说没开；清单见 docs/RUST-CORE-REFACTOR-PLAN.md「类型债」一节。
+// @ts-check
 'use strict';
 
 /**
@@ -86,12 +86,16 @@ function wrapStructuredError(failure, extra = {}) {
  * 归一本身幂等，但"归一发生在哪"决定了别名工具（write_file / edit / str_replace_editor …）
  * 会不会在某一层被跳过判定 —— 所以只留一个入口。
  *
- * @param {{ name: string, args?: object, session?: object, harness?: object, permissions?: object,
- *           extraAfterHooks?: Array<object> }} desc
+ * @param {{ name?: string, args?: object, session?: object, harness?: object, permissions?: object,
+ *           extraAfterHooks?: Array<object> }} [desc]
  *   `permissions` 是调用方手上已有的权限快照（Main 的 `gateway.getPermissions()`）；
  *   给不出就看关卡自己按 userDataPath 读同一份 store，两条路读的是**同一个文件**。
+ *
+ *   字段全标可选 + 局部变量显式标成这个形状：`desc || {}` 会得到一个 `形状 | {}` 联合，
+ *   在 `{}` 那一支上读任何字段都会报「不存在」（TypeScript 不去猜空对象将来会有啥）。
  */
 function createToolCall(desc) {
+  /** @type {{ name?: string, args?: object, session?: object, harness?: object, permissions?: object, extraAfterHooks?: Array<object> }} */
   const d = desc || {};
   const rawName = String(d.name || '');
   const rawArgs = d.args && typeof d.args === 'object' ? d.args : {};
@@ -168,13 +172,21 @@ const hookValidateArgs = {
   id: 'validate-args',
   stage: 'before',
   run(call) {
+    /**
+     * 局部标成「扁平形状」而不是直接用返回值的可辨识联合：本仓 `tsconfig.check.json` 没开
+     * `strictNullChecks`，字面量判别式（`ok: true` / `ok: false`）在这种模式下不参与收窄，
+     * 于是联合的每一支都会报「字段不存在」。这里只声明本函数真正读的字段。
+     *
+     * @type {{ ok: boolean, error?: string, errorCode?: string, suggestedFix?: string }}
+     */
     const v = validateToolArgs(call.name, call.args);
-    if (v.ok) return;
-    recordTelemetry(call, false, v.errorCode, 0);
-    call.block = wrapStructuredError(
-      { retryable: false, errorCode: v.errorCode, error: v.error },
-      { suggestedFix: v.suggestedFix }
-    );
+    if (!v.ok) {
+      recordTelemetry(call, false, v.errorCode || '', 0);
+      call.block = wrapStructuredError(
+        { retryable: false, errorCode: v.errorCode, error: v.error },
+        { suggestedFix: v.suggestedFix }
+      );
+    }
   }
 };
 
