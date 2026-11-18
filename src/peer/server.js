@@ -1,4 +1,4 @@
-// 类型债（暂缓）：本文件还有未修完的类型错，因此**没**列进 tsconfig.check.json。把 @ts-check 留在第 1 行会让人以为它在被检查 —— 宁可明说没开；清单见 docs/RUST-CORE-REFACTOR-PLAN.md「类型债」一节。
+// @ts-check
 'use strict';
 
 /**
@@ -50,7 +50,13 @@ function createPeerServer(opts) {
   let boundPort = 0;
   /** @type {Set<any>} */
   const clients = new Set();
-  /** @type {Map<string, { peerId: string, name: string, workspace: object, host: string, at: number }>} */
+  /**
+   * 连上来的对端。形状按**实际落进去的字段**写全：`role` / `port` / `trusted` / `claims`
+   * 都在下面的 `connected.set(...)` 里写入，少写一个就是「读的时候说字段不存在」。
+   *
+   * @type {Map<string, { peerId: string, name: string, workspace: object, host: string, at: number,
+   *                      role?: string, port?: number, trusted?: boolean, claims?: any[] }>}
+   */
   const connected = new Map();
 
   function handleHttp(req, res) {

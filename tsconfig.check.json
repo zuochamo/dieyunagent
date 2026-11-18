@@ -40,6 +40,7 @@
     "src/plans/plan-run-events.js",
     "src/agent/request-snapshot.js",
     "src/agent/tool-gate.js",
-    "src/peer/client.js"
+    "src/peer/client.js",
+    "src/peer/server.js"
   ]
 }
