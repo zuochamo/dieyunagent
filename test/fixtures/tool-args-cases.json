@@ -1,0 +1,104 @@
+{
+  "$comment": "tool-validate 双跑夹具（docs/NODE-THINNING-PLAN.md N2.1 第二段）。每条是「工具 + 入参 → 期望结论」，当前手写校验必须全部通过；等 `tool-validate.generated.js` 落地后，同一份夹具要在新旧两侧都通过 —— 结论不一致就等于改了校验口径。只覆盖**纯机械分支**（语义块 computer / mcp_* / apply_patch / ssh 的凭据与路径正则不在此列）。",
+  "coverage": [
+    "agents_md_propose",
+    "codebase_search",
+    "fs_read_file",
+    "fs_list_dir",
+    "fs_write_file",
+    "glob",
+    "goal_check",
+    "goal_finish",
+    "goal_start",
+    "goal_update",
+    "grep",
+    "host_print_image",
+    "host_proc",
+    "lsp",
+    "plan_create",
+    "read_symbol",
+    "web_search",
+    "worktree"
+  ],
+  "cases": [
+    { "tool": "agents_md_propose", "why": "缺 content", "args": { "section": "构建" }, "expect": { "ok": false, "errorCode": "MISSING_CONTENT" } },
+    { "tool": "agents_md_propose", "why": "齐全", "args": { "section": "commands", "content": "npm test" }, "expect": { "ok": true } },
+    { "tool": "agents_md_propose", "why": "section 不在枚举里", "args": { "section": "构建", "content": "npm test" }, "expect": { "ok": false, "errorCode": "INVALID_ARG" } },
+    { "tool": "agents_md_propose", "why": "空白 section 也算缺", "args": { "section": "   ", "content": "x" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+
+    { "tool": "codebase_search", "why": "缺 query", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "codebase_search", "why": "空白 query", "args": { "query": "  " }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "codebase_search", "why": "有 query", "args": { "query": "索引" }, "expect": { "ok": true } },
+
+    { "tool": "fs_read_file", "why": "缺路径", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_PATH" } },
+    { "tool": "fs_read_file", "why": "filePath", "args": { "filePath": "src/main.js" }, "expect": { "ok": true } },
+    { "tool": "fs_read_file", "why": "dirPath 不成立（只有 fs_list_dir 收）", "args": { "dirPath": "src" }, "expect": { "ok": false, "errorCode": "MISSING_PATH" } },
+
+    { "tool": "fs_list_dir", "why": "缺路径", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_PATH" } },
+    { "tool": "fs_list_dir", "why": "dirPath", "args": { "dirPath": "src" }, "expect": { "ok": true } },
+
+    { "tool": "host_print_image", "why": "缺路径", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_PATH" } },
+    { "tool": "host_print_image", "why": "filePath", "args": { "filePath": "a.png" }, "expect": { "ok": true } },
+
+    { "tool": "fs_write_file", "why": "缺 filePath", "args": { "content": "x" }, "expect": { "ok": false, "errorCode": "MISSING_PATH" } },
+    { "tool": "fs_write_file", "why": "缺 content", "args": { "filePath": "a.js" }, "expect": { "ok": false, "errorCode": "MISSING_CONTENT" } },
+    { "tool": "fs_write_file", "why": "content 非字符串", "args": { "filePath": "a.js", "content": 5 }, "expect": { "ok": false, "errorCode": "INVALID_ARG" } },
+    { "tool": "fs_write_file", "why": "空字符串 content 合法（清空文件）", "args": { "filePath": "a.js", "content": "" }, "expect": { "ok": true } },
+
+    { "tool": "glob", "why": "缺 pattern", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "glob", "why": "glob 不是 pattern（别名已删）", "args": { "glob": "**/*.js" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+
+    { "tool": "grep", "why": "缺 pattern", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "grep", "why": "query 不是 pattern（别名已删）", "args": { "query": "TODO" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+
+    { "tool": "goal_start", "why": "缺 objective", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "goal_start", "why": "有 objective", "args": { "objective": "把测试跑绿" }, "expect": { "ok": true } },
+
+    { "tool": "goal_update", "why": "三样都没给", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "goal_update", "why": "只给 todos", "args": { "todos": [] }, "expect": { "ok": true } },
+    { "tool": "goal_update", "why": "只给 objective", "args": { "objective": "x" }, "expect": { "ok": true } },
+
+    { "tool": "goal_check", "why": "command / check_id 都没给", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "goal_check", "why": "command", "args": { "command": "npm test" }, "expect": { "ok": true } },
+    { "tool": "goal_check", "why": "checkId 驼峰", "args": { "checkId": "c1" }, "expect": { "ok": true } },
+
+    { "tool": "goal_finish", "why": "outcome 非法", "args": { "outcome": "done" }, "expect": { "ok": false, "errorCode": "INVALID_ARG" } },
+    { "tool": "goal_finish", "why": "缺 outcome", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "goal_finish", "why": "complete", "args": { "outcome": "complete" }, "expect": { "ok": true } },
+    { "tool": "goal_finish", "why": "blocked", "args": { "outcome": "blocked" }, "expect": { "ok": true } },
+
+    { "tool": "host_proc", "why": "kill 缺 id/pid", "args": { "action": "kill" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "host_proc", "why": "kill 带 pid", "args": { "action": "kill", "pid": 4242 }, "expect": { "ok": true } },
+    { "tool": "host_proc", "why": "list 不需要参数", "args": { "action": "list" }, "expect": { "ok": true } },
+
+    { "tool": "lsp", "why": "operation 非法", "args": { "operation": "nope" }, "expect": { "ok": false, "errorCode": "INVALID_ARG" } },
+    { "tool": "lsp", "why": "workspaceSymbol 缺 query", "args": { "operation": "workspaceSymbol" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "lsp", "why": "workspaceSymbol 有 query", "args": { "operation": "workspaceSymbol", "query": "main" }, "expect": { "ok": true } },
+    { "tool": "lsp", "why": "documentSymbol 只要 filePath", "args": { "operation": "documentSymbol", "filePath": "a.js" }, "expect": { "ok": true } },
+    { "tool": "lsp", "why": "documentSymbol 缺 filePath", "args": { "operation": "documentSymbol" }, "expect": { "ok": false, "errorCode": "MISSING_PATH" } },
+    { "tool": "lsp", "why": "goToDefinition 缺 line", "args": { "operation": "goToDefinition", "filePath": "a.js" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "lsp", "why": "goToDefinition 齐全", "args": { "operation": "goToDefinition", "filePath": "a.js", "line": 3 }, "expect": { "ok": true } },
+
+    { "tool": "plan_create", "why": "无 goal（普通计划）", "args": { "prompt": "每天导出报表" }, "expect": { "ok": true } },
+    { "tool": "plan_create", "why": "goal 缺 objective", "args": { "goal": { "checks": [] }, "prompt": "p" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "plan_create", "why": "goal 缺 checks", "args": { "goal": { "objective": "o" }, "prompt": "p" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "plan_create", "why": "goal 齐全", "args": { "goal": { "objective": "o", "checks": [] }, "prompt": "p" }, "expect": { "ok": true } },
+    { "tool": "plan_create", "why": "goal 与定时互斥", "args": { "goal": { "objective": "o", "checks": [] }, "prompt": "p", "rrule": "FREQ=DAILY" }, "expect": { "ok": false, "errorCode": "INVALID_ARG" } },
+
+    { "tool": "read_symbol", "why": "全空", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "read_symbol", "why": "只给 filePath 无法定位", "args": { "filePath": "a.js" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "read_symbol", "why": "filePath + name", "args": { "filePath": "a.js", "name": "main" }, "expect": { "ok": true } },
+    { "tool": "read_symbol", "why": "filePath + line", "args": { "filePath": "a.js", "line": 10 }, "expect": { "ok": true } },
+
+    { "tool": "web_search", "why": "缺 query", "args": {}, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "web_search", "why": "fetchTop 越界", "args": { "query": "x", "fetchTop": 9 }, "expect": { "ok": false, "errorCode": "INVALID_ARG" } },
+    { "tool": "web_search", "why": "page 越界", "args": { "query": "x", "page": 0 }, "expect": { "ok": false, "errorCode": "INVALID_ARG" } },
+    { "tool": "web_search", "why": "合法范围", "args": { "query": "x", "fetchTop": 2, "page": 3 }, "expect": { "ok": true } },
+
+    { "tool": "worktree", "why": "action 缺省为 list", "args": {}, "expect": { "ok": true } },
+    { "tool": "worktree", "why": "action 非法", "args": { "action": "bogus" }, "expect": { "ok": false, "errorCode": "INVALID_ARG" } },
+    { "tool": "worktree", "why": "create 缺 runId", "args": { "action": "create" }, "expect": { "ok": false, "errorCode": "MISSING_ARG" } },
+    { "tool": "worktree", "why": "create 带 runId", "args": { "action": "create", "runId": "r1" }, "expect": { "ok": true } },
+    { "tool": "worktree", "why": "remove 缺 path", "args": { "action": "remove" }, "expect": { "ok": false, "errorCode": "MISSING_PATH" } }
+  ]
+}

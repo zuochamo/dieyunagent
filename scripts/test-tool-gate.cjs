@@ -256,11 +256,14 @@ async function main() {
       }
 
       // 跨机 / 子 loop / 计划 仍然一律不放（它们不是「看一眼网页」）
+      // 入参必须是**schema 合法**的：这三条以前写的是不存在的字段名（message / peer / planId），
+      // 靠「validateToolArgs 对这几个工具是 no-op」才走到 scope 检查；现在参数校验生效，
+      // 非法入参会先在参数关卡被拒（那测的就不是「心跳轮不许跨机」这件事了）。
       for (const [name, args] of [
-        ['peer_send', { peer: 'x', message: 'hi' }],
-        ['peer_claim', { peer: 'x' }],
+        ['peer_send', { peer: 'x', text: 'hi' }],
+        ['peer_claim', { action: 'list' }],
         ['subagent', { task: 'x' }],
-        ['plan_run', { planId: 'p1' }]
+        ['plan_run', { id: 'p1' }]
       ]) {
         const c = make(name, args, { wakePower: 'exec', wakeBudget: { writes: 0, execs: 0, maxWrites: 1, maxExecs: 1 } });
         await gate(c);
@@ -397,11 +400,13 @@ async function main() {
     for (const [name, args] of [
       ['host_exec', { command: 'echo hi' }],
       ['web_fetch', { url: 'https://example.com' }],
-      ['peer_send', { peer: 'x', message: 'hi' }],
+      // 同上：入参按 schema 写（`text` 不是 `message`、`id` 不是 `planId`），
+      // 否则测到的是参数校验而不是「只读轮不许这些工具」。
+      ['peer_send', { peer: 'x', text: 'hi' }],
       ['memory_forget', { memoryIds: [1] }],
       ['subagent', { task: 'do it' }],
-      ['plan_run', { planId: 'p1' }],
-      ['goal_check', { planId: 'p1', check_id: 'c1' }],
+      ['plan_run', { id: 'p1' }],
+      ['goal_check', { check_id: 'c1' }],
       ['browser_navigate', { url: 'https://example.com' }]
     ]) {
       const out = await deny(name, args);

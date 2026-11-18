@@ -14,7 +14,7 @@ const {
   MEMORY_TOOLS,
   SESSION_RECALL_TOOL
 } = require('./memory');
-const { PLAN_TOOLS } = require('./plan');
+const { PLAN_TOOLS, GOAL_START_TOOL, GOAL_UPDATE_TOOL, GOAL_TOOLS } = require('./plan');
 const { MCP_TOOL_SCHEMA_TOOL, MCP_MANAGE_TOOL } = require('./mcp');
 const {
   CLARIFY_TOOL,
@@ -46,10 +46,22 @@ const ALL_STATIC_TOOLS = HOST_TOOLS.concat(
   PEER_TOOLS
 );
 
+/**
+ * **条件注入**的工具：不进 `ALL_STATIC_TOOLS`（那会改变模型看到的工具表），
+ * 但要能按名解析 —— 校验的 required/enum 从 schema 派生，盘点与生成器也要看到它们。
+ *
+ * 现在只有会话目标四件套（`goal_*`）：有目标时才注入，所以不在静态表里，
+ * 结果 `getToolByName` 返回 null，schema 明明齐全却被当成「没有规则」。
+ */
+const CONDITIONAL_TOOLS = [GOAL_START_TOOL, GOAL_UPDATE_TOOL, ...GOAL_TOOLS];
+
+/** 静态 + 条件注入：**按名解析**与各处校验/盘点用的全集（注入面仍只看 `ALL_STATIC_TOOLS`）。 */
+const ALL_KNOWN_TOOLS = ALL_STATIC_TOOLS.concat(CONDITIONAL_TOOLS);
+
 const BY_NAME = Object.create(null);
-for (const t of ALL_STATIC_TOOLS) {
+for (const t of ALL_KNOWN_TOOLS) {
   const n = t && t.function && t.function.name;
-  if (n) BY_NAME[n] = t;
+  if (n && !BY_NAME[n]) BY_NAME[n] = t;
 }
 
 const PLAN_RUNTIME_TOOL_NAMES = [
@@ -85,6 +97,8 @@ module.exports = {
   PLAN_RUNTIME_TOOL_NAMES,
   RENDERER_ONLY_TOOLS,
   CHANNEL_RUNTIME_TOOL_NAMES,
+  CONDITIONAL_TOOLS,
+  ALL_KNOWN_TOOLS,
   getToolByName,
   toolsByNames
 };

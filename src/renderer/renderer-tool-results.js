@@ -11,7 +11,7 @@ function formatToolArgsBrief(name, args) {
     const sym = args.name || args.symbol || args.query || '';
     return `${sym}${target ? ` @ ${target}` : ''}`.trim().slice(0, 120);
   }
-  if (name === 'grep') return String(args.pattern || args.query || '').slice(0, 120);
+  if (name === 'grep') return String(args.pattern || '').slice(0, 120);
   if (name === 'glob') return String(args.pattern || '').slice(0, 120);
   if (name === 'lsp') {
     const loc = args.filePath || args.file_path || args.path || '';

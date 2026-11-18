@@ -34,18 +34,11 @@ async function buildMainAgentTools(mcpRuntime, names) {
   try {
     const result = await mcpRuntime.listAgentTools({ catalogOnly: true });
     for (const item of result.tools || []) {
-      if (!item || !item.agentName) continue;
-      tools.push({
-        type: 'function',
-        function: {
-          name: item.agentName,
-          description: `[MCP · ${item.serverId || 'mcp'}] ${item.description || item.toolName || item.agentName}`,
-          parameters:
-            item.inputSchema && typeof item.inputSchema === 'object'
-              ? item.inputSchema
-              : { type: 'object', properties: {} }
-        }
-      });
+      // 定义形状只有一份（`mcp/schema-slim.js#mcpAgentTool`）：参数瘦身 + 描述截断都在那里。
+      // 以前这里内联拼了一份**不瘦身**的，于是计划 / 频道 / headless 每轮的 MCP schema
+      // 比桌面聊天大一截（更容易撞上下文预算），且两侧描述模板各写一遍。
+      const def = catalog.mcpAgentTool(item);
+      if (def) tools.push(def);
     }
   } catch {
     // MCP 不可用不该让整轮跑不起来：静态工具已经够跑完本轮

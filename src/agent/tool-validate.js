@@ -20,22 +20,25 @@ const { MCP_MANAGE_ACTIONS, isRemoteTransport } = require('../mcp/manage');
 // 动作清单的唯一来源是 schema（`tool-catalog.js` 的 `parameters.properties.action.enum`）：
 // 在这里另抄一份数组的后果是「schema 有、校验过、执行不了」或「能执行但模型不知道」。
 const { getToolByName } = require('./tool-catalog');
+// 机械校验的唯一实现（由 catalog schema 生成）：required / type / enum / range + 条件规则。
+const { validateToolArgsGenerated } = require('./tool-validate.generated');
 
 /**
- * 取某个工具的 `action` 枚举（catalog 是唯一来源）。
- * 空数组 = catalog 里这个工具没有 action 枚举 —— 调用方据此判「清单缺失」而不是放行。
+ * 取某个工具某个字段的枚举（catalog 是唯一来源）。
+ * 空数组 = catalog 里没有这个枚举 —— 调用方据此判「清单缺失」而不是放行。
  * @param {string} toolName
+ * @param {string} [field] 默认 `action`（多数工具用它）；`lsp` 用的是 `operation`
  * @returns {string[]}
  */
-function toolActionEnum(toolName) {
+function toolActionEnum(toolName, field = 'action') {
   const def = getToolByName(toolName);
   const enumList =
     def &&
     def.function &&
     def.function.parameters &&
     def.function.parameters.properties &&
-    def.function.parameters.properties.action &&
-    def.function.parameters.properties.action.enum;
+    def.function.parameters.properties[field] &&
+    def.function.parameters.properties[field].enum;
   return Array.isArray(enumList) ? enumList : [];
 }
 
@@ -406,6 +409,12 @@ function validateToolArgs(name, args, opts) {
     return { ok: false, error: '工具名为空', errorCode: 'INVALID_NAME', retryable: false };
   }
 
+  // ① 机械校验（required / type / enum / range / 条件与跨字段规则）——**由 catalog schema 生成**
+  //    （`src/agent/tool-validate.generated.js`，唯一实现，见 docs/TOOL-VALIDATE-DECISION.md）。
+  //    与手写的判定在双跑夹具上逐条一致（62/62），这里先跑它、手写块保留，作为接管的第一阶段。
+  const mechanical = validateToolArgsGenerated(n, a);
+  if (!mechanical.ok) return mechanical;
+
   switch (n) {
     case 'computer':
       return validateComputerArgs(a);
@@ -425,35 +434,6 @@ function validateToolArgs(name, args, opts) {
           ok: false,
           error: 'skill_delete 的 dir 必须是绝对路径',
           errorCode: 'INVALID_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    }
-    case 'worktree': {
-      const action = String(a.action || 'list').trim();
-      const allowed = toolActionEnum('worktree');
-      if (!allowed.includes(action)) {
-        return {
-          ok: false,
-          error: `worktree 的 action 必须是 ${allowed.join(' / ')}（收到「${action || '空'}」）`,
-          errorCode: 'INVALID_ARG',
-          retryable: false
-        };
-      }
-      if (['create', 'preview_run', 'apply_run', 'cleanup_run'].includes(action) && !String(a.runId || '').trim()) {
-        return {
-          ok: false,
-          error: `worktree ${action} 需要 runId`,
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      if (action === 'remove' && !String(a.path || '').trim()) {
-        return {
-          ok: false,
-          error: 'worktree remove 需要 path（先用 action=list 取）',
-          errorCode: 'MISSING_ARG',
           retryable: false
         };
       }
@@ -555,52 +535,6 @@ function validateToolArgs(name, args, opts) {
     }
     case 'apply_patch':
       return applyPatchUnsupported();
-    case 'host_proc':
-      if (a.action === 'kill' && !String(a.id || '').trim() && !a.pid) {
-        return {
-          ok: false,
-          error: 'host_proc kill 需要 id 或 pid',
-          errorCode: 'MISSING_ARG',
-          retryable: false,
-          suggestedFix: '传 host_exec detached 返回的 handle（id），或 host_proc list 里的 pid'
-        };
-      }
-      return { ok: true };
-    case 'fs_read_file':
-    case 'fs_list_dir':
-    case 'host_print_image': {
-      const p = a.filePath || a.dirPath;
-      if (!p || !String(p).trim()) {
-        return {
-          ok: false,
-          error: `${n} 缺少路径参数`,
-          errorCode: 'MISSING_PATH',
-          retryable: false,
-          suggestedFix: '使用相对工作区路径，如 src/main.js'
-        };
-      }
-      return { ok: true };
-    }
-    case 'fs_write_file': {
-      const p = a.filePath;
-      if (!p || !String(p).trim()) {
-        return {
-          ok: false,
-          error: 'fs_write_file 缺少 filePath',
-          errorCode: 'MISSING_PATH',
-          retryable: false
-        };
-      }
-      if (a.content == null || typeof a.content !== 'string') {
-        return {
-          ok: false,
-          error: 'fs_write_file 缺少有效 content（字符串）',
-          errorCode: 'MISSING_CONTENT',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    }
     case 'fs_edit': {
       const p = a.filePath || a.path;
       if (!p || !String(p).trim()) {
@@ -635,147 +569,6 @@ function validateToolArgs(name, args, opts) {
         };
       }
       return { ok: true };
-    case 'web_search':
-      if (!String(a.query || '').trim()) {
-        return {
-          ok: false,
-          error: 'web_search 缺少 query',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      if (a.fetchTop != null) {
-        const n = Number(a.fetchTop);
-        if (!Number.isFinite(n) || n < 0 || n > 3) {
-          return {
-            ok: false,
-            error: `fetchTop 超出范围：${a.fetchTop}`,
-            errorCode: 'INVALID_ARG',
-            retryable: true,
-            suggestedFix: 'fetchTop 取 0-3，默认 0（只搜索不抓正文）'
-          };
-        }
-      }
-      if (a.page != null) {
-        const p = Number(a.page);
-        if (!Number.isFinite(p) || p < 1 || p > 10) {
-          return {
-            ok: false,
-            error: `page 超出范围：${a.page}`,
-            errorCode: 'INVALID_ARG',
-            retryable: true,
-            suggestedFix: 'page 从 1 开始，最多 10'
-          };
-        }
-      }
-      return { ok: true };
-    case 'read_symbol': {
-      const hasPath = !!(a.filePath && String(a.filePath).trim());
-      const hasName = !!String(a.name || a.symbol || a.symbolName || '').trim();
-      const hasLine = Number(a.line) > 0;
-      if (!hasPath && !hasName) {
-        return {
-          ok: false,
-          error: 'read_symbol 需要 filePath 或 name',
-          errorCode: 'MISSING_ARG',
-          retryable: false,
-          suggestedFix: 'filePath+name、filePath+line，或只给 name 全库查找'
-        };
-      }
-      // 只给 filePath 定位不到任何符号（符号定位只有「按 name」与「按包含某行的最小符号」
-      // 两条路）；在此拦下，避免白跑 LSP/结构索引并回一句不指向病因的 SYMBOL_NOT_FOUND。
-      // handler 侧同判，保证 fs.read_symbol 的空 name 分支只可能是「有 line 但该行无符号」。
-      if (hasPath && !hasName && !hasLine) {
-        return {
-          ok: false,
-          error: 'read_symbol 只给 filePath 无法定位符号：需要 name 或 line',
-          errorCode: 'MISSING_ARG',
-          retryable: false,
-          suggestedFix: '补 name（读该符号）或补 line（读包含该行的符号）；读整个文件请用 fs_read_file'
-        };
-      }
-      return { ok: true };
-    }
-    case 'codebase_search':
-      if (!String(a.query || '').trim()) {
-        return {
-          ok: false,
-          error: 'codebase_search 缺少 query',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    case 'grep':
-      if (!String(a.pattern || a.query || '').trim()) {
-        return {
-          ok: false,
-          error: 'grep 缺少 pattern',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    case 'glob':
-      if (!String(a.pattern || a.glob || '').trim()) {
-        return {
-          ok: false,
-          error: 'glob 缺少 pattern',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    case 'lsp': {
-      const op = String(a.operation || a.op || '').trim();
-      const allowed = new Set([
-        'goToDefinition',
-        'findReferences',
-        'goToImplementation',
-        'hover',
-        'typeDefinition',
-        'documentSymbol',
-        'workspaceSymbol'
-      ]);
-      if (!allowed.has(op)) {
-        return {
-          ok: false,
-          error:
-            'lsp.operation 必须是 workspaceSymbol / documentSymbol / goToDefinition / typeDefinition / goToImplementation / findReferences / hover',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      if (op === 'workspaceSymbol') {
-        if (!String(a.query || a.name || a.symbol || '').trim()) {
-          return {
-            ok: false,
-            error: 'lsp workspaceSymbol 缺少 query（符号名）',
-            errorCode: 'MISSING_ARG',
-            retryable: false
-          };
-        }
-        return { ok: true };
-      }
-      if (!String(a.filePath || a.file_path || a.path || '').trim()) {
-        return {
-          ok: false,
-          error: 'lsp 缺少 filePath',
-          errorCode: 'MISSING_PATH',
-          retryable: false
-        };
-      }
-      if (op === 'documentSymbol') return { ok: true };
-      if (a.line == null || !Number(a.line)) {
-        return {
-          ok: false,
-          error: 'lsp 缺少 line（1-based）',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    }
     case 'graph': {
       const op = String(a.operation || a.op || '').trim();
       if (!GRAPH_OPERATIONS.has(op)) {
@@ -808,17 +601,6 @@ function validateToolArgs(name, args, opts) {
           ok: false,
           error: 'graph.impact 缺少 path',
           errorCode: 'MISSING_PATH',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    }
-    case 'agents_md_propose': {
-      if (!String(a.section || '').trim() || !String(a.content || '').trim()) {
-        return {
-          ok: false,
-          error: 'agents_md_propose 需要 section 与 content',
-          errorCode: 'MISSING_ARG',
           retryable: false
         };
       }
@@ -907,99 +689,6 @@ function validateToolArgs(name, args, opts) {
             retryable: false
           };
         }
-      }
-      return { ok: true };
-    }
-    case 'plan_create': {
-      // 目标型计划的参数契约：形状错了就别建 —— 一个「猜出来的」无人值守长任务比报错贵得多。
-      if (a.goal && typeof a.goal === 'object') {
-        if (!String(a.goal.objective || '').trim()) {
-          return {
-            ok: false,
-            error:
-              '目标型计划需要 goal.objective：一句话说清「什么状态算达成」（与 goal_start 的 objective 同义；空目标在面板里是空的，每轮也没法交接）',
-            errorCode: 'MISSING_ARG',
-            retryable: false
-          };
-        }
-        if (!Array.isArray(a.goal.checks)) {
-          return {
-            ok: false,
-            error: '目标型计划需要 goal.checks：每项一条检查命令；确实没有可执行检查就传空数组 []',
-            errorCode: 'MISSING_ARG',
-            retryable: false
-          };
-        }
-        if (!String(a.prompt || '').trim()) {
-          return {
-            ok: false,
-            error: '目标型计划需要 prompt：写清「什么状态算达成」，每一轮交接班都靠它',
-            errorCode: 'MISSING_ARG',
-            retryable: false
-          };
-        }
-        const hasSchedule = String(a.rrule || '').trim() || String(a.onceAt || '').trim();
-        if (hasSchedule) {
-          return {
-            ok: false,
-            error: '目标型（goal）与定时（rrule / onceAt）二选一：请只给其中一种',
-            errorCode: 'INVALID_ARG',
-            retryable: false
-          };
-        }
-      }
-      return { ok: true };
-    }
-    case 'goal_start': {
-      // 会话级目标：objective 是唯一硬要求（检查清单可空 = 未验证模式）
-      const objective = String(a.objective || '').trim();
-      if (!objective) {
-        return {
-          ok: false,
-          error: 'goal_start 需要 objective：一句话说清「什么状态算达成」（空目标既推进不了也验收不了）',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    }
-    case 'goal_update': {
-      // 整体替换语义：三个字段至少给一个，否则这次调用什么也不会发生（多半是模型想错了）
-      const hasAny =
-        String(a.objective || '').trim() || Array.isArray(a.todos) || Array.isArray(a.checks);
-      if (!hasAny) {
-        return {
-          ok: false,
-          error: 'goal_update 需要 objective / checks / todos 至少一项（给什么就整体替换什么）',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    }
-    case 'goal_check': {
-      // 目标型计划的一轮里跑一条检查命令。命令可以来自声明清单（check_id）或模型当场给。
-      const command = String(a.command || '').trim();
-      const checkId = String(a.check_id || a.checkId || '').trim();
-      if (!command && !checkId) {
-        return {
-          ok: false,
-          error: 'goal_check 需要 command（要跑的检查命令）或 check_id（已声明的检查）',
-          errorCode: 'MISSING_ARG',
-          retryable: false
-        };
-      }
-      return { ok: true };
-    }
-    case 'goal_finish': {
-      const outcome = String(a.outcome || '').trim();
-      if (outcome !== 'complete' && outcome !== 'blocked') {
-        return {
-          ok: false,
-          error: `goal_finish 的 outcome 必须是 complete 或 blocked（收到「${outcome || '空'}」）`,
-          errorCode: 'INVALID_ARG',
-          retryable: false
-        };
       }
       return { ok: true };
     }

@@ -56,6 +56,8 @@ const WORKTREE_TOOL = _tc.WORKTREE_TOOL || null;
 const PEER_TOOLS = Array.isArray(_tc.PEER_TOOLS) ? _tc.PEER_TOOLS : [];
 const isWeakToolCallerModel = _tc.isWeakToolCallerModel || function () { return false; };
 const compactMcpToolDef = _tc.compactMcpToolDef || function (entry) { return entry && entry.tool; };
+const mcpToolDescription = _tc.mcpToolDescription;
+const mcpCandidate = _tc.mcpCandidate;
 
 async function getHostToolFlags() {
   if (!gwState.authed || !toolDefsApi.getPermissions) {
@@ -276,26 +278,30 @@ async function buildAgentTools(userQuery = '', opts = {}) {
         enabledMcpIds.size ? enabledMcpIds.has(String(item.serverId)) : true
       );
       for (const item of mcpCatalogTools) {
+        // 描述模板与候选项形状都取自单一来源（bundle 里由 tool-catalog 再导出）；
+        // 末尾的兜底只在产物未重建时生效，与 `compactMcpToolDef` 的兜底同一口径。
+        const describe = mcpToolDescription || ((it) => `[MCP · ${it.serverId}] ${it.description || it.toolName}`);
+        const candidateOf = mcpCandidate || ((it) => ({
+          id: it.agentName,
+          name: it.agentName,
+          description: describe(it),
+          source: 'mcp',
+          serverId: it.serverId || ''
+        }));
         optionalEntries.push({
           id: item.agentName,
           tool: {
             type: 'function',
             function: {
               name: item.agentName,
-              description: `[MCP · ${item.serverId}] ${item.description || item.toolName}`,
+              description: describe(item),
               parameters:
                 item.inputSchema && typeof item.inputSchema === 'object'
                   ? item.inputSchema
                   : { type: 'object', properties: {} }
             }
           },
-          candidate: {
-            id: item.agentName,
-            name: item.agentName,
-            description: `[MCP · ${item.serverId}] ${item.description || item.toolName}`,
-            source: 'mcp',
-            serverId: item.serverId || ''
-          }
+          candidate: candidateOf(item)
         });
       }
     } catch {

@@ -133,8 +133,15 @@ const HOST_TOOLS = [
             type: 'number',
             description: 'output：等待新输出或进程退出最多多少毫秒（默认 0，不等待；上限 120000）'
           }
+        },
+      allOf: [
+        {
+          if: { properties: { action: { const: 'kill' } }, required: ['action'] },
+          then: { anyOf: [{ required: ['id'] }, { required: ['pid'] }] }
         }
-      }
+      ],
+      required: []
+    }
     }
   },
   {
@@ -284,10 +291,14 @@ const WEB_TOOLS = [
           },
           page: {
             type: 'number',
-            description: '可选：页码，从 1 开始（duckduckgo 不支持翻页）'
+            minimum: 1,
+            maximum: 10,
+            description: '可选：页码，从 1 开始，最多 10（duckduckgo 不支持翻页）'
           },
           fetchTop: {
             type: 'number',
+            minimum: 0,
+            maximum: 3,
             description: '可选：0-3，搜完顺手抓前 N 条正文（带此参数就不用再单独 web_fetch）'
           },
           maxChars: { type: 'number', description: '返回最大字符数，默认 12000' }

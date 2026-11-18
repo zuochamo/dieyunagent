@@ -1,5 +1,9 @@
 'use strict';
 
+// section 白名单**唯一来源**是 `src/agents-md.js#EDITABLE_SECTION_IDS`（执行侧
+// `propose-tools-main.js` 与模板同源）。schema 以前自己抄了一份数组 —— 那是第二个拷贝。
+const { EDITABLE_SECTION_IDS } = require('../../agents-md-sections');
+
 /**
  * Agent 自我维护类工具：长期记忆（memory_recall / memory_forget）/ 会话回忆 / 技能增删 / AGENTS.md 提议。
  * 语义在执行侧（`src/agent/knowledge-maintainer.js`、`src/memory-shared`、Rust `memory`），这里只有 schema。
@@ -18,7 +22,7 @@ const AGENTS_MD_PROPOSE_TOOL = {
       properties: {
         section: {
           type: 'string',
-          enum: ['overview', 'structure', 'commands', 'conventions', 'testing', 'architecture', 'gotchas'],
+          enum: EDITABLE_SECTION_IDS,
           description: '要更新的区块'
         },
         content: {

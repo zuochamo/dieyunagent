@@ -1,5 +1,7 @@
 'use strict';
 
+const { mcpCandidate } = require('../../mcp/schema-slim');
+
 /**
  * MCP：mcp_tool_schema（按提问召回运行时 schema）与 mcp_manage（增删改服务）。语义全在 src/mcp/manage.js，这里只做参数翻译与形状转换。
  *
@@ -45,13 +47,8 @@ function createMcpHandlers(shared) {
         note: '已启用的 MCP 服务当前没有任何缓存工具；请先在 MCP 设置页刷新工具目录'
       };
     }
-    const candidates = all.map((item) => ({
-      id: item.agentName,
-      name: item.agentName,
-      description: `[MCP · ${item.serverId || ''}] ${item.description || item.toolName || ''}`,
-      source: 'mcp',
-      serverId: item.serverId || ''
-    }));
+    // 候选描述同样只有一份（`mcp/schema-slim.js#mcpCandidate`）
+    const candidates = all.map((item) => mcpCandidate(item));
     const max = Math.min(5, Math.max(1, Number(limit) || 3));
     let picked = [];
     try {

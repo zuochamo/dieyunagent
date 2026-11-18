@@ -19,16 +19,9 @@ const CHANGELOG_TRIM_FALLBACK_ROWS = 3;
 // **低于这个值就不再裁** —— marker 必须活着，否则该段后续更新会被静默 skip。
 const SECTION_MIN_KEEP = 260;
 
-/** 可被工具 / 维护流程写入的 section（changelog 由系统自动维护，不对外暴露）。 */
-const EDITABLE_SECTION_IDS = [
-  'overview',
-  'structure',
-  'commands',
-  'conventions',
-  'testing',
-  'architecture',
-  'gotchas'
-];
+// section 白名单的唯一来源（零依赖模块：catalog 会把这份枚举打进 Renderer bundle，
+// 而本文件依赖 fs/path/crypto，所以常量不能放这里）。
+const { EDITABLE_SECTION_IDS } = require('./agents-md-sections');
 
 // 可选 paths 属性：`<!-- dieyun:section:commands status=stable paths="tools/**, shows/**" -->`
 // 语义对齐 Claude Code 的 path-scoped rules / Cursor 的 globs：**命中才注入**。

@@ -74,7 +74,66 @@ function compactMcpToolDef(entry) {
   };
 }
 
+/**
+ * MCP 工具给模型看的描述：`[MCP · server] 描述`。
+ *
+ * **单一来源**：Main 侧（计划 / 频道 / headless 的工具表）与 Renderer（桌面聊天）都用它 ——
+ * 以前三处各写一遍模板（`main-agent-tools.js`、`main-tools/mcp.js`、`renderer-tool-defs.js`），
+ * 其中一处还顺手少了参数瘦身。
+ */
+function mcpToolDescription(item) {
+  const src = item && typeof item === 'object' ? item : {};
+  const desc = String(src.description || src.toolName || src.agentName || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `[MCP · ${src.serverId || 'mcp'}] ${desc}`.trim();
+}
+
+/**
+ * 运行时目录条目 → 候选描述（给 `recallAgentTools` 这类召回用）。
+ *
+ * 条目形状来自 `McpRuntimeManager#listAgentTools`：`{agentName, serverId, toolName, description, inputSchema}`。
+ */
+function mcpCandidate(item) {
+  const src = item && typeof item === 'object' ? item : {};
+  return {
+    id: src.agentName,
+    name: src.agentName,
+    description: mcpToolDescription(src),
+    source: 'mcp',
+    serverId: src.serverId || ''
+  };
+}
+
+/**
+ * 运行时目录条目 → 给模型看的工具定义。**唯一实现**：Main 与 Renderer 都调它（Renderer 经
+ * `DieyunToolCatalog` 取），所以两侧的 MCP 工具定义逐字段相同。
+ *
+ * 只做两件事：参数瘦身（`slimMcpInputSchema`）与描述截到 96 字；没有任何一层再拼一份。
+ */
+function mcpAgentTool(item) {
+  const src = item && typeof item === 'object' ? item : {};
+  if (!src.agentName) return null;
+  const parameters = slimMcpInputSchema(src.inputSchema);
+  const hasProps = Object.keys(parameters.properties || {}).length > 0;
+  const description = mcpToolDescription(src)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 96);
+  return {
+    type: 'function',
+    function: {
+      name: src.agentName,
+      description: hasProps ? description : `${description}（无列出参数时用 mcp_tool_schema）`,
+      parameters
+    }
+  };
+}
+
 module.exports = {
   slimMcpInputSchema,
-  compactMcpToolDef
+  compactMcpToolDef,
+  mcpToolDescription,
+  mcpCandidate,
+  mcpAgentTool
 };

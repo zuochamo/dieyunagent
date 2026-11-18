@@ -74,8 +74,14 @@ const READ_SYMBOL_TOOL = {
         filePath: { type: 'string', description: '文件路径；只按 name 全库找时可省略（不能只给路径）' },
         name: { type: 'string', description: '符号名（函数/类/方法），如 prepSystemPrompt' },
         line: { type: 'number', description: '1-based 行号：读包含该行的最小符号' },
-        maxLines: { type: 'number', description: '最多返回行数，默认 400，上限 2000' }
-      }
+        maxLines: { type: 'number', description: '最多返回行数，默认 400，上限 2000' },
+      },
+      anyOf: [
+        { required: ['filePath', 'name'] },
+        { required: ['filePath', 'line'] },
+        { required: ['name'] }
+      ],
+      required: []
     }
   }
 };
@@ -115,14 +121,44 @@ const LSP_TOOL = {
       properties: {
         operation: {
           type: 'string',
+          enum: [
+            'workspaceSymbol',
+            'documentSymbol',
+            'goToDefinition',
+            'typeDefinition',
+            'goToImplementation',
+            'findReferences',
+            'hover'
+          ],
+          // 枚举是**唯一来源**：`tool-validate.js` 从 schema 读取（不再自己写一份数组）。
+          // 加新 operation = 只改这里（描述、枚举、执行端分派三处对齐由 check:js 与夹具兜住）。
           description:
-            'workspaceSymbol | documentSymbol | goToDefinition | typeDefinition | goToImplementation | findReferences | hover'
+            'workspaceSymbol：全库按名搜符号（只要 query）。' +
+            'documentSymbol：列出文件内符号大纲（只要 filePath）。' +
+            'goToDefinition / typeDefinition / goToImplementation / findReferences / hover：需要 filePath + line。'
         },
         filePath: { type: 'string', description: '文件路径；workspaceSymbol 时可省略' },
         line: { type: 'number', description: '1-based 行号；workspaceSymbol/documentSymbol 不需要' },
         character: { type: 'number', description: '1-based 列号（UTF-16），默认 1' },
         query: { type: 'string', description: 'workspaceSymbol：要搜的符号名' }
       },
+      allOf: [
+        {
+          if: { properties: { operation: { const: 'workspaceSymbol' } }, required: ['operation'] },
+          then: { required: ['query'] }
+        },
+        {
+          if: { properties: { operation: { not: { enum: ['workspaceSymbol'] } } }, required: ['operation'] },
+          then: { required: ['filePath'] }
+        },
+        {
+          if: {
+            properties: { operation: { not: { enum: ['workspaceSymbol', 'documentSymbol'] } } },
+            required: ['operation']
+          },
+          then: { required: ['line'] }
+        }
+      ],
       required: ['operation']
     }
   }

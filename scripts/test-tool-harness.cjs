@@ -94,7 +94,7 @@ async function main() {
   // read_symbol 符号定位只有「按 name」与「按包含某行的最小符号」两条路，只给 filePath
   // 必返回 SYMBOL_NOT_FOUND（且已白跑 LSP + 结构索引），故在入口即拦。
   const rsPathOnly = validateToolArgs('read_symbol', { filePath: 'src/a.js' });
-  assert(!rsPathOnly.ok && rsPathOnly.errorCode === 'MISSING_ARG', 'read_symbol path-only blocked');
+  assert(!rsPathOnly.ok && rsPathOnly.errorCode === 'MISSING_ARG', 'read_symbol path-only blocked（跨字段规则，A2 收进 schema 后这里会跟着变）');
   const rsAlias = normalizeAgentToolName('read_symbol', { path: 'src/a.js' });
   assert(
     !validateToolArgs(rsAlias.name, rsAlias.args).ok,

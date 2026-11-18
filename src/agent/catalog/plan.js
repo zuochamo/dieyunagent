@@ -84,7 +84,20 @@ const PLAN_TOOLS = [
               '可选：计划执行时使用的工作空间（本地绝对路径，如 E:\\\\project）。留空 = 跟随执行时当前打开的工作空间'
           }
         },
-        required: []
+              allOf: [
+        {
+          if: { required: ['goal'] },
+          then: {
+            required: ['prompt'],
+            properties: { goal: { required: ['objective', 'checks'] } }
+          }
+        },
+        {
+          if: { required: ['goal'] },
+          then: { not: { anyOf: [{ required: ['rrule'] }, { required: ['onceAt'] }] } }
+        }
+      ],
+      required: []
       }
     }
   },
@@ -250,8 +263,14 @@ const GOAL_UPDATE_TOOL = {
             },
             required: ['text']
           }
-        }
-      }
+        },
+      },
+      anyOf: [
+        { required: ['objective'] },
+        { required: ['todos'] },
+        { required: ['checks'] }
+      ],
+      required: []
     }
   }
 };
@@ -286,7 +305,14 @@ const GOAL_TOOLS = [
             type: 'string',
             description: '要执行的检查命令（退出码 0 = 通过）；check_id 缺省时必填'
           }
-        }
+        },
+      anyOf: [
+        { required: ['command'] },
+        { required: ['check_id'] },
+        { required: ['checkId'] }
+      ],
+      required: []
+    
       }
     }
   },

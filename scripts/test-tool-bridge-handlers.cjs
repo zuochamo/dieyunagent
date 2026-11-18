@@ -234,7 +234,7 @@ async function main() {
 
     const noPath = await bridge.executeAgentTool('worktree', { action: 'remove' }, ctx());
     assert.strictEqual(noPath.ok, false, 'worktree remove 缺 path → 失败');
-    assert.strictEqual(noPath.errorCode, 'MISSING_ARG', 'worktree remove 缺 path → MISSING_ARG');
+    assert.strictEqual(noPath.errorCode, 'MISSING_PATH', 'worktree remove 缺 path → MISSING_PATH（缺路径类字段统一这个码）');
   }
 
   // ───────────────────────── goal（会话目标）─────────────────────────
@@ -473,7 +473,7 @@ async function main() {
     const bridge = makeBridge({});
     assert.ok((await bridge.executeAgentTool('skill_create', { name: 'x' }, ctx())).error, '没有 createUserSkill → 报不可用');
     const noDir = await bridge.executeAgentTool('skill_delete', {}, ctx());
-    assert.strictEqual(noDir.errorCode, 'MISSING_ARG', 'skill_delete 缺 dir → MISSING_ARG');
+    assert.strictEqual(noDir.errorCode, 'MISSING_PATH', 'skill_delete 缺 dir → MISSING_PATH（缺路径类字段统一这个码）');
 
     // 摄像头默认关：没授权时连「有没有手机桥」都不该泄露，先给 PERMISSION_DENIED。
     const camDenied = await bridge.executeAgentTool('camera_look', {}, ctx());

@@ -51,6 +51,8 @@ const { PEER_TOOLS } = require('./catalog/peer');
 const { SSH_TOOL, WORKTREE_TOOL } = require('./catalog/remote');
 const {
   ALL_STATIC_TOOLS,
+  ALL_KNOWN_TOOLS,
+  CONDITIONAL_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
   CHANNEL_RUNTIME_TOOL_NAMES,
   RENDERER_ONLY_TOOLS,
@@ -62,7 +64,13 @@ const {
 // mcp_manage / mcp_tool_schema 虽同前缀但不是远端工具，细则在 `mcp/tool-name.js`。
 const { isMcpServerToolName, MCP_BUILTIN_TOOL_NAMES } = require('../mcp/tool-name');
 // MCP 参数瘦身：远端 schema 又深又长，塞进工具表会吃掉上下文（唯一实现在 mcp/schema-slim.js）。
-const { slimMcpInputSchema, compactMcpToolDef } = require('../mcp/schema-slim');
+const {
+  slimMcpInputSchema,
+  compactMcpToolDef,
+  mcpToolDescription,
+  mcpCandidate,
+  mcpAgentTool
+} = require('../mcp/schema-slim');
 // 「工具调用能力弱」的模型判定（与 schema 无关，单独一个模块）。
 const { isWeakToolCallerModel } = require('./tool-model-capability');
 
@@ -105,6 +113,8 @@ module.exports = {
   DESKTOP_CAMERA_TOOL,
   DESKTOP_CAMERA_PTZ_TOOL,
   ALL_STATIC_TOOLS,
+  ALL_KNOWN_TOOLS,
+  CONDITIONAL_TOOLS,
   PLAN_RUNTIME_TOOL_NAMES,
   CHANNEL_RUNTIME_TOOL_NAMES,
   RENDERER_ONLY_TOOLS,
@@ -112,5 +122,8 @@ module.exports = {
   toolsByNames,
   isWeakToolCallerModel,
   slimMcpInputSchema,
-  compactMcpToolDef
+  compactMcpToolDef,
+  mcpToolDescription,
+  mcpCandidate,
+  mcpAgentTool
 };

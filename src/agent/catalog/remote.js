@@ -96,7 +96,10 @@ const WORKTREE_TOOL = {
           type: 'string',
           // 同 ssh：这份 enum 是 worktree 动作的唯一清单，校验从它派生。
           enum: ['list', 'create', 'remove', 'list_runs', 'preview_run', 'apply_run', 'cleanup_run', 'prune'],
-          description: '要做的操作'
+          // 缺省 list：执行端是 `String(a.action || 'list')`。之前把 action 列进 required，
+          // 等于 schema 比实现更严 —— 模型不给就白拦一次（双跑夹具里那条差异就是它）。
+          default: 'list',
+          description: '要做的操作（默认 list）'
         },
         runId: { type: 'string', description: '一次运行的 id（create / preview_run / apply_run / cleanup_run 用）' },
         roleId: { type: 'string', description: 'create 时用：这条副本承担的职责名（如 reviewer / fixer）' },
@@ -130,7 +133,20 @@ const WORKTREE_TOOL = {
             '所以不确定就先传 5 这类小数字'
         }
       },
-      required: ['action']
+      allOf: [
+        {
+          if: {
+            properties: { action: { enum: ['create', 'preview_run', 'apply_run', 'cleanup_run'] } },
+            required: ['action']
+          },
+          then: { required: ['runId'] }
+        },
+        {
+          if: { properties: { action: { const: 'remove' } }, required: ['action'] },
+          then: { required: ['path'] }
+        }
+      ],
+      required: []
     }
   }
 };
