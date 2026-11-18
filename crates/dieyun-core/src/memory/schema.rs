@@ -2,33 +2,60 @@ use rusqlite::Connection;
 
 use crate::error::CoreError;
 
+/// `sessions` 的列清单（建表与补列的唯一来源；顺序 = 建表顺序 + 历史加列顺序）。
+const SESSIONS_COLUMNS: &[crate::db_schema::Column] = &[
+    crate::db_schema::Column::new("id", "TEXT PRIMARY KEY"),
+    crate::db_schema::Column::new("updated_at", "INTEGER NOT NULL"),
+    crate::db_schema::Column::new("title", "TEXT"),
+    crate::db_schema::Column::new("archived", "INTEGER NOT NULL DEFAULT 0"),
+    crate::db_schema::Column::new("workspace_path", "TEXT"),
+    crate::db_schema::Column::new("title_source", "TEXT"),
+];
+
+/// `messages` 的列清单（建表与补列的唯一来源；顺序 = 建表顺序 + 历史加列顺序）。
+const MESSAGES_COLUMNS: &[crate::db_schema::Column] = &[
+    crate::db_schema::Column::new("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+    crate::db_schema::Column::new("session_id", "TEXT NOT NULL"),
+    crate::db_schema::Column::new("role", "TEXT NOT NULL"),
+    crate::db_schema::Column::new("content", "TEXT NOT NULL"),
+    crate::db_schema::Column::new("reasoning", "TEXT"),
+    crate::db_schema::Column::new("created_at", "INTEGER NOT NULL"),
+];
+
+/// `long_memories` 的列清单（建表与补列的唯一来源；顺序 = 建表顺序 + 历史加列顺序）。
+const LONG_MEMORIES_COLUMNS: &[crate::db_schema::Column] = &[
+    crate::db_schema::Column::new("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+    crate::db_schema::Column::new("content", "TEXT NOT NULL"),
+    crate::db_schema::Column::new("source", "TEXT"),
+    crate::db_schema::Column::new("created_at", "INTEGER NOT NULL"),
+    crate::db_schema::Column::new("scope", "TEXT DEFAULT 'global'"),
+    crate::db_schema::Column::new("kind", "TEXT DEFAULT 'normal'"),
+    crate::db_schema::Column::new("importance", "INTEGER DEFAULT 3"),
+    crate::db_schema::Column::new("status", "TEXT DEFAULT 'active'"),
+    crate::db_schema::Column::new("updated_at", "INTEGER"),
+    crate::db_schema::Column::new("last_used_at", "INTEGER"),
+    crate::db_schema::Column::new("access_count", "INTEGER DEFAULT 0"),
+    crate::db_schema::Column::new("expires_at", "INTEGER"),
+    crate::db_schema::Column::new("metadata_json", "TEXT"),
+    crate::db_schema::Column::new("session_id", "TEXT"),
+];
+
+/// `compaction_archives` 的列清单（建表与补列的唯一来源；顺序 = 建表顺序 + 历史加列顺序）。
+const COMPACTION_ARCHIVES_COLUMNS: &[crate::db_schema::Column] = &[
+    crate::db_schema::Column::new("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+    crate::db_schema::Column::new("session_id", "TEXT"),
+    crate::db_schema::Column::new("workspace_path", "TEXT"),
+    crate::db_schema::Column::new("tokens_before", "INTEGER"),
+    crate::db_schema::Column::new("tokens_after", "INTEGER"),
+    crate::db_schema::Column::new("summary_text", "TEXT"),
+    crate::db_schema::Column::new("summary_json", "TEXT"),
+    crate::db_schema::Column::new("folded_text", "TEXT"),
+    crate::db_schema::Column::new("created_at", "INTEGER NOT NULL"),
+];
+
 pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
     conn.execute_batch(
         r#"
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        updated_at INTEGER NOT NULL,
-        title TEXT
-      );
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        -- 该轮真思考：与 content 分列，绝不混进正文。
-        -- 默认不进历史重建（见 session-context.buildCompletionMessagesFromHistory），
-        -- 只在该轮需要上行回传（reasoning_content）时按需取真值。
-        reasoning TEXT,
-        created_at INTEGER NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
-      CREATE TABLE IF NOT EXISTS long_memories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        content TEXT NOT NULL,
-        source TEXT,
-        created_at INTEGER NOT NULL
-      );
       CREATE TABLE IF NOT EXISTS long_memory_vectors (
         memory_id INTEGER PRIMARY KEY,
         model TEXT NOT NULL,
@@ -178,19 +205,6 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
       );
       CREATE INDEX IF NOT EXISTS idx_reqsnap_session ON request_snapshots(session_id, id);
       CREATE INDEX IF NOT EXISTS idx_reqsnap_created ON request_snapshots(created_at);
-      CREATE TABLE IF NOT EXISTS compaction_archives (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT,
-        workspace_path TEXT,
-        tokens_before INTEGER,
-        tokens_after INTEGER,
-        summary_text TEXT,
-        summary_json TEXT,
-        folded_text TEXT,
-        created_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_compaction_archives_session
-        ON compaction_archives(session_id, created_at);
       -- 会话级目标对象：一个会话最多一条（PK 即约束），删会话级联清除。
       -- goal_json 是**不透明 JSON**：Rust 只当 KV，语义（归一化 / 事实核对 / 续跑判定）
       -- 全在 Node 的 src/plans/goal-run.js —— 不允许在 Rust 再解析一份。
@@ -205,29 +219,41 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
     )
     .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
 
-    ensure_column(conn, "sessions", "archived", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(conn, "sessions", "workspace_path", "TEXT")?;
+    // 这四张表「建表 + 后加列」只有一份清单：老库补列走同一条 `ensure_table`,
+    // 不再手写 `ALTER TABLE ADD COLUMN`（两处漂移时只有老库坏，开发机上永远看不出来）。
+    crate::db_schema::ensure_table(
+        conn,
+        "sessions",
+        SESSIONS_COLUMNS,
+        &[],
+    )?;
+    crate::db_schema::ensure_table(
+        conn,
+        "messages",
+        MESSAGES_COLUMNS,
+        &["FOREIGN KEY (session_id) REFERENCES sessions(id)"],
+    )?;
+    crate::db_schema::ensure_table(
+        conn,
+        "long_memories",
+        LONG_MEMORIES_COLUMNS,
+        &[],
+    )?;
+    crate::db_schema::ensure_table(
+        conn,
+        "compaction_archives",
+        COMPACTION_ARCHIVES_COLUMNS,
+        &[],
+    )?;
+
     // 会话标题的来源（heuristic = 首条用户消息切片，ai = 模型总结，user = 用户改名）。
     // 存在的理由只有一个：AI 标题**每会话只生成一次** —— 没有这一列就只能在
     // 「是不是首轮」「标题像不像模型写的」上猜，猜错的代价是每次开话题都重新调一次模型。
-    ensure_column(conn, "sessions", "title_source", "TEXT")?;
-    ensure_column(conn, "long_memories", "scope", "TEXT DEFAULT 'global'")?;
-    ensure_column(conn, "long_memories", "kind", "TEXT DEFAULT 'normal'")?;
-    ensure_column(conn, "long_memories", "importance", "INTEGER DEFAULT 3")?;
-    ensure_column(conn, "long_memories", "status", "TEXT DEFAULT 'active'")?;
-    ensure_column(conn, "long_memories", "updated_at", "INTEGER")?;
-    ensure_column(conn, "long_memories", "last_used_at", "INTEGER")?;
-    ensure_column(conn, "long_memories", "access_count", "INTEGER DEFAULT 0")?;
-    ensure_column(conn, "long_memories", "expires_at", "INTEGER")?;
-    ensure_column(conn, "long_memories", "metadata_json", "TEXT")?;
     // 写入溯源：这条记忆是哪个会话沉淀下来的。
     // 存在的理由只有一个 —— 「这个会话沉淀了什么 / 把这个会话写的都忘掉」必须可查，
     // metadata_json 里的 sessionId 是 JSON，做过滤要么 LIKE 猜串要么开 JSON1，
     // 两者都不如一个带索引的一等列。旧行为 NULL（不影响召回与注入）。
-    ensure_column(conn, "long_memories", "session_id", "TEXT")?;
-    ensure_column(conn, "compaction_archives", "folded_text", "TEXT")?;
     // 旧库补列：真思考与 content 分列存储（老数据为 NULL，回传时降级为占位）。
-    ensure_column(conn, "messages", "reasoning", "TEXT")?;
     // 旧库删列：`trace_text` 是「思考拼成的纯文本」——两个生产者（Renderer / Main）、读者为零，
     // 已按思考通道隔离 §3.7 D4 整体废除。best-effort：SQLite < 3.35 时语法失败也无妨，
     // 那只是老库留一个空列，而读写两侧都已不再碰它。
@@ -239,6 +265,11 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
       CREATE INDEX IF NOT EXISTS idx_long_memories_kind ON long_memories(kind);
       CREATE INDEX IF NOT EXISTS idx_long_memories_last_used ON long_memories(last_used_at);
       CREATE INDEX IF NOT EXISTS idx_long_memories_session ON long_memories(session_id, id);
+      -- 这两张表改成声明式建表（`ensure_table`）了，索引必须等表建好之后再建：
+      -- 放在第一批里会变成「先建索引后建表」→ `no such table: main.messages`。
+      CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_compaction_archives_session
+        ON compaction_archives(session_id, created_at);
     "#,
     )
     .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
@@ -509,23 +540,6 @@ mod tests {
     }
 }
 
-/// 补一列，**只吞「列已存在」**。
-///
-/// 旧实现把这几条 ALTER 全写成 `let _ = conn.execute(..)`：迁移真失败（只读库 / 磁盘满 /
-/// BUSY / 列被索引引用）时 `init_schema` 仍返回 Ok、`memory.ping` 也 still ok —— 失败被
-/// 推迟到后续某次业务写入才以 `no such column` 出现，那时已经离现场很远。
-fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<(), CoreError> {
-    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
-    match conn.execute(&sql, []) {
-        Ok(_) => Ok(()),
-        // 唯一可判定为「无害」的错误：这一列已经在了（重复执行迁移的正常路径）。
-        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
-        Err(e) => Err(CoreError::rpc(
-            "DB_SCHEMA_FAILED",
-            format!("补列 {table}.{column} 失败：{e}"),
-        )),
-    }
-}
 
 /// 删一列，只吞「本来就没有这一列」（重复执行迁移的正常路径）。
 fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> Result<(), CoreError> {
@@ -542,7 +556,8 @@ fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> Result
 
 #[cfg(test)]
 mod migration_swallow_tests {
-    use super::{drop_column_if_exists, ensure_column};
+    use super::drop_column_if_exists;
+    use crate::db_schema::ensure_column;
     use rusqlite::Connection;
 
     /// 回归（P4）：补列失败必须上抛 —— **只有**「列已存在」可以吞。
@@ -573,5 +588,71 @@ mod migration_swallow_tests {
         // 表不存在是真失败
         let err = drop_column_if_exists(&conn, "no_such_table", "b").unwrap_err();
         assert!(format!("{err}").contains("删列"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod legacy_upgrade_tests {
+    use super::*;
+
+    const LEGACY_SQL: &str = "
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, title TEXT);
+        CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                               role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL);
+        CREATE TABLE long_memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL,
+                                    source TEXT, created_at INTEGER NOT NULL);
+    ";
+
+    /// 回归（P3⑤）：memory 的老库升级后必须拿到全部后加列。
+    ///
+    /// 建表与补列现在共用**一份列清单**（`db_schema::ensure_table`），所以「新库有、老库没有」
+    /// 这种漂移不该再出现；这条用例钉住它。
+    #[test]
+    fn legacy_memory_db_gains_columns_declared_in_the_list() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(LEGACY_SQL).unwrap();
+
+        init_schema(&conn).unwrap();
+
+        let sessions = crate::db_schema::column_names(&conn, "sessions");
+        for want in ["archived", "workspace_path", "title_source"] {
+            assert!(sessions.contains(&want.to_string()), "sessions 缺 {want}: {sessions:?}");
+        }
+        let lms = crate::db_schema::column_names(&conn, "long_memories");
+        for want in [
+            "scope",
+            "kind",
+            "importance",
+            "status",
+            "updated_at",
+            "last_used_at",
+            "access_count",
+            "expires_at",
+            "metadata_json",
+            "session_id",
+        ] {
+            assert!(lms.contains(&want.to_string()), "long_memories 缺 {want}: {lms:?}");
+        }
+        let msgs = crate::db_schema::column_names(&conn, "messages");
+        assert!(msgs.contains(&"reasoning".to_string()), "messages 缺 reasoning: {msgs:?}");
+    }
+
+    /// 新库与老库的列**集合**一致（顺序取决于老库当年建表，不比）。
+    #[test]
+    fn fresh_and_legacy_memory_databases_end_with_the_same_columns() {
+        let fresh = Connection::open_in_memory().unwrap();
+        init_schema(&fresh).unwrap();
+
+        let legacy = Connection::open_in_memory().unwrap();
+        legacy.execute_batch(LEGACY_SQL).unwrap();
+        init_schema(&legacy).unwrap();
+
+        for table in ["sessions", "messages", "long_memories", "compaction_archives"] {
+            let mut a = crate::db_schema::column_names(&fresh, table);
+            let mut b = crate::db_schema::column_names(&legacy, table);
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "{table} 的新库/老库列集合不一致");
+        }
     }
 }

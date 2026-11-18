@@ -9,44 +9,57 @@ use crate::error::CoreError;
 /// 两者在 [`crate::codebase_db`] 里汇合。此前 graph 的 `open()` 里抄了一份 index 的
 /// 建表逻辑（谁先打开谁负责建），是同一份东西的第二份实现。
 pub fn ensure_schema(conn: &Connection) -> Result<(), CoreError> {
-    let has_graph = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_workspaces' LIMIT 1",
-            [],
-            |r| r.get::<_, i32>(0),
-        )
-        .optional()
-        .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?
-        .is_some();
-    if has_graph {
-        // 老库才需要清残留；新库在 init_graph_schema 里压根不会建那张表
+    // 老库才需要清残留（新库在建表批次里压根不会建那张表）。
+    //
+    // **不再「表存在就早退」**：`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，
+    // 真正决定老库能不能用新代码的是**补列**。之前这里看到 `graph_workspaces` 就直接
+    // `return Ok(())`，于是后加的列（`symbol_count` / `call_count` / `calls_built` / 以及
+    // `file_count` / `indexed_at` 这几个更早的）在升级用户的库里从来没出现过 ——
+    // `graph.status` 一查就是 `no such column`。
+    if has_table(conn, "graph_workspaces")? {
         drop_legacy_symbol_vectors(conn)
             .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
-        return Ok(());
     }
-    init_graph_schema(conn).map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))
+    // 无论表在不在都往下走：建表对已存在的表是空操作，**补列**才是老库能不能用新代码的关键。
+    init_graph_schema(conn)
 }
 
-pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
+fn has_table(conn: &Connection, table: &str) -> Result<bool, CoreError> {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 LIMIT 1",
+        [table],
+        |r| r.get::<_, i32>(0),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))
+}
+
+/// `graph_workspaces` 的**列清单**（建表与补列的唯一来源）。
+///
+/// 顺序 = 建表顺序 + 历史上加列的顺序：老库 `ALTER` 之后的物理顺序就是这样，
+/// 新库按这份清单建出来与之相同（按索引读行的代码不会有惊喜）。
+const GRAPH_WORKSPACES: &[crate::db_schema::Column] = &[
+    crate::db_schema::Column::new("root_hash", "TEXT PRIMARY KEY"),
+    crate::db_schema::Column::new("root_path", "TEXT NOT NULL"),
+    crate::db_schema::Column::new("file_count", "INTEGER DEFAULT 0"),
+    crate::db_schema::Column::new("edge_count", "INTEGER DEFAULT 0"),
+    crate::db_schema::Column::new("symbol_count", "INTEGER DEFAULT 0"),
+    crate::db_schema::Column::new("call_count", "INTEGER DEFAULT 0"),
+    // 这个工作区**建过调用图没有**（建库范围）。黏性：一旦为 1，之后的增量也按
+    // WithCalls 维护它 —— 否则一次保存的增量（结构态）会把该文件的出边删掉却不重建。
+    crate::db_schema::Column::new("calls_built", "INTEGER NOT NULL DEFAULT 0"),
+    crate::db_schema::Column::new("indexed_at", "INTEGER DEFAULT 0"),
+    crate::db_schema::Column::new("indexing", "INTEGER DEFAULT 0"),
+];
+
+pub fn init_graph_schema(conn: &Connection) -> Result<(), CoreError> {
     // 这个库的表**不声明外键**：库连接由 `SqliteHandle` 打开，`TuneOptions::foreign_keys`
     // 默认 false（`sqlite.rs`），声明了 `ON DELETE CASCADE` 也不生效 —— 一条没有约束力的
     // 声明比没有更危险（读代码的人会以为删符号会自动带走边）。
     // 级联的唯一实现是 [`super::cleanup`]（`clear_file_graph` / `clear_workspace_graph`）。
     conn.execute_batch(
         "
-        CREATE TABLE IF NOT EXISTS graph_workspaces (
-            root_hash TEXT PRIMARY KEY,
-            root_path TEXT NOT NULL,
-            file_count INTEGER DEFAULT 0,
-            edge_count INTEGER DEFAULT 0,
-            symbol_count INTEGER DEFAULT 0,
-            call_count INTEGER DEFAULT 0,
-            -- 这个工作区**建过调用图没有**（建库范围）。黏性：一旦为 1，之后的增量也按
-            -- WithCalls 维护它 —— 否则一次保存的增量（结构态）会把该文件的出边删掉却不重建。
-            calls_built INTEGER NOT NULL DEFAULT 0,
-            indexed_at INTEGER DEFAULT 0,
-            indexing INTEGER DEFAULT 0
-        );
         CREATE TABLE IF NOT EXISTS graph_imports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             root_hash TEXT NOT NULL,
@@ -93,23 +106,10 @@ pub fn init_graph_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_graph_calls_caller ON graph_calls(caller_symbol_id);
         CREATE INDEX IF NOT EXISTS idx_graph_calls_callee ON graph_calls(root_hash, callee_name);
         ",
-    )?;
-    ensure_column(
-        conn,
-        "graph_workspaces",
-        "symbol_count",
-        "INTEGER DEFAULT 0",
-    )?;
-    ensure_column(conn, "graph_workspaces", "call_count", "INTEGER DEFAULT 0")?;
-    // 建库范围（是否建过调用边）。旧库补列时默认 0 —— `query.rs` 的可见性判定会把
-    // 「calls_built = 0 但 call_count > 0」（老库已建过边）也算成「建过」，避免升级后
-    // 模型突然被告知「调用图未建」。
-    ensure_column(
-        conn,
-        "graph_workspaces",
-        "calls_built",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
+    )
+    .map_err(|e| CoreError::rpc("DB_SCHEMA_FAILED", e.to_string()))?;
+    // 列清单是唯一来源：建表（上面是其它表）+ 补列（老库缺的后加列在这里补上）。
+    crate::db_schema::ensure_table(conn, "graph_workspaces", GRAPH_WORKSPACES, &[])?;
     Ok(())
 }
 
@@ -140,29 +140,70 @@ fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> rusqli
     }
 }
 
-fn ensure_column(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> rusqlite::Result<()> {
-    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
-    match conn.execute(&sql, []) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("duplicate column name") {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归（P3⑤）：**老库**（表已存在但缺后加的列）也必须被对账补列。
+    ///
+    /// `ensure_schema` 以前看到 `graph_workspaces` 就 `return Ok(())`：`symbol_count` /
+    /// `call_count` / `calls_built` 这些后加的列在升级用户的库里从来没出现过 ——
+    /// `graph.status` 一查就是 `no such column: calls_built`。
+    #[test]
+    fn legacy_graph_db_gains_columns_added_later() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 模拟最初版本的库：只有三列
+        conn.execute_batch(
+            "CREATE TABLE graph_workspaces (
+                 root_hash TEXT PRIMARY KEY,
+                 root_path TEXT NOT NULL,
+                 indexing INTEGER DEFAULT 0) ",
+        )
+        .unwrap();
+        ensure_schema(&conn).unwrap();
+
+        let cols = crate::db_schema::column_names(&conn, "graph_workspaces");
+        for want in [
+            "file_count",
+            "edge_count",
+            "symbol_count",
+            "call_count",
+            "calls_built",
+            "indexed_at",
+        ] {
+            assert!(
+                cols.contains(&want.to_string()),
+                "老库缺列 {want}（实际 {cols:?}）—— ensure_schema 又变回「表存在就早退」了？"
+            );
+        }
+    }
+
+    /// 新库与老库最终拿到同一份列清单（顺序也一致）。
+    #[test]
+    fn fresh_and_legacy_databases_end_with_the_same_columns() {
+        let fresh = Connection::open_in_memory().unwrap();
+        ensure_schema(&fresh).unwrap();
+
+        let legacy = Connection::open_in_memory().unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE graph_workspaces (
+                     root_hash TEXT PRIMARY KEY,
+                     root_path TEXT NOT NULL,
+                     indexing INTEGER DEFAULT 0) ",
+            )
+            .unwrap();
+        ensure_schema(&legacy).unwrap();
+
+        // 比**集合**而不是顺序：老库的列序取决于它当年建表时的顺序（历史版本各不相同），
+        // 而代码按显式列名读行 —— 顺序不影响正确性，缺列才影响。
+        let mut fresh_cols = crate::db_schema::column_names(&fresh, "graph_workspaces");
+        let mut legacy_cols = crate::db_schema::column_names(&legacy, "graph_workspaces");
+        fresh_cols.sort();
+        legacy_cols.sort();
+        assert_eq!(fresh_cols, legacy_cols);
+    }
 
     /// 回归（P3）：这个库的建表语句里**不许**再出现外键声明。
     ///

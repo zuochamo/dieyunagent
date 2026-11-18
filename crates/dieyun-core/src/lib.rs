@@ -22,6 +22,7 @@ pub mod codebase_db;
 pub mod compaction;
 pub mod config;
 pub mod embedding;
+pub mod db_schema;
 pub mod error;
 pub mod fs_ops;
 pub mod fts;
