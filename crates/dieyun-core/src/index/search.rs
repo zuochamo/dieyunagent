@@ -13,7 +13,7 @@ pub const SEARCH_LIMIT_MAX: u32 = 48;
 
 /// 单条命中的带行号正文上限。命中在 chunk 内的位置不确定，整块给出更省一次回读。
 ///
-/// 数值唯一来源 `assets/agent-shared.json` 的 `snippets.rustBudgetChars`，且必须**大于**
+/// 数值唯一来源 `src/agent/agent-shared.json` 的 `snippets.rustBudgetChars`，且必须**大于**
 /// Node 的展示预算（`codebaseSnippetMaxChars`）—— 否则 Rust 先截断、Node 再也补不回来。
 /// 历史上这里是「3600 字节」≈1200 汉字，比 Node 的 2400 字符更早截断，与注释意图相反。
 fn snippet_max_chars() -> usize {

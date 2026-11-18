@@ -1,5 +1,5 @@
 {
-  "note": "「上游这条错误是不是上下文溢出」的跨语言基线。Rust `agent/driver.rs::looks_like_context_overflow` 与 Node `src/llm-reconnect-retry.js::isContextOverflowError` 必须对每一条给出相同结论。词表本身在 assets/agent-shared.json 的 contextOverflowPatterns（两侧同源）；本文件锁的是**判定行为**：加词、改匹配方式（contains / 正则）都必须两侧同步且这里全绿。历史事故：措辞只落在 Node 清单里时，内核连折都没折就把这一轮判成失败，而 Node 又把 core 的硬失败降级成「正常完成」—— 用户看到一次空轮。",
+  "note": "「上游这条错误是不是上下文溢出」的跨语言基线。Rust `agent/driver.rs::looks_like_context_overflow` 与 Node `src/llm-reconnect-retry.js::isContextOverflowError` 必须对每一条给出相同结论。词表本身在 src/agent/agent-shared.json 的 contextOverflowPatterns（两侧同源）；本文件锁的是**判定行为**：加词、改匹配方式（contains / 正则）都必须两侧同步且这里全绿。历史事故：措辞只落在 Node 清单里时，内核连折都没折就把这一轮判成失败，而 Node 又把 core 的硬失败降级成「正常完成」—— 用户看到一次空轮。",
   "cases": [
     { "message": "This model's maximum context length is 128000 tokens. However, your messages resulted in 140000 tokens.", "overflow": true },
     { "message": "Error code: 400 - {'error': {'message': 'context_length_exceeded'}}", "overflow": true },

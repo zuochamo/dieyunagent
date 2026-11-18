@@ -1,4 +1,4 @@
-//! 跨语言常量的唯一来源：`assets/agent-shared.json`（`include_str!` 编译期嵌入）。
+//! 跨语言常量的唯一来源：`src/agent/agent-shared.json`（`include_str!` 编译期嵌入）。
 //!
 //! 为什么在 Rust 里也读这份文件：token 折算系数、预算地板、触发比夹取、读上限、慢请求
 //! 阈值、上下文溢出词表 —— 这些知识 Node 与 Rust **两边都要用**，而两侧互相 `require`
@@ -6,14 +6,15 @@
 //! 4096/8192、溢出词表少三条），都没有任何测试变红。
 //!
 //! 规则：
-//! - 值只写在 `assets/agent-shared.json`，本模块只负责解析；
+//! - 值只写在 `src/agent/agent-shared.json`，本模块只负责解析；文件放在 `src/` 内是硬约束：
+//!   远端 Agent 包拍平 `src/` 前缀后，任何出 `src/` 的相对路径都会错位；
 //! - 结构体字段与 JSON 一一对应（`camelCase`），**漏字段会 panic**（宁可编译/启动就炸，
 //!   也不要静默用默认值 —— 那正是双写的成因）；
 //! - 加键必须两侧都有人读，`scripts/check-shared-constants.cjs` 会验。
 
 use std::sync::OnceLock;
 
-const RAW: &str = include_str!("../../../assets/agent-shared.json");
+const RAW: &str = include_str!("../../../src/agent/agent-shared.json");
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,7 +77,7 @@ pub struct SnippetNumbers {
 pub fn shared() -> &'static SharedConstants {
     static ONCE: OnceLock<SharedConstants> = OnceLock::new();
     ONCE.get_or_init(|| {
-        serde_json::from_str(RAW).expect("assets/agent-shared.json 与 shared.rs 结构不一致")
+        serde_json::from_str(RAW).expect("src/agent/agent-shared.json 与 shared.rs 结构不一致")
     })
 }
 

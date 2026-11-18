@@ -20,7 +20,7 @@ pub use tokens::estimate_messages_tokens;
 
 /// 内核侧的预算守卫（低于它的预算视为调用方给错）。
 ///
-/// 它是 Rust 独有的数字，不进 `assets/agent-shared.json`；但必须**不大于**共享文件里的
+/// 它是 Rust 独有的数字，不进 `src/agent/agent-shared.json`；但必须**不大于**共享文件里的
 /// `compaction.contextWindowFloorTokens`，否则 Node 派生的合法预算会被内核静默抬高 ——
 /// `shared.rs` 的测试钉着这条关系（所以这里只在测试构建里暴露）。
 #[cfg(test)]

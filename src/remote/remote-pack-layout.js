@@ -60,11 +60,17 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
   'src/lsp/spawn-args.js',
   'src/lsp/lsp-client.js',
   'src/lsp/navigate-service.js',
-  // 跨语言常量：model-runtime-by-tier → shared-constants → assets/agent-shared.json。
+  // 跨语言常量：model-runtime-by-tier → shared-constants → src/agent/agent-shared.json。
   // 漏掉任何一个，远端 daemon 加载期就 `Cannot find module`（同 2026-10-18 spawn-args 事故形态），
   // 而且 hash 是按这份清单算的 —— 漏了它反而会被判「已存在、跳过上传」，修也修不掉。
+  //
+  // 硬约束：本清单里的路径**必须都在 `src/` 下**。打包会把 `src/` 前缀拍平（`src/x/y` → `x/y`），
+  // 而 `src/` 之外的相对路径在拍平后层级必然错位 —— 2026-11-18 事故就是 `assets/agent-shared.json`
+  // 落在包根、`agent/shared-constants.js` 里 `require('../../assets/…')` 越过包根，远端 daemon
+  // 加载即崩（三个索引步骤全不可用）。`checkRemotePackSourceBoundary` 是本条的唯一校验实现，
+  // 打包期（scripts/pack-remote-gateway.cjs）与提交闸门（scripts/check-shared-constants.cjs）共用。
   'src/agent/shared-constants.js',
-  'assets/agent-shared.json'
+  'src/agent/agent-shared.json'
 ];
 
 /** 内置 Linux Node 运行时：随安装包一起预装，远程不需要目标机装 Node。 */
@@ -285,6 +291,57 @@ function assertRemotePackReady(packRoot) {
 }
 
 /**
+ * 部署包源码清单的边界闸门（唯一实现）。
+ *
+ * 远端包会把 `src/` 前缀拍平（`src/x/y.js` → `x/y.js`）后解压到
+ * `~/.dieyun/remote-agent/<版本>/`，所以两条都必须成立：
+ * 1. 清单里每个路径都在 `src/` 下（`src/` 之外的资源放不进这个深度体系）；
+ * 2. 每个被打包模块的**相对 require** 解析后仍在 `src/` 内 —— 出 `src/` 的路径
+ *    （如 `../../assets/x.json`）拍平后就会越过包根，远端 daemon 加载即崩。
+ *
+ * 2026-11-18 事故：`assets/agent-shared.json` 位于包根，而
+ * `agent/shared-constants.js` 用的是 `../../assets/agent-shared.json`（仓库内正好指到仓根，
+ * 拍平后落到 `~/.dieyun/remote-agent/` 这一层），于是每次会话都是「Remote Agent 未就绪」，
+ * 索引代码库 / 结构索引全部不可用。
+ *
+ * @param {{ rootDir: string, sourcePaths?: string[], readFile?: (abs: string) => string }} opts
+ * @returns {{ ok: boolean, violations: { rel: string, spec: string, target: string, kind: string }[] }}
+ */
+function checkRemotePackSourceBoundary(opts) {
+  const rootDir = path.resolve(String((opts && opts.rootDir) || path.join(__dirname, '..', '..')));
+  const sourcePaths =
+    Array.isArray(opts && opts.sourcePaths) && opts.sourcePaths.length
+      ? opts.sourcePaths
+      : REMOTE_GATEWAY_SOURCE_PATHS;
+  const readFile = (opts && opts.readFile) || ((abs) => fs.readFileSync(abs, 'utf8'));
+  const violations = [];
+  for (const rel of sourcePaths) {
+    const relPosix = String(rel).replace(/\\/g, '/');
+    if (!relPosix.startsWith('src/')) {
+      violations.push({ rel: relPosix, spec: '', target: relPosix, kind: 'entry-outside-src' });
+      continue;
+    }
+    let text = '';
+    try {
+      text = String(readFile(path.join(rootDir, relPosix)));
+    } catch {
+      // 缺文件由 inspectRemotePack 判（这里只管路径形状，不重复判存在性）
+      continue;
+    }
+    for (const m of text.matchAll(/require\(\s*['"](\.[^'"]*)['"]\s*\)/g)) {
+      const spec = m[1];
+      const target = path.posix.normalize(
+        path.posix.join(path.posix.dirname(relPosix), spec.replace(/\\/g, '/'))
+      );
+      if (target !== 'src' && !target.startsWith('src/')) {
+        violations.push({ rel: relPosix, spec, target, kind: 'outside-src' });
+      }
+    }
+  }
+  return { ok: violations.length === 0, violations };
+}
+
+/**
  * 部署包内容 hash：源码清单 + Linux dieyun-core。
  * 远程包内容不止源码清单：Linux dieyun-core 有无/换版都要反映到 hash，
  * 否则补打包核心后注入端会因 hash 不变而跳过重传。
@@ -325,6 +382,7 @@ module.exports = {
   REMOTE_PACK_MARKER_REL,
   REMOTE_PACK_REQUIRED_FILES,
   inspectRemotePack,
+  checkRemotePackSourceBoundary,
   assertRemotePackReady,
   parseRemotePackMissing,
   parseRemotePackMarker,

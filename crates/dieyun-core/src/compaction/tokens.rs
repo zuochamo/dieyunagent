@@ -11,7 +11,7 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
-/// 图片 part 的等效 token 数（由 `assets/agent-shared.json` 的等效字符数换算）。
+/// 图片 part 的等效 token 数（由 `src/agent/agent-shared.json` 的等效字符数换算）。
 ///
 /// 图片在真实请求里由服务端**按像素**换算成「图片 token」，与 base64 长度无关：
 /// 同一张图存成 1.5MB PNG 与压成 200KB JPEG，输入 token 几乎相同。若按 base64 长度计
@@ -19,7 +19,7 @@ fn is_cjk(ch: char) -> bool {
 /// —— 实测一张 PNG 让本函数估到 685406 token，越过压缩触发线，而图片既不可折叠也不可压缩，
 /// 于是变成「每轮都压、却压不掉」的假压缩。
 ///
-/// 系数唯一来源是 `assets/agent-shared.json`（Node 侧 `visionPartEqChars` ÷ `charsPerToken`），
+/// 系数唯一来源是 `src/agent/agent-shared.json`（Node 侧 `visionPartEqChars` ÷ `charsPerToken`），
 /// Rust 侧由 [`crate::shared::image_part_equiv_tokens`] 换算 —— 两侧同源，不再手抄 1875。
 fn image_part_equiv_tokens() -> usize {
     crate::shared::image_part_equiv_tokens()

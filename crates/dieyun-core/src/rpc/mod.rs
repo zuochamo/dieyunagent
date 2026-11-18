@@ -32,7 +32,7 @@ fn _assert_app_state_is_send_sync() {
 
 /// core 内部耗时超过这个值就打一行 `[rpc-slow] <method> <ms>` 到 stderr。
 ///
-/// 数值唯一来源是 `assets/agent-shared.json` 的 `rpc.slowLogMs`（Node 侧
+/// 数值唯一来源是 `src/agent/agent-shared.json` 的 `rpc.slowLogMs`（Node 侧
 /// `core-rpc-timeouts.js:SLOW_RPC_LOG_MS` 读同一份）：两侧都记才能分辨「core 内部慢」
 /// 还是「RPC 堵在管道 / 守护进程 / SSH 里」—— `memory.long_recall` 那两次 120s 超时
 /// 就是缺了这组对照，只能瞎猜。这不是超时机制（不掐断、不重试）。

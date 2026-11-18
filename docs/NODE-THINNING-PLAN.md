@@ -46,7 +46,7 @@
 | | |
 |---|---|
 | **现状证据** | 6 处手抄 Rust 常量：`src/agent/agent-limits.js:216`（图片折算 token）、`:239`、`:428`（衰减/归档窗口与向量批量「与 Rust 默认一致」）；`src/agent/compaction-main.js:85`（`charsPerToken`「与 Rust `compaction/tokens.rs` 同值」）；`src/core-bridge.js:270` + `src/core-rpc-timeouts.js:36`（`SLOW_RPC_LOG_MS` 同值，注释自陈「跨语言没法共享常量」）；`src/agent/session-title.js:29`（`TITLE_SOURCE_AI` 同值）；`src/index/source-files.js:26` + `src/gateway/rg-search.js:7`（忽略目录与 `index/walker.rs` 对齐）；反向还有 `crates/dieyun-core/src/index/search.rs:23`（`slice(0,400)` 与 Node grep 对齐） |
-| **动什么算完** | 一份机器可读数据（`assets/agent-shared.json`）：Node 侧 `require` 读、Rust 侧 `include_str!` + serde 读；上面每一处改成读它，并删掉「与 Rust 同值」的注释（不再需要）；`scripts/check-repo-contracts.cjs` 增一条闸门：数据文件里的每个键**两侧都有人读**（防只改一侧） |
+| **动什么算完** | 一份机器可读数据（`src/agent/agent-shared.json`）：Node 侧 `require` 读、Rust 侧 `include_str!` + serde 读；上面每一处改成读它，并删掉「与 Rust 同值」的注释（不再需要）；`scripts/check-repo-contracts.cjs` 增一条闸门：数据文件里的每个键**两侧都有人读**（防只改一侧） |
 | **风险** | 打包要带上这个文件：`electron-builder` 的 `build.files`、`scripts/pack-headless.cjs` 的纯 JS 闭包白名单都得列它（已有 `assets/` 机制可复用） |
 | **验证** | `npm run check:repo-contracts`、`cargo test -p dieyun-core --lib`、`npx vitest run test/unit/token-estimate.test.cjs`、`npm run test:headless` |
 

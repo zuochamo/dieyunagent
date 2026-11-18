@@ -621,7 +621,7 @@
   ],
   "pathRules": [
     {
-      "prefix": "assets/agent-shared.json",
+      "prefix": "src/agent/agent-shared.json",
       "tests": [
         "check:shared-constants",
         "test:unit"

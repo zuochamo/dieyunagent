@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 读上限三件套的唯一来源是 `assets/agent-shared.json`（Node 侧 `fs-read-limits.js` 读同一份）。
+/// 读上限三件套的唯一来源是 `src/agent/agent-shared.json`（Node 侧 `fs-read-limits.js` 读同一份）。
 /// 以前这里是三个手抄的 const，注释写着「与 Node 同值」—— 那种注释一旦漏改就是静默漂移。
 pub fn default_read_max_bytes() -> u64 {
     crate::shared::shared().read_limits.default_max_bytes

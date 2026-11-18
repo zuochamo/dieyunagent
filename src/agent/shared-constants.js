@@ -9,17 +9,16 @@
  * （预算地板 4096/8192、溢出词表少三条），而且两处都不会让任何测试变红。
  *
  * 现在的规则：
- * - 值只写在 `assets/agent-shared.json`；
+ * - 值只写在 `src/agent/agent-shared.json`（**必须在 `src/` 内**：远端 Agent 包会拍平
+ *   `src/` 前缀，任何 require 到 `src/` 之外的资源在拍平后层级都会错位，见
+ *   `src/remote/remote-pack-layout.js` 与 `scripts/check-shared-constants.cjs` 的边界闸门）；
  * - Node 一律从这里取（`agent-limits` / `fs-read-limits` / `core-rpc-timeouts` /
  *   `llm-reconnect-retry` / `model-runtime-by-tier` 都是消费方，不是来源）；
  * - Rust 侧同一份文件（`crates/dieyun-core/src/shared.rs`，`include_str!` 编译期嵌入）；
  * - 加键必须两侧都有人读，`scripts/check-shared-constants.cjs` 会验。
- *
- * 注意：`assets/**` 已在 electron-builder 的 files 里；headless 包要单独列（见
- * `scripts/pack-headless.cjs` 的 EXTRA_FILES）。
  */
 
-const raw = require('../../assets/agent-shared.json');
+const raw = require('./agent-shared.json');
 
 const frozen = (obj) => Object.freeze({ ...obj });
 

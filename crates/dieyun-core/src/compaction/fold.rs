@@ -79,7 +79,7 @@ const DEFAULT_KEEP_TAIL_ATOMS: usize = 3;
 
 /// 预算地板：低于它的预算无意义（调用方给错也不至于把上下文折成空）。
 ///
-/// 与 Node 的 `contextWindowFloorTokens`（8192，见 `assets/agent-shared.json`）不是同一个数：
+/// 与 Node 的 `contextWindowFloorTokens`（8192，见 `src/agent/agent-shared.json`）不是同一个数：
 /// 那个是「窗口」地板的派生基准，这个是「别人递进来的预算」的兜底守卫。守卫必须**小于等于**
 /// 那个地板，否则 Node 算出的合法预算会被内核静默抬高 —— `shared.rs` 的测试钉着这条关系。
 pub(crate) const MIN_BUDGET_TOKENS: usize = 4096;
@@ -105,7 +105,7 @@ pub fn fold(params: FoldParams) -> FoldResult {
         _ => (estimated, "estimate"),
     };
     let numbers = &crate::shared::shared().compaction;
-    // 触发比夹取区间是跨语言常量：唯一来源 `assets/agent-shared.json`
+    // 触发比夹取区间是跨语言常量：唯一来源 `src/agent/agent-shared.json`
     // （Node 的 `getCompactionTriggerRatio` 用同一份 min/max）。
     let budget = params.token_budget.max(MIN_BUDGET_TOKENS);
     let trigger =

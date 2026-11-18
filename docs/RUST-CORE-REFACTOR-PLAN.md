@@ -211,7 +211,7 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 > ① 跨语言数值与词表单一来源；② 三条跨语言双跑 fixture；③ catalog 生成器修交替臂 + d.ts + 两条新闸门；④ RPC 方法表 + **86/86 handler**（`rpc/mod.rs` 1458 → 304 行）+ parity/可达性测试。
 > （唯一不在本批的遗留：7 个老文件的 pragma 归位 + 19 处类型债，见文末「唯一未做」。）
 
-- ✅ **数值/词表单源**：`assets/agent-shared.json`（14 个键）→ Node `src/agent/shared-constants.js` / Rust `crates/dieyun-core/src/shared.rs`（`include_str!` 编译期嵌入）。
+- ✅ **数值/词表单源**：`src/agent/agent-shared.json`（14 个键）→ Node `src/agent/shared-constants.js` / Rust `crates/dieyun-core/src/shared.rs`（`include_str!` 编译期嵌入）。
   改读点：`agent-limits`（token 系数 ×2 + 图片等效字符 + snippet 预算）、`model-runtime-by-tier`（窗口地板）、`compaction-main`（触发比夹取）、`fs-read-limits`（三个读上限）、`core-rpc-timeouts`（慢请求阈值）、`llm-reconnect-retry`（溢出词表）；Rust 侧 `tokens.rs` / `fold.rs` / `config.rs` / `rpc/mod.rs` / `agent/driver.rs`。
   - **4096 vs 8192 的处理**：核实后确认二者不是同一个数（8192 = Node 的**窗口地板**派生基准；4096 = 内核对「别人递进来的预算」的守卫），所以没硬合并，而是把 8192 放进共享文件 + Rust 侧测试断言 `守卫 ≤ 窗口地板`，两者关系由测试锁死。
   - **顺手修掉的真 bug**：`index/search.rs` 的摘录预算此前是「3600 **字节**」与「字符」上限比较，中文正文只有约 1/3 预算（≈1200 汉字就截断），比 Node 的 2400 字符更早 —— 现在按字符算，预算 4800 字符（共享文件里，且测试断言必须大于 Node 的）。
@@ -246,7 +246,7 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 
 - R1 的前半：**RPC 注册表**（把 85 臂搬进 `rpc/registry.rs` + 每方法一个 handler 函数，`match` 变成查表）；同一批把 A15 的 `messages_clear` 别名删掉。
 - R1 的后半：`scripts/generate-rpc-catalog.cjs` 认 `"a" | "b" =>` 交替臂 + 自检「臂数 == catalog 条目数」；产出 `types/core-rpc.d.ts`，`rust-loop-runner.js` / `core-bridge.js` 上 `// @ts-check`。
-- 数值单一来源（`NODE-THINNING-PLAN N1.1`）：token 系数 / 图片等效 token / 预算地板 / 触发比夹取范围 / 读上限 / 慢请求阈值 → 一份 `assets/agent-shared.json`，两侧读同一份；**顺手修 4096 vs 8192 的不一致**。
+- 数值单一来源（`NODE-THINNING-PLAN N1.1`）：token 系数 / 图片等效 token / 预算地板 / 触发比夹取范围 / 读上限 / 慢请求阈值 → 一份 `src/agent/agent-shared.json`，两侧读同一份；**顺手修 4096 vs 8192 的不一致**。
 - 跨语言双跑 fixture（`N1.2`）：先补 3 条 —— 溢出词表、忽略目录、展示截断口径。
 
 **验收**：`npm run verify:rpc-catalog` + `npm run check:js` + `cargo test -p dieyun-core --lib` + `npm run test:rust-agent-loop-smoke` + `npm run check:shared-constants`。
@@ -306,7 +306,7 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 | 项 | 状态 | 落点 / 证据 |
 |---|---|---|
 | **R3 显式化** | ✅ | ①`graph.status.callsBuilt`（P2，调用图建过没有）；②`index.status.filesSkipped` / `filesTruncated`（看见了但不可索引 vs 仓比 16k 上限还大 → 后者这一轮**压根没看到文件**）；③`compaction.estimate` 形状错误改硬报 `INVALID_PARAMS`（A19，选了「报错」而不是「返回 null」——调用方不会把 null 当 0 用）；④**`planner.done.truncated` + `truncatedNote`**：计划被宿主上限压低（模型要 3 路 best-of-N、设置关掉）时说一句人话，否则「为什么这条任务没有交叉验证」永远查不出来 |
-| **R4 观测收口** | ✅ | 新增 `src/obs.rs`：`[rpc-slow]`（唯一一条，阈值仍读 `assets/agent-shared.json` 的 `rpc.slowLogMs`）、`[rpc-fold]`（折叠事实：档位 / 两个口径的 before / after / 触发源）、`[rpc-usage]`（每轮 prompt/completion/total，上游没给 `prompt_tokens` 就不写，避免假 0）、`[rpc-tools]`（工具段墙钟：`need_delegate` 出发打点、`agent.run.tools` 回来算差）。格式化函数是纯函数，4 条用例钉格式；只有 `emit` 碰 IO |
+| **R4 观测收口** | ✅ | 新增 `src/obs.rs`：`[rpc-slow]`（唯一一条，阈值仍读 `src/agent/agent-shared.json` 的 `rpc.slowLogMs`）、`[rpc-fold]`（折叠事实：档位 / 两个口径的 before / after / 触发源）、`[rpc-usage]`（每轮 prompt/completion/total，上游没给 `prompt_tokens` 就不写，避免假 0）、`[rpc-tools]`（工具段墙钟：`need_delegate` 出发打点、`agent.run.tools` 回来算差）。格式化函数是纯函数，4 条用例钉格式；只有 `emit` 碰 IO |
 | **`agent.delta.round`** | ✅ 删字段 | 三处调用点全传 `None`（恒为 null 的字段），根因是语义不成立：增量属于「正在飞的那一轮」，而账本 `round` 收到响应才自增。删字段 + 宿主直接用 `llmRound` |
 | **20s 预算机制** | ✅ 核实后不存在 | P1 已把 `FAST_METHOD_BUDGET_MS` 改成 10s（先于宿主 15s 发声），机制本身是活的（防轮询方法无限等），不删；`registry.rs` 里留了一句「历史上这里是 20s，等于死代码」 |
 | **清陈旧注释** | ✅ | `INTERACTIVE_EMBED_BUDGET_MS` / `EMBEDDING_TOO_SLOW`（那三层补偿已删，注释改成说明现状）、`agent.llm.chat`（→ `agent.run.*` / `llm.complete`）、**45s 口径 → 15s**（`sqlite.rs` / `graph/mod.rs` 三处；真实值在 `src/core-rpc-timeouts.js`） |

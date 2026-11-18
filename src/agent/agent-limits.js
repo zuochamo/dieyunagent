@@ -20,7 +20,7 @@ const {
   listContextTierIds
 } = require('./model-runtime-by-tier');
 const { clampModelRuntimeValue } = require('./model-runtime-schema');
-// 跨语言数值的唯一来源（Rust 读同一份 assets/agent-shared.json）。
+// 跨语言数值的唯一来源（Rust 读同一份 src/agent/agent-shared.json）。
 const SHARED = require('./shared-constants');
 
 /** @typedef {{ key: string, label: string, hint?: string, type: 'number'|'boolean', min?: number, max?: number, step?: number, unit?: string, format?: 'int'|'ms'|'min'|'mb'|'ratio' }} AgentLimitSchemaItem */
@@ -215,7 +215,7 @@ const AGENT_LIMITS_DEFAULTS = {
   // 注意：这是「账本折算系数」而非策略上限，故意不出现在设置页——
   // contentCharLen 没有 tier 上下文，只读全局默认值，做成可调项会「改了不生效」。
   // 两个计费口径都从本值换算：字符口径 session-context.contentCharLen、
-  // token 口径 token-estimate 的图片等效 token。**值在 assets/agent-shared.json**
+  // token 口径 token-estimate 的图片等效 token。**值在 src/agent/agent-shared.json**
   // （Rust `compaction/tokens.rs` 读同一份，不再手抄）。
   visionPartEqChars: SHARED.tokenEstimate.imagePartEqChars,
   // 电脑控制（computer 工具）输入参数上限。动作枚举/坐标形状等结构校验在
@@ -239,7 +239,7 @@ const AGENT_LIMITS_DEFAULTS = {
   // 提示词注入伪造窗口标题的成本也随条数可控。
   computerWindowListMax: 25,
   // 字符→token 折算系数（上下文账本 / 用量估算用）。与 visionPartEqChars 同为「折算系数」
-  // 而非策略上限，故意不上设置页。**值在 assets/agent-shared.json**：Rust
+  // 而非策略上限，故意不上设置页。**值在 src/agent/agent-shared.json**：Rust
   // `compaction/tokens.rs::estimate_text_tokens` 读同一份，手抄两份已经漂过一次。
   // renderer 侧经 agent-bundle-entry.js 的 compat 挂到 window.CHARS_PER_TOKEN /
   // window.CJK_CHARS_PER_TOKEN 后直接消费（这两个键不在 module.exports 中）。

@@ -121,7 +121,8 @@ const REQUIRED_ENTRIES = [
   'assets/dieyun.md',
   // 跨语言常量的唯一来源（src/agent/shared-constants.js 会 require 它）。
   // 漏了这一行：Linux 包启动即 require 失败，而 dev 环境完全看不出来。
-  'assets/agent-shared.json',
+  // 它必须在 src/ 内：远端 Agent 包拍平 src/ 前缀，出 src/ 的相对路径层级会错位。
+  'src/agent/agent-shared.json',
   CORE_REL,
   'node_modules/ws/package.json',
   'node_modules/@modelcontextprotocol/sdk/package.json'

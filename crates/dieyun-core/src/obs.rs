@@ -20,7 +20,7 @@ fn emit(line: &str) {
 
 /// 一行慢 RPC；未达阈值返回 `None`（调用方据此决定要不要写）。
 ///
-/// 阈值来自 `assets/agent-shared.json` 的 `rpc.slowLogMs`（Node 侧
+/// 阈值来自 `src/agent/agent-shared.json` 的 `rpc.slowLogMs`（Node 侧
 /// `core-rpc-timeouts.js:SLOW_RPC_LOG_MS` 读同一份）：两侧都记才能分辨「core 内部慢」
 /// 还是「RPC 堵在传输/宿主里」。
 pub(crate) fn rpc_slow_line(method: &str, elapsed_ms: u64, threshold_ms: u64) -> Option<String> {

@@ -1,6 +1,6 @@
 'use strict';
 
-// 三个上限的唯一来源是 assets/agent-shared.json（Rust `config.rs` 的
+// 三个上限的唯一来源是 src/agent/agent-shared.json（Rust `config.rs` 的
 // default_read_max_bytes / absolute_read_max_bytes / index_file_max_bytes 读同一份）。
 const SHARED = require('../agent/shared-constants');
 

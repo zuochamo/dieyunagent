@@ -6,7 +6,7 @@
  */
 const ENV = typeof process !== 'undefined' && process.env ? process.env : {};
 
-// 上下文溢出的词表（与 Rust `agent/driver.rs` 同一份数据：assets/agent-shared.json）。
+// 上下文溢出的词表（与 Rust `agent/driver.rs` 同一份数据：src/agent/agent-shared.json）。
 const OVERFLOW_PATTERNS = require('./agent/shared-constants').contextOverflowPatterns;
 
 const LLM_RECONNECT_SHORT_BASE_MS = 800;
@@ -176,7 +176,7 @@ function isNonRetryableLlmError(err) {
 function isContextOverflowError(err) {
   if (!err || isAbortError(err)) return false;
   const msg = String(err && (err.message || err)).toLowerCase();
-  // 词表唯一来源：assets/agent-shared.json 的 contextOverflowPatterns（Rust
+  // 词表唯一来源：src/agent/agent-shared.json 的 contextOverflowPatterns（Rust
   // `agent/driver.rs::looks_like_context_overflow` 读同一份）。
   // 以前这里是一条手写正则、Rust 那边是一串手写 contains：两份词表漏改过一次，
   // 结果措辞落在 Node 清单时内核连折都没折，用户看到一次「正常完成的空轮」。

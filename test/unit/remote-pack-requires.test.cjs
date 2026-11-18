@@ -15,7 +15,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { REMOTE_GATEWAY_SOURCE_PATHS } = require('../../src/remote/remote-pack-layout');
+const {
+  REMOTE_GATEWAY_SOURCE_PATHS,
+  checkRemotePackSourceBoundary
+} = require('../../src/remote/remote-pack-layout');
 
 const ROOT = path.join(__dirname, '..', '..');
 const REQUIRE_RE = /\brequire\(\s*(['"])(\.[^'"]*)\1\s*\)/g;
@@ -71,6 +74,27 @@ function inspectClosure(root, rels) {
   return { missing: [...missing].sort(), unresolved: [...unresolved].sort() };
 }
 
+/**
+ * 包内路径空间的闭包：先把清单按「拍平 src/」映射成远端真实布局，再解析每个模块的
+ * 相对 require。解析不到（或落回包外）就说明这个包在远端会 `Cannot find module`。
+ * @returns {string[]} 不可解析的 `文件 -> spec`
+ */
+function inspectFlattenedClosure(root, rels) {
+  const flatten = (rel) => String(rel).replace(/\\/g, '/').replace(/^src\//, '');
+  const packFiles = new Set(rels.map(flatten));
+  const bad = [];
+  for (const rel of rels) {
+    const abs = path.join(root, rel);
+    const fromDir = path.posix.dirname(flatten(rel));
+    for (const spec of relativeRequires(abs)) {
+      const base = path.posix.normalize(path.posix.join(fromDir, spec.replace(/\\/g, '/')));
+      const ok = RESOLVE_SUFFIXES.some((suffix) => packFiles.has(base + suffix));
+      if (!ok) bad.push(`${flatten(rel)} -> ${spec}`);
+    }
+  }
+  return bad.sort();
+}
+
 describe('远程 Agent 打包闭包', () => {
   it('清单内文件都存在', () => {
     const absent = REMOTE_GATEWAY_SOURCE_PATHS.filter((rel) => {
@@ -87,5 +111,47 @@ describe('远程 Agent 打包闭包', () => {
     const { missing, unresolved } = inspectClosure(ROOT, REMOTE_GATEWAY_SOURCE_PATHS);
     expect(unresolved).toEqual([]);
     expect(missing).toEqual([]);
+  });
+
+  /**
+   * 2026-11-18 事故：清单闭包是完整的（`assets/agent-shared.json` 也在清单里），
+   * 但打包会把 `src/` 前缀拍平，`agent/shared-constants.js` 里的 `../../assets/…`
+   * 拍平后越过包根 → 远端 daemon 加载即崩。所以还要在**包内路径空间**里再算一次闭包。
+   */
+  it('拍平 src/ 后在包内仍能解析（远端真实布局）', () => {
+    const flattened = inspectFlattenedClosure(ROOT, REMOTE_GATEWAY_SOURCE_PATHS);
+    expect(flattened).toEqual([]);
+  });
+
+  it('清单与包内相对 require 都不得越出 src/', () => {
+    const boundary = checkRemotePackSourceBoundary({ rootDir: ROOT });
+    expect(boundary.violations).toEqual([]);
+    expect(boundary.ok).toBe(true);
+  });
+
+  it('越出 src/ 的清单/require 会被闸门抓住（回归用例）', () => {
+    // ① 清单里出现 src/ 之外的资源（事故当天的清单形态）
+    const withOldLayout = checkRemotePackSourceBoundary({
+      rootDir: ROOT,
+      sourcePaths: ['src/agent/shared-constants.js', 'assets/agent-shared.json']
+    });
+    expect(withOldLayout.ok).toBe(false);
+    expect(withOldLayout.violations.map((v) => v.kind)).toContain('entry-outside-src');
+
+    // ② 包内模块自己 require 到 src/ 之外（事故当天的代码形态）
+    const withOldRequire = checkRemotePackSourceBoundary({
+      rootDir: ROOT,
+      sourcePaths: ['src/agent/shared-constants.js'],
+      readFile: () => "const raw = require('../../assets/agent-shared.json');"
+    });
+    expect(withOldRequire.ok).toBe(false);
+    expect(withOldRequire.violations).toEqual([
+      {
+        rel: 'src/agent/shared-constants.js',
+        spec: '../../assets/agent-shared.json',
+        target: 'assets/agent-shared.json',
+        kind: 'outside-src'
+      }
+    ]);
   });
 });

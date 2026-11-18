@@ -13,6 +13,7 @@ const { ensureBundledNodeLinux, resolveNodeVersion } = require('./lib/node-linux
 const {
   REMOTE_GATEWAY_SOURCE_PATHS,
   REMOTE_PACK_CORE_REL,
+  checkRemotePackSourceBoundary,
   computeRemoteGatewaySourceHash,
   inspectRemotePack
 } = require('../src/remote/remote-pack-layout.js');
@@ -50,6 +51,19 @@ function pkgNeedsInstall(outDir, pkgJson) {
 }
 
 async function main() {
+  // 拍平 src/ 之后仍能加载：清单与包内相对 require 都不得越出 src/（见 remote-pack-layout）
+  const boundary = checkRemotePackSourceBoundary({ rootDir: ROOT });
+  if (!boundary.ok) {
+    const detail = boundary.violations
+      .map((v) =>
+        v.kind === 'entry-outside-src'
+          ? `${v.rel} 不在 src/ 下`
+          : `${v.rel} require('${v.spec}') → ${v.target}（越出 src/）`
+      )
+      .join('；');
+    throw new Error(`远程 Agent 打包清单越界：${detail}`);
+  }
+
   await fsp.rm(OUT, { recursive: true, force: true });
   await fsp.mkdir(OUT, { recursive: true });
 

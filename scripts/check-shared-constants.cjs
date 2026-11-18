@@ -1,25 +1,29 @@
 'use strict';
 
 /**
- * 「跨语言常量」闸门：`assets/agent-shared.json` 里的每个键，Node 与 Rust **两侧都必须真的读到**。
+ * 「跨语言常量」闸门：`src/agent/agent-shared.json` 里的每个键，Node 与 Rust **两侧都必须真的读到**。
  *
  * 为什么需要它：这份文件是为了消灭「同一份知识两份手抄」而存在的。如果某个键只有一侧读，
  * 它就从「单一来源」退化成了「又一份孤儿常量」—— 而孤儿常量永远不会在测试里变红，直到线上
  * 出现「设置里改了不生效」或「两侧算法不一致」。历史上 token 系数、预算地板、溢出词表都
  * 这样漂过一次（见 docs/audit/2026-11-rust-core/runtime.md F9、agent.md F3）。
  *
- * 另外两条也会被挡：
+ * 另外三条也会被挡：
  * 1. 除 `shared-constants.js` 之外，任何 Node 文件直接 require 这份 JSON —— 绕过冻结包装，
  *    改起来没人知道谁在用；
- * 2. headless 包（`scripts/pack-headless.cjs` 的 EXTRA_FILES）没列这份文件 —— Linux 包会在
- *    运行期 require 失败，而 dev 环境完全看不出来。
+ * 2. headless 包（`scripts/pack-headless.cjs` 的 REQUIRED_ENTRIES）没列这份文件 —— Linux 包
+ *    会在运行期 require 失败，而 dev 环境完全看不出来；
+ * 3. 远端 Agent 包（`src/remote/remote-pack-layout.js`）的清单越出 `src/`，或包内任何模块的
+ *    相对 require 解析到 `src/` 之外 —— 远端包会拍平 `src/` 前缀，出 `src/` 的路径层级必然错位
+ *    （2026-11-18：`assets/agent-shared.json` 就是这样让远端 daemon 加载即崩，三个索引步骤全废）。
  */
 
 const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const SHARED_PATH = path.join(ROOT, 'assets', 'agent-shared.json');
+const SHARED_REL = 'src/agent/agent-shared.json';
+const SHARED_PATH = path.join(ROOT, 'src', 'agent', 'agent-shared.json');
 const JS_ROOTS = ['src', 'test'];
 const RS_ROOT = path.join('crates', 'dieyun-core', 'src');
 
@@ -104,20 +108,27 @@ function main() {
   for (const f of collect(path.join(ROOT, 'src'))) {
     if (f.rel === 'src/agent/shared-constants.js') continue;
     if (/require\(\s*['"][^'"]*agent-shared\.json['"]\s*\)/.test(f.text)) {
-      errors.push(`${f.rel} 直接 require 了 assets/agent-shared.json（必须经 src/agent/shared-constants.js）`);
+      errors.push(`${f.rel} 直接 require 了 ${SHARED_REL}（必须经 src/agent/shared-constants.js）`);
     }
   }
 
-  // headless 包要列进 EXTRA_FILES，否则 Linux 包运行期 require 失败
+  // 它本身必须在 src/ 内，且在 headless 包的必需清单里有登记
   const packHeadless = fs.readFileSync(path.join(ROOT, 'scripts', 'pack-headless.cjs'), 'utf8');
-  if (!packHeadless.includes('assets/agent-shared.json')) {
-    errors.push('scripts/pack-headless.cjs 的 EXTRA_FILES 里没有 assets/agent-shared.json（headless 包会 require 失败）');
+  if (!packHeadless.includes(SHARED_REL)) {
+    errors.push(`scripts/pack-headless.cjs 的 REQUIRED_ENTRIES 里没有 ${SHARED_REL}（headless 包会 require 失败）`);
   }
 
-  // 远端 Agent 的打包清单同理（哈希按清单算，漏了反而判「已存在、跳过上传」）
-  const remoteLayout = fs.readFileSync(path.join(ROOT, 'src', 'remote', 'remote-pack-layout.js'), 'utf8');
-  if (!remoteLayout.includes('assets/agent-shared.json')) {
-    errors.push('src/remote/remote-pack-layout.js 的 REMOTE_GATEWAY_SOURCE_PATHS 里没有 assets/agent-shared.json（远端 daemon 加载即崩）');
+  // 远端 Agent：清单与包内相对 require 都不得越出 src/（拍平 src/ 后层级必然错位）
+  const { checkRemotePackSourceBoundary } = require(path.join(ROOT, 'src', 'remote', 'remote-pack-layout.js'));
+  const boundary = checkRemotePackSourceBoundary({ rootDir: ROOT });
+  if (!boundary.ok) {
+    for (const v of boundary.violations) {
+      errors.push(
+        v.kind === 'entry-outside-src'
+          ? `src/remote/remote-pack-layout.js 的 REMOTE_GATEWAY_SOURCE_PATHS 里 ${v.rel} 不在 src/ 下（远端包会拍平 src/ 前缀，包内放不到这个层级）`
+          : `${v.rel} require('${v.spec}') 解析到 ${v.target}，越出 src/（远端包拍平后加载即崩）`
+      );
+    }
   }
 
   if (errors.length) {

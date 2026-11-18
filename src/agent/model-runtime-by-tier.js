@@ -289,7 +289,7 @@ function inferContextTierFromModelName(modelId) {
   return 'default';
 }
 
-/** 上下文窗口下限（与 model-runtime-schema 的 min 对齐；数值来自 assets/agent-shared.json）。 */
+/** 上下文窗口下限（与 model-runtime-schema 的 min 对齐；数值来自 src/agent/agent-shared.json）。 */
 const CONTEXT_WINDOW_FLOOR = require('./shared-constants').compaction.contextWindowFloorTokens;
 
 /**
