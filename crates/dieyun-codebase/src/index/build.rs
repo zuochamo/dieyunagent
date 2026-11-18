@@ -459,6 +459,11 @@ impl IndexService {
             // ① 缓存命中直接落库（不碰网络）② 未命中的才真的调端点 ③ 新算的回填缓存
             let (misses, reused) = self.apply_cached_vectors(&conn, pending_embed)?;
             vectors_reused = Some(reused);
+            // 本轮「新算 0」也是一个事实：全部命中缓存时必须把它写进库，否则 COALESCE
+            // 会留下上一轮的数字（面板/诊断就一直报「新算 240」，实际一次端点都没打）。
+            // 未命中时下面会覆盖成真实条数；`use_vectors == false` 那一路仍然不写
+            // （后台增量刷新不该抹掉上一次的复用/新算，见上段注释）。
+            vectors_embedded = Some(0);
             if reused > 0 {
                 self.set_progress(
                     root_hash,

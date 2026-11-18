@@ -98,7 +98,20 @@ async fn vectors_reuse_from_content_hash_cache_without_calling_endpoint() {
     };
     assert_eq!(seeded as i64, st1.chunk_count);
 
-    // ③ 带向量重建：全部命中 ⇒ vectors_embedded 必须是 0
+    // ③ 先把上一轮的数字改成非 0 —— 真实场景里那正是「上一次真算过」留下的值。
+    //    旧实现写的是 `COALESCE(?10, workspaces.vectors_embedded)`，全命中时传 None，
+    //    于是库里 999 原地不动，面板便一直报「新算 999」。新库测试（旧值本就 0）测不出，
+    //    所以这里必须显式造出「旧值非 0」的前置条件。
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE workspaces SET vectors_embedded = 999, vectors_reused = 0",
+            [],
+        )
+        .unwrap();
+    }
+
+    // ④ 带向量重建：全部命中 ⇒ vectors_embedded 必须是 0（覆盖上一轮的 999）
     let svc2 = IndexService::new(crate::codebase_db::handle(db.clone()), cfg.clone())
         .with_vector_cache(Some(cache_path));
     let st2 = svc2.index_workspace(&root, true, true).await.unwrap();
