@@ -57,6 +57,7 @@ impl AgentLoopManager {
             trigger_ratio: params.trigger_ratio,
             observed_prompt_tokens: None,
             pending_fold: None,
+            pending_since: None,
         };
         self.runs
             .lock()
@@ -222,6 +223,8 @@ impl AgentLoopManager {
 
         state.round += 1;
         let round_no = state.round;
+        // 每轮 usage 一行：`prompt_tokens` 是折叠触发的首选口径，缺了说明上游没给。
+        crate::obs::usage(run_id, round_no, llm.usage.as_ref());
         // 本段正文就是模型原文：不再剥 `agent_status` 行，也不做「重复前言」字符串去重
         // —— 每轮 assistant 消息本身就是增量；跨轮重复是模型行为，不是账本该改写的事实。
         let stored_content = llm.content.clone().unwrap_or_default();
@@ -329,9 +332,16 @@ impl AgentLoopManager {
                 return self.submit_tool_results(_config, _index, run_id, results);
             }
 
+            // 折叠事实一行：折了多少、档位、触发口径（`fold_if_needed` 已写进 pending_fold）。
+            if let Some(fact) = &state.pending_fold {
+                crate::obs::fold_fact(run_id, fact);
+            }
+            // 交给宿主之前打点：`agent.run.tools` 回来时用它算工具段墙钟。
+            state.pending_since = Some(std::time::Instant::now());
             let delegates = state
                 .pending_delegate
                 .iter()
+
                 .map(|(id, name, args)| DelegateTool {
                     id: id.clone(),
                     name: name.clone(),
@@ -389,6 +399,14 @@ impl AgentLoopManager {
             return self.need_llm(run_id);
         }
 
+        // 工具段墙钟：从 `need_delegate` 出发到这次回来。
+        if let Some(since) = state.pending_since.take() {
+            crate::obs::tool_round(
+                run_id,
+                results.len(),
+                since.elapsed().as_millis() as u64,
+            );
+        }
         let pending: HashMap<String, (String, Value)> = state
             .pending_delegate
             .drain(..)

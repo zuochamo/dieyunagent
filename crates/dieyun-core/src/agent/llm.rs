@@ -448,7 +448,7 @@ fn tail(text: &str, max: usize) -> String {
     chars[chars.len() - max..].iter().collect()
 }
 
-/// 供 `agent.llm.chat` 直接返回给宿主的结构化结果。
+/// 供 `agent.run.*` 与 `llm.complete` 返回给宿主的结构化结果（`agent.llm.chat` 已删除）。
 pub fn outcome_to_json(outcome: &Outcome) -> Value {
     json!({
         "content": outcome.content,

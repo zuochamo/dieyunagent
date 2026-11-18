@@ -3,6 +3,6 @@ pub mod llm;
 mod loop_run;
 
 pub use loop_run::{
-    AgentLoopManager, DelegateTool, LlmResponseInput, LoopResponse, StartParams, ToolCallInput,
-    ToolResultInput,
+    AgentLoopManager, DelegateTool, FoldFact, LlmResponseInput, LoopResponse, StartParams,
+    ToolCallInput, ToolResultInput,
 };

@@ -30,8 +30,9 @@ fn is_direct_embed_url(base_url: &str) -> bool {
 
 /// 后台 embedding 请求的墙钟上限（建库 / 归纳写入 / 手工重建向量都等得起）。
 ///
-/// **交互式查询不用这个数**：它必须受 `INTERACTIVE_EMBED_BUDGET_MS` 约束，否则端点挂死时
-/// 每轮召回要等满 120s（真机现场：`memory.long_recall` 连续两次 120008ms 超时）。
+/// **交互式与后台用同一个数**：`INTERACTIVE_EMBED_BUDGET_MS` + `EMBEDDING_TOO_SLOW` 那套
+/// 「预判太慢就不发」的三层补偿已经整体删除（见 `embedding/mod.rs` 顶部），留下的是
+/// 传输层必需的超时本身。端点挂死时每轮召回要等满这个数 —— 这是已知代价，不再另设闸门。
 pub const EMBED_REQUEST_TIMEOUT_MS: u64 = 120_000;
 
 /// `reqwest` 的「超时」单独一个码：调用方据此判定「端点没回」而不是「端点报错」，

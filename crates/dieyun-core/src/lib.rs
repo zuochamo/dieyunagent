@@ -24,6 +24,7 @@ pub mod config;
 pub mod embedding;
 pub mod db_schema;
 pub mod error;
+pub mod obs;
 pub mod fs_ops;
 pub mod fts;
 pub mod graph;

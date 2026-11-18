@@ -249,6 +249,9 @@ struct RunState {
     observed_prompt_tokens: Option<usize>,
     /// 下一次回给宿主的折叠事实（取走即清）
     pending_fold: Option<FoldFact>,
+    /// 本批工具交给宿主的那一刻（`need_delegate` 出发时打点，`agent.run.tools` 回来时算差）。
+    /// core 不执行工具，但这段**墙钟**是「这一轮为什么慢」的一半答案。
+    pending_since: Option<std::time::Instant>,
 }
 
 pub struct AgentLoopManager {

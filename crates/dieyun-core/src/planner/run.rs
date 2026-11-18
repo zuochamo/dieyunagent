@@ -74,6 +74,9 @@ struct PlannerRunState {
     trace: Vec<PlannerTraceEntry>,
     final_content: Option<String>,
     hit_round_limit: bool,
+    /// 计划被宿主上限改写时的一句人话（`None` = 模型要什么给了什么）。
+    /// 与 `hit_round_limit` 并列上报：两者都是「交给你的计划不是它原本的样子」。
+    plan_truncation: Option<String>,
     cancelled: bool,
     resume_completed_ids: HashSet<String>,
 }
@@ -104,6 +107,8 @@ impl PlannerRunManager {
         let mut resume_completed_ids = HashSet::new();
         let mut restored_results = Vec::new();
         let mut plan = None;
+        // 计划被宿主上限改写时的一句人话（进 done payload 的 	runcated）。
+        let mut plan_truncation: Option<String> = None;
         let mut explore_skipped = false;
         let mut explore_notes = String::new();
         if let Some(cp) = &params.resume_checkpoint {
@@ -121,7 +126,9 @@ impl PlannerRunManager {
                             ),
                         )
                     })?;
-                    plan = Some(finalize_plan(parsed, params.best_of_n));
+                    let finalized = finalize_plan(parsed, params.best_of_n);
+                    plan_truncation = finalized.truncation;
+                    plan = Some(finalized.plan);
                     explore_skipped = true;
                     let (ids, outputs) = parse_completed_outputs(
                         data.get("completedOutputs")
@@ -184,6 +191,7 @@ impl PlannerRunManager {
             trace,
             final_content: None,
             hit_round_limit: false,
+            plan_truncation: plan_truncation.clone(),
                 cancelled: false,
             resume_completed_ids,
         };
@@ -470,6 +478,11 @@ impl PlannerRunManager {
                 InternalPhase::Done => {
                     obj.insert("content".into(), json!(run.final_content));
                     obj.insert("hitRoundLimit".into(), json!(run.hit_round_limit));
+                    // 「交给你的计划不是它原本的样子」要说出来：模型据此知道这次没有交叉验证。
+                    if let Some(note) = &run.plan_truncation {
+                        obj.insert("truncated".into(), json!(true));
+                        obj.insert("truncatedNote".into(), json!(note));
+                    }
                     obj.insert(
                         "results".into(),
                         serde_json::to_value(&run.results).unwrap(),
@@ -507,9 +520,10 @@ impl PlannerRunManager {
             run.phase = InternalPhase::NeedPlanLlm;
             return self.build_response(run);
         }
-        let mut plan = plan.unwrap_or_else(|| build_fallback_plan(&run.user_prompt));
-        plan = finalize_plan(plan, run.params.best_of_n);
-        run.plan = Some(plan);
+        let plan = plan.unwrap_or_else(|| build_fallback_plan(&run.user_prompt));
+        let finalized = finalize_plan(plan, run.params.best_of_n);
+        run.plan_truncation = finalized.truncation.clone();
+        run.plan = Some(finalized.plan);
         self.update_plan_trace(run);
         self.advance_after_plan(run)
     }
@@ -1058,7 +1072,17 @@ fn summarize_worker_results(results: &[WorkerResultInput]) -> String {
         .join("\n")
 }
 
-fn finalize_plan(mut plan: Plan, cfg_best_of_n: u32) -> Plan {
+/// 计划的最终形态 + **被宿主上限改写过的地方**（`None` 表示模型要什么给了什么）。
+///
+/// 为什么要单独返回一句：`best_of_n` 被压下去是**静默的能力缩水** —— 模型在计划里写了 3 路，
+/// 宿主设置关掉就只跑 1 路。以前这件事只体现在返回的 plan 里（模型看不到、用户也看不到），
+/// 于是「为什么这条任务没有交叉验证」永远查不出来。
+struct FinalizedPlan {
+    plan: Plan,
+    truncation: Option<String>,
+}
+
+fn finalize_plan(mut plan: Plan, cfg_best_of_n: u32) -> FinalizedPlan {
     for st in &mut plan.subtasks {
         st.worker = super::plan_parse::normalize_worker_id(&st.worker);
         st.agent_type = super::plan_parse::normalize_agent_type(&st.agent_type);
@@ -1074,11 +1098,20 @@ fn finalize_plan(mut plan: Plan, cfg_best_of_n: u32) -> Plan {
     // 于是设置里关掉（cfg=0）时模型一句话就能开 3 路 —— 成本 ×3，且没有任何一层能拦。
     // Node 侧同口径见 `rust-planner-runner.js#clampPlanContentBestOfN`。
     let cap = cfg_best_of_n.min(3);
+    let requested = plan.best_of_n;
     plan.best_of_n = plan.best_of_n.min(cap);
     if plan.best_of_n < 2 {
         plan.best_of_n = 0;
     }
-    plan
+    let truncation = if plan.best_of_n < requested {
+        Some(format!(
+            "计划要求 {requested} 路并行（best-of-N），宿主上限只允许 {} 路 —— 这条任务没有做过交叉验证。",
+            plan.best_of_n
+        ))
+    } else {
+        None
+    };
+    FinalizedPlan { plan, truncation }
 }
 
 fn push_trace(run: &mut PlannerRunState, phase: impl Into<String>, thought: impl Into<String>) {
@@ -1204,7 +1237,7 @@ mod tests {
             best_of_n: 99,
             fallback: false,
         };
-        let out = finalize_plan(plan, 99);
+        let out = finalize_plan(plan, 99).plan;
         assert_eq!(out.best_of_n, 3);
         assert_eq!(out.subtasks[0].expected_output, "do");
     }
@@ -1258,10 +1291,40 @@ mod tests {
             best_of_n: n,
             fallback: false,
         };
-        assert_eq!(finalize_plan(plan_with(3), 0).best_of_n, 0, "关掉时不得开");
-        assert_eq!(finalize_plan(plan_with(3), 2).best_of_n, 2, "上限 2 就是 2");
-        assert_eq!(finalize_plan(plan_with(0), 3).best_of_n, 0, "模型没要求就不开");
-        assert_eq!(finalize_plan(plan_with(5), 99).best_of_n, 3, "硬上限 3");
+        assert_eq!(finalize_plan(plan_with(3), 0).plan.best_of_n, 0, "关掉时不得开");
+        assert_eq!(finalize_plan(plan_with(3), 2).plan.best_of_n, 2, "上限 2 就是 2");
+        assert_eq!(finalize_plan(plan_with(0), 3).plan.best_of_n, 0, "模型没要求就不开");
+        assert_eq!(finalize_plan(plan_with(5), 99).plan.best_of_n, 3, "硬上限 3");
+    }
+
+    /// 回归（P5 R3）：计划被宿主上限压下去时，`finalize_plan` 必须给一句人话（进 done 的 `truncated`）。
+    ///
+    /// 压低是**静默的能力缩水**：模型写了 3 路并行，宿主设置关掉就只跑 1 路；不看这一句，
+    /// 「为什么这条任务没有交叉验证」永远查不出来。
+    #[test]
+    fn finalize_plan_reports_when_best_of_n_was_cut() {
+        let plan_with = |n: u32| Plan {
+            plan_summary: "s".into(),
+            todos: vec![],
+            subtasks: vec![Subtask {
+                id: "A1".into(),
+                worker: "A".into(),
+                title: "t".into(),
+                instruction: "do".into(),
+                expected_output: String::new(),
+                agent_type: "build".into(),
+            }],
+            best_of_n: n,
+            fallback: false,
+        };
+
+        let cut = finalize_plan(plan_with(3), 0);
+        assert_eq!(cut.plan.best_of_n, 0);
+        let note = cut.truncation.expect("压低了就必须有一句说明");
+        assert!(note.contains("3 路"), "说明里要带原始要求：{note}");
+
+        // 没压低就不该有这句话（否则宿主的「truncated」永远为真，等于没说）
+        assert!(finalize_plan(plan_with(2), 3).truncation.is_none());
     }
 
     #[test]

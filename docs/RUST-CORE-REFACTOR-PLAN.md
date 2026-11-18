@@ -301,11 +301,17 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 
 **验收**：`cargo test` 274 → **281 全绿**、零 warning；`npm test`、`verify:rpc-catalog`、`check:js` 通过。
 
-### P5 · 「做不到」显式化 + 观测（3–5 人日）
+### P5 · 「做不到」显式化 + 观测（3–5 人日）· **已完成 2026-11-18**
 
-- R3：`GraphStatusCallGraph`、`IndexStatus.truncated/skipped`、`compaction.estimate{tokens:null}`、`planner.done` 带 `truncated:true`。
-- R4：`obs.rs` 收口 `[rpc-slow]`（保留唯一一条，删掉 20s 预算机制，理由见 §6）、折叠事实、每轮 usage、工具耗时；`agent.delta.round` 填真实 `round_of()`（或删字段 + 删文档 + 删宿主兜底，二选一）。
-- 删掉「已删除机制的注释」：`INTERACTIVE_EMBED_BUDGET_MS`、`agent.llm.chat`、45s 口径、`fold:L` 之外的旧描述。
+| 项 | 状态 | 落点 / 证据 |
+|---|---|---|
+| **R3 显式化** | ✅ | ①`graph.status.callsBuilt`（P2，调用图建过没有）；②`index.status.filesSkipped` / `filesTruncated`（看见了但不可索引 vs 仓比 16k 上限还大 → 后者这一轮**压根没看到文件**）；③`compaction.estimate` 形状错误改硬报 `INVALID_PARAMS`（A19，选了「报错」而不是「返回 null」——调用方不会把 null 当 0 用）；④**`planner.done.truncated` + `truncatedNote`**：计划被宿主上限压低（模型要 3 路 best-of-N、设置关掉）时说一句人话，否则「为什么这条任务没有交叉验证」永远查不出来 |
+| **R4 观测收口** | ✅ | 新增 `src/obs.rs`：`[rpc-slow]`（唯一一条，阈值仍读 `assets/agent-shared.json` 的 `rpc.slowLogMs`）、`[rpc-fold]`（折叠事实：档位 / 两个口径的 before / after / 触发源）、`[rpc-usage]`（每轮 prompt/completion/total，上游没给 `prompt_tokens` 就不写，避免假 0）、`[rpc-tools]`（工具段墙钟：`need_delegate` 出发打点、`agent.run.tools` 回来算差）。格式化函数是纯函数，4 条用例钉格式；只有 `emit` 碰 IO |
+| **`agent.delta.round`** | ✅ 删字段 | 三处调用点全传 `None`（恒为 null 的字段），根因是语义不成立：增量属于「正在飞的那一轮」，而账本 `round` 收到响应才自增。删字段 + 宿主直接用 `llmRound` |
+| **20s 预算机制** | ✅ 核实后不存在 | P1 已把 `FAST_METHOD_BUDGET_MS` 改成 10s（先于宿主 15s 发声），机制本身是活的（防轮询方法无限等），不删；`registry.rs` 里留了一句「历史上这里是 20s，等于死代码」 |
+| **清陈旧注释** | ✅ | `INTERACTIVE_EMBED_BUDGET_MS` / `EMBEDDING_TOO_SLOW`（那三层补偿已删，注释改成说明现状）、`agent.llm.chat`（→ `agent.run.*` / `llm.complete`）、**45s 口径 → 15s**（`sqlite.rs` / `graph/mod.rs` 三处；真实值在 `src/core-rpc-timeouts.js`） |
+
+**验收**：`cargo test` 297 → **302 全绿**、零 warning；`npm test`、`verify:rpc-catalog`、`check:js`、`check:shared-constants` 通过。
 
 ### P6 · 死代码清除（1–2 人日）· **已完成 2026-11-18**
 

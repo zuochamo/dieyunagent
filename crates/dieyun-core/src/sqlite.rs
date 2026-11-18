@@ -707,7 +707,7 @@ mod tests {
 
     /// 读侧不许被写事务拖住：WAL 下常驻连接照常读到写事务开始前的快照。
     ///
-    /// 这是 `codebase.status` 45s 超时的底线保障 —— status 走的正是常驻连接，
+    /// 这是 `codebase.status` 的 15s 宿主预算的底线保障 —— status 走的正是常驻连接，
     /// 一旦它在等写锁，表现就是面板「读取失败」。
     #[test]
     fn resident_read_is_not_blocked_by_open_write_transaction() {

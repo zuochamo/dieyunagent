@@ -139,7 +139,8 @@ async fn handle_request(state: &AppState, req: RpcRequest) -> RpcResponse {
     // 「core 真慢」还是「RPC 堵在传输/守护进程里」，不必再靠推理。
     let elapsed_ms = started.elapsed().as_millis() as u64;
     if elapsed_ms >= super::slow_rpc_log_ms() {
-        eprintln!("[rpc-slow] {method} {elapsed_ms}ms");
+        // 唯一一条慢日志：格式与阈值都在 `obs.rs` / `assets/agent-shared.json`。
+        crate::obs::rpc_slow(&method, elapsed_ms, super::slow_rpc_log_ms());
     }
     match result {
         Ok(result) => RpcResponse::ok(req.id, result),

@@ -66,7 +66,7 @@ impl GraphService {
     ///
     /// 拆开的原因见 `docs/SQLITE-ACCESS.md`：常驻连接是
     /// index / graph 共用的唯一写入连接，只要有一条慢读占着它，期间所有
-    /// `codebase.status` / `graph.status` 都会排队到客户端 45s 超时。
+    /// `codebase.status` / `graph.status` 都会排队到宿主 15s 预算（`src/core-rpc-timeouts.js`）。
     fn read_dedicated<T>(
         &self,
         ws: &WorkspaceRef,
@@ -374,7 +374,7 @@ mod tests {
 
     /// 读侧：状态秒回、数据查询不占常驻锁。另一个连接占着写事务时同样不许被堵。
     ///
-    /// 常驻连接被 index / graph 共用一把非重入锁，慢读占住它 => 所有 status 45s 超时
+    /// 常驻连接被 index / graph 共用一把非重入锁，慢读占住它 => 所有 status 撞到宿主 15s 预算
     /// （见 `docs/SQLITE-ACCESS.md`）。
     #[test]
     fn graph_reads_do_not_wait_on_open_write_transaction() {
