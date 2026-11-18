@@ -384,6 +384,13 @@ async function runMainTurn(ctx) {
     return { sessionId, content: note, trace: [], runId: null, readiness: null, aborted: true };
   }
 
+  // 溢出停机不是「完整收尾」：正文照常交付，但必须留痕，否则「这轮只说到这里」
+  // 在会话里看起来就和「跑完了」一模一样。
+  const stopReason = (loopResult && loopResult.stopReason) || null;
+  if (stopReason === 'context_overflow') {
+    console.warn('[agent.run] 上下文溢出停机：本轮正文可能不完整（已交付到最后一轮）');
+  }
+
   const reply = String((loopResult && loopResult.content) || '').trim();
   const trace = (loopResult && loopResult.trace) || [];
   if (!reply && !internal) {
@@ -485,7 +492,9 @@ async function runMainTurn(ctx) {
     trace,
     runId: (loopResult && loopResult.runId) || null,
     readiness: (loopResult && loopResult.readiness) || null,
-    aborted: false
+    aborted: false,
+    // 「这一轮是怎么结束的」（目前只有 context_overflow）：调用方据此决定能不能当完整结果用。
+    stopReason
   };
 }
 

@@ -9,7 +9,7 @@
 3. **禁用意图关键词硬编码**：勿用固定中英文词表 / 寒暄正则决定「是否注入上下文、切 AGENTS 章节、是否触发索引」等路由；优先结构信号（`@Codebase`、消息内路径、编辑器选区）、召回是否命中、或 `agent-limits` 配置。对用户查询做动态分词打分（FTS/向量）不属于本禁令。
 4. **分层边界**：Renderer 做 UI；**工具执行在 Main/Node**；Rust `dieyun-core` 做循环账本、**LLM 调用与流式（`agent/llm.rs`）**、planner、memory、index、compaction（折叠；transcript 唯一写者）。工具走 Gateway RPC。勿在 Rust 循环里堆「工头」协议，勿在 Renderer 写长期 Agent 状态机。
 5. **循环哲学（对齐 PI harness，不整仓替换）**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status` 状态机、假用户续跑、按只读步数/同文件读取/只计划逼写入。**交付四态**（`agent-round-text.resolveTurnDelivery` 单一来源）：有正文就交付；预算截断且只有思考 → 带标签思考引用（仅展示，落库换占位）；正常收尾无正文才 synthesis，且在 Node `rust-loop-runner`，Renderer 只展示。**思考永不顶正文**：只进 `messages.reasoning`（与 content 分列）。完成验收只提示、不自动续跑、不挡交付。
-6. **护栏单一来源**：数字上限只改 `src/agent/agent-limits.js`；**Node 与 Rust 两侧都要用的数字/词表**（token 折算、预算地板、触发比夹取、读上限、慢请求阈值、上下文溢出词表）只改 `src/agent/agent-shared.json`（Node 经 `src/agent/shared-constants.js`、Rust 经 `crates/dieyun-core/src/shared.rs` 读同一份；`npm run check:shared-constants` 会验「每个键两侧都有人读」）；工具拦截常量/逻辑在 `src/agent/guardrails-shared.js`；**工具调用的关卡顺序只在 `src/agent/tool-gate.js` 声明**（加检查只改清单，不改流程）。
+6. **护栏单一来源**：数字上限只改 `src/agent/agent-limits.js`；**Node 与 Rust 两侧都要用的数字/词表**（token 折算、预算地板、触发比夹取、读上限、慢请求阈值、上下文溢出词表）只改 `src/agent/agent-shared.json`（Node 经 `src/agent/shared-constants.js`、Rust 经 `crates/dieyun-base/src/shared.rs` 读同一份；`npm run check:shared-constants` 会验「每个键两侧都有人读」）；工具拦截常量/逻辑在 `src/agent/guardrails-shared.js`；**工具调用的关卡顺序只在 `src/agent/tool-gate.js` 声明**（加检查只改清单，不改流程）。
 7. **不提交**：密钥、`deploy.local.json`、`.env`、`dist/`、`release/`（除文档说明的备份策略）。
 8. **验证**：改完跑 `npm test`（按 diff 选测）或 `npm run test:agent`（全量 smoke）。
 
@@ -23,21 +23,21 @@
 |------|----------|------|
 | 模型可见规则 / system prompt | `src/agent/agent-system-prompt.js`、`system-prompt-prep.js` | 勿在 Renderer 再写一份准则或 codebase/AGENTS/图谱/记忆/技能/MCP 召回；Renderer 上报快照 + 编辑器块 |
 | 聊天气泡 / 思考区 / Composer | `src/renderer/renderer-chat-render.js`、`renderer-thinking-trace.js`、`renderer-agent-loop.js` | 在 Renderer 写长期 Agent 状态机 |
-| Agent 工具轮次 / trace | `crates/dieyun-core/src/agent/`、`src/agent/rust-loop-runner.js` | 仅改 UI 期望 Rust 行为 |
-| 上下文压缩 / 折叠（旧「LLM 摘要压缩」已删除） | `crates/dieyun-core/src/compaction/fold.rs`（语义唯一来源：就地折叠 + 保 tool_call 骨架 + 幂等档位）、`src/agent/compaction-main.js`（输入预算 / 触发比 / 遥测）、`src/agent/compaction-loop.js`（归档）、`src/agent/compaction-telemetry.js`；触发口径优先用服务端 `usage.prompt_tokens`。见 [`docs/CONTEXT-FOLD.md`](docs/CONTEXT-FOLD.md) | 在压缩里再调一次 LLM 做摘要；折 user 消息文字或 `tool_calls` 参数；在 Node 侧重写「该不该压」的条数与字符比预判；把未触发的调用也写进遥测 |
+| Agent 工具轮次 / trace | `crates/dieyun-runtime/src/agent/`、`src/agent/rust-loop-runner.js` | 仅改 UI 期望 Rust 行为 |
+| 上下文压缩 / 折叠（旧「LLM 摘要压缩」已删除） | `crates/dieyun-base/src/compaction/fold.rs`（语义唯一来源：就地折叠 + 保 tool_call 骨架 + 幂等档位）、`src/agent/compaction-main.js`（输入预算 / 触发比 / 遥测）、`src/agent/compaction-loop.js`（归档）、`src/agent/compaction-telemetry.js`；触发口径优先用服务端 `usage.prompt_tokens`。见 [`docs/CONTEXT-FOLD.md`](docs/CONTEXT-FOLD.md) | 在压缩里再调一次 LLM 做摘要；折 user 消息文字或 `tool_calls` 参数；在 Node 侧重写「该不该压」的条数与字符比预判；把未触发的调用也写进遥测 |
 | 交付文本 / 思考通道 | `src/agent/agent-round-text.js`（四态交付 + 真思考提取）、`src/agent/llm-channel.js`（通道身份）、`messages.reasoning`（账本分列） | 在 Rust / Node / Renderer 再写一份「思考顶正文」或长度阈值兜底 |
 | 工具 schema / 执行 | `src/agent/tool-catalog.js`（schema）、`src/agent/tool-bridge-main.js`（执行）、`src/gateway/fs-edit-file.js`（edit 实现） | 在 Renderer 再写一份 schema 或 `gatewayCall` 执行 host 工具 |
-| Planner / 多 Agent | `crates/dieyun-core/src/planner/`、`src/agent/rust-planner-runner.js`（worker 批 / 并发闸）、开关 `agent-limits.plannerMultiAgentEnabled`（设置 →「子 Agent」）、worker 写作用域 `src/agent/delegate-tool-gateway.js#createWorkerWriteScope`（worktree 优先 / 越界拒绝 / 读 copy-on-read） | `planner-orchestrator.js`（已删除）；在 worker 里靠提示词保证隔离；另写一份「哪条路径归哪份副本」的映射 |
-| Gateway / 记忆 / fs RPC | `src/gateway/`、`crates/dieyun-core/src/rpc/`、`crates/dieyun-core/src/memory/` | preload 绕过 Gateway |
+| Planner / 多 Agent | `crates/dieyun-runtime/src/planner/`、`src/agent/rust-planner-runner.js`（worker 批 / 并发闸）、开关 `agent-limits.plannerMultiAgentEnabled`（设置 →「子 Agent」）、worker 写作用域 `src/agent/delegate-tool-gateway.js#createWorkerWriteScope`（worktree 优先 / 越界拒绝 / 读 copy-on-read） | `planner-orchestrator.js`（已删除）；在 worker 里靠提示词保证隔离；另写一份「哪条路径归哪份副本」的映射 |
+| Gateway / 记忆 / fs RPC | `src/gateway/`、`crates/dieyun-runtime/src/rpc/`、`crates/dieyun-memory/src/memory/` | preload 绕过 Gateway |
 | 本地 Gateway 传输 / 端点（Renderer 怎么到 Gateway） | `src/gateway/local-endpoint.js`（**端点唯一来源**：POSIX `<userData>/gateway.sock` / Windows 命名管道；TCP+token 只在显式 `DIECLOUD_GATEWAY_PORT` 时）、`src/gateway/server.js`（监听 + `invokeRpc` + `onEvent`）、`src/main/ipc/gateway-shell.js`（`gateway:rpc` / `gateway:event`）、`src/headless/desktop-ui.js`（网页替身：同源 `/gateway` 翻成同一份 `invokeRpc`） | 在 Renderer 里再写一个 WebSocket 客户端或 `new WebSocket(...)`（Chromium 连不了 socket/管道，桌面走 IPC；网页走同源 `/gateway`）；另写一份端口 / token 文件逻辑；为「gateway 连不上」加重连状态机（IPC 没有连接可重连，失败就是这次调用失败） |
 | 浏览器面板可见性 / 原生视图边界（BrowserView 盖住别的页签） | `src/renderer/renderer-browser.js#syncBrowserBounds`（**唯一写者**：页签是否可见 + `#browser-viewport` 矩形一起传）、`src/browser/controller.js#setPanelState`（只认 `open`+`bounds`，没 bounds 不开） | 在 Main / 工具层自己 `setPanelState({open:true})` —— 只有上一次的旧矩形，原生视图会贴到当前可见的任何页签上；要画面可见用 `requestAutoOpenPanel()` 请 Renderer 开页签 |
 | 联网搜索 / 网页抓取 | `src/gateway/web/`（`engines/` 一个引擎一个 parser；出网走 `transport.js`） | 另写一份 SERP 解析、fetch 或 SSRF 校验 |
-| 向量后端（本地推理优先 / 远端可选） | 判定唯一入口 `crates/dieyun-core/src/embedding/mod.rs::EmbeddingConfig::plan`（`auto`/`local`/`remote`）；本地推理 `embedding/local.rs`（`ort` + `load-dynamic`，模型与 onnxruntime 都按需下载：`DIEYUN_MODELS_DIR` / `DIEYUN_ORT_LIB`）；装配唯一入口 `src/agent/embedding-config.js`（远端端点 + 本地模型目录合成一份 payload，三处 `configure` 共用）；查询向量一律走 RPC `embedding.query`（`src/codebase/embedding-client.js` 只剩薄封装）。见 [`docs/LOCAL-EMBEDDING.md`](docs/LOCAL-EMBEDDING.md) | 在调用点各写一份「有没有向量通道 / 慢不慢」的判断（旧的 `interactiveEmbedBudgetMs` + `EMBEDDING_TOO_SLOW` + 并发闸门已整体删除）；让 Node 自己打 embedding 端点（文档向量与查询向量会分属两个后端，相似度静默变差）；把模型或 dylib 塞进安装包 |
+| 向量后端（本地推理优先 / 远端可选） | 判定唯一入口 `crates/dieyun-base/src/embedding/mod.rs::EmbeddingConfig::plan`（`auto`/`local`/`remote`）；本地推理 `embedding/local.rs`（`ort` + `load-dynamic`，模型与 onnxruntime 都按需下载：`DIEYUN_MODELS_DIR` / `DIEYUN_ORT_LIB`）；装配唯一入口 `src/agent/embedding-config.js`（远端端点 + 本地模型目录合成一份 payload，三处 `configure` 共用）；查询向量一律走 RPC `embedding.query`（`src/codebase/embedding-client.js` 只剩薄封装）。见 [`docs/LOCAL-EMBEDDING.md`](docs/LOCAL-EMBEDDING.md) | 在调用点各写一份「有没有向量通道 / 慢不慢」的判断（旧的 `interactiveEmbedBudgetMs` + `EMBEDDING_TOO_SLOW` + 并发闸门已整体删除）；让 Node 自己打 embedding 端点（文档向量与查询向量会分属两个后端，相似度静默变差）；把模型或 dylib 塞进安装包 |
 | 手机端 UI / 桥接 | `src/mobile/public/`、`src/mobile/bridge.js`、`src/agent/service.js` | 复制整套 PC Renderer |
 | 模型 / 语音设置 | `src/model-settings.js`、`src/renderer/renderer-model-settings.js` | 散落硬编码 API URL |
 | 快捷键（键位 / 新增全局键） | `src/renderer/renderer-shortcuts.js`（键位表 + `matchesShortcut` + 「基础设置 → 快捷键」页；覆盖项存 `settings.shortcuts`） | 在调用点写 `ev.key === 'm'`、`ev.altKey && k === 's'`（用户改键后静默失效） |
 | 朗读（语音合成 / TTS） | `src/gateway/speech-synthesize.js`（合成请求体 / 超时 / 长度上限的唯一来源）、`src/gateway/tts-cache.js`（按 text+voice+format+model+baseUrl 的字节上限 LRU）、`src/renderer/renderer-tts.js`（分句切块 + 边合成边播 + 停止/切歌语义 + 逐句高亮）、`src/renderer/renderer-chat-scroll.js#followChatReadingRange`（念到哪一句的**视野跟随**：起点必须在视野里 / 用户一滚就整段让位 / 只往下带不回拽；用户滚动序号 `chatUserScrollSeq` 的唯一来源是 `markChatUserScrollIntent`）、`src/model-settings.js:resolveTtsApiConfig`（无 Renderer 的调用方与手机端选模型）、`src/mobile/public/app.js`（手机端朗读） | 在 Renderer / 手机端各拼一份合成请求体或选模型逻辑；拿 `speech`（转写）槽位跑合成 —— 两种能力常不同时存在；**在朗读里自己写 `scrollTop` / `scrollTo`** —— 每念一句就会把用户滚走的视口拽回去一次（`renderer-tts.js` 只交出 Range） |
-| LLM 调用（请求 / 流式 / 事件） | `crates/dieyun-core/src/agent/llm.rs`（请求 + SSE 解析，唯一实现）；主循环由 core 自己驱动（`agent.run.*`），辅助任务统一走 RPC `llm.complete`（宿主唯一入口 `src/agent/llm-complete.js`）；事件出口 `crates/dieyun-core/src/rpc/events.rs` + 宿主订阅 `src/core-bridge.js:onCoreEvent`；端点路径与鉴权仍只由 `src/agent/llm-request.js` 给（Rust 不推导）。见 [`docs/LLM-RPC.md`](docs/LLM-RPC.md) | 在 Node / Renderer 再写一份 HTTP 客户端或 SSE 解析（`llm-proxy.js` / `llm-stream-utils.js` 已删）；把 core 的 stderr 当事件源；在这一层加重试/退避；让 `agent.delta` 承担「本轮结束」语义 |
+| LLM 调用（请求 / 流式 / 事件） | `crates/dieyun-runtime/src/agent/llm.rs`（请求 + SSE 解析，唯一实现）；主循环由 core 自己驱动（`agent.run.*`），辅助任务统一走 RPC `llm.complete`（宿主唯一入口 `src/agent/llm-complete.js`）；事件出口 `crates/dieyun-runtime/src/rpc/events.rs` + 宿主订阅 `src/core-bridge.js:onCoreEvent`；端点路径与鉴权仍只由 `src/agent/llm-request.js` 给（Rust 不推导）。见 [`docs/LLM-RPC.md`](docs/LLM-RPC.md) | 在 Node / Renderer 再写一份 HTTP 客户端或 SSE 解析（`llm-proxy.js` / `llm-stream-utils.js` 已删）；把 core 的 stderr 当事件源；在这一层加重试/退避（重连只在宿主：主循环首轮 + planner 的 `llm.complete`，走 `src/llm-reconnect-retry.js`）；把传输层失败压成一句 `error sending request for url (...)`（必须给码 `LLM_TRANSPORT`，见 docs/LLM-RPC.md §3.1）；让 `agent.delta` 承担「本轮结束」语义 |
 | LLM 端点拼接 / 请求头 | `src/agent/llm-request.js`（端点与请求头唯一来源） | 在调用点内联 `Content-Type + Authorization` |
 | 打包 / 安装包 | `scripts/`、`build-installer.bat` | 任务无关不改 `electron-builder` 配置 |
 | 离线预装的 MCP 产物 | `scripts/pack-mcp-bundled.cjs`（版本唯一来源 `src/mcp/registry.js`） | 再写一份版本/校验和或另造预装机制 |
@@ -55,7 +55,7 @@
 | 共享记忆（跨机记忆条目 / 设置 → 扩展 → 共享记忆） | `src/memory-shared/`（`settings` 配置与密文口令、`pg` 连接/建表/探活、`service` 召回 SQL 与提炼锁）、`src/main/ipc/shared-memory.js`、`src/renderer/renderer-shared-memory.js`；提炼 prompt 仍在 `agent/knowledge-maintainer.js`，注入块仍在 `system-prompt-prep.js` | 上传对话消息；再写一份 Master/Slave 或角色表（提炼靠 advisory lock）；另写一份召回打分或 `secret/private` 过滤（复用 `isShareableKind`）；把共享库做成链路依赖（连不上即关，别加重试/队列） |
 | 生命感（设置 → 拟态 → 生命：心跳 / 相位 / 张力 / 自发唤醒 / 可拒绝 / 抽屉 / 眼睛 / 嘴与耳；拟态 → 设定：一个文本框，内容随意） | `src/alive/`（`runtime` 心跳编排、`vitals` 漂移与四相位、`tension` 未闭合项与阈值漂移、`waker` 唤醒门限、`decide` 决策与体征块、`store` 状态与感官开关/设定原文、`note` 抽屉、`voice` 说/听 + **依赖自检 `describeVoiceCapability` / 主动开口许可 `voicePolicy` / 设备枚举**）、`src/main/alive-boot.js`（装配唯一来源；**目前只桌面装配，headless 未装配** —— 无人值守要装配得先定静默策略）、`src/main/ipc/alive.js`、`src/renderer/renderer-alive.js`；数字 `agent-limits.js` 的 `alive*`（含 `aliveDecisionsKeep` / `aliveIntentsKeep` / `aliveSuspiciousWakeMin` / `aliveSetupMaxChars`，`decide.js` 里不留数字）；只读白名单 + 感官表在 `guardrails-shared.js`（**这份清单同时就是该档的工具表**，`aliveWakeToolNames` 派生，别在 `main-agent-tools` 里另拼）、关卡在 `tool-gate.js`；决策/抽屉/说话工具只在心跳轮注入 | 在 Renderer 判生死/唤醒/续跑或判"感官能不能用"（`capabilities` 是唯一来源）；给 `intent` 开一个展示口；把 `λ/ε/W` 做成设置项；**把设定做成结构化人格参数 / 拆成多字段 / 加说明文案或计数器，或让它进对话系统提示、或让代码替它编设定**；给心跳轮默认写盘或执行权限（写只有一个文件：`alive_note`→`note.md`，读回是 `alive_read_note`，无路径参数）；让抽屉变成双向通道（它能知道你在读就会开始表演）；把麦克风做成"一直听着"；用关键词判断"这轮算不算没做完"（未闭合项只能由模型声明）；把 REFUSE 当"这轮不想动"（那是 DEFER，空手 REFUSE 不计拒绝）；用 `load` 拦唤醒（要拦先用 `WAKE.load` 记清楚）；把相位说成昼夜节律（只有 load + fatigue 两个输入）；**把用户对话的 token 记进它的疲劳**（只数唤醒轮）；**逐跳写 TICK 事件**（288/天会把 WAKE/DECISION 挤出事件文件）；**存"睁眼"画面副本**（现实画面不落盘）；补 pause/resume（见 `docs/ALIVE.md` 负向清单） |
 | 无界面运行（终端 REPL / 一次性 run / 浏览器 Web / cron 型服务） | `src/headless/`（`main` 入口生命周期 + `boot` 装配 + `local-executor` 本地执行器 + `secret-storage` safeStorage 替身）、`src/agent/main-turn-runner.js`（Main 侧跑一轮的唯一实现，频道/计划/headless 共用）、`scripts/pack-headless.cjs`（Linux 包 tgz + deb：内置 node + core + 纯 JS 依赖闭包 + 冷启动闸门）、`scripts/lib/tar-writer.cjs`（权限位可控的 tar/gzip）、`scripts/lib/deb-archive.cjs`（deb 读写唯一来源：ar/control/Packages 条目）、`scripts/publish-headless-apt.cjs`（deb → 内网 apt 源：Packages/Packages.gz/Release + 索引自检）、`src/browser/electron-host.js`（浏览器栈延迟取 electron）、`deploy/systemd/dieyun-headless.service` | 另写一份 Agent 装配或工具桥；让 headless 经 Renderer 跑；为无窗口加「能力开关表」；把桌面/原生依赖（`koffi` / `playwright-core`）塞进 Linux 包；在可达模块顶部 `require('electron')`（headless 会整进程起不来）；自研「查版本→下载→替换运行中二进制」的更新器（更新交给 apt / `unattended-upgrades`，本仓只产源） |
-| 请求快照 / 「模型看到了什么」 | `src/agent/request-snapshot.js`（唯一装配与写入点）、`crates/dieyun-core/src/memory/snapshot.rs`（表与保留裁剪） | 在 Renderer/Main 各拼一份；另写事件溯源或格式迁移链 |
+| 请求快照 / 「模型看到了什么」 | `src/agent/request-snapshot.js`（唯一装配与写入点）、`crates/dieyun-memory/src/memory/snapshot.rs`（表与保留裁剪） | 在 Renderer/Main 各拼一份；另写事件溯源或格式迁移链 |
 | 远端 Agent 传输 / 进程 / 多工作区 | `src/ssh/remote-gateway-manager.js`（懒拉起 daemon、`openAgentChannel` 走 SSH `direct-streamlocal`、探活与回收）、`src/remote/minimal-gateway-host.js`（socket 监听 + 单例 + `hello{workspace}` 按连接路由）、`remote-agent-client.js`（`openChannel` 通道客户端）、`src/remote/remote-pack-layout.js`（**打包清单 + `checkRemotePackSourceBoundary`**：清单与包内相对 require 都不得越出 `src/` —— 远端包会拍平 `src/` 前缀，出 `src/` 的路径层级必然错位，2026-11-18 就是这样让远端 daemon 加载即崩） | 重新引入远端 TCP 端口 / pid 文件 / 本地隧道 / token；按 socket 键缓存客户端而不带 workspace；把运行期要加载的资源放在 `src/` 之外（`assets/…` 之类）而让被打包模块 `require('../../…')` 去取 |
 | 远端文件读写（哪条传输） | `src/gateway/rpc.js:getRemoteFs()`（**唯一出口**：Agent 可用走 `gateway/remote-agent-fs.js` 的 RPC；没 Agent 才走 `gateway/remote-fs.js` 的 SFTP；两者同接口，`transport` 标识决定谁补 `index.notify_change`） | 在 handler 里自己判「用 SFTP 还是 RPC」；写两套适配器形状；RPC 失败悄悄退 SSH exec |
 | 「这条路走本机还是远端主机」（SSH 会话里也要能碰本机） | 判定唯一入口 `src/gateway/rpc.js:resolveFsTarget()`（`fs_*` / `host_print_image` 读它；返回 `remote` 还是本机 + 本机相对基准）；前缀语义唯一来源 `src/gateway/host-local.js`（`local:` 路径前缀、`host_exec local:true`、`hostproc-`/`sshproc-` 句柄前缀、忘记写前缀时的 `annotateLocalPathMiss` 提示）；模型可见的那一句在 `tool-catalog.js` 的 `LOCAL_PATH_HINT` 与 `agent-system-prompt.js` 的 SSH 块 | 在 handler 里各写一份 `startsWith('local:')` 或各判一次 `getRemoteFs()`；按路径形状猜「这大概是本机」（SSH 到 Windows 时会静默读写错机器）；给本机路径套远端白名单（或反之）；用 `cwdForCall()` 当本机相对路径基准（SSH 会话里它是远端路径） |
@@ -72,8 +72,19 @@
 Renderer (src/renderer/)     UI、事件展示、gatewayCall 客户端（不执行 host 工具）
 Main (src/main-entry.js)     IPC、工具委托/执行、Worktree、MobileBridge（Electron 入口 src/main.js）；LLM 调用已移入 core
 Gateway (src/gateway/)       工具 RPC、权限白名单（Renderer 经 Main IPC 的 gateway:rpc 调 invokeRpc；私有 socket/命名管道只给本机其它进程）
-dieyun-core (Rust)           循环账本 agent.loop、LLM 客户端与流式（agent/llm.rs）、planner、memory、index、compaction（折叠）
+
+Rust workspace（依赖方向由 Cargo 强制，只能向下依赖）
+  dieyun-core        bin + 路径转发 shim（main.rs；`lib.rs` 把老路径原样 pub use 出来）
+  dieyun-runtime     agent（循环账本 / llm / driver）、planner、rpc（分派 + handler）、fs_ops
+  dieyun-codebase    index（切块 / 检索 / 向量）、graph（调用图）、treesitter、codebase_db
+  dieyun-memory      memory（会话账本 / 长记忆 / 召回 / 归档 / 项目身份 / 快照）
+  dieyun-base        error / shared / obs / blocking / sqlite / db_schema / config / embedding / compaction / fts
 ```
+
+> 为什么是这五层而不是照 §7 的六 crate：模块依赖里存在**强连通块** ——
+> `index ↔ graph ↔ codebase_db ↔ treesitter`、`config ↔ embedding`、`agent ↔ rpc`。
+> 硬拆成独立 crate 只有两条路：要么先花几天打断这些环，要么把它们放在同一个 crate 里、
+> 用「只暴露必要 API」当护栏。这里选后者，并把环的位置记在 §11。
 
 事件协议：`src/agent/run-events.js`（`AgentRunEvent`：trace / stream / tool / done …）。
 
@@ -95,7 +106,8 @@ npm run dev
 npm run dev:fast
 # 首次 SSH/WSL 远程或 pack 过期时仍用 npm run dev
 
-# 改 Rust
+# 改 Rust（测试现在分散在 4 个 crate 里，`-p dieyun-core --lib` 只会跑 0 个）
+cargo test --workspace --lib
 npm run cargo:test
 npm run test:rust-agent-loop-smoke
 
@@ -127,12 +139,12 @@ powershell -File scripts/agent-bootstrap.ps1 -BuildCore   # 含 dieyun-core 构�
 
 | 改动路径前缀 | 建议测试 |
 |--------------|----------|
-| `crates/dieyun-core/src/compaction/` | `cargo test -p dieyun-core --lib compaction` + `npx vitest run test/unit/compaction-telemetry.test.cjs` |
-| `crates/dieyun-core/src/agent/` | `npm run test:rust-agent-loop-smoke` |
-| `crates/dieyun-core/src/planner/` | `npm run test:rust-planner-smoke` |
+| `crates/dieyun-base/src/compaction/` | `cargo test -p dieyun-base --lib compaction` + `npx vitest run test/unit/compaction-telemetry.test.cjs` |
+| `crates/dieyun-runtime/src/agent/` | `npm run test:rust-agent-loop-smoke` |
+| `crates/dieyun-runtime/src/planner/` | `npm run test:rust-planner-smoke` |
 | `src/agent/` | `npm run test:agent-limits` + agent smoke |
 | 纯函数 / MCP-计划装配 | `npm run test:unit`；`npm run check:js`（scoped checkJs） |
-| `src/gateway/`、`crates/dieyun-core/src/rpc/` | `npm run test:local-gateway-smoke` + `verify:rpc-catalog` |
+| `src/gateway/`、`crates/dieyun-runtime/src/rpc/` | `npm run test:local-gateway-smoke` + `verify:rpc-catalog` |
 | `src/lsp/`（LSP 定位 / 诊断） | `npm run test:lsp`（可选 `DIEYUN_LSP_E2E=1` 跑真 LSP 端到端） |
 | `src/renderer/` | `npm run check:renderer` 或 `npm run test:renderer` |
 | `src/mobile/` | `npm run test:mobile` |

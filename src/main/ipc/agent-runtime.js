@@ -21,7 +21,8 @@ const {
 } = require('../../agent/run-cancel-registry');
 
 /** 压缩归档（旁路记录）的写入上限：它在发请求之前 await，不能让它拖住整轮。 */
-const COMPACTION_ARCHIVE_TIMEOUT_MS = 2000;
+// 归档走 compaction-loop 的唯一实现（聊天 / 计划 / 频道共用同一份）。
+const { buildLoopCompactionHandler } = require('../../agent/compaction-loop');
 
 // 会话目标（按轮计数）：唯一读写点，见 src/goals/session-goal.js
 const sessionGoalStore = require('../../goals/session-goal');
@@ -535,42 +536,31 @@ function registerAgentRuntimeIpc(ctx) {
           }
           sendPhase(phase, data);
         },
-        compactMessages: async (messages, compactCtx) => {
-          const cr = await mainCompactionAgent.maybeCompactMessages(messages, {
-            // 预算 / 触发比由 compaction-main 按本轮 Context 档位自己算（它才是唯一算预算的地方）
-            contextTierId: ctx.contextTierId,
-            apiConfig: apiCfg,
-            model: sessionModel,
+        // 压缩回调走**唯一实现**（`compaction-loop.buildLoopCompactionHandler`）：
+        // 折叠由 core 做，Node 只补「归档行」并把归档 id 回填给请求快照。
+        // 以前这里是手写闭包，少了 `archiveFold` 属性 —— 于是聊天会话里 core 折叠了、
+        // 遥测记了，但 `compaction_archives` 行与快照的 `compactionArchiveId` 永远是 null。
+        compactMessages: (() => {
+          const handler = buildLoopCompactionHandler({
+            compactionAgent: mainCompactionAgent,
+            gateway: live.localGateway || null,
             sessionId: payload.sessionId || null,
-            signal: compactCtx?.signal || abortController.signal,
-            runId: compactCtx?.runId || entry.runId || undefined,
-            force: !!compactCtx?.force,
-            toolsChars: compactCtx?.toolsChars
+            workspacePath,
+            contextTierId: ctx.contextTierId,
+            model: sessionModel,
+            // 0 = 让 compaction-main 按本轮档位算（它才是唯一算预算的地方）
+            tokenBudget: 0
           });
-          if (cr.compacted && payload.sessionId && live.localGateway) {
-            // 归档 id 回填给快照：让「这一轮压缩过」与 compaction_archives 行对得上。
-            // 归档失败不影响主链路（快照里就留 null）。
-            // 短超时：这次归档在**发请求之前**，DB 慢不能拖着整轮对话等它的默认 120s。
-            try {
-              const archived = await live.localGateway.invokeRpc(
-                'memory.compaction_archive',
-                {
-                  sessionId: payload.sessionId,
-                  workspacePath: workspacePath || null,
-                  tokensBefore: cr.tokensBefore,
-                  tokensAfter: cr.tokensAfter,
-                  summary: cr.summary || null,
-                  foldedTranscript: cr.foldedTranscript || null
-                },
-                { timeoutMs: COMPACTION_ARCHIVE_TIMEOUT_MS }
-              );
-              if (archived && archived.id != null) cr.compactionArchiveId = archived.id;
-            } catch {
-              // archive 是旁路记录，写失败只让快照少一个 id
-            }
-          }
-          return cr;
-        },
+          if (!handler) return undefined;
+          const wrapped = (messages, compactCtx = {}) =>
+            handler(messages, {
+              ...compactCtx,
+              // 聊天侧的取消信号来自 abortController（停止按钮），别丢
+              signal: compactCtx.signal || abortController.signal,
+              runId: compactCtx.runId || entry.runId || undefined
+            });
+          return Object.assign(wrapped, { archiveFold: handler.archiveFold });
+        })(),
         delegateTool: async (name, args) => {
           if (entry.aborted || abortController.signal.aborted) {
             const err = new Error('已停止');

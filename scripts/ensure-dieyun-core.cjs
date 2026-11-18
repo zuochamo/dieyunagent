@@ -1,34 +1,24 @@
 'use strict';
 
-const { execSync } = require('child_process');
 const path = require('path');
-const { packLooksComplete, packIsFresh, OUT, EXE_NAME } = require('./pack-dieyun-core.cjs');
-
-const ROOT = path.join(__dirname, '..');
+const { syncArtifact, OUT, EXE_NAME } = require('./pack-dieyun-core.cjs');
 
 /**
- * 启动前的 sidecar 闸门：**存在**不够，还要**比源码新**。
+ * dev / start 前的 sidecar 闸门：产物**存在**不够，还要**是最新编译出来的**。
  *
- * 2026-11-17 的坑：`ensure` 原先只要 build/ 里有产物、或 target/release 里有产物就报 OK，
- * 于是「改了 Rust 却跑旧二进制」静默发生 —— 那一轮排查全打在旧代码上。判据收成唯一一份
- * （`packIsFresh`），build/ 比 `crates/dieyun-core` 旧就重打。
+ * 2026-11-17 的坑仍然按原样防住：`ensure` 只要 build/ 里有产物就报 OK 的那一版，让「改了 Rust
+ * 却跑旧二进制」静默发生，整轮排查都打在旧代码上。这里不自己扫源码 mtime —— 源码变没变由
+ * cargo 的指纹说话（无变化 0.29s 空跑），改了才编译，编译出的产物比 build/ 新才复制。
+ * 判据与写盘都在 `pack-dieyun-core.cjs#syncArtifact` 一处，本文件只负责启动期的报错口径。
  */
-function runPack(reason) {
-  console.log(`[dieyun-core] ${reason}，重新打包（npm run pack:dieyun-core）…`);
-  execSync('npm run pack:dieyun-core', { cwd: ROOT, stdio: 'inherit' });
-}
-
-if (packIsFresh()) {
-  console.log(`[dieyun-core] sidecar OK: ${path.join(OUT, EXE_NAME)}`);
-  process.exit(0);
-}
-
-runPack(
-  packLooksComplete() ? 'build/ 里的 sidecar 比 crates/dieyun-core 源码旧' : 'sidecar 缺失'
-);
-
-if (!packIsFresh()) {
-  console.error('[dieyun-core] 打包后产物仍不可用');
-  console.error('[dieyun-core] 请确认已安装 Rust (cargo)，或手动运行: npm run pack:dieyun-core');
-  process.exit(1);
-}
+syncArtifact()
+  .then(({ copied }) => {
+    console.log(
+      `[dieyun-core] sidecar ${copied ? '已重打' : 'OK'}: ${path.join(OUT, EXE_NAME)}`
+    );
+  })
+  .catch((e) => {
+    console.error('[dieyun-core] ' + (e && e.message ? e.message : e));
+    console.error('[dieyun-core] 仍需解决时可手动运行: npm run pack:dieyun-core');
+    process.exit(1);
+  });

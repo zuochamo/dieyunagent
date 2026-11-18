@@ -6,8 +6,8 @@ const path = require('path');
 /**
  * 「这个文件要不要进索引」在 Node 侧的唯一来源。
  *
- * 权威口径始终在 Rust：`crates/dieyun-core/src/index/walker.rs`（代码索引，认所有文本）
- * 与 `crates/dieyun-core/src/graph/extract/files.rs` + `treesitter/lang.rs`（结构索引，
+ * 权威口径始终在 Rust：`crates/dieyun-codebase/src/index/walker.rs`（代码索引，认所有文本）
+ * 与 `crates/dieyun-codebase/src/graph/extract/files.rs` + `treesitter/lang.rs`（结构索引，
  * 只认 tree-sitter 能解析的 6 种语言）。这里只回答「一次保存要不要触发一次增量」，
  * 属粗过滤：**宁可多报，不许漏报**（多报由 Rust 侧跳过，漏报就是索引静默不更新）。
  *

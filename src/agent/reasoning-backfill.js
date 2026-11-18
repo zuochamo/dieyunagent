@@ -15,14 +15,28 @@
  * `reasoning` 是账本**内部**字段、不是上游协议字段：本模块在出口统一剥离，
  * 保证发给上游的消息里只有 `reasoning_content`，不夹带 `reasoning`。
  *
- * 单一来源：Main（rust-loop-runner.js）直接 require；Renderer（renderer-agent-llm.js）
- * 经 agent-bundle 注册为 window.ReasoningBackfill 消费。
+ * 单一来源，但**只管 Renderer 的辅助单轮**：那条路径自己拼 `llm.complete` 的 body
+ * （`renderer-agent-llm.js` 经 agent-bundle 注册为 window.ReasoningBackfill 消费）。
+ * 主循环（`agent.run.*`）的出站形状归 Rust `agent/outbound.rs` —— 宿主不再回填
+ * （2026-11-18 R2 收口：同一份知识只留一个作者）。
  *
  * 纯函数、零 IO、零 Electron —— 与 token-estimate.js 一样可入 Renderer bundle。
  */
 
-/** 历史轮缺思考真值时的兜底占位串（单一来源，勿在调用点另写字面量）。 */
-const REASONING_PLACEHOLDER = '（思考内容未随消息保存）';
+const SHARED = require('./shared-constants');
+
+/**
+ * 历史轮缺思考真值时的兜底占位串（跨语言单一来源：`agent-shared.json` →
+ * `reasoning.placeholder`，Rust 侧 `dieyun-runtime/src/agent/outbound.rs` 读同一份）。
+ *
+ * 只求「字段存在且非空」，**不承担任何可读语义**：上游（DeepSeek 思考模式）会把历史里的
+ * `reasoning_content` 当成「上一段思考的开头」接着往下写，一串人话占位会被原样回显成
+ * 真思考（实测：`messages.reasoning` 里出现「占位串 + 真思考」114 条），再落库、再上行，
+ * 就形成一条永不停止的自我维持链。零宽空格满足非空校验、且没有任何文字可被续写；
+ * 不用普通空格 —— 上游若先 trim 再校验，空格会变成空串而重新触发 HTTP 400。
+ * 零宽空格（U+200B）不是 Unicode White_Space，JS `trim()` 与 Rust `trim()` 都不会删它。
+ */
+const REASONING_PLACEHOLDER = SHARED.reasoning.placeholder;
 
 /** 账本自有真思考字段名（**不是**上游 `reasoning_content`）。 */
 const BOOK_REASONING_FIELD = 'reasoning';

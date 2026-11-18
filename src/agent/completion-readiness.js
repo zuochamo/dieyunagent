@@ -14,7 +14,7 @@
  * - 证据只看**结构字段**：工具名（`guardrails-shared` 的工具名归类）、`result.code` 数字退出码、
  *   结果对象的 `ok === false` / `error`、`browser_expect` 的 `failed` 计数、trace 里是否用过
  *   `browser_*`。**不从 summary 文本里抠数字**，也不读 `failed` 标志（那是 Renderer 展示层
- *   映射时才加的字段，Rust 账本 trace 里没有 —— 见 `crates/dieyun-core/src/agent/loop_run.rs`
+ *   映射时才加的字段，Rust 账本 trace 里没有 —— 见 `crates/dieyun-runtime/src/agent/loop_run.rs`
  *   的 `TraceTool`：只有 name / args / result / error）。
  * - 对技术栈零感知：不按工程类型/文件后缀分支；唯一的技术判断是「退出码是不是 0」。
  * - 验证类按**命令的最后一次结果**判定：先失败后通过=通过（修好了），先通过后失败=失败。

@@ -1,0 +1,35 @@
+[package]
+name = "dieyun-base"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Dieyun core 底座：错误、共享常量、观测、SQLite 句柄、schema 迁移、配置、向量后端、上下文折叠、FTS"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.23"
+ndarray = { version = "0.17", optional = true }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["std", "load-dynamic", "ndarray", "api-20"] }
+tokenizers = { version = "0.23", optional = true, default-features = false, features = ["fancy-regex"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+
+[features]
+# 与 dieyun-core 同名同义：桌面 sidecar 默认带「能跑就跑本地」的能力，
+# 远端 Linux 打包用 `--no-default-features` 关掉（产物里就不含 ORT）。
+default = ["local-embed"]
+local-embed = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

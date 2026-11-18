@@ -224,7 +224,7 @@ ls -l /run/user/$(id -u)/systemd/private                                  # 用�
 
 | 档位 | 命令 | 判据 |
 |------|------|------|
-| 补丁 / 次版本（semver 内） | `cargo update` | 跑 `cargo test -p dieyun-core --lib` 全绿即可 |
+| 补丁 / 次版本（semver 内） | `cargo update` | 跑 `cargo test --workspace --lib` 全绿即可（Rust 已拆成 5 个 crate，`-p dieyun-core` 只跑 bin） |
 | 主版本 / 预发布跨段 | 手改 `Cargo.toml` 版本号 | 需单独评估 API 变更 + 预下载产物，见下 |
 
 **已完成的升级（2026-10）**：`rusqlite 0.32 → 0.41`（`libsqlite3-sys` 0.39，FTS5 trigram 与

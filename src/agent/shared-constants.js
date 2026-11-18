@@ -14,7 +14,7 @@
  *   `src/remote/remote-pack-layout.js` 与 `scripts/check-shared-constants.cjs` 的边界闸门）；
  * - Node 一律从这里取（`agent-limits` / `fs-read-limits` / `core-rpc-timeouts` /
  *   `llm-reconnect-retry` / `model-runtime-by-tier` 都是消费方，不是来源）；
- * - Rust 侧同一份文件（`crates/dieyun-core/src/shared.rs`，`include_str!` 编译期嵌入）；
+ * - Rust 侧同一份文件（`crates/dieyun-base/src/shared.rs`，`include_str!` 编译期嵌入）；
  * - 加键必须两侧都有人读，`scripts/check-shared-constants.cjs` 会验。
  */
 
@@ -29,5 +29,8 @@ module.exports = {
   readLimits: frozen(raw.readLimits),
   rpc: frozen(raw.rpc),
   snippets: frozen(raw.snippets),
+  reasoning: frozen(raw.reasoning),
+  /** 上游传输层失败的**错误码**（core `llm.rs` 发、宿主分类器认；两端同一份值）。 */
+  llmErrors: frozen(raw.llmErrors),
   contextOverflowPatterns: Object.freeze([...raw.contextOverflowPatterns])
 };

@@ -33,6 +33,6 @@ jobs:
       - name: Agent smoke (skip rust sidecar if missing)
         run: npm run test:agent
       - name: Rust unit tests
-        run: cargo test -p dieyun-core --no-default-features -- --skip indexes_dieyunagent_main_entry_imports
+        run: cargo test --workspace --no-default-features -- --skip indexes_dieyunagent_main_entry_imports
       - name: Rust clippy
-        run: cargo clippy -p dieyun-core --no-default-features -- -D warnings
+        run: cargo clippy --workspace --no-default-features -- -D warnings

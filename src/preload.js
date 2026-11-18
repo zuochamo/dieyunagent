@@ -338,7 +338,7 @@ contextBridge.exposeInMainWorld('diecloud', {
 
   /**
    * 流式 chat completion：Main 只把 core 的增量转发过来（`{type:'delta', content, reasoning}`），
-   * 解析在 core（`crates/dieyun-core/src/agent/llm.rs`），渲染层不再收到 SSE 原文。
+   * 解析在 core（`crates/dieyun-runtime/src/agent/llm.rs`），渲染层不再收到 SSE 原文。
    * resolve 形状：`{ ok: true, result }`，`result` 是 core 归一后的
    * `{ content, reasoning, toolCalls, finishReason, usage, model }`。
    */

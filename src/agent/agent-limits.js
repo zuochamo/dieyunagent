@@ -361,8 +361,10 @@ const AGENT_LIMITS_DEFAULTS = {
   // 长期记忆**注入**的相似度阈值（语义 / 关键词两档）。
   // 与共享记忆的 `sharedMemoryMinScore*` 是同一套口径、不同数据源（本地库 / 跨机 PG），
   // 所以两组分开命名；值以前硬编码在 `system-prompt-prep.js` 里，看不出同源也改不动。
-  memoryInjectMinScoreSemantic: 0.32,
-  memoryInjectMinScoreKeyword: 0.12,
+  // 长期记忆「该不该注入」的唯一阈值，作用在 Rust 给的 `injectScore`（已归一到 [0,1]）。
+  // 以前是语义 0.32 / 关键词 0.12 两个数：它们量的根本不是同一件事（余弦 vs bm25），
+  // 于是「注不注入」取决于走了哪条通道、查询词有几个字。量纲统一后只剩这一个数。
+  memoryInjectMinScore: 0.32,
   // 会话交接里「原文快照」的预算：事实部分由存储投影（确定性），模型只写判断。
   // 与注入侧 HANDOFF_BLOCK_MAX_CHARS(4000) 的关系：快照在后、判断在前，
   // 触顶时先丢原文尾部，不丢结论。
@@ -392,7 +394,7 @@ const AGENT_LIMITS_DEFAULTS = {
   // **但每会话窗口只有「乘数里的那个 40」**：库体积 = 每会话行数 × 用过多少会话。
   // 2026-11-09 实测 `diecloud-memory.sqlite` 1.17GB，其中 request_snapshots 占 1034MB
   // （4818 行 / 157 个会话 / ≈220KB 一行），就是缺一个跨会话总闸。下面这条是那个总闸：
-  // 超过就按最旧优先跨会话裁（裁剪在 `crates/dieyun-core/src/memory/snapshot.rs` 的同一次写入里做）。
+  // 超过就按最旧优先跨会话裁（裁剪在 `crates/dieyun-memory/src/memory/snapshot.rs` 的同一次写入里做）。
   requestSnapshotEnabled: true,
   requestSnapshotKeepPerSession: 40,
   requestSnapshotKeepCompacted: 200,

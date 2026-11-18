@@ -3,7 +3,7 @@
 /**
  * 文本 → token 估算的**唯一来源**。
  *
- * 公式与 Rust `crates/dieyun-core/src/compaction/tokens.rs` **逐字对齐**：
+ * 公式与 Rust `crates/dieyun-base/src/compaction/tokens.rs` **逐字对齐**：
  * `ceil(cjk / CJK_CHARS_PER_TOKEN + other / CHARS_PER_TOKEN)`，且总长按 **Unicode 码点**
  * 计（与 Rust `str::chars()` 一致：星平面字符算 1，而非 UTF-16 码元的 2）。
  * 两语言共用同一基线 `test/fixtures/token-estimate-cases.json`，由
@@ -40,7 +40,7 @@ const IMAGE_PART_EQUIV_CHARS = Number(AGENT_LIMITS_DEFAULTS.visionPartEqChars);
  * 上下文圆环与用量统计也一并虚高。
  *
  * 这里只做「等效字符 → token」的同系数换算，折算系数本身仍唯一来源 `agent-limits.js`。
- * Rust 侧同值见 `crates/dieyun-core/src/compaction/tokens.rs::IMAGE_PART_EQUIV_TOKENS`，
+ * Rust 侧同值见 `crates/dieyun-base/src/compaction/tokens.rs::IMAGE_PART_EQUIV_TOKENS`，
  * 两侧一致性由 `test/fixtures/token-estimate-cases.json` 的图片用例锁定（改一侧必改另一侧）。
  */
 const IMAGE_PART_EQUIV_TOKENS = Math.ceil(IMAGE_PART_EQUIV_CHARS / CHARS_PER_TOKEN);

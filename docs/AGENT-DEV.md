@@ -11,7 +11,7 @@
 | Renderer | `src/renderer/` | DOM、聊天气泡、IPC 调用、**不**放 Agent 循环 / 工头协议 |
 | Main | `src/main-entry.js`、`src/main/`、`src/agent/`、`src/ssh/` | 对话 LLM HTTP、工具委托、启动编排；窗口托盘 / 工位监控 / 活动统计在 `src/main/` |
 | Gateway | `src/gateway/` | RPC 注册、鉴权、工具执行入口 |
-| Rust | `crates/dieyun-core/` | 循环账本 `agent.loop`、planner、memory、index、compaction（不是对话 LLM） |
+| Rust | `crates/`（5 个 crate，见 AGENTS.md「架构三层」） | 循环账本 `agent.loop`、planner、memory、index、compaction（不是对话 LLM） |
 
 **循环哲学**：tool_calls = 继续；无工具的文字 = 本轮结束。允许总步数、完全相同工具+参数止损、声称已改却无写入。禁止 `agent_status`、假用户续跑（`SEGMENT_CONTINUE` 段满预算闸除外）、按只读/同文件读取/只计划逼写入。
 
@@ -31,7 +31,7 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 
 ### Agent 执行
 
-- `crates/dieyun-core/src/agent/loop_run.rs` — Rust 状态机
+- `crates/dieyun-runtime/src/agent/loop_run.rs` — Rust 状态机
 - `src/agent/agent-system-prompt.js` — 给模型看的准则/工作区/权限文案（`assembleSystemPrompt`）
 - `src/agent/system-prompt-prep.js` — Main 召回开文件 / codebase / AGENTS.md overview / 图谱（结构信号）/ 记忆 / 技能索引 / MCP
 - `src/agent/rust-loop-runner.js` — Node ↔ Rust bridge（LLM / compact / sidecar cancel 分缝）
@@ -64,7 +64,7 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 
 ### 记忆 / 会话
 
-- `crates/dieyun-core/src/memory/` — SQLite 消息、trace
+- `crates/dieyun-memory/src/memory/` — SQLite 消息、trace
 - `src/gateway/rpc.js` — 共享闭包、`createRpcHandlers` 组装
 - `src/gateway/handlers/` — RPC 方法（含 `memory.js`、`fs.js`、`graph.js` 等）
 
@@ -139,13 +139,13 @@ npm run verify:agent-events
 
 ### 索引 / 图谱（Rust）
 
-- `crates/dieyun-core/src/treesitter/` — AST 切块与符号抽取
-- `crates/dieyun-core/src/index/` — codebase 索引与混合检索（FTS `trigram` + 向量池精确余弦 + 2 字短术语子串扫描，按名次 RRF 融合）
-- `crates/dieyun-core/src/index/vector_pool.rs` — 常驻内存向量池（唯一的向量检索通道）
-- `crates/dieyun-core/src/index/schema.rs` — 表 / `chunks_fts`（external content + 触发器）/ `SCHEMA_VERSION` 迁移
-- `crates/dieyun-core/src/graph/` — 依赖图、repo_map
+- `crates/dieyun-codebase/src/treesitter/` — AST 切块与符号抽取
+- `crates/dieyun-codebase/src/index/` — codebase 索引与混合检索（FTS `trigram` + 向量池精确余弦 + 2 字短术语子串扫描，按名次 RRF 融合）
+- `crates/dieyun-codebase/src/index/vector_pool.rs` — 常驻内存向量池（唯一的向量检索通道）
+- `crates/dieyun-codebase/src/index/schema.rs` — 表 / `chunks_fts`（external content + 触发器）/ `SCHEMA_VERSION` 迁移
+- `crates/dieyun-codebase/src/graph/` — 依赖图、repo_map
 
-Rust 侧注册：`crates/dieyun-core/src/rpc/mod.rs`。Node 侧：`src/gateway/handlers/`。
+Rust 侧注册：`crates/dieyun-runtime/src/rpc/mod.rs`。Node 侧：`src/gateway/handlers/`。
 
 ## 6. AgentRunEvent 类型
 

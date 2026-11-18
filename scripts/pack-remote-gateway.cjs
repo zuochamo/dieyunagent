@@ -38,6 +38,34 @@ async function ensureBundledNode(outDir) {
   return version;
 }
 
+/**
+ * 重建包时保留的顶层条目：`bin`（内置 node 94MB，重做要再解压+复制一遍）、`node_modules`
+ * （重做要走一次联网 `npm install`）、以及 `pkgNeedsInstall()` 用来比对的那两份清单。
+ */
+const KEEP_TOP_LEVEL = new Set(['bin', 'node_modules', 'package.json', 'package-lock.json']);
+
+/**
+ * 只清**源码产物**，保住上面那两件。
+ *
+ * 为什么不是整目录 `rm -rf`：清了 `bin/node` 与 `node_modules`，`ensureBundledNodeLinux()` 与
+ * `pkgNeedsInstall()` 每次都会判「缺」，于是每次 stale 重打都要重解压 node + 联网装 `ws`。
+ * 这两件事与「源码变了」无关，不该跟着 sourceHash 一起重做 —— 尤其 `npm install` 是这条路上
+ * 唯一不受控的一步（内网/断网机器上它把「启动慢」直接变成「起不来」）。
+ * 源码目录是整棵删掉的（顶层条目逐个 rm），所以被移出清单的旧文件不会残留。
+ */
+async function cleanPackDir(outDir) {
+  let entries;
+  try {
+    entries = await fsp.readdir(outDir);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (KEEP_TOP_LEVEL.has(name)) continue;
+    await fsp.rm(path.join(outDir, name), { recursive: true, force: true });
+  }
+}
+
 function pkgNeedsInstall(outDir, pkgJson) {
   const pkgPath = path.join(outDir, 'package.json');
   const lockPath = path.join(outDir, 'node_modules', '.package-lock.json');
@@ -64,8 +92,8 @@ async function main() {
     throw new Error(`远程 Agent 打包清单越界：${detail}`);
   }
 
-  await fsp.rm(OUT, { recursive: true, force: true });
   await fsp.mkdir(OUT, { recursive: true });
+  await cleanPackDir(OUT);
 
   for (const rel of COPY_PATHS) {
     const src = path.join(ROOT, rel);
@@ -93,6 +121,9 @@ async function main() {
       );
     }
   } else {
+    // `bin/` 是保留目录：源码侧的 linux core 不在了，包里那份也必须清掉，
+    // 否则下面按「文件在不在」重算的 hasLinuxCore 会虚报，远端拿到一个用不了的核心。
+    await fsp.rm(linuxCoreDest, { force: true });
     console.warn(
       '[remote-agent] 未找到 Linux dieyun-core，远程项目内索引不可用。请运行: npm run pack:dieyun-core:linux'
     );

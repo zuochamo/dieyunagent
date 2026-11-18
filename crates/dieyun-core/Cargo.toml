@@ -12,6 +12,13 @@ name = "dieyun-core"
 path = "src/main.rs"
 
 [dependencies]
+dieyun-runtime = { path = "../dieyun-runtime", default-features = false }
+dieyun-codebase = { path = "../dieyun-codebase", default-features = false }
+dieyun-memory = { path = "../dieyun-memory", default-features = false }
+# 底座：错误 / 共享常量 / 观测 / SQLite / schema / 配置 / 向量后端 / 折叠 / FTS。
+# `default-features = false` + 下面的特性转发：远端打包 `--no-default-features` 时
+# 真的不会带上 ORT（依赖的默认特性不会跟着依赖方一起关）。
+dieyun-base = { path = "../dieyun-base", default-features = false }
 anyhow = "1"
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
@@ -52,9 +59,12 @@ tree-sitter-rust = "0.24.2"
 # （模型文件 + onnxruntime dylib 都在才启用）。远端 Linux core 打包时可用
 # `--no-default-features` 关掉，产物里就不含 ORT 依赖，glibc 下限也不受影响。
 default = ["local-embed"]
-local-embed = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
+local-embed = ["dieyun-base/local-embed", "dep:ort", "dep:ndarray", "dep:tokenizers"]
 
 [dev-dependencies]
 tempfile = "3"
 # 只有测试用到：`agent::llm` 的端到端用例要起一个本地最小 HTTP 服务端（tokio::net）
 tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

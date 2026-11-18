@@ -101,7 +101,7 @@
     "generate:agent-events": "node scripts/generate-agent-run-events-doc.cjs",
     "verify:agent-events": "node scripts/generate-agent-run-events-doc.cjs --check",
     "cargo:build": "cargo build -p dieyun-core --release",
-    "cargo:test": "cargo test -p dieyun-core",
+    "cargo:test": "cargo test --workspace",
     "verify:vector-cache-reuse": "node scripts/verify-vector-cache-reuse.cjs",
     "verify:index-timing-local": "node scripts/verify-index-timing-local.cjs",
     "verify:index-timing-ssh": "node scripts/verify-index-timing-ssh.cjs",

@@ -20,7 +20,7 @@ const {
 /**
  * 上下文压缩的 Main 侧入口。
  *
- * 判定与折叠**全在 Rust**（`crates/dieyun-core/src/compaction/fold.rs`）：确定性、
+ * 判定与折叠**全在 Rust**（`crates/dieyun-base/src/compaction/fold.rs`）：确定性、
  * 幂等、无 LLM。这里只做三件 Node 才能做的事：
  * 1. 把「模型窗口 → 输入预算」算出来（settings / 档位 / 工具 schema 扣减都在 JS 侧）；
  * 2. 把上一轮服务端回报的 `usage.prompt_tokens` 透传下去（真实用量优先于字符比估值）；

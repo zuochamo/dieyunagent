@@ -435,7 +435,7 @@ function buildShim({ gatewayUrl, webToken, workspacePath, modelSettings, rustCor
     // 走同源 /llm 转发到上游（绕开模型端点的 CORS）。返回值形状与 preload.js 一致：
     // core 归一后的 { content, reasoning, usage, model }。
     //
-    // 增量：core 才是唯一的 SSE 解析者（crates/dieyun-core/src/agent/llm.rs），浏览器里
+    // 增量：core 才是唯一的 SSE 解析者（crates/dieyun-runtime/src/agent/llm.rs），浏览器里
     // 拿不到 agent.delta，在这里再解析一份 SSE 就是第二份实现（docs/LLM-RPC.md 负向清单）。
     // 所以流式接口在浏览器里退成「一次 delta」：请求按非流式发出，整段结果作为一条 delta
     // 交给渲染层。形状与桌面一致，最终结果一致，只是不逐字到达；要逐字增量，得把这条

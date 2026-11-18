@@ -682,7 +682,7 @@ function resetActiveRunContextUiState(sessionId) {
 
 /**
  * 压缩失败的原始原因是 Rust 侧分类码，展示前翻成人话。
- * 码的唯一来源是 `crates/dieyun-core/src/compaction/llm.rs`；这里只是展示层映射，
+ * 码的唯一来源是 `crates/dieyun-base/src/compaction/llm.rs`；这里只是展示层映射，
  * 未收录的新码会原样显示（便于发现新增分类），不会被吞掉。
  */
 const COMPACTION_REASON_LABELS = {
@@ -696,7 +696,7 @@ const COMPACTION_REASON_LABELS = {
   LLM_RATE_LIMIT: '被限流',
   LLM_EMPTY_CONTENT: '模型未输出正文',
   LLM_REASONING_ONLY: '模型只输出思考',
-  LLM_HTTP: '网络错误',
+  LLM_TRANSPORT: '网络中断',
   LLM_CONFIG: '模型未配置',
   content_policy: '内容审核拒绝',
   llm_error: 'LLM 调用失败'

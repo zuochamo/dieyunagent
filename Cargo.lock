@@ -397,12 +397,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "dieyun-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "ndarray",
+ "ort",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokenizers",
+ "tokio",
+]
+
+[[package]]
+name = "dieyun-codebase"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "dieyun-base",
+ "ignore",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "dieyun-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
  "clap",
+ "dieyun-base",
+ "dieyun-codebase",
+ "dieyun-memory",
+ "dieyun-runtime",
  "futures-util",
  "ignore",
  "ndarray",
@@ -423,6 +470,41 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "dieyun-memory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dieyun-base",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "dieyun-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "dieyun-base",
+ "dieyun-codebase",
+ "dieyun-memory",
+ "futures-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

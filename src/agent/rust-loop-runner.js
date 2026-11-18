@@ -8,7 +8,9 @@ const {
   raceAbortable,
   createAbortError,
   isAbortError,
-  isContextOverflowError
+  isContextOverflowError,
+  isTransientLlmError,
+  runWithLlmReconnectRetry
 } = require('../llm-reconnect-retry');
 const { resolveAgentLoopSpec, getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 // 请求快照：每轮请求的装配与落库唯一写入点（见 docs/REQUEST-SNAPSHOT.md）。
@@ -338,7 +340,7 @@ function createRunStallWatchdog(opts = {}) {
 
 /**
  * 运行 core 驱动的 agent loop（**驱动者是 core**：LLM 调用与轮次推进都在
- * `crates/dieyun-core/src/agent/driver.rs`，工具仍在 Node 执行）。
+ * `crates/dieyun-runtime/src/agent/driver.rs`，工具仍在 Node 执行）。
  *
  * 协议见 [`docs/AGENT-RUN-MIGRATION.md`](docs/AGENT-RUN-MIGRATION.md) §2：
  * - `agent.run.start` 跑到「要工具」就返回 `{phase:'need_tools', runId, delegates}`，
@@ -397,6 +399,8 @@ async function runRustAgentLoop(opts) {
   activeLoops.add(loopTicket);
 
   let llmRound = 0;
+  /** 本 run 自动重连过几次（只用于把失败说得比「一次都没试」更准确；catch 里要用）。 */
+  let reconnectAttempts = 0;
 
   // run 级无进展看门狗（阈值只认 agent-limits，见 createRunStallWatchdog 注释）。
   const stallLimits = getAgentLimits(opts.userData, opts.contextTierId) || {};
@@ -464,7 +468,11 @@ async function runRustAgentLoop(opts) {
     }
   };
 
-  const loopSpec = opts.loopSpec || resolveAgentLoopSpec(opts.settings, opts.userData, opts.contextTierId);
+  const resolvedLoopSpec = resolveAgentLoopSpec(opts.settings, opts.userData, opts.contextTierId);
+  const loopSpec = opts.loopSpec || resolvedLoopSpec;
+  // 瞬断重连的四个数仍来自 `agent-limits`（经同一份解析）：调用方显式给的 loopSpec 优先。
+  // 主循环这里是**第二个**消费方（第一个是 planner 的 `llm.complete`），参数口径必须一致。
+  const retrySpec = { ...resolvedLoopSpec, ...(opts.loopSpec || {}) };
   // 折叠预算（窗口 → 预算 → 扣工具 schema）仍只在 compaction-main 一处算；
   // 传进 startParams 后由 core 自己折（transcript 归它所有）。
   const foldSpec =
@@ -484,7 +492,6 @@ async function runRustAgentLoop(opts) {
   // content 的通道身份：由能力表按模型声明一次，随每个 llm_delta / start 下发。
   const policy = getChannelPolicy(model);
   const contentChannel = policy.singleChannel ? 'reasoning' : 'answer';
-  const hasTools = Array.isArray(startParams.tools) && startParams.tools.length > 0;
 
   /**
    * start / tools 两条调用的公共传输参数（单一来源，勿在调用点各拼一份）。
@@ -501,7 +508,10 @@ async function runRustAgentLoop(opts) {
       authMode: (llm && llm.authMode) || ''
     },
     contentChannel,
-    includeRaw: llmRawTapEnabled()
+    includeRaw: llmRawTapEnabled(),
+    // 出站投影（`agent/outbound.rs`）据此决定要不要给 assistant 补 `reasoning_content`：
+    // 能力表说这个模型必须回传，就必须回传（DeepSeek 思考 + tools 的硬校验）。
+    echoReasoning: !!(policy && policy.echoReasoning)
   });
 
   let phase = null;
@@ -560,21 +570,32 @@ async function runRustAgentLoop(opts) {
     }
     applyLlmMessageCharCap(body, opts.userData, opts.contextTierId);
     const vision = withVision(body.messages, round);
+    // 思考回传（`reasoning_content`）由 **Rust 出站投影**负责（`agent/outbound.rs`）：
+    // 它比宿主更清楚账本里的真思考字段，也保证「发出去的那一份」只有一个作者。
     return {
-      messages: backfillReasoningContent(vision.messages, hasTools, !!policy.echoReasoning),
+      messages: vision.messages,
       visionInjected: vision.injected
     };
   };
 
-  /** 溢出兜底：折叠已经是 core 的内部动作，Node 只能如实停下并说明（不假装成功）。 */
+  /**
+   * 溢出兜底：折叠已经是 core 的内部动作，Node 只能如实停下并说明（不假装成功）。
+   *
+   * 判定「成功」的口径请用 `stopReason`：`phase` 仍叫 `done` 只是为了交付已完成正文。
+   */
   const stopForOverflow = async (extra = {}) => {
     onPhase('turn_overflow_stopped', { runId, round: llmRound, ...extra });
     await abortSidecarRun(bridge, runId);
+    // `phase: 'done'` 是为了让已经产出的正文照常交付，但**不许**让下游把它当完整成功：
+    // `stopReason` / `stopNote` 是这条事实的唯一出口（以前只有一个 `overflowStopped`
+    // 布尔且没有任何消费方，于是计划 / 频道 / 归纳全按「正常收尾」处理）。
     return {
       phase: 'done',
       runId,
       content: String(deltaContent || ''),
-      overflowStopped: true
+      overflowStopped: true,
+      stopReason: 'context_overflow',
+      stopNote: '上下文已满：本轮到最后一轮为止的内容已交付，可能不完整。'
     };
   };
 
@@ -654,6 +675,22 @@ async function runRustAgentLoop(opts) {
 
     /** 上一轮工具结果：非空表示下一次该调 `agent.run.tools` 回填。 */
     let pendingResults = null;
+
+    /**
+     * 这一次重发是不是**干净的一次**：只有 run 的第一条请求、且这一轮还没产出任何东西时成立。
+     *
+     * 为什么只认这一个窗口：`agent.run.start` 在 core 里只是「用 runId 建（覆盖）一份 RunState」，
+     * 传输层失败时账本里还没有任何 assistant 轮，原样重发是安全的；而一旦出过增量 / usage，
+     * 或者已经进过工具轮（`agent.run.tools` 会把工具结果记进账本），重发就会重复内容 /
+     * 重复回填工具结果 —— 那种情况交给下游的断点续跑（`networkDisconnect` +「继续」）。
+     */
+    const canRestartCleanly = () =>
+      llmRound === 0 &&
+      pendingResults === null &&
+      !deltaContent &&
+      !deltaReasoning &&
+      lastUsage === null;
+
     while (true) {
       await throwIfCancelled(bridge, runId, signal);
       deltaContent = '';
@@ -665,7 +702,42 @@ async function runRustAgentLoop(opts) {
         ? { results: pendingResults, ...transport() }
         : { ...startParams, ...transport() };
       runStall.note(method);
-      phase = await invokeRunRpc(bridge, method, params, signal);
+      // 首轮请求允许瞬断重连（网关重启 / 连接被掐断这类）：core 的传输层失败在这里
+      // 就是一次 RPC 失败。**分类与退避只有 `llm-reconnect-retry` 那一份**，宿主不再
+      // 另写判据 —— 这次之所以没兜住，就是因为它拿不到 core 的结构化码（见 llm.rs）。
+      if (method === 'agent.run.start' && canRestartCleanly()) {
+        phase = await runWithLlmReconnectRetry(
+          () => invokeRunRpc(bridge, method, params, signal),
+          {
+            signal,
+            // 每次失败都重新判一次：第一次尝试若已经吐过字，就不该再原样重发。
+            isTransient: (err) => canRestartCleanly() && isTransientLlmError(err),
+            baseDelayMs: retrySpec.llmRetryBaseMs,
+            maxDelayMs: retrySpec.llmMaxRetryDelayMs,
+            maxRetries: retrySpec.llmMaxRetries,
+            maxWaitMs: retrySpec.llmReconnectMaxWaitMs,
+            onWait: (info) => {
+              reconnectAttempts += 1;
+              // 等待也算进展：否则 RUN_STALL 会把一次合法的重连等待判成「卡死」。
+              runStall.note('llm_reconnect_wait');
+              const sec = Math.max(1, Math.round((Number(info.waitMs) || 0) / 1000));
+              runLog(`模型接口连接中断，${sec}s 后自动重试（第 ${info.attempt} 次）`);
+              onPhase('llm_reconnect_wait', {
+                runId,
+                round: llmRound,
+                attempt: info.attempt,
+                waitMs: info.waitMs,
+                remainingMs: info.remainingMs,
+                maxRetries: info.maxRetries,
+                maxWaitMs: info.maxWaitMs,
+                error: String((info.error && info.error.message) || info.error || '')
+              });
+            }
+          }
+        );
+      } else {
+        phase = await invokeRunRpc(bridge, method, params, signal);
+      }
       runStall.note(`agent_run_${(phase && phase.phase) || 'unknown'}`);
 
       // 折叠是 core 的事：这里只消费它交上来的事实（UI / 遥测 / 归档）。
@@ -757,6 +829,17 @@ async function runRustAgentLoop(opts) {
       // 溢出 = 估算已不准：折叠现在在 core 内部（发请求之前），Node 没有第二次机会。
       return await stopForOverflow({ llmError: String(err.message || err) });
     }
+    // 自动重连过就把这件事说清楚：用户看到的不该和「一次都没试」一模一样。
+    // （IPC 会丢掉 `err.code`，但文案会原样带过去；`已自动重连` 这个前缀因此是
+    //  `llm-reconnect-retry.isTransientLlmError` 认的**自有**标记，不是上游文案。）
+    const failure =
+      reconnectAttempts > 0 && err instanceof Error
+        ? Object.assign(
+            new Error(`已自动重连 ${reconnectAttempts} 次仍未恢复：${err.message}`),
+            // eslint-disable-next-line no-undef -- Error 上的 code 是 core-bridge 挂的（非标准字段）
+            { code: /** @type {any} */ (err).code || '', cause: err }
+          )
+        : err;
     onPhase('loop_failed', {
       checkpoint: {
         runId,
@@ -764,9 +847,9 @@ async function runRustAgentLoop(opts) {
         messages: Array.isArray(startParams.messages) ? startParams.messages : [],
         tools: Array.isArray(startParams.tools) ? startParams.tools : []
       },
-      error: err.message || String(err)
+      error: failure.message || String(failure)
     });
-    throw err;
+    throw failure;
   } finally {
     activeLoops.delete(loopTicket);
     if (stallTimer) clearInterval(stallTimer);

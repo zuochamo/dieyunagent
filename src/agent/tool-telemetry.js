@@ -220,7 +220,7 @@ function summarizeTelemetry(userDataPath, limit = 200) {
  *
  * 事实来源只有一个：`request_snapshots.context_audit_json.index`
  * （写入方 `src/agent/system-prompt-prep.js:IndexInjectionAudit`，聚合方
- * `crates/dieyun-core/src/memory/snapshot.rs:count_index_injections`）。
+ * `crates/dieyun-memory/src/memory/snapshot.rs:count_index_injections`）。
  * 这里只做**展示口径**（占比、空值），不重新判定「什么算注入」。
  *
  * @param {object | null} raw RPC `memory.request_snapshot_index_audit` 的返回

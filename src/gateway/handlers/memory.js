@@ -378,7 +378,7 @@ function createMemoryHandlers({ requireRustCore, ctx }) {
     'memory.long_vector_status': async () => requireRustCore('memory.long_vector_status', {}),
 
     // 会话正文的跨会话检索（工具 `session_recall` 的后端）。查询串、路径归一与
-    // workspace 圈定全在 Rust 侧（`crates/dieyun-core/src/memory/`），这里只转发。
+    // workspace 圈定全在 Rust 侧（`crates/dieyun-memory/src/memory/`），这里只转发。
     'memory.messages_search': async ({ query, workspacePath, sessionId, limit, snippetChars }) =>
       requireRustCore(
         'memory.messages_search',

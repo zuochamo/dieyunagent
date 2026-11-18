@@ -23,6 +23,12 @@
     "codebaseSnippetMaxChars": 2400,
     "rustBudgetChars": 4800
   },
+  "reasoning": {
+    "placeholder": "\u200B"
+  },
+  "llmErrors": {
+    "transportCode": "LLM_TRANSPORT"
+  },
   "contextOverflowPatterns": [
     "context length",
     "context_length",

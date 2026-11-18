@@ -13,7 +13,7 @@
  * 职责边界（勿混）：
  *   - 本模块 = 「给定端点 + 配置，产出 URL 与 headers」——纯函数、零 IO、零 Electron。
  *   - 「用哪家供应商 / 哪个模型」是 model-api-config.js 的事；
- *   - 「怎么发、怎么解析流」是 core 的事（`crates/dieyun-core/src/agent/llm.rs`，
+ *   - 「怎么发、怎么解析流」是 core 的事（`crates/dieyun-runtime/src/agent/llm.rs`，
  *     宿主经 RPC `llm.complete` 调用，见 `src/agent/llm-complete.js`）——Node 侧
  *     已经**没有**第二份 HTTP/SSE 实现，别再加回来。
  *

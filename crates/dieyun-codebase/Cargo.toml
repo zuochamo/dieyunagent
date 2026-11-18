@@ -1,0 +1,33 @@
+[package]
+name = "dieyun-codebase"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "代码索引与结构图：切块、FTS 检索、调用图、tree-sitter 抽取"
+
+[dependencies]
+dieyun-base = { path = "../dieyun-base", default-features = false }
+anyhow = "1"
+base64 = "0.23"
+ignore = "0.4"
+rayon = "1"
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tree-sitter = "0.27"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-rust = "0.24.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-17T14:15:11.209Z",
+  "generatedAt": "2026-11-18T05:40:00.044Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
     "total": 193,
@@ -14,7 +14,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -24,7 +24,7 @@
         "gateway/handlers/agent.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -32,7 +32,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -40,7 +40,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -48,7 +48,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -58,7 +58,7 @@
         "gateway/handlers/agent.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -68,7 +68,7 @@
         "gateway/handlers/agent.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -78,7 +78,7 @@
         "gateway/handlers/agent.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -88,7 +88,7 @@
         "gateway/handlers/agent.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -98,7 +98,7 @@
         "gateway/handlers/agent.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -444,7 +444,7 @@
         "gateway/handlers/codebase.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -454,7 +454,7 @@
         "gateway/handlers/codebase.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -464,7 +464,7 @@
         "gateway/handlers/codebase.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -474,7 +474,7 @@
         "gateway/handlers/codebase.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -482,7 +482,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -490,7 +490,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -506,7 +506,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -514,7 +514,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -522,7 +522,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -530,7 +530,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -538,7 +538,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -572,7 +572,7 @@
         "gateway/handlers/fs.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -590,7 +590,7 @@
         "gateway/handlers/fs.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -624,7 +624,7 @@
         "gateway/handlers/graph.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -634,7 +634,7 @@
         "gateway/handlers/graph.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -644,7 +644,7 @@
         "gateway/handlers/graph.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -655,7 +655,7 @@
         "gateway/rpc.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -666,7 +666,7 @@
         "gateway/rpc.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -674,7 +674,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -700,7 +700,7 @@
         "gateway/handlers/graph.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -710,7 +710,7 @@
         "gateway/handlers/graph.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -721,7 +721,7 @@
         "gateway/rpc.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -731,7 +731,7 @@
         "gateway/handlers/graph.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -811,7 +811,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -869,7 +869,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -879,7 +879,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -889,7 +889,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -899,7 +899,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -909,7 +909,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -919,7 +919,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -929,7 +929,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -939,7 +939,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -949,7 +949,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -959,7 +959,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -969,7 +969,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -977,7 +977,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -987,7 +987,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -995,7 +995,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1005,7 +1005,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1015,7 +1015,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1025,7 +1025,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1035,7 +1035,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1045,7 +1045,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1055,7 +1055,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1065,7 +1065,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1075,7 +1075,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1085,7 +1085,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1103,7 +1103,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1113,7 +1113,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1123,7 +1123,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1133,7 +1133,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1141,7 +1141,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1159,7 +1159,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1169,7 +1169,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1185,7 +1185,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1201,7 +1201,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1211,7 +1211,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1219,7 +1219,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1229,7 +1229,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1239,7 +1239,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1249,7 +1249,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1259,7 +1259,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1269,7 +1269,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1279,7 +1279,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1289,7 +1289,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1315,7 +1315,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1325,7 +1325,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1335,7 +1335,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1345,7 +1345,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1355,7 +1355,7 @@
         "gateway/handlers/memory.js"
       ],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1387,7 +1387,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1395,7 +1395,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1403,7 +1403,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1411,7 +1411,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1419,7 +1419,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {
@@ -1427,7 +1427,7 @@
       "layer": "rust",
       "gateway": [],
       "rust": [
-        "dieyun-core/rpc/registry.rs"
+        "dieyun-runtime/rpc/registry.rs"
       ]
     },
     {

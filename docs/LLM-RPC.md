@@ -92,13 +92,34 @@ core 在 stdout 上除了「响应」还会写事件行：
 | `agent.delta` | `runId, round, content?, reasoning?` | 流式增量；两个通道**分开**下发，绝不合并 |
 | `agent.usage` | `runId, usage, model` | 每轮真实用量（成本统计只认它，别自己估） |
 
+## 3.1 传输层失败的错误码：`LLM_TRANSPORT`
+
+`agent/llm.rs` 遇到**传输层**失败（连不上 / 连接被掐断 / 超时 / 响应体中断）一律返回
+`code = LLM_TRANSPORT`（值在 `src/agent/agent-shared.json#llmErrors.transportCode`，两端同一份），
+message 形如：
+
+```
+模型接口传输失败（connect）：error sending request for url (http://host/v1/chat/completions) ← connection refused
+```
+
+- 码是**结构信号**：宿主 `llm-reconnect-retry.isTransientLlmError` 认它判「可重连的瞬断」，
+  不去猜 reqwest 的文案（顶层只有一句 `error sending request for url (...)`，真正原因在 `source` 链里）。
+- 文案带全链（`←` 分隔）：只给 url 时，人看不出是「被拒绝 / 被掐断 / 超时」。
+- 业务性失败仍走 `LLM_API`（上游 HTTP 错误 / 上游错误包）与 `LLM_CONFIG`（端点为空 / 客户端构建失败），
+  三个码互不混用 —— 会不会被重连只由码决定。
+- 重连本身仍在宿主：主循环首轮（`rust-loop-runner`，仅在**这一轮还没产出任何东西**时）与 planner 的
+  `llm.complete` 走同一份 `runWithLlmReconnectRetry`。core 依旧不重试。
+
 ## 4. 负向清单
 
 - **不要**在 Node / Renderer 侧再写一份 HTTP 客户端或 SSE 解析（`llm-proxy.js` / `llm-stream-utils.js` 已删，
   别以任何理由加回来）。
 - **不要**把 core 的 stderr 人类日志当事件源（那是上一版的做法，已删）。
 - **不要**在这一层加重试/退避：上游抖动是外部系统，重试只会把一次失败变成多次失败 + 更长等待。
-  （`runWithLlmReconnectRetry` 属于「同一请求再试一次」的业务决定，只在 planner 一处保留。）
+  （`runWithLlmReconnectRetry` 属于「同一请求再试一次」的业务决定，只在宿主两处保留：planner 的
+  `llm.complete`、主循环的**首轮**请求；core 里永远不重试。）
+- **不要**把传输层失败压成一句 `error sending request for url (...)`：那会让宿主无从分类
+  （见 §3.1，2026-11-18 网关重启现场就是这么把可恢复的瞬断判成永久失败的）。
 - **不要**在 Rust 里拼端点路径或猜鉴权：`llm-request.js` 是唯一来源。
 - **不要**让 `agent.delta` 承担「本轮结束」语义：结束/工具调用/错误仍由响应体表达。
 - **不要**给一次性调用加取消 RPC：没人要结果时退订 + 停止转发即可。
@@ -106,9 +127,11 @@ core 在 stdout 上除了「响应」还会写事件行：
 ## 5. 测试
 
 ```bash
-cargo test -p dieyun-core --lib agent::llm              # 增量拼装 / 分片工具参数 / 双通道 / 整包 / 错误包 / 真 HTTP+SSE
+cargo test -p dieyun-core --lib agent::llm              # 增量拼装 / 分片工具参数 / 双通道 / 整包 / 错误包 / 真 HTTP+SSE / 传输失败码
 cargo test -p dieyun-core --lib agent::driver           # 轮次驱动 + round.prepare + 溢出/拒图自愈
 node scripts/test-core-event-channel.cjs                # 真进程：响应 / 事件 / 反向调用 / 答复 四种行 + llm.complete
+node scripts/test-llm-reconnect-retry.cjs               # 瞬时错误分类（含 LLM_TRANSPORT）+ 退避/墙钟预算
+node scripts/test-rust-loop-runner.cjs                  # 主循环首轮瞬断重连 / 已出增量与工具轮不重发
 ```
 
 真 HTTP 用例手写了一个最小 chunked 服务端，**故意把一条 JSON 切在两个 TCP 块之间** ——

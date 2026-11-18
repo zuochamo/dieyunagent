@@ -1,40 +1,30 @@
-#![allow(clippy::redundant_field_names)]
-#![allow(clippy::needless_question_mark)]
-#![allow(clippy::manual_clamp)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::manual_find)]
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::manual_contains)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::while_let_on_iterator)]
-#![allow(clippy::blocks_in_conditions)]
-#![allow(clippy::cmp_owned)]
-#![allow(clippy::unnecessary_lazy_evaluations)]
-#![allow(clippy::format_in_format_args)]
-#![allow(clippy::derivable_impls)]
-#![allow(clippy::map_identity)]
-#![allow(clippy::needless_range_loop)]
-#![allow(clippy::trim_split_whitespace)]
+// 底座已在 `dieyun-base`：**路径原地保留**（`crate::error::…` / `crate::config::…`
+// 这些引用一行都不用改），但依赖方向从此由 Cargo 强制。
+pub use dieyun_base::{
+    blocking,
+    compaction,
+    config,
+    db_schema,
+    embedding,
+    error,
+    fts,
+    obs,
+    shared,
+    sqlite,
+};
 
-pub mod agent;
-pub mod blocking;
-pub mod codebase_db;
-pub mod compaction;
-pub mod config;
-pub mod embedding;
-pub mod db_schema;
-pub mod error;
-pub mod obs;
-pub mod fs_ops;
-pub mod fts;
-pub mod graph;
-pub mod index;
-pub mod memory;
-pub mod planner;
-pub mod rpc;
-pub mod shared;
-pub mod sqlite;
-pub mod treesitter;
+pub use dieyun_memory::memory;
+
+pub use dieyun_codebase::{    codebase_db,
+    index,
+    graph,
+    treesitter,};
+
+
+pub use dieyun_runtime::{    agent,
+    planner,
+    rpc,
+    fs_ops,};
 
 use config::AppConfig;
 

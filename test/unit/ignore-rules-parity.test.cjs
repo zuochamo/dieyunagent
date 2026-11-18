@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const { IGNORED_DIRS, BINARY_EXT } = require('../../src/index/source-files');
 
-const WALKER_RS = path.join(__dirname, '..', '..', 'crates', 'dieyun-core', 'src', 'index', 'walker.rs');
+const WALKER_RS = path.join(__dirname, '..', '..', 'crates', 'dieyun-codebase', 'src', 'index', 'walker.rs');
 
 function readWalker() {
   return fs.readFileSync(WALKER_RS, 'utf8');

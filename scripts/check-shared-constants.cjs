@@ -25,7 +25,15 @@ const ROOT = path.join(__dirname, '..');
 const SHARED_REL = 'src/agent/agent-shared.json';
 const SHARED_PATH = path.join(ROOT, 'src', 'agent', 'agent-shared.json');
 const JS_ROOTS = ['src', 'test'];
-const RS_ROOT = path.join('crates', 'dieyun-core', 'src');
+// 共享常量的 Rust 侧读取者现在在底座 crate 里（`dieyun-base`）。
+// Rust 侧的读者散在多个 crate 里（底座 / 代码库 / 运行时各有自己的读点），
+// 所以这里扫全部 `crates/*/src` —— 只扫一个 crate 会把「别人读了」误判成「没人读」。
+const RS_ROOTS = [
+  path.join('crates', 'dieyun-base', 'src'),
+  path.join('crates', 'dieyun-codebase', 'src'),
+  path.join('crates', 'dieyun-memory', 'src'),
+  path.join('crates', 'dieyun-runtime', 'src'),
+];
 
 /**
  * 允许「只有一侧读」的键，必须写清理由。
@@ -88,8 +96,8 @@ function main() {
   const jsSources = JS_ROOTS.flatMap((p) => collect(path.join(ROOT, p))).filter(
     (f) => f.rel !== 'src/agent/shared-constants.js'
   );
-  const rsSources = collect(path.join(ROOT, RS_ROOT)).filter(
-    (f) => f.rel !== 'crates/dieyun-core/src/shared.rs'
+  const rsSources = RS_ROOTS.flatMap((root) => collect(path.join(ROOT, root))).filter(
+    (f) => f.rel !== 'crates/dieyun-base/src/shared.rs'
   );
 
   for (const leaf of leaves) {

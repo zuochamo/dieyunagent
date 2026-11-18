@@ -27,7 +27,7 @@ const NODE_INVOKE_RE = /\b(?:invoke|invokeRpc|call_host)\(\s*['"]([a-z][a-z0-9_]
 /**
  * 方法表的行：`MethodSpec { name: "x.y", route: Route::… }`。
  *
- * 这是 RPC 方法名的**权威清单**（`crates/dieyun-core/src/rpc/registry.rs`）。分派臂将来
+ * 这是 RPC 方法名的**权威清单**（`crates/dieyun-runtime/src/rpc/registry.rs`）。分派臂将来
  * 会被逐个搬进 handler 文件，那时臂格式不再统一 —— 所以两种来源都收：表 + 臂。
  */
 const RUST_REGISTRY_RE = /MethodSpec\s*\{\s*name:\s*"([a-z][a-z0-9_.]+)"/g;
@@ -101,19 +101,19 @@ function collectGatewayMethods(root) {
 
 function collectRustMethods(root) {
   // 方法表可能分布在 rpc/*.rs（注册表拆分之后）；mod.rs 仍是当前唯一来源。
-  const rpcDir = path.join(root, 'crates', 'dieyun-core', 'src', 'rpc');
+  const rpcDir = path.join(root, 'crates', 'dieyun-runtime', 'src', 'rpc');
   const out = new Map();
   const files = fs.existsSync(rpcDir)
     ? fs.readdirSync(rpcDir).filter((f) => f.endsWith('.rs')).map((f) => `rpc/${f}`)
     : ['rpc/mod.rs'];
   for (const rel of files) {
-    const source = readFileSafe(path.join(root, 'crates', 'dieyun-core', 'src', rel));
+    const source = readFileSafe(path.join(root, 'crates', 'dieyun-runtime', 'src', rel));
     for (const name of extractFromRustSource(source)) {
-      out.set(name, new Set([`dieyun-core/${rel}`]));
+      out.set(name, new Set([`dieyun-runtime/${rel}`]));
     }
     for (const name of extractFromRustRegistry(source)) {
       if (!out.has(name)) out.set(name, new Set());
-      out.get(name).add(`dieyun-core/${rel}`);
+      out.get(name).add(`dieyun-runtime/${rel}`);
     }
   }
   return out;

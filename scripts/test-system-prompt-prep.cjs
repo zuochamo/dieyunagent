@@ -203,7 +203,11 @@ async function runPrepKnowledge() {
           throw new Error('项目记忆不再走 DB 召回');
         }
         if (method === 'memory.long_recall') {
-          return { mode: 'keyword', results: [{ id: 3, kind: 'normal', score: 0.4, content: '用户偏好中文' }] };
+          // `injectScore` 是注入判定的唯一字段（Rust 归一过的 [0,1]）；`score` 只剩排序语义
+          return {
+            mode: 'keyword',
+            results: [{ id: 3, kind: 'normal', score: 0.4, injectScore: 0.9, content: '用户偏好中文' }]
+          };
         }
         if (method === 'memory.compaction_recent') {
           return [{ summary_text: '此前已改过路由' }];

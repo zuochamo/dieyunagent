@@ -125,7 +125,7 @@ async function refreshCodebasePanelStatus() {
     );
     // 上一次建库的向量来源分布：打开「语义检索（向量）」后要能看出复用到底生效没有，
     // 否则「每会话重算整仓」和「命中跨 worktree 缓存」在界面上长得一模一样。
-    // 复用口径见 crates/dieyun-core/src/index/vector_cache.rs。
+    // 复用口径见 crates/dieyun-codebase/src/index/vector_cache.rs。
     const vectorsReused = Number(st.vectorsReused) || 0;
     const vectorsEmbedded = Number(st.vectorsEmbedded) || 0;
     setCodebasePanelText(

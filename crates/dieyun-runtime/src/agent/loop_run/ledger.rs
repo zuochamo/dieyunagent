@@ -1,0 +1,580 @@
+//! 账本推进：轮次 / 工具计数 / 待执行工具 / 取消与生命周期。
+//!
+//! 从 `agent/loop_run.rs` 机械搬来（纯移动）。**纯内存、无 IO**：本层不做任何 `.await`，
+//! LLM 调用由 `agent/driver.rs` 驱动。**transcript 的唯一写者**也在这里（`messages` 只由
+//! `continue_llm` / `submit_tool_results` 改）。
+
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+
+use serde_json::{json, Value};
+
+use super::delivery::{
+    delivered_content, is_length_stop, llm_thought_raw, push_assistant_text_only,
+    TRUNCATED_TOOL_ERROR,
+};
+use super::fold::{fold_force, fold_if_needed};
+use super::{
+    lock_run, parse_tool_arguments, run_handle, strip_inline_images_from_messages,
+    take_if_cancelled, AgentLoopManager,
+    ContentChannel, ContentSource, DelegateTool, FoldFact, LlmResponseInput, LoopResponse, RunState,
+    StartParams, ToolResultInput, TraceRound, TraceTool,
+};
+use dieyun_base::config::AppConfig;
+use dieyun_base::error::CoreError;
+use dieyun_codebase::index::IndexService;
+
+impl AgentLoopManager {
+
+    pub fn start(&self, params: StartParams) -> Result<LoopResponse, CoreError> {
+        if params.model.trim().is_empty() {
+            return Err(CoreError::rpc("INVALID_PARAMS", "model 必填"));
+        }
+        if params.messages.is_empty() {
+            return Err(CoreError::rpc("INVALID_PARAMS", "messages 不能为空"));
+        }
+        // 宿主给了 id 就用它（见 `run_id` 字段的注释）；没给才自己生成。
+        let run_id = params
+            .run_id
+            .clone()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| format!("run-{}", self.next_id.fetch_add(1, Ordering::Relaxed)));
+        let state = RunState {
+            model: params.model,
+            messages: params.messages,
+            tools: params.tools,
+            workspace_root: params.workspace_root,
+            max_tool_calls: params.max_tool_calls,
+            max_rounds: params.max_rounds,
+            round: 0,
+            tool_calls_used: 0,
+            trace: Vec::new(),
+            cancelled: false,
+            pending_delegate: Vec::new(),
+            token_budget: params.token_budget,
+            trigger_ratio: params.trigger_ratio,
+            observed_prompt_tokens: None,
+            pending_fold: None,
+            pending_since: None,
+        };
+        self.runs
+            .lock()
+            .map_err(|_| CoreError::rpc("AGENT_BUSY", "agent lock poisoned"))?
+            .insert(run_id.clone(), Arc::new(Mutex::new(state)));
+        Ok(self.need_llm(&run_id)?)
+    }
+
+
+    /// 从账本里摘掉图片 part，返回（摘掉张数, 当前 messages）。
+    ///
+    /// 为什么要有这条：上游 400「图片不支持」时，Node 只能**请求**「把这几条消息里的图摘掉」，
+    /// 不能自己改写 transcript —— 那会让同一份对话出现第二个写者。返回 messages 只是给宿主
+    /// 拼本次重发请求用，落库的真相仍在 core。
+    pub fn drop_images(
+        &self,
+        run_id: &str,
+        indices: Option<&[usize]>,
+    ) -> Result<(usize, Vec<Value>), CoreError> {
+        let handle = run_handle(&self.runs, run_id)
+            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
+        let mut dropped = 0usize;
+        match indices {
+            Some(list) => {
+                for idx in list {
+                    if let Some(msg) = state.messages.get_mut(*idx) {
+                        dropped += dieyun_base::compaction::strip_images_only(msg);
+                    }
+                }
+            }
+            None => {
+                for msg in state.messages.iter_mut() {
+                    dropped += dieyun_base::compaction::strip_images_only(msg);
+                }
+            }
+        }
+        Ok((dropped, state.messages.clone()))
+    }
+
+
+    /// 强制折叠一次，返回事实（没折成 / 本 run 不折叠时 None）。
+    ///
+    /// 只给「上下文溢出」这条路径用：正常触发由 `need_llm` 内部的 `fold_if_needed` 负责，
+    /// 宿主不再自己折完把 messages 推回来。
+    pub fn fold_now(&self, run_id: &str, force: bool) -> Result<Option<FoldFact>, CoreError> {
+        if take_if_cancelled(&self.runs, run_id) {
+            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
+        }
+        let handle = run_handle(&self.runs, run_id)
+            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
+        if force {
+            fold_force(&mut state);
+        } else {
+            fold_if_needed(&mut state);
+        }
+        Ok(state.pending_fold.take())
+    }
+
+
+    /// 取消一个 run：置位让在途路径在下一次账本操作时收手，并**立刻释放**大字段。
+    ///
+    /// 返回「是否真的找到并取消了」。旧实现恒返回 `Ok(())`，于是 `rpc.cancel` 的
+    /// `agentCancelled` 永远是 true —— 取消信号本身无法被观测（传错 runId、run 已结束、
+    /// core 刚重启，全都报「已取消」）。
+    pub fn cancel(&self, run_id: &str) -> Result<bool, CoreError> {
+        let Some(handle) = run_handle(&self.runs, run_id) else {
+            return Ok(false);
+        };
+        let mut state = lock_run(&handle)?;
+        state.cancelled = true;
+        // 取消后账本只剩「这个 run 已被取消」一个事实：transcript / 工具表 / 待执行工具
+        // 都没有读者了（交付文本在取消那一刻之前已经交给宿主）。留着它们 = 长驻进程里
+        // 的永久内存。run 本身由 `take_if_cancelled` 在下一次观察时移除。
+        state.messages = Vec::new();
+        state.tools = Vec::new();
+        state.pending_delegate.clear();
+        Ok(true)
+    }
+
+
+    /// 把 run 从账本里移除。正常收尾由 `finish_run` 负责，其余出口（出错 / 取消）
+    /// 由本函数兜底 —— 驱动器用 guard 在两条出口都调它。
+    pub fn discard(&self, run_id: &str) {
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(run_id);
+        }
+    }
+
+
+    /// 当前轮次（只读快照；run 已结束或不存在时返回 `None`）。
+    ///
+    /// 谁需要它：驱动器在每次发请求前把「第几轮」告诉宿主（`round.prepare` 的 `round`），
+    /// 宿主据此给 UI / 视觉注入标轮次。轮次是账本事实，宿主不能自己数（一个 run 会被
+    /// `agent.run.start` / `agent.run.tools` 分多次驱动，宿主侧的计数必然与账本分叉）。
+    pub fn round_of(&self, run_id: &str) -> Option<u32> {
+        run_handle(&self.runs, run_id).and_then(|h| h.lock().ok().map(|state| state.round))
+    }
+
+
+
+    /// 纯内存账本推进：本函数不做任何 IO，**同步**即可（此前写成 `async` 是历史遗留，
+    /// 会在多线程运行时下让 `std::sync::MutexGuard` 跨 await，违反 `Send`）。
+    /// 与 `submit_tool_results` 共用 `self.runs`（非重入锁），故每条路径都用 `drop(runs)` 收窄临界区。
+    pub fn continue_llm(
+        &self,
+        _config: &AppConfig,
+        _index: &IndexService,
+        run_id: &str,
+        llm: LlmResponseInput,
+    ) -> Result<LoopResponse, CoreError> {
+        let handle = run_handle(&self.runs, run_id)
+            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
+
+        if state.cancelled {
+            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
+        }
+        // 通道身份随本轮一起进来：`Reasoning` 表示 `content` 键里装的是思考
+        // （单通道模型），账本据此把它记进思考，绝不进交付正文。
+        let channel = llm.content_channel;
+        // 服务端 usage 是折叠触发的首选口径：有了它就不必靠字符比猜「用了多少」
+        if let Some(prompt) = llm
+            .usage
+            .as_ref()
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+        {
+            state.observed_prompt_tokens = Some(prompt as usize);
+        }
+        if state.round >= state.max_rounds {
+            if llm.tool_calls.is_empty() {
+                let trace = state.trace.clone();
+                let content = delivered_content(llm.content.as_deref(), channel);
+                drop(state);
+                return Ok(self.finish_run(run_id, trace, content, false));
+            }
+            let hint = format!("已达本段 {} 轮上限", state.max_rounds);
+            // 先把轮次取出来：`state` 现在是 `MutexGuard`，`state.trace.push(..)` 会经由
+            // DerefMut 借用整个 guard，字段不能再从同一次借用里单独借出来。
+            let current_round = state.round;
+            // 正文口径只有 `delivered_content()` 一处：思考通道在这里必须是 None，
+            // 否则思考会被写成 assistant 正文（下一轮再作为「我上一轮的回复」回灌模型）。
+            let synthetic_text = push_assistant_text_only(
+                &mut state.messages,
+                delivered_content(llm.content.as_deref(), channel).as_deref(),
+                &hint,
+            );
+            state.trace.push(TraceRound {
+                round: current_round,
+                thought: hint,
+                full_thought: llm_thought_raw(&llm),
+                content_source: ContentSource::Synthetic,
+                visible_content: Some(synthetic_text),
+                tools: Vec::new(),
+            });
+            let trace = state.trace.clone();
+            let content = delivered_content(llm.content.as_deref(), channel);
+            drop(state);
+            return Ok(self.finish_run(run_id, trace, content, true));
+        }
+
+        state.round += 1;
+        let round_no = state.round;
+        // 每轮 usage 一行：`prompt_tokens` 是折叠触发的首选口径，缺了说明上游没给。
+        dieyun_base::obs::usage(run_id, round_no, llm.usage.as_ref());
+        // 本段正文就是模型原文：不再剥 `agent_status` 行，也不做「重复前言」字符串去重
+        // —— 每轮 assistant 消息本身就是增量；跨轮重复是模型行为，不是账本该改写的事实。
+        let stored_content = llm.content.clone().unwrap_or_default();
+        // 思考原文只来自思考通道：`reasoning` 键，或（单通道模型）`content` 键。
+        // 不再用「正文」兜底思考 —— 那正是旧实现让思考区复述回答的路径。
+        let thought_raw = llm_thought_raw(&llm).unwrap_or_default();
+        let full_thought = if thought_raw.is_empty() {
+            None
+        } else {
+            Some(thought_raw.clone())
+        };
+        let thought = thought_raw.chars().take(500).collect::<String>();
+        // 可交付正文 = 非思考通道 且 内容非空。思考通道的 `content` 只是思考的存放处，
+        // 交给下游会把推理复述成结论（UI 上就是「回答区出现了思考」）。
+        let visible_content = if channel != ContentChannel::Reasoning
+            && !stored_content.trim().is_empty()
+        {
+            Some(stored_content.clone())
+        } else {
+            None
+        };
+        let content_source = if visible_content.is_some() {
+            ContentSource::Answer
+        } else if full_thought.is_some() {
+            ContentSource::Reasoning
+        } else {
+            ContentSource::Absent
+        };
+        let trace_tools = Vec::new();
+
+        if !llm.tool_calls.is_empty() {
+            let mut assistant_msg = json!({
+                "role": "assistant",
+                "content": stored_content.clone(),
+                "tool_calls": llm.tool_calls.iter().map(|tc| json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": if tc.arguments.is_string() {
+                            tc.arguments.as_str().unwrap_or("{}").to_string()
+                        } else {
+                            serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into())
+                        }
+                    }
+                })).collect::<Vec<_>>()
+            });
+            // 思考模式（DeepSeek V4 等）：带 tool_calls 的 assistant 消息必须原样回传
+            // reasoning_content，否则下一轮请求会被上游以 HTTP 400 拒绝。
+            if let Some(reasoning) = llm.reasoning.as_deref().filter(|s| !s.trim().is_empty()) {
+                assistant_msg["reasoning_content"] = json!(reasoning);
+            }
+
+            if state.tool_calls_used + llm.tool_calls.len() as u32 > state.max_tool_calls {
+                let hint = format!("已达本段 {} 次工具调用上限", state.max_tool_calls);
+                // 与轮次上限同一口径：思考通道的 content 不得落成 assistant 正文。
+                let synthetic_text = push_assistant_text_only(
+                    &mut state.messages,
+                    delivered_content(llm.content.as_deref(), channel).as_deref(),
+                    &hint,
+                );
+                state.trace.push(TraceRound {
+                    round: round_no,
+                    thought: hint,
+                    full_thought: llm_thought_raw(&llm),
+                    content_source: ContentSource::Synthetic,
+                    visible_content: Some(synthetic_text),
+                    tools: trace_tools,
+                });
+                let trace = state.trace.clone();
+                let content = delivered_content(llm.content.as_deref(), channel);
+                drop(state);
+                return Ok(self.finish_run(run_id, trace, content, true));
+            }
+
+            state.messages.push(assistant_msg);
+
+            // 一批里只要有一条入参不是合法 JSON，整批都不执行：那一帧本身已经坏了，
+            // 挑「看起来还行」的那条执行等于替模型猜意图（猜错的代价是写盘）。
+            let mut invalid: Vec<ToolResultInput> = Vec::new();
+            for tc in &llm.tool_calls {
+                match parse_tool_arguments(&tc.arguments) {
+                    Ok(args) => state
+                        .pending_delegate
+                        .push((tc.id.clone(), tc.name.clone(), args)),
+                    Err(reason) => invalid.push(ToolResultInput {
+                        id: tc.id.clone(),
+                        result: json!({}),
+                        error: Some(format!("工具「{}」{reason}", tc.name)),
+                    }),
+                }
+            }
+            if !invalid.is_empty() {
+                let bad: Vec<String> = invalid.iter().map(|r| r.id.clone()).collect();
+                // 这批一条都不执行：整帧已经坏了，挑「看起来还行」的执行等于替模型猜意图。
+                state.pending_delegate.clear();
+                let mut bad_tools: Vec<TraceTool> = Vec::new();
+                for tc in &llm.tool_calls {
+                    let content = match invalid.iter().find(|r| r.id == tc.id) {
+                        Some(hit) => hit.error.clone().unwrap_or_default(),
+                        None => format!(
+                            "同批工具入参非法（{}），整批未执行，请重新发一次",
+                            bad.join("、")
+                        ),
+                    };
+                    // 每个 `tool_call_id` 都必须有一条 tool 回执：少一条，下一轮请求就会被
+                    // 上游以 400 拒掉（assistant 的 tool_calls 与 tool 消息必须成对）。
+                    state.messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": content,
+                    }));
+                    bad_tools.push(TraceTool {
+                        name: tc.name.clone(),
+                        args: json!({}),
+                        result: None,
+                        error: Some(content),
+                    });
+                }
+                if let Some(round) = state.trace.last_mut() {
+                    round.tools = bad_tools;
+                }
+                drop(state);
+                return self.need_llm(run_id);
+            }
+
+            state.trace.push(TraceRound {
+                round: round_no,
+                thought: thought.clone(),
+                full_thought,
+                content_source,
+                visible_content: visible_content.clone(),
+                tools: trace_tools,
+            });
+
+            if is_length_stop(&llm.finish_reason) {
+                let results: Vec<ToolResultInput> = llm
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ToolResultInput {
+                        id: tc.id.clone(),
+                        result: json!({}),
+                        error: Some(format!("工具「{}」{TRUNCATED_TOOL_ERROR}", tc.name)),
+                    })
+                    .collect();
+                drop(state);
+                return self.submit_tool_results(_config, _index, run_id, results);
+            }
+
+            // 折叠事实一行：折了多少、档位、触发口径（`fold_if_needed` 已写进 pending_fold）。
+            if let Some(fact) = &state.pending_fold {
+                dieyun_base::obs::fold_fact(
+                    run_id,
+                    fact.level,
+                    fact.tokens_before,
+                    fact.tokens_before_estimated,
+                    fact.tokens_after,
+                    &fact.trigger_source,
+                    fact.folded_tool_results,
+                    fact.folded_texts,
+                );
+            }
+            // 交给宿主之前打点：`agent.run.tools` 回来时用它算工具段墙钟。
+            state.pending_since = Some(std::time::Instant::now());
+            let delegates = state
+                .pending_delegate
+                .iter()
+
+                .map(|(id, name, args)| DelegateTool {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: args.clone(),
+                })
+                .collect();
+            drop(state);
+            return Ok(LoopResponse {
+                phase: "need_delegate".into(),
+                run_id: run_id.to_string(),
+                llm_body: None,
+                delegates: Some(delegates),
+                content: None,
+                trace: None,
+                hit_round_limit: None,
+                messages: None,
+                message: None,
+                compacted: None,
+            });
+        }
+
+        state.trace.push(TraceRound {
+            round: round_no,
+            thought,
+            full_thought,
+            content_source,
+            visible_content,
+            tools: trace_tools,
+        });
+        let trace = state.trace.clone();
+        let content = delivered_content(llm.content.as_deref(), channel);
+        drop(state);
+        Ok(self.finish_run(run_id, trace, content, false))
+    }
+
+
+    /// 与 `continue_llm` 同属纯内存账本推进，见其注释：**同步**，无 IO。
+    pub fn submit_tool_results(
+        &self,
+        _config: &AppConfig,
+        _index: &IndexService,
+        run_id: &str,
+        results: Vec<ToolResultInput>,
+    ) -> Result<LoopResponse, CoreError> {
+        let handle = run_handle(&self.runs, run_id)
+            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
+
+        if state.cancelled {
+            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
+        }
+
+        if state.pending_delegate.is_empty() {
+            drop(state);
+            return self.need_llm(run_id);
+        }
+
+        // 工具段墙钟：从 `need_delegate` 出发到这次回来。
+        if let Some(since) = state.pending_since.take() {
+            dieyun_base::obs::tool_round(
+                run_id,
+                results.len(),
+                since.elapsed().as_millis() as u64,
+            );
+        }
+        let pending: HashMap<String, (String, Value)> = state
+            .pending_delegate
+            .drain(..)
+            .map(|(id, name, args)| (id, (name, args)))
+            .collect();
+
+        let returned_ids: std::collections::HashSet<String> =
+            results.iter().map(|r| r.id.clone()).collect();
+
+        for tr in results {
+            let Some((name, args)) = pending.get(&tr.id).map(|(n, a)| (n.clone(), a.clone()))
+            else {
+                continue;
+            };
+            state.tool_calls_used += 1;
+            if let Some(round) = state.trace.last_mut() {
+                round.tools.push(TraceTool {
+                    name: name.clone(),
+                    args: args.clone(),
+                    result: if tr.error.is_none() {
+                        Some(tr.result.clone())
+                    } else {
+                        None
+                    },
+                    error: tr.error.clone(),
+                });
+            }
+            state.messages.push(json!({
+                "role": "tool",
+                "tool_call_id": tr.id,
+                "content": if let Some(err) = &tr.error {
+                    err.clone()
+                } else {
+                    serde_json::to_string(&tr.result).unwrap_or_else(|_| "{}".into())
+                }
+            }));
+        }
+
+        for (id, (name, args)) in pending {
+            if returned_ids.contains(&id) {
+                continue;
+            }
+            state.messages.push(json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "content": format!("工具 {name} 未返回结果")
+            }));
+            if let Some(round) = state.trace.last_mut() {
+                round.tools.push(TraceTool {
+                    name,
+                    args,
+                    result: None,
+                    error: Some("delegate missing".into()),
+                });
+            }
+        }
+
+        strip_inline_images_from_messages(&mut state.messages);
+        drop(state);
+        self.need_llm(run_id)
+    }
+
+
+    /// 当前这个 run **还欠宿主多少条工具结果**（`delegate` 已派发、`agent.run.tools` 还没交回）。
+    ///
+    /// 为什么需要它：宿主漏回一条时，账本会给那条 tool_call 补一句「工具 X 未返回结果」
+    /// 并**以成功继续** —— 模型据此以为那次工具跑过了。RPC 入口拿到这份清单才能
+    /// 在入口就拒绝「条数/归属对不上」的批次，而不是让它在账本里被悄悄抹平。
+    pub fn pending_delegate_ids(&self, run_id: &str) -> Result<Vec<String>, CoreError> {
+        let handle = run_handle(&self.runs, run_id)
+            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let state = lock_run(&handle)?;
+        Ok(state
+            .pending_delegate
+            .iter()
+            .map(|(id, _, _)| id.clone())
+            .collect())
+    }
+
+    /// 取「下一次该发什么」（内含折叠）。驱动器在自愈（强制折叠 / 摘图）之后要靠它重新取 body。
+    pub fn next_body(&self, run_id: &str) -> Result<LoopResponse, CoreError> {
+        self.need_llm(run_id)
+    }
+
+
+    pub(crate) fn need_llm(&self, run_id: &str) -> Result<LoopResponse, CoreError> {
+        if take_if_cancelled(&self.runs, run_id) {
+            return Err(CoreError::rpc("AGENT_CANCELLED", "run 已取消"));
+        }
+        let handle = run_handle(&self.runs, run_id)
+            .ok_or_else(|| CoreError::rpc("AGENT_RUN_NOT_FOUND", "run 不存在或已结束"))?;
+        let mut state = lock_run(&handle)?;
+        // 折叠在**发出请求之前**做，且只动自己的账本：transcript 的写者只有这一处。
+        // 它跑在**本 run 自己的锁**上（不是全局 map 锁）—— 一个 run 折叠不会卡住别的 run。
+        fold_if_needed(&mut state);
+        // 注意：**不要**在这里写 `stream`。要不要流式是传输层的事（`DriveSpec.stream` →
+        // `agent::llm::chat_completion` 统一注入请求体）；这里硬写 `stream: false` 会让端点
+        // 改回非流式，而 D Y/XHX 这类中转在非流式口径下会**丢掉 tool_calls**
+        // （2026-11-17 实测：整包回 `message` 里没有 tool_calls，表现为「模型什么都没说」）。
+        let llm_body = json!({
+            "model": state.model,
+            "messages": state.messages,
+            "tools": state.tools
+        });
+        Ok(LoopResponse {
+            phase: "need_llm".into(),
+            run_id: run_id.to_string(),
+            llm_body: Some(llm_body),
+            delegates: None,
+            content: None,
+            trace: None,
+            hit_round_limit: None,
+            messages: None,
+            message: None,
+            compacted: state.pending_fold.take(),
+        })
+    }
+
+
+}

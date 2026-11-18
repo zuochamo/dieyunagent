@@ -79,7 +79,7 @@
     {
       "id": "agent-rust",
       "paths": [
-        "crates/dieyun-core/src/agent/"
+        "crates/dieyun-runtime/src/agent/"
       ],
       "owns": [
         "Rust agent loop",
@@ -98,7 +98,7 @@
     {
       "id": "planner-rust",
       "paths": [
-        "crates/dieyun-core/src/planner/",
+        "crates/dieyun-runtime/src/planner/",
         "src/agent/rust-planner-runner.js"
       ],
       "owns": [
@@ -269,7 +269,7 @@
     {
       "id": "core-rpc",
       "paths": [
-        "crates/dieyun-core/src/rpc/",
+        "crates/dieyun-runtime/src/rpc/",
         "src/core-bridge.js"
       ],
       "owns": [
@@ -287,7 +287,7 @@
     {
       "id": "memory",
       "paths": [
-        "crates/dieyun-core/src/memory/"
+        "crates/dieyun-memory/src/memory/"
       ],
       "owns": [
         "SQLite messages",
@@ -364,7 +364,7 @@
     {
       "id": "core-sqlite",
       "paths": [
-        "crates/dieyun-core/src/sqlite.rs"
+        "crates/dieyun-base/src/sqlite.rs"
       ],
       "owns": [
         "SQLite 调优单一来源（WAL / synchronous=NORMAL / wal_autocheckpoint / cache_size / auto_vacuum=INCREMENTAL）",
@@ -485,10 +485,10 @@
     {
       "id": "codebase-index",
       "paths": [
-        "crates/dieyun-core/src/index/",
-        "crates/dieyun-core/src/codebase_db.rs",
-        "crates/dieyun-core/src/treesitter/",
-        "crates/dieyun-core/src/embedding/"
+        "crates/dieyun-codebase/src/index/",
+        "crates/dieyun-codebase/src/codebase_db.rs",
+        "crates/dieyun-codebase/src/treesitter/",
+        "crates/dieyun-base/src/embedding/"
       ],
       "owns": [
         "Codebase index",
@@ -506,7 +506,7 @@
     {
       "id": "code-graph",
       "paths": [
-        "crates/dieyun-core/src/graph/"
+        "crates/dieyun-codebase/src/graph/"
       ],
       "owns": [
         "Dependency graph",
@@ -635,7 +635,7 @@
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/shared.rs",
+      "prefix": "crates/dieyun-base/src/shared.rs",
       "tests": [
         "check:shared-constants",
         "test:unit"
@@ -676,39 +676,39 @@
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/agent/",
+      "prefix": "crates/dieyun-runtime/src/agent/",
       "tests": [
         "cargo:test",
         "test:rust-agent-loop-smoke"
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/planner/",
+      "prefix": "crates/dieyun-runtime/src/planner/",
       "tests": [
         "test:rust-planner-smoke",
         "cargo:test"
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/index/",
+      "prefix": "crates/dieyun-codebase/src/index/",
       "tests": [
         "cargo:test"
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/graph/",
+      "prefix": "crates/dieyun-codebase/src/graph/",
       "tests": [
         "cargo:test"
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/treesitter/",
+      "prefix": "crates/dieyun-codebase/src/treesitter/",
       "tests": [
         "cargo:test"
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/rpc/",
+      "prefix": "crates/dieyun-runtime/src/rpc/",
       "tests": [
         "cargo:test",
         "test:core-event-channel",
@@ -716,7 +716,7 @@
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/compaction/",
+      "prefix": "crates/dieyun-base/src/compaction/",
       "tests": [
         "cargo:test",
         "test:unit",
@@ -724,7 +724,7 @@
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/embedding/",
+      "prefix": "crates/dieyun-base/src/embedding/",
       "tests": [
         "cargo:test",
         "test:unit"
@@ -738,7 +738,7 @@
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/memory/snapshot.rs",
+      "prefix": "crates/dieyun-memory/src/memory/snapshot.rs",
       "tests": [
         "cargo:test",
         "test:request-snapshot"
@@ -1248,7 +1248,7 @@
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/rpc/",
+      "prefix": "crates/dieyun-runtime/src/rpc/",
       "tests": [
         "verify:rpc-catalog",
         "cargo:test"
@@ -1692,7 +1692,7 @@
       ]
     },
     {
-      "prefix": "crates/dieyun-core/src/memory/",
+      "prefix": "crates/dieyun-memory/src/memory/",
       "tests": [
         "cargo:test"
       ]

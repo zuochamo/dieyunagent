@@ -5,6 +5,7 @@ const {
   isTransientLlmError,
   isContextOverflowError,
   resolveRetryWaitMs,
+  LLM_TRANSPORT_CODE,
   LLM_RECONNECT_MAX_RETRIES
 } = require('../src/llm-reconnect-retry');
 
@@ -145,6 +146,63 @@ function testTransientErrorShape() {
   assert(!isTransientLlmError(aborted), 'abort is never transient');
 }
 
+/**
+ * 结构化传输码：core 把「连不上 / 被掐断 / 超时 / 响应体中断」标成 `LLM_TRANSPORT`。
+ *
+ * 这条钉的是 2026-11-18 的现场：网关重启掐断在途请求，reqwest 只说
+ * `error sending request for url (...)`，词表一条都不匹配 → 可重连的瞬断被判成永久失败。
+ */
+function testTransportCodeIsTransient() {
+  assert(LLM_TRANSPORT_CODE === 'LLM_TRANSPORT', `传输码值是两端共享的常量，实际 ${LLM_TRANSPORT_CODE}`);
+
+  const transport = Object.assign(
+    new Error(
+      '模型接口传输失败（connect）：error sending request for url (http://192.168.31.62:5018/v1/chat/completions) ← connection refused'
+    ),
+    { code: LLM_TRANSPORT_CODE }
+  );
+  assert(isTransientLlmError(transport), 'LLM_TRANSPORT 必须可重连');
+
+  // 只靠文案（穿过 IPC 丢了 code）也必须认——这句是我们自己写的
+  assert(isTransientLlmError({ message: transport.message }), '传输失败文案本身可重连');
+
+  // 重连耗尽后由 rust-loop-runner 加的前缀：IPC 只搬 message，这是唯一剩下的信号
+  assert(
+    isTransientLlmError({ message: `已自动重连 3 次仍未恢复：${transport.message}` }),
+    '已自动重连标记要认'
+  );
+
+  // 业务性失败不能被误判：上游 400 / 鉴权 / 配额走的是 LLM_API
+  assert(
+    !isTransientLlmError(Object.assign(new Error('HTTP 401 invalid api key'), { code: 'LLM_API' })),
+    'LLM_API 鉴权失败不可重连'
+  );
+  // 已经耗尽的重连错误不许再进重连循环（否则就成了无限重试）
+  assert(
+    !isTransientLlmError(Object.assign(new Error('已自动重连 3 次仍未恢复'), { code: 'LLM_RECONNECT_EXHAUSTED' })),
+    'LLM_RECONNECT_EXHAUSTED 不再重连'
+  );
+}
+
+/** 传输码真的会触发重试：前两次失败，第三次成功。 */
+async function testTransportCodeIsRetried() {
+  let n = 0;
+  const result = await runWithLlmReconnectRetry(
+    async () => {
+      n += 1;
+      if (n < 3) {
+        throw Object.assign(new Error('模型接口传输失败（connect）：error sending request for url (http://x/v1)'), {
+          code: LLM_TRANSPORT_CODE
+        });
+      }
+      return 'ok';
+    },
+    { maxRetries: 3, baseDelayMs: 200, maxDelayMs: 200 }
+  );
+  assert(result === 'ok', '第三次应成功');
+  assert(n === 3, `应尝试 3 次，实际 ${n}`);
+}
+
 function testOverflowAndWait() {
   assert(isContextOverflowError({ message: 'prompt is too long' }), 'overflow detect');
   assert(isContextOverflowError({ message: 'HTTP 400 context_length_exceeded' }), 'context_length');
@@ -165,6 +223,8 @@ function testOverflowAndWait() {
 async function main() {
   testOverflowAndWait();
   testTransientErrorShape();
+  testTransportCodeIsTransient();
+  await testTransportCodeIsRetried();
   await testRetryBudget();
   await testTimeBudgetIgnoresRetryCap();
   await testTinyBudgetDoesNotIdle();

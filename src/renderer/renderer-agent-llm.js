@@ -669,7 +669,7 @@ function toOpenAiToolCalls(toolCalls) {
  *
  * 增量从哪来：core 解析 SSE 后经事件通道推 `agent.delta`，Main 按 runId 过滤再转发到本进程
  * （`agentApi.streamChatViaMain` 的 `onDelta`）。渲染层**不再自己发请求、不再解析 SSE**：
- * 传输与解析只有 `crates/dieyun-core/src/agent/llm.rs` 一份实现（原渲染层解析器与主进程
+ * 传输与解析只有 `crates/dieyun-runtime/src/agent/llm.rs` 一份实现（原渲染层解析器与主进程
  * `llm-stream-utils.js` 两份重复实现已删除）。
  */
 async function streamChatCompletionOnce(body, signal, onDelta) {

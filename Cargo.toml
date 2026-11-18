@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dieyun-core"]
+members = ["crates/dieyun-base", "crates/dieyun-core", "crates/dieyun-memory", "crates/dieyun-codebase", "crates/dieyun-runtime"]
 resolver = "2"
 
 [workspace.package]
@@ -15,3 +15,24 @@ authors = ["PixelOffice"]
 lto = true
 codegen-units = 1
 strip = true
+
+# clippy 风格开关的唯一来源：以前这 17 条 `#![allow(…)]` 写在 dieyun-core 的 lib.rs，
+# 拆 crate 之后只对一个 crate 生效（新 crate 立刻红）。成员里写 `[lints] workspace = true` 即可。
+[workspace.lints.clippy]
+redundant_field_names = "allow"
+needless_question_mark = "allow"
+manual_clamp = "allow"
+type_complexity = "allow"
+manual_find = "allow"
+too_many_arguments = "allow"
+manual_contains = "allow"
+collapsible_if = "allow"
+while_let_on_iterator = "allow"
+blocks_in_conditions = "allow"
+cmp_owned = "allow"
+unnecessary_lazy_evaluations = "allow"
+format_in_format_args = "allow"
+derivable_impls = "allow"
+map_identity = "allow"
+needless_range_loop = "allow"
+trim_split_whitespace = "allow"

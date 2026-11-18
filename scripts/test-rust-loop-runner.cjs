@@ -1276,6 +1276,157 @@ async function testSubagentStatusWiredThroughDelegateBatch() {
   assertNoLegacyRpc(bridge);
 }
 
+// ---------------------------------------------------------------- 首轮瞬断重连
+
+/** core 报传输层失败时的标准错误形状（码由 core-bridge 从 RPC error body 还原）。 */
+function transportFailure(kind = 'connect') {
+  return Object.assign(
+    new Error(
+      `模型接口传输失败（${kind}）：error sending request for url (http://192.168.31.62:5018/v1/chat/completions) ← connection refused`
+    ),
+    { code: 'LLM_TRANSPORT' }
+  );
+}
+
+/** 重连参数：次数模式（墙钟 0），退避取最短合法值，测试不空等也不会跑 30 分钟。 */
+function retryLoopSpec(extra = {}) {
+  return {
+    maxToolCalls: 8,
+    llmMaxRetries: 2,
+    llmRetryBaseMs: 200,
+    llmMaxRetryDelayMs: 200,
+    llmReconnectMaxWaitMs: 0,
+    ...extra
+  };
+}
+
+/**
+ * 2026-11-18 现场：网关重启把在途请求掐断，core 报 `LLM_TRANSPORT`。
+ * run 还没产出任何东西 → 允许把**同一条** `agent.run.start` 原样重发。
+ */
+async function testFirstRequestTransportErrorRetried() {
+  let attempts = 0;
+  const phases = [];
+  const waits = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => {
+      attempts += 1;
+      if (attempts === 1) throw transportFailure();
+      return { phase: 'done', runId: params.runId, content: '好了', trace: [] };
+    }
+  });
+
+  const result = await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [{ role: 'user', content: 'hi' }] },
+    loopSpec: retryLoopSpec(),
+    onPhase: (p, d) => {
+      phases.push(p);
+      if (p === 'llm_reconnect_wait') waits.push(d);
+    }
+  });
+
+  assert(result.phase === 'done', '重连后本轮应正常完成');
+  assert(attempts === 2, `start 应发两次（1 次失败 + 1 次重连），实际 ${attempts}`);
+  const starts = bridge.invokes.filter((i) => i.method === 'agent.run.start');
+  assert(starts.length === 2 && starts[0].params.runId === starts[1].params.runId, '重发必须沿用同一个 runId');
+  assert(phases.includes('llm_reconnect_wait'), `必须发出重连等待相位：${phases.join(',')}`);
+  assert(waits.length === 1, `等待相位只发一次，实际 ${waits.length}`);
+  assert(waits[0].attempt === 1, '等待相位带第几次重连');
+  assert(waits[0].waitMs >= 200, `等待相位带退避时长，实际 ${waits[0].waitMs}`);
+  assert(/传输失败/.test(String(waits[0].error)), '等待相位带失败原因（供 UI 对照）');
+  assertNoLegacyRpc(bridge);
+}
+
+/** 已经吐过字的失败不许重发：否则正文会重复一遍。 */
+async function testNoRetryAfterDeltaEmitted() {
+  let attempts = 0;
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params, _t, br) => {
+      attempts += 1;
+      br.emitEvent({ type: 'agent.delta', runId: params.runId, content: '半句话' });
+      throw transportFailure('body');
+    }
+  });
+
+  let thrown = '';
+  try {
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm', messages: [] },
+      loopSpec: retryLoopSpec()
+    });
+  } catch (err) {
+    thrown = String(err && err.message);
+  }
+  assert(attempts === 1, `已出增量就不许重发，实际 ${attempts} 次`);
+  assert(/传输失败/.test(thrown), `原样报错，实际：${thrown}`);
+}
+
+/** 工具轮失败不许重发：`agent.run.tools` 会把工具结果记进账本，重发就是重复回填。 */
+async function testNoRetryOnToolsRound() {
+  let startAttempts = 0;
+  let toolsAttempts = 0;
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params) => {
+      startAttempts += 1;
+      return {
+        phase: 'need_tools',
+        runId: params.runId,
+        delegates: [{ id: 'c1', name: 'fs_read_file', arguments: { filePath: 'a.txt' } }]
+      };
+    },
+    'agent.run.tools': async () => {
+      toolsAttempts += 1;
+      throw transportFailure();
+    }
+  });
+
+  let threw = false;
+  try {
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm', messages: [] },
+      loopSpec: retryLoopSpec(),
+      delegateTool: async () => ({ ok: true })
+    });
+  } catch {
+    threw = true;
+  }
+  assert(threw, '工具轮传输失败仍然要抛出（由断点续跑接手）');
+  assert(startAttempts === 1 && toolsAttempts === 1, `工具轮不重发：start=${startAttempts} tools=${toolsAttempts}`);
+}
+
+/** 重连耗尽：文案必须说明「试过了」，而不是和一次都没试长得一样。 */
+async function testExhaustedRetrySaysHowManyAttempts() {
+  let attempts = 0;
+  const bridge = createFakeBridge({
+    'agent.run.start': async () => {
+      attempts += 1;
+      throw transportFailure();
+    }
+  });
+
+  let err = null;
+  try {
+    await runRustAgentLoop({
+      coreBridge: bridge,
+      llm: { baseUrl: 'https://example/v1' },
+      startParams: { model: 'm', messages: [] },
+      loopSpec: retryLoopSpec({ llmMaxRetries: 1 })
+    });
+  } catch (e) {
+    err = e;
+  }
+  assert(err, '耗尽后仍要抛出');
+  assert(attempts === 2, `1 次失败 + 1 次重连，实际 ${attempts}`);
+  assert(/已自动重连 1 次仍未恢复/.test(String(err.message)), `文案要说明重连过，实际：${err.message}`);
+  assert(err.code === 'LLM_RECONNECT_EXHAUSTED', `耗尽码要保留（planner/headless 也认它）：${err.code}`);
+}
+
 async function run() {
   testApplyResolvedLoopSpec();
   testResolveChatUrl();
@@ -1310,6 +1461,12 @@ async function run() {
 
   await testRequestSnapshotWrittenInsideRoundPrepare();
   await testRequestSnapshotFailureDoesNotBreakLoop();
+
+  // 首轮瞬断重连（2026-11-18：网关重启掐断在途请求）
+  await testFirstRequestTransportErrorRetried();
+  await testNoRetryAfterDeltaEmitted();
+  await testNoRetryOnToolsRound();
+  await testExhaustedRetrySaysHowManyAttempts();
 }
 
 run()

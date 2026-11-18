@@ -16,7 +16,7 @@ const { buildLlmHeadersFromConfig } = require('./llm-request');
  * 远端 core 走远端」的静默分叉——两边向量空间不同，相似度只会变差、不会报错。
  *
  * 判定口径分工（勿越界）：
- * - **走哪条路由 Rust 决定**（`crates/dieyun-core/src/embedding/mod.rs::plan`，看
+ * - **走哪条路由 Rust 决定**（`crates/dieyun-base/src/embedding/mod.rs::plan`，看
  *   `provider` + 本地模型/运行时是否真的在 + 远端是否配齐）；
  * - 这里只负责**如实告诉它事实**：远端配置、本地模型目录、onnxruntime 路径。
  */

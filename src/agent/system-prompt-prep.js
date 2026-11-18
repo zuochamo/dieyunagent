@@ -58,8 +58,7 @@ const DEFAULT_LIMITS = {
   SHARED_MEMORY_MIN_SEMANTIC: AGENT_LIMITS_DEFAULTS.sharedMemoryMinScoreSemantic,
   SHARED_MEMORY_MIN_KEYWORD: AGENT_LIMITS_DEFAULTS.sharedMemoryMinScoreKeyword,
   SHARED_MEMORY_BLOCK_MAX_CHARS: AGENT_LIMITS_DEFAULTS.sharedMemoryBlockMaxChars,
-  MEMORY_INJECT_MIN_SEMANTIC: AGENT_LIMITS_DEFAULTS.memoryInjectMinScoreSemantic,
-  MEMORY_INJECT_MIN_KEYWORD: AGENT_LIMITS_DEFAULTS.memoryInjectMinScoreKeyword,
+  MEMORY_INJECT_MIN_SCORE: AGENT_LIMITS_DEFAULTS.memoryInjectMinScore,
   SKILL_TOTAL_COUNT: AGENT_LIMITS_DEFAULTS.skillTotalCount
 };
 
@@ -83,10 +82,7 @@ function ctxLimitsFromUserData(userDataPath) {
       L.sharedMemoryMinScoreKeyword || DEFAULT_LIMITS.SHARED_MEMORY_MIN_KEYWORD,
     SHARED_MEMORY_BLOCK_MAX_CHARS:
       L.sharedMemoryBlockMaxChars || DEFAULT_LIMITS.SHARED_MEMORY_BLOCK_MAX_CHARS,
-    MEMORY_INJECT_MIN_SEMANTIC:
-      L.memoryInjectMinScoreSemantic || DEFAULT_LIMITS.MEMORY_INJECT_MIN_SEMANTIC,
-    MEMORY_INJECT_MIN_KEYWORD:
-      L.memoryInjectMinScoreKeyword || DEFAULT_LIMITS.MEMORY_INJECT_MIN_KEYWORD
+    MEMORY_INJECT_MIN_SCORE: L.memoryInjectMinScore || DEFAULT_LIMITS.MEMORY_INJECT_MIN_SCORE
   };
 }
 
@@ -670,14 +666,22 @@ async function fetchGlobalMemoryBlock(snapshot, invokeRpc, lim, audit) {
           )
         };
     const rows = recall && Array.isArray(recall.results) ? recall.results : [];
-    // 阈值只有一份（agent-limits.js 的 memoryInjectMinScore*）：语义 0.32 / 关键词 0.12。
+    // 判定只看 Rust 给的 `injectScore`（分支内证据强度，已归一到 [0,1]）：宿主不再按通道
+    // 挑阈值，也不再看 `score`（那是分支内排序量纲，跨通道不可比）。
+    // 最近记忆（mode=recent）没有「证据强弱」，Rust 给 injectScore=1、阈值不参与。
     const minScore =
-      recall && recall.mode === 'semantic'
-        ? lim.MEMORY_INJECT_MIN_SEMANTIC
-        : recall && recall.mode === 'keyword'
-          ? lim.MEMORY_INJECT_MIN_KEYWORD
-          : 0;
-    const scored = minScore > 0 ? rows.filter((r) => (Number(r.score) || 0) >= minScore) : rows;
+      recall && (recall.mode === 'semantic' || recall.mode === 'keyword')
+        ? lim.MEMORY_INJECT_MIN_SCORE
+        : 0;
+    const scored =
+      minScore > 0
+        ? rows.filter((r) => {
+            const v = Number(r.injectScore);
+            // 老 core / 桩数据没有这个字段：判不了就别丢（宁可多注入一条，
+            // 也不要在版本混跑时把整块记忆静默清空）。
+            return Number.isFinite(v) ? v >= minScore : true;
+          })
+        : rows;
     const filtered = scored.filter(isInjectableMemoryRow);
     if (!filtered.length || (recall && recall.mode === 'none')) {
       recordMemoryAudit(audit, 'global', { mode: String((recall && recall.mode) || ''), ids: [] });

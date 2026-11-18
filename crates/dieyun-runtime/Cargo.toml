@@ -1,0 +1,28 @@
+[package]
+name = "dieyun-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "运行时：agent 主循环、planner、RPC 分派与 handler、fs 动作"
+
+[dependencies]
+dieyun-base = { path = "../dieyun-base", default-features = false }
+dieyun-memory = { path = "../dieyun-memory", default-features = false }
+dieyun-codebase = { path = "../dieyun-codebase", default-features = false }
+anyhow = "1"
+base64 = "0.23"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

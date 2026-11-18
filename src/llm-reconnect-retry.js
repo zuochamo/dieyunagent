@@ -7,7 +7,15 @@
 const ENV = typeof process !== 'undefined' && process.env ? process.env : {};
 
 // 上下文溢出的词表（与 Rust `agent/driver.rs` 同一份数据：src/agent/agent-shared.json）。
-const OVERFLOW_PATTERNS = require('./agent/shared-constants').contextOverflowPatterns;
+const sharedConstants = require('./agent/shared-constants');
+const OVERFLOW_PATTERNS = sharedConstants.contextOverflowPatterns;
+/**
+ * 上游**传输层**失败的协议码（值与 core `agent/llm.rs` 同一份：`agent-shared.json#llmErrors`）。
+ *
+ * 分类器认这个码，而不是去匹配 reqwest 的中英文文案 —— 文案是给人看的，随时会被改写；
+ * 而 `error sending request for url (...)` 这种顶层文案连「被拒绝 / 被掐断 / 超时」都分不出来。
+ */
+const LLM_TRANSPORT_CODE = sharedConstants.llmErrors.transportCode;
 
 const LLM_RECONNECT_SHORT_BASE_MS = 800;
 /** 单次采样重试次数（不含首次）。可用 LLM_RECONNECT_MAX_RETRIES 覆盖。 */
@@ -200,6 +208,11 @@ function isTransientLlmError(err) {
   if (!err || isAbortError(err)) return false;
   if (err.code === 'LLM_RECONNECT_EXHAUSTED') return false;
   if (isNonRetryableLlmError(err)) return false;
+  // 结构化信号优先：core 把「连不上 / 连接被掐断 / 超时 / 响应体中断」统一标成这个码。
+  // 只靠文案一定会漏 —— reqwest 顶层只说 `error sending request for url (...)`，真正的原因
+  // （connection refused / connection closed）在 source 链里，穿过 Electron IPC 后连 cause
+  // 都不剩（2026-11-18 现场：网关重启掐断在途请求，瞬断被判成永久失败，用户只看到 url）。
+  if (err.code === LLM_TRANSPORT_CODE) return true;
   const msg = String(err.message || err).toLowerCase();
   const status = parseHttpStatus(err);
   if (status === 429 || status === 502 || status === 503 || status === 504) return true;
@@ -219,6 +232,11 @@ function isTransientLlmError(err) {
     msg.includes('first_token') ||
     msg.includes('enotfound') ||
     msg.includes('getaddrinfo') ||
+    // 自有标记（不是上游文案）：core `llm.rs` 给传输层失败写的前缀，以及 `rust-loop-runner`
+    // 在重连耗尽后加的「已自动重连 N 次」前缀。Electron IPC 只搬 message、code 会丢，
+    // 这两条是它过界之后唯一还剩的信号。
+    msg.includes('模型接口传输失败') ||
+    msg.includes('已自动重连') ||
     /\bhttp\s+(429|502|503|504)\b/.test(msg)
   );
 }
@@ -310,5 +328,6 @@ module.exports = {
   sleepMs,
   raceAbortable,
   resolveRetryWaitMs,
+  LLM_TRANSPORT_CODE,
   LLM_RECONNECT_MAX_RETRIES
 };

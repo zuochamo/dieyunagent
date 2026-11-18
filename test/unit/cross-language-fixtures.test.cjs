@@ -8,8 +8,8 @@
  * 2. `snippet-budget-cases.json` —— 只断言关系型不变量：Rust 的摘录预算必须大于 Node 的
  *    展示预算（Rust 先截断 = 命中词直接消失，Node 补不回来）。
  *
- * Rust 侧的同一份断言在 `crates/dieyun-core/src/agent/driver.rs` 与
- * `crates/dieyun-core/src/index/search.rs` 的 `#[cfg(test)]` 里，读的是同样两个文件。
+ * Rust 侧的同一份断言在 `crates/dieyun-runtime/src/agent/driver.rs` 与
+ * `crates/dieyun-codebase/src/index/search.rs` 的 `#[cfg(test)]` 里，读的是同样两个文件。
  */
 
 const fs = require('fs');

@@ -434,3 +434,375 @@ npm run test:local-gateway-smoke          # 改 rpc/ 或 gateway 交互必跑
 - 每批落地后回来改状态，并更新行号（行号会漂）。
 - 新发现的缺陷按 §2 的格式追加（`文件:行` + 证据 + 确认方式），**没有证据的条目一律视为未核实**。
 - 修完一条就把「缺陷转用例」的测试名写进对应详档 —— 没有测试的修复视为未完成。
+
+---
+
+## 10. 2026-11-18 复核（P0–P6 之后）+ P7 批次
+
+> 复核口径：不信本文 §5 的自述，逐条回到代码取证；每条都带 `文件:行` 或可执行用例名，
+> 拿不到证据的一律按「未修」处理（§9.3 的纪律）。
+
+### 10.1 实测基线（复核时）
+
+| 项 | 结果 |
+|---|---|
+| `cargo test -p dieyun-core --lib` | **302 passed / 0 failed**（复核起点）→ P7 后 **327** |
+| `npm run verify:rpc-catalog` / `check:js` / `check:shared-constants` | 全绿 |
+| `cargo clippy -p dieyun-core --no-default-features -- -D warnings` | **红灯**（clippy 1.96 下 20 条 lint：`needless_borrow` ×11、doc 注释后空行 ×6 …）→ P7 已清零 |
+| Rust 规模 | 91 文件 / 31,141 行（基线 66 / 26,748） |
+| `rpc/mod.rs` | 1454 → **462** 行（86/86 handler + 注册表） |
+
+### 10.2 复核结论：P0–P6 是真的，但**仍有 10 条「现在就在错」未闭合**
+
+按影响排序（全部已取证，详见各批次的落点表）：
+
+1. 流式从不申请 `stream_options.include_usage`（`agent/llm.rs`）→ `agent.usage` 事件、成本统计、
+   「上游吞 tool_calls」诊断、折叠的 usage 触发口径**四处连带静默失效**。
+2. `tool_calls` 分片：index 无上限（一个坏帧分配十万槽）、缺 index 用数组下标兜底（串槽）、
+   `name` 用 `push_str` 拼接（`fs_read_filefs_read_file`）。
+3. 非法/被截断的工具入参被伪造成 `{"raw": …}` 后**照常执行**（`loop_run/mod.rs`）。
+4. `fs_read_file` 按字节切 + `from_utf8_lossy` → 中文碎成 `�`；而 `handlers/fs.rs` 的注释
+   声称「由它自己的测试兜住」（实际零测试）。
+5. planner：`to_lowercase()` 的偏移拿去切原文（panic）、`lock().unwrap()` 毒化后永久不可用、
+   撞轮次丢整批 results、worker_batch 不校验数量。
+6. 溢出自愈逻辑反了：`fold_now` 返回 `Ok(None)`（没折成）也照发第二次。
+7. graph 建库整轮零事务、`lsp_ingest` 先删后插无事务、抽取不判 `has_error`、
+   `MAX_FILES` 在**全部文本文件**上截断后才按语言筛（文档多的仓把代码挤出调用图）。
+8. `rpc/stdio.rs` / `events.rs` 写失败全 `let _ =`（宿主已死 core 还在跑完整条 run）。
+9. memory 三条静默失真：`recent_messages` 同毫秒倒序、NaN 过相似度阈值、
+   embedding 锁毒化被表达成「用户没配向量」。
+10. Node 侧：溢出停机伪装成 `phase:'done'`（无人消费 `overflowStopped`）、
+    聊天路径的 `compactMessages` 缺 `archiveFold`（折叠→归档→快照回填断成两截）。
+
+### 10.3 P7 批次一（agent/ 契约面 + 闸门）· 已落地
+
+| 项 | 落点 | 用例 |
+|---|---|---|
+| 申请 usage | `agent/llm.rs:apply_transport_fields`（请求体唯一作者；宿主显式关掉则尊重） | `streaming_request_asks_for_usage` / `transport_fields_do_not_overwrite_explicit_stream_options` |
+| 工具调用分片 | `llm.rs:ToolCallSlot` + `MAX_TOOL_CALLS=64` + 按 `id`/续片关联 | `absurd_tool_index_is_reported_instead_of_allocating` / `tool_call_fragments_without_index_stay_in_one_slot` / `tool_calls_without_index_do_not_collide` / `repeated_tool_name_is_not_concatenated` |
+| 非法入参不执行 | `loop_run/mod.rs:parse_tool_arguments` 返回 `Result`；整批不执行且每个 `tool_call_id` 都补 error 回执 | `invalid_tool_arguments_are_not_delegated` |
+| 折叠自愈 | `agent/driver.rs`：只有 `fold_now` 真的折了东西才重发 | `overflow_without_foldable_content_does_not_retry`（原 `retries_once_after_force_folding_on_context_overflow` 实际测的是「什么都没折也重发」，已改名区分） |
+| 多 choice | `llm.rs:feed_sse_data` 全部 choice 都累积 | `extra_choices_are_accumulated_not_dropped` |
+| clippy 闸门回绿 | 20 条 lint（含 6 处 doc 注释后空行、11 处 `needless_borrow`）零语义修正 | `cargo clippy … -D warnings` exit 0 |
+
+### 10.4 P7 批次二（I/O、planner、graph、memory、Node）· 已落地
+
+| 项 | 落点 | 用例 |
+|---|---|---|
+| stdout / 事件写失败出声 | `rpc/stdio.rs`（`STDOUT_ALIVE` + `write_line`）、`rpc/events.rs`（`SINK_CLOSED`）、`agent/driver.rs` 每轮请求前检查 | `write_failure_is_reported_not_swallowed` / `broken_stdout_flips_the_liveness_flag` / `io_line_names_the_channel_and_the_error` |
+| 分块读字符边界 | `fs_ops.rs`：`align_to_char_boundary` + `decode_utf8_block` + `nextOffset` 字段（A→Z 对齐说明见 `handlers/fs.rs` 注释） | `chunked_reads_reassemble_chinese_text_without_replacement_chars` / `offset_inside_a_character_is_aligned_to_its_start` / `non_utf8_block_still_advances` |
+| planner 字节偏移 | `planner/plan_parse.rs` 删掉 `to_lowercase()`（` ``` ` 是 ASCII，不需要也不允许先小写化） | `json_fence_extraction_survives_unicode_case_folding` |
+| planner 锁毒化 | `planner/run.rs:lock_runs`（`unwrap_or_else(into_inner)`，与 `sqlite.rs` 同口径） | `poisoned_lock_does_not_brick_the_planner` |
+| planner 撞轮次 | `handle_worker_batch` / `handle_best_of_n_attempt`：结果收下、不再派新活、照常验收；`planner.state` 增 `hitRoundLimit` | `round_limit_batch_keeps_results_and_goes_to_review` |
+| planner 结果校验 | 少回的子任务补一条 error 结果、多回的记 trace | `missing_worker_result_becomes_an_explicit_error` |
+| graph 分批事务 | `graph/build.rs` 与 index 共用 `index::CHUNK_COMMIT_EVERY`；`backfill_unique_callees` 留在事务外（它自己开事务） | 既有 graph 用例全绿 |
+| LSP ingest 事务 | `graph/lsp_ingest.rs`：DELETE+INSERT+`call_count` 同一事务，失败上抛（原 `.ok()`） | 既有 `ingests_lsp_callers_with_confidence_one` |
+| 语法错不独占 AST | `treesitter/extract.rs`：`root_node().has_error()` → 返回 None 交启发式 | `syntax_error_files_fall_back_to_the_heuristic` |
+| 截断如实上报 | `index/walker.rs` 返回 `(entries, truncated)`（`collect_text_files_where` 先筛后计数）；`index/build.rs` 不再用 `len() >= MAX_FILES` 代理；`graph.status.filesTruncated` 落库并暴露（`graph_workspaces.files_truncated`） | `exactly_the_cap_is_not_reported_as_truncated` / `code_files_survive_when_text_files_outnumber_the_cap` |
+| `*.env` 不进索引 | `index/walker.rs`：新增 `SECRET_EXT`（`prod.env` 也不放行；刻意与 `IGNORE_EXT` 分开，否则会破 `ignore-rules-parity` 那条「与 Node `BINARY_EXT` 完全相等」的闸门） | `skips_hidden_entries`（已补 `prod.env` 断言） |
+| 相似度阈值 NaN 安全 | `embedding::passes_min_similarity`（唯一判定，`is_finite() && > MIN`），索引池与长记忆召回共用 | `nan_never_passes_the_similarity_floor` |
+| recent_messages 同毫秒 | `memory/session.rs`：`ORDER BY created_at DESC, id DESC` | `recent_messages_break_created_at_ties_by_id` |
+| 锁毒化不清空向量配置 | `memory/store.rs`：`set_embedding` / `embedding()` 都用 `into_inner()` | 既有 configure 用例 |
+| 吞错出声 | `obs::degraded`（`[rpc-degraded]`）：修剪线程、scope rekey | `degraded_line_names_area_and_message` |
+| 溢出停机不再冒充成功 | `rust-loop-runner.js`：`stopReason:'context_overflow'` + `stopNote`；`main-turn-runner.js` 留痕并把它放进轮次结果 | 既有 `test:rust-loop-runner` / `test:agent` |
+| 聊天路径补归档 | `main/ipc/agent-runtime.js` 改用 `compaction-loop.buildLoopCompactionHandler`（含 `archiveFold`） | `npm test`（request-snapshot / agent 相关项） |
+
+**验收**：`cargo test --lib` 302 → **327 全绿**、`cargo clippy … -D warnings` **0 错误**、
+`verify:rpc-catalog` / `check:js` / `check:shared-constants` / `npm test` 通过。
+
+### 10.5 文档债纠正（复核时发现的三处「说法与代码不符」）
+
+1. **`EMBEDDING_TIMEOUT_CODE` 没有消费方**：§2.2 写「调用方据此区分『端点没回』与『端点报错』」，
+   实际全仓没有任何 code 判断（Node 侧只有 `EMBEDDING_DISABLED`）。要么删常量，要么给它真消费方。
+2. **`.env` 白名单并未删除**：§5 P6 声称已删，实际 `index/walker.rs` 的扩展名白名单里还在，
+   而白名单会放行 `prod.env`。P7 已真正挡掉（见 10.4）。
+3. **`handlers/fs.rs` 的「由它自己的测试兜住」是假承诺**：`fs_ops.rs` 当时 110 行零测试。
+   P7 补了三条用例，注释改成指向具体用例名。
+
+### 10.6 「可以重构了吗」：本轮的判定
+
+**可以，但「重构」= 拆 crate + 三处边界重排，不是推倒重写。** 判据：
+
+- **不重写整体**：Node 16.6 万行不动、双写面不变、隐含约束（`stream:false` 丢 tool_calls、`fold:L` 幂等、
+  末 3 原子保锚点、思考不顶正文）没有一篇文档写全 → 重写等于把它们变回未知。
+- **必须做边界**：`index/mod.rs` 1093 → **1286（回涨）**、`memory/mod.rs` 1786 行里 **1628 行是测试**、
+  `planner/run.rs` 1488 行从未拆、出站请求体至今**两个作者**（`loop_run/ledger.rs:493` + `llm.rs:329`，
+  `stream_options` 无处安放正是这条分叉的直接后果）。
+- **顺序**：P7（已落地）→ 拆 crate（`dieyun-store` / `index` / `graph` / `agent` / `rpc` / bin，编译期护栏）
+  → R2 出站投影（请求体唯一作者）→ 局部重写 index/graph 抽取层。
+
+### 10.7 P8 · 向量与 embedding 面（§10.6 的前四条）· 已落地
+
+| 项 | 落点 | 用例 |
+|---|---|---|
+| 向量落库分批提交 | `index/vectors.rs` 新增 `batched_write`（批大小共用 `index::CHUNK_COMMIT_EVERY`）；`apply_cached_vectors` / `store_embedded_vectors` 两条路径都改 | `batched_write_commits_across_batches`（跨两批 + 零头，断言全部落库） |
+| `results: []` 与字段缺失同罪 | `rpc/handlers/async_core.rs`：空数组直接 `INVALID_PARAMS` | `agent_run_tools_rejects_empty_results` |
+| 查询用短超时 | `embedding/remote.rs` 新增 `EMBED_QUERY_TIMEOUT_MS=10s`（批量仍是 120s）；唯一入口 `embedding::embed_query`（召回与 `embedding.query` 共用） | `query_timeout_is_much_shorter_than_batch_timeout` |
+| 写路径失败降级 | `memory/longmem.rs`：写入即索引 / 近重复前的 embedding 失败 → `[rpc-degraded]` 并**照常写记忆**（没有向量只影响召回通道） | 既有 long-memory 用例 |
+| `EMBEDDING_TIMEOUT_CODE` 有消费方 | `embed_query` 是唯一消化点（记超时值 + 语义通道跳过说明）；`CoreError::code()` 新增，判定靠码不靠文案 | `count_mismatch_is_rejected`（用到 `err.code()`） |
+| 回包 index 兜底 | `parse_embedding_vectors(json, expected)`：缺 `index` 用**行位置**（不是「已解析条数」），条数校验收到唯一解析点；`embed_batch` 的重复检查删掉 | `out_of_order_index_is_sorted_back` / `rows_without_index_are_not_dropped` / `count_mismatch_is_rejected` |
+
+**验收**：`cargo test --lib` 327 → **333 全绿**、`cargo clippy … -D warnings` 0 错误。
+
+### 10.8 仍未闭合（下一批）
+
+| # | 缺陷 | 位置 | 为什么还没做 |
+|---|---|---|---|
+| 1 | 子串通道把「路径命中」算进 `hits`，`hits == 词元数` 判全覆盖 → 强证据静默丢 / 文件名顶第一 | `index/search.rs` | 要拆 `hits` 与 `content_hits` 两个表达式并补两条用例 |
+| 2 | 召回分数量纲跨分支不同，Node 用单一绝对阈值 0.12 | `memory/recall.rs` + `system-prompt-prep.js` | 要把「注入判定」收回分数产生方（`injectScore`），属跨语言契约改动 |
+| 3 | ✅ 已落地：`agent.run.tools` 的条数与归属必须和账本一致 | `loop_run/ledger.rs:pending_delegate_ids` + `handlers/async_core.rs`：缺/多/空一律在入口拒绝，拒绝不动账本 | 用例 `agent_run_tools_requires_one_result_per_delegate` |
+| 5 | 子串通道把「路径命中」算进 `hits`，`hits == 词元数` 判全覆盖 → 强证据静默丢 / 文件名顶第一 | `index/search.rs` | 要拆 `hits` 与 `content_hits` 两个表达式并补两条用例 |
+| 6 | 召回分数量纲跨分支不同，Node 用单一绝对阈值 0.12 | `memory/recall.rs` + `system-prompt-prep.js` | 要把「注入判定」收回分数产生方（`injectScore`），属跨语言契约改动 |
+| 7 | 巨石回涨 / 测试与实现同居 / index+graph 两套抽取器 / R2 出站投影 / 拆 crate | — | 结构批次（10.6 的后三步） |
+
+---
+
+## 11. 拆 crate（2026-11-18 落地）
+
+### 11.1 边界怎么定的：先量，再拆
+
+动手前跑了一遍「模块 → `crate::X` 依赖」，结论是**照原计划拆成 6 个 crate 会撞强连通块**：
+
+| 环 | 成员 | 后果 |
+|---|---|---|
+| 索引族 | `index ↔ graph ↔ codebase_db ↔ treesitter` | `index` 用 `graph` 的 LSP 摄取，`graph` 用 `index` 的文件收集，`codebase_db` 两边都要 —— 拆开必须先改实现 |
+| 配置/向量 | `config ↔ embedding` | `AppConfig` 持 `EmbeddingConfig`；`embedding` 用 `config::apply_llm_headers` |
+| 循环/RPC | `agent ↔ rpc` | `AppState` 持 `Arc<AgentLoopManager>`；`agent` 反过来调 `rpc::events` / `rpc::calls`（反向调用通道） |
+
+所以最终是 **5 个 crate**，每个环整体落在一个 crate 里，用「只暴露必要 API」当护栏（而不是先花几天拆环）：
+
+```
+dieyun-core        bin + lib.rs（把老路径 pub use 出来，上一层的 crate::… 引用一行未改）
+  └ dieyun-runtime    agent / planner / rpc / fs_ops
+      ├ dieyun-memory     memory
+      ├ dieyun-codebase   index / graph / treesitter / codebase_db
+      └ dieyun-base       error / shared / obs / blocking / sqlite / db_schema / config / embedding / compaction / fts
+```
+
+数一下：（91 文件 / 31k 行的 Rust）现在是 **5 个编译单元**，依赖方向由 Cargo 强制 ——
+`dieyun-base` 不可能反向依赖 `dieyun-runtime`，这不是靠约定，是编译错误。
+
+### 11.2 迁移做法（纯移动，零行为改动）
+
+1. `git mv` 搬文件 —— 模块形状不变（`memory/mod.rs` 仍是 `memory`，`index/build.rs` 仍是 `index::build`），
+   所以**同 crate 内的 `crate::` 引用不用动**。
+2. 只有跨 crate 的引用要改：搬出来的模块里的 `crate::config::` / `crate::error::` 之类改成
+   `dieyun_base::config::` / `dieyun_base::error::`（脚本化的机械替换，一次跑完再 `cargo check` 收敛）。
+3. `dieyun-core/src/lib.rs` 变成**路径转发 shim**：`pub use dieyun_base::{config, error, …};`
+   —— 于是 `crate::error::CoreError` 这种上千处引用保持不变，`main.rs` 也不用改。
+4. `pub(crate)` 在跨 crate 之后等于「本 crate 私有」，被上层用到的一律放宽成 `pub`
+   （只放宽可见性，签名与实现不动）。
+
+### 11.3 顺手修掉的两处层次违规
+
+| 问题 | 修法 |
+|---|---|
+| `obs::fold_fact(run_id, &agent::FoldFact)` —— 观测层反向依赖 agent | 参数改成基本类型（观测层不认识 agent 的类型） |
+| `db_schema::column_names` 带 `#[cfg(test)]` 却要被 memory / graph 的用例用 | 去掉 `cfg(test)`（它本来就是「测试与诊断用」的公开工具） |
+
+### 11.4 命令与闸门的变化
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| Rust 单测 | `cargo test -p dieyun-core --lib`（334 条） | `cargo test --workspace --lib`（**77 + 113 + 57 + 87 = 334**，数字与拆分前一致） |
+| clippy | `-p dieyun-core` | `--workspace --no-default-features -- -D warnings` |
+| 契约闸门 | `check-shared-constants` 只扫一个 `src/` | 扫 `crates/*/src`（读者散在 4 个 crate，只扫一个会把「别人读了」误判成「没人读」） |
+| RPC catalog | 扫 `crates/dieyun-core/src/rpc` | 扫 `crates/dieyun-runtime/src/rpc`（标签随之变成 `dieyun-runtime/...`） |
+
+> ⚠️ **`cargo test -p dieyun-core --lib` 现在会跑 0 个用例** —— 这条命令骗过人不奇怪，
+> 所以 CI、`package.json`、`AGENTS.md` 都一起改了。新增 Rust 单测时放哪个 crate，就 `-p` 哪个，
+> 或直接用 `--workspace`。
+
+### 11.5 这一步**没有**解决什么
+
+拆 crate 只是把「谁能依赖谁」变成编译期事实，它**不**消除重复实现：
+
+- 出站请求体仍是两个作者（`loop_run/ledger.rs` + `agent/llm.rs`）—— R2 出站投影还没做；
+- `index` 与 `graph` 各有一份抽取器（AST vs 启发式），靠一条用例手工对齐；
+- `memory` 里的测试仍与实现同居（`memory/mod.rs` 1600+ 行是 `mod tests`）；
+- §10.8 的两条跨语言契约债（子串 `hits`、召回分数量纲）原样。
+
+下一批的顺序：**R2 出站投影** → 抽取层二选一 → 测试与实现分离。
+
+---
+
+## 12. R2 · 出站投影（2026-11-18 落地）
+
+### 12.1 之前是「两个作者」
+
+| 谁写 | 写了什么 |
+|---|---|
+| `loop_run/ledger.rs::need_llm` | `{model, messages, tools}` |
+| `agent/llm.rs::chat_completion` | `stream`（+ `stream_options`，2026-11-18 才补） |
+| Node `round.prepare` → `reasoning-backfill.js` | 把账本 `reasoning` 抬成 `reasoning_content` / 补占位 / 剥账本字段 |
+
+于是 `stream_options.include_usage` 漏了三个月没人发现（三处消费方全都「没数据就静默跳过」），
+而「思考回传」这件事**只有宿主知道**，内核并不知道能力表怎么声明。
+
+### 12.2 现在：`agent/outbound.rs` 是唯一作者
+
+```
+账本事实（messages / tools / 模型） ──► outbound::project_body(.., OutboundSpec)
+                                          │  ① 剥账本内部字段 synthetic / reasoning
+                                          │  ② reasoning_content：已有真值保留；
+                                          │     需要回传（带 tools / 有 tool_calls / echoReasoning）
+                                          │     就抬账本真思考，缺了补统一占位串
+                                          │  ③ stream + stream_options.include_usage
+                                          │  ④ 空 tools 数组整键删掉（兼容网关会 400）
+                                          ▼
+                                        HTTP（llm.rs 只管发、收、解析）
+```
+
+**调用点只有一个**：`driver::drive`，位置在宿主 `round.prepare` **交回请求副本之后** ——
+投影必须在宿主做完视觉注入 / 附件补图 / 裁剪之后执行，否则思考会被宿主那一份覆盖；
+放在之前就等于让「思考回传」重新有两个作者。
+
+`llm.rs::chat_completion` 不再自己拼传输字段，只调 `outbound::apply_transport`（补缺，幂等），
+服务宿主自建 body 的 `llm.complete` 路径。
+
+### 12.3 能力表怎么过界的
+
+`echoReasoning` 由宿主在 `transport()` 里随每一轮 `agent.run.*` 的 params 传，
+`rpc::drive_spec` 读成 `DriveSpec.echo_reasoning`，投影据此决定要不要补 `reasoning_content`。
+内核**不认识** `getChannelPolicy`，只知道「宿主声明了这个模型要不要回传」。
+
+### 12.4 Node 侧删掉了什么
+
+`rust-loop-runner.js` 的 `round.prepare` 不再调 `backfillReasoningContent`
+（只留视觉注入 + 字符上限 + 图片 sanitize，这些是**请求级策略**，不是出站形状）。
+`reasoning-backfill.js` 仍然存在，但只剩 **Renderer 辅助单轮**（它自己拼 `llm.complete` 的
+body，不走这条投影）一个消费方 —— 文件头注释已按现状改。
+
+### 12.5 用例
+
+| 用例 | 钉住什么 |
+|---|---|
+| `synthetic_marker_never_reaches_upstream` | 平台补的正文标记只活在账本里 |
+| `book_reasoning_is_promoted_and_stripped` | 账本 `reasoning` 抬成 `reasoning_content`，且自身不许上行 |
+| `missing_reasoning_gets_the_placeholder` | 占位串来自 `agent-shared.json`（Node / Rust 同一份），且 **trim 后仍非空**（零宽空格；人话占位会被上游回显成真思考） |
+| `no_tools_no_echo_keeps_the_message_clean` | 不需要回传时**不编**字段 |
+| `echo_reasoning_forces_the_field` | 能力表声明脱工具也要回传 |
+| `empty_tools_array_is_dropped` | 空 `tools` 整键删掉 |
+| `transport_fields_ask_for_usage` | 流式申请 usage / 非流式不申请 / 宿主显式关掉就尊重 |
+| `outbound_body_is_projected_once_by_core`（driver 端到端，抓真实请求体） | 上面四条在**真正发出去的 HTTP body** 里同时成立 |
+
+**验收**：`cargo test --workspace --lib` 334 → **343 全绿**；clippy / `check:js` / `npm test` 通过。
+
+---
+
+## 13. 抽取层二选一（2026-11-18 落地）
+
+### 13.1 之前：同一份知识两份实现
+
+| 实现 | 位置 | 产出 | 何时运行 |
+|---|---|---|---|
+| tree-sitter AST | `treesitter/extract.rs`（481 行 + 4 语言 walker） | imports / symbols / calls | 首选 |
+| 启发式正则扫描 | `graph/extract/{js_ts,python,go,rust_lang,symbols,heuristic}.rs`（**1330 行**） | imports / symbols / calls | 只在 AST 返回 `None` 时（语法错 / 未知语言） |
+
+两者覆盖**同一批四种语言**、产出**同样三样东西**，靠一条 parity 用例
+（`ast_minus_heuristic_is_only_the_deliberate_skip_list`）手工对齐 —— 这正是
+AGENTS.md 原则 2 说的「同一份知识有第二份实现」，而且它只在**坏文件**上运行：
+正则猜出来的边既会漏（把「没解析出来」伪装成「没人调用」）也会错。
+
+### 13.2 现在：只留 tree-sitter
+
+| 动作 | 结果 |
+|---|---|
+| 删掉 `graph/extract/{js_ts,python,go,rust_lang}.rs` 里的 `extract_import_specs` / `extract_symbols` / `extract_calls` / `strip_comment` / `CALL_SKIP` / `parse_*` 正则扫描 | −900 行量级 |
+| 删掉 `graph/extract/heuristic.rs`（249 行）与 `symbols.rs`（145 行） | 两套扫描原语一起消失 |
+| `is_ident`（唯一的合法用户是 AST 侧）搬进 `treesitter/extract.rs` | 单一来源，不再跨模块借 |
+| `graph/build.rs::index_file` 改吃 `&AstGraphExtract`，三条 `if let Some(ast) {...} else if is_xx_path ...` 分支整段删除 | 分支从 3×4 条降到 0 |
+| parity 用例随被删实现一起消失 | 不再需要「两套实现对齐」这条约束 |
+
+**行为变化（有意）**：语法有错 / 非四种语言的文件**这一轮不贡献任何边，且不记 mtime** ——
+下次保存会重新尝试。由 `unparsable_file_is_skipped_and_retried_after_fixing` 钉住
+（坏 → 不建边 → 修好 → 增量自动补回）。
+
+### 13.3 数字
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| `graph/extract/` 目录 | 8 文件 / **1587 行** | 6 文件 / **415 行** |
+| 抽取实现数量 | 2（AST + 启发式） | **1**（AST） |
+| `cargo test --workspace --lib` | 343 | **332**（删掉 12 条测启发式的用例，新增 1 条跳过/重试用例） |
+
+### 13.4 没解决什么
+
+- `graph` 与 `index` 仍然共用 `codebase_db`（同一个库，见 §11.1 的强连通块）；
+- `index` 侧的切块（`treesitter/chunk.rs`）与图抽取各走各的 AST walk —— 它们产出不同
+  （chunk 区间 vs import/call/symbol），目前没有合并的理由；
+- §10.8 的两条跨语言契约债照旧。
+
+---
+
+## 14. §10.8 收尾三件（2026-11-18 落地）
+
+### 14.1 测试与实现分离
+
+把每个「实现文件里塞几百上千行 `mod tests`」拆成同级独立文件
+（`#[cfg(test)] #[path = "tests.rs"] mod tests;`，模块身份与 `use super::*` 语义都不变）：
+
+| 文件 | 原 | 现在（实现 + 测试） |
+|---|---|---|
+| `memory/mod.rs` | 1701 | **132 + 1569** |
+| `planner/run.rs` | 1653 | 1229 + 425 |
+| `agent/loop_run/mod.rs` | 1201 | **300 + 903** |
+| `index/mod.rs` | 1195 | **449 + 748** |
+| `agent/llm.rs` | 936 | 544 + 435 |
+| `index/search.rs` | 933 | 521 + 487 |
+| `agent/driver.rs` | 888 | **253 + 636** |
+| `sqlite.rs` | 888 | **311 + 473** |
+| `graph/mod.rs` | 864 | **298 + 567** |
+| `memory/misc.rs` | 655 | 464 + 194 |
+| `compaction/fold.rs` | 594 | 341 + 255 |
+| `rpc/mod.rs` / `memory/schema.rs` | 580 / 580 | 297 + 219 / 449 + 134 |
+
+判据只有一条：**测试数量与结论不变**（拆完 `cargo test --workspace --lib` 全绿，条数一致）。
+收益是「改一个方法不用在整片用例之间翻」，diff 也可读了。
+
+### 14.2 子串通道的「强证据」判据
+
+`index/search.rs` 原来只有一个 `hits`：`content LIKE` 与 `rel_path LIKE` 各算一分。
+于是 `hits == 词元数` 这个「覆盖度 100%」判据两头都错：
+
+| 情形 | 旧行为 | 现在 |
+|---|---|---|
+| 正文全覆盖 + 路径也命中 | `hits = 2n ≠ n` → **强证据被静默丢弃** | 用 `content_hits`（只数正文）= n → 强证据成立 |
+| 只有**文件名**命中（正文一个都没有） | `hits = n` → 被当成「全覆盖强证据」顶到第一 | `content_hits = 0` → 不是证据 |
+| 排序 | `hits`（含路径） | 不变（路径相关确实更可能是要找的） |
+
+用例：`path_only_match_is_not_strong_evidence` / `content_full_coverage_counts_even_when_path_also_matches`。
+
+### 14.3 召回分数量纲：注入判定收回 Rust
+
+之前宿主拿两个**不同量纲**的绝对阈值卡召回结果：语义 0.32（余弦）／关键词 0.12（bm25 派生的
+`-rank + importance*0.035 + freshness*0.08`）。bm25 的量纲随语料与查询词长度漂移 ——
+「注不注入」实际上取决于查询词有几个字。
+
+现在每条命中带 **`injectScore ∈ [0,1]`**，由产生它的分支归一（唯一来源）：
+
+| 分支 | 归一方式 | 理由 |
+|---|---|---|
+| 语义 | `cosine.clamp(0,1)` | 余弦本身就是绝对的、跨查询可比 |
+| 关键词 / LIKE | `score / 本次查询的最佳 score` | bm25 只能在同一查询内比较 |
+| 最近记忆（无查询） | 恒 `1.0` | 「按时间取最近」本身就是这次的决定，没有证据强弱 |
+
+宿主侧只剩一个阈值 `agent-limits.memoryInjectMinScore`（0.32），并且：
+- 只读 `injectScore`，**不再看 `score`**（`score` 降级为分支内排序量纲，注释已写明）；
+- 缺字段（老 core / 测试桩）时不丢（`Number.isFinite` 判不了就放行），避免版本混跑时整块记忆被静默清空。
+
+用例：`keyword_inject_score_is_relative_to_the_best_hit` / `cosine_inject_score_clamps_and_rejects_nan`，
+宿主侧 `test:system-prompt-prep` 的桩已按新契约给 `injectScore`。
+
+### 14.4 验收
+
+`cargo test --workspace --lib` **337 全绿**（78 base / 104 codebase / 59 memory / 96 runtime）·
+`cargo clippy --workspace --no-default-features -- -D warnings` 0 错误 ·
+`npm test` / `check:js` / `lint:agent` / `verify:rpc-catalog` / `check:shared-constants` / `check:contracts` 通过。
+
+### 14.5 没解决什么
+
+- **共享记忆**（`src/memory-shared/`）仍有两个「语义 / 关键词」阈值（`sharedMemoryMinScore*`），
+  量纲问题与这里同形 —— 但它走的是 PostgreSQL 上的另一条召回 SQL，得先看那边的打分再动；
+- `injectScore` 是「分支内相对强度」，跨分支的**绝对**可比（例如「语义 0.5 与关键词 0.9 谁更可信」）
+  仍然没有统一口径 —— 统一它需要一份标定数据，不是纯代码问题。

@@ -16,7 +16,7 @@ const {
 } = require('../../src/agent/token-estimate');
 const { AGENT_LIMITS_DEFAULTS } = require('../../src/agent/agent-limits');
 
-// 与 Rust `crates/dieyun-core/src/compaction/tokens.rs` 的 #[cfg(test)] 共用同一份基线。
+// 与 Rust `crates/dieyun-base/src/compaction/tokens.rs` 的 #[cfg(test)] 共用同一份基线。
 const FIXTURE = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'token-estimate-cases.json'), 'utf8')
 );

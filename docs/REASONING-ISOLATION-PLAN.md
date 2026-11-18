@@ -54,7 +54,7 @@ B2/B3/B4 **逐字重复**；B1 是 Rust 侧第四份。
 
 | # | 位置 | 行为 |
 |---|---|---|
-| C1 | `src/agent/reasoning-backfill.js` `backfillReasoningContent()`（由 `rust-loop-runner.js` 注入 `requestBody.messages`） | 历史 assistant 缺 `reasoning_content` 时补假文本 `'（思考内容未随消息保存）'` **（已合并为单一来源）** |
+| C1 | `src/agent/reasoning-backfill.js` `backfillReasoningContent()`（由 `rust-loop-runner.js` 注入 `requestBody.messages`） | 历史 assistant 缺 `reasoning_content` 时补占位 `'\u200B'`（零宽、无可续写语义；旧版是可读假文本 `'（思考内容未随消息保存）'`，会被上游续写回显） **（已合并为单一来源）** |
 | C2 | ~~`src/renderer/renderer-agent-llm.js:521-531`~~ **已合并** → 同上，Renderer 经 `window.ReasoningBackfill` 消费 | 判定与 C1 统一为「本轮 hasTools 或该消息 tool_calls」 |
 | C3 | `loop_run.rs:379-388` `push_assistant_text_only()` | 触顶轮把合成文本 `"已达本段 N 轮上限"` 写进 messages |
 
@@ -303,7 +303,10 @@ classifyDelta(delta, policy) -> [{ channel: 'reasoning' | 'answer', text, source
    所以「思考绝不进上行 messages」在协议层**做不到**。本方案取的是：思考进**上行协议载荷**（按需回传真值），
    但绝不进 `book`、绝不进摘要、绝不静默当正文。
    - **不能裸删 C1**：删掉当下不报错，但真思考落库前，每一轮带 tools 的续跑都会被上游 400 ——
-     现在是靠假占位挡住 400，代价是把「（思考内容未随消息保存）」喂给模型。
+     现在是靠**零宽占位**（`\u200B`，只求「字段非空」、无可续写语义）挡住 400。
+     曾经用的是可读占位「（思考内容未随消息保存）」，代价不止是喂给模型：上游会把历史
+     `reasoning_content` 当成上一段思考的开头**接着写**，于是占位被原样回显成真思考
+     （实测 `messages.reasoning` 里 114 条「占位 + 真思考」），再落库、再上行 → 永不停止的自我维持链。
      顺序必须是**先落真值（§3.5），再让占位降级为罕见兜底**；
    - **Rust 那份（`loop_run.rs:550-552`）不能删**：它是同一轮里唯一的真值来源；
    - 若要求「连上行也不出现」，唯一替代是**对这些模型在 tools 场景禁用思考模式**，代价是失去推理能力 —— 不建议。
