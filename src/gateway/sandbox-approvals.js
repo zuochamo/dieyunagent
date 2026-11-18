@@ -1,4 +1,4 @@
-// @ts-check
+// 类型债（暂缓）：本文件还有未修完的类型错，因此**没**列进 tsconfig.check.json。把 @ts-check 留在第 1 行会让人以为它在被检查 —— 宁可明说没开；清单见 docs/RUST-CORE-REFACTOR-PLAN.md「类型债」一节。
 'use strict';
 
 /**
@@ -86,7 +86,7 @@ function createSandboxApprovals(deps = {}) {
 
   /** @type {Map<string, { sessionId: string, category: string, scope: string, at: number }>} */
   const grants = new Map();
-  /** @type {Map<string, { sessionId: string, root: string, at: number }>} */
+  /** @type {Map<string, { sessionId: string, root: string, at: number, remote?: boolean }>} */
   const pathGrants = new Map();
   /** @type {Map<string, { resolve: Function, timer: any }>} */
   const pending = new Map();

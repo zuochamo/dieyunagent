@@ -1,4 +1,4 @@
-﻿{
+{
   "compilerOptions": {
     "allowJs": true,
     "checkJs": false,
@@ -10,7 +10,10 @@
     "noImplicitAny": false,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "lib": ["ES2022", "DOM"]
+    "lib": [
+      "ES2022",
+      "DOM"
+    ]
   },
   "files": [
     "types/core-rpc.d.ts",
@@ -23,6 +26,18 @@
     "src/agent/write-smell-hints.js",
     "src/agent/agent-system-prompt.js",
     "src/agent/run-events.js",
-    "src/main/mcp-plans-boot.js"
+    "src/main/mcp-plans-boot.js",
+    "src/agent/completion-readiness.js",
+    "src/gateway/sandbox-policy.js",
+    "src/main/ipc/channels.js",
+    "src/main/ipc/peer.js",
+    "src/net/lan.js",
+    "src/peer/actions.js",
+    "src/peer/discovery.js",
+    "src/peer/index.js",
+    "src/peer/store.js",
+    "src/peer/workspace-key.js",
+    "src/plans/goal-run.js",
+    "src/plans/plan-run-events.js"
   ]
 }

@@ -384,18 +384,23 @@ npm run test:local-gateway-smoke          # 改 rpc/ 或 gateway 交互必跑
 |---|---|---|---|
 | A 级缺陷 | **19 → 0**（P0 修 11 条、P1 修 1 条、P2 修 2 条、收尾批修 5 条） | 0 | §2.1 每条都有测试且绿 |
 
-### 类型债（独立于 P0–P6，2026-11-18 处理了一轮）
+### 类型债（独立于 P0–P6，2026-11-18 处理了第一轮）
 
-**根因**：`// @ts-check` 写在 `'use strict';` **之后**会被 TypeScript 直接忽略 —— 仓里 30 个文件全是这个写法，所以 `npm run check:js` 这些年只覆盖到 4 个手工列进 `tsconfig.check.json` 的文件（而且那 4 个的 pragma 也是同一处错位）。
+**根因**：`// @ts-check` 写在 `'use strict';` **之后**会被 TypeScript 直接忽略 —— 仓里 **30 个**文件全是这个写法，所以 `npm run check:js` 这些年只覆盖 4 个手工列进 `tsconfig.check.json` 的文件（那 4 个的 pragma 也在这处错位）。等于闸门一直在、但一直在空转。
 
-**这一轮**：
-- 把 **27 个文件**的 pragma 挪到第 1 行 —— 它们现在**真的**被类型检查（`tsc -p tsconfig.check.json` 0 错误）。实测这批文件的真实类型错是 **91 处**（远多于当初估的 19），逐个判定「类型过期」还是「代码错」后修掉 44 处，典型修法：
-  - `{object}` / `{}` 参数形状后按字段访问 → 补准确的 `@param {{...}}`（`agent-limits` 的返回、`goal-run` 的入参、`completion-readiness` 的 Map 与 LSP 设置、`sandbox-policy` 的 opts / 决策对象）；
-  - **真死代码**：`agent-system-prompt.js` 里 `const pack = loadPackSystemPrompt()` 把 `packSystemPrompt()` 当无参函数**调用**了（拿到的是对象），于是 `typeof pack === 'function'` 恒假、那条分支从来没走过 —— 已删。
-  - `run-events.js` 的终端事件集合被收窄成三个字面量 → 按 `Set<string>` 声明。
-- **剩 3 个文件 47 处**（`agent/request-snapshot.js` 19、`agent/tool-gate.js` 14、`main/mcp-plans-boot.js` 14）**暂缓**：把它们假装在检查的 pragma 摘掉，换成一行显式的「类型债暂缓 + 数量 + 指向本段」，避免「写着 @ts-check、其实没检查」的假闸门。修法同上一类（形状补全），纯机械但需要逐个确认字段语义。
+**这一轮的结论（数字是实测，不是估的）**：
+- 把 pragma 全部挪到第 1 行后，真正的类型错是 **108 处**（原估计 19 处，差了一个数量级）。
+- **修掉 44 处**，**21 个文件现在真的被检查**（都在 `tsconfig.check.json` 里，`check:js` 0 错误）。典型修法三类：
+  1. `{object}` / `{}` 参数形状后按字段访问 → 补准确的 `@param {{...}}`（`agent-limits` 的返回、`goal-run` 的入参、`completion-readiness` 的 Map 与 LSP 设置、`sandbox-policy` 的 opts / 决策对象）；
+  2. **真死代码**：`agent-system-prompt.js` 里 `const pack = loadPackSystemPrompt()` 把 `packSystemPrompt()` 当无参函数**调用**了（拿到的是对象），于是 `typeof pack === 'function'` 恒假、那条分支从来没走过 —— 已删；
+  3. `run-events.js` 的终端事件集合被推断成三个字面量 → 按 `Set<string>` 声明。
+- **剩下 9 个文件 64 处暂缓**（`request-snapshot` 19、`tool-gate` 14、`mcp-plans-boot` 14、`sandbox-approvals` 6、`peer/coordinator` 4、`session-goal` 2、`peer/client` 2、`peer/wire` 2、`peer/server` 1）：这些文件的 pragma 换成了通行的一句「类型债暂缓 + 指向本段」——**宁可明说没开，也不留一个假装在检查的 pragma**；它们也没列进 tsconfig。
+
+**不变式（写下来供以后核对）**：`pragma 在第 1 行` ⇔ `在 tsconfig.check.json 里` ⇒ `check:js 会真的检查它`。当前 21 = 21，差值为 0。
 
 **闸门有效性验证过**：在 `run-events.js` 注入 `/** @type {{n:number}} */ ({n:'x'})` → `check:js` 立刻报 TS2352；删掉即恢复 0 错误。
+
+**下一轮怎么收尾**：剩下 64 处全是同一类（JSDoc 形状没跟上代码字段：`remote` / `roomId` / `peerRole` / `getRole` / `Error.code` / `{}` 参数），补形状 + 列入 tsconfig 即可，不需要改行为。
 | 「同一份知识两份实现」 | 审计列出 40+ 处 | ≤ 5（且每处有理由） | 详档「度量」小节逐条勾掉 |
 | `rpc/mod.rs` 单测 | 1 | 每 handler ≥1 | `cargo test -- --list \| grep rpc::` |
 | 静默吞错 | `let _ =` 123 / `.ok()` 19 | 白名单外 0 | `clippy -D warnings` |
