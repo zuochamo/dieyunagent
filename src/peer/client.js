@@ -58,12 +58,14 @@ function createPeerClient(opts) {
           try {
             const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             done({ ok: true, info: body });
-          } catch (err) {
+          } catch (err0) {
+    /** @type {Error & { code?: string }} */
+    const err = /** @type {Error & { code?: string }} */ (err0);
             done({ ok: false, error: `BAD_BODY: ${err && err.message ? err.message : err}` });
           }
         });
       });
-      req.on('error', (err) => done({ ok: false, error: err && err.code ? err.code : 'ERROR' }));
+      req.on('error', (/** @type {Error & { code?: string }} */ err) => done({ ok: false, error: err && err.code ? err.code : 'ERROR' }));
       req.on('timeout', () => {
         try {
           req.destroy();
@@ -145,7 +147,9 @@ function createPeerClient(opts) {
 
       try {
         ws = new WebSocket(`ws://${host}:${port}/peer`, { handshakeTimeout: connectTimeoutMs });
-      } catch (err) {
+      } catch (err0) {
+    /** @type {Error & { code?: string }} */
+    const err = /** @type {Error & { code?: string }} */ (err0);
         done({ ok: false, error: `CONNECT_FAILED: ${err && err.message ? err.message : err}` });
         return;
       }
@@ -169,7 +173,9 @@ function createPeerClient(opts) {
               })
             )
           );
-        } catch (err) {
+        } catch (err0) {
+    /** @type {Error & { code?: string }} */
+    const err = /** @type {Error & { code?: string }} */ (err0);
           done({ ok: false, error: `HELLO_FAILED: ${err && err.message ? err.message : err}` });
         }
       });
@@ -194,7 +200,9 @@ function createPeerClient(opts) {
           };
           try {
             ws.send(JSON.stringify({ t: FRAME.MSG, env }));
-          } catch (err) {
+          } catch (err0) {
+    /** @type {Error & { code?: string }} */
+    const err = /** @type {Error & { code?: string }} */ (err0);
             done({ ok: false, error: `SEND_FAILED: ${err && err.message ? err.message : err}`, peer });
             return;
           }

@@ -81,7 +81,7 @@ function createPeerCoordinator(deps) {
   /** @type {Map<string, { claims: ReturnType<typeof normalizeClaim>[], at: number }>} */
   const peerClaims = new Map();
   /** 握手学到的对端（UDP 被挡时的反向通路；key = peerId） */
-  /** @type {Map<string, { peerId: string, name: string, host: string, port: number, workspaceKey: string, at: number }>} */
+  /** @type {Map<string, { peerId: string, name: string, host: string, port: number, workspaceKey: string, at: number, role?: string }>} */
   const learnedPeers = new Map();
   /** @type {Map<string, { peerId: string, host: string, port: number, env: object, sessionId: string, at: number }>} */
   const pendingTurns = new Map();
@@ -518,7 +518,7 @@ function createPeerCoordinator(deps) {
     const from = Number(room.createdAt) || 0;
     const to = room.status === 'closed' ? Number(room.closedAt) || 0 : Number.MAX_SAFE_INTEGER;
     const perSession = Math.min(200, Math.max(20, limit));
-    /** @type {Array<{ peerId: string, peerName: string, sessionId: string, role: string, content: string, at: number }>} */
+    /** @type {Array<{ peerId: string, peerName: string, sessionId: string, role: string, content: string, at: number, peerRole?: string }>} */
     const rows = [];
     for (const peerId of room.members) {
       const name = peerNameOf(peerId);

@@ -26,7 +26,6 @@
     "src/agent/write-smell-hints.js",
     "src/agent/agent-system-prompt.js",
     "src/agent/run-events.js",
-    "src/main/mcp-plans-boot.js",
     "src/agent/completion-readiness.js",
     "src/gateway/sandbox-policy.js",
     "src/main/ipc/channels.js",

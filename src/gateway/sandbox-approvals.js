@@ -100,7 +100,7 @@ function createSandboxApprovals(deps = {}) {
    * 用户 20 分钟后回来点「允许」时，这里还得答得出「他批的是哪个会话、哪个类别、哪个目录」，
    * 否则那个按钮只能落到一个类别级授权（等于批准过 `/tmp` 就批过主目录）。
    * @type {Map<string, { sessionId: string, category: string, scope: string, path: string,
-   *                       mode: string, tool: string, at: number }>}
+   *                       mode: string, tool: string, at: number, remote?: boolean }>}
    */
   const requests = new Map();
 
