@@ -17,6 +17,7 @@
   },
   "files": [
     "types/core-rpc.d.ts",
+    "types/core-contracts.d.ts",
     "src/agent/llm-complete.js",
     "src/agent/rust-loop-runner.js",
     "src/core-bridge.js",

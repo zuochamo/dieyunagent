@@ -26,6 +26,8 @@ jobs:
         run: npm run check:contracts
       - name: Agent lint (narrow)
         run: npm run lint:agent
+      - name: Core contracts fresh (Rust @contract → types/core-contracts.d.ts)
+        run: npm run verify:core-contracts
       - name: JSDoc check (scoped)
         run: npm run check:js
       - name: Renderer static checks

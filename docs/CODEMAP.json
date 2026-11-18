@@ -1935,6 +1935,39 @@
       "tests": [
         "test:unit"
       ]
+    },
+    {
+      "prefix": "src/agent/tool-validate.js",
+      "tests": [
+        "test:tool-args",
+        "test:tool-harness"
+      ]
+    },
+    {
+      "prefix": "test/fixtures/tool-args-cases.json",
+      "tests": [
+        "test:tool-args"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-validate.generated.js",
+      "tests": [
+        "verify:tool-validators",
+        "test:tool-args"
+      ]
+    },
+    {
+      "prefix": "scripts/lib/tool-validate-dualrun.cjs",
+      "tests": [
+        "test:tool-args"
+      ]
+    },
+    {
+      "prefix": "src/agent/schema-rules.js",
+      "tests": [
+        "test:tool-args",
+        "test:tool-harness"
+      ]
     }
   ],
   "suites": {

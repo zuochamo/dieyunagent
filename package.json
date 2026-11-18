@@ -60,6 +60,7 @@
     "test:sandbox-approvals-late": "node scripts/test-sandbox-approvals-late.cjs",
     "test:sandbox-real": "node scripts/test-sandbox-real-project.cjs",
     "test:tool-gate": "node scripts/test-tool-gate.cjs",
+    "test:tool-args": "vitest run test/unit/tool-args-parity.test.cjs test/unit/tool-args-dualrun.test.cjs test/unit/schema-rules.test.cjs",
     "test:tool-harness": "node scripts/test-tool-harness.cjs",
     "test:tool-bridge-handlers": "node scripts/test-tool-bridge-handlers.cjs",
     "test:lsp": "node scripts/test-lsp.cjs",
@@ -97,7 +98,9 @@
     "report:auto-model-misfit": "node scripts/report-auto-model-misfit.cjs",
     "lint:agent": "eslint \"src/agent/**/*.js\" \"scripts/test-*.cjs\"",
     "generate:rpc-catalog": "node scripts/generate-rpc-catalog.cjs",
+    "generate:core-contracts": "node scripts/generate-core-contracts.cjs",
     "verify:rpc-catalog": "node scripts/generate-rpc-catalog.cjs --check",
+    "verify:core-contracts": "node scripts/generate-core-contracts.cjs --check",
     "generate:agent-events": "node scripts/generate-agent-run-events-doc.cjs",
     "verify:agent-events": "node scripts/generate-agent-run-events-doc.cjs --check",
     "cargo:build": "cargo build -p dieyun-core --release",
@@ -106,6 +109,8 @@
     "verify:index-timing-local": "node scripts/verify-index-timing-local.cjs",
     "verify:index-timing-ssh": "node scripts/verify-index-timing-ssh.cjs",
     "verify:index-effectiveness": "node scripts/verify-index-effectiveness.cjs",
+    "measure:lexical": "node scripts/measure-lexical-quality.cjs",
+    "inventory:tool-validate": "node scripts/inventory-tool-validate.cjs",
     "repro:recall-stall": "node scripts/repro-recall-stall.cjs",
     "repro:recall-writes": "node scripts/repro-recall-blocked-by-writes.cjs",
     "cargo:run": "cargo run -p dieyun-core --",
@@ -141,7 +146,10 @@
     "verify:headless-apt": "node scripts/publish-headless-apt.cjs --verify release/headless-apt/pool",
     "test:headless-desktop-ui": "node scripts/test-headless-desktop-ui.cjs",
     "test:headless-desktop-turn": "node scripts/test-headless-desktop-turn.cjs",
-    "test:alive": "node scripts/test-alive.cjs"
+    "test:alive": "node scripts/test-alive.cjs",
+    "generate:tool-validators": "node scripts/generate-tool-validators.cjs",
+    "verify:tool-validators": "node scripts/generate-tool-validators.cjs --check",
+    "report:tool-validators": "node scripts/generate-tool-validators.cjs --report"
   },
   "author": {
     "name": "PixelOffice",
