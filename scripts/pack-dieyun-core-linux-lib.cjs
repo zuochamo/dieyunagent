@@ -208,6 +208,51 @@ function assertCoreGlibcTarget(binPath) {
   return r;
 }
 
+/**
+ * `include_str!` / `include_bytes!` 指向 `crates/` **之外**的文件。
+ *
+ * Rust 侧确实有这种依赖：`crates/dieyun-base/src/shared.rs` 用
+ * `include_str!("../../../src/agent/agent-shared.json")` 读 Node 与 Rust 共用的那份
+ * 常量表（单一来源）。远端编译只上传 `Cargo.toml` + `crates/`，于是那条路径在编译机上
+ * 不存在 → `couldn't read crates/dieyun-base/src/../../../src/agent/agent-shared.json`。
+ *
+ * 这里不手写清单：**清单从 Rust 源码本身推出来**，以后谁再 `include_*!` 一个仓内文件，
+ * tar 内容与源码指纹自动跟上（否则远端编译必然失败 / 指纹漏项导致复用过期二进制）。
+ */
+function collectExternalIncludes() {
+  const cratesDir = path.join(ROOT, 'crates');
+  if (!fs.existsSync(cratesDir)) return [];
+  const out = new Set();
+  const includeRe = /include_(?:str|bytes)!\s*\(\s*"([^"]+)"\s*\)/g;
+
+  function walk(dir) {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (ent.name === 'target' || ent.name === '.git') continue;
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!ent.name.endsWith('.rs')) continue;
+      const src = fs.readFileSync(full, 'utf8');
+      for (const m of src.matchAll(includeRe)) {
+        const resolved = path.resolve(path.dirname(full), m[1]);
+        // 仓内**越出** `crates/` 的才算外部依赖；crates 内部的（如 `include_str!("mod.rs")`）
+        // 本来就随 `crates/` 一起上传
+        const relFromCrates = path.relative(cratesDir, resolved);
+        const insideCrates =
+          relFromCrates && !relFromCrates.startsWith('..') && !path.isAbsolute(relFromCrates);
+        if (insideCrates) continue;
+        if (!fs.existsSync(resolved)) continue;
+        out.add(resolved);
+      }
+    }
+  }
+
+  walk(cratesDir);
+  return [...out].sort((a, b) => a.localeCompare(b));
+}
+
 /** 与 pack-dieyun-core-linux-remote 上传的 tar 内容一致 */
 function collectFingerprintFiles() {
   const files = [];
@@ -229,6 +274,7 @@ function collectFingerprintFiles() {
   addFile(path.join(ROOT, 'Cargo.lock'));
   const cratesDir = path.join(ROOT, 'crates');
   if (fs.existsSync(cratesDir)) walkDir(cratesDir);
+  for (const includePath of collectExternalIncludes()) addFile(includePath);
 
   files.sort((a, b) => a.localeCompare(b));
   return files;
@@ -369,6 +415,7 @@ module.exports = {
   assertCoreGlibcTarget,
   isLinuxElf,
   collectFingerprintFiles,
+  collectExternalIncludes,
   computeSourceFingerprint,
   readLinuxCoreManifest,
   installLinuxCoreBin,

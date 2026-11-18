@@ -279,3 +279,52 @@ describe('运行时预检必须彻底消失（防止回归）', () => {
     assert.equal(/REMOTE_INDEX_CORE_INCOMPATIBLE/.test(text), false);
   });
 });
+
+describe('远端编译的源码包必须自带 include_str! 的仓内文件', () => {
+  const lib = require('../../scripts/pack-dieyun-core-linux-lib.cjs');
+  const rel = (p) => path.relative(lib.ROOT, p).replace(/\\/g, '/');
+
+  /**
+   * 2026-11-18 现场：远端编译报 `couldn't read crates/dieyun-base/src/../../../src/agent/
+   * agent-shared.json`。原因是上传给编译机的 tar 只有 `Cargo.toml` + `crates/`，而 Rust 侧
+   * 用 `include_str!` 读仓内另一份文件（Node / Rust 共用的常量表）。同一个漏项还会让源码指纹
+   * 漏掉它 —— 改了 agent-shared.json 却复用过期 Linux core，比编译失败更难发现。
+   */
+  it('crates 之外的 include_str! 目标都在清单里（含 agent-shared.json）', () => {
+    const externals = lib.collectExternalIncludes().map(rel);
+    assert.ok(
+      externals.includes('src/agent/agent-shared.json'),
+      `源码包漏了 agent-shared.json，实际清单：${externals.join(', ') || '(空)'}`
+    );
+  });
+
+  it('这些文件也必须进源码指纹（否则改完复用过期二进制）', () => {
+    const fingerprint = lib.collectFingerprintFiles().map(rel);
+    for (const item of lib.collectExternalIncludes().map(rel)) {
+      assert.ok(fingerprint.includes(item), `${item} 未进源码指纹`);
+    }
+  });
+
+  it('crates 里每一处 include_str!/include_bytes! 的目标都真实存在', () => {
+    const cratesDir = path.join(lib.ROOT, 'crates');
+    const missing = [];
+    const walk = (dir) => {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (ent.name === 'target') continue;
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!ent.name.endsWith('.rs')) continue;
+        const src = fs.readFileSync(full, 'utf8');
+        for (const m of src.matchAll(/include_(?:str|bytes)!\s*\(\s*"([^"]+)"/g)) {
+          const target = path.resolve(path.dirname(full), m[1]);
+          if (!fs.existsSync(target)) missing.push(`${rel(full)} → ${m[1]}`);
+        }
+      }
+    };
+    walk(cratesDir);
+    assert.deepEqual(missing, []);
+  });
+});

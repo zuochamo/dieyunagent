@@ -18,7 +18,10 @@ const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { installLinuxCoreBin } = require('./pack-dieyun-core-linux-lib.cjs');
+const {
+  installLinuxCoreBin,
+  collectExternalIncludes
+} = require('./pack-dieyun-core-linux-lib.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const LOCAL_CONFIG = path.join(ROOT, 'dieyun-linux-build.local.json');
@@ -254,6 +257,12 @@ function ensureOpenSsh() {
 async function uploadSources(opts) {
   const tarItems = ['Cargo.toml', 'crates'];
   if (fs.existsSync(path.join(ROOT, 'Cargo.lock'))) tarItems.push('Cargo.lock');
+  // Rust 侧 `include_str!` 会越出 `crates/`（如 `src/agent/agent-shared.json`，Node 与 Rust
+  // 共用的常量表）。漏传就变成编译机上的 `couldn't read …: No such file or directory`。
+  // 清单由 Rust 源码推出，与源码指纹同一来源（见 lib.collectExternalIncludes）。
+  for (const includePath of collectExternalIncludes()) {
+    tarItems.push(path.relative(ROOT, includePath).replace(/\\/g, '/'));
+  }
 
   // 固定名 + 相对路径：GNU tar 会把 `C:\...` 的盘符冒号解析成远程主机，
   // tar 产物必须以 cwd（ROOT）内的相对路径给出
