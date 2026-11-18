@@ -89,6 +89,39 @@ function applyLlmMessageCharCap(body, userData, tierId) {
  * Rust 内核不再自带 `maxToolCalls=150` / `maxRounds=96` 兜底（跨语言复制数字会静默分叉），
  * 缺参即 `INVALID_PARAMS` —— 所以两个数字必须在这一处补齐，而不是散在各调用点。
  */
+/**
+ * 把宿主解析出的护栏数字注入 startParams（`agent.run.start` 的唯一入口）。
+ *
+ * @param {Partial<import('../../types/core-contracts').StartParams>} startParams
+ * @param {{ maxToolCalls?: number, maxRounds?: number } | null} [spec]
+ * @param {{ tokenBudget?: number, triggerRatio?: number } | null} [foldSpec]
+ * @returns {Partial<import('../../types/core-contracts').StartParams>}
+ */
+
+/**
+ * `agent.run.start` 的字段在发请求前**显式读一遍** —— 这是契约的编译期探针，不是第二份校验。
+ *
+ * 为什么只读不抛：缺参的错误码与文案 Rust 侧已经有一份（`StartParams` 的 serde 反序列化回
+ * `INVALID_PARAMS`），Node 再抛一次就是「同一份知识两份实现」，还会悄悄改变历史调用方的行为。
+ * 读的收益在**类型层**：`types/core-contracts.d.ts` 由 Rust 结构体生成，字段被改名 →
+ * 这里 `p.maxToolCalls` 立刻 TS2339（`npm run check:js` 红），不会静默变成 undefined。
+ *
+ * @param {Partial<import('../../types/core-contracts').StartParams>} p
+ * @returns {{ model: unknown, messages: unknown, tools: unknown, maxToolCalls: unknown, maxRounds: unknown, tokenBudget: unknown, triggerRatio: unknown, runId: unknown }}
+ */
+function readLoopStartFields(p) {
+  return {
+    model: p.model,
+    messages: p.messages,
+    tools: p.tools,
+    maxToolCalls: p.maxToolCalls,
+    maxRounds: p.maxRounds,
+    tokenBudget: p.tokenBudget,
+    triggerRatio: p.triggerRatio,
+    runId: p.runId
+  };
+}
+
 function applyResolvedLoopSpec(startParams, spec, foldSpec) {
   const out = { ...(startParams || {}) };
   for (const key of ['maxToolCalls', 'maxRounds']) {
@@ -484,6 +517,9 @@ async function runRustAgentLoop(opts) {
       toolsChars: toolsJsonChars((opts.startParams && opts.startParams.tools) || [])
     });
   const startParams = applyResolvedLoopSpec(opts.startParams, loopSpec, foldSpec);
+  // 契约探针：字段被 Rust 改名 → `readLoopStartFields` 里的读点直接 TS2339（`check:js` 红）。
+  // 不抛错：缺参由 core 的 `INVALID_PARAMS` 报（同一份知识不留两份）。
+  readLoopStartFields(startParams);
 
   // 端点与请求头仍是 `llm-request.js` 的单一来源；core 只负责发出去。
   const url = resolveChatUrl(llm.baseUrl);
@@ -491,6 +527,7 @@ async function runRustAgentLoop(opts) {
   const model = String(startParams.model || '');
   // content 的通道身份：由能力表按模型声明一次，随每个 llm_delta / start 下发。
   const policy = getChannelPolicy(model);
+  /** @type {import('../../types/core-contracts').ContentChannel} */
   const contentChannel = policy.singleChannel ? 'reasoning' : 'answer';
 
   /**
@@ -674,7 +711,12 @@ async function runRustAgentLoop(opts) {
     onPhase('start', { runId, model });
 
     /** 上一轮工具结果：非空表示下一次该调 `agent.run.tools` 回填。 */
-    let pendingResults = null;
+    /**
+   * 上一轮工具结果：非空表示下一次该调 `agent.run.tools` 回填。
+   * 类型来自 Rust 的 `ToolResultInput`（`@contract`）—— 字段名漂了 `npm run check:js` 就红。
+   * @type {import('../../types/core-contracts').ToolResultInput[] | null}
+   */
+  let pendingResults = null;
 
     /**
      * 这一次重发是不是**干净的一次**：只有 run 的第一条请求、且这一轮还没产出任何东西时成立。
