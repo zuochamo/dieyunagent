@@ -17,14 +17,20 @@ const { WebSocket } = require('ws');
 const { FRAME, createHello, createEnvelope, parseFrame } = require('./wire');
 
 /**
- * @param {object} opts
- * @param {() => string} opts.getPeerId
- * @param {() => string} opts.getName
- * @param {() => { key: string, name: string, path: string }} opts.getWorkspace
- * @param {() => object[]} [opts.getClaims]
- * @param {() => number} [opts.getPort]
- * @param {number} [opts.connectTimeoutMs]
- * @param {(msg: string) => void} [opts.log]
+ * 建一个对端客户端。
+ *
+ * 依赖形状收成一处内联对象：`{object}` + 一串 `opts.xxx` 标签虽然 TypeScript 认，
+ * 但字段散了之后加一个容易漏、也不容易一眼看全。
+ *
+ * @param {{ getPeerId: () => string,
+ *           getName: () => string,
+ *           getRole?: () => string,
+ *           getWorkspace: () => { key: string, name: string, path: string },
+ *           getClaims?: () => object[],
+ *           getPort?: () => number,
+ *           connectTimeoutMs?: number,
+ *           log?: (msg: string) => void }} opts
+ *   `getRole`：自称的工作身份（与 `getName` 同源，握手时采信一次；见 docs/BOT-ROOM-PLAN.md §8）
  */
 function createPeerClient(opts) {
   const o = opts || /** @type {any} */ ({});

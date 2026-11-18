@@ -43,6 +43,9 @@
     "src/peer/client.js",
     "src/peer/server.js",
     "src/goals/session-goal.js",
-    "src/peer/wire.js"
+    "src/peer/wire.js",
+    "src/main/mcp-plans-boot.js",
+    "src/gateway/sandbox-approvals.js",
+    "src/peer/coordinator.js"
   ]
 }

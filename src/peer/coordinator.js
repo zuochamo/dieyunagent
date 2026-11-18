@@ -1,4 +1,4 @@
-// 类型债（暂缓）：本文件还有未修完的类型错，因此**没**列进 tsconfig.check.json。把 @ts-check 留在第 1 行会让人以为它在被检查 —— 宁可明说没开；清单见 docs/RUST-CORE-REFACTOR-PLAN.md「类型债」一节。
+// @ts-check
 'use strict';
 
 /**
@@ -836,16 +836,15 @@ function createPeerCoordinator(deps) {
 
   /**
    * 发消息给对端。
-   * @param {object} input
-   * @param {string} [input.peer]         peerId / 名称 / host:port
-   * @param {string} [input.host]
-   * @param {number} [input.port]
-   * @param {string} input.text
-   * @param {string} [input.sessionId]    本地会话（用于把对端回复落到同一会话）
-   * @param {boolean} [input.expectReply]
-   * @param {number} [input.timeoutMs]
-   * @param {string} [input.type]
-   * @param {number} [input.hops]
+   *
+   * 形状收成一处内联对象（而不是 `{object}` + 一串分散的 `input.xxx` 标签）：
+   * 字段散在注释各处时，加字段容易漏、也不容易一眼看全。
+   *
+   * @param {{ peer?: string, host?: string, port?: number, text?: string, sessionId?: string,
+   *           expectReply?: boolean, timeoutMs?: number, type?: string, hops?: number,
+   *           roomId?: string }} [input]
+   *   `peer`：peerId / 名称 / host:port；`sessionId`：本地会话（对端回复落同一会话）；
+   *   `roomId`：房间消息（Bot 面板的「房间 = 一次任务」，见 docs/BOT-ROOM-PLAN.md）
    */
   async function sendToPeer(input) {
     const i = input || /** @type {any} */ ({});

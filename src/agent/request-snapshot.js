@@ -130,9 +130,8 @@ function envelopeMessages(messagesJson, maxChars) {
 /**
  * 装配一行快照。返回 `null` 表示「不该写」（未启用 / 缺 sessionId / body 不合法）。
  *
- * 入参形状写成内联对象而不是 `{object}` + 一串 `desc.xxx` 标签：TypeScript 不认后者
- * （`{object}` 已经把类型钉死成 `{}`，字段标签全被忽略），于是每读一个字段都是一条类型错。
- * 字段含义见下面逐条说明：
+ * 入参形状收成一处内联对象（而不是 `{object}` + 一串分散的 `desc.xxx` 标签）：字段一多，
+ * 标签散在注释各处，加字段时容易漏、也不容易一眼看全。字段含义见下面逐条说明：
  *   - `body`：即将发送的请求体（含 model / messages / tools）
  *   - `source` / `reason`：`SNAPSHOT_SOURCES` / `SNAPSHOT_REASONS` 之一
  *   - `compaction`：{ compacted, tokensBefore, tokensAfter, archiveId, tokenBudget, triggerRatio, compactionRoundCount }

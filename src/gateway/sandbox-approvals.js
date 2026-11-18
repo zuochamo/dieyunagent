@@ -1,4 +1,4 @@
-// 类型债（暂缓）：本文件还有未修完的类型错，因此**没**列进 tsconfig.check.json。把 @ts-check 留在第 1 行会让人以为它在被检查 —— 宁可明说没开；清单见 docs/RUST-CORE-REFACTOR-PLAN.md「类型债」一节。
+// @ts-check
 'use strict';
 
 /**
@@ -220,6 +220,13 @@ function createSandboxApprovals(deps = {}) {
       `SANDBOX_ASK request=${requestId} category=${category} mode=${decision.mode} session=${sessionId || '-'} scope=${scope}`
     );
 
+    /**
+     * 用户答复：`true`（旧形态）或 `{ granted, reason }`（带原因的形态）。两侧都认，
+     * 所以这里必须显式声明成联合 —— 不声明的话 TS 从 `await` 的返回推不出形状，
+     * 后面 `answer.granted` 会落到 `never` 上。
+     *
+     * @type {{ granted?: boolean, reason?: string } | boolean | null | undefined}
+     */
     let answer;
     try {
       answer = await withTimeout(Promise.resolve(request(payload)), timeoutMs, {
@@ -240,11 +247,20 @@ function createSandboxApprovals(deps = {}) {
       };
     }
 
-    const granted = answer === true || (answer && answer.granted === true);
+    // 答复有两种形态：`true`（旧）或 `{ granted, reason }`。先 `typeof === 'object'` 再读字段，
+    // 让收窄显式落在对象形态上 —— 直接写 `answer && answer.granted` 时，`answer === true`
+    // 已经把另一支收窄成字面量 `true`，读 `.granted` 会报「不存在」。
+    // 归一一次：`answer` 可能是 `true`（旧形态）或 `{ granted, reason }`。先落成一个
+    // 「对象或 null」的局部量，后面所有字段读取都从它走 —— 免得每处都要重复 `!== null` 判断
+    // （TypeScript 不会把 `&&` 链里的收窄带到别的语句上）。
+    /** @type {{ granted?: boolean, reason?: string } | null} */
+    const reply = answer && typeof answer === 'object' ? answer : null;
+    const granted = answer === true || (reply !== null && reply.granted === true);
     recordAudit({ kind: granted ? 'grant' : 'decline', requestId, sessionId, category, scope, mode: decision.mode });
     if (!granted) {
       log(`SANDBOX_DECLINED request=${requestId} category=${category} session=${sessionId || '-'}`);
-      return { granted: false, remembered: false, reason: (answer && answer.reason) || '用户拒绝' };
+      const reason = reply && reply.reason ? reply.reason : '用户拒绝';
+      return { granted: false, remembered: false, reason };
     }
 
     grants.set(grantKey(sessionId, category, scope), { sessionId: sessionKey(sessionId), category, scope, at: now() });

@@ -1,4 +1,4 @@
-// 类型债（暂缓）：本文件还有未修完的类型错，因此**没**列进 tsconfig.check.json。把 @ts-check 留在第 1 行会让人以为它在被检查 —— 宁可明说没开；清单见 docs/RUST-CORE-REFACTOR-PLAN.md「类型债」一节。
+// @ts-check
 'use strict';
 
 /**
@@ -194,6 +194,8 @@ function createFinishPlanRun(deps) {
  * @param {() => object | null} deps.getCoreBridge
  * @param {() => object | null} deps.getMcpRuntime
  * @param {() => object | null} deps.getWindowTray
+ * @param {() => boolean} [deps.isBusy]
+ *   当前是否有别的活占着（模型正在跑一轮 / 索引在跑）—— 计划调度据此让路，别抢同一个槽
  * @param {(webContents?: object | null) => object} deps.createToolBridge
  * @param {() => object} deps.ensureMainCompactionAgent
  * @param {() => object | null} deps.getTrayNotify
@@ -211,7 +213,12 @@ function bootPlansRuntime(deps) {
   const log = deps.log;
 
   const plansStore = new Store(userData);
-  /** @type {Map<string, { runId: string, sessionId: string, startedAt: number, controller: AbortController }>} */
+  /**
+   * 正在跑的 plan 轮次。`planId` 在 `planId → run` 的登记处写入，`runId` 是 core 侧账本 id ——
+   * 两个都不是可选的，少写一个就是「读的时候说字段不存在」。
+   *
+   * @type {Map<string, { planId?: string, runId: string, sessionId: string, startedAt: number, controller?: AbortController }>}
+   */
   const runningPlans = new Map();
 
   const getMainWindowWebContents = () => {
@@ -370,8 +377,16 @@ function bootPlansRuntime(deps) {
       // 这里不再有「开工基线自检」「每轮无条件跑一条命令」这类固定步骤 —— 节奏是语义判断。
       if (isGoal) plansStore.beginAttempt(plan.id);
 
-      let result;
-      const planCtx = {
+      /**
+       * 一轮计划的结果。成功与失败**共用同一个扁平形状**（而不是判别式联合）：本仓
+       * `tsconfig.check.json` 没开 `strictNullChecks`，字面量判别式不参与收窄，联合的每一支
+       * 都会报「字段不存在」。字段按下面真正读取的写全。
+       *
+       * @type {{ ok: boolean, summary?: string, content?: string, error?: any,
+       *          outcome?: string|null, aborted?: boolean, stopped?: boolean,
+       *          sessionId?: string, mutatingToolCalls?: number }}
+       */
+      let result;      const planCtx = {
         userData,
         workspacePath: planWorkspacePath,
         gateway: gw,

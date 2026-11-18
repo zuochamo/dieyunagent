@@ -284,7 +284,7 @@ function mergeCatalogEntries(entries) {
 
 class McpCatalog {
   /**
-   * @param {{ userDataPath: string, log?: Function, listInstalled: () => object[], upsertInstalled: (payload: object) => object[] }} opts
+   * @param {{ userDataPath: string, log?: Function, listInstalled: () => object[], upsertInstalled: (payload: object) => object[] | { list: object[], action: string, mcpId: string } }} opts
    */
   constructor(opts) {
     this.userDataPath = opts.userDataPath || '';
