@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subtask {
@@ -12,6 +13,7 @@ pub struct Subtask {
     pub agent_type: String,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
@@ -31,6 +33,7 @@ pub struct ReviewResult {
     pub notes: String,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerResultInput {
@@ -44,6 +47,7 @@ pub struct WorkerResultInput {
     pub error: Option<String>,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerJobOut {
@@ -59,6 +63,7 @@ pub struct WorkerJobOut {
     pub best_of_n_total: u32,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannerTraceEntry {
@@ -69,6 +74,7 @@ pub struct PlannerTraceEntry {
     pub tools: Vec<Value>,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannerStartParams {
@@ -104,6 +110,7 @@ fn default_temperature() -> f64 {
     0.7
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannerContinueInput {

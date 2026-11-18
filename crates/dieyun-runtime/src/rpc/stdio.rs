@@ -74,7 +74,7 @@ pub async fn serve_stdio(state: AppState) -> anyhow::Result<()> {
             let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
-                    eprintln!("dieyun-core rpc runtime failed: {e}");
+                    dieyun_base::obs::io_error("rpc-runtime", &e.to_string());
                     return;
                 }
             };

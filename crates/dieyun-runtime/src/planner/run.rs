@@ -6,21 +6,22 @@ use serde_json::{json, Value};
 
 use dieyun_base::error::CoreError;
 
+use super::best_of_n::BestOfNState;
+use super::workers::{build_retry_jobs, build_worker_loop_start};
+use super::trace::{phase_name, push_trace};
 use super::plan_parse::{
-    build_fallback_plan, collect_workers_from_plan, parse_completed_outputs, parse_review_content,
-    plan_to_json, try_parse_plan_from_content, worker_job_needs_best_of_n,
+    build_fallback_plan, parse_completed_outputs, parse_review_content,
+    plan_to_json, try_parse_plan_from_content,
 };
 use super::prompts::{
-    build_best_of_n_pick_llm_body, build_explore_loop_messages, build_plan_llm_body,
-    build_planner_user_text, build_review_llm_body, build_synthesize_llm_body,
-    build_worker_task_system, format_trace_digest, parse_best_of_n_winner,
+    build_planner_user_text, build_review_llm_body,
 };
 use super::types::{
-    Plan, PlannerContinueInput, PlannerStartParams, PlannerTraceEntry, ReviewResult, Subtask,
+    Plan, PlannerContinueInput, PlannerStartParams, PlannerTraceEntry, ReviewResult,
     WorkerJobOut, WorkerResultInput,
 };
 
-fn planner_max_tool_calls(params: &PlannerStartParams) -> u32 {
+pub(super) fn planner_max_tool_calls(params: &PlannerStartParams) -> u32 {
     params.max_tool_calls.filter(|&n| n > 0).unwrap_or(0)
 }
 
@@ -31,14 +32,14 @@ fn planner_max_tool_calls(params: &PlannerStartParams) -> u32 {
 /// 于是 `lock().unwrap()` 一 panic，之后**每一次** planner 调用都在这里再 panic，
 /// 用户唯一的出路是重启 core。`sqlite.rs` 早就改成了同一口径（`unwrap_or_else` + 理由），
 /// planner 这里一直没跟上。
-fn lock_runs(
+pub(super) fn lock_runs(
     runs: &Mutex<HashMap<String, PlannerRunState>>,
 ) -> std::sync::MutexGuard<'_, HashMap<String, PlannerRunState>> {
     runs.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InternalPhase {
+pub(super) enum InternalPhase {
     NeedPlanLlm,
     NeedExploreLoop,
     NeedWorkers,
@@ -52,52 +53,38 @@ enum InternalPhase {
 }
 
 #[derive(Debug, Clone)]
-struct BestOfNAttemptRecord {
-    attempt_index: u32,
-    results: Vec<WorkerResultInput>,
-    summary: String,
-}
-
-#[derive(Debug, Clone)]
-struct BestOfNState {
-    job: WorkerJobOut,
-    total: u32,
-    attempt_index: u32,
-    collected: Vec<BestOfNAttemptRecord>,
-}
-
-struct PlannerRunState {
-    run_id: String,
-    params: PlannerStartParams,
-    phase: InternalPhase,
-    user_prompt: String,
-    plan_repair_attempt: u32,
-    last_plan_raw: String,
-    plan: Option<Plan>,
-    explore_notes: String,
-    explore_skipped: bool,
-    results: Vec<WorkerResultInput>,
-    review: Option<ReviewResult>,
-    worker_retries: u32,
-    pending_worker_jobs: Vec<WorkerJobOut>,
-    standard_worker_jobs: Vec<WorkerJobOut>,
-    bn_worker_jobs: Vec<WorkerJobOut>,
-    best_of_n_state: Option<BestOfNState>,
-    is_retry_batch: bool,
-    trace: Vec<PlannerTraceEntry>,
-    final_content: Option<String>,
-    hit_round_limit: bool,
+pub(super) struct PlannerRunState {
+    pub(super) run_id: String,
+    pub(super) params: PlannerStartParams,
+    pub(super) phase: InternalPhase,
+    pub(super) user_prompt: String,
+    pub(super) plan_repair_attempt: u32,
+    pub(super) last_plan_raw: String,
+    pub(super) plan: Option<Plan>,
+    pub(super) explore_notes: String,
+    pub(super) explore_skipped: bool,
+    pub(super) results: Vec<WorkerResultInput>,
+    pub(super) review: Option<ReviewResult>,
+    pub(super) worker_retries: u32,
+    pub(super) pending_worker_jobs: Vec<WorkerJobOut>,
+    pub(super) standard_worker_jobs: Vec<WorkerJobOut>,
+    pub(super) bn_worker_jobs: Vec<WorkerJobOut>,
+    pub(super) best_of_n_state: Option<BestOfNState>,
+    pub(super) is_retry_batch: bool,
+    pub(super) trace: Vec<PlannerTraceEntry>,
+    pub(super) final_content: Option<String>,
+    pub(super) hit_round_limit: bool,
     /// 计划被宿主上限改写时的一句人话（`None` = 模型要什么给了什么）。
     /// 与 `hit_round_limit` 并列上报：两者都是「交给你的计划不是它原本的样子」。
-    plan_truncation: Option<String>,
-    cancelled: bool,
-    resume_completed_ids: HashSet<String>,
+    pub(super) plan_truncation: Option<String>,
+    pub(super) cancelled: bool,
+    pub(super) resume_completed_ids: HashSet<String>,
 }
 
 #[derive(Default)]
 pub struct PlannerRunManager {
-    runs: Mutex<HashMap<String, PlannerRunState>>,
-    next_id: AtomicU64,
+    pub(super) runs: Mutex<HashMap<String, PlannerRunState>>,
+    pub(super) next_id: AtomicU64,
 }
 
 impl PlannerRunManager {
@@ -313,213 +300,6 @@ impl PlannerRunManager {
         Ok(json!({ "ok": true, "runId": run_id }))
     }
 
-    fn emit_phase(&self, run_id: &str) -> Result<Value, CoreError> {
-        let runs = lock_runs(&self.runs);
-        let run = runs
-            .get(run_id)
-            .ok_or_else(|| CoreError::rpc("NOT_FOUND", format!("planner run 不存在: {run_id}")))?;
-        self.build_response(run)
-    }
-
-    fn build_response(&self, run: &PlannerRunState) -> Result<Value, CoreError> {
-        let phase = phase_name(run.phase);
-        let mut out = json!({
-            "phase": phase,
-            "runId": run.run_id,
-            "trace": run.trace,
-        });
-        if let Some(obj) = out.as_object_mut() {
-            if let Some(plan) = &run.plan {
-                obj.insert("plan".into(), plan_to_json(plan));
-            }
-            match run.phase {
-                InternalPhase::NeedPlanLlm => {
-                    obj.insert(
-                        "llmBody".into(),
-                        build_plan_llm_body(
-                            &run.params.model,
-                            &run.params.sys_content,
-                            &run.user_prompt,
-                            run.plan_repair_attempt,
-                            &run.last_plan_raw,
-                        ),
-                    );
-                    obj.insert("repairAttempt".into(), json!(run.plan_repair_attempt));
-                }
-                InternalPhase::NeedExploreLoop => {
-                    if run.explore_skipped || !run.params.has_explore_tools {
-                        // Should not happen if logic correct; Node may skip calling loop
-                        obj.insert("skipExplore".into(), json!(true));
-                    } else if let Some(plan) = &run.plan {
-                        let (system, user) = build_explore_loop_messages(
-                            &run.params.sys_content,
-                            plan,
-                            &run.params.user_text,
-                            &run.params.chat_history_block,
-                        );
-                        obj.insert(
-                            "loopStart".into(),
-                            json!({
-                                "model": run.params.model,
-                                "messages": [
-                                    { "role": "system", "content": system },
-                                    { "role": "user", "content": user }
-                                ],
-                                "temperature": 0.2,
-                                "maxRounds": 24,
-                                "maxToolCalls": planner_max_tool_calls(&run.params),
-                                "agentType": "explore"
-                            }),
-                        );
-                        obj.insert("tracePhase".into(), json!("Explore · 只读勘察"));
-                    }
-                }
-                InternalPhase::NeedWorkers | InternalPhase::NeedRetryWorkers => {
-                    obj.insert(
-                        "workerJobs".into(),
-                        serde_json::to_value(&run.pending_worker_jobs).unwrap_or(json!([])),
-                    );
-                    obj.insert("isRetry".into(), json!(run.is_retry_batch));
-                }
-                InternalPhase::NeedBestOfNAttempt => {
-                    if let Some(bn) = &run.best_of_n_state {
-                        obj.insert(
-                            "workerJob".into(),
-                            serde_json::to_value(&bn.job).unwrap_or(json!({})),
-                        );
-                        obj.insert("attemptIndex".into(), json!(bn.attempt_index));
-                        obj.insert("totalAttempts".into(), json!(bn.total));
-                        obj.insert(
-                            "worktreeRole".into(),
-                            json!(format!("{}-bn{}", bn.job.worker, bn.attempt_index)),
-                        );
-                        obj.insert("isRetry".into(), json!(bn.job.is_retry));
-                    }
-                    obj.insert(
-                        "tracePhase".into(),
-                        json!(format!(
-                            "Best-of-{} · 执行器 {}",
-                            run.best_of_n_state.as_ref().map(|b| b.total).unwrap_or(0),
-                            run.best_of_n_state
-                                .as_ref()
-                                .map(|b| b.job.worker.as_str())
-                                .unwrap_or("")
-                        )),
-                    );
-                }
-                InternalPhase::NeedBestOfNPickLlm => {
-                    if let (Some(bn), Some(plan)) = (&run.best_of_n_state, &run.plan) {
-                        let attempts: Vec<(u32, String)> = bn
-                            .collected
-                            .iter()
-                            .map(|a| (a.attempt_index, a.summary.clone()))
-                            .collect();
-                        obj.insert(
-                            "llmBody".into(),
-                            build_best_of_n_pick_llm_body(
-                                &run.params.model,
-                                &plan.plan_summary,
-                                &attempts,
-                            ),
-                        );
-                        obj.insert(
-                            "tracePhase".into(),
-                            json!(format!(
-                                "Best-of-{} · 选优 · 执行器 {}",
-                                bn.total, bn.job.worker
-                            )),
-                        );
-                    }
-                }
-                InternalPhase::NeedReviewLlm => {
-                    if let Some(plan) = &run.plan {
-                        let results_json: Vec<Value> = run
-                            .results
-                            .iter()
-                            .map(|r| {
-                                json!({
-                                    "id": r.id,
-                                    "worker": r.worker,
-                                    "ok": r.error.is_none(),
-                                    "output": r.output.as_deref().or(r.error.as_deref()).unwrap_or("").chars().take(4000).collect::<String>()
-                                })
-                            })
-                            .collect();
-                        obj.insert(
-                            "llmBody".into(),
-                            build_review_llm_body(
-                                &run.params.model,
-                                &run.params.sys_content,
-                                plan,
-                                &results_json,
-                                &json!({}),
-                            ),
-                        );
-                    }
-                    obj.insert("tracePhase".into(), json!("规划师 · 验收"));
-                }
-                InternalPhase::NeedSynthesizeLlm => {
-                    if let Some(plan) = &run.plan {
-                        let results_json: Vec<Value> = run
-                            .results
-                            .iter()
-                            .map(|r| {
-                                json!({
-                                    "id": r.id,
-                                    "worker": r.worker,
-                                    "output": r.output,
-                                    "error": r.error
-                                })
-                            })
-                            .collect();
-                        let digest = format_trace_digest(&run.trace);
-                        obj.insert(
-                            "llmBody".into(),
-                            build_synthesize_llm_body(
-                                &run.params.model,
-                                &run.params.sys_content,
-                                plan,
-                                &results_json,
-                                &run.params.user_text,
-                                &run.params.chat_history_block,
-                                &digest,
-                                run.params.temperature,
-                                run.params.max_output_tokens,
-                            ),
-                        );
-                    }
-                    obj.insert("tracePhase".into(), json!("汇总"));
-                }
-                InternalPhase::Done => {
-                    obj.insert("content".into(), json!(run.final_content));
-                    obj.insert("hitRoundLimit".into(), json!(run.hit_round_limit));
-                    // 「交给你的计划不是它原本的样子」要说出来：模型据此知道这次没有交叉验证。
-                    if let Some(note) = &run.plan_truncation {
-                        obj.insert("truncated".into(), json!(true));
-                        obj.insert("truncatedNote".into(), json!(note));
-                    }
-                    obj.insert(
-                        "results".into(),
-                        serde_json::to_value(&run.results)?,
-                    );
-                    if let Some(review) = &run.review {
-                        obj.insert(
-                            "review".into(),
-                            json!({
-                                "accepted": review.accepted,
-                                "retry": review.retry,
-                                "notes": review.notes
-                            }),
-                        );
-                    }
-                    obj.insert("deferWorktreeCleanup".into(), json!(true));
-                }
-                InternalPhase::Cancelled => {}
-            }
-        }
-        Ok(out)
-    }
-
     fn handle_plan_llm(
         &self,
         run: &mut PlannerRunState,
@@ -594,174 +374,7 @@ impl PlannerRunManager {
         self.build_response(run)
     }
 
-    fn handle_worker_batch(
-        &self,
-        run: &mut PlannerRunState,
-        input: PlannerContinueInput,
-    ) -> Result<Value, CoreError> {
-        // 宿主可能少回（某个 worker 崩了 / 结果被裁剪）也可能多回：少回的那条**补一条
-        // error 结果**，不许丢 —— 丢掉会让验收根本看不到这个子任务，于是可能判「都做完了」
-        // 并合成一个假的完成；多回的直接忽略并留一条 trace。
-        let expected: Vec<String> = run
-            .pending_worker_jobs
-            .iter()
-            .flat_map(|j| j.tasks.iter().map(|t| t.id.clone()))
-            .collect();
-        let mut returned: HashMap<String, WorkerResultInput> = input
-            .worker_results
-            .into_iter()
-            .map(|r| (r.id.clone(), r))
-            .collect();
-        let mut merged: Vec<WorkerResultInput> = Vec::with_capacity(expected.len());
-        for id in &expected {
-            match returned.remove(id) {
-                Some(result) => merged.push(result),
-                None => merged.push(WorkerResultInput {
-                    id: id.clone(),
-                    worker: String::new(),
-                    subagent_id: None,
-                    output: None,
-                    error: Some("worker 未返回结果（宿主漏回或该子任务未执行）".into()),
-                }),
-            }
-        }
-        if !returned.is_empty() {
-            push_trace(
-                run,
-                "规划师 · 执行",
-                format!("宿主回了 {} 条不属于本批的结果，已忽略", returned.len()),
-            );
-        }
-        let round_limit = input.hit_round_limit;
-        if round_limit {
-            // 撞轮次上限 ≠ 这批结果不存在：宿主把已经跑完的结果一起送回来了。
-            // 旧实现整批丢弃、跳过验收、拿某一路半成品当最终答复（用户看到的是
-            // 「又从头跑了一遍」或「只做了一部分却说完成」）。
-            run.hit_round_limit = true;
-            push_trace(
-                run,
-                "规划师 · 验收",
-                "轮次预算已耗尽：不再派新活，用已返回的结果做一次简化验收",
-            );
-        }
-        if run.is_retry_batch {
-            let retry_ids: HashSet<String> = run
-                .pending_worker_jobs
-                .iter()
-                .flat_map(|j| j.tasks.iter().map(|t| t.id.clone()))
-                .collect();
-            run.results.retain(|r| !retry_ids.contains(&r.id));
-        }
-        run.results.extend(merged);
-        run.pending_worker_jobs.clear();
-        run.standard_worker_jobs.clear();
-        if round_limit {
-            // 撞上限就不再开新方案（那要再来一轮 worker），直接进验收。
-            run.bn_worker_jobs.clear();
-        }
-        self.begin_best_of_n_or_review(run, input.worktree_ctx)
-    }
-
-    fn handle_best_of_n_attempt(
-        &self,
-        run: &mut PlannerRunState,
-        mut input: PlannerContinueInput,
-    ) -> Result<Value, CoreError> {
-        if input.hit_round_limit {
-            run.hit_round_limit = true;
-            // 撞上限的那一路结果也别丢：能收就收进 collected，选优时还能用上。
-            let results = std::mem::take(&mut input.worker_results);
-            if let Some(bn) = run.best_of_n_state.as_mut() {
-                if !results.is_empty() {
-                    let summary = summarize_worker_results(&results);
-                    bn.collected.push(BestOfNAttemptRecord {
-                        attempt_index: bn.attempt_index,
-                        results,
-                        summary,
-                    });
-                }
-            }
-            let have_attempts = run
-                .best_of_n_state
-                .as_ref()
-                .map(|bn| !bn.collected.is_empty())
-                .unwrap_or(false);
-            if have_attempts {
-                run.phase = InternalPhase::NeedBestOfNPickLlm;
-                push_trace(
-                    run,
-                    "Best-of-N · 选优",
-                    "轮次预算已耗尽：用已收到的方案做选优",
-                );
-                return self.build_response(run);
-            }
-            run.final_content = input.partial_content;
-            run.phase = InternalPhase::Done;
-            push_trace(
-                run,
-                "规划师 · 收尾",
-                "轮次预算已耗尽且没有可用方案：以半成品收尾",
-            );
-            return self.build_response(run);
-        }
-        let trace_note = {
-            let Some(bn) = run.best_of_n_state.as_mut() else {
-                return Err(CoreError::rpc("INVALID_STATE", "best_of_n 状态缺失"));
-            };
-            let summary = summarize_worker_results(&input.worker_results);
-            bn.collected.push(BestOfNAttemptRecord {
-                attempt_index: bn.attempt_index,
-                results: input.worker_results,
-                summary,
-            });
-            if bn.attempt_index < bn.total {
-                bn.attempt_index += 1;
-                run.phase = InternalPhase::NeedBestOfNAttempt;
-                Some((
-                    format!("Best-of-{} · 执行器 {}", bn.total, bn.job.worker),
-                    format!("方案 {}/{}", bn.attempt_index, bn.total),
-                ))
-            } else {
-                run.phase = InternalPhase::NeedBestOfNPickLlm;
-                Some((
-                    format!("Best-of-{} · 选优 · 执行器 {}", bn.total, bn.job.worker),
-                    "正在评审各方案…".to_string(),
-                ))
-            }
-        };
-        if let Some((phase, thought)) = trace_note {
-            push_trace(run, phase, thought);
-        }
-        self.build_response(run)
-    }
-
-    fn handle_best_of_n_pick_llm(
-        &self,
-        run: &mut PlannerRunState,
-        content: String,
-    ) -> Result<Value, CoreError> {
-        let Some(bn) = run.best_of_n_state.take() else {
-            return Err(CoreError::rpc("INVALID_STATE", "best_of_n 状态缺失"));
-        };
-        let winner_idx = parse_best_of_n_winner(&content, bn.collected.len());
-        let winner = bn
-            .collected
-            .get(winner_idx)
-            .or_else(|| bn.collected.first())
-            .ok_or_else(|| CoreError::rpc("INVALID_STATE", "best_of_n 无有效方案"))?;
-        if run.is_retry_batch {
-            let retry_ids: HashSet<String> = bn.job.tasks.iter().map(|t| t.id.clone()).collect();
-            run.results.retain(|r| !retry_ids.contains(&r.id));
-        }
-        run.results.extend(winner.results.clone());
-        if let Some(last) = run.trace.last_mut() {
-            last.thought = format!("已选方案 {} / {}", winner.attempt_index, bn.total);
-        }
-        run.pending_worker_jobs.clear();
-        self.begin_best_of_n_or_review(run, None)
-    }
-
-    fn begin_best_of_n_or_review(
+    pub(super) fn begin_best_of_n_or_review(
         &self,
         run: &mut PlannerRunState,
         worktree_ctx: Option<Value>,
@@ -803,29 +416,6 @@ impl PlannerRunManager {
             }
         }
         Ok(resp)
-    }
-
-    fn start_best_of_n_job(
-        &self,
-        run: &mut PlannerRunState,
-        job: WorkerJobOut,
-    ) -> Result<(), CoreError> {
-        let total = job.best_of_n_total.max(2).min(3);
-        let worker = job.worker.clone();
-        run.pending_worker_jobs = vec![job.clone()];
-        run.best_of_n_state = Some(BestOfNState {
-            job,
-            total,
-            attempt_index: 1,
-            collected: vec![],
-        });
-        run.phase = InternalPhase::NeedBestOfNAttempt;
-        push_trace(
-            run,
-            format!("Best-of-{total} · 执行器 {worker}"),
-            format!("方案 1/{total}"),
-        );
-        Ok(())
     }
 
     fn handle_review_llm(
@@ -916,249 +506,6 @@ impl PlannerRunManager {
         self.build_response(run)
     }
 
-    fn prepare_worker_jobs(
-        &self,
-        run: &mut PlannerRunState,
-        is_retry: bool,
-    ) -> Result<(), CoreError> {
-        let plan = run
-            .plan
-            .as_ref()
-            .ok_or_else(|| CoreError::rpc("INVALID_STATE", "plan 缺失"))?
-            .clone();
-        let subtasks: Vec<Subtask> = plan
-            .subtasks
-            .iter()
-            .filter(|st| !run.resume_completed_ids.contains(&st.id))
-            .cloned()
-            .collect();
-        if subtasks.is_empty() && !run.resume_completed_ids.is_empty() {
-            run.phase = InternalPhase::NeedReviewLlm;
-            push_trace(run, "规划师 · 跳过 Worker", "所有子任务已在检查点中完成");
-            return Ok(());
-        }
-        let workers = collect_workers_from_plan(&subtasks);
-        if !workers.is_empty() {
-            let bn_note = if plan.best_of_n > 1 {
-                format!(" · Best-of-{}（build 子任务）", plan.best_of_n)
-            } else {
-                String::new()
-            };
-            let note = if workers.len() > 1 {
-                format!(
-                    "调度 · {} 路并行子 Agent（worktree）{bn_note}",
-                    workers.len()
-                )
-            } else {
-                format!("调度 · 子 Agent（worktree）{bn_note}")
-            };
-            push_trace(
-                run,
-                note,
-                workers
-                    .iter()
-                    .map(|w| format!("执行器 {w}"))
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-            );
-        }
-        let all_jobs: Vec<WorkerJobOut> = workers
-            .into_iter()
-            .map(|worker| {
-                let tasks: Vec<Subtask> = subtasks
-                    .iter()
-                    .filter(|t| t.worker == worker)
-                    .cloned()
-                    .collect();
-                let mut job = WorkerJobOut {
-                    worker: worker.clone(),
-                    tasks,
-                    is_retry,
-                    retry_reason: None,
-                    use_best_of_n: false,
-                    best_of_n_total: 0,
-                };
-                if worker_job_needs_best_of_n(&plan, &job) {
-                    job.use_best_of_n = true;
-                    job.best_of_n_total = plan.best_of_n;
-                }
-                job
-            })
-            .filter(|j| !j.tasks.is_empty())
-            .collect();
-        self.set_worker_queues(run, all_jobs, is_retry)
-    }
-
-    fn set_worker_queues(
-        &self,
-        run: &mut PlannerRunState,
-        all_jobs: Vec<WorkerJobOut>,
-        is_retry: bool,
-    ) -> Result<(), CoreError> {
-        run.standard_worker_jobs = all_jobs
-            .iter()
-            .filter(|j| !j.use_best_of_n)
-            .cloned()
-            .collect();
-        run.bn_worker_jobs = all_jobs
-            .iter()
-            .filter(|j| j.use_best_of_n)
-            .cloned()
-            .collect();
-        run.pending_worker_jobs = run.standard_worker_jobs.clone();
-        run.best_of_n_state = None;
-        run.is_retry_batch = is_retry;
-        if run.pending_worker_jobs.is_empty() && !run.bn_worker_jobs.is_empty() {
-            let job = run.bn_worker_jobs.remove(0);
-            self.start_best_of_n_job(run, job)?;
-        }
-        Ok(())
-    }
-
-    fn update_plan_trace(&self, run: &mut PlannerRunState) {
-        if let Some(plan) = run.plan.clone() {
-            Self::update_plan_trace_on(run, &plan);
-        }
-    }
-
-    fn update_plan_trace_on(run: &mut PlannerRunState, plan: &Plan) {
-        let plan_lines = plan
-            .subtasks
-            .iter()
-            .map(|s| format!("· [{}] {} {}", s.worker, s.id, s.title))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let todo_lines = if plan.todos.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "TODO\n{}\n\n",
-                plan.todos
-                    .iter()
-                    .enumerate()
-                    .map(|(i, t)| format!("[ ] {}. {t}", i + 1))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        };
-        let fallback_note = if plan.fallback {
-            "\n\n（规划 JSON 解析失败，已降级为单任务执行）"
-        } else {
-            ""
-        };
-        if let Some(last) = run.trace.first_mut() {
-            last.thought = format!(
-                "{}{plan_lines}{fallback_note}",
-                format!("{}\n\n{todo_lines}", plan.plan_summary)
-            );
-        }
-    }
-}
-
-fn build_worker_loop_start(
-    run: &PlannerRunState,
-    job: &WorkerJobOut,
-    task: &Subtask,
-    subagent_id: &str,
-    worktree_path: Option<&str>,
-    role_messages: &str,
-    prior_summary: &str,
-) -> Value {
-    let plan_summary = run
-        .plan
-        .as_ref()
-        .map(|p| p.plan_summary.as_str())
-        .unwrap_or("");
-    let system = build_worker_task_system(
-        &run.params.sys_content,
-        &job.worker,
-        task,
-        plan_summary,
-        subagent_id,
-        worktree_path,
-        role_messages,
-        prior_summary,
-        &run.explore_notes,
-    );
-    let user = format!(
-        "【用户原始需求】\n{}\n\n请完成当前子任务（详见系统提示）。",
-        run.params.user_text
-    );
-    json!({
-        "model": run.params.model,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user }
-        ],
-        "temperature": run.params.temperature,
-        "maxRounds": 96,
-        "maxToolCalls": planner_max_tool_calls(&run.params),
-        "agentType": task.agent_type,
-        "worker": job.worker,
-        "subtaskId": task.id,
-        "subagentId": subagent_id,
-    })
-}
-
-fn build_retry_jobs(run: &PlannerRunState, review: &ReviewResult) -> Vec<WorkerJobOut> {
-    let plan = match &run.plan {
-        Some(p) => p,
-        None => return vec![],
-    };
-    let mut jobs = Vec::new();
-    for item in &review.retry {
-        let worker = item.get("worker").and_then(|v| v.as_str()).unwrap_or("A");
-        let reason = item
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let ids: HashSet<String> = item
-            .get("subtaskIds")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let tasks: Vec<Subtask> = plan
-            .subtasks
-            .iter()
-            .filter(|t| t.worker == worker && (ids.is_empty() || ids.contains(&t.id)))
-            .cloned()
-            .collect();
-        if tasks.is_empty() {
-            continue;
-        }
-        let mut job = WorkerJobOut {
-            worker: worker.to_string(),
-            tasks,
-            is_retry: true,
-            retry_reason: reason,
-            use_best_of_n: false,
-            best_of_n_total: 0,
-        };
-        if worker_job_needs_best_of_n(plan, &job) {
-            job.use_best_of_n = true;
-            job.best_of_n_total = plan.best_of_n;
-        }
-        jobs.push(job);
-    }
-    jobs
-}
-
-fn summarize_worker_results(results: &[WorkerResultInput]) -> String {
-    results
-        .iter()
-        .map(|r| {
-            format!(
-                "[{}] {}",
-                r.id,
-                r.output.as_deref().or(r.error.as_deref()).unwrap_or("(无)")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// 计划的最终形态 + **被宿主上限改写过的地方**（`None` 表示模型要什么给了什么）。
@@ -1201,30 +548,6 @@ fn finalize_plan(mut plan: Plan, cfg_best_of_n: u32) -> FinalizedPlan {
         None
     };
     FinalizedPlan { plan, truncation }
-}
-
-fn push_trace(run: &mut PlannerRunState, phase: impl Into<String>, thought: impl Into<String>) {
-    run.trace.push(PlannerTraceEntry {
-        round: run.trace.len() as u32 + 1,
-        phase: phase.into(),
-        thought: thought.into(),
-        tools: vec![],
-    });
-}
-
-fn phase_name(p: InternalPhase) -> &'static str {
-    match p {
-        InternalPhase::NeedPlanLlm => "need_plan_llm",
-        InternalPhase::NeedExploreLoop => "need_explore_loop",
-        InternalPhase::NeedWorkers => "need_workers",
-        InternalPhase::NeedBestOfNAttempt => "need_best_of_n_attempt",
-        InternalPhase::NeedBestOfNPickLlm => "need_best_of_n_pick_llm",
-        InternalPhase::NeedReviewLlm => "need_review_llm",
-        InternalPhase::NeedRetryWorkers => "need_retry_workers",
-        InternalPhase::NeedSynthesizeLlm => "need_synthesize_llm",
-        InternalPhase::Done => "done",
-        InternalPhase::Cancelled => "cancelled",
-    }
 }
 
 fn now_ms() -> u64 {

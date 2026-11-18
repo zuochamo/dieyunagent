@@ -333,7 +333,10 @@ impl MemoryStore {
                 // 主 open() 走惰性初始化（库打不开不该打死启动），而自愈只是一次幂等 UPDATE。
                 // 失败要留一句日志：库损坏时自愈会静默不生效，而「数据一直脏」是最难查的那种故障。
                 if let Err(e) = store.reconcile_memory_ledger(now_ms()) {
-                    eprintln!("[dieyun:memory] 账本自愈失败（下次启动重试）: {e}");
+                    dieyun_base::obs::degraded(
+                "memory.reconcile",
+                &format!("账本自愈失败（下次启动重试）: {e}"),
+            );
                 }
                 std::thread::sleep(PRUNE_STARTUP_DELAY);
                 loop {

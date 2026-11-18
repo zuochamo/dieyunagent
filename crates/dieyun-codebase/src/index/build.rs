@@ -400,9 +400,9 @@ impl IndexService {
         if skipped > 0 {
             // 一行诊断：永久不可索引的文件已清掉旧 chunk，暂时读不到的下一轮再试。
             // 没有这一行，「搜索返回文件里已不存在的内容」只能靠人翻库才发现。
-            eprintln!(
-                "[index] {} 个文件本轮未进索引（超限/二进制已清旧 chunk，读失败下轮重试）",
-                skipped
+            dieyun_base::obs::degraded(
+                "index.skipped_files",
+                &format!("{skipped} 个文件本轮未进索引（超限/二进制已清旧 chunk，读失败下轮重试）"),
             );
         }
 

@@ -176,7 +176,7 @@ pub async fn drive(
                         body["messages"] = msgs.clone();
                     }
                 }
-                Err(err) => eprintln!("[round.prepare] 本轮跳过请求准备：{err}"),
+                Err(err) => dieyun_base::obs::degraded("round.prepare", &err.to_string()),
             }
         }
 
@@ -213,11 +213,11 @@ pub async fn drive(
                     // （预算为 0 / 没到可折档位 / 尾巴全是锚点）。以前这里只接 `?`（Err）就重发，
                     // 于是「折不动」也照发一次 —— 原样再失败一次，白花一次 token 与等待。
                     if manager.fold_now(run_id, true)?.is_some() {
-                        eprintln!("[agent.run] 上下文溢出：强制折叠后重发一次");
+                        dieyun_base::obs::heal(run_id, "fold_resend", "上下文溢出：强制折叠后重发一次");
                         response = manager.next_body(run_id)?;
                         continue;
                     }
-                    eprintln!("[agent.run] 上下文溢出但无可折内容：不再重发");
+                    dieyun_base::obs::heal(run_id, "fold_skip", "上下文溢出但无可折内容：不再重发");
                     return Err(err);
                 }
                 if !image_retried && looks_like_image_reject(&text) {
@@ -225,9 +225,17 @@ pub async fn drive(
                     let (dropped, _) = manager.drop_images(run_id, None)?;
                     if dropped == 0 {
                         // 账本里本来就没有图：说明是请求级注入的图，交给下一轮 round.prepare 不再注入
-                        eprintln!("[agent.run] 上游拒图，但账本里没有可摘的图（本轮放弃注入）");
+                        dieyun_base::obs::heal(
+                            run_id,
+                            "image_drop_none",
+                            "上游拒图，但账本里没有可摘的图（本轮放弃注入）",
+                        );
                     } else {
-                        eprintln!("[agent.run] 上游拒图：摘掉 {dropped} 张后重发一次");
+                        dieyun_base::obs::heal(
+                            run_id,
+                            "image_resend",
+                            &format!("上游拒图：摘掉 {dropped} 张后重发一次"),
+                        );
                     }
                     response = manager.next_body(run_id)?;
                     continue;

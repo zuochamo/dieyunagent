@@ -287,9 +287,12 @@ impl SqliteHandle {
         // 而是此后每条写入都进那个永不提交的事务，进程一退全部丢失，且全程没有任何报错。
         // 这里报告并回滚：宁可丢掉那笔来路不明的未提交写入，也不能让它吞掉整个进程的数据。
         if !conn.is_autocommit() {
-            eprintln!(
-                "[dieyun:db] 常驻写连接带着未提交事务进入 with_conn（{}），已回滚",
-                self.path.display()
+            crate::obs::degraded(
+                "sqlite.dirty_txn",
+                &format!(
+                    "常驻写连接带着未提交事务进入 with_conn（{}），已回滚",
+                    self.path.display()
+                ),
             );
             let _ = conn.execute_batch("ROLLBACK");
         }

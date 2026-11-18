@@ -364,8 +364,9 @@ fn ensure_fts_ready(conn: &Connection, source_table: &str, fts_table: &str) {
     let rebuild = format!("INSERT INTO {fts_table}({fts_table}) VALUES('rebuild')");
     let rebuilt = conn.execute(&rebuild, []).is_ok();
     if !rebuilt || !fts_write_probe(conn, source_table) {
-        eprintln!(
-            "[dieyun:memory] FTS 索引重建后写入仍失败：{source_table} 的写入路径可能已被其它损坏阻塞"
+        dieyun_base::obs::degraded(
+            "memory.fts_rebuild",
+            &format!("{source_table} 的 FTS 写入路径可能已被其它损坏阻塞"),
         );
     }
 }

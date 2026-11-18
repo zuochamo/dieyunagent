@@ -62,9 +62,9 @@ impl IndexService {
             // 是因为唯一调用方是起动期的 `IndexService::from_config` —— 清理失败不该让 core
             // 起不来，但也不能当它没发生。
             if let Err(e) = crate::graph::clear_workspace_rows(&conn, &root_hash) {
-                eprintln!(
-                    "[index] 工作区 {} 的图谱清理失败，整条留到下次启动重试：{e}",
-                    root_path
+                dieyun_base::obs::degraded(
+                    "index.graph_cleanup",
+                    &format!("工作区 {root_path} 的图谱清理失败，整条留到下次启动重试：{e}"),
                 );
                 continue;
             }

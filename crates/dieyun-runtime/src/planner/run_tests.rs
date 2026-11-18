@@ -3,6 +3,8 @@
 
 use super::*;
 
+use crate::planner::types::{Plan, Subtask, WorkerResultInput};
+
 fn sample_params() -> PlannerStartParams {
     PlannerStartParams {
         model: "test-model".into(),

@@ -390,8 +390,11 @@ async fn single_channel_content_becomes_thought_not_visible_reply() {
     assert_eq!(last.full_thought.as_deref(), Some(reasoning_text));
 }
 
-/// 入口传的是 camelCase 字段 + snake_case 取值，务必与 Node 端逐字对齐，
-/// 否则通道盖章到不了账本（症状是「改了没效果」）。
+/// 入口传的是 camelCase 字段 + snake_case 取值。
+///
+/// 这条不再靠「务必逐字对齐」的注释：字段名由 `@contract` 生成的
+/// `types/core-contracts.d.ts` 与 Node 调用方对齐（`npm run check:js` 会红），
+/// **取值**（`answer` / `reasoning` / `absent`）由本用例 + 那份 d.ts 的联合类型两侧共同钉住。
 #[test]
 fn llm_response_input_deserializes_content_channel() {
     let as_reasoning: LlmResponseInput =

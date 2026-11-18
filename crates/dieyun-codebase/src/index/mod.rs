@@ -186,10 +186,13 @@ impl IndexService {
         // 的统计失真（实测某条已删项目留了 53,538 段区段）。构造期做，不和在跑的建库抢锁。
         let removed = svc.prune_missing_workspaces();
         if !removed.is_empty() {
-            eprintln!(
-                "[index] 清掉 {} 个根目录已消失的工作区：{}",
-                removed.len(),
-                removed.join(", ")
+            dieyun_base::obs::degraded(
+                "index.prune_workspaces",
+                &format!(
+                    "清掉 {} 个根目录已消失的工作区：{}",
+                    removed.len(),
+                    removed.join(", ")
+                ),
             );
         }
         svc
@@ -234,7 +237,7 @@ impl IndexService {
                         }
                     }
                     Err(err) => {
-                        eprintln!("[index] 查询向量跳过（embedding 不可用）：{err}");
+                        dieyun_base::obs::degraded("index.query_vector", &err.to_string());
                     }
                 }
             }

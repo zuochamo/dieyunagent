@@ -147,8 +147,83 @@ pub fn degraded(area: &str, msg: &str) {
     emit(&degraded_line(area, msg));
 }
 
+/// 一行自动恢复动作：内核替上游或替自己擦了一次屁股（折叠重发 / 摘图重发）。
+///
+/// 与 `degraded` 的区别：**这不是失败**，而是一次已经发生的补救 —— 记成 degraded
+/// 会让「降级率」把自愈也算进去。
+pub fn heal_line(run: &str, action: &str, detail: &str) -> String {
+    format!("[rpc-heal] run={run} action={action} detail={detail}")
+}
+
+pub fn heal(run: &str, action: &str, detail: &str) {
+    emit(&heal_line(run, action, detail));
+}
+
 #[cfg(test)]
 mod tests {
+    /// 自愈动作单独一条前缀：它不是失败，别混进 `[rpc-degraded]` 的降级率。
+    #[test]
+    fn heal_line_names_run_action_and_detail() {
+        assert_eq!(
+            heal_line("run-7", "fold_resend", "上下文溢出：强制折叠后重发一次"),
+            "[rpc-heal] run=run-7 action=fold_resend detail=上下文溢出：强制折叠后重发一次"
+        );
+    }
+
+    /// **源码级守卫**：`eprintln!` 只许出现在本文件的 sink（`emit`）里。
+    ///
+    /// 为什么需要它：结构化事件的唯一价值是「前缀与字段稳定」。散落的 ad-hoc `eprintln!`
+    /// 会重新长出第二套格式（`[agent.run]` / `[index]` / `[dieyun:db]` …），宿主一旦按前缀
+    /// 解析就又变回「把日志当 IPC」—— 那正是 §2 这条债的成因。
+    #[test]
+    fn eprintln_lives_only_in_the_sink() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .to_path_buf();
+        let mut offenders: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&crates).expect("read crates/") {
+            let Ok(entry) = entry else { continue };
+            let src = entry.path().join("src");
+            if src.is_dir() {
+                collect_eprintln(&src, &mut offenders);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "eprintln! 只许出现在 obs.rs 的 sink，请改走 obs::degraded / obs::heal / obs::io_error：{offenders:?}"
+        );
+    }
+
+    fn collect_eprintln(dir: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_eprintln(&path, out);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // 本文件是 sink；测试文件里 print 调试随便写
+            if name == "obs.rs" || name == "tests.rs" || name.ends_with("_tests.rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // 只看生产代码：第一个 `#[cfg(test)]` 之后是本文件的测试模块
+            let prod = text.split("#[cfg(test)]").next().unwrap_or("");
+            if prod.contains("eprintln!") {
+                out.push(path.display().to_string());
+            }
+        }
+    }
+
 
     /// 降级行要能被 `grep` 到：它是「失败还在，但没打断主流程」的唯一痕迹。
     #[test]

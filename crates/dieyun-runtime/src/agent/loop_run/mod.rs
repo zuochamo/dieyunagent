@@ -66,6 +66,7 @@ fn strip_inline_images_from_messages(messages: &mut [Value]) {
 /// 护栏数字的唯一来源是 Node：`agent-limits.js` 解析、模型设置 `agentToolCallLimit`
 /// （按 Context 档位存）/ `agentMaxRounds` 提供数值。**内核不留同名默认值** ——
 /// 跨语言复制一个数字，改一边就静默分叉。
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartParams {
@@ -95,6 +96,7 @@ pub struct StartParams {
     pub run_id: Option<String>,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallInput {
@@ -109,6 +111,7 @@ pub struct ToolCallInput {
 /// 单通道模型（能力表按精确模型 id 声明 `singleChannel`）把思考塞在 `content` 键里，
 /// 盖章后 Rust 账本不必再用「文本长度 / 是否含 markup」这类启发式猜。
 /// 未声明的模型一律 `Answer`；未知取值降级为 `Absent`，不阻断请求。
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentChannel {
@@ -123,6 +126,7 @@ pub enum ContentChannel {
 ///
 /// 与 `ContentChannel` 刻意分开：入口只可能盖出前三种，`Synthetic` 是**平台补的**
 /// 文本（段上限提示），只有账本会记录它。
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentSource {
@@ -150,6 +154,7 @@ pub struct LlmResponseInput {
     pub usage: Option<Value>,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolResultInput {
@@ -175,6 +180,7 @@ pub struct TraceRound {
     pub tools: Vec<TraceTool>,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceTool {
@@ -186,6 +192,7 @@ pub struct TraceTool {
     pub error: Option<String>,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoopResponse {
@@ -215,6 +222,7 @@ pub struct LoopResponse {
 /// 折叠**在循环内部**做（发出下一次请求之前），因为 transcript 归这层所有：
 /// 早先由 Node 每轮调 `compaction.fold` 再把 messages 用 `set_messages` 推回来，
 /// 等于同一份对话有两个写者。现在 Node 只读事实、写遥测。
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FoldFact {
@@ -229,6 +237,7 @@ pub struct FoldFact {
     pub folded_images: usize,
 }
 
+/// @contract Node 侧按字段读/写（`types/core-contracts.d.ts` 由它生成，字段漂了 `npm run check:js` 会红）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DelegateTool {
