@@ -553,7 +553,7 @@ npm run test:local-gateway-smoke          # 改 rpc/ 或 gateway 交互必跑
 | 3 | ✅ 已落地：`agent.run.tools` 的条数与归属必须和账本一致 | `loop_run/ledger.rs:pending_delegate_ids` + `handlers/async_core.rs`：缺/多/空一律在入口拒绝，拒绝不动账本 | 用例 `agent_run_tools_requires_one_result_per_delegate` |
 | 5 | 子串通道把「路径命中」算进 `hits`，`hits == 词元数` 判全覆盖 → 强证据静默丢 / 文件名顶第一 | `index/search.rs` | 要拆 `hits` 与 `content_hits` 两个表达式并补两条用例 |
 | 6 | 召回分数量纲跨分支不同，Node 用单一绝对阈值 0.12 | `memory/recall.rs` + `system-prompt-prep.js` | 要把「注入判定」收回分数产生方（`injectScore`），属跨语言契约改动 |
-| 7 | 巨石回涨 / 测试与实现同居 / index+graph 两套抽取器 / R2 出站投影 / 拆 crate | — | 结构批次（10.6 的后三步） |
+| 7 | ~~巨石回涨 / 测试与实现同居 / 两套抽取器 / R2 / 拆 crate~~ | — | **已完成**：§11 拆 crate、§12 R2、§13 抽取层、§14.1 测试分离；`planner/run.rs` 也已拆三刀（`trace` / `best_of_n` / `workers`，1229 → 560 行） |
 
 ---
 
