@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 局域网地址枚举（**唯一来源**）。
  *

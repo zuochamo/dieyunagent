@@ -1,5 +1,5 @@
-'use strict';
 // @ts-check
+'use strict';
 
 /**
  * Shared tool guardrail constants + pure logic (Main + Renderer).

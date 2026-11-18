@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 会话级目标对象（`session_goals` 表）：**唯一读写点**。
  *

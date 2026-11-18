@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * peer 服务端：**本机对内网暴露的那一扇门**。
  *

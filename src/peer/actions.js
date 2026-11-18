@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 内网 peer 的**动作语义唯一实现**：桌面 IPC（`src/main/ipc/peer.js`）与
  * headless 浏览器界面（`src/headless/desktop-turn.js` 的 `peer.*` 方法）都调这里。

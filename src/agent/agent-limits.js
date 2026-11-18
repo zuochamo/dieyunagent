@@ -1,5 +1,5 @@
-'use strict';
 // @ts-check
+'use strict';
 
 /**
  * Node-only 依赖入口：浏览器 / 裸脚本下为抛错桩，避免 esbuild 静态解析 fs / path / electron。
@@ -1469,6 +1469,7 @@ const AGENT_LIMITS_BY_TIER_FILE = 'agent-limits-by-tier.json';
 /** @type {string|null} */
 let nodeCacheUserData = null;
 /** @type {Record<string, Record<string, unknown>>|null} */
+/** @type {Record<string, Record<string, unknown>> | null} */
 let nodeByTierCache = null;
 
 /**
@@ -1524,8 +1525,16 @@ function remapLimitsTierId(id) {
   return remapLegacyContextTierId(id);
 }
 
+/**
+ * 把旧档位名的整表折叠到当前档位集合上。
+ *
+ * @param {Record<string, unknown>} raw
+ * @returns {Record<string, Record<string, unknown>>}
+ */
 function foldLimitsTierRecord(raw) {
-  return foldLegacyContextTierRecord(raw, (tid) => listKnownTierIds().includes(tid));
+  return /** @type {Record<string, Record<string, unknown>>} */ (
+    foldLegacyContextTierRecord(raw, (tid) => listKnownTierIds().includes(tid))
+  );
 }
 
 function isAgentLimitsByTierShape(raw) {
@@ -1534,8 +1543,16 @@ function isAgentLimitsByTierShape(raw) {
   return Object.keys(raw).some((k) => tierIds.includes(remapLimitsTierId(k)));
 }
 
+/**
+ * 把「归一化后的整表」压回「只含显式覆盖项的扁平记录」。
+ *
+ * `@param {Record<string, unknown>} values`
+ * `@returns {Record<string, unknown>}`
+ */
 function extractLimitOverridesFromNormalized(values) {
-  return limitsByTierModule().extractLimitOverrides(values);
+  return /** @type {Record<string, unknown>} */ (
+    limitsByTierModule().extractLimitOverrides(values)
+  );
 }
 
 function syncLimitsToMainProcess() {
@@ -1623,8 +1640,16 @@ function legacyAgentLimitsFilePath(userDataPath) {
   return path.join(userDataPath, 'agent-limits.json');
 }
 
+/**
+ * 读磁盘上的「按档位覆盖表」。
+ *
+ * 空表用带索引签名的断言而不是裸 `{}`：裸对象字面量在 TS 里是 `{}`（无索引签名），
+ * 赋给 `Record<...>` 会报错 —— 类型债里最常见的一类「类型过期」，不是代码错。
+ *
+ * @returns {Record<string, Record<string, unknown>>}
+ */
 function loadLimitsByTierFromDisk(userDataPath) {
-  if (!userDataPath) return {};
+  if (!userDataPath) return /** @type {Record<string, Record<string, unknown>>} */ ({});
   const fs = nodeRequire('fs');
   const byTierFile = agentLimitsFilePath(userDataPath);
   try {
@@ -1646,7 +1671,7 @@ function loadLimitsByTierFromDisk(userDataPath) {
   } catch {
     // ignore
   }
-  return {};
+  return /** @type {Record<string, Record<string, unknown>>} */ ({});
 }
 
 function getNodeLimitsByTier(userDataPath) {
@@ -1667,7 +1692,7 @@ function getAgentLimitsForNodeTier(userDataPath, tierId) {
 }
 
 function saveLimitsByTierToDisk(userDataPath, byTier) {
-  if (!userDataPath) return {};
+  if (!userDataPath) return /** @type {Record<string, Record<string, unknown>>} */ ({});
   const fs = nodeRequire('fs');
   const path = nodeRequire('path');
   const file = agentLimitsFilePath(userDataPath);

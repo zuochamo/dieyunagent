@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 单轮「完成验收」的**唯一来源**（Main）。
  *
@@ -198,7 +198,7 @@ function firstFailedAssertion(r, failedCount) {
  *   writeTools: string[],
  *   filePaths: string[],
  *   hasWriteSignal: boolean,
- *   failedValidations: Array<{ name: string, exitCode: number|null }>,
+ *   failedValidations: Array<{ label: string, exitCode: number|null }>,
  *   passedValidation: number,
  *   browserToolUsed: boolean,
  *   expectation: { used: boolean, lastFailed: boolean, lastSummary: string }
@@ -208,7 +208,7 @@ function collectEvidence(trace) {
   const filePaths = [];
   const seenPaths = new Set();
   const writeTools = [];
-  /** @type {Map<string, { name: string, failed: boolean, exitCode: number|null }>} */
+  /** @type {Map<string, { label: string, failed: boolean, exitCode: number|null }>} */
   const validations = new Map();
   let browserToolUsed = false;
   let expectation = { used: false, lastFailed: false, lastSummary: '' };
@@ -354,6 +354,14 @@ function evaluateReadiness(evidence, ctx = {}) {
 /**
  * LSP 设置（`maxPerFile` / `minSeverity` / 是否启用）的唯一来源就是 LSP 服务自己；
  * 这里只读不写，读失败视为"没有诊断能力"。
+ */
+/**
+ * 读 LSP 诊断设置（唯一来源是 `../lsp/diagnostics-service`）。
+ *
+ * 这里只声明本文件真正读的字段：`enabled` 与 `timeoutMs`（诊断预算）。
+ *
+ * @param {string} [userDataPath]
+ * @returns {{ enabled?: boolean, timeoutMs?: number, maxFiles?: number, maxPerFile?: number, minSeverity?: string } | null}
  */
 function loadLspSettingsFor(userDataPath) {
   if (!userDataPath) return { enabled: false, maxPerFile: null };

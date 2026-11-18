@@ -1,5 +1,5 @@
-'use strict';
 // @ts-check
+'use strict';
 
 /**
  * 定时计划运行的 Main 侧运行态归约。

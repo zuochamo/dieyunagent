@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * peer 客户端：**出站连接的唯一实现**。
  *

@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 
 const path = require('path');
 // 只读动作集合来自动作枚举唯一来源（src/computer/actions.js 的 mutates:false 派生）
@@ -484,8 +484,8 @@ function resolveToken(token, base, remote = false, homeDir = '') {
  * 命令的分类与决策。
  *
  * @param {string} command
- * @param {{ mode?: string, workspaceRoots?: string[], internalRoots?: string[], cwd?: string, remote?: boolean }} [opts]
- * @returns {{ action: 'allow'|'ask'|'deny', category: string, reason: string, mode: string, detail?: string }}
+ * @param {{ mode?: string, workspaceRoots?: string[], internalRoots?: string[], cwd?: string, remote?: boolean, homeDir?: string }} [opts]
+ * @returns {{ action: 'allow'|'ask'|'deny', category: string, reason: string, mode: string, path?: string, detail?: string }}
  */
 function decideShellCommand(command, opts = {}) {
   const mode = normalizeSandboxMode(opts.mode);
@@ -605,7 +605,7 @@ function decideShellCommand(command, opts = {}) {
  * —— 于是「read-only 一律问、workspace-write 只放工作区内、danger 全放行」在远端同样成立。
  *
  * @param {string} absPath
- * @param {{ mode?: string, workspaceRoots?: string[], internalRoots?: string[], remote?: boolean }} [opts]
+ * @param {{ mode?: string, workspaceRoots?: string[], internalRoots?: string[], remote?: boolean, homeDir?: string }} [opts]
  */
 function decideFsWrite(absPath, opts = {}) {
   const mode = normalizeSandboxMode(opts.mode);

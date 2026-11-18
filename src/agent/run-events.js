@@ -1,5 +1,5 @@
-'use strict';
 // @ts-check
+'use strict';
 
 /** @typedef {'run_start'|'prep'|'trace'|'stream'|'tool'|'round_limit'|'done'|'error'|'stopped'} AgentRunEventType */
 
@@ -129,6 +129,7 @@ function agentRunEventFromTrace(sessionId, trace, streamContent, extra = {}) {
   });
 }
 
+/** @type {Set<string>} */
 const TERMINAL_RUN_EVENT_TYPES = new Set([
   AGENT_RUN_EVENT_TYPES.DONE,
   AGENT_RUN_EVENT_TYPES.ERROR,

@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 目标型计划（plans trigger=goal）：**事实、核对、文字块的唯一来源**。
  *
@@ -199,7 +199,7 @@ function tailEvidence(stdout, stderr, maxChars) {
  *
  * 走 `host.exec` 唯一入口（沙箱三档 / 审批 / 进程句柄表全部复用），不另写 shell 执行器。
  *
- * @param {{ gateway: object, plan?: object, command?: string, checkId?: string, cwd?: string,
+ * @param {{ gateway?: object, plan?: object, command?: string, checkId?: string, cwd?: string,
  *           limits?: object, sessionId?: string, runId?: string, round?: number, log?: (m: string) => void }} opts
  * @returns {Promise<{ at: string, round: number, checkId: string, command: string, ok: boolean,
  *                     exitCode: number|null, note: string, tail: string }>}
@@ -331,7 +331,7 @@ function goalCheckProgress(plan) {
  *
  * 注意这里**不判断**「检查够不够证明目标达成」——那是语义判断，归模型与人。
  *
- * @param {{ plan: object, outcome?: string }} input
+ * @param {{ plan?: object, outcome?: string }} input
  * @returns {{ accept: boolean, outcome: string, facts: object, reason: string }}
  */
 function judgeGoalFinish(input = {}) {
@@ -392,7 +392,7 @@ function judgeGoalFinish(input = {}) {
  * 顺序即优先级：收尾主张 > 轮次 > 墙钟 > 续跑。
  * 「预算用完」只有一种含义：**还没收尾**，不是完成。
  *
- * @param {{ plan: object, limits?: object, now?: number, interrupted?: boolean }} input
+ * @param {{ plan?: object, limits?: object, now?: number, interrupted?: boolean }} input
  * @returns {{ cont: boolean, stop: string|null, delayMs?: number, budget: object }}
  */
 function decideContinuation(input = {}) {
@@ -433,7 +433,7 @@ function factLine(fact) {
  * 谁来做完没做完的判断？读到它的人与模型 —— 代码在这里既不写「已完成」也不写「未完成」，
  * 所以「预算耗尽」看起来就只是「跑了 N 轮、最后一条检查 exit 1」，不会被话术包装成完成。
  *
- * @param {{ plan: object, limits?: object, upcoming?: boolean, writes?: number|null }} input
+ * @param {{ plan?: object, limits?: object, upcoming?: boolean, writes?: number|null }} input
  * @returns {string}
  */
 function renderEvidenceBlock(input = {}) {

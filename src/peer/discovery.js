@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 局域网 peer 发现（UDP 广播）。
  *

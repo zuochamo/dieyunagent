@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 内网 peer 协调器（**互通语义的唯一实现**）。
  *

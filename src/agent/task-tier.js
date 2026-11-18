@@ -1,5 +1,5 @@
-'use strict';
 // @ts-check
+'use strict';
 
 /** @typedef {'trivial' | 'normal' | 'heavy'} AgentTaskTier */
 /**

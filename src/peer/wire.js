@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 内网 peer 线协议（**帧与信封的唯一来源**）。
  *

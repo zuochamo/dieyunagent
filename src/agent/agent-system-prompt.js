@@ -1,5 +1,5 @@
-'use strict';
 // @ts-check
+'use strict';
 
 // 纯 CJS 依赖：顶层 require 真源，替代原先「全局 → 运行期 require 探测」。
 const { packSystemPrompt: loadPackSystemPrompt } = require('./session-context');
@@ -188,7 +188,6 @@ function finalizePackedPrompt(packed) {
 }
 
 function assembleSystemPrompt(opts = {}) {
-  const pack = loadPackSystemPrompt();
   const stableChunks = [
     opts.languagePrompt,
     capUserSystemText(opts.userSystem),
@@ -202,7 +201,6 @@ function assembleSystemPrompt(opts = {}) {
     formatSystemTimeChunk(opts.now),
     ...(Array.isArray(opts.turnDataChunks) ? opts.turnDataChunks : [])
   ];
-  if (typeof pack === 'function') return finalizePackedPrompt(pack(stableChunks, turnChunks));
   return finalizePackedPrompt({
     stable: joinPromptChunksLocal(stableChunks),
     turnRide: joinPromptChunksLocal(turnChunks)

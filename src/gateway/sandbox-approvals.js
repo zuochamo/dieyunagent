@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * ask-once 审批：**越界操作问用户一次，记住到本会话结束**。
  *

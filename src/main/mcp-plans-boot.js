@@ -1,5 +1,5 @@
+// 类型债（暂缓）：本文件还剩约 14 处类型错（参数形状写成 {object} / {} 后按字段访问）。先摘掉 @ts-check，避免出现「写着在检查、其实没检查」的假 pragma；清单见 docs/RUST-CORE-REFACTOR-PLAN.md 的「类型债」一节。
 'use strict';
-// @ts-check
 
 /**
  * MCP runtime/catalogs and scheduled-plans assembly (called from app.whenReady).

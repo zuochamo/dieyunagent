@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 频道（企业微信等外部入口）的 IPC（Renderer ↔ Main）。
  *

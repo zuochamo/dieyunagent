@@ -1,6 +1,6 @@
+// @ts-check
 'use strict';
 
-// @ts-check
 /**
  * 内网 peer 的 IPC（Renderer ↔ Main）。
  *
