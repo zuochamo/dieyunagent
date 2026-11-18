@@ -384,31 +384,24 @@ npm run test:local-gateway-smoke          # 改 rpc/ 或 gateway 交互必跑
 |---|---|---|---|
 | A 级缺陷 | **19 → 0**（P0 修 11 条、P1 修 1 条、P2 修 2 条、收尾批修 5 条） | 0 | §2.1 每条都有测试且绿 |
 
-### 类型债（独立于 P0–P6，2026-11-18 处理了第一轮）
+### 类型债（独立于 P0–P6）· **已清零 2026-11-18**
 
-**根因**：`// @ts-check` 写在 `'use strict';` **之后**会被 TypeScript 直接忽略 —— 仓里 **30 个**文件全是这个写法，所以 `npm run check:js` 这些年只覆盖 4 个手工列进 `tsconfig.check.json` 的文件（那 4 个的 pragma 也在这处错位）。等于闸门一直在、但一直在空转。
+**根因**：`// @ts-check` 写在 `use strict` 声明**之后**会被 TypeScript 直接忽略 —— 仓里 **30 个**文件全是这个写法，于是 `npm run check:js` 这些年只覆盖 4 个手工列进 `tsconfig.check.json` 的文件（那 4 个的 pragma 也在这处错位）。闸门一直在，但一直在空转。
 
-**这一轮的结论（数字是实测，不是估的）**：
-- 把 pragma 全部挪到第 1 行后，真正的类型错是 **108 处**（原估计 19 处，差了一个数量级）。
-- **修掉 44 处**，**21 个文件现在真的被检查**（都在 `tsconfig.check.json` 里，`check:js` 0 错误）。典型修法三类：
-  1. `{object}` / `{}` 参数形状后按字段访问 → 补准确的 `@param {{...}}`（`agent-limits` 的返回、`goal-run` 的入参、`completion-readiness` 的 Map 与 LSP 设置、`sandbox-policy` 的 opts / 决策对象）；
-  2. **真死代码**：`agent-system-prompt.js` 里 `const pack = loadPackSystemPrompt()` 把 `packSystemPrompt()` 当无参函数**调用**了（拿到的是对象），于是 `typeof pack === 'function'` 恒假、那条分支从来没走过 —— 已删；
-  3. `run-events.js` 的终端事件集合被推断成三个字面量 → 按 `Set<string>` 声明。
-- **剩下 9 个文件 64 处暂缓**（`request-snapshot` 19、`tool-gate` 14、`mcp-plans-boot` 14、`sandbox-approvals` 6、`peer/coordinator` 4、`session-goal` 2、`peer/client` 2、`peer/wire` 2、`peer/server` 1）：这些文件的 pragma 换成了通行的一句「类型债暂缓 + 指向本段」——**宁可明说没开，也不留一个假装在检查的 pragma**；它们也没列进 tsconfig。
+**结果（数字都是实测）**：
 
-**不变式（写下来供以后核对）**：`pragma 在第 1 行` ⇔ `在 tsconfig.check.json 里` ⇒ `check:js 会真的检查它`。当前 21 = 21，差值为 0。
+- pragma 全部挪到第 1 行后，真正的类型错是 **108 处**（当初估的是 19 处，差一个数量级），分布在 30 个文件里；**108 处全部修完**。
+- `npm run check:js` 现在覆盖 **31 个文件**（30 个源文件 + `types/core-rpc.d.ts`）、**0 错误**。
+- 修法三类（**没有一处用 `any` 或 `@ts-ignore` 掩盖**）：
+  1. **形状过期**（绝大多数）：JSDoc 形状没跟上代码真实读写的字段 —— 补 `remote` / `roomId` / `peerRole` / `getRole` / `isBusy` / `outcome` / `aborted` / `mutatingToolCalls` / `planId` 之类；`{object}` + 分散标签的写法收成一处内联形状。
+  2. **真死代码**：`agent-system-prompt.js` 里 `const pack = loadPackSystemPrompt()` 把 `packSystemPrompt()` 当无参函数**调用**了（拿到的是对象），于是 `typeof pack === "function"` 恒假、那条分支从来没走过 —— 已删。
+  3. **判别式联合不收窄**：本仓 `tsconfig.check.json` 没开 `strictNullChecks`，`ok: true` / `ok: false` 这类字面量判别式不参与收窄，凡是「先 return 再读另一支字段」的写法都会报「字段不存在」。改法是局部显式声明扁平形状（`tool-gate.js` / `mcp-plans-boot.js` / `sandbox-approvals.js`），**判定逻辑不变**。
 
-**闸门有效性验证过**：在 `run-events.js` 注入 `/** @type {{n:number}} */ ({n:'x'})` → `check:js` 立刻报 TS2352；删掉即恢复 0 错误。
+**不变式（以后核对用）**：`pragma 在第 1 行` ⇔ `在 tsconfig.check.json 里` ⇒ `check:js` 真的检查它。当前 **30 = 30，差值为 0**。
 
-**下一轮怎么收尾**：剩下 64 处全是同一类（JSDoc 形状没跟上代码字段：`remote` / `roomId` / `peerRole` / `getRole` / `Error.code` / `{}` 参数），补形状 + 列入 tsconfig 即可，不需要改行为。
-| 「同一份知识两份实现」 | 审计列出 40+ 处 | ≤ 5（且每处有理由） | 详档「度量」小节逐条勾掉 |
-| `rpc/mod.rs` 单测 | 1 | 每 handler ≥1 | `cargo test -- --list \| grep rpc::` |
-| 静默吞错 | `let _ =` 123 / `.ok()` 19 | 白名单外 0 | `clippy -D warnings` |
-| 最大文件 | 1935 行 | ≤ 800 行 | `Get-ChildItem -Recurse *.rs \| Measure-Object -Line` |
-| 结构化事件覆盖 | 13 处 `eprintln` / 0 `tracing` | 关键路径 100% 事件化、`eprintln` 0 | `obs.rs` + grep |
-| 跨语言 fixture | 1 处（token） | ≥ 5 处 | `test/fixtures/*-cases.json` |
+**闸门有效性**：在 `run-events.js` 与 `peer/coordinator.js` 各注入过一个假类型（`@type {{n:number}}` 套 `{n:"x"}`），两次都立刻报 TS2352；删掉即回到 0 错误。
 
-**停止条件**：P0–P6 全部落地 + 上表达标 → 这套 Rust 进入"可长期维护"状态，此时再评估 §7 的重写才是有依据的选择。
+**两条纪律（省下一次的弯路）**：① PowerShell 会吃掉 `node -e` 里的引号 / 星号 —— 一律「先写 `.cjs` 脚本再执行」，每个替换带 `if (!includes) throw`；② CRLF 会让 `\n` 字符串模式静默不匹配 —— 脚本里统一 normalize 再还原。
 
 ---
 
