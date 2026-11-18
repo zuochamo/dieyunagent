@@ -19,12 +19,12 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection};
 
 use crate::error::CoreError;
-use crate::graph::build::{run_build_with_progress, run_remote_build};
+use crate::graph::build::run_build_with_progress;
 use crate::graph::types::{
     CallGraphResult, GraphStartIndexResult, GraphStatusResult, ImpactResult, ModuleDepsResult,
     RepoMapResult, SymbolSearchResult,
 };
-use crate::index::{resolve_workspace, RemoteFileInput, WorkspaceRef};
+use crate::index::{resolve_workspace, WorkspaceRef};
 use crate::sqlite::SqliteHandle;
 use status::{repair_stale_indexing_flag, GraphProgressSnapshot};
 
@@ -33,7 +33,6 @@ pub struct GraphService {
     /// codebase.db 句柄：与 `IndexService` 共享同一条常驻连接（同库，故同连接）。
     db: Arc<SqliteHandle>,
     building: Arc<Mutex<HashSet<String>>>,
-    remote_files: Arc<Mutex<HashMap<String, Vec<RemoteFileInput>>>>,
     progress: Arc<Mutex<HashMap<String, GraphProgressSnapshot>>>,
 }
 
@@ -42,7 +41,6 @@ impl GraphService {
         Self {
             db,
             building: Arc::new(Mutex::new(HashSet::new())),
-            remote_files: Arc::new(Mutex::new(HashMap::new())),
             progress: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -294,91 +292,6 @@ impl GraphService {
         self.status(workspace_root)
     }
 
-    pub fn index_remote(
-        &self,
-        workspace_root: &str,
-        files: Vec<RemoteFileInput>,
-        force: bool,
-        scope: GraphScope,
-    ) -> Result<GraphStatusResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        if !ws.is_remote {
-            return self.index_workspace(workspace_root, force, scope);
-        }
-        let root_hash = ws.root_hash.clone();
-
-        {
-            let mut guard = self
-                .building
-                .lock()
-                .map_err(|_| CoreError::rpc("GRAPH_BUSY", "结构索引锁不可用"))?;
-            if guard.contains(&root_hash) {
-                drop(guard);
-                return self.status(workspace_root);
-            }
-            guard.insert(root_hash.clone());
-        }
-
-        let conn = self.open_dedicated()?;
-        let result = run_remote_build(&conn, &ws.key, &root_hash, &files, force, scope);
-        if let Ok(mut guard) = self.building.lock() {
-            guard.remove(&root_hash);
-        }
-        result?;
-        self.status(workspace_root)
-    }
-
-    pub fn index_remote_begin(&self, workspace_root: &str) -> Result<GraphStatusResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        if !ws.is_remote {
-            return self.status(workspace_root);
-        }
-        self.remote_files
-            .lock()
-            .map_err(|_| CoreError::rpc("GRAPH_BUSY", "远程结构索引状态锁不可用"))?
-            .insert(ws.root_hash.clone(), Vec::new());
-        self.status(workspace_root)
-    }
-
-    pub fn index_remote_push(
-        &self,
-        workspace_root: &str,
-        files: &[RemoteFileInput],
-    ) -> Result<usize, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        if !ws.is_remote {
-            return Ok(0);
-        }
-        let mut jobs = self
-            .remote_files
-            .lock()
-            .map_err(|_| CoreError::rpc("GRAPH_BUSY", "远程结构索引状态锁不可用"))?;
-        let slot = jobs
-            .get_mut(&ws.root_hash)
-            .ok_or_else(|| CoreError::rpc("REMOTE_GRAPH_STATE", "远程结构索引未 begin"))?;
-        slot.extend(files.iter().cloned());
-        Ok(files.len())
-    }
-
-    pub fn index_remote_finish(
-        &self,
-        workspace_root: &str,
-        force: bool,
-        scope: GraphScope,
-    ) -> Result<GraphStatusResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        if !ws.is_remote {
-            return self.status(workspace_root);
-        }
-        let files = self
-            .remote_files
-            .lock()
-            .map_err(|_| CoreError::rpc("GRAPH_BUSY", "远程结构索引状态锁不可用"))?
-            .remove(&ws.root_hash)
-            .unwrap_or_default();
-        self.index_remote(workspace_root, files, force, scope)
-    }
-
 }
 
 /// 清掉某工作区的**全部**图谱行（含 `graph_workspaces` 那行本身）。
@@ -528,41 +441,6 @@ mod tests {
             search_elapsed < std::time::Duration::from_secs(2),
             "symbol_search 等了 {search_elapsed:?}：读路径被写锁堵住了"
         );
-    }
-
-    #[test]
-    fn indexes_remote_graph_from_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let svc = test_graph(dir.path().join("graph-remote-test.db"));
-        let key = "ssh://dev@192.168.1.10/home/dev/project";
-        let st = svc
-            .index_remote(
-                key,
-                vec![
-                    RemoteFileInput {
-                        rel_path: "src/a.js".into(),
-                        content:
-                            "import { b } from './b.js';\nexport function a() { return b(); }\n"
-                                .into(),
-                        mtime: 1,
-                    },
-                    RemoteFileInput {
-                        rel_path: "src/b.js".into(),
-                        content: "export function b() { return 1; }\n".into(),
-                        mtime: 1,
-                    },
-                ],
-                true,
-                GraphScope::WithCalls,
-            )
-            .unwrap();
-        assert!(st.indexed);
-        assert!(st.symbol_count >= 2);
-
-        let hits = svc.symbol_search(key, "b", None, Some(5)).unwrap();
-        assert!(hits.results.iter().any(|s| s.name == "b"));
-        let callers = svc.callers(key, None, Some("src/b.js"), Some("b")).unwrap();
-        assert!(callers.sites.iter().any(|s| s.caller_path == "src/a.js"));
     }
 
     #[test]

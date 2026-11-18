@@ -307,11 +307,23 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 - R4：`obs.rs` 收口 `[rpc-slow]`（保留唯一一条，删掉 20s 预算机制，理由见 §6）、折叠事实、每轮 usage、工具耗时；`agent.delta.round` 填真实 `round_of()`（或删字段 + 删文档 + 删宿主兜底，二选一）。
 - 删掉「已删除机制的注释」：`INTERACTIVE_EMBED_BUDGET_MS`、`agent.llm.chat`、45s 口径、`fold:L` 之外的旧描述。
 
-### P6 · 死代码清除（1–2 人日）
+### P6 · 死代码清除（1–2 人日）· **已完成 2026-11-18**
 
-`index/remote.rs` 整条（344 行 + `RemoteIngestHandle` + 其单测）、`Accumulator.started`、`EMBEDDING_TIMEOUT_CODE`、`walker.rs` 的 `.env` 白名单、`messages_clear` 别名、`PlannerContinueInput.partial_body`、`store.rs` 里搬走后留下的空注释、`graph/build.rs` 的 `MAX_GRAPH_FILES` 重复常量。
+**核实结果**（每个候选先 grep 全部调用点，含 Node 侧 RPC 名与注册表）：
 
-**先核实再删**：删之前 grep 调用点，无调用点才删；有调用点就按 P3 收敛（不要留转发壳）。
+| 候选 | 结论 |
+|---|---|
+| `index/remote.rs` 整条（344 行 + `RemoteIngestHandle`） | **真死**：核心 RPC 表里没有 `index.remote*`（Node 侧 `index.remote_*` 是 Gateway handler，另一个命名空间）。连带 `IndexService::index_remote` / `RemoteFileInput` / graph 的 `index_remote` / `index_remote_begin` / `index_remote_push` / `index_remote_finish` / `run_remote_build` / `remote_files` 字段，以及两条远端用例 —— **一起删**（−695 行 / +13 行） |
+| `Accumulator.started` | 只写不读 → 删 |
+| `EMBEDDING_TIMEOUT_CODE` | **不是死代码**：`embedding/remote.rs` 的两条超时分支都用它当错误码（调用方据此区分「端点没回」与「端点报错」）→ **保留** |
+| `walker.rs` 的 `.env` 白名单 | 两处都不可达（`.env` 是隐藏文件，walker 直接跳过；`Path::extension()` 对点文件返回 `None`）→ 删 |
+| `messages_clear` 别名 | P1 已删，只剩一句注释 → 无事可做 |
+| `PlannerContinueInput.partial_body` | 三个赋值点、零读取点 → 删（连同 `RunState` 里那份） |
+| `store.rs` 空注释 | **核实后不存在**（现存的两处 `//` 是多行注释的续行，有内容）→ 无事可做 |
+| `graph/build.rs` 的 `MAX_GRAPH_FILES` | 与 `index::MAX_FILES` 同值同义 → `MAX_FILES` 提为 `pub(crate)`，graph 直接用 |
+| `agent/driver.rs` 的 9 处 socket 写吞错 | **更正 P4 时的判断**：那些都在 `#[cfg(test)] mod tests` 里（`one_shot_server` / `recording_server` 假宿主），生产路径的反向调用走 `rpc::calls::call_host`（`round.prepare` 在用）→ 不删 |
+
+**验收**：`cargo test` 298 → **296 全绿**（少的两条正是被删的远端摄取用例）、零 warning；`npm test`、`verify:rpc-catalog`、`check:shared-constants` 通过。
 
 ---
 

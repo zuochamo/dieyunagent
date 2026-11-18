@@ -2,7 +2,6 @@ mod repair;
 mod build;
 mod vectors;
 mod status;
-mod remote;
 mod schema;
 mod search;
 pub(crate) mod vector_cache;
@@ -24,7 +23,6 @@ use vector_pool::PoolCache;
 
 use crate::embedding::{self, EmbeddingConfig};
 
-pub use remote::RemoteFileInput;
 pub use schema::{ensure_schema, init_schema, SCHEMA_VERSION};
 pub use search::SearchResult;
 pub use walker::collect_text_files;
@@ -32,7 +30,7 @@ pub use workspace::{resolve_workspace, WorkspaceRef};
 
 pub(crate) const CHUNK_LINES: usize = 55;
 pub(crate) const CHUNK_OVERLAP: usize = 10;
-const MAX_FILES: usize = 16_000;
+pub(crate) const MAX_FILES: usize = 16_000;
 pub(crate) const CHUNK_CONTENT_MAX_CHARS: usize = 12000;
 
 #[derive(Debug, Clone, Default)]
@@ -88,7 +86,6 @@ pub struct IndexService {
     /// 不进热路径。
     meta_checked: Arc<Mutex<HashSet<String>>>,
     progress: Arc<Mutex<HashMap<String, ProgressSnapshot>>>,
-    remote_ingest: remote::RemoteIngestHandle,
     /// root_hash -> 常驻内存 chunk 向量池
     vector_pools: PoolCache,
     /// 跨 worktree 的向量复用缓存（`<data_dir>/vector-cache.sqlite`）。
@@ -105,7 +102,6 @@ impl IndexService {
             indexing: Arc::new(Mutex::new(HashSet::new())),
             meta_checked: Arc::new(Mutex::new(HashSet::new())),
             progress: Arc::new(Mutex::new(HashMap::new())),
-            remote_ingest: remote::RemoteIngestHandle::default(),
             vector_pools: PoolCache::new(),
             vector_cache_path: None,
             vector_cache: Arc::new(Mutex::new(None)),
@@ -529,29 +525,6 @@ mod tests {
         assert!(st.indexed);
         assert!(st.chunk_count > 0);
         let sr = svc.search(&root, "hello", Some(5)).await.unwrap();
-        assert!(!sr.results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn remote_index_from_files_smoke() {
-        use crate::index::RemoteFileInput;
-
-        let dir = tempdir().unwrap();
-        let db = dir.path().join("idx.sqlite");
-        let svc = IndexService::new(
-            crate::codebase_db::handle(db),
-            EmbeddingConfig::default(),
-        );
-        let key = "ssh://dev@192.168.1.10/home/dev/project";
-        let files = vec![RemoteFileInput {
-            rel_path: "hello.rs".into(),
-            content: "fn main() {\n    println!(\"remote hello\");\n}\n".into(),
-            mtime: 1,
-        }];
-        let st = svc.index_remote(key, files, true, false).await.unwrap();
-        assert!(st.indexed);
-        assert!(st.chunk_count > 0);
-        let sr = svc.search(key, "remote hello", Some(5)).await.unwrap();
         assert!(!sr.results.is_empty());
     }
 

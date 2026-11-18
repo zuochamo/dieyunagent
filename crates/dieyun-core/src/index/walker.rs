@@ -140,7 +140,6 @@ fn is_indexable_text_file(path: &Path) -> bool {
         || base == "Rakefile"
         || base == "Gemfile"
         || base == "Procfile"
-        || base.starts_with(".env")
         || base.eq_ignore_ascii_case("readme")
         || base.eq_ignore_ascii_case("license")
         || base.eq_ignore_ascii_case("licence")

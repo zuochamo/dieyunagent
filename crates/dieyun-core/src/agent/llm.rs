@@ -72,8 +72,6 @@ pub struct Accumulator {
     /// 上游把错误当正常流回吐（HTTP 200 + `data: {"error":…}`）时的原文：
     /// 不识别它，这一轮就会以「空回复」收场，上游只会写成「执行完成、无文本摘要」。
     upstream_error: Option<String>,
-    /// 非流式响应里直接的 message.content（有些端点即使 stream=true 也只回整包）
-    started: bool,
 }
 
 impl Accumulator {
@@ -157,7 +155,6 @@ impl Accumulator {
 
     /// 取 `delta` / `message` 里的两个文本通道与工具调用分片。
     fn take_texts(&mut self, holder: &Value) -> Option<Delta> {
-        self.started = true;
         let content = text_of(holder.get("content"));
         let reasoning = text_of(holder.get("reasoning_content"))
             .or_else(|| text_of(holder.get("reasoning")))
@@ -176,7 +173,6 @@ impl Accumulator {
     }
 
     fn take_message(&mut self, message: &Value) {
-        self.started = true;
         if let Some(c) = text_of(message.get("content")) {
             self.content.push_str(&c);
         }

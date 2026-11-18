@@ -117,7 +117,5 @@ pub struct PlannerContinueInput {
     #[serde(default)]
     pub partial_content: Option<String>,
     #[serde(default)]
-    pub partial_body: Option<Value>,
-    #[serde(default)]
     pub worktree_ctx: Option<Value>,
 }

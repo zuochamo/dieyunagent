@@ -5,7 +5,7 @@ use rusqlite::{params, Connection};
 
 use super::cleanup::{clear_file_graph, clear_workspace_graph, purge_removed_files, purge_stale_files};
 use crate::error::CoreError;
-use crate::graph::extract::files::{collect_graph_files, is_graph_path};
+use crate::graph::extract::files::collect_graph_files;
 use crate::graph::extract::go::{
     extract_calls as extract_go_calls, extract_import_specs as extract_go_imports,
     extract_symbols as extract_go_symbols, is_go_path, is_relative_spec as is_go_relative_spec,
@@ -28,9 +28,7 @@ use crate::graph::extract::rust_lang::{
 use crate::graph::extract::symbols::{
     extract_calls as extract_js_calls, extract_symbols as extract_js_symbols,
 };
-use crate::index::RemoteFileInput;
 
-const MAX_GRAPH_FILES: usize = 16_000;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -92,7 +90,7 @@ pub fn run_build_with_progress(
         clear_workspace_graph(conn, root_hash)?;
     }
 
-    let rel_files = collect_graph_files(root, MAX_GRAPH_FILES);
+    let rel_files = collect_graph_files(root, crate::index::MAX_FILES);
     let files_total = rel_files.len() as i64;
     report("parsing", 0, files_total, 0, 0, 0);
     let rel_set: HashSet<String> = rel_files.iter().cloned().collect();
@@ -197,137 +195,6 @@ pub fn run_build_with_progress(
         symbol_count,
         call_count,
     );
-
-    let indexed_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    conn.execute(
-        "UPDATE graph_workspaces
-         SET file_count = ?2, edge_count = ?3, symbol_count = ?4, call_count = ?5,
-             calls_built = ?6, indexed_at = ?7, indexing = 0
-         WHERE root_hash = ?1",
-        params![
-            root_hash,
-            rel_files.len() as i64,
-            import_count,
-            symbol_count,
-            call_count,
-            i64::from(effective_scope.with_calls()),
-            indexed_at
-        ],
-    )
-    .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
-
-    Ok(BuildStats {
-        file_count: rel_files.len() as i64,
-        edge_count: import_count,
-        symbol_count,
-        call_count,
-    })
-}
-
-pub fn run_remote_build(
-    conn: &Connection,
-    root_key: &str,
-    root_hash: &str,
-    files: &[RemoteFileInput],
-    force: bool,
-    scope: GraphScope,
-) -> Result<BuildStats, CoreError> {
-    conn.execute(
-        "INSERT INTO graph_workspaces (root_hash, root_path, indexing)
-         VALUES (?1, ?2, 1)
-         ON CONFLICT(root_hash) DO UPDATE SET indexing = 1, root_path = excluded.root_path",
-        params![root_hash, root_key],
-    )
-    .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
-
-    if force {
-        clear_workspace_graph(conn, root_hash)?;
-    }
-
-    let mut seen = HashSet::new();
-    let rel_files: Vec<String> = files
-        .iter()
-        .filter_map(|f| {
-            let rel = f.rel_path.replace('\\', "/");
-            if rel.is_empty()
-                || rel.starts_with("../")
-                || rel.contains('\0')
-                || !is_graph_path(&rel)
-            {
-                return None;
-            }
-            if seen.insert(rel.clone()) {
-                Some(rel)
-            } else {
-                None
-            }
-        })
-        .take(MAX_GRAPH_FILES)
-        .collect();
-    let rel_set: HashSet<String> = rel_files.iter().cloned().collect();
-    if force {
-        purge_removed_files(conn, root_hash, &rel_set)?;
-    } else {
-        purge_stale_files(conn, root_hash, &rel_set)?;
-    }
-
-    let stored_mtimes = load_file_mtimes(conn, root_hash)?;
-    let mut import_count = count_imports(conn, root_hash)?;
-    let mut symbol_count = count_symbols(conn, root_hash)?;
-    let mut call_count = count_calls(conn, root_hash)?;
-    // 与本地建库同一条规则（见 `run_build_with_progress` 的注释）：建库范围是黏性的，
-    // 建过调用图的工作区增量也按 WithCalls 维护；只有「结构态 → 调用态」这一轮才回填未变文件。
-    let plan = super::incremental::plan(conn, root_hash, force, scope)?;
-    let effective_scope = plan.scope;
-    let calls_missing = plan.reparse_unchanged;
-
-    // rel_path 归一化一次建表：原来每个文件都 `files.iter().find(...replace('\\',"/"))`，
-    // 16k 文件就是 2.5 亿次字符串替换 + 全表比对。同名保留**第一个**（与 find 同语义）。
-    let mut by_rel: HashMap<String, &RemoteFileInput> = HashMap::with_capacity(files.len());
-    for file in files.iter() {
-        by_rel
-            .entry(file.rel_path.replace('\\', "/"))
-            .or_insert(file);
-    }
-
-    for rel in &rel_files {
-        let Some(file) = by_rel.get(rel.as_str()).copied() else {
-            continue;
-        };
-        if file.content.contains('\0') {
-            continue;
-        }
-        let mtime = file.mtime;
-        if !force {
-            if !calls_missing && stored_mtimes.get(rel).copied() == Some(mtime) {
-                continue;
-            }
-            let (di, ds, dc) = clear_file_graph(conn, root_hash, rel)?;
-            import_count -= di;
-            symbol_count -= ds;
-            call_count -= dc;
-        }
-
-        let (ic, sc, cc) = index_file(conn, root_hash, rel, &file.content, mtime, &rel_set, effective_scope)?;
-        import_count += ic;
-        symbol_count += sc;
-        call_count += cc;
-
-        conn.execute(
-            "INSERT INTO graph_file_mtime (root_hash, rel_path, mtime)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(root_hash, rel_path) DO UPDATE SET mtime = excluded.mtime",
-            params![root_hash, rel, mtime],
-        )
-        .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
-    }
-
-    // 远端摄取同理：候选文件全部入库后回填名字唯一的解析目标
-    backfill_unique_callees(conn, root_hash)?;
 
     let indexed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

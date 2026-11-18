@@ -74,7 +74,6 @@ struct PlannerRunState {
     trace: Vec<PlannerTraceEntry>,
     final_content: Option<String>,
     hit_round_limit: bool,
-    partial_body: Option<Value>,
     cancelled: bool,
     resume_completed_ids: HashSet<String>,
 }
@@ -185,8 +184,7 @@ impl PlannerRunManager {
             trace,
             final_content: None,
             hit_round_limit: false,
-            partial_body: None,
-            cancelled: false,
+                cancelled: false,
             resume_completed_ids,
         };
         if run.phase == InternalPhase::NeedWorkers {
@@ -544,8 +542,7 @@ impl PlannerRunManager {
                 .partial_content
                 .or(input.content)
                 .unwrap_or_else(|| "Explore reached the round limit before producing a final summary; continue with worker execution using the available plan.".into());
-            run.partial_body = input.partial_body;
-            if let Some(last) = run.trace.last_mut() {
+                if let Some(last) = run.trace.last_mut() {
                 if last.phase.contains("Explore") {
                     last.thought = format!(
                         "{}\n\n（Explore 轮次已达上限，继续调度执行器。）",
@@ -576,8 +573,7 @@ impl PlannerRunManager {
         if input.hit_round_limit {
             run.hit_round_limit = true;
             run.final_content = input.partial_content;
-            run.partial_body = input.partial_body;
-            run.phase = InternalPhase::Done;
+                run.phase = InternalPhase::Done;
             return self.build_response(run);
         }
         if run.is_retry_batch {
@@ -602,8 +598,7 @@ impl PlannerRunManager {
         if input.hit_round_limit {
             run.hit_round_limit = true;
             run.final_content = input.partial_content;
-            run.partial_body = input.partial_body;
-            run.phase = InternalPhase::Done;
+                run.phase = InternalPhase::Done;
             return self.build_response(run);
         }
         let trace_note = {
@@ -1424,8 +1419,7 @@ impl Default for PlannerContinueInput {
             worker_results: vec![],
             hit_round_limit: false,
             partial_content: None,
-            partial_body: None,
-            worktree_ctx: None,
+                worktree_ctx: None,
         }
     }
 }

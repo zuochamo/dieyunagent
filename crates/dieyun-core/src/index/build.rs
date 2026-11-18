@@ -13,7 +13,7 @@ use super::{
     count_chunks, count_vectors, delete_all_chunks, delete_chunks_for_path, file_mtime_stamp,
     insert_chunk, load_all_chunk_texts, load_chunk_mtimes, load_chunks_missing_vectors,
     mtime_unchanged, now_secs, purge_stale_chunk_paths, resolve_workspace, walker, IndexService,
-    RemoteFileInput, StartIndexResult, StatusResult, MAX_FILES,
+    StartIndexResult, StatusResult, MAX_FILES,
 };
 use crate::embedding;
 use crate::error::CoreError;
@@ -217,39 +217,6 @@ impl IndexService {
         }
         result?;
         self.status(workspace_root)
-    }
-
-
-    pub async fn index_remote(
-        &self,
-        workspace_root: &str,
-        files: Vec<RemoteFileInput>,
-        force: bool,
-        vectors: bool,
-    ) -> Result<StatusResult, CoreError> {
-        let ws = resolve_workspace(workspace_root)?;
-        if !ws.is_remote {
-            return Err(CoreError::rpc(
-                "LOCAL_INDEX_REQUIRED",
-                "本地工作空间请使用 codebase.index",
-            ));
-        }
-        self.index_remote_begin(&ws, force, vectors).await?;
-        if !force {
-            let st = self.status(workspace_root)?;
-            let sig = self.embedding.signature();
-            let embedding_stale = st.chunk_count > 0
-                && !sig.is_empty()
-                && st.embedding_model.as_deref().unwrap_or("") != sig;
-            if st.indexed && !embedding_stale {
-                return Ok(st);
-            }
-        }
-        const BATCH: usize = 30;
-        for batch in files.chunks(BATCH) {
-            self.index_remote_push(&ws, batch)?;
-        }
-        self.index_remote_finish(&ws).await
     }
 
 

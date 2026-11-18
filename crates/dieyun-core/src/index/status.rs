@@ -263,18 +263,8 @@ impl IndexService {
 
 
     pub(crate) fn apply_live_progress(&self, root_hash: &str, st: &mut StatusResult) {
-        if let Ok(jobs) = self.remote_ingest.jobs.lock() {
-            if let Some(job) = jobs.get(root_hash) {
-                st.indexing = true;
-                st.phase = Some(if job.pending_embed.is_empty() {
-                    "chunking".into()
-                } else {
-                    "embedding".into()
-                });
-                st.files_done = Some(job.file_count);
-                st.chunk_count = job.chunk_count.max(st.chunk_count);
-            }
-        }
+        // 只有**本进程正在建库**时才有实时进度（`set_progress` 写的那份）。
+        // 以前这里还叠了一份「远端摄取任务」的进度，那条链路没有任何 RPC 入口（P6 已删）。
         if let Some(p) = self.progress_for(root_hash) {
             if !p.phase.is_empty() {
                 st.phase = Some(p.phase.clone());
