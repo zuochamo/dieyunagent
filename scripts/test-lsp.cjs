@@ -113,7 +113,10 @@ function assertServerSpecs() {
   assert(spec.args.includes('typescript-language-server'), 'npx must run typescript-language-server');
 
   assert(childEnvForCommand(process.execPath).ELECTRON_RUN_AS_NODE === '1', 'electron child must run as node');
-  assert(childEnvForCommand('npx').ELECTRON_RUN_AS_NODE == null, 'npx child keeps default env');
+  // 非 `process.execPath`（npx / node / python 之类）的唯一契约是「不改就原样传」，不是
+  // 「环境里没有 ELECTRON_RUN_AS_NODE」——宿主可能自带这个变量（DSH / 任何以
+  // ELECTRON_RUN_AS_NODE=1 启动的 shell 都会注入），断言「等于 process.env」才不依赖宿主。
+  assert(childEnvForCommand('npx') === process.env, 'npx child keeps default env unchanged');
 
   const fakeLib = path.join(tmpRoot, 'node_modules', 'typescript', 'lib');
   fs.mkdirSync(fakeLib, { recursive: true });
