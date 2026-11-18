@@ -1,7 +1,7 @@
 # 上下文折叠（compaction）
 
 > **状态**：已实施（2026-11-17）。取代旧的「LLM 摘要 + 伪造 assistant 回执」压缩。
-> **代码**：`crates/dieyun-core/src/compaction/`（语义全部在 `fold.rs`）、`src/agent/compaction-main.js`（预算与遥测）、`src/agent/compaction-loop.js`（归档）、`src/agent/compaction-telemetry.js`。
+> **代码**：`crates/dieyun-base/src/compaction/`（语义全部在 `fold.rs`）、`src/agent/compaction-main.js`（预算与遥测）、`src/agent/compaction-loop.js`（归档）、`src/agent/compaction-telemetry.js`。
 
 ---
 

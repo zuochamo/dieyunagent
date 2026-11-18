@@ -62,7 +62,7 @@
 
 > **本文件是数字上限的唯一合法改动点**（`AGENTS.md` 原则 6）。除下面 A1.2 的“模块内局部阈值”外，其余文件的数字应尽量改为读这里。
 > 例外：`visionPartEqChars` 是上下文账本的折算系数（非策略上限），故意不上设置页 —— `contentCharLen` 没有 tier 上下文、只读全局默认值，做成可调项会「改了不生效」。
-> 同类例外：`charsPerToken`(3.2) / `cjkCharsPerToken`(1.5) 也是折算系数，唯一来源在本文件，renderer 侧经 `window.CHARS_PER_TOKEN` / `window.CJK_CHARS_PER_TOKEN` 消费；Rust 同值见 `crates/dieyun-core/src/compaction/tokens.rs`。
+> 同类例外：`charsPerToken`(3.2) / `cjkCharsPerToken`(1.5) 也是折算系数，唯一来源在本文件，renderer 侧经 `window.CHARS_PER_TOKEN` / `window.CJK_CHARS_PER_TOKEN` 消费；Rust 同值见 `crates/dieyun-base/src/compaction/tokens.rs`。
 
 #### A1.2 其它 JS 文件内嵌数字（应知悉，非单源）
 

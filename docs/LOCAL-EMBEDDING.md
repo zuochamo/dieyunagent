@@ -1,7 +1,7 @@
 # 向量后端：本地推理优先
 
 > **状态**：已实施（2026-11-17）。取代「只支持远端 OpenAI 兼容端点」的旧形态。
-> **代码**：`crates/dieyun-core/src/embedding/`（`local.rs` 本地推理 / `remote.rs` 远端端点 / `mod.rs` provider 判定）、`src/agent/embedding-config.js`（装配唯一入口）、`src/codebase/embedding-client.js`（薄 RPC 封装）。
+> **代码**：`crates/dieyun-base/src/embedding/`（`local.rs` 本地推理 / `remote.rs` 远端端点 / `mod.rs` provider 判定）、`src/agent/embedding-config.js`（装配唯一入口）、`src/codebase/embedding-client.js`（薄 RPC 封装）。
 
 ---
 

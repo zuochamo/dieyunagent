@@ -4,8 +4,8 @@
 > 主循环（`agent.run.*`，core 自己调）、六个辅助任务（标题 / 回合汇总 / 评审 / 计划执行 /
 > 记忆提炼 / planner 各相位）、以及 Renderer（经 Main 转发）都走同一条路。
 >
-> **代码**：`crates/dieyun-core/src/agent/llm.rs`（请求 + SSE 解析 + usage + 抓包）、
-> `crates/dieyun-core/src/rpc/events.rs`（事件出口）、`crates/dieyun-core/src/rpc/calls.rs`（反向调用）、
+> **代码**：`crates/dieyun-runtime/src/agent/llm.rs`（请求 + SSE 解析 + usage + 抓包）、
+> `crates/dieyun-runtime/src/rpc/events.rs`（事件出口）、`crates/dieyun-runtime/src/rpc/calls.rs`（反向调用）、
 > `src/agent/llm-complete.js`（宿主唯一调用入口）、`src/core-bridge.js:onCoreEvent`（宿主订阅）。
 
 ---

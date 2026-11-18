@@ -21,7 +21,7 @@
 | 项 | 状态 | 落点 |
 |---|---|---|
 | R4 增量默认关 | ✅ | `src/model-settings.js`（`codebaseAutoIncremental=false`，`graphAutoIncremental` 仍默认为 `true`）、`src/index/codebase-incremental-scheduler.js`（无向量不维护、busy 不排重试）、`src/renderer/index.html`、`test/unit/incremental-index-dedupe.test.cjs` |
-| R2 删 trigram FTS | ✅ | `crates/dieyun-core/src/index/schema.rs`（`SCHEMA_VERSION=4`，迁移只做 `DROP`）、`index/search.rs`（词法只剩子串通道，双路 RRF） |
+| R2 删 trigram FTS | ✅ | `crates/dieyun-codebase/src/index/schema.rs`（`SCHEMA_VERSION=4`，迁移只做 `DROP`）、`index/search.rs`（词法只剩子串通道，双路 RRF） |
 | R3 向量 opt-in | ✅ | `index/mod.rs` / `index/remote.rs`（`vectors` 请求参数）、`rpc/mod.rs`、`src/gateway/handlers/codebase.js`、`src/gateway/rpc.js`、面板「建向量」按钮、CLI `--vectors` |
 | R3 补丁：向量生命周期 | ✅ | `index/mod.rs`（`vectors=false` 不再 `DELETE FROM chunk_vectors`；`embedding_model/dims` 沿用库里真实存在的向量）、`index/remote.rs`（`vector_count` 取库里实数、签名不归零）、`rpc/mod.rs`（`vectors:true` 且端点未配置 → `EMBEDDING_NOT_CONFIGURED`）、`src/index/codebase-incremental-scheduler.js`（增量带 `vectors:true`，只在已有向量时跑）、`renderer-utils.js:describeVectorSync`（覆盖不足要提示）、面板「建向量」改走增量补齐；用例 `index::tests::rebuild_without_vectors_keeps_existing_vectors` / `vectors_available_follows_embedding_config` / `test/unit/vector-sync-label.test.cjs` / `test/unit/incremental-index-dedupe.test.cjs` |
 | R5 调用图按需 | ✅ | `graph/build.rs`（`GraphScope::Structural \| WithCalls`）、`graph/mod.rs`、`rpc/mod.rs`（`calls` 参数）、`src/gateway/handlers/graph.js`（`callers`/`callees`/`lsp_resolve` 首次自动补建一次）、`test/unit` + 新增 Rust 用例 |
@@ -42,7 +42,7 @@
 | 查询 | 向量余弦 / 子串 `LIKE` 两路 RRF(k=60) 融合（trigram FTS 已于 R2 删除） | `symbol_search` / `module_deps` / `repo_map` 常驻；`callers` / `callees` / `impact` 需调用边 |
 | 出口 | `codebase.search`（工具 `codebase_search`）+ prep 自动注入块 | 工具 `graph` + prep 注入 `【仓库结构图】` + `read_symbol`/`lsp` 的本地回退 |
 | 增量 | `src/index/codebase-incremental-scheduler.js`（**默认关**，且无向量时直接不跑） | `src/graph/graph-incremental-scheduler.js`（默认开：便宜，且 `repo_map` 要新鲜） |
-| 单一来源 | Rust `crates/dieyun-core/src/index/`（schema/search/vector_pool/walker） | Rust `crates/dieyun-core/src/graph/`（build/query/extract） |
+| 单一来源 | Rust `crates/dieyun-codebase/src/index/`（schema/search/vector_pool/walker） | Rust `crates/dieyun-codebase/src/graph/`（build/query/extract） |
 | 界面入口 | 侧栏「索引」页签的上半区（`codebase-panel-*`） | 同一页签的下半区（`graph-panel-*`）；试搜框是一个，同查两路 |
 | 触发（v4 后） | 本轮「要碰代码库」即允许：`@Codebase` / 消息内路径 / 编辑器选区 / **结构信号下的自动检索** | 同上（`allowCodebase`），不再要求用户先点名文件 |
 
@@ -160,7 +160,7 @@
 |---|---|
 | 问题 | 426 MB（40%）买一个与 `grep` 重叠、且落后一轮增量的能力；2 字中文仍要走 `LIKE` 全表扫 |
 | 动作（方案 A，推荐） | `SCHEMA_VERSION 3 → 4`：迁移里 `DROP` 三个触发器 + `DROP TABLE chunks_fts`；`search.rs` 删 `lexical_hits`，词法只剩 `substring_hits`（放宽为「对切词后的每个词各跑一次 `LIKE`」，不再只限 2 字术语）；RRF 降为「向量 + 子串」两路 |
-| diff 面 | Rust：`crates/dieyun-core/src/index/schema.rs`（版本+迁移+触发器+测试）、`index/search.rs`（`lexical_hits` / `fts_query` / `fuse` / `empty_result` / `hit_line_from_highlight`）、`index/mod.rs`（`codebase.status` 若有 FTS 相关字段）<br>Main：`src/gateway/handlers/codebase.js`（错误文案「请稍后再试或使用 grep/读文件」保持）、`src/gateway/rpc.js`（`phase` 文案）<br>Renderer：`src/renderer/renderer-codebase-panel.js:245`（模式文案）、`src/renderer/index.html:1693-1695`（帮助文案）<br>文档：`docs/ARCHITECTURE.md` §15.1、`docs/VECTOR-SEARCH.md` §1 |
+| diff 面 | Rust：`crates/dieyun-codebase/src/index/schema.rs`（版本+迁移+触发器+测试）、`index/search.rs`（`lexical_hits` / `fts_query` / `fuse` / `empty_result` / `hit_line_from_highlight`）、`index/mod.rs`（`codebase.status` 若有 FTS 相关字段）<br>Main：`src/gateway/handlers/codebase.js`（错误文案「请稍后再试或使用 grep/读文件」保持）、`src/gateway/rpc.js`（`phase` 文案）<br>Renderer：`src/renderer/renderer-codebase-panel.js:245`（模式文案）、`src/renderer/index.html:1693-1695`（帮助文案）<br>文档：`docs/ARCHITECTURE.md` §15.1、`docs/VECTOR-SEARCH.md` §1 |
 | 为何不新增兜底 | `grep` 工具（`src/gateway/rg-search.js`）已在用 526 次/周，**它就是唯一来源**；不要复活已经死掉的 `tryRemoteGrepFallback`（见 R7） |
 | 风险（必须在验收里量化） | 中文 3 字以上从「bm25 排名」降为「子串命中按 chunk id 排序」，**召回不降、排序变差**；74k chunk 仓每次 `LIKE` ≈140 ms |
 | 保守替代（方案 B） | 只把分词器 `trigram → unicode61`（trigram 索引全部三字滑窗，unicode61 只索引词元，预计省 70–85% FTS 体积**待实测**；中文词法失效由 `LIKE`/`grep` 承担），代码结构不动，diff 面最小 |
@@ -177,7 +177,7 @@
 |---|---|
 | 问题 | `embeddingEnabled` 默认 `true`，建库即跑 embedding（首建墙钟 + 344 MB），而模型主动用 `codebase_search` 4 次/周；大仓还常年停在「chunk 有、向量 0」的半残态 |
 | 动作 | 建库默认只写 `chunks`（不写向量）；向量只在显式请求 `vectors: true` 时建：面板「建向量」按钮、CLI `--vectors`、以及任何显式传 `vectors` 的 RPC 调用方（`@Codebase` 与 prep 自动建库**不**带，见 §8 的取舍说明）。已存在向量照常可用 |
-| diff 面 | Rust：`crates/dieyun-core/src/index/mod.rs`（`use_vectors = self.embedding.enabled()` 的判定改为「配置启用 **且** 本次请求要求向量」）、`index/schema.rs`（`vector_count` 语义不变）、`crates/dieyun-core/src/embedding/`（`EmbeddingConfig::enabled` 不动，勿改语义）<br>Main：`src/gateway/rpc.js:667-682`（configure payload 增加「本次是否建向量」）、`src/gateway/handlers/codebase.js`（`codebase.index.start` 透传）<br>Renderer：`renderer-codebase-panel.js`（「建向量」按钮 + 未建提示）、`src/renderer/index.html:1694-1695`<br>文档：`docs/VECTOR-SEARCH.md` §1/§2、`docs/ARCHITECTURE.md` §15.1 |
+| diff 面 | Rust：`crates/dieyun-codebase/src/index/mod.rs`（`use_vectors = self.embedding.enabled()` 的判定改为「配置启用 **且** 本次请求要求向量」）、`index/schema.rs`（`vector_count` 语义不变）、`crates/dieyun-base/src/embedding/`（`EmbeddingConfig::enabled` 不动，勿改语义）<br>Main：`src/gateway/rpc.js:667-682`（configure payload 增加「本次是否建向量」）、`src/gateway/handlers/codebase.js`（`codebase.index.start` 透传）<br>Renderer：`renderer-codebase-panel.js`（「建向量」按钮 + 未建提示）、`src/renderer/index.html:1694-1695`<br>文档：`docs/VECTOR-SEARCH.md` §1/§2、`docs/ARCHITECTURE.md` §15.1 |
 | 为何删不掉（保留理由） | 只有向量通道能回答「中文自然语言 + 不知道标识符」的查询（`LIKE` 只能字面、`grep` 要求你已知关键词）；`docs/VECTOR-SEARCH.md` §4 的换 ANN 触发条件也只在保留通道时才有意义 |
 | 为何不新增开关字段 | 原判：不新增独立配置项：请求参数即「本次意图」，面板按钮与 `@Codebase` 都走同一个 `codebase.index.start`（单一来源），开关不进 `agent-limits`。**2026-10-31 修正**：新增 `indexSemanticSearch`（`src/model-settings.js`）——因为在「每会话一份索引库」下手点按钮根本不可用，见下方「R3 后续修正」 |
 | 验收 | 新建工作区 → 建库后 `codebase.status.vector_count = 0` 且不报错；`@Codebase` 一次后向量补满；`codebase.search` 在无向量时返回词法结果且 `vectorSearch=false` |
@@ -192,7 +192,7 @@ opt-in 落地后发现一个设计错误：在**每会话一份索引库**（SSH
 
 1. **意图持久化**：设置项 `indexSemanticSearch`（`src/model-settings.js:resolveIndexVectorsIntent`），
    打开后 agent / prep 的每次建库都带 `vectors: true`，不再依赖手点面板。
-2. **内容哈希复用**：`<data_dir>/vector-cache.sqlite`（`crates/dieyun-core/src/index/vector_cache.rs`），
+2. **内容哈希复用**：`<data_dir>/vector-cache.sqlite`（`crates/dieyun-codebase/src/index/vector_cache.rs`），
    同签名下同一段代码只算一次向量，跨 worktree / 跨会话命中（见 `docs/VECTOR-SEARCH.md` §1.2）。
    没有这一条，上面那个开关在日常使用里就是「每个新会话等一次全仓 embedding」。
 
@@ -220,7 +220,7 @@ R3 把向量从「配置项」改成「请求参数」后，`run_index` 里那�
 |---|---|
 | 问题 | `graph_calls` 391k 行 / 65 MB，服务 7 天 1 次 `graph` 调用；建它还要 LSP enrich 后台任务 |
 | 动作 | `graph.index` 默认只建 `symbols + imports + file_mtime`（够 `repo_map` / `symbol_search` / `module_deps`）；`callers` / `callees` / `impact` / `lsp_callers` 命中空表时，用**已有的** `autoIndex` 参数触发一次局部 calls 构建 |
-| diff 面 | Rust：`crates/dieyun-core/src/graph/build.rs`（拆分 build scope：`symbols+imports` / `+calls`）、`graph/mod.rs`（`graph.index.start` 参数）、`graph/query.rs`（`callers/callees/impact` 在 calls 缺失时返回既有的「未就绪」语义，勿新增错误码）、`graph/schema.rs`（表结构不变）<br>Main：`src/gateway/handlers/graph.js:19-37`（`graph.index.start` / `graph.index` 透传 scope；`123/136/149` 的 `autoIndex` 保持）<br>Agent：`src/agent/tool-catalog.js` `GRAPH_TOOL` 描述补一句「callers 首次可能触发一次建边」<br>Renderer：`renderer-graph-panel.js`（状态行区分「符号已建 / 调用边未建」） |
+| diff 面 | Rust：`crates/dieyun-codebase/src/graph/build.rs`（拆分 build scope：`symbols+imports` / `+calls`）、`graph/mod.rs`（`graph.index.start` 参数）、`graph/query.rs`（`callers/callees/impact` 在 calls 缺失时返回既有的「未就绪」语义，勿新增错误码）、`graph/schema.rs`（表结构不变）<br>Main：`src/gateway/handlers/graph.js:19-37`（`graph.index.start` / `graph.index` 透传 scope；`123/136/149` 的 `autoIndex` 保持）<br>Agent：`src/agent/tool-catalog.js` `GRAPH_TOOL` 描述补一句「callers 首次可能触发一次建边」<br>Renderer：`renderer-graph-panel.js`（状态行区分「符号已建 / 调用边未建」） |
 | 唯一需新增的参数 | `graph.index.start` / `graph.index` 增加 `calls: boolean`（缺省 `false`）。**为何删不掉**：调用边的产物量级（65 MB / 391k 行）与触发频次（1 次/周）相差 5 个数量级，必须可选；它不进 `agent-limits`，也不是「绕过失败」的开关，而是构建范围本身。实现形态是 Rust 内部的 `GraphScope::Structural \| WithCalls` 枚举，RPC 只做布尔映射（`rpc/mod.rs:graph_scope_from_params`），不引入配置字段 |
 | 实现要点 | ①`graph/build.rs` 的 `index_file` 在 `Structural` 下直接跳过调用抽取与 `backfill_unique_callees`；②**补建必须重解析未变文件**：`calls_missing = scope.with_calls() && !force && call_count == 0` 时禁用 mtime 跳过，否则「按需建调用图」在增量模式下永远抽不到边；③`handlers/graph.js` 的 `callers`/`callees`/`lsp_resolve` 在 `indexed && callCount===0` 时自动发起一次 `calls: true` 构建并返回 `GRAPH_INDEXING_IN_PROGRESS`（提示稍后再试），不新增错误码 |
 | 验收 | 新建工作区 → `graph.status` 报 `symbol_count>0 && call_count=0`；`repo_map`/`symbol_search` 正常；`callers` 首次调用后 `call_count>0`；`graph.lsp_enrich` 不再默认后台跑 |
@@ -330,7 +330,7 @@ R3 把向量从「配置项」改成「请求参数」后，`run_index` 里那�
 |---|---|
 | 事实产生 | `src/agent/system-prompt-prep.js` → `indexAudit = { allow, code: 'explicit'\|'auto'\|null, repoMap }`（Main 是唯一知道「哪个块真的进了 turnHost」的人） |
 | 事实搬运 | `src/renderer/renderer-agent-send.js`：`contextAudit.index` → `request_snapshots.context_audit_json.index` |
-| 聚合 | `crates/dieyun-core/src/memory/snapshot.rs:count_index_injections` + RPC `memory.request_snapshot_index_audit`（**只数带 `index` 审计的轮次**，改造前的历史行另记 `total`，否则旧数据会被读成「一直没注入」） |
+| 聚合 | `crates/dieyun-memory/src/memory/snapshot.rs:count_index_injections` + RPC `memory.request_snapshot_index_audit`（**只数带 `index` 审计的轮次**，改造前的历史行另记 `total`，否则旧数据会被读成「一直没注入」） |
 | 展示 | `src/agent/tool-telemetry.js:describeIndexInjections`（占比/空值口径唯一来源）→ `src/renderer/renderer-help.js`：面板下半区两行「注入 · 仓库结构图 / 注入 · 相关代码」 |
 | 契约 | 聚合窗口用**工具遥测窗口的起点**（`since`），两个口径同一段时间；core 未就绪时返回 `null` → UI 写「不可用」，不画成 0 |
 
@@ -422,7 +422,7 @@ DY_SESSION=<会话 id> DY_SSH_HOST=<远端主机> DY_SAMPLE=20 node scripts/veri
 完全一致（有回归测试 `missing_graph_tables_is_not_an_error`）。这条前提要记住：
 `codebase.search` 的「找定义」质量现在取决于结构索引建没建，而结构索引仍是按需构建（§R5）。
 
-回归测试三条（`crates/dieyun-core/src/index/search.rs`）：
+回归测试三条（`crates/dieyun-codebase/src/index/search.rs`）：
 `definition_site_ranks_above_usage`（改造前必失败）、`multi_term_query_does_not_use_definition_channel`、
 `missing_graph_tables_is_not_an_error`。
 
@@ -527,10 +527,10 @@ DY_SESSION=<会话 id> DY_SSH_HOST=<远端主机> DY_SAMPLE=20 node scripts/veri
 | 合计（n=54） | 78% / 89% / 0.82 | **87% / 93% / 0.89** | 74% / 80% / 0.77 | 52% / 59% / 0.56 |
 
 原句族剩下的 1/12 不是融合问题：同一段说明在 `src/agent/agent-limits.js` 与
-`crates/dieyun-core/src/agent/loop_run.rs` 各有一份（后者带 Markdown `**`，所以词元只落到
+`crates/dieyun-runtime/src/agent/loop_run.rs` 各有一份（后者带 Markdown `**`，所以词元只落到
 2/3，不构成强证据），两处都是正确答案，题库的「期望文件」只认了其中一个。
 
-回归测试两条（`crates/dieyun-core/src/index/search.rs`）：
+回归测试两条（`crates/dieyun-codebase/src/index/search.rs`）：
 `full_coverage_literal_hit_outranks_vector_only_hit`（改前必失败）、
 `vector_still_decides_when_no_literal_evidence`（守住改写族的价值不被这次改动带走）。
 

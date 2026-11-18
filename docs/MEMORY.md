@@ -103,8 +103,8 @@ flowchart TB
 ```
 
 - 引擎：`dieyun-core`（Rust / rusqlite），WAL + `synchronous=NORMAL` + `auto_vacuum=INCREMENTAL`；
-  连接调优单一来源 `crates/dieyun-core/src/sqlite.rs`，外键由各 store 显式开启。
-- 实现：`crates/dieyun-core/src/memory/`（Node 侧一律经 Gateway `requireRustCore` 访问）。
+  连接调优单一来源 `crates/dieyun-base/src/sqlite.rs`，外键由各 store 显式开启。
+- 实现：`crates/dieyun-memory/src/memory/`（Node 侧一律经 Gateway `requireRustCore` 访问）。
 - 目录名唯一来源 `src/app-paths.js`；旧 `pixel-office-agent` 首次启动自动迁移。
 
 ### 3.1.1 Agent 运行历史（`agent_runs` / `agent_traces` / `agent_plans` / `agent_steps`）
@@ -266,7 +266,7 @@ project_paths(path_key PRIMARY KEY, project_id, path, first_seen_at)   -- 别名
 scope = 'project:' + projects.id
 ```
 
-解析（`memory.project_resolve`，唯一实现 `crates/dieyun-core/src/memory/projects.rs`）：
+解析（`memory.project_resolve`，唯一实现 `crates/dieyun-memory/src/memory/projects.rs`）：
 
 1. `path_key`（小写 + 斜杠统一 + 去尾分隔符）命中 `project_paths` → 用该 project；
 2. 未命中但有 `git_origin` 且已有同 origin 的 project → 这条路径**自动成为它的别名**（仓库搬家 / 换盘符，记忆跟着走）；
@@ -339,7 +339,7 @@ scope = 'project:' + projects.id
 | 一致性 | 三个触发器（`long_memories_fts_ai/ad/au`）维护增删改；老库首次建表后按行数差异 `rebuild` 一次 |
 | 排序 | `ORDER BY bm25(long_memories_fts)`，再叠加重要度 / 新鲜度 / `stale` 惩罚做同一查询内微调 |
 | 可见行 | `memory/recall.rs::long_mem_visible_sql(alias, now_index)`（唯一来源：`status IN ('active','stale')` + 未过期）。**`memory/misc.rs` 的衰减 UPDATE 不走它**：那条筛的是「已过期、该归档」的行，与「还看得见」正好相反 |
-| 查询串 | `crates/dieyun-core/src/fts.rs::match_query`（唯一来源，索引与记忆共用；逐片段加引号、`OR` 连接、剥掉 FTS5 语法字符） |
+| 查询串 | `crates/dieyun-base/src/fts.rs::match_query`（唯一来源，索引与记忆共用；逐片段加引号、`OR` 连接、剥掉 FTS5 语法字符） |
 | 可见行 | `memory/mod.rs::long_mem_visible_sql(alias, now_index)`（唯一来源：`status IN ('active','stale')` + 未过期；原先手抄 10 处 → 现在 1 处）。**`misc.rs` 的衰减 UPDATE 不走它**：那条筛的是「已过期、该归档」的行，与「还看得见」正好相反 |
 
 **分词器边界（写清楚，免得当 bug 排查）：** trigram 只能索引 **≥3 字符** 的片段，
@@ -626,7 +626,7 @@ flowchart LR
 
 | 目标 | 触点 |
 |------|------|
-| 新增持久字段 | `crates/dieyun-core/src/memory/schema.rs` 迁移 + 相关 RPC + `docs/CODEMAP.json` |
+| 新增持久字段 | `crates/dieyun-memory/src/memory/schema.rs` 迁移 + 相关 RPC + `docs/CODEMAP.json` |
 | 调归纳 prompt / 输出 schema | `src/agent/knowledge-maintainer.js`（唯一来源；勿在 Renderer 再写一份） |
 | 调触发门 / 预算 | `src/agent/agent-limits.js` 的 `knowledge*` 组 |
 | 新增注入块 | `src/agent/system-prompt-prep.js`（装配处 `Promise.all`）+ 本文 §5 |
@@ -641,9 +641,9 @@ flowchart LR
 ## 15. 源码索引
 
 ```
-crates/dieyun-core/src/memory/          # SQLite MemoryStore（唯一写入），schema/mod/misc/agent/snapshot（词法检索已并入 FTS5，见 §5.2.1）
-crates/dieyun-core/src/memory/projects.rs   # 项目身份：projects / project_paths / 别名解析（唯一实现）
-crates/dieyun-core/src/rpc/             # memory.* 查询类 RPC
+crates/dieyun-memory/src/memory/          # SQLite MemoryStore（唯一写入），schema/mod/misc/agent/snapshot（词法检索已并入 FTS5，见 §5.2.1）
+crates/dieyun-memory/src/memory/projects.rs   # 项目身份：projects / project_paths / 别名解析（唯一实现）
+crates/dieyun-runtime/src/rpc/             # memory.* 查询类 RPC
 src/gateway/handlers/memory.js          # memory.* handler；project_* 的项目身份解析在此
 src/workspace/target.js                 # projectWorkspacePath（剥 worktree 后缀）
 src/agent/knowledge-maintainer.js       # 归纳器：触发(afterAgentRun)/prompt/取模型/写记忆(文件+库)/AGENTS 提案/定时/冷却/队列/pending/材料化

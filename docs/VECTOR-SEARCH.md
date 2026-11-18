@@ -12,7 +12,7 @@
 | 记忆语义召回（`memory.long_recall` 第一级） | `long_memory_vectors` | 每次查询从 SQLite 读 BLOB、反序列化 | Rust 内全量余弦（f32，量远小于代码块） |
 | 远端索引（SSH / WSL） | 远端库 | 远端进程内同样走 `VectorPool` | 同上 |
 
-三者共用同一套「余弦 + 阈值」口径（`MIN_SIMILARITY = 0.05`，唯一来源 `crates/dieyun-core/src/embedding/mod.rs`：代码索引向量池与长记忆语义召回都读它），没有第二套打分公式。
+三者共用同一套「余弦 + 阈值」口径（`MIN_SIMILARITY = 0.05`，唯一来源 `crates/dieyun-base/src/embedding/mod.rs`：代码索引向量池与长记忆语义召回都读它），没有第二套打分公式。
 
 > 代码索引的**词法通道**现在只有一条：子串 `LIKE`（按命中词数排序）。trigram FTS 已于 `SCHEMA_VERSION 4` 删除（体积/使用率判据见 `docs/INDEX-VALUE-REVIEW.md` R2）；`memory` 的 `long_memories_fts` 仍用 trigram，两者互不影响。
 
@@ -65,7 +65,7 @@ embedding 一遍。这就是向量长期开不起来的真原因（不是「模�
 
 ### 1.3 请求形状：批大小 + 有界并发（冷启动的时间账几乎全在这里）
 
-`crates/dieyun-core/src/embedding/mod.rs` 里只有两个常数决定「一次建库打端点多少次、同时打几条」：
+`crates/dieyun-base/src/embedding/mod.rs` 里只有两个常数决定「一次建库打端点多少次、同时打几条」：
 
 | 常数 | 值 | 口径 |
 |---|---|---|
@@ -167,7 +167,7 @@ Error: codebase.search 超时`。查下来**不是索引坏了**，是端点把�
 
 | 修法 | 落点 | 口径 |
 |---|---|---|
-| **交互闸门** | `crates/dieyun-core/src/embedding/mod.rs`（`embed_texts_interactive`）与 `src/codebase/embedding-client.js`（`embedInteractive`） | 记住**最近一次成功**往返（按 端点+模型 键，换端点即重新量）；超过预算（Rust `INTERACTIVE_EMBED_BUDGET_MS` / Node `agent-limits.interactiveEmbedBudgetMs`，两侧成对）就**不发请求**，回 `EMBEDDING_TOO_SLOW`，调用方走既有的关键词 / 子串通道 |
+| **交互闸门** | `crates/dieyun-base/src/embedding/mod.rs`（`embed_texts_interactive`）与 `src/codebase/embedding-client.js`（`embedInteractive`） | 记住**最近一次成功**往返（按 端点+模型 键，换端点即重新量）；超过预算（Rust `INTERACTIVE_EMBED_BUDGET_MS` / Node `agent-limits.interactiveEmbedBudgetMs`，两侧成对）就**不发请求**，回 `EMBEDDING_TOO_SLOW`，调用方走既有的关键词 / 子串通道 |
 | **归纳批量写** | `memory.long_add_many`（Rust `add_long_memories_deduped`）+ `knowledge-maintainer.applyMemoryItems` | 一次 `embed_batches` 算完 8 条向量（批大小仍是 `plan_embed_batches` 一份），再逐条走**同一套**写入政策（低价值闸 / 近重复 / 写入即索引）：请求数 8 → 1。core 还是旧版（没有这个方法，回 `UNKNOWN_METHOD`）时逐条退回 `memory.long_add` —— 语义一样，只是慢 |
 
 为什么闸门要放在**发请求之前**：调用方只能掐自己那条 await；被放弃的请求照样占端点。

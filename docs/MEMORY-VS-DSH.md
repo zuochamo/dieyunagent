@@ -124,7 +124,7 @@
 
 | 改动面 | 测试 |
 |---|---|
-| `crates/dieyun-core/src/memory/`、`fts.rs` | `cargo test -p dieyun-core`（含 `messages_search_matches_across_sessions_within_workspace`、`messages_fts_index_follows_update_and_delete`、`compaction_folded_search_reads_folded_text`） |
+| `crates/dieyun-memory/src/memory/`、`fts.rs` | `cargo test -p dieyun-core`（含 `messages_search_matches_across_sessions_within_workspace`、`messages_fts_index_follows_update_and_delete`、`compaction_folded_search_reads_folded_text`） |
 | 记忆 RPC / 工具 | `npm run test:local-gateway-smoke`、`npm run verify:rpc-catalog` |
 | 交接 | `npm run test:session-handoff`、`test/unit/session-handoff.test.cjs` |
 | AGENTS.md 链 | `npm run test:system-prompt-prep`（含 `runAgentsChain`） |

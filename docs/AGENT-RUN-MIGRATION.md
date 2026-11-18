@@ -7,7 +7,7 @@
 
 | 位置 | 内容 |
 |---|---|
-| `crates/dieyun-core/src/rpc/calls.rs` | `call_host(method, params)` → oneshot 等答复；30s 超时；无宿主通道时报 `HOST_UNAVAILABLE`（不发没人回的行）；迟到答复丢弃 |
+| `crates/dieyun-runtime/src/rpc/calls.rs` | `call_host(method, params)` → oneshot 等答复；30s 超时；无宿主通道时报 `HOST_UNAVAILABLE`（不发没人回的行）；迟到答复丢弃 |
 | `rpc/stdio.rs` | stdin 的 `type:"reply"` 在解析成请求前拦下；反向调用**以自己的行类型** `type:"call"` 发出（包进 `type:"event"` 会被当通知丢掉——踩过） |
 | `rpc/mod.rs` | `core.host_probe`（诊断）：core 调宿主 `core.echo` 并断言答复回来 |
 | `src/core-bridge.js` | `type:"call"` 分流 + `onCoreCall(method, handler)` + 答复写回 stdin |

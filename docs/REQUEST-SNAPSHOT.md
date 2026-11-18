@@ -3,7 +3,7 @@
 > 解决的问题：**「这一轮模型到底看到了什么、为什么历史变短了、这轮为什么没压缩」只能靠读代码猜。**
 > 现在这些都有留底，可以一条 RPC 查回来。
 >
-> 相关：表结构 `crates/dieyun-core/src/memory/schema.rs` · 装配 `src/agent/request-snapshot.js`
+> 相关：表结构 `crates/dieyun-memory/src/memory/schema.rs` · 装配 `src/agent/request-snapshot.js`
 
 ---
 
@@ -155,7 +155,7 @@ JSON.parse(full.messagesJson)   // ← 就是当时发出去的 messages 数组
   （否则"刚写完就把它自己的最近 N 轮裁掉"）。
 - 体量：单行 20–120KB（system/tools 每行都存全文，不去重），40 轮 ≈ 3.2MB/会话。
   超预算先降 `KeepPerSession`（结构不动）。
-- 删行不等于缩文件：本库 `auto_vacuum = INCREMENTAL`（见 `crates/dieyun-core/src/sqlite.rs`），
+- 删行不等于缩文件：本库 `auto_vacuum = INCREMENTAL`（见 `crates/dieyun-base/src/sqlite.rs`），
   已释放的页要 `PRAGMA incremental_vacuum` 才真正归还。**存量清理**（2026-11-09 实测 1200.6MB →
   541.1MB，删 3318 行）就是「停应用 → 按上限删一次 → `incremental_vacuum` 循环到 freelist 为 0 →
   `wal_checkpoint(TRUNCATE)`」，日常由写入时的裁剪维持，不需要再手动跑。

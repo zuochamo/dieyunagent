@@ -3,7 +3,7 @@
 > 对照对象：DSH 桌面版内置包（`app.asar` 内 `@deepseek-ai/dsh-subagent` /
 > `dsh-tool-subagent` / `dsh-tool-subagent-control` / `dsh-agent-team` / `dsh-agent`，
 > 官方说明 `dsh/docs/subsystems/subagent.zh.md`）与叠云本仓
-> `crates/dieyun-core/src/planner/` + `src/agent/subagent-runner.js` + `src/agent/rust-planner-runner.js`。
+> `crates/dieyun-runtime/src/planner/` + `src/agent/subagent-runner.js` + `src/agent/rust-planner-runner.js`。
 > 本文只记**结论与理由**；机制细节见 [AGENT-DEV.md](./AGENT-DEV.md) /
 > [MULTI-AGENT-WORKTREE-ISOLATION-PLAN.md](./MULTI-AGENT-WORKTREE-ISOLATION-PLAN.md)。
 >
@@ -136,7 +136,7 @@
 | 改动 | 测试 |
 |---|---|
 | `src/agent/subagent-runner.js` | `npx vitest run test/unit/subagent-runner.test.cjs test/unit/subagent-followup.test.cjs` |
-| `crates/dieyun-core/src/planner/` | `npm run test:rust-planner-smoke` + `cargo test -p dieyun-core --lib planner` |
+| `crates/dieyun-runtime/src/planner/` | `npm run test:rust-planner-smoke` + `cargo test -p dieyun-core --lib planner` |
 | planner worker 批 / worktree 隔离 | `node scripts/test-planner-parallel.cjs`、`node scripts/test-planner-workers.cjs` |
 | 护栏数字 / 设置页 schema | `npm run test:agent-limits` |
 | 纯函数 / 工具表 | `npm run test:unit` + `npm run check:js` |

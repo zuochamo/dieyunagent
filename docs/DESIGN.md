@@ -205,7 +205,7 @@ sequenceDiagram
 
 触发：`getComposerAgentMode() === 'plan'`，或存在可恢复检查点。
 
-**Rust 驱动**（`crates/dieyun-core/src/planner/` + `src/agent/rust-planner-runner.js`）：
+**Rust 驱动**（`crates/dieyun-runtime/src/planner/` + `src/agent/rust-planner-runner.js`）：
 
 | RPC | 作用 |
 | --- | --- |
@@ -310,7 +310,7 @@ flowchart TD
 
 > 详细分层、读写时机与注入规则见 **[MEMORY.md](./MEMORY.md)**。
 
-存储：`crates/dieyun-core/src/memory/`（Rust `MemoryStore`）→ `%APPDATA%/dieyunagent/diecloud-memory.sqlite`（WAL）。**唯一写入路径**：Gateway `requireRustCore('memory.*')`；sidecar 未就绪时 RPC 直接抛 `RUST_CORE_UNAVAILABLE`（JS `memory-store.js` 已删除）。
+存储：`crates/dieyun-memory/src/memory/`（Rust `MemoryStore`）→ `%APPDATA%/dieyunagent/diecloud-memory.sqlite`（WAL）。**唯一写入路径**：Gateway `requireRustCore('memory.*')`；sidecar 未就绪时 RPC 直接抛 `RUST_CORE_UNAVAILABLE`（JS `memory-store.js` 已删除）。
 
 **Rust memory RPC**（完整）：`memory.ping`、`touch_session`、`sessions_list`、`session_*`、`message_append`、`messages_recent/clear/delete_turn/after/older`、`long_add/recent/recall/keyword_search/reindex/vector_status/status_set/decay`、`handoff_save/get/latest`、`consolidation_job_*`、`compaction_archive/recent`、`request_snapshot_append/get/recent`、`sessions_with_messages`、`long_memories_after`；`agent.run_upsert`、`plan_save`、`steps_save`、`state_get`、`trace_save/get`。
 Gateway 侧另有 `memory.project_add/project_recall/project_scope`（项目 scope 归一化的唯一入口，见 [MEMORY.md](./MEMORY.md) §4.1）。
@@ -343,7 +343,7 @@ Gateway 侧另有 `memory.project_add/project_recall/project_scope`（项目 sco
 
 文件：`src/agent/compaction-main.js`（Main 进程，IPC `compaction:maybe-compact`）；Renderer 经 preload 调用 Main，**无本地 LLM 回退**。
 
-**Rust 分工**（`crates/dieyun-core/src/compaction/`）：`compaction.estimate` / `prepare` / `apply` 负责 token 预算、tool-call 原子块折叠与 messages 重组；`compaction.maybe_compact` 在 sidecar 内通过 `reqwest` 调用 chat API 做 LLM 摘要（`core.configure` 传入 `llm.baseUrl/apiKey/textModel`）。
+**Rust 分工**（`crates/dieyun-base/src/compaction/`）：`compaction.estimate` / `prepare` / `apply` 负责 token 预算、tool-call 原子块折叠与 messages 重组；`compaction.maybe_compact` 在 sidecar 内通过 `reqwest` 调用 chat API 做 LLM 摘要（`core.configure` 传入 `llm.baseUrl/apiKey/textModel`）。
 
 **Renderer 路径**：`applyContextCompaction()` → IPC `compaction:maybe-compact`（与 Rust agent loop 同逻辑）；sidecar 不可用则报错。上下文圆环 token 经 `compaction:estimate-tokens`（Rust）；IPC 不可用时本地启发式仅用于 UI。`compaction:reset-state` 经 preload 暴露。
 
@@ -570,7 +570,7 @@ npm run pack:deb:remote  # 仅 Ubuntu deb：跨机打到 Linux 构建机，产�
 2. `renderer-agent-api.js` / `renderer-agent-loop.js` — Rust loop / Planner IPC 入口；压缩与 token 估算走 Main IPC
 3. `renderer.js` — 其余 UI 与 Gateway 客户端
 
-改 Planner 看 `crates/dieyun-core/src/planner/` 与 `src/agent/rust-planner-runner.js`。改单 Agent loop 看 `crates/dieyun-core/src/agent/` 与 `src/agent/rust-loop-runner.js`。
+改 Planner 看 `crates/dieyun-runtime/src/planner/` 与 `src/agent/rust-planner-runner.js`。改单 Agent loop 看 `crates/dieyun-runtime/src/agent/` 与 `src/agent/rust-loop-runner.js`。
 
 ---
 
@@ -598,7 +598,7 @@ src/agent-home.js
 crates/dieyun-core/          # Rust sidecar：agent.loop、planner.run、codebase.index、memory.*、compaction.*、embedding
 src/gateway/server.js
 src/gateway/rpc.js
-crates/dieyun-core/src/memory/  # SQLite MemoryStore
+crates/dieyun-memory/src/memory/  # SQLite MemoryStore
 src/gateway/host-control.js
 src/gateway/web-fetch.js
 src/agent/rust-loop-runner.js

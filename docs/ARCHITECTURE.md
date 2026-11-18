@@ -133,7 +133,7 @@ flowchart TB
 | **Renderer** | `src/renderer/` | 聊天气泡、输入、Plan 进度、Gateway 客户端、工具 UI 委托 |
 | **Main** | `src/main-entry.js`、`src/agent/` | 窗口/托盘、IPC、Worktree、Rust 桥、计划调度、工具执行（LLM HTTP 已在 core，见 [`LLM-RPC.md`](./LLM-RPC.md)） |
 | **Gateway** | `src/gateway/` | 工具 RPC、权限、路径白名单、桥接 Rust memory |
-| **Rust** | `crates/dieyun-core/` | Agent/Planner 状态机、**LLM 客户端与流式解析**、上下文折叠（transcript 唯一写者）、SQLite 记忆、向量（本地优先）、索引 |
+| **Rust** | `crates/`（5 个 crate，见 `AGENTS.md`「架构三层」） | Agent/Planner 状态机、**LLM 客户端与流式解析**、上下文折叠（transcript 唯一写者）、SQLite 记忆、向量（本地优先）、索引。`dieyun-core` 只剩 bin + 路径转发；实现分布在 `dieyun-runtime` / `dieyun-codebase` / `dieyun-memory` / `dieyun-base` |
 
 ---
 
@@ -340,11 +340,11 @@ Planner 子 Agent 通过 coordinator 按 `toRole` 投递（`message-bus.js`）�
 
 ## 6. dieyun-core（Rust Sidecar）
 
-`crates/dieyun-core`，经 `src/core-bridge.js` **stdio 行 JSON-RPC** 通信。
+`crates/dieyun-core`（bin；实现分布在 `dieyun-runtime` / `dieyun-codebase` / `dieyun-memory` / `dieyun-base` 这 4 个库 crate 里，依赖方向由 Cargo 强制），经 `src/core-bridge.js` **stdio 行 JSON-RPC** 通信。
 
 ```mermaid
 flowchart TB
-  subgraph Crate["crates/dieyun-core/"]
+  subgraph Crate["crates/dieyun-core（bin）+ 4 个库 crate"]
     RPCio["rpc/stdio JSON-RPC"]
     Agent["agent/ loop_run（账本状态机，不含工具）"]
     Planner["planner/ run + plan_parse"]
@@ -388,7 +388,7 @@ flowchart TB
 
 ## 7. 记忆系统
 
-存储：`crates/dieyun-core/src/memory/` → `%APPDATA%/dieyunagent/diecloud-memory.sqlite`（WAL）。
+存储：`crates/dieyun-memory/src/memory/` → `%APPDATA%/dieyunagent/diecloud-memory.sqlite`（WAL）。
 
 **唯一写入路径**：Gateway `requireRustCore('memory.*')`；sidecar 未就绪则 RPC 抛 `RUST_CORE_UNAVAILABLE`。
 
@@ -793,7 +793,7 @@ flowchart TB
 | `src/gateway/` | 本地 RPC 服务 |
 | `src/agent/` | Agent / Planner / 工具桥 / 压缩 |
 | `src/renderer/` | 全部 UI 模块 |
-| `crates/dieyun-core/` | Rust sidecar |
+| `crates/` | Rust sidecar（`cargo build -p dieyun-core`；5 个 crate 组成一个 workspace） |
 | `skills/bundled/` | 预装技能 |
 | `src/ssh/` | 远程 SSH 工作空间 |
 | `src/plans/` | 定时任务 |
