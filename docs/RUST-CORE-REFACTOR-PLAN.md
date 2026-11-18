@@ -270,7 +270,7 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 
 **验收**：`cargo test` 239 → **269 全绿**、零 warning；`npm test`、vitest（225 文件 / 2208 条）、`verify:rpc-catalog` 通过。
 
-### P3 · 单一来源收敛（6–10 人日，风险中）· **2 / 5 已落地（2026-11-18），第 6 条已在收尾批完成**
+### P3 · 单一来源收敛（6–10 人日，风险中）· **已完成 2026-11-18**（第 6 条 A13 在收尾批完成）
 
 | 项 | 状态 | 落点 / 证据 |
 |---|---|---|
