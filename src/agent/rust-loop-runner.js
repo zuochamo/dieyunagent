@@ -605,7 +605,8 @@ async function runRustAgentLoop(opts) {
           runStall.note('llm_delta');
           onPhase('llm_delta', {
             runId,
-            round: event.round != null ? Number(event.round) : llmRound,
+            // `agent.delta` 不再带 round（core 侧那个字段恒为 null，已删）—— 轮次就是本循环自己的计数。
+        round: llmRound,
             content: deltaContent,
             reasoning: deltaReasoning,
             contentChannel,

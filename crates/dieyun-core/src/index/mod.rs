@@ -287,6 +287,12 @@ pub struct StatusResult {
     pub vectors_reused: i64,
     /// 上一次建库中真正调用 embedding 端点的条数
     pub vectors_embedded: i64,
+    /// 上一次建库「没能进索引」的文件数（超单文件上限 / 二进制 / 读不出来）。
+    /// 说出来才有用：否则用户只会看到「我明明有这个文件，搜不到」。
+    pub files_skipped: i64,
+    /// 上一次建库是否被扫描上限（`MAX_FILES`）**截断**：仓比上限大时，多出来的文件
+    /// 这一轮根本没被看到 —— 这与「被跳过」是两件事，必须分开报。
+    pub files_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -665,6 +671,36 @@ mod tests {
                 .results
                 .is_empty(),
             "文件已不可索引，库里不该还有它的旧正文"
+        );
+    }
+
+    /// 回归（P5 R3）：`status` 必须说出「这次建库有几个文件没进索引」。
+    ///
+    /// 不说出来的后果很具体：用户看到「我明明有这个文件，搜不到」，而面板只说「索引完成」。
+    /// `skipped`（看见了但内容不可索引）与 `truncated`（仓比扫描上限还大、后面的文件压根没看到）
+    /// 是两件事，分开报。
+    #[tokio::test]
+    async fn status_reports_files_skipped() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.rs"), "fn a() { b(); }\n").unwrap();
+        // 文本扩展名 + NUL 内容 → 走「不可索引」分支
+        std::fs::write(dir.path().join("binary.rs"), [b"\0\0".as_slice(), b"\0".as_slice()].concat())
+            .unwrap();
+        let db = dir.path().join("idx.sqlite");
+        let svc = IndexService::new(crate::codebase_db::handle(db), EmbeddingConfig::default());
+        let root = dir.path().to_string_lossy();
+
+        let st = svc.index_workspace(&root, true, false).await.unwrap();
+        assert!(st.indexed);
+
+        let status = svc.status(&root).unwrap();
+        assert_eq!(
+            status.files_skipped, 1,
+            "二进制文件要报成 skipped（实际 {status:?}）"
+        );
+        assert!(
+            !status.files_truncated,
+            "小仓不该被报成 truncated（那是「仓比 16k 上限还大」）"
         );
     }
 

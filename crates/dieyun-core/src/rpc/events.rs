@@ -37,12 +37,14 @@ pub fn emit(kind: &str, fields: Value) {
 }
 
 /// 流式增量：`content`/`reasoning` 两个通道分开推，绝不在这一层合并。
-pub fn emit_delta(run_id: &str, round: Option<u64>, content: Option<&str>, reasoning: Option<&str>) {
+pub fn emit_delta(run_id: &str, content: Option<&str>, reasoning: Option<&str>) {
+    // 这里**没有** `round`：增量属于「正在飞的那一轮」，而账本的 `round` 是收到响应才自增的，
+    // 请求发出时它还是上一轮 —— 填进去就是错的。这个字段以前恒为 `null`，宿主只能拿自己的
+    // 计数兜底；与其留一个永远为空的字段，不如删掉（宿主的 `llmRound` 本来就是每轮递增的）。
     emit(
         "agent.delta",
         json!({
             "runId": run_id,
-            "round": round,
             "content": content,
             "reasoning": reasoning,
         }),

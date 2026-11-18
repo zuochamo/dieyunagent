@@ -14,7 +14,10 @@ use crate::error::CoreError;
 /// - v5：`workspaces` 增加 `vectors_reused` / `vectors_embedded`（上一次建库里
 ///   「复用内容哈希缓存」与「真算」的条数）。这是**只加列**的纯增量迁移，不重建任何表：
 ///   加这两列是为了让「向量复用到底生效没有」可观测，否则打开语义检索后只能靠猜。
-pub const SCHEMA_VERSION: i32 = 5;
+/// - v6：`workspaces` 增加 `files_skipped` / `files_truncated`（上一次建库「没进索引的文件数」与
+///   「是否被 16k 扫描上限截断」）。同样只加列、不重建：不报这两个数，用户只会看到
+///   「我明明有这个文件，搜不到」。
+pub const SCHEMA_VERSION: i32 = 6;
 
 /// 确保索引表就绪。
 ///
@@ -77,6 +80,16 @@ fn migrate(conn: &Connection, from: i32) -> rusqlite::Result<()> {
     if from < 5 {
         // v4 → v5：记录上一次建库的向量来源（复用缓存 / 真算），见 SCHEMA_VERSION 注释。
         add_vector_stats_columns(conn, 5)?;
+    }
+    // **顺序即语义**：每一步自己把 `user_version` 写成本步的版本号，所以必须按升序执行 ——
+    // 把 v6 放在 v5 前面会让 v5 那步把版本号写回 5（当时就是这样，两个迁移用例立刻红）。
+    if from < 6 {
+        // v5 → v6：只加两列（幂等，重复执行吞 duplicate column）。
+        crate::db_schema::ensure_column(conn, "workspaces", "files_skipped", "INTEGER DEFAULT 0")
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        crate::db_schema::ensure_column(conn, "workspaces", "files_truncated", "INTEGER DEFAULT 0")
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        conn.pragma_update(None, "user_version", 6)?;
     }
     Ok(())
 }
@@ -148,7 +161,11 @@ const BASE_TABLES: &str = "
         embedding_dims INTEGER DEFAULT 0,
         -- 上一次建库的向量来源分布（面板/诊断用）：复用跨 worktree 内容哈希缓存 vs 真算
         vectors_reused INTEGER DEFAULT 0,
-        vectors_embedded INTEGER DEFAULT 0
+        vectors_embedded INTEGER DEFAULT 0,
+        -- 上一次建库「没能进索引」的文件数（超过单文件上限 / 二进制 / 读不出来）与
+        -- 「被 16k 扫描上限截断」标记：不说出来，用户只会看到「我明明有这个文件却搜不到」。
+        files_skipped INTEGER DEFAULT 0,
+        files_truncated INTEGER DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS chunks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

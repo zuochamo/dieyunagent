@@ -262,7 +262,6 @@ pub(crate) fn agent_run_start<'a>(state: &'a AppState, params: &'a Value) -> Box
         let emit = |d: &crate::agent::llm::Delta| {
             crate::rpc::events::emit_delta(
                 &run_id,
-                None,
                 d.content.as_deref(),
                 d.reasoning.as_deref(),
             );
@@ -314,7 +313,6 @@ pub(crate) fn agent_run_tools<'a>(state: &'a AppState, params: &'a Value) -> Box
         let emit = |d: &crate::agent::llm::Delta| {
             crate::rpc::events::emit_delta(
                 &run_id,
-                None,
                 d.content.as_deref(),
                 d.reasoning.as_deref(),
             );
@@ -383,7 +381,6 @@ pub(crate) fn llm_complete<'a>(state: &'a AppState, params: &'a Value) -> BoxFut
                 if !run_id.is_empty() {
                     crate::rpc::events::emit_delta(
                         &run_id,
-                        None,
                         d.content.as_deref(),
                         d.reasoning.as_deref(),
                     );

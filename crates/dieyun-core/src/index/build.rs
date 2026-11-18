@@ -164,6 +164,8 @@ impl IndexService {
                 embedding_stale: false,
                 vectors_reused: 0,
                 vectors_embedded: 0,
+                files_skipped: 0,
+                files_truncated: false,
                 phase: Some("walking".into()),
                 files_done: Some(0),
                 files_total: None,
@@ -526,10 +528,15 @@ impl IndexService {
             (prev_embed_model.clone(), prev_embed_dims)
         };
 
+        // 「没进索引」的两个事实要落库：不报出来，用户只会看到「我明明有这个文件却搜不到」。
+        // `truncated` 与 `skipped` 是两件事：前者是仓比扫描上限还大（后面的文件这一轮根本没看到），
+        // 后者是看见了但内容不可索引（超单文件上限 / 二进制 / 读失败）。
+        let truncated = files.len() >= MAX_FILES;
         conn.execute(
             "INSERT INTO workspaces (root_hash, root_path, file_count, chunk_count, vector_count,
-             indexed_at, indexing, embedding_model, embedding_dims, vectors_reused, vectors_embedded)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, COALESCE(?9, 0), COALESCE(?10, 0))
+             indexed_at, indexing, embedding_model, embedding_dims, vectors_reused, vectors_embedded,
+             files_skipped, files_truncated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, COALESCE(?9, 0), COALESCE(?10, 0), ?11, ?12)
              ON CONFLICT(root_hash) DO UPDATE SET
                root_path = excluded.root_path,
                file_count = excluded.file_count,
@@ -540,7 +547,9 @@ impl IndexService {
                embedding_model = excluded.embedding_model,
                embedding_dims = excluded.embedding_dims,
                vectors_reused = COALESCE(?9, workspaces.vectors_reused),
-               vectors_embedded = COALESCE(?10, workspaces.vectors_embedded)",
+               vectors_embedded = COALESCE(?10, workspaces.vectors_embedded),
+               files_skipped = ?11,
+               files_truncated = ?12",
             params![
                 root_hash,
                 root.to_string_lossy(),
@@ -551,7 +560,9 @@ impl IndexService {
                 embedding_model,
                 embed_dims,
                 vectors_reused,
-                vectors_embedded
+                vectors_embedded,
+                skipped,
+                i64::from(truncated)
             ],
         )
         .map_err(|e| CoreError::rpc("INDEX_FAILED", e.to_string()))?;

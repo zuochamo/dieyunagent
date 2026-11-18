@@ -78,10 +78,11 @@ impl IndexService {
         let current_signature = self.embedding.signature();
         let embedding_enabled = self.embedding.enabled();
 
-        let row: Option<(i64, i64, i64, i64, i64, Option<String>, i64, i64, i64)> = conn
+        let row: Option<(i64, i64, i64, i64, i64, Option<String>, i64, i64, i64, i64, i64)> = conn
             .query_row(
                 "SELECT file_count, chunk_count, vector_count, indexed_at, indexing,
-                        embedding_model, embedding_dims, vectors_reused, vectors_embedded
+                        embedding_model, embedding_dims, vectors_reused, vectors_embedded,
+                        files_skipped, files_truncated
                  FROM workspaces WHERE root_hash = ?1",
                 params![ws.root_hash],
                 |r| {
@@ -95,6 +96,8 @@ impl IndexService {
                         r.get(6)?,
                         r.get(7)?,
                         r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
                     ))
                 },
             )
@@ -116,6 +119,8 @@ impl IndexService {
                     embedding_stale: false,
                     vectors_reused: 0,
                     vectors_embedded: 0,
+                    files_skipped: 0,
+                    files_truncated: false,
                     phase: None,
                     files_done: None,
                     files_total: None,
@@ -124,7 +129,7 @@ impl IndexService {
                 self.apply_live_progress(&ws.root_hash, &mut st);
                 (st, None)
             }
-            Some((fc, cc, vc, ia, db_indexing, em, ed, reused, embedded)) => {
+            Some((fc, cc, vc, ia, db_indexing, em, ed, reused, embedded, skipped, truncated)) => {
                 // 仅当旗标或元数据明显残缺时再 COUNT，避免每次 status 扫表
                 let mut db_flag = db_indexing;
                 let mut file_count = fc;
@@ -250,6 +255,8 @@ impl IndexService {
                     embedding_stale,
                     vectors_reused: reused,
                     vectors_embedded: embedded,
+                    files_skipped: skipped,
+                    files_truncated: truncated != 0,
                     phase: None,
                     files_done: None,
                     files_total: None,
