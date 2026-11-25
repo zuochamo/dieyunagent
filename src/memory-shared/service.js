@@ -457,6 +457,13 @@ function createSharedMemoryService(deps) {
         const dist = row.dist == null ? null : Number(row.dist);
         const sim = row.sim == null ? null : Number(row.sim);
         const score = dist != null ? 1 - dist : sim || 0;
+        // 对外只承诺一个字段：`injectScore ∈ [0,1]`，与本地长期记忆**同名同义**
+        // （「这条该不该注入」的唯一依据）。但两者是**不同的有界相似度**，所以阈值不能合并：
+        //   向量行 = 1 − 余弦距离 ∈ [-1,1]（余弦本身绝对、跨查询可比）；
+        //   文本行 = pg_trgm `similarity()` ∈ [0,1]，且**天花板随「查询/条目」长度比下降**
+        //            （|A∩B|/|A∪B| 的结构所限：短查询配长条目永远到不了 0.3）——
+        //            这就是关键词阈值必须比语义阈值低一个量级的原因，不是量纲漂移。
+        // 宿主按行取哪条阈值由 `mode` 决定，见 `system-prompt-prep.js:fetchSharedMemoryBlock`。
         return {
           id: Number(row.id),
           content: String(row.content || ''),
@@ -464,6 +471,7 @@ function createSharedMemoryService(deps) {
           importance: Number(row.importance) || 0,
           scope: String(row.scope || 'global'),
           score: Number.isFinite(score) ? score : 0,
+          injectScore: Number.isFinite(score) ? Math.min(1, Math.max(0, score)) : 0,
           mode: dist != null ? 'semantic' : 'keyword'
         };
       });
