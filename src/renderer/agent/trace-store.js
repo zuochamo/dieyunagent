@@ -144,6 +144,79 @@ function readAgentTraceRecord(runId, opts = {}) {
 }
 
 /**
+ * 批量取（回放一屏的最省路径）：命中的直接用缓存，未命中的**合成一次** RPC。
+ *
+ * 逐条 `readAgentTraceRecord` 时一屏 32 条回合 = 32 次往返 + core 侧 32 次同一条 SQL；
+ * 这里把它们压成一次 `agent.traces_get`（Rust 一次读池 + 一条 SQL，见
+ * `crates/dieyun-memory/src/memory/agent.rs#get_agent_traces`）。
+ *
+ * 未命中的每条仍登记一条「等这一批」的在途 promise —— 期间别的调用点走
+ * `readAgentTraceRecord`（例如逐条回填）会直接复用同一批，不会再发第二个请求。
+ *
+ * @returns {Promise<Map<string, object|null>>} runId → row（没取到的不进缓存，下次还能重试）
+ */
+function readAgentTraceRecords(runIds, opts = {}) {
+  const shape = normalizeAgentTraceShape(opts.shape);
+  const ids = [];
+  const seen = new Set();
+  for (const raw of runIds || []) {
+    const id = String(raw || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  const out = new Map();
+  const missing = [];
+  for (const id of ids) {
+    const cached = peekAgentTraceRead(id, { shape });
+    if (cached) out.set(id, cached);
+    else missing.push(id);
+  }
+  if (!missing.length) return Promise.resolve(out);
+  if (typeof gatewayCall !== 'function') return Promise.resolve(out);
+
+  /** @type {Map<string, { key: string, resolve: (row: object|null) => void }>} */
+  const deferred = new Map();
+  const waits = [];
+  for (const id of missing) {
+    const key = agentTraceReadCacheKey(id, shape);
+    const inflight = agentTraceReadInflight.get(key);
+    if (inflight) {
+      waits.push(inflight.then((row) => out.set(id, row || null)));
+      continue;
+    }
+    let resolveFn = null;
+    const pending = new Promise((resolve) => {
+      resolveFn = resolve;
+    });
+    deferred.set(id, { key, resolve: resolveFn });
+    agentTraceReadInflight.set(key, pending);
+    waits.push(pending.then((row) => out.set(id, row || null)));
+  }
+  if (deferred.size) {
+    const params = shape === 'display' ? { runIds: [...deferred.keys()], shape } : { runIds: [...deferred.keys()] };
+    gatewayCall('agent.traces_get', params)
+      .then((res) => {
+        const rows = (res && res.rows) || {};
+        for (const [id, entry] of deferred) {
+          const row = rows[id] || null;
+          rememberAgentTraceRead(id, row, shape);
+          agentTraceReadInflight.delete(entry.key);
+          entry.resolve(row);
+        }
+      })
+      .catch((e) => {
+        console.warn(e);
+        for (const entry of deferred.values()) {
+          agentTraceReadInflight.delete(entry.key);
+          entry.resolve(null);
+        }
+      });
+  }
+  return Promise.all(waits).then(() => out);
+}
+
+/**
  * 展示态的「按需升级」：把该 runId 的完整行取回来（只取一次，之后走 `full` 缓存）。
  * 触发点只有用户的展开动作（某轮思考被截断 / 某个 diff 正文被裁）。
  */
@@ -686,9 +759,10 @@ window.DieyunNamespaces.register(
     getPendingResumeCheckpoint,
     setPendingResumeCheckpoint,
     clearPendingResumeCheckpoint,
-    // 思考区回放用的读路径（缓存 + 在途去重 + 展示态升级）：只给本仓渲染层用，不镜像回 window.*
+    // 思考区回放用的读路径（缓存 + 在途去重 + 展示态升级 + 批量取）：只给本仓渲染层用，不镜像回 window.*
     peekAgentTraceRead,
     readAgentTraceRecord,
+    readAgentTraceRecords,
     upgradeAgentTraceRecord,
     invalidateAgentTraceRead
   },

@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, renderChatHistoryEdge, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, layoutChatNav, chatUserScrollSeq, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat, refreshGoalPanelIfVisible, peekAgentTraceRead, readAgentTraceRecord */
+/* global window, document, $, escapeHtml, settings, gwState, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, renderChatHistoryEdge, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, layoutChatNav, chatUserScrollSeq, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat, refreshGoalPanelIfVisible, peekAgentTraceRead, readAgentTraceRecord, readAgentTraceRecords */
 'use strict';
 
 
@@ -295,6 +295,24 @@ function shouldAbortChatRender(switchGen) {
   return switchGen != null && typeof isActiveSessionSwitch === 'function' && !isActiveSessionSwitch(switchGen);
 }
 
+/**
+ * 回放前预取这一屏的思考区 trace（一次批量 RPC 取代「每条气泡各发一次」）。
+ *
+ * 只收「只有 `meta.traceRunId`、没有 inline / transient trace」的那些 —— 手上已经有
+ * trace 的不需要取。取回来的落进 `trace-store` 的两档缓存，随后逐条回填走 peek 命中。
+ */
+function prefetchSessionTraces() {
+  if (typeof readAgentTraceRecords !== 'function') return;
+  const runIds = [];
+  for (const m of messages) {
+    if (!m || m.role !== 'assistant') continue;
+    if (Array.isArray(m.transientTrace) && m.transientTrace.length) continue;
+    const { meta } = unpackAssistantMeta(m.content);
+    if (meta && meta.traceRunId) runIds.push(meta.traceRunId);
+  }
+  if (runIds.length) void readAgentTraceRecords(runIds, { shape: 'display' });
+}
+
 function appendRenderedMessageAtIndex(i, opts) {
   const forceScroll = opts.forceScroll !== false;
   const skipScroll = opts.skipScroll === true;
@@ -552,6 +570,7 @@ async function renderChatFromMessagesYielding(opts = {}) {
   beginChatHistoryArtifactsBatch();
   let painted = false;
   try {
+    prefetchSessionTraces();
     if (typeof revokeAnswerFigureBlobs === 'function') revokeAnswerFigureBlobs(chatList);
     chatList.innerHTML = '';
     clearArtifacts();
@@ -600,6 +619,7 @@ function renderChatFromMessages(opts = {}) {
   const hiddenToken = beginHiddenChatRender(!forceScroll);
   beginChatHistoryArtifactsBatch();
   try {
+    prefetchSessionTraces();
     if (typeof revokeAnswerFigureBlobs === 'function') revokeAnswerFigureBlobs(chatList);
     chatList.innerHTML = '';
     clearArtifacts();

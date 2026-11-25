@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-25T02:26:36.992Z",
+  "generatedAt": "2026-11-25T04:54:51.027Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 191,
+    "total": 192,
     "gatewayOnly": 105,
     "rustOnly": 25,
-    "both": 61
+    "both": 62
   },
   "methods": [
     {
@@ -93,6 +93,16 @@
     },
     {
       "method": "agent.trace_save",
+      "layer": "both",
+      "gateway": [
+        "gateway/handlers/agent.js"
+      ],
+      "rust": [
+        "dieyun-runtime/rpc/registry.rs"
+      ]
+    },
+    {
+      "method": "agent.traces_get",
       "layer": "both",
       "gateway": [
         "gateway/handlers/agent.js"

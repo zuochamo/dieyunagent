@@ -17,6 +17,7 @@ export type CoreRpcMethod =
   | 'agent.steps_save'
   | 'agent.trace_get'
   | 'agent.trace_save'
+  | 'agent.traces_get'
   | 'codebase.index'
   | 'codebase.index.start'
   | 'codebase.search'
@@ -218,6 +219,7 @@ export type RpcLayerMap = {
   'agent.steps_save': 'both';
   'agent.trace_get': 'both';
   'agent.trace_save': 'both';
+  'agent.traces_get': 'both';
   'artifact.list_files': 'gateway';
   'artifact.read_file': 'gateway';
   'browser.a11y_snapshot': 'gateway';

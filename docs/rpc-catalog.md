@@ -2,18 +2,18 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-11-25T02:26:36.992Z
+生成时间：2026-11-25T04:54:51.027Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 191 |
+| 总计 | 192 |
 | Gateway only | 105 |
 | Rust only | 25 |
-| Both | 61 |
+| Both | 62 |
 
 ## 按命名空间
 
-### agent (10)
+### agent (11)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
@@ -27,6 +27,7 @@
 | `agent.steps_save` | both | gateway/handlers/agent.js | yes |
 | `agent.trace_get` | both | gateway/handlers/agent.js | yes |
 | `agent.trace_save` | both | gateway/handlers/agent.js | yes |
+| `agent.traces_get` | both | gateway/handlers/agent.js | yes |
 
 ### artifact (2)
 

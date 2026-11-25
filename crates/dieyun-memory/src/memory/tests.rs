@@ -1072,6 +1072,98 @@ fn prunes_surplus_traces_per_run() {
     let _ = std::fs::remove_file(db);
 }
 
+/// 批量读（回放思考区用）：一批 run 一次读，每个 run 只给**最新**一条，缺失的不出现在结果里。
+#[test]
+fn batch_reads_latest_trace_per_run() {
+    let db = std::env::temp_dir().join(format!("dieyun-traces-batch-{}.sqlite", now_ms()));
+    let _ = std::fs::remove_file(&db);
+    let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+    let session = store.create_session(Some("批量"), None).unwrap();
+
+    // trace-a：同一 run 写两次（原地覆盖，取最新）
+    for thought in ["a1", "a2"] {
+        store
+            .save_agent_trace(&json!({
+                "runId": "trace-a",
+                "sessionId": session.id,
+                "status": "running",
+                "trace": [{ "round": 1, "thought": thought }],
+            }))
+            .unwrap();
+    }
+    // trace-b：正常一次
+    store
+        .save_agent_trace(&json!({
+            "runId": "trace-b",
+            "sessionId": session.id,
+            "status": "completed",
+            "trace": [{ "round": 1, "thought": "b1" }],
+        }))
+        .unwrap();
+    // trace-c：老库形态（同一 run 堆多行）——批量读也必须只给 id 最大的那条
+    store
+        .upsert_agent_run(&json!({
+            "id": "trace-c",
+            "sessionId": session.id,
+            "status": "running",
+        }))
+        .unwrap();
+    {
+        let guard = store.test_conn();
+        for thought in ["c1", "c2"] {
+            guard
+                .execute(
+                    "INSERT INTO agent_traces
+                       (run_id, session_id, message_id, phase, trace_json, created_at)
+                     VALUES ('trace-c', ?1, NULL, 'assistant', ?2, ?3)",
+                    params![
+                        session.id,
+                        json!([{ "round": 1, "thought": thought }]).to_string(),
+                        now_ms()
+                    ],
+                )
+                .unwrap();
+        }
+    }
+
+    let rows = store
+        .get_agent_traces(&json!({
+            "runIds": ["trace-a", "trace-b", "trace-c", "trace-missing", "  ", "trace-a"]
+        }))
+        .unwrap();
+    let map = rows
+        .get("rows")
+        .and_then(|v| v.as_object())
+        .expect("rows 必须是对象");
+    assert_eq!(map.len(), 3, "只回存在的三个 run；重复项不该变成两条，缺失项不出现");
+
+    let thought = |run: &str| -> Option<String> {
+        map.get(run)
+            .and_then(|r| r.get("trace"))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("thought"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(thought("trace-a").as_deref(), Some("a2"), "同一 run 取最新一条");
+    assert_eq!(thought("trace-b").as_deref(), Some("b1"));
+    assert_eq!(thought("trace-c").as_deref(), Some("c2"), "多行老库取 id 最大的那条");
+    assert_eq!(thought("trace-missing"), None);
+
+    // 空数组 / 缺参数：回空对象，不报错（渲染层按「没拿到」处理）
+    for input in [json!({ "runIds": [] }), json!({})] {
+        let out = store.get_agent_traces(&input).unwrap();
+        assert_eq!(
+            out.get("rows").and_then(|v| v.as_object()).map(|m| m.len()),
+            Some(0),
+            "空请求不该报错"
+        );
+    }
+
+    let _ = std::fs::remove_file(db);
+}
+
 #[test]
 fn merges_incremental_trace_checkpoints() {
     let db = std::env::temp_dir().join(format!("dieyun-trace-delta-{}.sqlite", now_ms()));

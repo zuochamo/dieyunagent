@@ -88,6 +88,7 @@ pub(crate) static METHODS: &[MethodSpec] = &[
     MethodSpec { name: "agent.steps_save", budget: Budget::None, imp: Impl::Blocking(handlers::agent::steps_save) },
     MethodSpec { name: "agent.trace_get", budget: Budget::None, imp: Impl::Blocking(handlers::agent::trace_get) },
     MethodSpec { name: "agent.trace_save", budget: Budget::None, imp: Impl::Blocking(handlers::agent::trace_save) },
+    MethodSpec { name: "agent.traces_get", budget: Budget::None, imp: Impl::Blocking(handlers::agent::traces_get) },
     MethodSpec { name: "codebase.index", budget: Budget::None, imp: Impl::Async(handlers::async_data::codebase_index) },
     MethodSpec { name: "codebase.index.start", budget: Budget::None, imp: Impl::Blocking(handlers::codebase::index_start) },
     MethodSpec { name: "codebase.search", budget: Budget::None, imp: Impl::Async(handlers::async_data::codebase_search) },

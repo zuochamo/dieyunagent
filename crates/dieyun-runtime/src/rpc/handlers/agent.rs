@@ -54,5 +54,10 @@ pub(crate) fn trace_get(snap: &ServiceSnapshot, params: &Value) -> Result<Value,
         let row = snap.memory.get_agent_trace(params)?;
         Ok(row.unwrap_or(Value::Null))
     }
+
+/// `agent.traces_get`：一次读池 + 一条 SQL 取一批 run 的最新 trace（回放思考区用）。
+pub(crate) fn traces_get(snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
+        snap.memory.get_agent_traces(params)
+    }
     // ---- fs：磁盘 IO（实现见 rpc/handlers/fs.rs）----
     // ---- codebase / graph：同步查询与索引启动 ----

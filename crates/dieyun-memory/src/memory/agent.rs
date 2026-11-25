@@ -1,4 +1,4 @@
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, params_from_iter, OptionalExtension};
 use serde_json::{json, Value};
 
 use dieyun_base::error::CoreError;
@@ -534,7 +534,9 @@ impl MemoryStore {
     pub fn get_agent_trace(&self, input: &Value) -> Result<Option<Value>, CoreError> {
         let run_id = input.get("runId").and_then(|v| v.as_str()).unwrap_or("");
         let message_id = optional_i64(input.get("messageId"));
-        self.with_conn(|conn| {
+        // 读走池（`docs/SQLITE-ACCESS.md`：读路径上的读一律 `read()`）——这条是回放热路径，
+        // 借写入连接会和每 ~2.5s 一次的 `trace_save` checkpoint 抢同一条常驻连接。
+        self.read(|conn| {
             let row = if !run_id.is_empty() {
                 conn.query_row(
                     "SELECT id, run_id, session_id, message_id, phase, trace_json, created_at
@@ -568,6 +570,63 @@ impl MemoryStore {
                     "createdAt": created_at,
                 })
             }))
+        })
+    }
+
+    /// 批量取「每个 run 的最新一条 trace」：一次读连接、一条 SQL。
+    ///
+    /// 回放思考区时一屏最多 32 条回合（`CHAT_INITIAL_LOAD_LIMIT`），逐条 RPC 等于把同一份
+    /// 读池借 32 次、把同一段 SQL 编译 32 次；而每条只是 `run_id` 不同。
+    ///
+    /// @returns `{ rows: { runId: row } }`，缺失的 run 不出现在结果里（渲染层按「没拿到」处理）。
+    pub fn get_agent_traces(&self, input: &Value) -> Result<Value, CoreError> {
+        let mut run_ids: Vec<String> = input
+            .get("runIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        run_ids.dedup();
+        if run_ids.is_empty() {
+            return Ok(json!({ "rows": {} }));
+        }
+        self.read(|conn| {
+            // rusqlite 没有数组绑定：按个数生成占位符，整批一条语句。
+            // `id = MAX(id)` 取每个 run 的最新一行（与单条读的 `ORDER BY id DESC LIMIT 1` 同义）。
+            let placeholders = vec!["?"; run_ids.len()].join(",");
+            let sql = format!(
+                "SELECT id, run_id, session_id, message_id, phase, trace_json, created_at
+                 FROM agent_traces
+                 WHERE run_id IN ({placeholders})
+                   AND id = (SELECT MAX(x.id) FROM agent_traces x WHERE x.run_id = agent_traces.run_id)"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut query = stmt.query(params_from_iter(run_ids.iter()))?;
+            let mut rows = serde_json::Map::new();
+            while let Some(row) = query.next()? {
+                let (id, run_id, session_id, message_id, phase, trace_json, created_at) =
+                    map_trace_row(row)?;
+                let trace = serde_json::from_str::<Value>(&trace_json).unwrap_or_else(|_| json!([]));
+                rows.insert(
+                    run_id.clone(),
+                    json!({
+                        "id": id,
+                        "runId": run_id,
+                        "sessionId": session_id,
+                        "messageId": message_id,
+                        "phase": phase,
+                        "trace": trace,
+                        "createdAt": created_at,
+                    }),
+                );
+            }
+            Ok(json!({ "rows": Value::Object(rows) }))
         })
     }
 }

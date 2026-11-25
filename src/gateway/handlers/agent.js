@@ -93,6 +93,18 @@ function createAgentHandlers({ requireRustCore }) {
       return shapeTraceForDisplay(row, {
         thoughtHeadChars: getAgentLimits().traceDisplayThoughtHeadChars
       });
+    },
+
+    // 批量读（回放一屏最多 32 条回合）：一次 core 调用取代逐条往返，展示态整形逐行复用同一份。
+    'agent.traces_get': async ({ runIds, shape }) => {
+      const rows = await requireRustCore('agent.traces_get', { runIds });
+      if (shape !== 'display' || !rows || typeof rows !== 'object') return rows;
+      const thoughtHeadChars = getAgentLimits().traceDisplayThoughtHeadChars;
+      const shaped = {};
+      for (const [runId, row] of Object.entries(rows.rows || {})) {
+        shaped[runId] = shapeTraceForDisplay(row, { thoughtHeadChars });
+      }
+      return { ...rows, rows: shaped };
     }
   };
 }

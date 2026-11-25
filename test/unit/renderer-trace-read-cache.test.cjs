@@ -53,8 +53,8 @@ function createCache({ maxMb = 12, fetchImpl } = {}) {
     'getAgentLimits',
     'console',
     `${BLOCK}
-     return { peekAgentTraceRead, readAgentTraceRecord, upgradeAgentTraceRecord,
-              invalidateAgentTraceRead, agentTraceReadCacheMaxChars };`
+     return { peekAgentTraceRead, readAgentTraceRecord, readAgentTraceRecords,
+              upgradeAgentTraceRecord, invalidateAgentTraceRead, agentTraceReadCacheMaxChars };`
   );
   const api = factory(gatewayCall, getAgentLimits, { warn() {} });
   return { ...api, calls };
@@ -154,6 +154,88 @@ test('空 trace / 无行不写缓存（不占预算，也不挡住后来的真�
   const missing = createCache({ fetchImpl: () => Promise.resolve(null) });
   await missing.readAgentTraceRecord('trace-y', DISPLAY);
   assert.equal(missing.peekAgentTraceRead('trace-y', DISPLAY), null);
+});
+
+// ---- 批量取：一屏只发一次 RPC ----
+
+test('批量取：命中的不发请求，未命中的合成**一次** traces_get', async () => {
+  const cache = createCache({
+    fetchImpl: (method, params) => {
+      if (method === 'agent.traces_get') {
+        const rows = {};
+        for (const id of params.runIds) rows[id] = { runId: id, trace: [{ round: 1 }] };
+        return Promise.resolve({ rows });
+      }
+      return Promise.resolve({ runId: params.runId, trace: [{ round: 1 }] });
+    }
+  });
+  // 先让 a 进缓存（单条读一次）
+  await cache.readAgentTraceRecord('trace-a', DISPLAY);
+  assert.equal(cache.calls.length, 1);
+
+  const out = await cache.readAgentTraceRecords(['trace-a', 'trace-b', 'trace-c', 'trace-b'], DISPLAY);
+  assert.equal(cache.calls.length, 2, '只有未命中那两个才发请求');
+  assert.equal(cache.calls[1].method, 'agent.traces_get');
+  assert.deepEqual(cache.calls[1].params, { runIds: ['trace-b', 'trace-c'], shape: 'display' });
+  assert.ok(out.get('trace-a') && out.get('trace-b') && out.get('trace-c'));
+  // 落进缓存：下一次整批都命中
+  await cache.readAgentTraceRecords(['trace-a', 'trace-b', 'trace-c'], DISPLAY);
+  assert.equal(cache.calls.length, 2, '再取一次应该全命中');
+});
+
+test('批量取：批内缺失的 run 不进缓存（下次还能重试）', async () => {
+  const cache = createCache({
+    fetchImpl: (_m, params) =>
+      Promise.resolve({ rows: { 'trace-x': { runId: 'trace-x', trace: [{ round: 1 }] } } })
+  });
+  const out = await cache.readAgentTraceRecords(['trace-x', 'trace-y'], DISPLAY);
+  assert.ok(out.get('trace-x'));
+  assert.equal(out.get('trace-y'), null, '缺的行给 null');
+  assert.equal(cache.peekAgentTraceRead('trace-y', DISPLAY), null, '缺的行不缓存');
+  await cache.readAgentTraceRecords(['trace-y'], DISPLAY);
+  assert.equal(cache.calls.length, 2, '缺失的应该能重试');
+});
+
+test('批量取：批量在途时，单条读复用同一批（不另发 trace_get）', async () => {
+  let releaseBatch = null;
+  const cache = createCache({
+    fetchImpl: (method) => {
+      if (method === 'agent.traces_get') {
+        return new Promise((resolve) => {
+          releaseBatch = () =>
+            resolve({ rows: { 'trace-1': { runId: 'trace-1', trace: [{ round: 1 }] } } });
+        });
+      }
+      return Promise.resolve({ runId: 'trace-1', trace: [{ round: 1 }] });
+    }
+  });
+  const batch = cache.readAgentTraceRecords(['trace-1'], DISPLAY);
+  const single = cache.readAgentTraceRecord('trace-1', DISPLAY);
+  assert.equal(cache.calls.length, 1, '只该有那一次批量请求');
+  assert.equal(cache.calls[0].method, 'agent.traces_get');
+  releaseBatch();
+  const [mapOut, singleOut] = await Promise.all([batch, single]);
+  assert.ok(mapOut.get('trace-1'));
+  assert.ok(singleOut && singleOut.trace.length === 1);
+  assert.equal(cache.calls.length, 1);
+});
+
+test('批量取：整批失败 → 全部 null 且不入缓存', async () => {
+  const cache = createCache({ fetchImpl: () => Promise.reject(new Error('core busy')) });
+  const out = await cache.readAgentTraceRecords(['trace-1', 'trace-2'], DISPLAY);
+  assert.equal(out.get('trace-1'), null);
+  assert.equal(out.get('trace-2'), null);
+  assert.equal(cache.peekAgentTraceRead('trace-1', DISPLAY), null);
+  await cache.readAgentTraceRecords(['trace-1'], DISPLAY);
+  assert.equal(cache.calls.length, 2, '失败后应该能重试');
+});
+
+test('批量取：空数组 / 全重复 → 不发请求', async () => {
+  const cache = createCache();
+  const empty = await cache.readAgentTraceRecords([], DISPLAY);
+  assert.equal(empty.size, 0);
+  await cache.readAgentTraceRecords(['', '  ', null], DISPLAY);
+  assert.equal(cache.calls.length, 0);
 });
 
 test('按体积淘汰：超上限先丢最久未用的，且至少留最后一条', async () => {
