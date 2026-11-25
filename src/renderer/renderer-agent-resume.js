@@ -66,7 +66,7 @@ async function resumeAgentToolLoop() {
       sessionId: runSessionId
     });
     if (!run.done) {
-      pauseAgentForToolLimit(run, fc);
+      await pauseAgentForToolLimit(run, fc);
       return;
     }
     await completeAgentRunAfterSuccess(run, fc);

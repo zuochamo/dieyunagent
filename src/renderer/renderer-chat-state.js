@@ -1,4 +1,4 @@
-/* global window, document, $, setComposerSendingState, updateLastTurnFloat, flushComposerQueue, updateComposerQueueUi, getAgentContinueState, currentSessionId, isSessionSwitchInFlight, isComposerQueuePaused, getComposerQueueEditing, renderAttachmentChips, refreshContextProgress, revokeAttachmentPreview, renderPeerSessionRow */
+/* global window, document, $, setComposerSendingState, updateLastTurnFloat, flushComposerQueue, updateComposerQueueUi, getAgentContinueState, getPendingResumeCheckpoint, currentSessionId, isSessionSwitchInFlight, isComposerQueuePaused, getComposerQueueEditing, renderAttachmentChips, refreshContextProgress, revokeAttachmentPreview, renderPeerSessionRow */
 'use strict';
 
 const SESSION_STORAGE_KEY = 'diecloud.active.session.v1';
@@ -180,7 +180,6 @@ const chatForm = $('chat-form');
 const chatInput = $('chat-input');
 const composerSendBtn = $('composer-send-btn');
 const composerBox = $('composer-box');
-const agentMain = document.querySelector('.agent-main');
 
 const messages = []; // [{role, content}]
 
@@ -289,6 +288,10 @@ function shouldAutoFlushComposerQueue(sessionId) {
   if (typeof getAgentContinueState === 'function') {
     const cs = getAgentContinueState(sid || currentSessionId);
     if (cs) return false;
+  }
+  // plan 的续跑入口是一份**断点**（不是 chat 段状态）：撞上限后同样不许被队列里的下一条顶掉
+  if (typeof getPendingResumeCheckpoint === 'function') {
+    if (getPendingResumeCheckpoint(sid || currentSessionId)) return false;
   }
   return true;
 }

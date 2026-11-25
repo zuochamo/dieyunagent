@@ -1,4 +1,4 @@
-/* global loopApi, settings, currentSessionId, gwState, gatewayCall, createAgentAbortError, buildDieyunMdSystemBlock, assembleSystemPrompt, getContextFilePathsForAgent, getSessionChangeRowsForAgent, waitRemoteCoreForPrep, recordAgentPrepTrace, throwIfAgentAborted, CTX_LIMITS, getEffectiveInputBudget, skipAutoCodebaseForTaskTier, isTaskTierFeatureEnabled, shouldInjectCodeContext, shouldAutoCodebaseSearch, textHasCodebaseMention, loadEnabledSkillIds, hasAgentContinueCheckpoint, sessionActiveRuns, DieyunToolCatalog */
+/* global loopApi, settings, currentSessionId, gwState, gatewayCall, createAgentAbortError, buildDieyunMdSystemBlock, assembleSystemPrompt, getContextFilePathsForAgent, getSessionChangeRowsForAgent, waitRemoteCoreForPrep, recordAgentPrepTrace, throwIfAgentAborted, CTX_LIMITS, getEffectiveInputBudget, skipAutoCodebaseForTaskTier, isTaskTierFeatureEnabled, shouldInjectCodeContext, shouldAutoCodebaseSearch, textHasCodebaseMention, hasAgentContinueCheckpoint, sessionActiveRuns, DieyunToolCatalog */
 'use strict';
 
 const systemMessageCache = new Map();
@@ -378,6 +378,9 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
           diff: r.diff ? { added: r.diff.added || 0, removed: r.diff.removed || 0 } : null
         }))
       : [];
+  const agentToolsForPrep = opts.agentToolsPromise
+    ? await opts.agentToolsPromise.catch(() => null)
+    : opts.agentTools;
   const snapshot = {
     userQuery,
     sessionId,
@@ -393,8 +396,8 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
     skipFastIndex,
     graphIndexOk,
     compactMcpTools:
-      Array.isArray(opts.agentTools) &&
-      opts.agentTools.some((t) => {
+      Array.isArray(agentToolsForPrep) &&
+      agentToolsForPrep.some((t) => {
         const name = t && t.function && t.function.name ? String(t.function.name) : '';
         return isMcpServerToolNameGlobal(name);
       }),
@@ -405,7 +408,6 @@ async function buildSystemMessageBody(userQuery = '', opts = {}) {
       hasSelection: !!(editorCtx && editorCtx.selection && editorCtx.selection.text),
       hasArtifact: !!selectedArtifact
     },
-    enabledSkillMap: typeof loadEnabledSkillIds === 'function' ? loadEnabledSkillIds() : {},
     hasContinueCheckpoint:
       typeof hasAgentContinueCheckpoint === 'function' && hasAgentContinueCheckpoint(sessionId),
     hasActiveRun:

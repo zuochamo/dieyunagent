@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText, shouldShowTraceTitle, attachAnswerFigures, revokeAnswerFigureBlobs */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, getPendingResumeCheckpoint, requestResumeInterruptedTurn, currentSessionId, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, summarizeToolResult, getCurrentUndoTurnId, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setDetailsOpen, getThinkingUiState, thinkingRunState, traceAnswerPhase, startThinkingTransitionPin, AgentRoundText, shouldShowTraceTitle, attachAnswerFigures, revokeAnswerFigureBlobs */
 'use strict';
 
 function patchThinkingTrace(
@@ -406,7 +406,10 @@ function renderAssistantBubbleContent(
     return;
   }
   if (!loading) {
-    if (content && !hitRoundLimit) {
+    // 正文照常渲染：`hitRoundLimit` 只决定「要不要补一行『继续』」，
+    // **不是**「把已经产出的正文藏起来」。以前 `content && !hitRoundLimit` 会在撞上限时
+    // 把正文整段吞掉（plan 尤其致命：它的正文往往就是这一轮唯一的交付）。
+    if (content) {
       const answer = document.createElement('div');
       answer.className = 'msg-answer';
       div.appendChild(answer);
@@ -446,9 +449,24 @@ function resolveAgentContinueStateForView() {
   return continueState;
 }
 
+/**
+ * plan 的续跑入口不是 chat 段状态，而是一份**断点**（`setPendingResumeCheckpoint`）。
+ *
+ * 以前这里只认 `getAgentContinueState`，于是 plan 撞上限时：正文被藏、按钮也不出现，
+ * 用户只能自己猜「回车继续」。现在两条入口共用同一行「继续」。
+ */
+function resolvePlannerResumeForView() {
+  if (typeof getPendingResumeCheckpoint !== 'function' || typeof currentSessionId === 'undefined') {
+    return null;
+  }
+  const checkpoint = getPendingResumeCheckpoint(currentSessionId);
+  return checkpoint && checkpoint.runId ? checkpoint : null;
+}
+
 function appendAgentContinueRow(div) {
   const continueState = resolveAgentContinueStateForView();
-  if (!continueState || !div) return;
+  const plannerResume = continueState ? null : resolvePlannerResumeForView();
+  if ((!continueState && !plannerResume) || !div) return;
   dismissAgentContinueRows(div);
   const row = document.createElement('div');
   row.className = 'msg-continue-row';
@@ -458,12 +476,21 @@ function appendAgentContinueRow(div) {
   link.textContent = '继续';
   link.title = '从当前进度接着执行';
   link.addEventListener('click', () => {
-    if (typeof resumeAgentToolLoop === 'function') resumeAgentToolLoop();
+    if (continueState) {
+      if (typeof resumeAgentToolLoop === 'function') resumeAgentToolLoop();
+      return;
+    }
+    // plan：走「续跑唯一入口」（`requestResumeInterruptedTurn` 自己会消费 planner 断点）
+    if (typeof requestResumeInterruptedTurn === 'function') {
+      requestResumeInterruptedTurn(currentSessionId);
+    }
   });
   row.appendChild(link);
   const hint = document.createElement('span');
   hint.className = 'msg-continue-hint';
-  hint.textContent = formatAgentContinueHint(continueState, true);
+  hint.textContent = continueState
+    ? formatAgentContinueHint(continueState, true)
+    : '本段预算用完，点击「继续」或直接回车从断点接着跑。';
   row.appendChild(hint);
   div.appendChild(row);
 }
@@ -632,31 +659,17 @@ function synthesizedReplyIsUsable(text) {
   return AgentRoundText.synthesizedReplyIsUsable(t);
 }
 
+/**
+ * 展示层剥 tool_call XML：与 `renderer-agent-continue.js#stripVisibleToolCallMarkup` 一样，
+ * 唯一实现在 `src/llm-tool-call-fallback.js#stripToolCallMarkup`（经 agent-bundle 暴露）。
+ * 以前这里与那边各有一份逐字相同的副本，两份都少「裸 `<calls>` / DSML 半角竖线」归一。
+ */
 function stripAssistantVisibleToolCallMarkup(text) {
-  const normalized = String(text || '')
-    .replace(/<\uff5cDSML\uff5c/gi, '<')
-    .replace(/<\/\uff5cDSML\uff5c/gi, '</')
-    .replace(/<tool[\s_]+calls>/gi, '<tool_calls>')
-    .replace(/<\/tool[\s_]+calls>/gi, '</tool_calls>')
-    .replace(/<tool[\s_]+call>/gi, '<tool_call>')
-    .replace(/<\/tool[\s_]+call>/gi, '</tool_call>')
-    .replace(/<\/function\s*>/gi, '')
-    .replace(/<function\s*>/gi, '');
-  return normalized
-    .replace(/<tool_calls>[\s\S]*?(?=<tool_calls>|$)/gi, '')
-    .replace(/<\/tool_calls>/gi, '')
-    .replace(/<invoke\s+name="[^"]+"[^>]*>[\s\S]*?(?=<invoke\s+name=|<\/tool_calls>|$)/gi, '')
-    .replace(/<\/invoke>/gi, '')
-    .replace(/<invoke\s+name="[^"]+"[^>]*\/?>/gi, '')
-    .replace(/<tool_call>[\s\S]*?(?=<tool_call>|$)/gi, '')
-    .replace(/<\/tool_call>/gi, '')
-    .replace(/<function=[^>\n/]+>\s*/gi, '')
-    .replace(/<parameter\s+name="[^"]+"[^>]*>[\s\S]*?<\/parameter>/gi, '')
-    .replace(/<parameter\s+name="[^"]+"[^>]*\/\s*>/gi, '')
-    .replace(/<parameter=[^>\n/]+>[\s\S]*?<\/parameter>/gi, '')
-    .replace(/<parameter=[^>\n/]+>[\s\S]*?(?=<parameter=|<function=|<tool_call>|<invoke|<\/tool_calls>|$)/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const fn = typeof window !== 'undefined' ? window.stripToolCallMarkup : null;
+  if (typeof fn !== 'function') {
+    throw new Error('agent-bundle 未加载：需要 window.stripToolCallMarkup（llm-tool-call-fallback）');
+  }
+  return fn(text);
 }
 
 /**

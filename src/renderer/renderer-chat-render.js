@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, renderChatHistoryEdge, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, layoutChatNav, chatUserScrollSeq, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat, refreshGoalPanel */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, renderChatHistoryEdge, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, layoutChatNav, chatUserScrollSeq, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat, refreshGoalPanelIfVisible */
 'use strict';
 
 
@@ -64,7 +64,6 @@ function isThinkingLayoutTransitionTarget(target) {
  * 时间常数按帧间隔算（120Hz / 60Hz 手感一致），追到 1px 内落回精确贴底。
  * 返回 true 表示这一帧还没到位，调度器据此继续续帧。
  */
-var CHAT_DAMP_TAU_MS = 90;
 var chatDampLastTs = 0;
 
 function dampedChatFollowStep() {
@@ -83,7 +82,7 @@ function dampedChatFollowStep() {
     return false;
   }
   const before = el.scrollTop;
-  el.scrollTop = before + delta * (1 - Math.exp(-dt / CHAT_DAMP_TAU_MS));
+  el.scrollTop = before + delta * (1 - Math.exp(-dt / SCROLL_DAMP_TAU_MS));
   if (el.scrollTop === before) {
     // 写不进去（被夹住或取整成 0）：落位收摊，绝不留一条空转的帧链
     el.scrollTop = maxScroll;
@@ -356,9 +355,10 @@ function finalizeChatRenderAfterMessages(opts = {}) {
     }
   }
   refreshContextProgress();
-  // 目标条与气泡区同属「这个会话长什么样」：切会话 / 重绘后必须按新会话重取一次，
-  // 否则上一个会话的目标会挂在新会话上方
-  if (typeof refreshGoalPanel === 'function') refreshGoalPanel();
+  // 「目标」面板与气泡区同属「这个会话长什么样」：切会话 / 重绘后要按新会话重取一次。
+  // 面板不在前台时不必打这次 IPC（`goalPanelVisible` 在 `renderer-goal-panel.js` 里是
+  // 可见性的唯一来源；可见时本来就有 2s 心跳）。
+  if (typeof refreshGoalPanelIfVisible === 'function') refreshGoalPanelIfVisible();
   if (typeof isArtifactsUiBatching === 'function' && isArtifactsUiBatching()) {
     // 批量渲染结束后统一刷新产物区
   } else if (!$('artifacts-panel')?.hidden) {

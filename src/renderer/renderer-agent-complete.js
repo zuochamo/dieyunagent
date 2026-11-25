@@ -1,4 +1,4 @@
-/* global sessionActiveRuns, currentSessionId, messages, loopApi, settings, gwState, showAgentToast, finalizeAssistantBubble, settleAssistantBubbleAfterLoop, finalizeUserTurnFooter, renderAssistantBubbleContent, resolveRunPlaceholder, runAgentCompletion, getSessionAbortSignal, createAgentAbortError, throwIfAgentAborted, waitForAgentAbortable, isUserAbortError, formatAgentApiError, compactPlainText, applyReadinessNote, capturePlanApplyForUndo, handleWorktreeApplyAfterRun, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, markTurnWorktreeOnly, getCurrentUndoTurnId, finalizeUndoForUserTurn, saveAgentPlanState, saveAgentRunState, saveAssistantTraceRecord, persistStoppedAssistant, buildAgentStateSnapshot, stepsFromAgentPlan, trackArtifactsFromTrace, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, finishSessionActiveRun, syncComposerForActiveSession, noteComposerSessionUsage, reportTokensToMain, clearAgentContinueState, setAgentContinueState, setAgentExecutionContext, invalidateSessionMessageCache, refreshHistoryList, scrollChat, collapseChatThinkingTraces, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, extractBookPrefixMessages, reprojectContinueLoopMessages, refreshTurnRideFromArchive, normalizeAssistantReplyForStorage, unpackAssistantMeta, splitPersistedAssistantTrace, humanizeModelId, formatModelFooterLabel, getTextModelId, buildStoppedFooterMeta, buildFallbackTurnMeta, resolveUserMsgCreatedAt, withdrawUserTurn, appendBubble, agentApi, captureTurnBatchCheckpoint, getPendingWorktreeApply, clearPendingResumeCheckpoint, tryDetectResumeCheckpoint, maybeSaveRunningTraceCheckpoint, createTraceRunId, getAgentToolCallLimit, getAgentMaxRounds, clearComposerQueuePause, getAgentLimits, AgentRoundText */
+/* global sessionActiveRuns, currentSessionId, messages, loopApi, settings, gwState, showAgentToast, finalizeAssistantBubble, settleAssistantBubbleAfterLoop, finalizeUserTurnFooter, renderAssistantBubbleContent, resolveRunPlaceholder, runAgentCompletion, getSessionAbortSignal, createAgentAbortError, throwIfAgentAborted, waitForAgentAbortable, isUserAbortError, formatAgentApiError, compactPlainText, applyReadinessNote, capturePlanApplyForUndo, handleWorktreeApplyAfterRun, beginPlanWorktreeTracking, schedulePlanWorktreeChangesRefresh, openWorktreeReviewAfterPlan, maybeEnforceWorktreeCleanupPolicy, scheduleWorktreePolicyCleanup, markTurnWorktreeOnly, getCurrentUndoTurnId, finalizeUndoForUserTurn, saveAgentPlanState, saveAgentRunState, saveAssistantTraceRecord, persistStoppedAssistant, buildAgentStateSnapshot, stepsFromAgentPlan, trackArtifactsFromTrace, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, finishSessionActiveRun, syncComposerForActiveSession, noteComposerSessionUsage, reportTokensToMain, clearAgentContinueState, setAgentContinueState, setAgentExecutionContext, invalidateSessionMessageCache, refreshHistoryList, scrollChat, collapseChatThinkingTraces, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, extractBookPrefixMessages, reprojectContinueLoopMessages, refreshTurnRideFromArchive, normalizeAssistantReplyForStorage, unpackAssistantMeta, splitPersistedAssistantTrace, humanizeModelId, formatModelFooterLabel, getTextModelId, buildStoppedFooterMeta, buildFallbackTurnMeta, resolveUserMsgCreatedAt, withdrawUserTurn, appendBubble, agentApi, captureTurnBatchCheckpoint, getPendingWorktreeApply, setPendingResumeCheckpoint, clearPendingResumeCheckpoint, tryDetectResumeCheckpoint, maybeSaveRunningTraceCheckpoint, createTraceRunId, getAgentToolCallLimit, getAgentMaxRounds, clearComposerQueuePause, getAgentLimits, AgentRoundText */
 'use strict';
 
 function buildAgentRunOptsForContinue(fc) {
@@ -15,44 +15,135 @@ function buildAgentRunOptsForContinue(fc) {
   };
 }
 
-function pauseAgentForToolLimit(run, fc) {
-  if (run.result?.body) {
+/**
+ * 命中轮次 / 工具段上限：**停车，等用户点「继续」**。
+ *
+ * 三条事实必须同时成立（2026-11-19 之前三条全错）：
+ * 1. **正文不许被吞**：plan 的结果对象没有 `body`，以前走 else 分支把续跑状态清空 ⇒ 气泡空白
+ *    （渲染层还额外在 `hitRoundLimit` 时不画正文）+ 没有「继续」行 + 已经产出的正文不落库。
+ * 2. **续跑入口要能点**：聊天段用 `setAgentContinueState`；plan 用断点（`setPendingResumeCheckpoint`），
+ *    两条入口都由「继续」行与空提交驱动（`sendMessage('', {resumeInterrupted:true})`）。
+ * 3. **必须落终态**：不写就会在 `agent_runs` 留一行 `running`，下次进会话被
+ *    `recoverInterruptedAssistantTurn` 当成「程序重启/连接断开」再补一条伪中断消息。
+ *    这里复用既有落库单一来源 `persistStoppedAssistant`（消息 + trace + 终态同一次写）。
+ */
+async function pauseAgentForToolLimit(run, fc) {
+  const sessionId = fc.runSessionId;
+  const result = run.result || {};
+  const answer = String(result.content || '').trim();
+  const trace = result.trace || [];
+  const limitDetail = (() => {
+    const used = Number(result.toolCallsUsed);
+    const maxTools = Number(getAgentToolCallLimit());
+    const maxRounds = Number(getAgentMaxRounds());
+    const parts = [];
+    if (Number.isFinite(used) && Number.isFinite(maxTools) && maxTools > 0) {
+      parts.push(`工具 ${Math.min(used, maxTools)}/${maxTools}`);
+    }
+    if (Number.isFinite(maxRounds) && maxRounds > 0) parts.push(`最多 ${maxRounds} 轮`);
+    return parts.length ? `（${parts.join('，')}）` : '';
+  })();
+  const pauseNote = `本段预算用完${limitDetail}，已在断点处停下；点「继续」或直接回车接着跑。`;
+
+  // ① 续跑入口：聊天段 vs plan 断点，二者只留一条，别让两个按钮打架
+  const plannerResumeRunId = !result.body && result.runId ? String(result.runId) : '';
+  if (result.body) {
     setAgentContinueState({
-      sessionId: fc.runSessionId,
+      sessionId,
       placeholder: fc.placeholder,
       payload: fc.payload,
       agentTools: fc.agentTools,
       runOpts: buildAgentRunOptsForContinue(fc),
-      partialResult: run.result,
+      partialResult: result,
       reason: 'tool_limit',
       limitInfo: {
-        toolCallsUsed: run.result?.toolCallsUsed,
+        toolCallsUsed: result.toolCallsUsed,
         maxToolCalls: getAgentToolCallLimit(),
         maxRounds: getAgentMaxRounds()
       },
-      workspacePath: sessionActiveRuns.get(fc.runSessionId)?.workspacePath || null,
+      workspacePath: sessionActiveRuns.get(sessionId)?.workspacePath || null,
       fc
     });
+  } else if (plannerResumeRunId && typeof setPendingResumeCheckpoint === 'function') {
+    // plan 的断点由 Main 侧 checkpoint 承载（`checkpointSave(coordinatorRunId, …)`），
+    // 这里只把「哪个 runId 可以在断点续跑」告诉 UI；续跑走同一个入口。
+    setPendingResumeCheckpoint(
+      {
+        runId: plannerResumeRunId,
+        planSummary: String(result.plan?.planSummary || result.plan?.summary || ''),
+        sessionId
+      },
+      sessionId
+    );
+    if (typeof clearAgentContinueState === 'function') clearAgentContinueState(sessionId);
   } else if (typeof clearAgentContinueState === 'function') {
-    clearAgentContinueState(fc.runSessionId);
+    clearAgentContinueState(sessionId);
   }
-  finalizeAssistantBubble(fc.runSessionId, fc.placeholder, {
-    content: run.result.content || '',
-    trace: run.result.trace || [],
+
+  // ② 气泡：正文照常显示（渲染层只在 `hitRoundLimit` 时补「继续」行，不再藏正文）
+  finalizeAssistantBubble(sessionId, fc.placeholder, {
+    content: answer,
+    trace,
     hitRoundLimit: true
   });
-  emitAgentRunEvent(fc.runSessionId, AGENT_RUN_EVENT_TYPES.ROUND_LIMIT, {
-    trace: run.result.trace || [],
-    streamContent: run.result.content || '',
+  {
+    // 关掉在途的「运行中 checkpoint」写入：否则 ~2.5s 一次的那条 trace_save 会在我们写完
+    // 终态之后落库，把 status 翻回 running（Rust 侧终态白名单已改成「非 running 即终态」，
+    // 这里是第二道：别再产生那条写入）。
+    const live = sessionActiveRuns.get(sessionId);
+    if (live) {
+      live.traceCheckpointClosed = true;
+      live.trace = trace;
+    }
+  }
+  emitAgentRunEvent(sessionId, AGENT_RUN_EVENT_TYPES.ROUND_LIMIT, {
+    trace,
+    streamContent: answer,
     hitRoundLimit: true,
     requestId: fc.agentServiceRequestId || null
   });
   if (fc.turnMeta && fc.userMsgIndex >= 0) {
     if (
       typeof canMutateViewMessages !== 'function' ||
-      canMutateViewMessages(fc.runSessionId)
+      canMutateViewMessages(sessionId)
     ) {
       messages[fc.userMsgIndex].meta = fc.turnMeta;
+    }
+  }
+
+  // ③ 落库（消息 + trace + 终态一次写；status=stopped = 本轮停下了，可从断点继续）
+  if (gwState.authed && sessionId && typeof persistStoppedAssistant === 'function') {
+    try {
+      const runId = fc.agentRunId || sessionActiveRuns.get(sessionId)?.runId || null;
+      const replyText = answer ? `${answer}\n\n——（${pauseNote}）` : `（${pauseNote}）`;
+      const userMessageId =
+        typeof fc.ensureUserLocalMsgId === 'function'
+          ? await fc.ensureUserLocalMsgId().catch(() => null)
+          : null;
+      await persistStoppedAssistant(trace, replyText, fc.turnMeta || null, {
+        runId,
+        sessionId,
+        userMsgIndex: fc.userMsgIndex,
+        userMessageId
+      });
+    } catch (e) {
+      console.warn(e);
+    }
+  }
+
+  // ④ 外部提交（手机 / 频道 / 内网对端）必须收到终态，否则 Main 的 activeRequests 永远挂着：
+  //    pause 路径以前什么都不发，ROUND_LIMIT 事件又被「live.finished 早退」挡掉。
+  if (typeof fc.notifyAgentServiceDone === 'function') {
+    try {
+      fc.notifyAgentServiceDone({
+        status: 'awaiting_user',
+        sessionId,
+        runId: fc.agentRunId || null,
+        summary: pauseNote,
+        trace: Array.isArray(trace) ? trace : []
+      });
+    } catch {
+      // 通知失败不影响交付
     }
   }
 }
@@ -349,6 +440,10 @@ async function completeAgentRunAfterSuccess(run, fc) {
     }
     if (gwState.authed) {
       try {
+        // 这里**不吞** append 的异常：写库失败时下面那几行（尤其 `saveAgentRunState` 的
+        // `status: completionStatus`）必须一并不执行。否则库里这轮是「终态但没有 assistant
+        // 消息」，而 `recoverInterruptedAssistantTurn` 只捞 `status === 'running'` 的轮次 ——
+        // 这条话就再也补不回来了。抛出去只让本轮停在 running，界面上的气泡照旧留着。
         const ins = await gatewayCall('memory.message_append', {
           sessionId: runSessionId,
           role: 'assistant',

@@ -179,44 +179,9 @@ async function copyTurnText(text) {
     return;
   }
   try {
-    let copied = false;
-    // 优先走异步剪贴板：不创建临时 textarea，不会抢走输入框焦点。
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      try {
-        await navigator.clipboard.writeText(t);
-        copied = true;
-      } catch {
-        copied = false;
-      }
-    }
-    if (!copied) {
-      // 回退方案：临时 textarea 会短暂抢焦点，复制后必须交还。
-      // 否则 textarea 被 remove() 后焦点落到 body，输入框「丢失光标」、无法输入。
-      const prevActive = document.activeElement;
-      const ta = document.createElement('textarea');
-      ta.value = t;
-      ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      ta.style.top = '0';
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      ta.setSelectionRange(0, t.length);
-      try {
-        copied = document.execCommand('copy');
-      } catch {
-        copied = false;
-      }
-      ta.remove();
-      if (prevActive && prevActive.isConnected && typeof prevActive.focus === 'function') {
-        try {
-          prevActive.focus({ preventScroll: true });
-        } catch {
-          // ignore
-        }
-      }
-    }
+    // 写剪贴板只有一份实现（renderer-utils.js#writeClipboardText）：
+    // 顺序（异步 API 优先）+ 焦点交还都在那一处，这里只管提示与焦点归位。
+    const copied = await writeClipboardText(t);
     if (!copied) throw new Error('clipboard unavailable');
     if (typeof focusChatInput === 'function') focusChatInput();
     if (typeof showAgentToast === 'function') {
@@ -700,13 +665,12 @@ async function withdrawUserTurn(msgIndex) {
       }
       if (rb && rb.committed !== false) {
         const n = rb.restored != null ? rb.restored : (rb.files && rb.files.length) || 0;
-        if (n > 0 || rb.strategy === 'worktree-only') {
-          showAgentToast(
-            '已恢复文件',
-            rb.strategy === 'worktree-only' ? '已丢弃 worktree 改动' : `已恢复 ${n} 个文件`,
-            { variant: 'success' }
-          );
-        }
+        if (n > 0) showAgentToast('已恢复文件', `已恢复 ${n} 个文件`, { variant: 'success' });
+      }
+      // 覆盖不到的路径（本轮 shell 命令改的文件 / 拿不到回合开始树）必须说出来：
+      // 以前这里只按「写成功了几个文件」报成功，用户看到的是「撤回成功、代码没变」
+      if (rb && rb.warning) {
+        showAgentToast('部分改动未还原', rb.warning, { variant: 'info', duration: 8000 });
       }
       // 撤回中途切走：勿清当前可见会话的文件区/产物
       if (String(currentSessionId || '') === String(sessionId || '')) {

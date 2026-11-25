@@ -370,16 +370,6 @@ function normalizeToolCallsForApi(toolCalls) {
   return out;
 }
 
-function safeJsonStringify(value) {
-  try {
-    return JSON.stringify(value);
-  } catch (err) {
-    return JSON.stringify({
-      error: 'tool_result_not_serializable',
-      message: String(err?.message || err)
-    });
-  }
-}
 
 /**
  * 出站图片 part 的统一闸门：格式不受上游支持（bmp/svg/heic/tiff/ico、坏 base64、

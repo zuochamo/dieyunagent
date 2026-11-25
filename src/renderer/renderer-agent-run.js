@@ -160,7 +160,11 @@ async function runAgentCompletion(payload, tools, placeholderEl, runOpts = {}) {
             apiConfig: runOpts.apiConfig,
             model: payload?.model,
             contextTierId: runContextTierId,
-            resumeFromRunId: resumeCheckpoint?.runId || null
+            resumeFromRunId: resumeCheckpoint?.runId || null,
+            // 侧模型为什么判「要拆」：写进思考区第一张卡（结论 + 判定模型思考原文）
+            plannerRouteReason: runOpts.plannerRouteReason || '',
+            plannerRouteThinking: runOpts.plannerRouteThinking || '',
+            plannerRoutePhase: runOpts.plannerRoutePhase || '',
           },
           { signal: runOpts.signal, onProgress: progress, sessionId: runSessionId }
         ),

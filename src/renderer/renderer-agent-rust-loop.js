@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS, SUBAGENT_TOOL */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS, SUBAGENT_TOOL, createProgressFlush, settleAssistantBubbleAfterLoop */
 'use strict';
 
 function isDieyunCoreReady() {
@@ -40,6 +40,38 @@ function resolveBrowserVision(model) {
 }
 
 /**
+ * 流式进度的合批装配：**唯一实现在** `src/agent/progress-flush.js`
+ * （经 agent-bundle 暴露为 `window.createProgressFlush`，Main 直接 require 同一份）。
+ *
+ * 这里只注入渲染进程的环境差异：贴帧（rAF）+ 数字只认 `agent-limits` 的
+ * `agentProgressFlushMs`。planner 与主循环两条流共用这一份 ——
+ * 以前两条流各写一套 pending / timer / rAF，数字还是两套（120 / 160）。
+ */
+function createRendererProgressFlush({ flush, signature }) {
+  if (typeof createProgressFlush !== 'function') {
+    throw new Error('agent-bundle 未加载：需要 createProgressFlush（agent/progress-flush.js）');
+  }
+  return createProgressFlush({
+    minIntervalMs: getAgentLimits().agentProgressFlushMs,
+    flush,
+    signature,
+    requestFrame: (fn) => window.requestAnimationFrame(fn),
+    cancelFrame: (handle) => window.cancelAnimationFrame(handle)
+  });
+}
+
+/**
+ * 结构签名：判断这一份 trace 是「只多了几个字」还是「结构变了（换轮次 / 新工具 /
+ * 收尾）」。`renderer-thinking-trace-dom.js` 是唯一实现，缺失时退化成「按轮次数量」——
+ * 那只会让合批更保守（更容易判成结构变化 → 走最小间隔），不会丢帧。
+ */
+function traceStructureSig(trace) {
+  return typeof thinkingTraceStructureSig === 'function'
+    ? thinkingTraceStructureSig(trace)
+    : String((trace || []).length);
+}
+
+/**
  * Main 进程 Rust planner pipeline（Explore/Worker 使用 Rust agent loop）。
  */
 async function runPlannerPipelineViaMain(params, options = {}) {
@@ -49,54 +81,18 @@ async function runPlannerPipelineViaMain(params, options = {}) {
   const cancelToken = options.cancelToken || `pl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const signal = options.signal;
   const onProgress = options.onProgress;
-  let pendingProgress = null;
-  let progressTimer = null;
-  let progressRaf = null;
-  let lastProgressFlushAt = 0;
-  let lastProgressStructureSig = '';
-  const flushProgress = () => {
-    if (progressTimer) {
-      clearTimeout(progressTimer);
-      progressTimer = null;
-    }
-    if (progressRaf) {
-      cancelAnimationFrame(progressRaf);
-      progressRaf = null;
-    }
-    if (!pendingProgress || typeof onProgress !== 'function') return;
-    const { trace, streamContent, plan } = pendingProgress;
-    pendingProgress = null;
-    lastProgressFlushAt = Date.now();
-    onProgress(trace, streamContent || '', plan || null);
-  };
-  const scheduleProgress = (trace, streamContent, plan) => {
-    if (typeof onProgress !== 'function') return;
-    pendingProgress = { trace, streamContent: streamContent || '', plan: plan || null };
-    const sig =
-      typeof thinkingTraceStructureSig === 'function'
-        ? thinkingTraceStructureSig(trace)
-        : String((trace || []).length);
-    const streamOnly = !!(lastProgressStructureSig && sig === lastProgressStructureSig);
-    lastProgressStructureSig = sig;
-
-    if (streamOnly) {
-      if (!progressRaf) progressRaf = requestAnimationFrame(flushProgress);
-      return;
-    }
-
-    if (progressRaf) {
-      cancelAnimationFrame(progressRaf);
-      progressRaf = null;
-    }
-
-    const elapsed = Date.now() - lastProgressFlushAt;
-    const delay = Math.max(0, 120 - elapsed);
-    if (progressTimer) return;
-    progressTimer = setTimeout(() => {
-      progressTimer = null;
-      progressRaf = requestAnimationFrame(flushProgress);
-    }, delay);
-  };
+  // 合批的唯一实现是 `agent/progress-flush.js`（经 agent-bundle 暴露为 ProgressFlush）：
+  // planner 与主循环共用同一份，别再各写一套 pending / timer / rAF（数字也只在 agent-limits）。
+  const progressFlush = createRendererProgressFlush({
+    flush: ({ trace, streamContent, plan }) => {
+      if (typeof onProgress !== 'function') return;
+      onProgress(trace, streamContent || '', plan || null);
+    },
+    signature: ({ trace }) => traceStructureSig(trace)
+  });
+  const scheduleProgress = (trace, streamContent, plan) =>
+    progressFlush.push({ trace, streamContent: streamContent || '', plan: plan || null });
+  const flushProgress = () => progressFlush.flushNow();
   const unregisterBackendCancel = registerActiveAgentBackendCancel(
     'planner',
     cancelToken,
@@ -127,8 +123,13 @@ async function runPlannerPipelineViaMain(params, options = {}) {
           if (!ev || ev.cancelToken !== cancelToken) return;
           if (ev.phase === 'started' && ev.data) {
             const rid = ev.data.coordinatorRunId || ev.data.runId;
-            if (rid && typeof window.beginPlanWorktreeTracking === 'function') {
-              window.beginPlanWorktreeTracking(rid, options.sessionId || params.sessionId);
+            // 只有**当前可见会话**才去动侧栏：后台会话的 plan 起步不该把用户眼前的
+            // 「变更」面板切走（`progress` 分支早就有这个判据，这里以前漏了）。
+            const startedSessionId = options.sessionId || params.sessionId || null;
+            const startedVisible =
+              String(startedSessionId || '') === String(currentSessionId || '');
+            if (rid && startedVisible && typeof window.beginPlanWorktreeTracking === 'function') {
+              window.beginPlanWorktreeTracking(rid, startedSessionId);
             }
           }
           if (ev.phase === 'progress' && ev.data && ev.data.trace && typeof onProgress === 'function') {
@@ -383,6 +384,11 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
   let displayedTrace = trace.slice();
   let liveContent = '';
   let frozenRounds = [];
+  /**
+   * 当前轮的开始时刻（轨迹图 `trace-graph.js` 画主线泳道要的唯一时间来源）。
+   * 0 = 这一版没记到（老逻辑/老数据）→ 图会退化成等宽顺序图，绝不拿 now 假造时长。
+   */
+  let roundStartedAt = 0;
   // 主循环并发 subagent 的「过程卡片」：Main 经 agent:subagent-trace 按 subagentId 分桶推送
   // （见 main/ipc/agent-runtime.js）。它们不进 displayedTrace —— 父运行收尾会用 Rust trace
   // 整体覆盖 displayedTrace，所以只在推给 UI 前合并一次。
@@ -418,76 +424,30 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
     ? addUsageStats(emptyUsageStats(), options.tokenUsage)
     : emptyUsageStats();
 
-  const RUST_PROGRESS_MIN_INTERVAL_MS = 120;
-  let pendingRustProgress = null;
-  let rustProgressTimer = null;
-  let rustProgressRaf = null;
-  let lastRustProgressFlushAt = 0;
-  let lastRustProgressStructureSig = '';
-
   const cloneTraceSnapshot = (traceRows) =>
     traceRows.map((r) => ({ ...r, tools: (r.tools || []).map((t) => ({ ...t })) }));
 
-  const flushRustProgress = () => {
-    if (rustProgressTimer) {
-      clearTimeout(rustProgressTimer);
-      rustProgressTimer = null;
-    }
-    if (rustProgressRaf) {
-      cancelAnimationFrame(rustProgressRaf);
-      rustProgressRaf = null;
-    }
-    if (!pendingRustProgress || typeof onProgress !== 'function') return;
-    const { traceRows, streamContent } = pendingRustProgress;
-    pendingRustProgress = null;
-    lastRustProgressFlushAt = Date.now();
-    onProgress(cloneTraceSnapshot(traceRows), streamContent || '');
-  };
+  /**
+   * 合批的唯一实现（`createRendererProgressFlush` → `agent/progress-flush.js`）。
+   * 主循环与 planner 两条流共用同一份状态机，间隔只认 `agent-limits.agentProgressFlushMs`。
+   */
+  const rustProgressFlush = createRendererProgressFlush({
+    flush: ({ traceRows, streamContent }) => {
+      if (typeof onProgress !== 'function') return;
+      onProgress(cloneTraceSnapshot(traceRows), streamContent || '');
+    },
+    signature: ({ traceRows }) => traceStructureSig(traceRows)
+  });
 
-  const scheduleRustProgress = (traceRows, streamContent) => {
-    if (typeof onProgress !== 'function') return;
-    pendingRustProgress = { traceRows, streamContent: streamContent || '' };
-    const sig =
-      typeof thinkingTraceStructureSig === 'function'
-        ? thinkingTraceStructureSig(traceRows)
-        : String((traceRows || []).length);
-    const streamOnly = !!(lastRustProgressStructureSig && sig === lastRustProgressStructureSig);
-    lastRustProgressStructureSig = sig;
-
-    if (streamOnly) {
-      if (!rustProgressRaf) rustProgressRaf = requestAnimationFrame(flushRustProgress);
-      return;
-    }
-
-    if (rustProgressRaf) {
-      cancelAnimationFrame(rustProgressRaf);
-      rustProgressRaf = null;
-    }
-
-    const elapsed = Date.now() - lastRustProgressFlushAt;
-    const delay = Math.max(0, RUST_PROGRESS_MIN_INTERVAL_MS - elapsed);
-    if (rustProgressTimer) return;
-    rustProgressTimer = setTimeout(() => {
-      rustProgressTimer = null;
-      rustProgressRaf = requestAnimationFrame(flushRustProgress);
-    }, delay);
-  };
+  const flushRustProgress = () => rustProgressFlush.flushNow();
 
   const notifyRustProgress = (traceRows, streamContent, { immediate = false } = {}) => {
     if (typeof onProgress !== 'function') return traceRows;
     // 推给 UI 前合并子 Agent 过程卡片；返回值仍是未合并的 traceRows，
     // 否则卡片会被写回 displayedTrace 并在后续每帧重复追加。
     const emitRows = mergeIsolatedSubagentTrace(traceRows);
-    if (immediate) {
-      pendingRustProgress = { traceRows: emitRows, streamContent: streamContent || '' };
-      lastRustProgressStructureSig =
-        typeof thinkingTraceStructureSig === 'function'
-          ? thinkingTraceStructureSig(emitRows)
-          : String((emitRows || []).length);
-      flushRustProgress();
-      return traceRows;
-    }
-    scheduleRustProgress(emitRows, streamContent);
+    rustProgressFlush.push({ traceRows: emitRows, streamContent: streamContent || '' });
+    if (immediate) rustProgressFlush.flushNow();
     return traceRows;
   };
 
@@ -638,6 +598,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       fullThought: full,
       tools: toolsRows || [],
       ...(placeholder ? { placeholder: true } : {}),
+      ...(roundStartedAt ? { startedAt: roundStartedAt } : {}),
       ...(extra || {})
     };
     if (rustBootVisible && rustBootSteps && !entry.bootSteps) {
@@ -673,7 +634,9 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       ...live,
       tools: toolsRows || live.tools || [],
       thought: live.thought || live.fullThought || '',
-      fullThought: live.fullThought || live.thought || ''
+      fullThought: live.fullThought || live.thought || '',
+      // 轮次在这一刻收尾：轨迹图靠它画块右边界（已有就别覆盖，多工具轮不重置）
+      ...(live.endedAt ? {} : { endedAt: Date.now() })
     });
     pushPlaceholder('…', []);
   };
@@ -731,6 +694,8 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             finishRustBootDisplay({ immediate: true });
             const modelId = (ev.data && ev.data.model) || body.model || '';
             const phaseLabel = formatLlmWaitLabel(options.hasImages ? 'vision' : 'text', modelId);
+            // 新一轮开始：轨迹图按这个时刻画主线这一块的左边界
+            roundStartedAt = Date.now();
             pushPlaceholder(phaseLabel, []);
             startLlmWaitTimer(phaseLabel);
           } else if (ev.phase === 'llm_delta') {
@@ -763,6 +728,18 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             }
           } else if (ev.phase === 'llm_response') {
             clearLlmWaitTimer();
+            // 这一轮（模型输出）到此收尾：给当前那条实时行打右边界，轨迹图据此画块。
+            // 工具轮会再冻结成 frozenRounds（那里已有 endedAt 就不覆盖）。
+            {
+              const liveRow = displayedTrace.length ? displayedTrace[displayedTrace.length - 1] : null;
+              if (liveRow && !liveRow.endedAt) {
+                displayedTrace = [
+                  ...displayedTrace.slice(0, -1),
+                  { ...liveRow, endedAt: Date.now() }
+                ];
+              }
+              roundStartedAt = 0;
+            }
             if (ev.data?.usage) {
               const usageChunk = extractUsageStats(ev.data.usage, ev.data.model || body.model);
               tokenUsage = addUsageStats(tokenUsage, usageChunk);
@@ -951,6 +928,33 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
               `${sec}s 后自动重试${budgetNote}，无需手动点「继续」`,
               { force: (waitData.attempt || 1) === 1 }
             );
+          } else if (ev.phase === 'done') {
+            // 循环账本已经收尾（`done` 由 core 在返回前发出）：**先把气泡收成「已完成」**。
+            // 为什么不能等 IPC 返回：Main 在 `return result` 之前还要 `await attachTurnFacts`
+            // （完成验收证据 + 独立 Reviewer + 目标判定），改过文件的轮次光 LSP 诊断就能到秒级，
+            // Reviewer 开着时还多一次完整 LLM 往返 —— 这段时间气泡一直显示「生成中…」，
+            // 用户看起来就是「模型说完了但卡住了」。
+            // 这里只做**展示**收口：不写库、不动 `live.finished`（终态与验收 note 仍由
+            // `completeAgentRunAfterSuccess` 在 IPC 返回后统一落库）。
+            const doneData = ev.data || {};
+            const doneContent = String(doneData.content || liveContent || '');
+            liveContent = doneContent;
+            clearLlmWaitTimer();
+            notifyRustProgress(displayedTrace, liveContent, { immediate: true });
+            const settleSessionId = options.sessionId || doneData.sessionId || null;
+            if (settleSessionId && typeof settleAssistantBubbleAfterLoop === 'function') {
+              // trace 用**当前这份**：紧随其后的账本映射（`runRustSegment` 返回后那几行）
+              // 还会把它换成合并过 live 内容/差异的版本，这里不抢那一份的活。
+              try {
+                settleAssistantBubbleAfterLoop(settleSessionId, null, {
+                  content: doneContent,
+                  trace: displayedTrace,
+                  hitRoundLimit: !!doneData.hitRoundLimit
+                });
+              } catch {
+                // 气泡收口失败不该让后面的 phases 处理跟着断（终态仍由完整收尾路径兜住）
+              }
+            }
           } else if (ev.phase === 'loop_failed' && ev.data?.checkpoint) {
             rustLoopFailedCheckpoint = ev.data.checkpoint;
           }

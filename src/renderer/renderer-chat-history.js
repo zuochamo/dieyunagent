@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, focusChatInput, loadChatFromGateway, refreshHistoryList, ensureLocalGatewayReady, clearAgentContinueState, loadComposerModelPickForSession, saveComposerModelPick, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, clearSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionMessageCacheStale, clearSessionMessageCacheStale, markSessionCacheDiverged, isSessionCacheDiverged, clearSessionCacheDiverged, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, CHAT_TURN_ALIGN_FETCH, CHAT_TURN_ALIGN_MAX_ROWS, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, uiText, resolveSessionWorkspacePathSync, sessionIsPeerChat, peerLinkForSession, peerNameForId, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta, triggerIconSvg */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, resetCompactionStateSafe, applySessionWorkspace, updateWorkspaceLabel, invalidateWorkspaceArtifacts, renderAttachmentChips, revokeAttachmentPreview, pendingAttachments, handleWorktreeApplyAfterRun, syncComposerForActiveSession, onComposerSessionActivated, invalidateComposerQueueSession, renderChatFromMessages, renderChatFromMessagesYielding, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, focusChatInput, loadChatFromGateway, refreshHistoryList, ensureLocalGatewayReady, clearAgentContinueState, loadComposerModelPickForSession, saveComposerModelPick, bumpSessionSwitchGeneration, isActiveSessionSwitch, cleanupStaleSessionRun, syncBrowserBounds, showAgentToast, sessionSwitchGeneration, captureSessionScrollPosition, clearSessionScrollPosition, withSessionScrollCaptureSuppressed, recoverInterruptedAssistantTurn, tryDetectResumeCheckpoint, anyActiveRunUsesRemote, unpackUserMessageContent, dismissToolActivityFloat, reconcileSessionLiveRunUi, restorePendingWorktreeRowFromState, saveSessionMessageCache, getSessionMessageCache, applyMessagesFromCache, gatewayRowsToMessages, invalidateSessionMessageCache, isSessionSending, isSessionMessageCacheStale, clearSessionMessageCacheStale, markSessionCacheDiverged, isSessionCacheDiverged, clearSessionCacheDiverged, getSessionCacheHasMore, setSessionCacheHasMore, CHAT_INITIAL_LOAD_LIMIT, CHAT_LOAD_MORE_LIMIT, CHAT_TURN_ALIGN_FETCH, CHAT_TURN_ALIGN_MAX_ROWS, teardownArtifactsMonacoEditor, cancelArtifactContentLoads, sessionActiveRuns, currentSessionId, messages, setMessagesOwnerSessionId, messagesBelongToSession, beginComposerPrepProgress, setComposerPrepProgress, finishComposerPrepProgress, activateSessionViewState, switchSessionArtifacts, isSidePanelOpen, getSidePanelTab, refreshArtifactsDirectory, renderArtifactsList, renderChangesPane, openSidePanel, setSidePanelTab, isWorkspaceArtifactsCacheReady, flatFolderIconSvg, t, uiText, resolveSessionWorkspacePathSync, sessionIsPeerChat, peerLinkForSession, peerNameForId, rememberSessionWorkspacePath, hasSessionWorkspacePathCache, MESSAGE_META_PREFIX, unpackMessageMeta, triggerIconSvg */
 'use strict';
 
 const historyApi = window.diecloud || {};
@@ -99,32 +99,11 @@ if (typeof window !== 'undefined') {
   window.getPendingSwitchTarget = getPendingSwitchTarget;
 }
 
-const SESSIONS_LIST_RETRY_ATTEMPTS = 3;
-const SESSIONS_LIST_RETRY_DELAY_MS = 1500;
-const SESSIONS_LIST_STALE_RETRY_MS = 12000;
-
 let historyListRefreshInflight = null;
-/** @type {ReturnType<typeof setTimeout> | null} */
-let historyListStaleRetryTimer = null;
 
 function historyListHasRows() {
   const list = $('history-list');
   return !!list?.querySelector('.history-row');
-}
-
-function clearHistoryListStaleRetry() {
-  if (historyListStaleRetryTimer) {
-    clearTimeout(historyListStaleRetryTimer);
-    historyListStaleRetryTimer = null;
-  }
-}
-
-function scheduleHistoryListStaleRetry() {
-  if (historyListStaleRetryTimer) return;
-  historyListStaleRetryTimer = setTimeout(() => {
-    historyListStaleRetryTimer = null;
-    void refreshHistoryList({ softFail: true });
-  }, SESSIONS_LIST_STALE_RETRY_MS);
 }
 
 function setHistoryListStaleHint(show) {
@@ -145,24 +124,27 @@ function setHistoryListStaleHint(show) {
   }
 }
 
-async function fetchSessionsListWithRetry(params = {}) {
-  const listParams = {
+/**
+ * 会话列表只发一次请求：失败就把网关给的 `errorCode`/`message` 说出来。
+ *
+ * 这里曾有一层「3 次 × 1.5s 重试 + 12s 无限重试」，代价是把 `errorCode` 丢掉、
+ * 把「core 未就绪 / SQLite 锁 / RPC 契约错误」统一显示成「后台较忙，正在重试加载…」，
+ * 用户和日志都拿不到真实原因。启动期的短等已由 `ensureLocalGatewayReady()` 与
+ * `renderer-gateway.js#withStartupGrace` 负责，渲染层不再自带重试。
+ */
+async function fetchSessionsList(params = {}) {
+  return gatewayCall('memory.sessions_list', {
     limit: 50,
     archived: false,
     ...params
-  };
-  let lastErr = null;
-  for (let attempt = 1; attempt <= SESSIONS_LIST_RETRY_ATTEMPTS; attempt += 1) {
-    try {
-      return await gatewayCall('memory.sessions_list', listParams);
-    } catch (err) {
-      lastErr = err;
-      if (attempt < SESSIONS_LIST_RETRY_ATTEMPTS) {
-        await delay(SESSIONS_LIST_RETRY_DELAY_MS * attempt);
-      }
-    }
-  }
-  throw lastErr || new Error('memory.sessions_list 失败');
+  });
+}
+
+/** 把一次失败说清楚：`errorCode` 有就带，没有就用 message。 */
+function describeGatewayFailure(err) {
+  const code = String((err && (err.code || err.errorCode)) || '').trim();
+  const msg = String((err && err.message) || '未知错误').trim();
+  return code ? `${code}：${msg}` : msg;
 }
 
 /**
@@ -173,7 +155,7 @@ async function healActiveSessionFromHistory() {
   if (!gwState || !gwState.authed) return String(currentSessionId || '');
   let sessions = [];
   try {
-    sessions = (await fetchSessionsListWithRetry({ archived: false })) || [];
+    sessions = (await fetchSessionsList({ archived: false })) || [];
   } catch (err) {
     console.warn('启动会话校正失败:', err);
     return String(currentSessionId || '');
@@ -720,6 +702,15 @@ async function renderLoadedSessionMessages(switchGen, sessionId, guarded) {
   if (typeof tryDetectResumeCheckpoint === 'function') {
     void tryDetectResumeCheckpoint(sessionId);
   }
+  // 「待应用的 plan 产出」恢复：`agent_runs.status === 'pending_apply'` 是库里的持久事实，
+  // 但面板行只活在进程内 Map —— 不按状态补回来，重启后这份产出就再也找不到「应用」按钮了。
+  if (typeof restorePendingWorktreeRowFromState === 'function') {
+    try {
+      await restorePendingWorktreeRowFromState(sessionId);
+    } catch (e) {
+      console.warn('恢复待应用变更失败:', e);
+    }
+  }
 
   let rendered = false;
   if (typeof renderChatFromMessagesYielding === 'function') {
@@ -1108,8 +1099,7 @@ async function refreshHistoryList(opts = {}) {
       } else if (!gwState.authed) {
         return;
       }
-      const sessions = await fetchSessionsListWithRetry();
-      clearHistoryListStaleRetry();
+      const sessions = await fetchSessionsList();
       setHistoryListStaleHint(false);
 
       if (!sessions || !sessions.length) {
@@ -1124,14 +1114,16 @@ async function refreshHistoryList(opts = {}) {
     } catch (err) {
       console.warn('历史对话加载失败:', err);
       if (softFail && historyListHasRows()) {
+        // 已有列表：留着上次结果，并把失败写在提示条里（不再自动重试）
         setHistoryListStaleHint(true);
-        scheduleHistoryListStaleRetry();
         return;
       }
       if (!historyListHasRows()) {
-        list.innerHTML =
-          '<div class="history-empty">后台较忙，正在重试加载…</div>';
-        scheduleHistoryListStaleRetry();
+        const detail = describeGatewayFailure(err);
+        const empty = document.createElement('div');
+        empty.className = 'history-empty';
+        empty.textContent = `历史对话加载失败（${detail}）`;
+        list.replaceChildren(empty);
       }
     } finally {
       historyListRefreshInflight = null;
@@ -1139,6 +1131,35 @@ async function refreshHistoryList(opts = {}) {
   })();
 
   return historyListRefreshInflight;
+}
+
+/**
+ * 后台在 Main 里跑完一轮（企业微信频道 / 生命感心跳等）：让界面追上那一条会话。
+ *
+ * 为什么需要：这些轮次不经过 Renderer、也不推流，消息只落进同一个账本。若你**正开着**
+ * 那条会话，界面一动不动 —— 只能切走再切回才看得见（"企业微信那边答完了、这边还没刷出来"
+ * 就是这么来的）。这里做的事只有两件：把该会话的消息缓存作废；如果**正开着它**且没有别的
+ * 轮在跑，就地重读一次。不切换当前会话、不抢滚动位置（重读走会话加载那条老路，位置由它恢复）。
+ *
+ * 频道（`channels:sessions-changed`）与心跳（`alive:ran`）共用这一份：两边要的语义完全一样，
+ * 各写一份只会慢慢分叉。
+ *
+ * @param {string} sessionId 后台跑完的那条会话
+ */
+async function refreshSessionAfterBackgroundTurn(sessionId) {
+  const sid = String(sessionId || '');
+  if (!sid) return;
+  if (typeof invalidateSessionMessageCache === 'function') invalidateSessionMessageCache(sid);
+  void refreshHistoryList({ softFail: true });
+  if (String(currentSessionId || '') !== sid) return;
+  // 这一轮正在由 Renderer 自己驱动（用户在这条会话里打字）：别插一脚
+  if (typeof isSessionSending === 'function' && isSessionSending(sid)) return;
+  if (typeof loadChatFromGateway !== 'function') return;
+  try {
+    await loadChatFromGateway(null, sid, { forceRefresh: true });
+  } catch {
+    // 刷新失败只影响「看不看得到最新一轮」，不提示、不打断
+  }
 }
 
 /** 会话 → 待注入交接来源（「继续上次」一次性信号，首轮发送即消费） */
@@ -1253,7 +1274,7 @@ function startUnboundNewChat() {
   return createNewSession(null);
 }
 
-/** 顶部「+」：有可继续的交接 → 弹二选一；没有 → 直接新对话（保持单键手感） */
+/** 「继续上次」的取回入口（取最近交接 → 新建会话）；无交接时给出可执行提示 */
 async function openNewChatMenu() {
   if (!gwState.authed || newChatMenuBusy) return;
   newChatMenuBusy = true;
@@ -1393,7 +1414,7 @@ async function deleteSession(sessionId) {
   try {
     await purgeSessionRecords(sessionId);
     if (sessionId === currentSessionId) {
-      const sessions = await fetchSessionsListWithRetry({ limit: 1, archived: false });
+      const sessions = await fetchSessionsList({ limit: 1, archived: false });
       if (sessions && sessions.length) {
         await switchSession(sessions[0].id);
       } else {
@@ -1439,7 +1460,7 @@ async function removeHistoryFolder(groupEl) {
     ui.expanded.delete(key);
     saveHistoryFolderUi(ui);
     if (hadCurrent) {
-      const sessions = await fetchSessionsListWithRetry({ limit: 1, archived: false });
+      const sessions = await fetchSessionsList({ limit: 1, archived: false });
       if (sessions && sessions.length) {
         await switchSession(sessions[0].id);
       } else {
@@ -2084,10 +2105,10 @@ function initChatHistoryUI() {
 
   // 外部频道（企业微信等）在 Main 里后台跑完一轮：会话写进的是同一份账本，
   // 标题与工作空间分组都能从 sessions 行推导，所以这里也只做一件事 —— 刷列表。
-  // 不切换当前会话：频道会话归频道自己，别把用户正在看的对话顶掉。
+  // 在**正开着那条会话**时还要把消息也补上（见 refreshSessionAfterBackgroundTurn）。
   if (typeof historyApi.onChannelsSessionsChanged === 'function') {
-    historyApi.onChannelsSessionsChanged(() => {
-      void refreshHistoryList({ softFail: true });
+    historyApi.onChannelsSessionsChanged((payload) => {
+      void refreshSessionAfterBackgroundTurn(payload && payload.sessionId);
     });
   }
 }
@@ -2097,6 +2118,7 @@ window.setPendingSessionHandoff = setPendingSessionHandoff;
 window.consumePendingSessionHandoff = consumePendingSessionHandoff;
 window.peekPendingSessionHandoff = peekPendingSessionHandoff;
 window.continueFromLastSession = continueFromLastSession;
+window.refreshSessionAfterBackgroundTurn = refreshSessionAfterBackgroundTurn;
 window.loadChatFromGateway = loadChatFromGateway;
 window.healActiveSessionFromHistory = healActiveSessionFromHistory;
 window.showChatLoadError = showChatLoadError;

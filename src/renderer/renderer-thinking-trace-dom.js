@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, AgentRoundText, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow */
+/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, AgentRoundText, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow, SCROLL_DAMP_TAU_MS */
 'use strict';
 
 /** 工具行的稳定签名（不含思考正文） */
@@ -449,8 +449,10 @@ function thinkingRoundSummaryParts(entry, index, trace) {
   const toolSuffix = toolSuffixFromEntry(entry);
 
   if (entry.isolated) {
-    // 子 Agent 卡片：标题固定显示「子 Agent 类型 + 序号」（entry.phase，由 live-loop-trace
-    // 统一拼装），后面接最新实时思考预览与运行状态/步数。
+    // 子 Agent 卡片：标题只显示「子 Agent 类型 + 序号」（entry.phase，由 live-loop-trace 统一拼装）
+    // 与运行状态/步数。**不再拼最新思考预览**：那一行每个 token 都在变，一次 32 步的子 Agent
+    // 会在运行期间把标题改写上百次，收尾后又停在一句随机的话上 —— 标题本该是稳定的身份牌，
+    // 思考全文就在卡片正文里，不需要标题替它做摘要。
     const rounds = Array.isArray(entry.rounds) ? entry.rounds : [];
     const stepN = rounds.length
       ? rounds.reduce((n, r) => n + ((r && r.tools) || []).length, 0)
@@ -460,9 +462,9 @@ function thinkingRoundSummaryParts(entry, index, trace) {
     const status = running ? '运行中…' : stepN ? `已完成 · ${stepN} 步` : '已完成';
     return {
       name,
-      primary: preview,
+      primary: '',
       suffix: status,
-      combined: joinSummaryParts(joinSummaryParts(name, preview), status)
+      combined: joinSummaryParts(name, status)
     };
   }
 
@@ -590,6 +592,8 @@ function appendCheckpointRestoreLink(summary, { undoTurnId, batchId, afterLabel 
           showAgentToast('Checkpoint 已恢复', n > 0 ? `已恢复 ${n} 个文件` : '文件已回到该步骤前', {
             variant: 'success'
           });
+          // 单检查点没有 git 树可比对：shell 改的路径没被覆盖，必须说出来
+          if (r.warning) showAgentToast('部分改动未还原', r.warning, { variant: 'info', duration: 8000 });
         } else {
           showAgentToast(
             'Checkpoint 恢复失败',
@@ -1067,17 +1071,140 @@ function fillIsolatedSubround(block, roundData, isLast, running, opts = {}) {
   block.classList.toggle('is-empty', !block.childElementCount);
 }
 
+/** 卡片正文是否贴底（判据只此一处，与聊天区同为 24px） */
+function isIsolatedCardNearBottom(body) {
+  return body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+}
+
+/**
+ * 「卡片正文要不要贴底」的用户意图位（唯一写入口）。
+ *
+ * 为什么不能只看滚动位置：卡片刚出现时 `scrollTop` 本来就是 0，而内容往往已经高过盒子
+ * （一次子 Agent 直接跑出十几轮），「本来就贴底」永远不成立 —— 于是正文从此再也不跟。
+ * 所以默认跟随，只有用户**在这块里真的滚过**（滚轮 / 触摸 / 拖滚动条 / 键盘）才让位；
+ * 用户自己滚回贴底，自动恢复跟随。
+ *
+ * 两个坑（都踩过）：
+ * - **点在正文里不算接管**：面板正文里点一下（选字、点开 diff、点链接）以前也会关掉跟随，
+ *   表现就是「看着看着它不动了」，而且没有任何提示。只有按在**滚动条**上才算用户要接管。
+ * - **程序化滚动也会触发 scroll 事件**：所以恢复跟随只看「已经让位过 + 现在贴底」，
+ *   不能拿 scroll 当用户信号。
+ */
+function bindIsolatedCardFollowIntent(body) {
+  if (!body || body.dataset.cardFollowIntent === '1') return;
+  body.dataset.cardFollowIntent = '1';
+  const yieldToUser = () => {
+    body.dataset.cardFollowYield = '1';
+    stopIsolatedCardFollow(body);
+  };
+  body.addEventListener('wheel', yieldToUser, { passive: true });
+  body.addEventListener('touchmove', yieldToUser, { passive: true });
+  body.addEventListener(
+    'pointerdown',
+    (e) => {
+      const rect = body.getBoundingClientRect();
+      if (e.clientX - rect.left >= body.clientWidth) yieldToUser();
+    },
+    { passive: true }
+  );
+  body.addEventListener(
+    'keydown',
+    (e) => {
+      if (
+        e.key === 'ArrowUp' ||
+        e.key === 'ArrowDown' ||
+        e.key === 'PageUp' ||
+        e.key === 'PageDown' ||
+        e.key === 'Home' ||
+        e.key === 'End' ||
+        e.key === ' '
+      ) {
+        yieldToUser();
+      }
+    },
+    { passive: true }
+  );
+  body.addEventListener(
+    'scroll',
+    () => {
+      if (body.dataset.cardFollowYield !== '1') return;
+      if (!isIsolatedCardNearBottom(body)) return;
+      delete body.dataset.cardFollowYield;
+    },
+    { passive: true }
+  );
+}
+
+/** @type {WeakMap<Element, { raf: number, lastTs: number }>} */
+const isolatedCardFollowState = new WeakMap();
+
+function stopIsolatedCardFollow(body) {
+  const state = isolatedCardFollowState.get(body);
+  if (!state || !state.raf) return;
+  cancelAnimationFrame(state.raf);
+  state.raf = 0;
+  state.lastTs = 0;
+}
+
+/**
+ * 运行中的卡片正文贴底：默认跟随（阻尼开着时逐帧逼近，见 renderer-chat-render.js 的同一手感），
+ * 用户上翻过就让位（意图位 `data-card-follow-yield`）。
+ */
+function followIsolatedCardBody(body) {
+  if (!body || body.dataset.cardFollowYield === '1') return;
+  const damped = typeof isThinkingDampedFlow === 'function' && isThinkingDampedFlow();
+  const target = Math.max(0, body.scrollHeight - body.clientHeight);
+  if (!damped) {
+    stopIsolatedCardFollow(body);
+    body.scrollTop = target;
+    return;
+  }
+  let state = isolatedCardFollowState.get(body);
+  if (!state) {
+    state = { raf: 0, lastTs: 0 };
+    isolatedCardFollowState.set(body, state);
+  }
+  if (state.raf) return;
+  const tick = () => {
+    const maxScroll = Math.max(0, body.scrollHeight - body.clientHeight);
+    const delta = maxScroll - body.scrollTop;
+    // 1px 内落位：亚像素取整会让「每帧推进 0.1px」变成永远追不到
+    if (!body.isConnected || Math.abs(delta) <= 1) {
+      if (body.isConnected) body.scrollTop = maxScroll;
+      state.raf = 0;
+      state.lastTs = 0;
+      return;
+    }
+    const now = Date.now();
+    const dt = state.lastTs ? Math.min(64, Math.max(8, now - state.lastTs)) : 16;
+    state.lastTs = now;
+    const before = body.scrollTop;
+    body.scrollTop = before + delta * (1 - Math.exp(-dt / SCROLL_DAMP_TAU_MS));
+    if (body.scrollTop === before) {
+      body.scrollTop = maxScroll;
+      state.raf = 0;
+      state.lastTs = 0;
+      return;
+    }
+    state.raf = requestAnimationFrame(tick);
+  };
+  state.raf = requestAnimationFrame(tick);
+}
+
 /**
  * 子 Agent 卡片正文：一个子 Agent 的全部轮次都在卡片里，按轮顺序渲染。
  * 正文是固定高度的滚动容器（见 styles.css .msg-thinking-subagent-body），
- * 所以运行中要跟着最新一轮走：仅当用户本来就贴在底部时才自动贴底，
- * 用户主动上翻看历史时不抢滚动位置。
+ * 运行中默认跟着最新一轮走（阻尼 = 无极阻尼开关），用户在这块里自己滚过就让位。
+ *
+ * `opts.runningHint`：调用方**已经知道这次运行还活着时的权威判定**（面板有整轮状态）。
+ * 为什么需要它：`isolatedCardRunning(entry)` 只能在「有 pending 工具 / 有空占位 / 有 runDone」
+ * 三条上判 —— planner 派出来的 worker 卡片没有 `runDone`，两轮之间（拿到思考、还没发工具）
+ * 三条全不成立，会被判成「已结束」，于是正文恰好在最该跟的时刻停止跟随。
  */
 function fillIsolatedCardBody(body, entry, opts = {}) {
   const rounds = Array.isArray(entry.rounds) ? entry.rounds : [];
-  const running = isolatedCardRunning(entry);
-  const followTail =
-    !opts.noFollowTail && body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+  const running =
+    typeof opts.runningHint === 'boolean' ? opts.runningHint : isolatedCardRunning(entry);
   const seen = new Set();
   rounds.forEach((r, i) => {
     const key = String(r && r.round != null ? r.round : i + 1);
@@ -1096,8 +1223,17 @@ function fillIsolatedCardBody(body, entry, opts = {}) {
   });
   body.classList.toggle('is-empty', !rounds.length);
   body.classList.toggle('is-multi-round', rounds.length > 1);
-  if (running && followTail && body.scrollHeight > body.clientHeight) {
-    body.scrollTop = body.scrollHeight;
+  if (running) {
+    bindIsolatedCardFollowIntent(body);
+    body.dataset.cardFollowing = '1';
+    followIsolatedCardBody(body);
+    return;
+  }
+  // 收尾那一拍补一次落位：运行期间一直在跟的卡片，最后一段内容不该停在折线以下。
+  // 只对「跟过」的卡片做（历史卡片重绘时 dataset 不在，不会被拽到底部）。
+  if (body.dataset.cardFollowing === '1') {
+    delete body.dataset.cardFollowing;
+    followIsolatedCardBody(body);
   }
 }
 

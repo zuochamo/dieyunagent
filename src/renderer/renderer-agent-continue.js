@@ -92,32 +92,20 @@ function buildSegmentContinueMessages(messages, partialContent) {
   return msgs;
 }
 
-/** 展示层剥掉模型误输出的 tool_call XML（须与 src/llm-tool-call-fallback.js 同步） */
+/**
+ * 展示层剥掉模型误输出的 tool_call XML —— **唯一实现**在 `src/llm-tool-call-fallback.js`
+ * （`stripToolCallMarkup`，经 agent-bundle 暴露成 `window.stripToolCallMarkup`）。
+ *
+ * 这里以前抄了一份，注释还写着「须与 llm-tool-call-fallback.js 同步」；那份抄件漏了
+ * 「裸 `<calls>`」与「DSML 半角竖线 / 带空格」两种归一，于是同一条回复 Main 侧剥净、
+ * 气泡里却漏出工具标记（2026-11-19 那次事故的形态）。
+ */
 function stripVisibleToolCallMarkup(text) {
-  const normalized = String(text || '')
-    .replace(/<\uff5cDSML\uff5c/gi, '<')
-    .replace(/<\/\uff5cDSML\uff5c/gi, '</')
-    .replace(/<tool[\s_]+calls>/gi, '<tool_calls>')
-    .replace(/<\/tool[\s_]+calls>/gi, '</tool_calls>')
-    .replace(/<tool[\s_]+call>/gi, '<tool_call>')
-    .replace(/<\/tool[\s_]+call>/gi, '</tool_call>')
-    .replace(/<\/function\s*>/gi, '')
-    .replace(/<function\s*>/gi, '');
-  return normalized
-    .replace(/<tool_calls>[\s\S]*?(?=<tool_calls>|$)/gi, '')
-    .replace(/<\/tool_calls>/gi, '')
-    .replace(/<invoke\s+name="[^"]+"[^>]*>[\s\S]*?(?=<invoke\s+name=|<\/tool_calls>|$)/gi, '')
-    .replace(/<\/invoke>/gi, '')
-    .replace(/<invoke\s+name="[^"]+"[^>]*\/?>/gi, '')
-    .replace(/<tool_call>[\s\S]*?(?=<tool_call>|$)/gi, '')
-    .replace(/<\/tool_call>/gi, '')
-    .replace(/<function=[^>\n/]+>\s*/gi, '')
-    .replace(/<parameter\s+name="[^"]+"[^>]*>[\s\S]*?<\/parameter>/gi, '')
-    .replace(/<parameter\s+name="[^"]+"[^>]*\/\s*>/gi, '')
-    .replace(/<parameter=[^>\n/]+>[\s\S]*?<\/parameter>/gi, '')
-    .replace(/<parameter=[^>\n/]+>[\s\S]*?(?=<parameter=|<function=|<tool_call>|<invoke|<\/tool_calls>|$)/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const fn = typeof window !== 'undefined' ? window.stripToolCallMarkup : null;
+  if (typeof fn !== 'function') {
+    throw new Error('agent-bundle 未加载：需要 window.stripToolCallMarkup（llm-tool-call-fallback）');
+  }
+  return fn(text);
 }
 
 /**

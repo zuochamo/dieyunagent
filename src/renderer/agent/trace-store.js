@@ -316,11 +316,17 @@ async function persistInterruptedAssistant(trace, replyText, turnMeta = null, op
   }
   if (gwState.authed) {
     try {
+      // 消息落库失败**不能**连带跳过下面的终态写入：否则气泡已经显示「已完成/已停止」，
+      // 库里这一轮却还是 running —— 下次进会话会被 `recoverInterruptedAssistantTurn`
+      // 当成「程序重启/连接断开」，再补一条伪中断消息（2026-11-19 审计）。
       const ins = await gatewayCall('memory.message_append', {
         sessionId: sid,
         role: 'assistant',
         content: persisted,
         ...(persistedReasoning ? { reasoning: persistedReasoning } : {})
+      }).catch((e) => {
+        console.warn(e);
+        return null;
       });
       if (ins?.localMsgId) {
         assistantMsg.localMsgId = ins.localMsgId;
@@ -458,7 +464,26 @@ async function recoverInterruptedAssistantTurn(sessionId) {
   const userIdx = messages.length - 1;
   const userMeta = messages[userIdx]?.meta || {};
   const normalizedTrace = normalizeStoppedTrace(trace);
-  const replyText = '任务中断（程序重启或连接断开），以下为已保存的思考过程。';
+  // 文案只说**验证过的事实**，不替用户猜原因。
+  //
+  // 以前这里一律写「任务中断（程序重启或连接断开）」—— 但同一个条件（state 仍是 running、
+  // 本地已无 live run）在 2026-11-19 实测里对应的是「plan 执行器撞轮次上限后停车」，
+  // 与进程重启无关。真正的可恢复性由 checkpoint 说了算（`tryDetectResumeCheckpoint`
+  // 用的是同一份 `agentCheckpointList`）：有可续跑的断点就说能继续，没有才说被中断。
+  let hasResumableCheckpoint = false;
+  try {
+    if (traceStoreLoopApi.agentCheckpointList) {
+      const list = await traceStoreLoopApi.agentCheckpointList(3);
+      hasResumableCheckpoint = (list?.items || []).some(
+        (i) => i && i.status === 'running' && String(i.sessionId || '') === String(sessionId || '')
+      );
+    }
+  } catch {
+    hasResumableCheckpoint = false;
+  }
+  const replyText = hasResumableCheckpoint
+    ? '上一轮没有跑完（撞轮次/工具上限或被中断），已在断点处保存；点「继续」或直接回车可接着跑。以下为已保存的思考过程。'
+    : '上一轮没有收尾（程序重启 / 连接断开 / 运行被中断），以下为已保存的思考过程。';
   await persistInterruptedAssistant(normalizedTrace, replyText, userMeta, {
     status: 'stopped',
     runId: state.runId,

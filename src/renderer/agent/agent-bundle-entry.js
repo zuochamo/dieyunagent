@@ -19,10 +19,27 @@ const taskTier = require('../../agent/task-tier');
 const limitsByTier = require('../../agent/agent-limits-by-tier');
 const runtimeByTier = require('../../agent/model-runtime-by-tier');
 const modelApiConfig = require('../../agent/model-api-config');
+// 行差异统计：Main（gateway/remote-fs.js / rpc.js / remote minimal host）与 Renderer 的
+// +/- 徽标调同一份（以前 Renderer 自己一份 LCS：不裁前后缀、按 '\n' 切导致 CRLF 全行算改）。
+const lineDiffStats = require('../../gateway/line-diff-stats');
+// 展示层剥掉模型误输出的 tool_call XML：唯一实现在 src/llm-tool-call-fallback.js
+// （含 DSML 半角竖线 / 带空格 / 裸 <calls> 三种归一）。Renderer 以前抄了两份，
+// 且抄漏了「裸 calls」与「半角竖线」两种变体 → 工具标记漏进气泡。
+const toolCallFallback = require('../../llm-tool-call-fallback');
+// 工具结果 → 思考区一行摘要：Main（live-loop-trace：planner / 子 Agent 卡片）与
+// Renderer（renderer-tool-results：桌面气泡）同一份纯函数。
+const toolResultSummary = require('../../agent/tool-result-summary');
+// 向量模型条目的归一化：Main（src/model-settings.js）与 Renderer（renderer-model-runtime.js）
+// 调同一份纯函数 —— 以前各写一套，Renderer 那套会丢掉 headers/authMode/userAgent。
+const modelSettingsEmbedding = require('../../agent/model-settings-embedding');
 const guardrailsShared = require('../../agent/guardrails-shared');
 const toolCatalog = require('../../agent/tool-catalog');
 const toolClassify = require('../../agent/tool-classify');
 const plannerToolFilters = require('../../agent/planner-tool-filters');
+// 工作空间候选的收拢/归一/匹配：Main（channels/workspace-switch.js）与 Renderer
+// （renderer-workspace-ssh.js#applySessionWorkspaceFromTool）同一份纯函数。
+// 不镜像到裸全局：`baseNameOf` / `candidateText` 这种名字太泛，经 DieyunWorkspaceCandidates 取。
+const workspaceCandidates = require('../../agent/workspace-candidates');
 const agentRoundText = require('../../agent/agent-round-text');
 const runEvents = require('../../agent/run-events');
 const sessionTranscript = require('../../agent/session-transcript');
@@ -35,6 +52,12 @@ const llmReconnectRetry = require('../../llm-reconnect-retry');
 const tokenEstimate = require('../../agent/token-estimate');
 const reasoningBackfill = require('../../agent/reasoning-backfill');
 const contextSignals = require('../../agent/context-signals');
+// 流式进度的合批状态机：Main（agent-runtime 的主循环与 planner、mcp-plans-boot 的计划 trace）
+// 与 Renderer（renderer-agent-rust-loop 的两条流）共用同一份 —— 以前四处各写一套
+// pending/timer/rAF + 结构签名，数字还是两套。
+const progressFlush = require('../../agent/progress-flush');
+// 轨迹图的数据整形（Main 与 Renderer 同一份纯函数：泳道 / span / 退化规则只有一处）
+const traceGraph = require('../../agent/trace-graph');
 
 register('DieyunModelRuntimePresets', presets, {
   compat: [
@@ -54,6 +77,33 @@ register('DieyunModelRuntimeSchema', schema, {
     'formatModelRuntimeValue'
   ]
 });
+
+register('DieyunModelSettingsEmbedding', modelSettingsEmbedding, {
+  compat: [
+    'EMBEDDING_DIMENSIONS_MIN',
+    'EMBEDDING_DIMENSIONS_MAX',
+    'DEFAULT_EMBEDDING_DIMENSIONS',
+    'isLegacyBuiltinEmbeddingEntry',
+    'normalizeEmbeddingEntry',
+    'normalizeEmbeddingModels',
+    'applyActiveEmbedding'
+  ]
+});
+
+register('DieyunLineDiffStats', lineDiffStats, {
+  compat: ['computeLineDiffStats', 'withinLineDiffBudget']
+});
+
+register('DieyunToolCallFallback', toolCallFallback, {
+  compat: ['stripToolCallMarkup', 'normalizeToolCallMarkup', 'hasToolCallMarkupHint']
+});
+
+register('DieyunToolResultSummary', toolResultSummary, {
+  compat: ['summarizeToolResult', 'summarizeHostExecResult']
+});
+
+// 流式进度合批的唯一实现（Main 直接 require 同名模块；Renderer 消费 window.createProgressFlush）。
+register('DieyunProgressFlush', progressFlush, { compat: ['createProgressFlush'] });
 
 // CHARS_PER_TOKEN / CJK_CHARS_PER_TOKEN 改造前由 agent-limits 的 window 导出块额外挂载，
 // 不在 module.exports 中，故在此显式补上（renderer-context-engine.js 等直接读裸名）。
@@ -199,6 +249,9 @@ register('DieyunGuardrailsShared', { ...guardrailsShared, GuardrailsShared: guar
 
 register('DieyunToolCatalog', toolCatalog, { compat: ['DieyunToolCatalog'] });
 register('DieyunToolClassify', toolClassify, { compat: ['DieyunToolClassify'] });
+// 候选匹配（纯函数）：`compat: []` = 只挂命名空间，不往 window 上撒 baseNameOf/candidateText
+// 这种泛名。Renderer 侧从 `window.DieyunWorkspaceCandidates` 取。
+register('DieyunWorkspaceCandidates', workspaceCandidates, { compat: [] });
 // Explore / Shell / Build 工具白名单的唯一来源（Main 侧由 planner / loop runner 直接 require）。
 // 渲染器勿再自抄一份：renderer-tool-defs.js 直接消费这里镜像出的兼容全局。
 register('DieyunPlannerToolFilters', plannerToolFilters, {
@@ -284,6 +337,10 @@ register('DieyunContextSignals', { ...contextSignals, ContextSignals: contextSig
     'formatCodebaseBlock',
     'shouldAutoCodebaseSearch'
   ]
+});
+
+register('DieyunTraceGraph', { ...traceGraph, TraceGraph: traceGraph }, {
+  compat: ['TraceGraph']
 });
 
 register('DieyunReviewerJson', reviewerJson, {

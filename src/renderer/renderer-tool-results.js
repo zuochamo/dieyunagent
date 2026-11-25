@@ -49,287 +49,15 @@ function formatToolArgsBrief(name, args) {
   }
 }
 
-function summarizeHostExecResult(result, error) {
-  if (error) return `错误: ${String(error).slice(0, 160)}`;
-  if (!result || typeof result !== 'object') return '完成';
-  if (result.detached) {
-    const pid = result.pid != null ? ` PID ${result.pid}` : '';
-    return String(result.stdout || `已后台启动${pid}`).slice(0, 120);
-  }
-  const exit = result.code != null ? result.code : result.exitCode;
-  const stderr = String(result.stderr ?? '').trim();
-  if (stderr && exit != null && exit !== 0) {
-    return `exit ${exit} · ${stderr.slice(0, 80)}`;
-  }
-  const out = String(result.stdout ?? result.output ?? '').trim();
-  if (out) {
-    if ((/^\/\*|^#|^import |^<!DOCTYPE|^<html[\s>]/i.test(out) || out.includes('{')) && out.length > 80) {
-      return exit != null && exit !== 0 ? `exit ${exit}` : `exit ${exit ?? 0} · 输出 ${out.length} 字`;
-    }
-    if (/^(True|False|OK|null|None)$/i.test(out)) return `exit ${exit ?? 0} · ${out}`;
-    return out.length > 100 ? `${out.slice(0, 100)}…` : out;
-  }
-  if (stderr) return stderr.length > 100 ? `${stderr.slice(0, 100)}…` : stderr;
-  return exit != null ? (exit === 0 ? 'exit 0' : `exit ${exit}`) : '命令成功（无输出）';
-}
-
-function summarizeToolResult(name, result) {
-  if (!result || typeof result !== 'object') return '完成';
-  if (result.error) {
-    const code = result.errorCode ? `[${result.errorCode}] ` : '';
-    const fix = result.suggestedFix ? ` · ${result.suggestedFix}` : '';
-    return `失败：${code}${String(result.error).slice(0, 120)}${fix}`;
-  }
-  if (name === 'host_exec') return summarizeHostExecResult(result, null);
-  if ((name === 'fs_write_file' || name === 'fs_edit') && result.path) {
-    const file = String(result.path).replace(/\\/g, '/').split('/').pop() || result.path;
-    const diff = result.diff
-      ? ` · +${Number(result.diff.added) || 0} -${Number(result.diff.removed) || 0}`
-      : '';
-    const n = Number(result.replacements);
-    const repl = name === 'fs_edit' && Number.isFinite(n) && n > 0 ? ` · ${n} 处` : '';
-    return `${file}${result.diff?.created ? ' · 新建' : name === 'fs_edit' ? ' · 已替换' : ' · 已写入'}${diff}${repl}`;
-  }
-  if (name === 'fs_list_dir' && result.entries) return `${result.entries.length} 项`;
-  if (result.stdout != null) {
-    const out = String(result.stdout).trim();
-    if (out) return out.slice(0, 100);
-    return result.exitCode === 0 ? '命令成功（无输出）' : `exit ${result.exitCode ?? 0}`;
-  }
-  if (name === 'agent_clarify' && (result.selectedIds || result.freeText)) {
-    const parts = [];
-    if (result.selectedIds?.length) {
-      parts.push(`已选：${(result.labels || result.selectedIds).join('、')}`);
-    }
-    if (result.freeText) {
-      const note = String(result.freeText).trim();
-      parts.push(`补充：${note.length > 80 ? `${note.slice(0, 80)}…` : note}`);
-    }
-    return parts.join(' · ') || '已确认';
-  }
-  if (name === 'agents_md_propose' && result.message) {
-    return String(result.message).slice(0, 120);
-  }
-  if (name === 'web_fetch' || name === 'web_search') {
-    if (result.error) return `失败：${String(result.error).slice(0, 120)}`;
-    if (name === 'web_search' && result.resultCount != null) {
-      const n = Number(result.resultCount) || 0;
-      const suffix = result.truncated ? '（已截断）' : '';
-      const pages =
-        Array.isArray(result.pages) && result.pages.length
-          ? ` · 正文 ${result.pages.filter((p) => p && p.ok).length}/${result.pages.length} 篇`
-          : '';
-      return `${n} 个结果${pages} · ${result.length || 0} 字${suffix}`;
-    }
-    if (result.text != null) {
-      const n = result.length != null ? result.length : result.text.length;
-      const trunc = result.truncated ? '（已截断）' : '';
-      return `${n} 字${trunc}`;
-    }
-  }
-  if (name === 'browser_navigate' && result.url) {
-    const eng = result.engine ? ` · ${result.engine}` : '';
-    const ch = result.channel ? `/${result.channel}` : '';
-    const note = result.note ? ` · ${String(result.note).slice(0, 60)}` : '';
-    return `${result.title || result.url}${eng}${ch}${note}`;
-  }
-  if (name === 'browser_reload' || name === 'browser_back' || name === 'browser_forward') {
-    if (result.error) return `${name.replace('browser_', '')} 失败：${String(result.error).slice(0, 80)}`;
-    return `${name.replace('browser_', '')} → ${(result.title || result.url || '').slice(0, 80)}`;
-  }
-  if (name === 'browser_import_storage') {
-    if (result.cancelled) return '用户取消导入';
-    if (result.error) return `导入失败：${String(result.error).slice(0, 80)}`;
-    const c = result.cookies?.applied != null ? `Cookie ${result.cookies.applied}` : '';
-    const ls = result.localStorage?.applied != null ? `localStorage ${result.localStorage.applied}` : '';
-    return ['已导入', c, ls].filter(Boolean).join(' · ');
-  }
-  if (name === 'browser_snapshot' && result.elements) {
-    const epoch = result.refEpoch != null ? ` · epoch ${result.refEpoch}` : '';
-    const iframeNote = Array.isArray(result.blockedIframes) && result.blockedIframes.length
-      ? ` · ${result.blockedIframes.length} 个跨域 iframe`
-      : '';
-    return `${result.elements.length} 个元素 · ${(result.title || result.url || '').slice(0, 60)}${epoch}${iframeNote}`;
-  }
-  if (name === 'browser_a11y_snapshot' && Array.isArray(result.nodes)) {
-    const src = result.source ? ` · ${result.source}` : '';
-    return `${result.count || result.nodes.length} 个 a11y 节点${src} · ${(result.title || result.url || '').slice(0, 60)}`;
-  }
-  if (name === 'browser_network' && Array.isArray(result.entries)) {
-    if (result.cleared) return '已清空网络记录';
-    const failed = result.entries.filter((e) => e.failed || (e.status != null && e.status >= 400)).length;
-    return `${result.count} 条请求${failed ? ` · ${failed} 条异常` : ''}`;
-  }
-  if (name === 'browser_console' && Array.isArray(result.entries)) {
-    if (result.cleared) return '已清空 console 记录';
-    const errors = result.errorCount || 0;
-    return `${result.count} 条${errors ? ` · ${errors} 条 error` : ''}`;
-  }
-  if (name === 'browser_click' || name === 'browser_double_click' || name === 'browser_right_click' || name === 'browser_fill' || name === 'browser_type' || name === 'browser_select_option' || name === 'browser_hover' || name === 'browser_drag' || name === 'browser_scroll' || name === 'browser_press_key') {
-    if (result.error) return `失败：${String(result.error).slice(0, 80)}`;
-    return result.ok === false ? '失败' : '完成';
-  }
-  if (name === 'browser_visual_diff') {
-    if (result.error) return `比较失败：${String(result.error).slice(0, 80)}`;
-    if (result.baselineCreated) return '已创建视觉基准';
-    if (result.dimensionChanged) return '尺寸变化（视口/内容高度不同）';
-    const pct = Number(result.changedPercent) || 0;
-    return result.changed ? `画面有变化 · ${pct}% 像素` : `画面无显著变化（${pct}%）`;
-  }
-  if (name === 'browser_expect') {
-    if (result.error) return `断言失败：${String(result.error).slice(0, 80)}`;
-    const total = Number(result.total) || 0;
-    const failed = Number(result.failed) || 0;
-    if (!total) return '断言未执行';
-    return failed ? `断言 ${total - failed}/${total} 通过 · ${failed} 条未通过` : `断言全部通过（${total} 条）`;
-  }
-  if (name === 'browser_viewport') {
-    if (result.error) return `设置失败：${String(result.error).slice(0, 80)}`;
-    if (result.reset && !result.viewport) return '已恢复默认视口';
-    const v = result.viewport;
-    if (!v) return '视口已更新';
-    const mirrored = result.mirroredTo ? ` · 已同步 ${result.mirroredTo}` : '';
-    return `视口 ${v.width}×${v.height}${v.mobile ? ' · 移动端' : ''}${mirrored}`;
-  }
-  if (name === 'browser_screenshot' && (result.base64 || result.base64Omitted || result.mime === 'image/png')) {
-    const size = `${result.width || '?'}×${result.height || '?'}`;
-    if (result.saveError) return `截图 ${size} · 保存失败：${String(result.saveError).slice(0, 40)}`;
-    if (result.path) return `截图 ${size} · 已存 ${String(result.path).split(/[\\/]/).pop()}`;
-    if (result.renderHealth && result.renderHealth.likelyBlank) {
-      return `截图 ${size} · 页面未渲染（全黑且无可见内容）`;
-    }
-    return `截图 ${size} · PNG`;
-  }
-  if (name === 'browser_pdf') {
-    if (result.error) return `导出失败：${String(result.error).slice(0, 80)}`;
-    const fileName = String(result.path || '').split(/[\\/]/).pop();
-    const size = result.bytes ? `${Math.round(result.bytes / 1024)}KB · ` : '';
-    return `PDF ${size}${fileName || ''}`;
-  }
-  if (name === 'browser_evaluate') {
-    if (result.error) return `执行失败：${String(result.error).slice(0, 80)}`;
-    if (result.ok === false) return '脚本报错';
-    const len = result.json ? String(result.json).length : 0;
-    return `返回 ${result.type || 'value'}${len ? ` · ${len} 字符` : ''}${result.truncated ? ' · 已截断' : ''}`;
-  }
-  if (name === 'browser_export_storage') {
-    if (result.cancelled) return '已取消导出登录态';
-    if (result.error) return `导出失败：${String(result.error).slice(0, 80)}`;
-    const parts = [];
-    if (result.cookieCount != null) parts.push(`Cookie ${result.cookieCount} 条`);
-    if (result.localStorageCount != null) parts.push(`localStorage ${result.localStorageCount} 项`);
-    if (!parts.length && result.localStorageError) return `导出失败：${String(result.localStorageError).slice(0, 60)}`;
-    return `已导出 ${parts.join(' · ') || '登录态'}`;
-  }
-  if (name === 'browser_cookies') {
-    if (result.error) return `Cookie 操作失败：${String(result.error).slice(0, 80)}`;
-    const action = result.action || 'list';
-    if (action === 'list') return `Cookie ${result.count || 0} 条${result.truncated ? ' · 已截断' : ''}`;
-    if (action === 'set') return `已写入 Cookie ${result.applied != null ? result.applied : 0} 条`;
-    return `已删除 Cookie ${result.removed != null ? result.removed : 0} 条`;
-  }
-  if (name === 'browser_dialog') {
-    if (result.error) return `对话框处理失败：${String(result.error).slice(0, 80)}`;
-    if (result.action === 'policy') return `对话框策略：${result.policy || 'auto'}`;
-    if (result.pending) {
-      return `当前 ${result.pending.type}：${String(result.pending.message || '').slice(0, 40)}`;
-    }
-    return `对话框 ${result.count || 0} 条`;
-  }
-  if (name === 'browser_route') {
-    if (result.error) return `请求改写失败：${String(result.error).slice(0, 80)}`;
-    if (result.action === 'add') {
-      const rule = result.added || {};
-      return `已加规则 ${rule.id || ''} · ${rule.type || ''} ${String(rule.urlPattern || '').slice(0, 30)}`;
-    }
-    if (result.action === 'remove') return `已删除规则 ${result.removed || ''}`;
-    if (result.action === 'clear') return '已清空请求改写规则';
-    return `请求改写规则 ${Array.isArray(result.routes) ? result.routes.length : 0} 条`;
-  }
-  if (name === 'browser_emulate') {
-    if (result.error) return `设备/权限模拟失败：${String(result.error).slice(0, 80)}`;
-    if (result.action === 'reset') return '已重置设备/权限模拟';
-    const bits = [];
-    if (result.geolocation) bits.push('定位');
-    if (result.timezone) bits.push(result.timezone);
-    if (result.locale) bits.push(result.locale);
-    if (Array.isArray(result.permissions) && result.permissions.length) {
-      bits.push(`权限 ${result.permissions.length}`);
-    }
-    return bits.length ? `已模拟 ${bits.join(' · ')}` : '设备/权限模拟：无变更';
-  }
-  if (name === 'browser_har_export') {
-    if (result.error) return `导出失败：${String(result.error).slice(0, 80)}`;
-    const fileName = String(result.path || '').split(/[\\/]/).pop();
-    return `HAR ${result.count || 0} 条请求 · ${fileName || ''}`;
-  }
-  if (name === 'browser_wait_for') {
-    if (result.error) return `等待失败：${String(result.error).slice(0, 80)}`;
-    return result.ok === false ? '等待超时' : `已等待到 ${result.kind || result.selector || result.url || result.matched || '条件'}`;
-  }
-  if (name === 'browser_tabs' && result.tabs) {
-    return `${result.tabs.length} 个标签 · 当前 ${result.activeTabId || '-'}`;
-  }
-  if (name === 'browser_downloads') {
-    const dl = result.download || (Array.isArray(result.downloads) ? result.downloads[result.downloads.length - 1] : null);
-    if (dl) return `${dl.status || 'download'} · ${dl.fileName || dl.path || ''}`;
-    return '暂无下载';
-  }
-  if (name === 'browser_upload_file') {
-    if (result.error) return `上传失败：${String(result.error).slice(0, 80)}`;
-    return result.ok === false ? '上传失败' : `已上传 ${result.fileName || result.filePath || result.path || '文件'}`;
-  }
-  if (name === 'browser_observe') {
-    const shot = result.screenshot ? ` · 截图 ${result.screenshot.width || '?'}×${result.screenshot.height || '?'}` : '';
-    const blank = result.renderHealth && result.renderHealth.likelyBlank ? ' · 页面未渲染' : '';
-    const fb = result.fallbackFrom ? ` · fallback ${result.fallbackFrom}->${result.engine || '?'}` : '';
-    return `${Array.isArray(result.elements) ? result.elements.length : 0} 个元素 · ${(result.title || result.url || '').slice(0, 60)}${shot}${blank}${fb}`;
-  }
-  if (name === 'browser_status' && result.browserview) {
-    const v = result.browserview;
-    const blank = v.renderHealth && v.renderHealth.likelyBlank ? ' · 页面未渲染' : '';
-    return `${v.title || v.url || '空闲'} · ${result.activeEngine || ''}${blank}`;
-  }
-  if (name === 'browser_close') return '已关闭';
-  if (name === 'codebase_search') {
-    if (result.error) return `失败：${String(result.error).slice(0, 120)}`;
-    const n = Array.isArray(result.results) ? result.results.length : 0;
-    return `${n} 个代码片段${result.vectorSearch ? ' · 向量' : ''}`;
-  }
-  if (name === 'grep') {
-    if (result.error) return `失败：${String(result.error).slice(0, 120)}`;
-    const n = Array.isArray(result.matches) ? result.matches.length : 0;
-    return `${n} 处匹配${result.truncated ? ' · 已截断' : ''}`;
-  }
-  if (name === 'glob') {
-    if (result.error) return `失败：${String(result.error).slice(0, 120)}`;
-    const n = Array.isArray(result.files) ? result.files.length : 0;
-    return `${n} 个文件${result.truncated ? ' · 已截断' : ''}`;
-  }
-  if (name === 'lsp') {
-    if (result.error) return String(result.errorCode || result.error).slice(0, 120);
-    if (result.kind === 'hover') return result.hover ? 'hover' : '无 hover';
-    const n = Array.isArray(result.locations) ? result.locations.length : 0;
-    return `${n} 个位置`;
-  }
-  if (name === 'computer') {
-    const parts = [String(result.action || '动作')];
-    if (result.display != null) parts.push(`屏 ${result.display}`);
-    if (result.screen) parts.push(`${result.screen.width}×${result.screen.height}`);
-    if (result.typed != null) parts.push(`输入 ${result.typed} 字`);
-    if (Array.isArray(result.windows)) parts.push(`${result.windows.length} 个窗口`);
-    // 动作生效但截图失败：必须让用户看见「做了，但这一帧没截到」
-    if (result.screenshotError) parts.push('动作已执行 · 截图失败');
-    if (result.changed === false) parts.push('画面未变');
-    if (result.stable === false) parts.push('画面仍在变');
-    // wait_until：等到了没有（超时 = 等的东西没发生，是重要信号）
-    if (result.timedOut === true) parts.push('等待超时');
-    else if (result.waitedMs != null) parts.push(`等了 ${Math.round(result.waitedMs / 100) / 10}s`);
-    if (result.activeWindow) parts.push(String(result.activeWindow).slice(0, 40));
-    return parts.join(' · ');
-  }
-  return '完成';
-}
+/**
+ * 工具结果摘要的**唯一实现**是 `src/agent/tool-result-summary.js`（Main 的 planner / 子 Agent
+ * 卡片也用它），经 agent-bundle 暴露成全局 `summarizeToolResult` / `summarizeHostExecResult`
+ * —— 本文件**不再声明同名壳**：经典 script 的顶层函数声明会覆盖 window 上的同名属性，
+ * 「壳里读 window.X」会变成自己调自己（栈溢出）。调用点（含本文件内）直接用全局名即可。
+ *
+ * 本文件以前自带一份 280 行的同名实现，与 Main 那份已经漂出四种不同说法
+ * （后台化文案、退出码、「不像输出」正则、无输出兜底）。
+ */
 
 function isShellToolName(name) {
   const n = String(name || '').toLowerCase();
@@ -418,41 +146,37 @@ function parseDiffStatsFromSummary(summary) {
   };
 }
 
-const LINE_DIFF_MAX_LINE_SUM = 4000;
-const LINE_DIFF_MAX_LINE_PRODUCT = 400000;
-
-function computeLineDiffStats(beforeText, afterText) {
-  const oldLines = String(beforeText ?? '').split('\n');
-  const newLines = String(afterText ?? '').split('\n');
-  const n = oldLines.length;
-  const m = newLines.length;
-  if (n === m && oldLines.every((line, i) => line === newLines[i])) {
-    return { added: 0, removed: 0 };
+/**
+ * +/- 行差异统计的单一来源：`src/gateway/line-diff-stats.js`（Main 侧 remote-fs / rpc /
+ * remote minimal host 也用它），经 agent-bundle 暴露成 `window.computeLineDiffStats`。
+ *
+ * 本文件以前自己写了一份 LCS：**不裁公共前后缀**、按 `'\n'` 切（CRLF 文件的每行都不同 →
+ * 整份文件算成全改）、超上限时用 `max(0, m-n)` 兜底。于是同一个写文件动作，
+ * 徽标（Renderer 算）与工具回包（Main 算）会给出两个数。
+ */
+function resolveLineDiffApi() {
+  var pick = function (name) {
+    return typeof window !== 'undefined' ? window[name] : undefined;
+  };
+  var api = {
+    computeLineDiffStats: pick('computeLineDiffStats'),
+    withinLineDiffBudget: pick('withinLineDiffBudget')
+  };
+  if (typeof api.computeLineDiffStats !== 'function' || typeof api.withinLineDiffBudget !== 'function') {
+    throw new Error(
+      'agent-bundle 未加载：renderer-tool-results 需要 window.computeLineDiffStats / window.withinLineDiffBudget'
+    );
   }
-  if (n * m > LINE_DIFF_MAX_LINE_PRODUCT || n + m > LINE_DIFF_MAX_LINE_SUM) {
-    return { added: Math.max(0, m - n), removed: Math.max(0, n - m) };
-  }
-  const dp = new Array(m + 1);
-  for (let j = 0; j <= m; j++) dp[j] = 0;
-  for (let i = 1; i <= n; i++) {
-    let prev = 0;
-    for (let j = 1; j <= m; j++) {
-      const tmp = dp[j];
-      if (oldLines[i - 1] === newLines[j - 1]) dp[j] = prev + 1;
-      else dp[j] = Math.max(dp[j], dp[j - 1]);
-      prev = tmp;
-    }
-  }
-  const lcs = dp[m];
-  return { added: m - lcs, removed: n - lcs };
+  return api;
 }
 
+
 function buildLineDiffOps(beforeText, afterText) {
-  const oldLines = String(beforeText ?? '').split('\n');
-  const newLines = String(afterText ?? '').split('\n');
+  const oldLines = String(beforeText ?? '').split(/\r?\n/);
+  const newLines = String(afterText ?? '').split(/\r?\n/);
   const n = oldLines.length;
   const m = newLines.length;
-  if (n * m > LINE_DIFF_MAX_LINE_PRODUCT || n + m > LINE_DIFF_MAX_LINE_SUM) return null;
+  if (!resolveLineDiffApi().withinLineDiffBudget(n, m)) return null;
   const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
@@ -655,7 +379,7 @@ function resolveToolDiffBody(tool) {
   if (afterText && diff.afterText == null) diff.afterText = afterText;
   if (diff.created == null && !beforeText && afterText) diff.created = true;
   if (!(Number(diff.added) || Number(diff.removed))) {
-    const stats = computeLineDiffStats(beforeText, afterText);
+    const stats = resolveLineDiffApi().computeLineDiffStats(beforeText, afterText);
     diff.added = stats.added;
     diff.removed = stats.removed;
   }
@@ -709,7 +433,7 @@ function resolveToolDiffStats(tool) {
   if (diff) {
     const before = pickDiffDisplayText(diff, 'before');
     const after = pickDiffDisplayText(diff, 'after');
-    if (before || after) return computeLineDiffStats(before, after);
+    if (before || after) return resolveLineDiffApi().computeLineDiffStats(before, after);
   }
   const writeArgs =
     typeof window.resolveToolArgsFromTrace === 'function'
@@ -719,7 +443,7 @@ function resolveToolDiffStats(tool) {
         : {};
   if (isEditToolName(tool.name) && writeArgs.content != null) {
     const before = diff ? pickDiffDisplayText(diff, 'before') : '';
-    return computeLineDiffStats(before, parseWriteToolContentArg(writeArgs.content));
+    return resolveLineDiffApi().computeLineDiffStats(before, parseWriteToolContentArg(writeArgs.content));
   }
   return null;
 }
@@ -764,7 +488,6 @@ window.canonicalArtifactPathFromTool = canonicalArtifactPathFromTool;
 window.resolveToolDiffBody = resolveToolDiffBody;
 window.resolveArtifactDiffFromTrace = resolveArtifactDiffFromTrace;
 window.resolveToolDiffStats = resolveToolDiffStats;
-window.computeLineDiffStats = computeLineDiffStats;
 window.buildLineDiffOps = buildLineDiffOps;
 window.compactDiffForTrace = compactDiffForTrace;
 window.pickDiffDisplayText = pickDiffDisplayText;

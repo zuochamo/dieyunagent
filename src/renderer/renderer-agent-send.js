@@ -1,4 +1,4 @@
-/* global isSessionSwitchInFlight, loopApi, currentSessionId, cleanupStaleSessionRun, resolveComposerModelForSend, attachmentNeedsVision, getCustomModelApiConfig, appendBubble, isCurrentSessionSending, stopTtsPlayback, getAgentContinueState, resumeAgentToolLoop, clearAgentContinueState, closeStaleAgentRunForSession, getPendingResumeCheckpoint, tryDetectResumeCheckpoint, clearPendingResumeCheckpoint, cloneAttachmentSnapshot, getPendingAttachments, appendUserTurn, setComposerSendingState, isImageAttachment, revokeAttachmentPreview, renderAttachmentChips, processAttachmentsForSend, syncComposerForActiveSession, focusChatInput, invalidateSessionMessageCache, isSessionCacheDiverged, packUserMessageMeta, messages, setMessagesOwnerSessionId, getMessagesOwnerSessionId, messagesBelongToSession, getSessionMessageCache, selectHistoryMessagesForSession, cloneHistoryMessages, renderChatFromMessages, gwState, resolveSessionWorkspacePath, bindCurrentSessionWorkspace, gatewayCall, sessionListTitle, refreshHistoryList, createTraceRunId, resetActiveRunContextUiState, beginComposerUsageAttribution, sessionActiveRuns, refreshContextProgress, throwIfAgentAborted, waitForAgentAbortable, isRemoteSessionWorkspacePath, syncSessionRemoteLease, finishSessionActiveRun, finalizeAssistantBubble, initAgentPrepSteps, renderAssistantBubbleContent, scrollChatToBottom, agentPrepStepStart, beginTurnUndo, agentPrepStepDone, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, buildSystemMessage, buildAgentTools, setSessionContextEstimate, estimateToolsTokens, modelSupportsMultimodal, extractPreparedImageParts, formatModelFooterLabel, resolveUserMsgCreatedAt, canMutateViewMessages, settings, buildCompletionMessages, unwrapSystemPromptPack, joinPromptChunks, getMaxOutputTokens, buildSessionChatHistoryBlock, runAgentCompletion, pauseAgentForToolLimit, completeAgentRunAfterSuccess, finishAgentPrepPhase, isUserAbortError, resolveStoppedDisplayTrace, resolveFailedDisplayTrace, normalizeStoppedTrace, getLastAgentDisplayedTrace, buildFallbackTurnMeta, finalizeUndoForUserTurn, buildStoppedFooterMeta, persistStoppedAssistant, finalizeUserTurnFooter, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, formatAgentApiError, persistFailedAssistantTurn, scheduleWorktreePolicyCleanup, autoCloseBrowserAfterAgentRun, isTaskTierFeatureEnabled, inferTaskTierFromStructure, extractPathHintsFromText, textHasCodebaseMention, getAgentLimits, fetchChatCompletion, pauseComposerQueueAfterUserStop, setLastMemoryInjectionAudit, sessionGoalPanelView, routePeerSessionSend, peerLinkForSession, isDieyunCoreReady, AGENT_RUNTIME_UNAVAILABLE */
+/* global isSessionSwitchInFlight, loopApi, currentSessionId, cleanupStaleSessionRun, resolveComposerModelForSend, attachmentNeedsVision, getCustomModelApiConfig, appendBubble, isCurrentSessionSending, stopTtsPlayback, getAgentContinueState, resumeAgentToolLoop, clearAgentContinueState, closeStaleAgentRunForSession, getPendingResumeCheckpoint, tryDetectResumeCheckpoint, clearPendingResumeCheckpoint, cloneAttachmentSnapshot, getPendingAttachments, appendUserTurn, setComposerSendingState, isImageAttachment, revokeAttachmentPreview, renderAttachmentChips, processAttachmentsForSend, syncComposerForActiveSession, focusChatInput, invalidateSessionMessageCache, isSessionCacheDiverged, packUserMessageMeta, messages, setMessagesOwnerSessionId, getMessagesOwnerSessionId, messagesBelongToSession, getSessionMessageCache, selectHistoryMessagesForSession, cloneHistoryMessages, renderChatFromMessages, gwState, resolveSessionWorkspacePath, bindCurrentSessionWorkspace, gatewayCall, sessionListTitle, refreshHistoryList, createTraceRunId, resetActiveRunContextUiState, beginComposerUsageAttribution, sessionActiveRuns, refreshContextProgress, throwIfAgentAborted, waitForAgentAbortable, isRemoteSessionWorkspacePath, syncSessionRemoteLease, finishSessionActiveRun, finalizeAssistantBubble, initAgentPrepSteps, renderAssistantBubbleContent, scrollChatToBottom, agentPrepStepStart, beginTurnUndo, agentPrepStepDone, emitAgentRunEvent, AGENT_RUN_EVENT_TYPES, buildSystemMessage, buildAgentTools, setSessionContextEstimate, estimateToolsTokens, modelSupportsMultimodal, extractPreparedImageParts, formatModelFooterLabel, resolveUserMsgCreatedAt, canMutateViewMessages, settings, buildCompletionMessages, unwrapSystemPromptPack, joinPromptChunks, getMaxOutputTokens, buildSessionChatHistoryBlock, runAgentCompletion, pauseAgentForToolLimit, completeAgentRunAfterSuccess, finishAgentPrepPhase, isUserAbortError, resolveStoppedDisplayTrace, resolveFailedDisplayTrace, normalizeStoppedTrace, getLastAgentDisplayedTrace, buildFallbackTurnMeta, finalizeUndoForUserTurn, buildStoppedFooterMeta, persistStoppedAssistant, finalizeUserTurnFooter, cloneTraceForMobile, shouldPauseForNetworkDisconnect, pauseAgentForNetworkDisconnect, formatAgentApiError, persistFailedAssistantTurn, scheduleWorktreePolicyCleanup, autoCloseBrowserAfterAgentRun, isTaskTierFeatureEnabled, inferTaskTierFromStructure, extractPathHintsFromText, textHasCodebaseMention, getAgentLimits, fetchChatCompletion, pauseComposerQueueAfterUserStop, setLastMemoryInjectionAudit, sessionGoalPanelView, routePeerSessionSend, peerLinkForSession, isDieyunCoreReady, AGENT_RUNTIME_UNAVAILABLE, agentApi, AgentRoundText */
 'use strict';
 
 /**
@@ -435,6 +435,38 @@ async function resolveSendWorkspace(state) {
   return true;
 }
 
+/**
+ * 「这一轮要不要拆成多路并行」的判定卡（拆与不拆同形）。
+ *
+ * 单一来源：phase 名来自 `agent-round-text.PLANNER_ROUTE_PHASE`（Main 的 planner 侧写同一张卡时
+ * 也用这个常量），所以「拆了」和「没拆」在思考区长得一样，用户不会以为是两件事。
+ * `thought` 是一句结论 + 理由；`fullThought` 带判定模型的思考原文（2026-11-20 用户要求）。
+ */
+function buildPlannerJudgeTraceEntry(route) {
+  const phase =
+    typeof AgentRoundText !== 'undefined' && AgentRoundText.PLANNER_ROUTE_PHASE
+      ? AgentRoundText.PLANNER_ROUTE_PHASE
+      : '调度 · 侧模型判定';
+  const verdict = route && route.use ? '拆成多路并行走 planner' : '不拆，按普通工具循环跑';
+  const reason = String((route && route.reason) || '').trim();
+  const thinking = String((route && route.thinking) || '').trim();
+  const thought = `${verdict}${reason ? `：${reason}` : ''}`;
+  const fullThought = thinking ? `${thought}\n\n【判定模型思考】\n${thinking}` : thought;
+  return { round: 0, phase, thought, fullThought, tools: [], planJudge: true };
+}
+
+/**
+ * 本轮 trace 里模型有没有要求中途改道（调了 `fan_out`）。
+ *
+ * 判定单一来源在 `agent-round-text.findFanOutRequest`（只认结构化工具调用记录，不扫正文）；
+ * 这里只做 bundle 兼容（老 bundle 没有这个方法就不改道，按普通循环交付）。
+ */
+function readFanOutHandoff(trace) {
+  return typeof AgentRoundText !== 'undefined' && typeof AgentRoundText.findFanOutRequest === 'function'
+    ? AgentRoundText.findFanOutRequest(trace)
+    : null;
+}
+
 async function executeSendPrepAndRun(state) {
   const {
     runSessionId,
@@ -455,6 +487,29 @@ async function executeSendPrepAndRun(state) {
   // 召回 / 档位判定的查询词：普通轮就是用户输入；目标续跑轮没有用户输入，
   // 用目标原文（Main 传下来的同一份 objective），否则记忆/索引召回会对着空串乱猜。
   const recallQuery = String(state.recallQuery || fullText || '');
+
+  /**
+   * 多 Agent 并行执行（planner 管线）的入口开关：它只表示「允许」，不表示「强制」。
+   *
+   * 打开后要问一次侧模型（Main 的 `agent:planner-route` → `agent/planner-router.js`）：
+   * 这一句里有没有 ≥2 个彼此独立、都要改文件/跑命令的交付物？判「要拆」才走 planner，
+   * 判不准 / 判定失败 / 超时一律走普通工具循环。
+   * 以前这里是直接 `forcePlanner`：两个字的追问也会被拆成 3 路执行器、跑半小时（2026-11-19 实测）。
+   *
+   * 判定**串行**放在选路前（等它 1.4~4s）。试过与准备阶段并发发出：省了等待，但判定会在
+   * 「本轮模型/端点还没解析出来」时用磁盘默认模型去判，判定口径与本轮不一致 ——
+   * 2026-11-20 实测取舍后按用户要求改回串行（口径一致优先于省 1~4s）。
+   *
+   * 两个结构性抑制（都不是猜意图，是入口本身的形状）：
+   * - `agentServiceRequestId` 非空 = 外部提交（手机 / 频道 / 内网对端 / 转接器）：改动要
+   *   有人在桌面「变更」面板点应用才落盘，无人值守入口点了也白等，还会先对外报"完成"；
+   * - 本轮带图片 = planner 管线的 user 消息只搬文本（图片进不了子 Agent），走了就静默丢图。
+   */
+  const plannerMultiAgent =
+    typeof getAgentLimits === 'function' &&
+    getAgentLimits().plannerMultiAgentEnabled === true &&
+    !agentServiceRequestId &&
+    !(prepared && prepared.hasImages);
 
   state.ensureUserLocalMsgId = async function ensureUserLocalMsgId() {
     if (state.userLocalMsgId || !userGatewayPersist) return state.userLocalMsgId;
@@ -549,22 +604,10 @@ async function executeSendPrepAndRun(state) {
         ? getAgentLimits().taskTierEnabled !== false
         : true;
   /**
-   * 多 Agent 并行执行（planner 管线）的**唯一入口**：用户在设置里显式打开才走。
-   * 之前这个布尔（`forcePlanner`）在整条链上只有读、没有任何写点，于是 planner
-   * （并行执行器 + worktree 隔离 + 变更合并）成了只有"断点续跑"才可能碰到的死代码。
-   * 这里只读一个开关值，不做"任务看起来复杂就自动走"的判断：planner 是重流程，
-   * 猜错一次就是多等几分钟 + 凭空多出一堆待合并的 worktree。
-   *
-   * 两个结构性抑制（都不是猜意图，是入口本身的形状）：
-   * - `agentServiceRequestId` 非空 = 外部提交（手机 / 频道 / 内网对端 / 转接器）：改动要
-   *   有人在桌面「变更」面板点应用才落盘，无人值守入口点了也白等，还会先对外报"完成"；
-   * - 本轮带图片 = planner 管线的 user 消息只搬文本（图片进不了子 Agent），走了就静默丢图。
+   * 多 Agent 并行执行（planner 管线）的入口开关判定已在函数开头算出
+   * （见 `plannerMultiAgent`）：判定只看用户这一句，与这里的档位推断无关。
+   * 这里只留档位推断。
    */
-  const plannerMultiAgent =
-    typeof getAgentLimits === 'function' &&
-    getAgentLimits().plannerMultiAgentEnabled === true &&
-    !agentServiceRequestId &&
-    !(prepared && prepared.hasImages);
   let taskTier =
     taskTierEnabled && typeof inferTaskTierFromStructure === 'function'
       ? inferTaskTierFromStructure({
@@ -586,9 +629,24 @@ async function executeSendPrepAndRun(state) {
     signal: runAbortController.signal,
     taskTier
   };
-  // 执行序与 UI 清单一致：索引/记忆/技能 → 再组装工具（勿先 ✓ tools）
+  // 系统提示与工具装配**互不依赖**，一起发出去、只等最慢的那一段。
+  // 以前这里是串行（注释还写着「执行序与 UI 清单一致：索引/记忆/技能 → 再组装工具」）——
+  // 让准备清单的勾选顺序决定了首字延迟，而清单本来只是展示。工具这边的结果只有一个地方
+  // 需要（`compactMcpTools` 决定 MCP 块用紧凑 schema 还是逐服务列启动命令），所以把
+  // Promise 交给系统提示，由它在真正要用时 await。
+  const agentToolsPromise = buildAgentTools(recallQuery, {
+    model: modelPick.model,
+    route: modelPick.route,
+    prepSessionId: runSessionId,
+    signal: runAbortController.signal
+  });
+  // 中止时这条链会被外层丢掉：先挂一个空 catch，别让它变成 unhandledRejection
+  agentToolsPromise.catch(() => {});
   const sysPack = unwrapSystemPromptPack(
-    await waitForAgentAbortable(buildSystemMessage(recallQuery, prepOpts), runAbortController.signal)
+    await waitForAgentAbortable(
+      buildSystemMessage(recallQuery, { ...prepOpts, agentToolsPromise }),
+      runAbortController.signal
+    )
   );
   const sysStable = sysPack.stable;
   const turnRide = sysPack.turnRide;
@@ -598,15 +656,7 @@ async function executeSendPrepAndRun(state) {
     setLastMemoryInjectionAudit(runSessionId, sysPack.memoryAudit || null);
   }
   throwIfAgentAborted(runAbortController.signal);
-  const agentTools = await waitForAgentAbortable(
-    buildAgentTools(recallQuery, {
-      model: modelPick.model,
-      route: modelPick.route,
-      prepSessionId: runSessionId,
-      signal: runAbortController.signal
-    }),
-    runAbortController.signal
-  );
+  const agentTools = await waitForAgentAbortable(agentToolsPromise, runAbortController.signal);
   throwIfAgentAborted(runAbortController.signal);
   setSessionContextEstimate(runSessionId, {
     system: sysContent,
@@ -716,7 +766,33 @@ async function executeSendPrepAndRun(state) {
     : String(buildSessionChatHistoryBlock({ messages: historyMessages }) || '');
   state.agentRunFrame.chatHistoryBlock = chatHistoryBlock;
   throwIfAgentAborted(runAbortController.signal);
-  const run = await runAgentCompletion(payload, agentTools, placeholder, {
+  // 开关只代表「允许」：这一轮到底拆不拆，问一次侧模型。判定在 Main（`agent:planner-route`，
+  // LLM 调用仍只有 `llm.complete` 一个出口）；失败 / 超时 / 拿不准一律不拆。
+  let plannerRoute = null;
+  if (plannerMultiAgent) {
+    try {
+      plannerRoute =
+        typeof agentApi === 'undefined' ||
+        !agentApi ||
+        typeof agentApi.agentPlannerRoute !== 'function'
+          ? { use: false, reason: '当前入口没有路由判定（旧版桥），按不拆处理' }
+          : await agentApi.agentPlannerRoute({
+              userText: fullText,
+              workspacePath: runWorkspacePath || state.runWorkspacePath || '',
+              model: composerModel || (payload && payload.model) || '',
+              apiConfig
+            });
+    } catch {
+      plannerRoute = { use: false, reason: '路由调用失败' };
+    }
+    throwIfAgentAborted(runAbortController.signal);
+    if (!plannerRoute || !plannerRoute.use) {
+      console.warn(
+        `[dieyun:planner] 侧模型判断：这一轮不拆（${(plannerRoute && plannerRoute.reason) || '无理由'}）`
+      );
+    }
+  }
+  const baseRunOpts = {
     signal: runAbortController.signal,
     apiConfig,
     sessionId: runSessionId,
@@ -727,17 +803,83 @@ async function executeSendPrepAndRun(state) {
     sysContent: sysStable,
     chatHistoryBlock,
     allowPlannerResume,
-    // 设置里开了「多 Agent 并行执行」→ 这一轮走 planner 管线（拆解 → 多路执行器 → 验收 → 合并）
-    forcePlanner: plannerMultiAgent,
+    // 「多 Agent 并行执行」只是**允许**：真正拆不拆由侧模型这一轮判定（见上面的 plannerRoute）。
+    // 拆了的话这张卡由 planner 自己写在思考区最前（`调度 · 侧模型判定`，带判定思考）；
+    // 没拆的话在下面由 Renderer 补同一张卡 —— 两处同形，用户总能看见「凭什么这么判」。
+    forcePlanner: !!(plannerRoute && plannerRoute.use),
+    plannerRouteReason: (plannerRoute && plannerRoute.reason) || '',
+    plannerRouteThinking: (plannerRoute && plannerRoute.thinking) || '',
     runId: agentRunId,
     turnRide,
     bookPrefixMessages,
     ensureUserLocalMsgId: state.ensureUserLocalMsgId,
     taskTier,
     contextAudit
-  });
+  };
+  let run = await runAgentCompletion(payload, agentTools, placeholder, baseRunOpts);
+  // 中途改道：普通循环跑到一半，模型自己调了 `fan_out`（发现这活该拆成多路并行写入）。
+  // 这一段**不交付** —— 它的 trace 当 planner 的前缀（baseTrace），由 planner 出最终答复。
+  const handoff = run.done ? readFanOutHandoff(run.result && run.result.trace) : null;
+  // 「没拆」也要把判定摆出来：否则用户只看到一条普通循环，不知道它为什么没并行。
+  // 但真改道时**不写这张卡**：图上先写「不拆」再写「中途改道」会自相矛盾。
+  if (run.result && plannerRoute && !plannerRoute.use && !handoff) {
+    run.result = {
+      ...run.result,
+      trace: [
+        buildPlannerJudgeTraceEntry(plannerRoute),
+        ...(Array.isArray(run.result.trace) ? run.result.trace : [])
+      ]
+    };
+  }
+  if (handoff && effectivePrepared.hasImages) {
+    // 本轮带图：planner 的 user 消息只搬文本，改道会静默丢图 —— 宁可不改道。
+    console.warn('[dieyun:planner] 本轮带图片，忽略中途改道（planner 只搬文本）');
+  } else if (handoff) {
+    const segTrace = Array.isArray(run.result && run.result.trace) ? run.result.trace : [];
+    // 模型自己已经想好怎么拆时，把它的切分当「参考」交给规划阶段（不强制采用，规划器可以改）。
+    const splitHint = handoff.subtasks.length
+      ? `\n\n【模型执行中确认的切分（参考，可调整）】\n${handoff.subtasks
+          .map((s, i) => `${i + 1}. ${s.title || s.instruction}${s.instruction && s.title ? `：${s.instruction}` : ''}`)
+          .join('\n')}`
+      : '';
+    try {
+      run = await runAgentCompletion(payload, agentTools, placeholder, {
+        ...baseRunOpts,
+        forcePlanner: true,
+        userText: `${fullText}${splitHint}`,
+        plannerRoutePhase:
+          typeof AgentRoundText !== 'undefined' && AgentRoundText.PLANNER_HANDOFF_PHASE
+            ? AgentRoundText.PLANNER_HANDOFF_PHASE
+            : '',
+        plannerRouteReason: `模型执行途中要求改道：${handoff.reason}`,
+        plannerRouteThinking: '',
+        baseTrace: segTrace
+      });
+    } catch (err) {
+      // 改道失败（planner 起不来 / 被中止）：退回交付这一段本身，别把整轮吞掉。
+      if (err && (err.name === 'AbortError' || isUserAbortError(err))) throw err;
+      console.warn('[dieyun:planner] 中途改道失败，改为交付当前这一段：', err);
+      run = {
+        ...run,
+        done: true,
+        result: {
+          ...(run.result || {}),
+          trace: [
+            {
+              round: 0,
+              phase: '调度 · 中途改道失败',
+              thought: `没能起 planner（${(err && err.message) || err}），已按当前进度交付`,
+              fullThought: `没能起 planner（${(err && err.message) || err}），已按当前进度交付`,
+              tools: []
+            },
+            ...segTrace
+          ]
+        }
+      };
+    }
+  }
   if (!run.done) {
-    pauseAgentForToolLimit(run, state.agentRunFrame);
+    await pauseAgentForToolLimit(run, state.agentRunFrame);
     return;
   }
 

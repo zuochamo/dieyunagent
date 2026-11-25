@@ -1,4 +1,4 @@
-/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal */
+/* global window, $, fetch, escapeHtml, gwState, gatewayCall, currentSessionId, loadEnabledSkillIds, showAgentToast, getAgentsMdMode, CTX_LIMITS, openDatabaseSettingsModal, getAgentLimits */
 const toolDefsApi = window.diecloud || {};
 
 const _tc = typeof DieyunToolCatalog !== 'undefined' ? DieyunToolCatalog : {};
@@ -19,6 +19,8 @@ const MEMORY_TOOLS = Array.isArray(_tc.MEMORY_TOOLS) ? _tc.MEMORY_TOOLS : [];
 const SKILL_CREATE_TOOL = _tc.SKILL_CREATE_TOOL;
 // 删除技能：schema 单一来源同上，删除判定在 src/agent-home.js#deleteUserSkill。
 const SKILL_DELETE_TOOL = _tc.SKILL_DELETE_TOOL || null;
+// 改技能正文：单一来源同上，判定与写盘在 src/agent-home.js#updateUserSkill。
+const SKILL_UPDATE_TOOL = _tc.SKILL_UPDATE_TOOL || null;
 const PLAN_TOOLS = _tc.PLAN_TOOLS || [];
 // 会话级目标：goal_start 常驻（模型可自主开目标），推进期工具按会话是否有目标动态给（见下方 buildAgentTools）。
 const GOAL_START_TOOL = _tc.GOAL_START_TOOL || null;
@@ -36,7 +38,12 @@ const SESSION_TOOL = _tc.SESSION_TOOL || null;
 const SESSION_WORKSPACE_TOOL = _tc.SESSION_WORKSPACE_TOOL || null;
 // 只读并发调研子 Agent：schema 单一来源在 src/agent/tool-catalog.js（Main 执行）。
 const SUBAGENT_TOOL = _tc.SUBAGENT_TOOL;
+const FAN_OUT_TOOL = _tc.FAN_OUT_TOOL;
 const SUBAGENT_STATUS_TOOL = _tc.SUBAGENT_STATUS_TOOL;
+// 「看一眼自己」：档位 / 真实可写根 / 生效预算 / 最近失败面 —— schema 单一来源在 catalog/self.js。
+const AGENT_INSPECT_TOOL = _tc.AGENT_INSPECT_TOOL || null;
+// 申请一项能力（开权限开关 / 填 MCP 凭据）：同源同上。它不能提权，只把请求送到界面。
+const AGENT_CAPABILITY_TOOL = _tc.AGENT_CAPABILITY_TOOL || null;
 // OS 级电脑控制（截屏 + 鼠标键盘）：schema 单一来源同上，注入受 osControl 开关控制。
 const COMPUTER_TOOL = _tc.COMPUTER_TOOL || null;
 // 手机摄像头（拍一张现实画面）：schema 单一来源同上，注入受 camera 权限开关控制（默认关）。
@@ -47,6 +54,11 @@ const DESKTOP_CAMERA_TOOL = _tc.DESKTOP_CAMERA_TOOL || null;
 // 本机云台转向（desktop_camera_ptz）：schema 单一来源同上。与取帧**共用** desktopCamera 开关 ——
 // 转的是同一台摄像头，多一个开关只会造出「能拍但不能转 1°」这种没有安全收益的状态。
 const DESKTOP_CAMERA_PTZ_TOOL = _tc.DESKTOP_CAMERA_PTZ_TOOL || null;
+// 身体（点点）：schema 单一来源 `agent/catalog/pet.js`。桌面版才有 —— `petGetSettings` 是桌面
+// preload 的接口（网页版 / headless 没有）。聊天轮**常驻**：用户在聊天里说「改成 256 个点 /
+// 换个形态」时，模型要靠它调参数；以前它只在心跳轮的工具表里，聊天轮没有 → 模型去改源码。
+// 宠物没显示时不靠「工具不存在」表达，执行端回 PET_DISABLED 结构化错误（与 peer_* 同一取舍）。
+const PET_TOOLS = Array.isArray(_tc.PET_TOOLS) ? _tc.PET_TOOLS : [];
 // SSH 远程主机（连/断/端口转发/切远端工作空间）：schema 单一来源同上，执行在 Main（ssh/actions.js）。
 const SSH_TOOL = _tc.SSH_TOOL || null;
 // Worktree 副本（开/清/写回）：schema 单一来源同上，执行在 Main（worktree/actions.js）。
@@ -188,6 +200,9 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   if (host.fsWrite && getAgentsMdMode() !== 'off') tools.push(AGENTS_MD_PROPOSE_TOOL);
   if (host.hostControl) tools.push(SKILL_CREATE_TOOL);
   if (host.hostControl && SKILL_DELETE_TOOL) tools.push(SKILL_DELETE_TOOL);
+  // 改技能正文：与创建/删除同一闸（都是写 ~/.dieyun/skills）。没有它，模型只能「删了重建」，
+  // 而重建会派生 name-1 目录并丢掉启用状态（见 agent-home#updateUserSkill 的注释）。
+  if (host.hostControl && SKILL_UPDATE_TOOL) tools.push(SKILL_UPDATE_TOOL);
   if (host.webFetch) tools.push(...WEB_TOOLS);
   if (host.browser && !weakModel) tools.push(...BROWSER_CORE_TOOLS);
   else if (host.browser && weakModel) {
@@ -212,6 +227,11 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   // 本机云台：开关同上（同一台设备）。没有电机的机型执行端会回 NO_PTZ，不靠「工具不存在」表达。
   if (host.desktopCamera && DESKTOP_CAMERA_PTZ_TOOL) {
     tools.push(DESKTOP_CAMERA_PTZ_TOOL);
+  }
+  // 身体（点点）：只有桌面版有这具身体（`petGetSettings` 由桌面 preload 提供）。
+  // 与相机不同，它不受 host 权限开关管：改的是用户自己的宠物外观，不读现实世界、不碰文件。
+  if (typeof toolDefsApi.petGetSettings === 'function' && PET_TOOLS.length) {
+    tools.push(...PET_TOOLS);
   }
   // SSH 远端：与 host 权限开关无关（连接参数/凭据由用户在界面上给），常驻。
   if (SSH_TOOL) tools.push(SSH_TOOL);
@@ -247,7 +267,19 @@ async function buildAgentTools(userQuery = '', opts = {}) {
   // Agent 主循环是协调者：可派只读研究子 Agent（深度恒为 1），并可查本轮的
   // 子 Agent 账本（哪些还能 continueFrom 追问 —— 追问的 id 不能靠记忆猜）。
   if (SUBAGENT_TOOL) tools.push(SUBAGENT_TOOL);
+  // 中途改道（把这一轮交给多路并行）：只有「多 Agent 并行执行」开着才给 ——
+  // 关着时宿主不会接手 planner，给了就是空承诺。
+  if (FAN_OUT_TOOL && typeof getAgentLimits === 'function' && getAgentLimits().plannerMultiAgentEnabled === true) {
+    tools.push(FAN_OUT_TOOL);
+  }
   if (SUBAGENT_STATUS_TOOL) tools.push(SUBAGENT_STATUS_TOOL);
+  // 看一眼自己（档位 / 可写根 / 生效预算 / 最近失败面）：只读、常驻。
+  // 它不进 optionalEntries（不参与 MCP 召回），也不受 host 权限开关管 —— 关着某些能力时，
+  // 它恰恰是模型唯一能问「到底关了什么」的地方。
+  if (AGENT_INSPECT_TOOL) tools.push(AGENT_INSPECT_TOOL);
+  // 申请一项能力（权限开关 / MCP 凭据）：常驻、不受 host 权限开关管 ——
+  // 关着某些能力时，它恰恰是模型把请求送到用户眼前的唯一通道。
+  if (AGENT_CAPABILITY_TOOL) tools.push(AGENT_CAPABILITY_TOOL);
 
   const optionalEntries = [];
 

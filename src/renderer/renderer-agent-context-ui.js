@@ -540,10 +540,6 @@ function estimateSystemPromptTokens(sessionId) {
   return estimateTextTokens(system);
 }
 
-function estimateSystemToolsExtra(sessionId) {
-  const est = getSessionContextEstimate(sessionId);
-  return estimateSystemPromptTokens(sessionId) + (est.toolsTokenEst || 0);
-}
 
 function estimateInflightRunTokens(live) {
   if (!live || live.finished || live.inPrepPhase) return 0;

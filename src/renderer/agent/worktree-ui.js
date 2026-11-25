@@ -1,4 +1,4 @@
-/* global window, document, $, currentSessionId, sessionActiveRuns, showAgentToast, renderChangesPane, getSessionChangeRowsForAgent, capturePlanApplyForUndo, reportKnowledgePlanOutcome, maybeEnforceWorktreeCleanupPolicy, openSidePanel, setSidePanelTab, DieyunNamespaces */
+/* global window, document, $, currentSessionId, sessionActiveRuns, isSessionSending, gwState, gatewayCall, showAgentToast, renderChangesPane, getSessionChangeRowsForAgent, capturePlanApplyForUndo, reportKnowledgePlanOutcome, maybeEnforceWorktreeCleanupPolicy, openSidePanel, setSidePanelTab, DieyunNamespaces */
 'use strict';
 
 const worktreeLoopApi = window.diecloud || {};
@@ -10,9 +10,24 @@ function worktreeSid(sessionId) {
   return String(sessionId || currentSessionId || '').trim();
 }
 
+/** plan 是否仍在跑：**现算**，别信存下来的布尔（见 `pendingWorktreeRow`）。 */
+function planRunIsLive(sid) {
+  return !!(sid && typeof isSessionSending === 'function' && isSessionSending(sid));
+}
+
 function pendingWorktreeRow(sessionId) {
   const sid = worktreeSid(sessionId);
-  return sid ? pendingWorktreeBySession.get(sid) || null : null;
+  if (!sid) return null;
+  const row = pendingWorktreeBySession.get(sid) || null;
+  // `live` 是**推导事实**，不是要单独维护的状态。
+  //
+  // 以前它只在 `finalizePlanWorktreeTracking`（唯一调用方 = 打开审阅）里被清，而 plan 还有五条
+  // 终态路径不会走到那里：撞轮次上限停车、用户停止、抛错、评审否决、后台会话完成 ——
+  // 结果 `live` 永远是 true：「应用」按钮永久禁用、面板一直写「Plan 执行中」，
+  // 用户只能点「放弃」把产出丢掉（2026-11-19 审计）。
+  // 读取时按会话真实运行态校正一次，就不再需要「谁负责清」这条约定。
+  if (row && row.live && !planRunIsLive(sid)) row.live = false;
+  return row;
 }
 
 function setPendingWorktreeRow(row, sessionId) {
@@ -259,12 +274,19 @@ async function applyWorktreeReview(paths, opts = {}) {
   );
   // 应用后清理走默认「归档到分支再删」：用户没勾选的文件产出仍留在分支上，
   // 不会像原来的 rmSync --force 那样静默消失。
-  if (worktreeLoopApi.worktreeCleanupRun) {
+  //
+  // **但只在整批都成功时才清理**：`appliedOk` 对「部分成功」也是 true（失败项在
+  // `apply.errors` 里），以前无条件清理会把没应用上的那部分连同行状态一起抹掉 ——
+  // 主工作区留下半套改动、剩下的只剩在用户看不见的分支上，而面板因为 `appliedOk=false`
+  // 还挂着那一行；再点「应用」时预览已空，反倒弹「已写回 0 个文件」的成功提示。
+  const fullyApplied =
+    result.appliedOk && !(result.apply && Array.isArray(result.apply.errors) && result.apply.errors.length);
+  if (fullyApplied && worktreeLoopApi.worktreeCleanupRun) {
     await worktreeLoopApi.worktreeCleanupRun(pending.runId).catch(() => {});
   }
   scheduleWorktreePolicyCleanup();
   finalizeWorktreeKnowledge(result.appliedOk ? 'applied' : 'skipped', paths, pending.sessionId);
-  if (result.appliedOk) setPendingWorktreeRow(null, pending.sessionId);
+  if (fullyApplied) setPendingWorktreeRow(null, pending.sessionId);
   if (typeof window.invalidateWorktreeReviewCache === 'function') {
     window.invalidateWorktreeReviewCache();
   }
@@ -364,114 +386,44 @@ async function handleWorktreeApplyAfterRun(_runId, _undoTurnId) {
   openWorktreeReviewPane();
 }
 
-function openWorktreeApplyDialog(preview) {
-  return new Promise((resolve) => {
-    const overlay = $('worktree-apply-overlay');
-    const listEl = $('worktree-apply-list');
-    const countEl = $('worktree-apply-count');
-    const warnEl = $('worktree-apply-warn');
-    const selectAll = $('worktree-apply-select-all');
-    const btnConfirm = $('worktree-apply-confirm');
-    const btnSkip = $('worktree-apply-skip');
-    if (!overlay || !listEl || !btnConfirm || !btnSkip) {
-      resolve({ applied: false });
-      return;
+/**
+ * 会话装载时恢复「待应用」的 worktree 行。
+ *
+ * `agent_runs.status === 'pending_apply'` 是**持久事实**，而 `pendingWorktreeBySession`
+ * 只是进程内 Map —— 重启后「变更」面板再也找不到这个 run，用户只能在「设置 → Worktree」
+ * 里看到一个「遗留 run」，那里的删除还会把它归档/丢掉（2026-11-19 审计 P1）。
+ * 这里按库里的事实把行补回来，`pending_apply` 才名副其实。
+ */
+async function restorePendingWorktreeRowFromState(sessionId) {
+  const sid = worktreeSid(sessionId);
+  if (!sid || !gwState.authed) return false;
+  if (pendingWorktreeRow(sid)) return false;
+  if (typeof gatewayCall !== 'function') return false;
+  try {
+    const state = await gatewayCall('agent.state_get', { sessionId: sid });
+    if (!state || state.status !== 'pending_apply' || !state.runId) return false;
+    setPendingWorktreeRow(
+      {
+        runId: String(state.runId),
+        sessionId: sid,
+        undoTurnId: null,
+        live: false,
+        traceFallback: false,
+        traceFallbackReason: '',
+        planPreview: null
+      },
+      sid
+    );
+    if (typeof window.invalidateWorktreeReviewCache === 'function') {
+      window.invalidateWorktreeReviewCache();
     }
-
-    const changes = preview.changes || [];
-    const hasConflict = changes.some((c) => c.conflict);
-    const hasMainDirty = changes.some((c) => c.mainDirty);
-
-    listEl.innerHTML = '';
-    const inputs = [];
-    for (const ch of changes) {
-      const li = document.createElement('li');
-      if (ch.conflict) li.classList.add('conflict');
-      if (ch.mainDirty) li.classList.add('main-dirty');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !ch.conflict;
-      cb.dataset.path = ch.repoPath;
-      inputs.push(cb);
-      const pathSpan = document.createElement('span');
-      pathSpan.className = 'worktree-apply-path';
-      pathSpan.textContent = ch.repoPath;
-      const meta = document.createElement('span');
-      meta.className = 'worktree-apply-meta';
-      meta.textContent = `${kindLabelWorktree(ch.kind)} · ${ch.roleId}${ch.conflict ? ' · 冲突' : ''}${ch.mainDirty ? ' · 主区已改' : ''}`;
-      li.appendChild(cb);
-      li.appendChild(pathSpan);
-      li.appendChild(meta);
-      listEl.appendChild(li);
-    }
-
-    const syncCount = () => {
-      const n = inputs.filter((i) => i.checked).length;
-      if (countEl) countEl.textContent = `已选 ${n} / ${changes.length}`;
-      if (selectAll) selectAll.checked = n === inputs.length;
-    };
-    syncCount();
-
-    if (warnEl) {
-      const warns = [];
-      if (hasConflict) warns.push('部分文件被多个执行器同时修改，默认不勾选；强制应用将覆盖为最后写入的 worktree 副本。');
-      if (hasMainDirty) warns.push('主工作区中部分文件已有未提交修改，应用将直接覆盖磁盘内容。');
-      if (warns.length) {
-        warnEl.textContent = warns.join(' ');
-        warnEl.hidden = false;
-      } else {
-        warnEl.hidden = true;
-      }
-    }
-
-    const close = (result) => {
-      overlay.hidden = true;
-      selectAll?.removeEventListener('change', onSelectAll);
-      btnConfirm.removeEventListener('click', onConfirm);
-      btnSkip.removeEventListener('click', onSkip);
-      resolve(result);
-    };
-
-    const onSelectAll = () => {
-      const v = !!selectAll.checked;
-      for (const inp of inputs) inp.checked = v;
-      syncCount();
-    };
-
-    const onConfirm = () => {
-      const paths = inputs.filter((i) => i.checked).map((i) => i.dataset.path);
-      if (!paths.length) {
-        showAgentToast('未选择文件', '请至少勾选一个文件，或点击「放弃变更」', { variant: 'warn' });
-        return;
-      }
-      // 冲突强制按变更粒度：勾中某个冲突文件只强制它自己，
-      // 不再用一个全局 boolean 顺带解除其余文件的覆盖保护。
-      const selectedChanges = changes.filter((c) => paths.includes(c.repoPath));
-      const keyOf = (ch) => ch.changeId || `${ch.roleId}::${ch.repoPath}`;
-      const forceChangeIds = selectedChanges.filter((c) => c.conflict).map(keyOf);
-      const dirtyFiles = selectedChanges.filter((c) => c.mainDirty);
-      let allowOverwriteMainDirty = false;
-      if (dirtyFiles.length) {
-        allowOverwriteMainDirty = window.confirm(
-          `主工作区中以下 ${dirtyFiles.length} 个文件已有未提交修改，应用会覆盖它们：\n\n` +
-            dirtyFiles.map((c) => `· ${c.repoPath}`).join('\n') +
-            '\n\n覆盖前会自动备份到 .dieyun/backup/，可回滚。确定继续？'
-        );
-        if (!allowOverwriteMainDirty) return;
-      }
-      close({ applied: true, paths, forceChangeIds, allowOverwriteMainDirty });
-    };
-
-    const onSkip = () => close({ applied: false });
-
-    for (const inp of inputs) inp.addEventListener('change', syncCount);
-    selectAll?.addEventListener('change', onSelectAll);
-    btnConfirm.addEventListener('click', onConfirm);
-    btnSkip.addEventListener('click', onSkip);
-
-    overlay.hidden = false;
-  });
+    if (typeof renderChangesPane === 'function') renderChangesPane();
+    return true;
+  } catch {
+    return false;
+  }
 }
+
 
 window.DieyunNamespaces.register(
   'DieyunAgent',
@@ -487,6 +439,7 @@ window.DieyunNamespaces.register(
     openWorktreeReviewAfterPlan,
     openWorktreeReviewPane,
     handleWorktreeApplyAfterRun,
+    restorePendingWorktreeRowFromState,
     kindLabelWorktree,
     getPendingWorktreeApply: (sessionId) => {
       const row = pendingWorktreeRow(sessionId);
@@ -504,6 +457,7 @@ window.DieyunNamespaces.register(
       'dismissWorktreeReview',
       'openWorktreeReviewPane',
       'handleWorktreeApplyAfterRun',
+      'restorePendingWorktreeRowFromState',
       'openWorktreeReviewAfterPlan',
       'kindLabelWorktree',
       'getPendingWorktreeApply'
