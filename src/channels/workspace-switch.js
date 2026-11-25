@@ -1,7 +1,16 @@
 'use strict';
 
-const path = require('path');
 const { bindSessionWorkspace } = require('../agent/session-workspace-bind');
+// 候选收拢 / 归一 / 匹配的**唯一实现**（纯函数，桌面侧同一个工具名也用这份）：
+// `src/agent/workspace-candidates.js`。这里只负责「频道这一路的候选来源与落绑定」。
+const {
+  KNOWN_WORKSPACE_LIMIT,
+  normalizePathKey,
+  baseNameOf,
+  candidatesFromSessionRows,
+  matchCandidate,
+  candidateText
+} = require('../agent/workspace-candidates');
 
 /**
  * 「这个企微会话换到另一个项目」的唯一实现。
@@ -17,22 +26,6 @@ const { bindSessionWorkspace } = require('../agent/session-workspace-bind');
  */
 
 const DEFAULT_SENTINEL = 'default';
-const KNOWN_WORKSPACE_LIMIT = 200;
-
-function normalizePathKey(p) {
-  return String(p || '')
-    .trim()
-    .replace(/[\\/]+$/, '')
-    .replace(/\//g, '\\')
-    .toLowerCase();
-}
-
-function baseNameOf(p) {
-  const s = String(p || '').trim();
-  if (!s) return '';
-  const parts = s.replace(/\\/g, '/').replace(/\/+$/, '').split('/');
-  return parts[parts.length - 1] || '';
-}
 
 /**
  * @param {{
@@ -46,49 +39,18 @@ function createChannelWorkspaceSwitcher(deps) {
 
   /** 候选清单：频道默认 + 本机已有会话的工作空间（去重、保持顺序） */
   async function listCandidates(channel) {
-    const list = [];
-    const seen = new Set();
-    const push = (p) => {
-      const raw = String(p || '').trim();
-      if (!raw) return;
-      const key = normalizePathKey(raw);
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      list.push({ path: raw, name: baseNameOf(raw) || raw });
-    };
-    push(channel && channel.workspacePath);
+    let rows = [];
     try {
-      const rows = await deps.gateway.invokeRpc('memory.sessions_list', {
+      rows = await deps.gateway.invokeRpc('memory.sessions_list', {
         limit: KNOWN_WORKSPACE_LIMIT,
         archived: false
       });
-      for (const row of Array.isArray(rows) ? rows : []) {
-        push(row && (row.workspaceProjectPath || row.workspacePath));
-      }
     } catch (e) {
       log(`[channels] 读取已有工作空间失败：${(e && e.message) || e}`);
+      rows = [];
     }
-    return list;
-  }
-
-  /** 把用户/模型给的值对到候选上：绝对路径 > 目录名精确 > 目录名部分匹配（唯一才认） */
-  function matchCandidate(input, candidates) {
-    const raw = String(input || '').trim();
-    if (!raw) return null;
-    const key = normalizePathKey(raw);
-    const exact = candidates.find((c) => normalizePathKey(c.path) === key);
-    if (exact) return exact;
-    const byName = candidates.filter((c) => c.name.toLowerCase() === raw.toLowerCase());
-    if (byName.length === 1) return byName[0];
-    const byPart = candidates.filter((c) => c.name.toLowerCase().includes(raw.toLowerCase()));
-    if (byPart.length === 1) return byPart[0];
-    if (byPart.length > 1) return { ambiguous: byPart };
-    return null;
-  }
-
-  function candidateText(candidates) {
-    if (!candidates.length) return '（本机还没有可用的工作空间）';
-    return candidates.map((c) => `${c.name}（${c.path}）`).join('、');
+    // 频道默认目录排最前（没在桌面打开过也能切回去）
+    return candidatesFromSessionRows(rows, [channel && channel.workspacePath]);
   }
 
   /**

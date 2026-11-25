@@ -102,7 +102,7 @@ function createThrottledSink({ reply, log, intervalMs = REPLY.flushIntervalMs })
  * @param {{
  *   store: object,
  *   log?: (msg: string) => void,
- *   runTurn: (ctx: { channelId: string, conversationKey: string, sessionId: string, text: string, attachments: Array<{kind: 'image'|'file', url: string, name?: string}>, sink: object, signal: AbortSignal, onSession: (sessionId: string) => void }) => Promise<{ sessionId: string, text: string }>
+ *   runTurn: (ctx: { channelId: string, conversationKey: string, sessionId: string, text: string, attachments: Array<{kind: 'image'|'file', url: string, name?: string, aeskey?: string}>, sink: object, signal: AbortSignal, onSession: (sessionId: string) => void }) => Promise<{ sessionId: string, text: string }>
  * }} opts
  */
 function createChannelRuntime(opts) {
@@ -216,9 +216,15 @@ function createChannelRuntime(opts) {
     const text = String((normalized && normalized.text) || '').trim();
     const images = (normalized && Array.isArray(normalized.images) ? normalized.images : []).slice(0, 4);
     const file = normalized && normalized.file ? normalized.file : null;
+    // `aeskey` 与 url 成对传下去：长连接下 url 下载到的是密文，密钥是**这条 url** 的（见 wecom-media.js）
     const attachments = images
-      .map((url) => ({ kind: 'image', url }))
-      .concat(file && file.url ? [{ kind: 'file', url: file.url, name: file.name || '' }] : []);
+      .filter((img) => img && img.url)
+      .map((img) => ({ kind: 'image', url: img.url, aeskey: img.aeskey || '' }))
+      .concat(
+        file && file.url
+          ? [{ kind: 'file', url: file.url, name: file.name || '', aeskey: file.aeskey || '' }]
+          : []
+      );
 
     if (!text && !attachments.length) {
       reply.final(REPLY.unsupportedText);

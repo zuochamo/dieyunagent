@@ -50,12 +50,15 @@ function newStreamId() {
  * 消息类型按企微智能机器人文档的字段摆放来读（`body.<msgtype>`），不猜：
  * - text：`text.content`
  * - voice：`voice.content`（企微已经把语音转成文本；没有就是只有媒体，交给上层说明）
- * - image：`image.url` / `image.pic_url`
- * - file：`file.url` / `file.name`
+ * - image：`image.url` / `image.pic_url` + `image.aeskey`
+ * - file：`file.url` / `file.name` + `file.aeskey`
  * - mixed：`mixed.msg_item[]`，每项同样是 `{ msgtype, text|image|... }`
  *
+ * **`aeskey` 必须跟着 url 一起归一**：长连接模式下 url 下载到的是 AES-256-CBC 密文，
+ * 每条 url 一把独立密钥（详见 `wecom-media.js`）。丢掉它，图片就永远是一段看不懂的字节。
+ *
  * @param {object} body
- * @returns {{ msgtype: string, text: string, images: string[], voiceText: string, file: {url:string,name:string}|null }}
+ * @returns {{ msgtype: string, text: string, images: Array<{url:string,aeskey:string}>, voiceText: string, file: {url:string,name:string,aeskey:string}|null }}
  */
 function normalizeInboundBody(body) {
   const b = body && typeof body === 'object' ? body : {};
@@ -63,7 +66,7 @@ function normalizeInboundBody(body) {
   const takeImage = (node) => {
     if (!node || typeof node !== 'object') return;
     const url = String(node.url || node.pic_url || '').trim();
-    if (url) out.images.push(url);
+    if (url) out.images.push({ url, aeskey: String(node.aeskey || '').trim() });
   };
   const takeText = (node) => {
     const t = node && typeof node === 'object' ? String(node.content || '').trim() : '';
@@ -84,7 +87,13 @@ function normalizeInboundBody(body) {
     case 'file': {
       const f = b.file && typeof b.file === 'object' ? b.file : {};
       const url = String(f.url || '').trim();
-      if (url) out.file = { url, name: String(f.name || f.filename || '').trim() };
+      if (url) {
+        out.file = {
+          url,
+          name: String(f.name || f.filename || '').trim(),
+          aeskey: String(f.aeskey || '').trim()
+        };
+      }
       break;
     }
     case 'mixed': {

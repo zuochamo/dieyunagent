@@ -353,4 +353,3 @@ window.onChannelsSettingsTabShown = function onChannelsSettingsTabShown() {
   loadChannels().catch(() => {});
 };
 
-window.renderChannelsSettings = () => loadChannels();

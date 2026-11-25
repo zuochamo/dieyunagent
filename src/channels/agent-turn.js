@@ -3,11 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const { runMainTurn, userError } = require('../agent/main-turn-runner');
-const { bindSessionWorkspace } = require('../agent/session-workspace-bind');
+const { bindSessionWorkspace, isReusableSessionRow } = require('../agent/session-workspace-bind');
 const { createChannelWorkspaceSwitcher } = require('./workspace-switch');
 const catalog = require('../agent/tool-catalog');
-const { normalizeVisionImageMime } = require('../agent/guardrails-shared');
 const { storeVisionImage } = require('../agent/vision-image');
+const { decryptMedia, sniffImageMime } = require('./wecom-media');
 
 /**
  * 频道一轮对话的执行体：**在 Main 里**跑完整的 Agent 循环，不经过 Renderer。
@@ -19,7 +19,7 @@ const { storeVisionImage } = require('../agent/vision-image');
  *
  * 一轮怎么跑（系统提示 / 工具 / 压缩 / 落库 / 记忆归纳）**不在本文件**：单一来源是
  * `agent/main-turn-runner.js#runMainTurn`。这里只做频道特有的事：
- * 企微联系人 → 会话映射、附件 URL 下载与收件箱落地、`session_set_workspace` 的频道实现、
+ * 企微联系人 → 会话映射、附件下载 / 解密 / 收件箱落地、`session_set_workspace` 的频道实现、
  * 以及「桌面历史列表要刷新」的通知。
  */
 
@@ -65,7 +65,7 @@ async function downloadAttachment(url, log) {
     const declared = Number(res.headers.get('content-length') || 0);
     if (declared && declared > MAX_ATTACHMENT_BYTES) throw new Error('附件超过 16MB，未下载');
     const buf = await readBodyCapped(res, MAX_ATTACHMENT_BYTES, controller);
-    return { buf, contentType: String(res.headers.get('content-type') || '') };
+    return buf;
   } catch (e) {
     if (log) log(`[channels] 附件下载失败 ${raw.slice(0, 120)}：${(e && e.message) || e}`);
     throw e;
@@ -152,6 +152,10 @@ function pruneInboxDir(dir) {
  * 把附件变成「模型能看的东西」：图片 → 多模态 part（同时留一份磁盘副本供后续轮引用），
  * 文件 → 收件箱路径 + 正文提示。
  *
+ * 三步不能合并：**下载**（出网过 SSRF 闸）→ **解密**（长连接回调的 url 下载到的是 AES 密文，
+ * 密钥是这条消息自带的 `aeskey`，见 `wecom-media.js`）→ **判型落盘**（图片看魔数，不看 CDN 的
+ * content-type）。任何一步失败都只留一行账本说明，不炸整轮。
+ *
  * @returns {Promise<{ imageParts: Array<object>, ledgerNotes: string[], ledgerAttachments: Array<object> }>}
  */
 async function prepareAttachments({ attachments, userDataPath, channelId, workspacePath, log }) {
@@ -160,10 +164,28 @@ async function prepareAttachments({ attachments, userDataPath, channelId, worksp
   const ledgerAttachments = [];
   for (const item of Array.isArray(attachments) ? attachments : []) {
     if (!item || !item.url) continue;
+    let buf;
     try {
-      const { buf, contentType } = await downloadAttachment(item.url, log);
+      buf = await downloadAttachment(item.url, log);
+    } catch (e) {
+      ledgerNotes.push(`[附件] 下载失败：${(e && e.message) || e}`);
+      continue;
+    }
+    try {
+      // 明文载荷（没有 aeskey）原样返回；密文解不开就明确报错，不要存一段看不懂的字节
+      buf = decryptMedia(buf, item.aeskey);
+    } catch (e) {
+      ledgerNotes.push(`[附件] ${(e && e.message) || e}`);
+      continue;
+    }
+    try {
       if (item.kind === 'image') {
-        const mime = normalizeVisionImageMime(contentType.split(';')[0] || 'image/jpeg') || 'image/jpeg';
+        // 判型只认文件头：企微对象存储给的是 application/octet-stream，按它走会把密文/字节流当图片注入
+        const mime = sniffImageMime(buf);
+        if (!mime) {
+          ledgerNotes.push(`[图片] 解密后不是可识别的图片（${buf.length} 字节），未进视觉通道`);
+          continue;
+        }
         const base64 = buf.toString('base64');
         imageParts.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } });
         const stored = storeVisionImage({ base64, mime }, { workspacePath: workspacePath || undefined, userDataPath });
@@ -177,7 +199,7 @@ async function prepareAttachments({ attachments, userDataPath, channelId, worksp
         ledgerAttachments.push({ kind: 'file', path: file });
       }
     } catch (e) {
-      ledgerNotes.push(`[附件] 下载失败：${(e && e.message) || e}`);
+      ledgerNotes.push(`[附件] 落盘失败：${(e && e.message) || e}`);
     }
   }
   return { imageParts, ledgerNotes, ledgerAttachments };
@@ -192,19 +214,18 @@ async function ensureChannelSession({ gateway, store, channel, channelId, conver
   const target = String(workspacePath || '');
   let sid = String(sessionId || '');
   if (sid) {
-    try {
-      const row = await gateway.invokeRpc('memory.session_get', { sessionId: sid });
-      if (row && row.id) {
-        if (target && String(row.workspacePath || '').trim() !== target) {
-          await bindSessionWorkspace(gateway, sid, target);
-        }
-        return sid;
+    // 读会话失败 ≠ 会话已删除：`memory.session_get` 对「查不到」返回 null，对传输 / SQLite
+    // 失败是抛错。以前这里 catch 全部当「已删除」并重建，一次抖动就会把频道会话永久换掉
+    // （旧会话里的上下文从此接不上）。判据与计划 / 心跳共用 `isReusableSessionRow`。
+    const row = await gateway.invokeRpc('memory.session_get', { sessionId: sid });
+    if (isReusableSessionRow(row)) {
+      if (target && String(row.workspacePath || '').trim() !== target) {
+        await bindSessionWorkspace(gateway, sid, target);
       }
-      sid = '';
-    } catch {
-      // 会话已被删除：重建（映射由调用方清掉）
-      sid = '';
+      return sid;
     }
+    // row 为 null（已删除）或已归档：重建，映射由调用方清掉
+    sid = '';
   }
   const created = await gateway.invokeRpc('memory.session_create', {
     title: channelSessionTitle(channel),
