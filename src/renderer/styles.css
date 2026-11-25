@@ -273,23 +273,19 @@ body {
 }
 
 .titlebar-update-progress-wrap[data-phase='ready'] .titlebar-update-progress {
+  /* 升级入口只留文字：**无底色、无边框**（2026-11-25 用户要求）。
+     可点区域靠 padding 撑起来，可发现性靠 `:hover` 换字色 —— 不再用色块描出按钮轮廓。 */
   padding: 1px 7px 2px;
-  /* --border-strong / --bg-soft / --bg-muted 从未定义过（2026-11-21 全仓变量盘点），
-     映射回本仓词汇表：强调边 = --border-subtle，浅底 = --surface-1 / hover = --surface-2 */
-  border: 1px solid var(--border-subtle);
-  border-radius: 0;
   font-family: inherit;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0;
   text-transform: lowercase;
   opacity: 0.92;
-  background: var(--surface-1);
 }
 
 .titlebar-update-progress-wrap[data-phase='ready']:hover .titlebar-update-progress {
   color: var(--text);
-  background: var(--surface-2);
 }
 @keyframes titlebar-update-pulse {
   0%,
