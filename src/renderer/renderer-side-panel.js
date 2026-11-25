@@ -5,7 +5,9 @@ const SIDE_PANEL_TAB_KEY = 'diecloud.ui.sidePanelTab.v1';
 
 const sidePanelState = {
   open: false,
-  tab: 'files'
+  tab: 'files',
+  /** 「占满整块区域」：对话列让位、只显示面板内容（见 applySidePanelMaximizedState） */
+  maximized: false
 };
 
 let panelCloseTimer = null;
@@ -51,6 +53,47 @@ function isSidePanelOpen() {
   return !!(panel && !panel.hidden);
 }
 
+/** 「占满整块区域」按键的两种文案（唯一来源；index.html 里的初始 title 只是首屏兜底） */
+const SIDE_PANEL_MAX_LABEL_MAXIMIZE = '占满整块区域（只看面板内容）';
+const SIDE_PANEL_MAX_LABEL_RESTORE = '还原分栏（显示对话）';
+
+function isSidePanelMaximized() {
+  return sidePanelState.maximized === true;
+}
+
+/**
+ * 面板「占满整块区域」的唯一写入点。
+ *
+ * 一次只往两处写、两处都只被这里写：
+ *   · `#agent-main.side-panel-maximized` —— 布局判据（CSS 里让对话列与分隔条整块让位，
+ *     只剩面板内容，见 styles.css 同名单一选择器）；
+ *   · `#side-panel-max-btn.is-maximized` —— 图标与悬停文案（左箭头 = 现在可以向左铺开，
+ *     右箭头 = 还原分栏）。
+ * 别在别处 `classList.add('side-panel-maximized')`：图标会与布局对不上（一个说占满、一个没让位）。
+ *
+ * 面板没开时没有「占满」可言，`open` 为 false 时这里直接落回 false，调用点不必各判一次。
+ */
+function applySidePanelMaximizedState(on) {
+  const next = !!on && sidePanelState.open;
+  sidePanelState.maximized = next;
+  const main = document.getElementById('agent-main');
+  if (main) main.classList.toggle('side-panel-maximized', next);
+  const btn = document.getElementById('side-panel-max-btn');
+  if (btn) {
+    const label = next ? SIDE_PANEL_MAX_LABEL_RESTORE : SIDE_PANEL_MAX_LABEL_MAXIMIZE;
+    btn.classList.toggle('is-maximized', next);
+    btn.setAttribute('aria-pressed', next ? 'true' : 'false');
+    btn.setAttribute('title', label);
+    btn.setAttribute('aria-label', label);
+  }
+  // 面板宽度跟着变：原生 BrowserView 不吃 CSS 过渡，边界要逐帧补（唯一入口）
+  if (typeof syncBrowserBounds === 'function') syncPanelMotionBounds();
+}
+
+function toggleSidePanelMaximized() {
+  applySidePanelMaximizedState(!sidePanelState.maximized);
+}
+
 function loadSavedSideTab() {
   try {
     const raw = window.localStorage.getItem(SIDE_PANEL_TAB_KEY);
@@ -86,8 +129,13 @@ function saveSideTab(tab) {
   }
 }
 
+/** 轨道上的**页签**（`.side-panel-max-btn` 也在轨道里，但它没有 data-side-tab、不是页签） */
+function sidePanelRailTabButtons() {
+  return document.querySelectorAll('.side-panel-rail-btn[data-side-tab]');
+}
+
 function updateSidePanelRail(tab) {
-  document.querySelectorAll('.side-panel-rail-btn').forEach((btn) => {
+  sidePanelRailTabButtons().forEach((btn) => {
     const t = btn.getAttribute('data-side-tab');
     const on = t === tab;
     btn.classList.toggle('active', on);
@@ -229,6 +277,8 @@ function applySidePanelOpenState(open) {
     const btnArtifacts = document.getElementById('win-artifacts');
     if (btnArtifacts) btnArtifacts.classList.add('active');
   } else {
+    // 面板收起就回到分栏态：占满态下对话列是 display:none，不跟着收就等于「面板没了、对话也没了」
+    if (isSidePanelMaximized()) applySidePanelMaximizedState(false);
     panel.classList.remove('is-panel-open');
     panel.classList.add('is-panel-closing');
     if (resizer) resizer.classList.add('is-panel-closing');
@@ -271,7 +321,7 @@ function initSidePanel() {
   // 同步 rail + pane 初始态，避免 rail 高亮某页但主 pane 仍是 files
   setSidePanelTab(sidePanelState.tab, { silent: true });
 
-  document.querySelectorAll('.side-panel-rail-btn').forEach((btn) => {
+  sidePanelRailTabButtons().forEach((btn) => {
     btn.addEventListener('click', function () {
       const tab = btn.getAttribute('data-side-tab') || 'files';
       toggleSidePanelTab(tab);
@@ -286,7 +336,19 @@ function initSidePanel() {
     });
   }
 
+  // 「占满整块区域 / 还原分栏」：轨道第一格，长得像普通页签图标但没有 data-side-tab ——
+  // 上面的页签绑定只认 `[data-side-tab]`，所以不会把它当页签切走
+  const btnMax = document.getElementById('side-panel-max-btn');
+  if (btnMax) {
+    applySidePanelMaximizedState(false);
+    btnMax.addEventListener('click', function () {
+      toggleSidePanelMaximized();
+    });
+  }
+
   if (typeof initScmPane === 'function') initScmPane();
+  // 「轨迹」页头的两个子标签（子代理 / 轨迹图）：只切本页内部两块内容，不是第二套页签
+  if (typeof initSubagentPaneModes === 'function') initSubagentPaneModes();
 }
 
 function closeBrowserPanelSilently() {

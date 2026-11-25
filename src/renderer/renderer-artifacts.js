@@ -1353,9 +1353,6 @@ function confirmTranslatedPathSave(filePath) {
  * 那里是「多标签 + 长驻编辑区」的唯一实现，本文件只负责文件列表与内容加载。
  */
 
-function initArtifactsBtn() {
-  // Panel toggle handled by initSidePanel()
-}
 
 window.pruneInvalidSessionArtifacts = pruneInvalidSessionArtifacts;
 window.resetPlanTraceArtifactLog = resetPlanTraceArtifactLog;

@@ -266,16 +266,6 @@ function clearPlanPreviewState() {
   }
 }
 
-function planPreviewSubtaskForPath(preview, filePath) {
-  if (!preview || !filePath) return null;
-  const targets = Array.isArray(preview.targets) ? preview.targets : [];
-  const hit =
-    targets.find((t) => t.path === filePath) ||
-    targets.find((t) => filePath.endsWith('/' + t.path) || filePath.endsWith('\\' + t.path));
-  if (!hit) return null;
-  const subtasks = Array.isArray(preview.subtasks) ? preview.subtasks : [];
-  return subtasks.find((st) => st.id === hit.subtaskId) || hit;
-}
 
 function renderPlanPreviewDetail(view, preview, target) {
   if (!view || !preview) return;

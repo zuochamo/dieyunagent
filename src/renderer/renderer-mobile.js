@@ -53,29 +53,13 @@ function setMobileConnectHint(text, ok) {
   hint.classList.toggle('show', !!text);
 }
 
+/**
+ * 写剪贴板的唯一实现在 `renderer-utils.js#writeClipboardText`（异步 API 优先 + 交还焦点）。
+ * 这里以前自己写了一份且顺序相反：textarea 优先、且从不交还焦点 ——
+ * 点一次「复制连接地址」，光标就掉出输入框，接着敲字不进 composer。
+ */
 async function copyTextToClipboard(text) {
-  const t = String(text || '');
-  let copied = false;
-  const ta = document.createElement('textarea');
-  ta.value = t;
-  ta.setAttribute('readonly', '');
-  ta.style.position = 'fixed';
-  ta.style.left = '-9999px';
-  ta.style.top = '0';
-  document.body.appendChild(ta);
-  ta.focus();
-  ta.select();
-  ta.setSelectionRange(0, t.length);
-  try {
-    copied = document.execCommand('copy');
-  } catch {
-    copied = false;
-  }
-  ta.remove();
-  if (!copied && navigator.clipboard && navigator.clipboard.writeText) {
-    await navigator.clipboard.writeText(t);
-    copied = true;
-  }
+  const copied = await writeClipboardText(text);
   if (!copied) throw new Error('clipboard unavailable');
 }
 

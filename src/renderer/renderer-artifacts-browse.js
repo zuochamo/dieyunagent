@@ -284,10 +284,6 @@ function normalizeListDirResult(raw) {
   return [];
 }
 
-async function getWorkspaceRootPath() {
-  const ctx = await getWorkspaceContext();
-  return ctx ? ctx.workspacePath : null;
-}
 
 async function refreshArtifactsDirectory(force, opts = {}) {
   if (!gwState.authed) return false;
@@ -580,10 +576,6 @@ function getSessionChangeRowsForAgent(sessionId) {
   return rows.filter((r) => r && r.path).map((r) => ({ ...r, source: 'trace' }));
 }
 
-function isMissingRpcHandlerError(err) {
-  const msg = String((err && err.message) || err || '');
-  return /No handler|handler registered|未知 RPC|unknown/i.test(msg);
-}
 
 function joinArtifactPath(base, name) {
   const b = String(base || '').replace(/[\\/]+$/, '');
@@ -592,9 +584,6 @@ function joinArtifactPath(base, name) {
   return b ? `${b}${sep}${n}` : n;
 }
 
-async function refreshWorkspaceArtifacts(force) {
-  return refreshArtifactsDirectory(force);
-}
 
 window.applyWorkspaceArtifactPath = applyWorkspaceArtifactPath;
 window.resolveArtifactPathInWorkspace = resolveArtifactPathInWorkspace;

@@ -274,8 +274,6 @@ window.onGraphPanelShown = onGraphPanelShown;
 window.onGraphPanelHidden = onGraphPanelHidden;
 window.refreshGraphPanelStatus = refreshGraphPanelStatus;
 window.onGraphSettingsTabShown = onGraphSettingsTabShown;
-window.refreshGraphIndexStatus = refreshGraphPanelStatus;
-window.openGraphSidePanel = openGraphSidePanel;
 // 符号命中的渲染唯一实现（统一搜索框复用；勿在别处再写一份）
 window.renderGraphSymbolHits = renderGraphSymbolHits;
 window.resolveGraphPanelWorkspaceRootAsync = resolveGraphPanelWorkspaceRootAsync;

@@ -14,6 +14,7 @@ const SETTINGS_TITLE_KEYS = {
   alive: ['settings_alive', '生命'],
   'alive-setup': ['settings_alive_setup', '设定'],
   'alive-log': ['settings_alive_log', '日志'],
+  'pet-diandian': ['settings_pet_diandian', '点点'],
   shortcuts: ['settings_shortcuts', '快捷键']
 };
 const MODEL_TAB_TITLE_KEYS = {
@@ -100,16 +101,6 @@ function switchSettingsPage(page, title, match) {
   if (titleEl) titleEl.textContent = title || page;
 }
 
-function switchPanel(tab) {
-  if (!tab) return;
-  closeSettingsModal();
-  closeSettingsSkillsPage();
-  closeExecuteModal();
-  const appEl = document.querySelector('.app');
-  if (appEl) appEl.classList.add('app-view-agent');
-  panels.forEach((p) => p.classList.toggle('active', p.dataset.panel === tab));
-  if (tab === 'agent') focusChatInput();
-}
 
 function closeSettingsSkillsPage() {
   if (isSettingsPageOpen('skills')) closeSettingsModal();
@@ -174,6 +165,9 @@ function switchSettingsTab(tab) {
   }
   if (tab === 'shared-memory' && typeof window.onSharedMemorySettingsTabShown === 'function') {
     window.onSharedMemorySettingsTabShown();
+  }
+  if (tab === 'pet-diandian' && typeof window.onPetSettingsTabShown === 'function') {
+    window.onPetSettingsTabShown();
   }
   // 「生命」「设定」「日志」是同一份数据的三个面（同一个 IPC、同一套渲染）：三个页签都算"这一页被打开"
   if ((tab === 'alive' || tab === 'alive-setup' || tab === 'alive-log') && typeof window.onAliveSettingsTabShown === 'function') {

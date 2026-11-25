@@ -81,9 +81,6 @@ function loadComposerModelPickForSession(sessionId) {
   return loadComposerModelPickLegacy();
 }
 
-function loadComposerModelPick() {
-  return loadComposerModelPickForSession(currentSessionId);
-}
 
 function saveComposerModelPick(pick, sessionId) {
   const sid = String(sessionId || currentSessionId || '').trim();
@@ -163,9 +160,6 @@ function suppliersCacheFingerprint() {
     .join('|');
 }
 
-function builtinModelsCacheEndpointKey() {
-  return suppliersCacheFingerprint();
-}
 
 function loadBuiltinModelsCache() {
   try {
@@ -205,20 +199,6 @@ function flattenCachedBuiltinModels(bySupplier) {
   return out;
 }
 
-function saveBuiltinModelsCache(bySupplier) {
-  try {
-    window.localStorage.setItem(
-      COMPOSER_MODEL_CACHE_KEY,
-      JSON.stringify({
-        at: Date.now(),
-        fingerprint: suppliersCacheFingerprint(),
-        suppliers: bySupplier || {}
-      })
-    );
-  } catch {
-    // ignore
-  }
-}
 
 function clearBuiltinModelsCache() {
   try {
@@ -359,19 +339,6 @@ function builtinModelsFromSavedSuppliers() {
   return out;
 }
 
-function formatBuiltinDetectMeta() {
-  if (composerModelState.loadingBuiltin) return '正在检测可用模型…';
-  if (composerModelState.builtinError) return composerModelState.builtinError;
-  const n = getEnabledBuiltinModels().length;
-  const total = (composerModelState.builtinModels || []).length;
-  const at = composerModelState.builtinLastDetectAt;
-  const timeStr = at ? new Date(at).toLocaleString('zh-CN') : '—';
-  let s = `共 ${total} 个可用，已启用 ${n} 个 · 上次检测 ${timeStr}`;
-  if (composerModelState.builtinMeta && composerModelState.builtinMeta.removed > 0) {
-    s += `（剔除 ${composerModelState.builtinMeta.removed} 个不可用）`;
-  }
-  return s;
-}
 
 function builtinModelPickerLabel(m) {
   const dup =
