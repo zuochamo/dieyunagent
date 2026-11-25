@@ -1,4 +1,4 @@
-/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS, SUBAGENT_TOOL, createProgressFlush, settleAssistantBubbleAfterLoop */
+/* global window, fetch, settings, gwState, gatewayCall, showAgentToast, executeAgentTool, formatToolArgsBrief, summarizeToolResult, TRACE_DESKTOP_THOUGHT_CHARS, getEffectiveInputBudget, getContextWindowTokens, getMaxOutputTokens, getContextReserveTokens, resolveComposerModelForSend, getCustomModelApiConfig, captureTurnBatchCheckpoint, isMutatingAgentTool, currentSessionId, noteContextCompaction, noteComposerSessionUsage, resolveComposerUsageSessionId, streamChatCompletion, fetchChatCompletion, upsertSynthesisTraceRound, getCurrentUndoTurnId, getUndoTurnIdForSession, supplierDisplayName, normalizeAgentToolName, compactDiffForTrace, getAgentLimits, trackArtifactsFromTrace, resolveSessionWorkspacePath, isWeakAssistantReply, AgentRoundText, formatModelFooterLabel, humanizeModelId, dismissAgentContinueRows, maybeShowProposeToolPreview, agentApi, STREAM_IDLE_HINT_MS, STREAM_FIRST_TOKEN_HINT_MS, SUBAGENT_TOOL, createProgressFlush, settleAssistantBubbleAfterLoop */
 'use strict';
 
 function isDieyunCoreReady() {
@@ -354,6 +354,36 @@ function formatLlmWaitLabel(kind, modelId) {
   return `${prefix} · ${name}…`;
 }
 
+/**
+ * 「等模型」期间思考区那行备注的**唯一文案来源**。
+ *
+ * 两段等待，各说各的：
+ * - 首字之前（请求已发出、一个 token 都还没回来）：`${notePrefix} Ns`
+ *   —— 2026-11-25 用户要求：「已请求模型，等待首字 Ns」。这段等待原本完全看不见：
+ *   占位符里的「（已等 Ns）」在 `visibleThoughtDisplay` 里会被替换成「思考中…」。
+ * - 首字之后静默 ≥ `idleHintMs`：`上游 Ns 无数据`（原有行为）。
+ * - 其它情况返回空串：正常出字时不加噪音。
+ *
+ * @param {{ streaming?: boolean, waitingMs?: number, idleMs?: number, notePrefix?: string,
+ *   firstHintMs?: number, idleHintMs?: number }} input
+ * @returns {string} 空串 = 不显示备注
+ */
+function llmWaitNoteText(input) {
+  const i = input || {};
+  const prefix = String(i.notePrefix || '已请求模型，等待首字').trim();
+  const firstHintMs = Math.max(0, Number(i.firstHintMs) || 0);
+  const idleHintMs = Math.max(0, Number(i.idleHintMs) || 0);
+  if (!i.streaming) {
+    const waitingMs = Math.max(0, Number(i.waitingMs) || 0);
+    // 阈值缺失 / 为 0 时宁可不打扰：调用方总会给常量，走到这里说明配置没接上
+    if (firstHintMs <= 0 || waitingMs < firstHintMs) return '';
+    return `${prefix} ${Math.max(1, Math.round(waitingMs / 1000))}s`;
+  }
+  const idleMs = Math.max(0, Number(i.idleMs) || 0);
+  if (idleHintMs > 0 && idleMs >= idleHintMs) return `上游 ${Math.round(idleMs / 1000)}s 无数据`;
+  return '';
+}
+
 async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
   if (!agentApi.agentRustLoopRun) {
     throw new Error('Rust agent loop IPC 不可用');
@@ -489,8 +519,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
   let rustBootVisible = !!rustBootSteps;
   let llmWaitTimer = null;
   let llmWaitStartedAt = 0;
-  let llmWaitBaseLabel = '';
-  /** 本轮是否已出字（首包到达）：出字前显示「请求 LLM…」，出字后改为静默监控 */
+  /** 本轮是否已出字（首包到达）：出字前显示「等待首字」，出字后改为静默监控 */
   let llmStreaming = false;
   /** 最近一次收到 delta 的时刻 */
   let llmLastDeltaAt = 0;
@@ -513,33 +542,33 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
       llmWaitTimer = null;
     }
     llmWaitStartedAt = 0;
-    llmWaitBaseLabel = '';
     llmStreaming = false;
     llmLastDeltaAt = 0;
     setLiveNote('');
   };
 
   /**
-   * 「等待模型」提示的唯一来源（请求期内只此一处改文案）：
-   *   未出字 → 「请求 LLM · 模型（已等 Ns）」
-   *   已出字且静默 ≥ STREAM_IDLE_HINT_MS → 备注「上游 Ns 无数据」
-   *   已出字且正常 → 不加噪音
+   * 「等模型」期间思考区那行备注的唯一来源（`llmWaitNoteText`）。
+   *
+   * 为什么不再每秒重推占位符：占位符文本在 `visibleThoughtDisplay` 里会被换成「思考中…」，
+   * 写进去用户也看不见，而且每次重推都会重建 live 槽位、把备注一起冲掉。
    */
-  const startLlmWaitTimer = (baseLabel) => {
+  const startLlmWaitTimer = (notePrefix) => {
     clearLlmWaitTimer();
-    llmWaitBaseLabel = String(baseLabel || '请求 LLM…');
     llmWaitStartedAt = Date.now();
     llmWaitTimer = setInterval(() => {
       if (!llmWaitStartedAt) return;
-      const base = llmWaitBaseLabel.replace(/…\s*$/, '');
-      if (!llmStreaming) {
-        const sec = Math.max(1, Math.round((Date.now() - llmWaitStartedAt) / 1000));
-        pushPlaceholder(`${base}（已等 ${sec}s）…`, []);
-        return;
-      }
-      const idleMs = Date.now() - llmLastDeltaAt;
-      setLiveNote(idleMs >= STREAM_IDLE_HINT_MS ? `上游 ${Math.round(idleMs / 1000)}s 无数据` : '');
-    }, 5000);
+      setLiveNote(
+        llmWaitNoteText({
+          streaming: llmStreaming,
+          waitingMs: Date.now() - llmWaitStartedAt,
+          idleMs: llmLastDeltaAt ? Date.now() - llmLastDeltaAt : 0,
+          notePrefix,
+          firstHintMs: STREAM_FIRST_TOKEN_HINT_MS,
+          idleHintMs: STREAM_IDLE_HINT_MS
+        })
+      );
+    }, 1000);
   };
 
   const stripBootStepsFromEntry = (entry) => {
@@ -697,7 +726,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             // 新一轮开始：轨迹图按这个时刻画主线这一块的左边界
             roundStartedAt = Date.now();
             pushPlaceholder(phaseLabel, []);
-            startLlmWaitTimer(phaseLabel);
+            startLlmWaitTimer('已请求模型，等待首字');
           } else if (ev.phase === 'llm_delta') {
             // 不结束心跳：出字后从「请求 LLM（已等 Ns）」切到「静默时长」监控，
             // 上游断流时才会出现「上游 Ns 无数据」，不再回落成无信息的占位符
@@ -922,7 +951,7 @@ async function chatCompletionWithToolsViaRust(payload, tools, options = {}) {
             // 同一槽位；彻底失败时 Main 用 frozenPartial 以 llm_response 交回残片，信息不丢。
             const waitLabel = `连接中断，等待第 ${waitData.attempt || 1} 次自动重试${budgetNote}`;
             pushPlaceholder(waitLabel, [], '等待模型连接恢复，恢复后将从当前进度继续…');
-            startLlmWaitTimer(waitLabel);
+            startLlmWaitTimer('等待模型连接恢复，已等');
             maybeShowLlmReconnectToast(
               '模型连接中断',
               `${sec}s 后自动重试${budgetNote}，无需手动点「继续」`,

@@ -30,6 +30,15 @@ const MOBILE_TRACE_STREAM_INTERVAL_MS = 20;
  * 只是显示阈值（远小于上游超时（core 侧超时自行兜底），用于提前暴露静默），不参与任何判定。
  */
 const STREAM_IDLE_HINT_MS = 30000;
+
+/**
+ * 「已请求模型，等待首字 Ns」的显示阈值：请求已发出、但一个 token 都还没回来时，超过该时长
+ * 就在思考区叠加这一行（2026-11-25：这段等待原本完全不可见 —— 占位符里的「（已等 Ns）」
+ * 在 `visibleThoughtDisplay` 里会被替换成「思考中…」，写在那里等于没写）。
+ * 3s 起说：更快的响应不值得闪一行字。只是显示阈值，不参与任何判定。
+ */
+const STREAM_FIRST_TOKEN_HINT_MS = 3000;
+
 /**
  * 「无极阻尼」贴底跟随的时间常数（毫秒）：聊天区（renderer-chat-render.js）与子 Agent 卡片正文
  * （renderer-thinking-trace-dom.js）共用同一手感，两处都不再各写一个 90。
