@@ -592,7 +592,12 @@ impl MemoryStore {
                     .collect()
             })
             .unwrap_or_default();
-        run_ids.dedup();
+        // 去重（`Vec::dedup` 只去**相邻**重复，跨位置重复会多绑一个占位符）：
+        // 保序 + 唯一，占位符个数就等于真正要查的 run 数。
+        {
+            let mut seen = std::collections::HashSet::new();
+            run_ids.retain(|id| seen.insert(id.clone()));
+        }
         if run_ids.is_empty() {
             return Ok(json!({ "rows": {} }));
         }

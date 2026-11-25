@@ -245,12 +245,13 @@ async function hydrateAssistantTraceFromStore(bubble, meta, storedContent, check
   const sessionId = sessionAtRender || currentSessionId;
   try {
     // 取数的唯一入口在 trace-store（缓存 + 在途去重 + 展示态升级）；这里不做第二份 RPC。
-    // 先用**展示态**：网关侧裁掉界面从不读的字段、思考全文只留开头一截（展开时再换完整态）。
-    let row = peekAgentTraceRead(meta.traceRunId, { shape: 'display' });
+    // 档位与预取同源（`replayTraceShape`）：默认展示态；轮次默认全展开时就整份要。
+    const shape = replayTraceShape();
+    let row = peekAgentTraceRead(meta.traceRunId, { shape });
     if (!row) {
       if (!gwState.authed) return;
       attachThinkingHydratePlaceholder(bubble);
-      row = await readAgentTraceRecord(meta.traceRunId, { shape: 'display' });
+      row = await readAgentTraceRecord(meta.traceRunId, { shape });
     }
     // 升级入口要按 runId 找回这一条：气泡自己记着（轮次 / 内联 diff 从最近的 .msg 上取）
     if (bubble.dataset) bubble.dataset.traceRunId = String(meta.traceRunId);
@@ -296,6 +297,17 @@ function shouldAbortChatRender(switchGen) {
 }
 
 /**
+ * 回放取 trace 的档位：默认展示态；**「显示轮次标题」关掉时直接要完整态**。
+ *
+ * 为什么：`tracePrefs.showTitles === false` 时每一轮默认展开（`resolveThinkingStepOpen`），
+ * 而展示态会把思考正文截成开头一截 —— 那一截是**当场可见**的，用户也没有「展开」这个动作
+ * 可以触发补全，等于白白看着被切掉一半的思考。这种设置下只能整份要（仍然是一次批量读）。
+ */
+function replayTraceShape() {
+  return tracePrefs && tracePrefs.showTitles === false ? 'full' : 'display';
+}
+
+/**
  * 回放前预取这一屏的思考区 trace（一次批量 RPC 取代「每条气泡各发一次」）。
  *
  * 只收「只有 `meta.traceRunId`、没有 inline / transient trace」的那些 —— 手上已经有
@@ -303,6 +315,7 @@ function shouldAbortChatRender(switchGen) {
  */
 function prefetchSessionTraces() {
   if (typeof readAgentTraceRecords !== 'function') return;
+  if (!gwState || !gwState.authed) return;
   const runIds = [];
   for (const m of messages) {
     if (!m || m.role !== 'assistant') continue;
@@ -310,7 +323,7 @@ function prefetchSessionTraces() {
     const { meta } = unpackAssistantMeta(m.content);
     if (meta && meta.traceRunId) runIds.push(meta.traceRunId);
   }
-  if (runIds.length) void readAgentTraceRecords(runIds, { shape: 'display' });
+  if (runIds.length) void readAgentTraceRecords(runIds, { shape: replayTraceShape() });
 }
 
 function appendRenderedMessageAtIndex(i, opts) {

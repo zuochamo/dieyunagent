@@ -18,7 +18,8 @@
  *   + `diff` 的统计与片段；被裁掉正文的 diff 保留空串并打 `textTrimmed`
  *   （空串而不是删键：`toolDiffHasBody` 用它判断「这一行要不要出现」，
  *   删了键会让「查看 diff · +N -M」这一行整块消失 —— 那是改变界面，不是省流量）；
- * - `isolated`（子 Agent 卡片）**不裁思考与嵌套轮次**：卡片默认展开，裁了当场就变样。
+ * - `isolated`（子 Agent 卡片）**整块不裁**（思考、嵌套轮次、工具行都原样）：卡片默认展开，
+ *   裁了当场就变样；而且它内部是 `rounds[]` 两层结构，裁了还得再对一层 index 才能补回来。
  *
  * 铁律：**只给回放看**。任何要把 trace 写回账本、或参与判定的调用方（例如
  * `trace-store.js#recoverInterruptedAssistantTurn` 会把取到的 trace 落库）必须取完整态。
@@ -65,19 +66,13 @@ function trimToolForDisplay(tool) {
   return { tool: out, trimmed };
 }
 
-function trimNestedRoundForDisplay(round, stats) {
-  if (!round || typeof round !== 'object') return round;
-  if (!Array.isArray(round.tools)) return round;
-  const tools = round.tools.map((t) => {
-    const r = trimToolForDisplay(t);
-    if (r.trimmed) stats.fields += 1;
-    return r.tool;
-  });
-  return { ...round, tools };
-}
 
 function trimEntryForDisplay(entry, headChars, stats) {
   if (!entry || typeof entry !== 'object') return entry;
+  // 子 Agent 卡片（`isolated`）**整块不裁**：卡片默认展开、内容就是「要看的过程」，
+  // 裁了当场变样；而且它内部是 `rounds[]` 两层结构，裁剪后想按 index 找回完整态
+  // 还得再对一层，不值得 —— 这一档在 payload 里的占比（~16%）用「不改界面」换。
+  if (entry.isolated) return { ...entry };
   const out = { ...entry };
   if (Array.isArray(entry.tools)) {
     out.tools = entry.tools.map((t) => {
@@ -86,11 +81,7 @@ function trimEntryForDisplay(entry, headChars, stats) {
       return r.tool;
     });
   }
-  if (Array.isArray(entry.rounds)) {
-    out.rounds = entry.rounds.map((r) => trimNestedRoundForDisplay(r, stats));
-  }
-  // 子 Agent 卡片默认展开 → 思考正文必须原样给
-  if (!entry.isolated && headChars > 0 && typeof entry.fullThought === 'string') {
+  if (headChars > 0 && typeof entry.fullThought === 'string') {
     const full = entry.fullThought;
     if (full.length > headChars) {
       out.fullThought = full.slice(0, headChars);

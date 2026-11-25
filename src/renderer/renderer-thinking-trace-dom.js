@@ -672,6 +672,17 @@ function requestTraceUpgrade(hostEl, onTrace) {
 }
 
 /**
+ * 展示态升级的「同一轮」判据：两次读之间那一行可能又长过（运行中的 checkpoint），
+ * 按下标找回时必须核对轮次身份，对不上宁可不补。
+ */
+function isSameThinkingEntry(a, b) {
+  if (!a || !b) return false;
+  if (String(a.phase || '') !== String(b.phase || '')) return false;
+  if (a.round != null && b.round != null && Number(a.round) !== Number(b.round)) return false;
+  return true;
+}
+
+/**
  * 程序化切换 details.open 的唯一入口（保留流式滚动钉底逻辑）。
  * 切换前登记期望值，toggle 回调据此区分「用户点击」与「程序化切换」；
  * 旧代码把程序化收起也记成用户意图，导致展开/折叠状态被写死。
@@ -761,12 +772,17 @@ function appendInlineToolDiff(parent, tool, { roundComplete = false, entryIndex 
     const started = requestTraceUpgrade(details, (fullTrace) => {
       const entry = entryIndex != null ? fullTrace[entryIndex] : null;
       const fullTool = entry && toolIndex != null ? (entry.tools || [])[toolIndex] : null;
-      if (fullTool && fullTool.diff && typeof fullTool.diff === 'object') {
-        diff = { ...fullTool.diff };
-        tool.diff = diff;
+      const fullDiff = fullTool && fullTool.diff;
+      if (!fullDiff || typeof fullDiff !== 'object') {
+        // 拿不到完整正文时**不许**用裁剪版（空 before/after）冒充 —— 那会显示成「（无内容）」，
+        // 比明确说加载失败更误导。保留 textTrimmed，让用户收起再点一次可以重试。
+        body.innerHTML = '<div class="diff-line diff-eq">（完整 diff 未能加载，收起后再点一次重试）</div>';
+        diffBodyPending = true;
+        return;
       }
+      diff = { ...fullDiff };
+      tool.diff = diff;
       diffTextTrimmed = false;
-      delete tool.diffTextTrimmed;
       diffBodyPending = true;
       fillDiffBody();
     });
@@ -776,7 +792,10 @@ function appendInlineToolDiff(parent, tool, { roundComplete = false, entryIndex 
     }
   };
   if (details.open) openDiffBody();
-  else details.addEventListener('toggle', openDiffBody, { once: true });
+  // 监听常驻：靠 `diffBodyPending` 做幂等（生成过就直接 return）。
+  // 不能挂 `once` —— 升级失败时我们保留 pending 让用户收起再点一次重试，
+  // `once` 会在第一次 toggle 就把它消费掉，重试永远不触发。
+  else details.addEventListener('toggle', openDiffBody);
   details.appendChild(body);
   parent.appendChild(details);
 }
@@ -1431,13 +1450,15 @@ function mountThinkingRoundDetails(
    * 用户展开时才去取完整态，取回来就地把 `entry` 补全后重填这一块 —— 不整块重绘气泡，
    * 用户刚打开的其它折叠状态因此不会被打回。
    */
-  if (entry.fullThoughtTruncated) {
+  if (entry.fullThoughtTruncated && tracePrefs.showReasoning !== false) {
     details.dataset.traceTrimmed = '1';
     details.addEventListener('toggle', () => {
       if (!details.open || !entry.fullThoughtTruncated) return;
       const started = requestTraceUpgrade(details, (fullTrace) => {
         const fullEntry = fullTrace[index];
-        if (!fullEntry || typeof fullEntry.fullThought !== 'string') return;
+        // 两次读之间那一行可能已经长过（运行中的 checkpoint）：按轮次身份核对，
+        // 对不上就**不补**（宁可留着截断版 + 下次重试，也不要贴错一轮的思考）。
+        if (!isSameThinkingEntry(fullEntry, entry) || typeof fullEntry.fullThought !== 'string') return;
         entry.fullThought = fullEntry.fullThought;
         delete entry.fullThoughtTruncated;
         delete details.dataset.traceTrimmed;

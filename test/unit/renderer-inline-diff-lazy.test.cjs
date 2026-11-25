@@ -51,11 +51,15 @@ function makeElement(tag) {
       this.children.push(child);
       return child;
     },
-    addEventListener(ev, fn) {
-      (this.listeners[ev] = this.listeners[ev] || []).push(fn);
+    addEventListener(ev, fn, opts) {
+      (this.listeners[ev] = this.listeners[ev] || []).push({ fn, once: !!(opts && opts.once) });
     },
     dispatch(ev) {
-      for (const fn of this.listeners[ev] || []) fn({ type: ev });
+      // 照 DOM 语义实现 `once`：第一次派发后就摘掉 —— 否则「挂 once 导致重试永不触发」
+      // 这类 bug 在测试里会被悄悄放过（本次真踩过）。
+      const list = this.listeners[ev] || [];
+      this.listeners[ev] = list.filter((l) => !l.once);
+      for (const l of list) l.fn({ type: ev });
     },
     set innerHTML(v) {
       this.htmlSets += 1;
@@ -185,6 +189,34 @@ test('展示态的 diff：收起不取，展开先给「加载中」再去取完
   assert.ok(r.body.innerHTML.includes('full'), '拿到完整 diff 后按它生成正文');
   assert.equal(r.tool.diff.beforeText, 'a\nb', '缓存里的工具对象也要补成完整态');
   assert.equal(r.body.dataset.diffPending, undefined);
+});
+
+test('展示态升级拿不到完整 diff（对不上那一行）→ 明确提示可重试，绝不用裁剪版冒充', () => {
+  let captured = null;
+  const r = run({
+    diff: TRIMMED,
+    upgrade: (onTrace) => {
+      captured = onTrace;
+      return true;
+    }
+  });
+  r.details.open = true;
+  r.details.dispatch('toggle');
+  assert.ok(r.body.innerHTML.includes('正在加载完整 diff'));
+
+  // 完整态里那个位置没有对应工具（例如两次读之间那行长过 / index 对不上）
+  captured([{ tools: [] }]);
+  assert.ok(
+    r.body.innerHTML.includes('未能加载'),
+    '不能把裁剪版（空 before/after）渲染成「（无内容）」'
+  );
+  assert.ok(!r.body.innerHTML.includes('（无内容）'));
+  // 保留可重试：再收起/展开会重新走升级
+  r.details.open = false;
+  r.details.dispatch('toggle');
+  r.details.open = true;
+  r.details.dispatch('toggle');
+  assert.equal(r.upgrades.length, 2, '重开一次要能再试一次');
 });
 
 test('展示态升级拿不到 runId（不是回放来的）→ 给一句可读提示，不崩', () => {

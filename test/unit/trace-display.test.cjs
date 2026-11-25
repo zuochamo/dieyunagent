@@ -106,7 +106,7 @@ test('fullThought 超长才截断并打标，短的整条保留', () => {
   assert.equal(e2.fullThoughtTruncated, undefined);
 });
 
-test('子 Agent 卡片（isolated）默认展开 → 思考与嵌套轮次原样保留', () => {
+test('子 Agent 卡片（isolated）整块不裁：思考、嵌套轮次、工具行全部原样', () => {
   const row = {
     trace: [
       {
@@ -117,20 +117,34 @@ test('子 Agent 卡片（isolated）默认展开 → 思考与嵌套轮次原样
           {
             round: 1,
             fullThought: 'I'.repeat(50),
-            tools: [{ name: 'grep', summary: '3 命中', result: { out: 'r'.repeat(100) }, args: { q: 'x' } }]
+            tools: [
+              {
+                name: 'fs_edit_file',
+                summary: '3 命中',
+                toolArgs: { filePath: 'a.js', content: 'x'.repeat(50) },
+                args: { filePath: 'a.js' },
+                result: { out: 'r'.repeat(100) },
+                diff: { created: false, added: 1, removed: 0, beforeText: 'B'.repeat(20), afterText: 'A'.repeat(20) }
+              }
+            ]
           }
         ]
       }
     ]
   };
-  const out = shapeTraceForDisplay(row, { thoughtHeadChars: HEAD }).trace[0];
-  assert.equal(out.fullThought, 'H'.repeat(50), '卡片默认展开，思考不能截');
-  assert.equal(out.fullThoughtTruncated, undefined);
-  assert.equal(out.rounds[0].fullThought, 'I'.repeat(50));
-  // 但嵌套轮次里的工具行照样裁（同样藏在折叠里）
-  assert.equal(out.rounds[0].tools[0].result, undefined);
-  assert.equal(out.rounds[0].tools[0].args, undefined);
-  assert.equal(out.rounds[0].tools[0].summary, '3 命中');
+  const out = shapeTraceForDisplay(row, { thoughtHeadChars: HEAD });
+  const entry = out.trace[0];
+  assert.equal(entry.fullThought, 'H'.repeat(50), '卡片默认展开，思考不能截');
+  assert.equal(entry.fullThoughtTruncated, undefined);
+  assert.equal(entry.rounds[0].fullThought, 'I'.repeat(50));
+  // 卡片里的工具行也原样：裁了它就得再对一层 index 才能补回来，不值得
+  const tool = entry.rounds[0].tools[0];
+  assert.ok(tool.result, '卡片里的 result 保留（整块不裁）');
+  assert.ok(tool.args, '卡片里的 args 保留');
+  assert.deepEqual(tool.toolArgs, { filePath: 'a.js', content: 'x'.repeat(50) });
+  assert.equal(tool.diff.beforeText, 'B'.repeat(20), '卡片里的 diff 正文保留');
+  assert.equal(tool.diff.textTrimmed, undefined);
+  assert.equal(out.displayShape.trimmedFields, 0, '整块不裁 → 一处都没动');
 });
 
 test('不修改入参（缓存 / 落库两条路可能还握着原对象）', () => {
