@@ -68,6 +68,100 @@ const VERIFY_STEPS = ['verify:asar', 'verify:remote-pack', 'verify:mcp-bundled']
  */
 const TEST_STEPS = ['test'];
 
+/**
+ * dist/ 里的产物回收（按版本保留最近 N 版）。
+ *
+ * 为什么要在打包链里做：一版安装包 ~160MB（exe + deb + blockmap），一版一版往下堆，
+ * dist 三个月就能到 1GB；而 `workspace-cleanup.ps1 -Deep` 是整个 dist 删掉，
+ * 想留「上一版」做增量更新测试就只能手工翻目录。
+ *
+ * 只删这里认得的产物文件名（安装包 / blockmap），目录（win-unpacked、mobile、
+ * optional 之类）一律不碰——那些要么是这一轮的打包产物，要么是手工投放物。
+ */
+const ARTIFACT_PATTERNS = [
+  { re: /^dieyunagent-Setup-(.+)\.exe$/, platform: 'win' },
+  { re: /^dieyunagent-Setup-(.+)\.exe\.blockmap$/, platform: 'win' },
+  { re: /^dieyunagent_(.+)_amd64\.deb$/, platform: 'linux' },
+  { re: /^dieyunagent-(.+)-x86_64\.AppImage$/, platform: 'linux' },
+  { re: /^dieyunagent-(.+)-x86_64\.AppImage\.blockmap$/, platform: 'linux' }
+];
+
+/** 版本号比较（只认数字段；同段数不同就按字符串兜底，避免 NaN 让排序塌成「都一样」） */
+function compareVersionDesc(a, b) {
+  const pa = String(a).split('.');
+  const pb = String(b).split('.');
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = Number(pa[i]);
+    const nb = Number(pb[i]);
+    if (Number.isFinite(na) && Number.isFinite(nb)) {
+      if (na !== nb) return nb - na;
+    } else if (String(pa[i] || '') !== String(pb[i] || '')) {
+      return String(pb[i] || '').localeCompare(String(pa[i] || ''));
+    }
+  }
+  return 0;
+}
+
+/**
+ * @param {{ distRoot: string, keep: number, log?: Function }} opts
+ * @returns {{ removed: {name: string, bytes: number}[], kept: string[] }}
+ */
+function pruneOldArtifacts(opts) {
+  const log = typeof opts.log === 'function' ? opts.log : console.log;
+  const distRoot = opts.distRoot;
+  const keep = Number.isFinite(opts.keep) ? Math.max(1, Math.floor(opts.keep)) : 2;
+  let names = [];
+  try {
+    names = fs.readdirSync(distRoot);
+  } catch {
+    return { removed: [], kept: [] };
+  }
+
+  /** @type {Map<string, {name: string, bytes: number}[]>} */
+  const byVersion = new Map();
+  for (const name of names) {
+    const hit = ARTIFACT_PATTERNS.find((p) => p.re.test(name));
+    if (!hit) continue;
+    const version = hit.re.exec(name)[1];
+    let bytes = 0;
+    try {
+      bytes = fs.statSync(path.join(distRoot, name)).size;
+    } catch {
+      continue;
+    }
+    if (!byVersion.has(version)) byVersion.set(version, []);
+    byVersion.get(version).push({ name, bytes });
+  }
+
+  const versions = [...byVersion.keys()].sort(compareVersionDesc);
+  const kept = versions.slice(0, keep);
+  // 本次构建的版本**无条件保留**：dist 里已经有 ≥keep 个比它更新的产物时（回滚打 hotfix、
+  // 重跑旧 tag），只按「版本号从大到小取前 N」会把刚打出来的安装包删掉 —— 而 latest.yml
+  // 正指向它，于是构建报成功、安装包和 blockmap 却不见了。
+  const pinned = String(opts.keepVersion || '').trim();
+  if (pinned && byVersion.has(pinned) && !kept.includes(pinned)) kept.push(pinned);
+  const dropped = versions.filter((v) => !kept.includes(v));
+  const removed = [];
+  for (const version of dropped) {
+    for (const item of byVersion.get(version)) {
+      try {
+        fs.rmSync(path.join(distRoot, item.name), { force: true });
+        removed.push(item);
+      } catch (e) {
+        log(`[build-desktop] 回收 ${item.name} 失败：${(e && e.message) || e}`);
+      }
+    }
+  }
+  if (removed.length) {
+    const mb = removed.reduce((a, r) => a + r.bytes, 0) / (1024 * 1024);
+    log(
+      `[build-desktop] 回收旧产物 ${removed.length} 个（${mb.toFixed(0)}MB）：` +
+        `保留 ${kept.join(', ') || '(无)'}；删掉 ${dropped.join(', ')}`
+    );
+  }
+  return { removed, kept };
+}
+
 function printHelp() {
   console.log(`
 用法: node scripts/build-desktop.cjs [选项]
@@ -80,6 +174,8 @@ function printHelp() {
   --no-verify                   跳过产物校验（排障用）
   --tests                       打包前跑测试门禁（Windows 默认开启）
   --no-tests                    跳过测试门禁（排障用；发布不要用）
+  --keep-artifacts <n>          出包后按版本保留最近 n 版安装包（默认 2）
+  --prune-only                  只回收 dist/ 里的旧版本产物，不打包
   --help, -h                    显示本帮助
 `);
 }
@@ -90,6 +186,8 @@ function parseArgs(argv) {
     target: '',
     verify: null,
     tests: null,
+    keepArtifacts: 2,
+    pruneOnly: false,
     help: false
   };
   for (let i = 2; i < argv.length; i++) {
@@ -98,6 +196,12 @@ function parseArgs(argv) {
       opts.platform = String(argv[++i]).toLowerCase();
     } else if (a === '--target' && argv[i + 1]) {
       opts.target = String(argv[++i]).toLowerCase();
+    } else if (a === '--keep-artifacts' && argv[i + 1]) {
+      const n = Number(argv[++i]);
+      if (!Number.isFinite(n) || n < 1) throw new Error(`--keep-artifacts 需要一个 ≥1 的数字：${argv[i]}`);
+      opts.keepArtifacts = Math.floor(n);
+    } else if (a === '--prune-only') {
+      opts.pruneOnly = true;
     } else if (a === '--verify') {
       opts.verify = true;
     } else if (a === '--no-verify') {
@@ -197,15 +301,19 @@ function assertLinuxHost() {
 
 function electronBuilderArgs(opts) {
   const targetArg = PLATFORM_TARGETS[opts.platform][opts.target];
+  // npmRebuild=false 两端都关（2026-11 起，原来只有 Linux 关）：
+  // - koffi / uiohook-napi 都是自带 prebuild 的 N-API 模块，Electron 44 直接能加载，
+  //   不需要 @electron/rebuild 按 ABI 重编（node-gyp-build 优先取 prebuilds/，重编产物根本没人读）；
+  // - 之前唯一真要重编的是 cpu-features（ssh2 的可选加速件），它已经不进安装包了
+  //   （package.json build.files 里排除；ssh2 有纯 JS 回退）；
+  // - 于是那一步只剩成本：实测 Windows 上白跑约 40s，且它失败时会把打包卡在一个
+  //   与我们无关的 gyp 错误上。
+  // 真需要按 Electron ABI 重编时（换 ABI 的极端情况）显式去掉这个开关再打，别改默认值。
+  const noRebuild = ['--config.npmRebuild=false'];
   if (opts.platform === 'linux') {
-    // npmRebuild=false 是刻意关的：electron-builder 默认会跑 @electron/rebuild，
-    // - koffi / uiohook-napi 自带 N-API prebuild，Electron 44 直接能加载，不需重建；
-    // - cpu-features（ssh2 的可选加速件）在没有完整源码/头部时会 gyp 失败，
-    //   而 ssh2 有纯 JS 回退，缺它不影响 SSH 功能。
-    // 真需要源码编译的场景（如换 Electron ABI）应显式去掉这个开关。
-    return ['--linux', targetArg, '--config.npmRebuild=false'];
+    return ['--linux', targetArg, ...noRebuild];
   }
-  return targetArg === '--dir' ? ['--win', '--dir'] : ['--win', targetArg];
+  return [...(targetArg === '--dir' ? ['--win', '--dir'] : ['--win', targetArg]), ...noRebuild];
 }
 
 /**
@@ -291,6 +399,20 @@ function main() {
     printHelp();
     return;
   }
+  if (opts.pruneOnly) {
+    const { getBuildDistRoot } = require('./build-dist-root.cjs');
+    const distRoot = getBuildDistRoot();
+    const res = pruneOldArtifacts({
+      distRoot,
+      keep: opts.keepArtifacts,
+      keepVersion: require(path.join(ROOT, 'package.json')).version
+    });
+    console.log(
+      `[build-desktop] --prune-only：${distRoot} 保留 ${res.kept.join(', ') || '(无)'}，` +
+        `删除 ${res.removed.length} 个文件`
+    );
+    return;
+  }
   // 内网镜像走环境变量（唯一来源 scripts/mirrors.cjs）：
   // electron-builder 及其「下载 Electron 运行时」子进程都读 ELECTRON_MIRROR。
   applyMirrorEnv();
@@ -334,6 +456,16 @@ function main() {
     console.log('\n[build-desktop] 已跳过产物校验（--verify 打开）');
   }
 
+  // 回收旧版本产物：只有真正出安装包的目标才有可回收物（--dir 只有一个解包目录）。
+  if (opts.target !== 'dir') {
+    const { getBuildDistRoot } = require('./build-dist-root.cjs');
+    pruneOldArtifacts({
+      distRoot: getBuildDistRoot(),
+      keep: opts.keepArtifacts,
+      keepVersion: require(path.join(ROOT, 'package.json')).version
+    });
+  }
+
   console.log(`\n[build-desktop] 完成：平台=${opts.platform} 目标=${opts.target} → dist/`);
 }
 
@@ -352,5 +484,7 @@ module.exports = {
   electronBuilderArgs,
   assertBuildArtifacts,
   reportSigningState,
+  pruneOldArtifacts,
+  compareVersionDesc,
   PLATFORM_TARGETS
 };

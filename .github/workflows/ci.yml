@@ -8,7 +8,8 @@ on:
 jobs:
   test:
     runs-on: windows-latest
-    timeout-minutes: 45
+    # 45 → 60：Rust 现在跑两套 feature（4 个 cargo 步骤），默认特性那套要编 `ort` / `tokenizers`。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,9 +33,24 @@ jobs:
         run: npm run check:js
       - name: Renderer static checks
         run: npm run check:renderer
-      - name: Agent smoke (skip rust sidecar if missing)
-        run: npm run test:agent
-      - name: Rust unit tests
+      # 顺序有意义：agent 套件里有三条要真连 dieyun-core（core-bridge / 请求快照 / planner 端到端）。
+      # 以前这一步排在所有 Rust 步骤之前，于是它们每次都打印 SKIP 然后算通过 —— CI 全绿但并不代表
+      # 这几条链路验过。现在先编译内核，再用 --require-core 把这三种套件的「跳过」变成失败。
+      - name: Build dieyun-core (agent smoke needs the real binary)
+        run: cargo build -p dieyun-core
+      - name: Agent smoke (requires dieyun-core; skip = fail)
+        run: npm run test:agent -- --require-core
+      # Rust 闸门必须跑**两套 feature**，否则会漏掉整整一类裂缝：
+      #   · 默认特性 = 桌面 sidecar 口径（`local-embed` 本地推理只在这套里编译）；
+      #   · `--no-default-features` = 远端 Linux 包口径（不带 ORT）。
+      # 2026-11-18 的 `crates/dieyun-base/src/embedding/local.rs` 就是这么红的：CI 只跑后一套，
+      # 本地只跑前一套，两侧从没碰面 —— 一个缺 `#[cfg(feature = "local-embed")]` 的用例
+      # 让 CI 编译不过一整天，而本地全绿。`--all-targets` 同理：不带它则测试代码不被检查。
+      - name: Rust unit tests (桌面 sidecar 口径：默认特性)
+        run: cargo test --workspace -- --skip indexes_dieyunagent_main_entry_imports
+      - name: Rust unit tests (远端 Linux 包口径：--no-default-features)
         run: cargo test --workspace --no-default-features -- --skip indexes_dieyunagent_main_entry_imports
-      - name: Rust clippy
-        run: cargo clippy --workspace --no-default-features -- -D warnings
+      - name: Rust clippy (默认特性，含测试目标)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust clippy (--no-default-features，含测试目标)
+        run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
