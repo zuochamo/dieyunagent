@@ -1073,6 +1073,10 @@ function saveEmbeddingModelFromEditor() {
   const idx = models.findIndex((m) => m.id === editingEmbeddingModelId);
   if (active) models = models.map((m) => ({ ...m, active: false }));
   const next = {
+    // 保留原条目上没有暴露在编辑器里的字段（headers / authMode / userAgent …）：
+    // 这些是请求修饰字段，`agent/embedding-config.js` 真读它们；编辑器只重建六个键
+    // 等于「打开某个向量模型点一次保存 → 自定义头消失 → 端点 401」。
+    ...(idx >= 0 ? models[idx] : {}),
     id: editingEmbeddingModelId || `embedding-${Date.now()}`,
     name,
     baseUrl,

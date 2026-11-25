@@ -14,8 +14,30 @@ var PRESET_DEFAULTS = window.DieyunModelRuntimePresets.MODEL_RUNTIME_DEFAULTS;
 var DEFAULT_BUILTIN_BASE_URL = '';
 var DEFAULT_BUILTIN_API_KEY = '';
 
-var EMBEDDING_DIMENSIONS_MIN = 64;
-var EMBEDDING_DIMENSIONS_MAX = 8192;
+/**
+ * 向量模型条目归一化的单一来源：`src/agent/model-settings-embedding.js`（Main 也 require 它），
+ * 经 agent-bundle 暴露成 `window.normalizeEmbeddingModels` / `window.applyActiveEmbedding`。
+ *
+ * 这里**故意不给兜底实现**：本文件以前自己写了一份，只重建 id/name/baseUrl/apiKey/dimensions/active
+ * 六个键，把 headers / authMode / userAgent 静默丢掉 —— 而 `agent/embedding-config.js` 真读它们，
+ * 于是「设置里填好自定义头 → 保存 → 向量端点 401」。缺了就在**调用时**喊，不要退回第二份实现
+ * （放调用时而不是加载时：本文件也被单测在零 window 沙箱里加载，只为取几个纯函数）。
+ */
+function resolveEmbeddingApi() {
+  var pick = function (name) {
+    return typeof window !== 'undefined' ? window[name] : undefined;
+  };
+  var api = {
+    normalizeEmbeddingModels: pick('normalizeEmbeddingModels'),
+    applyActiveEmbedding: pick('applyActiveEmbedding')
+  };
+  if (typeof api.normalizeEmbeddingModels !== 'function' || typeof api.applyActiveEmbedding !== 'function') {
+    throw new Error(
+      'agent-bundle 未加载：renderer-model-runtime 需要 window.normalizeEmbeddingModels / window.applyActiveEmbedding'
+    );
+  }
+  return api;
+}
 
 var DEFAULTS = {
   baseUrl: DEFAULT_BUILTIN_BASE_URL,
@@ -471,68 +493,11 @@ function normalizeSettings(raw) {
   } else if (!String(s.speechWhisperModel || '').trim()) {
     s.speechWhisperModel = DEFAULTS.speechWhisperModel;
   }
-  // 历史配置里的「内置 BGE」条目：模型已删除，baseUrl 存的是占位词「内置」，直接丢弃。
-  const isLegacyBuiltinEmbedding = (m) => {
-    if (!m) return false;
-    if (m.builtin === true) return true;
-    if (String(m.id || '').startsWith('embedding-builtin-')) return true;
-    return String(m.baseUrl || '').trim() === '内置';
-  };
-  const normalizeEmbedding = (m, index) => ({
-    id: String(m?.id || `embedding-${Date.now()}-${index}`),
-    name: String(m?.name || '').trim(),
-    baseUrl: String(m?.baseUrl || '').trim(),
-    apiKey: String(m?.apiKey || '').trim(),
-    dimensions: Math.min(
-      EMBEDDING_DIMENSIONS_MAX,
-      Math.max(EMBEDDING_DIMENSIONS_MIN, Number(m?.dimensions) || DEFAULTS.embeddingDimensions)
-    ),
-    active: m?.active === true
-  });
-  const hasRawEmbeddingModels =
-    raw && Object.prototype.hasOwnProperty.call(raw, 'embeddingModels');
-  let sourceEmbeddingModels = hasRawEmbeddingModels && Array.isArray(raw.embeddingModels)
-    ? raw.embeddingModels
-    : [];
-  if (!hasRawEmbeddingModels && (String(s.embeddingModel || '').trim() || String(s.embeddingBaseUrl || '').trim())) {
-    sourceEmbeddingModels = [{
-      id: 'embedding-legacy',
-      name: s.embeddingModel,
-      baseUrl: s.embeddingBaseUrl,
-      apiKey: s.embeddingApiKey,
-      dimensions: s.embeddingDimensions,
-      active: s.embeddingEnabled !== false
-    }];
-  }
-  // 内置 BGE 已删除：只保留「有名字 + 有端点」的外部模型条目（历史内置条目在此被丢弃）。
-  s.embeddingModels = sourceEmbeddingModels
-    .filter((m) => !isLegacyBuiltinEmbedding(m))
-    .map(normalizeEmbedding)
-    .filter((m) => m.name && m.baseUrl);
-  s.embeddingModels = s.embeddingModels.filter(
-    (m) => !(m.id === 'embedding-default' && m.name === 'text-embedding-v4')
-  );
-  // active 单选，但「全都不启用」合法（只留配置、暂不跑语义检索）：不再自动点亮第一个。
-  let activeSeen = false;
-  s.embeddingModels = s.embeddingModels.map((m) => {
-    const active = m.active && !activeSeen;
-    if (active) activeSeen = true;
-    return { ...m, active };
-  });
-  const activeEmbedding = s.embeddingModels.find((m) => m.active) || null;
-  s.embeddingEnabled = !!activeEmbedding;
-  if (!activeEmbedding) {
-    s.embeddingModel = '';
-    s.embeddingBaseUrl = '';
-    s.embeddingApiKey = '';
-    s.embeddingDimensions = DEFAULTS.embeddingDimensions;
-    return s;
-  }
-  s.embeddingModel = activeEmbedding.name;
-  s.embeddingBaseUrl = activeEmbedding.baseUrl || DEFAULTS.embeddingBaseUrl;
-  s.embeddingApiKey = activeEmbedding.apiKey || '';
-  s.embeddingDimensions = activeEmbedding.dimensions || DEFAULTS.embeddingDimensions;
-  return s;
+  // 向量模型条目的归一化只有一份实现（Main 与 Renderer 共用同一份纯函数）：
+  //   src/agent/model-settings-embedding.js → window.normalizeEmbeddingModels / applyActiveEmbedding
+  // 以前这里自己写一份且只重建六个键，headers / authMode / userAgent 保存即丢（见文件头 embeddingApi 说明）。
+  const api = resolveEmbeddingApi();
+  return api.applyActiveEmbedding(s, api.normalizeEmbeddingModels(raw, s));
 }
 
 function loadSettings() {
@@ -571,36 +536,6 @@ function getComposerModelPick() {
   }
 }
 
-function getComposerSelectedModelId() {
-  const pick = getComposerModelPick();
-  if (pick.autoMode || pick.selection === 'auto') return '';
-  const sel = pick.selection;
-  if (sel.startsWith('builtin:')) {
-    const rest = sel.slice('builtin:'.length);
-    const idx = rest.indexOf(':');
-    return idx >= 0 ? rest.slice(idx + 1) : rest;
-  }
-  if (sel.startsWith('custom:')) {
-    const id = sel.slice('custom:'.length);
-    const model = (settings.customModels || []).find((m) => m.id === id);
-    return model?.name || '';
-  }
-  return '';
-}
-
-function getComposerSelectedApiConfig() {
-  const pick = getComposerModelPick();
-  if (pick.autoMode || pick.selection === 'auto') return null;
-  const sel = pick.selection;
-  if (sel.startsWith('custom:')) return getCustomModelApiConfig(sel);
-  if (sel.startsWith('builtin:')) {
-    const rest = sel.slice('builtin:'.length);
-    const idx = rest.indexOf(':');
-    const supplierId = idx >= 0 ? rest.slice(0, idx) : null;
-    return getBuiltinApiConfig(supplierId || undefined);
-  }
-  return null;
-}
 
 function getSpeechApiConfig(s) {
   if (window.ModelCapabilities?.getSpeechApiConfigFromSettings) {

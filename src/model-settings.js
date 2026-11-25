@@ -20,8 +20,17 @@ const COMPACTION_TRIGGER_RATIO_DEFAULT = PRESET_DEFAULTS.compactionTriggerRatio;
 const AGENT_TOOL_CALL_LIMIT_DEFAULT = PRESET_DEFAULTS.agentToolCallLimit;
 const AGENT_MAX_ROUNDS_DEFAULT = PRESET_DEFAULTS.agentMaxRounds;
 const MAX_TOKENS_DEFAULT = MAX_OUTPUT_TOKENS_DEFAULT;
-const EMBEDDING_DIMENSIONS_MIN = 64;
-const EMBEDDING_DIMENSIONS_MAX = 8192;
+/**
+ * 向量模型条目的归一化是**单一实现**：`src/agent/model-settings-embedding.js`
+ * （Renderer 侧经 agent-bundle 用同一份；以前这里与 renderer-model-runtime.js 各写一套，
+ * 而且 Renderer 那套会丢掉 headers / authMode / userAgent，保存一次就让向量端点 401）。
+ */
+const {
+  EMBEDDING_DIMENSIONS_MIN,
+  EMBEDDING_DIMENSIONS_MAX,
+  normalizeEmbeddingModels,
+  applyActiveEmbedding
+} = require('./agent/model-settings-embedding');
 
 const DEFAULT_BUILTIN_BASE_URL = '';
 const DEFAULT_BUILTIN_API_KEY = '';
@@ -225,39 +234,6 @@ function modelSettingsPath(userData) {
   return path.join(userData, 'model-settings.json');
 }
 
-/**
- * 历史配置里的「内置 BGE」条目：模型已删除，条目本身也没有可用的 /embeddings 端点
- * （baseUrl 存的是占位词「内置」）。归一化阶段丢弃，避免检索时往空地址发请求。
- * @param {any} m
- */
-function isLegacyBuiltinEmbeddingEntry(m) {
-  if (!m) return false;
-  if (m.builtin === true) return true;
-  if (String(m.id || '').startsWith('embedding-builtin-')) return true;
-  return String(m.baseUrl || '').trim() === '内置';
-}
-
-function normalizeEmbeddingEntry(m, index) {
-  /** @type {{ id: string, name: string, baseUrl: string, apiKey: string, dimensions: number, active: boolean, headers?: object, authMode?: string, userAgent?: string }} */
-  const entry = {
-    id: String(m?.id || `embedding-${index + 1}`),
-    name: String(m?.name || '').trim(),
-    baseUrl: String(m?.baseUrl || '').trim(),
-    apiKey: String(m?.apiKey || '').trim(),
-    dimensions: Math.min(
-      EMBEDDING_DIMENSIONS_MAX,
-      Math.max(EMBEDDING_DIMENSIONS_MIN, Number(m?.dimensions) || DEFAULTS.embeddingDimensions)
-    ),
-    active: m?.active === true
-  };
-  // 请求修饰字段：与供应商 / 自定义模型同源，由 llm-request.js 统一装配。
-  // 无值时不挂键，保持既有结构契约。
-  if (m && m.headers) entry.headers = m.headers;
-  if (m && m.authMode) entry.authMode = String(m.authMode).trim();
-  if (m && m.userAgent) entry.userAgent = String(m.userAgent).trim();
-  return entry;
-}
-
 function normalize(raw) {
   const s = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
   // 不再强制清空 system：清空会让保存进 model-settings.json 的自定义 system「落盘即丢」，
@@ -293,53 +269,9 @@ function normalize(raw) {
   // 语义检索意图同理：只有显式开启才算（缺省/脏值一律 false，别把「未设置」变成「建向量」）。
   s.indexSemanticSearch = s.indexSemanticSearch === true;
 
-  const hasRawEmbeddingModels =
-    raw && Object.prototype.hasOwnProperty.call(raw, 'embeddingModels');
-  let sourceEmbeddingModels = hasRawEmbeddingModels && Array.isArray(raw.embeddingModels)
-    ? raw.embeddingModels
-    : [];
-  if (!hasRawEmbeddingModels && (String(s.embeddingModel || '').trim() || String(s.embeddingBaseUrl || '').trim())) {
-    sourceEmbeddingModels = [{
-      id: 'embedding-legacy',
-      name: s.embeddingModel,
-      baseUrl: s.embeddingBaseUrl,
-      apiKey: s.embeddingApiKey,
-      dimensions: s.embeddingDimensions,
-      active: s.embeddingEnabled !== false
-    }];
-  }
-  // 内置 BGE 已删除：只保留「有名字 + 有端点」的外部模型条目。
-  // 历史配置里的内置条目（baseUrl 是「内置」占位、没有可用的 /embeddings 端点）在这里被丢弃，
-  // 用户重新选一个外部模型即恢复语义检索；不选就退化为纯关键词召回。
-  s.embeddingModels = sourceEmbeddingModels
-    .filter((m) => !isLegacyBuiltinEmbeddingEntry(m))
-    .map(normalizeEmbeddingEntry)
-    .filter((m) => m.name && m.baseUrl);
-
-  // active 是单选语义（同一时刻只跑一个向量模型），但「全都不启用」是合法状态：
-  // 用户可能只是先把配置存着、暂不跑语义检索。以前这里"没有 active 就自动点亮第一个"，
-  // 结果是「添了模型不想用」也做不到 —— 每次保存都被重新点亮。缺省不启用，交给用户勾选。
-  let activeSeen = false;
-  s.embeddingModels = s.embeddingModels.map((m) => {
-    const active = m.active && !activeSeen;
-    if (active) activeSeen = true;
-    return { ...m, active };
-  });
-
-  const activeEmbedding = s.embeddingModels.find((m) => m.active) || null;
-  s.embeddingEnabled = !!activeEmbedding;
-  if (!activeEmbedding) {
-    s.embeddingModel = '';
-    s.embeddingBaseUrl = '';
-    s.embeddingApiKey = '';
-    s.embeddingDimensions = DEFAULTS.embeddingDimensions;
-    return s;
-  }
-  s.embeddingModel = activeEmbedding.name;
-  s.embeddingBaseUrl = activeEmbedding.baseUrl;
-  s.embeddingApiKey = activeEmbedding.apiKey;
-  s.embeddingDimensions = activeEmbedding.dimensions || DEFAULTS.embeddingDimensions;
-  return s;
+  // 向量模型列表的归一化只有一份实现（Main 与 Renderer 共用）：
+  // `src/agent/model-settings-embedding.js`。这里只负责「调用 + 回填顶层缓存字段」。
+  return applyActiveEmbedding(s, normalizeEmbeddingModels(raw, s));
 }
 
 function loadModelSettings(userData) {
