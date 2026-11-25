@@ -171,6 +171,10 @@ function renderStateBlock(state, cfg, opts) {
     `· 张力 ${Number(state.tension || 0).toFixed(1)} / 阈值 ${Number(state.wakeThreshold || 0).toFixed(1)}` +
       ` · 疲劳 ${Number(state.fatigue || 0).toFixed(1)}`
   );
+  // 绑定生命感的身体（点点）当前参数（宿主给一行就贴一行；绑定关闭时没有这行，工具也不会注入）。
+  // 只照贴不解析：它该知道"我现在长什么样"，至于怎么调是它和 pet_set 之间的事。
+  const bodyLine = String((opts && opts.body) || '').trim();
+  if (bodyLine) lines.push(`· ${bodyLine}`);
   /**
    * 「设定」：用户在「拟态 → 设定」里随手写的那段话（目标 / 想做的事 / 遇到人要不要开口……）。
    *

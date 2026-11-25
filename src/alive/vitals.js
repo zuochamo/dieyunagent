@@ -70,14 +70,16 @@ function createInitialState(cfg, nowMs) {
     /** 当日主动出声/收音次数与上一次时间（频率上限用；跨天重置次数） */
     voiceCountToday: 0,
     lastVoiceAt: 0,
-    /** 它最近一次**说了什么**（原文，截断；只用于展示，不进对话账本） */
-    lastVoiceText: '',
     /** 当日唤醒轮自己烧掉的 token（成本护栏用；跨天重置） */
     tokenToday: 0,
     /** 上一次唤醒的成本回执（由 runtime 写：token 与耗时）。页面对账用，不参与漂移 */
     lastWakeTokens: 0,
     lastWakeDurationMs: 0,
-    /** 它这一轮醒来**写下了什么**（正文压成一行；只用于展示，不进对话账本） */
+    /**
+     * 它这一轮醒来**写下了什么**（正文压成一行）与时间（由 runtime 写）。
+     * 只喂侧栏「生命」页那一行摘要：唤醒轮不推界面，正文只落它自己的会话库，
+     * 没有这份副本就只剩事件流。**只展示**，不进会话账本、不进模型上下文。
+     */
     lastWakeText: '',
     lastWakeTextAt: 0,
     /** 最近决策（阈值漂移的滑动窗口用；只留决策本身，不留理由） */

@@ -1,4 +1,4 @@
-/* global window, document, $, isSettingsPageOpen, switchSettingsTab, openSettingsModal, currentSessionId, invalidateSessionMessageCache, loadChatFromGateway, isSessionSending, refreshHistoryList, showAgentToast */
+/* global window, document, $, isSettingsPageOpen, switchSettingsTab, switchSession, refreshSessionAfterBackgroundTurn, showAgentToast */
 'use strict';
 
 /**
@@ -56,9 +56,7 @@ const aliveUi = {
   pollTimer: null,
   badgeTimer: null,
   pollTick: 0,
-  devicesLoaded: false,
-  /** 主窗口「它说…」被手动收起的时刻（下次它再开口会重新出现；不落盘 = 重启后照样看得到） */
-  speechDismissedAt: 0
+  devicesLoaded: false
 };
 
 const ALIVE_PHASE_TEXT = {
@@ -947,7 +945,7 @@ function aliveStatusDetail(st) {
   if (!st || !st.exists) return '';
   const lastWakeTokens = Number(st.lastWakeTokens || 0);
   const lastWakeMs = Number(st.lastWakeDurationMs || 0);
-  const lastWakeText = lastWakeTokens || lastWakeMs
+  const lastWakeCost = lastWakeTokens || lastWakeMs
     ? ` · 上次醒来 ${lastWakeTokens ? `${aliveFmtTokens(lastWakeTokens)} token` : ''}${lastWakeTokens && lastWakeMs ? ' / ' : ''}${lastWakeMs ? `${(lastWakeMs / 1000).toFixed(1)}s` : ''}`
     : '';
   return (
@@ -958,7 +956,7 @@ function aliveStatusDetail(st) {
     ` · 做 ${Number(st.actCount || 0)} / 放下 ${Number(st.deferCount || 0)} / 拒 ${Number(st.refuseCount || 0)}` +
     ` · 今日 token ${aliveFmtTokens(st.tokenToday)}/${Number(st.dailyTokenBudget) > 0 ? aliveFmtTokens(st.dailyTokenBudget) : '不限'}` +
     ` · 累计 ${aliveFmtTokens(st.totalTokens)}` +
-    lastWakeText
+    lastWakeCost
   );
 }
 
@@ -1030,37 +1028,31 @@ const ALIVE_STATUS_IDS = {
 };
 
 /**
- * 主窗口那行「它说 …」/「它醒来写了 …」。
+ * 侧栏「生命」页那一行「它醒来写了（06:07）：…」。
  *
- * 为什么需要：它出声是**说给在场的人听的** —— 人可能不在、可能没听清，那句话就飞了。
- * 所以每次开口在主窗口留一行原文（点「日志」看全部，点 ✕ 收起；下次它再动起来会重新出现）。
- * **只是展示**：不进会话账本、不进模型上下文 —— 它不接管你的对话线。
+ * 为什么需要：唤醒轮是 `internal: true`，正文只落进它自己的会话库 —— 它一夜写了几万字，
+ * 人不翻那条会话就永远看不到「它在你不看时做了什么」。这里放**压成一行**的摘要
+ * （`state.lastWakeText`，字数上限 `aliveWakeTextMaxChars`），整段换行显示、不截断，
+ * 点一下打开它的会话看全文。
  *
- * 两件事实、一行展示：说过话显示「它说」，没说过（或那次更旧）显示「它醒来写了」
- * —— 后者补的是"心跳轮不推给界面"：它半夜写的那几万字本来只有它自己看得到。
+ * 刻意**不放主窗口**（2026-11-21 删掉的就是气泡区上方那一条）：放在对话流上方会被误读成
+ * "它在跟我说话"，而这条只是它自己的一份记录。仍然是展示语义 —— 不进会话账本、不进模型上下文。
  *
- * 数据只有一份：`state.json` 的 `lastVoiceText` / `lastVoiceAt` 与 `lastWakeText` /
- * `lastWakeTextAt`（`alive:status` 与 `alive:badge` 都带这四项），所以主窗口这行与
- * 「拟态 → 日志」里那条永远是同一个说法。
+ * 空正文时这一整块不占位（`.alive-pane-vitals > :empty`）。
  */
-function renderAliveSpeech(info) {
-  const bar = $('alive-speech-bar');
-  const textEl = $('alive-speech-text');
-  if (!bar || !textEl) return;
-  const said = String((info && info.lastVoiceText) || '').trim();
-  const saidAt = Number((info && info.lastVoiceAt) || 0);
-  const wrote = String((info && info.lastWakeText) || '').trim();
-  const wroteAt = Number((info && info.lastWakeTextAt) || 0);
-  const useVoice = !!said && saidAt >= wroteAt;
-  const text = useVoice ? said : wrote;
-  const at = useVoice ? saidAt : wroteAt;
-  const fresh = !!text && at > Number(aliveUi.speechDismissedAt || 0);
-  bar.hidden = !fresh;
-  if (!fresh) return;
-  const when = fmtClock(at);
-  const label = useVoice ? '它说' : '它醒来写了';
-  textEl.textContent = `${label}${when ? `（${when}）` : ''}：${text}`;
-  textEl.title = text;
+function renderAliveWake(st) {
+  const el = $('alive-pane-wake');
+  if (!el) return;
+  // 正在拖选这一行时跳过：每 5s 一次的状态轮询不该把用户手里的选区打掉
+  if (aliveSelectionInside(el)) return;
+  const text = String((st && st.lastWakeText) || '').trim();
+  const at = Number((st && st.lastWakeTextAt) || 0);
+  const sid = String((st && st.sessionId) || '');
+  el.dataset.sessionId = text && sid ? sid : '';
+  el.classList.toggle('is-clickable', !!(text && sid));
+  // 正文已经整段显示在面板里，悬停只留"点一下去哪儿"
+  el.title = text && sid ? '点一下打开它自己那条会话（全文在那儿）' : '';
+  el.textContent = text ? `它醒来写了${at ? `（${fmtClock(at)}）` : ''}：${text}` : '';
 }
 
 function renderAliveStatus(status) {
@@ -1069,8 +1061,6 @@ function renderAliveStatus(status) {
   if (enabledEl && document.activeElement !== enabledEl) {
     enabledEl.checked = !!(st && st.enabled);
   }
-  // 主窗口那条「它说…」与这一页同一份事实：打开设置页也顺手刷新一次
-  renderAliveSpeech(st);
   renderAliveSenses(st);
   renderAliveCapabilities(st);
   renderAliveSetup(st);
@@ -1082,6 +1072,8 @@ function renderAliveStatus(status) {
   const fatigue = aliveFatigueNote(st);
   aliveWriteText(ALIVE_STATUS_IDS.fatigue, fatigue.text, fatigue.kind);
   aliveWriteText(ALIVE_STATUS_IDS.session, aliveSessionNote(st), null);
+  // 它上一轮醒来写下的那一行（只在这个面板上有位置，见 renderAliveWake）
+  renderAliveWake(st);
   aliveWriteText(
     ALIVE_STATUS_IDS.loops,
     st && st.exists && st.suspiciousObedience
@@ -1409,8 +1401,6 @@ async function refreshAliveBadge() {
   if (!api || typeof api.aliveBadge !== 'function') return;
   try {
     const res = await api.aliveBadge();
-    // 主窗口那条「它说…」：徽标是常驻轮询，顺带把这条一起刷（同一个 IPC，不多打一次）
-    renderAliveSpeech(res);
     renderAliveRailPhase(res);
   } catch {
     // 徽标失败只影响 rail 图标的相位色
@@ -1427,27 +1417,19 @@ function startAliveBadgePoll() {
 /**
  * 后台心跳轮刚跑完（Main 的 `alive:ran`）。
  *
- * 为什么需要：心跳轮在 Main 里跑、不推流，所以你**正开着它的会话**时，新的一轮只落进库里，
+ * 为什么要处理：心跳轮在 Main 里跑、不推流，所以你**正开着它的会话**时，新的一轮只落进库里，
  * 界面一动不动 —— 只能切走再切回才看得见（"停在上一次唤醒"的观感就是这么来的）。
- * 这里做的事只有两件：把该会话的缓存作废；如果**正开着它**且没有别的轮在跑，就地重读一次。
- * 不抢滚动位置、不动输入框（重读走的是会话加载那条老路，滚动位置由它自己恢复）。
+ *
+ * 「把正开着的那条会话补上」只有一份实现：`renderer-chat-history.js#refreshSessionAfterBackgroundTurn`
+ * （作废该会话消息缓存 + 刷列表 + 正开着且没在跑就地重读），企业微信频道用的也是它 ——
+ * 两处语义完全一样，各写一份只会慢慢分叉。这里只多一件事：心跳徽标跟着刷。
  */
 async function onAliveTurnFinished(payload) {
   const sid = String((payload && payload.sessionId) || '');
   if (!sid) return;
-  if (typeof invalidateSessionMessageCache === 'function') invalidateSessionMessageCache(sid);
-  if (typeof refreshHistoryList === 'function') {
-    Promise.resolve(refreshHistoryList()).catch(() => {});
-  }
   refreshAliveBadge();
-  if (String(currentSessionId || '') !== sid) return;
-  // 这一轮正在由 Renderer 自己驱动（用户在会话里打字）：别插一脚
-  if (typeof isSessionSending === 'function' && isSessionSending(sid)) return;
-  if (typeof loadChatFromGateway !== 'function') return;
-  try {
-    await loadChatFromGateway(null, sid, { forceRefresh: true });
-  } catch {
-    // 刷新失败只影响"看不看得到最新一轮"，不提示、不打断
+  if (typeof refreshSessionAfterBackgroundTurn === 'function') {
+    await refreshSessionAfterBackgroundTurn(sid);
   }
 }
 
@@ -1632,23 +1614,6 @@ function initAliveSettingsPage() {
   }
   // 「事件 / 抽屉」横向标签：一条委托监听覆盖两个壳（设置 → 日志、侧栏「生命」面板）
   document.addEventListener('click', onAliveTabClick);
-  // 主窗口「它说…」条的两个按钮：看全部日志 / 收起这一条
-  const speechLog = $('alive-speech-log');
-  if (speechLog) {
-    speechLog.addEventListener('click', () => {
-      if (typeof openSettingsModal === 'function') openSettingsModal('alive-log');
-      else if (typeof switchSettingsTab === 'function') switchSettingsTab('alive-log');
-    });
-  }
-  const speechDismiss = $('alive-speech-dismiss');
-  if (speechDismiss) {
-    speechDismiss.addEventListener('click', () => {
-      // 只收起"这一条"：下次它再开口（lastVoiceAt 变大）就重新出现
-      aliveUi.speechDismissedAt = Date.now();
-      const bar = $('alive-speech-bar');
-      if (bar) bar.hidden = true;
-    });
-  }
   // 设置弹窗被关掉时（页面不再可见）停掉轮询：没有统一的 close 钩子，就靠这一条
   window.addEventListener('beforeunload', () => {
     stopAlivePoll();
@@ -1662,23 +1627,20 @@ function initAliveSettingsPage() {
   initAlivePane();
 }
 
-/** 侧栏「生命」页的两个按钮：刷新 / 跳到设置页（开关与感官在那边） */
+/**
+ * 侧栏「生命」页里唯一要接线的交互：「它醒来写了 …」那一行（点一下打开它自己那条会话）。
+ *
+ * 原来这里还接两个按钮（刷新 / 设置），2026-11-21 按用户要求把按钮删了：
+ * 体征在页面可见时本来就 5s 轮询（`startAlivePoll`），开关与感官设备走设置页。
+ */
 function initAlivePane() {
-  const refresh = $('alive-pane-refresh');
-  if (refresh) {
-    refresh.addEventListener('click', () => {
-      refreshAliveStatus();
-      refreshAliveDecisions();
-      refreshAliveNote();
-      refreshAliveHistory();
-      refreshAliveBadge();
-    });
-  }
-  const settings = $('alive-pane-settings');
-  if (settings) {
-    settings.addEventListener('click', () => {
-      if (typeof openSettingsModal === 'function') openSettingsModal('alive');
-      else if (typeof switchSettingsTab === 'function') switchSettingsTab('alive');
+  // 会话 id 由 `alive:status` 带回（`state.lastWakeText` 与 `sessionId` 是同一份快照）
+  const wake = $('alive-pane-wake');
+  if (wake) {
+    wake.addEventListener('click', () => {
+      const sid = String(wake.dataset.sessionId || '');
+      if (!sid || typeof switchSession !== 'function') return;
+      switchSession(sid);
     });
   }
 }

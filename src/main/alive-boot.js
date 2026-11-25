@@ -17,12 +17,14 @@
 const path = require('path');
 const fs = require('fs');
 const { getAgentLimits } = require('../agent/agent-limits');
+const { isReusableSessionRow } = require('../agent/session-workspace-bind');
 const { runMainTurn } = require('../agent/main-turn-runner');
 const { loadModelSettings, resolveSpeechApiConfig, resolveTtsApiConfig, resolveTextApiConfig } = require('../model-settings');
 const { resolveApiConfigForRoute } = require('../agent/model-api-config');
 const { loadPermissions } = require('../gateway/permissions-store');
 const { ALIVE_DECIDE_TOOL } = require('../alive/decide');
 const { ALIVE_NOTE_TOOL, ALIVE_READ_NOTE_TOOL, appendNote, readNote, ensureWorkspace } = require('../alive/note');
+const { PET_SET_TOOL, PET_ACT_TOOL, runPetSet, runPetAct } = require('../alive/pet-tools');
 const {
   ALIVE_SPEAK_TOOL,
   ALIVE_LISTEN_TOOL,
@@ -184,7 +186,7 @@ function bootAliveRuntime(deps) {
        * 心跳轮照常跑、正文照常落库，而侧栏翻不到这条会话，"它在你不看时做了什么"
        * 于是只剩事件流。所以另开一条，并把新 id 写回 settings（下面那份逻辑）。
        */
-      if (row && row.id && !Number(row.archived)) return sessionId;
+      if (isReusableSessionRow(row)) return sessionId;
       sessionId = '';
     }
     const created = await gateway.invokeRpc('memory.session_create', {
@@ -304,6 +306,10 @@ function bootAliveRuntime(deps) {
     limits: limits(),
     log,
     getSenses: sensesNow,
+    /** 绑定生命感的身体（点点）：事件转发给悬浮窗 + 状态块里报一行身体参数（主进程装配，headless 没有 → 两件都缺席） */
+    onAliveEvent: typeof d.onAliveEvent === 'function' ? d.onAliveEvent : null,
+    onThinking: typeof d.onThinking === 'function' ? d.onThinking : null,
+    getPetBodyLine: typeof d.getPetBodyLine === 'function' ? d.getPetBodyLine : null,
     /**
      * 唤醒轮**之前**要拿到的外部事实（只有一个装配点）：
      *   - `recap`：最近这台机器上在做什么 + 未收尾的目标型计划（`src/alive/recap.js`）
@@ -433,6 +439,9 @@ function bootAliveRuntime(deps) {
       const extraTools = [ALIVE_DECIDE_TOOL];
       if (caps.drawer) extraTools.push(ALIVE_NOTE_TOOL, ALIVE_READ_NOTE_TOOL);
       if (caps.voice) extraTools.push(ALIVE_SPEAK_TOOL, ALIVE_LISTEN_TOOL);
+      // 身体（点点）：绑定了生命感才有这两件（设置 → 宠物 → 绑定生命感）
+      const petBridge = typeof d.getPetBridge === 'function' ? d.getPetBridge() : null;
+      if (petBridge && petBridge.enabled()) extraTools.push(PET_SET_TOOL, PET_ACT_TOOL);
 
       /** 语音配置按需现取（模型设置改了不用重启） */
       function speechDeps() {
@@ -460,6 +469,9 @@ function bootAliveRuntime(deps) {
       const preTool = async (name, args) => {
         const a = args && typeof args === 'object' ? args : {};
         if (name === 'alive_decide') return runtime.applyDecision(a);
+        // 身体（点点）：参数检查与执行和聊天轮是**同一份**（`alive/pet-tools.js` 的 runPetSet / runPetAct）
+        if (name === 'pet_set') return runPetSet(petBridge, a);
+        if (name === 'pet_act') return runPetAct(petBridge, a);
         if (name === 'alive_note') {
           if (!caps.drawer) return { ok: false, errorCode: 'SENSE_DISABLED', error: '抽屉是关着的' };
           const res = appendNote(userData, a.text, { nowMs: Date.now() });
@@ -505,7 +517,7 @@ function bootAliveRuntime(deps) {
             text: said ? said.slice(0, Math.max(0, Number(runtime.cfg.voiceTextMaxChars) || 0)) : undefined
           });
           // 只有真的用上了才计数（被拒、缺件都不扣额度：否则"说不出来"也会把今天的次数耗光）
-          if (res && res.ok === true) runtime.noteVoice(Date.now(), said);
+          if (res && res.ok === true) runtime.noteVoice(Date.now());
           return res;
         }
         return null;
@@ -614,7 +626,8 @@ function bootAliveRuntime(deps) {
       });
       // 这一轮已经落库：告诉界面（正开着它的会话就别让人切走再切回才看见）
       notifyWindows('alive:ran', { sessionId: sid, ts: Date.now() });
-      // 正文交回 runtime：它只留压成一行的一份进 `state.lastWakeText`（主窗口「它醒来写了…」）
+      // 这一轮的正文只落它自己的会话库（`sink: null`，不推给界面）；
+      // runtime 只留压成一行的一份给侧栏「生命」页（`state.lastWakeText`）
       return turn;
     }
   });

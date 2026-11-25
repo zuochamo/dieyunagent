@@ -56,8 +56,9 @@ function registerAliveIpc(ctx) {
    * 为什么不复用 `alive:status`：status 会读模型设置与权限文件（为了感官自检），
    * 那是"打开设置页时才需要"的重量；徽标是常驻 30s 轮询，必须便宜。
    *
-   * 2026-11-13：多了 `lastWakeText`/`lastWakeTextAt`（没出声的那些唤醒轮写了什么），
-   * 少了 `recent`/`recentAt` —— 那两个只为 rail 图标的律动算的，动画去掉后没有消费者了。
+   * 只回 rail 图标要的几项（enabled / running / phase / 今日唤醒数）+ 最后一条事件。
+   * `lastVoiceText` 2026-11-21 随主窗口那条展示一起删除；`lastWakeText` 只喂侧栏「生命」页，
+   * 走 `alive:status`（面板在那页可见时本来就在轮询），不必挤进这条极轻查询里。
    */
   ipcMain.handle('alive:badge', () =>
     withRuntime((alive) => {
@@ -73,16 +74,7 @@ function registerAliveIpc(ctx) {
         phase: st.phase || '',
         wakeCountToday: Number(st.wakeCountToday) || 0,
         lastKind: last ? String(last.kind || '') : '',
-        lastTs,
-        /** 它上一次**说了什么**（原话，来自 state.json）：主窗口那条「它说…」就用这两项 */
-        lastVoiceText: String(st.lastVoiceText || ''),
-        lastVoiceAt: Number(st.lastVoiceAt) || 0,
-        /**
-         * 它**这一轮醒来写下了什么**（正文压成一行）：没出声的那些唤醒轮，人只能从这一项看见。
-         * 主窗口那行在这一项比 `lastVoiceAt` 新时显示「它醒来写了…」（同一处渲染）。
-         */
-        lastWakeText: String(st.lastWakeText || ''),
-        lastWakeTextAt: Number(st.lastWakeTextAt) || 0
+        lastTs
       };
     })
   );

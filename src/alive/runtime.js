@@ -65,9 +65,9 @@ function resolveAliveConfig(limits) {
     fatigueEps: Math.max(0, num(pick('aliveFatigueEps'), D.aliveFatigueEps)),
     voiceMaxPerDay: Math.max(0, num(pick('aliveVoiceMaxPerDay'), D.aliveVoiceMaxPerDay)),
     voiceMinIntervalMs: Math.max(0, num(pick('aliveVoiceMinIntervalMs'), D.aliveVoiceMinIntervalMs)),
-    /** 「它说了什么」留多少字（最近一条进 state、每条进事件流；展示用，不进对话账本） */
+    /** 「它说了什么」在事件流（`SPEAK.text`）里留多少字（展示用，不进对话账本） */
     voiceTextMaxChars: Math.max(0, num(pick('aliveVoiceTextMaxChars'), D.aliveVoiceTextMaxChars)),
-    /** 「它这一轮醒来写下了什么」留多少字（最近一条进 state；展示用，不进对话账本） */
+    /** 「它这一轮醒来写下了什么」压成一行后留多少字（侧栏「生命」页那一行摘要；只展示） */
     wakeTextMaxChars: Math.max(0, num(pick('aliveWakeTextMaxChars'), D.aliveWakeTextMaxChars)),
     /** 每日 token 额度（成本护栏；`<=0` = 不限） */
     dailyTokenBudget: Math.max(0, num(pick('aliveDailyTokenBudget'), D.aliveDailyTokenBudget)),
@@ -123,10 +123,9 @@ function sampleOf(state, nowMs) {
 }
 
 /**
- * 压成一行并截断：**「说过什么」与「写下什么」共用这一处口径**。
+ * 压成一行并截断：唤醒轮正文在侧栏「生命」页只占**一行摘要**，全文是它自己会话库的事。
  *
- * 正文/口述都可能是多段带缩进的文字，直接塞进主窗口那一行会把整页撑成日志；
- * 展示只需要一句话，原样留全文是它自己会话库的事。
+ * 为什么要压：正文常是多段带缩进的文字，原样塞进那一行会把面板撑成日志。
  */
 function oneLine(text, maxChars) {
   return String(text == null ? '' : text)
@@ -195,7 +194,8 @@ function createAliveRuntime(opts) {
   let wakeAbort = null;
   /** @type {Array<{ ts: number, tokens: number }>} */
   let samples = [];
-  const turnRunner = typeof d.turnRunner === 'function' ? d.turnRunner : null;
+  /** 可换（单测 / 演示要换一套「这一轮怎么跑」）；`const` 会让 `setTurnRunner` 一调就抛 */
+  let turnRunner = typeof d.turnRunner === 'function' ? d.turnRunner : null;
   /** 宿主提供的「这一轮的外部事实」装配（最近工作 + 醒来时先看一眼）；缺省 = 只有内部体征 */
   const collectFacts = typeof d.collectFacts === 'function' ? d.collectFacts : null;
   /** 感官开关的取值入口（由宿主提供；缺省 = 全关，宁可不给能力） */
@@ -303,6 +303,8 @@ function createAliveRuntime(opts) {
       /** 用户写的那段设定：排在一切事实之前（先知道"我该在意什么"） */
       setup,
       load: computeLoad(nowMs),
+      /** 绑定生命感的身体（点点）当前参数：它要操控自己得先知道现在长什么样 */
+      body: typeof d.getPetBodyLine === 'function' ? d.getPetBodyLine() : null,
       recap: facts && facts.recap,
       /** 它自己抽屉的最后几行：先想起上次到哪儿了，再看外面（目标的唯一原料） */
       note: facts && Array.isArray(facts.note) ? facts.note : null,
@@ -315,8 +317,17 @@ function createAliveRuntime(opts) {
     });
     /**
      * 这一轮醒来的**正文**：`turnRunner` 返回的 `content`（`internal: true` 的那一轮不会自己推给界面，
-     * 正文只落进它自己的会话库）。这里只留压成一行的一份给主窗口看，见 `state.lastWakeText`。
+     * 全文只落进它自己的会话库）。这里只留压成一行的一份给侧栏「生命」页，见 `state.lastWakeText`。
      */
+    // 「思考中」信号（绑定生命感的身体表现用）：直发不走事件文件 —— 推理开始/结束是瞬时的，
+    // 写进 events.jsonl 只会把事件量翻倍（逐跳写事件是明确反模式）。
+    if (typeof d.onThinking === 'function') {
+      try {
+        d.onThinking(true);
+      } catch {
+        // 表现层失败不挡唤醒
+      }
+    }
     let wakeText = '';
     try {
       const turn = await turnRunner({
@@ -335,6 +346,13 @@ function createAliveRuntime(opts) {
       });
       log(`[alive] 唤醒轮失败：${(err && err.message) || err}`);
     } finally {
+      if (typeof d.onThinking === 'function') {
+        try {
+          d.onThinking(false);
+        } catch {
+          // ignore
+        }
+      }
       wakeInFlight = false;
       wakeAbort = null;
       // 期间被关掉/清空过：这一轮的结果作废，不写盘、不记事件（否则会把停表或清空覆盖掉）
@@ -342,8 +360,12 @@ function createAliveRuntime(opts) {
       const durationMs = Math.max(0, now() - nowMs);
       state.lastWakeTokens = wakeTokens;
       state.lastWakeDurationMs = durationMs;
-      // 这一轮醒来**写下了什么**（结论一行）：人回到主窗口才看得见它在你不看时做了什么。
-      // 与 `noteVoice` 同一套语义 —— 只展示，不进会话账本、不进模型上下文（那才是接管对话线）。
+      /**
+       * 这一轮醒来**写下了什么**（结论一行）：人回到侧栏「生命」页才看得见它在你不看时做了什么。
+       *
+       * 仍然是**展示**语义 —— 不进会话账本、不进模型上下文（那才是接管对话线）；全文在它自己的会话库。
+       * 空正文（DEFER 那种没写东西的一轮）不覆盖上一行：那一行说的是"最近一次写下的话"。
+       */
       const wrote = oneLine(wakeText, cfg.wakeTextMaxChars);
       if (wrote) {
         state.lastWakeText = wrote;
@@ -563,22 +585,35 @@ function createAliveRuntime(opts) {
       evidenceThisWake = true;
     }
     pushEvent(evt);
+    // 绑定生命感的身体（点点）订阅这一出口：宿主转发给悬浮窗做涟漪/暗淡等即时表现。
+    // 只转发不落盘，失败不影响事件流本身。
+    if (typeof d.onAliveEvent === 'function') {
+      try {
+        d.onAliveEvent({
+          kind: evt.kind,
+          ok: evt.ok,
+          phase: state ? state.phase : '',
+          fatigue: state ? state.fatigue : 0,
+          load: computeLoad(now())
+        });
+      } catch {
+        // 表现层失败不记账
+      }
+    }
     return true;
   }
 
   /**
    * 主动出声/收音的记账（**成功之后**才调；跨天重置由 tick 的 `rollDay` 负责）。
    *
-   * `text`（只有出声才有）= 它**实际说了什么**，原样留一份进 `state.lastVoiceText`：
-   * 人可能不在、可能没听清，可回看的文字是这条能力的下限。它只是**展示**用的事实，
-   * 不进你的会话账本、不进模型上下文（那是"接管对话线"，设计上不做）。
+   * 只记两件与频率上限有关的事实：当日次数与上次时间（`voicePolicy` 读它）。
+   * 「说了什么」不再往 state 里留副本：原话在事件流 `SPEAK.text` 里（`alive-boot` 写，
+   * 长度受 `aliveVoiceTextMaxChars` 约束），人要看就翻「拟态 → 日志」。
    */
-  function noteVoice(atMs, text) {
+  function noteVoice(atMs) {
     if (!state) return false;
     state.voiceCountToday = Number(state.voiceCountToday || 0) + 1;
     state.lastVoiceAt = Number.isFinite(Number(atMs)) ? Number(atMs) : now();
-    const said = oneLine(text, cfg.voiceTextMaxChars);
-    if (said) state.lastVoiceText = said;
     try {
       store.write(state);
     } catch {
@@ -655,8 +690,6 @@ function createAliveRuntime(opts) {
       /** 主动出声/收音：当日次数、上次时间与上限（页面对账用） */
       voiceCountToday: Number(st.voiceCountToday || 0),
       lastVoiceAt: Number(st.lastVoiceAt || 0),
-      /** 它**说过什么**（最近一条，展示用）：没在的人/没听清的人也能回看。不需要就是空串 */
-      lastVoiceText: String(st.lastVoiceText || ''),
       voiceMaxPerDay: cfg.voiceMaxPerDay,
       /** 两次主动开口的最小间隔（页面文案也读它：别在 Renderer 再抄一个"30 分钟"） */
       voiceMinIntervalMs: cfg.voiceMinIntervalMs,
@@ -664,8 +697,8 @@ function createAliveRuntime(opts) {
       lastWakeTokens: Number(st.lastWakeTokens || 0),
       lastWakeDurationMs: Number(st.lastWakeDurationMs || 0),
       /**
-       * 它**这一轮醒来写下了什么**（正文压成一行）与时间：唤醒轮不推给界面、也不进对话账本，
-       * 没有这一项的话，它一晚上写的几万字只有它自己看得到（主窗口那行据此显示「它醒来写了」）。
+       * 它**这一轮醒来写下了什么**（正文压成一行）与时间：唤醒轮不推界面、也不进对话账本，
+       * 没有这一项的话，它一晚上写的几万字只有它自己看得到（侧栏「生命」页那一行据此显示）。
        */
       lastWakeText: String(st.lastWakeText || ''),
       lastWakeTextAt: Number(st.lastWakeTextAt || 0),
