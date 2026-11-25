@@ -1,0 +1,15 @@
+{
+  "_doc": "check-renderer-dead-exports.cjs 的白名单。每条必须有 reason，且必须是「静态看起来没人用 / 看起来在覆盖 bundle 导出、但其实是刻意」的情况。对应情况消失后条目要跟着删（闸门会报 stale）。",
+  "allow": [
+    {
+      "file": "src/renderer/renderer-model-runtime.js",
+      "name": "STORAGE_KEY",
+      "reason": "本文件自己的 localStorage 键（'diecloud.model.settings.v1'），与 agent-bundle 里 tier-store 的 STORAGE_KEY 同名但语义不同；改造前就是这个形状，改键会让老用户的设置读不出来。"
+    },
+    {
+      "file": "src/renderer/renderer-model-runtime.js",
+      "name": "isSupplierModelEnabled",
+      "reason": "委托壳：读的是命名空间 window.DieyunModelApiConfig.isSupplierModelEnabled（不是同名全局，所以不会自己调自己），保留它是因为本文件也被单测在零 window 沙箱里加载，需要有可用的兜底实现。"
+    }
+  ]
+}

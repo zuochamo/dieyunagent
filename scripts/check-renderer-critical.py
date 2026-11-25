@@ -18,7 +18,11 @@ CRITICAL = [
     "normalizeSkillsCategoryFilter",
     "loadEnabledSkillIds",
     "isSkillEnabled",
-    "DEFAULT_ENABLED_SKILL_IDS",
+    # 启用状态的权威在 Main（skills/enabled-store.js）：这三个是跨文件契约
+    # （grid 定义、skills-ui / automation 调用），删掉任一都会让界面读到空状态而不报错
+    "loadSkillsEnabledFromMain",
+    "setSkillEnabledFlag",
+    "skillDefaultEnabled",
     "connectGateway",
     "gatewayCall",
     "renderAssistantBubbleContent",
