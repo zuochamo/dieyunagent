@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>轨迹图 · 预览</title>
+<!-- 复用仓库真实样式表：预览与 App 内渲染完全一致（本页在 examples/ 下，故路径是 ../src） -->
+<link rel="stylesheet" href="../src/renderer/styles.css" />
+<style>
+  /* 仅本预览页的壳：真 App 里 body 是 overflow:hidden，这里放开便于查看 */
+  body {
+    overflow: auto;
+    user-select: text;
+    padding: 16px 20px 40px;
+    background: var(--bg, #111);
+    color: var(--fg, #ddd);
+  }
+  .preview-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 0 12px;
+    background: var(--bg, #111);
+    border-bottom: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+    margin-bottom: 14px;
+  }
+  .preview-toolbar button {
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+    background: transparent;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .preview-toolbar button.active {
+    border-color: var(--accent, #4c8dff);
+    color: var(--accent, #4c8dff);
+  }
+  .preview-note {
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--fg-muted, #999);
+    margin: 0 0 10px;
+  }
+  .preview-box {
+    width: 860px;
+    max-width: 100%;
+    border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+    border-radius: 8px;
+    padding: 12px;
+  }
+</style>
+</head>
+<body>
+  <div class="preview-toolbar">
+    <strong style="font-size:12px">轨迹图预览</strong>
+    <button type="button" data-case="concurrent" class="active">并发子 Agent</button>
+    <button type="button" data-case="single">只有主线</button>
+    <button type="button" data-case="degraded">无时间戳（退化）</button>
+  </div>
+  <p class="preview-note">
+    这块就是右侧「轨迹」页 →「轨迹图」子标签的内容。<b>没有派发子 Agent 时也能看</b>：
+    主线一条泳道，每轮一块（点「只有主线」看）。
+  </p>
+  <div class="preview-box">
+    <div class="trace-graph" id="mount"></div>
+  </div>
+
+  <!--
+    预览页不走 App 的 bundle：直接以「假 CJS」加载同一份源码，
+    保证看到的就是 App 里那份整形 + 渲染（不复制逻辑，避免两份漂移）。
+  -->
+  <script>
+    window.module = { exports: {} };
+    window.exports = window.module.exports;
+  </script>
+  <script src="../src/agent/trace-graph.js"></script>
+  <script>window.TraceGraph = window.module.exports;</script>
+  <script src="../src/renderer/renderer-trace-graph.js"></script>
+
+  <script>
+    const T = Date.now() - 240000; // 4 分钟前开工，便于读相对刻度
+
+    const mainRounds = [
+      ['勘察', T, T + 9000],
+      ['拆解', T + 9000, T + 12000],
+      ['调度 · 3 路并行', T + 12000, T + 155000],
+      ['验收', T + 155000, T + 162000],
+      ['汇总', T + 162000, T + 171000]
+    ].map(function (row, i) {
+      return {
+        round: i + 1,
+        phase: row[0],
+        thought: row[0],
+        fullThought: row[0],
+        tools: [{ name: 'host_exec' }].concat(
+          i === 2 ? [{ name: 'fs_edit' }, { name: 'fs_edit', failed: true }] : []
+        ),
+        startedAt: row[1],
+        endedAt: row[2]
+      };
+    });
+
+    function subagent(id, title, start, end, rounds) {
+      return {
+        isolated: true,
+        subagentId: id,
+        phase: title,
+        startedAt: start,
+        endedAt: end,
+        rounds: rounds.map(function (r, i) {
+          return {
+            round: i + 1,
+            // 节点标签用：有阶段名用阶段名，没有就用这句“在干什么”
+            thought: r[3] || title + ' 第 ' + (i + 1) + ' 轮',
+            fullThought: r[3] || title,
+            startedAt: r[0],
+            endedAt: r[1],
+            tools: Array.from({ length: r[2] }, function () {
+              return { name: 'fs_edit' };
+            })
+          };
+        })
+      };
+    }
+
+    const cases = {
+      concurrent: function () {
+        return mainRounds.concat([
+          subagent('sa-1', '写入子 Agent #2 · 改 alpha 配色', T + 14000, T + 98000, [
+            [T + 14000, T + 60000, 6, '量参考图取色'],
+            [T + 60000, T + 98000, 4, '重画前爪']
+          ]),
+          subagent('sa-2', '写入子 Agent #3 · 补 beta 文档', T + 15000, T + 88000, [
+            [T + 15000, T + 88000, 5, '补状态说明']
+          ]),
+          subagent('sa-3', '勘察子 Agent #1 · 摸清现状', T + 12000, T + 40000, [
+            [T + 12000, T + 40000, 3, '数一遍现有验收项']
+          ])
+        ]);
+      },
+      single: function () {
+        return mainRounds;
+      },
+      // 老数据形态：完全没有 startedAt/endedAt → 整形层统一退化成等宽顺序图
+      degraded: function () {
+        return mainRounds.map(function (row) {
+          return {
+            round: row.round,
+            phase: row.phase,
+            thought: row.thought,
+            fullThought: row.fullThought,
+            tools: row.tools,
+            isolated: false
+          };
+        });
+      }
+    };
+
+    const mount = document.getElementById('mount');
+
+    function paint(name) {
+      // 资源路径写错时给一句人话，而不是留一块空白
+      if (typeof window.renderTraceGraph !== 'function' || !window.TraceGraph) {
+        mount.textContent =
+          '源码没加载上：请确认本页与 ../src 的相对路径正确（用仓库内的这个文件直接打开，不要复制到别处）。';
+        return;
+      }
+      window.renderTraceGraph(mount, { trace: cases[name](), running: false });
+    }
+
+    document.querySelectorAll('[data-case]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        document.querySelectorAll('[data-case]').forEach(function (b) {
+          b.classList.toggle('active', b === btn);
+        });
+        paint(btn.getAttribute('data-case'));
+      });
+    });
+
+    paint('concurrent');
+  </script>
+</body>
+</html>
