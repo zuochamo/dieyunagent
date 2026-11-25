@@ -9,6 +9,7 @@
  *   node scripts/test-agent-smoke.cjs --full    # agent-full (+ rust smokes)
  *   node scripts/test-agent-smoke.cjs --suite agent-full
  *   node scripts/test-agent-smoke.cjs --paths src/mobile/public/app.js
+ *   node scripts/test-agent-smoke.cjs --all --require-core   # CI 口径：缺内核 = 失败，不许静默跳过
  */
 
 const { execSync, spawnSync } = require('child_process');
@@ -96,11 +97,24 @@ function testsForPaths(changed, pathRules) {
   return [...tests];
 }
 
-function runNpmScript(scriptName, { allowSkip = false } = {}) {
+/**
+ * @param {string} scriptName
+ * @param {{ allowSkip?: boolean, requireCore?: boolean }} [opts]
+ *   allowSkip：缺内核时跳过（本地开发默认，方便没有 pack 过的人）
+ *   requireCore：缺内核即失败 —— CI 用这条，否则「CI 全绿」并不代表这几条链路验过
+ */
+function runNpmScript(scriptName, { allowSkip = false, requireCore = false } = {}) {
   const label = `npm run ${scriptName}`;
-  if (allowSkip && REQUIRES_CORE.has(scriptName) && !resolveDieyunCoreBinary()) {
-    console.log(`\n[dieyun:test] SKIP ${scriptName} (dieyun-core not built; run npm run pack:dieyun-core)`);
-    return;
+  if (REQUIRES_CORE.has(scriptName) && !resolveDieyunCoreBinary()) {
+    if (requireCore) {
+      throw new Error(
+        `${label} 需要 dieyun-core，但没找到可执行文件（先跑 cargo build -p dieyun-core，或 npm run pack:dieyun-core）`
+      );
+    }
+    if (allowSkip) {
+      console.log(`\n[dieyun:test] SKIP ${scriptName} (dieyun-core not built; run npm run pack:dieyun-core)`);
+      return;
+    }
   }
   console.log(`\n[dieyun:test] >> ${label}`);
   const r = spawnSync(label, {
@@ -152,8 +166,14 @@ function main() {
   }
 
   console.log('[dieyun:test] running:', scripts.join(', '));
+  // CI 传 --require-core：缺内核的套件不许静默跳过（跳过 = 这条链路一次没验）
+  const requireCore = argv.includes('--require-core');
+  if (requireCore && !resolveDieyunCoreBinary()) {
+    console.error('[dieyun:test] --require-core 需要 dieyun-core 可执行文件，先 cargo build -p dieyun-core');
+    process.exit(1);
+  }
   for (const script of scripts) {
-    runNpmScript(script, { allowSkip: true });
+    runNpmScript(script, { allowSkip: true, requireCore });
   }
   console.log('\n[dieyun:test] OK');
 }

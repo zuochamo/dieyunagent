@@ -47,6 +47,8 @@ const {
   reasoningFallbackText,
   persistableTurnText,
   isReasoningFallbackText,
+  replyHasToolCallMarkup,
+  deliverableAnswer,
   TURN_EMPTY_REPLY_TEXT
 } = require('../src/agent/agent-round-text');
 
@@ -75,6 +77,40 @@ assert(
   needsAssistantReplySynthesis('已改 login 表单：补了 CDP 输入，截图失败不再整轮失败。', toolTrace) === false,
   'non-empty reply does not trip synthesis'
 );
+
+// 回归（2026-11-19 子 Agent 事故）：上游把工具调用**写成文本**时，content 里留下的是
+// `<| |DSML| | invoke …>` 这类特殊 token。旧正则要求 `<` 紧跟关键字，于是整段标记被当成
+// 正式正文交付 —— 而那条 host_exec 从未执行，泄漏文本还被回注主上下文当结论。
+// 标记形态是**结构信号**（不是中英文词表），因此放宽到「`<` 与关键字之间允许 `|`/空格」。
+const dsmlLeak = [
+  '<| |DSML| | calls>',
+  '<| |DSML| | invoke name="host_exec">',
+  '<| |DSML| | parameter name="command" string="true">chcp 65001 >nul & dir</| |DSML| | parameter>',
+  '</| |DSML| | invoke>',
+  '</| |DSML| | calls>'
+].join('\n');
+assert(replyHasToolCallMarkup(dsmlLeak) === true, 'DSML special-token tool call is markup');
+assert(
+  needsAssistantReplySynthesis(dsmlLeak, toolTrace) === true,
+  'DSML leak needs synthesis instead of being delivered'
+);
+assert(deliverableAnswer(dsmlLeak, toolTrace) === '', 'DSML leak is never delivered as an answer');
+assert(replyHasToolCallMarkup('<|tool_calls|>') === true, '<|tool_calls|> is markup');
+assert(replyHasToolCallMarkup('<antml:invoke name="x">') === true, 'antml invoke is markup');
+// 反向：普通比较、标识符不能被误判（误判会把正常回答吞掉）
+assert(replyHasToolCallMarkup('a < b 且 c > d 都成立') === false, 'plain comparisons are not markup');
+assert(replyHasToolCallMarkup('function_name 与 function()') === false, 'identifiers are not markup');
+// 反向：正文里出现 `function=` 也**不是**标记（2026-11-21 回归：裸匹配会把 planner 汇总整段换成空串）
+assert(
+  replyHasToolCallMarkup('接口是 /api/x?function=getUser，改完测过。') === false,
+  'query string containing function= is not markup'
+);
+assert(
+  replyHasToolCallMarkup('把 function= 这一项删掉') === false,
+  'prose mentioning function= is not markup'
+);
+// 正向：历史形态 `<function=…>` 仍算标记（`<` 是它的结构信号）
+assert(replyHasToolCallMarkup('<function=fs_read_file>') === true, '<function= tag is markup');
 const deepThought = '已经把 BrowserView 截图失败改成可重试，并在观察失败时保留文本快照，气泡在循环返回后立刻收成已完成。';
 
 // 四态交付决策：单一来源（§3.4）

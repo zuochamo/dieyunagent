@@ -1326,7 +1326,7 @@ async function main() {
     try {
       await rt.tickOnce();
       rt.recordEvent({ kind: 'SPEAK', ok: true, chars: 12, text: '我在，桌上有杯水凉了' });
-      rt.noteVoice(clock, '我在，桌上有杯水凉了');
+      rt.noteVoice(clock);
       const st1 = rt.status();
       assert.strictEqual(st1.voiceCountToday, 1, '应记一次');
       assert.strictEqual(st1.lastVoiceAt, clock, '应记下时间');
@@ -1340,20 +1340,14 @@ async function main() {
         AGENT_LIMITS_DEFAULTS.aliveVoiceMinIntervalMs,
         '间隔也要由 status 带出：页面文案读它，别在 Renderer 里再抄一个数'
       );
-      // 「它说了什么」必须留得下来：人可能不在/没听清，主窗口那条与日志都靠它
-      assert.strictEqual(st1.lastVoiceText, '我在，桌上有杯水凉了', '最近一句原话要进 status');
+      // 「它说了什么」只留在事件流里（state 不再留副本：主窗口那条展示已删除）
+      assert.strictEqual(st1.lastVoiceText, undefined, 'state 不再留原话副本');
       assert.ok(
         rt.decisions(50).some((e) => e.kind === 'SPEAK' && String(e.text || '').includes('水凉了')),
-        '事件流也要带原话（日志逐条可回看）'
+        '事件流要带原话（日志逐条可回看）'
       );
-      rt.noteVoice(clock, '  多行\n换行   也要压成一行  ');
-      assert.strictEqual(rt.status().lastVoiceText, '多行 换行 也要压成一行', '空白要压平，别把日志撑成多行');
       rt.noteVoice(clock);
-      assert.strictEqual(
-        rt.status().lastVoiceText,
-        '多行 换行 也要压成一行',
-        '只听不说不该把上一句擦掉'
-      );
+      assert.strictEqual(rt.status().voiceCountToday, 2, '只听不说也计数（频率上限看的是次数）');
       assert.ok(
         rt.decisions(50).some((e) => e.kind === 'SPEAK'),
         '感官事件必须能从 runtime 出口查得到'
@@ -1586,10 +1580,11 @@ async function main() {
     }
   });
 
-  await okAsync('它醒来写了什么：正文压成一行进 state（主窗口「它醒来写了…」的唯一来源）', async () => {
+  await okAsync('唤醒轮正文：压成一行留在 state 喂侧栏「生命」页，不进事件流', async () => {
     const root = mkTmp('wake-text');
     let clock = Date.UTC(2026, 0, 1);
     const firstReply = '  这轮把 vision 稿的第二节核完。\n\n  顺带记一行：没人读的东西不算交付。  ';
+    const oneLineReply = '这轮把 vision 稿的第二节核完。 顺带记一行：没人读的东西不算交付。';
     let reply = firstReply;
     const rt = createAliveRuntime({
       userDataPath: root,
@@ -1603,27 +1598,28 @@ async function main() {
     });
     try {
       await rt.wakeNow();
-      const expected = '这轮把 vision 稿的第二节核完。 顺带记一行：没人读的东西不算交付。';
-      assert.strictEqual(rt.status().lastWakeText, expected, '多行正文要压成一行再进 status');
-      assert.strictEqual(rt.status().lastWakeTextAt, clock, '要记住时间（主窗口那行用它判新旧）');
+      // 唤醒轮不推界面、全文只在它自己的会话库；面板那一行读的是 state 里**压成一行**的这份副本
+      const st = rt.status();
+      assert.strictEqual(st.lastWakeText, oneLineReply, 'state 留压成一行的正文摘要');
+      assert.strictEqual(st.lastWakeTextAt, clock, '记下这一轮的时间（面板显示 06:07 这种）');
+      const wakeMax = Number(AGENT_LIMITS_DEFAULTS.aliveWakeTextMaxChars);
+      assert.ok(wakeMax > 0, '正文截断上限与写入侧同在（agent-limits 是唯一数字来源）');
 
-      // 空正文（DEFER 那种"没写东西"的一轮）不覆盖上一行
+      // 空正文（DEFER 那种"没写东西"的一轮）不覆盖上一行：那一行说的是"最近一次写下的话"
       reply = '';
       clock += TICK;
       await rt.wakeNow();
-      assert.strictEqual(rt.status().lastWakeText, expected, '没写东西的一轮不该把上一次擦掉');
+      assert.strictEqual(rt.status().lastWakeText, oneLineReply, '没写东西的一轮不覆盖上一行');
 
-      // 上限来自 agent-limits，不是页面上写死的数
-      const max = Number(AGENT_LIMITS_DEFAULTS.aliveWakeTextMaxChars) || 0;
-      assert.ok(max > 0, 'aliveWakeTextMaxChars 要有值');
-      reply = `标题行\n${'x'.repeat(max + 80)}`;
+      // 超长按上限截断（面板只放一行，原文在它自己的会话库里）
+      reply = 'x'.repeat(wakeMax + 50);
       clock += TICK;
       await rt.wakeNow();
-      assert.strictEqual(rt.status().lastWakeText.length, max, `要按 ${max} 字截断`);
+      assert.strictEqual(rt.status().lastWakeText.length, wakeMax, '按 aliveWakeTextMaxChars 截断');
 
-      // 只留一行在 state：正文不进事件流（日志不是录音带，也不该成为搬运正文的通道）
+      // 正文不进事件流：日志不是录音带，也不该成为搬运正文的通道
       assert.ok(
-        !rt.decisions(50).some((e) => e.text !== undefined && e.kind === 'WAKE_END'),
+        !rt.decisions(50).some((e) => e.kind === 'WAKE_END' && e.text !== undefined),
         'WAKE_END 不该带本轮正文'
       );
     } finally {

@@ -129,7 +129,7 @@ describe('wecom inbound normalization', () => {
 
   it('collects image urls from image and mixed messages', () => {
     expect(normalizeInboundBody({ msgtype: 'image', image: { url: 'https://x/1.jpg' } }).images).toEqual([
-      'https://x/1.jpg'
+      { url: 'https://x/1.jpg', aeskey: '' }
     ]);
     const mixed = normalizeInboundBody({
       msgtype: 'mixed',
@@ -141,7 +141,28 @@ describe('wecom inbound normalization', () => {
       }
     });
     expect(mixed.text).toBe('看这张');
-    expect(mixed.images).toEqual(['https://x/2.jpg']);
+    expect(mixed.images).toEqual([{ url: 'https://x/2.jpg', aeskey: '' }]);
+  });
+
+  it('keeps the per-url aeskey next to the url (long-connection media is encrypted)', () => {
+    const n = normalizeInboundBody({
+      msgtype: 'mixed',
+      mixed: {
+        msg_item: [
+          { msgtype: 'image', image: { url: 'https://x/1.jpg', aeskey: 'k-image-1' } },
+          { msgtype: 'image', image: { url: 'https://x/2.jpg', aeskey: 'k-image-2' } }
+        ]
+      }
+    });
+    expect(n.images).toEqual([
+      { url: 'https://x/1.jpg', aeskey: 'k-image-1' },
+      { url: 'https://x/2.jpg', aeskey: 'k-image-2' }
+    ]);
+    const f = normalizeInboundBody({
+      msgtype: 'file',
+      file: { url: 'https://x/a.pdf', name: 'a.pdf', aeskey: 'k-file' }
+    });
+    expect(f.file).toEqual({ url: 'https://x/a.pdf', name: 'a.pdf', aeskey: 'k-file' });
   });
 
   it('keys group chats by chatid and direct chats by single:userid', () => {

@@ -1,63 +1,80 @@
 'use strict';
 
 /**
- * Pure-logic smoke for composer queue normalize / rev / reorder.
+ * Pure-logic smoke for composer queue normalize + live-run 收尾判据。
  * Run: node scripts/test-composer-queue-edit.cjs
+ *
+ * ⚠️ 这里**不许再抄一份实现**：2026-11-21 之前的版本把
+ * `newComposerQueueItemId` / `normalizeComposerQueueItem` / `normalizeComposerQueueList` /
+ * `reorderById` / `shouldAutoFlush` / `takeById` / `insertAt` 全在脚本里重写一遍再断言自己，
+ * 其中 `reorderById` / `shouldAutoFlush` / `takeById` 在 `src/` 里根本不存在 ——
+ * 断言全绿也证明不了生产代码。现在改为用沙箱把**真实源码**装进来断言（同
+ * `test/unit/lib/load-renderer-fmt.cjs` 的做法）。
  */
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 
-function newComposerQueueItemId() {
-  return `cq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
+const ROOT = path.join(__dirname, '..');
 
-function normalizeComposerQueueItem(raw) {
-  const now = Date.now();
-  const enqueuedAt = Number(raw && raw.enqueuedAt) || now;
-  const updatedAt = Number(raw && raw.updatedAt) || enqueuedAt;
-  const rev = Math.max(0, Number(raw && raw.rev) || 0);
-  const id =
-    raw && raw.id != null && String(raw.id).trim()
-      ? String(raw.id).trim()
-      : newComposerQueueItemId();
-  return {
-    id,
-    text: String((raw && raw.text) || '').trim() || '请根据附件内容协助我。',
-    attachments: Array.isArray(raw && raw.attachments) ? raw.attachments.slice() : [],
-    enqueuedAt,
-    updatedAt,
-    rev
+/** 把一段「无 module.exports 的渲染层脚本」装进沙箱，取回指定顶层声明。 */
+function loadRendererScript(relPath, names) {
+  const src = fs.readFileSync(path.join(ROOT, relPath), 'utf8');
+  const win = {};
+  const doc = {
+    getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: () => ({
+      style: {},
+      classList: { add() {}, remove() {}, toggle() {} },
+      appendChild() {},
+      addEventListener() {},
+      remove() {}
+    }),
+    addEventListener() {},
+    body: { appendChild() {}, classList: { add() {}, remove() {}, toggle() {} } }
   };
-}
-
-function normalizeComposerQueueList(items) {
-  if (!Array.isArray(items)) return [];
-  return items.map((item) => normalizeComposerQueueItem(item || {}));
-}
-
-function reorderById(queue, id, toIndex) {
-  const index = queue.findIndex((item) => item && item.id === id);
-  if (index < 0) return false;
-  const dest = Math.max(0, Math.min(queue.length - 1, Number(toIndex)));
-  if (!Number.isFinite(dest) || dest === index) return false;
-  const [item] = queue.splice(index, 1);
-  queue.splice(dest, 0, item);
-  return true;
+  const storage = new Map();
+  const localStorage = {
+    getItem: (k) => (storage.has(k) ? storage.get(k) : null),
+    setItem: (k, v) => storage.set(k, String(v)),
+    removeItem: (k) => storage.delete(k)
+  };
+  // 只传 window/document/localStorage：其余自由标识符只在函数体内出现，调用前不需要存在。
+  const factory = new Function(
+    'window',
+    'document',
+    'localStorage',
+    src + '\nreturn { ' + names.join(', ') + ' };'
+  );
+  return factory(win, doc, localStorage);
 }
 
 function main() {
-  const legacy = normalizeComposerQueueList([
+  const queue = loadRendererScript('src/renderer/renderer-composer-queue.js', [
+    'newComposerQueueItemId',
+    'normalizeComposerQueueItem',
+    'normalizeComposerQueueList',
+    'COMPOSER_QUEUE_SOFT_FAIL_LIMIT'
+  ]);
+
+  // 老数据（没有 id / rev）经归一化后必须补齐，且时间戳沿用原值
+  const legacy = queue.normalizeComposerQueueList([
     { text: 'hello', attachments: [], enqueuedAt: 100 },
     { text: 'world', enqueuedAt: 200 }
   ]);
   assert.strictEqual(legacy.length, 2);
-  assert.ok(legacy[0].id.startsWith('cq-'));
+  assert.ok(legacy[0].id.startsWith('cq-'), '缺 id 的老条目要补一个新 id');
   assert.ok(legacy[1].id.startsWith('cq-'));
+  assert.notStrictEqual(legacy[0].id, legacy[1].id, '两个条目不能拿到同一个 id');
   assert.strictEqual(legacy[0].rev, 0);
   assert.strictEqual(legacy[0].updatedAt, 100);
   assert.strictEqual(legacy[0].text, 'hello');
 
-  const kept = normalizeComposerQueueItem({
+  // 已有字段必须原样保留（编辑 / 重排靠 id + rev 定位）
+  const kept = queue.normalizeComposerQueueItem({
     id: 'cq-fixed',
     text: 'x',
     rev: 3,
@@ -67,131 +84,31 @@ function main() {
   });
   assert.strictEqual(kept.id, 'cq-fixed');
   assert.strictEqual(kept.rev, 3);
+  assert.strictEqual(kept.updatedAt, 2);
   assert.strictEqual(kept.attachments.length, 1);
+  assert.notStrictEqual(kept.attachments, undefined);
 
-  const empty = normalizeComposerQueueItem({ text: '   ' });
+  // 空白正文按「只有附件」的默认文案落库
+  const empty = queue.normalizeComposerQueueItem({ text: '   ' });
   assert.strictEqual(empty.text, '请根据附件内容协助我。');
 
-  const q = [
-    { id: 'a', text: '1' },
-    { id: 'b', text: '2' },
-    { id: 'c', text: '3' }
-  ];
-  assert.strictEqual(reorderById(q, 'c', 0), true);
-  assert.deepStrictEqual(
-    q.map((x) => x.id),
-    ['c', 'a', 'b']
-  );
-  assert.strictEqual(reorderById(q, 'missing', 0), false);
+  // 非数组输入不许炸
+  assert.deepStrictEqual(queue.normalizeComposerQueueList(null), []);
 
-  // rev stale write simulation
-  let item = normalizeComposerQueueItem({ id: 'e1', text: 'old', rev: 1 });
-  const editRev = item.rev;
-  item.rev += 1; // concurrent bump
-  assert.notStrictEqual(item.rev, editRev);
+  // 软失败上限是「连续发送失败到第 N 次就暂停队列」的判据，只能来自生产常量
+  assert.strictEqual(typeof queue.COMPOSER_QUEUE_SOFT_FAIL_LIMIT, 'number');
+  assert.ok(queue.COMPOSER_QUEUE_SOFT_FAIL_LIMIT >= 2, '软失败上限至少 2 才有「重试」的含义');
 
-  function shouldFinishSessionActiveRun(live, runId) {
-    if (!live) return true;
-    const liveId = live.runId != null ? String(live.runId) : '';
-    const wantId = runId != null ? String(runId) : '';
-    if (!wantId) return !liveId;
-    if (!liveId) return true;
-    return liveId === wantId;
-  }
-  assert.strictEqual(shouldFinishSessionActiveRun(null, 'r1'), true);
-  assert.strictEqual(shouldFinishSessionActiveRun({ runId: 'r1' }, 'r1'), true);
-  assert.strictEqual(shouldFinishSessionActiveRun({ runId: 'r2' }, 'r1'), false);
-  assert.strictEqual(shouldFinishSessionActiveRun({ runId: 'r2' }, ''), false);
-  assert.strictEqual(shouldFinishSessionActiveRun({ runId: '' }, ''), true);
-
-  function shouldAutoFlush(opts) {
-    if (opts.flushHeld) return false;
-    if (opts.paused) return false;
-    if (opts.sending) return false;
-    if (opts.continueState) return false;
-    return true;
-  }
-  assert.strictEqual(shouldAutoFlush({ paused: true, sending: false }), false);
-  assert.strictEqual(shouldAutoFlush({ paused: false, sending: false, flushHeld: false }), true);
-  assert.strictEqual(shouldAutoFlush({ paused: false, sending: true }), false);
-
-  function takeById(queue, id) {
-    const index = queue.findIndex((item) => item && item.id === id);
-    if (index < 0) return { item: null, index: -1 };
-    const [item] = queue.splice(index, 1);
-    return { item, index };
-  }
-
-  function insertAt(queue, item, atIndex) {
-    const dest = Math.max(0, Math.min(queue.length, Number(atIndex)));
-    queue.splice(dest, 0, item);
-  }
-
-  const q2 = [
-    { id: 'a', text: '1' },
-    { id: 'b', text: '2' },
-    { id: 'c', text: '3' }
-  ];
-  const taken = takeById(q2, 'b');
-  assert.strictEqual(taken.index, 1);
-  assert.strictEqual(taken.item.id, 'b');
-  assert.deepStrictEqual(
-    q2.map((x) => x.id),
-    ['a', 'c']
-  );
-  insertAt(q2, taken.item, taken.index);
-  assert.deepStrictEqual(
-    q2.map((x) => x.id),
-    ['a', 'b', 'c']
-  );
-
-  function pauseAfterUserStop(opts) {
-    if (opts.skipPause) return false;
-    if (!opts.queueLength) return false;
-    return true;
-  }
-  assert.strictEqual(pauseAfterUserStop({ skipPause: true, queueLength: 2 }), false);
-  assert.strictEqual(pauseAfterUserStop({ skipPause: false, queueLength: 2 }), true);
-  assert.strictEqual(pauseAfterUserStop({ skipPause: false, queueLength: 0 }), false);
-
-  function shouldFlushAfterSendNow(opts) {
-    if (opts.flushHeld) return false;
-    if (opts.sendNowBusy && opts.holdUntilFinally) return false;
-    if (opts.paused) return false;
-    if (opts.sending) return false;
-    return true;
-  }
-  assert.strictEqual(
-    shouldFlushAfterSendNow({ flushHeld: true, paused: false, sending: false }),
-    false
-  );
-  assert.strictEqual(
-    shouldFlushAfterSendNow({ flushHeld: false, paused: true, sending: false }),
-    false
-  );
-  assert.strictEqual(
-    shouldFlushAfterSendNow({ flushHeld: false, paused: false, sending: false }),
-    true
-  );
-
-  // 连续软失败止损：跨 flush 调用累计，达上限暂停并清零，成功一次即清零
-  const SOFT_FAIL_LIMIT = 3;
-  function bumpSoftFail(streaks, sid) {
-    const streak = (streaks.get(sid) || 0) + 1;
-    streaks.set(sid, streak);
-    if (streak < SOFT_FAIL_LIMIT) return false;
-    streaks.delete(sid);
-    return true;
-  }
-  const streaks = new Map();
-  assert.strictEqual(bumpSoftFail(streaks, 's1'), false);
-  assert.strictEqual(bumpSoftFail(streaks, 's1'), false);
-  assert.strictEqual(streaks.get('s1'), 2);
-  assert.strictEqual(bumpSoftFail(streaks, 's1'), true); // 第 3 次 → 暂停
-  assert.strictEqual(streaks.has('s1'), false);
-  streaks.set('s2', 2);
-  streaks.delete('s2'); // 中间成功发送一次，重新计数
-  assert.strictEqual(bumpSoftFail(streaks, 's2'), false);
+  // live run 收尾判据：runId 对不上就不许把别人的气泡收掉
+  const liveRun = loadRendererScript('src/renderer/renderer-chat-live-run.js', [
+    'shouldFinishSessionActiveRun'
+  ]);
+  const should = liveRun.shouldFinishSessionActiveRun;
+  assert.strictEqual(should(null, 'r1'), true);
+  assert.strictEqual(should({ runId: 'r1' }, 'r1'), true);
+  assert.strictEqual(should({ runId: 'r2' }, 'r1'), false);
+  assert.strictEqual(should({ runId: 'r2' }, ''), false);
+  assert.strictEqual(should({ runId: '' }, ''), true);
 
   console.log('[dieyun:test] test-composer-queue-edit passed');
 }

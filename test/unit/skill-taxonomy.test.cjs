@@ -12,6 +12,7 @@
 const {
   SKILL_DOMAINS,
   DEFAULT_SKILL_DOMAIN,
+  isDefaultEnabledSkillId,
   resolveSkillDomain
 } = require('../../src/skills/taxonomy');
 
@@ -49,5 +50,25 @@ describe('技能分类单一来源（skills/taxonomy）', () => {
     expect(resolveSkillDomain({ skillKey: 'minimax:pptx-generator', category: 'MiniMax' })).toBe(
       'office'
     );
+  });
+});
+
+/**
+ * 默认启用规则也活在这里（同一份「预装/分类」知识的唯一来源）。
+ * 以前它在 Renderer、`system-prompt-prep.js`、`agent-home` 各写一份，加一个预装分类要改三处。
+ */
+describe('预装技能默认启用（skills/taxonomy）', () => {
+  it('预装种子默认启用', () => {
+    expect(isDefaultEnabledSkillId('builtin:weather')).toBe(true);
+    expect(isDefaultEnabledSkillId('builtin:minimax:minimax-docx')).toBe(true);
+    expect(isDefaultEnabledSkillId('builtin:curated:skill-creator')).toBe(true);
+  });
+
+  it('用户自建 / 市场安装 / 非种子分类默认不启用', () => {
+    expect(isDefaultEnabledSkillId('user:my-skill')).toBe(false);
+    expect(isDefaultEnabledSkillId('/home/me/.dieyun/skills/my-skill')).toBe(false);
+    expect(isDefaultEnabledSkillId('builtin:dieyun:whatever')).toBe(false);
+    expect(isDefaultEnabledSkillId('')).toBe(false);
+    expect(isDefaultEnabledSkillId(null)).toBe(false);
   });
 });

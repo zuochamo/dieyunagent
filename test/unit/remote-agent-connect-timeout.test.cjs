@@ -15,7 +15,7 @@ const net = require('node:net');
 const WebSocket = require('ws');
 const {
   RemoteAgentClient,
-  isDisconnectError,
+  isChannelDownError,
   CONNECT_TIMEOUT_MS
 } = require('../../src/gateway/remote-agent-client');
 
@@ -49,7 +49,9 @@ describe('RemoteAgentClient 握手超时', () => {
           return true;
         }
       );
-      assert.equal(isDisconnectError({ code: 'REMOTE_AGENT_CONNECT_TIMEOUT' }), true);
+      assert.equal(isChannelDownError({ code: 'REMOTE_AGENT_CONNECT_TIMEOUT' }), true);
+      // 只看错误码：文案再改也不会把「断线」判丢
+      assert.equal(isChannelDownError(new Error('Remote Agent 已断开')), false);
     } finally {
       client.close();
       await new Promise((r) => wss.close(r));

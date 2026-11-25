@@ -93,6 +93,18 @@ describe('subagent runner', () => {
     expect(out.summary).toBeUndefined();
   });
 
+  // 回归（2026-11-19）：**协调者**派发必须能用。以前调用方各自写 `subagentDepth`，
+  // planner 的 explore 阶段写成 1，与默认 `subagentMaxDepth: 1` 相撞 ——
+  // plan 模式的并发只读调研从上线起 100% 被拒（SUBAGENT_DEPTH_EXCEEDED）。
+  // 现在深度语义只在 runner 里（`runFromCoordinator` = 协调者 0），两个入口都不再手写数字。
+  it('lets the coordinator dispatch without hand-written depth', async () => {
+    const runner = makeRunner({ subagentMaxDepth: 1 }, async () => ({ content: '结论：找到了' }));
+    const out = await runner.runFromCoordinator({ task: 't' }, {});
+    expect(out.errorCode).toBeUndefined();
+    expect(out.ok).toBe(true);
+    expect(out.summary).toContain('结论');
+  });
+
   it('rejects a missing task with a structured error', async () => {
     const out = await makeRunner().run({}, {});
     expect(out.errorCode).toBe('SUBAGENT_TASK_REQUIRED');
@@ -203,6 +215,51 @@ describe('subagent runner', () => {
     expect(out.reason).toBe('limit');
     expect(out.summary).toContain('llm/app.py:40');
     expect(out.summary).toContain('不完整');
+  });
+
+  // 回归（2026-11-19）：上游把工具调用**写成文本**（`<| |DSML| | invoke …>`），那一轮循环在
+  // 「无 tool_calls 的文字 = 本轮结束」处收场，工具从未执行。这种「假正文」不能被当结论回注，
+  // 否则协调者会把一段标记当成子 Agent 的调研结果。标记之前的正文保留（可能有用），并在
+  // reason 上标 `tool-markup`，与「查完没查到（empty）」「预算截断（limit）」区分开。
+  it('never hands leaked tool-call markup back as the conclusion', async () => {
+    const runner = makeRunner({}, async () => ({
+      content: [
+        '桌面目录里两个 xlsx 同名不同后缀，先确认真身。',
+        '<| |DSML| | calls>',
+        '<| |DSML| | invoke name="host_exec">',
+        '<| |DSML| | parameter name="command" string="true">dir /O:D</| |DSML| | parameter>',
+        '</| |DSML| | invoke>',
+        '</| |DSML| | calls>'
+      ].join('\n'),
+      trace: [
+        {
+          round: 1,
+          thought: '先列目录',
+          tools: [{ name: 'fs_list_dir', summary: 'Desktop 共 12 项' }]
+        }
+      ]
+    }));
+    const out = await runner.run({ task: 't' }, {});
+    expect(out.ok).toBe(true);
+    expect(out.reason).toBe('tool-markup');
+    expect(out.summary).toContain('把工具调用写成了文本');
+    expect(out.summary).toContain('桌面目录里两个 xlsx');
+    expect(out.summary).not.toContain('DSML');
+    expect(out.summary).not.toContain('host_exec');
+  });
+
+  it('falls back to the child trace facts when only markup came back', async () => {
+    const runner = makeRunner({}, async () => ({
+      content: '<| |DSML| | invoke name="host_exec"></| |DSML| | invoke>',
+      trace: [
+        { round: 1, thought: '列目录', tools: [{ name: 'fs_list_dir', summary: 'Desktop 共 12 项' }] }
+      ]
+    }));
+    const out = await runner.run({ task: 't' }, {});
+    expect(out.reason).toBe('tool-markup');
+    expect(out.summary).toContain('工具调用记录');
+    expect(out.summary).toContain('fs_list_dir');
+    expect(out.summary).not.toContain('DSML');
   });
 
   it('converges a child loop failure into a structured error', async () => {
@@ -332,8 +389,9 @@ describe('subagent runner', () => {
       expect(FALLBACK_LIMITS[key]).toBe(AGENT_LIMITS_DEFAULTS[key]);
     }
     // 放宽后的轮次预算必须真的落在 schema 的 min/max 之间，否则设置页会把它夹回去。
-    expect(FALLBACK_LIMITS.subagentMaxRounds).toBe(48);
-    expect(FALLBACK_LIMITS.subagentMaxToolCalls).toBe(96);
+    // 第三次放宽：48/96 → 160/320（2026-11-19：执行器跑到 96 轮仍在有效推进，被硬上限截断）。
+    expect(FALLBACK_LIMITS.subagentMaxRounds).toBe(160);
+    expect(FALLBACK_LIMITS.subagentMaxToolCalls).toBe(320);
     // 不变式：默认值落在设置页 min/max 内，且**低于**上限，保证用户仍能手动上调。
     for (const key of ['subagentMaxRounds', 'subagentMaxToolCalls']) {
       const item = SCHEMA_BY_KEY.get(key);

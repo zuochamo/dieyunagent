@@ -208,16 +208,19 @@ describe('channel runtime dispatch', () => {
       normalized: {
         msgtype: 'mixed',
         text: '看这两张',
-        images: ['https://x/1.jpg', 'https://x/2.jpg'],
+        images: [
+          { url: 'https://x/1.jpg', aeskey: 'k1' },
+          { url: 'https://x/2.jpg', aeskey: 'k2' }
+        ],
         voiceText: '',
-        file: { url: 'https://x/a.pdf', name: 'a.pdf' }
+        file: { url: 'https://x/a.pdf', name: 'a.pdf', aeskey: 'k3' }
       },
       reply: fakeReply()
     });
     expect(attachments).toEqual([
-      { kind: 'image', url: 'https://x/1.jpg' },
-      { kind: 'image', url: 'https://x/2.jpg' },
-      { kind: 'file', url: 'https://x/a.pdf', name: 'a.pdf' }
+      { kind: 'image', url: 'https://x/1.jpg', aeskey: 'k1' },
+      { kind: 'image', url: 'https://x/2.jpg', aeskey: 'k2' },
+      { kind: 'file', url: 'https://x/a.pdf', name: 'a.pdf', aeskey: 'k3' }
     ]);
   });
 });

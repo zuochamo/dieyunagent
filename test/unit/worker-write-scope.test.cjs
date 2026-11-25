@@ -36,7 +36,8 @@ describe('worker 写作用域 · createWorkerWriteScope', () => {
     expect(createWorkerWriteScope(WS, '')).toBeNull();
     expect(createWorkerWriteScope('ssh://host/srv/app', '')).toBeNull();
     // 远端工作区即便误传了 worktreePath 也不启用：本机 path.resolve 解析 POSIX 路径会得到假路径
-    expect(createWorkerWriteScope('ssh://host/srv/app', '/srv/app/.wt')).toBeNull();
+    // 远端（SSH）现在按 POSIX 语义启用（见下面的「远端副本写作用域」用例）
+    expect(createWorkerWriteScope('ssh://host/srv/app', '/srv/app/.wt')).not.toBeNull();
     // worktree 与工作区同一个目录（= 没有隔离）也不启用
     expect(createWorkerWriteScope(WS, WS)).toBeNull();
   });
@@ -188,5 +189,54 @@ describe('worker 写作用域 · 写完必须能读回来（副本有就读副�
     );
     expect(gw.calls[0].method).toBe('host.exec');
     expect(gw.calls[0].params.cwd).toBe(path.join(wt, 'src'));
+  });
+});
+
+describe('远端（SSH）副本写作用域 · POSIX 语义', () => {
+  const WS_URI = 'ssh://host/srv/app/.dieyun/worktrees/sess-1/main';
+  const WT_POSIX = '/srv/app/.dieyun/worktrees/run-1/A';
+
+  it('会话副本 URI + per-role POSIX 副本 → 启用作用域（以前直接不启用）', () => {
+    const scope = createWorkerWriteScope(WS_URI, WT_POSIX);
+    expect(scope).not.toBeNull();
+    expect(scope.remote).toBe(true);
+    expect(scope.root).toBe(WT_POSIX);
+    // 会话副本与它所属的仓库根都算主侧
+    expect(scope.mainRoots).toContain('/srv/app/.dieyun/worktrees/sess-1/main');
+    expect(scope.mainRoots).toContain('/srv/app');
+  });
+
+  it('副本内原样 / 会话副本内重映射 / 仓库根内重映射 / 其余拒绝', () => {
+    const scope = createWorkerWriteScope(WS_URI, WT_POSIX);
+
+    expect(scope.map('/srv/app/.dieyun/worktrees/run-1/A/src/a.go')).toEqual({
+      path: '/srv/app/.dieyun/worktrees/run-1/A/src/a.go'
+    });
+    expect(scope.map('/srv/app/.dieyun/worktrees/sess-1/main/src/a.go')).toEqual({
+      path: '/srv/app/.dieyun/worktrees/run-1/A/src/a.go'
+    });
+    // 远端 worker 最常见的绝对路径：仓库根下的文件
+    expect(scope.map('/srv/app/internal/api/x.go')).toEqual({
+      path: '/srv/app/.dieyun/worktrees/run-1/A/internal/api/x.go'
+    });
+
+    const denied = scope.map('/home/someone/elsewhere/x.go');
+    expect(denied.denied.errorCode).toBe('WORKER_SCOPE_DENIED');
+    expect(denied.denied.retryable).toBe(false);
+    expect(String(denied.denied.error)).toContain(WT_POSIX);
+  });
+
+  it('相对路径不在这里重映射（已由 resolvePath 拼到副本）', () => {
+    const scope = createWorkerWriteScope(WS_URI, WT_POSIX);
+    expect(scope.map('src/a.go')).toEqual({ path: 'src/a.go' });
+  });
+
+  it('读不重映射（远端没有本机 fs 可判存在性）', () => {
+    const scope = createWorkerWriteScope(WS_URI, WT_POSIX);
+    expect(scope.mapRead('/srv/app/internal/api/x.go')).toBe('/srv/app/internal/api/x.go');
+  });
+
+  it('会话副本与副本同一条路径（没有隔离）→ 不启用', () => {
+    expect(createWorkerWriteScope(WS_URI, '/srv/app/.dieyun/worktrees/sess-1/main')).toBeNull();
   });
 });

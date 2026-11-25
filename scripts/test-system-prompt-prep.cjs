@@ -180,7 +180,6 @@ async function runPrepKnowledge() {
       languagePrompt: '',
       userSystem: '',
       workspaceInfo: { workspacePath: 'D:/proj', kind: 'local' },
-      enabledSkillMap: { 'builtin:weather': true },
       compactMcpTools: true,
       hasContinueCheckpoint: true,
       hasActiveRun: false
@@ -230,6 +229,9 @@ async function runPrepKnowledge() {
         }
       ],
       skills: {
+        // 启用状态来自 Main（skills/enabled-store.js），**不在 Renderer 快照里**：
+        // 频道 / 计划 / headless 那几档没有 Renderer，注入侧只能问 deps 要。
+        enabledMap: async () => ({ 'builtin:weather': true }),
         scan: async () => ({
           skills: [{
             id: 'builtin:weather',

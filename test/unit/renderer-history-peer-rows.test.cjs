@@ -10,7 +10,7 @@
  *   2. 行上有结构信号：bot 图标 + 对端名字（标题被 AI 改名后仍能认出是谁）；
  *   3. 判据只有 links（`sessionIsPeerChat`），不从标题里抠字，不影响普通会话行。
  *
- * 用 `new Function` + 极简 DOM 桩（与 `renderer-goal-bar.test.cjs` 同一手法）：
+ * 用 `new Function` + 极简 DOM 桩（与 `renderer-goal-panel.test.cjs` 同一手法）：
  * 这个模块是浏览器脚本，没有 module.exports；为几个渲染分支装 jsdom 不划算。
  */
 

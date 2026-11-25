@@ -385,6 +385,55 @@ async function testEmptyRoundLogsUpstreamSwallow() {
 }
 
 /**
+ * 另一类上游故障（2026-11-19 子 Agent 事故）：工具调用被**写成文本**（`<| |DSML| | invoke …>`）。
+ * core 只认结构化 tool_calls，于是这一轮被当成「无工具的文字 = 正常收尾」：工具没执行，
+ * 而正文看起来像一段回答。客户端补救不了（真正执行要 core 侧接口），所以只钉住那条诊断日志。
+ */
+async function testTextFormToolCallLogsLeak() {
+  const logs = [];
+  const bridge = createFakeBridge({
+    'agent.run.start': async (params, _t, br) => {
+      br.emitEvent({
+        type: 'agent.delta',
+        runId: params.runId,
+        content: '先确认下桌面目录。\n<| |DSML| | invoke name="host_exec">\n<| |DSML| | parameter name="command">dir</| |DSML| | parameter>\n</| |DSML| | invoke>'
+      });
+      return { phase: 'done', runId: params.runId, content: '', trace: [] };
+    }
+  });
+  await runRustAgentLoop({
+    coreBridge: bridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [], tools: [] },
+    loopSpec: loopSpec(),
+    log: (m) => logs.push(String(m))
+  });
+  const hit = logs.find((l) => l.includes('残留工具调用标记'));
+  assert(!!hit, `文本式工具调用必须留一条日志，实际日志：${logs.join(' | ')}`);
+  assert(hit.includes('没有执行'), `日志要说清那条工具没跑，实际：${hit}`);
+
+  // 对照：普通长文本（含比较符号）不该被当成残留标记
+  const quietLogs = [];
+  const quietBridge = createFakeBridge({
+    'agent.run.start': async (params, _t, br) => {
+      br.emitEvent({ type: 'agent.delta', runId: params.runId, content: 'a < b 且 c > d 都成立。' });
+      return { phase: 'done', runId: params.runId, content: '', trace: [] };
+    }
+  });
+  await runRustAgentLoop({
+    coreBridge: quietBridge,
+    llm: { baseUrl: 'https://example/v1' },
+    startParams: { model: 'm', messages: [], tools: [] },
+    loopSpec: loopSpec(),
+    log: (m) => quietLogs.push(String(m))
+  });
+  assert(
+    !quietLogs.some((l) => l.includes('残留工具调用标记')),
+    '普通文本（含 < > 比较）不该报残留工具调用标记'
+  );
+}
+
+/**
  * 工具轮也能带折叠事实：`need_tools` 响应上的 `compacted` 同样要走
  * phase / 遥测 / 归档（不能只在 done 上处理，否则工具轮之前的折叠全丢）。
  */
@@ -1441,6 +1490,7 @@ async function run() {
   await testFoldFactDrivesNodeSideEffects();
   await testFoldFactOnNeedToolsIsHandled();
   await testEmptyRoundLogsUpstreamSwallow();
+  await testTextFormToolCallLogsLeak();
   await testRoundPrepareRegisteredBeforeStart();
   await testRoundPrepareInjectsPerRoundOnRequestCopy();
   await testVisionDisabledNoInjection();

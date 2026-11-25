@@ -131,3 +131,33 @@ describe('PlansStore：COUNT 计划的计数锚点', () => {
     expect(store.get(plan.id).enabled).toBe(true);
   });
 });
+
+describe('PlansStore：新建条数上限（机制上限，不是护栏旋钮）', () => {
+  const { AGENT_LIMITS_DEFAULTS } = require('../../src/agent/agent-limits');
+
+  it('到上限后拒绝**新建**，并给结构化错误码', () => {
+    const store = tmpStore();
+    const cap = AGENT_LIMITS_DEFAULTS.plansMaxCount;
+    // 直接铺满内存里的计划列表：这里验的是「新建时挡」，不是磁盘 IO
+    store.plans = Array.from({ length: cap }, (_, i) => ({ id: `p${i}`, enabled: false }));
+    let err = null;
+    try {
+      store.upsert({ name: '再建一条', prompt: 'x', rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0' });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeTruthy();
+    expect(err.code).toBe('PLANS_LIMIT');
+    expect(String(err.message)).toContain(String(cap));
+  });
+
+  it('存量超限时**改**计划仍然可行（不把人锁死）', () => {
+    const store = tmpStore();
+    const cap = AGENT_LIMITS_DEFAULTS.plansMaxCount;
+    store.plans = Array.from({ length: cap - 1 }, (_, i) => ({ id: `p${i}`, enabled: false }));
+    const created = store.upsert({ name: '最后一格', prompt: 'x', rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0' });
+    // 现在正好卡在上限；改这条已存在的计划不该被拦
+    const edited = store.upsert({ ...created, name: '改个名' });
+    expect(edited.name).toBe('改个名');
+  });
+});

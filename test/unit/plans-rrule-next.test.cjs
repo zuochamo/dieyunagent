@@ -1,6 +1,6 @@
 'use strict';
 
-const { msUntilNextRun } = require('../../src/plans/rrule-next');
+const { msUntilNextRun, scheduleFacts } = require('../../src/plans/rrule-next');
 
 function planOf(patch) {
   return { id: 'p1', enabled: true, rrule: '', onceAt: '', dtstart: '', ...patch };
@@ -89,6 +89,47 @@ describe('msUntilNextRun：onceAt 与停用', () => {
     expect(msUntilNextRun(planOf({ rrule: 'FREQ=EVERYDAY;BYHOUR=9' }), now)).toBeNull();
     expect(msUntilNextRun(planOf({ rrule: 'FREQ=DAILY', enabled: false }), now)).toBeNull();
     expect(msUntilNextRun(null, now)).toBeNull();
+  });
+});
+
+describe('scheduleFacts：plan_create 回执里的频次事实', () => {
+  it('每天 09:00 → 间隔 1 天、每日 1 次', () => {
+    const now = new Date(2026, 8, 21, 6, 30, 0);
+    const facts = scheduleFacts(
+      planOf({ rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0', dtstart: now.toISOString() }),
+      now
+    );
+    expect(facts.intervalMs).toBe(24 * 60 * 60 * 1000);
+    expect(facts.runsPerDay).toBe(1);
+    expect(facts.once).toBe(false);
+    expect(new Date(facts.nextAt).getHours()).toBe(9);
+  });
+
+  it('每 1 分钟 → 每日 1440 次（模型据此自己判断成本）', () => {
+    const now = new Date(2026, 8, 21, 10, 0, 0);
+    const facts = scheduleFacts(
+      planOf({ rrule: 'FREQ=MINUTELY;INTERVAL=1', dtstart: now.toISOString() }),
+      now
+    );
+    expect(facts.intervalMs).toBe(60000);
+    expect(facts.runsPerDay).toBe(1440);
+  });
+
+  it('onceAt → 只跑一次，没有间隔/每日次数', () => {
+    const now = new Date(2026, 8, 21, 8, 0, 0);
+    const at = new Date(2026, 8, 21, 9, 0, 0);
+    const facts = scheduleFacts(planOf({ onceAt: at.toISOString() }), now);
+    expect(facts.once).toBe(true);
+    expect(facts.intervalMs).toBe(0);
+    expect(facts.runsPerDay).toBe(0);
+    expect(new Date(facts.nextAt).getTime()).toBe(at.getTime());
+  });
+
+  it('停用 / 过期 / 无规则 → null（没有「接下来」可说）', () => {
+    const now = new Date(2026, 8, 21, 10, 0, 0);
+    expect(scheduleFacts(planOf({ rrule: 'FREQ=DAILY', enabled: false }), now)).toBeNull();
+    expect(scheduleFacts(planOf({}), now)).toBeNull();
+    expect(scheduleFacts(planOf({ onceAt: new Date(2026, 8, 20, 9).toISOString() }), now)).toBeNull();
   });
 });
 

@@ -4,6 +4,7 @@ const {
   enrichLlmToolCalls,
   hasIncompleteToolCallMarkup,
   extractToolCallsFromContent,
+  stripToolCallMarkup,
   filterCompleteFunctionToolCalls,
   normalizeCompleteToolCallArgumentsJson
 } = require('../src/llm-tool-call-fallback');
@@ -25,6 +26,43 @@ assert(String(incompleteEnriched.content).includes('<tool_calls>'), 'does not le
 
 const dsmlIncomplete = '<｜DSML｜tool_calls><invoke name="grep">';
 assert(hasIncompleteToolCallMarkup(dsmlIncomplete) === true, 'incomplete DSML fail-closed');
+
+/**
+ * 回归（2026-11-19 子 Agent 事故）：DSML 的 **ASCII / 带空格 / `calls` 标签名** 变体
+ * —— `<| |DSML| | calls>`、`<| |DSML| | invoke name="…">`。
+ *
+ * 旧实现只认定长的 `<｜DSML｜`（全角、无空格），于是这种形态一条都匹配不上：既不剥除、
+ * 也不识别，整段标记被当成模型正文交付（子 Agent 卡片里肉眼可见），而那条 host_exec 从未执行。
+ */
+const dsmlAsciiLeak = [
+  '<| |DSML| | calls>',
+  '<| |DSML| | invoke name="host_exec">',
+  '<| |DSML| | parameter name="command" string="true">chcp 65001 >nul & dir C:\\Users\\admin\\Desktop\\报价单*</| |DSML| | parameter>',
+  '</| |DSML| | invoke>',
+  '</| |DSML| | calls>'
+].join('\n');
+const asciiCalls = extractToolCallsFromContent(dsmlAsciiLeak);
+assert(asciiCalls.length === 1, 'ASCII DSML 变体必须解析出一个工具调用');
+assert(asciiCalls[0].name === 'host_exec', 'ASCII DSML 变体的工具名');
+assert(
+  asciiCalls[0].arguments.command === 'chcp 65001 >nul & dir C:\\Users\\admin\\Desktop\\报价单*',
+  'ASCII DSML 变体的参数原文'
+);
+assert(stripToolCallMarkup(`先看下桌面。\n${dsmlAsciiLeak}`) === '先看下桌面。', 'ASCII DSML 变体必须被剥净');
+const asciiEnriched = enrichLlmToolCalls({ content: dsmlAsciiLeak, toolCalls: [] });
+assert(asciiEnriched.toolCalls.length === 1, 'enrich 从 ASCII DSML 变体补出工具调用');
+assert(String(asciiEnriched.content).trim() === '', 'enrich 后正文不残留标记');
+const asciiIncomplete = enrichLlmToolCalls({
+  content: '<| |DSML| | calls>\n<| |DSML| | invoke name="host_exec">',
+  toolCalls: []
+});
+// 只有开标签、没有参数也没有闭合 → fail-closed 不编造调用，只打「残缺标记」标
+assert(asciiIncomplete.toolCalls.length === 0, '未闭合的 ASCII DSML 不得编造工具调用');
+assert(asciiIncomplete.incompleteToolMarkup === true, '未闭合的 ASCII DSML 要标记出残缺');
+assert(
+  extractToolCallsFromContent('普通回复，没有工具调用。').length === 0,
+  'ASCII DSML 变体放宽后不误伤纯文本'
+);
 
 const plain = '普通回复，没有工具调用。';
 assert(hasIncompleteToolCallMarkup(plain) === false, 'plain text is not incomplete markup');
@@ -90,5 +128,24 @@ for (const toolName of ['subagent', 'plan_create', 'memory_recall', 'session_set
     `${toolName} 写在参数块里必须被识别成工具调用（旧白名单会漏掉）`
   );
 }
+
+/**
+ * 裸 `<calls>` 外层标签（没有 `tool` 前缀）：DeepSeek DSML 的另一种写法。
+ *
+ * 2026-11-21 之前 Renderer 侧有两份「展示层剥标记」的抄件（renderer-agent-continue.js /
+ * renderer-thinking-trace.js），它们只认 `<tool_calls>` / `<tool calls>`，**不认裸 `<calls>`**，
+ * 于是同一条回复在 Main 侧剥净、气泡与思考区里却漏出工具标记。两份抄件已删，
+ * 两侧现在都走本函数；这条断言就是那次漂移的回归。
+ */
+const bareCalls =
+  '先看下桌面。\n<calls>\n<invoke name="host_exec">\n<parameter name="command" string="true">dir</parameter>\n</invoke>\n</calls>';
+assert(stripToolCallMarkup(bareCalls) === '先看下桌面。', '裸 <calls> 变体必须被剥净');
+assert(
+  extractToolCallsFromContent(bareCalls).length === 1,
+  '裸 <calls> 变体也要能解析出工具调用（否则那条 host_exec 就静默没执行）'
+);
+// 纯文本不许被误伤（快路径：没有尖括号就原样返回）
+const plainText = '报表已生成，共 3 页；下一句里有 < 号但不成标记。';
+assert(stripToolCallMarkup(plainText) === plainText, '纯文本不许被剥变形');
 
 console.log('test-llm-tool-call-fallback.cjs ok');

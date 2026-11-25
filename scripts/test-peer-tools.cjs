@@ -76,20 +76,50 @@ async function main() {
   // 面板代码只有一套（`renderer-peer.js`），四处入口却不一样：桌面 preload IPC、headless
   // 网页 `/ws`、以及桌面/网页各自的注入面。任何一处漏一个方法，症状都是「某个界面空白」，
   // 而不会报错 —— 所以用「用到的集合 ⊆ 两侧实现的集合」把它们钉住。
-  const { PEER_ACTION_NAMES, createPeerActions } = require('../src/peer/actions');
+  const { PEER_ACTION_NAMES, PEER_BRIDGE_METHODS, createPeerActions } = require('../src/peer/actions');
   const preloadSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
-  const ipcChannels = [...preloadSrc.matchAll(/invoke\('peer:([\w-]+)'/g)].map((m) => m[1]);
-  assert.ok(ipcChannels.length >= 10, `preload 里应能扫到 peer:* 通道，实际 ${ipcChannels.length}`);
-  for (const ch of ipcChannels) {
-    assert.ok(PEER_ACTION_NAMES.includes(ch), `preload 的 peer:${ch} 必须在 src/peer/actions.js 的动作表里`);
+  // preload 不再手抄通道表：方法与参数整形来自 `PEER_BRIDGE_METHODS`，桌面只提供 invoke
+  // （手抄那次就漏过 `set-auto-trust`：动作表里有、preload 里没有 → 桌面与网页两种行为）。
+  assert.ok(
+    /buildPeerBridge/.test(preloadSrc),
+    'preload 必须用 buildPeerBridge 造 peer 桥（勿手抄一份方法表）'
+  );
+  assert.ok(
+    /peer:\$\{action\}/.test(preloadSrc),
+    'preload 的 invoke 必须打成 `peer:<action>` 通道（Main 侧 IPC 名字）'
+  );
+  assert.ok(
+    PEER_BRIDGE_METHODS.length >= 10,
+    `peer 桥表应覆盖面板用到的动作，实际 ${PEER_BRIDGE_METHODS.length} 条`
+  );
+  for (const def of PEER_BRIDGE_METHODS) {
+    assert.ok(
+      PEER_ACTION_NAMES.includes(def.action),
+      `peer 桥里的 peer:${def.action} 必须在 src/peer/actions.js 的动作表里`
+    );
   }
   const uiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'headless', 'desktop-ui.js'), 'utf8');
   const rendererPeerSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'renderer-peer.js'), 'utf8');
+  assert.ok(
+    /peerBridgeShimLines\(\)/.test(uiSrc),
+    'headless 网页替身必须从 PEER_BRIDGE_METHODS 生成 peer 方法（别手写第三份）'
+  );
+  const bridgeMethods = new Set(PEER_BRIDGE_METHODS.map((def) => def.method));
+  // 事件订阅不是「动作」（没有对应的 `peer.<action>` 帧）：`onPeerEvent` 由 preload / 网页替身各接一次。
+  const EVENT_METHODS = new Set(['onPeerEvent']);
+  for (const entry of ['src/preload.js', 'src/headless/desktop-ui.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', entry), 'utf8');
+    for (const name of EVENT_METHODS) {
+      assert.ok(new RegExp(`\\b${name}:`).test(src), `${entry} 必须实现事件订阅 ${name}`);
+    }
+  }
   const usedByPanel = new Set([...rendererPeerSrc.matchAll(/peerApi\.(\w+)/g)].map((m) => m[1]));
   for (const name of usedByPanel) {
+    if (EVENT_METHODS.has(name)) continue;
     assert.ok(
-      new RegExp(`\\b${name}:`).test(uiSrc),
-      `桌面面板用到的 ${name} 必须在 headless 网页替身（desktop-ui.js）里实现，否则网页里 Bot 面板是空的`
+      bridgeMethods.has(name),
+      `桌面面板用到的 ${name} 必须在 peer 桥表（src/peer/actions.js#PEER_BRIDGE_METHODS）里，` +
+        '否则桌面 preload 与 headless 网页替身都会缺这个方法（Bot 面板空白）'
     );
   }
 

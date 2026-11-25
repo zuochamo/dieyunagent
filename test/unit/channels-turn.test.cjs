@@ -4,6 +4,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { createChannelStore } = require('../../src/channels/store');
 const {
   createChannelTurnRunner,
@@ -23,6 +24,22 @@ const fakeSafeStorage = {
 function tmpUserData() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'ch-turn-'));
 }
+
+/**
+ * 按企微长连接的口径加密：AES-256-CBC，密钥 32 字节、IV 取密钥前 16 字节。
+ * `padTo32` 复现文档里的「填充至 32 字节的倍数」——那种载荷 Node 的 autoPadding 会判错。
+ */
+function encryptLikeWecom(plain, keyText, padTo32) {
+  const key = Buffer.from(keyText, 'utf8');
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, key.subarray(0, 16));
+  if (!padTo32) return Buffer.concat([cipher.update(plain), cipher.final()]);
+  const padLen = 32 - (plain.length % 32) || 32;
+  cipher.setAutoPadding(false);
+  const body = Buffer.concat([plain, Buffer.alloc(padLen, padLen)]);
+  return Buffer.concat([cipher.update(body), cipher.final()]);
+}
+
+const WECOM_KEY = 'K'.repeat(32);
 
 /** 记录 RPC 调用；会话类返回最小值，其余给 ok */
 function makeGateway(sink) {
@@ -94,6 +111,90 @@ describe('channels/agent-turn', () => {
       expect(att.ledgerNotes[0].startsWith('[图片] ')).toBe(true);
       expect(att.ledgerAttachments).toHaveLength(1);
       expect(fs.existsSync(att.ledgerAttachments[0].path)).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('解密企微 AES-256-CBC 密文后再进多模态（长连接回调的图片是加密的）', async () => {
+    const pngBytes = Buffer.from(PNG_1PX.split(',')[1], 'base64');
+    const cipherText = encryptLikeWecom(pngBytes, WECOM_KEY, false);
+    expect(cipherText.subarray(0, 4).equals(pngBytes.subarray(0, 4))).toBe(false);
+    const realFetch = globalThis.fetch;
+    // CDN 只给 application/octet-stream：判型必须靠解密后的魔数
+    globalThis.fetch = async () =>
+      new Response(cipherText, { headers: { 'content-type': 'application/octet-stream' } });
+    try {
+      const att = await prepareAttachments({
+        attachments: [{ kind: 'image', url: 'https://wwfile.example.com/a.jpg', aeskey: WECOM_KEY }],
+        userDataPath: userData,
+        channelId: channel.id,
+        workspacePath: ''
+      });
+      expect(att.imageParts).toHaveLength(1);
+      const dataUrl = att.imageParts[0].image_url.url;
+      expect(dataUrl.startsWith('data:image/png;base64,')).toBe(true);
+      expect(Buffer.from(dataUrl.split(',')[1], 'base64').equals(pngBytes)).toBe(true);
+      expect(att.ledgerNotes[0].startsWith('[图片] ')).toBe(true);
+      // 落盘副本也已解密（不再是密文）
+      expect(fs.readFileSync(att.ledgerAttachments[0].path).equals(pngBytes)).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('填充到 32 字节倍数的密文也能解（企微口径，Node 的 autoPadding 会判错）', async () => {
+    const pngBytes = Buffer.from(PNG_1PX.split(',')[1], 'base64');
+    const cipherText = encryptLikeWecom(pngBytes, WECOM_KEY, true);
+    expect(cipherText.length % 32).toBe(0);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(cipherText);
+    try {
+      const att = await prepareAttachments({
+        attachments: [{ kind: 'image', url: 'https://wwfile.example.com/b.jpg', aeskey: WECOM_KEY }],
+        userDataPath: userData,
+        channelId: channel.id,
+        workspacePath: ''
+      });
+      expect(att.imageParts).toHaveLength(1);
+      expect(Buffer.from(att.imageParts[0].image_url.url.split(',')[1], 'base64').equals(pngBytes)).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('aeskey 不对就明确报解密失败，不把乱码当图片注入', async () => {
+    const pngBytes = Buffer.from(PNG_1PX.split(',')[1], 'base64');
+    const cipherText = encryptLikeWecom(pngBytes, WECOM_KEY, false);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(cipherText);
+    try {
+      const att = await prepareAttachments({
+        attachments: [{ kind: 'image', url: 'https://wwfile.example.com/c.jpg', aeskey: 'X'.repeat(32) }],
+        userDataPath: userData,
+        channelId: channel.id,
+        workspacePath: ''
+      });
+      expect(att.imageParts).toHaveLength(0);
+      expect(att.ledgerNotes[0]).toContain('解密失败');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('没有 aeskey 但内容不是图片：明确说不进视觉通道，也不落一份假的 jpg', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(Buffer.alloc(64, 7));
+    try {
+      const att = await prepareAttachments({
+        attachments: [{ kind: 'image', url: 'https://wwfile.example.com/d.jpg' }],
+        userDataPath: userData,
+        channelId: channel.id,
+        workspacePath: ''
+      });
+      expect(att.imageParts).toHaveLength(0);
+      expect(att.ledgerAttachments).toHaveLength(0);
+      expect(att.ledgerNotes[0]).toContain('不是可识别的图片');
     } finally {
       globalThis.fetch = realFetch;
     }

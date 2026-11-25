@@ -28,6 +28,16 @@ describe('schema-rules · matches（条件判断）', () => {
     expect(present({ a: '  ' }, 'a')).toBe(false);
     expect(present({ content: '  ' }, 'content')).toBe(true);
   });
+
+  test('workspace 的空串是「有意义的空值」（plan_update 靠它改回跟随工作空间）', () => {
+    expect(present({ workspace: '' }, 'workspace')).toBe(true);
+    const ok = evaluateRules('plan_update', params('plan_update'), { id: 'p1', workspace: '' });
+    expect(ok.ok).toBe(true);
+    // 其它可编辑字段的空串仍然算「没给」：只给 id + 空 name 时应该被判缺参数
+    const bad = evaluateRules('plan_update', params('plan_update'), { id: 'p1', name: '   ' });
+    expect(bad.ok).toBe(false);
+    expect(bad.errorCode).toBe('MISSING_ARG');
+  });
 });
 
 describe('schema-rules · lsp 的三种 operation', () => {

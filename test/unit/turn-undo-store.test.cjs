@@ -200,7 +200,8 @@ describe('turn-undo-store: 元数据与内容分离', () => {
     assert.equal(record.files['old.js'].before, 'legacy-content', 'v1 内联内容必须读得回来');
 
     // 任何一次写入都应把它升级成 v2
-    svc.markTurnTouched({ sessionId: SESSION, turnId: TURN, paths: ['old.js'] });
+    // 任何一次写入都该把它升级成 v2（这里用「再拍一批 checkpoint」触发落盘）
+    svc.captureBatchCheckpoint({ sessionId: SESSION, turnId: TURN, round: 1 });
     await waitForMeta(userData);
     await waitFor(async () => {
       const text = fs.readFileSync(sessionJsonPath(userData), 'utf8');

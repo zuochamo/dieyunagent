@@ -65,6 +65,11 @@ function makeRemote(overrides = {}) {
  */
 function makeFs({ remote = null, allowedRoots = [], sandboxMode = 'danger-full-access' } = {}) {
   const localCalls = { rustRead: [], textRead: [], sandboxWrites: [], undo: [], grep: [], glob: [] };
+  const grepImpl = async (cwd, opts) => {
+    localCalls.grepViaRemoteExec = { cwd, opts };
+    return { ok: true, matches: [], source: 'remote_grep' };
+  };
+  const globImpl = async () => null;
   const handlers = createFsHandlers({
     perms: { hostControl: true, fsRead: true, fsWrite: true, shellExec: true },
     getRemoteFs: () => remote,
@@ -115,21 +120,27 @@ function makeFs({ remote = null, allowedRoots = [], sandboxMode = 'danger-full-a
         return { ok: true, matches: [], source: 'remote-agent' };
       }
     }),
-    grepViaRemoteExec: async (cwd, opts) => {
-      localCalls.grepViaRemoteExec = { cwd, opts };
-      return { ok: true, matches: [], source: 'remote_grep' };
-    },
+    grepViaRemoteExec: grepImpl,
     grepWorkspace: async (root, opts) => {
       localCalls.grep.push({ root, opts });
       return { ok: true, matches: [], source: 'rg' };
     },
-    globViaRemoteExec: async () => null,
+    globViaRemoteExec: globImpl,
     globWorkspace: async (root, opts) => {
       localCalls.glob.push({ root, opts });
       return { ok: true, files: [], source: 'rg' };
     },
     sandboxMode
   });
+  /**
+   * 假远端 fs 也要实现适配器接口里的 grep / glob：
+   * 真实 SFTP 适配器（`remote-fs.js`）就是由 `rpc.js:getRemoteFs()` 注入的
+   * `execGrep / execGlob` 接到 `ssh.exec` 上的，这里照同一条契约接，避免测试替身与生产接口漂移。
+   */
+  if (remote) {
+    remote.grep = async (params) => grepImpl('/srv/app', params);
+    remote.glob = async (params) => globImpl('/srv/app', params);
+  }
   return { handlers, localCalls };
 }
 

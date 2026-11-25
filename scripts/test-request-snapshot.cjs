@@ -121,7 +121,8 @@ async function main() {
     assert.equal(compactedLeft[0].compactionArchiveId, 42);
     assert.equal(compactedLeft[0].tokensAfter, 300);
 
-    // 4) 去重语义透传：systemText=null 的行仍然带 systemHash
+    // 4) 内容寻址去重：行里只留 hash，`get` 按 hash 从 snapshot_blobs 拼回正文
+    //    （docs/REQUEST-SNAPSHOT.md：「读侧 get 会自动拼回来，调用方看到的仍是全文」）
     const dedup = await bridge.invoke(
       'memory.request_snapshot_append',
       row({ systemText: null, systemHash: 'sh', toolsJson: null, keepPerSession: 5 }),
@@ -132,8 +133,12 @@ async function main() {
       { id: dedup.id },
       RPC_TIMEOUT_MS
     );
-    assert.equal(dedupRow.systemText, null);
     assert.equal(dedupRow.systemHash, 'sh');
+    assert.equal(
+      dedupRow.systemText,
+      'SYS',
+      'hash 命中 blob 时必须拼回全文（去重不等于丢正文）'
+    );
 
     // 5) 缺参报错（不是静默丢数据）
     const rejected = await bridge

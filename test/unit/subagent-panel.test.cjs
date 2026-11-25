@@ -8,7 +8,8 @@
  * 2. 有 live 就以 live 为准 —— 本轮没有子代理时不能拿上一轮的卡片冒充；
  * 3. live 消失（run 收尾）后保留最后一次快照，且状态必须是「已结束」；
  * 4. 快照按会话隔离；
- * 5. 标题状态 / 头部摘要文案。
+ * 5. 标题状态 / 头部摘要文案；
+ * 6. 上下两块版面里「现在该看谁」的判定（标签选中态，见 resolveSubagentSelection）。
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -43,7 +44,9 @@ function load(options = {}) {
        readSubagentPanelSnapshot: readSubagentPanelSnapshot,
        subagentPanelMetaText: subagentPanelMetaText,
        subagentCardStatusLabel: subagentCardStatusLabel,
-       snapshots: subagentPanelSnapshots
+       resolveSubagentSelection: resolveSubagentSelection,
+       snapshots: subagentPanelSnapshots,
+       selection: subagentPanelSelection
      };`
   );
   const api = factory(
@@ -99,7 +102,8 @@ describe('子代理面板：状态文案', () => {
 
   test('头部摘要三态', () => {
     const api = load();
-    assert.equal(api.subagentPanelMetaText([], false), '—');
+    // 空列表整块留白：页头上不出「—」「0 个」这类噪音（元素同时收起来）
+    assert.equal(api.subagentPanelMetaText([], false), '');
     assert.equal(
       api.subagentPanelMetaText([card('a', [{ round: 1, tools: [] }], { runDone: true })], true),
       '1 个 · 已结束'
@@ -172,5 +176,56 @@ describe('子代理面板：本次运行的快照语义', () => {
     // 换到另一个会话：读不到 s1 的快照
     api.sessionHolder.sessionId = 's2';
     assert.deepEqual(api.readSubagentPanelSnapshot().cards, []);
+  });
+});
+
+describe('子代理面板：选中哪个（上方标签 → 下方正文）', () => {
+  const done = (id) => card(id, [{ round: 1, tools: [] }], { runDone: true });
+  const live = (id) => card(id, [{ round: 1, tools: [] }], { runDone: false });
+
+  test('默认选「还在跑」的那个；没有在跑的退回第一个', () => {
+    // 三次独立加载：选择态按会话记，同一次加载里复用会把上一条断言的选择带过来
+    assert.equal(
+      load().resolveSubagentSelection([done('a'), live('b'), done('c')], 's1', true),
+      'b'
+    );
+    assert.equal(load().resolveSubagentSelection([done('a'), done('b')], 's1', true), 'a');
+    // run 已收尾（running=false）时不再按「在跑」挑，一律第一个
+    assert.equal(load().resolveSubagentSelection([done('a'), live('b')], 's1', false), 'a');
+  });
+
+  test('用户选过的仍在就保持不动（不会被新一轮在跑的抢走）', () => {
+    const api = load();
+    const cards = [done('a'), live('b')];
+    api.selection.set('s1', 'a');
+    assert.equal(api.resolveSubagentSelection(cards, 's1', true), 'a');
+  });
+
+  test('选过的没了就重新默认（不指向不存在的标签）', () => {
+    const api = load();
+    api.selection.set('s1', 'gone');
+    assert.equal(api.resolveSubagentSelection([done('a'), done('b')], 's1', true), 'a');
+  });
+
+  test('空列表清掉选择', () => {
+    const api = load();
+    api.selection.set('s1', 'a');
+    assert.equal(api.resolveSubagentSelection([], 's1', true), '');
+    assert.equal(api.selection.has('s1'), false);
+  });
+
+  test('换一轮（runId 变）清掉上一轮的选择', () => {
+    const runs = new Map([
+      ['s1', { runId: 'run-1', trace: [card('sa-build-1', [{ round: 1, tools: [] }])] }]
+    ]);
+    const api = load({ sessionActiveRuns: runs });
+    api.readSubagentPanelSnapshot();
+    api.selection.set('s1', 'sa-build-1');
+
+    // 新一轮复用同一个 id（namer 每轮从头编号），选择必须按轮清掉
+    runs.set('s1', { runId: 'run-2', trace: [card('sa-build-1', [{ round: 1, tools: [] }])] });
+    const snap = api.readSubagentPanelSnapshot();
+    assert.equal(api.selection.has('s1'), false);
+    assert.equal(api.resolveSubagentSelection(snap.cards, 's1', snap.running), 'sa-build-1');
   });
 });

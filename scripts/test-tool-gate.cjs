@@ -21,6 +21,7 @@ const {
 } = require('../src/agent/tool-gate');
 const { ToolHarnessSession } = require('../src/agent/tool-harness');
 const { AGENT_LIMITS_DEFAULTS } = require('../src/agent/agent-limits');
+const { createMainToolBridge } = require('../src/agent/tool-bridge-main');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assert failed');
@@ -33,7 +34,7 @@ async function main() {
   assert(TOOL_GATE_STAGES.join(',') === 'before,after', 'stages are before/after');
   assert(
     listHookIds().join(',') ===
-      'before:validate-args,before:tool-permission,before:read-only-scope,before:repeat-guard,after:telemetry,after:spill-output',
+      'before:validate-args,before:tool-permission,before:read-only-scope,before:subagent-scope,before:repeat-guard,after:telemetry,after:spill-output',
     `默认关卡顺序固定，实际 ${listHookIds().join(',')}`
   );
   assert(
@@ -341,6 +342,64 @@ async function main() {
     const plain = names(await buildMainAgentTools(fakeMcp));
     assert(plain.includes('subagent') === false && plain.includes('peer_send'), '默认档仍含 PEER_TOOLS');
     assert(plain.includes('mcp_pg__query'), '默认档仍注入 MCP');
+  }
+
+  // 4d) 子 Agent 作用域：研究子 Agent 的「只读」必须由执行层兑现
+  //     （清单只过滤了「发给模型」的工具表；模型仍可输出表外名字，别名归一后就是写类工具）
+  {
+    const make = (name, args, extra = {}) => {
+      const c = createToolCall({ name, args });
+      c.harness = { ctx: { sessionId: 's-sub', userDataPath, ...extra } };
+      return c;
+    };
+    const gate = (c) => runToolGateStage('before', c, DEFAULT_TOOL_GATE_HOOKS);
+
+    // 没有 allowedToolNames（普通对话 / planner 协调者）→ 不拦
+    const parent = make('fs_write_file', { filePath: 'a.txt', content: 'x' });
+    await gate(parent);
+    assert(!parent.block, '非子 Agent 循环不受该关卡影响');
+
+    const allowed = ['fs_read_file', 'grep', 'glob'];
+    const readOk = make('fs_read_file', { filePath: 'a.js' }, { allowedToolNames: allowed });
+    await gate(readOk);
+    assert(!readOk.block, `白名单内应放行：${readOk.block && readOk.block.errorCode}`);
+
+    // 表外写类工具（含别名归一后的 canonical 名）一律拒
+    const write = make('write_file', { path: 'a.js', content: 'x' }, { allowedToolNames: allowed });
+    await gate(write);
+    assert(
+      write.block && write.block.errorCode === 'SUBAGENT_TOOL_SCOPE',
+      `子 Agent 写文件必须被拦（实际 ${write.block && write.block.errorCode}）`
+    );
+    const exec = make('bash', { command: 'rm -rf x' }, { allowedToolNames: allowed });
+    await gate(exec);
+    assert(exec.block && exec.block.errorCode === 'SUBAGENT_TOOL_SCOPE', '子 Agent 跑命令必须被拦');
+    const nested = make('subagent', { task: 'x' }, { allowedToolNames: allowed });
+    await gate(nested);
+    assert(nested.block && nested.block.errorCode === 'SUBAGENT_TOOL_SCOPE', '子 Agent 再派子 Agent 必须被拦');
+
+    // 空表 = 子 Agent 但一个工具都没发：那是「全都拦」，不是「不拦」
+    // （以前写成 `!allowed.length` 一起放行 —— 白名单没送到时就静默变成没有任何限制）
+    const emptyTable = make('fs_read_file', { filePath: 'a.js' }, { allowedToolNames: [] });
+    await gate(emptyTable);
+    assert(emptyTable.block && emptyTable.block.errorCode === 'SUBAGENT_TOOL_SCOPE', '空白名单必须全拦');
+
+    // 真链路回归（2026-11-21 审计 P0）：`tool-bridge-main` 的 harnessCtx 曾经逐字段手抄、
+    // 漏掉 `allowedToolNames`/`harnessRunKey` —— 上面这些手搓 `harness.ctx` 的用例全绿，
+    // 而生产链路上关卡恒为 null = 不拦。所以必须经 `createMainToolBridge().executeAgentTool`
+    // 真走一遍（手搓 harness 是夹具，不是契约）。
+    const bridge = createMainToolBridge({ userDataPath });
+    const writeTarget = path.join(userDataPath, 'blocked-by-scope.txt');
+    const realBlocked = await bridge.executeAgentTool(
+      'fs_write_file',
+      { filePath: writeTarget, content: 'x' },
+      { sessionId: 's-sub-bridge', userDataPath, allowedToolNames: ['fs_read_file'] }
+    );
+    assert(
+      realBlocked && realBlocked.errorCode === 'SUBAGENT_TOOL_SCOPE',
+      `经真链路的子 Agent 白名单必须生效（实际 ${realBlocked && realBlocked.errorCode}）`
+    );
+    assert(!fs.existsSync(writeTarget), '被拦的子 Agent 写调用不得落盘');
   }
 
   // 5) after 关卡：顺序 = 声明顺序，且外层追加项排在默认项之后

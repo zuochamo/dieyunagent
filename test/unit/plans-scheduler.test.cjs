@@ -58,4 +58,33 @@ describe('PlansScheduler', () => {
     vi.advanceTimersByTime(7 * 86400000);
     expect(runs).toHaveLength(1);
   });
+
+  /**
+   * 回归：同一计划只许有一个待跑 timer。
+   *
+   * `reload()`（保存/开关/启动）与「跑完再上钟」（`_tick` 收尾）是两条都会上钟的路。
+   * 旧 timer 若只是被 `timers` map 覆盖、没人 clearTimeout，就是个谁也管不着的幽灵：
+   * 到期时和新 timer 一起把同一个计划跑两遍 —— 2026-11-18 17:00:08 线上实测到过
+   * （同一计划连着起跑两次，两个 runId 相差 90ms）。
+   */
+  it('重复上钟不会把同一个计划跑两遍', () => {
+    vi.useFakeTimers();
+    const now = new Date(2026, 8, 21, 6, 0, 0);
+    vi.setSystemTime(now);
+    const plan = {
+      id: 'p3',
+      name: '巡检',
+      enabled: true,
+      onceAt: '',
+      rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
+      dtstart: now.toISOString()
+    };
+    const runs = [];
+    const scheduler = makeScheduler(plan, runs);
+    scheduler.reload();
+    scheduler._arm(plan); // 第二条上钟路径（运行结束再上钟 / 再次 reload 的等效形状）
+
+    vi.advanceTimersByTime(3 * 3600000 + 1);
+    expect(runs).toHaveLength(1);
+  });
 });

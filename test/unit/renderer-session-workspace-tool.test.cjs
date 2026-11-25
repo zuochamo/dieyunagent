@@ -44,10 +44,21 @@ function loadModule(overrides = {}) {
     'renderArtifactsList',
     'refreshProductsPanelIfActive',
     'showAgentToast',
+    'gatewayCall',
     `${source}
      return { applySessionWorkspaceFromTool, applyLocalWorkspacePath, pickLocalWorkspace };`
   );
-  const window = { diecloud: wsApi, applySessionWorkspaceFromTool: null };
+  const window = {
+    diecloud: wsApi,
+    applySessionWorkspaceFromTool: null,
+    // 候选匹配的纯函数（agent-bundle 在真实渲染器里注册为 DieyunWorkspaceCandidates）
+    DieyunWorkspaceCandidates: require('../../src/agent/workspace-candidates'),
+    ...(overrides.window || {})
+  };
+  const sessionRows = overrides.sessionRows || [
+    { id: 's1', workspaceProjectPath: 'F:\\dieyundaizhang' },
+    { id: 's2', workspaceProjectPath: 'F:\\dieyuntools' }
+  ];
   const mod = factory(
     window,
     { querySelector: () => null },
@@ -62,9 +73,19 @@ function loadModule(overrides = {}) {
     () => {},
     () => {},
     () => {},
-    (t, b) => calls.push(['toast', t, b])
+    (t, b) => calls.push(['toast', t, b]),
+    async (method, args) => {
+      calls.push([method, args]);
+      if (method === 'memory.sessions_list') return sessionRows;
+      return { ok: true };
+    }
   );
   return { mod, calls, bound, window };
+}
+
+/** 只取真正的「切空间」调用（会话列表查询是取候选，不算切换）。 */
+function switchCalls(calls) {
+  return calls.filter(([m]) => m === 'setLocalWorkspace');
 }
 
 describe('renderer/applySessionWorkspaceFromTool（桌面换工作空间）', () => {
@@ -73,7 +94,7 @@ describe('renderer/applySessionWorkspaceFromTool（桌面换工作空间）', ()
     const res = await mod.applySessionWorkspaceFromTool({ workspace: 'F:\\dieyundaizhang' });
     expect(res.ok).toBe(true);
     expect(res.workspacePath).toBe('F:\\dieyundaizhang');
-    expect(calls).toEqual([['setLocalWorkspace', 'F:\\dieyundaizhang']]);
+    expect(switchCalls(calls)).toEqual([['setLocalWorkspace', 'F:\\dieyundaizhang']]);
     expect(bound).toEqual([['current', 'F:\\dieyundaizhang']]);
     // 必须说清「本轮上下文还是旧目录的」，否则模型会在同一轮继续用错目录
     expect(res.note).toContain('下一轮');
@@ -83,15 +104,50 @@ describe('renderer/applySessionWorkspaceFromTool（桌面换工作空间）', ()
     const { mod, calls, bound } = loadModule();
     const res = await mod.applySessionWorkspaceFromTool({ workspace: 'default' });
     expect(res.ok).toBe(true);
-    expect(calls).toEqual([['setLocalWorkspace', null]]);
+    expect(switchCalls(calls)).toEqual([['setLocalWorkspace', null]]);
     expect(bound).toEqual([['current', null]]);
   });
 
-  it('空参数不切换，只提示当前状态', async () => {
+  it('空参数不切换，返回候选清单（模型不知道有哪些项目时先看这个）', async () => {
     const { mod, calls } = loadModule();
     const res = await mod.applySessionWorkspaceFromTool({});
     expect(res.ok).toBe(false);
-    expect(calls).toEqual([]);
+    expect(switchCalls(calls)).toEqual([]);
+    expect(res.error).toContain('dieyundaizhang');
+    expect(res.error).toContain('default');
+  });
+
+  it('只给项目名也能切（目录名唯一即认）', async () => {
+    const { mod, calls, bound } = loadModule();
+    const res = await mod.applySessionWorkspaceFromTool({ workspace: 'dieyuntools' });
+    expect(res.ok).toBe(true);
+    expect(res.workspacePath).toBe('F:\\dieyuntools');
+    expect(switchCalls(calls)).toEqual([['setLocalWorkspace', 'F:\\dieyuntools']]);
+    expect(bound).toEqual([['current', 'F:\\dieyuntools']]);
+  });
+
+  it('项目名匹配到多个时要求指明，不乱猜', async () => {
+    const { mod, calls } = loadModule({
+      sessionRows: [
+        { id: 'a', workspaceProjectPath: 'F:\\dieyun' },
+        { id: 'b', workspaceProjectPath: 'F:\\dieyun-server' }
+      ]
+    });
+    // 「dieyun」精确命中目录名，仍按精确走；用子串才有歧义
+    const res = await mod.applySessionWorkspaceFromTool({ workspace: 'diey' });
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('多个项目');
+    expect(res.error).toContain('dieyun-server');
+    expect(switchCalls(calls)).toEqual([]);
+  });
+
+  it('找不到的项目名给出候选，不硬切', async () => {
+    const { mod, calls } = loadModule();
+    const res = await mod.applySessionWorkspaceFromTool({ workspace: '没这个项目' });
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('找不到工作空间');
+    expect(res.error).toContain('dieyundaizhang');
+    expect(switchCalls(calls)).toEqual([]);
   });
 
   it('后台会话：只绑那条会话，不动桌面视图', async () => {
@@ -101,7 +157,7 @@ describe('renderer/applySessionWorkspaceFromTool（桌面换工作空间）', ()
       sessionId: 'sess-background'
     });
     expect(res.ok).toBe(true);
-    expect(calls).toEqual([]);
+    expect(switchCalls(calls)).toEqual([]);
     expect(bound).toEqual([['sess-background', 'F:\\dieyuntools']]);
   });
 
@@ -111,6 +167,6 @@ describe('renderer/applySessionWorkspaceFromTool（桌面换工作空间）', ()
     const res = await mod.applySessionWorkspaceFromTool({ workspace: 'F:\\dieyuntools' });
     expect(res.ok).toBe(false);
     expect(res.error).toContain('远程任务');
-    expect(calls).toEqual([]);
+    expect(switchCalls(calls)).toEqual([]);
   });
 });

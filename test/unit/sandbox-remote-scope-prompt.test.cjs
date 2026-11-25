@@ -9,14 +9,14 @@
  */
 const assert = require('node:assert/strict');
 
-const { formatPermissionsChunk } = require('../../src/agent/agent-system-prompt');
+const { formatCapabilityBlock } = require('../../src/agent/agent-system-prompt');
 const { remoteAllowedRoots } = require('../../src/gateway/path-policy');
 
 const FULL = { hostControl: true, fsRead: true, fsWrite: true, shellExec: true, unrestrictedPaths: true };
 
 describe('权限说明与远端根的单一来源一致', () => {
   it('放开档只声明本机，不许把远程也说成放开', () => {
-    const text = formatPermissionsChunk(FULL);
+    const text = formatCapabilityBlock({ permissions: FULL });
     assert.match(text, /本机已完全放开/);
     assert.ok(!/远程\s*\/\s*下任意路径/.test(text), '不许声称远程 / 全放开');
     assert.match(text, /远程工作空间不受此开关影响/, '要明说远程不受影响，并给出真实范围');
@@ -33,6 +33,6 @@ describe('权限说明与远端根的单一来源一致', () => {
   });
 
   it('默认（未放开）不提路径限制', () => {
-    assert.ok(!/路径限制/.test(formatPermissionsChunk({ ...FULL, unrestrictedPaths: false })));
+    assert.ok(!/路径限制/.test(formatCapabilityBlock({ permissions: { ...FULL, unrestrictedPaths: false } })));
   });
 });

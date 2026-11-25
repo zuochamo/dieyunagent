@@ -17,6 +17,8 @@ const path = require('node:path');
 const TRACE_DOM_SRC = path.join(__dirname, '..', '..', 'src', 'renderer', 'renderer-thinking-trace-dom.js');
 const CHAT_RENDER_SRC = path.join(__dirname, '..', '..', 'src', 'renderer', 'renderer-chat-render.js');
 const CHAT_SCROLL_SRC = path.join(__dirname, '..', '..', 'src', 'renderer', 'renderer-chat-scroll.js');
+/** 数字单一来源：`SCROLL_DAMP_TAU_MS` 这类常量在 renderer-constants.js（index.html 里先于 chat 模块加载） */
+const CONSTANTS_SRC = path.join(__dirname, '..', '..', 'src', 'renderer', 'renderer-constants.js');
 
 /** 最小元素 stub：只实现标记函数与追帧用到的面 */
 function makeEl(props = {}) {
@@ -63,6 +65,9 @@ var reconcileSessionLiveRunUi = function () {};
 
 function loadChatRender(opts) {
   const source = fs.readFileSync(CHAT_RENDER_SRC, 'utf8');
+  // 常量表按真实加载顺序先求值（`renderer-constants.js` 在 index.html 里排在 chat 模块之前），
+  // 否则被测脚本里引用的 `SCROLL_DAMP_TAU_MS` 会是未定义 —— 那是夹具缺东西，不是被测逻辑坏了。
+  const constants = fs.readFileSync(CONSTANTS_SRC, 'utf8');
   const factory = new Function(
     'window',
     'document',
@@ -75,7 +80,7 @@ function loadChatRender(opts) {
     'pinChatToBottom',
     'updateLastTurnFloat',
     'motionMs',
-    `${CHAT_RENDER_DEPS}${source}
+    `${constants}${CHAT_RENDER_DEPS}${source}
      return { dampedChatFollowStep, pinStreamingChatToBottom };`
   );
   return factory(

@@ -624,10 +624,16 @@ async function main() {
     const catalog = require('../src/agent/tool-catalog');
     const names = Object.keys(createMainToolHandlers({})).sort();
     const expected = [
+      // 看一眼自己（main-tools/self.js）：只读自检，档位 / 可写根 / 生效预算 / 最近失败面
+      'agent_inspect',
+      // 申请一项能力（同一通道，payload.kind 分发：权限开关 / MCP 凭据）
+      'agent_capability',
       'agents_md_propose',
       'camera_look',
       'desktop_camera_look',
       'desktop_camera_ptz',
+      // 「运行模式」类：模型执行途中申请交给 planner（main-tools/agent-mode.js）
+      'fan_out',
       'goal_check',
       'goal_finish',
       'goal_start',
@@ -639,23 +645,33 @@ async function main() {
       'peer_claim',
       'peer_list',
       'peer_send',
+      // 身体（点点）：聊天轮也要能调参数（main-tools/pet.js，语义在 alive/pet-tools.js）
+      'pet_act',
+      'pet_set',
       'plan_cancel',
       'plan_create',
       'plan_delete',
       'plan_list',
       'plan_run',
+      // 计划可改可停（open/close 都要有）：plan_update 改规则，plan_set_enabled 停用但保留事实
+      'plan_set_enabled',
+      'plan_update',
       'session_recall',
       'skill_create',
       'skill_delete',
+      // 技能可改（不删就不该重建）
+      'skill_update',
       'ssh',
       'worktree'
     ].sort();
-    assert.deepStrictEqual(names, expected, 'Main 专属工具的注册表必须正好是这 25 个（多一个少一个都是事故）');
-    // goal_* 不在 ALL_STATIC_TOOLS 里（那是「静态全局表」）：它由 renderer-tool-defs 常驻下发、
-    // 目标型计划另给一份。所以这里按「静态表 ∪ 目标工具」判成员，仍然能抓到名字打错。
+    assert.deepStrictEqual(names, expected, 'Main 专属工具的注册表必须正好是这 33 个（多一个少一个都是事故）');
+    // goal_* 与 pet_* 不在 ALL_STATIC_TOOLS 里（那是「静态全局表」）：goal_* 由 renderer-tool-defs 常驻下发、
+    // 目标型计划另给一份；pet_* 只有桌面版注入。所以这里按「静态表 ∪ 目标工具 ∪ 身体工具」判成员，
+    // 仍然能抓到名字打错。
     const known = new Map();
     for (const t of catalog.ALL_STATIC_TOOLS) known.set(t.function.name, t);
     for (const t of catalog.GOAL_TOOLS) known.set(t.function.name, t);
+    for (const t of catalog.PET_TOOLS) known.set(t.function.name, t);
     known.set(catalog.GOAL_START_TOOL.function.name, catalog.GOAL_START_TOOL);
     known.set(catalog.GOAL_UPDATE_TOOL.function.name, catalog.GOAL_UPDATE_TOOL);
     for (const n of names) {
@@ -769,6 +785,258 @@ async function main() {
     const bridge = makeBridge({});
     const r = await bridge.executeAgentTool('agents_md_propose', {}, ctx());
     assert.ok(r && (r.error || r.ok === false), 'agents_md_propose 至少给出结论而不是抛错');
+  }
+  {
+    // agent_inspect：只读自检。三块事实各有唯一来源（沙箱 RPC / 权限快照 / 遥测摘要），
+    // 且**不得**产生任何写操作 —— 它是「看一眼」，不是状态机。
+    const gw = makeGateway({
+      permissions: {
+        hostControl: true,
+        fsRead: true,
+        fsWrite: false,
+        shellExec: true,
+        webFetch: true,
+        osControl: false,
+        camera: false,
+        desktopCamera: false
+      }
+    });
+    const passthrough = gw.invokeRpc;
+    gw.invokeRpc = async (method, params) => {
+      if (method === 'permissions.sandbox_state') {
+        return {
+          mode: 'workspace-write',
+          writableRoots: ['/ws', '/ud'],
+          workspaceRoots: ['/ws'],
+          internalRoots: ['/ud'],
+          grantedPaths: ['/extra'],
+          remoteGoverned: false
+        };
+      }
+      return passthrough(method, params);
+    };
+    const bridge = makeBridge({ gateway: gw });
+    const r = await bridge.executeAgentTool('agent_inspect', {}, ctx());
+    assert.strictEqual(r.ok, true, 'agent_inspect ok');
+    assert.strictEqual(r.sandbox.mode, 'workspace-write', '沙箱档位来自 permissions.sandbox_state');
+    assert.deepStrictEqual(r.sandbox.workspaceRoots, ['/ws'], '可写根透传工作区根');
+    assert.deepStrictEqual(r.sandbox.grantedPaths, ['/extra'], '已批准位置透传');
+    assert.strictEqual(r.sandbox.internalCount, 1, '内部目录只报个数');
+    assert.ok(
+      r.capabilities.on.some((c) => c.key === 'fsRead' && c.label === '读文件'),
+      '能力开着的要带人话标签'
+    );
+    assert.ok(r.capabilities.off.some((c) => c.key === 'fsWrite'), '关着的能力也要列出来');
+    assert.ok(r.limits.loop.maxRounds > 0, '循环预算取生效值而不是缺省表');
+    assert.strictEqual(typeof r.telemetry.successRate, 'number', '遥测摘要是既有实现');
+    assert.ok(String(r.note).includes('只读'), '要说清它是只读的');
+    assert.ok(
+      !gw.methods().some((m) => /_put$|_set$|write|edit/.test(m)),
+      '自检不得产生任何写调用'
+    );
+  }
+
+  {
+    // plan_update：**get → 合并 → upsert**，运行态不被表单冲掉；改完要重新上钟
+    const plan = {
+      id: 'p1',
+      name: '日报',
+      trigger: 'schedule',
+      rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
+      prompt: '汇总昨天的提交',
+      evidence: [{ command: 'npm test', ok: true }],
+      attempt: 3,
+      outcome: null,
+      enabled: true
+    };
+    const seen = {};
+    let reloaded = 0;
+    const plansStore = {
+      get: (id) => (id === 'p1' ? { ...plan } : null),
+      upsert: (patch) => {
+        seen.patch = patch;
+        return { ...patch };
+      },
+      setEnabled: () => null
+    };
+    const bridge = makeBridge({
+      deps: { plansStore, getPlansScheduler: () => ({ reload: () => { reloaded += 1; } }) }
+    });
+    const r = await bridge.executeAgentTool('plan_update', { id: 'p1', rrule: 'FREQ=DAILY;BYHOUR=10;BYMINUTE=0' }, ctx());
+    assert.strictEqual(r.ok, true, 'plan_update ok');
+    assert.strictEqual(seen.patch.rrule, 'FREQ=DAILY;BYHOUR=10;BYMINUTE=0', '改的是 rrule');
+    assert.strictEqual(seen.patch.prompt, '汇总昨天的提交', '没给的字段保持原样');
+    assert.deepStrictEqual(seen.patch.evidence, plan.evidence, '检查事实不被表单冲掉');
+    assert.strictEqual(seen.patch.attempt, 3, '轮次不被表单冲掉');
+    assert.strictEqual(reloaded, 1, '改完必须重新上钟');
+    assert.ok(r.change && r.change.target === 'plan:p1', '带改动回执');
+    assert.strictEqual(r.change.effectiveFrom, 'immediate', '计划改完当场生效');
+
+    // 类型不在这里切换（定时 ↔ 目标）：说清要删了重建，别半套
+    const bad = await bridge.executeAgentTool('plan_update', { id: 'p1', goal: { objective: 'x', checks: [] } }, ctx());
+    assert.strictEqual(bad.ok, false, '定时型计划不能被改成目标型');
+    assert.strictEqual(bad.errorCode, 'PLAN_MODE_FIXED', '给专用错误码');
+
+    const missing = await bridge.executeAgentTool('plan_update', { id: 'nope', name: 'x' }, ctx());
+    assert.strictEqual(missing.errorCode, 'PLAN_NOT_FOUND', '不存在的计划给结构化错误');
+
+    // 空闲触发的计划也不吃 rrule：收下只会静默不生效
+    const idleStore = {
+      get: () => ({ id: 'p3', trigger: 'idle', enabled: true, prompt: 'x', name: 'n' }),
+      upsert: () => null,
+      setEnabled: () => null
+    };
+    const idleBridge = makeBridge({
+      deps: { plansStore: idleStore, getPlansScheduler: () => ({ reload: () => {} }) }
+    });
+    const idle = await idleBridge.executeAgentTool('plan_update', { id: 'p3', rrule: 'FREQ=DAILY' }, ctx());
+    assert.strictEqual(idle.errorCode, 'PLAN_MODE_FIXED', '空闲触发计划不收 rrule（别静默吞掉）');
+  }
+  {
+    // 目标型计划改验收面：objective+checks 整体替换，但没给 cwd 时要沿用旧值
+    const goalPlan = {
+      id: 'g1',
+      name: '目标',
+      trigger: 'goal',
+      prompt: 'x',
+      enabled: true,
+      goal: { objective: '旧目标', checks: [{ id: 'c1', command: 'npm test' }], cwd: 'E:\\proj', todos: [{ text: 't', done: false }] }
+    };
+    let patch = null;
+    const bridge = makeBridge({
+      deps: {
+        plansStore: { get: () => ({ ...goalPlan }), upsert: (p) => { patch = p; return { ...p }; }, setEnabled: () => null },
+        getPlansScheduler: () => ({ reload: () => {} })
+      }
+    });
+    const r = await bridge.executeAgentTool(
+      'plan_update',
+      { id: 'g1', goal: { objective: '新目标', checks: ['npm run build'] } },
+      ctx()
+    );
+    assert.strictEqual(r.ok, true, '目标型计划可以改验收面');
+    assert.strictEqual(patch.goal.cwd, 'E:\\proj', '没给 cwd 时沿用旧值（别悄悄清掉）');
+    assert.deepStrictEqual(patch.goal.checks, ['npm run build'], '检查命令按给的替换');
+  }
+  {
+    // mcp_manage：只有**真的改了东西**才留回执；list / request_credential 都不算改动
+    const manager = {
+      applyToolRequest: async (payload) => ({
+        ok: true,
+        action: payload.action,
+        id: payload.id || '',
+        servers: [{ id: 'pg', enabled: true, configured: true }]
+      })
+    };
+    const bridge = makeBridge({ deps: { mcpManager: manager } });
+    const list = await bridge.executeAgentTool('mcp_manage', { action: 'list' }, ctx());
+    assert.strictEqual(list.ok, true, 'mcp list ok');
+    assert.strictEqual(list.change, undefined, '只读动作不该写改动回执');
+    const cred = await bridge.executeAgentTool('mcp_manage', { action: 'request_credential', id: 'pg' }, ctx());
+    assert.strictEqual(cred.ok, true, 'request_credential ok');
+    assert.strictEqual(cred.change, undefined, '请人填凭据不是一次改动');
+    const enabled = await bridge.executeAgentTool('mcp_manage', { action: 'enable', id: 'pg', enabled: true }, ctx());
+    assert.ok(enabled.change && enabled.change.target === 'mcp:enable:pg', '真改了配置才留回执');
+    assert.strictEqual(enabled.change.effectiveFrom, 'immediate');
+  }
+  {
+    // plan_set_enabled：停用但保留事实（不删、不 cancel）
+    const plan = { id: 'p2', name: '盯盘', trigger: 'goal', enabled: true, attempt: 5 };
+    const calls = [];
+    let reloaded = 0;
+    const planScheduler = { reload: () => { reloaded += 1; } };
+    const bridge = makeBridge({
+      deps: {
+        plansStore: {
+          get: (id) => (id === 'p2' ? { ...plan } : null),
+          setEnabled: (id, enabled) => { calls.push([id, enabled]); return { ...plan, enabled }; },
+          upsert: () => null
+        },
+        getPlansScheduler: () => planScheduler
+      }
+    });
+    const r = await bridge.executeAgentTool('plan_set_enabled', { id: 'p2', enabled: false }, ctx());
+    assert.strictEqual(r.ok, true, 'plan_set_enabled ok');
+    assert.deepStrictEqual(calls, [['p2', false]], '落到 store.setEnabled（不是 delete/cancel）');
+    assert.strictEqual(reloaded, 1, '停用也要重新上钟（把 timer 拆掉）');
+    assert.strictEqual(r.change.effectiveFrom, 'immediate');
+  }
+  {
+    // skill_update：改正文而不是「删了重建」；目录与启用状态不变
+    const updatedCalls = [];
+    const changed = [];
+    const bridge = makeBridge({
+      deps: {
+        updateUserSkill: async (ud, ws, payload) => {
+          updatedCalls.push(payload);
+          return { dir: payload.dir, skillPath: payload.dir + '/SKILL.md', before: 'old', after: 'new' };
+        },
+        onSkillsChanged: (x) => changed.push(x)
+      }
+    });
+    const r = await bridge.executeAgentTool('skill_update', { dir: '/skills/demo', content: '新正文' }, ctx());
+    assert.strictEqual(r.ok, true, 'skill_update ok');
+    assert.deepStrictEqual(updatedCalls, [{ dir: '/skills/demo', name: undefined, description: undefined, content: '新正文' }], '参数直传');
+    assert.strictEqual(changed.length, 1, '改完必须通知技能目录变化');
+    assert.ok(r.change && r.change.target === 'skill:/skills/demo', '带改动回执');
+  }
+
+  {
+    // agent_capability：申请闭环。三条分支都要对：
+    // 1) 没有界面（频道 / headless / 计划轮）→ 如实说弹不出来 + 给「去哪儿开」，不假装成功；
+    // 2) 有界面 → 把描述符（页面 / 锚点 / 理由）送到界面；
+    // 3) 已经开着 → 不重复打扰，指回去看本轮能力事实。
+    const sent = [];
+    const bridgeNoUi = makeBridge({
+      gatewayOpts: { permissions: { hostControl: true, fsRead: true, fsWrite: true, shellExecute: true, webFetch: true } }
+    });
+    const noUi = await bridgeNoUi.executeAgentTool(
+      'agent_capability',
+      { action: 'request', kind: 'camera', reason: '要看桌上是哪块板子' },
+      ctx()
+    );
+    assert.strictEqual(noUi.ok, false, '没有界面时不能假装弹过');
+    assert.strictEqual(noUi.errorCode, 'CAPABILITY_UI_UNAVAILABLE', '给专用错误码');
+    assert.ok(
+      String(noUi.suggestedFix || noUi.error).includes('摄像头'),
+      '要把「去哪儿开」交回去（失败信封收窄后靠 suggestedFix 带回来）'
+    );
+
+    const bridgeWithUi = makeBridge({
+      deps: { notifyCapabilityRequest: (p) => sent.push(p) },
+      gatewayOpts: { permissions: { hostControl: true, fsRead: true, fsWrite: true, webFetch: true } }
+    });
+    const req = await bridgeWithUi.executeAgentTool(
+      'agent_capability',
+      { action: 'request', kind: 'camera', reason: '要看桌上是哪块板子' },
+      ctx()
+    );
+    assert.strictEqual(req.ok, true, '有界面时申请成功');
+    assert.strictEqual(req.delivered, true);
+    assert.strictEqual(sent.length, 1, '请求必须真的送出去一次');
+    assert.strictEqual(sent[0].kind, 'camera');
+    assert.strictEqual(sent[0].page, 'perms', '落点页来自 capability-index');
+    assert.strictEqual(sent[0].anchor, 'perm-camera', '高亮到具体开关');
+    assert.strictEqual(sent[0].reason, '要看桌上是哪块板子');
+
+    const already = await bridgeWithUi.executeAgentTool(
+      'agent_capability',
+      { action: 'request', kind: 'fsWrite' },
+      ctx()
+    );
+    assert.strictEqual(already.ok, true, '已开着不算错误');
+    assert.strictEqual(already.delivered, false, '已开着不该再弹一次');
+    assert.strictEqual(sent.length, 1, '没多送一次申请');
+
+    const list = await bridgeWithUi.executeAgentTool('agent_capability', { action: 'list' }, ctx());
+    assert.strictEqual(list.ok, true);
+    const byKey = new Map(list.capabilities.map((c) => [c.key, c]));
+    assert.strictEqual(byKey.get('fsWrite').on, true, 'list 报的是真实开关');
+    assert.strictEqual(byKey.get('camera').on, false, '默认关的能力要如实报 false');
+    assert.ok(String(byKey.get('camera').howToEnable).includes('摄像头'), 'list 要带落点文案');
+
+    const unknown = await bridgeWithUi.executeAgentTool('agent_capability', { action: 'request', kind: 'teleport' }, ctx());
+    assert.strictEqual(unknown.errorCode, 'UNKNOWN_CAPABILITY', '不认识的能力给结构化错误');
   }
 
   console.log('ok tool-bridge handlers test');

@@ -40,7 +40,7 @@ assert(
   'missing setting falls back to schema default'
 );
 assert(
-  resolveLoopToolCallLimit({ agentToolCallLimit: 9999 }) === 600,
+  resolveLoopToolCallLimit({ agentToolCallLimit: 9999 }) === 1200,
   'tool-call limit clamps to schema max'
 );
 

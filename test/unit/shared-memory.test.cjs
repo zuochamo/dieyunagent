@@ -249,8 +249,9 @@ describe('共享记忆 · 注入块（阈值逐行按通道取）', () => {
   };
 
   /**
-   * 一批里既有向量行（score = 1 - 余弦距离）又有 trigram 兜底行（score = similarity）。
-   * 两种分数量纲不同：拿批级 mode 一刀切会让兜底行永远过不了 0.32，等于「有向量就没文本兜底」。
+   * 一批里既有向量行（`injectScore = 1 - 余弦距离`）又有 trigram 兜底行（`similarity()`）。
+   * 两者都是 [0,1] 的有界相似度，但 trigram 的天花板随长度比下降：拿批级 mode 一刀切会让
+   * 兜底行永远过不了 0.32，等于「有向量就没文本兜底」。
    */
   it('向量行用语义阈值，trigram 行用关键词阈值（同一批里各按各的）', async () => {
     const sm = {
@@ -259,10 +260,10 @@ describe('共享记忆 · 注入块（阈值逐行按通道取）', () => {
         ok: true,
         mode: 'semantic',
         results: [
-          { id: 1, content: '向量命中行', kind: 'normal', mode: 'semantic', score: 0.9 },
-          { id: 2, content: '文本兜底行', kind: 'normal', mode: 'keyword', score: 0.2 },
-          { id: 3, content: '向量低分行', kind: 'normal', mode: 'semantic', score: 0.1 },
-          { id: 4, content: '文本太低行', kind: 'normal', mode: 'keyword', score: 0.05 }
+          { id: 1, content: '向量命中行', kind: 'normal', mode: 'semantic', score: 0.9, injectScore: 0.9 },
+          { id: 2, content: '文本兜底行', kind: 'normal', mode: 'keyword', score: 0.2, injectScore: 0.2 },
+          { id: 3, content: '向量低分行', kind: 'normal', mode: 'semantic', score: 0.1, injectScore: 0.1 },
+          { id: 4, content: '文本太低行', kind: 'normal', mode: 'keyword', score: 0.05, injectScore: 0.05 }
         ]
       })
     };
@@ -274,6 +275,25 @@ describe('共享记忆 · 注入块（阈值逐行按通道取）', () => {
     assert.match(block, /【共享记忆 · 局域网其他机器沉淀/);
   });
 
+  /**
+   * 判定只读 `injectScore`（与本地记忆同名同义），不读 `score`：
+   * 两个字段一旦各有各的读法，「该不该注入」就会分成两份口径。
+   */
+  it('判定只看 injectScore：score 再高、injectScore 不够也不注入', async () => {
+    const sm = {
+      active: () => true,
+      recall: async () => ({
+        ok: true,
+        mode: 'semantic',
+        results: [
+          { id: 1, content: '分数虚高行', kind: 'normal', mode: 'semantic', score: 0.99, injectScore: 0.1 }
+        ]
+      })
+    };
+    const block = await fetchSharedMemoryBlock({ userQuery: '构建怎么跑' }, { sharedMemory: sm }, LIM, {});
+    assert.strictEqual(block, '', '判 injectScore 而不是 score');
+  });
+
   it('secret / private 永不进注入块；非语义模式标注为关键词召回', async () => {
     const sm = {
       active: () => true,
@@ -281,8 +301,8 @@ describe('共享记忆 · 注入块（阈值逐行按通道取）', () => {
         ok: true,
         mode: 'keyword',
         results: [
-          { id: 9, content: '数据库口令 abc', kind: 'secret', mode: 'keyword', score: 0.9 },
-          { id: 10, content: '构建用 pnpm', kind: 'normal', mode: 'keyword', score: 0.5 }
+          { id: 9, content: '数据库口令 abc', kind: 'secret', mode: 'keyword', score: 0.9, injectScore: 0.9 },
+          { id: 10, content: '构建用 pnpm', kind: 'normal', mode: 'keyword', score: 0.5, injectScore: 0.5 }
         ]
       })
     };

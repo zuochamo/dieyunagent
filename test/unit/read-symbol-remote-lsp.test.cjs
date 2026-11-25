@@ -22,7 +22,10 @@ function buildHandlers({ sourceText }) {
   const lspTimeouts = [];
   const handlers = createFsHandlers({
     perms: { hostControl: true, fsRead: true },
-    ctx: { getWorkspaceTarget: () => ({ kind: 'ssh', remotePath: '/w' }) },
+    // 新契约：handler 读**调用作用域**的 target（resolveCallWorkspaceTarget），不是视图的 getWorkspaceTarget
+    resolveCallWorkspaceTarget: () => ({ kind: 'ssh', remotePath: '/w' }),
+    ctx: {},
+    normalizeFilePathInput: (p) => String(p || ''),
     cwdForCall: () => '/w',
     // 远程 agent「可用」的唯一判据是 info.openChannel（remote-agent-client）
     getRemoteAgentInfo: () => ({ openChannel: async () => ({}) }),
