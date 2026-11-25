@@ -9,6 +9,7 @@ export interface StartParams {
   model: string;
   messages?: unknown[];
   tools?: unknown[];
+  /** 宿主会传（契约字段），但**循环自身不读它**：工具调用的路径由宿主的工具层解析， 账本里再存一份只会邀请别人「按它切工作区」。留字段是为了 `core-contracts.d.ts` 不漂。 */
   workspaceRoot?: string | null;
   /** 必填：唯一来源是 Node `agent-limits.js`（`applyResolvedLoopSpec` 填入）。 缺参直接报错，而不是在内核里回落到一份会静默分叉的默认值。 */
   maxToolCalls: number;
@@ -175,6 +176,8 @@ export interface PlannerStartParams {
   resumeCheckpoint?: unknown | null;
   /** Host passes the model setting `agentToolCallLimit` (per Context tier). */
   maxToolCalls?: number | null;
+  /** Host passes the model setting `agentMaxRounds` (per Context tier)。  以前这里烤着两个字面量（explore 24 / worker 96），跨语言各留一份默认值 —— `agent-limits.js` 的注释里早就写着「改一边就静默分叉」，2026-11-19 真的分叉了： 宿主把轮次上限调到 500，plan 的执行器仍在 96 轮被拦腰截断。 现在只由宿主传；`None`/0 表示宿主没给，Node 侧回落到同一份 `agentMaxRounds`。 */
+  maxRounds?: number | null;
 }
 
 /** 来自 `crates/dieyun-runtime/src/planner/types.rs`（Rust `PlannerContinueInput`）。 */

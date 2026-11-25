@@ -187,12 +187,10 @@ export type GatewayOnlyRpcMethod =
   | 'undo.can_rollback'
   | 'undo.capture_batch'
   | 'undo.capture_plan_apply'
-  | 'undo.mark_worktree_only'
   | 'undo.rollback'
   | 'undo.rollback_batch'
   | 'undo.rollback_commit'
   | 'undo.session_clear'
-  | 'undo.stack_get'
   | 'undo.turn_begin'
   | 'undo.turn_finalize'
   | 'web.fetch'
@@ -387,12 +385,10 @@ export type RpcLayerMap = {
   'undo.can_rollback': 'gateway';
   'undo.capture_batch': 'gateway';
   'undo.capture_plan_apply': 'gateway';
-  'undo.mark_worktree_only': 'gateway';
   'undo.rollback': 'gateway';
   'undo.rollback_batch': 'gateway';
   'undo.rollback_commit': 'gateway';
   'undo.session_clear': 'gateway';
-  'undo.stack_get': 'gateway';
   'undo.turn_begin': 'gateway';
   'undo.turn_finalize': 'gateway';
   'web.fetch': 'gateway';
