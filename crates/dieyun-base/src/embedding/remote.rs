@@ -263,9 +263,17 @@ mod tests {
     }
 
     /// 查询超时必须显著短于批量超时：否则端点挂住时每轮召回先卡两分钟。
+    ///
+    /// 「不能超过宿主 status 超时」那一半读的是**共享常量**
+    /// （`src/agent/agent-shared.json#rpc.hostStatusTimeoutMs`，Node 侧同一份）：
+    /// 以前这里手抄 `15_000`，宿主把它调小时这条断言仍绿 —— 等于没有闸门。
     #[test]
     fn query_timeout_is_much_shorter_than_batch_timeout() {
-        assert!(EMBED_QUERY_TIMEOUT_MS < EMBED_REQUEST_TIMEOUT_MS);
-        assert!(EMBED_QUERY_TIMEOUT_MS <= 15_000, "查询超时要落在「宿主先超时」的同量级");
+        const _: () = assert!(EMBED_QUERY_TIMEOUT_MS < EMBED_REQUEST_TIMEOUT_MS);
+        let host_min_ms = crate::shared::shared().rpc.host_status_timeout_ms;
+        assert!(
+            EMBED_QUERY_TIMEOUT_MS <= host_min_ms,
+            "查询超时 {EMBED_QUERY_TIMEOUT_MS}ms 要落在「宿主先超时」的同量级（{host_min_ms}ms）"
+        );
     }
 }

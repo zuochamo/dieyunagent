@@ -108,6 +108,32 @@ fn terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// 一次查询被切成的片段（与 `match_query` / `has_indexable_term` **同一份切分规则**，
+/// 同样按 `MAX_TERMS` 截断）。
+///
+/// 调用方要回答「这条命中覆盖了查询的几成」时用它 —— 别在别处再切一遍。
+pub fn query_terms(query: &str) -> Vec<String> {
+    terms(query).into_iter().take(MAX_TERMS).collect()
+}
+
+/// 命中覆盖度 ∈ (0,1]：`content` 里出现了这次查询的几成片段（大小写不敏感的子串判定）。
+///
+/// 为什么必须有它：片段之间是 **OR**（见文件头第 3 条），所以「有命中」不等于「对上了」——
+/// 一条只蹭到一个常见词的长句照样能排到最前；而 bm25 的量纲随语料与查询词长度漂移，
+/// 当不了绝对强度。覆盖度是这条链路上**唯一**与语料无关的绝对量：查询给了 3 个片段，
+/// 命中 1 个就是 1/3，跟语料多大、词多常见都没关系。
+pub fn term_coverage(content: &str, terms: &[String]) -> f64 {
+    if terms.is_empty() {
+        return 1.0;
+    }
+    let lowered = content.to_lowercase();
+    let hit = terms
+        .iter()
+        .filter(|t| lowered.contains(&t.to_lowercase()))
+        .count();
+    hit as f64 / terms.len() as f64
+}
+
 /// 去掉 FTS5 的语法字符与引号，留下纯文本片段。
 ///
 /// 只删不改写：多删的后果是「少一个召回词」，改写（比如把 `-` 换成空格）则会
@@ -152,8 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn short_cjk_terms_are_not_indexable() {
-        // trigram 索引里 2 字符片段查不到 —— 调用方要据此改走子串扫描
+    fn short_cjk_terms_are_not_indexable() {        // trigram 索引里 2 字符片段查不到 —— 调用方要据此改走子串扫描
         assert!(!has_indexable_term("索引"));
         assert!(!has_indexable_term("记忆 图谱"));
         assert!(has_indexable_term("ANN"));
@@ -199,5 +224,25 @@ mod tests {
 
         assert!(first_hit_byte(content, &["nope".to_string()]).is_none());
         assert!(first_hit_index(content, "nope").is_none());
+    }
+
+    /// 覆盖度：片段之间是 OR，所以「有命中」不等于「对上了」—— 覆盖度是这里唯一的绝对量。
+    #[test]
+    fn term_coverage_counts_matched_fragments() {
+        let terms = query_terms("parseConfig 索引 cfg");
+        assert_eq!(terms.len(), 3);
+        assert!((term_coverage("parseConfig 的索引实现", &terms) - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(term_coverage("完全无关的正文", &terms), 0.0);
+        assert_eq!(term_coverage("随便什么", &[]), 1.0, "没有片段时不做折扣");
+    }
+
+    #[test]
+    fn term_coverage_is_case_insensitive_and_capped() {
+        let terms = query_terms("ParseConfig");
+        assert_eq!(term_coverage("... parseconfig ...", &terms), 1.0);
+
+        // 上限与 match_query 共用（同一份切分 + 同一个 MAX_TERMS）
+        let long = (0..40).map(|i| format!("term{i}")).collect::<Vec<_>>().join(" ");
+        assert_eq!(query_terms(&long).len(), MAX_TERMS);
     }
 }

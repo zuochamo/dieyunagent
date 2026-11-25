@@ -477,7 +477,7 @@ fn custom_fixture(rows: &[(&str, &str, [f32; 3])]) -> (Connection, VectorPool) {
         let id = conn.last_insert_rowid();
         conn.execute(
             "INSERT INTO chunk_vectors (chunk_id, dims, vector) VALUES (?1, 3, ?2)",
-            params![id, vector_to_blob(&vec.to_vec())],
+            params![id, vector_to_blob(vec.as_slice())],
         )
         .unwrap();
     }

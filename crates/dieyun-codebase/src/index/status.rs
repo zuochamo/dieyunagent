@@ -8,6 +8,101 @@ use super::{count_vectors, IndexService, StatusRepair, StatusResult};
 use dieyun_base::error::CoreError;
 use rusqlite::{params, Connection};
 
+/// `workspaces` 行的一次读出（status 的原始事实）。字段顺序无所谓，名字对齐 SQL 列。
+struct StatusRow {
+    file_count: i64,
+    chunk_count: i64,
+    vector_count: i64,
+    indexed_at: i64,
+    indexing: i64,
+    embedding_model: Option<String>,
+    embedding_dims: i64,
+    vectors_reused: i64,
+    vectors_embedded: i64,
+    files_skipped: i64,
+    files_truncated: i64,
+}
+
+/// 核对之后的口径：脏了就按库实数修正，并把「欠一次修」作为 `repair` 交回调用方。
+struct StatusCounts {
+    db_flag: i64,
+    file_count: i64,
+    chunk_count: i64,
+    vector_count: i64,
+    indexed_at: i64,
+    embedding_model: Option<String>,
+    embedding_dims: i64,
+    repair: Option<StatusRepair>,
+}
+
+/// 库里的「真实存在」探针：`EXISTS` 走索引，微秒级，**不是** `COUNT(*)`。
+///
+/// 查询失败一律按「有」保守处理 —— 一次抖动不该把好索引误判成空。
+struct DbProbe {
+    has_rows: i64,
+    has_vectors: i64,
+}
+
+fn probe_db(conn: &Connection, root_hash: &str) -> DbProbe {
+    // 崩溃可能落在「清空 chunks」和「写回 counts」之间：库里已经空了，
+    // 元数据还是上一轮的满值。不查一下就会一直报「已索引 N 段」，而
+    // search 因 chunk_count != 0 绕过 needsIndex 门槛，静默返回 0 条。
+    // 探针用 EXISTS（走 root_hash 索引，微秒级），不是 COUNT(*)。
+    let has_rows: i64 = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE root_hash = ?1)",
+            params![root_hash],
+            |r| r.get(0),
+        )
+        // 查询失败按「有数据」保守处理，别把好索引误判成空
+        .unwrap_or(1);
+    // 向量侧同款探针：`force` 全量重建会先把老 `chunks`（连带 `chunk_vectors`）
+    // 删掉再重切。进程若在 embedding 阶段被杀，留下的是「chunk 有、向量几乎没
+    // 有」，而元数据还是上一轮的满值 —— 面板报几千条向量，检索侧却只能靠签名
+    // 拒绝它。`docs/VECTOR-SEARCH.md` §1.1 规则 3 要求元数据描述**真实存在**的
+    // 向量。探针同样用 EXISTS（`chunk_vectors.chunk_id` 是主键，命中即返回）。
+    let has_vectors: i64 = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_vectors WHERE chunk_id IN
+                 (SELECT id FROM chunks WHERE root_hash = ?1))",
+            params![root_hash],
+            |r| r.get(0),
+        )
+        // 查不到按「有向量」保守处理，别把好索引误判成空
+        .unwrap_or(1);
+    DbProbe {
+        has_rows,
+        has_vectors,
+    }
+}
+
+/// 读一行 `workspaces`（没有这一行 = 从没建过索引）。
+fn load_status_row(conn: &Connection, root_hash: &str) -> Option<StatusRow> {
+    conn.query_row(
+        "SELECT file_count, chunk_count, vector_count, indexed_at, indexing,
+                embedding_model, embedding_dims, vectors_reused, vectors_embedded,
+                files_skipped, files_truncated
+         FROM workspaces WHERE root_hash = ?1",
+        params![root_hash],
+        |r| {
+            Ok(StatusRow {
+                file_count: r.get(0)?,
+                chunk_count: r.get(1)?,
+                vector_count: r.get(2)?,
+                indexed_at: r.get(3)?,
+                indexing: r.get(4)?,
+                embedding_model: r.get(5)?,
+                embedding_dims: r.get(6)?,
+                vectors_reused: r.get(7)?,
+                vectors_embedded: r.get(8)?,
+                files_skipped: r.get(9)?,
+                files_truncated: r.get(10)?,
+            })
+        },
+    )
+    .ok()
+}
+
 impl IndexService {
 
     pub fn status(&self, workspace_root: &str) -> Result<StatusResult, CoreError> {
@@ -78,193 +173,189 @@ impl IndexService {
         let current_signature = self.embedding.signature();
         let embedding_enabled = self.embedding.enabled();
 
-        let row: Option<(i64, i64, i64, i64, i64, Option<String>, i64, i64, i64, i64, i64)> = conn
-            .query_row(
-                "SELECT file_count, chunk_count, vector_count, indexed_at, indexing,
-                        embedding_model, embedding_dims, vectors_reused, vectors_embedded,
-                        files_skipped, files_truncated
-                 FROM workspaces WHERE root_hash = ?1",
-                params![ws.root_hash],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                        r.get(8)?,
-                        r.get(9)?,
-                        r.get(10)?,
-                    ))
-                },
-            )
-            .ok();
+        // 没有这一行 = 从没建过索引：只回「没建」，不编任何数字。
+        let Some(row) = load_status_row(conn, &ws.root_hash) else {
+            return Ok(self.empty_status(&ws.root_hash, live_indexing, embedding_enabled));
+        };
+        let reused = row.vectors_reused;
+        let embedded = row.vectors_embedded;
+        let skipped = row.files_skipped;
+        let truncated = row.files_truncated;
 
-        Ok(match row {
-            None => {
-                let mut st = StatusResult {
-                    ok: true,
-                    indexed: false,
-                    file_count: 0,
-                    chunk_count: 0,
-                    vector_count: 0,
-                    indexed_at: 0,
-                    indexing: live_indexing,
-                    embedding_model: None,
-                    embedding_dims: 0,
-                    embedding_enabled,
-                    embedding_stale: false,
-                    vectors_reused: 0,
-                    vectors_embedded: 0,
-                    files_skipped: 0,
-                    files_truncated: false,
-                    phase: None,
-                    files_done: None,
-                    files_total: None,
-                    last_error: None,
-                };
-                self.apply_live_progress(&ws.root_hash, &mut st);
-                (st, None)
-            }
-            Some((fc, cc, vc, ia, db_indexing, em, ed, reused, embedded, skipped, truncated)) => {
-                // 仅当旗标或元数据明显残缺时再 COUNT，避免每次 status 扫表
-                let mut db_flag = db_indexing;
-                let mut file_count = fc;
-                let mut chunk_count = cc;
-                let mut vector_count = vc;
-                let mut indexed_at = ia;
-                let mut embedding_model = em.clone();
-                let mut embedding_dims = ed;
-                let mut repair = None;
-                if !live_indexing {
-                    let need_clear_flag = db_flag != 0;
-                    // 崩溃可能落在「清空 chunks」和「写回 counts」之间：库里已经空了，
-                    // 元数据还是上一轮的满值。不查一下就会一直报「已索引 N 段」，而
-                    // search 因 chunk_count != 0 绕过 needsIndex 门槛，静默返回 0 条。
-                    // 探针用 EXISTS（走 root_hash 索引，微秒级），不是 COUNT(*)。
-                    let has_rows: i64 = conn
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM chunks WHERE root_hash = ?1)",
-                            params![ws.root_hash],
-                            |r| r.get(0),
-                        )
-                        // 查询失败按「有数据」保守处理，别把好索引误判成空
-                        .unwrap_or(1);
-                    // 向量侧同款探针：`force` 全量重建会先把老 `chunks`（连带 `chunk_vectors`）
-                    // 删掉再重切。进程若在 embedding 阶段被杀，留下的是「chunk 有、向量几乎没
-                    // 有」，而元数据还是上一轮的满值 —— 面板报几千条向量，检索侧却只能靠签名
-                    // 拒绝它。`docs/VECTOR-SEARCH.md` §1.1 规则 3 要求元数据描述**真实存在**的
-                    // 向量。探针同样用 EXISTS（`chunk_vectors.chunk_id` 是主键，命中即返回）。
-                    let has_vectors: i64 = conn
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM chunk_vectors WHERE chunk_id IN
-                                 (SELECT id FROM chunks WHERE root_hash = ?1))",
-                            params![ws.root_hash],
-                            |r| r.get(0),
-                        )
-                        // 查不到按「有向量」保守处理，别把好索引误判成空
-                        .unwrap_or(1);
-                    let vector_meta_lies = vector_count > 0 && has_vectors == 0;
-                    // 旗标只能证明「这次崩了」，证明不了「上一进程崩过、旗标已被前面某次
-                    // status 清掉、元数据还是旧的」。本进程第一次看到这个工作区时核一次账。
-                    let first_sight = self.take_meta_check(&ws.root_hash);
-                    let meta_looks_broken = indexed_at == 0
-                        || (chunk_count == 0 && file_count == 0)
-                        || (chunk_count > 0 && has_rows == 0)
-                        || vector_meta_lies
-                        || first_sight;
-                    if need_clear_flag || meta_looks_broken {
-                        let real_chunks: i64 = conn
+        // 脏状态在这里核对（仍然只读），要写的话只交出 repair，由调用方用独立连接补写。
+        let StatusCounts {
+            db_flag,
+            file_count,
+            chunk_count,
+            vector_count,
+            indexed_at,
+            embedding_model,
+            embedding_dims,
+            repair,
+        } = self.reconcile_counts(conn, ws, &row, live_indexing)?;
+
+        let embedding_stale = vector_count > 0
+            && !current_signature.is_empty()
+            && embedding_model.as_deref().unwrap_or("") != current_signature;
+        let mut st = StatusResult {
+            ok: true,
+            indexed: indexed_at > 0,
+            file_count,
+            chunk_count,
+            vector_count,
+            indexed_at,
+            indexing: live_indexing || db_flag != 0,
+            embedding_model,
+            embedding_dims,
+            embedding_enabled,
+            embedding_stale,
+            vectors_reused: reused,
+            vectors_embedded: embedded,
+            files_skipped: skipped,
+            files_truncated: truncated != 0,
+            phase: None,
+            files_done: None,
+            files_total: None,
+            last_error: None,
+        };
+        self.apply_live_progress(&ws.root_hash, &mut st);
+        Ok((st, repair))
+    }
+
+    /// 「从没建过索引」时的状态：所有数字都是 0，只带本进程的实时进度。
+    fn empty_status(
+        &self,
+        root_hash: &str,
+        live_indexing: bool,
+        embedding_enabled: bool,
+    ) -> (StatusResult, Option<StatusRepair>) {
+        let mut st = StatusResult {
+            ok: true,
+            indexed: false,
+            file_count: 0,
+            chunk_count: 0,
+            vector_count: 0,
+            indexed_at: 0,
+            indexing: live_indexing,
+            embedding_model: None,
+            embedding_dims: 0,
+            embedding_enabled,
+            embedding_stale: false,
+            vectors_reused: 0,
+            vectors_embedded: 0,
+            files_skipped: 0,
+            files_truncated: false,
+            phase: None,
+            files_done: None,
+            files_total: None,
+            last_error: None,
+        };
+        self.apply_live_progress(root_hash, &mut st);
+        (st, None)
+    }
+
+    /// 核对计数与元数据：**只读**，只把「欠一次修」交回调用方。
+    ///
+    /// 只在旗标或元数据明显残缺时才 COUNT（健康工作区不会被每秒轮询拖成扫表）。
+    fn reconcile_counts(
+        &self,
+        conn: &Connection,
+        ws: &WorkspaceRef,
+        row: &StatusRow,
+        live_indexing: bool,
+    ) -> Result<StatusCounts, CoreError> {
+        // 仅当旗标或元数据明显残缺时再 COUNT，避免每次 status 扫表
+        let mut db_flag = row.indexing;
+        let mut file_count = row.file_count;
+        let mut chunk_count = row.chunk_count;
+        let mut vector_count = row.vector_count;
+        let mut indexed_at = row.indexed_at;
+        let mut embedding_model = row.embedding_model.clone();
+        let mut embedding_dims = row.embedding_dims;
+        let mut repair = None;
+        if !live_indexing {
+            let need_clear_flag = db_flag != 0;
+            let probe = probe_db(conn, &ws.root_hash);
+            let vector_meta_lies = vector_count > 0 && probe.has_vectors == 0;
+            // 旗标只能证明「这次崩了」，证明不了「上一进程崩过、旗标已被前面某次
+            // status 清掉、元数据还是旧的」。本进程第一次看到这个工作区时核一次账。
+            let first_sight = self.take_meta_check(&ws.root_hash);
+            let meta_looks_broken = indexed_at == 0
+                || (chunk_count == 0 && file_count == 0)
+                || (chunk_count > 0 && probe.has_rows == 0)
+                || vector_meta_lies
+                || first_sight;
+            if need_clear_flag || meta_looks_broken {
+                let real_chunks: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM chunks WHERE root_hash = ?1",
+                        params![ws.root_hash],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if real_chunks > 0 {
+                    // 数与库不符就按库说话：半途被杀的重建会让 chunk 数变了、元数据没跟上
+                    chunk_count = real_chunks;
+                    if file_count == 0 {
+                        file_count = conn
                             .query_row(
-                                "SELECT COUNT(*) FROM chunks WHERE root_hash = ?1",
+                                "SELECT COUNT(DISTINCT rel_path) FROM chunks WHERE root_hash = ?1",
                                 params![ws.root_hash],
                                 |r| r.get(0),
                             )
                             .unwrap_or(0);
-                        if real_chunks > 0 {
-                            // 数与库不符就按库说话：半途被杀的重建会让 chunk 数变了、元数据没跟上
-                            chunk_count = real_chunks;
-                            if file_count == 0 {
-                                file_count = conn
-                                    .query_row(
-                                        "SELECT COUNT(DISTINCT rel_path) FROM chunks WHERE root_hash = ?1",
-                                        params![ws.root_hash],
-                                        |r| r.get(0),
-                                    )
-                                    .unwrap_or(0);
-                            }
-                            if indexed_at == 0 {
-                                indexed_at = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs() as i64)
-                                    .unwrap_or(0);
-                            }
-                        } else if chunk_count > 0 {
-                            // 内容真的没了：如实归零（indexed_at=0 → indexed=false，上层会提示重建）
-                            chunk_count = 0;
-                            file_count = 0;
-                            indexed_at = 0;
-                        }
-                        // 向量计数取库实数；一条都没有就把签名一起归零 —— `can_vector` 与面板的
-                        // 「向量一致性」都以「库里真有向量」为前提，留着旧签名只会把假数据说圆
-                        if let Ok(real_vectors) = count_vectors(conn, &ws.root_hash) {
-                            vector_count = real_vectors;
-                            if real_vectors == 0 {
-                                embedding_model = None;
-                                embedding_dims = 0;
-                            }
-                        }
-                        // 读路径不写库：只把「欠一次修」交回调用方。健康工作区的首次核对
-                        // 算出来的值与元数据一样，不必写（写一次就多一轮 WAL）。
-                        let changed = file_count != fc
-                            || chunk_count != cc
-                            || indexed_at != ia
-                            || vector_count != vc
-                            || embedding_model != em
-                            || embedding_dims != ed;
-                        if changed || need_clear_flag {
-                            repair = Some(StatusRepair {
-                                file_count,
-                                chunk_count,
-                                indexed_at,
-                                vector_count,
-                                embedding_model: embedding_model.clone(),
-                                embedding_dims,
-                            });
-                        }
-                        db_flag = 0;
+                    }
+                    if indexed_at == 0 {
+                        indexed_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                    }
+                } else if chunk_count > 0 {
+                    // 内容真的没了：如实归零（indexed_at=0 → indexed=false，上层会提示重建）
+                    chunk_count = 0;
+                    file_count = 0;
+                    indexed_at = 0;
+                }
+                // 向量计数取库实数；一条都没有就把签名一起归零 —— `can_vector` 与面板的
+                // 「向量一致性」都以「库里真有向量」为前提，留着旧签名只会把假数据说圆
+                if let Ok(real_vectors) = count_vectors(conn, &ws.root_hash) {
+                    vector_count = real_vectors;
+                    if real_vectors == 0 {
+                        embedding_model = None;
+                        embedding_dims = 0;
                     }
                 }
-                let embedding_stale = vector_count > 0
-                    && !current_signature.is_empty()
-                    && embedding_model.as_deref().unwrap_or("") != current_signature;
-                let mut st = StatusResult {
-                    ok: true,
-                    indexed: indexed_at > 0,
-                    file_count,
-                    chunk_count,
-                    vector_count,
-                    indexed_at,
-                    indexing: live_indexing || db_flag != 0,
-                    embedding_model,
-                    embedding_dims,
-                    embedding_enabled,
-                    embedding_stale,
-                    vectors_reused: reused,
-                    vectors_embedded: embedded,
-                    files_skipped: skipped,
-                    files_truncated: truncated != 0,
-                    phase: None,
-                    files_done: None,
-                    files_total: None,
-                    last_error: None,
-                };
-                self.apply_live_progress(&ws.root_hash, &mut st);
-                (st, repair)
+                // 读路径不写库：只把「欠一次修」交回调用方。健康工作区的首次核对
+                // 算出来的值与元数据一样，不必写（写一次就多一轮 WAL）。
+                let changed = file_count != row.file_count
+                    || chunk_count != row.chunk_count
+                    || indexed_at != row.indexed_at
+                    || vector_count != row.vector_count
+                    || embedding_model != row.embedding_model
+                    || embedding_dims != row.embedding_dims;
+                if changed || need_clear_flag {
+                    repair = Some(StatusRepair {
+                        file_count,
+                        chunk_count,
+                        indexed_at,
+                        vector_count,
+                        embedding_model: embedding_model.clone(),
+                        embedding_dims,
+                    });
+                }
+                db_flag = 0;
             }
+        }
+        Ok(StatusCounts {
+            db_flag,
+            file_count,
+            chunk_count,
+            vector_count,
+            indexed_at,
+            embedding_model,
+            embedding_dims,
+            repair,
         })
     }
 

@@ -7,7 +7,7 @@ pub fn structural_chunk_ranges(rel_path: &str, source: &str) -> Option<Vec<(usiz
     let tree = parse_source(lang, source)?;
     let root = tree.root_node();
     let mut ranges = Vec::new();
-    walk_defs(root, source.as_bytes(), lang, &mut ranges);
+    walk_defs(root, lang, &mut ranges);
     if ranges.is_empty() {
         return None;
     }
@@ -28,7 +28,6 @@ pub fn structural_chunk_ranges(rel_path: &str, source: &str) -> Option<Vec<(usiz
 
 fn walk_defs(
     node: tree_sitter::Node,
-    src: &[u8],
     lang: SourceLang,
     out: &mut Vec<(usize, usize)>,
 ) {
@@ -66,7 +65,6 @@ fn walk_defs(
                 && node.parent().map(|p| p.kind() != "program" && p.kind() != "export_statement")
                     .unwrap_or(true);
             if !skip_tiny_arrow {
-                let _ = src; // keep signature parity for future text checks
                 out.push((start, end));
             }
         }
@@ -74,7 +72,7 @@ fn walk_defs(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        walk_defs(child, src, lang, out);
+        walk_defs(child, lang, out);
     }
 }
 

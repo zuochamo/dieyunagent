@@ -112,12 +112,3 @@ pub(crate) fn purge_removed_files(
     Ok(())
 }
 
-
-pub(crate) fn purge_stale_files(
-    conn: &Connection,
-    root_hash: &str,
-    keep: &HashSet<String>,
-) -> Result<(), CoreError> {
-    purge_removed_files(conn, root_hash, keep)
-}
-

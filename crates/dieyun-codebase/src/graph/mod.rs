@@ -200,8 +200,7 @@ impl GraphService {
                             calls,
                         );
                     }),
-                )
-                .map(|_| ());
+                );
                 finish(&svc, &hash, result);
             })
             .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", format!("无法启动结构索引线程: {e}")))?;

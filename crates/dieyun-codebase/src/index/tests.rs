@@ -60,10 +60,12 @@ async fn vectors_reuse_from_content_hash_cache_without_calling_endpoint() {
     let root = dir.path().to_string_lossy().to_string();
 
     // 「已启用」但端点不可达：任何真实请求都会失败。
-    let mut cfg = EmbeddingConfig::default();
-    cfg.model = "test-embed".into();
-    cfg.base_url = "http://127.0.0.1:9".into();
-    cfg.dimensions = 3;
+    let cfg = EmbeddingConfig {
+        model: "test-embed".into(),
+        base_url: "http://127.0.0.1:9".into(),
+        dimensions: 3,
+        ..Default::default()
+    };
     assert!(cfg.enabled());
 
     // ① 只建 chunk（不带向量），拿到这一版 chunk 正文
@@ -304,27 +306,33 @@ fn vectors_available_follows_embedding_config() {
     );
     assert!(!off.vectors_available(), "默认配置（空 model/base_url）不可用");
 
-    let mut only_model = EmbeddingConfig::default();
-    only_model.model = "text-embedding-3-small".into();
+    let only_model = EmbeddingConfig {
+        model: "text-embedding-3-small".into(),
+        ..Default::default()
+    };
     let half = IndexService::new(
         crate::codebase_db::handle(dir.path().join("b.sqlite")),
         only_model,
     );
     assert!(!half.vectors_available(), "只有 model、没有 base_url 仍不可用");
 
-    let mut disabled = EmbeddingConfig::default();
-    disabled.model = "text-embedding-3-small".into();
-    disabled.base_url = "https://api.example.com/v1".into();
-    disabled.disabled = true;
+    let disabled = EmbeddingConfig {
+        model: "text-embedding-3-small".into(),
+        base_url: "https://api.example.com/v1".into(),
+        disabled: true,
+        ..Default::default()
+    };
     let off2 = IndexService::new(
         crate::codebase_db::handle(dir.path().join("c.sqlite")),
         disabled,
     );
     assert!(!off2.vectors_available(), "显式禁用时不可用");
 
-    let mut on = EmbeddingConfig::default();
-    on.model = "text-embedding-3-small".into();
-    on.base_url = "https://api.example.com/v1".into();
+    let on = EmbeddingConfig {
+        model: "text-embedding-3-small".into(),
+        base_url: "https://api.example.com/v1".into(),
+        ..Default::default()
+    };
     let svc = IndexService::new(crate::codebase_db::handle(dir.path().join("d.sqlite")), on);
     assert!(svc.vectors_available());
 }
@@ -432,10 +440,12 @@ fn status_reports_vector_model_dims_and_staleness() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("idx.sqlite");
     let handle = crate::codebase_db::handle(db);
-    let mut cfg = EmbeddingConfig::default();
-    cfg.model = "test-model".into();
-    cfg.base_url = "http://127.0.0.1:1".into();
-    cfg.dimensions = 768;
+    let cfg = EmbeddingConfig {
+        model: "test-model".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        dimensions: 768,
+        ..Default::default()
+    };
     let svc = IndexService::new(Arc::clone(&handle), cfg);
     let root = dir.path().to_string_lossy().to_string();
     let ws = resolve_workspace(&root).unwrap();
@@ -504,10 +514,12 @@ fn status_reports_real_vector_count_after_interrupted_force_rebuild() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("idx.sqlite");
     let handle = crate::codebase_db::handle(db);
-    let mut cfg = EmbeddingConfig::default();
-    cfg.model = "test-model".into();
-    cfg.base_url = "http://127.0.0.1:1".into();
-    cfg.dimensions = 8;
+    let cfg = EmbeddingConfig {
+        model: "test-model".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        dimensions: 8,
+        ..Default::default()
+    };
     let svc = IndexService::new(Arc::clone(&handle), cfg);
     let root = dir.path().to_string_lossy().to_string();
     let ws = resolve_workspace(&root).unwrap();
@@ -566,10 +578,12 @@ fn status_clears_vector_signature_when_vectors_are_gone() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("idx.sqlite");
     let handle = crate::codebase_db::handle(db);
-    let mut cfg = EmbeddingConfig::default();
-    cfg.model = "test-model".into();
-    cfg.base_url = "http://127.0.0.1:1".into();
-    cfg.dimensions = 8;
+    let cfg = EmbeddingConfig {
+        model: "test-model".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        dimensions: 8,
+        ..Default::default()
+    };
     let svc = IndexService::new(Arc::clone(&handle), cfg);
     let root = dir.path().to_string_lossy().to_string();
     let ws = resolve_workspace(&root).unwrap();
@@ -734,7 +748,7 @@ fn prune_keeps_remote_keys_and_offline_volumes() {
     let svc = IndexService::new(Arc::clone(&handle), EmbeddingConfig::default());
 
     let remote_key = "ssh://dev@192.168.1.10/home/dev/project";
-    let remote_hash = workspace::hash_workspace_key_str(remote_key);
+    let remote_hash = dieyun_base::config::workspace_key_hash(remote_key);
     handle
         .with_conn(|conn| {
             conn.execute(

@@ -508,6 +508,12 @@ mod tests {
     /// core 是长驻进程，模型与 dylib 是宿主按需下载的：把失败固化进缓存，用户补装完之后
     /// 仍然只有「onnxruntime 动态库不可用」，必须重启整个 core 才能恢复。
     /// 用例用注入的 loader（不真的 dlopen 假文件 —— 那会挂住测试进程）。
+    ///
+    /// **必须挂在 feature 上**：`ensure_runtime_cached` 这个测试缝只在 `local-embed` 的
+    /// `imp` 里存在。不挂的话 `cargo test --no-default-features`（远端 Linux 包的口径，
+    /// 也是 CI 的一份）编译不过 —— 这条缝错了整整一天没人发现，因为两侧闸门用的
+    /// feature 集合从未碰面（CI 无默认特性 / 本地有默认特性）。见 `.github/workflows/ci.yml`。
+    #[cfg(feature = "local-embed")]
     #[test]
     fn runtime_failure_is_not_cached_but_success_is() {
         use std::cell::Cell;
@@ -594,7 +600,7 @@ mod tests {
         // 变化，实测同一段文本的余弦会掉到 ~0.98 —— 所以索引（批量）与查询（单条）之间
         // 一定存在这个量级的差异，任何「逐位相等」的假设都是错的；向量缓存存「算出来的
         // 那一个」，不跨形状比对，故不受影响。
-        let alone = embed(&model_dir, dylib.as_deref(), &[query.clone()]).expect("embed alone");
+        let alone = embed(&model_dir, dylib.as_deref(), std::slice::from_ref(&query)).expect("embed alone");
         let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
         let cross_shape = dot(&alone[0], &out[0]);
         assert!(

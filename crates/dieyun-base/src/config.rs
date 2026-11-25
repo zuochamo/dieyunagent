@@ -194,11 +194,22 @@ pub fn path_within_root(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
 }
 
-pub fn hash_workspace_root(workspace_root: &Path) -> String {
+/// 工作区键（索引库 / 记忆 scope / 向量缓存都按它分区）的**唯一派生规则**：
+/// `sha256(输入)` 取前 8 字节，写成 16 个 hex 字符。
+///
+/// 输入是「工作区标识字符串」：本地是规范化后的绝对路径（见 [`hash_workspace_root`]），
+/// 远端是 `ssh://user@host/path` 这种键（宿主与 Node 侧算的是同一个形状）。
+///
+/// 以前 `index::workspace` 里还有第二份实现（`hash_workspace_key_str` + 自己的 `hex16`），
+/// 两份靠「看起来一样」对齐 —— 一旦一边改了截断长度或加了 salt，索引键与记忆键就会
+/// **静默错位**（查不到东西，不报错）。现在只有这一处。
+pub fn workspace_key_hash(input: &str) -> String {
     use sha2::{Digest, Sha256};
-    let resolved = workspace_root.to_string_lossy();
-    let digest = Sha256::digest(resolved.as_bytes());
-    hex16(&digest)
+    hex16(&Sha256::digest(input.as_bytes()))
+}
+
+pub fn hash_workspace_root(workspace_root: &Path) -> String {
+    workspace_key_hash(&workspace_root.to_string_lossy())
 }
 
 fn hex16(bytes: &[u8]) -> String {

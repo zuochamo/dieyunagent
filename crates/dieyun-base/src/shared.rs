@@ -75,6 +75,12 @@ pub struct ReadLimits {
 #[serde(rename_all = "camelCase")]
 pub struct RpcNumbers {
     pub slow_log_ms: u64,
+    /// 宿主给 `codebase.status` / `graph.status` 的超时（`src/core-rpc-timeouts.js`）。
+    ///
+    /// 内核侧只在测试里读它：`Fast` 档预算必须**小于**这个值，否则「轮询类方法先返回」
+    /// 这条契约永远轮不到触发。以前 Rust 测试里手抄一份 `15_000`，宿主把超时调小后
+    /// 断言仍绿 —— 现在两侧读同一份。
+    pub host_status_timeout_ms: u64,
 }
 
 #[derive(Debug, serde::Deserialize)]

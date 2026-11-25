@@ -258,7 +258,8 @@ mod tests {
     #[test]
     fn usage_line_requires_prompt_tokens() {
         assert!(usage_line("run-1", 3, None, Some(10), Some(10)).is_none());
-        assert!(usage("run-1", 3, Some(&json!({"completion_tokens": 5}))).eq(&()));
+        // 同一份输入走 IO 出口 `usage()`：形状已由上面那条钉住，这里只要求「不写行、不 panic」
+        usage("run-1", 3, Some(&json!({"completion_tokens": 5})));
         let line = usage_line("run-1", 3, Some(1200), Some(80), Some(1280)).unwrap();
         assert_eq!(
             line,

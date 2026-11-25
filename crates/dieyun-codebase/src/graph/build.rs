@@ -3,7 +3,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection};
 
-use super::cleanup::{clear_file_graph, clear_workspace_graph, purge_removed_files, purge_stale_files};
+use super::cleanup::{clear_file_graph, clear_workspace_graph, purge_removed_files};
 use dieyun_base::error::CoreError;
 use crate::graph::extract::files::collect_graph_files;
 // 抽取只有一条路：tree-sitter（`crate::treesitter::extract_graph_ast`）。
@@ -19,15 +19,6 @@ use crate::graph::extract::rust_lang::{
     is_external_spec as is_rust_external_spec, is_rust_path, resolve_rust_import,
 };
 
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct BuildStats {
-    pub file_count: i64,
-    pub edge_count: i64,
-    pub symbol_count: i64,
-    pub call_count: i64,
-}
 
 /// 建库范围（R5）：调用图是结构索引里唯一「贵且少用」的部分。
 ///
@@ -59,7 +50,7 @@ pub fn run_build_with_progress(
     force: bool,
     scope: GraphScope,
     on_progress: Option<&dyn Fn(&str, i64, i64, i64, i64, i64)>,
-) -> Result<BuildStats, CoreError> {
+) -> Result<(), CoreError> {
     let report = |phase: &str, done: i64, total: i64, edges: i64, symbols: i64, calls: i64| {
         if let Some(cb) = on_progress {
             cb(phase, done, total, edges, symbols, calls);
@@ -84,11 +75,7 @@ pub fn run_build_with_progress(
     let files_total = rel_files.len() as i64;
     report("parsing", 0, files_total, 0, 0, 0);
     let rel_set: HashSet<String> = rel_files.iter().cloned().collect();
-    if force {
-        purge_removed_files(conn, root_hash, &rel_set)?;
-    } else {
-        purge_stale_files(conn, root_hash, &rel_set)?;
-    }
+    purge_removed_files(conn, root_hash, &rel_set)?;
 
     let stored_mtimes = load_file_mtimes(conn, root_hash)?;
     let mut import_count = count_imports(conn, root_hash)?;
@@ -240,12 +227,9 @@ pub fn run_build_with_progress(
     )
     .map_err(|e| CoreError::rpc("GRAPH_INDEX_FAILED", e.to_string()))?;
 
-    Ok(BuildStats {
-        file_count: rel_files.len() as i64,
-        edge_count: import_count,
-        symbol_count,
-        call_count,
-    })
+    // 计数已经在上面那次 UPDATE 里落库（`graph_workspaces` 是唯一读侧来源），
+    // 返回值不再带一份「顺手返回但没人读」的 BuildStats —— 两份数字迟早会漂。
+    Ok(())
 }
 
 fn index_file(
