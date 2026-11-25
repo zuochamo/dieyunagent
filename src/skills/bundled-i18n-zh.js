@@ -17,16 +17,7 @@ const ZH_BY_SKILL_KEY = {
   'minimax:minimax-xlsx': 'MiniMax Excel：表格读写、公式、透视与数据整理。',
   'minimax:pptx-generator': 'MiniMax PPT：生成与编辑演示文稿、版式与图表。',
   'minimax:minimax-multimodal-toolkit': 'MiniMax 多模态工具包：图文音混合任务编排。',
-  'minimax:vision-analysis': 'MiniMax 图像分析：识图、OCR 与视觉问答。',
-  'minimax:minimax-music-gen': 'MiniMax 音乐生成：根据描述生成音乐片段。',
-  'minimax:minimax-music-playlist': 'MiniMax 歌单/音乐组织与播放列表相关能力。',
-  'minimax:buddy-sings': 'MiniMax 歌声合成与演唱风格相关生成。',
-  'minimax:gif-sticker-maker': 'MiniMax GIF/贴纸制作与动图导出。',
-  'minimax:shader-dev': 'MiniMax Shader 开发：WebGL/GLSL 特效与可视化。',
-  'minimax:react-native-dev': 'MiniMax React Native 移动应用开发。',
-  'minimax:flutter-dev': 'MiniMax Flutter 跨平台应用开发。',
-  'minimax:ios-application-dev': 'MiniMax iOS 原生应用开发。',
-  'minimax:android-native-dev': 'MiniMax Android 原生应用开发。'
+  'minimax:vision-analysis': 'MiniMax 图像分析：识图、OCR 与视觉问答。'
 };
 
 /**

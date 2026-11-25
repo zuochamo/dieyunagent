@@ -2,7 +2,6 @@
 
 const fs = require('fs/promises');
 const path = require('path');
-const os = require('os');
 const {
   seededSkillRoots,
   getScanRoots,
@@ -17,12 +16,7 @@ const {
 } = require('./skill-frontmatter');
 const { zhDescriptionForSkillKey } = require('./bundled-i18n-zh');
 const { verifySkillContent } = require('./install-integrity');
-const { resolveSkillDomain, SKILL_DOMAINS } = require('./taxonomy');
-
-function defaultSkillRoots() {
-  const home = os.homedir();
-  return [path.join(home, '.dieyun', 'skills')];
-}
+const { resolveSkillDomain, SKILL_DOMAINS, isDefaultEnabledSkillId } = require('./taxonomy');
 
 function enrichMetaDescriptions(meta, skillId) {
   const m = { ...meta };
@@ -101,6 +95,9 @@ async function tryAddSkill(dir, seen, out, bundledRoots) {
     domain,
     // 「内置」= 落在预装种子分类目录内（与可删性同源）。skillKey 只用于 id 与召回，不再是内置判据。
     builtin: bundledRoots.some((root) => isSeededSkillDir(dir, root)),
+    // 默认启用规则随扫描下发（唯一来源 skills/taxonomy.js#isDefaultEnabledSkillId）：
+    // Renderer 与 Main 注入都只读这个字段，不再各自维护一份预装前缀表。
+    defaultEnabled: isDefaultEnabledSkillId(skillId),
     // 安装基线比对结果：ok = 与安装时一致；changed = 本地被改过；untracked = 非市场安装（手写/预装）。
     // 只做「可比对」，不做「阻止执行」——见 install-integrity.js 的边界说明。
     integrity: integrity.state,
@@ -147,12 +144,10 @@ function bundledSkillRoots() {
  */
 async function scanSkills(opts = {}) {
   const bundled = bundledSkillRoots();
-  let roots;
-  if (opts && opts.userData) {
-    roots = getScanRoots(opts.userData, opts.workspacePath);
-  } else {
-    roots = defaultSkillRoots();
-  }
+  // 扫描根只有一处来源（agent-home 的 getScanRoots）：「~/.dieyun/skills + userData/skills/user
+  // + 工作区 .dieyun/skills」。以前缺 userData 时会退回本文件里自拼的 ~/.dieyun/skills，
+  // 而所有生产调用点都传 userData，那条分支从来没被执行过。
+  let roots = getScanRoots(opts && opts.userData, opts && opts.workspacePath);
   const rootSeen = new Set();
   roots = filterAccessibleSkillRoots(
     roots

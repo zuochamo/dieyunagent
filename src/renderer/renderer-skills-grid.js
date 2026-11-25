@@ -3,11 +3,12 @@
 
 var skillsApi = window.diecloud || {};
 
-var SKILLS_ENABLED_KEY = 'diecloud.skills.enabled.v1';
+// 启用状态的权威存储**在 Main**（`src/skills/enabled-store.js`，经 IPC 读写）：频道 / 定时计划 /
+// headless 那几档没有 Renderer，状态留在这里就等于那些轮次永远按默认值猜。
+// 这个旧键只在首次加载时搬一次，搬完即删。
+var SKILLS_ENABLED_LEGACY_KEY = 'diecloud.skills.enabled.v1';
 var SKILLS_HIDDEN_KEY = 'diecloud.skills.hidden.v1';
 var SKILLS_PAGE_SIZE = 15;
-var DEFAULT_ENABLED_SKILL_IDS = ['builtin:weather'];
-var DEFAULT_ENABLED_SKILL_PREFIXES = ['builtin:minimax:', 'builtin:curated:'];
 var SKILLS_TAB_TITLES = { list: '技能', mcp: 'MCP', automation: '定时' };
 
 /**
@@ -59,20 +60,38 @@ function renderGridCategoryTabs(nav, activeId, tabs, countForId, onPick) {
   for (const cat of tabs) mkTab(cat.id, cat.label);
 }
 
-function updateGridPagination(prefix, pageIndex, pageCount, total) {
+/**
+ * 统一的分页条渲染（技能 / MCP / 定时 / 两个市场页共用这一份）。
+ *
+ * `opts`（都可省）说明"末页还能继续加载"这类差异，不再让每个页面各写一份：
+ * - `loading`：加载中时把信息位换成「加载中…」并禁用两个按钮；
+ * - `canLoadMore`：末页但服务端还有更多 —— 此时**必须**出现分页条并把「下一页」留着可点；
+ * - `label`：信息位里的计数文案（默认「共 N 项」）。
+ *
+ * @param {string} prefix 分页条元素前缀（`${prefix}-pagination` / `-page-info` / `-page-prev` / `-page-next`）
+ * @param {number} pageIndex
+ * @param {number} pageCount
+ * @param {number} total
+ * @param {{ loading?: boolean, canLoadMore?: boolean, label?: string }} [opts]
+ */
+function updateGridPagination(prefix, pageIndex, pageCount, total, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
   const bar = $(`${prefix}-pagination`);
   const info = $(`${prefix}-page-info`);
   const prev = $(`${prefix}-page-prev`);
   const next = $(`${prefix}-page-next`);
   if (!bar) return;
-  if (pageCount <= 1) {
+  const loading = !!o.loading;
+  const canLoadMore = !!o.canLoadMore;
+  if (pageCount <= 1 && !canLoadMore) {
     bar.hidden = true;
     return;
   }
   bar.hidden = false;
-  if (info) info.textContent = `${pageIndex + 1} / ${pageCount}（共 ${total} 项）`;
-  if (prev) prev.disabled = pageIndex <= 0;
-  if (next) next.disabled = pageIndex >= pageCount - 1;
+  const label = o.label || `共 ${total} 项`;
+  if (info) info.textContent = loading ? '加载中…' : `${pageIndex + 1} / ${pageCount}（${label}）`;
+  if (prev) prev.disabled = loading || pageIndex <= 0;
+  if (next) next.disabled = loading || (pageIndex >= pageCount - 1 && !canLoadMore);
 }
 
 function bindGridSearchInput(inputId, getQuery, setQuery, getPageIndex, setPageIndex, onRefresh) {
@@ -94,11 +113,26 @@ function bindGridSearchInput(inputId, getQuery, setQuery, getPageIndex, setPageI
   });
 }
 
-function bindGridPagination(prefix, getPageIndex, setPageIndex, onRefresh) {
+/**
+ * 绑「上一页 / 下一页」两个按钮（技能 / MCP / 定时 / 两个市场页共用）。
+ *
+ * `opts.onNext` / `opts.onPrev` 用来接管"末页要继续向后端加载"这种特例：
+ * 返回 `true` 表示已自行处理（例如市场页会先 loadMore、再把索引推进一页），
+ * 于是同一个 handler 既能翻本地页，也能触发服务端加载 —— 不必再各写一遍。
+ *
+ * @param {string} prefix
+ * @param {() => number} getPageIndex
+ * @param {(v: number) => void} setPageIndex
+ * @param {() => void} onRefresh
+ * @param {{ onNext?: () => boolean | Promise<boolean>, onPrev?: () => boolean | Promise<boolean> }} [opts]
+ */
+function bindGridPagination(prefix, getPageIndex, setPageIndex, onRefresh, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
   const prev = $(`${prefix}-page-prev`);
   const next = $(`${prefix}-page-next`);
   if (prev) {
-    prev.addEventListener('click', () => {
+    prev.addEventListener('click', async () => {
+      if (typeof o.onPrev === 'function' && (await o.onPrev())) return;
       const idx = getPageIndex();
       if (idx > 0) {
         setPageIndex(idx - 1);
@@ -107,37 +141,36 @@ function bindGridPagination(prefix, getPageIndex, setPageIndex, onRefresh) {
     });
   }
   if (next) {
-    next.addEventListener('click', () => {
+    next.addEventListener('click', async () => {
+      if (typeof o.onNext === 'function' && (await o.onNext())) return;
       setPageIndex(getPageIndex() + 1);
       onRefresh();
     });
   }
 }
 
-function findDomainById(catId) {
-  const list = skillsDomains();
-  return (
-    list.find((c) => c.id === catId) ||
-    list.find((c) => c.id === SKILLS_DOMAIN_DEFAULT) ||
-    { id: SKILLS_DOMAIN_DEFAULT, label: '效率工具' }
-  );
-}
-
-function skillSearchHaystack(skill) {
-  return [skill.id, skill.name, skill.description, skill.preview, skill.category]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
+/**
+ * 目录类接口（技能市场 / MCP 市场）的返回形状解析 —— 唯一实现。
+ *
+ * 只有一个形状：`{ entries, hasMore, loadedCount, searchRemote, errors? }`。
+ * 以前两边各有一份，还各自兼容「结果是数组」的旧形状（Main 早已只返回对象）。
+ * @param {any} result
+ */
+function parseGridListResult(result) {
+  const entries = Array.isArray(result && result.entries) ? result.entries : [];
+  return {
+    entries,
+    hasMore: !!(result && result.hasMore),
+    loadedCount: Number(result && result.loadedCount) || entries.length,
+    searchRemote: !!(result && result.searchRemote),
+    errors: Array.isArray(result && result.errors) ? result.errors : []
+  };
 }
 
 /** 技能的页签 id：分类由 Main 的 `skills/taxonomy.js` 决定，这里只读不算。 */
 function skillDomainId(skill) {
   const d = String((skill && skill.domain) || '');
   return skillsDomains().some((c) => c.id === d) ? d : SKILLS_DOMAIN_DEFAULT;
-}
-
-function skillDomainLabel(skill) {
-  return findDomainById(skillDomainId(skill)).label;
 }
 
 
@@ -251,40 +284,97 @@ function switchSkillsTab(tab) {
   }
 }
 
-function shouldDefaultEnableSkillId(id) {
-  if (DEFAULT_ENABLED_SKILL_IDS.includes(id)) return true;
-  return DEFAULT_ENABLED_SKILL_PREFIXES.some((prefix) => id.startsWith(prefix));
+/** 扫描结果里 `defaultEnabled` 的取用索引（Main 算好的，不要在这里补一份前缀表）。 */
+var skillsByIdIndex = null;
+
+function resetSkillsByIdIndex() {
+  skillsByIdIndex = null;
+}
+
+function skillDefaultEnabled(id) {
+  const key = String(id || '');
+  if (!key) return false;
+  if (!skillsByIdIndex) {
+    skillsByIdIndex = new Map();
+    for (const sk of skillsCatalog.skills || []) skillsByIdIndex.set(sk.id, !!sk.defaultEnabled);
+  }
+  return skillsByIdIndex.get(key) === true;
 }
 
 function isSkillEnabled(map, id) {
-  if (Object.prototype.hasOwnProperty.call(map, id)) return !!map[id];
-  return shouldDefaultEnableSkillId(id);
+  if (map && Object.prototype.hasOwnProperty.call(map, id)) return !!map[id];
+  return skillDefaultEnabled(id);
 }
 
+/** 用户显式设置过的启用状态（Main 那份的本地镜像；同步读，界面渲染都靠它）。 */
+var skillsEnabledMap = {};
+
 function loadEnabledSkillIds() {
+  return skillsEnabledMap;
+}
+
+/**
+ * 从 Main 拉一次启用状态。首次运行会把旧版 localStorage 里的选择搬过去（一次性）。
+ * @returns {Promise<Record<string, boolean>>}
+ */
+async function loadSkillsEnabledFromMain() {
+  if (typeof skillsApi.getSkillsEnabled !== 'function') return skillsEnabledMap;
+  let res = null;
   try {
-    const raw = window.localStorage.getItem(SKILLS_ENABLED_KEY);
-    const obj = raw ? JSON.parse(raw) : {};
-    const map = obj && typeof obj === 'object' ? obj : {};
-    let changed = false;
-    for (const sk of skillsCatalog.skills || []) {
-      if (map[sk.id] === undefined && shouldDefaultEnableSkillId(sk.id)) {
-        map[sk.id] = true;
-        changed = true;
-      }
-    }
-    for (const id of DEFAULT_ENABLED_SKILL_IDS) {
-      if (map[id] === undefined) {
-        map[id] = true;
-        changed = true;
-      }
-    }
-    if (changed) saveEnabledSkillIds(map);
-    return map;
+    res = await skillsApi.getSkillsEnabled();
   } catch {
-    const map = {};
-    for (const id of DEFAULT_ENABLED_SKILL_IDS) map[id] = true;
-    return map;
+    return skillsEnabledMap;
+  }
+  skillsEnabledMap = res && res.enabled && typeof res.enabled === 'object' ? res.enabled : {};
+  if (res && res.exists === false) await importLegacyEnabledSkills();
+  return skillsEnabledMap;
+}
+
+/** 旧版 localStorage → Main 的一次性搬迁。只在 Main 还没有这份文件时发生。 */
+async function importLegacyEnabledSkills() {
+  let legacy = null;
+  try {
+    legacy = JSON.parse(window.localStorage.getItem(SKILLS_ENABLED_LEGACY_KEY) || 'null');
+  } catch {
+    legacy = null;
+  }
+  if (!legacy || typeof legacy !== 'object') return;
+  for (const [id, on] of Object.entries(legacy)) {
+    if (!id || Object.prototype.hasOwnProperty.call(skillsEnabledMap, id)) continue;
+    try {
+      const saved = await skillsApi.setSkillEnabled({ id, enabled: !!on });
+      if (saved && saved.enabled && typeof saved.enabled === 'object') skillsEnabledMap = saved.enabled;
+    } catch {
+      // 单条搬不过去就跳过：默认规则兜底，不影响其余条目
+    }
+  }
+  try {
+    window.localStorage.removeItem(SKILLS_ENABLED_LEGACY_KEY);
+  } catch {
+    // ignore
+  }
+  window.dispatchEvent(new CustomEvent('dieyun:skills-enabled-change'));
+}
+
+/**
+ * 改一条启用状态：先更新本地镜像（界面立刻跟手），再写 Main（那里的才是真相）。
+ * @param {string} id
+ * @param {boolean} on
+ */
+async function setSkillEnabledFlag(id, on) {
+  const key = String(id || '');
+  if (!key) return;
+  skillsEnabledMap = { ...skillsEnabledMap, [key]: !!on };
+  window.dispatchEvent(new CustomEvent('dieyun:skills-enabled-change'));
+  if (typeof skillsApi.setSkillEnabled !== 'function') return;
+  try {
+    const saved = await skillsApi.setSkillEnabled({ id: key, enabled: !!on });
+    if (saved && saved.enabled && typeof saved.enabled === 'object') {
+      skillsEnabledMap = saved.enabled;
+      window.dispatchEvent(new CustomEvent('dieyun:skills-enabled-change'));
+    }
+  } catch {
+    // 写失败保留本地镜像：界面按用户点过的显示，下次刷新回到 Main 的真相
   }
 }
 
@@ -297,15 +387,6 @@ function updateSkillsEnabledCount() {
     (sk) => !isSkillHidden(hidden, sk) && isSkillEnabled(map, sk.id)
   ).length;
   el.textContent = `${n} 项已启用`;
-}
-
-function saveEnabledSkillIds(map) {
-  try {
-    window.localStorage.setItem(SKILLS_ENABLED_KEY, JSON.stringify(map));
-    window.dispatchEvent(new CustomEvent('dieyun:skills-enabled-change'));
-  } catch {
-    // ignore
-  }
 }
 
 function loadHiddenSkillIds() {
@@ -393,46 +474,23 @@ function countSkillsInTaxonomy(taxonomyId) {
 
 function renderSkillsCategoryTabs() {
   normalizeSkillsCategoryFilter();
-  const nav = $('skills-category-tabs');
-  if (!nav) return;
-  nav.innerHTML = '';
-
-  const mkTab = (id, label) => {
-    const n = countSkillsInTaxonomy(id);
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = `skills-category-tab${skillsCategoryFilter === id ? ' active' : ''}`;
-    btn.dataset.category = id;
-    btn.textContent = id === 'all' ? label : n > 0 ? `${label} ${n}` : label;
-    btn.addEventListener('click', () => {
+  // 分类页签的渲染/计数/点击只有一份实现（renderGridCategoryTabs）。
+  renderGridCategoryTabs(
+    $('skills-category-tabs'),
+    skillsCategoryFilter,
+    skillsDomains(),
+    countSkillsInTaxonomy,
+    (id) => {
       skillsCategoryFilter = id;
       skillsPageIndex = 0;
       renderSkillsCategoryTabs();
       renderSkillsList();
-    });
-    nav.appendChild(btn);
-  };
-
-  mkTab('all', '全部');
-  for (const cat of skillsDomains()) {
-    mkTab(cat.id, cat.label);
-  }
+    }
+  );
 }
 
 function updateSkillsPagination(total, pageCount) {
-  const bar = $('skills-pagination');
-  const info = $('skills-page-info');
-  const prev = $('skills-page-prev');
-  const next = $('skills-page-next');
-  if (!bar) return;
-  if (pageCount <= 1) {
-    bar.hidden = true;
-    return;
-  }
-  bar.hidden = false;
-  if (info) info.textContent = `${skillsPageIndex + 1} / ${pageCount}（共 ${total} 项）`;
-  if (prev) prev.disabled = skillsPageIndex <= 0;
-  if (next) next.disabled = skillsPageIndex >= pageCount - 1;
+  updateGridPagination('skills', skillsPageIndex, pageCount, total);
 }
 
 async function deleteSkillItem(sk) {
@@ -443,9 +501,8 @@ async function deleteSkillItem(sk) {
   if (!window.confirm(`确定删除技能「${label}」？${hint}`)) {
     return;
   }
-  const enabled = loadEnabledSkillIds();
-  delete enabled[sk.id];
-  saveEnabledSkillIds(enabled);
+  // 删掉的技能不该留着启用状态（留着也只是脏数据，但会让「已启用 N 项」多算）
+  await setSkillEnabledFlag(sk.id, false);
   if (canDelete) {
     if (!skillsApi.deleteSkill) {
       window.alert('当前版本未提供技能删除接口');
@@ -537,10 +594,7 @@ function renderSkillsList() {
     });
     cb.addEventListener('change', (e) => {
       e.stopPropagation();
-      const map = loadEnabledSkillIds();
-      if (cb.checked) map[sk.id] = true;
-      else map[sk.id] = false;
-      saveEnabledSkillIds(map);
+      setSkillEnabledFlag(sk.id, cb.checked).catch(() => {});
       renderSkillsList();
     });
     tile.querySelector('.skill-tile-foot')?.addEventListener('click', (e) => {

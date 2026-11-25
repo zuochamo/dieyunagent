@@ -57,6 +57,30 @@ const BUNDLED_SKILL_DOMAINS = Object.freeze({
 /** 中文标签 → domain id（frontmatter 里写「办公协同」和写 office 等价）。 */
 const DOMAIN_LABELS = new Map(SKILL_DOMAINS.map((d) => [d.label, d.id]));
 
+/**
+ * 预装技能的**默认启用**规则（唯一来源）。
+ *
+ * 以前这条规则在三个地方各写一份（Renderer 的 `DEFAULT_ENABLED_SKILL_IDS/PREFIXES`、
+ * `system-prompt-prep.js#shouldDefaultEnableSkillId`、`agent-home` 的种子分类表），
+ * 加一个预装分类就得改三处，漏一处就是「不可删但永不默认启用」。
+ * 现在随扫描结果下发每个技能的 `defaultEnabled`，两侧都只读这个字段。
+ *
+ * 语义：只影响「用户没表过态」的技能；用户显式关掉的仍然关着（见 `skills/enabled-store.js`）。
+ */
+const DEFAULT_ENABLED_SKILL_IDS = Object.freeze(['builtin:weather']);
+const DEFAULT_ENABLED_SKILL_PREFIXES = Object.freeze(['builtin:minimax:', 'builtin:curated:']);
+
+/**
+ * @param {string} id 扫描得到的技能 id（`builtin:<skillKey>` / 用户目录绝对路径）
+ * @returns {boolean}
+ */
+function isDefaultEnabledSkillId(id) {
+  const s = String(id || '');
+  if (!s) return false;
+  if (DEFAULT_ENABLED_SKILL_IDS.includes(s)) return true;
+  return DEFAULT_ENABLED_SKILL_PREFIXES.some((prefix) => s.startsWith(prefix));
+}
+
 function normalizeDomain(value) {
   const v = String(value || '').trim();
   if (!v) return '';
@@ -93,5 +117,8 @@ module.exports = {
   SKILL_DOMAINS,
   DEFAULT_SKILL_DOMAIN,
   BUNDLED_SKILL_DOMAINS,
+  DEFAULT_ENABLED_SKILL_IDS,
+  DEFAULT_ENABLED_SKILL_PREFIXES,
+  isDefaultEnabledSkillId,
   resolveSkillDomain
 };

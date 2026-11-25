@@ -1,11 +1,23 @@
-/* global window, document, $, escapeHtml, gwState, gatewayCall, openSettingsShell, switchSettingsPage, refreshAutomationList, showMcpListView, showAgentToast, getEffectiveInputBudget, CTX_LIMITS, updateSshPanelVisibility, ensureSelectMenu */
+/* global window, document, $, escapeHtml, gwState, gatewayCall, openSettingsShell, switchSettingsPage, refreshAutomationList, showMcpListView, showAgentToast, getEffectiveInputBudget, CTX_LIMITS, updateSshPanelVisibility, ensureSelectMenu, DieyunToolCatalog */
 'use strict';
 
-/** MCP 远程传输类型（取值与 Gateway 侧 transport 字段一致）。 */
-const MCP_REMOTE_TRANSPORT_OPTIONS = [
-  { key: 'streamable-http', label: 'Streamable HTTP' },
-  { key: 'sse', label: 'SSE' }
-];
+/**
+ * MCP 远端传输协议选项：**键来自单一来源**（`mcp/manage.js#MCP_REMOTE_TRANSPORT_KINDS`，
+ * 经 agent-bundle 的 `DieyunToolCatalog` 透出），这里只保留给人看的标签。
+ * 以前这张表是手写的，与校验 / 落库各写一份、互不相认（`sse` 就是这样漏掉别名表的）。
+ */
+const _skillsUiCatalog = typeof DieyunToolCatalog !== 'undefined' ? DieyunToolCatalog : {};
+const MCP_REMOTE_TRANSPORT_LABELS = { 'streamable-http': 'Streamable HTTP', sse: 'SSE' };
+const MCP_REMOTE_TRANSPORT_OPTIONS = (
+  Array.isArray(_skillsUiCatalog.MCP_REMOTE_TRANSPORT_KINDS)
+    ? _skillsUiCatalog.MCP_REMOTE_TRANSPORT_KINDS
+    : []
+).map((key) => ({ key, label: MCP_REMOTE_TRANSPORT_LABELS[key] || key }));
+if (!MCP_REMOTE_TRANSPORT_OPTIONS.length) {
+  // 空表只有一种原因：agent-bundle 没重建（`npm run build:renderer:dev`）。
+  // 说出来，好过让「传输方式」下拉静默变成空的。
+  console.error('[dieyun:skills] DieyunToolCatalog.MCP_REMOTE_TRANSPORT_KINDS 缺失：agent-bundle 需要重建');
+}
 
 let mcpConfigTransportMenu = null;
 
@@ -506,12 +518,24 @@ function findSkillInCatalog(created) {
 }
 
 async function registerCreatedSkillInUi(created) {
+  // 这条通道同时承载「改」与「删」（`agent-home#updateUserSkill` / `deleteUserSkill`）：
+  // 它们没有「新建技能」这一步，走下面那条分支会弹一句「技能已创建」——那是错话。
+  const updatedDir = created && created.updated ? String(created.updated) : '';
+  const deletedDir = created && created.deleted ? String(created.deleted) : '';
+  if (updatedDir || deletedDir) {
+    await refreshSkillsCatalog();
+    renderSkillsList();
+    updateSkillsEnabledCount();
+    if (typeof showAgentToast === 'function') {
+      showAgentToast(updatedDir ? '技能已更新' : '技能已删除', updatedDir || deletedDir, { variant: 'info' });
+    }
+    return null;
+  }
   await refreshSkillsCatalog();
   const sk = findSkillInCatalog(created);
   if (sk) {
-    const map = loadEnabledSkillIds();
-    map[sk.id] = true;
-    saveEnabledSkillIds(map);
+    // 新建的技能默认启用：写 Main 的启用状态（唯一权威），界面镜像随之更新
+    await setSkillEnabledFlag(sk.id, true);
     skillsCategoryFilter = 'user';
     renderSkillsCategoryTabs();
     renderSkillsList();
@@ -531,7 +555,9 @@ async function refreshSkillsCatalog() {
   if (grid) grid.innerHTML = '<div class="skills-empty">扫描中…</div>';
   try {
     skillsCatalog = await skillsApi.scanSkills();
-    loadEnabledSkillIds();
+    // `defaultEnabled` 随扫描结果下发，索引要跟着重建；启用状态来自 Main，不再读 localStorage
+    resetSkillsByIdIndex();
+    await loadSkillsEnabledFromMain();
     renderSkillsCategoryTabs();
     renderSkillsList();
     renderMcpList().catch(() => {});
@@ -879,22 +905,14 @@ function initSkillsUI() {
     });
   }
 
-  const skillsPagePrev = $('skills-page-prev');
-  const skillsPageNext = $('skills-page-next');
-  if (skillsPagePrev) {
-    skillsPagePrev.addEventListener('click', () => {
-      if (skillsPageIndex > 0) {
-        skillsPageIndex -= 1;
-        renderSkillsList();
-      }
-    });
-  }
-  if (skillsPageNext) {
-    skillsPageNext.addEventListener('click', () => {
-      skillsPageIndex += 1;
-      renderSkillsList();
-    });
-  }
+  bindGridPagination(
+    'skills',
+    () => skillsPageIndex,
+    (v) => {
+      skillsPageIndex = v;
+    },
+    () => renderSkillsList()
+  );
 
   const skillDetailClose = $('skill-detail-close');
   if (skillDetailClose) skillDetailClose.addEventListener('click', closeSkillDetail);
@@ -938,16 +956,40 @@ function initSkillsUI() {
     resetMcpCredentialsStore().catch(() => {});
   });
 
-  // Agent 的 mcp_manage request_credential：直接打开该服务的配置弹窗，由人亲手填 Key。
-  // 复用同一个弹窗（含 token / 环境变量、加密保存、保存后重挂会话），不另造一套输入界面。
-  if (skillsApi && typeof skillsApi.onMcpCredentialRequest === 'function') {
-    skillsApi.onMcpCredentialRequest((payload) => {
-      const id = String((payload && payload.serverId) || '').trim();
-      if (!id) return;
-      openMcpConfigDialog(
-        { id, name: payload.name || id },
-        { reason: String((payload && payload.reason) || '') }
-      ).catch(() => {});
+  // 模型申请一项能力（**唯一通道**，payload.kind 决定落到哪个界面）：
+  // - `mcpCredential`：打开该 MCP 服务的配置弹窗，由人亲手填 Key（复用同一个弹窗：token /
+  //   环境变量、加密保存、保存后重挂会话）；
+  // - 其余（osControl / camera / desktopCamera / …）：打开对应设置页并高亮要开的开关。
+  // 页面/控件 id 都由 Main 的 `capability-index` 给（唯一来源），这里只按描述符导航，不认能力名。
+  if (skillsApi && typeof skillsApi.onCapabilityRequest === 'function') {
+    skillsApi.onCapabilityRequest((payload) => {
+      const kind = String((payload && payload.kind) || '');
+      const reason = String((payload && payload.reason) || '');
+      if (kind === 'mcpCredential') {
+        const id = String((payload && (payload.serverId || payload.id)) || '').trim();
+        if (!id) return;
+        openMcpConfigDialog({ id, name: payload.name || id }, { reason }).catch(() => {});
+        return;
+      }
+      const page = String((payload && payload.page) || '').trim();
+      const anchor = String((payload && payload.anchor) || '').trim();
+      if (page && typeof openSettingsShell === 'function' && typeof switchSettingsPage === 'function') {
+        openSettingsShell();
+        switchSettingsPage(page);
+      }
+      if (anchor) {
+        // 等一帧让设置页真正显示出来：对隐藏元素 scrollIntoView 不会生效
+        setTimeout(() => {
+          const el = document.getElementById(anchor);
+          if (el && typeof el.scrollIntoView === 'function') {
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          }
+        }, 120);
+      }
+      const how = String((payload && payload.howToEnable) || (payload && payload.label) || '').trim();
+      if (how && typeof showAgentToast === 'function') {
+        showAgentToast('Agent 申请一项能力', reason ? `${how}（${reason}）` : how, { variant: 'info' });
+      }
     });
   }
   $('mcp-config-upgrade')?.addEventListener('click', () => {
@@ -975,24 +1017,18 @@ function initSkillsUI() {
     () => renderMcpList().catch(() => {})
   );
 
-  const skillsSearchInput = $('skills-search');
-  if (skillsSearchInput) {
-    let searchDebounce;
-    skillsSearchInput.addEventListener('input', () => {
-      skillsSearchQuery = skillsSearchInput.value || '';
-      skillsPageIndex = 0;
-      clearTimeout(searchDebounce);
-      searchDebounce = setTimeout(() => renderSkillsList(), 200);
-    });
-    skillsSearchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        skillsSearchInput.value = '';
-        skillsSearchQuery = '';
-        skillsPageIndex = 0;
-        renderSkillsList();
-      }
-    });
-  }
+  bindGridSearchInput(
+    'skills-search',
+    () => skillsSearchQuery,
+    (v) => {
+      skillsSearchQuery = v;
+    },
+    () => skillsPageIndex,
+    (v) => {
+      skillsPageIndex = v;
+    },
+    () => renderSkillsList()
+  );
 
   initWorkspaceUI().catch(() => {});
 }

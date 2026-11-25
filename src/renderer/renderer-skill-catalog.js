@@ -1,6 +1,7 @@
 'use strict';
 
-/* global window, document, $, escapeHtml, refreshSkillsCatalog */
+/* global window, document, $, escapeHtml, refreshSkillsCatalog, gatewayCall,
+   updateGridPagination, bindGridSearchInput, bindGridPagination, parseGridListResult */
 
 const skillCatalogApi = window.diecloud || {};
 // 页大小唯一来源 window.SKILLS_GRID_PAGE_SIZE（renderer-skills-ui.js 在本文件之前加载）。
@@ -14,6 +15,12 @@ let skillCatalogLoading = false;
 let skillCatalogLoadedCount = 0;
 let skillCatalogSearchRemote = false;
 let skillCatalogDetailEntry = null;
+/** 上一次加载失败的原因：非空时列表位显示错误，而不是被 finally 用旧数据盖掉 */
+let skillCatalogError = '';
+
+function skillCatalogPageCount() {
+  return Math.max(1, Math.ceil(skillCatalogEntries.length / SKILL_CATALOG_PAGE_SIZE));
+}
 
 function findSkillCatalogEntry(id) {
   return skillCatalogEntries.find((ent) => ent.id === id) || null;
@@ -154,20 +161,9 @@ async function installSkillCatalogEntry(id, { fromDetail = false } = {}) {
   }
 }
 
-function parseSkillCatalogListResult(result) {
-  if (Array.isArray(result)) {
-    return { entries: result, hasMore: false, loadedCount: result.length, searchRemote: false };
-  }
-  return {
-    entries: Array.isArray(result?.entries) ? result.entries : [],
-    hasMore: !!result?.hasMore,
-    loadedCount: Number(result?.loadedCount) || (Array.isArray(result?.entries) ? result.entries.length : 0),
-    searchRemote: !!result?.searchRemote
-  };
-}
-
+// 目录列表返回形状的解析只有一份（renderer-skills-grid.js#parseGridListResult）
 function applySkillCatalogListResult(result) {
-  const parsed = parseSkillCatalogListResult(result);
+  const parsed = parseGridListResult(result);
   skillCatalogEntries = parsed.entries;
   skillCatalogHasMore = parsed.hasMore;
   skillCatalogLoadedCount = parsed.loadedCount;
@@ -196,28 +192,26 @@ function formatInstallCount(n) {
 
 function renderSkillCatalogGrid() {
   const listEl = $('skill-catalog-list');
-  const info = $('skill-catalog-page-info');
-  const prev = $('skill-catalog-page-prev');
-  const next = $('skill-catalog-page-next');
-  const bar = $('skill-catalog-pagination');
   if (!listEl) return;
+
+  if (skillCatalogError) {
+    listEl.innerHTML = `<p class="skills-empty">加载失败：${escapeHtml(skillCatalogError)}</p>`;
+    updateGridPagination('skill-catalog', 0, 0, 0);
+    return;
+  }
 
   const visible = skillCatalogEntries.slice();
   if (!visible.length) {
     const q = skillCatalogSearchQuery.trim();
     const emptyMsg = q
-      ? q.length < 2
-        ? '搜索至少输入 2 个字符'
-        : skillCatalogSearchRemote
-          ? 'skills.sh 未找到匹配项，可换关键词'
-          : '没有匹配的技能'
+      ? '没有匹配的技能，可换关键词（skills.sh 搜索至少 2 个字符）'
       : '目录为空';
     listEl.innerHTML = `<p class="skills-empty">${emptyMsg}</p>`;
-    if (bar) bar.hidden = true;
+    updateGridPagination('skill-catalog', 0, 0, 0);
     return;
   }
 
-  const pageCount = Math.max(1, Math.ceil(visible.length / SKILL_CATALOG_PAGE_SIZE));
+  const pageCount = skillCatalogPageCount();
   if (skillCatalogPageIndex >= pageCount) skillCatalogPageIndex = pageCount - 1;
   if (skillCatalogPageIndex < 0) skillCatalogPageIndex = 0;
   const slice = visible.slice(
@@ -256,28 +250,16 @@ function renderSkillCatalogGrid() {
     })
     .join('');
 
-  if (bar) {
-    const atLastPage = skillCatalogPageIndex >= pageCount - 1;
-    const canLoadMore = atLastPage && skillCatalogHasMore;
-    if (pageCount <= 1 && !canLoadMore) {
-      bar.hidden = true;
-    } else {
-      bar.hidden = false;
-      const moreHint = skillCatalogHasMore ? ' · 可继续加载' : '';
-      const searchHint = skillCatalogSearchRemote ? ' · skills.sh 搜索' : '';
-      const loadedHint =
-        skillCatalogLoadedCount > visible.length
-          ? ` · 已加载 ${skillCatalogLoadedCount} 条`
-          : '';
-      if (info) {
-        info.textContent = skillCatalogLoading
-          ? '加载中…'
-          : `${skillCatalogPageIndex + 1} / ${pageCount}（当前 ${visible.length} 项${loadedHint}${searchHint}${moreHint}）`;
-      }
-      if (prev) prev.disabled = skillCatalogPageIndex <= 0 || skillCatalogLoading;
-      if (next) next.disabled = skillCatalogLoading || (atLastPage && !skillCatalogHasMore);
-    }
-  }
+  // 分页条（含"末页还能继续加载"）：唯一实现在 renderer-skills-grid.js#updateGridPagination
+  const atLastPage = skillCatalogPageIndex >= pageCount - 1;
+  const searchHint = skillCatalogSearchRemote ? ' · skills.sh 搜索' : '';
+  const loadedHint =
+    skillCatalogLoadedCount > visible.length ? ` · 已加载 ${skillCatalogLoadedCount} 条` : '';
+  updateGridPagination('skill-catalog', skillCatalogPageIndex, pageCount, visible.length, {
+    loading: skillCatalogLoading,
+    canLoadMore: atLastPage && skillCatalogHasMore,
+    label: `当前 ${visible.length} 项${loadedHint}${searchHint}${skillCatalogHasMore ? ' · 可继续加载' : ''}`
+  });
 }
 
 async function fetchSkillCatalogFromApi({ refresh = false, loadMore = false, search = '' } = {}) {
@@ -299,15 +281,8 @@ async function loadSkillCatalogUI({ refresh = false, loadMore = false, silent = 
     return;
   }
   const searchQuery = search != null ? String(search).trim() : skillCatalogSearchQuery.trim();
-  if (searchQuery.length === 1) {
-    skillCatalogEntries = [];
-    skillCatalogHasMore = false;
-    skillCatalogSearchRemote = true;
-    skillCatalogLoading = false;
-    renderSkillCatalogGrid();
-    return;
-  }
   skillCatalogLoading = true;
+  skillCatalogError = '';
   renderSkillCatalogGrid();
   if (!silent && !loadMore) {
     listEl.innerHTML = `<p class="skills-empty">${searchQuery ? '正在搜索 skills.sh…' : '加载目录…'}</p>`;
@@ -315,41 +290,47 @@ async function loadSkillCatalogUI({ refresh = false, loadMore = false, silent = 
     hint.textContent = searchQuery ? '搜索加载更多…' : '加载更多…';
   }
   try {
+    // 首屏条数与「太短的搜索词」都由 Main 判定（skills/catalog.js）：
+    // 它一次给 3 页（45 条）、搜索词 <2 字符直接回空表 —— Renderer 不再补一遍预取或特判。
     await fetchSkillCatalogFromApi({ refresh, loadMore, search: searchQuery });
     if (!loadMore) skillCatalogPageIndex = 0;
-
-    if (!skillCatalogEntries.length && skillCatalogHasMore && !loadMore) {
-      await fetchSkillCatalogFromApi({ loadMore: true, search: searchQuery });
-    }
-
-    if (!searchQuery && !loadMore && !refresh) {
-      let attempts = 0;
-      while (attempts < 4) {
-        if (skillCatalogEntries.length >= SKILL_CATALOG_PAGE_SIZE || !skillCatalogHasMore) break;
-        await fetchSkillCatalogFromApi({ loadMore: true, search: '' });
-        attempts += 1;
-      }
-    }
-
-    if (!skillCatalogEntries.length) {
-      listEl.innerHTML = `<p class="skills-empty">${searchQuery ? '没有匹配的技能' : '目录为空'}</p>`;
-      return;
-    }
     if (hint) {
       if (refresh) hint.textContent = '目录已刷新';
       else if (loadMore) hint.textContent = skillCatalogHasMore ? '已加载更多' : '已全部加载';
-      else if (searchQuery && skillCatalogSearchRemote) {
+      else if (searchQuery && skillCatalogSearchRemote && skillCatalogEntries.length) {
         hint.textContent = '已在 skills.sh 搜索';
       } else if (!silent) {
         hint.textContent = skillCatalogHasMore ? '已加载首屏，翻页可继续加载' : '';
       }
     }
   } catch (err) {
-    listEl.innerHTML = `<p class="skills-empty">加载失败：${escapeHtml(err.message || err)}</p>`;
+    skillCatalogError = String((err && err.message) || err);
+    if (hint) hint.textContent = '加载失败，可点「刷新目录」重试';
   } finally {
+    // 失败也要走同一处渲染：以前 catch 写完错误、finally 又用旧数据重绘把它盖掉了
     skillCatalogLoading = false;
-    if (skillCatalogEntries.length || skillCatalogSearchQuery.trim().length === 1) {
-      renderSkillCatalogGrid();
+    renderSkillCatalogGrid();
+  }
+}
+
+/**
+ * 打开市场页链接：走既有 RPC `host.open_url`。
+ *
+ * 唯一实现是 `gateway/host-control.js#openExternalUrl`（http(s) 校验 + shell.openExternal +
+ * 非 Electron 回落）。以前这里判断 `diecloud.openExternal` —— 那个方法**从来不存在**，
+ * 所以按钮点了只会显示一句提示；现在接上既有通道，被 hostControl 权限拒绝时如实说明。
+ * @param {string} url
+ */
+async function openSkillCatalogUrl(url) {
+  const target = String(url || '').trim();
+  if (!target) return;
+  try {
+    if (typeof gatewayCall !== 'function') throw new Error('Gateway 未就绪');
+    await gatewayCall('host.open_url', { url: target });
+  } catch (err) {
+    const hintEl = $('skill-catalog-detail-hint');
+    if (hintEl) {
+      hintEl.textContent = `无法直接打开（${(err && err.message) || err}）；链接已显示在上方，可复制到浏览器`;
     }
   }
 }
@@ -376,65 +357,45 @@ function initSkillCatalogUI() {
     refreshBtn.addEventListener('click', () => loadSkillCatalogUI({ refresh: true }));
   }
 
-  const searchInput = $('skill-catalog-search');
-  if (searchInput) {
-    let debounce;
-    searchInput.addEventListener('input', () => {
-      skillCatalogSearchQuery = searchInput.value || '';
-      skillCatalogPageIndex = 0;
-      clearTimeout(debounce);
-      debounce = setTimeout(() => {
-        const q = skillCatalogSearchQuery.trim();
-        if (q.length === 1) {
-          skillCatalogEntries = [];
-          skillCatalogHasMore = false;
-          skillCatalogSearchRemote = true;
-          renderSkillCatalogGrid();
-          return;
-        }
-        if (q) {
-          loadSkillCatalogUI({ refresh: true, search: q }).catch(() => {});
-        } else {
-          loadSkillCatalogUI({ refresh: false }).catch(() => {});
-        }
-      }, 350);
-    });
-    searchInput.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
-      searchInput.value = '';
-      skillCatalogSearchQuery = '';
-      skillCatalogPageIndex = 0;
-      loadSkillCatalogUI({ refresh: false }).catch(() => {});
-    });
-  }
+  // 搜索：防抖 / 清空语义只有一份（renderer-skills-grid.js#bindGridSearchInput）
+  bindGridSearchInput(
+    'skill-catalog-search',
+    () => skillCatalogSearchQuery,
+    (v) => {
+      skillCatalogSearchQuery = v;
+    },
+    () => skillCatalogPageIndex,
+    (v) => {
+      skillCatalogPageIndex = v;
+    },
+    () => {
+      const q = skillCatalogSearchQuery.trim();
+      loadSkillCatalogUI({ refresh: !!q, search: q }).catch(() => {});
+    }
+  );
 
-  const prevBtn = $('skill-catalog-page-prev');
-  if (prevBtn) {
-    prevBtn.addEventListener('click', () => {
-      if (skillCatalogPageIndex > 0) {
-        skillCatalogPageIndex -= 1;
-        renderSkillCatalogGrid();
-      }
-    });
-  }
-
-  const nextBtn = $('skill-catalog-page-next');
-  if (nextBtn) {
-    nextBtn.addEventListener('click', async () => {
-      const visible = skillCatalogEntries.slice();
-      const pageCount = Math.max(1, Math.ceil(visible.length / SKILL_CATALOG_PAGE_SIZE));
-      const atLastPage = skillCatalogPageIndex >= pageCount - 1;
-      if (atLastPage && skillCatalogHasMore) {
+  bindGridPagination(
+    'skill-catalog',
+    () => skillCatalogPageIndex,
+    (v) => {
+      skillCatalogPageIndex = v;
+    },
+    () => renderSkillCatalogGrid(),
+    {
+      /**
+       * 末页「下一页」= 向 Main 再要一批。
+       * 以前这里加载完只重渲染、**不推进索引**，用户点一次看到的还是同一页（要再点一次才动）。
+       */
+      onNext: async () => {
+        if (skillCatalogLoading) return true;
+        if (skillCatalogPageIndex < skillCatalogPageCount() - 1 || !skillCatalogHasMore) return false;
         await loadSkillCatalogUI({ loadMore: true, silent: true });
-        renderSkillCatalogGrid();
-        return;
-      }
-      if (skillCatalogPageIndex < pageCount - 1) {
         skillCatalogPageIndex += 1;
         renderSkillCatalogGrid();
+        return true;
       }
-    });
-  }
+    }
+  );
 
   const listEl = $('skill-catalog-list');
   if (listEl) {
@@ -497,12 +458,7 @@ function initSkillCatalogUI() {
       e.stopPropagation();
       const url = detailWebBtn.dataset.url;
       if (!url) return;
-      if (skillCatalogApi.openExternal && typeof skillCatalogApi.openExternal === 'function') {
-        skillCatalogApi.openExternal(url).catch(() => {});
-        return;
-      }
-      const hintEl = $('skill-catalog-detail-hint');
-      if (hintEl) hintEl.textContent = '链接已显示在上方，可复制到浏览器打开';
+      openSkillCatalogUrl(url).catch(() => {});
     });
   }
 
@@ -513,6 +469,4 @@ function initSkillCatalogUI() {
   });
 }
 
-window.showSkillListView = showSkillListView;
-window.showSkillCatalogView = showSkillCatalogView;
 window.initSkillCatalogUI = initSkillCatalogUI;
