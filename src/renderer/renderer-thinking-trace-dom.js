@@ -1,4 +1,4 @@
-/* global document, tracePrefs, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, AgentRoundText, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow, SCROLL_DAMP_TAU_MS */
+/* global document, tracePrefs, upgradeAgentTraceRecord, entryHasShellTool, entryHasEditTool, isEditToolName, getAgentContinueState, resumeAgentToolLoop, renderAssistantAnswerContent, rollbackToBatchCheckpoint, showAgentToast, AgentRoundText, toolDiffHasBody, pickDiffDisplayText, compactDiffForTrace, normWritePath, followChatStreamGrowth, scheduleStreamingChatFollow, setStreamingDetailsOpen, startThinkingTransitionPin, AgentRoundText, sessionActiveRuns, escapeHtml, formatInlineUnifiedDiffHtml, openSubagentPanelDetail, gatewayCall, openArtifactTab, isThinkingDampedFlow, SCROLL_DAMP_TAU_MS */
 'use strict';
 
 /** 工具行的稳定签名（不含思考正文） */
@@ -646,6 +646,32 @@ function shouldDefaultOpenThinkingEntry(
 }
 
 /**
+ * 展示态升级的唯一入口：把这一条气泡的 trace 从「展示态」换成完整态。
+ *
+ * 触发点只有**用户的展开动作**（某一轮思考 / 某个内联 diff）—— 展示态里那些被裁掉的
+ * 正文，收起时本来也不可见。同一个 runId 只取一次（`trace-store` 的 `full` 档缓存）。
+ *
+ * @param {Element} hostEl 展开的那个节点（任意位于气泡内的元素）
+ * @param {(trace: object[]) => void} onTrace 拿到完整 trace 后做什么（就地补 DOM，不整块重绘）
+ * @returns {boolean} 是否真的发起了升级（false = 这条气泡不是回放来的，没有 runId）
+ */
+function requestTraceUpgrade(hostEl, onTrace) {
+  if (!hostEl || typeof hostEl.closest !== 'function') return false;
+  if (typeof upgradeAgentTraceRecord !== 'function') return false;
+  const bubble = hostEl.closest('.msg');
+  const runId = String((bubble && bubble.dataset && bubble.dataset.traceRunId) || '').trim();
+  if (!runId) return false;
+  void upgradeAgentTraceRecord(runId)
+    .then((row) => {
+      const trace = row && Array.isArray(row.trace) ? row.trace : null;
+      if (!trace || !trace.length) return;
+      if (typeof onTrace === 'function') onTrace(trace);
+    })
+    .catch((e) => console.warn(e));
+  return true;
+}
+
+/**
  * 程序化切换 details.open 的唯一入口（保留流式滚动钉底逻辑）。
  * 切换前登记期望值，toggle 回调据此区分「用户点击」与「程序化切换」；
  * 旧代码把程序化收起也记成用户意图，导致展开/折叠状态被写死。
@@ -685,10 +711,12 @@ function thinkingStepDomKey(entry, index) {
   return `${phase}::${round}::${index}`;
 }
 
-function appendInlineToolDiff(parent, tool, { roundComplete = false } = {}) {
+function appendInlineToolDiff(parent, tool, { roundComplete = false, entryIndex = null, toolIndex = null } = {}) {
   if (!parent || !tool || !isEditToolName(tool.name)) return;
-  const diff = tool.diff && typeof tool.diff === 'object' ? tool.diff : null;
+  let diff = tool.diff && typeof tool.diff === 'object' ? tool.diff : null;
   if (!diff || (typeof toolDiffHasBody === 'function' && !toolDiffHasBody(diff))) return;
+  /** 展示态里 diff 正文被裁掉（`textTrimmed`）：展开这一下才去取完整态 */
+  let diffTextTrimmed = diff.textTrimmed === true;
 
   const details = document.createElement('details');
   details.className = 'msg-tool-inline-diff';
@@ -721,16 +749,34 @@ function appendInlineToolDiff(parent, tool, { roundComplete = false } = {}) {
     diffBodyPending = false;
     body.innerHTML = buildThinkingInlineDiffHtml(diff);
   };
-  if (details.open) fillDiffBody();
-  else {
-    details.addEventListener(
-      'toggle',
-      () => {
-        if (details.open) fillDiffBody();
-      },
-      { once: true }
-    );
-  }
+  const openDiffBody = () => {
+    if (!details.open || !diffBodyPending) return;
+    if (!diffTextTrimmed) {
+      fillDiffBody();
+      return;
+    }
+    // 展示态：正文还在库里，展开这一下才取（同一个 runId 只取一次）
+    diffBodyPending = false;
+    body.innerHTML = '<div class="diff-line diff-eq">正在加载完整 diff…</div>';
+    const started = requestTraceUpgrade(details, (fullTrace) => {
+      const entry = entryIndex != null ? fullTrace[entryIndex] : null;
+      const fullTool = entry && toolIndex != null ? (entry.tools || [])[toolIndex] : null;
+      if (fullTool && fullTool.diff && typeof fullTool.diff === 'object') {
+        diff = { ...fullTool.diff };
+        tool.diff = diff;
+      }
+      diffTextTrimmed = false;
+      delete tool.diffTextTrimmed;
+      diffBodyPending = true;
+      fillDiffBody();
+    });
+    if (!started) {
+      diffBodyPending = true;
+      body.innerHTML = '<div class="diff-line diff-eq">（完整 diff 需要回到这条会话里重新打开）</div>';
+    }
+  };
+  if (details.open) openDiffBody();
+  else details.addEventListener('toggle', openDiffBody, { once: true });
   details.appendChild(body);
   parent.appendChild(details);
 }
@@ -838,7 +884,7 @@ function appendInlineHtmlPreview(li, t) {
     .catch(() => wrap.remove());
 }
 
-function appendThinkingToolRows(ul, tools, { roundComplete = false } = {}) {
+function appendThinkingToolRows(ul, tools, { roundComplete = false, entryIndex = null } = {}) {
   const list = tools || [];
   const sig = thinkingToolsSignature(list, roundComplete);
   if (ul.dataset.toolsSig === sig && ul.childElementCount === list.length) {
@@ -846,7 +892,8 @@ function appendThinkingToolRows(ul, tools, { roundComplete = false } = {}) {
   }
   ul.dataset.toolsSig = sig;
   ul.replaceChildren();
-  for (const t of list) {
+  for (let ti = 0; ti < list.length; ti++) {
+    const t = list[ti];
     const li = document.createElement('li');
     const label = t.argsBrief ? `${t.name}(${t.argsBrief})` : t.name;
     if (t.name === 'fs_write_file' || t.name === 'fs_edit') {
@@ -873,7 +920,7 @@ function appendThinkingToolRows(ul, tools, { roundComplete = false } = {}) {
       text.textContent = `${label} → ${t.summary}`;
       row.appendChild(text);
       li.appendChild(row);
-      appendInlineToolDiff(li, t, { roundComplete });
+      appendInlineToolDiff(li, t, { roundComplete, entryIndex, toolIndex: ti });
       if (!failed) appendInlineHtmlPreview(li, t);
     }
     ul.appendChild(li);
@@ -1042,7 +1089,7 @@ function fillThinkingRoundBeat(beat, entry, index, trace, streaming, streamConte
       ul.className = 'msg-thinking-tools';
       beat.appendChild(ul);
     }
-    appendThinkingToolRows(ul, tools, { roundComplete: complete });
+    appendThinkingToolRows(ul, tools, { roundComplete: complete, entryIndex: index });
   } else if (ul) {
     ul.remove();
   }
@@ -1379,6 +1426,26 @@ function mountThinkingRoundDetails(
   block.className = 'msg-thinking-round';
   const last = !entry.isolated && streaming && index === trace.length - 1;
   fillThinkingRoundBlock(block, entry, index, trace, last, streamContent);
+  /*
+   * 展示态 trace 的按需升级：这一轮的思考正文被裁过（`fullThoughtTruncated`），
+   * 用户展开时才去取完整态，取回来就地把 `entry` 补全后重填这一块 —— 不整块重绘气泡，
+   * 用户刚打开的其它折叠状态因此不会被打回。
+   */
+  if (entry.fullThoughtTruncated) {
+    details.dataset.traceTrimmed = '1';
+    details.addEventListener('toggle', () => {
+      if (!details.open || !entry.fullThoughtTruncated) return;
+      const started = requestTraceUpgrade(details, (fullTrace) => {
+        const fullEntry = fullTrace[index];
+        if (!fullEntry || typeof fullEntry.fullThought !== 'string') return;
+        entry.fullThought = fullEntry.fullThought;
+        delete entry.fullThoughtTruncated;
+        delete details.dataset.traceTrimmed;
+        fillThinkingRoundBlock(block, entry, index, trace, last, streamContent);
+      });
+      if (!started) delete details.dataset.traceTrimmed;
+    });
+  }
   details.appendChild(block);
   const beat = document.createElement('div');
   beat.className = 'msg-thinking-beat';

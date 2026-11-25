@@ -75,29 +75,43 @@ const build = new Function(
   'isEditToolName',
   'toolDiffHasBody',
   'buildThinkingInlineDiffHtml',
+  'requestTraceUpgrade',
   `${extractFn(SOURCE, 'appendInlineToolDiff')}
    return appendInlineToolDiff;`
 );
 
 const DIFF = { created: false, added: 12, removed: 3, beforeText: 'a\nb', afterText: 'a\nB' };
 
-function run({ expandEdit = true, roundComplete = true, built = () => '<div class="diff-line">x</div>' } = {}) {
+function run({
+  expandEdit = true,
+  roundComplete = true,
+  built = () => '<div class="diff-line">x</div>',
+  diff = DIFF,
+  upgrade = null
+} = {}) {
   const parent = makeElement('div');
   let builds = 0;
+  const upgrades = [];
   const fn = build(
     documentStub,
     { expandEdit },
     (name) => name === 'fs_edit_file',
     () => true,
-    (diff) => {
+    (d) => {
       builds += 1;
-      return built(diff);
+      return built(d);
+    },
+    (hostEl, onTrace) => {
+      upgrades.push({ hostEl, hasCallback: typeof onTrace === 'function' });
+      if (typeof upgrade === 'function') return upgrade(onTrace);
+      return true;
     }
   );
-  fn(parent, { name: 'fs_edit_file', diff: DIFF }, { roundComplete });
+  const tool = { name: 'fs_edit_file', diff };
+  fn(parent, tool, { roundComplete, entryIndex: 0, toolIndex: 0 });
   const details = parent.children[0];
   const body = details.children.find((c) => String(c.className).includes('msg-tool-inline-diff-body'));
-  return { parent, details, body, builds: () => builds };
+  return { parent, details, body, tool, builds: () => builds, upgrades };
 }
 
 test('收起状态不生成 diff 正文（一次都不 build）', () => {
@@ -139,7 +153,90 @@ test('创建时就 open（运行中 + expandEdit）→ 立即生成，与旧行�
 
 test('没有 diff 体（非 edit 工具 / 无 beforeText）→ 整段不建', () => {
   const parent = makeElement('div');
-  const fn = build(documentStub, { expandEdit: true }, () => false, () => true, () => 'x');
+  const fn = build(documentStub, { expandEdit: true }, () => false, () => true, () => 'x', () => true);
   fn(parent, { name: 'host_exec', diff: DIFF }, { roundComplete: true });
   assert.equal(parent.children.length, 0, '非 edit 工具不该建 diff 节点');
+});
+
+// ---- 展示态（回放时 diff 正文被裁掉，展开才取完整态）----
+
+const TRIMMED = { created: false, added: 12, removed: 3, beforeText: '', afterText: '', textTrimmed: true };
+
+test('展示态的 diff：收起不取，展开先给「加载中」再去取完整态', async () => {
+  let captured = null;
+  const r = run({
+    diff: TRIMMED,
+    built: () => '<div class="diff-line">full</div>',
+    upgrade: (onTrace) => {
+      captured = onTrace;
+      return true;
+    }
+  });
+  assert.equal(r.upgrades.length, 0, '收起时不该发起升级');
+
+  r.details.open = true;
+  r.details.dispatch('toggle');
+  assert.equal(r.upgrades.length, 1, '展开这一下才升级');
+  assert.ok(r.body.innerHTML.includes('正在加载完整 diff'), '先给可见的加载提示');
+
+  // 完整态回来（同一位置的那个工具行）
+  captured([{ tools: [{ name: 'fs_edit_file', diff: { ...DIFF } }] }]);
+  await Promise.resolve();
+  assert.ok(r.body.innerHTML.includes('full'), '拿到完整 diff 后按它生成正文');
+  assert.equal(r.tool.diff.beforeText, 'a\nb', '缓存里的工具对象也要补成完整态');
+  assert.equal(r.body.dataset.diffPending, undefined);
+});
+
+test('展示态升级拿不到 runId（不是回放来的）→ 给一句可读提示，不崩', () => {
+  const r = run({
+    diff: TRIMMED,
+    upgrade: () => false // requestTraceUpgrade 返回 false：这条气泡没有 runId
+  });
+  r.details.open = true;
+  r.details.dispatch('toggle');
+  assert.ok(r.body.innerHTML.includes('重新打开'), '要给出可执行的提示');
+});
+
+// ---- 升级入口本身：runId 从最近的 .msg 上取 ----
+
+const upgradeBuild = new Function(
+  'upgradeAgentTraceRecord',
+  'console',
+  `${extractFn(SOURCE, 'requestTraceUpgrade')}
+   return requestTraceUpgrade;`
+);
+
+test('requestTraceUpgrade：按气泡上的 traceRunId 升级，并把完整 trace 交给回调', async () => {
+  const calls = [];
+  let received = null;
+  const fn = upgradeBuild(
+    (runId) => {
+      calls.push(runId);
+      return Promise.resolve({ trace: [{ round: 1, fullThought: '全文' }] });
+    },
+    { warn() {} }
+  );
+  const hostEl = { closest: (sel) => (sel === '.msg' ? { dataset: { traceRunId: 'trace-7' } } : null) };
+  const started = fn(hostEl, (trace) => {
+    received = trace;
+  });
+  assert.equal(started, true);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls, ['trace-7']);
+  assert.ok(received && received[0].fullThought === '全文');
+});
+
+test('requestTraceUpgrade：气泡上没有 runId（内联 trace，不是回放）→ 不升级也不报错', () => {
+  let called = 0;
+  const fn = upgradeBuild(
+    () => {
+      called += 1;
+      return Promise.resolve(null);
+    },
+    { warn() {} }
+  );
+  const started = fn({ closest: () => ({ dataset: {} }) }, () => {});
+  assert.equal(started, false);
+  assert.equal(called, 0);
 });

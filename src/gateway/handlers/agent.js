@@ -1,5 +1,8 @@
 'use strict';
 
+const { getAgentLimits } = require('../../agent/agent-limits');
+const { shapeTraceForDisplay } = require('../../agent/trace-display');
+
 /**
  * @param {{ requireRustCore: (method: string, params?: object, timeoutMs?: number) => Promise<unknown> }} deps
  */
@@ -82,8 +85,15 @@ function createAgentHandlers({ requireRustCore }) {
         stateSnapshot
       }),
 
-    'agent.trace_get': async ({ runId, messageId }) =>
-      requireRustCore('agent.trace_get', { runId, messageId })
+    // `shape: 'display'` 只服务回放展示（渲染层按需换完整态）：裁掉界面从不读的字段、
+    // 思考全文只留开头一截。**默认 full** —— 任何要落库 / 判定的调用方都别传 display。
+    'agent.trace_get': async ({ runId, messageId, shape }) => {
+      const row = await requireRustCore('agent.trace_get', { runId, messageId });
+      if (shape !== 'display') return row;
+      return shapeTraceForDisplay(row, {
+        thoughtHeadChars: getAgentLimits().traceDisplayThoughtHeadChars
+      });
+    }
   };
 }
 

@@ -38,6 +38,18 @@ const agentTraceReadInflight = new Map();
 /** bundle 未就绪 / limits 缺键时的兜底；真值在 `agent-limits.rendererTraceCacheMaxMb` */
 const AGENT_TRACE_READ_CACHE_FALLBACK_MB = 12;
 
+/**
+ * 缓存键：同一 runId 分两档 —— `display`（回放展示态，网关侧裁过）与 `full`（完整行）。
+ * 展开某轮 / 某个 diff 时把 `full` 取回来补齐，两档各自一条、都算进同一份体积预算。
+ */
+function agentTraceReadCacheKey(runId, shape) {
+  return `${shape === 'display' ? 'd' : 'f'}:${runId}`;
+}
+
+function normalizeAgentTraceShape(shape) {
+  return shape === 'display' ? 'display' : 'full';
+}
+
 function agentTraceReadCacheMaxChars() {
   const mb =
     typeof getAgentLimits === 'function' ? Number(getAgentLimits().rendererTraceCacheMaxMb) : NaN;
@@ -72,41 +84,52 @@ function trimAgentTraceReadCache() {
   }
 }
 
-function rememberAgentTraceRead(runId, row) {
+function rememberAgentTraceRead(runId, row, shape) {
   if (!runId || !row || !Array.isArray(row.trace) || !row.trace.length) return;
-  agentTraceReadCache.delete(runId);
-  agentTraceReadCache.set(runId, { row, chars: agentTraceRowChars(row) });
+  const key = agentTraceReadCacheKey(runId, shape);
+  agentTraceReadCache.delete(key);
+  agentTraceReadCache.set(key, { row, chars: agentTraceRowChars(row) });
+  // 完整行是展示态的超集：留着两档只会让同一份数据在预算里算两遍
+  if (shape !== 'display') agentTraceReadCache.delete(agentTraceReadCacheKey(runId, 'display'));
   trimAgentTraceReadCache();
 }
 
-/** 同步查：命中就直接画，不挂「加载中」占位 */
-function peekAgentTraceRead(runId) {
+/** 同步查：命中就直接画，不挂「加载中」占位。要展示态但手上只有完整行时，用完整行（超集）。 */
+function peekAgentTraceRead(runId, opts = {}) {
   const id = String(runId || '').trim();
   if (!id) return null;
-  const hit = agentTraceReadCache.get(id);
+  const shape = normalizeAgentTraceShape(opts.shape);
+  let key = agentTraceReadCacheKey(id, shape);
+  let hit = agentTraceReadCache.get(key);
+  if (!hit && shape === 'display') {
+    key = agentTraceReadCacheKey(id, 'full');
+    hit = agentTraceReadCache.get(key);
+  }
   if (!hit) return null;
-  agentTraceReadCache.delete(id);
-  agentTraceReadCache.set(id, hit); // 命中即刷到队尾（LRU）
+  agentTraceReadCache.delete(key);
+  agentTraceReadCache.set(key, hit); // 命中即刷到队尾（LRU）
   return hit.row;
 }
 
 /**
- * 异步取：命中即返回；同一 runId 在途只发一次；成功后进缓存，失败 / 未命中不入缓存。
+ * 异步取：命中即返回；同一 runId + 同一档在途只发一次；成功后进缓存，失败 / 未命中不入缓存。
  *
  * `agent.trace_get` 只认 `runId`（`sessionId` 在契约里从来没用上：账本永远在本地 core，
- * SSH 会话也一样），所以这里不再多带一个字段。
+ * SSH 会话也一样）。`shape: 'display'` 是网关侧的展示态整形（见 `agent/trace-display.js`）。
  */
-function readAgentTraceRecord(runId) {
+function readAgentTraceRecord(runId, opts = {}) {
   const id = String(runId || '').trim();
   if (!id) return Promise.resolve(null);
-  const cached = peekAgentTraceRead(id);
+  const shape = normalizeAgentTraceShape(opts.shape);
+  const cached = peekAgentTraceRead(id, { shape });
   if (cached) return Promise.resolve(cached);
-  const inflight = agentTraceReadInflight.get(id);
+  const key = agentTraceReadCacheKey(id, shape);
+  const inflight = agentTraceReadInflight.get(key);
   if (inflight) return inflight;
   if (typeof gatewayCall !== 'function') return Promise.resolve(null);
-  const task = gatewayCall('agent.trace_get', { runId: id })
+  const task = gatewayCall('agent.trace_get', shape === 'display' ? { runId: id, shape } : { runId: id })
     .then((row) => {
-      rememberAgentTraceRead(id, row);
+      rememberAgentTraceRead(id, row, shape);
       return row || null;
     })
     .catch((e) => {
@@ -114,15 +137,25 @@ function readAgentTraceRecord(runId) {
       return null;
     })
     .finally(() => {
-      agentTraceReadInflight.delete(id);
+      agentTraceReadInflight.delete(key);
     });
-  agentTraceReadInflight.set(id, task);
+  agentTraceReadInflight.set(key, task);
   return task;
+}
+
+/**
+ * 展示态的「按需升级」：把该 runId 的完整行取回来（只取一次，之后走 `full` 缓存）。
+ * 触发点只有用户的展开动作（某轮思考被截断 / 某个 diff 正文被裁）。
+ */
+function upgradeAgentTraceRecord(runId) {
+  return readAgentTraceRecord(runId, { shape: 'full' });
 }
 
 function invalidateAgentTraceRead(runId) {
   const id = String(runId || '').trim();
-  if (id) agentTraceReadCache.delete(id);
+  if (!id) return;
+  agentTraceReadCache.delete(agentTraceReadCacheKey(id, 'display'));
+  agentTraceReadCache.delete(agentTraceReadCacheKey(id, 'full'));
 }
 /* </trace-read-cache> */
 
@@ -653,9 +686,10 @@ window.DieyunNamespaces.register(
     getPendingResumeCheckpoint,
     setPendingResumeCheckpoint,
     clearPendingResumeCheckpoint,
-    // 思考区回放用的读路径（缓存 + 在途去重）：只给本仓渲染层用，不镜像回 window.*
+    // 思考区回放用的读路径（缓存 + 在途去重 + 展示态升级）：只给本仓渲染层用，不镜像回 window.*
     peekAgentTraceRead,
     readAgentTraceRecord,
+    upgradeAgentTraceRecord,
     invalidateAgentTraceRead
   },
   {

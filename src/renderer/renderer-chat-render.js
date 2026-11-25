@@ -244,13 +244,16 @@ async function hydrateAssistantTraceFromStore(bubble, meta, storedContent, check
   if (!bubble || !meta?.traceRunId) return;
   const sessionId = sessionAtRender || currentSessionId;
   try {
-    // 取数的唯一入口在 trace-store（缓存 + 在途去重）；这里不做第二份 RPC。
-    let row = peekAgentTraceRead(meta.traceRunId);
+    // 取数的唯一入口在 trace-store（缓存 + 在途去重 + 展示态升级）；这里不做第二份 RPC。
+    // 先用**展示态**：网关侧裁掉界面从不读的字段、思考全文只留开头一截（展开时再换完整态）。
+    let row = peekAgentTraceRead(meta.traceRunId, { shape: 'display' });
     if (!row) {
       if (!gwState.authed) return;
       attachThinkingHydratePlaceholder(bubble);
-      row = await readAgentTraceRecord(meta.traceRunId);
+      row = await readAgentTraceRecord(meta.traceRunId, { shape: 'display' });
     }
+    // 升级入口要按 runId 找回这一条：气泡自己记着（轮次 / 内联 diff 从最近的 .msg 上取）
+    if (bubble.dataset) bubble.dataset.traceRunId = String(meta.traceRunId);
     if (sessionId !== currentSessionId || !bubble.isConnected) {
       removeThinkingHydratePlaceholder(bubble);
       return;

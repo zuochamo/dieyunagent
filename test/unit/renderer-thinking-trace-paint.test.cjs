@@ -142,9 +142,10 @@ test('「稍后补画」的延迟队列已整体删除（思考区不可能再�
 });
 
 test('回填只走 trace-store 的读缓存，不另发一份 agent.trace_get', () => {
-  // 取数唯一入口（缓存 + 在途去重）在 trace-store.js；这里只允许「先 peek、未命中再 read」。
-  assert.match(renderSrc, /let row = peekAgentTraceRead\(meta\.traceRunId\);/);
-  assert.match(renderSrc, /row = await readAgentTraceRecord\(meta\.traceRunId\);/);
+  // 取数唯一入口（缓存 + 在途去重 + 展示态升级）在 trace-store.js：
+  // 这里只允许「先 peek 展示态、未命中再 read」，且不得自己拼 RPC。
+  assert.match(renderSrc, /let row = peekAgentTraceRead\(meta\.traceRunId, \{ shape: 'display' \}\);/);
+  assert.match(renderSrc, /row = await readAgentTraceRecord\(meta\.traceRunId, \{ shape: 'display' \}\);/);
   assert.doesNotMatch(renderSrc, /'agent\.trace_get'/);
   // 占位只挂在「未命中」分支里：命中缓存不许闪「加载中」
   assert.match(
@@ -152,4 +153,6 @@ test('回填只走 trace-store 的读缓存，不另发一份 agent.trace_get', 
     /if \(!row\) \{\s*\n\s*if \(!gwState\.authed\) return;\s*\n\s*attachThinkingHydratePlaceholder\(bubble\);/,
     '占位必须在未命中分支内'
   );
+  // 升级入口要能按 runId 找回这一条：气泡上必须留 traceRunId
+  assert.match(renderSrc, /bubble\.dataset\.traceRunId = String\(meta\.traceRunId\);/);
 });

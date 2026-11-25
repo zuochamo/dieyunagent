@@ -185,6 +185,11 @@ const AGENT_LIMITS_DEFAULTS = {
   // 没有这份记忆时每次切会话都要重拉同一批（首屏窗口最多 32 次 RPC）再整块重绘气泡。
   // 按体积淘汰（条数上限对「单条 3MB」没意义）：12MB ≈ 4–8 个会话的首屏。
   rendererTraceCacheMaxMb: 12,
+  // 回放时思考正文先给多少字（展示态，见 `src/agent/trace-display.js`）。
+  // 普通回合的 `fullThought` 占全库 trace 的 27.9%，而收起的轮次里一个字都看不见；
+  // 展示态只留开头这一截，用户展开这一轮时才去取完整态。1200 字 = 展开前那条摘要
+  // 之外再多读几十行也够看，同时把 payload 压到可与「正文 + 摘要」同量级。
+  traceDisplayThoughtHeadChars: 1200,
   // 视觉输入注入（浏览器截图 / 附件补看）：按来源分别限流。
   // 额度是「每轮在途」——缓冲在注入后即清空，因此每个 LLM 轮次都会重新给一份。
   visionShotsPerRound: 2,
