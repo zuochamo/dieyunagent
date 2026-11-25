@@ -56,7 +56,7 @@ function transcriptFromMessages(messages) {
 
 module.exports = {
   TRANSCRIPT_ROLES,
-  TRANSCRIPT_FIELDS,
-  projectTranscriptMessage,
+
+
   transcriptFromMessages
 };

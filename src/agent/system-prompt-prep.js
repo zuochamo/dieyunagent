@@ -739,16 +739,19 @@ async function fetchSharedMemoryBlock(snapshot, deps, lim, audit) {
   const rows = res && Array.isArray(res.results) ? res.results : [];
   const mode = String((res && res.mode) || 'none');
   /**
-   * 阈值必须**逐行按各自通道**取：同一批里可能既有向量行（`1 - 余弦距离`）又有 trigram 兜底行
-   * （`similarity()`），两者量纲不同、分布也不同。拿批级 `mode` 一刀切会让兜底行永远过不了
-   * 语义阈值（0.32），等于「有向量就再也用不上文本兜底」—— 与本模块的 COALESCE 设计相违。
+   * 判定只看 `injectScore`（与本地长期记忆同名同义：[0,1] 的「该不该注入」）。
+   * **阈值仍要逐行按通道取**：同一批里可能既有向量行（`1 - 余弦距离`）又有 trigram 兜底行
+   * （`similarity()`）。两者都是 [0,1] 的有界相似度，但 trigram 的天花板随「查询/条目」
+   * 长度比下降 —— 拿语义阈值（0.32）一刀切会让兜底行永远过不了，等于「有向量就再也用不上
+   * 文本兜底」，与本模块的 COALESCE 设计相违。所以这里保留两个数，
+   * 理由与本地记忆那边（`memoryInjectMinScore` 一个数）不同，见 docs/SHARED-MEMORY.md。
    */
   const semThreshold = Number(lim.SHARED_MEMORY_MIN_SEMANTIC);
   const kwThreshold = Number(lim.SHARED_MEMORY_MIN_KEYWORD);
   const scored = rows.filter((r) => {
     const t = r && r.mode === 'semantic' ? semThreshold : kwThreshold;
     if (!(Number.isFinite(t) && t > 0)) return true;
-    return (Number(r && r.score) || 0) >= t;
+    return (Number(r && r.injectScore) || 0) >= t;
   });
   const filtered = scored.filter(isInjectableMemoryRow);
   recordMemoryAudit(audit, 'shared', {
@@ -987,14 +990,20 @@ async function fetchWorkMemoryBlock(snapshot, invokeRpc, audit) {
   }
 }
 
-function shouldDefaultEnableSkillId(id) {
-  const s = String(id || '');
-  return s === 'builtin:weather' || s.startsWith('builtin:minimax:') || s.startsWith('builtin:curated:');
-}
-
-function isSkillEnabled(map, id) {
+/**
+ * 这个技能这一轮是否启用。
+ *
+ * 两条输入都必须是**单一来源**：
+ * - `map` = 用户显式做过的选择，来自 Main 的 `skills/enabled-store.js`（经
+ *   `deps.skills.enabledMap()`，不再从 Renderer 快照取 —— 频道 / 计划 / headless
+ *   那几档没有 Renderer，快照里永远没有这个字段）；
+ * - `skill.defaultEnabled` = 预装默认规则，扫描时由 `skills/taxonomy.js` 算好下发。
+ */
+function isSkillEnabled(map, skill) {
+  const id = String((skill && skill.id) || '');
+  if (!id) return false;
   if (map && Object.prototype.hasOwnProperty.call(map, id)) return !!map[id];
-  return shouldDefaultEnableSkillId(id);
+  return !!(skill && skill.defaultEnabled);
 }
 
 async function fetchSkillsBlock(snapshot, deps, lim) {
@@ -1007,9 +1016,15 @@ async function fetchSkillsBlock(snapshot, deps, lim) {
   } catch {
     return '';
   }
-  const enabledMap =
-    snapshot.enabledSkillMap && typeof snapshot.enabledSkillMap === 'object' ? snapshot.enabledSkillMap : {};
-  const ids = (catalog.skills || []).filter((sk) => isSkillEnabled(enabledMap, sk.id)).map((sk) => sk.id);
+  let enabledMap = {};
+  if (typeof skills.enabledMap === 'function') {
+    try {
+      enabledMap = (await skills.enabledMap()) || {};
+    } catch {
+      enabledMap = {};
+    }
+  }
+  const ids = (catalog.skills || []).filter((sk) => isSkillEnabled(enabledMap, sk)).map((sk) => sk.id);
   if (!ids.length) return '';
   const budget = lim.SKILL_TOTAL_COUNT;
   const catalogById = new Map((catalog.skills || []).map((s) => [s.id, s]));
@@ -1285,6 +1300,19 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
       agentHome = null;
     }
   }
+  /**
+   * 沙箱事实（档位 + 真实可写根）：`permissions` 只说了「哪些能力开着」，
+   * 说不出「这一轮到底能写到哪」。两者都由 `capability-index.formatCapabilityBlock` 渲染成
+   * 同一块【本轮能力事实】—— 取不到就只少一行，不用缺省值编。
+   */
+  let sandbox = deps.sandboxState || null;
+  if (!sandbox && typeof deps.getSandboxState === 'function') {
+    try {
+      sandbox = await deps.getSandboxState();
+    } catch {
+      sandbox = null;
+    }
+  }
   const packed = assembleSystemPrompt({
     languagePrompt: snapshot.languagePrompt,
     userSystem: snapshot.userSystem,
@@ -1292,6 +1320,7 @@ async function prepSystemPrompt(snapshot = {}, deps = {}) {
     agentHome,
     workspaceInfo: snapshot.workspaceInfo,
     permissions,
+    sandbox,
     stableDataChunks: [
       ...(Array.isArray(snapshot.stableDataChunks) ? snapshot.stableDataChunks : []),
       ...(mcpBlock ? [mcpBlock] : [])

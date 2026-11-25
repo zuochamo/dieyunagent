@@ -1005,11 +1005,45 @@ function buildCompletionMessagesFromHistory(
   return trimMessagesToCharBudget(foldOlderCompletionMessages(out, helpers, capOpts), capOpts);
 }
 
+/**
+ * 读一轮之前的会话历史，装配 `buildCompletionMessagesFromHistory` 需要的形状 —— **唯一实现**。
+ *
+ * 为什么收在这里：Main 侧「跑一轮」（`main-turn-runner`）与计划执行器（`plans/plan-agent-runner`）
+ * 各自写过一遍「memory.messages_recent(limit 120) → 只留 user/assistant → 补 created_at」，
+ * 已经漂移过一次：计划那份只认 `created_at`，主循环那份认 `createdAt || created_at`
+ * （core 换过字段名），于是计划的历史消息会被当成「没有时间」。
+ *
+ * @param {{ invokeRpc: Function }} gateway
+ * @param {string} sessionId
+ * @param {number} [limit]
+ */
+async function loadRecentTurnMessages(gateway, sessionId, limit = 120) {
+  const rows = await gateway.invokeRpc('memory.messages_recent', { sessionId, limit });
+  return (Array.isArray(rows) ? rows : [])
+    .filter((r) => r && (r.role === 'user' || r.role === 'assistant'))
+    .map((r) => ({
+      role: r.role,
+      content: String(r.content || ''),
+      created_at: r.createdAt || r.created_at
+    }));
+}
+
+/**
+ * `buildCompletionMessagesFromHistory` 的默认 helpers（meta 封套的拆解一律走 `unpackMessageMeta`）。
+ * 两侧调用方以前各拼一份同样的三件套。
+ */
+function completionHistoryHelpers() {
+  return {
+    unpackUserContent: (raw) => unpackMessageMeta(raw).content,
+    unpackAssistantMeta: (raw) => ({ content: unpackMessageMeta(raw).content, meta: null }),
+    compactPlainText: (s, n) => String(s || '').slice(0, n)
+  };
+}
+
 module.exports = {
   SESSION_HISTORY_HEADER,
   TURN_RIDE_HEADER,
   MESSAGE_META_PREFIX,
-  META_STRING_MAX,
   packMessageMeta,
   unpackMessageMeta,
   slimAttachmentsForPersist,
@@ -1023,9 +1057,7 @@ module.exports = {
   formatCompactionArchiveBlock,
   mergeCompactionBlockIntoTurnRide,
   isSyntheticLoopUserContent,
-  GOAL_CONTINUE_USER_PREFIX,
   ALIVE_STATE_PREFIX,
-  isAliveStateUserContent,
   isGoalContinueUserContent,
   extractBookPrefixMessages,
   extractInTurnLoopTail,
@@ -1036,6 +1068,8 @@ module.exports = {
   assistantTextFromMessage,
   buildSessionChatHistoryFromMessages,
   buildCompletionMessagesFromHistory,
+  loadRecentTurnMessages,
+  completionHistoryHelpers,
   trimMessagesToCharBudget,
   contentCharLen,
   selectHistoryMessagesForSession,

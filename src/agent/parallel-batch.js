@@ -80,10 +80,12 @@ async function settleAllAbortable(jobs, runJob, opts = {}) {
         }
       );
     });
+    // 中止时**不等整批跑完**：以前这里 `await batchPromise.catch(…)`，界面会停在「停止中」，
+    // 在途的 worker 继续烧 token 与工具时间（工具调用本身不可取消），用户点了停止要等几分钟
+    // （2026-11-19 审计）。各 runner 会在自己的下一次 `throwIfAborted` 处收尾。
+    // `batchPromise` 永远不会 reject（settleAllAbortable 已把每个 runner 收敛成 settled），
+    // 因此提前返回不会留下 unhandledRejection。
     return await Promise.race([batchPromise, abortSide]);
-  } catch (err) {
-    await batchPromise.catch(() => {});
-    throw err;
   } finally {
     if (abortWaiter && typeof abortWaiter.cancel === 'function') abortWaiter.cancel();
   }

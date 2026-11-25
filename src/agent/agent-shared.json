@@ -17,7 +17,8 @@
     "indexFileMaxBytes": 2097152
   },
   "rpc": {
-    "slowLogMs": 2000
+    "slowLogMs": 2000,
+    "hostStatusTimeoutMs": 15000
   },
   "snippets": {
     "codebaseSnippetMaxChars": 2400,

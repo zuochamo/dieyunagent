@@ -4,6 +4,8 @@
 // 纯 CJS 依赖：顶层 require 真源，替代原先「全局 → 运行期 require 探测」。
 const { packSystemPrompt: loadPackSystemPrompt } = require('./session-context');
 const { getAgentLimits: readAgentLimits } = require('./agent-limits');
+// 【本轮能力事实】的唯一来源（能力 → 开关 / 标签 / 设置落点）。这里只负责把它放进稳定块。
+const { formatCapabilityBlock } = require('./capability-index');
 
 function buildCoreAgentRules() {
   const subagent = [
@@ -106,41 +108,12 @@ function formatWorkspaceChunk(workspaceInfo, agentHome) {
       return `【当前工作空间 · SSH】\n${ws.displayPath || ws.workspacePath}\n${connHint}${remoteExtra}`;
     }
     const localExtra =
-      '\n本机可读写范围另含：用户主目录与系统临时目录（绝对路径可用 host_exec 取，Linux/macOS `echo $HOME`、Windows `echo %USERPROFILE%` / `%TEMP%`）';
+      '\n本机路径用绝对路径即可（Linux/macOS `echo $HOME`、Windows `echo %USERPROFILE%` / `%TEMP%`）；' +
+      '能不能读写、写到哪、哪些能力关着，见下文【本轮能力事实】—— 不要按「主目录随便写」的惯性规划。';
     return `【当前工作空间】\n${ws.workspacePath}${fallbackHint}${localExtra}`;
   }
   if (def) {
     return `【默认工作目录】\n${def}\n相对路径默认以此目录为根。`;
-  }
-  return '';
-}
-
-function formatPermissionsChunk(permissions) {
-  const p = permissions && typeof permissions === 'object' ? permissions : null;
-  if (!p) return '';
-  if (p.hostControl) {
-    const caps = [];
-    if (p.fsRead) caps.push('读文件');
-    if (p.fsWrite) caps.push('写文件');
-    if (p.shellExec) caps.push('执行 Shell');
-    caps.push('打开浏览器');
-    if (p.browserAutomation !== false) caps.push('浏览器自动化');
-    if (p.webFetch !== false) caps.push('联网抓取');
-    // 「完全放开路径限制」开关（设置页，默认关）：显式告知模型，免得它按白名单惯性自我设限。
-    // 注意只覆盖**本机**：远程根恒为工作空间 + $HOME + /tmp（远端 daemon 不认这个开关，
-    // 见 gateway/path-policy.remoteAllowedRoots），这里不能把远程也说成放开。
-    const pathNote =
-      p.unrestrictedPaths === true
-        ? '路径限制：本机已完全放开（所有磁盘任意路径可读写，含系统目录）；远程工作空间不受此开关影响，仍是工作空间 + $HOME + /tmp。'
-        : '';
-    return (
-      `【本机控制能力】已开启：${caps.join('、')}。${pathNote}` +
-      `工具名与参数见 schema。Windows 的 host_exec 是 cmd，不是 PowerShell；python -c 双引号内不要写分号。` +
-      `失败看 errorCode/suggestedFix；大输出看 outputFile。`
-    );
-  }
-  if (p.webFetch !== false) {
-    return '【联网抓取】web_search（默认 bing）/ web_fetch 已开启（无需本机文件权限，走系统代理）。';
   }
   return '';
 }
@@ -195,7 +168,8 @@ function assembleSystemPrompt(opts = {}) {
     ...(Array.isArray(opts.stableDataChunks) ? opts.stableDataChunks : []),
     formatAgentHomeChunk(opts.agentHome),
     formatWorkspaceChunk(opts.workspaceInfo, opts.agentHome),
-    formatPermissionsChunk(opts.permissions)
+    // 能力事实放最后：它是「前面这些说法成立吗」的边界，紧跟在工作空间之后读最自然。
+    formatCapabilityBlock({ permissions: opts.permissions, sandbox: opts.sandbox })
   ];
   const turnChunks = [
     formatSystemTimeChunk(opts.now),
@@ -212,7 +186,8 @@ const agentSystemPromptApi = {
   formatSystemTimeChunk,
   formatAgentHomeChunk,
   formatWorkspaceChunk,
-  formatPermissionsChunk,
+  // 能力事实块的实现与文案都在 `capability-index`（唯一来源），这里只转出同一个函数。
+  formatCapabilityBlock,
   capUserSystemText,
   assembleSystemPrompt
 };

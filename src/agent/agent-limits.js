@@ -40,15 +40,29 @@ const AGENT_LIMITS_DEFAULTS = {
   readinessErrorSampleChars: 120,
   transientMaxRetries: 3,
   retryBaseMs: 400,
+  // 流式进度的合批间隔。唯一消费方是 `src/agent/progress-flush.js`（Main 的 `llm_delta` /
+  // planner `progress`、Renderer 的主循环与 planner 两条流、计划 trace 队列共用同一份实现）。
+  // 为什么必须合批：core 逐 SSE chunk 推增量，不合批就是「一个 chunk 一次跨进程 IPC」，
+  // 且宿主送的是本轮累计正文 —— 单轮搬运量与事件数都随回答长度走（O(正文²)）。
+  // 40ms ≈ 25 帧/秒，肉眼是连续出字；比这更大就开始看得出「一顿一顿」。
+  // 故意不进 AGENT_LIMITS_SCHEMA：这是内部节奏，不是用户要调的护栏旋钮。
+  agentProgressFlushMs: 40,
   // 闲时队列（plans trigger=idle）：轮询间隔与「静默多久才算闲」。
   // 「忙」的唯一来源是 rust-loop-runner 的活跃 agent loop 计数（聊天/规划/定时任务全走它）。
   plansIdlePollMs: 60 * 1000,
   plansIdleQuietMs: 5 * 60 * 1000,
+  // 计划条数上限（**只挡新建**，存量超限仍可改 / 停用 / 运行）。
+  // 为什么要有：`plan_create` 是模型可自主调用的，而每条计划都是一整个 agent 轮
+  // （多轮 LLM + 工具）—— 没有上限时「一晚上几百条 MINUTELY 计划」只是几次工具调用的事。
+  // 为什么**不**夹取最小间隔：那等于替用户改他写的规则（与「代码不判定意图」冲突），
+  // 频次交给 `plan_create` 回执里的 runsPerDay 让模型/用户自己看。
+  // 故意不进 AGENT_LIMITS_SCHEMA：机制上限，不是护栏旋钮（同 defaultWorkspaceGc*）。
+  plansMaxCount: 50,
   // 目标型计划（plans trigger=goal）：预算在代码，节奏在模型。
   // 决定「再做一轮」只看客观事实：目标已被验收证据判定通过、或预算/轮次用完。
   // 这里只提供默认值与 clamp 上限（表单里填的数不能突破上限，防一晚烧穿预算）。
-  goalMaxAttempts: 12,
-  goalMaxWallMs: 8 * 60 * 60 * 1000,
+  goalMaxAttempts: 36,
+  goalMaxWallMs: 24 * 60 * 60 * 1000,
   // 只有「异常/崩溃恢复」才退避：正常跑完一轮立刻接下一轮（节奏由模型决定）。
   goalRetryBackoffMs: 60 * 1000,
   // 检查命令超时。**必须 ≤ src/exec-limits.js 的 EXEC_TIMEOUT_MAX_MS（600s）**，
@@ -282,11 +296,13 @@ const AGENT_LIMITS_DEFAULTS = {
   // 放宽的真实代价是 token / 时间，而非抢协调者的轮次。
   // 一轮调研要「列目录 → 搜定义 → 读关键片段 → 交叉验证」几十步，16 轮在大仓库上必然
   // 中途截断 —— 截断就没有结论，等于白派（协调者只能自己重做一遍）。
-  // 已两次放宽：16/32 → 32/64 → 48/96（等于旧 schema 上限）；schema max 同步翻倍，
+  // 已三次放宽：16/32 → 32/64 → 48/96 → 160/320。第三次的理由是 2026-11-19 实测：
+  // 3 路 worker / 探索在全量工具日志上跑到 96 轮仍在有效推进（每轮都在读新文件、跑验证），
+  // 被硬上限拦腰截断 → 撞上限的那一轮没有结论，整批只能重做。schema max 同步再翻倍，
   // 保证默认值仍低于上限、用户可继续下调/上调。不按任务类型分档（避免第二套预算规则），
   // 护栏数字只在这里改。
-  subagentMaxRounds: 48,
-  subagentMaxToolCalls: 96,
+  subagentMaxRounds: 160,
+  subagentMaxToolCalls: 320,
   // 子 Agent 回注主上下文的摘要上限。过程 trace 不回注，只在折叠卡片里展开，
   // 否则 N 路调研会把主上下文顶爆（这是该功能最常见的失败模式）。
   subagentSummaryMaxChars: 2400,
@@ -303,10 +319,17 @@ const AGENT_LIMITS_DEFAULTS = {
 
   // —— planner 并行执行器（**写入**子 Agent）——
   // 与上面「只读调研子 Agent」是两件事：调研子 Agent 共享主工作区、只读；
-  // 执行器各拿一个 git worktree，改完统一进「变更」面板逐文件合并。
-  // 这个数字同时是「同时开几个 worktree + 几条 LLM 并发流 + 几条写类串行队列」，
-  // 所以必须在这里单点收口：按 provider 限流/额度放宽它，才是真的放宽并发。
+  // 执行器各拿一个 git worktree，改完统一进「变更」面板逐文件合并（远端 SSH 则收尾并回会话副本）。
+  // 这个数字 = 「同时开几个 worktree + 几条 LLM 并发流」，必须在这里单点收口：
+  // 按 provider 限流/额度放宽它，才是真的放宽并发。
+  // 它**不**管写类工具的串行队列：那条按「作用于哪份副本」分键（`tool-bridge-main.js` /
+  // `mutate-queue.js`），同一副本内串行、不同副本并行 —— 以前这里的注释说它同时是那个并发度，
+  // 实现里从来没有接过线（2026-11-19 审计）。
   plannerMaxParallelWorkers: 3,
+  // 远端 per-run 副本目录的保留个数（机制预算，故意不进 SCHEMA，与 `defaultWorkspaceGc*` 同类）。
+  // 每个 per-role 副本是一份**完整 checkout**，崩溃/取消会把它留在服务器上；回收时先归档
+  //（提交进各自分支）再删目录、**保留分支**（分支是产出的存档）。0 = 不回收。
+  plannerRunWorktreeKeep: 20,
   // best-of-N：同一 build 类子任务并行跑 N 份、再择优。0 = 关（默认）。
   // 这是「护栏数字」而非「策略开关」，所以和并行度一样收在 agent-limits 里：
   // 之前它只存在于 Renderer 的 localStorage（`dieyun.planner.bestOfN.v1`），仓库内
@@ -362,6 +385,10 @@ const AGENT_LIMITS_DEFAULTS = {
   // 与共享记忆的 `sharedMemoryMinScore*` 是同一套口径、不同数据源（本地库 / 跨机 PG），
   // 所以两组分开命名；值以前硬编码在 `system-prompt-prep.js` 里，看不出同源也改不动。
   // 长期记忆「该不该注入」的唯一阈值，作用在 Rust 给的 `injectScore`（已归一到 [0,1]）。
+  // 两个分支各自的 [0,1] 是怎么来的（Rust 侧唯一实现，见 `memory/recall.rs`）：
+  //   语义   = 余弦夹到 [0,1]（本身就是绝对的、跨查询可比）；
+  //   关键词 = **片段覆盖度 × 本次查询内的相对最佳命中**。片段之间是 OR 连接的，只蹭到一个
+  //            词的长句覆盖度就是 1/N —— 拿不到满分；bm25 的绝对值随语料漂移，只能同查询内比。
   // 以前是语义 0.32 / 关键词 0.12 两个数：它们量的根本不是同一件事（余弦 vs bm25），
   // 于是「注不注入」取决于走了哪条通道、查询词有几个字。量纲统一后只剩这一个数。
   memoryInjectMinScore: 0.32,
@@ -606,21 +633,22 @@ const AGENT_LIMITS_DEFAULTS = {
   aliveVoiceMaxPerDay: 100,
   aliveVoiceMinIntervalMs: 20 * 60 * 1000,
   /**
-   * 它说过的话在「最近一条」(`state.lastVoiceText`) 与事件流 (`SPEAK.text`) 里保留多少字。
+   * 它说过的话在事件流 (`SPEAK.text`) 里保留多少字。
    *
    * 为什么要有这个数：它出声是**说给在场的人听的**，人可能不在、可能没听清 ——
-   * 所以"说了什么"必须留成可回看的文字（主窗口一条、拟态 → 日志逐条）。这是**展示**，
+   * 所以"说了什么"必须留成可回看的文字（「拟态 → 日志」逐条、侧栏「生命」页）。这是**展示**，
    * 不写进你的会话账本、不进模型上下文（那才是"接管对话线"）。
-   * 只留最近一条/每条最多这么多字：日志不是录音带，用完就旧了。
+   * 只留每条最多这么多字：日志不是录音带，用完就旧了。
+   * （`state.lastVoiceText` 与主窗口那条展示 2026-11-21 一并删除：出声原话只在事件流里。）
    */
   aliveVoiceTextMaxChars: 300,
   /**
-   * 它**这一轮醒来写下了什么**（心跳轮正文压成一行）在 `state.lastWakeText` 里留多少字。
+   * 唤醒轮正文**压成一行**后留在 `state.lastWakeText` 的字数上限（侧栏「生命」页那一行）。
    *
-   * 为什么要有这个数：唤醒轮是 `internal: true`，正文只落进它自己的会话库 —— 它一晚上写了几万字，
-   * 人回到主窗口却什么也看不见，"它在你不看时做了什么"只能靠翻日志。
-   * 所以主窗口那行有两个来源：说过话显示「它说」，没说话显示「它醒来写了」。
-   * 与 `aliveVoiceTextMaxChars` 同一条口径：**只展示**，不进会话账本、不进模型上下文。
+   * 为什么要有这个数：唤醒轮是 `internal: true`，正文只落进它自己的会话库 —— 它一夜写了几万字，
+   * 人回来翻面板却什么也看不见（主窗口那条展示 2026-11-21 删除时，这份副本一起删过一次；
+   * 2026-11-21 之后**只喂侧栏「生命」页**，不再回主窗口气泡区）。
+   * 与 `aliveVoiceTextMaxChars` 同一套语义：**只展示**，不进会话账本、不进模型上下文。
    */
   aliveWakeTextMaxChars: 200,
   /** 相位惯性（连续 k 个 tick 满足条件才切换）与相位门限 */
@@ -804,7 +832,7 @@ const AGENT_LIMITS_SCHEMA = [
       {
         key: 'plannerMultiAgentEnabled',
         label: '多 Agent 并行执行',
-        hint: '打开后改代码类任务走「规划 → 多路执行器（各一个 git worktree）并行 → 验收 → 变更面板逐文件合并」；需 git 工作区。按上下文档位生效：在哪个档位打开就只在那个档位（以及跟随它的会话）生效',
+        hint: '允许（不强制）：每轮开工前由侧模型判断这句是否值得拆成多路并行（各一份 worktree，改完在变更面板合并），判不准就走普通工具循环。需 git 工作区。判定（结论 + 理由 + 判定模型思考）会写在思考区第一张卡「调度 · 侧模型判定」。侧模型在本页下方「子 Agent 判定模型」里单独指定，留空用主模型。只在打开的档位生效',
         type: 'boolean'
       },
       {
@@ -863,7 +891,7 @@ const AGENT_LIMITS_SCHEMA = [
         hint: '单个子 Agent 的工具轮预算；子 Agent 独立记账，不占父级轮次',
         type: 'number',
         min: 4,
-        max: 96,
+        max: 320,
         step: 1,
         unit: '轮'
       },
@@ -873,7 +901,7 @@ const AGENT_LIMITS_SCHEMA = [
         hint: '单个子 Agent 的工具调用总次数上限；独立记账，不占父级工具预算',
         type: 'number',
         min: 4,
-        max: 192,
+        max: 640,
         step: 1,
         unit: '次'
       },
@@ -972,7 +1000,8 @@ const AGENT_LIMITS_SCHEMA = [
         hint: '从首轮开始计算的总时长预算；用完即停，并把已跑轮次与检查事实留在计划里',
         type: 'number',
         min: 30 * 60 * 1000,
-        max: 24 * 60 * 60 * 1000,
+        // 上限必须高于默认值（24h），否则表单一填就被夹回默认、旋钮等于没开。
+        max: 48 * 60 * 60 * 1000,
         step: 30 * 60 * 1000,
         format: 'ms',
         unit: 'ms'

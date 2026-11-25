@@ -211,7 +211,7 @@ module.exports = {
   REVIEWER_REPAIR_SYSTEM_PROMPT,
   resolveReviewerConfig,
   shouldRunReviewer,
-  buildReviewerBrowserEvidence,
+
   buildReviewerPayload,
   buildReviewerMessages,
   buildRepairMessages,

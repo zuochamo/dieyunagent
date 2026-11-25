@@ -24,14 +24,14 @@
 const { loadModelSettings, resolveTextApiConfig } = require('../model-settings');
 const crypto = require('crypto');
 const { runRustAgentLoop } = require('./rust-loop-runner');
-const { resolveLoopToolCallLimit } = require('./agent-limits');
+const { resolveLoopToolCallLimit, resolveAgentMaxRounds } = require('./agent-limits');
 const { applyTierRuntime, resolveContextTierIdFromSettings } = require('./model-runtime-by-tier');
-const { clampModelRuntimeValue } = require('./model-runtime-schema');
 const { getEffectiveInputBudget } = require('./compaction-main');
 const {
   buildCompletionMessagesFromHistory,
   packMessageMeta,
-  unpackMessageMeta
+  loadRecentTurnMessages,
+  completionHistoryHelpers
 } = require('./session-context');
 const { clearToolHarnessSessionsForSession } = require('./tool-harness');
 const { buildMainAgentTools } = require('./main-agent-tools');
@@ -101,9 +101,10 @@ async function buildTurnSnapshot({ gateway, sessionId, workspacePath, userQuery 
  * 本轮模型解析：没有 Renderer 会话，只能按默认文本模型（或调用方显式给的路由）解析。
  * 缺 key / 缺模型一律明确报错，不静默换供应商。
  *
- * @param {{ userData: string, route?: string, model?: string, strict?: boolean }} args
+ * @param {{ userData: string, route?: string, model?: string, strict?: boolean, tierHint?: string }} args
+ *   `tierHint`：解析 Context 档位时用哪个字符串（计划按「计划绑定的路由」判档，定时执行没有设置页可问）
  */
-function resolveTurnModel({ userData, route, model, strict }) {
+function resolveTurnModel({ userData, route, model, strict, tierHint }) {
   const settings = loadModelSettings(userData);
   const llm = resolveTextApiConfig(settings, route || model ? { route, model, strict: strict !== false } : {});
   if (!llm.apiKey || !llm.baseUrl) {
@@ -113,7 +114,10 @@ function resolveTurnModel({ userData, route, model, strict }) {
   if (!llmModel) {
     throw userError('没有可用的默认模型，请在「模型设置」里启用一个供应商模型', 'NO_MODEL');
   }
-  const contextTierId = resolveContextTierIdFromSettings(settings, llm.model);
+  const contextTierId = resolveContextTierIdFromSettings(
+    settings,
+    String(tierHint || '').trim() || llm.model
+  );
   const runSettings = applyTierRuntime(settings, userData, { tierId: contextTierId, model: llmModel });
   const tokenBudget = getEffectiveInputBudget(runSettings, llmModel);
   // 整体继承 llm：逐字段重建会丢掉 headers / authMode / userAgent（压缩也复用这份 apiCfg）
@@ -258,19 +262,9 @@ async function runMainTurn(ctx) {
   const sysContent = String((sysPack && (sysPack.content || sysPack.stable)) || '');
   const turnRide = String((sysPack && sysPack.turnRide) || '');
 
-  const rows = await gateway.invokeRpc('memory.messages_recent', { sessionId, limit: 120 });
-  const history = (Array.isArray(rows) ? rows : [])
-    .filter((r) => r && (r.role === 'user' || r.role === 'assistant'))
-    .map((r) => ({
-      role: r.role,
-      content: String(r.content || ''),
-      created_at: r.createdAt || r.created_at
-    }));
-  const helpers = {
-    unpackUserContent: (raw) => unpackMessageMeta(raw).content,
-    unpackAssistantMeta: (raw) => ({ content: unpackMessageMeta(raw).content, meta: null }),
-    compactPlainText: (s, n) => String(s || '').slice(0, n)
-  };
+  // 历史读取与 helpers 都是单一来源（session-context）：计划执行器也调同一份。
+  const history = await loadRecentTurnMessages(gateway, sessionId, 120);
+  const helpers = completionHistoryHelpers();
   const prepared = imageParts.length
     ? {
         content: [{ type: 'text', text: ledgerText }, ...imageParts],
@@ -322,7 +316,7 @@ async function runMainTurn(ctx) {
         messages,
         tools,
         maxToolCalls: resolveLoopToolCallLimit(runSettings),
-        maxRounds: clampModelRuntimeValue('agentMaxRounds', runSettings.agentMaxRounds),
+        maxRounds: resolveAgentMaxRounds(runSettings),
         workspaceRoot: workspacePath || undefined
       },
       compactMessages: buildLoopCompactionHandler({
@@ -397,12 +391,7 @@ async function runMainTurn(ctx) {
     const toolCount = trace.reduce((n, r) => n + ((r && r.tools) || []).length, 0);
     // 最常见失败（上游拒绝 / 额度用尽 / 只调工具没写正文），且文案不含内部细节：
     // 标成 userSafe 才能让对方知道「为什么没回话」，而不是一句通用失败。
-    throw userError(
-      toolCount
-        ? `模型执行了 ${toolCount} 次工具调用但未生成任何正文，请查看日志后重试`
-        : '模型未返回任何正文（上游可能拒绝请求或额度已用尽），请稍后重试',
-      'EMPTY_REPLY'
-    );
+    throw userError(roundText.emptyTurnFailureMessage(toolCount), 'EMPTY_REPLY');
   }
 
   // 落库与桌面聊天同一闸门：带标签的思考引用只用于展示，写进账本换占位。

@@ -70,17 +70,17 @@ const MODEL_RUNTIME_SCHEMA = [
         hint: '每段任务最多调用多少次工具，点「继续」后再给同样额度',
         type: 'number',
         min: 15,
-        max: 600,
+        max: 1200,
         step: 1,
         format: 'int'
       },
       {
         key: 'agentMaxRounds',
         label: 'Agent 轮次段上限',
-        hint: '每段任务最多多少轮 LLM↔工具循环，点「继续」后再给同样额度',
+        hint: '每段任务最多多少轮 LLM↔工具循环，点「继续」后再给同样额度；plan 模式的执行器与勘察轮也读这个值',
         type: 'number',
         min: 15,
-        max: 600,
+        max: 1200,
         step: 1,
         format: 'int'
       }

@@ -4,10 +4,41 @@ function countTraceTools(trace) {
   return (trace || []).reduce((n, e) => n + ((e && e.tools) || []).length, 0);
 }
 
+/**
+ * 残留 tool_call 标记 —— 上游把「工具调用」当文本发回来时，content 里会留下这些标记。
+ *
+ * 只认**结构形态**，不认中英文词表：
+ * 1. 明文 XML：`<tool_call>` / `</invoke>` / `<function_call>`；
+ * 2. 渠道特殊 token：`<|tool_calls|>`、`<| |DSML| | invoke name=…>`（DeepSeek chat template
+ *    的特殊标记，正常应由上游转成结构化 `tool_calls`；一旦落进 content 就是泄漏）；
+ * 3. 历史兼容：`<function=`、全角 `｜DSML｜`。
+ *
+ * 为什么 `<` 与关键字之间要允许 `|` / 空格：真实的泄漏形态是 `<| |DSML| | invoke`，旧正则
+ * 要求 `<` 紧跟关键字，于是整段标记被当成正文交付（2026-11-19 子 Agent 事故：那条
+ * `host_exec` 从未执行，泄漏文本却被回注主上下文当结论）。
+ *
+ * 为什么 `function=` **不能**单独成一枝：它是标记里才有的形态，但正文里也会出现
+ * （`GET /api/x?function=getUser`、讲代码时说「把 function= 这一项删掉」）—— 裸匹配会让
+ * 正常结论被判成泄漏，planner 汇总轮于是把整段正文换成空串再重问一遍。
+ */
+const TOOL_CALL_MARKUP_RE = new RegExp(
+  [
+    '</?(?:tool_calls?|invoke|function_call)\\b',
+    '<\\s*function=',
+    '<\\/?\\s*[|｜]?\\s*[|｜]?\\s*(?:tool_calls?|invoke|parameter|DSML|antml)\\b',
+    '[|｜]DSML[|｜]'
+  ].join('|'),
+  'i'
+);
+
+/** 首个残留标记的位置（-1 = 没有）。需要「标记之前的正文」的调用方用它，别另写正则。 */
+function toolCallMarkupIndex(text) {
+  const match = TOOL_CALL_MARKUP_RE.exec(String(text || ''));
+  return match ? match.index : -1;
+}
+
 function replyHasToolCallMarkup(text) {
-  return /<(?:tool_call|tool_calls|invoke|function=|\uff5cDSML\uff5c|｜DSML｜)/i.test(
-    String(text || '')
-  );
+  return toolCallMarkupIndex(text) >= 0;
 }
 
 /** 仅当工具轮结束后没有任何用户向正文时才补汇总；有字就用模型原文，不用长度启发式再打一轮 LLM */
@@ -49,6 +80,21 @@ const SYNTHESIS_PHASE = '汇总';
 const SYNTHESIS_START = '正在生成最终答复…';
 const SYNTHESIS_DONE = '已完成';
 const SYNTHESIS_FAILED = '汇总未完成，见下方答复';
+/**
+ * planner 前置判定（「这一轮要不要拆成多路并行」）在思考区的那一张卡的 phase 名。
+ *
+ * 唯一来源：planner 侧（`rust-planner-runner.js`，判定为「拆」时写）与 Renderer 侧
+ * （`renderer-agent-send.js`，判定为「不拆」时补同一张卡）都用它 —— 两边各写一份中文
+ * 就会变成「同一件事在思考区有两个名字」。
+ */
+const PLANNER_ROUTE_PHASE = '调度 · 侧模型判定';
+/**
+ * 「模型执行途中自己要求改道」（`fan_out`）在思考区的那一张卡的 phase 名。
+ *
+ * 与 `PLANNER_ROUTE_PHASE` 分开是有意的：一个是「开跑前判定器说不拆/拆」，
+ * 一个是「跑到一半模型自己说该拆」—— 两者的责任方不同，混成一个名字就查不出是谁拍的板。
+ */
+const PLANNER_HANDOFF_PHASE = '调度 · 中途改道';
 /**
  * 非模型思考的 trace phase：程序动作，不进 `messages.reasoning`。
  * - 汇总：交给汇总 LLM 的合成轮，不是本轮思考；
@@ -102,6 +148,39 @@ function reasoningFallbackText(reasoning) {
 
 function isReasoningFallbackText(text) {
   return String(text == null ? '' : text).trim().startsWith(TURN_REASONING_FALLBACK_LABEL);
+}
+
+/**
+ * 中途改道工具名（模型在执行途中声明「这活该拆成多路并行写入」）。
+ *
+ * 声明与执行分居两侧：工具本身只在 `main-tools/agent-mode.js` 里登记意图，
+ * 真正的切换由 Renderer 读到本轮 trace 里的这次调用后完成（`findFanOutRequest`）。
+ */
+const FAN_OUT_TOOL_NAME = 'fan_out';
+
+/**
+ * 从本轮 trace 里读「模型要求中途改道」。
+ *
+ * 只认**结构化调用记录**（`entry.tools[]` 的 name + 参数），不扫正文、不看措辞 ——
+ * 模型在文字里说「我要拆开做」不算数，只有真的调用了工具才算（否则就是在替它猜）。
+ *
+ * @param {Array} trace
+ * @returns {{reason: string, subtasks: Array} | null}
+ */
+function findFanOutRequest(trace) {
+  for (const entry of trace || []) {
+    for (const t of (entry && entry.tools) || []) {
+      if (String((t && t.name) || '').trim() !== FAN_OUT_TOOL_NAME) continue;
+      const args = (t && (t.toolArgs || t.args)) || {};
+      const reason = String(args.reason || '').replace(/\s+/g, ' ').trim();
+      const subtasks = Array.isArray(args.subtasks) ? args.subtasks : [];
+      return {
+        reason: reason || '模型判断这件事需要拆成多路并行执行',
+        subtasks
+      };
+    }
+  }
+  return null;
 }
 
 /**
@@ -167,6 +246,22 @@ function pickNormalizedAssistantReply(reply, trace, fallbacks) {
   return TURN_EMPTY_REPLY_TEXT;
 }
 
+/**
+ * 「这一轮什么都没交付」的失败文案 —— **唯一措辞**。
+ *
+ * 计划执行器（`plans/plan-agent-runner`）与 Main 跑一轮（`main-turn-runner`：频道 / headless）
+ * 都用它。同一件事以前两种说法（一边「请查看日志后重跑」、一边「请查看日志后重试」），
+ * 而这句话是直接给用户看的。
+ *
+ * @param {number} toolCount 本轮实际发生的工具调用次数（>0 说明模型动了手却没写正文）
+ */
+function emptyTurnFailureMessage(toolCount) {
+  const n = Math.max(0, Number(toolCount) || 0);
+  return n
+    ? `模型执行了 ${n} 次工具调用但未生成任何正文，请查看日志后重试`
+    : '模型未返回任何正文（上游可能拒绝请求或额度已用尽），请稍后重试';
+}
+
 const api = {
   TURN_REASONING_FALLBACK_LABEL,
   TURN_EMPTY_REPLY_TEXT,
@@ -174,7 +269,14 @@ const api = {
   SYNTHESIS_START,
   SYNTHESIS_DONE,
   SYNTHESIS_FAILED,
+  PLANNER_ROUTE_PHASE,
+  PLANNER_HANDOFF_PHASE,
+  FAN_OUT_TOOL_NAME,
+  findFanOutRequest,
+  TOOL_CALL_MARKUP_RE,
   countTraceTools,
+  toolCallMarkupIndex,
+  replyHasToolCallMarkup,
   needsAssistantReplySynthesis,
   synthesizedReplyIsUsable,
   normalizeDeliverableText,
@@ -185,7 +287,8 @@ const api = {
   resolveTurnDelivery,
   persistableTurnText,
   stripTraceUiOnlyFields,
-  pickNormalizedAssistantReply
+  pickNormalizedAssistantReply,
+  emptyTurnFailureMessage
 };
 
 module.exports = api;

@@ -190,7 +190,7 @@ function getWorkspaceMutateSnapshot(workspaceKey) {
 }
 
 module.exports = {
-  resolveStallMs,
+
   normalizeWorkspaceMutateKey,
   getMutateQueue,
   runExclusive,

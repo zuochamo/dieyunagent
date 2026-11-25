@@ -8,8 +8,11 @@
  * 与主循环 subagent（main/ipc/agent-runtime.js）共用这里，避免两份实现漂移。
  */
 const { stripToolCallMarkup } = require('../llm-tool-call-fallback');
-// 卡片标题的 label 截断位数：数字单一来源（agent-limits），这里不自留字面量。
-const { getAgentLimits } = require('./agent-limits');
+// 工具结果 → 思考区一行摘要：与 Renderer 的 renderer-tool-results.js 共用同一份实现
+// （以前两处各写一份，后台化文案 / 退出码 / 「不像输出」正则 / 无输出兜底四种已漂移）。
+const { summarizeToolResult } = require('./tool-result-summary');
+// 卡片标题的 label 截断位数、工具 diff 的片段/全文上限：数字单一来源（agent-limits），这里不自留字面量。
+const { getAgentLimits, AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 
 const LIVE_THOUGHT_CHARS = 2000;
 
@@ -20,7 +23,9 @@ const LIVE_THOUGHT_CHARS = 2000;
  * 会以「N × token」的频率把**整张卡片**（含各轮思考全文）反复过一遍 IPC。Main 侧
  * `webContents.send` 是同步 structured clone，会把主进程打满，Renderer 事件队列跟着积压 ——
  * 表现就是「只有一张卡片在动、整体卡死」。
- * 与 Renderer 的 `RUST_PROGRESS_MIN_INTERVAL_MS` 对齐：两端节流叠加后单卡片约 8 次/秒，够流畅。
+ * 与「Main→Renderer 的流式合批」（`src/agent/progress-flush.js`，间隔取自
+ * `agent-limits.agentProgressFlushMs`）是**两段不同的节流**：这一段在进程内合成卡片（没有
+ * 跨进程成本，但要等整张卡片装配完），那一段是跨进程外发的下限。叠加后单卡片约 8 次/秒。
  */
 const LIVE_TRACE_MIN_INTERVAL_MS = 120;
 
@@ -122,7 +127,9 @@ function mapPendingDelegateTool(d) {
     argsBrief: JSON.stringify(args).slice(0, 120),
     toolArgs: args,
     summary: '',
-    pending: true
+    pending: true,
+    // 派发时刻：`delegate_result` 到达时据此算出这次工具的真实占用（轨迹图用）
+    startedAt: Date.now()
   };
 }
 
@@ -147,11 +154,18 @@ function createLiveLoopTraceTracker(
     const n = Math.max(1, Number(roundNo) || 1);
     let row = rounds.find((x) => x.round === n);
     if (!row) {
-      row = { round: n, thought: '', fullThought: '', tools: [], placeholder: false };
+      // startedAt/endedAt：轨迹图（`trace-graph.js`）画时间轴要的**唯一**时间来源。
+      // 0 表示「这一版没记到时间」→ 图会退化成等宽顺序图，绝不拿 now 假造时长。
+      row = { round: n, thought: '', fullThought: '', tools: [], placeholder: false, startedAt: 0, endedAt: 0 };
       rounds.push(row);
       rounds.sort((a, b) => a.round - b.round);
     }
     return row;
+  }
+
+  /** 这一轮第一次有动静时落开始时间（幂等：同一轮多次 delta 只记第一次）。 */
+  function markRoundStart(row) {
+    if (row && !row.startedAt) row.startedAt = Date.now();
   }
 
   /**
@@ -229,6 +243,7 @@ function createLiveLoopTraceTracker(
     if (name === 'llm_request') {
       llmRound = data && data.round != null ? Number(data.round) : llmRound;
       const row = getRound(eventRoundNo(data));
+      markRoundStart(row);
       row.thought =
         data && data.model ? `请求 LLM · ${String(data.model).trim()}…` : '请求 LLM…';
         row.placeholder = true;
@@ -239,8 +254,10 @@ function createLiveLoopTraceTracker(
       llmRound = data && data.round != null ? Number(data.round) : llmRound;
       // 累计全文的归一化推迟到发帧时（见 flushPendingDelta）：同一帧内只保留最新一份。
       pendingDelta.length = 0;
+      const deltaRow = getRound(eventRoundNo(data));
+      markRoundStart(deltaRow);
       pendingDelta.push({
-        row: getRound(eventRoundNo(data)),
+        row: deltaRow,
         content: String((data && data.content) || ''),
         reasoning: String((data && data.reasoning) || ''),
         // content 的通道身份由入口盖章（llm-channel.classifyDelta），此处不再用 `a || b` 猜。
@@ -251,6 +268,9 @@ function createLiveLoopTraceTracker(
     }
     if (name === 'llm_response') {
       if (data && data.round != null) llmRound = Number(data.round) + 1;
+      // 这一轮（模型 + 工具）到此收尾：轨迹图按这个时间画块的右边界
+      const finished = rounds.find((r) => r.round === (data && data.round != null ? Number(data.round) + 1 : llmRound));
+      if (finished && !finished.endedAt) finished.endedAt = Date.now();
       return;
     }
     if (name === 'need_delegate' || name === 'delegate_start') {
@@ -275,6 +295,10 @@ function createLiveLoopTraceTracker(
       const tool = row.tools.find((t) => t.id === data.id) || row.tools.find((t) => t.pending && t.name === data.name);
       if (tool) {
         tool.pending = false;
+        if (!tool.endedAt) {
+          tool.endedAt = Date.now();
+          tool.ms = tool.startedAt ? Math.max(0, tool.endedAt - tool.startedAt) : 0;
+        }
         if (data.arguments && typeof data.arguments === 'object') {
           tool.toolArgs = { ...(tool.toolArgs || {}), ...data.arguments };
           tool.args = { ...(tool.args || {}), ...data.arguments };
@@ -289,9 +313,8 @@ function createLiveLoopTraceTracker(
           briefArgs.filePath ||
           briefArgs.path ||
           JSON.stringify(briefArgs).slice(0, 120);
-        tool.summary = data.error
-          ? `错误: ${data.error}`
-          : summarizeLoopTool({ name: data.name, result: data.result, error: data.error });
+        // 失败文案也归工具摘要模块（同一句「失败：[CODE] … · 建议」），这里不再自己拼「错误: …」
+        tool.summary = summarizeLoopTool({ name: data.name, result: data.result, error: data.error });
         if ((data.name === 'fs_write_file' || data.name === 'fs_edit') && data.result && data.result.diff) {
           tool.diff = compactLoopToolDiff(data.result.diff);
         }
@@ -325,76 +348,39 @@ function compactLoopToolDiff(diff) {
     created: !!diff.created,
     textTruncated: !!diff.textTruncated
   };
-  const cap = 12000;
-  if (diff.beforeSnippet != null) {
+  const cap = Number(AGENT_LIMITS_DEFAULTS.maxDiffChars) || 0;
+  const fullCap = Number(AGENT_LIMITS_DEFAULTS.diffFullTextCap) || 0;
+  if (cap > 0 && diff.beforeSnippet != null) {
     const s = String(diff.beforeSnippet);
     out.beforeSnippet = s.length > cap ? s.slice(0, cap) : s;
   }
-  if (diff.afterSnippet != null) {
+  if (cap > 0 && diff.afterSnippet != null) {
     const s = String(diff.afterSnippet);
     out.afterSnippet = s.length > cap ? s.slice(0, cap) : s;
   }
   if (!diff.textTruncated) {
     if (diff.beforeText != null) {
       const t = String(diff.beforeText);
-      if (t.length <= 120000) out.beforeText = t;
+      if (!fullCap || t.length <= fullCap) out.beforeText = t;
     }
     if (diff.afterText != null) {
       const t = String(diff.afterText);
-      if (t.length <= 120000) out.afterText = t;
+      if (!fullCap || t.length <= fullCap) out.afterText = t;
     }
   }
   return out;
 }
 
+/**
+ * 内层循环（planner 执行器 / 主循环并发 subagent）的工具行摘要。
+ *
+ * 唯一实现在 `src/agent/tool-result-summary.js`（Renderer 的 renderer-tool-results.js 也调它）：
+ * 这里以前另有一份 summarizeLoopTool + summarizeHostExecInline，与 Renderer 那份已漂出四种说法
+ * （后台化文案、非零退出码被压成 exit 0、「不像输出」正则少一支、无输出兜底「完成」vs「命令成功（无输出）」）。
+ * 只保留这个壳：phase 事件把 error 与 result 分开给，模块的第三个参数就是接它的。
+ */
 function summarizeLoopTool(t) {
-  if (t.error) return `错误: ${t.error}`;
-  if (t.name === 'host_exec') {
-    return summarizeHostExecInline(t.result, t.error);
-  }
-  if (t.name === 'fs_write_file' || t.name === 'fs_edit') {
-    const r = t.result;
-    if (r && typeof r === 'object' && r.path) {
-      const file = String(r.path).replace(/\\/g, '/').split('/').pop() || r.path;
-      const diff = r.diff
-        ? ` · +${Number(r.diff.added) || 0} -${Number(r.diff.removed) || 0}`
-        : '';
-      const n = Number(r.replacements);
-      const repl = t.name === 'fs_edit' && Number.isFinite(n) && n > 0 ? ` · ${n} 处` : '';
-      return `${file}${r.diff?.created ? ' · 新建' : t.name === 'fs_edit' ? ' · 已替换' : ' · 已写入'}${diff}${repl}`;
-    }
-  }
-  const r = t.result;
-  if (r && typeof r === 'object') {
-    if (typeof r.stdout === 'string' && r.stdout.trim()) return r.stdout.trim().slice(0, 240);
-    if (typeof r.stderr === 'string' && r.stderr.trim()) return r.stderr.trim().slice(0, 240);
-    if (typeof r.message === 'string' && r.message.trim()) return r.message.trim().slice(0, 240);
-    if (typeof r.content === 'string' && r.content.trim()) return r.content.trim().slice(0, 240);
-  }
-  return '完成';
-}
-
-function summarizeHostExecInline(result, error) {
-  if (error) return `错误: ${error}`;
-  if (!result || typeof result !== 'object') return '完成';
-  if (result.timedOut && result.stillRunning) {
-    return `转后台继续运行（${result.handle || (result.pid ? `pid ${result.pid}` : '无句柄')}）`;
-  }
-  const exit = result.code != null ? result.code : result.exitCode;
-  const stderr = String(result.stderr ?? '').trim();
-  if (stderr && exit != null && exit !== 0) {
-    return `exit ${exit} · ${stderr.slice(0, 80)}`;
-  }
-  const out = String(result.stdout ?? result.output ?? '').trim();
-  if (out) {
-    if ((/^\/\*|^#|^<!DOCTYPE|^<html[\s>]/i.test(out) || out.includes('{')) && out.length > 80) {
-      return `exit ${exit ?? 0} · 输出 ${out.length} 字`;
-    }
-    if (/^(True|False|OK|null|None)$/i.test(out)) return `exit ${exit ?? 0} · ${out}`;
-    return out.length > 100 ? `${out.slice(0, 100)}…` : out;
-  }
-  if (stderr) return stderr.slice(0, 100);
-  return exit != null ? (exit === 0 ? 'exit 0' : `exit ${exit}`) : '完成';
+  return summarizeToolResult(t && t.name, t && t.result, t && t.error);
 }
 
 function mapLoopToolToUi(t) {
@@ -493,7 +479,11 @@ const CARD_TOOL_KEYS = [
   'failed',
   'summary',
   'diff',
-  'error'
+  'error',
+  // 时间戳：轨迹图（`src/agent/trace-graph.js`）要画「这次工具占用多长」，缺了就只能退化
+  'startedAt',
+  'endedAt',
+  'ms'
 ];
 
 function toCardTool(tool) {
@@ -518,9 +508,15 @@ function buildIsolatedCard(meta, rounds, subagentId) {
     thought: String((r && (r.thought || r.fullThought)) || ''),
     fullThought: String((r && (r.fullThought || r.thought)) || ''),
     placeholder: !!(r && r.placeholder),
-    tools: Array.isArray(r && r.tools) ? r.tools.map(toCardTool) : []
+    tools: Array.isArray(r && r.tools) ? r.tools.map(toCardTool) : [],
+    // 每轮的起止：轨迹图按它画这一路的「第 N 轮」块（缺了就退化成等宽顺序图）
+    ...(r && r.startedAt ? { startedAt: r.startedAt } : {}),
+    ...(r && r.endedAt ? { endedAt: r.endedAt } : {})
   }));
   const latest = list.length ? list[list.length - 1] : null;
+  // 卡片级起止 = 各轮的包络：没有逐轮时间时，轨迹图还能靠它画一条整块
+  const starts = list.map((r) => Number(r.startedAt) || 0).filter((n) => n > 0);
+  const ends = list.map((r) => Number(r.endedAt) || 0).filter((n) => n > 0);
   return {
     // 条目级 round 取最新轮，仅用于兼容既有字段；真正的分轮在 rounds 内
     round: latest ? latest.round : 1,
@@ -538,6 +534,8 @@ function buildIsolatedCard(meta, rounds, subagentId) {
     subagentIndex: Number(m.subagentIndex) || 0,
     label: String(m.label || '').trim(),
     parallel: !!m.parallel,
+    ...(starts.length ? { startedAt: Math.min(...starts) } : {}),
+    ...(ends.length ? { endedAt: Math.max(...ends) } : {}),
     rounds: list
   };
 }
@@ -562,7 +560,14 @@ function mergeIsolatedCards(liveCard, rustCard) {
       round: ref.round != null ? ref.round : i + 1,
       thought: (l && l.thought) || (r && r.thought) || '',
       fullThought: (l && l.fullThought) || (r && r.fullThought) || '',
-      tools: mergeTraceTools((l && l.tools) || [], (r && r.tools) || [])
+      tools: mergeTraceTools((l && l.tools) || [], (r && r.tools) || []),
+      // 时间以实时侧为准（收尾的 Rust trace 不带时间戳），缺了再看收尾侧
+      ...(Number(l && l.startedAt) || Number(r && r.startedAt)
+        ? { startedAt: Number(l && l.startedAt) || Number(r && r.startedAt) }
+        : {}),
+      ...(Number(l && l.endedAt) || Number(r && r.endedAt)
+        ? { endedAt: Number(l && l.endedAt) || Number(r && r.endedAt) }
+        : {})
     });
   }
   return buildIsolatedCard({ ...rust, ...live }, rounds, live.subagentId || rust.subagentId);

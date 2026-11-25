@@ -32,4 +32,21 @@ async function bindSessionWorkspace(gateway, sessionId, workspacePath) {
   return true;
 }
 
-module.exports = { bindSessionWorkspace };
+/**
+ * 「这条会话还能不能继续往里写」的**唯一判据**：存在、且没被用户归档。
+ *
+ * 删除与归档必须同一口径：归档是用户的决定（这里不去改那个位），但继续往里写就等于
+ * 把记录丢进侧栏翻不到的地方 —— 侧栏只拉 `archived = 0`。实测症状是「计划天天弹完成通知，
+ * 界面里一直没有会话」（见 `plans/plan-session.js` 与 `main/alive-boot.js` 的注释）。
+ *
+ * **读取失败不是失效**：`memory.session_get` 对「查不到」返回 null，对传输 / SQLite 失败是
+ * 抛错。调用方不许把异常当成「已删除」去重建会话（那会把计划/频道会话永久迁走）。
+ *
+ * @param {{ id?: string, archived?: number|boolean }|null|undefined} row
+ * @returns {boolean}
+ */
+function isReusableSessionRow(row) {
+  return !!(row && row.id) && !Number(row.archived);
+}
+
+module.exports = { bindSessionWorkspace, isReusableSessionRow };

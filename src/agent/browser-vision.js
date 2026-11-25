@@ -320,7 +320,7 @@ module.exports = {
   SOURCE_COMPUTER,
   SOURCE_CAMERA,
   SOURCE_DESKTOP_CAMERA,
-  MAX_SHOTS_PER_RUN,
+
   MAX_BASE64_CHARS,
   resolveVisionLimits,
   extractShot,

@@ -1,6 +1,6 @@
 'use strict';
 
-const { normalizeTask, newId, DEFAULT_MAX_RETRIES } = require('./task-schema');
+const { normalizeTask, newId } = require('./task-schema');
 const {
   createMessage,
   messagesForRole,
@@ -78,45 +78,15 @@ class AgentRunCoordinator {
       return;
     }
 
-    if (task.retryCount < task.maxRetries && task.exceptionPolicy !== 'fail') {
-      this._scheduleRetry(run, task, 'timeout');
-    } else {
-      task.status = 'failed';
-      this._log(run, 'task_failed', { taskId, error: 'timeout' });
-    }
-  }
-
-  _scheduleRetry(run, task, reason) {
-    if (task.retryCount >= task.maxRetries) {
-      task.status = 'failed';
-      task.lastError = reason;
-      return;
-    }
-    task.retryCount += 1;
-    task.status = 'retrying';
-    task.lastError = reason;
-    task.startedAt = null;
-    task.finishedAt = null;
-    this._log(run, 'task_retry', {
-      taskId: task.taskId,
-      retryCount: task.retryCount,
-      maxRetries: task.maxRetries,
-      reason
-    });
-    this.postMessage(run.runId, {
-      fromRole: 'coordinator',
-      toRole: task.roleId,
-      type: 'task_assign',
-      taskId: task.taskId,
-      payload: {
-        retry: true,
-        retryCount: task.retryCount,
-        reason,
-        instruction: task.instruction,
-        expectedOutput: task.expectedOutput
-      }
-    });
-    run.retryQueue.push(task.taskId);
+    /**
+     * 重试**不在这一层**：coordinator 只记事实，真正的重试由 Rust planner
+     * （`crates/dieyun-runtime/src/planner/run.rs`，有 `max_worker_retries` 预算与 trace）执行。
+     *
+     * 以前这里会把任务标成 `retrying` 并推一条 `task_assign{retry:true}` + `run.retryQueue`，
+     * 但那三样都没有消费者：trace 里显示「重试中」，实际已死 —— 「失败被显示成进行中」。
+     */
+    task.status = 'failed';
+    this._log(run, 'task_failed', { taskId, error: 'timeout' });
   }
 
   startRun(meta = {}) {
@@ -129,7 +99,6 @@ class AgentRunCoordinator {
       messages: [],
       events: [],
       timers: new Map(),
-      retryQueue: [],
       pendingArbitration: null,
       abortReason: null,
       startedAt: Date.now(),
@@ -144,7 +113,7 @@ class AgentRunCoordinator {
     const run = this._getRun(runId);
     if (run.status === 'cancelled') throw new Error('运行已取消');
 
-    const task = normalizeTask({ ...spec, maxRetries: Math.min(3, spec.maxRetries ?? DEFAULT_MAX_RETRIES) });
+    const task = normalizeTask(spec);
     if (run.tasks.has(task.taskId)) {
       task.taskId = newId('task');
     }
@@ -233,17 +202,12 @@ class AgentRunCoordinator {
       task.status = 'failed';
       run.pendingArbitration = { taskId, reason: msg };
       this._log(run, 'arbitration_required', { taskId, reason: msg });
-      return { ok: true, task, retry: false, needsArbitration: true };
-    }
-
-    if (task.retryCount < task.maxRetries && task.exceptionPolicy !== 'fail') {
-      this._scheduleRetry(run, task, msg);
-      return { ok: true, task, retry: true, retryCount: task.retryCount };
+      return { ok: true, task, needsArbitration: true };
     }
 
     task.status = 'failed';
     this._log(run, 'task_failed', { taskId, error: msg });
-    return { ok: true, task, retry: false };
+    return { ok: true, task };
   }
 
   postMessage(runId, input) {
@@ -281,7 +245,7 @@ class AgentRunCoordinator {
       this._clearTaskTimer(run, taskId);
     }
     for (const task of run.tasks.values()) {
-      if (task.status === 'running' || task.status === 'queued' || task.status === 'retrying') {
+      if (task.status === 'running' || task.status === 'queued') {
         task.status = 'cancelled';
         task.finishedAt = Date.now();
       }

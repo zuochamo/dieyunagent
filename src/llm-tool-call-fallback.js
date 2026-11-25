@@ -14,12 +14,21 @@ const { ALL_STATIC_TOOLS } = require('./agent/tool-catalog');
  * 3) 多个 <tool_call> 连续出现且无 </tool_call> 闭合
  * 4) <tool call>（空格）与 </parameter>、</function> 混用
  * 5) DeepSeek DSML：<tool_calls><invoke name="…">… 或 <｜DSML｜…> 前缀变体
+ * 6) DSML 的 ASCII/空格变体：`<| |DSML| | calls>`、`<| |DSML| | invoke name="…">`、
+ *    `</| |DSML| | parameter>` —— 竖线可能是半角 `|` 也可能是全角 `｜`，中间可能带空格，
+ *    外层标签名可能写成 `calls` 而不是 `tool_calls`（2026-11-19 子 Agent 事故的真实形态）
  */
 
 const TOOL_CALL_OPEN_RE = /<tool[\s_]+call>/gi;
 const TOOL_CALL_CLOSE_RE = /<\/tool[\s_]+call>/gi;
-const DSML_TAG_PREFIX = /<\uff5cDSML\uff5c/gi;
-const DSML_TAG_CLOSE_PREFIX = /<\/\uff5cDSML\uff5c/gi;
+/**
+ * DSML 前缀：`<｜DSML｜` / `<|DSML|` / `<| |DSML| |`。
+ * 竖线半角、全角都要认，且允许「两根竖线之间夹空格」—— 事故里的形态就是 `<| |DSML| |`，
+ * 旧的定长 `<\uff5cDSML\uff5c` 一条都不匹配，于是标记既不剥除也不识别。
+ */
+const DSML_BARS = '(?:[|｜]\\s*){1,2}';
+const DSML_TAG_PREFIX = new RegExp(`<\\s*${DSML_BARS}DSML\\s*${DSML_BARS}`, 'gi');
+const DSML_TAG_CLOSE_PREFIX = new RegExp(`</\\s*${DSML_BARS}DSML\\s*${DSML_BARS}`, 'gi');
 
 /**
  * 「参数名等于工具名」的判定表：**从工具目录派生**，不再手抄一份。
@@ -45,12 +54,14 @@ function genToolCallId(index) {
 /** 统一 mimo / DeepSeek DSML 各变体标签，便于分段与剥除 */
 function normalizeToolCallMarkup(text) {
   const raw = String(text || '');
-  // 快路径：下面 8 条替换的匹配式全部以 `<` 起头，没有尖括号就不可能有标记。
-  // 纯文本回复（占绝大多数）因此完全跳过这 8 次全文正则。
+  // 快路径：下面这些替换的匹配式全部以 `<` 起头，没有尖括号就不可能有标记。
+  // 纯文本回复（占绝大多数）因此完全跳过全文正则。
   if (raw.indexOf('<') < 0) return raw;
   return raw
-    .replace(DSML_TAG_PREFIX, '<')
     .replace(DSML_TAG_CLOSE_PREFIX, '</')
+    .replace(DSML_TAG_PREFIX, '<')
+    .replace(/<\/\s*calls>/gi, '</tool_calls>')
+    .replace(/<\s*calls>/gi, '<tool_calls>')
     .replace(/<tool[\s_]+calls>/gi, '<tool_calls>')
     .replace(/<\/tool[\s_]+calls>/gi, '</tool_calls>')
     .replace(TOOL_CALL_OPEN_RE, '<tool_call>')
@@ -394,7 +405,12 @@ function stripToolCallMarkupFromNormalized(text) {
 }
 
 function stripToolCallMarkup(content) {
-  return stripToolCallMarkupFromNormalized(normalizeToolCallMarkup(content));
+  const text = String(content || '');
+  // 快路径：剥除用的 14 条替换全部以 `<` 为锚点，没有尖括号时唯一会被改动的只有
+  // 「连续空行折叠 + 首尾 trim」。流式正文是**累计全文**（每个分片都会走到这里），
+  // 少跑 25 条全文正则就是少一个 O(正文²) 的项。
+  if (text.indexOf('<') < 0) return text.replace(/\n{3,}/g, '\n\n').trim();
+  return stripToolCallMarkupFromNormalized(normalizeToolCallMarkup(text));
 }
 
 /** 入参必须是**已归一化**文本（见 normalizeToolCallMarkup）。 */

@@ -226,7 +226,7 @@ async function maybeGenerateSessionTitle(opts = {}) {
 }
 
 module.exports = {
-  TITLE_SOURCE_AI,
+
   buildSessionTitleBody,
   cleanGeneratedTitle,
   extractCompletionContent,

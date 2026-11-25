@@ -30,9 +30,16 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { AGENT_LIMITS_DEFAULTS } = require('./agent-limits');
 
-/** 单张 base64 硬顶：上游视觉预算之外的最后一道闸（超过说明没压缩，直接拒）。 */
-const MAX_BASE64_CHARS = 8 * 1024 * 1024;
+/**
+ * 单张 base64 硬顶：与上游视觉预算**同一来源**（`agent-limits` 的 `visionMaxBase64Chars`）。
+ *
+ * 这里只是同步兜底（超过说明没压缩，直接拒）；真正按设置值裁决的是
+ * `browser-vision.js#resolveVisionLimits`。以前这里是自写一份 `8 * 1024 * 1024`，
+ * 比共享上限大一倍 —— 用户把 `visionMaxBase64Chars` 调小对摄像头路径静默无效。
+ */
+const MAX_BASE64_CHARS = AGENT_LIMITS_DEFAULTS.visionMaxBase64Chars;
 
 /** ffmpeg 抓一帧的默认输出质量（MJPEG qscale）。3 ≈ 视觉无损但对模型足够。 */
 const JPEG_QUALITY = 3;
