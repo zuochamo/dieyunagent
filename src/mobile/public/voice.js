@@ -365,5 +365,4 @@
   }
 
   window.initMobileVoice = initMobileVoice;
-  window.cancelMobileVoice = cancelVoiceRecording;
 })();

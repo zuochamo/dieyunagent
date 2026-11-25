@@ -21,6 +21,7 @@
  */
 
 const { normalizeVisionImageMime } = require('../agent/guardrails-shared');
+const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 
 /** 手机端拍照能力标识（`MobileBridge` 的能力白名单同值）。 */
 const CAMERA_CAPABILITY = 'camera';
@@ -28,8 +29,12 @@ const CAMERA_CAPABILITY = 'camera';
 /** 手机端上报的 mime 只认这几种（多模态上游支持的集合）。 */
 const FALLBACK_MIME = 'image/jpeg';
 
-/** 单张 base64 的兜底硬顶：超过它说明手机没压缩，直接拒掉比让它顶穿视觉上限更清楚。 */
-const MAX_BASE64_CHARS = 8 * 1024 * 1024;
+/**
+ * 单张 base64 的兜底硬顶：与上游视觉预算**同一来源**（`agent-limits` 的 `visionMaxBase64Chars`）。
+ * 超过它说明手机没压缩，直接拒掉比让它顶穿视觉上限更清楚。
+ * 以前这里是自写一份 `8 * 1024 * 1024`，比共享上限大一倍（调小设置对这里静默无效）。
+ */
+const MAX_BASE64_CHARS = AGENT_LIMITS_DEFAULTS.visionMaxBase64Chars;
 
 /** `focus` → 用哪颗摄像头。face 用前置（正对着用户），其余用后置（看桌面/看现场）。 */
 function facingForFocus(focus) {
