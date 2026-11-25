@@ -60,6 +60,8 @@ release/
 deploy/*.zip
 
 # 本地工具输出 / 集成终端日志 / 临时调试文件 / 生成产物（不进版本库）
+# 工具遥测：脚本以仓库为 CWD 跑测试时会落在仓根（运行期数据，真身在 userData）
+tool-telemetry.jsonl
 /tmp-*
 /.tmp-*
 _tmp/
