@@ -144,9 +144,8 @@ function createDesktopTurn(deps) {
   const log = typeof deps.log === 'function' ? deps.log : () => {};
 
   const { runRustAgentLoop } = require('../agent/rust-loop-runner');
-  const { resolveLoopToolCallLimit } = require('../agent/agent-limits');
+  const { resolveLoopToolCallLimit, resolveAgentMaxRounds } = require('../agent/agent-limits');
   const { applyTierRuntime, resolveContextTierIdFromSettings } = require('../agent/model-runtime-by-tier');
-  const { clampModelRuntimeValue } = require('../agent/model-runtime-schema');
   const { getEffectiveInputBudget } = require('../agent/compaction-main');
   const { buildLoopCompactionHandler } = require('../agent/compaction-loop');
   const { isAbortError } = require('../llm-reconnect-retry');
@@ -217,7 +216,7 @@ function createDesktopTurn(deps) {
     const startParams = { ...(p.startParams || {}) };
     startParams.model = llmModel;
     if (!startParams.maxToolCalls) startParams.maxToolCalls = resolveLoopToolCallLimit(runSettings);
-    if (!startParams.maxRounds) startParams.maxRounds = clampModelRuntimeValue('agentMaxRounds', runSettings.agentMaxRounds);
+    if (!startParams.maxRounds) startParams.maxRounds = resolveAgentMaxRounds(runSettings);
     const workspacePath = String(p.runWorkspaceRoot || startParams.workspaceRoot || '').trim() || undefined;
     if (workspacePath && !startParams.workspaceRoot) startParams.workspaceRoot = workspacePath;
 

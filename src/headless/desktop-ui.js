@@ -21,6 +21,22 @@
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
+const { PEER_BRIDGE_METHODS } = require('../peer/actions');
+
+/**
+ * 把浏览器替身里的 peer 方法**生成**出来（`peerStatus` / `peerSetName` / …），
+ * 源头仍是 `peer/actions.js#PEER_BRIDGE_METHODS`：与桌面 preload 同一份，两侧只差一个 invoke。
+ *
+ * 为什么不在这里手写：手写就是第三份拷贝，`set-auto-trust` 已经因此漂过一次
+ * （动作表有、preload 没有、网页自己补了一条）。参数整形函数是纯箭头函数、无闭包，
+ * `String(fn)` 内联进生成脚本是安全的。
+ */
+function peerBridgeShimLines() {
+  return PEER_BRIDGE_METHODS.map((def) => {
+    const shape = def.args ? `(${String(def.args)})` : '(() => ({}))';
+    return `    ${def.method}: (...a) => agentCall('peer.${def.action}', ${shape}(...a)),`;
+  }).join('\n');
+}
 
 const COOKIE_NAME = 'dieyun_web';
 const SHIM_PATH = '/app/__desktop-shim.js';
@@ -475,31 +491,10 @@ function buildShim({ gatewayUrl, webToken, workspacePath, modelSettings, rustCor
       return () => phaseSubs.delete(wrapped);
     },
     // —— 内网 agent 互通（preload 的同名接口）——
-    // 动作语义只有一份（src/peer/actions.js，桌面 IPC 也调它）；这里只把调用经同源 /ws
-    // 转到服务端 peer.<name>，事件经 channel='peer' 的 event 帧推回。面板代码零改动。
-    peerStatus: () => agentCall('peer.status', {}),
-    peerRefresh: () => agentCall('peer.refresh', {}),
-    peerSetName: (name) => agentCall('peer.set-name', { name }),
-    peerSetRole: (role) => agentCall('peer.set-role', { role }),
-    peerSetEnabled: (enabled) => agentCall('peer.set-enabled', { enabled: !!enabled }),
-    peerSetAutoTurn: (enabled) => agentCall('peer.set-auto-turn', { enabled: !!enabled }),
-    // 授权默认值（未表态对端是否放行）：服务器首启就是 true，网页里可改回人工确认
-    peerSetAutoTrust: (enabled) => agentCall('peer.set-auto-trust', { enabled: !!enabled }),
-    peerTrust: (peerId, decision) => agentCall('peer.trust', { peerId, decision }),
-    peerUntrust: (peerId) => agentCall('peer.untrust', { peerId }),
-    peerTrustList: () => agentCall('peer.trust-list', {}),
-    peerSetStaticPeers: (peers) => agentCall('peer.set-static-peers', { peers: peers || [] }),
-    peerSend: (payload) => agentCall('peer.send', payload || {}),
-    peerSendSession: (payload) => agentCall('peer.send-session', payload || {}),
-    peerOpenSession: (peer) => agentCall('peer.open-session', { peer }),
-    peerLinkSession: (sessionId, peerId) => agentCall('peer.link-session', { sessionId, peerId }),
-    peerUnlinkSession: (sessionId) => agentCall('peer.unlink-session', { sessionId }),
-    peerClaim: (payload) => agentCall('peer.claim', payload || {}),
-    peerRooms: () => agentCall('peer.rooms', {}),
-    peerRoomCreate: (payload) => agentCall('peer.room-create', payload || {}),
-    peerRoomClose: (roomId) => agentCall('peer.room-close', { roomId }),
-    peerRoomSend: (payload) => agentCall('peer.room-send', payload || {}),
-    peerRoomTimeline: (payload) => agentCall('peer.room-timeline', payload || {}),
+    // 方法与参数整形的唯一来源是 src/peer/actions.js 的 PEER_BRIDGE_METHODS（桌面 preload 同一份）；
+    // 下面这行在**生成脚本时**展开成 peerStatus/peerSetName/… 每个方法，浏览器里只做 'peer.'+action。
+    // 注意：本段是生成脚本的模板文本，注释里不许出现反引号或美元插值（会提前闭合模板）。
+${peerBridgeShimLines()}
     // preload: ipcRenderer.on('peer:event') → 返回取消订阅函数
     onPeerEvent: (cb) => {
       if (typeof cb !== 'function') return () => {};

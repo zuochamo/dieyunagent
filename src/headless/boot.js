@@ -29,7 +29,7 @@ const { LocalGateway } = require('../gateway/server');
 const { describeLocalGatewayEndpoint } = require('../gateway/local-endpoint');
 const { createCoreBridge } = require('../core-bridge');
 const { resolveDieyunCoreBinary, isRustCoreEnabled } = require('../core-bridge-path');
-const { ensureAgentHomeDirs, dieyunDefaultWorkspaceDir } = require('../agent-home');
+const { ensureAgentHomeDirs, dieyunDefaultWorkspaceDir, createUserSkill } = require('../agent-home');
 const { scheduleDefaultWorkspaceGc } = require('../default-workspace-gc');
 const { ensureDieyunMdInHome } = require('../dieyun-instructions');
 const { createMcpStore } = require('../mcp/store');
@@ -207,6 +207,10 @@ let desktopUi = null;
       finishPlanRun: (plan, result) => (plansBoot ? plansBoot.finishPlanRun(plan, result) : result),
       cancelPlanRun: (planId) => (plansBoot ? plansBoot.cancelPlanRun(planId) : { ok: false }),
       userDataPath: userData,
+      // 技能创建与桌面同一份实现（agent-home.createUserSkill）：没有 Renderer 就没有
+      // onSkillsChanged 可通知，但「建技能」这件事本身不依赖界面 —— 少传它会让 skill_create
+      // 恒回「技能创建不可用」，那是半装配，不是能力开关。
+      createUserSkill,
       getMobileBridge: () => mobileBridge,
       peerCoordinator
     });
