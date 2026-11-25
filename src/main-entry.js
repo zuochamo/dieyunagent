@@ -96,6 +96,10 @@ const { bootAliveRuntime } = require('./main/alive-boot');
 const { registerAliveIpc } = require('./main/ipc/alive');
 const { registerChannelIpc } = require('./main/ipc/channels');
 const { bootChannelsRuntime } = require('./channels/boot');
+// 宠物（设置 → 宠物 → 点点）：桌面悬浮窗。headless 没有 GUI，只桌面装配
+const { loadPetSettings, patchPetSettings } = require('./pet/settings');
+const { createPetWindowManager } = require('./main/pet-window');
+const { registerPetIpc } = require('./main/ipc/pet');
 const { registerCompactionIpc } = require('./main/ipc/compaction');
 const { createRendererFreezeReporter } = require('./main/ipc/renderer-freeze');
 const { invalidateRemoteAgentClient } = require('./gateway/remote-agent-client');
@@ -220,6 +224,8 @@ let localGateway = null;
 /** 生命感运行时（设置 → 生命；开关关掉时也存在，只是不起心跳） */
 /** @type {any} */
 let aliveRuntime = null;
+let petSettings = null;
+let petWindow = null;
 /** @type {ReturnType<createCoreBridge> | null} */
 let coreBridge = null;
 /** @type {Map<string, { runId: string | null, aborted: boolean }>} */
@@ -324,6 +330,15 @@ let plansScheduler = null;
 let channelStore = null;
 /** @type {object | null} 频道长连接与调度 */
 let channelRuntime = null;
+/**
+ * 共享记忆（跨机 PostgreSQL）。**必须声明在模块级**：`before-quit` 的退出链在 ready 回调
+ * 之外读它，声明在回调里 = 每次退出都 `ReferenceError: sharedMemory is not defined`
+ * （弹「main process JavaScript error」），而且后面 gateway/core/远端 agent 的清理全被跳过。
+ * 用 `let` + null 起始而不是 `const` 延后赋值：getter 一旦在启动早期被调用，`const` 的 TDZ
+ * 会让它变成 ReferenceError 而不是「还没好」。
+ * @type {object | null}
+ */
+let sharedMemory = null;
 
 
 const earlyIpcCtx = {
@@ -745,10 +760,7 @@ app.whenReady().then(async () => {
 
   // 频道（企业微信等外部入口）：自己的会话、自己的工作空间，在 Main 后台跑一轮，
   // 与桌面当前会话无关（见 issue/2026-10-30-agent-channel-and-workspace-binding.md）。
-  // 共享记忆（跨机）实例在下面创建；这里用 getter，频道跑轮次时早已就绪。
-  // **必须提前声明**：`const` 在赋值前是 TDZ，getter 一旦在启动早期被调用就是
-  // ReferenceError（不是「还没好」），用 `let` + null 起始把这一格变成「暂不可用」。
-  let sharedMemory = null;
+  // 共享记忆实例在下面创建；这里用 getter（变量声明在模块级，见文件上方），频道跑轮次时早已就绪。
   const channelsBoot = bootChannelsRuntime({
     userData,
     safeStorage,
@@ -901,6 +913,8 @@ app.whenReady().then(async () => {
       peerCoordinator,
       // 手机摄像头（camera_look）：工具层只要「现在连着哪台手机」，不自己管桥。
       getMobileBridge: () => mobileBridge,
+      // 身体（点点）：pet_set / pet_act 在聊天轮的执行通道（与心跳轮同一个桥，见 petBridge）
+      getPetBridge: () => petBridge(),
       createUserSkill,
       onSkillsChanged: (created) => notifySkillsCatalogChanged(webContents, created),
       plansCreateFromText: createPlansCreateFromText({
@@ -969,6 +983,9 @@ app.whenReady().then(async () => {
     getAgentService: () => agentService,
     getWorktreeService: () => worktreeService,
     getSharedMemory: () => sharedMemory,
+    // planner 的 per-role 远端副本要靠它解析 SSH 会话（agent-runtime 的 resolveRemoteRunTarget）：
+    // 漏传这个键 = SSH 工作区里的多 Agent 并行静默退回本地 worktreeService
+    getSshConnectionPool: () => sshConnectionPool,
     ensureMainCompactionAgent,
     createRustLoopToolBridge,
     resolveAgentRunWorkspacePath,
@@ -1001,8 +1018,52 @@ app.whenReady().then(async () => {
 
   // 生命感（设置 → 生命）：一个心跳、一套体征；唤醒轮与用户轮走同一份 runner。
   // 装配只有一份（`src/main/alive-boot.js`），headless 用同一份，只是宿主不同。
+  /** 生命感 ↔ 点点 的桥（定义在装配前：闭包只在调用时才解引用 petWindow/petSettings） */
+  const petBridge = () => {
+    if (!petWindow || !petSettings) return null;
+    return {
+      /** 身体在不在（用户开着「显示点点」）：聊天轮的 pet_set / pet_act 只要求这一条 */
+      available: () => petSettings.enabled === true,
+      /** 绑定生命感：体征驱动 + 心跳轮的它可调身体（心跳轮注入用它） */
+      enabled: () => petSettings.aliveBind === true && petSettings.enabled === true,
+      setParams: (patch) => {
+        try {
+          petSettings = patchPetSettings(userData, patch);
+          petWindow.syncFromSettings(petSettings);
+          // 回一份生效后的设置：模型改完能自己核对（点数被夹到上限之类）
+          return { ok: true, settings: petSettings };
+        } catch (err) {
+          return { ok: false, error: (err && err.message) || String(err) };
+        }
+      },
+      act: (payload) => petWindow.forwardAlive(payload),
+      bodyLine: () => {
+        // 形态取**页面回报的当前形态**（它自己在球/猫/鱼之间变，Main 猜不出来）；
+        // 窗口还没回报时按起步形态（球）兜底。
+        const live = typeof petWindow.getLiveShape === 'function' ? petWindow.getLiveShape() : '';
+        const shape = live || 'sphere';
+        return `身体（点点）：形态 ${shape} · ${petSettings.count} 点 · 点大小 ${Math.round(petSettings.dotScale * 100)}% · 动效 ${Math.round(petSettings.motion * 100)}%`;
+      }
+    };
+  };
   aliveRuntime = bootAliveRuntime({
     userData,
+    getPetBridge: petBridge,
+    onAliveEvent: (evt) => {
+      if (petWindow) {
+        petWindow.forwardAlive({
+          kind: 'event',
+          name: String((evt && evt.kind) || ''),
+          phase: (evt && evt.phase) || '',
+          fatigue: (evt && evt.fatigue) || 0,
+          load: (evt && evt.load) || 0
+        });
+      }
+    },
+    /** 唤醒轮模型真的在推理的那段时间：点点「聚神」表现的起止信号 */
+    onThinking: (on) => {
+      if (petWindow) petWindow.forwardAlive({ kind: 'think', on: on !== false });
+    },
     getGateway: () => localGateway,
     getCoreBridge: () => coreBridge,
     getMcpRuntime: () => mcpRuntime,
@@ -1025,6 +1086,33 @@ app.whenReady().then(async () => {
   registerAliveIpc({ ipcMain, getAlive: () => aliveRuntime, log });
   // 开关持久在 `<userData>/alive/settings.json`：按上次的意图起停（默认关 = 不起心跳）
   if (aliveRuntime.enabled()) aliveRuntime.setEnabled(true);
+
+  // 宠物（点点）：设置权威在 `src/pet/settings.js`，窗口生命周期在 `src/main/pet-window.js`。
+  // 位置由拖动落盘（drag-end），启动按上次位置恢复（夹回工作区）。
+  petSettings = loadPetSettings(userData);
+  petWindow = createPetWindowManager({
+    getSettings: () => petSettings,
+    patchSettings: (patch) => {
+      petSettings = patchPetSettings(userData, patch);
+      return petSettings;
+    },
+    log: (msg) => log.info(msg)
+  });
+  registerPetIpc({
+    ipcMain,
+    petWindow,
+    getSettings: () => petSettings,
+    patchSettings: (patch) => {
+      petSettings = patchPetSettings(userData, patch);
+      return petSettings;
+    },
+    getAliveSnapshot: () => {
+      const st = aliveRuntime ? aliveRuntime.runtime.status() : null;
+      return st && st.enabled ? { phase: st.phase || '', fatigue: Number(st.fatigue) || 0 } : null;
+    },
+    log
+  });
+  if (petSettings.enabled) petWindow.syncFromSettings(petSettings);
   registerLateMainIpc({
     ipcMain,
     clipboard,
@@ -1111,6 +1199,15 @@ app.on('before-quit', () => {
       // 退出路径不因关闭失败而卡住
     }
     aliveRuntime = null;
+  }
+  // 宠物悬浮窗：退场前拆掉（位置已在 drag-end 落盘）
+  if (petWindow) {
+    try {
+      petWindow.dispose();
+    } catch {
+      // ignore
+    }
+    petWindow = null;
   }
   log.info('应用退出');
   // 频道长连接先断：它是外部系统的连接，不能等 Gateway/core 停完再断，

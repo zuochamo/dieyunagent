@@ -1,7 +1,7 @@
 'use strict';
 
 const { runRustAgentLoop } = require('../../agent/rust-loop-runner');
-const { createSubagentRunner } = require('../../agent/subagent-runner');
+const { createSubagentRunner, noteSubagentActivity } = require('../../agent/subagent-runner');
 const {
   createLiveLoopTraceTracker,
   mapLoopTraceToUi,
@@ -12,6 +12,9 @@ const { maybeGenerateSessionTitle } = require('../../agent/session-title');
 const { summarizeTelemetry, describeIndexInjections } = require('../../agent/tool-telemetry');
 const { evaluateTurnReadiness } = require('../../agent/completion-readiness');
 const { summarizeCompactionTelemetry } = require('../../agent/compaction-telemetry');
+// 流式进度的合批（唯一实现，Renderer 经 agent-bundle 消费同一份）：
+// `llm_delta` / planner `progress` 是逐 SSE chunk 触发的纯流式载荷，不合批就是一次 chunk 一次 IPC。
+const { createProgressFlush } = require('../../agent/progress-flush');
 const {
   ensureRunAbortController,
   abortRun,
@@ -322,7 +325,30 @@ function registerAgentRuntimeIpc(ctx) {
       tierId: ctx.contextTierId,
       model: ctx.model || rawSettings.textModel
     });
+    // 相位外发：只有 `llm_delta` 需要合批 —— 它是逐 SSE chunk 触发的纯流式文本，且载荷是
+    // **本轮累计正文**（见 rust-loop-runner），一个 chunk 一次 IPC 就是每 token 搬运整段回答，
+    // 单轮代价随长度平方增长。合批状态机只此一份（`agent/progress-flush.js`）。
+    // 结构相位（start / llm_request / llm_response / done …）一律先把挂起的增量冲出去再发：
+    // 顺序反了就等于「先告诉 UI 本轮结束、再补最后几个字」。
+    const rustLoopPhaseFlush = createProgressFlush({
+      minIntervalMs: require('../../agent/agent-limits').getAgentLimits(live.userData)
+        .agentProgressFlushMs,
+      flush: ({ phase, data }) => {
+        live.safeWebContentsSend(evt.sender, 'agent:rust-loop-phase', {
+          cancelToken,
+          phase,
+          data: data || {}
+        });
+      },
+      // 每个 delta 的相位名都一样 → 只有第一帧算结构事件，其余按最小间隔合批
+      signature: ({ phase }) => phase
+    });
     const sendPhase = (phase, data) => {
+      if (phase === 'llm_delta') {
+        rustLoopPhaseFlush.push({ phase, data: data || {} });
+        return;
+      }
+      rustLoopPhaseFlush.flushNow();
       live.safeWebContentsSend(evt.sender, 'agent:rust-loop-phase', {
         cancelToken,
         phase,
@@ -425,6 +451,8 @@ function registerAgentRuntimeIpc(ctx) {
           const subagentId = state.meta.subagentId || '';
           const tracker = createLiveLoopTraceTracker(state.meta, {
             onUpdate: (entries, content) => {
+              // 子 Agent 有产出 = 有进展：工具看门狗据此续命（别把长期产出的调研判成卡住）
+              if (typeof noteSubagentActivity === 'function') noteSubagentActivity();
               state.entries = entries;
               if (content) state.streamContent = content;
               subagentTraceState.set(subagentId, state);
@@ -464,7 +492,18 @@ function registerAgentRuntimeIpc(ctx) {
               },
               signal: abortController.signal,
               delegateTool: (n, a) =>
-                toolBridge.executeAgentTool(n, a, { ...ctx, subagentDepth: 1 })
+                toolBridge.executeAgentTool(n, a, {
+                  ...ctx,
+                  subagentDepth: 1,
+                  // 子 Agent 的工具表（Explore 白名单）随 ctx 下到执行层：
+                  // tool-gate 的 `subagent-scope` 按它拦表外调用
+                  allowedToolNames: Array.isArray(req.allowedToolNames)
+                    ? req.allowedToolNames
+                    : undefined,
+                  // 指纹表按子 Agent 分桶：与父循环共用一张表时，重复调用止损会被互相污染
+                  // （父级被误杀 / 死循环的子 Agent 被别人的调用"洗掉" streak）
+                  harnessRunKey: subagentId ? `sub-${subagentId}` : undefined
+                })
             });
           } finally {
             // 先补发节流中未到达的一帧，再落收尾卡片：否则最后 ~120ms 的流式文本会被节流丢掉
@@ -574,7 +613,8 @@ function registerAgentRuntimeIpc(ctx) {
           }
           ctx.signal = abortController.signal;
           if (name === subagentRunner.toolName) {
-            return subagentRunner.run(args, ctx);
+            // 主循环也是「协调者」：深度口径由 runner 统一给（`runFromCoordinator` = 0）
+            return subagentRunner.runFromCoordinator(args, ctx);
           }
           // 运行态查询（只读投影）：与派发共用同一个 runner 实例，否则查的是空账本。
           if (name === subagentRunner.statusToolName) {
@@ -651,6 +691,12 @@ function registerAgentRuntimeIpc(ctx) {
       }
       throw err;
     } finally {
+      // 最后 ~40ms 的增量还在合批队列里：先冲出去，再走取消/收尾（否则会静默丢结尾的字）
+      try {
+        rustLoopPhaseFlush.flushNow();
+      } catch {
+        // ignore
+      }
       rustLoopCancels.delete(cancelToken);
       if (runFinishedOk) {
         abortedAgentCancelTokens.delete(cancelToken);
@@ -776,6 +822,23 @@ function registerAgentRuntimeIpc(ctx) {
     dieyunHome: live.dieyunHome,
     workspaceRootPath: live.workspaceRootPath,
     resolveAgentRunWorkspacePath: live.resolveAgentRunWorkspacePath,
+    // 远端（SSH）工作区 → per-role 副本的落点（会话副本 + 仓库根 + 连接）。
+    // 解析不出来（本地 / SSH 未连接）返回 null，planner 就走本地 worktreeService。
+    resolveRemoteRunTarget: (workspacePath) => {
+      try {
+        const target = require('../../workspace/target').parseWorkspaceInput(String(workspacePath || ''));
+        if (!target || target.kind !== 'ssh') return null;
+        const pool = typeof ctx.getSshConnectionPool === 'function' ? ctx.getSshConnectionPool() : null;
+        if (!pool) return null;
+        const manager = pool.getConnectedManager(target) || pool.getManagerForTarget(target);
+        if (!manager || typeof manager.status !== 'function' || !manager.status().connected) return null;
+        const sessionWtPath = require('../../workspace/target').normalizeRemotePath(target.remotePath);
+        const repoPath = require('../../ssh/remote-worktree').repoRemotePathOf(sessionWtPath);
+        return { manager, repoPath, sessionWtPath };
+      } catch {
+        return null;
+      }
+    },
     localGateway: live.localGateway,
     userData: live.userData,
     createToolBridge: (webContents) => live.createRustLoopToolBridge(webContents)
@@ -792,9 +855,67 @@ function registerAgentRuntimeIpc(ctx) {
     }
   });
 
+  // 「这一轮要不要拆成多路并行」的一次性判定（planner 的前置路由）。
+  //
+  // 开关 `plannerMultiAgentEnabled` 只代表**允许**：这里问一次侧模型，要拆才由 Renderer 调
+  // `agent:planner-run`，否则这一轮照普通工具循环跑。判定放在 Main 是为了让 LLM 调用仍然只有
+  // `llm.complete` 一个出口（Renderer 不发请求），侧模型也从 Main 的 model-settings 读。
+  // 永不抛错：`routeTurnToPlanner` 自己就是「失败即不拆」。
+  ipcMain.handle('agent:planner-route', async (_evt, payload = {}) => {
+    const { routeTurnToPlanner } = require('../../agent/planner-router');
+    let settings = null;
+    try {
+      settings = typeof loadModelSettings === 'function' ? loadModelSettings(live.userData) : null;
+    } catch {
+      settings = null;
+    }
+    // 兜底：Renderer 正常会带上本轮的模型与端点；缺了就按磁盘 settings 补一份
+    // （判定只看「用户这一句里有几件事」，用什么模型判不影响结论；真配了侧模型仍优先用侧模型，
+    //  见 `resolvePlannerRouterConfig`）。
+    const passedConfig = payload.apiConfig && typeof payload.apiConfig === 'object' ? payload.apiConfig : {};
+    const apiConfig = String(passedConfig.baseUrl || '').trim()
+      ? passedConfig
+      : {
+          baseUrl: String((settings && (settings.baseUrl || settings.builtinBaseUrl)) || ''),
+          apiKey: String((settings && (settings.apiKey || settings.builtinApiKey)) || '')
+        };
+    const model = String(payload.model || (settings && settings.textModel) || '');
+    return routeTurnToPlanner({
+      userText: payload.userText || '',
+      workspacePath: payload.workspacePath || '',
+      model,
+      apiConfig,
+      settings,
+      coreBridge: live.coreBridge
+    });
+  });
+
   ipcMain.handle('agent:planner-run', async (evt, payload = {}) => {
     if (!live.coreBridge || !live.coreBridge.isReady()) {
       throw new Error('dieyun-core 未就绪');
+    }
+    // 「多 Agent 并行执行」是**唯一开关**（`agent-limits.plannerMultiAgentEnabled`）。
+    // 以前只有 Renderer 判（`renderer-agent-send.js`），Main 这条入口谁调都行 ——
+    // 手机 / 频道 / 内网对端将来加一个调用点就绕过去了。planner 会开 worktree、并发跑多路
+    // LLM，代价远高于普通一轮，所以在执行方（Main）补同一道闸。
+    // 档位口径：先看本轮上下文档，再回落 `default` 档 —— Node 侧按档取的是「该档覆盖值」，
+    // 不回落 default；只在 default 里打开的用户不该被误拒。
+    {
+      const { getAgentLimits, resolveContextTierIdForNode } = require('../../agent/agent-limits');
+      const tierId =
+        payload.contextTierId ||
+        (payload.model ? resolveContextTierIdForNode(live.userData, payload.model) : 'default');
+      const tierLimits = getAgentLimits(live.userData, tierId) || {};
+      const baseLimits =
+        tierId === 'default' ? tierLimits : getAgentLimits(live.userData, 'default') || {};
+      if (
+        tierLimits.plannerMultiAgentEnabled !== true &&
+        baseLimits.plannerMultiAgentEnabled !== true
+      ) {
+        throw new Error(
+          '「多 Agent 并行执行」未开启（设置 → 子 Agent → 多 Agent 并行执行），已拒绝启动 planner'
+        );
+      }
     }
     const cancelToken = String(
       payload.cancelToken || `pl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -812,47 +933,33 @@ function registerAgentRuntimeIpc(ctx) {
       sessionId: payload.sessionId || null
     };
     plannerRunCancels.set(cancelToken, entry);
-    let pendingProgressData = null;
-    let progressFlushTimer = null;
-    const clearPlannerProgressFlush = () => {
-      if (progressFlushTimer) {
-        clearTimeout(progressFlushTimer);
-        progressFlushTimer = null;
-      }
-      pendingProgressData = null;
-    };
-    const onPlannerSenderDestroyed = () => clearPlannerProgressFlush();
+    // planner 的 `progress` 与主循环的 `llm_delta` 是同一类载荷（累计 trace + 正文），
+    // 合批也走同一份实现（`agent/progress-flush.js`），不再各写一个定时器。
+    const plannerProgressFlush = createProgressFlush({
+      minIntervalMs: require('../../agent/agent-limits').getAgentLimits(live.userData)
+        .agentProgressFlushMs,
+      flush: (data) => {
+        if (!live.canSendToWebContents(evt.sender)) return;
+        live.safeWebContentsSend(evt.sender, 'agent:planner-phase', {
+          cancelToken,
+          phase: 'progress',
+          data
+        });
+      },
+      signature: () => 'progress'
+    });
+    const onPlannerSenderDestroyed = () => plannerProgressFlush.cancel();
     if (live.canSendToWebContents(evt.sender)) {
       evt.sender.once('destroyed', onPlannerSenderDestroyed);
     }
-    const flushPlannerProgress = () => {
-      if (progressFlushTimer) {
-        clearTimeout(progressFlushTimer);
-        progressFlushTimer = null;
-      }
-      if (!pendingProgressData) return;
-      if (!live.canSendToWebContents(evt.sender)) {
-        clearPlannerProgressFlush();
-        return;
-      }
-      const data = pendingProgressData;
-      pendingProgressData = null;
-      live.safeWebContentsSend(evt.sender, 'agent:planner-phase', {
-        cancelToken,
-        phase: 'progress',
-        data
-      });
-    };
+    const flushPlannerProgress = () => plannerProgressFlush.flushNow();
     const sendPhase = (name, data) => {
       if (!live.canSendToWebContents(evt.sender)) {
-        clearPlannerProgressFlush();
+        plannerProgressFlush.cancel();
         return;
       }
       if (name === 'progress') {
-        pendingProgressData = data || {};
-        if (!progressFlushTimer) {
-          progressFlushTimer = setTimeout(flushPlannerProgress, 160);
-        }
+        plannerProgressFlush.push(data || {});
         return;
       }
       flushPlannerProgress();
@@ -872,6 +979,12 @@ function registerAgentRuntimeIpc(ctx) {
         onPhase: (name, data) => {
           if (data && data.rustPlannerRunId) entry.rustPlannerRunId = data.rustPlannerRunId;
           if (data && data.runId && !entry.rustPlannerRunId) entry.rustPlannerRunId = data.runId;
+          // 把 planner run 也登记进 run-cancel-registry：`hasActiveRuns()`（→ `getAgentBusy()`）
+          // 以前只统计 rust-loop，于是计划模式跑着时后台归纳仍认为「主进程空闲」，会抢同样的
+          // 模型额度（2026-11-19 审计）。这里只做**记账**：取消仍走 abortController。
+          if (entry.rustPlannerRunId) {
+            ensureRunAbortController(entry.rustPlannerRunId, entry.sessionId);
+          }
           sendPhase(name, data);
         }
       });
@@ -931,7 +1044,11 @@ function registerAgentRuntimeIpc(ctx) {
           }
         }
       }
-      clearPlannerProgressFlush();
+      plannerProgressFlush.cancel();
+      // 与登记对称：plan 收尾后把这笔记账摘掉，否则 `hasActiveRuns()` 会一直为真
+      if (entry.rustPlannerRunId) {
+        clearRunAbortController(entry.rustPlannerRunId);
+      }
       try {
         evt.sender.removeListener('destroyed', onPlannerSenderDestroyed);
       } catch {

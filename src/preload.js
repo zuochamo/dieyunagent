@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+const { buildPeerBridge } = require('./peer/actions');
 
 contextBridge.exposeInMainWorld('diecloud', {
   getGatewayInfo: () => ipcRenderer.invoke('gateway:get-info'),
@@ -18,17 +19,9 @@ contextBridge.exposeInMainWorld('diecloud', {
   getMobileInfo: () => ipcRenderer.invoke('mobile:get-info'),
 
   // 内网 agent 互通（src/peer）：语义全在 Main 的协调器，Renderer 只发命令与收事件。
-  peerStatus: () => ipcRenderer.invoke('peer:status'),
-  peerRefresh: () => ipcRenderer.invoke('peer:refresh'),
-  peerSetName: (name) => ipcRenderer.invoke('peer:set-name', { name }),
-  peerSetRole: (role) => ipcRenderer.invoke('peer:set-role', { role }),
-  peerSetEnabled: (enabled) => ipcRenderer.invoke('peer:set-enabled', { enabled: !!enabled }),
-  peerSetAutoTurn: (enabled) => ipcRenderer.invoke('peer:set-auto-turn', { enabled: !!enabled }),
-  // 授权：首次来信 → 允许 / 拒绝；撤销回到「不认识」（取代 P0 的配对码）
-  peerTrust: (peerId, decision) => ipcRenderer.invoke('peer:trust', { peerId, decision }),
-  peerUntrust: (peerId) => ipcRenderer.invoke('peer:untrust', { peerId }),
-  peerTrustList: () => ipcRenderer.invoke('peer:trust-list'),
-  peerSetStaticPeers: (peers) => ipcRenderer.invoke('peer:set-static-peers', { peers: peers || [] }),
+  // 方法与参数整形的**唯一来源**是 `src/peer/actions.js#PEER_BRIDGE_METHODS`（网页侧同一份），
+  // 这里不再手抄一份 —— `set-auto-trust` 就曾漏抄在这里，导致桌面与网页行为不一致。
+  ...buildPeerBridge((action, payload) => ipcRenderer.invoke(`peer:${action}`, payload || {})),
   // 频道（企业微信等外部入口）：凭据加密存 Main，Renderer 只看状态
   channelsList: () => ipcRenderer.invoke('channels:list'),
   channelsCreate: (payload) => ipcRenderer.invoke('channels:create', payload || {}),
@@ -55,6 +48,10 @@ contextBridge.exposeInMainWorld('diecloud', {
   aliveSetOption: (payload) => ipcRenderer.invoke('alive:set-option', payload || {}),
   aliveDevices: () => ipcRenderer.invoke('alive:devices'),
   aliveNote: () => ipcRenderer.invoke('alive:note'),
+  // 宠物（设置 → 宠物 → 点点）：悬浮窗本体在独立窗口（pet-window/preload 只给它开桥），主窗口只需要读写设置
+  petGetSettings: () => ipcRenderer.invoke('pet:get-settings'),
+  petSetSettings: (patch) => ipcRenderer.invoke('pet:set-settings', patch || {}),
+  petSetEnabled: (enabled) => ipcRenderer.invoke('pet:set-enabled', { enabled: enabled !== false }),
   /** 后台心跳轮刚跑完（Main → 界面）：正开着它的会话就就地补上那一轮 */
   onAliveRan: (handler) => {
     if (typeof handler !== 'function') return () => {};
@@ -62,17 +59,6 @@ contextBridge.exposeInMainWorld('diecloud', {
     ipcRenderer.on('alive:ran', wrapped);
     return () => ipcRenderer.removeListener('alive:ran', wrapped);
   },
-  peerSend: (payload) => ipcRenderer.invoke('peer:send', payload || {}),
-  peerSendSession: (payload) => ipcRenderer.invoke('peer:send-session', payload || {}),
-  peerOpenSession: (peer) => ipcRenderer.invoke('peer:open-session', { peer }),
-  peerLinkSession: (sessionId, peerId) => ipcRenderer.invoke('peer:link-session', { sessionId, peerId }),
-  peerUnlinkSession: (sessionId) => ipcRenderer.invoke('peer:unlink-session', { sessionId }),
-  peerClaim: (payload) => ipcRenderer.invoke('peer:claim', payload || {}),
-  peerRooms: () => ipcRenderer.invoke('peer:rooms'),
-  peerRoomCreate: (payload) => ipcRenderer.invoke('peer:room-create', payload || {}),
-  peerRoomClose: (roomId) => ipcRenderer.invoke('peer:room-close', { roomId }),
-  peerRoomSend: (payload) => ipcRenderer.invoke('peer:room-send', payload || {}),
-  peerRoomTimeline: (payload) => ipcRenderer.invoke('peer:room-timeline', payload || {}),
   onPeerEvent: (cb) => {
     const handler = (_evt, payload) => {
       try {
@@ -191,9 +177,11 @@ contextBridge.exposeInMainWorld('diecloud', {
   },
 
   scanSkills: () => ipcRenderer.invoke('skills:scan'),
-  recallSkills: (payload) => ipcRenderer.invoke('skills:recall', payload),
   readSkill: (skillPath) => ipcRenderer.invoke('skills:read', skillPath),
   createSkill: (payload) => ipcRenderer.invoke('skills:create', payload),
+  // 技能的启用状态存在 Main（`src/skills/enabled-store.js`）：频道 / 计划 / headless 也要读同一份
+  getSkillsEnabled: () => ipcRenderer.invoke('skills:enabled-get'),
+  setSkillEnabled: (payload) => ipcRenderer.invoke('skills:set-enabled', payload),
   onSkillsChanged: (cb) => {
     if (typeof cb !== 'function') return () => {};
     const handler = (_evt, detail) => cb(detail);
@@ -203,7 +191,6 @@ contextBridge.exposeInMainWorld('diecloud', {
   skillCatalogList: (payload) => ipcRenderer.invoke('skills:catalog-list', payload || {}),
   skillCatalogPreview: (payload) => ipcRenderer.invoke('skills:catalog-preview', payload || {}),
   skillCatalogInstall: (payload) => ipcRenderer.invoke('skills:catalog-install', payload || {}),
-  getAgentHome: () => ipcRenderer.invoke('skills:get-home'),
   deleteSkill: (payload) => ipcRenderer.invoke('skills:delete', payload),
 
   listMcpServers: () => ipcRenderer.invoke('mcp:list'),
@@ -218,21 +205,25 @@ contextBridge.exposeInMainWorld('diecloud', {
   mcpCatalogSourcesGet: () => ipcRenderer.invoke('mcp:catalog-sources-get'),
   mcpCatalogSourcesSet: (payload) => ipcRenderer.invoke('mcp:catalog-sources-set', payload || {}),
   getMcpRuntimeTools: (payload) => ipcRenderer.invoke('mcp:runtime-tools', payload || {}),
-  callMcpRuntimeTool: (payload) => ipcRenderer.invoke('mcp:runtime-call', payload),
+  // MCP 工具语义召回（Renderer 聊天轮次在候选超上限时用）：与 Main 的装配共用同一实现
+  recallAgentTools: (payload) => ipcRenderer.invoke('tools:recall', payload || {}),
   getMcpConfig: (payload) => ipcRenderer.invoke('mcp:get-config', payload || {}),
   updateMcpConfig: (payload) => ipcRenderer.invoke('mcp:update-config', payload || {}),
-  /** Agent 通过 mcp_manage request_credential 请求填凭据：弹出该服务的配置弹窗，由人亲手输入 */
-  onMcpCredentialRequest: (cb) => {
+  /**
+   * 「模型申请一项能力」的唯一订阅口：`agent_capability`（开权限开关）与
+   * `mcp_manage.request_credential`（填服务凭据）都走这条通道，payload 带 `kind`
+   * 由渲染器分发（MCP 凭据 → 该服务的配置弹窗；其余 → 打开对应设置页并高亮开关）。
+   */
+  onCapabilityRequest: (cb) => {
     if (typeof cb !== 'function') return () => {};
     const handler = (_evt, payload) => cb(payload || {});
-    ipcRenderer.on('mcp:credential-request', handler);
-    return () => ipcRenderer.removeListener('mcp:credential-request', handler);
+    ipcRenderer.on('agent:capability-request', handler);
+    return () => ipcRenderer.removeListener('agent:capability-request', handler);
   },
   installMcpPackage: (payload) => ipcRenderer.invoke('mcp:install-package', payload || {}),
   repairMcpEnv: (payload) => ipcRenderer.invoke('mcp:repair-env', payload || {}),
   checkMcpUpdate: (payload) => ipcRenderer.invoke('mcp:check-update', payload || {}),
   upgradeMcpPackage: (payload) => ipcRenderer.invoke('mcp:upgrade-package', payload || {}),
-  recallAgentTools: (payload) => ipcRenderer.invoke('tools:recall', payload),
 
   getWorkplaceMonitor: () => ipcRenderer.invoke('workplace-monitor:get'),
   setWorkplaceMonitor: (payload) => ipcRenderer.invoke('workplace-monitor:set', payload || {}),
@@ -538,6 +529,7 @@ contextBridge.exposeInMainWorld('diecloud', {
   agentCompactionTelemetrySummary: (sessionId) =>
     ipcRenderer.invoke('agent:compaction-telemetry-summary', { sessionId: sessionId || '' }),
   agentPlannerPing: () => ipcRenderer.invoke('agent:planner-ping'),
+  agentPlannerRoute: (payload) => ipcRenderer.invoke('agent:planner-route', payload || {}),
   agentPlannerRun: (payload) =>
     ipcRenderer
       .invoke('agent:planner-run', payload || {})

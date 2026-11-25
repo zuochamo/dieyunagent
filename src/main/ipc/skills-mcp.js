@@ -3,16 +3,17 @@
 const path = require('path');
 const fsp = require('fs/promises');
 const { scanSkills, readSkillContent, assertReadableSkillPath } = require('../../skills/scanner');
-const { recallSkills } = require('../../skills/vector-index');
 const { readSkillUsage, usageFor } = require('../../skills/usage-ledger');
+const { readEnabledMap, setSkillEnabled, storeExists } = require('../../skills/enabled-store');
+// MCP 工具的语义召回：Renderer 侧的聊天轮次按用户这句话在候选里挑（工具超过上限时）。
+// 实现唯一来源仍是 `tools/tool-vector-index`（Main 自己的装配 `agent/main-tools/mcp.js` 也用它）。
 const { recallAgentTools } = require('../../tools/tool-vector-index');
 const { getEmbeddingConfig } = require('../../model-settings');
 const {
   createUserSkill,
-  describeAgentHome,
+  deleteUserSkill,
   getScanRoots,
-  filterAccessibleSkillRoots,
-  evaluateSkillDeletable
+  filterAccessibleSkillRoots
 } = require('../../agent-home');
 
 /**
@@ -63,20 +64,24 @@ function registerSkillsMcpIpc(ctx) {
     };
   });
 
-  ipcMain.handle('skills:recall', async (_evt, payload) => {
-    const localGateway = getLocalGateway();
+  /**
+   * 技能启用状态：**唯一权威在 Main**（`skills/enabled-store.js`）。
+   *
+   * 以前这份状态只存在 Renderer 的 localStorage 里，于是频道 / 定时计划 / headless /
+   * peer 来信这些没有 Renderer 的轮次只能按「默认启用」猜 —— 用户自建/市场安装的技能
+   * 一律不注入。现在两侧读写同一份文件。
+   *
+   * `exists=false` 只用于「把旧版 localStorage 的选择搬过来一次」：搬完 Renderer 就删旧键。
+   */
+  ipcMain.handle('skills:enabled-get', () => {
     const userData = getUserDataPath();
-    const workspacePath = localGateway ? localGateway.getWorkspace().workspacePath : null;
-    const settings = loadModelSettings(userData);
-    const embeddingConfig = getEmbeddingConfig(settings);
-    return recallSkills({
-      userData,
-      workspacePath,
-      embeddingConfig,
-      enabledIds: Array.isArray(payload?.enabledIds) ? payload.enabledIds : [],
-      query: payload?.query || '',
-      limit: payload?.limit || 8
-    });
+    return { enabled: readEnabledMap(userData), exists: storeExists(userData) };
+  });
+
+  ipcMain.handle('skills:set-enabled', (_evt, payload) => {
+    const id = payload && payload.id != null ? String(payload.id).trim() : '';
+    const enabled = !(payload && payload.enabled === false);
+    return { enabled: setSkillEnabled(getUserDataPath(), id, enabled) };
   });
 
   ipcMain.handle('mcp:catalog-list', async (_evt, payload) => {
@@ -108,23 +113,6 @@ function registerSkillsMcpIpc(ctx) {
     if (!mcpCatalog) return { urls: [] };
     const urls = payload && Array.isArray(payload.urls) ? payload.urls : [];
     return mcpCatalog.setSources(urls);
-  });
-
-  ipcMain.handle('tools:recall', async (_evt, payload) => {
-    const userData = getUserDataPath();
-    const settings = loadModelSettings(userData);
-    const embeddingConfig = getEmbeddingConfig(settings);
-    const recalled = await recallAgentTools({
-      userData,
-      embeddingConfig,
-      candidates: Array.isArray(payload?.candidates) ? payload.candidates : [],
-      query: payload?.query || '',
-      limit: payload?.limit || 10
-    });
-    if (recalled && recalled.serverFloor > 0) {
-      console.log(`[tools] recall 每服务保底补入 ${recalled.serverFloor} 个服务（候选 ${recalled.total}）`);
-    }
-    return recalled;
   });
 
   ipcMain.handle('mcp:list', () => listMcpServersForUi(getUserDataPath()));
@@ -200,8 +188,25 @@ function registerSkillsMcpIpc(ctx) {
     return result;
   });
 
-  ipcMain.handle('mcp:runtime-tools', async (_evt, payload) => {
-    const mcpRuntime = getMcpRuntime();
+  // Renderer 聊天轮次的 MCP 工具召回：候选超过上限时按用户这句话挑，别退化成「取前 N 个」。
+  ipcMain.handle('tools:recall', async (_evt, payload) => {
+    const userData = getUserDataPath();
+    const settings = loadModelSettings(userData);
+    const embeddingConfig = getEmbeddingConfig(settings);
+    const recalled = await recallAgentTools({
+      userData,
+      embeddingConfig,
+      candidates: Array.isArray(payload?.candidates) ? payload.candidates : [],
+      query: payload?.query || '',
+      limit: payload?.limit || 10
+    });
+    if (recalled && recalled.serverFloor > 0) {
+      console.log(`[tools] recall 每服务保底补入 ${recalled.serverFloor} 个服务（候选 ${recalled.total}）`);
+    }
+    return recalled;
+  });
+
+  ipcMain.handle('mcp:runtime-tools', async (_evt, payload) => {    const mcpRuntime = getMcpRuntime();
     if (!mcpRuntime) return { tools: [], errors: [] };
     const result = await mcpRuntime.listAgentTools({
       force: !!(payload && payload.force),
@@ -214,23 +219,6 @@ function registerSkillsMcpIpc(ctx) {
       errors: result.errors || [],
       catalogOnly: !!result.catalogOnly
     };
-  });
-
-  ipcMain.handle('mcp:runtime-call', async (_evt, payload) => {
-    const mcpRuntime = getMcpRuntime();
-    if (!mcpRuntime) throw new Error('MCP 运行时未就绪');
-    const agentName = payload && payload.agentName != null ? String(payload.agentName).trim() : '';
-    if (!agentName) throw new Error('agentName 必填');
-    const args =
-      payload && payload.arguments && typeof payload.arguments === 'object' ? payload.arguments : {};
-    return mcpRuntime.callAgentTool(agentName, args);
-  });
-
-  ipcMain.handle('skills:get-home', () => {
-    const localGateway = getLocalGateway();
-    const userData = getUserDataPath();
-    const workspacePath = localGateway ? localGateway.getWorkspace().workspacePath : null;
-    return describeAgentHome(userData, workspacePath);
   });
 
   ipcMain.handle('skills:create', async (evt, payload) => {

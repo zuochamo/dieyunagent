@@ -28,10 +28,8 @@ const { decideContinuation, renderEvidenceBlock } = require('../plans/goal-run')
 const { deliverPlanResult } = require('../plans/deliver');
 const { parsePlanFromText } = require('../plans/parser');
 const { AGENT_RUN_EVENT_TYPES, createAgentRunEvent } = require('../agent/run-events');
+const { createProgressFlush } = require('../agent/progress-flush');
 const { dieyunSkillsDir } = require('../agent-home');
-
-/** 计划运行 trace 的 IPC 合并窗口（与 Renderer 侧 120ms 的进度节流同级） */
-const PLAN_TRACE_FLUSH_MS = 120;
 
 /**
  * @typedef {object} McpPlansLog
@@ -305,36 +303,29 @@ function bootPlansRuntime(deps) {
       let sessionId = record.sessionId;
       const baseMeta = { planId: plan.id, planName: plan.name, startedAt };
 
-      // llm_delta 是逐 SSE chunk 触发：不节流会把整条 trace 以每秒几十次的频率过 IPC
-      let pendingTrace = null;
-      let traceTimer = null;
-      const flushTrace = () => {
-        if (traceTimer) {
-          clearTimeout(traceTimer);
-          traceTimer = null;
-        }
-        if (!pendingTrace) return;
-        const { rows, streamContent } = pendingTrace;
-        pendingTrace = null;
-        sendPlanPhase(
-          createAgentRunEvent(AGENT_RUN_EVENT_TYPES.TRACE, {
-            sessionId: sessionId || null,
-            runId,
-            trace: rows,
-            streamContent,
-            meta: baseMeta
-          })
-        );
-      };
-      const queueTrace = (rows, streamContent) => {
-        pendingTrace = { rows, streamContent };
-        if (traceTimer) return;
-        traceTimer = setTimeout(flushTrace, PLAN_TRACE_FLUSH_MS);
-      };
+      // 计划运行的 trace 也是逐 SSE chunk 更新：合批走与聊天 / planner 同一份实现
+      // （`agent/progress-flush.js`），数字只认 agent-limits 的 agentProgressFlushMs。
+      // 这里没有「结构 vs 流式」之分（trace 行本来就逐轮变），所以全部按最小间隔投递。
+      const traceFlush = createProgressFlush({
+        minIntervalMs: agentLimits().agentProgressFlushMs,
+        flush: ({ rows, streamContent }) => {
+          sendPlanPhase(
+            createAgentRunEvent(AGENT_RUN_EVENT_TYPES.TRACE, {
+              sessionId: sessionId || null,
+              runId,
+              trace: rows,
+              streamContent,
+              meta: baseMeta
+            })
+          );
+        },
+        signature: () => 'trace'
+      });
+      const flushTrace = () => traceFlush.flushNow();
 
       const trace = createPlanRunTrace({
         phaseLabel: '执行计划',
-        onUpdate: ({ trace: rows, streamContent }) => queueTrace(rows, streamContent)
+        onUpdate: ({ trace: rows, streamContent }) => traceFlush.push({ rows, streamContent })
       });
 
       // 运行边界（唯一入口）：先确保计划专用会话存在、并写入本次触发的用户轮次，再广播 run_start。
@@ -354,7 +345,7 @@ function bootPlansRuntime(deps) {
           record.sessionId = sessionId;
           if (begun.rebuilt) {
             log.warn(
-              `计划绑定会话已失联，已重建: ${plan.name} (${begun.staleSessionId || '未知'} → ${sessionId})`
+              `计划绑定会话已${begun.staleArchived ? '归档' : '失联'}，已重建: ${plan.name} (${begun.staleSessionId || '未知'} → ${sessionId})`
             );
           }
           // 运行边界落盘：用户轮次已在会话里，从这里开始到 endRun 之间的任何进程退出

@@ -2,12 +2,13 @@
 
 const path = require('path');
 const { ensureSessionWorktree } = require('../session/session-worktree');
+const { REMOTE_PACK_DIR_NAME } = require('../remote/remote-pack-layout');
 
 function getRemoteGatewayPackRoot(app) {
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'remote-gateway-pack');
+    return path.join(process.resourcesPath, REMOTE_PACK_DIR_NAME);
   }
-  return path.join(__dirname, '..', '..', 'build', 'remote-gateway-pack');
+  return path.join(__dirname, '..', '..', 'build', REMOTE_PACK_DIR_NAME);
 }
 
 /**

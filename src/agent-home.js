@@ -4,6 +4,9 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
+// 启用状态的权威存储在 Main（`skills/enabled-store.js`）：新建技能要顺手在那里启用，
+// 否则无人值守轮次（频道 / 计划 / headless）里它永远不注入。见下面 createUserSkill 的说明。
+const { setSkillEnabled: setSkillEnabledInStore } = require('./skills/enabled-store');
 
 const AGENT_DIR_NAME = '.dieyun';
 
@@ -286,6 +289,15 @@ function createUserSkill(userData, workspacePath, payload) {
   const md = `---\nname: ${name}\ndescription: ${descLine}\ncategory: 用户添加\nskillKey: ${skillKey}\n---\n\n${body}\n`;
   const skillPath = path.join(finalDir, 'SKILL.md');
   fs.writeFileSync(skillPath, md, 'utf8');
+  // 新建即启用：**写在这里**而不是各个调用点（设置页按钮 / Agent 工具 / 频道轮次），
+  // 否则只有带 Renderer 的那条路会启用它，`skill_create` 在频道 / 计划 / headless 里
+  // 造出来的技能等于没建。键是扫描 id（`scanner.js#resolveBundledSkillId` 把 skillKey
+  // 加 `builtin:` 前缀），与本函数产出的 skillKey 同一份命名。写状态失败不影响创建本身。
+  try {
+    setSkillEnabledInStore(userData, `builtin:${skillKey}`, true);
+  } catch {
+    // 状态文件写不进去（只读 userData 等）时，技能仍然存在，只是要用户在设置页手动启用
+  }
   return { dir: finalDir, skillPath, name, description, skillKey };
 }
 
@@ -316,6 +328,85 @@ async function deleteUserSkill(userData, workspacePath, dir) {
   }
   await fsp.rm(resolved, { recursive: true, force: true });
   return { ok: true, dir: resolved };
+}
+
+/**
+ * 改技能的 **SKILL.md**（目录不重命名、`skillKey` 不变）。
+ *
+ * 为什么需要它：`createUserSkill` 每次都**新建**一个目录（同名会派生 `name-1`），
+ * 所以「把这条技能改一下」以前只能删了重建 —— 重建换目录 = 换 `skillKey` = 启用状态丢失，
+ * 模型还会在技能列表里留下 `foo` / `foo-1` / `foo-2`。改内容不该是这个成本。
+ *
+ * 判定与删除共用同一套（`evaluateSkillDeletable`：扫描根内、非根本身、非种子技能），
+ * 理由也一样：种子里的是随包更新的只读内容，写进去下次升级就没了。
+ *
+ * @param {string} userData userData 目录
+ * @param {string|null} workspacePath 当前工作空间（决定扫描根）
+ * @param {{ dir: string, name?: string, description?: string, content?: string }} payload
+ * @returns {Promise<{ dir: string, skillPath: string, before: string, after: string }>}
+ */
+async function updateUserSkill(userData, workspacePath, payload) {
+  const dir = String((payload && payload.dir) || '').trim();
+  if (!dir) throw new Error('dir 必填（先列出技能目录，别猜路径）');
+  const roots = filterAccessibleSkillRoots(getScanRoots(userData, workspacePath).map((r) => path.resolve(r)));
+  const verdict = evaluateSkillDeletable(dir, roots);
+  if (!verdict.deletable) {
+    if (verdict.reason === 'ROOT_DIR') throw new Error('不能改技能根目录');
+    if (verdict.reason === 'SEEDED') throw new Error('预装内置技能不可修改（它随包更新，改了下次升级就丢）');
+    throw new Error('仅可修改当前扫描范围内的技能目录');
+  }
+  const resolved = path.resolve(dir);
+  const skillPath = path.join(resolved, 'SKILL.md');
+  let before = '';
+  try {
+    before = await fsp.readFile(skillPath, 'utf8');
+  } catch {
+    throw new Error('目标目录不是技能目录（缺少 SKILL.md）');
+  }
+
+  // frontmatter 只做「键值行」级处理：这是我们自己写出去的格式（见 createUserSkill），
+  // 不引 YAML 库、也不重排未知键 —— 保住 `skillKey` 与用户手加的字段。
+  const parsed = parseSkillFrontmatter(before);
+  const nextName =
+    payload && payload.name != null
+      ? String(payload.name).replace(/\r?\n/g, ' ').trim()
+      : parsed.meta.name || '';
+  const nextDesc =
+    payload && payload.description != null ? String(payload.description).trim() : parsed.meta.description || '';
+  const nextBody = payload && payload.content != null ? String(payload.content) : parsed.body;
+  if (!nextName) throw new Error('技能名称不能为空');
+
+  const meta = {
+    ...parsed.meta,
+    name: nextName,
+    description: nextDesc.replace(/\r?\n/g, ' ')
+  };
+  const after = `---\n${Object.entries(meta)
+    .filter(([, v]) => String(v || '').trim() !== '')
+    .map(([k, v]) => `${k}: ${String(v).replace(/\r?\n/g, ' ')}`)
+    .join('\n')}\n---\n\n${String(nextBody || '').trim()}\n`;
+
+  await fsp.writeFile(skillPath, after, 'utf8');
+  return { dir: resolved, skillPath, before, after };
+}
+
+/** `---\nkey: value\n---\nbody` → `{ meta, body }`（没有 frontmatter 时 meta 为空、body 是全文）。 */
+function parseSkillFrontmatter(text) {
+  const raw = String(text || '').replace(/\r\n/g, '\n');
+  const meta = {};
+  if (!raw.startsWith('---\n')) return { meta, body: raw };
+  const end = raw.indexOf('\n---', 4);
+  if (end < 0) return { meta, body: raw };
+  const head = raw.slice(4, end);
+  for (const line of head.split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    if (key) meta[key] = value;
+  }
+  const body = raw.slice(end + 4).replace(/^\n+/, '');
+  return { meta, body };
 }
 
 function describeAgentHome(userData, workspacePath) {
@@ -350,6 +441,7 @@ module.exports = {
   filterAccessibleSkillRoots,
   createUserSkill,
   deleteUserSkill,
+  updateUserSkill,
   describeAgentHome,
   sanitizeSkillFolderName
 };
