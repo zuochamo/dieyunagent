@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, renderChatHistoryEdge, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, layoutChatNav, chatUserScrollSeq, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat, refreshGoalPanelIfVisible */
+/* global window, document, $, escapeHtml, settings, gwState, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, renderChatHistoryEdge, prependOlderMessagesIncrementally, holdChatScrollAfterPrepend, layoutChatNav, chatUserScrollSeq, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns, pinChatToBottom, lastAssistantBubble, startChatFollowSettle, stopChatFollowSettle, isChatFollowSettling, initChatNav, motionMs, isThinkingDampedFlow, updateLastTurnFloat, refreshGoalPanelIfVisible, peekAgentTraceRead, readAgentTraceRecord */
 'use strict';
 
 
@@ -232,17 +232,25 @@ function removeThinkingHydratePlaceholder(bubble) {
   bubble.querySelector(':scope > .msg-thinking-outer.msg-thinking-hydrating')?.remove();
 }
 
+/**
+ * 补齐一条历史回合的思考区（trace 存在跟踪库：`meta.traceRunId`）。
+ *
+ * 读路径走 `trace-store.js` 的那份回放缓存（`peekAgentTraceRead` / `readAgentTraceRecord`）：
+ * - 命中（刚看过这条会话、切回来）→ 直接画，不挂占位、不发请求；
+ * - 未命中 → 先挂「思考过程（加载中…）」再取，同一 runId 在途只发一次。
+ * 占位由这里自己挂：放在调用方会连缓存命中也要闪一下「加载中」。
+ */
 async function hydrateAssistantTraceFromStore(bubble, meta, storedContent, checkpointOpts, sessionAtRender) {
-  if (!bubble || !meta?.traceRunId || !gwState.authed) {
-    removeThinkingHydratePlaceholder(bubble);
-    return;
-  }
+  if (!bubble || !meta?.traceRunId) return;
   const sessionId = sessionAtRender || currentSessionId;
   try {
-    const row = await gatewayCall('agent.trace_get', {
-      runId: meta.traceRunId,
-      sessionId
-    });
+    // 取数的唯一入口在 trace-store（缓存 + 在途去重）；这里不做第二份 RPC。
+    let row = peekAgentTraceRead(meta.traceRunId);
+    if (!row) {
+      if (!gwState.authed) return;
+      attachThinkingHydratePlaceholder(bubble);
+      row = await readAgentTraceRecord(meta.traceRunId);
+    }
     if (sessionId !== currentSessionId || !bubble.isConnected) {
       removeThinkingHydratePlaceholder(bubble);
       return;
@@ -339,7 +347,6 @@ function appendRenderedMessageAtIndex(i, opts) {
     checkpointRestore: !!cp
   });
   if (!trace.length && meta?.traceRunId) {
-    attachThinkingHydratePlaceholder(bubble);
     hydrateAssistantTraceFromStore(bubble, meta, split.content, cp, sessionAtRender);
   }
 }

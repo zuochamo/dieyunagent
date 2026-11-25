@@ -179,6 +179,12 @@ const AGENT_LIMITS_DEFAULTS = {
   maxDiffChars: 12000,
   diffFullTextCap: 120000,
   chatImagePreviewMaxMb: 15,
+  // 渲染层思考区回放缓存（runId → trace，见 `src/renderer/agent/trace-store.js` 的
+  // `<trace-read-cache>` 段）。回放时每条历史回合要各取一次**整份** trace：实测单会话
+  // 首屏 1–3MB、全库平均 93KB、单条最大 3MB（大头是 `tool.diff` 与 `fullThought`）。
+  // 没有这份记忆时每次切会话都要重拉同一批（首屏窗口最多 32 次 RPC）再整块重绘气泡。
+  // 按体积淘汰（条数上限对「单条 3MB」没意义）：12MB ≈ 4–8 个会话的首屏。
+  rendererTraceCacheMaxMb: 12,
   // 视觉输入注入（浏览器截图 / 附件补看）：按来源分别限流。
   // 额度是「每轮在途」——缓冲在注入后即清空，因此每个 LLM 轮次都会重新给一份。
   visionShotsPerRound: 2,

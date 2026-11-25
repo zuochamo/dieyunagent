@@ -1,4 +1,4 @@
-/* global window, gwState, gatewayCall, currentSessionId, messages, sessionActiveRuns, buildAgentStateSnapshot, createTraceRunId, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, refreshHistoryList, showAgentToast, formatAgentApiError, isCurrentSessionSending, isSessionSending, unpackAssistantMeta, DieyunNamespaces, withSessionRpcScope, AgentRoundText */
+/* global window, gwState, gatewayCall, getAgentLimits, currentSessionId, messages, sessionActiveRuns, buildAgentStateSnapshot, createTraceRunId, packAssistantMeta, buildPersistedAssistantContent, persistAssistantTranscriptText, refreshHistoryList, showAgentToast, formatAgentApiError, isCurrentSessionSending, isSessionSending, unpackAssistantMeta, DieyunNamespaces, withSessionRpcScope, AgentRoundText */
 'use strict';
 
 const traceStoreLoopApi = window.diecloud || {};
@@ -10,6 +10,122 @@ const TRACE_CHECKPOINT_INTERVAL_MS = 2500;
  * 而丢掉最后 30s 的思考对回顾无实际影响。
  */
 const TRACE_CHECKPOINT_FORCE_MS = 30000;
+
+/* <trace-read-cache> */
+/**
+ * 思考区回放的 trace 读缓存（runId → row）。
+ *
+ * 为什么要：回放时每条历史 assistant 回合都要一份**整份** trace（`meta.traceRunId`
+ * → `agent.trace_get`，入口 `renderer-chat-render.js#hydrateAssistantTraceFromStore`），
+ * 首屏窗口最多 32 次请求；实测单会话首屏 1–3MB、全库平均 93KB、单条最大 3MB（大头是
+ * `tool.diff` 与 `fullThought`）。此前没有任何记忆 —— 每次切会话都把同一批整份 trace
+ * 重拉一遍、再整块重绘气泡，切得越勤越慢。
+ *
+ * 三条规矩：
+ * 1. **同一 runId 只发一次**：在途请求去重；切走不取消、结果留着，切回来直接命中
+ *    （气泡 DOM 早被换掉，但数据不必重取）；
+ * 2. **上限按体积**（`agent-limits.rendererTraceCacheMaxMb`），超了按最久未用先丢
+ *    —— 条数上限对「单条 3MB」这种负载没有意义；
+ * 3. **写穿失效**：`saveAssistantTraceRecord` 每次落库后作废该 runId（运行中的
+ *    checkpoint 也走那条路），缓存里因此不会留半截 trace。
+ *
+ * 只缓存命中，不缓存未命中 / 失败（失败要能重试）。
+ */
+/** @type {Map<string, { row: object, chars: number }>} */
+const agentTraceReadCache = new Map();
+/** @type {Map<string, Promise<object|null>>} */
+const agentTraceReadInflight = new Map();
+/** bundle 未就绪 / limits 缺键时的兜底；真值在 `agent-limits.rendererTraceCacheMaxMb` */
+const AGENT_TRACE_READ_CACHE_FALLBACK_MB = 12;
+
+function agentTraceReadCacheMaxChars() {
+  const mb =
+    typeof getAgentLimits === 'function' ? Number(getAgentLimits().rendererTraceCacheMaxMb) : NaN;
+  const safe = Number.isFinite(mb) && mb > 0 ? mb : AGENT_TRACE_READ_CACHE_FALLBACK_MB;
+  return safe * 1024 * 1024;
+}
+
+/**
+ * 一条 row 的占用口径：序列化后的**字符数**当字节用。
+ * 只服务「该淘汰谁」这一个判断，不追求精确：真按 UTF-8 字节算得再序列化一次，
+ * 对 3MB 的行是白烧时间；而占体积的大头（工具 diff）本来就是 ASCII，两者接近。
+ */
+function agentTraceRowChars(row) {
+  try {
+    const text = JSON.stringify((row && row.trace) || null);
+    return typeof text === 'string' ? text.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function trimAgentTraceReadCache() {
+  const max = agentTraceReadCacheMaxChars();
+  let total = 0;
+  for (const item of agentTraceReadCache.values()) total += item.chars;
+  // 至少留最后一条：即便单条就超预算，也让它把这一次回放服务完
+  while (total > max && agentTraceReadCache.size > 1) {
+    const oldest = agentTraceReadCache.keys().next().value;
+    const dropped = agentTraceReadCache.get(oldest);
+    agentTraceReadCache.delete(oldest);
+    total -= dropped ? dropped.chars : 0;
+  }
+}
+
+function rememberAgentTraceRead(runId, row) {
+  if (!runId || !row || !Array.isArray(row.trace) || !row.trace.length) return;
+  agentTraceReadCache.delete(runId);
+  agentTraceReadCache.set(runId, { row, chars: agentTraceRowChars(row) });
+  trimAgentTraceReadCache();
+}
+
+/** 同步查：命中就直接画，不挂「加载中」占位 */
+function peekAgentTraceRead(runId) {
+  const id = String(runId || '').trim();
+  if (!id) return null;
+  const hit = agentTraceReadCache.get(id);
+  if (!hit) return null;
+  agentTraceReadCache.delete(id);
+  agentTraceReadCache.set(id, hit); // 命中即刷到队尾（LRU）
+  return hit.row;
+}
+
+/**
+ * 异步取：命中即返回；同一 runId 在途只发一次；成功后进缓存，失败 / 未命中不入缓存。
+ *
+ * `agent.trace_get` 只认 `runId`（`sessionId` 在契约里从来没用上：账本永远在本地 core，
+ * SSH 会话也一样），所以这里不再多带一个字段。
+ */
+function readAgentTraceRecord(runId) {
+  const id = String(runId || '').trim();
+  if (!id) return Promise.resolve(null);
+  const cached = peekAgentTraceRead(id);
+  if (cached) return Promise.resolve(cached);
+  const inflight = agentTraceReadInflight.get(id);
+  if (inflight) return inflight;
+  if (typeof gatewayCall !== 'function') return Promise.resolve(null);
+  const task = gatewayCall('agent.trace_get', { runId: id })
+    .then((row) => {
+      rememberAgentTraceRead(id, row);
+      return row || null;
+    })
+    .catch((e) => {
+      console.warn(e);
+      return null;
+    })
+    .finally(() => {
+      agentTraceReadInflight.delete(id);
+    });
+  agentTraceReadInflight.set(id, task);
+  return task;
+}
+
+function invalidateAgentTraceRead(runId) {
+  const id = String(runId || '').trim();
+  if (id) agentTraceReadCache.delete(id);
+}
+/* </trace-read-cache> */
+
 
 /** @type {Map<string, { runId: string, planSummary: string, sessionId?: string }>} */
 const pendingResumeCheckpoints = new Map();
@@ -101,7 +217,7 @@ async function saveAssistantTraceRecord({
   if (!gwState.authed || !runId || !trace || !trace.length) return null;
   const persistable = stripTraceUiOnlyFields(trace);
   try {
-    return await gatewayCall('agent.trace_save', {
+    const result = await gatewayCall('agent.trace_save', {
       runId,
       sessionId,
       messageId,
@@ -113,6 +229,10 @@ async function saveAssistantTraceRecord({
       summary,
       stateSnapshot
     });
+    // 写穿失效：这一行的内容刚变过（运行中 checkpoint 也走这里），
+    // 回放缓存里那一份立刻作废，下一次回放重新读——缓存里永远不留半截 trace。
+    invalidateAgentTraceRead(runId);
+    return result;
   } catch (e) {
     console.warn(e);
     return null;
@@ -532,7 +652,11 @@ window.DieyunNamespaces.register(
     tryDetectResumeCheckpoint,
     getPendingResumeCheckpoint,
     setPendingResumeCheckpoint,
-    clearPendingResumeCheckpoint
+    clearPendingResumeCheckpoint,
+    // 思考区回放用的读路径（缓存 + 在途去重）：只给本仓渲染层用，不镜像回 window.*
+    peekAgentTraceRead,
+    readAgentTraceRecord,
+    invalidateAgentTraceRead
   },
   {
     compat: [

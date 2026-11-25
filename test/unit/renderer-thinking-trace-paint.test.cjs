@@ -109,13 +109,14 @@ test('手里已有 trace（刚跑完那一轮的 transientTrace）→ 与正文�
   assert.equal(calls.hydrates, 0, '已有 trace 时不该再去 store 回填');
 });
 
-test('只有 meta.traceRunId → 立刻挂「加载中」占位并回填（不是静默留白）', () => {
+test('只有 meta.traceRunId → 画成结构化气泡并交给回填（占位由回填自己挂）', () => {
   const calls = paint({ meta: { traceRunId: 'trace-1' } });
   const opts = calls.bubbles[0].opts;
   assert.equal(opts.trace.length, 0);
   assert.equal(opts.structured, true, '结构化气泡才知道自己还差一块思考区');
-  assert.equal(calls.placeholders, 1);
   assert.equal(calls.hydrates, 1);
+  // 占位不在绘制这一层挂：回填命中缓存时要「直接有」，不该先闪一下「加载中」
+  assert.equal(calls.placeholders, 0);
 });
 
 test('既没有 trace 也没有 traceRunId → 不伪造思考区', () => {
@@ -137,5 +138,18 @@ test('「稍后补画」的延迟队列已整体删除（思考区不可能再�
     renderSrc,
     /endChatHistoryArtifactsBatch\(\);\s*\n\s*endSessionScrollCaptureSuppression\(\);\s*\n\s*endHiddenChatRender\(hiddenToken, \{ transition \}\);/,
     'renderChatFromMessagesYielding 的 finally 必须无条件 reveal'
+  );
+});
+
+test('回填只走 trace-store 的读缓存，不另发一份 agent.trace_get', () => {
+  // 取数唯一入口（缓存 + 在途去重）在 trace-store.js；这里只允许「先 peek、未命中再 read」。
+  assert.match(renderSrc, /let row = peekAgentTraceRead\(meta\.traceRunId\);/);
+  assert.match(renderSrc, /row = await readAgentTraceRecord\(meta\.traceRunId\);/);
+  assert.doesNotMatch(renderSrc, /'agent\.trace_get'/);
+  // 占位只挂在「未命中」分支里：命中缓存不许闪「加载中」
+  assert.match(
+    renderSrc,
+    /if \(!row\) \{\s*\n\s*if \(!gwState\.authed\) return;\s*\n\s*attachThinkingHydratePlaceholder\(bubble\);/,
+    '占位必须在未命中分支内'
   );
 });
