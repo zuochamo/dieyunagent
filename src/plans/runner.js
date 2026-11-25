@@ -1,10 +1,8 @@
 'use strict';
 
 const { loadModelSettings, MAX_TOKENS_DEFAULT, resolveTextApiConfig } = require('../model-settings');
-const { buildTaskSkillsSystem } = require('../automation/skill-prompt');
-const { ASSISTANT_IDENTITY, formatDieyunSystemBlock } = require('../dieyun-instructions');
+const { ASSISTANT_IDENTITY } = require('../dieyun-instructions');
 const { runPlanAgentLoop } = require('./plan-agent-runner');
-const { appendPlanLog } = require('./plan-log');
 const { completeOnce, currentLlmCompleteBridge } = require('../agent/llm-complete');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('../agent/llm-request');
 
@@ -60,43 +58,16 @@ async function chatCompletion(userData, prompt, extraSystem, opts = {}) {
 }
 
 /**
- * @param {{ userData: string, workspacePath?: string | null, log?: Function, gateway?: object, plansStore?: object, coreBridge?: object, mcpRuntime?: object, createToolBridge?: Function, compactionAgent?: object, webContents?: object }} ctx
+ * 计划执行只有一条路：`runPlanAgentLoop`（工具注入、预算、交付闸门都在那里）。
+ *
+ * 这里保留 `runPlan` 这个名字，只为调用方（`main/mcp-plans-boot.js`）的入口稳定。
+ * 2026-11-21 删掉了原先的「无工具、单次 LLM」降级分支：它自带第二份 dieyun 系统块、
+ * 技能块与「执行 TODO」块，而唯一生产调用点 `mcp-plans-boot.js` 恒传
+ * `gateway/coreBridge/createToolBridge`，那条分支在树内永远走不到。
+ *
+ * @param {object} ctx
  * @param {object} plan
  */
-async function runPlan(ctx, plan) {
-  if (ctx && ctx.gateway && ctx.coreBridge && typeof ctx.createToolBridge === 'function') {
-    return runPlanAgentLoop(ctx, plan);
-  }
+const runPlan = runPlanAgentLoop;
 
-  const { userData, workspacePath } = ctx;
-  if (!plan.prompt) throw new Error('计划缺少 prompt');
-
-  const extraParts = [];
-  const dieyunBlock = formatDieyunSystemBlock();
-  if (dieyunBlock) extraParts.push(dieyunBlock);
-  let extraSystem = extraParts.join('\n\n');
-  try {
-    const skillBlock = await buildTaskSkillsSystem(userData, workspacePath || null, plan.skillIds);
-    if (skillBlock) extraSystem = extraSystem ? `${extraSystem}\n\n${skillBlock}` : skillBlock;
-  } catch {
-    // ignore
-  }
-
-  const todoBlock = Array.isArray(plan.todos) && plan.todos.length
-    ? `\n\n执行 TODO：\n${plan.todos.map((t, i) => `${i + 1}. ${t}`).join('\n')}`
-    : '';
-  // 本次任务文本与写进会话的用户轮次必须是同一份（Main 已备好 ctx.planUserPrompt）
-  const taskPrompt = String((ctx && ctx.planUserPrompt) || '') || `${plan.prompt}${todoBlock}`;
-  const reply = await chatCompletion(userData, taskPrompt, extraSystem, {
-    route: plan.modelRoute,
-    model: plan.model
-  });
-  // 与 runPlanAgentLoop 同判据：空正文不许冒充成功（否则「没跑」会被记成 lastRunOk: true）
-  if (!String(reply || '').trim()) {
-    throw new Error('模型未返回任何正文（上游可能拒绝请求或额度已用尽），请查看日志后重跑');
-  }
-  appendPlanLog(userData, plan, reply);
-  return { ok: true, summary: reply.slice(0, 8000), content: reply };
-}
-
-module.exports = { runPlan, chatCompletion, appendPlanLog, resolveEndpoint };
+module.exports = { runPlan, chatCompletion, resolveEndpoint };

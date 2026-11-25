@@ -128,10 +128,10 @@ function planRunUserTurn(plan, at, limits) {
  * 会话里先有这一轮，Renderer 才能在运行一开始就刷新出该会话与「运行中」，
  * 而不是等收尾投递之后才第一次出现。
  *
- * @returns {Promise<{ plan: object, sessionId: string, userText: string, rebuilt: boolean, staleSessionId: string }>}
+ * @returns {Promise<{ plan: object, sessionId: string, userText: string, rebuilt: boolean, staleSessionId: string, staleArchived: boolean }>}
  */
 async function beginPlanRunTurn(gateway, plansStore, plan, opts = {}) {
-  const { plan: boundPlan, sessionId, rebuilt, staleSessionId } = await ensurePlanSession(
+  const { plan: boundPlan, sessionId, rebuilt, staleSessionId, staleArchived } = await ensurePlanSession(
     gateway,
     plansStore,
     plan
@@ -146,7 +146,7 @@ async function beginPlanRunTurn(gateway, plansStore, plan, opts = {}) {
     sessionId,
     title: planSessionTitle(boundPlan)
   });
-  return { plan: boundPlan, sessionId, userText, rebuilt, staleSessionId };
+  return { plan: boundPlan, sessionId, userText, rebuilt, staleSessionId, staleArchived };
 }
 
 /**

@@ -884,7 +884,10 @@ async function populateAutomationSkillSelect(selectedId) {
     const catalog = window.skillsCatalog;
     if (!catalog?.skills?.length && getAutomationApi().scanSkills) {
       window.skillsCatalog = await getAutomationApi().scanSkills();
+      resetSkillsByIdIndex();
     }
+    // 启用状态在 Main（skills/enabled-store.js）：定时页可能先于技能页打开，这里自己拉一次
+    await loadSkillsEnabledFromMain();
     const enabled = loadEnabledSkillIds();
     for (const sk of (window.skillsCatalog?.skills || [])) {
       if (!isSkillEnabled(enabled, sk.id)) continue;

@@ -32,12 +32,18 @@ class PlansScheduler {
   }
 
   clearAll() {
-    for (const t of this.timers.values()) clearTimeout(t);
-    this.timers.clear();
+    for (const planId of [...this.timers.keys()]) this._disarm(planId);
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = null;
     }
+  }
+
+  /** 取消某个计划的待跑 timer（同一计划只允许有一个待跑 timer，见 _arm） */
+  _disarm(planId) {
+    const timer = this.timers.get(planId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(planId);
   }
 
   reload() {
@@ -54,6 +60,11 @@ class PlansScheduler {
     if (plan.trigger === 'idle' || plan.trigger === 'goal') return;
     const ms = msUntilNextRun(plan);
     if (ms == null) return;
+    // 同一计划只留一个待跑 timer：覆盖前必须先清掉旧的。`reload()` 与「运行结束再上钟」
+    // 是两条都会上钟的路，旧 timer 若只是被 map 覆盖、没人 clearTimeout，就成了
+    // 谁也管不着的幽灵：到期时与新 timer 一起把同一个计划跑两遍
+    // （2026-11-18 实测日志里 17:00:08 同一计划连着起跑两次，两个 runId 相差 90ms）。
+    this._disarm(plan.id);
     if (ms > TIMER_MAX_MS) {
       // setTimeout 上限约 24.8 天：远期计划只能先睡满一段再重算。
       // 若把这一段当成「到点」触发，远期计划就会提前执行（时间对不上设定）。
@@ -70,7 +81,7 @@ class PlansScheduler {
   }
 
   async _tick(planId) {
-    this.timers.delete(planId);
+    this._disarm(planId);
     const plan = this.getPlans().find((p) => p.id === planId);
     if (!plan || !plan.enabled) return;
     if (this.running.has(planId)) {

@@ -1,16 +1,18 @@
 'use strict';
 
-const { loadModelSettings, resolveTextApiConfig } = require('../model-settings');
 const { ASSISTANT_IDENTITY, formatDieyunSystemBlock, loadDieyunInstructions } = require('../dieyun-instructions');
 const { buildTaskSkillsSystem } = require('../automation/skill-prompt');
 const { runRustAgentLoop } = require('../agent/rust-loop-runner');
-const { resolveLoopToolCallLimit } = require('../agent/agent-limits');
-const { applyTierRuntime, resolveContextTierIdFromSettings } = require('../agent/model-runtime-by-tier');
-const { clampModelRuntimeValue } = require('../agent/model-runtime-schema');
-const { getEffectiveInputBudget } = require('../agent/compaction-main');
-const { buildCompletionMessagesFromHistory } = require('../agent/session-context');
+const { resolveTurnModel } = require('../agent/main-turn-runner');
+const { resolveLoopToolCallLimit, resolveAgentMaxRounds } = require('../agent/agent-limits');
+const {
+  buildCompletionMessagesFromHistory,
+  loadRecentTurnMessages,
+  completionHistoryHelpers
+} = require('../agent/session-context');
+const roundText = require('../agent/agent-round-text');
 const { clearToolHarnessSessionsForSession } = require('../agent/tool-harness');
-const { buildPlanRunUserText, stripAssistantMeta, stripUserMeta } = require('./plan-run-turn');
+const { buildPlanRunUserText } = require('./plan-run-turn');
 const { buildMainAgentTools } = require('../agent/main-agent-tools');
 // 目标型计划专用的两个工具（goal_check / goal_finish）：schema 的唯一来源是 tool-catalog
 const { GOAL_TOOLS } = require('../agent/tool-catalog');
@@ -19,6 +21,21 @@ const { isMutatingAgentTool } = require('../agent/tool-classify');
 const { buildLoopCompactionHandler } = require('../agent/compaction-loop');
 const { isAbortError } = require('../llm-reconnect-retry');
 const { appendPlanLog } = require('./plan-log');
+
+/**
+ * 计划执行器（Main 侧「跑一轮」的**计划分支**）。
+ *
+ * 与 `agent/main-turn-runner.js` 的关系（2026-11-21 明确，见 docs/CODE-CLEANLINESS-REVIEW §8.7）：
+ * - **共用**：历史读取与消息装配（`session-context.loadRecentTurnMessages` /
+ *   `completionHistoryHelpers`）、轮次上限（`agent-limits.resolveAgentMaxRounds`）、
+ *   空交付文案（`agent-round-text.emptyTurnFailureMessage`）、循环装配与压缩、交付四态；
+ * - **只有三处是计划独有**（刻意不复用）：
+ *   1. 系统提示：定时任务没有 Renderer 会话，人格段/计划名/工作空间要在无 UI 上下文里拼
+ *      （`buildPlanSystemMessage`），与聊天那条 `prepSystemPrompt` 的输入快照不是同一形状；
+ *   2. `trigger === 'goal'` 的计划额外拿到 `GOAL_TOOLS`（只在这条路径加，避免「在聊天里对着空气申请完成」）；
+ *   3. 事实统计 `mutatingToolCalls`（收尾时给人看「一次改动都没有、检查却全绿」）。
+ * 改这三处以外的东西，先问「能不能改到共用那一份」。
+ */
 
 async function buildPlanSystemMessage(userData, workspacePath, plan, userPrompt) {
   const chunks = [
@@ -47,29 +64,6 @@ async function buildPlanSystemMessage(userData, workspacePath, plan, userPrompt)
     chunks.push(`【本次任务】\n${userPrompt.slice(0, 4000)}`);
   }
   return chunks.filter(Boolean).join('\n\n');
-}
-
-async function loadSessionMessages(gateway, sessionId, limit = 120) {
-  const rows = await gateway.invokeRpc('memory.messages_recent', {
-    sessionId,
-    limit
-  });
-  return (Array.isArray(rows) ? rows : [])
-    .filter((r) => r && (r.role === 'user' || r.role === 'assistant'))
-    .map((r) => ({
-      role: r.role,
-      content: String(r.content || ''),
-      created_at: r.created_at
-    }));
-}
-
-function buildPlanCompletionMessages(historyMessages, sysContent) {
-  const helpers = {
-    unpackUserContent: stripUserMeta,
-    unpackAssistantMeta: (raw) => ({ content: stripAssistantMeta(raw), meta: null }),
-    compactPlainText: (s, n) => String(s || '').slice(0, n)
-  };
-  return buildCompletionMessagesFromHistory(historyMessages, sysContent, null, false, helpers);
 }
 
 function summarizeTrace(trace) {
@@ -117,56 +111,52 @@ async function runPlanAgentLoop(ctx, plan) {
     throw new Error('Agent 需要 dieyun-core 就绪（请运行 npm run pack:dieyun-core 并重启）');
   }
 
-  // 定时执行没有 Renderer 会话：只能按计划自己记住的路由解析模型配置。
-  // strict=true —— 路由失效（模型/供应商被删）明确报错，绝不静默换到别的 key 上跑。
-  const settings = loadModelSettings(userData);
-  const llm = resolveTextApiConfig(settings, {
-    route: plan.modelRoute,
-    model: plan.model,
-    strict: true
-  });
-  if (!llm.apiKey || !llm.baseUrl) {
-    // 路由与裸模型名都算「绑定过模型」：只说 route 的话，route 为空、模型名却在的计划
-    // 会被误报成「未配置 API Key」，用户根本看不出是模型名在这一端点上不存在。
-    const bound = String(plan.modelRoute || plan.model || '').trim();
-    throw new Error(
-      bound
-        ? `计划绑定的模型不可用（${bound}），请在「模型设置」检查该模型/供应商是否仍启用`
-        : '未配置 API Key，请在模型设置中填写'
-    );
-  }
-  const llmModel = llm.model || settings.textModel || '';
-  if (!llmModel) {
-    // 别再让下层报 “model 必填”：这里是最清楚上下文的一层
-    throw new Error(
-      '计划未绑定模型，且没有可用的默认模型：请在「定时任务 → 编辑」里选择模型，或在「模型设置」中启用一个供应商模型'
-    );
-  }
-
   // 本次运行的会话与用户轮次已由 Main 在运行边界准备好（plan-run-turn#beginPlanRunTurn）：
   // 这里只消费 ctx.sessionId / ctx.planUserPrompt，不再自己绑会话、写会话（唯一实现）。
   const sessionId = String(ctx.sessionId || '');
   if (!sessionId) {
     throw new Error('计划会话未就绪：Main 未能在运行前准备计划专用会话');
   }
-  // 按计划绑定的路由解析出本轮 Context 档位，再叠出真正生效的「模型与段预算」：
-  // 定时执行没有 Renderer，档位必须在这里解析，不能假设用户在 default 档。
-  const contextTierId = resolveContextTierIdFromSettings(settings, plan.modelRoute || llmModel);
-  const runSettings = applyTierRuntime(settings, userData, { tierId: contextTierId, model: llmModel });
+
+  // 模型 / 档位 / 预算 / apiCfg 的解析与主循环同一份（main-turn-runner#resolveTurnModel）：
+  // strict=true（路由失效明确报错，绝不静默换 key）+ tierHint 用「计划绑定的路由」判档
+  // （定时执行没有设置页可问，档位不能假设在 default）。
+  const bound = String(plan.modelRoute || plan.model || '').trim();
+  let resolved;
+  try {
+    resolved = resolveTurnModel({
+      userData,
+      route: plan.modelRoute,
+      model: plan.model,
+      strict: true,
+      tierHint: plan.modelRoute
+    });
+  } catch (err) {
+    // 计划侧把「哪条绑定失效」说清楚：定时任务没有设置页上下文，一句「未配置 API Key」帮不到人。
+    if (!bound) throw err;
+    throw new Error(
+      `计划绑定的模型不可用（${bound}），请在「模型设置」检查该模型/供应商是否仍启用`
+    );
+  }
+  const { runSettings, llmModel, contextTierId, tokenBudget, apiCfg } = resolved;
   const boundPlan = plan;
   const userPrompt = String(ctx.planUserPrompt || '') || buildPlanRunUserText(boundPlan);
   const sysContent = await buildPlanSystemMessage(userData, workspacePath, boundPlan, userPrompt);
 
-  const history = await loadSessionMessages(gateway, sessionId, 120);
-  const messages = buildPlanCompletionMessages(history, sysContent);
+  // 历史读取与 helpers 与主循环同一份（session-context）：这里不再自带一份「只认 created_at」的实现。
+  const history = await loadRecentTurnMessages(gateway, sessionId, 120);
+  const messages = buildCompletionMessagesFromHistory(
+    history,
+    sysContent,
+    null,
+    false,
+    completionHistoryHelpers()
+  );
   const tools = await buildMainAgentTools(mcpRuntime);
   // 目标型计划多给两个工具：跑检查（留事实）与申请收尾（代码核对事实）。
   // 只在这一条路径上加 —— 聊天/频道/其它计划拿不到它们，避免「在聊天里对着空气申请完成」。
   if (boundPlan.trigger === 'goal') tools.push(...GOAL_TOOLS);
   const toolBridge = createToolBridge(webContents || null);
-  const tokenBudget = getEffectiveInputBudget(runSettings, llmModel);
-  // 整体继承 llm：逐字段重建会丢掉 headers / authMode / userAgent（压缩也复用这份 apiCfg）
-  const apiCfg = { ...llm, baseUrl: llm.baseUrl, apiKey: llm.apiKey };
 
   let loopResult = null;
   let aborted = false;
@@ -182,8 +172,11 @@ async function runPlanAgentLoop(ctx, plan) {
     contextTierId,
     planId: boundPlan.trigger === 'goal' ? boundPlan.id : undefined
   };
+  // 测试缝：单测用假 loop 跑完整编排，断言「计划这一轮到底喂了什么」（sysContent / startParams）。
+  // 生产调用方从不传 ctx.runRustAgentLoop。
+  const runLoop = typeof ctx.runRustAgentLoop === 'function' ? ctx.runRustAgentLoop : runRustAgentLoop;
   try {
-    loopResult = await runRustAgentLoop({
+    loopResult = await runLoop({
       coreBridge,
       llm: apiCfg,
       settings: runSettings,
@@ -199,7 +192,7 @@ async function runPlanAgentLoop(ctx, plan) {
         messages,
         tools,
         maxToolCalls: resolveLoopToolCallLimit(runSettings),
-        maxRounds: clampModelRuntimeValue('agentMaxRounds', runSettings.agentMaxRounds),
+        maxRounds: resolveAgentMaxRounds(runSettings),
         workspaceRoot: workspacePath || undefined
       },
       compactMessages: buildLoopCompactionHandler({
@@ -255,9 +248,7 @@ async function runPlanAgentLoop(ctx, plan) {
     // 空交付必须如实失败：让 lastRunOk=false、会话里留 `执行失败：…`。
     const toolCount = trace.reduce((n, r) => n + ((r && r.tools) || []).length, 0);
     throw new Error(
-      toolCount
-        ? `模型执行了 ${toolCount} 次工具调用但未生成任何正文，请查看日志后重跑`
-        : '模型未返回任何正文与工具调用（上游可能拒绝请求或额度已用尽），请查看日志后重跑'
+      roundText.emptyTurnFailureMessage(toolCount)
     );
   }
   appendPlanLog(userData, boundPlan, reply);

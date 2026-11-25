@@ -38,39 +38,81 @@ function wallClockToLocal(wall) {
 }
 
 /**
- * @param {import('./store').normalizePlan extends Function ? ReturnType<import('./store').normalizePlan> : object} plan
+ * 按本地时刻取「接下来 count 次触发」。
+ *
+ * @param {object} plan
  * @param {Date} [now]
- * @returns {number|null} ms until next run
+ * @param {number} [count]
+ * @returns {Date[]} 本地时刻，升序；拿不到就是空数组
  */
-function msUntilNextRun(plan, now = new Date()) {
-  if (!plan || !plan.enabled) return null;
-
-  // onceAt 存的就是真实时刻（ISO），不经过墙钟
+function nextRuns(plan, now = new Date(), count = 1) {
+  if (!plan || !plan.enabled) return [];
+  const want = Math.max(1, Math.floor(Number(count) || 1));
   if (plan.onceAt) {
-    const at = new Date(plan.onceAt).getTime();
-    if (Number.isNaN(at) || at <= now.getTime()) return null;
-    return at - now.getTime();
+    const at = new Date(plan.onceAt);
+    return !Number.isNaN(at.getTime()) && at.getTime() > now.getTime() ? [at] : [];
   }
-
-  if (!plan.rrule) return null;
-
+  if (!plan.rrule) return [];
   try {
     const opts = RRule.parseString(plan.rrule);
     const startInstant = plan.dtstart ? new Date(plan.dtstart) : now;
-    if (Number.isNaN(startInstant.getTime())) return null;
+    if (Number.isNaN(startInstant.getTime())) return [];
     opts.dtstart = localToWallClock(startInstant);
     // UNTIL 是 iCal 意义上的真实时刻（编辑器写成 …Z），同样要换算到墙钟再与逐次触发比较，
     // 否则「生效结束」在 16:00 之后的计划会少跑最后一天
     if (opts.until instanceof Date && !Number.isNaN(opts.until.getTime())) {
       opts.until = localToWallClock(opts.until);
     }
-    const next = new RRule(opts).after(localToWallClock(now), false);
-    if (!next) return null;
-    const ms = wallClockToLocal(next).getTime() - now.getTime();
-    return ms > 0 ? ms : null;
+    const rule = new RRule(opts);
+    const out = [];
+    let cursor = localToWallClock(now);
+    for (let i = 0; i < want; i += 1) {
+      const hit = rule.after(cursor, false);
+      if (!hit) break;
+      out.push(wallClockToLocal(hit));
+      // 下一次从这次之后找（inclusive=false），避免同一时刻被算两遍
+      cursor = hit;
+    }
+    return out;
   } catch {
-    return null;
+    return [];
   }
 }
 
-module.exports = { msUntilNextRun };
+/**
+ * @param {import('./store').normalizePlan extends Function ? ReturnType<import('./store').normalizePlan> : object} plan
+ * @param {Date} [now]
+ * @returns {number|null} ms until next run
+ */
+function msUntilNextRun(plan, now = new Date()) {
+  const [first] = nextRuns(plan, now, 1);
+  if (!first) return null;
+  const ms = first.getTime() - now.getTime();
+  return ms > 0 ? ms : null;
+}
+
+/**
+ * 「这条规则接下来会怎么跑」的事实（给 `plan_create` 回执用）：
+ * 下一次触发时刻、触发间隔、按间隔折算的每日次数。
+ *
+ * 为什么不在这里判「频次是不是太高」：那是策略，不是事实。模型/用户看到 `runsPerDay` 自己判断；
+ * 要挡无界增长用 `agent-limits.plansMaxCount`（条数上限），不夹取间隔（夹取等于替用户改规则）。
+ *
+ * @param {object} plan
+ * @param {Date} [now]
+ * @returns {{ nextAt: string, intervalMs: number, runsPerDay: number, once: boolean } | null}
+ */
+function scheduleFacts(plan, now = new Date()) {
+  const runs = nextRuns(plan, now, 2);
+  if (!runs.length) return null;
+  const once = !!plan.onceAt;
+  const intervalMs = runs.length > 1 ? Math.max(0, runs[1].getTime() - runs[0].getTime()) : 0;
+  return {
+    nextAt: runs[0].toISOString(),
+    intervalMs,
+    runsPerDay: intervalMs > 0 ? Math.round((24 * 60 * 60 * 1000 * 100) / intervalMs) / 100 : 0,
+    once
+  };
+}
+
+module.exports = { msUntilNextRun, nextRuns, scheduleFacts };

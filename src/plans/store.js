@@ -180,7 +180,19 @@ class PlansStore {
       err.code = 'INVALID_PROMPT';
       throw err;
     }
+    // 新建时挡一次条数上限：`plan_create` 是模型可自主调用的，每条计划都是一整个 agent 轮。
+    // 只挡新建 —— 存量（老用户已超限）仍可改、可停用、可运行，别把人锁死。
     const idx = this.plans.findIndex((p) => p.id === plan.id);
+    if (idx < 0) {
+      const cap = Number(AGENT_LIMITS_DEFAULTS.plansMaxCount) || 0;
+      if (cap > 0 && this.plans.length >= cap) {
+        // 文案对「人」也要成立：这条错误同时会出现在设置页的新建按钮上
+        const err = new Error(`计划条数已达上限（${cap} 条）：先删掉不再需要的计划，再建新的`);
+        // @ts-ignore —— 结构化错误码（调用方按 code 转成 errorCode）
+        err.code = 'PLANS_LIMIT';
+        throw err;
+      }
+    }
     const prev = idx >= 0 ? this.plans[idx] : null;
     if (prev) {
       plan.createdAt = prev.createdAt;

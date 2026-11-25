@@ -2,9 +2,7 @@
 
 'use strict';
 
-// 会话目标的 **UI 两个面**（同一个视图、同一份轮询）：
-//   1. 侧栏「目标」页（进度 / 清单 / 检查事实 / 停止·继续）；
-//   2. 气泡区上方的「目标条」（一行：目标 + 第几轮 + 最近一条事实，点开就地看全部事实）。
+// 会话目标的 **UI**：侧栏「目标」页（进度 / 清单 / 检查事实 / 停止·继续）。
 //
 // 分工（同一个目标语义只有一份）：
 //   - 目标是什么、进度怎么算、每条检查的最新事实、预算多少 —— 全部在 Main 侧成形
@@ -13,23 +11,18 @@
 //
 // 为什么用轮询而不是事件推送：目标由模型在轮内随手改（goal_check / goal_update），
 // 逐条埋事件等于把「目标变了」这层知识散到工具执行处。取视图是本地 RPC（微秒级），
-// 两处共用**一次**取数：面板可见 / 目标条在显示时才起 2s 心跳，都不可见立即停 ——
-// 没有目标的普通会话零成本。轮内变化另有事件驱动的一拍（`scheduleGoalUiRefresh`，
-// 挂在 `dispatchAgentRunEvent` 与子代理面板同一处），所以轮内也能跟上。
+// 只有面板可见时才起 2s 心跳 —— 面板收起后一次都不取（没有目标的普通会话零成本）。
+//
+// 气泡区上方的「目标条」（`#goal-bar`）已删除：同一份视图只在侧栏这一处看；它同时也是
+// 「轮内事件驱动刷新」的唯一理由，所以那一拍（原 `scheduleGoalUiRefresh`）一并删了。
 
 const GOAL_PANEL_POLL_MS = 2000;
-const GOAL_UI_REFRESH_THROTTLE_MS = 400;
 
 let goalPanelTimer = null;
 let goalPanelRendering = false;
-/** 取数期间又来了一拍（切会话 / 事件驱动）：取完必须补一拍，否则这一拍被静默吃掉 */
+/** 取数期间又来了一拍（切会话）：取完必须补一拍，否则这一拍被静默吃掉 */
 let goalPanelPending = false;
 let goalPanelVisible = false;
-let goalUiRefreshTimer = null;
-/** 最近一次取到的视图（`null` = 本会话没有目标）；目标条与面板共用 */
-let goalUiView = null;
-/** 这份视图属于哪个会话 —— 切会话时靠它识别「旧目标不能挂在新会话上方」 */
-let goalUiSessionId = '';
 
 function goalPanelEl(id) {
   return document.getElementById(id);
@@ -63,7 +56,7 @@ function goalIsClosed(view) {
 }
 
 /**
- * 面板头一行、目标条轮次位的那句话（两个面共用同一句，别再各写一份）。
+ * 面板头那一行（状态词 + 轮次）。
  *
  * 收尾过的目标不再报「第 N/M 轮」：那个数字是**预算用掉多少**，只对还在推进的目标有意义；
  * 挂到已收尾的目标上读起来就是「还在跑」，这正是「面板和对话对不上」的一半来源
@@ -207,14 +200,6 @@ function goalChecksHtml(view) {
   </div>`;
 }
 
-/** 目标条上那半句「最近一条事实」：没有事实时说清「还没有」 */
-function goalLatestFactText(view) {
-  const last = view && view.lastFact;
-  if (!last) return '还没有检查事实';
-  const code = last.exitCode == null ? '' : ` → exit ${last.exitCode}`;
-  return `${last.command}${code}`;
-}
-
 /** 目标视图的唯一读取口（其它模块要 objective / 状态时也走这里，别自己拼 IPC） */
 async function sessionGoalPanelView(sessionId) {
   const sid = String(sessionId || '');
@@ -259,7 +244,7 @@ async function continueSessionGoal() {
   }
 }
 
-/** 这一轮是不是正在跑（两个面都据此决定显示「停止」还是「继续」） */
+/** 这一轮是不是正在跑（据此决定显示「停止」还是「继续」） */
 function goalSessionRunning(sessionId) {
   const sid = String(sessionId || '');
   if (!sid || typeof sessionActiveRuns === 'undefined' || !sessionActiveRuns) return false;
@@ -275,7 +260,7 @@ function goalCanContinue(view, running) {
 }
 
 /**
- * 写 HTML 但内容没变就不动 DOM：两个面都是滚动容器，2s 轮询里每次重建 innerHTML
+ * 写 HTML 但内容没变就不动 DOM：面板是滚动容器，2s 轮询里每次重建 innerHTML
  * 会把用户的阅读位置顶回顶部（目标越推进、事实越多，这个毛病越明显）。
  */
 function writeGoalHtml(el, html) {
@@ -329,123 +314,31 @@ function renderGoalPanel(view, note) {
   </div>`);
 }
 
-/** 收起目标条（没有目标 / 目标已是历史）：连同展开区与 aria 一起复位 */
-function hideGoalBar() {
-  const bar = goalPanelEl('goal-bar');
-  if (!bar) return;
-  bar.hidden = true;
-  const facts = goalPanelEl('goal-bar-facts');
-  if (facts) facts.hidden = true;
-  const toggle = goalPanelEl('goal-bar-toggle');
-  if (toggle) toggle.setAttribute('aria-expanded', 'false');
-}
-
-/**
- * 气泡区上方的目标条。与面板同源同一次取数，只是更短：
- * `◎ 目标… · 第 3/12 轮 · npm test → exit 1`，点开就地看检查事实。
- *
- * 历史目标（已收尾 + 之后对话又继续）**不挂条**：它不在这条对话的当前上下文里，
- * 挂在气泡上方等于天天告诉人「你在做这件事」。要看那条目标的账，去侧栏「目标」页。
- */
-function renderGoalBar(view) {
-  const bar = goalPanelEl('goal-bar');
-  if (!bar) return;
-  if (!view || view.superseded) {
-    hideGoalBar();
-    return;
-  }
-  const sessionId = currentGoalSessionId();
-  const running = goalSessionRunning(sessionId);
-  bar.hidden = false;
-  bar.dataset.state = String(view.outcome || view.status || 'active');
-  const objective = goalPanelEl('goal-bar-objective');
-  if (objective) objective.textContent = view.objective;
-  const mark = goalPanelEl('goal-bar-mark');
-  if (mark) mark.textContent = view.outcome === 'complete' ? '✔' : running ? '◉' : '◎';
-  const round = goalPanelEl('goal-bar-round');
-  if (round) {
-    const label = goalStatusLabel(view);
-    round.textContent = goalIsClosed(view)
-      ? goalStateText(view)
-      : `第 ${Number(view.attempt) || 0}/${Number(view.maxAttempts) || 0} 轮${
-          label && label !== '进行中' ? ` · ${label}` : ''
-        }`;
-  }
-  const fact = goalPanelEl('goal-bar-fact');
-  if (fact) {
-    fact.textContent = goalLatestFactText(view);
-    fact.dataset.state = view.lastFact ? (view.lastFact.ok ? 'ok' : 'fail') : 'none';
-  }
-  const stopBtn = goalPanelEl('goal-bar-stop');
-  if (stopBtn) stopBtn.hidden = !running;
-  const continueBtn = goalPanelEl('goal-bar-continue');
-  if (continueBtn) continueBtn.hidden = !goalCanContinue(view, running);
-  const facts = goalPanelEl('goal-bar-facts');
-  if (facts && !facts.hidden) {
-    // 展开区是个滚动容器，内容没变就不重写（见 writeGoalHtml）
-    writeGoalHtml(
-      facts,
-      `${goalChecksHtml(view)}${goalTodoHtml(view)}
-      <div class="goal-section">
-        <div class="goal-section-title">检查事实（代码记录，不可编辑）</div>
-        ${goalFactsHtml(view)}
-      </div>`
-    );
-  }
-}
-
-function toggleGoalBarFacts(force) {
-  const facts = goalPanelEl('goal-bar-facts');
-  const toggle = goalPanelEl('goal-bar-toggle');
-  if (!facts || !toggle) return;
-  const open = force === 'open' ? true : force === 'close' ? false : facts.hidden;
-  facts.hidden = !open;
-  toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-  // 展开时补一次内容（没有视图就什么都不画 —— 目标条收起时本来也点不到）
-  if (open && goalUiViewCurrent()) renderGoalBar(goalUiViewCurrent());
-}
-
-/** 当前会话可用的视图：缓存那份如果属于上一个会话就当没有（切会话瞬间不能画旧目标） */
-function goalUiViewCurrent() {
-  return goalUiSessionId && goalUiSessionId === currentGoalSessionId() ? goalUiView : null;
-}
-
-/** 面板可见或目标条在显示时才有心跳；两者都没有就停（普通会话零成本） */
+/** 面板可见才有心跳；不可见立即停（普通会话零成本） */
 function syncGoalPoll() {
-  const bar = goalPanelEl('goal-bar');
-  const wanted = goalPanelVisible || !!(goalUiViewCurrent() && bar && !bar.hidden);
-  if (wanted && !goalPanelTimer) {
+  if (goalPanelVisible && !goalPanelTimer) {
     goalPanelTimer = setInterval(() => refreshGoalPanel(), GOAL_PANEL_POLL_MS);
-  } else if (!wanted && goalPanelTimer) {
+  } else if (!goalPanelVisible && goalPanelTimer) {
     clearInterval(goalPanelTimer);
     goalPanelTimer = null;
   }
 }
 
 /**
- * 取一次视图并渲染两个面。取不到不是错误：面板显示空态即可（比如 Gateway 还没热）。
- * @param {{ silent?: boolean }} [opts] silent = 后台拍（事件驱动），失败不改写面板文案
+ * 取一次视图并渲染面板。取不到不是错误：面板显示空态即可（比如 Gateway 还没热）。
+ * 只有面板可见时才有人看这份结果，所以失败直接写在面板上（没有「静默拍」这一说）。
  */
-async function refreshGoalPanel(opts = {}) {
+async function refreshGoalPanel() {
   if (goalPanelRendering) {
     // 正在取。这一拍不能丢：切会话正是最容易撞上的时刻（旧会话的心跳还在飞），
-    // 而丢掉它就意味着新会话的目标条要等到下一次事件才出现。取完补一拍。
+    // 丢掉它就意味着新会话要等到下一次心跳才看到目标。取完补一拍。
     goalPanelPending = true;
     return;
   }
   const sessionId = currentGoalSessionId();
-  if (goalUiSessionId && goalUiSessionId !== sessionId) {
-    // 已经切走了：先把旧目标条收掉，别让它挂在新会话上方等这一次取数
-    goalUiView = null;
-    goalUiSessionId = '';
-    renderGoalBar(null);
-  }
   const api = (window.diecloud || {}).sessionGoalPanel;
   if (!sessionId || typeof api !== 'function') {
-    goalUiView = null;
-    goalUiSessionId = '';
     renderGoalPanel(null, '选择会话后显示该会话的目标');
-    renderGoalBar(null);
     syncGoalPoll();
     return;
   }
@@ -457,40 +350,19 @@ async function refreshGoalPanel(opts = {}) {
       goalPanelPending = true;
       return;
     }
-    goalUiView = res && res.ok ? res.goal : null;
-    goalUiSessionId = sessionId;
-    renderGoalPanel(goalUiView, res && !res.ok && !opts.silent ? '目标读取失败' : '');
-    renderGoalBar(goalUiView);
+    renderGoalPanel(res && res.ok ? res.goal : null, res && !res.ok ? '目标读取失败' : '');
   } catch {
-    if (!opts.silent) {
-      goalUiView = null;
-      goalUiSessionId = '';
-      renderGoalPanel(null, '目标读取失败');
-      renderGoalBar(null);
-    }
+    renderGoalPanel(null, '目标读取失败');
   } finally {
     goalPanelRendering = false;
     if (goalPanelPending) {
       goalPanelPending = false;
       // 让出当前栈再补：这一拍很可能正是刚才被挡掉的那次调用
-      setTimeout(() => void refreshGoalPanel(opts), 0);
+      setTimeout(() => void refreshGoalPanel(), 0);
     } else {
       syncGoalPoll();
     }
   }
-}
-
-/**
- * 轮内变化的一拍（事件驱动，节流）：目标条/面板跟着 `dispatchAgentRunEvent` 更新，
- * 与「子代理」面板同一处、同一节奏。不可见时照样取一次 —— 目标条要靠这一拍才知道
- * 「这个会话刚有了目标」（所以不能像侧栏面板那样直接返回）。
- */
-function scheduleGoalUiRefresh() {
-  if (goalUiRefreshTimer) return;
-  goalUiRefreshTimer = setTimeout(() => {
-    goalUiRefreshTimer = null;
-    void refreshGoalPanel({ silent: true });
-  }, GOAL_UI_REFRESH_THROTTLE_MS);
 }
 
 /** 面板可见时的首刷 + 心跳启动（唯一入口，与 context / index 面板同构） */
@@ -503,6 +375,16 @@ function onGoalPanelShown() {
 function onGoalPanelHidden() {
   goalPanelVisible = false;
   syncGoalPoll();
+}
+
+/**
+ * 切会话 / 重绘后的重取（`finalizeChatRenderAfterMessages` 调）。
+ *
+ * 面板不在前台就不打这次 IPC：可见性只有一个来源（本模块的 `goalPanelVisible`），
+ * 而面板可见时本来就有 2s 心跳 —— 再按渲染次数补一次只是白打一次本地 RPC。
+ */
+function refreshGoalPanelIfVisible() {
+  if (goalPanelVisible) refreshGoalPanel();
 }
 
 /** 清除本会话目标（纯存储操作：目标语义不在这里，删除即删除） */
@@ -533,29 +415,13 @@ function initGoalPanel() {
   if (continueBtn) continueBtn.addEventListener('click', () => void continueSessionGoal());
   const stopBtn = goalPanelEl('goal-panel-stop');
   if (stopBtn) stopBtn.addEventListener('click', () => stopGoalTurn());
-  const barToggle = goalPanelEl('goal-bar-toggle');
-  if (barToggle) barToggle.addEventListener('click', () => toggleGoalBarFacts());
-  const barContinue = goalPanelEl('goal-bar-continue');
-  if (barContinue) barContinue.addEventListener('click', () => void continueSessionGoal());
-  const barStop = goalPanelEl('goal-bar-stop');
-  if (barStop) barStop.addEventListener('click', () => stopGoalTurn());
 }
 
 window.initGoalPanel = initGoalPanel;
 window.onGoalPanelShown = onGoalPanelShown;
 window.onGoalPanelHidden = onGoalPanelHidden;
 window.refreshGoalPanel = refreshGoalPanel;
-window.scheduleGoalUiRefresh = scheduleGoalUiRefresh;
+window.refreshGoalPanelIfVisible = refreshGoalPanelIfVisible;
 window.sessionGoalPanelView = sessionGoalPanelView;
 window.pauseSessionGoal = pauseSessionGoal;
 window.continueSessionGoal = continueSessionGoal;
-window.DieyunGoalPanel = {
-  initGoalPanel,
-  refreshGoalPanel,
-  scheduleGoalUiRefresh,
-  onGoalPanelShown,
-  onGoalPanelHidden,
-  sessionGoalPanelView,
-  pauseSessionGoal,
-  continueSessionGoal
-};
