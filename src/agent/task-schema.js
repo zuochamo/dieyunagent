@@ -7,13 +7,12 @@ const TASK_STATUSES = [
   'completed',
   'failed',
   'cancelled',
-  'timeout',
-  'retrying'
+  'timeout'
 ];
 
-const EXCEPTION_POLICIES = ['retry', 'fail', 'escalate'];
-
-const DEFAULT_MAX_RETRIES = 3;
+// 'retry' 已删除：重试只在 Rust planner 一处执行（`planner/run.rs` 的 `max_worker_retries`）。
+// coordinator 侧的 retrying / retryQueue / retryCount 从来没有消费者，只是把失败写成「重试中」。
+const EXCEPTION_POLICIES = ['fail', 'escalate'];
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_PRIORITY = 5;
 
@@ -44,13 +43,10 @@ function normalizeTask(input) {
   const now = Date.now();
   const taskId = input.taskId || newId('task');
   const roleId = normalizeWorkerId(input.roleId || input.worker || 'A');
-  const maxRetries = Math.min(3, Math.max(0, Number(input.maxRetries ?? DEFAULT_MAX_RETRIES)));
   const timeoutMs = Math.max(5000, Number(input.timeoutMs ?? DEFAULT_TIMEOUT_MS));
   const deadlineAt = Number(input.deadlineAt) || now + timeoutMs;
   const priority = Math.min(10, Math.max(1, Number(input.priority ?? DEFAULT_PRIORITY)));
-  const policy = EXCEPTION_POLICIES.includes(input.exceptionPolicy)
-    ? input.exceptionPolicy
-    : 'retry';
+  const policy = EXCEPTION_POLICIES.includes(input.exceptionPolicy) ? input.exceptionPolicy : 'fail';
 
   return {
     taskId,
@@ -63,8 +59,6 @@ function normalizeTask(input) {
     deadlineAt,
     priority,
     exceptionPolicy: policy,
-    maxRetries,
-    retryCount: Math.max(0, Number(input.retryCount) || 0),
     timeoutMs,
     worktreePath: input.worktreePath ? String(input.worktreePath) : null,
     worktreeBranch: input.worktreeBranch ? String(input.worktreeBranch) : null,
@@ -78,7 +72,6 @@ function normalizeTask(input) {
 }
 
 module.exports = {
-  DEFAULT_MAX_RETRIES,
   DEFAULT_TIMEOUT_MS,
   newId,
   normalizeTask

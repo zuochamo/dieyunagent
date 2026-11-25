@@ -115,17 +115,54 @@ function createMcpHandlers(shared) {
             retryable: true
           };
         }
+        const { changeReceipt, fingerprintJson } = require('../change-receipt');
+        const action = String((a && a.action) || '');
+        const target = `mcp:${action}${a && a.id ? `:${a.id}` : ''}`;
+        // 改动前快照：只取「有哪些服务、开没开、配没配」，够回答「从什么改成什么」；
+        // 列表本身是只读动作，动作就是 list 时不用再取一次。
+        let before = null;
+        if (action !== 'list') {
+          try {
+            const listed = await mcpManager.applyToolRequest({ action: 'list' }, {});
+            if (listed && Array.isArray(listed.servers)) before = listed.servers;
+          } catch {
+            before = null;
+          }
+        }
         try {
           // request_credential 需要把「请人填凭据」推到界面：只有这条通道能让模型既发起、又看不到明文。
           // 没有可用窗口（后台频道轮次）时传 null —— 让 manager 明确回「界面未就绪」，不假装弹过。
           const canNotify = !!webContents && !webContents.isDestroyed();
-          return await mcpManager.applyToolRequest(a, {
+          const result = await mcpManager.applyToolRequest(a, {
             notifyCredentialRequest: canNotify
               ? (payload) => {
-                  if (!webContents.isDestroyed()) webContents.send('mcp:credential-request', payload);
+                  // 与「申请开能力」合流成同一条通道（渲染器按 kind 分发到对应弹窗/设置页）
+                  if (!webContents.isDestroyed()) {
+                    webContents.send('agent:capability-request', { kind: 'mcpCredential', ...payload });
+                  }
                 }
               : null
           });
+          const after = result && Array.isArray(result.servers) ? result.servers : null;
+          // 只有**真的改了东西**才留回执。四个动作不是改动，写进去等于把审计流灌成噪音：
+          // list（只读）、request_credential（只是请人填）、check_update（只查版本）、
+          // repair_env（打开环境修复界面）。
+          const notAChange = new Set(['list', 'request_credential', 'check_update', 'repair_env']);
+          return {
+            ...result,
+            ...(notAChange.has(action)
+              ? null
+              : {
+                  change: changeReceipt(userDataPath, {
+                    target,
+                    before: before ? fingerprintJson(before) : null,
+                    after: after ? fingerprintJson(after) : null,
+                    // 写盘 + 重挂 MCP 会话都在这一调用内完成
+                    effectiveFrom: 'immediate',
+                    verifyWith: 'mcp_manage action=list'
+                  })
+                })
+          };
         } catch (err) {
           return {
             ok: false,

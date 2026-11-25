@@ -92,32 +92,68 @@ function classifyFailure(name, result, thrownErr) {
  * @param {number} stallMs 0/未配置 = 不启用
  * @returns {Promise<T>}
  */
-function raceToolStall(promise, call, stallMs) {
+function raceToolStall(promise, call, stallMs, activityProbe) {
   const ms = Number(stallMs) || 0;
   if (!(ms > 0)) return promise;
   // 原调用的后续 reject 必须被吃掉：race 已经不再持有它，否则会升级成
   // 进程级 unhandledRejection（Electron 主进程会弹错误框）。
   promise.catch(() => {});
+  const probe = typeof activityProbe === 'function' ? activityProbe : null;
+  let lastActivity = probe ? Number(probe()) || 0 : 0;
   let timer = null;
   const guard = new Promise((_, reject) => {
-    timer = setTimeout(() => {
+    const onFire = () => {
+      // 长任务工具（`subagent`）**有进展就不算卡住**：这个窗口原本从派发瞬间开始计时，
+      // 连排队时间也算进去 —— 一个稳定产出、只是跑得久的子 Agent 会被判 TOOL_STALLED
+      // （不可重试），父级丢掉它的结果并重派，同一块调研付费两遍（2026-11-19 审计）。
+      // 只延长、不缩短：并发多路时最多互相续命，是安全方向。
+      if (probe) {
+        const now = Number(probe()) || 0;
+        if (now > lastActivity) {
+          lastActivity = now;
+          arm();
+          return;
+        }
+      }
       const minutes = Math.max(1, Math.round(ms / 60000));
       const name = (call && call.name) || '工具';
       const e = new Error(`${name} 超过 ${minutes} 分钟没有返回，已判定卡住（原调用仍在后台运行，未被终止）。`);
       e.code = 'TOOL_STALLED';
       e.retryable = false;
       e.stalled = true;
-      e.suggestedFix =
-        '不要原样重跑同一条调用。① 长驻/守护型脚本（打印 READY 后不退出）必须用 detached=true；' +
-        '② 长任务给 waitMs 让它到点转后台，再用 host_proc action=output 续读；' +
-        '③ 交互式命令（如 timeout /t、等待 stdin 的工具）在无控制台环境下会一直挂住，改用轮询式检查。';
+      // 长任务工具的补救方式与 `host_exec` 完全不同：别给它一条「用 detached / host_proc」
+      // 的误导建议（那是 shell 命令的解法）。
+      e.suggestedFix = isLongRunningAgentTool(name)
+        ? '这个子 Agent 没有新进展：它可能卡在排队或某个工具上。缩小问题范围后重派一次，不要原样重跑；它的卡片里能看到已经跑到哪一步。'
+        : '不要原样重跑同一条调用。① 长驻/守护型脚本（打印 READY 后不退出）必须用 detached=true；' +
+          '② 长任务给 waitMs 让它到点转后台，再用 host_proc action=output 续读；' +
+          '③ 交互式命令（如 timeout /t、等待 stdin 的工具）在无控制台环境下会一直挂住，改用轮询式检查。';
       reject(e);
-    }, ms);
-    if (timer && typeof timer.unref === 'function') timer.unref();
+    };
+    const arm = () => {
+      timer = setTimeout(onFire, ms);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    };
+    arm();
   });
   return Promise.race([promise, guard]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+/**
+ * 长任务工具的「还有进展」探针：懒 require `subagent-runner` 的进展信标。
+ *
+ * 懒 require 是刻意的：`subagent-runner` 与工具层互相牵连，加载期互相引入会固化顺序
+ * （同 `tool-gate` 里懒 require `rust-loop-runner` 的理由）。
+ */
+function longRunningActivityProbe() {
+  try {
+    const runner = require('./subagent-runner');
+    return typeof runner.subagentActivityAt === 'function' ? runner.subagentActivityAt : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -175,7 +211,12 @@ class ToolHarnessSession {
       try {
         // 同步抛错也变成 reject：看门狗只认 promise，不能让它漏掉一层。
         const invocation = Promise.resolve().then(() => invoke(call.name, call.args));
-        call.result = await raceToolStall(invocation, call, stallMs);
+        call.result = await raceToolStall(
+          invocation,
+          call,
+          stallMs,
+          isLongRunningAgentTool(call.name) ? longRunningActivityProbe() : null
+        );
         call.failure = classifyFailure(call.name, call.result, null);
         if (call.failure && call.failure.retryable && attempt < transientMaxRetries) {
           lastFailure = call.failure;
@@ -207,7 +248,11 @@ class ToolHarnessSession {
 const sessions = new Map();
 
 function harnessSessionKey(ctx) {
-  return `${ctx.sessionId || 's'}::${ctx.runId || 'r'}`;
+  // 子 Agent 循环要**自己一张指纹表**：它们与父循环共用一张表时，三路调研都读同一个入口文件
+  // 会把父级的「重复调用止损」撑满（父级自己一次没调过也被 REPEAT_BLOCK），反方向是某个子
+  // Agent 真在死循环时，别的子 Agent 的调用把它的连续 streak 打断，止损失效（2026-11-19 审计）。
+  // `harnessRunKey` 由派发方显式给出（子 Agent = 它自己的 id），没给就退回运行 id。
+  return `${ctx.sessionId || 's'}::${ctx.harnessRunKey || ctx.runId || 'r'}`;
 }
 
 function getToolHarnessSession(ctx = {}) {

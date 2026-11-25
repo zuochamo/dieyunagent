@@ -56,6 +56,8 @@ const MUTATING_TOOL_NAMES = Object.freeze(
     // （截屏→点→看→点），并行投递只会互相踩；screenshot 也随工具名一同串行，代价可忽略。
     'computer',
     'skill_create',
+    // 改技能正文：与创建/删除同属「写 ~/.dieyun/skills」，串行队列才不会被两次改写交叉
+    'skill_update',
     // 删技能目录是物理删除（不可恢复），与 skill_create 一样进串行队列
     'skill_delete',
     'plan_create',
@@ -79,7 +81,7 @@ const MUTATING_TOOL_NAMES = Object.freeze(
 
 /** 会写入本地文件的工具名（不含 host_exec，后者按命令内容判断）。 */
 const FILE_WRITE_TOOL_NAMES = Object.freeze(
-  new Set(['fs_write_file', 'fs_edit', 'skill_create', 'agents_md_propose'])
+  new Set(['fs_write_file', 'fs_edit', 'skill_create', 'skill_update', 'agents_md_propose'])
 );
 
 /**
@@ -331,21 +333,38 @@ function bytesToLatin1(bytes, start, end) {
 
 /**
  * 用文件头魔数判定图片真实格式；只返回上游支持的 MIME，
+ * 判定不出（bmp/svg/heic/tiff/ico、空串）一律返回 ''。
+ *
+ * **唯一判型实现**：base64 版（`sniffVisionImageMime`）与「拿到原始字节」的调用方
+ * （频道多媒体下载、本机/手机摄像头）都走这里 —— 以前 `channels/wecom-media.js`
+ * 照抄过一份同样的四格式魔数，两边会各自先支持新格式。
+ *
+ * @param {Buffer|Uint8Array|null} bytes 原始字节（前 16 字节足够）
+ * @returns {string} `image/jpeg` / `image/png` / `image/webp` / `image/gif`，认不出 ''
+ */
+function sniffImageMimeFromBytes(bytes) {
+  const b = bytes && bytes.length ? bytes : null;
+  if (!b || b.length < 3) return '';
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+    return 'image/png';
+  }
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  const sig6 = bytesToLatin1(b, 0, 6);
+  if (sig6 === 'GIF87a' || sig6 === 'GIF89a') return 'image/gif';
+  if (b.length >= 12 && bytesToLatin1(b, 0, 4) === 'RIFF' && bytesToLatin1(b, 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return '';
+}
+
+/**
+ * 用文件头魔数判定图片真实格式；只返回上游支持的 MIME，
  * 判定不出（bmp/svg/heic/tiff/ico、坏 base64、空串）一律返回 ''。
  */
 function sniffVisionImageMime(base64) {
   const head = decodeBase64Head(base64, 16);
   if (!head || head.length < 3) return '';
-  if (head.length >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
-    return 'image/png';
-  }
-  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
-  const sig6 = bytesToLatin1(head, 0, 6);
-  if (sig6 === 'GIF87a' || sig6 === 'GIF89a') return 'image/gif';
-  if (head.length >= 12 && bytesToLatin1(head, 0, 4) === 'RIFF' && bytesToLatin1(head, 8, 12) === 'WEBP') {
-    return 'image/webp';
-  }
-  return '';
+  return sniffImageMimeFromBytes(head);
 }
 
 /** 拆 data URL → { mime, base64 }；非 data: URL 返回 null。 */
@@ -857,6 +876,7 @@ const SHARED_EXPORTS = {
   VISION_IMAGE_MIME,
   REJECTED_IMAGE_PLACEHOLDER,
   normalizeVisionImageMime,
+  sniffImageMimeFromBytes,
   sniffVisionImageMime,
   sanitizeImageUrlForApi,
   sanitizeChatBodyImagesForApi,

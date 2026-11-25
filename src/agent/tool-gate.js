@@ -151,7 +151,12 @@ function callContext(call) {
     /** 心跳轮允许动的根目录（空 = 取 workspacePath）；越界写/执行一律拒 */
     wakeRoot: ctx.wakeRoot ? String(ctx.wakeRoot) : '',
     /** 这一轮的写/执行预算（跨调用累计，由关卡自增；`agent-limits.aliveWake*MaxPerWake` 定上限） */
-    wakeBudget: ctx.wakeBudget && typeof ctx.wakeBudget === 'object' ? ctx.wakeBudget : null
+    wakeBudget: ctx.wakeBudget && typeof ctx.wakeBudget === 'object' ? ctx.wakeBudget : null,
+    /**
+     * 子 Agent 作用域：这一轮**能调哪些工具**（研究子 Agent = Explore 白名单）。
+     * 空 = 不是子 Agent 循环（普通对话 / planner 协调者）。
+     */
+    allowedToolNames: Array.isArray(ctx.allowedToolNames) ? ctx.allowedToolNames : null
   };
 }
 
@@ -472,8 +477,7 @@ const hookTelemetry = {
   }
 };
 
-const hookSpillOutput = {
-  id: 'spill-output',
+const hookSpillOutput = {  id: 'spill-output',
   stage: 'after',
   run(call) {
     if (call.failure) return; // 失败信封不落盘：模型需要看到错误本身
@@ -491,6 +495,43 @@ const hookSpillOutput = {
 };
 
 /**
+ * 子 Agent 作用域：**只读研究子 Agent 能调什么，由它的工具表说了算**。
+ *
+ * 为什么这条必须是关卡（2026-11-19 审计 P0-7）：子 Agent 的「只读」以前只是**没把写类工具
+ * 发给模型**（`buildExploreTools` 过滤），账本按模型返回的 `tool_calls` 原样执行，执行层
+ * 没有任何白名单校验。于是一旦模型输出白名单外的名字（幻觉、串味、或 `write_file` / `edit` /
+ * `bash` 这类别名被归一成写类工具），就会真的落到 `executeAgentTool` 上写主工作区 ——
+ * 直接推翻 `subagent` 工具对模型承诺的「只读、不改工作区」。
+ *
+ * 判据是**结构性数据**（runner 已经算好的 `childToolNames()` 经 ctx 传进来），不维护第二份清单。
+ */
+const hookSubagentScope = {
+  id: 'subagent-scope',
+  stage: 'before',
+  run(call) {
+    const ctx = callContext(call);
+    const allowed = ctx.allowedToolNames;
+    // `null` = **不是**子 Agent 循环（普通对话 / planner 协调者），不归这条关卡管；
+    // 空数组 = 是子 Agent 但一个工具都没发 —— 那不是「不拦」而是「全都拦」。
+    // 两种必须在判据上分开：以前写成 `!allowed.length` 一起放行，等于白名单一旦没送到
+    // （装配漏传）就静默变成「没有任何限制」。
+    if (!allowed) return;
+    if (allowed.includes(call.name)) return;
+    recordTelemetry(call, false, 'SUBAGENT_TOOL_SCOPE', 0);
+    const sample = allowed.slice(0, 10).join(' / ');
+    call.block = wrapStructuredError({
+      retryable: false,
+      errorCode: 'SUBAGENT_TOOL_SCOPE',
+      error:
+        `工具 ${call.name} 没有执行：这一轮是**只读研究子 Agent**，它的工具表里没有这个工具。` +
+        (sample ? `可用的只有：${sample}${allowed.length > 10 ? ' 等' : ''}。` : '这一轮的工具表是空的。') +
+        '写文件 / 改文件 / 执行命令 / 再派子 Agent 都在表外，重试也不会成功；' +
+        '要动手就把「改什么、为什么」写进结论，交给协调者去做。'
+    });
+  }
+};
+
+/**
  * 默认关卡清单：**顺序即语义**。
  * 想加一条检查 → 在这个数组里按正确位置插入，不要改 `runToolGateStage` 的流程。
  */
@@ -498,6 +539,7 @@ const DEFAULT_TOOL_GATE_HOOKS = Object.freeze([
   hookValidateArgs,
   hookToolPermission,
   hookReadOnlyScope,
+  hookSubagentScope,
   hookRepeatGuard,
   hookTelemetry,
   hookSpillOutput

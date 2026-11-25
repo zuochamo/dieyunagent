@@ -13,6 +13,7 @@ const {
   MAX_FILE_CHARS
 } = require('../agents-md');
 const { readAgentsMdPrefs } = require('./agents-md-prefs');
+const { changeReceipt, fingerprintText } = require('./change-receipt');
 
 const AGENTS_PENDING_REL = '.dieyun/agents-pending.json';
 // section 白名单唯一来源在 agents-md.js，避免模板 / Main / Renderer 各写一份。
@@ -90,6 +91,8 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
   }
 
   const line = reason ? `- ${content}（${reason}）` : content.startsWith('- ') ? content : `- ${content}`;
+  // 回执的 target：写到哪份文件的哪一段（同一个 section 反复改时能看出是同一处）
+  const relSection = `${agentsRelativePath()}#${section}`;
   const before = await ensureAgentsMdFile(gateway, ctx);
   const merged = applySectionUpdates(
     before,
@@ -133,7 +136,14 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
       draft: true,
       applied: applied.length,
       sizeMeta,
-      message: '已写入草稿 .dieyun/agents-draft.md，未修改 AGENTS.md'
+      message: '已写入草稿 .dieyun/agents-draft.md，未修改 AGENTS.md',
+      change: changeReceipt(userDataPath, {
+        target: relSection,
+        before: fingerprintText(before),
+        after: fingerprintText(merged.content),
+        effectiveFrom: 'user-accept',
+        verifyWith: `fs_read_file(${agentsDraftRelativePath()})`
+      })
     };
   }
 
@@ -155,7 +165,14 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
       applied: applied.length,
       workspacePath,
       sizeMeta,
-      message: '已打开 Diff 预览，请采纳或放弃'
+      message: '已打开 Diff 预览，请采纳或放弃',
+      change: changeReceipt(userDataPath, {
+        target: relSection,
+        before: fingerprintText(before),
+        after: fingerprintText(merged.content),
+        effectiveFrom: 'user-accept',
+        verifyWith: 'fs_read_file(.dieyun/AGENTS.md)'
+      })
     };
   }
 
@@ -182,7 +199,15 @@ async function executeAgentsMdProposeMain(gateway, args, ctx = {}, userDataPath 
     sizeMeta,
     message: `已更新 AGENTS.md（${applied.length} 条；当前 ${sizeMeta.contentLength}/${sizeMeta.maxChars} 字${
       sizeMeta.nearLimit ? '，已接近上限，下次请先合并同主题条目' : ''
-    }）`
+    }）`,
+    change: changeReceipt(userDataPath, {
+      target: relSection,
+      before: fingerprintText(before),
+      after: fingerprintText(merged.content),
+      // 项目地图是在**下一轮**装配系统提示时才进上下文，不是这一轮
+      effectiveFrom: 'next-round',
+      verifyWith: `fs_read_file(${agentsRelativePath()})`
+    })
   };
 }
 

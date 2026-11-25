@@ -115,8 +115,8 @@ const PLAN_TOOLS = [
     function: {
       name: 'plan_delete',
       description:
-        '删除指定 id 的计划（含目标型）。注意它连运行记录一起删；目标型只是「别再跑了、但保留已跑事实」时，' +
-        '让用户在「定时任务 → 目标」面板里停用，或用 plan_cancel 先中止当前这一轮',
+        '删除指定 id 的计划（含目标型）。注意它连运行记录一起删；只是「别再跑了、但保留已跑事实」时' +
+        '用 plan_set_enabled(false)，只想停当前这一轮用 plan_cancel。',
       parameters: {
         type: 'object',
         properties: {
@@ -155,6 +155,94 @@ const PLAN_TOOLS = [
           id: { type: 'string', description: '计划 id（先用 plan_list 取）' }
         },
         required: ['id']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'plan_update',
+      description:
+        '改一条已存在的计划（定时 / 目标型）：**给什么改什么，没给的字段保持原样**。\n' +
+        '用途：用户说「把那个计划改成每天 10 点」「验收命令换一条」「这个项目路径变了」。' +
+        '运行态（跑了几轮、检查事实、收尾结论）不受影响 —— 那是计划自己的账本，不该被表单冲掉。\n' +
+        '只是「别再跑了、但保留已跑事实」时用 plan_set_enabled(false)，不要用 plan_delete（那是连记录一起删）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '计划 id（先用 plan_list 取）' },
+          name: { type: 'string', description: '改名称' },
+          prompt: { type: 'string', description: '改任务说明（每轮交接班的依据）' },
+          description: { type: 'string', description: '改用户可见的描述' },
+          rrule: {
+            type: 'string',
+            description: '改定时规则（不含 RRULE: 前缀）；与 onceAt 互斥，给了它就等于改成「按规则重复」'
+          },
+          onceAt: {
+            type: 'string',
+            description: '改成只跑一次的 ISO8601 本地时间；与 rrule 互斥'
+          },
+          goal: {
+            type: 'object',
+            description: '改目标型计划的验收面（objective + checks 都要给；只换检查也要带上 objective）',
+            properties: {
+              objective: { type: 'string', description: '一句话说清「什么状态算达成」' },
+              checks: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '每项一条检查命令（原样执行，退出码 0 = 通过）'
+              },
+              cwd: { type: 'string', description: '检查命令的工作目录（可选）' }
+            },
+            required: ['objective', 'checks']
+          },
+          skillIds: { type: 'array', items: { type: 'string' }, description: '整体替换关联技能' },
+          todos: { type: 'array', items: { type: 'string' }, description: '整体替换 TODO 清单' },
+          workspace: {
+            type: 'string',
+            description: '改执行时的工作空间（本地绝对路径）；传空串 = 改回「跟随执行时的工作空间」'
+          }
+        },
+        anyOf: [
+          { required: ['name'] },
+          { required: ['prompt'] },
+          { required: ['description'] },
+          { required: ['rrule'] },
+          { required: ['onceAt'] },
+          { required: ['goal'] },
+          { required: ['skillIds'] },
+          { required: ['todos'] },
+          { required: ['workspace'] }
+        ],
+        required: ['id'],
+        allOf: [
+          {
+            if: { required: ['rrule'] },
+            then: { not: { required: ['onceAt'] } }
+          },
+          {
+            if: { required: ['onceAt'] },
+            then: { not: { required: ['rrule'] } }
+          }
+        ]
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'plan_set_enabled',
+      description:
+        '启用 / 停用一条计划。「停用」= 到点不再触发，但计划本身、跑过的轮次与检查事实都留着，' +
+        '随时可以再启用；这跟 plan_delete（连记录一起删）、plan_cancel（只中止当前这一轮）都不是一回事。\n' +
+        '目标型计划要「先别跑了、以后再说」时用这个，不要删。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '计划 id（先用 plan_list 取）' },
+          enabled: { type: 'boolean', description: 'true = 启用，false = 停用' }
+        },
+        required: ['id', 'enabled']
       }
     }
   }

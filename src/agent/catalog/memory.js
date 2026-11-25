@@ -175,10 +175,35 @@ const SKILL_DELETE_TOOL = {
 };
 
 
+const SKILL_UPDATE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'skill_update',
+    description:
+      '改一个已有技能的 SKILL.md（目录不重命名、启用状态不变）。给什么改什么：name / description / content（正文）。\n' +
+      '什么时候用：用户说「把这个技能的第 3 步改一下」「补一条注意事项」——**不要**删了重建：' +
+      'createUserSkill 每次都新建目录（同名会变成 name-1），重建的副作用是启用状态丢失、技能列表堆副本。\n' +
+      '预装内置技能不可修改（随包更新，改了下次升级会丢）。改之前先 fs_read_file 看一眼现在的全文。',
+    parameters: {
+      type: 'object',
+      properties: {
+        dir: { type: 'string', description: '技能目录绝对路径（技能列表里显示的那个目录）' },
+        name: { type: 'string', description: '新名称（省略 = 保持原样）' },
+        description: { type: 'string', description: '新简介（省略 = 保持原样）' },
+        content: { type: 'string', description: '新正文（Markdown；省略 = 保持原样）' }
+      },
+      required: ['dir'],
+      anyOf: [{ required: ['name'] }, { required: ['description'] }, { required: ['content'] }]
+    }
+  }
+};
+
+
 module.exports = {
   AGENTS_MD_PROPOSE_TOOL,
   SKILL_CREATE_TOOL,
   SKILL_DELETE_TOOL,
+  SKILL_UPDATE_TOOL,
   MEMORY_RECALL_TOOL,
   MEMORY_FORGET_TOOL,
   MEMORY_TOOLS,

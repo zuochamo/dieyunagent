@@ -650,8 +650,8 @@ function validateToolArgs(name, args, opts) {
       }
       if (action === 'add' || action === 'update') {
         const transport = String(a.transport || '').trim();
-        // 「算不算远端」的唯一判定在 mcp/manage.js（`toStoreRequest` 落库时用的是同一份），
-        // 别名（remote / http）在那里被认成远端 —— 否则就是「过校验却按 stdio 落库」。
+        // 「算不算远端」的判定只有 mcp/manage.js 一份（生成校验先跑 enum，因此 enum 里已列出
+        // sse / streamable-http；这里只为 legacy 别名 remote / http 与「只给 url、不给 transport」兜底）。
         const remote = isRemoteTransport(transport, a.url);
         if (action === 'add') {
           if (remote && !String(a.url || '').trim()) {

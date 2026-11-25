@@ -18,7 +18,9 @@ const { getToolHarnessSession, clearToolHarnessSession } = require('./tool-harne
 const { createToolCall } = require('./tool-gate');
 const { isMutatingAgentTool, MUTATING_TOOLS } = require('./tool-classify');
 const { sniffVisionImageMime } = require('./guardrails-shared');
-const { getAgentLimits } = require('./agent-limits');
+const { getAgentLimits, resolveAgentLoopSpec } = require('./agent-limits');
+// 自检工具（agent_inspect）要报「最近哪些工具老失败」：摘要是唯一来源，不在这里另算一份。
+const { summarizeTelemetry } = require('./tool-telemetry');
 // 视觉注入预算的编码器（缩长边 → PNG → JPEG → 再缩）唯一实现在 computer/capture.js，
 // 浏览器截图的整页大图也走它，避免两处各写一套缩放规则。
 const { encodeWithinBudget } = require('../computer/capture');
@@ -31,7 +33,7 @@ const {
 } = require('./write-smell-hints');
 const { executeAgentsMdProposeMain } = require('./propose-tools-main');
 // 技能删除的唯一实现（与 IPC skills:delete 共用）
-const { deleteUserSkill } = require('../agent-home');
+const { deleteUserSkill, updateUserSkill: updateUserSkillImpl } = require('../agent-home');
 // MCP 工具的「按用户提问召回」只此一份实现：渲染器装工具表用它，模型的
 // mcp_tool_schema(query) 也用它 —— 两处若各写一套排序，检索结果会互相打架。
 const { recallAgentTools } = require('../tools/tool-vector-index');
@@ -307,8 +309,23 @@ function createMainToolBridge(deps) {
   const plansStore = deps.plansStore || null;
   const plansCreateFromText = deps.plansCreateFromText || null;
   const createUserSkill = deps.createUserSkill || null;
+  // 改技能正文：与删除同一条路（agent-home#updateUserSkill），测试可注入替身
+  const updateUserSkill = deps.updateUserSkill || updateUserSkillImpl || null;
   const onSkillsChanged = deps.onSkillsChanged || null;
   const userDataPath = deps.userDataPath || '';
+  /**
+   * 「申请开某项能力」送到界面：与 `mcp_manage.request_credential` 合流成同一条通道
+   * （`agent:capability-request`，payload 带 `kind`）。没有窗口（频道 / headless / 计划轮）
+   * 时为 null —— 工具会如实回 `CAPABILITY_UI_UNAVAILABLE`，不假装弹过。
+   */
+  const notifyCapabilityRequest =
+    typeof deps.notifyCapabilityRequest === 'function'
+      ? deps.notifyCapabilityRequest
+      : webContents && typeof webContents.isDestroyed === 'function'
+        ? (payload) => {
+            if (!webContents.isDestroyed()) webContents.send('agent:capability-request', payload || {});
+          }
+        : null;
   // 内网 agent 互通（src/peer）：Main 创建的协调器；未启用时三个 peer_* 工具退化为结构化错误，
   // 不做「静默无此工具」——模型需要知道「这个能力没开」而不是「能力不存在」。
   const peerCoordinator = deps.peerCoordinator || null;
@@ -316,6 +333,12 @@ function createMainToolBridge(deps) {
   const sshActions = deps.sshActions || null;
   // Worktree（并行副本）：与设置页同一份实现，见 src/worktree/actions.js
   const worktreeActions = deps.worktreeActions || null;
+
+  /**
+   * 身体（点点）：`pet_set` / `pet_act` 的执行体只认这一个桥（显隐 / 参数 / 瞬时动作）。
+   * 无界面宿主没有宠物，取到 null → 工具回结构化 PEER 式的 PET_UNAVAILABLE。
+   */
+  const getPetBridge = typeof deps.getPetBridge === 'function' ? deps.getPetBridge : null;
   // 手机摄像头：`getMobileBridge` 用取值函数传进来（手机桥由 Main 启动时创建，
   // 工具桥装配时刻可能还没有它；重连/换端口后也总是拿到最新实例）。
   // 没接手机桥时保留 null —— camera_look 会退化成一句结构化错误，而不是「工具不存在」。
@@ -403,6 +426,10 @@ function createMainToolBridge(deps) {
     desktopCameraSource,
     desktopCameraPtz,
     getAgentLimits,
+    // 自检工具：循环预算与遥测算子都从既有单一来源取（不在这里重算）
+    resolveAgentLoopSpec,
+    summarizeTelemetry,
+    notifyCapabilityRequest,
     userDataPath,
     mcpRuntime,
     mcpManager,
@@ -410,6 +437,7 @@ function createMainToolBridge(deps) {
     sshActions,
     worktreeActions,
     createUserSkill,
+    updateUserSkill,
     onSkillsChanged,
     deleteUserSkill,
     plansStore,
@@ -429,7 +457,9 @@ function createMainToolBridge(deps) {
     recallAgentTools,
     slimMcpInputSchema,
     loadModelSettings,
-    getEmbeddingConfig
+    getEmbeddingConfig,
+    // 身体（点点）：聊天轮的 pet_set / pet_act（语义在 alive/pet-tools.js）
+    getPetBridge
   });
 
   /**
@@ -682,25 +712,15 @@ function createMainToolBridge(deps) {
         if (e && (e.name === 'AbortError' || e.code === 'ABORT_ERR')) throw e;
       }
     }
+    // **整份 ctx 透传**，不逐字段手抄：关卡读的 ctx 字段（`readOnly` / `senses` / `wakePower` /
+    // `wakeRoot` / `wakeBudget` / `allowedToolNames` / `harnessRunKey`）由 `tool-gate.callContext`
+    // 统一归一，这里再抄一遍就必然漏 —— 漏掉的正是 `allowedToolNames`，于是子 Agent 的
+    // 只读白名单（`hookSubagentScope`）在生产链路上恒为 null = 不拦（2026-11-21 审计 P0）。
     const harnessCtx = {
-      runId: ctx.runId,
-      sessionId: ctx.sessionId,
-      model: ctx.model,
-      contextTierId: ctx.contextTierId,
-      taskTier: ctx.taskTier || null,
+      ...ctx,
+      // 工作区口径仍在这里归一：调用方有用 workspacePath、有用 worktreePath（子 Agent/worker）
       workspacePath: ctx.workspacePath || ctx.worktreePath,
-      userDataPath,
-      /** 只读作用域（`src/alive` 的后台心跳轮）：关卡据此拦掉改动类工具 */
-      readOnly: ctx.readOnly === true,
-      /** 感官开关（`senses.eyes` / `senses.voice` …）：只读轮里还要逐项授权 */
-      senses: ctx.senses && typeof ctx.senses === 'object' ? ctx.senses : null,
-      /**
-       * 心跳轮的权力档（`read`/`write`/`exec`）+ 允许动的根 + 这一轮的写/执行预算。
-       * 只做透传：越界/次数/审批的判定都在 `tool-gate` 的 `wake-power-scope` 关卡里。
-       */
-      wakePower: typeof ctx.wakePower === 'string' ? ctx.wakePower : '',
-      wakeRoot: typeof ctx.wakeRoot === 'string' ? ctx.wakeRoot : '',
-      wakeBudget: ctx.wakeBudget && typeof ctx.wakeBudget === 'object' ? ctx.wakeBudget : null
+      userDataPath
     };
     const harness = getToolHarnessSession(harnessCtx);
     const visionEnabled = ctx && ctx.browserVision === true;

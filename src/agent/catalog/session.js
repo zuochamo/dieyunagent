@@ -126,6 +126,52 @@ const SESSION_WORKSPACE_TOOL = {
  * 研究子 Agent 的工具集 = Explore 白名单，白名单不含本工具，递归被物理切断（深度恒为 1）。
  * Main 执行（见 src/agent/subagent-runner.js），不属于 RENDERER_ONLY_TOOLS。
  */
+/**
+ * 中途改道：把这一轮交给「多路并行子 Agent（planner 管线）」。
+ *
+ * 为什么需要它：planner 是整轮管线，只能在开跑前选一次；可难度是动态的 —— 开头像单点修改，
+ * 跑到第 8 步才发现要动 5 个互不依赖的文件。这个工具让**模型自己**在发现「该拆」时说出口，
+ * 宿主随即结束本轮、用同一份用户请求起 planner（trace 两段合并，用户看到的还是一轮）。
+ *
+ * 只有「多 Agent 并行执行」开着时才会出现在工具表里（关着 = 宿主不会接手，给了就是空承诺）。
+ */
+const FAN_OUT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'fan_out',
+    description:
+      '把这件事交给多路并行子 Agent 分头执行（每路一份 worktree 副本，改完在「变更」面板逐文件合并）。' +
+      '当你在执行途中发现：剩下的事是**两个及以上彼此独立、都要改文件或跑命令**的活，并行走能明显省时间时调用。' +
+      '调用后本轮会立刻收尾，宿主用同一份用户请求起并行执行并交付最终结果 —— 不要再继续调工具、也不要在文字里假装已经做完。' +
+      '判断依据是「剩余工作能不能拆开并行」，不是「任务大不大」：有先后依赖、单文件小改、只读调研都不要调（只读调研用 subagent）。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        reason: {
+          type: 'string',
+          description: '一句话说明为什么这件事需要拆成并行执行（会展示给用户）'
+        },
+        subtasks: {
+          type: 'array',
+          description:
+            '已确认的子任务（可选）。每项写清「改什么 / 期望产出」；不确定就只给 reason，规划阶段会自己勘察拆解',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: { type: 'string', description: '简短标题' },
+              instruction: { type: 'string', description: '这条子任务要做什么、期望产出是什么' }
+            },
+            required: ['title', 'instruction']
+          }
+        }
+      },
+      required: ['reason']
+    }
+  }
+};
+
 const SUBAGENT_TOOL = {
   type: 'function',
   function: {
@@ -204,6 +250,7 @@ module.exports = {
   CLARIFY_TOOL,
   SESSION_TOOL,
   SESSION_WORKSPACE_TOOL,
+  FAN_OUT_TOOL,
   SUBAGENT_TOOL,
   SUBAGENT_STATUS_TOOL
 };

@@ -1895,6 +1895,50 @@ const RULES = {
       }
     ]
   },
+  "skill_update": {
+    "required": [
+      "dir"
+    ],
+    "checks": [
+      {
+        "kind": "type",
+        "field": "dir",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "name",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "description",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "content",
+        "type": "string"
+      }
+    ],
+    "anyOf": [
+      {
+        "required": [
+          "name"
+        ]
+      },
+      {
+        "required": [
+          "description"
+        ]
+      },
+      {
+        "required": [
+          "content"
+        ]
+      }
+    ]
+  },
   "memory_recall": {
     "required": [
       "query"
@@ -2109,6 +2153,158 @@ const RULES = {
       }
     ]
   },
+  "plan_update": {
+    "required": [
+      "id"
+    ],
+    "checks": [
+      {
+        "kind": "type",
+        "field": "id",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "name",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "prompt",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "description",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "rrule",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "onceAt",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "goal",
+        "type": "object"
+      },
+      {
+        "kind": "type",
+        "field": "skillIds",
+        "type": "array"
+      },
+      {
+        "kind": "type",
+        "field": "todos",
+        "type": "array"
+      },
+      {
+        "kind": "type",
+        "field": "workspace",
+        "type": "string"
+      }
+    ],
+    "allOf": [
+      {
+        "if": {
+          "required": [
+            "rrule"
+          ]
+        },
+        "then": {
+          "not": {
+            "required": [
+              "onceAt"
+            ]
+          }
+        }
+      },
+      {
+        "if": {
+          "required": [
+            "onceAt"
+          ]
+        },
+        "then": {
+          "not": {
+            "required": [
+              "rrule"
+            ]
+          }
+        }
+      }
+    ],
+    "anyOf": [
+      {
+        "required": [
+          "name"
+        ]
+      },
+      {
+        "required": [
+          "prompt"
+        ]
+      },
+      {
+        "required": [
+          "description"
+        ]
+      },
+      {
+        "required": [
+          "rrule"
+        ]
+      },
+      {
+        "required": [
+          "onceAt"
+        ]
+      },
+      {
+        "required": [
+          "goal"
+        ]
+      },
+      {
+        "required": [
+          "skillIds"
+        ]
+      },
+      {
+        "required": [
+          "todos"
+        ]
+      },
+      {
+        "required": [
+          "workspace"
+        ]
+      }
+    ]
+  },
+  "plan_set_enabled": {
+    "required": [
+      "id",
+      "enabled"
+    ],
+    "checks": [
+      {
+        "kind": "type",
+        "field": "id",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "enabled",
+        "type": "boolean"
+      }
+    ]
+  },
   "mcp_tool_schema": {
     "required": [],
     "checks": [
@@ -2176,7 +2372,8 @@ const RULES = {
         "field": "transport",
         "values": [
           "stdio",
-          "streamable-http"
+          "streamable-http",
+          "sse"
         ]
       },
       {
@@ -2294,6 +2491,23 @@ const RULES = {
         "kind": "type",
         "field": "workspace",
         "type": "string"
+      }
+    ]
+  },
+  "fan_out": {
+    "required": [
+      "reason"
+    ],
+    "checks": [
+      {
+        "kind": "type",
+        "field": "reason",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "subtasks",
+        "type": "array"
       }
     ]
   },
@@ -2793,6 +3007,55 @@ const RULES = {
       }
     ]
   },
+  "agent_capability": {
+    "required": [
+      "action"
+    ],
+    "checks": [
+      {
+        "kind": "type",
+        "field": "action",
+        "type": "string"
+      },
+      {
+        "kind": "enum",
+        "field": "action",
+        "values": [
+          "request",
+          "list"
+        ]
+      },
+      {
+        "kind": "type",
+        "field": "kind",
+        "type": "string"
+      },
+      {
+        "kind": "type",
+        "field": "reason",
+        "type": "string"
+      }
+    ],
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "request"
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "then": {
+          "required": [
+            "kind"
+          ]
+        }
+      }
+    ]
+  },
   "goal_start": {
     "required": [
       "objective"
@@ -2906,6 +3169,107 @@ const RULES = {
         "kind": "type",
         "field": "note",
         "type": "string"
+      }
+    ]
+  },
+  "pet_set": {
+    "required": [],
+    "checks": [
+      {
+        "kind": "range",
+        "field": "count",
+        "min": 64,
+        "max": 256
+      },
+      {
+        "kind": "type",
+        "field": "dotScale",
+        "type": "number"
+      },
+      {
+        "kind": "range",
+        "field": "dotScale",
+        "min": 0.5,
+        "max": 2
+      },
+      {
+        "kind": "type",
+        "field": "motion",
+        "type": "number"
+      },
+      {
+        "kind": "range",
+        "field": "motion",
+        "min": 0,
+        "max": 2
+      },
+      {
+        "kind": "type",
+        "field": "color",
+        "type": "string"
+      },
+      {
+        "kind": "enum",
+        "field": "color",
+        "values": [
+          "white",
+          "cyan",
+          "mint",
+          "amber",
+          "rose",
+          "violet"
+        ]
+      }
+    ]
+  },
+  "pet_act": {
+    "required": [
+      "effect"
+    ],
+    "checks": [
+      {
+        "kind": "type",
+        "field": "effect",
+        "type": "string"
+      },
+      {
+        "kind": "enum",
+        "field": "effect",
+        "values": [
+          "ripple",
+          "squish",
+          "pulse",
+          "wave",
+          "dim",
+          "question",
+          "think",
+          "shape"
+        ]
+      },
+      {
+        "kind": "type",
+        "field": "shape",
+        "type": "string"
+      },
+      {
+        "kind": "enum",
+        "field": "shape",
+        "values": [
+          "sphere",
+          "cat",
+          "fish"
+        ]
+      },
+      {
+        "kind": "type",
+        "field": "strength",
+        "type": "number"
+      },
+      {
+        "kind": "range",
+        "field": "strength",
+        "min": 0,
+        "max": 1
       }
     ]
   }

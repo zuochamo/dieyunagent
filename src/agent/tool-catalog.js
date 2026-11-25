@@ -35,6 +35,7 @@ const {
   AGENTS_MD_PROPOSE_TOOL,
   SKILL_CREATE_TOOL,
   SKILL_DELETE_TOOL,
+  SKILL_UPDATE_TOOL,
   MEMORY_TOOLS
 } = require('./catalog/memory');
 const { PLAN_TOOLS, GOAL_START_TOOL, GOAL_UPDATE_TOOL, GOAL_TOOLS } = require('./catalog/plan');
@@ -43,12 +44,15 @@ const {
   CLARIFY_TOOL,
   SESSION_TOOL,
   SESSION_WORKSPACE_TOOL,
+  FAN_OUT_TOOL,
   SUBAGENT_TOOL,
   SUBAGENT_STATUS_TOOL
 } = require('./catalog/session');
 const { COMPUTER_TOOL, CAMERA_TOOL, DESKTOP_CAMERA_TOOL, DESKTOP_CAMERA_PTZ_TOOL } = require('./catalog/computer');
 const { PEER_TOOLS } = require('./catalog/peer');
 const { SSH_TOOL, WORKTREE_TOOL } = require('./catalog/remote');
+const { AGENT_INSPECT_TOOL, AGENT_CAPABILITY_TOOL } = require('./catalog/self');
+const { PET_SET_TOOL, PET_ACT_TOOL, PET_TOOLS, PET_TOOL_NAMES } = require('./catalog/pet');
 const {
   ALL_STATIC_TOOLS,
   ALL_KNOWN_TOOLS,
@@ -73,6 +77,13 @@ const {
 } = require('../mcp/schema-slim');
 // 「工具调用能力弱」的模型判定（与 schema 无关，单独一个模块）。
 const { isWeakToolCallerModel } = require('./tool-model-capability');
+// MCP transport 口径（唯一来源在 mcp/manage.js）：转出去只是为了 Renderer 的选项表从同一份派生，
+// 别在渲染层再手写一张 ['streamable-http','sse']。
+const {
+  MCP_TRANSPORT_KINDS,
+  MCP_REMOTE_TRANSPORT_KINDS,
+  MCP_REMOTE_TRANSPORTS
+} = require('../mcp/manage');
 
 module.exports = {
   HOST_TOOLS,
@@ -91,6 +102,7 @@ module.exports = {
   AGENTS_MD_PROPOSE_TOOL,
   SKILL_CREATE_TOOL,
   SKILL_DELETE_TOOL,
+  SKILL_UPDATE_TOOL,
   MEMORY_TOOLS,
   PLAN_TOOLS,
   GOAL_START_TOOL,
@@ -105,13 +117,20 @@ module.exports = {
   MCP_BUILTIN_TOOL_NAMES,
   CLARIFY_TOOL,
   SESSION_TOOL,
+  FAN_OUT_TOOL,
   SUBAGENT_TOOL,
   SUBAGENT_STATUS_TOOL,
   SESSION_WORKSPACE_TOOL,
+  AGENT_INSPECT_TOOL,
+  AGENT_CAPABILITY_TOOL,
   COMPUTER_TOOL,
   CAMERA_TOOL,
   DESKTOP_CAMERA_TOOL,
   DESKTOP_CAMERA_PTZ_TOOL,
+  PET_SET_TOOL,
+  PET_ACT_TOOL,
+  PET_TOOLS,
+  PET_TOOL_NAMES,
   ALL_STATIC_TOOLS,
   ALL_KNOWN_TOOLS,
   CONDITIONAL_TOOLS,
@@ -125,5 +144,10 @@ module.exports = {
   compactMcpToolDef,
   mcpToolDescription,
   mcpCandidate,
-  mcpAgentTool
+  mcpAgentTool,
+  // MCP transport 口径（服务形态 / 远端协议 / 入参别名）：Renderer 的选项表也从这里取，
+  // 不在渲染层手写一张 ['streamable-http','sse'] —— 那会漏掉新协议或写出无 alias 的值。
+  MCP_TRANSPORT_KINDS,
+  MCP_REMOTE_TRANSPORT_KINDS,
+  MCP_REMOTE_TRANSPORTS
 };

@@ -38,8 +38,14 @@ function typeOk(val, type) {
   return typeof val === type;
 }
 
-/** 字段是否「算给了」（空白字符串算没给，除非字段本身允许空）。 */
-const BLANK_OK = new Set(['content', 'text', 'body', 'patch', 'diff', 'command', 'note']);
+/**
+ * 字段是否「算给了」（空白字符串算没给，除非字段本身允许空）。
+ *
+ * `workspace` 在名单里：它有一个**有意义的空值**——`plan_update` 传空串表示
+ * 「改回跟随执行时的工作空间」。不列进来时这条重置路径会被 `anyOf` 判成「没给参数」，
+ * 模型照着描述做却拿到 MISSING_ARG（2026-11-22 自查抓到的）。
+ */
+const BLANK_OK = new Set(['content', 'text', 'body', 'patch', 'diff', 'command', 'note', 'workspace']);
 
 function present(args, field) {
   const v = args[field];

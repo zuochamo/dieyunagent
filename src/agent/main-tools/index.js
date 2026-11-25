@@ -19,6 +19,9 @@ const { createPlansHandlers } = require('./plans');
 const { createGoalsHandlers } = require('./goals');
 const { createMemoryHandlers } = require('./memory');
 const { createPeerHandlers } = require('./peer');
+const { createAgentModeHandlers } = require('./agent-mode');
+const { createSelfHandlers } = require('./self');
+const { createPetHandlers } = require('./pet');
 
 function createMainToolHandlers(shared) {
   // **原型为 null**：模型发一个叫 `toString` / `constructor` 的工具名时，
@@ -32,7 +35,11 @@ function createMainToolHandlers(shared) {
   ...createPlansHandlers(shared),
   ...createGoalsHandlers(shared),
   ...createMemoryHandlers(shared),
-  ...createPeerHandlers(shared)
+  ...createPeerHandlers(shared),
+  ...createAgentModeHandlers(shared),
+  ...createSelfHandlers(shared),
+  // 身体（点点）：聊天轮也会调它 —— 用户说「改成 256 个点 / 换个形态」时不能再让它去改源码
+  ...createPetHandlers(shared)
   });
 }
 
