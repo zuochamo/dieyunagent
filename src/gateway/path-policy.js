@@ -77,4 +77,31 @@ function remoteAllowedRoots(workspaceRoot, homeDir) {
   return Array.from(new Set(roots));
 }
 
-module.exports = { assertAllowedPath, remoteAllowedRoots, REMOTE_SHARED_TMP_ROOT };
+/**
+ * 「这条路径确实不存在」的唯一判据：本机 `fs`、SFTP、远端 Agent RPC 三种方言都收在这里。
+ *
+ * 为什么必须有它：`fs.write_file` 的撤回快照、视觉基准这类「先读一次原文」的旁路，只有
+ * **确实不存在**才允许退回 `null`（= 新建）。把「读失败」也当 `null` 的后果不是少一条日志 ——
+ * 撤回对 `before == null` 走的是删除分支（会删掉用户文件），视觉比较会回写新基准并报
+ * 「已保存为新基准」（覆盖用户文件）。所以「不存在」与「读不出来」必须在判据上就分开。
+ *
+ * 三个方言：本机 `fs` 给 `ENOENT`；SFTP 给数字状态码 2 / 11 或 `NO_SUCH_FILE`（`ssh2` 原样透出）；
+ * 远端 Agent 的 RPC 回包保留原始 `code`（见 `remote-agent-client`）。远端 daemon 的 pack 里有
+ * 这个文件、没有 `ssh/`，所以判据放在这里而不是 `ssh/session-manager`。
+ */
+const MISSING_PATH_CODES = new Set(['ENOENT', 'NO_SUCH_FILE', 'FS_NOT_FOUND', 2, 11, '2', '11']);
+
+/**
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isPathMissingError(err) {
+  if (!err || typeof err !== 'object') return false;
+  const e = /** @type {{ code?: unknown, status?: unknown, message?: unknown }} */ (err);
+  const code = e.code != null ? e.code : e.status;
+  if (MISSING_PATH_CODES.has(/** @type {never} */ (code))) return true;
+  // ssh2 的 SFTP 错误有时只给 message（`No such file`），远端 RPC 包装层也可能只留文案
+  return /no such file|no such directory|cannot find the path/i.test(String(e.message || ''));
+}
+
+module.exports = { assertAllowedPath, remoteAllowedRoots, REMOTE_SHARED_TMP_ROOT, isPathMissingError };

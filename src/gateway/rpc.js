@@ -14,7 +14,7 @@ const {
   printImage
 } = require('./host-control');
 const webTools = require('./web');
-const { assertAllowedPath } = require('./path-policy');
+const { assertAllowedPath, isPathMissingError } = require('./path-policy');
 // 「本机」（跑叠云这台机器）的显式标记：路径 `local:` 前缀，语义唯一来源见 host-local.js
 const { decideFsTarget } = require('./host-local');
 const { decideFsWrite } = require('./sandbox-policy');
@@ -39,14 +39,15 @@ const { grepWorkspace, globWorkspace, TYPE_EXT } = require('./rg-search');
 const {
   getRemoteAgentClient,
   setRemoteAgentInvalidateListener,
-  isDisconnectError,
+  isChannelDownError,
   isRemoteAgentUsable
 } = require('./remote-agent-client');
 const { shellQuoteSingle, resolveRemotePath, remoteAllowedRoots } = require('../ssh/remote-path');
 const { encodeWorktreeContent, WORKTREE_SNAPSHOT_MAX_BYTES } = require('../git/git-target');
+// 撤回相关的两个纯判据（路径 key / 工作区是不是远端）只有 undo 模块一处实现
+const { undoRelativeKey, inferUndoWorkspaceKind } = require('../undo/turn-undo-service');
 const { captureRemoteGitWorkingBaseline } = require('../git/remote-baseline-capture');
 const { captureGitWorkingBaseline, mergeBaselineFilesInto } = require('../git/baseline-capture');
-const { isGitRepo } = require('../git/worktree-service');
 const { getWorkspaceGitDiffContext, getWorkspaceGitChangedAbsPaths } = require('../git/diff-context');
 const { resolveHostSidecarLocalPath } = require('../agent/host-sidecar');
 // 护栏数字单一来源（AGENTS.md §5）：diff 全文阈值只改 agent-limits。
@@ -586,8 +587,9 @@ function createRpcHandlers(ctx) {
       try {
         lastPing = await pingRemoteIndex(info);
       } catch (err) {
-        // 链路已断时勿空转满超时：交给上层 prep 自愈（SSH/隧道 ensure）
-        if (isDisconnectError(err)) {
+        // 链路已断时勿空转满超时：交给上层 prep 自愈（SSH/隧道 ensure）。
+        // 判据只看错误码（`isChannelDownError`），不再猜中文文案。
+        if (isChannelDownError(err)) {
           throw remoteIndexError(
             'REMOTE_AGENT_UNAVAILABLE',
             err && err.message ? err.message : 'Remote Agent 连接已关闭'
@@ -747,65 +749,79 @@ function createRpcHandlers(ctx) {
 
   /**
    * 读取 undo 跟踪路径的当前磁盘内容，供 Phase B checkpoint 快照（非 turn 开始的 before）。
+   *
+   * **只有「确实不存在」才允许 `before = null`** —— 撤回侧对 `before == null` 走的是
+   * **删除文件**分支（`restoreUndoFile`），把「读失败」当「文件原本不存在」就会在
+   * 恢复检查点时删掉用户文件（`docs/DEFENSIVE-CODE-AUDIT-2026-11-21.md §2.2` 的同族缺陷，
+   * 那里只修了 `fs.write_file`，这一处旁路读一直漏着）。
+   *
+   * 白名单口径也必须与恢复侧一致：恢复用 `writeRootsForCall()`（会话根 + 沙箱已批准的根），
+   * 这里用构造期 `writable` 的话，会话根内的文件会「读被拒、却能写」，读失败又落成 null。
    */
   async function readUndoTrackedPathNow(relPath, meta) {
     const enc = meta && meta.encoding === 'base64' ? 'base64' : 'utf8';
     const remote = getRemoteFs();
     const useRemote = !!(remote && meta && meta.remote);
-    try {
-      if (useRemote) {
+    const snapUnavailable = (targetPath, cause) => {
+      const e = new Error(
+        `检查点快照读取失败，已放弃本批快照（${targetPath}）：${(cause && cause.message) || cause}`
+      );
+      e.code = 'UNDO_SNAPSHOT_UNAVAILABLE';
+      e.path = String(targetPath);
+      return e;
+    };
+    if (useRemote) {
+      try {
         const prev = await remote.readFile(relPath, enc === 'base64' ? 'base64' : 'utf8');
         return {
           before: prev && prev.data != null ? String(prev.data) : null,
           encoding: enc,
           remote: true
         };
+      } catch (err) {
+        if (isPathMissingError(err)) return { before: null, encoding: enc, remote: true };
+        throw snapUnavailable(relPath, err);
       }
-      const undoCwd = cwdForCall() || defaultCwd;
-      const resolved = normalizeFilePathInput(relPath, undoCwd);
-      const safe = assertAllowedPath(resolved, writable);
-      // 走异步 fs：这里在 captureUndoCheckpointSnapshot 里按 8 路并发跑，
-      // 同步读会把整批「假并发」压回主线程串行，一次回滚审查要卡住界面。
-      let st;
-      try {
-        st = await fs.stat(safe);
-      } catch {
-        // 不存在（existsSync 为 false）时原实现直接给 before:null
-        return { before: null, encoding: enc, remote: false };
-      }
-      if (!st.isFile()) {
-        return { before: null, encoding: enc, remote: false };
-      }
-      const buf = await fs.readFile(safe);
-      if (buf.length > WORKTREE_SNAPSHOT_MAX_BYTES) {
-        return {
-          before: meta && meta.before != null ? String(meta.before) : null,
-          encoding: meta && meta.encoding === 'base64' ? 'base64' : 'utf8',
-          remote: false
-        };
-      }
-      // 二进制判定 / 编码落档统一走 git-target（与回合基线、Plan 回写快照同口径）
-      return { ...encodeWorktreeContent(buf), remote: false };
-    } catch {
+    }
+    const undoCwd = cwdForCall() || defaultCwd;
+    const resolved = normalizeFilePathInput(relPath, undoCwd);
+    const safe = assertAllowedPath(resolved, writeRootsForCall());
+    // 走异步 fs：这里在 captureUndoCheckpointSnapshot 里按 8 路并发跑，
+    // 同步读会把整批「假并发」压回主线程串行，一次回滚审查要卡住界面。
+    let st;
+    try {
+      st = await fs.stat(safe);
+    } catch (err) {
+      if (isPathMissingError(err)) return { before: null, encoding: enc, remote: false };
+      throw snapUnavailable(safe, err);
+    }
+    if (!st.isFile()) {
+      // 目录 / 设备文件：既不是「不存在」也不是可快照的原文，绝不能落成 null（= 恢复时删除）
+      throw snapUnavailable(safe, new Error('不是普通文件'));
+    }
+    const buf = await fs.readFile(safe).catch((err) => {
+      throw snapUnavailable(safe, err);
+    });
+    if (buf.length > WORKTREE_SNAPSHOT_MAX_BYTES) {
       return {
         before: meta && meta.before != null ? String(meta.before) : null,
         encoding: meta && meta.encoding === 'base64' ? 'base64' : 'utf8',
-        remote: !!useRemote
+        remote: false
       };
     }
+    // 二进制判定 / 编码落档统一走 git-target（与回合基线、Plan 回写快照同口径）
+    return { ...encodeWorktreeContent(buf), remote: false };
   }
 
+  /**
+   * 把工具参数里给的路径归一成「回合快照的相对 key」。
+   * key 的算法只在 `undo/turn-undo-service.js:undoRelativeKey` 一处实现（record.files 也是它建的）。
+   */
   function normalizeUndoTouchPaths(touchPaths, workspaceRoot) {
-    const root = workspaceRoot ? String(workspaceRoot).replace(/\\/g, '/').replace(/\/+$/, '') : '';
     const out = new Set();
     for (const raw of touchPaths || []) {
-      const fp = String(raw || '').replace(/\\/g, '/');
-      if (!fp) continue;
-      if (root && (fp === root || fp.startsWith(root + '/'))) {
-        out.add(fp.slice(root.length + 1));
-      } else {
-        out.add(fp);
-      }
+      const key = undoRelativeKey(raw, workspaceRoot);
+      if (key) out.add(key);
     }
     return out;
   }
@@ -871,7 +887,9 @@ function createRpcHandlers(ctx) {
   }
 
   async function restoreUndoFile(item) {
-    const useRemote = item.workspaceKind === 'ssh' || !!item.remote;
+    // 远端与否由 service 在建 restore item 时判过一次（`toRestoreItem`），这里只认那个结果：
+    // 同一决策两处求值（原来这里还按 workspaceKind 再判一次）迟早给出两个答案。
+    const useRemote = item.remote === true;
     const remote = useRemote ? getRemoteFs() : null;
     if (useRemote && !remote) {
       const e = new Error('远程工作区未连接，无法撤回文件');
@@ -926,19 +944,25 @@ function createRpcHandlers(ctx) {
     return { restored: results.filter((r) => r && r.ok).length, errors };
   }
 
+  /**
+   * 撤回执行时的「绑哪份工作区」上下文。
+   *
+   * 远端必须是 **URI 形态**（`ssh://user@host/path`）才放进调用上下文：裸 POSIX 路径在 Windows
+   * 上会被 `parseWorkspaceInput` 解析成假本地目录，于是 `getRemoteFs()` 变 null、
+   * 恢复全落在错误的位置。本地则「记录里的路径 → 外层上下文 → 记录的 workspaceRoot」逐级取。
+   */
   function undoRestoreCallContext(plan, sessionId) {
-    const kind = plan && plan.workspaceKind;
-    const fromPlan = plan && plan.runWorkspaceRoot ? String(plan.runWorkspaceRoot).trim() : '';
-    const fromAls = getActiveRunWorkspaceRoot();
-    const als = fromAls ? String(fromAls).trim() : '';
-    const isUri = (s) => /^ssh:/i.test(s);
-    let runWorkspaceRoot = fromPlan || als || '';
-    if (kind === 'ssh' && runWorkspaceRoot && !isUri(runWorkspaceRoot)) {
-      runWorkspaceRoot = isUri(als) ? als : '';
-    }
-    if (!runWorkspaceRoot && kind !== 'ssh' && plan && plan.workspaceRoot) {
-      runWorkspaceRoot = String(plan.workspaceRoot);
-    }
+    const isUri = (s) => /^ssh:/i.test(String(s || ''));
+    const fromPlan = String((plan && plan.runWorkspaceRoot) || '').trim();
+    const fromAls = String(getActiveRunWorkspaceRoot() || '').trim();
+    const isRemotePlan = plan && plan.workspaceKind === 'ssh';
+    const runWorkspaceRoot = isRemotePlan
+      ? isUri(fromPlan)
+        ? fromPlan
+        : isUri(fromAls)
+          ? fromAls
+          : ''
+      : fromPlan || fromAls || String((plan && plan.workspaceRoot) || '').trim();
     return { runWorkspaceRoot: runWorkspaceRoot || null, sessionId: sessionId || null };
   }
 
@@ -1270,6 +1294,10 @@ function createRpcHandlers(ctx) {
     if (isRemoteAgentUsable(agentInfo)) {
       return createRemoteAgentFsAdapter(agentInfo, targetDesc, opts);
     }
+    // SFTP 这条传输没有远端进程可跑 rg/grep：把两个 *ViaRemoteExec 注入适配器，
+    // 于是「远端怎么搜」也收在适配器接口里，handler 不再自己判传输（AGENTS.md「远端文件读写」）。
+    opts.execGrep = (params) => grepViaRemoteExec(cwdForCall(), params);
+    opts.execGlob = (params) => globViaRemoteExec(cwdForCall(), params);
     return createRemoteFsAdapter(sshCall, targetDesc, opts);
   }
 
@@ -2142,13 +2170,13 @@ function createRpcHandlers(ctx) {
     captureRemoteGitWorkingBaseline,
     captureGitWorkingBaseline,
     mergeBaselineFilesInto,
-    isGitRepo,
     workspaceRootForUndo,
     normalizeUndoTouchPaths,
     captureUndoCheckpointSnapshot,
     restoreUndoFilesConcurrent,
     runWithCallContext,
-    undoRestoreCallContext
+    undoRestoreCallContext,
+    inferUndoWorkspaceKind
   });
 
   const handlers = {

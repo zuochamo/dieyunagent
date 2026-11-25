@@ -8,6 +8,8 @@ const path = require('path');
 const { ensureExtension, resolveOutputPath } = require('../../browser/service');
 const { defaultBaselineName, withEngineTag } = require('../../browser/visual-diff');
 const { ABSOLUTE_READ_MAX_BYTES } = require('../fs-read-limits');
+// 「这条路径确实不存在」的唯一判据（本机 ENOENT / SFTP NO_SUCH_FILE / 远端 RPC ENOENT）
+const { isPathMissingError } = require('../path-policy');
 
 function createBrowserHandlers(d) {
   const {
@@ -112,7 +114,8 @@ function createBrowserHandlers(d) {
    * 浏览器产物的**读取**（与 writeArtifact 对称）：SSH 工作区经 SFTP 读，本地工作区经 fs 读。
    * 视觉基准是唯一需要「先读回来」的产物 —— 内置浏览器跑在本机，基准却是工作区里的文件。
    *
-   * 只有「文件确实不存在 / 读不出来」才返回空 buffer，此时语义就是「还没有基准」。
+   * 只有「文件确实不存在」才返回空 buffer，此时语义就是「还没有基准」；
+   * 读失败（权限 / 是目录 / 传输断）一律上抛 —— 那意味着基准没法比，不是「没有基准」。
    *
    * @param {string} ref 基准路径（相对或绝对）
    * @returns {Promise<{path: string, buffer: Buffer|null}>} path 为解析后的真实路径，供回显
@@ -127,8 +130,12 @@ function createBrowserHandlers(d) {
       }
       const buf = await fs.readFile(safe);
       return { path: safe, buffer: buf && buf.length ? buf : null };
-    } catch {
-      return { path: safe, buffer: null };
+    } catch (err) {
+      // 只有「确实不存在」才是「还没有基准」；读失败必须上抛。把它当空 buffer 的后果是上层
+      // 按首次调用处理：回写新基准并报「已保存为新基准」—— 用户已有的基准文件被覆盖
+      // （本文件头注释记的正是这桩事故：错误被吞成「还没有基准」，视觉回归永远重建、从不比较）。
+      if (isPathMissingError(err)) return { path: safe, buffer: null };
+      throw err;
     }
   }
 

@@ -3,7 +3,6 @@
 const crypto = require('crypto');
 const WebSocket = require('ws');
 
-const { sleepMs } = require('../llm-reconnect-retry');
 const { remoteAgentInfoKey } = require('../workspace/workspace-cache-keys');
 
 const PING_INTERVAL_MS = 25000;
@@ -13,22 +12,35 @@ const PING_INTERVAL_MS = 25000;
  * RPC 会永久挂起，上层三次重试全卡在 connect 上。
  */
 const CONNECT_TIMEOUT_MS = 15000;
-const CALL_RECONNECT_ATTEMPTS = 3;
-const CALL_RECONNECT_BASE_MS = 600;
 const MAX_CACHED_CLIENTS = 6;
 
-function isDisconnectError(err) {
-  const code = String((err && err.code) || '');
-  if (code === 'REMOTE_AGENT_CONNECT_TIMEOUT') return true;
-  const msg = String((err && err.message) || err || '').toLowerCase();
-  return (
-    msg.includes('连接已关闭') ||
-    msg.includes('已断开') ||
-    msg.includes('已关闭') ||
-    msg.includes('websocket') ||
-    msg.includes('未就绪') ||
-    msg.includes('隧道未就绪')
-  );
+/**
+ * 通道已不可用的**结构化判据**：只认错误码，不读文案。
+ *
+ * 这里曾经是一份 `isDisconnectError` 文案匹配（`includes('websocket')` / `'未就绪'` /
+ * `'已断开'`），并据此在 `call()` 里自动重发最多 3 次。三个问题：
+ * ① 中文/英文文案改一个词就静默失效；② 「远端 Agent 根本不适用」这类装配错误也被当成
+ * 断线重试 3 次；③ `fs.write_file` / `fs.mkdir` 也走 `call()` —— 通道中途断开时请求可能
+ * **已在远端执行**、只是回包丢了，重发就是重复写。仓库在 `llm-reconnect-retry.js` 与
+ * `docs/LLM-RPC.md §3.1` 早已禁止用文案判错，所以这里只留错误码。
+ */
+const CHANNEL_DOWN_CODES = new Set([
+  'REMOTE_AGENT_CONNECT_TIMEOUT',
+  'REMOTE_AGENT_DISCONNECTED',
+  'REMOTE_AGENT_NOT_READY',
+  'REMOTE_AGENT_WS_ERROR'
+]);
+
+/** 通道不可用的结构化判据；只用于「别空转」，不用于「重发一次」。 */
+function isChannelDownError(err) {
+  return !!(err && CHANNEL_DOWN_CODES.has(String(err.code || '')));
+}
+
+/** 构造带码的通道错误：码是调用方唯一的判断依据。 */
+function channelError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
 }
 
 /**
@@ -116,8 +128,8 @@ class RemoteAgentClient {
     }
   }
 
-  _rejectPending(message) {
-    const err = new Error(message);
+  _rejectPending(code, message) {
+    const err = channelError(code, message);
     for (const [, box] of this.pending) {
       box.reject(err);
     }
@@ -129,7 +141,7 @@ class RemoteAgentClient {
     this._generation += 1;
     this.connecting = null;
     this._teardownSocket();
-    this._rejectPending('Remote Agent 已断开');
+    this._rejectPending('REMOTE_AGENT_DISCONNECTED', 'Remote Agent 已断开');
   }
 
   _startPing(ws) {
@@ -261,7 +273,7 @@ class RemoteAgentClient {
         }
       });
 
-      ws.on('error', () => fail(new Error('Remote Agent WebSocket 错误')));
+      ws.on('error', () => fail(channelError('REMOTE_AGENT_WS_ERROR', 'Remote Agent WebSocket 错误')));
 
       ws.on('close', () => {
         this._clearPing();
@@ -269,8 +281,8 @@ class RemoteAgentClient {
         if (this.ws && this.ws !== ws) return;
         this.authed = false;
         if (this.ws === ws) this.ws = null;
-        this._rejectPending('Remote Agent 已断开');
-        if (!settled) fail(new Error('Remote Agent 连接已关闭'));
+        this._rejectPending('REMOTE_AGENT_DISCONNECTED', 'Remote Agent 已断开');
+        if (!settled) fail(channelError('REMOTE_AGENT_DISCONNECTED', 'Remote Agent 连接已关闭'));
       });
     });
   }
@@ -278,7 +290,7 @@ class RemoteAgentClient {
   async _callOnce(method, params = {}, timeoutMs) {
     await this.connect();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authed) {
-      throw new Error('Remote Agent 未就绪');
+      throw channelError('REMOTE_AGENT_NOT_READY', 'Remote Agent 未就绪');
     }
     const ms = timeoutMs != null && Number(timeoutMs) > 0 ? Number(timeoutMs) : 120000;
     return new Promise((resolve, reject) => {
@@ -314,25 +326,16 @@ class RemoteAgentClient {
   }
 
   /**
+   * **只发一次，不重发**。断了就把带码的错误交给调用方（`isChannelDownError` 只用于
+   * 「别空转/别假装成功」，不用于「再发一遍」）：写操作（`fs.write_file` / `fs.mkdir`）
+   * 在中途断开时可能已在远端执行，重发就是重复写。
+   *
    * @param {string} method
    * @param {object} [params]
    * @param {number} [timeoutMs]
    */
   async call(method, params = {}, timeoutMs) {
-    let lastErr;
-    for (let attempt = 1; attempt <= CALL_RECONNECT_ATTEMPTS; attempt += 1) {
-      try {
-        return await this._callOnce(method, params, timeoutMs);
-      } catch (err) {
-        lastErr = err;
-        if (!isDisconnectError(err) || attempt >= CALL_RECONNECT_ATTEMPTS) {
-          throw err;
-        }
-        this._resetForReconnect();
-        await sleepMs(CALL_RECONNECT_BASE_MS * attempt);
-      }
-    }
-    throw lastErr || new Error('Remote Agent RPC 失败');
+    return this._callOnce(method, params, timeoutMs);
   }
 
   close() {
@@ -341,7 +344,7 @@ class RemoteAgentClient {
     this._generation += 1;
     this.connecting = null;
     this._teardownSocket();
-    this._rejectPending('Remote Agent 已关闭');
+    this._rejectPending('REMOTE_AGENT_DISCONNECTED', 'Remote Agent 已关闭');
     this._closing = false;
   }
 }
@@ -379,7 +382,7 @@ function evictOldestCachedClient() {
  */
 function getRemoteAgentClient(info) {
   if (!isRemoteAgentUsable(info)) {
-    throw new Error('Remote Agent 隧道未就绪');
+    throw channelError('REMOTE_AGENT_NOT_READY', 'Remote Agent 隧道未就绪');
   }
   const key = remoteAgentClientKey(info);
   const cached = clientCache.get(key);
@@ -432,6 +435,6 @@ module.exports = {
   remoteAgentClientKey,
   isRemoteAgentUsable,
   setRemoteAgentInvalidateListener,
-  isDisconnectError,
+  isChannelDownError,
   CONNECT_TIMEOUT_MS
 };

@@ -151,6 +151,23 @@ function createRemoteFsAdapter(ssh, target, opts = {}) {
     };
   }
 
+  /**
+   * 搜索 / 通配：SFTP 这条传输没有远端进程可跑 rg，只能借用 ssh.exec 的经典 grep / rg。
+   * 具体命令拼装仍由 rpc.js 的两个 *ViaRemoteExec 负责（它们在调用作用域里拿 cwd 与 ssh 会话），
+   * 这里只把「远端怎么搜」接进同一个适配器接口 —— handler 不再自己判「有没有 Agent、再退 SFTP」。
+   *
+   * 返回 null = 这条传输做不了，调用方按既有语义回落本机搜索。
+   */
+  async function grep(params) {
+    if (typeof opts.execGrep !== 'function') return null;
+    return opts.execGrep(params || {});
+  }
+
+  async function glob(params) {
+    if (typeof opts.execGlob !== 'function') return null;
+    return opts.execGlob(params || {});
+  }
+
   return {
     root,
     // 传输标识：写文件的增量索引通知只在 SFTP 这条路上需要补
@@ -162,6 +179,8 @@ function createRemoteFsAdapter(ssh, target, opts = {}) {
     listDir,
     stat,
     mkdir,
+    grep,
+    glob,
     listArtifactFiles
   };
 }

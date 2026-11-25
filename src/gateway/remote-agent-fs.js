@@ -119,6 +119,19 @@ function createRemoteAgentFsAdapter(info, target, opts = {}) {
     };
   }
 
+  /**
+   * 搜索 / 通配也走同一个适配器接口（和 stat / listDir 一样）：
+   * handler 只问「远端怎么 grep / glob」，不再自己判「有没有 Agent、是不是 SFTP」——
+   * 那条判断的唯一位置是 `rpc.js:getRemoteFs()`（见 AGENTS.md「远端文件读写」）。
+   */
+  async function grep(params) {
+    return call('fs.grep', params || {});
+  }
+
+  async function glob(params) {
+    return call('fs.glob', params || {});
+  }
+
   return {
     root,
     transport: 'rpc',
@@ -128,6 +141,8 @@ function createRemoteAgentFsAdapter(info, target, opts = {}) {
     listDir,
     stat,
     mkdir,
+    grep,
+    glob,
     listArtifactFiles
   };
 }

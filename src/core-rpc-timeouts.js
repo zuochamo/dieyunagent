@@ -41,6 +41,15 @@ const AGENT_RUN_TIMEOUT_MS = 660 * 1000;
 const SLOW_RPC_LOG_MS = require('./agent/shared-constants').rpc.slowLogMs;
 
 /**
+ * `codebase.status` / `graph.status` 的超时。
+ *
+ * 数字与 Rust 侧同源（`src/agent/agent-shared.json` 的 `rpc.hostStatusTimeoutMs`）：
+ * 内核的 `Fast` 档预算必须小于它，`crates/dieyun-runtime/src/rpc/registry.rs` 的用例
+ * 直接读这一份做断言 —— 手抄两份时，宿主把它调小、那条断言照样绿。
+ */
+const HOST_STATUS_TIMEOUT_MS = require('./agent/shared-constants').rpc.hostStatusTimeoutMs;
+
+/**
  * @param {string} method
  * @param {number} [timeoutMs] 显式覆盖
  * @returns {number}
@@ -56,7 +65,7 @@ function resolveCoreRpcTimeoutMs(method, timeoutMs) {
   }
   if (m === 'codebase.index.start' || m === 'graph.index.start') return 60000;
   // status 是纯读库，健康库上应毫秒级返回；15s 只会在真卡住时把调用拖成「假死」。
-  if (m === 'codebase.status' || m === 'graph.status') return 15000;
+  if (m === 'codebase.status' || m === 'graph.status') return HOST_STATUS_TIMEOUT_MS;
   if (
     m === 'graph.lsp_resolve' ||
     m === 'graph.ingest_lsp_callers' ||

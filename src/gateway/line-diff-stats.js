@@ -49,14 +49,27 @@ function trimDiffWindow(before, after) {
 function statsInWindow(before, after, window) {
   const beforeMid = before.slice(window.start, window.beforeEnd + 1);
   const afterMid = after.slice(window.start, window.afterEnd + 1);
-  if (
-    beforeMid.length + afterMid.length > LINE_DIFF_MAX_LINE_SUM ||
-    beforeMid.length * afterMid.length > LINE_DIFF_MAX_LINE_PRODUCT
-  ) {
+  if (!withinLineDiffBudget(beforeMid.length, afterMid.length)) {
     return { added: afterMid.length, removed: beforeMid.length };
   }
   const lcs = lcsLineCount(beforeMid, afterMid);
   return { added: afterMid.length - lcs, removed: beforeMid.length - lcs };
+}
+
+/**
+ * 「这份 diff 还算得动吗」—— 行数上限的唯一判据。
+ *
+ * 徽标计数（`computeLineDiffStats`）与 Renderer 的逐行 op 表（`renderer-tool-results.js#buildLineDiffOps`）
+ * 都要在同一组上限下决定「算真实逐行差异 / 退回块级」。以前这两处各写一份 4000 / 400000，
+ * 改一个忘一个就会出现「徽标说 +1 −1、展开却是块级差」。
+ *
+ * @param {number} beforeLines
+ * @param {number} afterLines
+ */
+function withinLineDiffBudget(beforeLines, afterLines) {
+  const a = Math.max(0, Number(beforeLines) || 0);
+  const b = Math.max(0, Number(afterLines) || 0);
+  return a + b <= LINE_DIFF_MAX_LINE_SUM && a * b <= LINE_DIFF_MAX_LINE_PRODUCT;
 }
 
 /**
@@ -83,4 +96,4 @@ function computeLineDiffStats(beforeText, afterText) {
   return { added, removed };
 }
 
-module.exports = { computeLineDiffStats, prepareLineDiff };
+module.exports = { computeLineDiffStats, prepareLineDiff, withinLineDiffBudget };

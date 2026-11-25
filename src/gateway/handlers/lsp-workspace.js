@@ -21,10 +21,10 @@ const REMOTE_LSP_TIMEOUT_MS = 60000;
 function createLspWorkspaceHandlers(d) {
   const {
     perms,
-    ctx,
     lspDiagnostics,
     normalizeFilePathInput,
     cwdForCall,
+    resolveCallWorkspaceTarget,
     assertAllowedPath,
     readRootsForCall,
     isSshConnectedForCall,
@@ -157,7 +157,7 @@ function createLspWorkspaceHandlers(d) {
       const charArg = character != null ? character : column != null ? column : col;
       const fpArg = filePath || file_path || symbolPath;
       const target =
-        typeof ctx.getWorkspaceTarget === 'function' ? ctx.getWorkspaceTarget() : null;
+        typeof resolveCallWorkspaceTarget === 'function' ? resolveCallWorkspaceTarget() : null;
       if (target && target.kind === 'ssh') {
         // 远程 LSP：远程 agent 用它自己环境里的 Language Server
         // （rust-analyzer / gopls 走 PATH，ts/py 走远程工作区的 node_modules）。
@@ -306,7 +306,7 @@ function createLspWorkspaceHandlers(d) {
         return { ok: false, error: 'LSP 未启用', items: [], skipped: [] };
       }
       const target =
-        typeof ctx.getWorkspaceTarget === 'function' ? ctx.getWorkspaceTarget() : null;
+        typeof resolveCallWorkspaceTarget === 'function' ? resolveCallWorkspaceTarget() : null;
       const fileList = Array.isArray(params.files) ? params.files : [];
       if (!perms.hostControl || !perms.fsRead) {
         const e = new Error('文件读取未授权');
@@ -498,7 +498,7 @@ function createLspWorkspaceHandlers(d) {
         return { ok: false, error: 'LSP 未启用', diagnostics: [] };
       }
       const target =
-        typeof ctx.getWorkspaceTarget === 'function' ? ctx.getWorkspaceTarget() : null;
+        typeof resolveCallWorkspaceTarget === 'function' ? resolveCallWorkspaceTarget() : null;
       if (target && target.kind === 'ssh') {
         return { ok: true, enabled: false, diagnostics: [], skipped: 'ssh_workspace' };
       }
@@ -635,7 +635,7 @@ function createLspWorkspaceHandlers(d) {
         throw e;
       }
       const target =
-        typeof ctx.getWorkspaceTarget === 'function' ? ctx.getWorkspaceTarget() : null;
+        typeof resolveCallWorkspaceTarget === 'function' ? resolveCallWorkspaceTarget() : null;
       const isSsh = !!(target && target.kind === 'ssh');
       const workspaceRoot = isSsh
         ? String(params.workspaceRoot || cwdForCall() || defaultCwd || target.remotePath || '')

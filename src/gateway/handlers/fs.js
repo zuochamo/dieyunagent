@@ -10,6 +10,25 @@ const { isRemoteAgentUsable } = require('../remote-agent-client');
 // 这里只用它的解析/提示函数，不自己写 startsWith('local:')。
 const { splitLocalGlob, isLocalPathRef, annotateLocalPathMiss } = require('../host-local');
 const { recordSkillRead } = require('../../skills/usage-ledger');
+// 「这条路径确实不存在」的唯一判据（本机 ENOENT / SFTP NO_SUCH_FILE / 远端 RPC ENOENT）
+const { isPathMissingError } = require('../path-policy');
+
+/**
+ * 撤回快照读不到原文：**必须失败**，不能让这次写「照常成功、撤回时删文件」。
+ *
+ * 撤回侧对 `before == null` 的解释是「这个文件写之前不存在」（`rpc.js:restoreUndoFile`），
+ * 所以读失败时唯一安全的做法是把这次写判为失败 —— 用户宁可这次写没发生，也不要撤回删文件。
+ */
+function undoSnapshotUnavailable(targetPath, cause) {
+  const e = new Error(
+    `写入前的原文读取失败，撤回快照不可用，已放弃本次写入（${targetPath}）：` +
+      `${(cause && cause.message) || cause}`
+  );
+  e.code = 'UNDO_SNAPSHOT_UNAVAILABLE';
+  e.path = targetPath;
+  e.cause = cause;
+  return e;
+}
 
 /**
  * 远程 read_symbol 走 LSP 时的超时。
@@ -56,6 +75,7 @@ function createFsHandlers(d) {
     readSidecarFileAt,
     normalizeFilePathInput,
     cwdForCall,
+    resolveCallWorkspaceTarget,
     assertAllowedPath,
     readRootsForCall,
     invokeRustCore,
@@ -79,7 +99,6 @@ function createFsHandlers(d) {
     getRemoteAgentClient,
     grepViaRemoteExec,
     grepWorkspace,
-    globViaRemoteExec,
     globWorkspace,
   } = d;
   /**
@@ -368,7 +387,7 @@ function createFsHandlers(d) {
       }
 
       const target =
-        typeof ctx.getWorkspaceTarget === 'function' ? ctx.getWorkspaceTarget() : null;
+        typeof resolveCallWorkspaceTarget === 'function' ? resolveCallWorkspaceTarget() : null;
       const isSsh = !!(target && target.kind === 'ssh');
 
       // 远程走 SFTP，不能套本地白名单校验
@@ -549,14 +568,14 @@ function createFsHandlers(d) {
         await assertSandboxWritable(remoteAbs, 'fs.write_file', { remote: true });
         // 调用方（fs.edit_file）刚读过同一文件时直接复用，省掉一次整读。
         let beforeText = typeof undoBeforeText === 'string' ? undoBeforeText : null;
-        if (beforeText == null) {
+        if (beforeText == null && enc === 'utf8') {
           try {
-            if (enc === 'utf8') {
-              const prev = await remote.readFile(remotePath, 'utf8');
-              beforeText = prev.data;
-            }
-          } catch {
-            beforeText = null;
+            const prev = await remote.readFile(remotePath, 'utf8');
+            beforeText = prev.data;
+          } catch (err) {
+            // 只有「远端确实没有这个文件」才是「新建」。读失败当 null 的代价是撤回删文件
+            // （`rpc.js:restoreUndoFile` 对 before == null 走删除分支）。
+            if (!isPathMissingError(err)) throw undoSnapshotUnavailable(remotePath, err);
           }
         }
         let r;
@@ -612,13 +631,13 @@ function createFsHandlers(d) {
           : null;
       const buf = enc === 'base64' ? Buffer.from(String(data), 'base64') : Buffer.from(String(data), 'utf8');
       let beforeText = typeof undoBeforeText === 'string' ? undoBeforeText : null;
-      if (beforeText == null) {
+      // 「本来没有这个文件」与「读不出来」必须分开：撤回侧对 `before == null` 走的是删除分支
+      // （`rpc.js:restoreUndoFile`），把读失败当 null 会把用户文件删掉。
+      if (beforeText == null && enc === 'utf8' && fsSync.existsSync(safe)) {
         try {
-          if (enc === 'utf8' && fsSync.existsSync(safe)) {
-            beforeText = await fs.readFile(safe, 'utf8');
-          }
-        } catch {
-          beforeText = null;
+          beforeText = await fs.readFile(safe, 'utf8');
+        } catch (err) {
+          throw undoSnapshotUnavailable(safe, err);
         }
       }
       await fs.mkdir(path.dirname(safe), { recursive: true });
@@ -817,40 +836,20 @@ function createFsHandlers(d) {
       };
       // 去哪台机器：`local:` 前缀明确指本机，其余跟随会话工作空间（见 rpc.js:resolveFsTarget）
       const target = resolveFsTarget(searchPath);
-      if (target.remote) {
-        const agentInfo = getRemoteAgentInfo();
-        if (isRemoteAgentUsable(agentInfo)) {
-          // 远端 Agent：rg-search 在远端跑（没装 rg 时它自己退 grep）。
-          // 不再叠「codebase.grep 降级 → SSH exec grep」两层：那会让一次真实失败
-          // 变成「查到了但结果不全」，比直接报错更难查。
-          return await getRemoteAgentClient(agentInfo).call('fs.grep', {
-            pattern: pat,
-            glob,
-            path: target.path,
-            regex: regex === true,
-            caseInsensitive: ci,
-            ...ctxArgs,
-            maxResults
-          });
-        }
-        if (target.remote.transport === 'sftp') {
-          // 没装 Agent 的会话：本地没有工作区文件，只能靠 ssh exec 的 grep
-          const via = await grepViaRemoteExec(cwdForCall(), {
-            pattern: pat,
-            glob,
-            path: target.path,
-            regex: regex === true,
-            caseInsensitive: ci,
-            type: type || undefined,
-            multiline: multiline === true,
-            context,
-            beforeContext: ctxBefore,
-            afterContext: ctxAfter,
-            count: count === true,
-            maxResults
-          });
-          if (via) return via;
-        }
+      // 适配器可能没实现 grep（老远端包 / 单测假对象）：按「这条传输做不了」回落本机搜索。
+      if (target.remote && typeof target.remote.grep === 'function') {
+        // 「远端怎么搜」由适配器决定（RPC 走远端 rg；SFTP 走 *ViaRemoteExec）。
+        // handler 不再自己判「有没有 Agent / 是不是 SFTP」—— 那条判断的唯一位置是 rpc.js:getRemoteFs()。
+        const via = await target.remote.grep({
+          pattern: pat,
+          glob,
+          path: target.path,
+          regex: regex === true,
+          caseInsensitive: ci,
+          ...ctxArgs,
+          maxResults
+        });
+        if (via) return via;
       }
       // 本机搜索：显式 local: 时根就是它自己，否则是会话工作区
       const root = target.explicitLocal ? target.path : cwdForCall();
@@ -890,14 +889,10 @@ function createFsHandlers(d) {
         assertAllowedPath(path.resolve(localGlob.root), readRootsForCall());
         return globWorkspace(localGlob.root, { pattern: localGlob.pattern, maxResults });
       }
-      const agentInfo = getRemoteAgentInfo();
-      if (isRemoteAgentUsable(agentInfo)) {
-        // 远端失败就让失败如实上抛：吞掉再退 ssh exec 会把「命令坏了」说成「没有匹配」
-        return await getRemoteAgentClient(agentInfo).call('fs.glob', { pattern: pat, maxResults });
-      }
+      // 同 fs.grep：远端怎么 glob 由适配器决定，handler 不再自判传输。
       const remote = getRemoteFs();
-      if (remote && remote.transport === 'sftp') {
-        const via = await globViaRemoteExec(cwdForCall(), { pattern: pat, maxResults });
+      if (remote && typeof remote.glob === 'function') {
+        const via = await remote.glob({ pattern: pat, maxResults });
         if (via) return via;
       }
       const root = cwdForCall();

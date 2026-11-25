@@ -15,6 +15,8 @@ const {
 } = require('./local-endpoint');
 const { createRpcHandlers } = require('./rpc');
 const { createTurnUndoService } = require('../undo/turn-undo-service');
+// 撤回栈深上限的唯一数字来源（设置 →「撤回步数上限」），每次 trim 现取，改了立刻生效
+const { getAgentLimit } = require('../agent/agent-limits');
 const { createLspDiagnosticsService } = require('../lsp/diagnostics-service');
 const {
   loadPermissions,
@@ -177,7 +179,10 @@ class LocalGateway {
     this._activeWatchRoots = [];
     /** @type {ReturnType<import('../core-bridge').createCoreBridge> | null} */
     this.rustCore = opts.rustCore || null;
-    this.turnUndo = createTurnUndoService({ userDataPath: this.userDataPath });
+    this.turnUndo = createTurnUndoService({
+      userDataPath: this.userDataPath,
+      maxStack: () => getAgentLimit('maxUndoSteps', this.userDataPath)
+    });
     this.lspDiagnostics = createLspDiagnosticsService({
       userDataPath: this.userDataPath,
       log: (msg) => this.log(`[lsp] ${msg}`),
