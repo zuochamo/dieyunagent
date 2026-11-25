@@ -113,14 +113,16 @@ function serializeSessionState(st) {
     const out = {
       turnId: record.turnId,
       sessionId: record.sessionId,
-      mode: record.mode,
       strategy: record.strategy,
-      runId: record.runId,
       workspaceKind: record.workspaceKind,
       workspaceRoot: record.workspaceRoot,
       runWorkspaceRoot: record.runWorkspaceRoot,
       gitHead: record.gitHead,
-      planApplied: !!record.planApplied,
+      gitStashSha: record.gitStashSha || null,
+      gitUntrackedAtStart: Array.isArray(record.gitUntrackedAtStart)
+        ? record.gitUntrackedAtStart.slice()
+        : null,
+      shellMutated: !!record.shellMutated,
       rolledBack: !!record.rolledBack,
       finalized: !!record.finalized,
       createdAt: record.createdAt,
@@ -209,14 +211,16 @@ function deserializeSessionState(raw, texts) {
     const next = {
       turnId: record.turnId || turnId,
       sessionId: record.sessionId,
-      mode: record.mode,
       strategy: record.strategy,
-      runId: record.runId == null ? null : record.runId,
       workspaceKind: record.workspaceKind,
       workspaceRoot: record.workspaceRoot,
       runWorkspaceRoot: record.runWorkspaceRoot,
       gitHead: record.gitHead == null ? null : record.gitHead,
-      planApplied: !!record.planApplied,
+      gitStashSha: record.gitStashSha == null ? null : record.gitStashSha,
+      gitUntrackedAtStart: Array.isArray(record.gitUntrackedAtStart)
+        ? record.gitUntrackedAtStart.slice()
+        : null,
+      shellMutated: !!record.shellMutated,
       rolledBack: !!record.rolledBack,
       finalized: !!record.finalized,
       createdAt: record.createdAt,
@@ -289,37 +293,11 @@ function createTurnUndoStore(userDataPath) {
     return texts;
   }
 
-  async function readBlobs(sessionId, refs) {
-    /** @type {Map<string, string>} */
-    const texts = new Map();
-    if (!root) return texts;
-    for (const ref of refs) {
-      try {
-        texts.set(ref, await fs.readFile(blobFilePath(root, sessionId, ref), 'utf8'));
-      } catch {
-        // 同上
-      }
-    }
-    return texts;
-  }
-
   function readMetaSync(sessionId) {
     const sid = String(sessionId || '').trim();
     if (!root || !sid) return null;
     try {
       const raw = JSON.parse(fsSync.readFileSync(sessionFilePath(root, sid), 'utf8').replace(/^\uFEFF/, ''));
-      return raw && typeof raw === 'object' ? raw : null;
-    } catch {
-      return null;
-    }
-  }
-
-  async function readMeta(sessionId) {
-    const sid = String(sessionId || '').trim();
-    if (!root || !sid) return null;
-    try {
-      const body = await fs.readFile(sessionFilePath(root, sid), 'utf8');
-      const raw = JSON.parse(body.replace(/^\uFEFF/, ''));
       return raw && typeof raw === 'object' ? raw : null;
     } catch {
       return null;
@@ -337,15 +315,6 @@ function createTurnUndoStore(userDataPath) {
     const refs = collectRefs(raw.records);
     seedWrittenRefs(sid, refs);
     return deserializeSessionState(raw, readBlobsSync(sid, refs));
-  }
-
-  async function loadSession(sessionId) {
-    const sid = String(sessionId || '').trim();
-    const raw = await readMeta(sid);
-    if (!raw) return null;
-    const refs = collectRefs(raw.records);
-    seedWrittenRefs(sid, refs);
-    return deserializeSessionState(raw, await readBlobs(sid, refs));
   }
 
   /** 内容块落盘：只写本次新出现的引用；批量写失败不影响元数据（宁可丢内容也不写悬空引用） */
@@ -432,19 +401,6 @@ function createTurnUndoStore(userDataPath) {
     );
   }
 
-  async function flushSession(sessionId) {
-    const sid = String(sessionId || '').trim();
-    if (!root || !sid) return;
-    const timer = pendingTimers.get(sid);
-    if (timer) {
-      clearTimeout(timer);
-      pendingTimers.delete(sid);
-    }
-    const st = pendingPayloads.get(sid);
-    pendingPayloads.delete(sid);
-    if (st) await writeSessionNow(sid, st);
-  }
-
   async function deleteSession(sessionId) {
     const sid = String(sessionId || '').trim();
     if (!root || !sid) return;
@@ -470,16 +426,9 @@ function createTurnUndoStore(userDataPath) {
     }
   }
 
-  function hasStore() {
-    return !!root;
-  }
-
   return {
-    hasStore,
-    loadSession,
     loadSessionSync,
     scheduleSave,
-    flushSession,
     deleteSession,
     writeSessionNow
   };

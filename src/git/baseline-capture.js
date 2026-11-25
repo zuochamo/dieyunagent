@@ -8,20 +8,26 @@ const {
   WORKTREE_SNAPSHOT_MAX_BYTES
 } = require('./git-target');
 const { readGitStatus, toLegacyStatusItem } = require('./status');
-
-/** Avoid multi-minute undo.turn_begin on repos with thousands of dirty paths. */
-const MAX_BASELINE_FILES = 120;
+const { captureTurnStartState, MAX_BASELINE_FILES } = require('./turn-tree');
 
 /**
  * 捕获 turn 开始前工作区相对 git 根的脏文件内容（用于 git 策略撤回）。
+ *
+ * `opts.turnStartState`：只有**回合开始**需要「回合开始树 + 未跟踪清单」。
+ * 每个工具批次结束时的 `capture_batch` 也会调这里（补脏文件内容），
+ * 那里**不能**再跑 `git stash create` / `ls-files` —— 一轮 30+ 批就是 30+ 个不可达 commit
+ * 加 30+ 次全工作区遍历。
+ *
  * @param {string} repoPath
- * @returns {Promise<{ head: string, files: Record<string, { before: string|null, encoding: 'utf8'|'base64' }> }>}
+ * @param {{ turnStartState?: boolean }} [opts]
+ * @returns {Promise<{ isRepo: boolean, head: string, stashSha: string, untracked: string[]|null, files: Record<string, { before: string|null, encoding: 'utf8'|'base64' }> }>}
  */
-async function captureGitWorkingBaseline(repoPath) {
+async function captureGitWorkingBaseline(repoPath, opts = {}) {
   const files = {};
   const target = createGitTarget({ kind: 'local', root: repoPath });
+  // `isRepo` 由这里回答：调用方（`beginTurn`）不必再单独 `isGitRepo()` 问一次（省一次 git 往返）
   if (!(await target.isRepo())) {
-    return { head: '', files };
+    return { isRepo: false, head: '', stashSha: '', untracked: null, files };
   }
   const head = (await target.textOrEmpty(['rev-parse', 'HEAD'])) || '';
 
@@ -31,8 +37,16 @@ async function captureGitWorkingBaseline(repoPath) {
     // 未跟踪目录折叠成 `dir/`，不会在 turn_begin 里逐个展开
     status = await readGitStatus(target, { untrackedMode: 'normal' });
   } catch {
-    return { head, files };
+    return { isRepo: true, head, stashSha: '', untracked: null, files };
   }
+
+  // 先拿 status 再决定建不建树（闸门看的就是脏条目数）
+  const turnStart =
+    opts.turnStartState === true
+      ? await captureTurnStartState(target, { dirtyCount: status.entries.length })
+      : null;
+  const stashSha = turnStart ? turnStart.stashSha : '';
+  const untracked = turnStart ? turnStart.untracked : null;
 
   for (const entry of status.entries) {
     if (Object.keys(files).length >= MAX_BASELINE_FILES) break;
@@ -54,7 +68,7 @@ async function captureGitWorkingBaseline(repoPath) {
       // ignore unreadable
     }
   }
-  return { head, files };
+  return { isRepo: true, head, stashSha, untracked, files };
 }
 
 /**
@@ -79,4 +93,7 @@ function mergeBaselineFilesInto(target, incoming) {
   return { merged, mergedKeys };
 }
 
-module.exports = { captureGitWorkingBaseline, mergeBaselineFilesInto, MAX_BASELINE_FILES };
+module.exports = {
+  captureGitWorkingBaseline,
+  mergeBaselineFilesInto
+};

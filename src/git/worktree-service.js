@@ -43,6 +43,29 @@ function dieyunPath(repoPath, ...segs) {
   return path.join(repoPath, '.dieyun', ...segs);
 }
 
+/**
+ * 「主工作区这个文件有未提交改动吗」——**目录前缀也算命中**。
+ *
+ * 为什么必须这么做（2026-11-19 审计）：主工作区的脏文件来自 `git status`（`-unormal`），
+ * 未跟踪目录会被**折叠成一行** `docs/new/`；而待应用的变更逐文件枚举（`ls-files --others`
+ * → `docs/new/note.md`）。精确匹配 `has()` 于是恒为 false，本该被 `MAIN_DIRTY` 拦下的覆盖
+ * 直接执行，静默换掉用户自己还没提交的文件。
+ *
+ * @param {Set<string>} dirtySet 主工作区的脏路径（可能是目录形态，带尾斜杠）
+ * @param {string} relPath 待应用变更的仓库相对路径
+ */
+function isMainDirtyPath(dirtySet, relPath) {
+  const p = String(relPath || '');
+  if (!p || !dirtySet || !dirtySet.size) return false;
+  if (dirtySet.has(p)) return true;
+  let idx = p.indexOf('/');
+  while (idx > 0) {
+    if (dirtySet.has(`${p.slice(0, idx)}/`)) return true;
+    idx = p.indexOf('/', idx + 1);
+  }
+  return false;
+}
+
 function runRootOf(repoPath, runId) {
   return dieyunPath(repoPath, WORKTREES_DIR, String(runId || '').trim());
 }
@@ -554,6 +577,116 @@ async function pruneRunBranches(repoPath, opts = {}) {
   return { ok: true, deleted, kept };
 }
 
+/** 路径比较用的规范化：分隔符统一、去尾斜杠、小写（Windows 大小写不敏感）。 */
+function normalizeFsPath(p) {
+  return String(p || '')
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
+/** `git worktree list` 里当前登记的活 worktree 路径集合（规范化后）。 */
+async function listLiveWorktreePaths(repoPath) {
+  const out = new Set();
+  let text;
+  try {
+    text = await gitExec(repoPath, ['worktree', 'list', '--porcelain']);
+  } catch {
+    return out;
+  }
+  for (const raw of String(text).split('\n')) {
+    const m = /^worktree\s+(.+)$/.exec(raw.trim());
+    if (m) out.add(normalizeFsPath(m[1]));
+  }
+  return out;
+}
+
+/**
+ * 回收 run 残留的**零风险那两类**（不需要任何阈值、不需要用户配置）：
+ *
+ *   1. `dieyun/agent-*` 里**已并入 HEAD** 的分支 —— 产出已经在主线里；
+ *   2. `.dieyun/worktrees/<runId>` 里**没有任何活 worktree** 的 run 目录 ——
+ *      `git worktree list` 不再登记它，只剩空壳目录与 `.dieyun-run-meta.json`
+ *      （`cleanupRunWorktrees` 只在整 run 无拦截时才 `rmSync` 根目录，进程被强杀 /
+ *      某一 role 归档失败就会把根目录留在盘上，这就是残留的来源）。
+ *
+ * 未合并的分支一律保留（它们是还没处置的产出），run 里只要有一份 worktree 仍被
+ * git 登记就整 run 保留（可能正在跑）。
+ *
+ * **为什么要有这一层**（2026-11-21 实测）：回收原来只挂在桌面 Renderer 启动路径上
+ * （`maybeEnforceWorktreeCleanupPolicy`），无人值守 / 强杀进程后没人扫，本机攒到
+ * 19 份 worktree（473 MB）与 171 条 `dieyun/agent-run-*` 分支。触发点因此搬到
+ * Main 侧（`planner-main-bridge.runStart`，桌面与 headless 同一条路）。
+ *
+ * @param {object} [opts]
+ * @param {string[]} [opts.protectRunIds] 本轮还要用的 runId（续跑复用同一 runId，不能删）
+ */
+async function sweepRunArtifacts(repoPath, opts = {}) {
+  const result = {
+    ok: true,
+    removedRuns: [],
+    freedBytes: 0,
+    pruned: { ok: true, deleted: [], kept: [] }
+  };
+  if (!repoPath || !fs.existsSync(repoPath)) {
+    return { ...result, ok: false, error: '工作区不存在' };
+  }
+  if (!(await isGitRepo(repoPath))) {
+    return { ...result, ok: false, error: '工作区不是 git 仓库' };
+  }
+
+  const protectRunIds = new Set(
+    (Array.isArray(opts.protectRunIds) ? opts.protectRunIds : [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean)
+  );
+  const live = await listLiveWorktreePaths(repoPath);
+  const root = dieyunPath(repoPath, WORKTREES_DIR);
+
+  let runIds = [];
+  try {
+    runIds = fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((ent) => ent.isDirectory())
+      .map((ent) => ent.name);
+  } catch {
+    runIds = [];
+  }
+
+  for (const runId of runIds) {
+    if (protectRunIds.has(String(runId))) continue;
+    const runRoot = path.join(root, runId);
+    if (live.has(normalizeFsPath(runRoot))) continue;
+    let livingRole = false;
+    try {
+      livingRole = fs
+        .readdirSync(runRoot, { withFileTypes: true })
+        .some((ent) => ent.isDirectory() && live.has(normalizeFsPath(path.join(runRoot, ent.name))));
+    } catch {
+      // 读不到就当没有活 worktree：下面 rmSync 失败会自然跳过
+    }
+    if (livingRole) continue;
+    const bytes = getDirectorySizeBytes(runRoot);
+    try {
+      fs.rmSync(runRoot, { recursive: true, force: true });
+    } catch {
+      continue; // 被占用 / 权限：跳过这一个，不影响其余
+    }
+    result.removedRuns.push(runId);
+    result.freedBytes += bytes;
+  }
+
+  // 删掉的目录在 .git/worktrees 里还会留登记，顺手 prune（空跑也很便宜）
+  await gitExec(repoPath, ['worktree', 'prune']).catch(() => {});
+
+  try {
+    result.pruned = await pruneRunBranches(repoPath, { keep: 0, deleteUnmerged: false });
+  } catch (e) {
+    result.pruned = { ok: false, error: (e && e.message) || String(e), deleted: [], kept: [] };
+  }
+  return result;
+}
+
 function getDirectorySizeBytes(dirPath) {
   if (!dirPath || !fs.existsSync(dirPath)) return 0;
   let total = 0;
@@ -703,20 +836,24 @@ async function enforceWorktreeCleanupPolicy(repoPath, opts = {}) {
     }
   }
 
-  // 目录清完顺手回收分支：默认只删「已并入 HEAD」的，未合并的一律保留
-  // （它们是产出的存档）。这样分支不会像原来那样无限累积。
-  let pruned;
-  try {
-    pruned = await pruneRunBranches(repoPath, { keep: 0, deleteUnmerged: false });
-  } catch (e) {
-    pruned = { ok: false, error: (e && e.message) || String(e) };
-  }
+  // 容量口径清完，再回收「零风险残留」：已并入 HEAD 的 agent 分支 + 没人在用的 run 空壳。
+  // 语义全在 `sweepRunArtifacts`（Main 侧每轮开跑前也走同一份），这里不另写一遍 prune。
+  const swept = await sweepRunArtifacts(repoPath, { protectRunIds: [...protectedRunIds] });
+  const pruned = swept.pruned;
 
-  // 一条都没删掉时磁盘没变化（pruneRunBranches 只删分支、不碰目录），
-  // 不必再扫一遍整棵 worktree 目录树（getDirectorySizeBytes 是同步 statSync 全树，
-  // 空跑一次就是白等）。真有删除时才重扫，保证报出去的字节数是磁盘实况。
-  if (!removed.length) {
-    return { ok: true, removed, blocked, pruned, protectedRunIds: [...protectedRunIds], ...listed };
+  // 一个目录都没删掉时磁盘没变化（sweep 里也只删空壳），不必再扫一遍整棵 worktree 目录树
+  // （getDirectorySizeBytes 是同步 statSync 全树，空跑一次就是白等）。真有删除时才重扫，
+  // 保证报出去的字节数是磁盘实况。
+  if (!removed.length && !swept.removedRuns.length) {
+    return {
+      ok: true,
+      removed,
+      blocked,
+      pruned,
+      swept,
+      protectedRunIds: [...protectedRunIds],
+      ...listed
+    };
   }
 
   const after = await listManagedWorktreeRuns(repoPath);
@@ -725,6 +862,7 @@ async function enforceWorktreeCleanupPolicy(repoPath, opts = {}) {
     removed,
     blocked,
     pruned,
+    swept,
     protectedRunIds: [...protectedRunIds],
     ...after
   };
@@ -748,7 +886,6 @@ async function previewRunWorktreeChanges(repoPath, runId) {
   const meta = readRunMeta(repoPath, id);
   const mainFiles = await listWorktreeChanges(repoPath);
   const mainDirty = new Set(mainFiles.map((f) => f.path));
-
   const changes = [];
   const rolesByPath = new Map();
   for (const ent of fs.readdirSync(runRoot, { withFileTypes: true })) {
@@ -769,7 +906,7 @@ async function previewRunWorktreeChanges(repoPath, runId) {
         roleId,
         worktreePath: wtPath,
         baseSha,
-        mainDirty: mainDirty.has(key)
+        mainDirty: isMainDirtyPath(mainDirty, key)
       };
       changes.push(entry);
       if (!rolesByPath.has(key)) rolesByPath.set(key, []);
@@ -1136,6 +1273,7 @@ module.exports = {
   isGitRepo,
   gitExec,
   normalizeChangeKind,
+  isMainDirtyPath,
   listWorktrees,
   createAgentWorktree,
   resetAgentWorktree,
@@ -1144,6 +1282,7 @@ module.exports = {
   cleanupRunWorktrees,
   pruneRunBranches,
   listManagedWorktreeRuns,
+  sweepRunArtifacts,
   enforceWorktreeCleanupPolicy,
   listWorktreeChangesVsBase,
   previewRunWorktreeChanges,

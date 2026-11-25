@@ -8,8 +8,7 @@ const {
   WORKTREE_SNAPSHOT_MAX_BYTES
 } = require('./git-target');
 const { readGitStatus, toLegacyStatusItem } = require('./status');
-
-const MAX_BASELINE_FILES = 120;
+const { captureTurnStartState, MAX_BASELINE_FILES } = require('./turn-tree');
 
 /**
  * SSH 工作区：捕获回合开始前远端 git 脏文件（与 captureGitWorkingBaseline 对齐）。
@@ -20,10 +19,12 @@ const MAX_BASELINE_FILES = 120;
  *
  * @param {ReturnType<import('../ssh/session-manager').createSshSessionManager>} ssh
  * @param {string} remoteRoot
- * @returns {Promise<{ isGitRepo: boolean, head: string, files: Record<string, { before: string|null, encoding: 'utf8'|'base64', remote: true }> }>}
+ * @param {{ turnStartState?: boolean }} [opts] 只有回合开始需要「回合开始树 + 未跟踪清单」
+ *   （`capture_batch` 每批也调这里，那里跑 `stash create` 就是一轮几十个不可达 commit）
+ * @returns {Promise<{ isGitRepo: boolean, head: string, stashSha: string, untracked: string[]|null, files: Record<string, { before: string|null, encoding: 'utf8'|'base64', remote: true }> }>}
  */
-async function captureRemoteGitWorkingBaseline(ssh, remoteRoot) {
-  const empty = { isGitRepo: false, head: '', files: {} };
+async function captureRemoteGitWorkingBaseline(ssh, remoteRoot, opts = {}) {
+  const empty = { isGitRepo: false, head: '', stashSha: '', untracked: null, files: {} };
   if (!ssh || !remoteRoot) return empty;
 
   const root = normalizeRemotePath(remoteRoot);
@@ -41,8 +42,18 @@ async function captureRemoteGitWorkingBaseline(ssh, remoteRoot) {
   try {
     status = await readGitStatus(target, { untrackedMode: 'normal' });
   } catch {
-    return { isGitRepo: true, head, files: {} };
+    return { isGitRepo: true, head, stashSha: '', untracked: null, files: {} };
   }
+
+  // 回合开始树 + 当时的未跟踪清单：整轮撤回的唯一可靠来源
+  // （shell 改的文件只有树里有「改前」；shell 新建的未跟踪文件只有清单能判出「本轮新建」）
+  // 建树放在 status 之后：脏条目过多时闸门会跳过建树（见 baseline-capture.MAX_TURN_START_TREE_FILES）
+  const turnStart =
+    opts.turnStartState === true
+      ? await captureTurnStartState(target, { dirtyCount: status.entries.length })
+      : null;
+  const stashSha = turnStart ? turnStart.stashSha : '';
+  const untracked = turnStart ? turnStart.untracked : null;
 
   /** @type {Record<string, { before: string|null, encoding: 'utf8'|'base64', remote: true }>} */
   const files = {};
@@ -68,7 +79,7 @@ async function captureRemoteGitWorkingBaseline(ssh, remoteRoot) {
     }
   }
 
-  return { isGitRepo: true, head, files };
+  return { isGitRepo: true, head, stashSha, untracked, files };
 }
 
 module.exports = { captureRemoteGitWorkingBaseline };

@@ -1,15 +1,8 @@
-/* global window, gwState, gatewayCall, currentSessionId, messages, invalidateWorkspaceArtifacts, clearArtifacts, showAgentToast, getAgentLimits */
+/* global window, gwState, gatewayCall, currentSessionId, messages, invalidateWorkspaceArtifacts, clearArtifacts, showAgentToast */
 'use strict';
-
-function maxUndoSteps() {
-  return typeof getAgentLimits === 'function' ? getAgentLimits().maxUndoSteps : 5;
-}
 
 /** sessionId -> active undo turnId for that session's in-flight run */
 const sessionUndoTurnIds = new Map();
-
-/** sessionId -> turnId -> userMsgIndex */
-const turnMsgIndexBySession = new Map();
 
 /** sessionId:turnId -> in-flight batch capture */
 const batchCaptureInflight = new Map();
@@ -32,13 +25,6 @@ function getUndoTurnIdForSession(sessionId) {
 
 function getCurrentUndoTurnId() {
   return getUndoTurnIdForSession(currentSessionId);
-}
-
-function rememberTurnMsgIndex(sessionId, turnId, userMsgIndex) {
-  const sid = String(sessionId || '');
-  if (!sid || !turnId) return;
-  if (!turnMsgIndexBySession.has(sid)) turnMsgIndexBySession.set(sid, new Map());
-  turnMsgIndexBySession.get(sid).set(String(turnId), userMsgIndex);
 }
 
 function workspaceFromSessionPath(workspacePath) {
@@ -79,25 +65,21 @@ function patchUserMessageUndoMeta(userMsgIndex, turnId) {
 }
 
 /**
- * @param {{ mode?: 'agent'|'plan', userMsgIndex: number, runId?: string|null, sessionId?: string, workspacePath?: string|null }} opts
+ * @param {{ userMsgIndex: number, sessionId?: string, workspacePath?: string|null }} opts
  */
 async function beginTurnUndo(opts) {
   const sessionId = String((opts && opts.sessionId) || currentSessionId || '').trim();
   if (!gwState.authed || !sessionId) return null;
   const turnId = createUndoTurnId();
   sessionUndoTurnIds.set(sessionId, turnId);
-  rememberTurnMsgIndex(sessionId, turnId, opts.userMsgIndex);
   patchUserMessageUndoMeta(opts.userMsgIndex, turnId);
   const ws = await resolveWorkspaceForUndoSession(sessionId, opts && opts.workspacePath);
-  const mode = opts && opts['mode'] === 'plan' ? 'plan' : 'agent';
   try {
     await gatewayCall(
       'undo.turn_begin',
       {
         sessionId,
         turnId,
-        mode,
-        runId: opts && opts.runId ? opts.runId : null,
         workspaceKind: ws.kind,
         workspaceRoot: ws.workspaceRoot,
         ...(opts && opts.workspacePath ? { runWorkspaceRoot: opts.workspacePath } : {})
@@ -118,20 +100,6 @@ async function finalizeTurnUndo(turnId, sessionId) {
   if (sessionUndoTurnIds.get(sid) === turnId) sessionUndoTurnIds.delete(sid);
   try {
     await gatewayCall('undo.turn_finalize', { sessionId: sid, turnId });
-  } catch (e) {
-    console.warn(e);
-  }
-}
-
-async function markTurnWorktreeOnly(turnId, runId, sessionId) {
-  const sid = String(sessionId || currentSessionId || '').trim();
-  if (!gwState.authed || !sid || !turnId || !runId) return;
-  try {
-    await gatewayCall('undo.mark_worktree_only', {
-      sessionId: sid,
-      turnId,
-      runId
-    });
   } catch (e) {
     console.warn(e);
   }
@@ -195,22 +163,6 @@ async function rollbackTurnFiles(turnId, sessionId, runWorkspaceRoot) {
       turnId,
       ...(runWorkspaceRoot ? { runWorkspaceRoot } : {})
     });
-    if (r && r.needsWorktreeCleanup && r.runId) {
-      const api = window.diecloud || {};
-      if (api.worktreeCleanupRun) {
-        try {
-          await api.worktreeCleanupRun(r.runId);
-        } catch (e) {
-          return { ok: false, error: e.message || String(e), strategy: r.strategy, committed: false };
-        }
-      }
-      try {
-        await gatewayCall('undo.rollback_commit', { sessionId: sid, turnId });
-        r.committed = true;
-      } catch (e) {
-        return { ok: false, error: e.message || String(e), strategy: r.strategy, committed: false };
-      }
-    }
     // 仅当前可见会话才清侧栏；后台会话撤回勿污染当前文件区
     if (String(currentSessionId || '') === sid) {
       if (typeof invalidateWorkspaceArtifacts === 'function') invalidateWorkspaceArtifacts();
@@ -319,26 +271,18 @@ async function rollbackToBatchCheckpoint(turnId, batchId, sessionId, runWorkspac
 function clearSessionUndo(sessionId) {
   const sid = String(sessionId || '');
   sessionUndoTurnIds.delete(sid);
-  turnMsgIndexBySession.delete(sid);
   if (gwState.authed && sid) {
     gatewayCall('undo.session_clear', { sessionId: sid }).catch(() => {});
   }
-}
-
-function initUndoStackUI() {
-  // no-op; hooks live in chat-render + agent-loop
 }
 
 window.getUndoTurnIdForSession = getUndoTurnIdForSession;
 window.getCurrentUndoTurnId = getCurrentUndoTurnId;
 window.beginTurnUndo = beginTurnUndo;
 window.finalizeTurnUndo = finalizeTurnUndo;
-window.markTurnWorktreeOnly = markTurnWorktreeOnly;
 window.capturePlanApplyForUndo = capturePlanApplyForUndo;
 window.captureTurnBatchCheckpoint = captureTurnBatchCheckpoint;
 window.rollbackToBatchCheckpoint = rollbackToBatchCheckpoint;
-window.canRollbackTurn = canRollbackTurn;
 window.prepareTurnForWithdraw = prepareTurnForWithdraw;
 window.rollbackTurnFiles = rollbackTurnFiles;
 window.clearSessionUndo = clearSessionUndo;
-Object.defineProperty(window, 'MAX_UNDO_STEPS', { get: maxUndoSteps, configurable: true });

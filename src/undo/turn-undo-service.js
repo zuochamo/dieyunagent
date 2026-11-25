@@ -4,21 +4,44 @@ const fs = require('fs/promises');
 const fsSync = require('fs');
 const path = require('path');
 const { captureGitWorkingBaseline } = require('../git/baseline-capture');
-const { isGitRepo } = require('../git/worktree-service');
 const { encodeWorktreeContent, WORKTREE_SNAPSHOT_MAX_BYTES } = require('../git/git-target');
 const { createTurnUndoStore } = require('./turn-undo-store');
 const { normalizeRemotePath, parseWorkspaceInput } = require('../workspace/target');
+const { AGENT_LIMITS_DEFAULTS } = require('../agent/agent-limits');
 
-const MAX_STACK = 5;
+/** 栈深默认值：数字本身只住在 `agent-limits`（护栏单一来源）；设置项改动走 `opts.maxStack` 生效 */
+const DEFAULT_MAX_STACK = AGENT_LIMITS_DEFAULTS.maxUndoSteps;
+
 // 单轮 checkpoint 上限：到顶后**合并最老两个**而不是停止拍快照 ——
 // 停止拍会让长回合从某一批之后彻底失去「退回这一批之前」的能力（而且不留任何痕迹）。
 // 合并保住的语义：恢复点仍在，只是最老的那几个粒度变粗（宁可粗，不可悄悄消失）。
 const MAX_BATCHES_PER_TURN = 32;
 
 /**
+ * 「文件路径 → 回合快照的相对 key」的唯一实现（原来 service 的 `relKey` 与
+ * `gateway/rpc.js:normalizeUndoTouchPaths` 各写一份，改口径就得改两处）。
+ *
+ * 语义：反斜杠归一、去掉工作区根前缀（含尾斜杠差异）、路径不在根下就原样返回。
+ * 这里**不**做 `path.resolve` / `..` 拒绝 —— 远端 POSIX 路径在 Windows 上 resolve 会变假路径，
+ * 越界判定归 `path-policy` / `remote-path` 各层自己。
+ *
+ * @param {string} filePath
+ * @param {string|null|undefined} workspaceRoot
+ * @returns {string}
+ */
+function undoRelativeKey(filePath, workspaceRoot) {
+  const fp = String(filePath || '').replace(/\\/g, '/');
+  const root = workspaceRoot ? String(workspaceRoot).replace(/\\/g, '/').replace(/\/+$/, '') : '';
+  if (root && (fp === root || fp.startsWith(root + '/'))) {
+    return fp.slice(root.length + 1);
+  }
+  return fp;
+}
+
+/**
  * 单会话内容预算（字符数；ASCII 约等于字节，中文按 3 倍字节算）。
  *
- * 只限条数不限大小是不够的：`MAX_BATCHES_PER_TURN × MAX_STACK` 只封住「多少个恢复点」，
+ * 只限条数不限大小是不够的：`MAX_BATCHES_PER_TURN × 栈深` 只封住「多少个恢复点」，
  * 每个恢复点里放多少原文完全不受控。实测一个会话因此堆到 252MB（171.7MB 重复原文），
  * 落盘时在主线程上 `JSON.stringify` + 写盘要 0.4~0.9s（issue/2026-11-07-smoothness-investigation.md）。
  *
@@ -221,18 +244,40 @@ function restoreIsRemote(record, meta) {
 }
 
 /**
- * @typedef {'git'|'snapshot'|'worktree-only'} UndoStrategy
+ * 恢复项（plan → handler → `restoreUndoFile`）的唯一构造处。
+ * 整轮撤回与单检查点撤回共用它：两个 plan 各写一遍映射时，「谁判远端」「带哪些字段」
+ * 迟早漂移（handler 侧原来还要再判一次 `workspaceKind === 'ssh'`）。
+ *
+ * @param {TurnUndoRecord} record
+ * @param {string} relPath
+ * @param {{ before: string|null, encoding?: string, remote?: boolean } | null} meta
+ * @returns {{ path: string, before: string|null, encoding: 'utf8'|'base64', remote: boolean, workspaceKind: string, workspaceRoot: string|null }}
+ */
+function toRestoreItem(record, relPath, meta) {
+  const src = meta || { before: null };
+  return {
+    path: relPath,
+    before: src.before == null ? null : src.before,
+    encoding: src.encoding === 'base64' ? 'base64' : 'utf8',
+    remote: restoreIsRemote(record, src),
+    workspaceKind: record.workspaceKind || 'local',
+    workspaceRoot: record.workspaceRoot || null
+  };
+}
+
+/**
+ * @typedef {'git'|'snapshot'} UndoStrategy
  * @typedef {{
  *   turnId: string,
  *   sessionId: string,
- *   mode: 'agent'|'plan',
  *   strategy: UndoStrategy,
- *   runId: string|null,
  *   gitHead: string|null,
+ *   gitStashSha: string|null,
+ *   gitUntrackedAtStart: string[]|null,
+ *   shellMutated: boolean,
  *   files: Record<string, { before: string|null, encoding: 'utf8'|'base64', remote?: boolean }>,
  *   batches: Array<{ id: string, round: number, files: Record<string, { before: string|null, encoding: 'utf8'|'base64', remote?: boolean }>, createdAt: number, mergedCount?: number }>,
  *   batchSeq?: number,
- *   planApplied: boolean,
  *   rolledBack: boolean,
  *   createdAt: number,
  *   finalized: boolean,
@@ -241,12 +286,18 @@ function restoreIsRemote(record, meta) {
  */
 
 /**
- * @param {{ userDataPath?: string }} [opts]
+ * @param {{ userDataPath?: string, maxStack?: () => number }} [opts]
+ *   `maxStack`：栈深上限的取值器（设置页改「撤回步数上限」后立刻生效）。
+ *   缺省读 `agent-limits` 的默认值 —— 数字只在那一处定义。
  */
 function createTurnUndoService(opts = {}) {
   /** @type {Map<string, { activeTurnId: string|null, stack: string[], records: Map<string, TurnUndoRecord> }>} */
   const sessions = new Map();
   const store = opts.userDataPath ? createTurnUndoStore(opts.userDataPath) : null;
+  const maxStack = () => {
+    const n = Number(typeof opts.maxStack === 'function' ? opts.maxStack() : NaN);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_STACK;
+  };
 
   /**
    * 落盘：**不再有同步写**。
@@ -284,17 +335,9 @@ function createTurnUndoService(opts = {}) {
     return sessions.get(id);
   }
 
-  function relKey(filePath, workspaceRoot) {
-    const fp = String(filePath || '').replace(/\\/g, '/');
-    const root = workspaceRoot ? String(workspaceRoot).replace(/\\/g, '/').replace(/\/+$/, '') : '';
-    if (root && (fp === root || fp.startsWith(root + '/'))) {
-      return fp.slice(root.length + 1);
-    }
-    return fp;
-  }
-
   function trimStack(st) {
-    while (st.stack.length > MAX_STACK) {
+    const cap = maxStack();
+    while (st.stack.length > cap) {
       const oldId = st.stack.shift();
       if (oldId) st.records.delete(oldId);
     }
@@ -324,11 +367,9 @@ function createTurnUndoService(opts = {}) {
    * @param {{
    *   sessionId: string,
    *   turnId: string,
-   *   mode?: 'agent'|'plan',
-   *   runId?: string|null,
    *   workspaceKind?: 'local'|'ssh',
    *   workspaceRoot?: string|null,
-   *   remoteGitBaseline?: { isGitRepo?: boolean, head?: string, files?: Record<string, unknown> }
+   *   remoteGitBaseline?: { isGitRepo?: boolean, head?: string, stashSha?: string, untracked?: string[]|null, files?: Record<string, unknown> }
    * }} input
    */
   async function beginTurn(input) {
@@ -338,7 +379,6 @@ function createTurnUndoService(opts = {}) {
       return { ok: false, error: 'sessionId / turnId 必填' };
     }
     const st = sessionState(sessionId);
-    const mode = input['mode'] === 'plan' ? 'plan' : 'agent';
     const workspaceKind = inferUndoWorkspaceKind(input);
     const runWorkspaceRoot = normalizeUndoRunWorkspaceRoot(
       workspaceKind,
@@ -349,14 +389,23 @@ function createTurnUndoService(opts = {}) {
 
     let strategy = 'snapshot';
     let gitHead = null;
+    /** 回合开始树的 commit（`git stash create`）——整轮撤回的唯一可靠来源，见 git/turn-tree.js */
+    let gitStashSha = null;
+    /** 回合开始时就存在的未跟踪路径：撤回时不许删它们（`null` = 未知 → 不动未跟踪文件） */
+    let gitUntrackedAtStart = null;
     /** @type {Record<string, { before: string|null, encoding: 'utf8'|'base64', remote?: boolean }>} */
     let files = {};
 
-    if (workspaceKind === 'local' && workspaceRoot && (await isGitRepo(workspaceRoot))) {
-      strategy = 'git';
-      const baseline = await captureGitWorkingBaseline(workspaceRoot);
-      gitHead = baseline.head || null;
-      files = { ...baseline.files };
+    if (workspaceKind === 'local' && workspaceRoot) {
+      // 「是不是 git 仓库」由基线捕获自己回答，别在这里再 `isGitRepo()` 一次（多一次 git 往返）
+      const baseline = await captureGitWorkingBaseline(workspaceRoot, { turnStartState: true });
+      if (baseline.isRepo) {
+        strategy = 'git';
+        gitHead = baseline.head || null;
+        gitStashSha = baseline.stashSha || null;
+        gitUntrackedAtStart = Array.isArray(baseline.untracked) ? baseline.untracked : null;
+        files = { ...baseline.files };
+      }
     } else if (
       workspaceKind === 'ssh' &&
       input.remoteGitBaseline &&
@@ -364,6 +413,10 @@ function createTurnUndoService(opts = {}) {
     ) {
       strategy = 'git';
       gitHead = input.remoteGitBaseline.head || null;
+      gitStashSha = input.remoteGitBaseline.stashSha || null;
+      gitUntrackedAtStart = Array.isArray(input.remoteGitBaseline.untracked)
+        ? input.remoteGitBaseline.untracked
+        : null;
       files = { ...(input.remoteGitBaseline.files || {}) };
     }
 
@@ -371,13 +424,14 @@ function createTurnUndoService(opts = {}) {
     const record = {
       turnId,
       sessionId,
-      mode,
       strategy,
-      runId: input.runId ? String(input.runId) : null,
       workspaceKind,
       workspaceRoot,
       runWorkspaceRoot,
       gitHead,
+      gitStashSha,
+      gitUntrackedAtStart,
+      shellMutated: false,
       files,
       batches: [
         {
@@ -387,7 +441,6 @@ function createTurnUndoService(opts = {}) {
           createdAt: Date.now()
         }
       ],
-      planApplied: false,
       rolledBack: false,
       createdAt: Date.now(),
       finalized: false,
@@ -396,7 +449,13 @@ function createTurnUndoService(opts = {}) {
     st.records.set(turnId, record);
     st.activeTurnId = turnId;
     persistSession(sessionId, { immediate: true });
-    return { ok: true, turnId, strategy, fileCount: Object.keys(files).length };
+    return {
+      ok: true,
+      turnId,
+      strategy,
+      fileCount: Object.keys(files).length,
+      gitStashSha: gitStashSha || null
+    };
   }
 
   function getRecord(sessionId, turnId) {
@@ -423,10 +482,8 @@ function createTurnUndoService(opts = {}) {
     const turnId = String(input.turnId || st.activeTurnId || '').trim();
     if (!turnId) return { ok: false, skipped: true };
     const record = st.records.get(turnId);
-    if (!record || record.rolledBack || record.strategy === 'worktree-only') {
-      return { ok: false, skipped: true };
-    }
-    const key = relKey(input.filePath, input.workspaceRoot);
+    if (!record || record.rolledBack) return { ok: false, skipped: true };
+    const key = undoRelativeKey(input.filePath, input.workspaceRoot);
     if (!key) return { ok: false, skipped: true };
     if (record.files[key]) {
       // Git baseline may already hold turn-start content; still mark the path so rollback restores it.
@@ -485,7 +542,7 @@ function createTurnUndoService(opts = {}) {
   /**
    * Phase B：工具批次执行前拍 checkpoint（合并后的 files 深拷贝）。
    * 到 MAX_BATCHES_PER_TURN 后先合并最老两个再拍，永不「超过 N 批就不再记录」。
-   * @param {{ sessionId: string, turnId?: string, round?: number, merged?: number, filesSnapshot?: Record<string, unknown> }} input
+   * @param {{ sessionId: string, turnId?: string, round?: number, merged?: number, fullSnapshot?: boolean, filesSnapshot?: Record<string, unknown> }} input
    */
   function captureBatchCheckpoint(input) {
     const sessionId = String(input.sessionId || '').trim();
@@ -494,9 +551,10 @@ function createTurnUndoService(opts = {}) {
     const turnId = String(input.turnId || st.activeTurnId || '').trim();
     if (!turnId) return { ok: false, skipped: true };
     const record = st.records.get(turnId);
-    if (!record || record.rolledBack || record.strategy === 'worktree-only') {
-      return { ok: false, skipped: true };
-    }
+    if (!record || record.rolledBack) return { ok: false, skipped: true };
+    // `fullSnapshot` = 这一批里出现过 shell 命令（host_exec）。那些改动**逐文件捕获不到**，
+    // 只能靠回合开始树撤回；记下来是为了「撤不干净时不许装作成功」（见 planRollback.shellMutated）。
+    if (input.fullSnapshot) record.shellMutated = true;
     if (Array.isArray(input.touchedPaths) && input.touchedPaths.length) {
       markTouchedPaths(record, input.touchedPaths);
     }
@@ -540,9 +598,6 @@ function createTurnUndoService(opts = {}) {
     if (!record || record.rolledBack) {
       return { ok: false, error: '记录不可恢复' };
     }
-    if (record.strategy === 'worktree-only') {
-      return { ok: false, error: 'worktree 模式请使用整轮撤回' };
-    }
     const bid = String(batchId || '').trim();
     const batch = (record.batches || []).find((b) => b.id === bid);
     if (!batch) {
@@ -558,51 +613,22 @@ function createTurnUndoService(opts = {}) {
     const allPaths = new Set([...Object.keys(record.files), ...Object.keys(batchFiles)]);
     const restoreRoot = record.workspaceRoot || null;
     const restoreCtx = record.runWorkspaceRoot || restoreRoot;
-    const restore = [];
-    for (const relPath of allPaths) {
-      const meta = batchFiles[relPath];
-      if (meta) {
-        restore.push({
-          path: relPath,
-          before: meta.before,
-          encoding: meta.encoding || 'utf8',
-          remote: restoreIsRemote(record, meta),
-          workspaceKind: record.workspaceKind || 'local',
-          workspaceRoot: restoreRoot
-        });
-      } else {
-        const cur = record.files[relPath];
-        restore.push({
-          path: relPath,
-          before: null,
-          encoding: cur?.encoding || 'utf8',
-          remote: restoreIsRemote(record, cur),
-          workspaceKind: record.workspaceKind || 'local',
-          workspaceRoot: restoreRoot
-        });
-      }
-    }
+    // 不在该检查点里的路径 = 那一刻还不存在 → 恢复 = 删除（before 为 null）
+    const restore = [...allPaths].map((relPath) =>
+      toRestoreItem(record, relPath, batchFiles[relPath] || { before: null, encoding: record.files[relPath]?.encoding })
+    );
     return {
       ok: true,
       strategy: record.strategy,
-      runId: record.runId,
       workspaceRoot: restoreRoot,
       runWorkspaceRoot: restoreCtx,
       workspaceKind: record.workspaceKind || 'local',
       batchId: bid,
+      // 单检查点撤回没有 git 树（那是整轮语义），shell 改动同样撤不回来 —— 如实交出这个事实
+      shellMutated: !!record.shellMutated,
       files: restore.map((r) => r.path),
       restore
     };
-  }
-
-  function markWorktreeOnly({ sessionId, turnId, runId }) {
-    const record = getRecord(sessionId, turnId);
-    if (!record || record.rolledBack) return { ok: false };
-    record.strategy = 'worktree-only';
-    record.runId = runId ? String(runId) : record.runId;
-    record.files = {};
-    persistSession(sessionId, { immediate: true });
-    return { ok: true, strategy: record.strategy, runId: record.runId };
   }
 
   /**
@@ -614,38 +640,29 @@ function createTurnUndoService(opts = {}) {
     const root = workspaceRoot ? path.resolve(String(workspaceRoot)) : null;
     let n = 0;
     for (const p of paths || []) {
-      const key = relKey(p, root);
+      const key = undoRelativeKey(p, root);
       if (!key) continue;
       if (!record.files[key]) {
         const full = root ? path.join(root, key) : key;
+        let captured = null;
         if (fsSync.existsSync(full) && fsSync.statSync(full).isFile()) {
           try {
             const buf = fsSync.readFileSync(full);
-            if (buf.length > WORKTREE_SNAPSHOT_MAX_BYTES) continue;
-            const enc = encodeWorktreeContent(buf);
-            record.files[key] = { before: enc.before, encoding: enc.encoding };
+            if (buf.length <= WORKTREE_SNAPSHOT_MAX_BYTES) captured = encodeWorktreeContent(buf);
           } catch {
-            record.files[key] = { before: null, encoding: 'utf8' };
+            captured = null;
           }
-        } else {
-          record.files[key] = { before: null, encoding: 'utf8' };
         }
+        // 读不到 / 不存在都要能区分：只有「确实不存在」才记 null（撤回=删除）
+        record.files[key] = captured
+          ? { before: captured.before, encoding: captured.encoding }
+          : { before: null, encoding: 'utf8' };
       }
       markTouchedPaths(record, [key]);
       n += 1;
     }
-    record.planApplied = true;
-    record.strategy = record.strategy === 'worktree-only' ? 'snapshot' : record.strategy;
     if (n > 0) persistSession(sessionId, { immediate: true });
     return { ok: true, captured: n };
-  }
-
-  function markTurnTouched({ sessionId, turnId, paths }) {
-    const record = getRecord(sessionId, turnId);
-    if (!record) return { ok: false };
-    markTouchedPaths(record, paths);
-    persistSession(sessionId);
-    return { ok: true, count: Array.isArray(record.touchedPaths) ? record.touchedPaths.length : 0 };
   }
 
   function finalizeTurn({ sessionId, turnId }) {
@@ -683,26 +700,6 @@ function createTurnUndoService(opts = {}) {
     return !!(top && top.turnId === String(turnId || '') && top.finalized);
   }
 
-  function getStack(sessionId) {
-    const st = sessionState(sessionId);
-    if (!st) return [];
-    return st.stack
-      .map((id) => st.records.get(id))
-      .filter(Boolean)
-      .map((r) => ({
-        turnId: r.turnId,
-        mode: r['mode'],
-        strategy: r.strategy,
-        runId: r.runId,
-        planApplied: r.planApplied,
-        rolledBack: r.rolledBack,
-        finalized: r.finalized,
-        fileCount: Object.keys(r.files).length,
-        batchCount: Array.isArray(r.batches) ? r.batches.length : 0,
-        createdAt: r.createdAt
-      }));
-  }
-
   function clearSession(sessionId) {
     const id = String(sessionId || '').trim();
     sessions.delete(id);
@@ -725,45 +722,35 @@ function createTurnUndoService(opts = {}) {
     const record = st.records.get(id);
     if (!record) return { ok: false, error: '未找到记录' };
 
-    if (record.strategy === 'worktree-only') {
-      return {
-        ok: true,
-        strategy: 'worktree-only',
-        runId: record.runId,
-        workspaceRoot: record.workspaceRoot || null,
-        runWorkspaceRoot: record.runWorkspaceRoot || null,
-        workspaceKind: record.workspaceKind || 'local',
-        files: [],
-        restore: []
-      };
-    }
-
-    if (record.contentDropped) {
-      // 内容按体积预算丢弃过：restore 里再给 null 就等于「把文件删掉」，必须明确拒绝
+    // 内容按体积预算丢弃过：restore 里再给 null 就等于「把文件删掉」。但**有回合开始树**时
+    // 已跟踪文件由 git 树回滚负责、根本不依赖快照内容 —— 此时拒绝撤回是把能做的事也挡掉了。
+    const hasGitTree = record.strategy === 'git' && !!record.gitStashSha;
+    if (record.contentDropped && !hasGitTree) {
       return { ok: false, error: '该回合的改前内容已按体积预算丢弃，无法整轮撤回' };
     }
 
     const restoreRoot = record.workspaceRoot || null;
     const restore = rollbackRestorePaths(record)
       .filter((relPath) => record.files[relPath])
-      .map((relPath) => {
-        const meta = record.files[relPath];
-        return {
-          path: relPath,
-          before: meta.before,
-          encoding: meta.encoding || 'utf8',
-          remote: restoreIsRemote(record, meta),
-          workspaceKind: record.workspaceKind || 'local',
-          workspaceRoot: restoreRoot
-        };
-      });
+      .map((relPath) => toRestoreItem(record, relPath, record.files[relPath]));
     return {
       ok: true,
       strategy: record.strategy,
-      runId: record.runId,
       workspaceRoot: restoreRoot,
       runWorkspaceRoot: record.runWorkspaceRoot || restoreRoot,
       workspaceKind: record.workspaceKind || 'local',
+      /** 回合开始树的 commit：有它才能覆盖 shell 改的文件（见 git/turn-tree.js） */
+      gitStashSha: record.gitStashSha || null,
+      /** 回合开始时的 HEAD：撤回时拿它判「本轮改动是否被提交过」 */
+      gitHead: record.gitHead || null,
+      /** 回合开始时就有哪些未跟踪文件：撤回时按它区分「本轮新建」与「本来就有」 */
+      gitUntrackedAtStart: Array.isArray(record.gitUntrackedAtStart)
+        ? record.gitUntrackedAtStart.slice()
+        : null,
+      /** 本轮用过 shell 命令改文件：快照撤不全，撤回必须如实报告 */
+      shellMutated: !!record.shellMutated,
+      /** 快照内容被体积预算丢弃过：git 树盖不住的那部分（未跟踪文件）原文没了 */
+      snapshotDropped: !!record.contentDropped,
       files: restore.map((r) => r.path),
       restore
     };
@@ -782,16 +769,12 @@ function createTurnUndoService(opts = {}) {
   }
 
   return {
-    MAX_STACK,
     beginTurn,
     captureWrite,
     captureBatchCheckpoint,
-    markWorktreeOnly,
     capturePlanApplyPaths,
-    markTurnTouched,
     finalizeTurn,
     canRollback,
-    getStack,
     planRollback,
     planRollbackBatch,
     commitRollback,
@@ -802,6 +785,10 @@ function createTurnUndoService(opts = {}) {
 
 module.exports = {
   createTurnUndoService,
+  // 路径 key 的单一实现：gateway 的 touchPaths 归一也从这里取（别在 handler 里再写一份）
+  undoRelativeKey,
+  // 工作区是不是远端：handler 决定「要不要抓远端 git 基线」时问这里，不自己判 URI 前缀
+  inferUndoWorkspaceKind,
   // 预算策略的单一来源（测试与诊断直接读这两个符号，不另抄一份数字）
   UNDO_CONTENT_BUDGET_CHARS,
   enforceContentBudget
