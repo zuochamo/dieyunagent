@@ -863,44 +863,51 @@ const HTML_PREVIEW_MAX_BYTES = 400 * 1024;
  * - 内容经 fs.read_file 异步读出后填 srcdoc；读不到/被截断就撤卡，不占位；
  * - 「在面板打开」复用 artifacts 面板的 openArtifactTab，不另造预览器。
  */
+/**
+ * 思考区里的 HTML 预览（edit 了 .html 文件时给一块 iframe）。
+ *
+ * **先把文件读出来，再插 iframe**：iframe 一旦先进 DOM、`srcdoc` 还没设，浏览器会按
+ * `about:blank` 画一帧，而我们的 iframe 背景是 `#fff`（见 styles.css）—— 深色主题下
+ * 就是「屏幕白闪一下」（2026-11-25 用户实测：编辑 html 文件时闪）。
+ * 现在插入那一刻 `srcdoc` 已经设好，首帧就是真内容。
+ */
 function appendInlineHtmlPreview(li, t) {
   const p = String((t.toolArgs && t.toolArgs.filePath) || '').trim();
   if (!p || !/\.html?$/i.test(p)) return;
   if (li.querySelector('.msg-tool-html-preview')) return;
-  const wrap = document.createElement('div');
-  wrap.className = 'msg-tool-html-preview';
-  const bar = document.createElement('div');
-  bar.className = 'msg-tool-html-preview-bar';
-  const name = document.createElement('span');
-  name.textContent = 'HTML 预览';
-  bar.appendChild(name);
-  const openBtn = document.createElement('button');
-  openBtn.type = 'button';
-  openBtn.textContent = '在面板打开';
-  openBtn.addEventListener('click', () => {
-    if (typeof openArtifactTab === 'function') openArtifactTab(p);
-  });
-  bar.appendChild(openBtn);
-  const frame = document.createElement('iframe');
-  frame.setAttribute('sandbox', 'allow-scripts');
-  frame.setAttribute('title', 'HTML 预览');
-  frame.setAttribute('referrerpolicy', 'no-referrer');
-  wrap.appendChild(bar);
-  wrap.appendChild(frame);
-  li.appendChild(wrap);
   Promise.resolve()
     .then(() =>
       gatewayCall('fs.read_file', { filePath: p, maxBytes: HTML_PREVIEW_MAX_BYTES })
     )
     .then((r) => {
       const content = r && typeof r.content === 'string' ? r.content : null;
-      if (content == null || r.truncated) {
-        wrap.remove();
-        return;
-      }
-      frame.srcdoc = content;
+      if (content == null || r.truncated) return;
+      // 读回来这段时间里这一行可能已经被重建 / 移除：别往死节点里塞
+      if (li.isConnected === false || li.querySelector('.msg-tool-html-preview')) return;
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-tool-html-preview';
+      const bar = document.createElement('div');
+      bar.className = 'msg-tool-html-preview-bar';
+      const name = document.createElement('span');
+      name.textContent = 'HTML 预览';
+      bar.appendChild(name);
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.textContent = '在面板打开';
+      openBtn.addEventListener('click', () => {
+        if (typeof openArtifactTab === 'function') openArtifactTab(p);
+      });
+      bar.appendChild(openBtn);
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('title', 'HTML 预览');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.srcdoc = content; // 先给内容，再入 DOM → 不留白帧
+      wrap.appendChild(bar);
+      wrap.appendChild(frame);
+      li.appendChild(wrap);
     })
-    .catch(() => wrap.remove());
+    .catch(() => {});
 }
 
 function appendThinkingToolRows(ul, tools, { roundComplete = false, entryIndex = null } = {}) {
@@ -940,7 +947,10 @@ function appendThinkingToolRows(ul, tools, { roundComplete = false, entryIndex =
       row.appendChild(text);
       li.appendChild(row);
       appendInlineToolDiff(li, t, { roundComplete, entryIndex, toolIndex: ti });
-      if (!failed) appendInlineHtmlPreview(li, t);
+      // HTML 预览只在**整轮结束后**挂：流式期间这一行的 DOM 会被反复重建
+      // （`ul.replaceChildren()`），每次都插一个 iframe + 重读同一个文件 ——
+      // 深色界面里就是一遍遍白闪，而且同一个 html 被读很多次。
+      if (!failed && roundComplete) appendInlineHtmlPreview(li, t);
     }
     ul.appendChild(li);
   }
