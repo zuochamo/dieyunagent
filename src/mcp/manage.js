@@ -37,16 +37,42 @@ const MCP_MANAGE_ACTIONS = Object.freeze([
 const MCP_PACKAGE_ACTIONS = Object.freeze(['check_update', 'install_package', 'upgrade_package', 'repair_env']);
 
 /**
- * transport 的**唯一来源**：schema enum、参数校验（`tool-validate`）、store 落库（`toStoreRequest`）
- * 三处都从这里取，任何一处另抄一份都会分叉。
+ * transport 的**唯一来源**：schema enum、参数校验（`tool-validate`）、store 落库
+ * （`addMcpServer` / `upsertMcpFromCatalog` / `updateMcpServerConfig`）、Renderer 的选项表
+ * 全都从这里取，任何一处另抄一份都会分叉（历史上就是 `transport='http'` 过校验却按 stdio 落库）。
  *
- * - `MCP_TRANSPORT_KINDS`：规范取值，schema enum 与落库结果都用它；
- * - `MCP_REMOTE_TRANSPORTS`：入参**别名**（模型常写 `remote` / `http`），只在这里被认，
- *   落库永远归一成 `transportKind: 'remote'` + `remoteTransport: 'streamable-http'`；
- * - 空 url 不算「有 url」（`url: ''` 是没填，不是远端服务）。
+ * 两张表分工，别混：
+ * - `MCP_TRANSPORT_KINDS` —— **服务形态**的规范取值（模型 `transport` 参数与落库 `transportKind`）；
+ * - `MCP_REMOTE_TRANSPORT_KINDS` —— 远端**传输协议**的规范取值（落库 `remoteTransport`，
+ *   也是 Renderer 选项表的唯一来源）；
+ * - `MCP_REMOTE_TRANSPORTS` —— 入参**别名**（模型常写 `remote` / `http` / `sse`），只在这里被认，
+ *   落库永远归一成 `transportKind:'remote'` + 一个 `MCP_REMOTE_TRANSPORT_KINDS` 里的值。
+ *
+ * 空 url 不算「有 url」（`url: ''` 是没填，不是远端服务）。
  */
-const MCP_TRANSPORT_KINDS = Object.freeze(['stdio', 'streamable-http']);
-const MCP_REMOTE_TRANSPORTS = Object.freeze(['remote', 'streamable-http', 'http']);
+const MCP_REMOTE_TRANSPORT_KINDS = Object.freeze(['streamable-http', 'sse']);
+/**
+ * 模型可见的 `transport` 取值（= schema enum / 校验 / 落库三处共用）。
+ * `stdio` 之外就是协议本身 —— 由 `MCP_REMOTE_TRANSPORT_KINDS` 派生，**不要再手写一遍**：
+ * 少列一个值 = 模型写了过不了校验（`sse` 就是这么被挡在外面、还被误判成 stdio 的）。
+ */
+const MCP_TRANSPORT_KINDS = Object.freeze(['stdio', ...MCP_REMOTE_TRANSPORT_KINDS]);
+const MCP_REMOTE_TRANSPORTS = Object.freeze(['remote', 'http', ...MCP_REMOTE_TRANSPORT_KINDS]);
+
+/**
+ * 把任意来源的传输写法归一成 `MCP_REMOTE_TRANSPORT_KINDS` 里的一个值。
+ * 不认识的一律 `streamable-http`（当前默认，也是老代码的隐含默认）。
+ * @param {any} value
+ * @returns {'streamable-http' | 'sse'}
+ */
+function normalizeRemoteTransport(value) {
+  const t = String(value == null ? '' : value)
+    .trim()
+    .toLowerCase();
+  if (MCP_REMOTE_TRANSPORT_KINDS.includes(t)) return /** @type {any} */ (t);
+  if (t.includes('streamable') || t === 'http' || t === 'remote') return 'streamable-http';
+  return 'streamable-http';
+}
 
 /**
  * 这次变更算不算「远端服务」。
@@ -91,7 +117,8 @@ function toStoreRequest(request) {
   if (remote) {
     payload.transportKind = 'remote';
     if (a.url != null) payload.remoteUrl = String(a.url).trim();
-    payload.remoteTransport = 'streamable-http';
+    // sse 是合法协议（老 MCP 服务仍只有它），别在这里一律写成 streamable-http
+    payload.remoteTransport = normalizeRemoteTransport(a.transport);
     if (a.authHeaderName != null) payload.authHeaderName = String(a.authHeaderName).trim();
     // 声明了 token 却没写 authRequired 时按「需要鉴权」处理，否则 UI 会显示成「已配置」而实际 401
     payload.authRequired = a.authRequired != null ? !!a.authRequired : !!a.token;
@@ -305,7 +332,9 @@ module.exports = {
   createMcpManager,
   MCP_MANAGE_ACTIONS,
   MCP_TRANSPORT_KINDS,
+  MCP_REMOTE_TRANSPORT_KINDS,
   MCP_REMOTE_TRANSPORTS,
   isRemoteTransport,
+  normalizeRemoteTransport,
   toStoreRequest
 };

@@ -67,10 +67,11 @@ const MCP_MANAGE_TOOL = {
         description: { type: 'string', description: '可选说明，会显示在设置页' },
         transport: {
           type: 'string',
-          // 规范取值只有 mcp/manage.js 一份（MCP_TRANSPORT_KINDS）；模型写别名（remote / http）
-          // 由校验与落库侧的 isRemoteTransport 认，schema 不列别名以免三选一造成歧义。
+          // 取值唯一来源是 `mcp/manage.js`（`MCP_TRANSPORT_KINDS` = stdio + 远端协议），
+          // 校验器由这份 schema 生成，所以**别名必须写进 enum 才认**：`remote` / `http` 只留给
+          // 落库层做兼容（见 `isRemoteTransport`），模型照 schema 写 `sse` / `streamable-http` 即可。
           enum: [...MCP_TRANSPORT_KINDS],
-          description: 'add/update 时选传输方式；省略时按是否给 url 判断'
+          description: 'add/update 时选传输方式：本地命令用 stdio；远端用 streamable-http（多数）或 sse（老服务）；省略时按是否给 url 判断'
         },
         url: { type: 'string', description: '远端服务端点，如 http://192.168.31.62:3011/api/open-api/mcp' },
         authHeaderName: {

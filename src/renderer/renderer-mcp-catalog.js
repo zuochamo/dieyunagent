@@ -1,6 +1,7 @@
 'use strict';
 
-/* global window, document, $, escapeHtml, showMcpListView, renderMcpList */
+/* global window, document, $, escapeHtml, showMcpListView, renderMcpList,
+   parseGridListResult, renderGridCategoryTabs, updateGridPagination, bindGridSearchInput, bindGridPagination */
 
 const mcpCatalogApi = window.diecloud || {};
 // 页大小唯一来源 renderer-skills-ui.js 导出的 window.SKILLS_GRID_PAGE_SIZE（本文件在其后加载）。
@@ -15,30 +16,19 @@ let mcpCatalogHasMore = false;
 let mcpCatalogLoading = false;
 let mcpCatalogLoadedCount = 0;
 let mcpCatalogSearchRemote = false;
+/** 上一次加载失败的原因：非空时列表位显示错误，而不是被 finally 用旧数据盖掉 */
+let mcpCatalogError = '';
 /** 最近一次目录请求里各源的失败原因，用于说明「空目录」到底为什么空 */
 let mcpCatalogSourceErrors = [];
 
-function parseMcpCatalogListResult(result) {
-  if (Array.isArray(result)) {
-    return {
-      entries: result,
-      hasMore: false,
-      loadedCount: result.length,
-      searchRemote: false,
-      errors: []
-    };
-  }
-  return {
-    entries: Array.isArray(result?.entries) ? result.entries : [],
-    hasMore: !!result?.hasMore,
-    loadedCount: Number(result?.loadedCount) || (Array.isArray(result?.entries) ? result.entries.length : 0),
-    searchRemote: !!result?.searchRemote,
-    errors: Array.isArray(result?.errors) ? result.errors : []
-  };
+function mcpCatalogPageCount() {
+  const visible = getFilteredMcpCatalogEntries();
+  return Math.max(1, Math.ceil(visible.length / MCP_CATALOG_PAGE_SIZE));
 }
 
+// 目录列表返回形状的解析只有一份（renderer-skills-grid.js#parseGridListResult）
 function applyMcpCatalogListResult(result) {
-  const parsed = parseMcpCatalogListResult(result);
+  const parsed = parseGridListResult(result);
   mcpCatalogEntries = parsed.entries;
   mcpCatalogHasMore = parsed.hasMore;
   mcpCatalogLoadedCount = parsed.loadedCount;
@@ -60,10 +50,9 @@ function mcpCatalogSourceErrorText() {
   return parts.join('；');
 }
 
-function entryCanAdd(ent) {
-  if (!ent) return false;
-  if (ent.canAdd != null) return !!ent.canAdd;
-  return !!(ent.hasPackage || ent.hasRemote || ent.remoteUrl || ent.installSpec);
+/** 「这条是否可添加」的唯一判据是 Main 下发的 `canAdd`（`mcp/catalog.js#resolveCatalogAddability`）。 */
+function mcpCatalogEntryCanAdd(ent) {
+  return !!(ent && ent.canAdd);
 }
 
 function showMcpListView() {
@@ -85,15 +74,29 @@ function showMcpCatalogView() {
   });
 }
 
+/** 目录筛选页签：唯一来源（顺序即展示顺序，`renderGridCategoryTabs` 会补一个「全部」） */
+const MCP_CATALOG_FILTERS = [
+  { id: 'addable', label: '可添加' },
+  { id: 'remote', label: '远程' },
+  { id: 'local', label: '本地 npm' }
+];
+
+function mcpCatalogMatches(ent, filterId) {
+  if (filterId === 'remote') return !!(ent.hasRemote || ent.transport === 'remote' || ent.remoteUrl);
+  if (filterId === 'local') return !!(ent.hasPackage || ent.installSpec);
+  return mcpCatalogEntryCanAdd(ent);
+}
+
+function countMcpCatalogInFilter(filterId) {
+  if (filterId === 'all') return mcpCatalogEntries.length;
+  return mcpCatalogEntries.filter((ent) => mcpCatalogMatches(ent, filterId)).length;
+}
+
 function getFilteredMcpCatalogEntries() {
   const q = mcpCatalogSearchQuery.trim().toLowerCase();
   let list = mcpCatalogEntries.slice();
-  if (mcpCatalogFilter === 'addable') {
-    list = list.filter((ent) => entryCanAdd(ent));
-  } else if (mcpCatalogFilter === 'remote') {
-    list = list.filter((ent) => ent.hasRemote || ent.transport === 'remote' || ent.remoteUrl);
-  } else if (mcpCatalogFilter === 'local') {
-    list = list.filter((ent) => ent.hasPackage || ent.installSpec);
+  if (mcpCatalogFilter !== 'all') {
+    list = list.filter((ent) => mcpCatalogMatches(ent, mcpCatalogFilter));
   }
   if (q && !mcpCatalogSearchRemote) {
     list = list.filter((ent) => {
@@ -108,40 +111,42 @@ function getFilteredMcpCatalogEntries() {
 }
 
 function renderMcpCatalogFilterTabs() {
-  const nav = $('mcp-catalog-filter-tabs');
-  if (!nav) return;
-  const tabs = [
-    { id: 'addable', label: '可添加' },
-    { id: 'remote', label: '远程' },
-    { id: 'local', label: '本地 npm' },
-    { id: 'all', label: '全部' }
-  ];
-  nav.innerHTML = tabs
-    .map(
-      (tab) =>
-        `<button type="button" class="skills-category-tab${mcpCatalogFilter === tab.id ? ' active' : ''}" data-mcp-catalog-filter="${tab.id}">${tab.label}</button>`
-    )
-    .join('');
+  // 页签渲染/计数/点击只有一份实现（renderer-skills-grid.js#renderGridCategoryTabs）
+  renderGridCategoryTabs(
+    $('mcp-catalog-filter-tabs'),
+    mcpCatalogFilter,
+    MCP_CATALOG_FILTERS,
+    countMcpCatalogInFilter,
+    (id) => {
+      mcpCatalogFilter = id === 'all' ? 'all' : id;
+      mcpCatalogPageIndex = 0;
+      renderMcpCatalogFilterTabs();
+      renderMcpCatalogGrid();
+    }
+  );
 }
 
 function renderMcpCatalogGrid() {
   const listEl = $('mcp-catalog-list');
-  const info = $('mcp-catalog-page-info');
-  const prev = $('mcp-catalog-page-prev');
-  const next = $('mcp-catalog-page-next');
-  const bar = $('mcp-catalog-pagination');
   if (!listEl) return;
+
+  if (mcpCatalogError) {
+    listEl.innerHTML = `<p class="skills-empty">加载失败：${escapeHtml(mcpCatalogError)}</p>`;
+    updateGridPagination('mcp-catalog', 0, 0, 0);
+    return;
+  }
 
   const visible = getFilteredMcpCatalogEntries();
   if (!visible.length) {
     const q = mcpCatalogSearchQuery.trim();
-    const emptyMsg = q
-      ? mcpCatalogSearchRemote
-        ? '官方市场未找到匹配项，可换关键词或切换「全部」筛选'
-        : '没有匹配的 MCP，可换关键词或切换筛选'
-      : '没有匹配的 MCP';
-    listEl.innerHTML = `<p class="skills-empty">${emptyMsg}</p>`;
-    if (bar) bar.hidden = true;
+    const reason = mcpCatalogSourceErrorText();
+    const emptyMsg = reason
+      ? `目录源请求失败：${reason}。可点「刷新目录」重试，或回 MCP 列表用「添加」手动接入。`
+      : q
+        ? '没有匹配的 MCP，可换关键词或切换筛选'
+        : '没有匹配的 MCP';
+    listEl.innerHTML = `<p class="skills-empty">${escapeHtml(emptyMsg)}</p>`;
+    updateGridPagination('mcp-catalog', 0, 0, 0);
     return;
   }
 
@@ -155,7 +160,7 @@ function renderMcpCatalogGrid() {
 
   listEl.innerHTML = slice
     .map((ent) => {
-      const canAdd = entryCanAdd(ent);
+      const canAdd = mcpCatalogEntryCanAdd(ent);
       const action = mcpCatalogActionLabel(ent.installState, canAdd);
       const disabled = ent.installState === 'installed' || (!canAdd && ent.installState !== 'upgrade');
       const installed = ent.installState === 'installed';
@@ -191,28 +196,16 @@ function renderMcpCatalogGrid() {
     })
     .join('');
 
-  if (bar) {
-    const atLastPage = mcpCatalogPageIndex >= pageCount - 1;
-    const canLoadMore = atLastPage && mcpCatalogHasMore;
-    if (pageCount <= 1 && !canLoadMore) {
-      bar.hidden = true;
-    } else {
-      bar.hidden = false;
-      const moreHint = mcpCatalogHasMore ? ' · 可继续加载' : '';
-      const searchHint = mcpCatalogSearchRemote ? ' · 官方市场搜索' : '';
-      const loadedHint =
-        mcpCatalogLoadedCount > visible.length
-          ? ` · 已加载 ${mcpCatalogLoadedCount} 条`
-          : '';
-      if (info) {
-        info.textContent = mcpCatalogLoading
-          ? '加载中…'
-          : `${mcpCatalogPageIndex + 1} / ${pageCount}（当前 ${visible.length} 项${loadedHint}${searchHint}${moreHint}）`;
-      }
-      if (prev) prev.disabled = mcpCatalogPageIndex <= 0 || mcpCatalogLoading;
-      if (next) next.disabled = mcpCatalogLoading || (atLastPage && !mcpCatalogHasMore);
-    }
-  }
+  // 分页条（含"末页还能继续加载"）：唯一实现在 renderer-skills-grid.js#updateGridPagination
+  const atLastPage = mcpCatalogPageIndex >= pageCount - 1;
+  const searchHint = mcpCatalogSearchRemote ? ' · 官方市场搜索' : '';
+  const loadedHint =
+    mcpCatalogLoadedCount > visible.length ? ` · 已加载 ${mcpCatalogLoadedCount} 条` : '';
+  updateGridPagination('mcp-catalog', mcpCatalogPageIndex, pageCount, visible.length, {
+    loading: mcpCatalogLoading,
+    canLoadMore: atLastPage && mcpCatalogHasMore,
+    label: `当前 ${visible.length} 项${loadedHint}${searchHint}${mcpCatalogHasMore ? ' · 可继续加载' : ''}`
+  });
 }
 
 async function fetchMcpCatalogFromApi({ refresh = false, loadMore = false, search = '' } = {}) {
@@ -235,6 +228,7 @@ async function loadMcpCatalogUI({ refresh = false, loadMore = false, silent = fa
   }
   const searchQuery = search != null ? String(search).trim() : mcpCatalogSearchQuery.trim();
   mcpCatalogLoading = true;
+  mcpCatalogError = '';
   renderMcpCatalogGrid();
   if (!silent && !loadMore) {
     const loadingMsg = searchQuery
@@ -247,24 +241,6 @@ async function loadMcpCatalogUI({ refresh = false, loadMore = false, silent = fa
   try {
     await fetchMcpCatalogFromApi({ refresh, loadMore, search: searchQuery });
     if (!loadMore) mcpCatalogPageIndex = 0;
-
-    if (!mcpCatalogEntries.length && mcpCatalogHasMore && !loadMore) {
-      await fetchMcpCatalogFromApi({ loadMore: true, search: searchQuery });
-    }
-
-    if (!mcpCatalogEntries.length) {
-      const reason = mcpCatalogSourceErrorText();
-      const base = searchQuery ? '没有匹配的 MCP' : '目录为空';
-      listEl.innerHTML = `<p class="skills-empty">${escapeHtml(
-        reason
-          ? `${base}。目录源请求失败：${reason}。可点「刷新目录」重试，或回 MCP 列表用「添加」手动接入。`
-          : base
-      )}</p>`;
-      if (hint) hint.textContent = reason ? '目录源请求失败，可点「刷新目录」重试' : '';
-      renderMcpCatalogFilterTabs();
-      return;
-    }
-    renderMcpCatalogFilterTabs();
     if (hint) {
       if (refresh) hint.textContent = '目录已刷新';
       else if (loadMore) hint.textContent = mcpCatalogHasMore ? '已加载更多' : '已全部加载';
@@ -275,12 +251,13 @@ async function loadMcpCatalogUI({ refresh = false, loadMore = false, silent = fa
       } else if (!silent) hint.textContent = mcpCatalogHasMore ? '已加载首屏，翻页可继续加载' : '';
     }
   } catch (err) {
-    listEl.innerHTML = `<p class="skills-empty">加载失败：${escapeHtml(err.message || err)}</p>`;
+    mcpCatalogError = String((err && err.message) || err);
+    if (hint) hint.textContent = '加载失败，可点「刷新目录」重试';
   } finally {
+    // 失败也走同一处渲染：以前 catch 写完错误、finally 又用旧数据重绘把它盖掉了
     mcpCatalogLoading = false;
-    if (mcpCatalogEntries.length) {
-      renderMcpCatalogGrid();
-    }
+    renderMcpCatalogFilterTabs();
+    renderMcpCatalogGrid();
   }
 }
 
@@ -348,71 +325,42 @@ function initMcpCatalogUI() {
     saveSourcesBtn.addEventListener('click', () => saveMcpCatalogSourcesFromUI());
   }
 
-  const searchInput = $('mcp-catalog-search');
-  if (searchInput) {
-    let debounce;
-    searchInput.addEventListener('input', () => {
-      mcpCatalogSearchQuery = searchInput.value || '';
-      mcpCatalogPageIndex = 0;
-      clearTimeout(debounce);
-      debounce = setTimeout(() => {
-        const q = mcpCatalogSearchQuery.trim();
-        if (q) {
-          loadMcpCatalogUI({ refresh: true, search: q }).catch(() => {});
-        } else {
-          loadMcpCatalogUI({ refresh: false }).catch(() => {});
-        }
-      }, 350);
-    });
-    searchInput.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
-      searchInput.value = '';
-      mcpCatalogSearchQuery = '';
-      mcpCatalogPageIndex = 0;
-      loadMcpCatalogUI({ refresh: false }).catch(() => {});
-    });
-  }
-
-  document.addEventListener('click', (e) => {
-    const filterBtn =
-      e.target && e.target.closest ? e.target.closest('[data-mcp-catalog-filter]') : null;
-    if (filterBtn) {
-      mcpCatalogFilter = filterBtn.dataset.mcpCatalogFilter || 'addable';
-      mcpCatalogPageIndex = 0;
-      renderMcpCatalogFilterTabs();
-      renderMcpCatalogGrid();
-      return;
+  // 搜索：防抖 / 清空语义只有一份（renderer-skills-grid.js#bindGridSearchInput）
+  bindGridSearchInput(
+    'mcp-catalog-search',
+    () => mcpCatalogSearchQuery,
+    (v) => {
+      mcpCatalogSearchQuery = v;
+    },
+    () => mcpCatalogPageIndex,
+    (v) => {
+      mcpCatalogPageIndex = v;
+    },
+    () => {
+      const q = mcpCatalogSearchQuery.trim();
+      loadMcpCatalogUI({ refresh: !!q, search: q }).catch(() => {});
     }
-  });
+  );
 
-  const prev = $('mcp-catalog-page-prev');
-  const next = $('mcp-catalog-page-next');
-  if (prev) {
-    prev.addEventListener('click', () => {
-      if (mcpCatalogPageIndex > 0) {
-        mcpCatalogPageIndex -= 1;
-        renderMcpCatalogGrid();
-      }
-    });
-  }
-  if (next) {
-    next.addEventListener('click', async () => {
-      if (mcpCatalogLoading) return;
-      const visible = getFilteredMcpCatalogEntries();
-      const pageCount = Math.max(1, Math.ceil(visible.length / MCP_CATALOG_PAGE_SIZE));
-      const atLastPage = mcpCatalogPageIndex >= pageCount - 1;
-      if (atLastPage && mcpCatalogHasMore) {
-        const nextPage = mcpCatalogPageIndex + 1;
-        const q = mcpCatalogSearchQuery.trim();
-        await loadMcpCatalogUI({ loadMore: true, search: q });
-        mcpCatalogPageIndex = nextPage;
-        renderMcpCatalogGrid();
-      } else if (mcpCatalogPageIndex < pageCount - 1) {
+  // 翻页（末页「下一页」= 向 Main 再要一批，再推进一页）：唯一实现在 renderer-skills-grid.js
+  bindGridPagination(
+    'mcp-catalog',
+    () => mcpCatalogPageIndex,
+    (v) => {
+      mcpCatalogPageIndex = v;
+    },
+    () => renderMcpCatalogGrid(),
+    {
+      onNext: async () => {
+        if (mcpCatalogLoading) return true;
+        if (mcpCatalogPageIndex < mcpCatalogPageCount() - 1 || !mcpCatalogHasMore) return false;
+        await loadMcpCatalogUI({ loadMore: true, search: mcpCatalogSearchQuery.trim() });
         mcpCatalogPageIndex += 1;
         renderMcpCatalogGrid();
+        return true;
       }
-    });
-  }
+    }
+  );
 
   document.addEventListener('click', async (e) => {
     const btn = e.target && e.target.closest ? e.target.closest('[data-mcp-catalog-install]') : null;
@@ -444,7 +392,7 @@ function initMcpCatalogUI() {
   });
 }
 
-window.showMcpCatalogView = showMcpCatalogView;
+// `showMcpListView` 是跨文件契约（renderer-skills-grid.js 切页签时调用），保留导出；
+// showMcpCatalogView / loadMcpCatalogUI 只有本文件在用，不再挂到 window。
 window.showMcpListView = showMcpListView;
-window.loadMcpCatalogUI = loadMcpCatalogUI;
 window.initMcpCatalogUI = initMcpCatalogUI;

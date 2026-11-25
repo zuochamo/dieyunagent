@@ -6,6 +6,8 @@ const { assertSafeUrl } = require('../gateway/web/url-safety');
 const { readJsonFile, writeJsonFile } = require('../json-file');
 const { compareSemver } = require('./package-store');
 const { listBuiltinMcpServers } = require('./registry');
+// 远端传输协议规范值只有一份（mcp/manage.js）；catalog 只负责把 registry 的写法喂进去
+const { normalizeRemoteTransport } = require('./manage');
 
 const DEFAULT_REGISTRY_URL = 'https://registry.modelcontextprotocol.io/v0.1/servers';
 const SOURCES_FILE = 'mcp-catalog-sources.json';
@@ -94,13 +96,15 @@ function extractEnvHint(server) {
   return '';
 }
 
+/**
+ * registry 里 `remotes[].type` 的写法 → 规范协议值。
+ *
+ * 注意这是 **registry 声明口径**，不是模型入参口径（那个在 `mcp/manage.js#normalizeRemoteTransport`，
+ * 两个都是同一份规范值，别合并错方向）：registry 会写 `sse` / `http` / `streamable-http`
+ * 甚至 `streamable-http+json`，这里统一收口。
+ */
 function normalizeRemoteTransportType(raw) {
-  const t = String(raw || '')
-    .trim()
-    .toLowerCase();
-  if (t === 'sse') return 'sse';
-  if (t.includes('streamable') || t === 'http' || t === 'streamable-http') return 'streamable-http';
-  return 'streamable-http';
+  return normalizeRemoteTransport(raw);
 }
 
 function resolveRemoteSpec(server) {

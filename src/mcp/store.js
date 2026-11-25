@@ -5,10 +5,18 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { listBuiltinMcpServers } = require('./registry');
-const { enrichMcpServerForUi, isMcpServerConfigured } = require('./server-config');
+// 服务形态判定：`server-config.transportKind` 是读服务定义的口径，`mcp/manage.js` 是入参口径。
+// 这里起别名，避免与下面几个函数里同名的局部变量 `const transportKind = ...` 撞名。
+const {
+  enrichMcpServerForUi,
+  isMcpServerConfigured,
+  transportKind: resolveServerTransportKind
+} = require('./server-config');
 const { getEnvHintNames } = require('./env-hints');
 const { createMcpCredentialsStore } = require('./credentials-store');
 const mcpPackageStore = require('./package-store');
+// transport 口径（服务形态 / 远端协议）唯一来源，见 mcp/manage.js 顶部说明
+const { isRemoteTransport, normalizeRemoteTransport } = require('./manage');
 
 /**
  * MCP json store + catalog install/upgrade/repair. Bound to Electron safeStorage.
@@ -136,7 +144,11 @@ function createMcpStore(opts) {
     const id = p.id != null ? String(p.id).trim() : '';
     const command = p.command != null ? String(p.command).trim() : '';
     const remoteUrl = String(p.remoteUrl || p.url || '').trim();
-    const transportKind = p.transportKind === 'remote' || (!command && !!remoteUrl) ? 'remote' : 'stdio';
+    // 「算不算远端」只有一份判定（mcp/manage.js#isRemoteTransport）：显式 transport 优先，
+    // 没写就看有没有 url —— 以前这里自己推一遍，与校验 / 落库各写一份就会漂移。
+    const transportKind = isRemoteTransport(p.transport != null ? p.transport : p.transportKind, remoteUrl)
+      ? 'remote'
+      : 'stdio';
     if (!id) throw new Error('MCP id 必填');
     if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(id)) {
       throw new Error('id 须以字母开头，仅允许字母、数字、下划线、连字符');
@@ -226,13 +238,19 @@ function createMcpStore(opts) {
       payload && payload.registryVersion != null ? String(payload.registryVersion).trim() : '';
     const envHint = payload && payload.envHint != null ? String(payload.envHint).trim() : '';
     const homepage = payload && payload.homepage != null ? String(payload.homepage).trim() : '';
-    const transportKind =
-      payload && payload.transportKind === 'remote' ? 'remote' : command ? 'stdio' : 'remote';
     const remoteUrl = payload && payload.remoteUrl != null ? String(payload.remoteUrl).trim() : '';
-    const remoteTransport =
-      payload && payload.remoteTransport != null
-        ? String(payload.remoteTransport).trim()
-        : 'streamable-http';
+    // 同上：远端判定只有 mcp/manage.js 一份；没给 url 但有 command 就是 stdio
+    const transportKind = isRemoteTransport(
+      payload && payload.transport != null ? payload.transport : payload && payload.transportKind,
+      remoteUrl
+    )
+      ? 'remote'
+      : command
+        ? 'stdio'
+        : 'remote';
+    const remoteTransport = normalizeRemoteTransport(
+      payload && payload.remoteTransport != null ? payload.remoteTransport : ''
+    );
     const authHeaderName =
       payload && payload.authHeaderName != null
         ? String(payload.authHeaderName).trim()
@@ -320,7 +338,7 @@ function createMcpStore(opts) {
       builtin: !!server.builtin,
       enabled: !!server.enabled,
       bundledServer: server.bundledServer || '',
-      transportKind: server.transportKind || (server.remoteUrl ? 'remote' : 'stdio'),
+      transportKind: resolveServerTransportKind(server),
       remoteUrl: server.remoteUrl || '',
       remoteTransport: server.remoteTransport || 'streamable-http',
       authHeaderName: server.authHeaderName || 'Authorization',
@@ -362,20 +380,23 @@ function createMcpStore(opts) {
 
     if (!isBuiltin && customIdx >= 0) {
       const prev = store.custom[customIdx];
+      // 已经是远端的，改配置时不给 url 也仍然是远端（否则会掉进 stdio 分支）；
+      // 判「要不要转成远端」同样只问 mcp/manage.js#isRemoteTransport。
+      const nextRemoteUrl =
+        payload.remoteUrl != null ? String(payload.remoteUrl).trim() : String(prev.remoteUrl || '');
       const kind =
-        prev.transportKind === 'remote' || prev.remoteUrl || payload.remoteUrl != null
+        prev.transportKind === 'remote' ||
+        isRemoteTransport(payload.transport != null ? payload.transport : payload.transportKind, nextRemoteUrl)
           ? 'remote'
           : 'stdio';
       if (kind === 'remote') {
         store.custom[customIdx] = {
           ...prev,
           transportKind: 'remote',
-          remoteUrl:
-            payload.remoteUrl != null ? String(payload.remoteUrl).trim() : String(prev.remoteUrl || ''),
-          remoteTransport:
-            payload.remoteTransport != null
-              ? String(payload.remoteTransport).trim()
-              : String(prev.remoteTransport || 'streamable-http'),
+          remoteUrl: nextRemoteUrl,
+          remoteTransport: normalizeRemoteTransport(
+            payload.remoteTransport != null ? payload.remoteTransport : prev.remoteTransport
+          ),
           authHeaderName:
             payload.authHeaderName != null
               ? String(payload.authHeaderName).trim()
