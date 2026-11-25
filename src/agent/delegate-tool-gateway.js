@@ -7,6 +7,13 @@ const { fsEditArgsPresent } = require('./guardrails-shared');
 const { applyPatchUnsupported } = require('./tool-validate');
 // `local:` 前缀 = 模型显式指「本机」（跑叠云这台机器）：路径语义唯一来源在 gateway/host-local
 const { isLocalPathRef, isLocalFlag } = require('../gateway/host-local');
+// 远端（SSH）路径的唯一解析口径：`ssh://` URI 里那段 POSIX 路径只有 target.js 会解
+const {
+  normalizeRemotePath,
+  isRemoteWorkspacePath,
+  parseWorkspaceInput,
+  stripWorktreeSuffix
+} = require('../workspace/target');
 // 护栏数字单一来源（AGENTS.md §5）：fs 读取字节上限只改 agent-limits。
 const { AGENT_LIMITS_DEFAULTS, getAgentLimits } = require('./agent-limits');
 
@@ -14,6 +21,30 @@ const { AGENT_LIMITS_DEFAULTS, getAgentLimits } = require('./agent-limits');
 function isSameOrUnder(root, p) {
   const rel = path.relative(root, p);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/** POSIX 版同语义（远端路径必须按 POSIX 比，不能用 win32 的 path.relative）。 */
+function isSameOrUnderPosix(root, p) {
+  const r = String(root || '').replace(/\/+$/, '') || '/';
+  const t = String(p || '').replace(/\/+$/, '') || '/';
+  if (r === '/') return t.startsWith('/');
+  return t === r || t.startsWith(`${r}/`);
+}
+
+/**
+ * 工作区 / worktree 的「远端 POSIX 形态」：`ssh://u@h/srv/x` → `/srv/x`；
+ * 已经是纯 POSIX 的（远端 per-role 副本路径就是这样传下来的）→ 归一化即可。
+ */
+function remotePosixOf(p) {
+  const s = String(p || '').trim();
+  if (!s) return '';
+  if (isRemoteWorkspacePath(s)) {
+    const t = parseWorkspaceInput(s);
+    if (t && t.kind === 'ssh') return normalizeRemotePath(t.remotePath);
+    // 没有 `user@` 的 `ssh://host/path` 形态：`parseWorkspaceInput` 不认，这里只把 scheme+authority 剥掉
+    return normalizeRemotePath(s.replace(/^ssh:\/\/(?:[^@/]*@)?[^/:]+(?::\d+)?/i, ''));
+  }
+  return normalizeRemotePath(s);
 }
 
 /**
@@ -33,15 +64,60 @@ function isSameOrUnder(root, p) {
  *   副本里没有（node_modules / 构建产物 / 未跟踪文件）就读主工作区那一份；工作区之外的
  *   读取不拦 —— 能不能读由宿主权限与沙箱管，与普通轮同口径，读也不会破坏隔离。
  *
- * 没有 worktreePath 的运行（普通对话 / Plan 的只读勘察 / 远端 SSH 会话）返回 null，
- * 调用点行为零变化。
+ * 没有 worktreePath 的运行（普通对话 / Plan 的只读勘察）返回 null，调用点行为零变化。
+ * 远端（SSH）会话按 **POSIX 语义**做同一套规则：主侧 = 会话副本 + 它所属的仓库根
+ *（远端 worker 的绝对路径通常写在仓库根下），映射目标是 per-role 副本路径。
  */
 function createWorkerWriteScope(workspacePath, worktreePath) {
   const ws = String(workspacePath || '').trim();
   const wt = String(worktreePath || '').trim();
-  // 远端（ssh://）工作区没有 worktree 概念；拿本机 `path.resolve` 解析远端 POSIX 路径
-  // 会得到 `E:\srv\x` 这种假路径（docs/SANDBOX.md §1.1），直接不启用作用域。
-  if (!wt || !ws || /^ssh:\/\//i.test(wt) || /^ssh:\/\//i.test(ws)) return null;
+  if (!wt || !ws) return null;
+  // 远端（SSH）：路径是 POSIX，**不能**走 `path.resolve`（win32 会解析出 `E:\srv\x` 假路径，
+  // 见 docs/SANDBOX.md §1.1）。以前这里直接 `return null` ⇒ 远端并行修好之后，隔离只剩
+  // 「提示词保证」（2026-11-19 审计）。现在用 POSIX 语义做同一套规则：
+  // 写落在副本里 → 原样；落在会话副本 / 它所属的仓库里 → 重映射到副本同名相对路径；其余 → 拒绝。
+  if (isRemoteWorkspacePath(ws) || isRemoteWorkspacePath(wt)) {
+    const wsRoot = remotePosixOf(ws);
+    const wtRoot = remotePosixOf(wt);
+    if (!wsRoot || !wtRoot || wsRoot === wtRoot) return null;
+    // 会话副本与「它所属的仓库根」都算主侧：远端 worker 常见的绝对路径是仓库根下的文件。
+    const repoRoot = stripWorktreeSuffix(wsRoot) || '';
+    const mainRoots = [...new Set([wsRoot, repoRoot])].filter((r) => r && r !== wtRoot);
+    const wtPrefix = wtRoot.replace(/\/+$/, '');
+    return {
+      root: wtRoot,
+      mainRoot: wsRoot,
+      mainRoots,
+      remote: true,
+      map(target) {
+        let s = String(target == null ? '' : target);
+        if (!s) return { path: target };
+        if (isLocalPathRef(s)) s = s.replace(/^local:[\\/]*/i, '');
+        if (!s.startsWith('/')) return { path: target }; // 相对路径已由 resolvePath 拼到副本上
+        const p = normalizeRemotePath(s);
+        if (isSameOrUnderPosix(wtRoot, p)) return { path: p };
+        for (const root of mainRoots) {
+          if (!isSameOrUnderPosix(root, p)) continue;
+          const rel = p.slice(root.replace(/\/+$/, '').length).replace(/^\/+/, '');
+          return { path: rel ? `${wtPrefix}/${rel}` : wtPrefix };
+        }
+        return {
+          denied: {
+            error:
+              `本轮是远端（SSH）副本里的执行器，只能写 ${wtRoot} 之内` +
+              `（会话副本 ${wsRoot} 及其仓库下的路径会自动映射到副本）。${p} 落在这两处之外，未执行。`,
+            errorCode: 'WORKER_SCOPE_DENIED',
+            retryable: false
+          }
+        };
+      },
+      // 读不做重映射：远端没有本机文件系统可 `existsSync`，判断「副本里有没有这个文件」
+      // 需要再开一次 SFTP/exec，代价远大于收益；读本身不破坏隔离。
+      mapRead(target) {
+        return target;
+      }
+    };
+  }
   const wsRoot = path.resolve(ws);
   const wtRoot = path.resolve(wt);
   if (wtRoot === wsRoot) return null;
@@ -95,7 +171,62 @@ function createWorkerWriteScope(workspacePath, worktreePath) {
     return exists(counterpart) ? counterpart : abs;
   }
 
-  return { root: wtRoot, map, mapRead };
+  return { root: wtRoot, mainRoot: wsRoot, map, mapRead };
+}
+
+/**
+ * `host_exec` 命令正文里有没有**主工作区根路径**（用来堵「绕开副本直接写主工作区」）。
+ *
+ * 为什么只做这一条窄检查：`resolveExecCwdScoped` 只收口了 `cwd`，命令正文里的绝对路径
+ * 完全不受约束 —— `sed -i C:\ws\src\a.js`、`cp x C:\ws\y` 会直接落到主工作区，
+ * 绕过 worktree 隔离与「变更」面板。完整 shell 解析在这里既做不到也不划算（变量拼接、
+ * base64、管道都能绕），但「模型直接写主工作区绝对路径」是绝大多数情况，用一条
+ * 可解释的检查堵掉，并给结构化错误让它改用相对路径或 fs_*（那条路会自动映射到副本）。
+ *
+ * 两个必须成立的边界（否则这条检查自己就是故障源）：
+ * 1. **本副本自己的路径不算越界**：本地 worktree 就建在主工作区里
+ *    （`<ws>/.dieyun/worktrees/<runId>/<role>`），`node <副本>/scripts/build.js`、
+ *    `git -C <副本> status` 的主工作区前缀是天然的，不能拒。
+ * 2. **按路径段边界匹配**，不是纯子串：`C:\ws\app` 不能命中 `C:\ws\app-data\...`。
+ *
+ * @param {string} command
+ * @param {string} mainRoot 主工作区绝对路径
+ * @param {string} [ownRoot] 本副本根路径（命中它的前缀时放行）
+ * @returns {string} 命中的形态（空 = 没命中）
+ */
+function findMainWorkspacePathInCommand(command, mainRoot, ownRoot) {
+  const cmd = String(command || '').toLowerCase();
+  const root = String(mainRoot || '').trim();
+  if (!cmd || !root) return '';
+  // 分隔符两种写法都要认：模型可能写 `C:\ws\x`，也可能写 `C:/ws/x`
+  const variantsOf = (p) => {
+    const base = String(p || '').trim().replace(/[\\/]+$/, '');
+    if (!base) return [];
+    return [...new Set([base, base.replace(/\\/g, '/'), base.replace(/\//g, '\\')])].map((s) =>
+      s.toLowerCase()
+    );
+  };
+  const ownVariants = variantsOf(ownRoot);
+  const isBeforeBoundary = (ch) => !ch || /[\s"'`=<>|&;(]/.test(ch);
+  const isAfterBoundary = (ch) => !ch || /[\\/\s"'`<>|&;),]/.test(ch);
+
+  for (const needle of variantsOf(root)) {
+    let from = 0;
+    for (;;) {
+      const idx = cmd.indexOf(needle, from);
+      if (idx < 0) break;
+      from = idx + 1;
+      // 命中的是本副本自己的路径 → 放行（继续找下一个出现位置：命令里可能同时写了主工作区别处）
+      if (ownVariants.some((own) => cmd.startsWith(own, idx))) continue;
+      if (
+        isBeforeBoundary(idx === 0 ? '' : cmd.charAt(idx - 1)) &&
+        isAfterBoundary(cmd.charAt(idx + needle.length))
+      ) {
+        return needle;
+      }
+    }
+  }
+  return '';
 }
 
 function resolveFsReadMaxBytes(args, ctx) {
@@ -257,6 +388,23 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
       // cwd 是命令的写落地：绝对路径要按写作用域收口（否则 `cd` 到主工作区就绕过了 worktree）
       const cwdTarget = resolveExecCwdScoped(a.cwd);
       if (cwdTarget.denied) return cwdTarget.denied;
+      // 命令**正文**里的主工作区绝对路径同样会绕过隔离（cwd 收口挡不住 `sed -i <主工作区路径>`）
+      if (writeScope && writeScope.mainRoot) {
+        // 第三参数是本副本根：副本就在主工作区里，它自己的路径前缀是合法的
+        const leaked = findMainWorkspacePathInCommand(a.command, writeScope.mainRoot, writeScope.root);
+        if (leaked) {
+          // 与同分支其它拒绝（`return cwdTarget.denied`）同一形状：摊平的错误信封。
+          // 套一层 `denied` 会让 tool-harness 判不出失败（它只认 ok/error），这次调用被记成成功。
+          return {
+            error:
+              `命令里写了主工作区路径（${leaked}），本轮是 worktree 里的执行器，不能直接改主工作区。` +
+              '本轮的改动要落在副本里 —— 用相对路径（cwd 已在副本），' +
+              '或用 fs_edit / fs_write_file 写同一文件（这两个会自动映射到副本）。',
+            errorCode: 'WORKER_SCOPE_DENIED',
+            retryable: false
+          };
+        }
+      }
       return gateway.invokeRpc(
         'host.exec',
         withRunWorkspace({
@@ -849,5 +997,6 @@ async function delegateAgentToolViaGateway(gateway, name, args, ctx = {}) {
 module.exports = {
   delegateAgentToolViaGateway,
   resolveFsReadMaxBytes,
-  createWorkerWriteScope
+  createWorkerWriteScope,
+  findMainWorkspacePathInCommand
 };

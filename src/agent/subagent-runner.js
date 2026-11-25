@@ -22,6 +22,7 @@ const { buildTraceFactsDigest } = require('./agent-synthesis');
 const { buildExploreTools } = require('./planner-tool-filters');
 const { SUBAGENT_TOOL, SUBAGENT_STATUS_TOOL } = require('./tool-catalog');
 const { createSubagentNamer } = require('./live-loop-trace');
+const { toolCallMarkupIndex } = require('./agent-round-text');
 const { isAbortError, createAbortError } = require('../llm-reconnect-retry');
 
 /** 工具名常量：schema 单一来源在 tool-catalog.js */
@@ -52,8 +53,27 @@ const FALLBACK_LIMITS = Object.freeze(
 );
 
 /**
+ * 子 Agent 的「还活着」信标：最近一次有进展的毫秒时间戳。
+ *
+ * 唯一用途是给工具看门狗用（`tool-harness.raceToolStall`）：判定 `subagent` 卡住之前先看
+ * 这个值有没有推进 —— 有推进就重新计时。没有它，一个正在稳定产出的子 Agent 会被
+ * `toolStallMsLong`（45min）连同**排队时间**一起判死，父级收到 `TOOL_STALLED(不可重试)`，
+ * 而那个子 Agent 其实还在干活、结果最后没人收（2026-11-19 审计）。
+ * 只延长窗口、不缩短：并发多路时最多互相续命，是安全方向。
+ */
+let lastSubagentActivityAt = 0;
+
+function noteSubagentActivity() {
+  lastSubagentActivityAt = Date.now();
+}
+
+function subagentActivityAt() {
+  return lastSubagentActivityAt;
+}
+
+/**
  * 回注摘要的文案口径（单一来源，勿在调用方再拼）。
- * reason 字段把这几种情况结构化回给协调者：ok / limit / empty。
+ * reason 字段把这几种情况结构化回给协调者：ok / limit / empty / tool-markup。
  *
  * 文案只承诺**工具事实**（不再说「发现」——那会把子 Agent 的推理过程暗示成结论）。
  */
@@ -63,6 +83,14 @@ const SUMMARY_HEAD_TRUNCATED_WITH_TRACE =
   '（子 Agent 达到轮次/工具预算被截断，未给出正式结论；以下是它已完成的工具调用记录）';
 const SUMMARY_HEAD_NO_CONCLUSION_WITH_TRACE =
   '（子 Agent 未给出结论；以下是它已完成的工具调用记录）';
+const SUMMARY_HEAD_OVERFLOW_WITH_CONTENT =
+  '（子 Agent 的上下文已满，本轮被截断，以下内容可能不完整）';
+const SUMMARY_HEAD_OVERFLOW_WITH_TRACE =
+  '（子 Agent 的上下文已满，没给出结论；以下是它已完成的工具调用记录）';
+const SUMMARY_HEAD_TOOL_MARKUP_WITH_CONTENT =
+  '（子 Agent 这一轮把工具调用写成了文本、并未真正执行（上游未返回结构化 tool_calls）；以下是标记之前的正文，可能不完整）';
+const SUMMARY_HEAD_TOOL_MARKUP_WITH_TRACE =
+  '（子 Agent 这一轮把工具调用写成了文本、并未真正执行（上游未返回结构化 tool_calls），因此没有结论；以下是它已完成的工具调用记录）';
 const SUMMARY_TRUNCATED_NO_EVIDENCE =
   '（子 Agent 达到轮次/工具预算被截断，且未留下任何工具调用记录；建议缩小问题范围，或提高 subagentMaxRounds/subagentMaxToolCalls 后重派）';
 const SUMMARY_NO_CONCLUSION = '（子 Agent 未产出结论，也没有留下任何工具调用记录）';
@@ -88,6 +116,12 @@ function resolveSubagentLimits(userDataPath, contextTierId) {
     // 深度允许为 0（完全禁用派发）
     const depth = Number(merged.subagentMaxDepth);
     if (Number.isFinite(depth) && depth >= 0) out.subagentMaxDepth = Math.floor(depth);
+    // 追问留存同样允许 0：设置页明写「0 = 关闭追问」，但上面那条 `n > 0` 过滤会把 0
+    // 当成无效值丢掉，于是旋钮永远是假的（2026-11-19 审计）。
+    const retention = Number(merged.subagentFollowupRetention);
+    if (Number.isFinite(retention) && retention >= 0) {
+      out.subagentFollowupRetention = Math.floor(retention);
+    }
     return out;
   } catch {
     return { ...FALLBACK_LIMITS };
@@ -152,31 +186,69 @@ function buildFollowupPrompt(priorTask, task, hints) {
  * - 无正文但有工具事实：列出工具调用记录，并区分「被预算截断」与「模型没给结论」。
  * - 都没有：如实说明，并给出可执行建议。
  *
+ * 还有一种「假正文」：上游把工具调用发成了**文本**（`<| |DSML| | invoke …>` / `<tool_call>`），
+ * 于是 content 里剩下的是一段标记、而那一轮的工具**从未执行**，循环也在「无 tool_calls 的
+ * 文字 = 本轮结束」处收场（2026-11-19 事故）。标记不是结论：截到标记之前再判定，并把
+ * reason 标成 `tool-markup`，让协调者知道这是「上游没给结构化调用」，不是「查完没查到」。
+ *
  * 有意接受的代价：子 Agent 若把结论只留在思考里（没写进正文），协调者只能拿到工具事实 ——
  * 这由 `buildSubagentPrompt()` 的「结论先行 / 查不到就说查不到」负责，而不是靠回注思考兜底。
  *
  * @param {any} child 内层循环结果（content / hitRoundLimit / trace）
  * @param {number} maxChars
- * @returns {{ text: string, truncated: boolean, reason: 'ok'|'limit'|'empty' }}
+ * @returns {{ text: string, truncated: boolean, reason: 'ok'|'limit'|'empty'|'tool-markup' }}
  */
 function buildSummary(child, maxChars) {
   const cap =
     Number(maxChars) > 0 ? Math.floor(Number(maxChars)) : FALLBACK_LIMITS.subagentSummaryMaxChars;
-  const raw = String((child && child.content) || '').trim();
+  const rawContent = String((child && child.content) || '').trim();
   const hitLimit = !!(child && (child.hitRoundLimit || child.hit_round_limit));
+  // 上下文溢出（`stopForOverflow`）同样是「没跑完」：它没有 hitRoundLimit，若不当截断处理，
+  // 半份正文会以 reason=ok 回注，协调者把它当完整结论，且 buildTraceFactsDigest 的工具事实也丢。
+  const overflow = !!(child && (child.overflowStopped || child.stopReason === 'context_overflow'));
+  const truncatedByBudget = hitLimit || overflow;
+  // 残留 tool_call 标记 = 那一轮把工具调用写成了文本（没有执行）：标记之前的正文还可能有用，
+  // 标记本身绝不能当结论回注。
+  const markupAt = toolCallMarkupIndex(rawContent);
+  const leaked = markupAt >= 0;
+  const raw = leaked ? rawContent.slice(0, markupAt).trim() : rawContent;
   // reason 是回注给协调者的结构化信号：limit = 预算截断（可缩小问题重派），
-  // empty = 模型确实没给结论（换问法），ok = 正常。
-  const reason = raw ? (hitLimit ? 'limit' : 'ok') : hitLimit ? 'limit' : 'empty';
+  // empty = 模型确实没给结论（换问法），tool-markup = 上游没给结构化工具调用（换端点/重派），
+  // ok = 正常。
+  const reason = leaked
+    ? 'tool-markup'
+    : raw
+      ? truncatedByBudget
+        ? 'limit'
+        : 'ok'
+      : truncatedByBudget
+        ? 'limit'
+        : 'empty';
 
   let text;
   if (raw) {
-    text = hitLimit ? `${SUMMARY_HEAD_TRUNCATED_WITH_CONTENT}\n${raw}` : raw;
+    text = leaked
+      ? `${SUMMARY_HEAD_TOOL_MARKUP_WITH_CONTENT}\n${raw}`
+      : truncatedByBudget
+        ? `${overflow && !hitLimit ? SUMMARY_HEAD_OVERFLOW_WITH_CONTENT : SUMMARY_HEAD_TRUNCATED_WITH_CONTENT}\n${raw}`
+        : raw;
   } else {
     const facts = buildTraceFactsDigest(child && child.trace);
     if (facts) {
-      text = `${hitLimit ? SUMMARY_HEAD_TRUNCATED_WITH_TRACE : SUMMARY_HEAD_NO_CONCLUSION_WITH_TRACE}\n${facts}`;
+      const head = leaked
+        ? SUMMARY_HEAD_TOOL_MARKUP_WITH_TRACE
+        : truncatedByBudget
+          ? (overflow && !hitLimit
+              ? SUMMARY_HEAD_OVERFLOW_WITH_TRACE
+              : SUMMARY_HEAD_TRUNCATED_WITH_TRACE)
+          : SUMMARY_HEAD_NO_CONCLUSION_WITH_TRACE;
+      text = `${head}\n${facts}`;
     } else {
-      text = hitLimit ? SUMMARY_TRUNCATED_NO_EVIDENCE : SUMMARY_NO_CONCLUSION;
+      text = leaked
+        ? SUMMARY_HEAD_TOOL_MARKUP_WITH_TRACE
+        : truncatedByBudget
+          ? SUMMARY_TRUNCATED_NO_EVIDENCE
+          : SUMMARY_NO_CONCLUSION;
     }
   }
 
@@ -337,6 +409,8 @@ function createSubagentRunner(deps) {
             { role: 'user', content: buildFollowupPrompt(prior.task, task, rawArgs && rawArgs.hints) }
           ]
         : [{ role: 'user', content: buildSubagentPrompt(task, rawArgs && rawArgs.hints) }];
+      // 拿到槽位 = 有进展（排队时间不该算进「卡住」）
+      noteSubagentActivity();
       const child = await runChildLoop(
         {
           model: deps.model,
@@ -345,11 +419,17 @@ function createSubagentRunner(deps) {
           maxRounds: limits.subagentMaxRounds,
           maxToolCalls: limits.subagentMaxToolCalls,
           label,
-          subagentId
+          subagentId,
+          // 工具表**随循环一起下去**：执行层（tool-gate `subagent-scope`）要按它拦，
+          // 只把清单过滤在「发给模型」这一步是不够的（模型可以输出表外的名字）。
+          allowedToolNames: childTools
+            .map((t) => t && t.function && t.function.name)
+            .filter(Boolean)
         },
         meta
       );
 
+      noteSubagentActivity();
       // 留存追问上下文（含追问轮合并后的账本 messages；截断 run 也留 —— 半份上下文仍可续问）
       rememberFollowup(subagentId, prior ? `${prior.task}（含追问）` : task, child && child.messages);
       const summary = buildSummary(child, limits.subagentSummaryMaxChars);
@@ -415,6 +495,18 @@ function createSubagentRunner(deps) {
 
   return {
     run,
+    /**
+     * **协调者派发**：深度从「协调者」起算（0），与主循环同口径。
+     *
+     * 为什么需要这个入口（而不是让调用方自己传 `subagentDepth`）：2026-11-19 查到的真实缺陷 ——
+     * planner 的 explore 阶段自己写了 `subagentDepth: 1`，而 `subagentMaxDepth` 默认 1，
+     * `depth >= maxDepth` 直接把它判成「子 Agent 不能再派子 Agent」：**plan 模式的并发只读调研
+     * 从上线起 100% 被拒**，协调者只能串行自己读。深度的语义只应活在 runner 这一处，
+     * 调用方只需要声明「我是协调者」。
+     */
+    runFromCoordinator(rawArgs, ctx = {}) {
+      return run(rawArgs, { ...(ctx || {}), subagentDepth: 0 });
+    },
     status,
     toolName: SUBAGENT_TOOL_NAME,
     statusToolName: SUBAGENT_STATUS_TOOL_NAME,
@@ -429,6 +521,8 @@ function createSubagentRunner(deps) {
 
 module.exports = {
   createSubagentRunner,
+  noteSubagentActivity,
+  subagentActivityAt,
   resolveSubagentLimits,
   buildSubagentPrompt,
   buildFollowupPrompt,

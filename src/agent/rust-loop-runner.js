@@ -34,6 +34,8 @@ const { sanitizeChatBodyImagesForApi } = require('./guardrails-shared');
 
 const { executeDelegateBatch } = require('./delegate-batch');
 const { applyTurnEndSynthesis } = require('./agent-synthesis');
+// 「这段正文是不是残留的工具调用标记」的唯一判据在交付文本模块（`deliverableAnswer` 同源）
+const { replyHasToolCallMarkup } = require('./agent-round-text');
 const { buildLlmHeadersFromConfig, resolveLlmEndpoint } = require('./llm-request');
 const { getChannelPolicy } = require('./llm-channel');
 // 思考占位补全的单一来源（Renderer 经 agent-bundle 消费同一份）。
@@ -694,8 +696,13 @@ async function runRustAgentLoop(opts) {
       const prepared = prepareRequestMessages(messages, roundNo);
       // 快照记**这一个请求真正发出去的形态**：装配（裁剪 / 视觉注入 / 思考回填）就发生在
       // 这里，之前的「回合开始记一份账本种子」看不出这一轮注入了什么。
+      //
+      // **不 await**：这里是 `round.prepare` 的返回路径，core 要等我们答复才发请求，而这一写
+      // 是「序列化整份上下文 + 两次 sha256 + token 估算 + 一次 SQLite 写 + 保留裁剪」——
+      // 压在每一轮发请求之前，等于让首字固定多等一次落库（`request-snapshot.js` 的 writer
+      // 注释本来就写着「可以 await 也可以不 await」）。旁路账本失败只记日志，语义不变。
       runStall.note('llm_snapshot');
-      await writeRequestSnapshot(
+      void writeRequestSnapshot(
         { model, messages: prepared.messages, tools: startParams.tools || [] },
         roundNo
       ).catch(() => {});
@@ -808,6 +815,16 @@ async function runRustAgentLoop(opts) {
       llmRound += 1;
 
       if (!needTools) {
+        // 上游把工具调用写成**文本**（`<| |DSML| | invoke name="…">` / `<tool_call>` 等）：
+        // core 只认结构化 tool_calls，于是这一轮被当成「无工具的文字 = 正常收尾」，那条工具
+        // 从未执行，而正文看起来像一段回答（2026-11-19 子 Agent 事故）。与下面「吞掉
+        // tool_calls」同类，客户端补救不了，只留一条可对照的诊断日志。
+        if (replyHasToolCallMarkup(deltaContent)) {
+          runLog(
+            '本轮正文里含残留工具调用标记（上游把 tool_call 写成了文本，如 <| |DSML| | invoke>）' +
+              ' —— 那条工具没有执行；换能正常回结构化 tool_calls 的端点/中转后重跑'
+          );
+        }
         // 上游把工具调用吞掉时的**唯一可见信号**：这一轮既没有正文也没有思考，却有
         // completion_tokens。客户端补救不了 —— 同一份请求换一个供应商就正常回 tool_calls
         // （2026-11-17 实测：DY 中转的 deepseek-v4.1-flash 对任何「模型想调工具」的请求都回空

@@ -19,13 +19,15 @@ const { settleAllAbortable } = require('./parallel-batch');
 const { createPlannerMainBridge } = require('./planner-main-bridge');
 const { buildExploreTools, buildShellTools, buildBuildTools } = require('./planner-tool-filters');
 const { SUBAGENT_TOOL, SUBAGENT_STATUS_TOOL } = require('./tool-catalog');
-const { createSubagentRunner } = require('./subagent-runner');
+const { createSubagentRunner, noteSubagentActivity } = require('./subagent-runner');
 const { runRustAgentLoop, resolveChatUrl } = require('./rust-loop-runner');
 const { buildLlmHeadersFromConfig } = require('./llm-request');
 const { getEffectiveInputBudget } = require('./compaction-main');
 const { applyTierRuntime } = require('./model-runtime-by-tier');
 const { clampModelRuntimeValue } = require('./model-runtime-schema');
 const { stripToolCallMarkup } = require('../llm-tool-call-fallback');
+// 交付文本判据（四态 / 思考回落文案）的单一来源 —— 汇总轮空正文时用它，别在这里另写标签
+const roundText = require('./agent-round-text');
 const {
   createLiveLoopTraceTracker,
   createSubagentNamer,
@@ -172,6 +174,15 @@ async function fetchChatCompletion(body, apiConfig, settings, signal, onUsage, r
     { signal, ...(reconnect || {}) }
   );
   const content = json && json.content != null ? String(json.content) : '';
+  // 思考通道**必须一起交出去**：这个模型（deepseek 系 / 中转）经常整轮只回思考、正文为空，
+  // 而 planner 的汇总轮正是"要把过程压成一段话"的那一步 —— 只取 content 就等于把整轮产出
+  // 丢掉，最终交付成「(模型未生成文字答复。)」（2026-11-19 真事）。通道身份不变：由调用方决定怎么用。
+  const reasoning =
+    json && json.reasoning != null
+      ? String(json.reasoning)
+      : json && json.reasoningContent != null
+        ? String(json.reasoningContent)
+        : '';
   if (json && json.usage) {
     recordLlmUsage(json.usage, body?.model);
     if (typeof onUsage === 'function') onUsage(extractUsageStats(json.usage, body?.model));
@@ -182,7 +193,7 @@ async function fetchChatCompletion(body, apiConfig, settings, signal, onUsage, r
       if (typeof onUsage === 'function') onUsage(extractUsageStats(est, body?.model));
     }
   }
-  return content;
+  return { content, reasoning };
 }
 
 /**
@@ -231,7 +242,10 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           model: req.model,
           messages: req.messages,
           maxRounds: req.maxRounds,
-          maxToolCalls: req.maxToolCalls
+          maxToolCalls: req.maxToolCalls,
+          // 子 Agent 的工具表（Explore 白名单）一路带到执行层：tool-gate 的 `subagent-scope`
+          // 按它拦表外调用（只过滤「发给模型」的清单挡不住模型输出表外名字）
+          allowedToolNames: req.allowedToolNames
         },
         exploreTools,
         null,
@@ -254,19 +268,63 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     workspacePath =
       (ws && ws.kind === 'local' ? ws.workspacePath : null) || deps.workspaceRootPath() || undefined;
   }
+  // 工作区是不是远端（SSH）：只影响退化成串行时的**文案**（远端建不出副本时要说清是远端的问题，
+  // 而不是「不是 git 仓库」）。真正的分派在 `planner-main-bridge`（本地 / 远端两套实现）。
+  const remoteWorkspace = /^ssh:/i.test(String(workspacePath || ''));
 
   const agentBridge = createPlannerMainBridge({
     coordinator: deps.coordinator,
     worktreeService: deps.worktreeService,
     subagentStore: deps.subagentStore,
     dieyunHome: deps.dieyunHome,
+    // 远端（SSH）分派的**唯一入口**：不转发它，`planner-main-bridge` 里的 `remoteTarget()`
+    // 恒为 null，每个执行器都走本地 `worktreeService`（对一个 `ssh://` 根目录必然建不出来）
+    // ⇒ 整批退成串行，还把根因说成「远端建不出隔离副本」——远端 per-role 副本于是从未被执行过
+    // （2026-11-19 审计）。这里少一个字段，远端并行就等于没做。
+    resolveRemoteRunTarget: deps.resolveRemoteRunTarget,
     // 绑定本轮已解析的工作区，禁止回落到 Main 当前视图
     workspaceRootPath: () => workspacePath || (deps.workspaceRootPath && deps.workspaceRootPath()) || null
   });
 
+  // 续跑断点必须在 `runStart` **之前**读：续跑要沿用同一个 run 身份（见下）。
+  let resumeCheckpoint = null;
+  if (payload.resumeFromRunId) {
+    resumeCheckpoint = deps.subagentStore.loadCheckpoint(deps.dieyunHome(), payload.resumeFromRunId);
+  }
+  // 续跑**复用被中断那一轮的 runId**。
+  //
+  // 为什么（2026-11-19 实测）：worktree 根目录是 `.dieyun/worktrees/<runId>/<role>`、
+  // 分支是 `dieyun/agent-<runId>-<role>`、断点文件也按 runId 存 —— 换一个新 runId 续跑，
+  // 就会给同一件活新建一套空副本：中断前已经写进旧副本的产出既不在「变更」面板
+  // （预演也按新 runId 扫），也永远无法应用，只能被容量策略归档到不可见分支。
+  // 复用旧 id 后 `createAgentWorktree` 命中已存在目录（`reused:true`，不重置）——
+  // 半成品正好留给续跑，这也是 worktree-service 注释里写明的设计意图。
+  const resumeRunId = resumeCheckpoint?.ok ? String(payload.resumeFromRunId || '').trim() : '';
+
   let coordinatorRunId = null;
-  const started = agentBridge.runStart({ userText: String(payload.userText || '').slice(0, 500) });
+  const started = agentBridge.runStart({ runId: resumeRunId || undefined, userText: String(payload.userText || '').slice(0, 500) });
   if (started?.runId) coordinatorRunId = started.runId;
+
+  // 远端（SSH）的 per-run 副本目录会留下**完整 checkout**：每轮开工前回收过期的几份。
+  // 回收口径在 `remote-run-worktree.pruneRunWorktreeRoots`（先归档进分支、再删目录、保留分支），
+  // 数字的唯一来源是 `agent-limits.plannerRunWorktreeKeep`。失败只记一行，绝不挡这一轮。
+  if (typeof agentBridge.worktreePruneRunCopies === 'function') {
+    void (async () => {
+      try {
+        const keep =
+          Number((getAgentLimits(deps.userData, payload.contextTierId) || {}).plannerRunWorktreeKeep) || 0;
+        if (keep <= 0) return;
+        const pruned = await agentBridge.worktreePruneRunCopies({ keep });
+        if (pruned && !pruned.ok && !pruned.skipped) {
+          console.warn(
+            `[dieyun:planner] 过期副本回收未完成：${pruned.error || (pruned.blocked || []).join('、') || '未知原因'}`
+          );
+        }
+      } catch {
+        // ignore：回收是背景维护，失败不影响本轮
+      }
+    })();
+  }
 
   // 压缩实例的唯一来源是 Main（main-entry.ensureMainCompactionAgent）。planner 若自建实例，
   // 会话冷却计数与累积摘要缓存只活在本轮 run 内 —— 等于每次都绕过冷却、每次重新拉归档。
@@ -277,11 +335,6 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   const tokenBudget = getEffectiveInputBudget(settings, payload.model || settings.textModel);
   const toolBridge = deps.createToolBridge(opts.webContents);
 
-  let resumeCheckpoint = null;
-  if (payload.resumeFromRunId) {
-    resumeCheckpoint = deps.subagentStore.loadCheckpoint(deps.dieyunHome(), payload.resumeFromRunId);
-  }
-
   const enabledBestOfN = plannerBestOfNFromLimits(deps, payload);
   // 与主链同层：Renderer 传入本轮 contextTierId，planner 子循环的首包 / 静默 / 重连
   // 参数才能落在与主对话相同的档位（原先缺省落 'default'）。
@@ -289,7 +342,21 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   const plannerReconnect = {
     baseDelayMs: loopSpec.llmRetryBaseMs,
     maxDelayMs: loopSpec.llmMaxRetryDelayMs,
-    maxWaitMs: loopSpec.llmReconnectMaxWaitMs
+    maxWaitMs: loopSpec.llmReconnectMaxWaitMs,
+    // 与主循环同口径：重连期间要有可见信号。以前这里没有 onWait —— 规划 / 验收 / 汇总的
+    // LLM 瞬断时，界面与日志在最多 `llmReconnectMaxWaitMs` 内完全静默，用户分不清
+    // 「重连中」和「卡死」（2026-11-19 审计）。
+    onWait: (info) => {
+      const sec = Math.max(1, Math.round((Number(info && info.waitMs) || 0) / 1000));
+      const attempt = Number(info && info.attempt) || 0;
+      console.warn(`[dieyun:planner] 模型接口连接中断，${sec}s 后自动重试（第 ${attempt} 次）`);
+      onPhase('llm_reconnect_wait', {
+        runId: coordinatorRunId,
+        attempt,
+        waitMs: info && info.waitMs,
+        error: String((info && info.error && info.error.message) || (info && info.error) || '')
+      });
+    }
   };
   const loopMaxToolCalls = loopSpec.maxToolCalls;
   // 并行执行器上限：数字单一来源在 agent-limits（同时是 worktree 数 / LLM 并发流数）。
@@ -312,6 +379,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     maxOutputTokens: clampModelRuntimeValue('maxOutputTokens', settings.maxOutputTokens ?? settings.maxTokens),
     temperature: clampModelRuntimeValue('temperature', settings.temperature),
     maxToolCalls: loopMaxToolCalls,
+    // worker / explore 子循环的轮次预算：**和主循环同一个来源**（`agentMaxRounds`）。
+    // 以前这两个数烤在 Rust 里（explore 24 / worker 96），宿主调大轮次对 plan 完全无效。
+    maxRounds: loopSpec.maxRounds,
     resumeCheckpoint: resumeCheckpoint?.ok ? resumeCheckpoint.data || resumeCheckpoint : null
   };
 
@@ -399,12 +469,42 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
   const upsertIsolatedTrace = (subagentId, entries, streamContent) => {
     if (!subagentId || !Array.isArray(entries) || !entries.length) return;
     isolatedTraceBySubagent.set(subagentId, entries);
-    rebuildUiTrace(streamContent);
+    // 卡片自己的正文只留在卡片里：以前把任意一路 worker 的片段写成 run 级
+    // `lastStreamContent`，主气泡的流式文本就在 N 路之间来回跳，最后停在「最后一个收尾
+    // worker 的某个片段」上（既不是最终答复也不完整），断点里存的也是它（2026-11-19 审计 P2）。
+    void streamContent;
+    rebuildUiTrace();
   };
+
+  // 「为什么这一轮走了 planner」必须写在最前面：开关只代表**允许**，真正拍板的是侧模型
+  // （`src/agent/planner-router.js`）。没有这一行，用户看到 3 路执行器时无法判断是「我自己开的」
+  // 还是「判定器判的」，也无从复盘某次误判。`thought` 是结论 + 理由，`fullThought` 带判定模型
+  // 的思考原文；Renderer 在「不拆」时补的是同一张卡（phase 名同源 `agent-round-text`）。
+  const plannerRouteReason = String(payload.plannerRouteReason || '').trim();
+  const plannerRouteThinking = String(payload.plannerRouteThinking || '').trim();
+  const plannerRoutePhase =
+    String(payload.plannerRoutePhase || '').trim() || roundText.PLANNER_ROUTE_PHASE;
+  const routeThought = plannerRouteReason || '侧模型判定：拆成多路并行走 planner';
+  const routeNoteEntry =
+    plannerRouteReason || plannerRouteThinking
+      ? {
+          round: 0,
+          phase: plannerRoutePhase,
+          thought: routeThought,
+          fullThought: plannerRouteThinking
+            ? `${routeThought}\n\n【判定模型思考】\n${plannerRouteThinking}`
+            : routeThought,
+          tools: []
+        }
+      : null;
 
   const mergePlannerTrace = (trace) => {
     const plannerPart = (trace || []).map(mapPlannerTraceEntryToUi);
-    uiTrace = [...plannerPart, ...collectWorkerTracePart()];
+    uiTrace = [
+      ...(routeNoteEntry ? [routeNoteEntry] : []),
+      ...plannerPart,
+      ...collectWorkerTracePart()
+    ];
     pushUiTrace();
   };
 
@@ -458,6 +558,8 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     const tracker = liveMeta
       ? createLiveLoopTraceTracker(liveMeta, {
           onUpdate: (entries, content) => {
+            // 子 Agent 有产出 = 有进展：工具看门狗据此续命（别把长期产出的调研判成卡住）
+            noteSubagentActivity();
             if (content) liveContent = content;
             upsertIsolatedTrace(liveMeta.subagentId, entries, content);
           }
@@ -520,12 +622,16 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
             sessionId: payload.sessionId || undefined,
             runId: traceMeta?.subagentId || undefined,
             model: body.model || payload.model,
-            taskTier: payload.taskTier || null
+            taskTier: payload.taskTier || null,
+            // 子 Agent 循环：执行层按这张表拦（普通员工/勘察协调者没有这个字段 → 不拦）
+            allowedToolNames: Array.isArray(spec.allowedToolNames) ? spec.allowedToolNames : undefined
           };
           // 协调者（Plan explore 阶段）派发的只读研究子 Agent 走 subagent-runner，
           // 不落回普通工具委托 —— 否则「子 Agent」会被当成一个不存在的网关工具。
+          // 深度**由 runner 决定**（`runFromCoordinator` = 协调者口径 0）：这里以前自己写
+          // `subagentDepth: 1`，与默认 `subagentMaxDepth: 1` 相撞，plan 的并发调研 100% 被拒。
           if (opts.allowSubagent && name === subagentRunner.toolName) {
-            return subagentRunner.run(args, { ...toolCtx, subagentDepth: 1 });
+            return subagentRunner.runFromCoordinator(args, toolCtx);
           }
           if (opts.allowSubagent && name === subagentRunner.statusToolName) {
             return subagentRunner.status();
@@ -543,10 +649,19 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           // ignore
         }
       }
+      // **卡片收尾必须在这里**：以前放在 try/finally 之后，`runRustAgentLoop` 抛错时被整段跳过，
+      // 那张「准备中…」占位卡会一直挂在思考区转圈，还会被当成这一路的产出落库
+      // （2026-11-19 审计）。与主循环入口 `agent-runtime` 的 finalizeSubagentTrace 同形态：
+      // 失败也收尾（loopResult 为 null 时退回实时卡片）。
+      if (liveMeta) {
+        try {
+          finalizeLoopTrace(loopResult || null, liveMeta, liveContent);
+        } catch {
+          // ignore
+        }
+      }
     }
-    if (liveMeta) {
-      finalizeLoopTrace(loopResult, liveMeta, liveContent);
-    } else if (traceMeta) {
+    if (!liveMeta && traceMeta) {
       const entries = mapLoopTraceToUi(loopResult && loopResult.trace, traceMeta);
       if (entries.length) {
         uiTrace.push(...entries);
@@ -565,7 +680,9 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
 
   async function runWorkerJob(job, isRetry, opts = {}) {
     const worker = job.worker;
-    const parallelRun = !!opts.parallelBatch || !!(job.tasks && job.tasks.length > 1);
+    // 卡片的「并行」只反映**真实 batch 并发**：同一执行器的多个子任务在 for 循环里
+    // 一个接一个跑（`:666` 起），以前按 `tasks.length > 1` 也标成并行，于是卡片撒谎。
+    const parallelRun = !!opts.parallelBatch;
     const worktreeRole = opts.worktreeRole || worker;
     let wtPath = null;
     let wtBaseSha = null;
@@ -598,6 +715,10 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     let priorSummary = '';
     let hitRoundLimit = false;
     let partial = null;
+    // 同一执行器的多个子任务**共用一段对话**（见下面的 messages 拼接）：
+    // 以前每个子任务都新起一次 loop run，system / 已读文件全部重建，第 2 个子任务
+    // 会把第 1 个刚查过的东西再查一遍（2026-11-19 实测：同一 worker 的 B1/B2 各起一次 run）。
+    let carriedMessages = null;
     const useCoordinatorTasks = shouldUseCoordinatorTaskQueue(latestPlan, enabledBestOfN);
 
     for (const task of job.tasks || []) {
@@ -616,8 +737,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           priority: 5,
           deadlineAt: Date.now() + TASK_TIMEOUT_MS,
           timeoutMs: TASK_TIMEOUT_MS,
-          maxRetries: 3,
-          exceptionPolicy: 'retry',
+          // 重试不在这里：coordinator 只记事实，重跑由 planner 自己（`planner/run.rs`）按预算决定。
           worktreePath: wtPath
         });
         if (en?.ok && en.task) taskId = en.task.taskId;
@@ -664,6 +784,14 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       if (!taskTools.length) {
         throw new Error(`子任务 ${task.id} 无可用工具`);
       }
+      // 续做同一执行器的下一个子任务：**只换 system**（它描述当前子任务 + 期望输出），
+      // 其余历史（上一段读过哪些文件、跑过哪些命令、结论是什么）原样保留 —— 这正是
+      // 「同一执行器顺序执行」该有的语义，也让第 2 个子任务不必重复勘察。
+      // 段末再拼一条当前子任务的用户消息，保证模型知道现在要做哪一件。
+      if (carriedMessages && carriedMessages.length >= 2 && Array.isArray(spec.messages) && spec.messages.length >= 2) {
+        const [systemMsg, userMsg] = spec.messages;
+        spec.messages = [systemMsg, ...carriedMessages.slice(1), userMsg];
+      }
       let loopResult;
       try {
         loopResult = await runToolLoopFromSpec(spec, taskTools, wtPath, cardMeta);
@@ -686,13 +814,13 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         output,
         error: null
       });
-      completedOutputs.push({
-        id: task.id,
-        worker,
-        subagentId,
-        output,
-        error: null
-      });
+      // 断点里的已完成产出按 id **覆盖写**，不追加：验收触发重试后同一个 id 会再产出一次，
+      // 追加会让恢复后的 results 出现两条同 id 记录（一条是被否掉的旧产出），
+      // 断点体积还会随每次重试线性增长（2026-11-19 审计）。
+      const completedEntry = { id: task.id, worker, subagentId, output, error: null };
+      const dedupAt = completedOutputs.findIndex((o) => o && o.id === completedEntry.id);
+      if (dedupAt >= 0) completedOutputs[dedupAt] = completedEntry;
+      else completedOutputs.push(completedEntry);
       await persistPlannerCheckpoint({
         worker,
         lastSubtaskId: task.id,
@@ -701,27 +829,54 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       if (useCoordinatorTasks && agentBridge.taskComplete && coordinatorRunId) {
         await agentBridge.taskComplete(coordinatorRunId, taskId, { output: output.slice(0, 8000) });
       }
+      // 把这一段的对话留给**同一执行器的下一个子任务**（见上面的 messages 拼接）。
+      // 账本里的 messages 是「下一轮的输入」：没调工具的收尾轮不会把 assistant 正文补进去，
+      // 所以这里要自己补一条 —— 否则带过去的只有原始需求，等于没带上下文。
+      if (Array.isArray(loopResult.messages) && loopResult.messages.length) {
+        const carried = loopResult.messages.slice();
+        const last = carried[carried.length - 1];
+        const lastIsAnswer = last && last.role === 'assistant' && String(last.content || '') === output;
+        if (output && !lastIsAnswer) carried.push({ role: 'assistant', content: output });
+        carriedMessages = carried;
+      } else {
+        carriedMessages = null;
+      }
       priorSummary += `[${task.id}] ${output.slice(0, 400)}\n`;
     }
     return { outputs, hitRoundLimit, partial, worker };
   }
 
   /**
-   * 这一批的执行方式：`{ limit, isolated }`。
+   * 这一批的执行方式：`{ limit, isolated, note? }`。
    *
-   * 两个条件都要满足才并发：① 用户没把上限设成 1；② **隔离能力可用**（工作区是 git 仓库，
-   * 能给每一路建出 worktree）。探测方式：先给第一路建一次 —— `createAgentWorktree` 是幂等的
-   * （目录已存在则返回 `reused:true`），所以真跑时不会重复建，探测本身不浪费用。
+   * 两个条件都要满足才并发：① 用户没把上限设成 1；② **隔离能力可用** —— 本地 git 仓库，
+   * 或远端（SSH）会话里建得出远端副本（`planner-main-bridge` 分派到 `remote-run-worktree`）。
+   * 探测方式：先给第一路建一次 —— `createAgentWorktree` 是幂等的（目录已存在则返回 `reused:true`），
+   * 所以真跑时不会重复建，探测本身不浪费。
    *
    * `isolated=false` 时整批**统一**退成「串行 + 主工作区」（limit=1 且各 job 不再尝试建副本）：
    * 半隔离（A 有副本、B 没有）会让 B 的改动绕过「变更」面板直接落盘，比不隔离更难查。
+   * 退化的原因写在 `note` 里，由 `runWorkerBatch` 推到思考区（不许静默）。
    */
   async function resolveWorkerBatchPlan(jobs) {
     if (!(jobs.length > 1)) return { limit: 1, isolated: true };
-    if (!agentBridge.worktreeCreate || !coordinatorRunId) return { limit: 1, isolated: false };
+    if (!agentBridge.worktreeCreate || !coordinatorRunId) {
+      return {
+        limit: 1,
+        isolated: false,
+        note: '缺少编排账本，建不出隔离副本：本批串行在主工作区执行'
+      };
+    }
     const first = jobs[0] || {};
     const probe = await agentBridge.worktreeCreate(coordinatorRunId, first.worker || 'A');
-    if (!probe || !probe.ok) return { limit: 1, isolated: false };
+    if (!probe || !probe.ok) {
+      const where = remoteWorkspace ? '远端会话' : '本地工作区';
+      return {
+        limit: 1,
+        isolated: false,
+        note: `${where}建不出隔离副本（${(probe && probe.error) || '未知原因'}）：本批串行在主工作区执行`
+      };
+    }
     return { limit: Math.max(1, Math.min(workerCap, jobs.length)), isolated: true };
   }
 
@@ -731,6 +886,39 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
     const plan = await resolveWorkerBatchPlan(jobs);
     const parallelLimit = plan.limit;
     const parallelBatch = jobs.length > 1 && parallelLimit > 1;
+    // 「实际并发」是**这一层的事实**，必须说出来：core 只报「有几个执行器」（它看不到并发上限、
+    // 隔离探测结果、同一执行器多子任务、Best-of-N），并发度由这里决定。
+    // 以前只在「隔离退化」时写一条，于是「界面写着 N 路并行、墙钟却是一路一路跑」永远查不出来
+    // （2026-11-19 实测：6 段 worker run 首尾相接，用户完全看不出并行没发生）。
+    const taskCount = jobs.reduce((n, j) => n + (j.tasks ? j.tasks.length : 0), 0);
+    const serialReasons = [];
+    if (jobs.length > 1 && parallelLimit <= 1) {
+      serialReasons.push(`并发上限为 ${parallelLimit}（设置 → 多 Agent 并行的「并行执行器数」）`);
+    }
+    if (jobs.some((j) => (j.tasks || []).length > 1)) {
+      serialReasons.push('同一执行器的多个子任务在同一份副本里顺序执行');
+    }
+    if (!plan.isolated && plan.note) serialReasons.push(plan.note);
+    const actualNote = parallelBatch
+      ? `${jobs.length} 个执行器 / ${taskCount} 个子任务，并发上限 ${parallelLimit}`
+      : `串行：${serialReasons.join('；') || '本批只有一个执行器'}`;
+    if (jobs.length > 1) {
+      console.warn(`[dieyun:planner] 本批实际并发 · ${actualNote}`);
+      uiTrace.push({
+        phase: '调度 · 实际并发',
+        thought: actualNote,
+        fullThought: actualNote,
+        tools: []
+      });
+      pushUiTrace();
+      if (!parallelBatch) {
+        onPhase('workers_serial_fallback', {
+          runId,
+          jobs: jobs.length,
+          note: serialReasons.join('；')
+        });
+      }
+    }
     const settled = await settleAllAbortable(
       jobs,
       (job) => {
@@ -805,7 +993,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       onPhase(p, { runId });
 
       if (p === 'need_plan_llm') {
-        const content = await fetchChatCompletion(
+        const { content } = await fetchChatCompletion(
           phase.llmBody,
           apiConfig,
           settings,
@@ -851,6 +1039,10 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
             { allowSubagent: true }
           );
           if (loopResult.hitRoundLimit) {
+            // 截断的勘察结论也是**结论**：core 拿 `partialContent` 当笔记继续拆解。
+            // 同一份必须进断点（这里先记下，规划落盘时随 `latestPlan` 一并写），
+            // 否则从断点续跑后 worker 的【Explore 勘察摘要】是空白的。
+            latestExploreNotes = loopResult.content || '';
             phase = await bridge.invoke(
               'planner.run.continue',
               {
@@ -863,6 +1055,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
               },
               30000
             );
+            await persistPlannerCheckpoint();
           } else {
             phase = await bridge.invoke(
               'planner.run.continue',
@@ -921,7 +1114,7 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           );
         }
       } else if (p === 'need_best_of_n_pick_llm') {
-        const content = await fetchChatCompletion(
+        const { content } = await fetchChatCompletion(
           phase.llmBody,
           apiConfig,
           settings,
@@ -930,13 +1123,20 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           plannerReconnect,
           bridge
         );
+        // 选优之后接着就是验收：把 worktree 的实际 diff 一起带过去。
+        // 不带的话验收拿到的 `worktreeChanges` 是空对象，「声称改了文件却零 diff」这条
+        // 验收规则在 best-of-N 路径上永远不生效（2026-11-19 审计）。
+        let pickWorktreeCtx = null;
+        if (agentBridge.worktreePreviewRun && coordinatorRunId) {
+          pickWorktreeCtx = await agentBridge.worktreePreviewRun(coordinatorRunId);
+        }
         phase = await bridge.invoke(
           'planner.run.continue',
-          { runId, step: 'best_of_n_pick_llm', content },
+          { runId, step: 'best_of_n_pick_llm', content, worktreeCtx: pickWorktreeCtx || {} },
           60000
         );
       } else if (p === 'need_review_llm') {
-        const content = await fetchChatCompletion(
+        const { content, reasoning } = await fetchChatCompletion(
           phase.llmBody,
           apiConfig,
           settings,
@@ -945,13 +1145,20 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           plannerReconnect,
           bridge
         );
+        // 验收轮要的是 JSON：只回思考就等于没给判定。这里**不塞标签文本**（会被当 JSON 解析），
+        // 只留一条可对照的诊断 —— 真正的兜底是 core 侧「不采信未通过验收」的既有语义。
+        if (!String(content || '').trim() && String(reasoning || '').trim()) {
+          console.warn(
+            '[dieyun:planner] 验收轮上游只回了思考（content 为空），本轮判定按「未给出结论」处理'
+          );
+        }
         phase = await bridge.invoke(
           'planner.run.continue',
           { runId, step: 'review_llm', content },
           60000
         );
       } else if (p === 'need_synthesize_llm') {
-        const content = await fetchChatCompletion(
+        const { content, reasoning } = await fetchChatCompletion(
           phase.llmBody,
           apiConfig,
           settings,
@@ -960,9 +1167,36 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
           plannerReconnect,
           bridge
         );
+        // 汇总轮是**唯一**能把这一轮产出交给用户的地方，所以这里只做一件事：
+        // 把「不可用的正文」归一成**空正文**，交给 core 已有的判定去决定下一步
+        // （`handle_synthesize_llm`：空正文 ⇒ 再要一次最终答复；第二次仍空 ⇒ 如实标「未成文」）。
+        //
+        // 以前这里有两条「看起来有字、其实不可用」的路径被当成正文喂给 core，两次都砸在
+        // 同一个终点上 —— 账本里只剩「（模型未生成文字答复。）」（2026-11-19 三例实锤）：
+        //   1. 残留 tool_call 标记：中转常把工具调用当正文吐（`<| |DSML| | invoke …>`），
+        //      `stripToolCallMarkup` 会从标记处删到**全文末尾** → 整段汇总归零 → 下游 `(空响应)`；
+        //   2. 只有思考通道：把「（以下为模型思考，本轮未成文）」标签当正文交上去 → core 记
+        //      「已完成」，而落库口按 REASONING-ISOLATION §3.4 又把这条标签换成同一个占位符。
+        // 两者都是伪造成功（思考永不顶正文，标记残渣更不是正文）。所以一律交空串，
+        // 并留一条**带原始片段**的诊断 —— 下次要能一眼看出是「泄漏」还是「真空」。
+        const rawSummary = String(content || '');
+        const markupLeaked = roundText.replyHasToolCallMarkup(rawSummary);
+        let finalText = markupLeaked ? '' : stripToolCallMarkup(rawSummary);
+        if (markupLeaked) {
+          console.warn(
+            '[dieyun:planner] 汇总轮正文含残留工具调用标记（剥除后会吃掉整段），按空正文交给 core 重问。原始前 200 字：' +
+              JSON.stringify(rawSummary.slice(0, 200))
+          );
+        } else if (!finalText.trim()) {
+          console.warn(
+            '[dieyun:planner] 汇总轮没有可用正文（' +
+              (String(reasoning || '').trim() ? '只有思考通道' : '既无正文也无思考') +
+              '），按空正文交给 core 重问'
+          );
+        }
         phase = await bridge.invoke(
           'planner.run.continue',
-          { runId, step: 'synthesize_llm', content },
+          { runId, step: 'synthesize_llm', content: finalText },
           120000
         );
       } else {
@@ -976,6 +1210,33 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
       throw new Error(phase?.message || 'planner 未正常结束');
     }
 
+    // 远端（SSH）：收尾把每个执行器的副本并回会话副本 —— SSH 会话的「变更」面板一直看的是它，
+    // 不合并的话各路产出只躺在一堆没人找得到的 per-role 目录里。本地路径这段是 no-op。
+    let finalizeMerged = null;
+    if (coordinatorRunId && typeof agentBridge.worktreeFinalizeRun === 'function') {
+      try {
+        finalizeMerged = await agentBridge.worktreeFinalizeRun(coordinatorRunId);
+      } catch (e) {
+        finalizeMerged = { ok: false, error: (e && e.message) || String(e) };
+      }
+      if (finalizeMerged && finalizeMerged.failed && finalizeMerged.failed.length) {
+        // 只说「有冲突」用户没法自查：把**冲突文件、副本路径、可粘贴的命令**一起给出来。
+        const lines = finalizeMerged.failed.map((f) => {
+          const head = `${f.roleId}${f.conflict ? '（冲突）' : ''}`;
+          const files = Array.isArray(f.paths) && f.paths.length ? `冲突文件：${f.paths.join('、')}` : '';
+          const where = f.wtPath ? `副本 ${f.wtPath}${f.branch ? `（分支 ${f.branch}）` : ''}` : '';
+          const cmd = f.wtPath ? `自查：git -C ${f.wtPath} show --stat --oneline HEAD` : '';
+          return `- ${[head, files, where].filter(Boolean).join('；')}${cmd ? `\n  ${cmd}` : ''}`;
+        });
+        const note =
+          '执行器产出并回会话副本时有冲突（这些改动**没有被覆盖**，副本已保留）：\n' +
+          lines.join('\n');
+        console.warn(`[dieyun:planner] ${note}`);
+        uiTrace.push({ phase: '调度 · 并回副本', thought: note, fullThought: note, tools: [] });
+        pushUiTrace();
+      }
+    }
+
     // 断点只在**真正跑完**时删除。撞轮次/工具预算（hitRoundLimit）的那一轮是「跑到一半停车」，
     // 断点必须留着 —— 否则「继续」两条入口（tool-loop continue 状态 / planner 断点）都取不到
     // 东西，Composer 空提交变成毫无反应，而这一轮又已经交付了正文。
@@ -984,6 +1245,17 @@ async function runRustPlannerPipeline(deps, payload, opts = {}) {
         await Promise.resolve(agentBridge.checkpointDelete(coordinatorRunId));
       } catch {
         // ignore
+      }
+      // 续跑成功后把**被消费的那份**断点也删掉：它一直写着 status:'running'，
+      // `tryDetectResumeCheckpoint` 每次进会话都会把它端出来（点「继续」= 在又一个新 runId 下
+      // 重跑一遍已完成的子任务）。
+      const consumed = String(payload.resumeFromRunId || '').trim();
+      if (consumed && consumed !== coordinatorRunId) {
+        try {
+          await Promise.resolve(agentBridge.checkpointDelete(consumed));
+        } catch {
+          // ignore
+        }
       }
     } else if (coordinatorRunId && phase.hitRoundLimit) {
       await persistPlannerCheckpoint({ status: 'running', resumable: true, hitRoundLimit: true });
