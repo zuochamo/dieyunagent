@@ -20,7 +20,9 @@ const TRACE_PREF_DEFAULTS = {
   expandEdit: true,
   followWrites: true,
   showReadiness: true,
-  dampedFlow: false
+  // 无极阻尼默认开（2026-11-19）：思考区连续入流是默认手感，不喜欢的用户在设置里关掉即可。
+  // 存量偏好里没有这个键（旧版本从没写过）也按开处理 —— 见 loadTracePrefs 的 `!== false`。
+  dampedFlow: true
 };
 var tracePrefs = loadTracePrefs();
 
@@ -34,7 +36,7 @@ function loadTracePrefs() {
       expandEdit: raw.expandEdit !== false,
       followWrites: raw.followWrites !== false,
       showReadiness: raw.showReadiness !== false,
-      dampedFlow: raw.dampedFlow === true
+      dampedFlow: raw.dampedFlow !== false
     };
   } catch {
     return { ...TRACE_PREF_DEFAULTS };

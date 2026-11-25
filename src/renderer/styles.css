@@ -274,7 +274,9 @@ body {
 
 .titlebar-update-progress-wrap[data-phase='ready'] .titlebar-update-progress {
   padding: 1px 7px 2px;
-  border: 1px solid var(--border-strong);
+  /* --border-strong / --bg-soft / --bg-muted 从未定义过（2026-11-21 全仓变量盘点），
+     映射回本仓词汇表：强调边 = --border-subtle，浅底 = --surface-1 / hover = --surface-2 */
+  border: 1px solid var(--border-subtle);
   border-radius: 0;
   font-family: inherit;
   font-size: 11px;
@@ -282,12 +284,12 @@ body {
   letter-spacing: 0;
   text-transform: lowercase;
   opacity: 0.92;
-  background: var(--bg-soft);
+  background: var(--surface-1);
 }
 
 .titlebar-update-progress-wrap[data-phase='ready']:hover .titlebar-update-progress {
   color: var(--text);
-  background: var(--bg-muted);
+  background: var(--surface-2);
 }
 @keyframes titlebar-update-pulse {
   0%,
@@ -1128,7 +1130,7 @@ body {
   cursor: pointer;
 }
 .history-new-menu-item:hover {
-  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
+  background: var(--surface-2);
 }
 .history-new-menu-item[hidden] {
   display: none;
@@ -1178,7 +1180,7 @@ body {
   line-height: 1.35;
   color: var(--text-mute);
   border-radius: 6px;
-  background: var(--bg-subtle, rgba(127, 127, 127, 0.08));
+  background: var(--surface-1);
 }
 .history-list.history-list-stale .history-row {
   opacity: 0.92;
@@ -1771,6 +1773,44 @@ body.composer-resizing {
   flex: 1 1 0;
   min-width: 360px;
   padding: 0 0 var(--agent-pane-gutter) 0;
+}
+
+/*
+ * 面板「占满整块区域」（renderer-side-panel.js#applySidePanelMaximizedState 是唯一写入点）：
+ * 对话列（历史 + 思考区 + 输入框）整块让位，只剩面板内容；分隔条同时收起 —— 没有第二列可拖。
+ * 别在这里另写一份宽度：面板宽度仍由 flex 决定，`--artifacts-panel-width` 只管分栏态。
+ */
+.agent-main.side-panel-maximized .agent-chat-column,
+.agent-main.side-panel-maximized .pane-resizer-v {
+  display: none;
+}
+
+.agent-main.side-panel-maximized .artifacts-panel {
+  flex: 1 1 auto;
+  max-width: none;
+}
+
+/* 左侧那条 16px 的对话栏留白在占满态里没有意义：面板直接贴到窗口左边 */
+.agent-main.side-panel-maximized {
+  padding-left: 0;
+}
+
+/*
+ * 占满态里左边的「历史对话」侧栏也跟着让位（否则面板只铺到 `.content`，左边还压着 232px 会话列表）。
+ * 侧栏是 `.app` 网格的第一格，所以把列宽收到 0 就行 —— 但**别用 `display:none`**：
+ * 移出布局后 `.content` 会顶到第 1 列（现在 0 宽）上，整块主区跟着消失
+ * （实测：面板宽度变成 0，连轨道按钮都点不到）。这里只让它「收到 0 宽并被裁掉」。
+ * 判据仍只有 `#agent-main.side-panel-maximized` 一处，`:has` 只是把它读进 `.app` 网格。
+ */
+.app:has(#agent-main.side-panel-maximized) {
+  --sidebar-w: 0px;
+}
+
+.app:has(#agent-main.side-panel-maximized) .sidebar {
+  width: 0;
+  padding: 0;
+  overflow: hidden;
+  visibility: hidden;
 }
 
 .panel-toolbar {
@@ -2640,6 +2680,11 @@ body.composer-resizing {
 .msg-checkpoint-restore-sep {
   display: inline;
 }
+/* 摘要分隔符是 flex item：元素自身首尾的空格会被裁掉，间距只能用 margin 给。
+   子 Agent 卡片标题后面现在紧跟状态位，不加就会读成「勘察子 Agent #1·已完成」。 */
+.msg-thinking-round-summary-sep {
+  margin: 0 2px;
+}
 .msg-checkpoint-restore-btn {
   display: inline;
   margin: 0;
@@ -3201,7 +3246,7 @@ table.msg-md-table tbody tr:last-child td {
   margin: 0.65em 0;
   padding: 0.75em 0.85em;
   border-radius: 0;
-  background: var(--mermaid-bg, rgba(127, 127, 127, 0.08));
+  background: var(--surface-1);
   border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.18));
   overflow-x: auto;
 }
@@ -3231,7 +3276,7 @@ table.msg-md-table tbody tr:last-child td {
   padding: 0;
   border: none;
   border-radius: 0;
-  background: color-mix(in srgb, var(--panel-bg, rgba(255, 255, 255, 0.92)) 82%, transparent);
+  background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
   color: var(--text, #222);
   cursor: pointer;
   opacity: 0.78;
@@ -3242,7 +3287,7 @@ table.msg-md-table tbody tr:last-child td {
 .msg-mermaid-expand-btn:focus-visible {
   opacity: 1;
   outline: none;
-  background: color-mix(in srgb, var(--panel-bg, rgba(255, 255, 255, 0.96)) 92%, transparent);
+  background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
 }
 .msg-mermaid-has-expand:hover .msg-mermaid-expand-btn {
   opacity: 1;
@@ -4016,7 +4061,7 @@ table.msg-md-table tbody tr:last-child td {
  * 思考中：顶部固定悬浮条（仅钉住当前用户问题，不含思考过程）。
  * 定位上下文必须是 `.chat-viewport`（滚动视口），不是 `.agent-chat-column`：
  * 显隐判定量的是 `#chat-list` 的 rect，锚点和判定必须同一个上边界 ——
- * 绑到聊天列的话，列顶出现目标条（`.goal-bar`）时 top:10px 会压到目标条那一行。
+ * 绑到聊天列的话，锚点会是整列（列顶还有别的行时 top:10px 直接压上去）。
  */
 .thinking-live-float {
   position: absolute;
@@ -4518,7 +4563,7 @@ table.msg-md-table tbody tr:last-child td {
 }
 
 .composer-workspace-menu-item:hover {
-  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
+  background: var(--surface-2);
 }
 
 .composer-workspace-menu-item[hidden] {
@@ -4541,7 +4586,7 @@ table.msg-md-table tbody tr:last-child td {
   font-size: 11px;
   line-height: 1.45;
   padding: 6px 12px;
-  color: var(--muted, #888);
+  color: var(--text-mute);
 }
 
 .composer-workspace-menu-remote .composer-workspace-menu-item:hover {
@@ -4552,14 +4597,14 @@ table.msg-md-table tbody tr:last-child td {
   padding: 8px 12px 4px;
   font-size: 11px;
   line-height: 1.45;
-  color: var(--muted, #888);
+  color: var(--text-mute);
   border-top: 1px solid var(--border, rgba(127, 127, 127, 0.25));
   margin-top: 4px;
   word-break: break-word;
 }
 
 .composer-workspace-menu-status.is-ok {
-  color: var(--success, #16a34a);
+  color: var(--ok);
 }
 
 .composer-workspace-menu-status.is-err {
@@ -4881,7 +4926,7 @@ table.msg-md-table tbody tr:last-child td {
   font-size: 12px;
   padding: 6px 8px;
   margin-bottom: 8px;
-  background: var(--bg-subtle, rgba(127, 127, 127, 0.08));
+  background: var(--surface-1);
   border: 1px solid var(--border);
   word-break: break-all;
 }
@@ -4919,7 +4964,7 @@ input.ssh-remote-dir-path {
 
 .ssh-remote-dir-item:hover,
 .ssh-remote-dir-item.active {
-  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
+  background: var(--surface-2);
 }
 
 .ssh-remote-dir-item.is-dir .ssh-remote-dir-name {
@@ -4945,7 +4990,7 @@ input.ssh-remote-dir-path {
   padding: 1px 4px;
   margin-left: 4px;
   border: 1px solid var(--border);
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
   border-radius: 0;
   vertical-align: middle;
 }
@@ -5625,7 +5670,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 .worktree-apply-desc {
   margin: 0;
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--text-dim);
   line-height: 1.45;
 }
 
@@ -5635,7 +5680,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   justify-content: space-between;
   padding: 8px 18px;
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--text-dim);
 }
 
 .worktree-apply-select-all {
@@ -5683,7 +5728,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 .worktree-apply-meta {
   flex-shrink: 0;
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-dim);
 }
 
 .worktree-apply-warn {
@@ -5810,7 +5855,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 
 .settings-path-hint {
   font-size: 12px;
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
   word-break: break-all;
 }
 
@@ -6439,7 +6484,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   position: relative;
 }
 
-/*
+/**
  * 生命感：侧栏「生命」页 = 两段式（体征/趋势 → 记录区）。
  *
  * 高度分配就是这一块的全部设计：体征**按内容长**（不收缩），记录区吃掉余量。
@@ -6449,6 +6494,14 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
  *
  * 现在只有两种退化：面板够高 → 记录区把余量吃完（页面不滚）；面板太矮 → 整段滚动，
  * 而不是把某一块切成半行字（`flex-shrink: 0` + 外层 `overflow: auto` 就是干这个的）。
+ *
+ * **这一页的排版只有一组数**（2026-11-21 按用户要求统一）：正文 12px / 行高 1.55 /
+ * 同一种灰（`--text-dim`）/ 跟随界面字体（事件流不再是另一种字，也不再描边成卡片）。
+ * 文本节点（状态句 / 醒来写了 / 体征明细 / 图例 / 角标 / 记录区）一律继承这里，
+ * 别在各自的规则里再写一遍 `font-size` 与 `color` —— 那正是它以前东一块西一块的原因。
+ *
+ * 唯一的例外是**告警句**（`.channels-footnote.warn`，到线 / 快用完时由渲染层加）：
+ * 颜色是 `--danger`，那是语义不是排版；字号与行高仍走这一组。
  */
 .alive-pane-body {
   flex: 1;
@@ -6458,6 +6511,29 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   gap: 8px;
   padding: 10px 12px 12px;
   overflow: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+/* `.channels-footnote` 自己写死了 12px / 1.5 / `--text-mute`（设置页与频道页共用那条），
+   在这里显式改成这一页那一组 —— 继承盖不过显式声明，所以必须点名列出来。
+   曲线容器与图例同理（它们在设置页也用，那边保持自己的口径）。 */
+.alive-pane-body .channels-footnote,
+.alive-pane-body .alive-trend,
+.alive-pane-body .alive-trend-legend {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+/* 告警色在这一页照样生效（上面那条统一色不能把它盖掉） */
+.alive-pane-body .channels-footnote.warn {
+  color: var(--danger);
+}
+
+.alive-pane-body .channels-footnote.ok {
+  color: var(--ok);
 }
 
 .alive-pane-vitals {
@@ -6470,6 +6546,34 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 /* 空的行不占位（`alive-pane-session` 之类平时是空的，留着 gap 会白吐一截） */
 .alive-pane-vitals > :empty {
   display: none;
+}
+
+/**
+ * 它上一次醒来写下的正文（`state.lastWakeText`，压成一行）。
+ *
+ * 唤醒轮是 `internal: true`，正文只落它自己的会话库、不推气泡区，所以这一块是面板里
+ * 唯一能直接读到「它在你不看时写了什么」的地方。
+ *
+ * **不截断、不加边框**（2026-11-21 按用户要求）：一段话被裁到半行反而两边都不占
+ * —— 既读不完整也不省地方。整段换行显示（字数上限已是 `aliveWakeTextMaxChars`），
+ * 面板整体本来就能滚；只是当一段普通的灰字记录，别做成告警卡片。
+ * 字号 / 行高 / 颜色跟随 `.alive-pane-body` 那一组，这里不再重复。
+ */
+.alive-pane-wake {
+  margin: 0;
+  word-break: break-word;
+  /* 面板里其它文字是 user-select: none（body 全局），这一条要能拖选复制 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.alive-pane-wake.is-clickable {
+  cursor: pointer;
+}
+
+/* 可点时给一点点反馈（只是变亮，不改字号/边框） */
+.alive-pane-wake.is-clickable:hover {
+  color: var(--text);
 }
 
 .alive-pane-section {
@@ -6485,69 +6589,116 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   min-height: 60px;
 }
 
-.alive-pane-tabs {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  border-bottom: 1px solid var(--border);
+/* 「事件 / 抽屉」：标题栏里用「/」分隔的纯文字切换（2026-11-21 按用户要求：
+   去掉圆角灰底，改成与标题连读的一句「生命 / 事件 / 抽屉」）。
+   结构仍复用 `.pane-switch` / `.pane-switch-btn`（tablist 语义、`.active` 的切换都在那套里）。
+ *
+ * **选择器必须带面板前缀**：`.pane-switch` 的 `margin-left: 6px` / `gap: 2px` 写在文件更后面、
+ * 权重又一样 —— 只写 `.alive-pane-switch {...}` 会被它盖掉，结果就是「生命」后面多出一道 6px
+ * 的缝、斜杠左右不等距（2026-11-21 实测的"不整齐"就是这个）。
+ *
+ * 2026-11-21 起四个面板共用：生命（事件/抽屉）、源码管理（更改/历史）、轨迹（子代理/轨迹图）、
+ * Bot（Agent/房间）都改成这套「/」分栏纯文字切换，规则合一份（选择器列表并列，别再各写一份）。
+ */
+.side-panel-pane[data-side-pane='alive'] .side-panel-pane-head-main,
+.side-panel-pane[data-side-pane='scm'] .side-panel-pane-head-main,
+.side-panel-pane[data-side-pane='subagents'] .side-panel-pane-head-main,
+.side-panel-pane[data-side-pane='bot'] .side-panel-pane-head-main {
+  /* 斜杠自己带左右留白：标题与第一个标签之间不要再来一道 8px 的缝 */
+  gap: 0;
+  /* 基线对齐而不是盒子居中：标题(600)与标签(400)字重不同、行高也不同（标题默认、
+     标签 1.4），center 会把两者的盒子居中、文字基线错开 —— 实测就是「不太齐」。
+     baseline 让「生命 / 事件 / 抽屉」六个字落在同一条基线上。 */
+  align-items: baseline;
 }
 
-.alive-pane-tab {
-  margin: 0 0 -1px;
-  padding: 3px 9px 4px;
-  border: none;
-  border-bottom: 2px solid transparent;
+.side-panel-pane[data-side-pane='alive'] .side-panel-pane-title,
+.side-panel-pane[data-side-pane='bot'] .side-panel-pane-title,
+.side-panel-pane[data-side-pane='scm'] .side-panel-pane-title,
+.side-panel-pane[data-side-pane='subagents'] .side-panel-pane-title {
+  /* 与标签同一行高（1.4），基线对齐时行高不一致会把盒子拉高 */
+  line-height: 1.4;
+}
+
+.side-panel-pane[data-side-pane='alive'] .pane-switch,
+.side-panel-pane[data-side-pane='bot'] .pane-switch,
+.side-panel-pane[data-side-pane='scm'] .pane-switch,
+.side-panel-pane[data-side-pane='subagents'] .pane-switch {
+  margin-left: 0;
+  gap: 0;
+}
+
+.side-panel-pane[data-side-pane='alive'] .pane-switch-btn,
+.side-panel-pane[data-side-pane='bot'] .pane-switch-btn,
+.side-panel-pane[data-side-pane='scm'] .pane-switch-btn,
+.side-panel-pane[data-side-pane='subagents'] .pane-switch-btn {
+  padding: 0;
+  border-radius: 0;
   background: transparent;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
+  /* 与标题（13px / 600）同一行读，所以同字号；靠字重与亮度区分选中 */
+  font-size: 13px;
+  font-weight: 400;
   line-height: 1.4;
   color: var(--text-mute);
-  cursor: pointer;
-  transition: color var(--motion-fast) var(--motion-ease-standard),
-    border-color var(--motion-fast) var(--motion-ease-standard);
 }
 
-.alive-pane-tab:hover {
+/* 每个标签前一个斜杠：第一个正好落在标题后面，所以标题后面也有了分隔 */
+.side-panel-pane[data-side-pane='alive'] .pane-switch-btn::before,
+.side-panel-pane[data-side-pane='bot'] .pane-switch-btn::before,
+.side-panel-pane[data-side-pane='scm'] .pane-switch-btn::before,
+.side-panel-pane[data-side-pane='subagents'] .pane-switch-btn::before {
+  content: '/';
+  margin: 0 7px;
+  color: var(--text-mute);
+  opacity: 0.7;
+  font-weight: 400;
+}
+
+.side-panel-pane[data-side-pane='alive'] .pane-switch-btn:hover,
+.side-panel-pane[data-side-pane='bot'] .pane-switch-btn:hover,
+.side-panel-pane[data-side-pane='scm'] .pane-switch-btn:hover,
+.side-panel-pane[data-side-pane='subagents'] .pane-switch-btn:hover {
+  background: transparent;
   color: var(--text-dim);
 }
 
-.alive-pane-tab.active {
+.side-panel-pane[data-side-pane='alive'] .pane-switch-btn.active,
+.side-panel-pane[data-side-pane='bot'] .pane-switch-btn.active,
+.side-panel-pane[data-side-pane='scm'] .pane-switch-btn.active,
+.side-panel-pane[data-side-pane='subagents'] .pane-switch-btn.active {
+  background: transparent;
   color: var(--text);
-  /* 不用 `--accent`（亮色主题下它本身就是浅灰，下划线等于看不见）：选中就是"字变亮 + 一道实线" */
-  border-bottom-color: var(--text-dim);
+  font-weight: 600;
 }
 
+/* 记录区那一行：标签挪去标题栏后，这里只剩角标（「最近 40 / 共 60 条 · 最新 19:21」），靠右。
+   角标与正文同一字号、同一颜色（以前是 11px 加粗 + 更暗的灰，跟正文像两套东西）。 */
 .alive-pane-section-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
   flex-shrink: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-dim);
+  font-weight: 400;
 }
 
 .alive-pane-section-meta {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--text-mute);
   white-space: nowrap;
 }
 
+/* 事件流 / 抽屉的内容区：**无边框**（2026-11-21 按用户要求），左边缘与上面的正文对齐；
+   仍然可拖选、可复制，内容多了自己滚。 */
 .alive-pane-list {
   flex: 1 1 auto;
   min-height: 0;
   margin: 0;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
+  padding: 0;
+  border: none;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-mute);
+  /* `pre` 默认是等宽字：这一页统一跟随界面字体 */
+  font-family: inherit;
   /* 事件流 / 抽屉是要抄走的东西：`body` 是窗口级 `user-select: none`（见 199 行），
      这里必须显式开口，否则拖选根本起不来。设置页的「日志」两块同一份文字，
      所以两条规则写在同一个地方、跟着 `user-select` 的口径走。 */
@@ -6916,13 +7067,13 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
 }
 
 .worktrees-run-summary {
   margin: 0 0 8px;
   font-size: 13px;
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
 }
 
 .worktrees-list-hint {
@@ -6946,7 +7097,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   gap: 12px;
   padding: 10px 12px;
   border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.28));
-  background: var(--panel-elevated, rgba(127, 127, 127, 0.06));
+  background: var(--surface-1);
 }
 
 .worktrees-run-title {
@@ -6961,19 +7112,19 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   padding: 1px 6px;
   font-size: 11px;
   border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.35));
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
 }
 
 .worktrees-run-meta {
   margin-top: 4px;
   font-size: 12px;
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
 }
 
 .worktrees-empty {
   padding: 16px 12px;
   font-size: 13px;
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
   border: 1px dashed var(--border-subtle, rgba(127, 127, 127, 0.28));
 }
 
@@ -6989,7 +7140,7 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
 
 .settings-hint {
   margin: 0 0 12px;
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -7191,9 +7342,9 @@ body:has(.worktree-apply-overlay:not([hidden])) #artifacts-pane-resizer {
   padding: 8px 12px;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--warn, #b45309);
+  color: var(--danger);
   border: 1px solid currentColor;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: 6px;
   background: rgba(180, 83, 9, 0.08);
 }
 .settings-warning[hidden] {
@@ -8770,7 +8921,7 @@ body.pane-resizing .artifacts-file-list {
   border: none;
   border-radius: 0;
   background: transparent;
-  color: var(--text-muted, #888);
+  color: var(--text-mute);
   cursor: pointer;
 }
 
@@ -8779,18 +8930,38 @@ body.pane-resizing .artifacts-file-list {
   display: none;
 }
 
+/*
+ * 轨道第一格「占满整块区域」：外观就是一颗普通的面板区图标 —— 尺寸/圆角/悬停全继承
+ * `.side-panel-rail-btn`（单一来源，别在这里再写一份），这里只管两件事：
+ *   · 图标随状态翻面（左箭头 = 现在可以向左铺开；右箭头 = 还原分栏）；
+ *   · 占满态把图标提亮一档（不加底色：它旁边就是页签的高亮，两块高亮会像「两个当前页」）。
+ * 状态写入点只有 renderer-side-panel.js#applySidePanelMaximizedState 一处。
+ */
+.side-panel-max-btn.is-maximized {
+  color: var(--text);
+}
+
+.side-panel-max-btn .side-panel-max-icon-restore,
+.side-panel-max-btn.is-maximized .side-panel-max-icon-expand {
+  display: none;
+}
+
+.side-panel-max-btn.is-maximized .side-panel-max-icon-restore {
+  display: block;
+}
+
 .side-panel-rail-btn:hover {
-  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
+  background: var(--surface-2);
   color: var(--text);
 }
 
 .side-panel-rail-btn.active {
-  background: var(--bg-hover, rgba(127, 127, 127, 0.16));
+  background: var(--surface-2);
   color: var(--text);
 }
 
 .side-panel-rail-btn.is-busy {
-  color: var(--text-muted, #9a9aa3);
+  color: var(--text-mute);
 }
 
 .side-panel-rail-btn.is-busy svg {
@@ -8913,8 +9084,9 @@ body.pane-resizing .artifacts-file-list {
 }
 
 .side-panel-pane-meta {
-  font-size: 11px;
-  color: var(--text-muted, #888);
+  /* 字号三档制（2026-11-21）：13 正文/标题、12 辅助、10 徽标。meta 是辅助层 */
+  font-size: 12px;
+  color: var(--text-mute);
   /* 侧栏只有 350px：meta 一行装不下就省略，别把标题和按钮挤走 */
   min-width: 0;
   overflow: hidden;
@@ -9112,7 +9284,7 @@ body.pane-resizing .artifacts-file-list {
 }
 
 .ssh-panel-conn-on {
-  color: var(--success, #16a34a);
+  color: var(--ok);
 }
 
 .ssh-panel-conn-off {
@@ -9120,7 +9292,7 @@ body.pane-resizing .artifacts-file-list {
 }
 
 .ssh-panel-status.is-ok {
-  color: var(--success, #16a34a);
+  color: var(--ok);
 }
 
 .ssh-panel-status.is-err {
@@ -9138,7 +9310,7 @@ body.pane-resizing .artifacts-file-list {
   font-family: var(--font-mono);
   font-size: 10.5px;
   line-height: 1.5;
-  color: var(--text-muted, #9a9aa3);
+  color: var(--text-mute);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   overflow: hidden;
@@ -9520,9 +9692,11 @@ body.pane-resizing .artifacts-file-list {
   border-color: var(--text-mute);
 }
 
-/* --- 源码管理：更改 / 历史 双模式 --- */
+/* --- 面板头里的横向小切换（源码管理：更改 / 历史；轨迹页：子代理 / 轨迹图） ---
+ * 样式只有这一份：两个面板共用同一套类，别再各写一套按钮皮肤。
+ * 行为归属仍各自独立（`data-scm-mode-btn` / `data-trace-mode-btn`），类名只说外观。 */
 
-.scm-mode-switch {
+.pane-switch {
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -9530,7 +9704,7 @@ body.pane-resizing .artifacts-file-list {
   margin-left: 6px;
 }
 
-.scm-mode-btn {
+.pane-switch-btn {
   appearance: none;
   background: transparent;
   border: none;
@@ -9542,11 +9716,11 @@ body.pane-resizing .artifacts-file-list {
   cursor: pointer;
 }
 
-.scm-mode-btn:hover {
+.pane-switch-btn:hover {
   color: var(--text);
 }
 
-.scm-mode-btn.active {
+.pane-switch-btn.active {
   color: var(--text);
   background: rgba(128, 128, 128, 0.14);
 }
@@ -9624,7 +9798,7 @@ body.pane-resizing .artifacts-file-list {
 
 .scm-history-subject {
   font-size: 12px;
-  color: var(--fg);
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -9687,7 +9861,7 @@ body.pane-resizing .artifacts-file-list {
   padding: 3px 12px 3px 26px;
   font-size: 12px;
   cursor: pointer;
-  color: var(--fg);
+  color: var(--text);
   user-select: none;
   min-width: 0;
 }
@@ -9861,7 +10035,7 @@ body.pane-resizing .artifacts-file-list {
 .changes-plan-preview-instruction {
   margin-top: 8px;
   padding: 10px 12px;
-  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.1));
+  border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 12px;
   line-height: 1.55;
@@ -9879,7 +10053,7 @@ body.pane-resizing .artifacts-file-list {
   gap: 8px 12px;
   margin-bottom: 8px;
   padding: 8px 10px;
-  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.1));
+  border: 1px solid var(--border);
   background: transparent;
   font-size: 12px;
   line-height: 1.4;
@@ -10252,7 +10426,7 @@ body.pane-resizing .artifacts-file-list {
 .changes-view-meta {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-dim);
   word-break: break-all;
   margin-bottom: 8px;
 }
@@ -10524,7 +10698,7 @@ body.pane-resizing .artifacts-file-list {
 .artifacts-problems {
   flex: 0 0 auto;
   border-top: 1px solid var(--border);
-  background: var(--bg-subtle, rgba(127, 127, 127, 0.04));
+  background: var(--surface-1);
   max-height: 160px;
   display: flex;
   flex-direction: column;
@@ -10540,13 +10714,13 @@ body.pane-resizing .artifacts-file-list {
   gap: 8px;
   padding: 4px 10px;
   font-size: 11px;
-  color: var(--fg-muted);
+  color: var(--text-dim);
   border-bottom: 1px solid var(--border);
 }
 
 .artifacts-problems-title {
   font-weight: 600;
-  color: var(--fg);
+  color: var(--text);
 }
 
 .artifacts-problems-count {
@@ -10561,7 +10735,7 @@ body.pane-resizing .artifacts-file-list {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 10px;
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .artifacts-problems-list {
@@ -10572,7 +10746,7 @@ body.pane-resizing .artifacts-file-list {
 .artifacts-problems-empty {
   padding: 6px 10px;
   font-size: 11px;
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 
 .artifacts-problems-item {
@@ -10585,14 +10759,14 @@ body.pane-resizing .artifacts-file-list {
   border: 0;
   border-bottom: 1px solid var(--border);
   background: transparent;
-  color: var(--fg);
+  color: var(--text);
   padding: 4px 10px;
   font-size: 11px;
   cursor: pointer;
 }
 
 .artifacts-problems-item:hover {
-  background: var(--bg-subtle, rgba(127, 127, 127, 0.08));
+  background: var(--surface-1);
 }
 
 .artifacts-problems-sev {
@@ -10609,7 +10783,7 @@ body.pane-resizing .artifacts-file-list {
 
 .artifacts-problems-loc {
   font-family: var(--font-mono);
-  color: var(--fg-muted);
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -10736,7 +10910,7 @@ audio.artifacts-media-preview-el {
 
 .artifacts-editor-path {
   font-size: 11px;
-  color: var(--fg-muted);
+  color: var(--text-dim);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -10758,7 +10932,7 @@ audio.artifacts-media-preview-el {
   font-size: 12px;
   line-height: 1.5;
   background: transparent;
-  color: var(--fg);
+  color: var(--text);
 }
 
 .artifacts-editor-textarea:focus,
@@ -10804,7 +10978,7 @@ audio.artifacts-media-preview-el {
 .artifacts-editor-note {
   padding: 6px 12px;
   font-size: 11px;
-  color: var(--fg-muted);
+  color: var(--text-dim);
   border-bottom: 1px solid var(--border);
 }
 
@@ -10820,7 +10994,7 @@ audio.artifacts-media-preview-el {
 
 /* 「路径翻译」提示条：不是旁注，而是「打开的不是你给的那个路径」的风险提示 */
 .artifacts-editor-translation-note {
-  color: var(--fg);
+  color: var(--text);
   border-left: 3px solid var(--danger);
   background: var(--bg-elev);
 }
@@ -10852,7 +11026,7 @@ audio.artifacts-media-preview-el {
   padding: 7px 10px;
   border: 1px solid var(--border);
   background: var(--bg-elev);
-  color: var(--fg);
+  color: var(--text);
   font: inherit;
   cursor: pointer;
 }
@@ -10870,7 +11044,7 @@ audio.artifacts-media-preview-el {
 
 .artifacts-path-candidate-full {
   font-size: 11px;
-  color: var(--fg-muted);
+  color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -10883,7 +11057,7 @@ audio.artifacts-media-preview-el {
   padding: 5px 12px;
   font-size: 12px;
   cursor: pointer;
-  color: var(--fg);
+  color: var(--text);
   user-select: none;
 }
 
@@ -10906,7 +11080,7 @@ audio.artifacts-media-preview-el {
 }
 
 .artifacts-file-item-up {
-  color: var(--fg-muted);
+  color: var(--text-dim);
   border-bottom: 1px solid var(--border);
   margin-bottom: 2px;
 }
@@ -11032,21 +11206,11 @@ audio.artifacts-media-preview-el {
   0% { opacity: 0.55; transform: scale(0.96); }
   100% { opacity: 1; transform: scale(1); }
 }
-.artifacts-empty { color: var(--fg-muted); font-size: 12px; padding: 20px; text-align: center; user-select: none; }
+.artifacts-empty { color: var(--text-dim); font-size: 12px; padding: 20px; text-align: center; user-select: none; }
 
-.browser-panel {
-  flex: 0 0 var(--browser-panel-width, 48%);
-  min-width: 320px;
-  max-width: calc(100% - 360px - 5px);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-left: 1px solid var(--border);
-  background: var(--bg-elev);
-}
-.browser-panel[hidden] {
-  display: none !important;
-}
+/* （2026-11-21 删）`.browser-panel` / `.browser-panel[hidden]`：容器类在 HTML / JS / bundle
+   里零引用（活着的只有下面的 `.browser-panel-head`），整条是死 CSS；
+   它也是最后一个未定义变量 `--browser-panel-width` 的唯一使用点。 */
 .browser-panel-head {
   display: flex;
   align-items: center;
@@ -11354,7 +11518,7 @@ audio.artifacts-media-preview-el {
   cursor: pointer;
 }
 .products-item-path.is-clickable:hover {
-  color: var(--fg);
+  color: var(--text);
   text-decoration: underline;
 }
 .products-item-type {
@@ -11384,7 +11548,7 @@ audio.artifacts-media-preview-el {
 }
 .products-empty-title {
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 .products-empty-hint {
   margin-top: 6px;
@@ -11446,7 +11610,7 @@ audio.artifacts-media-preview-el {
 .goal-objective {
   font-size: 13px;
   line-height: 1.5;
-  color: var(--fg);
+  color: var(--text);
   word-break: break-word;
 }
 .goal-progress-line {
@@ -11454,7 +11618,7 @@ audio.artifacts-media-preview-el {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--text-mute);
 }
 .goal-progress-bar {
   font-family: var(--font-mono, ui-monospace, monospace);
@@ -11464,12 +11628,12 @@ audio.artifacts-media-preview-el {
 .goal-panel-empty {
   margin: 0;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--text-mute);
 }
 .goal-panel-note {
   margin: 0;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--text-mute);
 }
 .goal-section {
   display: flex;
@@ -11479,10 +11643,13 @@ audio.artifacts-media-preview-el {
   padding-top: 10px;
 }
 .goal-section-title {
-  font-size: 11px;
+  /* 字号三档制（2026-11-21）：13 正文/标题、12 辅助、10 徽标。小节标题是辅助层的加粗 */
+  font-size: 12px;
+  font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: none;
-  color: var(--fg-muted);
+  /* 小节标题与整块次级内容统一用 --text-mute（用户反馈 --text-dim 偏深） */
+  color: var(--text-mute);
 }
 .goal-todo-list,
 .goal-check-list,
@@ -11503,13 +11670,14 @@ audio.artifacts-media-preview-el {
   word-break: break-word;
 }
 .goal-todo.is-done {
-  color: var(--fg-muted);
+  color: var(--text-dim);
   text-decoration: line-through;
 }
 .goal-check-list code,
 .goal-fact-cmd {
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11.5px;
+  /* 等宽命令行：跟随辅助层 12px（原 11.5px 的碎档收掉） */
+  font-size: 12px;
   word-break: break-all;
 }
 .goal-fact {
@@ -11518,10 +11686,10 @@ audio.artifacts-media-preview-el {
   gap: 6px;
   align-items: baseline;
   line-height: 1.45;
-  color: var(--fg-muted);
+  color: var(--text-mute);
 }
 .goal-fact-mark {
-  font-size: 11px;
+  font-size: 10px;
   padding: 0 4px;
   border: 1px solid currentColor;
 }
@@ -11532,7 +11700,7 @@ audio.artifacts-media-preview-el {
   color: #d29922;
 }
 .goal-fact-round {
-  font-size: 11px;
+  font-size: 10px;
   opacity: 0.75;
 }
 /* 输出尾部：唯一「剩余高度归它」的段 —— 短输出不再挤在 180px 的小灰盒里、
@@ -11551,8 +11719,10 @@ audio.artifacts-media-preview-el {
   padding: 0 0 0 10px;
   border-left: 2px solid var(--border);
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
+  /* 输出尾部是正文，跟随基准 13px（等宽）；颜色降一档 --text-dim（用户反馈偏深） */
+  font-size: 13px;
   line-height: 1.45;
+  color: var(--text-dim);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -11563,199 +11733,166 @@ audio.artifacts-media-preview-el {
   gap: 6px;
   align-items: baseline;
   line-height: 1.45;
-  color: var(--fg-muted);
+  color: var(--text-mute);
 }
 .goal-check-mark {
-  font-size: 11px;
+  font-size: 10px;
 }
 .goal-check-meta {
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.75;
 }
 .goal-check.is-ok code {
-  color: var(--fg);
+  color: var(--text-dim);
 }
 
-/*
- * 目标条：贴在气泡区上方的一行（目标 · 第几轮 · 最近一条事实）。
- * 放在 `.agent-chat-column` 里而不是 `.chat-viewport` 里：视口内是滚动容器 +
- * absolute 的 `.chat-nav` 刻度，塞进去要么随内容滚走、要么压住刻度。
- */
-/**
- * 「它说…」条：生命感主动出声时，那句话在主窗口留一行。
- * 与目标条同一个位置（`.agent-chat-column` 顶部），因为它同样是「这一栏的状态」，不是消息。
- * 只展示：不进会话账本、不进模型上下文。
- */
-.alive-speech-bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 10px 5px 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  font-size: 12px;
-  color: var(--fg);
-}
-/* 带 display:flex 的元素必须自己声明 [hidden]（本仓没有全局兜底规则） */
-.alive-speech-bar[hidden] {
-  display: none;
-}
-.alive-speech-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.alive-speech-actions {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.alive-speech-action {
-  height: 20px;
-  padding: 0 6px;
-  font-size: 11px;
-  color: var(--fg-muted);
-}
-
-.goal-bar {
-  flex: 0 0 auto;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
-  font-size: 12px;
-  color: var(--fg-muted);
-}
-/* 面板与展开区都带 display，必须自己声明 [hidden]（本仓没有全局兜底规则） */
-.goal-bar[hidden],
-.goal-bar-facts[hidden] {
-  display: none;
-}
-.goal-bar-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 4px 8px;
-}
-.goal-bar-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-/* 整行都可点展开，但只有悬停时给一点底色，免得看起来像纯文字 */
-.goal-bar-toggle:hover .goal-bar-objective {
-  color: var(--fg);
-}
-.goal-bar-toggle:hover .goal-bar-caret {
-  opacity: 1;
-}
-.goal-bar-mark {
-  flex: 0 0 auto;
-  color: var(--accent);
-}
-.goal-bar-objective {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg);
-}
-.goal-bar-round {
-  flex: 0 0 auto;
-  font-size: 11px;
-  opacity: 0.8;
-}
-/* 轮次与「最近一条事实」之间要有可见分隔：两串短文字挨在一起会读成一句话 */
-.goal-bar-round::after {
-  content: '·';
-  margin: 0 6px;
-  opacity: 0.5;
-}
-.goal-bar-fact {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
-  opacity: 0.8;
-}
-.goal-bar-fact[data-state='ok'] {
-  color: #3fb950;
-}
-.goal-bar-fact[data-state='fail'] {
-  color: #d29922;
-}
-.goal-bar-caret {
-  flex: 0 0 auto;
-  margin-left: 2px;
-  font-size: 11px;
-  opacity: 0.75;
-}
-.goal-bar-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-}
-.goal-bar-action {
-  font-size: 11px;
-  padding: 1px 6px;
-}
-.goal-bar[data-state='complete'] .goal-bar-mark {
-  color: #3fb950;
-}
-.goal-bar[data-state='paused'] .goal-bar-mark,
-.goal-bar[data-state='stalled'] .goal-bar-mark,
-.goal-bar[data-state='blocked'] .goal-bar-mark {
-  color: #d29922;
-}
-.goal-bar-facts {
-  max-height: 40vh;
-  overflow: auto;
-  padding: 6px 10px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
-}
-.goal-bar-facts .goal-section:first-child {
-  border-top: 0;
-  padding-top: 0;
-}
-.subagent-panel-body {
+/* ── 右侧面板「轨迹」页：上 = 本次运行的全部子代理（标签 + 状态灯），下 = 选中那个的全文 ──
+   4 个并发时「一列折叠卡片」既要点开、又要滚很久，所以拆成两块：标签区最多占 38% 高度
+   （装不下就在内部滚），正文区吃满剩下的高度（自己滚、贴底跟随）。
+   页头的「子代理 / 轨迹图」子标签只切两块内容的可见性（见 renderer-subagent-panel.js#setTracePaneMode），
+   所以子代理这块自己得是「吃满整页的列」——它是 .side-panel-pane 的中间层，flex 不会自己传下去。 */
+#trace-subagents-wrap {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 8px 10px 14px;
+  display: flex;
+  flex-direction: column;
+}
+/* [hidden] 对 display:flex 无效，与 .subagent-panel-tabs 同一处理 */
+#trace-subagents-wrap[hidden],
+#trace-graph-wrap[hidden] {
+  display: none;
+}
+/* 「轨迹图」还没设计：先给一句占位说明，别做假图表 */
+.trace-graph-placeholder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 28px 16px;
+  text-align: center;
+  user-select: none;
+}
+
+/* ── 轨迹图（45° 电路板：**一根线 + 节点**）
+   主线是 currentColor（跟随主题黑白），子 Agent 支路各一个色相；
+   不加粗块、不加框 —— 那看起来像管道。失败用节点上的 ✕，不用红色。 */
+.trace-graph-placeholder:has(.trace-graph:not(:empty)) {
+  justify-content: flex-start;
+  text-align: left;
+  padding: 12px 12px 16px;
+}
+
+.trace-graph {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: 100%;
+  font-size: 11px;
+  color: var(--text);
 }
-.subagent-panel-card {
+
+.trace-graph-summary {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.trace-graph-svg {
+  display: block;
+  width: 100%;
+  overflow: visible;
+  font-family: inherit;
+  /* 滚轮缩放 / 拖拽平移：交给 renderer-trace-graph.js 处理，禁掉浏览器默认手势与滚动链 */
+  cursor: grab;
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+
+.trace-graph.is-panning .trace-graph-svg {
+  cursor: grabbing;
+}
+
+.trace-graph-hint {
+  color: var(--text-dim);
+  font-size: 10px;
+  opacity: 0.75;
+  user-select: none;
+}
+
+/* 节点 hover：只加一圈淡淡的描边，不动位置、不放大（避免抖动） */
+.trace-graph-node.is-clickable {
+  cursor: pointer;
+}
+
+.trace-graph-node.is-clickable:hover circle {
+  stroke: currentColor;
+  stroke-width: 6;
+  stroke-opacity: 0.18;
+}
+
+/* 「这一路还在跑」的呼吸点 */
+.trace-graph-lane-live {
+  animation: trace-graph-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes trace-graph-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.trace-graph-empty {
+  color: var(--text-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trace-graph-lane-live { animation: none; }
+}
+
+.subagent-panel-tabs {
+  flex: 0 0 auto;
+  max-height: 38%;
+  overflow: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.subagent-panel-tabs[hidden] {
+  display: none;
+}
+.subagent-panel-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* 一行放两个：4 个并发时是两行标签，别让一条长标题独占一整行（全名在下方标题行里） */
+  max-width: calc(50% - 4px);
+  min-width: 0;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  background: transparent;
   border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  /* 直角：本页延续项目卡片的直角风格（圆角标签在这个紧凑面板里会显脏） */
   border-radius: 0;
-  padding: 0 8px;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--motion-ease-standard),
+    border-color var(--motion-fast) var(--motion-ease-standard),
+    background var(--motion-fast) var(--motion-ease-standard);
 }
-.subagent-panel-card.is-running {
-  border-color: var(--border);
+.subagent-panel-tab:hover {
+  color: var(--text);
 }
-.subagent-panel-card.is-highlight {
+.subagent-panel-tab.is-active {
+  color: var(--text);
   border-color: color-mix(in srgb, var(--text) 32%, var(--border));
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.subagent-panel-tab.is-highlight {
   animation: subagent-panel-flash 1.2s ease-out;
 }
 @keyframes subagent-panel-flash {
@@ -11766,65 +11903,103 @@ audio.artifacts-media-preview-el {
     background: transparent;
   }
 }
-.subagent-panel-card-head {
-  cursor: pointer;
-  list-style: none;
-  padding: 6px 0;
+.subagent-panel-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 状态灯：运行中 = 脉冲蓝（还在动），已完成 = 常亮绿。灯是标签行里唯一的状态信号，
+   所以脉冲的地板不能压太低 —— 压到几乎看不见时会读成「灯灭了 / 这个挂了」。 */
+.subagent-panel-tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok, #16a34a);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.14);
+}
+.subagent-panel-tab-dot[data-state='running'] {
+  background: var(--alive-phase-alert, #4c8dff);
+  box-shadow: 0 0 0 3px rgba(76, 141, 255, 0.2);
+  animation: subagent-panel-tab-pulse 1.2s ease-in-out infinite;
+}
+@keyframes subagent-panel-tab-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .subagent-panel-tab-dot[data-state='running'] {
+    animation: none;
+    opacity: 1;
+  }
+}
+.subagent-panel-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.subagent-panel-detail[hidden] {
+  display: none;
+}
+.subagent-panel-detail-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: 6px;
+  padding: 8px 10px 6px;
   font-size: 12px;
   line-height: 1.4;
-  color: var(--text-dim);
-  user-select: none;
 }
-.subagent-panel-card-head::-webkit-details-marker {
-  display: none;
-}
-.subagent-panel-card-head::before {
-  content: '▸';
-  display: inline-block;
-  margin-right: 0.1em;
-  opacity: 0.55;
-  transform-origin: center;
-  transition: transform var(--motion-base) var(--motion-ease-standard);
-}
-.subagent-panel-card[open] > .subagent-panel-card-head::before {
-  transform: rotate(90deg);
-}
-.subagent-panel-card-title {
-  flex: 0 0 auto;
+.subagent-panel-detail-title {
+  min-width: 0;
   font-weight: 600;
   color: var(--text);
 }
-.subagent-panel-card-badge {
+.subagent-panel-detail-badge {
   flex: 0 0 auto;
   font-size: 10px;
   line-height: 1.5;
   color: var(--text-mute);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 0;
   padding: 0 4px;
 }
-.subagent-panel-card-status {
+.subagent-panel-detail-status {
   flex: 1 1 auto;
   min-width: 0;
   text-align: right;
   font-size: 11px;
   color: var(--text-mute);
 }
-.subagent-panel-card-body {
-  padding: 2px 0 8px;
+.subagent-panel-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  /* 正文滚到头时别把滚轮/手势串给外面的面板或聊天区 */
+  overscroll-behavior: contain;
+  padding: 0 10px 14px;
 }
 .subagent-panel-empty {
   padding: 28px 16px;
   text-align: center;
   user-select: none;
 }
+.subagent-panel-empty[hidden] {
+  display: none;
+}
 .subagent-panel-empty-title {
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--text-dim);
 }
 .subagent-panel-empty-hint {
   margin-top: 6px;
@@ -11848,14 +12023,14 @@ audio.artifacts-media-preview-el {
 .sandbox-approval-host.show { display: flex; }
 
 .sandbox-approval-card {
-  background: var(--panel-bg, #1f2430);
-  border: 1px solid var(--border-color, #3a4050);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-subtle);
   border-left: 3px solid var(--accent, #4c8dff);
   border-radius: 10px;
   padding: 12px 14px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
   font-size: 13px;
-  color: var(--text-primary, #e6e8ee);
+  color: var(--text);
 }
 
 .sandbox-approval-title { font-weight: 600; margin-bottom: 6px; }
@@ -11881,7 +12056,7 @@ audio.artifacts-media-preview-el {
 .sandbox-approval-btn {
   padding: 5px 12px;
   border-radius: 6px;
-  border: 1px solid var(--border-color, #3a4050);
+  border: 1px solid var(--border-subtle);
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -11966,15 +12141,20 @@ audio.artifacts-media-preview-el {
 /* 次要动作（撤销）不与主动作抢注意力，但仍可读 */
 .peer-sub-btn { opacity: 0.6; }
 .peer-sub-btn:hover { opacity: 1; }
-.peer-name { font-size: 13px; font-weight: 600; }
-.peer-addr { font-size: 11px; color: var(--text-dim); }
-.peer-badge { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim); }
+.peer-name {
+  font-size: 13px;
+  font-weight: 600;
+  /* 列表行名降一档（用户反馈正文黑偏深）：与徽标/地址同属次级信息 */
+  color: var(--text-dim);
+}
+.peer-addr { font-size: 12px; color: var(--text-dim); }
+.peer-badge { font-size: 10px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim); }
 .peer-badge-same { border-color: var(--accent, #4c8dff); color: var(--accent, #4c8dff); }
 .peer-badge-pending { border-color: #c79a3a; color: #c79a3a; }
 .peer-badge-denied,
 .peer-badge-offline { border-color: var(--text-mute); color: var(--text-mute); }
 .peer-badge-unknown { border-style: dashed; }
-.peer-claim { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim); }
+.peer-claim { font-size: 10px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim); }
 .peer-empty { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
 
 /* ---- Bot 侧栏页签：上下两层（上 = 已允许互通的内网 agent，下 = 房间）----
@@ -11984,17 +12164,23 @@ audio.artifacts-media-preview-el {
   flex-direction: column;
   min-height: 0;
 }
-/* 上层只占内容高度（最多 30%）：peer 少的时候不该白占半屏，房间区要拿剩下的。
-   列表条目多时靠 max-height 收住 + 自己滚动。 */
+/* 「Bot / Agent / 房间」标签切换靠 hidden 属性：类上的 display:flex 会盖掉 UA 的
+   [hidden]{display:none}，不补这条房间层永远藏不掉（2026-11-21 实测） */
+.bot-layer[hidden] {
+  display: none;
+}
+/* 2026-11-21 起两层改为标签切换（「Bot / Agent / 房间」），不再上下分屏：
+   当前层独占整个面板（吃掉余量），列表条目多时自己滚动。 */
 .bot-layer-peers {
-  flex: 0 1 auto;
-  max-height: 30%;
+  flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+}
+.bot-layer-peers .peer-list {
+  overflow-y: auto;
 }
 .bot-layer-peers .peer-bar {
   padding: 4px 10px 5px;
-  font-size: 11px;
+  font-size: 12px;
 }
 .bot-layer-peers .peer-list {
   padding: 4px 8px 6px;
@@ -12005,13 +12191,13 @@ audio.artifacts-media-preview-el {
   padding: 5px 8px;
   gap: 2px 8px;
 }
-.bot-layer-peers .peer-name { font-size: 12px; }
+.bot-layer-peers .peer-name { font-size: 13px; }
 .bot-layer-peers .peer-addr { display: none; }
 .bot-layer-peers .peer-badge,
 .bot-layer-peers .peer-role-chip,
 .bot-layer-peers .peer-claim { font-size: 10px; padding: 0 5px; }
 .bot-layer-peers .peer-row-actions .ghost-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 1px 6px;
 }
 /* 下层吃掉剩余空间：房间是主战场（时间线 + 派活），不能比列表矮 */
@@ -12029,8 +12215,8 @@ audio.artifacts-media-preview-el {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.bot-room-title { font-size: 12px; font-weight: 600; }
-.bot-room-meta { font-size: 11px; color: var(--text-muted, #888); }
+.bot-room-title { font-size: 13px; font-weight: 600; }
+.bot-room-meta { font-size: 12px; color: var(--text-mute); }
 .bot-room-body { flex: 1; min-height: 0; overflow: auto; padding: 10px; }
 .bot-room-empty-title { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
 .bot-room-empty-hint { font-size: 12px; color: var(--text-mute); line-height: 1.6; }
@@ -12072,7 +12258,7 @@ audio.artifacts-media-preview-el {
   white-space: nowrap;
 }
 .bot-room-member-off {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-mute);
   border: 1px solid var(--border);
   padding: 0 4px;
@@ -12097,7 +12283,7 @@ audio.artifacts-media-preview-el {
   gap: 8px;
 }
 .bot-room-item-title { font-size: 12px; font-weight: 600; }
-.bot-room-item-state { font-size: 11px; color: var(--text-mute); flex-shrink: 0; }
+.bot-room-item-state { font-size: 10px; color: var(--text-mute); flex-shrink: 0; }
 .bot-room-item-members {
   font-size: 11px;
   color: var(--text-dim);
@@ -12219,7 +12405,7 @@ audio.artifacts-media-preview-el {
 .peer-foot-row { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
 .peer-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
 .peer-toggle input[type='checkbox'] { margin: 0; }
-.peer-hint { font-size: 11px; color: var(--text-mute); line-height: 1.6; }
+.peer-hint { font-size: 12px; color: var(--text-mute); line-height: 1.6; }
 
 /* 首次来信确认弹窗：窄、矮、只有两个按钮 —— 它会在用户干别的事时突然出现，不该抢满屏 */
 .peer-trust-dialog {
@@ -12245,3 +12431,19 @@ audio.artifacts-media-preview-el {
 }
 .peer-trust-desc { margin: 0; font-size: 12px; color: var(--text-dim); line-height: 1.6; }
 .peer-trust-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ===== 宠物（点点）设置页：点色色板。色值唯一来源 pet-shapes.js，这里只管展示 ===== */
+.pet-color-row { display: flex; gap: 10px; }
+.pet-color-choice {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0.5;
+  box-shadow: 0 0 0 2px transparent;
+  transition: opacity 0.15s ease, box-shadow 0.15s ease;
+}
+.pet-color-choice:hover { opacity: 0.85; }
+.pet-color-choice.active { opacity: 1; box-shadow: 0 0 0 2px var(--text-dim, #888); }

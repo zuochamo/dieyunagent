@@ -30,4 +30,9 @@ const MOBILE_TRACE_STREAM_INTERVAL_MS = 20;
  * 只是显示阈值（远小于上游超时（core 侧超时自行兜底），用于提前暴露静默），不参与任何判定。
  */
 const STREAM_IDLE_HINT_MS = 30000;
+/**
+ * 「无极阻尼」贴底跟随的时间常数（毫秒）：聊天区（renderer-chat-render.js）与子 Agent 卡片正文
+ * （renderer-thinking-trace-dom.js）共用同一手感，两处都不再各写一个 90。
+ */
+const SCROLL_DAMP_TAU_MS = 90;
 

@@ -21,14 +21,6 @@ const gwState = {
   rustCore: null
 };
 
-/** 对话记忆、权限等必须走本地 Gateway，不能经 SSH 远程隧道 */
-const LOCAL_RPC_PREFIXES = ['memory.', 'agent.state_', 'permissions.', 'undo.', 'speech.'];
-
-function isLocalOnlyMethod(method) {
-  const m = String(method || '');
-  return LOCAL_RPC_PREFIXES.some((p) => m.startsWith(p));
-}
-
 function isLocalGatewayReady() {
   return !!(gwState.authed && typeof gatewayApi.gatewayRpc === 'function');
 }

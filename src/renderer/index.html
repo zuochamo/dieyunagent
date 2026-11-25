@@ -106,40 +106,6 @@
         <section class="tab-panel tab-panel-agent active" data-panel="agent">
           <div class="agent-main" id="agent-main">
           <div class="agent-chat-column">
-          <!-- 它说 / 它醒来写了：生命感动起来的时候，那一句原文在这里留一行。
-               为什么放在主窗口：出声是说给在场的人听的，而人可能不在、可能没听清 —— 得能回看；
-               心跳轮不推给界面，它半夜写的东西本来没人看得见，所以同一行也显示「它醒来写了」。
-               只是展示：**不进会话账本、不进模型上下文**（它不接管你的对话线）。
-               数据来自 `alive:badge` 的 `lastVoiceText`/`lastVoiceAt` 与
-               `lastWakeText`/`lastWakeTextAt`（同一份 state.json），
-               渲染只有 `renderer-alive.js#renderAliveSpeech` 一处。 -->
-          <div class="alive-speech-bar" id="alive-speech-bar" hidden>
-            <span class="alive-speech-text" id="alive-speech-text"></span>
-            <span class="alive-speech-actions">
-              <button type="button" class="ghost-btn alive-speech-action" id="alive-speech-log" title="看它说过/做过的全部记录（设置 → 拟态 → 日志）">日志</button>
-              <button type="button" class="ghost-btn alive-speech-action" id="alive-speech-dismiss" title="收起这一条（下次它再动起来会重新出现）">✕</button>
-            </span>
-          </div>
-          <!-- 目标条：本会话有目标时贴在气泡区上方一行（目标是什么 · 第几轮 · 最近一条检查事实）。
-               点击展开就地看全部检查事实与清单；按钮只有「继续 / 停止」。
-               数据来自 `agent:session-goal-panel` 的同一份视图（`renderer-goal-panel.js` 渲染），
-               这里只是壳子，不在这里判断目标状态。 -->
-          <div class="goal-bar" id="goal-bar" hidden>
-            <div class="goal-bar-head">
-              <button type="button" class="goal-bar-toggle" id="goal-bar-toggle" aria-expanded="false" title="展开 / 收起目标与检查事实">
-                <span class="goal-bar-mark" id="goal-bar-mark">◎</span>
-                <span class="goal-bar-objective" id="goal-bar-objective"></span>
-                <span class="goal-bar-round" id="goal-bar-round"></span>
-                <span class="goal-bar-fact" id="goal-bar-fact"></span>
-                <span class="goal-bar-caret" id="goal-bar-caret">▾</span>
-              </button>
-              <span class="goal-bar-actions">
-                <button type="button" class="ghost-btn goal-bar-action" id="goal-bar-continue" title="继续推进（重置轮次预算）" hidden>继续</button>
-                <button type="button" class="ghost-btn goal-bar-action" id="goal-bar-stop" title="停止当前一轮（目标转「已暂停」，不再自动续跑）" hidden>停止</button>
-              </span>
-            </div>
-            <div class="goal-bar-facts agent-scroll" id="goal-bar-facts" hidden></div>
-          </div>
           <div class="chat-viewport">
           <div class="chat agent-scroll" id="chat-list">
           </div>
@@ -148,8 +114,7 @@
           <!-- 思考中钉住当前提问的浮条：必须留在 `.chat-viewport` 里。
                它是 absolute + top:10px，锚的定位上下文必须是「滚动视口」——
                判定显隐用的也是 `#chat-list` 的 rect（renderer-chat-scroll.js#updateLastTurnFloat）。
-               放到 `.agent-chat-column` 里的话，一旦列顶多了目标条（`.goal-bar`），
-               10px 就落在目标条那一行上，两串文字直接叠在一起。 -->
+               放到 `.agent-chat-column` 里的话，锚点会变成整列（列顶还有别的行时 10px 直接压上去）。 -->
           <div class="thinking-live-float" id="last-turn-float" hidden>
             <div class="thinking-live-float-user" id="last-turn-float-user"></div>
           </div>
@@ -304,7 +269,20 @@
           <div class="pane-resizer pane-resizer-v" id="artifacts-pane-resizer" hidden aria-hidden="true"></div>
           <aside class="side-panel artifacts-panel" id="artifacts-panel" hidden aria-label="工作区面板">
             <div class="side-panel-layout">
+              <!-- 轨道第一格：「占满整块区域」（不是页签，没有 data-side-tab）。
+                   外观就是一个普通的面板区图标（复用 .side-panel-rail-btn 的尺寸/配色），
+                   点一下对话列（历史 + 思考区 + 输入框）整块让位、只剩面板内容，
+                   图标翻成右箭头，再点一下还原分栏。
+                   状态与写入点只有 renderer-side-panel.js#applySidePanelMaximizedState 一处。 -->
               <nav class="side-panel-rail" aria-label="面板视图">
+                <button type="button" class="side-panel-rail-btn side-panel-max-btn" id="side-panel-max-btn" title="占满整块区域（只看面板内容）" aria-label="占满整块区域（只看面板内容）" aria-pressed="false">
+                  <svg class="side-panel-max-icon side-panel-max-icon-expand" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                    <path d="M14.4 5.6 8 12l6.4 6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <svg class="side-panel-max-icon side-panel-max-icon-restore" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                    <path d="M9.6 5.6 16 12l-6.4 6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
                 <button type="button" class="side-panel-rail-btn" data-side-tab="changes" title="变更" aria-label="变更">
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                     <path d="M12 4.4v15.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
@@ -383,7 +361,7 @@
                     <path d="M2.6 13.2h4.2l2.2-5.4 3.1 10 2.4-6.2h2.1l1.5 1.6h1.9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
                   </svg>
                 </button>
-                <button type="button" class="side-panel-rail-btn" data-side-tab="subagents" title="子代理" aria-label="子代理">
+                <button type="button" class="side-panel-rail-btn" data-side-tab="subagents" title="轨迹" aria-label="轨迹">
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                     <circle cx="6" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
                     <circle cx="6" cy="18" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
@@ -431,9 +409,9 @@
                 <div class="side-panel-pane" data-side-pane="scm" hidden>
                   <div class="side-panel-pane-head">
                     <span class="side-panel-pane-title">源码管理</span>
-                    <div class="scm-mode-switch" id="scm-mode-switch" role="tablist" aria-label="源码管理视图">
-                      <button type="button" class="scm-mode-btn active" data-scm-mode-btn="changes" role="tab" aria-selected="true" title="工作区改动">更改</button>
-                      <button type="button" class="scm-mode-btn" data-scm-mode-btn="history" role="tab" aria-selected="false" title="提交历史时间线">历史</button>
+                    <div class="pane-switch" id="scm-mode-switch" role="tablist" aria-label="源码管理视图">
+                      <button type="button" class="pane-switch-btn active" data-scm-mode-btn="changes" role="tab" aria-selected="true" title="工作区改动">更改</button>
+                      <button type="button" class="pane-switch-btn" data-scm-mode-btn="history" role="tab" aria-selected="false" title="提交历史时间线">历史</button>
                     </div>
                     <span class="side-panel-pane-meta" id="scm-summary">未连接</span>
                     <button type="button" class="ghost-btn side-panel-pane-action" id="scm-refresh" title="刷新工作区状态">刷新</button>
@@ -664,19 +642,49 @@
                      这里只是一个壳 —— 别在这里再写第二套格式。 -->
                 <div class="side-panel-pane" data-side-pane="alive" hidden>
                   <div class="side-panel-pane-head">
+                    <!-- 标题栏只留标题：右下两个按钮（刷新 / 设置）2026-11-21 按用户要求删除 ——
+                         体征在页面可见时本来就 5s 轮询一次（renderer-alive.js#startAlivePoll），
+                         不需要手动刷新；开关与感官设备走设置页（设置 → 拟态 → 生命）。
+                         「事件 / 抽屉」两个标签 2026-11-21 从记录区挪到标题后面：它们切的是
+                         下面那一整块记录区，放在标题旁边比压在记录区里更好找（切换逻辑不变，
+                         仍是 renderer-alive.js#applyAliveTab 只切可见性）。 -->
                     <div class="side-panel-pane-head-main">
                       <span class="side-panel-pane-title">生命</span>
-                      <span class="side-panel-pane-meta" id="alive-pane-status">读取中…</span>
+                      <!-- 与标题同一行的「/」分栏：生命 / 事件 / 抽屉（斜杠由 CSS 的 `::before` 画，
+                           见 styles.css 里 `.side-panel-pane[data-side-pane='alive'] .pane-switch` 一段）。
+                           结构仍是 `.pane-switch` 的 tablist 语义，只是这一页不要圆角灰底 ——
+                           别为这两个标签另造一套切换逻辑。 -->
+                      <div class="pane-switch" role="tablist" aria-label="最近发生了什么 / 抽屉">
+                        <button
+                          type="button"
+                          class="pane-switch-btn active"
+                          data-alive-tab="events"
+                          role="tab"
+                          aria-selected="true"
+                        >事件</button>
+                        <button
+                          type="button"
+                          class="pane-switch-btn"
+                          data-alive-tab="note"
+                          role="tab"
+                          aria-selected="false"
+                        >抽屉</button>
+                      </div>
                     </div>
-                    <button type="button" class="ghost-btn side-panel-pane-action" id="alive-pane-refresh" title="刷新体征、曲线与事件">刷新</button>
-                    <button type="button" class="ghost-btn side-panel-pane-action" id="alive-pane-settings" title="打开「设置 → 拟态 → 生命」（开关 / 感官 / 设备）">设置</button>
                   </div>
                   <!-- 两段式：体征/趋势（按内容长）→ 记录区（吃掉余量）。
-                       记录区里「事件」与「抽屉」是**同一个位置的两组横向标签**（后者原来单独占一块，
-                       于是面板里同一份"它写过什么"出现了两个入口，也把事件流挤成半截窗口）。
-                       标签壳归渲染层文案，切换只切可见性（renderer-alive.js#applyAliveTab）。 -->
+                       记录区里「事件」与「抽屉」共用**同一个位置**（标签在标题栏、切换只切可见性，
+                       见 renderer-alive.js#applyAliveTab）—— 它俩若各占一块高度，事件流会被挤成半截窗口。 -->
                   <div class="alive-pane-body">
                     <div class="alive-pane-vitals">
+                      <!-- 状态那一句（跑没跑 / 相位 / 第几次心跳）原来挤在标题右边：侧栏只有 350px，
+                           它与标题、按钮抢宽度，两行都读不全（2026-11-21 挪进正文）。
+                           数据与设置页那一份同源：`ALIVE_STATUS_IDS.head` 的同一个渲染函数。 -->
+                      <p class="channels-footnote" id="alive-pane-status">读取中…</p>
+                      <!-- 它上一次醒来写下的正文（压成一行、整段换行显示不截断；点一下打开它自己那条会话看全文）。
+                           唤醒轮是 `internal: true`，正文只落会话库、不推气泡区 —— 这里是能瞥见它的唯一一处；
+                           数据只有一份：`state.lastWakeText`（`alive:status` 带回，渲染在 renderer-alive.js#renderAliveWake）。 -->
+                      <p class="alive-pane-wake" id="alive-pane-wake"></p>
                       <p class="channels-footnote" id="alive-pane-detail"></p>
                       <p class="channels-footnote" id="alive-pane-budget"></p>
                       <p class="channels-footnote" id="alive-pane-fatigue"></p>
@@ -692,22 +700,6 @@
                     </div>
                     <section class="alive-pane-section alive-pane-feed">
                       <div class="alive-pane-section-head">
-                        <div class="alive-pane-tabs" role="tablist" aria-label="最近发生了什么 / 抽屉">
-                          <button
-                            type="button"
-                            class="alive-pane-tab active"
-                            data-alive-tab="events"
-                            role="tab"
-                            aria-selected="true"
-                          >事件</button>
-                          <button
-                            type="button"
-                            class="alive-pane-tab"
-                            data-alive-tab="note"
-                            role="tab"
-                            aria-selected="false"
-                          >抽屉</button>
-                        </div>
                         <span class="alive-pane-section-meta" id="alive-pane-events-meta" data-alive-meta="events"></span>
                         <span class="alive-pane-section-meta" id="alive-pane-note-meta" data-alive-meta="note" hidden></span>
                       </div>
@@ -722,21 +714,42 @@
                      房间时间线与派任务是 BOT-ROOM-PLAN.md 的第 2–3 步，现在这里是占位。 -->
                 <div class="side-panel-pane" data-side-pane="bot" hidden>
                   <div class="side-panel-pane-head">
+                    <!-- 标题栏改用与「生命 / 源码管理 / 轨迹」同一套「/」分栏纯文字切换：
+                         「Bot / Agent / 房间」—— Agent 与房间两层本来是上下两块，
+                         现在改成标签切换、一次只看一层（切换只切 .bot-layer 可见性，
+                         数据与刷新不变，仍是 renderer-peer.js 的同一份轮询/重绘）。 -->
                     <div class="side-panel-pane-head-main">
                       <span class="side-panel-pane-title">Bot</span>
-                      <span class="side-panel-pane-meta" id="bot-panel-meta">内网 Agent</span>
+                      <div class="pane-switch" id="bot-layer-switch" role="tablist" aria-label="Bot 视图">
+                        <button
+                          type="button"
+                          class="pane-switch-btn active"
+                          data-bot-layer-btn="peers"
+                          role="tab"
+                          aria-selected="true"
+                          title="已允许互通的内网 agent"
+                        >Agent</button>
+                        <button
+                          type="button"
+                          class="pane-switch-btn"
+                          data-bot-layer-btn="room"
+                          role="tab"
+                          aria-selected="false"
+                          title="一次任务一个房间"
+                        >房间</button>
+                      </div>
                     </div>
                     <button type="button" class="ghost-btn side-panel-pane-action" id="bot-panel-settings" title="名称 / 启用开关 / 手工对端 / 信任管理">设置</button>
                     <button type="button" class="ghost-btn side-panel-pane-action" id="peer-refresh" data-i18n="refresh" title="刷新在线状态">刷新</button>
                   </div>
-                  <div class="bot-layer bot-layer-peers">
+                  <div class="bot-layer bot-layer-peers" data-bot-layer="peers">
                     <div class="peer-bar">
                       <span class="peer-dot" id="peer-dot"></span>
                       <span class="peer-bar-text" id="peer-status" data-i18n="connect_reading">正在读取连接信息…</span>
                     </div>
                     <div class="peer-list" id="peer-list"></div>
                   </div>
-                  <div class="bot-layer bot-layer-room">
+                  <div class="bot-layer bot-layer-room" data-bot-layer="room" hidden>
                     <div class="bot-room-head">
                       <span class="bot-room-title">房间</span>
                       <span class="bot-room-meta" id="bot-room-meta">一次任务一个</span>
@@ -759,18 +772,40 @@
                     </div>
                   </div>
                 </div>
+                <!-- 「轨迹」页：页头两个横向小标签（与源码管理的「更改 / 历史」同一套 .pane-switch 皮肤）。
+                     子代理 = 现在的功能（上下两块：本次运行的**全部**子代理 + 点中那个的完整思考过程）；
+                     轨迹图 = 还没设计，先占位（切过去只显示一句说明）。
+                     数据与思考区卡片同源（同一份 trace），渲染见 renderer-subagent-panel.js。 -->
                 <div class="side-panel-pane" data-side-pane="subagents" hidden>
                   <div class="side-panel-pane-head">
                     <div class="side-panel-pane-head-main">
-                      <span class="side-panel-pane-title">子代理</span>
-                      <span class="side-panel-pane-meta" id="subagent-panel-meta">—</span>
+                      <span class="side-panel-pane-title">轨迹</span>
+                      <div class="pane-switch" id="trace-mode-switch" role="tablist" aria-label="轨迹视图">
+                        <button type="button" class="pane-switch-btn active" data-trace-mode-btn="subagents" role="tab" aria-selected="true" title="本次运行派发的子代理，以及每个的完整思考过程">子代理</button>
+                        <button type="button" class="pane-switch-btn" data-trace-mode-btn="graph" role="tab" aria-selected="false" title="把一次运行画成图（还没设计）">轨迹图</button>
+                      </div>
+                      <span class="side-panel-pane-meta" id="subagent-panel-meta" hidden></span>
                     </div>
                   </div>
-                  <div class="subagent-panel-body agent-scroll" id="subagent-panel-list">
-                    <div class="subagent-panel-empty">
+                  <div id="trace-subagents-wrap">
+                    <div class="subagent-panel-tabs agent-scroll" id="subagent-panel-tabs" role="tablist" aria-label="本次运行的子代理" hidden></div>
+                    <div class="subagent-panel-detail" id="subagent-panel-detail" hidden>
+                      <div class="subagent-panel-detail-head">
+                        <span class="subagent-panel-detail-title" id="subagent-panel-detail-title"></span>
+                        <span class="subagent-panel-detail-badge" id="subagent-panel-detail-badge" hidden>并发</span>
+                        <span class="subagent-panel-detail-status" id="subagent-panel-detail-status"></span>
+                      </div>
+                      <div class="subagent-panel-detail-body agent-scroll" id="subagent-panel-detail-body"></div>
+                    </div>
+                    <div class="subagent-panel-empty" id="subagent-panel-empty">
                       <div class="subagent-panel-empty-title">本次运行没有子代理</div>
                       <div class="subagent-panel-empty-hint">协调者派发子 Agent 后，它们的完整思考过程会出现在这里</div>
                     </div>
+                  </div>
+                  <div class="trace-graph-placeholder" id="trace-graph-wrap" hidden>
+                    <!-- 轨迹图：泳道（主线 / 各子 Agent）× 时间轴。数据整形在 src/agent/trace-graph.js，
+                         渲染在 renderer-trace-graph.js；这里只留一个挂载点。 -->
+                    <div class="trace-graph" id="trace-graph-mount"></div>
                   </div>
                 </div>
                 <div class="side-panel-pane" data-side-pane="index" hidden>
@@ -1097,11 +1132,11 @@
               <div class="field-row">
                 <label class="field">
                   <span class="field-label">最多轮次（留空用默认）</span>
-                  <input type="number" id="automation-goal-attempts" min="1" max="48" placeholder="12" />
+                  <input type="number" id="automation-goal-attempts" min="1" max="48" placeholder="36" />
                 </label>
                 <label class="field">
                   <span class="field-label">时长预算·分钟（留空用默认）</span>
-                  <input type="number" id="automation-goal-wall-min" min="30" max="1440" step="30" placeholder="480" />
+                  <input type="number" id="automation-goal-wall-min" min="30" max="2880" step="30" placeholder="1440" />
                 </label>
               </div>
               <label class="field">
@@ -1408,6 +1443,8 @@
           <button type="button" class="settings-nav-item" data-settings-tab="alive" data-i18n="settings_alive">生命</button>
           <button type="button" class="settings-nav-item" data-settings-tab="alive-setup" data-i18n="settings_alive_setup">设定</button>
           <button type="button" class="settings-nav-item" data-settings-tab="alive-log" data-i18n="settings_alive_log">日志</button>
+          <div class="settings-nav-group-label" data-i18n="settings_pets">宠物</div>
+          <button type="button" class="settings-nav-item" data-settings-tab="pet-diandian" data-i18n="settings_pet_diandian">点点</button>
         </aside>
         <div class="settings-main">
           <header class="settings-main-head">
@@ -1891,6 +1928,35 @@
                 <pre class="channels-footnote" id="alive-note" style="white-space: pre-wrap">（还没有写东西）</pre>
               </div>
             </div>
+            <div class="settings-page" data-settings="pet-diandian">
+              <h3 class="settings-subsection-title" data-i18n="settings_pet_diandian">点点</h3>
+              <label class="check-row"><input type="checkbox" id="pet-enabled" /><span data-i18n="pet_enabled">显示点点（桌面悬浮）</span></label>
+              <p class="settings-page-desc check-row-hint" data-i18n="pet_enabled_hint">默认不显示，勾上才出现在桌面上；关掉即收起悬浮窗，位置和设置都会记住。</p>
+              <label class="check-row"><input type="checkbox" id="pet-alive-bind" /><span data-i18n="pet_alive_bind">绑定生命感（体征驱动 + 心跳轮的它可调身体）</span></label>
+              <p class="settings-page-desc check-row-hint" data-i18n="pet_alive_bind_hint">绑定后：疲劳会让它下垂迟缓、负载让它活跃、心跳事件起涟漪；每次心跳醒来的它还能用 pet_set / pet_act 调自己的形态和动效。需要「拟态 → 生命」总开关开着。</p>
+              <label class="field">
+                <span class="field-label"><span data-i18n="pet_count_label">点数量</span> <span id="pet-count-value" class="field-tag">128</span></span>
+                <input type="range" id="pet-count" min="64" max="512" step="8" value="128" />
+              </label>
+              <label class="field">
+                <span class="field-label"><span data-i18n="pet_dot_label">点大小</span> <span id="pet-dot-value" class="field-tag">100%</span></span>
+                <input type="range" id="pet-dot" min="0.5" max="2" step="0.1" value="0.5" />
+              </label>
+              <label class="field">
+                <span class="field-label"><span data-i18n="pet_size_label">整体大小</span> <span id="pet-size-value" class="field-tag">100%</span></span>
+                <input type="range" id="pet-size" min="0.6" max="1.8" step="0.05" value="0.75" />
+              </label>
+              <label class="field">
+                <span class="field-label"><span data-i18n="pet_motion_label">动效强度</span> <span id="pet-motion-value" class="field-tag">100%</span></span>
+                <input type="range" id="pet-motion" min="0" max="2" step="0.1" value="1" />
+              </label>
+              <div class="field">
+                <span class="field-label" data-i18n="pet_color_label">点色</span>
+                <nav class="pet-color-row" id="pet-color-row" role="radiogroup" aria-label="点色"></nav>
+              </div>
+              <p class="settings-page-desc" data-i18n="pet_interaction_hint">换形象是它自己的动作：会自己在球和猫之间变来变去。拖它换位置；点一下它会起涟漪。只有指针压在它身上时才挡鼠标，其余区域点击直接穿透到桌面。</p>
+              <span class="save-hint" id="pet-hint"></span>
+            </div>
             <div class="settings-page" data-settings="perms">
               <h3 class="settings-subsection-title">本机权限</h3>
               <div class="theme-auto-launch-options">
@@ -2373,6 +2439,25 @@
                 </div>
                 <span class="save-hint" id="encoding-params-hint"></span>
                 <div id="encoding-params-root" class="encoding-params-root"></div>
+        <div class="encoding-params-group" id="planner-router-group">
+          <h3 class="encoding-params-group-title">子 Agent 判定模型（可选）</h3>
+          <p class="settings-page-desc">
+            「多 Agent 并行执行」打开后，每一轮先由判定模型回答一句「这活要不要拆成多路并行」。这里留空 = 用本轮主模型与它的接口地址。
+          </p>
+          <label class="field">
+            <span class="field-label">判定模型名</span>
+            <input type="text" id="planner-router-model" placeholder="例如 glm-5.3-flash（留空 = 主模型）" />
+          </label>
+          <label class="field">
+            <span class="field-label">判定接口地址</span>
+            <input type="text" id="planner-router-base-url" placeholder="https://…/v1（留空 = 主模型端点）" />
+          </label>
+          <label class="field">
+            <span class="field-label">判定 API Key</span>
+            <input type="password" id="planner-router-api-key" placeholder="留空 = 主模型密钥" />
+          </label>
+          <span class="save-hint" id="planner-router-hint"></span>
+        </div>
               </div>
             </div>
             <div class="help-page" data-help-tab="about">
@@ -2667,6 +2752,7 @@
     <script src="./renderer-thinking-trace-dom.js"></script>
     <script src="./renderer-thinking-trace.js"></script>
     <script src="./renderer-subagent-panel.js"></script>
+  <script src="./renderer-trace-graph.js"></script>
     <script src="./renderer-undo-stack.js"></script>
     <script src="./renderer-chat-scroll.js"></script>
     <script src="./renderer-chat-live-run.js"></script>
@@ -2700,6 +2786,9 @@
     <script src="./renderer-channels.js"></script>
     <script src="./renderer-shared-memory.js"></script>
     <script src="./renderer-alive.js"></script>
+    <!-- 宠物（点点）：形态表/色板是 UMD 纯函数（悬浮窗页面 require 同一份），设置页只用它的色板 -->
+    <script src="./pet-window/pet-shapes.js"></script>
+    <script src="./renderer-pet.js"></script>
     <!-- composer + agent execution（agent-limits-runtime 依赖 composer 的 sessionComposerModelPicks，须在其后） -->
     <script src="./renderer-composer-mention.js"></script>
     <script src="./renderer-composer.js"></script>
@@ -2712,7 +2801,6 @@
     <script src="./renderer-agent-llm.js"></script>
     <script src="./renderer-agent-compaction.js"></script>
     <script src="./renderer-agent-rust-loop.js"></script>
-    <script src="./renderer-agent-api.js"></script>
     <script src="./renderer-agents-md.js"></script>
     <script src="./renderer-knowledge-maintainer.js"></script>
     <script src="./renderer-selection-drag.js"></script>

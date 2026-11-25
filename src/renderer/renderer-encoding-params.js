@@ -1,4 +1,4 @@
-/* global document, $, AGENT_LIMITS_SCHEMA, getAgentLimits, setAgentLimits, resetAgentLimits, formatAgentLimitValue, formatModelRuntimeValue, hydrateAgentLimitsFromDisk, hydrateRuntimeByTierFromMain, applyAgentLimitsToRuntime, getModelRuntimeValues, setModelRuntimeValues, resetModelRuntimeValues, getEditingContextTierId, setEditingContextTierId, MODEL_RUNTIME_PRESETS */
+/* global document, $, AGENT_LIMITS_SCHEMA, getAgentLimits, setAgentLimits, resetAgentLimits, formatAgentLimitValue, formatModelRuntimeValue, hydrateAgentLimitsFromDisk, hydrateRuntimeByTierFromMain, applyAgentLimitsToRuntime, getModelRuntimeValues, setModelRuntimeValues, resetModelRuntimeValues, getEditingContextTierId, setEditingContextTierId, MODEL_RUNTIME_PRESETS, settings, syncModelSettingsToMain, saveSettings */
 'use strict';
 
 function getModelRuntimeSchema() {
@@ -303,6 +303,87 @@ async function loadEncodingParamsFromMain() {
   }
 }
 
+/**
+ * 「子 Agent 判定模型」（可选）：留空 = 用本轮主模型。
+ *
+ * 存在 `model-settings.json` 的 `plannerRouterModel` / `plannerRouterBaseUrl` /
+ * `plannerRouterApiKey`，与 `reviewerModel` 同一类配置（都是「换个模型去判/去审」），
+ * 所以不塞进 agent-limits 那套数字护栏里。读写只有这一处：写进全局 `settings` 再 sync 给 Main，
+ * Main 的 `agent:planner-route` 每次判定前重新 `loadModelSettings`。
+ *
+ * 半套配置要当面说清楚：只填模型名、没填接口地址时 `resolvePlannerRouterConfig` 会当「没配」
+ * —— 不提示的话用户会以为判定换模型了，其实还是主模型在判。
+ */
+const PLANNER_ROUTER_FIELDS = [
+  ['planner-router-model', 'plannerRouterModel'],
+  ['planner-router-base-url', 'plannerRouterBaseUrl'],
+  ['planner-router-api-key', 'plannerRouterApiKey']
+];
+
+function renderPlannerRouterFields() {
+  const fields = PLANNER_ROUTER_FIELDS.map(([id, key]) => [$(id), key]).filter(([el]) => !!el);
+  if (!fields.length) return;
+  const hint = $('planner-router-hint');
+  const fill = () => {
+    for (const [el, key] of fields) el.value = String((settings && settings[key]) || '');
+  };
+  const paint = (model, baseUrl) => {
+    if (!hint) return;
+    if (!model && !baseUrl) {
+      hint.textContent = '留空 = 用本轮主模型判定';
+      return;
+    }
+    if (model && baseUrl) {
+      hint.textContent = `已保存：判定用 ${model}`;
+      return;
+    }
+    hint.textContent = model
+      ? '只填了模型名：还需要「判定接口地址」才会真的用侧模型，否则仍回落主模型'
+      : '只填了接口地址：还需要「判定模型名」才会真的用侧模型，否则仍回落主模型';
+  };
+  const persist = () => {
+    const next = {};
+    for (const [el, key] of fields) next[key] = String(el.value || '').trim();
+    if (settings) Object.assign(settings, next);
+    // 落盘走规范入口：localStorage + 同步给 Main（`saveSettings` 两件一起做）。
+    if (typeof saveSettings === 'function') saveSettings(settings);
+    else if (typeof syncModelSettingsToMain === 'function') void syncModelSettingsToMain();
+    paint(next.plannerRouterModel, next.plannerRouterBaseUrl);
+  };
+  for (const [el] of fields) el.addEventListener('change', persist);
+  fill();
+  paint(
+    String((settings && settings.plannerRouterModel) || '').trim(),
+    String((settings && settings.plannerRouterBaseUrl) || '').trim()
+  );
+  // 手改过 model-settings.json（或换了机器）时 Renderer 的 localStorage 可能没有这三个键：
+  // 面板全空就向 Main 取一次存档回填，免得「Main 里有、界面空着，一改就被覆盖成空」。
+  if (fields.every(([el]) => !String(el.value || '').trim())) {
+    const api = window.diecloud || {};
+    if (typeof api.getModelSettingsFromMain === 'function') {
+      api
+        .getModelSettingsFromMain()
+        .then((disk) => {
+          if (!disk || typeof disk !== 'object') return;
+          let changed = false;
+          for (const [, key] of fields) {
+            const v = String(disk[key] || '').trim();
+            if (!v) continue;
+            if (settings) settings[key] = v;
+            changed = true;
+          }
+          if (!changed) return;
+          fill();
+          paint(
+            String((settings && settings.plannerRouterModel) || '').trim(),
+            String((settings && settings.plannerRouterBaseUrl) || '').trim()
+          );
+        })
+        .catch(() => {});
+    }
+  }
+}
+
 function initEncodingParamsUI() {
   const root = $('encoding-params-root');
   if (!root) return;
@@ -311,6 +392,10 @@ function initEncodingParamsUI() {
     renderEncodingParamsTierTabs();
     renderEncodingParamsPanel();
   });
+
+  // 判定模型存的是 model-settings（不是本页的 agent-limits 档位），所以单独渲染、单独保存。
+  // `settings` 在 renderer-model-settings.js 启动时已从 Main 水合过，这里只负责填表与绑定。
+  renderPlannerRouterFields();
 
   root.addEventListener('input', onEncodingParamInput);
   root.addEventListener('change', onEncodingParamInput);

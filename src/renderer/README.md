@@ -35,7 +35,6 @@
 | `renderer-agent-llm.js` | LLM HTTP / SSE / 记忆整理 | 模型请求 |
 | `renderer-agent-compaction.js` | 上下文压缩 | compaction UI |
 | `renderer-agent-rust-loop.js` | Rust loop / planner IPC | 主循环 |
-| `renderer-agent-api.js` | Agent API 窗口导出 | compaction 进度桥 |
 | `renderer-agent-prep.js` | 准备阶段 checklist 状态 | 「准备中」步骤 UI |
 | `renderer-chat-scroll.js` | 会话滚动 / 跟随（贴底策略 + 朗读念到哪一句的视野跟随 + 用户滚动意图） | 切会话滚动 |
 | `renderer-chat-live-run.js` | live run 气泡 / Agent 事件 | 执行中气泡 |
@@ -46,7 +45,8 @@
 | `renderer-thinking-trace.js` | 流式 patch / 合成回退 | 思考区更新 |
 | `renderer-answer-md.js` | 回答区 Markdown 渲染（无依赖）：顶层围栏扫描 / GFM 表格 / 标题 / 列表 / 行内语法 / 媒体占位（图 / 音频 / 视频）/ 链接点击走 `host.open_url`。单一来源，`renderer-mermaid.js` 复用它挑 mermaid 块 | 正式回复排版 |
 | `renderer-answer-figures.js` | 正式回答里的媒体：正文 `![]()` 占位绑定 + 本轮媒体条（`tool.imagePaths` / 落盘的 path / base64 读图三个结构信号）。**图片**读盘转 blob，点图走通用灯箱全屏看（`openImageLightbox`）；**音频 / 视频**不读字节，`<video>/<audio>` 直接挂可 seek 的 `dieyun-media://` URL（Main 按 Range 分块取，见 `src/main/media-protocol.js`），播不了降级「用系统播放器打开」。读取与释放复用产物面板（`loadArtifactImageObjectUrl` / `openArtifactTab`） | 回答里的截图 / 音视频 |
-| `renderer-subagent-panel.js` | 右侧面板「子代理」页：本次运行的子 Agent 全文思考（复用思考区卡片渲染原语） | 子代理详情 |
+| `renderer-subagent-panel.js` | 右侧面板「轨迹」页（页头两个子标签：**子代理** = 本次运行的子 Agent 全文思考，复用思考区卡片渲染原语；**轨迹图** = 45° 电路板，数据整形在 `src/agent/trace-graph.js`） | 子代理详情 / 轨迹图 |
+| `renderer-trace-graph.js` | 轨迹图渲染（SVG，顺时针 45°）：主线是**一根斜线**（`currentColor`，跟随主题黑白），每轮一个**圆节点**（时长=节点间距，失败在节点上打 ✕）；子 Agent 从总线左右**交替**引出一条直角支线（带过孔点），只有子 Agent 支路带色相；hover 出轮次/工具数/耗时，点子 Agent 节点切回「子代理」；无时间戳时按顺序等距、不画刻度（不谎报时长）。**不加粗块、不加框**——那看起来像管道 | 轨迹图 |
 | `renderer-artifacts-session.js` | 会话产物桶 / UI batch | 产物会话态 |
 | `renderer-artifacts-browse.js` | 工作区浏览路径 | 产物目录 |
 | `renderer-artifact-diff-view.js` | 产物 diff 静态渲染 / 读盘 | 变更 diff 预览 |
@@ -81,7 +81,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `renderer-side-panel.js` | 侧栏切换 |
+| `renderer-side-panel.js` | 侧栏切换 + 「占满整块区域」（轨道底部按键：对话列整块让位、只剩面板内容，图标翻转 = `applySidePanelMaximizedState` 唯一写入点） |
 | `renderer-pane-layout.js` | 分栏布局 |
 | `renderer-monaco-core.js` | Monaco 加载 / 诊断 / diff 动画 |
 | `renderer-monaco.js` | 产物 Monaco 挂载 |
@@ -95,7 +95,7 @@
 | `renderer-codebase-panel.js` | 代码片段索引：状态 / 重建 / 建向量（面板已并入「索引」页签） |
 | `renderer-graph-panel.js` | 结构索引：状态 / 重建 / 符号命中渲染（面板已并入「索引」页签） |
 | `renderer-index-panel.js` | 「索引」面板外壳（`data-side-tab="index"`）：一个搜索框同查片段+符号、两个索引的 shown/hidden 扇出、rail busy 合成 |
-| `renderer-goal-panel.js` | 会话目标的两个面：气泡区上方**目标条**（`#goal-bar`：目标 · 第几轮 · 最近一条事实，点开就地展开检查事实与清单）与侧栏**「目标」页**（`data-side-tab="goal"`）。视图由 Main 的 `goals/session-goal.js#toPanelView` 成形，这里只画；同一份视图、同一次取数、同一个轮询（可见 / 有目标时才跑）。进度条按视图的 `progressFrom` 选文案（`checks` = 验收通过数/声明检查数，客观；`todos` = 清单勾选，模型自述；`outcome` = 收尾 0/1），不自己判比例 |
+| `renderer-goal-panel.js` | 侧栏**「目标」页**（`data-side-tab="goal"`）：目标 / 进度 / 清单 / 每条检查的最新事实 / 停止·继续·清除。视图由 Main 的 `goals/session-goal.js#toPanelView` 成形，这里只画；面板可见时才起 2s 心跳。进度条按视图的 `progressFrom` 选文案（`checks` = 验收通过数/声明检查数，客观；`todos` = 清单勾选，模型自述；`outcome` = 收尾 0/1），不自己判比例。气泡区上方那条「目标条」已删除 |
 | `renderer-problems.js` | LSP 诊断 |
 
 ## 设置 / 模型 / 技能

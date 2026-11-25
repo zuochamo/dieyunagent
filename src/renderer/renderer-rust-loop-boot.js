@@ -22,17 +22,6 @@ function createInitialRustLoopBootSteps() {
   }));
 }
 
-function updateRustBootStep(steps, stepId, patch) {
-  const id = String(stepId || '');
-  let changed = false;
-  for (const step of steps) {
-    if (step.id !== id) continue;
-    Object.assign(step, patch || {});
-    changed = true;
-    break;
-  }
-  return changed;
-}
 
 function rustBootStepStart(steps, stepId) {
   const id = String(stepId || '');

@@ -297,10 +297,65 @@ function fmtBytes(n) {
   return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+/**
+ * 写剪贴板的**唯一实现**（气泡「复制」与手机连接页「复制地址」共用）。
+ *
+ * 顺序是固定的，别按调用点各写一份：
+ * 1. 先走 `navigator.clipboard.writeText` —— 不创建临时节点，不抢焦点；
+ * 2. 失败才降级「临时 textarea + execCommand」—— 这条会短暂抢焦点，
+ *    所以**必须把焦点交还**：textarea 被 remove() 后焦点落到 body，
+ *    输入框就「丢失光标」、用户接着敲字不进 composer。
+ *
+ * 2026-11-21 之前这里有两份实现且顺序相反（手机那份 textarea 优先、不交还焦点），
+ * 点一次「复制连接地址」之后光标就掉出输入框。
+ *
+ * @param {string} text
+ * @returns {Promise<boolean>} 是否复制成功（不抛错，调用点自己决定怎么提示）
+ */
+async function writeClipboardText(text) {
+  const t = String(text == null ? '' : text);
+  if (!t) return false;
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(t);
+      return true;
+    } catch {
+      // 落到下面的降级路径
+    }
+  }
+  const prevActive = document.activeElement;
+  const ta = document.createElement('textarea');
+  ta.value = t;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  ta.style.top = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  ta.setSelectionRange(0, t.length);
+  let copied = false;
+  try {
+    copied = document.execCommand('copy');
+  } catch {
+    copied = false;
+  }
+  ta.remove();
+  if (prevActive && prevActive.isConnected && typeof prevActive.focus === 'function') {
+    try {
+      prevActive.focus({ preventScroll: true });
+    } catch {
+      // 焦点交还失败不影响复制结果
+    }
+  }
+  return !!copied;
+}
+
 window.showTextPrompt = showTextPrompt;
 window.showOverlay = showOverlay;
 window.parentRemotePath = parentRemotePath;
 window.describeVectorSync = describeVectorSync;
+window.writeClipboardText = writeClipboardText;
 window.escapeHtml = escapeHtml;
 window.fmtClock = fmtClock;
 window.fmtMonthDayClock = fmtMonthDayClock;
