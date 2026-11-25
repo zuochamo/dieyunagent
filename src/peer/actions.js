@@ -44,6 +44,60 @@ const PEER_ACTION_NAMES = Object.freeze([
 const DISABLED = Object.freeze({ ok: false, error: '内网互通未启用', errorCode: 'PEER_UNAVAILABLE' });
 
 /**
+ * 桥接口清单：**桌面 preload（`src/preload.js`）与 headless 网页（`src/headless/desktop-ui.js`）
+ * 共用这一份** —— 方法名与参数整形都在这里，两侧只提供自己的 invoke。
+ *
+ * 为什么必须有这份表：两侧以前各手抄一遍 `peerStatus/peerSetName/…`，加动作只改一边就是
+ * 「桌面能点、网页空白」。已经漂过一次：`set-auto-trust` 在动作表里有，`preload.js` 里没有，
+ * 网页侧却自己补了 —— 同一份界面两条行为。
+ *
+ * 加动作的顺序固定为：`PEER_ACTION_NAMES` 补名字 → 这里补一条（名字 + 参数整形）→
+ * `test/unit/peer-bridge-contract.test.cjs` 会同时校验动作表与桥表一一对应。
+ *
+ * @type {ReadonlyArray<{ method: string, action: string, args?: (...a: any[]) => object }>}
+ */
+const PEER_BRIDGE_METHODS = Object.freeze([
+  { method: 'peerStatus', action: 'status' },
+  { method: 'peerRefresh', action: 'refresh' },
+  { method: 'peerSetName', action: 'set-name', args: (name) => ({ name }) },
+  { method: 'peerSetRole', action: 'set-role', args: (role) => ({ role }) },
+  { method: 'peerSetEnabled', action: 'set-enabled', args: (enabled) => ({ enabled: !!enabled }) },
+  { method: 'peerSetAutoTurn', action: 'set-auto-turn', args: (enabled) => ({ enabled: !!enabled }) },
+  { method: 'peerSetAutoTrust', action: 'set-auto-trust', args: (enabled) => ({ enabled: !!enabled }) },
+  { method: 'peerTrust', action: 'trust', args: (peerId, decision) => ({ peerId, decision }) },
+  { method: 'peerUntrust', action: 'untrust', args: (peerId) => ({ peerId }) },
+  { method: 'peerTrustList', action: 'trust-list' },
+  { method: 'peerSetStaticPeers', action: 'set-static-peers', args: (peers) => ({ peers: peers || [] }) },
+  { method: 'peerSend', action: 'send', args: (payload) => payload || {} },
+  { method: 'peerSendSession', action: 'send-session', args: (payload) => payload || {} },
+  { method: 'peerOpenSession', action: 'open-session', args: (peer) => ({ peer }) },
+  { method: 'peerLinkSession', action: 'link-session', args: (sessionId, peerId) => ({ sessionId, peerId }) },
+  { method: 'peerUnlinkSession', action: 'unlink-session', args: (sessionId) => ({ sessionId }) },
+  { method: 'peerClaim', action: 'claim', args: (payload) => payload || {} },
+  { method: 'peerRooms', action: 'rooms' },
+  { method: 'peerRoomCreate', action: 'room-create', args: (payload) => payload || {} },
+  { method: 'peerRoomClose', action: 'room-close', args: (roomId) => ({ roomId }) },
+  { method: 'peerRoomSend', action: 'room-send', args: (payload) => payload || {} },
+  { method: 'peerRoomTimeline', action: 'room-timeline', args: (payload) => payload || {} }
+]);
+
+/**
+ * 造一份「peer 桥」：`invoke(action, payload)` 由调用方给
+ * （桌面 = `ipcRenderer.invoke('peer:'+action)`，网页 = `/ws` 的 `peer.<action>`）。
+ *
+ * @param {(action: string, payload: object) => Promise<any>} invoke
+ * @returns {Record<string, (...a: any[]) => Promise<any>>}
+ */
+function buildPeerBridge(invoke) {
+  /** @type {Record<string, (...a: any[]) => Promise<any>>} */
+  const out = {};
+  for (const def of PEER_BRIDGE_METHODS) {
+    out[def.method] = (...a) => invoke(def.action, def.args ? def.args(...a) : {});
+  }
+  return out;
+}
+
+/**
  * @param {() => any} getCoordinator 每次调用现取（协调器是晚绑定的）
  */
 function createPeerActions(getCoordinator) {
@@ -188,4 +242,4 @@ const HANDLERS = {
   }
 };
 
-module.exports = { createPeerActions, PEER_ACTION_NAMES };
+module.exports = { createPeerActions, PEER_ACTION_NAMES, PEER_BRIDGE_METHODS, buildPeerBridge };

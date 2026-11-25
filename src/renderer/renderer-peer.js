@@ -867,6 +867,23 @@ function bindPeerUi() {
   // Bot 侧栏页签的「设置」= 打开「连接 → Agent 互通」（那一页只管名称与开关，列表在这边）。
   $('bot-panel-settings')?.addEventListener('click', () => openPeerModal());
 
+  // ---- 「Bot / Agent / 房间」标签：与「生命 / 源码管理 / 轨迹」同一套 .pane-switch 皮肤。
+  //      只切两层 .bot-layer 的可见性（原来上下两块同屏，现在一次看一层）；
+  //      数据与轮询不变，两层仍然各自由同一份刷新逻辑重绘。
+  for (const btn of document.querySelectorAll('#bot-layer-switch [data-bot-layer-btn]')) {
+    btn.addEventListener('click', () => {
+      const next = btn.getAttribute('data-bot-layer-btn') || 'peers';
+      for (const other of document.querySelectorAll('#bot-layer-switch [data-bot-layer-btn]')) {
+        const on = other === btn;
+        other.classList.toggle('active', on);
+        other.setAttribute('aria-selected', String(on));
+      }
+      for (const layer of document.querySelectorAll('[data-side-pane="bot"] .bot-layer')) {
+        layer.hidden = layer.getAttribute('data-bot-layer') !== next;
+      }
+    });
+  }
+
   // ---- 房间：建 / 关（成员与上限由 Main 校验，这里只收集表单） ----
   $('bot-room-new')?.addEventListener('click', () => {
     const form = $('bot-room-form');
