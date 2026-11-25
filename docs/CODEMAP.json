@@ -55,7 +55,6 @@
         "src/renderer/renderer-agent-llm.js",
         "src/renderer/renderer-agent-compaction.js",
         "src/renderer/renderer-agent-rust-loop.js",
-        "src/renderer/renderer-agent-api.js",
         "src/agent/run-cancel-registry.js",
         "src/core-bridge.js"
       ],
@@ -267,6 +266,30 @@
       ]
     },
     {
+      "id": "skills",
+      "paths": [
+        "src/skills/",
+        "src/main/ipc/skills-mcp.js",
+        "src/renderer/renderer-skills-grid.js",
+        "src/renderer/renderer-skills-ui.js",
+        "src/renderer/renderer-skill-catalog.js"
+      ],
+      "owns": [
+        "skill scan / frontmatter / taxonomy (domain tabs)",
+        "enabled-state store (Main authoritative: skills-enabled.json)",
+        "install integrity baseline + usage ledger",
+        "skills.sh market catalog",
+        "skills UI + market UI"
+      ],
+      "tests": [
+        "test:unit",
+        "test:system-prompt-prep"
+      ],
+      "docs": [
+        "docs/ARCHITECTURE.md#9-技能、mcp-与插件"
+      ]
+    },
+    {
       "id": "core-rpc",
       "paths": [
         "crates/dieyun-runtime/src/rpc/",
@@ -352,7 +375,7 @@
         "一轮结束后的续跑判定（judgeAfterTurn → decideContinuation；预算尽落 stalled，收尾不改状态）",
         "停止 / 继续的状态迁移（pauseGoal / resumeGoal：继续重置轮次预算但保留事实与清单）",
         "目标 UI 的视图投影（toPanelView：进度 / 按检查聚合的事实 / 预算，Renderer 不再二次解释）",
-        "气泡区「目标条」+ 侧栏「目标」页（renderer-goal-panel.js：同一份视图、同一次取数、同一个轮询）"
+        "侧栏「目标」页（renderer-goal-panel.js：面板唯一视图面；气泡区上方的「目标条」已删除）"
       ],
       "tests": [
         "test:unit"
@@ -617,6 +640,57 @@
       "docs": [
         "docs/ALIVE.md"
       ]
+    },
+    {
+      "id": "pet",
+      "paths": [
+        "src/pet/settings.js",
+        "src/pet/drag.js",
+        "src/main/pet-window.js",
+        "src/main/ipc/pet.js",
+        "src/renderer/pet-window/index.html",
+        "src/renderer/pet-window/preload.js",
+        "src/renderer/pet-window/pet-shapes.js",
+        "src/renderer/pet-window/pet-cat-gait.js",
+        "src/renderer/pet-window/pet.js",
+        "src/renderer/renderer-pet.js"
+      ],
+      "owns": [
+        "点点桌面悬浮窗（透明置顶/拖动绝对定位/命中式点击穿透）",
+        "128 点状态向量与形态表（球/猫；morph 逐点错峰；身体即状态）",
+        "猫的步态（四拍对角步行：右前→左后→左前→右后，每腿差 1/4 拍；支撑相踩住后扫、摆动相抬脚；躯干起伏 + 尾巴慢摆）纯函数在 pet-cat-gait.js",
+        "设置 → 宠物 → 点点（开关/绑定生命感/点数/点大小/大小/动效/点色），权威在 src/pet/settings.js",
+        "身体工具 pet_set / pet_act：schema 在 agent/catalog/pet.js，语义在 alive/pet-tools.js；**聊天轮与心跳轮都注入**（只挂心跳轮时模型会去改源码）"
+      ],
+      "tests": [
+        "test:unit"
+      ],
+      "docs": []
+    },
+    {
+      "id": "agent-self-control",
+      "paths": [
+        "src/agent/capability-index.js",
+        "src/agent/catalog/self.js",
+        "src/agent/main-tools/self.js",
+        "src/agent/change-receipt.js",
+        "src/agent/workspace-candidates.js",
+        "src/agent/agent-system-prompt.js",
+        "src/agent/system-prompt-prep-main.js"
+      ],
+      "owns": [
+        "能力表（能力 → 开关判定 / 标签 / 设置落点）与【本轮能力事实】块",
+        "agent_inspect（只读自检）与 agent_capability（申请开能力 / 复查）",
+        "配置类工具的改动回执（self-changes.jsonl）",
+        "工作空间候选匹配（频道与桌面共用）"
+      ],
+      "tests": [
+        "test:unit",
+        "test:agent"
+      ],
+      "docs": [
+        "docs/AGENT-SELF-CONTROL-PLAN.md"
+      ]
     }
   ],
   "pathRules": [
@@ -787,7 +861,7 @@
       "prefix": "src/agent/system-prompt-prep.js",
       "tests": [
         "test:system-prompt-prep",
-        "test:session-handoff"
+        "test:unit"
       ]
     },
     {
@@ -1345,14 +1419,6 @@
       ]
     },
     {
-      "prefix": "src/renderer/renderer-agent-api.js",
-      "tests": [
-        "test:agent-round-text",
-        "check:renderer",
-        "test:llm-tool-call-fallback"
-      ]
-    },
-    {
       "prefix": "src/renderer/renderer-agent-system-message.js",
       "tests": [
         "test:agent-system-prompt",
@@ -1414,6 +1480,41 @@
       "prefix": "src/mcp/schema-slim.js",
       "tests": [
         "test:tool-harness",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/skills/",
+      "tests": [
+        "test:unit",
+        "test:system-prompt-prep"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-skills-grid.js",
+      "tests": [
+        "check:renderer",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-skills-ui.js",
+      "tests": [
+        "check:renderer",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-skill-catalog.js",
+      "tests": [
+        "check:renderer",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-mcp-catalog.js",
+      "tests": [
+        "check:renderer",
         "test:unit"
       ]
     },
@@ -1707,11 +1808,17 @@
     {
       "prefix": "src/agent/session-handoff.js",
       "tests": [
-        "test:session-handoff"
+        "test:unit"
       ]
     },
     {
       "prefix": "src/agent/knowledge-maintainer.js",
+      "tests": [
+        "test:knowledge-maintainer"
+      ]
+    },
+    {
+      "prefix": "src/agent/knowledge/",
       "tests": [
         "test:knowledge-maintainer"
       ]
@@ -1968,6 +2075,52 @@
         "test:tool-args",
         "test:tool-harness"
       ]
+    },
+    {
+      "prefix": "src/agent/model-settings-embedding.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/agent/tool-result-summary.js",
+      "tests": [
+        "test:unit",
+        "test:llm-tool-call-fallback"
+      ]
+    },
+    {
+      "prefix": "src/gateway/line-diff-stats.js",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/undo/",
+      "tests": [
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/gateway/handlers/undo.js",
+      "tests": [
+        "test:unit",
+        "verify:rpc-catalog"
+      ]
+    },
+    {
+      "prefix": "src/renderer/renderer-undo-stack.js",
+      "tests": [
+        "check:renderer",
+        "test:unit"
+      ]
+    },
+    {
+      "prefix": "src/git/turn-tree.js",
+      "tests": [
+        "test:unit",
+        "test:worktree"
+      ]
     }
   ],
   "suites": {
@@ -2035,7 +2188,9 @@
       "check:renderer",
       "test:headless-desktop-turn",
       "test:headless-desktop-ui",
-      "test:alive"
+      "test:alive",
+      "verify:tool-validators",
+      "test:tool-args"
     ],
     "agent-full": [
       "test:agent-limits",

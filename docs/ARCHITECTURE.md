@@ -509,7 +509,6 @@ flowchart TB
   subgraph Bundled["安装包 skills/bundled/"]
     MiniMax[minimax]
     Curated[curated]
-    Dieyun[dieyun 预装]
     Weather[weather]
   end
 
@@ -532,7 +531,7 @@ flowchart TB
 
 - **Bundled**：随安装包（`extraResources`）。
 - **Seed**：`seed-to-dieyun.js` 复制到用户目录，已存在不覆盖。
-- **启用状态**：`localStorage` `diecloud.skills.enabled.v1` 等。
+- **启用状态**：`<userData>/skills-enabled.json`（`src/skills/enabled-store.js`，**Main 是唯一权威**：频道 / 定时计划 / headless / peer 来信没有 Renderer，注入侧只能读这份）。默认启用规则随扫描结果下发（`src/skills/taxonomy.js#isDefaultEnabledSkillId` → 每个技能的 `defaultEnabled`）。Renderer 只经 IPC `skills:enabled-get` / `skills:set-enabled` 读写，旧版 `localStorage` `diecloud.skills.enabled.v1` 仅在首次启动搬一次。
 - **技能本质**：主要是 system prompt 知识；部分解锁工具（如天气）。
 - **预装 MCP**：`src/mcp/registry.js`。目前只预装 `mcp-postgres`（`bundledServer`，npm 包 + 平台二进制随安装包分发，`ELECTRON_RUN_AS_NODE` 启动，密钥走环境变量）。叠云 Open API 四件套（`mcp-daizhang` / `mcp-tools` / `mcp-index` / `mcp-pixel`）与 6 个第三方 npx 模板自 2026-11 起**不再预装**，改为用户按需接入（设置页「新增远端」或 Agent 工具 `mcp_manage`）；原先支撑四件套的 `src/mcp/servers/dieyun-open-api/` 与 `src/mcp/open-api-deploy-env.js` 已随之下线（预装只剩 manifest 产物一种形态）。
 - **插件通道已下线**：曾有的 `src/plugins/`（宿主 + 工具注入 + 生命周期钩子）与内置目录、`plugins.*` RPC、设置页已整体删除。第三方工具只有 MCP 一条路；`onAgentTurnEnd` / `onPlanRan` 两个事件钩子在真实的钩子作者出现之前不保留抽象——需要时按当时的实际需求重做，而不是先揣测一个进程外钩子协议。

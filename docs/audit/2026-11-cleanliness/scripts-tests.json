@@ -1,0 +1,205 @@
+{
+  "domain": "scripts/ + test/ + .github/workflows（代码整洁度）",
+  "verdict": "不通过。本域没有自动滑窗命中，但实地读下来有 1 处 P0：一个「测试」把自己要测的生产逻辑抄进脚本里再断言副本（且已与生产漂移）——等于该模块零真实覆盖。另有 4 处 P1：同一提交里落的重复测试、全仓零引用的调试脚本兼第六份 safeStorage 解密路径、CI 上恒 SKIP 的 3 个 core 依赖套件、30 个 test/verify 闸门既不进 CI 也不在任何 CODEMAP suite。结构性问题（69 个手写 smoke 与 246 个 vitest 两套体系并行；test-alive.cjs 单函数 1896 行）属 P2 需分批。",
+  "stats": "scripts/ 138 文件（其中 test-*.cjs 69 个 / 21045 行）；test/ 255 文件（test/unit 246 个 / 40384 行，vitest include=test/unit/**/*.test.cjs）；.github/workflows 仅 ci.yml 51 行；package.json 145 个 npm script，CI 只显式调 8 个（check:contracts / lint:agent / verify:core-contracts / check:js / check:renderer / test:agent + 2 条 cargo 双特性）；30 个 test:*/verify:* 闸门不在 CI 也不在 CODEMAP suites；40/69 个 smoke 脚本 require 的 src 模块同时被 test/unit 引用；scripts/ 与 test/unit 同名 5 组，逐组核过：1 组全重复、1 组半重复、2 组在注释里明确分工、1 组分不同入口。",
+  "findings": [
+    {
+      "title": "test-composer-queue-edit.cjs 把 renderer-composer-queue 的生产逻辑抄进脚本再断言副本（已漂移）",
+      "severity": "P0",
+      "category": "重复实现（已漂移）",
+      "evidence": [
+        "scripts/test-composer-queue-edit.cjs:10-46 —— 脚本自己定义 newComposerQueueItemId / normalizeComposerQueueItem / normalizeComposerQueueList / reorderById 四个函数，全文件 require 只有 'assert'（:8），从不 require 生产模块",
+        "scripts/test-composer-queue-edit.cjs:26 —— 副本的 attachments 语义是 `Array.isArray(raw&&raw.attachments) ? raw.attachments.slice() : []`",
+        "src/renderer/renderer-composer-queue.js:59-63,84 —— 生产用 cloneQueueAttachments() → cloneAttachmentSnapshot()（renderer-attachments.js:34）做附件快照克隆；副本只有浅 slice，非数组时返回 [] —— 同一语义两份且已经不同",
+        "src/renderer/renderer-composer-queue.js:654-666 —— 生产 reorderComposerQueueItem(sessionId,id,toIndex) 有一条副本里根本不存在的业务规则：:656 `if (editingIdFor(sid) === String(id||'')) return false`（正在编辑的条目不许挪），另加 persistComposerQueues()/updateComposerQueueUi() 副作用",
+        "scripts/test-composer-queue-edit.cjs:80-88 —— 脚本断言的是自己那份 reorderById/rev 语义，所以 :656 这条规则、持久化、UI 刷新全部零覆盖",
+        "test/unit 里 grep 'renderer-composer-queue' 零命中 —— 919 行模块在 vitest 单测体系里没有任何测试，唯一「测试」就是这份副本"
+      ],
+      "why": "这是整洁度口径 1 的最坏形态：同一语义两份实现，且副本已被当成「事实来源」——测试全绿只能证明副本自洽。生产侧 rev 计数、编辑互斥、附件克隆任一漂移都不会红；而发送队列是用户可见路径。",
+      "subtraction": "删掉脚本里那四个函数，改成从 src/renderer/renderer-composer-queue.js 取实现（该模块是 renderer 脚本，需要 vm 沙箱装载，可复用 test/unit/lib/load-renderer-fmt.cjs 那种装载方式），把断言改成对生产实现的断言；随后把 scripts/test-composer-queue-edit.cjs 整体并入 test/unit/renderer-composer-queue.test.cjs，删 package.json:51 的 test:composer-queue。",
+      "verify": "npx vitest run test/unit/renderer-composer-queue.test.cjs；改 :656 的 editingIdFor 判据应能让新测试变红（变异验证）。",
+      "effort": "M"
+    },
+    {
+      "title": "会话交接同一个功能落了两份同语义测试（脚本 109 行 / 单测 117 行）",
+      "severity": "P1",
+      "category": "重复实现（测试）",
+      "evidence": [
+        "scripts/test-session-handoff.cjs:3-8 —— 自述「钉住三件事：快照是确定性投影 / 判断在前原文在后 / 注入块有定界标签 + `<` 转义」",
+        "test/unit/session-handoff.test.cjs:5-11 —— 同三件事逐条重述，可逐句对应",
+        "scripts/test-session-handoff.cjs:41-42 —— buildSnapshot([],500)==='' 与空白正文用例；test/unit/session-handoff.test.cjs:68-86 —— 同一组空态用例，但用更严的 EMPTY_SESSION / EMPTY_HANDOFF 错误码",
+        "scripts/test-session-handoff.cjs:88-97 与 test/unit/session-handoff.test.cjs:107-108 —— `<handoff>` 定界与「不得执行」断言两边各写一遍",
+        "git: 5506a46「feat(agent): 会话交接摘要」一个提交同时带入 scripts/test-session-handoff.cjs(+109) 与 test/unit/session-handoff.test.cjs 的变更",
+        "docs/CODEMAP.json:1767-1769 —— pathRule 把 src/agent/session-handoff.js 只映到 test:session-handoff，即改这个模块时 npm test 跑的是要删的那一份，更全的单测反而不会被选中",
+        "package.json:76 —— test:session-handoff 定义；该闸门也不在 CI 也不在 CODEMAP suites"
+      ],
+      "why": "两份守同一批断言，脚本这份唯一多出的是 audit.handoff.from、`\\u003c` 转义形态、`</handoff>` 只出现一次三条；其余全被单测覆盖且更严。留着就是每次改交接要维护两处、且改了单测不会影响 CODEMAP 选中项。",
+      "subtraction": "把上面三条断言搬进 test/unit/session-handoff.test.cjs 后删 scripts/test-session-handoff.cjs 与 package.json:76；docs/CODEMAP.json:1769 把 test:session-handoff 换成 test:unit。",
+      "verify": "npx vitest run test/unit/session-handoff.test.cjs；npm run check:contracts（CODEMAP 与 npm scripts 一致性闸门）。",
+      "effort": "S"
+    },
+    {
+      "title": "dev-decrypt-ssh-pw.cjs 全仓零引用，且是 safeStorage 解密路径的又一份手写实现（失败还以 exit 0 收场）",
+      "severity": "P1",
+      "category": "死代码 + 重复实现",
+      "evidence": [
+        "scripts/dev-decrypt-ssh-pw.cjs:30-37 —— 自己 readFileSync(ssh-profiles.json) + Buffer.from(row.secretEnc,'base64') + safeStorage.decryptString + 直接 writeFileSync(明文,{mode:0o600})，全程绕过 src/secret-store.js",
+        "src/ssh/credentials-store.js:10-22 —— 生产侧加解密只是转调 createSecretStore（唯一实现），并有 onCorrupt / 0600 / 原子写语义；scripts 这份自成一套",
+        "scripts/dev-decrypt-ssh-pw.cjs:39-42 —— catch 里只 console.log('DECRYPT_FAIL …') 然后 app.exit(0)：解不出来时调用方/脚本看到的是成功退出",
+        "全仓检索（排除 node_modules/build/.git）只在本文件 :10、:29 的用法注释里出现 —— 零调用点、无 npm script、无文档引用",
+        "git fd5dd1a「feat(ssh): 连接参数/认证/跳板/结果语义收敛」一并提交后就再没被改过或被引用"
+      ],
+      "why": "既是死代码（口径 2），又是凭据解密路径的第六份实现（口径 1/6）。它还会把明文密码写进 %TEMP%，而且失败退出码是 0 —— 真出问题时会静默留一个空/旧文件给真机验收脚本。",
+      "subtraction": "删文件。若确实还需要真机取一次密码，就用 electron 跑一个只调 src/secret-store.js 读接口的一次性命令（文档写在 docs/ 里），不要在 scripts/ 留第二份解密实现。",
+      "verify": "grep -r 'dev-decrypt-ssh-pw'（含 .gitignore 外全仓）→ 0 命中；npm run check:contracts 仍绿。",
+      "effort": "S"
+    },
+    {
+      "title": "CI 上 npm run test:agent 恒 SKIP 三个 core 依赖套件，且以 exit 0 通过",
+      "severity": "P1",
+      "category": "死代码（闸门从不执行）+ 错误被吞掉",
+      "evidence": [
+        "scripts/test-agent-smoke.cjs:22-31 —— REQUIRES_CORE 手抄清单（8 个脚本名）",
+        "scripts/test-agent-smoke.cjs:99-103 —— allowSkip 且 resolveDieyunCoreBinary() 为 null 时只 console.log('SKIP …') 然后 return，不计失败",
+        "scripts/test-agent-smoke.cjs:156 —— 运行套件时一律 allowSkip:true",
+        ".github/workflows/ci.yml:24-37 —— npm ci 之后依次 check:contracts / lint:agent / verify:core-contracts / check:js / check:renderer / test:agent，**没有任何 cargo build 或 pack:dieyun-core**；cargo 两条在 :44-51，排在 test:agent 之后",
+        ".gitignore:9 —— build/dieyun-core/ 被忽略，CI 工作区里不可能有预置二进制",
+        "docs/CODEMAP.json:2041-2098 suites.agent 里在册的 test:core-bridge(:2047) / test:request-snapshot(:2072) / test:planner-e2e(:2080) 因此永远走 SKIP 分支"
+      ],
+      "why": "这不是「少跑几条」，而是三条闸门在唯一自动化环境里恒不执行、还返回成功 —— 与空 catch 同型。request-snapshot 的落库语义、core-bridge、planner-e2e 目前没有任何机器保护。",
+      "subtraction": "二选一且都不加机制：①CI 在 test:agent 之前加 `cargo build -p dieyun-core` 并 export DIEYUN_CORE_BIN（cargo 步骤本来就在，只是顺序）；②给 smoke runner 加 --no-skip，CI 用它，让缺 core 变成红。不要再往 REQUIRES_CORE 里加名字。",
+      "verify": "CI 日志里 grep 'SKIP test:' 应为 0；本地 DIEYUN_CORE_BIN 指向不存在路径时 npm run test:agent --no-skip 应非零退出。",
+      "effort": "S"
+    },
+    {
+      "title": "30 个 test:*/verify:* 闸门既不进 CI 也不在任何 CODEMAP suite；其中至少 5 个是纯函数、本可免费进 CI",
+      "severity": "P1",
+      "category": "死代码（闸门未接线）",
+      "evidence": [
+        ".github/workflows/ci.yml:9-51 —— 全仓唯一 workflow，跑的闸门就是 :27/:29/:31/:33/:35/:37 六条 + cargo 两条",
+        "docs/CODEMAP.json:2041-2098 suites.agent（56 项）、:2033-2040 suites.minimal（6 项）、:2099-2158 agent-full（57 项）—— 不含下表中的任何一项",
+        "不在 CI 也不在 suite 的 test:*（16 个）：test:renderer-csp / test:composer-queue / test:phase5-handlers / test:sandbox-real / test:browser-smoke / test:project-memory-file / test:session-handoff / test:core-event-channel / test:desktop-camera / test:reviewer-json / test:rust-agent-loop / test:llm-reconnect-retry / test:rust-planner-pipeline / test:remote-worktree-live / test:tool-bridge-delegate / test:dieyun-core-pack",
+        "不在 CI 也不在 suite 的 verify:*（14 个）：verify:bundled-skills / verify:asar / verify:remote-pack / verify:remote-agent-socket / verify:remote-agent-fs / verify:mcp-bundled / verify:vector-cache-reuse / verify:index-timing-local / verify:index-timing-ssh / verify:index-effectiveness / verify:headless-pack / verify:headless-deb / verify:headless-apt / verify:tool-validators",
+        "反例（说明不是「必须手动」）：scripts/test-reviewer-json.cjs:3-9 纯函数断言；scripts/test-llm-reconnect-retry.cjs:3-11 纯函数；scripts/test-project-memory-file.cjs:3-9 自述「这里只测纯函数」；scripts/test-tool-bridge-delegate.cjs:3-7 用本地 mock gateway；scripts/test-phase5-handlers-smoke.cjs:6-10 用 scripts/lib/test-gateway-harness.cjs（本地进程）",
+        "确属环境受限的（保持手动没错）：scripts/test-renderer-csp.cjs:3-15 需要真 Chromium/Playwright；scripts/verify-remote-gateway-pack.cjs:7-9 读打包产物 resources/remote-gateway-pack",
+        "package.json:152 —— verify:tool-validators 是 `generate-tool-validators.cjs --check`，即 N2.1 的生成物过期闸门，同样不在 CI"
+      ],
+      "why": "闸门存在但不被任何自动化调用，等于把「跑没跑」交给人的记性；且 package.json 里同时躺着 generate:X 与 verify:X --check 成对定义，看起来有保护，实际没人跑。NODE-THINNING-PLAN 的验收口径默认这些闸门在 CI 上。",
+      "subtraction": "两步减法：①5-6 个纯函数脚本迁进 test/unit/（vitest 已被 suites.agent 的 test:unit 覆盖，等同免费进 CI），删对应 npm script；②把只读的 --check 型闸门（verify:tool-validators / verify:mcp-bundled / verify:asar / verify:remote-pack）加成一个 ci.yml step。不为「跑不到的闸门」再添开关。",
+      "verify": "npm run check:contracts 不因删除而红（CODEMAP 引用需同步）；ci.yml 里每个 verify:* 步骤应当能在干净 checkout 上直接跑通。",
+      "already_on_record": "部分在册：MODULE-CHAOS-REVIEW.md:195 明确把 `scripts/`（63 个 test + 打包链）列为尚未审计的区域；NODE-THINNING-PLAN.md:69 只把 verify:core-contracts 写进 CI，:87 的 verify:tool-validators 从未进 CI —— 本轮把缺口落成具体清单。",
+      "effort": "M"
+    },
+    {
+      "title": "test-alive.cjs：1989 行单文件、单个 main() 约 1896 行、47 用例横跨 9 个模块 8 个验收面",
+      "severity": "P2",
+      "category": "超长函数 / 职责混杂",
+      "evidence": [
+        "scripts/test-alive.cjs:88 —— `async function main() {` 开始；:1986 `main().catch(...)` 结束 —— 单函数约 1896 行",
+        "scripts/test-alive.cjs:3-15 —— 自述 A–H 八个互不相干的验收面（漂移 / 相位 / 张力 / 阈值 / 决策 / 30 天运行 / 疲劳口径 / 感官）",
+        "scripts/test-alive.cjs:22-38 —— 一次 require 九个 src/alive/* 模块 + session-context + llm-usage-recorder",
+        "scripts/test-alive.cjs:47-86 —— ok()/okAsync()/mkTmp()/seededRng()/testCfg() 五个自造辅助，全部只为这一个函数服务",
+        "47 个 `ok(` / `okAsync(` 用例（计数）全压在同一个函数体内；文件头自称「单元测试」，却以 scripts/ 下的手写 runner 形式存在，不属于被 CI 覆盖的 test:unit"
+      ],
+      "why": "改 alive 的任一子模块都要在近 2000 行的同一函数里定位与插入用例；断言失败时调用栈只指向一个巨大函数，定位成本高。这也是「测试与实现同居以致阅读成本高」的典型（口径 3/8）。",
+      "subtraction": "按 A–H 拆成 test/unit/alive-{vitals,phase,tension,waker,decide,runtime,senses}.test.cjs（vitest 已被 CI 覆盖），scripts/ 只留一个跑 30 天整链路的 smoke。",
+      "verify": "拆完后 npx vitest run test/unit/alive-*.test.cjs 覆盖原 47 条；npm run test:alive 应只剩整链路一条。",
+      "effort": "L"
+    },
+    {
+      "title": "test-headless-desktop-ui.cjs 的存在理由已被 test/unit/headless-desktop-ui.test.cjs 覆盖（半重复）",
+      "severity": "P2",
+      "category": "重复实现（测试）",
+      "evidence": [
+        "scripts/test-headless-desktop-ui.cjs:6-10 —— 唯一的立项理由：「shim 是模板字符串生成的 JS，反引号会提前闭合模板，产物语法坏掉而 node --check 查不出来」",
+        "scripts/test-headless-desktop-ui.cjs:30 —— `assert.doesNotThrow(() => new Function(shim))` 就是这条理由的落地",
+        "test/unit/headless-desktop-ui.test.cjs:133-140 —— 「替身真跑一遍」用 `vm.runInNewContext(shim, sandbox)` 执行同一份 shim，语法坏一样会抛；:141-184 还断言 gatewayRpc/onGatewayEvent 形状与能力诚实性",
+        "scripts/test-headless-desktop-ui.cjs:47-57 —— 剩下的独有断言只是 shim 字符串包含 'desktop.set_workspace' 等 RPC 名（字符串包含式检查）",
+        "package.json:148 —— test:headless-desktop-ui；该脚本也在 suites.agent / agent-full 里，即 CI 会跑重复的那一半"
+      ],
+      "why": "两份都守「shim 必须合法且形状对」，单测那份更强（真执行 + 形状断言）。脚本留着只增加一处需要同步维护的字符串白名单。",
+      "subtraction": "把 :47-57 的 RPC 名清单与 tricky 路径/空 workspace 两个边界搬进 test/unit/headless-desktop-ui.test.cjs 的一个 it()，删 scripts/test-headless-desktop-ui.cjs 与 package.json:148，并从 docs/CODEMAP.json 的 suites 与 pathRules 里摘掉该名字。",
+      "verify": "npx vitest run test/unit/headless-desktop-ui.test.cjs；npm run check:contracts。",
+      "effort": "S"
+    },
+    {
+      "title": "两套并行测试体系：69 个手写 smoke（21045 行）与 246 个 vitest（40384 行），只有后者被 test:unit 固定覆盖",
+      "severity": "P2",
+      "category": "职责混杂 / 体系分裂",
+      "evidence": [
+        "规模：scripts/test-*.cjs 69 个文件 21045 行（`[System.IO.File]::ReadAllLines` 计数）；test/unit 246 个文件 40384 行；vitest.config.cjs:6 include 只认 test/unit/**/*.test.cjs",
+        "40/69 个 smoke 脚本 require 的 src 模块同时被 test/unit 引用（按 require 路径程序化统计）；即同一批模块两套体系各测一遍",
+        "同名 5 组逐一核过：session-handoff=全重复；headless-desktop-ui=半重复（本清单单列）；headless-desktop-turn / request-snapshot / scm-service=互补（scripts/test-headless-desktop-turn.cjs:3-10 走 set_workspace 真路径、test/unit/headless-desktop-turn.test.cjs:3-11 只测桌面轮边界；test/unit/request-snapshot.test.cjs:6-8 明确写「落库见 scripts/test-request-snapshot.cjs」；scripts/test-scm-service.cjs:4-11 明确写为什么要真跑 git）",
+        "纯函数断言却放在 smoke runner 里的例子：scripts/test-reviewer-json.cjs:3-9、scripts/test-llm-reconnect-retry.cjs:3-11、scripts/test-project-memory-file.cjs:3-9、scripts/test-composer-queue-edit.cjs（还抄了实现）",
+        "两套的 runner 语义也不同：smoke 用手写 assert + process.exit(1)（69 个脚本里 37 个自定义 function assert(、42 个自带 process.exit(1)），vitest 那套有 globals/forks/串行配置（vitest.config.cjs:1-13）"
+      ],
+      "why": "没有一条判定规则说「什么样的测试该放哪」，于是同名、同模块、同断言在两边生长；连带后果是 CI 只覆盖其中一套，另一套只能靠人记得敲 npm run test:xxx（见本清单 P1 那条 30 个闸门）。",
+      "subtraction": "只立一条判定并执行：需要真 core 进程 / 真机 / Electron / 硬件 / 外网 → 留 scripts/；纯函数与可 mock → 迁 test/unit 并删 npm script。不为「统一」新造第三套 runner。",
+      "verify": "迁移后 scripts/test-*.cjs 数量应显著下降，且每个残留脚本头部都能一句话说明「为什么不能用 vitest 跑」。",
+      "already_on_record": "MODULE-CHAOS-REVIEW.md:195 把 scripts/（63 个 test + 打包链）列为未审计区域，本轮给出规模与抽样结论；REDUNDANCY-REVIEW C 节（伪冗余清单）不涉及测试目录。",
+      "effort": "M"
+    },
+    {
+      "title": "inventory-tool-validate.cjs 的前提已被自家决策文档推翻，产出数字也已漂移（1128 / 787 / 817 三个版本）",
+      "severity": "P2",
+      "category": "陈旧一次性脚本（口径 7/2）",
+      "evidence": [
+        "scripts/inventory-tool-validate.cjs:3-8 —— 自述任务：「回答这 1128 行里，哪些是 schema 一句话就能表达的机械校验」，产出 docs/TOOL-VALIDATE-INVENTORY.md",
+        "docs/TOOL-VALIDATE-DECISION.md:11 —— 小节标题「先纠正一个前提（盘点结论有误）」；:23 说明盘点脚本把「schema 解析不到」记成了「schema 为空」",
+        "docs/TOOL-VALIDATE-DECISION.md:85 —— 记录当时 tool-validate.js 1128 → 787 行；实测当前 src/agent/tool-validate.js 为 817 行（[System.IO.File]::ReadAllLines 计数）—— 与 1128、787 都不一致",
+        "scripts/inventory-tool-validate.cjs 的分类口径（:10-18「机械 · required / enum / type / range；跨字段 · conditional；语义 · 必须人写」）与 scripts/lib/tool-validate-dualrun.cjs:31 起的差异分类是两份各自演进的口径",
+        "package.json:113 —— inventory:tool-validate；该脚本无任何自动调用点（不进 CI、不进 suite、只在 docs/TOOL-VALIDATE-INVENTORY.md 里被提及）"
+      ],
+      "why": "一次性盘点脚本的结论已被自己的决策文档判为「前提有误」，它产出的 md 里的行数也已过期三轮；继续留在 scripts/ 且挂着 npm script，只会让下一个人重新按错口径数一遍。",
+      "subtraction": "删 scripts/inventory-tool-validate.cjs、package.json:113 与 docs/TOOL-VALIDATE-INVENTORY.md；若要留取证，把它降级成 docs/archive/ 里的一份历史记录并注明「前提已被 TOOL-VALIDATE-DECISION §0 推翻」。分类口径只保留 dualrun 那一份。",
+      "verify": "grep 'inventory-tool-validate|TOOL-VALIDATE-INVENTORY' 仅剩 archive 说明；npm run generate:tool-validators 与 test:tool-args 不受影响。",
+      "effort": "S"
+    },
+    {
+      "title": "test-alive.cjs 自行声明 TICK = 300*1000，与 agent-limits 的 aliveTickIntervalMs 构成第二份数字",
+      "severity": "P3",
+      "category": "魔法数字（应进既有单一来源）",
+      "evidence": [
+        "scripts/test-alive.cjs:40-42 —— 本地定义 HOUR / DAY / TICK，TICK = 300 * 1000",
+        "src/agent/agent-limits.js:480 —— aliveTickIntervalMs: 300000（生命感数字的唯一来源，:478 已声明「越界由 alive/runtime.js#resolveAliveConfig 夹取」）",
+        "scripts/test-alive.cjs:36 已经 require AGENT_LIMITS_DEFAULTS 并在 :96 等处用它取 alive* 数字 —— 说明改成读单一来源成本为零，只是这一处漏了",
+        "scripts/test-alive.cjs:149-174 —— 相位切换用例用 TICK 推进模拟时钟，若生产 tick 间隔改掉，测试仍按 5 分钟步长跑，口径会静默分叉"
+      ],
+      "why": "口径 4 的直接违反：测试在模拟生产节拍，却自己写死节拍值。",
+      "subtraction": "`const TICK = AGENT_LIMITS_DEFAULTS.aliveTickIntervalMs;`，HOUR/DAY 若 agent-limits 已有对应键也一并取。",
+      "verify": "改 agent-limits 的 aliveTickIntervalMs 后，test:alive 的模拟步长应跟着变（可用断言 TICK === AGENT_LIMITS_DEFAULTS.aliveTickIntervalMs 锁住）。",
+      "effort": "S"
+    },
+    {
+      "title": "CI 里 lint:agent / check:js / check:renderer 各跑两遍（独立 step + test:agent 的 suite）",
+      "severity": "P3",
+      "category": "重复执行",
+      "evidence": [
+        ".github/workflows/ci.yml:29 —— name: Agent lint (narrow) / run: npm run lint:agent",
+        ".github/workflows/ci.yml:33 —— JSDoc check (scoped) / npm run check:js",
+        ".github/workflows/ci.yml:35 —— Renderer static checks / npm run check:renderer",
+        ".github/workflows/ci.yml:37 —— Agent smoke / npm run test:agent → scripts/test-agent-smoke.cjs --all（:123-124 取 map.suites.agent）",
+        "docs/CODEMAP.json:2092-2094 —— suites.agent 里第一段就是 \"lint:agent\" / \"check:js\" / \"check:renderer\"，因此同一次 CI 任务里这三项各被执行两次"
+      ],
+      "why": "同一份闸门在同一个 job 里跑两次，既费 CI 分钟也让「哪一步是权威」变得含糊；且改动 suite 时容易误以为 CI 已经不跑。",
+      "subtraction": "删 ci.yml 里这三个 step（保留 :27 check:contracts / :31 verify:core-contracts，它们不在 suite 里），或在 suite 里拿掉这三项并把 step 顺序固定。推荐前者：一份清单（CODEMAP suites）决定跑什么。",
+      "verify": "对比改动前后 CI 日志里 eslint / tsc / python check 的出现次数各为 1。",
+      "effort": "S"
+    },
+    {
+      "title": "verify:bundled-skills 名字是校验，实际是会写盘的生成脚本（且没有 --check 分支）",
+      "severity": "P3",
+      "category": "命名与行为不符（生成物/手写混放）",
+      "evidence": [
+        "package.json:12 —— \"verify:bundled-skills\": \"node scripts/prepare-bundled-skills.mjs\"",
+        "scripts/prepare-bundled-skills.mjs:2-4 —— 自述「构建前准备核心预装技能：裁剪非核心技能；缺失时尝试 vendor / curated 同步」",
+        "scripts/prepare-bundled-skills.mjs:79 —— fs.writeFileSync 落盘；全文件没有 process.argv / --check / --verify 分支（grep 无命中）",
+        "对照既有口径：package.json 里 generate:tool-validators 与 verify:tool-validators（:152，generate…--check）、generate:rpc-catalog 与 verify:rpc-catalog 都是「生成 + --check」成对"
+      ],
+      "why": "把会改仓库的脚本挂在 verify: 前缀下，等于给了「只读校验」的错误承诺；放进任何 CI/预检脚本都会让工作树变脏，而输出仍是一句成功。",
+      "subtraction": "二选一：改名 prepare:bundled-skills；或给它加 --check（只比对 CORE_REQUIRED 是否齐、内容是否一致，不写盘）并让 verify:bundled-skills 走 --check。写盘入口只留一个。",
+      "verify": "npm run verify:bundled-skills 后 git status --porcelain 应为空。",
+      "effort": "S"
+    }
+  ]
+}

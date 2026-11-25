@@ -1,0 +1,152 @@
+{
+  "domain": "当前未提交改动 + 未跟踪新增文件（diff / new files）",
+  "verdict": "中上。新增模块的单一来源意识明显好于仓库平均水平（trace-graph 纯函数只有一份、skills/enabled-store 是唯一权威、wecom-media 把 AES 解密与判型收在一处、判定卡的 phase 名共享常量、MCP 传输键改成从 mcp/manage.js 派生）。但同一批改动里仍长出四类旧病：①远端 per-run worktree 的「归档 → 删目录（留分支）」循环在 Main 桥与新 ssh 模块各写一遍；②「侧模型判定卡」的结构在 Renderer 与 Main 各拼一份，只有 phase 名共享；③护栏数字又回到模块内局部常量（planner-router 四个 + fan_out 的 12），而同一批的 plannerRunWorktreeKeep 却正确进了 agent-limits；④Renderer 又长出第三套滚动跟随状态机与三处「bundle 缺失就降级」的兜底（REDUNDANCY A8 已判掉）。未发现 P0：dist 产物已同步（bundle.js / agent-bundle.js 都含新符号），plannerRouter* 虽未进 model-settings DEFAULTS 但因 normalize 保留未知键而未致丢失。",
+  "stats": "git status: 166 个已跟踪文件改动（+7918 / -2250）、30 个未跟踪新增（8 个源码 + 17 个单测 + 3 份 archive 文档 + build/audit/）；行数用 [System.IO.File]::ReadAllLines().Count 实测：planner-router 243、trace-graph 247、wecom-media 124、renderer-trace-graph 583、enabled-store 91、remote-run-worktree 528、agent-mode 55、examples/trace-graph-preview.html 189、planner-main-bridge 369（原约 160）、renderer-thinking-trace-dom 1417。已读并对照四份既有结论：REDUNDANCY-REVIEW-2026-11-03（含 C 节伪冗余）、NODE-THINNING-PLAN（§6 负向清单）、ARCHITECTURE-DEBT、MODULE-CHAOS-REVIEW。本域无 8 行滑窗自动命中，全部为人工核对。",
+  "findings": [
+    {
+      "title": "远端 per-run 副本「归档每个 role 再删目录（必须留分支）」的循环写了两份",
+      "severity": "P1",
+      "category": "重复实现",
+      "evidence": [
+        "src/agent/planner-main-bridge.js:199 —— worktreeCleanupRun 的远端分支：:203 listRunWorktreeRoles → :211 archiveRunWorktree → :219 removeRunWorktree({deleteBranch:false})（:224），逐 role 收集 ok/error 后在 :228 汇总",
+        "src/ssh/remote-run-worktree.js:410 —— pruneRunWorktreeRoots 对每个过期 run 跑同一串：:411 listRunWorktreeRoles → :415 archiveRunWorktree → :424 removeRunWorktree({deleteBranch:false})（:428）→ :432-439 空目录 rmdir",
+        "两份只差归档 message 文案与「roles 为空」分支的写法；失败处置（archived.ok / archived.missing → 保留副本、okRun 记账）逐条同义"
+      ],
+      "why": "「停止 / 回收时先把未提交改动提交进该 role 分支，再删 checkout，分支必须留」是同一语义，现在有两处实现。任一处改口径（比如将来把 archive 换成 merge、或给 deleteBranch 加例外、或改失败处置）另一处不会跟着改；这次改动本身就是同时引入这两份。",
+      "subtraction": "在 remote-run-worktree.js 里抽 archiveAndDropRunRoles(sshManager, {repoPath, runId, message})（内部 listRunWorktreeRoles → archiveRunWorktree → removeRunWorktree({deleteBranch:false}) → 空目录 rmdir），worktreeCleanupRun 与 pruneRunWorktreeRoots 各留一行调用，bridge 只传 runId。",
+      "verify": "npx vitest run test/unit/remote-run-worktree.test.cjs test/unit/planner-main-bridge.test.cjs；手工：SSH 会话跑一次 planner 后中途「停止」，确认 dieyun/agent-<run>-<role> 分支仍在、副本目录已删、再续跑能复用 runId。",
+      "effort": "S"
+    },
+    {
+      "title": "「侧模型判定卡」的结构在 Renderer 与 Main 各拼一份，只有 phase 名是共享的",
+      "severity": "P1",
+      "category": "重复实现 / 层级越界",
+      "evidence": [
+        "src/renderer/renderer-agent-send.js:445 —— buildPlannerJudgeTraceEntry 组装 {round:0, phase, thought, fullThought, tools:[]}，:454 自己拼 `【判定模型思考】` 包装，:455 另塞一个 planJudge:true",
+        "src/agent/rust-planner-runner.js:488 —— routeNoteEntry 组装同一张卡，:495 同样拼 `【判定模型思考】`，但 thought 兜底文案是另一句（`侧模型判定：拆成多路并行走 planner` vs Renderer 的 `不拆，按普通工具循环跑`）",
+        "src/agent/agent-round-text.js:86 —— 只有 PLANNER_ROUTE_PHASE 一个常量被共享（:93 另造 PLANNER_HANDOFF_PHASE）；卡片结构本身没有单一来源",
+        "全仓搜 planJudge 只命中写点 renderer-agent-send.js:455 与 dist 产物（src/renderer/dist/bundle.js:55738），无读者"
+      ],
+      "why": "「这一轮拆不拆」是同一张卡的两半，现在两半各写一次结构 + 各写一套兜底文案；AGENTS 原则 5 把 trace 整形定在 Main、Renderer 只展示，这里却是 Renderer 往 run.result.trace 里插节点（正是 MODULE-CHAOS-REVIEW §4.1(1)「Renderer 是 Agent 账本写者之一」的同一形态，只是这次新加了一个入口）。",
+      "subtraction": "agent-round-text.js 出 buildPlannerRouteCard({verdict:'use'|'skip'|'handoff', reason, thinking}) 纯函数（现在已有 PLANNER_ROUTE_PHASE / PLANNER_HANDOFF_PHASE 两常量可复用），Renderer 与 planner 都调它；删两处内联对象与 planJudge 标记。",
+      "verify": "npx vitest run test/unit/fan-out-handoff.test.cjs；node scripts/test-rust-planner-smoke.cjs（已断言「拆」与「中途改道」两种 phase 同形）。",
+      "effort": "S"
+    },
+    {
+      "title": "新增模块把护栏数字写成模块内常量，绕开 agent-limits 单一来源",
+      "severity": "P1",
+      "category": "魔法数字",
+      "evidence": [
+        "src/agent/planner-router.js:26 ROUTER_TIMEOUT_MS=20000、:28 ROUTER_MAX_OUTPUT_TOKENS=256、:30 ROUTER_USER_TEXT_MAX_CHARS=2000、:108 ROUTER_THINKING_MAX_CHARS=1200，四个都留在模块内且全部经 module.exports（:234-236）对外",
+        "src/agent/main-tools/agent-mode.js:18 FAN_OUT_MAX_SUBTASKS=12 —— 这是「subtasks 最多留几条」的唯一约束：src/agent/catalog/session.js:155 的 subtasks 数组没有 maxItems",
+        "src/agent/agent-limits.js:318 plannerRunWorktreeKeep: 20 —— 同一批改动里这个数就正确进了 agent-limits（注释还写「机制预算，故意不进 SCHEMA」），说明这批改动同时存在两种口径"
+      ],
+      "why": "AGENTS 原则 6 与 agent-limits 既有惯例都表明这类数属于同一处：同类「一次小请求的时长 / 条数上限」已经在那里（synthesisTimeoutMs:155、sessionTitleTimeoutMs:160、readinessRpcTimeoutMs:35、peerSendTimeoutMs:81）。留在模块里意味着用户改不了、别的模块要用只能再抄一遍，下一个并行实现必然再写一个 20000。",
+      "subtraction": "搬成 plannerRouterTimeoutMs / plannerRouterMaxOutputTokens / plannerRouterUserTextMaxChars / plannerRouterThinkingMaxChars / fanOutMaxSubtasks；删模块内常量及其导出（同时解决下方的死导出）；给 subtasks 补 maxItems，让 schema 生成器带进 tool-validate.generated.js。",
+      "verify": "npm run test:agent-limits；npm run generate:tool-validators + npm run verify:tool-validators；npx vitest run test/unit/planner-router.test.cjs test/unit/fan-out-handoff.test.cjs。",
+      "effort": "S"
+    },
+    {
+      "title": "Renderer 又长出三处「bundle / 桥缺失就降级」的兜底（REDUNDANCY A8 已判掉）",
+      "severity": "P2",
+      "category": "降级层 / 兜底层",
+      "evidence": [
+        "src/renderer/renderer-agent-send.js:446-449 —— AgentRoundText 不在就把 phase 写成字面量 '调度 · 侧模型判定'（与 agent-round-text.js:86 各一份）",
+        "src/renderer/renderer-agent-send.js:464-468 —— readFanOutHandoff：没有 AgentRoundText.findFanOutRequest 就 return null（:462 注释自陈「这里只做 bundle 兼容」）",
+        "src/renderer/renderer-agent-send.js:768-771 —— agentApi.agentPlannerRoute 不存在就编一条 {use:false, reason:'当前入口没有路由判定（旧版桥），按不拆处理'}"
+      ],
+      "why": "三处都只在「生成物过期」时生效，而那时正确行为是立刻失败（重建 bundle），不是让功能静默消失。768-771 尤其糟：判定被跳过时用户只看到「不拆」，与「判定失败 / 超时」在界面上不可区分。",
+      "subtraction": "三处改成直接调用并在符号缺失时抛（与 renderer-model-settings / renderer-agent-llm 现在的写法一致，缺失即暴露），删掉字面量 phase 兜底。",
+      "already_on_record": "REDUNDANCY-REVIEW-2026-11-03.md:69（A8「删 Renderer 内联兜底（bundle 缺失即抛）」与该文 P0 执行记录第 7 条：renderer-agent-llm.js 的三条端点规则 + Content-Type/Bearer 兜底已删）。结论现在仍成立、且本次改动把同一形态加了回来；dist/agent-bundle.js 随仓库提交，缺符号只可能是没重建。",
+      "verify": "npm run check:renderer；npm run build:renderer:dev 后手工发一条消息，确认思考区仍出现判定卡 + 不拆时也能看到理由。",
+      "effort": "S"
+    },
+    {
+      "title": "子 Agent 卡片的滚动跟随即长出第三套状态机（与 chat-scroll 的单一来源重复）",
+      "severity": "P2",
+      "category": "重复实现 / 层级",
+      "evidence": [
+        "src/renderer/renderer-thinking-trace-dom.js:1091-1133 —— bindIsolatedCardFollowIntent 自己绑定 wheel / touchmove / pointerdown(滚动条) / keydown 四类「用户接管」事件，意图位是 DOM dataset data-cardFollowYield（:1095、:1128-1130）",
+        "src/renderer/renderer-chat-scroll.js:451-494 —— 既有唯一来源 markChatUserScrollIntent 绑定的是同一批事件，意图位是 chatUserScrollSeq（:20）",
+        "src/renderer/renderer-thinking-trace-dom.js:1073-1074 —— 24px 贴底判据第三份；:1151-1194 —— 阻尼逼近公式与 renderer-chat-render.js:85 同一式（都用 SCROLL_DAMP_TAU_MS）"
+      ],
+      "why": "三份「贴底 + 用户一滚就让位 + 阻尼」各自判「用户是不是接管了」：任何一次手感调整（阈值、让位策略、阻尼时间常数）都要改三处；两套意图位（dataset vs chatUserScrollSeq）意味着朗读跟随 / 聊天跟随看不到卡片内的滚动。",
+      "subtraction": "把「跟随容器贴底」抽成一个函数（接收容器 + 既有滚动意图源），聊天区与卡片正文共用；删 data-card-follow-yield，统一读 chatUserScrollSeq（它已经是用户滚动的唯一来源）。",
+      "already_on_record": "docs/MODULE-CHAOS-REVIEW.md:109 已记「滚动贴底/跟随 2 套独立状态机 / 25 处」（chat-scroll vs chat-render），:136 规则 2「会话/运行态只许一个写者」。两条结论现在仍成立，且本次改动没有合流既有两套、而是加了第三套 —— 该文「两套合流到 renderer-chat-scroll.js」的减法因此更贵了。",
+      "verify": "npm run test:renderer（注意 check:renderer 不测行为）+ 手工六条：流式跟随 / 上翻不拽回 / 滚回贴底恢复跟随 / 子 Agent 多轮卡片 / 朗读跟随 / 切会话。",
+      "effort": "M"
+    },
+    {
+      "title": "plannerRouter* 三个配置键没进 model-settings 的 DEFAULTS/normalize，同族的 reviewer* 进了",
+      "severity": "P2",
+      "category": "单一来源 / 漂移面",
+      "evidence": [
+        "src/model-settings.js:52-56 —— reviewerEnabled / reviewerModel / reviewerBaseUrl / reviewerApiKey 在 DEFAULTS 显式列出，:286-289 在 normalize() 逐键 trim / 严格布尔（注释「只用显式值」）",
+        "src/model-settings.js:28-72 —— DEFAULTS 全表没有 plannerRouterModel / plannerRouterBaseUrl / plannerRouterApiKey；它们能落盘只是因为 normalize 第一行 `{ ...DEFAULTS, ...raw }` 保留了未知键",
+        "src/renderer/renderer-encoding-params.js:317-321 —— Renderer 另建字段表 PLANNER_ROUTER_FIELDS，:349 直接 saveSettings(settings) 写全局 settings",
+        "src/renderer/renderer-encoding-params.js:382 —— `.catch(() => {})`：从 Main 取存档失败时完全无声，界面就是三个空框"
+      ],
+      "why": "「有哪些侧模型配置键、怎么归一」现在有两套口径：显式契约（reviewer*）与靠 spread 兜住（plannerRouter*）。后者不会 trim/clamp（apiKey 带空格不会被裁），任何一天有人给 normalize 加白名单或收紧保留未知键的行为，判定模型配置就静默丢失，而用户只会觉得「填了没生效」。",
+      "subtraction": "三个键进 DEFAULTS + normalize（与 reviewer* 同样式），Renderer 只留标签与提示；:382 的空 catch 改成报错或至少一行 console.warn。",
+      "already_on_record": "docs/MODULE-CHAOS-REVIEW.md:402 记过同一件事的上一轮处理：reviewer* 四键「normalize 本来就保留未知键，现在把它们变成显式契约」。本次新增的 plannerRouter* 三键又回到依赖未知键透传的状态。",
+      "verify": "npx vitest run test/unit/model-settings*.test.cjs；手工：设置页填判定模型 → 保存 → 重启仍在；手改 model-settings.json 给 apiKey 加空格 → 保存后应被 trim。",
+      "effort": "S"
+    },
+    {
+      "title": "「正文里有没有残留工具调用标记」的判据两份，形态集合已经不一样",
+      "severity": "P2",
+      "category": "重复实现（已漂移）",
+      "evidence": [
+        "src/agent/agent-round-text.js:20-27 —— TOOL_CALL_MARKUP_RE 是宽判据：`</?(tool_calls?|invoke|function_call)`、`function=`、`<| |DSML| | invoke`、`|DSML|`，以及 antml / parameter 形态（:16-19 注释说明这是为修 2026-11-19 泄漏事故新放宽的）",
+        "src/llm-tool-call-fallback.js:22-31 —— 同一件事的形态集合另有 TOOL_CALL_OPEN_RE / TOOL_CALL_CLOSE_RE / DSML_BARS / DSML_TAG_PREFIX 四条正则；hasToolCallMarkupHint（:412）只认 <tool_call> / <tool_calls> / <invoke name=\" / <function= / <parameter name=\"",
+        "src/agent/live-loop-trace.js:177 —— 思考区展示走 fallback 侧 stripToolCallMarkup，不认识新宽判据里的 antml / parameter 形态，这类泄漏会原样进 trace"
+      ],
+      "why": "两处共同决定「这段是不是泄漏正文」，但形态表各写一份且已分叉：宽判据本次多认 3~4 种形态，剥除/提取侧不认。下次再加形态只改一边，就回到「判出泄漏但不剥除」或「剥掉了却判没泄漏」两种半真半假的状态。",
+      "subtraction": "把「什么算工具调用标记」的形态表提成一处（零依赖模块或 agent-round-text 导出，fallback require 它），normalizeToolCallMarkup 的替换表与 hasToolCallMarkupHint 从同一张表派生；「抽取工具调用」与「判是否泄漏」两个语义仍分开，别合并。",
+      "verify": "node scripts/test-llm-tool-call-fallback.cjs + npx vitest run test/unit/agent-round-text*.test.cjs；补一条夹具：`<antml:invoke name=\"fs_read_file\">` 经 stripToolCallMarkup 后应为空串。",
+      "effort": "M"
+    },
+    {
+      "title": "planner-main-bridge 变成「本地 + 远端编排」混合体，且两处 catch 后 return null 无痕迹",
+      "severity": "P2",
+      "category": "职责混杂 / 错误被吞",
+      "evidence": [
+        "src/agent/planner-main-bridge.js 实测 369 行（改动前约 160）：coordinator 桥（:64-143）+ 6 个 worktree 方法的本地/远端分派（:149-330）+ 远端 prune/finalize 编排（:247-313）三类职责同居",
+        "src/agent/planner-main-bridge.js:31-36 —— remoteTarget() 里 `catch { return null }`：解析远端目标失败即静默按本机跑（SSH 会话会去建本机 worktree）",
+        "src/agent/planner-main-bridge.js:46-61 —— sweepRunResidue 里 try/catch 与 `.catch(() => null)` 两重静默；:66 `void sweepRunResidue(meta)` 连 promise 都不留"
+      ],
+      "why": "这条链路的失败模式全是「悄悄换成另一条路」，而两条路在用户侧看起来一样 —— 出问题时没有一行日志可对照。回收那条尤其讽刺：它存在的理由就是「残留没人收」（注释引 19 份 worktree / 171 条分支），失败静默等于回到事故现场。",
+      "subtraction": "远端编排搬回 src/ssh/remote-run-worktree.js（它已经是这段语义的家），bridge 只留「有 remote → 调 X，否则调 worktreeService」的一行分派；三处 catch 至少留一行带原因的日志，或把 error 放进返回值让 runStart 侧能看见。",
+      "verify": "npx vitest run test/unit/planner-main-bridge.test.cjs；手工：断开 SSH 后跑 planner，日志里应能看出「远端不可用 → 走本机」。",
+      "effort": "M"
+    },
+    {
+      "title": "新增文件里的死导出与纯透传包装（4 处）",
+      "severity": "P3",
+      "category": "死代码",
+      "evidence": [
+        "src/agent/main-tools/agent-mode.js:18 + :55 —— FAN_OUT_MAX_SUBTASKS 被导出，全仓无外部读点（只有本文件 :41 自用）",
+        "src/ssh/remote-run-worktree.js:25 + :527 —— repoRemotePathOf 从 remote-worktree 转手再导出一遍；真实调用点都走 require('../ssh/remote-worktree').repoRemotePathOf（gateway/server.js:60、session-worktree.js:9、worktree/actions.js:5 等），没有一处从这个入口取",
+        "src/channels/wecom-media.js:110-118 —— sniffImageMime 是 sniffImageMimeFromBytes 的同签名空壳（注释自陈「这里只保留一个同签名包装」），唯一调用点 agent-turn.js:184 可直接 require guardrails-shared",
+        "src/skills/enabled-store.js:25 + :82 —— version: 1 只写不读（readEnabledMap 不看 version，也没有迁移分支）"
+      ],
+      "why": "导出面越大，「这个符号还有没有用」的判断成本越高；NODE-THINNING-PLAN N4.1 那条「零调用点导出」闸门正是为这类残渣准备的，但它目前只覆盖 Renderer，Main/ssh/channels 侧的残渣没人扫。",
+      "subtraction": "删 FAN_OUT_MAX_SUBTASKS 的导出（数字搬进 agent-limits，见上方那条）、删 repoRemotePathOf 的转手导出、删 sniffImageMime 包装（agent-turn.js:184 改为 require ../agent/guardrails-shared 的 sniffImageMimeFromBytes）、enabled-store 要么读 version 做迁移要么不写。",
+      "verify": "npm run check:js；npx vitest run test/unit/wecom-media.test.cjs test/unit/remote-run-worktree.test.cjs test/unit/fan-out-handoff.test.cjs test/unit/skills-enabled-store.test.cjs。",
+      "effort": "S"
+    },
+    {
+      "title": "同一张子 Agent 卡片的状态文案两份，且已经不一样（轮数只在面板侧出现）",
+      "severity": "P3",
+      "category": "重复实现（已漂移）",
+      "evidence": [
+        "src/renderer/renderer-subagent-panel.js:148-161 —— subagentCardStatusLabel 输出「已完成 · N 轮 · N 步」",
+        "src/renderer/renderer-thinking-trace-dom.js:462-465 —— thinkingRoundSummaryParts 对同一张卡输出「已完成 · N 步」（本次改动还把思考预览从标题里摘掉了）"
+      ],
+      "why": "两处描述同一个对象的同一状态；这次只更新了思考区那份（摘掉 preview），面板那份没跟，于是同一屏里同一张卡片有两种说法（一个带轮数、一个不带）。",
+      "subtraction": "状态文案收进一个函数（或经 agent-bundle 共享），两处都调；确需区分（面板知道整轮状态）就把差异做成参数，而不是两份实现。",
+      "verify": "npm run test:renderer；手工跑一次带子 Agent 的运行，对比侧栏卡片标题与思考区标题文案。",
+      "effort": "S"
+    }
+  ]
+}

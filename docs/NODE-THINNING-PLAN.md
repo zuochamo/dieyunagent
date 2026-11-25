@@ -131,7 +131,7 @@
 
 ## 5. 切片 N4 · 删掉没有调用点的面
 
-### N4.1 新增「渲染层零调用点导出」闸门 · 规模 S
+### N4.1 新增「渲染层零调用点导出」闸门 · 规模 S · **已完成（2026-11-21）**
 
 | | |
 |---|---|
@@ -139,14 +139,16 @@
 | **动什么算完** | 新脚本 `scripts/check-renderer-dead-exports.cjs`：对 `index.html` 加载的每个脚本的顶层声明做调用点计数（同文件 + 跨文件 + `window.X`），零调用点的列出来；接进 `npm run check:renderer`（先以「报告 + 白名单」形式，清完再转硬失败） |
 | **风险** | 动态引用（拼字符串取函数名）会误报 → 白名单要写理由；宁可先报告不拦 |
 | **验证** | `npm run check:renderer` |
+| **落地记录（2026-11-21）** | 脚本已建（扫描 118 个 `index.html` 脚本；白名单 `scripts/renderer-dead-exports-allow.json`，当前 0 条），已接进 `check:renderer`，**直接以严格模式上线**（先清干净再拦）：同批删掉了 20 处零调用点声明（约 245 行）+ 3 处死 `window.X` 别名。正向对照已验（临时加一个死函数 → FAIL；删掉 → OK）。已知盲区写在脚本头部：`agent-bundle-entry.js` 打进 dist 的那批模块，导出经 `DieyunNamespaces.register({...})` 成对象，对象字面量里出现名字就算被引用，那里判不出死导出。 |
 
-### N4.2 合并 `renderer-agent-api.js`（7 行） · 规模 S（10 分钟）
+### N4.2 合并 `renderer-agent-api.js`（7 行） · 规模 S（10 分钟） · **已完成（2026-11-21）**
 
 | | |
 |---|---|
 | **现状证据** | `src/renderer/renderer-agent-api.js` 全文只有一句 `window.cleanupSessionContinueState = cleanupSessionContinueState;`，函数定义在 `renderer-agent-continue.js`；文件名与内容已经对不上（这是 LV 遗留的「API 层」） |
 | **动什么算完** | 这行搬进 `renderer-agent-continue.js` 尾部（与 `window.kickGoalTurn` 等同类写法放一起），删文件 + 删 `index.html` 里的 `<script>` |
 | **验证** | `npm run check:renderer`、`grep -r cleanupSessionContinueState src/renderer` |
+| **落地记录（2026-11-21）** | 文件已删（连 `index.html` 的 `<script>`、`src/renderer/README.md` 一行、`docs/CODEMAP.json` 两处）。那行**没有搬**——`cleanupSessionContinueState` 在 `renderer-agent-continue.js` 里是顶层函数声明（脚本拼接作用域下本来就是全局），`renderer-chat-state.js` 直接按裸名字调它，`window.X` 别名没有任何读者，搬过去只是把死代码换个位置。 |
 
 ### N4.3 复核重试层归属（只核不改） · 规模 S
 

@@ -1,0 +1,153 @@
+{
+  "domain": "single-source（AGENTS.md「唯一来源」声明实测核对，横切）",
+  "verdict": "抽查 14 条「唯一来源」声明：11 条实测成立（llm-request 端点/头、tool-gate 关卡顺序、agent-round-text.resolveTurnDelivery、resolveFsTarget 判定本体、syncBrowserBounds 唯一写者、peer/boot 装配、alive 只读白名单、default-workspace-gc、sweepRunArtifacts、session-workspace-bind 已修、peer actions 两表）；3 条不成立——main-turn-runner「Main 侧跑一轮唯一」（计划走 plan-agent-runner，系统提示另拼）、getRemoteFs「远端 fs 唯一出口」（fs/lsp handler 自判传输）、agent-limits「数字唯一」（四处自写默认值，键已存在）。另有一条声明之外的重复：远端/本地分支前缀 dieyun/agent- 两份声明。",
+  "stats": "抽查声明 14 条 · 成立 11 · 违反 3 · 发现 8 条（P0×2 / P1×2 / P2×2 / P3×2）· 已读并遵守 REDUNDANCY-REVIEW-2026-11-03（含 C 节伪冗余）、NODE-THINNING-PLAN 负向清单、ARCHITECTURE-DEBT、MODULE-CHAOS-REVIEW、CODE-CLEANLINESS-REVIEW-2026-11-21",
+  "findings": [
+    {
+      "title": "AGENTS.md:58「main-turn-runner 是 Main 侧跑一轮的唯一实现（频道/计划/headless 共用）」不成立：计划走第二套 runPlanAgentLoop，系统提示自己另拼一份",
+      "severity": "P0",
+      "category": "重复实现（同一轮语义两份，且已语义分叉）",
+      "evidence": [
+        "AGENTS.md:58 —— 声明 src/agent/main-turn-runner.js 是「Main 侧跑一轮的唯一实现，频道/计划/headless 共用」",
+        "src/plans/runner.js:68 —— 计划运行实际走 return runPlanAgentLoop(ctx, plan)，完全不经过 runMainTurn",
+        "src/plans/plan-agent-runner.js:158 —— 系统提示在本文件手拼：const sysContent = await buildPlanSystemMessage(...)（定义在 :23-50：ASSISTANT_IDENTITY + 【定时计划 Agent】人格 + 计划名 + dieyun 块 + skills）",
+        "src/agent/main-turn-runner.js:249-257 —— 会话轮的系统提示走单一来源 buildPrepSystemPromptDeps(...).prepSystemPrompt(...)（该装配产出 AGENTS 项目规则 / 记忆召回 / 代码召回 / 共享记忆 / goal 事实块 / turnRide）",
+        "src/plans/plan-agent-runner.js:52-64 与 src/agent/main-turn-runner.js:261-268 —— 「memory.messages_recent(limit 120) → 过滤 user/assistant → 归一 created_at」同一段历史加载逻辑两份",
+        "src/plans/plan-agent-runner.js:66-73 与 src/agent/main-turn-runner.js:269-273 —— 消息装配的 helpers 也两份：计划侧手接 stripUserMeta/stripAssistantMeta，会话侧用 unpackMessageMeta",
+        "src/plans/plan-agent-runner.js:186 —— 下半截（runRustAgentLoop / turnEndSynthesis / 压缩）确实共用，只有提示词与历史装配是两份"
+      ],
+      "why": "不只是文件两份，而是**模型可见规则分叉**：计划轮拿不到 prepSystemPrompt 那一族块（项目 AGENTS.md 规则、记忆/代码召回、共享记忆、goal 事实、turnRide），于是同一个仓库里「用户当面问」与「定时计划里跑」看到的准则不同。AGENTS.md 表格要求 system prompt 只在 agent-system-prompt.js / system-prompt-prep.js 一份，这条正是被绕开的那一处。",
+      "subtraction": "让 runPlanAgentLoop 退化成「给 runMainTurn 传计划专属参数」的薄壳：人格段/计划名/trigger==='goal' 的 GOAL_TOOLS 用 runMainTurn 已有的 extraTools + snapshot 通路传进去，删 buildPlanSystemMessage / loadSessionMessages / buildPlanCompletionMessages（约 50 行）。计划与聊天从此共用同一份提示词装配。",
+      "verify": "npm run test:unit（plans-*.test.cjs）+ 一次 goal 型计划真跑：断言 plan 轮的 sysContent 含 prepSystemPrompt 既有块且【定时计划 Agent】人格段仍在；对比 runSource:plan 的请求快照前后 diff，确认没有意外丢块。",
+      "already_on_record": "docs/CODE-CLEANLINESS-REVIEW-2026-11-21.md:136（§五 第 2 批第 5 条「main-turn-runner 与 plan-agent-runner 的骨架合并（或退一步：先修 AGENTS.md:58 的声明）」）—— 现在**仍成立**（plan-agent-runner.js 仍 309 行、runner.js:68 仍走它）；本条补上「系统提示为何不同」的证据与减法路径。",
+      "effort": "M"
+    },
+    {
+      "title": "AGENTS.md:61/62「getRemoteFs 是远端 fs 唯一出口、handler 不许自己判 SFTP/RPC」不成立：fs.grep / fs.glob / lsp-workspace 各判一遍",
+      "severity": "P0",
+      "category": "层级越界（Gateway handler 自己判「本机还是远端」/ 自选传输）",
+      "evidence": [
+        "AGENTS.md:61 —— 声明 src/gateway/rpc.js:getRemoteFs() 是「唯一出口」，避免列明「在 handler 里自己判『用 SFTP 还是 RPC』」",
+        "AGENTS.md:62 —— 避免列明「在 handler 里各写一份 startsWith('local:') 或各判一次 getRemoteFs()」",
+        "src/gateway/rpc.js:1248-1274 —— 唯一出口本体：target.kind + getRemoteAgentInfo + isRemoteAgentUsable 在这里只判一次，返回 remote-agent-fs（transport rpc）或 remote-fs（transport sftp）",
+        "src/gateway/handlers/fs.js:821-822 —— fs.grep 自己再判一次：getRemoteAgentInfo() + isRemoteAgentUsable(agentInfo)",
+        "src/gateway/handlers/fs.js:826 —— 判完直接 getRemoteAgentClient(agentInfo).call('fs.grep', ...)，绕过适配器",
+        "src/gateway/handlers/fs.js:836-852 —— 又自己 target.remote.transport === 'sftp' 分支到 grepViaRemoteExec（= handler 自选传输）",
+        "src/gateway/handlers/fs.js:893-902 —— fs.glob 同形：先 getRemoteAgentInfo()/isRemoteAgentUsable，再 getRemoteFs() 取 remote.transport === 'sftp'",
+        "src/gateway/handlers/lsp-workspace.js:164-165 —— 同形的第三处（getRemoteAgentInfo + isRemoteAgentUsable 后直连 RPC）",
+        "src/gateway/remote-agent-fs.js:124 / src/gateway/remote-fs.js:158 —— 两个适配器都自带 transport 标识，说明「谁被选中」本已由 getRemoteFs 决定"
+      ],
+      "why": "「远端 Agent 可用吗 / 这一批文件走哪条传输」有两份判定：一份在 getRemoteFs，一份在三个 handler。handler 读到的 transport 又恰好是 getRemoteFs 选的，所以今天答案一致——但这正是 A8 记的形态：改 getRemoteFs 的口径（例如把 grep/glob 收进适配器接口）不会带动这三处，下一次漂移就是「同一操作两个答案」。",
+      "subtraction": "把 grep / glob 补进两个适配器接口（remote-agent-fs → fs.grep RPC；remote-fs → 现有 grepViaRemoteExec / globViaRemoteExec），handler 只留 if (target.remote) return target.remote.grep(...)；删 fs.js:821-853、fs.js:893-902、lsp-workspace.js:164 三段自判。适配器形状本来就是「同接口」的既定设计，不是新增机制。",
+      "verify": "npm run test:local-gateway-smoke + test:unit（grep-oversize-hint）；「有远端 Agent」与「只有 SFTP」两种 SSH 会话各跑一次 fs_grep / fs_glob，断言结果字段与今天一致且 index.notify_change 仍由 transport 决定。",
+      "already_on_record": "docs/REDUNDANCY-REVIEW-2026-11-03.md:65（A8 第二行，当时写 handlers/fs.js:739-753，行号已漂到 821-853）标「未修」；docs/CODE-CLEANLINESS-REVIEW-2026-11-21.md:137（第 6 条「Gateway 侧『本机还是远端』的第二来源收回到唯一判定」）—— 现在**仍成立**。",
+      "effort": "M"
+    },
+    {
+      "title": "「数字只在 agent-limits.js」仍有四处自写默认值，而四处对应的既有键都已存在、装配点也已在传值",
+      "severity": "P1",
+      "category": "魔法数字该进既有单一来源（且是永不命中的副本）",
+      "evidence": [
+        "src/plans/scheduler.js:27-28 —— this.idlePollMs = opts.idlePollMs > 0 ? opts.idlePollMs : 60 * 1000；this.idleQuietMs = ... : 5 * 60 * 1000",
+        "src/agent/agent-limits.js:45-46 —— 同一语义的正本 plansIdlePollMs: 60 * 1000、plansIdleQuietMs: 5 * 60 * 1000",
+        "src/main/mcp-plans-boot.js:288-289 —— 唯一生产装配已经传 idlePollMs / idleQuietMs（于是 scheduler 那两行永不命中）",
+        "src/agent/rust-loop-runner.js:330-332 —— createRunStallWatchdog 的缺省 warnMs 5 * 60 * 1000、abortMs Math.max(warnMs, 45 * 60 * 1000)",
+        "src/agent/agent-limits.js:139-140 —— 正本 runStallWarnMs / runStallAbortMs 同值；唯一调用点 src/agent/rust-loop-runner.js:453-455 已经传 stallLimits.runStallWarnMs / runStallAbortMs",
+        "src/agent/knowledge-maintainer.js:1406 —— Number(ctx.limits().knowledgePlanApplyWaitMs) || 20 * 60 * 1000",
+        "src/agent/knowledge-maintainer.js:1493 —— Number(ctx.limits().knowledgeIdleRetryMs) || 5 * 60 * 1000",
+        "src/agent/agent-limits.js:443 / :445 —— 正本 knowledgePlanApplyWaitMs: 20 * 60 * 1000、knowledgeIdleRetryMs: 5 * 60 * 1000",
+        "src/agent/session-context.js:551-552 —— 同文件里仍有 maxTurns : 8、maxChars : 14000 两个字面量闭包，而 :646-648 注释自陈「这里不再各写一份字面量」"
+      ],
+      "why": "四处都是「键已存在 + 装配点已传值 + 再抄一份同值」的兜底。它们今天不生效，但一旦 limits 键被删/改名，静默回到旧值——正是 REDUNDANCY 结论 4 说的「实证违规」，也是 AGENTS.md 原则 2 明令禁止的兜底层形态。",
+      "subtraction": "照同仓正例 src/agent/mutate-queue.js:37-44 的 resolveStallMs（取不到即抛）改：scheduler 两行、watchdog 两个缺省、knowledge-maintainer 两处 || 全部改成「缺键抛错」或删缺省让唯一调用点必传；session-context:551-552 同样收进 agent-limits 或改抛。",
+      "verify": "npm run test:agent-limits + test:unit（plans-idle-queue 显式传 idlePollMs:10，不受影响）+ test:rust-loop-runner（注意 test/unit/run-stall-watchdog.test.cjs:82 那条无参构造会变成抛错，需改成显式传值）。",
+      "already_on_record": "docs/REDUNDANCY-REVIEW-2026-11-03.md:126（§B 第 2 条，当时写 plans/scheduler.js:27-28、rust-loop-runner.js:601,603、knowledge-maintainer.js:1264）—— 数字一处都没改，只是行号漂移（watchdog 现 330-332、knowledge 现 1406/1493），现在**仍成立**。",
+      "effort": "S"
+    },
+    {
+      "title": "`dieyun/agent-` 分支前缀有两份声明，其中一份在同一行注释里自称「唯一来源」",
+      "severity": "P1",
+      "category": "魔法字符串（本地/远端必须同口径，却各写一次）",
+      "evidence": [
+        "src/git/worktree-service.js:31-36 —— 注释「Agent worktree 分支命名空间。唯一来源：创建分支、判断归属、回收分支都引用它」+ const AGENT_BRANCH_PREFIX = 'dieyun/agent-';",
+        "src/ssh/remote-worktree.js:23 —— 同值再声明一次 const BRANCH_PREFIX = 'dieyun/agent-'（:58 用它拼远端分支名）",
+        "src/ssh/remote-worktree.js:233 —— 再以 AGENT_BRANCH_PREFIX: BRANCH_PREFIX 导出，src/ssh/remote-run-worktree.js:24 从这里取",
+        "src/workspace/target.js:152 —— 路径/目录形状已声明为「本地 / 远端共用」规则所在地；src/remote/remote-pack-layout.js:29 已把该文件打进远端包（= 现成的共享落点）",
+        "src/git/worktree-service.js:33-34 —— 注释记录的历史事故正是「创建用一处字面量、回收用另一处 → 回收静默匹配 0 个分支」"
+      ],
+      "why": "本地 worktree 与远端 worktree 必须同一前缀（远端收尾 commit/merge 回会话副本全靠它）。现在口径两处书写，而 worktree-service 的注释把「唯一来源」写在了只有本地那一半的文件里——下次改前缀，远端那一份不会跟着动，重现的是同一条静默失效。",
+      "subtraction": "把 AGENT_BRANCH_PREFIX 提到 src/workspace/target.js（远端包已含、且本来就是「本地/远端共用形状」的家），worktree-service 与 ssh/remote-worktree 都从那里 require，删 ssh 侧的 BRANCH_PREFIX 与 re-export。",
+      "verify": "npm run test:worktree + npm run test:remote-pack；grep 全仓后 dieyun/agent- 字面量只剩一处定义。",
+      "already_on_record": "无（REDUNDANCY-REVIEW §C 把 path/target 一类列为「已是单一来源」——这里是那个结论的漏网项）",
+      "effort": "S"
+    },
+    {
+      "title": "三档档位名与中文标签在 Renderer 里另有一份字面量，SANDBOX_MODES / SANDBOX_MODE_META 没有镜像通道，label 已经两版字",
+      "severity": "P2",
+      "category": "魔法字符串该进既有单一来源 + 层级越界（Renderer 自留护栏常量）",
+      "evidence": [
+        "src/gateway/sandbox-policy.js:31 —— SANDBOX_MODES = ['read-only','workspace-write','danger-full-access']；:34 —— DEFAULT_SANDBOX_MODE = 'workspace-write'；:36-61 —— SANDBOX_MODE_META 带中文 label",
+        "src/renderer/renderer-permissions.js:417 —— let lastNonDangerMode = 'workspace-write'",
+        "src/renderer/renderer-permissions.js:421 —— 自己列一遍档位集合 if (v === 'read-only' || v === 'workspace-write')（= SANDBOX_MODES 去掉 danger，手抄）",
+        "src/renderer/renderer-permissions.js:427 —— 再写一次缺省 const value = dangerToggle === true ? 'danger-full-access' : mode || 'workspace-write'",
+        "src/renderer/renderer-sandbox-approval.js:22-26 —— 另抄一份 label 表：'工作区内可写'，而 sandbox-policy.js:47 的是 '工作区内可写（默认）'（已经不同字）",
+        "src/agent/tool-gate.js:364 与 :402 —— 心跳轮把档位名当字面参数写死 mode: 'workspace-write'（刻意收窄，但没有具名常量说明这是收窄而非用户档位）",
+        "src/gateway/permissions-store.js:43 是正例：sandboxMode 直接取 DEFAULT_SANDBOX_MODE、归一走 normalizeSandboxMode（同进程可达，所以没有副本）"
+      ],
+      "why": "档位名是跨 Renderer / Gateway / tool-gate 三层的判定输入，而 Renderer 侧没有既有镜像通道可用（sandbox-policy 未进 agent-bundle），只能手抄；label 已经出现两种写法。AGENT-STRATEGY.md:69 明写「Renderer 不再留任何判定/常量」。",
+      "subtraction": "照既有通道（agent-bundle 的 window.Dieyun*，REDUNDANCY 结论 2 已确认这是既定做法）把 SANDBOX_MODES / DEFAULT_SANDBOX_MODE / SANDBOX_MODE_META.label 镜像给 Renderer，两处改引用；tool-gate 的 'workspace-write' 换成具名常量并加一行「刻意收窄，不跟用户档位」。",
+      "verify": "npm run check:renderer（window 导出声明）+ npm run test:renderer；设置页三档点选、危险档来回切、越界审批卡文案各看一次。",
+      "already_on_record": "部分：docs/REDUNDANCY-REVIEW-2026-11-03.md 结论 2 只确认了「agent-bundle 通道存在」，没有点名档位名；docs/SANDBOX.md 未列此项。",
+      "effort": "S"
+    },
+    {
+      "title": "resolveFsTarget 链上的 getRemoteAgentInfo 吞掉异常返回 null：远端目标会静默退化成「没有远端 Agent」",
+      "severity": "P2",
+      "category": "错误被吞掉（catch 后 return null 无痕迹）",
+      "evidence": [
+        "src/gateway/rpc.js:946-955 —— function getRemoteAgentInfo() { ... try { return ctx.getRemoteAgentInfo(callSid) } catch { return null; } }，无日志、无 errorCode",
+        "src/gateway/rpc.js:1288 —— resolveFsTarget 的唯一输入里就含 getRemoteFs()，而 getRemoteFs 在 :1270-1271 吃这个 null 决定走 RPC 还是 SFTP",
+        "src/gateway/handlers/fs.js:821-822 —— 同一个 null 也会让 fs.grep 直接掉到本机分支",
+        "AGENTS.md:62 —— 明令避免项「按路径形状猜『这大概是本机』（SSH 到 Windows 时会静默读写错机器）」是同一形态"
+      ],
+      "why": "这个返回值决定「这批文件操作去哪台机器」。抛错被折成 null 之后，一次真实故障的表现是「本机找不到这个文件」，与「远端会话写错机器」的失败形态无法区分；空 catch 也违反仓里「不吞错误」的既定口径（tool-gate.js:27 同款表述）。",
+      "subtraction": "不吞：记一次 warn（带 callSid）后原样上抛，或返回结构化 {ok:false, code:'REMOTE_AGENT_INFO_FAILED'} 由调用方明说；不加任何重试/兜底。",
+      "verify": "注入一个会抛的 ctx.getRemoteAgentInfo 跑 test:local-gateway-smoke，断言 fs_write_file / fs_read_file 报错而不是静默写本机。",
+      "already_on_record": "无",
+      "effort": "S"
+    },
+    {
+      "title": "trace 相位名「汇总」在 Rust 与 Node 各写一遍字面量，没有 agent-shared.json 键，而 Node 的交付四态正靠这个字符串匹配",
+      "severity": "P3",
+      "category": "魔法字符串（Node 与 Rust 两侧都要用的常量未收进 agent-shared）",
+      "evidence": [
+        "src/agent/agent-round-text.js:75 —— const SYNTHESIS_PHASE = '汇总'；:101 —— NON_MODEL_PHASES = new Set([SYNTHESIS_PHASE, '完成验收'])",
+        "src/agent/agent-round-text.js:129 —— 按 NON_MODEL_PHASES.has(phase) 跳过相位（决定哪些 trace 段不算模型思考/正文）",
+        "crates/dieyun-runtime/src/planner/run.rs:471 —— push_trace(run, \"汇总\", \"验收通过，正在生成最终答复…\")；:482 / :489 / :499 / :574 四处同样以 \"汇总\" 作相位名",
+        "crates/dieyun-runtime/src/planner/trace.rs:197 —— obj.insert(\"tracePhase\".into(), json!(\"汇总\"))",
+        "src/agent/agent-shared.json —— 已有 llmErrors.transportCode / contextOverflowPatterns 这类跨语言键的先例，唯独相位名没有",
+        "src/renderer/renderer-thinking-trace.js:589-592 —— Renderer 也从 AgentRoundText.SYNTHESIS_PHASE 取（Node 侧已单一来源，缺的只是 Rust 那一侧）"
+      ],
+      "why": "相位名是「这条 trace 是不是模型轮」的判定输入：Rust 发射、Node 匹配、Renderer 展示三方共用同一串中文。任一侧改名都不会有编译/测试失败，只会让汇总轮被当成真思考或真正文——静默改变交付语义（AGENTS.md 原则 5 的核心）。",
+      "subtraction": "在 src/agent/agent-shared.json 增 phases.synthesis（Node 经 shared-constants.js、Rust 经 shared.rs 读同一份；npm run check:shared-constants 会验两侧都有读点），Rust 的 push_trace 与 Node 的 SYNTHESIS_PHASE 都改读常量。",
+      "verify": "npm run check:shared-constants + npm run test:rust-planner-smoke + test:agent-round-text（都已有）。",
+      "already_on_record": "无",
+      "effort": "S"
+    },
+    {
+      "title": "tool-gate.js:23 注释里的行号引用已经漂了 1100 行（引 tool-bridge-main.js:1944，实际 820）",
+      "severity": "P3",
+      "category": "陈旧注释 / 注释复述代码位置",
+      "evidence": [
+        "src/agent/tool-gate.js:23 —— 注释写「它由调用方作为 after 关卡传入（tool-bridge-main.js:1944 的 sanitize-result）」",
+        "src/agent/tool-bridge-main.js:820 —— sanitize-result 关卡实际在这里（该文件全文 858 行，1944 行不存在）",
+        "src/agent/tool-bridge-main.js:153 —— sanitizeToolResultForApi 本体在这里"
+      ],
+      "why": "这类行号引用没有任何机械校验，审计时会被当成真实现位置去找（MODULE-CHAOS-REVIEW §八 item 4 曾因同类假注释修过一轮：当时的错误是「sanitize 在 guardrails-shared」）。位置类断言应写函数名/关卡 id，不写行号。",
+      "subtraction": "把该行改成「调用方以 after 关卡传入（tool-bridge-main.js 的 sanitize-result 关卡，必须晚于 record-browser-screenshot）」，去掉行号。",
+      "verify": "grep sanitize-result 两处一致即可，无需测试。",
+      "already_on_record": "docs/MODULE-CHAOS-REVIEW.md:54/§八 item 4 修过同一条注释的**归属**，但行号仍是错的——现在**仍成立**（只是残留更小）。",
+      "effort": "S"
+    }
+  ]
+}

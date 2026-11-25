@@ -89,15 +89,19 @@
 | **风险** | 别做成每轮动态调参的抖动源 |
 | **优先级** | 中低（精度问题，不是结构问题） |
 
-## 6. `request_snapshots` 每轮存整份 prompt · `未动`
+## 6. `request_snapshots` 每轮存整份 prompt · `已收口（2026-11-19：大字段内容寻址去重）`
 
 | | |
 |---|---|
-| **现状证据** | `crates/dieyun-memory/src/memory/snapshot.rs:41` `messages_json: String`（同表已存 `messages_hash` / `system_hash` / `tools_hash` / `truncated` / `system_text` / `tools_json`，见 `:44-49` 与 `:84-103` 的 INSERT） |
-| **为什么仍算债** | 已经分了 system / tools / messages 三块并带 hash，但 **messages 仍是整份 JSON 每轮落库**（曾占到库体 86%） |
-| **动什么算完** | 「hash 行 + 压缩 blob（或仅存 diff）」，同 hash 复用上一行；裁剪策略不变。压缩后仍要能还原出可比对文本（这是它的唯一用途：取证「模型看到了什么」） |
-| **2026-11-18 注意** | R2 之后出站请求体由 Rust 投影生成，而快照记录的是**投影前**的宿主副本（见 §12）—— 要么让快照记录投影后形状，要么在文档里明确「快照差一个 `reasoning_content`」 |
-| **优先级** | 中低 |
+| **现状证据（改前）** | `crates/dieyun-memory/src/memory/snapshot.rs`：`messages_json: String` 每轮整份落库，`system_text` / `tools_json` 也**逐轮内联**。只读探针实测（2026-11-19，线上库）：`request_snapshots` **413 MB / 626 MB（66%）**，其中 `tools_json` 88.6 MB / 1500 行但**只有 82 种内容**、`system_text` 6.8 MB / 65 种 |
+| **为什么仍算债** | 「同一个会话每轮发的 system / tools 是同一份」这件事没有任何结构表达 —— 拷 1500 次 |
+| **已实施** | 新表 `snapshot_blobs(hash → text)`（内容寻址）；行的 `system_text` / `tools_json` 改写 NULL，靠 `system_hash` / `tools_hash` 回查。NULL 的两种含义**不再靠推断**：hash 有 + blob 有 ⇒ 去重；hash 有 + blob 无 ⇒ 超上限没落库（这正是当年否掉「与上一行相同写 NULL」的三条理由，内容寻址一条都不碰） |
+| **迁移** | 新写入即刻生效；历史行由**修剪线程**每拍搬 400 行（`backfill_snapshot_blobs`，独立连接 + 固定节拍，不在启动路径上卡首屏）；读侧两种形状都认 |
+| **孤立清理** | `prune_request_snapshots` 删完行顺手清孤儿 hash —— 否则省下的体积会以另一种形状还回去 |
+| **实测收益** | 库副本上跑同一套 SQL + `VACUUM`：**626.4 MB → 461.7 MB（−164.6 MB / −26.3%）**；去重后正文只剩 5.4 MB（148 个 blob） |
+| **用例** | `dedupes_system_and_tools_by_hash`（两行只存一份、读回全文一致）· `over_cap_text_is_not_faked_back`（没落库就是 NULL）· `prune_drops_orphan_blobs` · `backfill_moves_legacy_inline_text_into_blobs`（搬运不改读侧结果） |
+| **仍未做** | `messages_json` 仍是整份每轮落库（198 MB）。它是**每轮都不同**的真实内容，去重/差分会引入读侧回放链 —— 与「旁路事实、不参与 replay」的定位冲突，**决定不做**；要再降只能压 `requestSnapshotKeepPerSession`（配置） |
+| **优先级** | 已关闭 |
 
 ## 7. 比 Rust 更旧的是 JS 这一侧 · `未动`
 
@@ -129,32 +133,38 @@
 
 ---
 
-## 10. 【新】`injectScore` 只是「分支内相对强度」· `需决策`
+## 10. `injectScore` 的量纲 · `已收口（2026-11-19）`
 
 | | |
 |---|---|
-| **现状证据** | `crates/dieyun-memory/src/memory/recall.rs`：语义分支 `cosine_inject_score`（绝对、可跨查询）、关键词分支 `keyword_inject_score`（`score / 本次最佳`，只能同查询内比）。宿主只看这一个字段（`src/agent/system-prompt-prep.js` 的 `MEMORY_INJECT_MIN_SCORE`） |
-| **为什么还算债** | 「语义 0.5 与关键词 0.9 谁更可信」仍无统一口径 —— 阈值是同一把尺，但两条分支的分数不是同一把尺 |
-| **动什么算完** | 需要一份**标定数据**（同一批查询下两类分支的命中重合度），据此定一个跨分支可比的映射。**纯代码解决不了**，别靠调阈值糊过去 |
-| **优先级** | 低（现有口径至少不再随查询词长度漂移） |
+| **当时的诊断** | 语义分支用余弦（绝对、跨查询可比），关键词分支用「相对本次最佳命中」（只能同查询内比），却由宿主用**同一个**阈值卡 |
+| **复核后的更正** | 「跨分支绝对可比」这个需求**不成立**：`memory.long_recall` 每次只返回**一个** mode（semantic / keyword / recent / none），两条分支的结果从不进同一个列表、也不互相排序。真正的问题是关键词分支**只有相对量** —— top 命中恒为 1.0，于是「任何命中」都等于满分（一条只蹭到一个常见词的长句每轮都会被注入） |
+| **已实施** | `crates/dieyun-base/src/fts.rs` 新增 `query_terms` / `term_coverage`（与 `match_query` 共用切分规则与 `MAX_TERMS`）；`memory/recall.rs` 的 `keyword_inject_score = 覆盖度 × 相对强度`。覆盖度是与语料无关的绝对量（查询 3 个片段、命中 1 个 = 1/3）—— 片段之间是 **OR**，所以「有命中 ≠ 对上了」。用例：`keyword_inject_score_is_coverage_times_relative`、`term_coverage_counts_matched_fragments`、`keyword_inject_score_discounts_partial_term_coverage`（端到端） |
+| **仍未做（且不是债）** | 「余弦 0.9 与关键词 1.0 谁更可信」依然没有答案，但**现在没人需要回答**（单 mode）。将来真要把两条分支合并成一份排序，才需要标定数据 |
+| **同形但另一套数据源** | 共享记忆（§11）仍是两个阈值：它在 PostgreSQL 上、打分在 `memory-shared/service.js`，与本地库这条链路不同源 —— 要统一得先给那边也造出 `injectScore` |
+| **优先级** | 已关闭 |
 
-## 11. 【新】共享记忆仍在用两把量纲不同的阈值 · `未动`
+## 11. 共享记忆仍在用两把量纲不同的阈值 · `已收口（2026-11-19：给 injectScore，但不合并阈值）`
 
 | | |
 |---|---|
 | **现状证据** | `src/agent/agent-limits.js` 的 `sharedMemoryMinScoreSemantic` / `sharedMemoryMinScoreKeyword`；消费点 `src/agent/system-prompt-prep.js` 的 `SHARED_MEMORY_MIN_SEMANTIC/KEYWORD`；打分在 `src/memory-shared/service.js`（PostgreSQL 一条召回 SQL，向量 + trigram 兜底） |
-| **为什么算债** | 与 §10 同形（两条通道量纲不同、各配一个绝对阈值），只是发生在另一套库上 |
-| **动什么算完** | 先看 `memory-shared/service.js` 的打分能否给 `injectScore`：能就给，然后合成一个阈值；不能就写清「为什么这里不能统一」 |
-| **优先级** | 中低 |
+| **复核结论（能做的那一半）** | 两种成分**都是 [0,1] 的有界相似度**（`1 − 余弦距离` / `pg_trgm similarity()`），所以可以给统一字段：`service.js` 现在每行返回 `injectScore ∈ [0,1]`，与本地长期记忆**同名同义**；宿主只读 `injectScore`、不再读 `score`（用例 `判定只看 injectScore：score 再高、injectScore 不够也不注入`） |
+| **不能合并的那一半（有结构原因）** | trigram 相似度量的是 `|A∩B|/|A∪B|` 的特例：**天花板随「查询/条目」长度比下降** —— 短查询配长条目永远到不了 0.3。若把两个阈值并成 0.32，无向量时的文本兜底会整段失效（而 `COALESCE` 的设计前提正是「没向量也能召回」）。所以保留 0.32 / 0.12 两个数，并在 `docs/SHARED-MEMORY.md` §4 写明「为什么这里和本地记忆不同（一个数 vs 两个数）」 |
+| **与 §10 的关系** | §10 那边能收成一个数，是因为本地两条分支**从不进同一批**、且关键词强度已经做到与语料无关；这里恰恰相反（同一批里混着两种相似度） |
+| **仍未做** | 想让 trigram 通道也有「与长度无关」的绝对强度，需要把查询也切成片段做覆盖度（与本地 `fts::term_coverage` 同形）—— 但 PG 侧没有等价的分词器（中文靠 trigram），要做就得在 Node 侧切词再下传，属另一张工单 |
+| **优先级** | 已关闭 |
 
-## 12. 【新】请求快照记录的是「投影前」的副本 · `半条`
+## 12. 请求快照记录的是「投影前」的副本 · `已收口（2026-11-19，决定「不搬装配，改成钉住差异」)`
 
 | | |
 |---|---|
-| **现状证据** | R2 之后出站形状唯一作者是 `crates/dieyun-runtime/src/agent/outbound.rs`（剥 `synthetic` / `reasoning`、补 `reasoning_content`、落 `stream_options`）；而快照由宿主 `src/agent/request-snapshot.js` 写，取自 `round.prepare` 交回的那份副本 —— 投影**之后**才发生 |
-| **后果** | 「模型看到了什么」与真实上行体差一个 `reasoning_content`（以及 `synthetic` 的剥离）。排障时容易对不上 |
-| **动什么算完** | 二选一：① `round.prepare` 的回包里带上 core 投影后的 messages（宿主只记录）；② 在快照行里加一列 `outbound_projection_version`，文档写明差异 |
-| **优先级** | 低（取证精度，不影响运行） |
+| **现状证据** | 出站形状唯一作者是 `crates/dieyun-runtime/src/agent/outbound.rs`（剥 `synthetic` / `reasoning`、补 `reasoning_content`、落 `stream_options`）；而快照由宿主 `src/agent/request-snapshot.js` 写，取自 `round.prepare` 交回的那份副本 —— 投影**之后**才发生 |
+| **决定（不搬、不加通道、不加列）** | ① 让 `round.prepare` 回包带「投影后 messages」要新增一次 core→宿主的完整 body 往返（每轮多搬一份，体积与今天的快照写库同量级）；② 把 `buildRequestSnapshotPayload` 搬进 core 会把 session / limits / contextAudit 三处**宿主专属事实**一起拖过去，属另一张工单（Node 变薄），且它带着 schema 与测试 |
+| **改成什么** | 把差异变成**被钉住的清单**：`outbound.rs` 新增用例 `projection_touches_only_the_documented_fields` —— 对同一份 body 求投影前后「被改动的路径」，断言恰好是 `messages[].synthetic` / `messages[].reasoning` / `messages[].reasoning_content` / `tools`（空数组整键删）/ `stream` / `stream_options`，并断言 `content` 一字未动。**往投影里加任何新改写，这条用例立刻红**，逼着回来同步文档 |
+| **文档** | `docs/REQUEST-SNAPSHOT.md` 新增「快照 vs 真正发出去的那一份」：逐条列这五项，并写明「快照里的信息 ⊇ 模型看到的」—— 唯一的内容级差异是 `reasoning` → `reasoning_content`（同值换名；缺值补占位串） |
+| **残留** | 需要「快照 = 实发字节」的场合（逐字节 replay 比对）仍然没有；那是另一件事，得连装配一起搬 |
+| **优先级** | 已关闭（取证精度，不影响运行） |
 
 ## 13. 【新】`planner/run.rs` 仍是单文件巨石 · `已完成（2026-11-18 拆三刀）`
 
@@ -173,6 +183,19 @@
 | **为什么算债** | 测试薄 + 职责杂：`longmem.rs` 同时管「写入即索引 / 近重复抑制 / 向量落库 / 写侧 await embedding」 |
 | **动什么算完** | 给 `projects.rs` / `longmem.rs` 各补最小用例（rekey 断言、无 embedding 分支、维度取自向量），再按「写入策略 / 向量索引」拆文件 |
 | **优先级** | 中低 |
+
+---
+
+## 15.【新】`llm_delta` 的载荷是「累计全文」 · `半条（合批已落地；协议改增量未做）`
+
+| | |
+|---|---|
+| **现状证据** | `crates/dieyun-runtime/src/agent/llm.rs` 的 `agent.delta` 只带**本片增量**（这是对的）；宿主立刻累积成全文再逐分片外发：`src/agent/rust-loop-runner.js:663-674`。下游全部按「累积值」消费：`src/renderer/renderer-agent-rust-loop.js`（`ev.data.content` 直接当正文）、`src/agent/live-loop-trace.js:172`、`src/plans/plan-run-events.js:176`、`src/headless/main.js:36`、`src/agent/main-turn-runner.js:311` |
+| **为什么过时** | 每个分片都搬整段回答 → 单轮传输量 O(正文²)；下游每片还要在整段上做一次归一化/O(n) 合并 |
+| **2026-11-21 已做（合批）** | `src/agent/progress-flush.js` 成为**唯一**的流式合批实现：Main 的 `llm_delta` 与 planner `progress`、Renderer 主循环与 planner 两条流、计划 trace 队列共用同一份状态机（以前四处各写 pending/timer/rAF，数字还有 120/160 两套）；间隔只认 `agent-limits.agentProgressFlushMs`=40ms。另在 `llm-tool-call-fallback.js#stripToolCallMarkup` 加了「没有 `<` 就只折空行」的快路径。事件数与搬运量降一个量级，但**载荷语义没变** |
+| **动什么算完** | 协议改成只带 `{seq, contentDelta, reasoningDelta}`，累积只留在 Renderer 的 `liveContent` 一处；上面 5 个消费方各自改成按增量追加（`headless/main.js` 那段「累计值差分打印」可整段删掉） |
+| **为什么不顺手做** | 5 个消费方各有一套「整段归一化」写法（剥离工具标记 / 思考区截断 / 手机镜像），语义要一起改，得单独一个改动窗口；合批已经拿走九成收益 |
+| **优先级** | 中 |
 
 ---
 

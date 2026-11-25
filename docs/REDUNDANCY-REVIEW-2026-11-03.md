@@ -56,6 +56,7 @@
 - **已漂移**：`skill-catalog.js:427-431` 加载更多后不推进 `pageIndex`（要再点一次才看到）；缺 `mcp-catalog.js:399` 的 loading guard；`errors` 字段只有 MCP 版有。
 - 仓库**已有**单一来源：`renderer-skills-grid.js:198-268` 的 `renderGridCategoryTabs / updateGridPagination / bindGridSearchInput / bindGridPagination`（automation 与 skills-ui 都在用），这两个 catalog 自己手写绕过。
 - 减法：接上那四个已有函数；`renderer-automation.js:35-36`、两个 catalog 的 `: 15` 页大小兜底是死代码（`skills-ui.js:944` 已提供）。
+- **已修（2026-11-21）**：两个 catalog 与 `renderer-skills-grid.js` 自己的列表页全部改调那四个 helper —— 分页条 / 分类 tab / 350ms→统一 200ms 搜索防抖 / 下一页 handler 都不再有第二份。`updateGridPagination` 增加可选 `{ loading, canLoadMore, label }`（"末页还能继续加载"是既有语义，不是新开关），`bindGridPagination` 增加 `{ onNext, onPrev }` 接管"末页先向服务端加载再推进索引"。同时修掉本条目记的两个真缺陷：技能市场加载更多后**真的推进 `pageIndex`**、失败提示不再被 `finally` 用旧数据盖掉；`renderSkillCatalogGrid`/`renderMcpCatalogGrid` 的 `errors` 差异收敛成一份 `parseGridListResult`（旧「结果是数组」兼容分支删除）。回归：`test/unit/renderer-grid-paging.test.cjs`（含"末页加载更多后到新页"的断言）。
 
 ### A8. AGENTS.md「唯一来源」声明已漂移（high）
 | 声明 | 现实 |

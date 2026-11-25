@@ -143,6 +143,8 @@ PY
 
 ### 1.4 端点慢到「不值得等」时：交互闸门 + 归纳写入批量化（2026-11-09）
 
+> **2026-11-19 更正**：本节两条修法里的**「交互闸门」已整套删除**（本地推理落地后「端点慢」这个根因消失）——`INTERACTIVE_EMBED_BUDGET_MS`、`EMBEDDING_TOO_SLOW`、`EMBED_CONCURRENCY`/`EMBED_INFLIGHT` 与 Node 侧同款预算在全仓 0 命中。下面的现场数据与「为什么闸门要放在发请求之前」保留作历史记录，**别再照它加补偿层**，见 [`docs/LOCAL-EMBEDDING.md`](LOCAL-EMBEDDING.md) §7。
+
 现场症状：发一条消息直接失败 —— `调用失败：Error invoking remote method 'agent:prep-system-prompt':
 Error: codebase.search 超时`。查下来**不是索引坏了**，是端点把整条队列堵死了。
 
@@ -167,7 +169,7 @@ Error: codebase.search 超时`。查下来**不是索引坏了**，是端点把�
 
 | 修法 | 落点 | 口径 |
 |---|---|---|
-| **交互闸门** | `crates/dieyun-base/src/embedding/mod.rs`（`embed_texts_interactive`）与 `src/codebase/embedding-client.js`（`embedInteractive`） | 记住**最近一次成功**往返（按 端点+模型 键，换端点即重新量）；超过预算（Rust `INTERACTIVE_EMBED_BUDGET_MS` / Node `agent-limits.interactiveEmbedBudgetMs`，两侧成对）就**不发请求**，回 `EMBEDDING_TOO_SLOW`，调用方走既有的关键词 / 子串通道 |
+| **交互闸门**（**已删除**） | — | 曾是：`EMBED_CONCURRENCY` / `INTERACTIVE_EMBED_BUDGET_MS` + Node 同款预算，在发请求前「预判太慢就不发」、回 `EMBEDDING_TOO_SLOW`。本地推理（毫秒级、无网络）落地后根因消失，整套删除（`docs/LOCAL-EMBEDDING.md` §7），别再搬回来 |
 | **归纳批量写** | `memory.long_add_many`（Rust `add_long_memories_deduped`）+ `knowledge-maintainer.applyMemoryItems` | 一次 `embed_batches` 算完 8 条向量（批大小仍是 `plan_embed_batches` 一份），再逐条走**同一套**写入政策（低价值闸 / 近重复 / 写入即索引）：请求数 8 → 1。core 还是旧版（没有这个方法，回 `UNKNOWN_METHOD`）时逐条退回 `memory.long_add` —— 语义一样，只是慢 |
 
 为什么闸门要放在**发请求之前**：调用方只能掐自己那条 await；被放弃的请求照样占端点。

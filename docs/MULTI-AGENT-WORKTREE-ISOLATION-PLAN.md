@@ -71,7 +71,8 @@ git worktree add -B dieyun/agent-<runId>-<roleId> .dieyun/worktrees/<runId>/<rol
 | 创建 | `createAgentWorktree(repoPath, {runId, roleId, baseRef})` | 基线解析成具体 sha 再落盘（避免基线随 HEAD 漂移）；已存在则 `reused:true` |
 | 串行化创建 | `runWorktreeCreateExclusive` | 防止并行 `git worktree add` 抢同一仓库的 `index.lock` |
 | 变更预览 / 合回 | `previewRunWorktreeChanges` / `applyRunWorktreeChanges` / `commitWorktreeChanges` | 产出先提交到 worktree 分支 → 清理不可逆也留了存档 |
-| 清理策略 | `enforceWorktreeCleanupPolicy({maxRuns, maxSizeGb, protectedRunIds})` | 容量/数量双维度，UI 侧已有设置页 |
+| 清理策略 | `enforceWorktreeCleanupPolicy({maxRuns, maxSizeGb, protectedRunIds})` | 容量/数量双维度（用户配置），UI 侧已有设置页 |
+| 残留回收 | `sweepRunArtifacts(repoPath, {protectRunIds})` | 零阈值那两类：已并入 HEAD 的分支 + 没有活 worktree 的 run 空壳；**唯一语义**，见 §10「plan run 的 worktree / 分支回收」 |
 | 变更 diff | `listWorktreeChangesVsBase` / `getWorktreeChangeDiff` | 相对基线 sha，语义确定 |
 
 **当前唯一调用点**是 Planner：`src/agent/planner-main-bridge.js:106`（由 `rust-planner-runner.js` 驱动）。普通单会话 agent 不建 worktree —— 这正是「用 agent 模式时 worktree 好像没用」的原因，不是 worktree 无用，是没人调用。
@@ -260,6 +261,26 @@ worktree 之前没有任何回收路径**：`enforceWorktreeCleanupPolicy` 是�
 
 **首跑记录（2026-10-31 17:24，真机）**：新建会话触发第一次扫描，回收 11 份
 （`sess-zzsentinel` 哨兵 + 10 份归档会话副本），另有 5 份因有未提交改动被保留。
+
+### plan run 的 worktree / 分支回收（2026-11-21 修）
+
+现场：`.dieyun/worktrees/` 攒了 19 份 run 副本（473 MB）+ 171 条 `dieyun/agent-run-*` 分支。
+根因不是「没写回收」，是**触发点挂错了地方**：`maybeEnforceWorktreeCleanupPolicy` 只在桌面
+Renderer 启动时跑，无人值守（headless）与「进程被强杀」的残留永远不扫；而
+`workspace-cleanup.ps1 -IncludeLocalData` 直接 `Remove-Item` 目录，不做 `git worktree remove`
+/`prune`，于是目录没了、登记与分支全成悬挂。
+
+规则（语义单一来源 `src/git/worktree-service.js:sweepRunArtifacts`）：
+
+| 事项 | 口径 |
+|---|---|
+| 删什么 | ① `dieyun/agent-*` 里**已并入 HEAD** 的分支（产出已在主线）；② `.dieyun/worktrees/<runId>` 里**没有任何活 worktree** 的 run 目录 —— `git worktree list` 不登记，只剩空壳与 `.dieyun-run-meta.json`（`cleanupRunWorktrees` 只在整 run 无拦截时才 `rmSync` 根目录，被强杀 / 某 role 归档失败就会留根） |
+| 不删什么 | 未合并的分支（那是还没处置的产出）；run 里只要有一份 worktree 仍被登记（可能在跑）；`protectRunIds`（续跑复用同一 runId） |
+| 触发点 | ① Main 侧每轮 plan 开跑前 `planner-main-bridge.runStart`（桌面与 headless 同一条路，此时新 run 的 worktree 还没建）；② 桌面启动/存量策略：`enforceWorktreeCleanupPolicy` 内部复用同一份，不再自己写 prune；③ `scripts/workspace-cleanup.ps1 -IncludeLocalData`：先 `git worktree remove` → `prune` → 删目录 → 只删已合并分支 |
+| 为什么不要阈值 | 这两类都不可能是「还没处置的产出」（分支已并入 HEAD、目录里没有 worktree），所以不吃 `maxRuns/maxSizeGb` 那套用户配置 —— 挂上阈值就等于「没人配置时永不回收」，正是这次的根因 |
+
+分工：`enforceWorktreeCleanupPolicy` 是**容量**策略（多旧 / 多大，用户可调），`sweepRunArtifacts`
+是**残留**回收（零风险、无阈值）；后者是前者的实现细节之一，不各写一份 prune。
 事后核对：被删的 10 份删前都是 clean（脚本的脏检查保证了这点），对应分支 9/10 仍在库里，
 第 10 份本就是 detached 无分支 —— **没有内容丢失**，重开这些会话会按 `WT_CREATED` 重建副本（~2s）。
 那次暴露的真问题不是「删太多」而是「判据漏了归档」：`sessions_list{archived:false}` 只给了活跃会话，

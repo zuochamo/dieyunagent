@@ -138,6 +138,8 @@ flowchart TD
 | 工具执行拦截 | `src/agent/tool-harness.js` |
 | 完成验收 | `src/agent/completion-readiness.js` → `evaluateTurnReadiness`（渲染：`src/renderer/agent-guardrails.js` → `applyReadinessNote`） |
 | 可选 diff Reviewer | `src/agent/turn-reviewer-run.js`（默认关；判定在 `turn-reviewer.js`） |
+| planner 前置路由（这一轮要不要拆多路） | `src/agent/planner-router.js`（判定 + 提示词唯一来源；IPC `agent:planner-route`） |
+| 中途改道（跑到一半才发现要拆） | 工具 `fan_out`（schema `catalog/session.js`、执行只登记意图 `main-tools/agent-mode.js`）→ Renderer 读到本轮 trace 后直接用同一份请求起 planner（`renderer-agent-send.js` 的 handoff，trace 当 baseTrace 合并） |
 | Shell 安全 | `src/gateway/exec-policy.js` |
 | 工具能力白名单 | `src/agent/planner-tool-filters.js` |
 | 上下文硬顶 | `src/renderer/renderer-context-engine.js` → `CTX_LIMITS` |
@@ -164,6 +166,8 @@ flowchart TD
 | 2026-09-09 | 去掉发送前分级 LLM；`taskTier` 仅结构信号 + 检索门闩 |
 | 2026-10-28 | **完成验收判定迁到 Main**（`src/agent/completion-readiness.js`）：证据取自循环账本 trace + Gateway 诊断/浏览器事实，退出码改读结构化 `result.code`；删除 Renderer 规则门、`verifyTargetCompletion` 空壳、`readinessRetry` 死分支与「诊断伪 trace 轮次」 |
 | 2026-10-28 | **完成验收误判修整**：验证类按「命令的最后一次结果」判定（不再用「任意一次通过」抵消失败，静态诊断干净也不再抵消失败）；失败的工具认结果对象的 `ok:false`/`error`（`browser_expect` 断言失败此前完全漏判，因为它刻意不带 `error`）；写失败的文件不进诊断清单；浏览器证据按本轮开始时刻切 `sinceMs` 窗口（观察账本按会话累计、并无「每轮 reset」）；诊断只请求 `minSeverity:'error'`（防 warning 占满每文件上限）；两段采集并行 + 调用点兜底，采集预算收进 `agent-limits.readiness*`，删死键 `completionRepairAttempts` / `verifyDiagMaxChars` |
+| 2026-11-19 | **「多 Agent 并行执行」语义改为「允许」而非「强制」**：以前开关一开每轮硬闯 planner（`forcePlanner`），两个字的追问也会拆出 3 路执行器、跑半小时。现在开关只表示允许，每轮由侧模型判定一次「这一句里有没有 ≥2 个彼此独立、都要改文件/跑命令的交付物」（`src/agent/planner-router.js`，IPC `agent:planner-route`），判「要拆」才起 planner；**失败 / 超时 / 拿不准一律不拆**。侧模型可替换：`model-settings.json` 的 `plannerRouterModel` / `plannerRouterBaseUrl` / `plannerRouterApiKey`（留空用主模型；设置页「子 Agent」组下方有输入框）。判定（结论 + 一句理由 + **判定模型思考原文**）写进思考区第一张卡「调度 · 侧模型判定」——「拆」与「不拆」同形（phase 常量在 `agent-round-text.PLANNER_ROUTE_PHASE`）。判定**串行**在选路前执行：试过与准备阶段并发，但那时本轮模型/端点还没解析出来，判定口径会与本轮不一致，故按口径一致优先改回串行 |
+| 2026-11-20 | **难度是动态的：加中途改道**。工具 `fan_out` 让模型在执行途中声明「这活该拆成多路并行写入」（只在「多 Agent 并行执行」打开时出现在工具表里）；工具本身**只登记意图**（`main-tools/agent-mode.js`），本轮照常收尾，由 Renderer 读到 trace 里的这次调用后用同一份用户请求起 planner（片段 trace 作 `baseTrace` 合并，用户看到的仍是一轮），段一不交付、由 planner 出最终答复；起不来则如实退回交付当前这一段。改道卡与开跑前判定卡分开（`PLANNER_HANDOFF_PHASE` vs `PLANNER_ROUTE_PHASE`）。同时把「判定只看这一句」的限制写进文档：追问式复杂化仍需 ① 判定看上下文（未做） |
 
 ---
 

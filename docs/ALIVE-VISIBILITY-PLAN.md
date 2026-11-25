@@ -175,14 +175,18 @@ if (cfg.dailyTokenBudget > 0 && Number(state.tokenToday || 0) >= cfg.dailyTokenB
 | 通道 | 返回 | 为什么不复用 `alive:status` |
 |---|---|---|
 | `alive:history {windowMs, points}` | `{ ok, samples, windowMs, total }` | status 是"现在"，曲线是"过去"，大小差一个量级 |
-| `alive:badge` | `{ ok, enabled, running, phase, wakeCountToday, lastKind, lastTs, lastVoiceText/At, lastWakeText/At }` | 主界面常驻轮询，不能每 30s 读一次模型设置 / 权限文件（status 会读） |
+| `alive:badge` | `{ ok, enabled, running, phase, wakeCountToday, lastKind, lastTs }` | 主界面常驻轮询，不能每 30s 读一次模型设置 / 权限文件（status 会读） |
 
 `alive:badge` 只读 `state.json` + `events.jsonl` 尾部一行，不 spawn 任何东西。
 
 ### 刷新节奏
 
 - 侧栏「生命」页可见时：5s（复用设置页那套 poll，页面不可见即停）。
-- 主界面徽标（相位色，以及「它说…」/「它醒来写了…」那行）：30s（体征漂移是 5 分钟尺度，30s 足够，别让渲染层空转）。
+  面板**没有手动刷新按钮**（2026-11-21 与「设置」按钮一起删除）：5s 轮询已经够，
+  开关 / 感官 / 设备都在 设置 → 拟态 → 生命。
+- 主界面徽标（侧栏生命图标的相位提示）：30s（体征漂移是 5 分钟尺度，30s 足够，别让渲染层空转）。
+  （2026-11-21 气泡上方那条「它说… / 它醒来写了…」已删除，`alive:badge` 现在只喂 rail 图标；
+  唤醒摘要那一行改由 `alive:status` 供侧栏「生命」页正文顶部，5s 轮询在那一页可见时本来就在跑。）
 - headless 网页端**不映射**这两个 IPC：服务器没有装配生命感（见 `docs/ALIVE.md` §7）。
 
 ---

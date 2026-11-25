@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-18T05:40:00.044Z",
+  "generatedAt": "2026-11-25T02:26:36.992Z",
   "description": "Auto-generated RPC method index for dieyunagent Gateway + dieyun-core",
   "stats": {
-    "total": 193,
-    "gatewayOnly": 107,
+    "total": 191,
+    "gatewayOnly": 105,
     "rustOnly": 25,
     "both": 61
   },
@@ -1551,14 +1551,6 @@
       "rust": []
     },
     {
-      "method": "undo.mark_worktree_only",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/undo.js"
-      ],
-      "rust": []
-    },
-    {
       "method": "undo.rollback",
       "layer": "gateway",
       "gateway": [
@@ -1584,14 +1576,6 @@
     },
     {
       "method": "undo.session_clear",
-      "layer": "gateway",
-      "gateway": [
-        "gateway/handlers/undo.js"
-      ],
-      "rust": []
-    },
-    {
-      "method": "undo.stack_get",
       "layer": "gateway",
       "gateway": [
         "gateway/handlers/undo.js"

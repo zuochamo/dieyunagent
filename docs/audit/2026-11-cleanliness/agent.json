@@ -1,0 +1,206 @@
+{
+  "domain": "src/agent（含 src/agent/catalog、src/agent/main-tools）",
+  "verdict": "没有 P0：src/agent 里「已漂移成真实 bug」级别的重复，上一轮（REDUNDANCY-REVIEW / NODE-THINNING / MODULE-CHAOS）基本修完了 —— 交付四态文案、工具校验生成物、增量调度器、凭据存储、忽略规则、mutate-queue 的 12*60*1000 都已收口。本次值钱的是四件「单一来源被绕过 / 第二份实现已无收益」：① 删 Renderer 的 mutate-queue（它自陈的唯一用途『并行写入提示』已删，本地 pending 恒为 0，且已和 Main 分叉三处）；② 把工具结果摘要收成一份（Main 的 live-loop-trace 与 Renderer 的 renderer-tool-results 已漂出 4 处不同文案，同一张思考区里两种说法）；③ 计划轮与 main-turn-runner 是两份同形编排，而 AGENTS.md:58 写着「Main 侧跑一轮的唯一实现，频道/计划/headless 共用」，声明不成立；④ 「这个工作空间是不是远端」在本目录里还有 4 处内联正则，其中 delegate-tool-gateway 同一个文件里既 require 了唯一来源又内联了一遍，且 `^ssh://` 与 `^ssh:` 结论不同。另有两件结构性账（tier 存储脚手架两份、knowledge-maintainer.js 1653 行五职责）与六件小卫生。核对后**不报**：agent-limits.js 作为数字主源与「不拆大文件」（既有负向清单已裁定，本目录里 knowledge*/alive*/desktopCamera* 等键确实都在这一份里）；guardrails-shared.js 的工具清单与 tool-gate.js 的关卡顺序（真单一来源，含『这份清单同时是心跳轮工具表』的派生）；tool-validate.js 与 tool-validate.generated.js 的边界（机械校验已由生成物接管、手写只剩语义判定，且有 verify + 62 条双跑夹具，属既定设计而非混放）；agent-limits-by-tier.js 与 agent-limits.js 的循环 require（注释已写明原因）；rust-planner-runner.js 的 `while (phase.phase !== 'done')`（那是 planner.run.* 协议的薄转发，续跑判定仍在 core，没有长出第二份「该不该继续」）；context-signals.js ↔ system-prompt-prep.js 的克隆窗口（**假阳**：system-prompt-prep.js:1350-1356 只是把 context-signals 的六个函数再导出一次，实现只有一份）；测试与实现同居（src/agent 106 个文件里 0 个 describe/it）；陈旧 TODO/FIXME（全目录 3 处命中都是 `TODO 清单` 这类文案，不是待办）。",
+  "stats": "范围：src/agent + src/agent/catalog + src/agent/main-tools，共 106 个 .js。实读文件：mutate-queue / renderer-mutate-queue / renderer-agent-tools / main-turn-runner / plans/plan-agent-runner / plans/runner / headless/desktop-turn / rust-loop-runner / rust-planner-runner（关键区段）/ live-loop-trace / renderer-tool-results / context-signals / system-prompt-prep / agent-round-text / agent-limits（尾部 API 区）/ agent-limits-by-tier / model-runtime-by-tier / model-runtime-schema / shared-constants + agent-shared.json / knowledge-maintainer（多处）/ tool-bridge-main / tool-validate / tool-classify / guardrails-shared / completion-readiness（引用处）/ session-transcript / session-context（区段）/ service.js（头部）/ delegate-tool-gateway（区段）/ workspace/target.js / main-entry.js（require 区）。行数用 [System.IO.File]::ReadAllLines().Count 实测：agent-limits 1819、knowledge-maintainer 1653、system-prompt-prep 1369、rust-planner-runner 1304、session-context 1045、delegate-tool-gateway 970、rust-loop-runner 932、guardrails-shared 897、tool-bridge-main 858、tool-validate 817、tool-validate.generated 3016、live-loop-trace 630、tool-gate 578。4 组克隆窗口逐组核实：mutate-queue（真重复、已漂移 3 处）、live-loop-trace↔renderer-tool-results（真重复、已漂移 4 处）、main-turn-runner↔plan-agent-runner（真重复骨架 + AGENTS 声明不符）、agent-limits-by-tier↔model-runtime-by-tier（真重复脚手架）、context-signals↔system-prompt-prep（假阳）。另做一次导出读点扫描（对 src/ + test/ + scripts/ 全量词边界计数）：34 个模块导出在自身文件外零引用，其中可确认为纯死导出（仅内部使用仍对外暴露）的 8 个已收进一条 finding。未跑任何运行时行为验证（只读审查）。",
+  "findings": [
+    {
+      "title": "Renderer 的 mutate-queue 是第二份实现（自陈的唯一用途已删）且已与 Main 分叉三处；但这条通路是活的，不能按死代码删",
+      "severity": "P1",
+      "category": "重复实现 / 可缺席的装饰层（原则 2）",
+      "evidence": [
+        "src/renderer/renderer-mutate-queue.js:6-9 —— 文件头自陈「与 src/agent/mutate-queue.js 是同语义的两份实现」，并写明「原先那个『并行写入』金色提示已删（判定源是这里的本地计数，而写类工具早已在 Main / Rust 执行，本地 pending 恒为 0）」",
+        "src/renderer/renderer-agent-tools.js:16-22 —— 全仓唯一消费点：`window.MutateQueue` 取不到就直接 `return fn()`，说明它本身就是可缺席的装饰层",
+        "src/renderer/renderer-mutate-queue.js:66-124（runExclusive 主体）↔ src/agent/mutate-queue.js:91-154 —— 同形：闸门/gate、watchdog、openGate/settleAccounting 逐段对应",
+        "已漂移①：src/agent/mutate-queue.js:129 `sessionId: String(opts.sessionId || holder || '')` vs src/renderer/renderer-mutate-queue.js:100 `sessionId: String(holder || '')`",
+        "已漂移②：src/agent/mutate-queue.js:138-141 走注入的 logHook（src/main-entry.js:109 注入 electron-log）vs src/renderer/renderer-mutate-queue.js:108-115 裸 console.warn",
+        "已漂移③：src/agent/mutate-queue.js:182-190 有 getWorkspaceMutateSnapshot（诊断快照），Renderer 那份没有",
+        "src/renderer/index.html:2718 —— 仍在按 <script> 加载这份文件"
+      ],
+      "why": "写类工具真正在 Main 串行（src/agent/tool-bridge-main.js:286-287 runExclusiveMain → agent/mutate-queue，调用点 :471）；Renderer 这一份服务于「Main 反向委托 UI 工具」那条通路（src/agent/renderer-tool-delegate.js:47 → src/renderer/renderer-agent-tools.js:251-282，RENDERER_ONLY_TOOLS 三个工具走它），所以**不是死代码**。它自己的注释写明「本地 pending 恒为 0、原先的『并行写入』提示已删」——即这一层今天能提供的收益接近 0，属于可缺席的装饰层。两份已分叉 sessionId 口径 / 日志出口 / 快照 API 三处，第三份能力（快照）只在 Main 有。",
+      "subtraction": "先定一份：既然 Main 的 runExclusiveMain 已在真实执行点串行，Renderer 侧只保留「取不到就直跑」的语义 —— 删 src/renderer/renderer-mutate-queue.js（159 行）与 index.html 的 script 标签，renderer-agent-tools.js:16-22 的 runExclusiveAgentTool 收敛成直接 invoke()。若将来要在渲染层展示「工作区忙」，读 Main 已有的 getWorkspaceMutateSnapshot，不要在这里再记一份计数。**注意：这不是死代码删除，需手测委托通路**。",
+      "verify": "npm run check:renderer + npm run test:agent；手测 RENDERER_ONLY_TOOLS 三件（弹一次确认卡 / 新建对话 / 换工作空间），确认委托通路仍通。",
+      "already_on_record": "docs/REDUNDANCY-REVIEW-2026-11-03.md A4（:38-42）判「优先删掉 Renderer 那份」；其 P0 执行记录（:156）只修了数字（改为读 agent-limits.toolStallMs），两份实现仍在；同条建议里「删掉并行写入提示」已执行 —— 于是删实现的成本比当时更低，现在仍然成立。",
+      "effort": "S"
+    },
+    {
+      "title": "工具结果摘要两份：Main 的 live-loop-trace 与 Renderer 的 renderer-tool-results 已漂出 4 处不同文案",
+      "severity": "P1",
+      "category": "重复实现（已漂移）",
+      "evidence": [
+        "src/agent/live-loop-trace.js:370-395（summarizeLoopTool）↔ src/renderer/renderer-tool-results.js:76-130（summarizeToolResult）—— 同一件事：把工具结果压成一行给思考区",
+        "逐字同形段：src/agent/live-loop-trace.js:375-386 ↔ src/renderer/renderer-tool-results.js:84-92（fs_write_file / fs_edit：文件名 + 新建/已替换/已写入 + `+N -M` + `N 处`）",
+        "已漂移①：src/agent/live-loop-trace.js:400-402 `result.timedOut && result.stillRunning` → 「转后台继续运行（句柄）」vs src/renderer/renderer-tool-results.js:55-58 `result.detached` → 「已后台启动 PID」——两个字段名、两种说法",
+        "已漂移②：src/agent/live-loop-trace.js:410 的『看起来不像输出』正则只有 4 支（`/*` `#` `<!DOCTYPE` `<html`）vs src/renderer/renderer-tool-results.js:66 多一支 `^import `",
+        "已漂移③：src/agent/live-loop-trace.js:411 把非零 exit 压成 `exit ${exit ?? 0} · 输出 N 字`（丢掉真实退出码）vs src/renderer/renderer-tool-results.js:67 保留 `exit ${exit}`",
+        "已漂移④：无输出兜底 src/agent/live-loop-trace.js:417 '完成' vs src/renderer/renderer-tool-results.js:73 '命令成功（无输出）'",
+        "失败前缀也不同：src/agent/live-loop-trace.js:311-313/:371 用 `错误: …`，src/renderer/renderer-tool-results.js:78-81 用「失败：[CODE] … · suggestedFix」"
+      ],
+      "why": "两条路径写进的是**同一块思考区**：桌面主循环的工具行由 Renderer 摘要，planner 执行器 / 并发子 Agent 的工具行由 Main 的 live-loop-trace 摘要（rust-planner-runner.js:558-567 用 createLiveLoopTraceTracker）。用户同一屏里会看到「已后台启动 PID 123」和「转后台继续运行（hostproc-7）」两种说法，且其中一份把非零退出码丢了 —— 这是「同一语义两份实现」的典型已漂移形态，而它影响的是模型/用户判断工具到底成没成。",
+      "subtraction": "抽 src/agent/tool-result-summary.js（零依赖：只吃 name + result 对象，产出那一行字符串），Main 侧 live-loop-trace 直接 require，Renderer 侧经 agent-bundle 镜像成 window（与 AgentRoundText / GuardrailsShared 同一条既有通道）。两侧差异（timedOut/detached）先在合并前定成一处判据：`(r.timedOut && r.stillRunning) || r.detached` → 统一文案。",
+      "verify": "`npm run test:agent`、`npm run test:planner-workers`；手测：分别跑一次「长命令转后台」+「fs_edit」在桌面轮与 planner 轮里对比工具行文案是否一致。",
+      "effort": "S"
+    },
+    {
+      "title": "「跑一轮」的编排有两份：plan-agent-runner 与 main-turn-runner 同形，AGENTS.md:58 的「唯一实现」声明不成立",
+      "severity": "P1",
+      "category": "重复实现（同一语义两份编排）+ 文档单一来源声明失真",
+      "evidence": [
+        "AGENTS.md:58 —— 「`src/agent/main-turn-runner.js`（Main 侧跑一轮的唯一实现，频道/计划/headless 共用）」",
+        "src/plans/runner.js:68 —— 计划实际调用的是 runPlanAgentLoop，不是 runMainTurn",
+        "模型解析同形：src/plans/plan-agent-runner.js:122-144 ↔ src/agent/main-turn-runner.js:106-122（loadModelSettings + resolveTextApiConfig + 缺 key/缺模型两段报错 + tier + budget + apiCfg 整体继承）",
+        "预算同形：src/plans/plan-agent-runner.js:154-155、:167-169 ↔ src/agent/main-turn-runner.js:116-121（applyTierRuntime + getEffectiveInputBudget + `{...llm, baseUrl, apiKey}` 同一句注释）",
+        "历史装配同形：src/plans/plan-agent-runner.js:52-73、:160-162 ↔ src/agent/main-turn-runner.js:261-289（memory.messages_recent limit 120 → 只留 user/assistant → buildCompletionMessagesFromHistory + 同一份 helpers）",
+        "循环装配同形：src/plans/plan-agent-runner.js:186-225 ↔ src/agent/main-turn-runner.js:303-368（runRustAgentLoop 的参数集合、maxToolCalls/maxRounds、compactMessages、turnEndSynthesis、finally clearToolHarnessSessionsForSession 逐项对应）",
+        "收尾同形：src/plans/plan-agent-runner.js:272-293 ↔ src/agent/main-turn-runner.js:464-487（同一个 afterAgentRun 调用 + 同一个 `catch {}` 吞掉）",
+        "已漂移文案：src/plans/plan-agent-runner.js:259-260「…请查看日志后重跑」vs src/agent/main-turn-runner.js:402-403「…请查看日志后重试」——同一句空交付报错两种措辞"
+      ],
+      "why": "AGENTS.md 把「Main 侧跑一轮」写成单一来源，现实是计划走自己的一份骨架，两份已经在小处漂移（空交付文案），且每加一个「本轮要注入什么 / 怎么落库」的改动都要改两处。这正是 REDUNDANCY 结论 1 说的「最大一类冗余是同一语义在不同层各写一遍编排」。计划侧真正独有的只有三件事：计划专用 system 块（:23-50）、GOAL_TOOLS 追加（:165）、plan 的 modelRoute/strict 解析（:123-127）+ mutatingToolCalls 统计（:175/:222）—— 其余都应是 main-turn-runner 的入参。",
+      "subtraction": "两条路二选一，我倾向合并：把 runMainTurn 的入参补三个可选口（`systemBlocks` / `extraTools` / `modelRoute+model`），删掉 plan-agent-runner 的模型解析、历史装配、循环装配、收尾四段（保留 :23-50 的 system 块与 :175 的事实统计）；否则至少把 AGENTS.md:58 的声明改成「频道/headless/生命感共用；计划另有 plan-agent-runner」，并把 :122-144 与 :160-162 改调 main-turn-runner 已导出的 resolveTurnModel / buildCompletionMessagesFromHistory 包装。同时统一那句空交付文案（一个常量放 agent-round-text）。",
+      "verify": "`npm run test:rust-planner-smoke`、`npm run test:planner-e2e`、`npm run test:agent`；手测：跑一次定时计划 + 一次频道轮 + 一次 headless run，确认三者都还落 user/assistant 两条、trace 有 runId、记忆归纳仍触发。",
+      "already_on_record": "docs/MODULE-CHAOS-REVIEW.md §6.4（:170）只记了「main-turn-runner 没有 judgeAfterTurn / goal.cont」（那是另一件事：会话目标续跑只在桌面链路）。「计划走第二份骨架、AGENTS.md 声明不符」尚未记账。",
+      "effort": "M"
+    },
+    {
+      "title": "「这个工作空间是不是远端」还留着 4 处内联正则；delegate-tool-gateway 同一文件里既 require 了唯一来源又内联一遍，且判据不同",
+      "severity": "P1",
+      "category": "层级越界 / 单一来源被绕过（AGENTS.md「这条路走本机还是远端主机」）",
+      "evidence": [
+        "唯一来源：src/workspace/target.js:34-36 `isRemoteWorkspacePath(input) { return /^ssh:/i.test(...) }`（导出 :242）",
+        "src/agent/delegate-tool-gateway.js:13 已经 require 了 isRemoteWorkspacePath、:79 用了它，但 :247 又内联 `/^ssh:\\/\\//i.test(String(base))`、:262 内联 `/^ssh:\\/\\//i.test(w)`",
+        "src/agent/main-turn-runner.js:82 `kind: /^ssh:/i.test(workspacePath) ? 'ssh' : 'local'`",
+        "src/agent/rust-planner-runner.js:273 `const remoteWorkspace = /^ssh:/i.test(String(workspacePath || ''))`（:873 据此选「远端会话 / 本地工作区」文案）",
+        "src/agent/service.js:24 `return /^ssh:/i.test(s) ? s : s.toLowerCase()`（sameWorkspacePath 的比较口径靠它分支）",
+        "对照正例：src/agent/host-sidecar.js:5 就是 require 同一个 helper 再判"
+      ],
+      "why": "两套判据在**同一个字符串形态上结论相反**：helper 认 `^ssh:`（含 legacy `ssh:user@host:/path`），delegate-tool-gateway 的两处认 `^ssh://`（要求两条斜杠）。于是同一台机器上 legacy 形态的远端工作区，一处判远端、一处判本地 —— 后者会把 base 当成可拼接的本地根，拼出 `ssh:user@host:/path/src/…` 这种假路径（与 docs/SSH-MODULE-REVIEW / target.js:71-75 记的那类事故同形）。AGENTS.md 已把这条判定收口到「唯一入口」并明令「在 handler 里各写一份 startsWith('local:') 或各判一次」为反模式。",
+      "subtraction": "四处改调 `isRemoteWorkspacePath`（工作量 6 行）。若确实需要区分「严格 URI 形态」，就在 workspace/target.js 里加第二个具名函数（`isRemoteWorkspaceUri`）并写清与 `isRemoteWorkspacePath` 的差别 —— 不要在调用点各写正则。",
+      "verify": "`npm run test:local-gateway-smoke`、`npm run test:agent`；`git grep -n \"ssh:\\\\\\\\/\\\\\\\\/\" src/agent` 应只剩 workspace/target.js 一处。",
+      "effort": "S"
+    },
+    {
+      "title": "按档持久化的脚手架两份（agent-limits-by-tier ↔ model-runtime-by-tier），且「只存覆盖」规则各写一遍",
+      "severity": "P2",
+      "category": "重复实现（同语义脚手架）",
+      "evidence": [
+        "src/agent/agent-limits-by-tier.js:18-19 STORAGE_KEY / LEGACY_STORAGE_KEY、:52-61 extractOverrides（与工厂值相同即不存）、:63-73 读 localStorage、:75-81 写、:83-98 legacy 迁移、:110-168 get/set/reset/getAll/hydrate、:170-174 isLimitsByTierShape",
+        "src/agent/model-runtime-by-tier.js:70-89 localStorage 读写、:98-137 getRuntimeValuesForTier/set/reset、:109-117 extractRuntimeOverrides、:188-200 saveRuntimeByTierToMain、:204-214 hydrate、:216-224 getAll、:234-262 migrateGlobalSettingsToDefaultTier",
+        "两处「只存覆盖」的同一份规则：src/agent/agent-limits-by-tier.js:56-59 vs src/agent/model-runtime-by-tier.js:113-115（都是 `factory[k] === v → continue`）",
+        "磁盘侧也各有一套：src/agent/model-runtime-by-tier.js:161-200（model-runtime-by-tier.json）vs src/agent/agent-limits.js:1667-1736（agent-limits-by-tier.json + legacy 迁移）",
+        "src/agent/model-runtime-by-tier.js:10 注释自陈「与 agent-limits-by-tier.json 同邻同形」，即用注释代替单一来源"
+      ],
+      "why": "两份 ~140 行脚手架（读 / 写 / 迁 legacy / 只存覆盖 / hydrate / shape 判定）承担完全相同的语义，只是数据键不同；两份都已经各自写过一次 legacy 迁移（agent-limits 是 `dieyun.agent-limits.v1`，runtime 是全局 settings → default 档），任何一条口径（比如「未知档位丢弃」「同值不落盘」）改一边就分叉。这是本轮唯一还没做的「同语义两份脚手架」。",
+      "subtraction": "抽 `src/agent/tier-store.js` 工厂：`createTierStore({ storageKey, legacyKey, defaults, normalize, extractOverrides, file })`，两份退化为「键 + 默认值 + 归一化函数」三行；Main 侧的磁盘版同理共用 `loadFromDisk/saveToDisk`。",
+      "verify": "`npx vitest run test/unit/`（tier / agent-limits / model-runtime 相关）、`npm run test:agent-limits`、`npm run check:renderer`；手测：改一档极限值 → 重启 → 该档生效、其它档不受影响。",
+      "already_on_record": "docs/REDUNDANCY-REVIEW-2026-11-03.md A14（:107）已记「抽 tier-store 工厂」，未执行；同条里 `model-runtime-by-tier.js:293/301` 的 8192 已改读 shared-constants（本次复核确认），:359 与 model-runtime-schema.js:33 仍未改（见本报告 P3 条）。",
+      "effort": "M"
+    },
+    {
+      "title": "knowledge-maintainer.js 1653 行、五类职责同居；文件内部同一张设置字段表还写了两遍",
+      "severity": "P2",
+      "category": "超长文件 / 职责混杂 + 重复实现（同文件内）",
+      "evidence": [
+        "src/agent/knowledge-maintainer.js:1-1653 —— 共 1653 行（[System.IO.File]::ReadAllLines().Count 实测；本目录第一大非 limits 文件）",
+        "职责分组：设置存储 :141-218、提示词与规则文本 :60-140、触发信号与门闩 :272-357、记忆写入（global/项目/共享镜像）:432-580、AGENTS.md 更新 :581-636、共享记忆提炼 :893-985、周期任务与 LLM 调用 :713-892、定时器/队列工厂 :1275-1588、对外入口 :1609-1633",
+        "同文件内重复：:152-167 normalizeKnowledgeSettings 与 :190-205 applyKnowledgeSettingsPatch —— 同一张 7 字段表、同一套「枚举内才收 / 布尔才收 / slice(0,240)」规则各写一遍",
+        "格式化上限仍散在文件里：:165 与 :203 `slice(0, 240)`、:228 `Number(max) || 360`、:237 `slice(0, 180)`"
+      ],
+      "why": "这是 src/agent 里第二大文件，而它的职责横跨「配置文件 IO / 提示词 / 记忆落库 / 共享记忆 PG 上传 / 定时器」，任一处改动都要在 1600 行里定位；更实际的风险是 :152-167 与 :190-205 那份字段表：加一个新设置字段时漏改第二份，就是「设置页能存、运行时忽略」的静默失效（该文件注释里已记过一次同类事故：:185-189）。注：它的数字已经归口（agent-limits.js:419-454 的 knowledge* 块，注释写明「唯一读者是 knowledge-maintainer.js」），所以本条不是魔法数字问题，是职责与文件长度问题。",
+      "subtraction": "按现有注释的自然断点切三刀（纯移动，不改逻辑）：`knowledge/settings.js`（:141-218 + :169-173，同时把两份字段表合成一份 `applyPatch(base, patch)`）、`knowledge/prompt.js`（:60-140 + :224-271 的 compact/summarize）、`knowledge/apply.js`（:412-712 记忆与 AGENTS 落库）。`:1275+` 的工厂留原处或另立 `knowledge/scheduler.js`。验收只认 `npm run test:knowledge-maintainer` + `test:system-prompt-prep` 全绿。",
+      "verify": "`npm run test:knowledge-maintainer`、`npm run test:project-memory-file`、`npm run test:agent`；`git grep -n \"normalizeKnowledgeSettings\"` 确认只剩一份字段表。",
+      "effort": "L"
+    },
+    {
+      "title": "轮次上限的「唯一来源」函数没有生产调用点：四处调用方各自内联同一个 clamp",
+      "severity": "P3",
+      "category": "死代码 / 单一来源空转",
+      "evidence": [
+        "src/agent/agent-limits.js:1751-1759 `resolveAgentMaxRounds(settings)`，注释写明「轮次上限的唯一来源…Loop 启动前由 applyResolvedLoopSpec 填进 agent.loop.start」；导出 :1815",
+        "它的唯一消费点是同文件 :1769（resolveAgentLoopSpec 内部），而三个真实 runner 全部绕过它自己写 clamp：src/agent/main-turn-runner.js:325、src/plans/plan-agent-runner.js:202、src/headless/desktop-turn.js:220（`clampModelRuntimeValue('agentMaxRounds', …)`）",
+        "第四处同样形式：src/agent/rust-planner-runner.js:589-592（`Number(spec.maxRounds) > 0 ? … : settings.agentMaxRounds` 再 clamp）",
+        "对照正例：同文件的 resolveLoopToolCallLimit（:1747-1749）被三处正常调用（main-turn-runner.js:324、plan-agent-runner.js:201、desktop-turn.js:219）"
+      ],
+      "why": "同一个「轮次上限」有两个写法：一处包成函数并声明是唯一来源，四处调用点却内联 `clampModelRuntimeValue('agentMaxRounds', …)`。今天两写法等价（都是 15–1200 夹取），但只要将来给轮次加上「档位缺省 / 子 Agent 倍率 / 下限」任一规则，四处不会跟着变 —— 与 :1754-1755 注释里反对的「跨语言各留一份默认值」是同一种病，只是发生在同一侧。",
+      "subtraction": "四处改成 `resolveAgentMaxRounds(runSettings)`（rust-planner-runner 那处改成 `spec.maxRounds > 0 ? clampModelRuntimeValue('agentMaxRounds', spec.maxRounds) : resolveAgentMaxRounds(settings)`），或反过来删掉 resolveAgentMaxRounds 并把注释改准。二选一，不要两个都留。",
+      "verify": "`npm run test:agent-limits`、`npm run test:rust-planner-smoke`、`npm run check:js`；`git grep -n \"'agentMaxRounds'\"` 的调用点应收敛到 agent-limits 与 model-runtime-schema 两处。",
+      "effort": "S"
+    },
+    {
+      "title": "一批导出只有内部使用仍对外暴露（8 个可确认的死导出）",
+      "severity": "P3",
+      "category": "死代码（未使用导出）",
+      "evidence": [
+        "src/agent/session-context.js:1012 `META_STRING_MAX`（仅 :81 / :122 内部用）、:1026 `GOAL_CONTINUE_USER_PREFIX`（仅 :305/:321 内部用）、:1028 `isAliveStateUserContent`（仅 :330 内部用）",
+        "src/agent/session-title.js:229 `TITLE_SOURCE_AI`（仅 :32 / :211 内部用）",
+        "src/agent/browser-vision.js:323 `MAX_SHOTS_PER_RUN`（仅 :53 / :78-88 内部用）",
+        "src/agent/turn-reviewer.js:214 `buildReviewerBrowserEvidence`（仅 :122 内部用）",
+        "src/agent/mutate-queue.js:193 `resolveStallMs`（仅 :39 内部用）",
+        "src/agent/session-transcript.js:59-60 `TRANSCRIPT_FIELDS` / `projectTranscriptMessage`（仅 :37 / :54 内部用；外部只消费 transcriptFromMessages，见 src/agent/session-context.js:30 与 src/renderer/agent/agent-bundle-entry.js:28）"
+      ],
+      "why": "这批名字在 +自身文件+ 之外（src/、test/、scripts/ 全量、含 json 里的名字串）零引用（词边界计数）。它们让「这个模块对外承诺了什么」失真：读代码的人会以为 META_STRING_MAX 是可供调用的契约阈值，实际改动它只影响本文件；agent-bundle 的镜像清单也不会因为多一个名字而报警。这与 NODE-THINNING N4.1「渲染层零调用点导出闸门」是同一类问题，只是发生在 Main 侧。",
+      "subtraction": "逐个从 module.exports 删名（保留 const 与内部使用），一次提交、零行为变化。若要防复发，把 N4.1 的 dead-export 报告脚本扩到 src/agent（先报告不拦）。",
+      "verify": "`npm run test:unit`、`npm run check:js`、`npm run check:contracts`（CODEMAP 若引用了这些名字会红）。",
+      "effort": "S"
+    },
+    {
+      "title": "8192 这个「窗口下限」仍有两处字面量，而单一来源（agent-shared.json）就在隔壁且已被消费",
+      "severity": "P3",
+      "category": "魔法数字该进既有单一来源",
+      "evidence": [
+        "单一来源：src/agent/agent-shared.json:10 的 `\"contextWindowFloorTokens\": 8192`（Node 经 src/agent/shared-constants.js:28 读）",
+        "已改好的同族：src/agent/model-runtime-by-tier.js:293 `CONTEXT_WINDOW_FLOOR = require('./shared-constants').compaction.contextWindowFloorTokens`、:301 `MIN_INPUT_BUDGET_TOKENS = CONTEXT_WINDOW_FLOOR`",
+        "未改①：src/agent/model-runtime-schema.js:33 `min: 8192`（contextWindow 的 schema 下限）—— 而 src/agent/model-runtime-by-tier.js:292 的注释用的是「与 model-runtime-schema 的 min 对齐」这种注释型约定",
+        "未改②：src/agent/model-runtime-by-tier.js:359 `if (/\\b8k\\b/.test(name)) return 8192;`"
+      ],
+      "why": "同一个「8k 窗口」在三处各写一次 8192，两处读共享常量、两处仍是字面量。注释里「与 X 对齐」正是 NODE-THINNING N1.1 要消灭的形态（该文档 :49 已经点名 model-runtime-by-tier 是这类手抄点）。改动风险低：值相同，只是把来源收成一处。",
+      "subtraction": "model-runtime-schema.js 引 shared-constants 取同一个键（它已经在 require ./model-runtime-presets，加一行无新依赖）；:359 复用文件内已有的 CONTEXT_WINDOW_FLOOR，并把 :292 的「对齐」注释删掉。",
+      "verify": "`npm run check:shared-constants`（每个键两侧都有人读）、`npm run test:agent-limits`、`npm run test:unit`。",
+      "already_on_record": "docs/REDUNDANCY-REVIEW-2026-11-03.md A14（:107）记「8192 又散在 model-runtime-by-tier.js:293/301/359 与 model-runtime-schema.js:33」。2026-11-19 的 shared-constants 收敛把 :293/:301 修掉了，:33 与 :359 仍在 → 条目半修，仍成立。",
+      "effort": "S"
+    },
+    {
+      "title": "browser_snapshot / browser_observe 的 textPreview 6000 字符上限写了两遍，且与 snapshot 脚本里那份不同源",
+      "severity": "P3",
+      "category": "魔法数字该进既有单一来源",
+      "evidence": [
+        "src/agent/tool-bridge-main.js:256-257（browser_snapshot：`length > 6000` → `slice(0, 6000) + '…'`）",
+        "src/agent/tool-bridge-main.js:263-264（browser_observe：同一段逐字复制，只差没有 outputFile 判定）",
+        "src/browser/snapshot-script.js:468 —— 采集端也按 6000 截 `textPreview`（同一个语义的第三个落点）",
+        "agent-limits.js 里没有对应键（最接近的 `dieyunMdMaxChars: 6000`（:348）是另一件事）"
+      ],
+      "why": "这是模型可见的截断阈值，同时出现在「采集」「出站净化」两处，且净化侧复制了两份；三处任一处单改就会出现「采集截到 6000、净化按 4000 再截」或反之的静默截断。MODULE-CHAOS §11.1 已经把 6000 当成断言写进 test:tool-bridge-handlers（「browser_snapshot 6000 字符截断但已落盘时不截断」），说明它是被承诺的行为，更该有单一数字。",
+      "subtraction": "agent-limits 增 `browserSnapshotPreviewMaxChars`（或复用既有的 snapshot 类键），三处改读；净化侧那两段顺带合成一个小函数 `capSnapshotPreview(result, {requireNoOutputFile})`。",
+      "verify": "`npm run test:tool-bridge-handlers`、`npm run test:browser-smoke`。",
+      "effort": "S"
+    },
+    {
+      "title": "base64 剥离信封手写 4 份：同一组 5 个字段在四处反复罗列",
+      "severity": "P3",
+      "category": "重复实现（同形白名单，改一处漏三处）",
+      "evidence": [
+        "src/agent/tool-bridge-main.js:156-193（computer）、:195-211（camera_look）、:212-227（desktop_camera_look）、:228-253（browser_screenshot）",
+        "四份里逐字相同的五件事，每份各抄一遍：visionImage/visionTokens（:180-181、:205-206、:221-222、:244-245）、base64Omitted/base64Length（:186-187、:207-208、:223-224、:249-250）、note 兜底（:190-192、:209、:225、:251）",
+        "回归网已存在：test/unit/computer-tool-pipeline.test.cjs:9（`const { sanitizeToolResultForApi } = require('../../src/agent/tool-bridge-main')`）、test/unit/computer-action-honesty.test.cjs:18 —— 所以收敛有测试兜底，属「可安全合并」",
+        "调用点只有一个：src/agent/tool-bridge-main.js:823（after 关卡的 sanitize-result）"
+      ],
+      "why": "视觉信封的五个字段是**契约**（模型/UI 两边都读），现在靠四段手抄维持：加一个字段（例如将来要带 `visionSource`）必须改四处，漏一处就变成「某个工具的图不进视觉通道」—— 而这类失败是静默的（模型只会说看不见）。这正是 MODULE-CHAOS §3.1 记的「按工具名硬编码 if 链 + 手列字段白名单」的残留形态。",
+      "subtraction": "抽 `visionOmissionEnvelope(result, { keep, note })`：公共 5 字段由它统一加，每个工具只交自己的 `keep` 列表；`browser_snapshot` / `browser_observe` 的预览截断同理（可与上一条 6000 一起做）。不改语义，测试兜底。",
+      "verify": "`npm run test:tool-bridge-handlers`、`npx vitest run test/unit/computer-tool-pipeline.test.cjs test/unit/computer-action-honesty.test.cjs`。",
+      "already_on_record": "docs/MODULE-CHAOS-REVIEW.md §3.2 A2（:64）已给方案「sanitizeToolResultForApi 改表驱动（每工具一条 {omit, keep}）」；同表 §3.1#5（:51）记的「结果清洗零测试」已**不再成立**（现有 2 个测试文件引用），本次复核更新；实现仍是四份手写。",
+      "effort": "S"
+    },
+    {
+      "title": "planner 的 8 处 console.warn 不走同层已有的日志钩子，planner 的排障日志进不了 electron-log 文件",
+      "severity": "P3",
+      "category": "console.* 当日志",
+      "evidence": [
+        "src/agent/rust-planner-runner.js:319-322（副本回收失败）、:352（模型接口连接中断重试）、:906（本批实际并发）、:1151 / :1186 / :1191（worker/评审异常）、:1234（收尾 note）—— 全是裸 console.warn",
+        "同层已有机制：src/main-entry.js:109 `require('./agent/mutate-queue').setMutateQueueLog((m) => log.warn(m))`、:112 `require('./agent/rust-loop-runner').setLoopRunnerLog((m) => log.warn(m))`（log = electron-log，:36）",
+        "该机制的自我说明：src/agent/rust-loop-runner.js:253-260「日志出口由 Main 注入（electron-log）…一个模块一个钩子，避免 4 个调用点各传一遍」"
+      ],
+      "why": "同一个 crate 级日志约定里，主循环与写队列都把日志交给 electron-log 落文件，只有 planner（同样是长跑、同样会产生「重连中 / 回收失败 / 并发被夹」这些事后要看的事实）直接 console.warn —— 在 Electron 主进程里 console 只到终端，用户点「打开日志」看不到。src/agent 其余 console.* 里，knowledge-maintainer / main-turn-runner 的也都带 `[dieyun:*]` 前缀走同一套既有习惯，planner 这 8 处不是「漏了前缀」而是「漏了出口」。",
+      "subtraction": "照 mutate-queue / rust-loop-runner 的既有做法加一个 `setPlannerRunnerLog(fn)`（不要新机制：同形的第三个钩子），main-entry 注入处加一行；8 处 console.warn 换成模块内 runLog。",
+      "verify": "`npm run test:rust-planner-smoke`、`npm run test:agent`；手测：断网跑一次 plan，确认「模型接口连接中断…」出现在 electron-log 文件里。",
+      "effort": "S"
+    }
+  ]
+}

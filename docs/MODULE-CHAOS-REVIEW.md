@@ -45,7 +45,7 @@
 | # | 现象 | 证据 |
 |---|---|---|
 | 1 | **一个动作枚举写三份**：`ssh` 的 8 个动作分别在 schema、校验、执行三处各列一遍 | `tool-catalog.js:2376`（enum）｜`tool-validate.js:446`（allowed 数组）｜`tool-bridge-main.js:617-741`（if 链）；`worktree` 同构（`:2439` / `:415` / `:752-804`） |
-| 2 | **三份已经分叉，且分叉是静默的**：`mcp_manage.transport` 的 `http` **能过校验，却按 stdio 执行** | schema 只允许 `['stdio','streamable-http']`（`tool-catalog.js:1834`）；校验多收 `'remote' \| 'http'`（`tool-validate.js:21`）；执行端只认 `'remote' \| 'streamable-http'`（`mcp/manage.js:63`） |
+| 2 | **三份已经分叉，且分叉是静默的**：`mcp_manage.transport` 的 `http` **能过校验，却按 stdio 执行**（已收敛，见 §九#2 及其 2026-11-21 更正） | schema 只允许 `['stdio','streamable-http']`（`tool-catalog.js:1834`）；校验多收 `'remote' \| 'http'`（`tool-validate.js:21`）；执行端只认 `'remote' \| 'streamable-http'`（`mcp/manage.js:63`） |
 | 3 | **执行分发是 1036 行 switch，全仓没有「工具名 → 执行体」注册表** | `tool-bridge-main.js:546-1581` `executeMainOnlyTool`，24 个 `case`；再接 `delegate-tool-gateway.js:92` 的第二个 switch（57 case / 686 行） |
 | 4 | **catalog 名不副实**：除 schema 外还混了 5 类东西 | 82 个 schema（`:24-2499`）+ 模型文案（428 处 `description`，含行为禁令）+ 分组过滤（`:1122-1142`、`:2501-2542`）+ MCP 参数裁剪（`:1885-1952`）+ **弱模型启发式**（`:1867-1883`，判「≤8B / tiny\|nano」，与工具 schema 毫无关系） |
 | 5 | **结果清洗零测试**：126 行按工具名硬编码 if 链，每条分支手列字段白名单 | `tool-bridge-main.js:150-275` `sanitizeToolResultForApi`；`scripts/` 全仓 **0** 处引用（虽在 `:1978` 导出「供测试」） |
@@ -201,7 +201,9 @@
 | # | 改动 | 文件 | 语义变化 |
 |---|---|---|---|
 | 1 | ssh / worktree 的 `action` 白名单不再手抄，改为**从 catalog 的 schema enum 派生**（`toolActionEnum()`） | `tool-validate.js`、`tool-catalog.js`（注释标注它是唯一清单） | 无（清单与旧数组逐字相同）；今后加动作只改 schema + 执行分派 |
-| 2 | MCP transport 收成一份：`MCP_TRANSPORT_KINDS`（规范取值）/ `MCP_REMOTE_TRANSPORTS`（入参别名）/ `isRemoteTransport()`，schema enum、校验、落库三处共用 | `mcp/manage.js`、`tool-validate.js`、`tool-catalog.js` | **修掉静默分叉**：`transport='http'` 以前过校验却按 stdio 落库，现在归一到 remote；`url: ''` 不再算「有 url」 |
+| 2 | MCP transport 收成一份：`MCP_TRANSPORT_KINDS`（模型可见取值）/ `MCP_REMOTE_TRANSPORT_KINDS`（远端协议规范值）/ `MCP_REMOTE_TRANSPORTS`（入参别名）/ `isRemoteTransport()`，schema enum、校验、落库三处共用 | `mcp/manage.js`、`tool-validate.js`、`tool-catalog.js` | **修掉静默分叉**：`transport='http'` 以前过校验却按 stdio 落库；`url: ''` 不再算「有 url」 |
+
+> **更正（2026-11-21）**：上一条的「现在归一到 remote」只在**落库层**成立，校验层并不认别名 —— 机械校验由 catalog schema 生成，先跑 `enum`，所以 `transport='http'` 现在会直接报 `INVALID_ARG`（合法值里没有它），不会走到 `isRemoteTransport`。同时 `sse` 已并入 `MCP_REMOTE_TRANSPORT_KINDS` 并进 schema enum（此前它只被 catalog / runtime 认，模型写 `sse` 必被拒且被判成 stdio 报「本地服务需要 command」）。即：**别名（`remote` / `http`）留给非模型入参路径做兼容，模型一律按 enum 写 `stdio` / `streamable-http` / `sse`**；`MCP_TRANSPORT_KINDS` 由远端协议表派生，不再手写第二份。
 | 3 | 删掉校验里的第二遍归一（legacy graph op 展开）——归一唯一入口是 `guardrails-shared.normalizeAgentToolName`，由 `tool-gate.js#createToolCall` 调用 | `tool-validate.js` | 无（唯一生产调用方是 gate，进关卡前已归一） |
 | 4 | 修 `tool-gate.js` 里「`sanitizeToolResultForApi` 在 guardrails-shared」的过期注释，并写清它与 `record-browser-screenshot` 的先后契约 | `tool-gate.js` | 无（只改注释） |
 | 5 | 删死 API `hideForOverlay` / `restoreAfterOverlay`（全仓零调用者的「Main 侧直接改原生视图边界」遗留通道） | `browser/controller.js`、`browser/service.js` | 无（零调用者）；原生视图边界仍只有 `syncBrowserBounds` + `setPanelState` 一条路 |

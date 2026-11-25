@@ -40,7 +40,10 @@ Renderer 模块表：[`src/renderer/README.md`](../src/renderer/README.md)。
 - `src/agent/tool-result-cap.js` — 工具结果写入 loop 前截断（`toolResultMaxJson`）
 - `src/agent/delegate-tool-gateway.js` — Agent `fs_read_file` 省略 maxBytes 时用 `fsReadDefaultMaxBytes`
 - `src/agent/tool-bridge-main.js` — Main 执行的**装配与关卡**：注册表查不到就走 Gateway 委托（`delegate-tool-gateway`），`RENDERER_ONLY_TOOLS`（`agent_clarify` / `session_new`）只反委托给 Renderer；出站净化 `sanitizeToolResultForApi` 也在这里（after 关卡顺序：截图暂存 → 净化 → 写味提示）
-- `src/agent/main-tools/` — 「只有 Main 能执行」的 24 个工具的执行体，一个域一个文件（camera / mcp / remote / skills / plans / goals / memory / peer），注册表在 `index.js`。加一个这类工具 = 加一个 handler + 注册一行；直测 `npm run test:tool-bridge-handlers`
+- `src/agent/main-tools/` — 「只有 Main 能执行」的工具的执行体，一个域一个文件（camera / mcp / remote / skills / plans / goals / memory / peer / agent-mode / self），注册表在 `index.js`。加一个这类工具 = 加一个 handler + 注册一行；直测 `npm run test:tool-bridge-handlers`
+- `src/agent/capability-index.js` — **模型对「自己」的认知**：能力 → 开关判定 / 人话标签 / 设置落点（`formatCapabilityBlock` 进系统提示、`enabledCapabilities` 给 `agent_inspect`、`resolveRequestKind` 给 `agent_capability`）；工具名映射仍在 `renderer-tool-defs.js`。设计见 [`docs/AGENT-SELF-CONTROL-PLAN.md`](AGENT-SELF-CONTROL-PLAN.md)
+- `src/agent/change-receipt.js` — 配置类工具的**改动回执**（`makeReceipt` / `fingerprintText` / `<userData>/self-changes.jsonl`）；不要把配置 diff 写进 `tool-telemetry.jsonl`
+- `src/agent/workspace-candidates.js` — 工作空间候选的收拢 / 归一 / 目录名匹配 / 候选文案（频道与桌面侧共用，纯函数、进 agent-bundle）
 - `src/agent/browser-vision.js` — 运行期视觉缓冲（按 runId / 来源限流，注入后清空，不进账本）
 - `src/agent/vision-image.js` — 工具图片的**可寻址凭证**：内容寻址落盘副本（`tool-output/vision/`，按 `visionImageKeepFiles` 裁剪）+ 视觉 token 口径（`visionTokensForSize`，DeepSeek 公开格网算法，≤1024）+ 成功/失败两句模型可见文案（唯一来源）。图入不进视觉通道都要在工具结果里留 `visionImage` / `visionTokens` / 只读副本路径
 - `src/renderer/renderer-agent-tools.js` — Renderer 侧的 UI 工具执行体；`session_new` 复用 `createNewSession`（与「新对话」按钮同一条流程），勿另写一遍建会话 + 绑工作空间

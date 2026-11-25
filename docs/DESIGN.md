@@ -293,7 +293,7 @@ flowchart TD
 | 谁来判 | Main：一次 `agent:rust-loop-run` 的返回 = 一轮结束，在 `judgeAfterTurn` 里判**一次**，结论挂 `result.goal` |
 | 谁来跑 | Renderer：只读 `goal.cont` 一个布尔，`startGoalTurn` 开下一轮（不判预算、不算事实） |
 | 给模型看 | `system-prompt-prep.js` 每轮注入目标块（目标 / 清单 / 最近事实 / 第几轮 / 还剩什么） |
-| 给人看 | 气泡区上方的**目标条** + 侧栏**「目标」页**（`renderer-goal-panel.js`，同一份视图、同一次取数） |
+| 给人看 | 侧栏**「目标」页**（`renderer-goal-panel.js`；气泡区上方那条「目标条」已删除） |
 
 **关键取舍**：
 
@@ -301,7 +301,7 @@ flowchart TD
 - 下一轮**不伪造用户消息**：请求尾补一条 `[系统] 目标尚未收尾…`（与「段续」同一机制，进 `isSyntheticLoopUserContent` 白名单），所以【当前任务】仍是用户原本那句话，气泡里也不会多出一条用户发言。
 - 「完成」只有一种证明方式：`goal_check` 的退出码。`goal_finish(complete)` 会被 `judgeGoalFinish` 拿事实核对，不通过就打回并把失败尾部回灌给模型；没有声明检查的目标是「未验证模式」，代码不替它宣布完成。
 - 预算只有一个来源：`agent-limits` 的 `goalMaxAttempts` / `goalMaxWallMs`。用尽 → 状态落 `stalled`，注入块与 UI 都说「预算已尽，等你决定」，**不包装成完成**。
-- 人永远优先：用户按停止 → 目标转 `paused`，之后的轮次不再自动续跑；面板 / 目标条上的「继续」才恢复（重置轮次预算，事实与清单全留）。
+- 人永远优先：用户按停止 → 目标转 `paused`，之后的轮次不再自动续跑；面板上的「继续」才恢复（重置轮次预算，事实与清单全留）。
 - 边界：只驱动**当前正在看的会话**（否则等于在后台烧 token）；与对端 agent 绑定的会话（会话即通道）不自动开轮 —— 那里每一轮都可能被投递给对方。
 
 ---

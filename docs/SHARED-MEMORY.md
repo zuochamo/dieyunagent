@@ -58,10 +58,16 @@ ORDER BY COALESCE(向量距离, 1 - trigram 相似度) ASC, importance DESC, las
 - 服务端能力只影响表达式，不影响语义：
   - 没装 `vector` 扩展 → SQL 里不出现 `::vector`（否则 PG 报 `type "vector" does not exist`）；
   - 没装 `pg_trgm` → 相似度退化为 0，排序退到「重要度 + 冷热」。
-- 阈值与本地记忆同一套：语义 `0.32` / 关键词 `0.12`（`agent-limits.js#sharedMemoryMinScore*`）。
-  **按行取阈值，不按批**：同一批结果里可能既有向量行（`score = 1 - 余弦距离`）又有 trigram 行
-  （`score = similarity`），两者量纲不同；按批级 `mode` 一刀切会让兜底行永远过不了 0.32，
+- 阈值与本地记忆同一套**字段**：每条结果带 `injectScore ∈ [0,1]`（与本地长期记忆同名同义 ——
+  「这条该不该注入」的唯一依据），宿主只读它、不读 `score`。
+- 阈值**保留两个数**：语义 `0.32` / 关键词 `0.12`（`agent-limits.js#sharedMemoryMinScore*`），
+  **按行取阈值，不按批**：同一批结果里可能既有向量行（`injectScore = 1 - 余弦距离`）又有 trigram 行
+  （`injectScore = similarity`）。两者都是 [0,1] 的有界相似度，但 **trigram 的天花板随「查询/条目」
+  长度比下降**（它量的是 `|A∩B|/|A∪B|` 的特例：短查询配长条目永远到不了 0.3）——
+  所以关键词线必须比语义线低一个量级。按批级 `mode` 一刀切会让兜底行永远过不了 0.32，
   等于「有向量就再也用不上文本兜底」—— 与上面的 `COALESCE` 设计直接相违。
+  这也是它和**本地记忆**（`memoryInjectMinScore` 一个数）的差别所在：本地两条分支的结果从不进同一批，
+  关键词分支的强度已经做到与语料无关（片段覆盖度 × 相对命中），所以一个数就够。
 
 注入点只有一处：`src/agent/system-prompt-prep.js#fetchSharedMemoryBlock`，
 块标题 `【共享记忆 · 局域网其他机器沉淀 · …】`，排在【长期记忆】之后、【压缩】之前 ——

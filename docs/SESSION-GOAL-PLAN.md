@@ -195,7 +195,10 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 
 ## 6. UI：一条目标条 + 侧栏「目标」页
 
-### 6.1 目标条（会话内，常驻一行）
+### 6.1 目标条（会话内，常驻一行）—— 已删除
+
+> 2026-11-21 起气泡区上方的目标条（`#goal-bar`、其样式、`renderGoalBar` / `toggleGoalBarFacts`）
+> 整体删除：同一份视图只在侧栏「目标」页看，「继续 / 停止」也在那里。以下是原设计。
 
 - 位置：气泡区顶部常驻一行（`.agent-chat-column` 的第一个子元素，`#goal-bar`）：
   `◎ 目标… · 第 3/12 轮 · npm test → exit 1`，点击展开就地看全部事实。
@@ -266,11 +269,11 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 | `src/main/ipc/agent-runtime.js` | `agent:rust-loop-run` 收尾附 `goal:{active,cont,stop,...}`；`agent:session-goal-panel`（读视图 / `action:'pause'` 暂停 / `action:'resume'` 继续 / `action:'clear'` 清除） |
 | `src/renderer/renderer-agent-run.js` | `:191` 与 `goal.cont` 合流 |
 | `src/renderer/renderer-agent-send.js`、`renderer-agent-resume.js` | `:667` / `:68` 的 `if (!run.done)` 分支加 `goalContinue` 路径；新增 `startGoalTurn`（`sendMessage` 的 `goalTurn:true` 内部入口：无用户气泡、无用户轮次）；停止时 `agent:session-goal-panel {action:'pause'}` |
-| `src/renderer/renderer-chat-live-run.js` | 目标条跟着事件走的那一拍：`scheduleGoalUiRefresh()`（与子代理面板同处） |
-| `src/renderer/index.html` | ① rail 按钮 `data-side-tab="goal"` + `data-side-pane="goal"` 一块 DOM（两侧必须成对，`check-renderer-index-panel.cjs` 会卡数量不一致）；② 目标条 `#goal-bar`（`.agent-chat-column` 第一个子元素） |
-| **`src/renderer/renderer-goal-panel.js`（新）** | 目标的两个面（气泡上方目标条 + 侧栏「目标」页）：objective / 进度条 / 按检查聚合的验收命令 / todos / 事实列表 / 停止·继续；两个面共用一次取数与一个轮询 |
+| `src/renderer/renderer-chat-live-run.js` | ~~目标面板跟着事件走的那一拍：`scheduleGoalUiRefresh()`~~（随目标条一起删除；面板可见时靠 2s 心跳） |
+| `src/renderer/index.html` | ① rail 按钮 `data-side-tab="goal"` + `data-side-pane="goal"` 一块 DOM（两侧必须成对，`check-renderer-index-panel.cjs` 会卡数量不一致）；② ~~目标条 `#goal-bar`~~（已删除） |
+| **`src/renderer/renderer-goal-panel.js`（新）** | 侧栏「目标」页：objective / 进度条 / 按检查聚合的验收命令 / todos / 事实列表 / 停止·继续（~~气泡上方目标条~~ 已删除） |
 | `src/renderer/renderer-side-panel.js` | `loadSavedSideTab()` 白名单加 `'goal'`；切会话时触发该页刷新 |
-| `src/renderer/styles.css` | 目标条 / 展开区 / 按检查聚合的验收命令样式 |
+| `src/renderer/styles.css` | 面板与按检查聚合的验收命令样式（~~目标条 / 展开区样式~~ 已随目标条删除） |
 | `src/renderer/renderer-chat-render.js` | 切会话 / 重绘后重取一次（`finalizeChatRenderAfterMessages`），否则上一个会话的目标会挂在新会话上方 |
 | `docs/rpc-catalog.md`、`docs/CODEMAP.json` | 新 RPC / 新模块（`verify:rpc-catalog` 会卡） |
 
@@ -329,13 +332,13 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 9. `docs/` 同步（`DESIGN.md` §4.5 + §15、`HARNESS-INVENTORY.md`、`CODEMAP.json`、`src/renderer/README.md`、本文件转「已实施」）
 > 验证点：跑一个带检查的目标，气泡上方那行就能看出「第几轮 / 最近一条检查是什么结果」，不用开侧栏；展开能就地看到每条检查的最新结论与次数。
 
-落地后的实际形状：
-- **目标条**（`#goal-bar`，`index.html` + `renderer-goal-panel.js`）：一行 = `◎ 目标… · 第 3/12 轮 · npm test → exit 0`，收尾/暂停/预算尽时把状态词并进同一行；右侧只有「继续 / 停止」两颗，出现条件与面板同一判据（`goalCanContinue`）。点击展开就地渲染「每条检查的最新结论 + 次数 / 推进清单 / 最近事实流水」。
-- **放哪儿**：`.agent-chat-column` 的第一个子元素（气泡区上方），**不是** `.chat-viewport` 里 —— 视口内是滚动容器加 absolute 的 `.chat-nav` 刻度，塞进去要么随内容滚走、要么压住刻度。
-- **两个面一次取数**：`refreshGoalPanel()` 取一次视图，同时渲染面板与目标条；心跳只在「面板可见 **或** 目标条在显示」时跑（2s，本地 RPC）。没有目标的会话零成本。
-- **轮内怎么跟上**：`scheduleGoalUiRefresh()`（400ms 节流）挂在 `dispatchAgentRunEvent` 里「子代理面板刷新」的同一拍 —— 目标由模型在轮内改，事件才是唯一知道的时机；目标条也要靠这一拍才知道「这个会话刚有了目标」。切会话/重绘由 `finalizeChatRenderAfterMessages` 重取一次。
+落地后的实际形状（**目标条已在 2026-11-21 删除，只剩侧栏「目标」页**，下面保留当时的形状记录）：
+- ~~**目标条**（`#goal-bar`，`index.html` + `renderer-goal-panel.js`）：一行 = `◎ 目标… · 第 3/12 轮 · npm test → exit 0`，收尾/暂停/预算尽时把状态词并进同一行；右侧只有「继续 / 停止」两颗，出现条件与面板同一判据（`goalCanContinue`）。点击展开就地渲染「每条检查的最新结论 + 次数 / 推进清单 / 最近事实流水」。~~
+- ~~**放哪儿**：`.agent-chat-column` 的第一个子元素（气泡区上方），**不是** `.chat-viewport` 里 —— 视口内是滚动容器加 absolute 的 `.chat-nav` 刻度，塞进去要么随内容滚走、要么压住刻度。~~
+- **一次取数**：`refreshGoalPanel()` 取一次视图渲染面板；心跳只在面板可见时跑（2s，本地 RPC）。没有目标的会话零成本。
+- **轮内怎么跟上**：面板可见时 2s 心跳就够 —— 模型在轮内改目标（`goal_check` / `goal_update`），最多 2s 后反映到页面上。原先那条 400ms 事件驱动刷新（`scheduleGoalUiRefresh`）是给「气泡上方目标条」用的，随目标条一起删了。切会话/重绘走 `refreshGoalPanelIfVisible()`（面板不在前台就跳过，可见性只有 `goalPanelVisible` 一个来源）。
 - **面板打磨**：`toPanelView` 的 `checks` 从「命令清单」升级为**按检查聚合**（`runs` 次数 + 最新 `ok/exitCode/round`），判据复用 `goal-run.factsForCheck` / `latestFactFor`（与 `judgeGoalFinish` 同一套匹配规则，没有第二份）。三态而不是两态：声明了但从没跑过是 `⬜ 还没跑过`，画成失败会冤枉模型。
-- **两处滚动容器不再每 2s 跳回顶部**：`writeGoalHtml()` 内容没变就不动 DOM。目标越推进、事实越多，这个毛病越明显。
+- **滚动容器不再每 2s 跳回顶部**：`writeGoalHtml()` 内容没变就不动 DOM。目标越推进、事实越多，这个毛病越明显。
 - **没做的**：目标条的键盘跳转与「点事实跳到对应气泡」；频道 / headless 的目标工具面。
 
 ## 11. 测试
@@ -344,7 +347,7 @@ Renderer 里**不出现** `attempt`、`maxAttempts`、`stop` 这些概念 ——
 |---|---|
 | 纯函数 + 注入 + 工具端到端 | `test/unit/session-goal.test.cjs`：存取往返 / 单目标护栏 / 损坏 JSON 当无目标 / 轮次与事实保留 / 面板视图 / 注入块四种状态措辞（且无目标时零注入）/ 入参校验 / `goal_start→goal_check→goal_finish` 全链路（含「没通过就被打回」） |
 | 续跑（P2b） | `test/unit/session-goal-continue.test.cjs`：无目标 / 已收尾 / 已暂停 → 不续；预算充足 → `cont=true` 且不改状态；轮次或墙钟用尽 → 不续且落 `stalled`（`outcome` 仍为空）；`resume` 重置轮次但保留事实与清单；已收尾的目标不给「继续」 |
-| 目标条 / 面板渲染（P2c） | `test/unit/renderer-goal-bar.test.cjs`：无目标时收起 / 一行文案与状态词 / 按钮出现条件（跑动中停止、停下且未收尾继续、收尾后不给继续）/ 展开区的三态标记与聚合次数 / 取数失败不改写面板文案（`new Function` + DOM 桩，与 `renderer-tool-artifact-path.test.cjs` 同一手法） |
+| 目标面板渲染（P2c） | `test/unit/renderer-goal-panel.test.cjs`：无目标时空态 / 面板头轮次与状态词 / 按钮出现条件（跑动中停止、停下且未收尾继续、收尾后不给继续）/ 检查的四态标记与聚合次数 / 取数失败不改写面板文案（`new Function` + DOM 桩，与 `renderer-tool-artifact-path.test.cjs` 同一手法） |
 | Rust | `cargo test -p dieyun-core memory::goal`：`put/get` 往返、空/超大拒绝、覆盖写、`null` 即删除、删会话级联清理 |
 | RPC | `npm run verify:rpc-catalog` + `npm run test:local-gateway-smoke` |
 | Renderer | `npm run check:renderer`（含 rail/pane 成对与 DOM id 引用）、`npm run test:renderer` |

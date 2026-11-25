@@ -1,0 +1,1830 @@
+src\llm-tool-call-fallback.js:390  src\renderer\renderer-agent-continue.js:107  src\renderer\renderer-thinking-trace.js:673
+.replace(/<tool_calls>[\s\S]*?(?=<tool_calls>|$)/gi, '')
+.replace(/<\/tool_calls>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*>[\s\S]*?(?=<invoke\s+name=|<\/tool_calls>|$)/gi, '')
+.replace(/<\/invoke>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*\/?>/gi, '')
+.replace(/<tool_call>[\s\S]*?(?=<tool_call>|$)/gi, '')
+.replace(/<\/tool_call>/gi, '')
+.replace(/<function=[^>\n/]+>\s*/gi, '')
+
+src\llm-tool-call-fallback.js:399  src\renderer\renderer-agent-continue.js:115  src\renderer\renderer-thinking-trace.js:681
+.replace(/<parameter\s+name="[^"]+"[^>]*>[\s\S]*?<\/parameter>/gi, '')
+.replace(/<parameter\s+name="[^"]+"[^>]*\/\s*>/gi, '')
+.replace(/<parameter=[^>\n/]+>[\s\S]*?<\/parameter>/gi, '')
+.replace(/<parameter=[^>\n/]+>[\s\S]*?(?=<parameter=|<function=|<tool_call>|<invoke|<\/tool_calls>|$)/gi, '')
+.replace(/\n{3,}/g, '\n\n')
+.trim();
+}
+
+
+src\renderer\agent\trace-store.js:324  src\renderer\renderer-agent-complete.js:575  src\renderer\renderer-agent-complete.js:636
+role: 'assistant',
+content: persisted,
+...(persistedReasoning ? { reasoning: persistedReasoning } : {})
+}).catch((e) => {
+console.warn(e);
+return null;
+});
+if (ins?.localMsgId) {
+
+src\renderer\agent\trace-store.js:326  src\renderer\renderer-agent-complete.js:577  src\renderer\renderer-agent-complete.js:638
+...(persistedReasoning ? { reasoning: persistedReasoning } : {})
+}).catch((e) => {
+console.warn(e);
+return null;
+});
+if (ins?.localMsgId) {
+assistantMsg.localMsgId = ins.localMsgId;
+assistantMsg.id = ins.localMsgId;
+
+src\renderer\agent\trace-store.js:328  src\renderer\renderer-agent-complete.js:579  src\renderer\renderer-agent-complete.js:640
+console.warn(e);
+return null;
+});
+if (ins?.localMsgId) {
+assistantMsg.localMsgId = ins.localMsgId;
+assistantMsg.id = ins.localMsgId;
+}
+await saveAgentRunState({
+
+src\agent\agent-limits-by-tier.js:64  src\agent\model-runtime-by-tier.js:72
+try {
+const raw = globalThis.localStorage.getItem(STORAGE_KEY);
+if (!raw) return {};
+const parsed = JSON.parse(raw);
+if (!parsed || typeof parsed !== 'object') return {};
+return foldTierRecord(parsed);
+} catch {
+return {};
+
+src\agent\context-signals.js:115  src\agent\system-prompt-prep.js:1348
+}
+
+module.exports = {
+textHasCodebaseMention,
+extractPathHintsFromText,
+shouldInjectCodeContext,
+shouldAutoCodebaseSearch,
+formatCodebaseBlock,
+
+src\agent\live-loop-trace.js:402  src\renderer\renderer-tool-results.js:58
+}
+const exit = result.code != null ? result.code : result.exitCode;
+const stderr = String(result.stderr ?? '').trim();
+if (stderr && exit != null && exit !== 0) {
+return `exit ${exit} · ${stderr.slice(0, 80)}`;
+}
+const out = String(result.stdout ?? result.output ?? '').trim();
+if (out) {
+
+src\agent\main-turn-runner.js:320  src\plans\plan-agent-runner.js:197
+startParams: {
+model: llmModel,
+messages,
+tools,
+maxToolCalls: resolveLoopToolCallLimit(runSettings),
+maxRounds: clampModelRuntimeValue('agentMaxRounds', runSettings.agentMaxRounds),
+workspaceRoot: workspacePath || undefined
+},
+
+src\agent\main-turn-runner.js:332  src\headless\desktop-turn.js:246
+sessionId,
+workspacePath,
+tokenBudget,
+contextTierId,
+apiConfig: apiCfg,
+model: llmModel
+}),
+turnEndSynthesis: true,
+
+src\agent\main-turn-runner.js:369  src\plans\plan-agent-runner.js:226
+} catch (err) {
+if (!isAbortError(err)) throw err;
+aborted = true;
+} finally {
+clearToolHarnessSessionsForSession(sessionId);
+}
+
+if (aborted) {
+
+src\agent\main-turn-runner.js:467  src\plans\plan-agent-runner.js:274
+afterAgentRun({
+result: {
+content: reply,
+trace,
+runId: loopResult && loopResult.runId,
+plan: null,
+review: null,
+readiness: loopResult && loopResult.readiness
+
+src\agent\mutate-queue.js:104  src\renderer\renderer-mutate-queue.js:78
+
+let meta = null;
+let watchdog = null;
+let opened = false;
+let accounted = false;
+
+const openGate = () => {
+if (opened) return;
+
+src\agent\mutate-queue.js:106  src\renderer\renderer-mutate-queue.js:80
+let watchdog = null;
+let opened = false;
+let accounted = false;
+
+const openGate = () => {
+if (opened) return;
+opened = true;
+mine.resolve();
+
+src\agent\mutate-queue.js:118  src\renderer\renderer-mutate-queue.js:89
+const settleAccounting = () => {
+if (accounted) return;
+accounted = true;
+q.pending = Math.max(0, q.pending - 1);
+if (holder) q.holders.delete(holder);
+if (q.active === meta) q.active = null;
+};
+
+
+src\agent\mutate-queue.js:155  src\renderer\renderer-mutate-queue.js:126
+
+function getWorkspaceMutatePending(workspaceKey) {
+const q = mutateQueues.get(normalizeWorkspaceMutateKey(workspaceKey));
+return q ? q.pending : 0;
+}
+
+function isWorkspaceMutateBusy(workspaceKey, excludeHolderId) {
+const q = mutateQueues.get(normalizeWorkspaceMutateKey(workspaceKey));
+
+src\agent\mutate-queue.js:156  src\renderer\renderer-mutate-queue.js:127
+function getWorkspaceMutatePending(workspaceKey) {
+const q = mutateQueues.get(normalizeWorkspaceMutateKey(workspaceKey));
+return q ? q.pending : 0;
+}
+
+function isWorkspaceMutateBusy(workspaceKey, excludeHolderId) {
+const q = mutateQueues.get(normalizeWorkspaceMutateKey(workspaceKey));
+if (!q || q.pending <= 0) return false;
+
+src\agent\mutate-queue.js:158  src\renderer\renderer-mutate-queue.js:129
+return q ? q.pending : 0;
+}
+
+function isWorkspaceMutateBusy(workspaceKey, excludeHolderId) {
+const q = mutateQueues.get(normalizeWorkspaceMutateKey(workspaceKey));
+if (!q || q.pending <= 0) return false;
+const exclude =
+excludeHolderId != null && String(excludeHolderId).trim()
+
+src\agent\mutate-queue.js:160  src\renderer\renderer-mutate-queue.js:131
+
+function isWorkspaceMutateBusy(workspaceKey, excludeHolderId) {
+const q = mutateQueues.get(normalizeWorkspaceMutateKey(workspaceKey));
+if (!q || q.pending <= 0) return false;
+const exclude =
+excludeHolderId != null && String(excludeHolderId).trim()
+? String(excludeHolderId).trim()
+: '';
+
+src\agent\mutate-queue.js:162  src\renderer\renderer-mutate-queue.js:133
+const q = mutateQueues.get(normalizeWorkspaceMutateKey(workspaceKey));
+if (!q || q.pending <= 0) return false;
+const exclude =
+excludeHolderId != null && String(excludeHolderId).trim()
+? String(excludeHolderId).trim()
+: '';
+if (!exclude) return true;
+if (q.holders.size === 0) return q.pending > 0;
+
+src\agent\mutate-queue.js:164  src\renderer\renderer-mutate-queue.js:135
+const exclude =
+excludeHolderId != null && String(excludeHolderId).trim()
+? String(excludeHolderId).trim()
+: '';
+if (!exclude) return true;
+if (q.holders.size === 0) return q.pending > 0;
+for (const holder of q.holders) {
+if (holder !== exclude) return true;
+
+src\agent\mutate-queue.js:166  src\renderer\renderer-mutate-queue.js:137
+? String(excludeHolderId).trim()
+: '';
+if (!exclude) return true;
+if (q.holders.size === 0) return q.pending > 0;
+for (const holder of q.holders) {
+if (holder !== exclude) return true;
+}
+return q.pending > 1;
+
+src\agent\mutate-queue.js:168  src\renderer\renderer-mutate-queue.js:139
+if (!exclude) return true;
+if (q.holders.size === 0) return q.pending > 0;
+for (const holder of q.holders) {
+if (holder !== exclude) return true;
+}
+return q.pending > 1;
+}
+
+
+src\agent\mutate-queue.js:170  src\renderer\renderer-mutate-queue.js:141
+for (const holder of q.holders) {
+if (holder !== exclude) return true;
+}
+return q.pending > 1;
+}
+
+function listWorkspaceMutateHolders(workspaceKey) {
+const q = mutateQueues.get(normalizeWorkspaceMutateKey(workspaceKey));
+
+src\browser\console-collector.js:95  src\browser\network-collector.js:27
+engine: partial.engine
+};
+entries.push(entry);
+if (entries.length > maxEntries) entries = entries.slice(-maxEntries);
+return entry;
+}
+
+function clear() {
+
+src\browser\console-collector.js:96  src\browser\network-collector.js:28
+};
+entries.push(entry);
+if (entries.length > maxEntries) entries = entries.slice(-maxEntries);
+return entry;
+}
+
+function clear() {
+entries = [];
+
+src\browser\console-collector.js:102  src\browser\timeline.js:170
+function clear() {
+entries = [];
+}
+
+
+function filterEntries(args = {}) {
+let out = entries.slice();
+if (args.engine) out = out.filter((e) => e.engine === args.engine);
+
+src\browser\console-collector.js:115  src\browser\timeline.js:194
+if (args.urlPattern) {
+const raw = String(args.urlPattern);
+let match;
+try {
+const re = new RegExp(raw, 'i');
+match = (e) => re.test(e.url || '');
+} catch {
+const needle = raw.toLowerCase();
+
+src\browser\console-collector.js:116  src\browser\timeline.js:195
+const raw = String(args.urlPattern);
+let match;
+try {
+const re = new RegExp(raw, 'i');
+match = (e) => re.test(e.url || '');
+} catch {
+const needle = raw.toLowerCase();
+match = (e) => String(e.url || '').toLowerCase().includes(needle);
+
+src\browser\console-collector.js:118  src\browser\timeline.js:197
+try {
+const re = new RegExp(raw, 'i');
+match = (e) => re.test(e.url || '');
+} catch {
+const needle = raw.toLowerCase();
+match = (e) => String(e.url || '').toLowerCase().includes(needle);
+}
+out = out.filter(match);
+
+src\browser\console-collector.js:120  src\browser\timeline.js:199
+match = (e) => re.test(e.url || '');
+} catch {
+const needle = raw.toLowerCase();
+match = (e) => String(e.url || '').toLowerCase().includes(needle);
+}
+out = out.filter(match);
+}
+if (args.sinceMs) {
+
+src\browser\console-collector.js:122  src\browser\timeline.js:201
+const needle = raw.toLowerCase();
+match = (e) => String(e.url || '').toLowerCase().includes(needle);
+}
+out = out.filter(match);
+}
+if (args.sinceMs) {
+const since = Date.now() - Math.max(0, Number(args.sinceMs) || 0);
+out = out.filter((e) => e.ts >= since);
+
+src\browser\console-collector.js:133  src\browser\network-collector.js:68
+
+function list(args = {}) {
+const limit = Math.min(200, Math.max(1, Number(args.limit) || 50));
+return filterEntries(args).slice(-limit);
+}
+
+function status(args = {}) {
+const rows = filterEntries(args);
+
+src\browser\controller.js:8  src\browser\snapshot-script.js:991
+buildClickCoordsScript,
+buildClickCoordsScriptBySelector,
+buildTypePrepareScript,
+buildTypePrepareScriptBySelector,
+buildReadFieldScript,
+buildSelectFieldScript,
+buildSelectOptionScript,
+buildImportLocalStorageScript,
+
+src\browser\controller.js:10  src\browser\snapshot-script.js:993
+buildTypePrepareScript,
+buildTypePrepareScriptBySelector,
+buildReadFieldScript,
+buildSelectFieldScript,
+buildSelectOptionScript,
+buildImportLocalStorageScript,
+buildReadLocalStorageScript,
+buildHoverCoordsScript,
+
+src\browser\controller.js:12  src\browser\snapshot-script.js:995
+buildReadFieldScript,
+buildSelectFieldScript,
+buildSelectOptionScript,
+buildImportLocalStorageScript,
+buildReadLocalStorageScript,
+buildHoverCoordsScript,
+buildHoverCoordsScriptBySelector,
+buildElementBoundsScript,
+
+src\browser\controller.js:14  src\browser\snapshot-script.js:997
+buildSelectOptionScript,
+buildImportLocalStorageScript,
+buildReadLocalStorageScript,
+buildHoverCoordsScript,
+buildHoverCoordsScriptBySelector,
+buildElementBoundsScript,
+buildScrollTargetScript,
+buildDragCoordsScript,
+
+src\browser\controller.js:16  src\browser\snapshot-script.js:999
+buildReadLocalStorageScript,
+buildHoverCoordsScript,
+buildHoverCoordsScriptBySelector,
+buildElementBoundsScript,
+buildScrollTargetScript,
+buildDragCoordsScript,
+buildWaitConditionScript,
+buildUploadFileScript,
+
+src\browser\controller.js:18  src\browser\snapshot-script.js:1001
+buildHoverCoordsScriptBySelector,
+buildElementBoundsScript,
+buildScrollTargetScript,
+buildDragCoordsScript,
+buildWaitConditionScript,
+buildUploadFileScript,
+buildPressKeyScript,
+normalizeModifiers,
+
+src\browser\controller.js:73  src\gateway\host-control.js:47
+function assertHttpUrl(url) {
+const u = String(url || '').trim();
+let parsed;
+try {
+parsed = new URL(u);
+} catch {
+const err = new Error('无效的 URL');
+err.code = 'INVALID_URL';
+
+src\browser\controller.js:372  src\browser\playwright-runner.js:1492
+}
+
+function guessMime(filePath) {
+const ext = path.extname(String(filePath || '')).toLowerCase();
+if (ext === '.png') return 'image/png';
+if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+if (ext === '.gif') return 'image/gif';
+if (ext === '.webp') return 'image/webp';
+
+src\browser\controller.js:374  src\browser\playwright-runner.js:1494
+function guessMime(filePath) {
+const ext = path.extname(String(filePath || '')).toLowerCase();
+if (ext === '.png') return 'image/png';
+if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+if (ext === '.gif') return 'image/gif';
+if (ext === '.webp') return 'image/webp';
+if (ext === '.pdf') return 'application/pdf';
+if (ext === '.txt' || ext === '.md') return 'text/plain';
+
+src\browser\controller.js:376  src\browser\playwright-runner.js:1496
+if (ext === '.png') return 'image/png';
+if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+if (ext === '.gif') return 'image/gif';
+if (ext === '.webp') return 'image/webp';
+if (ext === '.pdf') return 'application/pdf';
+if (ext === '.txt' || ext === '.md') return 'text/plain';
+if (ext === '.csv') return 'text/csv';
+if (ext === '.json') return 'application/json';
+
+src\browser\controller.js:378  src\browser\playwright-runner.js:1498
+if (ext === '.gif') return 'image/gif';
+if (ext === '.webp') return 'image/webp';
+if (ext === '.pdf') return 'application/pdf';
+if (ext === '.txt' || ext === '.md') return 'text/plain';
+if (ext === '.csv') return 'text/csv';
+if (ext === '.json') return 'application/json';
+return 'application/octet-stream';
+}
+
+src\browser\controller.js:1154  src\browser\playwright-runner.js:1315
+
+async function evaluateScript(args = {}) {
+const script = String(args.script == null ? '' : args.script);
+if (!script.trim()) {
+const err = new Error('browser_evaluate 需要 script');
+err.code = 'SCRIPT_REQUIRED';
+throw err;
+}
+
+src\browser\controller.js:2340  src\browser\playwright-runner.js:1921
+}
+
+
+async function dialog(args = {}) {
+const action = String(args.action || 'list').toLowerCase();
+if (action === 'policy') {
+const next = String(args.policy || 'auto').toLowerCase();
+dialogPolicy = ['auto', 'accept', 'dismiss', 'manual'].indexOf(next) >= 0 ? next : 'auto';
+
+src\browser\controller.js:2410  src\browser\playwright-runner.js:1985
+urlPattern: String(args.urlPattern || args.pattern || '*'),
+type: ['abort', 'fulfill', 'continue', 'modifyHeaders'].indexOf(type) >= 0 ? type : 'fulfill',
+status: args.status != null ? Number(args.status) : undefined,
+body: args.body != null ? String(args.body) : undefined,
+headers: args.headers && typeof args.headers === 'object' ? args.headers : undefined,
+contentType: args.contentType ? String(args.contentType) : undefined,
+errorReason: args.errorReason ? String(args.errorReason) : undefined,
+enabled: true,
+
+src\browser\controller.js:2412  src\browser\playwright-runner.js:1987
+status: args.status != null ? Number(args.status) : undefined,
+body: args.body != null ? String(args.body) : undefined,
+headers: args.headers && typeof args.headers === 'object' ? args.headers : undefined,
+contentType: args.contentType ? String(args.contentType) : undefined,
+errorReason: args.errorReason ? String(args.errorReason) : undefined,
+enabled: true,
+hits: 0
+};
+
+src\browser\controller.js:2657  src\browser\playwright-runner.js:1588
+const snap = await snapshot({
+interactive: opts.interactive !== false,
+mode: opts.mode,
+maxElements: opts.maxElements,
+delayMs: opts.delayMs,
+frame: opts.frame
+});
+if (snap && snap.ok === false) return snap;
+
+src\browser\controller.js:2658  src\browser\playwright-runner.js:1589
+interactive: opts.interactive !== false,
+mode: opts.mode,
+maxElements: opts.maxElements,
+delayMs: opts.delayMs,
+frame: opts.frame
+});
+if (snap && snap.ok === false) return snap;
+let shot = null;
+
+src\browser\controller.js:2660  src\browser\playwright-runner.js:1591
+maxElements: opts.maxElements,
+delayMs: opts.delayMs,
+frame: opts.frame
+});
+if (snap && snap.ok === false) return snap;
+let shot = null;
+let shotError = '';
+if (opts.screenshot !== false) {
+
+src\browser\controller.js:2688  src\browser\playwright-runner.js:1611
+mode: snap.mode,
+textPreview: snap.textPreview || '',
+elements: snap.elements || [],
+snapshotId: snap.snapshotId,
+coverage: snap.coverage,
+frames: snap.frames,
+blockedIframes: snap.blockedIframes,
+screenshot: shot
+
+src\channels\agent-turn.js:350  src\headless\local-executor.js:83
+const result = await runMainTurn({
+userData: deps.userData,
+gateway,
+coreBridge,
+mcpRuntime: deps.getMcpRuntime ? deps.getMcpRuntime() : null,
+compactionAgent: deps.getCompactionAgent ? deps.getCompactionAgent() : null,
+toolBridge: deps.createToolBridge(null),
+sessionId,
+
+src\channels\store.js:35  src\gateway\handlers\memory.js:17
+const raw = String(workspacePath == null ? '' : workspacePath).trim();
+if (!raw) return null;
+const target = parseWorkspaceInput(raw);
+if (!target) {
+const e = new Error(`工作空间路径无法识别：${raw}（远端须写成 ssh:
+e.code = 'INVALID_PARAMS';
+throw e;
+}
+
+src\channels\store.js:36  src\gateway\handlers\memory.js:18
+if (!raw) return null;
+const target = parseWorkspaceInput(raw);
+if (!target) {
+const e = new Error(`工作空间路径无法识别：${raw}（远端须写成 ssh:
+e.code = 'INVALID_PARAMS';
+throw e;
+}
+return target.kind === 'ssh' ? buildSshUri(target) : target.path;
+
+src\gateway\handlers\computer.js:14  src\remote\ssh-screen.js:506
+REMOTE_TMP_ROOT,
+REMOTE_SCREEN_TIMEOUT_MS,
+buildProbeScript,
+parseProbeOutput,
+describeProbe,
+buildCaptureCommand,
+buildInputCommand,
+pngSize,
+
+src\gateway\handlers\computer.js:95  src\gateway\handlers\host.js:88
+});
+if (blocked) {
+const e = new Error(blocked.error);
+e.code = blocked.errorCode;
+e.sandboxMode = blocked.sandboxMode;
+e.retryable = false;
+throw e;
+}
+
+src\gateway\handlers\computer.js:96  src\gateway\handlers\host.js:89
+if (blocked) {
+const e = new Error(blocked.error);
+e.code = blocked.errorCode;
+e.sandboxMode = blocked.sandboxMode;
+e.retryable = false;
+throw e;
+}
+}
+
+src\gateway\handlers\fs.js:73  src\gateway\rpc.js:2108
+graphIncremental,
+codebaseIncremental,
+summarizeLineDiff,
+runEditFile,
+listSidecarDirAt,
+getRemoteAgentInfo,
+getRemoteAgentClient,
+grepViaRemoteExec,
+
+src\gateway\handlers\fs.js:74  src\gateway\rpc.js:2109
+codebaseIncremental,
+summarizeLineDiff,
+runEditFile,
+listSidecarDirAt,
+getRemoteAgentInfo,
+getRemoteAgentClient,
+grepViaRemoteExec,
+grepWorkspace,
+
+src\gateway\handlers\fs.js:76  src\gateway\rpc.js:2111
+runEditFile,
+listSidecarDirAt,
+getRemoteAgentInfo,
+getRemoteAgentClient,
+grepViaRemoteExec,
+grepWorkspace,
+globViaRemoteExec,
+globWorkspace,
+
+src\gateway\handlers\fs.js:765  src\remote\minimal-gateway-host.js:279
+if (!st) return null;
+return {
+name: ent.name,
+isDirectory: st.isDirectory(),
+size: st.size,
+mtimeMs: st.mtimeMs
+};
+})
+
+src\gateway\handlers\fs.js:767  src\remote\minimal-gateway-host.js:281
+name: ent.name,
+isDirectory: st.isDirectory(),
+size: st.size,
+mtimeMs: st.mtimeMs
+};
+})
+);
+for (const row of rows) if (row) out.push(row);
+
+src\gateway\handlers\lsp-workspace.js:25  src\gateway\rpc.js:2090
+lspDiagnostics,
+normalizeFilePathInput,
+cwdForCall,
+assertAllowedPath,
+readRootsForCall,
+isSshConnectedForCall,
+resolveSshManager,
+requireSshForCall,
+
+src\gateway\handlers\lsp-workspace.js:26  src\gateway\rpc.js:2091
+normalizeFilePathInput,
+cwdForCall,
+assertAllowedPath,
+readRootsForCall,
+isSshConnectedForCall,
+resolveSshManager,
+requireSshForCall,
+defaultCwd,
+
+src\gateway\handlers\lsp-workspace.js:28  src\gateway\rpc.js:2093
+assertAllowedPath,
+readRootsForCall,
+isSshConnectedForCall,
+resolveSshManager,
+requireSshForCall,
+defaultCwd,
+getWorkspaceGitDiffContext,
+getWorkspaceGitChangedAbsPaths,
+
+src\gateway\rg-search.js:295  src\gateway\rpc.js:985
+const matches = [];
+for (const rel of order) {
+const items = byPath.get(rel);
+for (let i = 0; i < items.length; i++) {
+if (!items[i].isMatch) continue;
+const entry = { path: rel, line: items[i].line, text: items[i].text };
+if (wantContext) {
+if (before > 0) {
+
+src\gateway\rg-search.js:296  src\gateway\rpc.js:986
+for (const rel of order) {
+const items = byPath.get(rel);
+for (let i = 0; i < items.length; i++) {
+if (!items[i].isMatch) continue;
+const entry = { path: rel, line: items[i].line, text: items[i].text };
+if (wantContext) {
+if (before > 0) {
+const seg = [];
+
+src\gateway\rg-search.js:298  src\gateway\rpc.js:988
+for (let i = 0; i < items.length; i++) {
+if (!items[i].isMatch) continue;
+const entry = { path: rel, line: items[i].line, text: items[i].text };
+if (wantContext) {
+if (before > 0) {
+const seg = [];
+for (let j = Math.max(0, i - before); j < i; j++) {
+if (items[j].isMatch) continue;
+
+src\gateway\rg-search.js:300  src\gateway\rpc.js:990
+const entry = { path: rel, line: items[i].line, text: items[i].text };
+if (wantContext) {
+if (before > 0) {
+const seg = [];
+for (let j = Math.max(0, i - before); j < i; j++) {
+if (items[j].isMatch) continue;
+seg.push({ line: items[j].line, text: items[j].text });
+}
+
+src\gateway\rg-search.js:302  src\gateway\rpc.js:992
+if (before > 0) {
+const seg = [];
+for (let j = Math.max(0, i - before); j < i; j++) {
+if (items[j].isMatch) continue;
+seg.push({ line: items[j].line, text: items[j].text });
+}
+if (seg.length) entry.before = seg;
+}
+
+src\gateway\rg-search.js:304  src\gateway\rpc.js:994
+for (let j = Math.max(0, i - before); j < i; j++) {
+if (items[j].isMatch) continue;
+seg.push({ line: items[j].line, text: items[j].text });
+}
+if (seg.length) entry.before = seg;
+}
+if (after > 0) {
+const seg = [];
+
+src\gateway\rg-search.js:306  src\gateway\rpc.js:996
+seg.push({ line: items[j].line, text: items[j].text });
+}
+if (seg.length) entry.before = seg;
+}
+if (after > 0) {
+const seg = [];
+for (let j = i + 1; j < Math.min(items.length, i + 1 + after); j++) {
+if (items[j].isMatch) continue;
+
+src\gateway\rg-search.js:308  src\gateway\rpc.js:998
+if (seg.length) entry.before = seg;
+}
+if (after > 0) {
+const seg = [];
+for (let j = i + 1; j < Math.min(items.length, i + 1 + after); j++) {
+if (items[j].isMatch) continue;
+seg.push({ line: items[j].line, text: items[j].text });
+}
+
+src\gateway\rg-search.js:310  src\gateway\rpc.js:1000
+if (after > 0) {
+const seg = [];
+for (let j = i + 1; j < Math.min(items.length, i + 1 + after); j++) {
+if (items[j].isMatch) continue;
+seg.push({ line: items[j].line, text: items[j].text });
+}
+if (seg.length) entry.after = seg;
+}
+
+src\gateway\rg-search.js:312  src\gateway\rpc.js:1002
+for (let j = i + 1; j < Math.min(items.length, i + 1 + after); j++) {
+if (items[j].isMatch) continue;
+seg.push({ line: items[j].line, text: items[j].text });
+}
+if (seg.length) entry.after = seg;
+}
+}
+matches.push(entry);
+
+src\gateway\server.js:1346  src\remote\minimal-gateway-host.js:676
+try {
+const result = await fn(params);
+this._send(ws, { v: 1, type: 'result', id, ok: true, data: result });
+} catch (err) {
+this._send(ws, {
+v: 1,
+type: 'result',
+id,
+
+src\gateway\web\engines\bing.js:10  src\gateway\web\engines\google.js:11
+
+const BASE = 'https:
+
+function buildUrl({ query, site, page }) {
+const q = normalizeQuery(query, site);
+if (!q) throw new Error('query 必填');
+const p = clampPage(page);
+const url = new URL('/search', BASE);
+
+src\graph\graph-incremental-scheduler.js:19  src\index\codebase-incremental-scheduler.js:14
+*
+* @param {{
+* userDataPath: string,
+* getWorkspaceRoot: () => string | null,
+* invokeRustCore: (method: string, params: object, timeoutMs?: number) => Promise<object | null>,
+* log?: (msg: string) => void,
+* debounceMs?: number,
+* }} opts
+
+src\graph\graph-incremental-scheduler.js:20  src\index\codebase-incremental-scheduler.js:15
+* @param {{
+* userDataPath: string,
+* getWorkspaceRoot: () => string | null,
+* invokeRustCore: (method: string, params: object, timeoutMs?: number) => Promise<object | null>,
+* log?: (msg: string) => void,
+* debounceMs?: number,
+* }} opts
+*/
+
+src\lsp\cli-fallback.js:557  src\lsp\diagnostics-service.js:184
+if (root.startsWith('/') || abs.startsWith('/')) {
+return abs === root || abs.startsWith(`${root}/`);
+}
+const resolvedRoot = path.resolve(workspaceRoot);
+const resolvedAbs = path.resolve(absPath);
+const rel = path.relative(resolvedRoot, resolvedAbs);
+return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+src\lsp\cli-fallback.js:558  src\lsp\diagnostics-service.js:185
+return abs === root || abs.startsWith(`${root}/`);
+}
+const resolvedRoot = path.resolve(workspaceRoot);
+const resolvedAbs = path.resolve(absPath);
+const rel = path.relative(resolvedRoot, resolvedAbs);
+return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+
+src\lsp\cli-fallback.js:1447  src\lsp\diagnostics-service.js:19
+runRemoteTscBatch,
+runRemoteEslintBatch,
+runRemoteRuffBatch,
+runRemotePrettierBatch,
+runRemoteEslintProjectScan,
+runRemoteRuffProjectScan,
+runRemoteTscProjectScan,
+runRemotePrettierProjectScan,
+
+src\main\window-tray.js:119  src\main\workplace-monitor.js:177
+tokensToday: stats.tokensToday,
+tokensTotal: stats.tokensTotal,
+promptTokensToday: stats.promptTokensToday,
+completionTokensToday: stats.completionTokensToday,
+cachedTokensToday: stats.cachedTokensToday,
+cachedTokensTotal: stats.cachedTokensTotal,
+cacheHitPromptTokensToday: stats.cacheHitPromptTokensToday,
+cacheHitPromptTokensMonth: stats.cacheHitPromptTokensMonth,
+
+src\main\window-tray.js:120  src\main\workplace-monitor.js:178
+tokensTotal: stats.tokensTotal,
+promptTokensToday: stats.promptTokensToday,
+completionTokensToday: stats.completionTokensToday,
+cachedTokensToday: stats.cachedTokensToday,
+cachedTokensTotal: stats.cachedTokensTotal,
+cacheHitPromptTokensToday: stats.cacheHitPromptTokensToday,
+cacheHitPromptTokensMonth: stats.cacheHitPromptTokensMonth,
+promptTokensMonth: stats.promptTokensMonth,
+
+src\main\window-tray.js:122  src\main\workplace-monitor.js:180
+completionTokensToday: stats.completionTokensToday,
+cachedTokensToday: stats.cachedTokensToday,
+cachedTokensTotal: stats.cachedTokensTotal,
+cacheHitPromptTokensToday: stats.cacheHitPromptTokensToday,
+cacheHitPromptTokensMonth: stats.cacheHitPromptTokensMonth,
+promptTokensMonth: stats.promptTokensMonth,
+completionTokensMonth: stats.completionTokensMonth,
+cachedTokensMonth: stats.cachedTokensMonth,
+
+src\main\window-tray.js:124  src\main\workplace-monitor.js:182
+cachedTokensTotal: stats.cachedTokensTotal,
+cacheHitPromptTokensToday: stats.cacheHitPromptTokensToday,
+cacheHitPromptTokensMonth: stats.cacheHitPromptTokensMonth,
+promptTokensMonth: stats.promptTokensMonth,
+completionTokensMonth: stats.completionTokensMonth,
+cachedTokensMonth: stats.cachedTokensMonth,
+modelUsageToday: stats.modelUsageToday,
+modelUsageMonth: stats.modelUsageMonth,
+
+src\mcp\catalog.js:274  src\skills\catalog.js:70
+};
+}
+
+function mergeCatalogEntries(entries) {
+const byId = new Map();
+for (const ent of entries) {
+if (!ent || !ent.id) continue;
+const prev = byId.get(ent.id);
+
+src\mobile\public\voice.js:12  src\renderer\renderer-composer-voice.js:13
+let mediaStream = null;
+let mediaRecorder = null;
+let voiceChunks = [];
+let voiceStartedAt = 0;
+let voiceTimerId = null;
+let voiceMimeType = 'audio/webm';
+let audioContext = null;
+let analyser = null;
+
+src\mobile\public\voice.js:14  src\renderer\renderer-composer-voice.js:15
+let voiceChunks = [];
+let voiceStartedAt = 0;
+let voiceTimerId = null;
+let voiceMimeType = 'audio/webm';
+let audioContext = null;
+let analyser = null;
+let waveAnimId = null;
+
+
+src\mobile\public\voice.js:44  src\renderer\renderer-composer-voice.js:41
+}
+
+function pickRecorderMimeType() {
+const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+for (const t of candidates) {
+if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) return t;
+}
+return 'audio/webm';
+
+src\mobile\public\voice.js:46  src\renderer\renderer-composer-voice.js:43
+function pickRecorderMimeType() {
+const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+for (const t of candidates) {
+if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) return t;
+}
+return 'audio/webm';
+}
+
+
+src\mobile\public\voice.js:48  src\renderer\renderer-composer-voice.js:45
+for (const t of candidates) {
+if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) return t;
+}
+return 'audio/webm';
+}
+
+function extensionForMime(mime) {
+const m = String(mime || '').toLowerCase();
+
+src\mobile\public\voice.js:50  src\renderer\renderer-composer-voice.js:47
+}
+return 'audio/webm';
+}
+
+function extensionForMime(mime) {
+const m = String(mime || '').toLowerCase();
+if (m.includes('ogg')) return 'ogg';
+if (m.includes('mp4') || m.includes('m4a')) return 'm4a';
+
+src\mobile\public\voice.js:52  src\renderer\renderer-composer-voice.js:49
+}
+
+function extensionForMime(mime) {
+const m = String(mime || '').toLowerCase();
+if (m.includes('ogg')) return 'ogg';
+if (m.includes('mp4') || m.includes('m4a')) return 'm4a';
+return 'webm';
+}
+
+src\mobile\public\voice.js:69  src\renderer\renderer-composer-voice.js:56
+}
+
+function formatVoiceTimer(ms) {
+const sec = Math.max(0, Math.floor(ms / 1000));
+const m = Math.floor(sec / 60);
+const s = sec % 60;
+return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+src\mobile\public\voice.js:70  src\renderer\renderer-composer-voice.js:57
+
+function formatVoiceTimer(ms) {
+const sec = Math.max(0, Math.floor(ms / 1000));
+const m = Math.floor(sec / 60);
+const s = sec % 60;
+return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+
+src\mobile\public\voice.js:120  src\renderer\renderer-composer-voice.js:91
+if (!timer || !voiceRecording) return;
+timer.textContent = formatVoiceTimer(Date.now() - voiceStartedAt);
+}
+
+function stopWaveform() {
+if (waveAnimId) {
+cancelAnimationFrame(waveAnimId);
+waveAnimId = null;
+
+src\mobile\public\voice.js:122  src\renderer\renderer-composer-voice.js:93
+}
+
+function stopWaveform() {
+if (waveAnimId) {
+cancelAnimationFrame(waveAnimId);
+waveAnimId = null;
+}
+if (audioContext) {
+
+src\mobile\public\voice.js:124  src\renderer\renderer-composer-voice.js:95
+function stopWaveform() {
+if (waveAnimId) {
+cancelAnimationFrame(waveAnimId);
+waveAnimId = null;
+}
+if (audioContext) {
+try {
+audioContext.close();
+
+src\mobile\public\voice.js:145  src\renderer\renderer-composer-voice.js:116
+if (!wave || !stream) return;
+try {
+audioContext = new AudioContext();
+const source = audioContext.createMediaStreamSource(stream);
+analyser = audioContext.createAnalyser();
+analyser.fftSize = 64;
+source.connect(analyser);
+const bars = [];
+
+src\mobile\public\voice.js:154  src\renderer\renderer-composer-voice.js:125
+const bar = document.createElement('span');
+bar.className = 'composer-voice-bar';
+wave.appendChild(bar);
+bars.push(bar);
+}
+const data = new Uint8Array(analyser.frequencyBinCount);
+const tick = () => {
+if (!analyser) return;
+
+src\mobile\public\voice.js:156  src\renderer\renderer-composer-voice.js:127
+wave.appendChild(bar);
+bars.push(bar);
+}
+const data = new Uint8Array(analyser.frequencyBinCount);
+const tick = () => {
+if (!analyser) return;
+analyser.getByteFrequencyData(data);
+for (let i = 0; i < bars.length; i++) {
+
+src\mobile\public\voice.js:158  src\renderer\renderer-composer-voice.js:129
+}
+const data = new Uint8Array(analyser.frequencyBinCount);
+const tick = () => {
+if (!analyser) return;
+analyser.getByteFrequencyData(data);
+for (let i = 0; i < bars.length; i++) {
+const v = data[i + 2] || 0;
+
+
+src\mobile\public\voice.js:191  src\renderer\renderer-composer-voice.js:160
+}
+}
+mediaRecorder = null;
+if (mediaStream) {
+for (const track of mediaStream.getTracks()) track.stop();
+}
+mediaStream = null;
+stopWaveform();
+
+src\mobile\public\voice.js:192  src\renderer\renderer-composer-voice.js:161
+}
+mediaRecorder = null;
+if (mediaStream) {
+for (const track of mediaStream.getTracks()) track.stop();
+}
+mediaStream = null;
+stopWaveform();
+if (voiceTimerId) {
+
+src\mobile\public\voice.js:194  src\renderer\renderer-composer-voice.js:163
+if (mediaStream) {
+for (const track of mediaStream.getTracks()) track.stop();
+}
+mediaStream = null;
+stopWaveform();
+if (voiceTimerId) {
+clearInterval(voiceTimerId);
+voiceTimerId = null;
+
+src\mobile\public\voice.js:196  src\renderer\renderer-composer-voice.js:165
+}
+mediaStream = null;
+stopWaveform();
+if (voiceTimerId) {
+clearInterval(voiceTimerId);
+voiceTimerId = null;
+}
+}
+
+src\mobile\public\voice.js:237  src\renderer\renderer-composer-voice.js:191
+
+voiceMimeType = pickRecorderMimeType();
+voiceChunks = [];
+try {
+mediaRecorder = new MediaRecorder(mediaStream, { mimeType: voiceMimeType });
+} catch {
+mediaRecorder = new MediaRecorder(mediaStream);
+voiceMimeType = mediaRecorder.mimeType || 'audio/webm';
+
+src\mobile\public\voice.js:238  src\renderer\renderer-composer-voice.js:192
+voiceMimeType = pickRecorderMimeType();
+voiceChunks = [];
+try {
+mediaRecorder = new MediaRecorder(mediaStream, { mimeType: voiceMimeType });
+} catch {
+mediaRecorder = new MediaRecorder(mediaStream);
+voiceMimeType = mediaRecorder.mimeType || 'audio/webm';
+}
+
+src\mobile\public\voice.js:241  src\renderer\renderer-composer-voice.js:195
+mediaRecorder = new MediaRecorder(mediaStream, { mimeType: voiceMimeType });
+} catch {
+mediaRecorder = new MediaRecorder(mediaStream);
+voiceMimeType = mediaRecorder.mimeType || 'audio/webm';
+}
+
+mediaRecorder.ondataavailable = (ev) => {
+if (ev.data && ev.data.size > 0) voiceChunks.push(ev.data);
+
+src\mobile\public\voice.js:243  src\renderer\renderer-composer-voice.js:197
+mediaRecorder = new MediaRecorder(mediaStream);
+voiceMimeType = mediaRecorder.mimeType || 'audio/webm';
+}
+
+mediaRecorder.ondataavailable = (ev) => {
+if (ev.data && ev.data.size > 0) voiceChunks.push(ev.data);
+};
+mediaRecorder.onerror = () => {
+
+src\mobile\public\voice.js:259  src\renderer\renderer-composer-voice.js:213
+setVoiceControlsDisabled(false);
+updateVoiceTimer();
+voiceTimerId = setInterval(() => {
+updateVoiceTimer();
+if (Date.now() - voiceStartedAt >= VOICE_MAX_MS) {
+void finishVoiceRecording();
+}
+}, VOICE_TICK_MS);
+
+src\mobile\public\voice.js:260  src\renderer\renderer-composer-voice.js:214
+updateVoiceTimer();
+voiceTimerId = setInterval(() => {
+updateVoiceTimer();
+if (Date.now() - voiceStartedAt >= VOICE_MAX_MS) {
+void finishVoiceRecording();
+}
+}, VOICE_TICK_MS);
+
+
+src\mobile\public\voice.js:262  src\renderer\renderer-composer-voice.js:216
+updateVoiceTimer();
+if (Date.now() - voiceStartedAt >= VOICE_MAX_MS) {
+void finishVoiceRecording();
+}
+}, VOICE_TICK_MS);
+
+startWaveform(mediaStream);
+mediaRecorder.start(250);
+
+src\mobile\public\voice.js:277  src\renderer\renderer-composer-voice.js:232
+setVoiceControlsDisabled(false);
+setVoiceStatus('');
+}
+
+async function stopVoiceBlob() {
+return new Promise((resolve, reject) => {
+if (!mediaRecorder) {
+reject(new Error('未在录音'));
+
+src\mobile\public\voice.js:278  src\renderer\renderer-composer-voice.js:233
+setVoiceStatus('');
+}
+
+async function stopVoiceBlob() {
+return new Promise((resolve, reject) => {
+if (!mediaRecorder) {
+reject(new Error('未在录音'));
+return;
+
+src\mobile\public\voice.js:280  src\renderer\renderer-composer-voice.js:235
+
+async function stopVoiceBlob() {
+return new Promise((resolve, reject) => {
+if (!mediaRecorder) {
+reject(new Error('未在录音'));
+return;
+}
+mediaRecorder.onstop = () => {
+
+src\mobile\public\voice.js:282  src\renderer\renderer-composer-voice.js:237
+return new Promise((resolve, reject) => {
+if (!mediaRecorder) {
+reject(new Error('未在录音'));
+return;
+}
+mediaRecorder.onstop = () => {
+const blob = new Blob(voiceChunks, { type: voiceMimeType || 'audio/webm' });
+cleanupVoiceStream();
+
+src\mobile\public\voice.js:284  src\renderer\renderer-composer-voice.js:239
+reject(new Error('未在录音'));
+return;
+}
+mediaRecorder.onstop = () => {
+const blob = new Blob(voiceChunks, { type: voiceMimeType || 'audio/webm' });
+cleanupVoiceStream();
+resolve(blob);
+};
+
+src\mobile\public\voice.js:286  src\renderer\renderer-composer-voice.js:241
+}
+mediaRecorder.onstop = () => {
+const blob = new Blob(voiceChunks, { type: voiceMimeType || 'audio/webm' });
+cleanupVoiceStream();
+resolve(blob);
+};
+try {
+mediaRecorder.stop();
+
+src\mobile\public\voice.js:288  src\renderer\renderer-composer-voice.js:243
+const blob = new Blob(voiceChunks, { type: voiceMimeType || 'audio/webm' });
+cleanupVoiceStream();
+resolve(blob);
+};
+try {
+mediaRecorder.stop();
+} catch (err) {
+reject(err);
+
+src\mobile\public\voice.js:343  src\renderer\renderer-composer-voice.js:326
+
+function toggleVoiceRecording() {
+if (voiceTranscribing) return;
+if (voiceRecording) {
+void finishVoiceRecording();
+return;
+}
+void startVoiceRecording();
+
+src\mobile\public\voice.js:344  src\renderer\renderer-composer-voice.js:327
+function toggleVoiceRecording() {
+if (voiceTranscribing) return;
+if (voiceRecording) {
+void finishVoiceRecording();
+return;
+}
+void startVoiceRecording();
+}
+
+src\model-settings.js:244  src\renderer\renderer-model-runtime.js:483
+name: String(m?.name || '').trim(),
+baseUrl: String(m?.baseUrl || '').trim(),
+apiKey: String(m?.apiKey || '').trim(),
+dimensions: Math.min(
+EMBEDDING_DIMENSIONS_MAX,
+Math.max(EMBEDDING_DIMENSIONS_MIN, Number(m?.dimensions) || DEFAULTS.embeddingDimensions)
+),
+active: m?.active === true
+
+src\model-settings.js:296  src\renderer\renderer-model-runtime.js:492
+const hasRawEmbeddingModels =
+raw && Object.prototype.hasOwnProperty.call(raw, 'embeddingModels');
+let sourceEmbeddingModels = hasRawEmbeddingModels && Array.isArray(raw.embeddingModels)
+? raw.embeddingModels
+: [];
+if (!hasRawEmbeddingModels && (String(s.embeddingModel || '').trim() || String(s.embeddingBaseUrl || '').trim())) {
+sourceEmbeddingModels = [{
+id: 'embedding-legacy',
+
+src\model-settings.js:298  src\renderer\renderer-model-runtime.js:494
+let sourceEmbeddingModels = hasRawEmbeddingModels && Array.isArray(raw.embeddingModels)
+? raw.embeddingModels
+: [];
+if (!hasRawEmbeddingModels && (String(s.embeddingModel || '').trim() || String(s.embeddingBaseUrl || '').trim())) {
+sourceEmbeddingModels = [{
+id: 'embedding-legacy',
+name: s.embeddingModel,
+baseUrl: s.embeddingBaseUrl,
+
+src\model-settings.js:300  src\renderer\renderer-model-runtime.js:496
+: [];
+if (!hasRawEmbeddingModels && (String(s.embeddingModel || '').trim() || String(s.embeddingBaseUrl || '').trim())) {
+sourceEmbeddingModels = [{
+id: 'embedding-legacy',
+name: s.embeddingModel,
+baseUrl: s.embeddingBaseUrl,
+apiKey: s.embeddingApiKey,
+dimensions: s.embeddingDimensions,
+
+src\model-settings.js:302  src\renderer\renderer-model-runtime.js:498
+sourceEmbeddingModels = [{
+id: 'embedding-legacy',
+name: s.embeddingModel,
+baseUrl: s.embeddingBaseUrl,
+apiKey: s.embeddingApiKey,
+dimensions: s.embeddingDimensions,
+active: s.embeddingEnabled !== false
+}];
+
+src\model-settings.js:304  src\renderer\renderer-model-runtime.js:500
+name: s.embeddingModel,
+baseUrl: s.embeddingBaseUrl,
+apiKey: s.embeddingApiKey,
+dimensions: s.embeddingDimensions,
+active: s.embeddingEnabled !== false
+}];
+}
+
+
+src\model-settings.js:329  src\renderer\renderer-model-runtime.js:522
+const activeEmbedding = s.embeddingModels.find((m) => m.active) || null;
+s.embeddingEnabled = !!activeEmbedding;
+if (!activeEmbedding) {
+s.embeddingModel = '';
+s.embeddingBaseUrl = '';
+s.embeddingApiKey = '';
+s.embeddingDimensions = DEFAULTS.embeddingDimensions;
+return s;
+
+src\model-settings.js:330  src\renderer\renderer-model-runtime.js:523
+s.embeddingEnabled = !!activeEmbedding;
+if (!activeEmbedding) {
+s.embeddingModel = '';
+s.embeddingBaseUrl = '';
+s.embeddingApiKey = '';
+s.embeddingDimensions = DEFAULTS.embeddingDimensions;
+return s;
+}
+
+src\renderer\renderer-agent-continue.js:97  src\renderer\renderer-thinking-trace.js:663
+const normalized = String(text || '')
+.replace(/<\uff5cDSML\uff5c/gi, '<')
+.replace(/<\/\uff5cDSML\uff5c/gi, '</')
+.replace(/<tool[\s_]+calls>/gi, '<tool_calls>')
+.replace(/<\/tool[\s_]+calls>/gi, '</tool_calls>')
+.replace(/<tool[\s_]+call>/gi, '<tool_call>')
+.replace(/<\/tool[\s_]+call>/gi, '</tool_call>')
+.replace(/<\/function\s*>/gi, '')
+
+src\renderer\renderer-agent-continue.js:98  src\renderer\renderer-thinking-trace.js:664
+.replace(/<\uff5cDSML\uff5c/gi, '<')
+.replace(/<\/\uff5cDSML\uff5c/gi, '</')
+.replace(/<tool[\s_]+calls>/gi, '<tool_calls>')
+.replace(/<\/tool[\s_]+calls>/gi, '</tool_calls>')
+.replace(/<tool[\s_]+call>/gi, '<tool_call>')
+.replace(/<\/tool[\s_]+call>/gi, '</tool_call>')
+.replace(/<\/function\s*>/gi, '')
+.replace(/<function\s*>/gi, '');
+
+src\renderer\renderer-agent-continue.js:100  src\renderer\renderer-thinking-trace.js:666
+.replace(/<tool[\s_]+calls>/gi, '<tool_calls>')
+.replace(/<\/tool[\s_]+calls>/gi, '</tool_calls>')
+.replace(/<tool[\s_]+call>/gi, '<tool_call>')
+.replace(/<\/tool[\s_]+call>/gi, '</tool_call>')
+.replace(/<\/function\s*>/gi, '')
+.replace(/<function\s*>/gi, '');
+return normalized
+.replace(/<tool_calls>[\s\S]*?(?=<tool_calls>|$)/gi, '')
+
+src\renderer\renderer-agent-continue.js:102  src\renderer\renderer-thinking-trace.js:668
+.replace(/<tool[\s_]+call>/gi, '<tool_call>')
+.replace(/<\/tool[\s_]+call>/gi, '</tool_call>')
+.replace(/<\/function\s*>/gi, '')
+.replace(/<function\s*>/gi, '');
+return normalized
+.replace(/<tool_calls>[\s\S]*?(?=<tool_calls>|$)/gi, '')
+.replace(/<\/tool_calls>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*>[\s\S]*?(?=<invoke\s+name=|<\/tool_calls>|$)/gi, '')
+
+src\renderer\renderer-agent-continue.js:104  src\renderer\renderer-thinking-trace.js:670
+.replace(/<\/function\s*>/gi, '')
+.replace(/<function\s*>/gi, '');
+return normalized
+.replace(/<tool_calls>[\s\S]*?(?=<tool_calls>|$)/gi, '')
+.replace(/<\/tool_calls>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*>[\s\S]*?(?=<invoke\s+name=|<\/tool_calls>|$)/gi, '')
+.replace(/<\/invoke>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*\/?>/gi, '')
+
+src\renderer\renderer-agent-continue.js:106  src\renderer\renderer-thinking-trace.js:672
+return normalized
+.replace(/<tool_calls>[\s\S]*?(?=<tool_calls>|$)/gi, '')
+.replace(/<\/tool_calls>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*>[\s\S]*?(?=<invoke\s+name=|<\/tool_calls>|$)/gi, '')
+.replace(/<\/invoke>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*\/?>/gi, '')
+.replace(/<tool_call>[\s\S]*?(?=<tool_call>|$)/gi, '')
+.replace(/<\/tool_call>/gi, '')
+
+src\renderer\renderer-agent-continue.js:108  src\renderer\renderer-thinking-trace.js:674
+.replace(/<\/tool_calls>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*>[\s\S]*?(?=<invoke\s+name=|<\/tool_calls>|$)/gi, '')
+.replace(/<\/invoke>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*\/?>/gi, '')
+.replace(/<tool_call>[\s\S]*?(?=<tool_call>|$)/gi, '')
+.replace(/<\/tool_call>/gi, '')
+.replace(/<function=[^>\n/]+>\s*/gi, '')
+.replace(/<parameter\s+name="[^"]+"[^>]*>[\s\S]*?<\/parameter>/gi, '')
+
+src\renderer\renderer-agent-continue.js:110  src\renderer\renderer-thinking-trace.js:676
+.replace(/<\/invoke>/gi, '')
+.replace(/<invoke\s+name="[^"]+"[^>]*\/?>/gi, '')
+.replace(/<tool_call>[\s\S]*?(?=<tool_call>|$)/gi, '')
+.replace(/<\/tool_call>/gi, '')
+.replace(/<function=[^>\n/]+>\s*/gi, '')
+.replace(/<parameter\s+name="[^"]+"[^>]*>[\s\S]*?<\/parameter>/gi, '')
+.replace(/<parameter\s+name="[^"]+"[^>]*\/\s*>/gi, '')
+.replace(/<parameter=[^>\n/]+>[\s\S]*?<\/parameter>/gi, '')
+
+src\renderer\renderer-agent-continue.js:112  src\renderer\renderer-thinking-trace.js:678
+.replace(/<tool_call>[\s\S]*?(?=<tool_call>|$)/gi, '')
+.replace(/<\/tool_call>/gi, '')
+.replace(/<function=[^>\n/]+>\s*/gi, '')
+.replace(/<parameter\s+name="[^"]+"[^>]*>[\s\S]*?<\/parameter>/gi, '')
+.replace(/<parameter\s+name="[^"]+"[^>]*\/\s*>/gi, '')
+.replace(/<parameter=[^>\n/]+>[\s\S]*?<\/parameter>/gi, '')
+.replace(/<parameter=[^>\n/]+>[\s\S]*?(?=<parameter=|<function=|<tool_call>|<invoke|<\/tool_calls>|$)/gi, '')
+.replace(/\n{3,}/g, '\n\n')
+
+src\renderer\renderer-agent-continue.js:114  src\renderer\renderer-thinking-trace.js:680
+.replace(/<function=[^>\n/]+>\s*/gi, '')
+.replace(/<parameter\s+name="[^"]+"[^>]*>[\s\S]*?<\/parameter>/gi, '')
+.replace(/<parameter\s+name="[^"]+"[^>]*\/\s*>/gi, '')
+.replace(/<parameter=[^>\n/]+>[\s\S]*?<\/parameter>/gi, '')
+.replace(/<parameter=[^>\n/]+>[\s\S]*?(?=<parameter=|<function=|<tool_call>|<invoke|<\/tool_calls>|$)/gi, '')
+.replace(/\n{3,}/g, '\n\n')
+.trim();
+}
+
+src\renderer\renderer-agent-prep.js:150  src\renderer\renderer-rust-loop-boot.js:38
+const id = String(stepId || '');
+let changed = false;
+for (const step of steps) {
+if (step.id === id) {
+if (step.status !== 'done' && step.status !== 'skipped' && step.status !== 'failed') {
+step.status = 'active';
+changed = true;
+}
+
+src\renderer\renderer-agent-prep.js:152  src\renderer\renderer-rust-loop-boot.js:40
+for (const step of steps) {
+if (step.id === id) {
+if (step.status !== 'done' && step.status !== 'skipped' && step.status !== 'failed') {
+step.status = 'active';
+changed = true;
+}
+}
+}
+
+src\renderer\renderer-agent-resume.js:78  src\renderer\renderer-agent-send.js:905
+if (err.name === 'AbortError' || isUserAbortError(err)) {
+if (typeof pauseComposerQueueAfterUserStop === 'function') {
+pauseComposerQueueAfterUserStop(runSessionId);
+}
+const liveRun = sessionActiveRuns.get(runSessionId);
+const stoppedTrace =
+typeof resolveStoppedDisplayTrace === 'function'
+? resolveStoppedDisplayTrace(
+
+src\renderer\renderer-agent-resume.js:80  src\renderer\renderer-agent-send.js:907
+pauseComposerQueueAfterUserStop(runSessionId);
+}
+const liveRun = sessionActiveRuns.get(runSessionId);
+const stoppedTrace =
+typeof resolveStoppedDisplayTrace === 'function'
+? resolveStoppedDisplayTrace(
+err.trace || liveRun?.trace || getLastAgentDisplayedTrace(runSessionId) || []
+)
+
+src\renderer\renderer-agent-resume.js:82  src\renderer\renderer-agent-send.js:909
+const liveRun = sessionActiveRuns.get(runSessionId);
+const stoppedTrace =
+typeof resolveStoppedDisplayTrace === 'function'
+? resolveStoppedDisplayTrace(
+err.trace || liveRun?.trace || getLastAgentDisplayedTrace(runSessionId) || []
+)
+: normalizeStoppedTrace(
+err.trace || liveRun?.trace || getLastAgentDisplayedTrace(runSessionId) || []
+
+src\renderer\renderer-artifact-diff-view.js:66  src\renderer\renderer-artifacts.js:1011
+let r;
+try {
+r = await gatewayCall(
+'artifact.read_file',
+await artifactRpcParams({ filePath: readPath, encoding: 'utf8' })
+);
+} catch (err) {
+const msg = String((err && err.message) || err || '');
+
+src\renderer\renderer-artifact-diff-view.js:68  src\renderer\renderer-artifacts.js:1013
+r = await gatewayCall(
+'artifact.read_file',
+await artifactRpcParams({ filePath: readPath, encoding: 'utf8' })
+);
+} catch (err) {
+const msg = String((err && err.message) || err || '');
+if (/No handler|handler registered|未知 RPC|unknown/i.test(msg)) {
+r = await gatewayCall(
+
+src\renderer\renderer-attachments.js:57  src\renderer\renderer-chat-bubbles.js:253
+if (name.endsWith('.png')) return 'image/png';
+if (name.endsWith('.gif')) return 'image/gif';
+if (name.endsWith('.webp')) return 'image/webp';
+if (name.endsWith('.bmp')) return 'image/bmp';
+if (name.endsWith('.svg')) return 'image/svg+xml';
+return 'image/jpeg';
+}
+
+
+src\renderer\renderer-automation.js:201  src\renderer\renderer-skills-grid.js:251
+}
+list.sort((a, b) => {
+const ea = a.enabled ? 1 : 0;
+const eb = b.enabled ? 1 : 0;
+if (eb !== ea) return eb - ea;
+return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN');
+});
+return list;
+
+src\renderer\renderer-automation.js:202  src\renderer\renderer-skills-grid.js:252
+list.sort((a, b) => {
+const ea = a.enabled ? 1 : 0;
+const eb = b.enabled ? 1 : 0;
+if (eb !== ea) return eb - ea;
+return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN');
+});
+return list;
+}
+
+src\renderer\renderer-chat-bubbles.js:196  src\renderer\renderer-mobile.js:59
+const ta = document.createElement('textarea');
+ta.value = t;
+ta.setAttribute('readonly', '');
+ta.style.position = 'fixed';
+ta.style.left = '-9999px';
+ta.style.top = '0';
+document.body.appendChild(ta);
+ta.focus();
+
+src\renderer\renderer-chat-bubbles.js:198  src\renderer\renderer-mobile.js:61
+ta.setAttribute('readonly', '');
+ta.style.position = 'fixed';
+ta.style.left = '-9999px';
+ta.style.top = '0';
+document.body.appendChild(ta);
+ta.focus();
+ta.select();
+ta.setSelectionRange(0, t.length);
+
+src\renderer\renderer-chat-bubbles.js:200  src\renderer\renderer-mobile.js:63
+ta.style.left = '-9999px';
+ta.style.top = '0';
+document.body.appendChild(ta);
+ta.focus();
+ta.select();
+ta.setSelectionRange(0, t.length);
+try {
+copied = document.execCommand('copy');
+
+src\renderer\renderer-codebase-panel.js:153  src\renderer\renderer-graph-panel.js:117
+
+const phase = String(st.phase || '').trim();
+const done = Number(st.filesDone) || 0;
+const total = Number(st.filesTotal) || 0;
+let progress = '—';
+if (indexing || phase) {
+const label =
+phase === 'walking'
+
+src\renderer\renderer-codebase-panel.js:154  src\renderer\renderer-graph-panel.js:118
+const phase = String(st.phase || '').trim();
+const done = Number(st.filesDone) || 0;
+const total = Number(st.filesTotal) || 0;
+let progress = '—';
+if (indexing || phase) {
+const label =
+phase === 'walking'
+? '扫描'
+
+src\renderer\renderer-editor-context.js:51  src\renderer\renderer-monaco-core.js:327
+const out = [];
+const seen = new Set();
+function add(p) {
+const key = String(p || '').trim();
+if (!key) return;
+const norm = key.replace(/\\/g, '/').toLowerCase();
+if (seen.has(norm)) return;
+seen.add(norm);
+
+src\renderer\renderer-editor-context.js:52  src\renderer\renderer-monaco-core.js:328
+const seen = new Set();
+function add(p) {
+const key = String(p || '').trim();
+if (!key) return;
+const norm = key.replace(/\\/g, '/').toLowerCase();
+if (seen.has(norm)) return;
+seen.add(norm);
+out.push(key);
+
+src\renderer\renderer-model-capabilities.js:104  src\renderer\renderer-model-runtime.js:350
+if (shared && typeof shared.isSupplierModelEnabled === 'function') {
+return shared.isSupplierModelEnabled(supplier, modelId);
+}
+if (!supplier || !modelId) return false;
+const map = supplier.enabledModels || {};
+if (!Object.keys(map).length) return true;
+return map[modelId] !== false;
+}
+
+src\skills\vector-index.js:138  src\tools\tool-vector-index.js:98
+for (let i = 0; i < toEmbed.length; i += batchSize) {
+const batch = toEmbed.slice(i, i + batchSize);
+const vectors = await client.embed(batch.map((item) => item.document));
+for (let j = 0; j < batch.length; j++) {
+const vec = vectors[j];
+if (Array.isArray(vec) && vec.length) {
+batch[j].entry.dims = vec.length;
+batch[j].entry.vector = vectorToBase64(vec);
+
+src\skills\vector-index.js:140  src\tools\tool-vector-index.js:100
+const vectors = await client.embed(batch.map((item) => item.document));
+for (let j = 0; j < batch.length; j++) {
+const vec = vectors[j];
+if (Array.isArray(vec) && vec.length) {
+batch[j].entry.dims = vec.length;
+batch[j].entry.vector = vectorToBase64(vec);
+}
+}
+
+crates\dieyun-codebase\src\graph\build.rs:612  crates\dieyun-codebase\src\graph\query.rs:751
+use super::*;
+use crate::graph::schema::init_graph_schema;
+
+fn test_conn() -> Connection {
+let conn = Connection::open_in_memory().unwrap();
+init_graph_schema(&conn).unwrap();
+conn.execute(
+"INSERT INTO graph_workspaces (root_hash, root_path) VALUES ('rh', '/tmp')",
+
+crates\dieyun-codebase\src\graph\build.rs:614  crates\dieyun-codebase\src\graph\query.rs:753
+
+fn test_conn() -> Connection {
+let conn = Connection::open_in_memory().unwrap();
+init_graph_schema(&conn).unwrap();
+conn.execute(
+"INSERT INTO graph_workspaces (root_hash, root_path) VALUES ('rh', '/tmp')",
+[],
+)
+
+crates\dieyun-codebase\src\graph\extract\go.rs:60  crates\dieyun-codebase\src\graph\extract\js_ts.rs:24
+}
+
+fn normalize_rel_path(raw: &str) -> String {
+let normalized = raw.replace('\\', "/");
+let parts: Vec<&str> = normalized.split('/').collect();
+let mut stack: Vec<&str> = Vec::new();
+for part in parts {
+if part.is_empty() || part == "." {
+
+crates\dieyun-codebase\src\graph\extract\go.rs:62  crates\dieyun-codebase\src\graph\extract\js_ts.rs:26
+fn normalize_rel_path(raw: &str) -> String {
+let normalized = raw.replace('\\', "/");
+let parts: Vec<&str> = normalized.split('/').collect();
+let mut stack: Vec<&str> = Vec::new();
+for part in parts {
+if part.is_empty() || part == "." {
+continue;
+}
+
+crates\dieyun-codebase\src\graph\extract\go.rs:64  crates\dieyun-codebase\src\graph\extract\js_ts.rs:28
+let parts: Vec<&str> = normalized.split('/').collect();
+let mut stack: Vec<&str> = Vec::new();
+for part in parts {
+if part.is_empty() || part == "." {
+continue;
+}
+if part == ".." {
+stack.pop();
+
+crates\dieyun-codebase\src\graph\mod.rs:212  crates\dieyun-codebase\src\graph\status.rs:141
+ok: true,
+indexed: false,
+file_count: 0,
+edge_count: 0,
+symbol_count: 0,
+call_count: 0,
+calls_built: false,
+files_truncated: false,
+
+crates\dieyun-codebase\src\graph\mod.rs:285  crates\dieyun-codebase\src\index\build.rs:368
+guard.remove(&root_hash);
+}
+match &result {
+Ok(_) => self.clear_progress(&root_hash),
+Err(e) => self.set_progress_error(&root_hash, &e.to_string()),
+}
+result?;
+self.status(workspace_root)
+
+crates\dieyun-codebase\src\graph\schema.rs:219  crates\dieyun-codebase\src\index\schema.rs:220
+let mut stmt = conn
+.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL")
+.unwrap();
+let rows: Vec<(String, String)> = stmt
+.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+.unwrap()
+.map(|r| r.unwrap())
+.collect();
+
+crates\dieyun-codebase\src\graph\schema.rs:220  crates\dieyun-codebase\src\index\schema.rs:221
+.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL")
+.unwrap();
+let rows: Vec<(String, String)> = stmt
+.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+.unwrap()
+.map(|r| r.unwrap())
+.collect();
+assert!(!rows.is_empty());
+
+crates\dieyun-codebase\src\graph\schema.rs:222  crates\dieyun-codebase\src\index\schema.rs:223
+let rows: Vec<(String, String)> = stmt
+.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+.unwrap()
+.map(|r| r.unwrap())
+.collect();
+assert!(!rows.is_empty());
+for (name, sql) in rows {
+assert!(
+
+crates\dieyun-codebase\src\graph\status.rs:44  crates\dieyun-codebase\src\index\mod.rs:146
+
+pub(crate) fn set_progress_error(&self, root_hash: &str, err: &str) {
+if let Ok(mut guard) = self.progress.lock() {
+let entry = guard.entry(root_hash.to_string()).or_default();
+entry.phase = "error".into();
+entry.last_error = Some(err.to_string());
+}
+}
+
+crates\dieyun-codebase\src\graph\types.rs:48  crates\dieyun-codebase\src\index\mod.rs:306
+#[serde(skip_serializing_if = "Option::is_none")]
+pub phase: Option<String>,
+#[serde(skip_serializing_if = "Option::is_none")]
+pub files_done: Option<i64>,
+#[serde(skip_serializing_if = "Option::is_none")]
+pub files_total: Option<i64>,
+#[serde(skip_serializing_if = "Option::is_none")]
+pub last_error: Option<String>,
+
+crates\dieyun-codebase\src\graph\types.rs:50  crates\dieyun-codebase\src\index\mod.rs:308
+#[serde(skip_serializing_if = "Option::is_none")]
+pub files_done: Option<i64>,
+#[serde(skip_serializing_if = "Option::is_none")]
+pub files_total: Option<i64>,
+#[serde(skip_serializing_if = "Option::is_none")]
+pub last_error: Option<String>,
+}
+
+
+crates\dieyun-codebase\src\index\schema.rs:235  crates\dieyun-codebase\src\index\vector_pool.rs:287
+}
+
+fn insert_chunk(conn: &Connection, rel: &str, content: &str) -> i64 {
+conn.execute(
+"INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+VALUES ('rh', ?1, 1, 1, ?2, 0)",
+params![rel, content],
+)
+
+crates\dieyun-codebase\src\index\schema.rs:236  crates\dieyun-codebase\src\index\vector_pool.rs:288
+
+fn insert_chunk(conn: &Connection, rel: &str, content: &str) -> i64 {
+conn.execute(
+"INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+VALUES ('rh', ?1, 1, 1, ?2, 0)",
+params![rel, content],
+)
+.unwrap();
+
+crates\dieyun-codebase\src\index\schema.rs:238  crates\dieyun-codebase\src\index\vector_pool.rs:290
+conn.execute(
+"INSERT INTO chunks (root_hash, rel_path, start_line, end_line, content, mtime)
+VALUES ('rh', ?1, 1, 1, ?2, 0)",
+params![rel, content],
+)
+.unwrap();
+conn.last_insert_rowid()
+}
+
+crates\dieyun-runtime\src\rpc\handlers\codebase.rs:13  crates\dieyun-runtime\src\rpc\handlers\graph.rs:21
+
+
+pub(crate) fn index_start(snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
+let workspace_root = params
+.get("workspaceRoot")
+.and_then(|v| v.as_str())
+.ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+let force = params
+
+crates\dieyun-runtime\src\rpc\handlers\codebase.rs:14  crates\dieyun-runtime\src\rpc\handlers\graph.rs:22
+
+pub(crate) fn index_start(snap: &ServiceSnapshot, params: &Value) -> Result<Value, CoreError> {
+let workspace_root = params
+.get("workspaceRoot")
+.and_then(|v| v.as_str())
+.ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+let force = params
+.get("force")
+
+crates\dieyun-runtime\src\rpc\handlers\codebase.rs:16  crates\dieyun-runtime\src\rpc\handlers\graph.rs:24
+let workspace_root = params
+.get("workspaceRoot")
+.and_then(|v| v.as_str())
+.ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+let force = params
+.get("force")
+.and_then(|v| v.as_bool())
+.unwrap_or(true);
+
+crates\dieyun-runtime\src\rpc\handlers\codebase.rs:18  crates\dieyun-runtime\src\rpc\handlers\graph.rs:26
+.and_then(|v| v.as_str())
+.ok_or_else(|| CoreError::rpc("INVALID_PARAMS", "workspaceRoot 必填"))?;
+let force = params
+.get("force")
+.and_then(|v| v.as_bool())
+.unwrap_or(true);
+let skip_if_ready = params
+.get("skipIfReady")
+
+crates\dieyun-runtime\src\rpc\handlers\codebase.rs:20  crates\dieyun-runtime\src\rpc\handlers\graph.rs:28
+let force = params
+.get("force")
+.and_then(|v| v.as_bool())
+.unwrap_or(true);
+let skip_if_ready = params
+.get("skipIfReady")
+.and_then(|v| v.as_bool())
+.unwrap_or(true);
+

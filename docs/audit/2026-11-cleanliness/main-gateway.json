@@ -1,0 +1,215 @@
+{
+  "domain": "src/gateway + src/ssh + src/remote + src/git + src/lsp + src/browser + src/main + src/headless（代码整洁度）",
+  "verdict": "中下，但比提示里预期的干净。三条提示需要更正：①ssh/ 下 6 个文件不是死代码 —— ssh-config / auto-reconnect / connection-pool / remote-gateway-pool / reconnect / tunnel 全部经 src/main/workspace-remote-runtime.js（← src/main-entry.js）与 src/ssh/port-forward-manager.js 实连，反向 require 索引与 test 引用都命中，唯一「零 requirer」的只有 remote/run-cli.js 与 headless/main.js 两个入口文件；②沙箱三档仍只在 sandbox-policy.js（SANDBOX_MODES/SANDBOX_MODE_META/decideFsWrite 是唯一来源，server.js:490-583 只组装「档位→根」，且注释与两条判定链都指向它），本域没有另写一份档位判定；③window-tray.js ↔ workplace-monitor.js 的克隆窗口是伪冗余 —— 前者把状态推给 Renderer（pushStatus/buildTrayContextMenu），后者把负载发监控 socket（buildMonitorPayload/emitToAllMonitors），同形的只是 JSON 设置读写与定时器骨架，语义不重叠。真正的问题集中在四条：本机/远端判定的第二、第三真值（含一处取错作用域，P0）、远程搜索实现与排除表的三份漂移、浏览器双引擎的引擎无关语义两份且 interception 已分叉、以及 rpc.js 这个 2164 行分派器仍兼任实现文件。rg-search ↔ rpc.js 的克隆窗口确认为真（排除表 + 6 个上限数字 + 上下文夹取），fs.js / lsp-workspace.js ↔ rpc.js 的克隆窗口归因于「绕过 resolveFsTarget 的重复分支」而不是复制粘贴函数，已并入第 1 条。",
+  "stats": "范围实测行数（[System.IO.File]::ReadAllLines().Count）：gateway 57 文件 / 17010 行、ssh 20 / 6154、remote 8 / 2466、git 8 / 2885、lsp 9 / 5899、browser 22 / 11174、main 33 / 8178、headless 8 / 2842。最大文件：browser/controller.js 3101、lsp/diagnostics-service.js 2383、browser/playwright-runner.js 2186、gateway/rpc.js 2164、gateway/server.js 1474、lsp/cli-fallback.js 1459、main/ipc/agent-runtime.js 1376、git/worktree-service.js 1292、gateway/host-control.js 1272、browser/service.js 1197、main-entry.js 1188。已读并遵守四份既有结论：REDUNDANCY-REVIEW-2026-11-03（含 C 节伪冗余）、NODE-THINNING-PLAN（§6 负向清单）、ARCHITECTURE-DEBT、MODULE-CHAOS-REVIEW，另参考 docs/SSH-MODULE-REVIEW.md（ssh 部分）。方法：反向 require 索引（src+scripts+test）核死代码/死导出、人工逐条读码核行号、空 catch 与 console.* 全量扫描。本域空 catch 共 38 处，其中 30 处在 browser/frame-script.js（9）与 snapshot-script.js（21）的注入页脚本里（DOM 操作逐个 try，属刻意），其余 8 处分别在 evaluate.js 的序列化守卫（4）、timeline.js（2）、controller.js:1625 与 console-collector.js:42，均为「失败即按缺省继续」的页内/采集语义，未发现生产链路上被静默吞掉的真错误，console.* 只在 rpc.js:422/434（core 不可用告警）、remote/run-cli.js（CLI 入口）、headless/desktop-ui.js（浏览器侧脚本）三处，均非「console 当日志」；沙箱与 web/ 的 SSRF 校验都已是单一来源，未发现层级越界到 Renderer 的新增点。",
+  "findings": [
+    {
+      "title": "「本机 vs 远端」判定有四种写法，其中两处取的是「视图工作空间」而不是「本次调用作用域」",
+      "severity": "P0",
+      "category": "层级越界 / 重复实现",
+      "evidence": [
+        "src/gateway/rpc.js:1286 —— resolveFsTarget() 是 AGENTS.md 声明的唯一入口（纯函数 host-local.js:decideFsTarget），内部经 resolveCallWorkspaceTarget() 取调用作用域",
+        "src/gateway/rpc.js:173-175 —— 同文件注释写明「显式 sessionId 作用域：禁止回落到当前视图工作区（避免并行 SSH 串台）」：这是本仓自己定下的不变量",
+        "src/gateway/handlers/fs.js:820-836 —— fs.grep 不看 resolveFsTarget 的结果，先 isRemoteAgentUsable(agentInfo) 判一道，再 remote.transport === 'sftp' 判一道",
+        "src/gateway/handlers/fs.js:893-899 —— fs.glob 同样自判（isRemoteAgentUsable + remote.transport === 'sftp'）",
+        "src/gateway/handlers/lsp-workspace.js:159-161 —— lsp.query 用 ctx.getWorkspaceTarget() 判 target.kind === 'ssh'；server.js:888 的注入是 `() => this.getWorkspaceTarget()`（视图作用域，无 session）",
+        "src/gateway/handlers/fs.js:370-375 —— fs.read_symbol 同一函数内先取视图作用域 target 判 isSsh，紧接着又用调用作用域的 cwdForCall() 算 root",
+        "src/gateway/handlers/lsp-workspace.js:500-503 —— lsp.document_sync 用视图作用域判「ssh 就 skip」，同一函数 :512 又用 cwdForCall() 当根；:308-309、:637-638 同类"
+      ],
+      "why": "同一语义有四套判定：resolveFsTarget（调用作用域，唯一来源）、handler 自判 transport、handler 自判视图工作区、rpc.js 远程搜索里的第三套。已经真实漂移：并行 SSH 会话（用户看着本地工作区、Agent 在另一个会话的远端跑）时，lsp.query / fs.read_symbol 会按「本地」分支走，把远端路径交给本机 LSP 与白名单——这正是 rpc.js:173 那条注释要防的「串台」，而 lsp.document_sync 甚至在同一函数里混用两种作用域。",
+      "subtraction": "handler 里删掉 isRemoteAgentUsable / transport === 'sftp' 分支，统一消费注入的 getRemoteFs() / resolveFsTarget()（fs.grep 的 search 要补进 getRemoteFs 接口）；把 resolveCallWorkspaceTarget 作为依赖传进 handlers，5 处 ctx.getWorkspaceTarget() 全部改用它，或直接只用 cwdForCall() / resolveFsTarget()。",
+      "verify": "起两个并行会话（一个本地视图、一个 SSH），在 SSH 会话内跑 lsp / fs_read_symbol / fs_glob，断言落在会话工作空间那台机器；顺带 npm run test:lsp 与 test:phase5-handlers-smoke。",
+      "already_on_record": "REDUNDANCY-REVIEW A8 记了「handlers 自判 getRemoteFs」——仍成立（行号已重核）；「视图作用域 vs 调用作用域」这条漂移是本次新增证据，A8 没覆盖。",
+      "effort": "M"
+    },
+    {
+      "title": "远程 grep/glob 的实现与结果解析共三份，排除表已经三套",
+      "severity": "P1",
+      "category": "重复实现",
+      "evidence": [
+        "src/gateway/rpc.js:1040-1211 —— grepViaRemoteExec：SFTP/无 Agent 时 fs.grep 的实现，自建 rg 与系统 grep 两条命令行、PIPESTATUS 退码、rg 缺失退 grep",
+        "src/gateway/rpc.js:958-1014 —— parseClassicGrepLines：把 `path:N:text` / `path-N-text` 解析成命中与上下文",
+        "src/gateway/rpc.js:1214-1237 —— globViaRemoteExec：另一份 rg --files 拼装（:1221 只排除 node_modules/.git）",
+        "src/gateway/rpc.js:1816-1826 + :1836-1880 + :1882-1955 —— graph 调用方搜索的第三份实现：parseRemoteGrepLine / execRemoteGrepForCallers / resolveRemoteGraphCallers，自带一套 rg→grep 退壳与退出码语义",
+        "src/gateway/rg-search.js:743-750 / :788-795 / :835-842 —— 同一份「排除 4 个目录」在本地 grep、计数模式、glob 各写一遍",
+        "src/gateway/rpc.js:1111-1113 —— 远程 grep 又手抄一遍那 4 个 --glob",
+        "src/gateway/rpc.js:1893-1896 —— graph 调用方搜索的排除表是第三套（vendor / build / coverage / *.min.js）",
+        "src/gateway/rpc.js:1043 —— 注释「与 rg-search.resolveGrepContext 同规则」：口径靠注释维持"
+      ],
+      "why": "同一语义（在工作区里跑一次 ripgrep 并把结果解析成命中）有四处实现，排除表三套且已经不一致：本地 globWorkspace 排除 dist/target，SFTP 会话的 fs_glob 不排除 —— 同一工作区在两条通道上会给出不同的文件集合，模型据此判「产物没生成」是很容易踩的坑。",
+      "subtraction": "rg-search.js 导出 EXCLUDE_GLOBS（一个常量数组）、buildRgArgs、parseGrepOutput；rpc.js 的 grepViaRemoteExec / globViaRemoteExec / resolveRemoteGraphCallers 全部改为复用（远程只替换 shellQuote 与 exec 注入）；本地、远程、远程退壳三处共用同一份排除表。",
+      "verify": "同一工作区分别用本地通道与 SFTP 通道跑同一条 glob/grep（工作区里放一个 dist/ 文件），命中集合必须相同；npm run test:local-gateway-smoke。",
+      "already_on_record": "REDUNDANCY-REVIEW A3 记了「rg-search.js 与 rpc.js 各自内联 --glob 排除清单」——仍成立；「实现三份 + graph 那条第三套排除表」是本次补的，且 dist/target 漂移已实测。",
+      "effort": "M"
+    },
+    {
+      "title": "browser 双引擎的引擎无关语义各写两遍（guessMime 逐字相同），route 的 interception 字段两引擎语义已不同",
+      "severity": "P1",
+      "category": "重复实现",
+      "evidence": [
+        "src/browser/controller.js:374-385 与 src/browser/playwright-runner.js:1494-1505 —— guessMime 逐字符相同的 12 行",
+        "src/browser/controller.js:2408-2419 与 src/browser/playwright-runner.js:1983-1993 —— route add 的规则对象 12 行逐字相同",
+        "src/browser/controller.js:2401 与 src/browser/playwright-runner.js:1969 —— 「未找到规则 」文案两份",
+        "src/browser/controller.js:2870-2875 / :2894-2898 与 src/browser/playwright-runner.js:1729-1745 / :1775-1778 —— requireViewport 的三行守卫 + 同一句错误文案四处（normalizeViewport 本身已是单一来源，唯独这层壳没抽）",
+        "src/browser/controller.js:2429 / :2442 —— interception 报的是「拦截机制是否生效」（fetchEnabled）",
+        "src/browser/playwright-runner.js:1978 / :2013 —— interception 报的是「有没有规则」（routeRulesPw.length > 0），:2004 硬写 true"
+      ],
+      "why": "两个字段同一个名字却回答两个问题：BrowserView 在 CDP 不可用、规则已存时给 interception:false；Playwright 在规则被 remove 光之后仍可能给出 true。模型据此判「请求改写是否生效」，答案取决于选了哪个引擎。guessMime / 规则对象这些无引擎差异的部分两份，历史上就是改一边漏一边。",
+      "subtraction": "guessMime、route 规则整形、requireViewport 收进一个不引 electron 的小模块（playwright-runner 必须保持 electron-free），两引擎 require；interception 先定一个定义（建议「当前是否有生效中的改写规则」）并在同一处计算。",
+      "verify": "npm run test:browser-smoke；对两引擎跑同一组 route 动作（add / remove / clear），interception 必须一致。",
+      "already_on_record": "REDUNDANCY-REVIEW A12 ——仍成立（行号已重核；interception 语义漂移确认未修）。",
+      "effort": "M"
+    },
+    {
+      "title": "远程搜索的 6 个上限/口径在 rpc.js 里手抄，rg-search.js 已有的同名常量没导出",
+      "severity": "P1",
+      "category": "魔法数字",
+      "evidence": [
+        "src/gateway/rg-search.js:14-24 —— DEFAULT_GREP_LIMIT=50 / MAX_GREP_LIMIT=200 / DEFAULT_GLOB_LIMIT=80 / MAX_GLOB_LIMIT=400 / MAX_GREP_CONTEXT=10 / MAX_RAW_GREP_ITEMS=20000；:855-862 的 module.exports 没有导出它们",
+        "src/gateway/rpc.js:959 与 :1042 —— `Math.min(200, Math.max(1, Number(...) || 50))` 内联两遍",
+        "src/gateway/rpc.js:960-961 与 :1046 —— 上下文行上限 10 内联两遍",
+        "src/gateway/rpc.js:970 —— 原始条目上限 20000 内联",
+        "src/gateway/rpc.js:981 —— 单行截断 slice(0, 400)（rg-search.js:52 是同一口径）",
+        "src/gateway/rpc.js:1216 —— glob 的 400 / 80 又一次内联"
+      ],
+      "why": "这些数字决定「模型一次能看到多少命中」。改 rg-search 的上限不会改到远程通道，两条通道的截断口径从此只能靠人肉对齐；同一条工作区在本地与 SFTP 通道上表现不同，排查时没有任何一处能回答「上限是多少」。",
+      "subtraction": "rg-search 导出这些常量（或一个 resolveGrepLimits()），rpc.js 直接取；顺带把 slice(0,400) 收成 clipGrepLine()，两侧共用。",
+      "verify": "把 MAX_GREP_LIMIT 改成 120，断言本地与 SFTP 两条通道的 maxResults 都被夹到 120。",
+      "already_on_record": "REDUNDANCY-REVIEW A3 只记了排除清单，未记这组数字；本次新增。",
+      "effort": "S"
+    },
+    {
+      "title": "src/git 里「跑一条 git」「判是不是仓库」「抓回合前脏文件基线」各有两个实现，而 git-target 已同时支持本机与远端",
+      "severity": "P2",
+      "category": "重复实现",
+      "evidence": [
+        "src/git/git-target.js:252 —— target.isRepo()（rev-parse --git-dir），本机/远端共用 withGitTextHelpers",
+        "src/git/worktree-service.js:135-143 —— isGitRepo() 把同一条命令再实现一次（rpc.js:49 取的正是这一份）",
+        "src/git/worktree-service.js:120-133 —— 自建 gitExec（execFile + maxBuffer），与 git-target.js:103 的 target.run 并存",
+        "src/git/git-target.js:22 —— GIT_MAX_BUFFER = 12 * 1024 * 1024（未导出）↔ src/git/worktree-service.js:124 手写同值",
+        "src/git/baseline-capture.js:20-58 与 src/git/remote-baseline-capture.js:25-72 —— 同一个循环、同一个 120 上限、同一个 encodeWorktreeContent，只把 fs.readFileSync 换成 ssh.sftpReadFile；返回形状还漂了（远端多 isGitRepo 字段，本机没有）",
+        "src/git/baseline-capture.js:13 与 src/git/remote-baseline-capture.js:12 —— MAX_BASELINE_FILES = 120 各一份"
+      ],
+      "why": "git-target 就是「同一套 git 语义、两种传输」的既有单一来源（:259-268），但 worktree-service 与两份基线捕获都绕过它自己写。WORKTREE_SNAPSHOT_MAX_BYTES 的注释（git-target.js:29「过去四处各写一遍 4MB」）说明这批已经这么收过一次，12MB 与基线循环这批没收。两份基线捕获的返回形状已经不同，是「复制粘贴后各自演化」的典型体征。",
+      "subtraction": "worktree-service 的 gitExec/isGitRepo 改调 createGitTarget({kind:'local'}) 并删除；两份 baseline 捕获合成一个 captureGitBaseline(target, readFile)，本机注入 fs 读取、远端注入 sftpReadFile；GIT_MAX_BUFFER 导出复用。",
+      "verify": "npm run test:worktree-*（现有 smoke）；SSH 会话里跑一次 turn_begin 回撤，确认远端基线仍能撤回。",
+      "effort": "M"
+    },
+    {
+      "title": "rpc.js 仍是 2164 行的分派器：handler 已外迁，但 fs/graph 的远程实现、远端 core 就绪状态机、undo 捕获仍住在里面",
+      "severity": "P2",
+      "category": "超长文件 / 职责混杂",
+      "evidence": [
+        "src/gateway/rpc.js:119-2162 —— createRpcHandlers 一个函数约 2040 行；:2059-2153 一次性注入约 95 个闭包依赖（无分组，没有名字能说明边界）",
+        "src/gateway/rpc.js:958-1237 —— fs.grep / fs.glob 的远程实现，以 deps 形式注入 handlers/fs.js:80-83",
+        "src/gateway/rpc.js:484-740 —— 远端 dieyun-core 的就绪缓存、配置重试、等待循环（约 256 行状态机）",
+        "src/gateway/rpc.js:738-956 —— undo 捕获 / 恢复上下文",
+        "src/gateway/rpc.js:1436-1810 —— 索引与图谱编排（轮询就绪、LSP 富化、符号调用方落库）",
+        "src/gateway/rpc.js:340-410 —— 沙箱作用域与远端根判定"
+      ],
+      "why": "handlers/ 已经把 18 个域拆走了，但「实现」与「依赖装配」仍混在一个文件：改 fs.grep 的远程行为要去 rpc.js:1040，改它的 handler 骨架要去 handlers/fs.js，改沙箱档位要去 sandbox-policy.js 与 server.js。分派器同时是注入点、是状态机宿主、还是搜索/undo 的实现文件，review 与阅读成本全压在这一处。",
+      "subtraction": "把 :958-1237 搬进 gateway/remote-search.js（与 rg-search 同目录）、:484-740 搬进 gateway/remote-core-ready.js、:738-956 搬进 gateway/undo-context.js；rpc.js 只保留「建 ctx → 分组注入 deps → 返回 handlers」。纯搬运、导出集合不变。",
+      "verify": "npm run test:local-gateway-smoke + test:phase5-handlers-smoke（搬运期间行为不变）。",
+      "effort": "M"
+    },
+    {
+      "title": "lsp/diagnostics-service.js 一个文件 2383 行 / 55 个函数，八类职责挤在一起",
+      "severity": "P2",
+      "category": "超长文件 / 职责混杂",
+      "evidence": [
+        "src/lsp/diagnostics-service.js:282-433 —— 工作区 store 桶 + LSP 客户端池 + 结果缓存",
+        "src/lsp/diagnostics-service.js:433-830 —— 本机批量诊断 + 远端批量诊断（含引擎级失败分类与阻断）",
+        "src/lsp/diagnostics-service.js:925-1150 —— 目录监听、脏文件队列、逐文件刷新",
+        "src/lsp/diagnostics-service.js:1457-1610 —— live 文档同步与快照",
+        "src/lsp/diagnostics-service.js:1764-2170 —— 项目级扫描（引擎探测 + 批量跑 + 调度）",
+        "src/lsp/diagnostics-service.js:2172-2383 —— CLI 兜底入口与单文件诊断"
+      ],
+      "why": "一个模块同时管「怎么连 LSP / 什么时候扫 / 结果存哪 / 远端还是本机」，改任何一条都要在 2383 行里跳。MODULE-CHAOS §八 明确写明 src/lsp 不在那轮覆盖范围内，所以这是首次量到：形态与 browser（§五 已认定需要收敛失败语义）同型。",
+      "subtraction": "按「客户端池 / 缓存与 store / 监听与调度 / 扫描执行」切四个文件，导出集合不变（纯移动）；并把「本机 or 远端引擎」判定从 dispatch 里抽成一处。",
+      "verify": "npm run test:lsp（可选 DIEYUN_LSP_E2E=1 跑真 LSP 端到端）。",
+      "effort": "L"
+    },
+    {
+      "title": "三个采集器的 filterEntries 各自实现了同一段 urlPattern / sinceMs 过滤，且每份都写着「唯一来源」",
+      "severity": "P2",
+      "category": "重复实现",
+      "evidence": [
+        "src/browser/console-collector.js:107-132 —— urlPattern 正则 + 失败退字面量 + sinceMs，注释自称「唯一来源」",
+        "src/browser/network-collector.js:39-67 —— 同一段（同样的 try/catch 退字面量、同样的 Date.now()-sinceMs），注释同样写「唯一来源」",
+        "src/browser/timeline.js:175-211 —— 第三份，逐段相同",
+        "src/browser/timeline.js:214 与 console-collector.js:135 / network-collector.js:70 —— list() 上限各写一套（300/80 vs 200/50）"
+      ],
+      "why": "urlPattern / sinceMs 是模型传给浏览器工具的参数，三条通道必须给出同一个解释，否则「按 URL 过滤」在不同动作上行为不同。三处各自标注「唯一来源」正是「用注释代替单一来源」的形态。",
+      "subtraction": "抽一个 filterByCommonArgs(entries, args)（engine / urlPattern / sinceMs 三段），三个 collector 共用；list 上限进同一张常量表。",
+      "verify": "npm run test:browser-smoke；补一条「三通道同参数同结果」的单测。",
+      "already_on_record": "REDUNDANCY-REVIEW A15 记了「filterEntries 的 urlPattern/sinceMs/engine 三段在三个文件复制三次」——仍成立。",
+      "effort": "S"
+    },
+    {
+      "title": "浏览器动作的超时默认值散在约 20 处（15000 一处出现 8 次），没有单一来源",
+      "severity": "P2",
+      "category": "魔法数字",
+      "evidence": [
+        "src/browser/playwright-runner.js:953 / :998 / :1082 / :1084 / :1176 / :1203 / :1257 / :1548 —— `Number(args.timeoutMs) || 15000` 八处",
+        "src/browser/playwright-runner.js:1347 / :1441 / :1480 / :1636 —— 30000 / 60000 / 60000 / 60000 又四套默认",
+        "src/browser/controller.js:608 / :1389 / :1956 / :2620 / :2724 —— Math.min/max 夹取上下限各一套（500..30000、500..120000、1000..120000）",
+        "src/browser/service.js:198 / :476 / :978 —— 第三套默认（30000 / 15000 / 15000）"
+      ],
+      "why": "同一个动作在两引擎上的等待上限不同（既有文档已记「下载等待 BrowserView 有 120s 上限、Playwright 无上限」），模型遇到慢页面时拿到的失败码取决于走哪个引擎；而且仓库里没有任何一处能回答「这个动作默认等多久」。",
+      "subtraction": "browser/limits.js 一张表 {navigate, click, type, waitFor, download, evaluate, contentSignals} → {defaultMs, minMs, maxMs}，两引擎共读；service.dispatch 统一 clamp。",
+      "verify": "npm run test:browser-smoke；断言两引擎对同一动作取到同一个默认值与上下限。",
+      "already_on_record": "MODULE-CHAOS §五 browser 行③（「超时默认值收一处，现 8000/15000/30000 四处硬编码」）——仍成立，实测已扩到约 20 处。",
+      "effort": "S"
+    },
+    {
+      "title": "Gateway RPC 线协议（v/type/id/ok/error 信封 + BAD_JSON/UNKNOWN_TYPE/UNKNOWN_METHOD）手写两遍",
+      "severity": "P2",
+      "category": "重复实现",
+      "evidence": [
+        "src/gateway/server.js:1272 —— BAD_JSON 帧",
+        "src/gateway/server.js:1311 与 :1335 —— UNKNOWN_TYPE / UNKNOWN_METHOD 帧",
+        "src/gateway/server.js:1348-1360 —— result 成功/失败信封（含 retryable / suggestedFix 透传）",
+        "src/remote/minimal-gateway-host.js:626 / :659 / :670 —— 同一批错误码第二次手写",
+        "src/remote/minimal-gateway-host.js:678-695 —— 同一份 result 信封，注释也写着「与本地 Gateway 同一份失败契约」"
+      ],
+      "why": "远端 daemon 与本地 Gateway 是两条必须逐字段一致的线，现在靠注释对齐。任一帧字段只改一侧，远端 Agent 的握手或结果解析会静默半通（这正是 remote-pack 那次事故的形态）。",
+      "subtraction": "抽 src/gateway/wire-protocol.js（encodeResult / encodeError / parseFrame），两侧 require；同时把它加进 src/remote/remote-pack-layout.js 的 REMOTE_GATEWAY_SOURCE_PATHS（漏了远端注入即 Cannot find module）。",
+      "verify": "npm run test:local-gateway-smoke + 远端 daemon smoke；远端包 require 闭包校验（remote-pack-requires）。",
+      "already_on_record": "REDUNDANCY-REVIEW A14（gateway/server.js ↔ remote/minimal-gateway-host.js 线协议手写两遍）——仍成立（行号已重核）。",
+      "effort": "M"
+    },
+    {
+      "title": "桌面与 headless 各手写一遍同一批工厂装配，已经漂移（headless 的工具桥没接 ssh / worktree 动作）",
+      "severity": "P2",
+      "category": "重复实现 / 职责混杂",
+      "evidence": [
+        "src/main-entry.js:893-914 —— createRustLoopToolBridge 注入 sshActions / worktreeActions / onSkillsChanged / plansCreateFromText",
+        "src/headless/boot.js:196-216 —— 同一个 createMainToolBridge 只注入约 12 个依赖，没有 sshActions / worktreeActions",
+        "src/agent/main-tools/remote.js:21-23 —— 缺 sshActions 时直接返回 SSH_UNAVAILABLE（模型看到的是「能力不可用」，不是「这台机器没配」）",
+        "src/main-entry.js（1188 行）与 src/headless/boot.js（497 行）—— 两个入口各列约 15 项装配，没有共享的 assemble 模块"
+      ],
+      "why": "同一语义两份装配，漂移已经产生真实差异：headless 明明有 gateway 与 SSH 能力，ssh 工具却恒返回 SSH_UNAVAILABLE。这种漂移不报错，只在无人值守场景表现为「模型说连不上」——既有的 MODULE-CHAOS §六#1 已经把它记下来，但只有人记得要同步两侧。",
+      "subtraction": "抽 src/app/assemble-runtime.js（纯桌面项由调用方补：窗口/托盘/自动更新），两个入口只传「有无窗口」；加一条装配完整性断言（工具桥必需依赖清单缺失即启动失败）。",
+      "verify": "npm run test:headless；headless 里跑一次 ssh status（无会话时应报「没有已保存目标」而不是 SSH_UNAVAILABLE）。",
+      "already_on_record": "MODULE-CHAOS §六#1 ——仍成立（本次核对：headless 仍未注入 sshActions/worktreeActions）；该文档同时记着「是否设计如此」待拍板，若确定 headless 不该管 SSH，则应把 ssh/worktree 从共享 catalog 的 headless 侧同样摘掉，而不是留一个恒失败的入口。",
+      "effort": "M"
+    },
+    {
+      "title": "8 个模块里 18 个导出零外部引用；其中句柄前缀常量的「单一来源」正被两处字面量绕过",
+      "severity": "P3",
+      "category": "死代码 / 魔法字符串",
+      "evidence": [
+        "src/gateway/host-local.js:28-30 —— LOCAL_PROC_HANDLE_PREFIX / REMOTE_PROC_HANDLE_PREFIX 声明为「句柄自己说出它在哪台机器」的唯一来源，注释直接点名 host-control / remote-processes",
+        "src/gateway/host-control.js:149 —— 实际写的是 `hostproc-${++processHandleSeq}` 字面量",
+        "src/gateway/remote-processes.js:132 —— 实际写的是 `sshproc-${++handleSeq}` 字面量",
+        "src/gateway/host-local.js:227-231 —— 上述两个常量连同 LOCAL_PATH_PREFIX、looksLikeWindowsPath 导出后无任何外部引用（host-local.js:188 只在文件内用）",
+        "src/gateway/sandbox-policy.js:759 / :763 / :770 —— DENY_COMMAND_WORDS / runsScriptInterpreter / isUnderAny 同样零外部引用",
+        "src/remote/remote-index-core.js:495、src/remote/ssh-screen.js:505、src/git/diff-context.js:200、src/git/worktree-service.js:1280、src/main/linux-deb-install.js:293、src/main/media-protocol.js:218 与 :220、src/gateway/str-replace.js:274、src/gateway/exec-policy.js:59、src/gateway/fs-read-limits.js:24、src/gateway/local-endpoint.js:144 —— 同类零引用导出"
+      ],
+      "why": "没人 require 的导出会被当成「有调用方的公共 API」保留下来，下一轮审计还要重新判一次。句柄前缀那两条更糟：常量的全部意义就是防两处字面量分叉，而它恰恰是被两处字面量绕过 —— 哪天要改前缀（或加第三种句柄），procHandleScope 会认不出新句柄。",
+      "subtraction": "host-control.js:149 与 remote-processes.js:132 改用已有常量；18 个零引用导出从 module.exports 删掉（只在本文件用的保持私有）。",
+      "verify": "全仓 rg 确认各名字零引用后删除；node --check + npm test。",
+      "effort": "S"
+    }
+  ]
+}

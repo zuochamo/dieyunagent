@@ -74,6 +74,8 @@ sudo chown -R root:root /opt/dieyun-headless
 ```
 
 包内已带正确的权限位（`bin/node`、`bin/dieyun-headless`、`build/dieyun-core/dieyun-core` 是 0755）。
+`bin/node` 是**打包期 strip 过**的官方产物（93.9MB → 80.3MB，符号表/调试段全部去掉，实测运行无影响；
+脚本见 `scripts/lib/node-linux-runtime.cjs`，找不到 strip 工具时打包会直接失败而不是悄悄变大）。
 只有当你用**不保留权限**的工具（某些图形解压器）解包时，才需要补一次：
 
 ```bash

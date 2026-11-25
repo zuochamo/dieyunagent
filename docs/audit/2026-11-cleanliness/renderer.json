@@ -1,0 +1,210 @@
+{
+  "domain": "src/renderer（119 个 .js，排除 dist）+ src/mobile/public 对照",
+  "verdict": "Renderer 最大的整洁问题不是「重复函数」而是「同一语义两份、靠注释维系，且已在两侧给出不同答案」：录音转写、tool_call 标签剥离、模型设置归一化三对都还在漂移，其中前两对的漂移会直接表现为用户可见的错误（手机端转写卡住无法取消 / 气泡里漏出工具标记）。此外 245 行顶层函数全仓零调用点、check:renderer 至今只做单向校验（N4.1 未做），以及收尾落库的 35 行块在一个文件里写了 4 遍。所有建议都是删 / 合并 / 搬进既有单一来源，没有一条需要新增开关或状态机。",
+  "stats": "119 个 .js / 58,037 行（ReadAllLines 实数，排除 dist）；≥1400 行文件 5 个、≥90 行函数 106 个；index.html 123 个 <script>。8 行滑窗（标识符归一）复测给定 6 组：voice.js↔renderer-composer-voice.js 91 窗（各 370 行，几乎同构）、renderer-codebase-panel↔renderer-graph-panel 88 窗、renderer-agent-continue↔renderer-thinking-trace 21 窗（96-121 与 662-687 逐字符相同）、model-settings↔renderer-model-runtime 28 窗、agent/trace-store↔renderer-agent-complete 28 窗、renderer-agent-prep↔renderer-rust-loop-boot 11 窗。零调用点顶层函数实测 20 个（约 245 行，逐条见第 3 条）；console.* 106 处、裸 console.warn(err) 49 处、拒绝式空处理（`.catch(空函数)` 一族，含 `e => {}`）168 处、真空 catch 8 处。校正一条外部结论：docs/CODE-CLEANLINESS-REVIEW-2026-11-21.md §3.1 判「agent:main-tool-delegate 是死通路」不成立 —— 发送方在 src/agent/renderer-tool-delegate.js:47、处理器在 :169，调用方 src/agent/tool-bridge-main.js:15 与 src/main-entry.js:87，因此 renderer-agent-tools.js 与 renderer-mutate-queue.js 都是活的，本次未按死代码上报。",
+  "findings": [
+    {
+      "title": "录音→转写：手机端与桌面端各一份（91/370 窗口同形），已漂移出用户可见缺陷（手机上转写卡住时无法取消）",
+      "severity": "P0",
+      "category": "重复实现（已漂移）",
+      "evidence": [
+        "src/mobile/public/voice.js:4-7 ↔ src/renderer/renderer-composer-voice.js:4-7 —— VOICE_MAX_MS / VOICE_TICK_MS / 两个 localStorage 键两份；pickRecorderMimeType / extensionForMime / formatVoiceTimer / startWaveform / cleanupVoiceStream / stopVoiceBlob / toggleVoiceRecording 逐字相同",
+        "src/mobile/public/voice.js:153（`for (let i = 0; i < 10; i++)`，波形 10 条）↔ src/renderer/renderer-composer-voice.js:124（`i < 12`）—— 已漂移",
+        "src/mobile/public/voice.js:166（`Math.max(0.17, ...)`）↔ src/renderer/renderer-composer-voice.js:137（`0.15`）—— 已漂移",
+        "src/renderer/renderer-composer-voice.js:12、227、296、299、313、319 —— 桌面端点取消用 voiceGen 代际守卫：取消后回来的转写结果被丢弃；src/mobile/public/voice.js:272-279 的 cancelVoiceRecording 没有这层守卫，取消后结果仍会经 finishVoiceRecording 的 insertTranscript 插进输入框",
+        "src/renderer/renderer-composer-voice.js:150-151 —— 桌面端注释「『取消』永不置灰：转写请求可能长时间不返回，这是用户唯一的出口」，代码只置灰 confirm；src/mobile/public/voice.js:181 却 `if (cancel) cancel.disabled = !!disabled;`，配合 :320 转写中 setVoiceControlsDisabled(true) → 手机端转写卡住时按钮不可点，且 voice.js 全文件无 keydown/Esc 分支",
+        "src/mobile/public/voice.js:26-34 getSpeechWhisperModel 只读 localStorage，无 settings 回落；src/renderer/renderer-composer-voice.js:30 有 settings?.speechWhisperModel 回落 —— 同名字段两套取值口径",
+        "src/mobile/public/voice.js:61-69 与 src/renderer/renderer-attachments.js:76 —— arrayBufferToBase64 第三份（桌面端 voice 用的是全局那份）"
+      ],
+      "why": "这 6 个函数不是「两个不同页面各写一遍」而是同一段录音状态机被复制两次；复制发生在同一次提交，随后两侧分别修 bug：桌面端补了代际守卫与「取消永不置灰」，手机端一条没拿到。结果不是风格问题，是手机端「转写中」变成死状态（用户没有出口，只能等超时或刷新页面），以及用户明确取消后结果仍被插进输入框。",
+      "subtraction": "抽一个纯浏览器共享脚本 src/web-shared/voice-recorder.js（plain script，工厂参数化 {els, showToast, t, isBusy, insertText}），两侧各留 ≤60 行薄壳；代际守卫与「取消永不置灰」作为共享实现的一部分，不再各写一遍。手机端 bridge.js 需加静态根映射（现有的 .. 拒绝与 startsWith 校验必须保留）。不要「顺手简化」mime 候选顺序（Android WebView 实测结果）。",
+      "verify": "node 复跑 8 行归一化滑窗：voice.js ↔ renderer-composer-voice.js 应从 91 窗降到 <10；真机 Android WebView：录音 → 点「转写」→ 在请求返回前点取消，确认按钮可点且结果不再插进输入框。",
+      "already_on_record": "REDUNDANCY-REVIEW-2026-11-03 A1（记为「49/59 窗口、约 240 行可删」，排 P2「需真机验证」）。现在仍成立且比记录更严重：本轮实测 91 个同形窗口（我用的归一化把标识符全替换，比当年口径更宽），且上面列的 4 处漂移（波形条数、振幅、代际守卫、取消置灰）全部仍在，一处未修。",
+      "effort": "M"
+    },
+    {
+      "title": "tool_call 标签剥离两份逐字相同 + 与 Main 唯一实现已漂移（缺 <calls> 归一 → 气泡里漏出工具标记）",
+      "severity": "P0",
+      "category": "重复实现（已漂移）",
+      "evidence": [
+        "src/renderer/renderer-agent-continue.js:96-121（stripVisibleToolCallMarkup）与 src/renderer/renderer-thinking-trace.js:662-687（stripAssistantVisibleToolCallMarkup）—— 实测 21 个 8 行窗口全部相等，唯一差别是函数名",
+        "src/renderer/renderer-agent-continue.js:95 注释「展示层剥掉模型误输出的 tool_call XML（须与 src/llm-tool-call-fallback.js 同步）」—— 用注释代替单一来源",
+        "src/llm-tool-call-fallback.js:63-64（把裸 calls / /calls 归一到 tool_calls）与同文件 :19（「外层标签名可能写成 calls 而不是 tool_calls（2026-11-19 子 Agent 事故的真实形态）」）—— 两份 Renderer 副本没有这两条归一",
+        "src/llm-tool-call-fallback.js:387-405 stripToolCallMarkupFromNormalized —— 与两份 Renderer 副本同一条 14 步正则链，即第 3 份实现",
+        "src/renderer/renderer-agent-rust-loop.js:759、802、1096、1102 与 src/renderer/renderer-thinking-trace.js:653、658、697 —— 两份副本都真的在跑，不是死代码"
+      ],
+      "why": "同一条模型输出在 Main 侧被剥净（有裸 calls 归一），在 Renderer 侧没被剥净 → 工具标记作为正文漏进气泡与思考区。Renderer 内部还并存两份完全相同的实现，任何一次补正则都要改三处（含注释里的「须与…同步」），改漏一处就复发 2026-11-19 那次形态。",
+      "subtraction": "src/llm-tool-call-fallback.js 是纯函数、零 electron 依赖，agent-bundle 通道现成（src/renderer/agent/agent-bundle-entry.js:13-39 的 require + register 模式）→ 在 bundle 暴露 stripToolCallMarkup，删掉两份 Renderer 副本（约 −52 行），Renderer 侧只剩取 window.X 一行。不要反向把 Renderer 版抄进 Node（Node 已有更全的那份）。",
+      "verify": "npm run check:renderer + 用同一夹具（含裸 calls 开头的 DSML 变体）比较 Main 与 Renderer 输出必须逐字相同；npm run test:llm-tool-call-fallback 扩一条「Renderer 与 Main 同夹具同输出」。",
+      "already_on_record": "REDUNDANCY-REVIEW A11 只记了文案常量，未记这条正则链；docs/CODE-CLEANLINESS-REVIEW-2026-11-21 §2.3 记了「renderer-agent-continue ↔ renderer-thinking-trace 10 窗」但只当纯重复，未指出 <calls> 漂移。本条为新增证据（漂移方向 + 用户可见后果）。",
+      "effort": "S"
+    },
+    {
+      "title": "20 个顶层函数全仓零调用点（约 245 行），因为 check:renderer 只做单向校验（N4.1 的闸门至今不存在）",
+      "severity": "P1",
+      "category": "死代码",
+      "evidence": [
+        "src/renderer/agent/worktree-ui.js:427-534 openWorktreeApplyDialog（108 行，全仓仅此一处出现）",
+        "src/renderer/renderer-settings-shell.js:103-112 switchPanel（10 行；本文件无 window 导出，index.html 无 onclick 引用）",
+        "src/renderer/renderer-model-runtime.js:574-589 getComposerSelectedModelId、:591-603 getComposerSelectedApiConfig",
+        "src/renderer/renderer-composer.js:84-86 loadComposerModelPick、:166-168 builtinModelsCacheEndpointKey、:208-221 saveBuiltinModelsCache、:362-374 formatBuiltinDetectMeta",
+        "src/renderer/renderer-artifacts-browse.js:287-290 getWorkspaceRootPath、:583-586 isMissingRpcHandlerError、:595-597 refreshWorkspaceArtifacts",
+        "src/renderer/renderer-skills-grid.js:179-184 skillSearchHaystack、:192-194 skillDomainLabel；src/renderer/renderer-plan-changes.js:269-278 planPreviewSubtaskForPath；src/renderer/renderer-agent-context-ui.js:543-546 estimateSystemToolsExtra；src/renderer/renderer-agent-llm.js:373-382 safeJsonStringify；src/renderer/renderer-gateway.js:27-30 isLocalOnlyMethod；src/renderer/renderer-rust-loop-boot.js:25-35 updateRustBootStep；src/renderer/renderer-artifacts.js:1356-1358 initArtifactsBtn；src/renderer/renderer-undo-stack.js:328-330 initUndoStackUI",
+        "scripts/check-renderer-globals.py 只校验「window.X 能否解析到声明」；docs/NODE-THINNING-PLAN.md:138-139 的 N4.1 明确要建 scripts/check-renderer-dead-exports.cjs，而 scripts/ 下只有 check-renderer-critical.py / check-renderer-globals.py / check-renderer-index-panel.cjs"
+      ],
+      "why": "这些声明既没有调用点也没有 window 导出（少数有导出但无人调用），属于「看得见、改得动、但没人跑」的残留。它们让 check:renderer 的绿失去意义：绿灯只证明「引用的符号有声明」，不证明「声明的符号有人用」。",
+      "subtraction": "按 N4.1 建 scripts/check-renderer-dead-exports.cjs（对 index.html 加载脚本的顶层声明做同文件 + 跨文件 + window.X 计数，动态引用走带理由的白名单），接进 npm run check:renderer；第一批就把上面 20 个删掉（约 −245 行），零行为变化 —— 它们本来就没人调。",
+      "verify": "npm run check:renderer；删完后再 node --check 各文件并跑 build:renderer:dev 重建 bundle（确认没有 window.X = 未定义 的脚本加载序问题）。",
+      "already_on_record": "NODE-THINNING-PLAN N4.1（未做）与 CODE-CLEANLINESS-REVIEW-2026-11-21 §3.2（记 21 个，含 LOCAL_RPC_PREFIXES 这类非函数常量）。本条给出逐条 file:line 与行数，可直接照删。",
+      "effort": "S"
+    },
+    {
+      "title": "收尾落库：同一 35 行「message_append + 三次账本写入」在一个文件里写 4 遍，加 trace-store 第 5 份，且 5 份里只有 3 份回填 localMsgId",
+      "severity": "P1",
+      "category": "重复实现（职责混杂）",
+      "evidence": [
+        "src/renderer/renderer-agent-complete.js:443-475、:500-536、:573-613、:634-674 —— 同一序列 4 份：gatewayCall(memory.message_append) → saveAgentRunState → saveAssistantTraceRecord → saveAgentPlanState → refreshHistoryList，差别只在分支条件（后台完成 / 已切走会话 / 正常收尾）",
+        "src/renderer/agent/trace-store.js:322-352 —— 第 5 份同类块（同一序列，变量名不同）",
+        "src/renderer/renderer-agent-complete.js:443、:505 两份没有回填本地消息 id；:582-585、:643-646 与 src/renderer/agent/trace-store.js:331-334 有 assistantMsg.localMsgId/id = ins.localMsgId —— 5 份已经出现行为分叉",
+        "src/renderer/renderer-agent-complete.js:448-451、:505-508、:639-642 —— 落库失败只有 console.warn(e); return null;（同一文件三处缩进还不一致）"
+      ],
+      "why": "收尾落库是「一轮的账本」唯一入口，src/renderer/README.md:11 要求这类编排只存在于 trace-store.js，但编排被复制了 4 次：改一处语义（加字段、调终态判定）必须改 4 处，而 5 份里已经有一处漏了 localMsgId 回填，正是这类复制的典型后果。",
+      "subtraction": "把「append 消息 + saveAgentRunState + saveAssistantTraceRecord + saveAgentPlanState」收成一个 finalizeRunPersistence({runSessionId, trace, status, state, userMessageId, plan, results}) 放回 src/renderer/agent/trace-store.js（与 README 的单一来源规则同位），4 处调用退化为传参；localMsgId 回填进共享实现，5 份自动一致。",
+      "verify": "test:unit 现有 renderer 相关用例 + 手工三条路径：前台正常收尾、切走会话后再完成、后台任务完成（托盘文案、气泡终态、agent_runs.status 三处都要看）。",
+      "already_on_record": "docs/MODULE-CHAOS-REVIEW.md:325 只把「renderer-agent-complete.js 的 4 处落库收口」写成 Reviewer 回迁的附带工作，从未单独立项。本条为新增证据（4 份 + 第 5 份、localMsgId 分叉）。",
+      "effort": "M"
+    },
+    {
+      "title": "模型设置归一化两份（Main 与 Renderer 各一套 DEFAULTS + embedding 归一），embedding 条目的请求修饰字段在 Renderer 侧被丢",
+      "severity": "P1",
+      "category": "重复实现（已漂移）",
+      "evidence": [
+        "src/model-settings.js:233-259（isLegacyBuiltinEmbeddingEntry / normalizeEmbeddingEntry）↔ src/renderer/renderer-model-runtime.js:475-491（isLegacyBuiltinEmbedding / normalizeEmbedding）—— 同一语义两份；Main 版 :255-257 保留 headers/authMode/userAgent，Renderer 版只重建 6 个键",
+        "src/agent/embedding-config.js:114、:128-129 —— 向量端点载荷真的读这些字段（headers: buildLlmHeadersFromConfig(remote)、authMode）；手写进 model-settings.json 的自定义头，在用户打开设置页并保存一次后即被 Renderer 的归一化丢掉 → 向量请求静默变 401/403",
+        "src/renderer/renderer-model-settings.js:1076-1082 —— 保存向量模型的编辑器本身也只重建 7 个键（第二次丢，与归一化叠加）",
+        "src/renderer/renderer-model-runtime.js:512-514 —— embedding-default / text-embedding-v4 的过滤只存在于 Renderer；src/model-settings.js 无对应逻辑（同一份设置两侧结论不同）",
+        "src/model-settings.js:23-24 与 src/renderer/renderer-model-runtime.js:17-18 —— EMBEDDING_DIMENSIONS_MIN/MAX = 64/8192 两份（第三处在 codebase/embedding-client.js）",
+        "src/model-settings.js:279 temperature = clampModelRuntimeValue(temperature, …) ↔ src/renderer/renderer-model-runtime.js:392 只做 Number 强转、不 clamp"
+      ],
+      "why": "两份归一化回答同一个问题「磁盘里的设置该怎么读」，却给出不同答案：一边保留请求修饰字段、一边丢弃；一边过滤历史默认条目、一边不过滤；一边 clamp 温度、一边不 clamp。用户看到的是「设置页填好的东西一保存就没了」，排查成本极高（同一段理由在 renderer-model-runtime.js:313-315 与 :431 已经各写了一次）。",
+      "subtraction": "抽 src/agent/model-settings-schema.js（纯函数：DEFAULTS 表 + supplier / customModel / embedding 三个归一 + 夹取），经 agent-bundle 注册（clampModelRuntimeValue 已经是这么过去的，见 agent-bundle-entry.js:55）→ 两侧只留各自独占的 shaping；再补一条 parity 测试（同 fixture 双跑深等）。不加开关、不新增字段。",
+      "verify": "新增 test/unit/model-settings-normalize-parity.test.cjs（同 fixture 双跑深等）；手工：在 model-settings.json 给某个向量条目手写 headers → 打开设置页 → 保存 → 读回该文件确认 headers 仍在。",
+      "already_on_record": "REDUNDANCY-REVIEW A6（medium，「已产生真实 bug」）。现在仍成立、未修（该文注 3 把它列为 P1 之外未做项）。需要更正一处：A6 说的「自定义头被剥掉」只在手写配置向量端点时成立（设置 UI 没有 headers 输入框），因此今天不是普遍路径，严重度按「已漂移、窄路径真实 401」处理。",
+      "effort": "M"
+    },
+    {
+      "title": "codebase / graph 两个索引面板共 88 个同形窗口：轮询状态机、pane 可见性、rail busy、时间格式化各两份（A13 只修掉了 resolve*WorkspaceRoot）",
+      "severity": "P2",
+      "category": "重复实现",
+      "evidence": [
+        "src/renderer/renderer-codebase-panel.js:11-19 formatCodebaseIndexedAt ↔ src/renderer/renderer-graph-panel.js:11-19 formatGraphPanelIndexedAt —— 同一实现两个名字，且都绕开 src/renderer/renderer-utils.js 的 fmtDateTime（src/renderer/README.md:14 声明时间格式唯一来源）",
+        "src/renderer/renderer-codebase-panel.js:5-9、47-63 ↔ src/renderer/renderer-graph-panel.js:5-9、47-63 —— 逐字同构的轮询状态机，连 2000 / 5000 两个魔法数都一样",
+        "src/renderer/renderer-codebase-panel.js:34-45（isCodebasePaneActive + setCodebasePanelText）↔ src/renderer/renderer-graph-panel.js:34-45（isGraphPaneActive + setGraphPanelText）—— 同一 selector、同一「—」兜底",
+        "src/renderer/renderer-codebase-panel.js:76-84 syncCodebaseRailBusy ↔ src/renderer/renderer-graph-panel.js:71-77 syncGraphRailBusy —— 同一份 dataset.busy* + applyIndexRailBusy 规则",
+        "src/renderer/renderer-graph-panel.js:71 函数签名只接 1 个参数，:146 却以 2 个实参调用（syncGraphRailBusy(indexing, progress)）—— progress 是死参数，复制留下的痕迹"
+      ],
+      "why": "两个面板是同一个「索引面板」的两个半区（同一 data-side-pane=index、同一个 rail 按钮），骨架却各一份：88 个同形窗口意味着近一半代码要成对维护。历史事故正是只改一边（resolveWorkspaceRoot 的四级回落副本没跟着修 → 面板解析到上一个会话的工作区），A13 记的 P0 只清掉那一处，其余骨架仍在。",
+      "subtraction": "抽 createIndexPanelSection({prefix, paneSelector, summaryId, rpc, applyStats, phases, pollMs})：轮询 / 可见性 / rail busy / setText / onShown / onHidden 一份，RPC 名与字段映射留作参数；两个面板各剩「取数 + 渲染 stats」约 60 行。时间格式化改调 renderer-utils 的 fmtDateTime，删掉两份同名实现。",
+      "verify": "npm run check:renderer（含 scripts/check-renderer-index-panel.cjs 的护栏，需同批更新）+ 手工：切换会话后打开「索引」面板，两个半区的状态 / 进度 / rail 忙标记都不串会话。",
+      "already_on_record": "REDUNDANCY-REVIEW A13（medium）+ 该文 P0 执行记录第 6 条（只删了两份 resolve*WorkspaceRoot 四级回落）。现在仍成立：骨架两份未合，死参数 progress 也还在；「长出第三份」的风险仍在（src/renderer/renderer-agent-context-ui.js:822 注释自称与 codebase-panel 同构）。",
+      "effort": "M"
+    },
+    {
+      "title": "两套「步骤条状态机」：agent-prep 与 rust-loop-boot 同语义各一份，detail 上限已漂移（420 vs 120）",
+      "severity": "P2",
+      "category": "重复实现",
+      "evidence": [
+        "src/renderer/renderer-agent-prep.js:148-162 agentPrepStepStart ↔ src/renderer/renderer-rust-loop-boot.js:37-49 rustBootStepStart —— 「pending/active → active，已 done/skipped/failed 不动」逐字同构",
+        "src/renderer/renderer-agent-prep.js:164-178 ↔ src/renderer/renderer-rust-loop-boot.js:67-82（done）；src/renderer/renderer-agent-prep.js:180-196 ↔ src/renderer/renderer-rust-loop-boot.js:84-99（skip）；src/renderer/renderer-agent-prep.js:214-230 ↔ src/renderer/renderer-rust-loop-boot.js:51-65（note）—— 同一套状态迁移写两遍",
+        "src/renderer/renderer-agent-prep.js:184、221 与 src/renderer/renderer-rust-loop-boot.js:53、74、91 —— detail 截断 420 字 vs 120 字（同语义两个上限）",
+        "src/renderer/renderer-rust-loop-boot.js:25-35 updateRustBootStep —— 零调用点，是这套复制里掉队的一块",
+        "两套都在跑：src/renderer/renderer-agent-send.js:534-553、src/renderer/renderer-agent-system-message.js:124、src/renderer/renderer-agent-prep-remote.js:51 调 prep；src/renderer/renderer-agent-rust-loop.js:740、855、1009、1034、1039 调 boot"
+      ],
+      "why": "「一串带状态的步骤」在本仓出现了两次实现，迁移规则相同、截断上限不同、后来者还多写了一个没人用的 updateRustBootStep。下一次给步骤条加状态（例如 cancelled）必须改两处，漏一处就是两个面板显示不一致。",
+      "subtraction": "抽 createStepList({steps}) 返回 {start, done, skip, fail, note, sig}（纯操作，是否 emit / 重绘由调用方决定），两处各去掉约 60 行；detail 上限作为参数传入，并在注释里写清两个面板为何不同（若确实没有理由，就统一成一个数）。",
+      "verify": "node --check 两文件 + 手工：发一条消息看 prep 步骤条推进；跑一轮看 rust boot 步骤条推进（两者都不该出现卡在 active）。",
+      "already_on_record": "未在既有四份文档里出现过 —— 本轮新发现（REDUNDANCY-REVIEW 未收录这一对）。",
+      "effort": "M"
+    },
+    {
+      "title": "Renderer 仍在推导 Agent 终态并写账本（架构线：AGENTS 原则 4「勿在 Renderer 写长期 Agent 状态机」）",
+      "severity": "P2",
+      "category": "层级越界",
+      "evidence": [
+        "src/renderer/renderer-agent-loop.js:86-128 buildAgentStateSnapshot —— 在 UI 层把「暂停 / 失败 / 验证 / 完成」算成 taskStage，并有 4 个消费点把结果写进 runs 表（src/renderer/agent/trace-store.js:187、292、371；src/renderer/renderer-agent-complete.js:365）",
+        "src/renderer/renderer-agent-complete.js:342-348 —— 终态词表 completed / awaiting_user / blocked / pending_apply 由 UI 决定（函数本体 :253-480 共 480 行，见超长函数条）",
+        "src/renderer/agent/trace-store.js:54、:112 —— status: status || completed：写账本时把「没传状态」默认成 completed",
+        "src/renderer/agent/trace-store.js:185-263 —— Renderer 自研的写库节流状态机（TRACE_CHECKPOINT_INTERVAL_MS=2500 / FORCE_MS=30000，见 :6、:12），并自述曾把 trace_save 打到 45s 超时"
+      ],
+      "why": "主循环与 transcript 已经搬进 core（ARCHITECTURE-DEBT §0），但「这一轮算完成 / 暂停 / 待应用」仍由 UI 推导并写库 —— 这是 AGENTS 原则 4 明令禁止的形态，也是同一事实（一轮的结果）有两个作者的地方。docs/MODULE-CHAOS-REVIEW.md:85-92 已把它列为模块 B 的核心越界；Reviewer 判定回迁（该文 §405）只解决了其中一个来源。",
+      "subtraction": "终态由 core 随 agent.run.* 事件给出（Renderer 只展示）；buildAgentStateSnapshot 的摘要块保留为纯展示、不再回写 runs 表；账本写入只留 trace-store 一个入口。注意这需要先定「UI 的 awaiting_user / pending_apply 与 core 终态怎么对应」——属产品语义确认，别用「保留两条判定、谁先到听谁的」这种加法解决。",
+      "verify": "npm run check:renderer + 手工三条路径（正常完成 / 用户停止 / 切会话后完成）核对 agent_runs.status 与气泡终态一致；test:unit 现有 renderer 收尾用例。",
+      "already_on_record": "MODULE-CHAOS-REVIEW 模块 B（:77-92、:116-118）与 §13.2 / §405（Reviewer 已回迁）。现在仍成立：Reviewer 判定已删，但 taskStage / completionStatus / 账本写入仍在 Renderer。",
+      "effort": "L"
+    },
+    {
+      "title": "超长函数与超长文件：4 个 ≥300 行函数 + 5 个 ≥1400 行文件，单个函数混了 IO、状态机与文本拼装",
+      "severity": "P2",
+      "category": "超长函数 / 职责混杂",
+      "evidence": [
+        "src/renderer/renderer-agent-rust-loop.js:361 chatCompletionWithToolsViaRust —— 829 行（一轮运行的整段编排：payload 组装、重试分段、trace 映射、压缩前置、事件订阅）",
+        "src/renderer/renderer-agent-complete.js:253 completeAgentRunAfterSuccess —— 480 行（含上一条的 4 份重复落库块）",
+        "src/renderer/renderer-agent-send.js:470 executeSendPrepAndRun —— 413 行；src/renderer/renderer-agent-system-message.js:115 buildSystemMessageBody —— 328 行；src/renderer/renderer-tool-results.js:76 summarizeToolResult —— 257 行",
+        "文件长度（ReadAllLines）：src/renderer/renderer-chat-history.js 2130、renderer-alive.js 1682、renderer-automation.js 1525、renderer-workspace-ssh.js 1438、renderer-thinking-trace-dom.js 1418",
+        "全 renderer ≥90 行函数共 106 个（src/renderer/dist 里的同名副本另计，不计入）"
+      ],
+      "why": "829 行的单函数里同时有组装请求 / 重试分段 / 事件订阅 / 落库四类职责，任何一处改动都要通读整段；这与 MODULE-CHAOS 记的「单函数 846 行」是同一处（行号漂到 361，长度只降了 17 行）。超长文件本身不算结论，这里成条的理由是职责确实混在一起（chat-history 同时管列表 / 分组 / 分页 / 切换流水线）。",
+      "subtraction": "按 // --- 分节机械搬迁（只改可见性不改逻辑，参照 ARCHITECTURE-DEBT §13 里 Rust planner/run.rs 1229→560 的做法）：rust-loop 先切出「事件订阅」「重试分段」两段；chat-history 按 MODULE-CHAOS §129 的既有裁定切 renderer-chat-list.js / renderer-chat-switch.js。每刀单独提交、单独跑 check:renderer + 手工回归。",
+      "verify": "npm run check:renderer + npm run test:renderer + 手工六条回归（发送 / 流式 / 切会话 / 朗读跟随 / SSH 连接 / 计划运行）。",
+      "already_on_record": "MODULE-CHAOS-REVIEW §2.2（超长文件 12 强）、:116-122（846 行函数）、:129（chat-history 一刀切两半）与 :148（明确「不要先动 chat-history」）均已裁定分批。现在仍成立：829 行、2130 行，一条没动。",
+      "effort": "L"
+    },
+    {
+      "title": "错误被吞：168 处 拒绝式空处理 `.catch(空函数)`、8 处真空 catch 块、49 处裸 console.warn(e)（Renderer 没有前端错误该往哪报的约定）",
+      "severity": "P2",
+      "category": "错误被吞 / console 当日志",
+      "evidence": [
+        "src/renderer/renderer-agent-abort.js:23 —— loopApi.agentRunCancel(live.gatewayRunId, 用户停止)上挂空处理函数：停止请求失败对用户完全不可见（界面会显示「已停止」）",
+        "src/renderer/renderer-agent-compaction.js:150 —— persistCompactionArchive(cr, opts)上挂空处理函数：折叠归档写失败静默丢弃",
+        "src/renderer/agent/trace-store.js:58-60 与 :116-119 —— 账本写入失败 catch (e) { console.warn(e); return null; }（两条主账本写入，UI 无痕）",
+        "src/renderer/renderer-terminal.js:170、183、194、196 —— 终端 detach / stop / ensure 全部空吞；src/renderer/renderer-browser.js:194、207、396、586 —— 原生视图 panelState 调用全部空吞",
+        "统计口径：src/renderer/**（排除 dist）共 106 处 console.*，其中 49 处是裸 console.warn(e)（e 没有上下文，串 grep 也定位不到会话 / 工具）；拒绝式空处理（`.catch(空函数)` 一族，含 `e => {}`）168 处；真空 catch 块 8 处"
+      ],
+      "why": "口径第 6 条：空 catch 与「catch 后 return null 无痕迹」都算吞错。这里的问题规模不是个别手误，而是 Renderer 没有一份「前端错误往哪报」的约定 —— 于是 168 处各自决定静默。停止 / 归档 / 账本这三类失败有用户后果（界面说成功了，实际没成功），且都只留一条无上下文的 warn。",
+      "subtraction": "不建新机制：复用 LOGGING.md 的结构化前缀口径 + 一个 renderer 侧 reportUiError(scope, err, extra)（内部只做「带 scope 的 console.error + 可选 toast」两件事），先把有用户后果的三类（取消运行、归档落库、账本落库）接上；其余纯装饰性的空处理（隐藏面板、预加载 monaco 之类）在注释里写明 fire-and-forget，让下一轮审计不再重复发现。",
+      "verify": "node 统计脚本复跑（目标 168 → <80，且剩余每处都有 fire-and-forget 注释）；手工：断网后点「停止」，确认有提示而不是静默。",
+      "already_on_record": "CODE-CLEANLINESS-REVIEW-2026-11-21 §2.4 记了「src 168 处 console、主要是 Renderer 的 console.warn(err) 无上下文」这一统计，但没有落到 renderer 的吞错点、也没给减法。本条为展开。",
+      "effort": "M"
+    },
+    {
+      "title": "手抄的工具名集合绕开既有单一来源：undo 快照的 7 个「会碰文件」工具名 vs guardrails-shared 的 FILE_WRITE_TOOL_NAMES",
+      "severity": "P3",
+      "category": "魔法字符串本该进既有单一来源",
+      "evidence": [
+        "src/renderer/renderer-undo-stack.js:234-244 —— 手写 fs_write_file / fs_edit / host_print_image / skill_create / plan_create / plan_delete / agents_md_propose 七个字符串",
+        "src/agent/guardrails-shared.js:81-83 —— FILE_WRITE_TOOL_NAMES = {fs_write_file, fs_edit, skill_create, agents_md_propose}；该模块已经经 agent-bundle 镜像到 window（src/renderer/agent/agent-bundle-entry.js:22）",
+        "src/renderer/renderer-undo-stack.js:230-233 —— 同一循环里还硬编码了 host_exec 触发「全量快照」的语义"
+      ],
+      "why": "这不是「同一集合两份」而是「概念相邻、内容不同的两份手抄」：undo 侧多 host_print_image / plan_*（确实会写文件）。后果是新增写类工具时 undo 快照静默漏文件（回滚回不干净），而没有任何检查会红。",
+      "subtraction": "在该集合真正的归属地（src/agent/guardrails-shared.js）加一个具名导出 UNDO_SNAPSHOT_TOOL_NAMES，注释里写明它与 FILE_WRITE_TOOL_NAMES 的差集与理由；renderer 侧改读 window.GuardrailsShared。让「差集」成为一次显式决定，而不是下一轮审计的又一条发现。",
+      "verify": "npm run check:renderer；手工：用 host_print_image / plan_create 各跑一次，确认「撤销」能把文件恢复。",
+      "already_on_record": "REDUNDANCY-REVIEW A14 最后一行（「手抄 7 个会碰文件的工具名…该集合移进 guardrails-shared」）。现在仍成立、未修。",
+      "effort": "S"
+    },
+    {
+      "title": "遗留空壳文件 renderer-agent-api.js：全文 8 行只有一句 window 赋值，却挂着 40 个与内容无关的 /* global */ 声明",
+      "severity": "P3",
+      "category": "遗留兼容层 / 注释复述",
+      "evidence": [
+        "src/renderer/renderer-agent-api.js:1 —— 40 个 /* global … */ 名字，而正文（:3-7）只引用 window 与 cleanupSessionContinueState；实测这 40 个名字在正文里 0 次出现",
+        "src/renderer/renderer-agent-api.js:5 —— 全文唯一内容 window.cleanupSessionContinueState = cleanupSessionContinueState;，函数定义在 src/renderer/renderer-agent-continue.js:156",
+        "src/renderer/index.html:2770 —— 为这 8 行单独挂一个 <script>；src/renderer/README.md:38 还把它列成「Agent API 窗口导出」模块"
+      ],
+      "why": "文件名与内容已经对不上（并不存在「API 层」），它只是 renderer-agent-continue.js 的窗口导出被拆到另一个文件；那 40 个 global 声明是从旧文件整段复制来的垃圾，会误导人以为这里用了大量跨文件全局。",
+      "subtraction": "把 :5 那一行搬进 src/renderer/renderer-agent-continue.js 尾部（与同类 window 导出放一起），删文件 + 删 index.html:2770 的 <script> + 删 README 对应行（即 N4.2 的既有方案）。",
+      "verify": "npm run check:renderer（window 导出仍全部有声明）+ grep -r cleanupSessionContinueState src/renderer。",
+      "already_on_record": "NODE-THINNING-PLAN N4.2（记「7 行」，实测 8 行）。现在仍成立、未修。",
+      "effort": "S"
+    }
+  ]
+}

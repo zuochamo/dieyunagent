@@ -1,0 +1,196 @@
+{
+  "domain": "features 域：src/channels + src/mobile + src/alive + src/plans + src/goals + src/peer + src/skills + src/mcp + src/memory-shared + src/index + src/graph + src/automation + src/tools + src/undo + src/workspace + src/computer + src/terminal",
+  "verdict": "没有 P0：这个域里「已经漂移成真实 bug」的重复，上一轮基本收完了（识别规则三份→一份、凭据存储三份→secret-store、增量调度骨架两份→工厂、mutate-queue 的 12*60*1000、rewards 文案）。本次值钱的是五件「第二份实现还在长」：① 会话工作空间的「归一或抛错」写了两份逐字相同的实现（channels/store.js 与 gateway/handlers/memory.js），而这两处正是代码注释里自称「同一份解析」的地方 —— 它是写库闸门，历史上就是这条链把 `ssh:user@host:/path` 原样写进表；② 手机端朗读切块抄了 renderer-tts 的规则，且已经漂移（桌面用 ttsSafeSlice 不切半个代理对，手机直接 slice）；③ alive/ 目录仍在手写数字（decide.js 自己写着「本文件不留数字」，实有 6 处字面量 + 4 个与 agent-limits 同值的 `||` 兜底）；④ skills/vector-index 与 tools/tool-vector-index 的建索引骨架两份（batchSize 8 vs 16、QUERY_EMBED_TEXT_MAX 1200、tokenize 截 2000 全在两边各写一遍）；⑤ 结构索引调度器保留着代码索引侧明确否决的「busy 时 5s 重试」。另有一件死代码（plans/runner 的无工具单轮降级分支在树内已无调用点，且它自己又拼了一遍计划提示与「执行 TODO」块）、一件超长混杂（peer/coordinator.js 1343 行六类状态机）与四件小卫生。三个指定重复窗口实地核实结论：skills/tools 向量索引 = 真重复（已报）；graph/index 两个增量调度器 = 骨架合并**已完成**（REDUNDANCY A5 / P1-1 落地），只剩 decide() 策略差异（已单独报）；channels/store ↔ gateway/handlers/memory = 真重复，命中的正是 workspace 归一（已报）。提示逐条核实：alive/decide.js **确实留了数字**（违反 AGENTS 明令，已报）；plans 与 goals 的续跑判定**只有一份**（goals/session-goal.js:303 与 main/mcp-plans-boot.js:434,558 都调 plans/goal-run.js#decideContinuation，不报）；peer 的 actions/wire/coordinator 三层职责**分层正确**（actions 只做参数整形、coordinator 只做业务判定、wire 只有协议），但动作集合有第三张平行表没被契约测试锁住（P3）；channels/wecom-media.js 与 wecom-client.js **没有重复解帧/判型**（wecom-client 只归一字段，wecom-media 只解密 + 调 guardrails-shared 的魔数判型，实现各一份，**不报**）；mobile/public/app.js 复制 PC Renderer 一事已在 MODULE-CHAOS-REVIEW:159 裁定「不重写、只守三条」，本次只把它真正已漂移的一处（TTS 切块）按「已漂移」报，不重报「大文件」。刻意不报：agent-limits.js 与 system-prompt-prep.js 不拆（既有裁定）、memory-shared/service.js 的阈值口径（limitsOf 单一入口做得对）、peer 的 autoTrust 默认值、wecom-media 里那层同签名包装、各目录普遍存在的 `catch { // ignore }`（多数写明了理由，属既有风格而非吞错）。",
+  "stats": "范围：17 个目录、89 个 .js 文件、26,129 行（[System.IO.File]::ReadAllLines().Count 实数，html/css 未计）。实读全文：channels/store、channels/wecom-media、channels/agent-turn（区段）、channels/runtime（搜索项）、alive/decide、alive/tension、alive/voice（头部 + 常量区）、alive/runtime（resolveAliveConfig 全段）、plans/scheduler、plans/runner、plans/plan-agent-runner（头部）、main/mcp-plans-boot（250-505）、main/ipc/peer、headless/desktop-turn（155-194）、peer/actions、peer/index、peer/boot（require 区）、peer/coordinator（结构）、skills/vector-index、skills/install-integrity、tools/tool-vector-index、mcp/credentials-store、mcp/server-config、mcp/store（头部）、mcp/manage（40-280 区段）、mcp/package-store（结构）、memory-shared/service（数字与 limitsOf 区）、index/incremental-scheduler、index/codebase-incremental-scheduler、graph/graph-incremental-scheduler、workspace/target、computer/actions + coordinate-map（结构）、mobile/public/app.js（TTS 全段 866-1045 + 全文搜索）、mobile/bridge、renderer/renderer-tts（260-334，越界取证）、renderer/renderer-tool-defs（250-339，越界取证）、gateway/handlers/memory（1-60，越界取证）、agent/system-prompt-prep-main、agent/main-tools/mcp、agent/agent-limits（340-414、473-677 区段）、agent/tool-catalog（引用处）。方法：8 行克隆窗口三对逐行对照；`catch` 形态扫描（空 catch / 仅注释 catch / `.catch(() => {})`）全目录；未引用导出启发式扫描（导出名在 src+test+scripts 全量计数）；`TODO/FIXME/legacy/兼容` 全目录扫描（本域无陈旧 TODO，命中都是 `todos` 字段）；`console.*` 全仓扫描后按目录过滤（本域只剩 mcp/credentials-store 的两条）；行数一律 ReadAllLines 实测。未跑任何运行时验证（只读审查）。",
+  "findings": [
+    {
+      "title": "会话工作空间「归一或抛错」两份逐字相同的实现：channels/store.js 与 gateway/handlers/memory.js",
+      "severity": "P1",
+      "category": "重复实现（同一语义两份）",
+      "evidence": [
+        "src/channels/store.js:34-44 —— normalizeWorkspacePath：trim → parseWorkspaceInput → 失败抛 INVALID_PARAMS → `target.kind === 'ssh' ? buildSshUri(target) : target.path`",
+        "src/gateway/handlers/memory.js:16-26 —— normalizeSessionWorkspacePath：同样的十行，连报错文案「工作空间路径无法识别：${raw}（远端须写成 ssh://user@host/path）」一字不差",
+        "src/channels/store.js:28-30 —— 注释自称「工作空间字符串的唯一归一入口（与 Gateway 写库闸门同一份解析，见 gateway/handlers/memory.js#normalizeSessionWorkspacePath）」：用注释维系，而不是同一份实现",
+        "src/workspace/target.js:144-148 —— workspacePathForSession 已经是「ssh → buildSshUri，否则 path」这半句；:58-91 parseWorkspaceInput 已经是解析失败返回 null 的唯一实现，缺的只是「失败即抛」",
+        "src/channels/store.js:212、:263 —— 两处调用（创建频道、改频道）"
+      ],
+      "why": "这不是普通工具函数，是「会话 cwd 指向哪里」的写库闸门。memory.js:12-14 的注释记着历史事故：`ssh:user@host:/path`（scp 风格）被原样写进表，解析端当成本地路径，整条会话 cwd 指向不存在的 Windows 目录。两处各写一遍意味着下次只修一侧就静默放进非法路径 —— 而两处目前恰好一致，所以任何一只被改都不会有人发现。",
+      "subtraction": "把 wrapper 收进既有单一来源 `src/workspace/target.js`（例如 export `normalizeWorkspacePathOrThrow`，内部用 parseWorkspaceInput + workspacePathForSession），两处各删 11 行改为 require；`channels/store.js` 只剩调用点。",
+      "verify": "`npm test`（channels-store-robustness / channels-workspace-switch 用例）+ 补一条断言「非法 workspace 抛 INVALID_PARAMS」；收尾 `grep -rn \"parseWorkspaceInput(raw)\" src` 确认只剩一份。",
+      "effort": "S"
+    },
+    {
+      "title": "手机端朗读切块复制了 Renderer 的规则且已漂移：桌面不切半个代理对，手机直接 slice",
+      "severity": "P2",
+      "category": "重复实现（已漂移）/ 魔法数字没有单一来源",
+      "evidence": [
+        "src/mobile/public/app.js:873-875 —— TTS_CHUNK_TARGET = 90 / TTS_CHUNK_MAX = 180 / TTS_BREAK = '。！？!?；;\\n'",
+        "src/renderer/renderer-tts.js:270-274 —— TTS_CHUNK_TARGET = 90 / TTS_CHUNK_MAX = 180 / TTS_CHUNK_BREAK：同一组三个字面量各写一遍",
+        "src/mobile/public/app.js:888-918 —— splitTtsChunks 整段（成句 + 合并到 90 + 超长硬切）与 renderer-tts.js:338-383 的 splitTtsChunksDetailed 同形",
+        "src/renderer/renderer-tts.js:267-268 —— 注释自己承认：「手机端有一份等价实现……改这里的切块规则时同步改那边，否则两端语速/切句不一致」= 靠注释同步",
+        "src/renderer/renderer-tts.js:276-283 —— ttsSafeSlice：不切半个代理对；src/mobile/public/app.js:911-913 `cur.slice(0, TTS_CHUNK_MAX)` 无此保护 → **已漂移**：同一段含 emoji/生僻字的文本，手机端可能切出孤立代理项送进合成，桌面端不会",
+        "src/mobile/public/app.js:870-872 —— 注释仍写着「切块阈值与电脑端保持一致」，即两端都以为自己在对齐"
+      ],
+      "why": "同一语义两份 + 已经漂移，且漂移点是「不可见的坏字符」——没人会把它和切块函数联系起来。切句规则还直接决定朗读语速与停顿，靠注释同步必然再分叉（REDUNDANCY A1 记的语音状态机就是同一个形态）。",
+      "subtraction": "手机端是独立 bundle（无模块系统），把切块抽成一个零依赖 plain script（本仓已有 `src/agents-md-sections.js` 这类零依赖共享先例；renderer 侧 require、手机侧 `<script>` 引入），手机端删 31 行自写实现与三个常量。**最小止血**（可独立提交）：先把 ttsSafeSlice 的等价保护搬进手机端，并把三个常量改为从共享脚本取。",
+      "verify": "同一批中英 emoji 混排文本 fixture 双跑（node 侧 require 共享函数 + 手机端脚本在 jsdom 里跑），断言块数与每块文本一致、无孤立代理项（`/[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])/`）；`npm run test:mobile`。",
+      "already_on_record": "部分：docs/CODE-CLEANLINESS-REVIEW-2026-11-21.md §2.3 记的同族第一对是 mobile/public/voice.js ↔ renderer-composer-voice.js（另案），TTS 切块这一对未记；MODULE-CHAOS-REVIEW.md:159 只裁定「手机端不重写」，不含切块；漂移（无代理对保护）本轮新发现。",
+      "effort": "M"
+    },
+    {
+      "title": "生命感的数字仍在 alive/ 里手写：decide.js 自称「不留数字」，实有 6 处字面量 + 4 个与 agent-limits 同值的兜底",
+      "severity": "P2",
+      "category": "魔法数字本该进既有单一来源",
+      "evidence": [
+        "src/alive/runtime.js:38-111 —— resolveAliveConfig 是这些键的唯一装配处，decisionsKeep/intentsKeep/suspiciousWakeMin/recapMaxChars/voiceTextMaxChars 全部由它提供（永远有值）",
+        "src/alive/decide.js:85 —— 注释自陈「保留条数来自 agent-limits（aliveDecisionsKeep / aliveIntentsKeep），本文件不留数字」",
+        "src/alive/decide.js:122-123 —— `Number(cfg.decisionsKeep) || 200` / `Number(cfg.intentsKeep) || 20`：与 agent-limits.js:657-658 同值的兜底（第二份真相，改主源这两处永远不生效）",
+        "src/alive/decide.js:390 —— `Number(cfg.suspiciousWakeMin) || 5`，同 agent-limits.js:660",
+        "src/alive/decide.js:212 —— `Number(cfg.recapMaxChars) || 800`，同 agent-limits.js:569",
+        "src/alive/decide.js:20 —— INTENT_MAX_CHARS = 300：无对应键的纯本地字面量",
+        "src/alive/decide.js:115 —— `raw.done.slice(0, 12)`：一轮最多关几条，纯字面量（与 aliveLoopMax 12 同值但语义不同）",
+        "src/alive/tension.js:13、:61-65、:113、:124、:140 —— LOOP_TEXT_MAX = 160、weight 夹取 1..3、`loopTension(...) >= 1`、`Math.max(60000, cfg.refusalWindowMs)` ×2",
+        "src/alive/voice.js:31-37 —— LISTEN_MAX_SECONDS 15 / LISTEN_DEFAULT_SECONDS 5 / SPEAK_MAX_CHARS 300 / SPAWN_TIMEOUT_MARGIN_MS 20000 / LIST_DEVICES_TIMEOUT_MS 8000",
+        "src/agent/agent-limits.js:629 —— aliveVoiceTextMaxChars: 300（与 voice.js 的 SPEAK_MAX_CHARS 同值、不同语义，正好是最容易互相覆盖的那类）"
+      ],
+      "why": "AGENTS.md 生命感那一行明写「数字 agent-limits.js 的 alive*（含 aliveDecisionsKeep / aliveIntentsKeep / aliveSuspiciousWakeMin / aliveSetupMaxChars，**decide.js 里不留数字**）」。现在不仅有 6 处字面量，还有 4 个「与主源同值的 `||` 兜底」—— 兜底看着安全，实际是第二份真相：把 aliveRecapMaxChars 从 800 改小，decide.js 只会在 cfg 缺键时用 800，而 cfg 永远不缺键，于是这四处改动永远不会被验证。",
+      "subtraction": "在 agent-limits.js 补 6 个键（aliveIntentMaxChars / aliveLoopsClosePerTurn / aliveLoopTextMaxChars / aliveLoopWeightMin / aliveLoopWeightMax / aliveLoopDecayMinTension / aliveRefusalWindowFloorMs / aliveVoiceListenMaxSeconds / aliveSpawnTimeoutMarginMs / aliveListDevicesTimeoutMs），runtime.js#resolveAliveConfig 统一夹取下发，decide.js/tension.js/voice.js 改为纯读 cfg（缺键即抛，与本仓 `resolveStallMs` 的既有做法一致），删掉 4 个 `||` 兜底。",
+      "verify": "`npm run test:alive`（scripts/test-alive.cjs 现成）+ `npx vitest run test/unit/alive-*`；收尾扫 `alive/*.js` 里 `const [A-Z_]+ = \\d+` 应为 0。",
+      "already_on_record": "是（声明在 AGENTS.md 生命感行与 src/agent/agent-limits.js:654-657 的注释里 —— 注释称「以前这两处硬编码在 decide.js（20 / 200）」，主值确实搬走了，但兜底与另外 6 处仍留在原地），现在**仍成立**。",
+      "effort": "M"
+    },
+    {
+      "title": "技能索引与工具索引的「建索引 + 召回」骨架两份，关键数字两边各写一遍",
+      "severity": "P2",
+      "category": "重复实现（同一语义两份）",
+      "evidence": [
+        "src/skills/vector-index.js:90-159 ensureSkillIndex / src/tools/tool-vector-index.js:59-120 ensureToolIndex —— 同形骨架：createEmbeddingClient → embeddingSignature → canVector → readIndexFile → previous Map → 去重 Set → entryIsFresh → baseEntry → toEmbed → 分批 embed + vectorToBase64 → writeIndexFile → { index, vector }",
+        "src/skills/vector-index.js:21 与 src/tools/tool-vector-index.js:20 —— QUERY_EMBED_TEXT_MAX = 1200 各写一遍（无单一来源）",
+        "src/skills/vector-index.js:123 与 src/tools/tool-vector-index.js:83 —— `Array.from(tokenize(document)).slice(0, 2000)` 同一段截断各写一遍",
+        "src/skills/vector-index.js:176 与 src/tools/tool-vector-index.js:262 —— `rankByKeyword(entries, q, set, Math.max(max, 12))` 同一个 12 各写一遍",
+        "src/skills/vector-index.js:22 DEFAULT_LIMIT = 8（调用方 src/agent/system-prompt-prep-main.js:67 又写了一遍 `limit || 8`）/ src/tools/tool-vector-index.js:21 DEFAULT_LIMIT = 10（= agent-limits.js:364 toolRecallLimit: 10）",
+        "已漂移两处且无说明：批量大小 8（skills:137）vs 16（tools:97）；tools:111-117 多了 mergedPrevious + `.slice(0, 500)` 保留孤儿条目，skills 侧没有"
+      ],
+      "why": "两个文件解决的是同一件事（把一批文档按「文本 hash + embedding 签名」增量建向量索引，再按同一套 rankBySemantic 召回），差别只有文档拼装与条目字段。骨架两份的直接代价是「向量索引怎么算新鲜 / 怎么分批」这类共性缺陷要修两遍 —— batchSize 8 vs 16 已经是一次无说明的分叉；1200 / 2000 / 12 三个数字两边各写一遍，改召回质量参数时会漏一侧。",
+      "subtraction": "在 `src/codebase/vector-index.js`（已经是 hashText/embeddingSignature/vectorToBase64/tokenize/readIndexFile/writeIndexFile/rankByKeyword/rankBySemantic 的唯一来源）旁边加 `createVectorIndexStore({ indexPath, docOf, entryBase, isFresh, batchSize, keepOrphans })` + `embedPending()`，两份 ensure* 只剩「文档怎么拼」与「召回策略」；三个数字进 agent-limits（与 skillRecall*/toolRecall* 阈值同一批）。",
+      "verify": "现有 test/unit 里技能/工具召回用例 + `npm run test:agent`；补一条「两侧 batchSize 同值」的断言（正是历史漂移点）。",
+      "already_on_record": "是：docs/REDUNDANCY-REVIEW-2026-11-03.md A14 最后一行（「索引构建骨架 + 查询嵌入 + QUERY_EMBED_TEXT_MAX=1200；batchSize 8 vs 16 无说明」→ 减法「复用 codebase/vector-index.js 既有原语，加 createIndexStore / embedPending」），**至今未做，仍成立**。",
+      "effort": "M"
+    },
+    {
+      "title": "plans/runner.js 的「无工具单轮」降级分支在树内已走不到，而它自带第二份计划提示与「执行 TODO」块",
+      "severity": "P2",
+      "category": "死代码 / 降级层（原则 2 明令禁止的加法反模式）",
+      "evidence": [
+        "src/plans/runner.js:66-69 —— 只有 `ctx.gateway && ctx.coreBridge && typeof ctx.createToolBridge === 'function'` 全缺时才落到 else 分支（即「无工具、单次 LLM」）",
+        "src/main/mcp-plans-boot.js:389-412 —— 唯一生产调用点，planCtx 里恒传 gateway:gw / coreBridge / createToolBridge / mcpRuntime → 恒走 :68 的 runPlanAgentLoop；`deps.runPlan` 是测试缝（:205、:211），src/ 内无人注入",
+        "src/plans/runner.js:71-99 —— 降级分支自己又拼一遍：dieyun 系统块（:75-76）+ 技能块（:78-83）+ 「执行 TODO」块（:85-87）+ 空正文判失败（:95-97）",
+        "src/plans/plan-run-turn.js:58-60 —— `执行 TODO：\\\\n${todos.map((t, i) => `${i + 1}. ${t}`).join('\\\\n')}` 与 runner.js:85-87 逐字相同（第二份）",
+        "src/plans/plan-agent-runner.js:23-50 —— 计划系统提示的第三处拼装（本域已被 agent 域另案报告为「与 main-turn-runner 同形」，此处只补充它下面的这一层）"
+      ],
+      "why": "AGENTS 原则 2：降级层若只是绕过失败而非消除失败，就该删。这里的判据甚至不是「core 不可用」，而是「调用方没传三件依赖」—— 真出现 core 故障时走不到它（runRustAgentLoop 自己会报错），所以它既不被使用、也不解决问题，只留下「计划提示 + TODO 块」的第二、第三份写法。删它不会减少任何真实能力。",
+      "subtraction": "删 runner.js:71-99 的 else 分支与随之无用的 ASSISTANT_IDENTITY / buildTaskSkillsSystem / appendPlanLog require（注意 `chatCompletion` 必须保留：src/plans/parser.js:111 还在用它做计划解析），runPlan 直接 `return runPlanAgentLoop(ctx, plan)`；「执行 TODO」块只留 plan-run-turn.js 一份。",
+      "verify": "`npx vitest run test/unit/plans-*.test.cjs`、`test/unit/mcp-plans-boot.test.cjs`、`npm run test:rust-planner-smoke`；`grep -rn \"执行 TODO\" src` 应只剩一处。",
+      "already_on_record": "部分：docs/DESIGN.md:429 与 docs/ARCHITECTURE.md:702 把这条记成「core 不可用时降级为单次 LLM」（当作设计而非债务），因此从未进过减法清单；docs/CODE-CLEANLINESS-REVIEW-2026-11-21.md §五 第 5 步记的是它上层的 main-turn-runner ↔ plan-agent-runner 骨架合并。本条是那一层下面的死分支，**仍成立**。",
+      "effort": "S"
+    },
+    {
+      "title": "结构索引调度器保留了代码索引侧明确否决的「busy 时 5s 重试」：同族两个调度器对同一事件给出相反策略",
+      "severity": "P2",
+      "category": "重试层（原则 2）/ 重复实现已漂移",
+      "evidence": [
+        "src/graph/graph-incremental-scheduler.js:11 —— CODEBASE_BUSY_RETRY_MS = 5000；:36-42 拿 codebase.status 见 `indexing` 就 `return { action: 'retry', delayMs: 5000 }`",
+        "src/index/codebase-incremental-scheduler.js:51-58 —— 相反策略且写了理由：「索引正在跑时不再排队重试：保存是高频事件，重试风暴比『这次不增量』更贵。下一次保存/打开工作区自然会再触发一次」",
+        "src/index/incremental-scheduler.js:99-102 —— 工厂对 retry 的处理就是 `schedule(workspaceRoot, verdict.delayMs, reason)`，于是 graph 侧每条保存事件都会变成「每 5s 一次 codebase.status + graph.status」的轮询，直到 codebase 不再 indexing",
+        "src/graph/graph-incremental-scheduler.js:10、:38、:44、:57 —— RETRY_DELAY_MS 2000 / 15000 / 30000 / 60000 四个超时字面量也在本文件里，未进 agent-limits（REDUNDANCY §B 同类项已登记）"
+      ],
+      "why": "骨架合并（A5 / P1-1）只合了机制，把「busy 时怎么办」留成两份策略，而且留下的正是被否决的那一份。后果是同一台机器上「代码索引在跑」这件事，一个调度器判为「跳过、下次再说」，另一个判为「5 秒后再问一遍」——下一次为同类问题做决定时，两个先例都在，谁也不知道哪个是现行口径。",
+      "subtraction": "删 graph 侧的 codebase.status 预检与 retry（graph-incremental-scheduler.js:11、:36-42），与 codebase 一样「这次跳过，下次保存再触发」；四个超时字面量收进 agent-limits（与 plansIdle*/index* 同类）。",
+      "verify": "`npx vitest run test/unit/incremental-index-dedupe.test.cjs`（现有 9 条行为用例）+ 补一条「codebase.indexing 时 graph 侧不 schedule」；`npm run test:local-gateway-smoke`。",
+      "already_on_record": "是：docs/REDUNDANCY-REVIEW-2026-11-03.md A5（「graph 侧保留了 codebase 侧明确否决的『busy 时 5s 重试』」）与 docs/INDEX-VALUE-REVIEW.md:23（把「busy 不排重试」记为 R4 整改成果）。A5 的骨架合并已完成（P1 执行记录第 1 条），**这条策略差异仍在，仍成立**。",
+      "effort": "S"
+    },
+    {
+      "title": "peer/coordinator.js 1343 行：租约 / 房间 / 会话绑定 / 信任 / 收发 / 回传六类状态机同居一个文件",
+      "severity": "P2",
+      "category": "超长文件 / 职责混杂",
+      "evidence": [
+        "src/peer/coordinator.js:1343 —— ReadAllLines 实测（本域最长文件）",
+        "src/peer/coordinator.js:53-56、:149-201、:981-1072 —— 占位/租约（claimKey、ownClaims、peerClaims、allClaims、conflictsFor、broadcastClaim、claim）",
+        "src/peer/coordinator.js:364-553 —— 房间（newRoomId、roomsList、resolveRoomMembers、createRoom、closeRoom、sendToRoom、roomTimeline）",
+        "src/peer/coordinator.js:284-362 —— 会话绑定与重建（createSessionForPeer、sessionAlive、ensureSessionForPeer）",
+        "src/peer/coordinator.js:697-790 —— 信任与待确认缓冲（trustDecision、pendingTrustList、bufferUntrusted、trustPeer、untrustPeer）",
+        "src/peer/coordinator.js:578-696、:849-1110 —— 入站分派、出站发送与回合回传（handleMessage、handleReply、dispatchEnvelope、onEnvelope、sendToPeer、normalizeSendResult、noteTurnCompleted、noteTurnProgress）",
+        "src/peer/coordinator.js:80-108 —— 同时持有 9 个内存 Map（ownClaims/peerClaims/learnedPeers/pendingTurns/turnBudget/seenInbound/turnText/pendingInbound/awaitingReplies）+ :71 落盘 store + :567-577 拼给模型的入站文本",
+        "src/peer/coordinator.js:1118-1240 —— 生命周期与设置（status、start、stop、restart、setEnabled、setAutoTurn、setAutoTrust、setName、setRole、refresh）"
+      ],
+      "why": "一个文件同时做持久化接线、六类状态机、跨机文本拼装。改任何一类都得读全 1343 行，而本仓对 peer 的唯一机械闸门（test/unit/peer-bridge-contract.test.cjs）只覆盖动作表与桥表，覆盖不到语义——也就是说这个文件里最贵的部分恰好没有任何拆分或契约保护。",
+      "subtraction": "按文件里已有的函数分组机械拆三刀：`claims.js`（租约/占位）、`rooms.js`（房间 + 会话绑定）、`trust.js`（信任/待确认），coordinator 只留门面、dispatch 与生命周期；不改语义、不动 wire.js / actions.js / boot.js。以现有注释分节为界，逐块搬迁。",
+      "verify": "`npm run test:peer-tools` + `npx vitest run test/unit/peer-*.test.cjs` + `npm run test:unit`（peer-bridge-contract 必须全绿，否则说明动作表被搬坏）。",
+      "effort": "L"
+    },
+    {
+      "title": "plans/scheduler.js 三处小卫生：与 agent-limits 同值的兜底、四份相同的执行块、一处静默吞错",
+      "severity": "P3",
+      "category": "魔法数字 / 重复实现（文件内）/ 错误被吞掉",
+      "evidence": [
+        "src/plans/scheduler.js:27-28 —— `opts.idlePollMs > 0 ? ... : 60 * 1000` / `: 5 * 60 * 1000`，与 src/agent/agent-limits.js:45-46 的 plansIdlePollMs / plansIdleQuietMs 同值；而唯一生产调用方 src/main/mcp-plans-boot.js:288-289 每次都传 → 这两个兜底永不生效，只是第二份真相",
+        "src/plans/scheduler.js:91-98、:130-139、:157-166、:173-180 —— 四段逐字相同：`this.running.add(id) → await this.runPlan(plan) → catch log → finally { delete + lastBusyAt = Date.now() }`",
+        "src/plans/scheduler.js:108 —— `this._idleTick().catch(() => {})`：定时器回调里的异常不留任何痕迹（log 钩子就在同一个类上，:22）"
+      ],
+      "why": "三处都是「同一个文件里同一件事写多遍」：默认值两份（改 agent-limits 不生效）、执行块四份（改错误处理要改四处）、空 catch（定时任务静默死掉时日志里什么都没有，与本仓「错误要留痕」的口径相反）。",
+      "subtraction": "删 :27-28 的兜底改读 agent-limits 默认值；抽 `_runExclusive(plan, label)` 覆盖四处（runNow 需要返回值，参数化即可）；:108 改成 `.catch((e) => this.log('闲时轮询异常: …'))`。",
+      "verify": "`npx vitest run test/unit/plans-scheduler.test.cjs test/unit/plans-idle-queue.test.cjs`（现有用例覆盖 idle 节流与 target 优先）。",
+      "already_on_record": "是：docs/REDUNDANCY-REVIEW-2026-11-03.md §B 记了「plans/scheduler.js:27-28 的 60s / 5min……未挂在 agent-limits」；**部分已修**（agent-limits.js:45-46 现在有这两个键，调用方也传了），剩下的正是这两份同值兜底 —— 仍成立。",
+      "effort": "S"
+    },
+    {
+      "title": "peer/actions.js 的同一动作集合有三张平行表，契约测试只锁住两张",
+      "severity": "P3",
+      "category": "重复实现（同一集合多份清单，缺闸门）",
+      "evidence": [
+        "src/peer/actions.js:19-42 —— PEER_ACTION_NAMES：22 个动作名",
+        "src/peer/actions.js:59-82 —— PEER_BRIDGE_METHODS：22 条（方法名 + 参数整形）",
+        "src/peer/actions.js:133-243 —— HANDLERS：22 个键，真正的实现",
+        "test/unit/peer-bridge-contract.test.cjs:26-37 —— 只校验「动作表 ↔ 桥表」一一对应且方法名由动作名派生，**HANDLERS 不在任何断言里**",
+        "src/peer/actions.js:116-117 —— 动作名在表里但忘了写 handler 时，只有到运行期才返回「未知的互通动作」",
+        "src/peer/actions.js:129 —— `return { handle, names: PEER_ACTION_NAMES }`：`names` 在 src/ + test/ + scripts/ 内无消费者（src/main/ipc/peer.js:24 直接用模块级常量）"
+      ],
+      "why": "文件头 :46-55 自己写着「加动作只改两处表，契约测试会校验一一对应」，而真实实现是第三张表 —— 正是它记录的「set-auto-trust 在动作表里有、preload 里没有」那类漂移的下一个入口：现在漏写 HANDLERS 同样不会红。",
+      "subtraction": "让 `PEER_ACTION_NAMES` 从 HANDLERS 派生（`Object.freeze(Object.keys(HANDLERS))`，把 HANDLERS 提到前面），或至少给契约测试补一条「HANDLERS 键集合 == PEER_ACTION_NAMES」；删掉无消费者的 `names` 返回值。",
+      "verify": "故意删掉一个 HANDLERS 条目，`npx vitest run test/unit/peer-bridge-contract.test.cjs` 必须变红。",
+      "effort": "S"
+    },
+    {
+      "title": "mcp/manage.js 里「这个服务是不是远端」又手写了一遍，而单一来源就在隔壁",
+      "severity": "P3",
+      "category": "重复实现（同一判定多份）",
+      "evidence": [
+        "src/mcp/server-config.js:5-9 —— transportKind(server)：`transportKind === 'remote' || server.remoteUrl` 的唯一实现（读服务定义口径）",
+        "src/mcp/store.js:8-14 —— 为此专门起别名（`transportKind: resolveServerTransportKind`）并写注释「server-config.transportKind 是读服务定义的口径，mcp/manage.js 是入参口径」，说明本仓已把它当单一来源",
+        "src/mcp/manage.js:252 —— `const remote = server.transportKind === 'remote' || !!server.remoteUrl;`：与 transportKind() 同义、未 require 的手写第三份",
+        "src/mcp/manage.js:40-49 —— 同文件自己声明「transport 的唯一来源：schema enum、参数校验、store 落库、Renderer 选项表全都从这里取，任何一处另抄一份都会分叉（历史上就是 transport='http' 过校验却按 stdio 落库）」"
+      ],
+      "why": "谓词有第三份。真出现新的远端形态（例如再把 `http` 认成 remote）时，这一处不会跟着改，表现为「设置页显示远端、凭据弹窗按 stdio 处理」这类只在特定服务上出现的错。",
+      "subtraction": "改调 `require('./server-config').transportKind(server) === 'remote'`（server-config 只依赖 env-hints，无环）；同类内联在 src/mcp 内仅此一处。",
+      "verify": "`npm run test:mcp-store` + `npx vitest run test/unit/mcp-*.test.cjs`；`grep -rn \"transportKind === 'remote' ||\" src/mcp` 应为 0。",
+      "effort": "S"
+    },
+    {
+      "title": "mcp/credentials-store.js 拿 console.warn 当日志：注入的 log 通道它拿不到，去重键也永不失效",
+      "severity": "P3",
+      "category": "console.* 当日志 / 错误被吞掉",
+      "evidence": [
+        "src/mcp/credentials-store.js:14、:17 —— `console.warn('[dieyun:mcp] …')` 两条（解不开密文的告警）",
+        "src/mcp/credentials-store.js:5-8 —— 注释说明它刻意只喊一次、且这是高频路径（列表/弹窗/建会话都读）",
+        "src/mcp/credentials-store.js:6 —— `const warnedUndecryptable = new Set()` 是模块级、永不清空：换过 userData、用户重新填对凭据后，同一 serverId 再坏也不会再告警",
+        "src/channels/store.js:55 —— 同层相邻模块的做法是 `deps.log` 注入（`typeof deps.log === 'function' ? deps.log : () => {}`）；createMcpCredentialsStore（:24-26）的 deps 只有 safeStorage / userDataPath，没有 log",
+        "src/core-bridge.js:37-45 —— 本仓记过同一个坑：「曾经默认 noop + RPC_TIMEOUT 硬写 console.warn ⇒ GUI 打包后（无 stdout）」"
+      ],
+      "why": "打包后没有 stdout，这两条告警等于丢失；而它恰恰是「凭据存了但解不开」的唯一提示 —— 丢失后表现为「子进程拿到空 env、工具莫名其妙失败」。去重键不含失败原因，也让「同一个 ID 后来因为别的原因解不开」静默。",
+      "subtraction": "`createMcpCredentialsStore({ ..., log })`，两条改 `log(...)`（调用方 src/mcp/store.js 已有 log 钩子可传）；去重键带上原因类别（safeStorage 不可用 / 密钥不匹配），并在 saveSecrets 成功后清掉该 serverId 的键。",
+      "verify": "`npm run test:mcp-store` + test/unit/mcp-credentials-store.test.cjs（现有用例，补一条「重新保存后再坏会再告警」）。",
+      "effort": "S"
+    }
+  ]
+}

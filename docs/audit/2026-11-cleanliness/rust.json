@@ -1,0 +1,193 @@
+{
+  "domain": "rust（crates/ 110 个文件 + crates/dieyun-core 的路径转发 shim）",
+  "verdict": "整体已从「巨石 + 吞错」收敛到「五层 crate + 注册表分派」：rpc/mod.rs 336 行、handlers/ 与 registry.rs 不重复、EMBEDDING_TIMEOUT_CODE / request_budget_ms / messages_clear / index/remote.rs 等旧死代码确已删净、eprintln 只剩 obs.rs 一个出口。但仍有 5 处「同一语义两份实现」落在活路径上（出站传输字段两个作者、建库 start/sync 双入口、index/graph 两套并行状态机、表存在判定三份、graph 级联删除手写两半），另有 2 处零风险死代码、1 处指向已删 RPC 的文案会误导模型。没有发现 P0。",
+  "stats": "实测口径：Get-ChildItem crates -Recurse *.rs = 110 个文件；行数用 [System.IO.File]::ReadAllLines().Count。抽查 RUST-CORE-REFACTOR-PLAN.md 74 条地图的 10 条：D2 巨石（rpc/mod.rs 462→336、index/mod.rs 1935→503、loop_run 拆完）= 已修；D3/D8 死代码（index/remote.rs、request_budget_ms、messages_clear、EMBEDDING_TIMEOUT_CODE 无消费方）= 已修（EMBEDDING_TIMEOUT_CODE 现在 embedding/mod.rs:354 有消费方）；C 级「子串通道路径命中当强证据」= 已修（index/search.rs:446-507 拆出 content_hits）；C 级「召回量纲」= 已修（memory/recall.rs:237-247 injectScore）；B 级「MAX_GRAPH_FILES 先截断后筛」= 已修（graph/build.rs:74 复用 index::MAX_FILES + keep 预筛）；B 级「graph/schema 声明外键却不生效」= 已修（有 schema_declares_no_unenforced_foreign_keys 用例）；§12 R2 出站唯一作者 = 只成立一半（见 findings 第 1 条）；§14.1 测试分离 = 只搬了 12 个文件，另 6 处仍同居（第 9 条）。生产路径 unwrap()/expect() 逐个核过：非测试区仅 7 处，其中 5 处是有守卫的不变量（sqlite.rs:138/281、shared.rs:111、plan_parse.rs:76、planner/run.rs:229 紧邻 is_some 判定），db_schema.rs:96/98 是唯一没守卫的（且该函数只被测试调）；其余全部在 #[cfg(test)] 内联块里，未误报。clone 检测窗口逐条核实后的处置：graph/build.rs↔graph/query.rs 是 query_map(...).map_err(GRAPH_QUERY_FAILED) 样板（14 处 3 行同形），属错误映射惯用法、不是同一份语义，不建议合并；index/schema.rs↔index/vector_pool.rs 与 graph/types.rs↔index/mod.rs 的窗口命中的是并行 DTO/状态机的字段序列（已并入第 8 条）；codebase.rs↔graph.rs 的 5 个窗口是真样板（workspaceRoot / force / skipIfReady 解析），但 11 个 handler 各调各的服务，只值得抽一个参数解析 helper（P3，未成条，与第 7 条同源）。另有三项小卫生未单独成条：treesitter/chunk.rs:190 truncate 与 index/mod.rs:72 truncate_chars 是同一语义两份；now_secs 三份（index/mod.rs:374、index/status.rs:309-312、graph/build.rs:211-214）；dieyun-core/src/main.rs:56-70/76-90/100-117 三处重复的 configure + create_dir_all 样板，且 :30 的 --force 用 default_value_t = true 声明成布尔开关（永不可能是 false）。",
+  "findings": [
+    {
+      "title": "出站传输字段 stream / stream_options.include_usage 仍有两个作者，两份注释各自自称唯一",
+      "severity": "P1",
+      "category": "重复实现",
+      "evidence": [
+        "crates/dieyun-runtime/src/agent/outbound.rs:71 —— apply_transport 写 stream 与 stream_options.include_usage，:73 的 if stream && obj.get(stream_options).is_none() 分支与 llm.rs 逐字相同",
+        "crates/dieyun-runtime/src/agent/llm.rs:425 —— apply_transport_fields 是同一份知识的第二份实现（:430 同一判断、同一 json 字面量），:468 在 chat_completion 里每次发请求前再写一遍",
+        "crates/dieyun-runtime/src/agent/driver.rs:188-189 与 :197 —— 同一个 spec.stream 既喂给 project_body 又传给 chat_completion，最终值由后写者（llm.rs）决定，OutboundSpec.stream 实际是会被覆盖的输入",
+        "crates/dieyun-runtime/src/agent/outbound.rs:1 与 :38 —— 模块头写「唯一作者」、OutboundSpec.stream 注释写「唯一作者也在这里」",
+        "crates/dieyun-runtime/src/agent/llm.rs:418-419 —— llm.rs 反向声明「stream 与 stream_options.include_usage 只在这里写」",
+        "crates/dieyun-runtime/src/agent/outbound.rs:70 —— apply_transport 注释说给 llm.complete 这类宿主自建 body 的路径用，但 llm.complete（crates/dieyun-runtime/src/rpc/handlers/async_core.rs:427）走的是 llm.rs 那份，这份 pub 函数只有 project_body 一个调用点"
+      ],
+      "why": "§12 记的是「出站投影已收成一个作者」，实际只收了 messages 投影，传输字段仍两份且互相覆盖。今天两处取值来自同一个 spec.stream 所以看不出差别；下次往里加传输字段（max_tokens 夹取、include_obfuscation、超时相关开关）只改一处就会分叉，而这正是 A16/stream_options 漏水那次事故的复现路径。",
+      "subtraction": "二选一，不要两份：删 llm.rs:425-436，chat_completion 改调 outbound::apply_transport（签名只需包一层 as_object_mut）；或反过来只留 llm.rs 作唯一写入点，把 outbound::apply_transport 删掉并删 OutboundSpec.stream 字段（现在它是被覆盖的死输入）。",
+      "verify": "cargo test --workspace --lib agent::llm agent::outbound agent::driver_tests；保留既有用例 streaming_request_asks_for_usage / transport_fields_do_not_overwrite_explicit_stream_options；grep stream_options 的写入点应只剩 1 处。",
+      "already_on_record": "RUST-CORE-REFACTOR-PLAN.md §12「R2 · 出站投影（2026-11-18 落地）——现在：agent/outbound.rs 是唯一作者」。仍成立一半：messages 投影确实唯一，传输字段不是。",
+      "effort": "S"
+    },
+    {
+      "title": "面向模型/用户的错误文案仍指向 P6 已删除的 codebase.index_remote",
+      "severity": "P1",
+      "category": "遗留兼容层 / 陈旧引用",
+      "evidence": [
+        "crates/dieyun-codebase/src/index/build.rs:203 —— REMOTE_INDEX_REQUIRED 的文案：「远程工作空间请使用 codebase.index_remote 或在远端本地路径上建索引」",
+        "crates/dieyun-codebase/src/index/build.rs:342 —— 同一个已不存在的方法名（sync 入口那份文案，措辞还不一样）",
+        "crates/dieyun-codebase/src/index/vectors.rs:73 —— 文档注释仍引用 remote::index_remote_finish_inner（该模块已整体删除）",
+        "crates/dieyun-runtime/src/rpc/registry.rs:80-167 —— METHODS 全表 86 个方法里只有 codebase.status / index / index.start / search，没有 index_remote"
+      ],
+      "why": "这是 core 交给上层的原文：远端工作区一旦撞到这条分支，模型/用户拿到的是一条「请调用 X」，而 X 会回 UNKNOWN_METHOD。P6 删掉 index/remote.rs 时没人回改这两句面向调用方的文案，属于「删了实现、留着指路牌」。",
+      "subtraction": "两处文案改成与 graph 侧同款说法（crates/dieyun-codebase/src/graph/mod.rs:99 已经写成「请使用远端本地路径上的 graph.index.start」）；vectors.rs:73 删掉 remote:: 引用。",
+      "verify": "grep -r index_remote crates/ 归零（docs/ 下历史记录可保留）；远端工作区调 codebase.index.start 应只看到「在远端本地路径上建索引」。",
+      "already_on_record": "RUST-CORE-REFACTOR-PLAN.md §2.4 D8 死代码清单 / §5 P6「index/remote.rs 整条（344 行 + RemoteIngestHandle）真死，一起删」。代码删了，指路文案与文档注释没删 —— 现在仍成立。",
+      "effort": "S"
+    },
+    {
+      "title": "「这个库里有没有这张表」三份实现，其中一份注释自称唯一定义",
+      "severity": "P1",
+      "category": "重复实现",
+      "evidence": [
+        "crates/dieyun-codebase/src/index/schema.rs:46-48 —— 注释写「这张表在这个库里存在吗」的唯一定义，pub(super) fn table_exists，查询 sqlite_master",
+        "crates/dieyun-codebase/src/graph/schema.rs:27-36 —— graph 侧又一份 fn has_table，同一条 SELECT 1 FROM sqlite_master WHERE type=table AND name=?1 LIMIT 1",
+        "crates/dieyun-codebase/src/codebase_db.rs:36-44 —— 第三份（测试模块内，用 SELECT COUNT(*) 变体），而它自己的测试就是在验证 index/graph 两张表"
+      ],
+      "why": "同一个 crate 里三份同一 SQL，index 那份是 pub(super)，graph 用不上于是各写一份 —— 注释宣告的单一来源是假的。将来换成 user_version 判定、加前缀或加 schema 校验，改一处会让另两处静默按老逻辑走；三份的返回类型还不一致（Result<bool, CoreError> vs bool）。",
+      "subtraction": "把 table_exists 提到 dieyun_base::db_schema（与 ensure_table / ensure_column 同一处，那个模块的存在理由正是「一份结构清单」），删 graph/schema.rs 的 has_table 与 codebase_db.rs 测试里的第三份，graph 的 has_table 调用点（graph/schema.rs:19）改调公共版本。",
+      "verify": "cargo test -p dieyun-codebase --lib（schema / codebase_db 用例）；grep -c sqlite_master crates/dieyun-codebase/src 应只剩 db_schema 与我列出的 schema 自检用例。",
+      "effort": "S"
+    },
+    {
+      "title": "graph/query.rs 手搓的 OptionalRow 是 rusqlite OptionalExtension 的重造",
+      "severity": "P1",
+      "category": "重复实现",
+      "evidence": [
+        "crates/dieyun-codebase/src/graph/query.rs:735-747 —— trait OptionalRow 与 impl，语义就是 QueryReturnedNoRows → None，其余上抛（13 行）",
+        "crates/dieyun-codebase/src/graph/schema.rs:1 —— 同一个 crate 的另一个文件一直用的是真的 use rusqlite::OptionalExtension",
+        "crates/dieyun-memory/src/memory/projects.rs:64 —— 全仓其它点也都是 .optional()? 的标准用法"
+      ],
+      "why": "同一 crate 里一半人用标准扩展 trait、一半人用手搓的，读代码要先证明两者等价；而 query.rs 的三处 .optional() 调用（:329/:343/:353）看上去和标准 API 一模一样，最容易让后来人以为引错了 crate。",
+      "subtraction": "删 query.rs:735-747，文件头加 use rusqlite::OptionalExtension，三个调用点不动（方法名相同、语义相同）。",
+      "verify": "cargo test -p dieyun-codebase --lib graph::query；cargo clippy --workspace --all-targets -- -D warnings。",
+      "effort": "S"
+    },
+    {
+      "title": "purge_stale_files 是 purge_removed_files 的纯转发包装，两个名字表达同一件事",
+      "severity": "P1",
+      "category": "死代码",
+      "evidence": [
+        "crates/dieyun-codebase/src/graph/cleanup.rs:116-122 —— 函数体只有一行 purge_removed_files(conn, root_hash, keep)",
+        "crates/dieyun-codebase/src/graph/build.rs:78-82 —— force 分支调 purge_removed_files，非 force 分支调 purge_stale_files，其实同一个函数，让读者以为 force / 增量有不同清理语义"
+      ],
+      "why": "纯历史原因保留的第二个名字：没有任何参数、语义或注释上的差别。它让「force 与非 force 的清理差异在哪」这个真问题凭空多出一个分支要看。",
+      "subtraction": "删 cleanup.rs:116-122，build.rs:81 改调 purge_removed_files；若确实想要「增量时清哪些」的语义文档，写成 purge_removed_files 的注释而不是空壳函数。",
+      "verify": "cargo test -p dieyun-codebase --lib graph；grep purge_stale_files 归零。",
+      "effort": "S"
+    },
+    {
+      "title": "walk_defs 的 src 参数没人用，靠 let _ = src 压掉警告",
+      "severity": "P1",
+      "category": "死代码 / 未使用参数",
+      "evidence": [
+        "crates/dieyun-codebase/src/treesitter/chunk.rs:30 —— 形参 src: &[u8]",
+        "crates/dieyun-codebase/src/treesitter/chunk.rs:69 —— let _ = src; // keep signature parity for future text checks",
+        "crates/dieyun-codebase/src/treesitter/chunk.rs:77 —— 递归调用把它一路往下传（每层都传一个没人读的切片）"
+      ],
+      "why": "注释自己承认是为「将来可能要用」保留的签名，正是「只为历史原因保留」；占位语句还把编译器对未用参数的提示一起消掉了，于是下一轮审计只能靠人工发现。",
+      "subtraction": "删形参、删 chunk.rs:10 的实参与 :77 的递归实参、删 :69 的占位行；将来真要按文本判断再加参数。",
+      "verify": "cargo test -p dieyun-codebase --lib treesitter::chunk；cargo clippy --workspace --all-targets -- -D warnings。",
+      "effort": "S"
+    },
+    {
+      "title": "建库两条入口（*.index.start 与 *.index）各一份实现，前置守卫抄两遍且已漂移",
+      "severity": "P2",
+      "category": "重复实现 / 职责重叠",
+      "evidence": [
+        "crates/dieyun-codebase/src/index/build.rs:192 —— start_index_workspace（后台线程 + 进度）",
+        "crates/dieyun-codebase/src/index/build.rs:332-376 —— index_workspace（同步跑）；is_remote 守卫、resolve_workspace、加锁、已运行判定与 start 版逐字同形，只有错误文案和「是否复核竟态」不同",
+        "crates/dieyun-codebase/src/graph/mod.rs:88 与 :230 —— graph 侧同形的两份；竞态复核只在 start 版（:142-151），sync 版 :249-259 只查一次就直接 insert",
+        "crates/dieyun-runtime/src/rpc/handlers/codebase.rs:25-35 与 crates/dieyun-runtime/src/rpc/handlers/async_data.rs:122-132 —— EMBEDDING_NOT_CONFIGURED 守卫连中文文案都抄了两份（只差一句「或在设置里配好 embedding 后重试」）",
+        "src/gateway/rpc.js:1771-1782 —— 同步入口现在只剩「旧 core / 旧远端包不认识 .index.start」时的兼容回退在用，且它只匹配 REMOTE_INDEX_UNSUPPORTED 与 unknown method 两个信号"
+      ],
+      "why": "这是 §2.4 D2「同一语义多入口」仅存的一对：谁阻塞、谁带 skipIfReady、谁复核竞态，两条路各写一次。已经漂移 —— sync 路没有 start 路的竞态复核，两处远端报错文案不一致，EMBEDDING 守卫要让两处同时改才不跑偏。",
+      "subtraction": "让 sync 入口变薄壳：index_workspace / graph.index 内部改成「调 start_index_workspace，然后等线程结束读 status」，守卫只留 handlers 层一份 helper；如果确认兼容回退已无用（remote-index-core.js:15-20 白名单里本来就有 .index.start），连 sync RPC 与 gateway 的 syncMethod 分支一起删。",
+      "verify": "cargo test --workspace --lib；npm run verify:rpc-catalog；codebase.index / graph.index 两条 RPC 的返回形状与 already_running / skipIfReady 语义逐项对齐 start 版。",
+      "already_on_record": "RUST-CORE-REFACTOR-PLAN.md §2.4 D2 记的是「本地 run_index vs 远端 index_remote 两份逐字重复」，远端那条已删；start / sync 这一对当时没记，现在仍成立。",
+      "effort": "M"
+    },
+    {
+      "title": "index 与 graph 两套并行状态机：进度表、脏旗标修复、进行中快照三处同形各写一份",
+      "severity": "P2",
+      "category": "重复实现",
+      "evidence": [
+        "crates/dieyun-codebase/src/index/mod.rs:127-159 —— set_progress / set_progress_error / clear_progress，字段 chunk_count/vector_count",
+        "crates/dieyun-codebase/src/graph/status.rs:22-58 —— 同三个方法，逐字同形只换字段名（edge/symbol/call_count）",
+        "crates/dieyun-codebase/src/index/status.rs:363-384 与 crates/dieyun-codebase/src/graph/status.rs:61-85 —— apply_live_progress 两份（phase / files_done / files_total 取大值合并进状态）",
+        "crates/dieyun-codebase/src/index/status.rs:133-152 与 crates/dieyun-codebase/src/graph/status.rs:208-214 —— best-effort 脏旗标修复两份：都是 open_dedicated + busy_timeout(0) + UPDATE ... SET indexing = 0，只是 index 侧顺带回写计数",
+        "crates/dieyun-codebase/src/index/mod.rs:43-51 与 crates/dieyun-codebase/src/graph/status.rs:192-201 —— ProgressSnapshot vs GraphProgressSnapshot，同一形状；index/mod.rs:316-323 与 graph/types.rs:58-65 的 StartIndexResult vs GraphStartIndexResult 也只差内层状态类型"
+      ],
+      "why": "一条「后台任务 + 进程内进度表 + 崩溃残留修复 + 进行中快照」的骨架写了两遍，约 120 行。已经出现不一致：graph 的 apply_live_progress 不把 error 之外的相位信息回填、index 的修复要顺带对齐计数，两套越各自长越难判断「这条 status 字段该由谁产出」。",
+      "subtraction": "抽一个 LiveProgress<T>（HashMap + set/error/clear/apply）与一个 repair_stale_flag(conn, table, root_hash)，index / graph 只提供字段映射闭包；Start*Result 用泛型包装或直接复用同一结构（\\.status 里已有 serde(flatten) 的先例）。",
+      "verify": "cargo test --workspace --lib（index/graph 的 status、legacy、repair 用例）；两套 status 的字段语义分别有 panel 侧断言，改后 npm run test:local-gateway-smoke 仍绿。",
+      "effort": "M"
+    },
+    {
+      "title": "「实现 + 数百行测试同居」仍剩 6 处，最重的是 memory/snapshot.rs（333 行测试）与 index/vector_pool.rs（296 / 426 行）",
+      "severity": "P2",
+      "category": "测试与实现同居",
+      "evidence": [
+        "crates/dieyun-memory/src/memory/snapshot.rs:497 —— cfg(test) 起，文件共 829 行，测试区 333 行",
+        "crates/dieyun-codebase/src/index/vector_pool.rs:131 —— 测试区 296 行 / 全文 426 行，实现只占前 130 行",
+        "crates/dieyun-codebase/src/index/vector_cache.rs:90 —— 测试区 247 行 / 全文 336 行",
+        "crates/dieyun-codebase/src/index/schema.rs:204（197 行）；crates/dieyun-codebase/src/graph/query.rs:749（184 行）；crates/dieyun-runtime/src/agent/outbound.rs:124（182 行 / 全文 305 行）"
+      ],
+      "why": "§14.1 那一轮只搬了 12 个大文件（memory/mod.rs、index/mod.rs、llm.rs…），这批没进名单，其中最差的两个文件已经是「读实现先翻过 2/3 的用例」。这不是个人风格问题：它让「改一个量化参数」要在 296 行用例之间定位，也让 diff 不可读。",
+      "subtraction": "照 §14.1 的既有做法纯移动：同级 xxx_tests.rs + #[cfg(test)] #[path = \"xxx_tests.rs\"] mod tests;，一条用例都不改（模块身份与 use super::* 语义不变）。按性价比先做 vector_pool / vector_cache / snapshot 三个。",
+      "verify": "cargo test --workspace --lib 条数一致、全绿；--no-default-features 同样一致。",
+      "already_on_record": "ARCHITECTURE-DEBT.md §14 标「半条」；RUST-CORE-REFACTOR-PLAN.md §14.1 列了已搬的 12 个文件、§10.8 第 7 条标「已完成」—— 对这 6 个文件不成立，仍成立。",
+      "effort": "M"
+    },
+    {
+      "title": "陈旧/错位注释：指向已删的 ServiceSnapshot::dispatch、与代码相反的 .env 归属、悬空的列说明",
+      "severity": "P3",
+      "category": "陈旧注释 / 注释与代码不符",
+      "evidence": [
+        "crates/dieyun-runtime/src/rpc/registry.rs:11 —— 「Blocking → ServiceSnapshot::dispatch」，该函数已不存在（dispatch 只有 AppState 一个，crates/dieyun-runtime/src/rpc/mod.rs:162）",
+        "crates/dieyun-runtime/src/rpc/mod.rs:157 —— rustdoc 链接 [ServiceSnapshot::dispatch] 已经是断链（ServiceSnapshot 上没有任何 impl）",
+        "crates/dieyun-runtime/src/rpc/handlers/graph.rs:3 —— 文件头写「由 ServiceSnapshot::dispatch 的臂体机械搬来」；codebase.rs:3 / agent.rs:3 / memory.rs:3 同款",
+        "crates/dieyun-codebase/src/index/walker.rs:85-86 —— 注释说「IGNORE_EXT 里有 .env，别把它加回扩展名白名单」，实际 .env 在 SECRET_EXT（:46），IGNORE_EXT（:26-35）里没有它",
+        "crates/dieyun-memory/src/memory/schema.rs:260-271 —— 四段列说明（title_source / session_id / reasoning / trace_text）悬在唯一一句 drop_column_if_exists 上方，对应列已改由 :6-41 的列清单声明，注释与那行代码毫无关系"
+      ],
+      "why": "五处都在讲「已经不存在的东西」：读的人会去找一个没有的函数（断链），或者按注释去 IGNORE_EXT 里删 .env（那会破 test/unit/ignore-rules-parity 的「与 Node BINARY_EXT 完全相等」闸门），或者在删列语句上方读到四段讲加列的说明。",
+      "subtraction": "改字与移位，零行为变化：registry.rs:11 与 4 个 handler 头改成「AppState::dispatch + registry::METHODS」；walker.rs:85 改成 SECRET_EXT；memory/schema.rs:260-270 的四段搬回顶部对应列声明旁，trace_text 那段留在 drop 处。",
+      "verify": "cargo doc -p dieyun-core --no-deps 无 broken intra-doc link 警告；cargo test --workspace --lib。",
+      "effort": "S"
+    },
+    {
+      "title": "调用边置信度 0.8/0.9 散在四处，进度上报的 % 16 写两遍，repo_map 的 markdown 上限还与 limit 参数脱钩",
+      "severity": "P3",
+      "category": "魔法数字",
+      "evidence": [
+        "crates/dieyun-codebase/src/graph/build.rs:321 —— confidence = if callee_id.is_some() { 0.9 } else { 0.8 }",
+        "crates/dieyun-codebase/src/graph/build.rs:512 —— 回填时 UPDATE graph_calls SET callee_symbol_id = ?2, confidence = 0.9 WHERE id = ?1（字面量第三个副本）",
+        "crates/dieyun-codebase/src/graph/cleanup.rs:72 —— 撤销解析的 SQL 里又硬写 confidence = 0.8",
+        "crates/dieyun-codebase/src/graph/schema.rs:99 —— 表定义 DEFAULT 0.8，同一份知识的第四处",
+        "crates/dieyun-codebase/src/graph/build.rs:123 与 :180 —— files_done % 16 == 0 同一条上报条件写两遍（无名数字）",
+        "crates/dieyun-codebase/src/graph/query.rs:694/700/719/725 —— markdown 逐段只 take(16) / take(28) / take(24) / take(4)，而 :539-541 算出的 file_limit(≤32) / edge_limit(≤48) 只作用于 JSON，打印口径与 limit 参数无关（limit=64 时文件段仍只印 16 条）"
+      ],
+      "why": "「置信度只有两档」是一件真知识，却有四个字面量副本：改档位要改四处，漏一处就是同一张图里两种置信度并存。markdown 的四个上限则是另一类：它们看起来像 limit 派生值，实际是独立常量，让 limit 参数的一半语义失效。",
+      "subtraction": "在 graph 模块内加 CONF_RESOLVED / CONF_UNRESOLVED 两个常量（schema 的 DEFAULT 引用同一份文本、cleanup 的 UPDATE 用常量拼 SQL）；% 16 提成 PROGRESS_EVERY；markdown 段用传入的 limit 派生（或明确命名 MARKDOWN_FILES_MAX 等并写清与 limit 的关系）。",
+      "verify": "cargo test -p dieyun-codebase --lib graph（repo_map 与 refs 两条用例不改数值即绿）。",
+      "effort": "S"
+    },
+    {
+      "title": "手写级联删除的前一半把错误吞掉：孤儿向量与进度少报都不出声",
+      "severity": "P3",
+      "category": "错误被吞掉",
+      "evidence": [
+        "crates/dieyun-codebase/src/index/mod.rs:386 —— 删 chunk_vectors 的那句挂 .ok()，紧接着 :387 删 chunks 用 ? 上抛：前一半失败就留下永久孤儿向量行",
+        "crates/dieyun-codebase/src/index/mod.rs:398 —— delete_chunks_for_path 同款（先 .ok() 删向量，再 ? 删 chunk）",
+        "crates/dieyun-codebase/src/graph/cleanup.rs:61-66 —— if let Ok(n) = conn.execute(DELETE FROM graph_calls ...) { calls_deleted += n }：失败既不报错也不计数，调用方的进度计数静默少报",
+        "crates/dieyun-codebase/src/graph/cleanup.rs:76 与 :96 —— 同函数里另两处 .ok()"
+      ],
+      "why": "crates/dieyun-codebase/src/index/schema.rs:186-190 明写「级联在这儿是一份手写实现」——既然它是唯一实现，它的失败路径就不能无声。而孤儿 chunk_vectors 恰恰看不见：count_vectors 与探针都用 JOIN chunks，面板与 can_vector 都不会报，只有库体在涨（这与 VECTOR-SEARCH 要求的「元数据描述真实存在的向量」是同一类静默问题）。",
+      "subtraction": "两处 DELETE 都改成 ? 或收进同一个事务（失败则整对回滚，语义正确且无孤儿）；确实可以失败即放弃的位置改用 dieyun_base::obs::degraded 留一行，别用 .ok()。",
+      "verify": "cargo test -p dieyun-codebase --lib；用只读打开的连接跑 delete_chunks_for_path 应返回 Err 而不是静默 Ok。",
+      "effort": "S"
+    }
+  ]
+}

@@ -119,9 +119,9 @@ JSON.parse(full.messagesJson)   // ← 就是当时发出去的 messages 数组
 | `messagesChars` | 字符数，口径是 **UTF-16 code unit**（与 JS `String.length` 一致；中文算 1、emoji 算 2） |
 | `messagesHash` | 规范化 JSON 的 sha256，用来问「这轮和上轮差在哪」 |
 | `systemHash` / `systemChars` | system prompt 的身份与体量（字符数同上是 UTF-16 code unit） |
-| `systemText` | **NULL 只有一种含义：没落库**（空，或超过 `requestSnapshotSystemMaxChars`）——看 `systemChars` 判断是哪种。**每行都存全文，不做跨行去重** |
+| `systemText` | 正文**按内容寻址去重**：与 `systemHash` 同内容只存一份（`snapshot_blobs`），行里这列变 NULL。于是 NULL 有两种含义，靠 hash 区分：**hash 有 + blob 有 ⇒ 去重了**；**hash 有 + blob 无 ⇒ 没落库**（空，或超过 `requestSnapshotSystemMaxChars`，看 `systemChars`）。读侧 `get` 会自动拼回来，调用方看到的仍是全文 |
 | `toolsHash` / `toolsNames` | 工具集身份 + 名字数组（肉眼扫够用） |
-| `toolsJson` | 同上，NULL 语义同 `systemText` |
+| `toolsJson` | 同上：正文进 `snapshot_blobs`，NULL 语义与 `systemText` 一致 |
 | `estTokens` | 用 `token-estimate.js` 估的上下文用量（与 Rust `compaction/tokens.rs` 同口径） |
 | `tokenBudget` / `triggerRatio` | **每行都写**：当时的输入预算与触发比（`estTokens vs tokenBudget × triggerRatio` 决定压不压） |
 | `compactionRoundCount` | 当时的压缩冷却计数（0 = 这轮没被冷却挡住） |
@@ -153,8 +153,13 @@ JSON.parse(full.messagesJson)   // ← 就是当时发出去的 messages 数组
   Rust 侧 `keep_per_session.max(1)`）。传 0 会把该会话的行连同刚写的那行一起删光 ——
   "刚写进去就没了"是没法解释的现象，所以宁可夹住。全库窗口还会被抬到 ≥ 每会话窗口
   （否则"刚写完就把它自己的最近 N 轮裁掉"）。
-- 体量：单行 20–120KB（system/tools 每行都存全文，不去重），40 轮 ≈ 3.2MB/会话。
-  超预算先降 `KeepPerSession`（结构不动）。
+- 体量：单行 20–120KB，历史上 system/tools **每行都存全文**。2026-11-19 改成**内容寻址去重**
+  （`snapshot_blobs(hash → text)`，行里只留 hash）：现场实测 1500 行里 `tools_json` 88.6MB / 82 种内容、
+  `system_text` 6.8MB / 65 种内容 —— 去重后正文只剩 **5.4MB**；库副本上跑同一套 SQL + `VACUUM`，
+  文件从 **626.4MB → 461.7MB（−164.6MB / −26.3%）**。新写入即刻生效，历史行由修剪线程每拍搬 400 行
+  （`backfill_snapshot_blobs`），读侧两种形状都认。
+- 去重表跟着行一起收拾：`prune_request_snapshots` 删完行会清掉**孤立 blob**（没人引用的 hash），
+  否则省下来的体积会以另一种形状还回去。
 - 删行不等于缩文件：本库 `auto_vacuum = INCREMENTAL`（见 `crates/dieyun-base/src/sqlite.rs`），
   已释放的页要 `PRAGMA incremental_vacuum` 才真正归还。**存量清理**（2026-11-09 实测 1200.6MB →
   541.1MB，删 3318 行）就是「停应用 → 按上限删一次 → `incremental_vacuum` 循环到 freelist 为 0 →
@@ -192,19 +197,43 @@ Gateway   memory.request_snapshot_recent / _get ────┘（只读；UI / 
 | 上下文明明没满却压缩了 | 该轮 `compacted` + `tokensBefore/After`；再看 `compaction-telemetry.jsonl` 的失败原因码 |
 | 明明该压缩却没压 | 该轮 `estTokens` / `tokenBudget` / `triggerRatio` / `compactionRoundCount`：没到阈值 vs 冷却期 |
 | 同一轮出现两行快照 | 正常：`reason` 分别是 `initial` 与 `overflow-retry` / `image-repair` |
-| 某轮 `systemText` 是 NULL | **没落库**：`systemChars > 0` 说明超了 `requestSnapshotSystemMaxChars`，否则是空 system |
+| 某轮 `systemText` 是 NULL | 先看 `systemHash` 有没有值：**有 ⇒ 去重了**（正文在 `snapshot_blobs`，`get` 会拼回全文）；hash 也为 NULL 才是**没落库**（`systemChars > 0` = 超了 `requestSnapshotSystemMaxChars`，否则是空 system） |
 | 想知道工具集什么时候变的 | 按 `toolsHash` 分组，变化点就是变的那一轮 |
 | 一条都没有 | `requestSnapshotEnabled` 是否被关；该 run 有没有 `sessionId`（匿名 run 不写） |
 
 ---
 
-## 7. 已知边界（刻意不做）
+## 7. 快照 vs 真正发出去的那一份（投影前 / 后）
 
-- **不做大字段跨行去重**：曾按 `systemHash` / `toolsHash` "未变就写 NULL"省空间。删掉的理由：
-  ①NULL 变成双重语义（"与上一行相同" vs "超上限没落库"），读侧必须回溯才能解释；
-  ②去重游标是**每 run 一份**，表的语义却是**会话级** —— 子 Agent 和主循环共用父 `sessionId`
-  并发写时，读侧会把别人的 system 当成自己的（"我的 system 变了却没记下来"这类幻觉由此而来）；
-  ③省下的是磁盘，付出的是"这一行到底存了什么"这个唯一的确定性。要看系统提示的变化史，按 `systemHash` 分组即可。
+快照记的是 `round.prepare` 交回的那份**宿主副本**；出站投影（`crates/dieyun-runtime/src/agent/outbound.rs`）
+在**之后**才跑。所以两者差固定的五项 —— 不是 bug，是「形状的唯作者在 Rust」这条约束的必然结果
+（投影必须在宿主注入视觉/附件/裁剪之后，否则思考回传会有两个作者）。
+
+| # | 差异 | 方向 | 说明 |
+|---|---|---|---|
+| 1 | `messages[].synthetic` | 快照有 → 上行没有 | 平台补的正文标记，**只在账本里**存在 |
+| 2 | `messages[].reasoning` | 快照有 → 上行没有 | 账本内部字段（真思考与上游字段分列） |
+| 3 | `messages[].reasoning_content` | 快照没有 → 上行有 | 由 2 抬上去；缺值补**零宽占位串**（见 `agent-shared.json`）；不需要回传时不编这个字段 |
+| 4 | `tools: []` | 快照有 → 上行没有 | 空数组整键删（兼容网关会 400） |
+| 5 | `stream` / `stream_options.include_usage` | 快照没有 → 上行有 | 传输字段 |
+| — | `content` / `tool_calls` / `role` / `model` | **完全一致** | 「模型看到的内容」一个字节都没被改 |
+
+**读法**：快照里的信息 **⊇** 模型看到的 —— 唯一的内容级差异是第 3 项（同值的键名替换 + 占位串），
+其余是「多了两个账本标记」与「少了两个传输字段」。所以排障时**不需要还原**，按上表翻译即可。
+
+**闸门**：这张表由 `outbound.rs` 的 `projection_touches_only_the_documented_fields` 钉住 ——
+它枚举投影前后被改动的路径集合并断言恰好是上面这些；往投影里加任何新改写，那条用例立刻红。
+
+---
+
+## 8. 已知边界（刻意不做）
+
+- **不做「与上一行相同就写 NULL」的游标式去重**（2026-11-18 删过一次，2026-11-19 换成内容寻址）。
+  游标方案被否的三条理由仍然成立：①NULL 变成双重语义（"与上一行相同" vs "超上限没落库"），读侧必须回溯；
+  ②游标是**每 run 一份**、表语义却是**会话级** —— 子 Agent 与主循环共用父 `sessionId` 并发写时，
+  读侧会把别人的 system 当成自己的；③省的是磁盘，丢的是「这一行到底存了什么」的确定性。
+  现在的做法不碰这三条：**按内容 hash 寻址**（`snapshot_blobs(hash → text)`），NULL + hash 存在 = 去重
+  （确定性可查），NULL + hash 为空 = 没落库（语义没变）；无游标、无跨行推断、并发写天然安全。
 - **不做逐条消息 id 对齐**：那要把 DB 行 id 塞进消息体，破坏"发出去的就是库里那一份"的形状。要"从摘要点回原文"再单独加一刀。
 - **不做 UI 面板**：`recent` + `get` 已够渲染一个"本轮请求"抽屉，渲染层自己接。
 - **不做加密 / 不做压缩算法**：与 `messages` 同库同权限；保留策略代替压缩依赖。

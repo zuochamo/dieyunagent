@@ -2,8 +2,8 @@
 
 > **一句话**：不建议「推倒重写」。这套 Rust 的问题不是「代码烂到该重写」，而是**同一份知识有第二份实现**，于是每次修 bug 都只能打在消费端 —— 补丁因此越打越多。
 > 正确做法是**一趟删除 + 一趟归位**：先把 74 条已取证的缺陷分级止血，再把重复实现收敛到单一来源，最后才谈结构重排。
-> 本文配套取证：`docs/audit/2026-11-rust-core/{agent,memory,rpc,index,graph,runtime,planner}.md`（每条都带 `文件:行` 与代码原文）。
-> **进度**：**P0 止血**（9 项 / 8 条 A 级）与 **P1 契约与闸门**（共享常量 + 3 条双跑 fixture + catalog/d.ts + RPC 方法表 + 86/86 handler）均已落地，`cargo test` 239 → **264 全绿**（见 §5）；P2–P6 未开始。
+> 本文配套取证：`docs/audit/2026-11-rust-core/{agent,memory,index,graph}.md`（逐条带 `文件:行` 与代码原文）；`{rpc,runtime,planner}.md` 只有「2026-11-18 收尾批」的一页进度记录（逐条取证未落盘，未闭合项看该文件自己的 F 编号）。
+> **进度（2026-11-19 复核）**：P0–P8 全部落地（`cargo test` 239 → **346 全绿**），另加**拆 5 个 crate**（§11）、**R2 出站投影**（§12）、**抽取层二选一**（§13）、§10.8 收尾三件（§14）、**CI 两套 feature 闸门**（§15）、四处减法（§16）、三个巨型函数拆分（§17–§18）、跨语言契约债收口（§19–§20）、**请求快照大字段去重**（§21）。§2 的 19 条 A 级全清零；`docs/ARCHITECTURE-DEBT.md` 里 §6 / §10 / §11 / §12 四条「需决策 / 未动」均已收口。
 
 ---
 
@@ -338,9 +338,15 @@ support     sqlite.rs  config.rs  error.rs  blocking.rs  obs.rs      （obs.rs =
 **每批的统一验收**
 
 ```bash
-cargo test -p dieyun-core --lib          # 239 起，只许加不许减
+# 两套 feature 都要过（CI 就是跑这两条，见 §15）：默认特性 = 桌面 sidecar 口径，
+# `--no-default-features` = 远端 Linux 包口径（不带 ORT）。少跑一套就是一条盲区。
+cargo test --workspace --lib                        # 只许加不许减
+cargo test --workspace --lib --no-default-features
+cargo clippy --workspace --all-targets -- -D warnings             # 含测试目标
+cargo clippy --workspace --no-default-features --all-targets -- -D warnings
 npm run check:js                          # 含 types/core-rpc.d.ts 的字段检查
 npm run verify:rpc-catalog                # P1 之后含「臂数 == 条目数」自检
+npm run verify:core-contracts             # Rust @contract → types/core-contracts.d.ts 不过期
 npm run test:rust-agent-loop-smoke        # 改 agent/ 必跑
 npm run test:rust-planner-smoke           # 改 planner/ 必跑
 npm run test:local-gateway-smoke          # 改 rpc/ 或 gateway 交互必跑
@@ -413,13 +419,13 @@ npm run test:local-gateway-smoke          # 改 rpc/ 或 gateway 交互必跑
 |---|---|---|
 | [`audit/2026-11-rust-core/agent.md`](audit/2026-11-rust-core/agent.md) | driver / loop_run / llm | 11 |
 | [`audit/2026-11-rust-core/memory.md`](audit/2026-11-rust-core/memory.md) | memory 全模块 | 10 |
-| [`audit/2026-11-rust-core/rpc.md`](audit/2026-11-rust-core/rpc.md) | rpc 分派 / 事件 / stdio | 9 |
+| [`audit/2026-11-rust-core/rpc.md`](audit/2026-11-rust-core/rpc.md) | rpc 分派 / 事件 / stdio | 收尾进度页（F2 已修，F3–F9 仍开） |
 | [`audit/2026-11-rust-core/index.md`](audit/2026-11-rust-core/index.md) | index / fts / codebase_db | 11 |
 | [`audit/2026-11-rust-core/graph.md`](audit/2026-11-rust-core/graph.md) | graph / treesitter | 11 |
-| [`audit/2026-11-rust-core/runtime.md`](audit/2026-11-rust-core/runtime.md) | compaction / embedding / config / sqlite / main | 11 |
-| [`audit/2026-11-rust-core/planner.md`](audit/2026-11-rust-core/planner.md) | planner | 11 |
+| [`audit/2026-11-rust-core/runtime.md`](audit/2026-11-rust-core/runtime.md) | compaction / embedding / config / sqlite / main | 收尾进度页（F2/F3/F11 已修，F4–F7、F10 仍开） |
+| [`audit/2026-11-rust-core/planner.md`](audit/2026-11-rust-core/planner.md) | planner | 收尾进度页（F3 已修，F4–F11 仍开） |
 
-每条含：类型 / 严重度 / `文件:行` / 代码原文证据 / 触发条件 / 修法方向 / 怎么确认 / 置信度。
+前四份每条含：类型 / 严重度 / `文件:行` / 代码原文证据 / 触发条件 / 修法方向 / 怎么确认 / 置信度；后三份只有一页进度记录。
 
 ### 9.2 与其他文档的分工
 
@@ -806,3 +812,317 @@ AGENTS.md 原则 2 说的「同一份知识有第二份实现」，而且它只�
   量纲问题与这里同形 —— 但它走的是 PostgreSQL 上的另一条召回 SQL，得先看那边的打分再动；
 - `injectScore` 是「分支内相对强度」，跨分支的**绝对**可比（例如「语义 0.5 与关键词 0.9 谁更可信」）
   仍然没有统一口径 —— 统一它需要一份标定数据，不是纯代码问题。
+
+---
+
+## 15. CI 缺一套 feature（2026-11-19 复核 · 已修）
+
+### 15.1 缺陷：CI 的 Rust 测试步骤从 2026-11-18 起编译不过
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `cargo test --workspace --no-default-features`（`ci.yml` 的 Rust 测试步骤）→ `error: could not compile 'dieyun-base' (lib test) due to 6 previous errors`：`E0425 cannot find type 'OnceLock'` ×2、`E0425 cannot find function 'ensure_runtime_cached'` ×4 |
+| 位置 | `crates/dieyun-base/src/embedding/local.rs` 的 `mod tests`：用例 `runtime_failure_is_not_cached_but_success_is` 引用了只在 `feature = "local-embed"` 下存在的测试缝（`imp::ensure_runtime_cached` + `std::sync::OnceLock`） |
+| 引入 | `5048f36`（P0 止血 · A12 的验收用例，2026-11-18） |
+| **为什么没人发现** | **两侧闸门用的 feature 集合从未碰面**：CI 只跑 `--no-default-features`，文档 / 本地只跑默认特性（`cargo test --workspace --lib`）。而且 CI 的 clippy **不带 `--all-targets`** —— 测试目标根本不参与检查。反向也行得通：`local-embed` 的**生产代码**（`ort` 那条链）从没在 CI 里被 type-check 过 |
+
+这不是「一行写错」，是**闸门定义不完整**：把 feature 组合当成实现细节，于是「两套 feature 各自的测试代码」成了没人编译的第三片区域。
+
+### 15.2 修法（只补闸门与 lint，零语义改动）
+
+1. **`local.rs`**：那条用例加 `#[cfg(feature = "local-embed")]`（测试缝本身只在有 feature 时存在）。同模块另外 4 条**两套都跑** —— `compiled_flag_matches_feature` / `probe_without_model_dir_explains_why` 正好钉住「没有 feature 时也必须说人话」，所以不是整块 `mod tests` 挂 cfg。
+2. **`ci.yml`**：Rust 步骤 2 条 → **4 条**（`test` ×2 + `clippy --all-targets` ×2），`timeout-minutes` 45 → 60（默认特性那套要编 `ort` / `tokenizers`）。
+3. **清掉 `--all-targets` 下暴露的 16 条测试侧 lint**（此前没人看见）：
+
+| 位置 | lint | 改法 |
+|---|---|---|
+| `embedding/local.rs:603` | `cloned_ref_to_slice_refs` | `&[query.clone()]` → `std::slice::from_ref(&query)` |
+| `embedding/remote.rs:268,269` | `assertions_on_constants` ×2 | 改**编译期断言** `const _: () = assert!(..)`（改坏常量现在编不过） |
+| `obs.rs:261` | `unit_arg` | `assert!(usage(..).eq(&()))` → 直接调用（形状已由上一行钉住） |
+| `memory/tests.rs:538` | `len_zero`（`>= 1`） | `!…is_empty()` |
+| `index/search_tests.rs:480` | `unnecessary_to` | `&vec.to_vec()` → `vec.as_slice()` |
+| `index/tests.rs` ×7（63/307/315/325/435/507/569） | `field_reassign_with_default` | `EmbeddingConfig::default()` + 逐字段赋值 → 结构体字面量 + `..Default::default()` |
+| `rpc/registry.rs:266` | `assertions_on_constants` | 改编译期断言（同 §2） |
+| `rpc/stdio.rs:264` | `err().expect()` | → `expect_err(..)` |
+| `rpc/tests.rs:137` | `len_zero`（`> 0`） | `!…is_empty()` |
+
+> 顺带修掉一处会误导人的文档：§6 的「统一验收」块还写着 `cargo test -p dieyun-core --lib`（拆 crate 之后这条**只跑 0 个用例**，§11.4 早就警告过）。已改成两套 feature 的 `--workspace` 命令，并把四条命令与 CI 对齐。
+
+### 15.3 验收（实测）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --workspace --lib`（默认特性） | **339 通过 / 0 失败** |
+| `cargo test --workspace --lib --no-default-features` | **338 通过 / 0 失败**（少的那一条正是需要 `local-embed` 的用例） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 错误 |
+| `cargo clippy --workspace --no-default-features --all-targets -- -D warnings` | 0 错误 |
+| `npm run verify:rpc-catalog` / `verify:core-contracts` / `check:shared-constants` | 全 OK |
+
+### 15.4 纪律（下一轮别复发）
+
+**「这个配置 CI 跑不跑」要和「这个代码编不编」一一对上**：本仓的两套 feature 是**两个真实产品形态**（桌面 sidecar 带本地推理 / 远端 Linux 包不带 ORT），不是可选优化 —— 任何一侧的测试代码、lint、type-check 都得两侧各跑一次。同理，`cargo clippy` 不带 `--all-targets` 等于「只检查生产代码」，加测试用例时不会有人替你发现它编不过。
+
+---
+
+## 16. 2026-11-19 收尾：四处减法（工作区键 / 死字段 / 死返回值 / 化石变量）
+
+### 16.1 做了什么
+
+| # | 项 | 之前 | 现在 |
+|---|---|---|---|
+| 1 | **工作区键派生** | 同一规则两份实现：`dieyun-base/src/config.rs` 的 `hex16` + `hash_workspace_root`，与 `dieyun-codebase/src/index/workspace.rs` 的 `hex16` + `hash_workspace_key_str`（都是 `sha256(输入)` 取前 8 字节 → 16 hex） | 唯一来源 `dieyun_base::config::workspace_key_hash(&str)`；`hash_workspace_root(&Path)` 只是它的薄包装；远端键（`ssh://…`）直接调它。**失败形状**：一边改了截断长度或加 salt，索引键与记忆键就静默错位（查不到东西、不报错） |
+| 2 | **`RunState.workspace_root`** | 只在 `ledger.rs` 写入一次、没有任何读取点，靠 `#[allow(dead_code)]` 压住 | 删字段与赋值。`StartParams.workspace_root` **保留**（宿主真在发，是 `@contract` 字段）并在字段上写明「循环不读它」—— 否则下一个人会以为内核按它切工作区 |
+| 3 | **`graph::BuildStats`** | 建库结束返回一份 `{file_count, edge_count, symbol_count, call_count}`，两个调用点都 `.map(|_| ())` 直接丢掉；靠 `#[allow(dead_code)]` 压住 | 删结构体；`run_build_with_progress` 返回 `Result<(), CoreError>`。计数本来就在同一次 `UPDATE graph_workspaces` 里落库，库是唯一读侧 |
+| 4 | **`index/build.rs` 的 `let _ = workspace_key;`** | 第 49 行声明、第 138 行只为消 unused 警告而「用」一次 | 连变量带这行一起删 |
+
+### 16.2 一处更正（诚实账）
+
+上一轮复核说「4 个 `#[allow(dead_code)]` 里 3 个是失效残留」—— 逐条核对后**只有 1 个**是残留（`RunState.workspace_root`）。另外两个是**故意**的编译期断言守卫，不该删：
+
+| 位置 | 它是干什么的 |
+|---|---|
+| `rpc/mod.rs:27 _assert_app_state_is_send_sync` | `AppState` 必须 `Send + Sync`，否则 RPC 无法多线程 spawn（裸 `Connection` 混进来时立刻编不过） |
+| `rpc/mod.rs:83 _assert_snapshot_is_send_static` | `ServiceSnapshot` 必须能整体移进阻塞池 |
+
+「函数只为类型检查而存在」时带 `#[allow(dead_code)]` 是正确写法；删掉它们等于拆掉一条编译期护栏。所以本批**只清 1 个 allow**，另外 2 个保留并在 §15.4 之后的新纪律里写明判据：**「没有调用点」不等于「没有作用」**。
+
+### 16.3 验收与契约影响
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace --lib` / `--no-default-features` | 339 / 338 全绿（条数不变，行为零改动） |
+| `cargo clippy --workspace [--no-default-features] --all-targets -- -D warnings` | 两套 0 错误 |
+| `types/core-contracts.d.ts` | 只多 1 行字段文档（`StartParams.workspaceRoot` 的说明），`verify:core-contracts` / `check:js` 通过 |
+| `verify:rpc-catalog` / `check:shared-constants` / `check:contracts` | 全 OK |
+| 残留 | `fn hex16` 只剩 base 一处；`#[allow(dead_code)]` 2 处（都是故意断言）；`>100 行`生产函数仍 **18 个** —— 那是下一批（拆 `run_index` / `continue_llm` / `status_with_conn`）的事 |
+
+---
+
+## 17. 2026-11-19 第二批：三个巨型函数拆开（纯移动）
+
+### 17.1 拆法
+
+没有引入任何新机制、没有改一个判断：每个函数按**它本来就在做的阶段**切开，切出来的都是同文件内的
+私有方法或模块级纯函数，签名带注释写明「为什么是这个边界」。
+
+| 函数 | 之前 | 现在 | 切出来的阶段 |
+|---|---|---|---|
+| `index::build::run_index` | **356** | **88** | `mark_indexing`(登记在跑) → `collect_scope`(扫文件+增量基线 30) → `vector_plan`(向量口径 30) → `chunk_pass`(逐文件切块 141) → `prepare_embed`(缓存命中+待办 78) / `store_embed`(落库 19) → `write_meta`(元数据+重建池 50) |
+| `loop_run::ledger::continue_llm` | **264** | **111** | `stop_at_round_limit`(出口一 37) / `stop_at_tool_limit`(出口二 29)、`RoundText::of`(正文/思考/可见性口径)、`assistant_tool_call_message`(24)、`absorb_tool_batch`(整批入参校验+回执 50)、`truncated_tool_results`(12)、`delegates_from_pending`(11) |
+| `index::status::status_with_conn` | **205** | **64** | `load_status_row`(读一行)、`empty_status`(没建过索引 30)、`reconcile_counts`(只读核对+维修建议 126) |
+
+顺带消掉一处重复表达式：`chunk_pass` 里「首个 / 每 8 个 / 最后一个才报进度」的条件原本**写了两遍**，
+现在只有 `progress_due(done, total)` 一处。
+
+### 17.2 拆的过程中撞到的一个真陷阱（值得记住）
+
+`run_index` 原来是**一个** async fn：`conn`（拥有的 `Connection`）跨 await 没问题，因为 `Connection: Send`。
+把它按阶段拆开时，我把「算缓存命中 + 真调端点」整体挪进了一个 `async fn embed_missing(conn: &Connection, ..)`，
+于是 `&Connection` 活过了 await 点 —— `Connection` 不是 `Sync`，`&Connection` 不是 `Send`，整条 future 变成
+`!Send`，`index_workspace` 的调用方在 tokio 上直接编不过：
+
+```
+error: future cannot be sent between threads safely
+note: required because it's used within this async fn body  --> index/build.rs:248 (index_workspace)
+```
+
+修法不是加 `Box::pin` 或 `spawn_blocking`，而是**把 async 边界挪到正确的位置**：
+`prepare_embed`（同步，算该算哪些）→ `run_index` 里那一处 `.await`（只借 `&self.embedding` 与已算好的文本）→
+`store_embed`（同步，落库）。**判据**：任何拿 `&Connection` / `MutexGuard` 的函数都不许是 async。
+
+### 17.3 验收
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace --lib` / `--no-default-features` | **339 / 338 全绿**（条数一条没变 = 行为零改动；含 96 条 ledger / 104 条 index 用例） |
+| `cargo clippy --workspace [--no-default-features] --all-targets -- -D warnings` | 两套 0 错误 |
+| `verify:rpc-catalog` / `verify:core-contracts` / `check:shared-constants` / `check:contracts` | 全 OK（没有 `@contract` 类型变化） |
+
+### 17.4 诚实结论：`>100 行` 的个数没降（18 → 18），但形状变了
+
+| 区间 | 之前 | 现在 |
+|---|---|---|
+| `>200` | 4 | **1**（只剩 `memory::schema::init_schema` **300** 行 —— 它是列清单 + 触发器 SQL，数据不是逻辑） |
+| `150–200` | 4 | 4（`build_response` 198 / `run_build_with_progress` 192 / `repo_map` 152 / `save_agent_trace` 151 / `drive` 150 中的四个） |
+| `100–150` | 10 | **13**（新增的三个正是 `chunk_pass` 141 / `reconcile_counts` 126 / `continue_llm` 111） |
+
+也就是说：**三个最大的洞被填掉了（最大 356 → 300），但它们的碎片仍各自落在 100–150 区间**。
+这不是失败，是「按阶段切」的必然结果 —— 下一步要再降，得切**循环体内部**（`chunk_pass` 的「处理一个文件」
+可以独立成 `index_one_file`）或**核对块内部**（`reconcile_counts` 的「探针 / 重数 / 出维修建议」三段），
+那已经接近「重写这段逻辑」而不只是搬家，风险与收益要重新称一次。这也是本批停在这里的理由。
+
+---
+
+## 18. 2026-11-19 第三批：把 §17.4 点名的两处「循环体内部」也切了
+
+### 18.1 做了什么
+
+| 函数 | 之前 | 现在 | 切出来的东西 |
+|---|---|---|---|
+| `index::build::chunk_pass` | **141** | **79** | 单个文件的全部判断 → `index_one_file`(**64**) + `FileOutcome` 枚举 |
+| `index::status::reconcile_counts` | **126** | **101** | 两个 `EXISTS` 探针 → `probe_db` + `DbProbe`（30 行） |
+
+顺带合并了一处重复：`chunk_pass` 里「mtime 没变」分支与「建完 chunk」分支**各写了一遍**完全相同的
+进度上报（条件、参数逐字相同），且都夹在 `file_count += 1` 之后 —— 现在统一成
+「`file_count += 1` → `if progress_due(..)` 一处」。这是**行为等价**的合并（同一位置、同一条件），
+不是「顺手改逻辑」。
+
+### 18.2 `index_one_file` 的契约（为什么这么切）
+
+- **事务边界不在它手里**：分批提交（`CHUNK_COMMIT_EVERY`）留在 `chunk_pass`，它只吃 `&Transaction`；
+  否则「一批多大」这件事会散进单文件处理里。
+- **三种去向用枚举显式写出**：`Indexed` / `Unchanged` / `Skipped`。以前这三种是三条 `continue`，
+  「这个文件到底算不算这一轮的账」只能靠读 `file_count += 1` 出现在哪几个分支里才知道。
+- 「暂时读不到」与「永久不可索引」**回执相同（`Skipped`）**，差别只在要不要清旧 chunk ——
+  这条差异以前埋在 `continue` 之前三行，现在写在函数体注释与分支注释里。
+- 参数 6 个、无新增全局状态、无新增配置项。
+
+### 18.3 数字
+
+| 区间 | §17 之后 | 现在 |
+|---|---|---|
+| `>200` | 1 | 1（`init_schema` 300 —— 列清单 + 触发器 SQL，数据不是逻辑） |
+| `150–200` | 4 | 4 |
+| `100–150` | 13 | 12 |
+| **合计 `>100`** | 18 | **17** |
+
+本批三个原目标现在是：`run_index` **356 → 88**、`continue_llm` **264 → 111**、`status_with_conn` **205 → 64**；
+`chunk_pass` **141 → 79**、`index_one_file` 64、`reconcile_counts` **126 → 101**。
+
+> `reconcile_counts` 停在 101（差一行）是**故意的**：再切只能切出「三行的小函数」，
+> 那是为指标而指标，不是为可读性。
+
+### 18.4 验收
+
+`cargo test --workspace --lib` **339** / `--no-default-features` **338** 全绿（条数一条没变）·
+`cargo clippy --workspace [--no-default-features] --all-targets -- -D warnings` 两套 0 错误 ·
+`verify:rpc-catalog` / `verify:core-contracts` / `check:shared-constants` / `check:contracts` / `check:js` 全 OK · `npm test` OK。
+
+### 18.5 仍 `>100` 的 12 个（都是本轮之前就有的，本批没动）
+
+`build_response` 198 · `run_build_with_progress` 192 · `repo_map` 152 · `save_agent_trace` 151 ·
+`drive` 150 · `graph::start_index_workspace` 141 · `index::start_index_workspace` 138 · `chat_completion` 134 ·
+`search` 122 · `serve_stdio` 121 · `save_agent_steps` 115 · `planner::start` 109 · `search_messages` 104 ·
+`graph::index_file` 103 —— 这些的「该不该切」需要各自判断（有的是守卫序列、有的是 SQL 拼装、
+有的是流程编排），不再有「一个函数在做五件不相干的事」那种明显信号。要降它们，应当按**各自模块的
+下一张工单**推进，而不是继续做搬家。
+
+---
+
+## 19. 2026-11-19 第四批：两条跨语言契约债的收口
+
+两条都是 `docs/ARCHITECTURE-DEBT.md` 里标着「需决策」的项 —— 本批先**改正诊断**，再决定动不动代码。
+
+### 19.1 `injectScore`：诊断错了，真问题在关键词分支
+
+| | |
+|---|---|
+| 原诊断 | 「语义用余弦、关键词用相对最佳，两个量纲却被同一个阈值卡」→ 结论是需要标定数据，纯代码无解 |
+| **更正** | 「跨分支可比」**不是需求**：`memory.long_recall` 每次只返回**一个** mode（semantic / keyword / recent / none），两条分支的结果从不进同一个列表、也不互相排序。真正的问题在关键词分支自己：只有相对量 → **top 命中恒为 1.0**，于是任何命中都等于满分 |
+| 后果（可感知） | 一条只蹭到一个常见词的长句，每轮都被注入；而 +它把整个通道的过滤能力弄没了 |
+| 已实施 | `crates/dieyun-base/src/fts.rs`：`query_terms` / `term_coverage`（与 `match_query` 共用切分规则与 `MAX_TERMS`，别处不许再切一遍）；`memory/recall.rs`：`keyword_inject_score = 覆盖度 × 相对强度`。片段之间是 **OR**（见 `fts.rs` 文件头第 3 条），所以「有命中 ≠ 对上了」，覆盖度是这条链路上唯一与语料无关的绝对量 |
+| 用例 | `keyword_inject_score_is_coverage_times_relative`（纯函数）、`term_coverage_counts_matched_fragments` / `term_coverage_is_case_insensitive_and_capped`（切分与大小写）、`keyword_inject_score_discounts_partial_term_coverage`（端到端：两个片段只命中一个 → ≤0.5） |
+| 不动 | 宿主阈值仍是 `agent-limits.memoryInjectMinScore = 0.32`（一个数）；语义分支不变（余弦本来就是绝对的） |
+| 仍然没有 | 「余弦 0.9 与关键词 1.0 谁更可信」的答案 —— 但**现在没人需要回答**（单 mode）。真要把两分支合并排序时才需要标定数据 |
+
+### 19.2 请求快照：不搬装配，把差异钉住
+
+| | |
+|---|---|
+| 原诊断 | 快照取自 `round.prepare` 的宿主副本，而出站投影发生在**之后** → 快照与实发差一个 `reasoning_content` |
+| **决定** | **不搬装配、不加事件通道、不加列**。理由：① 要 core 把投影后的 body 交回宿主，等于每轮多搬一份完整 body；② 把 `buildRequestSnapshotPayload` 搬进 core 会把 session / limits / contextAudit 三处宿主专属事实一起拖过去（另一张工单），且它有 schema 与测试 |
+| 改成什么 | 把差异变成**被钉住的清单**：`outbound.rs` 用例 `projection_touches_only_the_documented_fields` 求投影前后被改动的路径集合，断言恰好是 `messages[].synthetic` / `messages[].reasoning` / `messages[].reasoning_content` / `tools`（空数组整键删）/ `stream` / `stream_options`，并断言 `content` 一字未动。**加任何新改写就红** |
+| 文档 | `docs/REQUEST-SNAPSHOT.md` §7「快照 vs 真正发出去的那一份」：五项逐条列出，并写明结论 —— **快照里的信息 ⊇ 模型看到的**，唯一的内容级差异是同值换名（`reasoning` → `reasoning_content`）+ 缺值补占位串 |
+| 残留 | 需要「快照 = 实发字节」（逐字节 replay）的场合仍然没有；那得连装配一起搬，属 Node 变薄那条线 |
+
+### 19.3 验收
+
+`cargo test --workspace --lib` **342**（82 base / 104 codebase / 60 memory / 97 runtime；
+新增 3 条：两条 `fts` 切分与覆盖度、一条 memory 端到端）· `--no-default-features` **341** 全绿 ·
+`cargo clippy --workspace [--no-default-features] --all-targets -- -D warnings` 两套 0 错误 ·
+`verify:rpc-catalog` / `verify:core-contracts` / `check:shared-constants` / `check:contracts` / `check:js` 全 OK · `npm test` OK。
+
+---
+
+## 20. 2026-11-19 第五批：共享记忆的第三处量纲债（§19 的同形）
+
+`docs/ARCHITECTURE-DEBT.md` §11 是 §10 的同形债，只是换了一套数据源（跨机 PostgreSQL）。本批先按它自己
+写好的判据走：「先看 `memory-shared/service.js` 的打分能否给 `injectScore`」。
+
+### 20.1 能做的一半：给 `injectScore`（统一字段名与口径）
+
+`service.js` 的召回行现在同时带 `score`（排序量纲）与 **`injectScore ∈ [0,1]`**（该不该注入），
+与本地长期记忆**同名同义**；宿主 `fetchSharedMemoryBlock` 只读 `injectScore`。
+
+| 分支 | `injectScore` 怎么来 | 有没有天花板 |
+|---|---|---|
+| 向量行 | `clamp(1 − 余弦距离)` | 无（余弦本身绝对、跨查询可比） |
+| trigram 行 | `pg_trgm similarity()` | **有**：量的是 `\|A∩B\|/\|A∪B\|` 的特例，天花板随「查询/条目」长度比下降 |
+
+用例：`判定只看 injectScore：score 再高、injectScore 不够也不注入`（把「两个字段各有各的读法」这条路堵死）。
+
+### 20.2 不能做的一半：合并成一个阈值（有结构原因，不是懒）
+
+本地那边能收成一个数（0.32），是因为①两条分支**从不进同一批**（`long_recall` 单 mode）；②关键词强度
+已经做成与语料无关（片段覆盖度 × 相对命中）。共享记忆恰恰相反：**同一批里混着两种相似度**，而 trigram
+的数值天花板天生比余弦低一个量级 —— 并成 0.32 会让「没向量时的文本兜底」整段失效，
+直接推翻 `COALESCE` 的设计前提。所以保留 0.32 / 0.12 两个数，把「为什么这里与本地不同」写进
+`docs/SHARED-MEMORY.md` §4，而不是硬凑一个数。
+
+### 20.3 仍未做（不是债）
+
+给 trigram 通道也造「与长度无关」的绝对强度 = 在 Node 侧把查询切成片段算覆盖度再下传
+（与 `fts::term_coverage` 同形）。PG 侧没有等价的分词器（中文只能靠 trigram），这属于另一张工单。
+
+### 20.4 验收
+
+`npx vitest run test/unit/shared-memory.test.cjs` 22 条（+1 新用例）通过 · `check:js` 0 错误 ·
+Rust 侧未改动（本批只动 `src/memory-shared/service.js`、`src/agent/system-prompt-prep.js` 与其单测 + 文档）。
+
+---
+
+## 21. 2026-11-19 第六批：请求快照大字段内容寻址去重
+
+### 21.1 依据（先量再动）
+
+只读探针看线上记忆库（`%APPDATA%/dieyunagent/diecloud-memory.sqlite`）：
+
+| 表 | 占用 | 关键事实 |
+|---|---|---|
+| `request_snapshots` | **413 MB / 626 MB（66%）** | 1500 行 / 45 会话 |
+| └ `tools_json` | 88.6 MB | **只有 82 种内容**（同一份 schema 拷了 1500 次） |
+| └ `system_text` | 6.8 MB | 只有 65 种内容 |
+| └ `messages_json` | 198 MB | 每轮都不同，**这是它的本职** |
+
+### 21.2 做了什么
+
+新表 `snapshot_blobs(hash → text)`（内容寻址）；行的 `system_text` / `tools_json` 写 NULL，靠
+`system_hash` / `tools_hash` 回查。**没有**回到「与上一行相同就写 NULL」那条被否掉的路 ——
+那套的问题（NULL 二义 / 游标跨并发 / 丢确定性）内容寻址一条都不碰：
+`hash 有 + blob 有 = 去重`，`hash 有 + blob 无 = 超上限没落库`。
+
+| 面 | 落点 |
+|---|---|
+| schema | `memory/schema.rs`：`CREATE TABLE IF NOT EXISTS snapshot_blobs`（在同一个 batch 里，老库自动补） |
+| 写 | `snapshot.rs::stash_blob`（`INSERT OR IGNORE`，同 hash 只留一份） |
+| 读 | `get_request_snapshot` 改成 `LEFT JOIN snapshot_blobs` + `COALESCE`，**调用方看到的仍是全文** |
+| 清理 | `prune_request_snapshots` 删完行清**孤立 hash**（不然省下的体积会以另一种形状还回去） |
+| 迁移 | `backfill_snapshot_blobs`（每拍 400 行）挂在**修剪线程**已有节拍上 —— 不在启动路径上搬几十 MB 卡首屏；读侧两种形状都认 |
+| 用例 | `dedupes_system_and_tools_by_hash` / `over_cap_text_is_not_faked_back` / `prune_drops_orphan_blobs` / `backfill_moves_legacy_inline_text_into_blobs` |
+
+### 21.3 实测收益
+
+在**库副本**上跑同一套 SQL + `VACUUM`：**626.4 MB → 461.7 MB（−164.6 MB / −26.3%）**；
+去重后正文只剩 **5.4 MB（148 个 blob）**；抽查最新一行：`system 4301 字符 / tools 66818 字符` 都按 hash 拼回。
+
+### 21.4 决定不做的那一半
+
+`messages_json`（198 MB）**不去重、不压缩、不存 diff**：它是每轮都不同的真实内容，差分/回放会让读侧
+需要一条「还原链」，与「旁路事实、不参与 replay」的定位直接冲突。要再降只有压
+`requestSnapshotKeepPerSession`（一行配置）。
+
+### 21.5 验收
+
+`cargo test --workspace --lib` **346**（82 / 104 / 64 / 97，本批 +4）· `--no-default-features` **345** ·
+`cargo clippy --workspace [--no-default-features] --all-targets -- -D warnings` 两套 0 错误 ·
+`npm test` / `check:js` / `check:contracts` / `verify:rpc-catalog` / `verify:core-contracts` / `check:shared-constants` 全 OK。

@@ -2,12 +2,12 @@
 
 > 勿手改。更新 RPC 注册后运行 `npm run generate:rpc-catalog`，CI 用 `npm run verify:rpc-catalog` 校验。
 
-生成时间：2026-11-18T05:40:00.044Z
+生成时间：2026-11-25T02:26:36.992Z
 
 | 统计 | 数量 |
 |------|------|
-| 总计 | 193 |
-| Gateway only | 107 |
+| 总计 | 191 |
+| Gateway only | 105 |
 | Rust only | 25 |
 | Both | 61 |
 
@@ -292,19 +292,17 @@
 | `speech.transcribe` | gateway | gateway/handlers/speech.js | — |
 | `speech.transcribe_probe` | gateway | gateway/handlers/speech.js | — |
 
-### undo (11)
+### undo (9)
 
 | Method | Layer | Gateway source | Rust |
 |--------|-------|----------------|------|
 | `undo.can_rollback` | gateway | gateway/handlers/undo.js | — |
 | `undo.capture_batch` | gateway | gateway/handlers/undo.js | — |
 | `undo.capture_plan_apply` | gateway | gateway/handlers/undo.js | — |
-| `undo.mark_worktree_only` | gateway | gateway/handlers/undo.js | — |
 | `undo.rollback` | gateway | gateway/handlers/undo.js | — |
 | `undo.rollback_batch` | gateway | gateway/handlers/undo.js | — |
 | `undo.rollback_commit` | gateway | gateway/handlers/undo.js | — |
 | `undo.session_clear` | gateway | gateway/handlers/undo.js | — |
-| `undo.stack_get` | gateway | gateway/handlers/undo.js | — |
 | `undo.turn_begin` | gateway | gateway/handlers/undo.js | — |
 | `undo.turn_finalize` | gateway | gateway/handlers/undo.js | — |
 

@@ -23,9 +23,10 @@
 | 文件 | 职责 |
 |------|------|
 | `src/channels/store.js` | 频道配置与凭据（`<userData>/channels.json`，Secret 走 safeStorage 密文、文件 0600）；会话映射（企微联系人 → Agent 会话） |
-| `src/channels/wecom-client.js` | 企微长连接：订阅、25s 心跳、3s 重连、帧编解码（`frames` 是协议唯一来源）、流式回写、主动推送、一次性连通性自检 `probeWecomCredentials` |
+| `src/channels/wecom-client.js` | 企微长连接：订阅、25s 心跳、3s 重连、帧编解码（`frames` 是协议唯一来源）、入站消息归一（含每条 url 的 `aeskey`）、流式回写、主动推送、一次性连通性自检 `probeWecomCredentials` |
 | `src/channels/runtime.js` | 调度：每条频道一条连接、同会话串行（忙即回「上一条还在处理」）、流式节流（企微限 30 条/分钟）、900s 超时中止、`SESSION_NOT_FOUND` 时重建映射 |
-| `src/channels/agent-turn.js` | **在 Main 跑一轮**：会话解析与工作空间绑定、附件、system prompt、工具、Rust 循环、消息落库、记忆归纳 |
+| `src/channels/wecom-media.js` | 多媒体解密唯一来源：`aeskey` 形状（32 字符 / 43~44 base64 / URL 编码）→ AES-256-CBC 解密（IV = 密钥前 16 字节，填充按企微的 32 字节对齐剥）→ 魔数判型 |
+| `src/channels/agent-turn.js` | **在 Main 跑一轮**：会话解析与工作空间绑定、附件下载 / 解密 / 落盘、system prompt、工具、Rust 循环、消息落库、记忆归纳 |
 | `src/channels/workspace-switch.js` | 微信里「换项目」的唯一实现：候选校验 → `bindSessionWorkspace` → 记住这条会话的选择（工具 `session_set_workspace`） |
 | `src/channels/boot.js` | 装配（照 `plans/boot` 的形状），窗口就绪后 `startEnabled()` |
 | `src/main/ipc/channels.js` | IPC：增删改查、启停、测试连接、测试推送（选目录复用既有 `dialog:pick-folder`，不再另开通道） |
@@ -47,9 +48,15 @@
 
 频道会话写的是**同一份账本**，所以桌面的「历史对话」里能看到 `[企业微信] 名称`（落在频道指定的
 工作空间分组下），点开可以读整条对话。为这件事只加了一条通知：新会话建成与轮末各广播一次
-`channels:sessions-changed`（`main-entry.js:broadcastToRenderers`），Renderer 收到只刷列表
-（`renderer-chat-history.js`，与 `agent:session-title` 同一做法），**不切换当前会话** ——
+`channels:sessions-changed`（`main-entry.js:broadcastToRenderers`），payload 带 `sessionId`；
+Renderer 侧的处理统一在 `renderer-chat-history.js#refreshSessionAfterBackgroundTurn` ——
+作废该会话消息缓存 + 刷列表；**若正开着那条会话**且没有别的轮在跑，就地重读一次
+（与生命感心跳 `alive:ran` 共用这一份，两边语义完全一样）。**不切换当前会话** ——
 否则就退回到「外部消息抢桌面焦点」的老问题。
+
+> 为什么必须连消息一起刷：频道轮在 Main 里跑、不推流，消息只落进账本。只刷列表的话，
+> 用户正开着那条会话时界面一动不动，切走再切回才看得见 —— 现象就是「企业微信那边答完了、
+> 这边还没刷出来」（2026-11-18 用户报的就是这个）。
 
 ## 在微信里换项目（工作空间）
 
@@ -93,9 +100,22 @@
 
 ## 附件与推送的边界
 
-- **图片**：下载 → 当轮多模态 part（`image_url` data URL）→ 同时 `storeVisionImage` 落一份只读副本，
-  账本里留 `[图片] <路径>`，后续轮可引用。
-- **文件**：下载到 `<userData>/channels-inbox/<channelId>/`，账本里留 `[附件] <路径>`，Agent 用普通文件工具读。
+- **多媒体一律是密文**：长连接回调里 `image.url` / `file.url` 下载到的**不是文件**，而是
+  AES-256-CBC 密文，密钥是这条消息自带的 `aeskey`（每条 url 一把，url 五分钟有效）。
+  解密在 `wecom-media.js#decryptMedia`，调用点只有 `agent-turn.js#prepareAttachments` 一处
+  （顺序：下载 → 解密 → 判型落盘）。**不解密的后果**：`tool-output/vision/d0/<sha256>.jpg`
+  会是一段高熵字节（2026-11-18 现场：371,936 字节 = 32×11,623，熵 7.9995，头 `ef 73 89 d8 …`），
+  视觉通道看不到、文件工具也读不出内容。
+  - 填充：企微把明文补齐到 **32 字节的倍数**，末字节的填充长度可能 >16，所以用
+    `setAutoPadding(false)` 自己校验——直接交给 Node 的 `autoPadding` 会在 PC 端截图上稳定报 `bad decrypt`；
+  - `aeskey` 形状：可能是 32 字符（文档「32 字节直接使用」），也可能是 43/44 字符 base64，
+    还可能被 URL 编码（`%2F` / `%3D`）：三种都在 `decodeMediaKey` 归一；
+  - 判型：解密后按**魔数**认（`ff d8 ff` / `89 50 4e 47` …），不信 CDN 的 `content-type`
+    （企微对象存储常给 `application/octet-stream`）；认不出就不进视觉通道、也不落假副本。
+- **图片**：解密 → 当轮多模态 part（`image_url` data URL）→ 同时 `storeVisionImage` 落一份只读副本，
+  账本里留 `[图片] <路径>`，后续轮可引用。解密失败 / 不是图片时账本留一行说明（`[附件] 解密失败…` /
+  `[图片] 解密后不是可识别的图片…`），**不静默塞一段乱码**。
+- **文件**：解密后落到 `<userData>/channels-inbox/<channelId>/`，账本里留 `[附件] <路径>`，Agent 用普通文件工具读。
   收件箱是**缓存**：只保留最近 7 天（`pruneInboxDir`），否则群里每天发文件会把磁盘吃到用户自己都不认识。
 - **语音**：用企微给的识别文本（`body.voice.content`）当作用户输入。
 - **出网**：附件 URL 来自回调体（群里人人可控），一律先过 `gateway/web/url-safety.js` 的 SSRF 校验，
