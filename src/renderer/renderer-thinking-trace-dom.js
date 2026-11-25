@@ -708,7 +708,29 @@ function appendInlineToolDiff(parent, tool, { roundComplete = false } = {}) {
 
   const body = document.createElement('div');
   body.className = 'msg-tool-inline-diff-body agent-scroll';
-  body.innerHTML = buildThinkingInlineDiffHtml(diff);
+  /*
+   * diff 正文**惰性生成**：整轮结束后这条 `<details>` 是收起的（只有运行中且
+   * `tracePrefs.expandEdit` 时才 `open`），而一屏 32 轮里可能有几十个 edit 行。
+   * 以前不管开合都预先 `buildThinkingInlineDiffHtml` + `innerHTML` 一遍 —— 那是
+   * LCS + 整段红绿的 DOM，正是单条 trace 里最大的一块（diff 全文 0.9–1.5MB），
+   * 收起时一个字都看不见。现在只在真正展开那一下生成一次。
+   */
+  let diffBodyPending = true;
+  const fillDiffBody = () => {
+    if (!diffBodyPending) return;
+    diffBodyPending = false;
+    body.innerHTML = buildThinkingInlineDiffHtml(diff);
+  };
+  if (details.open) fillDiffBody();
+  else {
+    details.addEventListener(
+      'toggle',
+      () => {
+        if (details.open) fillDiffBody();
+      },
+      { once: true }
+    );
+  }
   details.appendChild(body);
   parent.appendChild(details);
 }
