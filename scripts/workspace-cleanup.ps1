@@ -1,4 +1,6 @@
-# Workspace cleanup: default = small junk; -Deep = build artifacts (run workspace-backup.ps1 first)
+﻿# Workspace cleanup: default = small junk; -Deep = build artifacts (run workspace-backup.ps1 first)
+# -IncludeLocalData 额外回收 .dieyun 本地数据；其中 agent run 的 worktree 一律先走
+# `git worktree remove` + `prune`、再删目录，并只回收已并入 HEAD 的 `dieyun/agent-*` 分支。
 param(
   [switch]$WhatIf,
   [switch]$Deep,
@@ -51,6 +53,110 @@ if ($IncludeLocalData) {
     '.dieyun/cleanup-backup',
     '.dieyun/attachments'
   )
+}
+
+# —— agent run 的 worktree / 分支回收 ——
+# 为什么不能直接 Remove-Item .dieyun/worktrees：git 在 .git/worktrees/<id> 里存着登记，
+# 目录一删，`git worktree list` 与 `git status` 就留下悬挂项；`dieyun/agent-*` 分支也会
+# 一直累积（2026-11-21 实测：19 份 worktree 473 MB + 171 条 dieyun/agent-run-* 分支，
+# 全是回收只挂在桌面启动路径上、进程被强杀后没人扫的残留）。
+# 顺序固定：worktree remove → worktree prune → 删残留目录（下面 removePaths 里那一条）
+#           → 只删「已并入 HEAD」的分支。
+function Invoke-Git([string[]]$GitArgs) {
+  # 只读探针 + 容错分支（`skip (not a git repo)` / `keep worktree (remove failed)`）依赖
+  # git 失败**不**终止脚本：Windows PowerShell 5.1 下 `2>&1` 会把原生 stderr 变成
+  # ErrorRecord，配合脚本顶部的 `$ErrorActionPreference = 'Stop'` 会抛终止性异常，
+  # 于是任何一次 git 报错都会让清理脚本在半途崩掉。这里局部降级，退出码自己判。
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $out = & git -C $Root @GitArgs 2>&1
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+  return @{ ok = ($code -eq 0); out = (@($out) | ForEach-Object { "$_" }) -join "`n" }
+}
+
+function Clean-AgentRunWorktrees {
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host '  skip (git not found)'
+    return 0
+  }
+  if (-not (Invoke-Git @('rev-parse', '--git-dir')).ok) {
+    Write-Host '  skip (not a git repo)'
+    return 0
+  }
+
+  $rootFull = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\', '/')
+  $rootNorm = $rootFull.Replace('/', '\').ToLowerInvariant()
+  $freed = 0
+
+  # 1) 已登记的 worktree 逐份 remove（--force：目录里还有被 gitignore 的残留文件是常态）
+  # **只动本仓 agent run 的副本**（`<repo>\.dieyun\worktrees\...`）：`git worktree list` 里还有
+  # 开发者自己的 `git worktree add ..\feature-x`，那些不是本脚本的东西，`--force` 删掉就是
+  # 未提交改动直接丢失。语义仍以 `src/git/worktree-service.js#sweepRunArtifacts` 为准。
+  $agentWtRootNorm = ($rootFull.TrimEnd('\', '/') + '\.dieyun\worktrees\').ToLowerInvariant()
+  $listed = Invoke-Git @('worktree', 'list', '--porcelain')
+  $wtPaths = @()
+  foreach ($line in ($listed.out -split "`n")) {
+    $t = $line.Trim()
+    if ($t.StartsWith('worktree ')) { $wtPaths += $t.Substring('worktree '.Length) }
+  }
+  $removedWt = 0
+  foreach ($p in $wtPaths) {
+    $full = $p.Replace('/', '\')
+    $norm = $full.TrimEnd('\', '/').ToLowerInvariant()
+    if ($norm -eq $rootNorm) { continue }  # 主工作区
+    if (-not $norm.StartsWith($agentWtRootNorm)) {
+      Write-Host "  keep worktree (not an agent run copy): $p"
+      continue
+    }
+    $bytes = 0
+    if (Test-Path -LiteralPath $full) {
+      $bytes = (Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+    }
+    if ($WhatIf) {
+      $mb = [math]::Round(($bytes / 1MB), 1)
+      Write-Host "  would remove worktree: $p ($mb MB)"
+      $freed += $bytes
+      $removedWt += 1
+      continue
+    }
+    $r = Invoke-Git @('worktree', 'remove', '--force', $full)
+    if ($r.ok) {
+      $freed += $bytes
+      $removedWt += 1
+      Write-Host "  removed worktree: $p"
+    } else {
+      Write-Host "  keep worktree (remove failed): $p —— 先人工处置该 run 的产出"
+    }
+  }
+  if ($removedWt -eq 0) { Write-Host '  skip (no agent worktree registered)' }
+
+  # 2) 登记表收尾：删掉的目录在 .git/worktrees 里还留着条目
+  if (-not $WhatIf) { [void](Invoke-Git @('worktree', 'prune')) }
+
+  # 3) 分支：只删已并入 HEAD 的；未合并的是还没处置的产出，一律保留并报数
+  $brs = Invoke-Git @('for-each-ref', '--format=%(refname:short)', 'refs/heads/dieyun/agent-*')
+  $names = @()
+  foreach ($line in ($brs.out -split "`n")) {
+    $t = $line.Trim()
+    if ($t) { $names += $t }
+  }
+  $deleted = 0
+  $kept = 0
+  foreach ($name in $names) {
+    if (-not (Invoke-Git @('merge-base', '--is-ancestor', $name, 'HEAD')).ok) {
+      $kept += 1
+      continue
+    }
+    if ($WhatIf) { Write-Host "  would delete merged branch: $name"; $deleted += 1; continue }
+    if ((Invoke-Git @('branch', '-D', $name)).ok) { $deleted += 1 } else { $kept += 1 }
+  }
+  $verb = 'would delete'; if (-not $WhatIf) { $verb = 'deleted' }
+  Write-Host ("  {0} {1} merged agent branches, kept {2} unmerged" -f $verb, $deleted, $kept)
+  return $freed
 }
 
 function Remove-TreeIfExists([string]$rel) {
@@ -147,6 +253,14 @@ if ($IncludeLocalData) { Write-Host 'Mode: include local .dieyun caches' }
 if ($WhatIf) { Write-Host 'Mode: WHAT-IF (no deletes)' }
 
 $total = 0
+
+# worktree 必须先按 git 的方式解登记，再让下面 removePaths 删 `.dieyun/worktrees` 目录，
+# 否则会留下悬挂的 worktree 登记与一堆 agent 分支（见 Clean-AgentRunWorktrees 注释）
+if ($IncludeLocalData) {
+  Write-Host 'Agent run worktrees / branches:'
+  $total += Clean-AgentRunWorktrees
+}
+
 foreach ($rel in $removePaths) {
   $total += Remove-TreeIfExists $rel
 }
