@@ -230,6 +230,7 @@ async function pruneRemoteWorktrees(sshManager, opts) {
 
 module.exports = {
   WORKTREES_DIR,
+  AGENT_BRANCH_PREFIX: BRANCH_PREFIX,
   remoteWorktreeKey,
   remoteWorktreePath,
   remoteWorktreeBranch,

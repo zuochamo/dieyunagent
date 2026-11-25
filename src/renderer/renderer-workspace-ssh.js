@@ -23,6 +23,31 @@ function canSwitchLocalWorkspace() {
   return !!wsApi.setLocalWorkspace;
 }
 
+/**
+ * 本机「用过的项目」候选（桌面侧）。
+ *
+ * 候选来源与频道那条完全相同：`memory.sessions_list` 的会话行（`workspaceProjectPath` 优先，
+ * 理由见 `agent/workspace-candidates.js`）+ 当前视图目录；匹配规则也在那个模块里
+ * （目录名精确 → 唯一子串 → 歧义），这里只负责取数与文案。
+ *
+ * @returns {Promise<{ api: any, candidates: Array<{ path: string, name: string }> }>}
+ */
+async function localWorkspaceCandidatesForTool() {
+  const api = (typeof window !== 'undefined' && window.DieyunWorkspaceCandidates) || null;
+  if (!api) return { api: null, candidates: [] };
+  const rows = [];
+  if (typeof gatewayCall === 'function') {
+    try {
+      const list = await gatewayCall('memory.sessions_list', { archived: false, limit: 200 });
+      if (Array.isArray(list)) rows.push(...list);
+    } catch {
+      // 取不到历史就只报当前视图目录：宁可候选少，也不要让「切换」失败在一个看不见的 RPC 上
+    }
+  }
+  const current = typeof window !== 'undefined' ? window.activeViewSessionWorkspacePath : '';
+  return { api, candidates: api.candidatesFromSessionRows(rows, [current]) };
+}
+
 const workspaceMenuState = {
   open: false,
   remoteDirPath: '/',
@@ -786,6 +811,9 @@ async function pickLocalWorkspace() {
  * `args.sessionId` 是这一轮真正跑的会话（由工具委派带来）。它不在前台时只改那条会话的绑定，
  * 不动桌面视图 —— 否则后台会话一换项目，用户正在看的目录就被换掉了。
  *
+ * 三种入参（与频道侧语义对齐）：绝对路径照切；只给项目名按候选匹配（唯一才认，歧义要它指明）；
+ * 留空 = 只回候选清单不做切换；`"default"` = 回默认工作空间（schema 声明的唯一哨兵）。
+ *
  * @param {{ workspace?: string, sessionId?: string }} args
  * @returns {Promise<{ ok: boolean, workspacePath?: string, note?: string, error?: string }>}
  */
@@ -796,18 +824,65 @@ async function applySessionWorkspaceFromTool(args) {
   // 同一份词表在频道侧 `channels/workspace-switch.js` 也有一份，两边会各自漂移。
   const isDefault = raw.toLowerCase() === 'default';
   if (!raw) {
+    const { api, candidates } = await localWorkspaceCandidatesForTool();
+    const listText = api ? api.candidateText(candidates) : '（拿不到候选清单）';
     const current =
       (typeof window !== 'undefined' && window.activeViewSessionWorkspacePath) || '默认工作空间';
-    return { ok: false, error: `未指定 workspace，当前是 ${current}。要切就给绝对路径，回默认传 "default"。` };
+    return {
+      ok: false,
+      error:
+        `未指定 workspace，未做切换（当前是 ${current}）。本机用过的项目：${listText}；` +
+        '要切就给这些目录之一的路径或项目名，回默认传 "default"。'
+    };
   }
-  const target = isDefault ? '' : raw;
+
+  // 只给项目名（不是绝对路径）→ 按候选匹配：唯一才切，歧义要它指明（与频道同一份规则）。
+  const looksAbsolute = /^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('\\\\') || raw.startsWith('/');
+  let target = isDefault ? '' : raw;
+  if (!isDefault && !looksAbsolute) {
+    const { api, candidates } = await localWorkspaceCandidatesForTool();
+    if (!api) {
+      return {
+        ok: false,
+        error: '无法按项目名解析工作空间（agent-bundle 未加载）：请给绝对路径，或传 "default"。'
+      };
+    }
+    const matched = api.matchCandidate(raw, candidates);
+    if (!matched) {
+      return {
+        ok: false,
+        error:
+          `找不到工作空间「${raw}」。本机用过的项目：${api.candidateText(candidates)}；` +
+          '要从没打开过的目录干活就给它的绝对路径。'
+      };
+    }
+    if (matched.ambiguous) {
+      return {
+        ok: false,
+        error: `「${raw}」匹配到多个项目，请指明是哪一个：${api.candidateText(matched.ambiguous)}`
+      };
+    }
+    target = matched.path;
+  }
+
   const runSid = String((args && args.sessionId) || '');
   const curSid = typeof currentSessionId !== 'undefined' ? String(currentSessionId || '') : '';
+  // 改动回执（形状与 Main 的 `agent/change-receipt.js#makeReceipt` 一致）：
+  // 渲染器拿不到 crypto 与文件日志，所以只回字段、不落盘 —— 真正的审计流在 Main 那一侧。
+  const change = {
+    target: `workspace:${target || 'default'}`,
+    before: null,
+    after: null,
+    effectiveFrom: 'next-round',
+    verifyWith: 'fs_list_dir',
+    at: new Date().toISOString()
+  };
   if (runSid && curSid && runSid !== curSid) {
     await bindCurrentSessionWorkspace(runSid, target || null);
     return {
       ok: true,
       workspacePath: target,
+      change,
       note: '已切换这条会话的工作空间；它不在前台，桌面正在看的目录没有动。新目录从下一轮生效。'
     };
   }
@@ -816,6 +891,7 @@ async function applySessionWorkspaceFromTool(args) {
   return {
     ok: true,
     workspacePath: res.workspacePath,
+    change,
     note:
       '已把当前对话的工作空间切过去。本轮已装配的上下文（系统提示 / AGENTS.md / 索引）仍是原目录的，' +
       '新目录从下一轮生效；不确定目录对不对先用 fs_list_dir 看一眼。'

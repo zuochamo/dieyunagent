@@ -60,6 +60,29 @@ function padding(size) {
 }
 
 /**
+ * 打包期反路径穿越自检（打包闸门，本地一次跑完，远端零运行时成本）。
+ *
+ * 注入解压用远端 `tar -xzpf`，条目内容是可信的（本机构建），但信任要**前移**：
+ * 清单/遍历将来一旦被改坏（例如某步把绝对路径或 `..` 段拼进 rel），远端解压会把
+ * 文件写到包外 —— 相当于用注入通道在远端任意写文件。与其在远端解压脚本里加第二份
+ * 校验，不如在唯一写 tar 条目路径的地方（本函数）建闸门：
+ * - rel 必须是纯 POSIX 相对路径：不含 `..` 段、不以 `/` 开头、无反斜杠；
+ * - 远端解压按 `tar -C $DIR` 展开且本构建器只写普通文件（无 symlink 条目），
+ *   因此不存在 symlink 逃逸面；symlink 白名单若将来引入，必须在这里同闸校验 target。
+ * @param {string} rel
+ */
+function assertSafeTarRel(rel) {
+  const bad =
+    !rel ||
+    rel.startsWith('/') ||
+    rel.includes('\\') ||
+    rel.split('/').some((seg) => seg === '..' || seg === '');
+  if (bad) {
+    throw new Error(`pack 内出现不安全的 tar 条目路径（穿越/绝对/空段）: ${JSON.stringify(rel)}`);
+  }
+}
+
+/**
  * 把 pack 目录打成单个确定性 .tar.gz。
  * 逐文件整读（最大单文件即内置 Node，~几十 MB，短暂驻留可接受），换掉
  * 逐 chunk 的读流背压处理；压缩流带统一错误通道，任一环节失败立即抛出。
@@ -112,6 +135,7 @@ async function buildPackTarGz(packRoot, destPath, opts = {}) {
   let fed = 0;
   try {
     for (const f of files) {
+      assertSafeTarRel(f.rel);
       const content = await fsp.readFile(f.abs);
       await write(ustarHeader(f.rel, content.length, remotePackTarMode(f.rel)));
       await write(content);
@@ -152,4 +176,4 @@ async function buildPackTarGz(packRoot, destPath, opts = {}) {
   return { sha256: hash.digest('hex'), sizeBytes: written, fileCount: files.length };
 }
 
-module.exports = { buildPackTarGz };
+module.exports = { buildPackTarGz, assertSafeTarRel };

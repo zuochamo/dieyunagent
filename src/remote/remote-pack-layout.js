@@ -76,6 +76,13 @@ const REMOTE_GATEWAY_SOURCE_PATHS = [
 /** 内置 Linux Node 运行时：随安装包一起预装，远程不需要目标机装 Node。 */
 const REMOTE_PACK_NODE_REL = 'bin/node';
 
+/**
+ * 安装包里 pack 的目录名（`package.json` 的 `extraResources.to`）。
+ * 三处读它：打包（extraResources 的目录名）、主进程取 pack 根（src/main/remote-gateway.js）、
+ * Linux 桌面包把 pack 里那份 Linux core 当本机 sidecar 用（src/core-bridge-path.js）。
+ */
+const REMOTE_PACK_DIR_NAME = 'remote-gateway-pack';
+
 /** Linux dieyun-core。缺失只影响远程项目内索引，不阻塞 Agent 启动。 */
 const REMOTE_PACK_CORE_REL = 'bin/dieyun-core';
 
@@ -376,6 +383,7 @@ function computeRemoteGatewaySourceHash(rootDir) {
 
 module.exports = {
   REMOTE_GATEWAY_SOURCE_PATHS,
+  REMOTE_PACK_DIR_NAME,
   REMOTE_PACK_NODE_REL,
   REMOTE_PACK_CORE_REL,
   REMOTE_PACK_OK_MARKER,

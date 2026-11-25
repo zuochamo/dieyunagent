@@ -17,6 +17,7 @@ const { buildPackTarGz } = require('../remote/pack-archive');
 
 const REMOTE_HOME_DIR = '.dieyun/remote-agent';
 const REMOTE_LOG_DIR = 'logs';
+const REMOTE_UNIT_NAME = 'dieyun-agent.service';
 
 /**
  * 远程 Agent 日志**按项目 + 按实例**分开（2026-10-23 按项目，2026-10-28 加端口）。
@@ -53,6 +54,91 @@ function remoteRunDir(home) {
 
 function remoteSocketPathFor(home) {
   return `${remoteRunDir(home)}/agent.sock`;
+}
+
+/**
+ * 远端 daemon 的 systemd --user 单元（ZCode 同类方案的对齐项，2026-11-21）。
+ *
+ * 为什么改成 systemd：原来 `setsid ... &` + pgrep 反查，daemon 无人管——SSH 断了
+ * 不受影响（setsid 已保证），但机器重启后不会回来、崩溃也不会自动拉起，排障只能
+ * 靠 pgrep 猜。`systemctl --user` 给出：崩溃 Restart=on-failure 自动拉、
+ * `systemctl --user status dieyun-agent` 一条命令可排障、stop 有明确语义。
+ *
+ * 单元是**按主机一份**（socket/日志都按主机一份，daemon 内部按连接路由 workspace），
+ * 工作区不是单元参数 —— unit 文件里只写死 socket 路径，workspace 由 `hello` 声明。
+ *
+ * 何时**不**用 systemd：远端没有可用的 user systemd（无 `systemctl --user`、
+ * loginctl 未为会话建 user slice、容器里常见）。此时原样回退 setsid —— 检测和
+ * fallback 都在这一个脚本里完成，不新增第二份「拉起 daemon」实现。
+ *
+ * @param {string} home 远端 HOME 绝对路径
+ * @param {string} nodeBin 绝对 node 路径（同 setsid 路径的理由：非登录 shell 无 nvm PATH）
+ * @param {string} currentDir `~/.dieyun/remote-agent/current` 绝对路径
+ * @param {string} sockPath socket 绝对路径
+ * @param {string} logPath 日志绝对路径
+ */
+function buildAgentUnitFile(home, nodeBin, currentDir, sockPath, logPath) {
+  return [
+    '[Unit]',
+    'Description=dieyun remote agent',
+    'After=network.target',
+    '',
+    '[Service]',
+    `ExecStart=${nodeBin} ${currentDir}/remote/run-cli.js --socket ${sockPath}`,
+    'Restart=on-failure',
+    'RestartSec=2',
+    `StandardOutput=append:${logPath}`,
+    `StandardError=append:${logPath}`,
+    '',
+    '[Install]',
+    'WantedBy=default.target'
+  ].join('\n') + '\n';
+}
+
+/** 单元落盘路径（XDG_USER_UNIT_FILE 的默认值；不读远端 XDG 变量，$HOME 拼出来即可）。 */
+function remoteUnitPath(home) {
+  return `${home}/.config/systemd/user/${REMOTE_UNIT_NAME}`;
+}
+
+/**
+ * 启动脚本（systemd 路径）：写单元 → daemon-reload → enable --now → 等 socket。
+ * 任何一步失败都非 0 退出并由 stderr 带出原因；调用方看到非 0 走 setsid fallback。
+ */
+function buildSystemdStartScript(home, nodeBin, currentDir, sockPath, logPath, runDir) {
+  const unitPath = remoteUnitPath(home);
+  const unitQ = shellQuoteSingle(unitPath);
+  const unitQDir = shellQuoteSingle(`${home}/.config/systemd/user`);
+  const unitContent = buildAgentUnitFile(home, nodeBin, currentDir, sockPath, logPath);
+  return [
+    'set -e',
+    `mkdir -p ${shellQuoteSingle(runDir)}`,
+    `chmod 700 ${shellQuoteSingle(runDir)}`,
+    `mkdir -p ${shellQuoteSingle(remoteLogDir(home))}`,
+    `mkdir -p ${unitQDir}`,
+    `cat > ${unitQ} <<'DIEYUN_UNIT_EOF'`,
+    unitContent.trimEnd(),
+    'DIEYUN_UNIT_EOF',
+    // user manager 的生命周期绑在「该用户有没有活会话」上：不开 linger 时，最后一个 SSH 会话
+    // 退出 → logind 停掉 user@.service → 这个 daemon 一起被停，「崩溃自动拉起」只在会话存续期间
+    // 成立，「开机自己回来」更是完全不会发生（没有登录会话就没有 user manager）。
+    // 所以 linger 是这条路的**前提**，不是可选项。它要 polkit 授权、可能被拒：
+    // 失败不阻断启动（会话内仍然可用），但必须留一行可查的痕迹。
+    'if loginctl enable-linger "$(id -un)" >/dev/null 2>&1; then echo LINGER_ON; else echo LINGER_DENIED; fi',
+    'systemctl --user daemon-reload',
+    `systemctl --user enable --now ${REMOTE_UNIT_NAME}`,
+    'echo STARTED'
+  ].join('\n');
+}
+
+/** systemd 路径可用性探测：有 `systemctl --user` 且能应答（user manager 活着）。 */
+function buildSystemdProbeScript() {
+  return [
+    'if command -v systemctl >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then',
+    '  echo SYSTEMD_OK',
+    'else',
+    '  echo SYSTEMD_NO',
+    'fi'
+  ].join('\n');
 }
 
 /**
@@ -385,8 +471,49 @@ function createRemoteGatewayManager(opts = {}) {
     }
   }
 
-  /**
-   * 注入远程安装包。同端点串行（见模块级 deployLocks）：`rm -rf remoteBase` 与
+/**
+ * 管道上传（SFTP 被禁时的唯一降级实现）：本地文件流 → SSH exec stdin → 远端 `cat > path`。
+ * 进度按已写本地流字节估算（写缓冲 ≠ 远端已收，但 sha256 比对才是真校验，进度只求不卡死）。
+ * @param {any} sshManager
+ * @param {string} localPath
+ * @param {string} remotePath
+ * @param {number} totalBytes
+ * @param {(p: any) => void} emit
+ */
+async function uploadViaExecPipe(sshManager, localPath, remotePath, totalBytes, emit) {
+  const { createReadStream } = require('fs');
+  let sent = 0;
+  const rs = createReadStream(localPath);
+  rs.on('data', (chunk) => {
+    sent += chunk.length;
+    emit({
+      phase: 'upload',
+      percent: 5 + Math.min(75, Math.round((sent / Math.max(1, totalBytes)) * 75)),
+      message: `~${mb(sent)}/${mb(totalBytes)} MB（管道）`,
+      file: 'pack.tar.gz',
+      current: sent,
+      total: totalBytes
+    });
+  });
+  try {
+    const r = await sshManager.execStdin(`cat > ${shellQuoteSingle(remotePath)}`, rs, 600000);
+    if (r.code !== 0) {
+      throw Object.assign(new Error(`管道上传失败（exit=${r.code}）`), {
+        code: 'REMOTE_GATEWAY_UPLOAD_FAILED',
+        detail: [String(r.stdout || ''), String(r.stderr || '')].filter(Boolean).join('\n').slice(0, 500)
+      });
+    }
+  } finally {
+    try {
+      rs.destroy();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/**
+ * 注入远程安装包。同端点串行（见模块级 deployLocks）：`rm -rf remoteBase` 与
    * `current` 软链是跨 manager 共享资源，必须整段排队。
    *
    * 传输与完整性模型：整包打成单个 tar.gz 一次上传（取代散文件逐个 SFTP 的
@@ -485,31 +612,40 @@ function createRemoteGatewayManager(opts = {}) {
           current: 0,
           total: built.sizeBytes
         });
-        const sftp = sshManager.getSftp();
-        log(`正在注入远程 Agent ${version}（含 Node ${manifest.nodeVersion || ''}，压缩后 ${mb(built.sizeBytes)}MB）…`);
-        await new Promise((resolve, reject) => {
-          sftp.fastPut(
-            tmpArchive,
-            remoteArchive,
-            {
-              step: (transferred, _chunk, total) => {
-                emit({
-                  phase: 'upload',
-                  percent: 5 + Math.round((transferred / Math.max(1, total)) * 75),
-                  message: `${mb(transferred)}/${mb(total)} MB`,
-                  file: 'pack.tar.gz',
-                  current: transferred,
-                  total
-                });
-              }
-            },
-            (err) => (err ? reject(err) : resolve())
-          );
-        }).catch((e) => {
-          throw Object.assign(new Error(`远程 Agent 上传失败 (pack.tar.gz): ${e && e.message ? e.message : e}`), {
-            code: 'REMOTE_GATEWAY_UPLOAD_FAILED'
+        const sftp = typeof sshManager.getSftp === 'function' ? sshManager.getSftp() : null;
+        if (sftp) {
+          log(`正在注入远程 Agent ${version}（含 Node ${manifest.nodeVersion || ''}，压缩后 ${mb(built.sizeBytes)}MB）…`);
+          await new Promise((resolve, reject) => {
+            sftp.fastPut(
+              tmpArchive,
+              remoteArchive,
+              {
+                step: (transferred, _chunk, total) => {
+                  emit({
+                    phase: 'upload',
+                    percent: 5 + Math.round((transferred / Math.max(1, total)) * 75),
+                    message: `${mb(transferred)}/${mb(total)} MB`,
+                    file: 'pack.tar.gz',
+                    current: transferred,
+                    total
+                  });
+                }
+              },
+              (err) => (err ? reject(err) : resolve())
+            );
+          }).catch((e) => {
+            throw Object.assign(new Error(`远程 Agent 上传失败 (pack.tar.gz): ${e && e.message ? e.message : e}`), {
+              code: 'REMOTE_GATEWAY_UPLOAD_FAILED'
+            });
           });
-        });
+        } else {
+          // SFTP 子系统不可用（exec channel 只有 sftp）—— 降级为 `cat > file` 管道上传。
+          // 进度无法逐字节回调，按 5%→80% 一段报；完整性由后面的 sha256 比对兜底，
+          // 半截文件会在校验步被拒，重试时清目录逻辑天然保证无残留。
+          log(`SFTP 不可用，降级管道上传（${mb(built.sizeBytes)}MB）…`);
+          emit({ phase: 'upload', percent: 5, message: `0/${mb(built.sizeBytes)} MB（管道）` });
+          await uploadViaExecPipe(sshManager, tmpArchive, remoteArchive, built.sizeBytes, emit);
+        }
 
         // 传输校验：远端 sha256sum 与本地构建摘要比对
         emit({ phase: 'verify', percent: 82, message: '校验 sha256…' });
@@ -692,32 +828,50 @@ function createRemoteGatewayManager(opts = {}) {
   /**
    * 收掉这台主机上的 daemon。
    *
-   * 只按「命令行里带 `--socket <这个 socket>`」精确匹配，不再有 pid 文件、不再 fuser/lsof 收尸：
-   * daemon 收到 SIGTERM 会自己 `stop()`（逐个 dispose 每个 workspace 的 handlers，
-   * 索引 core 跟着收），因此不需要外部兜「孤儿 core 占库」。等不到退出再 SIGKILL。
+   * systemd 路径（单元存在时）：`systemctl --user stop`。**必须走这条** ——
+   * 单元是 Restart=on-failure，对 systemd 管的进程直接 kill 会被当成失败自动拉起，
+   * 表现为「怎么杀都杀不死」。
+   * 非 systemd（setsid fallback）：按「命令行里带 `--socket <这个 socket>`」精确匹配，
+   * 不再有 pid 文件。daemon 收到 SIGTERM 会自己 `stop()`（逐个 dispose 每个 workspace
+   * 的 handlers，索引 core 跟着收），因此不需要外部兜「孤儿 core 占库」。等不到退出再 SIGKILL。
    */
   async function stopAgentDaemon(sshManager, activeSocket, workspaceRoot) {
     const sockQ = shellQuoteSingle(activeSocket);
+    let unitStopped = false;
     try {
-      await sshManager.execScript(
-        [
-          `PAT=${sockQ}`,
-          'if command -v pgrep >/dev/null 2>&1; then',
-          '  for pid in $(pgrep -f -- "--socket $PAT" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done',
-          'else',
-          '  for pid in $(ps -eo pid=,args= 2>/dev/null | grep -F -- "--socket $PAT" | grep -v grep | awk \'{print $1}\'); do kill "$pid" 2>/dev/null || true; done',
-          'fi',
-          'for i in 1 2 3 4 5 6 7 8 9 10; do',
-          '  test -e "$PAT" || break',
-          '  sleep 0.2',
-          'done',
-          'if command -v pgrep >/dev/null 2>&1; then',
-          '  for pid in $(pgrep -f -- "--socket $PAT" 2>/dev/null); do kill -9 "$pid" 2>/dev/null || true; done',
-          'fi',
-          'rm -f "$PAT" 2>/dev/null || true'
-        ].join('\n'),
-        12000
-      );
+      const hasUnit = await remoteHasUnit(sshManager);
+      if (hasUnit) {
+        await sshManager.execScript(
+          [`systemctl --user stop ${REMOTE_UNIT_NAME} || true`, `rm -f ${sockQ} 2>/dev/null || true`].join('\n'),
+          12000
+        );
+        // 单元停了不代表主机上没有 daemon：单元文件存在但这次 daemon 是 setsid 拉起的
+        // （systemd 曾可用、后来 user manager 挂了走 fallback）时，systemctl 是 no-op，
+        // 必须探测 socket 还活着就落到下面的 pgrep 兜底 —— 否则旧进程留着占 socket，
+        // 下次 ensure 复用它就是「部署成功但跑的还是旧代码」的假象。
+        unitStopped = !(await probeAgentSocket(sshManager, activeSocket, 1500));
+      }
+      if (!unitStopped) {
+        await sshManager.execScript(
+          [
+            `PAT=${sockQ}`,
+            'if command -v pgrep >/dev/null 2>&1; then',
+            '  for pid in $(pgrep -f -- "--socket $PAT" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done',
+            'else',
+            '  for pid in $(ps -eo pid=,args= 2>/dev/null | grep -F -- "--socket $PAT" | grep -v grep | awk \'{print $1}\'); do kill "$pid" 2>/dev/null || true; done',
+            'fi',
+            'for i in 1 2 3 4 5 6 7 8 9 10; do',
+            '  test -e "$PAT" || break',
+            '  sleep 0.2',
+            'done',
+            'if command -v pgrep >/dev/null 2>&1; then',
+            '  for pid in $(pgrep -f -- "--socket $PAT" 2>/dev/null); do kill -9 "$pid" 2>/dev/null || true; done',
+            'fi',
+            'rm -f "$PAT" 2>/dev/null || true'
+          ].join('\n'),
+          12000
+        );
+      }
     } catch {
       // ignore — 连接已断或安装目录不存在
     }
@@ -731,6 +885,34 @@ function createRemoteGatewayManager(opts = {}) {
         // best effort
       }
     }
+  }
+
+  /** systemd 路径可用性探测：有 `systemctl --user` 且 user manager 活着（连接内缓存一次）。 */
+  const systemdProbeCache = new WeakMap();
+  async function remoteHasSystemd(sshManager) {
+    const cached = systemdProbeCache.get(sshManager);
+    if (cached !== undefined) return cached;
+    const pending = (async () => {
+      const r = await sshManager.execScript(buildSystemdProbeScript(), 8000);
+      return String(r.stdout || '').includes('SYSTEMD_OK');
+    })();
+    systemdProbeCache.set(sshManager, pending);
+    try {
+      return await pending;
+    } catch (e) {
+      systemdProbeCache.delete(sshManager);
+      throw e;
+    }
+  }
+
+  /** 远端是否已装 systemd 单元（决定 stop 走哪条路）。 */
+  async function remoteHasUnit(sshManager) {
+    const home = await getRemoteHome(sshManager);
+    const r = await sshManager.execScript(
+      `test -f ${shellQuoteSingle(remoteUnitPath(home))} && echo UNIT_YES || echo UNIT_NO`,
+      6000
+    );
+    return String(r.stdout || '').includes('UNIT_YES');
   }
 
   async function startAgentDaemon(sshManager, workspaceRoot, nodeRuntime) {
@@ -793,28 +975,55 @@ function createRemoteGatewayManager(opts = {}) {
 
     // 启动脚本必须用**绝对 node 路径**：远端非登录 bash 的 PATH 里没有 ~/.local/bin、~/.cargo/bin、
     // nvm 路径（真机实测 `command -v node` 直接 MISSING），靠 PATH 找 node 在这类机器上必然起不来。
-    const startCmd = [
-      `cd ${dirQ} || exit 1`,
-      `mkdir -p ${runQ}`,
-      `chmod 700 ${runQ}`,
-      `mkdir -p ${shellQuoteSingle(logDir)}`,
-      // setsid + 无 stdin：daemon 不跟着 SSH channel 一起死；输出进日志
-      `setsid ${nodeQ} ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)} --socket ${sockQ} --workspace ${wsQ} >> ${logQ} 2>&1 < /dev/null &`,
-      'echo STARTED'
-    ].join('\n');
+    // systemd --user 可用时走单元（崩溃自动拉、status 可排障）；否则原样 setsid fallback。
+    let startOut;
+    let startedBy = '';
+    if (await remoteHasSystemd(sshManager).catch(() => false)) {
+      try {
+        const r = await sshManager.execScript(
+          buildSystemdStartScript(home, nodeBin, currentDir, sockPath, logPath, runDir),
+          30000
+        );
+        if (String(r.stdout || '').includes('STARTED')) {
+          startedBy = 'systemd';
+          startOut = r;
+          if (String(r.stdout || '').includes('LINGER_DENIED')) {
+            // linger 被拒 = daemon 只活到最后一个 SSH 会话结束。不写这行的话，用户第二天看到的
+            // 只是「socket 没了、又得重起」，没人知道根因是 loginctl 没成。
+            log('远端 systemd linger 未开启（loginctl 被拒）：daemon 只在该 SSH 会话期间存活');
+          }
+        } else {
+          log(`systemd 启动未就绪（exit=${r.code}），回退 setsid`);
+        }
+      } catch (e) {
+        log(`systemd 启动失败（${(e && e.message) || e}），回退 setsid`);
+      }
+    }
+    if (!startedBy) {
+      const startCmd = [
+        `cd ${dirQ} || exit 1`,
+        `mkdir -p ${runQ}`,
+        `chmod 700 ${runQ}`,
+        `mkdir -p ${shellQuoteSingle(logDir)}`,
+        // setsid + 无 stdin：daemon 不跟着 SSH channel 一起死；输出进日志
+        `setsid ${nodeQ} ${shellQuoteSingle(`${currentDir}/remote/run-cli.js`)} --socket ${sockQ} --workspace ${wsQ} >> ${logQ} 2>&1 < /dev/null &`,
+        'echo STARTED'
+      ].join('\n');
+      startOut = await sshManager.execScript(startCmd, 30000);
+      startedBy = 'setsid';
+    }
 
-    const r = await sshManager.execScript(startCmd, 30000);
-    const out = String(r.stdout || '').trim();
+    const out = String(startOut.stdout || '').trim();
     if (!out.includes('STARTED')) {
       const logTail = await readRemoteGatewayLog(sshManager, logPath);
       throw Object.assign(new Error('远程 Agent 启动命令失败'), {
         code: 'REMOTE_GATEWAY_START_FAILED',
-        detail: [out, String(r.stderr || '').trim(), logTail].filter(Boolean).join('\n---\n').slice(0, 2000)
+        detail: [out, String(startOut.stderr || '').trim(), logTail].filter(Boolean).join('\n---\n').slice(0, 2000)
       });
     }
     await waitAgentSocket(sshManager, sockPath);
     const pid = await readAgentPid(sshManager, sockPath);
-    log(`远程 Agent 已就绪 socket=${sockPath}${pid ? ` pid=${pid}` : ''} runtime=${nodeRuntime.source || 'unknown'}`);
+    log(`远程 Agent 已就绪 socket=${sockPath}${pid ? ` pid=${pid}` : ''} runtime=${nodeRuntime.source || 'unknown'} start=${startedBy}`);
     activeLogRel = remoteLogDisplayPath();
     return sockPath;
   }
@@ -1052,6 +1261,10 @@ module.exports = {
   remoteLogDisplayPath,
   remoteRunDir,
   remoteSocketPathFor,
+  remoteUnitPath,
+  buildAgentUnitFile,
+  buildSystemdStartScript,
+  buildSystemdProbeScript,
   probeAgentSocket,
   readRemoteMarkerState,
   buildStaleCoreCleanupScript

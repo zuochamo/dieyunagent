@@ -10,8 +10,8 @@ const { EXEC_OUTPUT_MAX_CHARS, clampExecTimeoutMs } = require('../exec-limits');
 const { readLimitedFromStream } = require('./read-limited');
 const { buildAuthPlan, createAuthState, createOrderedAuthHandler, detectAgentSocket } = require('./auth-methods');
 const { createJumpChain, forwardSocket } = require('./proxy-jump');
+const { isPathMissingError } = require('../gateway/path-policy');
 
-const SFTP_NO_SUCH_FILE = new Set([2, 11, 'ENOENT', 'NO_SUCH_FILE']);
 const SFTP_PERMISSION = new Set([3, 'EACCES', 'EPERM', 'PERMISSION_DENIED']);
 
 function sftpEntryIsDirectory(ent) {
@@ -41,7 +41,8 @@ function formatSftpBrowseError(err, remotePath) {
   const code = err && (err.code != null ? err.code : err.status);
   const raw = String((err && err.message) || err || '');
   let msg;
-  if (SFTP_NO_SUCH_FILE.has(code) || /no such file/i.test(raw)) {
+  // 「不存在」的判据只有一份（`gateway/path-policy.isPathMissingError`，含 SFTP 的 2 / 11）
+  if (isPathMissingError(err)) {
     msg = `远程目录不存在：${dir}`;
   } else if (SFTP_PERMISSION.has(code) || /permission denied/i.test(raw)) {
     msg = `没有权限列出目录：${dir}。可手动输入家目录路径后回车`;
@@ -821,7 +822,7 @@ function createSshSessionManager(opts = {}) {
   /** Serialize exec channels — concurrent c.exec races cause "Channel open failure" on some sshd. */
   let execChain = Promise.resolve();
 
-  function execRawOnce(wrapped, timeoutMs) {
+  function execRawOnce(wrapped, timeoutMs, opts = {}) {
     const { client: c } = assertConnected();
     const timeout = clampExecTimeoutMs(timeoutMs);
     return new Promise((resolve, reject) => {
@@ -866,6 +867,11 @@ function createSshSessionManager(opts = {}) {
           return;
         }
         activeStream = stream;
+        // 管道上传（sftp 子系统被禁的降级路径）：命令已就绪，把本地流灌进远端 stdin。
+        // stream.end() 由 attachExecSettlement 在收尾时触发（stdin 写完先 end）。
+        if (opts.stdin && typeof opts.stdin.pipe === 'function') {
+          opts.stdin.pipe(stream);
+        }
         // 何时算结束只看 exec-settlement（channel close 会被后台进程继承的输出管道拖住）
         attachExecSettlement(
           { out: stream, err: stream.stderr, life: stream },
@@ -932,13 +938,13 @@ function createSshSessionManager(opts = {}) {
     });
   }
 
-  async function execRaw(wrapped, timeoutMs) {
+  async function execRaw(wrapped, timeoutMs, opts = {}) {
     const run = async () => {
-      const attempts = 4;
+      const attempts = opts.stdin ? 1 : 4;
       let lastErr = null;
       for (let i = 0; i < attempts; i++) {
         try {
-          return await execRawOnce(wrapped, timeoutMs);
+          return await execRawOnce(wrapped, timeoutMs, opts);
         } catch (err) {
           lastErr = err;
           if (!isChannelOpenError(err) || i >= attempts - 1) throw err;
@@ -974,6 +980,18 @@ function createSshSessionManager(opts = {}) {
   /** 远程复合 shell 脚本（避免 bash -lc 嵌套引号问题） */
   async function execScript(command, timeoutMs) {
     return exec(command, null, timeoutMs, { bashScript: true });
+  }
+
+  /**
+   * 把本地流灌进远端命令的 stdin（sftp 被禁时的管道上传降级路径，唯一实现）。
+   * 命令必须形如 `cat > <path>`；结束以远端 exit-status 为准。
+   * 只跑一次不重试：上传中途重试会在远端留下半截文件，必须由调用方整包重来。
+   * @param {string} command
+   * @param {import('stream').Readable} stdin
+   * @param {number} timeoutMs
+   */
+  async function execStdin(command, stdin, timeoutMs) {
+    return execRaw(command, timeoutMs, { stdin });
   }
 
   function openShell(opts = {}) {
@@ -1063,6 +1081,7 @@ function createSshSessionManager(opts = {}) {
     sftpStat,
     exec,
     execScript,
+    execStdin,
     openShell,
     assertConnected,
     getClient,
