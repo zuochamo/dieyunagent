@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';" />
+    <title>点点</title>
+    <style>
+      /* 悬浮窗全透明：只画 128 个点，其余像素交给桌面 */
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        cursor: default;
+      }
+      #pet-canvas { display: block; width: 100%; height: 100%; }
+    </style>
+  </head>
+  <body>
+    <canvas id="pet-canvas"></canvas>
+    <script src="./pet-shapes.js"></script>
+    <script src="./pet-cat-gait.js"></script>
+    <script src="./pet.js"></script>
+  </body>
+</html>
