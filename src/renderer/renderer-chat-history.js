@@ -727,8 +727,7 @@ async function renderLoadedSessionMessages(switchGen, sessionId, guarded) {
       switchGen,
       sessionId,
       forceScroll: false,
-      transition: guarded,
-      deferTrace: true
+      transition: guarded
     });
   }
   if (!rendered) {
@@ -1666,8 +1665,7 @@ async function performSwitchSession(sessionId, switchGen) {
             await renderChatFromMessagesYielding({
               forceScroll: false,
               sessionId: target,
-              switchGen,
-              deferTrace: true
+              switchGen
             });
           } else {
             renderChatFromMessages({ forceScroll: false, sessionId: target });

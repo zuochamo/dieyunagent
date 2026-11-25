@@ -1,4 +1,4 @@
-/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, trackArtifactsFromTrace, clearArtifacts, renderArtifactsList, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, refreshChangesPaneAfterRender, splitPersistedAssistantTrace, parseTraceFromPersisted, unpackAssistantMeta, forceArtifactsUiRefreshAfterBatch, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, renderAssistantBubbleContent, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns */
+/* global window, document, $, escapeHtml, settings, gwState, gatewayCall, tracePrefs, clearArtifacts, refreshContextProgress, scheduleContextProgressRefresh, getTextModelId, revokeAttachmentPreview, renderAttachmentChips, tryDetectResumeCheckpoint, showAgentToast, rollbackTurnFiles, prepareTurnForWithdraw, invalidateWorkspaceArtifacts, initMermaidRender, getCurrentUndoTurnId, AGENT_RUN_EVENT_TYPES, createAgentRunEvent, normalizeAgentRunEvent, agentRunEventFromTrace, applyAgentRunEventToLive, cloneTrace, resetActiveRunContextUiState, isActiveSessionSwitch, currentSessionId, maybeSaveRunningTraceCheckpoint, beginArtifactsUiBatch, endArtifactsUiBatch, splitPersistedAssistantTrace, unpackAssistantMeta, getAgentLimits, getSessionChangeRowsForAgent, renderChangesPane, collapseChatThinkingTraces, scrollChatToBottom, dismissToolActivityFloat, initToolActivityFloat, maybeLoadOlderChatMessages, saveSessionMessageCache, getSessionCacheHasMore, getComposerQueue, chatAutoFollow, chatList, followChatStreamGrowth, isChatNearBottom, isSessionMessageCacheStale, loadChatFromGateway, finishAgentPrepPhase, sessionActiveRuns */
 'use strict';
 
 var chatRenderApi = window.diecloud || {};
@@ -25,98 +25,6 @@ var chatFollowSettleDeadlineTimer = null;
 var CHAT_FOLLOW_SETTLE_MAX_MS = 5000;
 /** Yield to the event loop every N messages during session switch render. */
 var CHAT_HISTORY_RENDER_YIELD_EVERY = 24;
-var DEFER_TRACE_YIELD_EVERY = 6;
-
-/** @type {{ bubble: HTMLElement, content: string, trace: object[], thinkingRaw: string|null, undoTurnId: string|null, checkpointRestore: boolean }[]} */
-var deferredThinkingJobs = [];
-var deferredThinkingFlushGen = 0;
-
-function clearDeferredThinkingJobs() {
-  deferredThinkingJobs = [];
-  deferredThinkingFlushGen += 1;
-}
-
-function queueDeferredThinkingJob(job) {
-  if (!job || !job.bubble) return;
-  deferredThinkingJobs.push(job);
-}
-
-function scheduleDeferredThinkingFlush(switchGen, sessionId, opts = {}) {
-  const jobs = deferredThinkingJobs;
-  deferredThinkingJobs = [];
-  const flushGen = ++deferredThinkingFlushGen;
-  const hiddenToken = opts.hiddenToken || null;
-  const transition = opts.transition === true;
-  // flush 完成前聊天区保持隐藏，避免「无思考区 → 思考区突然出现」闪变
-  let revealed = false;
-  const reveal = () => {
-    if (revealed || !hiddenToken) return;
-    revealed = true;
-    endHiddenChatRender(hiddenToken, { transition });
-  };
-  if (!jobs.length) {
-    reveal();
-    return;
-  }
-  const sid = String(sessionId || '');
-  const run = async () => {
-    try {
-      for (let i = 0; i < jobs.length; i++) {
-        if (flushGen !== deferredThinkingFlushGen) return;
-        if (shouldAbortChatRender(switchGen)) return;
-        if (sid && String(currentSessionId) !== sid) return;
-        const job = jobs[i];
-        if (!job.bubble || !job.bubble.isConnected) continue;
-        let trace = Array.isArray(job.trace) ? job.trace : [];
-        if (!trace.length && job.thinkingRaw && typeof parseTraceFromPersisted === 'function') {
-          trace = parseTraceFromPersisted(job.thinkingRaw) || [];
-        }
-        if (!trace.length) continue;
-        if (typeof trackArtifactsFromTrace === 'function') {
-          trackArtifactsFromTrace(trace, { sessionId: sid });
-        }
-        if (typeof renderAssistantBubbleContent === 'function') {
-          renderAssistantBubbleContent(job.bubble, {
-            content: job.content || '',
-            trace,
-            hitRoundLimit: false,
-            loading: false,
-            undoTurnId: job.undoTurnId || null,
-            checkpointRestore: !!job.checkpointRestore
-          });
-        }
-        if ((i + 1) % DEFER_TRACE_YIELD_EVERY === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-      }
-      if (flushGen !== deferredThinkingFlushGen) return;
-      if (shouldAbortChatRender(switchGen)) return;
-      if (sid && String(currentSessionId) !== sid) return;
-      const saved = sessionScrollPositions.get(sid);
-      if (saved && !saved.atBottom) {
-        restoreSessionScrollPosition(sid, { immediate: true });
-      }
-      updateLastTurnFloat();
-      if (typeof forceArtifactsUiRefreshAfterBatch === 'function') {
-        forceArtifactsUiRefreshAfterBatch();
-      } else if (typeof renderArtifactsList === 'function' && !$('artifacts-panel')?.hidden) {
-        renderArtifactsList({ skipRefresh: true });
-      }
-      refreshChangesPaneAfterRender();
-    } finally {
-      // 无论正常完成还是被新渲染中止，都必须归还隐藏 token，否则聊天区永久不可见
-      reveal();
-    }
-  };
-  const start = () => {
-    void run();
-  };
-  if (typeof requestAnimationFrame === 'function' && !(document && document.hidden)) {
-    requestAnimationFrame(start);
-  } else {
-    setTimeout(start, 0);
-  }
-}
 
 function beginSessionScrollCaptureSuppression() {
   sessionScrollCaptureSuppressDepth += 1;

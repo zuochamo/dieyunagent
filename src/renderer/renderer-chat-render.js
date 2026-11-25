@@ -289,7 +289,6 @@ function appendRenderedMessageAtIndex(i, opts) {
   const forceScroll = opts.forceScroll !== false;
   const skipScroll = opts.skipScroll === true;
   const sessionAtRender = opts.sessionAtRender || currentSessionId;
-  const deferTrace = opts.deferTrace === true;
   const m = messages[i];
   if (m.role === 'user') {
     const { content, meta: packedMeta } = unpackUserMessageContent(m.content);
@@ -322,31 +321,25 @@ function appendRenderedMessageAtIndex(i, opts) {
   }
   if (m.role !== 'assistant') return;
   const { content: raw, meta } = unpackAssistantMeta(m.content);
-  const split = splitPersistedAssistantTrace(raw, deferTrace ? { skipParse: true } : undefined);
+  const split = splitPersistedAssistantTrace(raw);
   const inlineTrace = split.trace || [];
   const transientTrace = Array.isArray(m.transientTrace) ? m.transientTrace : [];
   const trace = inlineTrace.length ? inlineTrace : transientTrace;
-  if (!deferTrace && trace.length) trackArtifactsFromTrace(trace);
+  if (trace.length) trackArtifactsFromTrace(trace);
   const cp = resolveCheckpointRestoreForAssistant(i);
-  const hasDeferredThinking = !!(deferTrace && (split.thinkingRaw || trace.length));
+  // 思考区与正文**同一次渲染**落地：此前把「手里已有 trace」的那几条推迟到一帧后的
+  // flush 里补画，而 flush 被下一次切换（代际变化）打断就整批丢掉 —— 表现正是
+  // 「正文在、思考区连占位都没有，切回来一下又有了」。账号里能补画的只有
+  // `meta.traceRunId` 那条通路（它自带占位），所以这里不再有「稍后补」这个中间态。
   const bubble = appendBubble('assistant', split.content, {
-    trace: deferTrace ? [] : trace,
-    structured: hasDeferredThinking || (!!meta?.traceRunId && !trace.length && !split.thinkingRaw),
+    trace,
+    structured: !!meta?.traceRunId && !trace.length && !split.thinkingRaw,
     forceScroll,
     skipScroll,
     undoTurnId: cp?.undoTurnId || null,
     checkpointRestore: !!cp
   });
-  if (hasDeferredThinking) {
-    queueDeferredThinkingJob({
-      bubble,
-      content: split.content,
-      trace,
-      thinkingRaw: split.thinkingRaw || null,
-      undoTurnId: cp?.undoTurnId || null,
-      checkpointRestore: !!cp
-    });
-  } else if (!trace.length && meta?.traceRunId) {
+  if (!trace.length && meta?.traceRunId) {
     attachThinkingHydratePlaceholder(bubble);
     hydrateAssistantTraceFromStore(bubble, meta, split.content, cp, sessionAtRender);
   }
@@ -428,8 +421,7 @@ function prependOlderMessagesIncrementally(sessionId, olderCount) {
       appendRenderedMessageAtIndex(i, {
         forceScroll: false,
         skipScroll: true,
-        sessionAtRender: sessionId,
-        deferTrace: false
+        sessionAtRender: sessionId
       });
     }
   } catch (e) {
@@ -540,7 +532,6 @@ async function renderChatFromMessagesYielding(opts = {}) {
   const switchGen = opts.switchGen;
   const forceScroll = opts.forceScroll !== false;
   const transition = opts.transition === true;
-  const deferTrace = opts.deferTrace === true;
   const sessionAtRender = opts.sessionId != null ? String(opts.sessionId) : String(currentSessionId);
   if (!chatList) return false;
   if (shouldAbortChatRender(switchGen)) return false;
@@ -551,7 +542,6 @@ async function renderChatFromMessagesYielding(opts = {}) {
   beginChatHistoryArtifactsBatch();
   let painted = false;
   try {
-    clearDeferredThinkingJobs();
     if (typeof revokeAnswerFigureBlobs === 'function') revokeAnswerFigureBlobs(chatList);
     chatList.innerHTML = '';
     clearArtifacts();
@@ -571,8 +561,7 @@ async function renderChatFromMessagesYielding(opts = {}) {
       appendRenderedMessageAtIndex(i, {
         forceScroll,
         skipScroll: !forceScroll,
-        sessionAtRender,
-        deferTrace
+        sessionAtRender
       });
       if ((i + 1) % CHAT_HISTORY_RENDER_YIELD_EVERY === 0) {
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -587,18 +576,7 @@ async function renderChatFromMessagesYielding(opts = {}) {
   } finally {
     endChatHistoryArtifactsBatch();
     endSessionScrollCaptureSuppression();
-    if (
-      deferTrace &&
-      painted &&
-      !shouldAbortChatRender(switchGen) &&
-      sessionAtRender === String(currentSessionId)
-    ) {
-      // 思考区延迟补齐：聊天区保持隐藏，由 flush 完成后统一显示，避免闪变
-      scheduleDeferredThinkingFlush(switchGen, sessionAtRender, { hiddenToken, transition });
-    } else {
-      clearDeferredThinkingJobs();
-      endHiddenChatRender(hiddenToken, { transition });
-    }
+    endHiddenChatRender(hiddenToken, { transition });
   }
 }
 
