@@ -216,4 +216,90 @@ mod tests {
         project_body(&mut explicit, OutboundSpec::new(true, false, false));
         assert_eq!(explicit["stream_options"]["include_usage"], json!(false));
     }
+
+    /// 递归收集「前后两份 body 之间被改动的路径」（新增 / 删除 / 值变化都算）。
+    fn changed_paths(before: &Value, after: &Value, path: String, out: &mut Vec<String>) {
+        match (before, after) {
+            (Value::Object(a), Value::Object(b)) => {
+                for (k, v) in a {
+                    let p = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    match b.get(k) {
+                        Some(other) => changed_paths(v, other, p, out),
+                        None => out.push(p),
+                    }
+                }
+                for k in b.keys() {
+                    if !a.contains_key(k) {
+                        out.push(if path.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{path}.{k}")
+                        });
+                    }
+                }
+            }
+            (Value::Array(a), Value::Array(b)) => {
+                for i in 0..a.len().min(b.len()) {
+                    changed_paths(&a[i], &b[i], format!("{path}[{i}]"), out);
+                }
+                if a.len() != b.len() {
+                    out.push(path);
+                }
+            }
+            _ => {
+                if before != after {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    /// **投影只碰这几处** —— 请求快照记的是投影前的那一份（`docs/REQUEST-SNAPSHOT.md`），
+    /// 两者之间的差异就是这张清单。
+    ///
+    /// 这条用例是那份文档的闸门：往 `project_body` 里加任何新的改写，这个集合就会变红，
+    /// 逼着人回来把「快照与实发的差异」一并更新 —— 否则快照会开始**少说**模型看到的东西，
+    /// 而看快照的人不会知道该怀疑哪里。
+    #[test]
+    fn projection_touches_only_the_documented_fields() {
+        let mut body = json!({
+            "model": "m",
+            "messages": [
+                { "role": "assistant", "content": "答", "synthetic": true, "reasoning": "想" },
+                { "role": "user", "content": "问", "synthetic": true }
+            ],
+            "tools": []
+        });
+        let before = body.clone();
+        // 带 tools 的流式请求：思考要回传（has_tools=true）、传输字段要落
+        project_body(&mut body, OutboundSpec::new(true, false, true));
+
+        let mut touched = Vec::new();
+        changed_paths(&before, &body, String::new(), &mut touched);
+        touched.sort();
+
+        assert_eq!(
+            touched,
+            vec![
+                // ① 账本内部字段被剥掉（平台补的正文标记 / 真思考）
+                "messages[0].reasoning".to_string(),
+                // ② 真思考抬成上游字段（缺了补占位串）
+                "messages[0].reasoning_content".to_string(),
+                "messages[0].synthetic".to_string(),
+                "messages[1].synthetic".to_string(),
+                // ③ 传输字段
+                "stream".to_string(),
+                "stream_options".to_string(),
+                // ④ 空 tools 整键删（兼容网关会 400）
+                "tools".to_string(),
+            ]
+        );
+        // 「模型看到的内容」一个字段都不许动：正文与 tool_calls 原样。
+        assert_eq!(body["messages"][0]["content"], json!("答"));
+        assert_eq!(body["messages"][1]["content"], json!("问"));
+    }
 }

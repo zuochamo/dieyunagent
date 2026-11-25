@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn broken_stdout_flips_the_liveness_flag() {
         let mut writer = BrokenPipe;
-        let err = write_line(&mut writer, "{}").await.err().expect("必须报错");
+        let err = write_line(&mut writer, "{}").await.expect_err("必须报错");
         mark_stdout_dead(&err);
         assert!(!stdout_alive());
         // 同进程其它用例共用这个开关，测完复位。

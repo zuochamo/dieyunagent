@@ -100,6 +100,14 @@ pub struct PlannerStartParams {
     /// Host passes the model setting `agentToolCallLimit` (per Context tier).
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
+    /// Host passes the model setting `agentMaxRounds` (per Context tier)。
+    ///
+    /// 以前这里烤着两个字面量（explore 24 / worker 96），跨语言各留一份默认值 ——
+    /// `agent-limits.js` 的注释里早就写着「改一边就静默分叉」，2026-11-19 真的分叉了：
+    /// 宿主把轮次上限调到 500，plan 的执行器仍在 96 轮被拦腰截断。
+    /// 现在只由宿主传；`None`/0 表示宿主没给，Node 侧回落到同一份 `agentMaxRounds`。
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
 }
 
 fn default_max_output_tokens() -> u32 {

@@ -19,7 +19,42 @@ fn sample_params() -> PlannerStartParams {
         temperature: 0.7,
         resume_checkpoint: None,
         max_tool_calls: None,
+        max_rounds: None,
     }
+}
+
+/// 回归（2026-11-19）：worker / explore 子循环的轮次预算**只认宿主传入值**。
+///
+/// 以前 `workers.rs` 烤着 `"maxRounds": 96`、`trace.rs` 烤着 `24`，于是宿主把
+/// `agentMaxRounds` 调到 500 对 plan 完全无效 —— 执行器仍在第 96 轮被拦腰截断，
+/// 撞上限那一轮没有结论，整批只能重做（`agent-limits.js` 的注释早就写着
+/// 「跨语言各留一份默认值，改一边就静默分叉」）。
+#[test]
+fn worker_round_budget_comes_from_host() {
+    let mgr = PlannerRunManager::default();
+    let mut params = sample_params();
+    params.max_rounds = Some(777);
+    let start = mgr.start(params).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "plan_llm".into(),
+            content: Some(plan_json.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let loop_start = mgr
+        .worker_loop_body(&run_id, "A", "A1", "sa-worker-1", None, "", "")
+        .unwrap();
+    assert_eq!(loop_start["maxRounds"], 777, "worker 轮次预算必须来自宿主");
+    // 没给轮次预算时不许回退成字面量：0 让 Node 用同一份 `agentMaxRounds`
+    let mut bare = sample_params();
+    bare.max_rounds = None;
+    assert_eq!(super::planner_max_rounds(&bare), 0);
+    assert_eq!(super::planner_max_rounds(&sample_params()), 0);
 }
 
 #[test]
@@ -385,7 +420,307 @@ fn round_limit_batch_keeps_results_and_goes_to_review() {
     );
     assert_eq!(state["hitRoundLimit"], true);
 }
-/// 宿主漏回一条 worker 结果：补一条 error 结果，验收必须看得见这个子任务。
+/// 回归（2026-11-19）：explore（只读勘察）被截断**不能**把整轮标成 `hit_round_limit`；
+/// 勘察排在**拆解之前**，所以截断的勘察结论仍然作为拆解的输入往下走。
+///
+/// explore 撞上限后继续「拆解 → 调度执行器」，计划仍会被完整执行；以前把标志置到 run 级，
+/// 于是 worker 全成功、汇总也出了正文的一轮仍被宿主判成「额度用尽」，界面显示「本段预算用完」。
+#[test]
+fn explore_truncation_does_not_mark_the_whole_run_as_limited() {
+    let mgr = PlannerRunManager::default();
+    let mut params = sample_params();
+    params.has_explore_tools = true; // 走真实的「勘察 → 拆解 → 执行器」链路
+    let start = mgr.start(params).unwrap();
+    assert_eq!(
+        start["phase"], "need_explore_loop",
+        "有只读工具时先勘察、再拆解：{start}"
+    );
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let after_explore = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "explore_loop".into(),
+                content: Some(String::new()),
+                hit_round_limit: true,
+                partial_content: Some("勘察到一半".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        after_explore["phase"], "need_plan_llm",
+        "勘察只是拆解的输入，截断也要接着拆解：{after_explore}"
+    );
+    let plan_json = r#"{"planSummary":"s","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    let r = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "plan_llm".into(),
+                content: Some(plan_json.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(r["phase"], "need_workers", "勘察被截断也要继续调度执行器");
+    let state = mgr.state(&run_id).unwrap();
+    assert_eq!(
+        state["hitRoundLimit"],
+        false,
+        "勘察被截断不是整轮预算耗尽：{state}"
+    );
+}
+/// 回归（2026-11-21）：勘察结论与计划摘要各占一张卡。
+///
+/// 勘察前移到拆解之前以后，trace[0] 是「Explore · 只读勘察」卡，勘察结论就写在它的 thought 里；
+/// `update_plan_trace` 原来写 `first_mut()`，于是计划摘要把勘察结论整段覆盖、卡片标题与内容错位。
+#[test]
+fn explore_notes_survive_the_plan_summary_card() {
+    let mgr = PlannerRunManager::default();
+    let mut params = sample_params();
+    params.has_explore_tools = true;
+    let start = mgr.start(params).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "explore_loop".into(),
+            content: Some("勘察结论：入口在 src/main-entry.js".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let plan_json = r#"{"planSummary":"把入口拆开","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "plan_llm".into(),
+            content: Some(plan_json.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let state = mgr.state(&run_id).unwrap();
+    let trace = state["trace"].as_array().unwrap();
+    let explore = trace
+        .iter()
+        .find(|e| e["phase"].as_str().unwrap_or("").contains("Explore"))
+        .expect("勘察卡要留着");
+    let explore_thought = explore["thought"].as_str().unwrap_or("");
+    assert!(
+        explore_thought.contains("入口在 src/main-entry.js"),
+        "勘察结论不能被计划摘要覆盖：{explore_thought}"
+    );
+    let plan_card = trace
+        .iter()
+        .find(|e| e["phase"].as_str().unwrap_or("").contains("任务拆解"))
+        .expect("计划卡要在");
+    let plan_thought = plan_card["thought"].as_str().unwrap_or("");
+    assert!(
+        plan_thought.contains("把入口拆开"),
+        "计划摘要在计划卡上：{plan_thought}"
+    );
+    assert!(
+        !plan_thought.contains("入口在 src/main-entry.js"),
+        "两张卡各说各的：{plan_thought}"
+    );
+}
+
+/// 回归（2026-11-19 P1）：收尾即摘句柄。
+///
+/// `AppState` 只建一次 planner，运行期没有别的回收点 —— 一条 run 的 results（worker 全文输出）、
+/// trace、plan 会一直驻留到 core 重启。Done / Cancelled 之后再查应该是 NOT_FOUND。
+#[test]
+fn planner_run_is_released_once_finished() {
+    let mgr = PlannerRunManager::default();
+    let start = mgr.start(sample_params()).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "plan_llm".into(),
+            content: Some(plan_json.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "worker_batch".into(),
+            worker_results: vec![WorkerResultInput {
+                id: "A1".into(),
+                worker: "A".into(),
+                subagent_id: None,
+                output: Some("done".into()),
+                error: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "review_llm".into(),
+            content: Some(r#"{"accepted":true,"retry":[],"notes":"ok"}"#.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let done = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "synthesize_llm".into(),
+                content: Some("最终答复".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(done["phase"], "done");
+    let err = mgr.state(&run_id).expect_err("收尾后必须已摘句柄");
+    assert!(
+        matches!(err, CoreError::Rpc { code, .. } if code == "NOT_FOUND"),
+        "收尾后 state 应为 NOT_FOUND，实际 {err:?}"
+    );
+}
+
+/// 回归（2026-11-19 P1）：撞上限的那一轮**不许再派重试批**。
+///
+/// `workers.rs` 撞上限时明确写「不再派新活」，验收却还能 `set_worker_queues(retry_jobs)` ——
+/// 预算耗尽后又起一整批子循环，用户看到「说用完却又跑一遍」。
+#[test]
+fn round_limited_batch_does_not_dispatch_retry() {
+    let mgr = PlannerRunManager::default();
+    let start = mgr.start(sample_params()).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "plan_llm".into(),
+            content: Some(plan_json.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "worker_batch".into(),
+            worker_results: vec![WorkerResultInput {
+                id: "A1".into(),
+                worker: "A".into(),
+                subagent_id: None,
+                output: Some("半成品".into()),
+                error: None,
+            }],
+            hit_round_limit: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let r = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "review_llm".into(),
+                content: Some(
+                    r#"{"accepted":false,"retry":[{"worker":"A","subtaskIds":["A1"],"reason":"没做完"}]}"#
+                        .into(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        r["phase"], "need_synthesize_llm",
+        "预算已耗尽时不许再派重试批：{r}"
+    );
+}
+
+/// 回归（2026-11-19 P1）：验收点名的执行器名要**归一**后再匹配计划。
+///
+/// 评审 LLM 常写小写 `"a"`；老实现直接 `t.worker == worker` 一条都匹配不上 →
+/// 整批变空 → trace 说「需重试」实际一条没派，直接汇总交付。
+#[test]
+fn retry_worker_name_is_normalized() {
+    let mgr = PlannerRunManager::default();
+    let start = mgr.start(sample_params()).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "plan_llm".into(),
+            content: Some(plan_json.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "worker_batch".into(),
+            worker_results: vec![WorkerResultInput {
+                id: "A1".into(),
+                worker: "A".into(),
+                subagent_id: None,
+                output: Some("done".into()),
+                error: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let r = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "review_llm".into(),
+                content: Some(
+                    r#"{"accepted":false,"retry":[{"worker":"a","subtaskIds":["A1"],"reason":"重跑"}]}"#
+                        .into(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(r["phase"], "need_retry_workers", "小写执行器名要能匹配计划");
+    let jobs = r["workerJobs"].as_array().cloned().unwrap_or_default();
+    assert!(!jobs.is_empty(), "必须真的派出一批重试：{r}");
+}
+
+/// 回归（2026-11-19 P1）：计划里重复的子任务 id 要重编号（账本按 id 收敛结果）。
+#[test]
+fn duplicate_subtask_ids_are_renumbered() {
+    let mgr = PlannerRunManager::default();
+    let start = mgr.start(sample_params()).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[
+        {"id":"A1","worker":"A","title":"t1","instruction":"do1","expectedOutput":"d1"},
+        {"id":"A1","worker":"A","title":"t2","instruction":"do2","expectedOutput":"d2"}
+    ]}"#;
+    let r = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "plan_llm".into(),
+                content: Some(plan_json.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let subtasks = r["plan"]["subtasks"].as_array().cloned().unwrap_or_default();
+    assert_eq!(subtasks.len(), 2, "两条子任务都要留下：{r}");
+    let id0 = subtasks[0]["id"].as_str().unwrap_or("");
+    let id1 = subtasks[1]["id"].as_str().unwrap_or("");
+    assert_ne!(id0, id1, "重复 id 必须重编号（{id0} / {id1}）");
+}
+
 #[test]
 fn missing_worker_result_becomes_an_explicit_error() {
     let mgr = PlannerRunManager::default();
@@ -440,4 +775,253 @@ fn poisoned_lock_does_not_brick_the_planner() {
     }));
     assert!(mgr.runs.is_poisoned(), "前提：锁已毒化");
     assert!(mgr.start(sample_params()).is_ok(), "毒化后仍要能开工");
+}
+
+/// 回归（2026-11-19 连中四例）：汇总轮的 system prompt **不许**拼 agent 的执行者人格
+/// （`sys_content`）。
+///
+/// 那是「你有这些工具、按这些格式调用」的人格，而汇总请求里没有 `tools` 字段 —— 模型于是把
+/// 工具调用当正文吐出来（`<｜｜DSML｜｜ calls>…invoke name="host_exec"…`），交付层从标记处删到
+/// 全文末尾 ⇒ 整段归零 ⇒ 账本只剩「（模型未生成文字答复。）」，用户看到「活干完了但任务断了」。
+#[test]
+fn synthesize_system_prompt_is_not_the_agent_persona() {
+    let mgr = PlannerRunManager::default();
+    let start = mgr.start(sample_params()).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "plan_llm".into(),
+            content: Some(plan_json.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "worker_batch".into(),
+            worker_results: vec![WorkerResultInput {
+                id: "A1".into(),
+                worker: "A".into(),
+                subagent_id: None,
+                output: Some("改完了".into()),
+                error: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let r = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "review_llm".into(),
+                content: Some(r#"{"accepted":true,"retry":[],"notes":"通过"}"#.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(r["phase"], "need_synthesize_llm", "{r}");
+    let sys = r["llmBody"]["messages"][0]["content"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !sys.contains("sys"),
+        "汇总 system 不许拼 sys_content（执行者人格会诱发工具调用当正文）：{sys}"
+    );
+    assert!(
+        sys.contains("没有工具"),
+        "必须明确告诉模型它没有工具、不许输出工具调用标记：{sys}"
+    );
+    assert!(
+        r["llmBody"].get("tools").is_none(),
+        "汇总请求本来就带不了工具，人格却按「能调工具」写，就是这次事故的成因"
+    );
+    let user_body = r["llmBody"]["messages"][1]["content"].as_str().unwrap_or("");
+    assert!(
+        user_body.contains("【子任务结果】"),
+        "子任务产出仍然必须进汇总输入：{user_body}"
+    );
+    assert!(
+        user_body.contains("改完了"),
+        "子任务正文必须进汇总输入：{user_body}"
+    );
+}
+
+/// 回归（2026-11-19）：验收判「未通过」但没点名重试项时，事实必须进 trace、也必须进汇总提示词。
+///
+/// 以前 `accepted=false + retry=[]` 与「通过」走同一条路（直接汇总），汇总提示词里又没有
+/// 验收结论 —— 于是坏产出被总结成「已完成」，用户完全看不出来。
+#[test]
+fn rejected_without_retry_keeps_the_fact_and_reaches_synthesizer() {
+    let mgr = PlannerRunManager::default();
+    let start = mgr.start(sample_params()).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "plan_llm".into(),
+            content: Some(plan_json.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "worker_batch".into(),
+            worker_results: vec![WorkerResultInput {
+                id: "A1".into(),
+                worker: "A".into(),
+                subagent_id: None,
+                output: Some("做了一半".into()),
+                error: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let r = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "review_llm".into(),
+                content: Some(r#"{"accepted":false,"retry":[],"notes":"npm test 未通过"}"#.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(r["phase"], "need_synthesize_llm", "{r}");
+    let trace = r["trace"].as_array().unwrap();
+    let last = trace.last().unwrap();
+    assert_eq!(last["phase"], "汇总");
+    assert!(
+        last["thought"].as_str().unwrap_or("").contains("验收未通过"),
+        "trace 必须留下「未通过」的事实：{last}"
+    );
+    let body = r["llmBody"]["messages"][1]["content"].as_str().unwrap_or("");
+    assert!(body.contains("【验收结论】未通过"), "汇总提示词要带验收结论：{body}");
+    assert!(body.contains("npm test 未通过"), "验收说明要进汇总：{body}");
+}
+
+/// 回归（2026-11-19）：汇总轮正文为空 ⇒ 先重问一次，再空就如实标「未成文」，不当成功。
+#[test]
+fn empty_synthesize_is_retried_once_then_marked_unwritten() {
+    let mgr = PlannerRunManager::default();
+    let start = mgr.start(sample_params()).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do","expectedOutput":"done"}]}"#;
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "plan_llm".into(),
+            content: Some(plan_json.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "worker_batch".into(),
+            worker_results: vec![WorkerResultInput {
+                id: "A1".into(),
+                worker: "A".into(),
+                subagent_id: None,
+                output: Some("done".into()),
+                error: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mgr.continue_run(
+        &run_id,
+        PlannerContinueInput {
+            step: "review_llm".into(),
+            content: Some(r#"{"accepted":true,"retry":[],"notes":""}"#.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let retry = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "synthesize_llm".into(),
+                content: Some("   \n ".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        retry["phase"], "need_synthesize_llm",
+        "空正文先重问一次：{retry}"
+    );
+    let done = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "synthesize_llm".into(),
+                content: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(done["phase"], "done");
+    assert!(
+        done["content"].is_null(),
+        "第二轮仍空 ⇒ final_content 留 None，交给交付四态处理：{done}"
+    );
+    let trace = done["trace"].as_array().unwrap();
+    assert!(
+        trace
+            .last()
+            .and_then(|e| e["thought"].as_str())
+            .unwrap_or("")
+            .contains("未成文"),
+        "trace 要如实写「汇总未成文」：{done}"
+    );
+}
+
+/// 回归（2026-11-19）：执行器名认不出时必须**说出来**。
+///
+/// 以前 `normalize_worker_id` 一律兜底成 `"A"` 且不上报 —— `workers.rs` 按 worker 分组，
+/// 于是「执行器B / 前端」这类名字会把多路计划静默折叠成单 worktree 串行队列。
+#[test]
+fn unknown_worker_name_is_surfaced_in_trace() {
+    let mgr = PlannerRunManager::default();
+    let start = mgr.start(sample_params()).unwrap();
+    let run_id = start["runId"].as_str().unwrap().to_string();
+    let plan_json = r#"{"planSummary":"s","subtasks":[
+        {"id":"A1","worker":"前端","title":"t","instruction":"do","expectedOutput":"done"},
+        {"id":"B1","worker":"B","title":"t2","instruction":"do2","expectedOutput":"done2"}]}"#;
+    let r = mgr
+        .continue_run(
+            &run_id,
+            PlannerContinueInput {
+                step: "plan_llm".into(),
+                content: Some(plan_json.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let trace = r["trace"].as_array().unwrap();
+    let hit = trace.iter().any(|e| {
+        e["phase"] == "规划师 · 计划归一"
+            && e["thought"].as_str().unwrap_or("").contains("前端")
+    });
+    assert!(hit, "认不出的执行器名要进 trace：{r}");
+    // 兜底只影响那一条：B 不能被一起吞进 A
+    let workers: Vec<String> = r["plan"]["subtasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["worker"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(workers.contains(&"A".to_string()), "{workers:?}");
+    assert!(workers.contains(&"B".to_string()), "{workers:?}");
 }

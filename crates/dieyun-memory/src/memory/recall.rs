@@ -223,15 +223,24 @@ fn long_mem_hit_json(
     hit
 }
 
-/// 关键词类分支（bm25 / LIKE）的注入强度：**本次查询内**相对最佳命中。
+/// 关键词类分支（bm25 / LIKE）的注入强度 = **覆盖度 × 本次查询内的相对强度**。
 ///
-/// 为什么不给绝对值：bm25 的量纲随语料与查询词长度漂移，跨查询不可比 ——
-/// 宿主此前拿一个绝对阈值（0.12）去卡它，于是「注不注入」取决于查询词有几个字。
-fn keyword_inject_score(score: f64, best: f64) -> f64 {
+/// 两个因子各管一件事，缺一个就会失真：
+/// - **覆盖度**（[`dieyun_base::fts::term_coverage`]）是**绝对**的：FTS 的片段之间是 OR，
+///   只蹭到一个常见词的长句照样能排到最前。早先只有相对强度，于是「任何命中」都等于满分 ——
+///   一条弱命中每轮都会被注入；而 bm25 的绝对值又随语料漂移，当不了绝对强度用。
+///   覆盖度与语料无关：查询 3 个片段、命中 1 个就是 1/3。
+/// - **相对强度**（`score / best`）处理「片段都对上了，但这条明显更差」：bm25 只能同查询内比。
+///
+/// 宿主只拿一个阈值（`agent-limits.memoryInjectMinScore`）卡这个字段，所以它必须同时
+/// 「够绝对」（≤1/3 覆盖度的弱命中挂不进）与「够稳」（换个语料库不会整体漂移）。
+fn keyword_inject_score(score: f64, best: f64, coverage: f64) -> f64 {
+    let coverage = coverage.clamp(0.0, 1.0);
     if best <= 0.0 {
-        return 1.0;
+        // 没有正分基线（全都是 ≤0 的排名）：只剩覆盖度可依
+        return coverage;
     }
-    (score / best).clamp(0.0, 1.0)
+    (score / best).clamp(0.0, 1.0) * coverage
 }
 
 /// 语义分支的注入强度：余弦本身就是绝对的、跨查询可比的量，直接夹到 [0,1]。
@@ -383,10 +392,12 @@ impl MemoryStore {
         let hits = self.fts_search_long(None, q, limit)?;
         let total = hits.len();
         let best = hits.first().map(|(s, _)| *s).unwrap_or(0.0);
+        let terms = dieyun_base::fts::query_terms(q);
         let results: Vec<Value> = hits
             .into_iter()
             .map(|(score, row)| {
                 let (id, content, source, scope, kind, importance, status, created_at) = row;
+                let coverage = dieyun_base::fts::term_coverage(&content, &terms);
                 long_mem_hit_json(
                     id,
                     content,
@@ -397,7 +408,7 @@ impl MemoryStore {
                     status,
                     created_at,
                     score,
-                    keyword_inject_score(score, best),
+                    keyword_inject_score(score, best, coverage),
                     false,
                 )
             })
@@ -654,10 +665,12 @@ impl MemoryStore {
         }
         let hits = self.fts_search_long(Some(scope), q, limit)?;
         let best = hits.first().map(|(s, _)| *s).unwrap_or(0.0);
+        let terms = dieyun_base::fts::query_terms(q);
         Ok(hits
             .into_iter()
             .map(|(score, row)| {
                 let (id, content, source, scope, kind, importance, status, created_at) = row;
+                let coverage = dieyun_base::fts::term_coverage(&content, &terms);
                 long_mem_hit_json(
                     id,
                     content,
@@ -668,7 +681,7 @@ impl MemoryStore {
                     status,
                     created_at,
                     score,
-                    keyword_inject_score(score, best),
+                    keyword_inject_score(score, best, coverage),
                     false,
                 )
             })
@@ -737,15 +750,22 @@ impl MemoryStore {
 
 #[cfg(test)]
 mod tests {
-    /// 关键词分支的注入强度按「本次查询内最佳命中」归一。
+    /// 关键词分支的注入强度 = 覆盖度 × 本次查询内相对强度。
     ///
-    /// 宿主以前拿绝对阈值 0.12 卡 bm25 —— 那个数随语料与查询词长度漂移，跨查询不可比。
+    /// 宿主以前拿绝对阈值 0.12 卡 bm25 —— 那个数随语料与查询词长度漂移，跨查询不可比；
+    /// 改成「只按最佳命中归一」之后又走到另一个极端：**任何命中都等于满分**（top 恒为 1.0），
+    /// 一条只蹭到一个常见词的长句每轮都会被注入。覆盖度补上那个绝对量。
     #[test]
-    fn keyword_inject_score_is_relative_to_the_best_hit() {
-        assert_eq!(keyword_inject_score(4.0, 4.0), 1.0, "最佳命中恒为 1");
-        assert!((keyword_inject_score(2.0, 4.0) - 0.5).abs() < 1e-9);
-        assert_eq!(keyword_inject_score(-1.0, 4.0), 0.0, "负相关夹到 0");
-        assert_eq!(keyword_inject_score(3.0, 0.0), 1.0, "没有正分基线时一律放行");
+    fn keyword_inject_score_is_coverage_times_relative() {
+        // 片段全覆盖 + 本查询最佳命中 = 满分
+        assert_eq!(keyword_inject_score(4.0, 4.0, 1.0), 1.0);
+        // 只对上一半片段：即便它是本次最佳命中，也只有 0.5（片段是 OR 连接的，不能拿满）
+        assert_eq!(keyword_inject_score(4.0, 4.0, 0.5), 0.5);
+        assert!((keyword_inject_score(4.0, 4.0, 1.0 / 3.0) - 1.0 / 3.0).abs() < 1e-9);
+        // 相对强度仍按同查询内最佳归一
+        assert!((keyword_inject_score(2.0, 4.0, 1.0) - 0.5).abs() < 1e-9);
+        assert_eq!(keyword_inject_score(-1.0, 4.0, 1.0), 0.0, "负相关夹到 0");
+        assert_eq!(keyword_inject_score(3.0, 0.0, 0.75), 0.75, "没有正分基线时只剩覆盖度");
     }
 
     /// 语义分支直接用余弦夹到 [0,1]（NaN 归 0，不许漏过阈值）。

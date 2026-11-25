@@ -29,6 +29,16 @@ impl MemoryStore {
         // 运行中的任务每 ~2.5s 保存一次 trace checkpoint（agent.trace_save → upsert_agent_run），
         // 若每次都刷新 updated_at，多个并行任务的会话会在侧栏（ORDER BY updated_at DESC）里不停互换位置。
         // 会话排序只应由真实消息（memory.message_append）驱动。
+        //
+        // 这里是「**迟到的 `running` checkpoint 不许把已收尾的行翻回去**」这一个判据，它的口径是
+        // 一个否定式：只要当前不是 `running`，后面来的 `running` 就丢掉（completed / stopped /
+        // failed / interrupted / awaiting_user / pending_apply / blocked …）。以前枚举
+        // `IN ('completed','stopped','failed')`，于是「迟到的 running checkpoint 把 awaiting_user /
+        // pending_apply 翻回 running」——僵尸 running 行会在下次进会话时被当成「任务中断」。
+        // 新增状态值不需要再回来改这三行。
+        // 注意：这**不是**「可以回收的终态」名单 —— 那个在
+        // `misc.rs::prune_finished_agent_runs`（只有 completed/stopped/failed/interrupted 可删），
+        // `pending_apply` / `awaiting_user` / `blocked` 在这里算「已收尾」，但一行都不能删。
         let user_message_id = optional_i64(input.get("userMessageId"));
         let assistant_message_id = optional_i64(input.get("assistantMessageId"));
         let summary = input
@@ -51,17 +61,17 @@ impl MemoryStore {
                   user_message_id = COALESCE(excluded.user_message_id, agent_runs.user_message_id),
                   assistant_message_id = COALESCE(excluded.assistant_message_id, agent_runs.assistant_message_id),
                   status = CASE
-                    WHEN agent_runs.status IN ('completed', 'stopped', 'failed') AND excluded.status = 'running'
+                    WHEN agent_runs.status <> 'running' AND excluded.status = 'running'
                       THEN agent_runs.status
                     ELSE excluded.status
                   END,
                   summary = CASE
-                    WHEN agent_runs.status IN ('completed', 'stopped', 'failed') AND excluded.status = 'running'
+                    WHEN agent_runs.status <> 'running' AND excluded.status = 'running'
                       THEN agent_runs.summary
                     ELSE COALESCE(excluded.summary, agent_runs.summary)
                   END,
                   state_snapshot = CASE
-                    WHEN agent_runs.status IN ('completed', 'stopped', 'failed') AND excluded.status = 'running'
+                    WHEN agent_runs.status <> 'running' AND excluded.status = 'running'
                       THEN agent_runs.state_snapshot
                     ELSE COALESCE(excluded.state_snapshot, agent_runs.state_snapshot)
                   END,
@@ -115,10 +125,7 @@ impl MemoryStore {
                 .optional()
                 .map_err(CoreError::from)
             })?;
-            if matches!(
-                existing_status.as_deref(),
-                Some("completed" | "stopped" | "failed")
-            ) {
+            if matches!(existing_status.as_deref(), Some(s) if s != "running") {
                 return Ok(json!({ "skipped": true, "runId": run_id }));
             }
         }

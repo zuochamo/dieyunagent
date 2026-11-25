@@ -14,7 +14,10 @@ use super::prompts::{
     build_best_of_n_pick_llm_body, build_explore_loop_messages, build_plan_llm_body,
     build_review_llm_body, build_synthesize_llm_body, format_trace_digest,
 };
-use super::run::{lock_runs, planner_max_tool_calls, InternalPhase, PlannerRunManager, PlannerRunState};
+use super::run::{
+    lock_runs, planner_max_rounds, planner_max_tool_calls, InternalPhase, PlannerRunManager,
+    PlannerRunState,
+};
 use super::types::{Plan, PlannerTraceEntry};
 
 impl PlannerRunManager {
@@ -39,6 +42,7 @@ impl PlannerRunManager {
                             &run.user_prompt,
                             run.plan_repair_attempt,
                             &run.last_plan_raw,
+                            &run.explore_notes,
                         ),
                     );
                     obj.insert("repairAttempt".into(), json!(run.plan_repair_attempt));
@@ -47,10 +51,11 @@ impl PlannerRunManager {
                     if run.explore_skipped || !run.params.has_explore_tools {
                         // Should not happen if logic correct; Node may skip calling loop
                         obj.insert("skipExplore".into(), json!(true));
-                    } else if let Some(plan) = &run.plan {
+                    } else {
+                        // `plan` 为 None = 勘察排在拆解**之前**（现在的正常顺序）：目标直接来自用户任务。
                         let (system, user) = build_explore_loop_messages(
                             &run.params.sys_content,
-                            plan,
+                            run.plan.as_ref(),
                             &run.params.user_text,
                             &run.params.chat_history_block,
                         );
@@ -63,7 +68,7 @@ impl PlannerRunManager {
                                     { "role": "user", "content": user }
                                 ],
                                 "temperature": 0.2,
-                                "maxRounds": 24,
+                                "maxRounds": planner_max_rounds(&run.params),
                                 "maxToolCalls": planner_max_tool_calls(&run.params),
                                 "agentType": "explore"
                             }),
@@ -142,6 +147,10 @@ impl PlannerRunManager {
                                 })
                             })
                             .collect();
+                        // worktree 变更来自状态（`begin_best_of_n_or_review` 写进来的那一次），
+                        // 不在这里另造一份 —— 以前这里写死 `{}`，与另一处实现抢同一个字段，
+                        // 验收「声称改了却零 diff」的规则会按调用顺序静默失效。
+                        let wt_ctx = run.worktree_ctx.clone().unwrap_or_else(|| json!({}));
                         obj.insert(
                             "llmBody".into(),
                             build_review_llm_body(
@@ -149,7 +158,7 @@ impl PlannerRunManager {
                                 &run.params.sys_content,
                                 plan,
                                 &results_json,
-                                &json!({}),
+                                &wt_ctx,
                             ),
                         );
                     }
@@ -174,9 +183,9 @@ impl PlannerRunManager {
                             "llmBody".into(),
                             build_synthesize_llm_body(
                                 &run.params.model,
-                                &run.params.sys_content,
                                 plan,
                                 &results_json,
+                                run.review.as_ref(),
                                 &run.params.user_text,
                                 &run.params.chat_history_block,
                                 &digest,
@@ -256,11 +265,23 @@ impl PlannerRunManager {
         } else {
             ""
         };
-        if let Some(last) = run.trace.first_mut() {
-            last.thought = format!(
-                "{}{plan_lines}{fallback_note}",
-                format!("{}\n\n{todo_lines}", plan.plan_summary)
-            );
+        // 计划摘要要落在**「任务拆解」那张卡**上，不能写 `trace.first_mut()`：
+        // 只读勘察已经前移到拆解之前（run.rs `handle_explore_loop`），trace[0] 是
+        // 「Explore · 只读勘察」那张卡，勘察结论就写在它的 thought 里 —— 写 first_mut
+        // 会把勘察结论整段覆盖，卡片标题与内容还会错位。没有拆解卡时补一张。
+        let thought = format!(
+            "{}{plan_lines}{fallback_note}",
+            format!("{}\n\n{todo_lines}", plan.plan_summary)
+        );
+        if let Some(plan_card) = run
+            .trace
+            .iter_mut()
+            .rev()
+            .find(|e| e.phase.contains("任务拆解"))
+        {
+            plan_card.thought = thought;
+        } else {
+            push_trace(run, "规划师 · 任务拆解", thought);
         }
     }
 }

@@ -66,18 +66,28 @@ fn strip_loose_json(text: &str) -> String {
         .replace(",]", "]")
 }
 
-pub fn normalize_worker_id(raw: &str) -> String {
+/// 归一执行器名。第二个返回值 = **用了兜底**（模型给了不认识的名字）。
+///
+/// 为什么兜底必须能被上层看见：`workers.rs` 按 worker 分组，分组既是「分批依据」也是
+/// 「并行依据」。名字认不出就一律塌成 `"A"`，于是多路计划**静默折叠成单 worktree 串行队列**
+/// （模型写「执行器B」「前端」都会命中这条兜底），界面上一个字的异常都没有（2026-11-19 审计）。
+pub fn normalize_worker_id_checked(raw: &str) -> (String, bool) {
     let w = raw.trim().to_uppercase();
     if w.len() == 1 && w.chars().next().unwrap().is_ascii_uppercase() && w <= "F".to_string() {
-        return w;
+        return (w, false);
     }
     if w.starts_with('W') && w[1..].chars().all(|c| c.is_ascii_digit()) {
-        return w;
+        return (w, false);
     }
     if w.contains("-BN") {
-        return w;
+        return (w, false);
     }
-    "A".into()
+    // 空名字不算「认不出」（模型干脆没写），非空但不认识才算兜底。
+    ("A".into(), !w.is_empty())
+}
+
+pub fn normalize_worker_id(raw: &str) -> String {
+    normalize_worker_id_checked(raw).0
 }
 
 pub fn normalize_agent_type(raw: &str) -> String {
@@ -139,6 +149,7 @@ pub fn parse_completed_outputs(
 fn normalize_one_subtask(
     raw: &Value,
     worker_seq: &mut std::collections::HashMap<String, u32>,
+    notes: &mut Vec<String>,
 ) -> Option<Subtask> {
     let obj = raw.as_object()?;
     let instruction = obj
@@ -155,13 +166,28 @@ fn normalize_one_subtask(
     if instruction.is_empty() {
         return None;
     }
-    let worker = normalize_worker_id(
-        obj.get("worker")
-            .or_else(|| obj.get("executor"))
-            .or_else(|| obj.get("assignee"))
+    let raw_worker = obj
+        .get("worker")
+        .or_else(|| obj.get("executor"))
+        .or_else(|| obj.get("assignee"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("A");
+    let (worker, defaulted) = normalize_worker_id_checked(raw_worker);
+    if defaulted {
+        // 这里就把事实记下来：认不出的名字塌成 A 之后，上层再也看不出「它原本分了 4 路」。
+        let id_hint = obj
+            .get("id")
+            .or_else(|| obj.get("taskId"))
             .and_then(|v| v.as_str())
-            .unwrap_or("A"),
-    );
+            .unwrap_or("(无 id)");
+        let note = format!(
+            "子任务 {id_hint} 的执行器名「{}」无法识别，已归到执行器 {worker}（多路计划可能因此变成单路串行）",
+            raw_worker.trim()
+        );
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
     let seq = worker_seq.entry(worker.clone()).or_insert(0);
     *seq += 1;
     let id = obj
@@ -251,12 +277,12 @@ fn normalize_todo_list(
     }
 }
 
-pub fn normalize_plan_payload(parsed: &Value, _user_text: &str) -> Option<Plan> {
+pub fn normalize_plan_payload(parsed: &Value, _user_text: &str, notes: &mut Vec<String>) -> Option<Plan> {
     if let Some(arr) = parsed.as_array() {
         let mut worker_seq = std::collections::HashMap::new();
         let subtasks: Vec<Subtask> = arr
             .iter()
-            .filter_map(|item| normalize_one_subtask(item, &mut worker_seq))
+            .filter_map(|item| normalize_one_subtask(item, &mut worker_seq, notes))
             .collect();
         if subtasks.is_empty() {
             return None;
@@ -284,14 +310,14 @@ pub fn normalize_plan_payload(parsed: &Value, _user_text: &str) -> Option<Plan> 
     let subtasks: Vec<Subtask> = if let Some(arr) = subtasks_raw.and_then(|v| v.as_array()) {
         let mut worker_seq = std::collections::HashMap::new();
         arr.iter()
-            .filter_map(|raw| normalize_one_subtask(raw, &mut worker_seq))
+            .filter_map(|raw| normalize_one_subtask(raw, &mut worker_seq, notes))
             .collect()
     } else if obj.contains_key("instruction")
         || obj.contains_key("title")
         || obj.contains_key("description")
     {
         let mut worker_seq = std::collections::HashMap::new();
-        normalize_one_subtask(parsed, &mut worker_seq)
+        normalize_one_subtask(parsed, &mut worker_seq, notes)
             .into_iter()
             .collect()
     } else {
@@ -333,8 +359,18 @@ pub fn normalize_plan_payload(parsed: &Value, _user_text: &str) -> Option<Plan> 
     })
 }
 
-pub fn try_parse_plan_from_content(content: &str, user_text: &str) -> Option<Plan> {
-    extract_json_block(content).and_then(|p| normalize_plan_payload(&p, user_text))
+/// 解析计划 + **归一改写记录**（目前只记「执行器名认不出、已折叠到 A」这类静默降级）。
+///
+/// 为什么要分开返回：调用方（`run.rs`）要把它写进 trace。多路计划被折叠成单路串行时，
+/// 界面/日志里必须留一句话，否则只能靠猜「为什么这次只有一条执行流」（2026-11-19 审计）。
+pub fn try_parse_plan_from_content_notes(
+    content: &str,
+    user_text: &str,
+) -> (Option<Plan>, Vec<String>) {
+    let mut notes: Vec<String> = Vec::new();
+    let plan = extract_json_block(content)
+        .and_then(|p| normalize_plan_payload(&p, user_text, &mut notes));
+    (plan, notes)
 }
 
 pub fn build_fallback_plan(user_text: &str) -> Plan {
@@ -450,7 +486,7 @@ mod tests {
         let raw = r#"```json
 {"planSummary":"test","subtasks":[{"id":"A1","worker":"A","title":"t","instruction":"do it","expectedOutput":"done"}]}
 ```"#;
-        let plan = try_parse_plan_from_content(raw, "user").unwrap();
+        let plan = try_parse_plan_from_content_notes(raw, "user").0.unwrap();
         assert_eq!(plan.subtasks.len(), 1);
         assert_eq!(plan.subtasks[0].id, "A1");
     }

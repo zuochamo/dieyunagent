@@ -262,8 +262,16 @@ mod tests {
                 spec.name
             );
         }
-        // 快读预算必须小于宿主侧最小超时（15s），否则永远轮不到触发。
-        assert!(FAST_METHOD_BUDGET_MS < 15_000);
+        // 快读预算必须小于宿主侧最小超时，否则永远轮不到触发。
+        // 那个「宿主最小超时」（`codebase.status` / `graph.status` 的 15s）不是本文件的常量：
+        // 唯一来源是 `src/agent/agent-shared.json#rpc.hostStatusTimeoutMs`（Node 侧
+        // `core-rpc-timeouts.js` 读同一份），所以这里读运行期值 —— 以前手抄 `15_000`，
+        // 宿主调小超时后这条断言照样绿，契约等于没有闸门。
+        let host_min_ms = dieyun_base::shared::shared().rpc.host_status_timeout_ms;
+        assert!(
+            FAST_METHOD_BUDGET_MS < host_min_ms,
+            "Fast 预算 {FAST_METHOD_BUDGET_MS}ms 必须小于宿主最小超时 {host_min_ms}ms"
+        );
     }
 
     /// `memory.status` 从来没实现过（旧测试却断言它有预算）。这条钉住「表即真相」。

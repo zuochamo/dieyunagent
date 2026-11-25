@@ -535,7 +535,7 @@ fn session_memories_are_traceable_and_forgettable() {
     assert!(store.long_memories_by_session("sess-a", 20).unwrap().is_empty());
     assert_eq!(store.long_memories_by_session("sess-b", 20).unwrap().len(), 1);
     assert_eq!(store.archive_long_memories_by_session("sess-a").unwrap(), 0);
-    assert!(store.recent_long_memories(10, Some("global")).unwrap().len() >= 1);
+    assert!(!store.recent_long_memories(10, Some("global")).unwrap().is_empty());
 
     // 同内容再次写入会复活既有行，并把来源会话补上（COALESCE 不覆盖旧来源）
     store
@@ -957,12 +957,22 @@ fn prunes_finished_runs_and_cascades_children() {
             }))
             .unwrap();
     }
-    // 非终态的 run 必须原样保留：running 进行中，planned 是 planner 中间态。
-    for run_id in ["run-live", "run-planned"] {
-        let status = if run_id == "run-live" {
-            "running"
-        } else {
-            "planned"
+    // 非终态的 run 必须原样保留：running 进行中，planned 是 planner 中间态；
+    // awaiting_user / pending_apply / blocked 也都是 UI 恢复入口靠的持久事实
+    //（「等用户回答」「待应用产出」「目标被卡住」），一条都不能被保留窗口当成终态删掉。
+    for run_id in [
+        "run-live",
+        "run-planned",
+        "run-awaiting",
+        "run-pending-apply",
+        "run-blocked",
+    ] {
+        let status = match run_id {
+            "run-live" => "running",
+            "run-planned" => "planned",
+            "run-awaiting" => "awaiting_user",
+            "run-pending-apply" => "pending_apply",
+            _ => "blocked",
         };
         store
             .upsert_agent_run(&json!({
@@ -985,7 +995,10 @@ fn prunes_finished_runs_and_cascades_children() {
     let runs: i64 = guard
         .query_row("SELECT COUNT(*) FROM agent_runs", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(runs, 3, "保留 1 个终态 + running + planned");
+    assert_eq!(
+        runs, 6,
+        "保留 1 个终态 + running/planned/awaiting_user/pending_apply/blocked"
+    );
     let traces: i64 = guard
         .query_row("SELECT COUNT(*) FROM agent_traces", [], |r| r.get(0))
         .unwrap();
@@ -1308,6 +1321,38 @@ fn fts_index_follows_update_and_delete() {
         .is_empty(),
         "删掉的记忆不该再被召回"
     );
+    let _ = std::fs::remove_file(db);
+}
+
+/// 关键词召回的 `injectScore` = 覆盖度 × 相对强度：**只蹭到一个片段的长句拿不到满分**。
+///
+/// 这是宿主那个单一阈值（`agent-limits.memoryInjectMinScore`）能成立的前提：FTS 的片段
+/// 之间是 OR，若只看「相对最佳命中」，任何命中都等于 1.0 —— 一条弱命中每轮都会被注入。
+#[test]
+fn keyword_inject_score_discounts_partial_term_coverage() {
+    let db = std::env::temp_dir().join(format!("dieyun-inject-coverage-{}.sqlite", now_ms()));
+    let _ = std::fs::remove_file(&db);
+    let store = MemoryStore::open(db.clone(), EmbeddingConfig::default()).unwrap();
+    seed_memory(&store, "全文索引与 bm25 排序都在这条里", "note", 3);
+    seed_memory(&store, "只有全文索引，另一个片段没有", "note", 3);
+
+    // 两个片段：只命中其中一个 → 覆盖度 1/2，即便它是本次最佳命中也不能给满分
+    let hits = store
+        .keyword_search_long_memories("全文索引 zzzznotpresent", 5)
+        .unwrap();
+    let results = hits
+        .get("results")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(!results.is_empty(), "至少能召回一条：{hits}");
+    for row in &results {
+        let inject = row.get("injectScore").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        assert!(
+            inject <= 0.5 + 1e-9,
+            "查询两个片段、最多命中一个 → injectScore 不能超过 0.5：{row}"
+        );
+    }
     let _ = std::fs::remove_file(db);
 }
 

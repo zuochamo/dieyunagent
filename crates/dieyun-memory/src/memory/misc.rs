@@ -365,6 +365,14 @@ impl MemoryStore {
                             if let Err(err) = Self::purge_oversized_message_meta(&conn) {
                                 dieyun_base::obs::degraded("memory.purge_meta", &err.to_string());
                             }
+                            // 请求快照里内联的大字段（system / tools）按批搬进 `snapshot_blobs`。
+                            // 放在这条节拍里而不是启动路径：线上已有几十 MB 的逐轮拷贝，
+                            // 启动时搬会卡首屏；这里每次搬一小批（每列 600 行，峰值几十 MB），
+                            // 1500 行的存量约两拍搬完；读侧两种形状都认。
+                            // 成功不写日志（每 30 分钟一条噪声不值），失败要出声。
+                            if let Err(err) = super::snapshot::backfill_snapshot_blobs(&conn, 600) {
+                                dieyun_base::obs::degraded("memory.snapshot_blobs", &err.to_string());
+                            }
                         }
                         Err(err) => {
                             dieyun_base::obs::degraded("memory.prune_open", &err.to_string());
@@ -447,29 +455,33 @@ impl MemoryStore {
 
     /// 已完成 run 的保留窗口：最近 `runs_keep_recent` 条 + 最长 `run_max_age_ms`。
     ///
-    /// 只删终态：`running`（进行中）与 `planned`（planner 写入的中间态）都不动。
+    /// **可回收的只有真终态**（见 `PRUNABLE`）。`running`（进行中）、`planned`（planner 的中间态）、
+    /// `awaiting_user`（这轮在等人）、`pending_apply`（等用户点「应用」）、`blocked`（目标被卡住）
+    /// 都是 **UI 恢复入口所依赖的持久事实** —— 删行等于把入口一起删掉，而产出还躺在 worktree 里。
+    /// 用白名单列举的另一个原因：以后新增的非终态状态默认安全，不用回来改这条 SQL。
     pub(crate) fn prune_finished_agent_runs(
         conn: &Connection,
         policy: &PrunePolicy,
     ) -> Result<usize, CoreError> {
+        const PRUNABLE: &str = "'completed', 'stopped', 'failed', 'interrupted'";
         let cutoff = now_ms() - policy.run_max_age_ms;
-        let deleted = conn
-            .execute(
-                r#"
+        let sql = format!(
+            r#"
                 DELETE FROM agent_runs
-                WHERE status IN ('completed', 'stopped', 'failed')
+                WHERE status IN ({PRUNABLE})
                   AND (
                     updated_at < ?1
                     OR id IN (
                       SELECT id FROM agent_runs
-                      WHERE status IN ('completed', 'stopped', 'failed')
+                      WHERE status IN ({PRUNABLE})
                       ORDER BY updated_at DESC
                       LIMIT -1 OFFSET ?2
                     )
                   )
-                "#,
-                params![cutoff, policy.runs_keep_recent],
-            )
+                "#
+        );
+        let deleted = conn
+            .execute(&sql, params![cutoff, policy.runs_keep_recent])
             .map_err(|e| CoreError::rpc("DB_PRUNE_FAILED", e.to_string()))?;
         Ok(deleted)
     }

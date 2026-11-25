@@ -19,6 +19,7 @@
 //! - 不猜供应商方言。`reasoning_content` / `content` 通道语义由入口盖章（见 `ContentChannel`），
 //!   这里只按字段搬运。
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -32,6 +33,24 @@ const RAW_CAP_BYTES: usize = 4 * 1024 * 1024;
 /// 单次请求的墙钟上限。流式默认更宽：一旦开始出字，慢慢吐是正常的。
 pub const STREAM_TIMEOUT_SECS: u64 = 600;
 pub const NON_STREAM_TIMEOUT_SECS: u64 = 300;
+
+/// 进程级 HTTP 客户端：连接池 / keep-alive / HTTP/2 多路复用都挂在 `Client` 内部。
+///
+/// 构建失败只可能是 TLS 后端不可用这类环境问题，所以结果也缓存 —— 没必要每轮重试一次
+/// 构建（真正要重试的是请求，那在宿主）。超时按请求设置（`RequestBuilder::timeout`），
+/// 两个预算仍是上面那两个常量。
+fn http_client() -> Result<&'static reqwest::Client, CoreError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    let built = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .build()
+            .map_err(|e| format!("LLM 客户端构建失败：{e}"))
+    });
+    match built {
+        Ok(client) => Ok(client),
+        Err(message) => Err(CoreError::rpc("LLM_CONFIG", message.clone())),
+    }
+}
 
 /// 传输层失败的协议码（唯一来源 `src/agent/agent-shared.json` 的 `llmErrors.transportCode`）。
 ///
@@ -456,10 +475,10 @@ pub async fn chat_completion(
     } else {
         NON_STREAM_TIMEOUT_SECS
     };
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout))
-        .build()
-        .map_err(|e| CoreError::rpc("LLM_CONFIG", format!("LLM 客户端构建失败：{e}")))?;
+    // 进程级客户端 + **按请求**超时：连接池 / keep-alive / HTTP/2 多路复用都挂在 `Client`
+    // 内部，逐次新建等于每一轮都重做一次 DNS + TCP + TLS 握手（`chat_completion` 一轮一次，
+    // 工具轮越多付得越多），上一轮的连接也永远复用不到。
+    let client = http_client()?;
     // `stream` 是**传输**语义：宿主/账本只表达「这一轮要不要增量」，请求体里的 `stream`
     // 字段以这里为准 —— 唯一 HTTP 实现说了算，别处再写一次就会分叉（2026-11-17 的坑：
     // `loop_run.next_body` 曾硬写 `stream: false`，端点于是回整包，中转在非流式口径下
@@ -467,6 +486,7 @@ pub async fn chat_completion(
     let mut body = body;
     apply_transport_fields(&mut body, stream);
     let request = apply_llm_headers(client.post(url), headers, &cfg.api_key, &cfg.auth_mode)
+        .timeout(Duration::from_secs(timeout))
         .json(&body);
     let response = request.send().await.map_err(|e| transport_error(&e))?;
     let status = response.status();
@@ -500,31 +520,37 @@ pub async fn chat_completion(
     }
 
     let mut response = response;
-    let mut buffer = String::new();
-    let mut raw = String::new();
+    // 缓冲按**字节**累积、切出完整行之后再解码：TCP / HTTP 分片边界不保证落在 UTF-8
+    // 字符边界上（中文与 emoji 是 3–4 字节），先 `from_utf8_lossy` 会把被截断那一半
+    // 永久替换成 U+FFFD —— 而且这个坏字符会经 `acc.content` 落进账本、下一轮原样回传给
+    // 模型，属于不可恢复的丢字。
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut raw: Vec<u8> = Vec::new();
     // 整包兜底：端点**忽略 `stream: true`**（或压根不看这个字段）时会回一份完整 JSON
     // （`content-type: application/json`，不是 SSE）。此时下面的循环一条 `data:` 都找不到，
     // 若就这么收场，本轮会以「空回复」结束，而且 content / reasoning / tool_calls 三样一起丢
     // ——2026-11-17 真事：中转回整包 `message.tool_calls`，客户端表现成「模型什么都没说」。
     // 所以这里留一份原文，一行 SSE 都没见过就按非流式解析（与非流式分支同一条路径）。
-    let mut whole = String::new();
+    let mut whole: Vec<u8> = Vec::new();
     let mut saw_sse = false;
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|e| transport_error(&e))?
     {
-        let text = String::from_utf8_lossy(&chunk).to_string();
         if include_raw && raw.len() < RAW_CAP_BYTES {
-            raw.push_str(&text);
+            raw.extend_from_slice(&chunk);
         }
         if whole.len() < RAW_CAP_BYTES {
-            whole.push_str(&text);
+            whole.extend_from_slice(&chunk);
         }
-        buffer.push_str(&text);
-        // 逐行消费；半行留在 buffer 里等下一块
-        while let Some(idx) = buffer.find('\n') {
-            let line: String = buffer.drain(..=idx).collect();
+        buffer.extend_from_slice(&chunk);
+        // 逐行消费；半行（含不完整的 UTF-8 尾字节）留在 buffer 里等下一块
+        while let Some(idx) = buffer.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = buffer.drain(..=idx).collect();
+            // 到 `\n` 为止是完整的一行：此时才解码，跨分片的多字节字符不会再被切开。
+            // 真出现非法字节（上游本身乱码）只影响这一行，不污染后续。
+            let line = String::from_utf8_lossy(&line);
             let line = line.trim_end_matches(['\r', '\n']);
             let Some(data) = line.strip_prefix("data:") else {
                 // `event:` / 心跳 / 空行：不是数据行
@@ -539,8 +565,10 @@ pub async fn chat_completion(
             break;
         }
     }
-    if !buffer.trim().is_empty() {
-        if let Some(data) = buffer.trim_start().strip_prefix("data:") {
+    if !buffer.is_empty() {
+        let rest = String::from_utf8_lossy(&buffer);
+        let rest = rest.trim();
+        if let Some(data) = rest.strip_prefix("data:") {
             saw_sse = true;
             if let Some(delta) = acc.feed_sse_data(data) {
                 on_delta(&delta);
@@ -549,26 +577,29 @@ pub async fn chat_completion(
     }
     // 一条 SSE 数据行都没有 → 上游回的是整包（或错误页）。按非流式解析：正常就能拿到
     // content / reasoning / tool_calls；不是 JSON 就报 LLM_PARSE，而不是静默当空回复。
-    if !saw_sse && !whole.trim().is_empty() {
-        acc.feed_body(&whole)?;
+    let whole_text = String::from_utf8_lossy(&whole).to_string();
+    if !saw_sse && !whole_text.trim().is_empty() {
+        acc.feed_body(&whole_text)?;
         if include_raw {
-            raw = whole.clone();
+            raw = whole;
         }
     }
     // 上游把错误当正常流回吐：必须变成失败，否则这轮以「空回复」收场。
     if let Some(upstream) = acc.upstream_error() {
         let message = format!("LLM 上游错误：{upstream}");
         if include_raw {
+            // 抓包原文只为看：整段一次性解码（解析路径才是逐行解码的）
+            let raw_text = String::from_utf8_lossy(&raw);
             return Err(CoreError::rpc(
                 "LLM_API",
-                format!("{message}\n--- raw ---\n{raw}"),
+                format!("{message}\n--- raw ---\n{raw_text}"),
             ));
         }
         return Err(CoreError::rpc("LLM_API", message));
     }
     let mut outcome = acc.finish();
     if include_raw {
-        outcome.raw = Some(raw);
+        outcome.raw = Some(String::from_utf8_lossy(&raw).to_string());
     }
     Ok(outcome)
 }

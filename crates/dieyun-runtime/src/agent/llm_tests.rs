@@ -467,3 +467,78 @@ async fn transport_failure_carries_code_and_source_chain() {
         "必须带 source 链：真正原因只在链里，顶层只有一句 error sending request：{msg}"
     );
 }
+
+/// 分片边界落在**多字节字符中间**时不能丢字。
+///
+/// 以前逐 chunk `String::from_utf8_lossy`：被截断的中文/emoji 会永久变成 U+FFFD，而且这个
+/// 坏字符会经 `acc.content` 落进账本、下一轮原样回传给模型（不可恢复的丢字）。现在缓冲按
+/// 字节累积、切出完整行之后再解码，所以半个字符会等到下一块补齐。
+#[tokio::test]
+async fn chunk_boundary_inside_multibyte_char_is_not_corrupted() {
+    use std::collections::HashMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            if String::from_utf8_lossy(&buf[..n]).contains("\r\n\r\n") {
+                break;
+            }
+        }
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"中文\"}}]}\n\ndata: [DONE]\n\n";
+        let bytes = body.as_bytes();
+        // 切在第一个非 ASCII 字节之后一位：正好把一个 3 字节的中文字劈成 1 + 2
+        let cut = bytes
+            .iter()
+            .position(|b| *b >= 0x80)
+            .map(|i| i + 1)
+            .expect("测试载荷里必须有中文");
+        let (first, second) = bytes.split_at(cut);
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\ntransfer-encoding: chunked\r\n\r\n",
+        );
+        out.extend_from_slice(format!("{:x}\r\n", first.len()).as_bytes());
+        out.extend_from_slice(first);
+        out.extend_from_slice(b"\r\n");
+        out.extend_from_slice(format!("{:x}\r\n", second.len()).as_bytes());
+        out.extend_from_slice(second);
+        out.extend_from_slice(b"\r\n0\r\n\r\n");
+        socket.write_all(&out).await.expect("write");
+        socket.flush().await.ok();
+    });
+
+    let cfg = LlmConfig {
+        api_key: "sk-test".to_string(),
+        auth_mode: "bearer".to_string(),
+        ..Default::default()
+    };
+    let url = format!("http://{addr}/v1/chat/completions");
+    let outcome = chat_completion(
+        &cfg,
+        &url,
+        &HashMap::new(),
+        json!({"model": "fake", "stream": true}),
+        true,
+        false,
+        |_delta| {},
+    )
+    .await
+    .expect("chat");
+
+    assert_eq!(outcome.content, "中文", "跨分片的多字节字符不能变成 U+FFFD");
+    assert!(
+        !outcome.content.contains('\u{FFFD}'),
+        "内容里不许出现替换字符"
+    );
+    server.await.expect("server join");
+}

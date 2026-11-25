@@ -13,7 +13,9 @@ use dieyun_base::error::CoreError;
 
 use super::plan_parse::{collect_workers_from_plan, worker_job_needs_best_of_n};
 use super::prompts::build_worker_task_system;
-use super::run::{planner_max_tool_calls, InternalPhase, PlannerRunManager, PlannerRunState};
+use super::run::{
+    planner_max_rounds, planner_max_tool_calls, InternalPhase, PlannerRunManager, PlannerRunState,
+};
 use super::trace::push_trace;
 use super::types::{PlannerContinueInput, ReviewResult, Subtask, WorkerJobOut, WorkerResultInput};
 
@@ -114,23 +116,23 @@ impl PlannerRunManager {
             } else {
                 String::new()
             };
+            // 这里**不宣称「并行」**：并发度是宿主的事实（`plannerMaxParallelWorkers` 上限、
+            // worktree 隔离探测结果、Best-of-N 天然串行、同一执行器的多个子任务顺序执行）。
+            // core 只数了数 worker 名字就说「N 路并行」，于是「实际单路跑完 N 路」永远查不出来
+            // （2026-11-19 实测：界面全程显示 4 路并行，墙钟却是 6 段首尾相接）。
+            // 事实由宿主回报（`调度 · 实际并发`），这里只报「有几个执行器」。
             let note = if workers.len() > 1 {
-                format!(
-                    "调度 · {} 路并行子 Agent（worktree）{bn_note}",
-                    workers.len()
-                )
+                format!("调度 · {} 个执行器（worktree）{bn_note}", workers.len())
             } else {
                 format!("调度 · 子 Agent（worktree）{bn_note}")
             };
-            push_trace(
-                run,
-                note,
-                workers
-                    .iter()
-                    .map(|w| format!("执行器 {w}"))
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-            );
+            let mut thought = workers
+                .iter()
+                .map(|w| format!("执行器 {w}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            thought.push_str("（同一执行器的多个子任务顺序执行；实际并发度由宿主决定）");
+            push_trace(run, note, thought);
         }
         let all_jobs: Vec<WorkerJobOut> = workers
             .into_iter()
@@ -223,7 +225,7 @@ pub(super) fn build_worker_loop_start(
             { "role": "user", "content": user }
         ],
         "temperature": run.params.temperature,
-        "maxRounds": 96,
+        "maxRounds": planner_max_rounds(&run.params),
         "maxToolCalls": planner_max_tool_calls(&run.params),
         "agentType": task.agent_type,
         "worker": job.worker,
@@ -232,14 +234,26 @@ pub(super) fn build_worker_loop_start(
     })
 }
 
-pub(super) fn build_retry_jobs(run: &PlannerRunState, review: &ReviewResult) -> Vec<WorkerJobOut> {
+/// 评审要求重试的子任务 → 重试批。
+///
+/// 返回 `(jobs, unmatched)`：`unmatched` 是「评审点了名、但对不上计划里任何子任务」的条目。
+/// 以前对不上就 `continue` 静默丢掉，整批可能变成空 → 直接进汇总：trace 显示「需重试」，
+/// 实际一条都没派，用户看到的是「验收没过却照样交付」。现在由调用方把原因写进 trace。
+pub(super) fn build_retry_jobs(
+    run: &PlannerRunState,
+    review: &ReviewResult,
+) -> (Vec<WorkerJobOut>, Vec<String>) {
     let plan = match &run.plan {
         Some(p) => p,
-        None => return vec![],
+        None => return (vec![], vec![]),
     };
     let mut jobs = Vec::new();
+    let mut unmatched: Vec<String> = Vec::new();
     for item in &review.retry {
-        let worker = item.get("worker").and_then(|v| v.as_str()).unwrap_or("A");
+        // worker 名必须走**同一份归一**（`plan_parse` 里计划解析也用它）：
+        // 评审 LLM 偶尔输出 `"a"` / `"执行器 A"`，不归一时 `t.worker == worker` 一条都匹配不上。
+        let raw_worker = item.get("worker").and_then(|v| v.as_str()).unwrap_or("A");
+        let worker = super::plan_parse::normalize_worker_id(raw_worker);
         let reason = item
             .get("reason")
             .and_then(|v| v.as_str())
@@ -249,7 +263,8 @@ pub(super) fn build_retry_jobs(run: &PlannerRunState, review: &ReviewResult) -> 
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
+                    .filter_map(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
                     .collect()
             })
             .unwrap_or_default();
@@ -260,6 +275,11 @@ pub(super) fn build_retry_jobs(run: &PlannerRunState, review: &ReviewResult) -> 
             .cloned()
             .collect();
         if tasks.is_empty() {
+            unmatched.push(if ids.is_empty() {
+                format!("执行器 {raw_worker}")
+            } else {
+                format!("执行器 {raw_worker}：{}", ids.iter().cloned().collect::<Vec<_>>().join("/"))
+            });
             continue;
         }
         let mut job = WorkerJobOut {
@@ -276,6 +296,6 @@ pub(super) fn build_retry_jobs(run: &PlannerRunState, review: &ReviewResult) -> 
         }
         jobs.push(job);
     }
-    jobs
+    (jobs, unmatched)
 }
 

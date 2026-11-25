@@ -25,6 +25,165 @@ use dieyun_base::config::AppConfig;
 use dieyun_base::error::CoreError;
 use dieyun_codebase::index::IndexService;
 
+/// 一轮的「正文 / 思考 / 可见性」口径（工具分支与收尾分支共用同一份判断）。
+struct RoundText {
+    stored_content: String,
+    thought: String,
+    full_thought: Option<String>,
+    visible_content: Option<String>,
+    content_source: ContentSource,
+}
+
+impl RoundText {
+    fn of(llm: &LlmResponseInput, channel: ContentChannel) -> Self {
+        // 本段正文就是模型原文：不再剥 `agent_status` 行，也不做「重复前言」字符串去重
+        // —— 每轮 assistant 消息本身就是增量；跨轮重复是模型行为，不是账本该改写的事实。
+        let stored_content = llm.content.clone().unwrap_or_default();
+        // 思考原文只来自思考通道：`reasoning` 键，或（单通道模型）`content` 键。
+        // 不再用「正文」兜底思考 —— 那正是旧实现让思考区复述回答的路径。
+        let thought_raw = llm_thought_raw(llm).unwrap_or_default();
+        let full_thought = if thought_raw.is_empty() {
+            None
+        } else {
+            Some(thought_raw.clone())
+        };
+        let thought = thought_raw.chars().take(500).collect::<String>();
+        // 可交付正文 = 非思考通道 且 内容非空。思考通道的 `content` 只是思考的存放处，
+        // 交给下游会把推理复述成结论（UI 上就是「回答区出现了思考」）。
+        let visible_content = if channel != ContentChannel::Reasoning
+            && !stored_content.trim().is_empty()
+        {
+            Some(stored_content.clone())
+        } else {
+            None
+        };
+        let content_source = if visible_content.is_some() {
+            ContentSource::Answer
+        } else if full_thought.is_some() {
+            ContentSource::Reasoning
+        } else {
+            ContentSource::Absent
+        };
+        RoundText {
+            stored_content,
+            thought,
+            full_thought,
+            visible_content,
+            content_source,
+        }
+    }
+}
+
+/// 本轮 assistant 消息（含 tool_calls）。思考模式下必须原样回传 `reasoning_content`，
+/// 否则下一轮请求会被上游以 HTTP 400 拒绝（DeepSeek V4 等）。
+fn assistant_tool_call_message(llm: &LlmResponseInput, stored_content: &str) -> Value {
+    let mut assistant_msg = json!({
+        "role": "assistant",
+        "content": stored_content,
+        "tool_calls": llm.tool_calls.iter().map(|tc| json!({
+            "id": tc.id,
+            "type": "function",
+            "function": {
+                "name": tc.name,
+                "arguments": if tc.arguments.is_string() {
+                    tc.arguments.as_str().unwrap_or("{}").to_string()
+                } else {
+                    serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into())
+                }
+            }
+        })).collect::<Vec<_>>()
+    });
+    // 思考模式（DeepSeek V4 等）：带 tool_calls 的 assistant 消息必须原样回传
+    // reasoning_content，否则下一轮请求会被上游以 HTTP 400 拒绝。
+    if let Some(reasoning) = llm.reasoning.as_deref().filter(|s| !s.trim().is_empty()) {
+        assistant_msg["reasoning_content"] = json!(reasoning);
+    }
+    assistant_msg
+}
+
+/// 把这一批 tool_calls 的入参收进待执行队列；**任一条不合法就整批作废**并补齐每条回执。
+///
+/// 返回 `Some(bad_tools)` 表示整批被拒：**调用方**为本轮补一条 trace（带这些坏工具）后只需
+/// `need_llm`，不要再动执行队列。
+///
+/// 为什么把 trace 交给调用方（2026-11-19 审计）：这里以前直接 `state.trace.last_mut()` 赋值 ——
+/// 本轮还没 push TraceRound，`last_mut()` 拿到的是**上一轮**，于是上一轮已成功的工具列表被这轮的
+/// 报错覆盖，而本轮在 UI 上整段消失（trace 里出现轮次空洞）。
+fn absorb_tool_batch(state: &mut RunState, llm: &LlmResponseInput) -> Option<Vec<TraceTool>> {
+    // 一批里只要有一条入参不是合法 JSON，整批都不执行：那一帧本身已经坏了，
+    // 挑「看起来还行」的那条执行等于替模型猜意图（猜错的代价是写盘）。
+    let mut invalid: Vec<ToolResultInput> = Vec::new();
+    for tc in &llm.tool_calls {
+        match parse_tool_arguments(&tc.arguments) {
+            Ok(args) => state
+                .pending_delegate
+                .push((tc.id.clone(), tc.name.clone(), args)),
+            Err(reason) => invalid.push(ToolResultInput {
+                id: tc.id.clone(),
+                result: json!({}),
+                error: Some(format!("工具「{}」{reason}", tc.name)),
+            }),
+        }
+    }
+    if invalid.is_empty() {
+        return None;
+    }
+        let bad: Vec<String> = invalid.iter().map(|r| r.id.clone()).collect();
+        // 这批一条都不执行：整帧已经坏了，挑「看起来还行」的执行等于替模型猜意图。
+        state.pending_delegate.clear();
+        let mut bad_tools: Vec<TraceTool> = Vec::new();
+        for tc in &llm.tool_calls {
+            let content = match invalid.iter().find(|r| r.id == tc.id) {
+                Some(hit) => hit.error.clone().unwrap_or_default(),
+                None => format!(
+                    "同批工具入参非法（{}），整批未执行，请重新发一次",
+                    bad.join("、")
+                ),
+            };
+            // 每个 `tool_call_id` 都必须有一条 tool 回执：少一条，下一轮请求就会被
+            // 上游以 400 拒掉（assistant 的 tool_calls 与 tool 消息必须成对）。
+            state.messages.push(json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": content,
+            }));
+            bad_tools.push(TraceTool {
+                name: tc.name.clone(),
+                args: json!({}),
+                result: None,
+                error: Some(content),
+            });
+        }
+    Some(bad_tools)
+}
+
+/// 被截断的工具调用（`finish_reason=length`）：一律不执行，统一发错误回执。
+fn truncated_tool_results(llm: &LlmResponseInput) -> Vec<ToolResultInput> {
+    let results: Vec<ToolResultInput> = llm
+        .tool_calls
+        .iter()
+        .map(|tc| ToolResultInput {
+            id: tc.id.clone(),
+            result: json!({}),
+            error: Some(format!("工具「{}」{TRUNCATED_TOOL_ERROR}", tc.name)),
+        })
+        .collect();
+    results
+}
+
+/// 待执行工具 → 宿主可见形状（一次克隆，宿主据此调度）。
+fn delegates_from_pending(state: &RunState) -> Vec<DelegateTool> {
+    state
+        .pending_delegate
+        .iter()
+        .map(|(id, name, args)| DelegateTool {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: args.clone(),
+        })
+        .collect()
+}
+
 impl AgentLoopManager {
 
     pub fn start(&self, params: StartParams) -> Result<LoopResponse, CoreError> {
@@ -33,6 +192,20 @@ impl AgentLoopManager {
         }
         if params.messages.is_empty() {
             return Err(CoreError::rpc("INVALID_PARAMS", "messages 不能为空"));
+        }
+        // `workspace_root` 是契约字段，循环自身**不读它**（工具路径由宿主工具层解析）。
+        // 但「传了又完全不管」意味着宿主把路径拼错时一点信号都没有 —— 空串 / 相对路径 /
+        // 既不是 `ssh://` 键也不是绝对路径都说明上游拼错了。这里只留一行有痕迹的日志，
+        // 不校验、不回落、不按它切工作区（那会造出第二份「哪条路径归谁」的判断）。
+        if let Some(ws) = params.workspace_root.as_deref() {
+            let t = ws.trim();
+            let plausible = t.starts_with("ssh://") || std::path::Path::new(t).is_absolute();
+            if !plausible {
+                dieyun_base::obs::degraded(
+                    "agent.run.start",
+                    &format!("workspaceRoot 形状可疑（非绝对路径、也不是 ssh:// 键）：{ws}"),
+                );
+            }
         }
         // 宿主给了 id 就用它（见 `run_id` 字段的注释）；没给才自己生成。
         let run_id = params
@@ -45,7 +218,6 @@ impl AgentLoopManager {
             model: params.model,
             messages: params.messages,
             tools: params.tools,
-            workspace_root: params.workspace_root,
             max_tool_calls: params.max_tool_calls,
             max_rounds: params.max_rounds,
             round: 0,
@@ -189,187 +361,52 @@ impl AgentLoopManager {
         {
             state.observed_prompt_tokens = Some(prompt as usize);
         }
+
         if state.round >= state.max_rounds {
-            if llm.tool_calls.is_empty() {
-                let trace = state.trace.clone();
-                let content = delivered_content(llm.content.as_deref(), channel);
-                drop(state);
-                return Ok(self.finish_run(run_id, trace, content, false));
-            }
-            let hint = format!("已达本段 {} 轮上限", state.max_rounds);
-            // 先把轮次取出来：`state` 现在是 `MutexGuard`，`state.trace.push(..)` 会经由
-            // DerefMut 借用整个 guard，字段不能再从同一次借用里单独借出来。
-            let current_round = state.round;
-            // 正文口径只有 `delivered_content()` 一处：思考通道在这里必须是 None，
-            // 否则思考会被写成 assistant 正文（下一轮再作为「我上一轮的回复」回灌模型）。
-            let synthetic_text = push_assistant_text_only(
-                &mut state.messages,
-                delivered_content(llm.content.as_deref(), channel).as_deref(),
-                &hint,
-            );
-            state.trace.push(TraceRound {
-                round: current_round,
-                thought: hint,
-                full_thought: llm_thought_raw(&llm),
-                content_source: ContentSource::Synthetic,
-                visible_content: Some(synthetic_text),
-                tools: Vec::new(),
-            });
-            let trace = state.trace.clone();
-            let content = delivered_content(llm.content.as_deref(), channel);
-            drop(state);
-            return Ok(self.finish_run(run_id, trace, content, true));
+            return self.stop_at_round_limit(run_id, state, &llm, channel);
         }
 
         state.round += 1;
         let round_no = state.round;
         // 每轮 usage 一行：`prompt_tokens` 是折叠触发的首选口径，缺了说明上游没给。
         dieyun_base::obs::usage(run_id, round_no, llm.usage.as_ref());
-        // 本段正文就是模型原文：不再剥 `agent_status` 行，也不做「重复前言」字符串去重
-        // —— 每轮 assistant 消息本身就是增量；跨轮重复是模型行为，不是账本该改写的事实。
-        let stored_content = llm.content.clone().unwrap_or_default();
-        // 思考原文只来自思考通道：`reasoning` 键，或（单通道模型）`content` 键。
-        // 不再用「正文」兜底思考 —— 那正是旧实现让思考区复述回答的路径。
-        let thought_raw = llm_thought_raw(&llm).unwrap_or_default();
-        let full_thought = if thought_raw.is_empty() {
-            None
-        } else {
-            Some(thought_raw.clone())
-        };
-        let thought = thought_raw.chars().take(500).collect::<String>();
-        // 可交付正文 = 非思考通道 且 内容非空。思考通道的 `content` 只是思考的存放处，
-        // 交给下游会把推理复述成结论（UI 上就是「回答区出现了思考」）。
-        let visible_content = if channel != ContentChannel::Reasoning
-            && !stored_content.trim().is_empty()
-        {
-            Some(stored_content.clone())
-        } else {
-            None
-        };
-        let content_source = if visible_content.is_some() {
-            ContentSource::Answer
-        } else if full_thought.is_some() {
-            ContentSource::Reasoning
-        } else {
-            ContentSource::Absent
-        };
+        let text = RoundText::of(&llm, channel);
         let trace_tools = Vec::new();
 
         if !llm.tool_calls.is_empty() {
-            let mut assistant_msg = json!({
-                "role": "assistant",
-                "content": stored_content.clone(),
-                "tool_calls": llm.tool_calls.iter().map(|tc| json!({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": if tc.arguments.is_string() {
-                            tc.arguments.as_str().unwrap_or("{}").to_string()
-                        } else {
-                            serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into())
-                        }
-                    }
-                })).collect::<Vec<_>>()
-            });
-            // 思考模式（DeepSeek V4 等）：带 tool_calls 的 assistant 消息必须原样回传
-            // reasoning_content，否则下一轮请求会被上游以 HTTP 400 拒绝。
-            if let Some(reasoning) = llm.reasoning.as_deref().filter(|s| !s.trim().is_empty()) {
-                assistant_msg["reasoning_content"] = json!(reasoning);
-            }
-
             if state.tool_calls_used + llm.tool_calls.len() as u32 > state.max_tool_calls {
-                let hint = format!("已达本段 {} 次工具调用上限", state.max_tool_calls);
-                // 与轮次上限同一口径：思考通道的 content 不得落成 assistant 正文。
-                let synthetic_text = push_assistant_text_only(
-                    &mut state.messages,
-                    delivered_content(llm.content.as_deref(), channel).as_deref(),
-                    &hint,
-                );
-                state.trace.push(TraceRound {
-                    round: round_no,
-                    thought: hint,
-                    full_thought: llm_thought_raw(&llm),
-                    content_source: ContentSource::Synthetic,
-                    visible_content: Some(synthetic_text),
-                    tools: trace_tools,
-                });
-                let trace = state.trace.clone();
-                let content = delivered_content(llm.content.as_deref(), channel);
-                drop(state);
-                return Ok(self.finish_run(run_id, trace, content, true));
+                return self.stop_at_tool_limit(run_id, state, &llm, channel, round_no, trace_tools);
             }
 
+            let assistant_msg = assistant_tool_call_message(&llm, &text.stored_content);
             state.messages.push(assistant_msg);
 
-            // 一批里只要有一条入参不是合法 JSON，整批都不执行：那一帧本身已经坏了，
-            // 挑「看起来还行」的那条执行等于替模型猜意图（猜错的代价是写盘）。
-            let mut invalid: Vec<ToolResultInput> = Vec::new();
-            for tc in &llm.tool_calls {
-                match parse_tool_arguments(&tc.arguments) {
-                    Ok(args) => state
-                        .pending_delegate
-                        .push((tc.id.clone(), tc.name.clone(), args)),
-                    Err(reason) => invalid.push(ToolResultInput {
-                        id: tc.id.clone(),
-                        result: json!({}),
-                        error: Some(format!("工具「{}」{reason}", tc.name)),
-                    }),
-                }
-            }
-            if !invalid.is_empty() {
-                let bad: Vec<String> = invalid.iter().map(|r| r.id.clone()).collect();
-                // 这批一条都不执行：整帧已经坏了，挑「看起来还行」的执行等于替模型猜意图。
-                state.pending_delegate.clear();
-                let mut bad_tools: Vec<TraceTool> = Vec::new();
-                for tc in &llm.tool_calls {
-                    let content = match invalid.iter().find(|r| r.id == tc.id) {
-                        Some(hit) => hit.error.clone().unwrap_or_default(),
-                        None => format!(
-                            "同批工具入参非法（{}），整批未执行，请重新发一次",
-                            bad.join("、")
-                        ),
-                    };
-                    // 每个 `tool_call_id` 都必须有一条 tool 回执：少一条，下一轮请求就会被
-                    // 上游以 400 拒掉（assistant 的 tool_calls 与 tool 消息必须成对）。
-                    state.messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": content,
-                    }));
-                    bad_tools.push(TraceTool {
-                        name: tc.name.clone(),
-                        args: json!({}),
-                        result: None,
-                        error: Some(content),
-                    });
-                }
-                if let Some(round) = state.trace.last_mut() {
-                    round.tools = bad_tools;
-                }
+            if let Some(bad_tools) = absorb_tool_batch(&mut state, &llm) {
+                // 整批入参非法：每条 tool_call_id 的回执已经补齐，等宿主重发。
+                // **本轮也要留一条 trace**（带坏工具），否则这一轮在 UI 上整段消失。
+                state.trace.push(TraceRound {
+                    round: round_no,
+                    thought: text.thought.clone(),
+                    full_thought: text.full_thought.clone(),
+                    content_source: text.content_source,
+                    visible_content: text.visible_content.clone(),
+                    tools: bad_tools,
+                });
                 drop(state);
                 return self.need_llm(run_id);
             }
 
             state.trace.push(TraceRound {
                 round: round_no,
-                thought: thought.clone(),
-                full_thought,
-                content_source,
-                visible_content: visible_content.clone(),
+                thought: text.thought.clone(),
+                full_thought: text.full_thought,
+                content_source: text.content_source,
+                visible_content: text.visible_content.clone(),
                 tools: trace_tools,
             });
 
             if is_length_stop(&llm.finish_reason) {
-                let results: Vec<ToolResultInput> = llm
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ToolResultInput {
-                        id: tc.id.clone(),
-                        result: json!({}),
-                        error: Some(format!("工具「{}」{TRUNCATED_TOOL_ERROR}", tc.name)),
-                    })
-                    .collect();
+                let results = truncated_tool_results(&llm);
                 drop(state);
                 return self.submit_tool_results(_config, _index, run_id, results);
             }
@@ -389,16 +426,7 @@ impl AgentLoopManager {
             }
             // 交给宿主之前打点：`agent.run.tools` 回来时用它算工具段墙钟。
             state.pending_since = Some(std::time::Instant::now());
-            let delegates = state
-                .pending_delegate
-                .iter()
-
-                .map(|(id, name, args)| DelegateTool {
-                    id: id.clone(),
-                    name: name.clone(),
-                    arguments: args.clone(),
-                })
-                .collect();
+            let delegates = delegates_from_pending(&state);
             drop(state);
             return Ok(LoopResponse {
                 phase: "need_delegate".into(),
@@ -416,16 +444,87 @@ impl AgentLoopManager {
 
         state.trace.push(TraceRound {
             round: round_no,
-            thought,
-            full_thought,
-            content_source,
-            visible_content,
+            thought: text.thought,
+            full_thought: text.full_thought,
+            content_source: text.content_source,
+            visible_content: text.visible_content,
             tools: trace_tools,
         });
         let trace = state.trace.clone();
         let content = delivered_content(llm.content.as_deref(), channel);
         drop(state);
         Ok(self.finish_run(run_id, trace, content, false))
+    }
+
+    /// 出口一：达到本段轮次上限。没有工具调用就是正常收尾；有工具调用则补一条合成提示，
+    /// 并按「撞上限」交付（`hit_round_limit=true`）。
+    fn stop_at_round_limit(
+        &self,
+        run_id: &str,
+        mut state: std::sync::MutexGuard<'_, RunState>,
+        llm: &LlmResponseInput,
+        channel: ContentChannel,
+    ) -> Result<LoopResponse, CoreError> {
+        if llm.tool_calls.is_empty() {
+            let trace = state.trace.clone();
+            let content = delivered_content(llm.content.as_deref(), channel);
+            drop(state);
+            return Ok(self.finish_run(run_id, trace, content, false));
+        }
+        let hint = format!("已达本段 {} 轮上限", state.max_rounds);
+        // 先把轮次取出来：`state` 现在是 `MutexGuard`，`state.trace.push(..)` 会经由
+        // DerefMut 借用整个 guard，字段不能再从同一次借用里单独借出来。
+        let current_round = state.round;
+        // 正文口径只有 `delivered_content()` 一处：思考通道在这里必须是 None，
+        // 否则思考会被写成 assistant 正文（下一轮再作为「我上一轮的回复」回灌模型）。
+        let synthetic_text = push_assistant_text_only(
+            &mut state.messages,
+            delivered_content(llm.content.as_deref(), channel).as_deref(),
+            &hint,
+        );
+        state.trace.push(TraceRound {
+            round: current_round,
+            thought: hint,
+            full_thought: llm_thought_raw(llm),
+            content_source: ContentSource::Synthetic,
+            visible_content: Some(synthetic_text),
+            tools: Vec::new(),
+        });
+        let trace = state.trace.clone();
+        let content = delivered_content(llm.content.as_deref(), channel);
+        drop(state);
+        Ok(self.finish_run(run_id, trace, content, true))
+    }
+
+    /// 出口二：本批工具会突破次数上限 —— 与轮次上限同一口径（思考不得落成 assistant 正文）。
+    fn stop_at_tool_limit(
+        &self,
+        run_id: &str,
+        mut state: std::sync::MutexGuard<'_, RunState>,
+        llm: &LlmResponseInput,
+        channel: ContentChannel,
+        round_no: u32,
+        trace_tools: Vec<TraceTool>,
+    ) -> Result<LoopResponse, CoreError> {
+        let hint = format!("已达本段 {} 次工具调用上限", state.max_tool_calls);
+        // 与轮次上限同一口径：思考通道的 content 不得落成 assistant 正文。
+        let synthetic_text = push_assistant_text_only(
+            &mut state.messages,
+            delivered_content(llm.content.as_deref(), channel).as_deref(),
+            &hint,
+        );
+        state.trace.push(TraceRound {
+            round: round_no,
+            thought: hint,
+            full_thought: llm_thought_raw(llm),
+            content_source: ContentSource::Synthetic,
+            visible_content: Some(synthetic_text),
+            tools: trace_tools,
+        });
+        let trace = state.trace.clone();
+        let content = delivered_content(llm.content.as_deref(), channel);
+        drop(state);
+        Ok(self.finish_run(run_id, trace, content, true))
     }
 
 

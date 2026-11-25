@@ -134,7 +134,15 @@ async fn configure_failure_leaves_the_live_config_untouched() {
         )
         .await
         .unwrap_err();
-    assert!(format!("{err}").len() > 0);
+    // 报错必须**带出真实的 io 失败**，不能是一句泛化占位：
+    // Rust 的 `io::Error` 文案一定以 `(os error N)` 结尾（Windows 183 / Unix 17），
+    // 这条断言因此跨平台稳定，又能区分「建目录失败」与「参数校验失败」。
+    let text = err.to_string();
+    assert!(text.contains("os error"), "错误文案要带出真实 io 失败：{text}");
+    assert!(
+        !text.contains("INVALID_PARAMS"),
+        "这是 io 失败，不是参数校验失败：{text}"
+    );
 
     let after = state.inner.read().await.config.data_dir.clone();
     assert_eq!(after, before, "失败不许把 data_dir 改成那个路径");

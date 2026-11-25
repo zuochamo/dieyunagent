@@ -944,4 +944,48 @@ async fn invalid_tool_arguments_are_not_delegated() {
         content.contains("合法 JSON"),
         "工具消息要说清为什么没执行，got {content}"
     );
+    // 回归（2026-11-19 P2）：被整批拒绝的那一轮**自己**要留一条 trace，并把坏工具挂在自己身上。
+    // 以前 `state.trace.last_mut()` 打在**上一轮**上：上一轮的工具列表被覆盖，本轮整段消失
+    // （trace 里出现轮次空洞）。need_llm 不回 trace，所以再跑一轮拿 done 的完整 trace 来断言。
+    let done = mgr
+        .continue_llm(
+            &config,
+            &index,
+            &start.run_id,
+            LlmResponseInput {
+                content: Some("改完了".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(done.phase, "done");
+    let trace = serde_json::to_value(done.trace.as_ref().unwrap_or(&Vec::new()))
+        .unwrap_or(json!([]));
+    let trace = trace.as_array().cloned().unwrap_or_default();
+    assert_eq!(trace.len(), 2, "两轮都要在 trace 里（失败那轮不许消失）：{trace:?}");
+    let bad_round_tools = trace[0]
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(bad_round_tools.len(), 1, "失败那轮要挂上被拒的工具：{:?}", trace[0]);
+    assert!(
+        bad_round_tools[0]
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("")
+            .contains("合法 JSON"),
+        "坏工具要带错误原因：{:?}",
+        bad_round_tools[0]
+    );
+    let ok_round_tools = trace[1]
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        ok_round_tools.is_empty(),
+        "正常那一轮不该被上一轮的坏工具污染：{:?}",
+        trace[1]
+    );
 }

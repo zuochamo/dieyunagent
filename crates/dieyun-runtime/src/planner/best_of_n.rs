@@ -26,6 +26,11 @@ impl PlannerRunManager {
     ) -> Result<Value, CoreError> {
         if input.hit_round_limit {
             run.hit_round_limit = true;
+            // 预算已经耗尽 → **立刻清掉剩余的 best-of-N 路数**。标准批撞上限时就是这么做的
+            // （`workers.rs`：「轮次预算已耗尽：不再派新活」），bn 这条路径一直漏着，
+            // 于是后面每一路还会再跑满 N 次子循环 —— 用户以为已经收口，实际成本与耗时翻倍。
+            let discarded = run.bn_worker_jobs.len();
+            run.bn_worker_jobs.clear();
             // 撞上限的那一路结果也别丢：能收就收进 collected，选优时还能用上。
             let results = std::mem::take(&mut input.worker_results);
             if let Some(bn) = run.best_of_n_state.as_mut() {
@@ -45,20 +50,30 @@ impl PlannerRunManager {
                 .unwrap_or(false);
             if have_attempts {
                 run.phase = InternalPhase::NeedBestOfNPickLlm;
+                let suffix = if discarded > 0 {
+                    format!("（已丢弃 {discarded} 路未开始的 best-of-N）")
+                } else {
+                    String::new()
+                };
                 push_trace(
                     run,
                     "Best-of-N · 选优",
-                    "轮次预算已耗尽：用已收到的方案做选优",
+                    format!("轮次预算已耗尽：用已收到的方案做选优{suffix}"),
                 );
                 return self.build_response(run);
             }
-            run.final_content = input.partial_content;
-            run.phase = InternalPhase::Done;
+            // 零产出：**不要直接 Done**。那条分支会把标准批已经完成的结果挡在答复之外
+            // （它们就在 run.results 里），而且 `final_content` 可能为 None（上游只回思考时），
+            // 宿主拿到「有正文」的假成功。改成退回收尾：让汇总把已完成的产出说出来。
+            run.best_of_n_state = None;
+            run.pending_worker_jobs.clear();
+            run.final_content = None;
             push_trace(
                 run,
-                "规划师 · 收尾",
-                "轮次预算已耗尽且没有可用方案：以半成品收尾",
+                "Best-of-N · 收尾",
+                "轮次预算已耗尽且没有可用方案：改为汇总已完成产出",
             );
+            run.phase = InternalPhase::NeedSynthesizeLlm;
             return self.build_response(run);
         }
         let trace_note = {
@@ -96,6 +111,7 @@ impl PlannerRunManager {
         &self,
         run: &mut PlannerRunState,
         content: String,
+        worktree_ctx: Option<Value>,
     ) -> Result<Value, CoreError> {
         let Some(bn) = run.best_of_n_state.take() else {
             return Err(CoreError::rpc("INVALID_STATE", "best_of_n 状态缺失"));
@@ -115,7 +131,10 @@ impl PlannerRunManager {
             last.thought = format!("已选方案 {} / {}", winner.attempt_index, bn.total);
         }
         run.pending_worker_jobs.clear();
-        self.begin_best_of_n_or_review(run, None)
+        // 选优之后同样要把 worktree 上下文带给验收：以前这里传 `None`，验收拿到的
+        // `worktreeChanges` 恒为空对象 —— 于是「声称改了文件却零 diff」这条验收规则
+        // 在 best-of-N 路径上永远不生效（`prompts.rs` 明确要求结合它判断）。
+        self.begin_best_of_n_or_review(run, worktree_ctx)
     }
 
     pub(super) fn start_best_of_n_job(

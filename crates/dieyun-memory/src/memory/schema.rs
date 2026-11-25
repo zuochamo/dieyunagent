@@ -205,6 +205,17 @@ pub fn init_schema(conn: &Connection) -> Result<(), CoreError> {
       );
       CREATE INDEX IF NOT EXISTS idx_reqsnap_session ON request_snapshots(session_id, id);
       CREATE INDEX IF NOT EXISTS idx_reqsnap_created ON request_snapshots(created_at);
+      -- 快照里「同一个会话每轮都一样」的大字段（system 提示 / 工具 schema）按**内容寻址**存一份。
+      -- 现场实测（2026-11-19）：request_snapshots 占记忆库 413 MB / 626 MB，其中 tools_json 87 MB
+      -- 全是同一份 schema 的逐轮拷贝。行里保留 system_hash / tools_hash，正文搬到这里；
+      -- NULL 的两种含义靠 hash 区分：hash 有 + blob 有 ⇒ 去重；hash 有 + blob 无 ⇒ 超上限没落库。
+      CREATE TABLE IF NOT EXISTS snapshot_blobs (
+        hash TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        chars INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
       -- 会话级目标对象：一个会话最多一条（PK 即约束），删会话级联清除。
       -- goal_json 是**不透明 JSON**：Rust 只当 KV，语义（归一化 / 事实核对 / 续跑判定）
       -- 全在 Node 的 src/plans/goal-run.js —— 不允许在 Rust 再解析一份。

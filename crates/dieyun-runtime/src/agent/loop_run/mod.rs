@@ -76,6 +76,8 @@ pub struct StartParams {
     #[serde(default)]
     pub tools: Vec<Value>,
     #[serde(default)]
+    /// 宿主会传（契约字段），但**循环自身不读它**：工具调用的路径由宿主的工具层解析，
+    /// 账本里再存一份只会邀请别人「按它切工作区」。留字段是为了 `core-contracts.d.ts` 不漂。
     pub workspace_root: Option<String>,
     /// 必填：唯一来源是 Node `agent-limits.js`（`applyResolvedLoopSpec` 填入）。
     /// 缺参直接报错，而不是在内核里回落到一份会静默分叉的默认值。
@@ -250,8 +252,6 @@ struct RunState {
     model: String,
     messages: Vec<Value>,
     tools: Vec<Value>,
-    #[allow(dead_code)]
-    workspace_root: Option<String>,
     max_tool_calls: u32,
     max_rounds: u32,
     round: u32,

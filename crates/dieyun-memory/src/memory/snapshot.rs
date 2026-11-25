@@ -5,8 +5,11 @@
 //! - **旁路事实**，不是真相来源：真相仍是 `messages` 与 `compaction_archives`，
 //!   所以本表可裁剪、可丢失，不参与 replay，也没有格式版本迁移链。
 //! - **唯一写入点**是 Node 的 `rust-loop-runner`（body 定稿处），本模块只做落库与保留裁剪。
-//! - 大字段（`system_text` / `tools_json`）允许为 NULL，语义是「与同会话上一条非 NULL 相同」；
-//!   这个约定由写入方（`src/agent/request-snapshot.js`）维护，读侧只做加法。
+//! - 大字段（`system_text` / `tools_json`）**按内容寻址去重**：同一个会话每轮发的 system / tools
+//!   是同一份，行里只留 `system_hash` / `tools_hash`，正文进 `snapshot_blobs`。
+//!   于是列上的 NULL 有两种含义，靠 hash 区分：
+//!   `hash 有 + blob 有` ⇒ 去重了；`hash 有 + blob 无` ⇒ 超上限没落库（用 `*_chars` 判断是空还是截断）。
+//!   历史行仍是内联的（修剪线程按批搬进 blobs），读侧两种形状都认。
 //!
 //! 字段语义与读法见 `docs/REQUEST-SNAPSHOT.md`。
 
@@ -67,6 +70,60 @@ pub struct RequestSnapshotInput {
     pub keep_total_rows: Option<i64>,
 }
 
+/// 把大字段搬进 `snapshot_blobs`（同 hash 已存在就只留一份），返回该写进行里的值：
+/// 有 hash 就写 NULL（读侧按 hash 回查），没 hash 才原样内联 —— 后者只是防御，Node 侧
+/// 只要有正文就一定会给 hash。
+fn stash_blob(
+    conn: &Connection,
+    kind: &str,
+    hash: Option<&str>,
+    text: Option<&str>,
+) -> Result<Option<String>, CoreError> {
+    let (Some(hash), Some(text)) = (hash, text) else {
+        return Ok(text.map(|s| s.to_string()));
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO snapshot_blobs (hash, kind, chars, text, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![hash, kind, text.chars().count() as i64, text, now_ms()],
+    )?;
+    Ok(None)
+}
+
+/// 把**历史行**里内联的大字段搬进 `snapshot_blobs`（每批最多 `limit` 行）。
+///
+/// 为什么不放在启动路径上一次搬完：线上库已有几十 MB 的逐轮拷贝，启动时搬会让首屏卡几秒。
+/// 修剪线程本来就有独立连接与固定节拍（见 `misc.rs`），搬完这批下次继续；读侧两种形状都认。
+pub fn backfill_snapshot_blobs(conn: &Connection, limit: i64) -> Result<usize, CoreError> {
+    let batch = limit.clamp(1, 2000);
+    let mut moved = 0usize;
+    for (column, kind) in [("system_text", "system"), ("tools_json", "tools")] {
+        let rows: Vec<(i64, Option<String>, String)> = {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, {hash_col}, {column} FROM request_snapshots
+                  WHERE {column} IS NOT NULL AND {hash_col} IS NOT NULL
+                  LIMIT ?1",
+                hash_col = if column == "system_text" {
+                    "system_hash"
+                } else {
+                    "tools_hash"
+                },
+            ))?;
+            stmt.query_map(params![batch], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (id, hash, text) in rows {
+            stash_blob(conn, kind, hash.as_deref(), Some(&text))?;
+            conn.execute(
+                &format!("UPDATE request_snapshots SET {column} = NULL WHERE id = ?1"),
+                params![id],
+            )?;
+            moved += 1;
+        }
+    }
+    Ok(moved)
+}
+
 /// 落一行快照，并在同一连接内做保留裁剪。返回 `{ ok, id, pruned }`。
 pub fn insert_request_snapshot(
     conn: &Connection,
@@ -80,6 +137,20 @@ pub fn insert_request_snapshot(
         return Err(CoreError::rpc("INVALID_PARAMS", "messagesJson 必填"));
     }
     let now = now_ms();
+    // 大字段先去重进 `snapshot_blobs`：同一个会话每轮的 system / tools 是同一份，
+    // 逐轮内联就是纯冗余（现场实测 1480 行里 tools_json 占 87 MB）。
+    let system_text = stash_blob(
+        conn,
+        "system",
+        input.system_hash.as_deref(),
+        input.system_text.as_deref(),
+    )?;
+    let tools_json = stash_blob(
+        conn,
+        "tools",
+        input.tools_hash.as_deref(),
+        input.tools_json.as_deref(),
+    )?;
     conn.execute(
         "INSERT INTO request_snapshots
           (session_id, run_id, round, source, created_at, model, stream,
@@ -107,10 +178,10 @@ pub fn insert_request_snapshot(
             input.truncated.unwrap_or(false) as i64,
             input.system_hash,
             input.system_chars,
-            input.system_text,
+            system_text,
             input.tools_hash,
             input.tools_names,
-            input.tools_json,
+            tools_json,
             input.est_tokens,
             input.token_budget,
             input.trigger_ratio,
@@ -186,13 +257,24 @@ pub fn prune_request_snapshots(
             params![session_id, keep_compacted, keep_per_session],
         )?;
     }
-    // 第 2 层：全库最旧优先。总行数没超上限时子查询返回 NULL，`id <= NULL` 不成立 ⇒ 一行不删。
+    // 第 2 层：全库最旧优先。总行数没超上限时子查询返回 NULL，`id <= NULL` 不成立 ⇒ 一行删不。
     removed += conn.execute(
         "DELETE FROM request_snapshots
           WHERE id <= (
             SELECT id FROM request_snapshots ORDER BY id DESC LIMIT 1 OFFSET ?1
           )",
         params![keep_total_rows],
+    )?;
+    // 孤立 blob 清理：行被裁掉后，它引用的 system / tools 正文就没人用了。
+    // 少了这一步，去重表只增不减 —— 省下来的体积会以另一种形状还回去。
+    conn.execute(
+        "DELETE FROM snapshot_blobs
+          WHERE hash NOT IN (
+            SELECT system_hash FROM request_snapshots WHERE system_hash IS NOT NULL
+            UNION
+            SELECT tools_hash FROM request_snapshots WHERE tools_hash IS NOT NULL
+          )",
+        [],
     )?;
     Ok(removed)
 }
@@ -256,14 +338,19 @@ pub fn recent_request_snapshots(
 pub fn get_request_snapshot(conn: &Connection, id: i64) -> Result<Option<Value>, CoreError> {
     let row = conn
         .query_row(
-            "SELECT id, session_id, run_id, round, source, created_at, model, stream,
-                    messages_json, messages_chars, message_count, messages_hash, truncated,
-                    system_hash, system_chars, system_text,
-                    tools_hash, tools_names, tools_json,
-                    est_tokens, token_budget, trigger_ratio, compaction_round_count,
-                    compacted, tokens_before, tokens_after, compaction_archive_id,
-                    reason, context_audit_json
-               FROM request_snapshots WHERE id = ?1",
+            "SELECT s.id, s.session_id, s.run_id, s.round, s.source, s.created_at, s.model, s.stream,
+                    s.messages_json, s.messages_chars, s.message_count, s.messages_hash, s.truncated,
+                    s.system_hash, s.system_chars,
+                    COALESCE(s.system_text, sb.text),
+                    s.tools_hash, s.tools_names,
+                    COALESCE(s.tools_json, tb.text),
+                    s.est_tokens, s.token_budget, s.trigger_ratio, s.compaction_round_count,
+                    s.compacted, s.tokens_before, s.tokens_after, s.compaction_archive_id,
+                    s.reason, s.context_audit_json
+               FROM request_snapshots s
+               LEFT JOIN snapshot_blobs sb ON sb.hash = s.system_hash
+               LEFT JOIN snapshot_blobs tb ON tb.hash = s.tools_hash
+              WHERE s.id = ?1",
             params![id],
             |row| {
                 Ok(json!({
@@ -599,5 +686,144 @@ mod tests {
         assert_eq!(s["rounds"], json!(0));
         assert!(s["since"].is_null(), "空窗口不给时间戳，UI 才不会画出一个假窗口");
         assert!(s["until"].is_null());
+    }
+
+    /// 带完整大字段的一份输入（system + tools 都给了 hash 与正文）。
+    fn with_big_fields(session: &str) -> RequestSnapshotInput {
+        let mut i = input(session, false);
+        i.system_hash = Some("h-system".into());
+        i.system_text = Some("你是叠云，一个会动手的 Agent".into());
+        i.system_chars = Some(15);
+        i.tools_hash = Some("h-tools".into());
+        i.tools_json = Some(r#"[{"name":"fs_read_file","description":"读文件"}]"#.into());
+        i
+    }
+
+    /// 同一个会话每轮的 system / tools 是同一份：正文只存一份，行里留 hash；读侧照样拿到全文。
+    ///
+    /// 现场依据（2026-11-19）：1480 行快照里 `tools_json` 占 87 MB，全是这份 schema 的逐轮拷贝。
+    #[test]
+    fn dedupes_system_and_tools_by_hash() {
+        let conn = conn();
+        let a = insert_request_snapshot(&conn, &with_big_fields("s1")).expect("a");
+        let b = insert_request_snapshot(&conn, &with_big_fields("s1")).expect("b");
+
+        let inline: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM request_snapshots
+                  WHERE system_text IS NOT NULL OR tools_json IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(inline, 0, "有 hash 的行不再内联正文");
+        let blobs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM snapshot_blobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(blobs, 2, "system / tools 各一份，第二行不再存拷贝");
+
+        for res in [a, b] {
+            let id = res.get("id").and_then(|v| v.as_i64()).expect("id");
+            let row = get_request_snapshot(&conn, id).expect("get").expect("row");
+            assert_eq!(
+                row.get("systemText").and_then(|v| v.as_str()),
+                Some("你是叠云，一个会动手的 Agent"),
+                "去重不许改动读侧结果"
+            );
+            assert_eq!(
+                row.get("toolsJson").and_then(|v| v.as_str()),
+                Some(r#"[{"name":"fs_read_file","description":"读文件"}]"#)
+            );
+        }
+    }
+
+    /// 超上限时 Node 只给 hash 与字符数、不给正文：读侧必须照实回 NULL，不许从别处补一个。
+    #[test]
+    fn over_cap_text_is_not_faked_back() {
+        let conn = conn();
+        let mut i = input("s1", false);
+        i.system_hash = Some("h-big".into());
+        i.system_chars = Some(99_999);
+        insert_request_snapshot(&conn, &i).expect("row");
+
+        let id: i64 = conn
+            .query_row("SELECT id FROM request_snapshots", [], |r| r.get(0))
+            .unwrap();
+        let row = get_request_snapshot(&conn, id).expect("get").expect("row");
+        assert!(
+            row.get("systemText").expect("字段在").is_null(),
+            "没落库就是没落库（靠 systemChars 判断是空还是截断）"
+        );
+        assert_eq!(row.get("systemHash").and_then(|v| v.as_str()), Some("h-big"));
+        let blobs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM snapshot_blobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(blobs, 0, "没有正文就不该产生 blob");
+    }
+
+    /// 行被裁掉之后，它引用的正文就没人用了：孤立 blob 必须一起清，否则去重表只增不减。
+    #[test]
+    fn prune_drops_orphan_blobs() {
+        let conn = conn();
+        insert_request_snapshot(&conn, &with_big_fields("s1")).expect("a");
+        let mut newer = with_big_fields("s1");
+        newer.tools_hash = Some("h-tools-2".into());
+        newer.tools_json = Some(r#"[{"name":"fs_read_file"}]"#.into());
+        insert_request_snapshot(&conn, &newer).expect("b");
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM snapshot_blobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 3, "system 一份 + 两份不同的 tools");
+
+        prune_request_snapshots(&conn, "s1", 1, 200, 1500).expect("prune");
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM snapshot_blobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, 2, "被裁那一行的 tools 成了孤儿的，跟着一起清");
+    }
+
+    /// 历史行是内联形状：修剪线程按批搬进 blobs，**读侧结果逐字节不变**。
+    #[test]
+    fn backfill_moves_legacy_inline_text_into_blobs() {
+        let conn = conn();
+        insert_request_snapshot(&conn, &with_big_fields("s1")).expect("row");
+        // 改造成「历史形状」：正文内联、blobs 为空
+        conn.execute(
+            "UPDATE request_snapshots SET system_text = ?1, tools_json = ?2",
+            params![
+                "你是叠云，一个会动手的 Agent",
+                r#"[{"name":"fs_read_file","description":"读文件"}]"#
+            ],
+        )
+        .expect("make legacy");
+        conn.execute("DELETE FROM snapshot_blobs", []).expect("drop blobs");
+
+        let moved = backfill_snapshot_blobs(&conn, 100).expect("backfill");
+        assert_eq!(moved, 2, "system + tools 各搬一条");
+
+        let inline: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM request_snapshots
+                  WHERE system_text IS NOT NULL OR tools_json IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(inline, 0, "搬完行里只剩 hash");
+
+        let id: i64 = conn
+            .query_row("SELECT id FROM request_snapshots", [], |r| r.get(0))
+            .unwrap();
+        let row = get_request_snapshot(&conn, id).expect("get").expect("row");
+        assert_eq!(
+            row.get("systemText").and_then(|v| v.as_str()),
+            Some("你是叠云，一个会动手的 Agent"),
+            "搬运不许改动读侧结果"
+        );
+        assert_eq!(
+            row.get("toolsJson").and_then(|v| v.as_str()),
+            Some(r#"[{"name":"fs_read_file","description":"读文件"}]"#)
+        );
     }
 }
